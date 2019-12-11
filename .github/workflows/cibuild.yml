@@ -8,10 +8,13 @@ jobs:
     runs-on: windows-latest
     
     steps:
-    - uses: actions/checkout@master
+    - name: Checking out
+      uses: actions/checkout@v1
     - name: Invoke MSBuild
       run: cibuild.bat
-    - uses: actions/upload-artifact@master
+      shell: cmd
+    - name: Uploading files
+      uses: actions/upload-artifact@v1
       with:
-        name: Artifacts
+        name: Release build
         path: bin/Release
