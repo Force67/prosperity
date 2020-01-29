@@ -7,6 +7,7 @@
  * in the root of the source tree.
  */
 
+#ifdef _WIN32
 #include "mem.h"
 
 #include <Windows.h>
@@ -69,3 +70,4 @@ size_t getAvailableMem() {
   return -1;
 }
 }
+#endif
