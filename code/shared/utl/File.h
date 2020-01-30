@@ -15,7 +15,7 @@
 #include <vector>
 
 namespace utl {
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__linux__)
 using native_handle = void *;
 #else
 using native_handle = int;

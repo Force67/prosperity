@@ -10,6 +10,7 @@
 #include "File.h"
 #include <algorithm>
 #include <cstdio>
+#include <cstring>
 
 namespace utl {
 namespace {
@@ -19,7 +20,7 @@ class PhysFile final : public fileBase {
   std::FILE *fptr;
 
 public:
-  PhysFile::PhysFile(const std::string &name, fileMode mode) : fptr(nullptr) {
+  PhysFile(const std::string &name, fileMode mode) : fptr(nullptr) {
     // convert access mode
     const char *modeStr = "a+";
     if (mode == fileMode::read)
@@ -27,7 +28,11 @@ public:
     else if (mode == fileMode::write)
       modeStr = "wb";
 
+    #ifdef _WIN32
     fopen_s(&fptr, name.c_str(), modeStr);
+    #elif __linux__
+    fptr = fopen(name.c_str(), modeStr);
+    #endif
 
     // we can cache the size now
     if (fptr && mode == fileMode::read) {
@@ -45,9 +50,9 @@ public:
     }
   }
 
-  PhysFile::~PhysFile() { Close(); }
+  ~PhysFile() { Close(); }
 
-  void PhysFile::Close() override {
+  void Close() override {
     if (fptr) {
       std::fclose(fptr);
       sizeTracker = 0;
@@ -132,7 +137,7 @@ public:
     if (pos < size) {
       // get readable size
       if (const uint64_t result = std::min<uint64_t>(count, size - pos)) {
-        std::memcpy(buf, ptr + pos, result);
+        memcpy(buf, ptr + pos, result);
         pos += result;
         return result;
       }
