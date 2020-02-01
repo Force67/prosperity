@@ -27,4 +27,10 @@ build:
   parallel: true
   verbosity: minimal
 
+after_build:
+- 7z a Artifacts.zip .\bin\*
+
+artifacts:
+- path: Artifacts.zip
+
 test: off
