@@ -17,10 +17,10 @@ platform:
 #- x86 # by design PS4Delta can't support x86 systems
 
 install:
-- cmd: |
-    git submodule update --init --recursive
-    set QT_DIR=C:\Qt\5.14.0\msvc2017_64
-    pmake.bat
+- |
+  git submodule update --init --recursive
+  set QT_DIR=C:\Qt\5.14.0\msvc2017_64
+  pmake.bat
 
 build:
   project: build/PS4Delta.sln
