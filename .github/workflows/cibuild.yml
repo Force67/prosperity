@@ -1,26 +1,43 @@
 name: CI
 
-on: [push]
+on:
+  push:
+    paths-ignore:
+      - 'docs/**'
+      - '.github/CONTRIBUTING.md'
+      - '.github/FUNDING.md'
+      - '.github/ISSUE_TEMPLATE.md'
+      - '.appveyor.yml'
+      - 'README.md'
+  pull_request:
+    paths-ignore:
+      - 'docs/**'
+      - '.github/CONTRIBUTING.md'
+      - '.github/FUNDING.md'
+      - '.github/ISSUE_TEMPLATE.md'
+      - '.appveyor.yml'
+      - 'README.md'
 
 jobs:
-  build:
+  build-windows:
+    strategy:
+      fail-fast: false
+      matrix:
+        configuration: [Release, Debug]
     runs-on: windows-latest
-
     steps:
     - uses: actions/checkout@v2
     - name: Init submodules
-      run: "git submodule update --init --recursive"
-      shell: cmd
-    - name: Install Qt
-      uses: jurplel/install-qt-action@v2
+      run: git submodule update --init --recursive
+    - uses: jurplel/install-qt-action@v2
       with:
-        host: windows
-        target: desktop
-        arch: win64_msvc2017_64
-    - name: Invoke MSBuild
-      run: cibuild.bat
-      shell: cmd
+        version: 5.14.0
+    - name: Premake
+      run: tools\premake\bin\win32\premake5 --file=code/premake5.lua vs2019
+    - uses: microsoft/setup-msbuild@v1
+    - name: Build
+      run: msbuild /m /nologo /p:Configuration=${{ matrix.configuration }} build\PS4Delta.sln
     - uses: actions/upload-artifact@v1
       with:
-        name: Artifacts
-        path: bin/Release
+        name: PS4Delta-${{ matrix.configuration }}
+        path: bin\${{ matrix.configuration }}
