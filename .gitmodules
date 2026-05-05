@@ -10,3 +10,6 @@
 [submodule "code/vendor/xbyak"]
 	path = code/vendor/xbyak
 	url = https://github.com/herumi/xbyak
+[submodule "code/vendor/equilibrium"]
+	path = code/vendor/equilibrium
+	url = https://github.com/Force67/equilibrium.git
