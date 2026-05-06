@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=PS4Delta
+Comment=PS4 emulation and research project
+Exec=ps4delta %f
+Icon=ps4delta
+Terminal=true
+Categories=Game;Emulator;
