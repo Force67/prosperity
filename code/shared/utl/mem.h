@@ -8,6 +8,7 @@
  * in the root of the source tree.
  */
 
+#include <cstddef>
 #include <cstdint>
 #include <type_traits>
 

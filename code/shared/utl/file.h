@@ -11,15 +11,17 @@
 #include <algorithm>
 #include <cstdint>
 #include <memory>
-#include <string>
-#include <vector>
+#include <type_traits>
+
+#include <base/containers/vector.h>
+#include <base/memory/unique_pointer.h>
+#include <base/strings/xstring.h>
 
 namespace utl {
-#ifdef _WIN32
+// Use void* uniformly: on Windows we stash the HANDLE, on POSIX we stash
+// either a FILE* or nullptr. Callers that actually need an int fd can
+// reach down to the FILE* themselves.
 using native_handle = void *;
-#else
-using native_handle = int;
-#endif
 
 enum class fileMode { read, write, append, create, trunc };
 
@@ -44,13 +46,13 @@ public:
 };
 
 class File {
-  std::unique_ptr<fileBase> file{};
+  base::UniquePointer<fileBase> file{};
 
 public:
   File() = default;
-  File(const std::string &, fileMode mode = fileMode::read);
+  File(const base::String &, fileMode mode = fileMode::read);
   File(const void *, size_t);
-  File(std::unique_ptr<fileBase> &&);
+  File(base::UniquePointer<fileBase> &&);
   ~File();
 
   // move
@@ -58,12 +60,12 @@ public:
 
   void Close() {
     if (file)
-      file.reset();
+      file = {};
   }
 
-  void Reset(std::unique_ptr<fileBase> &&ptr) { file = std::move(ptr); }
+  inline void Reset(base::UniquePointer<fileBase> &&ptr) { file = std::move(ptr); }
 
-  inline std::unique_ptr<fileBase> GetBase() { return std::move(file); }
+  inline base::UniquePointer<fileBase> GetBase() { return std::move(file); }
 
   inline uint64_t Read(void *ptr, size_t size) { return file->Read(ptr, size); }
   inline uint64_t Write(const void *ptr, size_t size) {
@@ -76,48 +78,43 @@ public:
   inline uint64_t Tell() { return file->Tell(); }
   inline native_handle GetNativeHandle() { return file->GetNativeHandle(); }
   inline bool IsOpen() { return file->IsOpen(); }
-  inline bool Exists() { return file.get(); }
+  inline bool Exists() { return static_cast<bool>(file); }
 
-  // POD to std::vector
+  // POD to base::Vector
   template <typename T>
-  std::enable_if_t<std::is_pod<T>::value && !std::is_pointer<T>::value, bool>
-  Read(std::vector<T> &vec, std::size_t size) {
+  std::enable_if_t<std::is_trivially_copyable_v<T> && !std::is_pointer_v<T>, bool>
+  Read(base::Vector<T> &vec, std::size_t size) {
     vec.resize(size);
     return this->Read(vec.data(), sizeof(T) * size) == sizeof(T) * size;
   }
 
-  // Read POD std::vector, size must be set by resize() method
+  // Read POD vector, size set via resize() externally.
   template <typename T>
-  std::enable_if_t<std::is_pod<T>::value && !std::is_pointer<T>::value, bool>
-  Read(std::vector<T> &vec) {
+  std::enable_if_t<std::is_trivially_copyable_v<T> && !std::is_pointer_v<T>, bool>
+  Read(base::Vector<T> &vec) {
     return this->Read(vec.data(), sizeof(T) * vec.size()) ==
            sizeof(T) * vec.size();
   }
 
-  // Read POD, sizeof(T) is used
   template <typename T>
-  std::enable_if_t<std::is_pod<T>::value && !std::is_pointer<T>::value, bool>
+  std::enable_if_t<std::is_trivially_copyable_v<T> && !std::is_pointer_v<T>, bool>
   Read(T &data) {
     return Read(&data, sizeof(T)) == sizeof(T);
   }
 
-  // Write POD unconditionally
   template <typename T>
-  std::enable_if_t<std::is_pod<T>::value && !std::is_pointer<T>::value,
+  std::enable_if_t<std::is_trivially_copyable_v<T> && !std::is_pointer_v<T>,
                    const File &>
   Write(const T &data) {
     Write(std::addressof(data), sizeof(T));
     return *this;
   }
 
-  // Write POD std::vector unconditionally
   template <typename T>
-  std::enable_if_t<std::is_pod<T>::value && !std::is_pointer<T>::value,
+  std::enable_if_t<std::is_trivially_copyable_v<T> && !std::is_pointer_v<T>,
                    const File &>
-  Write(const std::vector<T> &vec) {
-    /*if (*/ Write(vec.data(),
-                   vec.size() *
-                       sizeof(T)); // != vec.size() * sizeof(T);//) //xfail();
+  Write(const base::Vector<T> &vec) {
+    Write(vec.data(), vec.size() * sizeof(T));
     return *this;
   }
 };
@@ -125,7 +122,6 @@ public:
 using FileHandle = std::shared_ptr<File>;
 
 template <typename T> struct ContainerStream final : fileBase {
-  // T can be a reference, but this is not recommended
   using value_type = typename std::remove_reference_t<T>::value_type;
 
   T obj;
@@ -139,9 +135,8 @@ template <typename T> struct ContainerStream final : fileBase {
     const uint64_t end = obj.size();
 
     if (pos < end) {
-      // Get readable size
       if (const uint64_t max = std::min<uint64_t>(size, end - pos)) {
-        std::copy(obj.cbegin() + pos, obj.cbegin() + pos + max,
+        std::copy(obj.begin() + pos, obj.begin() + pos + max,
                   static_cast<value_type *>(buffer));
         pos = pos + max;
         return max;
@@ -153,23 +148,17 @@ template <typename T> struct ContainerStream final : fileBase {
 
   uint64_t Write(const void *buffer, uint64_t size) override {
     const uint64_t old_size = obj.size();
+    (void)old_size;
 
-    if (old_size + size < old_size) {
-      // fmt::raw_error("fs::container_stream<>::write(): overflow");
-    }
-
-    if (pos > old_size) {
-      // Fill gap if necessary (default-initialized)
+    if (pos > obj.size()) {
       obj.resize(pos);
     }
 
     const auto src = static_cast<const value_type *>(buffer);
 
-    // Overwrite existing part
     const uint64_t overlap = std::min<uint64_t>(obj.size() - pos, size);
     std::copy(src, src + overlap, obj.begin() + pos);
 
-    // Append new data
     obj.insert(obj.end(), src + overlap, src + size);
     pos += size;
 
@@ -185,7 +174,6 @@ template <typename T> struct ContainerStream final : fileBase {
                   : whence == seekMode::seek_end ? offset + GetSize() : (0);
 
     if (new_pos < 0) {
-      // fs::g_tls_error = fs::error::inval;
       return -1;
     }
 
@@ -201,7 +189,7 @@ template <typename T> struct ContainerStream final : fileBase {
 };
 
 template <typename T> File make_stream(T &&container = T{}) {
-  File result(std::make_unique<ContainerStream<T>>(std::forward<T>(container)));
+  File result(base::MakeUnique<ContainerStream<T>>(std::forward<T>(container)));
   return result;
 }
 }

@@ -1,27 +1,20 @@
-
+#include <algorithm>
 #include <mutex>
 #include <thread>
-#include <vector>
+
+#include <base/containers/vector.h>
+#include <base/memory/unique_pointer.h>
+#include <base/strings/xstring.h>
 
 #include "logger.h"
 #include "threadsafe_queue.h"
 
 namespace utl {
-template <typename InIt>
-bool ComparePartialString(InIt begin, InIt end, const char *other) {
-  for (; begin != end && *other != '\0'; ++begin, ++other) {
-    if (*begin != *other) {
-      return false;
-    }
-  }
-  // Only return true if both strings finished at the same point
-  return (begin == end) == (*other == '\0');
-}
 
 class LogRegistry {
   std::mutex writing_lock;
   std::thread backend_thread;
-  std::vector<std::unique_ptr<logBase>> sinks;
+  base::Vector<base::UniquePointer<logBase>> sinks;
   Common::MPSCQueue<logEntry> pending;
   std::chrono::steady_clock::time_point time_origin;
 
@@ -35,31 +28,27 @@ public:
   }
 
   LogRegistry() {
-
     time_origin = std::chrono::steady_clock::now();
 
     backend_thread = std::thread([&] {
       logEntry entry;
       auto write_logs = [&](logEntry &e) {
         std::lock_guard lock{writing_lock};
-        for (const auto &sink : sinks) {
+        for (auto &sink : sinks) {
           sink->write(e);
         }
       };
 
-      // work the queue
       while (true) {
         entry = pending.PopWait();
 
-        // do we need to drain?
         if (entry.final_entry)
           break;
 
         write_logs(entry);
       }
 
-      // drain the queue
-      // only writes up to MAX_LOGS
+      // drain (cap to avoid spinning forever during teardown)
       constexpr int MAX_LOGS_TO_WRITE = 100;
       int logs_written = 0;
       while (logs_written++ < MAX_LOGS_TO_WRITE && pending.Pop(entry)) {
@@ -76,8 +65,7 @@ public:
   }
 
   void AddEntry(logLevel lvl, uint32_t line, const char *func,
-                std::string msg) {
-
+                base::String msg) {
     using std::chrono::duration_cast;
     using std::chrono::steady_clock;
 
@@ -86,35 +74,39 @@ public:
         steady_clock::now() - time_origin);
     entry.log_level = lvl;
     entry.line_num = line;
-    entry.function = func;
+    entry.function = base::String(func);
     entry.message = std::move(msg);
 
     pending.Push(entry);
   }
 
-  logBase *AddSink(std::unique_ptr<logBase> sink) {
+  logBase *AddSink(base::UniquePointer<logBase> sink) {
     std::lock_guard lock{writing_lock};
-    auto *poop = sink.get();
-
+    auto *raw = sink.Get_UseOnlyIfYouKnowWhatYouareDoing();
     sinks.push_back(std::move(sink));
-    return poop;
+    return raw;
   }
 
-  void RemoveSink(std::string_view name) {
+  void RemoveSink(base::StringRef name) {
     std::lock_guard lock{writing_lock};
-    const auto it =
-        std::remove_if(sinks.begin(), sinks.end(),
-                       [&name](const auto &i) { return name == i->getName(); });
-    sinks.erase(it, sinks.end());
+    // base::Vector lacks std::remove_if; do it inline.
+    auto* it = sinks.begin();
+    auto* dst = sinks.begin();
+    for (; it != sinks.end(); ++it) {
+      if (name != base::StringRef((*it)->getName())) {
+        if (dst != it) *dst = std::move(*it);
+        ++dst;
+      }
+    }
+    while (sinks.end() != dst) sinks.pop_back();
   }
 
-  logBase *GetSink(std::string_view name) {
-    const auto it =
-        std::find_if(sinks.begin(), sinks.end(),
-                     [&name](const auto &i) { return name == i->getName(); });
-    if (it == sinks.end())
-      return nullptr;
-    return it->get();
+  logBase *GetSink(base::StringRef name) {
+    for (auto &sink : sinks) {
+      if (name == base::StringRef(sink->getName()))
+        return sink.Get_UseOnlyIfYouKnowWhatYouareDoing();
+    }
+    return nullptr;
   }
 };
 
@@ -129,14 +121,13 @@ const char *GetLevelName(logLevel log_level) {
     LVL(Warning);
     LVL(Error);
     LVL(Critical);
-    // case LogLevel::Count:
-    // UNREACHABLE();
+    default: break;
   }
 #undef LVL
   return nullptr;
 }
 
-std::string formatLogEntry(const logEntry &entry) {
+base::String formatLogEntry(const logEntry &entry) {
   uint32_t time_seconds =
       static_cast<unsigned int>(entry.timestamp.count() / 1000000);
   uint32_t time_fractional =
@@ -144,23 +135,29 @@ std::string formatLogEntry(const logEntry &entry) {
 
   const char *level_name = GetLevelName(entry.log_level);
 
-  return fmt::format("[{:4d}.{:06d}] <{}> {}:{}: {}", time_seconds,
-                     time_fractional, level_name, entry.function,
-                     entry.line_num, entry.message);
+  // fmt::format produces std::string; copy into base::String once.
+  std::string s = fmt::format("[{:4d}.{:06d}] <{}> {}:{}: {}", time_seconds,
+                              time_fractional, level_name,
+                              entry.function.c_str(), entry.line_num,
+                              entry.message.c_str());
+  return base::String(s.c_str(), static_cast<base::String::size_type>(s.size()));
 }
 
-logBase *addLogSink(std::unique_ptr<logBase> sink) {
+logBase *addLogSink(base::UniquePointer<logBase> sink) {
   return LogRegistry::Instance().AddSink(std::move(sink));
 }
 
 void formatLogMsg(logLevel lvl, uint32_t line, const char *func,
                   const char *fmt, const fmt::format_args &args) {
+  std::string s = fmt::vformat(fmt, args);
   auto &reg = LogRegistry::Instance();
-  reg.AddEntry(lvl, line, func, fmt::vformat(fmt, args));
+  reg.AddEntry(lvl, line, func,
+               base::String(s.c_str(),
+                            static_cast<base::String::size_type>(s.size())));
 }
 
-logBase *getLogSink(std::string_view name) {
-  auto &reg = LogRegistry::Instance();
-  return reg.GetSink(name);
+logBase *getLogSink(base::StringRef name) {
+  return LogRegistry::Instance().GetSink(name);
 }
-}
+
+}  // namespace utl

@@ -96,6 +96,6 @@ private:
 template <class _Ty, class... _Types,
           std::enable_if_t<!std::is_array_v<_Ty>, int> = 0>
 object_ref<_Ty> make_ref(_Types &&... _Args) {
-  return object_ref<_Ty>(new _Ty(_STD forward<_Types>(_Args)...));
+  return object_ref<_Ty>(new _Ty(std::forward<_Types>(_Args)...));
 }
 }

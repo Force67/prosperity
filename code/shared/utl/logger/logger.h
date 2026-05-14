@@ -3,6 +3,12 @@
 #include <chrono>
 #include <cstdint>
 
+#include <base.h>
+
+#include <base/strings/xstring.h>
+#include <base/strings/string_ref.h>
+#include <base/memory/unique_pointer.h>
+
 // hard dependency
 #include <fmt/format.h>
 
@@ -10,22 +16,21 @@
 
 namespace utl {
 enum class logLevel : uint8_t {
-  Trace,    //< very detailed and extensive debugging information
-  Debug,    //< less detailed debug information
-  Info,     //< status information
-  Warning,  //< minor or potential problems
-  Error,    //< major problems that block further execution of a task
-  Critical, //< major problems that block continued execution of the entire
-            //application
-  Count     //< total number of log levels
+  Trace,
+  Debug,
+  Info,
+  Warning,
+  Error,
+  Critical,
+  Count
 };
 
 struct logEntry {
   std::chrono::microseconds timestamp;
   logLevel log_level;
   unsigned int line_num;
-  std::string function;
-  std::string message;
+  base::String function;
+  base::String message;
   bool final_entry = false;
 
   logEntry() = default;
@@ -44,9 +49,9 @@ public:
   virtual void write(const logEntry &) = 0;
 };
 
-std::string formatLogEntry(const logEntry &entry);
-logBase *addLogSink(std::unique_ptr<logBase> sink);
-logBase *getLogSink(std::string_view name);
+base::String formatLogEntry(const logEntry &entry);
+logBase *addLogSink(base::UniquePointer<logBase> sink);
+logBase *getLogSink(base::StringRef name);
 void formatLogMsg(logLevel lvl, uint32_t line, const char *func,
                   const char *fmt, const fmt::format_args &args);
 
@@ -60,7 +65,7 @@ inline void fmtLogMsg(logLevel lvl, uint32_t line, const char *func,
 
 template <typename... Args>
 inline void fmtLogMsg(logLevel lvl, uint32_t line, const char *func,
-                      const std::string &text) {
+                      const base::String &text) {
   formatLogMsg(lvl, line, func, text.c_str(), {});
 }
 }

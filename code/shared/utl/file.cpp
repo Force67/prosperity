@@ -7,7 +7,8 @@
  * in the root of the source tree.
  */
 
-#include "File.h"
+#include <base.h>
+#include "file.h"
 #include <algorithm>
 #include <cstdio>
 
@@ -19,7 +20,7 @@ class PhysFile final : public fileBase {
   std::FILE *fptr;
 
 public:
-  PhysFile::PhysFile(const std::string &name, fileMode mode) : fptr(nullptr) {
+  PhysFile(const base::String &name, fileMode mode) : fptr(nullptr) {
     // convert access mode
     const char *modeStr = "a+";
     if (mode == fileMode::read)
@@ -45,9 +46,9 @@ public:
     }
   }
 
-  PhysFile::~PhysFile() { Close(); }
+  ~PhysFile() { Close(); }
 
-  void PhysFile::Close() override {
+  void Close() override {
     if (fptr) {
       std::fclose(fptr);
       sizeTracker = 0;
@@ -170,13 +171,13 @@ public:
 };
 }
 
-File::File(const std::string &dir, fileMode mode /* = fileMode::read */)
-    : file(std::make_unique<PhysFile>(dir, mode)) {}
+File::File(const base::String &dir, fileMode mode /* = fileMode::read */)
+    : file(base::MakeUnique<PhysFile>(dir, mode)) {}
 
 File::File(const void *ptr, size_t size)
-    : file(std::make_unique<MemStream>(ptr, size)) {}
+    : file(base::MakeUnique<MemStream>(ptr, size)) {}
 
-File::File(std::unique_ptr<fileBase> &&base) : file(std::move(base)) {}
+File::File(base::UniquePointer<fileBase> &&base) : file(std::move(base)) {}
 
 File::~File() { Close(); }
 }

@@ -8,10 +8,9 @@
  * in the root of the source tree.
  */
 
-#include <string>
+#include <base/strings/xstring.h>
 
-// implements various path utility functions
 namespace utl {
-std::wstring make_abs_path(const std::wstring &relative);
-std::string make_abs_path(const std::string &relative);
+base::StringW make_abs_path(const base::StringW &relative);
+base::String make_abs_path(const base::String &relative);
 }
