@@ -10,16 +10,17 @@
 
 #include <atomic>
 #include <mutex>
-#include <string>
 #include <utl/object_ref.h>
-#include <vector>
+
+#include <base/containers/vector.h>
+#include <base/strings/xstring.h>
 
 namespace krnl {
 class proc;
 
 class kObject {
 public:
-  using handleList = std::vector<uint32_t>;
+  using handleList = base::Vector<uint32_t>;
 
   enum class oType {
     file,
@@ -42,7 +43,7 @@ public:
 protected:
   oType otype;
   proc *process;
-  std::string name;
+  base::String name;
 
 private:
   handleList handleCollection;

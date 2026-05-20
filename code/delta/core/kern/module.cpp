@@ -7,6 +7,7 @@
  * in the root of the source tree.
  */
 
+#include <base.h>
 #include <utl/file.h>
 #include <utl/mem.h>
 
@@ -26,7 +27,7 @@ smodule::smodule(proc *process) : process(process) {
   info.ripZoneSize = process->getEnv().ripZoneSize;
 }
 
-bool smodule::fromFile(const std::string &path) {
+bool smodule::fromFile(const base::String &path) {
   utl::File file(path);
   if (!file.IsOpen()) {
     __debugbreak();
@@ -40,15 +41,16 @@ bool smodule::fromFile(const std::string &path) {
       diskHeader.machine == ELF_MACHINE_X86_64) {
     file.Seek(0, utl::seekMode::seek_set);
 
-    data = std::make_unique<uint8_t[]>(file.GetSize());
-    file.Read(data.get(), file.GetSize());
+    auto sz = file.GetSize();
+    data = base::MakeUnique<uint8_t[]>(static_cast<mem_size>(sz));
+    file.Read(data.Get_UseOnlyIfYouKnowWhatYouareDoing(), sz);
     return fromMem(std::move(data));
   }
   __debugbreak();
   return false;
 }
 
-bool smodule::fromMem(std::unique_ptr<uint8_t[]> data) {
+bool smodule::fromMem(base::UniquePointer<uint8_t[]> data) {
   /*TODO: figure out a way of getting rid of the back buffer*/
   this->data = std::move(data);
 
@@ -64,7 +66,7 @@ bool smodule::fromMem(std::unique_ptr<uint8_t[]> data) {
   digestDynamic();
 
 #ifdef _DEBUG
-  LOG_TRACE("mapped {} at {}", info.name, fmt::ptr(info.base));
+  LOG_TRACE("mapped {} at {}", info.name.c_str(), fmt::ptr(info.base));
 #endif
   setupTLS();
 
@@ -91,7 +93,7 @@ bool smodule::fromMem(std::unique_ptr<uint8_t[]> data) {
 }
 
 bool smodule::unload() {
-  data.reset();
+  data = {};
 
   // todo: unload memory from VMA
   return true;
@@ -144,10 +146,10 @@ void smodule::digestDynamic() {
     case DT_NEEDED: {
       auto name = (const char *)(strtab.ptr + (d->un.value & 0xFFFFFFFF));
       if (name) {
-        std::string xname = name;
+        base::String xname(name);
         /*quick but (valid?) hack for determining if an object is exported*/
         auto pos = xname.find(".prx");
-        if (pos != -1) {
+        if (pos != base::String::npos) {
           sharedObjects.push_back(xname.substr(0, pos));
         }
       }
@@ -365,8 +367,11 @@ bool smodule::resolveObfSymbol(const char *name, uintptr_t &ptrOut) {
       char nameenc[12]{}; // name + null terminator
       std::strncpy(nameenc, name, 11);
 
-      std::string longName =
-          std::string(nameenc) + "#" + libname + "#" + mod.name;
+      base::String longName(nameenc);
+      longName += "#";
+      longName += libname;
+      longName += "#";
+      longName += mod.name;
       ptrOut = xmod->getSymbolFullName(longName.c_str());
       return true;
     }
@@ -674,12 +679,12 @@ void smodule::logDbgInfo() {
       // this is similar to the windows pdb path
       auto *comment = getOffset<SCEComment>(s->offset);
 
-      std::string name;
+      base::String name;
       name.resize(comment->pathLength);
       memcpy(name.data(), getOffset<void>(s->offset + sizeof(SCEComment)),
              comment->pathLength);
 
-      LOG_INFO("Starting: {}", name);
+      LOG_INFO("Starting: {}", name.c_str());
       break;
     }
 #if 0

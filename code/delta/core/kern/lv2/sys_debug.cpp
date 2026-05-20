@@ -10,6 +10,8 @@
 #include <base.h>
 #include <string>
 
+#ifdef _MSC_VER
 #include <intrin.h>
+#endif
 
 namespace krnl {}

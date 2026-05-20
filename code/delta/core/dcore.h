@@ -9,28 +9,25 @@
  */
 
 #include <kern/proc.h>
-#include <memory>
-#include <string>
 
-#include <QApplication>
-#include <QFontDatabase>
-#include <QIcon>
+#include <base/containers/vector.h>
+#include <base/strings/xstring.h>
+#include <base/memory/unique_pointer.h>
 
-#include "ui/mainwindow.h"
-
-class deltaCore : public QApplication {
-  Q_OBJECT
+class deltaCore {
 public:
-  using argvList = std::vector<std::string>;
+  using argvList = base::Vector<base::String>;
 
-  deltaCore(int &, char **);
+  deltaCore();
+  ~deltaCore();
 
   bool init();
-  void boot(std::string &fromdir);
+  void boot(const base::String& fromdir);
 
   argvList argv;
+
 private:
-  bool headless{false};
-  std::unique_ptr<mainWindow> window;
-  std::unique_ptr<krnl::proc> proc;
+  base::UniquePointer<krnl::proc> proc;
 };
+
+extern "C" int dcoreMain(int argc, char** argv);

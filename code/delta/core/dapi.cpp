@@ -1,31 +1,27 @@
-
 // Copyright (C) 2019 Force67
 
 #include <base.h>
 #include <logger/logger.h>
 #include <utl/mem.h>
+#include <utl/path.h>
 #include <xbyak_util.h>
 
-#include <QCommandLineParser>
-#include <QFileInfo>
+#include <base/strings/xstring.h>
+#include <base/containers/vector.h>
+
+#include <chrono>
+#include <cstring>
+#include <string>
+#include <thread>
 
 #ifdef _WIN32
+#include <Windows.h>
 #include <VersionHelpers.h>
 #endif
 
 #include "dcore.h"
 
-inline std::string sstr(const QString &_in) { return _in.toStdString(); }
-
-static deltaCore *createCore(int &argc, char **argv) {
-
-  auto *app = new deltaCore(argc, argv);
-
-  return app;
-}
-
 static bool verifyViablity() {
-
 #ifdef _WIN32
   if (!IsWindows8OrGreater()) {
     LOG_ERROR("Your operating system is outdated. Please update to windows 8 "
@@ -42,12 +38,13 @@ static bool verifyViablity() {
     return false;
   }
 
-  std::string missingFeatures;
+  base::String missingFeatures;
   Xbyak::util::Cpu cpu;
 
 #define CHECK_FEATURE(x, y)                                                    \
   if (!cpu.has(Xbyak::util::Cpu::t##x)) {                                      \
-    missingFeatures += std::string(y) + ";";                                   \
+    missingFeatures += y;                                                      \
+    missingFeatures += ";";                                                    \
   }
 
   CHECK_FEATURE(SSE, "SSE");
@@ -63,7 +60,8 @@ static bool verifyViablity() {
   CHECK_FEATURE(BMI1, "BM1");
 
   if (!missingFeatures.empty()) {
-    LOG_ERROR("Your cpu is missing the following instructions: {}");
+    LOG_ERROR("Your cpu is missing the following instructions: {}",
+              missingFeatures.c_str());
     return false;
   }
 
@@ -81,7 +79,6 @@ static void win32PostInit() {
   auto NtSetTimerResolution_f = reinterpret_cast<NtSetTimerResolution_t>(
       GetProcAddress(hNtLib, "NtSetTimerResolution"));
 
-  // qt resets our timer, so wet set it back manually
   ULONG min_res, max_res, orig_res, new_res;
   if (NtQueryTimerResolution_f(&min_res, &max_res, &orig_res) == 0)
     NtSetTimerResolution_f(max_res, TRUE, &new_res);
@@ -94,47 +91,32 @@ EXPORT int dcoreMain(int argc, char **argv) {
   if (!verifyViablity())
     return -1;
 
-  QGuiApplication::setAttribute(Qt::AA_EnableHighDpiScaling);
-  QScopedPointer<deltaCore> appInstance(createCore(argc, argv));
+  deltaCore core;
 
-  QCommandLineParser parser;
-  parser.setApplicationDescription("Welcome to the " rsc_productname
-                                   " command line.");
-  parser.addPositionalArgument("File", "Path for directly loading a file");
-  parser.addPositionalArgument("[Args...]", "Optional args for the executable");
-  parser.addOption(QCommandLineOption("headless", "Run " rsc_productname
-                                                  " in headless mode."));
-  parser.process(*appInstance);
-
-  if (appInstance) {
-    if (appInstance->init()) {
+  if (!core.init())
+    return -1;
 
 #ifdef _WIN32
-      win32PostInit();
+  win32PostInit();
 #endif
 
-      auto args = parser.positionalArguments();
-      if (args.length() > 0) {
-        // Propagate command line arguments
-        std::vector<std::string> argv;
-
-        if (args.length() > 1) {
-          argv.emplace_back();
-
-          for (int i = 1; i < args.length(); i++) {
-            argv.emplace_back(args[i].toStdString());
-          }
-
-          appInstance->argv = std::move(argv);
-        }
-
-        auto path = sstr(QFileInfo(args.at(0)).canonicalFilePath());
-        appInstance->boot(path);
+  if (argc > 1) {
+    if (argc > 2) {
+      core.argv.reserve(argc - 1);
+      core.argv.emplace_back();
+      for (int i = 2; i < argc; ++i) {
+        core.argv.emplace_back(argv[i]);
       }
-
-      // enter event loop
-      return appInstance->exec();
     }
+
+    base::String path(argv[1]);
+    core.boot(path);
+  }
+
+  // Block forever; proc runs on a detached thread.
+  // TODO: replace with proper shutdown signal once we have an event loop.
+  for (;;) {
+    std::this_thread::sleep_for(std::chrono::seconds(1));
   }
 
   return 0;

@@ -9,7 +9,8 @@
  */
 
 #include <cstdint>
-#include <vector>
+
+#include <base/containers/vector.h>
 
 #include <utl/mem.h>
 
@@ -46,7 +47,7 @@ private:
   size_t codeMemTotal{0};
   size_t rtMemTotal{0};
 
-  std::vector<pageInfo> codePages;
-  std::vector<pageInfo> rtPages;
+  base::Vector<pageInfo> codePages;
+  base::Vector<pageInfo> rtPages;
 };
 }

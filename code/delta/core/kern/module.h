@@ -8,11 +8,13 @@
  * in the root of the source tree.
  */
 
-#include <string>
-
 #include "proc.h"
 #include <elf_types.h>
 #include <sce_types.h>
+
+#include <base/containers/vector.h>
+#include <base/strings/xstring.h>
+#include <base/memory/unique_pointer.h>
 
 namespace utl {
 class File;
@@ -25,7 +27,7 @@ struct moduleSeg {
 };
 
 struct moduleInfo {
-  std::string name;
+  base::String name;
   uint32_t handle;
   uint8_t *base;
   uint8_t *entry;
@@ -63,8 +65,8 @@ class smodule {
 public:
   explicit smodule(proc *);
 
-  bool fromFile(const std::string &);
-  bool fromMem(std::unique_ptr<uint8_t[]>);
+  bool fromFile(const base::String &);
+  bool fromMem(base::UniquePointer<uint8_t[]>);
 
   uintptr_t getSymbol(uint64_t);
   uintptr_t getSymbolFullName(const char *name);
@@ -94,7 +96,7 @@ private:
   bool mapImage();
 
   template <typename Type, typename TAdd> Type *getOffset(const TAdd dist) {
-    return (Type *)(data.get() + dist);
+    return (Type *)(data.Get_UseOnlyIfYouKnowWhatYouareDoing() + dist);
   }
 
   template <typename Type, typename TAdd> Type *getAddress(const TAdd dist) {
@@ -116,7 +118,7 @@ private:
   }
 
 private:
-  std::unique_ptr<uint8_t[]> data;
+  base::UniquePointer<uint8_t[]> data;
 
 private:
   proc *process;
@@ -136,9 +138,9 @@ private:
     uint16_t attr;
   };
 
-  std::vector<modInfo> impModules;
-  std::vector<libInfo> impLibs;
-  std::vector<std::string> sharedObjects;
+  base::Vector<modInfo> impModules;
+  base::Vector<libInfo> impLibs;
+  base::Vector<base::String> sharedObjects;
 
   ElfRel *jmpslots;
   ElfRel *rela;

@@ -7,6 +7,8 @@
  * in the root of the source tree.
  */
 
+#include <algorithm>
+
 #include <utl/mem.h>
 
 #include "proc.h"

@@ -8,9 +8,9 @@
  * in the root of the source tree.
  */
 
-#include <memory>
-#include <string>
-#include <vector>
+#include <base/containers/vector.h>
+#include <base/strings/xstring.h>
+#include <base/strings/string_ref.h>
 
 #include "dev/device.h"
 #include "module.h"
@@ -36,20 +36,19 @@ class proc {
   friend class smodule;
 
 public:
-  using moduleList = std::vector<modulePtr>;
+  using moduleList = base::Vector<modulePtr>;
 
   proc();
-  bool create(const std::string &);
+  bool create(const base::String &);
   void start();
 
   static proc *getActive();
 
-  // inline modulePtr getMainModule() { return modules[0]; }
   inline moduleList &getModuleList() { return modules; }
   inline objectTable &getObjTable() { return objects; }
 
-  modulePtr loadModule(std::string_view);
-  modulePtr getModule(std::string_view);
+  modulePtr loadModule(base::StringRef);
+  modulePtr getModule(base::StringRef);
   modulePtr getModule(uint32_t);
 
   inline vmManager &getVma() { return vmem; }

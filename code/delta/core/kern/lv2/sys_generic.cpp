@@ -2,6 +2,7 @@
 
 // Copyright (C) Force67 2019
 
+#include <base.h>
 #include "sys_generic.h"
 #include "kern/proc.h"
 

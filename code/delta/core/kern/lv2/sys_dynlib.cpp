@@ -113,7 +113,11 @@ int PS4ABI sys_dynlib_dlsym(uint32_t handle, const char *symName, void **sym) {
   runtime::encode_nid(symName, reinterpret_cast<uint8_t *>(&nameenc));
 
   auto &modName = mod->getInfo().name;
-  std::string longName = std::string(nameenc) + "#" + modName + "#" + modName;
+  base::String longName(nameenc);
+  longName += "#";
+  longName += modName;
+  longName += "#";
+  longName += modName;
 
   uintptr_t addrOut = 0;
   if (!mod->resolveObfSymbol(longName.c_str(), addrOut)) {
@@ -176,7 +180,7 @@ int PS4ABI sys_dynlib_process_needed_and_relocate() {
 
     if (!mod->resolveImports() || !mod->applyRelocations()) {
       LOG_ERROR("failed to apply relocations for module {}",
-                mod->getInfo().name);
+                mod->getInfo().name.c_str());
       return -1;
     }
   }

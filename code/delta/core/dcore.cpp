@@ -1,4 +1,3 @@
-
 /*
  * PS4Delta : PS4 emulation and research project
  *
@@ -10,43 +9,33 @@
 #include <cstdio>
 #include <thread>
 
-#include <QCommandLineParser>
-
 #include "dcore.h"
 #include <logger/logger.h>
 #include <utl/file.h>
 
 #include "formats/pup_object.h"
 
-deltaCore::deltaCore(int &argc, char **argv) : QApplication(argc, argv) {
-  setApplicationName(rsc_productname);
-  setApplicationVersion(rsc_productversion);
-}
+deltaCore::deltaCore() = default;
+deltaCore::~deltaCore() = default;
 
 bool deltaCore::init() {
   LOG_INFO("Initializing deltaCore " rsc_copyright);
-
-  if (!headless)
-    window = std::make_unique<mainWindow>(*this);
-
-  if (window)
-    window->init();
-
   return true;
 }
 
-void deltaCore::boot(std::string &xdir) {
-  static std::string dir = xdir;
+void deltaCore::boot(const base::String& xdir) {
+  base::String dir = xdir;
 
-  // sanitize path
-  std::replace(dir.begin(), dir.end(), '/', '\\');
+#ifdef _WIN32
+  for (auto& c : dir) if (c == '/') c = '\\';
+#endif
 
-  std::thread ctx([&]() {
-    auto proc = std::make_unique<krnl::proc>();
-    if (!proc->create(dir))
+  std::thread ctx([dir = std::move(dir)]() {
+    auto p = base::MakeUnique<krnl::proc>();
+    if (!p->create(dir))
       return;
 
-    proc->start();
+    p->start();
   });
 
   ctx.detach();

@@ -9,10 +9,10 @@
 
 #include "vprx.h"
 #include <crypto/sha1.h>
-#include <vector>
+#include <base/containers/vector.h>
 
 namespace runtime {
-static std::vector<const modInfo *> vprxTable;
+static base::Vector<const modInfo *> vprxTable;
 
 void vprx_init() { utl::init_function::init(); }
 

@@ -7,9 +7,12 @@
  * in the root of the source tree.
  */
 
+#include <base.h>
 #include <cstdint>
 #include <cstdio>
+#ifdef _MSC_VER
 #include <intrin.h>
+#endif
 #include <xbyak.h>
 
 #include "sys_debug.h"
@@ -61,7 +64,11 @@ moduleInfo *called_in(void *addr) {
 }
 
 static int PS4ABI null_handler() {
+#ifdef _MSC_VER
   void *ret = _ReturnAddress();
+#else
+  void *ret = __builtin_return_address(0);
+#endif
   called_in(ret);
 
   std::printf(">>>>>>>>>>>>> NULL HANDLER CALLED BY %p\n", ret);
@@ -69,7 +76,11 @@ static int PS4ABI null_handler() {
 }
 
 static int PS4ABI null_handler_notable() {
+#ifdef _MSC_VER
   void *ret = _ReturnAddress();
+#else
+  void *ret = __builtin_return_address(0);
+#endif
   called_in(ret);
 
   std::printf(">>>>>>>>>>>>> NULL HANDLER NULLTABLE CALLED BY %p\n", ret);

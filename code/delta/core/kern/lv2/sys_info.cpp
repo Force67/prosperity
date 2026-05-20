@@ -8,9 +8,11 @@
  */
 
 #include <base.h>
-#include <string>
+#include <base/strings/string_ref.h>
 
+#ifdef _MSC_VER
 #include <intrin.h>
+#endif
 
 #include "../proc.h"
 
@@ -100,7 +102,7 @@ int PS4ABI sys_sysctl(int *name, uint32_t namelen, void *oldp, size_t *oldlenp,
   }
 
   if (name[0] == 0 && name[1] == 3 && namelen == 2) {
-    auto name = std::string_view(static_cast<const char *>(newp), newlen);
+    auto name = base::StringRef(static_cast<const char *>(newp), newlen);
     if (name == "kern.neomode") {
     }
 

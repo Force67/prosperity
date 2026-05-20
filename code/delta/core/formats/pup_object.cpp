@@ -38,7 +38,7 @@ bool IsCompressed()
 }
 */
 
-pupReader::pupReader(const std::string &name) : file(name) {}
+pupReader::pupReader(const base::String &name) : file(name) {}
 
 bool pupReader::load() {
   if (!file.IsOpen())
@@ -71,7 +71,8 @@ utl::File pupReader::extractFile(uint16_t id) {
         continue;
 
       if (i == id) {
-        std::vector<uint8_t> data(e.sizeCompressed);
+        base::Vector<uint8_t> data(e.sizeCompressed,
+                                   base::VectorReservePolicy::kForData);
 
         file.Seek(e.offset, utl::seekMode::seek_set);
         file.Read(data);
@@ -85,7 +86,7 @@ utl::File pupReader::extractFile(uint16_t id) {
 
 void pupReader::extractAll() {}
 
-void pupReader::unzipEntry(const pup_entry &entry, std::vector<uint8_t> &out) {
+void pupReader::unzipEntry(const pup_entry &entry, base::Vector<uint8_t> &out) {
   /*singular block*/
   if (entry.flags & 0x800) {
   }

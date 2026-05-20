@@ -8,7 +8,6 @@
  */
 
 #include "UnSELF.h"
-#include <vector>
 
 namespace crypto {
 #if 0

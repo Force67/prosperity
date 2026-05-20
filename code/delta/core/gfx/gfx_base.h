@@ -9,14 +9,14 @@
  */
 
 #include <cstdint>
-#include <vector>
+#include <base/containers/vector.h>
 
 namespace gfx {
 class frameBase {
 public:
   virtual ~frameBase() = default;
   virtual void toggleFullscreen() = 0;
-  virtual void takeScreenshot(std::vector<uint8_t> &data, uint32_t sizeX,
+  virtual void takeScreenshot(base::Vector<uint8_t> &data, uint32_t sizeX,
                               uint32_t sizeY) = 0;
 };
 }

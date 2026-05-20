@@ -1,4 +1,3 @@
-
 /*
  * PS4Delta : PS4 emulation and research project
  *
@@ -24,7 +23,7 @@ proc::proc() : vmem(env) { g_activeProc = this; }
 
 proc *proc::getActive() { return g_activeProc; }
 
-bool proc::create(const std::string &path) {
+bool proc::create(const base::String &path) {
   /*register HLE prx overrides*/
   runtime::vprx_init();
 
@@ -39,7 +38,8 @@ bool proc::create(const std::string &path) {
 
   /*pre-load required modules
    (the kernel does it, so do we)*/
-  if (!loadModule("libkernel") || !loadModule("libSceLibcInternal")) {
+  if (!loadModule(base::StringRef("libkernel")) ||
+      !loadModule(base::StringRef("libSceLibcInternal"))) {
     LOG_ERROR("unable to preload sys modules");
     return false;
   }
@@ -52,9 +52,10 @@ bool proc::create(const std::string &path) {
   return true;
 }
 
-modulePtr proc::getModule(std::string_view name) {
+modulePtr proc::getModule(base::StringRef name) {
   for (auto &mod : modules) {
-    if (mod->getInfo().name == name)
+    // module name is base::String, compare via c_str.
+    if (name == base::StringRef(mod->getInfo().name))
       return mod;
   }
   return {nullptr};
@@ -69,7 +70,7 @@ modulePtr proc::getModule(uint32_t handle) {
 }
 
 /*does not expect an extension*/
-modulePtr proc::loadModule(std::string_view name) {
+modulePtr proc::loadModule(base::StringRef name) {
   auto mod = getModule(name);
   if (!mod) {
     auto lib = utl::make_ref<smodule>(this);
@@ -78,16 +79,13 @@ modulePtr proc::loadModule(std::string_view name) {
 
     modules.emplace_back(lib);
 
-    /*whack hack*/
-    std::string nameFull =
-        std::string("modules\\") + std::string(name) + ".sprx";
+    base::String nameFull("modules\\");
+    nameFull.append(name.data(), name.length());
+    nameFull += ".sprx";
     if (!lib->fromFile(utl::make_abs_path(nameFull))) {
-      LOG_ERROR("unable to load module {}", name);
+      LOG_ERROR("unable to load module {}", nameFull.c_str());
       return nullptr;
     }
-    /*else {
-            modules.emplace_back(lib);
-    }*/
 
     return lib;
   }
@@ -101,7 +99,7 @@ void proc::start() {
   auto &kinfo = modules[1]->getInfo();
 
   if (!info.entry) {
-    LOG_WARNING("entry missing for {}", info.name);
+    LOG_WARNING("entry missing for {}", info.name.c_str());
     return;
   }
 
@@ -115,12 +113,12 @@ void proc::start() {
   stack[0].val = 1 + 0; // argc
   auto s = reinterpret_cast<stack_entry *>(&stack[1]);
   (*s++).ptr = info.name.c_str();
-  (*s++).ptr = nullptr; // arg null terminator
-  (*s++).ptr = nullptr; // env null terminator
-  (*s++).val = 9ull;    // entrypoint type
+  (*s++).ptr = nullptr;
+  (*s++).ptr = nullptr;
+  (*s++).val = 9ull;
   (*s++).ptr = (const void *)(info.entry);
-  (*s++).ptr = nullptr; // aux null type
+  (*s++).ptr = nullptr;
   (*s++).ptr = nullptr;
   func(stack);
 }
-} // namespace krnl
+}  // namespace krnl

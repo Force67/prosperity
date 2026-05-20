@@ -8,6 +8,7 @@
  */
 
 #include <base.h>
+#include <base/strings/string_ref.h>
 
 #include "kern/dev/console_dev.h"
 #include "kern/dev/dipsw_dev.h"
@@ -20,7 +21,7 @@
 
 namespace krnl {
 static device *make_device(const char *deviceName) {
-  std::string_view xname(deviceName);
+  base::StringRef xname(deviceName);
 
   device *dev = nullptr;
   auto *proc = proc::getActive();
@@ -33,7 +34,7 @@ static device *make_device(const char *deviceName) {
   if (xname == "dipsw")
     dev = new dipswDevice(proc);
   /*there are multiple of these*/
-  if (xname.find("dmem") != -1)
+  if (xname.find("dmem", 0, 4) != base::StringRef::npos)
     dev = new dmaDevice(proc);
 
   return dev;

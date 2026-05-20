@@ -7,6 +7,7 @@
  * in the root of the source tree.
  */
 
+#include <base.h>
 #include "dipsw_dev.h"
 
 namespace krnl {

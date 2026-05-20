@@ -9,6 +9,8 @@
  */
 
 #include <utl/file.h>
+#include <base/containers/vector.h>
+#include <base/strings/xstring.h>
 
 namespace utl {
 class File;
@@ -32,7 +34,7 @@ struct pup_header {
 
 struct pup_entry {
   uint32_t flags;
-  uint32_t unk; //< always zero
+  uint32_t unk;
   uint64_t offset;
   uint64_t sizeCompressed;
   uint64_t sizeUncompressed;
@@ -41,20 +43,19 @@ struct pup_entry {
 static_assert(sizeof(pup_header) == 32);
 static_assert(sizeof(pup_entry) == 32);
 
-// a reader for decrypted update blops
 class pupReader {
 public:
-  pupReader(const std::string &);
+  pupReader(const base::String &);
 
   bool load();
   void extractAll();
   utl::File extractFile(uint16_t id);
 
 private:
-  void unzipEntry(const pup_entry &, std::vector<uint8_t> &);
+  void unzipEntry(const pup_entry &, base::Vector<uint8_t> &);
 
   utl::File file;
   pup_header header{};
-  std::vector<pup_entry> entries;
+  base::Vector<pup_entry> entries;
 };
 }

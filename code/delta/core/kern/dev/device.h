@@ -1,5 +1,7 @@
 #pragma once
 
+#include <base.h>
+
 /*
  * PS4Delta : PS4 emulation and research project
  *
