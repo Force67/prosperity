@@ -6,7 +6,7 @@
 	url = https://github.com/fmtlib/fmt
 [submodule "code/vendor/capstone"]
 	path = code/vendor/capstone
-	url = https://github.com/aquynh/capstone.git
+	url = https://github.com/capstone-engine/capstone.git
 [submodule "code/vendor/xbyak"]
 	path = code/vendor/xbyak
 	url = https://github.com/herumi/xbyak
