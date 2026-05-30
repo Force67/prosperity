@@ -68,3 +68,4 @@ add_subdirectory(shared)
 add_subdirectory(delta)
 
 add_subdirectory(tools/modload)
+add_subdirectory(tools/modexec)

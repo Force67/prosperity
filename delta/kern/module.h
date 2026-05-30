@@ -142,21 +142,23 @@ private:
   base::Vector<libInfo> impLibs;
   base::Vector<base::String> sharedObjects;
 
-  ElfRel *jmpslots;
-  ElfRel *rela;
-  ElfSym *symbols;
-  uint8_t *hashes;
+  // filled in by digestDynamic() from DT_ entries. must default to zero: a
+  // module that omits one would otherwise relocate against garbage.
+  ElfRel *jmpslots = nullptr;
+  ElfRel *rela = nullptr;
+  ElfSym *symbols = nullptr;
+  uint8_t *hashes = nullptr;
 
   struct table {
-    char *ptr;
-    size_t size;
+    char *ptr = nullptr;
+    size_t size = 0;
   };
 
   table strtab;
   table symtab;
 
-  uint32_t numJmpSlots;
-  uint32_t numSymbols;
-  uint32_t numRela;
+  uint32_t numJmpSlots = 0;
+  uint32_t numSymbols = 0;
+  uint32_t numRela = 0;
 };
 }

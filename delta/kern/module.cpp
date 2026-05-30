@@ -30,8 +30,7 @@ smodule::smodule(proc *process) : process(process) {
 bool smodule::fromFile(const base::String &path) {
   utl::File file(path);
   if (!file.IsOpen()) {
-    // Missing dependency module on disk: fail so the caller can
-    // continue rather than trapping the whole process.
+    // missing dep on disk; fail soft so the caller can keep going
     LOG_ERROR("smodule: cannot open {}", path.c_str());
     return false;
   }
@@ -216,10 +215,9 @@ void smodule::digestDynamic() {
 }
 
 bool smodule::mapImage() {
-  // Size of the image = highest segment end, NOT the sum of segment sizes.
-  // Segments are placed at their (base-relative) paddr, which can be sparse;
-  // summing the sizes under-reserves and lets a later segment's memcpy land in
-  // the still-PROT_NONE reservation (segfault). Take the maximum extent.
+  // size is the highest segment end, not the sum: segments map at their paddr,
+  // which can be sparse, so summing under-reserves and a later segment ends up
+  // writing into the unmapped part of the reservation.
   uint64_t codeSize = 0;
   for (uint16_t i = 0; i < elf->phnum; ++i) {
     const auto *p = &segments[i];
@@ -286,10 +284,9 @@ bool smodule::mapImage() {
   }
 
 #if 1
-  // temp hack: raise the 5.05 libkernel debug msg level. The offset is
-  // firmware-specific, and handle==1 is only libkernel during a normal boot --
-  // bounds-check so loading an arbitrary module (whose handle-1 image may be
-  // smaller) can't write out of range.
+  // temp hack: raise the 5.05 libkernel debug level. offset is fw-specific and
+  // handle==1 is only libkernel on a real boot; bounds-check so a smaller
+  // handle-1 image can't get written out of range.
   constexpr uint32_t kLibkernelDbgOff = 0x68264;
   if (info.handle == 1 && kLibkernelDbgOff + sizeof(uint32_t) <= info.codeSize) {
     *getAddress<uint32_t>(kLibkernelDbgOff) = UINT32_MAX;
@@ -399,9 +396,9 @@ bool smodule::resolveObfSymbol(const char *name, uintptr_t &ptrOut) {
 /*invoked by sys_dynlib_process_needed_and_relocate*/
 bool smodule::resolveImports() {
   /*unpatched functioncall*/
-  uintptr_t addrBadCall =
-      process->getModule("libkernel")
-          ->getSymbolFullName("M0z6Dr6TNnM#libkernel#libkernel");
+  uintptr_t addrBadCall = 0;
+  if (auto kmod = process->getModule("libkernel"))
+    addrBadCall = kmod->getSymbolFullName("M0z6Dr6TNnM#libkernel#libkernel");
 
   for (uint32_t i = 0; i < numJmpSlots; i++) {
     const auto *r = &jmpslots[i];
@@ -432,11 +429,8 @@ bool smodule::resolveImports() {
     uintptr_t addr = 0;
     const char *name = &strtab.ptr[sym->st_name];
 
-    if (!resolveObfSymbol(name, addr)) {
-      return false;
-    }
-
-    if (!addr)
+    // unresolved import (missing dep): point at the badcall stub, don't fail
+    if (!resolveObfSymbol(name, addr) || !addr)
       addr = addrBadCall;
 
     *getAddress<uintptr_t>(r->offset) = addr;
@@ -453,13 +447,14 @@ bool smodule::applyRelocations() {
     uint32_t isym = ELF64_R_SYM(r->info);
     int32_t type = ELF64_R_TYPE(r->info);
 
-    ElfSym *sym = &symbols[isym];
-    int32_t bind = ELF64_ST_BIND(sym->st_info);
-
+    // check the index before indexing symbols[] below
     if (isym >= numSymbols) {
       LOG_ERROR("Invalid symbol index {}", isym);
       continue;
     }
+
+    ElfSym *sym = &symbols[isym];
+    int32_t bind = ELF64_ST_BIND(sym->st_info);
 
     uint64_t symVal = 0;
 
@@ -472,12 +467,9 @@ bool smodule::applyRelocations() {
       else {
         const char *name = &strtab.ptr[sym->st_name];
 
-        if (!resolveObfSymbol(name, symVal)) {
-          return false;
-        }
-
-        if (!symVal)
-          __debugbreak();
+        // unresolved import (missing dep): skip, leave the slot zeroed
+        if (!resolveObfSymbol(name, symVal) || !symVal)
+          continue;
       }
     }
 
@@ -549,6 +541,10 @@ uintptr_t smodule::getSymbol(uint64_t nid) {
 uintptr_t smodule::getSymbolFullName(const char *name) {
   // TODO: fix elf hash lookup
 
+  // no export hash table (module exports nothing)
+  if (!hashes || !symbols || !strtab.ptr)
+    return 0;
+
   auto elfHash = [](const char *name) {
     auto p = (const uint8_t *)name;
     uint32_t h = 0;
@@ -613,7 +609,7 @@ uintptr_t smodule::getSymbol2(const char *name) {
 void smodule::installEHFrame() {
   const auto *p = getSegment(PT_GNU_EH_FRAME);
   if (!p)
-    return;  // module ships no GNU unwind tables
+    return;  // no eh_frame_hdr segment
   if (p->filesz > p->memsz)
     return;
 
@@ -656,11 +652,9 @@ void smodule::installEHFrame() {
     return;
   }
 
-  // The FDE table lives inside the mapped image. Some modules (e.g. the
-  // WebKit/JSC libs) have an eh_frame_hdr whose table pointer doesn't lead to a
-  // clean 0-terminated walk, so bound every read to the committed image and
-  // bail if the terminator isn't found; the unwind info is informational and
-  // not required to load the module.
+  // the FDE table sits in the mapped image. some modules (webkit/jsc) have an
+  // eh_frame_hdr whose pointer doesn't walk to a clean terminator, so keep
+  // every read inside the image and give up if we miss it. eh_frame is optional.
   uint8_t *const image_begin = info.base;
   uint8_t *const image_end = info.base + info.codeSize;
   if (data_buffer < image_begin || data_buffer >= image_end)
@@ -669,8 +663,7 @@ void smodule::installEHFrame() {
   uint8_t *data_buffer_end = data_buffer;
   bool terminated = false;
   while (data_buffer_end + sizeof(uint32_t) <= image_end) {
-    // CFI record length is an UNSIGNED 32-bit value; 0 terminates the table,
-    // 0xFFFFFFFF means a 64-bit length follows.
+    // CFI length is unsigned: 0 ends the table, 0xffffffff means a 64-bit len
     uint32_t len = *reinterpret_cast<uint32_t *>(data_buffer_end);
     if (len == 0) {
       data_buffer_end += sizeof(uint32_t);
@@ -687,7 +680,7 @@ void smodule::installEHFrame() {
       advance = 4u + len;
     }
 
-    // Guard against overflow / lack of forward progress (garbage lengths).
+    // garbage length could overflow or stall the walk; bail if we'd not advance
     if (advance < sizeof(uint32_t) || data_buffer_end + advance <= data_buffer_end)
       break;
     data_buffer_end += advance;
