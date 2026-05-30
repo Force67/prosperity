@@ -37,6 +37,19 @@ int main(int argc, char** argv) {
   if (rc != 0)
     return 3;
 
+  // no eboot, so fake a minimal SCE process param. libkernel's _start fetches
+  // it via sys_dynlib_get_proc_param and checks the size + "ORBI" magic.
+  static uint8_t procParam[0x50] = {};
+  *reinterpret_cast<uint64_t*>(procParam + 0x00) = sizeof(procParam);
+  *reinterpret_cast<uint32_t*>(procParam + 0x08) = 0x4942524F;  // "ORBI"
+  *reinterpret_cast<uint32_t*>(procParam + 0x0C) = 1;           // entry count (!= 0)
+  *reinterpret_cast<uint32_t*>(procParam + 0x10) = 0x11000000;  // sdk version
+  {
+    auto& m0 = mods[0]->getInfo();
+    m0.procParam = procParam;
+    m0.procParamSize = sizeof(procParam);
+  }
+
   // stage 3 (opt-in): jump into the guest. proc::start enters libkernel's entry
   // with modules[0] as the main program.
   if (argc > 2 && std::strcmp(argv[2], "run") == 0) {
