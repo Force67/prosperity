@@ -15,9 +15,8 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
 endif()
 
-# Mirror the resource defines that premake5.lua used to inject. The .rc
-# scripts in _res reference all of these, so keep the full set defined for
-# the windows resource compiler.
+# Resource defines consumed by the .rc scripts in _res. Keep the full set
+# defined for the windows resource compiler.
 add_compile_definitions(
   FXNAME="PS4Delta"
   FXNAME_WIDE=L"PS4Delta"
@@ -56,7 +55,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
   )
 endif()
 
-add_subdirectory(code/vendor)
-add_subdirectory(code/shared)
-add_subdirectory(code/delta/core)
-add_subdirectory(code/delta/host)
+add_subdirectory(vendor)
+add_subdirectory(shared)
+add_subdirectory(delta/core)
+add_subdirectory(delta/host)

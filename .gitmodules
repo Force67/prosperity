@@ -1,15 +1,15 @@
 [submodule "code/vendor/zlib"]
-	path = code/vendor/zlib
+	path = vendor/zlib
 	url = https://github.com/madler/zlib
 [submodule "code/vendor/fmtlib"]
-	path = code/vendor/fmtlib
+	path = vendor/fmtlib
 	url = https://github.com/fmtlib/fmt
 [submodule "code/vendor/capstone"]
-	path = code/vendor/capstone
+	path = vendor/capstone
 	url = https://github.com/capstone-engine/capstone.git
 [submodule "code/vendor/xbyak"]
-	path = code/vendor/xbyak
+	path = vendor/xbyak
 	url = https://github.com/herumi/xbyak
 [submodule "code/vendor/equilibrium"]
-	path = code/vendor/equilibrium
+	path = vendor/equilibrium
 	url = https://github.com/Force67/equilibrium.git

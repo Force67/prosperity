@@ -4,23 +4,19 @@ on: [push]
 
 jobs:
   build:
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v2
-    - name: Init submodules
-      run: "git submodule update --init --recursive"
-      shell: cmd
-    - name: Install Qt
-      uses: jurplel/install-qt-action@v2
+    - uses: actions/checkout@v4
       with:
-        host: windows
-        target: desktop
-        arch: win64_msvc2017_64
-    - name: Invoke MSBuild
-      run: cibuild.bat
-      shell: cmd
-    - uses: actions/upload-artifact@v1
+        submodules: recursive
+    - name: Install toolchain
+      run: sudo apt-get update && sudo apt-get install -y cmake ninja-build
+    - name: Configure
+      run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+    - name: Build
+      run: cmake --build build
+    - uses: actions/upload-artifact@v4
       with:
-        name: Artifacts
-        path: bin/Release
+        name: ps4delta
+        path: build/delta/host/ps4delta
