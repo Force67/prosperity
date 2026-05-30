@@ -13,3 +13,6 @@
 [submodule "code/vendor/equilibrium"]
 	path = vendor/equilibrium
 	url = https://github.com/Force67/equilibrium.git
+[submodule "vendor/googletest"]
+	path = vendor/googletest
+	url = https://github.com/google/googletest

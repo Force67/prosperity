@@ -16,7 +16,9 @@ jobs:
       run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
     - name: Build
       run: cmake --build build
+    - name: Test
+      run: ctest --test-dir build --output-on-failure
     - uses: actions/upload-artifact@v4
       with:
         name: ps4delta
-        path: build/delta/host/ps4delta
+        path: build/delta/main/ps4delta

@@ -66,7 +66,9 @@ codeLift::codeLift(uint8_t *&rip) : ripPointer(rip) {}
 
 codeLift::~codeLift() {
   if (handle) {
-    cs_free(insn, 1);
+    // insn is only allocated in transform(); may be null if it never ran
+    if (insn)
+      cs_free(insn, 1);
     cs_close(&handle);
 
     // just to be sure...

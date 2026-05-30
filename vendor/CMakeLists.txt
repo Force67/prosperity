@@ -1,8 +1,12 @@
 # --------------------------------------------------------------------------
-# zlib: uses upstream CMakeLists, but we only want the static lib target
-#         and we want it to skip examples / minigzip.
+# zlib: uses upstream CMakeLists, but we only want the static lib target. Skip
+# the shared lib, examples, install rules and — importantly — its CTest
+# registration, which would otherwise pollute our test suite.
 # --------------------------------------------------------------------------
 set(ZLIB_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(ZLIB_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+set(ZLIB_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+set(ZLIB_INSTALL OFF CACHE BOOL "" FORCE)
 set(SKIP_INSTALL_ALL ON CACHE BOOL "" FORCE)
 add_subdirectory(zlib EXCLUDE_FROM_ALL)
 # Upstream zlib's CMakeLists doesn't expose a normal include interface;
@@ -71,3 +75,13 @@ target_compile_features(eq_base PUBLIC cxx_std_20)
 target_compile_definitions(eq_base PUBLIC
   BASE_STRIP_BUGCHECK     # don't pull in fancy backtrace machinery
 )
+
+# --------------------------------------------------------------------------
+# googletest: only needed when building the module unit tests.
+# --------------------------------------------------------------------------
+if(DELTA_BUILD_TESTS)
+  set(BUILD_GMOCK OFF CACHE BOOL "" FORCE)
+  set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
+  set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+  add_subdirectory(googletest EXCLUDE_FROM_ALL)
+endif()

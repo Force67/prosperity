@@ -55,7 +55,14 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
   )
 endif()
 
+list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
+include(AddDeltaModule)
+
+option(DELTA_BUILD_TESTS "Build the delta module unit tests" ON)
+if(DELTA_BUILD_TESTS)
+  enable_testing()
+endif()
+
 add_subdirectory(vendor)
 add_subdirectory(shared)
-add_subdirectory(delta/core)
-add_subdirectory(delta/host)
+add_subdirectory(delta)
