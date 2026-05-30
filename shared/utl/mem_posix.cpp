@@ -34,14 +34,20 @@ static int protection_ToPosix(pageProtection prot) {
 void* allocMem(void* preferredAddr, size_t length, pageProtection prot,
                allocationType type) {
   int flags = MAP_PRIVATE | MAP_ANONYMOUS;
-  if (preferredAddr) {
-    flags |= MAP_FIXED_NOREPLACE;
-  }
+  int posix_prot;
 
-  // For pure-reserve we map PROT_NONE; commit happens via protectMem.
-  int posix_prot = (type == allocationType::reserve)
-                       ? PROT_NONE
-                       : protection_ToPosix(prot);
+  if (type == allocationType::reserve) {
+    // reserve: mapped but inaccessible, and don't clobber an existing mapping
+    posix_prot = PROT_NONE;
+    if (preferredAddr)
+      flags |= MAP_FIXED_NOREPLACE;
+  } else {
+    // commit: overlay a sub-range of the reservation. has to be MAP_FIXED --
+    // MAP_FIXED_NOREPLACE hits EEXIST and the page stays unwritable.
+    posix_prot = protection_ToPosix(prot);
+    if (preferredAddr)
+      flags |= MAP_FIXED;
+  }
 
   void* p = ::mmap(preferredAddr, length, posix_prot, flags, -1, 0);
   if (p == MAP_FAILED)

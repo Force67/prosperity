@@ -66,3 +66,5 @@ endif()
 add_subdirectory(vendor)
 add_subdirectory(shared)
 add_subdirectory(delta)
+
+add_subdirectory(tools/modload)

@@ -30,7 +30,9 @@ smodule::smodule(proc *process) : process(process) {
 bool smodule::fromFile(const base::String &path) {
   utl::File file(path);
   if (!file.IsOpen()) {
-    __debugbreak();
+    // Missing dependency module on disk: fail so the caller can
+    // continue rather than trapping the whole process.
+    LOG_ERROR("smodule: cannot open {}", path.c_str());
     return false;
   }
 
@@ -46,7 +48,10 @@ bool smodule::fromFile(const base::String &path) {
     file.Read(data.Get_UseOnlyIfYouKnowWhatYouareDoing(), sz);
     return fromMem(std::move(data));
   }
-  __debugbreak();
+
+  // Not a raw x86-64 (SCE) ELF, e.g. still SELF-encrypted, or a different
+  // arch. We don't decrypt here, so reject it.
+  LOG_ERROR("smodule: {} is not a decrypted x86-64 ELF", path.c_str());
   return false;
 }
 
@@ -274,9 +279,13 @@ bool smodule::mapImage() {
   }
 
 #if 1
-  // temp hack: raise 5.05 kernel debug msg level
-  if (info.handle == 1) {
-    *getAddress<uint32_t>(0x68264) = UINT32_MAX;
+  // temp hack: raise the 5.05 libkernel debug msg level. The offset is
+  // firmware-specific, and handle==1 is only libkernel during a normal boot --
+  // bounds-check so loading an arbitrary module (whose handle-1 image may be
+  // smaller) can't write out of range.
+  constexpr uint32_t kLibkernelDbgOff = 0x68264;
+  if (info.handle == 1 && kLibkernelDbgOff + sizeof(uint32_t) <= info.codeSize) {
+    *getAddress<uint32_t>(kLibkernelDbgOff) = UINT32_MAX;
     LOG_WARNING("Enabling libkernel debug messages");
   }
 #endif

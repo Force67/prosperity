@@ -79,7 +79,7 @@ modulePtr proc::loadModule(base::StringRef name) {
 
     modules.emplace_back(lib);
 
-    base::String nameFull("modules\\");
+    base::String nameFull("modules/");
     nameFull.append(name.data(), name.length());
     nameFull += ".sprx";
     if (!lib->fromFile(utl::make_abs_path(nameFull))) {
