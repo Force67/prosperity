@@ -309,3 +309,4 @@ Thumbs.db
 # custom user specific stuff
 vendor/*tar.gz
 vendor/*tar
+/build-dbg
