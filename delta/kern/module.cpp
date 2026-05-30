@@ -216,12 +216,19 @@ void smodule::digestDynamic() {
 }
 
 bool smodule::mapImage() {
-  // calculate total aligned code size
-  uint32_t codeSize = 0;
+  // Size of the image = highest segment end, NOT the sum of segment sizes.
+  // Segments are placed at their (base-relative) paddr, which can be sparse;
+  // summing the sizes under-reserves and lets a later segment's memcpy land in
+  // the still-PROT_NONE reservation (segfault). Take the maximum extent.
+  uint64_t codeSize = 0;
   for (uint16_t i = 0; i < elf->phnum; ++i) {
     const auto *p = &segments[i];
     if (p->type == PT_LOAD || p->type == PT_SCE_RELRO) {
-      codeSize += align_up(p->memsz, p->align);
+      uint64_t align = p->align ? p->align : 0x1000;
+      uint64_t base = elf->type == ET_SCE_EXEC ? p->vaddr : p->paddr;
+      uint64_t end = align_up(base + p->memsz, align);
+      if (end > codeSize)
+        codeSize = end;
     }
   }
 
@@ -605,6 +612,8 @@ uintptr_t smodule::getSymbol2(const char *name) {
 // taken from idc's "uplift" project
 void smodule::installEHFrame() {
   const auto *p = getSegment(PT_GNU_EH_FRAME);
+  if (!p)
+    return;  // module ships no GNU unwind tables
   if (p->filesz > p->memsz)
     return;
 
@@ -647,20 +656,44 @@ void smodule::installEHFrame() {
     return;
   }
 
+  // The FDE table lives inside the mapped image. Some modules (e.g. the
+  // WebKit/JSC libs) have an eh_frame_hdr whose table pointer doesn't lead to a
+  // clean 0-terminated walk, so bound every read to the committed image and
+  // bail if the terminator isn't found; the unwind info is informational and
+  // not required to load the module.
+  uint8_t *const image_begin = info.base;
+  uint8_t *const image_end = info.base + info.codeSize;
+  if (data_buffer < image_begin || data_buffer >= image_end)
+    return;
+
   uint8_t *data_buffer_end = data_buffer;
-  while (true) {
-    size_t size = *reinterpret_cast<int32_t *>(data_buffer_end);
-    if (size == 0) {
-      data_buffer_end = &data_buffer_end[4];
+  bool terminated = false;
+  while (data_buffer_end + sizeof(uint32_t) <= image_end) {
+    // CFI record length is an UNSIGNED 32-bit value; 0 terminates the table,
+    // 0xFFFFFFFF means a 64-bit length follows.
+    uint32_t len = *reinterpret_cast<uint32_t *>(data_buffer_end);
+    if (len == 0) {
+      data_buffer_end += sizeof(uint32_t);
+      terminated = true;
       break;
     }
-    if (size == -1) {
-      size = 12 + *reinterpret_cast<size_t *>(&data_buffer_end[4]);
+
+    size_t advance;
+    if (len == 0xFFFFFFFFu) {
+      if (data_buffer_end + 12 > image_end)
+        break;
+      advance = 12u + *reinterpret_cast<uint64_t *>(data_buffer_end + 4);
     } else {
-      size = 4 + size;
+      advance = 4u + len;
     }
-    data_buffer_end = &data_buffer_end[size];
+
+    // Guard against overflow / lack of forward progress (garbage lengths).
+    if (advance < sizeof(uint32_t) || data_buffer_end + advance <= data_buffer_end)
+      break;
+    data_buffer_end += advance;
   }
+  if (!terminated)
+    return;  // truncated / malformed unwind table
 
   size_t fde_count;
   if (exinfo->fdeCount == 0x03) // absolute
