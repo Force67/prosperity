@@ -9,6 +9,7 @@
 
 #include <base.h>
 #include <cstdlib>
+#include <unordered_map>
 #include <logger/logger.h>
 
 #include "../module.h"
@@ -269,20 +270,26 @@ struct tls_index {
 };
 
 void *PS4ABI guest_tls_get_addr(tls_index *ti) {
+  // per-thread dynamic TLS blocks (module index -> block). Each thread gets its
+  // own copy of every module's __thread storage, like a real DTV.
+  static thread_local std::unordered_map<uint32_t, uint8_t *> t_blocks;
+
+  auto it = t_blocks.find(ti->module_id);
+  if (it != t_blocks.end())
+    return it->second + ti->offset;
+
   auto *proc = proc::getActive();
   for (auto &mod : proc->getModuleList()) {
     auto &info = mod->getInfo();
     if (info.tlsSlot != ti->module_id)
       continue;
 
-    if (!info.tlsBlock) {
-      size_t sz = info.tlsSizeMem ? info.tlsSizeMem : 1;
-      auto *block = static_cast<uint8_t *>(std::calloc(1, sz));
-      if (info.tlsAddr && info.tlsSizeFile)
-        std::memcpy(block, info.tlsAddr, info.tlsSizeFile);
-      info.tlsBlock = block;
-    }
-    return info.tlsBlock + ti->offset;
+    size_t sz = info.tlsSizeMem ? info.tlsSizeMem : 1;
+    auto *block = static_cast<uint8_t *>(std::calloc(1, sz));
+    if (info.tlsAddr && info.tlsSizeFile)
+      std::memcpy(block, info.tlsAddr, info.tlsSizeFile);
+    t_blocks[ti->module_id] = block;
+    return block + ti->offset;
   }
 
   std::printf("[tls] __tls_get_addr: no module for index %llu\n",

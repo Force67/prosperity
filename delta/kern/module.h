@@ -56,11 +56,6 @@ struct moduleInfo {
   size_t tlsSizeFile;
   uint32_t tlsalign;
 
-  // per-thread dynamic TLS block, allocated lazily by our __tls_get_addr HLE
-  // (single boot thread for now). libkernel's own lazy allocator leaves the
-  // DTV entries null, so general-dynamic __thread access faults without this.
-  uint8_t *tlsBlock;
-
   uint8_t *ehFrameheaderAddr;
   uint8_t *ehFrameAddr;
   uint32_t ehFrameheaderSize;
