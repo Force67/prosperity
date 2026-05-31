@@ -9,7 +9,10 @@
 #include <cstdio>
 #include <cstring>
 #include <memory>
+#include <set>
+#include <string>
 #include <thread>
+#include <vector>
 
 #include "dcore.h"
 #include <logger/logger.h>
@@ -47,6 +50,31 @@ public:
       return false;
     size = static_cast<int64_t>(node->size);
     return true;
+  }
+  bool list(const char *rel, std::vector<krnl::vfs::DirEntry> &out) override {
+    // Build "prefix/" so we match only paths inside this directory. Root ("" or
+    // "/") -> "/". The pkg stores absolute paths with a leading '/'.
+    std::string prefix(rel ? rel : "");
+    while (!prefix.empty() && prefix.back() == '/')
+      prefix.pop_back();
+    prefix += "/";
+    if (prefix.empty() || prefix[0] != '/')
+      prefix.insert(prefix.begin(), '/');
+
+    std::vector<std::string> all;
+    fs_.paths(all);
+    std::set<std::string> seen;
+    for (const auto &p : all) {
+      if (p.size() <= prefix.size() || p.compare(0, prefix.size(), prefix) != 0)
+        continue;
+      std::string rest = p.substr(prefix.size());
+      auto slash = rest.find('/');
+      bool isDir = slash != std::string::npos;
+      std::string child = isDir ? rest.substr(0, slash) : rest;
+      if (!child.empty() && seen.insert(child).second)
+        out.push_back({child, isDir});
+    }
+    return !out.empty();
   }
 
 private:

@@ -17,6 +17,7 @@
 
 #include "sys_debug.h"
 #include "sys_dynlib.h"
+#include "sys_event.h"
 #include "sys_generic.h"
 #include "sys_info.h"
 #include "sys_mem.h"
@@ -235,7 +236,7 @@ static const syscall_Reg syscall_dpt[] = {
     {138, (void *)&null_handler}, // sys_utimes
     {139, (void *)&null_handler}, // sys_sigreturn
     {140, (void *)&null_handler}, // sys_adjtime
-    {141, (void *)&null_handler}, // sys_kqueueex
+    {141, (void *)&sys_kqueueex},
     {142, (void *)&null_handler}, // sys_gethostid
     {143, (void *)&null_handler}, // sys_sethostid
     {144, (void *)&null_handler}, // sys_getrlimit
@@ -332,7 +333,7 @@ static const syscall_Reg syscall_dpt[] = {
     {255, (void *)&null_handler}, // sys_aio_read
     {256, (void *)&null_handler}, // sys_aio_write
     {257, (void *)&null_handler}, // sys_lio_listio
-    {272, (void *)&null_handler}, // sys_getdents
+    {272, (void *)&sys_getdents},
     {274, (void *)&null_handler}, // sys_lchmod
     {275, (void *)&null_handler}, // sys_lchown
     {276, (void *)&null_handler}, // sys_lutimes
@@ -407,8 +408,8 @@ static const syscall_Reg syscall_dpt[] = {
     {359, (void *)&null_handler}, // sys_aio_waitcomplete
     {360, (void *)&null_handler}, // sys_getresuid
     {361, (void *)&null_handler}, // sys_getresgid
-    {362, (void *)&null_handler}, // sys_kqueue
-    {363, (void *)&null_handler}, // sys_kevent
+    {362, (void *)&sys_kqueue},
+    {363, (void *)&sys_kevent},
     {364, (void *)&null_handler}, // sys_cap_get_proc
     {365, (void *)&null_handler}, // sys_cap_set_proc
     {366, (void *)&null_handler}, // sys_cap_get_fd

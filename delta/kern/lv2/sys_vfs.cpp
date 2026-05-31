@@ -14,12 +14,14 @@
 #include "kern/dev/console_dev.h"
 #include "kern/dev/dipsw_dev.h"
 #include "kern/dev/dce_dev.h"
+#include "kern/dev/dir_dev.h"
 #include "kern/dev/dma_dev.h"
 #include "kern/dev/file_dev.h"
 #include "kern/dev/gc_dev.h"
 #include "kern/dev/tty6_dev.h"
 #include "kern/proc.h"
 #include "kern/vfs.h"
+#include "sys_vfs.h"
 
 #include <utl/object_ref.h>
 
@@ -48,7 +50,7 @@ static device *make_device(const char *deviceName) {
 
 int PS4ABI sys_open(const char *path, uint32_t flags, uint32_t mode) {
   if (!path)
-    return SysError::eINVAL;
+    return -SysError::eINVAL;
 
   std::fprintf(stderr, "[open] %s flags=%#x mode=%#x\n", path, flags, mode);
 
@@ -66,18 +68,29 @@ int PS4ABI sys_open(const char *path, uint32_t flags, uint32_t mode) {
       return dev->handle();
     }
     // unknown device: fail soft instead of trapping
-    return SysError::eNOENT;
+    return -SysError::eNOENT;
+  }
+
+  // Directory: games open one (O_DIRECTORY) then getdents it to find assets.
+  // Gated on the flag so a normal file open doesn't pay the full listing scan.
+  if (flags & O_DIRECTORY) {
+    std::vector<vfs::DirEntry> entries;
+    if (vfs::listDir(path, entries)) {
+      auto *dir = new dirDevice(proc::getActive(), std::move(entries));
+      return dir->handle();
+    }
+    return -SysError::eNOENT;
   }
 
   // Regular file: resolve through the VFS (host + virtual mounts).
   utl::File vf = vfs::openRead(path);
   if (!vf.Exists())
-    return SysError::eNOENT;
+    return -SysError::eNOENT;
 
   auto *file = new fileDevice(proc::getActive());
   if (!file->adopt(std::move(vf))) {
     file->releaseHandle();
-    return SysError::eNOENT;
+    return -SysError::eNOENT;
   }
   return file->handle();
 }
@@ -105,6 +118,11 @@ int64_t PS4ABI sys_lseek(uint32_t fd, int64_t offset, int whence) {
 }
 
 int PS4ABI sys_fstat(uint32_t fd, void *stat) {
+  // Zero first: a failed/unsupported fstat must not leave the caller's stat
+  // buffer uninitialized. Games read st_size from it without checking the
+  // return and then allocate that many bytes (garbage -> bad_alloc).
+  if (stat)
+    std::memset(stat, 0, sizeof(SceKernelStat));
   auto *d = fdToDevice(fd);
   if (!d)
     return -SysError::eBADF;
@@ -115,10 +133,17 @@ int PS4ABI sys_stat(const char *path, void *stat) {
   int64_t size = 0;
   bool isDir = false;
   if (!vfs::stat(path, size, isDir))
-    return SysError::eNOENT;
+    return -SysError::eNOENT;
   fillStat(*reinterpret_cast<SceKernelStat *>(stat),
            isDir ? kSceFileModeDir : kSceFileModeReg, size);
   return 0;
+}
+
+int64_t PS4ABI sys_getdents(uint32_t fd, void *buf, size_t nbytes) {
+  auto *d = fdToDevice(fd);
+  if (!d)
+    return -SysError::eBADF;
+  return d->getdents(buf, nbytes);
 }
 
 int PS4ABI sys_close(uint32_t fd) {

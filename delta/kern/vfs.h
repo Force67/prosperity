@@ -10,11 +10,18 @@
 
 #include <cstdint>
 #include <memory>
+#include <string>
+#include <vector>
 
 #include <base/strings/xstring.h>
 #include <utl/file.h>
 
 namespace krnl::vfs {
+// One entry in a directory listing.
+struct DirEntry {
+  std::string name;
+  bool isDir;
+};
 // Map a guest path prefix (e.g. "/app0") onto a host directory. Longest prefix
 // wins at resolve time.
 void mount(const char *guestPrefix, const char *hostDir);
@@ -38,6 +45,11 @@ struct VirtualProvider {
   virtual ~VirtualProvider() = default;
   virtual std::unique_ptr<VirtualFile> open(const char *relPath) = 0;
   virtual bool stat(const char *relPath, int64_t &size) = 0;
+  // List the immediate children of a directory. Returns false if relPath is not
+  // a directory (or listing is unsupported). Default: not a directory.
+  virtual bool list(const char * /*relPath*/, std::vector<DirEntry> & /*out*/) {
+    return false;
+  }
 };
 
 // Map a guest path prefix onto an on-demand provider (kept alive for the
@@ -52,4 +64,7 @@ utl::File openRead(const char *guestPath);
 
 // Stat a guest path across host and virtual mounts. Returns false if absent.
 bool stat(const char *guestPath, int64_t &size, bool &isDir);
+
+// List a directory's immediate children. Returns false if not a directory.
+bool listDir(const char *guestPath, std::vector<DirEntry> &out);
 } // namespace krnl::vfs

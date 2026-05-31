@@ -7,6 +7,7 @@
  */
 
 #include <cstring>
+#include <dirent.h>
 
 #include <base/containers/vector.h>
 
@@ -157,6 +158,33 @@ bool stat(const char *path, int64_t &size, bool &isDir) {
   if (!f.Exists() || !f.IsOpen())
     return false;
   size = static_cast<int64_t>(f.GetSize());
+  return true;
+}
+
+bool listDir(const char *path, std::vector<DirEntry> &out) {
+  if (!path)
+    return false;
+
+  size_t len = 0;
+  const mountPoint *m = findMount(path, len);
+  if (!m)
+    return false;
+
+  const char *rest = path + len;
+  if (m->provider)
+    return m->provider->list(rest, out);
+
+  // Host mount: enumerate the host directory.
+  base::String hostDir = joinHost(m->host, rest);
+  DIR *d = opendir(hostDir.c_str());
+  if (!d)
+    return false;
+  while (dirent *e = readdir(d)) {
+    if (std::strcmp(e->d_name, ".") == 0 || std::strcmp(e->d_name, "..") == 0)
+      continue;
+    out.push_back({e->d_name, e->d_type == DT_DIR});
+  }
+  closedir(d);
   return true;
 }
 } // namespace krnl::vfs
