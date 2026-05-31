@@ -83,11 +83,19 @@ int PS4ABI sys_dynlib_get_info_ex(uint32_t handle, int32_t ukn /*always 1*/,
   dyn_info->init_proc_addr = reinterpret_cast<uintptr_t>(info.initAddr);
   dyn_info->fini_proc_addr = reinterpret_cast<uintptr_t>(info.finiAddr);
 
-  dyn_info->eh_frame_addr = reinterpret_cast<uintptr_t>(info.ehFrameAddr);
-  dyn_info->eh_frame_hdr_addr =
+  // installEHFrame stores the *hdr* (PT_GNU_EH_FRAME) in ehFrameAddr/Size and
+  // the actual unwind data (.eh_frame) in ehFrameheaderAddr/Size, i.e. the
+  // fields are named backwards. Report them the way the guest unwinder expects:
+  // eh_frame_addr = .eh_frame, eh_frame_hdr_addr = .eh_frame_hdr.
+  dyn_info->eh_frame_addr =
       reinterpret_cast<uintptr_t>(info.ehFrameheaderAddr);
-  dyn_info->eh_frame_size = info.ehFrameSize;
-  dyn_info->eh_frame_hdr_size = info.ehFrameheaderSize;
+  dyn_info->eh_frame_hdr_addr = reinterpret_cast<uintptr_t>(info.ehFrameAddr);
+  dyn_info->eh_frame_size = info.ehFrameheaderSize;
+  dyn_info->eh_frame_hdr_size = info.ehFrameSize;
+  std::printf("[get_info_ex] h=%u %s eh_frame=%#lx+%#x hdr=%#lx+%#x\n",
+              handle, info.name.c_str(), dyn_info->eh_frame_addr,
+              dyn_info->eh_frame_size, dyn_info->eh_frame_hdr_addr,
+              dyn_info->eh_frame_hdr_size);
 
   auto &text = dyn_info->segs[0];
   text.addr = reinterpret_cast<uintptr_t>(info.textSeg.addr);
