@@ -26,6 +26,7 @@ public:
     file,
     device,
     equeue,
+    eventflag,
   };
 
   explicit kObject(proc *, oType);

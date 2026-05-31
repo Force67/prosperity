@@ -18,6 +18,7 @@
 #include "sys_debug.h"
 #include "sys_dynlib.h"
 #include "sys_event.h"
+#include "sys_event_flag.h"
 #include "sys_generic.h"
 #include "sys_info.h"
 #include "sys_mem.h"
@@ -518,7 +519,7 @@ static const syscall_Reg syscall_dpt[] = {
     {475, (void *)&null_handler}, // sys_pread
     {476, (void *)&null_handler}, // sys_pwrite
     {477, (void *)&sys_mmap},
-    {478, (void *)&null_handler}, // sys_lseek
+    {478, (void *)&sys_lseek}, // modern lseek (the game uses 478, not the old 19)
     {479, (void *)&null_handler}, // sys_truncate
     {480, (void *)&null_handler}, // sys_ftruncate
     {481, (void *)&null_handler}, // sys_thr_kill2
@@ -578,15 +579,15 @@ static const syscall_Reg syscall_dpt[] = {
     {535, (void *)&null_handler}, // sys_dl_get_list
     {536, (void *)&null_handler}, // sys_dl_get_info
     {537, (void *)&null_handler}, // sys_dl_notify_event
-    {538, (void *)&null_handler}, // sys_evf_create
-    {539, (void *)&null_handler}, // sys_evf_delete
-    {540, (void *)&null_handler}, // sys_evf_open
-    {541, (void *)&null_handler}, // sys_evf_close
-    {542, (void *)&null_handler}, // sys_evf_wait
-    {543, (void *)&null_handler}, // sys_evf_trywait
-    {544, (void *)&null_handler}, // sys_evf_set
-    {545, (void *)&null_handler}, // sys_evf_clear
-    {546, (void *)&null_handler}, // sys_evf_cancel
+    {538, (void *)&sys_evf_create},
+    {539, (void *)&sys_evf_delete},
+    {540, (void *)&sys_evf_open},
+    {541, (void *)&sys_evf_close},
+    {542, (void *)&sys_evf_wait},
+    {543, (void *)&sys_evf_trywait},
+    {544, (void *)&sys_evf_set},
+    {545, (void *)&sys_evf_clear},
+    {546, (void *)&sys_evf_cancel},
     {547, (void *)&null_handler}, // sys_query_memory_protection
     {548, (void *)&null_handler}, // sys_batch_map
     {549, (void *)&null_handler}, // sys_osem_create
