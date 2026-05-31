@@ -35,12 +35,13 @@ int PS4ABI sys_sigaction(int how, void (*cb)(void *, void *, void *)) {
 
 /*does not belong here*/
 int PS4ABI sys_namedobj_create(const char *name, void *arg2, uint32_t arg3) {
-  static int fakecounter = 0;
-  int value = fakecounter;
-  fakecounter++;
-  std::printf("creating named obj %s -> %d, named obj %p\n", name, fakecounter,
-              arg2);
-  return value;
+  // Registers a debug name for a kernel object. Success is 0 -- returning the
+  // old fake counter read back as an errno (EPERM on the 2nd call) and aborted
+  // libc init. The actual id is reported through other channels we don't model.
+  (void)name;
+  (void)arg2;
+  (void)arg3;
+  return 0;
 }
 
 int PS4ABI sys_namedobj_delete() { return 0; }

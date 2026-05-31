@@ -9,6 +9,9 @@
 #include "kern/lv2/sys_dynlib.h"
 #include "kern/module.h"
 #include "kern/proc.h"
+#include "kern/vfs.h"
+
+#include <string>
 
 // SCOUT: patch a guest function to `xor eax,eax; ret` (return 0). Used to step
 // over libkernel-internal validation that rejects our externally-loaded module
@@ -34,6 +37,16 @@ int main(int argc, char** argv) {
   }
 
   utl::createLogger(true);
+
+  // Mount /app0 onto the directory the main module lives in, so the game's
+  // runtime file opens resolve to the extracted disc image.
+  {
+    std::string p(argv[1]);
+    auto slash = p.find_last_of('/');
+    std::string dir = slash == std::string::npos ? "." : p.substr(0, slash);
+    krnl::vfs::mount("/app0", dir.c_str());
+    std::printf("[modexec] mounted /app0 -> %s\n", dir.c_str());
+  }
 
   krnl::proc proc;
 

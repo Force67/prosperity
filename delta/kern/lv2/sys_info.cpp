@@ -26,8 +26,15 @@ int PS4ABI sys_is_in_sandbox() { return 0; }
 int PS4ABI sys_cpuset_getaffinity() { return 0; }
 
 int PS4ABI sys_get_authinfo(int pid, void *infoOut) {
+  // SceSelfAuthInfo (136 bytes). Hand back a plausible non-privileged game
+  // identity: auth_id of a normal application plus a permissive capability
+  // mask. Returning 1 here (the old behaviour) reads as EPERM and aborts libc.
   std::memset(infoOut, 0, 136);
-  return 1;
+  auto *p = reinterpret_cast<uint64_t *>(infoOut);
+  p[0] = 0x3100000000000001ull; // auth_id: regular application
+  p[2] = 0x2000038000000000ull; // capability bits
+  p[4] = 0x4000400040000000ull; // attributes / shared
+  return 0;
 }
 
 /*maybe should be moved to a proc file*/

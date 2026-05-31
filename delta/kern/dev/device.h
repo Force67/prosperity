@@ -29,5 +29,13 @@ public:
     __debugbreak();
     return -1;
   }
+
+  // File-like operations. Default to "not supported"; real files and char
+  // devices override what they implement. Convention follows lv2: >= 0 on
+  // success (byte count / offset), negative SysError on failure.
+  virtual int64_t read(void *, size_t) { return -SysError::eNODEV; }
+  virtual int64_t write(const void *, size_t) { return -SysError::eNODEV; }
+  virtual int64_t lseek(int64_t, int) { return -SysError::eNODEV; }
+  virtual int fstat(void * /*SceKernelStat*/) { return -SysError::eNODEV; }
 };
 }

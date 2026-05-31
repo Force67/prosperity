@@ -9,13 +9,16 @@
 
 #include <base.h>
 #include <base/strings/string_ref.h>
+#include <cstdio>
 
 #include "kern/dev/console_dev.h"
 #include "kern/dev/dipsw_dev.h"
 #include "kern/dev/dma_dev.h"
+#include "kern/dev/file_dev.h"
 #include "kern/dev/gc_dev.h"
 #include "kern/dev/tty6_dev.h"
 #include "kern/proc.h"
+#include "kern/vfs.h"
 
 #include <utl/object_ref.h>
 
@@ -63,8 +66,58 @@ int PS4ABI sys_open(const char *path, uint32_t flags, uint32_t mode) {
     return SysError::eNOENT;
   }
 
-  // TODO: real VFS. For now report "not found" so the guest handles it.
-  return SysError::eNOENT;
+  // Regular file: resolve through the VFS mount table onto the host.
+  base::String host = vfs::resolve(path);
+  if (host.empty())
+    return SysError::eNOENT;
+
+  auto *file = new fileDevice(proc::getActive());
+  if (!file->open(host, flags)) {
+    file->releaseHandle();
+    return SysError::eNOENT;
+  }
+  return file->handle();
+}
+
+// Resolve an fd (object-table handle) back to the device that backs it.
+static device *fdToDevice(uint32_t fd) {
+  auto *obj = proc::getActive()->getObjTable().get(fd);
+  if (!obj || obj->type() != kObject::oType::device)
+    return nullptr;
+  return static_cast<device *>(obj);
+}
+
+int64_t PS4ABI sys_read(uint32_t fd, void *buf, size_t nbytes) {
+  auto *d = fdToDevice(fd);
+  if (!d)
+    return -SysError::eBADF;
+  return d->read(buf, nbytes);
+}
+
+int64_t PS4ABI sys_lseek(uint32_t fd, int64_t offset, int whence) {
+  auto *d = fdToDevice(fd);
+  if (!d)
+    return -SysError::eBADF;
+  return d->lseek(offset, whence);
+}
+
+int PS4ABI sys_fstat(uint32_t fd, void *stat) {
+  auto *d = fdToDevice(fd);
+  if (!d)
+    return -SysError::eBADF;
+  return d->fstat(stat);
+}
+
+int PS4ABI sys_stat(const char *path, void *stat) {
+  base::String host = vfs::resolve(path);
+  if (host.empty())
+    return SysError::eNOENT;
+  utl::File f(host, utl::fileMode::read);
+  if (!f.Exists())
+    return SysError::eNOENT;
+  fillStat(*reinterpret_cast<SceKernelStat *>(stat), kSceFileModeReg,
+           static_cast<int64_t>(f.GetSize()));
+  return 0;
 }
 
 int PS4ABI sys_close(uint32_t fd) {

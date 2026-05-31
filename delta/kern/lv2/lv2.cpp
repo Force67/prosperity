@@ -96,7 +96,7 @@ static const syscall_Reg syscall_dpt[] = {
     {0, (void *)&null_handler}, // sys_nosys
     {1, (void *)&sys_exit},
     {2, (void *)&null_handler}, // sys_fork
-    {3, (void *)&null_handler}, // sys_read
+    {3, (void *)&sys_read},
     {4, (void *)&sys_write},
     {5, (void *)&sys_open},
     {6, (void *)&sys_close},
@@ -112,7 +112,7 @@ static const syscall_Reg syscall_dpt[] = {
     {16, (void *)&null_handler}, // sys_chown
     {17, (void *)&null_handler}, // sys_obreak
     {18, (void *)&null_handler}, // sys_getfsstat
-    {19, (void *)&null_handler}, // sys_lseek
+    {19, (void *)&sys_lseek},
     {20, (void *)&sys_getpid},
     {21, (void *)&null_handler}, // sys_mount
     {22, (void *)&null_handler}, // sys_unmount
@@ -131,7 +131,7 @@ static const syscall_Reg syscall_dpt[] = {
     {35, (void *)&null_handler}, // sys_fchflags
     {36, (void *)&null_handler}, // sys_sync
     {37, (void *)&null_handler}, // sys_kill
-    {38, (void *)&null_handler}, // sys_stat
+    {38, (void *)&sys_stat},
     {39, (void *)&null_handler}, // sys_getppid
     {40, (void *)&null_handler}, // sys_lstat
     {41, (void *)&null_handler}, // sys_dup
@@ -155,7 +155,7 @@ static const syscall_Reg syscall_dpt[] = {
     {59, (void *)&sys_execve},
     {60, (void *)&null_handler}, // sys_umask
     {61, (void *)&null_handler}, // sys_chroot
-    {62, (void *)&null_handler}, // sys_fstat
+    {62, (void *)&sys_fstat},
     {63, (void *)&null_handler}, // sys_getkerninfo
     {64, (void *)&null_handler}, // sys_getpagesize
     {65, (void *)&null_handler}, // sys_msync
@@ -276,8 +276,8 @@ static const syscall_Reg syscall_dpt[] = {
     {185, (void *)&null_handler}, // sys_lfs_markv
     {186, (void *)&null_handler}, // sys_lfs_segclean
     {187, (void *)&null_handler}, // sys_lfs_segwait
-    {188, (void *)&null_handler}, // sys_stat
-    {189, (void *)&null_handler}, // sys_fstat
+    {188, (void *)&sys_stat},
+    {189, (void *)&sys_fstat},
     {190, (void *)&null_handler}, // sys_lstat
     {191, (void *)&null_handler}, // sys_pathconf
     {192, (void *)&null_handler}, // sys_fpathconf
@@ -286,7 +286,7 @@ static const syscall_Reg syscall_dpt[] = {
     {196, (void *)&null_handler}, // sys_getdirentries
     {197, (void *)&sys_mmap},
     {198, (void *)&null_handler}, // sys_nosys
-    {199, (void *)&null_handler}, // sys_lseek
+    {199, (void *)&sys_lseek},
     {200, (void *)&null_handler}, // sys_truncate
     {201, (void *)&null_handler}, // sys_ftruncate
     {202, (void *)&sys_sysctl},
@@ -717,6 +717,11 @@ static void PS4ABI trace_syscall(const char *name, int index, void *addr) {
   std::fprintf(stderr, "[syscall] %d %s\n", index, name);
 }
 
+static void PS4ABI trace_ret(int index, int64_t ret) {
+  std::fprintf(stderr, "[syscall]   -> %d returned %lld (%#llx)\n", index,
+               (long long)ret, (unsigned long long)ret);
+}
+
 static uintptr_t emit_calltrace(const char *name, uint32_t sid,
                                 const void *dest) {
   struct callTrace : Xbyak::CodeGenerator {
@@ -747,8 +752,22 @@ static uintptr_t emit_calltrace(const char *name, uint32_t sid,
       pop(rsi);
       pop(rdi);
 
+      // call the real handler (not a tail jump) so we can log its return
+      sub(rsp, 8);  // keep 16-byte alignment across the call
       mov(rax, dest);
-      jmp(rax);
+      call(rax);
+      // log the return value
+      push(rax);
+      mov(esi, eax);
+      mov(edi, sid);
+      mov(rax, reinterpret_cast<uintptr_t>(&trace_ret));
+      call(rax);
+      pop(rax);
+      add(rsp, 8);
+      // FreeBSD syscall ABI: carry clear = success. Our C handlers don't touch
+      // CF, so clear it here or the guest's `jb cerror` reads garbage.
+      clc();
+      ret();
     }
   };
 
@@ -762,7 +781,7 @@ uintptr_t lv2_get(uint32_t sid) {
   for (auto &it : syscall_dpt) {
     if (sid == it.id) {
       return reinterpret_cast<uintptr_t>(it.ptr);
-      // swap the line above for the one below to trace every syscall:
+      // swap for the line above to trace every syscall + its return value:
       // return emit_calltrace(syscall_getname(sid), sid, it.ptr);
     }
   }
