@@ -7,6 +7,7 @@
  */
 
 #include <base.h>
+#include <cstdio>
 #include <cstring>
 
 #include "dce_dev.h"
@@ -16,13 +17,39 @@ dceDevice::dceDevice(proc *p) : device(p) {}
 
 bool dceDevice::init(const char *, uint32_t, uint32_t) { return true; }
 
+// A guest pointer is directly host-addressable here (in-process LLE). Guard
+// dereferences to a sane userspace range so a stray field doesn't fault.
+static bool plausiblePtr(uint64_t v) {
+  return v >= 0x10000 && v < 0x0000800000000000ull;
+}
+
+// Dump an ioctl arg struct as u64s, chasing anything that looks like a pointer
+// one level deep. This is how we reverse the (undocumented) DCE structs.
+static void dumpStruct(const void *data, uint32_t len) {
+  const uint64_t *q = static_cast<const uint64_t *>(data);
+  uint32_t n = len / 8;
+  for (uint32_t i = 0; i < n; i++) {
+    std::printf("    [%u] %#018llx", i, (unsigned long long)q[i]);
+    if (plausiblePtr(q[i])) {
+      const uint64_t *p = reinterpret_cast<const uint64_t *>(q[i]);
+      std::printf("  -> %#llx %#llx %#llx %#llx", (unsigned long long)p[0],
+                  (unsigned long long)p[1], (unsigned long long)p[2],
+                  (unsigned long long)p[3]);
+    }
+    std::printf("\n");
+  }
+}
+
 int32_t dceDevice::ioctl(uint32_t cmd, void *data) {
-  // TODO: implement the display ioctls. libSceVideoOut's framebuffer setup
-  // passes output buffers (by pointer, inside the arg struct) that these
-  // ioctls must fill with real framebuffer info; until then the guest reads
-  // those buffers uninitialized and derives a garbage framebuffer size, which
-  // throws bad_alloc deep in video init. Returning success alone is not enough.
-  printf("[dce] ioctl(%#x) -> 0 (display unimplemented)\n", cmd);
+  uint32_t len = (cmd >> 16) & 0x1FFF;
+  uint32_t group = (cmd >> 8) & 0xff;
+  uint32_t num = cmd & 0xff;
+  const char *dir = (cmd & 0x80000000) ? ((cmd & 0x40000000) ? "INOUT" : "IN")
+                                       : ((cmd & 0x40000000) ? "OUT" : "VOID");
+  std::printf("[dce] ioctl cmd=%#x grp=%#x num=%#x len=%u %s data=%p\n", cmd,
+              group, num, len, dir, data);
+  if (data && len && len <= 0x200)
+    dumpStruct(data, len);
   return 0;
 }
 }  // namespace krnl
