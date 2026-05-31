@@ -142,9 +142,7 @@ bool objectTable::add(kObject *obj, uint32_t &handleOut) {
 }
 
 bool objectTable::remove(uint32_t handle) {
-  
-    //FOR NOW DANGEROUS
-  //std::lock_guard lock(omutex);
+  std::lock_guard lock(omutex);
 
   auto *e = findEntry(handle);
   if (e && e->obj) {

@@ -34,10 +34,12 @@ bool vmManager::init() {
 }
 
 void vmManager::add(uint8_t *ptr, size_t size, mprot prot) {
+  std::lock_guard lock(vmlock);
   rtPages.emplace_back(ptr, size, prot);
 }
 
 pageInfo *vmManager::get(uint8_t *ptr) {
+  std::lock_guard lock(vmlock);
   auto it = std::find_if(rtPages.begin(), rtPages.end(),
                          [&ptr](const auto &page) { return page.ptr == ptr; });
 
@@ -48,6 +50,7 @@ pageInfo *vmManager::get(uint8_t *ptr) {
 }
 
 bool vmManager::overlaps(uint8_t *ptr, size_t size) const {
+  std::lock_guard lock(vmlock);
   uint8_t *end = ptr + size;
   for (const auto &page : rtPages) {
     if (ptr < page.ptr + page.size && page.ptr < end)
@@ -70,6 +73,7 @@ uint8_t *vmManager::mapMemory(uint8_t *preference, size_t size,
 }
 
 void vmManager::unmapRtMemory(uint8_t *ptr) {
+  std::lock_guard lock(vmlock);
   auto iter =
       std::find_if(rtPages.begin(), rtPages.end(),
                    [&ptr](const auto &page) { return page.ptr == ptr; });

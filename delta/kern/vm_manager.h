@@ -9,6 +9,7 @@
  */
 
 #include <cstdint>
+#include <mutex>
 
 #include <base/containers/vector.h>
 
@@ -46,6 +47,9 @@ public:
 
 private:
   procInfo &pinfo;
+
+  // guards the page lists against concurrent sys_mmap from guest threads.
+  mutable std::mutex vmlock;
 
   size_t codeMemTotal{0};
   size_t rtMemTotal{0};

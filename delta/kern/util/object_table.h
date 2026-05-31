@@ -30,7 +30,8 @@ private:
   bool resize(uint32_t newCap);
   bool findSlot(uint32_t &out);
 
-  std::mutex omutex;
+  // recursive: release() holds the lock and calls remove(), which re-locks.
+  std::recursive_mutex omutex;
 
   struct entry {
     int refCount = 0;
