@@ -50,6 +50,20 @@ int32_t dceDevice::ioctl(uint32_t cmd, void *data) {
               group, num, len, dir, data);
   if (data && len && len <= 0x200)
     dumpStruct(data, len);
+
+  if (cmd == 0xc0308203 && data) {
+    auto *s = static_cast<uint64_t *>(data);
+    // op 9: allocate display/scanout memory. libSceVideoOut reads back
+    // *struct[2]=offset and *struct[3]=length and mmaps that region (PROT
+    // 0x33 = CPU+GPU r/w). Return a sane fixed region so the mmap succeeds
+    // (offset 0, 64 MiB -- room for several 1080p framebuffers).
+    if (s[0] == 9) {
+      if (plausiblePtr(s[2]))
+        *reinterpret_cast<uint64_t *>(s[2]) = 0;  // offset
+      if (plausiblePtr(s[3]))
+        *reinterpret_cast<uint64_t *>(s[3]) = 0x4000000;  // length (64 MiB)
+    }
+  }
   return 0;
 }
 }  // namespace krnl
