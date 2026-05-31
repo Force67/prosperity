@@ -21,6 +21,7 @@
 #include "sys_info.h"
 #include "sys_mem.h"
 #include "sys_thread.h"
+#include "sys_time.h"
 #include "sys_vfs.h"
 #include "sys_net.h"
 
@@ -309,7 +310,7 @@ static const syscall_Reg syscall_dpt[] = {
     {229, (void *)&null_handler}, // sys_shmctl
     {230, (void *)&null_handler}, // sys_shmdt
     {231, (void *)&null_handler}, // sys_shmget
-    {232, (void *)&null_handler}, // sys_clock_gettime
+    {232, (void *)&sys_clock_gettime},
     {233, (void *)&null_handler}, // sys_clock_settime
     {234, (void *)&null_handler}, // sys_clock_getres
     {235, (void *)&null_handler}, // sys_ktimer_create
