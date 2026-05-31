@@ -95,11 +95,19 @@ int PS4ABI sys_evf_create(const char *name, uint32_t attr,
 }
 
 int PS4ABI sys_evf_open(const char *name) {
-  std::lock_guard<std::mutex> lk(g_efRegM);
-  auto it = name ? g_efByName.find(name) : g_efByName.end();
-  if (it == g_efByName.end())
-    return -SysError::eSRCH;
-  return it->second->handle();
+  {
+    std::lock_guard<std::mutex> lk(g_efRegM);
+    auto it = name ? g_efByName.find(name) : g_efByName.end();
+    if (it != g_efByName.end())
+      return it->second->handle();
+  }
+  // Auto-create unknown named flags: on real hw a system service creates them;
+  // here both producer and consumer just open by name, so creating on first
+  // open gives them a shared flag and the sync actually works.
+  auto *ef = new eventFlag(proc::getActive(), name, 0);
+  std::printf("[evf] open '%s' (auto-created) -> id=%u\n", name ? name : "",
+              ef->handle());
+  return ef->handle();
 }
 
 int PS4ABI sys_evf_delete(int id) {
