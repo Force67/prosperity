@@ -238,8 +238,17 @@ bool smodule::mapImage() {
   constexpr size_t one_mb = 1024ull * 1024ull;
   constexpr size_t eight_gb = 8ull * 1024ull * one_mb;
 
+  // ASLR off: hand out fixed, sequential bases so a guest crash lands at the
+  // same address every run and is easy to reproduce while the boot is being
+  // worked on. Switch back to the nullptr (kernel-chosen) reservation below once
+  // the boot is stable.
+  // info.base = static_cast<uint8_t *>(utl::allocMem(
+  //     nullptr, eight_gb, utl::pageProtection::w, utl::allocationType::reserve));
+  static uintptr_t s_nextBase = 0x0000200000000000ull;
   info.base = static_cast<uint8_t *>(utl::allocMem(
-      nullptr, eight_gb, utl::pageProtection::w, utl::allocationType::reserve));
+      reinterpret_cast<void *>(s_nextBase), eight_gb, utl::pageProtection::w,
+      utl::allocationType::reserve));
+  s_nextBase += eight_gb;
 
   if (!info.base)
     return false;
