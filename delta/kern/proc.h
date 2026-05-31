@@ -60,7 +60,11 @@ private:
   moduleList modules;
   objectTable objects;
   uint32_t handleCounter = 1;
+  uint16_t tlsCounter = 1;
 
-  uint32_t nextFreeTLS() { return -1; }
+  // 1-based ELF TLS module index handed to each module that ships a PT_TLS.
+  // libkernel uses this as the DTV slot; it must be unique and non-negative
+  // (-1 corrupts DTPMOD relocations and the DTV).
+  uint16_t nextFreeTLS() { return tlsCounter++; }
 };
 }
