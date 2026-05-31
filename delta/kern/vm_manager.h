@@ -38,6 +38,9 @@ public:
   void add(uint8_t *ptr, size_t size, mprot);
   pageInfo *get(uint8_t *ptr);
 
+  // true if [ptr, ptr+size) hits a tracked mapping
+  bool overlaps(uint8_t *ptr, size_t size) const;
+
   uint8_t *mapMemory(uint8_t *preference, size_t size, utl::pageProtection);
   void unmapRtMemory(uint8_t *);
 

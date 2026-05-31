@@ -28,15 +28,14 @@ uint8_t *PS4ABI sys_mmap(void *addr, size_t size, uint32_t prot, uint32_t flags,
   if (flags & mFlags::stack || flags & mFlags::noextend)
     flags |= mFlags::anon;
 
-  if (flags & mFlags::fixed) {
-    __debugbreak();
-  } else if (!addr) {
-    __debugbreak();
-    addr = reinterpret_cast<void *>(0x200000000);
-  }
-
   /*align the page*/
   size = (size + 0x3FFF) & 0xFFFFFFFFFFFFC000LL;
+
+  // addr is a hint unless MAP_FIXED: relocate it rather than alias an existing map
+  if (!(flags & mFlags::fixed)) {
+    if (!addr || proc->getVma().overlaps(static_cast<uint8_t *>(addr), size))
+      addr = nullptr;
+  }
 
   if (fd != -1) {
     auto *obj = proc->getObjTable().get(fd);
@@ -47,15 +46,14 @@ uint8_t *PS4ABI sys_mmap(void *addr, size_t size, uint32_t prot, uint32_t flags,
   }
 
   void *ptr = utl::allocMem(addr, size, ppt::w, alt::reservecommit);
+  if (!ptr && addr) {
+    if (flags & mFlags::fixed)
+      ptr = utl::allocMem(addr, size, ppt::w, alt::commit);  // maybe reserved
+    else
+      ptr = utl::allocMem(nullptr, size, ppt::w, alt::reservecommit);  // hint taken
+  }
   if (!ptr) {
-    // maybe a previously reserved page?
-    ptr = utl::allocMem(addr, size, ppt::w, alt::commit);
-    if (!ptr && !(flags & 0x10)) {
-      ptr = utl::allocMem(nullptr, size, ppt::w, alt::reservecommit);
-      if (!ptr) {
-        return reinterpret_cast<uint8_t *>(-1);
-      }
-    }
+    return reinterpret_cast<uint8_t *>(-1);
   }
 
 #if 0

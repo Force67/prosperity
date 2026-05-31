@@ -47,6 +47,15 @@ pageInfo *vmManager::get(uint8_t *ptr) {
   return nullptr;
 }
 
+bool vmManager::overlaps(uint8_t *ptr, size_t size) const {
+  uint8_t *end = ptr + size;
+  for (const auto &page : rtPages) {
+    if (ptr < page.ptr + page.size && page.ptr < end)
+      return true;
+  }
+  return false;
+}
+
 uint8_t *vmManager::mapMemory(uint8_t *preference, size_t size,
                               utl::pageProtection prot) {
   const auto allocType = utl::allocationType::reservecommit;
