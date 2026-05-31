@@ -1,7 +1,12 @@
 // Runs a module through load -> relocate -> start, one stage at a time, so each
 // layer can be brought up on its own. Usage: modexec <main-module.sprx> [run]
+#define _GNU_SOURCE
 #include <cstdio>
 #include <cstring>
+
+#include <csignal>
+#include <cstdlib>
+#include <ucontext.h>
 
 #include <logger/logger.h>
 #include <utl/mem.h>
@@ -12,6 +17,68 @@
 #include "kern/vfs.h"
 
 #include <string>
+
+// Resolve a host address to "<module>+0x<off> (<seg>)" by scanning the loaded
+// module images, so a guest fault points straight at a guest module offset.
+static void symbolize(uintptr_t addr, char* out, size_t n) {
+  auto* proc = krnl::proc::getActive();
+  if (proc) {
+    for (auto& mod : proc->getModuleList()) {
+      auto& mi = mod->getInfo();
+      auto* t = mi.textSeg.addr;
+      auto* d = mi.dataSeg.addr;
+      if (t && addr >= (uintptr_t)t && addr < (uintptr_t)t + mi.textSeg.size) {
+        std::snprintf(out, n, "%s+%#lx (.text)", mi.name.c_str(),
+                      addr - (uintptr_t)t);
+        return;
+      }
+      if (d && addr >= (uintptr_t)d && addr < (uintptr_t)d + mi.dataSeg.size) {
+        std::snprintf(out, n, "%s+%#lx (.data)", mi.name.c_str(),
+                      addr - (uintptr_t)d);
+        return;
+      }
+    }
+  }
+  std::snprintf(out, n, "%#lx (??)", addr);
+}
+
+static void crashHandler(int sig, siginfo_t* si, void* ucv) {
+  auto* uc = static_cast<ucontext_t*>(ucv);
+  auto* gr = uc->uc_mcontext.gregs;
+  char rip[256], fault[256];
+  symbolize(gr[REG_RIP], rip, sizeof(rip));
+  symbolize((uintptr_t)si->si_addr, fault, sizeof(fault));
+  std::fprintf(stderr, "\n=== GUEST FAULT: %s (signal %d) ===\n",
+               strsignal(sig), sig);
+  std::fprintf(stderr, "  rip   = %016llx  %s\n", (unsigned long long)gr[REG_RIP], rip);
+  std::fprintf(stderr, "  fault = %016llx  %s\n", (unsigned long long)si->si_addr, fault);
+  std::fprintf(stderr, "  rax=%016llx rbx=%016llx rcx=%016llx rdx=%016llx\n",
+               (unsigned long long)gr[REG_RAX], (unsigned long long)gr[REG_RBX],
+               (unsigned long long)gr[REG_RCX], (unsigned long long)gr[REG_RDX]);
+  std::fprintf(stderr, "  rsi=%016llx rdi=%016llx rbp=%016llx rsp=%016llx\n",
+               (unsigned long long)gr[REG_RSI], (unsigned long long)gr[REG_RDI],
+               (unsigned long long)gr[REG_RBP], (unsigned long long)gr[REG_RSP]);
+  std::fprintf(stderr, "  r8 =%016llx r9 =%016llx r10=%016llx r11=%016llx\n",
+               (unsigned long long)gr[REG_R8], (unsigned long long)gr[REG_R9],
+               (unsigned long long)gr[REG_R10], (unsigned long long)gr[REG_R11]);
+  std::fprintf(stderr, "  r12=%016llx r13=%016llx r14=%016llx r15=%016llx\n",
+               (unsigned long long)gr[REG_R12], (unsigned long long)gr[REG_R13],
+               (unsigned long long)gr[REG_R14], (unsigned long long)gr[REG_R15]);
+  std::fflush(stderr);
+  std::_Exit(128 + sig);
+}
+
+static void installCrashHandler() {
+  struct sigaction sa = {};
+  sa.sa_sigaction = crashHandler;
+  sa.sa_flags = SA_SIGINFO;
+  sigemptyset(&sa.sa_mask);
+  sigaction(SIGSEGV, &sa, nullptr);
+  sigaction(SIGILL, &sa, nullptr);
+  sigaction(SIGTRAP, &sa, nullptr);
+  sigaction(SIGFPE, &sa, nullptr);
+  sigaction(SIGBUS, &sa, nullptr);
+}
 
 // SCOUT: patch a guest function to `xor eax,eax; ret` (return 0). Used to step
 // over libkernel-internal validation that rejects our externally-loaded module
@@ -36,6 +103,9 @@ int main(int argc, char** argv) {
     return 1;
   }
 
+  std::setvbuf(stdout, nullptr, _IONBF, 0);  // don't lose scout prints on crash
+  installCrashHandler();
+
   utl::createLogger(true);
 
   // Mount /app0 onto the directory the main module lives in, so the game's
@@ -59,6 +129,12 @@ int main(int argc, char** argv) {
   }
   auto& mods = proc.getModuleList();
   std::printf("[modexec] loaded %zu modules\n", mods.size());
+  for (auto& m : mods) {
+    auto& mi = m->getInfo();
+    std::printf("[modexec]   %-24s base=%p init=+%#lx\n", mi.name.c_str(),
+                (void*)mi.base,
+                mi.initAddr ? (uintptr_t)(mi.initAddr - mi.base) : 0);
+  }
 
   // stage 2: resolve imports + relocate every module (what guest libkernel
   // triggers via syscall 599 at startup).
@@ -90,6 +166,10 @@ int main(int argc, char** argv) {
   if (argc > 2 && std::strcmp(argv[2], "run") == 0) {
     // SCOUT patches for libkernel-internal module bookkeeping (11.00 offsets).
     forceReturn0(proc, "libkernel", 0x287e0);  // module-gen lib-id validator
+    // AppContent's module_start eagerly creates an IPMI client to the SceAppContent
+    // system service. We don't emulate the service process, so the client is NULL
+    // and a virtual call faults. Neuter the singleton-init helper so init no-ops.
+    forceReturn0(proc, "libSceAppContentUtil", 0x1a00);
     std::printf("[modexec] === stage 3: execute (jumping to guest entry) ===\n");
     std::fflush(stdout);
     proc.start();
