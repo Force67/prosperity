@@ -8,6 +8,7 @@
  */
 
 #include <base.h>
+#include <cstdlib>
 #include <logger/logger.h>
 
 #include "../module.h"
@@ -254,6 +255,39 @@ int PS4ABI sys_dynlib_load_prx(const char *path, uint64_t flags, int *pHandle,
   if (pHandle)
     *pHandle = mod->getInfo().handle;
   return 0;
+}
+
+// HLE of libkernel's __tls_get_addr (NID vNe1w4diLCs). libkernel's own dynamic
+// TLS allocator leaves the per-thread DTV entries null, so general-dynamic
+// __thread access (e.g. libc's malloc arena, module errno) reads address 0 and
+// faults. We resolve the module by its TLS module index and hand back a real,
+// init-image-populated block. tls_index = {module_id, offset}; the result is
+// block + offset. Single boot thread => one block per module, cached.
+struct tls_index {
+  uint64_t module_id;
+  uint64_t offset;
+};
+
+void *PS4ABI guest_tls_get_addr(tls_index *ti) {
+  auto *proc = proc::getActive();
+  for (auto &mod : proc->getModuleList()) {
+    auto &info = mod->getInfo();
+    if (info.tlsSlot != ti->module_id)
+      continue;
+
+    if (!info.tlsBlock) {
+      size_t sz = info.tlsSizeMem ? info.tlsSizeMem : 1;
+      auto *block = static_cast<uint8_t *>(std::calloc(1, sz));
+      if (info.tlsAddr && info.tlsSizeFile)
+        std::memcpy(block, info.tlsAddr, info.tlsSizeFile);
+      info.tlsBlock = block;
+    }
+    return info.tlsBlock + ti->offset;
+  }
+
+  std::printf("[tls] __tls_get_addr: no module for index %llu\n",
+              (unsigned long long)ti->module_id);
+  return nullptr;
 }
 
 int PS4ABI sys_dynlib_process_needed_and_relocate() {

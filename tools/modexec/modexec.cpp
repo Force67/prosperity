@@ -64,6 +64,27 @@ static void crashHandler(int sig, siginfo_t* si, void* ucv) {
   std::fprintf(stderr, "  r12=%016llx r13=%016llx r14=%016llx r15=%016llx\n",
                (unsigned long long)gr[REG_R12], (unsigned long long)gr[REG_R13],
                (unsigned long long)gr[REG_R14], (unsigned long long)gr[REG_R15]);
+  // Dump the guest TLS state so we can see why __tls_get_addr returns null.
+  // TCB = fs base; DTV = *(TCB+8); DTV[0]=generation, per-module block pointers
+  // at DTV+0x10 + id*8 (see libkernel __tls_get_addr at 0x289c0).
+  if (auto* proc = krnl::proc::getActive()) {
+    auto* tcb = reinterpret_cast<uint64_t*>(proc->getEnv().fsBase);
+    std::fprintf(stderr, "  --- TLS ---\n  tcb(fs)=%p\n", (void*)tcb);
+    if (tcb) {
+      auto* dtv = reinterpret_cast<uint64_t*>(tcb[1]);
+      std::fprintf(stderr, "  dtv=%p", (void*)dtv);
+      if (dtv) {
+        std::fprintf(stderr, " gen=%llu count=%llu\n", (unsigned long long)dtv[0],
+                     (unsigned long long)dtv[1]);
+        for (int i = 0; i < 8; i++)
+          std::fprintf(stderr, "    dtv[%d] block=%016llx\n", i,
+                       (unsigned long long)dtv[2 + i]);
+      } else {
+        std::fprintf(stderr, "\n");
+      }
+    }
+  }
+
   std::fflush(stderr);
   std::_Exit(128 + sig);
 }
@@ -95,6 +116,32 @@ static void forceReturn0(krnl::proc& proc, const char* mod, uint32_t off) {
   p[1] = 0xC0;
   p[2] = 0xC3;  // ret
   std::printf("[modexec] SCOUT patched %s+%#x -> return 0\n", mod, off);
+}
+
+// Redirect libkernel's __tls_get_addr (NID vNe1w4diLCs) to our host HLE. Found
+// by NID so it's firmware-independent. libkernel's own dynamic-TLS allocator
+// leaves DTV entries null, so general-dynamic __thread access faults; ours
+// hands back a real per-module block. Overwrites the entry with
+// `movabs rax, &fn; jmp rax`.
+static void patchTlsGetAddr(krnl::proc& proc) {
+  auto k = proc.getModule(base::StringRef("libkernel"));
+  if (!k)
+    return;
+  uintptr_t addr = k->getSymbolByNid("vNe1w4diLCs");
+  if (!addr) {
+    std::printf("[modexec] __tls_get_addr export not found\n");
+    return;
+  }
+  auto* p = reinterpret_cast<uint8_t*>(addr);
+  auto page = reinterpret_cast<void*>(addr & ~0xFFFull);
+  utl::protectMem(page, 0x2000, utl::pageProtection::rwx);
+  p[0] = 0x48;  // movabs rax, imm64
+  p[1] = 0xB8;
+  *reinterpret_cast<uint64_t*>(p + 2) =
+      reinterpret_cast<uint64_t>(&krnl::guest_tls_get_addr);
+  p[10] = 0xFF;  // jmp rax
+  p[11] = 0xE0;
+  std::printf("[modexec] patched libkernel __tls_get_addr @%p -> host HLE\n", p);
 }
 
 int main(int argc, char** argv) {
@@ -170,6 +217,7 @@ int main(int argc, char** argv) {
     // system service. We don't emulate the service process, so the client is NULL
     // and a virtual call faults. Neuter the singleton-init helper so init no-ops.
     forceReturn0(proc, "libSceAppContentUtil", 0x1a00);
+    patchTlsGetAddr(proc);
     std::printf("[modexec] === stage 3: execute (jumping to guest entry) ===\n");
     std::fflush(stdout);
     proc.start();
