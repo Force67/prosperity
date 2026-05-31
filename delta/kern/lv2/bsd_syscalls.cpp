@@ -104,11 +104,20 @@ int PS4ABI sys_write(uint32_t fd, const void *buf, size_t nbytes) {
     for (size_t i = 0; i < nbytes; ++i, ++b) {
       printf("%c", *b);
     }
-    return 0;
+    return static_cast<int>(nbytes);
   }
 
-  __debugbreak();
-
-  return -1;
+  // A device-backed fd (console/tty): let it handle the write. Otherwise just
+  // accept the bytes; libkernel writes debug output to fds we don't model, and
+  // trapping there kills the boot.
+  if (auto *proc = proc::getActive()) {
+    auto *obj = proc->getObjTable().get(fd);
+    if (obj && obj->type() == kObject::oType::device) {
+      int64_t r = static_cast<device *>(obj)->write(buf, nbytes);
+      if (r >= 0)
+        return static_cast<int>(r);
+    }
+  }
+  return static_cast<int>(nbytes);
 }
 } // namespace krnl
