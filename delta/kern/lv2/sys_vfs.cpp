@@ -44,7 +44,7 @@ int PS4ABI sys_open(const char *path, uint32_t flags, uint32_t mode) {
   if (!path)
     return SysError::eINVAL;
 
-  std::printf("open: %s, %x, %x\n", path, flags, mode);
+  std::fprintf(stderr, "[open] %s flags=%#x mode=%#x\n", path, flags, mode);
 
   if (std::strncmp(path, "/dev/", 5) == 0) {
     const char *name = &path[5];
@@ -58,13 +58,13 @@ int PS4ABI sys_open(const char *path, uint32_t flags, uint32_t mode) {
       }
 
       return dev->handle();
-    } else
-      __debugbreak();
-    return -1;
+    }
+    // unknown device: fail soft instead of trapping
+    return SysError::eNOENT;
   }
 
-  __debugbreak();
-  return 0;
+  // TODO: real VFS. For now report "not found" so the guest handles it.
+  return SysError::eNOENT;
 }
 
 int PS4ABI sys_close(uint32_t fd) {

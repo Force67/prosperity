@@ -26,10 +26,12 @@ int PS4ABI sys_rtprio_thread(int a1, uint64_t a2, thread_prio *rtp) {
   return 0;
 }
 
-int PS4ABI sys_umtx_op(void *ptr, int, uint32_t, void *, void *) {
-  std::printf("locking kmutex! %p\n", ptr);
-  __debugbreak();
-  // TODO:
+int PS4ABI sys_umtx_op(void *ptr, int op, uint32_t, void *, void *) {
+  // userspace mutex op. Single-threaded boot for now: pretend every lock/wait
+  // succeeds immediately. TODO: real futex-backed implementation once threads
+  // run concurrently.
+  (void)ptr;
+  (void)op;
   return 0;
 }
 } // namespace krnl

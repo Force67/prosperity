@@ -714,7 +714,7 @@ static const syscall_Reg syscall_dpt[] = {
 };
 
 static void PS4ABI trace_syscall(const char *name, int index, void *addr) {
-  std::printf("trace_syscall: %s (%d), %p\n", name, index, addr);
+  std::fprintf(stderr, "[syscall] %d %s\n", index, name);
 }
 
 static uintptr_t emit_calltrace(const char *name, uint32_t sid,
@@ -761,8 +761,9 @@ static uintptr_t emit_calltrace(const char *name, uint32_t sid,
 uintptr_t lv2_get(uint32_t sid) {
   for (auto &it : syscall_dpt) {
     if (sid == it.id) {
-       return reinterpret_cast<uintptr_t>(it.ptr);
-      //return emit_calltrace(syscall_getname(sid), sid, it.ptr);
+      return reinterpret_cast<uintptr_t>(it.ptr);
+      // swap the line above for the one below to trace every syscall:
+      // return emit_calltrace(syscall_getname(sid), sid, it.ptr);
     }
   }
 

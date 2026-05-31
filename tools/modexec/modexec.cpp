@@ -4,10 +4,28 @@
 #include <cstring>
 
 #include <logger/logger.h>
+#include <utl/mem.h>
 
 #include "kern/lv2/sys_dynlib.h"
 #include "kern/module.h"
 #include "kern/proc.h"
+
+// SCOUT: patch a guest function to `xor eax,eax; ret` (return 0). Used to step
+// over libkernel-internal validation that rejects our externally-loaded module
+// set, so we can see how much further the boot gets.
+static void forceReturn0(krnl::proc& proc, const char* mod, uint32_t off) {
+  auto m = proc.getModule(base::StringRef(mod));
+  if (!m)
+    return;
+  uint8_t* p = m->getInfo().base + off;
+  // mprotect needs a page-aligned base.
+  auto page = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(p) & ~0xFFFull);
+  utl::protectMem(page, 0x1000, utl::pageProtection::rwx);
+  p[0] = 0x31;  // xor eax, eax
+  p[1] = 0xC0;
+  p[2] = 0xC3;  // ret
+  std::printf("[modexec] SCOUT patched %s+%#x -> return 0\n", mod, off);
+}
 
 int main(int argc, char** argv) {
   if (argc < 2) {
@@ -57,6 +75,8 @@ int main(int argc, char** argv) {
   // stage 3 (opt-in): jump into the guest. proc::start enters libkernel's entry
   // with modules[0] as the main program.
   if (argc > 2 && std::strcmp(argv[2], "run") == 0) {
+    // SCOUT patches for libkernel-internal module bookkeeping (11.00 offsets).
+    forceReturn0(proc, "libkernel", 0x287e0);  // module-gen lib-id validator
     std::printf("[modexec] === stage 3: execute (jumping to guest entry) ===\n");
     std::fflush(stdout);
     proc.start();
