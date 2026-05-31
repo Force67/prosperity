@@ -40,6 +40,11 @@ struct moduleInfo {
   uint8_t *procParam;
   uint32_t procParamSize;
 
+  // per-library SCE module param (PT_SCE_MODULEPARAM); queried via
+  // sys_dynlib_get_obj_member index 8 to validate the module's SDK version.
+  uint8_t *moduleParam;
+  uint32_t moduleParamSize;
+
   uint8_t *initAddr;
   uint8_t *finiAddr;
 
@@ -71,6 +76,9 @@ public:
   uintptr_t getSymbol(uint64_t);
   uintptr_t getSymbolFullName(const char *name);
   uintptr_t getSymbol2(const char *name);
+  // Resolve an exported symbol by its 11-char NID prefix (export strtab names
+  // are "<nid>#<libid>#<modid>"; dlsym only knows the NID, not the inner ids).
+  uintptr_t getSymbolByNid(const char *nid);
   bool resolveObfSymbol(const char *name, uintptr_t &ptrOut);
 
   bool applyRelocations();
@@ -160,5 +168,10 @@ private:
   uint32_t numJmpSlots = 0;
   uint32_t numSymbols = 0;
   uint32_t numRela = 0;
+
+  // applyRelocations must run at most once: the TLS relocs (DTPMOD64/DTPOFF)
+  // are additive (+=), so a second pass (the harness relocates, then the guest
+  // libkernel calls syscall 599 too) would double the module's TLS index.
+  bool relocated = false;
 };
 }

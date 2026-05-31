@@ -44,6 +44,12 @@ bool proc::create(const base::String &path) {
     return false;
   }
 
+  // libSceSysmodule preloads these for libkernel at runtime via load_prx. Doing
+  // it here too puts them in the initial module set, so libkernel registers
+  // their TLS in the DTV at thread init (a module loaded later via load_prx has
+  // no DTV slot, so __tls_get_addr returns null and its errno access faults).
+  loadModule(base::StringRef("libSceNet"));
+
   if (!first->fromFile(path)) {
     LOG_ERROR("unable to load main process module");
     return false;

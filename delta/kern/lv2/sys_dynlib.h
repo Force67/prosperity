@@ -70,4 +70,6 @@ int PS4ABI sys_dynlib_dlsym(uint32_t handle, const char *cname, void **sym);
 int PS4ABI sys_dynlib_get_obj_member(uint32_t handle, uint8_t index,
                                      void **value);
 int PS4ABI sys_dynlib_process_needed_and_relocate();
+int PS4ABI sys_dynlib_load_prx(const char *path, uint64_t arg2, int *pHandle,
+                               uint64_t arg4, const void *opt, int64_t *pRes);
 }

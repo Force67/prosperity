@@ -632,7 +632,7 @@ static const syscall_Reg syscall_dpt[] = {
     {591, (void *)&sys_dynlib_dlsym},
     {592, (void *)&sys_dynlib_get_list},
     {593, (void *)&sys_dynlib_get_info},
-    {594, (void *)&null_handler}, // sys_dynlib_load_prx
+    {594, (void *)&sys_dynlib_load_prx},
     {595, (void *)&null_handler}, // sys_dynlib_unload_prx
     {596, (void *)&null_handler}, // sys_dynlib_do_copy_relocations
     {597, (void *)&null_handler}, // sys_dynlib_prepare_dlclose

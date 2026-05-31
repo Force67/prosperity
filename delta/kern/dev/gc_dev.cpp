@@ -70,8 +70,9 @@ int32_t gcDevice::ioctl(uint32_t cmd, void *data) {
   }
   }
 
-  __debugbreak();
-
+  // SCOUT: log unknown gc ioctls and soft-succeed so the boot keeps advancing
+  // instead of trapping. Lets us discover the sequence GNM actually issues.
+  printf("[gc] UNHANDLED ioctl(%x) data=%p\n", cmd, data);
   return 0;
 }
 

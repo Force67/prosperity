@@ -107,23 +107,24 @@ int PS4ABI sys_dynlib_dlsym(uint32_t handle, const char *symName, void **sym) {
   if (!mod)
     return -1;
 
-  std::printf("DLSYM %s!%s\n", mod->getInfo().name.c_str(), symName);
-
   char nameenc[12]{};
   runtime::encode_nid(symName, reinterpret_cast<uint8_t *>(&nameenc));
 
   auto &modName = mod->getInfo().name;
-  base::String longName(nameenc);
-  longName += "#";
-  longName += modName;
-  longName += "#";
-  longName += modName;
 
-  uintptr_t addrOut = 0;
-  if (!mod->resolveObfSymbol(longName.c_str(), addrOut)) {
+  // dlsym resolves an EXPORT of the target module by its NID. resolveObfSymbol
+  // is for imports (it decodes "#libid#modid"); here we match the 11-char NID
+  // directly against the module's export table.
+  uintptr_t addrOut = mod->getSymbolByNid(nameenc);
+  if (!addrOut) {
+    std::printf("DLSYM %s!%s -> UNRESOLVED\n", modName.c_str(), symName);
     *sym = nullptr;
     return -1;
   }
+
+  std::printf("DLSYM %s!%s -> %p (+%#lx)\n", modName.c_str(), symName,
+              reinterpret_cast<void *>(addrOut),
+              addrOut - reinterpret_cast<uintptr_t>(mod->getInfo().base));
 
   *sym = reinterpret_cast<void *>(addrOut);
 
@@ -132,15 +133,26 @@ int PS4ABI sys_dynlib_dlsym(uint32_t handle, const char *symName, void **sym) {
 
 int PS4ABI sys_dynlib_get_obj_member(uint32_t handle, uint8_t index,
                                      void **value) {
-  if (index != 1)
-    return SysError::eINVAL;
-
   auto mod = proc::getActive()->getModule(handle);
   if (!mod)
-    return -1;
+    return SysError::eSRCH;
 
-  *value = mod->getInfo().initAddr;
-  return 0;
+  auto &info = mod->getInfo();
+  switch (index) {
+  case 1:  // module init proc
+    *value = info.initAddr;
+    return 0;
+  case 2:  // module fini proc
+    *value = info.finiAddr;
+    return 0;
+  case 8:  // SCE module param (libSceSysmodule reads the SDK version from it)
+    *value = info.moduleParam;
+    return 0;
+  default:
+    LOG_WARNING("get_obj_member: unhandled index {} for {}", index,
+                info.name.c_str());
+    return SysError::eINVAL;
+  }
 }
 
 int PS4ABI sys_dynlib_get_proc_param(void **data, size_t *size) {
@@ -172,6 +184,52 @@ int PS4ABI sys_dynlib_get_list(uint32_t *handles, size_t maxCount,
   }
 
   *count = listCount;
+  return 0;
+}
+
+// syscall 594. libkernel's _sceKernelLoadStartModule path calls this with
+// rdi=path, rsi=flags, rdx=&handle. It expects the loaded module's handle
+// written to *pHandle and 0 returned on success.
+int PS4ABI sys_dynlib_load_prx(const char *path, uint64_t flags, int *pHandle,
+                               uint64_t arg4, const void *opt, int64_t *pRes) {
+  if (pRes)
+    *pRes = 0;
+  if (!path)
+    return SysError::eINVAL;
+
+  // Derive the module name from the path: basename minus its extension. The
+  // module's internal name (set from the SCE module info) matches this for the
+  // system libs we preload, so getModule() can find an already-loaded one.
+  const char *slash = std::strrchr(path, '/');
+  const char *baseStart = slash ? slash + 1 : path;
+  const char *dot = std::strrchr(baseStart, '.');
+  size_t nameLen = dot ? static_cast<size_t>(dot - baseStart)
+                       : std::strlen(baseStart);
+  base::String name;
+  name.append(baseStart, nameLen);
+
+  std::printf("[load_prx] path='%s' -> '%s' flags=%#llx\n", path, name.c_str(),
+              (unsigned long long)flags);
+
+  auto *proc = proc::getActive();
+
+  // already loaded (we preload the system module tree): hand back its handle.
+  auto mod = proc->getModule(base::StringRef(name));
+  if (!mod) {
+    // not yet present: load it and bring it up to the others' state.
+    mod = proc->loadModule(base::StringRef(name));
+    if (!mod) {
+      LOG_ERROR("load_prx: unable to load {}", name.c_str());
+      return SysError::eNOENT;
+    }
+    if (!mod->resolveImports() || !mod->applyRelocations()) {
+      LOG_ERROR("load_prx: relocate failed for {}", name.c_str());
+      return SysError::eNOEXEC;
+    }
+  }
+
+  if (pHandle)
+    *pHandle = mod->getInfo().handle;
   return 0;
 }
 

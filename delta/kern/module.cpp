@@ -80,6 +80,12 @@ bool smodule::fromMem(base::UniquePointer<uint8_t[]> data) {
       info.procParam = getAddress<uint8_t>(seg->vaddr);
       info.procParamSize = seg->filesz;
     }
+  } else {
+    auto *seg = getSegment(ElfSegType::PT_SCE_MODULEPARAM);
+    if (seg) {
+      info.moduleParam = getAddress<uint8_t>(seg->vaddr);
+      info.moduleParamSize = seg->filesz;
+    }
   }
 
   installEHFrame();
@@ -331,8 +337,11 @@ bool smodule::mapImage() {
 
 bool smodule::setupTLS() {
   auto *p = getSegment(PT_TLS);
-  if (p) {
-
+  // Only modules with an actual TLS template get a module index. Many modules
+  // ship an empty PT_TLS (memsz 0); handing those a slot inflates the indices
+  // so they no longer match libkernel's own (dense) TLS-module numbering, and
+  // __tls_get_addr then can't find a real module's block.
+  if (p && p->memsz) {
     info.tlsAddr = getAddress<uint8_t>(p->vaddr);
     info.tlsalign = p->align;
     info.tlsSizeFile = p->filesz;
@@ -439,8 +448,11 @@ bool smodule::resolveImports() {
     const char *name = &strtab.ptr[sym->st_name];
 
     // unresolved import (missing dep): point at the badcall stub, don't fail
-    if (!resolveObfSymbol(name, addr) || !addr)
+    if (!resolveObfSymbol(name, addr) || !addr) {
       addr = addrBadCall;
+      LOG_WARNING("unresolved import {} in {} (jmpslot@{:#x})", name,
+                  info.name.c_str(), r->offset);
+    }
 
     *getAddress<uintptr_t>(r->offset) = addr;
   }
@@ -450,6 +462,10 @@ bool smodule::resolveImports() {
 
 /*invoked by sys_dynlib_process_needed_and_relocate*/
 bool smodule::applyRelocations() {
+  if (relocated)
+    return true;
+  relocated = true;
+
   for (size_t i = 0; i < numRela; i++) {
     auto *r = &rela[i];
 
@@ -609,6 +625,22 @@ uintptr_t smodule::getSymbol2(const char *name) {
     if (std::strcmp(sname, name) == 0) {
       return getAddressNPTR<uintptr_t>(s->st_value);
     }
+  }
+
+  return 0;
+}
+
+uintptr_t smodule::getSymbolByNid(const char *nid) {
+  for (uint32_t i = 0; i < numSymbols; i++) {
+    const auto *s = &symbols[i];
+
+    // exports are defined (st_value != 0); imports are undefined (== 0).
+    if (!s->st_value || s->st_name >= strtab.size)
+      continue;
+
+    const char *sname = &strtab.ptr[s->st_name];
+    if (std::strncmp(sname, nid, 11) == 0)
+      return getAddressNPTR<uintptr_t>(s->st_value);
   }
 
   return 0;

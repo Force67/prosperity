@@ -86,6 +86,17 @@ int PS4ABI sys_sysctl(int *name, uint32_t namelen, void *oldp, size_t *oldlenp,
     return 0;
   }
 
+  // kern.proc.<41>: a "proc image area"/sanitizer flag libkernel reads at init.
+  // Bit 0 gates loading libSceDbgUBSanitizer.sprx (a debug-only module). Return
+  // 0 so libkernel takes the success path and skips the sanitizer preload.
+  else if (name[0] == 1 && name[1] == 14 && name[2] == 41 && namelen == 3) {
+    if (oldp && oldlenp && *oldlenp >= sizeof(uint32_t)) {
+      *reinterpret_cast<uint32_t *>(oldp) = 0;
+      *oldlenp = sizeof(uint32_t);
+    }
+    return 0;
+  }
+
   // cxx init stuff
   else if (name[0] == 1 && name[1] == 37 && namelen == 2) {
     auto length = *oldlenp;
@@ -145,7 +156,12 @@ int PS4ABI sys_sysctl(int *name, uint32_t namelen, void *oldp, size_t *oldlenp,
 
   std::printf("sysctl referenced by %p\n", _ReturnAddress());
   called_in(_ReturnAddress());
-  __debugbreak();
-  return 0;
+  // SCOUT: log the unhandled mib and soft-fail (ENOENT) instead of trapping so
+  // the guest can decide how to cope, and we can see what it queries next.
+  std::printf("[sysctl] UNHANDLED mib namelen=%u:", namelen);
+  for (uint32_t i = 0; i < namelen && i < 8; i++)
+    std::printf(" %d", name[i]);
+  std::printf("\n");
+  return 2;  // ENOENT
 }
 } // namespace krnl
