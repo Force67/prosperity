@@ -216,7 +216,12 @@ int PS4ABI sys_dynlib_load_prx(const char *path, uint64_t flags, int *pHandle,
   // genuinely-absent modules), so we skip running their init. libSceNet's init
   // does network setup that, with our socket stubs, takes an error path and
   // faults on a __thread errno access (its TLS isn't in the DTV).
-  static const char *kSkip[] = {"libSceNet"};
+  static const char *kSkip[] = {"libSceNet", "libSceSsl2", "libSceHttp2",
+                                "libSceNpManager", "libSceNpWebApi2",
+                                // file basename differs from its internal name
+                                // (libSceAppContentUtil); already preloaded and
+                                // its IPMI init scout-patched, so skip the dup.
+                                "libSceAppContent"};
   for (auto *s : kSkip) {
     if (std::strcmp(name.c_str(), s) == 0) {
       std::printf("[load_prx] skipping %s (init unsupported)\n", s);
@@ -229,16 +234,21 @@ int PS4ABI sys_dynlib_load_prx(const char *path, uint64_t flags, int *pHandle,
   // already loaded (we preload the system module tree): hand back its handle.
   auto mod = proc->getModule(base::StringRef(name));
   if (!mod) {
-    // not yet present: load it and bring it up to the others' state.
     mod = proc->loadModule(base::StringRef(name));
     if (!mod) {
       LOG_ERROR("load_prx: unable to load {}", name.c_str());
       return SysError::eNOENT;
     }
-    if (!mod->resolveImports() || !mod->applyRelocations()) {
-      LOG_ERROR("load_prx: relocate failed for {}", name.c_str());
-      return SysError::eNOEXEC;
-    }
+  }
+
+  // Always relocate: a module pulled in as another module's DT_NEEDED dep is
+  // added to the list by loadModule but never relocated, so its init_array
+  // holds raw offsets and module_start calls a bad pointer. applyRelocations
+  // is idempotent (guarded), so re-running it on an already-relocated module
+  // is a no-op.
+  if (!mod->resolveImports() || !mod->applyRelocations()) {
+    LOG_ERROR("load_prx: relocate failed for {}", name.c_str());
+    return SysError::eNOEXEC;
   }
 
   if (pHandle)
