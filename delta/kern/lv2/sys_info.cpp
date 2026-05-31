@@ -97,12 +97,14 @@ int PS4ABI sys_sysctl(int *name, uint32_t namelen, void *oldp, size_t *oldlenp,
     return 0;
   }
 
-  // cxx init stuff
+  // kern.arnd (CTL_KERN.37): random bytes used by the C++ runtime / libc for
+  // cookies and ASLR. Zero is a benign, deterministic value; a non-zero fill
+  // (0x04) was being consumed as garbage allocation sizes downstream.
   else if (name[0] == 1 && name[1] == 37 && namelen == 2) {
     auto length = *oldlenp;
     if (length > 256)
       length = 256;
-    memset(oldp, 4, length);
+    memset(oldp, 0, length);
     *oldlenp = length;
     return 0;
   }
