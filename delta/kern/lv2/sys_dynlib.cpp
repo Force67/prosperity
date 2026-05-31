@@ -163,8 +163,10 @@ int PS4ABI sys_dynlib_get_list(uint32_t *handles, size_t maxCount,
                                size_t *count) {
   auto &list = proc::getActive()->getModuleList();
 
-  int listCount = 0;
+  size_t listCount = 0;
   for (auto &mod : list) {
+    if (listCount >= maxCount)
+      break;  // don't overflow the caller's buffer
     *(handles++) = mod->getInfo().handle;
     listCount++;
   }

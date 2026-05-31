@@ -37,17 +37,21 @@ int main(int argc, char** argv) {
   if (rc != 0)
     return 3;
 
-  // no eboot, so fake a minimal SCE process param. libkernel's _start fetches
-  // it via sys_dynlib_get_proc_param and checks the size + "ORBI" magic.
-  static uint8_t procParam[0x50] = {};
-  *reinterpret_cast<uint64_t*>(procParam + 0x00) = sizeof(procParam);
-  *reinterpret_cast<uint32_t*>(procParam + 0x08) = 0x4942524F;  // "ORBI"
-  *reinterpret_cast<uint32_t*>(procParam + 0x0C) = 1;           // entry count (!= 0)
-  *reinterpret_cast<uint32_t*>(procParam + 0x10) = 0x11000000;  // sdk version
-  {
-    auto& m0 = mods[0]->getInfo();
+  // A real eboot carries its own SCE process param (PT_SCE_PROCPARAM). Only when
+  // it's missing (e.g. running a bare lib as main) do we fake a minimal one so
+  // libkernel's _start clears its size + "ORBI" magic check.
+  auto& m0 = mods[0]->getInfo();
+  if (!m0.procParam) {
+    static uint8_t procParam[0x50] = {};
+    *reinterpret_cast<uint64_t*>(procParam + 0x00) = sizeof(procParam);
+    *reinterpret_cast<uint32_t*>(procParam + 0x08) = 0x4942524F;  // "ORBI"
+    *reinterpret_cast<uint32_t*>(procParam + 0x0C) = 1;           // entry count (!= 0)
+    *reinterpret_cast<uint32_t*>(procParam + 0x10) = 0x11000000;  // sdk version
     m0.procParam = procParam;
     m0.procParamSize = sizeof(procParam);
+    std::printf("[modexec] (using synthetic proc param)\n");
+  } else {
+    std::printf("[modexec] using module's own proc param (%u bytes)\n", m0.procParamSize);
   }
 
   // stage 3 (opt-in): jump into the guest. proc::start enters libkernel's entry
