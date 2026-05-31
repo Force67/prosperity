@@ -496,7 +496,7 @@ static const syscall_Reg syscall_dpt[] = {
     {452, (void *)&null_handler}, // sys_setaudit_addr
     {453, (void *)&null_handler}, // sys_auditctl
     {454, (void *)&sys_umtx_op},
-    {455, (void *)&null_handler}, // sys_thr_new
+    {455, (void *)&sys_thr_new},
     {456, (void *)&null_handler}, // sys_sigqueue
     {457, (void *)&null_handler}, // sys_kmq_open
     {458, (void *)&null_handler}, // sys_kmq_setattr
