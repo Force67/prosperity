@@ -25,7 +25,10 @@ fileDevice::fileDevice(proc *p) : device(p) {}
 bool fileDevice::open(const base::String &hostPath, uint32_t /*flags*/) {
   // Read-only for now: the disc image is immutable.
   utl::File tmp(hostPath, utl::fileMode::read);
-  if (!tmp.Exists())
+  // Exists() only means a PhysFile object was constructed; IsOpen() means the
+  // underlying fopen actually succeeded. Without the IsOpen() check a missing
+  // file would register an fd whose later read fread()s a null FILE* and faults.
+  if (!tmp.Exists() || !tmp.IsOpen())
     return false;
   file_.Reset(tmp.GetBase());
   open_ = true;
