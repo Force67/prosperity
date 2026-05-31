@@ -28,6 +28,23 @@ moduleInfo *called_in(void *addr);
 static __attribute__((tls_model("initial-exec"))) thread_local uint32_t t_tid = 1;
 static std::atomic<uint32_t> g_nextTid{2};
 
+// Thread-startup handshake: sys_thr_new blocks until the new thread has run its
+// init and reached its first sync point (umtx). The game spawns workers that
+// produce shared state the main thread then reads with no explicit ordering
+// (it relies on the worker, on another core, having finished). Without the
+// head start the main thread races ahead and reads not-yet-produced data.
+static std::mutex g_startM;
+static std::condition_variable g_startCv;
+static __attribute__((tls_model("initial-exec"))) thread_local std::atomic<bool>
+    *t_started = nullptr;
+
+static void markThreadStarted() {
+  if (t_started && !t_started->exchange(true)) {
+    std::lock_guard<std::mutex> lk(g_startM);
+    g_startCv.notify_all();
+  }
+}
+
 // FreeBSD thr_param (the layout sys_thr_new receives in rdi).
 struct thr_param {
   void(PS4ABI *start_func)(void *);
@@ -57,17 +74,25 @@ int PS4ABI sys_thr_new(thr_param *p, int size) {
   auto fn = p->start_func;
   auto arg = p->arg;
   auto fsbase = reinterpret_cast<uint64_t>(p->tls_base);
+  auto started = std::make_shared<std::atomic<bool>>(false);
 
   // Run on the host thread's (large) stack, NOT the guest's thr_param stack: our
   // host syscall handlers execute on whatever stack the guest code is using, and
   // the guest stack (e.g. 64 KiB) is far too small for them (std::thread/printf/
   // C++ exceptions overflow it). The host thread stack is bigger and works.
-  std::thread([fn, arg, fsbase, tid] {
+  std::thread([fn, arg, fsbase, tid, started] {
     setThreadFsBase(fsbase);
     t_tid = tid;
+    t_started = started.get();
     fn(arg);
   }).detach();
 
+  // Wait for the new thread to finish its init and hit its first sync point so
+  // it wins the races the game expects it to. Bounded so a thread that never
+  // syncs can't hang us.
+  std::unique_lock<std::mutex> lk(g_startM);
+  g_startCv.wait_for(lk, std::chrono::milliseconds(200),
+                     [&] { return started->load(); });
   return 0;
 }
 
@@ -99,6 +124,7 @@ constexpr uint32_t UMUTEX_CONTESTED = 0x80000000u;
 
 int PS4ABI sys_umtx_op(void *ptr, int op, uint32_t val, void *a, void *b) {
   using namespace std::chrono_literals;
+  markThreadStarted();  // first sync point => our init is done
   switch (op) {
   case 2:    // UMTX_OP_WAIT
   case 11:   // UMTX_OP_WAIT_UINT
