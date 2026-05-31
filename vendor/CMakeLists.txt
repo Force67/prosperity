@@ -77,6 +77,26 @@ target_compile_definitions(eq_base PUBLIC
 )
 
 # --------------------------------------------------------------------------
+# mbedtls (2.28 LTS): we only want the static mbedcrypto target for the PKG
+# loader (AES-128 ECB/CBC, bignum modexp for RSA, SHA-256, HMAC). Skip the
+# programs, tests, x509/tls libs and install rules. The stock 2.28 default
+# config already enables everything we use, so no custom config is needed.
+# --------------------------------------------------------------------------
+set(ENABLE_PROGRAMS OFF CACHE BOOL "" FORCE)
+set(ENABLE_TESTING OFF CACHE BOOL "" FORCE)
+set(MBEDTLS_FATAL_WARNINGS OFF CACHE BOOL "" FORCE)
+set(USE_SHARED_MBEDTLS_LIBRARY OFF CACHE BOOL "" FORCE)
+set(USE_STATIC_MBEDTLS_LIBRARY ON CACHE BOOL "" FORCE)
+add_subdirectory(mbedtls EXCLUDE_FROM_ALL)
+# Thin wrapper so consumers link one name; mbedcrypto already carries the
+# include interface, but keep it explicit to match the other vendor ifaces.
+add_library(mbedtls_iface INTERFACE)
+target_include_directories(mbedtls_iface INTERFACE
+  ${CMAKE_CURRENT_SOURCE_DIR}/mbedtls/include
+)
+target_link_libraries(mbedtls_iface INTERFACE mbedcrypto)
+
+# --------------------------------------------------------------------------
 # googletest: only needed when building the module unit tests.
 # --------------------------------------------------------------------------
 if(DELTA_BUILD_TESTS)

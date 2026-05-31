@@ -51,6 +51,9 @@ public:
   // Open the resolved host path. Returns false if it doesn't exist.
   bool open(const base::String &hostPath, uint32_t flags);
 
+  // Back this device with an already-opened file (e.g. a virtual VFS stream).
+  bool adopt(utl::File &&file);
+
   int64_t read(void *buf, size_t n) override;
   int64_t lseek(int64_t off, int whence) override;
   int fstat(void *stat) override;

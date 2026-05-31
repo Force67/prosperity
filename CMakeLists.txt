@@ -69,3 +69,4 @@ add_subdirectory(delta)
 
 add_subdirectory(tools/modload)
 add_subdirectory(tools/modexec)
+add_subdirectory(tools/pkg_check)

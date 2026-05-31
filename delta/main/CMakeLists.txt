@@ -34,4 +34,7 @@ if(UNIX AND NOT APPLE)
           RENAME ps4delta.png)
   install(FILES _res/ps4delta.desktop
           DESTINATION share/applications)
+  # Register the application/x-ps4-pkg MIME type so .pkg files open with us.
+  install(FILES _res/ps4delta-pkg.xml
+          DESTINATION share/mime/packages)
 endif()

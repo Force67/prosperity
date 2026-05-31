@@ -69,13 +69,13 @@ int PS4ABI sys_open(const char *path, uint32_t flags, uint32_t mode) {
     return SysError::eNOENT;
   }
 
-  // Regular file: resolve through the VFS mount table onto the host.
-  base::String host = vfs::resolve(path);
-  if (host.empty())
+  // Regular file: resolve through the VFS (host + virtual mounts).
+  utl::File vf = vfs::openRead(path);
+  if (!vf.Exists())
     return SysError::eNOENT;
 
   auto *file = new fileDevice(proc::getActive());
-  if (!file->open(host, flags)) {
+  if (!file->adopt(std::move(vf))) {
     file->releaseHandle();
     return SysError::eNOENT;
   }
@@ -112,14 +112,12 @@ int PS4ABI sys_fstat(uint32_t fd, void *stat) {
 }
 
 int PS4ABI sys_stat(const char *path, void *stat) {
-  base::String host = vfs::resolve(path);
-  if (host.empty())
+  int64_t size = 0;
+  bool isDir = false;
+  if (!vfs::stat(path, size, isDir))
     return SysError::eNOENT;
-  utl::File f(host, utl::fileMode::read);
-  if (!f.Exists())
-    return SysError::eNOENT;
-  fillStat(*reinterpret_cast<SceKernelStat *>(stat), kSceFileModeReg,
-           static_cast<int64_t>(f.GetSize()));
+  fillStat(*reinterpret_cast<SceKernelStat *>(stat),
+           isDir ? kSceFileModeDir : kSceFileModeReg, size);
   return 0;
 }
 

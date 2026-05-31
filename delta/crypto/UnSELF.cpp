@@ -9,155 +9,83 @@
 
 #include "UnSELF.h"
 
+#include <cstring>
+
+#include <elf_types.h>
+#include <sce_types.h>
+
 namespace crypto {
-#if 0
-	using namespace loaders;
+base::Vector<uint8_t> self2elf(const uint8_t *data, size_t size) {
+  base::Vector<uint8_t> out;
 
-	class ElfBuilder
-	{
-		// in file
-		utl::File &file;
+  if (size < sizeof(SELFHeader))
+    return out;
+  const auto *sh = reinterpret_cast<const SELFHeader *>(data);
+  if (sh->magic != SELF_MAGIC)
+    return out;
 
-		ELFHeader elf{};
-		std::vector<ELFPgHeader> sections;
-		std::vector<uint8_t> data;
+  const size_t segTableOff = sizeof(SELFHeader);
+  const size_t elfOff =
+      segTableOff + static_cast<size_t>(sh->numSegments) * sizeof(SELFSegmentTable);
+  if (elfOff + sizeof(ELFHeader) > size)
+    return out;
 
-	public:
+  const auto *eh = reinterpret_cast<const ELFHeader *>(data + elfOff);
+  if (eh->magic != ELF_MAGIC)
+    return out;
 
-		ElfBuilder(utl::File &f) :
-			file(f)
-		{}
+  const size_t phoff = eh->phoff;
+  const uint16_t phentsize = eh->phentsize;
+  const uint16_t phnum = eh->phnum;
+  const size_t hdrEnd = phoff + static_cast<size_t>(phnum) * phentsize;
+  if (elfOff + hdrEnd > size)
+    return out;
 
-		bool LoadHeaders(SELFHeader &self)
-		{
-			size_t headerDelta = sizeof(SELFHeader) + (sizeof(SELFSegmentTable) * self.numSegments);
+  auto phdr = [&](uint32_t i) {
+    return reinterpret_cast<const ELFPgHeader *>(
+        data + elfOff + phoff + static_cast<size_t>(i) * phentsize);
+  };
 
-			// get elf
-			file.Seek(headerDelta, utl::seekMode::seek_set);
-			if (!file.Read(elf))
-				return false;
+  // The output layout is the union of the program-header extents and the
+  // destination of every block segment.
+  size_t total = hdrEnd;
+  for (uint16_t i = 0; i < phnum; ++i) {
+    const size_t end = phdr(i)->offset + phdr(i)->filesz;
+    if (end > total)
+      total = end;
+  }
 
-			// valid elf?
-			if (elf.magic != 0x464C457F)
-				return false;
+  const auto *segs =
+      reinterpret_cast<const SELFSegmentTable *>(data + segTableOff);
+  for (uint16_t i = 0; i < sh->numSegments; ++i) {
+    const auto &s = segs[i];
+    if (!(s.flags & SF_BFLG))
+      continue;
+    const uint32_t idx = static_cast<uint32_t>(s.flags >> 20) & 0xFFF;
+    if (idx >= phnum)
+      continue;
+    if (s.offset + s.fileSize > size) // source out of range
+      continue;
+    const size_t end = phdr(idx)->offset + s.fileSize;
+    if (end > total)
+      total = end;
+  }
 
-			// read section info
-			sections.resize(elf.phnum);
-			return file.Read(sections);
-		}
+  out.resize(total); // value-initialized => zero filled
+  std::memcpy(out.data(), data + elfOff, hdrEnd);
 
-		bool LoadData()
-		{
-			// align position
-			uint64_t pos = (file.Tell() + 0xF) & ~0xF;
-	
-			// todo: check is always 65?
-			uint64_t offset = file.Seek(pos + 0x41, utl::seekMode::seek_set);
+  for (uint16_t i = 0; i < sh->numSegments; ++i) {
+    const auto &s = segs[i];
+    if (!(s.flags & SF_BFLG))
+      continue;
+    const uint32_t idx = static_cast<uint32_t>(s.flags >> 20) & 0xFFF;
+    if (idx >= phnum)
+      continue;
+    if (s.offset + s.fileSize > size)
+      continue;
+    std::memcpy(out.data() + phdr(idx)->offset, data + s.offset, s.fileSize);
+  }
 
-#ifdef DELTA_DBG
-		//	std::printf(__FUNCTION__ " offset %llx\n", offset);
-#endif
-
-			if (offset < file.GetSize()) {
-
-				size_t delta = file.GetSize() - offset;
-				data.resize(delta);
-			
-				return file.Read(data);
-			}
-
-			return false;
-		}
-
-		void ShowHeaders()
-		{
-			for (auto& e : sections) {
-				std::printf("%s -> %llx\n", SegTypeToString(e.type), e.offset);
-			}
-		}
-
-		// find a better way
-		void ExportBuffer(std::vector<uint8_t> &out) {
-			
-			// the delta to reserve
-			size_t delta = sizeof(ELFHeader) + (elf.phnum * sizeof(ELFPgHeader)) + data.size();
-			out.reserve(delta);
-
-			//std::memcpy()
-		}
-
-		bool MakeElf(const std::wstring &name)
-		{
-			utl::File file(name, utl::fileMode::write);
-			if (file.IsOpen()) {
-				file.Write(elf);
-				file.Write(sections);
-				file.Write(data);
-
-				return true;
-			}
-
-			return false;
-		}
-	};
-
-	// todo: make less shit
-	bool convert_self(utl::File &file, std::vector<uint8_t> &&out)
-	{
-		// reset
-		file.Seek(0, utl::seekMode::seek_set);
-
-		SELFHeader self{};
-		file.Read(self);
-
-		if (self.magic == SELF_MAGIC /*&& NotDebugging()*/) {
-			ElfBuilder builder(file);
-
-			if (!builder.LoadHeaders(self)) {
-				std::puts("Unable to parse SELF headers!");
-				return false;
-			}
-
-			if (!builder.LoadData()) {
-				std::puts("Unable to gather ELF data!");
-				return false;
-			}
-
-			// export it for us
-			//builder.ExportBuffer(std::move(out));
-
-			return true;
-		}
-
-		return false;
-	}
-
-	bool convert_self(utl::File& file, const std::wstring& target)
-	{
-		// reset
-		file.Seek(0, utl::seekMode::seek_set);
-
-		SELFHeader self{};
-		file.Read(self);
-
-		if (self.magic == SELF_MAGIC) {
-			ElfBuilder builder(file);
-
-			if (!builder.LoadHeaders(self)) {
-				std::puts("Unable to parse SELF headers!");
-				return false;
-			}
-
-			if (!builder.LoadData()) {
-				std::puts("Unable to gather ELF data!");
-				return false;
-			}
-
-			builder.ShowHeaders();
-			return builder.MakeElf(target);
-		}
-
-		return false;
-	}
-#endif
+  return out;
+}
 } // namespace crypto

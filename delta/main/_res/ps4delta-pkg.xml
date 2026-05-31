@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/x-ps4-pkg">
+    <comment>PS4 package</comment>
+    <glob pattern="*.pkg"/>
+  </mime-type>
+</mime-info>

@@ -69,6 +69,31 @@ static bool verifyViablity() {
 }
 
 #ifdef _WIN32
+// Associate .pkg with this executable under HKCU (no admin needed, idempotent)
+// so double-clicking a package in Explorer launches us with its path.
+static void registerPkgAssociation() {
+  wchar_t exe[MAX_PATH]{};
+  if (!GetModuleFileNameW(nullptr, exe, MAX_PATH))
+    return;
+
+  auto writeKey = [](const wchar_t *sub, const std::wstring &value) {
+    HKEY key;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, sub, 0, nullptr, 0, KEY_WRITE,
+                        nullptr, &key, nullptr) != ERROR_SUCCESS)
+      return;
+    RegSetValueExW(key, nullptr, 0, REG_SZ,
+                   reinterpret_cast<const BYTE *>(value.c_str()),
+                   static_cast<DWORD>((value.size() + 1) * sizeof(wchar_t)));
+    RegCloseKey(key);
+  };
+
+  writeKey(L"Software\\Classes\\.pkg", L"PS4Delta.pkg");
+  std::wstring cmd = L"\"";
+  cmd += exe;
+  cmd += L"\" \"%1\"";
+  writeKey(L"Software\\Classes\\PS4Delta.pkg\\shell\\open\\command", cmd);
+}
+
 static void win32PostInit() {
   using NtQueryTimerResolution_t = LONG(WINAPI *)(PULONG, PULONG, PULONG);
   using NtSetTimerResolution_t = LONG(WINAPI *)(ULONG, BOOLEAN, PULONG);
@@ -82,6 +107,8 @@ static void win32PostInit() {
   ULONG min_res, max_res, orig_res, new_res;
   if (NtQueryTimerResolution_f(&min_res, &max_res, &orig_res) == 0)
     NtSetTimerResolution_f(max_res, TRUE, &new_res);
+
+  registerPkgAssociation();
 }
 #endif
 

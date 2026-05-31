@@ -14,8 +14,11 @@
 #include "runtime/code_lift.h"
 #include "runtime/vprx/vprx.h"
 
+#include <crypto/UnSELF.h>
+
 #include "module.h"
 #include "proc.h"
+#include "vfs.h"
 
 namespace krnl {
 smodule::smodule(proc *process) : process(process) {
@@ -52,6 +55,48 @@ bool smodule::fromFile(const base::String &path) {
   // arch. We don't decrypt here, so reject it.
   LOG_ERROR("smodule: {} is not a decrypted x86-64 ELF", path.c_str());
   return false;
+}
+
+bool smodule::fromVfs(const base::String &guestPath) {
+  utl::File f = vfs::openRead(guestPath.c_str());
+  if (!f.Exists()) {
+    LOG_ERROR("smodule: cannot open vfs path {}", guestPath.c_str());
+    return false;
+  }
+
+  auto sz = f.GetSize();
+  if (sz < sizeof(ELFHeader))
+    return false;
+
+  base::Vector<uint8_t> raw;
+  raw.resize(static_cast<mem_size>(sz));
+  f.Read(raw.data(), sz);
+
+  const uint8_t *src = raw.data();
+  size_t srcSize = static_cast<size_t>(sz);
+
+  // eboot.bin / prx in a pkg are fake SELFs: rebuild the plain ELF in memory.
+  base::Vector<uint8_t> elfImg;
+  uint32_t magic = static_cast<uint32_t>(src[0]) |
+                   (static_cast<uint32_t>(src[1]) << 8) |
+                   (static_cast<uint32_t>(src[2]) << 16) |
+                   (static_cast<uint32_t>(src[3]) << 24);
+  if (magic == SELF_MAGIC) {
+    elfImg = crypto::self2elf(src, srcSize);
+    if (elfImg.empty()) {
+      LOG_ERROR("smodule: self2elf failed for {}", guestPath.c_str());
+      return false;
+    }
+    src = elfImg.data();
+    srcSize = elfImg.size();
+  } else if (magic != ELF_MAGIC) {
+    LOG_ERROR("smodule: {} is neither SELF nor ELF", guestPath.c_str());
+    return false;
+  }
+
+  auto out = base::MakeUnique<uint8_t[]>(static_cast<mem_size>(srcSize));
+  std::memcpy(out.Get_UseOnlyIfYouKnowWhatYouareDoing(), src, srcSize);
+  return fromMem(std::move(out));
 }
 
 bool smodule::fromMem(base::UniquePointer<uint8_t[]> data) {

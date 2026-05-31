@@ -6,3 +6,4 @@ Exec=ps4delta %f
 Icon=ps4delta
 Terminal=true
 Categories=Game;Emulator;
+MimeType=application/x-ps4-pkg;

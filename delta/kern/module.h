@@ -71,6 +71,9 @@ public:
   explicit smodule(proc *);
 
   bool fromFile(const base::String &);
+  // Load a module from a guest VFS path (host or virtual mount). Converts a
+  // fake SELF to an ELF on the fly, so it works for a pkg's eboot.bin.
+  bool fromVfs(const base::String &);
   bool fromMem(base::UniquePointer<uint8_t[]>);
 
   uintptr_t getSymbol(uint64_t);

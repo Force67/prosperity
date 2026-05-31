@@ -14,6 +14,7 @@
 
 #include "module.h"
 #include "proc.h"
+#include "vfs.h"
 #include "runtime/vprx/vprx.h"
 
 namespace krnl {
@@ -33,7 +34,7 @@ proc::proc() : vmem(env) { g_activeProc = this; }
 
 proc *proc::getActive() { return g_activeProc; }
 
-bool proc::create(const base::String &path) {
+bool proc::create(const base::String &path, bool fromVfs) {
   /*register HLE prx overrides*/
   runtime::vprx_init();
 
@@ -54,7 +55,8 @@ bool proc::create(const base::String &path) {
     return false;
   }
 
-  if (!first->fromFile(path)) {
+  bool loaded = fromVfs ? first->fromVfs(path) : first->fromFile(path);
+  if (!loaded) {
     LOG_ERROR("unable to load main process module");
     return false;
   }
@@ -82,24 +84,40 @@ modulePtr proc::getModule(uint32_t handle) {
 /*does not expect an extension*/
 modulePtr proc::loadModule(base::StringRef name) {
   auto mod = getModule(name);
-  if (!mod) {
-    auto lib = utl::make_ref<smodule>(this);
-    lib->getInfo().handle = handleCounter;
-    handleCounter++;
+  if (mod)
+    return mod;
 
-    modules.emplace_back(lib);
+  auto lib = utl::make_ref<smodule>(this);
+  lib->getInfo().handle = handleCounter;
+  handleCounter++;
 
-    base::String nameFull("modules/");
-    nameFull.append(name.data(), name.length());
-    nameFull += ".sprx";
-    if (!lib->fromFile(utl::make_abs_path(nameFull))) {
-      LOG_ERROR("unable to load module {}", nameFull.c_str());
-      return nullptr;
+  modules.emplace_back(lib);
+
+  // HLE/system modules ship with the emulator; prefer those.
+  base::String hostRel("modules/");
+  hostRel.append(name.data(), name.length());
+  hostRel += ".sprx";
+  base::String hostPath = utl::make_abs_path(hostRel);
+  if (utl::File(hostPath, utl::fileMode::read).IsOpen()) {
+    if (lib->fromFile(hostPath))
+      return lib;
+  } else {
+    // The game's own modules live inside the pkg: SDK prx under
+    // /app0/sce_module, the title's own prx at the app root.
+    const char *roots[] = {"/app0/sce_module/", "/app0/"};
+    for (const char *root : roots) {
+      base::String vfsPath(root);
+      vfsPath.append(name.data(), name.length());
+      vfsPath += ".prx";
+      if (vfs::openRead(vfsPath.c_str()).Exists())
+        return lib->fromVfs(vfsPath) ? lib : nullptr;
     }
-
-    return lib;
   }
-  return mod;
+
+  base::String sname;
+  sname.append(name.data(), name.length());
+  LOG_ERROR("unable to load module {}", sname.c_str());
+  return nullptr;
 }
 
 void proc::start() {

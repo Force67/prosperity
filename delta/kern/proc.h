@@ -43,7 +43,9 @@ public:
   using moduleList = base::Vector<modulePtr>;
 
   proc();
-  bool create(const base::String &);
+  // Load the process. When fromVfs is set, path is a guest VFS path (e.g.
+  // "/app0/eboot.bin") loaded through the mount table; otherwise a host file.
+  bool create(const base::String &, bool fromVfs = false);
   void start();
 
   static proc *getActive();

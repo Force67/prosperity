@@ -35,6 +35,14 @@ bool fileDevice::open(const base::String &hostPath, uint32_t /*flags*/) {
   return true;
 }
 
+bool fileDevice::adopt(utl::File &&file) {
+  if (!file.Exists())
+    return false;
+  file_.Reset(file.GetBase());
+  open_ = true;
+  return true;
+}
+
 int64_t fileDevice::read(void *buf, size_t n) {
   if (!open_)
     return -SysError::eBADF;
