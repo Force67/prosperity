@@ -28,6 +28,11 @@ public:
   };
 
   explicit kObject(proc *, oType);
+  // Must be virtual: derived devices add virtual methods, so without a virtual
+  // dtor the kObject subobject sits past the vptr (offset 8) and `delete this`
+  // in release() would free an interior pointer (invalid free) and skip the
+  // derived destructors (leaking the device's file handle).
+  virtual ~kObject() = default;
 
   void retain();
   void release();
