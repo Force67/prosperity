@@ -25,6 +25,7 @@ public:
   enum class oType {
     file,
     device,
+    equeue,
   };
 
   explicit kObject(proc *, oType);
