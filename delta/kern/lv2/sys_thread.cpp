@@ -8,8 +8,12 @@
  */
 
 #include <base.h>
+#include <array>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstdio>
+#include <mutex>
 #include <string>
 #include <thread>
 
@@ -54,9 +58,10 @@ int PS4ABI sys_thr_new(thr_param *p, int size) {
   auto arg = p->arg;
   auto fsbase = reinterpret_cast<uint64_t>(p->tls_base);
 
-  // Run the guest thread entry on a real host thread with its own guest fs base
-  // and tid. (Runs on the host thread's stack for now; the guest stack/guard is
-  // ignored.)
+  // Run on the host thread's (large) stack, NOT the guest's thr_param stack: our
+  // host syscall handlers execute on whatever stack the guest code is using, and
+  // the guest stack (e.g. 64 KiB) is far too small for them (std::thread/printf/
+  // C++ exceptions overflow it). The host thread stack is bigger and works.
   std::thread([fn, arg, fsbase, tid] {
     setThreadFsBase(fsbase);
     t_tid = tid;
@@ -77,12 +82,56 @@ int PS4ABI sys_rtprio_thread(int a1, uint64_t a2, thread_prio *rtp) {
   return 0;
 }
 
-int PS4ABI sys_umtx_op(void *ptr, int op, uint32_t, void *, void *) {
-  // userspace mutex op. Single-threaded boot for now: pretend every lock/wait
-  // succeeds immediately. TODO: real futex-backed implementation once threads
-  // run concurrently.
-  (void)ptr;
-  (void)op;
-  return 0;
+// Address-keyed wait/wake (a small futex). A fixed bucket array avoids per-
+// address allocation; hash collisions only cause harmless spurious wakeups
+// since every waiter re-checks its condition.
+namespace {
+struct Bucket {
+  std::mutex m;
+  std::condition_variable cv;
+};
+std::array<Bucket, 256> g_umtxBuckets;
+Bucket &umtxBucket(const void *a) {
+  return g_umtxBuckets[(reinterpret_cast<uintptr_t>(a) >> 4) & 0xff];
+}
+constexpr uint32_t UMUTEX_CONTESTED = 0x80000000u;
+}  // namespace
+
+int PS4ABI sys_umtx_op(void *ptr, int op, uint32_t val, void *a, void *b) {
+  using namespace std::chrono_literals;
+  switch (op) {
+  case 2:    // UMTX_OP_WAIT
+  case 11:   // UMTX_OP_WAIT_UINT
+  case 15: { // UMTX_OP_WAIT_UINT_PRIVATE
+    auto &bk = umtxBucket(ptr);
+    std::unique_lock<std::mutex> lk(bk.m);
+    // sleep only while the value still matches what the caller waited on
+    if (*static_cast<volatile uint32_t *>(ptr) == val)
+      bk.cv.wait_for(lk, 5ms);
+    return 0;
+  }
+  case 17: { // UMTX_OP_MUTEX_WAIT: block while the umutex is owned
+    auto &bk = umtxBucket(ptr);
+    std::unique_lock<std::mutex> lk(bk.m);
+    if ((*static_cast<volatile uint32_t *>(ptr) & ~UMUTEX_CONTESTED) != 0)
+      bk.cv.wait_for(lk, 5ms);  // timeout guards against a missed wake
+    return 0;
+  }
+  case 3:    // UMTX_OP_WAKE
+  case 16:   // UMTX_OP_WAKE_PRIVATE
+  case 18:   // UMTX_OP_MUTEX_WAKE
+  case 22: { // UMTX_OP_MUTEX_WAKE2
+    auto &bk = umtxBucket(ptr);
+    std::lock_guard<std::mutex> lk(bk.m);
+    bk.cv.notify_all();
+    return 0;
+  }
+  default: {
+    static std::atomic<uint32_t> seen[32]{};
+    if (op >= 0 && op < 32 && seen[op].fetch_add(1) == 0)
+      std::printf("[umtx] unhandled op=%d\n", op);
+    return 0;
+  }
+  }
 }
 } // namespace krnl
