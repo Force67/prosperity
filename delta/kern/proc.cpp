@@ -12,9 +12,11 @@
 #include <utl/path.h>
 #include <xbyak.h>
 
+#include "crash.h"
 #include "module.h"
 #include "proc.h"
 #include "vfs.h"
+#include "lv2/sys_dynlib.h"
 #include "runtime/vprx/vprx.h"
 
 namespace krnl {
@@ -120,8 +122,49 @@ modulePtr proc::loadModule(base::StringRef name) {
   return nullptr;
 }
 
+// Patch a guest function to `xor eax,eax; ret`. Steps over libkernel-internal
+// validation that rejects our externally-loaded module set (11.00 offsets).
+static void forceReturn0(proc &p, const char *mod, uint32_t off) {
+  auto m = p.getModule(base::StringRef(mod));
+  if (!m)
+    return;
+  uint8_t *c = m->getInfo().base + off;
+  utl::protectMem(reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(c) & ~0xFFFull),
+                  0x1000, utl::pageProtection::rwx);
+  c[0] = 0x31;  // xor eax, eax
+  c[1] = 0xC0;
+  c[2] = 0xC3;  // ret
+}
+
+// Boot patches applied before entering the guest, needed by every boot path
+// (modexec and the real pkg boot), not just the modexec harness.
+static void applyBootPatches(proc &p) {
+  // Redirect libkernel's __tls_get_addr (NID vNe1w4diLCs) to our per-thread HLE;
+  // libkernel's own dynamic-TLS allocator leaves DTV entries null. NID lookup is
+  // firmware-independent.
+  if (auto k = p.getModule(base::StringRef("libkernel"))) {
+    if (uintptr_t a = k->getSymbolByNid("vNe1w4diLCs")) {
+      auto *c = reinterpret_cast<uint8_t *>(a);
+      utl::protectMem(reinterpret_cast<void *>(a & ~0xFFFull), 0x2000,
+                      utl::pageProtection::rwx);
+      c[0] = 0x48;  // movabs rax, imm64
+      c[1] = 0xB8;
+      *reinterpret_cast<uint64_t *>(c + 2) =
+          reinterpret_cast<uint64_t>(&guest_tls_get_addr);
+      c[10] = 0xFF;  // jmp rax
+      c[11] = 0xE0;
+      LOG_INFO("patched libkernel __tls_get_addr -> host HLE");
+    }
+  }
+  forceReturn0(p, "libkernel", 0x287e0);            // module-gen lib-id validator
+  forceReturn0(p, "libSceAppContentUtil", 0x1a00);  // AppContent IPMI init
+}
+
 void proc::start() {
   LOG_ASSERT(modules[1]->getInfo().name == "libkernel");
+
+  installCrashHandler();
+  applyBootPatches(*this);
 
   auto &info = modules[0]->getInfo();
   auto &kinfo = modules[1]->getInfo();
