@@ -13,6 +13,7 @@
 
 #include "kern/dev/console_dev.h"
 #include "kern/dev/dipsw_dev.h"
+#include "kern/dev/dce_dev.h"
 #include "kern/dev/dma_dev.h"
 #include "kern/dev/file_dev.h"
 #include "kern/dev/gc_dev.h"
@@ -34,6 +35,8 @@ static device *make_device(const char *deviceName) {
     dev = new tty6Device(proc);
   if (xname == "gc")
     dev = new gcDevice(proc);
+  if (xname == "dce")
+    dev = new dceDevice(proc);
   if (xname == "dipsw")
     dev = new dipswDevice(proc);
   /*there are multiple of these*/
