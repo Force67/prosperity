@@ -211,6 +211,19 @@ int PS4ABI sys_dynlib_load_prx(const char *path, uint64_t flags, int *pHandle,
   std::printf("[load_prx] path='%s' -> '%s' flags=%#llx\n", path, name.c_str(),
               (unsigned long long)flags);
 
+  // Modules whose module_start needs a backend we don't emulate yet. libkernel's
+  // sysmodule preload tolerates a "can't load" here (it does the same for
+  // genuinely-absent modules), so we skip running their init. libSceNet's init
+  // does network setup that, with our socket stubs, takes an error path and
+  // faults on a __thread errno access (its TLS isn't in the DTV).
+  static const char *kSkip[] = {"libSceNet"};
+  for (auto *s : kSkip) {
+    if (std::strcmp(name.c_str(), s) == 0) {
+      std::printf("[load_prx] skipping %s (init unsupported)\n", s);
+      return SysError::eNOENT;
+    }
+  }
+
   auto *proc = proc::getActive();
 
   // already loaded (we preload the system module tree): hand back its handle.
