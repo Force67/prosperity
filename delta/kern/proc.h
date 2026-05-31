@@ -29,6 +29,10 @@ struct procInfo {
 class smodule;
 class kObject;
 
+// Set the calling host thread's guest fs base (guest TLS pointer). Called for
+// the main thread (sysarch 129) and for each guest thread we spawn.
+void setThreadFsBase(uint64_t);
+
 /*TODO: FIX MISUSE OF modulePtr*/
 using modulePtr = utl::object_ref<smodule>;
 

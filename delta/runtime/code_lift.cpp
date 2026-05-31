@@ -20,6 +20,9 @@ namespace krnl {
 uintptr_t lv2_get(uint32_t sysIndex);
 }
 
+// returns the calling host thread's guest fs base (per-thread guest TLS).
+extern "C" uint64_t krnl_current_fsbase();
+
 namespace runtime {
 static Xbyak::Operand::Code capstone_to_xbyak(x86_reg reg) {
 #define CASE_R(x)                                                              \
@@ -182,28 +185,35 @@ void codeLift::emit_fsbase(uint8_t *base) {
   /*translate the register that we set*/
   auto reg = Xbyak::Reg64(capstone_to_xbyak(operands[0].reg));
 
-  // single env, proc exists during lift -> the slot is stable, so bake it in.
-  auto *fsBaseSlot = &krnl::proc::getActive()->getEnv().fsBase;
-
-  // touch only `reg` (no helper call, movs only) so the read clobbers no flags
+  // Per-thread guest fs base: call krnl_current_fsbase() (a trivial leaf that
+  // does `mov rax, fs:[tpoff]; ret`, clobbering only rax). Each host thread
+  // running guest code has its own fs base, so guest TLS is per-thread. mov/
+  // push/pop/call/ret leave flags untouched, so the read still clobbers no
+  // flags; we only preserve rax (the helper's clobber + its return slot).
   struct fsGen : Xbyak::CodeGenerator {
-    fsGen(Xbyak::Reg64 reg, int32_t disp, uint8_t size, uintptr_t slot) {
-      mov(reg, slot);      // reg = &fsBase
-      mov(reg, ptr[reg]);  // reg = fsBase
+    fsGen(Xbyak::Reg64 reg, int32_t disp, uint8_t size, uintptr_t helper) {
+      bool isRax = reg.getIdx() == Xbyak::Operand::RAX;
+      if (!isRax)
+        push(rax);
+      mov(rax, helper);
+      call(rax);  // rax = this thread's guest fs base
 
       // disp may be negative (static TLS sits below fs)
+      auto dst = isRax ? rax : reg;
       if (size == 4)
-        mov(reg.cvt32(), ptr[reg + disp]);
+        mov(dst.cvt32(), ptr[rax + disp]);
       else
-        mov(reg, ptr[reg + disp]);
+        mov(dst, ptr[rax + disp]);
 
+      if (!isRax)
+        pop(rax);
       ret();
     }
   };
 
   auto fsDisp = static_cast<int32_t>(operands[1].mem.disp);
   fsGen gen(reg, fsDisp, operands[0].size,
-            reinterpret_cast<uintptr_t>(fsBaseSlot));
+            reinterpret_cast<uintptr_t>(&krnl_current_fsbase));
 
   /*call directly in rip zone*/
   base[0] = 0xE8;

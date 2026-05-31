@@ -19,6 +19,16 @@
 namespace krnl {
 static proc *g_activeProc{nullptr};
 
+// Per-thread guest fs base (TLS). The lifter rewrites guest `fs:[disp]` reads to
+// call krnl_current_fsbase() so each host thread running guest code reads its
+// own thread's TLS. initial-exec model => the access is a single
+// `mov rax, fs:[off]; ret` that clobbers only rax, which the lifter stub relies
+// on (it preserves only rax around the call).
+__attribute__((tls_model("initial-exec"))) static thread_local uint64_t t_fsbase =
+    0;
+extern "C" uint64_t krnl_current_fsbase() { return t_fsbase; }
+void setThreadFsBase(uint64_t v) { t_fsbase = v; }
+
 proc::proc() : vmem(env) { g_activeProc = this; }
 
 proc *proc::getActive() { return g_activeProc; }

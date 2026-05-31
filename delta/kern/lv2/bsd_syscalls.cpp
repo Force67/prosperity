@@ -51,6 +51,7 @@ int PS4ABI sys_sysarch(int num, void *args) {
   if (num == 129) {
     auto fsbase = *static_cast<void **>(args);
     proc::getActive()->getEnv().fsBase = fsbase;
+    setThreadFsBase(reinterpret_cast<uint64_t>(fsbase));
     return 0;
   }
 
