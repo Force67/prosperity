@@ -157,11 +157,6 @@ void codeLift::emit_syscall(uint8_t *base, uint32_t idx) {
   }
 }
 
-/*fetch fs base ptr from current process*/
-static PS4ABI void *getFsBase() {
-  return krnl::proc::getActive()->getEnv().fsBase;
-}
-
 /*this implementation is based on uplift*/
 void codeLift::emit_fsbase(uint8_t *base) {
   if (insn->detail->x86.op_count != 2)
@@ -169,6 +164,7 @@ void codeLift::emit_fsbase(uint8_t *base) {
 
   auto operands = insn->detail->x86.operands;
 
+  // only TLS reads (mov reg, fs:[disp]); writes via fs override don't occur here
   if (operands[0].type != X86_OP_REG)
     __debugbreak();
 
@@ -186,34 +182,28 @@ void codeLift::emit_fsbase(uint8_t *base) {
   /*translate the register that we set*/
   auto reg = Xbyak::Reg64(capstone_to_xbyak(operands[0].reg));
 
-  /*jit assemble a register setter*/
+  // single env, proc exists during lift -> the slot is stable, so bake it in.
+  auto *fsBaseSlot = &krnl::proc::getActive()->getEnv().fsBase;
+
+  // touch only `reg` (no helper call, movs only) so the read clobbers no flags
   struct fsGen : Xbyak::CodeGenerator {
-    /*note: this is sys-v abi*/
-    fsGen(Xbyak::Reg64 reg, uint32_t disp, uint8_t size) {
-      int idx = reg.getIdx();
+    fsGen(Xbyak::Reg64 reg, int32_t disp, uint8_t size, uintptr_t slot) {
+      mov(reg, slot);      // reg = &fsBase
+      mov(reg, ptr[reg]);  // reg = fsBase
 
-      mov(rax, reinterpret_cast<uintptr_t>(&getFsBase));
-      call(rax);
-
-      // sysv returns directly into rax
-      if (idx != Xbyak::Reg64::RAX) {
-        mov(reg, rax);
-      }
-
-      if (disp)
-        add(reg, disp);
-
+      // disp may be negative (static TLS sits below fs)
       if (size == 4)
-        mov(reg.cvt32(), ptr[reg]);
+        mov(reg.cvt32(), ptr[reg + disp]);
       else
-        mov(reg, ptr[reg]);
+        mov(reg, ptr[reg + disp]);
 
       ret();
     }
   };
 
-  uint32_t dispOff = insn->size > 5 ? *(uint32_t *)(base + 5) : 0;
-  fsGen gen(reg, dispOff, operands[0].size);
+  auto fsDisp = static_cast<int32_t>(operands[1].mem.disp);
+  fsGen gen(reg, fsDisp, operands[0].size,
+            reinterpret_cast<uintptr_t>(fsBaseSlot));
 
   /*call directly in rip zone*/
   base[0] = 0xE8;
