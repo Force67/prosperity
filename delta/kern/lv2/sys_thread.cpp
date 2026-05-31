@@ -126,21 +126,26 @@ int PS4ABI sys_umtx_op(void *ptr, int op, uint32_t val, void *a, void *b) {
   using namespace std::chrono_literals;
   markThreadStarted();  // first sync point => our init is done
   switch (op) {
+  // WAIT/WAKE both take the bucket lock, so a wake can't slip in between a
+  // waiter's value check and its sleep => no lost wake. So block on the value
+  // (predicate) rather than a short poll: a worker that waits for the main
+  // thread to publish data must keep sleeping until that store actually lands,
+  // not wake after 5ms and read it half-built. The long timeout is only a
+  // safety net for a genuinely missed wake.
   case 2:    // UMTX_OP_WAIT
   case 11:   // UMTX_OP_WAIT_UINT
   case 15: { // UMTX_OP_WAIT_UINT_PRIVATE
     auto &bk = umtxBucket(ptr);
+    auto *p = static_cast<volatile uint32_t *>(ptr);
     std::unique_lock<std::mutex> lk(bk.m);
-    // sleep only while the value still matches what the caller waited on
-    if (*static_cast<volatile uint32_t *>(ptr) == val)
-      bk.cv.wait_for(lk, 5ms);
+    bk.cv.wait_for(lk, 1s, [&] { return *p != val; });
     return 0;
   }
   case 17: { // UMTX_OP_MUTEX_WAIT: block while the umutex is owned
     auto &bk = umtxBucket(ptr);
+    auto *p = static_cast<volatile uint32_t *>(ptr);
     std::unique_lock<std::mutex> lk(bk.m);
-    if ((*static_cast<volatile uint32_t *>(ptr) & ~UMUTEX_CONTESTED) != 0)
-      bk.cv.wait_for(lk, 5ms);  // timeout guards against a missed wake
+    bk.cv.wait_for(lk, 1s, [&] { return (*p & ~UMUTEX_CONTESTED) == 0; });
     return 0;
   }
   case 3:    // UMTX_OP_WAKE
