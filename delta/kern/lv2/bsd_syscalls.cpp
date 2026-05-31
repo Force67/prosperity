@@ -85,10 +85,13 @@ int PS4ABI sys_regmgr_call(uint32_t op, uint32_t id, void *result, void *value,
     }
 
     return 0x800D0203;
-  } else
-    __debugbreak();
+  }
 
-  return -1;
+  // SCOUT: soft-fail unknown regmgr ops with the same "not available" error the
+  // op-25 unknown-key path returns (the guest copes with it) instead of trapping.
+  printf("[regmgr] UNHANDLED op=%u id=%#x type=%#llx\n", op, id,
+         (unsigned long long)type);
+  return 0x800D0203;
 }
 
 int PS4ABI sys_getpid() { return 0x1337; }
