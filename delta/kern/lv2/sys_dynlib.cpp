@@ -126,6 +126,13 @@ int PS4ABI sys_dynlib_dlsym(uint32_t handle, const char *symName, void **sym) {
   // is for imports (it decodes "#libid#modid"); here we match the 11-char NID
   // directly against the module's export table.
   uintptr_t addrOut = mod->getSymbolByNid(nameenc);
+
+  // Callers may pass an already-encoded 11-char NID (e.g. the SDK module-entry
+  // symbol "BaOKcng8g88") instead of a plain name. encode_nid() would hash the
+  // NID string itself and never match, so also try matching it verbatim.
+  if (!addrOut && std::strlen(symName) == 11)
+    addrOut = mod->getSymbolByNid(symName);
+
   if (!addrOut) {
     std::printf("DLSYM %s!%s -> UNRESOLVED\n", modName.c_str(), symName);
     *sym = nullptr;
