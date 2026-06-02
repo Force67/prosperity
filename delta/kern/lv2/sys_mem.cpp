@@ -11,6 +11,10 @@
 #include <logger/logger.h>
 #include <utl/mem.h>
 
+#include <atomic>
+#include <cstdint>
+#include <sys/mman.h>
+
 #include "../proc.h"
 #include "error_table.h"
 #include "sys_mem.h"
@@ -18,6 +22,29 @@
 namespace krnl {
 using ppt = utl::pageProtection;
 using alt = utl::allocationType;
+
+// PS4 user-space pointers must live below 2^40: libc's sceLibcMspaceCreate (and
+// other allocators) reject a base whose bits >= 40 are set. The host kernel
+// hands mmap(NULL) addresses far above that ceiling, so when we have to pick an
+// address ourselves, carve it from a dedicated low arena instead. Bump-only and
+// MAP_FIXED_NOREPLACE so we never clobber an existing mapping.
+static uint8_t *allocLowGuest(size_t size) {
+  constexpr uintptr_t kFloor = 0x1000000000ull;   // 64 GiB
+  constexpr uintptr_t kCeil = 0x10000000000ull;   // 2^40, the PS4 user ceiling
+  static std::atomic<uintptr_t> next{kFloor};
+  for (int tries = 0; tries < 8192; tries++) {
+    uintptr_t base = next.fetch_add(size + 0x4000) & ~uintptr_t(0x3FFF);
+    if (base < kFloor || base + size > kCeil)
+      return nullptr;
+    void *p = ::mmap(reinterpret_cast<void *>(base), size, PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
+    if (p == reinterpret_cast<void *>(base))
+      return static_cast<uint8_t *>(p);
+    if (p != MAP_FAILED)
+      ::munmap(p, size);  // kernel ignored the hint; release and try higher
+  }
+  return nullptr;
+}
 
 uint8_t *PS4ABI sys_mmap(void *addr, size_t size, uint32_t prot, uint32_t flags,
                          uint32_t fd, size_t offset) {
@@ -45,13 +72,16 @@ uint8_t *PS4ABI sys_mmap(void *addr, size_t size, uint32_t prot, uint32_t flags,
     }
   }
 
-  void *ptr = utl::allocMem(addr, size, ppt::w, alt::reservecommit);
-  if (!ptr && addr) {
-    if (flags & mFlags::fixed)
+  void *ptr = nullptr;
+  if (addr) {
+    ptr = utl::allocMem(addr, size, ppt::w, alt::reservecommit);
+    if (!ptr && (flags & mFlags::fixed))
       ptr = utl::allocMem(addr, size, ppt::w, alt::commit);  // maybe reserved
-    else
-      ptr = utl::allocMem(nullptr, size, ppt::w, alt::reservecommit);  // hint taken
   }
+  // No usable hint (or it was taken): pick a low (<2^40) address the guest's
+  // own allocators will accept, not whatever high address the host hands out.
+  if (!ptr)
+    ptr = allocLowGuest(size);
   if (!ptr) {
     return reinterpret_cast<uint8_t *>(-1);
   }
