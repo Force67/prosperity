@@ -2,15 +2,40 @@
 // Copyright (C) Force67 2019
 
 #include <base.h>
+#include <cstdio>
+#include <cstring>
 #include "gc_dev.h"
+#include "kern/proc.h"
 
 namespace krnl {
 gcDevice::gcDevice(proc *p) : device(p) {}
 
 bool gcDevice::init(const char *, uint32_t, uint32_t) { return true; }
 
+// SCOUT: scan the stack for the first return address landing in any guest
+// module's .text and report it as <module>+offset, to pin which guest wrapper
+// issued each gc ioctl (the native backend runs handlers on the guest stack).
+static void printGuestCaller() {
+  auto *proc = proc::getActive();
+  if (!proc)
+    return;
+  auto *sp = reinterpret_cast<uintptr_t *>(__builtin_frame_address(0));
+  for (int i = 0; i < 512; i++) {
+    uintptr_t v = sp[i];
+    for (auto &m : proc->getModuleList()) {
+      auto &mi = m->getInfo();
+      auto base = (uintptr_t)mi.textSeg.addr;
+      if (base && v >= base && v < base + mi.textSeg.size) {
+        std::printf("[gc]   caller %s+%#lx\n", mi.name.c_str(), v - base);
+        return;
+      }
+    }
+  }
+}
+
 /* gc_ioctl */
 int32_t gcDevice::ioctl(uint32_t cmd, void *data) {
+  printGuestCaller();
   switch (cmd) {
   case 0xC00C8110: {
 
