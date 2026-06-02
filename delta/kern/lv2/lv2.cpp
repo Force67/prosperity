@@ -330,7 +330,7 @@ static const syscall_Reg syscall_dpt[] = {
     {237, (void *)&null_handler}, // sys_ktimer_settime
     {238, (void *)&null_handler}, // sys_ktimer_gettime
     {239, (void *)&null_handler}, // sys_ktimer_getoverrun
-    {240, (void *)&null_handler}, // sys_nanosleep
+    {240, (void *)&sys_nanosleep},
     {241, (void *)&null_handler}, // sys_ffclock_getcounter
     {242, (void *)&null_handler}, // sys_ffclock_setestimate
     {243, (void *)&null_handler}, // sys_ffclock_getestimate

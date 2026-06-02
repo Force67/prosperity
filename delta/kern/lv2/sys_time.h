@@ -11,4 +11,5 @@ struct sce_timespec {
 };
 
 int PS4ABI sys_clock_gettime(uint32_t clock_id, sce_timespec *tp);
+int PS4ABI sys_nanosleep(const sce_timespec *rqtp, sce_timespec *rmtp);
 }  // namespace krnl
