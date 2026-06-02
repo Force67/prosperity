@@ -25,7 +25,12 @@
 
           # capstone, fmtlib, zlib, xbyak, equilibrium are vendored as
           # submodules, so we do not bring system copies into the closure.
-          buildInputs = [ ];
+          # The graphics layer needs Vulkan + SDL3 (window/present).
+          buildInputs = with pkgs; [
+            vulkan-headers
+            vulkan-loader
+            sdl3
+          ];
 
           cmakeFlags = [
             "-GNinja"
@@ -57,6 +62,10 @@
             clang-tools
             gdb
             git
+            vulkan-headers
+            vulkan-loader
+            vulkan-validation-layers
+            sdl3
           ];
 
           shellHook = ''
