@@ -310,3 +310,6 @@ Thumbs.db
 vendor/*tar.gz
 vendor/*tar
 /build-dbg
+
+# aarch64 / FEX build tree
+build-arm/

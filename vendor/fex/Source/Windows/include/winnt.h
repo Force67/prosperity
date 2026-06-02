@@ -1,0 +1,217 @@
+// SPDX-License-Identifier: LGPL-2.1-or-later
+// SPDX-FileCopyrightText: Copyright (C) the Wine project
+
+#pragma once
+
+#include_next <winnt.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef struct ___IMAGE_LOAD_CONFIG_CODE_INTEGRITY {
+  WORD Flags;
+  WORD Catalog;
+  DWORD CatalogOffset;
+  DWORD Reserved;
+} __IMAGE_LOAD_CONFIG_CODE_INTEGRITY, *__PIMAGE_LOAD_CONFIG_CODE_INTEGRITY;
+
+typedef struct __IMAGE_LOAD_CONFIG_DIRECTORY64 {
+  DWORD Size; /* 000 */
+  DWORD TimeDateStamp;
+  WORD MajorVersion;
+  WORD MinorVersion;
+  DWORD GlobalFlagsClear;
+  DWORD GlobalFlagsSet; /* 010 */
+  DWORD CriticalSectionDefaultTimeout;
+  ULONGLONG DeCommitFreeBlockThreshold;
+  ULONGLONG DeCommitTotalFreeThreshold; /* 020 */
+  ULONGLONG LockPrefixTable;
+  ULONGLONG MaximumAllocationSize; /* 030 */
+  ULONGLONG VirtualMemoryThreshold;
+  ULONGLONG ProcessAffinityMask; /* 040 */
+  DWORD ProcessHeapFlags;
+  WORD CSDVersion;
+  WORD DependentLoadFlags;
+  ULONGLONG EditList; /* 050 */
+  ULONGLONG SecurityCookie;
+  ULONGLONG SEHandlerTable; /* 060 */
+  ULONGLONG SEHandlerCount;
+  ULONGLONG GuardCFCheckFunctionPointer; /* 070 */
+  ULONGLONG GuardCFDispatchFunctionPointer;
+  ULONGLONG GuardCFFunctionTable; /* 080 */
+  ULONGLONG GuardCFFunctionCount;
+  DWORD GuardFlags; /* 090 */
+  __IMAGE_LOAD_CONFIG_CODE_INTEGRITY CodeIntegrity;
+  ULONGLONG GuardAddressTakenIatEntryTable; /* 0a0 */
+  ULONGLONG GuardAddressTakenIatEntryCount;
+  ULONGLONG GuardLongJumpTargetTable; /* 0b0 */
+  ULONGLONG GuardLongJumpTargetCount;
+  ULONGLONG DynamicValueRelocTable; /* 0c0 */
+  ULONGLONG CHPEMetadataPointer;
+  ULONGLONG GuardRFFailureRoutine; /* 0d0 */
+  ULONGLONG GuardRFFailureRoutineFunctionPointer;
+  DWORD DynamicValueRelocTableOffset; /* 0e0 */
+  WORD DynamicValueRelocTableSection;
+  WORD Reserved2;
+  ULONGLONG GuardRFVerifyStackPointerFunctionPointer;
+  DWORD HotPatchTableOffset; /* 0f0 */
+  DWORD Reserved3;
+  ULONGLONG EnclaveConfigurationPointer;
+  ULONGLONG VolatileMetadataPointer; /* 100 */
+  ULONGLONG GuardEHContinuationTable;
+  ULONGLONG GuardEHContinuationCount; /* 110 */
+  ULONGLONG GuardXFGCheckFunctionPointer;
+  ULONGLONG GuardXFGDispatchFunctionPointer; /* 120 */
+  ULONGLONG GuardXFGTableDispatchFunctionPointer;
+  ULONGLONG CastGuardOsDeterminedFailureMode; /* 130 */
+  ULONGLONG GuardMemcpyFunctionPointer;
+} _IMAGE_LOAD_CONFIG_DIRECTORY64, *_PIMAGE_LOAD_CONFIG_DIRECTORY64;
+
+typedef struct __IMAGE_LOAD_CONFIG_DIRECTORY32 {
+  DWORD Size; /* 000 */
+  DWORD TimeDateStamp;
+  WORD MajorVersion;
+  WORD MinorVersion;
+  DWORD GlobalFlagsClear;
+  DWORD GlobalFlagsSet; /* 010 */
+  DWORD CriticalSectionDefaultTimeout;
+  DWORD DeCommitFreeBlockThreshold;
+  DWORD DeCommitTotalFreeThreshold;
+  DWORD LockPrefixTable; /* 020 */
+  DWORD MaximumAllocationSize;
+  DWORD VirtualMemoryThreshold;
+  DWORD ProcessHeapFlags;
+  DWORD ProcessAffinityMask; /* 030 */
+  WORD CSDVersion;
+  WORD DependentLoadFlags;
+  DWORD EditList;
+  DWORD SecurityCookie;
+  DWORD SEHandlerTable; /* 040 */
+  DWORD SEHandlerCount;
+  DWORD GuardCFCheckFunctionPointer;
+  DWORD GuardCFDispatchFunctionPointer;
+  DWORD GuardCFFunctionTable; /* 050 */
+  DWORD GuardCFFunctionCount;
+  DWORD GuardFlags;
+  IMAGE_LOAD_CONFIG_CODE_INTEGRITY CodeIntegrity;
+  DWORD GuardAddressTakenIatEntryTable;
+  DWORD GuardAddressTakenIatEntryCount;
+  DWORD GuardLongJumpTargetTable; /* 070 */
+  DWORD GuardLongJumpTargetCount;
+  DWORD DynamicValueRelocTable;
+  DWORD CHPEMetadataPointer;
+  DWORD GuardRFFailureRoutine; /* 080 */
+  DWORD GuardRFFailureRoutineFunctionPointer;
+  DWORD DynamicValueRelocTableOffset;
+  WORD DynamicValueRelocTableSection;
+  WORD Reserved2;
+  DWORD GuardRFVerifyStackPointerFunctionPointer; /* 090 */
+  DWORD HotPatchTableOffset;
+  DWORD Reserved3;
+  DWORD EnclaveConfigurationPointer;
+  DWORD VolatileMetadataPointer; /* 0a0 */
+  DWORD GuardEHContinuationTable;
+  DWORD GuardEHContinuationCount;
+  DWORD GuardXFGCheckFunctionPointer;
+  DWORD GuardXFGDispatchFunctionPointer; /* 0b0 */
+  DWORD GuardXFGTableDispatchFunctionPointer;
+  DWORD CastGuardOsDeterminedFailureMode;
+  DWORD GuardMemcpyFunctionPointer;
+} _IMAGE_LOAD_CONFIG_DIRECTORY32, *_PIMAGE_LOAD_CONFIG_DIRECTORY32;
+
+typedef struct _IMAGE_CHPE_RANGE_ENTRY {
+  union {
+    ULONG StartOffset;
+    struct {
+      ULONG NativeCode  : 1;
+      ULONG AddressBits : 31;
+    } DUMMYSTRUCTNAME;
+  } DUMMYUNIONNAME;
+  ULONG Length;
+} IMAGE_CHPE_RANGE_ENTRY, *PIMAGE_CHPE_RANGE_ENTRY;
+
+typedef struct _IMAGE_ARM64EC_METADATA {
+  ULONG Version;
+  ULONG CodeMap;
+  ULONG CodeMapCount;
+  ULONG CodeRangesToEntryPoints;
+  ULONG RedirectionMetadata;
+  ULONG __os_arm64x_dispatch_call_no_redirect;
+  ULONG __os_arm64x_dispatch_ret;
+  ULONG __os_arm64x_dispatch_call;
+  ULONG __os_arm64x_dispatch_icall;
+  ULONG __os_arm64x_dispatch_icall_cfg;
+  ULONG AlternateEntryPoint;
+  ULONG AuxiliaryIAT;
+  ULONG CodeRangesToEntryPointsCount;
+  ULONG RedirectionMetadataCount;
+  ULONG GetX64InformationFunctionPointer;
+  ULONG SetX64InformationFunctionPointer;
+  ULONG ExtraRFETable;
+  ULONG ExtraRFETableSize;
+  ULONG __os_arm64x_dispatch_fptr;
+  ULONG AuxiliaryIATCopy;
+  ULONG __os_arm64x_helper0;
+  ULONG __os_arm64x_helper1;
+  ULONG __os_arm64x_helper2;
+  ULONG __os_arm64x_helper3;
+  ULONG __os_arm64x_helper4;
+  ULONG __os_arm64x_helper5;
+  ULONG __os_arm64x_helper6;
+  ULONG __os_arm64x_helper7;
+  ULONG __os_arm64x_helper8;
+} IMAGE_ARM64EC_METADATA;
+
+typedef struct _IMAGE_ARM64EC_REDIRECTION_ENTRY {
+  ULONG Source;
+  ULONG Destination;
+} IMAGE_ARM64EC_REDIRECTION_ENTRY;
+
+typedef struct _IMAGE_ARM64EC_CODE_RANGE_ENTRY_POINT {
+  ULONG StartRva;
+  ULONG EndRva;
+  ULONG EntryPoint;
+} IMAGE_ARM64EC_CODE_RANGE_ENTRY_POINT;
+
+typedef struct _CONTEXT_CHUNK {
+  LONG Offset;
+  ULONG Length;
+} CONTEXT_CHUNK, *PCONTEXT_CHUNK;
+
+typedef struct _CONTEXT_EX {
+  CONTEXT_CHUNK All;
+  CONTEXT_CHUNK Legacy;
+  CONTEXT_CHUNK XState;
+#ifdef _WIN64
+  ULONG64 align;
+#endif
+} CONTEXT_EX, *PCONTEXT_EX;
+
+// From process hacker
+typedef struct _IMAGE_VOLATILE_METADATA {
+  ULONG Size;
+  ULONG Version;
+  ULONG VolatileAccessTable;
+  ULONG VolatileAccessTableSize;
+  ULONG VolatileInfoRangeTable;
+  ULONG VolatileInfoRangeTableSize;
+} IMAGE_VOLATILE_METADATA, *PIMAGE_VOLATILE_METADATA;
+
+typedef struct _IMAGE_VOLATILE_RVA_METADATA {
+  ULONG Rva;
+} IMAGE_VOLATILE_RVA_METADATA, *PIMAGE_VOLATILE_RVA_METADATA;
+
+typedef struct _IMAGE_VOLATILE_RANGE_METADATA {
+  ULONG Rva;
+  ULONG Size;
+} IMAGE_VOLATILE_RANGE_METADATA, *PIMAGE_VOLATILE_RANGE_METADATA;
+
+NTSYSAPI DWORD WINAPI RtlRunOnceExecuteOnce(PRTL_RUN_ONCE, PRTL_RUN_ONCE_INIT_FN, PVOID, PVOID*);
+
+// This is a FEX extension, and requires corresponding wine patches
+#define CONTEXT_ARM64_FEX_YMMSTATE (CONTEXT_ARM64 | 0x00000040)
+
+#ifdef __cplusplus
+}
+#endif

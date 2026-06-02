@@ -1,0 +1,51 @@
+[submodule "External/vixl"]
+	shallow = true
+	path = External/vixl
+	url = https://github.com/FEX-Emu/vixl.git
+[submodule "External/cpp-optparse"]
+	path = Source/Common/cpp-optparse
+	url = https://github.com/Sonicadvance1/cpp-optparse
+[submodule "External/fex-posixtest-bins"]
+  shallow = true
+	path = External/fex-posixtest-bins
+	url = https://github.com/FEX-Emu/fex-posixtest-bins.git
+[submodule "External/fex-gvisor-tests-bins"]
+  shallow = true
+	path = External/fex-gvisor-tests-bins
+	url = https://github.com/FEX-Emu/fex-gvisor-tests-bins.git
+[submodule "External/fex-gcc-target-tests-bins"]
+  shallow = true
+	path = External/fex-gcc-target-tests-bins
+	url = https://github.com/FEX-Emu/fex-gcc-target-tests-bins.git
+[submodule "External/jemalloc"]
+	path = External/jemalloc
+	url = https://github.com/FEX-Emu/jemalloc.git
+[submodule "External/fmt"]
+	path = External/fmt
+	url = https://github.com/fmtlib/fmt.git
+[submodule "External/drm-headers"]
+	path = External/drm-headers
+	url = https://github.com/FEX-Emu/drm-headers.git
+[submodule "External/xxhash"]
+	path = External/xxhash
+	url = https://github.com/Cyan4973/xxHash.git
+[submodule "External/Catch2"]
+	path = External/Catch2
+	url = https://github.com/catchorg/Catch2.git
+[submodule "External/robin-map"]
+	shallow = true
+	path = External/robin-map
+	url = https://github.com/FEX-Emu/robin-map.git
+[submodule "External/Vulkan-Headers"]
+	shallow = true
+	path = External/Vulkan-Headers
+	url = https://github.com/KhronosGroup/Vulkan-Headers.git
+[submodule "External/jemalloc_glibc"]
+	path = External/jemalloc_glibc
+	url = https://github.com/FEX-Emu/jemalloc.git
+[submodule "External/tracy"]
+	path = External/tracy
+	url = https://github.com/wolfpld/tracy
+[submodule "External/range-v3"]
+	path = External/range-v3
+	url = https://github.com/ericniebler/range-v3.git

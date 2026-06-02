@@ -1,0 +1,46 @@
+// SPDX-License-Identifier: MIT
+#pragma once
+#include <FEXCore/fextl/string.h>
+
+namespace FEXCore::StringUtils {
+// Trim the left side of the string of whitespace and new lines
+inline fextl::string LeftTrim(fextl::string String, std::string_view TrimTokens = " \t\n\r\f\v") {
+  size_t pos = fextl::string::npos;
+  if ((pos = String.find_first_not_of(TrimTokens)) != fextl::string::npos) {
+    String.erase(0, pos);
+  }
+
+  return String;
+}
+
+// Trim the right side of the string of whitespace and new lines
+inline fextl::string RightTrim(fextl::string String, std::string_view TrimTokens = " \t\n\r\f\v") {
+  size_t pos = fextl::string::npos;
+  if ((pos = String.find_last_not_of(TrimTokens)) != fextl::string::npos) {
+    String.erase(String.begin() + pos + 1, String.end());
+  }
+
+  return String;
+}
+
+// Trim both the left and right of the string of whitespace and new lines
+inline fextl::string Trim(fextl::string String, std::string_view TrimTokens = " \t\n\r\f\v") {
+  return RightTrim(LeftTrim(std::move(String), TrimTokens), TrimTokens);
+}
+
+inline fextl::string& ReplaceAllInPlace(fextl::string& Str, std::string_view Token, std::string_view New) {
+  const auto OriginalTokenSize = Token.size();
+  const auto NewTokenSize = New.size();
+
+  size_t TokenPos {};
+  auto TokenIter = Str.find(Token, TokenPos);
+  while (TokenIter != Str.npos) {
+    Str.replace(TokenIter, OriginalTokenSize, New);
+    TokenPos += NewTokenSize;
+    TokenIter = Str.find(Token, TokenPos);
+  }
+
+  return Str;
+}
+
+} // namespace FEXCore::StringUtils

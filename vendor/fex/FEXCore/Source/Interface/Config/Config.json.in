@@ -1,0 +1,589 @@
+{
+  "Options": {
+    "CPU": {
+      "Multiblock": {
+        "Type": "bool",
+        "Default": "true",
+        "Desc": [
+          "Controls multiblock code compilation",
+          "Can cause long JIT compilation times and stutter"
+        ]
+      },
+      "MaxInst": {
+        "Type": "int32",
+        "Default": "5000",
+        "Desc": [
+          "Maximum number of instruction to store in a block"
+        ]
+      },
+      "EnableCodeCachingWIP": {
+        "Type": "bool",
+        "Default": "false",
+        "Desc": [
+          "Enable the code caching subsystem"
+        ]
+      },
+      "EnableCodeCacheValidation": {
+        "Type": "bool",
+        "Default": "false",
+        "Desc": [
+          "Enable expensive validation when loading code caches"
+        ]
+      },
+      "HostFeatures": {
+        "Type": "strenum",
+        "Default": "FEXCore::Config::HostFeatures::OFF",
+        "Enums": {
+          "ENABLESVE": "enablesve",
+          "DISABLESVE": "disablesve",
+          "ENABLEAVX": "enableavx",
+          "DISABLEAVX": "disableavx",
+          "ENABLEAFP": "enableafp",
+          "DISABLEAFP": "disableafp",
+          "ENABLELRCPC": "enablelrcpc",
+          "DISABLELRCPC": "disablelrcpc",
+          "ENABLELRCPC2": "enablelrcpc2",
+          "DISABLELRCPC2": "disablelrcpc2",
+          "ENABLECSSC": "enablecssc",
+          "DISABLECSSC": "disablecssc",
+          "ENABLEPMULL128": "enablepmull128",
+          "DISABLEPMULL128": "disablepmull128",
+          "ENABLERNG": "enablerng",
+          "DISABLERNG": "disablerng",
+          "ENABLECLZERO": "enableclzero",
+          "DISABLECLZERO": "disableclzero",
+          "ENABLEATOMICS": "enableatomics",
+          "DISABLEATOMICS": "disableatomics",
+          "ENABLEFCMA": "enablefcma",
+          "DISABLEFCMA": "disablefcma",
+          "ENABLEFLAGM": "enableflagm",
+          "DISABLEFLAGM": "disableflagm",
+          "ENABLEFLAGM2": "enableflagm2",
+          "DISABLEFLAGM2": "disableflagm2",
+          "ENABLEFRINTTS": "enablefrintts",
+          "DISABLEFRINTTS": "disablefrintts",
+          "ENABLECRYPTO": "enablecrypto",
+          "DISABLECRYPTO": "disablecrypto",
+          "ENABLERPRES": "enablerpres",
+          "DISABLERPRES": "disablerpres",
+          "ENABLESVEBITPERM": "enablesvebitperm",
+          "DISABLESVEBITPERM": "disablesvebitperm",
+          "ENABLEPRESERVEALLABI": "enablepreserveallabi",
+          "DISABLEPRESERVEALLABI": "disablepreserveallabi",
+          "ENABLEWFXT": "enablewfxt",
+          "DISABLEWFXT": "disablewfxt",
+          "ENABLE3DNOW": "enable3dnow",
+          "DISABLE3DNOW": "disable3dnow",
+          "ENABLESSE4A": "enablesse4a",
+          "DISABLESSE4A": "disablesse4a"
+        },
+        "Desc": [
+          "Allows controlling of the CPU features in the JIT.",
+          "\toff: Default CPU features queried from CPU features",
+          "\t{enable,disable}sve: Will force enable or disable sve even if the host doesn't support it",
+          "\t{enable,disable}avx: Will force enable or disable avx even if the host doesn't support it",
+          "\t{enable,disable}afp: Will force enable or disable afp even if the host doesn't support it",
+          "\t{enable,disable}lrcpc: Will force enable or disable lrcpc even if the host doesn't support it",
+          "\t{enable,disable}lrcpc2: Will force enable or disable lrcpc2 even if the host doesn't support it",
+          "\t{enable,disable}cssc: Will force enable or disable cssc even if the host doesn't support it",
+          "\t{enable,disable}pmull128: Will force enable or disable pmull128 even if the host doesn't support it",
+          "\t{enable,disable}rng: Will force enable or disable rng even if the host doesn't support it",
+          "\t{enable,disable}clzero: Will force enable or disable clzero even if the host doesn't support it",
+          "\t{enable,disable}atomics: Will force enable or disable ARMv8.1 LSE atomics even if the host doesn't support it",
+          "\t{enable,disable}fcma: Will force enable or disable fcma even if the host doesn't support it",
+          "\t{enable,disable}flagm: Will force enable or disable flagm even if the host doesn't support it",
+          "\t{enable,disable}flagm2: Will force enable or disable flagm2 even if the host doesn't support it",
+          "\t{enable,disable}crypto: Will force enable or disable crypto extensions even if the host doesn't support it",
+          "\t{enable,disable}rpres: Will force enable or disable rpres even if the host doesn't support it",
+          "\t{enable,disable}svebitperm: Will force enable or disable svebitperm even if the host doesn't support it",
+          "\t{enable,disable}preserveallabi: Will force enable or disable preserve_all abi even if the host doesn't support it",
+          "\t{enable,disable}wfxt: Will force enable or disable wfxt even if the host doesn't support it",
+          "\t{enable,disable}3dnow: Will force enable or disable 3DNow! even if the host doesn't support it",
+          "\t{enable,disable}sse4a: Will force enable or disable SSE4a even if the host doesn't support it"
+        ]
+      },
+      "SmallTSCScale": {
+        "Type": "bool",
+        "Default": "true",
+        "Desc": [
+          "Scales the cycle counter on systems that have low frequencies."
+        ]
+      },
+      "CPUFeatureRegisters": {
+        "Type": "str",
+        "Default": "",
+        "Desc": [
+          "Allows overriding cpu feature flags for manual testing"
+        ]
+      }
+    },
+    "Emulation": {
+      "RootFS": {
+        "Type": "str",
+        "Default": "",
+        "Desc": [
+          "Which Root filesystem prefix to use",
+          "This can be a filesystem path",
+          "\teg: ~/RootFS/Debian_x86_64",
+          "Or this can be a name of a rootfs",
+          "If the named rootfs exists in the FEX data folder then it will use that one",
+          "\teg: $HOME/.fex-emu/RootFS/<RootFS name>/",
+          "Or if you have XDG_DATA_HOME the config will search in that directory",
+          "\teg: $XDG_DATA_HOME/.fex-emu/RootFS/<RootFS name>/"
+        ]
+      },
+      "ThunkHostLibs": {
+        "Type": "str",
+        "Default": "@CMAKE_INSTALL_FULL_LIBDIR@/fex-emu/HostThunks",
+        "Desc": [
+          "Folder to find the host-side thunking libraries."
+        ]
+      },
+      "ThunkGuestLibs": {
+        "Type": "str",
+        "Default": "@CMAKE_INSTALL_PREFIX@/share/fex-emu/GuestThunks",
+        "Desc": [
+          "Folder to find the guest-side thunking libraries."
+        ]
+      },
+      "ThunkConfig": {
+        "Type": "str",
+        "Default": "",
+        "Desc": [
+          "A json file specifying where to overlay the thunks.",
+          "This can be a filesystem path",
+          "\teg: ~/MyThunkConfig.json",
+          "Or this can be a named of a Thunk config file",
+          "If the named config file exists in the FEX data folder folder the it will use that one",
+          "\teg: $HOME/.fex-emu/ThunkConfigs/<ThunkConfig name>",
+          "Or if you have XDG_DATA_HOME the config will search in that directory",
+          "\teg: $XDG_DATA_HOME/.fex-emu/ThunkConfigs/<ThunkConfig name>"
+        ]
+      },
+      "Env": {
+        "Type": "strarray",
+        "Default": "",
+        "Desc": [
+          "Adds an environment variable to the emulated environment."
+        ]
+      },
+      "HostEnv": {
+        "Type": "strarray",
+        "Default": "",
+        "Desc": [
+          "Adds an environment variable to the host environment.",
+          "This can be useful for setting environment variables that thunks can pick up.",
+          "Typically isn't necessary since the guest libc isn't thunked. But is possible."
+        ]
+      },
+      "AdditionalArguments": {
+        "Type": "strarray",
+        "Default": "",
+        "Desc": [
+          "Allows the user to pass additional arguments to the application"
+        ]
+      },
+      "DisableL2Cache": {
+        "Type": "bool",
+        "Default": "false",
+        "Desc": [
+          "Disables FEXCore's JIT L2 cache lookup. Saving memory.",
+          "Can potentially introduce more stutters."
+        ]
+      },
+      "DynamicL1Cache": {
+        "Type": "bool",
+        "Default": "false",
+        "Desc": [
+          "Switches FEXCore's JIT L1 cache to be dynamically sized. Saving memory.",
+          "Can potentially introduce more stutters."
+        ]
+      },
+      "DynamicL1CacheIncreaseCountHeuristic": {
+        "Type": "uint64",
+        "Default": "250",
+        "Desc": [
+          "Threshold of lookups per second that the L1 dynamic cache should increase its size.",
+          "Lower numbers means more aggressive scaling upward to the maximum size.",
+          "Higher numbers means more conservative scaling, using less memory.",
+          "Can potentially introduce stutters, more likely the higher the number.",
+          "Don't have this number smaller than the decrease count!"
+        ]
+      },
+      "DynamicL1CacheDecreaseCountHeuristic": {
+        "Type": "uint64",
+        "Default": "50",
+        "Desc": [
+          "Threshold of lookups per second that the L1 dynamic cache should decrease its size.",
+          "The higher the number, the more aggressively it reduces the L1 cache size.",
+          "Lower numbers means more conservative memory savings.",
+          "Can potentially introduce more stutters, more likely the higher the number.",
+          "Don't have this number larger than the increase count!"
+        ]
+      }
+    },
+    "Debug": {
+      "SingleStep": {
+        "Type": "bool",
+        "Default": "false",
+        "Desc": [
+          "Single stepping configuration."
+        ]
+      },
+      "GdbServer": {
+        "Type": "bool",
+        "Default": "false",
+        "Desc": [
+          "Enables the GDB server."
+        ]
+      },
+      "DumpIR": {
+        "Type": "str",
+        "Default": "no",
+        "Desc": [
+          "Folder to dump the IR in to.",
+          "[no, stdout, stderr, server, <Folder>]"
+        ]
+      },
+      "PassManagerDumpIR": {
+        "Type": "strenum",
+        "Default": "FEXCore::Config::PassManagerDumpIR::OFF",
+        "Enums": {
+          "BEFOREOPT": "beforeopt",
+          "AFTEROPT": "afteropt",
+          "BEFOREPASS": "beforepass",
+          "AFTERPASS": "afterpass"
+        },
+        "Desc": [
+          "Allows controlling when FEX dumps its IR.",
+          "\toff: IR dumping will be disabled",
+          "\tbeforeopt: Dump IR before any optimizations",
+          "\tafteropt: Dump IR after all optimizations",
+          "\tbeforepass: Dump IR before every optimization pass",
+          "\tafterpass: Dump IR after every optimization pass"
+        ]
+      },
+      "DumpGPRs": {
+        "Type": "bool",
+        "Default": "false",
+        "Desc": [
+          "When the test harness ends, print the GPR state."
+        ]
+      },
+      "O0": {
+        "Type": "bool",
+        "Default": "false",
+        "Desc": [
+          "Disables optimizations passes for debugging."
+        ]
+      },
+      "GlobalJITNaming": {
+        "Type": "bool",
+        "Default": "false",
+        "Desc": [
+          "Uses JITSymbols to name all JIT state as one symbol",
+          "Useful for querying how much time is spent inside of the JIT",
+          "Profiling tools will show JIT time as FEXJIT"
+        ]
+      },
+      "LibraryJITNaming": {
+        "Type": "bool",
+        "Default": "false",
+        "Desc": [
+          "Uses JITSymbols to name JIT symbols grouped by library",
+          "Useful for querying how much time is spent in each guest library",
+          "Can be used to help guide thunk generation"
+        ]
+      },
+      "BlockJITNaming": {
+        "Type": "bool",
+        "Default": "false",
+        "Desc": [
+          "Uses JITSymbols to name JIT symbols",
+          "Useful for determining hot blocks of code",
+          "Has some file writing overhead per JIT block"
+        ]
+      },
+      "GDBSymbols": {
+        "Type": "bool",
+        "Default": "false",
+        "Desc": [
+          "Integrates with GDB using the JIT interface.",
+          "Needs the fex jit loader in GDB, which can be loaded via `jit-reader-load libFEXGDBReader.so.`",
+          "Also needs x86_64-linux-gnu-objdump in PATH.",
+          "Can be very slow."
+        ]
+      },
+      "InjectLibSegFault": {
+        "Type": "bool",
+        "Default": "false",
+        "Desc": [
+          "Sets the environment variable LD_PRELOAD=libSegFault.so",
+          "This allows the user to very easily enable libSegFault without dealing with environment variables",
+          "Very useful for applications that have launch scripts that set the variable to nothing at launch",
+          "Set this in an application configuration for injecting in to only specific applications.",
+          "\tNote: If x86/x86_64 libSegFault.so isn't installed then this option won't work."
+        ]
+      },
+      "Disassemble": {
+        "Type": "strenum",
+        "Default": "FEXCore::Config::Disassemble::OFF",
+        "Enums": {
+          "DISPATCHER": "dispatcher",
+          "BLOCKS": "blocks",
+          "STATS": "stats"
+        },
+        "Desc": [
+          "Allows controlling of the vixl disassembler.",
+          "\toff: No disassembly will be output",
+          "\tdispatcher: Will enable disassembly of the JIT dispatcher loop",
+          "\tblocks: Will enable disassembly of the translated instruction code blocks",
+          "\tstats: Will print stats when disassembling the code"
+        ]
+      },
+      "ForceSVEWidth": {
+        "Type": "uint32",
+        "Default": "0",
+        "Desc": [
+          "Allows overriding the SVE width in the vixl simulator.",
+          "Useful as a debugging feature."
+        ]
+      },
+      "DisableTelemetry": {
+        "Type": "bool",
+        "Default": "false",
+        "Desc": [
+          "Disables telemetry at runtime.",
+          "Useful for CI instcountCI mostly"
+        ]
+      }
+    },
+    "Logging": {
+      "SilentLog": {
+        "Type": "bool",
+        "Default": "true",
+        "Desc": [
+          "Disables logging"
+        ]
+      },
+      "OutputLog": {
+        "Type": "str",
+        "Default": "server",
+        "Desc": [
+          "File to write FEX output to.",
+          "[stderr, server, <Filename>]"
+        ]
+      },
+      "TelemetryDirectory": {
+        "Type": "str",
+        "Default": "",
+        "Desc": [
+          "Redirects the telemetry folder that FEX usually writes to.",
+          "By default telemetry data is stored in {$FEX_APP_DATA_LOCATION,{$XDG_DATA_HOME,$HOME}/.fex-emu/Telemetry/}"
+        ]
+      },
+      "ProfileStats": {
+        "Type": "bool",
+        "Default": "false",
+        "Desc": [
+          "Enables FEX's low-overhead sampling profile statistics.",
+          "Requires a supported version of Mangohud to see the results"
+        ]
+      },
+      "EnableGpuvisProfiling": {
+        "Type": "bool",
+        "Default": "false",
+        "Desc": [
+          "Enables profiling when FEX was built with the gpuvis profiler backend."
+        ]
+      }
+    },
+    "Hacks": {
+      "SMCChecks": {
+        "Type": "uint8",
+        "Default": "FEXCore::Config::CONFIG_SMC_MTRACK",
+        "TextDefault": "mtrack",
+        "ArgumentHandler": "SMCCheckHandler",
+        "Desc": [
+          "Checks code for modification before execution.",
+          "\tnone: No checks",
+          "\tmtrack: Page tracking based invalidation (default)",
+          "\tfull: Validate code before every run (slow)"
+        ]
+      },
+      "TSOEnabled": {
+        "Type": "bool",
+        "Default": "true",
+        "Desc": [
+          "Controls TSO IR ops.",
+          "Highly likely to break any multithreaded application if disabled."
+        ]
+      },
+      "VectorTSOEnabled": {
+        "Type": "bool",
+        "Default": "false",
+        "Desc": [
+          "When TSO emulation is enabled, controls if vector loadstores should also be atomic."
+        ]
+      },
+      "MemcpySetTSOEnabled": {
+        "Type": "bool",
+        "Default": "false",
+        "Desc": [
+          "When TSO emulation is enabled, controls if memcpy and memset should also be atomic.",
+          "Only affects REP MOVS and REP STOS instructions"
+        ]
+      },
+      "HalfBarrierTSOEnabled": {
+        "Type": "bool",
+        "Default": "true",
+        "Desc": [
+          "When TSO emulation is enabled, controls if unaligned loads and stores should be backpatched to half-barrier atomics.",
+          "Can be dangerous due to aligned loadstores through the same code now become non-atomic."
+        ]
+      },
+      "StrictInProcessSplitLocks": {
+        "Type": "bool",
+        "Default": "false",
+        "Desc": [
+          "Strict global lock when handling an unaligned atomic that crosses a 16-byte or cacheline granularity",
+          "This is required to ensure a split-lock doesn't tear inside the process"
+        ]
+      },
+      "KernelUnalignedAtomicBackpatching": {
+        "Type": "bool",
+        "Default": "true",
+        "Desc": [
+          "When the kernel unaligned atomic handler is enabled, use backpatching to reduce kernel context switches."
+        ]
+      },
+      "VolatileMetadata": {
+        "Type": "bool",
+        "Default": "true",
+        "Desc": [
+          "Use volatile metadata in PE files to inform TSO instructions when available.",
+          "When metadata is unavailable falls back to the currently enabled TSO options."
+        ]
+      },
+      "X87ReducedPrecision": {
+        "Type": "bool",
+        "Default": "false",
+        "Desc": [
+          "Emulates X87 floating point using 64-bit precision. This reduces emulation accuracy and may result in rendering bugs."
+        ]
+      },
+      "StallProcess": {
+        "Type": "bool",
+        "Default": "false",
+        "Desc": [
+          "Forces a process to stall out on initialization",
+          "Useful for a process that keeps restarting and doesn't work"
+        ]
+      },
+      "HideHypervisorBit": {
+        "Type": "bool",
+        "Default": "false",
+        "Desc": [
+          "Hides the hypervisor CPUID bit when set.",
+          "Should only be used for applications that have issues with this set."
+        ]
+      },
+      "StartupSleep": {
+        "Type": "uint32",
+        "Default": "0",
+        "Desc": [
+          "Sleeps the process at startup for a duration of seconds.",
+          "Useful if an application crashes too quickly to attach a debugger."
+        ]
+      },
+      "StartupSleepProcName": {
+        "Type": "str",
+        "Default": "",
+        "Desc": [
+          "Contrains the startup sleep to only apply to processes that match this name."
+        ]
+      },
+      "MonoHacks": {
+        "Type": "bool",
+        "Default": "true",
+        "Desc": [
+          "Permits a hook-based SMC approach and smaller JIT blocks when mono is detected."
+        ]
+      }
+    },
+    "Misc": {
+      "ServerSocketPath": {
+        "Type": "str",
+        "Default": "",
+        "Desc": [
+          "Override for a FEXServer socket path. Only useful for chroots."
+        ]
+      },
+      "NeedsSeccomp": {
+        "Type": "bool",
+        "Default": "false",
+        "Desc": [
+          "Disables inline syscalls in order to support seccomp handling"
+        ]
+      },
+      "ExtendedVolatileMetadata": {
+        "Type": "str",
+        "Default": "",
+        "Desc": [
+          "Configuration provided volatile metadata. Only implemented for WoW64/arm64ec.",
+          "Limited in its use but can be handy.",
+          "Extends on top of what Microsoft has for volatile metadata, but also supported for WoW64.",
+          "Colon delimited modules, then semi-colon delimited instructions, then comma delimited ranges",
+          "Default disables TSO in the module, unless instructions overlap the range",
+          "<module>;<offset begin>-<offset-end>,...;<instruction offset to force TSO>,...:<another>",
+          "examples:",
+          "  * Disable TSO for a full module: Just provide the module name:",
+          "      `hl2_linux`",
+          "  * Disable TSO for a part of the module:",
+          "      `hl2_linux;<offset begin>-<offset-end>`",
+          "  * Disable TSO for a part of the module, but enable TSO for some instructions within the module",
+          "      `hl2_linux;<offset begin>-<offset-end>;<instruction offset>,<instruction offset>`",
+          "  * Disable TSO for multiple modules",
+          "      `hl2_linux:libsdl2.so`"
+        ]
+      }
+    }
+  },
+  "UnnamedOptions": {
+    "Misc": {
+      "INTERPRETER_INSTALLED": {
+        "Type": "bool",
+        "Default": "false"
+      },
+      "APP_FILENAME": {
+        "Type": "str",
+        "Default": ""
+      },
+      "APP_CONFIG_NAME": {
+        "Type": "str",
+        "Default": "",
+        "Desc": [
+          "This is the application config name that has been loaded.",
+          "This differs from APP_FILENAME in two ways",
+          "Where APP_FILENAME always points to the executable path that FEX-Emu is executing.",
+          "This matches what is used to load the AppLayer configuration name.",
+          "When running through a compatibility layer like wine, this will only be the exe name, instead of wine full path."
+        ]
+      },
+      "IS64BIT_MODE": {
+        "Type": "bool",
+        "Default": "false"
+      },
+      "DISABLE_VIXL_INDIRECT_RUNTIME_CALLS": {
+        "Type": "bool",
+        "Default": "true",
+        "Desc": [
+          "This option is used for the InstructionCountCI so it can generate the same codegen between Arm64 hosts and vixl simulator hosts.",
+          "Vixl simulator indirect runtime calls are a special hlt instruction with metadata after it. Effectively making a custom call instruction.",
+          "With visual simulator calls disabled, the code generation would be the same as on a native Arm64 host, but running the code is broken."
+        ]
+      }
+    }
+  }
+}
+

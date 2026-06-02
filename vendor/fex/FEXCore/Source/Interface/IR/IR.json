@@ -1,0 +1,3202 @@
+{
+  "Docs": [
+    "IRTypes define types that can be used directly in the IR.",
+    "These will translate to the underlying C types when stored in the op data",
+    "",
+    "SSA types are special cased",
+    "  SSA = untyped",
+    "  GPR = GPR class type",
+    "  FPR = FPR class type",
+    "Declaring the SSA types correctly will allow validation passes to ensure the op is getting passed correct arguments",
+    "",
+    "Arguments must always follow a particular order. <Type>:<Prefix><Name>",
+    "Type must always be an IRType",
+    "Prefix currently can be one of the following: #, $",
+    "  #: This is a temporary argument that is in the IR Emitter arguments",
+    "    - This will not be stored in the resulting IR op data structure",
+    "  $: This is a value that will be stored inside of the IR op data structure",
+    "    - If it is type SSA, GPR, or FPR then it is an SSA type",
+    "    - These will get added to the SSA argument union to ensure RA happens",
+    "",
+    "IR op definition follows the structure of <SSA Type> = <IROp> <Arguments>",
+    "",
+    "Eg:",
+    "IR op with no result and no arguments",
+    "  CallbackReturn",
+    "",
+    "IR op with result and no arguments",
+    "  GPR = ProcessorID",
+    "",
+    "IR op with no result and non-SSA argument",
+    "  Fence FenceType:$Type",
+    "",
+    "IR op with no result and SSA arguments",
+    "  SetRoundingMode GPR:$Mode",
+    "",
+    "IR op with result and SSA arguments",
+    "  GPR = Add GPR:$Src1, GPR:$Src2",
+
+    "",
+    "## Op members ##",
+    "* Desc",
+    "  * List of text for documenting this IR op.",
+    "* OpClass",
+    "  * Textual class to group IR ops by type",
+    "* DestClass",
+    "  * SSA class of the return when the return type is `SSA`",
+    "  * Not used if the destination type is one of {GPR, FPR}",
+    "* DestSize",
+    "  * The size of the destination type",
+    "* EmitValidation",
+    "  * List of validations to emit for the IR emitter",
+    "  * These are validations that can't be automatically inferred and need to be hand-written",
+    ""
+  ],
+  "Enums": {
+    "class CondClass : uint8_t": [
+      "EQ    = 0,",
+      "NEQ   = 1,",
+      "UGE   = 2,",
+      "ULT   = 3,",
+      "MI    = 4,",
+      "PL    = 5,",
+      "VS    = 6,",
+      "VC    = 7,",
+      "UGT   = 8,",
+      "ULE   = 9,",
+      "SGE   = 10,",
+      "SLT   = 11,",
+      "SGT   = 12,",
+      "SLE   = 13,",
+      "TSTZ  = 14, /* bit test zero */",
+      "TSTNZ = 15, /* bit test nonzero */",
+      "",
+      "FLU   = 16, /* float less or unordered */",
+      "FGE   = 17, /* float greater or equal */",
+      "FLEU  = 18, /* float less or equal or unordered */",
+      "FGT   = 19, /* float greater */",
+      "FU    = 20, /* float unordered */",
+      "FNU   = 21, /* float not unordered */",
+      "",
+      "AL    = 32, /* always */"
+    ],
+    "class FenceType : uint8_t": [
+      "Load      = 0,",
+      "Store     = 1,",
+      "LoadStore = 2,",
+      "Inst      = 3,"
+    ],
+    "class MemOffsetType : uint8_t": [
+      "SXTX = 0,",
+      "UXTW = 1,",
+      "SXTW = 2,"
+    ],
+    "class RegClass : uint32_t": [
+      "Invalid  = 0,",
+      "GPR      = 1,",
+      "GPRFixed = 2,",
+      "FPR      = 3,",
+      "FPRFixed = 4,",
+      "Complex  = 5,"
+    ],
+    "class RoundMode : uint8_t": [
+      "Nearest     = 0,",
+      "NegInfinity = 1,",
+      "PosInfinity = 2,",
+      "TowardsZero = 3, /* Truncate */",
+      "Host        = 4,"
+    ],
+    "class ConstPad : uint8_t": [
+      "NoPad = 0,",
+      "DoPad = 1,",
+      "AutoPad = 2,"
+    ]
+  },
+  "Defines": [
+    "constexpr uint8_t NumClasses {6}",
+
+    "constexpr uint8_t FCMP_FLAG_EQ        = 0",
+    "constexpr uint8_t FCMP_FLAG_LT        = 1",
+    "constexpr uint8_t FCMP_FLAG_UNORDERED = 2",
+
+    "struct BreakDefinition {",
+    "  uint16_t ErrorRegister;",
+    "  uint8_t Signal;",
+    "  uint8_t TrapNumber;",
+    "  uint8_t si_code;",
+    "};"
+  ],
+  "IRTypes" : {
+    "i1":  "bool",
+    "i8":  "int8_t",
+    "i16": "int16_t",
+    "i32": "int32_t",
+    "i64": "int64_t",
+    "u8":  "uint8_t",
+    "u16": "uint16_t",
+    "u32": "uint32_t",
+    "u64": "uint64_t",
+    "OpSize": "FEXCore::IR::OpSize",
+    "SSA": "OrderedNode*",
+    "GPR": "OrderedNode*",
+    "FPR": "OrderedNode*",
+    "FenceType": "FenceType",
+    "RegisterClass": "RegClass",
+    "CondClass": "CondClass",
+    "SHA256Sum": "SHA256Sum",
+    "MemOffsetType": "MemOffsetType",
+    "BreakDefinition": "BreakDefinition",
+    "RoundType": "RoundMode",
+    "ConstPad": "ConstPad",
+    "FloatCompareOp": "FloatCompareOp",
+    "NamedVectorConstant": "FEXCore::IR::NamedVectorConstant",
+    "IndexNamedVectorConstant": "FEXCore::IR::IndexNamedVectorConstant",
+    "ShiftType": "FEXCore::IR::ShiftType",
+    "BranchHint": "FEXCore::IR::BranchHint",
+    "Array16": "std::array<uint8_t, 16>"
+  },
+  "Ops": {
+    "Misc": {
+      "Dummy": {
+        "HasSideEffects": true,
+        "SwitchGen": false,
+        "JITDispatchOverride": "NoOp"
+      },
+      "IRHeader SSA:$Blocks, u64:$OriginalRIP, u32:$BlockCount, u32:$NumHostInstructions, u32:$SpillSlots, i1:$PostRA{false}, i1:$HasX87{false}, i1:$ReadsParity{false}": {
+        "SwitchGen": false,
+        "JITDispatchOverride": "NoOp"
+      },
+      "CodeBlock SSA:$Begin, SSA:$Last, u32:$ID, i1:$EntryPoint{false}, u32:$GuestEntryOffset{0}": {
+        "SwitchGen": false,
+        "RAOverride": "0",
+        "JITDispatchOverride": "NoOp"
+      },
+      "BeginBlock SSA:$BlockHeader": {
+        "HasSideEffects": true,
+        "SwitchGen": false,
+        "RAOverride": "0",
+        "JITDispatchOverride": "NoOp"
+      },
+      "InvalidateFlags u64:$Flags": {
+        "HasSideEffects": true,
+        "JITDispatchOverride": "NoOp"
+      },
+
+      "EndBlock SSA:$BlockHeader": {
+        "HasSideEffects": true,
+        "SwitchGen": false,
+        "RAOverride": "0",
+        "JITDispatchOverride": "NoOp"
+      },
+
+      "GuestOpcode u32:$GuestEntryOffset": {
+        "Desc": ["Marks the beginning of a guest opcode"],
+        "HasSideEffects": true
+      },
+
+      "GPR = ValidateCode Array16:$CodeOriginal, GPR:$Address, u8:$CodeLength": {
+        "HasSideEffects": true,
+        "HasDest": true,
+        "DestSize": "OpSize::i64Bit"
+      },
+
+      "ThreadRemoveCodeEntry": {
+        "HasSideEffects": true
+      },
+
+      "GPR = ProcessorID": {
+        "Desc": ["Returns the processor ID correlating to the current running CPU",
+                 "This may be out of date by time this instruction is executed so care must be taken",
+                 "This same information can be gotten from syscall getcpu(&cpu, &node)",
+                 "uint32_t Res = (node << 12) | cpu;",
+                 "This means it has a limitation of 4096 CPU cores. Which is fine and matches x86 behaviour"
+                ],
+        "DestSize": "OpSize::i64Bit"
+      },
+      "GPR = GetRoundingMode": {
+        "Desc": ["Gets the current rounding mode options"
+                ],
+        "DestSize": "OpSize::i32Bit"
+      },
+
+      "SetRoundingMode GPR:$RoundMode, i1:$SetDAZ, GPR:$MXCSR": {
+        "Desc": ["Sets the current rounding mode options for the thread"
+                ],
+        "HasSideEffects": true
+      },
+      "GPR = PushRoundingMode u8:$RoundMode": {
+        "Desc": ["Override the current rounding mode options for the thread, returning old FPCR"
+                ],
+        "DestSize": "OpSize::i64Bit",
+        "HasSideEffects": true
+      },
+      "PopRoundingMode GPR:$FPCR": {
+        "Desc": ["Resets rounding mode after PushRoundingMode operation"
+                ],
+        "HasSideEffects": true
+      },
+      "Print SSA:$Value": {
+        "HasSideEffects": true,
+        "Desc": ["Debug operation that prints an SSA value to the console",
+                 "May only print 64bits of the value"]
+      },
+      "GPR = AllocateGPR i1:$ForPair": {
+        "Desc": ["Silly pseudo-instruction to allocate a register for a future destination",
+                 "Note: if an instruction uses allocated destinations-as-sources,",
+                 "it cannot use a regular destination too. This ensures RA correctness.",
+                 "This is a kludge to deal with the IR's lack of multiple destinations",
+                 "If ForPair is set, RA will try to allocate the base of a register pair"],
+        "DestSize": "OpSize::i64Bit",
+        "JITDispatch": false
+      },
+      "FPR = AllocateFPR OpSize:#RegisterSize, OpSize:#ElementSize": {
+        "Desc": ["Like AllocateGPR, but for FPR"],
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize",
+        "JITDispatch": false
+      },
+      "GPR = AllocateGPRAfter GPR:$After": {
+        "Desc": ["Silly pseudo-instruction to allocate a register for a future destination",
+                 "This is a kludge to deal with the IR's lack of multiple destinations",
+                 "RA will attempt to allocate to the register after $After.",
+                 "It may not succeed."],
+        "DestSize": "OpSize::i64Bit",
+        "JITDispatch": false
+      },
+      "GPR = RDRAND i1:$GetReseeded": {
+        "Desc": ["Uses the hardware random number generator to generate a 64bit number",
+                 "The boolean argument asks if we should be reading the reseeded number or not",
+                 "Reseeded RNG calculation is more expensive and will be heavier to use",
+                 "Returns the 64-bit number",
+                 "Sets the Z flag if the number is valid.",
+                 "RNG hardware is allowed to fail early and return. Software must always check this"
+                ],
+        "HasSideEffects": true,
+        "DestSize": "OpSize::i64Bit"
+      },
+      "Yield": {
+        "HasSideEffects": true,
+        "Desc": ["This is a hint instruction that the CPU is likely to do a spin so it might want to pause to help out SMP",
+                 "Can be implemented as a NOP if necessary"]
+      },
+      "WFET GPR:$Upper, GPR:$Lower": {
+        "HasSideEffects": true,
+        "Desc": [
+          "Implement a low power wait attempting to sleep until RDTSC >= Upper:Lower.",
+          "Will spuriously wake up."
+	]
+      },
+      "MonoBackpatcherWrite OpSize:$Size, GPR:$Value, GPR:$Addr": {
+        "HasSideEffects": true,
+        "Desc": [ "Writes and invalidates the target address with the invalidation mutex locked. This is a fault-avoiding",
+                  "replacement for the atomic SMC writes used in the mono callsite backpatcher." ],
+        "EmitValidation": [
+          "Size == FEXCore::IR::OpSize::i32Bit || Size == FEXCore::IR::OpSize::i64Bit"
+        ]
+      }
+    },
+    "Branch": {
+      "Jump SSA:$TargetBlock": {
+        "HasSideEffects": true,
+        "RAOverride": "0"
+      },
+      "CondJump SSA:$Cmp1, SSA:$Cmp2, SSA:$TrueBlock, SSA:$FalseBlock, CondClass:$Cond{CondClass::NEQ}, OpSize:$CompareSize{OpSize::iInvalid}, i1:$FromNZCV{false}": {
+        "Inline": ["", "AddSub"],
+        "HasSideEffects": true,
+        "RAOverride": "2"
+      },
+      "ExitFunction OpSize:#Size, GPR:$NewRIP, BranchHint:$Hint, GPR:$CallReturnAddress, SSA:$CallReturnBlock": {
+        "Desc": ["Exits the current JIT function with a target RIP"
+                ],
+        "Inline": ["Any"],
+        "HasSideEffects": true,
+        "DestSize": "Size",
+        "RAOverride": "2"
+      },
+      "Break BreakDefinition:$Reason": {
+        "HasSideEffects": true
+      },
+      "CallbackReturn": {
+        "HasSideEffects": true
+      },
+      "GPR = Syscall GPR:$SyscallID, GPR:$Arg0, GPR:$Arg1, GPR:$Arg2, GPR:$Arg3, GPR:$Arg4, GPR:$Arg5": {
+        "HasSideEffects": true,
+        "Desc": ["Dispatches a guest syscall through to the SyscallHandler class"
+                ],
+        "DestSize": "OpSize::i64Bit"
+      },
+
+      "Thunk GPR:$ArgPtr, SHA256Sum:$ThunkNameHash": {
+        "HasSideEffects": true
+      },
+
+      "GPR:$EAX, GPR:$EBX, GPR:$ECX, GPR:$EDX = CPUID GPR:$Function, GPR:$Leaf": {
+        "Desc": ["Calls in to the CPUID handler function to return emulated CPUID"],
+        "DestSize": "OpSize::i32Bit",
+        "HasSideEffects": true
+      },
+      "GPR:$EAX, GPR:$EDX = XGetBV GPR:$Function": {
+        "Desc": ["Calls in to the XCR handler function to return emulated XCR"],
+        "DestSize": "OpSize::i32Bit",
+        "HasSideEffects": true
+      }
+    },
+    "Moves": {
+      "GPR = Copy GPR:$Source": {
+        "Desc": ["GPR copy, generated by RA to split live ranges"],
+        "DestSize": "OpSize::i64Bit"
+      }
+    },
+    "StaticRA": {
+      "SSA = LoadRegister u32:$Reg, RegisterClass:$Class, OpSize:#Size": {
+        "Desc": ["Loads a value from the given register",
+                 "Size must match the execution mode."],
+        "DestSize": "Size"
+      },
+
+      "GPR = LoadPF OpSize:#Size": {
+        "Desc": ["Loads raw PF"],
+        "DestSize": "Size"
+      },
+
+      "GPR = LoadAF OpSize:#Size": {
+        "Desc": ["Loads raw PF"],
+        "DestSize": "Size"
+      },
+
+      "SSA = StoreRegister SSA:$Value, OpSize:#Size": {
+         "HasSideEffects": true,
+        "Desc": ["Stores a value to a given register.",
+                 "Size must match the execution mode."],
+        "DestSize": "Size"
+      },
+
+      "StorePF GPR:$Value, OpSize:#Size": {
+        "HasSideEffects": true,
+        "Desc": ["Stores raw PF"],
+        "DestSize": "Size"
+      },
+
+      "StoreAF GPR:$Value, OpSize:#Size": {
+        "HasSideEffects": true,
+        "Desc": ["Stores raw AF"],
+        "DestSize": "Size"
+      }
+    },
+    "Memory": {
+      "SSA = LoadContext OpSize:#ByteSize, RegisterClass:$Class, u32:$Offset": {
+        "Desc": ["Loads a value from the context with offset",
+                 "Dest = Ctx[Offset]"
+                ],
+        "DestSize": "ByteSize",
+        "EmitValidation": [
+          "($Class == RegClass::GPR && (#ByteSize == IR::OpSize::i8Bit || #ByteSize == IR::OpSize::i16Bit || #ByteSize == IR::OpSize::i32Bit || #ByteSize == IR::OpSize::i64Bit)) || $Class == RegClass::FPR",
+          "($Class == RegClass::FPR && (#ByteSize == IR::OpSize::i8Bit || #ByteSize == IR::OpSize::i16Bit || #ByteSize == IR::OpSize::i32Bit || #ByteSize == IR::OpSize::i64Bit || #ByteSize == IR::OpSize::i128Bit || #ByteSize == IR::OpSize::i256Bit)) || $Class == RegClass::GPR",
+          "!($Offset >= offsetof(Core::CPUState, gregs[0]) && $Offset < offsetof(Core::CPUState, gregs[16])) && \"Can't LoadContext to GPR\"",
+          "!($Offset >= offsetof(Core::CPUState, xmm.avx.data[0]) && $Offset < offsetof(Core::CPUState, xmm.avx.data[16])) && \"Can't LoadContext to XMM\""
+        ]
+      },
+
+      "SSA:$Value1, SSA:$Value2 = LoadContextPair OpSize:#ByteSize, RegisterClass:$Class, u32:$Offset": {
+        "Desc": ["Loads a pair of values from the context with offset",
+                 "Value0 = Ctx[Offset], Value1 = Ctx[Offset + ByteSize]"
+                ],
+        "HasSideEffects": true,
+        "DestSize": "ByteSize",
+        "EmitValidation": [
+          "($Class == RegClass::GPR && (#ByteSize == IR::OpSize::i8Bit || #ByteSize == IR::OpSize::i16Bit || #ByteSize == IR::OpSize::i32Bit || #ByteSize == IR::OpSize::i64Bit)) || $Class == RegClass::FPR",
+          "($Class == RegClass::FPR && (#ByteSize == IR::OpSize::i8Bit || #ByteSize == IR::OpSize::i16Bit || #ByteSize == IR::OpSize::i32Bit || #ByteSize == IR::OpSize::i64Bit || #ByteSize == IR::OpSize::i128Bit || #ByteSize == IR::OpSize::i256Bit)) || $Class == RegClass::GPR",
+          "!($Offset >= offsetof(Core::CPUState, gregs[0]) && $Offset < offsetof(Core::CPUState, gregs[16])) && \"Can't LoadContext to GPR\"",
+          "!($Offset >= offsetof(Core::CPUState, xmm.avx.data[0]) && $Offset < offsetof(Core::CPUState, xmm.avx.data[16])) && \"Can't LoadContext to XMM\""
+        ]
+      },
+
+      "StoreContext OpSize:#ByteSize, RegisterClass:$Class, SSA:$Value, u32:$Offset": {
+        "Desc": ["Stores a value to the context with offset",
+                 "Ctx[Offset] = Value",
+                 "Zero Extends if value's type is too small",
+                 "Truncates if value's type is too large"
+                ],
+        "Inline": ["Zero", ""],
+        "HasSideEffects": true,
+        "DestSize": "ByteSize",
+        "EmitValidation": [
+          "($Class == RegClass::GPR && (#ByteSize == IR::OpSize::i8Bit || #ByteSize == IR::OpSize::i16Bit || #ByteSize == IR::OpSize::i32Bit || #ByteSize == IR::OpSize::i64Bit)) || $Class == RegClass::FPR",
+          "($Class == RegClass::FPR && (#ByteSize == IR::OpSize::i8Bit || #ByteSize == IR::OpSize::i16Bit || #ByteSize == IR::OpSize::i32Bit || #ByteSize == IR::OpSize::i64Bit || #ByteSize == IR::OpSize::i128Bit || #ByteSize == IR::OpSize::i256Bit)) || $Class == RegClass::GPR",
+          "!($Offset >= offsetof(Core::CPUState, gregs[0]) && $Offset < offsetof(Core::CPUState, gregs[16])) && \"Can't StoreContext to GPR\"",
+          "!($Offset >= offsetof(Core::CPUState, xmm.avx.data[0]) && $Offset < offsetof(Core::CPUState, xmm.avx.data[16])) && \"Can't StoreContext to XMM\""
+        ]
+      },
+
+      "StoreContextPair OpSize:#ByteSize, RegisterClass:$Class, SSA:$Value1, SSA:$Value2, u32:$Offset": {
+        "Desc": ["Stores a pair of values to the context with offset",
+                 "Ctx[Offset] = Value1, Ctx[Offset + ByteSize] = Value2",
+                 "Zero Extends if value's type is too small",
+                 "Truncates if value's type is too large"
+                ],
+        "HasSideEffects": true,
+        "DestSize": "ByteSize",
+        "EmitValidation": [
+          "WalkFindRegClass($Value1) == $Class",
+          "WalkFindRegClass($Value2) == $Class",
+          "($Class == RegClass::GPR && (#ByteSize == IR::OpSize::i8Bit || #ByteSize == IR::OpSize::i16Bit || #ByteSize == IR::OpSize::i32Bit || #ByteSize == IR::OpSize::i64Bit)) || $Class == RegClass::FPR",
+          "($Class == RegClass::FPR && (#ByteSize == IR::OpSize::i8Bit || #ByteSize == IR::OpSize::i16Bit || #ByteSize == IR::OpSize::i32Bit || #ByteSize == IR::OpSize::i64Bit || #ByteSize == IR::OpSize::i128Bit || #ByteSize == IR::OpSize::i256Bit)) || $Class == RegClass::GPR",
+          "!($Offset >= offsetof(Core::CPUState, gregs[0]) && $Offset < offsetof(Core::CPUState, gregs[16])) && \"Can't StoreContext to GPR\"",
+          "!($Offset >= offsetof(Core::CPUState, xmm.avx.data[0]) && $Offset < offsetof(Core::CPUState, xmm.avx.data[16])) && \"Can't StoreContext to XMM\""
+        ]
+      },
+
+      "SSA = LoadContextIndexed GPR:$Index, OpSize:#ByteSize, u32:$BaseOffset, u32:$Stride, RegisterClass:$Class": {
+        "Desc": ["Loads a value from the context with offset and indexed by SSA value",
+                 "Dest = Ctx[BaseOffset + Index * Stride]"
+                ],
+        "DestSize": "ByteSize",
+        "EmitValidation": [
+          "($Class == RegClass::GPR && (#ByteSize == IR::OpSize::i8Bit || #ByteSize == IR::OpSize::i16Bit || #ByteSize == IR::OpSize::i32Bit || #ByteSize == IR::OpSize::i64Bit)) || $Class == RegClass::FPR",
+          "($Class == RegClass::FPR && (#ByteSize == IR::OpSize::i8Bit || #ByteSize == IR::OpSize::i16Bit || #ByteSize == IR::OpSize::i32Bit || #ByteSize == IR::OpSize::i64Bit || #ByteSize == IR::OpSize::i128Bit || #ByteSize == IR::OpSize::i256Bit)) || $Class == RegClass::GPR",
+          "!($BaseOffset >= offsetof(Core::CPUState, gregs[0]) && $BaseOffset < offsetof(Core::CPUState, gregs[16])) && \"Can't LoadContextIndexed to GPR\"",
+          "!($BaseOffset >= offsetof(Core::CPUState, xmm.avx.data[0]) && $BaseOffset < offsetof(Core::CPUState, xmm.avx.data[16])) && \"Can't LoadContextIndexed to XMM\""
+        ]
+      },
+      "StoreContextIndexed SSA:$Value, GPR:$Index, OpSize:#ByteSize, u32:$BaseOffset, u32:$Stride, RegisterClass:$Class": {
+        "HasSideEffects": true,
+        "Desc": ["Stores a value to the context with offset and indexed by SSA value",
+                 "Ctx[BaseOffset + Index * Stride] = Value"
+                ],
+        "DestSize": "ByteSize",
+        "EmitValidation": [
+          "WalkFindRegClass($Value) == $Class",
+          "($Class == RegClass::GPR && (#ByteSize == IR::OpSize::i8Bit || #ByteSize == IR::OpSize::i16Bit || #ByteSize == IR::OpSize::i32Bit || #ByteSize == IR::OpSize::i64Bit)) || $Class == RegClass::FPR",
+          "($Class == RegClass::FPR && (#ByteSize == IR::OpSize::i8Bit || #ByteSize == IR::OpSize::i16Bit || #ByteSize == IR::OpSize::i32Bit || #ByteSize == IR::OpSize::i64Bit || #ByteSize == IR::OpSize::i128Bit || #ByteSize == IR::OpSize::i256Bit)) || $Class == RegClass::GPR",
+          "!($BaseOffset >= offsetof(Core::CPUState, gregs[0]) && $BaseOffset < offsetof(Core::CPUState, gregs[16])) && \"Can't StoreContextIndexed to GPR\"",
+          "!($BaseOffset >= offsetof(Core::CPUState, xmm.avx.data[0]) && $BaseOffset < offsetof(Core::CPUState, xmm.avx.data[16])) && \"Can't StoreContextIndexed to XMM\""
+        ]
+      },
+      "GPR = FormContextAddress OpSize:#Size, GPR:$Index, u32:$Stride": {
+        "Desc": ["Forms an address into the context structure indexed by SSA value",
+                 "Dest = Ctx + Index * Stride",
+                 "This allows backends to compute the address once and reuse it for multiple memory operations",
+                 "Stride must be a power of 2"
+                ],
+        "DestSize": "Size",
+        "EmitValidation": [
+          "#Size == IR::OpSize::i64Bit"
+        ]
+      },
+
+      "SpillRegister SSA:$Value, u32:$Slot, RegisterClass:$Class": {
+        "HasSideEffects": true,
+        "Desc": ["Spills an SSA value to memory",
+                 "Spill slots are register allocated and has live ranges calculated to handle slot calculation",
+                 "```diff\n- !Don't use this op. It is for RA to handle spilling and filling!\n```"
+                ],
+        "EmitValidation": [
+          "WalkFindRegClass($Value) == $Class"
+        ]
+      },
+
+      "SSA = FillRegister OpSize:#Size, OpSize:#ElementSize, u32:$Slot, RegisterClass:$Class": {
+        "Desc": ["Fills a register from a spill slot",
+                 "Spill slots are register allocated and has live ranges calculated to handle slot calculation",
+                 "```diff\n- !Don't use this op. It is for RA to handle spilling and filling!\n```"
+                ],
+        "DestSize": "Size",
+        "ElementSize": "ElementSize"
+      },
+
+      "GPR = LoadNZCV": {
+        "Desc": ["Loads value of NZCV register"],
+        "DestSize": "OpSize::i32Bit"
+      },
+
+      "StoreNZCV GPR:$Value": {
+        "HasSideEffects": true,
+        "Desc": ["Stores value to NZCV register"],
+        "DestSize": "OpSize::i32Bit"
+      },
+
+      "GPR = LoadDF": {
+        "Desc": ["Loads the decimal flag from the context object in -1/1",
+                  "representation for easy consumption"
+                ],
+        "DestSize": "OpSize::i64Bit"
+      },
+
+      "SSA = LoadMem RegisterClass:$Class, OpSize:#Size, GPR:$Addr, GPR:$Offset, OpSize:$Align, MemOffsetType:$OffsetType, u8:$OffsetScale": {
+        "Inline": ["", "Mem"],
+        "DestSize": "Size"
+      },
+
+      "SSA:$Value1, SSA:$Value2 = LoadMemPair RegisterClass:$Class, OpSize:#Size, GPR:$Addr, u32:$Offset": {
+        "Desc": ["Load a pair of values from memory."],
+        "DestSize": "Size",
+        "HasSideEffects": true
+      },
+
+      "StoreMem RegisterClass:$Class, OpSize:#Size, SSA:$Value, GPR:$Addr, GPR:$Offset, OpSize:$Align, MemOffsetType:$OffsetType, u8:$OffsetScale": {
+        "Desc": [ "Stores a value to memory.",
+                  "Zero Extends if value's type is too small",
+                  "Truncates if value's type is too large"
+                ],
+        "Inline": ["Zero", "", "Mem"],
+        "HasSideEffects": true,
+        "DestSize": "Size"
+      },
+
+      "StoreMemPair RegisterClass:$Class, OpSize:#Size, SSA:$Value1, SSA:$Value2, GPR:$Addr, u32:$Offset": {
+        "Desc": [ "Stores a pair of values to memory.",
+                  "Zero Extends if value's type is too small",
+                  "Truncates if value's type is too large"
+                ],
+        "Inline": ["Zero", "Zero"],
+        "HasSideEffects": true,
+        "DestSize": "Size"
+      },
+
+      "StoreMemX87SVEOptPredicate OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Value, GPR:$Addr": {
+        "Desc": [ "Stores a value to memory using SVE predicate mask that's designed",
+                  "specifically for use in the X87 SVE Ldst optimization." ],
+        "DestSize": "RegisterSize",
+        "HasSideEffects": true,
+        "ElementSize": "ElementSize"
+      },
+      "FPR = LoadMemX87SVEOptPredicate OpSize:#RegisterSize, OpSize:#ElementSize, GPR:$Addr": {
+        "Desc": [ "Loads a value to memory using SVE predicate mask that's designed",
+                  "specifically for use in the X87 SVE Ldst optimization." ],
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+
+      "SSA = LoadMemTSO RegisterClass:$Class, OpSize:#Size, GPR:$Addr, GPR:$Offset, OpSize:$Align, MemOffsetType:$OffsetType, u8:$OffsetScale": {
+        "Desc": ["Does a x86 TSO compatible load from memory. Offset must be Invalid()."
+                ],
+        "Inline": ["", "Memtso"],
+        "DestSize": "Size"
+      },
+
+      "StoreMemTSO RegisterClass:$Class, OpSize:#Size, SSA:$Value, GPR:$Addr, GPR:$Offset, OpSize:$Align, MemOffsetType:$OffsetType, u8:$OffsetScale": {
+        "Desc": ["Does a x86 TSO compatible store to memory. Offset must be Invalid()."
+                ],
+        "Inline": ["Zero", "", "Memtso"],
+        "HasSideEffects": true,
+        "DestSize": "Size"
+      },
+
+      "FPR = VLoadVectorMasked OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Mask, GPR:$Addr, GPR:$Offset, MemOffsetType:$OffsetType, u8:$OffsetScale": {
+        "Desc": ["Does a masked load similar to VPMASKMOV/VMASKMOV where the upper bit of each element",
+                 "determines whether or not that element will be loaded from memory"],
+        "ImplicitFlagClobber": true,
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "VStoreVectorMasked OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Mask, FPR:$Data, GPR:$Addr, GPR:$Offset, MemOffsetType:$OffsetType, u8:$OffsetScale": {
+        "Desc": ["Does a masked store similar to VPMASKMOV/VMASKMOV where the upper bit of each element",
+                 "determines whether or not that element will be stored to memory"],
+        "HasSideEffects": true,
+        "ImplicitFlagClobber": true,
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = VLoadVectorGatherMasked OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Incoming, FPR:$Mask, GPR:$AddrBase, FPR:$VectorIndexLow, FPR:$VectorIndexHigh, OpSize:$VectorIndexElementSize, u8:$OffsetScale, u8:$DataElementOffsetStart, u8:$IndexElementOffsetStart, OpSize:$AddrSize": {
+        "Desc": [
+          "Does a masked load similar to VPGATHERD* where the upper bit of each element",
+          "determines whether or not that element will be loaded from memory.",
+          "Most of VSIB encoding is passed directly through to the IR operation."
+        ],
+        "TiedSource": 0,
+        "ImplicitFlagClobber": true,
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize",
+        "EmitValidation": [
+          "$VectorIndexElementSize == OpSize::i32Bit || $VectorIndexElementSize == OpSize::i64Bit"
+        ]
+      },
+      "FPR = VLoadVectorGatherMaskedQPS OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Incoming, FPR:$MaskReg, GPR:$AddrBase, FPR:$VectorIndexLow, FPR:$VectorIndexHigh, u8:$OffsetScale, OpSize:$AddrSize": {
+        "Desc": [
+          "Does a masked load similar to VPGATHERQPS where the upper bit of each element",
+          "determines whether or not that element will be loaded from memory.",
+          "Most of VSIB encoding is passed directly through to the IR operation.",
+          "Only supports the case of 32-bit data element sizes from 64-bit addresses"
+        ],
+        "TiedSource": 0,
+        "ImplicitFlagClobber": true,
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize",
+        "EmitValidation": [
+          "ElementSize == OpSize::i32Bit",
+          "RegisterSize != FEXCore::IR::OpSize::i256Bit && \"What does 256-bit mean in this context?\""
+        ]
+      },
+      "FPR = VLoadVectorElement OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$DstSrc, u8:$Index, GPR:$Addr": {
+        "Desc": ["Does a memory load to a single element of a vector.",
+                 "Leaves the rest of the vector's data intact.",
+                 "Matches arm64 ld1 semantics"],
+        "TiedSource": 0,
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "VStoreVectorElement OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Value, u8:$Index, GPR:$Addr": {
+        "Desc": ["Does a memory store of a single element of a vector.",
+                 "Matches arm64 st1 semantics"],
+        "HasSideEffects": true,
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = VBroadcastFromMem OpSize:#RegisterSize, OpSize:#ElementSize, GPR:$Address": {
+        "Desc": ["Broadcasts an ElementSize value from memory into each element of a vector."],
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "GPR = Push OpSize:#Size, OpSize:$ValueSize, GPR:$Value, GPR:$Addr": {
+        "Desc": [
+          "Pushes a value to the address, returning the new pointer after incrementing.",
+          "The address is decremented by the value size while.",
+          "The return value size is the size of the current operating mode"
+        ],
+        "TiedSource": 1,
+        "HasSideEffects": true,
+        "DestSize": "Size"
+      },
+      "PushTwo OpSize:#Size, OpSize:$ValueSize, GPR:$Value1, GPR:$Value2, GPR:$Addr": {
+        "Desc": [
+          "Push two values to the address, incrementing the pointer in the place.",
+          "Fused post-RA so doesn't have a destination."
+        ],
+        "HasSideEffects": true
+      },
+      "GPR = RMWHandle GPR:$Value": {
+        "Desc": [
+          "This is a special move that indicates the result will be poisoned by a non-SSA instruction writing to its result.",
+          "In effect, it serves to prevent invalid optimizations with non-SSA instructions."
+        ],
+        "DestSize": "OpSize::i64Bit",
+        "HasSideEffects": true,
+        "TiedSource": 0
+      },
+      "GPR:$Addr, GPR:$Value = Pop OpSize:$Size, GPR:$Addr": {
+        "Desc": [
+          "Pops a value from the address, updating the new pointer after incrementing.",
+          "The address is incremented by the size via an RMW source/destintaion."
+        ],
+        "HasSideEffects": true,
+        "DestSize": "Size"
+      },
+      "GPR:$Addr, GPR:$Value1, GPR:$Value2 = PopTwo OpSize:$Size, GPR:$Addr": {
+        "Desc": ["Pop two values from the address. Fused post-RA."],
+        "HasSideEffects": true,
+        "DestSize": "Size"
+      },
+      "GPR = MemSet i1:$IsAtomic, OpSize:$Size, GPR:$Prefix, GPR:$Addr, GPR:$Value, GPR:$Length, GPR:$Direction": {
+        "Desc": ["Duplicates behaviour of x86 STOS repeat",
+                 "Returns the final address that gets generated without the prefix appended."
+                ],
+        "Inline": ["", "", "Zero", "", "Any"],
+        "HasSideEffects": true,
+        "DestSize": "OpSize::i64Bit"
+      },
+      "GPR:$DstAddress, GPR:$SrcAddress = MemCpy i1:$IsAtomic, OpSize:$Size, GPR:$Dest, GPR:$Src, GPR:$Length, GPR:$Direction": {
+        "Desc": ["Duplicates behaviour of x86 MOVS repeat",
+                 "Returns the final addresses after they have been incremented or decremented"
+                ],
+        "Inline": ["", "", "", "Any"],
+        "HasSideEffects": true,
+        "DestSize": "OpSize::i64Bit"
+      },
+      "CacheLineClear GPR:$Addr, i1:$Serialize": {
+        "Desc": ["Does a 64 byte cacheline clear at the address specified",
+                 "Only clears the data cachelines. Doesn't do any zeroing",
+                 "Can skip serialization if requested."
+                ],
+        "HasSideEffects": true
+      },
+      "CacheLineClean GPR:$Addr": {
+        "Desc": ["Does a 64 byte cacheline cleanat the address specified",
+                 "Only cleans the data cachelines. Doesn't do any zeroing",
+                 "Skips the invalidation step of the CacheLineClear operation"
+                ],
+        "HasSideEffects": true
+      },
+      "CacheLineZero GPR:$Addr": {
+        "Desc": ["Does a 64 byte zero at the address specified",
+                 "Writing zeroes to memory",
+                 "It is specifically non-temporal and weakly ordered",
+                 "This matches CLZero behaviour"
+                ],
+        "HasSideEffects": true
+      },
+      "Fence FenceType:$Fence": {
+        "Desc": ["Does a memory fence operation of the desired type",
+                 "FenceType::Load: Ensures load memory operations are serialized",
+                 "FenceType::Store: Ensures store memory operations are serialized",
+                 "FenceType::LoadStore: Ensures loads and store memory operations are serialized",
+                 "FenceType::Inst: Instruction barrier. Ensures all instructions after this point will be explicitly fetched",
+                 "Ensures the memory operations are globally visible"
+                ],
+        "HasSideEffects": true
+      },
+      "Prefetch i1:$ForStore, i1:$Stream, i8:$CacheLevel, GPR:$Addr, GPR:$Offset, MemOffsetType:$OffsetType, u8:$OffsetScale": {
+        "Desc": ["Does a cacheline prefetch operation"
+                ],
+        "Inline": ["", "Mem"],
+        "EmitValidation": ["CacheLevel > 0 && CacheLevel < 4"],
+        "HasSideEffects": true,
+        "DestSize": "OpSize::i64Bit"
+      },
+      "VStoreNonTemporal OpSize:#RegisterSize, FPR:$Value, GPR:$Addr, i8:$Offset": {
+        "Desc": ["Does a non-temporal memory store of a vector.",
+                 "Matches arm64 SVE stnt1b semantics.",
+                 "Specifically weak-memory model ordered to match x86 non-temporal stores."
+        ],
+        "HasSideEffects": true,
+        "DestSize": "RegisterSize",
+        "EmitValidation": [
+          "RegisterSize == FEXCore::IR::OpSize::i128Bit || RegisterSize == FEXCore::IR::OpSize::i256Bit",
+          "Offset % IR::OpSizeToSize(RegisterSize) == 0"
+        ]
+      },
+      "VStoreNonTemporalPair OpSize:#RegisterSize, FPR:$ValueLow, FPR:$ValueHigh, GPR:$Addr, i8:$Offset": {
+        "Desc": ["Does a non-temporal memory store of two vector registers.",
+                 "Matches arm64 stnp semantics.",
+                 "Specifically weak-memory model ordered to match x86 non-temporal stores."
+        ],
+        "HasSideEffects": true,
+        "DestSize": "RegisterSize",
+        "EmitValidation": [
+          "RegisterSize == FEXCore::IR::OpSize::i128Bit",
+          "Offset % IR::OpSizeToSize(RegisterSize) == 0"
+        ]
+      },
+      "FPR = VLoadNonTemporal OpSize:#RegisterSize, GPR:$Addr, i8:$Offset": {
+        "Desc": ["Does a non-temporal memory load of a vector.",
+                 "Matches arm64 SVE ldnt1b semantics.",
+                 "Specifically weak-memory model ordered to match x86 non-temporal stores."
+        ],
+        "HasSideEffects": true,
+        "DestSize": "RegisterSize",
+        "EmitValidation": [
+          "RegisterSize == FEXCore::IR::OpSize::i128Bit || RegisterSize == FEXCore::IR::OpSize::i256Bit",
+          "Offset % IR::OpSizeToSize(RegisterSize) == 0"
+        ]
+      }
+    },
+    "Atomic": {
+      "GPR = CAS OpSize:#Size, GPR:$Expected, GPR:$Desired, GPR:$Addr": {
+        "HasSideEffects": true,
+        "Desc": ["Does a compare and swap of values to a memory location",
+                 "This mostly matches the C++ atomic_compare_exchange_strong function",
+                 "Dest = atomic_compare_exchange_strong(%Addr, %Expected, %Desired)",
+                 "Depending on if the value in %Addr is Expected the results destination will be different",
+                 "Behaves like the following but atomically",
+                 "Dest = %Expected",
+                 "if (deref(%Addr) != %Expected) Dest = deref(%Addr)"
+                ],
+        "TiedSource": 0,
+        "DestSize": "Size",
+        "ImplicitFlagClobber": true,
+        "EmitValidation": [
+          "Size == FEXCore::IR::OpSize::i8Bit || Size == FEXCore::IR::OpSize::i16Bit || Size == FEXCore::IR::OpSize::i32Bit || Size == FEXCore::IR::OpSize::i64Bit"
+        ]
+      },
+      "GPR:$Lo, GPR:$Hi = CASPair OpSize:#Size, GPR:$ExpectedLo, GPR:$ExpectedHi, GPR:$DesiredLo, GPR:$DesiredHi, GPR:$Addr": {
+        "Desc": ["Does a compare and exchange with two pairs of values",
+                 "ssa0 is the comparison value",
+                 "ssa1 is the new value",
+                 "ssa2 is the memory location",
+                 "Returns the lower & upper halves of the value in memory."
+                ],
+        "HasSideEffects": true,
+        "DestSize": "Size",
+        "EmitValidation": [
+          "Size == FEXCore::IR::OpSize::i32Bit || Size == FEXCore::IR::OpSize::i64Bit"
+        ]
+      },
+      "GPR = AtomicSwap OpSize:#Size, GPR:$Value, GPR:$Addr": {
+        "HasSideEffects": true,
+        "Desc": ["Atomic integer swap"
+                ],
+        "DestSize": "Size",
+        "EmitValidation": [
+          "Size == FEXCore::IR::OpSize::i8Bit || Size == FEXCore::IR::OpSize::i16Bit || Size == FEXCore::IR::OpSize::i32Bit || Size == FEXCore::IR::OpSize::i64Bit"
+        ]
+      },
+      "GPR = AtomicFetchAdd OpSize:#Size, GPR:$Value, GPR:$Addr": {
+        "HasSideEffects": true,
+        "Desc": ["Atomic integer fetch and add",
+                 "Atomically fetches %Addr and adds %value to the memory location",
+                 "Dest is the value prior to operating on the value in memory",
+                 "IR layout must match NonFetch-variant, otherwise DCE IR optimization breaks!"
+                ],
+        "DestSize": "Size",
+        "EmitValidation": [
+          "Size == FEXCore::IR::OpSize::i8Bit || Size == FEXCore::IR::OpSize::i16Bit || Size == FEXCore::IR::OpSize::i32Bit || Size == FEXCore::IR::OpSize::i64Bit"
+        ]
+      },
+      "GPR = AtomicFetchSub OpSize:#Size, GPR:$Value, GPR:$Addr": {
+        "HasSideEffects": true,
+        "Desc": ["Atomic integer fetch and sub",
+                 "Atomically fetches %Addr and subtracts %value to the memory location",
+                 "Dest is the value prior to operating on the value in memory",
+                 "IR layout must match NonFetch-variant, otherwise DCE IR optimization breaks!"
+                ],
+        "DestSize": "Size",
+        "EmitValidation": [
+          "Size == FEXCore::IR::OpSize::i8Bit || Size == FEXCore::IR::OpSize::i16Bit || Size == FEXCore::IR::OpSize::i32Bit || Size == FEXCore::IR::OpSize::i64Bit"
+        ]
+      },
+      "GPR = AtomicFetchAnd OpSize:#Size, GPR:$Value, GPR:$Addr": {
+        "HasSideEffects": true,
+        "Desc": ["Atomic integer fetch and binary and",
+                 "Atomically fetches %Addr and binary ands %value to the memory location",
+                 "Dest is the value prior to operating on the value in memory",
+                 "IR layout must match NonFetch-variant, otherwise DCE IR optimization breaks!"
+                ],
+        "DestSize": "Size",
+        "EmitValidation": [
+          "Size == FEXCore::IR::OpSize::i8Bit || Size == FEXCore::IR::OpSize::i16Bit || Size == FEXCore::IR::OpSize::i32Bit || Size == FEXCore::IR::OpSize::i64Bit"
+        ]
+      },
+      "GPR = AtomicFetchCLR OpSize:#Size, GPR:$Value, GPR:$Addr": {
+        "HasSideEffects": true,
+        "Desc": ["Atomic integer fetch and binary clear",
+                 "Atomically fetches %Addr and binary clears %value to the memory location",
+                 "Dest is the value prior to operating on the value in memory",
+                 "Matches ARM ldclral semantics",
+                 "eg: Dest[Addr] &= ~Value",
+                 "IR layout must match NonFetch-variant, otherwise DCE IR optimization breaks!"
+                ],
+        "DestSize": "Size",
+        "EmitValidation": [
+          "Size == FEXCore::IR::OpSize::i8Bit || Size == FEXCore::IR::OpSize::i16Bit || Size == FEXCore::IR::OpSize::i32Bit || Size == FEXCore::IR::OpSize::i64Bit"
+        ]
+      },
+      "GPR = AtomicFetchOr OpSize:#Size, GPR:$Value, GPR:$Addr": {
+        "HasSideEffects": true,
+        "Desc": ["Atomic integer fetch and binary or",
+                 "Atomically fetches %Addr and binary ors %value to the memory location",
+                 "Dest is the value prior to operating on the value in memory",
+                 "IR layout must match NonFetch-variant, otherwise DCE IR optimization breaks!"
+                ],
+        "DestSize": "Size",
+        "EmitValidation": [
+          "Size == FEXCore::IR::OpSize::i8Bit || Size == FEXCore::IR::OpSize::i16Bit || Size == FEXCore::IR::OpSize::i32Bit || Size == FEXCore::IR::OpSize::i64Bit"
+        ]
+      },
+      "GPR = AtomicFetchXor OpSize:#Size, GPR:$Value, GPR:$Addr": {
+        "HasSideEffects": true,
+        "Desc": ["Atomic integer fetch and binary exclusive or",
+                 "Atomically fetches %Addr and binary exclusive ors %value to the memory location",
+                 "Dest is the value prior to operating on the value in memory",
+                 "IR layout must match NonFetch-variant, otherwise DCE IR optimization breaks!"
+                ],
+        "DestSize": "Size",
+        "EmitValidation": [
+          "Size == FEXCore::IR::OpSize::i8Bit || Size == FEXCore::IR::OpSize::i16Bit || Size == FEXCore::IR::OpSize::i32Bit || Size == FEXCore::IR::OpSize::i64Bit"
+        ]
+      },
+      "GPR = AtomicFetchNeg OpSize:#Size, GPR:$Addr": {
+        "HasSideEffects": true,
+        "Desc": ["Atomic integer fetch and two's complement negate",
+                 "Dest is the value prior to operating on the value in memory",
+                 "IR layout must match NonFetch-variant, otherwise DCE IR optimization breaks!"
+                ],
+        "DestSize": "Size",
+        "EmitValidation": [
+          "Size == FEXCore::IR::OpSize::i8Bit || Size == FEXCore::IR::OpSize::i16Bit || Size == FEXCore::IR::OpSize::i32Bit || Size == FEXCore::IR::OpSize::i64Bit"
+        ]
+      },
+      "TelemetrySetValue GPR:$Value, u8:$TelemetryValueIndex": {
+        "HasSideEffects": true,
+        "Desc": ["Set Telemetry value if the passed in 32-bit value isn't zero.",
+                 "Only useful for 32-bit applications."
+                ],
+        "ImplicitFlagClobber": true,
+        "DestSize": "OpSize::i64Bit"
+      }
+    },
+    "ALU": {
+      "GPR = EntrypointOffset OpSize:#Size, i64:$Offset": {
+        "Desc": ["Returns the <entrypoint> + Offset address",
+                 "When the size is 4 bytes then 32-bit overflow and underflow needs to work"
+                ],
+        "DestSize": "Size",
+        "EmitValidation": [
+          "Size == FEXCore::IR::OpSize::i32Bit || Size == FEXCore::IR::OpSize::i64Bit"
+        ]
+      },
+
+      "InlineEntrypointOffset OpSize:#Size, i64:$Offset": {
+        "Desc": ["Returns the <entrypoint> + Offset address",
+                 "When the size is 4 bytes then 32-bit overflow and underflow needs to work"
+                ],
+        "HasSideEffects": true,
+        "RAOverride": "0",
+        "DestSize": "Size",
+        "EmitValidation": [
+          "Size == FEXCore::IR::OpSize::i32Bit || Size == FEXCore::IR::OpSize::i64Bit"
+        ]
+      },
+
+      "GPR = Constant i64:$Constant, ConstPad:$Pad{IR::ConstPad::NoPad}, i32:$MaxBytes{0}": {
+        "Desc": ["Generates a 64bit constant inside of a GPR",
+                 "Unsupported to create a constant in FPR"
+                ],
+        "DestSize": "OpSize::i64Bit",
+        "EmitValidation": [
+          "MaxBytes >= 0 && MaxBytes <= 8 && (MaxBytes & 1) == 0",
+          "MaxBytes == 0 || (Constant >> (MaxBytes * 8)) == 0"
+        ]
+      },
+
+      "InlineConstant i64:$Constant": {
+        "Desc": ["Generates a 64bit constant to be used directly, non-FPR"],
+        "HasSideEffects": true,
+        "RAOverride": "0",
+        "DestSize": "OpSize::i64Bit"
+      },
+
+      "GPR = CycleCounter i1:$SelfSynchronizingLoads": {
+        "Desc": ["Returns the host 64bit cycle counter",
+                 "Useful when emulating rdtsc",
+                 "Be careful, the frequency of this counter changes based on host",
+                 "On AArch64 make sure to query the CNTFRQ_EL0 system register to get the frequency",
+                 "On x86-64 make sure to query CPUID fn8000_0008[EDX_8] for constant TSC",
+                 "x86-64 constant frequency lives in MSR_PLATFORM_INFO. Which is only available to kernel",
+                 "Part of the ART frequency equation can be pulled from CPUID fn0000_0015[EBX & EAX]",
+                 "But it's missing the ART multiplier still?",
+                 "If the self-synchronizing flag is toggled then all instructions and loads must be completed before the cycle counter read"
+                ],
+        "DestSize": "OpSize::i64Bit"
+      },
+
+      "GPR = Neg OpSize:#Size, GPR:$Src, CondClass:$Cond{CondClass::AL}": {
+        "Desc": ["Integer negation, with optional predication",
+                 "Dest = Cond ? -Src : Src",
+                 "Will truncate to 64 or 32bits"
+                ],
+        "DestSize": "Size",
+        "EmitValidation": [
+          "Size == FEXCore::IR::OpSize::i32Bit || Size == FEXCore::IR::OpSize::i64Bit"
+        ]
+      },
+      "GPR = Not OpSize:#Size, GPR:$Src": {
+        "Desc": ["Integer binary not",
+                 "op:",
+                 "Dest = ~Src"
+                ],
+        "DestSize": "Size",
+        "EmitValidation": [
+          "Size == FEXCore::IR::OpSize::i32Bit || Size == FEXCore::IR::OpSize::i64Bit"
+        ]
+      },
+      "GPR = Popcount OpSize:#Size, GPR:$Src": {
+        "Desc": ["Population count of source register",
+                 "Returns the number of bits set"
+                ],
+        "DestSize": "Size",
+        "EmitValidation": [
+          "Size == FEXCore::IR::OpSize::i8Bit || Size == FEXCore::IR::OpSize::i16Bit || Size == FEXCore::IR::OpSize::i32Bit || Size == FEXCore::IR::OpSize::i64Bit"
+        ]
+      },
+      "GPR = FindLSB OpSize:#Size, GPR:$Src": {
+        "Desc": ["Find least-significant-bit set",
+                 "Returns the index of the least significant bit set",
+                 "Undefined result if Src is zero."
+                ],
+        "DestSize": "Size",
+        "EmitValidation": [
+          "Size == FEXCore::IR::OpSize::i8Bit || Size == FEXCore::IR::OpSize::i16Bit || Size == FEXCore::IR::OpSize::i32Bit || Size == FEXCore::IR::OpSize::i64Bit"
+        ]
+      },
+      "GPR = FindMSB OpSize:#Size, GPR:$Src": {
+        "Desc": ["Find most-significant-bit set",
+                 "Returns the index of the most significant bit set",
+                 "Undefined result if Src is zero."
+                ],
+        "DestSize": "Size",
+        "EmitValidation": [
+          "Size == FEXCore::IR::OpSize::i16Bit || Size == FEXCore::IR::OpSize::i32Bit || Size == FEXCore::IR::OpSize::i64Bit"
+        ]
+      },
+      "GPR = FindTrailingZeroes OpSize:#Size, GPR:$Src": {
+        "Desc": ["Counts the number of trailing zero bits in a GPR",
+                 "Returns the number of bits that are zero trailing",
+                 "In the case of zero returns the size in bits of the input"
+                ],
+        "DestSize": "Size",
+        "EmitValidation": [
+          "Size == FEXCore::IR::OpSize::i16Bit || Size == FEXCore::IR::OpSize::i32Bit || Size == FEXCore::IR::OpSize::i64Bit"
+        ]
+      },
+      "GPR = CountLeadingZeroes OpSize:#Size, GPR:$Src": {
+        "Desc": ["Counts the number of leading zero bits in a GPR",
+                 "Returns the number of bits that are zero leading",
+                 "In the case of zero returns the size in bits of the input"
+                ],
+        "DestSize": "Size",
+        "EmitValidation": [
+          "Size == FEXCore::IR::OpSize::i16Bit || Size == FEXCore::IR::OpSize::i32Bit || Size == FEXCore::IR::OpSize::i64Bit"
+        ]
+      },
+      "GPR = Rev OpSize:#Size, GPR:$Src": {
+        "Desc": ["Reverses the byte order of the register",
+                 "Specifically 8bit byte swap size. (Not 16bit or 32bit word swapping)"
+                ],
+        "DestSize": "Size",
+        "EmitValidation": [
+          "Size == FEXCore::IR::OpSize::i16Bit || Size == FEXCore::IR::OpSize::i32Bit || Size == FEXCore::IR::OpSize::i64Bit"
+        ]
+      },
+      "GPR = Rbit OpSize:#Size, GPR:$Src": {
+        "Desc": ["Reverses the bit order of the register"],
+        "DestSize": "Size",
+        "EmitValidation": [
+          "Size == FEXCore::IR::OpSize::i32Bit || Size == FEXCore::IR::OpSize::i64Bit"
+        ]
+      },
+      "GPR = Add OpSize:#Size, GPR:$Src1, GPR:$Src2": {
+        "Desc": [ "Integer Add",
+                  "Will truncate to 64 or 32bits"
+                ],
+        "Inline": ["", "LargeAddSub"],
+        "DestSize": "Size",
+        "EmitValidation": [
+          "Size == FEXCore::IR::OpSize::i32Bit || Size == FEXCore::IR::OpSize::i64Bit"
+        ]
+      },
+      "GPR = Adc OpSize:#Size, GPR:$Src1, GPR:$Src2": {
+        "Desc": [ "Integer Add with carry",
+                  "Will truncate to 64 or 32bits"
+                ],
+        "Inline": ["Zero", ""],
+        "DestSize": "Size",
+        "EmitValidation": [
+          "Size == FEXCore::IR::OpSize::i32Bit || Size == FEXCore::IR::OpSize::i64Bit"
+        ]
+      },
+      "GPR = Sbb OpSize:#Size, GPR:$Src1, GPR:$Src2": {
+        "Desc": [ "Integer Subtract with carry/borrow",
+                  "Will truncate to 64 or 32bits"
+                ],
+        "DestSize": "Size",
+        "EmitValidation": [
+          "Size == FEXCore::IR::OpSize::i32Bit || Size == FEXCore::IR::OpSize::i64Bit"
+        ]
+      },
+      "GPR = AddShift OpSize:#Size, GPR:$Src1, GPR:$Src2, ShiftType:$Shift{ShiftType::LSL}, u8:$ShiftAmount{0}": {
+        "Desc": [ "Integer Add with shifted register",
+                  "Will truncate to 64 or 32bits",
+                  "Dest = Src1 + (Src2 << ShiftAmount)"
+                ],
+        "DestSize": "Size",
+        "EmitValidation": [
+          "Size == FEXCore::IR::OpSize::i32Bit || Size == FEXCore::IR::OpSize::i64Bit",
+          "Shift != ShiftType::ROR"
+        ]
+      },
+      "GPR = AddWithFlags OpSize:#Size, GPR:$Src1, GPR:$Src2": {
+        "Desc": [ "Integer add. Truncates and sets NZCV per AddNZCV"],
+        "Inline": ["", "LargeAddSub"],
+        "DestSize": "Size",
+        "HasSideEffects": true,
+        "EmitValidation": [
+          "Size == FEXCore::IR::OpSize::i32Bit || Size == FEXCore::IR::OpSize::i64Bit"
+        ]
+      },
+      "AddNZCV OpSize:#Size, GPR:$Src1, GPR:$Src2": {
+        "Desc": ["Set NZCV for the sum of two GPRs"],
+        "Inline": ["", "LargeAddSub"],
+        "HasSideEffects": true,
+        "DestSize": "Size"
+      },
+      "SetSmallNZV OpSize:#Size, GPR:$Src": {
+        "Desc": ["Set NZV with a SETF instruction. Preserves CF."],
+        "HasSideEffects": true,
+        "DestSize": "Size",
+        "EmitValidation": [
+          "Size == FEXCore::IR::OpSize::i8Bit || Size == FEXCore::IR::OpSize::i16Bit"
+        ]
+      },
+      "CarryInvert": {
+        "Desc": ["Invert carry flag in NZCV"],
+        "HasSideEffects": true
+      },
+      "AXFlag GPR:$V_inv": {
+        "Desc": ["After an FCmp, converts NZCV flags from the Arm format to a mysterious eXternal format",
+                 "On FlagM2-less platforms, takes the inverted 1/0 overflow flag"],
+        "HasSideEffects": true
+      },
+      "GPR = Parity GPR:$Raw, i1:$Mask, i1:$Invert": {
+        "Desc": ["Calculates PF"],
+        "DestSize": "OpSize::i32Bit"
+      },
+      "RmifNZCV GPR:$Src, u8:$Rotate, u8:$Mask": {
+        "Desc": ["Rotate, mask, and insert into NZCV on FlagM platforms"],
+        "Inline": ["Zero", ""],
+        "HasSideEffects": true
+      },
+      "CondAddNZCV OpSize:#Size, GPR:$Src1, GPR:$Src2, CondClass:$Cond, u8:$FalseNZCV": {
+        "Desc": ["If condition is true, set NZCV per sum of GPRs, else force NZCV to a constant."],
+        "Inline": ["Zero", "AddSub"],
+        "HasSideEffects": true,
+        "DestSize": "Size",
+        "EmitValidation": [
+          "Size == FEXCore::IR::OpSize::i32Bit || Size == FEXCore::IR::OpSize::i64Bit"
+        ]
+      },
+      "CondSubNZCV OpSize:#Size, GPR:$Src1, GPR:$Src2, CondClass:$Cond, u8:$FalseNZCV": {
+        "Desc": ["If condition is true, set NZCV per difference of GPRs, else force NZCV to a constant."],
+        "Inline": ["Zero", "AddSub"],
+        "HasSideEffects": true,
+        "DestSize": "Size",
+        "EmitValidation": [
+          "Size == FEXCore::IR::OpSize::i32Bit || Size == FEXCore::IR::OpSize::i64Bit"
+        ]
+      },
+      "GPR = AdcWithFlags OpSize:#Size, GPR:$Src1, GPR:$Src2": {
+        "Desc": ["Adds and set NZCV for the sum of two GPRs and carry-in given as NZCV"],
+        "Inline": ["Zero", ""],
+        "HasSideEffects": true,
+        "DestSize": "Size",
+        "EmitValidation": [
+          "Size == FEXCore::IR::OpSize::i32Bit || Size == FEXCore::IR::OpSize::i64Bit"
+        ]
+      },
+      "GPR = AdcZero OpSize:#Size, GPR:$Src1": {
+        "Desc": ["Adds GPR with inverted carry-in"],
+        "DestSize": "Size",
+        "EmitValidation": [
+          "Size == FEXCore::IR::OpSize::i32Bit || Size == FEXCore::IR::OpSize::i64Bit"
+        ]
+      },
+      "GPR = AdcZeroWithFlags OpSize:#Size, GPR:$Src1": {
+        "Desc": ["Adds and set NZCV for the sum of GPR and inverted carry-in given as NZCV"],
+        "HasSideEffects": true,
+        "DestSize": "Size",
+        "EmitValidation": [
+          "Size == FEXCore::IR::OpSize::i32Bit || Size == FEXCore::IR::OpSize::i64Bit"
+        ]
+      },
+      "GPR = SbbWithFlags OpSize:#Size, GPR:$Src1, GPR:$Src2": {
+        "Desc": ["Subtracts and set NZCV for the difference of two GPRs and carry-in given as NZCV"],
+        "HasSideEffects": true,
+        "DestSize": "Size",
+        "EmitValidation": [
+          "Size == FEXCore::IR::OpSize::i32Bit || Size == FEXCore::IR::OpSize::i64Bit"
+        ]
+      },
+      "AdcNZCV OpSize:#Size, GPR:$Src1, GPR:$Src2": {
+        "Desc": ["Set NZCV for the sum of two GPRs and carry-in given as NZCV"],
+        "HasSideEffects": true,
+        "DestSize": "Size",
+        "EmitValidation": [
+          "Size == FEXCore::IR::OpSize::i32Bit || Size == FEXCore::IR::OpSize::i64Bit"
+        ]
+      },
+      "SbbNZCV OpSize:#Size, GPR:$Src1, GPR:$Src2": {
+        "Desc": ["Set NZCV for the difference of two GPRs and carry-in given as NZCV"],
+        "HasSideEffects": true,
+        "DestSize": "Size",
+        "EmitValidation": [
+          "Size == FEXCore::IR::OpSize::i32Bit || Size == FEXCore::IR::OpSize::i64Bit"
+        ]
+      },
+      "GPR = Sub OpSize:#Size, GPR:$Src1, GPR:$Src2": {
+        "Desc": [ "Integer Sub",
+                  "Will truncate to 64 or 32bits"
+                ],
+        "Inline": ["SubtractZero", "LargeAddSub"],
+        "DestSize": "Size",
+        "EmitValidation": [
+          "Size == FEXCore::IR::OpSize::i32Bit || Size == FEXCore::IR::OpSize::i64Bit"
+        ]
+      },
+      "GPR = SubShift OpSize:#Size, GPR:$Src1, GPR:$Src2, ShiftType:$Shift{ShiftType::LSL}, u8:$ShiftAmount{0}": {
+        "Desc": [ "Integer Sub with shifted register",
+                  "Will truncate to 64 or 32bits"
+                ],
+        "DestSize": "Size",
+        "EmitValidation": [
+          "Size == FEXCore::IR::OpSize::i32Bit || Size == FEXCore::IR::OpSize::i64Bit",
+          "Shift != ShiftType::ROR"
+        ]
+      },
+      "GPR = SubWithFlags OpSize:#Size, GPR:$Src1, GPR:$Src2": {
+        "Desc": [ "Integer Sub. Truncates and sets NZCV per SubNZCV"],
+        "Inline": ["SubtractZero", "LargeAddSub"],
+        "DestSize": "Size",
+        "HasSideEffects": true,
+        "EmitValidation": [
+          "Size == FEXCore::IR::OpSize::i32Bit || Size == FEXCore::IR::OpSize::i64Bit"
+        ]
+      },
+      "CmpPairZ OpSize:#Size, GPR:$Src1Lo, GPR:$Src1Hi, GPR:$Src2Lo, GPR:$Src2Hi": {
+        "Desc": ["Compares register pairs and sets Z accordingly, preserving N/Z/V.",
+                 "This accelerates cmpxchg."],
+        "HasSideEffects": true,
+        "DestSize": "Size"
+      },
+      "SubNZCV OpSize:#Size, GPR:$Src1, GPR:$Src2": {
+        "Desc": ["Set NZCV for the difference of two GPRs. ",
+                 "Carry flag uses arm64 definition, inverted x86.",
+                 ""],
+        "Inline": ["Zero", "LargeAddSub"],
+        "DestSize": "Size",
+        "HasSideEffects": true
+      },
+      "GPR = Or OpSize:#Size, GPR:$Src1, GPR:$Src2": {
+        "Desc": ["Integer binary or"
+                ],
+        "DestSize": "Size",
+        "Inline": ["", "Logical"],
+        "EmitValidation": [
+          "Size == FEXCore::IR::OpSize::i32Bit || Size == FEXCore::IR::OpSize::i64Bit"
+        ]
+      },
+      "GPR = Orlshl OpSize:#Size, GPR:$Src1, GPR:$Src2, u8:$BitShift": {
+        "Desc": ["Integer binary or with logical shift left"
+                ],
+        "DestSize": "Size",
+        "EmitValidation": [
+          "Size == FEXCore::IR::OpSize::i32Bit || Size == FEXCore::IR::OpSize::i64Bit"
+        ]
+      },
+      "GPR = Orlshr OpSize:#Size, GPR:$Src1, GPR:$Src2, u8:$BitShift": {
+        "Desc": ["Integer binary or with logical shift right"
+                ],
+        "DestSize": "Size",
+        "EmitValidation": [
+          "Size == FEXCore::IR::OpSize::i32Bit || Size == FEXCore::IR::OpSize::i64Bit"
+        ]
+      },
+      "GPR = Ornror OpSize:#Size, GPR:$Src1, GPR:$Src2, u8:$BitShift": {
+        "Desc": ["Integer binary or with NOT on second source and rotation right"
+                ],
+        "DestSize": "Size",
+        "EmitValidation": [
+          "Size == FEXCore::IR::OpSize::i32Bit || Size == FEXCore::IR::OpSize::i64Bit"
+        ]
+      },
+      "GPR = Xor OpSize:#Size, GPR:$Src1, GPR:$Src2": {
+        "Desc": ["Integer binary exclusive or"],
+        "Inline": ["", "Logical"],
+        "DestSize": "Size",
+        "EmitValidation": [
+          "Size == FEXCore::IR::OpSize::i32Bit || Size == FEXCore::IR::OpSize::i64Bit"
+        ]
+      },
+      "GPR = XorShift OpSize:#Size, GPR:$Src1, GPR:$Src2, ShiftType:$Shift{ShiftType::LSL}, u8:$ShiftAmount{0}": {
+        "Desc": [ "Integer binary exclusive or with shifted register"],
+        "DestSize": "Size",
+        "EmitValidation": [
+          "Size == FEXCore::IR::OpSize::i32Bit || Size == FEXCore::IR::OpSize::i64Bit"
+        ]
+      },
+      "GPR = XornShift OpSize:#Size, GPR:$Src1, GPR:$Src2, ShiftType:$Shift{ShiftType::LSL}, u8:$ShiftAmount{0}": {
+        "Desc": [ "Integer binary exclusive or not with shifted register"],
+        "DestSize": "Size",
+        "EmitValidation": [
+          "Size == FEXCore::IR::OpSize::i32Bit || Size == FEXCore::IR::OpSize::i64Bit"
+        ]
+      },
+      "GPR = And OpSize:#Size, GPR:$Src1, GPR:$Src2": {
+        "Desc": ["Integer binary and"],
+        "Inline": ["", "Logical"],
+        "DestSize": "Size",
+        "EmitValidation": [
+          "Size == FEXCore::IR::OpSize::i32Bit || Size == FEXCore::IR::OpSize::i64Bit"
+        ]
+      },
+      "GPR = AndShift OpSize:#Size, GPR:$Src1, GPR:$Src2, ShiftType:$Shift{ShiftType::LSL}, u8:$ShiftAmount{0}": {
+        "Desc": [ "Integer binary and with shifted register"],
+        "DestSize": "Size",
+        "EmitValidation": [
+          "Size == FEXCore::IR::OpSize::i32Bit || Size == FEXCore::IR::OpSize::i64Bit"
+        ]
+      },
+      "GPR = AndWithFlags OpSize:#Size, GPR:$Src1, GPR:$Src2": {
+        "Desc": ["Integer binary and"
+                ],
+        "Inline": ["", "Logical"],
+        "DestSize": "Size",
+        "TiedSource": 0,
+        "HasSideEffects": true
+      },
+      "GPR = Andn OpSize:#Size, GPR:$Src1, GPR:$Src2": {
+        "Desc": ["Integer binary AND NOT. Performs the equivalent of Src1 & ~Src2"],
+        "DestSize": "Size",
+        "Inline": ["", "Logical"],
+        "EmitValidation": [
+          "Size == FEXCore::IR::OpSize::i32Bit || Size == FEXCore::IR::OpSize::i64Bit"
+        ]
+      },
+      "TestNZ OpSize:#Size, GPR:$Src1, GPR:$Src2": {
+        "Desc": ["Set NZCV for the binary AND of two GPRs, setting N and Z accordingly and zeroing C and V"],
+        "Inline": ["", "Logical"],
+        "DestSize": "Size",
+        "HasSideEffects": true
+      },
+      "TestZ OpSize:#Size, GPR:$Src1, GPR:$Src2": {
+        "Desc": ["Set NZCV for the binary AND of two GPRs, setting Z accordingly and zeroing C and V. N is undefined."],
+        "DestSize": "Size",
+        "HasSideEffects": true
+      },
+      "GPR = Lshl OpSize:#Size, GPR:$Src1, GPR:$Src2": {
+        "Desc": ["Integer logical shift left"],
+        "Inline": ["", "Any"],
+        "DestSize": "Size",
+        "EmitValidation": [
+          "Size == FEXCore::IR::OpSize::i32Bit || Size == FEXCore::IR::OpSize::i64Bit"
+        ]
+      },
+      "GPR = Lshr OpSize:#Size, GPR:$Src1, GPR:$Src2": {
+        "Desc": ["Integer logical shift right"],
+        "Inline": ["", "Any"],
+        "DestSize": "Size",
+        "EmitValidation": [
+          "Size == FEXCore::IR::OpSize::i32Bit || Size == FEXCore::IR::OpSize::i64Bit"
+        ]
+      },
+      "GPR = Ashr OpSize:#Size, GPR:$Src1, GPR:$Src2": {
+        "Desc": ["Integer arithmetic shift right"],
+        "Inline": ["", "Any"],
+        "DestSize": "Size",
+        "EmitValidation": [
+          "Size == FEXCore::IR::OpSize::i32Bit || Size == FEXCore::IR::OpSize::i64Bit"
+        ]
+      },
+      "GPR = ShiftFlags OpSize:$Size, GPR:$Result, GPR:$Src1, ShiftType:$Shift, GPR:$Src2, GPR:$PFInput, i1:$InvertCF": {
+        "Desc": ["Set NZCV flags for specified variable integer shift with given result.",
+                 "Returns updated raw PF."],
+        "HasSideEffects": true,
+        "DestSize": "OpSize::i64Bit"
+      },
+      "RotateFlags OpSize:$Size, GPR:$Result, GPR:$Shift, i1:$Left": {
+        "Desc": ["Set NZCV flags for specified variable integer rotate with given result."],
+        "HasSideEffects": true
+      },
+      "GPR = Ror OpSize:#Size, GPR:$Src1, GPR:$Src2": {
+        "Desc": ["Integer rotate right"],
+        "Inline": ["", "Any"],
+        "DestSize": "Size",
+        "EmitValidation": [
+          "Size == FEXCore::IR::OpSize::i32Bit || Size == FEXCore::IR::OpSize::i64Bit"
+        ]
+      },
+      "GPR = Mul OpSize:#Size, GPR:$Src1, GPR:$Src2": {
+        "Desc": ["Integer signed multiplication"
+                ],
+        "DestSize": "Size",
+        "EmitValidation": [
+          "Size == FEXCore::IR::OpSize::i32Bit || Size == FEXCore::IR::OpSize::i64Bit"
+        ]
+      },
+      "GPR = UMul OpSize:#Size, GPR:$Src1, GPR:$Src2": {
+        "Desc": ["Integer unsigned multiplication"
+                ],
+        "DestSize": "Size",
+        "EmitValidation": [
+          "Size == FEXCore::IR::OpSize::i32Bit || Size == FEXCore::IR::OpSize::i64Bit"
+        ]
+      },
+      "GPR = UMull GPR:$Src1, GPR:$Src2": {
+        "Desc": ["Integer unsigned multiplication long",
+                 "Multiplies two 32-bit numbers, returning a 64-bit destination register."
+                ],
+        "DestSize": "FEXCore::IR::OpSize::i64Bit"
+      },
+      "GPR = SMull GPR:$Src1, GPR:$Src2": {
+        "Desc": ["Integer signed multiplication long",
+                 "Multiplies two 32-bit numbers, returning a 64-bit destination register."
+                ],
+        "DestSize": "FEXCore::IR::OpSize::i64Bit"
+      },
+      "GPR = MulH OpSize:#Size, GPR:$Src1, GPR:$Src2": {
+        "Desc": ["Integer signed multiply returning high results",
+                 "op:",
+                 "Tmp <size * 2> = Src1 * Src2;",
+                 "Dest = Tmp >> (size * 8);"
+                ],
+        "DestSize": "Size",
+        "EmitValidation": [
+          "Size == FEXCore::IR::OpSize::i32Bit || Size == FEXCore::IR::OpSize::i64Bit"
+        ]
+      },
+      "GPR = UMulH OpSize:#Size, GPR:$Src1, GPR:$Src2": {
+        "Desc": ["Integer unsigned multiply returning high results",
+                 "op:",
+                 "Tmp <size * 2> = Src1 * Src2;",
+                 "Dest = Tmp >> (size * 8);"
+                ],
+        "DestSize": "Size",
+        "EmitValidation": [
+          "Size == FEXCore::IR::OpSize::i32Bit || Size == FEXCore::IR::OpSize::i64Bit"
+        ]
+      },
+      "GPR = Bfi OpSize:#Size, u8:$Width, u8:$lsb, GPR:$Dest, GPR:$Src": {
+        "Desc": ["Copies a bitfield from one GPR to another",
+                 "The source bitfield is from Src[Width:0]",
+                 "The bitfield is copied in to Dest[(Width + lsb):lsb]"
+                ],
+        "DestSize": "Size",
+        "TiedSource": 0,
+        "EmitValidation": [
+          "Size == FEXCore::IR::OpSize::i32Bit || Size == FEXCore::IR::OpSize::i64Bit",
+          "(Width + lsb) <= IR::OpSizeAsBits(Size)"
+        ]
+      },
+      "GPR = Bfxil OpSize:#Size, u8:$Width, u8:$lsb, GPR:$Dest, GPR:$Src": {
+        "Desc": ["Copies a bitfield from one GPR to another",
+                 "Inserting in to the low bits of the destination",
+                 "The source bitfield is from Src[(Width + lsb):lsb]",
+                 "The bitfield is copied in to Dest[Width:0]"
+                ],
+        "DestSize": "Size",
+        "TiedSource": 0,
+        "EmitValidation": [
+          "Size == FEXCore::IR::OpSize::i32Bit || Size == FEXCore::IR::OpSize::i64Bit",
+          "(Width + lsb) <= IR::OpSizeAsBits(Size)"
+        ]
+      },
+      "GPR = Bfe OpSize:#Size, u8:$Width, u8:$lsb, GPR:$Src": {
+        "Desc": ["Extracts a bitfield from one GPR with zext",
+                 "The source bitfield is from Src[Width:0]",
+                 "The bitfield is then zero extended"
+                ],
+        "DestSize": "Size",
+        "EmitValidation": [
+          "Size == FEXCore::IR::OpSize::i32Bit || Size == FEXCore::IR::OpSize::i64Bit",
+          "(Width + lsb) <= IR::OpSizeAsBits(Size)"
+        ]
+      },
+      "GPR = Sbfe OpSize:#Size, u8:$Width, u8:$lsb, GPR:$Src": {
+        "Desc": ["Extracts a bitfield from one GPR with sext",
+                 "The source bitfield is from Src[Width:0]",
+                 "The bitfield is then sign extended"
+                ],
+        "DestSize": "Size",
+        "EmitValidation": [
+          "Size == FEXCore::IR::OpSize::i32Bit || Size == FEXCore::IR::OpSize::i64Bit",
+          "(Width + lsb) <= IR::OpSizeAsBits(Size)"
+        ]
+      },
+      "GPR = NZCVSelect OpSize:#ResultSize, CondClass:$Cond, GPR:$TrueVal, GPR:$FalseVal": {
+        "Desc": ["Select based on value in NZCV flags",
+                 "op:",
+                 "Dest = Cond ? TrueVal : FalseVal"
+                ],
+        "DestSize": "ResultSize",
+        "EmitValidation": [
+          "ResultSize == FEXCore::IR::OpSize::i32Bit || ResultSize == FEXCore::IR::OpSize::i64Bit"
+        ]
+      },
+      "FPR = NZCVSelectV OpSize:#ResultSize, CondClass:$Cond, FPR:$TrueVal, FPR:$FalseVal": {
+        "Desc": [
+          "Select based on value in NZCV flags, where TrueVal and FalseVal are both FPRs.",
+          "op:",
+          "Dest = Cond ? TrueVal : FalseVal"
+        ],
+        "DestSize": "ResultSize"
+      },
+      "GPR = NZCVSelectIncrement OpSize:#ResultSize, CondClass:$Cond, GPR:$TrueVal, GPR:$FalseVal": {
+        "Desc": ["Select and increment based on value in NZCV flags",
+                 "op:",
+                 "Dest = Cond ? TrueVal : (FalseVal + 1)"
+                ],
+        "DestSize": "ResultSize",
+        "EmitValidation": [
+          "ResultSize == FEXCore::IR::OpSize::i32Bit || ResultSize == FEXCore::IR::OpSize::i64Bit"
+        ]
+      },
+      "GPR = Select OpSize:#ResultSize, OpSize:$CompareSize, CondClass:$Cond, SSA:$Cmp1, SSA:$Cmp2, GPR:$TrueVal, GPR:$FalseVal": {
+        "Desc": ["Ternary selection of GPRs",
+                 "op:",
+                 "Dest = Cmp1 <Cond> Cmp2 ? TrueVal : FalseVal"
+                ],
+        "Inline": ["", "AddSub", "", ""],
+        "DestSize": "ResultSize",
+        "ImplicitFlagClobber": true,
+        "EmitValidation": [
+          "CompareSize == FEXCore::IR::OpSize::i32Bit || CompareSize == FEXCore::IR::OpSize::i64Bit || CompareSize == FEXCore::IR::OpSize::i128Bit",
+          "ResultSize == FEXCore::IR::OpSize::i32Bit || ResultSize == FEXCore::IR::OpSize::i64Bit"
+        ]
+      },
+      "GPR = MaskGenerateFromBitWidth GPR:$BitWidth": {
+        "Desc": ["Generates a bit mask from with a value from [0, 63]",
+                 "0 is special cased to full-mask",
+                 "Special operation for SSE4a bitmask generation."
+        ],
+        "DestSize": "FEXCore::IR::OpSize::i64Bit",
+        "ImplicitFlagClobber": true
+      },
+
+      "GPR = Extr OpSize:#Size, GPR:$Upper, GPR:$Lower, u8:$LSB": {
+        "Desc": ["Concats the two GPRs to create a value that is the size of the full two GPRs",
+                 "It then extracts a bitfield width that size of a GPR from the LSB",
+                 "Valid LSB range is 0-31 for 32bit and 0-63 for 64bit",
+                 "<Size * 2> ConcatValue = $Upper:$Lower",
+                 "Result = ConcatValue<LSB+Size - 1: LSB>"
+                ],
+        "DestSize": "Size",
+        "EmitValidation": [
+          "Size == FEXCore::IR::OpSize::i32Bit || Size == FEXCore::IR::OpSize::i64Bit"
+        ]
+      },
+      "GPR = PDep OpSize:#Size, GPR:$Input, GPR:$Mask": {
+        "Desc": ["Performs a parallel bit deposit.",
+                 "Takes the contiguous low-order bits and deposits them into",
+                 "the destination at the locations specified by the Mask."
+                ],
+        "DestSize": "Size",
+        "EmitValidation": [
+          "Size == FEXCore::IR::OpSize::i32Bit || Size == FEXCore::IR::OpSize::i64Bit"
+        ]
+      },
+
+      "GPR = PExt OpSize:#Size, GPR:$Input, GPR:$Mask": {
+        "Desc": ["Performs a parallel bit extract.",
+                 "Each bit set in the mask will select the corresponding bit in the Input",
+                 "and transfers them to the lower contiguous bits in the destination."
+                ],
+        "DestSize": "Size",
+        "EmitValidation": [
+          "Size == FEXCore::IR::OpSize::i32Bit || Size == FEXCore::IR::OpSize::i64Bit"
+        ]
+      },
+
+      "GPR:$Quotient, GPR:$Remainder = Div OpSize:#Size, GPR:$Lower, GPR:$Upper, GPR:$Divisor": {
+        "Desc": ["Integer long signed division returning lower bits",
+                 "The Lower and Upper registers will be concated together to generate a dividend twice the size",
+                 "Then the divisor divides the temporary dividend and returns the results in the original sized register",
+                 "If Upper is invalid, this is a non-long division."
+                ],
+        "DestSize": "Size",
+        "HasSideEffects": true
+      },
+      "GPR:$Quotient, GPR:$Remainder = UDiv OpSize:#Size, GPR:$Lower, GPR:$Upper, GPR:$Divisor": {
+        "Desc": ["Integer long unsigned division returning lower bits",
+                 "The Lower and Upper registers will be concated together to generate a dividend twice the size",
+                 "Then the divisor divides the temporary dividend and returns the results in the original sized register",
+                 "If Upper is invalid, this is a non-long division."
+                ],
+        "DestSize": "Size",
+        "HasSideEffects": true
+      },
+
+      "Float to GPR": {"Ignore": 1},
+      "GPR = VExtractToGPR OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector, u8:$Index": {
+        "Desc": ["Extracts an element from a vector and places it in a GPR",
+                 "The element that is extracted from the vector is zero extended to the GPR size"
+                ],
+        "DestSize": "ElementSize"
+      },
+
+      "GPR = Float_ToGPR_S OpSize:#DestElementSize, OpSize:$SrcElementSize, FPR:$Scalar": {
+        "Desc": ["Moves the scalar element to a GPR with conversion",
+                 "Converts the 32bit or 64bit float to an signed integer",
+                 "Rounding mode determined by host flag's rounding mode"
+                ],
+        "DestSize": "DestElementSize"
+      },
+
+      "GPR = Float_ToGPR_ZS OpSize:#DestElementSize, OpSize:$SrcElementSize, FPR:$Scalar": {
+        "Desc": ["Moves the scalar element to a GPR with conversion",
+                 "Converts the 32bit or 64bit float to an signed integer rounding towards zero (Truncating)"
+                ],
+        "DestSize": "DestElementSize"
+      },
+
+      "FCmp OpSize:$ElementSize, FPR:$Scalar1, FPR:$Scalar2": {
+        "Desc": ["Does a scalar unordered compare and sets NZCV accordingly.",
+                 "NZCV follows Arm conventions, a separate AXFLAG instruction is required for x86",
+                 "Ordering flag result is true if either float input is NaN"
+                ],
+        "HasSideEffects": true
+      }
+    },
+    "VectorScalar": {
+      "FPR = VFAddScalarInsert OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector1, FPR:$Vector2, i1:$ZeroUpperBits": {
+        "Desc": ["Does a scalar 'add' between Vector1 and Vector2.",
+                 "Inserting the result in to the lower element of Vector1 and returning the results.",
+                 "If ZeroUpperBits is set then in a 256-bit wide operation it will zero the upper 128-bits of the destination.",
+                 "For 128-bit operation this matches SSE insert semantics.",
+                 "For 256-bit operation with ZeroUpperBits, this matches AVX insert semantics."
+                ],
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = VFSubScalarInsert OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector1, FPR:$Vector2, i1:$ZeroUpperBits": {
+        "Desc": ["Does a scalar 'sub' between Vector1 and Vector2.",
+                 "Inserting the result in to the lower element of Vector1 and returning the results.",
+                 "If ZeroUpperBits is set then in a 256-bit wide operation it will zero the upper 128-bits of the destination.",
+                 "For 128-bit operation this matches SSE insert semantics.",
+                 "For 256-bit operation with ZeroUpperBits, this matches AVX insert semantics."
+                ],
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = VFMulScalarInsert OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector1, FPR:$Vector2, i1:$ZeroUpperBits": {
+        "Desc": ["Does a scalar 'mul' between Vector1 and Vector2.",
+                 "Inserting the result in to the lower element of Vector1 and returning the results.",
+                 "If ZeroUpperBits is set then in a 256-bit wide operation it will zero the upper 128-bits of the destination.",
+                 "For 128-bit operation this matches SSE insert semantics.",
+                 "For 256-bit operation with ZeroUpperBits, this matches AVX insert semantics."
+                ],
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = VFDivScalarInsert OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector1, FPR:$Vector2, i1:$ZeroUpperBits": {
+        "Desc": ["Does a scalar 'div' between Vector1 and Vector2.",
+                 "Inserting the result in to the lower element of Vector1 and returning the results.",
+                 "If ZeroUpperBits is set then in a 256-bit wide operation it will zero the upper 128-bits of the destination.",
+                 "For 128-bit operation this matches SSE insert semantics.",
+                 "For 256-bit operation with ZeroUpperBits, this matches AVX insert semantics."
+                ],
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = VFMinScalarInsert OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector1, FPR:$Vector2, i1:$ZeroUpperBits": {
+        "Desc": ["Does a scalar 'min' between Vector1 and Vector2.",
+                 "Inserting the result in to the lower element of Vector1 and returning the results.",
+                 "If ZeroUpperBits is set then in a 256-bit wide operation it will zero the upper 128-bits of the destination.",
+                 "For 128-bit operation this matches SSE insert semantics.",
+                 "For 256-bit operation with ZeroUpperBits, this matches AVX insert semantics.",
+                 "Additionally matches x86 zero and NaN semantics",
+                 "If both source operands are zero, return the second operand (in the case of negative and positive zero)",
+                 "If either source operand is NaN then return the second operand."
+                ],
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize",
+        "ImplicitFlagClobber": true
+      },
+      "FPR = VFMaxScalarInsert OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector1, FPR:$Vector2, i1:$ZeroUpperBits": {
+        "Desc": ["Does a scalar 'max' between Vector1 and Vector2.",
+                 "Inserting the result in to the lower element of Vector1 and returning the results.",
+                 "If ZeroUpperBits is set then in a 256-bit wide operation it will zero the upper 128-bits of the destination.",
+                 "For 128-bit operation this matches SSE insert semantics.",
+                 "For 256-bit operation with ZeroUpperBits, this matches AVX insert semantics.",
+                 "Additionally matches x86 zero and NaN semantics",
+                 "If both source operands are zero, return the second operand (in the case of negative and positive zero)",
+                 "If either source operand is NaN then return the second operand."
+                ],
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize",
+        "ImplicitFlagClobber": true
+      },
+      "FPR = VFSqrtScalarInsert OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector1, FPR:$Vector2, i1:$ZeroUpperBits": {
+        "Desc": ["Does a scalar 'sqrt' on Vector2, inserting in to Vector1 and storing in to the destination.",
+                 "Inserting the result in to the lower element of Vector1 and returning the results.",
+                 "If ZeroUpperBits is set then in a 256-bit wide operation it will zero the upper 128-bits of the destination.",
+                 "For 128-bit operation this matches SSE insert semantics.",
+                 "For 256-bit operation with ZeroUpperBits, this matches AVX insert semantics."
+                ],
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = VFRSqrtScalarInsert OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector1, FPR:$Vector2, i1:$ZeroUpperBits": {
+        "Desc": ["Does a scalar 'rsqrt' on Vector2, inserting in to Vector1 and storing in to the destination.",
+                 "Inserting the result in to the lower element of Vector1 and returning the results.",
+                 "If ZeroUpperBits is set then in a 256-bit wide operation it will zero the upper 128-bits of the destination.",
+                 "For 128-bit operation this matches SSE insert semantics.",
+                 "For 256-bit operation with ZeroUpperBits, this matches AVX insert semantics."
+                ],
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = VFRecpScalarInsert OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector1, FPR:$Vector2, i1:$ZeroUpperBits": {
+        "Desc": ["Does a scalar 'recip' on Vector2, inserting in to Vector1 and storing in to the destination.",
+                 "Inserting the result in to the lower element of Vector1 and returning the results.",
+                 "If ZeroUpperBits is set then in a 256-bit wide operation it will zero the upper 128-bits of the destination.",
+                 "For 128-bit operation this matches SSE insert semantics.",
+                 "For 256-bit operation with ZeroUpperBits, this matches AVX insert semantics."
+                ],
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = VFToFScalarInsert OpSize:#RegisterSize, OpSize:#DstElementSize, OpSize:$SrcElementSize, FPR:$Vector1, FPR:$Vector2, i1:$ZeroUpperBits": {
+        "Desc": ["Does a scalar 'cvt' between Vector1 and Vector2.",
+                 "Inserting the result in to the lower element of Vector1 and returning the results.",
+                 "If ZeroUpperBits is set then in a 256-bit wide operation it will zero the upper 128-bits of the destination.",
+                 "For 128-bit operation this matches SSE insert semantics.",
+                 "For 256-bit operation with ZeroUpperBits, this matches AVX insert semantics."
+                ],
+        "DestSize": "RegisterSize",
+        "ElementSize": "DstElementSize"
+      },
+      "FPR = VSToFVectorInsert OpSize:#RegisterSize, OpSize:#DstElementSize, OpSize:$SrcElementSize, FPR:$Vector1, FPR:$Vector2, i8:$HasTwoElements, i1:$ZeroUpperBits": {
+        "Desc": ["Does a Vector 'scvt' between Vector1 and Vector2.",
+                 "Inserting the result in to the lower element of Vector1 and returning the results.",
+                 "If ZeroUpperBits is set then in a 256-bit wide operation it will zero the upper 128-bits of the destination.",
+                 "For 128-bit operation this matches SSE insert semantics.",
+                 "For 256-bit operation with ZeroUpperBits, this matches AVX insert semantics.",
+                 "HasTwoElements is slightly different than most of these scalar operations.",
+                 "Handles the edge case of cvtpi2ps xmm0, mm0 which is two elements in the lower 64-bits"
+                ],
+        "DestSize": "RegisterSize",
+        "ElementSize": "DstElementSize"
+      },
+      "FPR = VSToFGPRInsert OpSize:#RegisterSize, OpSize:#DstElementSize, OpSize:$SrcElementSize, FPR:$Vector, GPR:$Src, i1:$ZeroUpperBits": {
+        "Desc": ["Does a scalar 'cvt' between Vector1 and GPR.",
+                 "Inserting the result in to the lower element of Vector1 and returning the results.",
+                 "If ZeroUpperBits is set then in a 256-bit wide operation it will zero the upper 128-bits of the destination.",
+                 "For 128-bit operation this matches SSE insert semantics.",
+                 "For 256-bit operation with ZeroUpperBits, this matches AVX insert semantics."
+                ],
+        "DestSize": "RegisterSize",
+        "ElementSize": "DstElementSize"
+      },
+      "FPR = VFToIScalarInsert OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector1, FPR:$Vector2, RoundType:$Round, i1:$ZeroUpperBits": {
+        "Desc": ["Does a scalar round float to integral on Vector2, inserting in to Vector1 and storing in to the destination.",
+                 "Rounding mode determined by argument",
+                 "Inserting the result in to the lower element of Vector1 and returning the results.",
+                 "If ZeroUpperBits is set then in a 256-bit wide operation it will zero the upper 128-bits of the destination.",
+                 "For 128-bit operation this matches SSE insert semantics.",
+                 "For 256-bit operation with ZeroUpperBits, this matches AVX insert semantics."
+                ],
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = VFCMPScalarInsert OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector1, FPR:$Vector2, FloatCompareOp:$Op, i1:$ZeroUpperBits": {
+        "Desc": ["Does a scalar 'cmp' between Vector1 and Vecto2, inserting in to Vector1 and storing in to the destination.",
+                 "Compare op determined by argument",
+                 "Inserting the result in to the lower element of Vector1 and returning the results.",
+                 "If ZeroUpperBits is set then in a 256-bit wide operation it will zero the upper 128-bits of the destination.",
+                 "For 128-bit operation this matches SSE insert semantics.",
+                 "For 256-bit operation with ZeroUpperBits, this matches AVX insert semantics."
+                ],
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = VFMLAScalarInsert OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Upper, FPR:$Vector1, FPR:$Vector2, FPR:$Addend": {
+        "Desc": [
+          "Dest = (Vector1 * Vector2) + Addend",
+          "This explicitly matches x86 FMA semantics because ARM semantics are mind-bending.",
+          "Upper elements copied from Upper"
+        ],
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize",
+        "TiedSource": 0
+      },
+      "FPR = VFMLSScalarInsert OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Upper, FPR:$Vector1, FPR:$Vector2, FPR:$Addend": {
+        "Desc": [
+          "Dest = (Vector1 * Vector2) - Addend",
+          "This explicitly matches x86 FMA semantics because ARM semantics are mind-bending.",
+          "Upper elements copied from Upper"
+        ],
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize",
+        "TiedSource": 0
+      },
+      "FPR = VFNMLAScalarInsert OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Upper, FPR:$Vector1, FPR:$Vector2, FPR:$Addend": {
+        "Desc": [
+          "Dest = (-Vector1 * Vector2) + Addend",
+          "This explicitly matches x86 FMA semantics because ARM semantics are mind-bending.",
+          "Upper elements copied from Upper"
+        ],
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize",
+        "TiedSource": 0
+      },
+      "FPR = VFNMLSScalarInsert OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Upper, FPR:$Vector1, FPR:$Vector2, FPR:$Addend": {
+        "Desc": [
+          "Dest = (-Vector1 * Vector2) - Addend",
+          "This explicitly matches x86 FMA semantics because ARM semantics are mind-bending.",
+          "Upper elements copied from Upper"
+        ],
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize",
+        "TiedSource": 0
+      },
+      "FPR = VFCopySign OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector1,  FPR:$Vector2": {
+        "Desc": ["Returns a vector where each element has has the magniture of each corresponding element in vector1 and the sign of vector 2."],
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize",
+        "TiedSource": 0
+      }
+    },
+    "Vector": {
+      "FPR = VMov OpSize:#RegisterSize, FPR:$Source": {
+        "Desc" : ["Copy vector register",
+                  "When Register size is smaller than Source register size,",
+                  "this op is defined to truncate and zero extend"
+                 ],
+        "DestSize": "RegisterSize"
+      },
+
+      "FPR = VectorImm OpSize:#RegisterSize, OpSize:#ElementSize, u8:$Immediate, u8:$ShiftAmount{0}": {
+        "Desc": ["Generates a vector with each element containg the immediate zexted"
+                ],
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+
+      "FPR = LoadNamedVectorConstant OpSize:#RegisterSize, NamedVectorConstant:$Constant": {
+        "Desc": ["Load a named vector constant.",
+                 "The list of vector constants can be found in <FEXCore/IR/IR.h>"
+                ],
+        "DestSize": "RegisterSize"
+      },
+      "FPR = LoadNamedVectorIndexedConstant OpSize:#RegisterSize, IndexNamedVectorConstant:$Constant, u32:$Index": {
+        "Desc": ["Load a named vector constant from Indexable table.",
+                 "Index needs to be aligned register size.",
+                 "The list of indexable vector constants can be found in <FEXCore/IR/IR.h>"
+                ],
+        "DestSize": "RegisterSize"
+      },
+      "FPR = VNeg OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector": {
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = VNot OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector": {
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+
+      "FPR = VAbs OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector": {
+        "Desc": ["Does an signed integer absolute"
+                ],
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+
+      "FPR = VPopcount OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector": {
+        "Desc": ["Does a popcount for each element of the register"
+                ],
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+
+      "FPR = VAddV OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector": {
+        "Desc": ["Does a horizontal vector add of elements across the source vector",
+                 "Result is a zero extended scalar"
+                ],
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = VUMinV OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector": {
+        "Desc": ["Does a horizontal vector unsigned minimum of elements across the source vector",
+                 "Result is a zero extended scalar"
+                ],
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = VUMaxV OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector": {
+        "Desc": ["Does a horizontal vector unsigned maximum of elements across the source vector",
+                 "Result is a zero extended scalar"
+                ],
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = VFAbs OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector": {
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+
+      "FPR = VFNeg OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector": {
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+
+      "FPR = VFRecp OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector": {
+        "Desc": [
+          "Reciprocal value - matches the precision required by the x86 spec.",
+          "It has a relative error of at most 1.5 * 2^-12"
+        ],
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = VFRecpPrecision OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector": {
+        "Desc": [
+          "Similar to VFRecp but carrying more precision for 3DNow!",
+          "It provides at least 14 bits precision, with a relative error of at most 2^-14"
+        ],
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize",
+        "EmitValidation": [
+          "RegisterSize == FEXCore::IR::OpSize::i64Bit || RegisterSize == FEXCore::IR::OpSize::i32Bit",
+          "ElementSize == FEXCore::IR::OpSize::i32Bit"
+        ]
+      },
+
+      "FPR = VFSqrt OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector": {
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+
+      "FPR = VFRSqrt OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector": {
+        "Desc": [
+          "Reciprocal Square Root - matches the precision required by the x86 spec.",
+          "It has a relative error of at most 1.5 * 2^-12"
+        ],
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = VFRSqrtPrecision OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector": {
+        "Desc": [
+          "Similar to VFRSqrt but carrying more precision for 3DNow!",
+          "It provides at least 15 bits precision, with a relative error of at most 2^-15"
+        ],
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize",
+        "EmitValidation": [
+          "RegisterSize == FEXCore::IR::OpSize::i64Bit || RegisterSize == FEXCore::IR::OpSize::i32Bit",
+          "ElementSize == FEXCore::IR::OpSize::i32Bit"
+        ]
+      },
+
+      "FPR = VCMPEQZ OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector": {
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = VCMPGTZ OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector": {
+        "Desc": ["Vector compare signed greater than",
+                 "Each element is compared, if the result is true then the resulting element is ~0, else zero",
+                 "Compares the vector against zero"
+                ],
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = VCMPLTZ OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector": {
+        "Desc": ["Vector compare signed less than",
+                 "Each element is compared, if the result is true then the resulting element is ~0, else zero",
+                 "Compares the vector against zero"
+                ],
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = VDupElement OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector, u8:$Index": {
+        "Desc": ["Duplicates one element from the source register across the whole register"],
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = VShlI OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector, u8:$BitShift": {
+        "TiedSource": 0,
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize",
+        "EmitValidation": [
+          "ElementSize >= FEXCore::IR::OpSize::i8Bit && ElementSize <= FEXCore::IR::OpSize::i64Bit",
+          "BitShift > 0"
+        ]
+      },
+      "FPR = VUShrI OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector, u8:$BitShift": {
+        "TiedSource": 0,
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize",
+        "EmitValidation": [
+          "ElementSize >= FEXCore::IR::OpSize::i8Bit && ElementSize <= FEXCore::IR::OpSize::i64Bit",
+          "BitShift > 0"
+        ]
+      },
+      "FPR = VUShraI OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$DestVector, FPR:$Vector, u8:$BitShift": {
+        "TiedSource": 0,
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize",
+        "EmitValidation": [
+          "ElementSize >= FEXCore::IR::OpSize::i8Bit && ElementSize <= FEXCore::IR::OpSize::i64Bit",
+          "BitShift > 0 && BitShift <= IR::OpSizeAsBits(ElementSize)"
+        ]
+      },
+      "FPR = VSShrI OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector, u8:$BitShift": {
+        "TiedSource": 0,
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize",
+        "EmitValidation": [
+          "ElementSize >= FEXCore::IR::OpSize::i8Bit && ElementSize <= FEXCore::IR::OpSize::i64Bit",
+          "BitShift > 0"
+        ]
+      },
+
+      "FPR = VUShrNI OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector, u8:$BitShift": {
+        "TiedSource": 0,
+        "Desc": "Unsigned shifts right each element and then narrows to the next lower element size",
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize >> 1",
+        "EmitValidation": [
+          "ElementSize >= FEXCore::IR::OpSize::i16Bit && ElementSize <= FEXCore::IR::OpSize::i64Bit",
+          "BitShift <= IR::OpSizeAsBits(ElementSize)"
+        ]
+      },
+
+      "FPR = VUShrNI2 OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$VectorLower, FPR:$VectorUpper, u8:$BitShift": {
+        "TiedSource": 0,
+        "Desc": ["Unsigned shifts right each element and then narrows to the next lower element size",
+                 "Inserts results in to the high elements of the first argument"
+                ],
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize >> 1",
+        "EmitValidation": [
+          "ElementSize >= FEXCore::IR::OpSize::i16Bit && ElementSize <= FEXCore::IR::OpSize::i64Bit",
+          "BitShift > 0 && BitShift <= IR::OpSizeAsBits(ElementSize)"
+        ]
+      },
+      "FPR = VSXTL OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector": {
+        "Desc": "Sign extends elements from the source element size to the next size up",
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize << 1"
+      },
+      "FPR = VSXTL2 OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector": {
+        "Desc": ["Sign extends elements from the source element size to the next size up",
+                 "Source elements come from the upper half of the register"
+                ],
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize << 1"
+      },
+      "FPR = VSSHLL OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector, u8:$BitShift{0}": {
+        "Desc": "Sign extends elements from the source element size to the next size up",
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize << 1"
+      },
+      "FPR = VSSHLL2 OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector, u8:$BitShift{0}": {
+        "Desc": ["Sign extends elements from the source element size to the next size up",
+                 "Source elements come from the upper half of the register"
+                ],
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize << 1"
+      },
+      "FPR = VUXTL OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector": {
+        "Desc": "Zero extends elements from the source element size to the next size up",
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize << 1"
+      },
+      "FPR = VUXTL2 OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector": {
+        "Desc": ["Zero extends elements from the source element size to the next size up",
+                 "Source elements come from the upper half of the register"
+                ],
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize << 1"
+      },
+      "FPR = VSQXTN OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector": {
+        "TiedSource": 0,
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize >> 1"
+      },
+      "FPR = VSQXTN2 OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$VectorLower, FPR:$VectorUpper": {
+        "TiedSource": 0,
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize >> 1"
+      },
+      "FPR = VSQXTNPair OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$VectorLower, FPR:$VectorUpper": {
+        "Desc": ["Does both VSQXTN and VSQXTN2 in a combined operation."
+                ],
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize >> 1"
+      },
+      "FPR = VSQXTUN OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector": {
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize >> 1"
+      },
+      "FPR = VSQXTUN2 OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$VectorLower, FPR:$VectorUpper": {
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize >> 1"
+      },
+      "FPR = VSQXTUNPair OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$VectorLower, FPR:$VectorUpper": {
+        "Desc": ["Does both VSQXTUN and VSQXTUN2 in a combined operation."
+                ],
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize >> 1"
+      },
+      "FPR = VSRSHR OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector, u8:$BitShift": {
+        "Desc": ["Signed rounding shift right by immediate",
+                 "Exactly matching Arm64 srshr semantics"
+                ],
+        "TiedSource": 0,
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = VSQSHL OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector, u8:$BitShift": {
+        "Desc": ["Signed satuating shift left by immediate",
+                 "Exactly matching Arm64 sqshl semantics"
+                ],
+        "TiedSource": 0,
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = VRev32 OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector": {
+        "Desc" : ["Reverses elements in 32-bit halfwords",
+                  "Available element size: 1byte, 2 byte"
+                 ],
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = VRev64 OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector": {
+        "Desc" : ["Reverses elements in 64-bit halfwords",
+                  "Available element size: 1byte, 2 byte, 4 byte"
+                 ],
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+
+      "FPR = VAdd OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector1, FPR:$Vector2": {
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+
+      "FPR = VSub OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector1, FPR:$Vector2": {
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+
+      "FPR = VAnd OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector1, FPR:$Vector2": {
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize",
+        "EmitValidation": [
+          "RegisterSize == FEXCore::IR::OpSize::i256Bit || RegisterSize == FEXCore::IR::OpSize::i128Bit || RegisterSize == FEXCore::IR::OpSize::i64Bit"
+        ]
+      },
+
+      "FPR = VAndn OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector1, FPR:$Vector2": {
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize",
+        "EmitValidation": [
+          "RegisterSize == FEXCore::IR::OpSize::i256Bit || RegisterSize == FEXCore::IR::OpSize::i128Bit || RegisterSize == FEXCore::IR::OpSize::i64Bit"
+        ]
+      },
+
+      "FPR = VOr OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector1, FPR:$Vector2": {
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize",
+        "EmitValidation": [
+          "RegisterSize == FEXCore::IR::OpSize::i256Bit || RegisterSize == FEXCore::IR::OpSize::i128Bit || RegisterSize == FEXCore::IR::OpSize::i64Bit"
+        ]
+      },
+
+      "FPR = VXor OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector1, FPR:$Vector2": {
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize",
+        "EmitValidation": [
+          "RegisterSize == FEXCore::IR::OpSize::i256Bit || RegisterSize == FEXCore::IR::OpSize::i128Bit || RegisterSize == FEXCore::IR::OpSize::i64Bit"
+        ]
+      },
+
+      "FPR = VUQAdd OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector1, FPR:$Vector2": {
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+
+      "FPR = VUQSub OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector1, FPR:$Vector2": {
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+
+      "FPR = VSQAdd OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector1, FPR:$Vector2": {
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+
+      "FPR = VSQSub OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector1, FPR:$Vector2": {
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+
+      "FPR = VAddP OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$VectorLower, FPR:$VectorUpper": {
+        "Desc": "Does a horizontal pairwise add of elements across the two source vectors",
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+
+      "FPR = VURAvg OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector1, FPR:$Vector2": {
+        "Desc": ["Does an unsigned rounded average", "dst_elem = (src1_elem + src2_elem + 1) >> 1"],
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = VUMin OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector1, FPR:$Vector2": {
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = VUMax OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector1, FPR:$Vector2": {
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = VSMin OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector1, FPR:$Vector2": {
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = VSMax OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector1, FPR:$Vector2": {
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+
+      "FPR = VZip OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$VectorLower, FPR:$VectorUpper": {
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = VZip2 OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$VectorLower, FPR:$VectorUpper": {
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = VUnZip OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$VectorLower, FPR:$VectorUpper": {
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = VUnZip2 OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$VectorLower, FPR:$VectorUpper": {
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = VTrn OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$VectorLower, FPR:$VectorUpper": {
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = VTrn2 OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$VectorLower, FPR:$VectorUpper": {
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+
+      "FPR = VFAdd OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector1, FPR:$Vector2": {
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = VFAddP OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$VectorLower, FPR:$VectorUpper": {
+        "Desc": "Does a horizontal pairwise add of elements across the two source vectors with float element types",
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = VFAddV OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector": {
+        "Desc": ["Does a horizontal float vector add of elements across the source vector",
+                 "Result is a zero extended scalar"
+                ],
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = VFSub OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector1, FPR:$Vector2": {
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = VFMul OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector1, FPR:$Vector2": {
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = VFDiv OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector1, FPR:$Vector2": {
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+
+      "FPR = VFMin OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector1, FPR:$Vector2": {
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize",
+        "TiedSource": 0
+      },
+      "FPR = VFMax OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector1, FPR:$Vector2": {
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize",
+        "TiedSource": 0
+      },
+      "FPR = VMul OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector1, FPR:$Vector2": {
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = VUMull OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector1, FPR:$Vector2": {
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize << 1"
+      },
+      "FPR = VSMull OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector1, FPR:$Vector2": {
+        "Desc": [ "Does a signed integer multiply with extend.",
+                  "ElementSize is the source size"
+                ],
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize << 1"
+      },
+      "FPR = VUMull2 OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector1, FPR:$Vector2": {
+        "Desc": "Multiplies the high elements with size extension",
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize << 1"
+      },
+      "FPR = VSMull2 OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector1, FPR:$Vector2": {
+        "Desc": "Multiplies the high elements with size extension",
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize << 1"
+      },
+      "FPR = VUMulH OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector1, FPR:$Vector2": {
+        "Desc": "Wide unsigned multiply returning the high results",
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = VSMulH OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector1, FPR:$Vector2": {
+        "Desc": "Wide signed multiply returning the high results",
+
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = VUABDL OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector1, FPR:$Vector2": {
+        "Desc": ["Unsigned Absolute Difference Long"
+                ],
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize << 1"
+      },
+      "FPR = VUABDL2 OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector1, FPR:$Vector2": {
+        "Desc": ["Unsigned Absolute Difference Long",
+                 "Using the high elements of the source vectors"
+                ],
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize << 1"
+      },
+      "FPR = VUShl OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector, FPR:$ShiftVector, i1:$RangeCheck": {
+        "TiedSource": 0,
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = VUShr OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector, FPR:$ShiftVector, i1:$RangeCheck": {
+        "TiedSource": 0,
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = VSShr OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector, FPR:$ShiftVector, i1:$RangeCheck": {
+        "TiedSource": 0,
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = VUShlS OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector, FPR:$ShiftScalar": {
+        "TiedSource": 0,
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = VUShrS OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector, FPR:$ShiftScalar": {
+        "TiedSource": 0,
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = VSShrS OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector, FPR:$ShiftScalar": {
+        "TiedSource": 0,
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = VUShrSWide OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector, FPR:$ShiftScalar": {
+        "TiedSource": 0,
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = VSShrSWide OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector, FPR:$ShiftScalar": {
+        "TiedSource": 0,
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = VUShlSWide OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector, FPR:$ShiftScalar": {
+        "TiedSource": 0,
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = VInsElement OpSize:#RegisterSize, OpSize:#ElementSize, u8:$DestIdx, u8:$SrcIdx, FPR:$DestVector, FPR:$SrcVector": {
+        "TiedSource": 0,
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = VInsGPR OpSize:#RegisterSize, OpSize:#ElementSize, u8:$DestIdx, FPR:$DestVector, GPR:$Src": {
+        "TiedSource": 0,
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+
+      "FPR = VExtr OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$VectorLower, FPR:$VectorUpper, u8:$Index": {
+        "Desc": ["Concats two vector registers together and extracts a full width register from the element index",
+                 "Index is an element index. So it is offset by ElementSize argument",
+                 "op:",
+                 "TmpVector <RegisterSize *2> = concat(Upper:Lower)",
+                 "Dest = TmpVector >> (ElementSize * Index * 8); // Or can be thought of `concat(&TmpVector[Index], i128)`"
+                ],
+        "TiedSource": 1,
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+
+      "FPR = VCMPEQ OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector1, FPR:$Vector2": {
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+
+      "FPR = VCMPGT OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector1, FPR:$Vector2": {
+        "Desc": ["Vector compare signed greater than",
+                 "Each element is compared, if the result is true then the resulting element is ~0, else zero"
+                ],
+
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = VFCMPEQ OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector1, FPR:$Vector2": {
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = VFCMPNEQ OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector1, FPR:$Vector2": {
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = VFCMPLT OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector1, FPR:$Vector2": {
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = VFCMPGT OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector1, FPR:$Vector2": {
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = VFCMPLE OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector1, FPR:$Vector2": {
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = VFCMPORD OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector1, FPR:$Vector2": {
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = VFCMPUNO OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector1, FPR:$Vector2": {
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = VTBL1 OpSize:#RegisterSize, FPR:$VectorTable, FPR:$VectorIndices": {
+        "Desc": ["Does a vector table lookup from one register in to the destination",
+                 "Lookup is byte sized per byte element.",
+                 "Any index larger than what the registers provide will result in zero for that element",
+                 "Table is always treated as a 128bit register",
+                 "Indices matches destination size. Either 64bit or 128bit"
+                ],
+        "DestSize": "RegisterSize"
+      },
+      "FPR = VTBL2 OpSize:#RegisterSize, FPR:$VectorTable1, FPR:$VectorTable2, FPR:$VectorIndices": {
+        "Desc": ["Does a vector table lookup from two registers in to the destination",
+                 "Lookup is byte sized per byte element.",
+                 "Any index larger than what the registers provide will result in zero for that element",
+                 "Table is always treated as a two 128bit registers",
+                 "Indices matches destination size. Either 64bit or 128bit",
+                 "Careful about not using sequential table registers, will result in some moves if they aren't sequential."
+                ],
+        "DestSize": "RegisterSize"
+      },
+      "FPR = VTBX1 OpSize:#RegisterSize, FPR:$VectorSrcDst, FPR:$VectorTable, FPR:$VectorIndices": {
+        "Desc": ["Does a vector table lookup from one register in to the destination",
+                 "Lookup is byte sized per byte element.",
+                 "Any index larger than what the registers provide will result in not modifying that element",
+                 "Table is always treated as a 128bit register",
+                 "Indices matches destination size. Either 64bit or 128bit"
+                ],
+        "TiedSource": 0,
+        "DestSize": "RegisterSize"
+      },
+      "FPR = VBSL OpSize:#RegisterSize, FPR:$VectorMask, FPR:$VectorTrue, FPR:$VectorFalse": {
+        "Desc": ["Does a vector bitwise select.",
+                 "If the bit in the field is 1 then the corresponding bit is pulled from VectorTrue",
+                 "If the bit in the field is 0 then the corresponding bit is pulled from VectorFalse"
+                ],
+        "TiedSource": 0,
+        "DestSize": "RegisterSize"
+      },
+
+      "GPR = VPCMPESTRX FPR:$LHS, FPR:$RHS, GPR:$RAX, GPR:$RDX, u16:$Control": {
+        "Desc": ["Performs intermediate behavior analogous to the x86 PCMPESTRI/PCMPESTRM instruction",
+                 "This will return the intermediate result of a PCMPESTR-type operation, but NOT the final",
+                 "result. This must be derived from the intermediate result",
+
+                 "NOTE: On top of returning the intermediate result, the returned value also combines the status",
+                 "flags into the upper 16-bits of the 32-bit result, as these can also be derived over the",
+                 "course of creating the intermediate result"
+                ],
+        "DestSize": "OpSize::i32Bit",
+        "JITDispatch": false
+      },
+      "GPR = VPCMPISTRX FPR:$LHS, FPR:$RHS, u8:$Control": {
+        "Desc": ["Performs intermediate behavior analogous to the x86 PCMPISTRI/PCMPISTRM instruction",
+                 "This will return the intermediate result of a PCMPISTR-type operation, but NOT the final",
+                 "result. This must be derived from the intermediate result",
+
+                 "NOTE: On top of returning the intermediate result, the returned value also combines the status",
+                 "flags into the upper 16-bits of the 32-bit result, as these can also be derived over the",
+                 "course of creating the intermediate result"
+                ],
+        "DestSize": "OpSize::i32Bit",
+        "JITDispatch": false
+      },
+      "FPR = VFCADD OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector1, FPR:$Vector2, u16:$Rotate": {
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = VFMLA OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector1, FPR:$Vector2, FPR:$Addend": {
+        "Desc": [
+          "Dest = (Vector1 * Vector2) + Addend",
+          "This explicitly matches x86 FMA semantics because ARM semantics are mind-bending."
+        ],
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize",
+        "TiedSource": 2
+      },
+      "FPR = VFMLS OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector1, FPR:$Vector2, FPR:$Addend": {
+        "Desc": [
+          "Dest = (Vector1 * Vector2) - Addend",
+          "This explicitly matches x86 FMA semantics because ARM semantics are mind-bending."
+        ],
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize",
+        "TiedSource": 2
+      },
+      "FPR = VFNMLA OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector1, FPR:$Vector2, FPR:$Addend": {
+        "Desc": [
+          "Dest = (-Vector1 * Vector2) + Addend",
+          "This explicitly matches x86 FMA semantics because ARM semantics are mind-bending."
+        ],
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize",
+        "TiedSource": 2
+      },
+      "FPR = VFNMLS OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector1, FPR:$Vector2, FPR:$Addend": {
+        "Desc": [
+          "Dest = (-Vector1 * Vector2) - Addend",
+          "This explicitly matches x86 FMA semantics because ARM semantics are mind-bending."
+        ],
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize",
+        "TiedSource": 2
+      }
+    },
+    "Conv": {
+      "FPR = VCastFromGPR OpSize:#RegisterSize, OpSize:#ElementSize, GPR:$Src": {
+        "Desc": ["Moves a GPR to a Vector register with zero extension to full length of the register.",
+                 "No conversion is done on the data as it moves register files"
+                ],
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+
+      "FPR = VDupFromGPR OpSize:#RegisterSize, OpSize:#ElementSize, GPR:$Src": {
+        "Desc": ["Broadcasts a value in a GPR into each ElementSize-sized element in a vector"],
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+
+      "FPR = VLoadTwoGPRs GPR:$Lower, GPR:$Upper": {
+        "Desc": ["Moves two 64-bit registers to a vector register optimally"],
+        "DestSize": "OpSize::i128Bit",
+        "ElementSize": "OpSize::i64Bit"
+      },
+
+      "FPR = Float_FromGPR_S OpSize:#DstElementSize, OpSize:$SrcElementSize, GPR:$Src": {
+        "Desc": ["Scalar op: Converts signed GPR to Scalar float",
+                 "Zeroes the upper bits of the vector register"
+                ],
+        "DestSize": "DstElementSize"
+      },
+      "FPR = Float_FToF OpSize:#DstElementSize, OpSize:$SrcElementSize, FPR:$Scalar": {
+        "Desc": ["Scalar op: Converts float from one size to another",
+                 "Zeroes the upper bits of the vector register"
+                ],
+        "DestSize": "DstElementSize"
+      },
+
+      "FPR = Vector_SToF OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector": {
+        "Desc": "Vector op: Converts signed integer to same size float",
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = Vector_FToS OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector": {
+        "Desc": ["Vector op: Converts float to signed integer, rounding towards zero",
+                 "Rounding mode determined by host rounding mode"
+                ],
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = Vector_FToZS OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector": {
+        "Desc": "Vector op: Converts float to signed integer, rounding towards zero",
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = Vector_FToF OpSize:#RegisterSize, OpSize:#DestElementSize, FPR:$Vector, OpSize:$SrcElementSize": {
+        "Desc": "Vector op: Converts float from source element size to destination size (fp32<->fp64)",
+        "DestSize": "RegisterSize",
+        "ElementSize": "DestElementSize"
+      },
+
+      "FPR = VFCVTL2 OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector": {
+        "Desc": [
+          "Vector op: Converts float from source element size to destination size (fp32->fp64)",
+          "Selecting from the high half of the register."
+        ],
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize << 1",
+        "EmitValidation": [
+          "RegisterSize != FEXCore::IR::OpSize::i256Bit && \"What does 256-bit mean in this context?\""
+        ]
+      },
+      "FPR = VFCVTN2 OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$VectorLower, FPR:$VectorUpper": {
+        "TiedSource": 0,
+        "Desc": [
+          "Vector op: Converts float from source element size and inserting in to the high bits.",
+          "Bottom half is untouched",
+          "Narrowing to the element size below what is passed in.",
+          "F64->F32, F32->F16"
+        ],
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize >> 1",
+        "EmitValidation": [
+          "RegisterSize != FEXCore::IR::OpSize::i256Bit && \"What does 256-bit mean in this context?\""
+        ]
+      },
+      "FPR = Vector_FToI OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector, RoundType:$Round": {
+        "Desc": ["Vector op: Rounds float to integral",
+                 "Rounding mode determined by argument"
+                ],
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = Vector_FToISized OpSize:#RegisterSize, OpSize:#ElementSize, FPR:$Vector, i1:$HostRound, OpSize:$IntSize": {
+        "Desc": ["Vector op: Rounds float to sized integral",
+                 "Either host rounding or round-to-zero",
+                 "Rounding mode determined by argument"
+                ],
+        "DestSize": "RegisterSize",
+        "ElementSize": "ElementSize"
+      },
+      "FPR = Vector_F64ToI32 OpSize:#RegisterSize, FPR:$Vector, RoundType:$Round, i1:$EnsureZeroUpperHalf": {
+        "Desc": ["Vector op: Rounds 64-bit float to 32-bit integral with round mode",
+                 "Matches CVTPD2DQ/CVTTPD2DQ behaviour"
+                ],
+        "DestSize": "RegisterSize",
+        "ElementSize": "FEXCore::IR::OpSize::i32Bit"
+      }
+    },
+    "Crypto": {
+      "FPR = VAESImc FPR:$Vector": {
+        "Desc": "Does a stage of the inverse mix column transformation",
+        "DestSize": "OpSize::i128Bit"
+      },
+      "FPR = VAESEnc OpSize:#RegisterSize, FPR:$State, FPR:$Key, FPR:$ZeroReg": {
+        "Desc": "Does a step of AES encryption",
+        "DestSize": "RegisterSize"
+      },
+      "FPR = VAESEncLast OpSize:#RegisterSize, FPR:$State, FPR:$Key, FPR:$ZeroReg": {
+        "Desc": "Does the last step of AES encryption",
+        "DestSize": "RegisterSize"
+      },
+      "FPR = VAESDec OpSize:#RegisterSize, FPR:$State, FPR:$Key, FPR:$ZeroReg": {
+        "Desc": "Does a step of AES decryption",
+        "DestSize": "RegisterSize"
+      },
+      "FPR = VAESDecLast OpSize:#RegisterSize, FPR:$State, FPR:$Key, FPR:$ZeroReg": {
+        "Desc": "Does the last step of AES decryption",
+        "DestSize": "RegisterSize"
+      },
+      "FPR = VAESKeyGenAssist FPR:$Src, FPR:$KeyGenTBLSwizzle, FPR:$ZeroReg, u8:$RCON": {
+        "Desc": "Assists in key generation",
+        "DestSize": "OpSize::i128Bit"
+      },
+      "FPR = VSha1H FPR:$Src": {
+        "Desc": "Does vector scalar SHA1H instruction",
+        "DestSize": "FEXCore::IR::OpSize::i32Bit"
+      },
+      "FPR = VSha1C FPR:$Src1, FPR:$Src2, FPR:$Src3": {
+        "Desc": "Does vector SHA1C instruction",
+        "DestSize": "FEXCore::IR::OpSize::i128Bit",
+        "TiedSource": 0
+      },
+      "FPR = VSha1M FPR:$Src1, FPR:$Src2, FPR:$Src3": {
+        "Desc": "Does vector SHA1M instruction",
+        "DestSize": "FEXCore::IR::OpSize::i128Bit",
+        "TiedSource": 0
+      },
+      "FPR = VSha1P FPR:$Src1, FPR:$Src2, FPR:$Src3": {
+        "Desc": "Does vector SHA1P instruction",
+        "DestSize": "FEXCore::IR::OpSize::i128Bit",
+        "TiedSource": 0
+      },
+      "FPR = VSha1SU1 FPR:$Src1, FPR:$Src2": {
+        "Desc": "Does vector scalar SHA1H instruction",
+        "DestSize": "FEXCore::IR::OpSize::i128Bit",
+        "TiedSource": 0
+      },
+      "FPR = VSha256U0 FPR:$Src1, FPR:$Src2": {
+        "Desc": "Does vector scalar VSha256U0 instruction",
+        "DestSize": "FEXCore::IR::OpSize::i128Bit",
+        "TiedSource": 0
+      },
+      "FPR = VSha256U1 FPR:$Src1, FPR:$Src2": {
+        "Desc": "Does vector scalar VSha256U1 instruction",
+        "DestSize": "FEXCore::IR::OpSize::i128Bit"
+      },
+      "FPR = VSha256H FPR:$Src1, FPR:$Src2, FPR:$Src3": {
+        "Desc": "Does vector scalar VSha256H instruction",
+        "DestSize": "FEXCore::IR::OpSize::i128Bit",
+        "TiedSource": 0
+      },
+      "FPR = VSha256H2 FPR:$Src1, FPR:$Src2, FPR:$Src3": {
+        "Desc": "Does vector scalar VSha256H2 instruction",
+        "DestSize": "FEXCore::IR::OpSize::i128Bit",
+        "TiedSource": 0
+      },
+      "GPR = CRC32 GPR:$Src1, GPR:$Src2, OpSize:$SrcSize": {
+        "Desc": ["CRC32 using polynomial 0x1EDC6F41"
+                ],
+        "DestSize": "OpSize::i32Bit"
+      },
+      "FPR = PCLMUL OpSize:#RegisterSize, FPR:$Src1, FPR:$Src2, u8:$Selector": {
+        "Desc": [
+          "Performs carryless multiplication of 64-bit elements depending on the selector.",
+          "Selector = 0b00000000: Uses low 64-bit elements from both input vectors",
+          "Selector = 0b00000001: Uses high 64-bit element from Src1 and low 64-bit element from Src2",
+          "Selector = 0b00010000: Uses low 64-bit element from Src1 and high 64-bit element from Src2",
+          "Selector = 0b00010001: Uses high 64-bit elements from both input vectors"
+        ],
+        "DestSize": "RegisterSize"
+      }
+    },
+    "F64": {
+      "FPR = F64ATAN FPR:$Src1, FPR:$Src2": {
+        "DestSize": "OpSize::i64Bit",
+        "JITDispatch": false
+      },
+      "FPR = F64FPREM FPR:$Src1, FPR:$Src2": {
+        "DestSize": "OpSize::i64Bit",
+        "JITDispatch": false
+      },
+      "FPR = F64FPREM1 FPR:$Src1, FPR:$Src2": {
+        "DestSize": "OpSize::i64Bit",
+        "JITDispatch": false
+      },
+      "FPR = F64SCALE FPR:$Src1, FPR:$Src2": {
+        "DestSize": "OpSize::i64Bit",
+        "JITDispatch": false
+      },
+      "FPR = F64F2XM1 FPR:$Src": {
+        "DestSize": "OpSize::i64Bit",
+        "JITDispatch": false
+      },
+      "FPR = F64FYL2X FPR:$Src, FPR:$Src2": {
+        "DestSize": "OpSize::i64Bit",
+        "JITDispatch": false
+      },
+      "FPR = F64TAN FPR:$Src": {
+        "DestSize": "OpSize::i64Bit",
+        "JITDispatch": false
+      },
+      "FPR = F64SIN FPR:$Src": {
+        "DestSize": "OpSize::i64Bit",
+        "JITDispatch": false
+      },
+      "FPR = F64COS FPR:$Src": {
+        "DestSize": "OpSize::i64Bit",
+        "JITDispatch": false
+      },
+      "FPR:$Sin, FPR:$Cos = F64SINCOS FPR:$Src": {
+        "DestSize": "OpSize::i64Bit",
+        "HasSideEffects": true,
+        "JITDispatch": false
+      }
+    },
+    "F80": {
+      "GPR = SyncStackToSlow": {
+        "Desc": [
+          "Synchronizes the virtual stack environment to the physical registers.",
+          "Returns the current stack top."
+        ],
+        "X87": true,
+        "HasSideEffects": true,
+        "DestSize": "OpSize::i64Bit"
+      },
+      "StackForceSlow": {
+        "Desc": [
+          "Forces the slow path."
+        ],
+        "X87": true,
+        "HasSideEffects": true
+      },
+      "InitStack": {
+        "Desc": [
+          "Initializes the stack by marking all tags as invalid and setting top to zero."
+        ],
+        "X87": true,
+        "HasSideEffects": true
+      },
+      "IncStackTop": {
+        "Desc": [
+          "Increase stack top-pointer."
+        ],
+        "X87": true,
+        "HasSideEffects": true
+      },
+      "DecStackTop": {
+        "Desc": [
+          "Decrease stack top-pointer."
+        ],
+        "X87": true,
+        "HasSideEffects": true
+      },
+      "InvalidateStack u8:$StackLocation": {
+        "Desc": [
+          "Marks the value in TOP+$StackLocation as empty / invalid 0b11.",
+          "If the StackLocation is 0xff, we invalidate all locations."
+        ],
+        "X87": true,
+        "HasSideEffects": true
+      },
+      "PushStack FPR:$X80Src, FPR:$OriginalValue, OpSize:$LoadSize": {
+        "Desc": [
+          "Pushes the provided X80Src source on to the x87 stack.",
+          "Tracks OriginalValue as the original value of X80Src. OriginalValue can be Invalid() in which case no tracking is done.",
+          "Opsize is 128bit for F80 values, 64-bit for low precision.",
+          "LoadSize the original load size, i.e. of size of OriginalValue.",
+          "Float: 80-bit, 64-bit, 32-bit"
+        ],
+        "HasSideEffects": true,
+        "X87": true
+      },
+      "CopyPushStack u8:$StackLocation": {
+        "Desc": [
+          "Pushes an element already on the stack onto the top."
+        ],
+        "HasSideEffects": true,
+        "X87": true
+      },
+      "StoreStackMem OpSize:$SourceSize, OpSize:$StoreSize, GPR:$Addr, GPR:$Offset, OpSize:$Align, MemOffsetType:$OffsetType, u8:$OffsetScale": {
+        "Desc": [
+          "Takes the top value off the x87 stack and stores it to memory.",
+          "SourceSize is 128bit for F80 values, 64-bit for low precision.",
+          "StoreSize is the store size for conversion:",
+          "Float: 80-bit, 64-bit, or 32-bit"
+        ],
+        "HasSideEffects": true,
+        "X87": true
+      },
+      "StoreStackToStack u8:$StackLocation": {
+        "Desc": [
+          "Takes the top value off the x87 stack and stores it to stack location TOP+StackLocation",
+          "Float: 80-bit, 64-bit, or 32-bit",
+          "Int: 64-bit, 32-bit, 16-bit"
+        ],
+        "HasSideEffects": true,
+        "X87": true
+      },
+      "PopStackDestroy": {
+        "Desc": [
+          "Pops the top value off the stack but doesn't save it anywhere."
+        ],
+        "HasSideEffects": true,
+        "X87": true
+      },
+      "FPR = ReadStackValue u8:$StackLocation": {
+        "Desc": [
+          "Reads a value off the stack at the offset"
+        ],
+        "DestSize": "OpSize::i128Bit",
+        "X87": true
+      },
+      "GPR = StackValidTag u8:$StackLocation": {
+        "Desc": [
+          "Returns 1 if the value in location TOP+$StackLocation is valid, 0 otherwise."
+        ],
+        "DestSize": "OpSize::i32Bit",
+        "X87": true
+      },
+      "F80AddStack u8:$SrcStack1, u8:$SrcStack2": {
+        "Desc": [
+          "Adds two stack locations together, storing the result in to the first stack location"
+        ],
+        "HasSideEffects": true,
+        "X87": true
+      },
+      "F80AddValue u8:$SrcStack, FPR:$X80Src": {
+        "Desc": [
+          "Adds a operand value to a stack location. The result stored in to the stack location provided."
+        ],
+        "HasSideEffects": true,
+        "X87": true
+      },
+      "FPR = F80Add FPR:$X80Src1, FPR:$X80Src2": {
+        "DestSize": "OpSize::i128Bit",
+        "JITDispatch": false
+      },
+      "F80SubStack u8:$DstStack, u8:$SrcStack1, u8:$SrcStack2": {
+        "Desc": [
+          "Subtracts the value in stack location TOP+$SrcStack2 from the value in stack location TOP+$SrcStack1.",
+          "The result is stored in stack location TOP+$DstStack."
+        ],
+        "HasSideEffects": true,
+        "X87": true
+      },
+      "F80SubValue u8:$SrcStack, FPR:$X80Src": {
+        "Desc": [
+          "Subtracts the value $X80Src from the value in stack location TOP+$SrcStack.",
+          "The result is stored in stack location TOP."
+        ],
+        "HasSideEffects": true,
+        "X87": true
+      },
+      "F80SubRValue FPR:$X80Src, u8:$SrcStack": {
+        "Desc": [
+          "Subtracts the value in stack location TOP+$SrcStack from the value $X80Src.",
+          "The result is stored in stack location TOP."
+        ],
+        "HasSideEffects": true,
+        "X87": true
+      },
+      "FPR = F80Sub FPR:$X80Src1, FPR:$X80Src2": {
+        "Desc": [
+          "Subtracts the value in $X80Src1 from the value in $X80Src2.",
+          "The result is returned.",
+          "`FPR = X80Src2 - X80Src1`"
+        ],
+        "DestSize": "OpSize::i128Bit",
+        "JITDispatch": false
+      },
+      "F80MulStack u8:$SrcStack1, u8:$SrcStack2": {
+        "Desc": [
+          "Multiplies two stack locations together, storing the result in to the first stack location"
+        ],
+        "HasSideEffects": true,
+        "X87": true
+      },
+      "F80MulValue u8:$SrcStack, FPR:$X80Src": {
+        "Desc": [
+          "Multiplies a operand value to a stack location. The result stored in to the stack location provided."
+        ],
+        "HasSideEffects": true,
+        "X87": true
+      },
+      "FPR = F80Mul FPR:$X80Src1, FPR:$X80Src2": {
+        "DestSize": "OpSize::i128Bit",
+        "JITDispatch": false
+      },
+      "F80DivStack u8:$DstStack, u8:$SrcStack1, u8:$SrcStack2": {
+        "Desc": [
+          "Divides the value in stack location TOP+$SrcStack1 by the value in stack location TOP+$SrcStack2.",
+          "The result is stored in stack location TOP+$DstStack.",
+          "`FPR|Stack[TOP+DstStack] = Stack[TOP+SrcStack1] / Stack[TOP+SrcStack2]`"
+        ],
+        "HasSideEffects": true,
+        "X87": true
+      },
+      "F80DivValue u8:$SrcStack, FPR:$X80Src": {
+        "Desc": [
+          "Divides the value in stack location TOP+$SrcStack by the value $X80Src.",
+          "The result is stored in stack location TOP and returned.",
+          "`FPR|Stack[TOP] = Stack[TOP+SrcStack] / X80Src`"
+        ],
+        "HasSideEffects": true,
+        "X87": true
+      },
+      "F80DivRValue FPR:$X80Src, u8:$SrcStack": {
+        "Desc": [
+          "Divides the value X80Src by the value in stack location TOP+$SrcStack.",
+          "The result is stored in stack location TOP.",
+          "`FPR|Stack[TOP] = X80Src / Stack[TOP+SrcStack]`"
+        ],
+        "HasSideEffects": true,
+        "X87": true
+      },
+      "FPR = F80Div FPR:$X80Src1, FPR:$X80Src2": {
+        "Desc": [
+          "Divides the value in $X80Src1 by the value in $X80Src2.",
+          "The result is returned.",
+          "`FPR = X80Src1 / X80Src2`"
+        ],
+        "DestSize": "OpSize::i128Bit",
+        "JITDispatch": false
+      },
+      "F80StackXchange u8:$SrcStack": {
+        "Desc": [
+          "Exchanges the value at the top of the stack with the value at TOP+$SrcStack."
+        ],
+        "X87": true,
+        "HasSideEffects": true
+      },
+      "FPR = F80StackChangeSign": {
+        "Desc": [
+          "Complements the sign bit of the value at the top of the stack.",
+          "Returns the new value at the top of the stack."
+        ],
+        "HasSideEffects": true,
+        "DestSize": "OpSize::i128Bit",
+        "X87": true
+      },
+      "FPR = F80StackAbs": {
+        "Desc": [
+          "Clears the sign bit of the value at the top of the stack.",
+          "Returns the new value at the top of the stack."
+        ],
+        "HasSideEffects": true,
+        "DestSize": "OpSize::i128Bit",
+        "X87": true
+      },
+      "F80PTANStack": {
+        "Desc": [
+          "Computes the approximate tangent of the source operand in register ST(0), stores the result in ST(0), and pushes a 1.0 onto the FPU register stack."
+        ],
+        "X87": true,
+        "HasSideEffects": true
+      },
+      "FPR = F80ATANStack": {
+        "Desc": [
+          "Computes arctan(st1/st0) and stores it in st0. Then pops the stack."
+        ],
+        "DestSize": "OpSize::i128Bit",
+        "X87": true,
+        "HasSideEffects": true
+      },
+      "FPR = F80ATAN FPR:$X80Src1, FPR:$X80Src2": {
+        "DestSize": "OpSize::i128Bit",
+        "JITDispatch": false
+      },
+      "F80FPREMStack": {
+        "X87": true,
+        "HasSideEffects": true
+      },
+      "FPR = F80FPREM FPR:$X80Src1, FPR:$X80Src2": {
+        "DestSize": "OpSize::i128Bit",
+        "JITDispatch": false
+      },
+      "F80FPREM1Stack": {
+        "X87": true,
+        "HasSideEffects": true
+      },
+      "FPR = F80FPREM1 FPR:$X80Src1, FPR:$X80Src2": {
+        "DestSize": "OpSize::i128Bit",
+        "JITDispatch": false
+      },
+      "F80SCALEStack": {
+        "X87": true,
+        "HasSideEffects": true
+      },
+      "FPR = F80SCALE FPR:$X80Src1, FPR:$X80Src2": {
+        "DestSize": "OpSize::i128Bit",
+        "JITDispatch": false
+      },
+      "FPR = F80CVT OpSize:#Size, FPR:$X80Src": {
+        "DestSize": "Size",
+        "JITDispatch": false
+      },
+      "GPR = F80CVTInt OpSize:#Size, FPR:$X80Src, i1:$Truncate": {
+        "DestSize": "Size",
+        "JITDispatch": false
+      },
+      "FPR = F80CVTTo FPR:$X80Src, OpSize:$SrcSize": {
+        "DestSize": "OpSize::i128Bit",
+        "JITDispatch": false
+      },
+      "FPR = F80CVTToInt GPR:$Src, OpSize:$SrcSize": {
+        "DestSize": "OpSize::i128Bit",
+        "JITDispatch": false
+      },
+      "F80RoundStack": {
+        "Desc": [
+          "Replaces the value at the top of the stack with its nearest integral value."
+        ],
+        "X87": true,
+        "HasSideEffects": true
+      },
+      "FPR = F80Round FPR:$X80Src": {
+        "DestSize": "OpSize::i128Bit",
+        "JITDispatch": false
+      },
+      "F80F2XM1Stack": {
+        "X87": true,
+        "HasSideEffects": true
+      },
+      "FPR = F80F2XM1 FPR:$X80Src": {
+        "DestSize": "OpSize::i128Bit",
+        "JITDispatch": false
+      },
+      "FPR = F80TAN FPR:$X80Src": {
+        "DestSize": "OpSize::i128Bit",
+        "JITDispatch": false
+      },
+      "F80SINStack": {
+        "X87": true,
+        "HasSideEffects": true
+      },
+      "FPR = F80SIN FPR:$X80Src": {
+        "DestSize": "OpSize::i128Bit",
+        "JITDispatch": false
+      },
+      "F80COSStack": {
+        "X87": true,
+        "HasSideEffects": true
+      },
+      "FPR = F80COS FPR:$X80Src": {
+        "DestSize": "OpSize::i128Bit",
+        "JITDispatch": false
+      },
+      "FPR:$Sin, FPR:$Cos = F80SINCOS FPR:$X80Src": {
+        "DestSize": "OpSize::i128Bit",
+        "HasSideEffects": true,
+        "JITDispatch": false
+      },
+      "F80SINCOSStack": {
+        "X87": true,
+        "HasSideEffects": true
+      },
+      "F80SQRTStack": {
+        "X87": true,
+        "HasSideEffects": true
+      },
+      "FPR = F80SQRT FPR:$X80Src": {
+        "DestSize": "OpSize::i128Bit",
+        "JITDispatch": false
+      },
+      "FPR = F80XTRACT_EXP FPR:$X80Src": {
+        "DestSize": "OpSize::i128Bit",
+        "JITDispatch": false
+      },
+      "FPR = F80XTRACT_SIG FPR:$X80Src": {
+        "DestSize": "OpSize::i128Bit",
+        "JITDispatch": false
+      },
+      "GPR = F80StackTest u8:$SrcStack": {
+        "Desc": [
+          "Does comparison between value in stack at TOP + SrcStack"
+        ],
+        "DestSize": "OpSize::i32Bit",
+        "X87": true
+      },
+      "GPR = F80CmpStack u8:$SrcStack": {
+        "Desc": [
+          "Does a scalar unordered compare between the value at the top of the stack and the value in stack position TOP+$SrcStack and stores the flags in to a GPR",
+          "Ordering flag result is true if either float input is NaN"
+        ],
+        "DestSize": "OpSize::i32Bit",
+        "X87": true
+      },
+      "GPR = F80CmpValue FPR:$X80Src": {
+        "Desc": [
+          "Does a scalar unordered compare between the value at the top of the stack and $X80Src and stores the asked for flags in to a GPR",
+          "Ordering flag result is true if either float input is NaN"
+        ],
+        "DestSize": "OpSize::i32Bit",
+        "HasSideEffects": true,
+        "X87": true
+      },
+      "GPR = F80Cmp FPR:$X80Src1, FPR:$X80Src2": {
+        "Desc": ["Does a scalar unordered compare and stores the flags in to a GPR",
+                 "Ordering flag result is true if either float input is NaN"
+                ],
+        "DestSize": "OpSize::i32Bit",
+        "JITDispatch": false
+      },
+      "FPR = F80BCDLoad FPR:$X80Src": {
+        "DestSize": "OpSize::i128Bit",
+        "JITDispatch": false
+      },
+      "FPR = F80BCDStore FPR:$X80Src": {
+        "DestSize": "OpSize::i128Bit",
+        "JITDispatch": false
+      },
+      "FPR = F80FYL2XStack": {
+        "Desc": [
+          "Computes ST1 * log2(ST0)",
+          "Stores the result in ST1, and pops the top of the stack.",
+          "Returns the new value at the top of the stack, i.e. the result of the operation."
+        ],
+        "HasSideEffects": true,
+        "DestSize": "OpSize::i128Bit",
+        "X87": true
+      },
+      "FPR = F80FYL2X FPR:$X80Src1, FPR:$X80Src2": {
+        "DestSize": "OpSize::i128Bit",
+        "JITDispatch": false
+      },
+      "F80VBSLStack OpSize:#RegisterSize, FPR:$VectorMask, u8:$SrcStack1, u8:$SrcStack2": {
+        "Desc": [
+          "Does a vector bitwise select.",
+          "If the bit in the field is 1 then the corresponding bit is pulled from VectorTrue",
+          "If the bit in the field is 0 then the corresponding bit is pulled from VectorFalse",
+          "Writes the result to the top of the stack."
+        ],
+        "X87": true,
+        "HasSideEffects": true
+      }
+    },
+    "Backend": {
+      "Last": {
+        "HasSideEffects": true
+      }
+    }
+  }
+}

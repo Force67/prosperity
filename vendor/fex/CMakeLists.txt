@@ -1,0 +1,647 @@
+cmake_minimum_required(VERSION 3.14)
+project(FEX C CXX ASM)
+
+include(CheckIncludeFiles)
+check_include_files("gdb/jit-reader.h" HAVE_GDB_JIT_READER_H)
+
+option(BUILD_FEX_LINUX_TESTS "Build FEXLinuxTests (requires x86 compiler)" FALSE)
+option(BUILD_THUNKS "Build thunks" FALSE)
+option(BUILD_FEXCONFIG "Build FEXConfig" TRUE)
+option(ENABLE_CLANG_THUNKS "Build thunks with clang" TRUE)
+option(ENABLE_IWYU "Enable the Include What You Use sanitizer" FALSE)
+option(ENABLE_LTO "Enable LTO with compilation" TRUE)
+option(ENABLE_XRAY "Enable building with LLVM X-Ray" FALSE)
+set(USE_LINKER "" CACHE STRING "Path to a custom linker program")
+option(ENABLE_UBSAN "Enable the Clang Undefined Behavior Sanitizer" FALSE)
+option(ENABLE_ASAN "Enable the Clang Address Sanitizer" FALSE)
+option(ENABLE_TSAN "Enable the Clang Thread Sanitizer" FALSE)
+option(ENABLE_COVERAGE "Enable Code Coverage" FALSE)
+option(ENABLE_ASSERTIONS "Enable debug assertions" FALSE)
+option(ENABLE_GDB_SYMBOLS "Enable GDBSymbols integration support" ${HAVE_GDB_JIT_READER_H})
+option(ENABLE_STRICT_WERROR "Enable stricter -Werror" FALSE)
+option(ENABLE_WERROR "Enable -Werror" FALSE)
+option(ENABLE_JEMALLOC "Enable jemalloc allocator" TRUE)
+option(ENABLE_JEMALLOC_GLIBC_ALLOC "Enable jemalloc glibc allocator" TRUE)
+option(ENABLE_OFFLINE_TELEMETRY "Enable FEX offline telemetry" TRUE)
+option(ENABLE_COMPILE_TIME_TRACE "Enable time trace compile option" FALSE)
+option(ENABLE_LIBCXX "Use LLVM's libc++ instead of the GNU libstdc++" FALSE)
+option(ENABLE_CCACHE "Enable ccache for build caching" TRUE)
+option(ENABLE_VIXL_SIMULATOR "Use the VIXL simulator for emulation (only useful for CI testing)" FALSE)
+option(ENABLE_VIXL_DISASSEMBLER "Enable debug disassembler output with VIXL" FALSE)
+option(USE_LEGACY_BINFMTMISC "Use legacy method of setting up binfmt_misc" FALSE)
+option(ENABLE_FEXCORE_PROFILER "Enable FEXCore's timeline profiling capabilities" FALSE)
+set(FEXCORE_PROFILER_BACKEND "gpuvis" CACHE STRING "Set which backend to use for FEXCore's profiler")
+set_property(CACHE FEXCORE_PROFILER_BACKEND PROPERTY STRINGS gpuvis tracy)
+option(ENABLE_GLIBC_ALLOCATOR_HOOK_FAULT "Enables glibc memory allocation hooking with fault for CI testing")
+option(USE_PDB_DEBUGINFO "Build debug info in PDB format" FALSE)
+option(BUILD_STEAM_SUPPORT "Enable Steam integration" FALSE)
+
+set(X86_32_TOOLCHAIN_FILE "${CMAKE_CURRENT_SOURCE_DIR}/Data/CMake/toolchain_x86_32.cmake" CACHE FILEPATH "Toolchain file for the (cross-)compiler targeting i686")
+set(X86_64_TOOLCHAIN_FILE "${CMAKE_CURRENT_SOURCE_DIR}/Data/CMake/toolchain_x86_64.cmake" CACHE FILEPATH "Toolchain file for the (cross-)compiler targeting x86_64")
+set(X86_DEV_ROOTFS "/" CACHE FILEPATH "Path to the sysroot used for cross-compiling for i686 and x86_64")
+set(DATA_DIRECTORY "" CACHE PATH "Global data directory (override)")
+set(HOSTLIBS_DATA_DIRECTORY "" CACHE PATH "Global data directory (override)")
+
+if (NOT DATA_DIRECTORY)
+  set(DATA_DIRECTORY "${CMAKE_INSTALL_PREFIX}/share/fex-emu")
+endif()
+
+include(GNUInstallDirs)
+if (NOT HOSTLIBS_DATA_DIRECTORY)
+  set(HOSTLIBS_DATA_DIRECTORY "${CMAKE_INSTALL_FULL_LIBDIR}/fex-emu")
+endif()
+
+## Platform Checks ##
+# Only 64-bit Linux and Windows are supported
+
+# NB: SIZEOF_VOID_P is in bytes, not bits
+# On 32-bit systems this is set to 4
+if (NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
+  message(FATAL_ERROR "Unsupported pointer size ${CMAKE_SIZEOF_VOID_P}."
+    " FEX only supports 64-bit (8-byte pointer) systems."
+    " If you believe this is in error, file an issue.")
+elseif (NOT (WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux"))
+  message(FATAL_ERROR "Unsupported system type ${CMAKE_SYSTEM_NAME}."
+    " FEX only supports Linux and Windows."
+    " If you believe this is in error, file an issue.")
+endif()
+
+## Compiler Checks ##
+# GCC and MSVC are unsupported
+if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+  message(FATAL_ERROR "FEX doesn't support GCC! Use Clang instead.")
+elseif (MSVC)
+  message(FATAL_ERROR "FEX doesn't support MSVC! Use Clang on MinGW instead.")
+elseif (MINGW)
+  message(STATUS "Building for MinGW")
+  set(ENABLE_JEMALLOC TRUE)
+  set(ENABLE_JEMALLOC_GLIBC_ALLOC FALSE)
+else ()
+  message(STATUS "Clang version ${CMAKE_CXX_COMPILER_VERSION}")
+  set(CLANG_MINIMUM_VERSION 13.0)
+  if (CMAKE_CXX_COMPILER_VERSION VERSION_LESS ${CLANG_MINIMUM_VERSION})
+    message(FATAL_ERROR "Clang version too old for FEX. Need at least ${CLANG_MINIMUM_VERSION} but has ${CMAKE_CXX_COMPILER_VERSION}")
+  endif()
+endif()
+
+## Architecture Handling ##
+string(TOLOWER ${CMAKE_SYSTEM_PROCESSOR} processor)
+if (processor MATCHES "x86|amd64")
+  option(ENABLE_X86_HOST_DEBUG "Enables compiling on x86_64 host" FALSE)
+  if (NOT ENABLE_X86_HOST_DEBUG)
+    message(FATAL_ERROR
+      " FEX doesn't support compiling for x86-64 hosts!"
+      " This is /only/ a supported configuration for FEX CI and nothing else!")
+  else()
+    message(STATUS "x86_64 debug build")
+  endif()
+
+  set(ARCHITECTURE_x86_64 1)
+  add_definitions(-DARCHITECTURE_x86_64=1)
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mcx16")
+elseif (processor MATCHES "^aarch64|^arm64|^armv8\.*")
+  set(ARCHITECTURE_arm64 1)
+  add_definitions(-DARCHITECTURE_arm64=1)
+
+  # arm64ec needs to define both arm64 and arm64ec
+  if (processor MATCHES "^arm64ec")
+    set(ARCHITECTURE_arm64ec 1)
+    add_definitions(-DARCHITECTURE_arm64ec=1)
+  endif()
+endif()
+
+if (NOT (ARCHITECTURE_arm64 OR ARCHITECTURE_arm64ec OR ARCHITECTURE_x86_64))
+  message(FATAL_ERROR "Unsupported processor type ${processor}."
+    " If you believe this is in error, file an issue.")
+endif()
+
+if (BUILD_STEAM_SUPPORT)
+  add_definitions(-DFEX_STEAM_SUPPORT=1)
+endif()
+
+if (ENABLE_FEXCORE_PROFILER)
+  add_definitions(-DENABLE_FEXCORE_PROFILER=1)
+  string(TOUPPER "${FEXCORE_PROFILER_BACKEND}" FEXCORE_PROFILER_BACKEND)
+
+  if (FEXCORE_PROFILER_BACKEND STREQUAL "GPUVIS")
+    add_definitions(-DFEXCORE_PROFILER_BACKEND=1)
+  elseif (FEXCORE_PROFILER_BACKEND STREQUAL "TRACY")
+    add_definitions(-DFEXCORE_PROFILER_BACKEND=2)
+    add_definitions(-DTRACY_ENABLE=1)
+    # Required so that Tracy will only start in the selected guest application
+    add_definitions(-DTRACY_MANUAL_LIFETIME=1)
+    add_definitions(-DTRACY_DELAYED_INIT=1)
+    # This interferes with FEX's signal handling
+    add_definitions(-DTRACY_NO_CRASH_HANDLER=1)
+    # Tracy can gather call stack samples in regular intervals, but this
+    # isn't useful for us since it would usually sample opaque JIT code
+    add_definitions(-DTRACY_NO_SAMPLING=1)
+    # This pulls in libbacktrace which allocators in global constructors (before FEX can set up its allocator hooks)
+    add_definitions(-DTRACY_NO_CALLSTACK=1)
+    if (MINGW)
+      message(FATAL_ERROR "Tracy profiler not supported on MinGW")
+    endif()
+  else()
+    message(FATAL_ERROR "Unknown FEXCore profiler backend ${FEXCORE_PROFILER_BACKEND}")
+  endif()
+endif()
+
+if (ENABLE_JEMALLOC_GLIBC_ALLOC AND ENABLE_GLIBC_ALLOCATOR_HOOK_FAULT)
+  message(FATAL_ERROR "Can't have both glibc fault allocator and jemalloc glibc allocator enabled at the same time")
+endif()
+
+if (ENABLE_GLIBC_ALLOCATOR_HOOK_FAULT)
+  add_definitions(-DGLIBC_ALLOCATOR_FAULT=1)
+endif()
+
+# uninstall target
+if(NOT TARGET uninstall)
+  configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/Data/CMake/cmake_uninstall.cmake.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/cmake_uninstall.cmake"
+    IMMEDIATE @ONLY)
+
+  add_custom_target(uninstall
+    COMMAND ${CMAKE_COMMAND} -P ${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/cmake_uninstall.cmake)
+endif()
+
+# These options are meant for package management
+set(TUNE_CPU "native" CACHE STRING "Override the CPU the build is tuned for")
+set(TUNE_ARCH "generic" CACHE STRING "Override the Arch the build is tuned for")
+set(OVERRIDE_VERSION "detect" CACHE STRING "Override the FEX version")
+set(OVERRIDE_HASH "detect" CACHE STRING "Override the FEX git hash")
+
+string(TOUPPER "${CMAKE_BUILD_TYPE}" CMAKE_BUILD_TYPE)
+if (CMAKE_BUILD_TYPE MATCHES "DEBUG")
+  set(ENABLE_ASSERTIONS TRUE)
+endif()
+
+if (ENABLE_ASSERTIONS)
+  message(STATUS "Assertions enabled")
+  add_definitions(-DASSERTIONS_ENABLED=1)
+endif()
+
+if (ENABLE_GDB_SYMBOLS)
+  message(STATUS "GDBSymbols support enabled")
+  add_definitions(-DGDB_SYMBOLS_ENABLED=1)
+endif()
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Bin)
+set(CMAKE_INCLUDE_CURRENT_DIR ON)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+cmake_policy(SET CMP0083 NEW) # Follow new PIE policy
+include(CheckPIESupported)
+check_pie_supported()
+
+set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ${ENABLE_LTO})
+
+include(CheckCXXSourceCompiles)
+set(CMAKE_REQUIRED_FLAGS "-std=c++11 -Wattributes -Werror=attributes")
+check_cxx_source_compiles(
+  "
+  __attribute__((preserve_all))
+  int Testy(int a, int b, int c, int d, int e, int f) {
+  return a + b + c + d + e + f;
+  }
+  int main() {
+  return Testy(0, 1, 2, 3, 4, 5);
+  }"
+  HAS_CLANG_PRESERVE_ALL)
+unset(CMAKE_REQUIRED_FLAGS)
+if (HAS_CLANG_PRESERVE_ALL)
+  if (MINGW)
+    message(STATUS "Ignoring broken clang::preserve_all support")
+    set(HAS_CLANG_PRESERVE_ALL FALSE)
+  else()
+    message(STATUS "Has clang::preserve_all")
+  endif()
+endif()
+
+if (ARCHITECTURE_arm64 AND HAS_CLANG_PRESERVE_ALL)
+  add_definitions("-DFEX_PRESERVE_ALL_ATTR=__attribute__((preserve_all))" "-DFEX_HAS_PRESERVE_ALL_ATTR=1")
+else()
+  add_definitions("-DFEX_PRESERVE_ALL_ATTR=" "-DFEX_HAS_PRESERVE_ALL_ATTR=0")
+endif()
+
+if (ENABLE_VIXL_SIMULATOR)
+  # We can run the simulator on both x86-64 or AArch64 hosts
+  add_definitions(-DVIXL_SIMULATOR=1 -DVIXL_INCLUDE_SIMULATOR_AARCH64=1)
+endif()
+
+if (ENABLE_CCACHE)
+  find_program(CCACHE_PROGRAM ccache)
+  if(CCACHE_PROGRAM)
+    message(STATUS "CCache enabled")
+    set_property(GLOBAL PROPERTY RULE_LAUNCH_COMPILE "${CCACHE_PROGRAM}")
+  endif()
+endif()
+
+if (ENABLE_XRAY)
+  add_compile_options(-fxray-instrument)
+  link_libraries(-fxray-instrument)
+endif()
+
+if (ENABLE_COMPILE_TIME_TRACE)
+  add_compile_options(-ftime-trace)
+  link_libraries(-ftime-trace)
+endif()
+
+set(PTHREAD_LIB pthread)
+
+if (USE_LINKER)
+  message(STATUS "Overriding linker to: ${USE_LINKER}")
+  add_link_options("-fuse-ld=${USE_LINKER}")
+endif()
+
+if (ENABLE_LIBCXX)
+  message(WARNING "This is an unsupported configuration and should only be used for testing")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -stdlib=libc++")
+  set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -stdlib=libc++ -lc++abi")
+endif()
+
+if (NOT ENABLE_OFFLINE_TELEMETRY)
+  # Disable FEX offline telemetry entirely if asked
+  add_definitions(-DFEX_DISABLE_TELEMETRY=1)
+endif()
+
+if (ENABLE_UBSAN)
+  # See https://github.com/FEX-Emu/FEX/pull/4494#issuecomment-2800608944
+  # and related discussion for the use of -fno-sanitize=alignment -fno-sanitize=function
+  # with UBSAN.
+  # alignment: we don't follow a strict alignment policy, for example IR uses packed structs
+  # that are regularly access unaligned.
+  # function: syscalls cast function pointers to void (*)(unsigned long...), causing warnings
+  # related to this access.
+  add_definitions(-DENABLE_UBSAN=1)
+  add_compile_options(-fno-omit-frame-pointer -fsanitize=undefined -fno-sanitize=alignment -fno-sanitize=function -fno-sanitize-recover=undefined)
+  link_libraries(-fno-omit-frame-pointer -fsanitize=undefined -fno-sanitize=alignment -fno-sanitize=function -fno-sanitize-recover=undefined)
+endif()
+
+if (ENABLE_ASAN)
+  add_definitions(-DENABLE_ASAN=1)
+  add_compile_options(-fno-omit-frame-pointer -fsanitize=address -fsanitize-address-use-after-scope)
+  link_libraries(-fno-omit-frame-pointer -fsanitize=address -fsanitize-address-use-after-scope)
+endif()
+
+if (ENABLE_TSAN)
+  add_compile_options(-fno-omit-frame-pointer -fsanitize=thread)
+  link_libraries(-fno-omit-frame-pointer -fsanitize=thread)
+endif()
+
+if (ENABLE_COVERAGE)
+  add_compile_options(-fprofile-instr-generate -fcoverage-mapping)
+  link_libraries(-fprofile-instr-generate -fcoverage-mapping)
+endif()
+
+if (ENABLE_JEMALLOC_GLIBC_ALLOC)
+  # The glibc jemalloc subproject which hooks the glibc allocator.
+  # Required for thunks to work.
+  # All host native libraries will use this allocator, while *most* other FEX internal allocations will use the other jemalloc allocator.
+  add_subdirectory(External/jemalloc_glibc/)
+elseif (NOT MINGW)
+  message(STATUS
+    " jemalloc glibc allocator disabled!\n"
+    " This is not a recommended configuration!\n"
+    " This will very explicitly break thunk execution!\n"
+    " Use at your own risk!")
+endif()
+
+if (ENABLE_JEMALLOC)
+  # The jemalloc subproject that all FEXCore fextl objects allocate through.
+  add_subdirectory(External/jemalloc/)
+elseif (NOT MINGW)
+  message(STATUS
+    " jemalloc disabled!\n"
+    " This is not a recommended configuration!\n"
+    " This will very explicitly break 32-bit application execution!\n"
+    " Use at your own risk!")
+endif()
+
+if (USE_PDB_DEBUGINFO)
+  add_compile_options(-g -gcodeview)
+  add_link_options(-g -Wl,--pdb=)
+endif()
+
+set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXX_FLAGS_RELWITHDEBINFO} -fno-omit-frame-pointer")
+set(CMAKE_LINKER_FLAGS_RELWITHDEBINFO "${CMAKE_LINKER_FLAGS_RELWITHDEBINFO} -fno-omit-frame-pointer")
+
+set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -fomit-frame-pointer")
+set(CMAKE_LINKER_FLAGS_RELEASE "${CMAKE_LINKER_FLAGS_RELEASE} -fomit-frame-pointer")
+
+## Modules ##
+list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/Data/CMake/)
+
+include(LinkerGC)
+
+## Externals ##
+include_directories(External/robin-map/include/)
+
+include(CTest)
+if (BUILD_TESTING OR ENABLE_VIXL_DISASSEMBLER OR ENABLE_VIXL_SIMULATOR)
+  add_subdirectory(External/vixl/)
+  include_directories(SYSTEM External/vixl/src/)
+endif()
+
+if (ENABLE_FEXCORE_PROFILER AND FEXCORE_PROFILER_BACKEND STREQUAL "TRACY")
+  add_subdirectory(External/tracy)
+endif()
+
+find_package(PkgConfig REQUIRED)
+find_package(Python 3.9 REQUIRED COMPONENTS Interpreter)
+
+set(BUILD_SHARED_LIBS OFF)
+
+if (NOT CMAKE_CROSSCOMPILING)
+  find_package(xxhash MODULE QUIET)
+endif()
+
+if (NOT TARGET xxHash::xxhash)
+  set(XXHASH_BUNDLED_MODE TRUE)
+  set(XXHASH_BUILD_XXHSUM FALSE)
+  add_subdirectory(External/xxhash/cmake_unofficial/)
+endif()
+
+add_definitions(-Wno-trigraphs)
+add_definitions(-DGLOBAL_DATA_DIRECTORY="${DATA_DIRECTORY}/")
+
+if (BUILD_TESTING)
+  find_package(Catch2 3 QUIET)
+  if (NOT Catch2_FOUND)
+    add_subdirectory(External/Catch2/)
+
+    # Pull in catch_discover_tests definition
+    list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/External/Catch2/contrib/")
+  endif()
+
+  include(Catch)
+else ()
+  # Override any previously generated test list to avoid running stale test binaries
+  file(GENERATE OUTPUT CTestTestfile.cmake CONTENT "# No tests since BUILD_TESTING is disabled")
+endif()
+
+find_package(fmt QUIET)
+if (NOT fmt_FOUND)
+  # Disable fmt install
+  set(FMT_INSTALL OFF)
+  add_subdirectory(External/fmt/)
+endif()
+
+find_package(range-v3 QUIET)
+if (NOT range-v3_FOUND)
+  add_subdirectory(External/range-v3/)
+  target_compile_definitions(range-v3 INTERFACE RANGES_DISABLE_DEPRECATED_WARNINGS)
+endif()
+
+add_subdirectory(External/tiny-json/)
+include_directories(External/tiny-json/)
+
+include_directories(Source/)
+include_directories("${CMAKE_BINARY_DIR}/Source/")
+
+include(CheckCXXCompilerFlag)
+
+# Add in diagnostic colours if the option is available.
+# Ninja code generator will kill colours if this isn't here
+check_cxx_compiler_flag(-fdiagnostics-color=always GCC_COLOR)
+check_cxx_compiler_flag(-fcolor-diagnostics CLANG_COLOR)
+check_cxx_compiler_flag(-Wno-deprecated-enum-enum-conversion ENUM_ENUM_WARNING)
+
+if (GCC_COLOR)
+  add_compile_options(-fdiagnostics-color=always)
+endif()
+if (CLANG_COLOR)
+  add_compile_options(-fcolor-diagnostics)
+endif()
+
+if(ENUM_ENUM_WARNING)
+  add_compile_options(-Wno-deprecated-enum-enum-conversion)
+endif()
+
+if(ENABLE_WERROR OR ENABLE_STRICT_WERROR)
+  add_compile_options(-Werror)
+  if (NOT ENABLE_STRICT_WERROR)
+    # Disable some Werror that can add frustration when developing
+    add_compile_options(-Wno-error=unused-variable)
+  endif()
+endif()
+
+set(FEX_TUNE_COMPILE_FLAGS)
+if (NOT TUNE_ARCH STREQUAL "generic")
+  check_cxx_compiler_flag("-march=${TUNE_ARCH}" COMPILER_SUPPORTS_ARCH_TYPE)
+  if(COMPILER_SUPPORTS_ARCH_TYPE)
+    list(APPEND FEX_TUNE_COMPILE_FLAGS "-march=${TUNE_ARCH}")
+  else()
+    message(FATAL_ERROR "Trying to compile arch type '${TUNE_ARCH}' but the compiler doesn't support this")
+  endif()
+endif()
+
+if (TUNE_CPU STREQUAL "native")
+  if(ARCHITECTURE_arm64)
+    if (CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 999999.0)
+      # Clang 12.0 fixed the -mcpu=native bug with mixed big.little implementers
+      # Clang can not currently check for native Apple M1 type in hypervisor. Currently disabled
+      check_cxx_compiler_flag("-mcpu=native" COMPILER_SUPPORTS_CPU_TYPE)
+      if(COMPILER_SUPPORTS_CPU_TYPE)
+        list(APPEND FEX_TUNE_COMPILE_FLAGS "-mcpu=native")
+      endif()
+    else()
+      execute_process(COMMAND python3 "${PROJECT_SOURCE_DIR}/Scripts/aarch64_fit_native.py" "/proc/cpuinfo" "${CMAKE_CXX_COMPILER_VERSION}"
+        OUTPUT_VARIABLE AARCH64_CPU)
+
+      string(STRIP ${AARCH64_CPU} AARCH64_CPU)
+
+      execute_process(COMMAND python3 "${PROJECT_SOURCE_DIR}/Scripts/NeedDisabledSVE.py"
+        RESULT_VARIABLE NEEDS_SVE_DISABLED)
+      if (NEEDS_SVE_DISABLED)
+        message(STATUS "Platform has bugged SVE. Disabling")
+        set(AARCH64_CPU "cortex-a78")
+      endif()
+
+      check_cxx_compiler_flag("-mcpu=${AARCH64_CPU}" COMPILER_SUPPORTS_CPU_TYPE)
+      if(COMPILER_SUPPORTS_CPU_TYPE)
+        list(APPEND FEX_TUNE_COMPILE_FLAGS "-mcpu=${AARCH64_CPU}")
+      endif()
+    endif()
+  else()
+    check_cxx_compiler_flag("-march=native" COMPILER_SUPPORTS_MARCH_NATIVE)
+    if(COMPILER_SUPPORTS_MARCH_NATIVE)
+      list(APPEND FEX_TUNE_COMPILE_FLAGS "-march=native")
+    endif()
+  endif()
+elseif (NOT TUNE_CPU STREQUAL "none")
+  check_cxx_compiler_flag("-mcpu=${TUNE_CPU}" COMPILER_SUPPORTS_CPU_TYPE)
+  if(COMPILER_SUPPORTS_CPU_TYPE)
+    list(APPEND FEX_TUNE_COMPILE_FLAGS "-mcpu=${TUNE_CPU}")
+  else()
+    message(FATAL_ERROR "Trying to compile cpu type '${TUNE_CPU}' but the compiler doesn't support this")
+  endif()
+endif()
+
+set(GIT_DESCRIBE_STRING "FEX-Unknown")
+
+if (OVERRIDE_VERSION STREQUAL "detect")
+  find_package(Git)
+
+  if (GIT_FOUND)
+    execute_process(
+      COMMAND ${GIT_EXECUTABLE} describe --abbrev=7
+      WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+      OUTPUT_VARIABLE GIT_DESCRIBE_STRING
+      ERROR_QUIET
+      OUTPUT_STRIP_TRAILING_WHITESPACE)
+  endif()
+else()
+  set(GIT_DESCRIBE_STRING "${OVERRIDE_VERSION}")
+endif()
+
+set(GIT_SHORT_HASH "Unknown")
+
+if (OVERRIDE_HASH STREQUAL "detect")
+  find_package(Git)
+
+  if (GIT_FOUND)
+    execute_process(
+      COMMAND ${GIT_EXECUTABLE} rev-parse --short=7 HEAD
+      WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+      OUTPUT_VARIABLE GIT_SHORT_HASH
+      ERROR_QUIET
+      OUTPUT_STRIP_TRAILING_WHITESPACE)
+  endif()
+else()
+  set(GIT_SHORT_HASH "${OVERRIDE_HASH}")
+endif()
+
+if (ENABLE_IWYU)
+  find_program(IWYU_EXE "iwyu")
+  if (IWYU_EXE)
+    message(STATUS "IWYU enabled")
+    set(CMAKE_CXX_INCLUDE_WHAT_YOU_USE "${IWYU_EXE}")
+  endif()
+endif()
+
+add_compile_options(-Wall)
+
+if (BUILD_TESTING)
+  message(STATUS "Unit tests are enabled")
+
+  set(TEST_JOB_COUNT "" CACHE STRING "Override number of parallel jobs to use while running tests")
+  if (TEST_JOB_COUNT)
+    message(STATUS "Running tests with ${TEST_JOB_COUNT} jobs")
+  elseif(CMAKE_VERSION VERSION_LESS "3.29")
+    execute_process(COMMAND "nproc" OUTPUT_STRIP_TRAILING_WHITESPACE OUTPUT_VARIABLE TEST_JOB_COUNT)
+  endif()
+  set(TEST_JOB_FLAG "-j${TEST_JOB_COUNT}")
+endif()
+
+add_subdirectory(External/SoftFloat-3e/)
+add_subdirectory(External/cephes/)
+add_subdirectory(FEXHeaderUtils/)
+add_subdirectory(CodeEmitter/)
+add_subdirectory(FEXCore/)
+
+if (ARCHITECTURE_arm64 AND NOT MINGW AND NOT BUILD_STEAM_SUPPORT)
+  # Binfmt_misc files must be installed prior to Source/ installs
+  add_subdirectory(Data/binfmts/)
+endif()
+
+add_subdirectory(Source/)
+
+if (NOT BUILD_STEAM_SUPPORT)
+  add_subdirectory(Data/AppConfig/)
+endif()
+
+# Install the ThunksDB file
+file(GLOB CONFIG_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/Data/*.json)
+
+# Any application configuration json file gets installed
+foreach(CONFIG_SRC ${CONFIG_SOURCES})
+  install(FILES ${CONFIG_SRC}
+    DESTINATION ${DATA_DIRECTORY}/
+    COMPONENT Runtime)
+endforeach()
+
+if (BUILD_TESTING)
+  add_subdirectory(unittests/)
+endif()
+
+if (BUILD_THUNKS)
+  set(FEX_PROJECT_SOURCE_DIR ${PROJECT_SOURCE_DIR})
+  add_subdirectory(ThunkLibs/Generator)
+
+  # Thunk targets for both host libraries and IDE integration
+  add_subdirectory(ThunkLibs/HostLibs)
+
+  # Thunk targets for IDE integration of guest code, only
+  add_subdirectory(ThunkLibs/GuestLibs)
+
+  # Thunk targets for guest libraries
+  include(ExternalProject)
+  ExternalProject_Add(guest-libs
+    PREFIX guest-libs
+    SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/ThunkLibs/GuestLibs"
+    BINARY_DIR "Guest"
+    CMAKE_ARGS
+      "-DBITNESS=64"
+      "-DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}"
+      "-DBUILD_FEX_LINUX_TESTS=${BUILD_FEX_LINUX_TESTS}"
+      "-DENABLE_CLANG_THUNKS=${ENABLE_CLANG_THUNKS}"
+      "-DCMAKE_TOOLCHAIN_FILE:FILEPATH=${X86_64_TOOLCHAIN_FILE}"
+      "-DCMAKE_INSTALL_PREFIX=${CMAKE_INSTALL_PREFIX}"
+      "-DFEX_PROJECT_SOURCE_DIR=${FEX_PROJECT_SOURCE_DIR}"
+      "-DGENERATOR_EXE=$<TARGET_FILE:thunkgen>"
+      "-DX86_DEV_ROOTFS=${X86_DEV_ROOTFS}"
+    INSTALL_COMMAND ""
+    BUILD_ALWAYS ON
+    DEPENDS thunkgen)
+
+  ExternalProject_Add(guest-libs-32
+    PREFIX guest-libs-32
+    SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/ThunkLibs/GuestLibs"
+    BINARY_DIR "Guest_32"
+    CMAKE_ARGS
+      "-DBITNESS=32"
+      "-DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}"
+      "-DBUILD_FEX_LINUX_TESTS=${BUILD_FEX_LINUX_TESTS}"
+      "-DENABLE_CLANG_THUNKS=${ENABLE_CLANG_THUNKS}"
+      "-DCMAKE_TOOLCHAIN_FILE:FILEPATH=${X86_32_TOOLCHAIN_FILE}"
+      "-DCMAKE_INSTALL_PREFIX=${CMAKE_INSTALL_PREFIX}"
+      "-DFEX_PROJECT_SOURCE_DIR=${FEX_PROJECT_SOURCE_DIR}"
+      "-DGENERATOR_EXE=$<TARGET_FILE:thunkgen>"
+      "-DX86_DEV_ROOTFS=${X86_DEV_ROOTFS}"
+    INSTALL_COMMAND ""
+    BUILD_ALWAYS ON
+    DEPENDS thunkgen)
+
+  install(
+    CODE "message(\"-- Installing: guest-libs\")"
+    CODE "
+      execute_process(COMMAND ${CMAKE_COMMAND} --build . --target install
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/Guest)"
+    DEPENDS guest-libs
+    COMPONENT Runtime)
+
+  install(
+    CODE "message(\"-- Installing: guest-libs-32\")"
+    CODE "
+      execute_process(COMMAND ${CMAKE_COMMAND} --build . --target install
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/Guest_32)"
+    DEPENDS guest-libs-32
+    COMPONENT Runtime)
+
+  add_custom_target(uninstall_guest-libs
+    COMMAND ${CMAKE_COMMAND} "--build" "." "--target" "uninstall"
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/Guest)
+
+  add_custom_target(uninstall_guest-libs-32
+    COMMAND ${CMAKE_COMMAND} "--build" "." "--target" "uninstall"
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/Guest_32)
+
+  add_dependencies(uninstall uninstall_guest-libs)
+  add_dependencies(uninstall uninstall_guest-libs-32)
+endif()
+
+if (BUILD_STEAM_SUPPORT)
+  add_subdirectory(Source/Steam/)
+endif()

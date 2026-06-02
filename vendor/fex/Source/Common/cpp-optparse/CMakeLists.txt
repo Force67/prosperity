@@ -1,0 +1,5 @@
+set (NAME cpp-optparse)
+set (SRCS OptionParser.cpp)
+add_library(${NAME} STATIC ${SRCS})
+target_link_libraries(${NAME} FEXCore_Base)
+target_include_directories(${NAME} INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}")

@@ -1,0 +1,51 @@
+{
+  "DB": {
+    "GL": {
+      "Library" : "libGL-guest.so",
+      "Overlay": [
+        "@PREFIX_LIB@/libGL.so",
+        "@PREFIX_LIB@/libGL.so.1",
+        "@PREFIX_LIB@/libGL.so.1.2.0",
+        "@PREFIX_LIB@/libGL.so.1.7.0"
+      ]
+    },
+    "Vulkan": {
+      "Library": "libvulkan-guest.so",
+      "Overlay": [
+        "@PREFIX_LIB@/libvulkan.so",
+        "@PREFIX_LIB@/libvulkan.so.1",
+        "@HOME@/.local/share/Steam/ubuntu12_32/steam-runtime/pinned_libs_64/libvulkan.so.1"
+      ]
+    },
+    "drm": {
+      "Library": "libdrm-guest.so",
+      "Overlay": [
+        "@PREFIX_LIB@/libdrm.so",
+        "@PREFIX_LIB@/libdrm.so.2",
+        "@PREFIX_LIB@/libdrm.so.2.4.0"
+      ]
+    },
+    "asound": {
+      "Library": "libasound-guest.so",
+      "Overlay": [
+        "@PREFIX_LIB@/libasound.so",
+        "@PREFIX_LIB@/libasound.so.2",
+        "@PREFIX_LIB@/libasound.so.2.0.0"
+      ]
+    },
+    "fex_thunk_test": {
+      "Library": "libfex_thunk_test-guest.so",
+      "Overlay": [
+        "@PREFIX_LIB@/libfex_thunk_test.so"
+      ]
+    },
+    "WaylandClient": {
+      "Library" : "libwayland-client-guest.so",
+      "Overlay": [
+        "@PREFIX_LIB@/libwayland-client.so",
+        "@PREFIX_LIB@/libwayland-client.so.0",
+        "@PREFIX_LIB@/libwayland-client.so.0.20.0"
+      ]
+    }
+  }
+}
