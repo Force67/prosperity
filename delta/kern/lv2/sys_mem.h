@@ -26,6 +26,11 @@ int PS4ABI sys_mname(uint8_t *, size_t len, const char *name, void *);
 int PS4ABI sys_mprotect(uint8_t *, size_t len, int prot);
 int PS4ABI sys_mdbg_service(uint32_t op, void *, void *, void *);
 
+/*POSIX shared memory*/
+int PS4ABI sys_shm_open(const char *path, uint32_t flags, uint16_t mode);
+int PS4ABI sys_shm_unlink(const char *path);
+int PS4ABI sys_ftruncate(uint32_t fd, int64_t length);
+
 /*direct memory access*/
 int PS4ABI sys_dmem_container(uint32_t op);
 }

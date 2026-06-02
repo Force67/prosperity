@@ -531,10 +531,10 @@ static const syscall_Reg syscall_dpt[] = {
     {477, (void *)&sys_mmap},
     {478, (void *)&sys_lseek}, // modern lseek (the game uses 478, not the old 19)
     {479, (void *)&null_handler}, // sys_truncate
-    {480, (void *)&null_handler}, // sys_ftruncate
+    {480, (void *)&sys_ftruncate},
     {481, (void *)&null_handler}, // sys_thr_kill2
-    {482, (void *)&null_handler}, // sys_shm_open
-    {483, (void *)&null_handler}, // sys_shm_unlink
+    {482, (void *)&sys_shm_open},
+    {483, (void *)&sys_shm_unlink},
     {484, (void *)&null_handler}, // sys_cpuset
     {485, (void *)&null_handler}, // sys_cpuset_setid
     {486, (void *)&null_handler}, // sys_cpuset_getid

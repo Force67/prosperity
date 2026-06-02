@@ -13,7 +13,10 @@
 
 #include <atomic>
 #include <cstdint>
+#include <mutex>
+#include <string>
 #include <sys/mman.h>
+#include <unordered_map>
 
 #include "../proc.h"
 #include "error_table.h"
@@ -46,6 +49,46 @@ static uint8_t *allocLowGuest(size_t size) {
   return nullptr;
 }
 
+// POSIX shared memory (shm_open/shm_unlink/ftruncate + fd-backed mmap).
+//
+// A named shm object is sized with ftruncate then mmap'd to share a region
+// between components. In a single guest process "shared" means the same name
+// resolves to the same backing block, so every mapper sees one region. The block
+// is a low (<2^40) guest allocation; ftruncate or the first mmap allocates it.
+namespace {
+struct shmBacking {
+  uint8_t *base = nullptr;
+  size_t size = 0;
+};
+std::mutex g_shmMutex;
+std::unordered_map<std::string, shmBacking> g_shmByName;
+
+class shmObject : public kObject {
+public:
+  shmObject(proc *p, std::string nm)
+      : kObject(p, kObject::oType::shm), shmName(std::move(nm)) {}
+  std::string shmName;  // key into g_shmByName
+};
+
+// Return the backing block for a shm, allocating/growing it to cover the
+// requested range. Caller must NOT hold g_shmMutex. -1 on failure.
+uint8_t *shmMap(shmObject *shm, size_t size, size_t offset) {
+  std::lock_guard<std::mutex> lk(g_shmMutex);
+  auto &b = g_shmByName[shm->shmName];
+  size_t need = (offset + size + 0x3FFF) & ~size_t(0x3FFF);
+  if (!b.base && need) {
+    b.base = allocLowGuest(need);
+    if (!b.base)
+      return reinterpret_cast<uint8_t *>(-1);
+    b.size = need;
+    proc::getActive()->getVma().add(b.base, need, ppt::w);
+  }
+  if (!b.base || offset > b.size)
+    return reinterpret_cast<uint8_t *>(-1);
+  return b.base + offset;
+}
+}  // namespace
+
 uint8_t *PS4ABI sys_mmap(void *addr, size_t size, uint32_t prot, uint32_t flags,
                          uint32_t fd, size_t offset) {
   auto *proc = proc::getActive();
@@ -66,6 +109,11 @@ uint8_t *PS4ABI sys_mmap(void *addr, size_t size, uint32_t prot, uint32_t flags,
 
   if (fd != -1) {
     auto *obj = proc->getObjTable().get(fd);
+    if (obj && obj->type() == kObject::oType::shm) {
+      // POSIX shared memory: hand back the shared backing so every mapper of
+      // this shm sees the same region (sized by ftruncate).
+      return shmMap(static_cast<shmObject *>(obj), size, offset);
+    }
     if (obj) {
       /*TODO: mmap in device!!*/
       static_cast<device *>(obj)->map(addr, size, prot, flags, offset);
@@ -114,9 +162,74 @@ uint8_t *PS4ABI sys_mmap(void *addr, size_t size, uint32_t prot, uint32_t flags,
   return static_cast<uint8_t *>(ptr);
 }
 
-int PS4ABI sys_mprotect(uint8_t *, size_t len, int prot) { 
+int PS4ABI sys_mprotect(uint8_t *, size_t len, int prot) {
     //TODO
     return 0;
+}
+
+int PS4ABI sys_shm_open(const char *path, uint32_t flags, uint16_t mode) {
+  auto *proc = proc::getActive();
+  if (!proc || !path)
+    return -SysError::eINVAL;
+
+  constexpr uint32_t kO_CREAT = 0x0200, kO_EXCL = 0x0800;
+  std::string name(path);
+  {
+    std::lock_guard<std::mutex> lk(g_shmMutex);
+    auto it = g_shmByName.find(name);
+    if (it == g_shmByName.end()) {
+      if (!(flags & kO_CREAT))
+        return -SysError::eNOENT;
+      g_shmByName.emplace(name, shmBacking{});  // empty; sized later by ftruncate
+    } else if ((flags & kO_CREAT) && (flags & kO_EXCL)) {
+      return -SysError::eEXIST;
+    }
+  }
+
+  // A fresh fd per open, all sharing the named backing (POSIX-ish for a single
+  // guest process). The ctor registers it in the object table.
+  auto *obj = new shmObject(proc, std::move(name));
+  std::fprintf(stderr, "[shm_open] '%s' flags=%#x -> fd=%u\n", path, flags,
+               obj->handle());
+  return obj->handle();
+}
+
+int PS4ABI sys_shm_unlink(const char *path) {
+  if (!path)
+    return -SysError::eINVAL;
+  std::lock_guard<std::mutex> lk(g_shmMutex);
+  auto it = g_shmByName.find(path);
+  if (it == g_shmByName.end())
+    return -SysError::eNOENT;
+  // Drop the name only. Any region already handed to mmap is a raw pointer that
+  // stays valid; we keep the host allocation (reclaimed at process exit).
+  g_shmByName.erase(it);
+  return 0;
+}
+
+int PS4ABI sys_ftruncate(uint32_t fd, int64_t length) {
+  auto *proc = proc::getActive();
+  if (!proc || length < 0)
+    return -SysError::eINVAL;
+  auto *obj = proc->getObjTable().get(fd);
+  if (!obj || obj->type() != kObject::oType::shm)
+    return -SysError::eBADF;
+
+  auto *shm = static_cast<shmObject *>(obj);
+  size_t want = (static_cast<size_t>(length) + 0x3FFF) & ~size_t(0x3FFF);
+  std::lock_guard<std::mutex> lk(g_shmMutex);
+  auto &b = g_shmByName[shm->shmName];
+  if (want == 0 || want <= b.size)
+    return 0;
+  uint8_t *nb = allocLowGuest(want);
+  if (!nb)
+    return -SysError::eNOMEM;
+  if (b.base)
+    std::memcpy(nb, b.base, b.size);  // grow before first mmap: preserve contents
+  b.base = nb;
+  b.size = want;
+  proc->getVma().add(b.base, want, ppt::w);
+  return 0;
 }
 
 int PS4ABI sys_mname(uint8_t *ptr, size_t len, const char *name, void *) {
