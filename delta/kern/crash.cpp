@@ -145,6 +145,21 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
                  (unsigned long long)g[R12], (unsigned long long)g[R13],
                  (unsigned long long)g[R14], (unsigned long long)g[R15]);
     backtrace(g[RBP]);
+    // Raw stack scan: optimised guest code omits frame pointers, so the rbp
+    // chain above misses frames. Scan the guest stack for any value that lands
+    // in a loaded module's .text; that's the (super)set of return
+    // addresses, i.e. the real call chain.
+    std::fprintf(stderr, "  --- stack scan ---\n");
+    auto *sp = reinterpret_cast<uintptr_t *>(g[RSP]);
+    if (g[RSP] >= 0x10000) {
+      for (int i = 0; i < 256; i++) {
+        uintptr_t v = sp[i];
+        char sym[256];
+        symbolize(v, sym, sizeof(sym));
+        if (std::strstr(sym, "(.text)"))
+          std::fprintf(stderr, "  sp+%-4x %016lx  %s\n", i * 8, v, sym);
+      }
+    }
   }
 #endif
   std::fflush(stderr);
