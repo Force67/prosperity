@@ -168,6 +168,13 @@ public:
     LOG_INFO("fex: registered exec range {} +{:#x}", (void *)info.base, info.codeSize);
   }
 
+  void registerExecRange(uintptr_t base, size_t size) override {
+    ensureInit();
+    std::lock_guard lk(g_rangeMutex);
+    g_ranges.push_back({base, size});
+    LOG_INFO("fex: registered exec range {:#x} +{:#x}", base, size);
+  }
+
   // Per-guest-thread bookkeeping. The gdt lives here (FEX tracks GDT/LDT per
   // thread; sharing one array across threads is incorrect) alongside the guest
   // stack and call-ret stack so they can be freed when the thread finishes.
@@ -249,7 +256,8 @@ public:
     FEXCore::Allocator::RegisterTLSData(h->thread); // FEX per-thread registration
     LOG_INFO("fex: running guest thread rip={:#x}", h->thread->CurrentFrame->State.rip);
     CTX->ExecuteThread(h->thread);
-    LOG_INFO("fex: guest thread returned");
+    LOG_INFO("fex: guest thread returned rip={:#x}",
+             (unsigned long)h->thread->CurrentFrame->State.rip);
     FEXCore::Allocator::UninstallTLSData(h->thread);
     CTX->DestroyThread(h->thread);
     t_curThread = nullptr;
