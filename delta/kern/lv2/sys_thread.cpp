@@ -11,6 +11,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <condition_variable>
 #include <cstdio>
 #include <mutex>
@@ -81,7 +82,7 @@ int PS4ABI sys_thr_new(thr_param *p, int size) {
   // host syscall handlers execute on whatever stack the guest code is using, and
   // the guest stack (e.g. 64 KiB) is far too small for them (std::thread/printf/
   // C++ exceptions overflow it). The host thread stack is bigger and works.
-  // Create the guest thread on THIS (parent) thread, as FEX requires; creating
+  // Create the guest thread on THIS (parent) thread, as FEX requires. Creating
   // it on the freshly spawned worker while other guest threads run in the JIT
   // races on shared context state. The worker host thread only runs it.
   void *gthread =
@@ -95,10 +96,15 @@ int PS4ABI sys_thr_new(thr_param *p, int size) {
 
   // Wait for the new thread to finish its init and hit its first sync point so
   // it wins the races the game expects it to. Bounded so a thread that never
-  // syncs can't hang us.
-  std::unique_lock<std::mutex> lk(g_startM);
-  g_startCv.wait_for(lk, std::chrono::milliseconds(200),
-                     [&] { return started->load(); });
+  // syncs can't hang us. DELTA_NO_THR_BARRIER disables the wait so the spawner
+  // runs ahead, for cases where the spawner is the producer the spawned thread
+  // depends on.
+  static const bool noBarrier = std::getenv("DELTA_NO_THR_BARRIER") != nullptr;
+  if (!noBarrier) {
+    std::unique_lock<std::mutex> lk(g_startM);
+    g_startCv.wait_for(lk, std::chrono::milliseconds(200),
+                       [&] { return started->load(); });
+  }
   return 0;
 }
 

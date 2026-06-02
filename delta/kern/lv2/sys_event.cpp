@@ -7,8 +7,10 @@
  */
 
 #include <base.h>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <thread>
 
 #include "kern/proc.h"
 #include "sys_event.h"
@@ -18,6 +20,28 @@ namespace krnl {
 // without knowing which equeue a given flip event was registered on.
 static std::mutex g_eqRegM;
 static base::Vector<equeue *> g_equeues;
+
+// EVFILT_DISPLAY (-13) is the videoout vblank/flip filter. A thread that waits
+// on it blocks in kevent until a vblank arrives. With no real display hardware,
+// a synthetic 60 Hz tick keeps that wait from blocking forever.
+static constexpr int16_t kEVFILT_DISPLAY = -13;
+static std::atomic<bool> g_vblankStarted{false};
+
+// Start the 60 Hz EVFILT_DISPLAY pump once, on the first vblank registration, so
+// the timer thread only runs when something waits on it.
+static void startVblankPump() {
+  bool expected = false;
+  if (!g_vblankStarted.compare_exchange_strong(expected, true))
+    return;
+  std::printf("[vblank] pump started (60 Hz, EVFILT_DISPLAY)\n");
+  std::thread([] {
+    uint64_t count = 0;
+    for (;;) {
+      std::this_thread::sleep_for(std::chrono::microseconds(16667));  // ~60 Hz
+      triggerAllEqueues(-1, kEVFILT_DISPLAY, static_cast<int64_t>(++count));
+    }
+  }).detach();
+}
 
 equeue::equeue(proc *p, const char *nm) : kObject(p, oType::equeue) {
   if (nm)
@@ -69,6 +93,9 @@ int equeue::kevent(const kevent_t *changes, int nchanges, kevent_t *out,
     } else {
       notes.push_back({c, false});
     }
+    // First vblank registration kicks off the synthetic 60 Hz pump.
+    if (c.filter == kEVFILT_DISPLAY)
+      startVblankPump();
   }
 
   // 2) collect ready events, waiting if asked.
