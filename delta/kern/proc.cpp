@@ -51,6 +51,12 @@ bool proc::create(const base::String &path, bool fromVfs) {
     return false;
   }
 
+  // libkernel is a thin forwarder: a chunk of its exports (the memory-pool
+  // helpers libSceSaveData & friends import as "libkernel") actually live in
+  // libkernel_sys. Preload it so those NIDs resolve via the cross-module
+  // fallback in resolveObfSymbol; tolerate absence on minimal module sets.
+  loadModule(base::StringRef("libkernel_sys"));
+
   bool loaded = fromVfs ? first->fromVfs(path) : first->fromFile(path);
   if (!loaded) {
     LOG_ERROR("unable to load main process module");

@@ -460,6 +460,21 @@ bool smodule::resolveObfSymbol(const char *name, uintptr_t &ptrOut) {
       longName += "#";
       longName += mod.name;
       ptrOut = xmod->getSymbolFullName(longName.c_str());
+
+      // libkernel forwards a set of its exports to libkernel_sys; the import
+      // still names "libkernel", so a miss there means we search the rest of
+      // the loaded modules for the bare NID before falling back to the badcall
+      // stub. (Fixes libSceSaveData's libkernel_sys memory-pool imports.)
+      if (!ptrOut) {
+        for (auto &other : process->getModuleList()) {
+          if (other.get() == xmod || other.get() == this)
+            continue;
+          if (uintptr_t a = other->getSymbolByNid(nameenc)) {
+            ptrOut = a;
+            break;
+          }
+        }
+      }
       return true;
     }
   }
