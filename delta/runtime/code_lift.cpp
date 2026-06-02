@@ -7,6 +7,11 @@
  * in the root of the source tree.
  */
 
+// The lifter rewrites guest x86-64 in place (Xbyak codegen) so it runs natively
+// on an x86-64 host. It is meaningless (and won't compile) on aarch64, where
+// guest code runs through the FEXCore JIT instead (see delta/cpu/fex_backend).
+#if defined(DELTA_BACKEND_NATIVE)
+
 #include <base.h>
 #include <cstdio>
 #include <xbyak.h>
@@ -233,3 +238,5 @@ void codeLift::emit_fsbase(uint8_t *base) {
   ripPointer += alignedSize;
 }
 } // namespace runtime
+
+#endif // DELTA_BACKEND_NATIVE

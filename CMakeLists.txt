@@ -58,6 +58,29 @@ endif()
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 include(AddDeltaModule)
 
+# CPU execution backend selection.
+#
+# x86-64 host: guest PS4 x86-64 code runs natively (the existing path; only
+#   syscalls and fs:-relative TLS are rewritten in-place by runtime/code_lift).
+# aarch64 host: guest code runs through an embedded FEXCore JIT and syscalls
+#   arrive via a FEXCore callback dispatched to lv2 (delta/cpu/fex_backend).
+# Everything else (loader, lv2 HLE, devices) stays host-native either way.
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
+  set(DELTA_BACKEND "FEX" CACHE STRING "CPU execution backend (FEX|NATIVE)")
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")
+  set(DELTA_BACKEND "NATIVE" CACHE STRING "CPU execution backend (FEX|NATIVE)")
+else()
+  message(FATAL_ERROR "Unsupported host arch '${CMAKE_SYSTEM_PROCESSOR}' (need x86_64 or aarch64)")
+endif()
+message(STATUS "Delta CPU backend: ${DELTA_BACKEND} (host ${CMAKE_SYSTEM_PROCESSOR})")
+
+if(DELTA_BACKEND STREQUAL "FEX")
+  add_compile_definitions(DELTA_BACKEND_FEX=1)
+  include(BuildFEXCore)
+else()
+  add_compile_definitions(DELTA_BACKEND_NATIVE=1)
+endif()
+
 option(DELTA_BUILD_TESTS "Build the delta module unit tests" ON)
 if(DELTA_BUILD_TESTS)
   enable_testing()

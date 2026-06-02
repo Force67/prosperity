@@ -17,8 +17,11 @@
 #include "crash.h"
 #include "module.h"
 #include "proc.h"
+#include "cpu/cpu_backend.h"
 
 namespace krnl {
+const char *syscall_getname(uint32_t idx); // name_table.cpp
+
 // Resolve a host address to "<module>+0x<off> (<seg>)" by scanning loaded module
 // images, so a guest fault points straight at a guest module offset.
 static void symbolize(uintptr_t addr, char *out, size_t n) {
@@ -44,6 +47,8 @@ static void symbolize(uintptr_t addr, char *out, size_t n) {
 
 // Walk the rbp frame chain (guest code keeps frame pointers) and symbolize each
 // return address. Bounded and range-checked so a bad frame can't loop or fault.
+// Works for both backends: guest frames are x86-64 frames in identity-mapped
+// memory, so the walk is plain pointer reads on either host arch.
 static void backtrace(uintptr_t rbp) {
   std::fprintf(stderr, "  --- backtrace ---\n");
   for (int i = 0; i < 32; i++) {
@@ -64,17 +69,27 @@ static void backtrace(uintptr_t rbp) {
 }
 
 static void crashHandler(int sig, siginfo_t *si, void *ucv) {
-  auto *uc = static_cast<ucontext_t *>(ucv);
-  auto *gr = uc->uc_mcontext.gregs;
-  char rip[256], fault[256];
-  symbolize(gr[REG_RIP], rip, sizeof(rip));
+  // Let the CPU backend handle JIT-internal signals (e.g. FEX unaligned-atomic
+  // SIGBUS) and resume; only a genuinely fatal fault falls through to the dump.
+  if (cpu::tryHandleJitSignal(sig, si, ucv))
+    return;
+
+  char fault[256];
   symbolize((uintptr_t)si->si_addr, fault, sizeof(fault));
   std::fprintf(stderr, "\n=== GUEST FAULT: %s (signal %d) ===\n",
                strsignal(sig), sig);
-  std::fprintf(stderr, "  rip   = %016llx  %s\n",
-               (unsigned long long)gr[REG_RIP], rip);
+  if (int sc = cpu::faultingSyscall(); sc >= 0)
+    std::fprintf(stderr, "  in syscall %d (%s)\n", sc, syscall_getname((uint32_t)sc));
   std::fprintf(stderr, "  fault = %016llx  %s\n",
                (unsigned long long)si->si_addr, fault);
+#if defined(__x86_64__)
+  // Native x86 host: the host signal context IS the guest context.
+  auto *uc = static_cast<ucontext_t *>(ucv);
+  auto *gr = uc->uc_mcontext.gregs;
+  char rip[256];
+  symbolize(gr[REG_RIP], rip, sizeof(rip));
+  std::fprintf(stderr, "  rip   = %016llx  %s\n",
+               (unsigned long long)gr[REG_RIP], rip);
   std::fprintf(stderr, "  rax=%016llx rbx=%016llx rcx=%016llx rdx=%016llx\n",
                (unsigned long long)gr[REG_RAX], (unsigned long long)gr[REG_RBX],
                (unsigned long long)gr[REG_RCX], (unsigned long long)gr[REG_RDX]);
@@ -88,6 +103,50 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
                (unsigned long long)gr[REG_R12], (unsigned long long)gr[REG_R13],
                (unsigned long long)gr[REG_R14], (unsigned long long)gr[REG_R15]);
   backtrace(gr[REG_RBP]);
+#else
+  // aarch64 host: guest x86 state lives in the FEXCore CPUState, not the host
+  // ARM signal context. Reconstruct the precise guest RIP from the host JIT PC
+  // (CPUState.rip alone is only block-accurate and multiblock hides the site).
+  uint64_t hostpc = 0;
+#if defined(__aarch64__)
+  if (ucv)
+    hostpc = static_cast<ucontext_t *>(ucv)->uc_mcontext.pc;
+#endif
+  uint64_t recon = cpu::reconstructGuestRip(hostpc);
+  uint64_t grip = recon ? recon : cpu::currentGuestRip(); // fall back to block rip
+  std::fprintf(stderr, "  host pc in JIT: %s\n", recon ? "yes" : "no (FEX/HLE C++)");
+  char ripsym[256];
+  symbolize(grip, ripsym, sizeof(ripsym));
+  std::fprintf(stderr, "  host pc   = %016llx\n", (unsigned long long)hostpc);
+  std::fprintf(stderr, "  guest rip = %016llx  %s\n",
+               (unsigned long long)grip, ripsym);
+  if (grip) {
+    auto *b = reinterpret_cast<const uint8_t *>(grip);
+    std::fprintf(stderr, "  insn bytes:");
+    for (int i = 0; i < 16; i++)
+      std::fprintf(stderr, " %02x", b[i]);
+    std::fprintf(stderr, "\n");
+  }
+  // Guest GPR dump + rbp backtrace (parity with the native x86 dump above).
+  // gregs order is FEXCore::X86State::REG_* (RAX,RCX,RDX,RBX,RSP,RBP,RSI,RDI,
+  // R8..R15); mirror it locally so this TU needs no FEXCore headers.
+  if (const uint64_t *g = cpu::currentGuestGregs()) {
+    enum { RAX, RCX, RDX, RBX, RSP, RBP, RSI, RDI, R8, R9, R10, R11, R12, R13, R14, R15 };
+    std::fprintf(stderr, "  rax=%016llx rbx=%016llx rcx=%016llx rdx=%016llx\n",
+                 (unsigned long long)g[RAX], (unsigned long long)g[RBX],
+                 (unsigned long long)g[RCX], (unsigned long long)g[RDX]);
+    std::fprintf(stderr, "  rsi=%016llx rdi=%016llx rbp=%016llx rsp=%016llx\n",
+                 (unsigned long long)g[RSI], (unsigned long long)g[RDI],
+                 (unsigned long long)g[RBP], (unsigned long long)g[RSP]);
+    std::fprintf(stderr, "  r8 =%016llx r9 =%016llx r10=%016llx r11=%016llx\n",
+                 (unsigned long long)g[R8], (unsigned long long)g[R9],
+                 (unsigned long long)g[R10], (unsigned long long)g[R11]);
+    std::fprintf(stderr, "  r12=%016llx r13=%016llx r14=%016llx r15=%016llx\n",
+                 (unsigned long long)g[R12], (unsigned long long)g[R13],
+                 (unsigned long long)g[R14], (unsigned long long)g[R15]);
+    backtrace(g[RBP]);
+  }
+#endif
   std::fflush(stderr);
   std::fflush(stdout);  // _Exit won't flush; keep the guest trace up to the fault
   std::_Exit(128 + sig);

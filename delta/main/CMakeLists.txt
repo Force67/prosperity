@@ -22,8 +22,13 @@ target_link_libraries(ps4delta PRIVATE
   delta_formats
   delta_crypto
   delta_gfx
-  xbyak          # dapi.cpp uses xbyak_util for the CPU feature probe
+  delta_cpu
 )
+
+# dapi.cpp uses xbyak_util for the CPU feature probe only on the native x86 path.
+if(DELTA_BACKEND STREQUAL "NATIVE")
+  target_link_libraries(ps4delta PRIVATE xbyak)
+endif()
 
 # On linux the .ico is useless, so install the converted png plus a desktop
 # entry that points at it.

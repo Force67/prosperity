@@ -17,6 +17,7 @@ if(UNIX)
   target_link_libraries(delta_deps INTERFACE pthread dl)
 endif()
 
+add_subdirectory(cpu)
 add_subdirectory(crypto)
 add_subdirectory(formats)
 add_subdirectory(gfx)
@@ -26,7 +27,10 @@ add_subdirectory(main)
 
 # kern and runtime are co-dependent: kern drives the JIT runtime
 # (proc -> vprx/code_lift) and the runtime calls back into kern
-# (code_lift -> proc::getActive). Declare the static-lib cycle so the linker
+# (code_lift -> proc::getActive). delta_cpu is likewise co-dependent with kern:
+# the loader/proc/threads call cpu::backend(), and the FEX backend calls back
+# into kern (lv2_get, moduleInfo). Declare the static-lib cycles so the linker
 # repeats the archives until symbols resolve.
-target_link_libraries(delta_kern    PUBLIC delta_runtime)
+target_link_libraries(delta_kern    PUBLIC delta_runtime delta_cpu)
 target_link_libraries(delta_runtime PUBLIC delta_kern)
+target_link_libraries(delta_cpu     PUBLIC delta_kern)

@@ -4,7 +4,9 @@
 #include <logger/logger.h>
 #include <utl/mem.h>
 #include <utl/path.h>
+#if defined(DELTA_BACKEND_NATIVE)
 #include <xbyak_util.h>
+#endif
 
 #include <base/strings/xstring.h>
 #include <base/containers/vector.h>
@@ -20,6 +22,7 @@
 #endif
 
 #include "dcore.h"
+#include "cpu/cpu_backend.h"
 
 static bool verifyViablity() {
 #ifdef _WIN32
@@ -38,6 +41,9 @@ static bool verifyViablity() {
     return false;
   }
 
+#if defined(DELTA_BACKEND_NATIVE)
+  // Native x86 host: the guest runs directly on this CPU, so it must itself
+  // expose the instruction set PS4 code expects.
   base::String missingFeatures;
   Xbyak::util::Cpu cpu;
 
@@ -64,6 +70,11 @@ static bool verifyViablity() {
               missingFeatures.c_str());
     return false;
   }
+#else
+  // aarch64 host: guest x86-64 runs in the FEXCore JIT, which synthesises the
+  // expected instruction set regardless of the host CPU.
+  LOG_INFO("FEX backend: skipping host x86 feature probe");
+#endif
 
   return true;
 }
@@ -113,6 +124,7 @@ static void win32PostInit() {
 #endif
 
 EXPORT int dcoreMain(int argc, char **argv) {
+  cpu::earlyInit(); // segregate guest/JIT memory before anything maps (FEX path)
   utl::createLogger(true);
 
   if (!verifyViablity())

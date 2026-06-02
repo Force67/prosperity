@@ -13,7 +13,9 @@
 #ifdef _MSC_VER
 #include <intrin.h>
 #endif
+#if defined(DELTA_BACKEND_NATIVE)
 #include <xbyak.h>
+#endif
 
 #include "sys_debug.h"
 #include "sys_dynlib.h"
@@ -716,6 +718,7 @@ static const syscall_Reg syscall_dpt[] = {
     {672, (void *)&null_handler}, // sys_dynlib_get_list_for_libdbg
 };
 
+#if defined(DELTA_BACKEND_NATIVE)
 static void PS4ABI trace_syscall(const char *name, int index, void *addr) {
   std::fprintf(stderr, "[syscall] %d %s\n", index, name);
 }
@@ -779,6 +782,7 @@ static uintptr_t emit_calltrace(const char *name, uint32_t sid,
 
   return reinterpret_cast<uintptr_t>(gen->getCode());
 }
+#endif // DELTA_BACKEND_NATIVE
 
 uintptr_t lv2_get(uint32_t sid) {
   for (auto &it : syscall_dpt) {

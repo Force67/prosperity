@@ -11,8 +11,11 @@
 #include <utl/file.h>
 #include <utl/mem.h>
 
+#if defined(DELTA_BACKEND_NATIVE)
 #include "runtime/code_lift.h"
+#endif
 #include "runtime/vprx/vprx.h"
+#include "cpu/cpu_backend.h"
 
 #include <crypto/UnSELF.h>
 
@@ -330,7 +333,10 @@ bool smodule::mapImage() {
     }
   }
 
-  // step 1: lift code
+  // step 1: lift code (x86 host only). The lifter rewrites syscall/int/fs reads
+  // in place so raw guest x86-64 runs natively. On aarch64 the FEXCore JIT
+  // handles all three, so the image is left byte-for-byte intact.
+#if defined(DELTA_BACKEND_NATIVE)
   for (uint16_t i = 0; i < elf->phnum; i++) {
     const auto *s = &segments[i];
     uint32_t perm = s->flags & (PF_R | PF_W | PF_X);
@@ -342,6 +348,7 @@ bool smodule::mapImage() {
       lift.transform(getAddress<uint8_t>(s->vaddr), s->filesz);
     }
   }
+#endif
 
 #if 1
   // temp hack: raise the 5.05 libkernel debug level. offset is fw-specific and
@@ -376,6 +383,10 @@ bool smodule::mapImage() {
       utl::protectMem(getAddress<void>(s->vaddr), s->filesz, trans_perm(perm));
     }
   }
+
+  // Tell the backend the image is in place: native no-op (lifting done above),
+  // FEX registers [base, base+codeSize) as an executable range for the JIT.
+  cpu::backend().onImageMapped(info);
 
   return true;
 }

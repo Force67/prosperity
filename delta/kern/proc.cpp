@@ -10,27 +10,21 @@
 #include <utl/file.h>
 #include <utl/mem.h>
 #include <utl/path.h>
-#include <xbyak.h>
 
 #include "crash.h"
 #include "module.h"
 #include "proc.h"
 #include "vfs.h"
+#include "cpu/cpu_backend.h"
 #include "lv2/sys_dynlib.h"
 #include "runtime/vprx/vprx.h"
 
 namespace krnl {
 static proc *g_activeProc{nullptr};
 
-// Per-thread guest fs base (TLS). The lifter rewrites guest `fs:[disp]` reads to
-// call krnl_current_fsbase() so each host thread running guest code reads its
-// own thread's TLS. initial-exec model => the access is a single
-// `mov rax, fs:[off]; ret` that clobbers only rax, which the lifter stub relies
-// on (it preserves only rax around the call).
-__attribute__((tls_model("initial-exec"))) static thread_local uint64_t t_fsbase =
-    0;
-extern "C" uint64_t krnl_current_fsbase() { return t_fsbase; }
-void setThreadFsBase(uint64_t v) { t_fsbase = v; }
+// The guest fs base (TLS) and how the guest entry is run are backend-specific
+// (see delta/cpu): native uses a host thread_local + direct call, FEX uses the
+// FEXCore CPUState + JIT. setThreadFsBase() is defined by the active backend.
 
 proc::proc() : vmem(env) { g_activeProc = this; }
 
@@ -142,6 +136,13 @@ static void applyBootPatches(proc &p) {
   // Redirect libkernel's __tls_get_addr (NID vNe1w4diLCs) to our per-thread HLE;
   // libkernel's own dynamic-TLS allocator leaves DTV entries null. NID lookup is
   // firmware-independent.
+  //
+  // NATIVE ONLY: this patches the guest to `jmp` a *host* function pointer,
+  // which only works when the host runs x86 directly. Under the FEXCore JIT
+  // (aarch64) that address is ARM code and jumping to it as x86 faults wildly.
+  // TODO(boot/fex): redirect __tls_get_addr via a FEXCore thunk trampoline, or
+  // satisfy guest dynamic TLS another way.
+#if defined(DELTA_BACKEND_NATIVE)
   if (auto k = p.getModule(base::StringRef("libkernel"))) {
     if (uintptr_t a = k->getSymbolByNid("vNe1w4diLCs")) {
       auto *c = reinterpret_cast<uint8_t *>(a);
@@ -156,6 +157,24 @@ static void applyBootPatches(proc &p) {
       LOG_INFO("patched libkernel __tls_get_addr -> host HLE");
     }
   }
+#else  // DELTA_BACKEND_FEX
+  // FEX path: a host jump is invalid inside the x86 JIT, so patch the export to
+  // a tiny `mov eax, <magic>; syscall; ret` stub that the FEX syscall handler
+  // bridges to krnl::guest_tls_get_addr (tls_index ptr arrives in rdi).
+  if (auto k = p.getModule(base::StringRef("libkernel"))) {
+    if (uintptr_t a = k->getSymbolByNid("vNe1w4diLCs")) {
+      auto *c = reinterpret_cast<uint8_t *>(a);
+      utl::protectMem(reinterpret_cast<void *>(a & ~0xFFFull), 0x2000,
+                      utl::pageProtection::rwx);
+      c[0] = 0xB8; // mov eax, imm32
+      *reinterpret_cast<uint32_t *>(c + 1) = cpu::kTlsGetAddrSyscall;
+      c[5] = 0x0F; // syscall
+      c[6] = 0x05;
+      c[7] = 0xC3; // ret
+      LOG_INFO("patched libkernel __tls_get_addr -> magic syscall (FEX)");
+    }
+  }
+#endif
   forceReturn0(p, "libkernel", 0x287e0);            // module-gen lib-id validator
   forceReturn0(p, "libSceAppContentUtil", 0x1a00);  // AppContent IPMI init
 }
@@ -174,8 +193,6 @@ void proc::start() {
     return;
   }
 
-  auto func = (void *(PS4ABI *)(void *))kinfo.entry;
-
   union stack_entry {
     const void *ptr;
     uint64_t val;
@@ -190,6 +207,10 @@ void proc::start() {
   (*s++).ptr = (const void *)(info.entry);
   (*s++).ptr = nullptr;
   (*s++).ptr = nullptr;
-  func(stack);
+
+  // Enter libkernel's entry with the PS4 convention (arg block in rdi). The
+  // backend runs it natively (x86 host) or via the FEXCore JIT (aarch64 host).
+  cpu::backend().enterGuest(reinterpret_cast<uintptr_t>(kinfo.entry), stack,
+                            /*fsbase*/ 0);
 }
 }  // namespace krnl

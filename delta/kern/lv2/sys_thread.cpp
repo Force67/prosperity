@@ -19,6 +19,7 @@
 
 #include "../module.h"
 #include "../proc.h"
+#include "cpu/cpu_backend.h"
 #include "sys_thread.h"
 
 namespace krnl {
@@ -80,11 +81,16 @@ int PS4ABI sys_thr_new(thr_param *p, int size) {
   // host syscall handlers execute on whatever stack the guest code is using, and
   // the guest stack (e.g. 64 KiB) is far too small for them (std::thread/printf/
   // C++ exceptions overflow it). The host thread stack is bigger and works.
-  std::thread([fn, arg, fsbase, tid, started] {
-    setThreadFsBase(fsbase);
+  // Create the guest thread on THIS (parent) thread, as FEX requires; creating
+  // it on the freshly spawned worker while other guest threads run in the JIT
+  // races on shared context state. The worker host thread only runs it.
+  void *gthread =
+      cpu::backend().createGuestThread(reinterpret_cast<uintptr_t>(fn), arg, fsbase);
+
+  std::thread([gthread, tid, started] {
     t_tid = tid;
     t_started = started.get();
-    fn(arg);
+    cpu::backend().runGuestThread(gthread);
   }).detach();
 
   // Wait for the new thread to finish its init and hit its first sync point so
