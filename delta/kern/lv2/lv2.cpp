@@ -41,6 +41,11 @@ int sys_sigaction(int how, void (*cb)(void *, void *, void *));
 int sys_regmgr_call(uint32_t op, uint32_t id, void *result, void *value,
                     uint64_t type);
 
+int sys_randomized_path(const char *set_path, char *out, size_t *out_len);
+int sys_workaround8849();
+int sys_blockpool_open();
+int sys_dynlib_do_copy_relocations();
+
 int sys_namedobj_create(const char *name, void *arg2, uint32_t arg3);
 int sys_namedobj_delete();
 
@@ -639,16 +644,16 @@ static const syscall_Reg syscall_dpt[] = {
     {593, (void *)&sys_dynlib_get_info},
     {594, (void *)&sys_dynlib_load_prx},
     {595, (void *)&null_handler}, // sys_dynlib_unload_prx
-    {596, (void *)&null_handler}, // sys_dynlib_do_copy_relocations
+    {596, (void *)&sys_dynlib_do_copy_relocations},
     {597, (void *)&null_handler}, // sys_dynlib_prepare_dlclose
     {598, (void *)&sys_dynlib_get_proc_param},
     {599, (void *)&sys_dynlib_process_needed_and_relocate},
     {600, (void *)&null_handler}, // sys_sandbox_path
     {601, (void *)&sys_mdbg_service},
-    {602, (void *)&null_handler}, // sys_randomized_path
+    {602, (void *)&sys_randomized_path},
     {603, (void *)&null_handler}, // sys_rdup
     {604, (void *)&null_handler}, // sys_dl_get_metadata
-    {605, (void *)&null_handler}, // sys_workaround8849
+    {605, (void *)&sys_workaround8849},
     {606, (void *)&null_handler}, // sys_is_development_mode
     {607, (void *)&null_handler}, // sys_get_self_auth_info
     {608, (void *)&sys_dynlib_get_info_ex},
@@ -696,7 +701,7 @@ static const syscall_Reg syscall_dpt[] = {
     {650, (void *)&null_handler}, // sys_budget_get_ptype_of_budget
     {651, (void *)&null_handler}, // sys_prepare_to_resume_process
     {652, (void *)&null_handler}, // sys_process_terminate
-    {653, (void *)&null_handler}, // sys_blockpool_open
+    {653, (void *)&sys_blockpool_open},
     {654, (void *)&null_handler}, // sys_blockpool_map
     {655, (void *)&null_handler}, // sys_blockpool_unmap
     {656, (void *)&null_handler}, // sys_dynlib_get_info_for_libdbg

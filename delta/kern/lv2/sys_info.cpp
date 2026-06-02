@@ -121,6 +121,29 @@ int PS4ABI sys_sysctl(int *name, uint32_t namelen, void *oldp, size_t *oldlenp,
     return 0;
   }
 
+  // answer machdep.tsc_freq (synthetic oid {0x1337,5}). The TSC on the PS4 APU
+  // runs at a fixed ~1.6 GHz; libkernel's sceKernelGetTscFrequency divides by
+  // this during every module's CRT init, so a zero/garbage value risks a
+  // divide-by-zero or wildly wrong timing. Report a plausible fixed rate.
+  else if (name[0] == 0x1337 && name[1] == 5 && namelen == 2) {
+    if (oldp && oldlenp && *oldlenp >= sizeof(uint64_t)) {
+      *reinterpret_cast<uint64_t *>(oldp) = 1593600000ull;
+      *oldlenp = sizeof(uint64_t);
+    }
+    return 0;
+  }
+
+  // answer kern.sdk_version (synthetic oid {0x1337,6}): the *system* firmware
+  // SDK version, encoded as 0x0MMMmmpp (major/minor/patch). 5.05 (0x05050001)
+  // is broadly compatible and matches what most retail titles tolerate.
+  else if (name[0] == 0x1337 && name[1] == 6 && namelen == 2) {
+    if (oldp && oldlenp && *oldlenp >= sizeof(uint32_t)) {
+      *reinterpret_cast<uint32_t *>(oldp) = 0x05050001;
+      *oldlenp = sizeof(uint32_t);
+    }
+    return 0;
+  }
+
   if (name[0] == 0 && name[1] == 3 && namelen == 2) {
     auto name = base::StringRef(static_cast<const char *>(newp), newlen);
     if (name == "kern.neomode") {
@@ -152,6 +175,22 @@ int PS4ABI sys_sysctl(int *name, uint32_t namelen, void *oldp, size_t *oldlenp,
       /*DK, not present on retail*/
       return 2;
     }
+
+    else if (name == "machdep.tsc_freq") {
+      static_cast<uint32_t *>(oldp)[0] = 0x1337;
+      static_cast<uint32_t *>(oldp)[1] = 5;
+      *oldlenp = 8;
+      return 0;
+    } else if (name == "kern.sdk_version") {
+      static_cast<uint32_t *>(oldp)[0] = 0x1337;
+      static_cast<uint32_t *>(oldp)[1] = 6;
+      *oldlenp = 8;
+      return 0;
+    }
+
+    std::printf("[sysctl] UNHANDLED name2oid: '%.*s'\n", (int)newlen,
+                static_cast<const char *>(newp));
+    return 2;
   }
 
   /*for sceKernelGetLibkernelTextLocation*/

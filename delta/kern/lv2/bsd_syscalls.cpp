@@ -85,6 +85,12 @@ int PS4ABI sys_regmgr_call(uint32_t op, uint32_t id, void *result, void *value,
       return 0;
     }
 
+    // The remaining keys are Sony's obfuscated (checksummed) registry ids whose
+    // plaintext we can't recover, so we can't know the correct value to return.
+    // The guest tolerates the "key not available" error and uses its defaults,
+    // which is safer than inventing a value for an unidentified setting.
+    printf("[regmgr] op25 get-int unknown encoded_id=%#llx\n",
+           (unsigned long long)int_value->encoded_id);
     return 0x800D0203;
   }
 
@@ -94,6 +100,40 @@ int PS4ABI sys_regmgr_call(uint32_t op, uint32_t id, void *result, void *value,
          (unsigned long long)type);
   return 0x800D0203;
 }
+
+// sys_randomized_path (602): libkernel's sceKernelGetRandomizedPath. arg0 is an
+// optional path to *set* (NULL = query the current one); arg1 is the output
+// buffer and arg2 an in/out length. The kernel hands back the per-title
+// randomized sandbox component used under /system_data. We have no such mapping,
+// so report an empty path (len 0) with success; the guest treats that as "no
+// randomized prefix" and falls through to the plain sandbox path.
+int PS4ABI sys_randomized_path(const char *set_path, char *out,
+                               size_t *out_len) {
+  (void)set_path;
+  if (out && out_len) {
+    if (*out_len >= 1)
+      out[0] = '\0';
+    *out_len = 0;
+  }
+  return 0;
+}
+
+// sys_workaround8849 (605): a Sony libkernel-internal no-op kept for an old
+// firmware errata (CXX runtime guard). The real kernel just validates its args
+// and returns success; nothing observable comes back.
+int PS4ABI sys_workaround8849() { return 0; }
+
+// sys_blockpool_open (653): allocates a "block pool" used by the flexible-memory
+// allocator and returns a descriptor. We don't model block pools yet; the only
+// caller during boot does not feed the result into blockpool_map/mmap, so hand
+// back a fixed positive descriptor (a non-zero, non-stdio handle) to signal
+// success without colliding with a real object-table fd.
+int PS4ABI sys_blockpool_open() { return 0x4000; }
+
+// sys_dynlib_do_copy_relocations (596): processes R_X86_64_COPY relocations for
+// the main executable. Our loader already resolves data relocations when it maps
+// each module, so there is nothing extra to copy here; return success.
+int PS4ABI sys_dynlib_do_copy_relocations() { return 0; }
 
 int PS4ABI sys_getpid() { return 0x1337; }
 
