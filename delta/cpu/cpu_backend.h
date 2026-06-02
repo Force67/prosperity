@@ -46,12 +46,6 @@ public:
   // register the module's executable range so the JIT knows what to decode.
   virtual void onImageMapped(krnl::moduleInfo &info) = 0;
 
-  // Register an extra executable range not backed by a loaded module (e.g. a
-  // host-allocated boot trampoline). Without this the FEX JIT treats the address
-  // as non-executable and ExecuteThread bails the instant control reaches it.
-  // Native: no-op (guest code runs on the host CPU directly).
-  virtual void registerExecRange(uintptr_t base, size_t size) {}
-
   // Create a guest thread object (CPU state, stack, TLS) without running it.
   // MUST be called on the PARENT thread before the worker host thread is spawned.
   // FEX serializes thread creation against running threads, so creating on the

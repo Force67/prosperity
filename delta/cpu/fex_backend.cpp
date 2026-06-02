@@ -168,13 +168,6 @@ public:
     LOG_INFO("fex: registered exec range {} +{:#x}", (void *)info.base, info.codeSize);
   }
 
-  void registerExecRange(uintptr_t base, size_t size) override {
-    ensureInit();
-    std::lock_guard lk(g_rangeMutex);
-    g_ranges.push_back({base, size});
-    LOG_INFO("fex: registered exec range {:#x} +{:#x}", base, size);
-  }
-
   // Per-guest-thread bookkeeping. The gdt lives here (FEX tracks GDT/LDT per
   // thread; sharing one array across threads is incorrect) alongside the guest
   // stack and call-ret stack so they can be freed when the thread finishes.

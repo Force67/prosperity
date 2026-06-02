@@ -10,7 +10,6 @@
 #include <utl/file.h>
 #include <utl/mem.h>
 #include <utl/path.h>
-#include <sys/mman.h>
 
 #include "crash.h"
 #include "module.h"
@@ -184,7 +183,6 @@ static void applyBootPatches(proc &p) {
 #endif
   forceReturn0(p, "libkernel", 0x287e0);            // module-gen lib-id validator
   forceReturn0(p, "libSceAppContentUtil", 0x1a00);  // AppContent IPMI init
-  forceReturn0(p, "libkernel", 0x93dc);  // MutexattrInitForInternalLibc idempotent
 }
 
 void proc::start() {
@@ -206,38 +204,13 @@ void proc::start() {
     uint64_t val;
   } stack[128];
 
-  // Run libSceLibcInternal's malloc bootstrap (libc+0x29610) once, BEFORE the
-  // eboot CRT, via a trampoline planted as AT_ENTRY: _start calls AT_ENTRY, the
-  // trampoline runs the bootstrap then jmps the real eboot entry. Fixes the
-  // savedata null-mspace crash (system libc arena otherwise never created).
-  const void *guestEntry = (const void *)(info.entry);
-  if (auto libc = getModule(base::StringRef("libSceLibcInternal"))) {
-    uintptr_t boot = reinterpret_cast<uintptr_t>(libc->getInfo().base) + 0x29610;
-    uintptr_t real = reinterpret_cast<uintptr_t>(info.entry);
-    auto *t = static_cast<uint8_t *>(mmap(nullptr, 0x1000,
-        PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
-    size_t n = 0;
-    t[n++] = 0x57;                                              // push rdi
-    t[n++] = 0x48; t[n++] = 0xB8;                               // movabs rax, boot
-    *reinterpret_cast<uint64_t *>(t + n) = boot; n += 8;
-    t[n++] = 0xFF; t[n++] = 0xD0;                               // call rax
-    t[n++] = 0x5F;                                              // pop rdi
-    t[n++] = 0x48; t[n++] = 0xB8;                               // movabs rax, real
-    *reinterpret_cast<uint64_t *>(t + n) = real; n += 8;
-    t[n++] = 0xFF; t[n++] = 0xE0;                               // jmp rax
-    cpu::backend().registerExecRange(reinterpret_cast<uintptr_t>(t), 0x1000);
-    guestEntry = t;
-    LOG_INFO("boot: libc-bootstrap trampoline {:#x} -> entry {:#x}",
-             (uintptr_t)t, real);
-  }
-
   stack[0].val = 1 + 0; // argc
   auto s = reinterpret_cast<stack_entry *>(&stack[1]);
   (*s++).ptr = info.name.c_str();
   (*s++).ptr = nullptr;
   (*s++).ptr = nullptr;
   (*s++).val = 9ull;
-  (*s++).ptr = guestEntry;
+  (*s++).ptr = (const void *)(info.entry);
   (*s++).ptr = nullptr;
   (*s++).ptr = nullptr;
 
