@@ -41,6 +41,9 @@ int sys_sigaction(int how, void (*cb)(void *, void *, void *));
 int sys_regmgr_call(uint32_t op, uint32_t id, void *result, void *value,
                     uint64_t type);
 
+int PS4ABI sys_ipmimgr_call(uint32_t op, uint32_t kid, void *out, void *in,
+                            uint64_t insize, uint64_t arg6);
+
 int sys_randomized_path(const char *set_path, char *out, size_t *out_len);
 int sys_workaround8849();
 int sys_blockpool_open();
@@ -670,7 +673,7 @@ static const syscall_Reg syscall_dpt[] = {
     {619, (void *)&null_handler}, // sys_test_debug_rwmem
     {620, (void *)&null_handler}, // sys_free_stack
     {621, (void *)&null_handler}, // sys_suspend_system
-    {622, (void *)&null_handler}, // sys_ipmimgr_call
+    {622, (void *)&sys_ipmimgr_call},
     {623, (void *)&null_handler}, // sys_get_gpo
     {624, (void *)&null_handler}, // sys_get_vm_map_timestamp
     {625, (void *)&null_handler}, // sys_opmc_set_hw
