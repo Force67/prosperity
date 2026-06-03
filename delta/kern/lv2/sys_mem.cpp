@@ -35,16 +35,20 @@ static uint8_t *allocLowGuest(size_t size) {
   constexpr uintptr_t kFloor = 0x1000000000ull;   // 64 GiB
   constexpr uintptr_t kCeil = 0x10000000000ull;   // 2^40, the PS4 user ceiling
   static std::atomic<uintptr_t> next{kFloor};
+  size = (size + 0x3FFF) & ~uintptr_t(0x3FFF);
   for (int tries = 0; tries < 8192; tries++) {
-    uintptr_t base = next.fetch_add(size + 0x4000) & ~uintptr_t(0x3FFF);
-    if (base < kFloor || base + size > kCeil)
-      return nullptr;
+    uintptr_t base = next.load(std::memory_order_relaxed);
+    if (base + size + 0x4000 > kCeil)
+      return nullptr;  // doesn't fit; do NOT poison `next` (CAS, not fetch_add)
+    if (!next.compare_exchange_weak(base, base + size + 0x4000,
+                                    std::memory_order_relaxed))
+      continue;  // another thread advanced it; reload and retry
     void *p = ::mmap(reinterpret_cast<void *>(base), size, PROT_READ | PROT_WRITE,
                      MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
     if (p == reinterpret_cast<void *>(base))
       return static_cast<uint8_t *>(p);
     if (p != MAP_FAILED)
-      ::munmap(p, size);  // kernel ignored the hint; release and try higher
+      ::munmap(p, size);  // hint occupied; the CAS already skipped past it
   }
   return nullptr;
 }
