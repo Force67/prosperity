@@ -273,6 +273,14 @@ int PS4ABI sys_dynlib_load_prx(const char *path, uint64_t flags, int *pHandle,
   return 0;
 }
 
+// We never reclaim a loaded module (its code/data stay mapped for the process
+// lifetime), so unload is a success no-op: the guest's module_stop has already
+// run and it just wants the bookkeeping to succeed.
+int PS4ABI sys_dynlib_unload_prx(uint32_t handle) {
+  std::printf("[unload_prx] handle=%#x (no-op)\n", handle);
+  return 0;
+}
+
 // HLE of libkernel's __tls_get_addr (NID vNe1w4diLCs). libkernel's own dynamic
 // TLS allocator leaves the per-thread DTV entries null, so general-dynamic
 // __thread access (e.g. libc's malloc arena, module errno) reads address 0 and

@@ -134,7 +134,7 @@ static const syscall_Reg syscall_dpt[] = {
     {24, (void *)&null_handler}, // sys_getuid
     {25, (void *)&null_handler}, // sys_geteuid
     {26, (void *)&null_handler}, // sys_ptrace
-    {27, (void *)&null_handler}, // sys_recvmsg
+    {27, (void *)&sys_recvmsg},
     {28, (void *)&null_handler}, // sys_sendmsg
     {29, (void *)&null_handler}, // sys_recvfrom
     {30, (void *)&null_handler}, // sys_accept
@@ -204,8 +204,8 @@ static const syscall_Reg syscall_dpt[] = {
     {94, (void *)&null_handler},  // sys_setdopt
     {95, (void *)&null_handler},  // sys_fsync
     {96, (void *)&null_handler},  // sys_setpriority
-    {97, (void *)&null_handler},  // sys_socket
-    {98, (void *)&null_handler},  // sys_connect
+    {97, (void *)&sys_socket},
+    {98, (void *)&sys_connect},
     {99, (void *)&sys_netcontrol},
     {100, (void *)&null_handler}, // sys_getpriority
     {101, (void *)&null_handler}, // sys_netabort
@@ -647,7 +647,7 @@ static const syscall_Reg syscall_dpt[] = {
     {592, (void *)&sys_dynlib_get_list},
     {593, (void *)&sys_dynlib_get_info},
     {594, (void *)&sys_dynlib_load_prx},
-    {595, (void *)&null_handler}, // sys_dynlib_unload_prx
+    {595, (void *)&sys_dynlib_unload_prx},
     {596, (void *)&sys_dynlib_do_copy_relocations},
     {597, (void *)&null_handler}, // sys_dynlib_prepare_dlclose
     {598, (void *)&sys_dynlib_get_proc_param},
