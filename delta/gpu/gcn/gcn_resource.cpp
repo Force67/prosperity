@@ -30,6 +30,24 @@ VBuffer decodeVBuffer(const uint32_t *p) {
   return v;
 }
 
+TImage decodeTImage(const uint32_t *p) {
+  // GCN T# (image resource), 8 dwords:
+  //  [0] base[39:8] (base = [0] << 8 with hi bits from [1])
+  //  [1] base_hi[7:0]; min_lod[19:8]; dfmt[25:20]; nfmt[29:26]
+  //  [2] width[13:0]; height[27:14]
+  //  [3] ...; tiling_index[24:20]
+  TImage t;
+  t.base = ((static_cast<uint64_t>(p[1] & 0xFF) << 32) | p[0]) << 8;
+  t.dfmt = (p[1] >> 20) & 0x3F;
+  t.nfmt = (p[1] >> 26) & 0xF;
+  t.width = ((p[2] & 0x3FFF)) + 1;
+  t.height = ((p[2] >> 14) & 0x3FFF) + 1;
+  t.tilingIdx = (p[3] >> 20) & 0x1F;
+  t.valid = t.base >= 0x1000000000ull && t.base < 0x20000000000ull &&
+            t.width > 1 && t.width <= 8192 && t.height > 1 && t.height <= 8192;
+  return t;
+}
+
 // SMRD operand fields (GFX6/7).
 struct Smrd {
   uint32_t op, sdst, sbase, offset;
@@ -82,6 +100,35 @@ std::vector<VBuffer> trackVertexBuffers(const uint32_t *fetchCode,
                      baseSgpr, (unsigned long)table, byteOff,
                      (unsigned long)v.base, v.stride, v.numRecords, v.dfmt, v.nfmt);
       result.push_back(v);
+    }
+  }
+  return result;
+}
+
+std::vector<TImage> trackTextures(const uint32_t *psCode, uint32_t maxDwords,
+                                  const uint32_t *psUserData) {
+  std::vector<TImage> result;
+  if (!psCode || !psUserData)
+    return result;
+  auto insts = decode(psCode, maxDwords);
+  for (const auto &in : insts) {
+    // MIMG image_sample: the T# / S# are referenced by SGPR indices (SRSRC /
+    // SSAMP). The PS passes them inline in its user-data SGPRs (Isaac does no
+    // s_load), so read the 8-dword T# straight out of user_data[srsrc*4..].
+    if (in.enc != Enc::mimg)
+      continue;
+    uint32_t word1 = in.raw[1];
+    uint32_t srsrc = ((word1 >> 16) & 0x1F) * 4;  // T# base SGPR
+    if (srsrc + 8 > 16)
+      continue;
+    TImage t = decodeTImage(&psUserData[srsrc]);
+    if (t.valid) {
+      if (g_trace)
+        std::fprintf(stderr, "[gcnres] T# (inline sgpr%u) base=%#lx %ux%u "
+                     "dfmt=%u nfmt=%u tiling=%u\n", srsrc, (unsigned long)t.base,
+                     t.width, t.height, t.dfmt, t.nfmt, t.tilingIdx);
+      result.push_back(t);
+      break;  // first texture is the sprite atlas
     }
   }
   return result;

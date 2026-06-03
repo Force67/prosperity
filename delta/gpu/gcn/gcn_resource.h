@@ -23,6 +23,26 @@ struct VBuffer {
   uint32_t nfmt = 0;
 };
 
+// A decoded image resource (GCN T#, 8 dwords).
+struct TImage {
+  uint64_t base = 0;
+  uint32_t width = 0;
+  uint32_t height = 0;
+  uint32_t dfmt = 0;
+  uint32_t nfmt = 0;
+  uint32_t tilingIdx = 0;  // 0/1 = linear; higher = tiled
+  bool valid = false;
+};
+
+// Decode a T# from 8 dwords.
+TImage decodeTImage(const uint32_t *p);
+
+// Recover the image(s) a (textured) pixel shader samples, by tracking its
+// s_load_dwordx8 of T#s out of the PS user-data tables. Empty if the PS does no
+// texture sampling.
+std::vector<TImage> trackTextures(const uint32_t *psCode, uint32_t maxDwords,
+                                  const uint32_t *psUserData);
+
 // Decode a V# from 4 consecutive dwords.
 VBuffer decodeVBuffer(const uint32_t *p);
 

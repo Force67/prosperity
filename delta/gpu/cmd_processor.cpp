@@ -74,6 +74,40 @@ void dumpHist() {
 void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
   uint64_t vsA = g_regs.shaderAddr(mmSPI_SHADER_PGM_LO_VS);
   uint64_t psA = g_regs.shaderAddr(mmSPI_SHADER_PGM_LO_PS);
+  // One-time: find the first PS that samples a texture (has an MIMG instruction)
+  // and dump how it loads its resources, so we can wire texture sampling.
+  static bool g_texProbed = false;
+  if (g_trace && !g_texProbed && psA >= 0x1000000000ull && psA < 0x20000000000ull) {
+    auto pi = gcn::decode(reinterpret_cast<const uint32_t *>(psA), 256);
+    int nMimg = 0, nSmrd = 0;
+    for (auto &in : pi) {
+      if (in.enc == gcn::Enc::mimg) nMimg++;
+      if (in.enc == gcn::Enc::smrd) nSmrd++;
+    }
+    if (nMimg > 0) {
+      g_texProbed = true;
+      std::fprintf(stderr, "[gpu] TEXTURED PS @%#lx: mimg=%d smrd=%d\n",
+                   (unsigned long)psA, nMimg, nSmrd);
+      const uint32_t *pud = &g_regs[mmSPI_SHADER_USER_DATA_PS_0];
+      std::fprintf(stderr, "[gpu]   PS user_data:");
+      for (int k = 0; k < 16; k++) std::fprintf(stderr, " %08x", pud[k]);
+      std::fprintf(stderr, "\n");
+      auto texs = gcn::trackTextures(reinterpret_cast<const uint32_t *>(psA), 256, pud);
+      std::fprintf(stderr, "[gpu]   trackTextures -> %zu\n", texs.size());
+      if (!texs.empty()) {
+        auto &t = texs[0];
+        // Dump the texture as a LINEAR interpretation (to inspect tiling).
+        auto *px = reinterpret_cast<const uint8_t *>(t.base);
+        FILE *f = std::fopen("/tmp/tex_raw.bin", "wb");
+        if (f) {
+          std::fwrite(px, 1, (size_t)t.width * t.height * 4, f);
+          std::fclose(f);
+          std::fprintf(stderr, "[gpu]   dumped /tmp/tex_raw.bin (%ux%u rgba)\n",
+                       t.width, t.height);
+        }
+      }
+    }
+  }
   if (vk::available()) {
     const uint32_t *vud = &g_regs[mmSPI_SHADER_USER_DATA_VS_0];
     vk::DrawInfo d;
