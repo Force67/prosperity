@@ -97,6 +97,18 @@ int PS4ABI sys_sysctl(int *name, uint32_t namelen, void *oldp, size_t *oldlenp,
     return 0;
   }
 
+  // kern.cpumode (kern.14.42): the CPU mode, base PS4 (6/7-core "normal") vs
+  // Neo/Pro. Isaac is a base-PS4 title; report mode 0 (normal). Both the direct
+  // mib query and the sysctlbyname("kern.cpumode") name2oid path hit this; left
+  // unhandled the game spins re-resolving it (with an uninitialised oid buffer).
+  else if (name[0] == 1 && name[1] == 14 && name[2] == 42 && namelen == 3) {
+    if (oldp && oldlenp && *oldlenp >= sizeof(uint32_t)) {
+      *reinterpret_cast<uint32_t *>(oldp) = 0;  // normal (non-Neo) mode
+      *oldlenp = sizeof(uint32_t);
+    }
+    return 0;
+  }
+
   // kern.arnd (CTL_KERN.37): random bytes used by the C++ runtime / libc for
   // cookies and ASLR. Zero is a benign, deterministic value; a non-zero fill
   // (0x04) was being consumed as garbage allocation sizes downstream.
@@ -185,6 +197,13 @@ int PS4ABI sys_sysctl(int *name, uint32_t namelen, void *oldp, size_t *oldlenp,
       static_cast<uint32_t *>(oldp)[0] = 0x1337;
       static_cast<uint32_t *>(oldp)[1] = 6;
       *oldlenp = 8;
+      return 0;
+    } else if (name == "kern.cpumode") {
+      // resolve to the real kern.14.42 mib handled above.
+      static_cast<uint32_t *>(oldp)[0] = 1;
+      static_cast<uint32_t *>(oldp)[1] = 14;
+      static_cast<uint32_t *>(oldp)[2] = 42;
+      *oldlenp = 12;
       return 0;
     }
 
