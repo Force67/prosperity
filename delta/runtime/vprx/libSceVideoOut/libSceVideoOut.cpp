@@ -190,6 +190,14 @@ void startFlipPump() {
       std::this_thread::sleep_for(std::chrono::microseconds(16667));
       presentScanout();
       uint64_t c = g_port.flipCount.fetch_add(1) + 1;
+      // Mark GPU/flip completion in the buffer labels. Gnm's prepareFlip packet
+      // tells the GPU to write the buffer's label (sceVideoOutGetBufferLabelAddress
+      // + bufferIndex*8) when the flip completes; the game busy-polls that label
+      // to recycle buffers. With no real GPU we write it ourselves: a monotonic
+      // value (the flip count) satisfies the ">= submitted id" poll so the game
+      // stops waiting and submits the next frame.
+      for (int i = 0; i < 16; i++)
+        g_port.labels[i] = c;
       // post the flip-complete event to whichever equeue holds a flip knote.
       triggerAllEqueues(kEventFlip, kFilterFlip, static_cast<int64_t>(c));
     }

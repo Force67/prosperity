@@ -94,6 +94,22 @@ int PS4ABI sys_evf_create(const char *name, uint32_t attr,
   return ef->handle();
 }
 
+// Some system-service event flags gate the game on state the ShellCore would
+// publish (app focus granted, power normal, system running). With no ShellCore
+// the flag stays 0 and the game's "wait for focus/ready" (EVF OR-wait for any
+// bit) blocks forever. Seed those flags as "focused/ready" so the game proceeds.
+static uint64_t systemFlagInit(const char *name) {
+  if (!name)
+    return 0;
+  base::StringRef n(name);
+  if (n.find("AppFocus", 0, 8) != base::StringRef::npos ||
+      n.find("CtrlFocus", 0, 9) != base::StringRef::npos ||
+      n.find("PowerControl", 0, 12) != base::StringRef::npos ||
+      n.find("SystemStateMgr", 0, 14) != base::StringRef::npos)
+    return 0x1;  // bit0 = focused / powered / running
+  return 0;
+}
+
 int PS4ABI sys_evf_open(const char *name) {
   {
     std::lock_guard<std::mutex> lk(g_efRegM);
@@ -104,7 +120,7 @@ int PS4ABI sys_evf_open(const char *name) {
   // Auto-create unknown named flags: on real hw a system service creates them;
   // here both producer and consumer just open by name, so creating on first
   // open gives them a shared flag and the sync actually works.
-  auto *ef = new eventFlag(proc::getActive(), name, 0);
+  auto *ef = new eventFlag(proc::getActive(), name, systemFlagInit(name));
   std::printf("[evf] open '%s' (auto-created) -> id=%u\n", name ? name : "",
               ef->handle());
   return ef->handle();
