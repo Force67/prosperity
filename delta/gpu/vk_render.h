@@ -15,17 +15,16 @@
 
 namespace gpu::vk {
 
-// Per-draw inputs extracted from the Liverpool register state by the command
-// processor. Addresses are guest GPU addresses (identity-mapped, host-readable).
+// Per-draw inputs extracted by the command processor (resource-tracked from the
+// shader + register state). Addresses are guest (identity-mapped, host-readable).
 struct DrawInfo {
-  uint64_t vsAddr = 0;   // VS GCN bytecode
-  uint64_t psAddr = 0;   // PS GCN bytecode
-  uint32_t primType = 0; // VGT_PRIMITIVE_TYPE
+  const void *vertexData = nullptr;  // base of attribute-0 (position) buffer
+  uint32_t vertexCount = 0;
+  uint32_t vertexStride = 0;   // bytes per vertex in the source buffer
+  uint32_t posOffset = 0;      // byte offset of the float2 position
+  uint32_t primType = 0;       // VGT_PRIMITIVE_TYPE
   uint32_t indexCount = 0;
-  uint32_t indexType = 0;     // 0=16-bit, 1=32-bit
-  uint64_t indexAddr = 0;     // index buffer (0 => auto)
-  const uint32_t *vsUserData = nullptr;  // 16 SGPRs
-  const uint32_t *psUserData = nullptr;
+  float mvp[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
 };
 
 // Bring up the headless Vulkan device. Returns false if Vulkan is unavailable

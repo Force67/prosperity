@@ -75,19 +75,36 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
   uint64_t vsA = g_regs.shaderAddr(mmSPI_SHADER_PGM_LO_VS);
   uint64_t psA = g_regs.shaderAddr(mmSPI_SHADER_PGM_LO_PS);
   if (vk::available()) {
+    const uint32_t *vud = &g_regs[mmSPI_SHADER_USER_DATA_VS_0];
+    vk::DrawInfo d;
+    d.primType = g_regs[mmVGT_PRIMITIVE_TYPE];
+    d.indexCount = (count >= 1) ? body[0] : 0;
+
+    // MVP matrix: the VS sgpr[4..7] V# points at the constant buffer whose first
+    // 16 floats are the transform (s_buffer_load_dwordx16 in the VS).
+    uint64_t cbuf = (static_cast<uint64_t>(vud[5] & 0xFFFF) << 32) | vud[4];
+    if (cbuf >= 0x1000000000ull && cbuf < 0x20000000000ull)
+      std::memcpy(d.mvp, reinterpret_cast<const void *>(cbuf), 64);
+
+    // Vertex buffer: resource-track the fetch shader (VS sgpr[0..1] ptr).
+    uint64_t fetch = (static_cast<uint64_t>(vud[1] & 0xFFFF) << 32) | vud[0];
+    if (fetch >= 0x1000000000ull && fetch < 0x20000000000ull) {
+      auto vbs = gcn::trackVertexBuffers(reinterpret_cast<const uint32_t *>(fetch),
+                                         64, vud);
+      if (!vbs.empty()) {
+        d.vertexData = reinterpret_cast<const void *>(vbs[0].base);
+        d.vertexCount = vbs[0].numRecords;
+        d.vertexStride = vbs[0].stride;
+        d.posOffset = 0;
+      }
+    }
     if (!g_frameActive) {
       vk::beginFrame(g_regs.cbColorBase(0), fbWidth(), fbHeight(), 0,
                      g_regs[mmCB_COLOR0_INFO]);
       g_frameActive = true;
     }
-    vk::DrawInfo d;
-    d.vsAddr = vsA;
-    d.psAddr = psA;
-    d.primType = g_regs[mmVGT_PRIMITIVE_TYPE];
-    d.indexCount = (count >= 1) ? body[0] : 0;
-    d.vsUserData = &g_regs[mmSPI_SHADER_USER_DATA_VS_0];
-    d.psUserData = &g_regs[mmSPI_SHADER_USER_DATA_PS_0];
-    vk::draw(d);
+    if (d.vertexData)
+      vk::draw(d);
   }
   if (!g_trace)
     return;
