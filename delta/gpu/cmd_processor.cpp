@@ -11,6 +11,7 @@
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <mutex>
 
 namespace gpu {
@@ -70,6 +71,38 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
                op, prim, indices, (unsigned long)cb, cbInfo, cbAttrib,
                scTL & 0xFFFF, scTL >> 16, scBR & 0xFFFF, scBR >> 16,
                (unsigned long)vs, (unsigned long)ps);
+
+  // One-time: locate the embedded "OrbShdr" BinaryInfo in the VS/PS GCN code to
+  // confirm the recompiler can find shader length+hash. Layout: if code[0] ==
+  // 0xBEEB03FF the info is at code + (code[1]+1)*2 dwords; else scan for the
+  // 7-byte signature {'O','r','b','S','h','d','r'}.
+  static bool shaderProbed = false;
+  if (!shaderProbed && vs && ps) {
+    shaderProbed = true;
+    auto probe = [](const char *tag, uint64_t addr) {
+      auto *code = reinterpret_cast<const uint32_t *>(addr);
+      const uint8_t *info = nullptr;
+      if (code[0] == 0xBEEB03FFu)
+        info = reinterpret_cast<const uint8_t *>(code + (code[1] + 1) * 2);
+      else {
+        auto *b = reinterpret_cast<const uint8_t *>(code);
+        for (int k = 0; k < 0x4000; k++)
+          if (std::memcmp(b + k, "OrbShdr", 7) == 0) { info = b + k; break; }
+      }
+      if (info) {
+        uint32_t lenField; std::memcpy(&lenField, info + 8, 4);
+        uint64_t hash; std::memcpy(&hash, info + 0xC, 8);  // approx offsets
+        std::fprintf(stderr, "[gpu]   %s shader @%#lx OrbShdr len=%u hash=%#lx\n",
+                     tag, (unsigned long)addr, lenField & 0xFFFFFF,
+                     (unsigned long)hash);
+      } else {
+        std::fprintf(stderr, "[gpu]   %s shader @%#lx: no OrbShdr (code0=%#x)\n",
+                     tag, (unsigned long)addr, code[0]);
+      }
+    };
+    probe("VS", vs);
+    probe("PS", ps);
+  }
 }
 
 }  // namespace
