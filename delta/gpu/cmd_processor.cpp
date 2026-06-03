@@ -130,6 +130,9 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
         d.vertexCount = vbs[0].numRecords;
         d.vertexStride = vbs[0].stride;
         d.posOffset = 0;
+        // Isaac's vertex format: pos.xy@0, color.rgb@0x10, uv.xy@0x1c.
+        if (d.vertexStride >= 0x1c)
+          d.colorOffset = 0x10;
       }
     }
 

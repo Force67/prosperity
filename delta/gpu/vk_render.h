@@ -31,6 +31,7 @@ struct DrawInfo {
   const void *uvData = nullptr;
   uint32_t uvStride = 0;
   uint32_t uvOffset = 0;       // byte offset of the float2 uv within the vertex
+  uint32_t colorOffset = 0xFFFFFFFFu;  // byte offset of float3 color; ~0 = white
   uint64_t texBase = 0;
   uint32_t texW = 0, texH = 0;
 };

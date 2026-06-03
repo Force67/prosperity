@@ -227,15 +227,19 @@ bool createPipeline() {
   stages[1].module = fs;
   stages[1].pName = "main";
 
-  // Interleaved repacked vertex: float2 position + float2 uv, stride 16 (shared
-  // with the textured pipeline; the colored one ignores uv).
-  VkVertexInputBindingDescription bind{0, 16, VK_VERTEX_INPUT_RATE_VERTEX};
-  VkVertexInputAttributeDescription attr{0, 0, VK_FORMAT_R32G32_SFLOAT, 0};
+  // Interleaved repacked vertex: pos.xy@0, color.rgba@8, uv.xy@24, stride 32
+  // (shared layout with the textured pipeline).
+  VkVertexInputBindingDescription bind{0, 32, VK_VERTEX_INPUT_RATE_VERTEX};
+  VkVertexInputAttributeDescription attrs[3] = {
+      {0, 0, VK_FORMAT_R32G32_SFLOAT, 0},
+      {1, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 8},
+      {2, 0, VK_FORMAT_R32G32_SFLOAT, 24},
+  };
   VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
   vi.vertexBindingDescriptionCount = 1;
   vi.pVertexBindingDescriptions = &bind;
-  vi.vertexAttributeDescriptionCount = 1;
-  vi.pVertexAttributeDescriptions = &attr;
+  vi.vertexAttributeDescriptionCount = 3;
+  vi.pVertexAttributeDescriptions = attrs;
 
   VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
   ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
@@ -340,15 +344,16 @@ bool createTexPipeline() {
   stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
   stages[1].module = fs; stages[1].pName = "main";
 
-  VkVertexInputBindingDescription bind{0, 16, VK_VERTEX_INPUT_RATE_VERTEX};
-  VkVertexInputAttributeDescription attrs[2] = {
-      {0, 0, VK_FORMAT_R32G32_SFLOAT, 0},  // pos
-      {1, 0, VK_FORMAT_R32G32_SFLOAT, 8},  // uv
+  VkVertexInputBindingDescription bind{0, 32, VK_VERTEX_INPUT_RATE_VERTEX};
+  VkVertexInputAttributeDescription attrs[3] = {
+      {0, 0, VK_FORMAT_R32G32_SFLOAT, 0},        // pos
+      {1, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 8},  // color
+      {2, 0, VK_FORMAT_R32G32_SFLOAT, 24},       // uv
   };
   VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
   vi.vertexBindingDescriptionCount = 1;
   vi.pVertexBindingDescriptions = &bind;
-  vi.vertexAttributeDescriptionCount = 2;
+  vi.vertexAttributeDescriptionCount = 3;
   vi.pVertexAttributeDescriptions = attrs;
 
   VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
@@ -605,24 +610,32 @@ void draw(const DrawInfo &d) {
     return;
   uint32_t nv = d.vertexCount;
   if (nv > 4096) return;  // sane cap (Isaac quads are tiny)
-  VkDeviceSize need = (VkDeviceSize)nv * 16;  // interleaved pos+uv (vec4)
+  VkDeviceSize need = (VkDeviceSize)nv * 32;  // pos.xy + color.rgba + uv.xy
   if (g.vbOffset + need > kVbRing)
     return;  // ring full this frame
-  // Repack pos (+uv) interleaved into the vertex ring.
-  auto *psrc = static_cast<const uint8_t *>(d.vertexData) + d.posOffset;
-  auto *usrc = static_cast<const uint8_t *>(d.uvData) + d.uvOffset;
+  // Repack pos / color / uv interleaved into the vertex ring (stride 32).
+  auto *base = static_cast<const uint8_t *>(d.vertexData);
   auto *dst = reinterpret_cast<float *>(g.vbMap + g.vbOffset);
   for (uint32_t v = 0; v < nv; v++) {
-    auto *p = reinterpret_cast<const float *>(psrc + (size_t)v * d.vertexStride);
-    dst[v * 4 + 0] = p[0];
-    dst[v * 4 + 1] = p[1];
-    if (usrc && d.uvStride) {
-      auto *u = reinterpret_cast<const float *>(usrc + (size_t)v * d.uvStride);
-      dst[v * 4 + 2] = u[0];
-      dst[v * 4 + 3] = u[1];
+    const uint8_t *vert = base + (size_t)v * d.vertexStride;
+    auto *p = reinterpret_cast<const float *>(vert + d.posOffset);
+    dst[v * 8 + 0] = p[0];
+    dst[v * 8 + 1] = p[1];
+    if (d.colorOffset != 0xFFFFFFFFu) {
+      auto *c = reinterpret_cast<const float *>(vert + d.colorOffset);
+      dst[v * 8 + 2] = c[0];
+      dst[v * 8 + 3] = c[1];
+      dst[v * 8 + 4] = c[2];
+      dst[v * 8 + 5] = 1.0f;
     } else {
-      dst[v * 4 + 2] = 0.0f;
-      dst[v * 4 + 3] = 0.0f;
+      dst[v * 8 + 2] = dst[v * 8 + 3] = dst[v * 8 + 4] = dst[v * 8 + 5] = 1.0f;
+    }
+    if (d.uvData && d.uvStride) {
+      auto *u = reinterpret_cast<const float *>(vert + d.uvOffset);
+      dst[v * 8 + 6] = u[0];
+      dst[v * 8 + 7] = u[1];
+    } else {
+      dst[v * 8 + 6] = dst[v * 8 + 7] = 0.0f;
     }
   }
 
