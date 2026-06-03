@@ -81,7 +81,7 @@ public:
 void exitGuestThread();
 
 // Return a guest-callable address that invokes the host (PS4ABI / sysv) function
-// `hostFn` with the guest's integer arguments (up to 8; args 7-8 read from the
+// `hostFn` with the guest's integer arguments (up to 14; args 7+ read from the
 // guest stack). On the native x86 backend this is just `hostFn`; the guest
 // calls it directly. On FEX it returns a small guest x86 trampoline that bounces
 // through the kHostThunkSyscallBase magic syscall. Used by the loader to bind

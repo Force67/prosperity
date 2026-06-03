@@ -128,18 +128,23 @@ public:
       }
       uint64_t ret = 0;
       if (fn) {
+        // Reconstruct SysV args 7..14 from the guest stack just above the return
+        // address (the trampoline pushed nothing). Passing extra args a callee
+        // ignores is harmless; this covers up to 14-arg Sce exports such as
+        // sceGnmSubmitAndFlipCommandBuffers (9 args).
         const uint64_t rsp = Frame->State.gregs[FEXCore::X86State::REG_RSP];
-        uint64_t a7 = 0, a8 = 0;
-        if (rsp) {
-          a7 = *reinterpret_cast<uint64_t *>(rsp + 8);
-          a8 = *reinterpret_cast<uint64_t *>(rsp + 16);
-        }
-        using Fn8 = uint64_t(PS4ABI *)(uint64_t, uint64_t, uint64_t, uint64_t,
-                                       uint64_t, uint64_t, uint64_t, uint64_t);
-        ret = reinterpret_cast<Fn8>(fn)(Args->Argument[1], Args->Argument[2],
-                                        Args->Argument[3], Args->Argument[4],
-                                        Args->Argument[5], Args->Argument[6], a7,
-                                        a8);
+        uint64_t s[8] = {};
+        if (rsp)
+          for (int i = 0; i < 8; i++)
+            s[i] = reinterpret_cast<uint64_t *>(rsp)[i + 1];
+        using Fn = uint64_t(PS4ABI *)(uint64_t, uint64_t, uint64_t, uint64_t,
+                                      uint64_t, uint64_t, uint64_t, uint64_t,
+                                      uint64_t, uint64_t, uint64_t, uint64_t,
+                                      uint64_t, uint64_t);
+        ret = reinterpret_cast<Fn>(fn)(
+            Args->Argument[1], Args->Argument[2], Args->Argument[3],
+            Args->Argument[4], Args->Argument[5], Args->Argument[6], s[0], s[1],
+            s[2], s[3], s[4], s[5], s[6], s[7]);
       }
       if (g_ctxPtr) {
         uint32_t ef = g_ctxPtr->ReconstructCompactedEFLAGS(Frame->Thread, false, nullptr, 0);
@@ -310,8 +315,27 @@ public:
       LOG_INFO("fex: guest thread exited via thr_exit");
     }
     t_exitJmpValid = false;
-    LOG_INFO("fex: guest thread returned rip={:#x}",
-             (unsigned long)h->thread->CurrentFrame->State.rip);
+    auto &endS = h->thread->CurrentFrame->State;
+    LOG_INFO("fex: guest thread returned rip={:#x}", (unsigned long)endS.rip);
+    // Diagnostic: a guest thread that "returns" to a tiny rip jumped through a
+    // bad/unset function pointer (e.g. a GPU thread with no real GPU backend).
+    // Dump its registers + a module-resolved stack scan to pin the culprit.
+    if (endS.rip < 0x100000ull) {
+      std::fprintf(stderr, "=== BOGUS THREAD RETURN rip=%#lx ===\n",
+                   (unsigned long)endS.rip);
+      const char *rn[] = {"rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "rsp",
+                          "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15"};
+      for (int i = 0; i < 16; i++)
+        std::fprintf(stderr, "  %s=%#lx\n", rn[i], (unsigned long)endS.gregs[i]);
+      uint64_t rsp = endS.gregs[FEXCore::X86State::REG_RSP];
+      if (rsp) {
+        for (int i = 0; i < 64; i++) {
+          uint64_t v = reinterpret_cast<uint64_t *>(rsp)[i];
+          if (v >= 0x200000000000ull && v < 0x206000000000ull)
+            std::fprintf(stderr, "  stk+%#x = %#lx\n", i * 8, (unsigned long)v);
+        }
+      }
+    }
     FEXCore::Allocator::UninstallTLSData(h->thread);
     CTX->DestroyThread(h->thread);
     t_curThread = nullptr;

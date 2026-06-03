@@ -18,7 +18,9 @@ static base::Vector<const modInfo *> vprxTable;
 // reference them here so the linker keeps those archive members (otherwise the
 // MODULE_INIT static initializers never run and the HLE tables stay empty).
 extern "C" int vprx_anchor_libSceVideoOut;
-static volatile int *const vprx_anchors[] = {&vprx_anchor_libSceVideoOut};
+extern "C" int vprx_anchor_libSceGnmDriver;
+static volatile int *const vprx_anchors[] = {&vprx_anchor_libSceVideoOut,
+                                             &vprx_anchor_libSceGnmDriver};
 
 void vprx_init() {
   // Touch the anchors so the references aren't optimized away.

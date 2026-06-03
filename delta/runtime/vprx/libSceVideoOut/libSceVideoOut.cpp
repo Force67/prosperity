@@ -438,4 +438,14 @@ int PS4ABI sceVideoOutModeSetAny_(int handle, void *arg) {
   return 0;
 }
 
+// Bridge for the HLE Gnm driver: the game flips via sceGnmSubmitAndFlip-
+// CommandBuffers (a GPU prepareFlip packet), so record the target scanout buffer
+// here; the flip pump then presents it and posts the flip-complete event.
+void prosperity_videoout_set_flip(int bufferIndex, int64_t flipArg) {
+  std::lock_guard<std::mutex> lk(g_mtx);
+  if (bufferIndex >= 0 && bufferIndex < kMaxBuffers)
+    g_port.currentBuffer = bufferIndex;
+  g_port.lastFlipArg = flipArg;
+}
+
 }  // extern "C"
