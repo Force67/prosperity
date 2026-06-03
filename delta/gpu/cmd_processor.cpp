@@ -7,6 +7,7 @@
 #include "cmd_processor.h"
 #include "pm4.h"
 #include "liverpool.h"
+#include "vk_render.h"
 
 #include <atomic>
 #include <cstdio>
@@ -22,6 +23,21 @@ Regs g_regs;  // persistent register state across submits (Gnm relies on this)
 const bool g_trace = std::getenv("DELTA_GPU_TRACE") != nullptr;
 std::atomic<uint64_t> g_totalSubmits{0};
 std::atomic<uint64_t> g_totalDraws{0};
+bool g_vkTried = false;
+bool g_frameActive = false;
+
+// Current render-target / framebuffer geometry, derived from the screen scissor
+// (CB regs don't carry an explicit width/height).
+uint32_t fbWidth() {
+  uint32_t br = g_regs[mmPA_SC_SCREEN_SCISSOR_BR];
+  uint32_t w = br & 0xFFFF;
+  return w ? w : 1920;
+}
+uint32_t fbHeight() {
+  uint32_t br = g_regs[mmPA_SC_SCREEN_SCISSOR_BR];
+  uint32_t h = br >> 16;
+  return h ? h : 1080;
+}
 
 // Write a run of register values from a SET_*_REG packet body into the file.
 void setRegs(uint32_t base, const uint32_t *body, uint32_t count) {
@@ -51,9 +67,26 @@ void dumpHist() {
       std::fprintf(stderr, "[gpu]   op %#04x x%u\n", i, g_opHist[i]);
 }
 
-// Issue the current register state as a draw. For now: log what we'd render so
-// the decode path is verifiable; the Vulkan path attaches here.
+// Issue the current register state as a draw: begin the frame lazily on the
+// first draw, then hand the draw to the Vulkan renderer.
 void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
+  uint64_t vsA = g_regs.shaderAddr(mmSPI_SHADER_PGM_LO_VS);
+  uint64_t psA = g_regs.shaderAddr(mmSPI_SHADER_PGM_LO_PS);
+  if (vk::available()) {
+    if (!g_frameActive) {
+      vk::beginFrame(g_regs.cbColorBase(0), fbWidth(), fbHeight(), 0,
+                     g_regs[mmCB_COLOR0_INFO]);
+      g_frameActive = true;
+    }
+    vk::DrawInfo d;
+    d.vsAddr = vsA;
+    d.psAddr = psA;
+    d.primType = g_regs[mmVGT_PRIMITIVE_TYPE];
+    d.indexCount = (count >= 1) ? body[0] : 0;
+    d.vsUserData = &g_regs[mmSPI_SHADER_USER_DATA_VS_0];
+    d.psUserData = &g_regs[mmSPI_SHADER_USER_DATA_PS_0];
+    vk::draw(d);
+  }
   if (!g_trace)
     return;
   uint64_t cb = g_regs.cbColorBase(0);
@@ -107,10 +140,23 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
 
 }  // namespace
 
+// Called by the Gnm HLE on submit-and-flip: finish the frame and present.
+void endFrame() {
+  std::lock_guard<std::mutex> lk(g_mtx);
+  if (g_frameActive && vk::available()) {
+    vk::endFrame();
+    g_frameActive = false;
+  }
+}
+
 void submitDcb(const void *dcb, uint32_t sizeBytes) {
   if (!dcb || sizeBytes < 4)
     return;
   std::lock_guard<std::mutex> lk(g_mtx);
+  if (!g_vkTried) {
+    g_vkTried = true;
+    vk::init();
+  }
   auto *p = static_cast<const uint32_t *>(dcb);
   uint32_t words = sizeBytes / 4;
   uint64_t sn = g_totalSubmits.fetch_add(1) + 1;

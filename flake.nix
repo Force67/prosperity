@@ -65,11 +65,20 @@
             vulkan-headers
             vulkan-loader
             vulkan-validation-layers
+            mesa            # lavapipe: software Vulkan for headless testing
             sdl3
           ];
 
           shellHook = ''
             echo "ps4delta dev shell, run:  cmake -G Ninja -B build && ninja -C build"
+            # Default to nix lavapipe (software Vulkan) so the GPU backend works
+            # headless / without a GPU driver. Override VK_ICD_FILENAMES to use a
+            # real GPU + display.
+            if [ -z "$VK_ICD_FILENAMES" ]; then
+              for f in ${pkgs.mesa}/share/vulkan/icd.d/lvp_icd.*.json; do
+                [ -e "$f" ] && export VK_ICD_FILENAMES="$f" && break
+              done
+            fi
           '';
         };
       });

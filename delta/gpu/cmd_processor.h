@@ -17,4 +17,7 @@ namespace gpu {
 // state and issuing draws. Safe to call from the guest's GPU submit thread.
 void submitDcb(const void *dcb, uint32_t sizeBytes);
 
+// End the current frame and present it (called by the Gnm submit-and-flip HLE).
+void endFrame();
+
 }  // namespace gpu

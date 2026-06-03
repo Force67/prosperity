@@ -131,6 +131,7 @@ int PS4ABI sceGnmSubmitAndFlipCommandBuffers(uint32_t count, void **dcbGpuAddrs,
   // VideoOut flip pump presents it and posts the flip-complete event.
   dumpPm4(dcbGpuAddrs, dcbSizes, count);
   processDcbs(dcbGpuAddrs, dcbSizes, count);
+  gpu::endFrame();  // finish + present the rendered frame
   prosperity_videoout_set_flip(static_cast<int>(displayBufferIndex), flipArg);
   return 0;
 }
