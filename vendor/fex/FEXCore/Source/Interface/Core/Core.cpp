@@ -66,6 +66,9 @@ $end_info$
 #include <shared_mutex>
 #include <signal.h>
 #include <stdio.h>
+#include <cstdlib>
+#include <unistd.h>
+#include <sys/syscall.h>
 #include <string_view>
 #include <sys/stat.h>
 #include <type_traits>
@@ -777,6 +780,16 @@ ContextImpl::CompileCodeResult ContextImpl::CompileCode(FEXCore::Core::InternalT
 
 uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_t GuestRIP, uint64_t MaxInst) {
   auto Thread = Frame->Thread;
+  // DELTA boot-diag block tracer: log the guest RIP of every newly-compiled
+  // block (fires once per block — first execution). Enable with DELTA_BLOCKTRACE=1
+  // and post-filter to a module's range to get the "what code was reached" map.
+  {
+    static const bool DeltaBlockTrace = std::getenv("DELTA_BLOCKTRACE") != nullptr;
+    if (DeltaBlockTrace) {
+      std::fprintf(stderr, "[blk] t%ld %#lx\n", (long)::syscall(SYS_gettid),
+                   (unsigned long)GuestRIP);
+    }
+  }
   FEXCORE_PROFILE_SCOPED("CompileBlock");
   FEXCORE_PROFILE_ACCUMULATION(Thread, AccumulatedJITTime);
 
