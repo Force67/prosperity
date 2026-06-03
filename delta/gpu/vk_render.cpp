@@ -653,6 +653,27 @@ void draw(const DrawInfo &d) {
                  maxx, maxy, d.texBase ? 1 : 0, dst[2], dst[3], dst[4]);
   }
 
+  // Experiment: skip late fullscreen-covering draws (the post/composite passes
+  // that, without multi-RT, cover the scene). Reveals the sprite scene.
+  static const bool noComposite = std::getenv("DELTA_GPU_NOCOMPOSITE") != nullptr;
+  if (noComposite && g.frameDraws >= 4) {
+    const float *m = d.mvp;
+    float nx0 = 1e9f, ny0 = 1e9f, nx1 = -1e9f, ny1 = -1e9f;
+    for (uint32_t v = 0; v < nv; v++) {
+      float x = dst[v * 8], y = dst[v * 8 + 1];
+      float cw = m[3] * x + m[7] * y + m[15];
+      if (cw == 0) cw = 1;
+      float ndx = (m[0] * x + m[4] * y + m[12]) / cw;
+      float ndy = (m[1] * x + m[5] * y + m[13]) / cw;
+      nx0 = ndx < nx0 ? ndx : nx0; nx1 = ndx > nx1 ? ndx : nx1;
+      ny0 = ndy < ny0 ? ndy : ny0; ny1 = ndy > ny1 ? ndy : ny1;
+    }
+    if ((nx1 - nx0) >= 1.8f && (ny1 - ny0) >= 1.8f) {  // covers ~all of NDC
+      g.frameDraws++;
+      return;
+    }
+  }
+
   // Textured draw: bind the texture's descriptor set + the textured pipeline.
   VkDescriptorSet texSet = VK_NULL_HANDLE;
   if (d.texBase && g.texPipeline)
