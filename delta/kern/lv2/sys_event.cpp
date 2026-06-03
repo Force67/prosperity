@@ -141,6 +141,33 @@ int equeue::kevent(const kevent_t *changes, int nchanges, kevent_t *out,
   return collect();
 }
 
+void equeue::addEvent(uint64_t ident, int16_t filter, void *udata) {
+  std::lock_guard<std::mutex> lk(m);
+  kevent_t ev{};
+  ev.ident = ident;
+  ev.filter = filter;
+  ev.flags = kEV_CLEAR;
+  ev.udata = udata;
+  if (auto *k = find(ident, filter)) {
+    k->ev = ev;
+    k->active = false;
+  } else {
+    notes.push_back({ev, false});
+  }
+  if (filter == kEVFILT_DISPLAY)
+    startVblankPump();
+}
+
+bool equeue::removeEvent(uint64_t ident, int16_t filter) {
+  std::lock_guard<std::mutex> lk(m);
+  for (size_t j = 0; j < notes.size(); j++)
+    if (notes[j].ev.ident == ident && notes[j].ev.filter == filter) {
+      notes.erase(notes.begin() + j);
+      return true;
+    }
+  return false;
+}
+
 void equeue::trigger(int64_t ident, int16_t filter, int64_t data) {
   std::lock_guard<std::mutex> lk(m);
   bool any = false;

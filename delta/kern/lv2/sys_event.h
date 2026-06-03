@@ -63,6 +63,13 @@ public:
   // matches any ident. Called by the vblank pump / dce on flip.
   void trigger(int64_t ident, int16_t filter, int64_t data);
 
+  // Register a knote directly (no kevent syscall). Used by the HLE VideoOut
+  // flip/vblank-event APIs, which add the equeue entry on the game's behalf.
+  void addEvent(uint64_t ident, int16_t filter, void *udata);
+
+  // Remove a knote by (ident,filter). Returns true if one was removed.
+  bool removeEvent(uint64_t ident, int16_t filter);
+
 private:
   struct knote {
     kevent_t ev;

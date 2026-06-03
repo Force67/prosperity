@@ -14,7 +14,20 @@
 namespace runtime {
 static base::Vector<const modInfo *> vprxTable;
 
-void vprx_init() { utl::init_function::init(); }
+// HLE-module anchors. Each vprx HLE module's _api.cpp defines one of these; we
+// reference them here so the linker keeps those archive members (otherwise the
+// MODULE_INIT static initializers never run and the HLE tables stay empty).
+extern "C" int vprx_anchor_libSceVideoOut;
+static volatile int *const vprx_anchors[] = {&vprx_anchor_libSceVideoOut};
+
+void vprx_init() {
+  // Touch the anchors so the references aren't optimized away.
+  int sum = 0;
+  for (auto *a : vprx_anchors)
+    sum += *a;
+  (void)sum;
+  utl::init_function::init();
+}
 
 void vprx_reg(const modInfo *info) { vprxTable.push_back(info); }
 
