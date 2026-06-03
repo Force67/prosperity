@@ -76,6 +76,7 @@ struct State {
   VkSampler sampler = VK_NULL_HANDLE;
 
   uint32_t frameDraws = 0;
+  int frameNum = 0;
   bool recording = false;
 } g;
 
@@ -574,6 +575,7 @@ void beginFrame(uint64_t, uint32_t width, uint32_t height, uint32_t, uint32_t) {
   if (!createPipeline()) return;
   createTexPipeline();  // best-effort; colored path still works without it
   g.frameDraws = 0;
+  g.frameNum++;
   g.vbOffset = 0;
 
   vkResetCommandBuffer(g.cmd, 0);
@@ -637,6 +639,18 @@ void draw(const DrawInfo &d) {
     } else {
       dst[v * 8 + 6] = dst[v * 8 + 7] = 0.0f;
     }
+  }
+
+  if (g_dump && g.frameNum == 450) {
+    float minx = 1e9f, miny = 1e9f, maxx = -1e9f, maxy = -1e9f;
+    for (uint32_t v = 0; v < nv; v++) {
+      float x = dst[v * 8], y = dst[v * 8 + 1];
+      minx = x < minx ? x : minx; maxx = x > maxx ? x : maxx;
+      miny = y < miny ? y : miny; maxy = y > maxy ? y : maxy;
+    }
+    std::fprintf(stderr, "[gpuvk] f450 draw#%u nv=%u pos[%.0f,%.0f..%.0f,%.0f] "
+                 "tex=%d col=(%.2f,%.2f,%.2f)\n", g.frameDraws, nv, minx, miny,
+                 maxx, maxy, d.texBase ? 1 : 0, dst[2], dst[3], dst[4]);
   }
 
   // Textured draw: bind the texture's descriptor set + the textured pipeline.
