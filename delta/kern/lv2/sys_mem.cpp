@@ -31,7 +31,7 @@ using alt = utl::allocationType;
 // hands mmap(NULL) addresses far above that ceiling, so when we have to pick an
 // address ourselves, carve it from a dedicated low arena instead. Bump-only and
 // MAP_FIXED_NOREPLACE so we never clobber an existing mapping.
-static uint8_t *allocLowGuest(size_t size) {
+uint8_t *allocLowGuest(size_t size) {
   constexpr uintptr_t kFloor = 0x1000000000ull;   // 64 GiB
   constexpr uintptr_t kCeil = 0x10000000000ull;   // 2^40, the PS4 user ceiling
   static std::atomic<uintptr_t> next{kFloor};

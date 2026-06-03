@@ -20,6 +20,11 @@ enum mFlags : uint32_t {
   anon = 0x1000,
 };
 
+// Reserve `size` bytes of zero-filled guest memory below the 2^40 user ceiling
+// (bump-allocated, never freed). Used for kernel-side guest allocations that
+// must be guest-dereferenceable (identity-mapped) and pass PS4 pointer checks.
+uint8_t *allocLowGuest(size_t size);
+
 uint8_t *PS4ABI sys_mmap(void *addr, size_t size, uint32_t prot, uint32_t flags,
                          uint32_t fd, size_t offset);
 int PS4ABI sys_mname(uint8_t *, size_t len, const char *name, void *);

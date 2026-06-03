@@ -17,7 +17,10 @@
 #include "vfs.h"
 #include "cpu/cpu_backend.h"
 #include "lv2/sys_dynlib.h"
+#include "lv2/sys_mem.h"
 #include "runtime/vprx/vprx.h"
+
+#include <cstring>
 
 namespace krnl {
 static proc *g_activeProc{nullptr};
@@ -84,6 +87,43 @@ modulePtr proc::getModule(uint32_t handle) {
 }
 
 /*does not expect an extension*/
+// Isaac-specific surface setup. The game's global surface-name registry, a
+// fixed-bucket hash map<string,surface> at rebirth+0x687a90, is constructed
+// with a NULL bucket-array pointer (its ctor at +0x1e9bcd just zeroes it) and is
+// meant to get its storage lazily when the renderer registers the base surfaces
+// ("Floor Surface"/"Wall Surface"). That renderer path is gated on the Gnm->
+// Vulkan graphics device, which isn't brought up yet, so the bucket array is
+// never allocated and every registry find/insert dereferences null + idx*0x20
+// (rebirth+0x1e8c8b on a worker insert, +0x1e7e09 on a main-thread find). Until
+// the real gfx/renderer init exists, hand the registry valid empty storage up
+// front: allocate the N=0x20 * 0x20-byte zeroed bucket array, point the registry
+// at it, and NOP the ctor's null-write so it can't clobber the pointer when it
+// later runs. The map then works as a valid empty registry independent of order
+// or the missing gfx init. (Verified offsets via the decrypted rebirth.elf.)
+static void bringUpRebirthSurfaceRegistry(smodule &m) {
+  uint8_t *base = m.getInfo().base;
+  constexpr uint32_t kRegistryOff = 0x687a90; // bucket-array base pointer
+  constexpr uint32_t kCtorZeroOff = 0x1e9bcd; // `mov qword [registry], 0` (11 bytes)
+  constexpr size_t kBucketBytes = 0x20 * 0x20; // N buckets * stride
+
+  uint8_t *buckets = allocLowGuest(kBucketBytes);
+  if (!buckets) {
+    LOG_ERROR("rebirth surface-registry: bucket alloc failed");
+    return;
+  }
+  *reinterpret_cast<uint64_t *>(base + kRegistryOff) =
+      reinterpret_cast<uint64_t>(buckets);
+
+  uint8_t *ctor = base + kCtorZeroOff;
+  utl::protectMem(
+      reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(ctor) & ~0xFFFull),
+      0x1000, utl::pageProtection::rwx);
+  std::memset(ctor, 0x90, 11); // NOP the ctor's null-write
+
+  LOG_INFO("rebirth surface-registry: installed empty buckets@{} -> [+{:#x}]",
+           (void *)buckets, kRegistryOff);
+}
+
 modulePtr proc::loadModule(base::StringRef name) {
   auto mod = getModule(name);
   if (mod)
@@ -100,9 +140,13 @@ modulePtr proc::loadModule(base::StringRef name) {
   hostRel.append(name.data(), name.length());
   hostRel += ".sprx";
   base::String hostPath = utl::make_abs_path(hostRel);
+  const bool isRebirth = name == base::StringRef("rebirth");
   if (utl::File(hostPath, utl::fileMode::read).IsOpen()) {
-    if (lib->fromFile(hostPath))
+    if (lib->fromFile(hostPath)) {
+      if (isRebirth)
+        bringUpRebirthSurfaceRegistry(*lib);
       return lib;
+    }
   } else {
     // The game's own modules live inside the pkg: SDK prx under
     // /app0/sce_module, the title's own prx at the app root.
@@ -111,8 +155,13 @@ modulePtr proc::loadModule(base::StringRef name) {
       base::String vfsPath(root);
       vfsPath.append(name.data(), name.length());
       vfsPath += ".prx";
-      if (vfs::openRead(vfsPath.c_str()).Exists())
-        return lib->fromVfs(vfsPath) ? lib : nullptr;
+      if (vfs::openRead(vfsPath.c_str()).Exists()) {
+        if (!lib->fromVfs(vfsPath))
+          return nullptr;
+        if (isRebirth)
+          bringUpRebirthSurfaceRegistry(*lib);
+        return lib;
+      }
     }
   }
 
