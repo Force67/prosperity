@@ -8,6 +8,7 @@
 #include "pm4.h"
 #include "liverpool.h"
 #include "vk_render.h"
+#include "gcn/gcn_decode.h"
 
 #include <atomic>
 #include <cstdio>
@@ -169,6 +170,45 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
     };
     dumpUd("VS", &g_regs[mmSPI_SHADER_USER_DATA_VS_0]);
     dumpUd("PS", &g_regs[mmSPI_SHADER_USER_DATA_PS_0]);
+
+    // Follow the descriptor-table pointers in the user-data SGPRs and decode the
+    // V#/T#/S# sharps inside. A V# (4 dwords): base48, stride, num_records. A T#
+    // (8 dwords): base + width/height. This is where the real vertex buffer and
+    // texture atlas live for the quad draws.
+    auto dumpTable = [](const char *tag, uint64_t ptr) {
+      if (ptr < 0x1000000000ull || ptr >= 0x20000000000ull)
+        return;
+      auto *t = reinterpret_cast<const uint32_t *>(ptr);
+      std::fprintf(stderr, "[gpu]   table %s @%#lx:\n", tag, (unsigned long)ptr);
+      for (int k = 0; k < 32; k += 4) {
+        uint64_t b = ((uint64_t)(t[k + 1] & 0xFFFF) << 32) | t[k];
+        uint32_t stride = (t[k + 1] >> 16) & 0x3FFF;
+        // V# heuristic
+        if (b >= 0x1000000000ull && b < 0x20000000000ull && stride &&
+            stride <= 256)
+          std::fprintf(stderr, "[gpu]     +%02x V#? base=%#lx stride=%u nrec=%u dfmt=%#x\n",
+                       k * 4, (unsigned long)b, stride, t[k + 2], t[k + 3]);
+        // T# heuristic: dword2 has width-1[0:13], height-1[14:27]
+        uint64_t tb = ((uint64_t)(t[k + 1] & 0xFFFFFF) << 32) | t[k];
+        uint32_t w = (t[k + 2] & 0x3FFF) + 1, h = ((t[k + 2] >> 14) & 0x3FFF) + 1;
+        if (tb >= 0x1000000000ull && tb < 0x20000000000ull && w > 4 && w <= 8192 &&
+            h > 4 && h <= 8192)
+          std::fprintf(stderr, "[gpu]     +%02x T#? base=%#lx %ux%u dfmt=%#x\n",
+                       k * 4, (unsigned long)tb, w, h, (t[k + 1] >> 20) & 0x3F);
+      }
+    };
+    const uint32_t *vud = &g_regs[mmSPI_SHADER_USER_DATA_VS_0];
+    dumpTable("VS.sgpr0", ((uint64_t)(vud[1] & 0xFFFF) << 32) | vud[0]);
+    dumpTable("VS.sgpr2", ((uint64_t)(vud[3] & 0xFFFF) << 32) | vud[2]);
+
+    // Disassemble the shaders to validate the GCN decoder and reveal the
+    // vertex-fetch / resource-load pattern. The fetch shader (sgpr0 ptr, just
+    // past the VS code) does the s_load(V# table) + buffer_load(attributes).
+    gcn::disassemble(reinterpret_cast<const uint32_t *>(vs), 512, "VS");
+    gcn::disassemble(reinterpret_cast<const uint32_t *>(ps), 512, "PS");
+    uint64_t fetch = ((uint64_t)(vud[1] & 0xFFFF) << 32) | vud[0];
+    if (fetch >= 0x1000000000ull && fetch < 0x20000000000ull)
+      gcn::disassemble(reinterpret_cast<const uint32_t *>(fetch), 128, "VS.fetch");
   }
 }
 
