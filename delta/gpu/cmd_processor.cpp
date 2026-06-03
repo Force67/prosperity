@@ -135,6 +135,40 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
     };
     probe("VS", vs);
     probe("PS", ps);
+
+    // Dump the user-data SGPRs and decode candidate V#/T#/S# descriptors. A
+    // dword pair that forms a plausible guest pointer (0x10_0000_0000.. range)
+    // is likely a descriptor or a pointer to a descriptor table.
+    auto dumpUd = [](const char *tag, const uint32_t *ud) {
+      std::fprintf(stderr, "[gpu]   %s user_data:", tag);
+      for (int k = 0; k < 16; k++)
+        std::fprintf(stderr, " %08x", ud[k]);
+      std::fprintf(stderr, "\n");
+      // Decode any 4-dword group as a V# (buffer): base44, stride, num_records.
+      for (int k = 0; k + 1 < 16; k += 2) {
+        uint64_t base = ((uint64_t)(ud[k + 1] & 0xFFF) << 32) | ud[k];
+        if (base >= 0x1000000000ull && base < 0x20000000000ull) {
+          uint32_t stride = (ud[k + 1] >> 16) & 0x3FFF;
+          uint32_t nrec = ud[k + 2];
+          std::fprintf(stderr, "[gpu]     sgpr[%d..]: ptr=%#lx stride=%u nrec=%u fmt=%#x\n",
+                       k, (unsigned long)base, stride, nrec, ud[k + 3]);
+          // A small vertex buffer (a quad): dump it as floats to learn the layout.
+          if (stride && stride <= 64 && nrec && nrec <= 8) {
+            auto *f = reinterpret_cast<const float *>(base);
+            auto *u = reinterpret_cast<const uint32_t *>(base);
+            for (uint32_t v = 0; v < nrec; v++) {
+              std::fprintf(stderr, "[gpu]       v%u:", v);
+              for (uint32_t c = 0; c < stride / 4; c++)
+                std::fprintf(stderr, " %g(%08x)", f[v * (stride / 4) + c],
+                             u[v * (stride / 4) + c]);
+              std::fprintf(stderr, "\n");
+            }
+          }
+        }
+      }
+    };
+    dumpUd("VS", &g_regs[mmSPI_SHADER_USER_DATA_VS_0]);
+    dumpUd("PS", &g_regs[mmSPI_SHADER_USER_DATA_PS_0]);
   }
 }
 
