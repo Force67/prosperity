@@ -56,6 +56,9 @@ public:
   }
 };
 
+// Native: the guest thread entry returns naturally; thr_exit just returns.
+void exitGuestThread() {}
+
 // Native host is x86-64: the guest can call the host function directly.
 uintptr_t makeHostThunk(void *hostFn) { return reinterpret_cast<uintptr_t>(hostFn); }
 

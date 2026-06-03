@@ -17,6 +17,7 @@
 #include <logger/logger.h>
 
 #include <atomic>
+#include <csetjmp>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
@@ -66,6 +67,11 @@ static FEXCore::Context::Context *g_ctxPtr = nullptr;
 // handler can name the syscall a fault occurred inside.
 static thread_local uint32_t t_lastSyscall = 0xFFFFFFFFu;
 static thread_local bool t_inSyscall = false;
+
+// Set around CTX->ExecuteThread so thr_exit can bail out of the JIT (longjmp)
+// instead of returning into guest code (which libkernel treats as fatal).
+static thread_local std::jmp_buf t_exitJmp;
+static thread_local bool t_exitJmpValid = false;
 
 namespace {
 
@@ -294,7 +300,16 @@ public:
     t_curThread = h->thread;
     FEXCore::Allocator::RegisterTLSData(h->thread); // FEX per-thread registration
     LOG_INFO("fex: running guest thread rip={:#x}", h->thread->CurrentFrame->State.rip);
-    CTX->ExecuteThread(h->thread);
+    // thr_exit (cpu::exitGuestThread) longjmps here to leave the JIT without
+    // returning to guest code. The thread is being torn down regardless, so
+    // abandoning the JIT dispatcher's host frame is safe.
+    if (setjmp(t_exitJmp) == 0) {
+      t_exitJmpValid = true;
+      CTX->ExecuteThread(h->thread);
+    } else {
+      LOG_INFO("fex: guest thread exited via thr_exit");
+    }
+    t_exitJmpValid = false;
     LOG_INFO("fex: guest thread returned rip={:#x}",
              (unsigned long)h->thread->CurrentFrame->State.rip);
     FEXCore::Allocator::UninstallTLSData(h->thread);
@@ -389,6 +404,14 @@ void earlyInit() {
 }
 
 ICpuBackend &backend() { return g_backend; }
+
+void exitGuestThread() {
+  if (t_exitJmpValid) {
+    t_exitJmpValid = false;
+    std::longjmp(t_exitJmp, 1);
+  }
+  // Not in a guest thread context: nothing to unwind.
+}
 
 // Plant a guest x86 trampoline that bounces into the native HLE function `hostFn`
 // via the kHostThunkSyscallBase magic syscall. The trampoline preserves the 4th

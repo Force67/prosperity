@@ -14,6 +14,7 @@
 #include <thread>
 
 #include "../proc.h"
+#include "cpu/cpu_backend.h"
 #include "error_table.h"
 #include "sys_thread_ext.h"
 
@@ -35,8 +36,13 @@ struct sched_param64 {
 int PS4ABI sys_thr_exit(int64_t *state) {
   if (state)
     *state = 1;
-  std::printf("[thr_exit] state=%p -> returning to unwind guest thread\n",
+  std::printf("[thr_exit] state=%p -> terminating guest thread\n",
               (void *)state);
+  // thr_exit must never return to the caller: FreeBSD destroys the thread
+  // in-kernel, and libkernel's pthread trampoline aborts ("thr_exit() returned")
+  // if it does. Leave the JIT now (FEX longjmps out of ExecuteThread; native is
+  // a no-op and the entry returns naturally).
+  cpu::exitGuestThread();
   return 0;
 }
 

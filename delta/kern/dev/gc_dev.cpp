@@ -6,6 +6,7 @@
 #include <cstring>
 #include "gc_dev.h"
 #include "kern/proc.h"
+#include "kern/lv2/sys_mem.h"
 
 namespace krnl {
 gcDevice::gcDevice(proc *p) : device(p) {}
@@ -70,12 +71,17 @@ int32_t gcDevice::ioctl(uint32_t cmd, void *data) {
     return 0;
   }
   case 0xC008811B: {
-    struct argl {
-      uint64_t unknown;
-    };
-    auto args = static_cast<argl *>(data);
-    printf("gc ioctl(%x): %I64x\n", cmd, args->unknown);
-    args->unknown = 0x1234FFFF00000000ull;
+    // GNM "trace/info init": the driver passes an 8-byte out slot and stores the
+    // returned pointer into its global logging-info pointer (Gnm vaddr 0x100e8),
+    // then dereferences it on every submit (`cmp dword[ptr],0` = trace-enable).
+    // A bogus value here makes that deref fault. Hand back a real, zeroed guest
+    // struct so the deref reads trace-disabled (0) and the logger is a no-op.
+    static uint8_t *traceInfo = nullptr;
+    if (!traceInfo)
+      traceInfo = allocLowGuest(0x100);  // zero-filled; [+0] = trace flag (off)
+    auto args = static_cast<uint64_t *>(data);
+    *args = reinterpret_cast<uint64_t>(traceInfo);
+    printf("gc ioctl(%x): trace-info -> %p\n", cmd, (void *)traceInfo);
     return 0;
   }
   case 0xC0848119: {

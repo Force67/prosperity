@@ -71,6 +71,15 @@ public:
   }
 };
 
+// Terminate the guest thread currently running on this host thread immediately,
+// without returning to guest code. The PS4 thr_exit syscall must never return
+// to its caller (FreeBSD destroys the thread in-kernel); libkernel's pthread
+// trampoline treats a return as a fatal error. On FEX this unwinds out of the
+// JIT (longjmp) back to runGuestThread so the thread is destroyed; on
+// the native backend it's a no-op (the guest entry returns naturally). Only call
+// from a guest thread context (i.e. from inside a syscall handler).
+void exitGuestThread();
+
 // Return a guest-callable address that invokes the host (PS4ABI / sysv) function
 // `hostFn` with the guest's integer arguments (up to 8; args 7-8 read from the
 // guest stack). On the native x86 backend this is just `hostFn`; the guest
