@@ -21,6 +21,7 @@ add_subdirectory(cpu)
 add_subdirectory(crypto)
 add_subdirectory(formats)
 add_subdirectory(gfx)
+add_subdirectory(gpu)
 add_subdirectory(kern)
 add_subdirectory(runtime)
 add_subdirectory(main)
@@ -32,5 +33,9 @@ add_subdirectory(main)
 # into kern (lv2_get, moduleInfo). Declare the static-lib cycles so the linker
 # repeats the archives until symbols resolve.
 target_link_libraries(delta_kern    PUBLIC delta_runtime delta_cpu)
-target_link_libraries(delta_runtime PUBLIC delta_kern)
+target_link_libraries(delta_runtime PUBLIC delta_kern delta_gpu)
 target_link_libraries(delta_cpu     PUBLIC delta_kern)
+
+# delta_gpu (GCN PM4 -> Vulkan) is driven by the Gnm HLE in delta_runtime and
+# renders through delta_gfx's Vulkan device.
+target_link_libraries(delta_gpu     PUBLIC delta_gfx)

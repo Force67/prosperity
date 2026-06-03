@@ -22,8 +22,20 @@
 #include <cstdio>
 #include <cstdlib>
 
+#include "gpu/cmd_processor.h"
+
 // VideoOut HLE flip bridge (same delta_runtime library).
 extern "C" void prosperity_videoout_set_flip(int bufferIndex, int64_t flipArg);
+
+namespace {
+// Feed each draw command buffer to the GPU command processor.
+void processDcbs(void **dcbGpuAddrs, uint32_t *dcbSizes, uint32_t count) {
+  if (!dcbGpuAddrs || !dcbSizes)
+    return;
+  for (uint32_t i = 0; i < count; i++)
+    gpu::submitDcb(dcbGpuAddrs[i], dcbSizes[i]);
+}
+}  // namespace
 
 namespace {
 // Env-gated PM4 dump (DELTA_PM4DUMP=1): walk the dcb type-3 packets and tally
@@ -95,8 +107,8 @@ extern "C" {
 int PS4ABI sceGnmSubmitCommandBuffers(uint32_t count, void **dcbGpuAddrs,
                                      uint32_t *dcbSizes, void **ccbGpuAddrs,
                                      uint32_t *ccbSizes) {
-  // TODO(gpu): parse + render the PM4 in dcbGpuAddrs[0..count]. For now, accept.
   dumpPm4(dcbGpuAddrs, dcbSizes, count);
+  processDcbs(dcbGpuAddrs, dcbSizes, count);
   return 0;
 }
 
@@ -118,6 +130,7 @@ int PS4ABI sceGnmSubmitAndFlipCommandBuffers(uint32_t count, void **dcbGpuAddrs,
   // The flip target buffer is what should be scanned out next; record it so the
   // VideoOut flip pump presents it and posts the flip-complete event.
   dumpPm4(dcbGpuAddrs, dcbSizes, count);
+  processDcbs(dcbGpuAddrs, dcbSizes, count);
   prosperity_videoout_set_flip(static_cast<int>(displayBufferIndex), flipArg);
   return 0;
 }
