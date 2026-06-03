@@ -29,6 +29,13 @@
 #include "sys_time.h"
 #include "sys_vfs.h"
 #include "sys_net.h"
+#include "sys_procid.h"
+#include "sys_mem_ext.h"
+#include "sys_thread_ext.h"
+#include "sys_time_ext.h"
+#include "sys_ksem.h"
+#include "sys_vfs_ext.h"
+#include "sys_sce_misc.h"
 
 #include "kern/module.h"
 #include "kern/proc.h"
@@ -114,25 +121,25 @@ static const syscall_Reg syscall_dpt[] = {
     {4, (void *)&sys_write},
     {5, (void *)&sys_open},
     {6, (void *)&sys_close},
-    {7, (void *)&null_handler},  // sys_wait4
+    {7, (void *)&sys_wait4},  // sys_wait4
     {8, (void *)&null_handler},  // sys_creat
     {9, (void *)&null_handler},  // sys_link
-    {10, (void *)&null_handler}, // sys_unlink
+    {10, (void *)&sys_unlink}, // sys_unlink
     {11, (void *)&null_handler}, // sys_execv
-    {12, (void *)&null_handler}, // sys_chdir
-    {13, (void *)&null_handler}, // sys_fchdir
+    {12, (void *)&sys_chdir}, // sys_chdir
+    {13, (void *)&sys_fchdir}, // sys_fchdir
     {14, (void *)&null_handler}, // sys_mkd
     {15, (void *)&null_handler}, // sys_chmod
     {16, (void *)&null_handler}, // sys_chown
-    {17, (void *)&null_handler}, // sys_obreak
+    {17, (void *)&sys_obreak}, // sys_obreak
     {18, (void *)&null_handler}, // sys_getfsstat
     {19, (void *)&sys_lseek},
     {20, (void *)&sys_getpid},
     {21, (void *)&null_handler}, // sys_mount
     {22, (void *)&null_handler}, // sys_unmount
-    {23, (void *)&null_handler}, // sys_setuid
-    {24, (void *)&null_handler}, // sys_getuid
-    {25, (void *)&null_handler}, // sys_geteuid
+    {23, (void *)&sys_setuid}, // sys_setuid
+    {24, (void *)&sys_getuid}, // sys_getuid
+    {25, (void *)&sys_geteuid}, // sys_geteuid
     {26, (void *)&null_handler}, // sys_ptrace
     {27, (void *)&sys_recvmsg},
     {28, (void *)&null_handler}, // sys_sendmsg
@@ -140,121 +147,121 @@ static const syscall_Reg syscall_dpt[] = {
     {30, (void *)&null_handler}, // sys_accept
     {31, (void *)&null_handler}, // sys_getpeername
     {32, (void *)&null_handler}, // sys_getsockname
-    {33, (void *)&null_handler}, // sys_access
+    {33, (void *)&sys_access}, // sys_access
     {34, (void *)&null_handler}, // sys_chflags
     {35, (void *)&null_handler}, // sys_fchflags
-    {36, (void *)&null_handler}, // sys_sync
-    {37, (void *)&null_handler}, // sys_kill
+    {36, (void *)&sys_sync}, // sys_sync
+    {37, (void *)&sys_kill}, // sys_kill
     {38, (void *)&sys_stat},
-    {39, (void *)&null_handler}, // sys_getppid
-    {40, (void *)&null_handler}, // sys_lstat
-    {41, (void *)&null_handler}, // sys_dup
+    {39, (void *)&sys_getppid}, // sys_getppid
+    {40, (void *)&sys_lstat}, // sys_lstat
+    {41, (void *)&sys_dup}, // sys_dup
     {42, (void *)&null_handler}, // sys_pipe
-    {43, (void *)&null_handler}, // sys_getegid
+    {43, (void *)&sys_getegid}, // sys_getegid
     {44, (void *)&null_handler}, // sys_profil
     {45, (void *)&null_handler}, // sys_ktrace
     {46, (void *)&sys_sigaction},
-    {47, (void *)&null_handler}, // sys_getgid
+    {47, (void *)&sys_getgid}, // sys_getgid
     {48, (void *)&sys_sigprocmask},
-    {49, (void *)&null_handler}, // sys_getlogin
-    {50, (void *)&null_handler}, // sys_setlogin
+    {49, (void *)&sys_getlogin}, // sys_getlogin
+    {50, (void *)&sys_setlogin}, // sys_setlogin
     {51, (void *)&null_handler}, // sys_acct
-    {52, (void *)&null_handler}, // sys_sigpending
-    {53, (void *)&null_handler}, // sys_sigaltstack
+    {52, (void *)&sys_sigpending}, // sys_sigpending
+    {53, (void *)&sys_sigaltstack}, // sys_sigaltstack
     {54, (void *)&sys_ioctl},
     {55, (void *)&null_handler}, // sys_reboot
     {56, (void *)&null_handler}, // sys_revoke
     {57, (void *)&null_handler}, // sys_symlink
-    {58, (void *)&null_handler}, // sys_readlink
+    {58, (void *)&sys_readlink}, // sys_readlink
     {59, (void *)&sys_execve},
-    {60, (void *)&null_handler}, // sys_umask
+    {60, (void *)&sys_umask}, // sys_umask
     {61, (void *)&null_handler}, // sys_chroot
     {62, (void *)&sys_fstat},
     {63, (void *)&null_handler}, // sys_getkerninfo
-    {64, (void *)&null_handler}, // sys_getpagesize
-    {65, (void *)&null_handler}, // sys_msync
+    {64, (void *)&sys_getpagesize}, // sys_getpagesize
+    {65, (void *)&sys_msync}, // sys_msync
     {66, (void *)&null_handler}, // sys_vfork
     {67, (void *)&null_handler}, // sys_vread
     {68, (void *)&null_handler}, // sys_vwrite
-    {69, (void *)&null_handler}, // sys_sbrk
+    {69, (void *)&sys_sbrk}, // sys_sbrk
     {70, (void *)&null_handler}, // sys_sstk
     {71, (void *)&sys_mmap},
     {72, (void *)&null_handler},  // sys_ovadvise
-    {73, (void *)&null_handler},  // sys_munmap
+    {73, (void *)&sys_munmap},  // sys_munmap
     {74, (void *)&sys_mprotect},
-    {75, (void *)&null_handler},  // sys_madvise
+    {75, (void *)&sys_madvise},  // sys_madvise
     {76, (void *)&null_handler},  // sys_vhangup
     {77, (void *)&null_handler},  // sys_vlimit
-    {78, (void *)&null_handler},  // sys_mincore
-    {79, (void *)&null_handler},  // sys_getgroups
-    {80, (void *)&null_handler},  // sys_setgroups
-    {81, (void *)&null_handler},  // sys_getpgrp
-    {82, (void *)&null_handler},  // sys_setpgid
-    {83, (void *)&null_handler},  // sys_setitimer
+    {78, (void *)&sys_mincore},  // sys_mincore
+    {79, (void *)&sys_getgroups},  // sys_getgroups
+    {80, (void *)&sys_setgroups},  // sys_setgroups
+    {81, (void *)&sys_getpgrp},  // sys_getpgrp
+    {82, (void *)&sys_setpgid},  // sys_setpgid
+    {83, (void *)&sys_setitimer},  // sys_setitimer
     {84, (void *)&null_handler},  // sys_wait
     {85, (void *)&null_handler},  // sys_swapon
-    {86, (void *)&null_handler},  // sys_getitimer
-    {87, (void *)&null_handler},  // sys_gethostname
-    {88, (void *)&null_handler},  // sys_sethostname
-    {89, (void *)&null_handler},  // sys_getdtablesize
-    {90, (void *)&null_handler},  // sys_dup2
+    {86, (void *)&sys_getitimer},  // sys_getitimer
+    {87, (void *)&sys_gethostname},  // sys_gethostname
+    {88, (void *)&sys_sethostname},  // sys_sethostname
+    {89, (void *)&sys_getdtablesize},  // sys_getdtablesize
+    {90, (void *)&sys_dup2},  // sys_dup2
     {91, (void *)&null_handler},  // sys_getdopt
-    {92, (void *)&null_handler},  // sys_fcntl
-    {93, (void *)&null_handler},  // sys_select
+    {92, (void *)&sys_fcntl},  // sys_fcntl
+    {93, (void *)&sys_select},  // sys_select
     {94, (void *)&null_handler},  // sys_setdopt
-    {95, (void *)&null_handler},  // sys_fsync
-    {96, (void *)&null_handler},  // sys_setpriority
+    {95, (void *)&sys_fsync},  // sys_fsync
+    {96, (void *)&sys_setpriority},  // sys_setpriority
     {97, (void *)&sys_socket},
     {98, (void *)&sys_connect},
     {99, (void *)&sys_netcontrol},
-    {100, (void *)&null_handler}, // sys_getpriority
+    {100, (void *)&sys_getpriority}, // sys_getpriority
     {101, (void *)&null_handler}, // sys_netabort
     {102, (void *)&null_handler}, // sys_netgetsockinfo
     {103, (void *)&null_handler}, // sys_sigreturn
     {104, (void *)&null_handler}, // sys_bind
-    {105, (void *)&null_handler}, // sys_setsockopt
+    {105, (void *)&sys_setsockopt}, // sys_setsockopt
     {106, (void *)&null_handler}, // sys_listen
     {107, (void *)&null_handler}, // sys_vtimes
     {108, (void *)&null_handler}, // sys_sigvec
     {109, (void *)&null_handler}, // sys_sigblock
     {110, (void *)&null_handler}, // sys_sigsetmask
-    {111, (void *)&null_handler}, // sys_sigsuspend
+    {111, (void *)&sys_sigsuspend}, // sys_sigsuspend
     {112, (void *)&null_handler}, // sys_sigstack
     {113, (void *)&sys_socketex},
     {114, (void *)&null_handler}, // sys_socketclose
     {115, (void *)&null_handler}, // sys_vtrace
-    {116, (void *)&null_handler}, // sys_gettimeofday
-    {117, (void *)&null_handler}, // sys_getrusage
-    {118, (void *)&null_handler}, // sys_getsockopt
+    {116, (void *)&sys_gettimeofday}, // sys_gettimeofday
+    {117, (void *)&sys_getrusage}, // sys_getrusage
+    {118, (void *)&sys_getsockopt}, // sys_getsockopt
     {119, (void *)&null_handler}, // sys_resuba
-    {120, (void *)&null_handler}, // sys_readv
-    {121, (void *)&null_handler}, // sys_writev
-    {122, (void *)&null_handler}, // sys_settimeofday
+    {120, (void *)&sys_readv}, // sys_readv
+    {121, (void *)&sys_writev}, // sys_writev
+    {122, (void *)&sys_settimeofday}, // sys_settimeofday
     {123, (void *)&null_handler}, // sys_fchown
     {124, (void *)&null_handler}, // sys_fchmod
     {125, (void *)&null_handler}, // sys_netgetiflist
     {126, (void *)&null_handler}, // sys_setreuid
     {127, (void *)&null_handler}, // sys_setregid
-    {128, (void *)&null_handler}, // sys_rename
+    {128, (void *)&sys_rename}, // sys_rename
     {129, (void *)&null_handler}, // sys_truncate
     {130, (void *)&null_handler}, // sys_ftruncate
-    {131, (void *)&null_handler}, // sys_flock
+    {131, (void *)&sys_flock}, // sys_flock
     {132, (void *)&null_handler}, // sys_mkfifo
     {133, (void *)&null_handler}, // sys_sendto
     {134, (void *)&null_handler}, // sys_shutdown
     {135, (void *)&null_handler}, // sys_socketpair
-    {136, (void *)&null_handler}, // sys_mkdir
-    {137, (void *)&null_handler}, // sys_rmdir
-    {138, (void *)&null_handler}, // sys_utimes
+    {136, (void *)&sys_mkdir}, // sys_mkdir
+    {137, (void *)&sys_rmdir}, // sys_rmdir
+    {138, (void *)&sys_utimes}, // sys_utimes
     {139, (void *)&null_handler}, // sys_sigreturn
     {140, (void *)&null_handler}, // sys_adjtime
     {141, (void *)&sys_kqueueex},
     {142, (void *)&null_handler}, // sys_gethostid
     {143, (void *)&null_handler}, // sys_sethostid
-    {144, (void *)&null_handler}, // sys_getrlimit
-    {145, (void *)&null_handler}, // sys_setrlimit
+    {144, (void *)&sys_getrlimit}, // sys_getrlimit
+    {145, (void *)&sys_setrlimit}, // sys_setrlimit
     {146, (void *)&null_handler}, // sys_killpg
-    {147, (void *)&null_handler}, // sys_setsid
+    {147, (void *)&sys_setsid}, // sys_setsid
     {148, (void *)&null_handler}, // sys_quotactl
     {149, (void *)&null_handler}, // sys_quota
     {150, (void *)&null_handler}, // sys_getsockname
@@ -263,54 +270,54 @@ static const syscall_Reg syscall_dpt[] = {
     {153, (void *)&null_handler}, // sys_asyncdaemon
     {154, (void *)&null_handler}, // sys_nlm_syscall
     {155, (void *)&null_handler}, // sys_nfssvc
-    {156, (void *)&null_handler}, // sys_getdirentries
+    {156, (void *)&sys_getdirentries}, // sys_getdirentries
     {157, (void *)&null_handler}, // sys_statfs
     {158, (void *)&null_handler}, // sys_fstatfs
     {160, (void *)&null_handler}, // sys_lgetfh
     {161, (void *)&null_handler}, // sys_getfh
     {162, (void *)&null_handler}, // sys_getdomainname
     {163, (void *)&null_handler}, // sys_setdomainname
-    {164, (void *)&null_handler}, // sys_uname
+    {164, (void *)&sys_uname}, // sys_uname
     {165, (void *)&sys_sysarch},
-    {166, (void *)&null_handler}, // sys_rtprio
+    {166, (void *)&sys_rtprio}, // sys_rtprio
     {169, (void *)&null_handler}, // sys_semsys
     {170, (void *)&null_handler}, // sys_msgsys
     {171, (void *)&null_handler}, // sys_shmsys
-    {173, (void *)&null_handler}, // sys_pread
-    {174, (void *)&null_handler}, // sys_pwrite
+    {173, (void *)&sys_pread}, // sys_pread
+    {174, (void *)&sys_pwrite}, // sys_pwrite
     {175, (void *)&null_handler}, // sys_setfib
     {176, (void *)&null_handler}, // sys_ntp_adjtime
     {177, (void *)&null_handler}, // sys_sfork
     {178, (void *)&null_handler}, // sys_getdescriptor
     {179, (void *)&null_handler}, // sys_setdescriptor
-    {181, (void *)&null_handler}, // sys_setgid
-    {182, (void *)&null_handler}, // sys_setegid
-    {183, (void *)&null_handler}, // sys_seteuid
+    {181, (void *)&sys_setgid}, // sys_setgid
+    {182, (void *)&sys_setegid}, // sys_setegid
+    {183, (void *)&sys_seteuid}, // sys_seteuid
     {184, (void *)&null_handler}, // sys_lfs_bmapv
     {185, (void *)&null_handler}, // sys_lfs_markv
     {186, (void *)&null_handler}, // sys_lfs_segclean
     {187, (void *)&null_handler}, // sys_lfs_segwait
     {188, (void *)&sys_stat},
     {189, (void *)&sys_fstat},
-    {190, (void *)&null_handler}, // sys_lstat
-    {191, (void *)&null_handler}, // sys_pathconf
-    {192, (void *)&null_handler}, // sys_fpathconf
-    {194, (void *)&null_handler}, // sys_getrlimit
-    {195, (void *)&null_handler}, // sys_setrlimit
-    {196, (void *)&null_handler}, // sys_getdirentries
+    {190, (void *)&sys_lstat}, // sys_lstat
+    {191, (void *)&sys_pathconf}, // sys_pathconf
+    {192, (void *)&sys_fpathconf}, // sys_fpathconf
+    {194, (void *)&sys_getrlimit}, // sys_getrlimit
+    {195, (void *)&sys_setrlimit}, // sys_setrlimit
+    {196, (void *)&sys_getdirentries}, // sys_getdirentries
     {197, (void *)&sys_mmap},
     {198, (void *)&null_handler}, // sys_nosys
     {199, (void *)&sys_lseek},
     {200, (void *)&null_handler}, // sys_truncate
     {201, (void *)&null_handler}, // sys_ftruncate
     {202, (void *)&sys_sysctl},
-    {203, (void *)&null_handler}, // sys_mlock
-    {204, (void *)&null_handler}, // sys_munlock
+    {203, (void *)&sys_mlock}, // sys_mlock
+    {204, (void *)&sys_munlock}, // sys_munlock
     {205, (void *)&null_handler}, // sys_undelete
-    {206, (void *)&null_handler}, // sys_futimes
-    {207, (void *)&null_handler}, // sys_getpgid
+    {206, (void *)&sys_futimes}, // sys_futimes
+    {207, (void *)&sys_getpgid}, // sys_getpgid
     {208, (void *)&null_handler}, // sys_newreboot
-    {209, (void *)&null_handler}, // sys_poll
+    {209, (void *)&sys_poll}, // sys_poll
     {220, (void *)&null_handler}, // sys_semctl
     {221, (void *)&null_handler}, // sys_semget
     {222, (void *)&null_handler}, // sys_semop
@@ -324,32 +331,32 @@ static const syscall_Reg syscall_dpt[] = {
     {230, (void *)&null_handler}, // sys_shmdt
     {231, (void *)&null_handler}, // sys_shmget
     {232, (void *)&sys_clock_gettime},
-    {233, (void *)&null_handler}, // sys_clock_settime
-    {234, (void *)&null_handler}, // sys_clock_getres
-    {235, (void *)&null_handler}, // sys_ktimer_create
-    {236, (void *)&null_handler}, // sys_ktimer_delete
-    {237, (void *)&null_handler}, // sys_ktimer_settime
-    {238, (void *)&null_handler}, // sys_ktimer_gettime
-    {239, (void *)&null_handler}, // sys_ktimer_getoverrun
+    {233, (void *)&sys_clock_settime}, // sys_clock_settime
+    {234, (void *)&sys_clock_getres}, // sys_clock_getres
+    {235, (void *)&sys_ktimer_create}, // sys_ktimer_create
+    {236, (void *)&sys_ktimer_delete}, // sys_ktimer_delete
+    {237, (void *)&sys_ktimer_settime}, // sys_ktimer_settime
+    {238, (void *)&sys_ktimer_gettime}, // sys_ktimer_gettime
+    {239, (void *)&sys_ktimer_getoverrun}, // sys_ktimer_getoverrun
     {240, (void *)&sys_nanosleep},
-    {241, (void *)&null_handler}, // sys_ffclock_getcounter
-    {242, (void *)&null_handler}, // sys_ffclock_setestimate
-    {243, (void *)&null_handler}, // sys_ffclock_getestimate
-    {247, (void *)&null_handler}, // sys_clock_getcpuclockid2
-    {248, (void *)&null_handler}, // sys_ntp_gettime
-    {250, (void *)&null_handler}, // sys_minherit
+    {241, (void *)&sys_ffclock_getcounter}, // sys_ffclock_getcounter
+    {242, (void *)&sys_ffclock_setestimate}, // sys_ffclock_setestimate
+    {243, (void *)&sys_ffclock_getestimate}, // sys_ffclock_getestimate
+    {247, (void *)&sys_clock_getcpuclockid2}, // sys_clock_getcpuclockid2
+    {248, (void *)&sys_ntp_gettime}, // sys_ntp_gettime
+    {250, (void *)&sys_minherit}, // sys_minherit
     {251, (void *)&sys_rfork},
     {252, (void *)&null_handler}, // sys_openbsd_poll
-    {253, (void *)&null_handler}, // sys_issetugid
+    {253, (void *)&sys_issetugid}, // sys_issetugid
     {254, (void *)&null_handler}, // sys_lchown
-    {255, (void *)&null_handler}, // sys_aio_read
-    {256, (void *)&null_handler}, // sys_aio_write
-    {257, (void *)&null_handler}, // sys_lio_listio
+    {255, (void *)&sys_aio_unsupported}, // sys_aio_read
+    {256, (void *)&sys_aio_unsupported}, // sys_aio_write
+    {257, (void *)&sys_aio_unsupported}, // sys_lio_listio
     {272, (void *)&sys_getdents},
     {274, (void *)&null_handler}, // sys_lchmod
     {275, (void *)&null_handler}, // sys_lchown
     {276, (void *)&null_handler}, // sys_lutimes
-    {277, (void *)&null_handler}, // sys_msync
+    {277, (void *)&sys_msync}, // sys_msync
     {278, (void *)&null_handler}, // sys_nstat
     {279, (void *)&null_handler}, // sys_nfstat
     {280, (void *)&null_handler}, // sys_nlstat
@@ -368,43 +375,43 @@ static const syscall_Reg syscall_dpt[] = {
     {307, (void *)&null_handler}, // sys_kldnext
     {308, (void *)&null_handler}, // sys_kldstat
     {309, (void *)&null_handler}, // sys_kldfirstmod
-    {310, (void *)&null_handler}, // sys_getsid
-    {311, (void *)&null_handler}, // sys_setresuid
-    {312, (void *)&null_handler}, // sys_setresgid
+    {310, (void *)&sys_getsid}, // sys_getsid
+    {311, (void *)&sys_setresuid}, // sys_setresuid
+    {312, (void *)&sys_setresgid}, // sys_setresgid
     {313, (void *)&null_handler}, // sys_signasleep
-    {314, (void *)&null_handler}, // sys_aio_return
-    {315, (void *)&null_handler}, // sys_aio_suspend
-    {316, (void *)&null_handler}, // sys_aio_cancel
-    {317, (void *)&null_handler}, // sys_aio_error
-    {318, (void *)&null_handler}, // sys_aio_read
-    {319, (void *)&null_handler}, // sys_aio_write
-    {320, (void *)&null_handler}, // sys_lio_listio
-    {321, (void *)&null_handler}, // sys_yield
-    {322, (void *)&null_handler}, // sys_thr_sleep
-    {323, (void *)&null_handler}, // sys_thr_wakeup
-    {324, (void *)&null_handler}, // sys_mlockall
-    {325, (void *)&null_handler}, // sys_munlockall
-    {326, (void *)&null_handler}, // sys_getcwd
-    {327, (void *)&null_handler}, // sys_sched_setparam
-    {328, (void *)&null_handler}, // sys_sched_getparam
-    {329, (void *)&null_handler}, // sys_sched_setscheduler
-    {330, (void *)&null_handler}, // sys_sched_getscheduler
-    {331, (void *)&null_handler}, // sys_sched_yield
-    {332, (void *)&null_handler}, // sys_sched_get_priority_max
-    {333, (void *)&null_handler}, // sys_sched_get_priority_min
-    {334, (void *)&null_handler}, // sys_sched_rr_get_interval
+    {314, (void *)&sys_aio_unsupported}, // sys_aio_return
+    {315, (void *)&sys_aio_unsupported}, // sys_aio_suspend
+    {316, (void *)&sys_aio_unsupported}, // sys_aio_cancel
+    {317, (void *)&sys_aio_unsupported}, // sys_aio_error
+    {318, (void *)&sys_aio_unsupported}, // sys_aio_read
+    {319, (void *)&sys_aio_unsupported}, // sys_aio_write
+    {320, (void *)&sys_aio_unsupported}, // sys_lio_listio
+    {321, (void *)&sys_yield}, // sys_yield
+    {322, (void *)&sys_thr_sleep}, // sys_thr_sleep
+    {323, (void *)&sys_thr_wakeup}, // sys_thr_wakeup
+    {324, (void *)&sys_mlockall}, // sys_mlockall
+    {325, (void *)&sys_munlockall}, // sys_munlockall
+    {326, (void *)&sys_getcwd}, // sys_getcwd
+    {327, (void *)&sys_sched_setparam}, // sys_sched_setparam
+    {328, (void *)&sys_sched_getparam}, // sys_sched_getparam
+    {329, (void *)&sys_sched_setscheduler}, // sys_sched_setscheduler
+    {330, (void *)&sys_sched_getscheduler}, // sys_sched_getscheduler
+    {331, (void *)&sys_sched_yield}, // sys_sched_yield
+    {332, (void *)&sys_sched_get_priority_max}, // sys_sched_get_priority_max
+    {333, (void *)&sys_sched_get_priority_min}, // sys_sched_get_priority_min
+    {334, (void *)&sys_sched_rr_get_interval}, // sys_sched_rr_get_interval
     {335, (void *)&null_handler}, // sys_utrace
     {336, (void *)&null_handler}, // sys_sendfile
     {337, (void *)&null_handler}, // sys_kldsym
     {338, (void *)&null_handler}, // sys_jail
     {339, (void *)&null_handler}, // sys_nnpfs_syscall
     {340, (void *)&sys_sigprocmask},
-    {341, (void *)&null_handler}, // sys_sigsuspend
+    {341, (void *)&sys_sigsuspend}, // sys_sigsuspend
     {342, (void *)&sys_sigaction},
-    {343, (void *)&null_handler}, // sys_sigpending
+    {343, (void *)&sys_sigpending}, // sys_sigpending
     {344, (void *)&null_handler}, // sys_sigreturn
-    {345, (void *)&null_handler}, // sys_sigtimedwait
-    {346, (void *)&null_handler}, // sys_sigwaitinfo
+    {345, (void *)&sys_sigtimedwait}, // sys_sigtimedwait
+    {346, (void *)&sys_sigwaitinfo}, // sys_sigwaitinfo
     {347, (void *)&null_handler}, // sys_acl_get_file
     {348, (void *)&null_handler}, // sys_acl_set_file
     {349, (void *)&null_handler}, // sys_acl_get_fd
@@ -417,9 +424,9 @@ static const syscall_Reg syscall_dpt[] = {
     {356, (void *)&null_handler}, // sys_extattr_set_file
     {357, (void *)&null_handler}, // sys_extattr_get_file
     {358, (void *)&null_handler}, // sys_extattr_delete_file
-    {359, (void *)&null_handler}, // sys_aio_waitcomplete
-    {360, (void *)&null_handler}, // sys_getresuid
-    {361, (void *)&null_handler}, // sys_getresgid
+    {359, (void *)&sys_aio_unsupported}, // sys_aio_waitcomplete
+    {360, (void *)&sys_getresuid}, // sys_getresuid
+    {361, (void *)&sys_getresgid}, // sys_getresgid
     {362, (void *)&sys_kqueue},
     {363, (void *)&sys_kevent},
     {364, (void *)&null_handler}, // sys_cap_get_proc
@@ -456,15 +463,15 @@ static const syscall_Reg syscall_dpt[] = {
     {396, (void *)&null_handler}, // sys_statfs
     {397, (void *)&null_handler}, // sys_fstatfs
     {398, (void *)&null_handler}, // sys_fhstatfs
-    {400, (void *)&null_handler}, // sys_ksem_close
-    {401, (void *)&null_handler}, // sys_ksem_post
-    {402, (void *)&null_handler}, // sys_ksem_wait
-    {403, (void *)&null_handler}, // sys_ksem_trywait
-    {404, (void *)&null_handler}, // sys_ksem_init
-    {405, (void *)&null_handler}, // sys_ksem_open
-    {406, (void *)&null_handler}, // sys_ksem_unlink
-    {407, (void *)&null_handler}, // sys_ksem_getvalue
-    {408, (void *)&null_handler}, // sys_ksem_destroy
+    {400, (void *)&sys_ksem_close}, // sys_ksem_close
+    {401, (void *)&sys_ksem_post}, // sys_ksem_post
+    {402, (void *)&sys_ksem_wait}, // sys_ksem_wait
+    {403, (void *)&sys_ksem_trywait}, // sys_ksem_trywait
+    {404, (void *)&sys_ksem_init}, // sys_ksem_init
+    {405, (void *)&sys_ksem_open}, // sys_ksem_open
+    {406, (void *)&sys_ksem_unlink}, // sys_ksem_unlink
+    {407, (void *)&sys_ksem_getvalue}, // sys_ksem_getvalue
+    {408, (void *)&sys_ksem_destroy}, // sys_ksem_destroy
     {409, (void *)&null_handler}, // sys_mac_get_pid
     {410, (void *)&null_handler}, // sys_mac_get_link
     {411, (void *)&null_handler}, // sys_mac_set_link
@@ -485,19 +492,19 @@ static const syscall_Reg syscall_dpt[] = {
     {426, (void *)&null_handler}, // sys_acl_set_link
     {427, (void *)&null_handler}, // sys_acl_delete_link
     {428, (void *)&null_handler}, // sys_acl_aclcheck_link
-    {429, (void *)&null_handler}, // sys_sigwait
+    {429, (void *)&sys_sigwait}, // sys_sigwait
     {430, (void *)&null_handler}, // sys_thr_create
-    {431, (void *)&null_handler}, // sys_thr_exit
+    {431, (void *)&sys_thr_exit}, // sys_thr_exit
     {432, (void *)&sys_thr_self},
-    {433, (void *)&null_handler}, // sys_thr_kill
+    {433, (void *)&sys_thr_kill}, // sys_thr_kill
     {436, (void *)&null_handler}, // sys_jail_attach
     {437, (void *)&null_handler}, // sys_extattr_list_fd
     {438, (void *)&null_handler}, // sys_extattr_list_file
     {439, (void *)&null_handler}, // sys_extattr_list_link
     {440, (void *)&null_handler}, // sys_kse_switchin
-    {441, (void *)&null_handler}, // sys_ksem_timedwait
-    {442, (void *)&null_handler}, // sys_thr_suspend
-    {443, (void *)&null_handler}, // sys_thr_wake
+    {441, (void *)&sys_ksem_timedwait}, // sys_ksem_timedwait
+    {442, (void *)&sys_thr_suspend}, // sys_thr_suspend
+    {443, (void *)&sys_thr_wake}, // sys_thr_wake
     {444, (void *)&null_handler}, // sys_kldunloadf
     {445, (void *)&null_handler}, // sys_audit
     {446, (void *)&null_handler}, // sys_auditon
@@ -510,16 +517,16 @@ static const syscall_Reg syscall_dpt[] = {
     {453, (void *)&null_handler}, // sys_auditctl
     {454, (void *)&sys_umtx_op},
     {455, (void *)&sys_thr_new},
-    {456, (void *)&null_handler}, // sys_sigqueue
+    {456, (void *)&sys_sigqueue}, // sys_sigqueue
     {457, (void *)&null_handler}, // sys_kmq_open
     {458, (void *)&null_handler}, // sys_kmq_setattr
     {459, (void *)&null_handler}, // sys_kmq_timedreceive
     {460, (void *)&null_handler}, // sys_kmq_timedsend
     {461, (void *)&null_handler}, // sys_kmq_tify
     {462, (void *)&null_handler}, // sys_kmq_unlink
-    {463, (void *)&null_handler}, // sys_abort2
-    {464, (void *)&null_handler}, // sys_thr_set_name
-    {465, (void *)&null_handler}, // sys_aio_fsync
+    {463, (void *)&sys_abort2}, // sys_abort2
+    {464, (void *)&sys_thr_set_name}, // sys_thr_set_name
+    {465, (void *)&sys_aio_unsupported}, // sys_aio_fsync
     {466, (void *)&sys_rtprio_thread},
     {469, (void *)&null_handler}, // sys_getpath_fromfd
     {470, (void *)&null_handler}, // sys_getpath_fromaddr
@@ -527,32 +534,32 @@ static const syscall_Reg syscall_dpt[] = {
     {472, (void *)&null_handler}, // sys_sctp_generic_sendmsg
     {473, (void *)&null_handler}, // sys_sctp_generic_sendmsg_iov
     {474, (void *)&null_handler}, // sys_sctp_generic_recvmsg
-    {475, (void *)&null_handler}, // sys_pread
-    {476, (void *)&null_handler}, // sys_pwrite
+    {475, (void *)&sys_pread}, // sys_pread
+    {476, (void *)&sys_pwrite}, // sys_pwrite
     {477, (void *)&sys_mmap},
     {478, (void *)&sys_lseek}, // modern lseek (the game uses 478, not the old 19)
     {479, (void *)&null_handler}, // sys_truncate
     {480, (void *)&sys_ftruncate},
-    {481, (void *)&null_handler}, // sys_thr_kill2
+    {481, (void *)&sys_thr_kill2}, // sys_thr_kill2
     {482, (void *)&sys_shm_open},
     {483, (void *)&sys_shm_unlink},
-    {484, (void *)&null_handler}, // sys_cpuset
-    {485, (void *)&null_handler}, // sys_cpuset_setid
-    {486, (void *)&null_handler}, // sys_cpuset_getid
+    {484, (void *)&sys_cpuset}, // sys_cpuset
+    {485, (void *)&sys_cpuset_setid}, // sys_cpuset_setid
+    {486, (void *)&sys_cpuset_getid}, // sys_cpuset_getid
     {487, (void *)&sys_cpuset_getaffinity},
-    {488, (void *)&null_handler}, // sys_cpuset_setaffinity
-    {489, (void *)&null_handler}, // sys_faccessat
+    {488, (void *)&sys_cpuset_setaffinity}, // sys_cpuset_setaffinity
+    {489, (void *)&sys_faccessat}, // sys_faccessat
     {490, (void *)&null_handler}, // sys_fchmodat
     {491, (void *)&null_handler}, // sys_fchownat
     {492, (void *)&null_handler}, // sys_fexecve
-    {493, (void *)&null_handler}, // sys_fstatat
+    {493, (void *)&sys_fstatat}, // sys_fstatat
     {494, (void *)&null_handler}, // sys_futimesat
     {495, (void *)&null_handler}, // sys_linkat
     {496, (void *)&null_handler}, // sys_mkdirat
     {497, (void *)&null_handler}, // sys_mkfifoat
     {498, (void *)&null_handler}, // sys_mkdat
-    {499, (void *)&null_handler}, // sys_openat
-    {500, (void *)&null_handler}, // sys_readlinkat
+    {499, (void *)&sys_openat}, // sys_openat
+    {500, (void *)&sys_readlinkat}, // sys_readlinkat
     {501, (void *)&null_handler}, // sys_renameat
     {502, (void *)&null_handler}, // sys_symlinkat
     {503, (void *)&null_handler}, // sys_unlinkat
@@ -561,11 +568,11 @@ static const syscall_Reg syscall_dpt[] = {
     {506, (void *)&null_handler}, // sys_jail_get
     {507, (void *)&null_handler}, // sys_jail_set
     {508, (void *)&null_handler}, // sys_jail_remove
-    {509, (void *)&null_handler}, // sys_closefrom
+    {509, (void *)&sys_closefrom}, // sys_closefrom
     {510, (void *)&null_handler}, // sys_semctl
     {511, (void *)&null_handler}, // sys_msgctl
     {512, (void *)&null_handler}, // sys_shmctl
-    {513, (void *)&null_handler}, // sys_lpathconf
+    {513, (void *)&sys_lpathconf}, // sys_lpathconf
     {514, (void *)&null_handler}, // sys_cap_new
     {515, (void *)&null_handler}, // sys_cap_rights_get
     {516, (void *)&null_handler}, // sys_cap_enter
@@ -582,14 +589,14 @@ static const syscall_Reg syscall_dpt[] = {
     {527, (void *)&null_handler}, // sys_rctl_get_limits
     {528, (void *)&null_handler}, // sys_rctl_add_rule
     {529, (void *)&null_handler}, // sys_rctl_remove_rule
-    {530, (void *)&null_handler}, // sys_posix_fallocate
-    {531, (void *)&null_handler}, // sys_posix_fadvise
+    {530, (void *)&sys_posix_fallocate}, // sys_posix_fallocate
+    {531, (void *)&sys_posix_fadvise}, // sys_posix_fadvise
     {532, (void *)&sys_regmgr_call},
-    {533, (void *)&null_handler}, // sys_jitshm_create
-    {534, (void *)&null_handler}, // sys_jitshm_alias
-    {535, (void *)&null_handler}, // sys_dl_get_list
-    {536, (void *)&null_handler}, // sys_dl_get_info
-    {537, (void *)&null_handler}, // sys_dl_notify_event
+    {533, (void *)&sys_jitshm_create}, // sys_jitshm_create
+    {534, (void *)&sys_jitshm_alias}, // sys_jitshm_alias
+    {535, (void *)&sys_dl_get_list}, // sys_dl_get_list
+    {536, (void *)&sys_dl_get_info}, // sys_dl_get_info
+    {537, (void *)&sys_dl_notify_event}, // sys_dl_notify_event
     {538, (void *)&sys_evf_create},
     {539, (void *)&sys_evf_delete},
     {540, (void *)&sys_evf_open},
@@ -599,8 +606,8 @@ static const syscall_Reg syscall_dpt[] = {
     {544, (void *)&sys_evf_set},
     {545, (void *)&sys_evf_clear},
     {546, (void *)&sys_evf_cancel},
-    {547, (void *)&null_handler}, // sys_query_memory_protection
-    {548, (void *)&null_handler}, // sys_batch_map
+    {547, (void *)&sys_query_memory_protection}, // sys_query_memory_protection
+    {548, (void *)&sys_batch_map}, // sys_batch_map
     {549, (void *)&sys_osem_create},
     {550, (void *)&sys_osem_delete},
     {551, (void *)&sys_osem_open},
@@ -611,120 +618,120 @@ static const syscall_Reg syscall_dpt[] = {
     {556, (void *)&sys_osem_cancel},
     {557, (void *)&sys_namedobj_create},
     {558, (void *)&sys_namedobj_delete},
-    {559, (void *)&null_handler}, // sys_set_vm_container
-    {560, (void *)&null_handler}, // sys_debug_init
-    {561, (void *)&null_handler}, // sys_suspend_process
-    {562, (void *)&null_handler}, // sys_resume_process
-    {563, (void *)&null_handler}, // sys_opmc_enable
-    {564, (void *)&null_handler}, // sys_opmc_disable
-    {565, (void *)&null_handler}, // sys_opmc_set_ctl
-    {566, (void *)&null_handler}, // sys_opmc_set_ctr
-    {567, (void *)&null_handler}, // sys_opmc_get_ctr
-    {568, (void *)&null_handler}, // sys_budget_create
-    {569, (void *)&null_handler}, // sys_budget_delete
-    {570, (void *)&null_handler}, // sys_budget_get
-    {571, (void *)&null_handler}, // sys_budget_set
-    {572, (void *)&null_handler}, // sys_virtual_query
-    {573, (void *)&null_handler}, // sys_mdbg_call
-    {574, (void *)&null_handler}, // sys_sblock_create
-    {575, (void *)&null_handler}, // sys_sblock_delete
-    {576, (void *)&null_handler}, // sys_sblock_enter
-    {577, (void *)&null_handler}, // sys_sblock_exit
-    {578, (void *)&null_handler}, // sys_sblock_xenter
-    {579, (void *)&null_handler}, // sys_sblock_xexit
-    {580, (void *)&null_handler}, // sys_eport_create
-    {581, (void *)&null_handler}, // sys_eport_delete
-    {582, (void *)&null_handler}, // sys_eport_trigger
-    {583, (void *)&null_handler}, // sys_eport_open
-    {584, (void *)&null_handler}, // sys_eport_close
+    {559, (void *)&sys_set_vm_container}, // sys_set_vm_container
+    {560, (void *)&sys_debug_init}, // sys_debug_init
+    {561, (void *)&sys_suspend_process}, // sys_suspend_process
+    {562, (void *)&sys_resume_process}, // sys_resume_process
+    {563, (void *)&sys_opmc_enable}, // sys_opmc_enable
+    {564, (void *)&sys_opmc_disable}, // sys_opmc_disable
+    {565, (void *)&sys_opmc_set_ctl}, // sys_opmc_set_ctl
+    {566, (void *)&sys_opmc_set_ctr}, // sys_opmc_set_ctr
+    {567, (void *)&sys_opmc_get_ctr}, // sys_opmc_get_ctr
+    {568, (void *)&sys_budget_create}, // sys_budget_create
+    {569, (void *)&sys_budget_delete}, // sys_budget_delete
+    {570, (void *)&sys_budget_get}, // sys_budget_get
+    {571, (void *)&sys_budget_set}, // sys_budget_set
+    {572, (void *)&sys_virtual_query}, // sys_virtual_query
+    {573, (void *)&sys_mdbg_call}, // sys_mdbg_call
+    {574, (void *)&sys_sblock_create}, // sys_sblock_create
+    {575, (void *)&sys_sblock_delete}, // sys_sblock_delete
+    {576, (void *)&sys_sblock_enter}, // sys_sblock_enter
+    {577, (void *)&sys_sblock_exit}, // sys_sblock_exit
+    {578, (void *)&sys_sblock_xenter}, // sys_sblock_xenter
+    {579, (void *)&sys_sblock_xexit}, // sys_sblock_xexit
+    {580, (void *)&sys_eport_create}, // sys_eport_create
+    {581, (void *)&sys_eport_delete}, // sys_eport_delete
+    {582, (void *)&sys_eport_trigger}, // sys_eport_trigger
+    {583, (void *)&sys_eport_open}, // sys_eport_open
+    {584, (void *)&sys_eport_close}, // sys_eport_close
     {585, (void *)&sys_is_in_sandbox},
     {586, (void *)&sys_dmem_container},
     {587, (void *)&sys_get_authinfo},
     {588, (void *)&sys_mname},
     {589, (void *)&sys_dynlib_dlopen},
-    {590, (void *)&null_handler}, // sys_dynlib_dlclose
+    {590, (void *)&sys_dynlib_dlclose}, // sys_dynlib_dlclose
     {591, (void *)&sys_dynlib_dlsym},
     {592, (void *)&sys_dynlib_get_list},
     {593, (void *)&sys_dynlib_get_info},
     {594, (void *)&sys_dynlib_load_prx},
     {595, (void *)&sys_dynlib_unload_prx},
     {596, (void *)&sys_dynlib_do_copy_relocations},
-    {597, (void *)&null_handler}, // sys_dynlib_prepare_dlclose
+    {597, (void *)&sys_dynlib_prepare_dlclose}, // sys_dynlib_prepare_dlclose
     {598, (void *)&sys_dynlib_get_proc_param},
     {599, (void *)&sys_dynlib_process_needed_and_relocate},
-    {600, (void *)&null_handler}, // sys_sandbox_path
+    {600, (void *)&sys_sandbox_path}, // sys_sandbox_path
     {601, (void *)&sys_mdbg_service},
     {602, (void *)&sys_randomized_path},
-    {603, (void *)&null_handler}, // sys_rdup
-    {604, (void *)&null_handler}, // sys_dl_get_metadata
+    {603, (void *)&sys_rdup}, // sys_rdup
+    {604, (void *)&sys_dl_get_metadata}, // sys_dl_get_metadata
     {605, (void *)&sys_workaround8849},
-    {606, (void *)&null_handler}, // sys_is_development_mode
-    {607, (void *)&null_handler}, // sys_get_self_auth_info
+    {606, (void *)&sys_is_development_mode}, // sys_is_development_mode
+    {607, (void *)&sys_get_self_auth_info}, // sys_get_self_auth_info
     {608, (void *)&sys_dynlib_get_info_ex},
-    {609, (void *)&null_handler}, // sys_budget_getid
+    {609, (void *)&sys_budget_getid}, // sys_budget_getid
     {610, (void *)&sys_budget_get_ptype},
-    {611, (void *)&null_handler}, // sys_get_paging_stats_of_all_threads
+    {611, (void *)&sys_get_paging_stats_of_all_threads}, // sys_get_paging_stats_of_all_threads
     {612, (void *)&sys_get_proc_type_info},
-    {613, (void *)&null_handler}, // sys_get_resident_count
-    {614, (void *)&null_handler}, // sys_prepare_to_suspend_process
-    {615, (void *)&null_handler}, // sys_get_resident_fmem_count
-    {616, (void *)&null_handler}, // sys_thr_get_name
-    {617, (void *)&null_handler}, // sys_set_gpo
-    {618, (void *)&null_handler}, // sys_get_paging_stats_of_all_objects
-    {619, (void *)&null_handler}, // sys_test_debug_rwmem
-    {620, (void *)&null_handler}, // sys_free_stack
-    {621, (void *)&null_handler}, // sys_suspend_system
+    {613, (void *)&sys_get_resident_count}, // sys_get_resident_count
+    {614, (void *)&sys_prepare_to_suspend_process}, // sys_prepare_to_suspend_process
+    {615, (void *)&sys_get_resident_fmem_count}, // sys_get_resident_fmem_count
+    {616, (void *)&sys_thr_get_name}, // sys_thr_get_name
+    {617, (void *)&sys_set_gpo}, // sys_set_gpo
+    {618, (void *)&sys_get_paging_stats_of_all_objects}, // sys_get_paging_stats_of_all_objects
+    {619, (void *)&sys_test_debug_rwmem}, // sys_test_debug_rwmem
+    {620, (void *)&sys_free_stack}, // sys_free_stack
+    {621, (void *)&sys_suspend_system}, // sys_suspend_system
     {622, (void *)&sys_ipmimgr_call},
-    {623, (void *)&null_handler}, // sys_get_gpo
-    {624, (void *)&null_handler}, // sys_get_vm_map_timestamp
-    {625, (void *)&null_handler}, // sys_opmc_set_hw
-    {626, (void *)&null_handler}, // sys_opmc_get_hw
-    {627, (void *)&null_handler}, // sys_get_cpu_usage_all
-    {628, (void *)&null_handler}, // sys_mmap_dmem
-    {629, (void *)&null_handler}, // sys_physhm_open
-    {630, (void *)&null_handler}, // sys_physhm_unlink
-    {631, (void *)&null_handler}, // sys_resume_internal_hdd
-    {632, (void *)&null_handler}, // sys_thr_suspend_ucontext
-    {633, (void *)&null_handler}, // sys_thr_resume_ucontext
-    {634, (void *)&null_handler}, // sys_thr_get_ucontext
-    {635, (void *)&null_handler}, // sys_thr_set_ucontext
-    {636, (void *)&null_handler}, // sys_set_timezone_info
-    {637, (void *)&null_handler}, // sys_set_phys_fmem_limit
-    {638, (void *)&null_handler}, // sys_utc_to_localtime
-    {639, (void *)&null_handler}, // sys_localtime_to_utc
-    {640, (void *)&null_handler}, // sys_set_uevt
-    {641, (void *)&null_handler}, // sys_get_cpu_usage_proc
-    {642, (void *)&null_handler}, // sys_get_map_statistics
-    {643, (void *)&null_handler}, // sys_set_chicken_switches
-    {644, (void *)&null_handler}, // sys_extend_page_table_pool
-    {645, (void *)&null_handler}, // sys_#645
-    {646, (void *)&null_handler}, // sys_get_kernel_mem_statistics
-    {647, (void *)&null_handler}, // sys_get_sdk_compiled_version
-    {648, (void *)&null_handler}, // sys_app_state_change
+    {623, (void *)&sys_get_gpo}, // sys_get_gpo
+    {624, (void *)&sys_get_vm_map_timestamp}, // sys_get_vm_map_timestamp
+    {625, (void *)&sys_opmc_set_hw}, // sys_opmc_set_hw
+    {626, (void *)&sys_opmc_get_hw}, // sys_opmc_get_hw
+    {627, (void *)&sys_get_cpu_usage_all}, // sys_get_cpu_usage_all
+    {628, (void *)&sys_mmap_dmem}, // sys_mmap_dmem
+    {629, (void *)&sys_physhm_open}, // sys_physhm_open
+    {630, (void *)&sys_physhm_unlink}, // sys_physhm_unlink
+    {631, (void *)&sys_resume_internal_hdd}, // sys_resume_internal_hdd
+    {632, (void *)&sys_thr_suspend_ucontext}, // sys_thr_suspend_ucontext
+    {633, (void *)&sys_thr_resume_ucontext}, // sys_thr_resume_ucontext
+    {634, (void *)&sys_thr_get_ucontext}, // sys_thr_get_ucontext
+    {635, (void *)&sys_thr_set_ucontext}, // sys_thr_set_ucontext
+    {636, (void *)&sys_set_timezone_info}, // sys_set_timezone_info
+    {637, (void *)&sys_set_phys_fmem_limit}, // sys_set_phys_fmem_limit
+    {638, (void *)&sys_utc_to_localtime}, // sys_utc_to_localtime
+    {639, (void *)&sys_localtime_to_utc}, // sys_localtime_to_utc
+    {640, (void *)&sys_set_uevt}, // sys_set_uevt
+    {641, (void *)&sys_get_cpu_usage_proc}, // sys_get_cpu_usage_proc
+    {642, (void *)&sys_get_map_statistics}, // sys_get_map_statistics
+    {643, (void *)&sys_set_chicken_switches}, // sys_set_chicken_switches
+    {644, (void *)&sys_extend_page_table_pool}, // sys_extend_page_table_pool
+    {645, (void *)&sys_unk645}, // sys_#645
+    {646, (void *)&sys_get_kernel_mem_statistics}, // sys_get_kernel_mem_statistics
+    {647, (void *)&sys_get_sdk_compiled_version}, // sys_get_sdk_compiled_version
+    {648, (void *)&sys_app_state_change}, // sys_app_state_change
     {649, (void *)&sys_dynlib_get_obj_member},
-    {650, (void *)&null_handler}, // sys_budget_get_ptype_of_budget
-    {651, (void *)&null_handler}, // sys_prepare_to_resume_process
-    {652, (void *)&null_handler}, // sys_process_terminate
+    {650, (void *)&sys_budget_get_ptype_of_budget}, // sys_budget_get_ptype_of_budget
+    {651, (void *)&sys_prepare_to_resume_process}, // sys_prepare_to_resume_process
+    {652, (void *)&sys_process_terminate}, // sys_process_terminate
     {653, (void *)&sys_blockpool_open},
-    {654, (void *)&null_handler}, // sys_blockpool_map
-    {655, (void *)&null_handler}, // sys_blockpool_unmap
-    {656, (void *)&null_handler}, // sys_dynlib_get_info_for_libdbg
-    {657, (void *)&null_handler}, // sys_blockpool_batch
-    {658, (void *)&null_handler}, // sys_fdatasync
-    {659, (void *)&null_handler}, // sys_dynlib_get_list2
-    {660, (void *)&null_handler}, // sys_dynlib_get_info2
-    {661, (void *)&null_handler}, // sys_aio_submit
-    {662, (void *)&null_handler}, // sys_aio_multi_delete
-    {663, (void *)&null_handler}, // sys_aio_multi_wait
-    {664, (void *)&null_handler}, // sys_aio_multi_poll
-    {665, (void *)&null_handler}, // sys_aio_get_data
-    {666, (void *)&null_handler}, // sys_aio_multi_cancel
-    {667, (void *)&null_handler}, // sys_get_bio_usage_all
-    {668, (void *)&null_handler}, // sys_aio_create
-    {669, (void *)&null_handler}, // sys_aio_submit_cmd
-    {670, (void *)&null_handler}, // sys_aio_init
-    {671, (void *)&null_handler}, // sys_get_page_table_stats
-    {672, (void *)&null_handler}, // sys_dynlib_get_list_for_libdbg
+    {654, (void *)&sys_blockpool_map}, // sys_blockpool_map
+    {655, (void *)&sys_blockpool_unmap}, // sys_blockpool_unmap
+    {656, (void *)&sys_dynlib_get_info_for_libdbg}, // sys_dynlib_get_info_for_libdbg
+    {657, (void *)&sys_blockpool_batch}, // sys_blockpool_batch
+    {658, (void *)&sys_fdatasync}, // sys_fdatasync
+    {659, (void *)&sys_dynlib_get_list2}, // sys_dynlib_get_list2
+    {660, (void *)&sys_dynlib_get_info2}, // sys_dynlib_get_info2
+    {661, (void *)&sys_aio_unsupported}, // sys_aio_submit
+    {662, (void *)&sys_aio_unsupported}, // sys_aio_multi_delete
+    {663, (void *)&sys_aio_unsupported}, // sys_aio_multi_wait
+    {664, (void *)&sys_aio_unsupported}, // sys_aio_multi_poll
+    {665, (void *)&sys_aio_unsupported}, // sys_aio_get_data
+    {666, (void *)&sys_aio_unsupported}, // sys_aio_multi_cancel
+    {667, (void *)&sys_get_bio_usage_all}, // sys_get_bio_usage_all
+    {668, (void *)&sys_aio_unsupported}, // sys_aio_create
+    {669, (void *)&sys_aio_unsupported}, // sys_aio_submit_cmd
+    {670, (void *)&sys_aio_init}, // sys_aio_init
+    {671, (void *)&sys_get_page_table_stats}, // sys_get_page_table_stats
+    {672, (void *)&sys_dynlib_get_list_for_libdbg}, // sys_dynlib_get_list_for_libdbg
 };
 
 #if defined(DELTA_BACKEND_NATIVE)
