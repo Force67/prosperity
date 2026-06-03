@@ -24,6 +24,7 @@
 #include "sys_generic.h"
 #include "sys_info.h"
 #include "sys_mem.h"
+#include "sys_semaphore.h"
 #include "sys_thread.h"
 #include "sys_time.h"
 #include "sys_vfs.h"
@@ -600,14 +601,14 @@ static const syscall_Reg syscall_dpt[] = {
     {546, (void *)&sys_evf_cancel},
     {547, (void *)&null_handler}, // sys_query_memory_protection
     {548, (void *)&null_handler}, // sys_batch_map
-    {549, (void *)&null_handler}, // sys_osem_create
-    {550, (void *)&null_handler}, // sys_osem_delete
-    {551, (void *)&null_handler}, // sys_osem_open
-    {552, (void *)&null_handler}, // sys_osem_close
-    {553, (void *)&null_handler}, // sys_osem_wait
-    {554, (void *)&null_handler}, // sys_osem_wait
-    {555, (void *)&null_handler}, // sys_osem_post
-    {556, (void *)&null_handler}, // sys_osem_cancel
+    {549, (void *)&sys_osem_create},
+    {550, (void *)&sys_osem_delete},
+    {551, (void *)&sys_osem_open},
+    {552, (void *)&sys_osem_close},
+    {553, (void *)&sys_osem_wait},
+    {554, (void *)&sys_osem_trywait},
+    {555, (void *)&sys_osem_post},
+    {556, (void *)&sys_osem_cancel},
     {557, (void *)&sys_namedobj_create},
     {558, (void *)&sys_namedobj_delete},
     {559, (void *)&null_handler}, // sys_set_vm_container

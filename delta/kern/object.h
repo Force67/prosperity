@@ -27,6 +27,7 @@ public:
     device,
     equeue,
     eventflag,
+    semaphore,
     shm,
   };
 
