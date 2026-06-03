@@ -36,6 +36,14 @@ namespace cpu {
 // above any real PS4 syscall number so it can't collide.
 constexpr uint32_t kTlsGetAddrSyscall = 0x40000001u;
 
+// Magic syscall range used on the FEX path to call native HLE functions from
+// guest code (vprx PRX overrides). A guest import slot can't point straight at a
+// host (ARM) function (the x86 JIT would try to decode ARM bytes), so we hand
+// the slot a tiny guest trampoline that issues `mov eax,<base|idx>; syscall` and
+// dispatch index `idx` to the registered host function in HandleSyscall. The top
+// byte tags the range; the low 24 bits are the thunk index.
+constexpr uint32_t kHostThunkSyscallBase = 0x42000000u;
+
 class ICpuBackend {
 public:
   virtual ~ICpuBackend() = default;
@@ -62,6 +70,14 @@ public:
     runGuestThread(createGuestThread(entry, arg, fsbase));
   }
 };
+
+// Return a guest-callable address that invokes the host (PS4ABI / sysv) function
+// `hostFn` with the guest's integer arguments (up to 8; args 7-8 read from the
+// guest stack). On the native x86 backend this is just `hostFn`; the guest
+// calls it directly. On FEX it returns a small guest x86 trampoline that bounces
+// through the kHostThunkSyscallBase magic syscall. Used by the loader to bind
+// vprx HLE exports (e.g. libSceVideoOut) into guest import slots. Thread-safe.
+uintptr_t makeHostThunk(void *hostFn);
 
 // Called once at process start, before any large allocation or guest mapping.
 // FEX: reserves/segregates the address space so guest memory can't collide with

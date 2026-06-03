@@ -442,6 +442,22 @@ bool smodule::resolveObfSymbol(const char *name, uintptr_t &ptrOut) {
   if (!libname)
     return false;
 
+  // HLE override: if a vprx module is registered for this library, it wins over
+  // the loaded LLE module (e.g. libSceVideoOut, whose real .bss device table is
+  // never populated in our env). The 11-char NID prefix decodes to the same hid
+  // the HLE table is keyed on.
+  {
+    uint64_t hid = 0;
+    if (runtime::decode_nid(name, 11, hid)) {
+      if (uintptr_t hle = runtime::vprx_get(libname, hid)) {
+        // The HLE handler is a native host function; on FEX the guest can't jump
+        // to it directly, so bind a guest trampoline. Native returns it as-is.
+        ptrOut = cpu::makeHostThunk(reinterpret_cast<void *>(hle));
+        return true;
+      }
+    }
+  }
+
   for (auto &mod : impModules) {
     if (mod.id == static_cast<int32_t>(modid)) {
       auto xmod = process->getModule(mod.name);

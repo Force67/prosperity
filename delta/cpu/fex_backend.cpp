@@ -20,6 +20,7 @@
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <mutex>
 #include <ucontext.h>
 #include <vector>
@@ -75,6 +76,16 @@ struct ExecRange {
 std::mutex g_rangeMutex;
 std::vector<ExecRange> g_ranges;
 
+// Host-thunk table: index -> native HLE function, dispatched from a guest
+// trampoline via the kHostThunkSyscallBase magic syscall. See makeHostThunk.
+std::mutex g_thunkMutex;
+std::vector<void *> g_hostThunks;
+// Bump-allocated pool of guest-executable trampolines (one per bound HLE export).
+uint8_t *g_thunkPool = nullptr;
+size_t g_thunkPoolUsed = 0;
+constexpr size_t g_thunkPoolSize = 0x100000; // 1 MiB -> ~95k trampolines
+constexpr size_t kThunkStride = 16;
+
 class FexSyscallHandler final : public FEXCore::HLE::SyscallHandler {
 public:
   FexSyscallHandler() { OSABI = FEXCore::HLE::SyscallOSABI::OS_LINUX64; }
@@ -94,6 +105,41 @@ public:
         g_ctxPtr->SetFlagsFromCompactedEFLAGS(Frame->Thread, ef & ~1u);
       }
       return r;
+    }
+
+    // Host-thunk bridge: a guest trampoline (planted by makeHostThunk) issued
+    // this magic syscall to invoke a native HLE function. Reconstruct the SysV
+    // call arguments: the trampoline did `mov r10,rcx` so the original 4th arg
+    // (rcx, which `syscall` clobbers) is in Argument[4]; args 7-8 sit on the
+    // guest stack just above the return address.
+    if ((num & 0xFF000000u) == kHostThunkSyscallBase) {
+      const uint32_t idx = num & 0x00FFFFFFu;
+      void *fn = nullptr;
+      {
+        std::lock_guard lk(g_thunkMutex);
+        if (idx < g_hostThunks.size())
+          fn = g_hostThunks[idx];
+      }
+      uint64_t ret = 0;
+      if (fn) {
+        const uint64_t rsp = Frame->State.gregs[FEXCore::X86State::REG_RSP];
+        uint64_t a7 = 0, a8 = 0;
+        if (rsp) {
+          a7 = *reinterpret_cast<uint64_t *>(rsp + 8);
+          a8 = *reinterpret_cast<uint64_t *>(rsp + 16);
+        }
+        using Fn8 = uint64_t(PS4ABI *)(uint64_t, uint64_t, uint64_t, uint64_t,
+                                       uint64_t, uint64_t, uint64_t, uint64_t);
+        ret = reinterpret_cast<Fn8>(fn)(Args->Argument[1], Args->Argument[2],
+                                        Args->Argument[3], Args->Argument[4],
+                                        Args->Argument[5], Args->Argument[6], a7,
+                                        a8);
+      }
+      if (g_ctxPtr) {
+        uint32_t ef = g_ctxPtr->ReconstructCompactedEFLAGS(Frame->Thread, false, nullptr, 0);
+        g_ctxPtr->SetFlagsFromCompactedEFLAGS(Frame->Thread, ef & ~1u);
+      }
+      return ret;
     }
 
     const uintptr_t handler = krnl::lv2_get(num);
@@ -343,6 +389,43 @@ void earlyInit() {
 }
 
 ICpuBackend &backend() { return g_backend; }
+
+// Plant a guest x86 trampoline that bounces into the native HLE function `hostFn`
+// via the kHostThunkSyscallBase magic syscall. The trampoline preserves the 4th
+// arg (rcx) into r10 before `syscall` clobbers rcx, matching the dispatch above.
+uintptr_t makeHostThunk(void *hostFn) {
+  std::lock_guard lk(g_thunkMutex);
+  if (!g_thunkPool) {
+    g_thunkPool = static_cast<uint8_t *>(
+        mmap(nullptr, g_thunkPoolSize, PROT_READ | PROT_WRITE | PROT_EXEC,
+             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+    if (g_thunkPool == MAP_FAILED) {
+      g_thunkPool = nullptr;
+      LOG_ERROR("fex: host-thunk pool mmap failed");
+      return 0;
+    }
+    // FEX won't JIT code outside a registered executable range.
+    std::lock_guard rk(g_rangeMutex);
+    g_ranges.push_back({reinterpret_cast<uint64_t>(g_thunkPool), g_thunkPoolSize});
+  }
+  if (g_thunkPoolUsed + kThunkStride > g_thunkPoolSize) {
+    LOG_ERROR("fex: host-thunk pool exhausted");
+    return 0;
+  }
+  const uint32_t idx = static_cast<uint32_t>(g_hostThunks.size());
+  g_hostThunks.push_back(hostFn);
+
+  uint8_t *t = g_thunkPool + g_thunkPoolUsed;
+  g_thunkPoolUsed += kThunkStride;
+  const uint32_t sc = kHostThunkSyscallBase | idx;
+  uint8_t *p = t;
+  *p++ = 0x49; *p++ = 0x89; *p++ = 0xCA;           // mov r10, rcx
+  *p++ = 0xB8;                                       // mov eax, imm32
+  std::memcpy(p, &sc, 4); p += 4;
+  *p++ = 0x0F; *p++ = 0x05;                          // syscall
+  *p++ = 0xC3;                                       // ret
+  return reinterpret_cast<uintptr_t>(t);
+}
 
 uint64_t currentGuestRip() {
   return t_curThread ? t_curThread->CurrentFrame->State.rip : 0;
