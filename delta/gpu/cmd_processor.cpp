@@ -8,6 +8,7 @@
 #include "pm4.h"
 #include "liverpool.h"
 
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>
@@ -18,6 +19,8 @@ namespace {
 std::mutex g_mtx;
 Regs g_regs;  // persistent register state across submits (Gnm relies on this)
 const bool g_trace = std::getenv("DELTA_GPU_TRACE") != nullptr;
+std::atomic<uint64_t> g_totalSubmits{0};
+std::atomic<uint64_t> g_totalDraws{0};
 
 // Write a run of register values from a SET_*_REG packet body into the file.
 void setRegs(uint32_t base, const uint32_t *body, uint32_t count) {
@@ -77,6 +80,19 @@ void submitDcb(const void *dcb, uint32_t sizeBytes) {
   std::lock_guard<std::mutex> lk(g_mtx);
   auto *p = static_cast<const uint32_t *>(dcb);
   uint32_t words = sizeBytes / 4;
+  uint64_t sn = g_totalSubmits.fetch_add(1) + 1;
+  if (g_trace && (sn <= 8 || sn % 256 == 0))
+    std::fprintf(stderr, "[gpu] submit #%lu size=%u draws-so-far=%lu\n",
+                 (unsigned long)sn, sizeBytes,
+                 (unsigned long)g_totalDraws.load());
+  // Dump the full packet walk of the first large (real rendering) command
+  // buffer so we can see its opcodes / find the draw.
+  static bool dumpedBig = false;
+  bool dumpThis = g_trace && !dumpedBig && sizeBytes > 4000;
+  if (dumpThis) {
+    dumpedBig = true;
+    std::fprintf(stderr, "[gpu] === big dcb walk (size=%u) ===\n", sizeBytes);
+  }
   if (g_trace && g_dcbSeen < 6)
     std::fprintf(stderr, "[gpu] submitDcb dcb=%p sizeBytes=%u words=%u hdr0=%#x\n",
                  dcb, sizeBytes, words, p[0]);
@@ -90,8 +106,8 @@ void submitDcb(const void *dcb, uint32_t sizeBytes) {
       const uint32_t *body = &p[i + 1];
       if (g_trace) {
         g_opHist[op & 0xFF]++;
-        if (g_dcbSeen == 0)
-          std::fprintf(stderr, "[gpu]   @%-4u T3 op=%#04x count=%u\n", i, op, count);
+        if (dumpThis)
+          std::fprintf(stderr, "[gpu]   @%-5u T3 op=%#04x count=%u\n", i, op, count);
       }
       if (i + 1 + count > words)
         break;  // truncated / desync
@@ -101,19 +117,47 @@ void submitDcb(const void *dcb, uint32_t sizeBytes) {
       case IT_SET_UCONFIG_REG: setRegs(kUConfigRegBase, body, count); break;
       case IT_SET_CONFIG_REG:  setRegs(kConfigRegBase, body, count); break;
       default:
-        if (isDraw(op))
+        if (isDraw(op)) {
+          g_totalDraws.fetch_add(1);
           handleDraw(op, body, count);
+        }
         break;
       }
       i += 1 + count;
-    } else if (type == Pm4Type::type2) {
-      i += 1;  // single-dword filler/NOP
+    } else if (type == Pm4Type::type2 || hdr == 0) {
+      // Single-dword filler: type-2 NOPs and zero-dword alignment padding that
+      // Gnm sprinkles between packets. Skip and keep walking (these are NOT the
+      // end of the buffer (real packets resume after the padding).
+      i += 1;
     } else {
-      // Gnm draw command buffers contain only type-2 and type-3 packets; a
-      // type-0 or type-1 header means we've run off the end of the real
-      // commands into trailing zero/garbage padding. Stop there.
+      // A non-zero type-0 / type-1 header is a genuine desync; stop.
+      if (dumpThis)
+        std::fprintf(stderr, "[gpu]   @%-5u STOP type%u hdr=%#x\n", i,
+                     (uint32_t)type, hdr);
       break;
     }
+  }
+  if (dumpThis) {
+    std::fprintf(stderr, "[gpu] === big dcb walk done: %u/%u words ===\n", i, words);
+    // Brute-scan the whole buffer for draw-opcode headers (in case the walker
+    // desynced and missed a draw), and dump raw words around the stop point.
+    int found = 0;
+    for (uint32_t w = 0; w < words; w++) {
+      uint32_t h = p[w];
+      if ((h >> 30) == 3) {
+        uint32_t o = (h >> 8) & 0xFF;
+        if (o == 0x2D || o == 0x27 || o == 0x35 || o == 0x30 || o == 0x15) {
+          std::fprintf(stderr, "[gpu]   SCAN found draw op=%#x @word %u\n", o, w);
+          if (++found > 8) break;
+        }
+      }
+    }
+    if (!found)
+      std::fprintf(stderr, "[gpu]   SCAN: no draw opcode anywhere in %u words\n", words);
+    std::fprintf(stderr, "[gpu]   raw[255..270]:");
+    for (uint32_t w = 255; w < 271 && w < words; w++)
+      std::fprintf(stderr, " %08x", p[w]);
+    std::fprintf(stderr, "\n");
   }
   if (g_trace && g_dcbSeen < 4)
     std::fprintf(stderr, "[gpu] dcb done: walked %u/%u words\n", i, words);
