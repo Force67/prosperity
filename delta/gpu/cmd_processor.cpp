@@ -9,6 +9,7 @@
 #include "liverpool.h"
 #include "vk_render.h"
 #include "gcn/gcn_decode.h"
+#include "gcn/gcn_resource.h"
 
 #include <atomic>
 #include <cstdio>
@@ -207,8 +208,24 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
     gcn::disassemble(reinterpret_cast<const uint32_t *>(vs), 512, "VS");
     gcn::disassemble(reinterpret_cast<const uint32_t *>(ps), 512, "PS");
     uint64_t fetch = ((uint64_t)(vud[1] & 0xFFFF) << 32) | vud[0];
-    if (fetch >= 0x1000000000ull && fetch < 0x20000000000ull)
+    if (fetch >= 0x1000000000ull && fetch < 0x20000000000ull) {
       gcn::disassemble(reinterpret_cast<const uint32_t *>(fetch), 128, "VS.fetch");
+      // Recover the actual vertex-attribute buffers and dump the first vertices.
+      auto vbs = gcn::trackVertexBuffers(reinterpret_cast<const uint32_t *>(fetch),
+                                         64, vud);
+      for (size_t bi = 0; bi < vbs.size(); bi++) {
+        auto &v = vbs[bi];
+        std::fprintf(stderr, "[gpu]   VB%zu base=%#lx stride=%u nrec=%u\n", bi,
+                     (unsigned long)v.base, v.stride, v.numRecords);
+        auto *f = reinterpret_cast<const float *>(v.base);
+        for (uint32_t r = 0; r < v.numRecords && r < 6; r++) {
+          std::fprintf(stderr, "[gpu]     r%u:", r);
+          for (uint32_t c = 0; c < v.stride / 4 && c < 8; c++)
+            std::fprintf(stderr, " %g", f[r * (v.stride / 4) + c]);
+          std::fprintf(stderr, "\n");
+        }
+      }
+    }
   }
 }
 
