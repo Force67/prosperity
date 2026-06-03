@@ -25,6 +25,14 @@ struct DrawInfo {
   uint32_t primType = 0;       // VGT_PRIMITIVE_TYPE
   uint32_t indexCount = 0;
   float mvp[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+
+  // Texturing (optional). If texBase != 0 the draw is textured: uvData holds the
+  // float2 UVs (same vertexCount/stride as the position buffer's source).
+  const void *uvData = nullptr;
+  uint32_t uvStride = 0;
+  uint32_t uvOffset = 0;       // byte offset of the float2 uv within the vertex
+  uint64_t texBase = 0;
+  uint32_t texW = 0, texH = 0;
 };
 
 // Bring up the headless Vulkan device. Returns false if Vulkan is unavailable

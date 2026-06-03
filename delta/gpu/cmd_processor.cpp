@@ -132,6 +132,39 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
         d.posOffset = 0;
       }
     }
+
+    // Texture: the PS samples an inline T# (image_sample). Isaac's textured
+    // sprite vertex format is {pos.xyzw @0, color @0x10, uv.xy @0x1c} in a
+    // 64-byte vertex, so the UV lives in the position buffer at offset 0x1c.
+    if (psA >= 0x1000000000ull && psA < 0x20000000000ull && d.vertexData) {
+      auto texs = gcn::trackTextures(reinterpret_cast<const uint32_t *>(psA), 256,
+                                     &g_regs[mmSPI_SHADER_USER_DATA_PS_0]);
+      if (!texs.empty()) {
+        d.texBase = texs[0].base;
+        d.texW = texs[0].width;
+        d.texH = texs[0].height;
+        d.uvData = d.vertexData;
+        d.uvStride = d.vertexStride;
+        d.uvOffset = 0x1c;  // float[7],[8]
+      }
+    }
+    static int g_uvDbg = 0;
+    if (g_trace && d.texBase && g_uvDbg < 3 && d.vertexData) {
+      g_uvDbg++;
+      std::fprintf(stderr, "[gpu] TEX draw tex=%#lx %ux%u nv=%u posStride=%u "
+                   "uvStride=%u\n", (unsigned long)d.texBase, d.texW, d.texH,
+                   d.vertexCount, d.vertexStride, d.uvStride);
+      auto *ps = reinterpret_cast<const float *>(d.vertexData);
+      auto *uv = reinterpret_cast<const float *>(d.uvData);
+      std::fprintf(stderr, "[gpu]   VB0 base=%p VB1 base=%p\n", d.vertexData, d.uvData);
+      for (uint32_t v = 0; v < 4; v++) {
+        std::fprintf(stderr, "[gpu]   v%u VB0[", v);
+        for (int c = 0; c < 16; c++) std::fprintf(stderr, "%g ", ps[v*16+c]);
+        std::fprintf(stderr, "] VB1[");
+        if (uv) for (int c = 0; c < 16; c++) std::fprintf(stderr, "%g ", uv[v*16+c]);
+        std::fprintf(stderr, "]\n");
+      }
+    }
     if (!g_frameActive) {
       vk::beginFrame(g_regs.cbColorBase(0), fbWidth(), fbHeight(), 0,
                      g_regs[mmCB_COLOR0_INFO]);
