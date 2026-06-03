@@ -8,9 +8,11 @@
 #include "libSceVideoOut.h"
 
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
+#include <thread>
 
 #include "gfx/gfx.h"
 #include "kern/proc.h"
@@ -118,16 +120,24 @@ std::mutex g_mtx;
 VideoPort g_port;            // single display port is enough for Isaac
 std::atomic<bool> g_gfxUp{false};
 
+std::atomic<int> g_gfxState{0};  // 0=untried, 1=up, 2=failed
+
 bool ensureGfx(uint32_t w, uint32_t h) {
-  if (g_gfxUp.load())
+  int st = g_gfxState.load();
+  if (st == 1)
     return true;
+  if (st == 2)
+    return false;  // tried once and failed; don't spam retries every frame
   std::lock_guard<std::mutex> lk(g_mtx);
-  if (g_gfxUp.load())
-    return true;
+  st = g_gfxState.load();
+  if (st != 0)
+    return st == 1;
   if (!gfx::init("prosperity - The Binding of Isaac", w, h)) {
-    std::printf("[videoout] gfx::init FAILED\n");
+    std::printf("[videoout] gfx::init FAILED (no window this run)\n");
+    g_gfxState.store(2);
     return false;
   }
+  g_gfxState.store(1);
   g_gfxUp.store(true);
   std::printf("[videoout] gfx window up (%ux%u)\n", w, h);
   return true;
@@ -141,6 +151,49 @@ equeue *findEqueue(int handle) {
   if (!obj || obj->type() != kObject::oType::equeue)
     return nullptr;
   return static_cast<equeue *>(obj);
+}
+
+// Present the most recently flipped scanout buffer to the window.
+void presentScanout() {
+  void *fb;
+  uint32_t w, h, pitch, fmt;
+  {
+    std::lock_guard<std::mutex> lk(g_mtx);
+    int idx = g_port.currentBuffer >= 0 ? g_port.currentBuffer : 0;
+    fb = (idx < kMaxBuffers) ? g_port.buffers[idx] : nullptr;
+    w = g_port.width;
+    h = g_port.height;
+    pitch = g_port.pitch;
+    fmt = g_port.pixelFormat;
+  }
+  if (!fb || !ensureGfx(w, h))
+    return;
+  auto pf = (fmt & 0x2200u) ? gfx::PixelFormat::rgba8 : gfx::PixelFormat::bgra8;
+  gfx::present(fb, w, h, pitch * 4, pf);
+  gfx::pumpEvents();
+}
+
+std::atomic<bool> g_flipPumpStarted{false};
+
+// The game submits flips through Gnm (a PM4 prepareFlip packet to the GPU), not
+// sceVideoOutSubmitFlip, and then blocks in kevent on the equeue it registered
+// with sceVideoOutAddFlipEvent waiting for flip completion. We don't run the GPU
+// yet, so synthesize that completion: a ~60 Hz pump that presents the current
+// scanout buffer and posts the flip event to every equeue that registered one.
+void startFlipPump() {
+  bool expected = false;
+  if (!g_flipPumpStarted.compare_exchange_strong(expected, true))
+    return;
+  std::printf("[videoout] flip pump started (60 Hz)\n");
+  std::thread([] {
+    for (;;) {
+      std::this_thread::sleep_for(std::chrono::microseconds(16667));
+      presentScanout();
+      uint64_t c = g_port.flipCount.fetch_add(1) + 1;
+      // post the flip-complete event to whichever equeue holds a flip knote.
+      triggerAllEqueues(kEventFlip, kFilterFlip, static_cast<int64_t>(c));
+    }
+  }).detach();
 }
 
 }  // namespace
@@ -241,6 +294,7 @@ int PS4ABI sceVideoOutAddFlipEvent(int eqHandle, int handle, void *udata) {
   g_port.flipEqueue = eqHandle;
   g_port.flipUdata = udata;
   eq->addEvent(static_cast<uint64_t>(kEventFlip), kFilterFlip, udata);
+  startFlipPump();
   return 0;
 }
 
@@ -364,9 +418,12 @@ int PS4ABI sceVideoOutWaitVblank(int handle) {
 }
 
 int PS4ABI sceVideoOutGetBufferLabelAddress(int handle, uintptr_t *label) {
+  // Gnm's flip path checks `eax == 0` for success (then reads *label to build a
+  // GPU completion-label write). Returning the slot count here makes Gnm treat
+  // the flip request as failed ("flip request failed"). Return 0 = success.
   if (label)
     *label = reinterpret_cast<uintptr_t>(&g_port.labels[0]);
-  return 16;  // number of label slots
+  return 0;
 }
 
 int PS4ABI sceVideoOutSetWindowModeMargins(int handle, int top, int bottom) {
