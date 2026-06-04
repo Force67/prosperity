@@ -28,6 +28,10 @@ std::atomic<uint64_t> g_totalDraws{0};
 bool g_vkTried = false;
 bool g_frameActive = false;
 
+// Index-buffer state, set by IT_INDEX_TYPE / IT_INDEX_BASE before a draw.
+uint32_t g_indexType = 0;  // 0 = 16-bit, 1 = 32-bit (VGT_DMA_INDEX_TYPE bits[1:0])
+uint64_t g_indexBase = 0;  // from IT_INDEX_BASE (DRAW_INDEX_2 carries its own base)
+
 // Current render-target / framebuffer geometry, derived from the screen scissor
 // (CB regs don't carry an explicit width/height).
 uint32_t fbWidth() {
@@ -112,7 +116,20 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
     const uint32_t *vud = &g_regs[mmSPI_SHADER_USER_DATA_VS_0];
     vk::DrawInfo d;
     d.primType = g_regs[mmVGT_PRIMITIVE_TYPE];
-    d.indexCount = (count >= 1) ? body[0] : 0;
+    // Index buffer. DRAW_INDEX_2 (5 dwords): maxSize, baseLo, baseHi, indexCount,
+    // drawInitiator. The draws are indexed triangle lists; without the index
+    // buffer (drawing raw vertices as a strip) batched sprites smear into long
+    // diagonal triangles. DRAW_INDEX_AUTO has no index buffer (sequential verts).
+    if (op == IT_DRAW_INDEX_2 && count >= 4) {
+      uint64_t ibase = (static_cast<uint64_t>(body[2] & 0xFF) << 32) | body[1];
+      uint32_t icount = body[3];
+      if (ibase >= 0x1000000000ull && ibase < 0x20000000000ull && icount &&
+          icount <= 0x100000) {
+        d.indexData = reinterpret_cast<const void *>(ibase);
+        d.indexCount = icount;
+        d.indexType = g_indexType;  // 0 = 16-bit, 1 = 32-bit
+      }
+    }
     d.rtBase = g_regs.cbColorBase(0);
     d.rtW = fbWidth();
     d.rtH = fbHeight();
@@ -383,6 +400,13 @@ void submitDcb(const void *dcb, uint32_t sizeBytes) {
       case IT_SET_SH_REG:      setRegs(kShRegBase, body, count); break;
       case IT_SET_UCONFIG_REG: setRegs(kUConfigRegBase, body, count); break;
       case IT_SET_CONFIG_REG:  setRegs(kConfigRegBase, body, count); break;
+      case IT_INDEX_TYPE:  // VGT_DMA_INDEX_TYPE: bits[1:0] 0=16-bit 1=32-bit
+        if (count >= 1) g_indexType = body[0] & 0x3;
+        break;
+      case IT_INDEX_BASE:  // index buffer base (byte address) lo/hi
+        if (count >= 2)
+          g_indexBase = (static_cast<uint64_t>(body[1] & 0xFF) << 32) | body[0];
+        break;
       default:
         if (isDraw(op)) {
           g_totalDraws.fetch_add(1);

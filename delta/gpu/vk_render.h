@@ -22,8 +22,14 @@ struct DrawInfo {
   uint32_t vertexCount = 0;
   uint32_t vertexStride = 0;   // bytes per vertex in the source buffer
   uint32_t posOffset = 0;      // byte offset of the float2 position
-  uint32_t primType = 0;       // VGT_PRIMITIVE_TYPE
+  uint32_t primType = 0;       // VGT_PRIMITIVE_TYPE (4 = triangle list)
+
+  // Index buffer (DRAW_INDEX_2). When indexData != null the draw is indexed: the
+  // indices select vertices out of the vertex buffer. indexType: 0 = 16-bit,
+  // 1 = 32-bit. Without an index buffer the draw is sequential (DRAW_INDEX_AUTO).
+  const void *indexData = nullptr;
   uint32_t indexCount = 0;
+  uint32_t indexType = 0;
   float mvp[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
   uint64_t rtBase = 0;         // CB_COLOR0 address; the draw's render target
   uint32_t rtW = 0, rtH = 0;   // render-target dimensions

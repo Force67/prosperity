@@ -36,6 +36,7 @@ namespace {
   } while (0)
 
 constexpr VkDeviceSize kVbRing = 16ull * 1024 * 1024;  // per-frame vertex ring
+constexpr VkDeviceSize kIbRing = 8ull * 1024 * 1024;   // per-frame index ring (32-bit)
 
 struct State {
   bool ready = false;
@@ -70,6 +71,13 @@ struct State {
   VkDeviceMemory vbMem = VK_NULL_HANDLE;
   uint8_t *vbMap = nullptr;
   VkDeviceSize vbOffset = 0;
+
+  // Per-frame index ring (host-visible). 32-bit indices (16-bit guest indices are
+  // widened on upload) for indexed triangle-list draws.
+  VkBuffer ib = VK_NULL_HANDLE;
+  VkDeviceMemory ibMem = VK_NULL_HANDLE;
+  uint8_t *ibMap = nullptr;
+  VkDeviceSize ibOffset = 0;
 
   // Textured pipeline + texture cache.
   VkPipeline texPipeline = VK_NULL_HANDLE;
@@ -122,7 +130,8 @@ struct RTarget {
   uint32_t w = 0, h = 0;
   VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
   bool usedThisFrame = false;
-  uint32_t draws = 0;  // draws into this RT this frame
+  uint32_t draws = 0;     // draws into this RT this frame
+  int lastFrame = -1000;  // frame number this RT was last rendered into
 };
 std::unordered_map<uint64_t, RTarget> g_rts;
 
@@ -268,6 +277,21 @@ bool createDevice() {
   VKOK(vkBindBufferMemory(g.device, g.vb, g.vbMem, 0));
   VKOK(vkMapMemory(g.device, g.vbMem, 0, kVbRing, 0, (void **)&g.vbMap));
 
+  // Index ring (host-visible, 32-bit indices).
+  VkBufferCreateInfo ibi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+  ibi.size = kIbRing;
+  ibi.usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+  VKOK(vkCreateBuffer(g.device, &ibi, nullptr, &g.ib));
+  VkMemoryRequirements ir;
+  vkGetBufferMemoryRequirements(g.device, g.ib, &ir);
+  VkMemoryAllocateInfo ia{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+  ia.allocationSize = ir.size;
+  ia.memoryTypeIndex = findMemoryType(ir.memoryTypeBits,
+      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  VKOK(vkAllocateMemory(g.device, &ia, nullptr, &g.ibMem));
+  VKOK(vkBindBufferMemory(g.device, g.ib, g.ibMem, 0));
+  VKOK(vkMapMemory(g.device, g.ibMem, 0, kIbRing, 0, (void **)&g.ibMap));
+
   VkPhysicalDeviceProperties props;
   vkGetPhysicalDeviceProperties(g.phys, &props);
   std::fprintf(stderr, "[gpuvk] device: %s\n", props.deviceName);
@@ -368,8 +392,10 @@ VkPipeline buildPipeline(bool textured, VkPipelineColorBlendAttachmentState cba)
   vi.pVertexBindingDescriptions = &bind;
   vi.vertexAttributeDescriptionCount = 3;
   vi.pVertexAttributeDescriptions = attrs;
+  // GNM draws are indexed triangle LISTS (VGT_PRIMITIVE_TYPE 4); the previous
+  // hardcoded strip connected separate sprites into long diagonal triangles.
   VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
-  ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+  ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
   VkPipelineViewportStateCreateInfo vp{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
   vp.viewportCount = 1; vp.scissorCount = 1;
   VkPipelineRasterizationStateCreateInfo rs{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
@@ -687,6 +713,7 @@ void beginRegion(uint64_t base, RTarget &rt) {
   VkRect2D sc{{0, 0}, {rt.w, rt.h}};
   vkCmdSetScissor(g.cmd, 0, 1, &sc);
   rt.usedThisFrame = true;
+  rt.lastFrame = g.frameNum;
   g.curRt = base;
   g.lastRt = base;
   static const bool regTrace = std::getenv("DELTA_GPU_REGTRACE") != nullptr;
@@ -737,6 +764,7 @@ void beginFrame() {
   g.frameDraws = 0;
   g.frameNum++;
   g.vbOffset = 0;
+  g.ibOffset = 0;
   g.curRt = 0;
   g.lastRt = 0;
   g.busiestRt = 0;
@@ -755,13 +783,33 @@ void beginFrame() {
 }
 
 void draw(const DrawInfo &d) {
-  if (!g.recording || !d.vertexData || d.vertexCount < 3 || !d.vertexStride)
+  if (!g.recording || !d.vertexData || !d.vertexStride)
     return;
+  // Indexed triangle list (the common GNM draw): the index buffer selects which
+  // vertices form each triangle. Find how many vertices the indices reference so
+  // we repack exactly that many (the V# num_records can be the whole shared batch).
+  const uint16_t *idx16 = nullptr;
+  const uint32_t *idx32 = nullptr;
+  bool indexed = d.indexData && d.indexCount >= 3;
   uint32_t nv = d.vertexCount;
-  if (nv > 4096) return;  // sane cap (Isaac quads are tiny)
+  if (indexed) {
+    if (d.indexCount > 1500000u) return;
+    uint32_t maxIdx = 0;
+    if (d.indexType == 1) {
+      idx32 = static_cast<const uint32_t *>(d.indexData);
+      for (uint32_t i = 0; i < d.indexCount; i++) maxIdx = idx32[i] > maxIdx ? idx32[i] : maxIdx;
+    } else {
+      idx16 = static_cast<const uint16_t *>(d.indexData);
+      for (uint32_t i = 0; i < d.indexCount; i++) maxIdx = idx16[i] > maxIdx ? idx16[i] : maxIdx;
+    }
+    nv = maxIdx + 1;
+  }
+  if (nv < 3 || nv > 200000u) return;  // sane cap
   VkDeviceSize need = (VkDeviceSize)nv * 32;  // pos.xy + color.rgba + uv.xy
   if (g.vbOffset + need > kVbRing)
     return;  // ring full this frame
+  if (indexed && g.ibOffset + (VkDeviceSize)d.indexCount * 4 > kIbRing)
+    return;
   // Repack pos / color / uv interleaved into the vertex ring (stride 32).
   auto *base = static_cast<const uint8_t *>(d.vertexData);
   auto *dst = reinterpret_cast<float *>(g.vbMap + g.vbOffset);
@@ -848,8 +896,25 @@ void draw(const DrawInfo &d) {
     if ((nx1 - nx0) >= 1.7f && (ny1 - ny0) >= 1.7f) { g.frameDraws++; return; }
   }
 
+  // Redirect a STALE render-to-texture source to the freshest same-size RT. Isaac
+  // samples a room buffer (e.g. 0x109ae97800) that the game refreshes via a pass
+  // our heuristic renderer misses, leaving it stale/black; sampled fullscreen and
+  // opaque it blacks out the scene. The current room lives in a sibling same-size
+  // RT we DO refresh every frame, so use that instead.
+  uint64_t texBase = d.texBase;
+  static const bool freshRT = std::getenv("DELTA_GPU_FRESHRT") != nullptr;
+  if (freshRT && texBase) {
+    auto it = g_rts.find(texBase);
+    if (it != g_rts.end() && g.frameNum - it->second.lastFrame > 8) {
+      int bestFrame = it->second.lastFrame; uint64_t best = texBase;
+      for (auto &kv : g_rts)
+        if (kv.second.w == it->second.w && kv.second.h == it->second.h &&
+            kv.second.lastFrame > bestFrame) { bestFrame = kv.second.lastFrame; best = kv.first; }
+      texBase = best;
+    }
+  }
   // Is this a render-to-texture sample (the draw samples another render target)?
-  bool rtAsTex = d.texBase && d.texBase != d.rtBase && g_rts.count(d.texBase);
+  bool rtAsTex = texBase && texBase != d.rtBase && g_rts.count(texBase);
   // A genuine fullscreen composite samples a near-fullscreen source RT (the scene
   // buffer copied to the scanout, or a post pass). Those use screen-space UVs and
   // must land opaquely. Sprite/effect draws that merely sample a smaller RT keep
@@ -863,21 +928,22 @@ void draw(const DrawInfo &d) {
   if (rtAsTex && g_rts[d.texBase].w >= 700 && g_rts[d.texBase].w <= 900)
     g.frameHadRoom = true;
 
-  // Targeted draw trace (DELTA_GPU_DTRACE): dump every draw on a couple of frames
-  // so the scanout composite can be inspected (which RT it samples, geometry).
+  // Draw trace (DELTA_GPU_DTRACE): content-triggered. Once a frame samples a room
+  // RT, dump EVERY draw of the NEXT frame (with blend state) so the full gameplay
+  // composite can be inspected regardless of the flaky autoskip's frame timing.
   static const bool dtrace = std::getenv("DELTA_GPU_DTRACE") != nullptr;
-  static const int dtframe = [] {
-    const char *e = std::getenv("DELTA_GPU_DTFRAME");
-    return e ? std::atoi(e) : 800;
-  }();
-  if (dtrace && (g.frameNum == dtframe || g.frameNum == dtframe + 1)) {
+  static int dumpFrame = -1;
+  if (dtrace && g.frameHadRoom && dumpFrame < 0)
+    dumpFrame = g.frameNum + 1;
+  if (dtrace && g.frameNum == dumpFrame) {
     float minx=1e9f,miny=1e9f,maxx=-1e9f,maxy=-1e9f;
     for (uint32_t v=0; v<nv; v++){float x=dst[v*8],y=dst[v*8+1];
       minx=x<minx?x:minx;maxx=x>maxx?x:maxx;miny=y<miny?y:miny;maxy=y>maxy?y:maxy;}
-    std::fprintf(stderr,"[dt] f%d d%u rt=%#lx %ux%u tex=%#lx %ux%u rtAsTex=%d fsC=%d nv=%u "
-                 "pos[%.0f,%.0f..%.0f,%.0f] uv0=%.3f,%.3f col=%.2f,%.2f,%.2f\n",
+    std::fprintf(stderr,"[dt] f%d d%u rt=%#lx %ux%u tex=%#lx %ux%u rtAsTex=%d fsC=%d "
+                 "blend=%#x en=%d nv=%u pos[%.0f,%.0f..%.0f,%.0f] uv0=%.3f,%.3f col=%.2f,%.2f,%.2f\n",
                  g.frameNum,g.frameDraws,(unsigned long)d.rtBase,d.rtW,d.rtH,
-                 (unsigned long)d.texBase,d.texW,d.texH,rtAsTex?1:0,fsComposite?1:0,nv,
+                 (unsigned long)d.texBase,d.texW,d.texH,rtAsTex?1:0,fsComposite?1:0,
+                 d.blendControl,d.blendEnable?1:0,nv,
                  minx,miny,maxx,maxy,dst[6],dst[7],dst[2],dst[3],dst[4]);
   }
   // Upload guest texture (independent of the render region) if not RT-as-texture.
@@ -889,7 +955,7 @@ void draw(const DrawInfo &d) {
   if (g.curRt != d.rtBase) {
     endRegion();
     if (rtAsTex) {  // make the sampled RT shader-readable before we render
-      auto &src = g_rts[d.texBase];
+      auto &src = g_rts[texBase];
       if (src.layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
         imageBarrier(g.cmd, src.image, src.layout,
                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
@@ -901,8 +967,8 @@ void draw(const DrawInfo &d) {
     if (!rt) { g.frameDraws++; return; }
     beginRegion(d.rtBase, *rt);
   }
-  if (rtAsTex && g_rts[d.texBase].layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
-    texSet = g_rts[d.texBase].set;
+  if (rtAsTex && g_rts[texBase].layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+    texSet = g_rts[texBase].set;
 
   // Content-triggered trace of room-RT composites (source RT ~832 wide): fires
   // whenever gameplay is on screen, regardless of frame number (autoskip timing
@@ -965,7 +1031,20 @@ void draw(const DrawInfo &d) {
     vkCmdPushConstants(g.cmd, g.layout, VK_SHADER_STAGE_VERTEX_BIT, 0, 64, d.mvp);
   }
   vkCmdBindVertexBuffers(g.cmd, 0, 1, &g.vb, &off);
-  vkCmdDraw(g.cmd, nv, 1, 0, 0);
+  if (indexed) {
+    // Widen the guest indices (16- or 32-bit) into the 32-bit index ring and draw.
+    VkDeviceSize ioff = g.ibOffset;
+    auto *idst = reinterpret_cast<uint32_t *>(g.ibMap + ioff);
+    if (idx32)
+      std::memcpy(idst, idx32, (size_t)d.indexCount * 4);
+    else
+      for (uint32_t i = 0; i < d.indexCount; i++) idst[i] = idx16[i];
+    vkCmdBindIndexBuffer(g.cmd, g.ib, ioff, VK_INDEX_TYPE_UINT32);
+    vkCmdDrawIndexed(g.cmd, d.indexCount, 1, 0, 0, 0);
+    g.ibOffset += (VkDeviceSize)d.indexCount * 4;
+  } else {
+    vkCmdDraw(g.cmd, nv, 1, 0, 0);
+  }
   g.vbOffset += need;
   g.frameDraws++;
   if (g.curRt) {
@@ -991,6 +1070,12 @@ void endFrame(uint64_t scanoutBase) {
   if (wantW && wantH)
     for (auto &kv : g_rts)
       if ((int)kv.second.w == wantW && (int)kv.second.h == wantH) { presentBase = kv.first; break; }
+  // Debug: present a specific RT by guest address (addresses are stable per build).
+  static const uint64_t wantAddr = [] {
+    const char *e = std::getenv("DELTA_GPU_PRESENT_ADDR");
+    return e ? strtoull(e, nullptr, 0) : 0ull;
+  }();
+  if (wantAddr && g_rts.count(wantAddr)) presentBase = wantAddr;
   auto it = g_rts.find(presentBase);
   if (it == g_rts.end()) {  // nothing rendered this frame
     vkEndCommandBuffer(g.cmd);
@@ -1056,8 +1141,8 @@ void endFrame(uint64_t scanoutBase) {
   // frames with real draw counts) so the headless autoskip stops opening menus
   // and stays in the run instead of bouncing back out via the pause menu.
   static int roomStreak = 0;
-  if (g.frameHadRoom && g.frameDraws > 20 && ++roomStreak >= 15)
-    gfx::setInGameplay(true);
+  if (g.frameHadRoom && g.frameDraws > 20 && ++roomStreak >= 4)
+    gfx::setInGameplay(true);  // latch fast, before the autoskip re-pauses
 
   // Deterministic room capture: whenever this frame sampled a room RT, roll the
   // presented image to /tmp/gpu_room.ppm (atomic). The last write is guaranteed a
@@ -1072,6 +1157,15 @@ void endFrame(uint64_t scanoutBase) {
   }
   if (g_dump && g.frameNum >= 1000 && g.frameNum % 2000 == 0 && g.frameDraws > 0)
     dumpPpm(pixels, rt.w, rt.h);
+  // Early-frame sequence capture (DELTA_GPU_DUMP_EARLY): dump the first frames that
+  // draw to numbered files, to inspect the deterministic (no-input) intro start.
+  static const bool dumpEarly = std::getenv("DELTA_GPU_DUMP_EARLY") != nullptr;
+  static int earlyN = 0;
+  if (dumpEarly && earlyN < 60 && g.frameDraws > 0) {
+    char p[256];
+    std::snprintf(p, sizeof(p), "%s/early_%03d_f%d.ppm", dumpDir(), earlyN++, g.frameNum);
+    writePpm(p, pixels, rt.w, rt.h);
+  }
   // Rolling latest-frame capture (uncapped) so late transitions (menu/gameplay)
   // can be inspected from a long headless run without knowing the frame number.
   if (g_dump && g.frameNum % 300 == 0 && g.frameDraws > 0) {
