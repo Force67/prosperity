@@ -7,6 +7,10 @@ check_include_files("gdb/jit-reader.h" HAVE_GDB_JIT_READER_H)
 option(BUILD_FEX_LINUX_TESTS "Build FEXLinuxTests (requires x86 compiler)" FALSE)
 option(BUILD_THUNKS "Build thunks" FALSE)
 option(BUILD_FEXCONFIG "Build FEXConfig" TRUE)
+# PS4Delta embeds only FEXCore (the JIT) + Common; it has its own kernel HLE and
+# never uses FEX's Linux frontend tools (LinuxEmulation, FEXServer, ...), which
+# aren't fully vendored here. Off => skip Source/Tools/.
+option(BUILD_FEX_TOOLS "Build the FEX frontend tools" ON)
 option(ENABLE_CLANG_THUNKS "Build thunks with clang" TRUE)
 option(ENABLE_IWYU "Enable the Include What You Use sanitizer" FALSE)
 option(ENABLE_LTO "Enable LTO with compilation" TRUE)
@@ -60,10 +64,15 @@ if (NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
   message(FATAL_ERROR "Unsupported pointer size ${CMAKE_SIZEOF_VOID_P}."
     " FEX only supports 64-bit (8-byte pointer) systems."
     " If you believe this is in error, file an issue.")
-elseif (NOT (WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux"))
+elseif (NOT (WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Android"))
   message(FATAL_ERROR "Unsupported system type ${CMAKE_SYSTEM_NAME}."
     " FEX only supports Linux and Windows."
     " If you believe this is in error, file an issue.")
+endif()
+# Android (bionic) is Linux-like for FEXCore's purposes; treat it as Linux for
+# the platform-gated source/flag selection below so the JIT builds normally.
+if (CMAKE_SYSTEM_NAME STREQUAL "Android")
+  set(CMAKE_SYSTEM_NAME "Linux")
 endif()
 
 ## Compiler Checks ##

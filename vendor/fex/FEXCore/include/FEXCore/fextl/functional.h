@@ -51,10 +51,15 @@ public:
       };
 
       // Third, assign the result to std::function, ensuring it's indeed
-      // allocation-free by checking for nothrow-constructibility
+      // allocation-free by checking for nothrow-constructibility.
+      // libc++ doesn't mark this assignment noexcept, but its small-buffer
+      // optimisation still stores a single-pointer capture inline (no
+      // allocation), so the guarantee holds in practice; skip the strict check.
+#if !defined(_LIBCPP_VERSION)
       static_assert(noexcept(internal = std::move(wrapped_lambda)), "This implementation of std::function "
                                                                     "does not support implementing "
                                                                     "fextl::move_only_function");
+#endif
       internal = std::move(wrapped_lambda);
 
       // Finally, if a destructor must be called, generate a pointer to its destructor

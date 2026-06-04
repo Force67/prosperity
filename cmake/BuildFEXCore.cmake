@@ -11,14 +11,35 @@ include(ExternalProject)
 
 set(FEX_SRC ${CMAKE_SOURCE_DIR}/vendor/fex)
 
-# Clang used to build FEX. Override with -DDELTA_FEX_CLANG=/path if needed.
-# Defaults to the nix-provided clang wrapper that the bring-up was validated on.
-set(DELTA_FEX_CLANG "/nix/store/bcv5hwb933cp93m9ckgsym21ncnhwm2v-clang-wrapper-18.1.8/bin"
-    CACHE PATH "Directory containing the clang/clang++ used to build FEXCore")
-if(NOT EXISTS "${DELTA_FEX_CLANG}/clang++")
-  message(FATAL_ERROR
-    "FEXCore needs Clang (FEX refuses GCC) but ${DELTA_FEX_CLANG}/clang++ was not found.\n"
-    "Set -DDELTA_FEX_CLANG=<dir containing clang/clang++>.")
+# How FEX gets its compiler. On Android we cross-compile with the NDK toolchain
+# (bionic, arm64-v8a) the outer build is already using, so forward that file +
+# ABI/platform and let it pick the NDK clang. TUNE_CPU=none avoids FEX's
+# configure-time /proc/cpuinfo probe (it would read the x86 build host); the JIT
+# detects real host features at runtime. Elsewhere (native arm/x86 host build)
+# FEX builds with its own pinned Clang so it links into a possibly-GCC emulator.
+if(ANDROID)
+  # NDK libc++ (r27/r28) lacks std::atomic_ref, which FEX needs; force-include a
+  # builtin-based polyfill (see cmake/android_atomic_ref.h).
+  set(_fex_toolchain_args
+    -DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}
+    -DANDROID_ABI=${ANDROID_ABI}
+    -DANDROID_PLATFORM=${ANDROID_PLATFORM}
+    -DANDROID_STL=${ANDROID_STL}
+    -DTUNE_CPU=none
+    "-DCMAKE_CXX_FLAGS=-include ${CMAKE_CURRENT_LIST_DIR}/android_atomic_ref.h")
+else()
+  # Clang used to build FEX. Override with -DDELTA_FEX_CLANG=/path if needed.
+  # Defaults to the nix-provided clang wrapper the bring-up was validated on.
+  set(DELTA_FEX_CLANG "/nix/store/bcv5hwb933cp93m9ckgsym21ncnhwm2v-clang-wrapper-18.1.8/bin"
+      CACHE PATH "Directory containing the clang/clang++ used to build FEXCore")
+  if(NOT EXISTS "${DELTA_FEX_CLANG}/clang++")
+    message(FATAL_ERROR
+      "FEXCore needs Clang (FEX refuses GCC) but ${DELTA_FEX_CLANG}/clang++ was not found.\n"
+      "Set -DDELTA_FEX_CLANG=<dir containing clang/clang++>.")
+  endif()
+  set(_fex_toolchain_args
+    -DCMAKE_C_COMPILER=${DELTA_FEX_CLANG}/clang
+    -DCMAKE_CXX_COMPILER=${DELTA_FEX_CLANG}/clang++)
 endif()
 
 set(FEX_PREFIX  ${CMAKE_BINARY_DIR}/fex)
@@ -42,12 +63,12 @@ ExternalProject_Add(fexcore_ep
   CMAKE_ARGS
     -G Ninja
     -DCMAKE_BUILD_TYPE=Release
-    -DCMAKE_C_COMPILER=${DELTA_FEX_CLANG}/clang
-    -DCMAKE_CXX_COMPILER=${DELTA_FEX_CLANG}/clang++
+    ${_fex_toolchain_args}
     -DENABLE_LTO=False
     -DENABLE_JEMALLOC=False
     -DENABLE_JEMALLOC_GLIBC_ALLOC=False
     -DBUILD_THUNKS=False
+    -DBUILD_FEX_TOOLS=False
     -DBUILD_FEXCONFIG=False
     -DENABLE_OFFLINE_TELEMETRY=False
     -DBUILD_TESTING=OFF
@@ -89,8 +110,12 @@ add_library(fex_core INTERFACE)
 add_dependencies(fex_core fexcore_ep)
 target_include_directories(fex_core INTERFACE ${_fex_includes})
 # Whole archive set in one group so the circular FEXCore<->Base<->deps refs
-# resolve regardless of order.
+# resolve regardless of order. bionic folds pthread into libc (no -lpthread).
+set(_fex_sys_libs pthread dl m)
+if(ANDROID)
+  set(_fex_sys_libs dl m)
+endif()
 target_link_libraries(fex_core INTERFACE
   -Wl,--start-group ${_fex_archives} -Wl,--end-group
-  pthread dl m)
+  ${_fex_sys_libs})
 add_library(fex::core ALIAS fex_core)
