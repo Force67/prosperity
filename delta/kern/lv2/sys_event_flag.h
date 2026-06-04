@@ -22,7 +22,10 @@ class proc;
 // never block and read producer state before it is built (garbage / crashes).
 class eventFlag : public kObject {
 public:
-  eventFlag(proc *p, const char *name, uint64_t init);
+  // `sticky` bits are re-asserted after every clear: used for system focus/
+  // ready flags the (absent) ShellCore would keep set, so a game that polls
+  // them with clear-on-wait stays "focused" instead of latching off.
+  eventFlag(proc *p, const char *name, uint64_t init, uint64_t sticky = 0);
 
   // Wait until the bits satisfy pattern per mode (AND=all, OR=any). Blocks up to
   // *timeoutUs micros (null = forever). Writes the matched bits to *result, then
@@ -42,6 +45,7 @@ private:
   std::mutex m;
   std::condition_variable cv;
   uint64_t bits;
+  uint64_t sticky;
 };
 
 int PS4ABI sys_evf_create(const char *name, uint32_t attr, uint64_t initPattern);

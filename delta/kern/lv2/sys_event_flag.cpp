@@ -22,8 +22,8 @@ enum { kEvfAnd = 0x01, kEvfOr = 0x02, kEvfClearAll = 0x10, kEvfClearPat = 0x20 }
 static std::mutex g_efRegM;
 static std::unordered_map<std::string, eventFlag *> g_efByName;
 
-eventFlag::eventFlag(proc *p, const char *nm, uint64_t init)
-    : kObject(p, oType::eventflag), bits(init) {
+eventFlag::eventFlag(proc *p, const char *nm, uint64_t init, uint64_t sticky_)
+    : kObject(p, oType::eventflag), bits(init), sticky(sticky_) {
   if (nm && *nm) {
     name = nm;
     std::lock_guard<std::mutex> lk(g_efRegM);
@@ -42,6 +42,7 @@ int eventFlag::take(uint64_t pattern, uint32_t mode, uint64_t *result) {
     bits = 0;
   else if (mode & kEvfClearPat)
     bits &= ~pattern;
+  bits |= sticky;  // system focus/ready flags stay asserted (no ShellCore here)
   return 0;
 }
 
@@ -120,7 +121,8 @@ int PS4ABI sys_evf_open(const char *name) {
   // Auto-create unknown named flags: on real hw a system service creates them;
   // here both producer and consumer just open by name, so creating on first
   // open gives them a shared flag and the sync actually works.
-  auto *ef = new eventFlag(proc::getActive(), name, systemFlagInit(name));
+  uint64_t seed = systemFlagInit(name);
+  auto *ef = new eventFlag(proc::getActive(), name, seed, seed);
   std::printf("[evf] open '%s' (auto-created) -> id=%u\n", name ? name : "",
               ef->handle());
   return ef->handle();
