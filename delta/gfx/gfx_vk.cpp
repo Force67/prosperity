@@ -220,6 +220,8 @@ bool ensureFrameResources(uint32_t w, uint32_t h, VkFormat fmt) {
 }  // namespace
 
 bool init(const char *title, uint32_t width, uint32_t height) {
+  if (available())
+    return true;  // already up; init is idempotent
   if (!SDL_Init(SDL_INIT_VIDEO)) {
     std::fprintf(stderr, "[gfx] SDL_Init failed: %s\n", SDL_GetError());
     return false;
@@ -446,6 +448,22 @@ void present(const void *pixels, uint32_t w, uint32_t h, uint32_t srcPitch,
 }
 
 bool available() { return g.window != nullptr && g.swapchain != VK_NULL_HANDLE; }
+
+// Idempotent bring-up: create the window/swapchain on the first call, then just
+// report availability. Safe to call every frame from the presenting thread;
+// after a failed attempt it stops retrying so a no-display run doesn't spam.
+bool ensure(const char *title, uint32_t width, uint32_t height) {
+  if (available())
+    return true;
+  static bool failed = false;
+  if (failed)
+    return false;
+  if (!init(title, width, height)) {
+    failed = true;
+    return false;
+  }
+  return true;
+}
 
 bool pumpEvents() {
   SDL_Event e;

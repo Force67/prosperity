@@ -21,7 +21,12 @@ enum class PixelFormat {
 };
 
 // Create the window, Vulkan device and swapchain. Returns false on failure.
+// Idempotent: returns true immediately if a window already exists.
 bool init(const char *title, uint32_t width, uint32_t height);
+
+// Idempotent bring-up for the presenting thread: create the window on the first
+// call, then report availability. Stops retrying after a failed attempt.
+bool ensure(const char *title, uint32_t width, uint32_t height);
 
 // True once a window + swapchain exist (init succeeded and not shut down).
 bool available();

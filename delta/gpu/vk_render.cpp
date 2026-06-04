@@ -883,7 +883,11 @@ void endFrame(uint64_t scanoutBase) {
   // present and rely on the readback/PPM path. DELTA_GPU_NOPRESENT forces that
   // headless path even on a display.
   static const bool noPresent = std::getenv("DELTA_GPU_NOPRESENT") != nullptr;
-  if (!noPresent && gfx::available() && gfx::pumpEvents())
+  // Bring the window up on the first presentable frame: the videoout HLE only
+  // creates it from its own scanout-present path, which the GPU (Gnm) title
+  // never takes, so the renderer owns window creation here. ensure() is
+  // idempotent and runs on this (the presenting) thread.
+  if (!noPresent && gfx::ensure("prosperity", rt.w, rt.h) && gfx::pumpEvents())
     gfx::present(pixels, rt.w, rt.h, rt.w * 4, gfx::PixelFormat::bgra8);
 }
 
