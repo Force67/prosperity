@@ -178,6 +178,19 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
         d.uvOffset = 0x1c;  // float[7],[8]
       }
     }
+    // Floor trace (DELTA_GPU_FLOORTRACE): log draws into a room-sized (~832w) RT,
+    // including DROPPED ones (no vertex data), to find why the room floor (the
+    // large centre fill) is missing while the walls render.
+    static const bool floorTrace = std::getenv("DELTA_GPU_FLOORTRACE") != nullptr;
+    static int g_floorN = 0;
+    if (floorTrace && d.rtW >= 700 && d.rtW <= 900 && g_floorN < 60) {
+      g_floorN++;
+      std::fprintf(stderr, "[floor] rt=%#lx %ux%u VS=%#lx PS=%#lx vtx=%p stride=%u "
+                   "nrec=%u tex=%#lx %ux%u blend=%#x\n",
+                   (unsigned long)d.rtBase, d.rtW, d.rtH, (unsigned long)vsA,
+                   (unsigned long)psA, d.vertexData, d.vertexStride, d.vertexCount,
+                   (unsigned long)d.texBase, d.texW, d.texH, d.blendControl);
+    }
     static int g_uvDbg = 0;
     if (g_trace && d.texBase && g_uvDbg < 3 && d.vertexData) {
       g_uvDbg++;
