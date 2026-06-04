@@ -382,8 +382,15 @@ namespace {
 // kernel-chosen ::mmap internals land there too, a guest fixed mapping clobbers
 // them (zero-fills the JIT's block-link map -> the null-node crash). We route
 // all of FEXCore's allocations into this reserved window instead.
+#ifdef __ANDROID__
+// 39-bit user VA: pin above the guest arena (sys_mem kCeil = 384 GiB) and below
+// where bionic's mmap_base/stack live (~448 GiB+). Reserved first in earlyInit.
+constexpr uintptr_t kFexHeapBase = 0x0000'0060'0000'0000ull; // 384 GiB
+constexpr size_t kFexHeapSize = 32ull * 1024 * 1024 * 1024;  // 32 GiB
+#else
 constexpr uintptr_t kFexHeapBase = 0x0000'5000'0000'0000ull; // 80 TiB
 constexpr size_t kFexHeapSize = 96ull * 1024 * 1024 * 1024;  // 96 GiB
+#endif
 std::atomic<uintptr_t> g_fexHeapNext{0};
 uintptr_t g_fexHeapEnd = 0;
 

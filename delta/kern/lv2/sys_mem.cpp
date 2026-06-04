@@ -32,8 +32,15 @@ using alt = utl::allocationType;
 // address ourselves, carve it from a dedicated low arena instead. Bump-only and
 // MAP_FIXED_NOREPLACE so we never clobber an existing mapping.
 uint8_t *allocLowGuest(size_t size) {
+#ifdef __ANDROID__
+  // 39-bit user VA: keep the guest arena clear of the module region (32..~224
+  // GiB) and the FEX heap / bionic up top, and still under the PS4 2^40 ceiling.
+  constexpr uintptr_t kFloor = 0x4000000000ull;   // 256 GiB
+  constexpr uintptr_t kCeil = 0x6000000000ull;    // 384 GiB
+#else
   constexpr uintptr_t kFloor = 0x1000000000ull;   // 64 GiB
   constexpr uintptr_t kCeil = 0x10000000000ull;   // 2^40, the PS4 user ceiling
+#endif
   static std::atomic<uintptr_t> next{kFloor};
   size = (size + 0x3FFF) & ~uintptr_t(0x3FFF);
   for (int tries = 0; tries < 8192; tries++) {
@@ -126,9 +133,19 @@ uint8_t *PS4ABI sys_mmap(void *addr, size_t size, uint32_t prot, uint32_t flags,
 
   void *ptr = nullptr;
   if (addr) {
-    ptr = utl::allocMem(addr, size, ppt::w, alt::reservecommit);
-    if (!ptr && (flags & mFlags::fixed))
-      ptr = utl::allocMem(addr, size, ppt::w, alt::commit);  // maybe reserved
+    if (flags & mFlags::fixed) {
+      // MAP_FIXED: the guest demands this exact address; overlay whatever's there.
+      ptr = utl::allocMem(addr, size, ppt::w, alt::reservecommit);
+      if (!ptr)
+        ptr = utl::allocMem(addr, size, ppt::w, alt::commit);  // maybe pre-reserved
+    } else if (utl::allocMem(addr, size, ppt::w, alt::reserve)) {
+      // A hint must never alias an existing mapping. reservecommit uses MAP_FIXED
+      // and would clobber it, so probe with a NOREPLACE reserve first and only
+      // commit if the address was free; otherwise fall through to the low arena.
+      // Without this a guest TLS/TCB hint lands on and destroys a loaded module
+      // (seen on Android, where the guest hints into the low module region).
+      ptr = utl::allocMem(addr, size, ppt::w, alt::commit);
+    }
   }
   // No usable hint (or it was taken): pick a low (<2^40) address the guest's
   // own allocators will accept, not whatever high address the host hands out.

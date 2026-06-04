@@ -298,11 +298,22 @@ bool smodule::mapImage() {
   // the boot is stable.
   // info.base = static_cast<uint8_t *>(utl::allocMem(
   //     nullptr, eight_gb, utl::pageProtection::w, utl::allocationType::reserve));
+#ifdef __ANDROID__
+  // Android user VA is 39-bit (~512 GiB); the x86 layout's 32 TiB base is
+  // unmappable. Pack modules with a tight slot (modules are << 2 GiB, ripZone is
+  // 5 KiB), based at 64 GiB: above the fixed PS4 guest regions the GNM driver
+  // maps (SceGnm* at ~0xfe0000000 / 63.5 GiB) and SceKernelInternalMemory at
+  // 8 GiB, and below the guest arena (lv2/sys_mem, 256 GiB) and FEX heap.
+  constexpr size_t moduleSlot = 2ull * 1024ull * one_mb;  // 2 GiB
+  static uintptr_t s_nextBase = 0x0000'0010'0000'0000ull; // 64 GiB
+#else
+  constexpr size_t moduleSlot = eight_gb;
   static uintptr_t s_nextBase = 0x0000200000000000ull;
+#endif
   info.base = static_cast<uint8_t *>(utl::allocMem(
-      reinterpret_cast<void *>(s_nextBase), eight_gb, utl::pageProtection::w,
+      reinterpret_cast<void *>(s_nextBase), moduleSlot, utl::pageProtection::w,
       utl::allocationType::reserve));
-  s_nextBase += eight_gb;
+  s_nextBase += moduleSlot;
 
   if (!info.base)
     return false;
