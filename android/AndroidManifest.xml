@@ -1,32 +1,53 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Prosperity: pure-native NativeActivity app (no Java/dex, hasCode=false).
-     The native lib (lib/arm64-v8a/libps4delta_app.so) exports
-     ANativeActivity_onCreate; android_main brings up the emulator. -->
+<!-- Prosperity Android app. A small Java launcher (LauncherActivity) provides the
+     game library + firmware install UI; it starts the emulator (NativeActivity,
+     android_main) in a separate :emu process so every launch gets fresh guest
+     memory (the FEX heap reservation can't be redone within one process). The
+     launcher itself only calls the lightweight JNI utilities in NativeBridge. -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.prosperity.ps4"
     android:versionCode="1"
-    android:versionName="0.1">
+    android:versionName="0.2">
 
     <uses-feature android:name="android.hardware.vulkan.version"
         android:version="0x400000" android:required="true"/>
 
+    <!-- Browse/open pkgs and a firmware module set anywhere on the phone, read
+         in place by the native POSIX loader (no copy into app storage). -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"/>
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32"/>
+
     <application
         android:label="Prosperity"
-        android:hasCode="false"
+        android:requestLegacyExternalStorage="true"
         android:extractNativeLibs="true">
+
+        <!-- Launcher menu: game library + firmware install. -->
+        <activity
+            android:name="com.prosperity.ps4.LauncherActivity"
+            android:label="Prosperity"
+            android:exported="true"
+            android:configChanges="orientation|keyboardHidden|screenSize|screenLayout">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+        </activity>
+
+        <!-- The emulator surface. Started explicitly by the launcher with the
+             chosen pkg (via boot.cfg); not a launcher entry itself. Runs in its
+             own process so each game boot is a clean address space. -->
         <activity
             android:name="android.app.NativeActivity"
             android:label="Prosperity"
             android:exported="true"
+            android:process=":emu"
             android:screenOrientation="landscape"
             android:configChanges="orientation|keyboardHidden|screenSize|screenLayout"
             android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
             <meta-data android:name="android.app.lib_name"
                 android:value="ps4delta_app"/>
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN"/>
-                <category android:name="android.intent.category.LAUNCHER"/>
-            </intent-filter>
         </activity>
     </application>
 </manifest>

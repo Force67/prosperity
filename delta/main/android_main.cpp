@@ -64,14 +64,41 @@ struct AppState {
   bool booted = false;
 };
 
+// The launcher Activity writes the absolute path of the pkg it wants to run to
+// <dataDir>/boot.cfg (one line) before starting this NativeActivity. Read it;
+// fall back to the legacy <dataDir>/game.pkg when no launcher config exists
+// (e.g. data staged by hand over adb).
+base::String resolveBootPkg(const base::String &dataDir) {
+  base::String cfg = dataDir;
+  cfg += "/boot.cfg";
+  if (FILE *f = ::fopen(cfg.c_str(), "rb")) {
+    char buf[4096];
+    size_t n = ::fread(buf, 1, sizeof(buf) - 1, f);
+    ::fclose(f);
+    buf[n] = '\0';
+    char *p = buf;
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')
+      ++p;
+    size_t len = std::strlen(p);
+    while (len > 0 && (p[len - 1] == '\n' || p[len - 1] == '\r' ||
+                       p[len - 1] == ' ' || p[len - 1] == '\t'))
+      p[--len] = '\0';
+    if (len > 0 && ::access(p, R_OK) == 0)
+      return base::String(p);
+    LOGI("boot.cfg path unusable ('%s'); falling back to game.pkg", p);
+  }
+  base::String fallback = dataDir;
+  fallback += "/game.pkg";
+  return fallback;
+}
+
 void bootOnce(AppState *s) {
   if (s->booted)
     return;
   s->booted = true;
   s->core = new deltaCore();
   s->core->init();
-  base::String pkg = s->dataDir;
-  pkg += "/game.pkg";
+  base::String pkg = resolveBootPkg(s->dataDir);
   LOGI("booting pkg %s", pkg.c_str());
   s->core->boot(pkg);  // mounts pkg, runs the guest on a detached thread
 }

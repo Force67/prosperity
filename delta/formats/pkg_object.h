@@ -54,6 +54,13 @@ public:
   // Collect every file path in the image (tooling / debugging).
   void paths(std::vector<std::string> &out) const;
 
+  // Read a well-known outer-PKG metadata entry by its PKG entry id (param.sfo =
+  // 0x1000, icon0.png = 0x1200). Unlike find()/read(), this reads the PKG
+  // header's entry table, which sits outside the encrypted PFS, so it works
+  // even when the inner image didn't decrypt (valid() == false). Returns the
+  // number of bytes read into `out`, or -1 if the entry is absent.
+  int64_t readPkgEntry(uint32_t entryId, std::vector<uint8_t> &out);
+
 private:
   std::unique_ptr<PkgImpl> impl_;
 };

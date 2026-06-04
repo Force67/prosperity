@@ -43,19 +43,33 @@ struct pup_entry {
 static_assert(sizeof(pup_header) == 32);
 static_assert(sizeof(pup_entry) == 32);
 
+// Reader for a PS4 firmware update (.PUP). The outer container (magic
+// 0x1D3D154F) is parsed here; segments are written out by extractAll(). Note
+// retail PUPs are encrypted (and their inner modules are encrypted SELFs in a
+// filesystem image), so without the SAMU/SELF crypto chain extractAll() can
+// recover the container segments but not produce loadable .sprx modules. See
+// the summary string it returns.
 class pupReader {
 public:
-  pupReader(const base::String &);
+  explicit pupReader(const base::String &);
 
   bool load();
-  void extractAll();
-  utl::File extractFile(uint16_t id);
+
+  // Extract every non-special segment into outDir (which must already exist),
+  // named by its known firmware name or segment_<id>.bin. zlib-compressed
+  // segments are inflated when possible. Returns a human-readable multi-line
+  // summary; sets `looksEncrypted` when the segments don't parse as plaintext
+  // (i.e. the PUP needs decryption we can't do here).
+  base::String extractAll(const base::String &outDir, bool &looksEncrypted);
+
+  int segmentCount() const { return header.numSegments; }
 
 private:
-  void unzipEntry(const pup_entry &, base::Vector<uint8_t> &);
+  bool inflateEntry(const pup_entry &, base::Vector<uint8_t> &in,
+                    base::Vector<uint8_t> &out);
 
   utl::File file;
   pup_header header{};
   base::Vector<pup_entry> entries;
 };
-}
+} // namespace vfs

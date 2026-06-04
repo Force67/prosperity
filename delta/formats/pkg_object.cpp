@@ -550,6 +550,43 @@ struct PkgImpl {
     inner->read(innerOff, take, static_cast<uint8_t *>(buf));
     return static_cast<int64_t>(take);
   }
+
+  // Read a well-known outer-PKG entry (param.sfo = 0x1000, icon0.png = 0x1200)
+  // straight from the PKG header's entry table. These entries are plaintext in
+  // a fake pkg and live outside the encrypted PFS, so this works regardless of
+  // whether the inner image decrypted. Same big-endian header layout getEkpfs
+  // walks: entry count @0x10, table offset @0x18, 0x20-byte rows of
+  // [id @0, data offset @16, data size @20].
+  bool readEntry(uint32_t wantId, std::vector<uint8_t> &out) {
+    if (!pkg.IsOpen())
+      return false;
+    std::lock_guard<std::mutex> lk(io);
+    auto R = [&](uint64_t o, uint64_t n, uint8_t *dst) {
+      pkg.Seek(o, utl::seekMode::seek_set);
+      pkg.Read(dst, n);
+    };
+    uint8_t tmp[4];
+    R(0x10, 4, tmp);
+    uint32_t ec = be32(tmp);
+    R(0x18, 4, tmp);
+    uint32_t to = be32(tmp);
+    if (ec == 0 || ec > 0x10000)
+      return false;
+    std::vector<uint8_t> tb(static_cast<size_t>(ec) * 0x20);
+    R(to, tb.size(), tb.data());
+    for (uint32_t i = 0; i < ec; ++i) {
+      const uint8_t *e = tb.data() + i * 0x20;
+      if (be32(e) != wantId)
+        continue;
+      uint32_t off = be32(e + 16), sz = be32(e + 20);
+      if (sz == 0 || static_cast<uint64_t>(off) + sz > pkg.GetSize())
+        return false;
+      out.resize(sz);
+      R(off, sz, out.data());
+      return true;
+    }
+    return false;
+  }
 };
 
 PkgFilesystem::PkgFilesystem(const base::String &pkgPath)
@@ -577,5 +614,11 @@ void PkgFilesystem::paths(std::vector<std::string> &out) const {
   out.reserve(impl_->files.size());
   for (const auto &kv : impl_->files)
     out.push_back(kv.first);
+}
+
+int64_t PkgFilesystem::readPkgEntry(uint32_t entryId, std::vector<uint8_t> &out) {
+  if (!impl_)
+    return -1;
+  return impl_->readEntry(entryId, out) ? static_cast<int64_t>(out.size()) : -1;
 }
 } // namespace vfs
