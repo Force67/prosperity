@@ -9,6 +9,7 @@ import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Color;
 import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -18,6 +19,7 @@ import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
+import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
@@ -50,8 +52,8 @@ import java.util.zip.ZipInputStream;
  */
 public class LauncherActivity extends Activity {
 
-    private TextView firmwareStatus;
     private LinearLayout gamesContainer;
+    private View firmwareBanner; // shown on the main page only when no firmware
 
     // --- lifecycle ----------------------------------------------------------
 
@@ -77,62 +79,115 @@ public class LauncherActivity extends Activity {
     }
 
     private void buildUi() {
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
+        FrameLayout root = new FrameLayout(this);
         root.setBackgroundColor(0xFF101418);
+
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setLayoutParams(new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+        // Top bar: title on the left, a Settings entry on the right.
+        LinearLayout topBar = new LinearLayout(this);
+        topBar.setOrientation(LinearLayout.HORIZONTAL);
+        topBar.setGravity(Gravity.CENTER_VERTICAL);
+        topBar.setPadding(dp(16), dp(16), dp(8), dp(8));
 
         TextView title = new TextView(this);
         title.setText("Prosperity");
         title.setTextColor(Color.WHITE);
         title.setTextSize(24);
         title.setTypeface(Typeface.DEFAULT_BOLD);
-        title.setPadding(dp(16), dp(16), dp(16), dp(8));
-        root.addView(title);
+        title.setLayoutParams(new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        topBar.addView(title);
 
-        // Firmware status + install.
-        LinearLayout fwBar = new LinearLayout(this);
-        fwBar.setOrientation(LinearLayout.HORIZONTAL);
-        fwBar.setGravity(Gravity.CENTER_VERTICAL);
-        fwBar.setPadding(dp(16), dp(4), dp(16), dp(4));
+        Button settings = new Button(this);
+        settings.setText("Settings");
+        settings.setOnClickListener(v -> openSettings());
+        topBar.addView(settings);
+        content.addView(topBar);
 
-        firmwareStatus = new TextView(this);
-        firmwareStatus.setTextColor(0xFFB0B8C0);
-        firmwareStatus.setTextSize(13);
-        LinearLayout.LayoutParams fwLp =
-                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
-        firmwareStatus.setLayoutParams(fwLp);
-        fwBar.addView(firmwareStatus);
-
-        Button installFw = new Button(this);
-        installFw.setText("Install firmware");
-        installFw.setOnClickListener(v -> installFirmware());
-        fwBar.addView(installFw);
-        root.addView(fwBar);
-
-        Button addGame = new Button(this);
-        addGame.setText("+  Add game");
-        LinearLayout.LayoutParams agLp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        agLp.setMargins(dp(16), dp(8), dp(16), dp(8));
-        addGame.setLayoutParams(agLp);
-        addGame.setOnClickListener(v -> addGame());
-        root.addView(addGame);
+        // First-run nudge: only on screen while no firmware is installed.
+        content.addView(firmwareBanner = makeFirmwareBanner());
 
         View divider = new View(this);
         divider.setLayoutParams(new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, dp(1)));
         divider.setBackgroundColor(0xFF2A2F36);
-        root.addView(divider);
+        content.addView(divider);
 
         ScrollView scroll = new ScrollView(this);
         scroll.setLayoutParams(new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
         gamesContainer = new LinearLayout(this);
         gamesContainer.setOrientation(LinearLayout.VERTICAL);
+        // Leave room so the FAB never covers the last row.
+        gamesContainer.setPadding(0, 0, 0, dp(96));
         scroll.addView(gamesContainer);
-        root.addView(scroll);
+        content.addView(scroll);
+
+        root.addView(content);
+        root.addView(makeFab());
 
         setContentView(root);
+    }
+
+    // Circular "+" floating action button, bottom-right, for adding a game.
+    private View makeFab() {
+        TextView fab = new TextView(this);
+        fab.setText("+");
+        fab.setTextColor(Color.WHITE);
+        fab.setTextSize(30);
+        fab.setTypeface(Typeface.DEFAULT_BOLD);
+        fab.setGravity(Gravity.CENTER);
+        fab.setIncludeFontPadding(false);
+        GradientDrawable circle = new GradientDrawable();
+        circle.setShape(GradientDrawable.OVAL);
+        circle.setColor(0xFF3B82F6);
+        fab.setBackground(circle);
+        fab.setElevation(dp(6));
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(dp(60), dp(60));
+        lp.gravity = Gravity.BOTTOM | Gravity.END;
+        lp.setMargins(0, 0, dp(24), dp(28));
+        fab.setLayoutParams(lp);
+        fab.setOnClickListener(v -> addGame());
+        return fab;
+    }
+
+    // "No firmware installed" card with an install button; hidden once present.
+    private View makeFirmwareBanner() {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setPadding(dp(16), dp(14), dp(16), dp(14));
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(0xFF1B2330);
+        bg.setCornerRadius(dp(10));
+        card.setBackground(bg);
+        LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        clp.setMargins(dp(16), dp(8), dp(16), dp(8));
+        card.setLayoutParams(clp);
+
+        TextView head = new TextView(this);
+        head.setText("Firmware not installed");
+        head.setTextColor(Color.WHITE);
+        head.setTextSize(16);
+        head.setTypeface(Typeface.DEFAULT_BOLD);
+        card.addView(head);
+
+        TextView body = new TextView(this);
+        body.setText("Install the PS4 firmware module set before running games.");
+        body.setTextColor(0xFF9AA3AD);
+        body.setTextSize(13);
+        body.setPadding(0, dp(2), 0, dp(10));
+        card.addView(body);
+
+        Button install = new Button(this);
+        install.setText("Install firmware");
+        install.setOnClickListener(v -> installFirmware());
+        card.addView(install);
+        return card;
     }
 
     private void rebuildGameList() {
@@ -142,7 +197,7 @@ public class LauncherActivity extends Activity {
         JSONArray lib = loadLibrary();
         if (lib.length() == 0) {
             TextView hint = new TextView(this);
-            hint.setText("No games yet. Tap \"Add game\" and pick a .pkg on your phone.");
+            hint.setText("No games yet. Tap the + button and pick a .pkg on your phone.");
             hint.setTextColor(0xFF6A7178);
             hint.setPadding(dp(16), dp(24), dp(16), dp(16));
             gamesContainer.addView(hint);
@@ -286,22 +341,7 @@ public class LauncherActivity extends Activity {
         return new File(getExternalFilesDir(null), "modules");
     }
 
-    private boolean firmwareInstalled() {
-        File m = modulesDir();
-        File[] files = m.listFiles();
-        if (files == null)
-            return false;
-        for (File f : files) {
-            String n = f.getName().toLowerCase();
-            if (n.endsWith(".sprx") || n.endsWith(".prx"))
-                return true;
-        }
-        return false;
-    }
-
-    private void refreshFirmwareStatus() {
-        if (firmwareStatus == null)
-            return;
+    private int moduleCount() {
         File[] files = modulesDir().listFiles();
         int count = 0;
         if (files != null)
@@ -310,10 +350,31 @@ public class LauncherActivity extends Activity {
                 if (n.endsWith(".sprx") || n.endsWith(".prx"))
                     count++;
             }
-        if (count > 0)
-            firmwareStatus.setText("Firmware: installed (" + count + " modules)");
-        else
-            firmwareStatus.setText("Firmware: not installed");
+        return count;
+    }
+
+    private boolean firmwareInstalled() {
+        return moduleCount() > 0;
+    }
+
+    private void refreshFirmwareStatus() {
+        if (firmwareBanner != null)
+            firmwareBanner.setVisibility(firmwareInstalled() ? View.GONE : View.VISIBLE);
+    }
+
+    // Settings menu: firmware lives here once installed (the main page only nags
+    // about it while it's missing, via the banner).
+    private void openSettings() {
+        int count = moduleCount();
+        String status = count > 0
+                ? "Firmware: installed (" + count + " modules)"
+                : "Firmware: not installed";
+        new AlertDialog.Builder(this)
+                .setTitle("Settings")
+                .setMessage(status)
+                .setPositiveButton("Install firmware", (d, w) -> installFirmware())
+                .setNegativeButton("Close", null)
+                .show();
     }
 
     private void installFirmware() {
