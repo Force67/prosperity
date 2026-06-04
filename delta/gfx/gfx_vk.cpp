@@ -12,6 +12,10 @@
 // copy plus image-to-image blit avoids host-writes-to-image layout constraints
 // and lets the window be any size relative to the framebuffer.
 
+// SDL3 is not available on Android; that build uses the headless gfx stub
+// (gfx_headless.cpp) and the GPU renderer dumps frames instead of presenting.
+#ifndef __ANDROID__
+
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -530,3 +534,5 @@ void shutdown() {
 }
 
 }  // namespace gfx
+
+#endif  // !__ANDROID__
