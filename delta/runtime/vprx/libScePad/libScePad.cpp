@@ -82,9 +82,14 @@ uint32_t autoSkipButtons() {
   return (g_readSeq % 10 < 3) ? (kCross | kCircle | kOptions | kTouchPad) : 0;
 }
 
-// Optional keyboard->DS4 adapter (DELTA_PAD_KEYBOARD=1): map the SDL window's
-// keyboard to buttons + sticks. Off by default; falls back to neutral/autoskip.
+// Adapter from the gfx pad (DELTA_PAD_KEYBOARD=1 maps the SDL window keyboard;
+// the Android app maps the on-screen touch gamepad). Off by default elsewhere;
+// always on in the app, where the touch pad is the only input.
+#if defined(DELTA_ANDROID_APP)
+static const bool g_keyboard = true;
+#else
 static const bool g_keyboard = std::getenv("DELTA_PAD_KEYBOARD") != nullptr;
+#endif
 
 void fillPadState(PadData *d) {
   if (!d) return;
