@@ -78,9 +78,14 @@ struct State {
   VkDescriptorPool dsPool = VK_NULL_HANDLE;
   VkSampler sampler = VK_NULL_HANDLE;
 
+  // Pipelines keyed by blend state (textured<<0, enable<<1, blendControl<<2) so
+  // each draw uses the guest's CB_BLEND0_CONTROL blend instead of one hardcoded mode.
+  std::unordered_map<uint64_t, VkPipeline> pipeCache;
+
   uint32_t frameDraws = 0;
   int frameNum = 0;
   bool recording = false;
+  bool frameHadRoom = false;  // this frame sampled a room-sized (~832w) RT
 } g;
 
 struct TexEntry {
@@ -278,29 +283,80 @@ VkShaderModule makeModule(const uint32_t *spv, size_t bytes) {
   return m;
 }
 
-bool createPipeline() {
-  if (g.pipeline)
-    return true;
-  VkPushConstantRange pcr{VK_SHADER_STAGE_VERTEX_BIT, 0, 64};  // mat4
-  VkPipelineLayoutCreateInfo li{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-  li.pushConstantRangeCount = 1;
-  li.pPushConstantRanges = &pcr;
-  VKOK(vkCreatePipelineLayout(g.device, &li, nullptr, &g.layout));
+// GNM blend multiplier (CB_BLENDn_CONTROL factor field) -> Vulkan blend factor.
+VkBlendFactor vkFactor(uint32_t f) {
+  switch (f) {
+    case 0:  return VK_BLEND_FACTOR_ZERO;
+    case 1:  return VK_BLEND_FACTOR_ONE;
+    case 2:  return VK_BLEND_FACTOR_SRC_COLOR;
+    case 3:  return VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR;
+    case 4:  return VK_BLEND_FACTOR_SRC_ALPHA;
+    case 5:  return VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    case 6:  return VK_BLEND_FACTOR_DST_ALPHA;
+    case 7:  return VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA;
+    case 8:  return VK_BLEND_FACTOR_DST_COLOR;
+    case 9:  return VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR;
+    case 10: return VK_BLEND_FACTOR_SRC_ALPHA_SATURATE;
+    case 11: return VK_BLEND_FACTOR_CONSTANT_COLOR;
+    case 12: return VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_COLOR;
+    case 13: return VK_BLEND_FACTOR_SRC1_COLOR;
+    case 14: return VK_BLEND_FACTOR_ONE_MINUS_SRC1_COLOR;
+    case 15: return VK_BLEND_FACTOR_SRC1_ALPHA;
+    case 16: return VK_BLEND_FACTOR_ONE_MINUS_SRC1_ALPHA;
+    case 17: return VK_BLEND_FACTOR_CONSTANT_ALPHA;
+    case 18: return VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_ALPHA;
+    default: return VK_BLEND_FACTOR_ONE;
+  }
+}
+// GNM blend function (combine fcn) -> Vulkan blend op.
+VkBlendOp vkBlendOp(uint32_t f) {
+  switch (f) {
+    case 0:  return VK_BLEND_OP_ADD;
+    case 1:  return VK_BLEND_OP_SUBTRACT;
+    case 2:  return VK_BLEND_OP_MIN;
+    case 3:  return VK_BLEND_OP_MAX;
+    case 4:  return VK_BLEND_OP_REVERSE_SUBTRACT;
+    default: return VK_BLEND_OP_ADD;
+  }
+}
+// Decode CB_BLEND0_CONTROL into a Vulkan colour-blend attachment. `en` is the
+// per-target blend enable (bit 30). Falls back to a sensible src-alpha blend when
+// the guest enables blend but the control word is zero (default state, not yet set).
+VkPipelineColorBlendAttachmentState blendAttachment(uint32_t bc, bool en) {
+  VkPipelineColorBlendAttachmentState cba{};
+  cba.colorWriteMask = 0xF;
+  if (!en) { cba.blendEnable = VK_FALSE; return cba; }
+  cba.blendEnable = VK_TRUE;
+  uint32_t cs = bc & 0x1F, cf = (bc >> 5) & 0x7, cd = (bc >> 8) & 0x1F;
+  bool sep = (bc >> 29) & 1;
+  uint32_t as = sep ? (bc >> 16) & 0x1F : cs;
+  uint32_t af = sep ? (bc >> 21) & 0x7 : cf;
+  uint32_t ad = sep ? (bc >> 24) & 0x1F : cd;
+  cba.srcColorBlendFactor = vkFactor(cs);
+  cba.dstColorBlendFactor = vkFactor(cd);
+  cba.colorBlendOp = vkBlendOp(cf);
+  cba.srcAlphaBlendFactor = vkFactor(as);
+  cba.dstAlphaBlendFactor = vkFactor(ad);
+  cba.alphaBlendOp = vkBlendOp(af);
+  return cba;
+}
 
-  VkShaderModule vs = makeModule(quad_vert_spv, sizeof(quad_vert_spv));
-  VkShaderModule fs = makeModule(quad_frag_spv, sizeof(quad_frag_spv));
+// Build a graphics pipeline for the colored (textured=false) or textured quad
+// with the given colour-blend attachment. Shaders + layout selected by `textured`.
+VkPipeline buildPipeline(bool textured, VkPipelineColorBlendAttachmentState cba) {
+  VkShaderModule vs = makeModule(textured ? tex_vert_spv : quad_vert_spv,
+                                 textured ? sizeof(tex_vert_spv) : sizeof(quad_vert_spv));
+  VkShaderModule fs = makeModule(textured ? tex_frag_spv : quad_frag_spv,
+                                 textured ? sizeof(tex_frag_spv) : sizeof(quad_frag_spv));
   VkPipelineShaderStageCreateInfo stages[2]{};
   stages[0] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
   stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
-  stages[0].module = vs;
-  stages[0].pName = "main";
+  stages[0].module = vs; stages[0].pName = "main";
   stages[1] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
   stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-  stages[1].module = fs;
-  stages[1].pName = "main";
+  stages[1].module = fs; stages[1].pName = "main";
 
-  // Interleaved repacked vertex: pos.xy@0, color.rgba@8, uv.xy@24, stride 32
-  // (shared layout with the textured pipeline).
+  // Interleaved repacked vertex: pos.xy@0, color.rgba@8, uv.xy@24, stride 32.
   VkVertexInputBindingDescription bind{0, 32, VK_VERTEX_INPUT_RATE_VERTEX};
   VkVertexInputAttributeDescription attrs[3] = {
       {0, 0, VK_FORMAT_R32G32_SFLOAT, 0},
@@ -312,27 +368,60 @@ bool createPipeline() {
   vi.pVertexBindingDescriptions = &bind;
   vi.vertexAttributeDescriptionCount = 3;
   vi.pVertexAttributeDescriptions = attrs;
-
   VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
   ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
-
   VkPipelineViewportStateCreateInfo vp{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
-  vp.viewportCount = 1;
-  vp.scissorCount = 1;
-
+  vp.viewportCount = 1; vp.scissorCount = 1;
   VkPipelineRasterizationStateCreateInfo rs{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
-  rs.polygonMode = VK_POLYGON_MODE_FILL;
-  rs.cullMode = VK_CULL_MODE_NONE;
-  rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
-  rs.lineWidth = 1.0f;
-
+  rs.polygonMode = VK_POLYGON_MODE_FILL; rs.cullMode = VK_CULL_MODE_NONE;
+  rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE; rs.lineWidth = 1.0f;
   VkPipelineMultisampleStateCreateInfo ms{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
   ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
-
   VkPipelineDepthStencilStateCreateInfo dss{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
-  dss.depthTestEnable = VK_FALSE;
-  dss.depthWriteEnable = VK_FALSE;
+  VkPipelineColorBlendStateCreateInfo cb{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+  cb.attachmentCount = 1; cb.pAttachments = &cba;
+  VkDynamicState dyns[2] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+  VkPipelineDynamicStateCreateInfo dy{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+  dy.dynamicStateCount = 2; dy.pDynamicStates = dyns;
+  VkPipelineRenderingCreateInfo rci{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
+  rci.colorAttachmentCount = 1; rci.pColorAttachmentFormats = &g.rtFormat;
+  VkGraphicsPipelineCreateInfo pi{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+  pi.pNext = &rci; pi.stageCount = 2; pi.pStages = stages;
+  pi.pVertexInputState = &vi; pi.pInputAssemblyState = &ia; pi.pViewportState = &vp;
+  pi.pRasterizationState = &rs; pi.pMultisampleState = &ms; pi.pDepthStencilState = &dss;
+  pi.pColorBlendState = &cb; pi.pDynamicState = &dy;
+  pi.layout = textured ? g.texLayout : g.layout;
+  VkPipeline p = VK_NULL_HANDLE;
+  vkCreateGraphicsPipelines(g.device, VK_NULL_HANDLE, 1, &pi, nullptr, &p);
+  vkDestroyShaderModule(g.device, vs, nullptr);
+  vkDestroyShaderModule(g.device, fs, nullptr);
+  return p;
+}
 
+// Pipeline for a draw's blend state, cached. Returns the default src-alpha pipeline
+// when the per-state build fails so a draw never silently drops.
+VkPipeline getPipeline(bool textured, uint32_t bc, bool en) {
+  uint64_t key = (textured ? 1ull : 0) | (en ? 2ull : 0) |
+                 ((uint64_t)(en ? (bc & 0x7FFFFFFFu) : 0u) << 2);
+  auto it = g.pipeCache.find(key);
+  if (it != g.pipeCache.end())
+    return it->second;
+  VkPipeline p = buildPipeline(textured, blendAttachment(bc, en));
+  if (!p) p = textured ? g.texPipeline : g.pipeline;
+  g.pipeCache[key] = p;
+  return p;
+}
+
+bool createPipeline() {
+  if (g.pipeline)
+    return true;
+  VkPushConstantRange pcr{VK_SHADER_STAGE_VERTEX_BIT, 0, 64};  // mat4
+  VkPipelineLayoutCreateInfo li{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+  li.pushConstantRangeCount = 1;
+  li.pPushConstantRanges = &pcr;
+  VKOK(vkCreatePipelineLayout(g.device, &li, nullptr, &g.layout));
+  // Default colored pipeline: classic src-alpha (used as the fallback / for draws
+  // that don't enable blend the cache builds an opaque one on demand).
   VkPipelineColorBlendAttachmentState cba{};
   cba.blendEnable = VK_TRUE;
   cba.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
@@ -342,36 +431,8 @@ bool createPipeline() {
   cba.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
   cba.alphaBlendOp = VK_BLEND_OP_ADD;
   cba.colorWriteMask = 0xF;
-  VkPipelineColorBlendStateCreateInfo cb{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
-  cb.attachmentCount = 1;
-  cb.pAttachments = &cba;
-
-  VkDynamicState dyns[2] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
-  VkPipelineDynamicStateCreateInfo dy{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
-  dy.dynamicStateCount = 2;
-  dy.pDynamicStates = dyns;
-
-  VkPipelineRenderingCreateInfo rci{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
-  rci.colorAttachmentCount = 1;
-  rci.pColorAttachmentFormats = &g.rtFormat;
-
-  VkGraphicsPipelineCreateInfo pi{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
-  pi.pNext = &rci;
-  pi.stageCount = 2;
-  pi.pStages = stages;
-  pi.pVertexInputState = &vi;
-  pi.pInputAssemblyState = &ia;
-  pi.pViewportState = &vp;
-  pi.pRasterizationState = &rs;
-  pi.pMultisampleState = &ms;
-  pi.pDepthStencilState = &dss;
-  pi.pColorBlendState = &cb;
-  pi.pDynamicState = &dy;
-  pi.layout = g.layout;
-  VkResult r = vkCreateGraphicsPipelines(g.device, VK_NULL_HANDLE, 1, &pi, nullptr, &g.pipeline);
-  vkDestroyShaderModule(g.device, vs, nullptr);
-  vkDestroyShaderModule(g.device, fs, nullptr);
-  if (r != VK_SUCCESS) { std::fprintf(stderr, "[gpuvk] pipeline failed: %d\n", (int)r); return false; }
+  g.pipeline = buildPipeline(false, cba);
+  if (!g.pipeline) { std::fprintf(stderr, "[gpuvk] pipeline failed\n"); return false; }
   return true;
 }
 
@@ -406,37 +467,8 @@ bool createTexPipeline() {
   li.pPushConstantRanges = &pcr;
   VKOK(vkCreatePipelineLayout(g.device, &li, nullptr, &g.texLayout));
 
-  VkShaderModule vs = makeModule(tex_vert_spv, sizeof(tex_vert_spv));
-  VkShaderModule fs = makeModule(tex_frag_spv, sizeof(tex_frag_spv));
-  VkPipelineShaderStageCreateInfo stages[2]{};
-  stages[0] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
-  stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
-  stages[0].module = vs; stages[0].pName = "main";
-  stages[1] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
-  stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-  stages[1].module = fs; stages[1].pName = "main";
-
-  VkVertexInputBindingDescription bind{0, 32, VK_VERTEX_INPUT_RATE_VERTEX};
-  VkVertexInputAttributeDescription attrs[3] = {
-      {0, 0, VK_FORMAT_R32G32_SFLOAT, 0},        // pos
-      {1, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 8},  // color
-      {2, 0, VK_FORMAT_R32G32_SFLOAT, 24},       // uv
-  };
-  VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
-  vi.vertexBindingDescriptionCount = 1;
-  vi.pVertexBindingDescriptions = &bind;
-  vi.vertexAttributeDescriptionCount = 3;
-  vi.pVertexAttributeDescriptions = attrs;
-
-  VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
-  ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
-  VkPipelineViewportStateCreateInfo vp{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
-  vp.viewportCount = 1; vp.scissorCount = 1;
-  VkPipelineRasterizationStateCreateInfo rs{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
-  rs.polygonMode = VK_POLYGON_MODE_FILL; rs.cullMode = VK_CULL_MODE_NONE; rs.lineWidth = 1.0f;
-  VkPipelineMultisampleStateCreateInfo ms{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
-  ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
-  VkPipelineDepthStencilStateCreateInfo dss{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+  // Default textured pipeline: src-alpha over (the common sprite blend). Per-draw
+  // blend states build their own pipeline on demand via getPipeline().
   VkPipelineColorBlendAttachmentState cba{};
   cba.blendEnable = VK_TRUE;
   cba.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
@@ -446,22 +478,8 @@ bool createTexPipeline() {
   cba.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
   cba.alphaBlendOp = VK_BLEND_OP_ADD;
   cba.colorWriteMask = 0xF;
-  VkPipelineColorBlendStateCreateInfo cb{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
-  cb.attachmentCount = 1; cb.pAttachments = &cba;
-  VkDynamicState dyns[2] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
-  VkPipelineDynamicStateCreateInfo dy{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
-  dy.dynamicStateCount = 2; dy.pDynamicStates = dyns;
-  VkPipelineRenderingCreateInfo rci{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
-  rci.colorAttachmentCount = 1; rci.pColorAttachmentFormats = &g.rtFormat;
-  VkGraphicsPipelineCreateInfo pi{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
-  pi.pNext = &rci; pi.stageCount = 2; pi.pStages = stages;
-  pi.pVertexInputState = &vi; pi.pInputAssemblyState = &ia; pi.pViewportState = &vp;
-  pi.pRasterizationState = &rs; pi.pMultisampleState = &ms; pi.pDepthStencilState = &dss;
-  pi.pColorBlendState = &cb; pi.pDynamicState = &dy; pi.layout = g.texLayout;
-  VkResult r = vkCreateGraphicsPipelines(g.device, VK_NULL_HANDLE, 1, &pi, nullptr, &g.texPipeline);
-  vkDestroyShaderModule(g.device, vs, nullptr);
-  vkDestroyShaderModule(g.device, fs, nullptr);
-  if (r != VK_SUCCESS) { std::fprintf(stderr, "[gpuvk] tex pipeline failed: %d\n", (int)r); return false; }
+  g.texPipeline = buildPipeline(true, cba);
+  if (!g.texPipeline) { std::fprintf(stderr, "[gpuvk] tex pipeline failed\n"); return false; }
   return true;
 }
 
@@ -723,6 +741,7 @@ void beginFrame() {
   g.lastRt = 0;
   g.busiestRt = 0;
   g.busiestRtDraws = 0;
+  g.frameHadRoom = false;
   for (auto &kv : g_rts) {
     kv.second.usedThisFrame = false;
     kv.second.draws = 0;
@@ -808,6 +827,27 @@ void draw(const DrawInfo &d) {
     }
   }
 
+  // Experiment: skip fullscreen GUEST-texture draws (not RT composites) into a
+  // large RT. These are Isaac's darkness/vignette/colour overlays; rendered with
+  // our single hardcoded blend they come out opaque and black out the room. The
+  // final scene->scanout composite is rtAsTex so it is NOT skipped. Used to verify
+  // the overlay-covers-room hypothesis before implementing real per-draw blend.
+  static const bool skipFsTex = std::getenv("DELTA_GPU_SKIP_FSTEX") != nullptr;
+  if (skipFsTex && d.texBase && !(d.texBase != d.rtBase && g_rts.count(d.texBase)) &&
+      g.frameDraws >= 4) {
+    const float *m = d.mvp;
+    float nx0 = 1e9f, ny0 = 1e9f, nx1 = -1e9f, ny1 = -1e9f;
+    for (uint32_t v = 0; v < nv; v++) {
+      float x = dst[v * 8], y = dst[v * 8 + 1];
+      float cw = m[3] * x + m[7] * y + m[15]; if (cw == 0) cw = 1;
+      float ndx = (m[0] * x + m[4] * y + m[12]) / cw;
+      float ndy = (m[1] * x + m[5] * y + m[13]) / cw;
+      nx0 = ndx < nx0 ? ndx : nx0; nx1 = ndx > nx1 ? ndx : nx1;
+      ny0 = ndy < ny0 ? ndy : ny0; ny1 = ndy > ny1 ? ndy : ny1;
+    }
+    if ((nx1 - nx0) >= 1.7f && (ny1 - ny0) >= 1.7f) { g.frameDraws++; return; }
+  }
+
   // Is this a render-to-texture sample (the draw samples another render target)?
   bool rtAsTex = d.texBase && d.texBase != d.rtBase && g_rts.count(d.texBase);
   // A genuine fullscreen composite samples a near-fullscreen source RT (the scene
@@ -820,6 +860,8 @@ void draw(const DrawInfo &d) {
     return e ? (uint32_t)std::atoi(e) : 1280u;
   }();
   bool fsComposite = rtAsTex && g_rts[d.texBase].w >= fsMinW;
+  if (rtAsTex && g_rts[d.texBase].w >= 700 && g_rts[d.texBase].w <= 900)
+    g.frameHadRoom = true;
 
   // Targeted draw trace (DELTA_GPU_DTRACE): dump every draw on a couple of frames
   // so the scanout composite can be inspected (which RT it samples, geometry).
@@ -870,19 +912,44 @@ void draw(const DrawInfo &d) {
       dt2Count < 40) {
     dt2Count++;
     float minx=1e9f,miny=1e9f,maxx=-1e9f,maxy=-1e9f;
-    for (uint32_t v=0; v<nv; v++){float x=dst[v*8],y=dst[v*8+1];
-      minx=x<minx?x:minx;maxx=x>maxx?x:maxx;miny=y<miny?y:miny;maxy=y>maxy?y:maxy;}
+    float nx0=1e9f,ny0=1e9f,nx1=-1e9f,ny1=-1e9f;
+    const float *m = d.mvp;
+    for (uint32_t v=0; v<nv; v++){
+      float x=dst[v*8],y=dst[v*8+1];
+      minx=x<minx?x:minx;maxx=x>maxx?x:maxx;miny=y<miny?y:miny;maxy=y>maxy?y:maxy;
+      float cw = m[3]*x+m[7]*y+m[15]; if (cw==0) cw=1;
+      float ndx=(m[0]*x+m[4]*y+m[12])/cw, ndy=(m[1]*x+m[5]*y+m[13])/cw;
+      nx0=ndx<nx0?ndx:nx0; nx1=ndx>nx1?ndx:nx1; ny0=ndy<ny0?ndy:ny0; ny1=ndy>ny1?ndy:ny1;
+    }
     std::fprintf(stderr, "[dt2] f%d d%u room tex=%#lx %ux%u bound=%d srcLayout=%d "
-                 "fsC=%d nv=%u pos[%.0f,%.0f..%.0f,%.0f] uv0=%.3f,%.3f\n",
+                 "fsC=%d nv=%u pos[%.0f,%.0f..%.0f,%.0f] ndc[%.2f,%.2f..%.2f,%.2f] uv0=%.3f,%.3f\n",
                  g.frameNum, g.frameDraws, (unsigned long)d.texBase,
                  g_rts[d.texBase].w, g_rts[d.texBase].h, texSet != VK_NULL_HANDLE,
                  (int)g_rts[d.texBase].layout, fsComposite?1:0, nv,
-                 minx,miny,maxx,maxy,dst[6],dst[7]);
+                 minx,miny,maxx,maxy,nx0,ny0,nx1,ny1,dst[6],dst[7]);
+  }
+
+  // Debug: render room-RT composites as a solid colour (colored pipeline) instead
+  // of sampling, to separate a geometry/MVP fault from a sampling/UV fault. If the
+  // colour shows where the room should be, the geometry is fine and the problem is
+  // the UV/texture path.
+  static const bool rtRed = std::getenv("DELTA_GPU_RTRED") != nullptr;
+  if (rtRed && rtAsTex && g_rts[d.texBase].w >= 700 && g_rts[d.texBase].w <= 900) {
+    for (uint32_t v = 0; v < nv; v++) {
+      dst[v * 8 + 2] = 1.0f; dst[v * 8 + 3] = 0.0f;
+      dst[v * 8 + 4] = 0.0f; dst[v * 8 + 5] = 1.0f;
+    }
+    texSet = VK_NULL_HANDLE;  // force colored pipeline
   }
 
   VkDeviceSize off = g.vbOffset;
   if (texSet) {
-    vkCmdBindPipeline(g.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, g.texPipeline);
+    // Per-draw blend from the guest's CB_BLEND0_CONTROL. The fullscreen scene
+    // composite must land opaquely (it copies the whole scene to the scanout), so
+    // force blend off for it regardless of the guest's register.
+    VkPipeline p = fsComposite ? getPipeline(true, 0, false)
+                               : getPipeline(true, d.blendControl, d.blendEnable);
+    vkCmdBindPipeline(g.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
     // Push mat4 MVP + a clipUV flag. Render-to-texture composites (sampling a
     // scene RT) are fullscreen blits: the shader derives uv from clip position
     // rather than the per-vertex attribute (whose format/offset varies per draw).
@@ -893,7 +960,8 @@ void draw(const DrawInfo &d) {
     vkCmdBindDescriptorSets(g.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, g.texLayout, 0,
                             1, &texSet, 0, nullptr);
   } else {
-    vkCmdBindPipeline(g.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, g.pipeline);
+    vkCmdBindPipeline(g.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                      getPipeline(false, d.blendControl, d.blendEnable));
     vkCmdPushConstants(g.cmd, g.layout, VK_SHADER_STAGE_VERTEX_BIT, 0, 64, d.mvp);
   }
   vkCmdBindVertexBuffers(g.cmd, 0, 1, &g.vb, &off);
@@ -983,6 +1051,24 @@ void endFrame(uint64_t scanoutBase) {
     std::snprintf(tmp, sizeof(tmp), "%s/gpu_sized.tmp", dumpDir());
     writePpm(tmp, pixels, rt.w, rt.h);
     std::rename(tmp, p);  // atomic: a kill mid-write can't truncate the result
+  }
+  // Latch the gameplay signal once a run is clearly underway (sustained room
+  // frames with real draw counts) so the headless autoskip stops opening menus
+  // and stays in the run instead of bouncing back out via the pause menu.
+  static int roomStreak = 0;
+  if (g.frameHadRoom && g.frameDraws > 20 && ++roomStreak >= 15)
+    gfx::setInGameplay(true);
+
+  // Deterministic room capture: whenever this frame sampled a room RT, roll the
+  // presented image to /tmp/gpu_room.ppm (atomic). The last write is guaranteed a
+  // gameplay frame regardless of when the flaky autoskip enters/leaves a run. Skip
+  // sparse transition frames (few draws) so the capture is representative gameplay.
+  if (g_dump && g.frameHadRoom && g.frameDraws > 20) {
+    char p[256], tmp[256];
+    std::snprintf(p, sizeof(p), "%s/gpu_room.ppm", dumpDir());
+    std::snprintf(tmp, sizeof(tmp), "%s/gpu_room.tmp", dumpDir());
+    writePpm(tmp, pixels, rt.w, rt.h);
+    std::rename(tmp, p);
   }
   if (g_dump && g.frameNum >= 1000 && g.frameNum % 2000 == 0 && g.frameDraws > 0)
     dumpPpm(pixels, rt.w, rt.h);

@@ -117,6 +117,13 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
     d.rtW = fbWidth();
     d.rtH = fbHeight();
 
+    // Per-draw blend state from CB_BLEND0_CONTROL. Bit 30 is the per-target blend
+    // enable; when clear the draw writes opaquely (no blend). Isaac's room
+    // darkness/vignette and additive effect overlays rely on this: rendered with
+    // a single hardcoded blend they came out opaque and blacked out the scene.
+    d.blendControl = g_regs[mmCB_BLEND0_CONTROL];
+    d.blendEnable = (d.blendControl >> 30) & 1u;
+
     // MVP matrix: the VS sgpr[4..7] V# points at the constant buffer whose first
     // 16 floats are the transform (s_buffer_load_dwordx16 in the VS).
     uint64_t cbuf = (static_cast<uint64_t>(vud[5] & 0xFFFF) << 32) | vud[4];

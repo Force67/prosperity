@@ -40,6 +40,14 @@ constexpr uint32_t mmPA_CL_VPORT_XSCALE = 0xA10F;
 // Render-target mask (which CB targets are written).
 constexpr uint32_t mmCB_TARGET_MASK = 0xA08E;
 constexpr uint32_t mmCB_SHADER_MASK = 0xA08F;
+// Per-MRT blend control. CB_BLENDn_CONTROL are 1 dword apart. Layout (GCN gen2):
+//  [0:4] color_src_factor  [5:7] color_func   [8:12] color_dst_factor
+//  [16:20] alpha_src_factor [21:23] alpha_func [24:28] alpha_dst_factor
+//  [29] separate_alpha_blend  [30] enable
+constexpr uint32_t mmCB_BLEND0_CONTROL = 0xA1E0;
+constexpr uint32_t kCbBlendStride = 0x1;
+// Overall color-buffer mode (ROP3 / blend disable). MODE field is [4:6].
+constexpr uint32_t mmCB_COLOR_CONTROL = 0xA202;
 // Primitive type for the draw (VGT_PRIMITIVE_TYPE is a uconfig reg on gen2).
 constexpr uint32_t mmVGT_PRIMITIVE_TYPE = 0xC242;
 constexpr uint32_t mmVGT_NUM_INDICES = 0xC24C;

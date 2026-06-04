@@ -36,6 +36,12 @@ struct DrawInfo {
   uint32_t colorOffset = 0xFFFFFFFFu;  // byte offset of float3 color; ~0 = white
   uint64_t texBase = 0;
   uint32_t texW = 0, texH = 0;
+
+  // Per-draw blend state, decoded from CB_BLEND0_CONTROL (raw dword) + whether
+  // blending is enabled for color target 0. The renderer maps the GNM blend
+  // factors/functions to a Vulkan pipeline (cached per unique state).
+  uint32_t blendControl = 0;
+  bool blendEnable = false;
 };
 
 // Bring up the headless Vulkan device. Returns false if Vulkan is unavailable
