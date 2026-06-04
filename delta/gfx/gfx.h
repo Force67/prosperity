@@ -23,6 +23,9 @@ enum class PixelFormat {
 // Create the window, Vulkan device and swapchain. Returns false on failure.
 bool init(const char *title, uint32_t width, uint32_t height);
 
+// True once a window + swapchain exist (init succeeded and not shut down).
+bool available();
+
 // Upload pixels (w by h, srcPitch bytes per row, 0 means w*4) and present them,
 // scaling to the current window size.
 void present(const void *pixels, uint32_t w, uint32_t h, uint32_t srcPitch = 0,

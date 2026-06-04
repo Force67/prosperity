@@ -445,6 +445,8 @@ void present(const void *pixels, uint32_t w, uint32_t h, uint32_t srcPitch,
     g.needRecreate = true;
 }
 
+bool available() { return g.window != nullptr && g.swapchain != VK_NULL_HANDLE; }
+
 bool pumpEvents() {
   SDL_Event e;
   while (SDL_PollEvent(&e)) {

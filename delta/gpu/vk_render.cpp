@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <unordered_map>
 #include <vector>
 
@@ -825,8 +826,12 @@ void endFrame(uint64_t scanoutBase) {
   if (g_dump && g.frameNum % 200 == 0)
     std::fprintf(stderr, "[gpuvk] frame %d draws=%u rt=%#lx %ux%u\n", g.frameNum,
                  g.frameDraws, (unsigned long)presentBase, rt.w, rt.h);
-  static const bool present = std::getenv("DELTA_GPU_PRESENT") != nullptr;
-  if (present && gfx::pumpEvents())
+  // Present the rendered scanout into the window the VideoOut HLE opened. When
+  // there is no display (headless) the window was never created, so we skip
+  // present and rely on the readback/PPM path. DELTA_GPU_NOPRESENT forces that
+  // headless path even on a display.
+  static const bool noPresent = std::getenv("DELTA_GPU_NOPRESENT") != nullptr;
+  if (!noPresent && gfx::available() && gfx::pumpEvents())
     gfx::present(pixels, rt.w, rt.h, rt.w * 4, gfx::PixelFormat::bgra8);
 }
 
