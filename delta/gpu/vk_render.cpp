@@ -124,6 +124,14 @@ std::unordered_map<uint64_t, RTarget> g_rts;
 const bool g_dump = std::getenv("DELTA_GPU_DUMP") != nullptr;
 int g_dumpedFrames = 0;
 
+// Directory frame dumps go to. Defaults to /tmp; Android has no /tmp, so the
+// runner sets DELTA_GPU_DUMP_DIR to a writable path (e.g. the cwd under
+// /data/local/tmp). Returned without a trailing slash.
+const char *dumpDir() {
+  const char *d = std::getenv("DELTA_GPU_DUMP_DIR");
+  return (d && *d) ? d : "/tmp";
+}
+
 PFN_vkCmdBeginRenderingKHR p_vkCmdBeginRendering = nullptr;
 PFN_vkCmdEndRenderingKHR p_vkCmdEndRendering = nullptr;
 
@@ -649,8 +657,8 @@ void writePpm(const char *path, const uint8_t *bgra, uint32_t w, uint32_t h) {
 
 void dumpPpm(const uint8_t *bgra, uint32_t w, uint32_t h) {
   if (g_dumpedFrames >= 4) return;
-  char path[128];
-  std::snprintf(path, sizeof(path), "/tmp/gpu_frame_%d.ppm", g_dumpedFrames++);
+  char path[256];
+  std::snprintf(path, sizeof(path), "%s/gpu_frame_%d.ppm", dumpDir(), g_dumpedFrames++);
   writePpm(path, bgra, w, h);
   std::fprintf(stderr, "[gpuvk] dumped %s\n", path);
 }
@@ -873,8 +881,11 @@ void endFrame(uint64_t scanoutBase) {
     dumpPpm(pixels, rt.w, rt.h);
   // Rolling latest-frame capture (uncapped) so late transitions (menu/gameplay)
   // can be inspected from a long headless run without knowing the frame number.
-  if (g_dump && g.frameNum % 300 == 0 && g.frameDraws > 0)
-    writePpm("/tmp/gpu_latest.ppm", pixels, rt.w, rt.h);
+  if (g_dump && g.frameNum % 300 == 0 && g.frameDraws > 0) {
+    char latest[256];
+    std::snprintf(latest, sizeof(latest), "%s/gpu_latest.ppm", dumpDir());
+    writePpm(latest, pixels, rt.w, rt.h);
+  }
   if (g_dump && g.frameNum % 200 == 0)
     std::fprintf(stderr, "[gpuvk] frame %d draws=%u rt=%#lx %ux%u\n", g.frameNum,
                  g.frameDraws, (unsigned long)presentBase, rt.w, rt.h);

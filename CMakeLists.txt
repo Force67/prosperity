@@ -51,8 +51,19 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
     -Wno-narrowing
     -Wno-multichar
     -Wno-invalid-offsetof
-    -Wno-alloc-size-larger-than    # base::String::append SSO range checks
   )
+endif()
+# GCC-only: clang (e.g. the Android NDK) rejects this and capstone builds -Werror.
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
+  add_compile_options(-Wno-alloc-size-larger-than)  # base::String::append SSO range checks
+endif()
+
+# NDK libc++ lacks std::atomic_ref (used by the embedded FEX headers); force a
+# builtin-based polyfill into C++ TUs. CXX only: C deps (capstone/zlib) must not
+# pull in <atomic>. SHELL: keeps "-include <path>" as one un-deduplicated arg.
+if(ANDROID)
+  add_compile_options(
+    "$<$<COMPILE_LANGUAGE:CXX>:SHELL:-include ${CMAKE_CURRENT_SOURCE_DIR}/cmake/android_atomic_ref.h>")
 endif()
 
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
@@ -90,7 +101,11 @@ add_subdirectory(vendor)
 add_subdirectory(shared)
 add_subdirectory(delta)
 
-add_subdirectory(tools/modload)
-add_subdirectory(tools/modexec)
-add_subdirectory(tools/pkg_check)
-add_subdirectory(tools/gfx_test)
+# Host-only dev tools (gfx_test needs an SDL3 window). The Android target builds
+# just the ps4delta executable, run headless via adb.
+if(NOT ANDROID)
+  add_subdirectory(tools/modload)
+  add_subdirectory(tools/modexec)
+  add_subdirectory(tools/pkg_check)
+  add_subdirectory(tools/gfx_test)
+endif()

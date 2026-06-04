@@ -13,7 +13,9 @@ set(DELTA_ROOT ${CMAKE_CURRENT_SOURCE_DIR} CACHE INTERNAL "delta module include 
 add_library(delta_deps INTERFACE)
 target_include_directories(delta_deps INTERFACE ${DELTA_ROOT})
 target_link_libraries(delta_deps INTERFACE shared)
-if(UNIX)
+if(ANDROID)
+  target_link_libraries(delta_deps INTERFACE dl)  # bionic: pthread is in libc
+elseif(UNIX)
   target_link_libraries(delta_deps INTERFACE pthread dl)
 endif()
 

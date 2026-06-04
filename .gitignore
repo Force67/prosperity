@@ -313,3 +313,10 @@ vendor/*tar
 
 # aarch64 / FEX build tree
 build-arm/
+
+# Android (NDK build): the NDK + upstream-FEX clone, the build tree, the pulled
+# frame dumps, and the local runner script.
+/.android
+/build-android
+/android-dumps
+run-android.sh
