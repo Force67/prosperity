@@ -805,6 +805,30 @@ void draw(const DrawInfo &d) {
 
   // Is this a render-to-texture sample (the draw samples another render target)?
   bool rtAsTex = d.texBase && d.texBase != d.rtBase && g_rts.count(d.texBase);
+  // A genuine fullscreen composite samples a near-fullscreen source RT (the scene
+  // buffer copied to the scanout, or a post pass). Those use screen-space UVs and
+  // must land opaquely. Sprite/effect draws that merely sample a smaller RT keep
+  // their real vertex UVs and blend (clipUV off), so dim overlays/glows tint
+  // instead of being forced opaque-white over the scene.
+  bool fsComposite = rtAsTex && g_rts[d.texBase].w >= 1280;
+
+  // Targeted draw trace (DELTA_GPU_DTRACE): dump every draw on a couple of frames
+  // so the scanout composite can be inspected (which RT it samples, geometry).
+  static const bool dtrace = std::getenv("DELTA_GPU_DTRACE") != nullptr;
+  static const int dtframe = [] {
+    const char *e = std::getenv("DELTA_GPU_DTFRAME");
+    return e ? std::atoi(e) : 800;
+  }();
+  if (dtrace && (g.frameNum == dtframe || g.frameNum == dtframe + 1)) {
+    float minx=1e9f,miny=1e9f,maxx=-1e9f,maxy=-1e9f;
+    for (uint32_t v=0; v<nv; v++){float x=dst[v*8],y=dst[v*8+1];
+      minx=x<minx?x:minx;maxx=x>maxx?x:maxx;miny=y<miny?y:miny;maxy=y>maxy?y:maxy;}
+    std::fprintf(stderr,"[dt] f%d d%u rt=%#lx %ux%u tex=%#lx %ux%u rtAsTex=%d fsC=%d nv=%u "
+                 "pos[%.0f,%.0f..%.0f,%.0f] uv0=%.3f,%.3f col=%.2f,%.2f,%.2f\n",
+                 g.frameNum,g.frameDraws,(unsigned long)d.rtBase,d.rtW,d.rtH,
+                 (unsigned long)d.texBase,d.texW,d.texH,rtAsTex?1:0,fsComposite?1:0,nv,
+                 minx,miny,maxx,maxy,dst[6],dst[7],dst[2],dst[3],dst[4]);
+  }
   // Upload guest texture (independent of the render region) if not RT-as-texture.
   VkDescriptorSet texSet = VK_NULL_HANDLE;
   if (d.texBase && g.texPipeline && !rtAsTex)
@@ -837,7 +861,7 @@ void draw(const DrawInfo &d) {
     // rather than the per-vertex attribute (whose format/offset varies per draw).
     float pc[17];
     std::memcpy(pc, d.mvp, 64);
-    reinterpret_cast<uint32_t *>(pc)[16] = rtAsTex ? 1u : 0u;
+    reinterpret_cast<uint32_t *>(pc)[16] = fsComposite ? 1u : 0u;
     vkCmdPushConstants(g.cmd, g.texLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, 68, pc);
     vkCmdBindDescriptorSets(g.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, g.texLayout, 0,
                             1, &texSet, 0, nullptr);
@@ -894,17 +918,26 @@ void endFrame(uint64_t scanoutBase) {
   vkQueueSubmit(g.queue, 1, &si, g.fence);
   vkWaitForFences(g.device, 1, &g.fence, VK_TRUE, UINT64_MAX);
 
-  // The guest scanout is produced bottom-up relative to the display (a Y-origin
-  // mismatch uniform across every draw and render-target path); flip the rows
-  // back so the image is the right way up. Columns are left as-is (it is not
-  // horizontally mirrored). This buffer feeds present() and the PPM dumps.
+  // Orientation correction. DELTA_GPU_FLIP selects the readback transform so the
+  // correct one can be determined empirically: 0=none 1=Y(rows) 2=X(cols)
+  // 3=XY(180, default). The guest scanout's handedness/origin mismatch is uniform
+  // across every draw, so one pass on the final scanout fixes it with no
+  // render-to-texture sampling interactions.
+  static const int flipMode = [] {
+    const char *e = std::getenv("DELTA_GPU_FLIP");
+    return e ? std::atoi(e) : 1;
+  }();
   static std::vector<uint8_t> flipped;
   flipped.resize(static_cast<size_t>(rt.w) * rt.h * 4);
+  const auto *rb = static_cast<const uint8_t *>(g.readbackMap);
   for (uint32_t y = 0; y < rt.h; y++) {
-    const uint8_t *srow = static_cast<const uint8_t *>(g.readbackMap) +
-                          static_cast<size_t>(rt.h - 1 - y) * rt.w * 4;
-    uint8_t *drow = flipped.data() + static_cast<size_t>(y) * rt.w * 4;
-    std::memcpy(drow, srow, static_cast<size_t>(rt.w) * 4);
+    uint32_t sy = (flipMode & 1) ? (rt.h - 1 - y) : y;
+    const uint32_t *srow = reinterpret_cast<const uint32_t *>(rb + (size_t)sy * rt.w * 4);
+    uint32_t *drow = reinterpret_cast<uint32_t *>(flipped.data() + (size_t)y * rt.w * 4);
+    if (flipMode & 2)
+      for (uint32_t x = 0; x < rt.w; x++) drow[x] = srow[rt.w - 1 - x];
+    else
+      std::memcpy(drow, srow, (size_t)rt.w * 4);
   }
   const uint8_t *pixels = flipped.data();
   if (g_dump && g.frameNum >= 1000 && g.frameNum % 2000 == 0 && g.frameDraws > 0)
@@ -916,9 +949,17 @@ void endFrame(uint64_t scanoutBase) {
     std::snprintf(latest, sizeof(latest), "%s/gpu_latest.ppm", dumpDir());
     writePpm(latest, pixels, rt.w, rt.h);
   }
-  if (g_dump && g.frameNum % 200 == 0)
-    std::fprintf(stderr, "[gpuvk] frame %d draws=%u rt=%#lx %ux%u\n", g.frameNum,
-                 g.frameDraws, (unsigned long)presentBase, rt.w, rt.h);
+  if (g_dump && g.frameNum % 200 == 0) {
+    std::fprintf(stderr, "[gpuvk] frame %d draws=%u rt=%#lx %ux%u  scanout=%#lx\n",
+                 g.frameNum, g.frameDraws, (unsigned long)presentBase, rt.w, rt.h,
+                 (unsigned long)scanoutBase);
+    for (auto &kv : g_rts)
+      if (kv.second.usedThisFrame)
+        std::fprintf(stderr, "[gpuvk]    RT %#lx %ux%u draws=%u%s\n",
+                     (unsigned long)kv.first, kv.second.w, kv.second.h,
+                     kv.second.draws,
+                     kv.first == scanoutBase ? " <-SCANOUT" : "");
+  }
   // Present the rendered scanout into the window the VideoOut HLE opened. When
   // there is no display (headless) the window was never created, so we skip
   // present and rely on the readback/PPM path. DELTA_GPU_NOPRESENT forces that
