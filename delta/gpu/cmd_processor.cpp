@@ -157,9 +157,21 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
         d.vertexCount = vbs[0].numRecords;
         d.vertexStride = vbs[0].stride;
         d.posOffset = 0;
-        // Isaac's vertex format: pos.xy@0, color.rgb@0x10, uv.xy@0x1c.
-        if (d.vertexStride >= 0x1c)
-          d.colorOffset = 0x10;
+        // Per-attribute offsets from the fetch shader's V# bases: each attribute's
+        // V# points at vertexBase + attributeOffset, so off = vb.base - pos.base.
+        // dfmt 11 = 32_32 (float2 uv), dfmt 10 = 8_8_8_8 (rgba8 colour). This
+        // generalises the old hardcoded sprite offsets (pos@0,color@0x10,uv@0x1c)
+        // so other vertex layouts (e.g. the stride-36 room floor) sample the right
+        // attributes instead of garbage. Falls back to the sprite offsets.
+        uint32_t uvOff = 0, colOff = 0;
+        for (size_t i = 1; i < vbs.size(); i++) {
+          uint64_t off = vbs[i].base - vbs[0].base;
+          if (off == 0 || off >= d.vertexStride) continue;
+          if (vbs[i].dfmt == 11 && !uvOff) uvOff = static_cast<uint32_t>(off);
+          else if (vbs[i].dfmt == 10 && !colOff) colOff = static_cast<uint32_t>(off);
+        }
+        d.uvOffset = uvOff ? uvOff : (d.vertexStride >= 0x1c ? 0x1c : 0);
+        d.colorOffset = colOff ? colOff : (d.vertexStride >= 0x1c ? 0x10 : 0xFFFFFFFFu);
       }
     }
 
@@ -175,7 +187,7 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
         d.texH = texs[0].height;
         d.uvData = d.vertexData;
         d.uvStride = d.vertexStride;
-        d.uvOffset = 0x1c;  // float[7],[8]
+        // d.uvOffset was derived from the fetch shader during vertex extraction.
       }
     }
     // Floor trace (DELTA_GPU_FLOORTRACE): log draws into a room-sized (~832w) RT,
