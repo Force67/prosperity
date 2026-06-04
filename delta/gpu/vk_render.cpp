@@ -604,10 +604,7 @@ void beginRegion(uint64_t base, RTarget &rt) {
   g.lastRt = base;
 }
 
-void dumpPpm(const uint8_t *bgra, uint32_t w, uint32_t h) {
-  if (g_dumpedFrames >= 4) return;
-  char path[128];
-  std::snprintf(path, sizeof(path), "/tmp/gpu_frame_%d.ppm", g_dumpedFrames++);
+void writePpm(const char *path, const uint8_t *bgra, uint32_t w, uint32_t h) {
   FILE *f = std::fopen(path, "wb");
   if (!f) return;
   std::fprintf(f, "P6\n%u %u\n255\n", w, h);
@@ -617,6 +614,13 @@ void dumpPpm(const uint8_t *bgra, uint32_t w, uint32_t h) {
     std::fputc(bgra[i * 4 + 0], f);
   }
   std::fclose(f);
+}
+
+void dumpPpm(const uint8_t *bgra, uint32_t w, uint32_t h) {
+  if (g_dumpedFrames >= 4) return;
+  char path[128];
+  std::snprintf(path, sizeof(path), "/tmp/gpu_frame_%d.ppm", g_dumpedFrames++);
+  writePpm(path, bgra, w, h);
   std::fprintf(stderr, "[gpuvk] dumped %s\n", path);
 }
 
@@ -821,8 +825,25 @@ void endFrame(uint64_t scanoutBase) {
   vkQueueSubmit(g.queue, 1, &si, g.fence);
   vkWaitForFences(g.device, 1, &g.fence, VK_TRUE, UINT64_MAX);
 
-  auto *pixels = static_cast<const uint8_t *>(g.readbackMap);
-  if (g_dump && g.frameNum >= 400 && g.frameDraws > 0) dumpPpm(pixels, rt.w, rt.h);
+  // The guest renders the whole frame horizontally mirrored (an X-handedness
+  // mismatch that is uniform across every draw and render-target path); mirror
+  // the final scanout back so text and logos read the right way round.
+  static std::vector<uint8_t> flipped;
+  flipped.resize(static_cast<size_t>(rt.w) * rt.h * 4);
+  for (uint32_t y = 0; y < rt.h; y++) {
+    const uint8_t *srow = static_cast<const uint8_t *>(g.readbackMap) +
+                          static_cast<size_t>(y) * rt.w * 4;
+    uint8_t *drow = flipped.data() + static_cast<size_t>(y) * rt.w * 4;
+    for (uint32_t x = 0; x < rt.w; x++)
+      std::memcpy(drow + x * 4, srow + (rt.w - 1 - x) * 4, 4);
+  }
+  const uint8_t *pixels = flipped.data();
+  if (g_dump && g.frameNum >= 1000 && g.frameNum % 2000 == 0 && g.frameDraws > 0)
+    dumpPpm(pixels, rt.w, rt.h);
+  // Rolling latest-frame capture (uncapped) so late transitions (menu/gameplay)
+  // can be inspected from a long headless run without knowing the frame number.
+  if (g_dump && g.frameNum % 300 == 0 && g.frameDraws > 0)
+    writePpm("/tmp/gpu_latest.ppm", pixels, rt.w, rt.h);
   if (g_dump && g.frameNum % 200 == 0)
     std::fprintf(stderr, "[gpuvk] frame %d draws=%u rt=%#lx %ux%u\n", g.frameNum,
                  g.frameDraws, (unsigned long)presentBase, rt.w, rt.h);
