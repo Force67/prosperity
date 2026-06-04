@@ -20,6 +20,7 @@
 
     <application
         android:label="Prosperity"
+        android:icon="@mipmap/ic_launcher"
         android:requestLegacyExternalStorage="true"
         android:extractNativeLibs="true">
 

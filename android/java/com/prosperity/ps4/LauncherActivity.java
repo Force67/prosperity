@@ -93,6 +93,15 @@ public class LauncherActivity extends Activity {
         topBar.setGravity(Gravity.CENTER_VERTICAL);
         topBar.setPadding(dp(16), dp(16), dp(8), dp(8));
 
+        ImageView logo = new ImageView(this);
+        int logoId = getResources().getIdentifier("logo", "drawable", getPackageName());
+        if (logoId != 0)
+            logo.setImageResource(logoId);
+        LinearLayout.LayoutParams logoLp = new LinearLayout.LayoutParams(dp(36), dp(36));
+        logoLp.rightMargin = dp(10);
+        logo.setLayoutParams(logoLp);
+        topBar.addView(logo);
+
         TextView title = new TextView(this);
         title.setText("Prosperity");
         title.setTextColor(Color.WHITE);
