@@ -188,7 +188,13 @@ void startFlipPump() {
   std::thread([] {
     for (;;) {
       std::this_thread::sleep_for(std::chrono::microseconds(16667));
-      presentScanout();
+      // NB: do NOT present here. The window is driven solely by the GPU
+      // renderer (Gnm submit -> gpu::endFrame -> gfx::present) on the submit
+      // thread. gfx has one swapchain/command buffer and is not thread-safe, so
+      // a present from this pump thread races the renderer's present and
+      // intermittently deadlocks Vulkan. This pump only synthesizes flip
+      // completion (labels + events) to unblock the game's flip wait; the guest
+      // scanout buffer it used to blit is never CPU-written by the title anyway.
       uint64_t c = g_port.flipCount.fetch_add(1) + 1;
       // Mark GPU/flip completion in the buffer labels. Gnm's prepareFlip packet
       // tells the GPU to write the buffer's label (sceVideoOutGetBufferLabelAddress
