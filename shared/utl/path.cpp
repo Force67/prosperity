@@ -14,6 +14,7 @@
 #include <cstring>
 #else
 #include <climits>
+#include <cstdlib>
 #include <cstring>
 #include <unistd.h>
 #ifndef PATH_MAX
@@ -64,6 +65,15 @@ base::String make_abs_path(const base::String &rel) {
 static const base::String& exe_dir() {
   static base::String filePath;
   if (filePath.empty()) {
+    // DELTA_DATA_DIR overrides where modules/ and host assets live. The Android
+    // app sets it to the activity's external files dir; the binary itself sits
+    // in a read-only lib/ dir, so /proc/self/exe is no use there.
+    if (const char* dd = ::getenv("DELTA_DATA_DIR"); dd && *dd) {
+      filePath = base::String(dd);
+      if (filePath.back() != '/')
+        filePath += "/";
+      return filePath;
+    }
     char buf[PATH_MAX]{};
     ssize_t n = ::readlink("/proc/self/exe", buf, PATH_MAX - 1);
     if (n > 0) {

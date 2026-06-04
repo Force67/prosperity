@@ -64,6 +64,10 @@ endif()
 if(ANDROID)
   add_compile_options(
     "$<$<COMPILE_LANGUAGE:CXX>:SHELL:-include ${CMAKE_CURRENT_SOURCE_DIR}/cmake/android_atomic_ref.h>")
+  # The app build is a dlopen'd .so; its thread_local vars (and FEXCore's) must
+  # use a dynamic TLS model, not Initial-Exec (dlopen can't satisfy IE TLS).
+  # global-dynamic also works in the CLI executable, so apply it everywhere.
+  add_compile_options(-ftls-model=global-dynamic)
 endif()
 
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
@@ -90,6 +94,17 @@ if(DELTA_BACKEND STREQUAL "FEX")
   include(BuildFEXCore)
 else()
   add_compile_definitions(DELTA_BACKEND_NATIVE=1)
+endif()
+
+# Build an on-screen Android app (NativeActivity APK) instead of the headless
+# adb-shell binary: main/ builds libps4delta_app.so and gfx presents to the
+# device screen (gfx_android) rather than dumping frames.
+option(DELTA_ANDROID_APP "Build the Android NativeActivity app" OFF)
+if(DELTA_ANDROID_APP)
+  if(NOT ANDROID)
+    message(FATAL_ERROR "DELTA_ANDROID_APP requires the Android NDK toolchain")
+  endif()
+  add_compile_definitions(DELTA_ANDROID_APP=1)
 endif()
 
 option(DELTA_BUILD_TESTS "Build the delta module unit tests" ON)

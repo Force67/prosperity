@@ -26,7 +26,10 @@ if(ANDROID)
     -DANDROID_PLATFORM=${ANDROID_PLATFORM}
     -DANDROID_STL=${ANDROID_STL}
     -DTUNE_CPU=none
-    "-DCMAKE_CXX_FLAGS=-include ${CMAKE_CURRENT_LIST_DIR}/android_atomic_ref.h")
+    # global-dynamic TLS so the archives are safe to link into a dlopen'd .so
+    # (the Android app); IE-model thread_locals fail at dlopen time.
+    "-DCMAKE_C_FLAGS=-ftls-model=global-dynamic"
+    "-DCMAKE_CXX_FLAGS=-include ${CMAKE_CURRENT_LIST_DIR}/android_atomic_ref.h -ftls-model=global-dynamic")
 else()
   # Clang used to build FEX. Override with -DDELTA_FEX_CLANG=/path if needed.
   # Defaults to the nix-provided clang wrapper the bring-up was validated on.

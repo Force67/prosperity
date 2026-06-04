@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Prosperity: pure-native NativeActivity app (no Java/dex, hasCode=false).
+     The native lib (lib/arm64-v8a/libps4delta_app.so) exports
+     ANativeActivity_onCreate; android_main brings up the emulator. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.prosperity.ps4"
+    android:versionCode="1"
+    android:versionName="0.1">
+
+    <uses-feature android:name="android.hardware.vulkan.version"
+        android:version="0x400000" android:required="true"/>
+
+    <application
+        android:label="Prosperity"
+        android:hasCode="false"
+        android:extractNativeLibs="true">
+        <activity
+            android:name="android.app.NativeActivity"
+            android:label="Prosperity"
+            android:exported="true"
+            android:screenOrientation="landscape"
+            android:configChanges="orientation|keyboardHidden|screenSize|screenLayout"
+            android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
+            <meta-data android:name="android.app.lib_name"
+                android:value="ps4delta_app"/>
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

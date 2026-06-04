@@ -26,8 +26,17 @@
 namespace krnl {
 moduleInfo *called_in(void *addr);
 
+// These per-thread vars use initial-exec TLS for fast, allocation-free access.
+// The Android app is a dlopen'd .so, where IE TLS is rejected (STATIC_TLS), so
+// there we fall back to the toolchain default (-ftls-model=global-dynamic).
+#if defined(__ANDROID__) && defined(DELTA_ANDROID_APP)
+#define DELTA_TLS_IE
+#else
+#define DELTA_TLS_IE __attribute__((tls_model("initial-exec")))
+#endif
+
 // Per-thread guest thread id (sys_thr_self). Main thread is 1.
-static __attribute__((tls_model("initial-exec"))) thread_local uint32_t t_tid = 1;
+static DELTA_TLS_IE thread_local uint32_t t_tid = 1;
 static std::atomic<uint32_t> g_nextTid{2};
 
 // Thread-startup handshake: sys_thr_new blocks until the new thread has run its
@@ -37,8 +46,7 @@ static std::atomic<uint32_t> g_nextTid{2};
 // head start the main thread races ahead and reads not-yet-produced data.
 static std::mutex g_startM;
 static std::condition_variable g_startCv;
-static __attribute__((tls_model("initial-exec"))) thread_local std::atomic<bool>
-    *t_started = nullptr;
+static DELTA_TLS_IE thread_local std::atomic<bool> *t_started = nullptr;
 
 static void markThreadStarted() {
   if (t_started && !t_started->exchange(true)) {
