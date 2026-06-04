@@ -671,6 +671,11 @@ void beginRegion(uint64_t base, RTarget &rt) {
   rt.usedThisFrame = true;
   g.curRt = base;
   g.lastRt = base;
+  static const bool regTrace = std::getenv("DELTA_GPU_REGTRACE") != nullptr;
+  if (regTrace && rt.w < 1280)
+    std::fprintf(stderr, "[reg] f%d begin RT %#lx %ux%u clear=%d\n", g.frameNum,
+                 (unsigned long)base, rt.w, rt.h,
+                 color.loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR);
 }
 
 void writePpm(const char *path, const uint8_t *bgra, uint32_t w, uint32_t h) {
@@ -810,7 +815,11 @@ void draw(const DrawInfo &d) {
   // must land opaquely. Sprite/effect draws that merely sample a smaller RT keep
   // their real vertex UVs and blend (clipUV off), so dim overlays/glows tint
   // instead of being forced opaque-white over the scene.
-  bool fsComposite = rtAsTex && g_rts[d.texBase].w >= 1280;
+  static const uint32_t fsMinW = [] {
+    const char *e = std::getenv("DELTA_GPU_FSCOMP_MINW");
+    return e ? (uint32_t)std::atoi(e) : 1280u;
+  }();
+  bool fsComposite = rtAsTex && g_rts[d.texBase].w >= fsMinW;
 
   // Targeted draw trace (DELTA_GPU_DTRACE): dump every draw on a couple of frames
   // so the scanout composite can be inspected (which RT it samples, geometry).
@@ -853,6 +862,24 @@ void draw(const DrawInfo &d) {
   if (rtAsTex && g_rts[d.texBase].layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
     texSet = g_rts[d.texBase].set;
 
+  // Content-triggered trace of room-RT composites (source RT ~832 wide): fires
+  // whenever gameplay is on screen, regardless of frame number (autoskip timing
+  // varies). Caps output so a long run stays readable.
+  static int dt2Count = 0;
+  if (dtrace && rtAsTex && g_rts[d.texBase].w >= 700 && g_rts[d.texBase].w <= 900 &&
+      dt2Count < 40) {
+    dt2Count++;
+    float minx=1e9f,miny=1e9f,maxx=-1e9f,maxy=-1e9f;
+    for (uint32_t v=0; v<nv; v++){float x=dst[v*8],y=dst[v*8+1];
+      minx=x<minx?x:minx;maxx=x>maxx?x:maxx;miny=y<miny?y:miny;maxy=y>maxy?y:maxy;}
+    std::fprintf(stderr, "[dt2] f%d d%u room tex=%#lx %ux%u bound=%d srcLayout=%d "
+                 "fsC=%d nv=%u pos[%.0f,%.0f..%.0f,%.0f] uv0=%.3f,%.3f\n",
+                 g.frameNum, g.frameDraws, (unsigned long)d.texBase,
+                 g_rts[d.texBase].w, g_rts[d.texBase].h, texSet != VK_NULL_HANDLE,
+                 (int)g_rts[d.texBase].layout, fsComposite?1:0, nv,
+                 minx,miny,maxx,maxy,dst[6],dst[7]);
+  }
+
   VkDeviceSize off = g.vbOffset;
   if (texSet) {
     vkCmdBindPipeline(g.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, g.texPipeline);
@@ -889,6 +916,13 @@ void endFrame(uint64_t scanoutBase) {
   // Debug: present the busiest RT (the scene) instead of the composited scanout.
   static const bool presentScene = std::getenv("DELTA_GPU_PRESENT_SCENE") != nullptr;
   if (presentScene && g.busiestRt) presentBase = g.busiestRt;
+  // Debug: present the first RT matching DELTA_GPU_PRESENT_RTW x RTH (inspect a
+  // specific render target, e.g. the 832x512 room buffer).
+  static const int wantW = [] { const char *e = std::getenv("DELTA_GPU_PRESENT_RTW"); return e ? std::atoi(e) : 0; }();
+  static const int wantH = [] { const char *e = std::getenv("DELTA_GPU_PRESENT_RTH"); return e ? std::atoi(e) : 0; }();
+  if (wantW && wantH)
+    for (auto &kv : g_rts)
+      if ((int)kv.second.w == wantW && (int)kv.second.h == wantH) { presentBase = kv.first; break; }
   auto it = g_rts.find(presentBase);
   if (it == g_rts.end()) {  // nothing rendered this frame
     vkEndCommandBuffer(g.cmd);
@@ -940,6 +974,16 @@ void endFrame(uint64_t scanoutBase) {
       std::memcpy(drow, srow, (size_t)rt.w * 4);
   }
   const uint8_t *pixels = flipped.data();
+  // When inspecting a specific RT size (DELTA_GPU_PRESENT_RTW/H), dump it every
+  // frame to a rolling file so the last write is guaranteed to be that RT.
+  if (g_dump && wantW && wantH && (int)rt.w == wantW && (int)rt.h == wantH &&
+      g.frameDraws > 0) {
+    char p[256], tmp[256];
+    std::snprintf(p, sizeof(p), "%s/gpu_sized.ppm", dumpDir());
+    std::snprintf(tmp, sizeof(tmp), "%s/gpu_sized.tmp", dumpDir());
+    writePpm(tmp, pixels, rt.w, rt.h);
+    std::rename(tmp, p);  // atomic: a kill mid-write can't truncate the result
+  }
   if (g_dump && g.frameNum >= 1000 && g.frameNum % 2000 == 0 && g.frameDraws > 0)
     dumpPpm(pixels, rt.w, rt.h);
   // Rolling latest-frame capture (uncapped) so late transitions (menu/gameplay)
