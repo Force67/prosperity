@@ -197,11 +197,49 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
     static int g_floorN = 0;
     if (floorTrace && d.rtW >= 700 && d.rtW <= 900 && g_floorN < 60) {
       g_floorN++;
-      std::fprintf(stderr, "[floor] rt=%#lx %ux%u VS=%#lx PS=%#lx vtx=%p stride=%u "
-                   "nrec=%u tex=%#lx %ux%u blend=%#x\n",
-                   (unsigned long)d.rtBase, d.rtW, d.rtH, (unsigned long)vsA,
-                   (unsigned long)psA, d.vertexData, d.vertexStride, d.vertexCount,
-                   (unsigned long)d.texBase, d.texW, d.texH, d.blendControl);
+      // For a textured floor draw, sample the texture: count non-zero pixels and
+      // the uv range, and one-time dump the raw bytes so the texture content
+      // (black/unloaded vs garbled/tiled vs dark) can be inspected.
+      int nz = 0; float uvmin = 1e9f, uvmax = -1e9f;
+      if (d.texBase >= 0x1000000000ull && d.texW && d.texH) {
+        auto *px = reinterpret_cast<const uint32_t *>(d.texBase);
+        uint64_t cnt = (uint64_t)d.texW * d.texH, step = cnt > 4096 ? cnt / 4096 : 1;
+        for (uint64_t i = 0; i < cnt; i += step) if (px[i] & 0x00FFFFFF) nz++;
+        if (d.uvData) {
+          auto *vb = static_cast<const uint8_t *>(d.uvData);
+          for (uint32_t v = 0; v < d.vertexCount && v < 64; v++) {
+            auto *u = reinterpret_cast<const float *>(vb + (size_t)v * d.uvStride + d.uvOffset);
+            uvmin = u[0] < uvmin ? u[0] : uvmin; uvmax = u[0] > uvmax ? u[0] : uvmax;
+            uvmin = u[1] < uvmin ? u[1] : uvmin; uvmax = u[1] > uvmax ? u[1] : uvmax;
+          }
+        }
+        static bool dumped = false;
+        if (!dumped && d.texW == 512 && d.texH == 512) {
+          dumped = true;
+          FILE *f = std::fopen("/tmp/floor_tex.bin", "wb");
+          if (f) { std::fwrite(px, 1, (size_t)d.texW * d.texH * 4, f); std::fclose(f); }
+        }
+      }
+      // NDC bounds of the floor geometry (apply the extracted MVP), to tell a
+      // wrong-MVP (off-screen / degenerate) from a sampling problem.
+      float nx0=1e9f,ny0=1e9f,nx1=-1e9f,ny1=-1e9f;
+      if (d.vertexData) {
+        auto *vb = static_cast<const uint8_t *>(d.vertexData);
+        const float *m = d.mvp;
+        for (uint32_t v = 0; v < d.vertexCount && v < 64; v++) {
+          auto *p = reinterpret_cast<const float *>(vb + (size_t)v * d.vertexStride);
+          float cw = m[3]*p[0]+m[7]*p[1]+m[15]; if (cw==0) cw=1;
+          float ndx=(m[0]*p[0]+m[4]*p[1]+m[12])/cw, ndy=(m[1]*p[0]+m[5]*p[1]+m[13])/cw;
+          nx0=ndx<nx0?ndx:nx0; nx1=ndx>nx1?ndx:nx1; ny0=ndy<ny0?ndy:ny0; ny1=ndy>ny1?ndy:ny1;
+        }
+      }
+      std::fprintf(stderr, "[floor] rt=%#lx %ux%u stride=%u nrec=%u uvOff=%u tex=%#lx "
+                   "%ux%u nz=%d/4096 uv[%.2f..%.2f] ndc[%.2f,%.2f..%.2f,%.2f] "
+                   "mvp=[%.3f %.3f %.3f] blend=%#x\n",
+                   (unsigned long)d.rtBase, d.rtW, d.rtH, d.vertexStride,
+                   d.vertexCount, d.uvOffset, (unsigned long)d.texBase, d.texW, d.texH,
+                   nz, uvmin, uvmax, nx0,ny0,nx1,ny1, d.mvp[0],d.mvp[5],d.mvp[12],
+                   d.blendControl);
     }
     static int g_uvDbg = 0;
     if (g_trace && d.texBase && g_uvDbg < 3 && d.vertexData) {

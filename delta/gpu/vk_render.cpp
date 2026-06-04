@@ -1067,9 +1067,12 @@ void endFrame(uint64_t scanoutBase) {
   // specific render target, e.g. the 832x512 room buffer).
   static const int wantW = [] { const char *e = std::getenv("DELTA_GPU_PRESENT_RTW"); return e ? std::atoi(e) : 0; }();
   static const int wantH = [] { const char *e = std::getenv("DELTA_GPU_PRESENT_RTH"); return e ? std::atoi(e) : 0; }();
-  if (wantW && wantH)
+  if (wantW && wantH) {
+    int best = -1000000;  // pick the FRESHEST match (room buffers cycle addresses)
     for (auto &kv : g_rts)
-      if ((int)kv.second.w == wantW && (int)kv.second.h == wantH) { presentBase = kv.first; break; }
+      if ((int)kv.second.w == wantW && (int)kv.second.h == wantH &&
+          kv.second.lastFrame > best) { best = kv.second.lastFrame; presentBase = kv.first; }
+  }
   // Debug: present a specific RT by guest address (addresses are stable per build).
   static const uint64_t wantAddr = [] {
     const char *e = std::getenv("DELTA_GPU_PRESENT_ADDR");
