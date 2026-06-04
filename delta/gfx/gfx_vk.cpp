@@ -26,6 +26,7 @@
 #include <vulkan/vulkan.h>
 
 #include "gfx.h"
+#include "overlay.h"
 
 namespace gfx {
 namespace {
@@ -285,24 +286,37 @@ bool init(const char *title, uint32_t width, uint32_t height) {
   }
   std::vector<VkPhysicalDevice> phs(nphys);
   vkEnumeratePhysicalDevices(g.instance, &nphys, phs.data());
+  // Prefer a real GPU over the llvmpipe software rasteriser (type CPU) among the
+  // devices that can both render and present; discrete > integrated > virtual >
+  // CPU. DELTA_VK_GPU=<name-substring> forces a specific device.
+  const char *want = SDL_getenv("DELTA_VK_GPU");
   bool found = false;
+  int best = -1;
   for (auto pd : phs) {
     uint32_t nq = 0;
     vkGetPhysicalDeviceQueueFamilyProperties(pd, &nq, nullptr);
     std::vector<VkQueueFamilyProperties> qf(nq);
     vkGetPhysicalDeviceQueueFamilyProperties(pd, &nq, qf.data());
+    uint32_t fam = UINT32_MAX;
     for (uint32_t i = 0; i < nq; i++) {
       VkBool32 present = VK_FALSE;
       vkGetPhysicalDeviceSurfaceSupportKHR(pd, i, g.surface, &present);
-      if ((qf[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) && present) {
-        g.phys = pd;
-        g.queueFamily = i;
-        found = true;
-        break;
-      }
+      if ((qf[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) && present) { fam = i; break; }
     }
-    if (found)
-      break;
+    if (fam == UINT32_MAX)
+      continue;  // can't both render and present
+    VkPhysicalDeviceProperties pp;
+    vkGetPhysicalDeviceProperties(pd, &pp);
+    int score;
+    switch (pp.deviceType) {
+      case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU:   score = 4; break;
+      case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU: score = 3; break;
+      case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU:    score = 2; break;
+      case VK_PHYSICAL_DEVICE_TYPE_CPU:            score = 0; break;  // llvmpipe
+      default:                                     score = 1; break;
+    }
+    if (want && std::strstr(pp.deviceName, want)) score = 100;
+    if (score > best) { best = score; g.phys = pd; g.queueFamily = fam; found = true; }
   }
   if (!found) {
     std::fprintf(stderr, "[gfx] no graphics+present queue\n");
@@ -369,6 +383,9 @@ void present(const void *pixels, uint32_t w, uint32_t h, uint32_t srcPitch,
   auto *src = static_cast<const uint8_t *>(pixels);
   for (uint32_t y = 0; y < h; y++)
     std::memcpy(dst + (size_t)y * w * 4, src + (size_t)y * srcPitch, w * 4);
+
+  // Composite the keyboard->DualSense legend over the frame (toggle with F1).
+  overlayDraw(dst, w, h, fmt == PixelFormat::bgra8);
 
   vkWaitForFences(g.device, 1, &g.fence, VK_TRUE, UINT64_MAX);
 
@@ -477,12 +494,17 @@ bool pumpEvents() {
     if (e.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED ||
         e.type == SDL_EVENT_WINDOW_RESIZED)
       g.needRecreate = true;
+    if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat &&
+        e.key.scancode == SDL_SCANCODE_F1)
+      overlayToggle();
   }
   return true;
 }
 
-// Optional keyboard->DS4 adapter. WASD = left stick + d-pad (move / menu nav),
-// arrows = right stick (Isaac aims/shoots), plus a sensible face-button layout.
+// Keyboard->DS4 adapter, laid out for two-handed keyboard play: the left hand
+// moves (WASD) and works the action keys, the right hand aims (arrow keys).
+// Both hands reach a shoulder pair via the Shift keys. Keep this in sync with
+// the on-screen legend (overlay.cpp).
 bool pollKeyboardPad(PadKeys &out) {
   if (!g.window)
     return false;
@@ -499,20 +521,19 @@ bool pollKeyboardPad(PadKeys &out) {
   out.lx = out.left ? 0 : (out.right ? 255 : 128);
   out.ly = out.up ? 0 : (out.down ? 255 : 128);
   // Aim / shoot on the right stick (arrow keys).
-  uint8_t rx = down(SDL_SCANCODE_LEFT) ? 0 : (down(SDL_SCANCODE_RIGHT) ? 255 : 128);
-  uint8_t ry = down(SDL_SCANCODE_UP) ? 0 : (down(SDL_SCANCODE_DOWN) ? 255 : 128);
-  out.rx = rx; out.ry = ry;
+  out.rx = down(SDL_SCANCODE_LEFT) ? 0 : (down(SDL_SCANCODE_RIGHT) ? 255 : 128);
+  out.ry = down(SDL_SCANCODE_UP) ? 0 : (down(SDL_SCANCODE_DOWN) ? 255 : 128);
 
-  out.cross = down(SDL_SCANCODE_SPACE);                                 // confirm / use item
-  out.circle = down(SDL_SCANCODE_BACKSPACE) || down(SDL_SCANCODE_ESCAPE);// cancel
-  out.square = down(SDL_SCANCODE_F);                                    // use card/pill
-  out.triangle = down(SDL_SCANCODE_LSHIFT) || down(SDL_SCANCODE_RSHIFT);
+  out.cross = down(SDL_SCANCODE_SPACE);                                  // confirm / accept
+  out.circle = down(SDL_SCANCODE_ESCAPE) || down(SDL_SCANCODE_BACKSPACE);// cancel / back
+  out.square = down(SDL_SCANCODE_F);                                     // use card / pill
+  out.triangle = down(SDL_SCANCODE_R);                                   // pick up / swap
   out.l1 = down(SDL_SCANCODE_Q);
-  out.r1 = down(SDL_SCANCODE_E);                                        // bomb (often R1/face)
-  out.l2 = down(SDL_SCANCODE_1);
-  out.r2 = down(SDL_SCANCODE_2);
-  out.options = down(SDL_SCANCODE_RETURN) || down(SDL_SCANCODE_P);      // pause / start
-  out.touchpad = down(SDL_SCANCODE_TAB);                               // map
+  out.r1 = down(SDL_SCANCODE_E);
+  out.l2 = down(SDL_SCANCODE_LSHIFT);
+  out.r2 = down(SDL_SCANCODE_RSHIFT);
+  out.options = down(SDL_SCANCODE_RETURN) || down(SDL_SCANCODE_P);       // start / pause
+  out.touchpad = down(SDL_SCANCODE_TAB);                                 // map / select
   return true;
 }
 

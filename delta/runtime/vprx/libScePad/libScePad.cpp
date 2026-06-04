@@ -74,21 +74,25 @@ struct PadControllerInformation {
 
 uint64_t g_readSeq = 0;
 
-// Optional auto-skip: pulse confirm/back/start so the intro+title auto-advance.
+// Auto-skip pulse: confirm/back/start so a headless intro+title auto-advance.
+// Gated by g_autoskip at the call site, where it takes precedence over the
+// keyboard (a headless verification run has a window but no real input).
 uint32_t autoSkipButtons() {
-  static const bool on = std::getenv("DELTA_PAD_AUTOSKIP") != nullptr;
-  if (!on) return 0;
   // ~10-read period: 3 reads pressed, 7 released, so menus see button edges.
   return (g_readSeq % 10 < 3) ? (kCross | kCircle | kOptions | kTouchPad) : 0;
 }
+static const bool g_autoskip = std::getenv("DELTA_PAD_AUTOSKIP") != nullptr;
 
-// Adapter from the gfx pad (DELTA_PAD_KEYBOARD=1 maps the SDL window keyboard;
-// the Android app maps the on-screen touch gamepad). Off by default elsewhere;
-// always on in the app, where the touch pad is the only input.
+// Adapter from the gfx pad (maps the SDL window keyboard; the Android app maps
+// the on-screen touch gamepad). On by default for interactive play; set
+// DELTA_PAD_KEYBOARD=0 to disable. DELTA_PAD_AUTOSKIP overrides it.
 #if defined(DELTA_ANDROID_APP)
 static const bool g_keyboard = true;
 #else
-static const bool g_keyboard = std::getenv("DELTA_PAD_KEYBOARD") != nullptr;
+static const bool g_keyboard = [] {
+  const char *e = std::getenv("DELTA_PAD_KEYBOARD");
+  return !e || std::strcmp(e, "0") != 0;
+}();
 #endif
 
 void fillPadState(PadData *d) {
@@ -97,7 +101,9 @@ void fillPadState(PadData *d) {
   uint32_t buttons = 0;
   uint8_t lx = 128, ly = 128, rx = 128, ry = 128;
   gfx::PadKeys k;
-  if (g_keyboard && gfx::pollKeyboardPad(k)) {
+  if (g_autoskip) {
+    buttons = autoSkipButtons();
+  } else if (g_keyboard && gfx::pollKeyboardPad(k)) {
     if (k.cross) buttons |= kCross;
     if (k.circle) buttons |= kCircle;
     if (k.square) buttons |= kSquare;
@@ -113,8 +119,6 @@ void fillPadState(PadData *d) {
     if (k.options) buttons |= kOptions;
     if (k.touchpad) buttons |= kTouchPad;
     lx = k.lx; ly = k.ly; rx = k.rx; ry = k.ry;
-  } else {
-    buttons = autoSkipButtons();
   }
   d->buttons = buttons;
   d->leftStick = {lx, ly};

@@ -71,10 +71,14 @@
 
           shellHook = ''
             echo "ps4delta dev shell, run:  cmake -G Ninja -B build && ninja -C build"
-            # Default to nix lavapipe (software Vulkan) so the GPU backend works
-            # headless / without a GPU driver. Override VK_ICD_FILENAMES to use a
-            # real GPU + display.
-            if [ -z "$VK_ICD_FILENAMES" ]; then
+            # Vulkan ICD: prefer the system GPU driver. NixOS exposes hardware
+            # Vulkan ICDs under /run/opengl-driver, so when those exist we leave
+            # VK_ICD_FILENAMES unset and let the loader find the real GPU (the
+            # backend then prefers a discrete device over llvmpipe). Only pin nix
+            # lavapipe (software Vulkan) when there is no system driver at all
+            # (headless / GPU-less CI), so rendering still works there.
+            if [ -z "$VK_ICD_FILENAMES" ] && \
+               ! ls /run/opengl-driver/share/vulkan/icd.d/*.json >/dev/null 2>&1; then
               for f in ${pkgs.mesa}/share/vulkan/icd.d/lvp_icd.*.json; do
                 [ -e "$f" ] && export VK_ICD_FILENAMES="$f" && break
               done

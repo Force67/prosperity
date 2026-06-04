@@ -15,4 +15,15 @@ else()
   find_package(Vulkan REQUIRED)
   find_package(SDL3 REQUIRED CONFIG)
   add_delta_module(gfx DEPS Vulkan::Vulkan SDL3::SDL3)
+
+  # Dear ImGui core (reuse the copy vendored with tracy) for the controls-legend
+  # overlay. We only need it to build a raw draw list; overlay.cpp rasterises the
+  # ImDrawData into the present framebuffer itself, so no ImGui backend is used.
+  set(_imgui ${CMAKE_SOURCE_DIR}/vendor/equilibrium/external/tracy/imgui)
+  target_sources(delta_gfx PRIVATE
+    ${_imgui}/imgui.cpp
+    ${_imgui}/imgui_draw.cpp
+    ${_imgui}/imgui_tables.cpp
+    ${_imgui}/imgui_widgets.cpp)
+  target_include_directories(delta_gfx PRIVATE ${_imgui})
 endif()

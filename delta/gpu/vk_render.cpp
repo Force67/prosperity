@@ -173,7 +173,37 @@ bool createDevice() {
   if (!n) { std::fprintf(stderr, "[gpuvk] no device\n"); return false; }
   std::vector<VkPhysicalDevice> devs(n);
   vkEnumeratePhysicalDevices(g.instance, &n, devs.data());
-  g.phys = devs[0];
+
+  // Prefer a real GPU over the llvmpipe software rasteriser (reported as type
+  // CPU): discrete > integrated > virtual > CPU. The loader can enumerate both
+  // a discrete GPU and llvmpipe on the same box, so picking devs[0] blindly may
+  // land on software. DELTA_VK_GPU=<name-substring> forces a specific device.
+  const char *want = std::getenv("DELTA_VK_GPU");
+  int best = -1;
+  g.phys = VK_NULL_HANDLE;
+  for (VkPhysicalDevice d : devs) {
+    uint32_t dqn = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(d, &dqn, nullptr);
+    std::vector<VkQueueFamilyProperties> dq(dqn);
+    vkGetPhysicalDeviceQueueFamilyProperties(d, &dqn, dq.data());
+    bool gfx = false;
+    for (auto &q : dq)
+      if (q.queueFlags & VK_QUEUE_GRAPHICS_BIT) { gfx = true; break; }
+    if (!gfx) continue;
+    VkPhysicalDeviceProperties p;
+    vkGetPhysicalDeviceProperties(d, &p);
+    int score;
+    switch (p.deviceType) {
+      case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU:   score = 4; break;
+      case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU: score = 3; break;
+      case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU:    score = 2; break;
+      case VK_PHYSICAL_DEVICE_TYPE_CPU:            score = 0; break;  // llvmpipe
+      default:                                     score = 1; break;
+    }
+    if (want && std::strstr(p.deviceName, want)) score = 100;
+    if (score > best) { best = score; g.phys = d; }
+  }
+  if (g.phys == VK_NULL_HANDLE) { std::fprintf(stderr, "[gpuvk] no gfx device\n"); return false; }
 
   uint32_t qn = 0;
   vkGetPhysicalDeviceQueueFamilyProperties(g.phys, &qn, nullptr);
@@ -864,17 +894,17 @@ void endFrame(uint64_t scanoutBase) {
   vkQueueSubmit(g.queue, 1, &si, g.fence);
   vkWaitForFences(g.device, 1, &g.fence, VK_TRUE, UINT64_MAX);
 
-  // The guest renders the whole frame horizontally mirrored (an X-handedness
-  // mismatch that is uniform across every draw and render-target path); mirror
-  // the final scanout back so text and logos read the right way round.
+  // The guest scanout is produced bottom-up relative to the display (a Y-origin
+  // mismatch uniform across every draw and render-target path); flip the rows
+  // back so the image is the right way up. Columns are left as-is (it is not
+  // horizontally mirrored). This buffer feeds present() and the PPM dumps.
   static std::vector<uint8_t> flipped;
   flipped.resize(static_cast<size_t>(rt.w) * rt.h * 4);
   for (uint32_t y = 0; y < rt.h; y++) {
     const uint8_t *srow = static_cast<const uint8_t *>(g.readbackMap) +
-                          static_cast<size_t>(y) * rt.w * 4;
+                          static_cast<size_t>(rt.h - 1 - y) * rt.w * 4;
     uint8_t *drow = flipped.data() + static_cast<size_t>(y) * rt.w * 4;
-    for (uint32_t x = 0; x < rt.w; x++)
-      std::memcpy(drow + x * 4, srow + (rt.w - 1 - x) * 4, 4);
+    std::memcpy(drow, srow, static_cast<size_t>(rt.w) * 4);
   }
   const uint8_t *pixels = flipped.data();
   if (g_dump && g.frameNum >= 1000 && g.frameNum % 2000 == 0 && g.frameDraws > 0)
