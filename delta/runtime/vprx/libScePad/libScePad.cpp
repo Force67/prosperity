@@ -74,12 +74,26 @@ struct PadControllerInformation {
 
 uint64_t g_readSeq = 0;
 
-// Auto-skip pulse: confirm/back/start so a headless intro+title auto-advance.
-// Gated by g_autoskip at the call site, where it takes precedence over the
-// keyboard (a headless verification run has a window but no real input).
+// Auto-skip pulse: advance the intro/title/menus into actual gameplay for a
+// headless verification run. Gated by g_autoskip at the call site, where it
+// takes precedence over the keyboard. NEVER pulse Circle (back/cancel) together
+// with Cross (confirm): pressing both each cycle confirms then immediately backs
+// out, so menus never advance (this kept the headless run stuck on the title).
+// Sequence: Options first (title "PRESS OPTIONS" -> main menu), then Cross to
+// confirm "New Run"/save-slot/character-select, with the occasional Down to move
+// the menu cursor. Buttons pulse with gaps so menus see clean press edges.
 uint32_t autoSkipButtons() {
-  // ~10-read period: 3 reads pressed, 7 released, so menus see button edges.
-  return (g_readSeq % 10 < 3) ? (kCross | kCircle | kOptions | kTouchPad) : 0;
+  // The intro/logos run for ~30s before the "PRESS OPTIONS" title, and we can't
+  // know when that happens, so pulse Options AND Cross continuously throughout
+  // (never time-limited). Options opens the menu from the title; Cross confirms
+  // "New Run"/save-slot/character-select (their default entries are pre-
+  // highlighted). Clean press edges via gaps. No Circle/Down so nothing cancels
+  // or navigates away from the default path into gameplay.
+  uint32_t phase = g_readSeq % 24;
+  if (phase < 3) return kOptions;
+  if (phase >= 8 && phase < 11) return kCross;
+  if (phase >= 16 && phase < 19) return kCross;
+  return 0;
 }
 static const bool g_autoskip = std::getenv("DELTA_PAD_AUTOSKIP") != nullptr;
 
@@ -129,6 +143,9 @@ void fillPadState(PadData *d) {
   d->connected = true;
   d->connectedCount = 1;
   d->timestamp = ++g_readSeq;
+  if (g_autoskip && (g_readSeq % 600 == 1))
+    std::fprintf(stderr, "[pad] readSeq=%llu buttons=%#x\n",
+                 (unsigned long long)g_readSeq, buttons);
 }
 
 }  // namespace
