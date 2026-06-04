@@ -1,6 +1,9 @@
 #include "libSceUserService.h"
 
 static const runtime::funcInfo functions[] = {
+    {0x8F760CBB531534DA, (void *)&sceUserServiceInitialize},
+    {0x6B3FF447A7AF899D, (void *)&sceUserServiceInitialize2},
+    {0x6F01634BE6D7F660, (void *)&sceUserServiceTerminate},
     {0xC87D7B43A356B558, (void *)&sceUserServiceGetEvent},
     {0x7CF87298A36F2BF0, (void *)&sceUserServiceGetLoginUserIdList},
     {0x09D5A9D281D61ABD, (void *)&sceUserServiceGetInitialUser},

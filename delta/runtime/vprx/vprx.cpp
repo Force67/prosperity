@@ -21,11 +21,12 @@ extern "C" int vprx_anchor_libSceVideoOut;
 extern "C" int vprx_anchor_libSceGnmDriver;
 extern "C" int vprx_anchor_libSceMsgDialog;
 // NB: libScePad / libSceUserService HLE exist in-tree but are intentionally NOT
-// anchored: reporting a connected controller drags in an app-messaging/user
-// sign-in cascade (SceAppMessaging "tryGetMsg" + "user already logged in" spin)
-// that isn't implemented and crashes the boot. Until that subsystem exists, the
-// LLE pad (no device backing) keeps the title at "press start" but lets the boot
-// and all rendering through.
+// anchored. Reporting a connected controller drives a deep multi-layer input
+// stack: overriding userService Initialize clears the IPMI "user already logged
+// in" spin, but the next layer (Mbus enumerating the pad via /dev/usbctl) then
+// tight-loops needing real USB-enumeration + HID-report protocol. Until that
+// stack is built, the LLE pad (no device backing) leaves the title at "press
+// start" while boot and all rendering work. Anchor these once usbctl/HID exist.
 static volatile int *const vprx_anchors[] = {&vprx_anchor_libSceVideoOut,
                                              &vprx_anchor_libSceGnmDriver,
                                              &vprx_anchor_libSceMsgDialog};

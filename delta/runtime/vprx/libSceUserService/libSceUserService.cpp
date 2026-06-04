@@ -14,6 +14,15 @@ constexpr int kNoEvent = 0x80960013;  // SCE_USER_SERVICE_ERROR_NO_EVENT
 bool g_loginDelivered = false;
 }  // namespace
 
+// Fully take over init/teardown so the LLE userService never sets up its IPMI
+// client (whose login round-trip to a non-existent system daemon spins forever
+// once a controller appears).
+int PS4ABI sceUserServiceInitialize(const void *params) { return 0; }
+int PS4ABI sceUserServiceInitialize2(uint32_t a, int64_t b, const void *c) {
+  return 0;
+}
+int PS4ABI sceUserServiceTerminate() { return 0; }
+
 int PS4ABI sceUserServiceGetEvent(void *eventOut) {
   struct Event {
     int32_t eventType;  // 0 = LOGIN, 1 = LOGOUT
