@@ -20,16 +20,17 @@ static base::Vector<const modInfo *> vprxTable;
 extern "C" int vprx_anchor_libSceVideoOut;
 extern "C" int vprx_anchor_libSceGnmDriver;
 extern "C" int vprx_anchor_libSceMsgDialog;
-// NB: libScePad / libSceUserService HLE exist in-tree but are intentionally NOT
-// anchored. Reporting a connected controller drives a deep multi-layer input
-// stack: overriding userService Initialize clears the IPMI "user already logged
-// in" spin, but the next layer (Mbus enumerating the pad via /dev/usbctl) then
-// tight-loops needing real USB-enumeration + HID-report protocol. Until that
-// stack is built, the LLE pad (no device backing) leaves the title at "press
-// start" while boot and all rendering work. Anchor these once usbctl/HID exist.
+// Pad + userService HLE: a connected controller + one logged-in user lets the
+// title advance into actual gameplay (the userService init override avoids the
+// IPMI sign-in spin). Mbus still busy-polls /dev/usbctl on a worker but that no
+// longer blocks boot or rendering.
+extern "C" int vprx_anchor_libScePad;
+extern "C" int vprx_anchor_libSceUserService;
 static volatile int *const vprx_anchors[] = {&vprx_anchor_libSceVideoOut,
                                              &vprx_anchor_libSceGnmDriver,
-                                             &vprx_anchor_libSceMsgDialog};
+                                             &vprx_anchor_libSceMsgDialog,
+                                             &vprx_anchor_libScePad,
+                                             &vprx_anchor_libSceUserService};
 
 void vprx_init() {
   // Touch the anchors so the references aren't optimized away.
