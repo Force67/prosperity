@@ -51,6 +51,13 @@ struct PadKeys {
 // Fill `out` from the current keyboard state. Returns false if no window exists.
 bool pollKeyboardPad(PadKeys &out);
 
+// Harness signal shared between the GPU renderer and the input layer. The renderer
+// raises it once sustained gameplay (room rendering) is on screen, so the headless
+// autoskip (DELTA_PAD_AUTOSKIP) stops pressing menu buttons and stays in the run
+// instead of bouncing back out through the pause menu. Latches on (a run started).
+void setInGameplay(bool v);
+bool inGameplay();
+
 void shutdown();
 
 }  // namespace gfx

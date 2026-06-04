@@ -83,12 +83,19 @@ uint64_t g_readSeq = 0;
 // confirm "New Run"/save-slot/character-select, with the occasional Down to move
 // the menu cursor. Buttons pulse with gaps so menus see clean press edges.
 uint32_t autoSkipButtons() {
-  // The intro/logos run for ~30s before the "PRESS OPTIONS" title, and we can't
-  // know when that happens, so pulse Options AND Cross continuously throughout
-  // (never time-limited). Options opens the menu from the title; Cross confirms
-  // "New Run"/save-slot/character-select (their default entries are pre-
-  // highlighted). Clean press edges via gaps. No Circle/Down so nothing cancels
-  // or navigates away from the default path into gameplay.
+  // Drive intro -> title -> menu -> a started run, then STOP opening menus so we
+  // stay in gameplay (for headless verification). Options opens the menu from the
+  // "PRESS OPTIONS" title; Cross confirms New Run / save-slot / character-select
+  // (default entries pre-highlighted). Once a run is likely underway we drop
+  // Options (it would open the pause menu and Cross would navigate us back out),
+  // keeping only an occasional Cross to dismiss incidental item/pickup popups.
+  // Never Circle/Down so nothing cancels or moves off the default path.
+  // Once the GPU renderer reports sustained gameplay, stop opening menus (Options
+  // would pause and Cross would navigate us back out); just hold neutral so we
+  // stay in the run. The signal latches, so a brief pause flash won't restart the
+  // menu mashing.
+  if (gfx::inGameplay())
+    return 0;
   uint32_t phase = g_readSeq % 24;
   if (phase < 3) return kOptions;
   if (phase >= 8 && phase < 11) return kCross;
