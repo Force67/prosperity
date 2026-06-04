@@ -5,6 +5,95 @@
 
 #include "../vprx.h"
 
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+
+// HLE controller. We report a single connected DS4 on the open handle and feed
+// the game a neutral pad state (sticks centered, no buttons). With
+// DELTA_PAD_AUTOSKIP=1 we pulse the confirm/back/start buttons periodically so a
+// headless run can advance past the intro/title into the menu for verification.
+namespace {
+
+// Orbis button bitmasks (ScePadButtonDataOffset).
+enum : uint32_t {
+  kL3 = 0x0002, kR3 = 0x0004, kOptions = 0x0008,
+  kUp = 0x0010, kRight = 0x0020, kDown = 0x0040, kLeft = 0x0080,
+  kL2 = 0x0100, kR2 = 0x0200, kL1 = 0x0400, kR1 = 0x0800,
+  kTriangle = 0x1000, kCircle = 0x2000, kCross = 0x4000, kSquare = 0x8000,
+  kTouchPad = 0x100000,
+};
+
+struct AnalogStick { uint8_t x, y; };
+struct AnalogButtons { uint8_t l2, r2; };
+struct FQuaternion { float x, y, z, w; };
+struct FVector3 { float x, y, z; };
+struct PadTouch { uint16_t x, y; uint8_t id; uint8_t reserve[3]; };
+struct PadTouchData {
+  uint8_t touchNum; uint8_t reserve[3]; uint32_t reserve1; PadTouch touch[2];
+};
+struct PadExtUnitData { uint32_t id; uint8_t reserve; uint8_t dataLen; uint8_t data[10]; };
+
+// ScePadData: offsets verified against the orbis layout (connected@0x4C,
+// timestamp@0x50). Written into the game's buffer on read.
+struct PadData {
+  uint32_t buttons;             // 0x00
+  AnalogStick leftStick;        // 0x04
+  AnalogStick rightStick;       // 0x06
+  AnalogButtons analogButtons;  // 0x08
+  uint8_t pad0[2];              // 0x0A
+  FQuaternion orientation;      // 0x0C
+  FVector3 acceleration;        // 0x1C
+  FVector3 angularVelocity;     // 0x28
+  PadTouchData touchData;       // 0x34
+  bool connected;               // 0x4C
+  uint8_t pad1[3];
+  uint64_t timestamp;           // 0x50
+  PadExtUnitData extUnit;       // 0x58
+  uint8_t connectedCount;       // 0x68
+  uint8_t reserve[2];
+  uint8_t deviceUniqueDataLen;  // 0x6B
+  uint8_t deviceUniqueData[12]; // 0x6C
+};
+static_assert(sizeof(PadData) >= 0x78, "PadData layout");
+
+struct PadControllerInformation {
+  float touchpadDensity;        // 0x00
+  uint16_t touchResolutionX;    // 0x04
+  uint16_t touchResolutionY;    // 0x06
+  uint8_t stickDeadZoneLeft;    // 0x08
+  uint8_t stickDeadZoneRight;   // 0x09
+  uint8_t connectionType;       // 0x0A
+  uint8_t connectedCount;       // 0x0B
+  bool connected;               // 0x0C
+  uint8_t deviceClass;          // 0x0D (ORBIS_PAD_DEVICE_CLASS_STANDARD = 0)
+  uint8_t reserve[8];
+};
+
+uint64_t g_readSeq = 0;
+
+// Optional auto-skip: pulse confirm/back/start so the intro+title auto-advance.
+uint32_t autoSkipButtons() {
+  static const bool on = std::getenv("DELTA_PAD_AUTOSKIP") != nullptr;
+  if (!on) return 0;
+  // ~10-read period: 3 reads pressed, 7 released, so menus see button edges.
+  return (g_readSeq % 10 < 3) ? (kCross | kCircle | kOptions | kTouchPad) : 0;
+}
+
+void fillPadState(PadData *d) {
+  if (!d) return;
+  std::memset(d, 0, sizeof(*d));
+  d->buttons = autoSkipButtons();
+  d->leftStick = {128, 128};
+  d->rightStick = {128, 128};
+  d->orientation = {0, 0, 0, 1};
+  d->connected = true;
+  d->connectedCount = 1;
+  d->timestamp = ++g_readSeq;
+}
+
+}  // namespace
+
 int scePadClose() {
   LOG_UNIMPLEMENTED;
   return 0;
@@ -60,8 +149,19 @@ int scePadGetCapability() {
   return 0;
 }
 
-int scePadGetControllerInformation() {
-  LOG_UNIMPLEMENTED;
+int scePadGetControllerInformation(int handle, void *pInfo) {
+  if (auto *info = static_cast<PadControllerInformation *>(pInfo)) {
+    std::memset(info, 0, sizeof(*info));
+    info->touchpadDensity = 44.86f;
+    info->touchResolutionX = 1920;
+    info->touchResolutionY = 942;
+    info->stickDeadZoneLeft = 0;
+    info->stickDeadZoneRight = 0;
+    info->connectionType = 0;  // local
+    info->connectedCount = 1;
+    info->connected = true;
+    info->deviceClass = 0;  // STANDARD (DualShock4)
+  }
   return 0;
 }
 
@@ -75,9 +175,8 @@ int scePadGetDeviceInfo() {
   return 0;
 }
 
-int scePadGetHandle() {
-  LOG_UNIMPLEMENTED;
-  return 0;
+int scePadGetHandle(int userId, int type, int index) {
+  return 1;  // single fixed handle
 }
 
 int scePadGetVersionInfo() {
@@ -100,18 +199,20 @@ int scePadMbusInit() {
   return 0;
 }
 
-int scePadOpen() {
-  LOG_UNIMPLEMENTED;
-  return 0;
+int scePadOpen(int userId, int type, int index, const void *param) {
+  return 1;  // positive handle = success
 }
 
-int scePadRead() {
-  LOG_UNIMPLEMENTED;
-  return 0;
+int scePadRead(int handle, void *data, int num) {
+  if (num <= 0) return 0;
+  auto *d = static_cast<PadData *>(data);
+  // Return one fresh sample (we don't keep history); games read [0].
+  fillPadState(&d[0]);
+  return 1;  // number of samples read
 }
 
-int scePadReadState() {
-  LOG_UNIMPLEMENTED;
+int scePadReadState(int handle, void *data) {
+  fillPadState(static_cast<PadData *>(data));
   return 0;
 }
 
@@ -235,9 +336,10 @@ int scePadGetFeatureReport() {
   return 0;
 }
 
-int scePadReadExt() {
-  LOG_UNIMPLEMENTED;
-  return 0;
+int scePadReadExt(int handle, void *data, int num) {
+  if (num <= 0) return 0;
+  fillPadState(static_cast<PadData *>(data));
+  return 1;
 }
 
 int scePadGetBluetoothAddress() {
@@ -335,9 +437,8 @@ int scePadSetLoginUserNumber() {
   return 0;
 }
 
-int scePadIsValidHandle() {
-  LOG_UNIMPLEMENTED;
-  return 0;
+int scePadIsValidHandle(int handle) {
+  return handle > 0 ? 1 : 0;
 }
 
 int scePadMbusTerm() {
@@ -395,8 +496,8 @@ int scePadIsMoveConnected() {
   return 0;
 }
 
-int scePadReadStateExt() {
-  LOG_UNIMPLEMENTED;
+int scePadReadStateExt(int handle, void *data) {
+  fillPadState(static_cast<PadData *>(data));
   return 0;
 }
 
