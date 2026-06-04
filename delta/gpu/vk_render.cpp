@@ -88,8 +88,24 @@ struct TexEntry {
   VkDeviceMemory mem = VK_NULL_HANDLE;
   VkImageView view = VK_NULL_HANDLE;
   VkDescriptorSet set = VK_NULL_HANDLE;
+  uint32_t w = 0, h = 0;
+  uint64_t hash = 0;  // cheap fingerprint of guest pixels; re-upload when it changes
 };
 std::unordered_map<uint64_t, TexEntry> g_texCache;
+
+// Cheap content fingerprint of a guest texture: sample a spread of dwords. Lets
+// us re-upload dynamic textures (room art composed/loaded after first sample)
+// instead of serving the stale first upload.
+uint64_t texHash(uint64_t base, uint32_t w, uint32_t h) {
+  const uint32_t *p = reinterpret_cast<const uint32_t *>(base);
+  uint64_t count = (uint64_t)w * h;            // dwords (RGBA8)
+  uint64_t step = count > 512 ? count / 512 : 1;
+  uint64_t hsh = 1469598103934665603ull;       // FNV-ish
+  for (uint64_t i = 0; i < count; i += step) {
+    hsh = (hsh ^ p[i]) * 1099511628211ull;
+  }
+  return hsh ^ (count << 1);
+}
 
 // A render target, keyed by its guest CB_COLOR0 address. Doubles as a sampleable
 // texture (render-to-texture) for composite passes.
@@ -411,32 +427,8 @@ bool createTexPipeline() {
   return true;
 }
 
-// Upload a guest texture (assumed linear 32bpp RGBA) and return a descriptor set
-// bound to it. Cached by guest base address.
-VkDescriptorSet getTexture(uint64_t base, uint32_t w, uint32_t h) {
-  auto it = g_texCache.find(base);
-  if (it != g_texCache.end())
-    return it->second.set;
-  if (g_texCache.size() > 3000 || !w || !h)
-    return VK_NULL_HANDLE;
-  TexEntry e;
-  VkImageCreateInfo ii{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
-  ii.imageType = VK_IMAGE_TYPE_2D;
-  ii.format = VK_FORMAT_R8G8B8A8_UNORM;
-  ii.extent = {w, h, 1};
-  ii.mipLevels = 1; ii.arrayLayers = 1;
-  ii.samples = VK_SAMPLE_COUNT_1_BIT;
-  ii.tiling = VK_IMAGE_TILING_OPTIMAL;
-  ii.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-  if (vkCreateImage(g.device, &ii, nullptr, &e.image) != VK_SUCCESS) return VK_NULL_HANDLE;
-  VkMemoryRequirements mr; vkGetImageMemoryRequirements(g.device, e.image, &mr);
-  VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-  ai.allocationSize = mr.size;
-  ai.memoryTypeIndex = findMemoryType(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-  vkAllocateMemory(g.device, &ai, nullptr, &e.mem);
-  vkBindImageMemory(g.device, e.image, e.mem, 0);
-
-  // Staging upload from guest memory (identity-mapped, host-readable).
+// Copy guest pixels (linear 32bpp RGBA) into `img` via a staging buffer.
+void uploadTexPixels(VkImage img, uint64_t base, uint32_t w, uint32_t h) {
   VkDeviceSize sz = (VkDeviceSize)w * h * 4;
   VkBuffer stg; VkDeviceMemory stgMem; void *map;
   VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
@@ -453,20 +445,19 @@ VkDescriptorSet getTexture(uint64_t base, uint32_t w, uint32_t h) {
   std::memcpy(map, reinterpret_cast<const void *>(base), sz);
   vkUnmapMemory(g.device, stgMem);
 
-  // One-shot copy on a transient command buffer.
   VkCommandBufferAllocateInfo ca{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
   ca.commandPool = g.pool; ca.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; ca.commandBufferCount = 1;
   VkCommandBuffer c; vkAllocateCommandBuffers(g.device, &ca, &c);
   VkCommandBufferBeginInfo cbi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
   cbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
   vkBeginCommandBuffer(c, &cbi);
-  imageBarrier(c, e.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+  imageBarrier(c, img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                0, VK_ACCESS_TRANSFER_WRITE_BIT);
   VkBufferImageCopy cp{};
   cp.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
   cp.imageExtent = {w, h, 1};
-  vkCmdCopyBufferToImage(c, stg, e.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &cp);
-  imageBarrier(c, e.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+  vkCmdCopyBufferToImage(c, stg, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &cp);
+  imageBarrier(c, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
                VK_ACCESS_SHADER_READ_BIT);
   vkEndCommandBuffer(c);
@@ -478,6 +469,46 @@ VkDescriptorSet getTexture(uint64_t base, uint32_t w, uint32_t h) {
   vkFreeCommandBuffers(g.device, g.pool, 1, &c);
   vkDestroyBuffer(g.device, stg, nullptr);
   vkFreeMemory(g.device, stgMem, nullptr);
+}
+
+// Upload a guest texture (linear 32bpp RGBA) and return a descriptor set bound
+// to it. Cached by guest base; re-uploaded when the guest pixels change (the
+// room art is composed/loaded into the same buffer after the first sample, so a
+// once-only cache would serve a stale black frame).
+VkDescriptorSet getTexture(uint64_t base, uint32_t w, uint32_t h) {
+  if (!w || !h) return VK_NULL_HANDLE;
+  uint64_t hsh = texHash(base, w, h);
+  auto it = g_texCache.find(base);
+  if (it != g_texCache.end()) {
+    TexEntry &e = it->second;
+    if (e.w == w && e.h == h) {
+      if (e.hash != hsh) {  // dynamic texture changed -> re-upload pixels
+        uploadTexPixels(e.image, base, w, h);
+        e.hash = hsh;
+      }
+      return e.set;
+    }
+    // size changed (buffer reused for a different texture): fall through to recreate
+  }
+  if (g_texCache.size() > 3000) return VK_NULL_HANDLE;
+  TexEntry e; e.w = w; e.h = h; e.hash = hsh;
+  VkImageCreateInfo ii{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+  ii.imageType = VK_IMAGE_TYPE_2D;
+  ii.format = VK_FORMAT_R8G8B8A8_UNORM;
+  ii.extent = {w, h, 1};
+  ii.mipLevels = 1; ii.arrayLayers = 1;
+  ii.samples = VK_SAMPLE_COUNT_1_BIT;
+  ii.tiling = VK_IMAGE_TILING_OPTIMAL;
+  ii.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+  if (vkCreateImage(g.device, &ii, nullptr, &e.image) != VK_SUCCESS) return VK_NULL_HANDLE;
+  VkMemoryRequirements mr; vkGetImageMemoryRequirements(g.device, e.image, &mr);
+  VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+  ai.allocationSize = mr.size;
+  ai.memoryTypeIndex = findMemoryType(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+  vkAllocateMemory(g.device, &ai, nullptr, &e.mem);
+  vkBindImageMemory(g.device, e.image, e.mem, 0);
+
+  uploadTexPixels(e.image, base, w, h);
 
   VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
   vci.image = e.image; vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
