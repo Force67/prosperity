@@ -20,6 +20,12 @@ static base::Vector<const modInfo *> vprxTable;
 extern "C" int vprx_anchor_libSceVideoOut;
 extern "C" int vprx_anchor_libSceGnmDriver;
 extern "C" int vprx_anchor_libSceMsgDialog;
+// NB: libScePad / libSceUserService HLE exist in-tree but are intentionally NOT
+// anchored: reporting a connected controller drags in an app-messaging/user
+// sign-in cascade (SceAppMessaging "tryGetMsg" + "user already logged in" spin)
+// that isn't implemented and crashes the boot. Until that subsystem exists, the
+// LLE pad (no device backing) keeps the title at "press start" but lets the boot
+// and all rendering through.
 static volatile int *const vprx_anchors[] = {&vprx_anchor_libSceVideoOut,
                                              &vprx_anchor_libSceGnmDriver,
                                              &vprx_anchor_libSceMsgDialog};

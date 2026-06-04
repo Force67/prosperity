@@ -97,3 +97,7 @@ static const runtime::funcInfo functions[] = {
 };
 
 MODULE_INIT(libScePad);
+
+// Anchor referenced from vprx.cpp so this module's HLE table is registered (and
+// the LLE libScePad, which has no controller backing here, is overridden).
+extern "C" int vprx_anchor_libScePad = 1;
