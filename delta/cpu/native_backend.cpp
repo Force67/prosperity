@@ -9,6 +9,7 @@
 #if defined(DELTA_BACKEND_NATIVE)
 
 #include <base.h>
+#include <csetjmp>
 #include "cpu_backend.h"
 #include "kern/proc.h"
 
@@ -26,6 +27,14 @@ void setThreadFsBase(uint64_t v) { t_fsbase = v; }
 } // namespace krnl
 
 namespace cpu {
+
+// Per-thread unwind target for thr_exit. The guest pthread trampoline issues
+// thr_exit as its last act and treats a return as fatal ("thr_exit() returned").
+// On native the trampoline is just a host call chain (runGuestThread -> guest
+// frames -> the syscall handler), and those guest frames carry no C++ unwind
+// info, so we can't throw past them. longjmp restores SP/IP directly, so it
+// unwinds straight back to runGuestThread without touching the guest frames.
+static thread_local std::jmp_buf *t_exitJmp = nullptr;
 
 class NativeBackend final : public ICpuBackend {
 public:
@@ -52,12 +61,22 @@ public:
     auto entry = t->entry;
     auto arg = t->arg;
     delete t;
-    reinterpret_cast<void(PS4ABI *)(void *)>(entry)(arg);
+    // thr_exit longjmps back here instead of returning into the guest. The
+    // guest entry may also just return naturally (setjmp returns 0 first time).
+    std::jmp_buf jb;
+    t_exitJmp = &jb;
+    if (setjmp(jb) == 0)
+      reinterpret_cast<void(PS4ABI *)(void *)>(entry)(arg);
+    t_exitJmp = nullptr;
   }
 };
 
-// Native: the guest thread entry returns naturally; thr_exit just returns.
-void exitGuestThread() {}
+// Native: unwind out of the guest call chain back to runGuestThread so the
+// host thread ends, instead of returning into the guest pthread trampoline.
+void exitGuestThread() {
+  if (t_exitJmp)
+    std::longjmp(*t_exitJmp, 1);
+}
 
 // Native host is x86-64: the guest can call the host function directly.
 uintptr_t makeHostThunk(void *hostFn) { return reinterpret_cast<uintptr_t>(hostFn); }
