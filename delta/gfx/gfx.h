@@ -34,6 +34,18 @@ void present(const void *pixels, uint32_t w, uint32_t h, uint32_t srcPitch = 0,
 // Drain window events. Returns false once the user asks to close the window.
 bool pumpEvents();
 
+// Keyboard-to-gamepad state (an optional input adapter). Buttons are booleans
+// and sticks are 0..255 with 128 centred. Maps a WASD/arrows layout to a DS4.
+struct PadKeys {
+  bool cross = false, circle = false, square = false, triangle = false;
+  bool up = false, down = false, left = false, right = false;
+  bool l1 = false, r1 = false, l2 = false, r2 = false;
+  bool options = false, touchpad = false;
+  uint8_t lx = 128, ly = 128, rx = 128, ry = 128;
+};
+// Fill `out` from the current keyboard state. Returns false if no window exists.
+bool pollKeyboardPad(PadKeys &out);
+
 void shutdown();
 
 }  // namespace gfx

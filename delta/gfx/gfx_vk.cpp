@@ -459,6 +459,41 @@ bool pumpEvents() {
   return true;
 }
 
+// Optional keyboard->DS4 adapter. WASD = left stick + d-pad (move / menu nav),
+// arrows = right stick (Isaac aims/shoots), plus a sensible face-button layout.
+bool pollKeyboardPad(PadKeys &out) {
+  if (!g.window)
+    return false;
+  const bool *k = SDL_GetKeyboardState(nullptr);
+  if (!k)
+    return false;
+  auto down = [&](SDL_Scancode s) { return k[s]; };
+
+  // Movement on the left stick (and the d-pad, for menus).
+  out.left = down(SDL_SCANCODE_A);
+  out.right = down(SDL_SCANCODE_D);
+  out.up = down(SDL_SCANCODE_W);
+  out.down = down(SDL_SCANCODE_S);
+  out.lx = out.left ? 0 : (out.right ? 255 : 128);
+  out.ly = out.up ? 0 : (out.down ? 255 : 128);
+  // Aim / shoot on the right stick (arrow keys).
+  uint8_t rx = down(SDL_SCANCODE_LEFT) ? 0 : (down(SDL_SCANCODE_RIGHT) ? 255 : 128);
+  uint8_t ry = down(SDL_SCANCODE_UP) ? 0 : (down(SDL_SCANCODE_DOWN) ? 255 : 128);
+  out.rx = rx; out.ry = ry;
+
+  out.cross = down(SDL_SCANCODE_SPACE);                                 // confirm / use item
+  out.circle = down(SDL_SCANCODE_BACKSPACE) || down(SDL_SCANCODE_ESCAPE);// cancel
+  out.square = down(SDL_SCANCODE_F);                                    // use card/pill
+  out.triangle = down(SDL_SCANCODE_LSHIFT) || down(SDL_SCANCODE_RSHIFT);
+  out.l1 = down(SDL_SCANCODE_Q);
+  out.r1 = down(SDL_SCANCODE_E);                                        // bomb (often R1/face)
+  out.l2 = down(SDL_SCANCODE_1);
+  out.r2 = down(SDL_SCANCODE_2);
+  out.options = down(SDL_SCANCODE_RETURN) || down(SDL_SCANCODE_P);      // pause / start
+  out.touchpad = down(SDL_SCANCODE_TAB);                               // map
+  return true;
+}
+
 void shutdown() {
   if (g.device)
     vkDeviceWaitIdle(g.device);

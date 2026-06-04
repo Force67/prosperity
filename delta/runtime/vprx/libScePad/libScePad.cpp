@@ -9,6 +9,8 @@
 #include <cstdlib>
 #include <cstring>
 
+#include "gfx/gfx.h"
+
 // HLE controller. We report a single connected DS4 on the open handle and feed
 // the game a neutral pad state (sticks centered, no buttons). With
 // DELTA_PAD_AUTOSKIP=1 we pulse the confirm/back/start buttons periodically so a
@@ -80,12 +82,40 @@ uint32_t autoSkipButtons() {
   return (g_readSeq % 10 < 3) ? (kCross | kCircle | kOptions | kTouchPad) : 0;
 }
 
+// Optional keyboard->DS4 adapter (DELTA_PAD_KEYBOARD=1): map the SDL window's
+// keyboard to buttons + sticks. Off by default; falls back to neutral/autoskip.
+static const bool g_keyboard = std::getenv("DELTA_PAD_KEYBOARD") != nullptr;
+
 void fillPadState(PadData *d) {
   if (!d) return;
   std::memset(d, 0, sizeof(*d));
-  d->buttons = autoSkipButtons();
-  d->leftStick = {128, 128};
-  d->rightStick = {128, 128};
+  uint32_t buttons = 0;
+  uint8_t lx = 128, ly = 128, rx = 128, ry = 128;
+  gfx::PadKeys k;
+  if (g_keyboard && gfx::pollKeyboardPad(k)) {
+    if (k.cross) buttons |= kCross;
+    if (k.circle) buttons |= kCircle;
+    if (k.square) buttons |= kSquare;
+    if (k.triangle) buttons |= kTriangle;
+    if (k.up) buttons |= kUp;
+    if (k.down) buttons |= kDown;
+    if (k.left) buttons |= kLeft;
+    if (k.right) buttons |= kRight;
+    if (k.l1) buttons |= kL1;
+    if (k.r1) buttons |= kR1;
+    if (k.l2) buttons |= kL2;
+    if (k.r2) buttons |= kR2;
+    if (k.options) buttons |= kOptions;
+    if (k.touchpad) buttons |= kTouchPad;
+    lx = k.lx; ly = k.ly; rx = k.rx; ry = k.ry;
+  } else {
+    buttons = autoSkipButtons();
+  }
+  d->buttons = buttons;
+  d->leftStick = {lx, ly};
+  d->rightStick = {rx, ry};
+  d->analogButtons = {static_cast<uint8_t>((buttons & kL2) ? 255 : 0),
+                      static_cast<uint8_t>((buttons & kR2) ? 255 : 0)};
   d->orientation = {0, 0, 0, 1};
   d->connected = true;
   d->connectedCount = 1;
