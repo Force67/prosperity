@@ -47,16 +47,18 @@ struct State {
   VkCommandBuffer cmd = VK_NULL_HANDLE;
   VkFence fence = VK_NULL_HANDLE;
 
-  VkImage rt = VK_NULL_HANDLE;
-  VkDeviceMemory rtMem = VK_NULL_HANDLE;
-  VkImageView rtView = VK_NULL_HANDLE;
-  uint32_t rtW = 0, rtH = 0;
   VkFormat rtFormat = VK_FORMAT_B8G8R8A8_UNORM;
 
+  // Shared readback buffer (sized for the largest RT presented).
   VkBuffer readback = VK_NULL_HANDLE;
   VkDeviceMemory readbackMem = VK_NULL_HANDLE;
   void *readbackMap = nullptr;
   VkDeviceSize readbackSize = 0;
+
+  uint64_t curRt = 0;   // RT currently in a dynamic-rendering region (0 = none)
+  uint64_t lastRt = 0;  // last RT rendered to (present fallback)
+  uint64_t busiestRt = 0;
+  uint32_t busiestRtDraws = 0;
 
   // Pipeline (textured/colored quad).
   VkPipelineLayout layout = VK_NULL_HANDLE;
@@ -87,6 +89,20 @@ struct TexEntry {
   VkDescriptorSet set = VK_NULL_HANDLE;
 };
 std::unordered_map<uint64_t, TexEntry> g_texCache;
+
+// A render target, keyed by its guest CB_COLOR0 address. Doubles as a sampleable
+// texture (render-to-texture) for composite passes.
+struct RTarget {
+  VkImage image = VK_NULL_HANDLE;
+  VkDeviceMemory mem = VK_NULL_HANDLE;
+  VkImageView view = VK_NULL_HANDLE;
+  VkDescriptorSet set = VK_NULL_HANDLE;  // for sampling this RT as a texture
+  uint32_t w = 0, h = 0;
+  VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
+  bool usedThisFrame = false;
+  uint32_t draws = 0;  // draws into this RT this frame
+};
+std::unordered_map<uint64_t, RTarget> g_rts;
 
 const bool g_dump = std::getenv("DELTA_GPU_DUMP") != nullptr;
 int g_dumpedFrames = 0;
@@ -327,7 +343,7 @@ bool createTexPipeline() {
   sc.addressModeU = sc.addressModeV = sc.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
   VKOK(vkCreateSampler(g.device, &sc, nullptr, &g.sampler));
 
-  VkPushConstantRange pcr{VK_SHADER_STAGE_VERTEX_BIT, 0, 64};
+  VkPushConstantRange pcr{VK_SHADER_STAGE_VERTEX_BIT, 0, 68};  // mat4 + clipUV flag
   VkPipelineLayoutCreateInfo li{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
   li.setLayoutCount = 1;
   li.pSetLayouts = &g.dsLayout;
@@ -482,61 +498,109 @@ VkDescriptorSet getTexture(uint64_t base, uint32_t w, uint32_t h) {
   return e.set;
 }
 
-bool ensureRT(uint32_t w, uint32_t h, VkFormat fmt) {
-  if (g.rt && g.rtW == w && g.rtH == h && g.rtFormat == fmt)
-    return true;
+void ensureReadback(uint32_t w, uint32_t h) {
+  VkDeviceSize need = (VkDeviceSize)w * h * 4;
+  if (g.readback && need <= g.readbackSize)
+    return;
   vkDeviceWaitIdle(g.device);
-  if (g.rtView) vkDestroyImageView(g.device, g.rtView, nullptr);
-  if (g.rt) vkDestroyImage(g.device, g.rt, nullptr);
-  if (g.rtMem) vkFreeMemory(g.device, g.rtMem, nullptr);
+  if (g.readbackMap) vkUnmapMemory(g.device, g.readbackMem);
   if (g.readback) vkDestroyBuffer(g.device, g.readback, nullptr);
   if (g.readbackMem) vkFreeMemory(g.device, g.readbackMem, nullptr);
-  g.rt = VK_NULL_HANDLE; g.readback = VK_NULL_HANDLE; g.rtView = VK_NULL_HANDLE;
-  g.rtW = w; g.rtH = h; g.rtFormat = fmt;
-
-  VkImageCreateInfo ii{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
-  ii.imageType = VK_IMAGE_TYPE_2D;
-  ii.format = fmt;
-  ii.extent = {w, h, 1};
-  ii.mipLevels = 1;
-  ii.arrayLayers = 1;
-  ii.samples = VK_SAMPLE_COUNT_1_BIT;
-  ii.tiling = VK_IMAGE_TILING_OPTIMAL;
-  ii.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
-             VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-  ii.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-  VKOK(vkCreateImage(g.device, &ii, nullptr, &g.rt));
-  VkMemoryRequirements ir;
-  vkGetImageMemoryRequirements(g.device, g.rt, &ir);
-  VkMemoryAllocateInfo ia{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-  ia.allocationSize = ir.size;
-  ia.memoryTypeIndex = findMemoryType(ir.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-  VKOK(vkAllocateMemory(g.device, &ia, nullptr, &g.rtMem));
-  VKOK(vkBindImageMemory(g.device, g.rt, g.rtMem, 0));
-
-  VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-  vci.image = g.rt;
-  vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
-  vci.format = fmt;
-  vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-  VKOK(vkCreateImageView(g.device, &vci, nullptr, &g.rtView));
-
-  g.readbackSize = (VkDeviceSize)w * h * 4;
+  g.readbackSize = need;
   VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-  bi.size = g.readbackSize;
-  bi.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-  VKOK(vkCreateBuffer(g.device, &bi, nullptr, &g.readback));
-  VkMemoryRequirements br;
-  vkGetBufferMemoryRequirements(g.device, g.readback, &br);
+  bi.size = need; bi.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+  vkCreateBuffer(g.device, &bi, nullptr, &g.readback);
+  VkMemoryRequirements br; vkGetBufferMemoryRequirements(g.device, g.readback, &br);
   VkMemoryAllocateInfo ba{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
   ba.allocationSize = br.size;
   ba.memoryTypeIndex = findMemoryType(br.memoryTypeBits,
       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-  VKOK(vkAllocateMemory(g.device, &ba, nullptr, &g.readbackMem));
-  VKOK(vkBindBufferMemory(g.device, g.readback, g.readbackMem, 0));
-  VKOK(vkMapMemory(g.device, g.readbackMem, 0, g.readbackSize, 0, &g.readbackMap));
-  std::fprintf(stderr, "[gpuvk] render target %ux%u fmt=%d\n", w, h, (int)fmt);
-  return true;
+  vkAllocateMemory(g.device, &ba, nullptr, &g.readbackMem);
+  vkBindBufferMemory(g.device, g.readback, g.readbackMem, 0);
+  vkMapMemory(g.device, g.readbackMem, 0, need, 0, &g.readbackMap);
+}
+
+// Find or create the render target at guest address `base` (dimensions w x h).
+RTarget *getRT(uint64_t base, uint32_t w, uint32_t h) {
+  auto it = g_rts.find(base);
+  if (it != g_rts.end())
+    return &it->second;
+  if (g_rts.size() > 64 || !w || !h)
+    return nullptr;
+  RTarget t; t.w = w; t.h = h;
+  VkImageCreateInfo ii{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+  ii.imageType = VK_IMAGE_TYPE_2D;
+  ii.format = g.rtFormat;
+  ii.extent = {w, h, 1};
+  ii.mipLevels = 1; ii.arrayLayers = 1;
+  ii.samples = VK_SAMPLE_COUNT_1_BIT;
+  ii.tiling = VK_IMAGE_TILING_OPTIMAL;
+  ii.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+             VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+  if (vkCreateImage(g.device, &ii, nullptr, &t.image) != VK_SUCCESS) return nullptr;
+  VkMemoryRequirements mr; vkGetImageMemoryRequirements(g.device, t.image, &mr);
+  VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+  ai.allocationSize = mr.size;
+  ai.memoryTypeIndex = findMemoryType(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+  vkAllocateMemory(g.device, &ai, nullptr, &t.mem);
+  vkBindImageMemory(g.device, t.image, t.mem, 0);
+  VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+  vci.image = t.image; vci.viewType = VK_IMAGE_VIEW_TYPE_2D; vci.format = g.rtFormat;
+  vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+  vkCreateImageView(g.device, &vci, nullptr, &t.view);
+  // descriptor set so this RT can be sampled (render-to-texture).
+  if (g.dsPool) {
+    VkDescriptorSetAllocateInfo da{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    da.descriptorPool = g.dsPool; da.descriptorSetCount = 1; da.pSetLayouts = &g.dsLayout;
+    if (vkAllocateDescriptorSets(g.device, &da, &t.set) == VK_SUCCESS) {
+      VkDescriptorImageInfo dii{g.sampler, t.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+      VkWriteDescriptorSet wr{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+      wr.dstSet = t.set; wr.descriptorCount = 1;
+      wr.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+      wr.pImageInfo = &dii;
+      vkUpdateDescriptorSets(g.device, 1, &wr, 0, nullptr);
+    }
+  }
+  std::fprintf(stderr, "[gpuvk] new RT %#lx %ux%u\n", (unsigned long)base, w, h);
+  g_rts[base] = t;
+  return &g_rts[base];
+}
+
+// End the current dynamic-rendering region (if any), leaving its RT readable.
+void endRegion() {
+  if (!g.curRt) return;
+  p_vkCmdEndRendering(g.cmd);
+  auto &rt = g_rts[g.curRt];
+  imageBarrier(g.cmd, rt.image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+               VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
+  rt.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+  g.curRt = 0;
+}
+
+// Begin a dynamic-rendering region on `rt` (clear on first use this frame).
+void beginRegion(uint64_t base, RTarget &rt) {
+  VkImageLayout from = rt.layout;
+  imageBarrier(g.cmd, rt.image, from, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+               0, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
+  rt.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+  VkRenderingAttachmentInfo color{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+  color.imageView = rt.view;
+  color.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+  color.loadOp = rt.usedThisFrame ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_CLEAR;
+  color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+  color.clearValue.color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+  VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
+  ri.renderArea = {{0, 0}, {rt.w, rt.h}};
+  ri.layerCount = 1; ri.colorAttachmentCount = 1; ri.pColorAttachments = &color;
+  p_vkCmdBeginRendering(g.cmd, &ri);
+  VkViewport vpt{0, 0, (float)rt.w, (float)rt.h, 0, 1};
+  vkCmdSetViewport(g.cmd, 0, 1, &vpt);
+  VkRect2D sc{{0, 0}, {rt.w, rt.h}};
+  vkCmdSetScissor(g.cmd, 0, 1, &sc);
+  rt.usedThisFrame = true;
+  g.curRt = base;
+  g.lastRt = base;
 }
 
 void dumpPpm(const uint8_t *bgra, uint32_t w, uint32_t h) {
@@ -569,41 +633,26 @@ bool init() {
 
 bool available() { return g.ready; }
 
-void beginFrame(uint64_t, uint32_t width, uint32_t height, uint32_t, uint32_t) {
-  if (!g.ready || !width || !height) return;
-  if (!ensureRT(width, height, g.rtFormat)) return;
+void beginFrame() {
+  if (!g.ready) return;
   if (!createPipeline()) return;
   createTexPipeline();  // best-effort; colored path still works without it
   g.frameDraws = 0;
   g.frameNum++;
   g.vbOffset = 0;
+  g.curRt = 0;
+  g.lastRt = 0;
+  g.busiestRt = 0;
+  g.busiestRtDraws = 0;
+  for (auto &kv : g_rts) {
+    kv.second.usedThisFrame = false;
+    kv.second.draws = 0;
+  }
 
   vkResetCommandBuffer(g.cmd, 0);
   VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
   bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
   vkBeginCommandBuffer(g.cmd, &bi);
-
-  imageBarrier(g.cmd, g.rt, VK_IMAGE_LAYOUT_UNDEFINED,
-               VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, 0,
-               VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
-
-  VkRenderingAttachmentInfo color{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
-  color.imageView = g.rtView;
-  color.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-  color.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-  color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-  color.clearValue.color = {{0.0f, 0.0f, 0.0f, 1.0f}};
-  VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
-  ri.renderArea = {{0, 0}, {width, height}};
-  ri.layerCount = 1;
-  ri.colorAttachmentCount = 1;
-  ri.pColorAttachments = &color;
-  p_vkCmdBeginRendering(g.cmd, &ri);
-
-  VkViewport vpt{0, 0, (float)width, (float)height, 0, 1};
-  vkCmdSetViewport(g.cmd, 0, 1, &vpt);
-  VkRect2D sc{{0, 0}, {width, height}};
-  vkCmdSetScissor(g.cmd, 0, 1, &sc);
   g.recording = true;
 }
 
@@ -649,8 +698,14 @@ void draw(const DrawInfo &d) {
       miny = y < miny ? y : miny; maxy = y > maxy ? y : maxy;
     }
     std::fprintf(stderr, "[gpuvk] f450 draw#%u nv=%u pos[%.0f,%.0f..%.0f,%.0f] "
-                 "tex=%d col=(%.2f,%.2f,%.2f)\n", g.frameDraws, nv, minx, miny,
-                 maxx, maxy, d.texBase ? 1 : 0, dst[2], dst[3], dst[4]);
+                 "rt=%#lx tex=%#lx rtAsTex=%d col=(%.2f,%.2f,%.2f) uv[%.3f,%.3f "
+                 "%.3f,%.3f %.3f,%.3f %.3f,%.3f]\n", g.frameDraws,
+                 nv, minx, miny, maxx, maxy, (unsigned long)d.rtBase,
+                 (unsigned long)d.texBase,
+                 (d.texBase && d.texBase != d.rtBase && g_rts.count(d.texBase)) ? 1 : 0,
+                 dst[2], dst[3], dst[4],
+                 dst[6], dst[7], dst[14], dst[15], dst[22], dst[23], dst[30], dst[31]);
+    if (d.texBase) std::fprintf(stderr, "[gpuvk]      texW=%u texH=%u\n", d.texW, d.texH);
   }
 
   // Experiment: skip late fullscreen-covering draws (the post/composite passes
@@ -674,15 +729,42 @@ void draw(const DrawInfo &d) {
     }
   }
 
-  // Textured draw: bind the texture's descriptor set + the textured pipeline.
+  // Is this a render-to-texture sample (the draw samples another render target)?
+  bool rtAsTex = d.texBase && d.texBase != d.rtBase && g_rts.count(d.texBase);
+  // Upload guest texture (independent of the render region) if not RT-as-texture.
   VkDescriptorSet texSet = VK_NULL_HANDLE;
-  if (d.texBase && g.texPipeline)
+  if (d.texBase && g.texPipeline && !rtAsTex)
     texSet = getTexture(d.texBase, d.texW, d.texH);
+
+  // Switch render target if this draw targets a different RT than the open region.
+  if (g.curRt != d.rtBase) {
+    endRegion();
+    if (rtAsTex) {  // make the sampled RT shader-readable before we render
+      auto &src = g_rts[d.texBase];
+      if (src.layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+        imageBarrier(g.cmd, src.image, src.layout,
+                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                     VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
+        src.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+      }
+    }
+    RTarget *rt = getRT(d.rtBase, d.rtW, d.rtH);
+    if (!rt) { g.frameDraws++; return; }
+    beginRegion(d.rtBase, *rt);
+  }
+  if (rtAsTex && g_rts[d.texBase].layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+    texSet = g_rts[d.texBase].set;
 
   VkDeviceSize off = g.vbOffset;
   if (texSet) {
     vkCmdBindPipeline(g.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, g.texPipeline);
-    vkCmdPushConstants(g.cmd, g.texLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, 64, d.mvp);
+    // Push mat4 MVP + a clipUV flag. Render-to-texture composites (sampling a
+    // scene RT) are fullscreen blits: the shader derives uv from clip position
+    // rather than the per-vertex attribute (whose format/offset varies per draw).
+    float pc[17];
+    std::memcpy(pc, d.mvp, 64);
+    reinterpret_cast<uint32_t *>(pc)[16] = rtAsTex ? 1u : 0u;
+    vkCmdPushConstants(g.cmd, g.texLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, 68, pc);
     vkCmdBindDescriptorSets(g.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, g.texLayout, 0,
                             1, &texSet, 0, nullptr);
   } else {
@@ -693,20 +775,41 @@ void draw(const DrawInfo &d) {
   vkCmdDraw(g.cmd, nv, 1, 0, 0);
   g.vbOffset += need;
   g.frameDraws++;
+  if (g.curRt) {
+    auto &rt = g_rts[g.curRt];
+    if (++rt.draws > g.busiestRtDraws) { g.busiestRtDraws = rt.draws; g.busiestRt = g.curRt; }
+  }
 }
 
-void endFrame() {
+void endFrame(uint64_t scanoutBase) {
   if (!g.ready || !g.recording) return;
   g.recording = false;
-  p_vkCmdEndRendering(g.cmd);
+  endRegion();  // close any open region
 
-  imageBarrier(g.cmd, g.rt, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+  // Present the scanout RT (the flip buffer); fall back to the last RT rendered.
+  uint64_t presentBase = g_rts.count(scanoutBase) ? scanoutBase : g.lastRt;
+  // Debug: present the busiest RT (the scene) instead of the composited scanout.
+  static const bool presentScene = std::getenv("DELTA_GPU_PRESENT_SCENE") != nullptr;
+  if (presentScene && g.busiestRt) presentBase = g.busiestRt;
+  auto it = g_rts.find(presentBase);
+  if (it == g_rts.end()) {  // nothing rendered this frame
+    vkEndCommandBuffer(g.cmd);
+    VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    si.commandBufferCount = 1; si.pCommandBuffers = &g.cmd;
+    vkResetFences(g.device, 1, &g.fence);
+    vkQueueSubmit(g.queue, 1, &si, g.fence);
+    vkWaitForFences(g.device, 1, &g.fence, VK_TRUE, UINT64_MAX);
+    return;
+  }
+  RTarget &rt = it->second;
+  ensureReadback(rt.w, rt.h);
+  imageBarrier(g.cmd, rt.image, rt.layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+  rt.layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
   VkBufferImageCopy copy{};
   copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-  copy.imageExtent = {g.rtW, g.rtH, 1};
-  vkCmdCopyImageToBuffer(g.cmd, g.rt, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+  copy.imageExtent = {rt.w, rt.h, 1};
+  vkCmdCopyImageToBuffer(g.cmd, rt.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                          g.readback, 1, &copy);
   vkEndCommandBuffer(g.cmd);
 
@@ -717,19 +820,14 @@ void endFrame() {
   vkQueueSubmit(g.queue, 1, &si, g.fence);
   vkWaitForFences(g.device, 1, &g.fence, VK_TRUE, UINT64_MAX);
 
-  static int frameNum = 0;
-  ++frameNum;
   auto *pixels = static_cast<const uint8_t *>(g.readbackMap);
-  // Dump frames well into the run (past the empty loading frames) where the menu
-  // actually issues draws.
-  if (g_dump && frameNum >= 400 && g.frameDraws > 0) dumpPpm(pixels, g.rtW, g.rtH);
-  if (g_dump && frameNum % 200 == 0)
-    std::fprintf(stderr, "[gpuvk] frame %d draws=%u\n", frameNum, g.frameDraws);
-  // Present to the window. Gated by env so headless testing (PPM dump) doesn't
-  // hit the windowing/swapchain path (which needs a real display).
+  if (g_dump && g.frameNum >= 400 && g.frameDraws > 0) dumpPpm(pixels, rt.w, rt.h);
+  if (g_dump && g.frameNum % 200 == 0)
+    std::fprintf(stderr, "[gpuvk] frame %d draws=%u rt=%#lx %ux%u\n", g.frameNum,
+                 g.frameDraws, (unsigned long)presentBase, rt.w, rt.h);
   static const bool present = std::getenv("DELTA_GPU_PRESENT") != nullptr;
   if (present && gfx::pumpEvents())
-    gfx::present(pixels, g.rtW, g.rtH, g.rtW * 4, gfx::PixelFormat::bgra8);
+    gfx::present(pixels, rt.w, rt.h, rt.w * 4, gfx::PixelFormat::bgra8);
 }
 
 }  // namespace gpu::vk

@@ -456,4 +456,14 @@ void prosperity_videoout_set_flip(int bufferIndex, int64_t flipArg) {
   g_port.lastFlipArg = flipArg;
 }
 
+// The guest scanout buffer address for a registered buffer index (the GPU
+// render target the flip displays). Used by the GPU renderer to present the
+// right render target.
+uint64_t prosperity_videoout_buffer(int bufferIndex) {
+  std::lock_guard<std::mutex> lk(g_mtx);
+  if (bufferIndex >= 0 && bufferIndex < kMaxBuffers)
+    return reinterpret_cast<uint64_t>(g_port.buffers[bufferIndex]);
+  return 0;
+}
+
 }  // extern "C"

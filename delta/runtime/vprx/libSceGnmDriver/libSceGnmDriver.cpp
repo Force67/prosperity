@@ -26,6 +26,7 @@
 
 // VideoOut HLE flip bridge (same delta_runtime library).
 extern "C" void prosperity_videoout_set_flip(int bufferIndex, int64_t flipArg);
+extern "C" uint64_t prosperity_videoout_buffer(int bufferIndex);
 
 namespace {
 // Feed each draw command buffer to the GPU command processor.
@@ -131,7 +132,8 @@ int PS4ABI sceGnmSubmitAndFlipCommandBuffers(uint32_t count, void **dcbGpuAddrs,
   // VideoOut flip pump presents it and posts the flip-complete event.
   dumpPm4(dcbGpuAddrs, dcbSizes, count);
   processDcbs(dcbGpuAddrs, dcbSizes, count);
-  gpu::endFrame();  // finish + present the rendered frame
+  // Present the render target that this flip displays (the guest scanout buffer).
+  gpu::endFrame(prosperity_videoout_buffer(static_cast<int>(displayBufferIndex)));
   prosperity_videoout_set_flip(static_cast<int>(displayBufferIndex), flipArg);
   return 0;
 }

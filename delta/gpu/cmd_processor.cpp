@@ -113,6 +113,9 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
     vk::DrawInfo d;
     d.primType = g_regs[mmVGT_PRIMITIVE_TYPE];
     d.indexCount = (count >= 1) ? body[0] : 0;
+    d.rtBase = g_regs.cbColorBase(0);
+    d.rtW = fbWidth();
+    d.rtH = fbHeight();
 
     // MVP matrix: the VS sgpr[4..7] V# points at the constant buffer whose first
     // 16 floats are the transform (s_buffer_load_dwordx16 in the VS).
@@ -169,8 +172,7 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
       }
     }
     if (!g_frameActive) {
-      vk::beginFrame(g_regs.cbColorBase(0), fbWidth(), fbHeight(), 0,
-                     g_regs[mmCB_COLOR0_INFO]);
+      vk::beginFrame();
       g_frameActive = true;
     }
     if (d.vertexData)
@@ -318,11 +320,12 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
 
 }  // namespace
 
-// Called by the Gnm HLE on submit-and-flip: finish the frame and present.
-void endFrame() {
+// Called by the Gnm HLE on submit-and-flip: finish the frame and present the
+// render target the flip displays.
+void endFrame(uint64_t scanoutBase) {
   std::lock_guard<std::mutex> lk(g_mtx);
   if (g_frameActive && vk::available()) {
-    vk::endFrame();
+    vk::endFrame(scanoutBase);
     g_frameActive = false;
   }
 }

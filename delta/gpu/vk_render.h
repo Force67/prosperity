@@ -25,6 +25,8 @@ struct DrawInfo {
   uint32_t primType = 0;       // VGT_PRIMITIVE_TYPE
   uint32_t indexCount = 0;
   float mvp[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+  uint64_t rtBase = 0;         // CB_COLOR0 address; the draw's render target
+  uint32_t rtW = 0, rtH = 0;   // render-target dimensions
 
   // Texturing (optional). If texBase != 0 the draw is textured: uvData holds the
   // float2 UVs (same vertexCount/stride as the position buffer's source).
@@ -41,13 +43,12 @@ struct DrawInfo {
 bool init();
 bool available();
 
-// Frame lifecycle. rtAddr/width/height/pitch/format describe the render target
-// (the guest scanout). beginFrame ensures an RT image of that size exists and
-// starts recording; endFrame submits, reads the RT back to a linear RGBA buffer
-// and presents/dumps it.
-void beginFrame(uint64_t rtAddr, uint32_t width, uint32_t height, uint32_t pitch,
-                uint32_t cbInfo);
+// Frame lifecycle. Each draw renders into the Vulkan image for its DrawInfo.rtBase
+// (a render target keyed by guest address). beginFrame starts recording;
+// endFrame submits, reads back the render target at `scanoutBase` (the flip
+// buffer) and presents/dumps it.
+void beginFrame();
 void draw(const DrawInfo &d);
-void endFrame();
+void endFrame(uint64_t scanoutBase);
 
 }  // namespace gpu::vk
