@@ -9,8 +9,10 @@
  * Android we drop SDL entirely and stub the window/present/input out: init fails
  * (the VideoOut path already handles "no window this run"), present is a no-op,
  * and the keyboard pad reports no input.
+ *
+ * The on-screen app build (DELTA_ANDROID_APP) uses gfx_android.cpp instead.
  */
-#ifdef __ANDROID__
+#if defined(__ANDROID__) && !defined(DELTA_ANDROID_APP)
 
 #include "gfx.h"
 
