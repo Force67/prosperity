@@ -26,11 +26,13 @@ extern "C" int vprx_anchor_libSceMsgDialog;
 // longer blocks boot or rendering.
 extern "C" int vprx_anchor_libScePad;
 extern "C" int vprx_anchor_libSceUserService;
+extern "C" int vprx_anchor_libSceUsbd;
 static volatile int *const vprx_anchors[] = {&vprx_anchor_libSceVideoOut,
                                              &vprx_anchor_libSceGnmDriver,
                                              &vprx_anchor_libSceMsgDialog,
                                              &vprx_anchor_libScePad,
-                                             &vprx_anchor_libSceUserService};
+                                             &vprx_anchor_libSceUserService,
+                                             &vprx_anchor_libSceUsbd};
 
 void vprx_init() {
   // Touch the anchors so the references aren't optimized away.
