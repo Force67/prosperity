@@ -19,8 +19,13 @@ namespace gfx {
 // Set before the guest renderer first calls gfx::ensure().
 void setAndroidWindow(ANativeWindow *window);
 
-// Publish the current touch-derived pad state; pollKeyboardPad() returns it.
-void setAndroidPad(const PadKeys &keys);
+// Publish the currently-down touch points (surface/window pixel coords).
+// gfx owns the on-screen control layout, so it maps these to the DS4 pad
+// (pollKeyboardPad) and draws the matching helper overlay on present.
+struct Touch {
+  float x, y;
+};
+void setAndroidTouches(const Touch *pts, int count);
 
 }  // namespace gfx
 

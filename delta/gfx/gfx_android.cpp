@@ -11,6 +11,8 @@
  */
 #if defined(__ANDROID__) && defined(DELTA_ANDROID_APP)
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -49,6 +51,7 @@ struct State {
   VkSwapchainKHR swapchain = VK_NULL_HANDLE;
   VkFormat swapFormat = VK_FORMAT_B8G8R8A8_UNORM;
   VkExtent2D swapExtent{};
+  VkSurfaceTransformFlagBitsKHR preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
   std::vector<VkImage> swapImages;
 
   VkCommandPool cmdPool = VK_NULL_HANDLE;
@@ -69,11 +72,153 @@ struct State {
 };
 State g;
 
-// Window handle + pad state published by android_main (other thread).
+// Window handle + touch state published by android_main (other thread).
 std::mutex g_inMutex;
 ANativeWindow *g_pendingWindow = nullptr;
 bool g_windowChanged = false;
-PadKeys g_pad;
+constexpr int kMaxTouch = 8;
+Touch g_touches[kMaxTouch];
+int g_touchCount = 0;
+uint32_t g_surfaceW = 0, g_surfaceH = 0;
+
+// On-screen virtual gamepad, in normalised [0,1] surface coords. The present
+// blit stretches the whole game framebuffer across the whole surface, so a point
+// at (fx,fy) draws and hit-tests at the same place. Buttons use a square zone of
+// half-size `r` (in height units); sticks use a generous side region.
+struct Btn {
+  float cx, cy, r;
+};
+const Btn kCross{0.70f, 0.86f, 0.06f};    // use item / confirm
+const Btn kCircle{0.80f, 0.66f, 0.06f};   // cancel
+const Btn kBomb{0.70f, 0.62f, 0.06f};     // bomb (R1)
+const Btn kOptions{0.95f, 0.10f, 0.05f};  // pause / start
+struct Stick {
+  float cx, cy, r;
+};
+const Stick kLStick{0.12f, 0.70f, 0.14f};  // move
+const Stick kRStick{0.88f, 0.70f, 0.14f};  // aim / shoot
+
+bool inBtn(float nx, float ny, const Btn &b, float aspect) {
+  // square zone; scale x by aspect so the zone is square on screen, not stretched
+  return std::fabs((nx - b.cx) * aspect) <= b.r && std::fabs(ny - b.cy) <= b.r;
+}
+
+// Map the down touches to a DS4 pad against the layout above.
+PadKeys computePad() {
+  PadKeys k;  // neutral (sticks centred at 128)
+  if (!g_surfaceW || !g_surfaceH)
+    return k;
+  float aspect = float(g_surfaceH) / float(g_surfaceW);
+  for (int i = 0; i < g_touchCount; i++) {
+    float nx = g_touches[i].x / g_surfaceW;
+    float ny = g_touches[i].y / g_surfaceH;
+    if (inBtn(nx, ny, kOptions, aspect)) { k.options = true; continue; }
+    if (inBtn(nx, ny, kCross, aspect))   { k.cross = true;   continue; }
+    if (inBtn(nx, ny, kCircle, aspect))  { k.circle = true;  continue; }
+    if (inBtn(nx, ny, kBomb, aspect))    { k.r1 = true;      continue; }
+    // Sticks: left half moves, right half aims. Deflection from the ring centre.
+    const Stick &s = (nx < 0.5f) ? kLStick : kRStick;
+    float dx = (nx - s.cx) / s.r, dy = (ny - s.cy) / s.r;
+    dx = std::clamp(dx, -1.0f, 1.0f);
+    dy = std::clamp(dy, -1.0f, 1.0f);
+    uint8_t vx = uint8_t(std::clamp(128.0f + dx * 127.0f, 0.0f, 255.0f));
+    uint8_t vy = uint8_t(std::clamp(128.0f + dy * 127.0f, 0.0f, 255.0f));
+    if (nx < 0.5f) {
+      k.lx = vx; k.ly = vy;
+      k.left = dx < -0.4f; k.right = dx > 0.4f;
+      k.up = dy < -0.4f; k.down = dy > 0.4f;  // d-pad for menus
+    } else {
+      k.rx = vx; k.ry = vy;
+    }
+  }
+  return k;
+}
+
+// --- helper overlay (CPU alpha-blend into the present framebuffer) ----------
+// Drawn in the game framebuffer, which the present blit stretches across the
+// whole surface, so normalised (fx,fy) lands at the same on-screen spot. Radii
+// are corrected by the surface aspect so glyphs stay round on screen.
+
+inline void blendPx(uint8_t *buf, int w, int h, bool bgra, int x, int y,
+                    uint8_t r, uint8_t g, uint8_t b, float a) {
+  if (x < 0 || y < 0 || x >= w || y >= h || a <= 0.0f)
+    return;
+  uint8_t *p = buf + (size_t)(y * w + x) * 4;
+  int ri = bgra ? 2 : 0, bi = bgra ? 0 : 2;
+  p[ri] = uint8_t(p[ri] * (1 - a) + r * a);
+  p[1] = uint8_t(p[1] * (1 - a) + g * a);
+  p[bi] = uint8_t(p[bi] * (1 - a) + b * a);
+}
+
+// Round-on-screen ellipse in the framebuffer. band<=0 => filled disc, else a
+// ring of that normalised-radius thickness.
+void glyph(uint8_t *buf, int w, int h, bool bgra, float xr, float yr, float fx,
+           float fy, float sr, float band, uint8_t r, uint8_t g, uint8_t b,
+           float a) {
+  float cx = fx * w, cy = fy * h;
+  float rx = sr * xr, ry = sr * yr;  // px radii (round on screen)
+  int x0 = std::max(0, int(cx - rx - 1)), x1 = std::min(w - 1, int(cx + rx + 1));
+  int y0 = std::max(0, int(cy - ry - 1)), y1 = std::min(h - 1, int(cy + ry + 1));
+  for (int y = y0; y <= y1; y++)
+    for (int x = x0; x <= x1; x++) {
+      float ex = (x - cx) / rx, ey = (y - cy) / ry;
+      float d = std::sqrt(ex * ex + ey * ey);
+      if (band <= 0.0f ? (d <= 1.0f) : (d <= 1.0f && d >= 1.0f - band))
+        blendPx(buf, w, h, bgra, x, y, r, g, b, a);
+    }
+}
+
+void drawOverlay(uint8_t *buf, uint32_t w, uint32_t h, bool bgra) {
+  Touch t[kMaxTouch];
+  int n;
+  uint32_t sw, sh;
+  {
+    std::lock_guard<std::mutex> lk(g_inMutex);
+    n = g_touchCount;
+    std::memcpy(t, g_touches, sizeof(Touch) * (n < kMaxTouch ? n : kMaxTouch));
+    sw = g_surfaceW; sh = g_surfaceH;
+  }
+  if (!sw || !sh)
+    return;
+  // Per-unit px radii so a glyph stays round after the fb is stretched to the
+  // surface: screen radius sr*sh maps to sr*h px in y and sr*(sh*w/sw) px in x.
+  float yr = float(h);
+  float xr = float(sh) * float(w) / float(sw);
+  float aspect = float(sh) / float(sw);
+
+  auto pressed = [&](const Btn &btn) {
+    for (int i = 0; i < n; i++)
+      if (inBtn(t[i].x / sw, t[i].y / sh, btn, aspect))
+        return true;
+    return false;
+  };
+
+  // Face buttons: PS4 colours, brighter when held.
+  struct BC { const Btn &b; uint8_t r, g, bl; } bcs[] = {
+      {kCross, 70, 130, 255}, {kCircle, 240, 70, 70},
+      {kBomb, 220, 220, 220}, {kOptions, 200, 200, 200}};
+  for (auto &c : bcs) {
+    float a = pressed(c.b) ? 0.85f : 0.40f;
+    glyph(buf, w, h, bgra, xr, yr, c.b.cx, c.b.cy, c.b.r, 0.0f, c.r, c.g, c.bl, a);
+    glyph(buf, w, h, bgra, xr, yr, c.b.cx, c.b.cy, c.b.r, 0.18f, 255, 255, 255, 0.6f);
+  }
+
+  // Sticks: outer ring + a dot at the current deflection.
+  const Stick *sticks[] = {&kLStick, &kRStick};
+  for (auto *s : sticks) {
+    glyph(buf, w, h, bgra, xr, yr, s->cx, s->cy, s->r, 0.10f, 255, 255, 255, 0.5f);
+    float dotx = s->cx, doty = s->cy;
+    for (int i = 0; i < n; i++) {
+      float nx = t[i].x / sw, ny = t[i].y / sh;
+      bool mine = (s == &kLStick) ? (nx < 0.5f) : (nx >= 0.5f);
+      if (!mine) continue;
+      float dx = std::clamp((nx - s->cx) / s->r, -1.0f, 1.0f);
+      float dy = std::clamp((ny - s->cy) / s->r, -1.0f, 1.0f);
+      dotx = s->cx + dx * s->r; doty = s->cy + dy * s->r;
+    }
+    glyph(buf, w, h, bgra, xr, yr, dotx, doty, s->r * 0.4f, 0.0f, 255, 255, 255, 0.8f);
+  }
+}
 
 uint32_t findMemoryType(uint32_t typeBits, VkMemoryPropertyFlags props) {
   VkPhysicalDeviceMemoryProperties mp;
@@ -115,14 +260,39 @@ bool createSwapchain() {
       chosen = f;
   g.swapFormat = chosen.format;
 
+  // Opt out of Android pre-rotation: phones report currentTransform=ROTATE_90/
+  // 270 for a landscape window (the panel is natively portrait) and expect the
+  // app to render rotated. We present via a plain blit (can't rotate), so we ask
+  // the compositor to do the rotation by choosing IDENTITY. currentExtent is in
+  // the pre-rotated basis, so swap W/H to get the identity (display) extent.
+  const VkSurfaceTransformFlagsKHR rotated =
+      VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR |
+      VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR;
+  bool preRotated = (caps.currentTransform & rotated) != 0;
+  g.preTransform =
+      (caps.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR)
+          ? VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR
+          : caps.currentTransform;
+  std::printf("[gfx-android] surface transform=%#x supported=%#x -> using %#x\n",
+              caps.currentTransform, caps.supportedTransforms, g.preTransform);
+
   VkExtent2D ext = caps.currentExtent;
   if (ext.width == 0xFFFFFFFF) {
     ext.width = (uint32_t)ANativeWindow_getWidth(g.window);
     ext.height = (uint32_t)ANativeWindow_getHeight(g.window);
   }
+  if (g.preTransform == VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR && preRotated)
+    std::swap(ext.width, ext.height);
   if (ext.width == 0 || ext.height == 0)
     return false;
   g.swapExtent = ext;
+  {
+    // Input + overlay work in the on-screen (landscape) space, which may differ
+    // from the swapchain extent when the compositor is rotating for us.
+    std::lock_guard<std::mutex> lk(g_inMutex);
+    g_surfaceW = std::max(ext.width, ext.height);
+    g_surfaceH = std::min(ext.width, ext.height);
+  }
 
   uint32_t imgCount = caps.minImageCount + 1;
   if (caps.maxImageCount && imgCount > caps.maxImageCount)
@@ -137,7 +307,7 @@ bool createSwapchain() {
   sc.imageArrayLayers = 1;
   sc.imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
   sc.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
-  sc.preTransform = caps.currentTransform;
+  sc.preTransform = g.preTransform;
   sc.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
   sc.presentMode = VK_PRESENT_MODE_FIFO_KHR;
   sc.clipped = VK_TRUE;
@@ -383,6 +553,9 @@ void present(const void *pixels, uint32_t w, uint32_t h, uint32_t srcPitch,
   for (uint32_t y = 0; y < h; y++)
     std::memcpy(dst + (size_t)y * w * 4, src + (size_t)y * srcPitch, w * 4);
 
+  // Composite the virtual-gamepad helper over the frame.
+  drawOverlay(dst, w, h, fmt == PixelFormat::bgra8);
+
   vkWaitForFences(g.device, 1, &g.fence, VK_TRUE, UINT64_MAX);
 
   if (g.needRecreate && !createSwapchain())
@@ -391,11 +564,14 @@ void present(const void *pixels, uint32_t w, uint32_t h, uint32_t srcPitch,
   uint32_t idx = 0;
   VkResult ar = vkAcquireNextImageKHR(g.device, g.swapchain, UINT64_MAX,
                                       g.acquireSem, VK_NULL_HANDLE, &idx);
-  if (ar == VK_ERROR_OUT_OF_DATE_KHR || ar == VK_SUBOPTIMAL_KHR) {
+  if (ar == VK_ERROR_OUT_OF_DATE_KHR) {
     g.needRecreate = true;
     return;
   }
-  if (ar != VK_SUCCESS)
+  // SUBOPTIMAL is expected and permanent here: we deliberately present with an
+  // IDENTITY transform while the surface wants ROTATE_90 (the compositor rotates
+  // for us). Don't treat it as a resize, or we'd rebuild the swapchain forever.
+  if (ar != VK_SUCCESS && ar != VK_SUBOPTIMAL_KHR)
     return;
 
   vkResetFences(g.device, 1, &g.fence);
@@ -457,7 +633,7 @@ void present(const void *pixels, uint32_t w, uint32_t h, uint32_t srcPitch,
   pi.pSwapchains = &g.swapchain;
   pi.pImageIndices = &idx;
   VkResult pr = vkQueuePresentKHR(g.queue, &pi);
-  if (pr == VK_ERROR_OUT_OF_DATE_KHR || pr == VK_SUBOPTIMAL_KHR)
+  if (pr == VK_ERROR_OUT_OF_DATE_KHR)  // not SUBOPTIMAL (see acquire above)
     g.needRecreate = true;
 }
 
@@ -466,7 +642,7 @@ bool pumpEvents() { return true; }
 
 bool pollKeyboardPad(PadKeys &out) {
   std::lock_guard<std::mutex> lk(g_inMutex);
-  out = g_pad;
+  out = computePad();
   return true;
 }
 
@@ -478,9 +654,11 @@ void setAndroidWindow(ANativeWindow *window) {
   g_windowChanged = true;
 }
 
-void setAndroidPad(const PadKeys &keys) {
+void setAndroidTouches(const Touch *pts, int count) {
   std::lock_guard<std::mutex> lk(g_inMutex);
-  g_pad = keys;
+  g_touchCount = count < 0 ? 0 : (count > kMaxTouch ? kMaxTouch : count);
+  for (int i = 0; i < g_touchCount; i++)
+    g_touches[i] = pts[i];
 }
 
 }  // namespace gfx

@@ -62,7 +62,6 @@ struct AppState {
   deltaCore *core = nullptr;
   base::String dataDir;
   bool booted = false;
-  int32_t surfaceW = 0, surfaceH = 0;
 };
 
 void bootOnce(AppState *s) {
@@ -77,39 +76,30 @@ void bootOnce(AppState *s) {
   s->core->boot(pkg);  // mounts pkg, runs the guest on a detached thread
 }
 
-// Touch -> DS4. Left half drives the move/left-stick, right half the aim/right-
-// stick: 8-way from the touch position relative to that half's centre. A short
-// tap (no significant drag) also presses cross so menus advance.
-void applyTouch(AppState *s, AInputEvent *ev) {
-  gfx::PadKeys k;  // neutral
-  int n = AMotionEvent_getPointerCount(ev);
-  int action = AMotionEvent_getAction(ev) & AMOTION_EVENT_ACTION_MASK;
-  bool anyDown = action != AMOTION_EVENT_ACTION_UP &&
-                 action != AMOTION_EVENT_ACTION_CANCEL;
-  float W = s->surfaceW ? s->surfaceW : 1920.0f;
-  float H = s->surfaceH ? s->surfaceH : 1080.0f;
-  for (int i = 0; anyDown && i < n; i++) {
-    float x = AMotionEvent_getX(ev, i);
-    float y = AMotionEvent_getY(ev, i);
-    bool right = x > W * 0.5f;
-    float cx = right ? W * 0.75f : W * 0.25f;
-    float cy = H * 0.5f;
-    float dx = x - cx, dy = y - cy;
-    float dz = W * 0.06f;  // dead zone
-    int hx = dx > dz ? 1 : (dx < -dz ? -1 : 0);
-    int hy = dy > dz ? 1 : (dy < -dz ? -1 : 0);
-    if (right) {
-      k.rx = hx < 0 ? 0 : (hx > 0 ? 255 : 128);
-      k.ry = hy < 0 ? 0 : (hy > 0 ? 255 : 128);
-    } else {
-      k.left = hx < 0; k.right = hx > 0; k.up = hy < 0; k.down = hy > 0;
-      k.lx = hx < 0 ? 0 : (hx > 0 ? 255 : 128);
-      k.ly = hy < 0 ? 0 : (hy > 0 ? 255 : 128);
-      if (hx == 0 && hy == 0)
-        k.cross = true;  // a centre tap confirms
-    }
+// Forward the currently-down touch points (surface pixel coords) to gfx, which
+// owns the on-screen control layout and maps them to the DS4 pad + overlay.
+void forwardTouch(AInputEvent *ev) {
+  int action = AMotionEvent_getAction(ev);
+  int kind = action & AMOTION_EVENT_ACTION_MASK;
+  if (kind == AMOTION_EVENT_ACTION_UP || kind == AMOTION_EVENT_ACTION_CANCEL) {
+    gfx::setAndroidTouches(nullptr, 0);  // last finger up
+    return;
   }
-  gfx::setAndroidPad(k);
+  int upIdx = -1;
+  if (kind == AMOTION_EVENT_ACTION_POINTER_UP)
+    upIdx = (action & AMOTION_EVENT_ACTION_POINTER_INDEX_MASK) >>
+            AMOTION_EVENT_ACTION_POINTER_INDEX_SHIFT;
+  int n = AMotionEvent_getPointerCount(ev);
+  gfx::Touch pts[8];
+  int c = 0;
+  for (int i = 0; i < n && c < 8; i++) {
+    if (i == upIdx)
+      continue;  // this pointer is lifting
+    pts[c].x = AMotionEvent_getX(ev, i);
+    pts[c].y = AMotionEvent_getY(ev, i);
+    c++;
+  }
+  gfx::setAndroidTouches(pts, c);
 }
 
 void onCmd(android_app *app, int32_t cmd) {
@@ -117,8 +107,6 @@ void onCmd(android_app *app, int32_t cmd) {
   switch (cmd) {
   case APP_CMD_INIT_WINDOW:
     if (app->window) {
-      s->surfaceW = ANativeWindow_getWidth(app->window);
-      s->surfaceH = ANativeWindow_getHeight(app->window);
       gfx::setAndroidWindow(app->window);
       bootOnce(s);  // first window: start the emulator (renderer needs a window)
     }
@@ -131,10 +119,9 @@ void onCmd(android_app *app, int32_t cmd) {
   }
 }
 
-int32_t onInput(android_app *app, AInputEvent *ev) {
-  auto *s = static_cast<AppState *>(app->userData);
+int32_t onInput(android_app *, AInputEvent *ev) {
   if (AInputEvent_getType(ev) == AINPUT_EVENT_TYPE_MOTION) {
-    applyTouch(s, ev);
+    forwardTouch(ev);
     return 1;
   }
   return 0;
