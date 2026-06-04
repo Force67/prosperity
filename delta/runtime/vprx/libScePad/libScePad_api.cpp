@@ -97,9 +97,3 @@ static const runtime::funcInfo functions[] = {
 };
 
 MODULE_INIT(libScePad);
-
-// Anchor referenced from vprx.cpp so the linker keeps this archive member and
-// the MODULE_INIT static initializer above actually runs (registers the HLE
-// table). Without it the controller HLE is silently stripped and the game falls
-// back to the LLE libScePad.sprx, which has no backing device and reports no pad.
-extern "C" int vprx_anchor_libScePad = 1;

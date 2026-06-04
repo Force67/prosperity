@@ -20,11 +20,9 @@ static base::Vector<const modInfo *> vprxTable;
 extern "C" int vprx_anchor_libSceVideoOut;
 extern "C" int vprx_anchor_libSceGnmDriver;
 extern "C" int vprx_anchor_libSceMsgDialog;
-extern "C" int vprx_anchor_libScePad;
 static volatile int *const vprx_anchors[] = {&vprx_anchor_libSceVideoOut,
                                              &vprx_anchor_libSceGnmDriver,
-                                             &vprx_anchor_libSceMsgDialog,
-                                             &vprx_anchor_libScePad};
+                                             &vprx_anchor_libSceMsgDialog};
 
 void vprx_init() {
   // Touch the anchors so the references aren't optimized away.
