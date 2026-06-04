@@ -7,12 +7,15 @@ layout(location = 0) out vec4 vColor;
 layout(location = 1) out vec2 vUv;
 void main() {
     vec4 p = pc.mvp * vec4(inPos, 0.0, 1.0); p.z = 0.0;
+    gl_Position = p;
+    // Render-to-texture composite (clipUV set): a neutral fullscreen blit of the
+    // source RT: sample at the screen position and don't modulate by the
+    // per-vertex attributes (whose format/offset varies per draw and is unknown
+    // for the composite). Regular sprites use their vertex uv + color.
     if (pc.clipUV != 0u) {
-        gl_Position = p;
         vColor = vec4(1.0);
-        vUv = vec2(p.x * 0.5 + 0.5, p.y * 0.5 + 0.5);
+        vUv = p.xy * 0.5 + 0.5;
     } else {
-        gl_Position = vec4(-p.x, p.y, p.z, p.w);
         vColor = inColor;
         vUv = inUv;
     }
