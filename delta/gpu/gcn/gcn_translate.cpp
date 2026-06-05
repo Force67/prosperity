@@ -72,6 +72,11 @@ std::vector<FetchAttr> parseFetch(uint64_t fetchAddr) {
   uint32_t sem = 0;
   for (auto &in : insts) {
     uint32_t w = in.raw[0];
+    // The fetch shader returns with s_setpc_b64 (SOP1 op 0x20). decode() only stops
+    // at s_endpgm, so without this it walks past the fetch shader into adjacent code
+    // and invents bogus attributes (whose dest VGPRs collide with the real ones).
+    if (in.enc == Enc::sop1 && (in.opcode == 0x20 || in.opcode == 0x21)) break;
+    if (in.enc == Enc::sopp && in.opcode == 1) break;  // s_endpgm
     if (in.enc == Enc::smrd && in.opcode == 0x02) {  // s_load_dwordx4
       uint32_t sdst = (w >> 15) & 0x7F, sbase = (w >> 9) & 0x3F, off = w & 0xFF;
       loads[sdst] = {sbase * 2u, off};
@@ -366,12 +371,15 @@ bool translatePs(const uint32_t *psCode, const uint32_t *psUserData, uint32_t nu
         r.psTexs.push_back({bind, srsrc});
         samplers += "layout(set=0, binding=" + std::to_string(bind) +
                     ") uniform sampler2D tex" + std::to_string(bind) + ";\n";
-        std::string uvexpr = "vec2(Ff(vg[" + std::to_string(vaddr) + "]), Ff(vg[" +
-                             std::to_string(vaddr + 1) + "]))";
+        std::string uvexpr = std::getenv("DELTA_GPU_RC_TEXMID") ? "vec2(0.5)"
+                             : "vec2(Ff(vg[" + std::to_string(vaddr) + "]), Ff(vg[" +
+                               std::to_string(vaddr + 1) + "]))";
         e.line("vec4 t" + std::to_string(bind) + " = texture(tex" + std::to_string(bind) +
                ", " + uvexpr + ");");
         if (std::getenv("DELTA_GPU_RC_UVDBG"))
           e.line("outColor = vec4(" + uvexpr + ", 0.0, 1.0); return;");
+        if (std::getenv("DELTA_GPU_RC_TEXMID"))
+          e.line("outColor = t" + std::to_string(bind) + "; return;");
         const char *sw[4] = {"x", "y", "z", "w"};
         uint32_t comp = 0;
         for (int i = 0; i < 4; i++)
