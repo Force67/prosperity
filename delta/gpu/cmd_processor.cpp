@@ -592,10 +592,23 @@ void submitDcb(const void *dcb, uint32_t sizeBytes) {
       // Gnm sprinkles between packets. Skip and keep walking (these are NOT the
       // end of the buffer (real packets resume after the padding).
       i += 1;
+    } else if (type == Pm4Type::type0) {
+      // Type-0 writes a run of consecutive registers (base in hdr[15:0], count in
+      // hdr[29:16]+1) directly into the register file. The old walker treated this as
+      // a desync and STOPPED -- dropping every later draw (the room floor) in any
+      // command buffer that used type-0. Apply the register writes and skip the body.
+      uint32_t cnt = pm4Count(hdr);            // body dword count
+      uint32_t base = pm4Type0Reg(hdr);        // absolute register dword offset
+      for (uint32_t k = 0; k < cnt && i + 1 + k < words; k++) {
+        uint32_t idx = base + k;
+        if (idx < kRegFileSize) g_regs[idx] = p[i + 1 + k];
+      }
+      i += 1 + cnt;
     } else {
-      // A non-zero type-0 / type-1 header is a genuine desync; stop.
-      if (dumpThis)
-        std::fprintf(stderr, "[gpu]   @%-5u STOP type%u hdr=%#x\n", i,
+      // A type-1 header is a genuine desync; stop.
+      static const bool desyncTrace = std::getenv("DELTA_GPU_DESYNC") != nullptr;
+      if (dumpThis || desyncTrace)
+        std::fprintf(stderr, "[gpu]   @%-5u/%u STOP type%u hdr=%#x\n", i, words,
                      (uint32_t)type, hdr);
       break;
     }

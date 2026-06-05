@@ -160,7 +160,12 @@ int PS4ABI sceGnmSubmitDone() { return 0; }
 
 int PS4ABI sceGnmAreSubmitsAllowed() { return 1; }
 
-int PS4ABI sceGnmDingDong(uint32_t ringId, uint32_t offset) { return 0; }
+int PS4ABI sceGnmDingDong(uint32_t ringId, uint32_t offset) {
+  static int n = 0;
+  if (std::getenv("DELTA_GPU_DINGDONG") && n++ < 20)
+    std::fprintf(stderr, "[gnm] sceGnmDingDong ring=%u offset=%#x\n", ringId, offset);
+  return 0;
+}
 
 int PS4ABI sceGnmDingDongForWorkload(uint32_t workload, uint32_t ringId,
                                     uint32_t offset) {
