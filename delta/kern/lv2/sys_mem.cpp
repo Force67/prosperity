@@ -126,8 +126,15 @@ uint8_t *PS4ABI sys_mmap(void *addr, size_t size, uint32_t prot, uint32_t flags,
       return shmMap(static_cast<shmObject *>(obj), size, offset);
     }
     if (obj) {
-      /*TODO: mmap in device!!*/
-      static_cast<device *>(obj)->map(addr, size, prot, flags, offset);
+      // Device-backed mmap (e.g. /dev/dce's scanout pool): use the region the
+      // device hands back instead of an anonymous fallback, so the guest maps
+      // the device's real memory. -1 means "not device-backed"; fall through.
+      auto *m = static_cast<device *>(obj)->map(addr, size, prot, flags, offset);
+      if (m != reinterpret_cast<uint8_t *>(-1)) {
+        proc->getVma().add(m, size,
+                           static_cast<ppt>(prot & static_cast<uint32_t>(ppt::rwx)));
+        return m;
+      }
     }
   }
 
