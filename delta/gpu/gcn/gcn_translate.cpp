@@ -366,8 +366,12 @@ bool translatePs(const uint32_t *psCode, const uint32_t *psUserData, uint32_t nu
         r.psTexs.push_back({bind, srsrc});
         samplers += "layout(set=0, binding=" + std::to_string(bind) +
                     ") uniform sampler2D tex" + std::to_string(bind) + ";\n";
+        std::string uvexpr = "vec2(Ff(vg[" + std::to_string(vaddr) + "]), Ff(vg[" +
+                             std::to_string(vaddr + 1) + "]))";
         e.line("vec4 t" + std::to_string(bind) + " = texture(tex" + std::to_string(bind) +
-               ", vec2(Ff(vg[" + std::to_string(vaddr) + "]), Ff(vg[" + std::to_string(vaddr + 1) + "])));");
+               ", " + uvexpr + ");");
+        if (std::getenv("DELTA_GPU_RC_UVDBG"))
+          e.line("outColor = vec4(" + uvexpr + ", 0.0, 1.0); return;");
         const char *sw[4] = {"x", "y", "z", "w"};
         uint32_t comp = 0;
         for (int i = 0; i < 4; i++)
