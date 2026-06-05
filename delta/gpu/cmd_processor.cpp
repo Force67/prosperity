@@ -10,6 +10,7 @@
 #include "vk_render.h"
 #include "gcn/gcn_decode.h"
 #include "gcn/gcn_resource.h"
+#include "gcn/gcn_translate.h"
 
 #include <atomic>
 #include <cstdio>
@@ -78,6 +79,18 @@ void dumpHist() {
 void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
   uint64_t vsA = g_regs.shaderAddr(mmSPI_SHADER_PGM_LO_VS);
   uint64_t psA = g_regs.shaderAddr(mmSPI_SHADER_PGM_LO_PS);
+  // One-time: recompile the first VS/PS pair to GLSL and print it (DELTA_GPU_SHTRACE),
+  // to validate the GCN->GLSL translator before wiring it into the pipeline.
+  static bool g_shTried = false;
+  if (std::getenv("DELTA_GPU_SHTRACE") && !g_shTried &&
+      vsA >= 0x1000000000ull && vsA < 0x20000000000ull &&
+      psA >= 0x1000000000ull && psA < 0x20000000000ull) {
+    g_shTried = true;
+    gcn::recompile(reinterpret_cast<const uint32_t *>(vsA),
+                   reinterpret_cast<const uint32_t *>(psA),
+                   &g_regs[mmSPI_SHADER_USER_DATA_VS_0],
+                   &g_regs[mmSPI_SHADER_USER_DATA_PS_0]);
+  }
   // One-time: find the first PS that samples a texture (has an MIMG instruction)
   // and dump how it loads its resources, so we can wire texture sampling.
   static bool g_texProbed = false;
