@@ -545,6 +545,13 @@ bool smodule::resolveImports() {
     uintptr_t addr = 0;
     const char *name = &strtab.ptr[sym->st_name];
 
+    // DELTA_RELOC_TRACE: dump every PLT import (module, GOT offset, obfuscated
+    // NID#lib#mod). Lets us pin which symbol a given GOT slot resolves to when an
+    // LLE module calls an import we mis-emulate.
+    if (std::getenv("DELTA_RELOC_TRACE"))
+      std::printf("[reloc] %s jmpslot@%#lx -> %s\n", info.name.c_str(),
+                  (unsigned long)r->offset, name);
+
     // unresolved import (missing dep): point at the badcall stub, don't fail
     if (!resolveObfSymbol(name, addr) || !addr) {
       addr = addrBadCall;
