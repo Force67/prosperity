@@ -919,10 +919,12 @@ bool drawRecomp(const DrawInfo &d) {
   // A fullscreen, untextured, REPLACE-blend draw into an RT that already holds
   // content this frame would overwrite it. Isaac bakes the room floor layer into a
   // buffer then issues exactly such a clear, blacking the floor; skipping it keeps
-  // the floor (verified: the floor layer then survives in its buffer). Opt-in for
-  // now (DELTA_GPU_NOWIPE=1) pending robust room-buffer-layer compositing; see
-  // [[isaac-gfx-room-black]].
-  static const bool noWipe = std::getenv("DELTA_GPU_NOWIPE") != nullptr;
+  // the floor so it composites (with the RT V-flip below). On by default;
+  // DELTA_GPU_NOWIPE=0 disables.
+  static const bool noWipe = [] {
+    const char *e = std::getenv("DELTA_GPU_NOWIPE");
+    return !e || std::strcmp(e, "0") != 0;
+  }();
   if (noWipe && d.recomp->psTexs.empty() && nv <= 8) {
     uint32_t cdst = (d.blendControl >> 8) & 0x1F, csrc = d.blendControl & 0x1F;
     bool replace = d.blendEnable && csrc == 1 && cdst == 0;
@@ -1333,8 +1335,22 @@ void draw(const DrawInfo &d) {
   // floor. Opt-in (DELTA_GPU_ROOMALPHA=1): correct for a current room, but the room
   // buffers cycle addresses per room so the layer selection isn't yet robust.
   static const bool roomAlpha = std::getenv("DELTA_GPU_ROOMALPHA") != nullptr;
-  bool roomComposite = roomAlpha && rtAsTex && !fsComposite &&
-                       g_rts[texBase].w >= 700 && g_rts[texBase].w <= 900;
+  bool roomSrc = rtAsTex && !fsComposite && g_rts[texBase].w >= 700 &&
+                 g_rts[texBase].w <= 900;
+  bool roomComposite = roomAlpha && roomSrc;
+
+  // GCN renders y-up but we render each RT with Vulkan's y-down framebuffer, so an
+  // RT's stored content is vertically mirrored vs the UVs the game samples it with.
+  // For a room composite this means the sampled rect misses the floor (which lands
+  // in the mirrored-bottom of the buffer). Flip the sampled V to compensate -- this
+  // (plus NOWIPE preserving the floor layer) is what makes the room floor render.
+  // On by default; DELTA_GPU_RTVFLIP=0 disables.
+  static const bool rtVFlip = [] {
+    const char *e = std::getenv("DELTA_GPU_RTVFLIP");
+    return !e || std::strcmp(e, "0") != 0;
+  }();
+  if (rtVFlip && roomSrc)
+    for (uint32_t v = 0; v < nv; v++) dst[v * 8 + 7] = 1.0f - dst[v * 8 + 7];
 
   VkDeviceSize off = g.vbOffset;
   if (texSet) {
