@@ -30,6 +30,7 @@
             vulkan-headers
             vulkan-loader
             sdl3
+            shaderc          # runtime GLSL -> SPIR-V for the shader recompiler
           ];
 
           cmakeFlags = [
@@ -67,6 +68,7 @@
             vulkan-validation-layers
             mesa            # lavapipe: software Vulkan for headless testing
             sdl3
+            shaderc         # runtime GLSL -> SPIR-V for the shader recompiler
           ];
 
           shellHook = ''
