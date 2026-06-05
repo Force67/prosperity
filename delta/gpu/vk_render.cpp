@@ -955,9 +955,12 @@ void draw(const DrawInfo &d) {
   if (!g.recording || !d.vertexData || !d.vertexStride)
     return;
   // Recompiled-shader path: run the game's actual VS/PS. Falls through to the
-  // heuristic quad path when the draw can't be handled. Gated by DELTA_GPU_RECOMP
-  // while it is brought up; default off until verified.
-  static const bool recompPath = std::getenv("DELTA_GPU_RECOMP") != nullptr;
+  // heuristic quad path when the draw can't be handled. On by default now that it
+  // renders gameplay correctly; DELTA_GPU_RECOMP=0 forces the old heuristic path.
+  static const bool recompPath = [] {
+    const char *e = std::getenv("DELTA_GPU_RECOMP");
+    return !e || std::strcmp(e, "0") != 0;
+  }();
   if (recompPath && d.recomp && drawRecomp(d))
     return;
   // Indexed triangle list (the common GNM draw): the index buffer selects which

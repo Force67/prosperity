@@ -275,7 +275,10 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
     // Recompiled-shader path: recompile the VS/PS pair (cached) and resolve the
     // live vertex-attribute buffers, so the renderer can run the game's actual
     // shaders. The heuristic fields above stay populated as the fallback.
-    static const bool recompOn = std::getenv("DELTA_GPU_RECOMP") != nullptr;
+    static const bool recompOn = [] {
+      const char *e = std::getenv("DELTA_GPU_RECOMP");
+      return !e || std::strcmp(e, "0") != 0;
+    }();
     if (recompOn && vsA >= 0x1000000000ull && vsA < 0x20000000000ull &&
         psA >= 0x1000000000ull && psA < 0x20000000000ull) {
       static std::unordered_map<uint64_t, gcn::Recompiled> shCache;
