@@ -123,6 +123,13 @@ int PS4ABI sys_virtual_query(const void *addr, int /*flags*/, void *info,
   void *end = region->ptr + region->size;
   std::memcpy(vq + 0x00, &start, sizeof(void *));
   std::memcpy(vq + 0x08, &end, sizeof(void *));
+  // +0x10 = the region's direct-memory offset. We don't model a separate dmem
+  // pool (guest addresses are identity-mapped), but libSceVideoOut's buffer
+  // registration rejects a scanout buffer unless the offset shares the virtual
+  // address's low 16 bits (a tiling-alignment check). Report the VA as the
+  // offset so that holds; left zero, every scanout register failed.
+  uint64_t offset = reinterpret_cast<uint64_t>(start);
+  std::memcpy(vq + 0x10, &offset, sizeof(uint64_t));
   // GPU-accessible memory (the guest asked for GPU read/write, bits 0x10/0x20)
   // is direct/physical memory in SCE terms: report it as WC_GARLIC (memType 3)
   // with the direct bit set, which is what libSceVideoOut checks before it will
@@ -136,8 +143,8 @@ int PS4ABI sys_virtual_query(const void *addr, int /*flags*/, void *info,
     std::memcpy(vq + 0x1C, &memType, sizeof(int));
   }
   if (std::getenv("DELTA_VQ_TRACE"))
-    std::printf("[vq] addr=%p region=[%p..%p) sceProt=%#x gpu=%d memType=%d\n",
-                addr, start, end, region->sceProt, gpu, gpu ? 3 : 0);
+    std::printf("[vq] addr=%p region=[%p..%p) sceProt=%#x memType=%d\n", addr,
+                start, end, region->sceProt, gpu ? 3 : 0);
   if (infoSize >= 0x21) {
     // flexible(0x01) | direct(0x02, GPU mem) | committed(0x10)
     vq[0x20] = 0x01 | 0x10 | (gpu ? 0x02 : 0x00);
