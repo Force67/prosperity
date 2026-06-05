@@ -902,9 +902,25 @@ bool drawRecomp(const DrawInfo &d) {
   if (!d.recomp || !d.recomp->ok || !d.nvattrs || !d.indexData || d.indexCount < 3)
     return false;
   if (!g.texPipeline) return false;  // need the descriptor infra (dsPool/dsLayout)
-  // Render-to-texture composites sample another of OUR render-target images, not
-  // guest memory, so they need the heuristic rtAsTex path; let those fall back.
-  if (d.texBase && d.texBase != d.rtBase && g_rts.count(d.texBase)) return false;
+  // RT-as-texture composite: samples one of OUR render-target images. Room composites
+  // (700-900 src) stay on the heuristic path (its verified V-flip renders the tutorial
+  // floor). Other composites (e.g. the darkness/light overlay that the heuristic
+  // fake-blit mis-applies, blacking non-tutorial rooms) run the game's REAL shader
+  // binding the RT image -- the shadPS4 "run all draws through real shaders" approach.
+  // Gated (DELTA_GPU_RECOMP_COMPOSITE) until validated; feedback loop guarded.
+  static const bool recompComposite = [] {
+    const char *e = std::getenv("DELTA_GPU_RECOMP_COMPOSITE");
+    return !e || std::strcmp(e, "0") != 0;
+  }();
+  bool rtAsTex = d.texBase && d.texBase != d.rtBase && g_rts.count(d.texBase);
+  uint32_t srcW = rtAsTex ? g_rts[d.texBase].w : 0;
+  bool roomSrc = rtAsTex && srcW >= 700 && srcW <= 900;
+  // The fullscreen scene->scanout composite (large source) stays on the heuristic
+  // path: it relies on the forced-opaque (alpha=1) blit; running it through the real
+  // shader blacks the scanout.
+  bool fsSrc = rtAsTex && srcW >= 1280;
+  if (d.texBase && d.texBase == d.rtBase) return false;
+  if (rtAsTex && (roomSrc || fsSrc || !recompComposite)) return false;
   // Index range -> vertex count.
   const uint16_t *i16 = nullptr; const uint32_t *i32 = nullptr;
   uint32_t maxIdx = 0;
@@ -969,8 +985,13 @@ bool drawRecomp(const DrawInfo &d) {
 
   RecompPipe *rp = getRecompPipe(d);
   if (!rp) return false;
-  VkDescriptorSet texSet = rp->textured ? getTexture(d.texBase, d.texW, d.texH) : VK_NULL_HANDLE;
-  if (rp->textured && !texSet) return false;
+  // Guest-texture source resolved up front; an RT-as-texture source is resolved after
+  // the region switch (transitioning it to readable must happen outside a region).
+  VkDescriptorSet texSet = VK_NULL_HANDLE;
+  if (rp->textured && !rtAsTex) {
+    texSet = getTexture(d.texBase, d.texW, d.texH);
+    if (!texSet) return false;
+  }
 
   static const bool fdbg = std::getenv("DELTA_GPU_FLOORTRACE") != nullptr;
   static int fdbgN = 0;
@@ -1027,12 +1048,27 @@ bool drawRecomp(const DrawInfo &d) {
   if (i32) std::memcpy(idst, i32, (size_t)d.indexCount * 4);
   else for (uint32_t i = 0; i < d.indexCount; i++) idst[i] = i16[i];
 
-  // Switch render target (same logic as the heuristic path).
+  // Switch render target (same logic as the heuristic path). Barrier the sampled RT
+  // readable here, outside any render region.
   if (g.curRt != d.rtBase) {
     endRegion();
+    if (rtAsTex) {
+      auto &src = g_rts[d.texBase];
+      if (src.layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+        imageBarrier(g.cmd, src.image, src.layout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                     VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
+        src.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+      }
+    }
     RTarget *rt = getRT(d.rtBase, d.rtW, d.rtH);
     if (!rt) return true;  // RT cap hit: treat as handled (dropped)
     beginRegion(d.rtBase, *rt);
+  }
+  if (rtAsTex) {
+    auto &src = g_rts[d.texBase];
+    if (src.layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) return false;  // mid-region; fall back
+    texSet = src.set;
+    if (!texSet) return false;
   }
 
   vkCmdBindPipeline(g.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, rp->pipe);
