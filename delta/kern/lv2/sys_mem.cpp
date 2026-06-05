@@ -131,8 +131,9 @@ uint8_t *PS4ABI sys_mmap(void *addr, size_t size, uint32_t prot, uint32_t flags,
       // the device's real memory. -1 means "not device-backed"; fall through.
       auto *m = static_cast<device *>(obj)->map(addr, size, prot, flags, offset);
       if (m != reinterpret_cast<uint8_t *>(-1)) {
-        proc->getVma().add(m, size,
-                           static_cast<ppt>(prot & static_cast<uint32_t>(ppt::rwx)));
+        proc->getVma().add(
+            m, size, static_cast<ppt>(prot & static_cast<uint32_t>(ppt::rwx)),
+            prot);
         return m;
       }
     }
@@ -172,7 +173,7 @@ uint8_t *PS4ABI sys_mmap(void *addr, size_t size, uint32_t prot, uint32_t flags,
   if (flags & mFlags::anon)
     std::memset(ptr, 0, size);
 
-  proc->getVma().add(static_cast<uint8_t *>(ptr), size, gprot);
+  proc->getVma().add(static_cast<uint8_t *>(ptr), size, gprot, prot);
 
   utl::protectMem(static_cast<void *>(ptr), size, ppt::rwx);
 

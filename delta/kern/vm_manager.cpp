@@ -33,9 +33,9 @@ bool vmManager::init() {
   return pinfo.userStack;
 }
 
-void vmManager::add(uint8_t *ptr, size_t size, mprot prot) {
+void vmManager::add(uint8_t *ptr, size_t size, mprot prot, uint32_t sceProt) {
   std::lock_guard lock(vmlock);
-  rtPages.emplace_back(ptr, size, prot);
+  rtPages.emplace_back(ptr, size, prot, sceProt);
 }
 
 pageInfo *vmManager::get(uint8_t *ptr) {

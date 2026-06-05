@@ -1,4 +1,5 @@
 
+#include <cstdlib>
 /*
  * PS4Delta : PS4 emulation and research project
  *
@@ -87,7 +88,10 @@ int PS4ABI sys_query_memory_protection(void *addr, void *info) {
   std::memset(qp, 0, 0x18);
   void *start = region->ptr;
   void *end = region->ptr + region->size;
-  uint32_t prot = static_cast<uint32_t>(region->prot); // r=1/w=2/x=4 == SCE bits
+  // Full SCE prot (with GPU bits) if we kept it, else the host r/w/x bits.
+  uint32_t prot = region->sceProt
+                      ? region->sceProt
+                      : static_cast<uint32_t>(region->prot);
   std::memcpy(qp + 0x00, &start, sizeof(void *));
   std::memcpy(qp + 0x08, &end, sizeof(void *));
   std::memcpy(qp + 0x10, &prot, sizeof(uint32_t));
@@ -119,14 +123,24 @@ int PS4ABI sys_virtual_query(const void *addr, int /*flags*/, void *info,
   void *end = region->ptr + region->size;
   std::memcpy(vq + 0x00, &start, sizeof(void *));
   std::memcpy(vq + 0x08, &end, sizeof(void *));
+  // GPU-accessible memory (the guest asked for GPU read/write, bits 0x10/0x20)
+  // is direct/physical memory in SCE terms: report it as WC_GARLIC (memType 3)
+  // with the direct bit set, which is what libSceVideoOut checks before it will
+  // register a scanout buffer. Plain CPU memory stays flexible WB_ONION.
+  bool gpu = (region->sceProt & 0x30) != 0;
   if (infoSize >= 0x1C + sizeof(int)) {
-    int prot = static_cast<int>(region->prot);
+    int prot = region->sceProt ? static_cast<int>(region->sceProt)
+                               : static_cast<int>(region->prot);
     std::memcpy(vq + 0x18, &prot, sizeof(int));
-    int memType = 0; // SCE_KERNEL_WB_ONION
+    int memType = gpu ? 3 : 0;  // 3 = SCE_KERNEL_WC_GARLIC, 0 = WB_ONION
     std::memcpy(vq + 0x1C, &memType, sizeof(int));
   }
+  if (std::getenv("DELTA_VQ_TRACE"))
+    std::printf("[vq] addr=%p region=[%p..%p) sceProt=%#x gpu=%d memType=%d\n",
+                addr, start, end, region->sceProt, gpu, gpu ? 3 : 0);
   if (infoSize >= 0x21) {
-    vq[0x20] = 0x01 | 0x10; // flexible memory, committed
+    // flexible(0x01) | direct(0x02, GPU mem) | committed(0x10)
+    vq[0x20] = 0x01 | 0x10 | (gpu ? 0x02 : 0x00);
     if (region->name) {
       size_t n = std::strlen(region->name);
       if (n > 31)

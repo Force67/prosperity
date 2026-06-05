@@ -25,9 +25,15 @@ struct pageInfo {
   uint8_t *ptr;
   size_t size;
   mprot prot;
+  // Full SCE protection as the guest requested it, including the GPU bits
+  // (0x10 GPU_READ / 0x20 GPU_WRITE) that the host r/w/x `prot` drops. Reported
+  // by sceKernelVirtualQuery; libSceVideoOut rejects a scanout buffer whose query
+  // lacks the GPU-read bit / direct-memory type.
+  uint32_t sceProt = 0;
   const char *name = nullptr;
 
-  pageInfo(uint8_t *p, size_t s, mprot mp) : ptr(p), size(s), prot(mp) {}
+  pageInfo(uint8_t *p, size_t s, mprot mp, uint32_t sp = 0)
+      : ptr(p), size(s), prot(mp), sceProt(sp) {}
 };
 
 class vmManager {
@@ -36,7 +42,7 @@ public:
   ~vmManager();
 
   bool init();
-  void add(uint8_t *ptr, size_t size, mprot);
+  void add(uint8_t *ptr, size_t size, mprot, uint32_t sceProt = 0);
   pageInfo *get(uint8_t *ptr);
 
   // true if [ptr, ptr+size) hits a tracked mapping
