@@ -17,6 +17,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <unordered_map>
 
 namespace gpu {
 namespace {
@@ -269,6 +270,51 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
         std::fprintf(stderr, "] VB1[");
         if (uv) for (int c = 0; c < 16; c++) std::fprintf(stderr, "%g ", uv[v*16+c]);
         std::fprintf(stderr, "]\n");
+      }
+    }
+    // Recompiled-shader path: recompile the VS/PS pair (cached) and resolve the
+    // live vertex-attribute buffers, so the renderer can run the game's actual
+    // shaders. The heuristic fields above stay populated as the fallback.
+    static const bool recompOn = std::getenv("DELTA_GPU_RECOMP") != nullptr;
+    if (recompOn && vsA >= 0x1000000000ull && vsA < 0x20000000000ull &&
+        psA >= 0x1000000000ull && psA < 0x20000000000ull) {
+      static std::unordered_map<uint64_t, gcn::Recompiled> shCache;
+      uint64_t key = vsA * 0x9e3779b97f4a7c15ull ^ psA;
+      auto it = shCache.find(key);
+      if (it == shCache.end())
+        it = shCache.emplace(key, gcn::recompile(
+                 reinterpret_cast<const uint32_t *>(vsA),
+                 reinterpret_cast<const uint32_t *>(psA),
+                 &g_regs[mmSPI_SHADER_USER_DATA_VS_0],
+                 &g_regs[mmSPI_SHADER_USER_DATA_PS_0])).first;
+      gcn::Recompiled &rc = it->second;
+      if (rc.ok && !rc.attrs.empty()) {
+        const uint32_t *vud2 = &g_regs[mmSPI_SHADER_USER_DATA_VS_0];
+        const void *heurVtx0 = d.vertexData; uint32_t heurStride0 = d.vertexStride;
+        uint64_t base0 = 0;
+        bool good = true;
+        for (size_t i = 0; i < rc.attrs.size() && i < 8; i++) {
+          auto &a = rc.attrs[i];
+          uint64_t tbl = (static_cast<uint64_t>(vud2[a.tableSgpr + 1] & 0xFFFF) << 32) | vud2[a.tableSgpr];
+          if (tbl < 0x1000000000ull || tbl >= 0x20000000000ull) { good = false; break; }
+          auto vb = gcn::decodeVBuffer(reinterpret_cast<const uint32_t *>(tbl + a.vbufDwordOff * 4));
+          if (vb.base < 0x1000000000ull || vb.base >= 0x20000000000ull || !vb.stride) { good = false; break; }
+          if (i == 0) { base0 = vb.base; d.vertexData = reinterpret_cast<const void *>(vb.base);
+            d.vertexStride = vb.stride; d.vertexCount = vb.numRecords; }
+          uint32_t off = (vb.base >= base0) ? (uint32_t)(vb.base - base0) : 0;
+          d.vattrs[d.nvattrs++] = {a.location, off, a.numComps, vb.dfmt, vb.nfmt};
+          static int rcvN = 0;
+          if (std::getenv("DELTA_GPU_SHTRACE") && rcvN < 16) {
+            rcvN++;
+            std::fprintf(stderr, "[rcv] attr%zu loc=%u tblSgpr=%u dwOff=%u tbl=%#lx "
+                         "vb.base=%#lx stride=%u nrec=%u dfmt=%u off=%u | heurVtx=%p heurStride=%u\n",
+                         i, a.location, a.tableSgpr, a.vbufDwordOff, (unsigned long)tbl,
+                         (unsigned long)vb.base, vb.stride, vb.numRecords, vb.dfmt, off,
+                         heurVtx0, heurStride0);
+          }
+        }
+        if (good && d.nvattrs) { d.vsAddr = vsA; d.psAddr = psA; d.recomp = &rc; }
+        else d.nvattrs = 0;
       }
     }
     if (!g_frameActive) {

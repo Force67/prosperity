@@ -13,7 +13,19 @@
 
 #include <cstdint>
 
+namespace gpu::gcn { struct Recompiled; }
+
 namespace gpu::vk {
+
+// One vertex attribute for the recompiled-shader path: where the recompiled VS
+// reads input `location` from within the (interleaved) vertex buffer.
+struct VertexAttr {
+  uint32_t location = 0;
+  uint32_t offset = 0;    // byte offset within the vertex
+  uint32_t numComps = 0;  // 1..4
+  uint32_t dfmt = 0;      // GCN data format (selects the Vulkan format)
+  uint32_t nfmt = 0;      // GCN number format
+};
 
 // Per-draw inputs extracted by the command processor (resource-tracked from the
 // shader + register state). Addresses are guest (identity-mapped, host-readable).
@@ -48,6 +60,15 @@ struct DrawInfo {
   // factors/functions to a Vulkan pipeline (cached per unique state).
   uint32_t blendControl = 0;
   bool blendEnable = false;
+
+  // Recompiled-shader path. When recomp != null and nvattrs > 0 the renderer runs
+  // the game's actual VS/PS (recompiled to SPIR-V) instead of the heuristic quad:
+  // vertexData/vertexStride is the raw interleaved vertex buffer, vattrs describe
+  // the inputs, mvp holds the constant buffer (pushed), texBase the sampler.
+  uint64_t vsAddr = 0, psAddr = 0;       // pipeline cache key
+  const gcn::Recompiled *recomp = nullptr;
+  VertexAttr vattrs[8];
+  uint32_t nvattrs = 0;
 };
 
 // Bring up the headless Vulkan device. Returns false if Vulkan is unavailable

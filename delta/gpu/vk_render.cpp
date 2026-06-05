@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "gfx/gfx.h"
+#include "gcn/gcn_translate.h"
 #include "shaders/quad_vert_spv.h"
 #include "shaders/quad_frag_spv.h"
 #include "shaders/tex_vert_spv.h"
@@ -757,6 +758,174 @@ bool init() {
 
 bool available() { return g.ready; }
 
+// ---- recompiled-shader path -------------------------------------------------
+// GCN data format -> Vulkan vertex format.
+VkFormat vfmt(uint32_t dfmt, uint32_t nfmt) {
+  switch (dfmt) {
+    case 1:  return VK_FORMAT_R8_UNORM;
+    case 3:  return VK_FORMAT_R8G8_UNORM;
+    case 4:  return nfmt == 4 ? VK_FORMAT_R32_UINT : VK_FORMAT_R32_SFLOAT;
+    case 10: return nfmt == 4 ? VK_FORMAT_R8G8B8A8_UINT : VK_FORMAT_R8G8B8A8_UNORM;
+    case 11: return VK_FORMAT_R32G32_SFLOAT;
+    case 13: return VK_FORMAT_R32G32B32_SFLOAT;
+    case 14: return VK_FORMAT_R32G32B32A32_SFLOAT;
+    default: return VK_FORMAT_R32G32B32A32_SFLOAT;
+  }
+}
+
+struct RecompPipe {
+  VkPipeline pipe = VK_NULL_HANDLE;
+  VkPipelineLayout layout = VK_NULL_HANDLE;
+  bool textured = false;
+};
+std::unordered_map<uint64_t, RecompPipe> g_recompPipes;
+
+VkShaderModule makeModuleVec(const std::vector<uint32_t> &spv) {
+  return makeModule(spv.data(), spv.size() * 4);
+}
+
+// Build (or fetch) the pipeline for a recompiled draw, keyed by the shader pair +
+// blend state + vertex layout.
+RecompPipe *getRecompPipe(const DrawInfo &d) {
+  uint64_t key = d.vsAddr * 0x9e3779b97f4a7c15ull ^ d.psAddr ^
+                 ((uint64_t)(d.blendEnable ? (d.blendControl & 0x7FFFFFFFu) : 0) << 1) ^
+                 ((uint64_t)d.vertexStride << 33);
+  auto it = g_recompPipes.find(key);
+  if (it != g_recompPipes.end()) return &it->second;
+  RecompPipe rp;
+  rp.textured = !d.recomp->psTexs.empty();
+
+  VkPushConstantRange pcr{VK_SHADER_STAGE_VERTEX_BIT, 0, 128};
+  VkPipelineLayoutCreateInfo li{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+  li.pushConstantRangeCount = 1;
+  li.pPushConstantRanges = &pcr;
+  if (rp.textured) { li.setLayoutCount = 1; li.pSetLayouts = &g.dsLayout; }
+  if (vkCreatePipelineLayout(g.device, &li, nullptr, &rp.layout) != VK_SUCCESS) return nullptr;
+
+  VkShaderModule vs = makeModuleVec(d.recomp->vsSpirv);
+  VkShaderModule fs = makeModuleVec(d.recomp->fsSpirv);
+  VkPipelineShaderStageCreateInfo stages[2]{};
+  stages[0] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+  stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT; stages[0].module = vs; stages[0].pName = "main";
+  stages[1] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+  stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT; stages[1].module = fs; stages[1].pName = "main";
+
+  VkVertexInputBindingDescription bind{0, d.vertexStride, VK_VERTEX_INPUT_RATE_VERTEX};
+  VkVertexInputAttributeDescription attrs[8];
+  for (uint32_t i = 0; i < d.nvattrs; i++)
+    attrs[i] = {d.vattrs[i].location, 0, vfmt(d.vattrs[i].dfmt, d.vattrs[i].nfmt), d.vattrs[i].offset};
+  VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+  vi.vertexBindingDescriptionCount = 1; vi.pVertexBindingDescriptions = &bind;
+  vi.vertexAttributeDescriptionCount = d.nvattrs; vi.pVertexAttributeDescriptions = attrs;
+
+  VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+  ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+  VkPipelineViewportStateCreateInfo vp{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+  vp.viewportCount = 1; vp.scissorCount = 1;
+  VkPipelineRasterizationStateCreateInfo rs{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+  rs.polygonMode = VK_POLYGON_MODE_FILL; rs.cullMode = VK_CULL_MODE_NONE;
+  rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE; rs.lineWidth = 1.0f;
+  VkPipelineMultisampleStateCreateInfo ms{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+  ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+  VkPipelineDepthStencilStateCreateInfo dss{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+  VkPipelineColorBlendAttachmentState cba = blendAttachment(d.blendControl, d.blendEnable);
+  VkPipelineColorBlendStateCreateInfo cb{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+  cb.attachmentCount = 1; cb.pAttachments = &cba;
+  VkDynamicState dyns[2] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+  VkPipelineDynamicStateCreateInfo dy{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+  dy.dynamicStateCount = 2; dy.pDynamicStates = dyns;
+  VkPipelineRenderingCreateInfo rci{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
+  rci.colorAttachmentCount = 1; rci.pColorAttachmentFormats = &g.rtFormat;
+  VkGraphicsPipelineCreateInfo pi{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+  pi.pNext = &rci; pi.stageCount = 2; pi.pStages = stages;
+  pi.pVertexInputState = &vi; pi.pInputAssemblyState = &ia; pi.pViewportState = &vp;
+  pi.pRasterizationState = &rs; pi.pMultisampleState = &ms; pi.pDepthStencilState = &dss;
+  pi.pColorBlendState = &cb; pi.pDynamicState = &dy; pi.layout = rp.layout;
+  VkResult r = vkCreateGraphicsPipelines(g.device, VK_NULL_HANDLE, 1, &pi, nullptr, &rp.pipe);
+  vkDestroyShaderModule(g.device, vs, nullptr);
+  vkDestroyShaderModule(g.device, fs, nullptr);
+  if (r != VK_SUCCESS) { std::fprintf(stderr, "[gpuvk] recomp pipeline failed: %d\n", (int)r);
+    return nullptr; }
+  g_recompPipes[key] = rp;
+  return &g_recompPipes[key];
+}
+
+// Issue an indexed draw running the game's recompiled VS/PS. Returns false if the
+// draw can't be handled (the caller falls back to the heuristic path).
+bool drawRecomp(const DrawInfo &d) {
+  if (!d.recomp || !d.recomp->ok || !d.nvattrs || !d.indexData || d.indexCount < 3)
+    return false;
+  if (!g.texPipeline) return false;  // need the descriptor infra (dsPool/dsLayout)
+  // Render-to-texture composites sample another of OUR render-target images, not
+  // guest memory, so they need the heuristic rtAsTex path; let those fall back.
+  if (d.texBase && d.texBase != d.rtBase && g_rts.count(d.texBase)) return false;
+  // Index range -> vertex count.
+  const uint16_t *i16 = nullptr; const uint32_t *i32 = nullptr;
+  uint32_t maxIdx = 0;
+  if (d.indexType == 1) { i32 = (const uint32_t *)d.indexData;
+    for (uint32_t i = 0; i < d.indexCount; i++) maxIdx = i32[i] > maxIdx ? i32[i] : maxIdx; }
+  else { i16 = (const uint16_t *)d.indexData;
+    for (uint32_t i = 0; i < d.indexCount; i++) maxIdx = i16[i] > maxIdx ? i16[i] : maxIdx; }
+  uint32_t nv = maxIdx + 1;
+  if (nv > 200000u || !d.vertexStride) return false;
+  VkDeviceSize vneed = (VkDeviceSize)nv * d.vertexStride;
+  if (g.vbOffset + vneed > kVbRing) return false;
+  if (g.ibOffset + (VkDeviceSize)d.indexCount * 4 > kIbRing) return false;
+
+  RecompPipe *rp = getRecompPipe(d);
+  if (!rp) return false;
+  VkDescriptorSet texSet = rp->textured ? getTexture(d.texBase, d.texW, d.texH) : VK_NULL_HANDLE;
+  if (rp->textured && !texSet) return false;
+
+  static const bool rdbg = std::getenv("DELTA_GPU_SHTRACE") != nullptr;
+  static int rdbgN = 0;
+  if (rdbg && rdbgN < 8) {
+    rdbgN++;
+    const float *vp = reinterpret_cast<const float *>(d.vertexData);
+    const float *m = d.mvp;
+    float x = vp[0], y = vp[1], z = (d.vattrs[0].numComps >= 3) ? vp[2] : 0.0f;
+    float cw = m[3]*x + m[7]*y + m[11]*z + m[15]; if (cw == 0) cw = 1;
+    float nx = (m[0]*x + m[4]*y + m[8]*z + m[12]) / cw;
+    float ny = (m[1]*x + m[5]*y + m[9]*z + m[13]) / cw;
+    std::fprintf(stderr, "[rc] vs=%#lx ps=%#lx nattr=%u stride=%u a0(off=%u nc=%u df=%u) "
+                 "ic=%u nv=%u tex=%d %#lx pos0=(%.1f,%.1f,%.1f) ndc0=(%.2f,%.2f) mvp=[%.3f %.3f %.3f]\n",
+                 (unsigned long)d.vsAddr, (unsigned long)d.psAddr, d.nvattrs, d.vertexStride,
+                 d.vattrs[0].offset, d.vattrs[0].numComps, d.vattrs[0].dfmt, d.indexCount, nv,
+                 rp->textured ? 1 : 0, (unsigned long)d.texBase, x, y, z, nx, ny, m[0], m[5], m[12]);
+  }
+
+  // Copy the raw interleaved vertex buffer and the indices into the rings.
+  VkDeviceSize voff = g.vbOffset, ioff = g.ibOffset;
+  std::memcpy(g.vbMap + voff, d.vertexData, (size_t)vneed);
+  auto *idst = reinterpret_cast<uint32_t *>(g.ibMap + ioff);
+  if (i32) std::memcpy(idst, i32, (size_t)d.indexCount * 4);
+  else for (uint32_t i = 0; i < d.indexCount; i++) idst[i] = i16[i];
+
+  // Switch render target (same logic as the heuristic path).
+  if (g.curRt != d.rtBase) {
+    endRegion();
+    RTarget *rt = getRT(d.rtBase, d.rtW, d.rtH);
+    if (!rt) return true;  // RT cap hit: treat as handled (dropped)
+    beginRegion(d.rtBase, *rt);
+  }
+
+  vkCmdBindPipeline(g.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, rp->pipe);
+  uint32_t pc[32] = {0};
+  std::memcpy(pc, d.mvp, 64);  // the constant buffer (MVP) -> push constants
+  vkCmdPushConstants(g.cmd, rp->layout, VK_SHADER_STAGE_VERTEX_BIT, 0, 128, pc);
+  if (texSet)
+    vkCmdBindDescriptorSets(g.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, rp->layout, 0, 1, &texSet, 0, nullptr);
+  vkCmdBindVertexBuffers(g.cmd, 0, 1, &g.vb, &voff);
+  vkCmdBindIndexBuffer(g.cmd, g.ib, ioff, VK_INDEX_TYPE_UINT32);
+  vkCmdDrawIndexed(g.cmd, d.indexCount, 1, 0, 0, 0);
+  g.vbOffset += vneed;
+  g.ibOffset += (VkDeviceSize)d.indexCount * 4;
+  g.frameDraws++;
+  if (g.curRt) { auto &rt = g_rts[g.curRt];
+    if (++rt.draws > g.busiestRtDraws) { g.busiestRtDraws = rt.draws; g.busiestRt = g.curRt; } }
+  return true;
+}
+
 void beginFrame() {
   if (!g.ready) return;
   if (!createPipeline()) return;
@@ -784,6 +953,12 @@ void beginFrame() {
 
 void draw(const DrawInfo &d) {
   if (!g.recording || !d.vertexData || !d.vertexStride)
+    return;
+  // Recompiled-shader path: run the game's actual VS/PS. Falls through to the
+  // heuristic quad path when the draw can't be handled. Gated by DELTA_GPU_RECOMP
+  // while it is brought up; default off until verified.
+  static const bool recompPath = std::getenv("DELTA_GPU_RECOMP") != nullptr;
+  if (recompPath && d.recomp && drawRecomp(d))
     return;
   // Indexed triangle list (the common GNM draw): the index buffer selects which
   // vertices form each triangle. Find how many vertices the indices reference so

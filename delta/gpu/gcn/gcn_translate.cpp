@@ -138,6 +138,7 @@ struct Emit {
       case 0x25: setU("(" + rawOf(s0) + " & " + rawOf(s1) + ")"); break;     // and_b32
       case 0x26: setU("(" + rawOf(s0) + " | " + rawOf(s1) + ")"); break;     // or_b32
       case 0x27: setU("(" + rawOf(s0) + " ^ " + rawOf(s1) + ")"); break;     // xor_b32
+      case 0x2f: setU("packHalf2x16(vec2(" + s0 + ", " + s1 + "))"); break;  // cvt_pkrtz_f16_f32
       default: set(s0 + " * " + s1); break;
     }
   }
@@ -228,14 +229,19 @@ bool translateVs(const uint32_t *vsCode, const uint32_t *vsUserData, Recompiled 
         bool imm = (w >> 8) & 1; uint32_t off = w & 0xFF;
         if (op == 0x02) {  // s_load_dwordx4 -> a sharp loaded from the user-data SRT
           sgVsharpUd[sdst] = sbase * 2u;  // approx: the table pointer's user-data index
-        } else if (op >= 0x08) {  // s_buffer_load_dword* : read the MVP cbuffer
+        } else if (op >= 0x08) {  // s_buffer_load_dword* : read a constant buffer
           uint32_t n = op == 0x08 ? 1 : op == 0x09 ? 2 : op == 0x0a ? 4 : op == 0x0b ? 8 : 16;
           if (!haveCbuf) { haveCbuf = true; cbufBinding = (uint32_t)r.vsCbufs.size();
             r.vsCbufs.push_back({cbufBinding, sbase * 2u, 16}); }
           uint32_t doff = imm ? off : 0;
-          for (uint32_t i = 0; i < n; i++)
-            e.line("sg[" + std::to_string(sdst + i) + "] = ub" + std::to_string(cbufBinding) +
-                   ".data[" + std::to_string(doff + i) + "];");
+          // Constant buffers are uploaded as push constants. Indexed as uvec4[] so
+          // the array is tightly packed (a std140 uint[] would pad each element to
+          // 16 bytes and scramble the matrix).
+          for (uint32_t i = 0; i < n; i++) {
+            uint32_t k = doff + i;
+            e.line("sg[" + std::to_string(sdst + i) + "] = pc.data[" + std::to_string(k >> 2) +
+                   "][" + std::to_string(k & 3) + "];");
+          }
         }
         break;
       }
@@ -285,11 +291,25 @@ bool translateVs(const uint32_t *vsCode, const uint32_t *vsUserData, Recompiled 
   r.numParams = e.maxParam;
 
   std::string ubo;
-  for (auto &c : r.vsCbufs)
-    ubo += "layout(set=0, binding=" + std::to_string(c.binding) + ", std140) uniform UB" +
-           std::to_string(c.binding) + " { uint data[" + std::to_string(c.numDwords) + "]; } ub" +
-           std::to_string(c.binding) + ";\n";
+  if (!r.vsCbufs.empty())
+    ubo = "layout(push_constant) uniform PC { uvec4 data[8]; } pc;\n";
 
+  // GL clip space (z in [-w,w]) -> Vulkan clip space (z in [0,w]). Without this the
+  // guest's depth lands outside Vulkan's [0,1] NDC range and every primitive is
+  // depth-clipped to nothing.
+  e.line("gl_Position.z = (gl_Position.z + gl_Position.w) * 0.5;");
+  if (std::getenv("DELTA_GPU_RC_FIXPOS"))
+    e.line("gl_Position = vec4(((gl_VertexIndex & 1)==0?-0.9:0.9), ((gl_VertexIndex & 2)==0?-0.9:0.9), 0.0, 1.0);");
+  if (std::getenv("DELTA_GPU_RC_DIRECTMVP") && !attrs.empty()) {
+    const char *pos = attrs[0].numComps == 2 ? "vec4(in0, 0.0, 1.0)"
+                      : attrs[0].numComps == 3 ? "vec4(in0, 1.0)" : "in0";
+    e.line("mat4 _m = mat4(Ff(pc.data[0][0]),Ff(pc.data[0][1]),Ff(pc.data[0][2]),Ff(pc.data[0][3]),"
+           "Ff(pc.data[1][0]),Ff(pc.data[1][1]),Ff(pc.data[1][2]),Ff(pc.data[1][3]),"
+           "Ff(pc.data[2][0]),Ff(pc.data[2][1]),Ff(pc.data[2][2]),Ff(pc.data[2][3]),"
+           "Ff(pc.data[3][0]),Ff(pc.data[3][1]),Ff(pc.data[3][2]),Ff(pc.data[3][3]));");
+    e.line(std::string("gl_Position = _m * ") + pos + ";");
+    e.line("gl_Position.z = 0.0;");
+  }
   r.vsGlsl = "#version 450\n" + ins + outs + ubo +
              "float Ff(uint x){return uintBitsToFloat(x);}\nuint Uf(float x){return floatBitsToUint(x);}\n"
              "void main(){\n  uint sg[128]; uint vg[256];\n" +
@@ -344,7 +364,7 @@ bool translatePs(const uint32_t *psCode, const uint32_t *psUserData, uint32_t nu
         uint32_t srsrc = ((w1 >> 16) & 0x1F) * 4;
         uint32_t bind = (uint32_t)r.psTexs.size();
         r.psTexs.push_back({bind, srsrc});
-        samplers += "layout(set=0, binding=" + std::to_string(8 + bind) +
+        samplers += "layout(set=0, binding=" + std::to_string(bind) +
                     ") uniform sampler2D tex" + std::to_string(bind) + ";\n";
         e.line("vec4 t" + std::to_string(bind) + " = texture(tex" + std::to_string(bind) +
                ", vec2(Ff(vg[" + std::to_string(vaddr) + "]), Ff(vg[" + std::to_string(vaddr + 1) + "])));");
@@ -382,6 +402,7 @@ bool translatePs(const uint32_t *psCode, const uint32_t *psUserData, uint32_t nu
   for (uint32_t i = 0; i < maxIn; i++)
     ins += "layout(location=" + std::to_string(i) + ") in vec4 inp" + std::to_string(i) + ";\n";
   if (!wroteColor) e.line("outColor = vec4(1.0);");
+  if (std::getenv("DELTA_GPU_RC_FLAT")) e.line("outColor = vec4(1.0, 0.0, 1.0, 1.0);");
 
   r.fsGlsl = "#version 450\n" + ins + samplers + "layout(location=0) out vec4 outColor;\n" +
              "float Ff(uint x){return uintBitsToFloat(x);}\nuint Uf(float x){return floatBitsToUint(x);}\n"
