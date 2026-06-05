@@ -24,6 +24,7 @@ bool available() { return false; }
 void present(const void *, uint32_t, uint32_t, uint32_t, PixelFormat) {}
 bool pumpEvents() { return true; }
 bool pollKeyboardPad(PadKeys &) { return false; }
+void setRumble(uint8_t, uint8_t) {}
 void shutdown() {}
 
 }  // namespace gfx

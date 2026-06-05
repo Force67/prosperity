@@ -646,6 +646,10 @@ bool pollKeyboardPad(PadKeys &out) {
   return true;
 }
 
+// Haptics on the touch-gamepad build would need a JNI call to the Vibrator
+// service; no-op until that's wired through the NativeActivity.
+void setRumble(uint8_t, uint8_t) {}
+
 void shutdown() { teardown(); }
 
 void setAndroidWindow(ANativeWindow *window) {

@@ -18,6 +18,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -68,6 +69,8 @@ struct State {
   void *stagingMap = nullptr;
   VkImage frameImg = VK_NULL_HANDLE;
   VkDeviceMemory frameMem = VK_NULL_HANDLE;
+
+  SDL_Gamepad *gamepad = nullptr;  // first connected controller (for input + rumble)
 
   bool needRecreate = false;
 };
@@ -227,9 +230,19 @@ bool ensureFrameResources(uint32_t w, uint32_t h, VkFormat fmt) {
 bool init(const char *title, uint32_t width, uint32_t height) {
   if (available())
     return true;  // already up; init is idempotent
-  if (!SDL_Init(SDL_INIT_VIDEO)) {
+  if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) {
     std::fprintf(stderr, "[gfx] SDL_Init failed: %s\n", SDL_GetError());
     return false;
+  }
+  // Open the first connected controller (if any) for input + rumble. Hotplug is
+  // handled in pumpEvents(); keyboard play works regardless.
+  {
+    int n = 0;
+    SDL_JoystickID *ids = SDL_GetGamepads(&n);
+    if (ids) {
+      if (n > 0) g.gamepad = SDL_OpenGamepad(ids[0]);
+      SDL_free(ids);
+    }
   }
   if (!SDL_Vulkan_LoadLibrary(nullptr)) {
     std::fprintf(stderr, "[gfx] SDL_Vulkan_LoadLibrary failed: %s\n",
@@ -497,6 +510,13 @@ bool pumpEvents() {
     if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat &&
         e.key.scancode == SDL_SCANCODE_F1)
       overlayToggle();
+    if (e.type == SDL_EVENT_GAMEPAD_ADDED && !g.gamepad)
+      g.gamepad = SDL_OpenGamepad(e.gdevice.which);
+    if (e.type == SDL_EVENT_GAMEPAD_REMOVED && g.gamepad &&
+        e.gdevice.which == SDL_GetGamepadID(g.gamepad)) {
+      SDL_CloseGamepad(g.gamepad);
+      g.gamepad = nullptr;
+    }
   }
   return true;
 }
@@ -534,7 +554,48 @@ bool pollKeyboardPad(PadKeys &out) {
   out.r2 = down(SDL_SCANCODE_RSHIFT);
   out.options = down(SDL_SCANCODE_RETURN) || down(SDL_SCANCODE_P);       // start / pause
   out.touchpad = down(SDL_SCANCODE_TAB);                                 // map / select
+
+  // Overlay a real controller when one is connected (it takes precedence over
+  // keyboard for any button/axis it actively asserts).
+  if (g.gamepad) {
+    auto b = [&](SDL_GamepadButton n) { return SDL_GetGamepadButton(g.gamepad, n); };
+    out.cross |= b(SDL_GAMEPAD_BUTTON_SOUTH);
+    out.circle |= b(SDL_GAMEPAD_BUTTON_EAST);
+    out.square |= b(SDL_GAMEPAD_BUTTON_WEST);
+    out.triangle |= b(SDL_GAMEPAD_BUTTON_NORTH);
+    out.up |= b(SDL_GAMEPAD_BUTTON_DPAD_UP);
+    out.down |= b(SDL_GAMEPAD_BUTTON_DPAD_DOWN);
+    out.left |= b(SDL_GAMEPAD_BUTTON_DPAD_LEFT);
+    out.right |= b(SDL_GAMEPAD_BUTTON_DPAD_RIGHT);
+    out.l1 |= b(SDL_GAMEPAD_BUTTON_LEFT_SHOULDER);
+    out.r1 |= b(SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER);
+    out.options |= b(SDL_GAMEPAD_BUTTON_START);
+    out.touchpad |= b(SDL_GAMEPAD_BUTTON_TOUCHPAD);
+    // Sticks: map [-32768,32767] to [0,255]; only override the centred keyboard value.
+    auto axis = [&](SDL_GamepadAxis n) -> int {
+      int v = SDL_GetGamepadAxis(g.gamepad, n);
+      return (v + 32768) * 255 / 65535;
+    };
+    int lx = axis(SDL_GAMEPAD_AXIS_LEFTX), ly = axis(SDL_GAMEPAD_AXIS_LEFTY);
+    int rx = axis(SDL_GAMEPAD_AXIS_RIGHTX), ry = axis(SDL_GAMEPAD_AXIS_RIGHTY);
+    if (std::abs(lx - 128) > 12) out.lx = (uint8_t)lx;
+    if (std::abs(ly - 128) > 12) out.ly = (uint8_t)ly;
+    if (std::abs(rx - 128) > 12) out.rx = (uint8_t)rx;
+    if (std::abs(ry - 128) > 12) out.ry = (uint8_t)ry;
+    // Triggers -> L2/R2 (and the analog buttons via the bit, see fillPadState).
+    if (SDL_GetGamepadAxis(g.gamepad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > 8000) out.l2 = true;
+    if (SDL_GetGamepadAxis(g.gamepad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > 8000) out.r2 = true;
+  }
   return true;
+}
+
+void setRumble(uint8_t largeMotor, uint8_t smallMotor) {
+  if (!g.gamepad)
+    return;
+  // DS4 motors are 0..255; SDL rumble is 0..65535. Large = low-freq, small = high-freq.
+  // Duration 0 means "until the next call"; the game re-issues continuously.
+  SDL_RumbleGamepad(g.gamepad, (uint16_t)(largeMotor * 257),
+                    (uint16_t)(smallMotor * 257), 0);
 }
 
 void shutdown() {

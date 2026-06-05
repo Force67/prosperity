@@ -51,6 +51,11 @@ struct PadKeys {
 // Fill `out` from the current keyboard state. Returns false if no window exists.
 bool pollKeyboardPad(PadKeys &out);
 
+// Drive haptics on the active controller. large/small are the DS4 motor
+// intensities (0..255). Routed to SDL gamepad rumble (PC) or the device
+// vibrator (Android); a no-op when no haptic device is present.
+void setRumble(uint8_t largeMotor, uint8_t smallMotor);
+
 // Harness signal shared between the GPU renderer and the input layer. The renderer
 // raises it once sustained gameplay (room rendering) is on screen, so the headless
 // autoskip (DELTA_PAD_AUTOSKIP) stops pressing menu buttons and stays in the run

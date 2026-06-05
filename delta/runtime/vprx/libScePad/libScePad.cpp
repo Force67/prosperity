@@ -339,8 +339,13 @@ int scePadSetTiltCorrectionState() {
   return 0;
 }
 
-int scePadSetVibration() {
-  LOG_UNIMPLEMENTED;
+// ScePadVibrationParam: two 0..255 motor intensities (large = low-freq, small =
+// high-freq). Drive the active controller's haptics; logging is omitted because
+// games call this every frame and the spam dominated the trace.
+struct ScePadVibrationParam { uint8_t largeMotor; uint8_t smallMotor; };
+int scePadSetVibration(int /*handle*/, const ScePadVibrationParam *param) {
+  if (param)
+    gfx::setRumble(param->largeMotor, param->smallMotor);
   return 0;
 }
 
