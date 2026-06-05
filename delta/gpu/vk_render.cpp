@@ -1071,8 +1071,12 @@ void roomTrace(const DrawInfo &d, uint32_t nv, bool recomp) {
   static const bool on = std::getenv("DELTA_GPU_ROOMTRACE") != nullptr;
   if (!on) return;
   static int n = 0;
-  if (n >= 200) return;
-  if (d.rtW < 700 || d.rtW > 900) return;
+  if (n >= 400) return;
+  static const uint32_t wmin = [] { const char *e = std::getenv("DELTA_GPU_ROOMTRACE_WMIN");
+    return e ? (uint32_t)std::atoi(e) : 700u; }();
+  static const uint32_t wmax = [] { const char *e = std::getenv("DELTA_GPU_ROOMTRACE_WMAX");
+    return e ? (uint32_t)std::atoi(e) : 900u; }();
+  if (d.rtW < wmin || d.rtW > wmax) return;
   // Skip the loading-screen bakes (DELTA_GPU_ROOMTRACE_MINF) to focus on gameplay
   // room bakes when exploring.
   static const int minF = [] { const char *e = std::getenv("DELTA_GPU_ROOMTRACE_MINF");

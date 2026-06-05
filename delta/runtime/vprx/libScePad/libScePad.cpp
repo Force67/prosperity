@@ -149,9 +149,16 @@ void fillPadState(PadData *d) {
   if (g_explore && g_autoskip && gfx::inGameplay()) {
     if (!g_firstGameplaySeq) g_firstGameplaySeq = g_readSeq;
     uint64_t since = g_readSeq - g_firstGameplaySeq;
-    // Walk up into the adjacent room, then settle there (hold neutral) so a clean,
-    // non-transition frame of a non-start room can be captured.
-    if (since < 280) ly = 0;  // up
+    // Walk up into the adjacent room and stop near its centre (a short burst), then
+    // settle (hold neutral) so a clean, non-transition frame of a non-start room can
+    // be captured. Tunable via DELTA_PAD_EXPLORE_READS.
+    static const uint64_t walk = [] { const char *e = std::getenv("DELTA_PAD_EXPLORE_READS");
+      return e ? (uint64_t)std::atoll(e) : 130ull; }();
+    // Default walk right (the start room's exits are the side doors; up is the
+    // hatch/wall). DELTA_PAD_EXPLORE_DIR: 0=right 1=left 2=up 3=down.
+    static const int dir = [] { const char *e = std::getenv("DELTA_PAD_EXPLORE_DIR");
+      return e ? std::atoi(e) : 0; }();
+    if (since < walk) { if (dir==0) lx=255; else if (dir==1) lx=0; else if (dir==2) ly=0; else ly=255; }
   }
   d->buttons = buttons;
   d->leftStick = {lx, ly};
