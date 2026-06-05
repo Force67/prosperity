@@ -54,15 +54,15 @@ void vprx_reg(const modInfo *info) { vprxTable.push_back(info); }
 // real path isn't ready or is forced off.
 //   - libSceGnmDriver: LLE by default (PM4 via ioctl(/dev/gc) -> gcDevice -> the
 //     GPU command processor). Force the HLE submit shim with DELTA_GNM_HLE.
-//   - libSceVideoOut: HLE by default for now; the real module drives the
-//     framebuffer through ioctl(/dev/dce) + mmap, which we're still bringing up.
-//     DELTA_VO_LLE runs the real module instead.
+//   - libSceVideoOut: LLE by default; the real module drives the framebuffer
+//     through ioctl(/dev/dce) + mmap (dceDevice) and flips via the videoout
+//     service thread. Force the HLE shim with DELTA_VO_HLE.
 // Returns true when `lib`'s HLE shim should be used (skip when running LLE).
 static bool useHleShim(const char *lib) {
   if (std::strcmp(lib, "libSceGnmDriver") == 0)
     return std::getenv("DELTA_GNM_HLE") != nullptr;
   if (std::strcmp(lib, "libSceVideoOut") == 0)
-    return std::getenv("DELTA_VO_LLE") == nullptr;
+    return std::getenv("DELTA_VO_HLE") != nullptr;
   return true;  // every other HLE module stays HLE
 }
 
