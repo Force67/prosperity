@@ -15,6 +15,7 @@
 #include <thread>
 
 #include "gfx/gfx.h"
+#include "gpu/cmd_processor.h"
 #include "kern/proc.h"
 #include "kern/lv2/sys_event.h"
 
@@ -391,6 +392,43 @@ int PS4ABI sceVideoOutSubmitFlip(int handle, int bufferIndex, int flipMode,
     eqHandle = g_port.flipEqueue;
     udata = g_port.flipUdata;
   }
+  if (eqHandle >= 0) {
+    if (auto *eq = findEqueue(eqHandle))
+      eq->trigger(kEventFlip, kFilterFlip,
+                  static_cast<int64_t>(g_port.flipCount.load()));
+  }
+  return 0;
+}
+
+int PS4ABI sceVideoOutSubmitFlipEop(int handle, int bufferIndex, int flipMode,
+                                    int64_t flipArg, void *eopLabel) {
+  // The real libSceGnmDriver (LLE submit path) flips through this internal
+  // videoout entry instead of sceVideoOutSubmitFlip. It is the EOP-label variant:
+  // the eopLabel is the GPU completion label the flip would wait on, which we
+  // don't need since our submit/present is synchronous. The game renders through
+  // Gnm (PM4 -> the GPU command processor's Vulkan render target), so present that
+  // render target here (endFrame), not the raw guest scanout buffer (which the
+  // title never CPU-writes). Then complete the flip exactly like SubmitFlip.
+  uint64_t scanout = 0;
+  int eqHandle;
+  void *udata;
+  {
+    std::lock_guard<std::mutex> lk(g_mtx);
+    if (bufferIndex >= 0 && bufferIndex < kMaxBuffers) {
+      scanout = reinterpret_cast<uint64_t>(g_port.buffers[bufferIndex]);
+      g_port.currentBuffer = bufferIndex;
+    }
+    g_port.lastFlipArg = flipArg;
+    g_port.submitCount.fetch_add(1);
+    eqHandle = g_port.flipEqueue;
+    udata = g_port.flipUdata;
+  }
+  // endFrame takes the GPU's own lock; call it outside g_mtx. It presents the RT
+  // matching `scanout`, falling back to the last RT rendered when it isn't one.
+  gpu::endFrame(scanout);
+  (void)udata;
+
+  g_port.flipCount.fetch_add(1);
   if (eqHandle >= 0) {
     if (auto *eq = findEqueue(eqHandle))
       eq->trigger(kEventFlip, kFilterFlip,

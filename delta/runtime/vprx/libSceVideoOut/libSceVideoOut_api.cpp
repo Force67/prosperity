@@ -22,6 +22,7 @@ static const runtime::funcInfo functions[] = {
     {0x536249B52A8D2992, (void *)&sceVideoOutGetEventId},             // U2JJtSqNKZI
     {0xAD651370A7645334, (void *)&sceVideoOutGetEventData},           // rWUTcKdkUzQ
     {0x538E8DC0E889A72B, (void *)&sceVideoOutSubmitFlip},             // U46NwOiJpys
+    {0x8FCC65FBDD80D2AE, (void *)&sceVideoOutSubmitFlipEop},          // j8xl+92A0q4
     {0x49B537770A7CD254, (void *)&sceVideoOutGetFlipStatus},          // SbU3dwp80lQ
     {0xCE05E27C74FD12B6, (void *)&sceVideoOutIsFlipPending},          // zgXifHT9ErY
     {0xD456412B2F0778D5, (void *)&sceVideoOutGetVblankStatus},        // 1FZBKy8HeNU

@@ -44,6 +44,11 @@ int PS4ABI sceVideoOutGetEventData(const void *event, int64_t *data);
 // --- flip / vblank ---
 int PS4ABI sceVideoOutSubmitFlip(int handle, int bufferIndex, int flipMode,
                                 int64_t flipArg);
+// EOP-label variant of SubmitFlip (NID j8xl+92A0q4). The real libSceGnmDriver
+// calls this on its LLE flip path; same as SubmitFlip plus a GPU completion-label
+// pointer we don't need (we present synchronously).
+int PS4ABI sceVideoOutSubmitFlipEop(int handle, int bufferIndex, int flipMode,
+                                    int64_t flipArg, void *eopLabel);
 int PS4ABI sceVideoOutGetFlipStatus(int handle, void *status);
 int PS4ABI sceVideoOutIsFlipPending(int handle);
 int PS4ABI sceVideoOutGetVblankStatus(int handle, void *status);
