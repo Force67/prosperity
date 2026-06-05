@@ -948,7 +948,7 @@ bool drawRecomp(const DrawInfo &d) {
     vkCmdBindDescriptorSets(g.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, rp->layout, 0, 1, &texSet, 0, nullptr);
   vkCmdBindVertexBuffers(g.cmd, 0, 1, &g.vb, &voff);
   vkCmdBindIndexBuffer(g.cmd, g.ib, ioff, VK_INDEX_TYPE_UINT32);
-  vkCmdDrawIndexed(g.cmd, d.indexCount, 1, 0, 0, 0);
+  vkCmdDrawIndexed(g.cmd, d.indexCount, d.instanceCount ? d.instanceCount : 1, 0, 0, 0);
   g.vbOffset += vneed;
   g.ibOffset += (VkDeviceSize)d.indexCount * 4;
   g.frameDraws++;
@@ -1254,10 +1254,10 @@ void draw(const DrawInfo &d) {
     else
       for (uint32_t i = 0; i < d.indexCount; i++) idst[i] = idx16[i];
     vkCmdBindIndexBuffer(g.cmd, g.ib, ioff, VK_INDEX_TYPE_UINT32);
-    vkCmdDrawIndexed(g.cmd, d.indexCount, 1, 0, 0, 0);
+    vkCmdDrawIndexed(g.cmd, d.indexCount, d.instanceCount ? d.instanceCount : 1, 0, 0, 0);
     g.ibOffset += (VkDeviceSize)d.indexCount * 4;
   } else {
-    vkCmdDraw(g.cmd, nv, 1, 0, 0);
+    vkCmdDraw(g.cmd, nv, d.instanceCount ? d.instanceCount : 1, 0, 0);
   }
   g.vbOffset += need;
   g.frameDraws++;

@@ -42,6 +42,7 @@ struct DrawInfo {
   const void *indexData = nullptr;
   uint32_t indexCount = 0;
   uint32_t indexType = 0;
+  uint32_t instanceCount = 1;  // from IT_NUM_INSTANCES (tilemaps draw instanced)
   float mvp[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
   uint64_t rtBase = 0;         // CB_COLOR0 address; the draw's render target
   uint32_t rtW = 0, rtH = 0;   // render-target dimensions

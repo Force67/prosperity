@@ -33,6 +33,7 @@ bool g_frameActive = false;
 // Index-buffer state, set by IT_INDEX_TYPE / IT_INDEX_BASE before a draw.
 uint32_t g_indexType = 0;  // 0 = 16-bit, 1 = 32-bit (VGT_DMA_INDEX_TYPE bits[1:0])
 uint64_t g_indexBase = 0;  // from IT_INDEX_BASE (DRAW_INDEX_2 carries its own base)
+uint32_t g_numInstances = 1;  // from IT_NUM_INSTANCES; applies to the next draw(s)
 
 // Current render-target / framebuffer geometry, derived from the screen scissor
 // (CB regs don't carry an explicit width/height).
@@ -130,6 +131,7 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
     const uint32_t *vud = &g_regs[mmSPI_SHADER_USER_DATA_VS_0];
     vk::DrawInfo d;
     d.primType = g_regs[mmVGT_PRIMITIVE_TYPE];
+    d.instanceCount = g_numInstances;
     // Index buffer. DRAW_INDEX_2 (5 dwords): maxSize, baseLo, baseHi, indexCount,
     // drawInitiator. The draws are indexed triangle lists; without the index
     // buffer (drawing raw vertices as a strip) batched sprites smear into long
@@ -335,10 +337,10 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
       if (adSeen >= 1 && adFrame < 80) {
         adFrame++;
         std::fprintf(stderr, "[ad] rt=%#lx %ux%u vs=%#lx tex=%#lx %ux%u nattr=%u stride=%u "
-                     "ic=%u vc=%u prim=%u\n",
+                     "ic=%u vc=%u prim=%u inst=%u\n",
                      (unsigned long)d.rtBase, d.rtW, d.rtH, (unsigned long)vsA,
                      (unsigned long)d.texBase, d.texW, d.texH, d.nvattrs, d.vertexStride,
-                     d.indexCount, d.vertexCount, d.primType);
+                     d.indexCount, d.vertexCount, d.primType, d.instanceCount);
       }
     }
     // Dropped-draw trace (DELTA_GPU_DROPS): log draws we can't issue (no vertex
@@ -558,6 +560,21 @@ void submitDcb(const void *dcb, uint32_t sizeBytes) {
       case IT_INDEX_BASE:  // index buffer base (byte address) lo/hi
         if (count >= 2)
           g_indexBase = (static_cast<uint64_t>(body[1] & 0xFF) << 32) | body[0];
+        break;
+      case IT_NUM_INSTANCES:  // instance count for the following draw(s)
+        g_numInstances = (count >= 1 && body[0]) ? body[0] : 1;
+        break;
+      case IT_DMA_DATA:  // GPU memory->memory copy (CP DMA). body: ctrl, srcLo,
+                         // srcHi, dstLo, dstHi, command(byteCount[20:0]).
+        if (std::getenv("DELTA_GPU_DMATRACE") && count >= 5) {
+          static int dmn = 0;
+          uint64_t src = (static_cast<uint64_t>(body[2] & 0xFFFF) << 32) | body[1];
+          uint64_t dst = (static_cast<uint64_t>(body[4] & 0xFFFF) << 32) | body[3];
+          uint32_t bytes = count >= 6 ? (body[5] & 0x1FFFFF) : 0;
+          if (dmn++ < 80)
+            std::fprintf(stderr, "[dma] ctrl=%#x src=%#lx dst=%#lx bytes=%u\n",
+                         body[0], (unsigned long)src, (unsigned long)dst, bytes);
+        }
         break;
       default:
         if (isDraw(op)) {
