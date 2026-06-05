@@ -10,6 +10,8 @@
 #include "vprx.h"
 #include <crypto/sha1.h>
 #include <base/containers/vector.h>
+#include <cstdlib>
+#include <cstring>
 
 namespace runtime {
 static base::Vector<const modInfo *> vprxTable;
@@ -47,7 +49,27 @@ void vprx_init() {
 
 void vprx_reg(const modInfo *info) { vprxTable.push_back(info); }
 
+// Per-module HLE policy. We prefer running the real sprx (LLE) for modules whose
+// syscall/device backing we emulate, falling back to the HLE shim only when the
+// real path isn't ready or is forced off.
+//   - libSceGnmDriver: LLE by default (PM4 via ioctl(/dev/gc) -> gcDevice -> the
+//     GPU command processor). Force the HLE submit shim with DELTA_GNM_HLE.
+//   - libSceVideoOut: HLE by default for now; the real module drives the
+//     framebuffer through ioctl(/dev/dce) + mmap, which we're still bringing up.
+//     DELTA_VO_LLE runs the real module instead.
+// Returns true when `lib`'s HLE shim should be used (skip when running LLE).
+static bool useHleShim(const char *lib) {
+  if (std::strcmp(lib, "libSceGnmDriver") == 0)
+    return std::getenv("DELTA_GNM_HLE") != nullptr;
+  if (std::strcmp(lib, "libSceVideoOut") == 0)
+    return std::getenv("DELTA_VO_LLE") == nullptr;
+  return true;  // every other HLE module stays HLE
+}
+
 uintptr_t vprx_get(const char *lib, uint64_t hid) {
+  if (!useHleShim(lib))
+    return 0;
+
   const modInfo *table = nullptr;
 
   // find the right table
