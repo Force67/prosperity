@@ -134,6 +134,11 @@ struct RTarget {
   bool usedThisFrame = false;
   uint32_t draws = 0;     // draws into this RT this frame
   int lastFrame = -1000;  // frame number this RT was last rendered into
+  bool clearPending = false;  // a fullscreen black clear was requested; applied lazily
+                              // (as loadOp=CLEAR) only when content actually redraws this
+                              // RT, so baked-once content (the room floor) persists across
+                              // frames instead of being wiped by a stray clear.
+  bool everRendered = false;  // false until first real render (then loadOp can LOAD)
 };
 std::unordered_map<uint64_t, RTarget> g_rts;
 
@@ -703,7 +708,19 @@ void beginRegion(uint64_t base, RTarget &rt) {
   VkRenderingAttachmentInfo color{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
   color.imageView = rt.view;
   color.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-  color.loadOp = rt.usedThisFrame ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_CLEAR;
+  // Lazy clear (DELTA_GPU_LAZYCLEAR, default on): persist RT content across frames
+  // (LOAD), clearing only when the game explicitly requested a clear (clearPending) or
+  // the RT was never rendered. The old per-frame auto-clear wiped baked-once content
+  // (room floor) whose redraw lands on a different frame than its clear.
+  static const bool lazyClear = [] { const char *e = std::getenv("DELTA_GPU_LAZYCLEAR");
+    return !e || std::strcmp(e, "0") != 0; }();
+  if (lazyClear)
+    color.loadOp = (rt.clearPending || !rt.everRendered) ? VK_ATTACHMENT_LOAD_OP_CLEAR
+                                                         : VK_ATTACHMENT_LOAD_OP_LOAD;
+  else
+    color.loadOp = rt.usedThisFrame ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_CLEAR;
+  rt.clearPending = false;
+  rt.everRendered = true;
   color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
   color.clearValue.color = {{0.0f, 0.0f, 0.0f, 1.0f}};
   VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
@@ -932,26 +949,23 @@ bool drawRecomp(const DrawInfo &d) {
   if (nv > 200000u || !d.vertexStride) return false;
   roomTrace(d, nv, true);
 
-  // A fullscreen, untextured, REPLACE-blend draw into an RT that already holds
-  // content this frame would overwrite it. Isaac bakes the room floor layer into a
-  // buffer then issues exactly such a clear, blacking the floor; skipping it keeps
-  // the floor so it composites (with the RT V-flip below). On by default;
-  // DELTA_GPU_NOWIPE=0 disables.
+  // A fullscreen, untextured, near-black REPLACE draw is the game CLEARING an RT.
+  // Don't render it (that wipes the RT immediately); record a LAZY clear instead --
+  // realised as loadOp=CLEAR only when content actually redraws this RT this frame
+  // (see beginRegion). Baked-once content (the room floor) whose clear and redraw land
+  // on different frames then survives. A COLOURED fullscreen REPLACE is real content
+  // (e.g. the per-frame minimap redraw) and must NOT be treated as a clear.
   static const bool noWipe = [] {
     const char *e = std::getenv("DELTA_GPU_NOWIPE");
     return !e || std::strcmp(e, "0") != 0;
   }();
+  static const bool lazyClear2 = [] { const char *e = std::getenv("DELTA_GPU_LAZYCLEAR");
+    return !e || std::strcmp(e, "0") != 0; }();
   if (noWipe && d.recomp->psTexs.empty() && nv <= 8) {
     uint32_t cdst = (d.blendControl >> 8) & 0x1F, csrc = d.blendControl & 0x1F;
     bool replace = d.blendEnable && csrc == 1 && cdst == 0;
-    auto rit = g_rts.find(d.rtBase);
-    bool rtHasContent = rit != g_rts.end() && rit->second.draws > 0 &&
-                        rit->second.lastFrame == g.frameNum;
-    if (replace && rtHasContent) {
+    if (replace) {
       const auto *vb = static_cast<const uint8_t *>(d.vertexData);
-      // Only suppress a near-BLACK fill (the actual floor-wiping clear). A coloured
-      // fullscreen REPLACE (e.g. the per-frame minimap redraw) is real content and
-      // must NOT be skipped, or it ghosts (the minimap went white-box).
       bool nearBlack = true;
       for (uint32_t a = 0; a < d.nvattrs; a++) {
         if (d.vattrs[a].numComps == 4 && d.vattrs[a].offset != 0) {
@@ -963,7 +977,6 @@ bool drawRecomp(const DrawInfo &d) {
           break;
         }
       }
-      // Confirm fullscreen coverage in NDC.
       const float *m = d.mvp;
       float nx0=1e9f,ny0=1e9f,nx1=-1e9f,ny1=-1e9f;
       for (uint32_t v = 0; v < nv; v++) {
@@ -972,9 +985,20 @@ bool drawRecomp(const DrawInfo &d) {
         float nx=(m[0]*p[0]+m[4]*p[1]+m[12])/cw, ny=(m[1]*p[0]+m[5]*p[1]+m[13])/cw;
         nx0=nx<nx0?nx:nx0; nx1=nx>nx1?nx:nx1; ny0=ny<ny0?ny:ny0; ny1=ny>ny1?ny:ny1;
       }
-      if (nearBlack && (nx1-nx0) >= 1.8f && (ny1-ny0) >= 1.8f) {
+      bool fullscreenBlack = nearBlack && (nx1-nx0) >= 1.8f && (ny1-ny0) >= 1.8f;
+      if (fullscreenBlack && lazyClear2) {
+        RTarget *rt = getRT(d.rtBase, d.rtW, d.rtH);  // create if needed
+        if (rt) rt->clearPending = true;
         g.frameDraws++;
-        return true;  // handled (suppressed)
+        return true;  // suppressed; the clear is applied lazily on the next redraw
+      }
+      // Legacy single-frame behaviour (DELTA_GPU_LAZYCLEAR=0): only suppress if the
+      // RT already holds content this frame.
+      auto rit = g_rts.find(d.rtBase);
+      if (fullscreenBlack && rit != g_rts.end() && rit->second.draws > 0 &&
+          rit->second.lastFrame == g.frameNum) {
+        g.frameDraws++;
+        return true;
       }
     }
   }
@@ -1552,7 +1576,11 @@ void endFrame(uint64_t scanoutBase) {
   static const int dumpAllRTFrame = [] {
     const char *e = std::getenv("DELTA_GPU_DUMPALLRT_FRAME"); return e ? std::atoi(e) : 1500;
   }();
-  if (dumpAllRT && g.frameHadRoom && g.frameDraws > 8 && g.frameNum > dumpAllRTFrame)
+  // Trigger on a BAKE frame (a room buffer was rendered into) when DELTA_GPU_DUMPALLRT_BAKE
+  // is set, else a composite frame -- to capture the freshly-baked room buffers.
+  static const bool dumpOnBake = std::getenv("DELTA_GPU_DUMPALLRT_BAKE") != nullptr;
+  bool dumpTrigger = dumpOnBake ? g.frameRoomBake : (g.frameHadRoom && g.frameDraws > 8);
+  if (dumpAllRT && dumpTrigger && g.frameNum > dumpAllRTFrame)
     dumpAllRTs();
   // Capture the presented frame whenever the room was (re)baked this frame, so the
   // composite is inspected on a frame where the room buffers are guaranteed current
