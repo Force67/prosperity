@@ -877,6 +877,21 @@ bool drawRecomp(const DrawInfo &d) {
   VkDescriptorSet texSet = rp->textured ? getTexture(d.texBase, d.texW, d.texH) : VK_NULL_HANDLE;
   if (rp->textured && !texSet) return false;
 
+  static const bool fdbg = std::getenv("DELTA_GPU_FLOORTRACE") != nullptr;
+  static int fdbgN = 0;
+  if (fdbg && d.rtW >= 700 && d.rtW <= 900 && fdbgN < 24) {
+    fdbgN++;
+    const float *vp = reinterpret_cast<const float *>(d.vertexData);
+    const float *m = d.mvp;
+    float x = vp[0], y = vp[1], z = (d.vattrs[0].numComps >= 3) ? vp[2] : 0.0f;
+    float cw = m[3]*x + m[7]*y + m[11]*z + m[15]; if (cw == 0) cw = 1;
+    float nx = (m[0]*x + m[4]*y + m[8]*z + m[12]) / cw;
+    float ny = (m[1]*x + m[5]*y + m[9]*z + m[13]) / cw;
+    std::fprintf(stderr, "[fr-recomp] vs=%#lx rt=%#lx %ux%u nattr=%u stride=%u ic=%u nv=%u "
+                 "tex=%#lx pos0=(%.1f,%.1f,%.1f) ndc0=(%.2f,%.2f)\n",
+                 (unsigned long)d.vsAddr, (unsigned long)d.rtBase, d.rtW, d.rtH, d.nvattrs,
+                 d.vertexStride, d.indexCount, nv, (unsigned long)d.texBase, x, y, z, nx, ny);
+  }
   static const bool rdbg = std::getenv("DELTA_GPU_SHTRACE") != nullptr;
   static int rdbgN = 0;
   if (rdbg && rdbgN < 8) {
