@@ -932,8 +932,23 @@ bool drawRecomp(const DrawInfo &d) {
     bool rtHasContent = rit != g_rts.end() && rit->second.draws > 0 &&
                         rit->second.lastFrame == g.frameNum;
     if (replace && rtHasContent) {
+      const auto *vb = static_cast<const uint8_t *>(d.vertexData);
+      // Only suppress a near-BLACK fill (the actual floor-wiping clear). A coloured
+      // fullscreen REPLACE (e.g. the per-frame minimap redraw) is real content and
+      // must NOT be skipped, or it ghosts (the minimap went white-box).
+      bool nearBlack = true;
+      for (uint32_t a = 0; a < d.nvattrs; a++) {
+        if (d.vattrs[a].numComps == 4 && d.vattrs[a].offset != 0) {
+          const uint8_t *cb0 = vb + d.vattrs[a].offset;  // vertex 0's colour
+          float r, gg, bl;
+          if (d.vattrs[a].dfmt == 10) { r = cb0[0]/255.f; gg = cb0[1]/255.f; bl = cb0[2]/255.f; }
+          else { const float *c = reinterpret_cast<const float *>(cb0); r = c[0]; gg = c[1]; bl = c[2]; }
+          if (r > 0.02f || gg > 0.02f || bl > 0.02f) nearBlack = false;
+          break;
+        }
+      }
       // Confirm fullscreen coverage in NDC.
-      const float *m = d.mvp; const auto *vb = static_cast<const uint8_t *>(d.vertexData);
+      const float *m = d.mvp;
       float nx0=1e9f,ny0=1e9f,nx1=-1e9f,ny1=-1e9f;
       for (uint32_t v = 0; v < nv; v++) {
         const float *p = reinterpret_cast<const float *>(vb + (size_t)v * d.vertexStride);
@@ -941,7 +956,7 @@ bool drawRecomp(const DrawInfo &d) {
         float nx=(m[0]*p[0]+m[4]*p[1]+m[12])/cw, ny=(m[1]*p[0]+m[5]*p[1]+m[13])/cw;
         nx0=nx<nx0?nx:nx0; nx1=nx>nx1?nx:nx1; ny0=ny<ny0?ny:ny0; ny1=ny>ny1?ny:ny1;
       }
-      if ((nx1-nx0) >= 1.8f && (ny1-ny0) >= 1.8f) {
+      if (nearBlack && (nx1-nx0) >= 1.8f && (ny1-ny0) >= 1.8f) {
         g.frameDraws++;
         return true;  // handled (suppressed)
       }
