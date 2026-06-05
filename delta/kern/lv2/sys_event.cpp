@@ -38,7 +38,13 @@ static void startVblankPump() {
     uint64_t count = 0;
     for (;;) {
       std::this_thread::sleep_for(std::chrono::microseconds(16667));  // ~60 Hz
-      triggerAllEqueues(-1, kEVFILT_DISPLAY, static_cast<int64_t>(++count));
+      // EVFILT_DISPLAY event data packs the flip/vblank counter in the high bits:
+      // the real libSceVideoOut reads the count as data>>16 (low 16 are a status
+      // nibble + sub-field). A raw count left its counter reading ~0 so its
+      // service thread never advanced. The value stays monotonic, so the HLE
+      // videoout (which only uses it to wake) is unaffected.
+      ++count;
+      triggerAllEqueues(-1, kEVFILT_DISPLAY, static_cast<int64_t>(count << 16));
     }
   }).detach();
 }
