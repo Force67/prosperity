@@ -10,11 +10,13 @@ void main() {
     vec4 p = pc.mvp * vec4(inPos, 0.0, 1.0); p.z = 0.0;
     gl_Position = p;
     vClip = pc.clipUV;
-    // Render-to-texture composite (clipUV set): a neutral fullscreen blit of the
-    // source RT: sample at the screen position and don't modulate by the
-    // per-vertex attributes (whose format/offset varies per draw and is unknown
-    // for the composite). Regular sprites use their vertex uv + color.
-    if (pc.clipUV != 0u) {
+    // clipUV==1: fullscreen render-to-texture composite (scene->scanout). Sample at
+    // the screen position, don't modulate by the per-vertex attributes (whose
+    // format/offset is unknown for the composite). clipUV==2: room-layer composite,
+    // keeps per-vertex uv/colour but the fragment derives a colour-keyed alpha so a
+    // stacked room layer's empty interior doesn't overwrite the layer beneath it.
+    // 0: a regular sprite (per-vertex uv + colour).
+    if (pc.clipUV == 1u) {
         vColor = vec4(1.0);
         vUv = p.xy * 0.5 + 0.5;
     } else {

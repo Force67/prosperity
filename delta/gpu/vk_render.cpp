@@ -95,6 +95,7 @@ struct State {
   int frameNum = 0;
   bool recording = false;
   bool frameHadRoom = false;  // this frame sampled a room-sized (~832w) RT
+  bool frameRoomBake = false; // this frame RENDERED into a room-sized (~832w) RT
 } g;
 
 struct TexEntry {
@@ -715,6 +716,7 @@ void beginRegion(uint64_t base, RTarget &rt) {
   vkCmdSetScissor(g.cmd, 0, 1, &sc);
   rt.usedThisFrame = true;
   rt.lastFrame = g.frameNum;
+  if (rt.w >= 700 && rt.w <= 900) g.frameRoomBake = true;  // room background baked
   g.curRt = base;
   g.lastRt = base;
   static const bool regTrace = std::getenv("DELTA_GPU_REGTRACE") != nullptr;
@@ -742,6 +744,48 @@ void dumpPpm(const uint8_t *bgra, uint32_t w, uint32_t h) {
   std::snprintf(path, sizeof(path), "%s/gpu_frame_%d.ppm", dumpDir(), g_dumpedFrames++);
   writePpm(path, bgra, w, h);
   std::fprintf(stderr, "[gpuvk] dumped %s\n", path);
+}
+
+// Diagnostic: dump every render target used this frame to its own ppm so the
+// per-buffer content (which 832 buffer holds the floor vs the walls, etc) can be
+// inspected directly. One-shot per RT via a transient command buffer (slow; only
+// for debugging). Call after the frame's main submit has completed.
+void dumpAllRTs() {
+  static int done = 0;
+  if (done) return;
+  done = 1;
+  for (auto &kv : g_rts) {
+    RTarget &rt = kv.second;
+    if (!rt.image || rt.layout == VK_IMAGE_LAYOUT_UNDEFINED) continue;
+    VkDeviceSize sz = (VkDeviceSize)rt.w * rt.h * 4;
+    ensureReadback(rt.w, rt.h);
+    VkCommandBufferAllocateInfo ca{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+    ca.commandPool = g.pool; ca.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; ca.commandBufferCount = 1;
+    VkCommandBuffer c; vkAllocateCommandBuffers(g.device, &ca, &c);
+    VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(c, &bi);
+    imageBarrier(c, rt.image, rt.layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                 VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+    VkBufferImageCopy copy{};
+    copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    copy.imageExtent = {rt.w, rt.h, 1};
+    vkCmdCopyImageToBuffer(c, rt.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, g.readback, 1, &copy);
+    vkEndCommandBuffer(c);
+    VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    si.commandBufferCount = 1; si.pCommandBuffers = &c;
+    vkResetFences(g.device, 1, &g.fence);
+    vkQueueSubmit(g.queue, 1, &si, g.fence);
+    vkWaitForFences(g.device, 1, &g.fence, VK_TRUE, UINT64_MAX);
+    rt.layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    vkFreeCommandBuffers(g.device, g.pool, 1, &c);
+    char path[256];
+    std::snprintf(path, sizeof(path), "%s/rt_%#lx_%ux%u.ppm", dumpDir(),
+                  (unsigned long)kv.first, rt.w, rt.h);
+    writePpm(path, static_cast<const uint8_t *>(g.readbackMap), rt.w, rt.h);
+    std::fprintf(stderr, "[gpuvk] dumped RT %s draws=%u\n", path, rt.draws);
+    (void)sz;
+  }
 }
 
 }  // namespace
@@ -850,6 +894,8 @@ RecompPipe *getRecompPipe(const DrawInfo &d) {
   return &g_recompPipes[key];
 }
 
+void roomTrace(const DrawInfo &d, uint32_t nv, bool recomp);
+
 // Issue an indexed draw running the game's recompiled VS/PS. Returns false if the
 // draw can't be handled (the caller falls back to the heuristic path).
 bool drawRecomp(const DrawInfo &d) {
@@ -868,6 +914,38 @@ bool drawRecomp(const DrawInfo &d) {
     for (uint32_t i = 0; i < d.indexCount; i++) maxIdx = i16[i] > maxIdx ? i16[i] : maxIdx; }
   uint32_t nv = maxIdx + 1;
   if (nv > 200000u || !d.vertexStride) return false;
+  roomTrace(d, nv, true);
+
+  // A fullscreen, untextured, REPLACE-blend draw into an RT that already holds
+  // content this frame would overwrite it. Isaac bakes the room floor layer into a
+  // buffer then issues exactly such a clear, blacking the floor; skipping it keeps
+  // the floor (verified: the floor layer then survives in its buffer). Opt-in for
+  // now (DELTA_GPU_NOWIPE=1) pending robust room-buffer-layer compositing; see
+  // [[isaac-gfx-room-black]].
+  static const bool noWipe = std::getenv("DELTA_GPU_NOWIPE") != nullptr;
+  if (noWipe && d.recomp->psTexs.empty() && nv <= 8) {
+    uint32_t cdst = (d.blendControl >> 8) & 0x1F, csrc = d.blendControl & 0x1F;
+    bool replace = d.blendEnable && csrc == 1 && cdst == 0;
+    auto rit = g_rts.find(d.rtBase);
+    bool rtHasContent = rit != g_rts.end() && rit->second.draws > 0 &&
+                        rit->second.lastFrame == g.frameNum;
+    if (replace && rtHasContent) {
+      // Confirm fullscreen coverage in NDC.
+      const float *m = d.mvp; const auto *vb = static_cast<const uint8_t *>(d.vertexData);
+      float nx0=1e9f,ny0=1e9f,nx1=-1e9f,ny1=-1e9f;
+      for (uint32_t v = 0; v < nv; v++) {
+        const float *p = reinterpret_cast<const float *>(vb + (size_t)v * d.vertexStride);
+        float cw = m[3]*p[0]+m[7]*p[1]+m[15]; if (cw==0) cw=1;
+        float nx=(m[0]*p[0]+m[4]*p[1]+m[12])/cw, ny=(m[1]*p[0]+m[5]*p[1]+m[13])/cw;
+        nx0=nx<nx0?nx:nx0; nx1=nx>nx1?nx:nx1; ny0=ny<ny0?ny:ny0; ny1=ny>ny1?ny:ny1;
+      }
+      if ((nx1-nx0) >= 1.8f && (ny1-ny0) >= 1.8f) {
+        g.frameDraws++;
+        return true;  // handled (suppressed)
+      }
+    }
+  }
+
   VkDeviceSize vneed = (VkDeviceSize)nv * d.vertexStride;
   if (g.vbOffset + vneed > kVbRing) return false;
   if (g.ibOffset + (VkDeviceSize)d.indexCount * 4 > kIbRing) return false;
@@ -970,6 +1048,7 @@ void beginFrame() {
   g.busiestRt = 0;
   g.busiestRtDraws = 0;
   g.frameHadRoom = false;
+  g.frameRoomBake = false;
   for (auto &kv : g_rts) {
     kv.second.usedThisFrame = false;
     kv.second.draws = 0;
@@ -980,6 +1059,23 @@ void beginFrame() {
   bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
   vkBeginCommandBuffer(g.cmd, &bi);
   g.recording = true;
+}
+
+// Per-frame room-composition trace (DELTA_GPU_ROOMTRACE): logs every draw whose
+// target RT is room-sized (700..900 wide) with the frame number, so a single
+// bake frame's full draw list (floor quadrants + wall tilemap + details) can be
+// read off and the floor/wall buffer split understood.
+void roomTrace(const DrawInfo &d, uint32_t nv, bool recomp) {
+  static const bool on = std::getenv("DELTA_GPU_ROOMTRACE") != nullptr;
+  if (!on) return;
+  static int n = 0;
+  if (n >= 200) return;
+  if (d.rtW < 700 || d.rtW > 900) return;
+  n++;
+  std::fprintf(stderr, "[room] f%d %s rt=%#lx %ux%u tex=%#lx %ux%u nv=%u ic=%u blend=%#x en=%d\n",
+               g.frameNum, recomp ? "RC" : "HE", (unsigned long)d.rtBase, d.rtW, d.rtH,
+               (unsigned long)d.texBase, d.texW, d.texH, nv, d.indexCount,
+               d.blendControl, d.blendEnable ? 1 : 0);
 }
 
 void draw(const DrawInfo &d) {
@@ -1014,6 +1110,7 @@ void draw(const DrawInfo &d) {
     nv = maxIdx + 1;
   }
   if (nv < 3 || nv > 200000u) return;  // sane cap
+  roomTrace(d, nv, false);
   VkDeviceSize need = (VkDeviceSize)nv * 32;  // pos.xy + color.rgba + uv.xy
   if (g.vbOffset + need > kVbRing)
     return;  // ring full this frame
@@ -1117,9 +1214,15 @@ void draw(const DrawInfo &d) {
     const char *e = std::getenv("DELTA_GPU_FRESHRT");
     return !e || std::strcmp(e, "0") != 0;
   }();
+  // When room-layer compositing is on, never redirect a room-sized buffer (700..900
+  // wide): the room is two sibling layers (floor + walls) and redirecting one to the
+  // "freshest" sibling would sample the wrong layer and drop the floor.
+  static const bool roomAlphaRedirect = std::getenv("DELTA_GPU_ROOMALPHA") != nullptr;
   if (freshRT && texBase) {
     auto it = g_rts.find(texBase);
-    if (it != g_rts.end() && g.frameNum - it->second.lastFrame > 8) {
+    bool isRoom = roomAlphaRedirect && it != g_rts.end() &&
+                  it->second.w >= 700 && it->second.w <= 900;
+    if (!isRoom && it != g_rts.end() && g.frameNum - it->second.lastFrame > 8) {
       int bestFrame = it->second.lastFrame; uint64_t best = texBase;
       for (auto &kv : g_rts)
         if (kv.second.w == it->second.w && kv.second.h == it->second.h &&
@@ -1222,20 +1325,32 @@ void draw(const DrawInfo &d) {
     texSet = VK_NULL_HANDLE;  // force colored pipeline
   }
 
+  // Room-layer composite: Isaac composes the room as two sibling 832 buffers (a
+  // floor layer and a wall layer with an empty interior) into the scene with
+  // REPLACE. Under REPLACE the wall layer's black interior overwrites the floor
+  // layer below it. We composite room layers with SRC_ALPHA over and a colour-keyed
+  // alpha in the fragment (clipUV==2) so the wall layer's empty interior keeps the
+  // floor. Opt-in (DELTA_GPU_ROOMALPHA=1): correct for a current room, but the room
+  // buffers cycle addresses per room so the layer selection isn't yet robust.
+  static const bool roomAlpha = std::getenv("DELTA_GPU_ROOMALPHA") != nullptr;
+  bool roomComposite = roomAlpha && rtAsTex && !fsComposite &&
+                       g_rts[texBase].w >= 700 && g_rts[texBase].w <= 900;
+
   VkDeviceSize off = g.vbOffset;
   if (texSet) {
     // Per-draw blend from the guest's CB_BLEND0_CONTROL. The fullscreen scene
     // composite must land opaquely (it copies the whole scene to the scanout), so
     // force blend off for it regardless of the guest's register.
+    // SRC_ALPHA(4) | ONE_MINUS_SRC_ALPHA(5)<<8 = 0x504 (color src/dst factors).
     VkPipeline p = fsComposite ? getPipeline(true, 0, false)
-                               : getPipeline(true, d.blendControl, d.blendEnable);
+                   : roomComposite ? getPipeline(true, 0x504u, true)
+                                   : getPipeline(true, d.blendControl, d.blendEnable);
     vkCmdBindPipeline(g.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
-    // Push mat4 MVP + a clipUV flag. Render-to-texture composites (sampling a
-    // scene RT) are fullscreen blits: the shader derives uv from clip position
-    // rather than the per-vertex attribute (whose format/offset varies per draw).
+    // Push mat4 MVP + a clipUV flag. 1 = fullscreen scene composite (screen-space uv,
+    // forced opaque). 2 = room-layer composite (per-vertex uv, colour-keyed alpha).
     float pc[17];
     std::memcpy(pc, d.mvp, 64);
-    reinterpret_cast<uint32_t *>(pc)[16] = fsComposite ? 1u : 0u;
+    reinterpret_cast<uint32_t *>(pc)[16] = fsComposite ? 1u : roomComposite ? 2u : 0u;
     vkCmdPushConstants(g.cmd, g.texLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, 68, pc);
     vkCmdBindDescriptorSets(g.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, g.texLayout, 0,
                             1, &texSet, 0, nullptr);
@@ -1354,6 +1469,25 @@ void endFrame(uint64_t scanoutBase) {
     writePpm(tmp, pixels, rt.w, rt.h);
     std::rename(tmp, p);  // atomic: a kill mid-write can't truncate the result
   }
+  // Diagnostic: one-shot dump of every RT this frame (DELTA_GPU_DUMPALLRT), on a
+  // representative gameplay frame, to inspect each buffer's content directly.
+  static const bool dumpAllRT = std::getenv("DELTA_GPU_DUMPALLRT") != nullptr;
+  static const int dumpAllRTFrame = [] {
+    const char *e = std::getenv("DELTA_GPU_DUMPALLRT_FRAME"); return e ? std::atoi(e) : 1500;
+  }();
+  if (dumpAllRT && g.frameHadRoom && g.frameDraws > 24 && g.frameNum > dumpAllRTFrame)
+    dumpAllRTs();
+  // Capture the presented frame whenever the room was (re)baked this frame, so the
+  // composite is inspected on a frame where the room buffers are guaranteed current
+  // (not a stale persisted buffer). Rolling + atomic.
+  if (g_dump && g.frameRoomBake && g.frameDraws > 24) {
+    char p[256], tmp[256];
+    std::snprintf(p, sizeof(p), "%s/gpu_bake.ppm", dumpDir());
+    std::snprintf(tmp, sizeof(tmp), "%s/gpu_bake.tmp", dumpDir());
+    writePpm(tmp, pixels, rt.w, rt.h);
+    std::rename(tmp, p);
+  }
+
   // Latch the gameplay signal once a run is clearly underway (sustained room
   // frames with real draw counts) so the headless autoskip stops opening menus
   // and stays in the run instead of bouncing back out via the pause menu.

@@ -6,10 +6,15 @@ layout(set = 0, binding = 0) uniform sampler2D tex;
 layout(location = 0) out vec4 outColor;
 void main() {
     vec4 c = texture(tex, vUv) * vColor;
-    // Fullscreen render-to-texture composite: copy the source RT opaquely. Its
-    // alpha is a scratch value left by sprite blending, not coverage, so keeping
-    // it would make the SRC_ALPHA blend fade the whole scene to the black clear.
-    // Force alpha 1 so the composite lands the full scene RGB onto the scanout.
-    if (vClip != 0u) c.a = 1.0;
+    // clipUV==1 (fullscreen scene composite): copy the source RT opaquely. Its alpha
+    // is a scratch value left by sprite blending, not coverage, so keeping it would
+    // make the SRC_ALPHA blend fade the whole scene to the black clear.
+    if (vClip == 1u) c.a = 1.0;
+    // clipUV==2 (room-layer composite): the room is composed of stacked layers (a
+    // floor layer, then a wall layer with an empty interior), each REPLACE-blended on
+    // hardware. Their stored alpha is unreliable (the floor texels are alpha 0), so
+    // derive coverage from colour: a coloured texel is opaque, a black texel is empty.
+    // With SRC_ALPHA blend the wall layer's black interior then keeps the floor below.
+    else if (vClip == 2u) c.a = max(max(c.r, c.g), c.b) > 0.0039 ? 1.0 : 0.0;
     outColor = c;
 }
