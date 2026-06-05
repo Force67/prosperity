@@ -1095,7 +1095,12 @@ void draw(const DrawInfo &d) {
   // opaque it blacks out the scene. The current room lives in a sibling same-size
   // RT we DO refresh every frame, so use that instead.
   uint64_t texBase = d.texBase;
-  static const bool freshRT = std::getenv("DELTA_GPU_FRESHRT") != nullptr;
+  // Redirect a composite that samples a stale room buffer to the freshest sibling
+  // (room-base RTs cycle addresses across frames). On by default; FRESHRT=0 disables.
+  static const bool freshRT = [] {
+    const char *e = std::getenv("DELTA_GPU_FRESHRT");
+    return !e || std::strcmp(e, "0") != 0;
+  }();
   if (freshRT && texBase) {
     auto it = g_rts.find(texBase);
     if (it != g_rts.end() && g.frameNum - it->second.lastFrame > 8) {
