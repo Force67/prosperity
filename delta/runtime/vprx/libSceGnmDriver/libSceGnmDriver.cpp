@@ -29,6 +29,47 @@
 extern "C" void prosperity_videoout_set_flip(int bufferIndex, int64_t flipArg);
 extern "C" uint64_t prosperity_videoout_buffer(int bufferIndex);
 
+// LLE submit bridge: the REAL libSceGnmDriver.sprx (the default now; the HLE
+// submit shim below is only used when DELTA_GNM_HLE forces it on) builds PM4 and
+// submits it through
+// ioctl(/dev/gc, ...) instead of calling the HLE entry points below. The gc char
+// device forwards those submit ioctls here. The ioctl payload is an array of
+// 16-byte PM4 INDIRECT_BUFFER descriptors, each {header, base_lo, base_hi_byte,
+// size_in_dwords}: header 0xC0023300 = IT_INDIRECT_BUFFER_CNST (the ccb) and
+// 0xC0023F00 = IT_INDIRECT_BUFFER (the dcb). Decode them to the same
+// submitCcb/submitDcb path the HLE entry points use. (Layout verified against the
+// 11.00 kernel gc_submit_internal and the sprx submit wrappers.)
+extern "C" void prosperity_gc_submit(const void *descArray, uint32_t descCount) {
+  auto *d = static_cast<const uint32_t *>(descArray);
+  if (!d)
+    return;
+  for (uint32_t i = 0; i < descCount; i++) {
+    const uint32_t *e = d + i * 4;
+    uint32_t hdr = e[0];
+    uint64_t addr = (static_cast<uint64_t>(e[2] & 0xFF) << 32) | e[1];
+    uint32_t bytes = (e[3] & 0xFFFFF) * 4;  // ib_size is in dwords
+    if (!addr || !bytes)
+      continue;
+    if (hdr == 0xC0023300u)
+      gpu::submitCcb(reinterpret_cast<const void *>(addr), bytes);
+    else if (hdr == 0xC0023F00u)
+      gpu::submitDcb(reinterpret_cast<const void *>(addr), bytes);
+  }
+}
+
+// LLE flip bridge: end the frame and present. displayBufferIndex < 0 means we
+// couldn't recover the flip's target buffer, so present the last RT the renderer
+// drew (endFrame falls back to it). The videoout flip pump posts the
+// flip-complete event independently, so the guest's flip wait still unblocks.
+extern "C" void prosperity_gc_flip(int displayBufferIndex, int64_t flipArg) {
+  uint64_t scanout = displayBufferIndex >= 0
+                         ? prosperity_videoout_buffer(displayBufferIndex)
+                         : 0;
+  gpu::endFrame(scanout);
+  if (displayBufferIndex >= 0)
+    prosperity_videoout_set_flip(displayBufferIndex, flipArg);
+}
+
 namespace {
 // Feed each command buffer to the GPU command processor. The Constant Engine runs
 // ahead of the Draw Engine, so process a submit's ccb (CE RAM -> shader constant

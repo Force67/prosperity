@@ -3,32 +3,50 @@
 
 #include <base.h>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include "gc_dev.h"
 #include "kern/proc.h"
 #include "kern/lv2/sys_mem.h"
+
+// LLE GPU submit bridge (delta_runtime). The real libSceGnmDriver.sprx submits
+// PM4 through these ioctls; forward the descriptor array to the GPU command
+// processor. See prosperity_gc_submit in libSceGnmDriver.cpp.
+extern "C" void prosperity_gc_submit(const void *descArray, uint32_t descCount);
+extern "C" void prosperity_gc_flip(int displayBufferIndex, int64_t flipArg);
 
 namespace krnl {
 gcDevice::gcDevice(proc *p) : device(p) {}
 
 bool gcDevice::init(const char *, uint32_t, uint32_t) { return true; }
 
-// SCOUT: scan the stack for the first return address landing in any guest
-// module's .text and report it as <module>+offset, to pin which guest wrapper
-// issued each gc ioctl (the native backend runs handlers on the guest stack).
+// SCOUT (DELTA_GC_CALLER): scan the stack for the first return address landing in
+// any guest module's .text and report it as <module>+offset, to pin which guest
+// wrapper issued each gc ioctl (the native backend runs handlers on the guest
+// stack). Off by default: the submit ioctls fire 60+/frame and the scan is slow.
 static void printGuestCaller() {
+  static const bool on = std::getenv("DELTA_GC_CALLER") != nullptr;
+  if (!on)
+    return;
   auto *proc = proc::getActive();
   if (!proc)
     return;
   auto *sp = reinterpret_cast<uintptr_t *>(__builtin_frame_address(0));
-  for (int i = 0; i < 512; i++) {
+  int printed = 0;
+  uintptr_t last = 0;
+  for (int i = 0; i < 512 && printed < 6; i++) {
     uintptr_t v = sp[i];
+    if (v == last)
+      continue;
     for (auto &m : proc->getModuleList()) {
       auto &mi = m->getInfo();
       auto base = (uintptr_t)mi.textSeg.addr;
       if (base && v >= base && v < base + mi.textSeg.size) {
-        std::printf("[gc]   caller %s+%#lx\n", mi.name.c_str(), v - base);
-        return;
+        std::printf("[gc]   caller[%d] %s+%#lx\n", printed, mi.name.c_str(),
+                    v - base);
+        last = v;
+        printed++;
+        break;
       }
     }
   }
@@ -36,6 +54,64 @@ static void printGuestCaller() {
 
 /* gc_ioctl */
 int32_t gcDevice::ioctl(uint32_t cmd, void *data) {
+  // Graphics command submission (the LLE path: real libSceGnmDriver.sprx). The
+  // arg's descriptor array is an array of 16-byte PM4 INDIRECT_BUFFER packets;
+  // forward it to the GPU command processor. Handle these first (and without the
+  // stack-scan SCOUT) since they fire 60+ times per frame.
+  switch (cmd) {
+  case 0xC0108102: {  // gc submit: {u32 a0, u32 count, u64 descPtr}
+    struct argl {
+      uint32_t a0;
+      uint32_t count;
+      uint64_t descPtr;
+    };
+    auto *a = static_cast<argl *>(data);
+    prosperity_gc_submit(reinterpret_cast<const void *>(a->descPtr), a->count);
+    return 0;
+  }
+  case 0xC018810A: {  // gc submit (variant): {u32 a0, u32 count, u32 a2, _, u64 ptr}
+    struct argl {
+      uint32_t a0;
+      uint32_t count;
+      uint32_t a2;
+      uint32_t pad;
+      uint64_t descPtr;
+    };
+    auto *a = static_cast<argl *>(data);
+    prosperity_gc_submit(reinterpret_cast<const void *>(a->descPtr), a->count);
+    return 0;
+  }
+  case 0xC020810C: {  // gc submit-and-flip: adds u64 flipPtr, u32 flag
+    struct argl {
+      uint32_t a0;
+      uint32_t count;
+      uint64_t descPtr;
+      uint64_t flipPtr;
+      uint32_t flag;
+    };
+    auto *a = static_cast<argl *>(data);
+    prosperity_gc_submit(reinterpret_cast<const void *>(a->descPtr), a->count);
+    // SCOUT (DELTA_GC_FLIP): the flip target buffer/arg live behind flipPtr; dump
+    // it the first few times so we can decode the layout. Until then present the
+    // last RT (index -1) and let the videoout pump post the flip event.
+    static const bool flipTrace = std::getenv("DELTA_GC_FLIP") != nullptr;
+    static int flipDumps = 0;
+    if (flipTrace && flipDumps < 8) {
+      flipDumps++;
+      printf("[gc] flip a0=%x count=%u descPtr=%lx flipPtr=%lx flag=%x\n", a->a0,
+             a->count, (unsigned long)a->descPtr, (unsigned long)a->flipPtr,
+             a->flag);
+      if (a->flipPtr) {
+        auto *fp = reinterpret_cast<const uint32_t *>(a->flipPtr);
+        printf("[gc]   flipPtr[0..7]: %x %x %x %x %x %x %x %x\n", fp[0], fp[1],
+               fp[2], fp[3], fp[4], fp[5], fp[6], fp[7]);
+      }
+    }
+    prosperity_gc_flip(-1, 0);
+    return 0;
+  }
+  }
+
   printGuestCaller();
   switch (cmd) {
   case 0xC00C8110: {
