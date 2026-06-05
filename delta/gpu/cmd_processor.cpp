@@ -324,6 +324,33 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
       vk::beginFrame();
       g_frameActive = true;
     }
+    // All-draws map (DELTA_GPU_ALLDRAWS): once a busy frame (>15 draws into a room-
+    // sized RT) starts, log every draw's target RT, texture, vert/index count and
+    // shader for two frames, to see the complete layer structure (which RT the
+    // floor fill targets).
+    static const bool allDraws = std::getenv("DELTA_GPU_ALLDRAWS") != nullptr;
+    static int adFrame = 0, adSeen = 0;
+    if (allDraws) {
+      if (d.rtW >= 700 && d.rtW <= 900) adSeen++;
+      if (adSeen >= 1 && adFrame < 80) {
+        adFrame++;
+        std::fprintf(stderr, "[ad] rt=%#lx %ux%u vs=%#lx tex=%#lx %ux%u nattr=%u stride=%u "
+                     "ic=%u vc=%u prim=%u\n",
+                     (unsigned long)d.rtBase, d.rtW, d.rtH, (unsigned long)vsA,
+                     (unsigned long)d.texBase, d.texW, d.texH, d.nvattrs, d.vertexStride,
+                     d.indexCount, d.vertexCount, d.primType);
+      }
+    }
+    // Dropped-draw trace (DELTA_GPU_DROPS): log draws we can't issue (no vertex
+    // data resolved from the fetch shader) once gameplay is up, to find a missing
+    // floor fill that never reaches the renderer.
+    if (!d.vertexData && std::getenv("DELTA_GPU_DROPS")) {
+      static int dn = 0;
+      if (dn++ < 60)
+        std::fprintf(stderr, "[drop] vs=%#lx ps=%#lx rt=%#lx %ux%u ic=%u prim=%u fetch=%#lx\n",
+                     (unsigned long)vsA, (unsigned long)psA, (unsigned long)d.rtBase,
+                     d.rtW, d.rtH, d.indexCount, d.primType, (unsigned long)fetch);
+    }
     if (d.vertexData)
       vk::draw(d);
   }

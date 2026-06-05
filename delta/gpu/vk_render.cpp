@@ -887,10 +887,26 @@ bool drawRecomp(const DrawInfo &d) {
     float cw = m[3]*x + m[7]*y + m[11]*z + m[15]; if (cw == 0) cw = 1;
     float nx = (m[0]*x + m[4]*y + m[8]*z + m[12]) / cw;
     float ny = (m[1]*x + m[5]*y + m[9]*z + m[13]) / cw;
+    // Dump the per-vertex colour attribute (the float4/rgba8 that modulates the
+    // texture) for a few verts, to tell a dark-vertex-colour floor from a missing
+    // texture. Prints both float and byte interpretations of the attribute.
+    char cbuf[320]; cbuf[0] = 0; int cl = 0;
+    for (uint32_t a = 0; a < d.nvattrs; a++)
+      if (d.vattrs[a].numComps == 4 && d.vattrs[a].offset != 0) {  // colour, not pos
+        for (uint32_t v = 0; v < nv && v < 3; v++) {
+          const uint8_t *b = static_cast<const uint8_t *>(d.vertexData) +
+                             (size_t)v * d.vertexStride + d.vattrs[a].offset;
+          const float *c = reinterpret_cast<const float *>(b);
+          cl += std::snprintf(cbuf + cl, sizeof(cbuf) - cl,
+                              " c%u=f(%.2f,%.2f,%.2f,%.2f)/b(%u,%u,%u,%u)", v,
+                              c[0], c[1], c[2], c[3], b[0], b[1], b[2], b[3]);
+        }
+        break;
+      }
     std::fprintf(stderr, "[fr-recomp] vs=%#lx rt=%#lx %ux%u nattr=%u stride=%u ic=%u nv=%u "
-                 "tex=%#lx pos0=(%.1f,%.1f,%.1f) ndc0=(%.2f,%.2f)\n",
+                 "tex=%#lx pos0=(%.1f,%.1f,%.1f) ndc0=(%.2f,%.2f)%s\n",
                  (unsigned long)d.vsAddr, (unsigned long)d.rtBase, d.rtW, d.rtH, d.nvattrs,
-                 d.vertexStride, d.indexCount, nv, (unsigned long)d.texBase, x, y, z, nx, ny);
+                 d.vertexStride, d.indexCount, nv, (unsigned long)d.texBase, x, y, z, nx, ny, cbuf);
   }
   static const bool rdbg = std::getenv("DELTA_GPU_SHTRACE") != nullptr;
   static int rdbgN = 0;
