@@ -141,6 +141,18 @@ void fillPadState(PadData *d) {
     if (k.touchpad) buttons |= kTouchPad;
     lx = k.lx; ly = k.ly; rx = k.rx; ry = k.ry;
   }
+  // Explore mode (DELTA_PAD_EXPLORE): once in gameplay, walk Isaac toward doors so a
+  // headless run visits multiple rooms (to verify rendering beyond the start room).
+  // Cycles direction every ~150 reads (up, right, down, left) on the left stick.
+  static const bool g_explore = std::getenv("DELTA_PAD_EXPLORE") != nullptr;
+  static uint64_t g_firstGameplaySeq = 0;
+  if (g_explore && g_autoskip && gfx::inGameplay()) {
+    if (!g_firstGameplaySeq) g_firstGameplaySeq = g_readSeq;
+    uint64_t since = g_readSeq - g_firstGameplaySeq;
+    // Walk up into the adjacent room, then settle there (hold neutral) so a clean,
+    // non-transition frame of a non-start room can be captured.
+    if (since < 280) ly = 0;  // up
+  }
   d->buttons = buttons;
   d->leftStick = {lx, ly};
   d->rightStick = {rx, ry};
