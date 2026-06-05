@@ -1479,13 +1479,14 @@ void endFrame(uint64_t scanoutBase) {
     dumpAllRTs();
   // Capture the presented frame whenever the room was (re)baked this frame, so the
   // composite is inspected on a frame where the room buffers are guaranteed current
-  // (not a stale persisted buffer). Rolling + atomic.
-  if (g_dump && g.frameRoomBake && g.frameDraws > 24) {
-    char p[256], tmp[256];
-    std::snprintf(p, sizeof(p), "%s/gpu_bake.ppm", dumpDir());
-    std::snprintf(tmp, sizeof(tmp), "%s/gpu_bake.tmp", dumpDir());
-    writePpm(tmp, pixels, rt.w, rt.h);
-    std::rename(tmp, p);
+  // (not a stale persisted buffer). Numbered sequence (gameplay bakes are mixed with
+  // loading/transition bakes, so a few are captured to pick a real room from).
+  static const bool bakeSeq = std::getenv("DELTA_GPU_BAKESEQ") != nullptr;
+  static int bakeN = 0;
+  if (bakeSeq && g.frameRoomBake && g.frameDraws > 24 && bakeN < 16) {
+    char p[256];
+    std::snprintf(p, sizeof(p), "%s/gpu_bake_%02d_f%d.ppm", dumpDir(), bakeN++, g.frameNum);
+    writePpm(p, pixels, rt.w, rt.h);
   }
 
   // Latch the gameplay signal once a run is clearly underway (sustained room
