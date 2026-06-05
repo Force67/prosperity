@@ -60,20 +60,14 @@ static bool plausiblePtr(uint64_t v) {
   return v >= 0x10000 && v < 0x0000800000000000ull;
 }
 
-// Dump an ioctl arg struct as u64s, chasing anything that looks like a pointer
-// one level deep. Reverses the (undocumented) DCE structs. DELTA_DCE_TRACE.
+// Dump an ioctl arg struct as u64s. Just the values: do NOT chase "pointers"
+// (many fields are two packed u32s like {pitch, height} that look like a high
+// address but aren't, and dereferencing them faults). DELTA_DCE_TRACE.
 static void dumpStruct(const void *data, uint32_t len) {
   const uint64_t *q = static_cast<const uint64_t *>(data);
   uint32_t n = len / 8;
-  for (uint32_t i = 0; i < n; i++) {
-    std::printf("    [%u] %#018llx", i, (unsigned long long)q[i]);
-    if (plausiblePtr(q[i])) {
-      const uint64_t *p = reinterpret_cast<const uint64_t *>(q[i]);
-      std::printf("  -> %#llx %#llx", (unsigned long long)p[0],
-                  (unsigned long long)p[1]);
-    }
-    std::printf("\n");
-  }
+  for (uint32_t i = 0; i < n; i++)
+    std::printf("    [%u] %#018llx\n", i, (unsigned long long)q[i]);
 }
 
 uint64_t dceDevice::poolAlloc(uint64_t bytes) {
