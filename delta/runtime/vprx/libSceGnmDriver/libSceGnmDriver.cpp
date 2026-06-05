@@ -118,6 +118,11 @@ int PS4ABI sceGnmSubmitCommandBuffersForWorkload(uint32_t workload, uint32_t cou
                                                 uint32_t *dcbSizes,
                                                 void **ccbGpuAddrs,
                                                 uint32_t *ccbSizes) {
+  // Same as sceGnmSubmitCommandBuffers but tagged with a workload id; the command
+  // buffers must still be processed (this was stubbed, silently dropping every
+  // draw the game submitted through the workload path).
+  dumpPm4(dcbGpuAddrs, dcbSizes, count);
+  processDcbs(dcbGpuAddrs, dcbSizes, count);
   return 0;
 }
 
@@ -142,6 +147,11 @@ int PS4ABI sceGnmSubmitAndFlipCommandBuffersForWorkload(
     uint32_t workload, uint32_t count, void **dcbGpuAddrs, uint32_t *dcbSizes,
     void **ccbGpuAddrs, uint32_t *ccbSizes, uint32_t videoOutHandle,
     uint32_t displayBufferIndex, uint32_t flipMode, int64_t flipArg) {
+  // Was a flip-only stub that dropped the submitted command buffers. Process them
+  // (and end the frame on the flip) exactly like the non-workload variant.
+  dumpPm4(dcbGpuAddrs, dcbSizes, count);
+  processDcbs(dcbGpuAddrs, dcbSizes, count);
+  gpu::endFrame(prosperity_videoout_buffer(static_cast<int>(displayBufferIndex)));
   prosperity_videoout_set_flip(static_cast<int>(displayBufferIndex), flipArg);
   return 0;
 }
