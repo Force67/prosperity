@@ -1073,11 +1073,17 @@ void roomTrace(const DrawInfo &d, uint32_t nv, bool recomp) {
   static int n = 0;
   if (n >= 200) return;
   if (d.rtW < 700 || d.rtW > 900) return;
+  // Skip the loading-screen bakes (DELTA_GPU_ROOMTRACE_MINF) to focus on gameplay
+  // room bakes when exploring.
+  static const int minF = [] { const char *e = std::getenv("DELTA_GPU_ROOMTRACE_MINF");
+    return e ? std::atoi(e) : 0; }();
+  if ((int)g.frameNum < minF) return;
   n++;
-  std::fprintf(stderr, "[room] f%d %s rt=%#lx %ux%u tex=%#lx %ux%u nv=%u ic=%u blend=%#x en=%d\n",
+  std::fprintf(stderr, "[room] f%d %s rt=%#lx %ux%u tex=%#lx %ux%u nv=%u ic=%u blend=%#x en=%d "
+               "tmask=%#x cctrl=%#x\n",
                g.frameNum, recomp ? "RC" : "HE", (unsigned long)d.rtBase, d.rtW, d.rtH,
                (unsigned long)d.texBase, d.texW, d.texH, nv, d.indexCount,
-               d.blendControl, d.blendEnable ? 1 : 0);
+               d.blendControl, d.blendEnable ? 1 : 0, d.targetMask, d.colorControl);
 }
 
 void draw(const DrawInfo &d) {
@@ -1491,7 +1497,7 @@ void endFrame(uint64_t scanoutBase) {
   static const int dumpAllRTFrame = [] {
     const char *e = std::getenv("DELTA_GPU_DUMPALLRT_FRAME"); return e ? std::atoi(e) : 1500;
   }();
-  if (dumpAllRT && g.frameHadRoom && g.frameDraws > 24 && g.frameNum > dumpAllRTFrame)
+  if (dumpAllRT && g.frameHadRoom && g.frameDraws > 8 && g.frameNum > dumpAllRTFrame)
     dumpAllRTs();
   // Capture the presented frame whenever the room was (re)baked this frame, so the
   // composite is inspected on a frame where the room buffers are guaranteed current

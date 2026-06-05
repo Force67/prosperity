@@ -156,6 +156,9 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
     // a single hardcoded blend they came out opaque and blacked out the scene.
     d.blendControl = g_regs[mmCB_BLEND0_CONTROL];
     d.blendEnable = (d.blendControl >> 30) & 1u;
+    // Per-MRT channel write mask (MRT0 = bits[3:0]) and overall colour-control mode.
+    d.targetMask = g_regs[mmCB_TARGET_MASK];
+    d.colorControl = g_regs[mmCB_COLOR_CONTROL];
 
     // MVP matrix: the VS sgpr[4..7] V# points at the constant buffer whose first
     // 16 floats are the transform (s_buffer_load_dwordx16 in the VS).

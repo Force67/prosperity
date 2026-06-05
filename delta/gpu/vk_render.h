@@ -61,6 +61,12 @@ struct DrawInfo {
   // factors/functions to a Vulkan pipeline (cached per unique state).
   uint32_t blendControl = 0;
   bool blendEnable = false;
+  // CB_TARGET_MASK (per-MRT channel write enable; MRT0 = bits[3:0]) and
+  // CB_COLOR_CONTROL (MODE field [6:4]; 0 = disable color output). Honoured as the
+  // Vulkan colorWriteMask so a draw the game masks off (e.g. a fullscreen "clear"
+  // it expects to write nothing) does not overwrite the target.
+  uint32_t targetMask = 0xF;
+  uint32_t colorControl = 0;
 
   // Recompiled-shader path. When recomp != null and nvattrs > 0 the renderer runs
   // the game's actual VS/PS (recompiled to SPIR-V) instead of the heuristic quad:
