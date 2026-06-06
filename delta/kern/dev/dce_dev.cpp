@@ -7,6 +7,7 @@
  */
 
 #include <base.h>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -17,6 +18,23 @@
 
 namespace krnl {
 dceDevice::dceDevice(proc *p) : device(p) {}
+
+// A monotonic nanosecond timestamp and a wall-clock ~60 Hz vblank counter. The
+// GameMaker runner (and sceVideoOutWaitVblank) busy-polls sceVideoOutGet-
+// VblankStatus until the count advances, to pace the frame loop, so the count
+// MUST tick in real time even though there is no display hardware. Without this
+// the count stays 0 and the title spins forever on its first frame.
+static uint64_t nowNs() {
+  using namespace std::chrono;
+  return static_cast<uint64_t>(
+      duration_cast<nanoseconds>(steady_clock::now().time_since_epoch()).count());
+}
+static uint64_t vblankCount() {
+  using namespace std::chrono;
+  static const auto start = steady_clock::now();
+  auto ns = duration_cast<nanoseconds>(steady_clock::now() - start).count();
+  return static_cast<uint64_t>(ns / 16666667);  // ~59.94 Hz
+}
 
 static bool g_dceTrace() {
   static const bool on = std::getenv("DELTA_DCE_TRACE") != nullptr;
@@ -151,6 +169,54 @@ int32_t dceDevice::ioctl(uint32_t cmd, void *data) {
       }
       return 0;
     }
+    case 0xa: {
+      // Get flip status. arg[0x10] (s[2]) = out ptr, arg[0x18] (s[3]) = size
+      // (0x48). The module copies it into SceVideoOutFlipStatus. Kernel field
+      // layout (verified against the 11.00 sceVideoOutGetFlipStatus wrapper):
+      //   [0x00] flipArg [0x10] count [0x18] processTime [0x20] tsc
+      //   [0x28] currentBuffer [0x2c]+[0x34] flipPendingNum [0x30] gcQueueNum
+      //   [0x38] submitTsc
+      // Our flip/present is synchronous, so nothing is ever pending: report
+      // count == an advancing flip count and pending == 0 so the runner's
+      // "is a flip still queued?" checks let it submit the next frame.
+      if (plausiblePtr(s[2])) {
+        auto *o = reinterpret_cast<uint8_t *>(s[2]);
+        std::memset(o, 0, 0x48);
+        uint64_t now = nowNs();
+        *reinterpret_cast<uint64_t *>(o + 0x10) = vblankCount();  // count
+        *reinterpret_cast<uint64_t *>(o + 0x18) = now;            // processTime
+        *reinterpret_cast<uint64_t *>(o + 0x20) = now * 16 / 10;  // tsc (1.6GHz)
+        *reinterpret_cast<uint64_t *>(o + 0x38) = now * 16 / 10;  // submitTsc
+        // flipPendingNum / gcQueueNum / currentBuffer left 0.
+      }
+      return 0;
+    }
+    case 0xb: {
+      // Get vblank status. arg[0x10] (s[2]) = out ptr, arg[0x18] (s[3]) = size
+      // (0x28). Kernel field layout: [0x00] count [0x08] processTime [0x10] tsc
+      // [0x18] flags. count MUST advance in real time (see vblankCount) or the
+      // runner's vsync busy-poll never returns -> the title hangs on frame 1.
+      if (plausiblePtr(s[2])) {
+        auto *o = reinterpret_cast<uint8_t *>(s[2]);
+        std::memset(o, 0, 0x28);
+        uint64_t now = nowNs();
+        *reinterpret_cast<uint64_t *>(o + 0x00) = vblankCount();  // count
+        *reinterpret_cast<uint64_t *>(o + 0x08) = now;            // processTime
+        *reinterpret_cast<uint64_t *>(o + 0x10) = now * 16 / 10;  // tsc (1.6GHz)
+        o[0x18] = 0;                                              // flags
+      }
+      return 0;
+    }
+    case 0xc: {
+      // fc_get_scaler_setup (videoout service thread). out[0x00] != 0 only when a
+      // NEW scaler config is pending; the title never reconfigures the scaler after
+      // boot, so report "none pending" (all zero) -- a non-zero handle here makes
+      // the service spin posting bogus scaler events. (NOT the flip-done path; that
+      // is the EVFILT_DISPLAY/-13 event below.)
+      if (plausiblePtr(s[2]))
+        std::memset(reinterpret_cast<void *>(s[2]), 0, 0x40);
+      return 0;
+    }
     case 0x1f:
       // Open-time capability/flip-control header: arg[0x10] (s[2]) = size (0xc),
       // arg[0x18] (s[3]) = pointer into the pool the kernel writes 12 bytes to.
@@ -194,9 +260,8 @@ int32_t dceDevice::ioctl(uint32_t cmd, void *data) {
   }
 
   if (cmd == 0xc0488204 && data) {
-    // Submit flip (72-byte arg). Stage 1: report success so the module's flip
-    // wrapper doesn't error. arg[0x40] (s[8]) points at a status out-slot the
-    // caller checks for 0x58 = ok. (Presenting the frame comes next.)
+    // Submit flip (72-byte arg). Report success: arg[0x40] (s[8]) points at a
+    // status out-slot the caller checks for 0x58 = ok.
     if (plausiblePtr(s[8]))
       *reinterpret_cast<uint64_t *>(s[8]) = 0x58;
     return 0;

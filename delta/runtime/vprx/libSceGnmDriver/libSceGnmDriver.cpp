@@ -43,11 +43,21 @@ extern "C" void prosperity_gc_submit(const void *descArray, uint32_t descCount) 
   auto *d = static_cast<const uint32_t *>(descArray);
   if (!d)
     return;
+  static const bool traceSubmit = std::getenv("DELTA_GC_SUBMIT") != nullptr;
+  static int submitDumps = 0;
+  const bool dumpThis = traceSubmit && submitDumps++ < 12;
+  if (dumpThis)
+    std::fprintf(stderr, "[gc] submit descArray=%p count=%u\n", descArray,
+                 descCount);
   for (uint32_t i = 0; i < descCount; i++) {
     const uint32_t *e = d + i * 4;
     uint32_t hdr = e[0];
     uint64_t addr = (static_cast<uint64_t>(e[2] & 0xFF) << 32) | e[1];
     uint32_t bytes = (e[3] & 0xFFFFF) * 4;  // ib_size is in dwords
+    if (dumpThis)
+      std::fprintf(stderr,
+                   "[gc]   desc[%u]: %08x %08x %08x %08x -> addr=%#lx bytes=%u\n",
+                   i, e[0], e[1], e[2], e[3], (unsigned long)addr, bytes);
     if (!addr || !bytes)
       continue;
     if (hdr == 0xC0023300u)

@@ -194,6 +194,8 @@ int PS4ABI sys_dynlib_get_list(uint32_t *handles, size_t maxCount,
 
   size_t listCount = 0;
   for (auto &mod : list) {
+    if (mod->getInfo().name.empty())
+      continue;
     if (listCount >= maxCount)
       break;  // don't overflow the caller's buffer
     *(handles++) = mod->getInfo().handle;

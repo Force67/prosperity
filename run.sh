@@ -20,7 +20,9 @@ set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="$ROOT/build"                 # nix-toolchain build (consistent libstdc++/glibc)
 BIN="$BUILD_DIR/delta/main/ps4delta"
-DEFAULT_PKG="/home/vince/Documents/dumps/PT.pkg"
+#DEFAULT_PKG="/home/vince/Documents/dumps/The.Binding.of.Isaac.Rebirth.v1.16.PS4-CUSA00792.pkg"
+#DEFAULT_PKG="/home/vince/Documents/dumps/Undertale-CUSA09415.pkg"
+DEFAULT_PKG="/home/vince/Documents/dumps/uncharted2.pkg"
 
 DO_BUILD=0; TRACE=0; TIMEOUT=""; LOG=""; EXTRA=()
 while [[ $# -gt 0 ]]; do
@@ -46,8 +48,12 @@ INNER='set -e'
 if [[ $DO_BUILD -eq 1 ]]; then
   INNER+='
     CLANGDIR=$(dirname "$(command -v clang)")
-    cmake -GNinja -B "'"$BUILD_DIR"'" -DCMAKE_BUILD_TYPE=Release -DDELTA_BUILD_TESTS=OFF -DDELTA_FEX_CLANG="$CLANGDIR" >/dev/null
-    ninja -C "'"$BUILD_DIR"'" ps4delta'
+    if [[ -f "'"$BUILD_DIR"'/CMakeCache.txt" ]]; then
+      cmake -B "'"$BUILD_DIR"'" -DCMAKE_BUILD_TYPE=Release -DDELTA_BUILD_TESTS=OFF -DDELTA_FEX_CLANG="$CLANGDIR" >/dev/null
+    else
+      cmake -GNinja -B "'"$BUILD_DIR"'" -DCMAKE_BUILD_TYPE=Release -DDELTA_BUILD_TESTS=OFF -DDELTA_FEX_CLANG="$CLANGDIR" >/dev/null
+    fi
+    cmake --build "'"$BUILD_DIR"'" --target ps4delta --parallel'
 fi
 INNER+='
   [[ -x "'"$BIN"'" ]] || { echo "missing binary: '"$BIN"' (run with -b)"; exit 1; }

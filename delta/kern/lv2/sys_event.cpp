@@ -9,6 +9,7 @@
 #include <base.h>
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <cstdio>
 #include <thread>
 
@@ -21,10 +22,12 @@ namespace krnl {
 static std::mutex g_eqRegM;
 static base::Vector<equeue *> g_equeues;
 
-// EVFILT_DISPLAY (-13) is the videoout vblank/flip filter. A thread that waits
-// on it blocks in kevent until a vblank arrives. With no real display hardware,
-// a synthetic 60 Hz tick keeps that wait from blocking forever.
+// EVFILT_DISPLAY (-13) and Sony's videoout event filter (-14) are both used by
+// real system modules for vblank/flip waits. A thread that waits on either
+// blocks in kevent until a display event arrives. With no real display hardware,
+// a synthetic 60 Hz tick keeps those waits from blocking forever.
 static constexpr int16_t kEVFILT_DISPLAY = -13;
+static constexpr int16_t kEVFILT_VIDEOOUT = -14;
 static std::atomic<bool> g_vblankStarted{false};
 
 // Start the 60 Hz EVFILT_DISPLAY pump once, on the first vblank registration, so
@@ -33,18 +36,25 @@ static void startVblankPump() {
   bool expected = false;
   if (!g_vblankStarted.compare_exchange_strong(expected, true))
     return;
-  std::printf("[vblank] pump started (60 Hz, EVFILT_DISPLAY)\n");
+  std::printf("[vblank] pump started (60 Hz, EVFILT_DISPLAY/VIDEOOUT)\n");
   std::thread([] {
     uint64_t count = 0;
     for (;;) {
       std::this_thread::sleep_for(std::chrono::microseconds(16667));  // ~60 Hz
-      // EVFILT_DISPLAY event data packs the flip/vblank counter in the high bits:
-      // the real libSceVideoOut reads the count as data>>16 (low 16 are a status
-      // nibble + sub-field). A raw count left its counter reading ~0 so its
-      // service thread never advanced. The value stays monotonic, so the HLE
-      // videoout (which only uses it to wake) is unaffected.
       ++count;
-      triggerAllEqueues(-1, kEVFILT_DISPLAY, static_cast<int64_t>(count << 16));
+      // Replicate the data the kernel's EVFILT_DISPLAY filter (filt_dceevent ->
+      // dce_ih_event) hands the title:
+      //   bits 16..63 = the vblank counter (read as data>>16; must advance),
+      //   bits 12..15 = a 4-bit per-event sequence (1..14) the title polls to
+      //                 detect a NEW event,
+      //   bits  0..11 = a TSC nonce.
+      // Packing only count<<16 left bits 12..15 = 0, so the title woke every tick
+      // but saw "no new event".
+      uint64_t seq = (count - 1) % 14 + 1;                    // 1..14
+      uint64_t tsc = static_cast<uint64_t>(__builtin_ia32_rdtsc()) & 0xFFF;
+      int64_t data = static_cast<int64_t>((count << 16) | (seq << 12) | tsc);
+      triggerAllEqueues(-1, kEVFILT_DISPLAY, data);
+      triggerAllEqueues(-1, kEVFILT_VIDEOOUT, data);
     }
   }).detach();
 }
@@ -75,6 +85,7 @@ equeue::knote *equeue::find(uint64_t ident, int16_t filter) {
 
 int equeue::kevent(const kevent_t *changes, int nchanges, kevent_t *out,
                    int nout, const ktimespec *to) {
+  static const bool traceReturns = std::getenv("DELTA_EVENT_TRACE") != nullptr;
   std::unique_lock<std::mutex> lk(m);
 
   // 1) apply the changelist.
@@ -100,7 +111,7 @@ int equeue::kevent(const kevent_t *changes, int nchanges, kevent_t *out,
       notes.push_back({c, false});
     }
     // First vblank registration kicks off the synthetic 60 Hz pump.
-    if (c.filter == kEVFILT_DISPLAY)
+    if (c.filter == kEVFILT_DISPLAY || c.filter == kEVFILT_VIDEOOUT)
       startVblankPump();
   }
 
@@ -123,8 +134,13 @@ int equeue::kevent(const kevent_t *changes, int nchanges, kevent_t *out,
     return 0;
 
   int got = collect();
-  if (got > 0)
+  if (got > 0) {
+    if (traceReturns)
+      std::printf("[kevent] return immediate n=%d filter=%d ident=%#llx data=%#llx\n",
+                  got, out[0].filter, (unsigned long long)out[0].ident,
+                  (unsigned long long)out[0].data);
     return got;
+  }
 
   bool ready = false;
   auto pred = [&] {
@@ -142,9 +158,17 @@ int equeue::kevent(const kevent_t *changes, int nchanges, kevent_t *out,
                std::chrono::nanoseconds(to->tv_nsec);
     ready = cv.wait_for(lk, dur, pred);
   }
-  if (!ready)
+  if (!ready) {
+    if (traceReturns)
+      std::printf("[kevent] timeout nout=%d\n", nout);
     return 0;
-  return collect();
+  }
+  got = collect();
+  if (traceReturns && got > 0)
+    std::printf("[kevent] return wait n=%d filter=%d ident=%#llx data=%#llx\n",
+                got, out[0].filter, (unsigned long long)out[0].ident,
+                (unsigned long long)out[0].data);
+  return got;
 }
 
 void equeue::addEvent(uint64_t ident, int16_t filter, void *udata) {
@@ -160,7 +184,7 @@ void equeue::addEvent(uint64_t ident, int16_t filter, void *udata) {
   } else {
     notes.push_back({ev, false});
   }
-  if (filter == kEVFILT_DISPLAY)
+  if (filter == kEVFILT_DISPLAY || filter == kEVFILT_VIDEOOUT)
     startVblankPump();
 }
 

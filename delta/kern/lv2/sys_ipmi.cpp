@@ -18,6 +18,7 @@
 #include <base.h>
 #include <atomic>
 #include <cstdint>
+#include <cstring>
 
 namespace krnl {
 
@@ -31,6 +32,8 @@ static std::atomic<uint32_t> g_nextClientKid{1};
 
 int PS4ABI sys_ipmimgr_call(uint32_t op, uint32_t kid, void *out, void *in,
                             uint64_t insize, uint64_t arg6) {
+  (void)kid;
+  (void)arg6;
   auto setResult = [&](uint32_t v) {
     if (out)
       *static_cast<uint32_t *>(out) = v;
@@ -42,6 +45,18 @@ int PS4ABI sys_ipmimgr_call(uint32_t op, uint32_t kid, void *out, void *in,
     setResult(g_nextClientKid.fetch_add(1));
     return 0;
   case IPMI_DESTROY_CLIENT:
+    setResult(0);
+    return 0;
+  case 784:
+    // StopSession/Disconnect-style calls pass a pointer to a guest status word
+    // in the request payload. libSceIpmi asserts that status is zero after the
+    // manager syscall returns; leave it clear when no service process exists.
+    if (in && insize >= sizeof(uint64_t)) {
+      uint32_t *status = nullptr;
+      std::memcpy(&status, in, sizeof(status));
+      if (status)
+        *status = 0;
+    }
     setResult(0);
     return 0;
   default:

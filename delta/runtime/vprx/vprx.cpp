@@ -30,13 +30,17 @@ extern "C" int vprx_anchor_libScePad;
 extern "C" int vprx_anchor_libSceUserService;
 extern "C" int vprx_anchor_libSceUsbd;
 extern "C" int vprx_anchor_libSceAudioOut;
+extern "C" int vprx_anchor_libSceAudioIn;
+extern "C" int vprx_anchor_libSceNpTrophy;
 static volatile int *const vprx_anchors[] = {&vprx_anchor_libSceVideoOut,
                                              &vprx_anchor_libSceGnmDriver,
                                              &vprx_anchor_libSceMsgDialog,
                                              &vprx_anchor_libScePad,
                                              &vprx_anchor_libSceUserService,
                                              &vprx_anchor_libSceUsbd,
-                                             &vprx_anchor_libSceAudioOut};
+                                             &vprx_anchor_libSceAudioOut,
+                                             &vprx_anchor_libSceAudioIn,
+                                             &vprx_anchor_libSceNpTrophy};
 
 void vprx_init() {
   // Touch the anchors so the references aren't optimized away.
@@ -90,6 +94,14 @@ uintptr_t vprx_get(const char *lib, uint64_t hid) {
     }
   }
 
+  // DELTA_NID_TRACE: report imports with no HLE override (resolved to the LLE
+  // module). Set it to a library-name substring to focus the dump, or "1" for
+  // all. Fires once per import at load time, so it stays bounded.
+  if (const char *t = std::getenv("DELTA_NID_TRACE")) {
+    if (t[0] == '1' || std::strstr(lib, t))
+      std::fprintf(stderr, "[nid] %s hid=%#018llx -> LLE (no HLE)\n", lib,
+                   (unsigned long long)hid);
+  }
   return 0;
 }
 

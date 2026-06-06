@@ -20,6 +20,30 @@ gcDevice::gcDevice(proc *p) : device(p) {}
 
 bool gcDevice::init(const char *, uint32_t, uint32_t) { return true; }
 
+static void completeFlipLabels(uint64_t flipPtr) {
+  if (!flipPtr)
+    return;
+
+  auto *p = reinterpret_cast<uint32_t *>(flipPtr);
+  // Gnm prepareFlip emits a PM4-like EOP-label packet:
+  //   C0038000 addr_lo addr_hi value_lo value_hi
+  // Complete it synchronously because the CPU-side emulated submit already
+  // finished all draws before returning.
+  if (p[0] == 0xC0038000u) {
+    uint64_t addr = (static_cast<uint64_t>(p[2] & 0xFF) << 32) | p[1];
+    uint64_t value = static_cast<uint64_t>(p[3]) |
+                     (static_cast<uint64_t>(p[4]) << 32);
+    if (addr) {
+      *reinterpret_cast<uint64_t *>(addr) = value;
+      static const bool trace = std::getenv("DELTA_GC_FLIP") != nullptr;
+      if (trace)
+        std::printf("[gc]   flip label [%#lx] = %#lx\n",
+                    static_cast<unsigned long>(addr),
+                    static_cast<unsigned long>(value));
+    }
+  }
+}
+
 // SCOUT (DELTA_GC_CALLER): scan the stack for the first return address landing in
 // any guest module's .text and report it as <module>+offset, to pin which guest
 // wrapper issued each gc ioctl (the native backend runs handlers on the guest
@@ -107,6 +131,7 @@ int32_t gcDevice::ioctl(uint32_t cmd, void *data) {
                fp[2], fp[3], fp[4], fp[5], fp[6], fp[7]);
       }
     }
+    completeFlipLabels(a->flipPtr);
     prosperity_gc_flip(-1, 0);
     return 0;
   }
@@ -173,6 +198,13 @@ int32_t gcDevice::ioctl(uint32_t cmd, void *data) {
     printf("gc ioctl(%x): %x, %x, %x, %x, %x\n", cmd, args->unknown_00,
            args->unknown_04, args->unknown_08, args->unknown_0C,
            args->unknown_80);
+    return 0;
+  }
+  case 0xC0048116: {
+    auto *args = static_cast<uint32_t *>(data);
+    printf("gc ioctl(%x): in/out=%x\n", cmd, args ? *args : 0);
+    if (args)
+      *args = 0;
     return 0;
   }
   }
