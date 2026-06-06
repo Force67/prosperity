@@ -158,6 +158,16 @@ Bucket &umtxBucket(const void *a) {
 constexpr uint32_t UMUTEX_CONTESTED = 0x80000000u;
 }  // namespace
 
+static void umtxTrace(int op, void *ptr, uint32_t self, uint32_t owner) {
+  static const bool tr = std::getenv("DELTA_UMTX_TRACE") != nullptr;
+  if (!tr)
+    return;
+  static std::atomic<int> n{0};
+  if (n.fetch_add(1) < 4000)
+    std::fprintf(stderr, "[umtx] op=%d ptr=%p self=%u owner=%#x\n", op, ptr,
+                 self, owner);
+}
+
 int PS4ABI sys_umtx_op(void *ptr, int op, uint32_t val, void *a, void *b) {
   using namespace std::chrono_literals;
   markThreadStarted();  // first sync point => our init is done
@@ -209,24 +219,41 @@ int PS4ABI sys_umtx_op(void *ptr, int op, uint32_t val, void *a, void *b) {
     for (;;) {
       uint32_t owner = p->load();
       uint32_t held = owner & ~UMUTEX_CONTESTED;
-      if (held == 0) {                 // free: claim it. Keep CONTESTED set so the
-        p->store(self | UMUTEX_CONTESTED);  // unlock is kernel-arbitrated (op 6) and
-        return 0;                      // wakes any other waiters still blocked here.
+      if (held == 0) {                 // free: claim it atomically. A blind store
+        // would race libthr's userland CAS fast path (which runs WITHOUT our bucket
+        // lock): both could "win" the same free mutex -> two owners -> libthr's
+        // per-thread owned-PI-mutex list gets the same mutex twice -> "Fatal error
+        // 'mutex is on list'". CAS makes the claim atomic against that fast path.
+        // Preserve a waiter's CONTESTED bit but don't set it spuriously (an
+        // uncontended unlock must stay in userland, not hit op 6).
+        if (!p->compare_exchange_strong(owner, self | (owner & UMUTEX_CONTESTED)))
+          continue;                    // lost the race; re-evaluate
+        umtxTrace(op, ptr, self, owner);
+        return 0;
       }
       if (held == self)                // already ours (libthr counts recursion)
         return 0;
       if (op == 4)                     // trylock: don't block
         return -16 /*EBUSY*/;
-      p->store(owner | UMUTEX_CONTESTED);  // mark so the unlocker wakes us
+      // Mark contested with a CAS too: if the owner word changed under us (a
+      // concurrent userland unlock cleared it), re-evaluate instead of stomping a
+      // stale owner|CONTESTED back over a now-free mutex.
+      if (!p->compare_exchange_strong(owner, owner | UMUTEX_CONTESTED))
+        continue;
       bk.cv.wait_for(lk, 1s);          // re-check on wake / safety timeout
     }
   }
   case 6: { // UMTX_OP_MUTEX_UNLOCK
+    // libthr only reaches the kernel unlock for a CONTESTED mutex, and its
+    // userland path has ALREADY verified the caller owns it (and, for the
+    // contested PI/PROTECT release, already cleared the owner tid to 0/CONTESTED
+    // before the syscall). So don't re-check ownership here -- the owner word is
+    // often already 0 by now, and an EPERM makes libthr skip dequeueing the mutex
+    // -> "Fatal error 'mutex is on list'". Just release and wake a waiter.
     auto &bk = umtxBucket(ptr);
     auto *p = static_cast<std::atomic<uint32_t> *>(ptr);
     std::unique_lock<std::mutex> lk(bk.m);
-    if ((p->load() & ~UMUTEX_CONTESTED) != t_tid)
-      return -1 /*EPERM*/;             // not the owner
+    umtxTrace(6, ptr, t_tid, p->load());
     p->store(0);                       // release
     bk.cv.notify_all();
     return 0;
@@ -239,6 +266,9 @@ int PS4ABI sys_umtx_op(void *ptr, int op, uint32_t val, void *a, void *b) {
     auto &cbk = umtxBucket(ptr);
     auto &mbk = umtxBucket(a);
     std::unique_lock<std::mutex> clk(cbk.m);
+    if (a)
+      umtxTrace(8, a, t_tid,
+                static_cast<std::atomic<uint32_t> *>(a)->load());
     if (a) {                           // release the mutex (waking its waiters)
       auto *m = static_cast<std::atomic<uint32_t> *>(a);
       if (&mbk == &cbk) {              // same bucket: already locked, don't re-lock

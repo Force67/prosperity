@@ -88,7 +88,13 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
       if (n.fetch_add(1) < 20) {
         char sym[256];
         symbolize(uc->uc_mcontext.gregs[REG_RIP], sym, sizeof(sym));
-        std::fprintf(stderr, "[assert] skipped guest int 0x41 @ %s\n", sym);
+        auto *g = uc->uc_mcontext.gregs;
+        std::fprintf(stderr,
+                     "[assert] skipped guest int 0x41 @ %s "
+                     "rsi=%lld rdx=%lld r15=%lld rax=%lld rcx=%lld\n",
+                     sym, (long long)g[REG_RSI], (long long)g[REG_RDX],
+                     (long long)g[REG_R15], (long long)g[REG_RAX],
+                     (long long)g[REG_RCX]);
       }
       uc->uc_mcontext.gregs[REG_RIP] += 2;
       return;
