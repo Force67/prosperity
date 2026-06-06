@@ -17,6 +17,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <map>
 #include <unordered_map>
 
 namespace gpu {
@@ -357,6 +358,24 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
         std::fprintf(stderr, "[drop] vs=%#lx ps=%#lx rt=%#lx %ux%u ic=%u prim=%u fetch=%#lx\n",
                      (unsigned long)vsA, (unsigned long)psA, (unsigned long)d.rtBase,
                      d.rtW, d.rtH, d.indexCount, d.primType, (unsigned long)fetch);
+    }
+    // RT-target census (DELTA_GPU_RTCENSUS): tally draw targets by size and whether
+    // they carry vertex data (drawn) or are dropped. Reveals whether the room-layer
+    // buffers the scene composite samples (e.g. 448x320, 704x448) are ever rendered
+    // into, or whether their floor draws are dropped (no vertex data resolved).
+    static const bool rtCensus = std::getenv("DELTA_GPU_RTCENSUS") != nullptr;
+    if (rtCensus && d.rtW && d.rtH) {
+      static std::map<uint32_t, std::pair<uint32_t,uint32_t>> hist;  // size -> {drawn, dropped}
+      static uint64_t cn = 0;
+      uint32_t key = (d.rtW << 16) | (d.rtH & 0xFFFF);
+      if (d.vertexData) hist[key].first++; else hist[key].second++;
+      if ((++cn % 6000) == 0) {
+        std::fprintf(stderr, "[rtcensus] cn=%lu (size: drawn/dropped):", (unsigned long)cn);
+        for (auto &kv : hist)
+          std::fprintf(stderr, " %ux%u:%u/%u", kv.first >> 16, kv.first & 0xFFFF,
+                       kv.second.first, kv.second.second);
+        std::fprintf(stderr, "\n");
+      }
     }
     if (d.vertexData)
       vk::draw(d);

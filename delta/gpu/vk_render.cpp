@@ -10,6 +10,7 @@
 
 #include <vulkan/vulkan.h>
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -952,6 +953,47 @@ RecompPipe *getRecompPipe(const DrawInfo &d) {
 
 void roomTrace(const DrawInfo &d, uint32_t nv, bool recomp);
 
+// Frame-scoped textured-draw recorder (DELTA_GPU_DUMPBLACK): captures every textured
+// draw of the current frame so endFrame's black-floor detector can flush them on the
+// exact bug frame -- identifies the floor-fill draw and whether it samples a tracked
+// RT vs a loaded/zero guest texture, deterministically.
+struct DrawRec { uint64_t rt, tex; uint32_t rtW, rtH, texW, texH; int rtTrk; long nz; uint32_t nv, inst; bool recomp; };
+std::vector<DrawRec> g_frameDrawRecs;
+int g_frameDrawRecFrame = -1;
+void recordDraw(const DrawInfo &d, uint32_t nv, bool recomp) {
+  static const bool on = std::getenv("DELTA_GPU_DUMPBLACK") != nullptr;
+  if (!on || !d.texBase) return;
+  if ((int)g.frameNum != g_frameDrawRecFrame) { g_frameDrawRecs.clear(); g_frameDrawRecFrame = g.frameNum; }
+  if (g_frameDrawRecs.size() > 800) return;
+  DrawRec r{}; r.rt = d.rtBase; r.tex = d.texBase; r.rtW = d.rtW; r.rtH = d.rtH;
+  r.texW = d.texW; r.texH = d.texH; r.rtTrk = g_rts.count(d.texBase) ? 1 : 0;
+  r.nz = -1; r.nv = nv; r.inst = d.instanceCount; r.recomp = recomp;
+  if (d.texBase >= 0x1000000000ull && d.texBase < 0x20000000000ull && d.texW && d.texH) {
+    const uint32_t *px = reinterpret_cast<const uint32_t *>(d.texBase);
+    uint64_t cnt = (uint64_t)d.texW * d.texH, step = cnt > 2048 ? cnt / 2048 : 1; r.nz = 0;
+    for (uint64_t i = 0; i < cnt; i += step) if (px[i] & 0x00FFFFFFu) r.nz++;
+  }
+  g_frameDrawRecs.push_back(r);
+}
+void flushFrameDrawRecs() {
+  // Aggregate by (rt,texW,texH,rtTrk,nz>0) so the floor-fill (many same-size draws)
+  // stands out from one-off sprites.
+  std::fprintf(stderr, "[blackframe] f%d recs=%zu:\n", g.frameNum, g_frameDrawRecs.size());
+  std::unordered_map<uint64_t, int> agg;
+  std::unordered_map<uint64_t, DrawRec> sample;
+  for (auto &r : g_frameDrawRecs) {
+    uint64_t k = (r.rt << 1) ^ ((uint64_t)r.texW << 20) ^ ((uint64_t)r.texH << 8) ^
+                 (r.rtTrk) ^ ((r.nz > 0 ? 1ull : 0ull) << 5) ^ (r.recomp ? 2ull : 0ull);
+    agg[k]++; sample[k] = r;
+  }
+  for (auto &kv : agg) {
+    DrawRec &r = sample[kv.first];
+    std::fprintf(stderr, "  x%-4d %s rt=%#lx %ux%u tex=%#lx %ux%u rtTrk=%d nz=%ld/2048 inst=%u nv=%u\n",
+                 kv.second, r.recomp ? "RC" : "HE", (unsigned long)r.rt, r.rtW, r.rtH,
+                 (unsigned long)r.tex, r.texW, r.texH, r.rtTrk, r.nz, r.inst, r.nv);
+  }
+}
+
 // Issue an indexed draw running the game's recompiled VS/PS. Returns false if the
 // draw can't be handled (the caller falls back to the heuristic path).
 bool drawRecomp(const DrawInfo &d) {
@@ -1197,16 +1239,31 @@ void roomTrace(const DrawInfo &d, uint32_t nv, bool recomp) {
     return e ? std::atoi(e) : 0; }();
   if ((int)g.frameNum < minF) return;
   n++;
-  std::fprintf(stderr, "[room] f%d %s rt=%#lx %ux%u tex=%#lx %ux%u nv=%u ic=%u blend=%#x en=%d "
-               "tmask=%#x cctrl=%#x\n",
+  // Decisive floor-source data: is the sampled texture a tracked RT (GPU-rendered)
+  // or untracked guest memory, and how many of its pixels are nonzero (a zero
+  // texture -> black floor). Lets us tell "floor draw missing" from "floor draw
+  // sampling a zero/RTT buffer".
+  int rtTracked = (d.texBase && g_rts.count(d.texBase)) ? 1 : 0;
+  long nz = -1;
+  if (d.texBase >= 0x1000000000ull && d.texBase < 0x20000000000ull && d.texW && d.texH) {
+    const uint32_t *px = reinterpret_cast<const uint32_t *>(d.texBase);
+    uint64_t cnt = (uint64_t)d.texW * d.texH, step = cnt > 4096 ? cnt / 4096 : 1;
+    nz = 0;
+    for (uint64_t i = 0; i < cnt; i += step) if (px[i] & 0x00FFFFFFu) nz++;
+  }
+  std::fprintf(stderr, "[room] f%d %s rt=%#lx %ux%u tex=%#lx %ux%u rtTrk=%d nz=%ld/4096 nv=%u ic=%u "
+               "blend=%#x en=%d tmask=%#x cctrl=%#x\n",
                g.frameNum, recomp ? "RC" : "HE", (unsigned long)d.rtBase, d.rtW, d.rtH,
-               (unsigned long)d.texBase, d.texW, d.texH, nv, d.indexCount,
+               (unsigned long)d.texBase, d.texW, d.texH, rtTracked, nz, nv, d.indexCount,
                d.blendControl, d.blendEnable ? 1 : 0, d.targetMask, d.colorControl);
 }
+
+void recordDraw(const DrawInfo &d, uint32_t nv, bool recomp);
 
 void draw(const DrawInfo &d) {
   if (!g.recording || !d.vertexData || !d.vertexStride)
     return;
+  recordDraw(d, d.vertexCount, d.recomp != nullptr);
   // Recompiled-shader path: run the game's actual VS/PS. Falls through to the
   // heuristic quad path when the draw can't be handled. On by default now that it
   // renders gameplay correctly; DELTA_GPU_RECOMP=0 forces the old heuristic path.
@@ -1543,9 +1600,29 @@ void draw(const DrawInfo &d) {
   }
 }
 
+// Wall-clock FPS report. Always on (cheap): every ~2s of presented frames, log
+// the average FPS over that window so perf changes can be measured empirically
+// (DELTA_GPU_FPS=0 silences it).
+void reportFps() {
+  static const bool off = [] { const char *e = std::getenv("DELTA_GPU_FPS"); return e && e[0] == '0'; }();
+  if (off) return;
+  using clock = std::chrono::steady_clock;
+  static auto last = clock::now();
+  static int frames = 0;
+  frames++;
+  auto now = clock::now();
+  double dt = std::chrono::duration<double>(now - last).count();
+  if (dt >= 2.0) {
+    std::fprintf(stderr, "[fps] %.1f fps (%d frames / %.2fs)\n", frames / dt, frames, dt);
+    last = now;
+    frames = 0;
+  }
+}
+
 void endFrame(uint64_t scanoutBase) {
   if (!g.ready || !g.recording) return;
   g.recording = false;
+  reportFps();
   endRegion();  // close any open region
 
   // Present the scanout RT (the flip buffer); fall back to the last RT rendered.
@@ -1620,6 +1697,29 @@ void endFrame(uint64_t scanoutBase) {
       std::memcpy(drow, srow, (size_t)rt.w * 4);
   }
   const uint8_t *pixels = flipped.data();
+  // Black-floor-triggered RT dump (DELTA_GPU_DUMPBLACK): when the presented room's
+  // centre (where the floor should be) is near-black on a real gameplay frame, dump
+  // every RT once -- captures exactly the bug frame's resources (a basement room
+  // whose floor layer is missing), deterministically, rather than guessing a frame.
+  static const bool dumpBlack = std::getenv("DELTA_GPU_DUMPBLACK") != nullptr;
+  if (dumpBlack && g.frameHadRoom && g.frameDraws > 20 && g.frameNum > 250) {
+    uint64_t cx0 = rt.w * 3 / 8, cx1 = rt.w * 5 / 8, cy0 = rt.h * 3 / 8, cy1 = rt.h * 5 / 8;
+    uint64_t sum = 0, n = 0;
+    for (uint64_t y = cy0; y < cy1; y += 4)
+      for (uint64_t x = cx0; x < cx1; x += 4) {
+        const uint8_t *px = pixels + (y * rt.w + x) * 4;
+        sum += px[0] + px[1] + px[2]; n++;
+      }
+    uint64_t avg = n ? sum / (n * 3) : 0;
+    static int blkN = 0, brightN = 0;
+    std::fprintf(stderr, "[blackdet] frame=%d centre-avg=%lu draws=%u\n", g.frameNum,
+                 (unsigned long)avg, g.frameDraws);
+    // Capture the FIRST dark-floor frame and the FIRST bright-floor frame, so the two
+    // draw lists can be diffed (which floor-layer draws does the bright room have that
+    // the dark room is missing?).
+    if (avg < 20 && blkN++ == 0) { std::fprintf(stderr, "[DARKFRAME]\n"); flushFrameDrawRecs(); dumpAllRTs(); }
+    if (avg > 60 && brightN++ == 0) { std::fprintf(stderr, "[BRIGHTFRAME]\n"); flushFrameDrawRecs(); }
+  }
   // When inspecting a specific RT size (DELTA_GPU_PRESENT_RTW/H), dump it every
   // frame to a rolling file so the last write is guaranteed to be that RT.
   if (g_dump && wantW && wantH && (int)rt.w == wantW && (int)rt.h == wantH &&
