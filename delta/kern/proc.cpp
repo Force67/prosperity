@@ -185,6 +185,20 @@ static void forceReturn0(proc &p, const char *mod, uint32_t off) {
   c[2] = 0xC3;  // ret
 }
 
+// Patch a (rdi=paramId, rsi=int* out) getter to `*out = val; return 0`.
+static void forceGetterOk(proc &p, const char *mod, uint32_t off, uint32_t val) {
+  auto m = p.getModule(base::StringRef(mod));
+  if (!m)
+    return;
+  uint8_t *c = m->getInfo().base + off;
+  utl::protectMem(reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(c) & ~0xFFFull),
+                  0x1000, utl::pageProtection::rwx);
+  c[0] = 0xC7; c[1] = 0x06;  // mov dword [rsi], imm32
+  std::memcpy(c + 2, &val, 4);
+  c[6] = 0x31; c[7] = 0xC0;  // xor eax, eax
+  c[8] = 0xC3;               // ret
+}
+
 // Boot patches applied before entering the guest, needed by every boot path
 // (modexec and the real pkg boot), not just the modexec harness.
 static void applyBootPatches(proc &p) {
@@ -232,6 +246,12 @@ static void applyBootPatches(proc &p) {
 #endif
   forceReturn0(p, "libkernel", 0x287e0);            // module-gen lib-id validator
   forceReturn0(p, "libSceAppContentUtil", 0x1a00);  // AppContent IPMI init
+  // AppContent's IPMI client is stubbed, so the real Initialize/AppParamGetInt
+  // error out and the engine's GameSystemInit (big.cpp:1298/1302) asserts. Force
+  // both to SCE_OK: Initialize (bootParam out is pre-zeroed = normal boot) and
+  // AppParamGetInt returning SKU_FLAG = FULL (3).
+  forceReturn0(p, "libSceAppContentUtil", 0x1610);     // sceAppContentInitialize
+  forceGetterOk(p, "libSceAppContentUtil", 0x1630, 3); // sceAppContentAppParamGetInt
 }
 
 void proc::start() {

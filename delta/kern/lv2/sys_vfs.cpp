@@ -26,6 +26,33 @@
 #include <utl/object_ref.h>
 
 namespace krnl {
+// Scan the (guest) stack for the first return address inside any guest module's
+// .text and print it as <module>+offset, to pin which guest code issued an open.
+// Native backend runs handlers on the guest stack. Gated; for tracing loops.
+static void printOpenCaller(const char *path) {
+  static const bool on = std::getenv("DELTA_OPEN_CALLER") != nullptr;
+  if (!on)
+    return;
+  auto *proc = proc::getActive();
+  if (!proc)
+    return;
+  auto *sp = reinterpret_cast<uintptr_t *>(__builtin_frame_address(0));
+  int printed = 0;
+  for (int i = 0; i < 768 && printed < 5; i++) {
+    uintptr_t v = sp[i];
+    for (auto &m : proc->getModuleList()) {
+      auto &mi = m->getInfo();
+      auto base = reinterpret_cast<uintptr_t>(mi.textSeg.addr);
+      if (base && v >= base && v < base + mi.textSeg.size) {
+        std::fprintf(stderr, "[open-caller] %s : %s+%#lx\n", path,
+                     mi.name.c_str(), v - base);
+        printed++;
+        break;
+      }
+    }
+  }
+}
+
 static device *make_device(const char *deviceName) {
   base::StringRef xname(deviceName);
 
@@ -55,6 +82,8 @@ int PS4ABI sys_open(const char *path, uint32_t flags, uint32_t mode) {
   static const bool vtrace = std::getenv("DELTA_VFS_TRACE") != nullptr;
   if (vtrace)
     std::fprintf(stderr, "[open] %s flags=%#x mode=%#x\n", path, flags, mode);
+  if (std::strstr(path, ".psarc"))
+    printOpenCaller(path);
 
   if (std::strncmp(path, "/dev/", 5) == 0) {
     const char *name = &path[5];
