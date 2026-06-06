@@ -162,7 +162,11 @@ void fillPadState(PadData *d) {
     // and survives in a hostile room long enough to capture a settled non-start room.
     static const bool cont = std::getenv("DELTA_PAD_EXPLORE_CONT") != nullptr;
     if (cont) {
-      uint64_t ph = (since / 40) % 4;  // circle: right, down, left, up
+      // Longer bursts (default 200 reads/dir) so Isaac actually crosses the room
+      // and transits a door, not just jitter in place. Tunable via the same
+      // DELTA_PAD_EXPLORE_READS knob.
+      uint64_t burst = walk ? walk : 200ull;
+      uint64_t ph = (since / burst) % 4;  // right, down, left, up
       if (ph==0) lx=255; else if (ph==1) ly=255; else if (ph==2) lx=0; else ly=0;
     } else if (since < walk) {
       if (dir==0) lx=255; else if (dir==1) lx=0; else if (dir==2) ly=0; else ly=255;
