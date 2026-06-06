@@ -1342,6 +1342,27 @@ void draw(const DrawInfo &d) {
       texBase = best;
     }
   }
+  // Untracked RT-sized source (DELTA_GPU_CYCLEREDIR, default on): a composite samples
+  // a buffer that's NOT one of our render targets but is RT-sized and all-zero in guest
+  // memory -- the game rendered its content into a sibling RT at a cycled address (our
+  // per-VkImage model doesn't write RT content back to guest memory). Redirect to the
+  // freshest same-size tracked RT so the content composites instead of sampling black.
+  // Opt-in: it reveals the floor for some non-tutorial rooms but the redirected sibling
+  // can be the wrong cycled buffer; the proper fix is the resource model + de-tiling.
+  static const bool cycleRedir = std::getenv("DELTA_GPU_CYCLEREDIR") != nullptr;
+  if (cycleRedir && texBase >= 0x1000000000ull && texBase < 0x20000000000ull &&
+      !g_rts.count(texBase) && d.texW >= 256 && d.texH >= 128) {
+    const uint32_t *px = reinterpret_cast<const uint32_t *>(texBase);
+    uint64_t cnt = (uint64_t)d.texW * d.texH, step = cnt > 1024 ? cnt / 1024 : 1, nz = 0;
+    for (uint64_t i = 0; i < cnt && !nz; i += step) if (px[i] & 0x00FFFFFFu) nz++;
+    if (!nz) {
+      int bestFrame = -1000000; uint64_t best = 0;
+      for (auto &kv : g_rts)
+        if (kv.second.w == d.texW && kv.second.h == d.texH && kv.second.draws > 0 &&
+            kv.second.lastFrame > bestFrame) { bestFrame = kv.second.lastFrame; best = kv.first; }
+      if (best) texBase = best;
+    }
+  }
   // Is this a render-to-texture sample (the draw samples another render target)?
   bool rtAsTex = texBase && texBase != d.rtBase && g_rts.count(texBase);
   // A genuine fullscreen composite samples a near-fullscreen source RT (the scene
