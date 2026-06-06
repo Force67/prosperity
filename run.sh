@@ -20,7 +20,7 @@ set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="$ROOT/build"                 # nix-toolchain build (consistent libstdc++/glibc)
 BIN="$BUILD_DIR/delta/main/ps4delta"
-DEFAULT_PKG="/home/captainspark/Music/PRO/dumps/The.Binding.of.Isaac.Rebirth.v1.16.PS4-CUSA00792.pkg"
+DEFAULT_PKG="/home/vince/Documents/dumps/The.Binding.of.Isaac.Rebirth.v1.16.PS4-CUSA00792.pkg"
 
 DO_BUILD=0; TRACE=0; TIMEOUT=""; LOG=""; EXTRA=()
 while [[ $# -gt 0 ]]; do
