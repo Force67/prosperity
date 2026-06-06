@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <ucontext.h>
+#include <unistd.h>
 
 #include "crash.h"
 #include "module.h"
@@ -68,6 +69,34 @@ static void backtrace(uintptr_t rbp) {
     rbp = next;
   }
 }
+
+// SIGUSR1 probe: dump the receiving thread's current guest RIP + a stack scan of
+// return addresses in loaded modules. Sent to every thread (one per /proc task)
+// to find what a wedged title's threads are blocked on. x86-native only.
+#if defined(__x86_64__)
+static void probeHandler(int, siginfo_t *, void *ucv) {
+  auto *uc = static_cast<ucontext_t *>(ucv);
+  auto *gr = uc->uc_mcontext.gregs;
+  char rip[256];
+  symbolize(gr[REG_RIP], rip, sizeof(rip));
+  std::fprintf(stderr, "[probe] tid=%ld rip=%016llx %s\n", (long)gettid(),
+               (unsigned long long)gr[REG_RIP], rip);
+  uintptr_t rsp = gr[REG_RSP];
+  if (rsp >= 0x10000) {
+    auto *sp = reinterpret_cast<uintptr_t *>(rsp);
+    int printed = 0;
+    for (int i = 0; i < 512 && printed < 6; i++) {
+      char sym[256];
+      symbolize(sp[i], sym, sizeof(sym));
+      if (std::strstr(sym, "(.text)")) {
+        std::fprintf(stderr, "[probe]   sp+%-4x %s\n", i * 8, sym);
+        printed++;
+      }
+    }
+  }
+  std::fflush(stderr);
+}
+#endif
 
 static void crashHandler(int sig, siginfo_t *si, void *ucv) {
   // Let the CPU backend handle JIT-internal signals (e.g. FEX unaligned-atomic
@@ -212,5 +241,12 @@ void installCrashHandler() {
   sigaction(SIGTRAP, &sa, nullptr);
   sigaction(SIGFPE, &sa, nullptr);
   sigaction(SIGBUS, &sa, nullptr);
+#if defined(__x86_64__)
+  struct sigaction pa = {};
+  pa.sa_sigaction = probeHandler;
+  pa.sa_flags = SA_SIGINFO | SA_RESTART;  // don't abort the thread's blocking call
+  sigemptyset(&pa.sa_mask);
+  sigaction(SIGUSR1, &pa, nullptr);
+#endif
 }
 }  // namespace krnl
