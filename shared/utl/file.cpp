@@ -91,11 +91,18 @@ public:
       return 0;
     }
 
-    uint64_t x = std::fseek(fptr, static_cast<uint32_t>(ofs), origin);
+    // 64-bit seek: the cast-to-uint32 truncation here corrupted reads past 4 GiB
+    // (e.g. files deep in a multi-GiB pkg's inner PFS image -> wrong file offset).
+#ifdef _WIN32
+    int64_t x = _fseeki64(fptr, ofs, origin);
     if (x == 0)
-      return static_cast<uint64_t>(std::ftell(fptr));
-
-    return x;
+      return static_cast<uint64_t>(_ftelli64(fptr));
+#else
+    int64_t x = fseeko(fptr, static_cast<off_t>(ofs), origin);
+    if (x == 0)
+      return static_cast<uint64_t>(ftello(fptr));
+#endif
+    return static_cast<uint64_t>(x);
   }
 
   uint64_t Tell() override { return std::ftell(fptr); }
