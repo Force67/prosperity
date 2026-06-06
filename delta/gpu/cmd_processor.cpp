@@ -545,11 +545,9 @@ void submitDcb(const void *dcb, uint32_t sizeBytes) {
       uint32_t op = pm4Opcode(hdr);
       uint32_t count = pm4Count(hdr);  // body dword count
       const uint32_t *body = &p[i + 1];
-      if (g_trace) {
-        g_opHist[op & 0xFF]++;
-        if (dumpThis)
-          std::fprintf(stderr, "[gpu]   @%-5u T3 op=%#04x count=%u\n", i, op, count);
-      }
+      g_opHist[op & 0xFF]++;
+      if (g_trace && dumpThis)
+        std::fprintf(stderr, "[gpu]   @%-5u T3 op=%#04x count=%u\n", i, op, count);
       if (i + 1 + count > words)
         break;  // truncated / desync
       switch (op) {
@@ -639,6 +637,15 @@ void submitDcb(const void *dcb, uint32_t sizeBytes) {
     std::fprintf(stderr, "[gpu] dcb done: walked %u/%u words\n", i, words);
   if (g_trace && ++g_dcbSeen <= 4)
     dumpHist();
+  // Cumulative opcode histogram dumped once deep into gameplay (DELTA_GPU_OPHIST):
+  // reveals any draw/dispatch opcode the title uses that isDraw() doesn't handle (a
+  // silently-skipped draw -- e.g. the non-tutorial room floor).
+  static const bool opHist = std::getenv("DELTA_GPU_OPHIST") != nullptr;
+  static bool opHistDumped = false;
+  if (opHist && !opHistDumped && sn >= 2000) {
+    opHistDumped = true;
+    dumpHist();
+  }
 }
 
 }  // namespace gpu
