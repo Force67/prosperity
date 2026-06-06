@@ -55,6 +55,8 @@ struct DrawInfo {
   uint32_t colorOffset = 0xFFFFFFFFu;  // byte offset of float3 color; ~0 = white
   uint64_t texBase = 0;
   uint32_t texW = 0, texH = 0;
+  uint32_t texTiling = 8;       // T# tiling_index (8/31 = linear; else tiled)
+  uint32_t texPitch = 0;        // T# surface pitch in pixels (0 = use texW)
 
   // Per-draw blend state, decoded from CB_BLEND0_CONTROL (raw dword) + whether
   // blending is enabled for color target 0. The renderer maps the GNM blend

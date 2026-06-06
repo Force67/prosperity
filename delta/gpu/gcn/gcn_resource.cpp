@@ -36,6 +36,7 @@ TImage decodeTImage(const uint32_t *p) {
   //  [1] base_hi[7:0]; min_lod[19:8]; dfmt[25:20]; nfmt[29:26]
   //  [2] width[13:0]; height[27:14]
   //  [3] ...; tiling_index[24:20]
+  //  [4] depth[12:0]; pitch[26:13]
   TImage t;
   t.base = ((static_cast<uint64_t>(p[1] & 0xFF) << 32) | p[0]) << 8;
   t.dfmt = (p[1] >> 20) & 0x3F;
@@ -43,6 +44,8 @@ TImage decodeTImage(const uint32_t *p) {
   t.width = ((p[2] & 0x3FFF)) + 1;
   t.height = ((p[2] >> 14) & 0x3FFF) + 1;
   t.tilingIdx = (p[3] >> 20) & 0x1F;
+  t.pitch = ((p[4] >> 13) & 0x3FFF) + 1;
+  if (t.pitch < t.width) t.pitch = t.width;  // fall back to width if unset
   t.valid = t.base >= 0x1000000000ull && t.base < 0x20000000000ull &&
             t.width > 1 && t.width <= 8192 && t.height > 1 && t.height <= 8192;
   return t;
@@ -123,10 +126,27 @@ std::vector<TImage> trackTextures(const uint32_t *psCode, uint32_t maxDwords,
       continue;
     TImage t = decodeTImage(&psUserData[srsrc]);
     if (t.valid) {
+      // Empirical tiling census (DELTA_GPU_TILEHIST): tally tilingIdx of every
+      // sampled texture so we can confirm which modes are linear (8/31) vs 1D
+      // micro / 2D macro tiled, and dump it periodically.
+      static const bool tileHist = std::getenv("DELTA_GPU_TILEHIST") != nullptr;
+      if (tileHist) {
+        static uint32_t hist[32] = {0};
+        static uint64_t n = 0, pitchNe = 0;
+        hist[t.tilingIdx & 31]++;
+        if (t.pitch != t.width) pitchNe++;
+        if ((++n % 4000) == 0) {
+          std::fprintf(stderr, "[tilehist] n=%lu pitch!=width=%lu:", (unsigned long)n,
+                       (unsigned long)pitchNe);
+          for (int i = 0; i < 32; i++) if (hist[i])
+            std::fprintf(stderr, " idx%d=%u", i, hist[i]);
+          std::fprintf(stderr, "\n");
+        }
+      }
       if (g_trace)
-        std::fprintf(stderr, "[gcnres] T# (inline sgpr%u) base=%#lx %ux%u "
+        std::fprintf(stderr, "[gcnres] T# (inline sgpr%u) base=%#lx %ux%u pitch=%u "
                      "dfmt=%u nfmt=%u tiling=%u\n", srsrc, (unsigned long)t.base,
-                     t.width, t.height, t.dfmt, t.nfmt, t.tilingIdx);
+                     t.width, t.height, t.pitch, t.dfmt, t.nfmt, t.tilingIdx);
       result.push_back(t);
       break;  // first texture is the sprite atlas
     }

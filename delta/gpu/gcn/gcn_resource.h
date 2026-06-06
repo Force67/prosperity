@@ -28,9 +28,10 @@ struct TImage {
   uint64_t base = 0;
   uint32_t width = 0;
   uint32_t height = 0;
+  uint32_t pitch = 0;      // surface pitch in pixels (T#.pitch+1)
   uint32_t dfmt = 0;
   uint32_t nfmt = 0;
-  uint32_t tilingIdx = 0;  // 0/1 = linear; higher = tiled
+  uint32_t tilingIdx = 0;  // 8/31 = linear; everything else is tiled (1D micro or 2D macro)
   bool valid = false;
 };
 

@@ -19,6 +19,7 @@
 
 #include "gfx/gfx.h"
 #include "gcn/gcn_translate.h"
+#include "gcn/gcn_detile.h"
 #include "shaders/quad_vert_spv.h"
 #include "shaders/quad_frag_spv.h"
 #include "shaders/tex_vert_spv.h"
@@ -516,9 +517,21 @@ bool createTexPipeline() {
   return true;
 }
 
-// Copy guest pixels (linear 32bpp RGBA) into `img` via a staging buffer.
-void uploadTexPixels(VkImage img, uint64_t base, uint32_t w, uint32_t h) {
+// Copy guest pixels (32bpp RGBA) into `img` via a staging buffer. If the source
+// surface is GCN-tiled (tiling not linear), de-tile into a linear scratch buffer
+// first so the texture isn't uploaded scrambled.
+void uploadTexPixels(VkImage img, uint64_t base, uint32_t w, uint32_t h,
+                     uint32_t tiling = 8, uint32_t pitch = 0) {
   VkDeviceSize sz = (VkDeviceSize)w * h * 4;
+  static const bool noDetile = std::getenv("DELTA_GPU_NODETILE") != nullptr;
+  std::vector<uint32_t> linear;
+  const void *srcPixels = reinterpret_cast<const void *>(base);
+  if (!noDetile && !gcn::tilingIsLinear(tiling)) {
+    linear.resize((size_t)w * h);
+    gcn::detile32(reinterpret_cast<const uint32_t *>(base), linear.data(), w, h,
+                  tiling, pitch ? pitch : w);
+    srcPixels = linear.data();
+  }
   VkBuffer stg; VkDeviceMemory stgMem; void *map;
   VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
   bi.size = sz; bi.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
@@ -531,7 +544,7 @@ void uploadTexPixels(VkImage img, uint64_t base, uint32_t w, uint32_t h) {
   vkAllocateMemory(g.device, &ba, nullptr, &stgMem);
   vkBindBufferMemory(g.device, stg, stgMem, 0);
   vkMapMemory(g.device, stgMem, 0, sz, 0, &map);
-  std::memcpy(map, reinterpret_cast<const void *>(base), sz);
+  std::memcpy(map, srcPixels, sz);
   vkUnmapMemory(g.device, stgMem);
 
   VkCommandBufferAllocateInfo ca{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
@@ -564,7 +577,8 @@ void uploadTexPixels(VkImage img, uint64_t base, uint32_t w, uint32_t h) {
 // to it. Cached by guest base; re-uploaded when the guest pixels change (the
 // room art is composed/loaded into the same buffer after the first sample, so a
 // once-only cache would serve a stale black frame).
-VkDescriptorSet getTexture(uint64_t base, uint32_t w, uint32_t h) {
+VkDescriptorSet getTexture(uint64_t base, uint32_t w, uint32_t h,
+                           uint32_t tiling = 8, uint32_t pitch = 0) {
   if (!w || !h) return VK_NULL_HANDLE;
   uint64_t hsh = texHash(base, w, h);
   // Diagnostic (DELTA_GPU_TEXDUMP): in deep gameplay, dump the first few large guest
@@ -597,7 +611,7 @@ VkDescriptorSet getTexture(uint64_t base, uint32_t w, uint32_t h) {
     TexEntry &e = it->second;
     if (e.w == w && e.h == h) {
       if (e.hash != hsh) {  // dynamic texture changed -> re-upload pixels
-        uploadTexPixels(e.image, base, w, h);
+        uploadTexPixels(e.image, base, w, h, tiling, pitch);
         e.hash = hsh;
       }
       return e.set;
@@ -622,7 +636,7 @@ VkDescriptorSet getTexture(uint64_t base, uint32_t w, uint32_t h) {
   vkAllocateMemory(g.device, &ai, nullptr, &e.mem);
   vkBindImageMemory(g.device, e.image, e.mem, 0);
 
-  uploadTexPixels(e.image, base, w, h);
+  uploadTexPixels(e.image, base, w, h, tiling, pitch);
 
   VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
   vci.image = e.image; vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
@@ -1038,7 +1052,7 @@ bool drawRecomp(const DrawInfo &d) {
   // the region switch (transitioning it to readable must happen outside a region).
   VkDescriptorSet texSet = VK_NULL_HANDLE;
   if (rp->textured && !rtAsTex) {
-    texSet = getTexture(d.texBase, d.texW, d.texH);
+    texSet = getTexture(d.texBase, d.texW, d.texH, d.texTiling, d.texPitch);
     if (!texSet) return false;
   }
 
@@ -1399,7 +1413,7 @@ void draw(const DrawInfo &d) {
   // Upload guest texture (independent of the render region) if not RT-as-texture.
   VkDescriptorSet texSet = VK_NULL_HANDLE;
   if (d.texBase && g.texPipeline && !rtAsTex)
-    texSet = getTexture(d.texBase, d.texW, d.texH);
+    texSet = getTexture(d.texBase, d.texW, d.texH, d.texTiling, d.texPitch);
 
   // Switch render target if this draw targets a different RT than the open region.
   if (g.curRt != d.rtBase) {

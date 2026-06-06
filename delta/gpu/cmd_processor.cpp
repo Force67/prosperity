@@ -204,6 +204,8 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
         d.texBase = texs[0].base;
         d.texW = texs[0].width;
         d.texH = texs[0].height;
+        d.texTiling = texs[0].tilingIdx;
+        d.texPitch = texs[0].pitch;
         d.uvData = d.vertexData;
         d.uvStride = d.vertexStride;
         // d.uvOffset was derived from the fetch shader during vertex extraction.
