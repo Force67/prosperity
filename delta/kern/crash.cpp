@@ -102,6 +102,13 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
   std::fprintf(stderr, "  r12=%016llx r13=%016llx r14=%016llx r15=%016llx\n",
                (unsigned long long)gr[REG_R12], (unsigned long long)gr[REG_R13],
                (unsigned long long)gr[REG_R14], (unsigned long long)gr[REG_R15]);
+  if (gr[REG_RIP]) {
+    auto *b = reinterpret_cast<const uint8_t *>(gr[REG_RIP]);
+    std::fprintf(stderr, "  insn bytes:");
+    for (int i = 0; i < 16; i++)
+      std::fprintf(stderr, " %02x", b[i]);
+    std::fprintf(stderr, "\n");
+  }
   backtrace(gr[REG_RBP]);
 #else
   // aarch64 host: guest x86 state lives in the FEXCore CPUState, not the host
