@@ -747,6 +747,16 @@ static void PS4ABI trace_ret(int index, int64_t ret) {
                (long long)ret, (unsigned long long)ret);
 }
 
+// DELTA_SCERR_TRACE: emitted (when set) on the trampoline's error path so we can
+// see exactly which syscall returned which errno just before a guest abort. The
+// errno is the BSD-style positive value the guest's libkernel turns into an SCE
+// error (0x80020000 | errno), e.g. errno 1 -> 0x80020001.
+static void PS4ABI trace_syscall_err(uint32_t sid, uint32_t err) {
+  const char *name = syscall_getname(sid);
+  std::fprintf(stderr, "[syscallerr] %u %s -> errno %u (SCE %#010x)\n", sid,
+               name ? name : "?", err, 0x80020000u | err);
+}
+
 static uintptr_t emit_calltrace(const char *name, uint32_t sid,
                                 const void *dest) {
   struct callTrace : Xbyak::CodeGenerator {
@@ -825,9 +835,10 @@ extern "C" uint32_t krnl_syscall_errno(uint64_t raw) {
 // One-time trampoline per handler: call it with the guest's arg registers
 // untouched, then set/clear the carry flag and normalise rax per the convention
 // above. Replaces the bare `call handler` so the guest sees faithful errors.
-static uintptr_t emit_bsd_trampoline(const void *handler) {
+static uintptr_t emit_bsd_trampoline(const void *handler, uint32_t sid,
+                                     bool trace) {
   struct bsdRet : Xbyak::CodeGenerator {
-    bsdRet(uintptr_t handler) {
+    bsdRet(uintptr_t handler, uint32_t sid, bool trace) {
       push(rbx);            // save guest rbx; rsp now 16-aligned for the calls
       mov(rax, handler);
       call(rax);            // handler(rdi,rsi,rdx,rcx,r8,r9) -> rax (args intact)
@@ -838,6 +849,17 @@ static uintptr_t emit_bsd_trampoline(const void *handler) {
       test(eax, eax);
       Xbyak::Label ok;
       jz(ok);
+      // error path: eax = positive errno, rsp 16-aligned (after the call ret).
+      if (trace) {
+        push(rax);          // save errno (rsp now misaligned)
+        mov(esi, eax);      // arg2 = errno
+        mov(edi, sid);      // arg1 = syscall id
+        sub(rsp, 8);        // realign for the call
+        mov(rax, reinterpret_cast<uintptr_t>(&trace_syscall_err));
+        call(rax);
+        add(rsp, 8);
+        pop(rax);           // restore errno
+      }
       pop(rbx);
       stc();                // error: rax already = positive errno
       ret();
@@ -848,7 +870,7 @@ static uintptr_t emit_bsd_trampoline(const void *handler) {
       ret();
     }
   };
-  auto *gen = new bsdRet(reinterpret_cast<uintptr_t>(handler));
+  auto *gen = new bsdRet(reinterpret_cast<uintptr_t>(handler), sid, trace);
   return reinterpret_cast<uintptr_t>(gen->getCode());
 }
 #endif // DELTA_BACKEND_NATIVE
@@ -865,15 +887,20 @@ uintptr_t lv2_get(uint32_t sid) {
 #if defined(DELTA_BACKEND_NATIVE)
   // Wrap each handler once in a trampoline that applies the BSD carry/errno
   // return convention. Cache by handler so syscall ids that share a handler
-  // (and the many duplicate sites in the guest) reuse a single stub.
+  // (and the many duplicate sites in the guest) reuse a single stub. When
+  // DELTA_SCERR_TRACE is set the stub also logs its errno on the error path, so
+  // key the cache by sid instead (each id reports its own name).
+  static const bool traceErr = std::getenv("DELTA_SCERR_TRACE") != nullptr;
   static std::mutex trMutex;
-  static std::unordered_map<const void *, uintptr_t> trCache;
+  static std::unordered_map<uint64_t, uintptr_t> trCache;
   std::lock_guard<std::mutex> lk(trMutex);
-  auto it = trCache.find(handler);
+  uint64_t key = traceErr ? static_cast<uint64_t>(sid)
+                          : reinterpret_cast<uint64_t>(handler);
+  auto it = trCache.find(key);
   if (it != trCache.end())
     return it->second;
-  uintptr_t tr = emit_bsd_trampoline(handler);
-  trCache.emplace(handler, tr);
+  uintptr_t tr = emit_bsd_trampoline(handler, sid, traceErr);
+  trCache.emplace(key, tr);
   return tr;
 #else
   return reinterpret_cast<uintptr_t>(handler);

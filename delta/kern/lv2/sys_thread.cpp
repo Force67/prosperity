@@ -193,6 +193,72 @@ int PS4ABI sys_umtx_op(void *ptr, int op, uint32_t val, void *a, void *b) {
     bk.cv.notify_all();
     return 0;
   }
+  // Kernel-arbitrated mutex (UMUTEX_PRIO_INHERIT/PROTECT). libthr hands the whole
+  // lock/unlock to the kernel here instead of the userland CAS + MUTEX_WAIT path;
+  // *ptr is the umutex m_owner word (low 31 bits = owner tid, bit31 = contested).
+  // Returning 0 without actually arbitrating lets two threads both "own" one mutex
+  // (the Fios2 worker pool: tid A locks, tid B also "locks", then B's cond_wait
+  // owner check [*mutex+0x28]==curthread fails -> EPERM 0x80020001). So enforce
+  // real mutual exclusion on the owner word under the bucket lock.
+  case 4:    // UMTX_OP_MUTEX_TRYLOCK
+  case 5: {  // UMTX_OP_MUTEX_LOCK
+    auto &bk = umtxBucket(ptr);
+    auto *p = static_cast<std::atomic<uint32_t> *>(ptr);
+    const uint32_t self = t_tid;
+    std::unique_lock<std::mutex> lk(bk.m);
+    for (;;) {
+      uint32_t owner = p->load();
+      uint32_t held = owner & ~UMUTEX_CONTESTED;
+      if (held == 0) {                 // free: claim it. Keep CONTESTED set so the
+        p->store(self | UMUTEX_CONTESTED);  // unlock is kernel-arbitrated (op 6) and
+        return 0;                      // wakes any other waiters still blocked here.
+      }
+      if (held == self)                // already ours (libthr counts recursion)
+        return 0;
+      if (op == 4)                     // trylock: don't block
+        return -16 /*EBUSY*/;
+      p->store(owner | UMUTEX_CONTESTED);  // mark so the unlocker wakes us
+      bk.cv.wait_for(lk, 1s);          // re-check on wake / safety timeout
+    }
+  }
+  case 6: { // UMTX_OP_MUTEX_UNLOCK
+    auto &bk = umtxBucket(ptr);
+    auto *p = static_cast<std::atomic<uint32_t> *>(ptr);
+    std::unique_lock<std::mutex> lk(bk.m);
+    if ((p->load() & ~UMUTEX_CONTESTED) != t_tid)
+      return -1 /*EPERM*/;             // not the owner
+    p->store(0);                       // release
+    bk.cv.notify_all();
+    return 0;
+  }
+  // Kernel condvar. CV_WAIT atomically releases the umutex (uaddr1=a) and sleeps
+  // on the ucond (ptr) until signaled; libthr re-locks the mutex (op 5) on return.
+  // Hold the cond bucket across the mutex release so a concurrent signal can't be
+  // lost between unlock and sleep.
+  case 8: { // UMTX_OP_CV_WAIT: ptr=ucond, a=umutex, b=timespec
+    auto &cbk = umtxBucket(ptr);
+    auto &mbk = umtxBucket(a);
+    std::unique_lock<std::mutex> clk(cbk.m);
+    if (a) {                           // release the mutex (waking its waiters)
+      auto *m = static_cast<std::atomic<uint32_t> *>(a);
+      if (&mbk == &cbk) {              // same bucket: already locked, don't re-lock
+        m->store(0);
+      } else {
+        std::lock_guard<std::mutex> mlk(mbk.m);
+        m->store(0);
+      }
+      mbk.cv.notify_all();
+    }
+    cbk.cv.wait_for(clk, 1s);
+    return 0;
+  }
+  case 9:    // UMTX_OP_CV_SIGNAL
+  case 10: { // UMTX_OP_CV_BROADCAST
+    auto &bk = umtxBucket(ptr);
+    std::lock_guard<std::mutex> lk(bk.m);
+    bk.cv.notify_all();                // waiters re-check their predicate
+    return 0;
+  }
   default: {
     static std::atomic<uint32_t> seen[32]{};
     if (op >= 0 && op < 32 && seen[op].fetch_add(1) == 0)
