@@ -9,7 +9,13 @@ TBD
 TBD
 
 ## Requirements
-* __System__: Get yourself a proper OS, like Linux. Or Windows 11. 
-* __Processor__: a x86-64 CPU with sse4.2 and bm1 instruction support.
-* __Memory__: more than 8 GB of RAM.
+
+### On linux
+* __Processor__: Something made in the last 10 years, with avx, sse4.2 and bm1 instruction support.
+* __RAM__: 16 GB of RAM (8 may work, depending on the type of game you want to run).
+* __Graphics__: a GPU with support for Vulkan 1.4+.
+
+### On android
+* __Processor__: Preferablly something new, like one of those fancy new snapdragons.
+* __RAM__: 12 GB of RAM (8 may work, depending on the type of game you want to run).
 * __Graphics__: a GPU with support for Vulkan 1.4+.
