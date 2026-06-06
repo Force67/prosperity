@@ -7,6 +7,7 @@
 #include <cstring>
 #include "gc_dev.h"
 #include "kern/proc.h"
+#include "kern/lv2/sys_event.h"
 #include "kern/lv2/sys_mem.h"
 
 // LLE GPU submit bridge (delta_runtime). The real libSceGnmDriver.sprx submits
@@ -133,6 +134,7 @@ int32_t gcDevice::ioctl(uint32_t cmd, void *data) {
     }
     completeFlipLabels(a->flipPtr);
     prosperity_gc_flip(-1, 0);
+    noteFlip();  // advance the flip count + post the display event for pacing
     return 0;
   }
   }

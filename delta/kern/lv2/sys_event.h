@@ -86,6 +86,15 @@ private:
 // this so it needn't know which equeue a flip event landed on.
 void triggerAllEqueues(int64_t ident, int16_t filter, int64_t data);
 
+// Count one submitted flip (LLE gc submit-and-flip / HLE SubmitFlip) and post a
+// display event carrying the new flip count. The engine's render-frame pacing
+// reads the EVFILT_DISPLAY event's data>>16 as "how many frames have flipped",
+// so it must track real flips, not the free-running 60 Hz vblank tick (which
+// races ahead while the title is still loading -> GetRenderFrameParams asks for
+// a frame far beyond the last produced -> "frame number out of range" halt).
+void noteFlip();
+uint64_t flipCount();
+
 int PS4ABI sys_kqueue();
 int PS4ABI sys_kqueueex(const char *name, int flags);
 int PS4ABI sys_kevent(int kq, const kevent_t *changelist, int nchanges,

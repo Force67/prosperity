@@ -30,6 +30,11 @@ static constexpr int16_t kEVFILT_DISPLAY = -13;
 static constexpr int16_t kEVFILT_VIDEOOUT = -14;
 static std::atomic<bool> g_vblankStarted{false};
 
+// Flips the title has actually submitted. The display event's data>>16 carries
+// this (not the vblank tick) so render-frame pacing tracks real flips.
+static std::atomic<uint64_t> g_flipCount{0};
+uint64_t flipCount() { return g_flipCount.load(); }
+
 // Start the 60 Hz EVFILT_DISPLAY pump once, on the first vblank registration, so
 // the timer thread only runs when something waits on it.
 static void startVblankPump() {
@@ -42,21 +47,41 @@ static void startVblankPump() {
     for (;;) {
       std::this_thread::sleep_for(std::chrono::microseconds(16667));  // ~60 Hz
       ++count;
-      // Replicate the data the kernel's EVFILT_DISPLAY filter (filt_dceevent ->
-      // dce_ih_event) hands the title:
-      //   bits 16..63 = the vblank counter (read as data>>16; must advance),
-      //   bits 12..15 = a 4-bit per-event sequence (1..14) the title polls to
-      //                 detect a NEW event,
-      //   bits  0..11 = a TSC nonce.
-      // Packing only count<<16 left bits 12..15 = 0, so the title woke every tick
-      // but saw "no new event".
+      // Event data layout (read as data>>16 for the counter, bits 12..15 a 1..14
+      // per-event sequence the title polls to detect a NEW event, bits 0..11 a
+      // TSC nonce). Packing only count<<16 left bits 12..15 = 0, so the title
+      // woke every tick but saw "no new event".
       uint64_t seq = (count - 1) % 14 + 1;                    // 1..14
       uint64_t tsc = static_cast<uint64_t>(__builtin_ia32_rdtsc()) & 0xFFF;
-      int64_t data = static_cast<int64_t>((count << 16) | (seq << 12) | tsc);
-      triggerAllEqueues(-1, kEVFILT_DISPLAY, data);
-      triggerAllEqueues(-1, kEVFILT_VIDEOOUT, data);
+      // Vblank (-14): a free-running tick for vblank waiters / frame timing.
+      int64_t vdata = static_cast<int64_t>((count << 16) | (seq << 12) | tsc);
+      triggerAllEqueues(-1, kEVFILT_VIDEOOUT, vdata);
+      // Flip (-13): the engine's flip handler reads data>>16 as the index of the
+      // last flipped frame and asserts unless the sim has produced it. Never post
+      // it before the first real flip (during loading the last produced frame is
+      // -1, so any flip event is "out of range"); once flipping it rides the real
+      // flip count and noteFlip already posts each flip immediately.
+      uint64_t flips = g_flipCount.load();
+      if (flips > 0) {
+        uint64_t idx = flips - 1;
+        int64_t fdata =
+            static_cast<int64_t>((idx << 16) | ((idx % 14 + 1) << 12) | tsc);
+        triggerAllEqueues(-1, kEVFILT_DISPLAY, fdata);
+      }
     }
   }).detach();
+}
+
+void noteFlip() {
+  uint64_t idx = g_flipCount.fetch_add(1);  // index of the flip that just completed
+  // Post the flip (-13) event immediately so a thread blocked waiting for this
+  // flip wakes now instead of on the next 60 Hz pump tick. data>>16 is the index
+  // of the LAST completed flip (not the count): the engine's flip handler then
+  // processes frames up to and including that index, which the sim has produced.
+  uint64_t seq = idx % 14 + 1;
+  uint64_t tsc = static_cast<uint64_t>(__builtin_ia32_rdtsc()) & 0xFFF;
+  int64_t data = static_cast<int64_t>((idx << 16) | (seq << 12) | tsc);
+  triggerAllEqueues(-1, kEVFILT_DISPLAY, data);
 }
 
 equeue::equeue(proc *p, const char *nm) : kObject(p, oType::equeue) {

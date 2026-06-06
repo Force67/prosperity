@@ -14,6 +14,7 @@
 
 #include "dce_dev.h"
 #include "kern/proc.h"
+#include "kern/lv2/sys_event.h"
 #include "kern/lv2/sys_mem.h"
 
 namespace krnl {
@@ -183,7 +184,7 @@ int32_t dceDevice::ioctl(uint32_t cmd, void *data) {
         auto *o = reinterpret_cast<uint8_t *>(s[2]);
         std::memset(o, 0, 0x48);
         uint64_t now = nowNs();
-        *reinterpret_cast<uint64_t *>(o + 0x10) = vblankCount();  // count
+        *reinterpret_cast<uint64_t *>(o + 0x10) = flipCount();    // count
         *reinterpret_cast<uint64_t *>(o + 0x18) = now;            // processTime
         *reinterpret_cast<uint64_t *>(o + 0x20) = now * 16 / 10;  // tsc (1.6GHz)
         *reinterpret_cast<uint64_t *>(o + 0x38) = now * 16 / 10;  // submitTsc
