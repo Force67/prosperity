@@ -2,6 +2,10 @@ name: CI
 
 on: [push]
 
+env:
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
+  CCACHE_MAXSIZE: 2G
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -10,14 +14,49 @@ jobs:
     - uses: actions/checkout@v4
       with:
         submodules: recursive
-    - name: Install toolchain
-      run: sudo apt-get update && sudo apt-get install -y cmake ninja-build
+
+    # flake.nix pins Vulkan + SDL3 + shaderc (none packaged on ubuntu-latest), so
+    # build inside the dev shell. keep-outputs/keep-env-derivations stop the GC
+    # from dropping the dev-shell closure before it gets cached.
+    - uses: DeterminateSystems/nix-installer-action@main
+      with:
+        extra-conf: |
+          keep-env-derivations = true
+          keep-outputs = true
+
+    # Cache the whole nix store (toolchain + Vulkan/SDL3/shaderc/clang/mesa) keyed
+    # on the flake; restored on every run, only rebuilt when the flake changes.
+    - name: Cache nix store
+      uses: nix-community/cache-nix-action@v7
+      with:
+        primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock') }}
+        restore-prefixes-first-match: nix-${{ runner.os }}-
+        gc-max-store-size-linux: 5G
+        purge: true
+        purge-prefixes: nix-${{ runner.os }}-
+        purge-created: 0
+        purge-last-accessed: P1DT12H
+        purge-primary-key: never
+
+    # ccache persists compiled objects across runs. The build dir itself is not
+    # cached, so a warm ccache is what makes the vendored deps + our sources fast.
+    - name: Cache ccache
+      uses: actions/cache@v4
+      with:
+        path: ${{ github.workspace }}/.ccache
+        key: ccache-${{ runner.os }}-${{ github.sha }}
+        restore-keys: ccache-${{ runner.os }}-
+
     - name: Configure
-      run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+      run: nix develop --command cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
     - name: Build
-      run: cmake --build build
+      run: nix develop --command cmake --build build
     - name: Test
-      run: ctest --test-dir build --output-on-failure
+      run: nix develop --command ctest --test-dir build --output-on-failure
+    - name: ccache stats
+      if: always()
+      run: nix develop --command ccache -s
+
     - uses: actions/upload-artifact@v4
       with:
         name: ps4delta

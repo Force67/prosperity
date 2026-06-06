@@ -59,6 +59,7 @@
             cmake
             ninja
             pkg-config
+            ccache          # compiler cache (CI warms it across runs)
             clang_18
             clang-tools
             gdb
