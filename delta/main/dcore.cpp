@@ -7,6 +7,7 @@
  */
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <set>
@@ -35,14 +36,58 @@ namespace {
 // Bridges a PkgFilesystem into the kernel VFS as an on-demand virtual mount.
 class PkgProvider : public krnl::vfs::VirtualProvider {
 public:
-  explicit PkgProvider(const base::String &path) : fs_(path) {}
+  explicit PkgProvider(const base::String &path) : fs_(path) {
+    if (const char *sub = std::getenv("DELTA_PKG_LS")) {
+      std::vector<std::string> all;
+      fs_.paths(all);
+      for (const auto &p : all)
+        if (sub[0] == '1' || p.find(sub) != std::string::npos)
+          std::fprintf(stderr, "[pkg] %s\n", p.c_str());
+    }
+    if (const char *want = std::getenv("DELTA_PKG_DUMP")) {
+      if (const auto *node = fs_.find(want)) {
+        std::vector<uint8_t> buf(node->size);
+        int64_t n = fs_.read(*node, buf.data(), 0, node->size);
+        const char *base = std::strrchr(want, '/');
+        std::string out = std::string("/tmp/") + (base ? base + 1 : want);
+        if (FILE *f = std::fopen(out.c_str(), "wb")) {
+          std::fwrite(buf.data(), 1, n > 0 ? n : 0, f);
+          std::fclose(f);
+          std::fprintf(stderr, "[pkg] dumped %s -> %s (%lld bytes)\n", want,
+                       out.c_str(), (long long)n);
+        }
+      } else {
+        std::fprintf(stderr, "[pkg] DUMP: %s not found\n", want);
+      }
+    }
+  }
   bool valid() const { return fs_.valid(); }
 
   std::unique_ptr<krnl::vfs::VirtualFile> open(const char *rel) override {
+    maybeDump();
     const auto *node = fs_.find(rel);
     if (!node)
       return nullptr;
     return std::make_unique<PkgFile>(&fs_, *node);
+  }
+  void maybeDump() {
+    static bool done = false;
+    const char *want = std::getenv("DELTA_PKG_DUMP");
+    if (done || !want)
+      return;
+    done = true;
+    if (const auto *node = fs_.find(want)) {
+      std::vector<uint8_t> buf(node->size);
+      int64_t n = fs_.read(*node, buf.data(), 0, node->size);
+      const char *base = std::strrchr(want, '/');
+      std::string out = std::string("/tmp/") + (base ? base + 1 : want);
+      if (FILE *f = std::fopen(out.c_str(), "wb")) {
+        std::fwrite(buf.data(), 1, n > 0 ? n : 0, f);
+        std::fclose(f);
+        std::fprintf(stderr, "[pkg] dumped %s -> %s (%lld bytes)\n", want,
+                     out.c_str(), (long long)n);
+      }
+    }
   }
   bool stat(const char *rel, int64_t &size) override {
     const auto *node = fs_.find(rel);

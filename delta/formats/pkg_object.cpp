@@ -477,6 +477,15 @@ struct PkgImpl {
           std::string nm(reinterpret_cast<const char *>(d.data() + o + 16), nl);
           if (ty == 2 && ch < ino.size()) {
             files[pre + "/" + nm] = {ino[ch].size, ino[ch].start};
+            if (const char *dbg = std::getenv("DELTA_PFS_DBG"))
+              if (nm.find(dbg) != std::string::npos)
+                std::fprintf(stderr,
+                             "[pfs] %s/%s size=%llu start=%u blocks=%u "
+                             "blocks*bs=%llu bs=%u\n",
+                             pre.c_str(), nm.c_str(),
+                             (unsigned long long)ino[ch].size, ino[ch].start,
+                             ino[ch].blocks,
+                             (unsigned long long)ino[ch].blocks * bs, bs);
           } else if (ty == 3 && nm != "." && nm != "..") {
             walk(ch, pre + "/" + nm, r, bs);
           }

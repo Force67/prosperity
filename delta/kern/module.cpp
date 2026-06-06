@@ -97,6 +97,17 @@ bool smodule::fromVfs(const base::String &guestPath) {
     return false;
   }
 
+  if (const char *dd = std::getenv("DELTA_DUMP_MODULE")) {
+    if (guestPath.find(dd) != base::String::npos) {
+      if (FILE *f = std::fopen("/tmp/dumped_module.elf", "wb")) {
+        std::fwrite(src, 1, srcSize, f);
+        std::fclose(f);
+        LOG_INFO("dumped decrypted {} -> /tmp/dumped_module.elf ({} bytes)",
+                 guestPath.c_str(), srcSize);
+      }
+    }
+  }
+
   auto out = base::MakeUnique<uint8_t[]>(static_cast<mem_size>(srcSize));
   std::memcpy(out.Get_UseOnlyIfYouKnowWhatYouareDoing(), src, srcSize);
   return fromMem(std::move(out));

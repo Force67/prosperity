@@ -52,7 +52,9 @@ int PS4ABI sys_open(const char *path, uint32_t flags, uint32_t mode) {
   if (!path)
     return -SysError::eINVAL;
 
-  std::fprintf(stderr, "[open] %s flags=%#x mode=%#x\n", path, flags, mode);
+  static const bool vtrace = std::getenv("DELTA_VFS_TRACE") != nullptr;
+  if (vtrace)
+    std::fprintf(stderr, "[open] %s flags=%#x mode=%#x\n", path, flags, mode);
 
   if (std::strncmp(path, "/dev/", 5) == 0) {
     const char *name = &path[5];
@@ -84,14 +86,21 @@ int PS4ABI sys_open(const char *path, uint32_t flags, uint32_t mode) {
 
   // Regular file: resolve through the VFS (host + virtual mounts).
   utl::File vf = vfs::openRead(path);
-  if (!vf.Exists())
+  if (!vf.Exists()) {
+    if (vtrace)
+      std::fprintf(stderr, "[open]   -> ENOENT %s\n", path);
     return -SysError::eNOENT;
+  }
 
+  int64_t fsize = vf.GetSize();
   auto *file = new fileDevice(proc::getActive());
   if (!file->adopt(std::move(vf))) {
     file->releaseHandle();
     return -SysError::eNOENT;
   }
+  if (vtrace)
+    std::fprintf(stderr, "[open]   -> fd=%u size=%lld %s\n", file->handle(),
+                 (long long)fsize, path);
   return file->handle();
 }
 
