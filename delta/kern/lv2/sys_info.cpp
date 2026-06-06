@@ -16,8 +16,49 @@
 
 #include "../proc.h"
 #include "error_table.h"
+#include <cstdio>
+
+#if defined(DELTA_BACKEND_NATIVE)
+#include <ctime>
+#endif
 
 namespace krnl {
+
+// The guest's TSC. machdep.tsc_freq must equal the rate the guest's `rdtsc`
+// actually advances, or every libkernel timer (frame pacing, timeouts: a guest
+// `wait until rdtsc-start >= seconds*tsc_freq` loop) runs at the wrong speed.
+// The PS4's invariant TSC is 1.6 GHz, but on the native x86 backend the guest's
+// rdtsc IS the host's rdtsc, which ticks at the host TSC rate (often 2-4 GHz) --
+// reporting 1.6 GHz there made all guest timers run host_rate/1.6 too fast.
+// rdtsc can't be cheaply rescaled in the lifter (it's a 2-byte op: no room for a
+// call, and trapping it per use is far too slow for busy-wait loops), so instead
+// report the real host rate (calibrated once) so the two agree. On FEX/aarch64
+// the guest rdtsc is emulated by the JIT, so keep the PS4-native 1.6 GHz.
+static uint64_t guestTscFreq() {
+#if defined(DELTA_BACKEND_NATIVE)
+  static const uint64_t hz = [] {
+    auto nowNs = [] {
+      timespec t{};
+      clock_gettime(CLOCK_MONOTONIC, &t);
+      return static_cast<uint64_t>(t.tv_sec) * 1000000000ull + t.tv_nsec;
+    };
+    uint64_t t0 = nowNs(), c0 = __builtin_ia32_rdtsc();
+    timespec s{0, 20 * 1000 * 1000};  // ~20 ms; actual elapsed is measured below
+    nanosleep(&s, nullptr);
+    uint64_t dt = nowNs() - t0, dc = __builtin_ia32_rdtsc() - c0;
+    if (dt == 0)
+      return uint64_t(1600000000);
+    uint64_t f = static_cast<uint64_t>(static_cast<double>(dc) * 1e9 /
+                                       static_cast<double>(dt) + 0.5);
+    std::fprintf(stderr, "[tsc] calibrated host TSC = %llu Hz (rdtsc==tsc_freq)\n",
+                 (unsigned long long)f);
+    return f;
+  }();
+  return hz;
+#else
+  return uint64_t(1600000000);  // FEX emulates rdtsc; PS4 invariant TSC rate
+#endif
+}
 int sys_budget_get_ptype();
 
 moduleInfo *called_in(void *addr);
@@ -134,14 +175,13 @@ int PS4ABI sys_sysctl(int *name, uint32_t namelen, void *oldp, size_t *oldlenp,
     return 0;
   }
 
-  // answer machdep.tsc_freq (synthetic oid {0x1337,5}). The base PS4 "Liverpool"
-  // APU's Jaguar cores run at exactly 1.6 GHz (16x the 100 MHz reference clock),
-  // and the invariant TSC ticks at that rate. libkernel's sceKernelGetTscFrequency
-  // reads this and divides by it during every module's CRT init, so report the
-  // real 1.6 GHz rather than an approximation.
+  // answer machdep.tsc_freq (synthetic oid {0x1337,5}). libkernel's
+  // sceKernelGetTscFrequency reads this and uses it to convert rdtsc deltas to
+  // time, so it MUST match the rate the guest's rdtsc actually advances at (see
+  // guestTscFreq): the host TSC rate on native, 1.6 GHz on FEX.
   else if (name[0] == 0x1337 && name[1] == 5 && namelen == 2) {
     if (oldp && oldlenp && *oldlenp >= sizeof(uint64_t)) {
-      *reinterpret_cast<uint64_t *>(oldp) = 1600000000ull; // 1.6 GHz
+      *reinterpret_cast<uint64_t *>(oldp) = guestTscFreq();
       *oldlenp = sizeof(uint64_t);
     }
     return 0;

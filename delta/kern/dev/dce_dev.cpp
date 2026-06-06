@@ -36,6 +36,16 @@ static uint64_t vblankCount() {
   auto ns = duration_cast<nanoseconds>(steady_clock::now() - start).count();
   return static_cast<uint64_t>(ns / 16666667);  // ~59.94 Hz
 }
+// A TSC value in the same domain/rate as the guest's rdtsc, so flip/vblank-status
+// tsc fields stay comparable with rdtsc the title reads itself. On native that's
+// the raw host TSC; on FEX use the 1.6 GHz wall clock the emulated rdtsc matches.
+static uint64_t guestTsc() {
+#if defined(DELTA_BACKEND_NATIVE)
+  return __builtin_ia32_rdtsc();
+#else
+  return nowNs() * 16 / 10;  // ns -> 1.6 GHz ticks
+#endif
+}
 
 static bool g_dceTrace() {
   static const bool on = std::getenv("DELTA_DCE_TRACE") != nullptr;
@@ -186,8 +196,8 @@ int32_t dceDevice::ioctl(uint32_t cmd, void *data) {
         uint64_t now = nowNs();
         *reinterpret_cast<uint64_t *>(o + 0x10) = flipCount();    // count
         *reinterpret_cast<uint64_t *>(o + 0x18) = now;            // processTime
-        *reinterpret_cast<uint64_t *>(o + 0x20) = now * 16 / 10;  // tsc (1.6GHz)
-        *reinterpret_cast<uint64_t *>(o + 0x38) = now * 16 / 10;  // submitTsc
+        *reinterpret_cast<uint64_t *>(o + 0x20) = guestTsc();     // tsc
+        *reinterpret_cast<uint64_t *>(o + 0x38) = guestTsc();     // submitTsc
         // flipPendingNum / gcQueueNum / currentBuffer left 0.
       }
       return 0;
@@ -203,7 +213,7 @@ int32_t dceDevice::ioctl(uint32_t cmd, void *data) {
         uint64_t now = nowNs();
         *reinterpret_cast<uint64_t *>(o + 0x00) = vblankCount();  // count
         *reinterpret_cast<uint64_t *>(o + 0x08) = now;            // processTime
-        *reinterpret_cast<uint64_t *>(o + 0x10) = now * 16 / 10;  // tsc (1.6GHz)
+        *reinterpret_cast<uint64_t *>(o + 0x10) = guestTsc();     // tsc
         o[0x18] = 0;                                              // flags
       }
       return 0;
