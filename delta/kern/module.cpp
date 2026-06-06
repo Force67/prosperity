@@ -318,6 +318,13 @@ bool smodule::mapImage() {
   if (!info.base)
     return false;
 
+  // The lifter emits a per-fs-access stub into the rip-zone. The linear-sweep
+  // resync lifts the whole segment (not just the prefix before the first rodata
+  // blob), so a large module can need far more than the old fixed 5 KiB. Size the
+  // zone to the code (a generous bound: stubs are ~32 B, fs accesses are sparser
+  // than that), capped well under the 8 GiB module slot / rel32 reach.
+  info.ripZoneSize = std::max<size_t>(info.ripZoneSize, codeSize);
+
   // immediately take module memory + rip Zone memory
   utl::allocMem(info.base, codeSize + info.ripZoneSize, utl::pageProtection::w,
                 utl::allocationType::commit);
@@ -348,11 +355,12 @@ bool smodule::mapImage() {
   // in place so raw guest x86-64 runs natively. On aarch64 the FEXCore JIT
   // handles all three, so the image is left byte-for-byte intact.
 #if defined(DELTA_BACKEND_NATIVE)
+  uint8_t *ripEnd = info.base + codeSize + info.ripZoneSize;
   for (uint16_t i = 0; i < elf->phnum; i++) {
     const auto *s = &segments[i];
     uint32_t perm = s->flags & (PF_R | PF_W | PF_X);
     if (s->type == PT_LOAD && perm == (PF_R | PF_X)) {
-      runtime::codeLift lift(info.ripZone);
+      runtime::codeLift lift(info.ripZone, ripEnd);
       LOG_ASSERT(lift.init());
 
       /*TODO: we should really introduce a cache here*/

@@ -7,6 +7,7 @@
  */
 
 #define _GNU_SOURCE
+#include <atomic>
 #include <csignal>
 #include <cstdint>
 #include <cstdio>
@@ -73,6 +74,27 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
   // SIGBUS) and resume; only a genuinely fatal fault falls through to the dump.
   if (cpu::tryHandleJitSignal(sig, si, ucv))
     return;
+
+#if defined(__x86_64__)
+  // Guest SDK assert/__debugbreak is `int 0x41` (cd 41); in userspace it raises
+  // SIGSEGV (#GP). Real hardware with no kernel debugger attached just steps over
+  // it and the assert handler's caller continues, so do the same: skip the 2-byte
+  // instruction and resume. Otherwise every guest assertion would kill the boot.
+  if (sig == SIGSEGV && ucv) {
+    auto *uc = static_cast<ucontext_t *>(ucv);
+    auto *ip = reinterpret_cast<const uint8_t *>(uc->uc_mcontext.gregs[REG_RIP]);
+    if (ip && ip[0] == 0xcd && ip[1] == 0x41) {
+      static std::atomic<int> n{0};
+      if (n.fetch_add(1) < 20) {
+        char sym[256];
+        symbolize(uc->uc_mcontext.gregs[REG_RIP], sym, sizeof(sym));
+        std::fprintf(stderr, "[assert] skipped guest int 0x41 @ %s\n", sym);
+      }
+      uc->uc_mcontext.gregs[REG_RIP] += 2;
+      return;
+    }
+  }
+#endif
 
   char fault[256];
   symbolize((uintptr_t)si->si_addr, fault, sizeof(fault));

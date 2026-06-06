@@ -19,7 +19,7 @@ namespace runtime {
 // convert unsupported code
 class codeLift {
 public:
-  codeLift(uint8_t *&rip);
+  codeLift(uint8_t *&rip, uint8_t *ripEnd = nullptr);
   ~codeLift();
 
   bool init();
@@ -32,5 +32,6 @@ private:
   csh handle = 0;
   cs_insn *insn = nullptr;
   uint8_t *&ripPointer;
+  uint8_t *ripEnd = nullptr;  // end of the rip-zone; stop emitting stubs past it
 };
 }

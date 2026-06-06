@@ -70,7 +70,8 @@ static void printOpInfo(const cs_x86_op &op) {
               op.mem.base);
 }
 
-codeLift::codeLift(uint8_t *&rip) : ripPointer(rip) {}
+codeLift::codeLift(uint8_t *&rip, uint8_t *ripEndIn)
+    : ripPointer(rip), ripEnd(ripEndIn) {}
 
 codeLift::~codeLift() {
   if (handle) {
@@ -105,7 +106,21 @@ bool codeLift::transform(uint8_t *data, size_t size, uint64_t base) {
   insn = cs_malloc(handle);
 
   const uint8_t *codePtr = data; // iterator
-  while (cs_disasm_iter(handle, &codePtr, &size, &base, insn)) {
+  // Executable PT_LOAD segments interleave code with rodata (strings, constants,
+  // jump tables) that capstone can't decode. A plain linear sweep stops dead at
+  // the first such blob, leaving every later instruction un-lifted; that code
+  // still runs natively, so its raw `syscall`/`int`/`mov fs:[..]` hit the host
+  // CPU (an un-lifted guest TLS write corrupts the host fs base). Resync past the
+  // undecodable byte so code after a data blob is lifted too. The rewriters below
+  // bail (rather than trap) on anything they don't recognise, so a data byte that
+  // briefly mis-decodes as a syscall/fs access is left untouched.
+  while (size > 0) {
+    if (!cs_disasm_iter(handle, &codePtr, &size, &base, insn)) {
+      ++codePtr;
+      --size;
+      ++base;
+      continue;
+    }
 
     auto detail = insn->detail->x86;
     // uint32_t dest = static_cast<uint32_t>(X86_REL_ADDR(*insn));
@@ -114,18 +129,18 @@ bool codeLift::transform(uint8_t *data, size_t size, uint64_t base) {
 
     /*syscall -> custom handler*/
     if (insn->id == X86_INS_SYSCALL) {
-      emit_syscall(getOps(-10), *(uint32_t *)(getOps(-7)));
+      // emit_syscall writes 10 bytes before the insn (the `mov rax,imm/jmp` it
+      // builds over the `mov eax,nr; syscall` pair); skip if that would underflow.
+      // It also no-ops unless the preceding bytes form a known syscall number, so
+      // a stray `0f 05` in resync'd data is left alone.
+      if (insn->address >= 10)
+        emit_syscall(getOps(-10), *(uint32_t *)(getOps(-7)));
     }
 
-    /*interrupt -> debugbreak*/
-    else if (insn->id == X86_INS_INT) {
-      uint8_t *tgt = getOps(0);
-      *(uint16_t *)(tgt) = 0xCCCC;
-    }
-
-    /*else if (is_bmi1_instruction(insn->id)) {
-            std::printf("encountered bm1 instruction %p\n", getOps(0));
-    }*/
+    // `int` is intentionally NOT rewritten: turning every `cd xx` (common in the
+    // rodata the resync sweeps over) into a breakpoint would mass-corrupt data,
+    // and it bought nothing (a raw guest `int 0x41` already faults like int3). A
+    // reached SDK assert stays fatal; handle it in the signal path if needed.
 
     /*fs base (tls) access*/
     else {
@@ -167,58 +182,86 @@ void codeLift::emit_syscall(uint8_t *base, uint32_t idx) {
 
 /*this implementation is based on uplift*/
 void codeLift::emit_fsbase(uint8_t *base) {
-  if (insn->detail->x86.op_count != 2)
-    __debugbreak();
+  auto &x = insn->detail->x86;
+  auto *operands = x.operands;
+  if (x.op_count != 2)
+    return;  // unrecognised form (or a data byte mis-decoded as a mov): leave it
 
-  auto operands = insn->detail->x86.operands;
-
-  // only TLS reads (mov reg, fs:[disp]); writes via fs override don't occur here
-  if (operands[0].type != X86_OP_REG)
-    __debugbreak();
-
-  if (operands[1].type != X86_OP_MEM || operands[1].mem.segment != X86_REG_FS ||
-      operands[1].mem.base != X86_REG_INVALID ||
-      operands[1].mem.index != X86_REG_INVALID) {
-    __debugbreak();
-  }
-
-  if (operands[0].size != 8 && operands[0].size != 4) {
-    __debugbreak();
+  // Identify the fs-memory operand and the register operand. We handle both the
+  // read `mov reg, fs:[disp]` and the write `mov fs:[disp], reg`; the write form
+  // is what libc's TLS init uses, and leaving it raw lets it clobber the host fs
+  // base. Only the absolute fs:[disp] form (no base/index) and 4/8-byte GPR
+  // operands are handled; anything else is left untouched (capstone_to_xbyak
+  // only maps 32/64-bit registers, so we must not feed it sub-registers).
+  int memIdx = operands[0].type == X86_OP_MEM   ? 0
+               : operands[1].type == X86_OP_MEM ? 1
+                                                : -1;
+  int regIdx = operands[0].type == X86_OP_REG   ? 0
+               : operands[1].type == X86_OP_REG ? 1
+                                                : -1;
+  if (memIdx < 0 || regIdx < 0)
     return;
-  }
+  auto &mem = operands[memIdx];
+  auto &gpr = operands[regIdx];
+  if (mem.mem.segment != X86_REG_FS || mem.mem.base != X86_REG_INVALID ||
+      mem.mem.index != X86_REG_INVALID)
+    return;
+  if (gpr.size != 8 && gpr.size != 4)
+    return;
 
-  /*translate the register that we set*/
-  auto reg = Xbyak::Reg64(capstone_to_xbyak(operands[0].reg));
+  const bool isWrite = (memIdx == 0);  // mov fs:[disp], reg
+  auto reg = Xbyak::Reg64(capstone_to_xbyak(gpr.reg));
 
   // Per-thread guest fs base: call krnl_current_fsbase() (a trivial leaf that
-  // does `mov rax, fs:[tpoff]; ret`, clobbering only rax). Each host thread
-  // running guest code has its own fs base, so guest TLS is per-thread. mov/
-  // push/pop/call/ret leave flags untouched, so the read still clobbers no
-  // flags; we only preserve rax (the helper's clobber + its return slot).
+  // does `mov rax, fs:[tpoff]; ret`, clobbering only rax). mov/push/pop/call/ret
+  // leave flags untouched. A read clobbers only its destination register; a store
+  // must clobber nothing, so the write path preserves rax and rcx (rcx is the
+  // value scratch, captured before rax is reused for the helper call).
   struct fsGen : Xbyak::CodeGenerator {
-    fsGen(Xbyak::Reg64 reg, int32_t disp, uint8_t size, uintptr_t helper) {
-      bool isRax = reg.getIdx() == Xbyak::Operand::RAX;
-      if (!isRax)
+    fsGen(Xbyak::Reg64 reg, int32_t disp, uint8_t size, bool isWrite,
+          uintptr_t helper) {
+      if (!isWrite) {
+        bool isRax = reg.getIdx() == Xbyak::Operand::RAX;
+        if (!isRax)
+          push(rax);
+        mov(rax, helper);
+        call(rax);  // rax = this thread's guest fs base
+        // disp may be negative (static TLS sits below fs)
+        auto dst = isRax ? rax : reg;
+        if (size == 4)
+          mov(dst.cvt32(), ptr[rax + disp]);
+        else
+          mov(dst, ptr[rax + disp]);
+        if (!isRax)
+          pop(rax);
+        ret();
+      } else {
         push(rax);
-      mov(rax, helper);
-      call(rax);  // rax = this thread's guest fs base
-
-      // disp may be negative (static TLS sits below fs)
-      auto dst = isRax ? rax : reg;
-      if (size == 4)
-        mov(dst.cvt32(), ptr[rax + disp]);
-      else
-        mov(dst, ptr[rax + disp]);
-
-      if (!isRax)
+        push(rcx);
+        mov(rcx, reg);  // capture value first (handles reg == rax/rcx)
+        mov(rax, helper);
+        call(rax);  // rax = guest fs base
+        if (size == 4)
+          mov(ptr[rax + disp], ecx);
+        else
+          mov(ptr[rax + disp], rcx);
+        pop(rcx);
         pop(rax);
-      ret();
+        ret();
+      }
     }
   };
 
-  auto fsDisp = static_cast<int32_t>(operands[1].mem.disp);
-  fsGen gen(reg, fsDisp, operands[0].size,
+  auto fsDisp = static_cast<int32_t>(mem.mem.disp);
+  fsGen gen(reg, fsDisp, gpr.size, isWrite,
             reinterpret_cast<uintptr_t>(&krnl_current_fsbase));
+
+  // Don't run past the rip-zone (sized to the segment in the loader). Leaving a
+  // tail access raw is worse than ideal but far better than scribbling past the
+  // zone into the next module; in practice the zone is sized so this never trips.
+  const auto alignedSize = align_up<size_t>(gen.getSize(), 8);
+  if (ripEnd && ripPointer + alignedSize > ripEnd)
+    return;
 
   /*call directly in rip zone*/
   base[0] = 0xE8;
@@ -230,7 +273,6 @@ void codeLift::emit_fsbase(uint8_t *base) {
     std::memset(&base[5], 0x90, insn->size - 5);
 
   /*align the block and pad out the rest*/
-  const auto alignedSize = align_up<size_t>(gen.getSize(), 8);
   if (gen.getSize() < alignedSize)
     std::memset(ripPointer + gen.getSize(), 0xCC, alignedSize - gen.getSize());
 
