@@ -158,7 +158,15 @@ void fillPadState(PadData *d) {
     // hatch/wall). DELTA_PAD_EXPLORE_DIR: 0=right 1=left 2=up 3=down.
     static const int dir = [] { const char *e = std::getenv("DELTA_PAD_EXPLORE_DIR");
       return e ? std::atoi(e) : 0; }();
-    if (since < walk) { if (dir==0) lx=255; else if (dir==1) lx=0; else if (dir==2) ly=0; else ly=255; }
+    // Continuous mode (DELTA_PAD_EXPLORE_CONT): keep moving (circle) so Isaac dodges
+    // and survives in a hostile room long enough to capture a settled non-start room.
+    static const bool cont = std::getenv("DELTA_PAD_EXPLORE_CONT") != nullptr;
+    if (cont) {
+      uint64_t ph = (since / 40) % 4;  // circle: right, down, left, up
+      if (ph==0) lx=255; else if (ph==1) ly=255; else if (ph==2) lx=0; else ly=0;
+    } else if (since < walk) {
+      if (dir==0) lx=255; else if (dir==1) lx=0; else if (dir==2) ly=0; else ly=255;
+    }
   }
   d->buttons = buttons;
   d->leftStick = {lx, ly};

@@ -567,6 +567,31 @@ void uploadTexPixels(VkImage img, uint64_t base, uint32_t w, uint32_t h) {
 VkDescriptorSet getTexture(uint64_t base, uint32_t w, uint32_t h) {
   if (!w || !h) return VK_NULL_HANDLE;
   uint64_t hsh = texHash(base, w, h);
+  // Diagnostic (DELTA_GPU_TEXDUMP): in deep gameplay, dump the first few large guest
+  // textures sampled, so a non-tutorial room's floor texture can be inspected (is it
+  // loaded/brown or black/zero?). Counts non-zero pixels too.
+  static const bool texDump = std::getenv("DELTA_GPU_TEXDUMP") != nullptr;
+  if (texDump && g.frameNum > 1200 && w >= 128 && h >= 128) {
+    static int tdn = 0;
+    if (tdn < 16) {
+      const uint32_t *px = reinterpret_cast<const uint32_t *>(base);
+      uint64_t cnt = (uint64_t)w * h, nz = 0, step = cnt > 8192 ? cnt / 8192 : 1;
+      for (uint64_t i = 0; i < cnt; i += step) if (px[i] & 0x00FFFFFFu) nz++;
+      char p[256];
+      std::snprintf(p, sizeof(p), "%s/tex_%02d_%#lx_%ux%u.ppm", dumpDir(), tdn,
+                    (unsigned long)base, w, h);
+      FILE *f = std::fopen(p, "wb");
+      if (f) {
+        std::fprintf(f, "P6\n%u %u\n255\n", w, h);
+        const uint8_t *b = reinterpret_cast<const uint8_t *>(base);
+        for (uint64_t i = 0; i < cnt; i++) { std::fputc(b[i*4], f); std::fputc(b[i*4+1], f); std::fputc(b[i*4+2], f); }
+        std::fclose(f);
+      }
+      std::fprintf(stderr, "[texdump] %d base=%#lx %ux%u nonzero=%lu/8192\n", tdn,
+                   (unsigned long)base, w, h, (unsigned long)nz);
+      tdn++;
+    }
+  }
   auto it = g_texCache.find(base);
   if (it != g_texCache.end()) {
     TexEntry &e = it->second;
