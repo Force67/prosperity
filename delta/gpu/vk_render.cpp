@@ -727,6 +727,39 @@ RTarget *getRT(uint64_t base, uint32_t w, uint32_t h) {
   return &g_rts[base];
 }
 
+// Byte footprint a render target occupies in guest memory (32bpp).
+uint64_t rtByteSize(const RTarget &rt) { return (uint64_t)rt.w * rt.h * 4; }
+
+// Overlap-aware resolution of a sampled texture address to a tracked render
+// target. This is the first building block of the resource model (see the
+// shadps4 "page table collects all overlappers" design): the game cycles and
+// aliases RT addresses (double-buffered room layers, a pool of scene buffers),
+// so a composite often samples an address that does not exactly match the RT
+// base it was rendered into. Resolve by interval overlap over the RT set and
+// pick the freshest rendered RT whose footprint matches/contains the sampled
+// region. Returns the g_rts key (== an RT base), or 0 if none. Generalises (and
+// when on, replaces) the per-symptom FRESHRT/CYCLEREDIR address heuristics.
+uint64_t resolveSampledRT(uint64_t addr, uint32_t w, uint32_t h) {
+  if (!addr) return 0;
+  uint64_t reqSize = w && h ? (uint64_t)w * h * 4 : 0;
+  uint64_t a0 = addr, a1 = addr + (reqSize ? reqSize : 4);
+  uint64_t best = 0;
+  long bestScore = -1;
+  for (auto &kv : g_rts) {
+    const RTarget &rt = kv.second;
+    if (!rt.everRendered) continue;  // never sample an RT with no content
+    uint64_t b0 = kv.first, b1 = b0 + rtByteSize(rt);
+    if (!(a0 < b1 && b0 < a1)) continue;  // no interval overlap
+    bool dimMatch = (!w || !h) || (rt.w == w && rt.h == h);
+    // Score: exact base + dim match is best, then dim match, then freshest.
+    long score = (long)rt.lastFrame;
+    if (dimMatch) score += 1L << 30;
+    if (b0 == addr) score += 1L << 31;
+    if (score > bestScore) { bestScore = score; best = b0; }
+  }
+  return best;
+}
+
 // End the current dynamic-rendering region (if any), leaving its RT readable.
 void endRegion() {
   if (!g.curRt) return;
@@ -1434,6 +1467,19 @@ void draw(const DrawInfo &d) {
       if (best) texBase = best;
     }
   }
+  // Resource-model overlap fallback (DELTA_GPU_RTOVERLAP, default on): if the
+  // sampled address is not itself a tracked RT base but its footprint overlaps a
+  // tracked RT (a sub-region or aliased sample of a render target), resolve to
+  // that RT so the live rendered content is sampled instead of (stale/zero) guest
+  // memory. Additive: leaves exact-match samples and the heuristics above intact.
+  static const bool rtOverlap = [] {
+    const char *e = std::getenv("DELTA_GPU_RTOVERLAP");
+    return !e || std::strcmp(e, "0") != 0;
+  }();
+  if (rtOverlap && texBase && !g_rts.count(texBase)) {
+    uint64_t r = resolveSampledRT(texBase, d.texW, d.texH);
+    if (r) texBase = r;
+  }
   // Is this a render-to-texture sample (the draw samples another render target)?
   bool rtAsTex = texBase && texBase != d.rtBase && g_rts.count(texBase);
   // A genuine fullscreen composite samples a near-fullscreen source RT (the scene
@@ -1697,6 +1743,20 @@ void endFrame(uint64_t scanoutBase) {
       std::memcpy(drow, srow, (size_t)rt.w * 4);
   }
   const uint8_t *pixels = flipped.data();
+  // Minimal single-shot capture (DELTA_GPU_SNAP=N): write ONE ppm of the presented
+  // scanout to <dumpdir>/gpu_snap.ppm at the first drawing frame >= N, then never
+  // again. For verifying gfx without the rolling DELTA_GPU_DUMP firehose (hundreds
+  // of MB per run). DELTA_GPU_SNAP_ROOM=1 waits for a gameplay-room frame.
+  static const int snapAt = [] { const char *e = std::getenv("DELTA_GPU_SNAP"); return e ? std::atoi(e) : 0; }();
+  static const bool snapRoom = std::getenv("DELTA_GPU_SNAP_ROOM") != nullptr;
+  static bool snapped = false;
+  if (snapAt && !snapped && g.frameNum >= snapAt && g.frameDraws > 0 &&
+      (!snapRoom || (g.frameHadRoom && g.frameDraws > 20))) {
+    char p[256]; std::snprintf(p, sizeof p, "%s/gpu_snap.ppm", dumpDir());
+    writePpm(p, pixels, rt.w, rt.h);
+    std::fprintf(stderr, "[snap] wrote %s (f%d %ux%u draws=%u)\n", p, g.frameNum, rt.w, rt.h, g.frameDraws);
+    snapped = true;
+  }
   // Black-floor-triggered RT dump (DELTA_GPU_DUMPBLACK): when the presented room's
   // centre (where the floor should be) is near-black on a real gameplay frame, dump
   // every RT once -- captures exactly the bug frame's resources (a basement room
