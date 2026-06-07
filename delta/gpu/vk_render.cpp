@@ -147,6 +147,21 @@ std::unordered_map<uint64_t, RTarget> g_rts;
 const bool g_dump = std::getenv("DELTA_GPU_DUMP") != nullptr;
 int g_dumpedFrames = 0;
 
+// Perf profiling accumulators (ns), reset each FPS window. Reveals where the
+// per-frame wall time goes: our GPU code (draw + endFrame, incl. the readback
+// stall and synchronous texture uploads) vs the guest/FEX time outside it.
+uint64_t g_nsDraw = 0, g_nsEnd = 0, g_nsReadback = 0, g_nsTexUp = 0;
+uint32_t g_texUps = 0;
+inline uint64_t nowNs() {
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(
+             std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+struct ScopeNs {
+  uint64_t t0; uint64_t *acc;
+  explicit ScopeNs(uint64_t *a) : t0(nowNs()), acc(a) {}
+  ~ScopeNs() { *acc += nowNs() - t0; }
+};
+
 // Directory frame dumps go to. Defaults to /tmp; Android has no /tmp, so the
 // runner sets DELTA_GPU_DUMP_DIR to a writable path (e.g. the cwd under
 // /data/local/tmp). Returned without a trailing slash.
@@ -166,6 +181,22 @@ uint32_t findMemoryType(uint32_t typeBits, VkMemoryPropertyFlags props) {
         (mp.memoryTypes[i].propertyFlags & props) == props)
       return i;
   return 0;
+}
+
+// Pick a memory type matching `pref` if any exists, else fall back to `req`. Used
+// for the readback buffer: the CPU READS it every frame (the scanout flip), so it
+// must be HOST_CACHED -- reading from the default HOST_COHERENT (write-combined,
+// uncached) staging memory byte-by-byte is ~30x slower and was dominating frame
+// time. CACHED+COHERENT (present on desktop GPUs) needs no manual invalidate.
+uint32_t findMemoryTypePref(uint32_t typeBits, VkMemoryPropertyFlags pref,
+                            VkMemoryPropertyFlags req) {
+  VkPhysicalDeviceMemoryProperties mp;
+  vkGetPhysicalDeviceMemoryProperties(g.phys, &mp);
+  for (uint32_t i = 0; i < mp.memoryTypeCount; i++)
+    if ((typeBits & (1u << i)) &&
+        (mp.memoryTypes[i].propertyFlags & pref) == pref)
+      return i;
+  return findMemoryType(typeBits, req);
 }
 
 void imageBarrier(VkCommandBuffer c, VkImage img, VkImageLayout from,
@@ -566,9 +597,11 @@ void uploadTexPixels(VkImage img, uint64_t base, uint32_t w, uint32_t h,
   vkEndCommandBuffer(c);
   VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
   si.commandBufferCount = 1; si.pCommandBuffers = &c;
+  uint64_t _t0 = nowNs();
   vkResetFences(g.device, 1, &g.fence);
   vkQueueSubmit(g.queue, 1, &si, g.fence);
   vkWaitForFences(g.device, 1, &g.fence, VK_TRUE, UINT64_MAX);
+  g_nsTexUp += nowNs() - _t0; g_texUps++;
   vkFreeCommandBuffers(g.device, g.pool, 1, &c);
   vkDestroyBuffer(g.device, stg, nullptr);
   vkFreeMemory(g.device, stgMem, nullptr);
@@ -674,7 +707,11 @@ void ensureReadback(uint32_t w, uint32_t h) {
   VkMemoryRequirements br; vkGetBufferMemoryRequirements(g.device, g.readback, &br);
   VkMemoryAllocateInfo ba{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
   ba.allocationSize = br.size;
-  ba.memoryTypeIndex = findMemoryType(br.memoryTypeBits,
+  // CPU reads this buffer every frame (the flip) -> prefer HOST_CACHED so reads hit
+  // cache instead of streaming from write-combined memory (the dominant frame cost).
+  ba.memoryTypeIndex = findMemoryTypePref(br.memoryTypeBits,
+      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT |
+          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
   vkAllocateMemory(g.device, &ba, nullptr, &g.readbackMem);
   vkBindBufferMemory(g.device, g.readback, g.readbackMem, 0);
@@ -1310,6 +1347,7 @@ void recordDraw(const DrawInfo &d, uint32_t nv, bool recomp);
 void draw(const DrawInfo &d) {
   if (!g.recording || !d.vertexData || !d.vertexStride)
     return;
+  ScopeNs _t(&g_nsDraw);
   recordDraw(d, d.vertexCount, d.recomp != nullptr);
   // Recompiled-shader path: run the game's actual VS/PS. Falls through to the
   // heuristic quad path when the draw can't be handled. On by default now that it
@@ -1673,9 +1711,16 @@ void reportFps() {
   auto now = clock::now();
   double dt = std::chrono::duration<double>(now - last).count();
   if (dt >= 2.0) {
-    std::fprintf(stderr, "[fps] %.1f fps (%d frames / %.2fs)\n", frames / dt, frames, dt);
+    double f = frames ? frames : 1;
+    std::fprintf(stderr,
+        "[fps] %.1f fps | per-frame gpu-code: draw=%.2fms end=%.2fms (readback=%.2fms) "
+        "texup=%.2fms x%.1f\n",
+        frames / dt, g_nsDraw / f / 1e6, g_nsEnd / f / 1e6, g_nsReadback / f / 1e6,
+        g_nsTexUp / f / 1e6, g_texUps / f);
     last = now;
     frames = 0;
+    g_nsDraw = g_nsEnd = g_nsReadback = g_nsTexUp = 0;
+    g_texUps = 0;
   }
 }
 
@@ -1683,6 +1728,7 @@ void endFrame(uint64_t scanoutBase) {
   if (!g.ready || !g.recording) return;
   g.recording = false;
   reportFps();
+  ScopeNs _t(&g_nsEnd);
   endRegion();  // close any open region
 
   // Present the scanout RT (the flip buffer); fall back to the last RT rendered.
@@ -1731,9 +1777,11 @@ void endFrame(uint64_t scanoutBase) {
   VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
   si.commandBufferCount = 1;
   si.pCommandBuffers = &g.cmd;
+  uint64_t _tr0 = nowNs();
   vkResetFences(g.device, 1, &g.fence);
   vkQueueSubmit(g.queue, 1, &si, g.fence);
   vkWaitForFences(g.device, 1, &g.fence, VK_TRUE, UINT64_MAX);
+  g_nsReadback += nowNs() - _tr0;
 
   // Orientation correction. DELTA_GPU_FLIP selects the readback transform so the
   // correct one can be determined empirically: 0=none 1=Y(rows) 2=X(cols)
