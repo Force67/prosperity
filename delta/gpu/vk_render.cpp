@@ -1515,8 +1515,13 @@ void endFrame(uint64_t scanoutBase) {
   // of MB per run). DELTA_GPU_SNAP_ROOM=1 waits for a gameplay-room frame.
   static const int snapAt = [] { const char *e = std::getenv("DELTA_GPU_SNAP"); return e ? std::atoi(e) : 0; }();
   static const bool snapRoom = std::getenv("DELTA_GPU_SNAP_ROOM") != nullptr;
+  // Wait for a frame with at least this many draws before capturing, so a busy
+  // scene frame is grabbed instead of a sparse HUD/transition frame (e.g. Doom64
+  // gameplay where only some frames carry the full level geometry).
+  static const int snapMinDraws = [] { const char *e = std::getenv("DELTA_GPU_SNAP_MINDRAWS"); return e ? std::atoi(e) : 0; }();
   static bool snapped = false;
-  if (snapAt && !snapped && g.frameNum >= snapAt && g.frameDraws > 0 &&
+  if (snapAt && !snapped && g.frameNum >= snapAt &&
+      g.frameDraws > 0 && (int)g.frameDraws >= snapMinDraws &&
       (!snapRoom || (g.frameHadRoom && g.frameDraws > 20))) {
     char p[256]; std::snprintf(p, sizeof p, "%s/gpu_snap.ppm", dumpDir());
     writePpm(p, pixels, rt.w, rt.h);
