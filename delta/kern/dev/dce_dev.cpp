@@ -6,6 +6,7 @@
  * in the root of the source tree.
  */
 
+#include <atomic>
 #include <base.h>
 #include <chrono>
 #include <cstdio>
@@ -46,6 +47,15 @@ static uint64_t guestTsc() {
   return nowNs() * 16 / 10;  // ns -> 1.6 GHz ticks
 #endif
 }
+
+// The last flip submitted via ioctl 0xc0488204 (sceVideoOutSubmitFlip). A title
+// flips display buffer N then polls GetFlipStatus until currentBuffer == N (its
+// flip became the scanout). We used to report currentBuffer = 0 always, so flips
+// to buffers 1/2 never matched and the title spun on each until a ~1s timeout
+// (Doom64 ran at ~1fps). Record the flip here and report it in the status.
+static std::atomic<uint32_t> g_dceCurrentBuffer{0};
+static std::atomic<int64_t> g_dceFlipArg{0};
+static std::atomic<uint64_t> g_dceFlipCount{0};
 
 static bool g_dceTrace() {
   static const bool on = std::getenv("DELTA_DCE_TRACE") != nullptr;
@@ -194,11 +204,17 @@ int32_t dceDevice::ioctl(uint32_t cmd, void *data) {
         auto *o = reinterpret_cast<uint8_t *>(s[2]);
         std::memset(o, 0, 0x48);
         uint64_t now = nowNs();
-        *reinterpret_cast<uint64_t *>(o + 0x10) = flipCount();    // count
+        *reinterpret_cast<int64_t *>(o + 0x00) = g_dceFlipArg.load();  // flipArg
+        *reinterpret_cast<uint64_t *>(o + 0x10) =
+            g_dceFlipCount.load() ? g_dceFlipCount.load() : flipCount();  // count
         *reinterpret_cast<uint64_t *>(o + 0x18) = now;            // processTime
         *reinterpret_cast<uint64_t *>(o + 0x20) = guestTsc();     // tsc
+        // currentBuffer = the buffer the last submitted flip displays. A title
+        // waits for this to equal the index it just flipped before reusing a
+        // buffer; reporting it (vs a stuck 0) is what unblocks the per-frame wait.
+        *reinterpret_cast<int32_t *>(o + 0x28) = (int32_t)g_dceCurrentBuffer.load();
         *reinterpret_cast<uint64_t *>(o + 0x38) = guestTsc();     // submitTsc
-        // flipPendingNum / gcQueueNum / currentBuffer left 0.
+        // flipPendingNum / gcQueueNum left 0 (our flip is synchronous: none pending).
       }
       return 0;
     }
@@ -271,8 +287,16 @@ int32_t dceDevice::ioctl(uint32_t cmd, void *data) {
   }
 
   if (cmd == 0xc0488204 && data) {
-    // Submit flip (72-byte arg). Report success: arg[0x40] (s[8]) points at a
-    // status out-slot the caller checks for 0x58 = ok.
+    // Submit flip (72-byte arg). s[1] = display buffer index, s[3] = flipArg
+    // (verified against the 11.00 sceVideoOutSubmitFlip caller). Our flip is
+    // synchronous, so record it as immediately complete: GetFlipStatus then
+    // reports currentBuffer == the index the title just flipped, unblocking its
+    // per-frame "wait for my flip" poll (this is what fixed Doom64's ~1fps).
+    g_dceCurrentBuffer.store(static_cast<uint32_t>(s[1]));
+    g_dceFlipArg.store(static_cast<int64_t>(s[3]));
+    g_dceFlipCount.fetch_add(1);
+    // Report success: arg[0x40] (s[8]) points at a status out-slot the caller
+    // checks for 0x58 = ok.
     if (plausiblePtr(s[8]))
       *reinterpret_cast<uint64_t *>(s[8]) = 0x58;
     return 0;
