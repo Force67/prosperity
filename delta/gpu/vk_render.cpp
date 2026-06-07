@@ -40,6 +40,8 @@ namespace {
 
 constexpr VkDeviceSize kVbRing = 16ull * 1024 * 1024;  // per-frame vertex ring
 constexpr VkDeviceSize kIbRing = 8ull * 1024 * 1024;   // per-frame index ring (32-bit)
+constexpr VkDeviceSize kUboRing = 64ull * 1024 * 1024; // per-frame recomp cbuffer ring
+constexpr uint32_t kCbufWindow = 1024;                 // bytes per draw (uvec4 data[64])
 
 struct State {
   bool ready = false;
@@ -90,6 +92,21 @@ struct State {
   VkDescriptorSetLayout dsLayout = VK_NULL_HANDLE;
   VkDescriptorPool dsPool = VK_NULL_HANDLE;
   VkSampler sampler = VK_NULL_HANDLE;
+
+  // Recomp cbuffer ring: a per-frame host-visible dynamic uniform buffer. The
+  // recompiled VS reads its constant buffer (transforms) from descriptor set 1
+  // (textures stay at set 0). Per draw we copy the guest cbuffer window into the
+  // ring and bind set 1 with a dynamic offset. emptyLayout fills set 0 for
+  // untextured recomp draws (which still use the set-1 UBO).
+  VkDescriptorSetLayout uboLayout = VK_NULL_HANDLE;
+  VkDescriptorSetLayout emptyLayout = VK_NULL_HANDLE;
+  VkDescriptorPool uboPool = VK_NULL_HANDLE;
+  VkDescriptorSet uboSet = VK_NULL_HANDLE;
+  VkBuffer uboBuf = VK_NULL_HANDLE;
+  VkDeviceMemory uboMem = VK_NULL_HANDLE;
+  uint8_t *uboMap = nullptr;
+  VkDeviceSize uboOffset = 0;
+  uint32_t uboAlign = 256;
 
   // Pipelines keyed by blend state (textured<<0, enable<<1, blendControl<<2) so
   // each draw uses the guest's CB_BLEND0_CONTROL blend instead of one hardcoded mode.
@@ -362,6 +379,47 @@ bool createDevice() {
   VkPhysicalDeviceProperties props;
   vkGetPhysicalDeviceProperties(g.phys, &props);
   std::fprintf(stderr, "[gpuvk] device: %s\n", props.deviceName);
+
+  // Recomp cbuffer ring + dynamic-UBO descriptor (set 1) + empty set-0 layout.
+  g.uboAlign = (uint32_t)props.limits.minUniformBufferOffsetAlignment;
+  if (g.uboAlign < 1) g.uboAlign = 1;
+  {
+    VkBufferCreateInfo ub{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    ub.size = kUboRing;
+    ub.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+    VKOK(vkCreateBuffer(g.device, &ub, nullptr, &g.uboBuf));
+    VkMemoryRequirements ur;
+    vkGetBufferMemoryRequirements(g.device, g.uboBuf, &ur);
+    VkMemoryAllocateInfo um{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    um.allocationSize = ur.size;
+    um.memoryTypeIndex = findMemoryType(ur.memoryTypeBits,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    VKOK(vkAllocateMemory(g.device, &um, nullptr, &g.uboMem));
+    VKOK(vkBindBufferMemory(g.device, g.uboBuf, g.uboMem, 0));
+    VKOK(vkMapMemory(g.device, g.uboMem, 0, kUboRing, 0, (void **)&g.uboMap));
+
+    VkDescriptorSetLayoutBinding ub0{0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1,
+        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+    VkDescriptorSetLayoutCreateInfo ul{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    ul.bindingCount = 1; ul.pBindings = &ub0;
+    VKOK(vkCreateDescriptorSetLayout(g.device, &ul, nullptr, &g.uboLayout));
+    VkDescriptorSetLayoutCreateInfo el{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    el.bindingCount = 0;
+    VKOK(vkCreateDescriptorSetLayout(g.device, &el, nullptr, &g.emptyLayout));
+
+    VkDescriptorPoolSize ups{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1};
+    VkDescriptorPoolCreateInfo upi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    upi.maxSets = 1; upi.poolSizeCount = 1; upi.pPoolSizes = &ups;
+    VKOK(vkCreateDescriptorPool(g.device, &upi, nullptr, &g.uboPool));
+    VkDescriptorSetAllocateInfo uai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    uai.descriptorPool = g.uboPool; uai.descriptorSetCount = 1; uai.pSetLayouts = &g.uboLayout;
+    VKOK(vkAllocateDescriptorSets(g.device, &uai, &g.uboSet));
+    VkDescriptorBufferInfo ubinfo{g.uboBuf, 0, kCbufWindow};
+    VkWriteDescriptorSet uw{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    uw.dstSet = g.uboSet; uw.dstBinding = 0; uw.descriptorCount = 1;
+    uw.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC; uw.pBufferInfo = &ubinfo;
+    vkUpdateDescriptorSets(g.device, 1, &uw, 0, nullptr);
+  }
   return true;
 }
 
@@ -984,11 +1042,11 @@ RecompPipe *getRecompPipe(const DrawInfo &d) {
   RecompPipe rp;
   rp.textured = !d.recomp->psTexs.empty();
 
-  VkPushConstantRange pcr{VK_SHADER_STAGE_VERTEX_BIT, 0, 128};
+  // set 0 = texture(s) (or an empty layout when untextured), set 1 = cbuffer UBO.
+  VkDescriptorSetLayout sls[2] = {rp.textured ? g.dsLayout : g.emptyLayout, g.uboLayout};
   VkPipelineLayoutCreateInfo li{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-  li.pushConstantRangeCount = 1;
-  li.pPushConstantRanges = &pcr;
-  if (rp.textured) { li.setLayoutCount = 1; li.pSetLayouts = &g.dsLayout; }
+  li.setLayoutCount = 2;
+  li.pSetLayouts = sls;
   if (vkCreatePipelineLayout(g.device, &li, nullptr, &rp.layout) != VK_SUCCESS) return nullptr;
 
   VkShaderModule vs = makeModuleVec(d.recomp->vsSpirv);
@@ -1206,9 +1264,21 @@ bool drawRecomp(const DrawInfo &d) {
   }
 
   vkCmdBindPipeline(g.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, rp->pipe);
-  uint32_t pc[32] = {0};
-  std::memcpy(pc, d.mvp, 64);  // the constant buffer (MVP) -> push constants
-  vkCmdPushConstants(g.cmd, rp->layout, VK_SHADER_STAGE_VERTEX_BIT, 0, 128, pc);
+  // Copy the guest cbuffer window into the per-frame ring and bind it as the set-1
+  // dynamic UBO (the recompiled VS reads its transforms from it).
+  VkDeviceSize cbOff = (g.uboOffset + g.uboAlign - 1) & ~(VkDeviceSize)(g.uboAlign - 1);
+  if (cbOff + kCbufWindow > kUboRing) cbOff = 0;  // wrap within the frame
+  uint8_t *cbDst = g.uboMap + cbOff;
+  std::memset(cbDst, 0, kCbufWindow);
+  if (d.cbufBase >= 0x1000000000ull && d.cbufBase < 0x20000000000ull) {
+    uint32_t n = (d.cbufSize && d.cbufSize < kCbufWindow) ? d.cbufSize : kCbufWindow;
+    std::memcpy(cbDst, reinterpret_cast<const void *>(d.cbufBase), n);
+  } else {
+    std::memcpy(cbDst, d.mvp, 64);  // fallback: the 64-byte MVP the cmd processor resolved
+  }
+  g.uboOffset = cbOff + kCbufWindow;
+  uint32_t dynOff = (uint32_t)cbOff;
+  vkCmdBindDescriptorSets(g.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, rp->layout, 1, 1, &g.uboSet, 1, &dynOff);
   if (texSet)
     vkCmdBindDescriptorSets(g.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, rp->layout, 0, 1, &texSet, 0, nullptr);
   vkCmdBindVertexBuffers(g.cmd, 0, 1, &g.vb, &voff);
@@ -1230,6 +1300,7 @@ void beginFrame() {
   g.frameNum++;
   g.vbOffset = 0;
   g.ibOffset = 0;
+  g.uboOffset = 0;
   g.curRt = 0;
   g.lastRt = 0;
   g.busiestRt = 0;

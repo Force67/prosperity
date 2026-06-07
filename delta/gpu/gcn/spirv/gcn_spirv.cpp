@@ -76,7 +76,7 @@ struct Tr {
   Id pPrivU, sgpr, vgpr;
   Id sccVar = 0;    // scalar condition code (s_cmp / scalar ALU -> s_cbranch_scc*)
   Id stateVar = 0;  // CFG block index for the while-switch dispatch
-  Id pcVar = 0;          // push-constant block (cbuffer)
+  Id pcVar = 0;          // cbuffer block (uniform buffer, set 1 binding 0)
   bool havePc = false;
 
   void initTypes() {
@@ -120,26 +120,33 @@ struct Tr {
   Id isNonZero(Id u) { return m.emit(spv::Op::OpINotEqual, tBool, {u, m.constU32(0)}); }
   Id isZero(Id u) { return m.emit(spv::Op::OpIEqual, tBool, {u, m.constU32(0)}); }
 
-  // Declare the push-constant cbuffer: PC { uvec4 data[8]; } (matches the GLSL
-  // backend's layout so the renderer's push range is identical).
+  // Declare the cbuffer as a uniform buffer: CB { uvec4 data[64]; } at descriptor
+  // set 1, binding 0. Push constants can't hold it (the VS reads matrices past byte
+  // 256, e.g. Undertale at cbuffer dwords 48 and 64); a UBO covers the full 1 KiB
+  // window. Textures stay at set 0, so the texture path is unchanged.
   void ensurePc() {
     if (havePc) return;
     havePc = true;
     Id tUV4 = m.typeVec(tU, 4);
-    Id arr = m.typeArray(tUV4, 8);
+    Id arr = m.typeArray(tUV4, 64);
     m.decorate(arr, spv::Decoration::ArrayStride, {16});
     Id st = m.typeStruct({arr});
     m.decorate(st, spv::Decoration::Block);
     m.memberDecorate(st, 0, spv::Decoration::Offset, {0});
-    pcVar = m.variable(m.typePointer(spv::StorageClass::PushConstant, st),
-                       spv::StorageClass::PushConstant);
+    pcVar = m.variable(m.typePointer(spv::StorageClass::Uniform, st),
+                       spv::StorageClass::Uniform);
+    m.decorate(pcVar, spv::Decoration::DescriptorSet, {1});
+    m.decorate(pcVar, spv::Decoration::Binding, {0});
   }
-  // Read cbuffer dword k (== uvec4 data[k>>2][k&3]) as a uint Id.
+  // Read cbuffer dword k (== uvec4 data[k>>2][k&3]) as a uint Id. Clamp the uvec4
+  // index into the 64-element (1 KiB) window so an out-of-range constant index can't
+  // produce an invalid SPIR-V access chain.
   Id pcDword(uint32_t k) {
     ensurePc();
-    Id pPushU = m.typePointer(spv::StorageClass::PushConstant, tU);
-    Id ch = m.accessChain(pPushU, pcVar,
-                          {m.constU32(0), m.constU32(k >> 2), m.constU32(k & 3)});
+    uint32_t v4 = (k >> 2) & 63;
+    Id pU = m.typePointer(spv::StorageClass::Uniform, tU);
+    Id ch = m.accessChain(pU, pcVar,
+                          {m.constU32(0), m.constU32(v4), m.constU32(k & 3)});
     return m.load(tU, ch);
   }
 

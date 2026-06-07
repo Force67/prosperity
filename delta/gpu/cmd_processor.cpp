@@ -191,8 +191,10 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
     // slot); the recompiled-shader path below re-resolves it from the SGPR the VS
     // actually reads (rc.vsCbufs) when that differs.
     uint64_t cbuf = (static_cast<uint64_t>(vud[5] & 0xFFFF) << 32) | vud[4];
-    if (cbuf >= 0x1000000000ull && cbuf < 0x20000000000ull)
+    if (cbuf >= 0x1000000000ull && cbuf < 0x20000000000ull) {
       std::memcpy(d.mvp, reinterpret_cast<const void *>(cbuf), 64);
+      d.cbufBase = cbuf;
+    }
 
     // Vertex buffer: resource-track the fetch shader (VS sgpr[0..1] ptr).
     uint64_t fetch = (static_cast<uint64_t>(vud[1] & 0xFFFF) << 32) | vud[0];
@@ -281,10 +283,17 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
         // wrong one -- the general fix, not an Isaac special-case.
         if (good && d.nvattrs && !rc.vsCbufs.empty()) {
           uint32_t cbSgpr = rc.vsCbufs[0].udSgpr;
-          if (cbSgpr + 1 < 16) {
+          if (cbSgpr + 2 < 16) {
             uint64_t vbase = (static_cast<uint64_t>(vud2[cbSgpr + 1] & 0xFFFF) << 32) | vud2[cbSgpr];
-            if (vbase >= 0x1000000000ull && vbase < 0x20000000000ull)
+            if (vbase >= 0x1000000000ull && vbase < 0x20000000000ull) {
               std::memcpy(d.mvp, reinterpret_cast<const void *>(vbase), 64);
+              // Full cbuffer base+size for the set-1 UBO. V#: stride[29:16] of word1,
+              // num_records word2; byte size = stride ? stride*records : records.
+              d.cbufBase = vbase;
+              uint32_t stride = (vud2[cbSgpr + 1] >> 16) & 0x3FFF;
+              uint32_t records = vud2[cbSgpr + 2];
+              d.cbufSize = stride ? stride * records : records;
+            }
           }
         }
         if (good && d.nvattrs) { d.vsAddr = vsA; d.psAddr = psA; d.recomp = &rc; }

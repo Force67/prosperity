@@ -44,6 +44,12 @@ struct DrawInfo {
   uint32_t indexType = 0;
   uint32_t instanceCount = 1;  // from IT_NUM_INSTANCES (tilemaps draw instanced)
   float mvp[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+  // Recompiled VS cbuffer (transforms): the guest constant-buffer base+size resolved
+  // from the VS's cbuffer V#. The renderer copies a window of it into a dynamic UBO
+  // (set 1) the recompiled VS reads. mvp[] mirrors the first 64 bytes (heuristic-path
+  // fallback). cbufBase==0 means unresolved (fall back to mvp).
+  uint64_t cbufBase = 0;
+  uint32_t cbufSize = 0;
   uint64_t rtBase = 0;         // CB_COLOR0 address; the draw's render target
   uint32_t rtW = 0, rtH = 0;   // render-target dimensions (shared by all MRT targets)
 
