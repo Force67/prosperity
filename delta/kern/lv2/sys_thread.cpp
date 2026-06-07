@@ -156,6 +156,22 @@ Bucket &umtxBucket(const void *a) {
   return g_umtxBuckets[(reinterpret_cast<uintptr_t>(a) >> 4) & 0xff];
 }
 constexpr uint32_t UMUTEX_CONTESTED = 0x80000000u;
+// Re-poll interval for a blocked waiter. A waiter is woken promptly by the
+// matching WAKE/SIGNAL, but some guest code publishes its predicate with a plain
+// lock-free store and NO wake syscall (it expects the waiter to re-check), so a
+// long timeout left such a waiter asleep for the whole interval -> Doom64's KEX
+// job scheduler stalled ~1s per frame (~1fps). Re-checking every few ms turns
+// that into full speed (Doom64 1fps -> 60fps). Correctness is unaffected: every
+// path re-checks its predicate (op2/11/15/17 the value, op8 libthr's app-level
+// while(!cond)) before proceeding, so a short interval only changes poll latency,
+// never lets a waiter run early. DELTA_UMTX_TIMEOUT_MS overrides it.
+std::chrono::milliseconds umtxTimeout() {
+  static const long ms = [] {
+    const char *e = std::getenv("DELTA_UMTX_TIMEOUT_MS");
+    return e ? std::atol(e) : 2;
+  }();
+  return std::chrono::milliseconds(ms);
+}
 }  // namespace
 
 static void umtxTrace(int op, void *ptr, uint32_t self, uint32_t owner) {
@@ -184,14 +200,14 @@ int PS4ABI sys_umtx_op(void *ptr, int op, uint32_t val, void *a, void *b) {
     auto &bk = umtxBucket(ptr);
     auto *p = static_cast<volatile uint32_t *>(ptr);
     std::unique_lock<std::mutex> lk(bk.m);
-    bk.cv.wait_for(lk, 1s, [&] { return *p != val; });
+    bk.cv.wait_for(lk, umtxTimeout(), [&] { return *p != val; });
     return 0;
   }
   case 17: { // UMTX_OP_MUTEX_WAIT: block while the umutex is owned
     auto &bk = umtxBucket(ptr);
     auto *p = static_cast<volatile uint32_t *>(ptr);
     std::unique_lock<std::mutex> lk(bk.m);
-    bk.cv.wait_for(lk, 1s, [&] { return (*p & ~UMUTEX_CONTESTED) == 0; });
+    bk.cv.wait_for(lk, umtxTimeout(), [&] { return (*p & ~UMUTEX_CONTESTED) == 0; });
     return 0;
   }
   case 3:    // UMTX_OP_WAKE
@@ -240,7 +256,7 @@ int PS4ABI sys_umtx_op(void *ptr, int op, uint32_t val, void *a, void *b) {
       // stale owner|CONTESTED back over a now-free mutex.
       if (!p->compare_exchange_strong(owner, owner | UMUTEX_CONTESTED))
         continue;
-      bk.cv.wait_for(lk, 1s);          // re-check on wake / safety timeout
+      bk.cv.wait_for(lk, umtxTimeout());  // re-check on wake / safety timeout
     }
   }
   case 6: { // UMTX_OP_MUTEX_UNLOCK
@@ -279,7 +295,7 @@ int PS4ABI sys_umtx_op(void *ptr, int op, uint32_t val, void *a, void *b) {
       }
       mbk.cv.notify_all();
     }
-    cbk.cv.wait_for(clk, 1s);
+    cbk.cv.wait_for(clk, umtxTimeout());
     return 0;
   }
   case 9:    // UMTX_OP_CV_SIGNAL
