@@ -113,6 +113,7 @@ struct State {
   std::unordered_map<uint64_t, VkPipeline> pipeCache;
 
   uint32_t frameDraws = 0;
+  uint32_t frameMaxIdx = 0;  // largest indexCount of any draw this frame (3D geometry detector)
   int frameNum = 0;
   bool recording = false;
   bool frameHadRoom = false;  // this frame sampled a room-sized (~832w) RT
@@ -1302,6 +1303,7 @@ void beginFrame() {
   if (!createPipeline()) return;
   createTexPipeline();  // best-effort; colored path still works without it
   g.frameDraws = 0;
+  g.frameMaxIdx = 0;
   g.frameNum++;
   g.vbOffset = 0;
   g.ibOffset = 0;
@@ -1327,6 +1329,7 @@ void beginFrame() {
 void draw(const DrawInfo &d) {
   if (!g.recording || !d.vertexData || !d.vertexStride)
     return;
+  if (d.indexCount > g.frameMaxIdx) g.frameMaxIdx = d.indexCount;
   ScopeNs _t(&g_nsDraw);
   // Recompiled-shader path: run the game's actual VS/PS. Falls through to the
   // heuristic quad path when the draw can't be handled. On by default now that it
@@ -1595,6 +1598,11 @@ void endFrame(uint64_t scanoutBase) {
   // scene frame is grabbed instead of a sparse HUD/transition frame (e.g. Doom64
   // gameplay where only some frames carry the full level geometry).
   static const int snapMinDraws = [] { const char *e = std::getenv("DELTA_GPU_SNAP_MINDRAWS"); return e ? std::atoi(e) : 0; }();
+  // DELTA_GPU_SNAP_MININDICES: require a frame to contain a draw with at least this
+  // many indices (3D level geometry, e.g. Doom64 with ~2400-index draws) instead of
+  // counting draws -- a level frame can have few draws but huge index counts that a
+  // draw-count gate (snapMinDraws/snapBest) misses.
+  static const int snapMinIdx = [] { const char *e = std::getenv("DELTA_GPU_SNAP_MININDICES"); return e ? std::atoi(e) : 0; }();
   // DELTA_GPU_SNAP_BEST: instead of capturing the first qualifying frame, keep
   // re-capturing whenever this frame has more draws than any seen so far (after
   // snapAt). The final gpu_snap.ppm is then the busiest frame of the run -- a real
@@ -1604,13 +1612,18 @@ void endFrame(uint64_t scanoutBase) {
   static bool snapped = false;
   bool snapNow = snapAt && g.frameNum >= snapAt && g.frameDraws > 0 &&
                  (int)g.frameDraws >= snapMinDraws &&
+                 (int)g.frameMaxIdx >= snapMinIdx &&
                  (!snapRoom || (g.frameHadRoom && g.frameDraws > 20));
-  if (snapBest)
+  // With a min-indices gate, "best" tracks the largest index count seen (the busiest
+  // 3D frame) rather than the draw count.
+  if (snapBest && snapMinIdx)
+    snapNow = snapNow && (int)g.frameMaxIdx > snapBestDraws;
+  else if (snapBest)
     snapNow = snapNow && (int)g.frameDraws > snapBestDraws;
   else
     snapNow = snapNow && !snapped;
   if (snapNow) {
-    snapBestDraws = g.frameDraws;
+    snapBestDraws = snapMinIdx ? (int)g.frameMaxIdx : (int)g.frameDraws;
     char p[256]; std::snprintf(p, sizeof p, "%s/gpu_snap.ppm", dumpDir());
     writePpm(p, pixels, rt.w, rt.h);
     std::fprintf(stderr, "[snap] wrote %s (f%d %ux%u draws=%u)\n", p, g.frameNum, rt.w, rt.h, g.frameDraws);
