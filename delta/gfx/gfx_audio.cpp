@@ -96,10 +96,18 @@ extern "C" int prosperity_audio_output(int handle, const void *samples, uint32_t
   // tracks playback. Bounded so a stalled/absent device (headless) can't hang the
   // thread: if it doesn't drain within ~a buffer's worth of time, fall through.
   const uint32_t target = bytes * 3;  // keep ~3 buffers of latency
+  int prevQ = -1;
   for (int i = 0; i < 64; i++) {
     int q = SDL_GetAudioStreamQueued(stream);  // thread-safe
     if (q < 0 || static_cast<uint32_t>(q) <= target)
       break;
+    // Only pace against a device that is actually consuming. If the queue isn't
+    // shrinking (no real playback, e.g. headless/no audio device), don't block --
+    // otherwise every Output stalls the full cap and drags the caller (and the
+    // game's main thread, via the audio mutex) to a crawl. Drop instead (below).
+    if (prevQ >= 0 && q >= prevQ)
+      break;
+    prevQ = q;
     std::this_thread::sleep_for(std::chrono::microseconds(500));
   }
   // Bound latency: if the device queue is STILL many buffers deep after the wait
