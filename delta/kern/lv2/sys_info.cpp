@@ -65,7 +65,22 @@ moduleInfo *called_in(void *addr);
 
 int PS4ABI sys_is_in_sandbox() { return 0; }
 
-int PS4ABI sys_cpuset_getaffinity() { return 0; }
+int PS4ABI sys_cpuset_getaffinity(int /*level*/, int /*which*/, int64_t /*id*/,
+                                  size_t cpusetsize, void *mask) {
+  // Report the CPUs the title is allowed to run on. Base PS4 grants a game 6
+  // cores (0..5; the OS keeps 6/7). The KEX engine (Doom64) sizes its worker
+  // pool from the set-bit count here (workers = availableCores/2); the old no-op
+  // left `mask` unfilled, so it saw 0 cores -> "Max Worker Threads: 0" -> the
+  // parallel job manager ran every job serially on the main thread and its job
+  // pump spun, throttling the whole engine. Fill the low 6 bits.
+  if (mask && cpusetsize) {
+    std::memset(mask, 0, cpusetsize);
+    uint64_t bits = 0x3F;  // cores 0..5
+    std::memcpy(mask, &bits,
+                cpusetsize < sizeof(bits) ? cpusetsize : sizeof(bits));
+  }
+  return 0;
+}
 
 int PS4ABI sys_get_authinfo(int pid, void *infoOut) {
   // SceSelfAuthInfo (136 bytes). Hand back a plausible non-privileged game
