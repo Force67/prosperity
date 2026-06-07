@@ -22,9 +22,25 @@ void avpTrace(const char *fn) {
 }
 }
 
-int64_t PS4ABI sceAvPlayerInit(void * /*initData*/) { return kHandle; }
+// DELTA_AVP_TRACE: dump the init-data block as 16 pointers so the event-callback
+// (a guest code pointer) and its offset can be identified -> lets us fire video
+// state events the title waits on (Doom64 stalls after Start with no IsActive poll).
+static void dumpInitData(const char *fn, const void *initData) {
+  static const bool on = std::getenv("DELTA_AVP_TRACE") != nullptr;
+  if (!on || !initData) return;
+  auto *p = reinterpret_cast<const uint64_t *>(initData);
+  for (int i = 0; i < 16; i++)
+    std::fprintf(stderr, "[avp] %s initData[%#x]=%#llx\n", fn, i * 8,
+                 (unsigned long long)p[i]);
+}
 
-int64_t PS4ABI sceAvPlayerInitEx(const void * /*initData*/, int64_t *handleOut) {
+int64_t PS4ABI sceAvPlayerInit(void *initData) {
+  dumpInitData("Init", initData);
+  return kHandle;
+}
+
+int64_t PS4ABI sceAvPlayerInitEx(const void *initData, int64_t *handleOut) {
+  dumpInitData("InitEx", initData);
   if (handleOut)
     *handleOut = kHandle;
   return 0;
