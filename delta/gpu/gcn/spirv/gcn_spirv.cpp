@@ -199,9 +199,8 @@ void emitVop2(Tr &t, uint32_t op, uint32_t vdst, Id s0, Id s1) {
   auto setU = [&](Id u) { t.stVg(vdst, u); };
   Id u0 = t.m.bitcast(t.tU, s0), u1 = t.m.bitcast(t.tU, s1);
   switch (op) {
-    case 0x00: {  // cndmask (vcc)
-      Id vccF = t.m.bitcast(t.tF, t.ldSg(106));
-      Id cond = t.m.emit(spv::Op::OpFOrdNotEqual, t.tBool, {vccF, t.fconst(0.0f)});
+    case 0x00: {  // cndmask: VCC ? s1 : s0 (VCC stored as raw 1u/0u by VOPC)
+      Id cond = t.m.emit(spv::Op::OpINotEqual, t.tBool, {t.ldSg(106), t.m.constU32(0)});
       setF(t.m.emit(spv::Op::OpSelect, t.tF, {cond, s1, s0}));
       break;
     }
@@ -220,6 +219,49 @@ void emitVop2(Tr &t, uint32_t op, uint32_t vdst, Id s0, Id s1) {
                   {t.m.compositeConstruct(t.tV2, {s0, s1})})); break;    // cvt_pkrtz
     default: setF(t.fmul(s0, s1)); break;
   }
+}
+
+// VOPC: vector compare -> VCC (sgpr 106) as raw 1u/0u. The low nibble selects the
+// predicate (1=lt 2=eq 3=le 4=gt 5=ne 6=ge) for all of f32 (op 0x00-0x1f, incl. the
+// cmpx EXEC-writing variants which we treat the same), i32 (0x80-0x9f) and u32
+// (0xc0-0xdf). s0f/s1f are the float operands, s0u/s1u the raw uint operands.
+void emitVopc(Tr &t, uint32_t op, Id s0f, Id s1f, Id s0u, Id s1u) {
+  uint32_t lo = op & 0xF;
+  Id cond = 0;
+  Id si0 = t.m.bitcast(t.tI, s0u), si1 = t.m.bitcast(t.tI, s1u);
+  auto F = [&](spv::Op o) { return t.m.emit(o, t.tBool, {s0f, s1f}); };
+  auto I = [&](spv::Op o) { return t.m.emit(o, t.tBool, {si0, si1}); };
+  auto U = [&](spv::Op o) { return t.m.emit(o, t.tBool, {s0u, s1u}); };
+  if (op <= 0x3F) {  // f32 / f64-as-f32 / cmpx
+    switch (lo) {
+      case 1: cond = F(spv::Op::OpFOrdLessThan); break;
+      case 2: cond = F(spv::Op::OpFOrdEqual); break;
+      case 3: cond = F(spv::Op::OpFOrdLessThanEqual); break;
+      case 4: cond = F(spv::Op::OpFOrdGreaterThan); break;
+      case 5: cond = F(spv::Op::OpFUnordNotEqual); break;
+      case 6: cond = F(spv::Op::OpFOrdGreaterThanEqual); break;
+    }
+  } else if (op >= 0x80 && op <= 0xBF) {  // i32
+    switch (lo) {
+      case 1: cond = I(spv::Op::OpSLessThan); break;
+      case 2: cond = I(spv::Op::OpIEqual); break;
+      case 3: cond = I(spv::Op::OpSLessThanEqual); break;
+      case 4: cond = I(spv::Op::OpSGreaterThan); break;
+      case 5: cond = I(spv::Op::OpINotEqual); break;
+      case 6: cond = I(spv::Op::OpSGreaterThanEqual); break;
+    }
+  } else if (op >= 0xC0) {  // u32
+    switch (lo) {
+      case 1: cond = U(spv::Op::OpULessThan); break;
+      case 2: cond = U(spv::Op::OpIEqual); break;
+      case 3: cond = U(spv::Op::OpULessThanEqual); break;
+      case 4: cond = U(spv::Op::OpUGreaterThan); break;
+      case 5: cond = U(spv::Op::OpINotEqual); break;
+      case 6: cond = U(spv::Op::OpUGreaterThanEqual); break;
+    }
+  }
+  if (cond)
+    t.stSg(106, t.m.emit(spv::Op::OpSelect, t.tU, {cond, t.m.constU32(1), t.m.constU32(0)}));
 }
 
 void emitVop3(Tr &t, uint32_t op, uint32_t vdst, Id s0, Id s1, Id s2) {
@@ -317,6 +359,12 @@ bool translateVs(const uint32_t *vsCode, const uint32_t *vsUserData, Recompiled 
         emitVop3(t, op, vdst, t.srcF(s0, in.literal, neg & 1, abs & 1),
                  t.srcF(s1, in.literal, neg & 2, abs & 2),
                  t.srcF(s2, in.literal, neg & 4, abs & 4));
+        break;
+      }
+      case Enc::vopc: {
+        uint32_t op = in.opcode, vsrc1 = (w >> 9) & 0xFF, src0 = w & 0x1FF;
+        emitVopc(t, op, t.srcF(src0, in.literal), t.srcF(256 + vsrc1, in.literal),
+                 t.srcRaw(src0, in.literal), t.srcRaw(256 + vsrc1, in.literal));
         break;
       }
       case Enc::exp: {
@@ -427,6 +475,12 @@ bool translatePs(const uint32_t *psCode, Recompiled &r, Tr &t) {
         emitVop3(t, op, vdst, t.srcF(s0, in.literal, neg & 1, abs & 1),
                  t.srcF(s1, in.literal, neg & 2, abs & 2),
                  t.srcF(s2, in.literal, neg & 4, abs & 4));
+        break;
+      }
+      case Enc::vopc: {
+        uint32_t op = in.opcode, vsrc1 = (w >> 9) & 0xFF, src0 = w & 0x1FF;
+        emitVopc(t, op, t.srcF(src0, in.literal), t.srcF(256 + vsrc1, in.literal),
+                 t.srcRaw(src0, in.literal), t.srcRaw(256 + vsrc1, in.literal));
         break;
       }
       case Enc::mimg: {
