@@ -96,6 +96,16 @@ uint32_t autoSkipButtons() {
   // menu mashing.
   if (gfx::inGameplay())
     return 0;
+  // DELTA_PAD_AUTOSKIP_STOP=N: stop pulsing after N reads and hold neutral. Some
+  // titles (Doom64) need a few button presses to pass the login/title, but then an
+  // idle-triggered attract DEMO only plays if input goes quiet -- continuous pulsing
+  // suppresses it. Stop after N so login passes, then the title idles into the demo.
+  static const uint64_t stopAt = [] {
+    const char *e = std::getenv("DELTA_PAD_AUTOSKIP_STOP");
+    return e ? std::strtoull(e, nullptr, 10) : 0ull;
+  }();
+  if (stopAt && g_readSeq > stopAt)
+    return 0;
   uint32_t phase = g_readSeq % 24;
   if (phase < 3) return kOptions;
   if (phase >= 8 && phase < 11) return kCross;
