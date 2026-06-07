@@ -106,8 +106,13 @@ uint32_t autoSkipButtons() {
   }();
   if (stopAt && g_readSeq > stopAt)
     return 0;
+  // DELTA_PAD_AUTOSKIP_NOOPT: don't pulse Options, only Cross. The Options pulse is
+  // for Isaac's "PRESS OPTIONS" title; in Undertale (and other Z-to-advance titles)
+  // Options opens the config menu and derails progression, so Cross-only (= Z, the
+  // confirm/advance button) drives the intro/title/dialogue straight into the game.
+  static const bool noOpt = std::getenv("DELTA_PAD_AUTOSKIP_NOOPT") != nullptr;
   uint32_t phase = g_readSeq % 24;
-  if (phase < 3) return kOptions;
+  if (phase < 3) return noOpt ? kCross : kOptions;
   if (phase >= 8 && phase < 11) return kCross;
   if (phase >= 16 && phase < 19) return kCross;
   return 0;
