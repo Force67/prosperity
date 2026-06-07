@@ -295,6 +295,30 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
       vk::beginFrame();
       g_frameActive = true;
     }
+    // DELTA_GPU_SPRITEDUMP: for the first few TEXTURED draws, dump the resolved
+    // transform + first vertex (pos/uv via the resolved attrs) + texture, to pin
+    // why textured draws render black (degenerate MVP vs UV=0 vs blend).
+    static const bool spriteDump = std::getenv("DELTA_GPU_SPRITEDUMP") != nullptr;
+    static int sdN = 0;
+    if (spriteDump && d.recomp && !d.recomp->psTexs.empty() && d.vertexData && sdN < 12) {
+      sdN++;
+      const float *m = d.mvp;
+      std::fprintf(stderr,
+          "[sprite] tex=%#lx %ux%u tiling=%u stride=%u nvattrs=%u rt=%#lx %ux%u "
+          "blendCtl=%#x mvp=[%.3f %.3f %.3f %.3f / %.3f %.3f %.3f %.3f / ... / "
+          "%.3f %.3f %.3f %.3f]\n",
+          (unsigned long)d.texBase, d.texW, d.texH, d.texTiling, d.vertexStride,
+          d.nvattrs, (unsigned long)d.rtBase, d.rtW, d.rtH, d.blendControl,
+          m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[12], m[13], m[14], m[15]);
+      const auto *vb = static_cast<const uint8_t *>(d.vertexData);
+      for (uint32_t a = 0; a < d.nvattrs && a < 4; a++) {
+        const float *f = reinterpret_cast<const float *>(vb + d.vattrs[a].offset);
+        std::fprintf(stderr, "[sprite]   attr%u loc=%u off=%u nc=%u dfmt=%u v0=[%.4f %.4f %.4f %.4f]\n",
+            a, d.vattrs[a].location, d.vattrs[a].offset, d.vattrs[a].numComps,
+            d.vattrs[a].dfmt, f[0], d.vattrs[a].numComps>1?f[1]:0.f,
+            d.vattrs[a].numComps>2?f[2]:0.f, d.vattrs[a].numComps>3?f[3]:0.f);
+      }
+    }
     if (d.vertexData)
       vk::draw(d);
   }
