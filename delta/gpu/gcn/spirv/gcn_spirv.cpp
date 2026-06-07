@@ -848,13 +848,20 @@ bool translatePs(const uint32_t *psCode, Recompiled &r, Tr &t) {
       // GCN alpha-test/kill idiom: control flow branches over the color export for
       // failing fragments (e.g. s_cmp + s_cbranch_scc0 -> s_endpgm). Discard those
       // (OpKill) instead of leaving the output undefined.
-      Id wrote = t.isNonZero(t.m.load(t.tU, sc.colorWrittenVar));
-      Id killBlk = t.m.newBlock(), afterKill = t.m.newBlock();
-      t.m.selectionMerge(afterKill);
-      t.m.branchConditional(wrote, afterKill, killBlk);
-      t.m.openBlock(killBlk);
-      t.m.kill();
-      t.m.openBlock(afterKill);
+      // DELTA_GPU_NOKILL: skip the discard (always keep the fragment) -- a diagnostic
+      // for "everything renders black": if the whole RT is being OpKill'd (a bad
+      // sampled alpha / inverted test makes every fragment fail), disabling kill
+      // makes the content appear (with wrong transparency), proving the discard path.
+      static const bool noKill = std::getenv("DELTA_GPU_NOKILL") != nullptr;
+      if (!noKill) {
+        Id wrote = t.isNonZero(t.m.load(t.tU, sc.colorWrittenVar));
+        Id killBlk = t.m.newBlock(), afterKill = t.m.newBlock();
+        t.m.selectionMerge(afterKill);
+        t.m.branchConditional(wrote, afterKill, killBlk);
+        t.m.openBlock(killBlk);
+        t.m.kill();
+        t.m.openBlock(afterKill);
+      }
       t.m.returnVoid();
     }
     t.m.endFunction();
