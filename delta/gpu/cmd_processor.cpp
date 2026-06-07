@@ -66,6 +66,29 @@ bool isDraw(uint32_t op) {
          op == IT_DRAW_INDEX_MULTI_AUTO;
 }
 
+// GPU completion-label writes (EOP / RELEASE_MEM / WRITE_DATA). Our submit is
+// synchronous: every draw in the dcb is finished by the time we walk past these
+// packets, so the fence/label the GPU would signal is complete the instant we
+// process it. Writing it immediately is what lets the guest's CPU-side polls --
+// the flip-done / submit-done labels Gnm spins on between frames -- make
+// progress. Without it the title stalls after the few in-flight display buffers
+// drain (it never sees a flip "complete").
+const bool g_eopTrace = std::getenv("DELTA_GPU_EOPTRACE") != nullptr;
+// Labels live in guest memory the game allocated (Garlic/Onion 0x10_0000_0000+),
+// in low guest heaps (0x2_0000_0000+), or in the GnmDriver area (0xfe00_0000+).
+// Accept any plausibly-mapped, non-low address; reject null/garbage.
+inline bool labelAddrOk(uint64_t a) {
+  return a >= 0x10000ull && a < 0x20000000000ull;
+}
+void writeLabel(uint64_t addr, uint64_t value, bool is64) {
+  if (!labelAddrOk(addr))
+    return;
+  if (is64)
+    *reinterpret_cast<volatile uint64_t *>(addr) = value;
+  else
+    *reinterpret_cast<volatile uint32_t *>(addr) = static_cast<uint32_t>(value);
+}
+
 // Opcode histogram (DELTA_GPU_TRACE): shows what the dcb
 // contains and whether the walker reaches a draw or desyncs.
 uint32_t g_opHist[256] = {};
@@ -574,6 +597,67 @@ void submitDcb(const void *dcb, uint32_t sizeBytes) {
                          body[0], (unsigned long)src, (unsigned long)dst, bytes);
         }
         break;
+      case IT_WRITE_DATA: {  // body: control, dstLo, dstHi, data...
+        // Gnm writes its 32/64-bit submit/flip fence labels with WRITE_DATA. The
+        // control field's dst_sel encoding varies (the flip-label packet built by
+        // sceGnmInsertFlip uses control=5, not the [11:8]=memory form), so don't
+        // gate on dst_sel: a memory write resolves to a real guest label address,
+        // while a register write (dst_sel=0) yields a tiny offset that labelAddrOk
+        // rejects. body[1]=dstLo, body[2]=dstHi, body[3..]=data.
+        if (count >= 4) {
+          uint64_t addr = (static_cast<uint64_t>(body[2] & 0xFFFF) << 32) |
+                          (body[1] & ~0x3u);
+          uint32_t ndw = count - 3;
+          if (labelAddrOk(addr) && labelAddrOk(addr + (uint64_t)ndw * 4))
+            std::memcpy(reinterpret_cast<void *>(addr), &body[3],
+                        (size_t)ndw * 4);
+          if (g_eopTrace)
+            std::fprintf(stderr, "[eop] WRITE_DATA dst=%#lx ndw=%u v0=%#x\n",
+                         (unsigned long)addr, ndw, ndw ? body[3] : 0);
+        }
+        break;
+      }
+      case IT_EVENT_WRITE_EOP: {  // body: eventCtrl, addrLo, addrHi+sel, dataLo, dataHi
+        if (count >= 4) {
+          uint64_t addr = (static_cast<uint64_t>(body[2] & 0xFFFF) << 32) |
+                          (body[1] & ~0x3u);
+          uint32_t dataSel = (body[2] >> 29) & 0x7;  // 1=32-bit, 2=64-bit
+          uint64_t val = static_cast<uint64_t>(body[3]) |
+                         (static_cast<uint64_t>(count >= 5 ? body[4] : 0) << 32);
+          if (dataSel == 1) writeLabel(addr, val, false);
+          else if (dataSel >= 2) writeLabel(addr, val, true);
+          if (g_eopTrace)
+            std::fprintf(stderr, "[eop] EOP addr=%#lx sel=%u val=%#lx\n",
+                         (unsigned long)addr, dataSel, (unsigned long)val);
+        }
+        break;
+      }
+      case IT_RELEASE_MEM: {  // body: eventCtrl, selBits, addrLo, addrHi, dataLo, dataHi
+        if (count >= 5) {
+          uint32_t dataSel = (body[1] >> 29) & 0x7;  // 1=32-bit, 2=64-bit
+          uint64_t addr = (static_cast<uint64_t>(body[3] & 0xFFFF) << 32) |
+                          (body[2] & ~0x3u);
+          uint64_t val = static_cast<uint64_t>(body[4]) |
+                         (static_cast<uint64_t>(count >= 6 ? body[5] : 0) << 32);
+          if (dataSel == 1) writeLabel(addr, val, false);
+          else if (dataSel >= 2) writeLabel(addr, val, true);
+          if (g_eopTrace)
+            std::fprintf(stderr, "[eop] RELEASE_MEM addr=%#lx sel=%u val=%#lx\n",
+                         (unsigned long)addr, dataSel, (unsigned long)val);
+        }
+        break;
+      }
+      case IT_EVENT_WRITE_EOS: {  // body: eventCtrl, addrLo, addrHi+cmd, data
+        if (count >= 4) {
+          uint64_t addr = (static_cast<uint64_t>(body[2] & 0xFFFF) << 32) |
+                          (body[1] & ~0x3u);
+          writeLabel(addr, body[3], false);
+          if (g_eopTrace)
+            std::fprintf(stderr, "[eop] EOS addr=%#lx val=%#x\n",
+                         (unsigned long)addr, body[3]);
+        }
+        break;
+      }
       default:
         if (isDraw(op)) {
           g_totalDraws.fetch_add(1);
