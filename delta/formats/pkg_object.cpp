@@ -633,7 +633,19 @@ bool PkgFilesystem::valid() const { return impl_ && impl_->valid; }
 const PkgFilesystem::Node *PkgFilesystem::find(const char *relPath) const {
   if (!impl_ || !relPath)
     return nullptr;
-  std::string key = relPath[0] == '/' ? relPath : std::string("/") + relPath;
+  // Normalize to a single leading slash and collapse repeated slashes. Titles
+  // build asset paths by concatenation and routinely emit doubled separators
+  // (Doom64 opens "/app0//DOOMSND.DLS"); the file table is keyed on the clean
+  // path, and POSIX treats "//" as "/", so an exact match must too. Without this
+  // the soundfont open returns ENOENT and FMOD aborts the boot.
+  std::string key;
+  key.reserve(std::strlen(relPath) + 1);
+  key.push_back('/');
+  for (const char *p = relPath; *p; ++p) {
+    if (*p == '/' && (key.empty() || key.back() == '/'))
+      continue;
+    key.push_back(*p);
+  }
   auto it = impl_->files.find(key);
   return it == impl_->files.end() ? nullptr : &it->second;
 }
