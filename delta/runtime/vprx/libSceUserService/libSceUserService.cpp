@@ -10,7 +10,7 @@
 namespace {
 constexpr int32_t kUserId = 1;
 constexpr int32_t kInvalidUserId = -1;
-constexpr int kNoEvent = 0x80960013;  // SCE_USER_SERVICE_ERROR_NO_EVENT
+constexpr int kNoEvent = 0x80960007;  // SCE_USER_SERVICE_ERROR_NO_EVENT
 bool g_loginDelivered = false;
 }  // namespace
 

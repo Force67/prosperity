@@ -47,13 +47,19 @@ uint8_t *allocLowGuest(size_t size) {
   constexpr uintptr_t kFloor = 0x4000000000ull;   // 256 GiB
   constexpr uintptr_t kCeil = 0x10000000000ull;   // 2^40, the PS4 user ceiling
 #endif
+  // Align bases to 64 KiB, not just the 16 KiB page: GNM tiled textures/render
+  // targets carry alignment requirements above a page, and titles that allocate
+  // a GPU pool here and sub-allocate surfaces from its base assert when the base
+  // isn't aligned enough (DOOM's rhiTextureGnm buffer-block alignment check).
+  constexpr uintptr_t kAlign = 0x10000;
   static std::atomic<uintptr_t> next{kFloor};
   size = (size + 0x3FFF) & ~uintptr_t(0x3FFF);
   for (int tries = 0; tries < 8192; tries++) {
-    uintptr_t base = next.load(std::memory_order_relaxed);
+    uintptr_t raw = next.load(std::memory_order_relaxed);
+    uintptr_t base = (raw + (kAlign - 1)) & ~(kAlign - 1);  // align the base up
     if (base + size + 0x4000 > kCeil)
       return nullptr;  // doesn't fit; do NOT poison `next` (CAS, not fetch_add)
-    if (!next.compare_exchange_weak(base, base + size + 0x4000,
+    if (!next.compare_exchange_weak(raw, base + size + 0x4000,
                                     std::memory_order_relaxed))
       continue;  // another thread advanced it; reload and retry
     void *p = ::mmap(reinterpret_cast<void *>(base), size, PROT_READ | PROT_WRITE,

@@ -170,6 +170,10 @@ int PS4ABI sys_fstat(uint32_t fd, void *stat) {
 int PS4ABI sys_stat(const char *path, void *stat) {
   if (!path || !stat)
     return -SysError::eFAULT;
+  // Zero first, for the reason sys_fstat documents: callers read st_size without
+  // checking the return and then size a buffer from it. A missing file must
+  // leave st_size = 0, not stack garbage (DOOM read a -1 size and crashed).
+  std::memset(stat, 0, sizeof(SceKernelStat));
   int64_t size = 0;
   bool isDir = false;
   if (!vfs::stat(path, size, isDir))
