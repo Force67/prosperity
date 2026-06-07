@@ -9,6 +9,7 @@
 #include <base.h>
 
 #include <atomic>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 
@@ -24,8 +25,19 @@ int PS4ABI sys_gettimeofday(sce_timeval *tv, sce_timezone *tz) {
   if (tv) {
     struct timespec ts {};
     clock_gettime(CLOCK_REALTIME, &ts);
-    tv->tv_sec = ts.tv_sec;
-    tv->tv_usec = ts.tv_nsec / 1000;
+    uint64_t now = static_cast<uint64_t>(ts.tv_sec) * 1000000000ull + ts.tv_nsec;
+    // DIAGNOSTIC (DELTA_TIMESCALE_RT=N): advance the wall clock Nx from a fixed
+    // baseline. Classifies a busy-wait gated on a gettimeofday-based TIMEOUT
+    // (Doom64's ~1fps main loop hammers gettimeofday, not monotonic, so the old
+    // DELTA_TIMESCALE which only scaled monotonic had no effect): if fps rises the
+    // loop is timeout-bound (it gives up sooner); if unchanged it is work-bound.
+    static const long rtScale = [] { const char *e = std::getenv("DELTA_TIMESCALE_RT"); return e ? std::atol(e) : 1; }();
+    if (rtScale > 1) {
+      static const uint64_t base = now;
+      now = base + (now - base) * static_cast<uint64_t>(rtScale);
+    }
+    tv->tv_sec = static_cast<long>(now / 1000000000ull);
+    tv->tv_usec = static_cast<long>((now % 1000000000ull) / 1000);
   }
   if (tz) {
     // We report UTC with no DST: the guest's notion of "local time" is handled
