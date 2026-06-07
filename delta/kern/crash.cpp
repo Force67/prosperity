@@ -70,6 +70,9 @@ static void backtrace(uintptr_t rbp) {
   }
 }
 
+// Per-syscall call counter, filled by the lv2 trampoline under DELTA_SCHIST.
+extern "C" uint64_t g_sysHist[1024];
+
 // SIGUSR1 probe: dump the receiving thread's current guest RIP + a stack scan of
 // return addresses in loaded modules. Sent to every thread (one per /proc task)
 // to find what a wedged title's threads are blocked on. x86-native only.
@@ -92,6 +95,18 @@ static void probeHandler(int, siginfo_t *, void *ucv) {
         std::fprintf(stderr, "[probe]   sp+%-4x %s\n", i * 8, sym);
         printed++;
       }
+    }
+  }
+  // DELTA_SCHIST syscall histogram (lv2.cpp counts each syscall in its trampoline).
+  // Dump the non-zero counts so a slow/wedged title's hammered syscalls are visible
+  // -- the only profiler available (perf/strace/proc-mem are yama-blocked here).
+  // Signal ONE thread to avoid interleaved output from concurrent handlers.
+  bool any = false;
+  for (int i = 0; i < 1024; i++) {
+    if (g_sysHist[i] > 100) {  // skip noise
+      if (!any) { std::fprintf(stderr, "[schist] syscall counts:\n"); any = true; }
+      std::fprintf(stderr, "[schist]   %4d %-28s %llu\n", i, syscall_getname(i),
+                   (unsigned long long)g_sysHist[i]);
     }
   }
   std::fflush(stderr);

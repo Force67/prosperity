@@ -832,13 +832,24 @@ extern "C" uint32_t krnl_syscall_errno(uint64_t raw) {
   return 0;
 }
 
+// Per-syscall-id call counter (DELTA_SCHIST). The only profiler available on this
+// build: perf/strace/`/proc/PID/mem` are all yama-blocked, so to find what a
+// wedged/slow title hammers, count every syscall in the trampoline and dump the
+// histogram from the SIGUSR1 probe (crash.cpp). Racy increments are fine here.
+extern "C" uint64_t g_sysHist[1024] = {};
+static const bool g_scHist = std::getenv("DELTA_SCHIST") != nullptr;
+
 // One-time trampoline per handler: call it with the guest's arg registers
 // untouched, then set/clear the carry flag and normalise rax per the convention
 // above. Replaces the bare `call handler` so the guest sees faithful errors.
 static uintptr_t emit_bsd_trampoline(const void *handler, uint32_t sid,
-                                     bool trace) {
+                                     bool trace, bool count) {
   struct bsdRet : Xbyak::CodeGenerator {
-    bsdRet(uintptr_t handler, uint32_t sid, bool trace) {
+    bsdRet(uintptr_t handler, uint32_t sid, bool trace, bool count) {
+      if (count) {          // DELTA_SCHIST: ++g_sysHist[sid] (rax is caller-saved)
+        mov(rax, reinterpret_cast<uintptr_t>(&g_sysHist[sid & 1023]));
+        inc(qword[rax]);
+      }
       push(rbx);            // save guest rbx; rsp now 16-aligned for the calls
       mov(rax, handler);
       call(rax);            // handler(rdi,rsi,rdx,rcx,r8,r9) -> rax (args intact)
@@ -870,7 +881,7 @@ static uintptr_t emit_bsd_trampoline(const void *handler, uint32_t sid,
       ret();
     }
   };
-  auto *gen = new bsdRet(reinterpret_cast<uintptr_t>(handler), sid, trace);
+  auto *gen = new bsdRet(reinterpret_cast<uintptr_t>(handler), sid, trace, count);
   return reinterpret_cast<uintptr_t>(gen->getCode());
 }
 #endif // DELTA_BACKEND_NATIVE
@@ -894,12 +905,14 @@ uintptr_t lv2_get(uint32_t sid) {
   static std::mutex trMutex;
   static std::unordered_map<uint64_t, uintptr_t> trCache;
   std::lock_guard<std::mutex> lk(trMutex);
-  uint64_t key = traceErr ? static_cast<uint64_t>(sid)
-                          : reinterpret_cast<uint64_t>(handler);
+  // Per-sid stub (not deduped by handler) when tracing errors OR counting, so
+  // each id reports/counts under its own number.
+  uint64_t key = (traceErr || g_scHist) ? static_cast<uint64_t>(sid)
+                                        : reinterpret_cast<uint64_t>(handler);
   auto it = trCache.find(key);
   if (it != trCache.end())
     return it->second;
-  uintptr_t tr = emit_bsd_trampoline(handler, sid, traceErr);
+  uintptr_t tr = emit_bsd_trampoline(handler, sid, traceErr, g_scHist);
   trCache.emplace(key, tr);
   return tr;
 #else
