@@ -290,11 +290,12 @@ int32_t dceDevice::ioctl(uint32_t cmd, void *data) {
     // Submit flip (72-byte arg). s[1] = display buffer index, s[3] = flipArg
     // (verified against the 11.00 sceVideoOutSubmitFlip caller). Our flip is
     // synchronous, so record it as immediately complete: GetFlipStatus then
-    // reports currentBuffer == the index the title just flipped, unblocking its
-    // per-frame "wait for my flip" poll (this is what fixed Doom64's ~1fps).
+    // reports currentBuffer == the index the title just flipped. This is exactly
+    // Undertale's documented blocker (the flip path dropped bufferIndex/flipArg);
+    // it did NOT fix Doom64's separate ~1fps busy-wait, but it is correct.
     g_dceCurrentBuffer.store(static_cast<uint32_t>(s[1]));
     g_dceFlipArg.store(static_cast<int64_t>(s[3]));
-    g_dceFlipCount.fetch_add(1);
+    g_dceFlipCount.fetch_add(1);  // a per-flip count reported back in GetFlipStatus
     // Report success: arg[0x40] (s[8]) points at a status out-slot the caller
     // checks for 0x58 = ok.
     if (plausiblePtr(s[8]))
