@@ -339,7 +339,14 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
             d.vattrs[a].numComps>2?f[2]:0.f, d.vattrs[a].numComps>3?f[3]:0.f);
       }
     }
-    if (d.vertexData)
+    // DELTA_GPU_SKIPSTALE: drop draws that sample a very wide (>=2048) buffer, used
+    // to hide a title's stale full-screen video-buffer blit (Doom64's undecoded 4K
+    // menu bg = garbage) so the menu items drawn on top become readable -> lets the
+    // correct menu input be derived instead of guessed.
+    static const bool skipStale = std::getenv("DELTA_GPU_SKIPSTALE") != nullptr;
+    if (skipStale && d.texBase && d.texW >= 2048)
+      ; // skip the wide stale-buffer blit
+    else if (d.vertexData)
       vk::draw(d);
   }
   if (!g_trace)
