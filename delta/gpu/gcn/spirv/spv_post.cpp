@@ -4,6 +4,8 @@
  * SPIRV-Tools optimize + validate wrapper. See spv_post.h.
  */
 
+#ifdef DELTA_HAVE_SPIRV_BACKEND
+
 #include "spv_post.h"
 
 #include <cstdio>
@@ -44,3 +46,5 @@ bool validate(const std::vector<uint32_t> &spv, std::string *err) {
 }
 
 }  // namespace gpu::gcn::spirv
+
+#endif  // DELTA_HAVE_SPIRV_BACKEND

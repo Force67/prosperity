@@ -4,6 +4,8 @@
  * Minimal SPIR-V module builder. See spv_emit.h.
  */
 
+#ifdef DELTA_HAVE_SPIRV_BACKEND
+
 #include "spv_emit.h"
 
 #include <cstring>
@@ -326,3 +328,5 @@ std::vector<uint32_t> Module::assemble() const {
 }
 
 }  // namespace gpu::gcn::spirv
+
+#endif  // DELTA_HAVE_SPIRV_BACKEND

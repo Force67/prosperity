@@ -9,6 +9,7 @@
 #include "gcn_translate.h"
 #include "gcn_decode.h"
 #include "shaderc_compile.h"
+#include "spirv/gcn_spirv.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -430,6 +431,15 @@ Recompiled recompile(const uint32_t *vsCode, const uint32_t *psCode,
                      const uint32_t *vsUserData, const uint32_t *psUserData) {
   Recompiled r;
   if (!vsCode || !psCode || !vsUserData || !psUserData) return r;
+  // Direct GCN->SPIR-V backend (DELTA_GPU_SPIRV): emit SPIR-V straight from the
+  // GCN bytecode + a spirv-opt pass, skipping GLSL/shaderc. recompileSpirv
+  // validates its output and returns false on anything it can't handle, so we
+  // fall back to the GLSL backend below (no regression risk).
+  static const bool useSpirv = std::getenv("DELTA_GPU_SPIRV") != nullptr;
+  if (useSpirv) {
+    if (recompileSpirv(vsCode, psCode, vsUserData, psUserData, r)) return r;
+    r = Recompiled{};  // discard any partial state from the failed attempt
+  }
   if (!translateVs(vsCode, vsUserData, r)) return r;
   if (!translatePs(psCode, psUserData, r.numParams, r)) return r;
   if (g_dbg)
