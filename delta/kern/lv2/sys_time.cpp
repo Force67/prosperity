@@ -7,6 +7,7 @@
  */
 
 #include <base.h>
+#include <cstdlib>
 #include <ctime>
 
 #include "error_table.h"
@@ -46,6 +47,19 @@ int PS4ABI sys_clock_gettime(uint32_t clock_id, sce_timespec *tp) {
 
   struct timespec ts {};
   clock_gettime(host, &ts);
+  // DIAGNOSTIC (DELTA_TIMESCALE=N): make the guest's monotonic clock advance N x
+  // faster from a fixed baseline. If a title's ~1fps spin is a frame-rate LIMITER
+  // (`while(now < target) yield`), this makes it exit Nx sooner (fps up); if it's
+  // a work loop drowning in clock-syscall overhead, fps is unchanged. Classifies
+  // the bottleneck. Realtime is left alone (only monotonic/uptime ids scale).
+  static const long scale = [] { const char *e = std::getenv("DELTA_TIMESCALE"); return e ? std::atol(e) : 1; }();
+  if (scale > 1 && host == CLOCK_MONOTONIC) {
+    static const uint64_t base = (uint64_t)ts.tv_sec * 1000000000ull + ts.tv_nsec;
+    uint64_t now = (uint64_t)ts.tv_sec * 1000000000ull + ts.tv_nsec;
+    uint64_t scaled = base + (now - base) * (uint64_t)scale;
+    ts.tv_sec = scaled / 1000000000ull;
+    ts.tv_nsec = scaled % 1000000000ull;
+  }
   tp->tv_sec = ts.tv_sec;
   tp->tv_nsec = ts.tv_nsec;
   return 0;
