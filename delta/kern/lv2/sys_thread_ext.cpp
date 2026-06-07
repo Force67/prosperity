@@ -85,12 +85,31 @@ int PS4ABI sys_thr_get_name(uint32_t tid, char *buf) {
   return 0;
 }
 
-int PS4ABI sys_yield() {
+// A CPU "relax" hint for a spin-wait: no syscall, no context switch. The guest
+// scheduler (e.g. Doom64's KEX parallel-job manager) busy-waits for a worker by
+// calling scePthreadYield in a tight loop -- millions of times per frame. Mapping
+// that to the host sched_yield forced a context-switch each call; with ~35 guest
+// threads runnable the host scheduler kept parking the waiter, so the worker's
+// result was only seen after tens of microseconds of scheduling latency PER spin,
+// summing to ~1s/frame (~1fps). On our many-core host the workers run on their own
+// cores regardless, so a `pause` (the worker's write is seen within microseconds)
+// is both correct and ~100x faster here.
+static inline void cpuRelax() {
+#if defined(__x86_64__) || defined(__i386__)
+  __builtin_ia32_pause();
+#elif defined(__aarch64__)
+  asm volatile("yield" ::: "memory");
+#else
   std::this_thread::yield();
+#endif
+}
+
+int PS4ABI sys_yield() {
+  cpuRelax();
   return 0;
 }
 int PS4ABI sys_sched_yield() {
-  std::this_thread::yield();
+  cpuRelax();
   return 0;
 }
 
