@@ -32,6 +32,9 @@ extern "C" int vprx_anchor_libSceUsbd;
 extern "C" int vprx_anchor_libSceAudioOut;
 extern "C" int vprx_anchor_libSceAudioIn;
 extern "C" int vprx_anchor_libSceNpTrophy;
+// HLE libSceAvPlayer: stub the movie player so intro/cutscene playback is skipped
+// instead of crashing the un-emulated H.264/Atrac9 decode threads.
+extern "C" int vprx_anchor_libSceAvPlayer;
 static volatile int *const vprx_anchors[] = {&vprx_anchor_libSceVideoOut,
                                              &vprx_anchor_libSceGnmDriver,
                                              &vprx_anchor_libSceMsgDialog,
@@ -40,7 +43,8 @@ static volatile int *const vprx_anchors[] = {&vprx_anchor_libSceVideoOut,
                                              &vprx_anchor_libSceUsbd,
                                              &vprx_anchor_libSceAudioOut,
                                              &vprx_anchor_libSceAudioIn,
-                                             &vprx_anchor_libSceNpTrophy};
+                                             &vprx_anchor_libSceNpTrophy,
+                                             &vprx_anchor_libSceAvPlayer};
 
 void vprx_init() {
   // Touch the anchors so the references aren't optimized away.

@@ -250,6 +250,11 @@ public:
     bs_ = rd64(h + 0x10);
     uint64_t bo = rd64(h + 0x18);
     uint64_t dl = rd64(h + 0x28);
+    if (std::getenv("DELTA_PFS_DBG"))
+      std::fprintf(stderr,
+                   "[pfsc] magic=%02x%02x%02x%02x bs=%llu bo=%llu dl=%llu\n",
+                   h[0], h[1], h[2], h[3], (unsigned long long)bs_,
+                   (unsigned long long)bo, (unsigned long long)dl);
     if (bs_ == 0)
       return;
     n_ = dl / bs_;
@@ -526,14 +531,23 @@ struct PkgImpl {
     // + inodes + dirents + flat_path_table), so locate it by its "PFSC" magic
     // rather than assuming a fixed block. (Isaac lands at block 11, P.T. at 19.)
     uint64_t innerBlk = 11;
-    for (uint64_t bi = 1; bi < 256; ++bi) {
+    bool found = false;
+    uint64_t maxBlk = (pkg.GetSize() - pfsOff) / outerBs;
+    for (uint64_t bi = 1; bi < maxBlk; ++bi) {
       uint8_t magic[4];
       outer->read(bi * outerBs, sizeof(magic), magic);
       if (magic[0] == 'P' && magic[1] == 'F' && magic[2] == 'S' && magic[3] == 'C') {
         innerBlk = bi;
+        found = true;
         break;
       }
     }
+    if (std::getenv("DELTA_PFS_DBG"))
+      std::fprintf(stderr,
+                   "[pkg] pfsOff=%llu outerBs=%u PFSC scan: found=%d "
+                   "innerBlk=%llu maxBlk=%llu\n",
+                   (unsigned long long)pfsOff, outerBs, found,
+                   (unsigned long long)innerBlk, (unsigned long long)maxBlk);
     auto *sub = make<SubSource>(outer, innerBlk * outerBs);
     auto *pfsc = make<PfscSource>(sub);
 
