@@ -22,7 +22,12 @@ BUILD_DIR="$ROOT/build"                 # nix-toolchain build (consistent libstd
 BIN="$BUILD_DIR/delta/main/ps4delta"
 #DEFAULT_PKG="/home/vince/Documents/dumps/The.Binding.of.Isaac.Rebirth.v1.16.PS4-CUSA00792.pkg"
 #DEFAULT_PKG="/home/vince/Documents/dumps/Undertale-CUSA09415.pkg"
-DEFAULT_PKG="/home/vince/Documents/dumps/uncharted2.pkg"
+#DEFAULT_PKG="/home/vince/Documents/dumps/gtasa.pkg"
+#DEFAULT_PKG="/home/vince/Documents/dumps/uncharted2.pkg"
+#DEFAULT_PKG="/home/vince/Documents/dumps/shadowofthecolossus.pkg"
+DEFAULT_PKG="/home/vince/Documents/dumps/doom64.pkg"
+#
+# /home/vince/Documents/dumps/doom64.pkg
 
 DO_BUILD=0; TRACE=0; TIMEOUT=""; LOG=""; EXTRA=()
 while [[ $# -gt 0 ]]; do

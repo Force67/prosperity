@@ -1,41 +1,97 @@
-# Build dependencies
+# Building
 
-* A Windows machine with Visual Studio 2019 (Community Edition is fine too)
-* Clang-cl for windows (install it from your visual studio installer)
-* Qt >= 5.12 with `msvc2017_64` (Ensure that the `QTDIR` or `QT_DIR` environment variable are set). It can be found [here](https://www.qt.io/offline-installers)
+Prosperity targets Linux (x86-64 and aarch64) and Android. The CPU backend is
+chosen automatically from the host architecture:
 
-# Setup the project
+* **x86-64 host** -> `NATIVE`: guest x86-64 runs directly on the CPU.
+* **aarch64 host** -> `FEX`: guest x86-64 runs through an embedded FEX JIT.
 
+The graphics layer needs Vulkan, SDL3 and shaderc. The supported way to get a
+matching toolchain is the Nix dev shell defined in `flake.nix`.
+
+## Get the source
+
+All third-party code (capstone, fmtlib, zlib, xbyak, FEX, mbedtls, equilibrium,
+googletest) is vendored as git submodules, so clone recursively:
+
+```bash
+git clone --recursive https://github.com/Force67/prosperity.git
+cd prosperity
+# already cloned without --recursive?
+git submodule update --init --recursive
 ```
-git clone https://github.com/Force67/ps4delta.git
-cd ps4delta
-git submodule update --init
+
+## Linux (Nix, recommended)
+
+Install Nix (with flakes enabled) from <https://nixos.org/download>, then:
+
+```bash
+nix develop                                 # enter the dev shell
+cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build                         # or: ninja -C build
 ```
 
-#### Building the project
+The dev shell provides cmake, ninja, the compiler, Vulkan, SDL3, shaderc, and
+mesa's lavapipe (software Vulkan) for headless/GPU-less machines.
 
-Execute pmake.cmd in order to generate the project solution. 
+To run everything in one shot without entering the shell interactively:
 
-Afterwards you can open `build/PS4Delta.sln`. The recommended build configuration is `Release` for all purposes.
+```bash
+nix develop --command bash -c 'cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build'
+```
 
-Don't forget to copy the QT runtime dlls in the output directory (can be found at `%QT_DIR%/bin`)
-You will need for __release__ : `Qt5core.dll` `Qt5gui.dll` `Qt5Qml.dll` `Qt5Widgets.dll` `Qt5WinExtras.dll` `Qt53DRender.dll`
-And for  __debug__ : `Qt5cored.dll` `Qt5guid.dll` `Qt5Qmld.dll` `Qt5Widgetsd.dll` `Qt5WinExtrasd.dll` `Qt53DRenderd.dll`
+The resulting binary is `build/delta/main/ps4delta`. See
+[installation.md](installation.md) for how to run it.
 
-Then you will need to do the actual installation of the project by following these instructions [here](https://github.com/Force67/ps4delta/blob/master/docs/installation.md)
+## Linux (without Nix)
 
-#### Troubleshooting
+You need a C++20 toolchain (GCC 13+ or Clang 18+) plus:
 
-Q - I don't see any project solution in `/build` folder
-A - You might need to download the Qt offline installer as shown above if you haven't got it yet. Also make sure you QT_DIR are set to something like `C:\Qt\Qt5.14.0\5.14.0\msvc2017_64`
+* `cmake` >= 3.20 and `ninja`
+* Vulkan headers + loader (`libvulkan`)
+* SDL3 (note: not packaged on Ubuntu 24.04 yet; build it from source)
+* shaderc (`glslc` / `libshaderc`)
 
-Q - I got the error `MSB8020` when building the project with VS2019
-A - It means that you haven't got any tools for building the solution, so you might need to the VS installer, modify VS2019 and add both `C++ Clang` and `C++ Clang-cl`. 
+Then configure and build the same way:
 
-Q - When I start the app it shows `Unable to load core`
-A - First check that you have built the entire solution and not just the host project. Then check if in the `bin/Debug` folder, there is a file named `dcore.dll`. Also, double check that you copied all the runtime dlls in the output folder.
+```bash
+cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+```
 
-Q - When I start the app in release it crashes and when I start the app in debug it shows `This application failed to start because no Qt platform plugin could be initialized.`
-A - Copy the platforms folder from your `%QT_DIR%/plugins/` to your target folder (Debug or Release)
+If `find_package(Vulkan)` or `find_package(SDL3)` fails, the corresponding
+dependency is missing. Nix is recommended precisely because SDL3 and shaderc are
+awkward to obtain on stable distros.
 
-If you have other issues at the building process, feel free to ask them on our discord server [here](https://discord.gg/WqWjujt).
+## Android
+
+Android builds use the NDK toolchain (clang) and run on aarch64 via the FEX
+backend. There are two flavours:
+
+* **Headless adb-shell binary** (default): dumps frames, driven over `adb`.
+* **On-screen NativeActivity APK**: configure with `-DDELTA_ANDROID_APP=ON`
+  (requires the NDK; builds `libps4delta_app.so` and presents to the device).
+
+The exact NDK/SDK wiring lives in the (gitignored) `build-apk.sh` /
+`run-android.sh` helper scripts.
+
+## CMake options
+
+| Option | Default | Effect |
+| --- | --- | --- |
+| `CMAKE_BUILD_TYPE` | `Release` | standard CMake build type |
+| `DELTA_BUILD_TESTS` | `ON` | build the unit tests (`ctest`) |
+| `DELTA_BACKEND` | auto | `NATIVE` or `FEX`; auto-selected from host arch |
+| `DELTA_ANDROID_APP` | `OFF` | build the on-screen Android app (needs the NDK) |
+
+Host-only dev tools (`tools/modload`, `modexec`, `pkg_check`, `gfx_test`) are
+built automatically on non-Android targets.
+
+## Tests
+
+```bash
+ctest --test-dir build --output-on-failure
+```
+
+CI (`.github/workflows/cibuild.yml`) runs exactly this configure/build/test flow
+inside the same Nix dev shell.
