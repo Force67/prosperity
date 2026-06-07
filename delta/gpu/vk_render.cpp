@@ -1043,14 +1043,28 @@ bool drawRecomp(const DrawInfo &d) {
     const char *e = std::getenv("DELTA_GPU_RECOMP_COMPOSITE");
     return !e || std::strcmp(e, "0") != 0;
   }();
-  bool rtAsTex = d.texBase && d.texBase != d.rtBase && g_rts.count(d.texBase);
-  uint32_t srcW = rtAsTex ? g_rts[d.texBase].w : 0;
+  // Resolve the sampled texture address to an overlapping live RT (resource-model
+  // page-table lookup), so the primary recompiled path also binds the live image
+  // for cycled/aliased RT addresses instead of stale guest memory -- unifying
+  // RT-as-texture resolution with the heuristic draw() path. Additive: an exact RT
+  // base resolves to itself.
+  uint64_t texBase = d.texBase;
+  static const bool rtOverlap2 = [] {
+    const char *e = std::getenv("DELTA_GPU_RTOVERLAP");
+    return !e || std::strcmp(e, "0") != 0;
+  }();
+  if (rtOverlap2 && texBase && !g_rts.count(texBase)) {
+    uint64_t r = resolveSampledRT(texBase, d.texW, d.texH);
+    if (r) texBase = r;
+  }
+  bool rtAsTex = texBase && texBase != d.rtBase && g_rts.count(texBase);
+  uint32_t srcW = rtAsTex ? g_rts[texBase].w : 0;
   bool roomSrc = rtAsTex && srcW >= 700 && srcW <= 900;
   // The fullscreen scene->scanout composite (large source) stays on the heuristic
   // path: it relies on the forced-opaque (alpha=1) blit; running it through the real
   // shader blacks the scanout.
   bool fsSrc = rtAsTex && srcW >= 1280;
-  if (d.texBase && d.texBase == d.rtBase) return false;
+  if (texBase && texBase == d.rtBase) return false;
   if (rtAsTex && (roomSrc || fsSrc || !recompComposite)) return false;
   // Index range -> vertex count.
   const uint16_t *i16 = nullptr; const uint32_t *i32 = nullptr;
@@ -1191,7 +1205,7 @@ bool drawRecomp(const DrawInfo &d) {
   if (g.curRt != d.rtBase) {
     endRegion();
     if (rtAsTex) {
-      auto &src = g_rts[d.texBase];
+      auto &src = g_rts[texBase];
       if (src.layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
         imageBarrier(g.cmd, src.image, src.layout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                      VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
@@ -1203,7 +1217,7 @@ bool drawRecomp(const DrawInfo &d) {
     beginRegion(d.rtBase, *rt);
   }
   if (rtAsTex) {
-    auto &src = g_rts[d.texBase];
+    auto &src = g_rts[texBase];
     if (src.layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) return false;  // mid-region; fall back
     texSet = src.set;
     if (!texSet) return false;
