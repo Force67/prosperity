@@ -641,6 +641,11 @@ void uploadTexPixels(VkImage img, uint64_t base, uint32_t w, uint32_t h,
                      uint32_t tiling = 8, uint32_t pitch = 0) {
   VkDeviceSize sz = (VkDeviceSize)w * h * 4;
   static const bool noDetile = std::getenv("DELTA_GPU_NODETILE") != nullptr;
+  // DELTA_GPU_FORCETILE=N: override the T# tiling index for ALL sampled textures, to
+  // test whether a "linear" (tiling=8) buffer is actually GPU-tiled (e.g. Doom64's
+  // 4K menu composite scrambles when read linear). N is the tiling index to de-tile as.
+  static const int forceTile = [] { const char *e = std::getenv("DELTA_GPU_FORCETILE"); return e ? std::atoi(e) : -1; }();
+  if (forceTile >= 0) tiling = (uint32_t)forceTile;
   std::vector<uint32_t> linear;
   const void *srcPixels = reinterpret_cast<const void *>(base);
   if (!noDetile && !gcn::tilingIsLinear(tiling)) {

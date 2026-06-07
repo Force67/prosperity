@@ -239,6 +239,17 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
         d.uvData = d.vertexData;
         d.uvStride = d.vertexStride;
         // d.uvOffset was derived from the fetch shader during vertex extraction.
+        // DELTA_GPU_TEXFMT: dump sampled texture formats (dfmt/nfmt/tiling/dims) to
+        // pin a scrambled draw (e.g. Doom64's menu) to a format/tiling we mishandle.
+        static const bool texfmt = std::getenv("DELTA_GPU_TEXFMT") != nullptr;
+        static int tfN = 0;
+        if (texfmt && tfN < 24) {
+          tfN++;
+          std::fprintf(stderr, "[texfmt] base=%#lx %ux%u pitch=%u dfmt=%u nfmt=%u tiling=%u rt=%ux%u\n",
+                       (unsigned long)texs[0].base, texs[0].width, texs[0].height,
+                       texs[0].pitch, texs[0].dfmt, texs[0].nfmt, texs[0].tilingIdx,
+                       d.rtW, d.rtH);
+        }
       }
     }
     // Recompiled-shader path: recompile the VS/PS pair (cached) and resolve the
