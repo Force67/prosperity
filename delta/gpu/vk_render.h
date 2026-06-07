@@ -71,6 +71,14 @@ struct DrawInfo {
   uint32_t texTiling = 8;       // T# tiling_index (8/31 = linear; else tiled)
   uint32_t texPitch = 0;        // T# surface pitch in pixels (0 = use texW)
 
+  // Multi-texture: a PS can sample several textures (Doom64's 3D walls/floors use
+  // a diffuse + lightmap + ... loaded from the EUD resource table). texs[0] mirrors
+  // texBase. When nTexs > 1 the renderer binds an N-sampler descriptor set; texs[i]
+  // maps to the recompiled PS's sampler binding i.
+  struct DrawTex { uint64_t base = 0; uint32_t w = 0, h = 0, tiling = 8, pitch = 0; };
+  DrawTex texs[8];
+  uint32_t nTexs = 0;
+
   // Per-draw blend state, decoded from CB_BLEND0_CONTROL (raw dword) + whether
   // blending is enabled for color target 0. The renderer maps the GNM blend
   // factors/functions to a Vulkan pipeline (cached per unique state).

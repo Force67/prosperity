@@ -93,6 +93,18 @@ struct State {
   VkDescriptorPool dsPool = VK_NULL_HANDLE;
   VkSampler sampler = VK_NULL_HANDLE;
 
+  // Multi-texture (recomp PS sampling >1 texture, e.g. Doom64 3D): an 8-binding
+  // set-0 layout + a pool for the N-sampler sets, plus a 1x1 white default for any
+  // binding the PS samples that we couldn't resolve (so diffuse*lightmap with a
+  // missing map shows the diffuse instead of going black). The single-texture path
+  // (Isaac/Undertale/composites) is unchanged.
+  static constexpr uint32_t kMaxTex = 8;
+  VkDescriptorSetLayout texArrayLayout = VK_NULL_HANDLE;
+  VkDescriptorPool mtexPool = VK_NULL_HANDLE;
+  VkImage whiteImg = VK_NULL_HANDLE;
+  VkDeviceMemory whiteMem = VK_NULL_HANDLE;
+  VkImageView whiteView = VK_NULL_HANDLE;
+
   // Recomp cbuffer ring: a per-frame host-visible dynamic uniform buffer. The
   // recompiled VS reads its constant buffer (transforms) from descriptor set 1
   // (textures stay at set 0). Per draw we copy the guest cbuffer window into the
@@ -588,6 +600,9 @@ bool createPipeline() {
   return true;
 }
 
+void uploadTexPixels(VkImage img, uint64_t base, uint32_t w, uint32_t h,
+                     uint32_t tiling, uint32_t pitch);  // defined below
+
 bool createTexPipeline() {
   if (g.texPipeline)
     return true;
@@ -610,6 +625,42 @@ bool createTexPipeline() {
   sc.magFilter = sc.minFilter = VK_FILTER_LINEAR;
   sc.addressModeU = sc.addressModeV = sc.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
   VKOK(vkCreateSampler(g.device, &sc, nullptr, &g.sampler));
+
+  // Multi-texture path: an 8-binding set-0 layout + a pool, used only by recomp PS
+  // that sample >1 texture (single-texture draws keep the 1-binding dsLayout/dsPool).
+  {
+    VkDescriptorSetLayoutBinding mb[State::kMaxTex];
+    for (uint32_t i = 0; i < State::kMaxTex; i++)
+      mb[i] = {i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+    VkDescriptorSetLayoutCreateInfo ml{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    ml.bindingCount = State::kMaxTex; ml.pBindings = mb;
+    VKOK(vkCreateDescriptorSetLayout(g.device, &ml, nullptr, &g.texArrayLayout));
+    VkDescriptorPoolSize mps{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4096 * State::kMaxTex};
+    VkDescriptorPoolCreateInfo mp{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    mp.maxSets = 4096; mp.poolSizeCount = 1; mp.pPoolSizes = &mps;
+    VKOK(vkCreateDescriptorPool(g.device, &mp, nullptr, &g.mtexPool));
+
+    // 1x1 white default texture (for unresolved sampler bindings).
+    VkImageCreateInfo wi{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    wi.imageType = VK_IMAGE_TYPE_2D; wi.format = VK_FORMAT_R8G8B8A8_UNORM;
+    wi.extent = {1, 1, 1}; wi.mipLevels = 1; wi.arrayLayers = 1;
+    wi.samples = VK_SAMPLE_COUNT_1_BIT; wi.tiling = VK_IMAGE_TILING_OPTIMAL;
+    wi.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    VKOK(vkCreateImage(g.device, &wi, nullptr, &g.whiteImg));
+    VkMemoryRequirements wmr; vkGetImageMemoryRequirements(g.device, g.whiteImg, &wmr);
+    VkMemoryAllocateInfo wai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    wai.allocationSize = wmr.size;
+    wai.memoryTypeIndex = findMemoryType(wmr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    VKOK(vkAllocateMemory(g.device, &wai, nullptr, &g.whiteMem));
+    vkBindImageMemory(g.device, g.whiteImg, g.whiteMem, 0);
+    uint32_t white = 0xFFFFFFFFu;
+    uploadTexPixels(g.whiteImg, reinterpret_cast<uint64_t>(&white), 1, 1, 8, 1);
+    VkImageViewCreateInfo wv{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    wv.image = g.whiteImg; wv.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    wv.format = VK_FORMAT_R8G8B8A8_UNORM;
+    wv.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    VKOK(vkCreateImageView(g.device, &wv, nullptr, &g.whiteView));
+  }
 
   VkPushConstantRange pcr{VK_SHADER_STAGE_VERTEX_BIT, 0, 68};  // mat4 + clipUV flag
   VkPipelineLayoutCreateInfo li{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
@@ -781,6 +832,52 @@ VkDescriptorSet getTexture(uint64_t base, uint32_t w, uint32_t h,
 
   g_texCache[base] = e;
   return e.set;
+}
+
+// Image view for a guest texture (ensures it is cached/uploaded via getTexture).
+VkImageView texViewFor(const DrawInfo::DrawTex &t) {
+  if (!t.base || !t.w || !t.h) return VK_NULL_HANDLE;
+  if (getTexture(t.base, t.w, t.h, t.tiling, t.pitch) == VK_NULL_HANDLE)
+    return VK_NULL_HANDLE;
+  auto it = g_texCache.find(t.base);
+  return it != g_texCache.end() ? it->second.view : VK_NULL_HANDLE;
+}
+
+// An N-sampler descriptor set (set 0, bindings 0..kMaxTex-1) for a recomp PS that
+// samples >1 texture. Cached by the combination of the textures' (base,w,h); any
+// binding we cannot resolve gets the 1x1 white default so a diffuse*lightmap shader
+// with a missing map shows the diffuse instead of going black.
+std::unordered_map<uint64_t, VkDescriptorSet> g_mtexCache;
+VkDescriptorSet getMultiTexSet(const DrawInfo &d) {
+  uint64_t key = 1469598103934665603ull;
+  for (uint32_t i = 0; i < d.nTexs; i++)
+    key = (key ^ texHash(d.texs[i].base, d.texs[i].w, d.texs[i].h)) * 1099511628211ull;
+  auto ci = g_mtexCache.find(key);
+  if (ci != g_mtexCache.end()) {
+    for (uint32_t i = 0; i < d.nTexs; i++) texViewFor(d.texs[i]);  // refresh content
+    return ci->second;
+  }
+  if (g_mtexCache.size() > 3500) return VK_NULL_HANDLE;
+  VkImageView views[State::kMaxTex];
+  for (uint32_t i = 0; i < State::kMaxTex; i++) {
+    VkImageView v = i < d.nTexs ? texViewFor(d.texs[i]) : VK_NULL_HANDLE;
+    views[i] = v ? v : g.whiteView;
+  }
+  VkDescriptorSetAllocateInfo da{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+  da.descriptorPool = g.mtexPool; da.descriptorSetCount = 1; da.pSetLayouts = &g.texArrayLayout;
+  VkDescriptorSet set;
+  if (vkAllocateDescriptorSets(g.device, &da, &set) != VK_SUCCESS) return VK_NULL_HANDLE;
+  VkDescriptorImageInfo dii[State::kMaxTex];
+  VkWriteDescriptorSet wr[State::kMaxTex];
+  for (uint32_t i = 0; i < State::kMaxTex; i++) {
+    dii[i] = {g.sampler, views[i], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    wr[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    wr[i].dstSet = set; wr[i].dstBinding = i; wr[i].descriptorCount = 1;
+    wr[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; wr[i].pImageInfo = &dii[i];
+  }
+  vkUpdateDescriptorSets(g.device, State::kMaxTex, wr, 0, nullptr);
+  g_mtexCache[key] = set;
+  return set;
 }
 
 void ensureReadback(uint32_t w, uint32_t h) {
@@ -1029,6 +1126,7 @@ struct RecompPipe {
   VkPipeline pipe = VK_NULL_HANDLE;
   VkPipelineLayout layout = VK_NULL_HANDLE;
   bool textured = false;
+  bool multiTex = false;  // PS samples >1 texture -> set 0 = the N-sampler layout
 };
 std::unordered_map<uint64_t, RecompPipe> g_recompPipes;
 
@@ -1047,9 +1145,13 @@ RecompPipe *getRecompPipe(const DrawInfo &d) {
   if (it != g_recompPipes.end()) return &it->second;
   RecompPipe rp;
   rp.textured = !d.recomp->psTexs.empty();
+  rp.multiTex = d.recomp->psTexs.size() > 1;  // multi-sampler set-0 layout
 
   // set 0 = texture(s) (or an empty layout when untextured), set 1 = cbuffer UBO.
-  VkDescriptorSetLayout sls[2] = {rp.textured ? g.dsLayout : g.emptyLayout, g.uboLayout};
+  // A multi-texture PS uses the 8-binding layout; single-texture keeps the 1-binding.
+  VkDescriptorSetLayout set0 = !rp.textured ? g.emptyLayout
+                             : rp.multiTex ? g.texArrayLayout : g.dsLayout;
+  VkDescriptorSetLayout sls[2] = {set0, g.uboLayout};
   VkPipelineLayoutCreateInfo li{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
   li.setLayoutCount = 2;
   li.pSetLayouts = sls;
@@ -1233,7 +1335,8 @@ bool drawRecomp(const DrawInfo &d) {
   // the region switch (transitioning it to readable must happen outside a region).
   VkDescriptorSet texSet = VK_NULL_HANDLE;
   if (rp->textured && !rtAsTex) {
-    texSet = getTexture(d.texBase, d.texW, d.texH, d.texTiling, d.texPitch);
+    texSet = rp->multiTex ? getMultiTexSet(d)
+                          : getTexture(d.texBase, d.texW, d.texH, d.texTiling, d.texPitch);
     if (!texSet) return false;
   }
 

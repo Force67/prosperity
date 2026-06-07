@@ -114,17 +114,56 @@ std::vector<TImage> trackTextures(const uint32_t *psCode, uint32_t maxDwords,
   if (!psCode || !psUserData)
     return result;
   auto insts = decode(psCode, maxDwords);
+
+  // First pass: track s_load_dwordx8 (SMRD op 3) that load a T# from the
+  // extended-user-data resource table. The base pointer sits in the user-data
+  // SGPR pair `sbase*2`; the T# is `off` dwords into that table. We record the
+  // destination SGPR so a later MIMG referencing it can resolve the T# the
+  // table holds. Isaac passes its single T# inline and emits no such load, so
+  // this map stays empty for it (the inline path below is unchanged).
+  struct Loaded { uint64_t taddr; };
+  std::vector<std::pair<uint32_t, Loaded>> sloads;  // dstSgpr -> resolved T# address
+  auto findLoad = [&](uint32_t sgpr) -> const Loaded * {
+    for (auto it = sloads.rbegin(); it != sloads.rend(); ++it)
+      if (it->first == sgpr) return &it->second;
+    return nullptr;
+  };
+  for (const auto &in : insts) {
+    if (in.enc != Enc::smrd)
+      continue;
+    Smrd s = decodeSmrd(in.raw[0]);
+    if (s.op != 0x03)  // s_load_dwordx8 (an 8-dword T#)
+      continue;
+    uint32_t baseSgpr = s.sbase * 2;  // user_data index of the table pointer
+    if (baseSgpr + 1 >= 16)
+      continue;
+    uint64_t table = (static_cast<uint64_t>(psUserData[baseSgpr + 1] & 0xFFFF) << 32) |
+                     psUserData[baseSgpr];
+    if (table < 0x1000000000ull || table >= 0x20000000000ull)
+      continue;
+    uint64_t taddr = table + (s.imm ? static_cast<uint64_t>(s.offset) * 4 : 0);
+    sloads.push_back({s.sdst, {taddr}});
+    if (g_trace)
+      std::fprintf(stderr, "[gcnres] s_load_dwordx8 sgpr%u <- table=%#lx off=%u -> T# @%#lx\n",
+                   s.sdst, (unsigned long)table, s.offset, (unsigned long)taddr);
+  }
+
   for (const auto &in : insts) {
     // MIMG image_sample: the T# / S# are referenced by SGPR indices (SRSRC /
-    // SSAMP). The PS passes them inline in its user-data SGPRs (Isaac does no
-    // s_load), so read the 8-dword T# straight out of user_data[srsrc*4..].
+    // SSAMP). A PS either passes them inline in its user-data SGPRs (Isaac does
+    // no s_load) or loads them from the resource table via s_load_dwordx8
+    // (3D shaders that sample several maps). Resolve inline first, else from the
+    // s_load map, and return every valid texture in MIMG (= binding) order.
     if (in.enc != Enc::mimg)
       continue;
     uint32_t word1 = in.raw[1];
     uint32_t srsrc = ((word1 >> 16) & 0x1F) * 4;  // T# base SGPR
-    if (srsrc + 8 > 16)
+    bool inline_ = srsrc + 8 <= 16;
+    const Loaded *ld = inline_ ? nullptr : findLoad(srsrc);
+    if (!inline_ && !ld)
       continue;
-    TImage t = decodeTImage(&psUserData[srsrc]);
+    TImage t = inline_ ? decodeTImage(&psUserData[srsrc])
+                       : decodeTImage(reinterpret_cast<const uint32_t *>(ld->taddr));
     if (t.valid) {
       // Empirical tiling census (DELTA_GPU_TILEHIST): tally tilingIdx of every
       // sampled texture so we can confirm which modes are linear (8/31) vs 1D
@@ -144,11 +183,11 @@ std::vector<TImage> trackTextures(const uint32_t *psCode, uint32_t maxDwords,
         }
       }
       if (g_trace)
-        std::fprintf(stderr, "[gcnres] T# (inline sgpr%u) base=%#lx %ux%u pitch=%u "
-                     "dfmt=%u nfmt=%u tiling=%u\n", srsrc, (unsigned long)t.base,
-                     t.width, t.height, t.pitch, t.dfmt, t.nfmt, t.tilingIdx);
+        std::fprintf(stderr, "[gcnres] T# (%s sgpr%u) base=%#lx %ux%u pitch=%u "
+                     "dfmt=%u nfmt=%u tiling=%u\n", inline_ ? "inline" : "s_load",
+                     srsrc, (unsigned long)t.base, t.width, t.height, t.pitch,
+                     t.dfmt, t.nfmt, t.tilingIdx);
       result.push_back(t);
-      break;  // first texture is the sprite atlas
     }
   }
   return result;
