@@ -123,7 +123,7 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
       std::fprintf(stderr, "[gpu]   PS user_data:");
       for (int k = 0; k < 16; k++) std::fprintf(stderr, " %08x", pud[k]);
       std::fprintf(stderr, "\n");
-      auto texs = gcn::trackTextures(reinterpret_cast<const uint32_t *>(psA), 256, pud);
+      auto texs = gcn::trackTextures(reinterpret_cast<const uint32_t *>(psA), 4096, pud);
       std::fprintf(stderr, "[gpu]   trackTextures -> %zu\n", texs.size());
       if (!texs.empty()) {
         auto &t = texs[0];
@@ -228,7 +228,7 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
     // sprite vertex format is {pos.xyzw @0, color @0x10, uv.xy @0x1c} in a
     // 64-byte vertex, so the UV lives in the position buffer at offset 0x1c.
     if (psA >= 0x1000000000ull && psA < 0x20000000000ull && d.vertexData) {
-      auto texs = gcn::trackTextures(reinterpret_cast<const uint32_t *>(psA), 256,
+      auto texs = gcn::trackTextures(reinterpret_cast<const uint32_t *>(psA), 4096,
                                      &g_regs[mmSPI_SHADER_USER_DATA_PS_0]);
       if (!texs.empty()) {
         d.texBase = texs[0].base;
@@ -238,6 +238,11 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
         d.texPitch = texs[0].pitch;
         d.uvData = d.vertexData;
         d.uvStride = d.vertexStride;
+        // All sampled textures (binding order), for multi-texture PS (Doom64 3D).
+        d.nTexs = static_cast<uint32_t>(texs.size() < 8 ? texs.size() : 8);
+        for (uint32_t i = 0; i < d.nTexs; i++)
+          d.texs[i] = {texs[i].base, texs[i].width, texs[i].height,
+                       texs[i].tilingIdx, texs[i].pitch};
         // d.uvOffset was derived from the fetch shader during vertex extraction.
         // DELTA_GPU_TEXFMT: dump sampled texture formats (dfmt/nfmt/tiling/dims) to
         // pin a scrambled draw (e.g. Doom64's menu) to a format/tiling we mishandle.
@@ -337,6 +342,43 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
             a, d.vattrs[a].location, d.vattrs[a].offset, d.vattrs[a].numComps,
             d.vattrs[a].dfmt, f[0], d.vattrs[a].numComps>1?f[1]:0.f,
             d.vattrs[a].numComps>2?f[2]:0.f, d.vattrs[a].numComps>3?f[3]:0.f);
+      }
+    }
+    // DELTA_GPU_GEOMDUMP: dump the full state of high-index (3D level geometry)
+    // draws to diagnose why Doom64's 3D renders black: textured vs vertex-color,
+    // the texture format/tiling, the cbuffer transform, and a vertex position
+    // (on-screen check). Gated on indexCount>=500 so it only fires in a 3D level.
+    static const bool geomDump = std::getenv("DELTA_GPU_GEOMDUMP") != nullptr;
+    static int gdN = 0;
+    if (geomDump && d.indexCount >= 500 && d.recomp && d.vertexData && gdN < 16) {
+      gdN++;
+      const float *cb = d.cbufBase ? reinterpret_cast<const float *>(d.cbufBase) : nullptr;
+      const auto *vb = static_cast<const uint8_t *>(d.vertexData);
+      const float *p0 = reinterpret_cast<const float *>(vb + d.vattrs[0].offset);
+      std::fprintf(stderr,
+          "[geom] idx=%u psTexs=%zu tex=%#lx %ux%u tiling=%u pitch=%u rt=%#lx %ux%u "
+          "blend=%#x mask=%#x cc=%#x nvattrs=%u stride=%u pos0=[%.1f %.1f %.1f] cbufBase=%#lx\n",
+          d.indexCount, d.recomp->psTexs.size(), (unsigned long)d.texBase, d.texW, d.texH,
+          d.texTiling, d.texPitch, (unsigned long)d.rtBase, d.rtW, d.rtH, d.blendControl,
+          d.targetMask, d.colorControl, d.nvattrs, d.vertexStride,
+          p0[0], p0[1], p0[2], (unsigned long)d.cbufBase);
+      if (cb)
+        std::fprintf(stderr, "  cbuf=[%.3f %.3f %.3f %.3f / %.3f %.3f %.3f %.3f / %.3f %.3f %.3f %.3f / %.3f %.3f %.3f %.3f]\n",
+            cb[0],cb[1],cb[2],cb[3],cb[4],cb[5],cb[6],cb[7],cb[8],cb[9],cb[10],cb[11],cb[12],cb[13],cb[14],cb[15]);
+      // Dump the PS's texture-load pattern: SMRD (op/sdst/sbase/imm/off) + MIMG srsrc,
+      // and the first 8 user-data dwords, to see how the 4 T#s are loaded.
+      auto psI = gcn::decode(reinterpret_cast<const uint32_t *>(d.psAddr), 4096);
+      const uint32_t *pud = &g_regs[mmSPI_SHADER_USER_DATA_PS_0];
+      std::fprintf(stderr, "  ps_ud=[%08x %08x %08x %08x %08x %08x %08x %08x]\n",
+                   pud[0],pud[1],pud[2],pud[3],pud[4],pud[5],pud[6],pud[7]);
+      for (auto &in : psI) {
+        if (in.enc == gcn::Enc::smrd) {
+          uint32_t w = in.raw[0];
+          std::fprintf(stderr, "  smrd op=%u sdst=%u sbase=%u imm=%u off=%#x\n",
+                       (w>>22)&0x1F, (w>>15)&0x7F, (w>>9)&0x3F, (w>>8)&1, w&0xFF);
+        } else if (in.enc == gcn::Enc::mimg) {
+          std::fprintf(stderr, "  mimg srsrc=%u\n", ((in.raw[1]>>16)&0x1F)*4);
+        }
       }
     }
     // DELTA_GPU_SKIPSTALE: drop draws that sample a very wide (>=2048) buffer, used
