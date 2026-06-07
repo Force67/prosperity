@@ -111,7 +111,20 @@ uint32_t autoSkipButtons() {
   // Options opens the config menu and derails progression, so Cross-only (= Z, the
   // confirm/advance button) drives the intro/title/dialogue straight into the game.
   static const bool noOpt = std::getenv("DELTA_PAD_AUTOSKIP_NOOPT") != nullptr;
+  // DELTA_PAD_AUTOSKIP_NAV: vertical menu navigation. Pulse Options (pass a title),
+  // then Down (move the cursor down a list) interleaved with Cross (confirm). Needed
+  // for titles whose default cursor is not on "New Game" (e.g. Doom64's KEX menu),
+  // where Isaac's Cross-only never reaches the start entry.
+  static const bool nav = std::getenv("DELTA_PAD_AUTOSKIP_NAV") != nullptr;
   uint32_t phase = g_readSeq % 24;
+  if (nav) {
+    if (phase < 3) return kOptions;            // pass the "press start" title
+    if (phase >= 6 && phase < 8) return kDown;  // move cursor down
+    if (phase >= 11 && phase < 13) return kCross;
+    if (phase >= 16 && phase < 18) return kDown;
+    if (phase >= 21 && phase < 23) return kCross;
+    return 0;
+  }
   if (phase < 3) return noOpt ? kCross : kOptions;
   if (phase >= 8 && phase < 11) return kCross;
   if (phase >= 16 && phase < 19) return kCross;
