@@ -487,6 +487,10 @@ VkBlendOp vkBlendOp(uint32_t f) {
 VkPipelineColorBlendAttachmentState blendAttachment(uint32_t bc, bool en) {
   VkPipelineColorBlendAttachmentState cba{};
   cba.colorWriteMask = 0xF;
+  // DELTA_GPU_NOBLEND: force opaque (diagnostic) to test whether a draw vanishes
+  // because its src-alpha blend multiplies by a zero texel alpha (Doom64 3D walls).
+  static const bool noBlend = std::getenv("DELTA_GPU_NOBLEND") != nullptr;
+  if (noBlend) en = false;
   if (!en) { cba.blendEnable = VK_FALSE; return cba; }
   cba.blendEnable = VK_TRUE;
   uint32_t cs = bc & 0x1F, cf = (bc >> 5) & 0x7, cd = (bc >> 8) & 0x1F;
