@@ -1519,10 +1519,22 @@ void endFrame(uint64_t scanoutBase) {
   // scene frame is grabbed instead of a sparse HUD/transition frame (e.g. Doom64
   // gameplay where only some frames carry the full level geometry).
   static const int snapMinDraws = [] { const char *e = std::getenv("DELTA_GPU_SNAP_MINDRAWS"); return e ? std::atoi(e) : 0; }();
+  // DELTA_GPU_SNAP_BEST: instead of capturing the first qualifying frame, keep
+  // re-capturing whenever this frame has more draws than any seen so far (after
+  // snapAt). The final gpu_snap.ppm is then the busiest frame of the run -- a real
+  // scene frame, not a sparse HUD/transition one, without guessing a frame number.
+  static const bool snapBest = std::getenv("DELTA_GPU_SNAP_BEST") != nullptr;
+  static int snapBestDraws = 0;
   static bool snapped = false;
-  if (snapAt && !snapped && g.frameNum >= snapAt &&
-      g.frameDraws > 0 && (int)g.frameDraws >= snapMinDraws &&
-      (!snapRoom || (g.frameHadRoom && g.frameDraws > 20))) {
+  bool snapNow = snapAt && g.frameNum >= snapAt && g.frameDraws > 0 &&
+                 (int)g.frameDraws >= snapMinDraws &&
+                 (!snapRoom || (g.frameHadRoom && g.frameDraws > 20));
+  if (snapBest)
+    snapNow = snapNow && (int)g.frameDraws > snapBestDraws;
+  else
+    snapNow = snapNow && !snapped;
+  if (snapNow) {
+    snapBestDraws = g.frameDraws;
     char p[256]; std::snprintf(p, sizeof p, "%s/gpu_snap.ppm", dumpDir());
     writePpm(p, pixels, rt.w, rt.h);
     std::fprintf(stderr, "[snap] wrote %s (f%d %ux%u draws=%u)\n", p, g.frameNum, rt.w, rt.h, g.frameDraws);

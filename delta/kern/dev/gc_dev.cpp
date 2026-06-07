@@ -137,6 +137,18 @@ int32_t gcDevice::ioctl(uint32_t cmd, void *data) {
     noteFlip();  // advance the flip count + post the display event for pacing
     return 0;
   }
+  case 0xC0088101:  // "switch buffer": ring double-buffer handoff. The driver
+                    // issues this per submit (60+/frame) and ignores the args;
+                    // our submit is synchronous so there is no ring to switch.
+                    // Handle it here, silently -- it was falling through to the
+                    // UNHANDLED logger below, and an unbuffered printf per submit
+                    // (stdbuf -e0) throttled the whole render loop to ~1 fps.
+    return 0;
+  case 0xC0048116: {  // "submit done?" status word; hot (polled per submit).
+    if (data)
+      *static_cast<uint32_t *>(data) = 0;
+    return 0;
+  }
   }
 
   printGuestCaller();
@@ -202,18 +214,18 @@ int32_t gcDevice::ioctl(uint32_t cmd, void *data) {
            args->unknown_80);
     return 0;
   }
-  case 0xC0048116: {
-    auto *args = static_cast<uint32_t *>(data);
-    printf("gc ioctl(%x): in/out=%x\n", cmd, args ? *args : 0);
-    if (args)
-      *args = 0;
-    return 0;
-  }
   }
 
   // SCOUT: log unknown gc ioctls and soft-succeed so the boot keeps advancing
   // instead of trapping. Lets us discover the sequence GNM actually issues.
-  printf("[gc] UNHANDLED ioctl(%x) data=%p\n", cmd, data);
+  // Rate-limited: an unknown ioctl in the per-submit hot path would otherwise
+  // flood unbuffered stderr and stall the render loop.
+  static const bool gcTrace = std::getenv("DELTA_GC_TRACE") != nullptr;
+  static int unhandledLogged = 0;
+  if (gcTrace || unhandledLogged < 32) {
+    unhandledLogged++;
+    printf("[gc] UNHANDLED ioctl(%x) data=%p\n", cmd, data);
+  }
   return 0;
 }
 
