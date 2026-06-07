@@ -116,6 +116,27 @@ uint32_t autoSkipButtons() {
   // for titles whose default cursor is not on "New Game" (e.g. Doom64's KEX menu),
   // where Isaac's Cross-only never reaches the start entry.
   static const bool nav = std::getenv("DELTA_PAD_AUTOSKIP_NAV") != nullptr;
+  // DELTA_PAD_AUTOSKIP_SWEEP: cycle through every button (one at a time, ~40 reads
+  // each with gaps for clean press edges) to discover which input advances a title
+  // whose menu we cannot see. The [pad] log prints the current button so a draw-
+  // count jump (level load) can be correlated to the button that caused it.
+  static const bool sweep = std::getenv("DELTA_PAD_AUTOSKIP_SWEEP") != nullptr;
+  if (sweep) {
+    static const uint32_t btns[] = {kCross, kOptions, kCircle, kTriangle, kSquare,
+                                    kDown, kUp, kLeft, kRight, kL1, kR1, kTouchPad};
+    static const char *names[] = {"Cross", "Options", "Circle", "Triangle", "Square",
+                                   "Down", "Up", "Left", "Right", "L1", "R1", "TouchPad"};
+    uint32_t n = sizeof(btns) / sizeof(btns[0]);
+    uint32_t slot = (uint32_t)((g_readSeq / 60) % n);
+    static uint32_t lastSlot = 0xffffffff;
+    if (slot != lastSlot) {
+      lastSlot = slot;
+      std::fprintf(stderr, "[sweep] readSeq=%llu now pressing %s\n",
+                   (unsigned long long)g_readSeq, names[slot]);
+    }
+    uint32_t ph = g_readSeq % 60;
+    return (ph < 30) ? btns[slot] : 0;  // hold ~30 reads, release ~30
+  }
   uint32_t phase = g_readSeq % 24;
   if (nav) {
     if (phase < 3) return kOptions;            // pass the "press start" title
