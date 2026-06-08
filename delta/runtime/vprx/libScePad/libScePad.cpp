@@ -137,6 +137,17 @@ uint32_t autoSkipButtons() {
     uint32_t ph = g_readSeq % 60;
     return (ph < 30) ? btns[slot] : 0;  // hold ~30 reads, release ~30
   }
+  // DELTA_PAD_AUTOSKIP_DOOM: Doom64's title/menu flow. Press Options ("START")
+  // a few times to leave the title screen, then ONLY Cross (confirm) from then
+  // on. Crucially it must never re-press Options once in the menu (that backs
+  // out, looping at the title) and never Down (the cursor defaults to "New
+  // Game"). Drives title -> New Game -> skill -> level load.
+  static const bool doom = std::getenv("DELTA_PAD_AUTOSKIP_DOOM") != nullptr;
+  if (doom) {
+    uint32_t ph = g_readSeq % 30;
+    if (g_readSeq < 240) return (ph < 8) ? kOptions : 0;  // leave the title
+    return (ph < 8) ? kCross : 0;                          // confirm down the menu
+  }
   uint32_t phase = g_readSeq % 24;
   if (nav) {
     if (phase < 3) return kOptions;            // pass the "press start" title
