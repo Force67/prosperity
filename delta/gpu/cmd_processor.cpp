@@ -4,6 +4,7 @@
  * GPU command processor. See cmd_processor.h.
  */
 
+#include <chrono>
 #include "cmd_processor.h"
 #include "pm4.h"
 #include "liverpool.h"
@@ -320,6 +321,29 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
       vk::beginFrame();
       g_frameActive = true;
     }
+    // DELTA_GPU_DRAWLIST: one line per draw BEFORE any vertexData gating, so draws
+    // dropped for null vertexData/recomp (e.g. Doom64's 3D world geometry) are
+    // visible -- distinguishes "world draws never submitted" from "submitted but
+    // dropped because vertex/shader resolution failed".
+    static const bool drawList = std::getenv("DELTA_GPU_DRAWLIST") != nullptr;
+    static int dlN = 0;
+    // Wall-clock gate: the title/menu floods the early run, so only start logging
+    // after DELTA_GPU_DRAWLIST_AFTER seconds (default 90), by when the level has
+    // loaded -- then log EVERY draw so the in-level pattern (incl. world geometry,
+    // if any reaches us) is captured.
+    static const auto dlStart = std::chrono::steady_clock::now();
+    static const int dlAfter = [] { const char *e = std::getenv("DELTA_GPU_DRAWLIST_AFTER");
+      return e ? std::atoi(e) : 90; }();
+    auto dlElapsed = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::steady_clock::now() - dlStart).count();
+    if (drawList && dlElapsed >= dlAfter && dlN < 400) {
+      dlN++;
+      std::fprintf(stderr, "[draw] idx=%u rt=%#lx %ux%u tex=%#lx %ux%u vd=%d recomp=%d nvattrs=%u prim=%u\n",
+                   d.indexCount, (unsigned long)d.rtBase, d.rtW, d.rtH,
+                   (unsigned long)d.texBase, d.texW, d.texH, d.vertexData ? 1 : 0,
+                   (d.recomp && d.recomp->ok) ? 1 : 0, d.nvattrs,
+                   g_regs[mmVGT_PRIMITIVE_TYPE]);
+    }
     // DELTA_GPU_SPRITEDUMP: for the first few TEXTURED draws, dump the resolved
     // transform + first vertex (pos/uv via the resolved attrs) + texture, to pin
     // why textured draws render black (degenerate MVP vs UV=0 vs blend).
@@ -349,8 +373,12 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
     // the texture format/tiling, the cbuffer transform, and a vertex position
     // (on-screen check). Gated on indexCount>=500 so it only fires in a 3D level.
     static const bool geomDump = std::getenv("DELTA_GPU_GEOMDUMP") != nullptr;
+    // DELTA_GPU_GEOMMIN overrides the index-count gate (default 500) so the dump
+    // can also catch Doom64's lower-index level draws.
+    static const uint32_t geomMin = [] { const char *e = std::getenv("DELTA_GPU_GEOMMIN");
+      return e ? (uint32_t)std::strtoul(e, nullptr, 10) : 500u; }();
     static int gdN = 0;
-    if (geomDump && d.indexCount >= 500 && d.recomp && d.vertexData && gdN < 16) {
+    if (geomDump && d.indexCount >= geomMin && d.vertexData && gdN < 40) {
       gdN++;
       const float *cb = d.cbufBase ? reinterpret_cast<const float *>(d.cbufBase) : nullptr;
       const auto *vb = static_cast<const uint8_t *>(d.vertexData);
@@ -358,7 +386,7 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
       std::fprintf(stderr,
           "[geom] idx=%u psTexs=%zu tex=%#lx %ux%u tiling=%u pitch=%u rt=%#lx %ux%u "
           "blend=%#x mask=%#x cc=%#x nvattrs=%u stride=%u pos0=[%.1f %.1f %.1f] cbufBase=%#lx\n",
-          d.indexCount, d.recomp->psTexs.size(), (unsigned long)d.texBase, d.texW, d.texH,
+          d.indexCount, d.recomp ? d.recomp->psTexs.size() : 0, (unsigned long)d.texBase, d.texW, d.texH,
           d.texTiling, d.texPitch, (unsigned long)d.rtBase, d.rtW, d.rtH, d.blendControl,
           d.targetMask, d.colorControl, d.nvattrs, d.vertexStride,
           p0[0], p0[1], p0[2], (unsigned long)d.cbufBase);
@@ -693,16 +721,41 @@ void submitDcb(const void *dcb, uint32_t sizeBytes) {
       case IT_NUM_INSTANCES:  // instance count for the following draw(s)
         g_numInstances = (count >= 1 && body[0]) ? body[0] : 1;
         break;
-      case IT_DMA_DATA:  // GPU memory->memory copy (CP DMA). body: ctrl, srcLo,
-                         // srcHi, dstLo, dstHi, command(byteCount[20:0]).
-        if (std::getenv("DELTA_GPU_DMATRACE") && count >= 5) {
-          static int dmn = 0;
+      case IT_DMA_DATA:  // CP DMA. body: ctrl, srcLo/Hi, dstLo/Hi, command(byteCount).
+        // Actually PERFORM the memory->memory copy (it was a no-op). Doom64 uploads
+        // its level texture atlases to GPU memory via CP DMA, so without this the
+        // T# addresses stay zero and the 3D world samples blank (black) textures.
+        // ctrl word: SRC_SEL[30:29], DST_SEL[21:20]; sel 0/3 = memory address,
+        // 2 = immediate data (a fill, not a copy) -- only copy true mem->mem.
+        if (count >= 6) {
+          uint32_t ctrl = body[0];
+          uint32_t srcSel = (ctrl >> 29) & 0x3;
+          uint32_t dstSel = (ctrl >> 20) & 0x3;
           uint64_t src = (static_cast<uint64_t>(body[2] & 0xFFFF) << 32) | body[1];
           uint64_t dst = (static_cast<uint64_t>(body[4] & 0xFFFF) << 32) | body[3];
-          uint32_t bytes = count >= 6 ? (body[5] & 0x1FFFFF) : 0;
-          if (dmn++ < 80)
-            std::fprintf(stderr, "[dma] ctrl=%#x src=%#lx dst=%#lx bytes=%u\n",
-                         body[0], (unsigned long)src, (unsigned long)dst, bytes);
+          uint32_t bytes = body[5] & 0x1FFFFF;
+          bool srcMem = (srcSel == 0 || srcSel == 3);
+          bool dstMem = (dstSel == 0 || dstSel == 3);
+          static const bool noCopy = std::getenv("DELTA_GPU_NODMACOPY") != nullptr;
+          // Only copy between REAL guest memory: the sel bits report "memory" even
+          // for GDS/register targets (e.g. dst=0x3022c), which aren't mapped in our
+          // address space and segfault. Every real guest allocation (heap/video/
+          // garlic) sits far above 16 MiB, so that floor cleanly excludes the
+          // on-chip GDS/low targets while keeping texture/buffer uploads.
+          auto memOk = [](uint64_t a) { return a >= 0x1000000ull && a < 0x20000000000ull; };
+          if (!noCopy && srcMem && dstMem && bytes && bytes <= 0x1000000u &&
+              src != dst && memOk(src) && memOk(src + bytes) &&
+              memOk(dst) && memOk(dst + bytes))
+            std::memcpy(reinterpret_cast<void *>(dst),
+                        reinterpret_cast<const void *>(src), bytes);
+          if (std::getenv("DELTA_GPU_DMATRACE")) {
+            static int dmn = 0;
+            if (dmn++ < 200)
+              std::fprintf(stderr, "[dma] ctrl=%#x srcSel=%u dstSel=%u src=%#lx dst=%#lx bytes=%u%s\n",
+                           ctrl, srcSel, dstSel, (unsigned long)src,
+                           (unsigned long)dst, bytes,
+                           (srcMem && dstMem) ? " COPIED" : "");
+          }
         }
         break;
       case IT_WRITE_DATA: {  // body: control, dstLo, dstHi, data...
@@ -831,7 +884,14 @@ void submitDcb(const void *dcb, uint32_t sizeBytes) {
   // silently-skipped draw -- e.g. the non-tutorial room floor).
   static const bool opHist = std::getenv("DELTA_GPU_OPHIST") != nullptr;
   static bool opHistDumped = false;
-  if (opHist && !opHistDumped && sn >= 2000) {
+  // Time-gate (default 100s) so the cumulative histogram includes the in-level
+  // command stream (level-load compute/copies), not just the title.
+  static const auto ohStart = std::chrono::steady_clock::now();
+  static const int ohAfter = [] { const char *e = std::getenv("DELTA_GPU_OPHIST_AFTER");
+    return e ? std::atoi(e) : 100; }();
+  auto ohElapsed = std::chrono::duration_cast<std::chrono::seconds>(
+      std::chrono::steady_clock::now() - ohStart).count();
+  if (opHist && !opHistDumped && ohElapsed >= ohAfter) {
     opHistDumped = true;
     dumpHist();
   }
