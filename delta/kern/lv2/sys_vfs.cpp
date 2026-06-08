@@ -145,7 +145,15 @@ int64_t PS4ABI sys_read(uint32_t fd, void *buf, size_t nbytes) {
   auto *d = fdToDevice(fd);
   if (!d)
     return -SysError::eBADF;
-  return d->read(buf, nbytes);
+  int64_t r = d->read(buf, nbytes);
+  // DELTA_READ_TRACE: log large reads (asset/texture loads) + their target buffer,
+  // to see whether texture data lands in the GPU texture region (0x41x) directly or
+  // a staging buffer the game later copies from.
+  static const bool rt = std::getenv("DELTA_READ_TRACE") != nullptr;
+  if (rt && nbytes >= 0x4000)
+    std::fprintf(stderr, "[read] fd=%u buf=%p nbytes=%#zx -> %lld\n", fd, buf, nbytes,
+                 (long long)r);
+  return r;
 }
 
 int64_t PS4ABI sys_lseek(uint32_t fd, int64_t offset, int whence) {
