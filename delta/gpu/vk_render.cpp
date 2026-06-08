@@ -1755,6 +1755,11 @@ void endFrame(uint64_t scanoutBase) {
   static int roomStreak = 0;
   if (g.frameHadRoom && g.frameDraws > 20 && ++roomStreak >= 4)
     gfx::setInGameplay(true);  // latch fast, before the autoskip re-pauses
+  // A frame with a huge index count is 3D level geometry (Doom64: ~2400-index
+  // draws; 2D titles stay well under this). Latch gameplay so the input autoskip/
+  // sweep stops mashing menus and the loaded level stays stable for capture.
+  if (g.frameMaxIdx >= 1500)
+    gfx::setInGameplay(true);
 
   // Deterministic room capture: whenever this frame sampled a room RT, roll the
   // presented image to /tmp/gpu_room.ppm (atomic). The last write is guaranteed a
