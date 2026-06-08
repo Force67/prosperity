@@ -11,6 +11,7 @@
 #include <base/strings/string_ref.h>
 #include <cstdio>
 
+#include "kern/dev/ajm_dev.h"
 #include "kern/dev/console_dev.h"
 #include "kern/dev/dipsw_dev.h"
 #include "kern/dev/dce_dev.h"
@@ -69,6 +70,8 @@ static device *make_device(const char *deviceName) {
     dev = new dceDevice(proc);
   if (xname == "dipsw")
     dev = new dipswDevice(proc);
+  if (xname == "ajm")
+    dev = new ajmDevice(proc);
   /*there are multiple of these*/
   if (xname.find("dmem", 0, 4) != base::StringRef::npos)
     dev = new dmaDevice(proc);
