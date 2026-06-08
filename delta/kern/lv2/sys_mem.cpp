@@ -251,6 +251,13 @@ int PS4ABI sys_shm_open(const char *path, uint32_t flags, uint16_t mode) {
     std::lock_guard<std::mutex> lk(g_shmMutex);
     auto it = g_shmByName.find(name);
     if (it == g_shmByName.end()) {
+      if (!(flags & kO_CREAT) && std::getenv("DELTA_SHM_NOAUTO")) {
+        // DIAGNOSTIC: restore the pre-LLE behaviour (fail an open of a system shm
+        // the guest didn't create) to test whether auto-providing it makes a title
+        // block waiting for a ShellCore handshake that never arrives (Doom64).
+        std::fprintf(stderr, "[shm_open] NOAUTO: '%s' -> ENOENT\n", name.c_str());
+        return -SysError::eNOENT;
+      }
       if (!(flags & kO_CREAT)) {
         // A read-only open of a shm that wasn't created by the guest: this is a
         // SYSTEM shared region the kernel would have published at boot (e.g.

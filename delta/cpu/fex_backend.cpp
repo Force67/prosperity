@@ -83,6 +83,78 @@ struct ExecRange {
 std::mutex g_rangeMutex;
 std::vector<ExecRange> g_ranges;
 
+// Per-thunk HLE name (libname!NID), parallel to g_hostThunks, for DELTA_HLE_TRACE.
+std::vector<std::string> g_thunkNames;
+
+// Named module ranges, for the deadlock watchdog's symbolization.
+struct NamedRange { uint64_t base, size; std::string name; };
+std::mutex g_namedMutex;
+std::vector<NamedRange> g_named;
+static void symRange(uint64_t a, char *out, size_t n) {
+  std::lock_guard lk(g_namedMutex);
+  for (auto &r : g_named)
+    if (a >= r.base && a < r.base + r.size) {
+      std::snprintf(out, n, "%s[%#llx]+%#llx",
+                    r.name.empty() ? "?" : r.name.c_str(),
+                    (unsigned long long)r.base,
+                    (unsigned long long)(a - r.base));
+      return;
+    }
+  std::snprintf(out, n, "%#llx", (unsigned long long)a);
+}
+
+// Live guest threads, for the DELTA_WATCHDOG=secs deadlock dump: after N seconds
+// it prints every live thread's current guest RIP so a stalled boot's blocking
+// site can be symbolized to a module+offset without a debugger.
+struct LiveThread { FEXCore::Core::InternalThreadState *thread; uint32_t id; };
+std::mutex g_liveMutex;
+std::vector<LiveThread> g_live;
+std::atomic<uint32_t> g_liveSeq{0};
+static void startWatchdog() {
+  static std::once_flag once;
+  std::call_once(once, [] {
+    const char *e = std::getenv("DELTA_WATCHDOG");
+    if (!e) return;
+    int secs = std::atoi(e);
+    if (secs <= 0) secs = 20;
+    std::thread([secs] {
+      for (int round = 0;; round++) {
+        std::this_thread::sleep_for(std::chrono::seconds(secs));
+        std::lock_guard lk(g_liveMutex);
+        std::fprintf(stderr, "=== WATCHDOG round %d: %zu live guest threads ===\n",
+                     round, g_live.size());
+        for (auto &t : g_live) {
+          auto &S = t.thread->CurrentFrame->State;
+          char sym[256];
+          symRange(S.rip, sym, sizeof(sym));
+          std::fprintf(stderr, "  tid=%u rip=%#llx (%s)\n", t.id,
+                       (unsigned long long)S.rip, sym);
+          // Scan the stack upward for return addresses into known modules (the
+          // wait stub omits frame pointers, so a raw scan beats an rbp walk) to
+          // reveal which subsystem this thread is parked inside.
+          uint64_t rsp = S.gregs[FEXCore::X86State::REG_RSP];
+          int shown = 0;
+          for (int i = 0; i < 1024 && shown < 12; i++) {
+            uint64_t a = rsp + (uint64_t)i * 8;
+            if (a < 0x1000) break;
+            uint64_t v = 0;
+            std::memcpy(&v, reinterpret_cast<void *>(a), 8);
+            // a plausible code return address that lands in a named module range
+            if (v < 0x200000000000ull || v >= 0x210000000000ull) continue;
+            char s2[256];
+            symRange(v, s2, sizeof(s2));
+            if (s2[0] == '0') continue;  // unnamed range -> skip noise
+            std::fprintf(stderr, "      stk+%#x %#llx (%s)\n", i * 8,
+                         (unsigned long long)v, s2);
+            shown++;
+          }
+        }
+        std::fflush(stderr);
+      }
+    }).detach();
+  });
+}
+
 // Host-thunk table: index -> native HLE function, dispatched from a guest
 // trampoline via the kHostThunkSyscallBase magic syscall. See makeHostThunk.
 std::mutex g_thunkMutex;
@@ -142,10 +214,22 @@ public:
                                       uint64_t, uint64_t, uint64_t, uint64_t,
                                       uint64_t, uint64_t, uint64_t, uint64_t,
                                       uint64_t, uint64_t);
+        static const bool hleTrace = std::getenv("DELTA_HLE_TRACE") != nullptr;
+        uint64_t caller = (rsp) ? reinterpret_cast<uint64_t *>(rsp)[0] : 0;
         ret = reinterpret_cast<Fn>(fn)(
             Args->Argument[1], Args->Argument[2], Args->Argument[3],
             Args->Argument[4], Args->Argument[5], Args->Argument[6], s[0], s[1],
             s[2], s[3], s[4], s[5], s[6], s[7]);
+        if (hleTrace) {
+          char cs[256]; symRange(caller, cs, sizeof(cs));
+          const char *nm = "";
+          { std::lock_guard lk(g_thunkMutex);
+            if (idx < g_thunkNames.size()) nm = g_thunkNames[idx].c_str(); }
+          std::fprintf(stderr, "[hle] %s thunk#%u(%#lx,%#lx,%#lx,%#lx) -> %#lx  from %s\n",
+                       nm, idx, Args->Argument[1], Args->Argument[2],
+                       Args->Argument[3], Args->Argument[4],
+                       (unsigned long)ret, cs);
+        }
       }
       if (g_ctxPtr) {
         uint32_t ef = g_ctxPtr->ReconstructCompactedEFLAGS(Frame->Thread, false, nullptr, 0);
@@ -231,6 +315,11 @@ public:
     ensureInit();
     std::lock_guard lk(g_rangeMutex);
     g_ranges.push_back({reinterpret_cast<uint64_t>(info.base), info.codeSize});
+    {
+      std::lock_guard nk(g_namedMutex);
+      g_named.push_back({reinterpret_cast<uint64_t>(info.base), info.codeSize,
+                         std::string(info.name.c_str())});
+    }
     LOG_INFO("fex: registered exec range {} +{:#x}", (void *)info.base, info.codeSize);
   }
 
@@ -313,7 +402,12 @@ public:
     auto *h = static_cast<FexThread *>(handle);
     t_curThread = h->thread;
     FEXCore::Allocator::RegisterTLSData(h->thread); // FEX per-thread registration
-    LOG_INFO("fex: running guest thread rip={:#x}", h->thread->CurrentFrame->State.rip);
+    startWatchdog();
+    uint32_t myId = g_liveSeq.fetch_add(1);
+    uint64_t entryRip = h->thread->CurrentFrame->State.rip;
+    { std::lock_guard lk(g_liveMutex); g_live.push_back({h->thread, myId}); }
+    LOG_INFO("fex: running guest thread rip={:#x} (watchdog tid={})",
+             h->thread->CurrentFrame->State.rip, myId);
     // thr_exit (cpu::exitGuestThread) longjmps here to leave the JIT without
     // returning to guest code. The thread is being torn down regardless, so
     // abandoning the JIT dispatcher's host frame is safe.
@@ -326,6 +420,31 @@ public:
     t_exitJmpValid = false;
     auto &endS = h->thread->CurrentFrame->State;
     LOG_INFO("fex: guest thread returned rip={:#x}", (unsigned long)endS.rip);
+    if (std::getenv("DELTA_WATCHDOG")) {
+      char es[256]; symRange(entryRip, es, sizeof(es));
+      char rs[256]; symRange(endS.rip, rs, sizeof(rs));
+      std::fprintf(stderr, "=== THREAD tid=%u RETURNED entry=%#llx (%s) ret=%#llx (%s) ===\n",
+                   myId, (unsigned long long)entryRip, es,
+                   (unsigned long long)endS.rip, rs);
+      if (endS.rip >= 0x200000000000ull && endS.rip < 0x210000000000ull) {
+        const uint8_t *b = reinterpret_cast<const uint8_t *>(endS.rip);
+        std::fprintf(stderr, "      bytes@rip: %02x %02x %02x %02x %02x %02x\n",
+                     b[0], b[1], b[2], b[3], b[4], b[5]);
+      }
+      uint64_t rsp = endS.gregs[FEXCore::X86State::REG_RSP];
+      int shown = 0;
+      for (int i = 0; i < 2048 && shown < 20; i++) {
+        uint64_t a = rsp + (uint64_t)i * 8, v = 0;
+        if (a < 0x1000) break;
+        std::memcpy(&v, reinterpret_cast<void *>(a), 8);
+        if (v < 0x200000000000ull || v >= 0x210000000000ull) continue;
+        char s2[256]; symRange(v, s2, sizeof(s2));
+        if (s2[0] == '0') continue;
+        std::fprintf(stderr, "      stk+%#x %#llx (%s)\n", i * 8,
+                     (unsigned long long)v, s2);
+        shown++;
+      }
+    }
     // Diagnostic: a guest thread that "returns" to a tiny rip jumped through a
     // bad/unset function pointer (e.g. a GPU thread with no real GPU backend).
     // Dump its registers + a module-resolved stack scan to pin the culprit.
@@ -345,6 +464,9 @@ public:
         }
       }
     }
+    { std::lock_guard lk(g_liveMutex);
+      for (size_t i = 0; i < g_live.size(); i++)
+        if (g_live[i].thread == h->thread) { g_live.erase(g_live.begin() + i); break; } }
     FEXCore::Allocator::UninstallTLSData(h->thread);
     CTX->DestroyThread(h->thread);
     t_curThread = nullptr;
@@ -487,8 +609,10 @@ void exitGuestThread() {
 // Plant a guest x86 trampoline that bounces into the native HLE function `hostFn`
 // via the kHostThunkSyscallBase magic syscall. The trampoline preserves the 4th
 // arg (rcx) into r10 before `syscall` clobbers rcx, matching the dispatch above.
-uintptr_t makeHostThunk(void *hostFn) {
+uintptr_t makeHostThunk(void *hostFn, const char *name) {
   std::lock_guard lk(g_thunkMutex);
+  g_thunkNames.resize(g_hostThunks.size() + 1);
+  g_thunkNames[g_hostThunks.size()] = name ? name : "";
   if (!g_thunkPool) {
     g_thunkPool = static_cast<uint8_t *>(
         mmap(nullptr, g_thunkPoolSize, PROT_READ | PROT_WRITE | PROT_EXEC,

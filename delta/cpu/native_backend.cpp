@@ -86,7 +86,7 @@ void exitGuestThread() {
 }
 
 // Native host is x86-64: the guest can call the host function directly.
-uintptr_t makeHostThunk(void *hostFn) { return reinterpret_cast<uintptr_t>(hostFn); }
+uintptr_t makeHostThunk(void *hostFn, const char * /*name*/) { return reinterpret_cast<uintptr_t>(hostFn); }
 
 void earlyInit() {} // native: nothing to segregate
 

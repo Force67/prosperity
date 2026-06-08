@@ -482,7 +482,9 @@ bool smodule::resolveObfSymbol(const char *name, uintptr_t &ptrOut) {
       if (uintptr_t hle = runtime::vprx_get(libname, hid)) {
         // The HLE handler is a native host function; on FEX the guest can't jump
         // to it directly, so bind a guest trampoline. Native returns it as-is.
-        ptrOut = cpu::makeHostThunk(reinterpret_cast<void *>(hle));
+        char tn[64];
+        std::snprintf(tn, sizeof(tn), "%s!%.11s", libname, name);
+        ptrOut = cpu::makeHostThunk(reinterpret_cast<void *>(hle), tn);
         return true;
       }
     }

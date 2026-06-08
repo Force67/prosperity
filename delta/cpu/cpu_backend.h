@@ -97,7 +97,7 @@ void exitGuestThread();
 // calls it directly. On FEX it returns a small guest x86 trampoline that bounces
 // through the kHostThunkSyscallBase magic syscall. Used by the loader to bind
 // vprx HLE exports (e.g. libSceVideoOut) into guest import slots. Thread-safe.
-uintptr_t makeHostThunk(void *hostFn);
+uintptr_t makeHostThunk(void *hostFn, const char *name = nullptr);
 
 // Called once at process start, before any large allocation or guest mapping.
 // FEX: reserves/segregates the address space so guest memory can't collide with
