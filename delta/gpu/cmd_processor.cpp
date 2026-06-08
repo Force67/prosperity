@@ -532,6 +532,87 @@ void endFrame(uint64_t scanoutBase) {
   }
 }
 
+// Constant Engine RAM: on-chip scratch the CE fills and dumps to memory as the
+// shaders' constant buffers. Liverpool CE RAM is 48 KiB. Every access is bounds-
+// checked so a malformed packet can never write outside it or outside guest memory.
+uint8_t g_ceRam[48 * 1024];
+inline bool ccbGuestRange(uint64_t a, uint64_t bytes) {
+  return bytes > 0 && a >= 0x1000000000ull && a + bytes <= 0x20000000000ull;
+}
+
+void submitCcb(const void *ccb, uint32_t sizeBytes) {
+  if (!ccb || sizeBytes < 4)
+    return;
+  std::lock_guard<std::mutex> lk(g_mtx);
+  const uint32_t *p = static_cast<const uint32_t *>(ccb);
+  uint32_t words = sizeBytes / 4, i = 0;
+  static const bool ccbHist = std::getenv("DELTA_GPU_CCBHIST") != nullptr;
+  static const bool ceOff = [] { const char *e = std::getenv("DELTA_GPU_CE"); return e && e[0] == '0'; }();
+  static uint32_t hist[256] = {};
+  static int histDumps = 0;
+  static uint64_t nCcb = 0;
+  if (ccbHist && nCcb == 0)
+    std::fprintf(stderr, "[ccb] first ccb: %u bytes (%u words)\n", sizeBytes, words);
+  nCcb++;
+  while (i < words) {
+    uint32_t hdr = p[i];
+    Pm4Type type = pm4Type(hdr);
+    if (type == Pm4Type::type3) {
+      uint32_t op = pm4Opcode(hdr), count = pm4Count(hdr);
+      const uint32_t *body = &p[i + 1];
+      if (i + 1 + count > words) break;
+      hist[op & 0xFF]++;
+      if (!ceOff) {
+        switch (op) {
+        case IT_WRITE_CONST_RAM: {  // body[0]=byte offset; body[1..]=data dwords
+          uint32_t off = body[0] & 0xFFFF;
+          uint32_t n = count > 1 ? count - 1 : 0;
+          if ((uint64_t)off + (uint64_t)n * 4 <= sizeof(g_ceRam))
+            std::memcpy(g_ceRam + off, &body[1], (size_t)n * 4);
+          break;
+        }
+        case IT_LOAD_CONST_RAM: {  // addrLo, addrHi, num_dwords, byte offset
+          if (count >= 4) {
+            uint64_t addr = (static_cast<uint64_t>(body[1] & 0xFFFF) << 32) | body[0];
+            uint32_t num = body[2] & 0x7FFF, off = body[3] & 0xFFFF;
+            if (ccbGuestRange(addr, (uint64_t)num * 4) &&
+                (uint64_t)off + (uint64_t)num * 4 <= sizeof(g_ceRam))
+              std::memcpy(g_ceRam + off, reinterpret_cast<const void *>(addr), (size_t)num * 4);
+          }
+          break;
+        }
+        case IT_DUMP_CONST_RAM:
+        case IT_DUMP_CONST_RAM_OFFSET: {  // byte offset, num_dwords, addrLo, addrHi
+          if (count >= 4) {
+            uint32_t off = body[0] & 0xFFFF, num = body[1] & 0x7FFF;
+            uint64_t addr = (static_cast<uint64_t>(body[3] & 0xFFFF) << 32) | body[2];
+            if (ccbGuestRange(addr, (uint64_t)num * 4) &&
+                (uint64_t)off + (uint64_t)num * 4 <= sizeof(g_ceRam))
+              std::memcpy(reinterpret_cast<void *>(addr), g_ceRam + off, (size_t)num * 4);
+          }
+          break;
+        }
+        default: break;
+        }
+      }
+      i += 1 + count;
+    } else if (type == Pm4Type::type2 || hdr == 0) {
+      i += 1;
+    } else if (type == Pm4Type::type0) {
+      i += 1 + pm4Count(hdr);
+    } else {
+      break;  // type-1 desync
+    }
+  }
+  if (ccbHist && histDumps < 3 && nCcb >= 50) {
+    histDumps++;
+    std::fprintf(stderr, "[ccb] opcode histogram (after %lu ccbs, this one %u words):\n",
+                 (unsigned long)nCcb, words);
+    for (int o = 0; o < 256; o++)
+      if (hist[o]) std::fprintf(stderr, "[ccb]   op %#04x x%u\n", o, hist[o]);
+  }
+}
+
 void submitDcb(const void *dcb, uint32_t sizeBytes) {
   if (!dcb || sizeBytes < 4)
     return;

@@ -58,7 +58,16 @@ enum Pm4It : uint32_t {
   IT_SET_SH_REG = 0x76,
   IT_SET_UCONFIG_REG = 0x79,
   IT_WRITE_DATA = 0x37,
+  // Constant Engine (processes the CCB; runs ahead of the draw engine). CE RAM is
+  // on-chip scratch the CE fills (WRITE/LOAD) and dumps to memory (DUMP) as the
+  // shaders' constant buffers.
+  IT_LOAD_CONST_RAM = 0x80,
+  IT_WRITE_CONST_RAM = 0x81,
+  IT_DUMP_CONST_RAM = 0x83,
+  IT_INCREMENT_CE_COUNTER = 0x84,
+  IT_INCREMENT_DE_COUNTER = 0x85,
   IT_WAIT_ON_CE_COUNTER = 0x86,
+  IT_DUMP_CONST_RAM_OFFSET = 0x9E,
 };
 
 // Base dword offsets the SET_*_REG packets are relative to (the register at

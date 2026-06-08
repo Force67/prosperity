@@ -29,12 +29,18 @@ extern "C" void prosperity_videoout_set_flip(int bufferIndex, int64_t flipArg);
 extern "C" uint64_t prosperity_videoout_buffer(int bufferIndex);
 
 namespace {
-// Feed each draw command buffer to the GPU command processor.
-void processDcbs(void **dcbGpuAddrs, uint32_t *dcbSizes, uint32_t count) {
+// Feed each command buffer to the GPU command processor. The Constant Engine runs
+// ahead of the Draw Engine, so process a submit's ccb (CE RAM -> shader constant
+// buffers) before its dcb draws.
+void processDcbs(void **dcbGpuAddrs, uint32_t *dcbSizes, void **ccbGpuAddrs,
+                 uint32_t *ccbSizes, uint32_t count) {
   if (!dcbGpuAddrs || !dcbSizes)
     return;
-  for (uint32_t i = 0; i < count; i++)
+  for (uint32_t i = 0; i < count; i++) {
+    if (ccbGpuAddrs && ccbSizes && ccbGpuAddrs[i] && ccbSizes[i])
+      gpu::submitCcb(ccbGpuAddrs[i], ccbSizes[i]);
     gpu::submitDcb(dcbGpuAddrs[i], dcbSizes[i]);
+  }
 }
 }  // namespace
 
@@ -109,7 +115,7 @@ int PS4ABI sceGnmSubmitCommandBuffers(uint32_t count, void **dcbGpuAddrs,
                                      uint32_t *dcbSizes, void **ccbGpuAddrs,
                                      uint32_t *ccbSizes) {
   dumpPm4(dcbGpuAddrs, dcbSizes, count);
-  processDcbs(dcbGpuAddrs, dcbSizes, count);
+  processDcbs(dcbGpuAddrs, dcbSizes, ccbGpuAddrs, ccbSizes, count);
   return 0;
 }
 
@@ -122,7 +128,7 @@ int PS4ABI sceGnmSubmitCommandBuffersForWorkload(uint32_t workload, uint32_t cou
   // buffers must still be processed (this was stubbed, silently dropping every
   // draw the game submitted through the workload path).
   dumpPm4(dcbGpuAddrs, dcbSizes, count);
-  processDcbs(dcbGpuAddrs, dcbSizes, count);
+  processDcbs(dcbGpuAddrs, dcbSizes, ccbGpuAddrs, ccbSizes, count);
   return 0;
 }
 
@@ -136,7 +142,7 @@ int PS4ABI sceGnmSubmitAndFlipCommandBuffers(uint32_t count, void **dcbGpuAddrs,
   // The flip target buffer is what should be scanned out next; record it so the
   // VideoOut flip pump presents it and posts the flip-complete event.
   dumpPm4(dcbGpuAddrs, dcbSizes, count);
-  processDcbs(dcbGpuAddrs, dcbSizes, count);
+  processDcbs(dcbGpuAddrs, dcbSizes, ccbGpuAddrs, ccbSizes, count);
   // Present the render target that this flip displays (the guest scanout buffer).
   gpu::endFrame(prosperity_videoout_buffer(static_cast<int>(displayBufferIndex)));
   prosperity_videoout_set_flip(static_cast<int>(displayBufferIndex), flipArg);
@@ -150,7 +156,7 @@ int PS4ABI sceGnmSubmitAndFlipCommandBuffersForWorkload(
   // Was a flip-only stub that dropped the submitted command buffers. Process them
   // (and end the frame on the flip) exactly like the non-workload variant.
   dumpPm4(dcbGpuAddrs, dcbSizes, count);
-  processDcbs(dcbGpuAddrs, dcbSizes, count);
+  processDcbs(dcbGpuAddrs, dcbSizes, ccbGpuAddrs, ccbSizes, count);
   gpu::endFrame(prosperity_videoout_buffer(static_cast<int>(displayBufferIndex)));
   prosperity_videoout_set_flip(static_cast<int>(displayBufferIndex), flipArg);
   return 0;
