@@ -144,7 +144,31 @@ bool createSwapchain() {
   sc.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
   sc.preTransform = caps.currentTransform;
   sc.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
-  sc.presentMode = VK_PRESENT_MODE_FIFO_KHR;  // always supported
+  // Present mode: FIFO (vsync) is always supported but double-buffer-misses to half
+  // the refresh when a frame lands late, and adds latency. Prefer MAILBOX (triple-
+  // buffer: latest frame wins, no tearing, no half-rate drop). DELTA_GPU_VSYNC=0
+  // forces IMMEDIATE (uncapped, for benchmarking); =1 forces FIFO.
+  {
+    uint32_t npm = 0;
+    vkGetPhysicalDeviceSurfacePresentModesKHR(g.phys, g.surface, &npm, nullptr);
+    std::vector<VkPresentModeKHR> pms(npm);
+    vkGetPhysicalDeviceSurfacePresentModesKHR(g.phys, g.surface, &npm, pms.data());
+    auto has = [&](VkPresentModeKHR m) {
+      for (auto p : pms) if (p == m) return true; return false;
+    };
+    const char *vs = std::getenv("DELTA_GPU_VSYNC");
+    VkPresentModeKHR mode = VK_PRESENT_MODE_FIFO_KHR;
+    if (vs && vs[0] == '0' && has(VK_PRESENT_MODE_IMMEDIATE_KHR))
+      mode = VK_PRESENT_MODE_IMMEDIATE_KHR;
+    else if (!(vs && vs[0] == '1') && has(VK_PRESENT_MODE_MAILBOX_KHR))
+      mode = VK_PRESENT_MODE_MAILBOX_KHR;
+    sc.presentMode = mode;
+    if (mode == VK_PRESENT_MODE_MAILBOX_KHR && imgCount < 3) {
+      imgCount = 3;  // mailbox wants >=3 images to actually triple-buffer
+      if (caps.maxImageCount && imgCount > caps.maxImageCount) imgCount = caps.maxImageCount;
+      sc.minImageCount = imgCount;
+    }
+  }
   sc.clipped = VK_TRUE;
   sc.oldSwapchain = g.swapchain;
 
