@@ -41,7 +41,11 @@ extern "C" int vprx_anchor_libSceAvPlayer;
 // of libSceSystemService stays LLE). Stops the title's fatal-error reporter from
 // tripping the real .sprx's NULL-arg assert.
 extern "C" int vprx_anchor_libSceSystemService;
+// HLE libfmod: the game's bundled FMOD .prx. Its real init needs the un-emulated
+// AJM ATRAC9 decoder; stub the API to "succeed" with null audio so Doom64 boots.
+extern "C" int vprx_anchor_libfmod;
 static volatile int *const vprx_anchors[] = {&vprx_anchor_libSceVideoOut,
+                                             &vprx_anchor_libfmod,
                                              &vprx_anchor_libSceGnmDriver,
                                              &vprx_anchor_libSceMsgDialog,
                                              &vprx_anchor_libScePad,
