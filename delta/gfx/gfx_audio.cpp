@@ -96,9 +96,21 @@ extern "C" int prosperity_audio_output(int handle, const void *samples, uint32_t
       SDL_PutAudioStreamData(p.stream, scratch.data(), static_cast<int>(bytes));
     }
   }
-  if (g_trace && ((g_framesOut += frames) % (48000 * 2) < frames))
-    std::fprintf(stderr, "[audio] h=%d ~%lu frames out, queued=%d\n", handle,
-                 (unsigned long)g_framesOut, queued);
+  if (g_trace && ((g_framesOut += frames) % (48000 * 2) < frames)) {
+    // Peak level over this buffer (confirms real audio vs. silence -> tells PCM
+    // working from a missing decode upstream).
+    float peak = 0.f;
+    uint32_t n = frames * p.channels;
+    if (p.bytesPerSample == 4) {
+      const float *s = static_cast<const float *>(samples);
+      for (uint32_t i = 0; i < n; i++) { float a = s[i] < 0 ? -s[i] : s[i]; if (a > peak) peak = a; }
+    } else {
+      const int16_t *s = static_cast<const int16_t *>(samples);
+      for (uint32_t i = 0; i < n; i++) { float a = (s[i] < 0 ? -s[i] : s[i]) / 32768.f; if (a > peak) peak = a; }
+    }
+    std::fprintf(stderr, "[audio] h=%d ~%lu frames out, queued=%d peak=%.3f\n", handle,
+                 (unsigned long)g_framesOut, queued, peak);
+  }
   return static_cast<int>(frames);
 }
 
