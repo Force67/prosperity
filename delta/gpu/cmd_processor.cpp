@@ -365,6 +365,21 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
       if (cb)
         std::fprintf(stderr, "  cbuf=[%.3f %.3f %.3f %.3f / %.3f %.3f %.3f %.3f / %.3f %.3f %.3f %.3f / %.3f %.3f %.3f %.3f]\n",
             cb[0],cb[1],cb[2],cb[3],cb[4],cb[5],cb[6],cb[7],cb[8],cb[9],cb[10],cb[11],cb[12],cb[13],cb[14],cb[15]);
+      // Sample the bound texture's ALPHA: is the source genuinely alpha=0 (so the PS
+      // must compute opacity elsewhere / a recompiler alpha bug) or alpha=255 (so our
+      // load zeroes it)? This decides why the src-alpha blend makes walls invisible.
+      if (d.texBase >= 0x1000000000ull && d.texBase < 0x20000000000ull && d.texW && d.texH) {
+        const uint32_t *tp = reinterpret_cast<const uint32_t *>(d.texBase);
+        uint64_t n = (uint64_t)d.texW * d.texH, step = n > 4096 ? n / 4096 : 1, aNz = 0, rgbNz = 0;
+        for (uint64_t i = 0; i < n; i += step) {
+          uint32_t px = tp[i];
+          if (px >> 24) aNz++;
+          if (px & 0x00FFFFFF) rgbNz++;
+        }
+        std::fprintf(stderr, "  texAlpha: px0=%#010x alphaNonZero=%llu/%llu rgbNonZero=%llu\n",
+                     tp[0], (unsigned long long)aNz, (unsigned long long)(n/step),
+                     (unsigned long long)rgbNz);
+      }
       // Dump the PS's texture-load pattern: SMRD (op/sdst/sbase/imm/off) + MIMG srsrc,
       // and the first 8 user-data dwords, to see how the 4 T#s are loaded.
       auto psI = gcn::decode(reinterpret_cast<const uint32_t *>(d.psAddr), 4096);
