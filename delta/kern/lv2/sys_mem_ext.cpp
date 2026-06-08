@@ -14,6 +14,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <sys/mman.h>
 
@@ -176,10 +177,13 @@ int PS4ABI sys_set_vm_container(uint32_t) { return 0; }
 // Map a direct-memory region. We don't track physical dmem, so satisfy it with
 // an ordinary anonymous low-guest mapping. sys_mmap returns (uint8_t*)-1 on
 // failure, propagated as ENOMEM.
-int64_t PS4ABI sys_mmap_dmem(void *addr, size_t len, int /*memType*/, int prot,
-                             int /*flags*/, int64_t /*directMemoryStart*/) {
+int64_t PS4ABI sys_mmap_dmem(void *addr, size_t len, int memType, int prot,
+                             int /*flags*/, int64_t directMemoryStart) {
   uint8_t *p = sys_mmap(addr, len, static_cast<uint32_t>(prot), mFlags::anon,
                         static_cast<uint32_t>(-1), 0);
+  if (std::getenv("DELTA_DMEM_TRACE"))
+    std::fprintf(stderr, "[dmem] map req_addr=%p len=%#zx memType=%d prot=%#x dmStart=%#llx -> %p\n",
+                 addr, len, memType, prot, (unsigned long long)directMemoryStart, (void *)p);
   if (p == reinterpret_cast<uint8_t *>(-1))
     return -SysError::eNOMEM;
   return reinterpret_cast<int64_t>(p);
