@@ -213,10 +213,22 @@ void startFlipPump() {
 
 }  // namespace
 
+// DIAGNOSTIC: inject a failure return into a named HLE setup function to find
+// which real-videoout return value makes Isaac skip its command-buffer creation.
+// DELTA_VO_FAIL=open|regbuf|fliprate|addflip[:<hex retval>] (default retval -1).
+static int failInject(const char *name) {
+  const char *f = std::getenv("DELTA_VO_FAIL");
+  if (!f || std::strncmp(f, name, std::strlen(name)) != 0)
+    return 0;  // 0 = don't inject
+  const char *c = std::strchr(f, ':');
+  return c ? (int)std::strtol(c + 1, nullptr, 0) : -1;
+}
+
 extern "C" {
 
 int PS4ABI sceVideoOutOpen(int userId, int busType, int index, const void *param) {
   std::printf("[videoout] open user=%d bus=%d idx=%d\n", userId, busType, index);
+  if (int r = failInject("open")) { std::printf("[vofail] open -> %d\n", r); return r; }
   std::lock_guard<std::mutex> lk(g_mtx);
   g_port.open = true;
   // bring the window up early so the user sees something while the game inits.
@@ -268,6 +280,7 @@ int PS4ABI sceVideoOutSetBufferAttribute(void *attribute, uint32_t pixelFormat,
 int PS4ABI sceVideoOutRegisterBuffers(int handle, int startIndex,
                                      void *const *addresses, int bufferNum,
                                      const void *attribute) {
+  if (int r = failInject("regbuf")) { std::printf("[vofail] regbuf -> %d\n", r); return r; }
   std::lock_guard<std::mutex> lk(g_mtx);
   if (attribute) {
     auto *a = static_cast<const BufferAttribute *>(attribute);
@@ -296,6 +309,7 @@ int PS4ABI sceVideoOutUnregisterBuffers(int handle, int attributeIndex) {
 
 int PS4ABI sceVideoOutSetFlipRate(int handle, int rate) {
   std::printf("[videoout] setFlipRate %d\n", rate);
+  if (int r = failInject("fliprate")) { std::printf("[vofail] fliprate -> %d\n", r); return r; }
   g_port.flipRate = rate;
   return 0;
 }
@@ -303,6 +317,7 @@ int PS4ABI sceVideoOutSetFlipRate(int handle, int rate) {
 int PS4ABI sceVideoOutAddFlipEvent(int eqHandle, int handle, void *udata) {
   std::printf("[videoout] addFlipEvent eq=%d h=%d udata=%p\n", eqHandle, handle,
               udata);
+  if (int r = failInject("addflip")) { std::printf("[vofail] addflip -> %d\n", r); return r; }
   auto *eq = findEqueue(eqHandle);
   if (!eq)
     return -1;

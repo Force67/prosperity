@@ -65,8 +65,12 @@ uint8_t *allocLowGuest(size_t size) {
       continue;  // another thread advanced it; reload and retry
     void *p = ::mmap(reinterpret_cast<void *>(base), size, PROT_READ | PROT_WRITE,
                      MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
-    if (p == reinterpret_cast<void *>(base))
+    if (p == reinterpret_cast<void *>(base)) {
+      if (std::getenv("DELTA_ALLOC_TRACE"))
+        std::printf("[lowalloc] %#lx +%#lx\n", (unsigned long)base,
+                    (unsigned long)size);
       return static_cast<uint8_t *>(p);
+    }
     if (p != MAP_FAILED)
       ::munmap(p, size);  // hint occupied; the CAS already skipped past it
   }
@@ -247,9 +251,26 @@ int PS4ABI sys_shm_open(const char *path, uint32_t flags, uint16_t mode) {
     std::lock_guard<std::mutex> lk(g_shmMutex);
     auto it = g_shmByName.find(name);
     if (it == g_shmByName.end()) {
-      if (!(flags & kO_CREAT))
-        return -SysError::eNOENT;
-      g_shmByName.emplace(name, shmBacking{});  // empty; sized later by ftruncate
+      if (!(flags & kO_CREAT)) {
+        // A read-only open of a shm that wasn't created by the guest: this is a
+        // SYSTEM shared region the kernel would have published at boot (e.g.
+        // libSceAvSetting's audio/video settings block). We don't model its
+        // contents, so auto-provide a zeroed, pre-sized backing -- the title
+        // then fstat()s a real size and mmaps it (reading defaults) instead of
+        // failing init with a -ENOENT shm fd it tries to map anyway.
+        shmBacking b;
+        b.size = 0x10000;  // 64 KiB, ample for a settings block
+        b.base = allocLowGuest(b.size);
+        if (b.base) {
+          std::memset(b.base, 0, b.size);
+          proc->getVma().add(b.base, b.size, ppt::w);
+        }
+        std::fprintf(stderr, "[shm_open] auto-provide system shm '%s' size=%#zx\n",
+                     name.c_str(), b.size);
+        g_shmByName.emplace(name, b);
+      } else {
+        g_shmByName.emplace(name, shmBacking{});  // empty; sized later by ftruncate
+      }
     } else if ((flags & kO_CREAT) && (flags & kO_EXCL)) {
       return -SysError::eEXIST;
     }
@@ -274,6 +295,21 @@ int PS4ABI sys_shm_unlink(const char *path) {
   // stays valid; we keep the host allocation (reclaimed at process exit).
   g_shmByName.erase(it);
   return 0;
+}
+
+// Report a shm fd's backing size for fstat (shm objects aren't device-backed,
+// so sys_fstat's fdToDevice path can't size them). Returns SIZE_MAX if `fd`
+// isn't a shm, so the caller falls through to the normal path.
+size_t shmFstatSize(uint32_t fd) {
+  auto *proc = proc::getActive();
+  if (!proc)
+    return SIZE_MAX;
+  auto *obj = proc->getObjTable().get(fd);
+  if (!obj || obj->type() != kObject::oType::shm)
+    return SIZE_MAX;
+  auto *shm = static_cast<shmObject *>(obj);
+  std::lock_guard<std::mutex> lk(g_shmMutex);
+  return g_shmByName[shm->shmName].size;
 }
 
 int PS4ABI sys_ftruncate(uint32_t fd, int64_t length) {

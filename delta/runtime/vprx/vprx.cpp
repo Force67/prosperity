@@ -13,6 +13,8 @@
 #include <cstdlib>
 #include <cstring>
 
+#include "kern/proc.h"
+
 namespace runtime {
 static base::Vector<const modInfo *> vprxTable;
 
@@ -70,17 +72,44 @@ void vprx_reg(const modInfo *info) { vprxTable.push_back(info); }
 //   - libSceVideoOut: LLE by default; the real module drives the framebuffer
 //     through ioctl(/dev/dce) + mmap (dceDevice) and flips via the videoout
 //     service thread. Force the HLE shim with DELTA_VO_HLE.
-// Returns true when `lib`'s HLE shim should be used (skip when running LLE).
-static bool useHleShim(const char *lib) {
+// DIAGNOSTIC: force just a few specific NIDs of an otherwise-LLE module onto the
+// HLE shim. Env is a comma/space list of hex hids, e.g.
+//   DELTA_HLE_NIDS_VO=0x1234...,0xabcd...
+// Lets us binary-search which single videoout/gnm export's real behavior triggers
+// the both-LLE Isaac crash, without recompiling per test.
+static bool nidForcedHle(const char *envName, uint64_t hid) {
+  const char *list = std::getenv(envName);
+  if (!list)
+    return false;
+  for (const char *p = list; *p;) {
+    while (*p == ',' || *p == ' ')
+      p++;
+    if (!*p)
+      break;
+    char *end = nullptr;
+    uint64_t v = std::strtoull(p, &end, 16);
+    if (end == p)
+      break;
+    if (v == hid)
+      return true;
+    p = end;
+  }
+  return false;
+}
+
+// Returns true when `lib`'s HLE shim should be used for this NID (skip = LLE).
+static bool useHleShim(const char *lib, uint64_t hid) {
   if (std::strcmp(lib, "libSceGnmDriver") == 0)
-    return std::getenv("DELTA_GNM_HLE") != nullptr;
+    return std::getenv("DELTA_GNM_HLE") != nullptr ||
+           nidForcedHle("DELTA_HLE_NIDS_GNM", hid);
   if (std::strcmp(lib, "libSceVideoOut") == 0)
-    return std::getenv("DELTA_VO_HLE") != nullptr;
+    return std::getenv("DELTA_VO_HLE") != nullptr ||
+           nidForcedHle("DELTA_HLE_NIDS_VO", hid);
   return true;  // every other HLE module stays HLE
 }
 
 uintptr_t vprx_get(const char *lib, uint64_t hid) {
-  if (!useHleShim(lib))
+  if (!useHleShim(lib, hid))
     return 0;
 
   const modInfo *table = nullptr;

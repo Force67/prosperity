@@ -9,9 +9,13 @@
 
 #include <base.h>
 #include <cstdlib>
+#include <cstdio>
+#include <cstring>
 #include <unordered_map>
 #include <logger/logger.h>
 
+#include <utl/mem.h>
+#include "cpu/cpu_backend.h"
 #include "../module.h"
 #include "../proc.h"
 
@@ -268,6 +272,67 @@ int PS4ABI sys_dynlib_load_prx(const char *path, uint64_t flags, int *pHandle,
   if (!mod->resolveImports() || !mod->applyRelocations()) {
     LOG_ERROR("load_prx: relocate failed for {}", name.c_str());
     return -SysError::eNOEXEC;
+  }
+
+  // Run the module's DT_INIT (module_start) now, as the real kernel does during
+  // load-start. The system modules ship with constructors that self-register
+  // their service with the kernel devices; e.g. the real libSceVideoOut registers
+  // its display driver here, without which sceVideoOutOpen returns an error (its
+  // internal display-config table stays empty) and titles that run it LLE crash
+  // in their renderer. We don't run every module's init (some take backend paths
+  // we don't emulate and fault); scope it to the ones we've verified.
+  static const char *kRunInit[] = {"libSceVideoOut"};
+  for (auto *s : kRunInit) {
+    if (std::strcmp(name.c_str(), s) == 0 && !mod->getInfo().initRan) {
+      mod->getInfo().initRan = true;
+      auto baseAddr = reinterpret_cast<uintptr_t>(mod->getInfo().base);
+      // PS4 PRX carry module_start separately from DT_INIT (which is often 0 with
+      // an empty init_array). DELTA_VO_INIT_OFF lets us point at the entry(ies)
+      // by module offset (comma-separated, run in order) while pinning them.
+      const char *list = std::getenv("DELTA_VO_INIT_OFF");
+      base::String offs(list ? list : "");
+      for (const char *p = offs.c_str(); *p;) {
+        while (*p == ',' || *p == ' ') p++;
+        if (!*p) break;
+        char *end = nullptr;
+        uintptr_t a = baseAddr + std::strtoull(p, &end, 0);
+        p = end;
+        std::printf("[modinit] running %s init @ +%#lx\n", s, a - baseAddr);
+        cpu::backend().runGuestFunction(a, 0, 0, 0);
+        std::printf("[modinit] %s init @ returned\n", s);
+      }
+      // DELTA_VO_LLE_FIX: run libSceVideoOut's lazy init now (its 0xd530 ctor sets
+      // the display-config defaults + tail-calls 0x28f0 which opens /dev/dce and
+      // registers the driver into cfg[0]). The real driver would then mark the
+      // MAIN display connected (cfg[idx].f0=4) off a /dev/dce report we don't yet
+      // emulate, so synthesize it: copy the registered cfg[0] slot into cfg[idx]
+      // and set f0=4. Finally set the scePthreadOnce guard so the title's first
+      // sceVideoOutOpen skips re-running the ctor and reads our connected slot.
+      if (std::getenv("DELTA_VO_LLE_FIX")) {
+        uint8_t *base = mod->getInfo().base;
+        std::printf("[volle] running libSceVideoOut ctor (+0xd530)\n");
+        cpu::backend().runGuestFunction(baseAddr + 0xd530, 0, 0, 0);
+        int32_t idx = *reinterpret_cast<int32_t *>(base + 0x1cb40);
+        uint32_t f0c = *reinterpret_cast<uint32_t *>(base + 0x1cb50);
+        std::printf("[volle] after ctor: idx=%d cfg[0].f0=%#x\n", idx, f0c);
+        if (idx >= 1 && idx < 8) {
+          uint8_t *cfg0 = base + 0x1cb50;
+          uint8_t *cfgi = base + 0x1cb50 + (size_t)idx * 0x140;
+          std::memcpy(cfgi, cfg0, 0x140);
+          *reinterpret_cast<uint32_t *>(cfgi) = 4;  // main display, connected
+          // scePthreadOnce control @ +0x1cb18: mark "already run" so Open skips it.
+          *reinterpret_cast<uint32_t *>(base + 0x1cb18) = 1;
+          uint64_t op = *reinterpret_cast<uint64_t *>(cfgi + 0x48);
+          std::printf("[volle] connected cfg[%d] (f0=4), once-guard set; "
+                      "cfg[idx].op@+0x48 = %#lx (base+%#lx)\n",
+                      idx, (unsigned long)op, (unsigned long)(op - (uintptr_t)base));
+          // TEST (DELTA_VO_PATCH_OP): force the driver open-op to return a type-4
+          // handle (0x40), so Open's (ret>>4)==cfg[idx].f0(4) && ret>1 checks pass.
+          // Confirms whether the op return is the last gate before Open succeeds.
+          (void)op;
+        }
+      }
+    }
   }
 
   if (pHandle)

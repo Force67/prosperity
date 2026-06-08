@@ -35,6 +35,20 @@ static std::atomic<bool> g_vblankStarted{false};
 static std::atomic<uint64_t> g_flipCount{0};
 uint64_t flipCount() { return g_flipCount.load(); }
 
+// A low-bit TSC nonce for the display event's bits 0..11, so a polling title
+// sees each event as new. On the native x86 backend that's the real rdtsc; the
+// aarch64/FEX host has no rdtsc intrinsic, so fall back to a monotonic wall
+// clock -- only the low 12 bits are used. Mirrors dce_dev.cpp::guestTsc.
+static uint64_t tscNonce() {
+#if defined(DELTA_BACKEND_NATIVE)
+  return __builtin_ia32_rdtsc();
+#else
+  using namespace std::chrono;
+  return static_cast<uint64_t>(
+      duration_cast<nanoseconds>(steady_clock::now().time_since_epoch()).count());
+#endif
+}
+
 // Start the 60 Hz EVFILT_DISPLAY pump once, on the first vblank registration, so
 // the timer thread only runs when something waits on it.
 static void startVblankPump() {
@@ -52,7 +66,7 @@ static void startVblankPump() {
       // TSC nonce). Packing only count<<16 left bits 12..15 = 0, so the title
       // woke every tick but saw "no new event".
       uint64_t seq = (count - 1) % 14 + 1;                    // 1..14
-      uint64_t tsc = static_cast<uint64_t>(__builtin_ia32_rdtsc()) & 0xFFF;
+      uint64_t tsc = tscNonce() & 0xFFF;
       // Vblank (-14): a free-running tick for vblank waiters / frame timing.
       int64_t vdata = static_cast<int64_t>((count << 16) | (seq << 12) | tsc);
       triggerAllEqueues(-1, kEVFILT_VIDEOOUT, vdata);
@@ -79,7 +93,7 @@ void noteFlip() {
   // of the LAST completed flip (not the count): the engine's flip handler then
   // processes frames up to and including that index, which the sim has produced.
   uint64_t seq = idx % 14 + 1;
-  uint64_t tsc = static_cast<uint64_t>(__builtin_ia32_rdtsc()) & 0xFFF;
+  uint64_t tsc = tscNonce() & 0xFFF;
   int64_t data = static_cast<int64_t>((idx << 16) | (seq << 12) | tsc);
   triggerAllEqueues(-1, kEVFILT_DISPLAY, data);
 }

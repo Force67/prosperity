@@ -17,6 +17,7 @@
 #include <logger/logger.h>
 
 #include <atomic>
+#include <thread>
 #include <csetjmp>
 #include <csignal>
 #include <cstdio>
@@ -216,6 +217,14 @@ public:
 // TODO(boot): real signal handling (SMC write-protect faults, guest signals).
 class FexSignalDelegator final : public FEXCore::SignalDelegator {};
 
+// Return target for runGuestFunction: a synchronously-called guest function rets
+// here, and we longjmp out of the JIT just like thr_exit. Dispatched as a host
+// thunk, so its signature matches the thunk call path (extra args ignored).
+static uint64_t PS4ABI guestFnReturnExit() {
+  exitGuestThread();
+  return 0;  // unreachable (exitGuestThread longjmps)
+}
+
 class FexBackend final : public ICpuBackend {
 public:
   void onImageMapped(krnl::moduleInfo &info) override {
@@ -342,6 +351,37 @@ public:
     if (h->stack) munmap(h->stack, h->stackSize);
     if (h->callret) munmap(h->callret, h->callretSize);
     delete h;
+  }
+
+  uint64_t runGuestFunction(uintptr_t fn, uint64_t a0, uint64_t a1,
+                            uint64_t a2) override {
+    // A guest function that returns must land somewhere; point its return address
+    // at a host thunk that calls exitGuestThread, so the JIT unwinds cleanly.
+    static uintptr_t exitThunk =
+        makeHostThunk(reinterpret_cast<void *>(&guestFnReturnExit));
+
+    // Inherit the caller's guest TLS (fs base): module init calls into libkernel,
+    // which reads thread-local state. The caller (blocked on join below) isn't
+    // touching its TLS meanwhile, so sharing it for this synchronous call is safe
+    // and avoids faulting on the scratch-TLS a fresh thread would otherwise get.
+    uint64_t fsbase = t_curThread ? t_curThread->CurrentFrame->State.fs_cached : 0;
+
+    // createGuestThread sets RDI=arg; add RSI/RDX for the 2nd/3rd SysV args.
+    auto *h = static_cast<FexThread *>(
+        createGuestThread(fn, reinterpret_cast<void *>(a0), fsbase));
+    auto &S = h->thread->CurrentFrame->State;
+    S.gregs[FEXCore::X86State::REG_RSI] = a1;
+    S.gregs[FEXCore::X86State::REG_RDX] = a2;
+    // Push the return address. After the implicit `call`, x86 wants rsp%16==8 at
+    // the callee's first instruction, so 16-align then subtract 8.
+    uint64_t rsp = S.gregs[FEXCore::X86State::REG_RSP] & ~0xFULL;
+    rsp -= 8;
+    *reinterpret_cast<uint64_t *>(rsp) = exitThunk;
+    S.gregs[FEXCore::X86State::REG_RSP] = rsp;
+    // Run on a fresh host thread (never nest ExecuteThread on the caller's host
+    // thread) and block until it finishes. fn returns -> exitThunk -> longjmp.
+    std::thread([this, h] { runGuestThread(h); }).join();
+    return 0;
   }
 
 private:

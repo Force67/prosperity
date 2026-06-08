@@ -21,6 +21,7 @@
 #include "kern/dev/tty6_dev.h"
 #include "kern/proc.h"
 #include "kern/vfs.h"
+#include "sys_mem.h"
 #include "sys_vfs.h"
 
 #include <utl/object_ref.h>
@@ -169,6 +170,18 @@ int PS4ABI sys_fstat(uint32_t fd, void *stat) {
   // return and then allocate that many bytes (garbage -> bad_alloc).
   if (stat)
     std::memset(stat, 0, sizeof(SceKernelStat));
+  // shm fds aren't device-backed; size them from the shm backing so a title
+  // that fstat()s a shm before mmap'ing it (e.g. libSceAvSetting) gets a real
+  // st_size instead of -EBADF + a zero-length map.
+  if (size_t sz = shmFstatSize(fd); sz != SIZE_MAX) {
+    if (stat) {
+      auto *st = static_cast<SceKernelStat *>(stat);
+      st->st_size = static_cast<int64_t>(sz);
+      st->st_mode = 0x8000;  // S_IFREG
+      st->st_blksize = 0x4000;
+    }
+    return 0;
+  }
   auto *d = fdToDevice(fd);
   if (!d)
     return -SysError::eBADF;

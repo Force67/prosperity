@@ -47,6 +47,7 @@ struct moduleInfo {
 
   uint8_t *initAddr;
   uint8_t *finiAddr;
+  bool initRan = false;  // DT_INIT already executed (loader runs it for some PRX)
 
   moduleSeg textSeg;
   moduleSeg dataSeg;

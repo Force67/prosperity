@@ -36,6 +36,8 @@ int PS4ABI sys_mdbg_service(uint32_t op, void *, void *, void *);
 int PS4ABI sys_shm_open(const char *path, uint32_t flags, uint16_t mode);
 int PS4ABI sys_shm_unlink(const char *path);
 int PS4ABI sys_ftruncate(uint32_t fd, int64_t length);
+// Size of a shm fd's backing for fstat (SIZE_MAX if fd isn't a shm).
+size_t shmFstatSize(uint32_t fd);
 
 /*direct memory access*/
 int PS4ABI sys_dmem_container(uint32_t op);

@@ -82,11 +82,17 @@ static void printVideoOutCaller() {
   if (!vbase)
     return;
   auto *sp = reinterpret_cast<uintptr_t *>(__builtin_frame_address(0));
-  for (int i = 0; i < 512; i++) {
+  int shown = 0;
+  uintptr_t lastoff = ~0ull;
+  for (int i = 0; i < 1024 && shown < 6; i++) {
     uintptr_t v = sp[i];
     if (v >= vbase && v < vbase + vsize) {
-      std::printf("[dce]   caller libSceVideoOut+%#lx\n", v - vbase);
-      return;
+      uintptr_t off = v - vbase;
+      if (off == lastoff)
+        continue;  // skip repeated return-address slots
+      std::printf("[dce]   caller libSceVideoOut+%#lx\n", off);
+      lastoff = off;
+      shown++;
     }
   }
 }
@@ -95,8 +101,13 @@ bool dceDevice::init(const char *, uint32_t, uint32_t) { return true; }
 
 // A guest pointer is directly host-addressable here (in-process LLE). Guard
 // dereferences to a sane userspace range so a stray field doesn't fault.
+// NB: on the FEX (aarch64) backend the guest stack is a host mmap up at
+// 0xffff_xxxx_xxxx, so the real libSceVideoOut passes out-slot pointers above
+// the old 0x8000_0000_0000 ceiling -- accept the full 48-bit user range, else
+// the dce silently drops every write to a stack out-slot (the open-op then
+// mmaps an uninitialised offset/size and fails).
 static bool plausiblePtr(uint64_t v) {
-  return v >= 0x10000 && v < 0x0000800000000000ull;
+  return v >= 0x10000 && v < 0x0001000000000000ull;
 }
 
 // Dump an ioctl arg struct as u64s. Just the values: do NOT chase "pointers"
@@ -163,9 +174,14 @@ int32_t dceDevice::ioctl(uint32_t cmd, void *data) {
       // Allocate scanout pool. arg[0x10]/arg[0x18] (s[2]/s[3]) point at the
       // caller's offset/size out-slots; it then mmaps the dce fd at that offset
       // for `size` bytes. Carve a real pool slice so the mmap maps live memory.
-      uint64_t want = (plausiblePtr(s[3]) && *reinterpret_cast<uint64_t *>(s[3]))
-                          ? *reinterpret_cast<uint64_t *>(s[3])
-                          : 0x4000000;  // 64 MiB default
+      // s[3] is a pure OUT slot on some callers (libSceVideoOut's open path passes
+      // it uninitialised) -- only treat *s[3] as a requested size when it's a
+      // sane size (not stack garbage / a pointer), else use the default. Without
+      // this the open-op reads a bogus huge size, poolAlloc fails ENOMEM, the
+      // slots stay uninitialised, and the title mmaps garbage offset/len.
+      uint64_t reqd = plausiblePtr(s[3]) ? *reinterpret_cast<uint64_t *>(s[3]) : 0;
+      uint64_t want = (reqd > 0 && reqd <= 0x10000000) ? reqd  // <= 256 MiB
+                                                       : 0x4000000;  // 64 MiB
       uint64_t off = poolAlloc(want);
       if (off == UINT64_MAX)
         return 12;  // ENOMEM

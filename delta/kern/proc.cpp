@@ -6,6 +6,8 @@
  * in the root of the source tree.
  */
 
+#include <thread>
+#include <chrono>
 #include <base.h>
 #include <utl/file.h>
 #include <utl/mem.h>
@@ -122,6 +124,141 @@ static void bringUpRebirthSurfaceRegistry(smodule &m) {
 
   LOG_INFO("rebirth surface-registry: installed empty buckets@{} -> [+{:#x}]",
            (void *)buckets, kRegistryOff);
+
+  // DIAGNOSTIC (DELTA_GFXCTX_WATCH): poll the rebirth GfxContext singleton's
+  // command-buffer pointer (rebirth+0x687b30, field +0x38). The both-LLE render
+  // thread faults at rebirth+0x23f027 dereferencing this when it is null; this
+  // shows whether/when it gets allocated. Logs every transition.
+  if (std::getenv("DELTA_GFXCTX_WATCH")) {
+    auto *slot = reinterpret_cast<volatile uint64_t *>(base + 0x687b30 + 0x38);
+    std::thread([slot] {
+      uint64_t last = ~0ull;
+      for (int i = 0; i < 200000; i++) {
+        uint64_t v = *slot;
+        if (v != last) {
+          std::printf("[gfxctx] +0x38 = %#llx  (t=%dms)\n",
+                      (unsigned long long)v, i / 2);
+          last = v;
+        }
+        std::this_thread::sleep_for(std::chrono::microseconds(500));
+      }
+    }).detach();
+  }
+}
+
+// DIAGNOSTIC (DELTA_VO_PATCH): patch real libSceVideoOut export entries to
+// `mov eax,<v>; ret`, to isolate which real setup function's error return makes
+// rebirth skip command-buffer creation. List: open,regbuf,fliprate,addflip,getlabel.
+// open returns 1 (a valid handle); the rest return 0 (SCE_OK).
+// DIAGNOSTIC (DELTA_VO_WATCH): poll libSceVideoOut's internal display-config state
+// during the NATURAL flow (its init runs via pthread_once on first Open). Shows
+// how count[0x1cb30]/idx[0x1cb40]/cfg[*].f0[0x1cb50 stride 0x140] evolve, to pin
+// exactly what the driver fails to set (the display-connected state f0==4 Open needs).
+static void watchVideoOutState(smodule &m) {
+  if (!std::getenv("DELTA_VO_WATCH"))
+    return;
+  uint8_t *base = m.getInfo().base;
+  std::thread([base] {
+    int32_t lc = 0x7fffffff, li = 0x7fffffff;
+    uint32_t lf[3] = {0xdead, 0xdead, 0xdead};
+    for (int i = 0; i < 120000; i++) {
+      int32_t c = *reinterpret_cast<volatile int32_t *>(base + 0x1cb30);
+      int32_t idx = *reinterpret_cast<volatile int32_t *>(base + 0x1cb40);
+      uint32_t f[3];
+      for (int s = 0; s < 3; s++)
+        f[s] = *reinterpret_cast<volatile uint32_t *>(base + 0x1cb50 + s * 0x140);
+      // port[0] @ vaddr 0x1d550 (stride 0xb0): field@0x14=open flag; field@0x48 set
+      // to 0xfffffff3 once Open reaches the deep success path (just before op@0x580).
+      uint32_t portOpen = *reinterpret_cast<volatile uint32_t *>(base + 0x1d564);
+      uint32_t port48 = *reinterpret_cast<volatile uint32_t *>(base + 0x1d550 + 0x48);
+      static uint32_t lpo = 0xdead, lp48 = 0xdead;
+      if (c != lc || idx != li || f[0] != lf[0] || f[1] != lf[1] || f[2] != lf[2] ||
+          portOpen != lpo || port48 != lp48) {
+        std::printf("[vowatch t=%dms] count=%d idx=%d cfg.f0=[%#x %#x %#x] "
+                    "port0.open=%u port0.f48=%#x\n",
+                    i / 2, c, idx, f[0], f[1], f[2], portOpen, port48);
+        lc = c; li = idx; lf[0] = f[0]; lf[1] = f[1]; lf[2] = f[2]; lpo = portOpen;
+        lp48 = port48;
+      }
+      // DELTA_VO_FORCE_CONNECT: once the driver registered the placeholder into
+      // cfg[0] (f0 went -1 -> 0) but Open reads cfg[idx] (still free -1), make a
+      // connected display: copy the populated cfg[0] slot into cfg[idx] and mark
+      // it connected (f0=4). Proves the display-config mechanism end to end.
+      static bool patched = false;
+      if (std::getenv("DELTA_VO_FORCE_CONNECT") && !patched && idx >= 1 &&
+          idx < 8 && f[0] == 0 && f[1] == 0xffffffff) {
+        uint8_t *cfg0 = base + 0x1cb50;
+        uint8_t *cfgi = base + 0x1cb50 + (size_t)idx * 0x140;
+        std::memcpy(cfgi, cfg0, 0x140);                 // copy ops/vtable
+        *reinterpret_cast<uint32_t *>(cfgi) = 4;        // f0 = connected
+        patched = true;
+        std::printf("[vowatch] FORCE_CONNECT: cfg[%d] <- cfg[0], f0=4\n", idx);
+      }
+      std::this_thread::sleep_for(std::chrono::microseconds(500));
+    }
+  }).detach();
+}
+
+// Host hook for the videoout busType/index map-op (vaddr 0x1020). Open calls it
+// with esi=userId, edx=busType, ecx=index, r8=param. Via makeHostThunk those land
+// in args (rsi,rdx,r10,r8) -> a2,a3,a4,a5. Logs the title's real Open() args and
+// returns 0 (the op's value for the main display). If this never logs, Open failed
+// before the op (count/f0/param gate).
+static uint64_t PS4ABI voOpMapLog(uint64_t a1, uint64_t userId, uint64_t busType,
+                                  uint64_t index, uint64_t param, uint64_t a6) {
+  uint32_t pv = 0;
+  if (param > 0x10000 && param < 0x800000000000ull)
+    pv = *reinterpret_cast<uint32_t *>(param);
+  std::printf("[voop] sceVideoOutOpen(userId=%#lx busType=%ld index=%ld param=%#lx "
+              "[param]=%#x [param]&0xf=%#x) -> map-op returns 0\n",
+              (unsigned long)userId, (long)busType, (long)index,
+              (unsigned long)param, pv, pv & 0xf);
+  return 0;
+}
+
+static void patchVideoOutDiag(smodule &m) {
+  watchVideoOutState(m);
+  if (std::getenv("DELTA_VO_OPLOG")) {
+    uintptr_t thunk = cpu::makeHostThunk(reinterpret_cast<void *>(&voOpMapLog));
+    uint8_t *o = m.getInfo().base + 0x1020;
+    utl::protectMem(reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(o) & ~0xFFFull),
+                    0x2000, utl::pageProtection::rwx);
+    o[0] = 0x48; o[1] = 0xb8;                       // mov rax, imm64
+    *reinterpret_cast<uint64_t *>(o + 2) = thunk;
+    o[10] = 0xff; o[11] = 0xe0;                     // jmp rax
+    std::printf("[voop] hooked map-op @ +0x1020 -> thunk %#lx\n",
+                (unsigned long)thunk);
+  }
+  // TEST (DELTA_VO_SKIP_580): nop the `js error` after Open's `call op@0x580`
+  // (config-validate op). If Open then progresses, op@0x580's return was a gate.
+  if (std::getenv("DELTA_VO_SKIP_580")) {
+    uint8_t *c = m.getInfo().base + 0xaeb8;  // js 0xef09 after the op call
+    utl::protectMem(reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(c) & ~0xFFFull),
+                    0x2000, utl::pageProtection::rwx);
+    if (c[0] == 0x78) {  // js rel8
+      c[0] = 0x90; c[1] = 0x90;
+      std::printf("[votest] nop'd op@0x580 error-js @ +0xaeb8\n");
+    } else {
+      std::printf("[votest] op@0x580 js bytes mismatch: %#x %#x\n", c[0], c[1]);
+    }
+  }
+  const char *list = std::getenv("DELTA_VO_PATCH");
+  if (!list)
+    return;
+  uint8_t *base = m.getInfo().base;
+  struct { const char *name; uint32_t off; uint8_t ret; } fns[] = {
+      {"open", 0xaad0, 1}, {"regbuf", 0xb620, 0}, {"fliprate", 0xbde0, 0},
+      {"addflip", 0xc6c0, 0}, {"getlabel", 0xbb80, 0}};
+  for (auto &fn : fns) {
+    if (!std::strstr(list, fn.name))
+      continue;
+    uint8_t *c = base + fn.off;
+    utl::protectMem(reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(c) & ~0xFFFull),
+                    0x2000, utl::pageProtection::rwx);
+    c[0] = 0xb8; c[1] = fn.ret; c[2] = 0; c[3] = 0; c[4] = 0;  // mov eax, imm32
+    c[5] = 0xc3;                                               // ret
+    std::printf("[vopatch] libSceVideoOut!%s -> return %d\n", fn.name, fn.ret);
+  }
 }
 
 modulePtr proc::loadModule(base::StringRef name) {
@@ -141,10 +278,13 @@ modulePtr proc::loadModule(base::StringRef name) {
   hostRel += ".sprx";
   base::String hostPath = utl::make_abs_path(hostRel);
   const bool isRebirth = name == base::StringRef("rebirth");
+  const bool isVideoOut = name == base::StringRef("libSceVideoOut");
   if (utl::File(hostPath, utl::fileMode::read).IsOpen()) {
     if (lib->fromFile(hostPath)) {
       if (isRebirth)
         bringUpRebirthSurfaceRegistry(*lib);
+      if (isVideoOut)
+        patchVideoOutDiag(*lib);
       return lib;
     }
   } else {

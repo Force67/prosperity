@@ -69,6 +69,13 @@ public:
       reinterpret_cast<void(PS4ABI *)(void *)>(entry)(arg);
     t_exitJmp = nullptr;
   }
+
+  uint64_t runGuestFunction(uintptr_t fn, uint64_t a0, uint64_t a1,
+                            uint64_t a2) override {
+    // Guest code runs natively on x86-64: a direct function-pointer call.
+    return reinterpret_cast<uint64_t(PS4ABI *)(uint64_t, uint64_t, uint64_t)>(fn)(
+        a0, a1, a2);
+  }
 };
 
 // Native: unwind out of the guest call chain back to runGuestThread so the

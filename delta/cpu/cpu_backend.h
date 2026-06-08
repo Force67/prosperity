@@ -65,6 +65,17 @@ public:
   // thread (does the FEX per-thread registration first), then destroys it.
   virtual void runGuestThread(void *handle) = 0;
 
+  // Synchronously call a guest function `fn(a0, a1, a2)` (PS4 SysV ABI) from host
+  // code and return when it returns. This is how the real kernel runs a loaded
+  // module's DT_INIT (module_start) so the module can self-register (e.g. the
+  // real libSceVideoOut registering its display driver). Native: a direct
+  // function-pointer call. FEX: runs the function on a fresh JIT thread whose
+  // return address unwinds out via exitGuestThread.
+  // Returns the function's eax. Must be called from a context where guest memory
+  // and the module's dependencies are already mapped + relocated.
+  virtual uint64_t runGuestFunction(uintptr_t fn, uint64_t a0, uint64_t a1,
+                                    uint64_t a2) = 0;
+
   // Convenience for the main thread: create + run on this thread.
   void enterGuest(uintptr_t entry, void *arg, uint64_t fsbase) {
     runGuestThread(createGuestThread(entry, arg, fsbase));
