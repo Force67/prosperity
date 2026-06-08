@@ -7,6 +7,7 @@
  * in the root of the source tree.
  */
 
+#include <cstdio>
 #include <base.h>
 #include <logger/logger.h>
 #include <utl/mem.h>
@@ -132,6 +133,9 @@ uint8_t *PS4ABI sys_mmap(void *addr, size_t size, uint32_t prot, uint32_t flags,
 
   if (fd != -1) {
     auto *obj = proc->getObjTable().get(fd);
+    if (std::getenv("DELTA_MMAPFD_TRACE"))
+      std::fprintf(stderr, "[mmapfd] fd=%u addr=%p size=%#zx off=%#zx objType=%d\n",
+                   fd, addr, size, offset, obj ? (int)obj->type() : -1);
     if (obj && obj->type() == kObject::oType::shm) {
       // POSIX shared memory: hand back the shared backing so every mapper of
       // this shm sees the same region (sized by ftruncate).
@@ -184,6 +188,21 @@ uint8_t *PS4ABI sys_mmap(void *addr, size_t size, uint32_t prot, uint32_t flags,
 
   if (flags & mFlags::anon)
     std::memset(ptr, 0, size);
+
+  // File-backed mmap: copy the file's content into the freshly-mapped pages so the
+  // guest reads the file it mapped (Doom64 mmaps its asset/WAD files and samples
+  // textures straight out of the mapping; an anonymous zero-fill left them black).
+  // readAt is a no-op (-1) for non-file devices; the read stops at EOF so a sparse
+  // over-sized mapping keeps zeros past the file's end.
+  if (fd != static_cast<uint32_t>(-1)) {
+    if (auto *o = proc->getObjTable().get(fd))
+      if (o->type() == kObject::oType::device) {
+        int64_t got = static_cast<device *>(o)->readAt(ptr, size, offset);
+        if (got > 0 && std::getenv("DELTA_MMAPFD_TRACE"))
+          std::fprintf(stderr, "[mmapfd]   filled %p from fd=%u off=%#zx -> %lld bytes\n",
+                       ptr, fd, offset, (long long)got);
+      }
+  }
 
   proc->getVma().add(static_cast<uint8_t *>(ptr), size, gprot, prot);
 

@@ -61,6 +61,18 @@ int64_t fileDevice::lseek(int64_t off, int whence) {
   return static_cast<int64_t>(file_.Tell());
 }
 
+// pread: read at an absolute offset without disturbing the file position (the
+// guest keeps its own position for sequential reads). Backs a file mmap.
+int64_t fileDevice::readAt(void *buf, size_t n, int64_t off) {
+  if (!open_)
+    return -SysError::eBADF;
+  uint64_t saved = file_.Tell();
+  file_.Seek(off, utl::seekMode::seek_set);
+  int64_t r = static_cast<int64_t>(file_.Read(buf, n));
+  file_.Seek(static_cast<int64_t>(saved), utl::seekMode::seek_set);
+  return r;
+}
+
 int fileDevice::fstat(void *stat) {
   if (!open_)
     return -SysError::eBADF;

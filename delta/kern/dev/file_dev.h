@@ -54,8 +54,14 @@ public:
   // Back this device with an already-opened file (e.g. a virtual VFS stream).
   bool adopt(utl::File &&file);
 
+  // A file mmap is satisfied by sys_mmap's anonymous-alloc + file-content fill
+  // (via readAt), not a device-owned region; return -1 silently to take that path.
+  uint8_t *map(void *, size_t, uint32_t, uint32_t, size_t) override {
+    return reinterpret_cast<uint8_t *>(-1);
+  }
   int64_t read(void *buf, size_t n) override;
   int64_t lseek(int64_t off, int whence) override;
+  int64_t readAt(void *buf, size_t n, int64_t off) override;
   int fstat(void *stat) override;
 
 private:

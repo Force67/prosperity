@@ -40,6 +40,10 @@ public:
   virtual int64_t read(void *, size_t) { return -SysError::eNODEV; }
   virtual int64_t write(const void *, size_t) { return -SysError::eNODEV; }
   virtual int64_t lseek(int64_t, int) { return -SysError::eNODEV; }
+  // Read `n` bytes at absolute `off` into `buf` WITHOUT moving the file position
+  // (pread). Used to back a file mmap with the file's content. Returns bytes read
+  // (0 at/after EOF), or -1 if this device isn't a readable file.
+  virtual int64_t readAt(void *, size_t, int64_t) { return -1; }
   virtual int fstat(void * /*SceKernelStat*/) { return -SysError::eNODEV; }
   // Directory enumeration (FreeBSD dirents). Non-directories aren't one.
   virtual int64_t getdents(void *, size_t) { return -SysError::eNOTDIR; }
