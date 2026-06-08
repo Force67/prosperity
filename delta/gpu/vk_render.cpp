@@ -709,6 +709,19 @@ void uploadTexPixels(VkImage img, uint64_t base, uint32_t w, uint32_t h,
     gcn::detile32(reinterpret_cast<const uint32_t *>(base), linear.data(), w, h,
                   tiling, pitch ? pitch : w);
     srcPixels = linear.data();
+  } else if (pitch && pitch != w) {
+    // Linear surface whose row stride (pitch) differs from its width: the rows
+    // are pitch-strided in guest memory, so a flat w*h*4 copy would pull each row
+    // from the wrong offset and shear the image into diagonal stripes. Repack
+    // into a tightly-packed w*h buffer row by row. (Common for Doom64's
+    // composite/scaled surfaces; Isaac's textures have pitch==width so are
+    // unaffected.)
+    linear.resize((size_t)w * h);
+    const uint32_t *s = reinterpret_cast<const uint32_t *>(base);
+    for (uint32_t y = 0; y < h; y++)
+      std::memcpy(linear.data() + (size_t)y * w, s + (size_t)y * pitch,
+                  (size_t)w * 4);
+    srcPixels = linear.data();
   }
   VkBuffer stg; VkDeviceMemory stgMem; void *map;
   VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
