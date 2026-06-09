@@ -681,7 +681,13 @@ void handleDispatch(const uint32_t *body, uint32_t count) {
   uint32_t tgx = g_regs[mmCOMPUTE_NUM_THREAD_X] & 0xFFFF;
   uint32_t tgy = g_regs[mmCOMPUTE_NUM_THREAD_Y] & 0xFFFF;
   uint32_t tgz = g_regs[mmCOMPUTE_NUM_THREAD_Z] & 0xFFFF;
-  uint32_t rsrc2 = g_regs[mmCOMPUTE_PGM_RSRC2];
+  // RSRC2/settings (user_sgpr count, tgid_enable, lds) sits in the ComputeProgram
+  // STRUCT at dword 18-19 = SH 0x212/0x213 (compute SET_SH_REG uses struct-relative
+  // offsets), i.e. absolute 0x2E12/0x2E13 -- NOT the canonical 0x20F.
+  uint32_t rsrc2hi = g_regs[0x2E13];           // high dword of the settings u64
+  uint32_t userSgpr = (rsrc2hi >> 1) & 0x1F;   // num_user_regs (bits 37:33)
+  uint32_t tgidEnable = (rsrc2hi >> 7) & 0x7;  // tgid_enable (bits 41:39)
+  uint32_t ldsDwords = (rsrc2hi >> 15) & 0x1FF;
 
   static const bool csDump = std::getenv("DELTA_GPU_CSDUMP") != nullptr;
   static int cdN = 0;
@@ -689,10 +695,9 @@ void handleDispatch(const uint32_t *body, uint32_t count) {
     cdN++;
     const uint32_t *ud = &g_regs[mmCOMPUTE_USER_DATA_0];
     std::fprintf(stderr,
-        "[cs] addr=%#lx groups=[%u %u %u] tg=[%u %u %u] rsrc2=%#x usgpr=%u "
-        "tgiden=%u lds=%u\n",
-        (unsigned long)csAddr, dimX, dimY, dimZ, tgx, tgy, tgz, rsrc2,
-        (rsrc2 >> 1) & 0x1F, (rsrc2 >> 7) & 0x7, (rsrc2 >> 15) & 0x1FF);
+        "[cs] addr=%#lx groups=[%u %u %u] tg=[%u %u %u] usgpr=%u tgiden=%u lds=%u\n",
+        (unsigned long)csAddr, dimX, dimY, dimZ, tgx, tgy, tgz,
+        userSgpr, tgidEnable, ldsDwords);
     std::fprintf(stderr, "[cs]   user_data:");
     for (int k = 0; k < 16; k++) std::fprintf(stderr, " %08x", ud[k]);
     std::fprintf(stderr, "\n");
