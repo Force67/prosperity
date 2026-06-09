@@ -394,6 +394,34 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
       if (cb)
         std::fprintf(stderr, "  cbuf=[%.3f %.3f %.3f %.3f / %.3f %.3f %.3f %.3f / %.3f %.3f %.3f %.3f / %.3f %.3f %.3f %.3f]\n",
             cb[0],cb[1],cb[2],cb[3],cb[4],cb[5],cb[6],cb[7],cb[8],cb[9],cb[10],cb[11],cb[12],cb[13],cb[14],cb[15]);
+      // Project a handful of vertices through the cbuf MVP (both row- and column-
+      // major) and count how many land in NDC [-1,1] -- tells us if the world
+      // geometry is on-screen (so the black is a PS/sampling issue) or off-screen
+      // (a VS/cbuffer-resolution issue).
+      if (cb) {
+        auto proj = [&](const float *p, bool colMajor, float out[4]) {
+          float v[4] = {p[0], p[1], p[2], 1.0f};
+          for (int r = 0; r < 4; r++) {
+            float s = 0;
+            for (int c = 0; c < 4; c++)
+              s += (colMajor ? cb[c * 4 + r] : cb[r * 4 + c]) * v[c];
+            out[r] = s;
+          }
+        };
+        int onR = 0, onC = 0, n = d.indexCount < 64 ? d.indexCount : 64;
+        float firstR[4] = {0}, firstC[4] = {0};
+        for (int i = 0; i < n; i++) {
+          const float *p = reinterpret_cast<const float *>(vb + (size_t)i * d.vertexStride + d.vattrs[0].offset);
+          float r4[4], c4[4]; proj(p, false, r4); proj(p, true, c4);
+          if (i == 0) { for (int k = 0; k < 4; k++) { firstR[k] = r4[k]; firstC[k] = c4[k]; } }
+          auto onscreen = [](float *o) { if (o[3] <= 0.0001f) return false;
+            float x = o[0]/o[3], y = o[1]/o[3], z = o[2]/o[3];
+            return x>=-1&&x<=1&&y>=-1&&y<=1&&z>=-1&&z<=1; };
+          if (onscreen(r4)) onR++; if (onscreen(c4)) onC++;
+        }
+        std::fprintf(stderr, "  proj n=%d onscreen row=%d col=%d | v0row=[%.2f %.2f %.2f %.2f] v0col=[%.2f %.2f %.2f %.2f]\n",
+                     n, onR, onC, firstR[0],firstR[1],firstR[2],firstR[3], firstC[0],firstC[1],firstC[2],firstC[3]);
+      }
       // Sample the bound texture's ALPHA: is the source genuinely alpha=0 (so the PS
       // must compute opacity elsewhere / a recompiler alpha bug) or alpha=255 (so our
       // load zeroes it)? This decides why the src-alpha blend makes walls invisible.
