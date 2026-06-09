@@ -378,8 +378,11 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
     // can also catch Doom64's lower-index level draws.
     static const uint32_t geomMin = [] { const char *e = std::getenv("DELTA_GPU_GEOMMIN");
       return e ? (uint32_t)std::strtoul(e, nullptr, 10) : 500u; }();
-    static int gdN = 0;
-    if (geomDump && d.indexCount >= geomMin && d.vertexData && gdN < 40) {
+    static int gdN = 0, gdSeen = 0;
+    // Sample periodically across the WHOLE run (every 100th qualifying world draw)
+    // so we can see whether the camera/view ever moves -- not just the first frames.
+    if (geomDump && d.indexCount >= geomMin && d.vertexData &&
+        (gdSeen++ % 100 == 0) && gdN < 300) {
       gdN++;
       const float *cb = d.cbufBase ? reinterpret_cast<const float *>(d.cbufBase) : nullptr;
       const auto *vb = static_cast<const uint8_t *>(d.vertexData);
@@ -431,6 +434,24 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
         }
         std::fprintf(stderr, "  proj n=%d onscreen row=%d col=%d | flipZ row=%d col=%d | v0row=[%.2f %.2f %.2f %.2f] v0col=[%.2f %.2f %.2f %.2f]\n",
                      n, onR, onC, onRfz, onCfz, firstR[0],firstR[1],firstR[2],firstR[3], firstC[0],firstC[1],firstC[2],firstC[3]);
+        // The game is in real gameplay, so a valid view transform exists. Maybe the
+        // VS projects a DIFFERENT attribute than attr0. Project EACH >=3-comp attr
+        // (over the indexed verts) and report which, if any, lands on-screen -- that
+        // identifies the true position attribute the renderer should be feeding.
+        uint32_t firstIdx = i16 ? i16[0] : i32 ? i32[0] : 0;
+        for (uint32_t a = 0; a < d.nvattrs && a < 8; a++) {
+          if (d.vattrs[a].numComps < 3) continue;
+          int onA = 0;
+          for (int i = 0; i < n; i++) {
+            uint32_t idx = i16 ? i16[i] : i32 ? i32[i] : (uint32_t)i;
+            const float *p = reinterpret_cast<const float *>(vb + (size_t)idx * d.vertexStride + d.vattrs[a].offset);
+            float c4[4]; proj(p, true, c4);
+            if (onscreen(c4)) onA++;
+          }
+          const float *pv = reinterpret_cast<const float *>(vb + (size_t)firstIdx * d.vertexStride + d.vattrs[a].offset);
+          std::fprintf(stderr, "    attr%u off=%u nc=%u dfmt=%u v0=[%.2f %.2f %.2f] onscreen(col)=%d\n",
+                       a, d.vattrs[a].offset, d.vattrs[a].numComps, d.vattrs[a].dfmt, pv[0], pv[1], pv[2], onA);
+        }
       }
       // Sample the bound texture's ALPHA: is the source genuinely alpha=0 (so the PS
       // must compute opacity elsewhere / a recompiler alpha bug) or alpha=255 (so our
