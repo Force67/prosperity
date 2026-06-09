@@ -132,7 +132,7 @@ struct Emit {
     auto set = [&](const std::string &e) { line(d + " = Uf(" + e + ");"); };
     auto setU = [&](const std::string &e) { line(d + " = (" + e + ");"); };
     switch (op) {
-      case 0x00: set("(Ff(sg[106])!=0.0 ? " + s1 + " : " + s0 + ")"); break;  // cndmask (vcc)
+      case 0x00: set("(sg[106]!=0u ? " + s1 + " : " + s0 + ")"); break;  // cndmask (vcc, raw 1u/0u)
       case 0x01: case 0x02: case 0x03: set(s0 + " + " + s1); break;          // add_f32 variants
       case 0x04: set(s0 + " - " + s1); break;                                // sub_f32
       case 0x05: set(s1 + " - " + s0); break;                                // subrev_f32
@@ -147,6 +147,22 @@ struct Emit {
       case 0x2f: setU("packHalf2x16(vec2(" + s0 + ", " + s1 + "))"); break;  // cvt_pkrtz_f16_f32
       default: set(s0 + " * " + s1); break;
     }
+  }
+  // VOPC: vector compare -> VCC (sg[106]) as raw 1u/0u. Low nibble selects the
+  // predicate (1 lt, 2 eq, 3 le, 4 gt, 5 ne, 6 ge) for f32 (op<=0x3f), i32
+  // (0x80-0xbf) and u32 (0xc0+). Both backends previously skipped VOPC, so cndmask
+  // always read VCC==0 and picked src0; this makes conditional selects work.
+  void vopc(uint32_t op, const std::string &s0f, const std::string &s1f,
+            const std::string &s0u, const std::string &s1u) {
+    uint32_t lo = op & 0xF;
+    const char *o = lo == 1 ? "<" : lo == 2 ? "==" : lo == 3 ? "<=" : lo == 4 ? ">"
+                    : lo == 5 ? "!=" : lo == 6 ? ">=" : nullptr;
+    if (!o) return;
+    std::string a, b;
+    if (op <= 0x3F) { a = s0f; b = s1f; }                                  // f32
+    else if (op >= 0x80 && op <= 0xBF) { a = "int(" + s0u + ")"; b = "int(" + s1u + ")"; }  // i32
+    else { a = s0u; b = s1u; }                                             // u32
+    line("sg[106] = (" + a + " " + std::string(o) + " " + b + ") ? 1u : 0u;");
   }
   void vop1(uint32_t op, uint32_t vdst, const std::string &s0) {
     std::string d = "vg[" + std::to_string(vdst) + "]";
@@ -270,6 +286,12 @@ bool translateVs(const uint32_t *vsCode, const uint32_t *vsUserData, Recompiled 
         (void)clmp;
         break;
       }
+      case Enc::vopc: {
+        uint32_t op = in.opcode, vsrc1 = (w >> 9) & 0xFF, src0 = w & 0x1FF;
+        e.vopc(op, srcF(src0, in.literal), srcF(256 + vsrc1, in.literal),
+               srcRaw(src0, in.literal), srcRaw(256 + vsrc1, in.literal));
+        break;
+      }
       case Enc::exp: {
         uint32_t en = w & 0xF, target = (w >> 4) & 0x3F;
         uint32_t v[4] = {w1 & 0xFF, (w1 >> 8) & 0xFF, (w1 >> 16) & 0xFF, (w1 >> 24) & 0xFF};
@@ -362,6 +384,12 @@ bool translatePs(const uint32_t *psCode, const uint32_t *psUserData, uint32_t nu
         e.vop3(op, vdst, srcF(s0, in.literal, neg & 1, abs & 1),
                srcF(s1, in.literal, neg & 2, abs & 2),
                srcF(s2, in.literal, neg & 4, abs & 4));
+        break;
+      }
+      case Enc::vopc: {
+        uint32_t op = in.opcode, vsrc1 = (w >> 9) & 0xFF, src0 = w & 0x1FF;
+        e.vopc(op, srcF(src0, in.literal), srcF(256 + vsrc1, in.literal),
+               srcRaw(src0, in.literal), srcRaw(256 + vsrc1, in.literal));
         break;
       }
       case Enc::mimg: {
