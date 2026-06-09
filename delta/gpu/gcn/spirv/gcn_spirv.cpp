@@ -941,8 +941,12 @@ bool recompileSpirv(const uint32_t *vsCode, const uint32_t *psCode,
     if (g_dbg) std::fprintf(stderr, "[gcnspv] PS invalid: %s\n", err.c_str());
     return false;
   }
-  r.vsSpirv = spirv::optimize(vs);
-  r.fsSpirv = spirv::optimize(ps);
+  // DELTA_GPU_SPIRV_NOOPT: skip the optimize pass (use the naive memory-backed
+  // register SPIR-V). Diagnostic: isolates an emission bug from a spirv-opt
+  // mis-promotion (the naive form keeps the register file in memory, always correct).
+  static const bool noOpt = std::getenv("DELTA_GPU_SPIRV_NOOPT") != nullptr;
+  r.vsSpirv = noOpt ? vs : spirv::optimize(vs);
+  r.fsSpirv = noOpt ? ps : spirv::optimize(ps);
   r.ok = !r.vsSpirv.empty() && !r.fsSpirv.empty();
   // Tally (DELTA_GPU_SPIRV): how many shaders the direct SPIR-V backend accepted vs
   // had to decline (-> GLSL fallback), and how many used the CFG path. Confirms the
