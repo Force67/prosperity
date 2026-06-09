@@ -39,6 +39,16 @@ TImage decodeTImage(const uint32_t *p) {
   //  [4] depth[12:0]; pitch[26:13]
   TImage t;
   t.base = ((static_cast<uint64_t>(p[1] & 0xFF) << 32) | p[0]) << 8;
+  // PS4 GFX7 colour buffers are addressed by a 32-bit CB_COLOR_BASE (= base[39:8],
+  // so a 40-bit byte address). When such a render target is sampled as a texture,
+  // its T# carries a spurious base[47:40] byte (dword1[7:0]) that the colour buffer
+  // cannot express, pushing the decoded address far out of the guest VA range
+  // (e.g. Undertale's 640x480 surface: dword0<<8 = 0x40c3298000 = the RT, but
+  // dword1[7:0]=0x40 inflates it to 0x4040c3298000). Drop the high byte when it
+  // takes the address out of range so the T# resolves to the 40-bit RT the colour
+  // buffer rendered into. Normal guest textures have base[47:40]=0 -> unchanged.
+  if (t.base >= 0x20000000000ull)
+    t.base &= 0xFFFFFFFFFFull;  // mask to 40 bits (CB addressing)
   t.dfmt = (p[1] >> 20) & 0x3F;
   t.nfmt = (p[1] >> 26) & 0xF;
   t.width = ((p[2] & 0x3FFF)) + 1;

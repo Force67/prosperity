@@ -322,6 +322,31 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
       vk::beginFrame();
       g_frameActive = true;
     }
+    // DELTA_GPU_BLITDUMP: for the first few draws targeting a wide (scanout-sized)
+    // RT, disassemble the PS and report what trackTextures resolved. Pins why
+    // Undertale's surface->scanout blit renders untextured (tex=0): is the PS doing
+    // an image_sample we miss, or is the T# pointing outside the guest range?
+    static const bool blitDump = std::getenv("DELTA_GPU_BLITDUMP") != nullptr;
+    static int bdN = 0;
+    if (blitDump && d.rtW >= 1280 && bdN < 6) {
+      bdN++;
+      std::fprintf(stderr,
+          "[blit] #%d rt=%#lx %ux%u VS=%#lx PS=%#lx texBase=%#lx %ux%u nvattrs=%u "
+          "stride=%u idx=%u blendCtl=%#x\n",
+          bdN, (unsigned long)d.rtBase, d.rtW, d.rtH, (unsigned long)vsA,
+          (unsigned long)psA, (unsigned long)d.texBase, d.texW, d.texH, d.nvattrs,
+          d.vertexStride, d.indexCount, d.blendControl);
+      if (psA >= 0x1000000000ull && psA < 0x20000000000ull) {
+        auto texs = gcn::trackTextures(reinterpret_cast<const uint32_t *>(psA), 4096,
+                                       &g_regs[mmSPI_SHADER_USER_DATA_PS_0]);
+        std::fprintf(stderr, "[blit]   trackTextures -> %zu T#\n", texs.size());
+        for (auto &t : texs)
+          std::fprintf(stderr, "[blit]     T# base=%#lx %ux%u pitch=%u dfmt=%u nfmt=%u tiling=%u\n",
+                       (unsigned long)t.base, t.width, t.height, t.pitch, t.dfmt,
+                       t.nfmt, t.tilingIdx);
+        gcn::disassemble(reinterpret_cast<const uint32_t *>(psA), 64, "blit.PS");
+      }
+    }
     // DELTA_GPU_DRAWLIST: one line per draw BEFORE any vertexData gating, so draws
     // dropped for null vertexData/recomp (e.g. Doom64's 3D world geometry) are
     // visible -- distinguishes "world draws never submitted" from "submitted but
