@@ -1789,7 +1789,9 @@ void endFrame(uint64_t scanoutBase) {
     dumpPpm(pixels, rt.w, rt.h);
   // Rolling latest-frame capture (uncapped) so late transitions (menu/gameplay)
   // can be inspected from a long headless run without knowing the frame number.
-  if (g_dump && g.frameNum % 300 == 0 && g.frameDraws > 0) {
+  static const int latestEvery = [] { const char *e = std::getenv("DELTA_GPU_LATEST_EVERY");
+    return e ? std::atoi(e) : 300; }();
+  if (g_dump && g.frameNum % latestEvery == 0 && g.frameDraws > 0) {
     char latest[256];
     std::snprintf(latest, sizeof(latest), "%s/gpu_latest.ppm", dumpDir());
     writePpm(latest, pixels, rt.w, rt.h);
