@@ -17,6 +17,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <algorithm>
 
 #include "gcn_decode.h"
 #include "gcn_resource.h"
@@ -66,22 +67,37 @@ void logUnknown(Lane &L, const char *enc, uint32_t op) {
     std::fprintf(stderr, "[csinterp] unhandled %s op=%#x\n", enc, op);
 }
 
-// VOP2 (GFX6/7). Integer ops dominate compute address math.
+// VOP2 (GFX6/7, canonical [30:25] opcode numbers). Integer ops dominate compute
+// address math.
 void vop2(Lane &L, uint32_t op, uint32_t vdst, uint32_t s0, uint32_t s1) {
   switch (op) {
-    case 0x01: case 0x02: L.wrV(vdst, f2u(u2f(s0) + u2f(s1))); break;  // add_f32 / sub handled below
-    case 0x03: L.wrV(vdst, f2u(u2f(s1) - u2f(s0))); break;            // subrev_f32
-    case 0x08: case 0x06: L.wrV(vdst, f2u(u2f(s0) * u2f(s1))); break; // mul_f32
+    case 0x00: { bool c = (L.s[106] & 1); L.wrV(vdst, c ? s1 : s0); break; }  // cndmask (VCC)
+    case 0x03: L.wrV(vdst, f2u(u2f(s0) + u2f(s1))); break;            // add_f32
+    case 0x04: L.wrV(vdst, f2u(u2f(s0) - u2f(s1))); break;            // sub_f32
+    case 0x05: L.wrV(vdst, f2u(u2f(s1) - u2f(s0))); break;            // subrev_f32
+    case 0x08: L.wrV(vdst, f2u(u2f(s0) * u2f(s1))); break;            // mul_f32
+    case 0x09: L.wrV(vdst, (uint32_t)((int32_t)(s0 << 8) >> 8) * (int32_t)((s1 << 8) >> 8)); break; // mul_i32_i24
+    case 0x0b: L.wrV(vdst, (s0 & 0xFFFFFF) * (s1 & 0xFFFFFF)); break; // mul_u32_u24
+    case 0x0f: L.wrV(vdst, (uint32_t)std::min((int32_t)s0, (int32_t)s1)); break; // min_i32
+    case 0x10: L.wrV(vdst, (uint32_t)std::max((int32_t)s0, (int32_t)s1)); break; // max_i32
+    case 0x11: L.wrV(vdst, std::min(s0, s1)); break;                 // min_u32
+    case 0x12: L.wrV(vdst, std::max(s0, s1)); break;                 // max_u32
+    case 0x13: L.wrV(vdst, s0 >> (s1 & 31)); break;                  // lshr_b32
+    case 0x14: L.wrV(vdst, s1 >> (s0 & 31)); break;                  // lshrrev_b32
+    case 0x15: L.wrV(vdst, (uint32_t)((int32_t)s0 >> (s1 & 31))); break; // ashr_i32
+    case 0x16: L.wrV(vdst, (uint32_t)((int32_t)s1 >> (s0 & 31))); break; // ashrrev_i32
+    case 0x19: L.wrV(vdst, s0 << (s1 & 31)); break;                  // lshl_b32
+    case 0x1a: L.wrV(vdst, s1 << (s0 & 31)); break;                  // lshlrev_b32
     case 0x1b: L.wrV(vdst, s0 & s1); break;                          // and_b32
     case 0x1c: L.wrV(vdst, s0 | s1); break;                          // or_b32
     case 0x1d: L.wrV(vdst, s0 ^ s1); break;                          // xor_b32
-    case 0x24: L.wrV(vdst, s1 << (s0 & 31)); break;                  // lshlrev_b32 (s1<<s0)
+    case 0x1f: L.wrV(vdst, f2u(u2f(s0) * u2f(s1) + u2f(L.v[vdst]))); break;  // mac_f32
+    case 0x22: L.wrV(vdst, (uint32_t)__builtin_popcount(s0) + s1); break;     // bcnt_u32_b32
     case 0x25: L.wrV(vdst, s0 + s1); break;                          // add_i32
     case 0x26: L.wrV(vdst, s0 - s1); break;                          // sub_i32
     case 0x27: L.wrV(vdst, s1 - s0); break;                          // subrev_i32
     case 0x28: { uint64_t r = (uint64_t)s0 + s1 + (L.s[106] & 1);    // addc_u32 (+VCC)
                  L.wrV(vdst, (uint32_t)r); L.s[106] = (r >> 32) & 1; break; }
-    case 0x29: L.wrV(vdst, s1 << (s0 & 31)); break;                  // lshrrev? keep as shift
     default: logUnknown(L, "vop2", op); break;
   }
 }
@@ -98,19 +114,26 @@ void vop1(Lane &L, uint32_t op, uint32_t vdst, uint32_t s0) {
   }
 }
 
-// VOP3 (GFX6/7): aliases VOP2 (0x100-0x13f) / VOP1 (0x180-0x1ff); else 3-src.
+void vopc(Lane &L, uint32_t op, uint32_t s0, uint32_t s1);  // fwd
+
+// VOP3 (GFX6/7): op<0x100 are VOPC compares in VOP3 form (result -> sdst pair, not
+// VCC). 0x100-0x13f alias VOP2, 0x180-0x1ff alias VOP1; 0x140+ are the 3-src ALU.
 void vop3(Lane &L, uint32_t op, uint32_t vdst, uint32_t s0, uint32_t s1, uint32_t s2) {
+  if (op < 0x100) {  // VOPC done as VOP3: compare, write bool to the sdst (=vdst).
+    vopc(L, op, s0, s1);
+    L.wrS(vdst, L.s[106]);  // vopc left the bool in VCC; copy to the real dest
+    return;
+  }
   if (op >= 0x100 && op < 0x140) { vop2(L, op - 0x100, vdst, s0, s1); return; }
   if (op >= 0x180 && op < 0x200) { vop1(L, op - 0x180, vdst, s0); return; }
   switch (op) {
-    case 0x141: case 0x143: case 0x14b:  // mad_f32 / fma
-      L.wrV(vdst, f2u(u2f(s0) * u2f(s1) + u2f(s2))); break;
-    case 0x1c2: case 0x1c4:  // mad_u32_u24 / mad_i32_i24
-      L.wrV(vdst, (s0 & 0xFFFFFF) * (s1 & 0xFFFFFF) + s2); break;
-    case 0x15d:  // v_lshl_add? (s0<<s1)+s2  -- observed in Doom64 address math
-      L.wrV(vdst, (s0 << (s1 & 31)) + s2); break;
-    case 0x16b:  // v_lshlrev_b64-ish / mul_lo address term: (s1<<s0)+s2 best-effort
-      L.wrV(vdst, (s1 << (s0 & 31)) + s2); break;
+    case 0x141: case 0x14b: L.wrV(vdst, f2u(u2f(s0) * u2f(s1) + u2f(s2))); break;  // mad/fma_f32
+    case 0x142: L.wrV(vdst, (uint32_t)(((int32_t)(s0 << 8) >> 8) * ((int32_t)(s1 << 8) >> 8)) + s2); break; // mad_i32_i24
+    case 0x143: L.wrV(vdst, (s0 & 0xFFFFFF) * (s1 & 0xFFFFFF) + s2); break;        // mad_u32_u24
+    case 0x14a: L.wrV(vdst, (s2 >> (s0 & 31)) | (s1 << ((32 - s0) & 31))); break;  // alignbit (best-effort)
+    case 0x15d: { uint32_t d = s0 > s1 ? s0 - s1 : s1 - s0; L.wrV(vdst, d + s2); break; }  // sad_u32 = |s0-s1|+s2
+    case 0x169: case 0x16b: L.wrV(vdst, s0 * s1); break;                           // mul_lo_u32 / mul_lo_i32
+    case 0x16a: case 0x16c: L.wrV(vdst, (uint32_t)(((uint64_t)s0 * s1) >> 32)); break; // mul_hi
     default: logUnknown(L, "vop3", op); break;
   }
 }
@@ -179,7 +202,19 @@ void imageStore(Lane &L, const Inst &in) {
   uint32_t dmask = (w >> 8) & 0xF;
   uint32_t vaddr = w1 & 0xFF, vdata = (w1 >> 8) & 0xFF, srsrc = ((w1 >> 16) & 0x1F) * 4;
   TImage t = decodeTImage(&L.s[srsrc]);
-  if (!t.valid || !guestOk(t.base)) return;
+  // GFX6/7 image base is 40-bit (dword0<<8); decodeTImage also folds in dword1[7:0]
+  // which on Liverpool is min_lod, not base[47:40], yielding a bogus >40-bit address.
+  // Use the 40-bit base so the dest matches where the draw samples it.
+  uint64_t base = ((uint64_t)L.s[srsrc] << 8) & 0xFFFFFFFFFFull;
+  static int dbg = 0;
+  if (std::getenv("DELTA_GPU_CSRUN_VERBOSE") && dbg < 4) {
+    dbg++;
+    std::fprintf(stderr, "[csimg] srsrc=%u base=%#lx %ux%u pitch=%u dfmt=%u coord=[%u %u]\n",
+                 srsrc, (unsigned long)base, t.width, t.height, t.pitch, t.dfmt,
+                 L.v[vaddr], L.v[vaddr + 1]);
+  }
+  if (!t.width || !t.height || !guestOk(base)) return;
+  t.base = base;
   uint32_t x = L.v[vaddr], y = L.v[vaddr + 1];
   if (x >= t.width || y >= t.height) return;  // bounds (approximate exec)
   uint8_t *px = reinterpret_cast<uint8_t *>(t.base) + ((uint64_t)y * t.pitch + x) * 4;
