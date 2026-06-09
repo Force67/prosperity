@@ -452,6 +452,35 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
           std::fprintf(stderr, "  mimg srsrc=%u\n", ((in.raw[1]>>16)&0x1F)*4);
         }
       }
+      // Dump the WORLD VS's cbuffer reads: for each s_buffer_load, resolve the V#
+      // from the VS user-data and print the 16 floats it actually reads (the REAL
+      // matrix the VS uses), vs the heuristic cbuf above -- to find whether the VS
+      // reads a different cbuffer/offset (the true MVP) than we bind.
+      if (d.vsAddr >= 0x1000000000ull && d.vsAddr < 0x20000000000ull) {
+        auto vsI = gcn::decode(reinterpret_cast<const uint32_t *>(d.vsAddr), 4096);
+        const uint32_t *vud = &g_regs[mmSPI_SHADER_USER_DATA_VS_0];
+        std::fprintf(stderr, "  vs_ud=[%08x %08x %08x %08x %08x %08x %08x %08x]\n",
+                     vud[0],vud[1],vud[2],vud[3],vud[4],vud[5],vud[6],vud[7]);
+        int shown = 0;
+        for (auto &in : vsI) {
+          if (in.enc != gcn::Enc::smrd) continue;
+          uint32_t w = in.raw[0], op = (w>>22)&0x1F, sbase = (w>>9)&0x3F;
+          bool imm = (w>>8)&1; uint32_t off = w&0xFF;
+          if (op < 0x08 || shown >= 4) continue;  // s_buffer_load_* only
+          shown++;
+          uint32_t b2 = sbase * 2;
+          uint64_t vbase = b2 + 1 < 16 ? ((uint64_t)(vud[b2+1] & 0xFFF) << 32 | vud[b2]) : 0;
+          uint32_t boff = imm ? off * 4 : 0;
+          std::fprintf(stderr, "  vs_smrd op=%u sbase=%u(ud%u) off=%#x -> V#base=%#lx",
+                       op, sbase, b2, boff, (unsigned long)vbase);
+          if (vbase >= 0x1000000ull && vbase < 0x20000000000ull) {
+            const float *m = reinterpret_cast<const float *>(vbase + boff);
+            std::fprintf(stderr, " mtx=[%.3f %.3f %.3f %.3f / %.3f %.3f %.3f %.3f / %.3f %.3f %.3f %.3f / %.3f %.3f %.3f %.3f]",
+                m[0],m[1],m[2],m[3],m[4],m[5],m[6],m[7],m[8],m[9],m[10],m[11],m[12],m[13],m[14],m[15]);
+          }
+          std::fprintf(stderr, "\n");
+        }
+      }
     }
     // DELTA_GPU_SKIPSTALE: drop draws that sample a very wide (>=2048) buffer, used
     // to hide a title's stale full-screen video-buffer blit (Doom64's undecoded 4K
