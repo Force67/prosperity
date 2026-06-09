@@ -408,24 +408,29 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
             out[r] = s;
           }
         };
-        int onR = 0, onC = 0, n = d.indexCount < 64 ? d.indexCount : 64;
+        int onR = 0, onC = 0, onRfz = 0, onCfz = 0, n = d.indexCount < 64 ? d.indexCount : 64;
         const uint16_t *i16 = (d.indexType == 0) ? static_cast<const uint16_t *>(d.indexData) : nullptr;
         const uint32_t *i32 = (d.indexType == 1) ? static_cast<const uint32_t *>(d.indexData) : nullptr;
         float firstR[4] = {0}, firstC[4] = {0};
+        auto onscreen = [](float *o) { if (o[3] <= 0.0001f) return false;
+          float x = o[0]/o[3], y = o[1]/o[3], z = o[2]/o[3];
+          return x>=-1&&x<=1&&y>=-1&&y<=1&&z>=-1&&z<=1; };
         for (int i = 0; i < n; i++) {
           // Use the INDEX buffer to fetch the real vertex (these are indexed draws;
           // a linear 0..n read hits unused verts at the buffer head).
           uint32_t idx = i16 ? i16[i] : i32 ? i32[i] : (uint32_t)i;
           const float *p = reinterpret_cast<const float *>(vb + (size_t)idx * d.vertexStride + d.vattrs[0].offset);
           float r4[4], c4[4]; proj(p, false, r4); proj(p, true, c4);
+          // Same but with z negated -- validates the DELTA_GPU_VSFLIPZ hypothesis
+          // (does flipping the position z bring the geometry on-screen?).
+          float pf[3] = {p[0], p[1], -p[2]}, rf[4], cf[4];
+          proj(pf, false, rf); proj(pf, true, cf);
           if (i == 0) { for (int k = 0; k < 4; k++) { firstR[k] = r4[k]; firstC[k] = c4[k]; } }
-          auto onscreen = [](float *o) { if (o[3] <= 0.0001f) return false;
-            float x = o[0]/o[3], y = o[1]/o[3], z = o[2]/o[3];
-            return x>=-1&&x<=1&&y>=-1&&y<=1&&z>=-1&&z<=1; };
           if (onscreen(r4)) onR++; if (onscreen(c4)) onC++;
+          if (onscreen(rf)) onRfz++; if (onscreen(cf)) onCfz++;
         }
-        std::fprintf(stderr, "  proj n=%d onscreen row=%d col=%d | v0row=[%.2f %.2f %.2f %.2f] v0col=[%.2f %.2f %.2f %.2f]\n",
-                     n, onR, onC, firstR[0],firstR[1],firstR[2],firstR[3], firstC[0],firstC[1],firstC[2],firstC[3]);
+        std::fprintf(stderr, "  proj n=%d onscreen row=%d col=%d | flipZ row=%d col=%d | v0row=[%.2f %.2f %.2f %.2f] v0col=[%.2f %.2f %.2f %.2f]\n",
+                     n, onR, onC, onRfz, onCfz, firstR[0],firstR[1],firstR[2],firstR[3], firstC[0],firstC[1],firstC[2],firstC[3]);
       }
       // Sample the bound texture's ALPHA: is the source genuinely alpha=0 (so the PS
       // must compute opacity elsewhere / a recompiler alpha bug) or alpha=255 (so our
