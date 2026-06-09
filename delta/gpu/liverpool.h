@@ -66,6 +66,16 @@ constexpr uint32_t mmSPI_SHADER_PGM_RSRC1_VS = 0x2C4A;
 constexpr uint32_t mmSPI_SHADER_PGM_RSRC2_VS = 0x2C4B;
 constexpr uint32_t mmSPI_SHADER_USER_DATA_VS_0 = 0x2C4C;  // 16 user-data SGPRs
 
+// Compute program registers (SET_SH_REG relative 0x200..; absolute = 0x2C00+rel).
+constexpr uint32_t mmCOMPUTE_NUM_THREAD_X = 0x2E07;  // u16 full | u16 partial
+constexpr uint32_t mmCOMPUTE_NUM_THREAD_Y = 0x2E08;
+constexpr uint32_t mmCOMPUTE_NUM_THREAD_Z = 0x2E09;
+constexpr uint32_t mmCOMPUTE_PGM_LO = 0x2E0C;   // CS addr[39:8]
+constexpr uint32_t mmCOMPUTE_PGM_HI = 0x2E0D;   // CS addr[47:40] in [7:0]
+constexpr uint32_t mmCOMPUTE_PGM_RSRC1 = 0x2E0E;
+constexpr uint32_t mmCOMPUTE_PGM_RSRC2 = 0x2E0F;  // user_sgpr [4:0]<<1, tgid_en[8:6], lds[24:15]
+constexpr uint32_t mmCOMPUTE_USER_DATA_0 = 0x2E40;  // 16 user-data SGPRs
+
 // The full GPU register state. A draw is rendered from a snapshot of this.
 struct Regs {
   std::array<uint32_t, kRegFileSize> data{};

@@ -667,6 +667,39 @@ void submitCcb(const void *ccb, uint32_t sizeBytes) {
   }
 }
 
+// IT_DISPATCH_DIRECT: a GPU compute dispatch. body = [dim_x, dim_y, dim_z,
+// dispatch_initiator] (workgroup counts). The CS program addr, workgroup size,
+// resource/RSRC and user-data come from the COMPUTE_* SH registers set before it.
+// Doom64 builds its level texture atlases with these (the T# the 3D world samples
+// is written by a CS), so without executing them the atlases stay zero/black.
+void handleDispatch(const uint32_t *body, uint32_t count) {
+  uint32_t dimX = count >= 1 ? body[0] : 0;
+  uint32_t dimY = count >= 2 ? body[1] : 0;
+  uint32_t dimZ = count >= 3 ? body[2] : 0;
+  uint64_t csAddr = (static_cast<uint64_t>(g_regs[mmCOMPUTE_PGM_HI] & 0xFF) << 32 |
+                     g_regs[mmCOMPUTE_PGM_LO]) << 8;
+  uint32_t tgx = g_regs[mmCOMPUTE_NUM_THREAD_X] & 0xFFFF;
+  uint32_t tgy = g_regs[mmCOMPUTE_NUM_THREAD_Y] & 0xFFFF;
+  uint32_t tgz = g_regs[mmCOMPUTE_NUM_THREAD_Z] & 0xFFFF;
+  uint32_t rsrc2 = g_regs[mmCOMPUTE_PGM_RSRC2];
+
+  static const bool csDump = std::getenv("DELTA_GPU_CSDUMP") != nullptr;
+  static int cdN = 0;
+  if (csDump && cdN < 6 && csAddr >= 0x1000000000ull && csAddr < 0x20000000000ull) {
+    cdN++;
+    const uint32_t *ud = &g_regs[mmCOMPUTE_USER_DATA_0];
+    std::fprintf(stderr,
+        "[cs] addr=%#lx groups=[%u %u %u] tg=[%u %u %u] rsrc2=%#x usgpr=%u "
+        "tgiden=%u lds=%u\n",
+        (unsigned long)csAddr, dimX, dimY, dimZ, tgx, tgy, tgz, rsrc2,
+        (rsrc2 >> 1) & 0x1F, (rsrc2 >> 7) & 0x7, (rsrc2 >> 15) & 0x1FF);
+    std::fprintf(stderr, "[cs]   user_data:");
+    for (int k = 0; k < 16; k++) std::fprintf(stderr, " %08x", ud[k]);
+    std::fprintf(stderr, "\n");
+    gcn::disassemble(reinterpret_cast<const uint32_t *>(csAddr), 1024, "cs");
+  }
+}
+
 void submitDcb(const void *dcb, uint32_t sizeBytes) {
   if (!dcb || sizeBytes < 4)
     return;
@@ -707,6 +740,7 @@ void submitDcb(const void *dcb, uint32_t sizeBytes) {
       if (i + 1 + count > words)
         break;  // truncated / desync
       switch (op) {
+      case IT_DISPATCH_DIRECT: handleDispatch(body, count); break;
       case IT_SET_CONTEXT_REG: setRegs(kContextRegBase, body, count); break;
       case IT_SET_SH_REG:      setRegs(kShRegBase, body, count); break;
       case IT_SET_UCONFIG_REG: setRegs(kUConfigRegBase, body, count); break;
