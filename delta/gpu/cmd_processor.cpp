@@ -409,9 +409,14 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
           }
         };
         int onR = 0, onC = 0, n = d.indexCount < 64 ? d.indexCount : 64;
+        const uint16_t *i16 = (d.indexType == 0) ? static_cast<const uint16_t *>(d.indexData) : nullptr;
+        const uint32_t *i32 = (d.indexType == 1) ? static_cast<const uint32_t *>(d.indexData) : nullptr;
         float firstR[4] = {0}, firstC[4] = {0};
         for (int i = 0; i < n; i++) {
-          const float *p = reinterpret_cast<const float *>(vb + (size_t)i * d.vertexStride + d.vattrs[0].offset);
+          // Use the INDEX buffer to fetch the real vertex (these are indexed draws;
+          // a linear 0..n read hits unused verts at the buffer head).
+          uint32_t idx = i16 ? i16[i] : i32 ? i32[i] : (uint32_t)i;
+          const float *p = reinterpret_cast<const float *>(vb + (size_t)idx * d.vertexStride + d.vattrs[0].offset);
           float r4[4], c4[4]; proj(p, false, r4); proj(p, true, c4);
           if (i == 0) { for (int k = 0; k < 4; k++) { firstR[k] = r4[k]; firstC[k] = c4[k]; } }
           auto onscreen = [](float *o) { if (o[3] <= 0.0001f) return false;
