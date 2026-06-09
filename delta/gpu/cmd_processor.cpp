@@ -11,6 +11,7 @@
 #include "vk_render.h"
 #include "gcn/gcn_decode.h"
 #include "gcn/gcn_resource.h"
+#include "gcn/gcn_interp.h"
 #include "gcn/gcn_translate.h"
 
 #include <atomic>
@@ -702,6 +703,15 @@ void handleDispatch(const uint32_t *body, uint32_t count) {
     for (int k = 0; k < 16; k++) std::fprintf(stderr, " %08x", ud[k]);
     std::fprintf(stderr, "\n");
     gcn::disassemble(reinterpret_cast<const uint32_t *>(csAddr), 1024, "cs");
+  }
+
+  // DELTA_GPU_CSRUN: execute the compute shader on the CPU (WIP) so Doom64's
+  // buffer->image atlas builders populate the dest textures the 3D world samples.
+  static const bool csRun = std::getenv("DELTA_GPU_CSRUN") != nullptr;
+  if (csRun && csAddr >= 0x1000000000ull && csAddr < 0x20000000000ull && tgx && tgy) {
+    const uint32_t *ud = &g_regs[mmCOMPUTE_USER_DATA_0];
+    gcn::runComputeShader(csAddr, dimX, dimY, dimZ, tgx, tgy, tgz, userSgpr,
+                          tgidEnable, ud);
   }
 }
 
