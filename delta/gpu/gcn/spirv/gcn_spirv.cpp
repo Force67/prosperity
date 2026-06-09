@@ -20,9 +20,11 @@ bool recompileSpirv(const uint32_t *, const uint32_t *, const uint32_t *,
 #include "spv_emit.h"
 #include "spv_post.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <unordered_map>
+#include <vector>
 
 #include <spirv/unified1/GLSL.std.450.h>
 
@@ -72,6 +74,8 @@ struct Tr {
   S::Module m;
   Id tVoid, tFn, tU, tI, tF, tBool, tV2, tV3, tV4;
   Id pPrivU, sgpr, vgpr;
+  Id sccVar = 0;    // scalar condition code (s_cmp / scalar ALU -> s_cbranch_scc*)
+  Id stateVar = 0;  // CFG block index for the while-switch dispatch
   Id pcVar = 0;          // push-constant block (cbuffer)
   bool havePc = false;
 
@@ -93,7 +97,28 @@ struct Tr {
                       spv::StorageClass::Private, m.constNull(arrVg));
     m.name(sgpr, "sgpr");
     m.name(vgpr, "vgpr");
+    sccVar = m.variable(pPrivU, spv::StorageClass::Private, m.constNull(tU));
+    stateVar = m.variable(pPrivU, spv::StorageClass::Private, m.constNull(tU));
+    m.name(sccVar, "scc");
+    m.name(stateVar, "state");
   }
+
+  // Seed EXEC all-active (sgpr[126]=1) at the start of the function body. In our
+  // per-invocation (scalar-lane) model EXEC is a single "this lane active" bit, so
+  // execz/execnz and s_and_saveexec behave for the common vectorised-if pattern.
+  // Must be called after beginFunction (emits an OpStore).
+  void seedExec() { stSg(126, m.constU32(1)); }
+
+  // SCC / EXEC / CFG-state helpers.
+  Id ldScc() { return m.load(tU, sccVar); }
+  void stScc(Id v) { m.store(sccVar, v); }
+  void stSccBool(Id b) { stScc(m.emit(spv::Op::OpSelect, tU, {b, m.constU32(1), m.constU32(0)})); }
+  Id ldExec() { return ldSg(126); }
+  Id ldState() { return m.load(tU, stateVar); }
+  void stState(uint32_t s) { m.store(stateVar, m.constU32(s)); }
+  void stStateId(Id s) { m.store(stateVar, s); }
+  Id isNonZero(Id u) { return m.emit(spv::Op::OpINotEqual, tBool, {u, m.constU32(0)}); }
+  Id isZero(Id u) { return m.emit(spv::Op::OpIEqual, tBool, {u, m.constU32(0)}); }
 
   // Declare the push-constant cbuffer: PC { uvec4 data[8]; } (matches the GLSL
   // backend's layout so the renderer's push range is identical).
@@ -281,6 +306,322 @@ void emitVop3(Tr &t, uint32_t op, uint32_t vdst, Id s0, Id s1, Id s2) {
   }
 }
 
+// ---- control flow: shared per-instruction emit + CFG while-switch -----------
+// Per-stage declarations carried into the shared emitter. The straight-line
+// (single-basic-block) path stays inline in translateVs/Ps (proven, unchanged);
+// this shared path is used only when a shader has branches (or DELTA_GPU_SPIRV_CFG
+// forces it for testing). Arbitrary control flow is lowered to a while/switch
+// state machine over basic blocks (handles reducible and irreducible CFGs).
+struct StageCtx {
+  bool isPs = false;
+  Recompiled *r = nullptr;
+  std::vector<Id> *iface = nullptr;
+  Id posOut = 0;                               // VS
+  std::unordered_map<uint32_t, Id> paramOuts;  // VS
+  uint32_t maxParam = 0;                        // VS
+  bool haveCbuf = false;                        // VS
+  Id colorOut = 0;                             // PS
+  Id sampImgTy = 0, pSampImg = 0;              // PS
+  std::unordered_map<uint32_t, Id> inVars;     // PS
+  uint32_t maxIn = 0;                           // PS
+  bool wroteColor = false;                      // PS
+};
+
+Id psInputVar(Tr &t, StageCtx &sc, uint32_t attr) {
+  auto it = sc.inVars.find(attr);
+  if (it != sc.inVars.end()) return it->second;
+  Id v = t.m.variable(t.m.typePointer(spv::StorageClass::Input, t.tV4), spv::StorageClass::Input);
+  t.m.decorate(v, spv::Decoration::Location, {attr});
+  sc.iface->push_back(v);
+  sc.inVars[attr] = v;
+  if (attr + 1 > sc.maxIn) sc.maxIn = attr + 1;
+  return v;
+}
+Id vsParamOut(Tr &t, StageCtx &sc, uint32_t p) {
+  auto it = sc.paramOuts.find(p);
+  if (it != sc.paramOuts.end()) return it->second;
+  Id v = t.m.variable(t.m.typePointer(spv::StorageClass::Output, t.tV4), spv::StorageClass::Output);
+  t.m.decorate(v, spv::Decoration::Location, {p});
+  sc.iface->push_back(v);
+  sc.paramOuts[p] = v;
+  return v;
+}
+
+// Emit one non-terminator instruction (branches are handled by the CFG driver).
+void emitInst(Tr &t, const Inst &in, StageCtx &sc) {
+  uint32_t w = in.raw[0], w1 = in.raw[1];
+  switch (in.enc) {
+    case Enc::sop1: {
+      uint32_t op = in.opcode, sdst = (w >> 16) & 0x7F, ssrc0 = w & 0xFF;
+      if (op == 0x03) t.stSg(sdst, t.srcRaw(ssrc0, in.literal));  // s_mov_b32
+      else if (op == 0x04) {                                      // s_mov_b64
+        t.stSg(sdst, t.srcRaw(ssrc0, in.literal));
+        if (ssrc0 <= 103) t.stSg(sdst + 1, t.ldSg(ssrc0 + 1));
+      } else if (op >= 0x24 && op <= 0x27) {  // s_{and,or,xor,andn2}_saveexec_b64
+        Id oldExec = t.ldExec(), src = t.srcRaw(ssrc0, in.literal), ne;
+        if (op == 0x24) ne = t.m.emit(spv::Op::OpBitwiseAnd, t.tU, {oldExec, src});
+        else if (op == 0x25) ne = t.m.emit(spv::Op::OpBitwiseOr, t.tU, {oldExec, src});
+        else if (op == 0x26) ne = t.m.emit(spv::Op::OpBitwiseXor, t.tU, {oldExec, src});
+        else ne = t.m.emit(spv::Op::OpBitwiseAnd, t.tU,
+                           {oldExec, t.m.emit(spv::Op::OpNot, t.tU, {src})});
+        t.stSg(sdst, oldExec);
+        t.stSg(126, ne);
+        t.stSccBool(t.isNonZero(ne));
+      }
+      break;
+    }
+    case Enc::sop2: {
+      uint32_t op = in.opcode, sdst = (w >> 16) & 0x7F, s0f = w & 0xFF, s1f = (w >> 8) & 0xFF;
+      Id a = t.srcRaw(s0f, in.literal), b = t.srcRaw(s1f, in.literal), r = 0;
+      bool scc = false;
+      auto shamt = [&] { return t.m.emit(spv::Op::OpBitwiseAnd, t.tU, {b, t.m.constU32(31)}); };
+      switch (op) {
+        case 0x00: case 0x02: case 0x04: r = t.m.emit(spv::Op::OpIAdd, t.tU, {a, b}); break;
+        case 0x01: case 0x03: case 0x05: r = t.m.emit(spv::Op::OpISub, t.tU, {a, b}); break;
+        case 0x0a: case 0x0b: r = t.m.emit(spv::Op::OpSelect, t.tU, {t.isNonZero(t.ldScc()), a, b}); break;
+        case 0x0e: case 0x0f: r = t.m.emit(spv::Op::OpBitwiseAnd, t.tU, {a, b}); scc = true; break;
+        case 0x10: case 0x11: r = t.m.emit(spv::Op::OpBitwiseOr, t.tU, {a, b}); scc = true; break;
+        case 0x12: case 0x13: r = t.m.emit(spv::Op::OpBitwiseXor, t.tU, {a, b}); scc = true; break;
+        case 0x14: case 0x15: r = t.m.emit(spv::Op::OpBitwiseAnd, t.tU,
+                              {a, t.m.emit(spv::Op::OpNot, t.tU, {b})}); scc = true; break;
+        case 0x1e: case 0x1f: r = t.m.emit(spv::Op::OpShiftLeftLogical, t.tU, {a, shamt()}); scc = true; break;
+        case 0x20: case 0x21: r = t.m.emit(spv::Op::OpShiftRightLogical, t.tU, {a, shamt()}); scc = true; break;
+        case 0x22: case 0x23: r = t.m.emit(spv::Op::OpShiftRightArithmetic, t.tU,
+                              {t.m.bitcast(t.tI, a), shamt()}); scc = true; break;
+        case 0x24: r = t.m.emit(spv::Op::OpIMul, t.tU, {a, b}); break;  // s_mul_i32
+        default: r = a; break;
+      }
+      if (r) { t.stSg(sdst, r); if (scc) t.stSccBool(t.isNonZero(r)); }
+      break;
+    }
+    case Enc::sopc: {  // s_cmp_* -> SCC
+      uint32_t op = in.opcode, s0f = w & 0xFF, s1f = (w >> 8) & 0xFF;
+      Id a = t.srcRaw(s0f, in.literal), b = t.srcRaw(s1f, in.literal);
+      Id ai = t.m.bitcast(t.tI, a), bi = t.m.bitcast(t.tI, b), c = 0;
+      switch (op) {
+        case 0x00: c = t.m.emit(spv::Op::OpIEqual, t.tBool, {a, b}); break;
+        case 0x01: c = t.m.emit(spv::Op::OpINotEqual, t.tBool, {a, b}); break;
+        case 0x02: c = t.m.emit(spv::Op::OpSGreaterThan, t.tBool, {ai, bi}); break;
+        case 0x03: c = t.m.emit(spv::Op::OpSGreaterThanEqual, t.tBool, {ai, bi}); break;
+        case 0x04: c = t.m.emit(spv::Op::OpSLessThan, t.tBool, {ai, bi}); break;
+        case 0x05: c = t.m.emit(spv::Op::OpSLessThanEqual, t.tBool, {ai, bi}); break;
+        case 0x06: c = t.m.emit(spv::Op::OpIEqual, t.tBool, {a, b}); break;
+        case 0x07: c = t.m.emit(spv::Op::OpINotEqual, t.tBool, {a, b}); break;
+        case 0x08: c = t.m.emit(spv::Op::OpUGreaterThan, t.tBool, {a, b}); break;
+        case 0x09: c = t.m.emit(spv::Op::OpUGreaterThanEqual, t.tBool, {a, b}); break;
+        case 0x0a: c = t.m.emit(spv::Op::OpULessThan, t.tBool, {a, b}); break;
+        case 0x0b: c = t.m.emit(spv::Op::OpULessThanEqual, t.tBool, {a, b}); break;
+        default: break;
+      }
+      if (c) t.stSccBool(c);
+      break;
+    }
+    case Enc::smrd: {
+      if (sc.isPs) break;  // VS cbuffer only (PS has no push range in our layout)
+      uint32_t op = in.opcode, sdst = (w >> 15) & 0x7F, sbase = (w >> 9) & 0x3F;
+      bool imm = (w >> 8) & 1; uint32_t off = w & 0xFF;
+      if (op >= 0x08) {
+        uint32_t n = op == 0x08 ? 1 : op == 0x09 ? 2 : op == 0x0a ? 4 : op == 0x0b ? 8 : 16;
+        if (!sc.haveCbuf) { sc.haveCbuf = true;
+          sc.r->vsCbufs.push_back({(uint32_t)sc.r->vsCbufs.size(), sbase * 2u, 16}); }
+        uint32_t doff = imm ? off : 0;
+        for (uint32_t i = 0; i < n; i++) t.stSg(sdst + i, t.pcDword(doff + i));
+      }
+      break;
+    }
+    case Enc::vop2: {
+      uint32_t op = in.opcode, vdst = (w >> 17) & 0xFF, vsrc1 = (w >> 9) & 0xFF, src0 = w & 0x1FF;
+      emitVop2(t, op, vdst, t.srcF(src0, in.literal), t.srcF(256 + vsrc1, in.literal));
+      break;
+    }
+    case Enc::vop1: {
+      uint32_t op = in.opcode, vdst = (w >> 17) & 0xFF, src0 = w & 0x1FF;
+      emitVop1(t, op, vdst, t.srcF(src0, in.literal));
+      break;
+    }
+    case Enc::vop3: {
+      uint32_t op = in.opcode, vdst = w & 0xFF, abs = (w >> 8) & 7;
+      uint32_t s0 = w1 & 0x1FF, s1 = (w1 >> 9) & 0x1FF, s2 = (w1 >> 18) & 0x1FF, neg = (w1 >> 29) & 7;
+      emitVop3(t, op, vdst, t.srcF(s0, in.literal, neg & 1, abs & 1),
+               t.srcF(s1, in.literal, neg & 2, abs & 2), t.srcF(s2, in.literal, neg & 4, abs & 4));
+      break;
+    }
+    case Enc::vopc: {
+      uint32_t op = in.opcode, vsrc1 = (w >> 9) & 0xFF, src0 = w & 0x1FF;
+      emitVopc(t, op, t.srcF(src0, in.literal), t.srcF(256 + vsrc1, in.literal),
+               t.srcRaw(src0, in.literal), t.srcRaw(256 + vsrc1, in.literal));
+      break;
+    }
+    case Enc::vintrp: {
+      if (!sc.isPs) break;
+      uint32_t chan = (w >> 8) & 3, attr = (w >> 10) & 0x3F, op = (w >> 16) & 3, vdst = (w >> 18) & 0xFF;
+      if (op == 1) {
+        Id v = psInputVar(t, sc, attr);
+        Id pInF = t.m.typePointer(spv::StorageClass::Input, t.tF);
+        t.stVgF(vdst, t.m.load(t.tF, t.m.accessChain(pInF, v, {t.m.constU32(chan)})));
+      }
+      break;
+    }
+    case Enc::mimg: {
+      if (!sc.isPs) break;
+      uint32_t dmask = (w >> 8) & 0xF, vaddr = w1 & 0xFF, vdata = (w1 >> 8) & 0xFF;
+      uint32_t srsrc = ((w1 >> 16) & 0x1F) * 4, bind = (uint32_t)sc.r->psTexs.size();
+      sc.r->psTexs.push_back({bind, srsrc});
+      Id texVar = t.m.variable(sc.pSampImg, spv::StorageClass::UniformConstant);
+      t.m.decorate(texVar, spv::Decoration::DescriptorSet, {0});
+      t.m.decorate(texVar, spv::Decoration::Binding, {bind});
+      Id uv = t.m.compositeConstruct(t.tV2, {t.ldVgF(vaddr), t.ldVgF(vaddr + 1)});
+      Id texel = t.m.emit(spv::Op::OpImageSampleImplicitLod, t.tV4,
+                          {t.m.load(sc.sampImgTy, texVar), uv});
+      uint32_t comp = 0;
+      for (int i = 0; i < 4; i++)
+        if (dmask & (1 << i)) t.stVgF(vdata + comp++, t.m.compositeExtract(t.tF, texel, i));
+      break;
+    }
+    case Enc::exp: {
+      uint32_t en = w & 0xF, target = (w >> 4) & 0x3F, compr = (w >> 10) & 1;
+      uint32_t v[4] = {w1 & 0xFF, (w1 >> 8) & 0xFF, (w1 >> 16) & 0xFF, (w1 >> 24) & 0xFF};
+      if (sc.isPs) {
+        if (target <= 7) {
+          sc.wroteColor = true;
+          Id col;
+          if (compr) {
+            Id c01 = t.m.extInst(t.tV2, GLSLstd450UnpackHalf2x16, {t.ldVg(v[0])});
+            Id c23 = t.m.extInst(t.tV2, GLSLstd450UnpackHalf2x16, {t.ldVg(v[1])});
+            col = t.m.vectorShuffle(t.tV4, c01, c23, {0, 1, 2, 3});
+          } else {
+            Id c[4];
+            for (int i = 0; i < 4; i++) c[i] = (en & (1 << i)) ? t.ldVgF(v[i]) : t.fconst(i == 3 ? 1.f : 0.f);
+            col = t.m.compositeConstruct(t.tV4, {c[0], c[1], c[2], c[3]});
+          }
+          t.m.store(sc.colorOut, col);
+        }
+      } else {
+        if (target == 12) {  // POS0
+          Id c[4];
+          for (int i = 0; i < 4; i++) c[i] = (en & (1 << i)) ? t.ldVgF(v[i]) : t.fconst(i == 3 ? 1.f : 0.f);
+          t.m.store(sc.posOut, t.m.compositeConstruct(t.tV4, {c[0], c[1], c[2], c[3]}));
+        } else if (target >= 32 && target <= 63) {
+          uint32_t p = target - 32; if (p + 1 > sc.maxParam) sc.maxParam = p + 1;
+          Id outVar = vsParamOut(t, sc, p);
+          Id c[4];
+          for (int i = 0; i < 4; i++) c[i] = (en & (1 << i)) ? t.ldVgF(v[i]) : t.fconst(0.f);
+          t.m.store(outVar, t.m.compositeConstruct(t.tV4, {c[0], c[1], c[2], c[3]}));
+        }
+      }
+      break;
+    }
+    default: break;
+  }
+}
+
+// Branch classification. 0=none, 1=uncond, 2=scc0, 3=scc1, 4=vccz, 5=vccnz,
+// 6=execz, 7=execnz, 8=endpgm.
+int branchKind(const Inst &in) {
+  if (in.enc != Enc::sopp) return 0;
+  switch (in.opcode) {
+    case 0x01: return 8; case 0x02: return 1; case 0x04: return 2; case 0x05: return 3;
+    case 0x06: return 4; case 0x07: return 5; case 0x08: return 6; case 0x09: return 7;
+    default: return 0;
+  }
+}
+bool hasControlFlow(const std::vector<Inst> &insts) {
+  for (auto &in : insts) { int k = branchKind(in); if (k >= 1 && k <= 7) return true; }
+  return false;
+}
+// "Take the branch" condition for a conditional branch kind.
+Id branchTaken(Tr &t, int kind) {
+  switch (kind) {
+    case 2: return t.isZero(t.ldScc());
+    case 3: return t.isNonZero(t.ldScc());
+    case 4: return t.isZero(t.ldSg(106));
+    case 5: return t.isNonZero(t.ldSg(106));
+    case 6: return t.isZero(t.ldExec());
+    case 7: return t.isNonZero(t.ldExec());
+    default: return t.m.constBool(false);
+  }
+}
+
+void emitCFG(Tr &t, std::vector<Inst> &insts, StageCtx &sc) {
+  uint32_t maxPc = insts.empty() ? 0 : insts.back().pc + insts.back().size;
+  // Basic-block leaders: entry, every branch target, the instruction after a branch.
+  std::vector<uint32_t> leaders{0};
+  for (auto &in : insts) {
+    int k = branchKind(in);
+    if (k == 0) continue;
+    leaders.push_back(in.pc + in.size);  // fall-through
+    if (k >= 1 && k <= 7) {              // has a PC-relative target
+      int32_t simm = (int16_t)(in.raw[0] & 0xFFFF);
+      leaders.push_back((uint32_t)((int32_t)in.pc + (int32_t)in.size + simm));
+    }
+  }
+  std::sort(leaders.begin(), leaders.end());
+  leaders.erase(std::unique(leaders.begin(), leaders.end()), leaders.end());
+  // Drop out-of-range leaders (targets past the decoded program -> EXIT).
+  std::vector<uint32_t> starts;
+  for (uint32_t l : leaders) if (l < maxPc) starts.push_back(l);
+  uint32_t nB = (uint32_t)starts.size(), EXIT = nB;
+  auto blockOf = [&](uint32_t pc) -> uint32_t {
+    if (pc >= maxPc) return EXIT;
+    uint32_t b = 0;
+    for (uint32_t i = 0; i < nB; i++) if (starts[i] <= pc) b = i; else break;
+    return b;
+  };
+
+  Id header = t.m.newBlock(), dispatch = t.m.newBlock(), mergeSel = t.m.newBlock();
+  Id cont = t.m.newBlock(), merge = t.m.newBlock(), exitBlk = t.m.newBlock();
+  std::vector<Id> caseLbl(nB);
+  for (auto &l : caseLbl) l = t.m.newBlock();
+
+  t.stState(0);
+  t.m.branch(header);
+  t.m.openBlock(header);
+  t.m.loopMerge(merge, cont);
+  t.m.branch(dispatch);
+  t.m.openBlock(dispatch);
+  Id s = t.ldState();
+  t.m.selectionMerge(mergeSel);
+  std::vector<std::pair<uint32_t, Id>> cases;
+  for (uint32_t i = 0; i < nB; i++) cases.push_back({i, caseLbl[i]});
+  t.m.switchInst(s, exitBlk, cases);  // default (incl. EXIT state) -> exit the loop
+
+  for (uint32_t bi = 0; bi < nB; bi++) {
+    t.m.openBlock(caseLbl[bi]);
+    uint32_t blkStart = starts[bi], blkEnd = (bi + 1 < nB) ? starts[bi + 1] : maxPc;
+    bool terminated = false;
+    for (auto &in : insts) {
+      if (in.pc < blkStart || in.pc >= blkEnd) continue;
+      int k = branchKind(in);
+      if (k == 0) { emitInst(t, in, sc); continue; }
+      // terminator
+      uint32_t fall = (bi + 1 < nB) ? bi + 1 : EXIT;
+      if (k == 8) {  // endpgm
+        t.stState(EXIT);
+      } else if (k == 1) {  // unconditional
+        int32_t simm = (int16_t)(in.raw[0] & 0xFFFF);
+        t.stState(blockOf((uint32_t)((int32_t)in.pc + (int32_t)in.size + simm)));
+      } else {  // conditional
+        int32_t simm = (int16_t)(in.raw[0] & 0xFFFF);
+        uint32_t tb = blockOf((uint32_t)((int32_t)in.pc + (int32_t)in.size + simm));
+        Id sel = t.m.emit(spv::Op::OpSelect, t.tU,
+                          {branchTaken(t, k), t.m.constU32(tb), t.m.constU32(fall)});
+        t.stStateId(sel);
+      }
+      terminated = true;
+      break;
+    }
+    if (!terminated) t.stState((bi + 1 < nB) ? bi + 1 : EXIT);  // fall through
+    t.m.branch(mergeSel);
+  }
+  t.m.openBlock(exitBlk);
+  t.m.branch(merge);
+  t.m.openBlock(mergeSel);
+  t.m.branch(cont);
+  t.m.openBlock(cont);
+  t.m.branch(header);
+  t.m.openBlock(merge);  // left open; caller emits the stage epilogue + return here
+}
+
 // ---- VS ---------------------------------------------------------------------
 bool translateVs(const uint32_t *vsCode, const uint32_t *vsUserData, Recompiled &r,
                  Tr &t) {
@@ -318,6 +659,30 @@ bool translateVs(const uint32_t *vsCode, const uint32_t *vsUserData, Recompiled 
   uint32_t maxParam = 0;
   std::unordered_map<uint32_t, Id> paramOuts;  // param index -> Output var
   bool haveCbuf = false;
+
+  // Branchy shaders take the CFG (while-switch) path; single-basic-block shaders
+  // keep the proven straight-line loop below. DELTA_GPU_SPIRV_CFG forces the CFG
+  // path (validates the machinery on single-BB shaders).
+  // CFG path is opt-in (DELTA_GPU_SPIRV_CFG) while its branch semantics are still
+  // WIP: it emits structurally-valid SPIR-V but the per-lane EXEC/branch model is
+  // not yet correct on real branchy shaders. Keeping it off the default
+  // DELTA_GPU_SPIRV path preserves that backend's verified single-BB parity.
+  static const bool forceCfg = std::getenv("DELTA_GPU_SPIRV_CFG") != nullptr;
+  if (forceCfg) {
+    StageCtx sc; sc.isPs = false; sc.r = &r; sc.iface = &iface; sc.posOut = posOut;
+    t.seedExec();
+    emitCFG(t, insts, sc);
+    r.numParams = sc.maxParam;
+    Id pOutF = t.m.typePointer(spv::StorageClass::Output, t.tF);
+    Id zPtr = t.m.accessChain(pOutF, posOut, {t.m.constU32(2)});
+    Id wPtr = t.m.accessChain(pOutF, posOut, {t.m.constU32(3)});
+    Id z = t.m.load(t.tF, zPtr), wv = t.m.load(t.tF, wPtr);
+    t.m.store(zPtr, t.fmul(t.fadd(z, wv), t.fconst(0.5f)));
+    t.m.returnVoid();
+    t.m.endFunction();
+    t.m.entryPoint(spv::ExecutionModel::Vertex, main, "main", iface);
+    return true;
+  }
 
   for (auto &in : insts) {
     uint32_t w = in.raw[0], w1 = in.raw[1];
@@ -446,6 +811,22 @@ bool translatePs(const uint32_t *psCode, Recompiled &r, Tr &t) {
     return v;
   };
 
+  static const bool forceCfgPs = std::getenv("DELTA_GPU_SPIRV_CFG") != nullptr;
+  if (forceCfgPs) {  // opt-in WIP; see translateVs note
+    StageCtx sc; sc.isPs = true; sc.r = &r; sc.iface = &iface; sc.colorOut = colorOut;
+    sc.sampImgTy = sampImgTy; sc.pSampImg = pSampImg;
+    t.seedExec();
+    emitCFG(t, insts, sc);
+    if (!sc.wroteColor)
+      t.m.store(colorOut, t.m.constComposite(t.tV4,
+                {t.fconst(1.f), t.fconst(1.f), t.fconst(1.f), t.fconst(1.f)}));
+    t.m.returnVoid();
+    t.m.endFunction();
+    t.m.entryPoint(spv::ExecutionModel::Fragment, main, "main", iface);
+    t.m.execMode(main, spv::ExecutionMode::OriginUpperLeft);
+    return true;
+  }
+
   for (auto &in : insts) {
     uint32_t w = in.raw[0], w1 = in.raw[1];
     switch (in.enc) {
@@ -563,6 +944,18 @@ bool recompileSpirv(const uint32_t *vsCode, const uint32_t *psCode,
   r.vsSpirv = spirv::optimize(vs);
   r.fsSpirv = spirv::optimize(ps);
   r.ok = !r.vsSpirv.empty() && !r.fsSpirv.empty();
+  // Tally (DELTA_GPU_SPIRV): how many shaders the direct SPIR-V backend accepted vs
+  // had to decline (-> GLSL fallback), and how many used the CFG path. Confirms the
+  // backend is actually in use rather than silently falling back.
+  static const bool tally = std::getenv("DELTA_GPU_SPIRV") != nullptr;
+  if (tally) {
+    static int okN = 0, cfN = 0; static int logged = 0;
+    if (r.ok) okN++;
+    if (hasControlFlow(decode(vsCode, 4096)) || hasControlFlow(decode(psCode, 4096))) cfN++;
+    if (logged < 12) { logged++;
+      std::fprintf(stderr, "[gcnspv] recompiled ok=%d (cfg-shaders=%d) this=%s\n", okN, cfN,
+                   r.ok ? "spirv" : "FALLBACK"); }
+  }
   return r.ok;
 }
 

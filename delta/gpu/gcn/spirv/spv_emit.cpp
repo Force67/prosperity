@@ -301,6 +301,12 @@ void Module::branch(Id target) { emitVoid(spv::Op::OpBranch, {target}); }
 void Module::branchConditional(Id cond, Id t, Id f) {
   emitVoid(spv::Op::OpBranchConditional, {cond, t, f});
 }
+void Module::switchInst(Id selector, Id defaultLabel,
+                        const std::vector<std::pair<uint32_t, Id>> &cases) {
+  std::vector<uint32_t> ops{selector, defaultLabel};
+  for (auto &c : cases) { ops.push_back(c.first); ops.push_back(c.second); }
+  emitVoid(spv::Op::OpSwitch, ops);
+}
 void Module::returnVoid() { emitVoid(spv::Op::OpReturn, {}); }
 void Module::unreachable() { emitVoid(spv::Op::OpUnreachable, {}); }
 void Module::kill() { emitVoid(spv::Op::OpKill, {}); }

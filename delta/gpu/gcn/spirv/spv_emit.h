@@ -104,6 +104,9 @@ class Module {
   void loopMerge(Id mergeBlock, Id continueBlock);
   void branch(Id target);
   void branchConditional(Id cond, Id t, Id f);
+  // OpSwitch: selector + default label + (literal, label) cases.
+  void switchInst(Id selector, Id defaultLabel,
+                  const std::vector<std::pair<uint32_t, Id>> &cases);
   void returnVoid();
   void unreachable();
   void kill();  // OpKill (PS discard)
