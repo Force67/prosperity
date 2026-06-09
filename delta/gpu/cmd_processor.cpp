@@ -468,19 +468,25 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
                      vud[0],vud[1],vud[2],vud[3],vud[4],vud[5],vud[6],vud[7]);
         int shown = 0;
         for (auto &in : vsI) {
-          if (in.enc != gcn::Enc::smrd) continue;
+          if (in.enc != gcn::Enc::smrd || shown >= 6) continue;
           uint32_t w = in.raw[0], op = (w>>22)&0x1F, sbase = (w>>9)&0x3F;
           bool imm = (w>>8)&1; uint32_t off = w&0xFF;
-          if (op < 0x08 || shown >= 4) continue;  // s_buffer_load_* only
           shown++;
           uint32_t b2 = sbase * 2;
-          uint64_t vbase = b2 + 1 < 16 ? ((uint64_t)(vud[b2+1] & 0xFFF) << 32 | vud[b2]) : 0;
           uint32_t boff = imm ? off * 4 : 0;
-          std::fprintf(stderr, "  vs_smrd op=%u sbase=%u(ud%u) off=%#x -> V#base=%#lx",
-                       op, sbase, b2, boff, (unsigned long)vbase);
-          if (vbase >= 0x1000000ull && vbase < 0x20000000000ull) {
-            const float *m = reinterpret_cast<const float *>(vbase + boff);
-            std::fprintf(stderr, " mtx=[%.3f %.3f %.3f %.3f / %.3f %.3f %.3f %.3f / %.3f %.3f %.3f %.3f / %.3f %.3f %.3f %.3f]",
+          // op<8 = s_load (64-bit pointer in ud[b2..b2+1]); op>=8 = s_buffer_load
+          // (V# in ud[b2..b2+3], base in low 44 bits). Resolve + dump the 16 floats
+          // it reads (a 2nd matrix here would be the missing view transform).
+          uint64_t base = 0;
+          if (b2 + 1 < 16) {
+            if (op < 0x08) base = ((uint64_t)vud[b2+1] << 32 | vud[b2]);
+            else base = ((uint64_t)(vud[b2+1] & 0xFFF) << 32 | vud[b2]);
+          }
+          std::fprintf(stderr, "  vs_smrd op=%u %s sbase=%u(ud%u) off=%#x -> base=%#lx",
+                       op, op<0x08?"sload":"sbufload", sbase, b2, boff, (unsigned long)base);
+          if (base >= 0x1000000ull && base < 0x20000000000ull) {
+            const float *m = reinterpret_cast<const float *>(base + boff);
+            std::fprintf(stderr, " mtx=[%.2f %.2f %.2f %.2f / %.2f %.2f %.2f %.2f / %.2f %.2f %.2f %.2f / %.2f %.2f %.2f %.2f]",
                 m[0],m[1],m[2],m[3],m[4],m[5],m[6],m[7],m[8],m[9],m[10],m[11],m[12],m[13],m[14],m[15]);
           }
           std::fprintf(stderr, "\n");
