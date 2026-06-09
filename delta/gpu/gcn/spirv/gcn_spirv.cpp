@@ -664,8 +664,15 @@ bool translateVs(const uint32_t *vsCode, const uint32_t *vsUserData, Recompiled 
     t.m.decorate(inVar, spv::Decoration::Location, {a.semantic});
     iface.push_back(inVar);
     Id val = t.m.load(compTy, inVar);
+    // DELTA_GPU_VSFLIPZ: negate the z of the position attribute (semantic 0, >=3
+    // comps). Doom64's world verts are view-space with +z forward, but the VS's
+    // GL projection (clip.w=-z) expects -z, so everything lands behind the camera
+    // (w<0) and is clipped -> black level. Flipping z at the source re-projects it
+    // in front. Gated (default off) so Isaac/2D titles are unaffected.
+    static const bool flipZ = std::getenv("DELTA_GPU_VSFLIPZ") != nullptr;
     for (uint32_t c = 0; c < a.numComps; c++) {
       Id comp = a.numComps == 1 ? val : t.m.compositeExtract(t.tF, val, c);
+      if (flipZ && a.semantic == 0 && c == 2 && a.numComps >= 3) comp = t.fneg(comp);
       t.stVgF(a.destVgpr + c, comp);
     }
     r.attrs.push_back({a.semantic, a.numComps, a.tableSgpr, a.dwordOff});
