@@ -303,48 +303,95 @@ bool smodule::mapImage() {
   constexpr size_t one_mb = 1024ull * 1024ull;
   constexpr size_t eight_gb = 8ull * 1024ull * one_mb;
 
-  // ASLR off: hand out fixed, sequential bases so a guest crash lands at the
-  // same address every run and is easy to reproduce while the boot is being
-  // worked on. Switch back to the nullptr (kernel-chosen) reservation below once
-  // the boot is stable.
-  // info.base = static_cast<uint8_t *>(utl::allocMem(
-  //     nullptr, eight_gb, utl::pageProtection::w, utl::allocationType::reserve));
+  // A fixed (non-PIC) PS4 executable (ET_SCE_EXEC) links against its absolute
+  // load addresses: its segments start at vaddr 0x400000 and it embeds absolute
+  // references the loader cannot rebase. It must be mapped *in place*, with a
+  // zero load bias so getAddress(vaddr) == vaddr. Relocatable modules
+  // (ET_SCE_DYNEXEC main module, ET_SCE_DYNAMIC PRX) are position-independent
+  // and get a sequential high reservation instead. codeSize above is already the
+  // absolute image end for ET_SCE_EXEC (base = vaddr) and the image size for the
+  // relocatable types (base = paddr, which starts near 0).
+  if (elf->type == ET_SCE_EXEC) {
+    uint64_t loVaddr = UINT64_MAX;
+    for (uint16_t i = 0; i < elf->phnum; ++i) {
+      const auto *p = &segments[i];
+      if (p->type == PT_LOAD || p->type == PT_SCE_RELRO) {
+        uint64_t align = p->align ? p->align : 0x1000;
+        loVaddr = std::min<uint64_t>(loVaddr, p->vaddr & ~(align - 1));
+      }
+    }
+    if (loVaddr == UINT64_MAX)
+      loVaddr = 0;
+
+    // The rip zone (x86 lifter scratch) trails the image. It is unused on the
+    // FEX/aarch64 path but still reserved + filled so the layout matches.
+    info.ripZoneSize = std::max<size_t>(info.ripZoneSize, codeSize - loVaddr);
+    size_t span = (codeSize - loVaddr) + info.ripZoneSize;
+
+    void *got = utl::allocMem(reinterpret_cast<void *>(loVaddr), span,
+                              utl::pageProtection::w,
+                              utl::allocationType::reserve);
+    if (!got || reinterpret_cast<uintptr_t>(got) != loVaddr) {
+      LOG_ERROR("mapImage: could not reserve fixed-exec range at {:#x} (+{:#x})",
+                loVaddr, span);
+      return false;
+    }
+    utl::allocMem(reinterpret_cast<void *>(loVaddr), span,
+                  utl::pageProtection::w, utl::allocationType::commit);
+
+    info.base = nullptr;  // zero load bias: image lives at its absolute vaddrs
+    info.codeSize = codeSize;
+    info.ripZone = reinterpret_cast<uint8_t *>(codeSize);  // base(0) + codeSize
+
+    std::memset(info.ripZone, 0xCC, info.ripZoneSize);
+    utl::protectMem(info.ripZone, info.ripZoneSize, utl::pageProtection::rwx);
+  } else {
+    // ASLR off: hand out fixed, sequential bases so a guest crash lands at the
+    // same address every run and is easy to reproduce while the boot is being
+    // worked on. Switch back to the nullptr (kernel-chosen) reservation below
+    // once the boot is stable.
+    // info.base = static_cast<uint8_t *>(utl::allocMem(
+    //     nullptr, eight_gb, utl::pageProtection::w,
+    //     utl::allocationType::reserve));
 #ifdef __ANDROID__
-  // Android user VA is 39-bit (~512 GiB); the x86 layout's 32 TiB base is
-  // unmappable. Pack modules with a tight slot (modules are << 2 GiB, ripZone is
-  // 5 KiB), based at 64 GiB: above the fixed PS4 guest regions the GNM driver
-  // maps (SceGnm* at ~0xfe0000000 / 63.5 GiB) and SceKernelInternalMemory at
-  // 8 GiB, and below the guest arena (lv2/sys_mem, 256 GiB) and FEX heap.
-  constexpr size_t moduleSlot = 2ull * 1024ull * one_mb;  // 2 GiB
-  static uintptr_t s_nextBase = 0x0000'0010'0000'0000ull; // 64 GiB
+    // Android user VA is 39-bit (~512 GiB); the x86 layout's 32 TiB base is
+    // unmappable. Pack modules with a tight slot (modules are << 2 GiB, ripZone
+    // is 5 KiB), based at 64 GiB: above the fixed PS4 guest regions the GNM
+    // driver maps (SceGnm* at ~0xfe0000000 / 63.5 GiB) and
+    // SceKernelInternalMemory at 8 GiB, and below the guest arena (lv2/sys_mem,
+    // 256 GiB) and FEX heap.
+    constexpr size_t moduleSlot = 2ull * 1024ull * one_mb;  // 2 GiB
+    static uintptr_t s_nextBase = 0x0000'0010'0000'0000ull; // 64 GiB
 #else
-  constexpr size_t moduleSlot = eight_gb;
-  static uintptr_t s_nextBase = 0x0000200000000000ull;
+    constexpr size_t moduleSlot = eight_gb;
+    static uintptr_t s_nextBase = 0x0000200000000000ull;
 #endif
-  info.base = static_cast<uint8_t *>(utl::allocMem(
-      reinterpret_cast<void *>(s_nextBase), moduleSlot, utl::pageProtection::w,
-      utl::allocationType::reserve));
-  s_nextBase += moduleSlot;
+    info.base = static_cast<uint8_t *>(utl::allocMem(
+        reinterpret_cast<void *>(s_nextBase), moduleSlot,
+        utl::pageProtection::w, utl::allocationType::reserve));
+    s_nextBase += moduleSlot;
 
-  if (!info.base)
-    return false;
+    if (!info.base)
+      return false;
 
-  // The lifter emits a per-fs-access stub into the rip-zone. The linear-sweep
-  // resync lifts the whole segment (not just the prefix before the first rodata
-  // blob), so a large module can need far more than the old fixed 5 KiB. Size the
-  // zone to the code (a generous bound: stubs are ~32 B, fs accesses are sparser
-  // than that), capped well under the 8 GiB module slot / rel32 reach.
-  info.ripZoneSize = std::max<size_t>(info.ripZoneSize, codeSize);
+    // The lifter emits a per-fs-access stub into the rip-zone. The linear-sweep
+    // resync lifts the whole segment (not just the prefix before the first
+    // rodata blob), so a large module can need far more than the old fixed 5
+    // KiB. Size the zone to the code (a generous bound: stubs are ~32 B, fs
+    // accesses are sparser than that), capped well under the 8 GiB module slot /
+    // rel32 reach.
+    info.ripZoneSize = std::max<size_t>(info.ripZoneSize, codeSize);
 
-  // immediately take module memory + rip Zone memory
-  utl::allocMem(info.base, codeSize + info.ripZoneSize, utl::pageProtection::w,
-                utl::allocationType::commit);
+    // immediately take module memory + rip Zone memory
+    utl::allocMem(info.base, codeSize + info.ripZoneSize, utl::pageProtection::w,
+                  utl::allocationType::commit);
 
-  info.codeSize = codeSize;
-  info.ripZone = info.base + codeSize;
+    info.codeSize = codeSize;
+    info.ripZone = info.base + codeSize;
 
-  std::memset(info.ripZone, 0xCC, info.ripZoneSize);
-  utl::protectMem(info.ripZone, info.ripZoneSize, utl::pageProtection::rwx);
+    std::memset(info.ripZone, 0xCC, info.ripZoneSize);
+    utl::protectMem(info.ripZone, info.ripZoneSize, utl::pageProtection::rwx);
+  }
 
   // step 0: map data
   for (uint16_t i = 0; i < elf->phnum; i++) {
