@@ -8,7 +8,7 @@
  * tiles with pipe/bank swizzle). Reading them linearly scrambles the image, so
  * before uploading we de-tile into a row-major linear buffer.
  *
- * Faithful (32bpp) port of AMD AddrLib as implemented in shadPS4
+ * Faithful (32bpp) implementation of the AMD AddrLib address swizzle
  * (video_core/host_shaders/tiling.comp + video_core/amdgpu/tiling.cpp).
  */
 

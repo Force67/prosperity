@@ -9,7 +9,7 @@
  * registers (render target, shader pointers, primitive state) out of it.
  *
  * Register offsets below are GCN gen2 (Sea Islands / Liverpool) values, the same
- * the PS4 Gnm driver programs. Verified against AMD PM4 docs / shadPS4.
+ * the PS4 Gnm driver programs. Verified against the AMD PM4 / GCN docs.
  */
 
 #include <array>

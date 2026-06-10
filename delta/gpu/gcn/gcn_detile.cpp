@@ -1,7 +1,7 @@
 /*
  * PS4Delta : GCN / Liverpool texture de-tiling (32bpp). See gcn_detile.h.
  *
- * Ported from shadPS4's tiling.comp / tiling.cpp (AMD AddrLib). Restricted to the
+ * Implements the AMD AddrLib (Liverpool) tiling/de-tiling swizzle. Restricted to the
  * 32bpp, single-mip, single-slice, 1-sample case that Isaac's room/sprite
  * textures use. Two paths: 1D micro-tiled and 2D macro-tiled (the rest).
  */
@@ -21,7 +21,7 @@ inline bool isMicro1D(uint32_t idx) {
 }
 
 // Micro-tile mode (Display/Thin/Depth/Thick) for a given tilingIdx. Determines
-// the in-tile pixel swizzle. Table per shadPS4 GetMicroTileMode().
+// the in-tile pixel swizzle. Table per the AMD GetMicroTileMode() mapping.
 inline MicroMode microModeOf(uint32_t idx) {
   if (idx <= 7) return MM_Depth;              // 0-7  depth
   if (idx >= 8 && idx <= 12) return MM_Display; // 8-12 display (8 linear handled earlier)

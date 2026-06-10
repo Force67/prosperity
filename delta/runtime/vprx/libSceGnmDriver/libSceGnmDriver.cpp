@@ -10,7 +10,7 @@
  * object table). Until a GCN->Vulkan backend exists, override just the submit/
  * flip/done entry points so they "succeed": the game advances and we drive the
  * flip (present + flip event) through the VideoOut HLE. This is the graphics
- * exception to the keep-PRX-LLE rule (mirrors shadps4, which HLEs Gnm submit).
+ * exception to the keep-PRX-LLE rule: the GPU submit path is HLE'd.
  *
  * TODO(gpu): capture the dcb/ccb command buffers here and translate PM4 -> Vulkan
  * to actually render into the scanout buffer.
