@@ -1819,6 +1819,18 @@ void endFrame(uint64_t scanoutBase) {
     std::fprintf(stderr, "[snap] wrote %s (f%d %ux%u draws=%u)\n", p, g.frameNum, rt.w, rt.h, g.frameDraws);
     snapped = true;
   }
+  // Sequence capture (DELTA_GPU_SNAPSEQ=K): write up to K numbered gameplay-room
+  // frames, one every ~250 frames, to seq_NN.ppm. Bounded (K*6MB, cleaned up after);
+  // lets a long explore run be inspected for non-start rooms without the firehose.
+  static const int snapSeqN = [] { const char *e = std::getenv("DELTA_GPU_SNAPSEQ"); return e ? std::atoi(e) : 0; }();
+  static int seqDone = 0, seqLastFrame = -10000;
+  if (snapSeqN && seqDone < snapSeqN && g.frameHadRoom && g.frameDraws > 20 &&
+      g.frameNum - seqLastFrame >= 250) {
+    char p[256]; std::snprintf(p, sizeof p, "%s/seq_%02d.ppm", dumpDir(), seqDone);
+    writePpm(p, pixels, rt.w, rt.h);
+    std::fprintf(stderr, "[snapseq] %d -> f%d draws=%u\n", seqDone, g.frameNum, g.frameDraws);
+    seqDone++; seqLastFrame = g.frameNum;
+  }
   // Black-floor-triggered RT dump (DELTA_GPU_DUMPBLACK): when the presented room's
   // centre (where the floor should be) is near-black on a real gameplay frame, dump
   // every RT once -- captures exactly the bug frame's resources (a basement room
