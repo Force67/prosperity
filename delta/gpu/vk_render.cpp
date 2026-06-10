@@ -1435,24 +1435,6 @@ void draw(const DrawInfo &d) {
   if (rtAsTex && g_rts[d.texBase].w >= 700 && g_rts[d.texBase].w <= 900)
     g.frameHadRoom = true;
 
-  // Draw trace (DELTA_GPU_DTRACE): content-triggered. Once a frame samples a room
-  // RT, dump EVERY draw of the NEXT frame (with blend state) so the full gameplay
-  // composite can be inspected regardless of the flaky autoskip's frame timing.
-  static const bool dtrace = std::getenv("DELTA_GPU_DTRACE") != nullptr;
-  static int dumpFrame = -1;
-  if (dtrace && g.frameHadRoom && dumpFrame < 0)
-    dumpFrame = g.frameNum + 1;
-  if (dtrace && g.frameNum == dumpFrame) {
-    float minx=1e9f,miny=1e9f,maxx=-1e9f,maxy=-1e9f;
-    for (uint32_t v=0; v<nv; v++){float x=dst[v*8],y=dst[v*8+1];
-      minx=x<minx?x:minx;maxx=x>maxx?x:maxx;miny=y<miny?y:miny;maxy=y>maxy?y:maxy;}
-    std::fprintf(stderr,"[dt] f%d d%u rt=%#lx %ux%u tex=%#lx %ux%u rtAsTex=%d fsC=%d "
-                 "blend=%#x en=%d nv=%u pos[%.0f,%.0f..%.0f,%.0f] uv0=%.3f,%.3f col=%.2f,%.2f,%.2f\n",
-                 g.frameNum,g.frameDraws,(unsigned long)d.rtBase,d.rtW,d.rtH,
-                 (unsigned long)d.texBase,d.texW,d.texH,rtAsTex?1:0,fsComposite?1:0,
-                 d.blendControl,d.blendEnable?1:0,nv,
-                 minx,miny,maxx,maxy,dst[6],dst[7],dst[2],dst[3],dst[4]);
-  }
   // Upload guest texture (independent of the render region) if not RT-as-texture.
   VkDescriptorSet texSet = VK_NULL_HANDLE;
   if (d.texBase && g.texPipeline && !rtAsTex)
@@ -1477,84 +1459,18 @@ void draw(const DrawInfo &d) {
   if (rtAsTex && g_rts[texBase].layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
     texSet = g_rts[texBase].set;
 
-  // Content-triggered trace of room-RT composites (source RT ~832 wide): fires
-  // whenever gameplay is on screen, regardless of frame number (autoskip timing
-  // varies). Caps output so a long run stays readable.
-  static int dt2Count = 0;
-  if (dtrace && rtAsTex && g_rts[d.texBase].w >= 700 && g_rts[d.texBase].w <= 900 &&
-      dt2Count < 40) {
-    dt2Count++;
-    float minx=1e9f,miny=1e9f,maxx=-1e9f,maxy=-1e9f;
-    float nx0=1e9f,ny0=1e9f,nx1=-1e9f,ny1=-1e9f;
-    const float *m = d.mvp;
-    for (uint32_t v=0; v<nv; v++){
-      float x=dst[v*8],y=dst[v*8+1];
-      minx=x<minx?x:minx;maxx=x>maxx?x:maxx;miny=y<miny?y:miny;maxy=y>maxy?y:maxy;
-      float cw = m[3]*x+m[7]*y+m[15]; if (cw==0) cw=1;
-      float ndx=(m[0]*x+m[4]*y+m[12])/cw, ndy=(m[1]*x+m[5]*y+m[13])/cw;
-      nx0=ndx<nx0?ndx:nx0; nx1=ndx>nx1?ndx:nx1; ny0=ndy<ny0?ndy:ny0; ny1=ndy>ny1?ndy:ny1;
-    }
-    std::fprintf(stderr, "[dt2] f%d d%u room tex=%#lx %ux%u bound=%d srcLayout=%d "
-                 "fsC=%d nv=%u pos[%.0f,%.0f..%.0f,%.0f] ndc[%.2f,%.2f..%.2f,%.2f] uv0=%.3f,%.3f\n",
-                 g.frameNum, g.frameDraws, (unsigned long)d.texBase,
-                 g_rts[d.texBase].w, g_rts[d.texBase].h, texSet != VK_NULL_HANDLE,
-                 (int)g_rts[d.texBase].layout, fsComposite?1:0, nv,
-                 minx,miny,maxx,maxy,nx0,ny0,nx1,ny1,dst[6],dst[7]);
-  }
-
-  // Debug: render room-RT composites as a solid colour (colored pipeline) instead
-  // of sampling, to separate a geometry/MVP fault from a sampling/UV fault. If the
-  // colour shows where the room should be, the geometry is fine and the problem is
-  // the UV/texture path.
-  static const bool rtRed = std::getenv("DELTA_GPU_RTRED") != nullptr;
-  if (rtRed && rtAsTex && g_rts[d.texBase].w >= 700 && g_rts[d.texBase].w <= 900) {
-    for (uint32_t v = 0; v < nv; v++) {
-      dst[v * 8 + 2] = 1.0f; dst[v * 8 + 3] = 0.0f;
-      dst[v * 8 + 4] = 0.0f; dst[v * 8 + 5] = 1.0f;
-    }
-    texSet = VK_NULL_HANDLE;  // force colored pipeline
-  }
-
-  // Room-layer composite: Isaac composes the room as two sibling 832 buffers (a
-  // floor layer and a wall layer with an empty interior) into the scene with
-  // REPLACE. Under REPLACE the wall layer's black interior overwrites the floor
-  // layer below it. We composite room layers with SRC_ALPHA over and a colour-keyed
-  // alpha in the fragment (clipUV==2) so the wall layer's empty interior keeps the
-  // floor. Opt-in (DELTA_GPU_ROOMALPHA=1): correct for a current room, but the room
-  // buffers cycle addresses per room so the layer selection isn't yet robust.
-  static const bool roomAlpha = std::getenv("DELTA_GPU_ROOMALPHA") != nullptr;
-  bool roomSrc = rtAsTex && !fsComposite && g_rts[texBase].w >= 700 &&
-                 g_rts[texBase].w <= 900;
-  bool roomComposite = roomAlpha && roomSrc;
-
-  // GCN renders y-up but we render each RT with Vulkan's y-down framebuffer, so an
-  // RT's stored content is vertically mirrored vs the UVs the game samples it with.
-  // For a room composite this means the sampled rect misses the floor (which lands
-  // in the mirrored-bottom of the buffer). Flip the sampled V to compensate -- this
-  // (plus NOWIPE preserving the floor layer) is what makes the room floor render.
-  // On by default; DELTA_GPU_RTVFLIP=0 disables.
-  static const bool rtVFlip = [] {
-    const char *e = std::getenv("DELTA_GPU_RTVFLIP");
-    return !e || std::strcmp(e, "0") != 0;
-  }();
-  if (rtVFlip && roomSrc)
-    for (uint32_t v = 0; v < nv; v++) dst[v * 8 + 7] = 1.0f - dst[v * 8 + 7];
-
   VkDeviceSize off = g.vbOffset;
   if (texSet) {
-    // Per-draw blend from the guest's CB_BLEND0_CONTROL. The fullscreen scene
-    // composite must land opaquely (it copies the whole scene to the scanout), so
-    // force blend off for it regardless of the guest's register.
-    // SRC_ALPHA(4) | ONE_MINUS_SRC_ALPHA(5)<<8 = 0x504 (color src/dst factors).
+    // Per-draw blend from the guest's CB_BLEND0_CONTROL. The fullscreen scene->
+    // scanout copy (fsComposite) must land opaquely regardless of the guest blend.
     VkPipeline p = fsComposite ? getPipeline(true, 0, false)
-                   : roomComposite ? getPipeline(true, 0x504u, true)
-                                   : getPipeline(true, d.blendControl, d.blendEnable);
+                               : getPipeline(true, d.blendControl, d.blendEnable);
     vkCmdBindPipeline(g.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
-    // Push mat4 MVP + a clipUV flag. 1 = fullscreen scene composite (screen-space uv,
-    // forced opaque). 2 = room-layer composite (per-vertex uv, colour-keyed alpha).
+    // Push mat4 MVP + a clipUV flag (1 = fullscreen scene composite: screen-space
+    // uv, forced opaque).
     float pc[17];
     std::memcpy(pc, d.mvp, 64);
-    reinterpret_cast<uint32_t *>(pc)[16] = fsComposite ? 1u : roomComposite ? 2u : 0u;
+    reinterpret_cast<uint32_t *>(pc)[16] = fsComposite ? 1u : 0u;
     vkCmdPushConstants(g.cmd, g.texLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, 68, pc);
     vkCmdBindDescriptorSets(g.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, g.texLayout, 0,
                             1, &texSet, 0, nullptr);
