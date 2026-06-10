@@ -43,9 +43,7 @@ struct ShaderTex {
 
 struct Recompiled {
   bool ok = false;
-  std::string vsGlsl;
-  std::string fsGlsl;
-  std::vector<uint32_t> vsSpirv;  // compiled (empty if GLSL failed to compile)
+  std::vector<uint32_t> vsSpirv;  // emitted directly from GCN (empty on failure)
   std::vector<uint32_t> fsSpirv;
   std::vector<ShaderAttr> attrs;   // vertex inputs
   std::vector<ShaderCbuf> vsCbufs; // VS UBOs (set 0, binding = .binding)
