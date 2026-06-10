@@ -1410,125 +1410,13 @@ void draw(const DrawInfo &d) {
     }
   }
 
-  if (g_dump && g.frameNum == 450) {
-    float minx = 1e9f, miny = 1e9f, maxx = -1e9f, maxy = -1e9f;
-    for (uint32_t v = 0; v < nv; v++) {
-      float x = dst[v * 8], y = dst[v * 8 + 1];
-      minx = x < minx ? x : minx; maxx = x > maxx ? x : maxx;
-      miny = y < miny ? y : miny; maxy = y > maxy ? y : maxy;
-    }
-    std::fprintf(stderr, "[gpuvk] f450 draw#%u nv=%u pos[%.0f,%.0f..%.0f,%.0f] "
-                 "rt=%#lx tex=%#lx rtAsTex=%d col=(%.2f,%.2f,%.2f) uv[%.3f,%.3f "
-                 "%.3f,%.3f %.3f,%.3f %.3f,%.3f]\n", g.frameDraws,
-                 nv, minx, miny, maxx, maxy, (unsigned long)d.rtBase,
-                 (unsigned long)d.texBase,
-                 (d.texBase && d.texBase != d.rtBase && g_rts.count(d.texBase)) ? 1 : 0,
-                 dst[2], dst[3], dst[4],
-                 dst[6], dst[7], dst[14], dst[15], dst[22], dst[23], dst[30], dst[31]);
-    if (d.texBase) std::fprintf(stderr, "[gpuvk]      texW=%u texH=%u\n", d.texW, d.texH);
-  }
-
-  // Experiment: skip late fullscreen-covering draws (the post/composite passes
-  // that, without multi-RT, cover the scene). Reveals the sprite scene.
-  static const bool noComposite = std::getenv("DELTA_GPU_NOCOMPOSITE") != nullptr;
-  if (noComposite && g.frameDraws >= 4) {
-    const float *m = d.mvp;
-    float nx0 = 1e9f, ny0 = 1e9f, nx1 = -1e9f, ny1 = -1e9f;
-    for (uint32_t v = 0; v < nv; v++) {
-      float x = dst[v * 8], y = dst[v * 8 + 1];
-      float cw = m[3] * x + m[7] * y + m[15];
-      if (cw == 0) cw = 1;
-      float ndx = (m[0] * x + m[4] * y + m[12]) / cw;
-      float ndy = (m[1] * x + m[5] * y + m[13]) / cw;
-      nx0 = ndx < nx0 ? ndx : nx0; nx1 = ndx > nx1 ? ndx : nx1;
-      ny0 = ndy < ny0 ? ndy : ny0; ny1 = ndy > ny1 ? ndy : ny1;
-    }
-    if ((nx1 - nx0) >= 1.8f && (ny1 - ny0) >= 1.8f) {  // covers ~all of NDC
-      g.frameDraws++;
-      return;
-    }
-  }
-
-  // Experiment: skip fullscreen GUEST-texture draws (not RT composites) into a
-  // large RT. These are Isaac's darkness/vignette/colour overlays; rendered with
-  // our single hardcoded blend they come out opaque and black out the room. The
-  // final scene->scanout composite is rtAsTex so it is NOT skipped. Used to verify
-  // the overlay-covers-room hypothesis before implementing real per-draw blend.
-  static const bool skipFsTex = std::getenv("DELTA_GPU_SKIP_FSTEX") != nullptr;
-  if (skipFsTex && d.texBase && !(d.texBase != d.rtBase && g_rts.count(d.texBase)) &&
-      g.frameDraws >= 4) {
-    const float *m = d.mvp;
-    float nx0 = 1e9f, ny0 = 1e9f, nx1 = -1e9f, ny1 = -1e9f;
-    for (uint32_t v = 0; v < nv; v++) {
-      float x = dst[v * 8], y = dst[v * 8 + 1];
-      float cw = m[3] * x + m[7] * y + m[15]; if (cw == 0) cw = 1;
-      float ndx = (m[0] * x + m[4] * y + m[12]) / cw;
-      float ndy = (m[1] * x + m[5] * y + m[13]) / cw;
-      nx0 = ndx < nx0 ? ndx : nx0; nx1 = ndx > nx1 ? ndx : nx1;
-      ny0 = ndy < ny0 ? ndy : ny0; ny1 = ndy > ny1 ? ndy : ny1;
-    }
-    if ((nx1 - nx0) >= 1.7f && (ny1 - ny0) >= 1.7f) { g.frameDraws++; return; }
-  }
-
-  // Redirect a STALE render-to-texture source to the freshest same-size RT. Isaac
-  // samples a room buffer (e.g. 0x109ae97800) that the game refreshes via a pass
-  // our heuristic renderer misses, leaving it stale/black; sampled fullscreen and
-  // opaque it blacks out the scene. The current room lives in a sibling same-size
-  // RT we DO refresh every frame, so use that instead.
+  // Resolve the sampled texture address to a render target via overlap (the
+  // resource-model page-table lookup): an exact RT base, or an address whose
+  // footprint overlaps a live RT, binds that RT's image instead of stale guest
+  // memory. This replaces the old per-symptom FRESHRT/CYCLEREDIR/ROOMALPHA address
+  // heuristics with one principled, game-agnostic lookup.
   uint64_t texBase = d.texBase;
-  // Redirect a composite that samples a stale room buffer to the freshest sibling
-  // (room-base RTs cycle addresses across frames). On by default; FRESHRT=0 disables.
-  static const bool freshRT = [] {
-    const char *e = std::getenv("DELTA_GPU_FRESHRT");
-    return !e || std::strcmp(e, "0") != 0;
-  }();
-  // When room-layer compositing is on, never redirect a room-sized buffer (700..900
-  // wide): the room is two sibling layers (floor + walls) and redirecting one to the
-  // "freshest" sibling would sample the wrong layer and drop the floor.
-  static const bool roomAlphaRedirect = std::getenv("DELTA_GPU_ROOMALPHA") != nullptr;
-  if (freshRT && texBase) {
-    auto it = g_rts.find(texBase);
-    bool isRoom = roomAlphaRedirect && it != g_rts.end() &&
-                  it->second.w >= 700 && it->second.w <= 900;
-    if (!isRoom && it != g_rts.end() && g.frameNum - it->second.lastFrame > 8) {
-      int bestFrame = it->second.lastFrame; uint64_t best = texBase;
-      for (auto &kv : g_rts)
-        if (kv.second.w == it->second.w && kv.second.h == it->second.h &&
-            kv.second.lastFrame > bestFrame) { bestFrame = kv.second.lastFrame; best = kv.first; }
-      texBase = best;
-    }
-  }
-  // Untracked RT-sized source (DELTA_GPU_CYCLEREDIR, default on): a composite samples
-  // a buffer that's NOT one of our render targets but is RT-sized and all-zero in guest
-  // memory -- the game rendered its content into a sibling RT at a cycled address (our
-  // per-VkImage model doesn't write RT content back to guest memory). Redirect to the
-  // freshest same-size tracked RT so the content composites instead of sampling black.
-  // Opt-in: it reveals the floor for some non-tutorial rooms but the redirected sibling
-  // can be the wrong cycled buffer; the proper fix is the resource model + de-tiling.
-  static const bool cycleRedir = std::getenv("DELTA_GPU_CYCLEREDIR") != nullptr;
-  if (cycleRedir && texBase >= 0x1000000000ull && texBase < 0x20000000000ull &&
-      !g_rts.count(texBase) && d.texW >= 256 && d.texH >= 128) {
-    const uint32_t *px = reinterpret_cast<const uint32_t *>(texBase);
-    uint64_t cnt = (uint64_t)d.texW * d.texH, step = cnt > 1024 ? cnt / 1024 : 1, nz = 0;
-    for (uint64_t i = 0; i < cnt && !nz; i += step) if (px[i] & 0x00FFFFFFu) nz++;
-    if (!nz) {
-      int bestFrame = -1000000; uint64_t best = 0;
-      for (auto &kv : g_rts)
-        if (kv.second.w == d.texW && kv.second.h == d.texH && kv.second.draws > 0 &&
-            kv.second.lastFrame > bestFrame) { bestFrame = kv.second.lastFrame; best = kv.first; }
-      if (best) texBase = best;
-    }
-  }
-  // Resource-model overlap fallback (DELTA_GPU_RTOVERLAP, default on): if the
-  // sampled address is not itself a tracked RT base but its footprint overlaps a
-  // tracked RT (a sub-region or aliased sample of a render target), resolve to
-  // that RT so the live rendered content is sampled instead of (stale/zero) guest
-  // memory. Additive: leaves exact-match samples and the heuristics above intact.
-  static const bool rtOverlap = [] {
-    const char *e = std::getenv("DELTA_GPU_RTOVERLAP");
-    return !e || std::strcmp(e, "0") != 0;
-  }();
-  if (rtOverlap && texBase && !g_rts.count(texBase)) {
+  if (texBase && !g_rts.count(texBase)) {
     uint64_t r = resolveSampledRT(texBase, d.texW, d.texH);
     if (r) texBase = r;
   }
