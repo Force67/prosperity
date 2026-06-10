@@ -122,6 +122,12 @@ const uint64_t *currentGuestGregs();
 // number; otherwise -1. Lets the crash handler name the culprit HLE call.
 int faultingSyscall();
 
+// Dump this host thread's most-recent guest-boundary events (syscalls + HLE
+// thunk calls) oldest-first to the given stream. The crash handler uses it
+// because failing init logic often makes its last HLE/Gnm/kernel call right
+// before a downstream null-deref. No-op on the native backend.
+void dumpThreadTrace(void *fileStar);
+
 // Reconstruct the precise guest RIP from a host PC captured in a signal (FEX
 // only). CPUState.rip is only block-accurate while the JIT is running and
 // multiblock compilation hides the real fault site; this asks FEX to map the

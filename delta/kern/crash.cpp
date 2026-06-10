@@ -119,6 +119,13 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
   if (cpu::tryHandleJitSignal(sig, si, ucv))
     return;
 
+  // Only the first faulting thread prints. A second concurrent fault (common at
+  // teardown) would interleave the dump and can itself core-dump, truncating it.
+  static std::atomic<bool> s_dumping{false};
+  if (s_dumping.exchange(true)) {
+    for (;;) pause();  // park until the first thread's _Exit ends the process
+  }
+
 #if defined(__x86_64__)
   // Guest SDK assert/__debugbreak is `int 0x41` (cd 41); in userspace it raises
   // SIGSEGV (#GP). Real hardware with no kernel debugger attached just steps over
@@ -223,6 +230,10 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
     std::fprintf(stderr, "  r12=%016llx r13=%016llx r14=%016llx r15=%016llx\n",
                  (unsigned long long)g[R12], (unsigned long long)g[R13],
                  (unsigned long long)g[R14], (unsigned long long)g[R15]);
+    // Print the boundary-call trace before the (best-effort, occasionally
+    // out-of-bounds) stack scan so it survives even if the scan faults.
+    cpu::dumpThreadTrace(stderr);
+    std::fflush(stderr);
     backtrace(g[RBP]);
     // Raw stack scan: optimised guest code omits frame pointers, so the rbp
     // chain above misses frames. Scan the guest stack for any value that lands

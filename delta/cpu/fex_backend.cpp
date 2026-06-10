@@ -69,6 +69,26 @@ static FEXCore::Context::Context *g_ctxPtr = nullptr;
 static thread_local uint32_t t_lastSyscall = 0xFFFFFFFFu;
 static thread_local bool t_inSyscall = false;
 
+// Per-thread ring of recent guest->host boundary crossings (syscalls + HLE
+// thunk calls), dumped by the crash handler for the faulting thread. Kept tiny
+// and lock-free (thread_local) so it is safe to touch from a signal handler.
+struct TraceEvt {
+  char kind;        // 's' syscall, 'h' HLE thunk, 0 = empty
+  uint32_t id;      // syscall number / thunk index
+  uint64_t a0, a1, a2, a3;
+  uint64_t ret;     // result (or sentinel before return)
+  uint64_t caller;  // guest caller PC (HLE only)
+  const char *name; // static HLE name pointer (HLE only), else nullptr
+};
+static constexpr uint32_t kTraceRing = 96;
+static thread_local TraceEvt t_trace[kTraceRing];
+static thread_local uint32_t t_tracePos = 0;
+static inline TraceEvt &traceNext() {
+  TraceEvt &e = t_trace[t_tracePos % kTraceRing];
+  t_tracePos++;
+  return e;
+}
+
 // Set around CTX->ExecuteThread so thr_exit can bail out of the JIT (longjmp)
 // instead of returning into guest code (which libkernel treats as fatal).
 static thread_local std::jmp_buf t_exitJmp;
@@ -216,10 +236,17 @@ public:
                                       uint64_t, uint64_t);
         static const bool hleTrace = std::getenv("DELTA_HLE_TRACE") != nullptr;
         uint64_t caller = (rsp) ? reinterpret_cast<uint64_t *>(rsp)[0] : 0;
+        const char *evName = nullptr;
+        { std::lock_guard lk(g_thunkMutex);
+          if (idx < g_thunkNames.size()) evName = g_thunkNames[idx].c_str(); }
+        TraceEvt &ev = traceNext();
+        ev = {'h', idx, Args->Argument[1], Args->Argument[2], Args->Argument[3],
+              Args->Argument[4], ~0ull, caller, evName};
         ret = reinterpret_cast<Fn>(fn)(
             Args->Argument[1], Args->Argument[2], Args->Argument[3],
             Args->Argument[4], Args->Argument[5], Args->Argument[6], s[0], s[1],
             s[2], s[3], s[4], s[5], s[6], s[7]);
+        ev.ret = ret;
         if (hleTrace) {
           char cs[256]; symRange(caller, cs, sizeof(cs));
           const char *nm = "";
@@ -259,8 +286,12 @@ public:
     auto fn = reinterpret_cast<Fn>(handler);
     t_lastSyscall = num;
     t_inSyscall = true;
+    TraceEvt &ev = traceNext();
+    ev = {'s', num, Args->Argument[1], Args->Argument[2], Args->Argument[3],
+          Args->Argument[4], ~0ull, 0, nullptr};
     uint64_t ret = fn(Args->Argument[1], Args->Argument[2], Args->Argument[3],
                       Args->Argument[4], Args->Argument[5], Args->Argument[6]);
+    ev.ret = ret;
     t_inSyscall = false;
     if (trace)
       std::fprintf(stderr, "    -> %#lx\n", ret);
@@ -654,6 +685,32 @@ const uint64_t *currentGuestGregs() {
 }
 
 int faultingSyscall() { return t_inSyscall ? static_cast<int>(t_lastSyscall) : -1; }
+
+void dumpThreadTrace(void *fileStar) {
+  auto *f = static_cast<std::FILE *>(fileStar);
+  if (!f)
+    return;
+  std::fprintf(f, "  --- last guest->host calls (this thread, oldest first) ---\n");
+  uint32_t count = t_tracePos < kTraceRing ? t_tracePos : kTraceRing;
+  uint32_t start = t_tracePos - count;
+  for (uint32_t i = 0; i < count; i++) {
+    const TraceEvt &e = t_trace[(start + i) % kTraceRing];
+    if (e.kind == 's') {
+      std::fprintf(f, "  sc  %3u %-22s (%#llx,%#llx,%#llx,%#llx) -> %#llx\n",
+                   e.id, krnl::syscall_getname(e.id),
+                   (unsigned long long)e.a0, (unsigned long long)e.a1,
+                   (unsigned long long)e.a2, (unsigned long long)e.a3,
+                   (unsigned long long)e.ret);
+    } else if (e.kind == 'h') {
+      char cs[256];
+      symRange(e.caller, cs, sizeof(cs));
+      std::fprintf(f, "  hle %s(%#llx,%#llx,%#llx,%#llx) -> %#llx  from %s\n",
+                   e.name ? e.name : "?", (unsigned long long)e.a0,
+                   (unsigned long long)e.a1, (unsigned long long)e.a2,
+                   (unsigned long long)e.a3, (unsigned long long)e.ret, cs);
+    }
+  }
+}
 
 uint64_t reconstructGuestRip(uint64_t hostPC) {
   if (!g_ctxPtr || !t_curThread)
