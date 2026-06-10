@@ -124,14 +124,18 @@ uint64_t texHash(uint64_t base, uint32_t w, uint32_t h) {
   return hsh ^ (count << 1);
 }
 
-// A render target, keyed by its guest CB_COLOR0 address. Doubles as a sampleable
-// texture (render-to-texture) for composite passes.
+// An image in the resource cache: a render target keyed by its guest base address,
+// that also doubles as a sampleable texture (render-to-texture). This is the unit
+// of the resource model -- RT-bind and texture-sample both resolve to
+// the same Image via the address page table, so render-to-texture/MRT "just work".
 struct RTarget {
   VkImage image = VK_NULL_HANDLE;
   VkDeviceMemory mem = VK_NULL_HANDLE;
   VkImageView view = VK_NULL_HANDLE;
   VkDescriptorSet set = VK_NULL_HANDLE;  // for sampling this RT as a texture
   uint32_t w = 0, h = 0;
+  VkFormat fmt = VK_FORMAT_B8G8R8A8_UNORM;  // identity: addr alone doesn't pin format
+  bool isDepth = false;                      // depth/stencil attachment (MRT/depth task)
   VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
   bool usedThisFrame = false;
   uint32_t draws = 0;     // draws into this RT this frame
@@ -143,6 +147,27 @@ struct RTarget {
   bool everRendered = false;  // false until first real render (then loadOp can LOAD)
 };
 std::unordered_map<uint64_t, RTarget> g_rts;
+
+// Address -> image page table (the resource model's core). Maps a 64 KiB guest page
+// to the RT bases whose memory footprint covers it, so a sampled address resolves to
+// every overlapping live image in O(pages) instead of scanning the whole cache. A
+// page can be touched by several overlapping/aliased RTs (double-buffer pairs, a
+// pool of cycled scene buffers), so each page holds a list.
+constexpr uint32_t kRtPageShift = 16;  // 64 KiB
+std::unordered_map<uint64_t, std::vector<uint64_t>> g_rtPages;
+
+uint64_t rtByteSizeWH(uint32_t w, uint32_t h) { return (uint64_t)w * h * 4; }
+
+// Register an RT's footprint pages so the page table can find it by overlap.
+void registerRtPages(uint64_t base, uint32_t w, uint32_t h) {
+  uint64_t lo = base >> kRtPageShift, hi = (base + rtByteSizeWH(w, h) - 1) >> kRtPageShift;
+  for (uint64_t p = lo; p <= hi; p++) {
+    auto &v = g_rtPages[p];
+    bool seen = false;
+    for (uint64_t b : v) if (b == base) { seen = true; break; }
+    if (!seen) v.push_back(base);
+  }
+}
 
 const bool g_dump = std::getenv("DELTA_GPU_DUMP") != nullptr;
 int g_dumpedFrames = 0;
@@ -761,38 +786,42 @@ RTarget *getRT(uint64_t base, uint32_t w, uint32_t h) {
   }
   std::fprintf(stderr, "[gpuvk] new RT %#lx %ux%u\n", (unsigned long)base, w, h);
   g_rts[base] = t;
+  registerRtPages(base, w, h);  // resource-model page table
   return &g_rts[base];
 }
 
-// Byte footprint a render target occupies in guest memory (32bpp).
-uint64_t rtByteSize(const RTarget &rt) { return (uint64_t)rt.w * rt.h * 4; }
+uint64_t rtByteSize(const RTarget &rt) { return rtByteSizeWH(rt.w, rt.h); }
 
-// Overlap-aware resolution of a sampled texture address to a tracked render
-// target. This is the first building block of the resource model (see the
-// shadps4 "page table collects all overlappers" design): the game cycles and
-// aliases RT addresses (double-buffered room layers, a pool of scene buffers),
-// so a composite often samples an address that does not exactly match the RT
-// base it was rendered into. Resolve by interval overlap over the RT set and
-// pick the freshest rendered RT whose footprint matches/contains the sampled
-// region. Returns the g_rts key (== an RT base), or 0 if none. Generalises (and
-// when on, replaces) the per-symptom FRESHRT/CYCLEREDIR address heuristics.
+// Resolve a sampled texture address to the live RT image that backs it (the
+// resource model's "the page table collects all overlappers" lookup). The game
+// cycles/aliases RT addresses (double-buffered room layers, a pool of scene
+// buffers), so a composite often samples an address that does not exactly match
+// the RT base it was rendered into. We gather every RT whose footprint touches
+// the sampled region's pages and pick the freshest rendered one that overlaps,
+// preferring an exact base + matching dimensions. Returns the g_rts key, or 0.
 uint64_t resolveSampledRT(uint64_t addr, uint32_t w, uint32_t h) {
   if (!addr) return 0;
-  uint64_t reqSize = w && h ? (uint64_t)w * h * 4 : 0;
-  uint64_t a0 = addr, a1 = addr + (reqSize ? reqSize : 4);
+  uint64_t reqSize = w && h ? (uint64_t)w * h * 4 : 4;
+  uint64_t a0 = addr, a1 = addr + reqSize;
   uint64_t best = 0;
   long bestScore = -1;
-  for (auto &kv : g_rts) {
-    const RTarget &rt = kv.second;
-    if (!rt.everRendered) continue;  // never sample an RT with no content
-    uint64_t b0 = kv.first, b1 = b0 + rtByteSize(rt);
-    if (!(a0 < b1 && b0 < a1)) continue;  // no interval overlap
+  auto consider = [&](uint64_t b0) {
+    auto it = g_rts.find(b0);
+    if (it == g_rts.end()) return;
+    const RTarget &rt = it->second;
+    if (!rt.everRendered) return;  // never sample an RT with no content
+    uint64_t b1 = b0 + rtByteSizeWH(rt.w, rt.h);
+    if (!(a0 < b1 && b0 < a1)) return;  // no interval overlap
     bool dimMatch = (!w || !h) || (rt.w == w && rt.h == h);
-    // Score: exact base + dim match is best, then dim match, then freshest.
     long score = (long)rt.lastFrame;
     if (dimMatch) score += 1L << 30;
     if (b0 == addr) score += 1L << 31;
     if (score > bestScore) { bestScore = score; best = b0; }
+  };
+  for (uint64_t p = a0 >> kRtPageShift; p <= (a1 - 1) >> kRtPageShift; p++) {
+    auto it = g_rtPages.find(p);
+    if (it != g_rtPages.end())
+      for (uint64_t b0 : it->second) consider(b0);
   }
   return best;
 }
@@ -1000,7 +1029,7 @@ bool drawRecomp(const DrawInfo &d) {
   // (700-900 src) stay on the heuristic path (its verified V-flip renders the tutorial
   // floor). Other composites (e.g. the darkness/light overlay that the heuristic
   // fake-blit mis-applies, blacking non-tutorial rooms) run the game's REAL shader
-  // binding the RT image -- the shadPS4 "run all draws through real shaders" approach.
+  // binding the RT image -- the "run all draws through their real shaders" approach.
   // Gated (DELTA_GPU_RECOMP_COMPOSITE) until validated; feedback loop guarded.
   static const bool recompComposite = [] {
     const char *e = std::getenv("DELTA_GPU_RECOMP_COMPOSITE");
