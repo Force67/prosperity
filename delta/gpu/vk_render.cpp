@@ -837,7 +837,13 @@ void beginRegion(uint64_t base, RTarget &rt) {
   ri.renderArea = {{0, 0}, {rt.w, rt.h}};
   ri.layerCount = 1; ri.colorAttachmentCount = 1; ri.pColorAttachments = &color;
   p_vkCmdBeginRendering(g.cmd, &ri);
-  VkViewport vpt{0, 0, (float)rt.w, (float)rt.h, 0, 1};
+  // Negative-height (y-up) viewport: GCN/PS4 rasterises y-up, so we do too. This
+  // stores render-target content in the game's orientation, so render-to-texture
+  // composites (room floor/walls) sample with aligned UVs -- the proper general fix
+  // for what the old per-composite RTVFLIP hack patched. The final scanout is still
+  // brought to display orientation by the readback flip (DELTA_GPU_FLIP, default Y);
+  // the two are independent (viewport = RT sampling, readback flip = present).
+  VkViewport vpt{0, (float)rt.h, (float)rt.w, -(float)rt.h, 0, 1};
   vkCmdSetViewport(g.cmd, 0, 1, &vpt);
   VkRect2D sc{{0, 0}, {rt.w, rt.h}};
   vkCmdSetScissor(g.cmd, 0, 1, &sc);
@@ -877,43 +883,6 @@ void dumpPpm(const uint8_t *bgra, uint32_t w, uint32_t h) {
 // per-buffer content (which 832 buffer holds the floor vs the walls, etc) can be
 // inspected directly. One-shot per RT via a transient command buffer (slow; only
 // for debugging). Call after the frame's main submit has completed.
-void dumpAllRTs() {
-  static int done = 0;
-  if (done) return;
-  done = 1;
-  for (auto &kv : g_rts) {
-    RTarget &rt = kv.second;
-    if (!rt.image || rt.layout == VK_IMAGE_LAYOUT_UNDEFINED) continue;
-    VkDeviceSize sz = (VkDeviceSize)rt.w * rt.h * 4;
-    ensureReadback(rt.w, rt.h);
-    VkCommandBufferAllocateInfo ca{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
-    ca.commandPool = g.pool; ca.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; ca.commandBufferCount = 1;
-    VkCommandBuffer c; vkAllocateCommandBuffers(g.device, &ca, &c);
-    VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(c, &bi);
-    imageBarrier(c, rt.image, rt.layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                 VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
-    VkBufferImageCopy copy{};
-    copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-    copy.imageExtent = {rt.w, rt.h, 1};
-    vkCmdCopyImageToBuffer(c, rt.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, g.readback, 1, &copy);
-    vkEndCommandBuffer(c);
-    VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-    si.commandBufferCount = 1; si.pCommandBuffers = &c;
-    vkResetFences(g.device, 1, &g.fence);
-    vkQueueSubmit(g.queue, 1, &si, g.fence);
-    vkWaitForFences(g.device, 1, &g.fence, VK_TRUE, UINT64_MAX);
-    rt.layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    vkFreeCommandBuffers(g.device, g.pool, 1, &c);
-    char path[256];
-    std::snprintf(path, sizeof(path), "%s/rt_%#lx_%ux%u.ppm", dumpDir(),
-                  (unsigned long)kv.first, rt.w, rt.h);
-    writePpm(path, static_cast<const uint8_t *>(g.readbackMap), rt.w, rt.h);
-    std::fprintf(stderr, "[gpuvk] dumped RT %s draws=%u\n", path, rt.draws);
-    (void)sz;
-  }
-}
 
 }  // namespace
 
@@ -1021,49 +990,6 @@ RecompPipe *getRecompPipe(const DrawInfo &d) {
   return &g_recompPipes[key];
 }
 
-void roomTrace(const DrawInfo &d, uint32_t nv, bool recomp);
-
-// Frame-scoped textured-draw recorder (DELTA_GPU_DUMPBLACK): captures every textured
-// draw of the current frame so endFrame's black-floor detector can flush them on the
-// exact bug frame -- identifies the floor-fill draw and whether it samples a tracked
-// RT vs a loaded/zero guest texture, deterministically.
-struct DrawRec { uint64_t rt, tex; uint32_t rtW, rtH, texW, texH; int rtTrk; long nz; uint32_t nv, inst; bool recomp; };
-std::vector<DrawRec> g_frameDrawRecs;
-int g_frameDrawRecFrame = -1;
-void recordDraw(const DrawInfo &d, uint32_t nv, bool recomp) {
-  static const bool on = std::getenv("DELTA_GPU_DUMPBLACK") != nullptr;
-  if (!on || !d.texBase) return;
-  if ((int)g.frameNum != g_frameDrawRecFrame) { g_frameDrawRecs.clear(); g_frameDrawRecFrame = g.frameNum; }
-  if (g_frameDrawRecs.size() > 800) return;
-  DrawRec r{}; r.rt = d.rtBase; r.tex = d.texBase; r.rtW = d.rtW; r.rtH = d.rtH;
-  r.texW = d.texW; r.texH = d.texH; r.rtTrk = g_rts.count(d.texBase) ? 1 : 0;
-  r.nz = -1; r.nv = nv; r.inst = d.instanceCount; r.recomp = recomp;
-  if (d.texBase >= 0x1000000000ull && d.texBase < 0x20000000000ull && d.texW && d.texH) {
-    const uint32_t *px = reinterpret_cast<const uint32_t *>(d.texBase);
-    uint64_t cnt = (uint64_t)d.texW * d.texH, step = cnt > 2048 ? cnt / 2048 : 1; r.nz = 0;
-    for (uint64_t i = 0; i < cnt; i += step) if (px[i] & 0x00FFFFFFu) r.nz++;
-  }
-  g_frameDrawRecs.push_back(r);
-}
-void flushFrameDrawRecs() {
-  // Aggregate by (rt,texW,texH,rtTrk,nz>0) so the floor-fill (many same-size draws)
-  // stands out from one-off sprites.
-  std::fprintf(stderr, "[blackframe] f%d recs=%zu:\n", g.frameNum, g_frameDrawRecs.size());
-  std::unordered_map<uint64_t, int> agg;
-  std::unordered_map<uint64_t, DrawRec> sample;
-  for (auto &r : g_frameDrawRecs) {
-    uint64_t k = (r.rt << 1) ^ ((uint64_t)r.texW << 20) ^ ((uint64_t)r.texH << 8) ^
-                 (r.rtTrk) ^ ((r.nz > 0 ? 1ull : 0ull) << 5) ^ (r.recomp ? 2ull : 0ull);
-    agg[k]++; sample[k] = r;
-  }
-  for (auto &kv : agg) {
-    DrawRec &r = sample[kv.first];
-    std::fprintf(stderr, "  x%-4d %s rt=%#lx %ux%u tex=%#lx %ux%u rtTrk=%d nz=%ld/2048 inst=%u nv=%u\n",
-                 kv.second, r.recomp ? "RC" : "HE", (unsigned long)r.rt, r.rtW, r.rtH,
-                 (unsigned long)r.tex, r.texW, r.texH, r.rtTrk, r.nz, r.inst, r.nv);
-  }
-}
-
 // Issue an indexed draw running the game's recompiled VS/PS. Returns false if the
 // draw can't be handled (the caller falls back to the heuristic path).
 bool drawRecomp(const DrawInfo &d) {
@@ -1112,7 +1038,6 @@ bool drawRecomp(const DrawInfo &d) {
     for (uint32_t i = 0; i < d.indexCount; i++) maxIdx = i16[i] > maxIdx ? i16[i] : maxIdx; }
   uint32_t nv = maxIdx + 1;
   if (nv > 200000u || !d.vertexStride) return false;
-  roomTrace(d, nv, true);
 
   // A fullscreen, untextured, near-black REPLACE draw is the game CLEARING an RT.
   // Don't render it (that wipes the RT immediately); record a LAZY clear instead --
@@ -1180,54 +1105,6 @@ bool drawRecomp(const DrawInfo &d) {
   if (rp->textured && !rtAsTex) {
     texSet = getTexture(d.texBase, d.texW, d.texH, d.texTiling, d.texPitch);
     if (!texSet) return false;
-  }
-
-  static const bool fdbg = std::getenv("DELTA_GPU_FLOORTRACE") != nullptr;
-  static int fdbgN = 0;
-  if (fdbg && d.rtW >= 700 && d.rtW <= 900 && fdbgN < 24) {
-    fdbgN++;
-    const float *vp = reinterpret_cast<const float *>(d.vertexData);
-    const float *m = d.mvp;
-    float x = vp[0], y = vp[1], z = (d.vattrs[0].numComps >= 3) ? vp[2] : 0.0f;
-    float cw = m[3]*x + m[7]*y + m[11]*z + m[15]; if (cw == 0) cw = 1;
-    float nx = (m[0]*x + m[4]*y + m[8]*z + m[12]) / cw;
-    float ny = (m[1]*x + m[5]*y + m[9]*z + m[13]) / cw;
-    // Dump the per-vertex colour attribute (the float4/rgba8 that modulates the
-    // texture) for a few verts, to tell a dark-vertex-colour floor from a missing
-    // texture. Prints both float and byte interpretations of the attribute.
-    char cbuf[320]; cbuf[0] = 0; int cl = 0;
-    for (uint32_t a = 0; a < d.nvattrs; a++)
-      if (d.vattrs[a].numComps == 4 && d.vattrs[a].offset != 0) {  // colour, not pos
-        for (uint32_t v = 0; v < nv && v < 3; v++) {
-          const uint8_t *b = static_cast<const uint8_t *>(d.vertexData) +
-                             (size_t)v * d.vertexStride + d.vattrs[a].offset;
-          const float *c = reinterpret_cast<const float *>(b);
-          cl += std::snprintf(cbuf + cl, sizeof(cbuf) - cl,
-                              " c%u=f(%.2f,%.2f,%.2f,%.2f)/b(%u,%u,%u,%u)", v,
-                              c[0], c[1], c[2], c[3], b[0], b[1], b[2], b[3]);
-        }
-        break;
-      }
-    std::fprintf(stderr, "[fr-recomp] vs=%#lx rt=%#lx %ux%u nattr=%u stride=%u ic=%u nv=%u "
-                 "tex=%#lx pos0=(%.1f,%.1f,%.1f) ndc0=(%.2f,%.2f)%s\n",
-                 (unsigned long)d.vsAddr, (unsigned long)d.rtBase, d.rtW, d.rtH, d.nvattrs,
-                 d.vertexStride, d.indexCount, nv, (unsigned long)d.texBase, x, y, z, nx, ny, cbuf);
-  }
-  static const bool rdbg = std::getenv("DELTA_GPU_SHTRACE") != nullptr;
-  static int rdbgN = 0;
-  if (rdbg && rdbgN < 8) {
-    rdbgN++;
-    const float *vp = reinterpret_cast<const float *>(d.vertexData);
-    const float *m = d.mvp;
-    float x = vp[0], y = vp[1], z = (d.vattrs[0].numComps >= 3) ? vp[2] : 0.0f;
-    float cw = m[3]*x + m[7]*y + m[11]*z + m[15]; if (cw == 0) cw = 1;
-    float nx = (m[0]*x + m[4]*y + m[8]*z + m[12]) / cw;
-    float ny = (m[1]*x + m[5]*y + m[9]*z + m[13]) / cw;
-    std::fprintf(stderr, "[rc] vs=%#lx ps=%#lx nattr=%u stride=%u a0(off=%u nc=%u df=%u) "
-                 "ic=%u nv=%u tex=%d %#lx pos0=(%.1f,%.1f,%.1f) ndc0=(%.2f,%.2f) mvp=[%.3f %.3f %.3f]\n",
-                 (unsigned long)d.vsAddr, (unsigned long)d.psAddr, d.nvattrs, d.vertexStride,
-                 d.vattrs[0].offset, d.vattrs[0].numComps, d.vattrs[0].dfmt, d.indexCount, nv,
-                 rp->textured ? 1 : 0, (unsigned long)d.texBase, x, y, z, nx, ny, m[0], m[5], m[12]);
   }
 
   // Copy the raw interleaved vertex buffer and the indices into the rings.
@@ -1303,52 +1180,10 @@ void beginFrame() {
   g.recording = true;
 }
 
-// Per-frame room-composition trace (DELTA_GPU_ROOMTRACE): logs every draw whose
-// target RT is room-sized (700..900 wide) with the frame number, so a single
-// bake frame's full draw list (floor quadrants + wall tilemap + details) can be
-// read off and the floor/wall buffer split understood.
-void roomTrace(const DrawInfo &d, uint32_t nv, bool recomp) {
-  static const bool on = std::getenv("DELTA_GPU_ROOMTRACE") != nullptr;
-  if (!on) return;
-  static int n = 0;
-  if (n >= 400) return;
-  static const uint32_t wmin = [] { const char *e = std::getenv("DELTA_GPU_ROOMTRACE_WMIN");
-    return e ? (uint32_t)std::atoi(e) : 700u; }();
-  static const uint32_t wmax = [] { const char *e = std::getenv("DELTA_GPU_ROOMTRACE_WMAX");
-    return e ? (uint32_t)std::atoi(e) : 900u; }();
-  if (d.rtW < wmin || d.rtW > wmax) return;
-  // Skip the loading-screen bakes (DELTA_GPU_ROOMTRACE_MINF) to focus on gameplay
-  // room bakes when exploring.
-  static const int minF = [] { const char *e = std::getenv("DELTA_GPU_ROOMTRACE_MINF");
-    return e ? std::atoi(e) : 0; }();
-  if ((int)g.frameNum < minF) return;
-  n++;
-  // Decisive floor-source data: is the sampled texture a tracked RT (GPU-rendered)
-  // or untracked guest memory, and how many of its pixels are nonzero (a zero
-  // texture -> black floor). Lets us tell "floor draw missing" from "floor draw
-  // sampling a zero/RTT buffer".
-  int rtTracked = (d.texBase && g_rts.count(d.texBase)) ? 1 : 0;
-  long nz = -1;
-  if (d.texBase >= 0x1000000000ull && d.texBase < 0x20000000000ull && d.texW && d.texH) {
-    const uint32_t *px = reinterpret_cast<const uint32_t *>(d.texBase);
-    uint64_t cnt = (uint64_t)d.texW * d.texH, step = cnt > 4096 ? cnt / 4096 : 1;
-    nz = 0;
-    for (uint64_t i = 0; i < cnt; i += step) if (px[i] & 0x00FFFFFFu) nz++;
-  }
-  std::fprintf(stderr, "[room] f%d %s rt=%#lx %ux%u tex=%#lx %ux%u rtTrk=%d nz=%ld/4096 nv=%u ic=%u "
-               "blend=%#x en=%d tmask=%#x cctrl=%#x\n",
-               g.frameNum, recomp ? "RC" : "HE", (unsigned long)d.rtBase, d.rtW, d.rtH,
-               (unsigned long)d.texBase, d.texW, d.texH, rtTracked, nz, nv, d.indexCount,
-               d.blendControl, d.blendEnable ? 1 : 0, d.targetMask, d.colorControl);
-}
-
-void recordDraw(const DrawInfo &d, uint32_t nv, bool recomp);
-
 void draw(const DrawInfo &d) {
   if (!g.recording || !d.vertexData || !d.vertexStride)
     return;
   ScopeNs _t(&g_nsDraw);
-  recordDraw(d, d.vertexCount, d.recomp != nullptr);
   // Recompiled-shader path: run the game's actual VS/PS. Falls through to the
   // heuristic quad path when the draw can't be handled. On by default now that it
   // renders gameplay correctly; DELTA_GPU_RECOMP=0 forces the old heuristic path.
@@ -1378,7 +1213,6 @@ void draw(const DrawInfo &d) {
     nv = maxIdx + 1;
   }
   if (nv < 3 || nv > 200000u) return;  // sane cap
-  roomTrace(d, nv, false);
   VkDeviceSize need = (VkDeviceSize)nv * 32;  // pos.xy + color.rgba + uv.xy
   if (g.vbOffset + need > kVbRing)
     return;  // ring full this frame
@@ -1587,11 +1421,8 @@ void endFrame(uint64_t scanoutBase) {
   vkWaitForFences(g.device, 1, &g.fence, VK_TRUE, UINT64_MAX);
   g_nsReadback += nowNs() - _tr0;
 
-  // Orientation correction. DELTA_GPU_FLIP selects the readback transform so the
-  // correct one can be determined empirically: 0=none 1=Y(rows) 2=X(cols)
-  // 3=XY(180, default). The guest scanout's handedness/origin mismatch is uniform
-  // across every draw, so one pass on the final scanout fixes it with no
-  // render-to-texture sampling interactions.
+  // Readback transform (DELTA_GPU_FLIP: 0=none 1=Y 2=X 3=XY). Default 1 (Y): the
+  // guest scanout origin is bottom-up vs the display's top-down.
   static const int flipMode = [] {
     const char *e = std::getenv("DELTA_GPU_FLIP");
     return e ? std::atoi(e) : 1;
@@ -1635,62 +1466,6 @@ void endFrame(uint64_t scanoutBase) {
     std::fprintf(stderr, "[snapseq] %d -> f%d draws=%u\n", seqDone, g.frameNum, g.frameDraws);
     seqDone++; seqLastFrame = g.frameNum;
   }
-  // Black-floor-triggered RT dump (DELTA_GPU_DUMPBLACK): when the presented room's
-  // centre (where the floor should be) is near-black on a real gameplay frame, dump
-  // every RT once -- captures exactly the bug frame's resources (a basement room
-  // whose floor layer is missing), deterministically, rather than guessing a frame.
-  static const bool dumpBlack = std::getenv("DELTA_GPU_DUMPBLACK") != nullptr;
-  if (dumpBlack && g.frameHadRoom && g.frameDraws > 20 && g.frameNum > 250) {
-    uint64_t cx0 = rt.w * 3 / 8, cx1 = rt.w * 5 / 8, cy0 = rt.h * 3 / 8, cy1 = rt.h * 5 / 8;
-    uint64_t sum = 0, n = 0;
-    for (uint64_t y = cy0; y < cy1; y += 4)
-      for (uint64_t x = cx0; x < cx1; x += 4) {
-        const uint8_t *px = pixels + (y * rt.w + x) * 4;
-        sum += px[0] + px[1] + px[2]; n++;
-      }
-    uint64_t avg = n ? sum / (n * 3) : 0;
-    static int blkN = 0, brightN = 0;
-    std::fprintf(stderr, "[blackdet] frame=%d centre-avg=%lu draws=%u\n", g.frameNum,
-                 (unsigned long)avg, g.frameDraws);
-    // Capture the FIRST dark-floor frame and the FIRST bright-floor frame, so the two
-    // draw lists can be diffed (which floor-layer draws does the bright room have that
-    // the dark room is missing?).
-    if (avg < 20 && blkN++ == 0) { std::fprintf(stderr, "[DARKFRAME]\n"); flushFrameDrawRecs(); dumpAllRTs(); }
-    if (avg > 60 && brightN++ == 0) { std::fprintf(stderr, "[BRIGHTFRAME]\n"); flushFrameDrawRecs(); }
-  }
-  // When inspecting a specific RT size (DELTA_GPU_PRESENT_RTW/H), dump it every
-  // frame to a rolling file so the last write is guaranteed to be that RT.
-  if (g_dump && wantW && wantH && (int)rt.w == wantW && (int)rt.h == wantH &&
-      g.frameDraws > 0) {
-    char p[256], tmp[256];
-    std::snprintf(p, sizeof(p), "%s/gpu_sized.ppm", dumpDir());
-    std::snprintf(tmp, sizeof(tmp), "%s/gpu_sized.tmp", dumpDir());
-    writePpm(tmp, pixels, rt.w, rt.h);
-    std::rename(tmp, p);  // atomic: a kill mid-write can't truncate the result
-  }
-  // Diagnostic: one-shot dump of every RT this frame (DELTA_GPU_DUMPALLRT), on a
-  // representative gameplay frame, to inspect each buffer's content directly.
-  static const bool dumpAllRT = std::getenv("DELTA_GPU_DUMPALLRT") != nullptr;
-  static const int dumpAllRTFrame = [] {
-    const char *e = std::getenv("DELTA_GPU_DUMPALLRT_FRAME"); return e ? std::atoi(e) : 1500;
-  }();
-  // Trigger on a BAKE frame (a room buffer was rendered into) when DELTA_GPU_DUMPALLRT_BAKE
-  // is set, else a composite frame -- to capture the freshly-baked room buffers.
-  static const bool dumpOnBake = std::getenv("DELTA_GPU_DUMPALLRT_BAKE") != nullptr;
-  bool dumpTrigger = dumpOnBake ? g.frameRoomBake : (g.frameHadRoom && g.frameDraws > 8);
-  if (dumpAllRT && dumpTrigger && g.frameNum > dumpAllRTFrame)
-    dumpAllRTs();
-  // Capture the presented frame whenever the room was (re)baked this frame, so the
-  // composite is inspected on a frame where the room buffers are guaranteed current
-  // (not a stale persisted buffer). Numbered sequence (gameplay bakes are mixed with
-  // loading/transition bakes, so a few are captured to pick a real room from).
-  static const bool bakeSeq = std::getenv("DELTA_GPU_BAKESEQ") != nullptr;
-  static int bakeN = 0;
-  if (bakeSeq && g.frameRoomBake && g.frameDraws > 24 && bakeN < 16) {
-    char p[256];
-    std::snprintf(p, sizeof(p), "%s/gpu_bake_%02d_f%d.ppm", dumpDir(), bakeN++, g.frameNum);
-    writePpm(p, pixels, rt.w, rt.h);
-  }
 
   // Latch the gameplay signal once a run is clearly underway (sustained room
   // frames with real draw counts) so the headless autoskip stops opening menus
@@ -1712,15 +1487,6 @@ void endFrame(uint64_t scanoutBase) {
   }
   if (g_dump && g.frameNum >= 1000 && g.frameNum % 2000 == 0 && g.frameDraws > 0)
     dumpPpm(pixels, rt.w, rt.h);
-  // Early-frame sequence capture (DELTA_GPU_DUMP_EARLY): dump the first frames that
-  // draw to numbered files, to inspect the deterministic (no-input) intro start.
-  static const bool dumpEarly = std::getenv("DELTA_GPU_DUMP_EARLY") != nullptr;
-  static int earlyN = 0;
-  if (dumpEarly && earlyN < 60 && g.frameDraws > 0) {
-    char p[256];
-    std::snprintf(p, sizeof(p), "%s/early_%03d_f%d.ppm", dumpDir(), earlyN++, g.frameNum);
-    writePpm(p, pixels, rt.w, rt.h);
-  }
   // Rolling latest-frame capture (uncapped) so late transitions (menu/gameplay)
   // can be inspected from a long headless run without knowing the frame number.
   if (g_dump && g.frameNum % 300 == 0 && g.frameDraws > 0) {
