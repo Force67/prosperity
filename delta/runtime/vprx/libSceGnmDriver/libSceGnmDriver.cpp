@@ -3,17 +3,18 @@
  *
  * HLE libSceGnmDriver: the GPU command-submission entry points only.
  *
- * The real Sony module builds PM4 command buffers (which we keep LLE) but its
- * submit path hands them to a GPU command processor we don't emulate yet: the
- * LLE driver spawns a GPU worker that, with no real GPU/queue backing, jumps
- * through an unset completion pointer and crashes (then corrupts the kernel
- * object table). Until a GCN->Vulkan backend exists, override just the submit/
- * flip/done entry points so they "succeed": the game advances and we drive the
- * flip (present + flip event) through the VideoOut HLE. This is the graphics
- * exception to the keep-PRX-LLE rule: the GPU submit path is HLE'd.
+ * The game builds PM4 command buffers (which we keep LLE). The real Sony submit
+ * path hands them to a GPU command processor backed by hardware we don't have, so
+ * we HLE just the submit/flip/done entry points (the graphics exception to the
+ * keep-PRX-LLE rule). Each submit feeds the dcb/ccb to our GCN->Vulkan command
+ * processor (gpu::submitDcb/submitCcb -> PM4 decode -> recompiled shaders -> the
+ * headless Vulkan renderer); the *AndFlip variants additionally end the frame and
+ * drive the flip (present + flip event) through the VideoOut HLE.
  *
- * TODO(gpu): capture the dcb/ccb command buffers here and translate PM4 -> Vulkan
- * to actually render into the scanout buffer.
+ * The non-submitting entry points (SubmitDone/AreSubmitsAllowed/DingDong/
+ * FlushGarlic/InsertWaitFlipDone) are intentional no-ops: our submit is synchronous
+ * (the draws are already rendered when the call returns), so there is no async ring
+ * to ding-dong, no EOP to wait on, and no Garlic write-combine buffer to flush.
  */
 
 #include "libSceGnmDriver.h"
