@@ -324,7 +324,8 @@ struct StageCtx {
   Id sampImgTy = 0, pSampImg = 0;              // PS
   std::unordered_map<uint32_t, Id> inVars;     // PS
   uint32_t maxIn = 0;                           // PS
-  bool wroteColor = false;                      // PS
+  bool wroteColor = false;                      // PS (compile-time: shader has an exp)
+  Id colorWrittenVar = 0;  // PS (runtime per-lane: this fragment reached a color exp)
 };
 
 Id psInputVar(Tr &t, StageCtx &sc, uint32_t attr) {
@@ -495,6 +496,9 @@ void emitInst(Tr &t, const Inst &in, StageCtx &sc) {
             col = t.m.compositeConstruct(t.tV4, {c[0], c[1], c[2], c[3]});
           }
           t.m.store(sc.colorOut, col);
+          // Mark this fragment as having reached a color export, so the discard idiom
+          // (control flow that branches over the exp) can be lowered to OpKill.
+          if (sc.colorWrittenVar) t.m.store(sc.colorWrittenVar, t.m.constU32(1));
         }
       } else {
         if (target == 12) {  // POS0
@@ -660,15 +664,12 @@ bool translateVs(const uint32_t *vsCode, const uint32_t *vsUserData, Recompiled 
   std::unordered_map<uint32_t, Id> paramOuts;  // param index -> Output var
   bool haveCbuf = false;
 
-  // Branchy shaders take the CFG (while-switch) path; single-basic-block shaders
-  // keep the proven straight-line loop below. DELTA_GPU_SPIRV_CFG forces the CFG
-  // path (validates the machinery on single-BB shaders).
-  // CFG path is opt-in (DELTA_GPU_SPIRV_CFG) while its branch semantics are still
-  // WIP: it emits structurally-valid SPIR-V but the per-lane EXEC/branch model is
-  // not yet correct on real branchy shaders. Keeping it off the default
-  // DELTA_GPU_SPIRV path preserves that backend's verified single-BB parity.
+  // Branchy shaders take the CFG (while-switch) path so their control flow (the GCN
+  // alpha-test/discard idiom, conditional shading) is honoured; single-basic-block
+  // shaders keep the proven straight-line loop below. DELTA_GPU_SPIRV_CFG forces the
+  // CFG path even for single-BB shaders (machinery test).
   static const bool forceCfg = std::getenv("DELTA_GPU_SPIRV_CFG") != nullptr;
-  if (forceCfg) {
+  if (forceCfg || hasControlFlow(insts)) {
     StageCtx sc; sc.isPs = false; sc.r = &r; sc.iface = &iface; sc.posOut = posOut;
     t.seedExec();
     emitCFG(t, insts, sc);
@@ -822,15 +823,35 @@ bool translatePs(const uint32_t *psCode, Recompiled &r, Tr &t) {
   };
 
   static const bool forceCfgPs = std::getenv("DELTA_GPU_SPIRV_CFG") != nullptr;
-  if (forceCfgPs) {  // opt-in WIP; see translateVs note
-    StageCtx sc; sc.isPs = true; sc.r = &r; sc.iface = &iface; sc.colorOut = colorOutVar(0);
+  if (forceCfgPs || hasControlFlow(insts)) {  // branchy PS: honour control flow / discard
+    Id co = colorOutVar(0);
+    // Default the color to transparent so a fragment that never reaches an export
+    // leaves a defined value (not garbage) even if the discard lowering is bypassed.
+    t.m.store(co, t.m.constComposite(t.tV4,
+              {t.fconst(0.f), t.fconst(0.f), t.fconst(0.f), t.fconst(0.f)}));
+    StageCtx sc; sc.isPs = true; sc.r = &r; sc.iface = &iface; sc.colorOut = co;
     sc.sampImgTy = sampImgTy; sc.pSampImg = pSampImg;
+    sc.colorWrittenVar = t.m.variable(t.pPrivU, spv::StorageClass::Private, t.m.constNull(t.tU));
     t.seedExec();
     emitCFG(t, insts, sc);
-    if (!sc.wroteColor)
-      t.m.store(colorOutVar(0), t.m.constComposite(t.tV4,
+    if (!sc.wroteColor) {
+      // Shader has no export at all: opaque white fallback (matches the single-BB path).
+      t.m.store(co, t.m.constComposite(t.tV4,
                 {t.fconst(1.f), t.fconst(1.f), t.fconst(1.f), t.fconst(1.f)}));
-    t.m.returnVoid();
+      t.m.returnVoid();
+    } else {
+      // GCN alpha-test/kill idiom: control flow branches over the color export for
+      // failing fragments (e.g. s_cmp + s_cbranch_scc0 -> s_endpgm). Discard those
+      // (OpKill) instead of leaving the output undefined.
+      Id wrote = t.isNonZero(t.m.load(t.tU, sc.colorWrittenVar));
+      Id killBlk = t.m.newBlock(), afterKill = t.m.newBlock();
+      t.m.selectionMerge(afterKill);
+      t.m.branchConditional(wrote, afterKill, killBlk);
+      t.m.openBlock(killBlk);
+      t.m.kill();
+      t.m.openBlock(afterKill);
+      t.m.returnVoid();
+    }
     t.m.endFunction();
     t.m.entryPoint(spv::ExecutionModel::Fragment, main, "main", iface);
     t.m.execMode(main, spv::ExecutionMode::OriginUpperLeft);
@@ -933,6 +954,25 @@ bool recompileSpirv(const uint32_t *vsCode, const uint32_t *psCode,
                     const uint32_t *vsUserData, const uint32_t *psUserData,
                     Recompiled &r) {
   if (!vsCode || !psCode || !vsUserData || !psUserData) return false;
+  // One-shot disassembly (DELTA_GPU_SHDIS): for the first branchy shader, list each
+  // instruction's encoding + opcode so we can see which ops the CFG path must handle.
+  if (std::getenv("DELTA_GPU_SHDIS")) {
+    static int dn = 0;
+    auto dump = [&](const char *tag, const uint32_t *code) {
+      auto ins = decode(code, 4096);
+      if (!hasControlFlow(ins) || dn >= 2) return;
+      dn++;
+      static const char *encName[] = {"unk","sop1","sop2","sopk","sopc","sopp","smrd",
+        "vop1","vop2","vop3","vopc","vintrp","ds","mubuf","mtbuf","mimg","exp"};
+      std::fprintf(stderr, "[shdis] %s branchy, %zu insts:\n", tag, ins.size());
+      for (auto &in : ins)
+        std::fprintf(stderr, "[shdis]  pc=%u %s op=%#x w0=%#x w1=%#x\n", in.pc,
+                     encName[(int)in.enc <= 16 ? (int)in.enc : 0], in.opcode,
+                     in.raw[0], in.raw[1]);
+    };
+    dump("VS", vsCode);
+    dump("PS", psCode);
+  }
   // VS and PS are separate SPIR-V modules (separate Tr/Module each).
   Tr tv;
   if (!translateVs(vsCode, vsUserData, r, tv)) return false;
