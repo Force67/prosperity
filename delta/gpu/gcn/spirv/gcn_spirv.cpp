@@ -203,18 +203,23 @@ void emitVop1(Tr &t, uint32_t op, uint32_t vdst, Id s0) {
                   {t.ext1(GLSLstd450Floor, t.fadd(s0, t.fconst(0.5f)))}))); break;  // rpi
     case 0x0e: setU(t.m.bitcast(t.tU, t.m.emit(spv::Op::OpConvertFToS, t.tI,
                   {t.ext1(GLSLstd450Floor, s0)}))); break;               // flr
-    case 0x21: setF(t.ext1(GLSLstd450Fract, s0)); break;
-    case 0x22: setF(t.ext1(GLSLstd450Trunc, s0)); break;
-    case 0x23: setF(t.ext1(GLSLstd450Ceil, s0)); break;
-    case 0x24: setF(t.ext1(GLSLstd450RoundEven, s0)); break;
-    case 0x25: setF(t.ext1(GLSLstd450Floor, s0)); break;
-    case 0x2a: setF(t.ext1(GLSLstd450Exp2, s0)); break;
-    case 0x2c: setF(t.ext1(GLSLstd450Log2, s0)); break;
-    case 0x2d: case 0x2e: setF(t.fdiv(t.fconst(1.0f), s0)); break;       // rcp
-    case 0x2f: setF(t.ext1(GLSLstd450InverseSqrt, s0)); break;           // rsq
-    case 0x33: setF(t.ext1(GLSLstd450Sqrt, s0)); break;
-    case 0x35: setF(t.ext1(GLSLstd450Sin, s0)); break;
-    case 0x36: setF(t.ext1(GLSLstd450Cos, s0)); break;
+    // Transcendental/rounding ops, GFX6/7 (Liverpool / Sea Islands) VOP1 numbering. The
+    // earlier table used GFX8/9 numbers, so V_EXP_F32 (0x25) was decoded as floor and
+    // V_RCP_F32 (0x27) as a mov -- which collapsed any colour-processing shader (e.g. the
+    // scene->scanout composite's gamma: log2/mul/exp2) to black. These are the real
+    // opcodes the recompiler sees.
+    case 0x20: setF(t.ext1(GLSLstd450Fract, s0)); break;                 // V_FRACT_F32
+    case 0x21: setF(t.ext1(GLSLstd450Trunc, s0)); break;                 // V_TRUNC_F32
+    case 0x22: setF(t.ext1(GLSLstd450Ceil, s0)); break;                  // V_CEIL_F32
+    case 0x23: setF(t.ext1(GLSLstd450RoundEven, s0)); break;             // V_RNDNE_F32
+    case 0x24: setF(t.ext1(GLSLstd450Floor, s0)); break;                 // V_FLOOR_F32
+    case 0x25: setF(t.ext1(GLSLstd450Exp2, s0)); break;                  // V_EXP_F32
+    case 0x26: setF(t.ext1(GLSLstd450Log2, s0)); break;                  // V_LOG_F32
+    case 0x27: case 0x28: setF(t.fdiv(t.fconst(1.0f), s0)); break;       // V_RCP[_IFLAG]_F32
+    case 0x29: setF(t.ext1(GLSLstd450InverseSqrt, s0)); break;           // V_RSQ_F32
+    case 0x2e: setF(t.ext1(GLSLstd450Sqrt, s0)); break;                  // V_SQRT_F32
+    case 0x30: setF(t.ext1(GLSLstd450Sin, s0)); break;                   // V_SIN_F32
+    case 0x31: setF(t.ext1(GLSLstd450Cos, s0)); break;                   // V_COS_F32
     default: setU(t.m.bitcast(t.tU, s0)); break;                         // mov fallback
   }
 }
