@@ -45,7 +45,14 @@ struct DrawInfo {
   uint32_t instanceCount = 1;  // from IT_NUM_INSTANCES (tilemaps draw instanced)
   float mvp[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
   uint64_t rtBase = 0;         // CB_COLOR0 address; the draw's render target
-  uint32_t rtW = 0, rtH = 0;   // render-target dimensions
+  uint32_t rtW = 0, rtH = 0;   // render-target dimensions (shared by all MRT targets)
+
+  // Multiple render targets (CB_COLOR0..7). mrtBase[0] mirrors rtBase. A target is
+  // bound when its CB_TARGET_MASK nibble is non-zero and its base is a valid guest
+  // address; mrtCount is highest-bound-index + 1 (1 for the common single-RT case,
+  // so the renderer's single-attachment path is unchanged). All targets share rtW/rtH.
+  uint64_t mrtBase[8] = {0};
+  uint32_t mrtCount = 1;
 
   // Texturing (optional). If texBase != 0 the draw is textured: uvData holds the
   // float2 UVs (same vertexCount/stride as the position buffer's source).

@@ -4,10 +4,10 @@
  * PS4Delta : PS4 emulation and research project
  *
  * GCN (GFX6/7 "Liverpool") shader recompiler. Translates a guest vertex + pixel
- * shader pair to GLSL (compiled to SPIR-V at runtime via shaderc), plus a resource
- * binding plan the renderer uses to wire the real vertex buffers / constant buffers
- * / textures from the guest at draw time. Replaces the old heuristic quad path with
- * the shaders the game actually runs.
+ * shader pair directly to SPIR-V (a register-VM model cleaned up by spirv-opt), plus
+ * a resource binding plan the renderer uses to wire the real vertex buffers /
+ * constant buffers / textures from the guest at draw time. Replaces the old heuristic
+ * quad path with the shaders the game actually runs.
  *
  * Scope: the straight-line VS/PS patterns 2D titles like Isaac use (vertex fetch +
  * MVP transform + export; interpolate + texture sample + modulate + export). Control
@@ -49,6 +49,7 @@ struct Recompiled {
   std::vector<ShaderCbuf> vsCbufs; // VS UBOs (set 0, binding = .binding)
   std::vector<ShaderTex> psTexs;   // PS samplers (set 0, binding = .binding)
   uint32_t numParams = 0;          // VS->PS interpolants (locations 0..numParams-1)
+  uint8_t psMrtMask = 0;           // bit n set = PS exports to MRT color target n (0..7)
 };
 
 // Recompile a VS+PS pair. vsCode/psCode are guest pointers to the GCN code; the

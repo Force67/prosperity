@@ -60,7 +60,9 @@ struct State {
   void *readbackMap = nullptr;
   VkDeviceSize readbackSize = 0;
 
-  uint64_t curRt = 0;   // RT currently in a dynamic-rendering region (0 = none)
+  uint64_t curRt = 0;   // primary RT (MRT0) of the open region (0 = none)
+  uint64_t curMrt[8] = {0};   // all color targets bound in the open region
+  uint32_t curMrtCount = 0;   // how many of curMrt[] are bound
   uint64_t lastRt = 0;  // last RT rendered to (present fallback)
   uint64_t busiestRt = 0;
   uint32_t busiestRtDraws = 0;
@@ -826,45 +828,62 @@ uint64_t resolveSampledRT(uint64_t addr, uint32_t w, uint32_t h) {
   return best;
 }
 
-// End the current dynamic-rendering region (if any), leaving its RT readable.
+// End the current dynamic-rendering region (if any), leaving its RTs readable.
 void endRegion() {
   if (!g.curRt) return;
   p_vkCmdEndRendering(g.cmd);
-  auto &rt = g_rts[g.curRt];
-  imageBarrier(g.cmd, rt.image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-               VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
-  rt.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+  for (uint32_t i = 0; i < g.curMrtCount; i++) {
+    auto it = g_rts.find(g.curMrt[i]);
+    if (it == g_rts.end()) continue;
+    auto &rt = it->second;
+    imageBarrier(g.cmd, rt.image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                 VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
+    rt.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+  }
   g.curRt = 0;
+  g.curMrtCount = 0;
 }
 
-// Begin a dynamic-rendering region on `rt` (clear on first use this frame).
-void beginRegion(uint64_t base, RTarget &rt) {
-  VkImageLayout from = rt.layout;
-  imageBarrier(g.cmd, rt.image, from, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-               0, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
-  rt.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-  VkRenderingAttachmentInfo color{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
-  color.imageView = rt.view;
-  color.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-  // Lazy clear (DELTA_GPU_LAZYCLEAR, default on): persist RT content across frames
-  // (LOAD), clearing only when the game explicitly requested a clear (clearPending) or
-  // the RT was never rendered. The old per-frame auto-clear wiped baked-once content
-  // (room floor) whose redraw lands on a different frame than its clear.
+// Begin a dynamic-rendering region binding mrtCount color targets (mrtBase[0] is the
+// primary). The common single-RT case (mrtCount == 1) binds exactly one attachment.
+void beginRegion(const uint64_t *mrtBase, uint32_t mrtCount, uint32_t w, uint32_t h) {
   static const bool lazyClear = [] { const char *e = std::getenv("DELTA_GPU_LAZYCLEAR");
     return !e || std::strcmp(e, "0") != 0; }();
-  if (lazyClear)
-    color.loadOp = (rt.clearPending || !rt.everRendered) ? VK_ATTACHMENT_LOAD_OP_CLEAR
-                                                         : VK_ATTACHMENT_LOAD_OP_LOAD;
-  else
-    color.loadOp = rt.usedThisFrame ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_CLEAR;
-  rt.clearPending = false;
-  rt.everRendered = true;
-  color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-  color.clearValue.color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+  VkRenderingAttachmentInfo colors[8]{};
+  g.curMrtCount = 0;
+  for (uint32_t i = 0; i < mrtCount && i < 8; i++) {
+    RTarget *rtp = getRT(mrtBase[i], w, h);
+    RTarget &rt = *rtp;
+    imageBarrier(g.cmd, rt.image, rt.layout, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                 0, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
+    rt.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    auto &color = colors[i];
+    color.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+    color.imageView = rt.view;
+    color.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    // Lazy clear (DELTA_GPU_LAZYCLEAR, default on): persist RT content across frames
+    // (LOAD), clearing only when the game explicitly requested a clear (clearPending) or
+    // the RT was never rendered. The old per-frame auto-clear wiped baked-once content
+    // (room floor) whose redraw lands on a different frame than its clear.
+    if (lazyClear)
+      color.loadOp = (rt.clearPending || !rt.everRendered) ? VK_ATTACHMENT_LOAD_OP_CLEAR
+                                                           : VK_ATTACHMENT_LOAD_OP_LOAD;
+    else
+      color.loadOp = rt.usedThisFrame ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_CLEAR;
+    rt.clearPending = false;
+    rt.everRendered = true;
+    color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    color.clearValue.color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+    rt.usedThisFrame = true;
+    rt.lastFrame = g.frameNum;
+    g.curMrt[g.curMrtCount++] = mrtBase[i];
+  }
+  RTarget &rt = *getRT(mrtBase[0], w, h);
+  uint64_t base = mrtBase[0];
   VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
   ri.renderArea = {{0, 0}, {rt.w, rt.h}};
-  ri.layerCount = 1; ri.colorAttachmentCount = 1; ri.pColorAttachments = &color;
+  ri.layerCount = 1; ri.colorAttachmentCount = g.curMrtCount; ri.pColorAttachments = colors;
   p_vkCmdBeginRendering(g.cmd, &ri);
   // Negative-height (y-up) viewport: GCN/PS4 rasterises y-up, so we do too. This
   // stores render-target content in the game's orientation, so render-to-texture
@@ -883,9 +902,9 @@ void beginRegion(uint64_t base, RTarget &rt) {
   g.lastRt = base;
   static const bool regTrace = std::getenv("DELTA_GPU_REGTRACE") != nullptr;
   if (regTrace && rt.w < 1280)
-    std::fprintf(stderr, "[reg] f%d begin RT %#lx %ux%u clear=%d\n", g.frameNum,
-                 (unsigned long)base, rt.w, rt.h,
-                 color.loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR);
+    std::fprintf(stderr, "[reg] f%d begin RT %#lx %ux%u mrt=%u clear=%d\n", g.frameNum,
+                 (unsigned long)base, rt.w, rt.h, g.curMrtCount,
+                 colors[0].loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR);
 }
 
 void writePpm(const char *path, const uint8_t *bgra, uint32_t w, uint32_t h) {
@@ -956,9 +975,10 @@ VkShaderModule makeModuleVec(const std::vector<uint32_t> &spv) {
 // Build (or fetch) the pipeline for a recompiled draw, keyed by the shader pair +
 // blend state + vertex layout.
 RecompPipe *getRecompPipe(const DrawInfo &d) {
+  uint32_t mrtN = d.mrtCount ? (d.mrtCount > 8 ? 8 : d.mrtCount) : 1;
   uint64_t key = d.vsAddr * 0x9e3779b97f4a7c15ull ^ d.psAddr ^
                  ((uint64_t)(d.blendEnable ? (d.blendControl & 0x7FFFFFFFu) : 0) << 1) ^
-                 ((uint64_t)d.vertexStride << 33);
+                 ((uint64_t)d.vertexStride << 33) ^ ((uint64_t)mrtN << 60);
   auto it = g_recompPipes.find(key);
   if (it != g_recompPipes.end()) return &it->second;
   RecompPipe rp;
@@ -997,14 +1017,23 @@ RecompPipe *getRecompPipe(const DrawInfo &d) {
   VkPipelineMultisampleStateCreateInfo ms{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
   ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
   VkPipelineDepthStencilStateCreateInfo dss{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+  // One blend attachment per bound MRT target (same blend for all; targets the PS does
+  // not export to are write-masked off so they keep their loaded content).
+  VkPipelineColorBlendAttachmentState cbAtt[8];
   VkPipelineColorBlendAttachmentState cba = blendAttachment(d.blendControl, d.blendEnable);
+  for (uint32_t i = 0; i < mrtN; i++) {
+    cbAtt[i] = cba;
+    if (i && !(d.recomp->psMrtMask & (1u << i))) cbAtt[i].colorWriteMask = 0;
+  }
   VkPipelineColorBlendStateCreateInfo cb{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
-  cb.attachmentCount = 1; cb.pAttachments = &cba;
+  cb.attachmentCount = mrtN; cb.pAttachments = cbAtt;
   VkDynamicState dyns[2] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
   VkPipelineDynamicStateCreateInfo dy{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
   dy.dynamicStateCount = 2; dy.pDynamicStates = dyns;
+  VkFormat fmts[8];
+  for (uint32_t i = 0; i < mrtN; i++) fmts[i] = g.rtFormat;
   VkPipelineRenderingCreateInfo rci{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
-  rci.colorAttachmentCount = 1; rci.pColorAttachmentFormats = &g.rtFormat;
+  rci.colorAttachmentCount = mrtN; rci.pColorAttachmentFormats = fmts;
   VkGraphicsPipelineCreateInfo pi{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
   pi.pNext = &rci; pi.stageCount = 2; pi.pStages = stages;
   pi.pVertexInputState = &vi; pi.pInputAssemblyState = &ia; pi.pViewportState = &vp;
@@ -1143,9 +1172,11 @@ bool drawRecomp(const DrawInfo &d) {
   if (i32) std::memcpy(idst, i32, (size_t)d.indexCount * 4);
   else for (uint32_t i = 0; i < d.indexCount; i++) idst[i] = i16[i];
 
-  // Switch render target (same logic as the heuristic path). Barrier the sampled RT
-  // readable here, outside any render region.
-  if (g.curRt != d.rtBase) {
+  // Switch render target. Re-begin when the primary target or the MRT count changes
+  // (the open region's attachment count must match the pipeline's). Barrier the sampled
+  // RT readable here, outside any render region.
+  uint32_t mrtN = d.mrtCount ? (d.mrtCount > 8 ? 8 : d.mrtCount) : 1;
+  if (g.curRt != d.rtBase || g.curMrtCount != mrtN) {
     endRegion();
     if (rtAsTex) {
       auto &src = g_rts[texBase];
@@ -1157,7 +1188,7 @@ bool drawRecomp(const DrawInfo &d) {
     }
     RTarget *rt = getRT(d.rtBase, d.rtW, d.rtH);
     if (!rt) return true;  // RT cap hit: treat as handled (dropped)
-    beginRegion(d.rtBase, *rt);
+    beginRegion(d.mrtBase, mrtN, d.rtW, d.rtH);
   }
   if (rtAsTex) {
     auto &src = g_rts[texBase];
@@ -1303,8 +1334,9 @@ void draw(const DrawInfo &d) {
   if (d.texBase && g.texPipeline && !rtAsTex)
     texSet = getTexture(d.texBase, d.texW, d.texH, d.texTiling, d.texPitch);
 
-  // Switch render target if this draw targets a different RT than the open region.
-  if (g.curRt != d.rtBase) {
+  // Switch render target if this draw targets a different RT than the open region (or
+  // the open region is multi-target: the heuristic path renders to a single attachment).
+  if (g.curRt != d.rtBase || g.curMrtCount != 1) {
     endRegion();
     if (rtAsTex) {  // make the sampled RT shader-readable before we render
       auto &src = g_rts[texBase];
@@ -1317,7 +1349,7 @@ void draw(const DrawInfo &d) {
     }
     RTarget *rt = getRT(d.rtBase, d.rtW, d.rtH);
     if (!rt) { g.frameDraws++; return; }
-    beginRegion(d.rtBase, *rt);
+    beginRegion(d.mrtBase, 1, d.rtW, d.rtH);  // heuristic path is single-RT
   }
   if (rtAsTex && g_rts[texBase].layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
     texSet = g_rts[texBase].set;

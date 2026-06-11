@@ -782,10 +782,20 @@ bool translateVs(const uint32_t *vsCode, const uint32_t *vsUserData, Recompiled 
 bool translatePs(const uint32_t *psCode, Recompiled &r, Tr &t) {
   auto insts = decode(psCode, 4096);
   std::vector<Id> iface;
-  Id colorOut = t.m.variable(t.m.typePointer(spv::StorageClass::Output, t.tV4),
-                             spv::StorageClass::Output);
-  t.m.decorate(colorOut, spv::Decoration::Location, {0});
-  iface.push_back(colorOut);
+  // Color outputs are declared lazily per MRT target (location == target index), so a
+  // shader exporting to MRT0..7 produces a multi-attachment fragment output. Most 2D
+  // titles only export MRT0 -> a single location-0 output (identical to a single RT).
+  Id colorOuts[8] = {0};
+  Id pV4Out = t.m.typePointer(spv::StorageClass::Output, t.tV4);
+  auto colorOutVar = [&](uint32_t target) -> Id {
+    if (colorOuts[target]) return colorOuts[target];
+    Id v = t.m.variable(pV4Out, spv::StorageClass::Output);
+    t.m.decorate(v, spv::Decoration::Location, {target});
+    iface.push_back(v);
+    colorOuts[target] = v;
+    r.psMrtMask |= (uint8_t)(1u << target);
+    return v;
+  };
 
   // Sampled-image type for any texture.
   Id imgTy = t.m.typeImage(t.tF, spv::Dim::Dim2D, 0, 0, 0, 1, spv::ImageFormat::Unknown);
@@ -813,12 +823,12 @@ bool translatePs(const uint32_t *psCode, Recompiled &r, Tr &t) {
 
   static const bool forceCfgPs = std::getenv("DELTA_GPU_SPIRV_CFG") != nullptr;
   if (forceCfgPs) {  // opt-in WIP; see translateVs note
-    StageCtx sc; sc.isPs = true; sc.r = &r; sc.iface = &iface; sc.colorOut = colorOut;
+    StageCtx sc; sc.isPs = true; sc.r = &r; sc.iface = &iface; sc.colorOut = colorOutVar(0);
     sc.sampImgTy = sampImgTy; sc.pSampImg = pSampImg;
     t.seedExec();
     emitCFG(t, insts, sc);
     if (!sc.wroteColor)
-      t.m.store(colorOut, t.m.constComposite(t.tV4,
+      t.m.store(colorOutVar(0), t.m.constComposite(t.tV4,
                 {t.fconst(1.f), t.fconst(1.f), t.fconst(1.f), t.fconst(1.f)}));
     t.m.returnVoid();
     t.m.endFunction();
@@ -885,7 +895,7 @@ bool translatePs(const uint32_t *psCode, Recompiled &r, Tr &t) {
       case Enc::exp: {
         uint32_t en = w & 0xF, target = (w >> 4) & 0x3F, compr = (w >> 10) & 1;
         uint32_t v[4] = {w1 & 0xFF, (w1 >> 8) & 0xFF, (w1 >> 16) & 0xFF, (w1 >> 24) & 0xFF};
-        if (target <= 7) {  // MRT0
+        if (target <= 7) {  // MRT0..7
           wroteColor = true;
           Id col;
           if (compr) {
@@ -898,7 +908,7 @@ bool translatePs(const uint32_t *psCode, Recompiled &r, Tr &t) {
               comps[i] = (en & (1 << i)) ? t.ldVgF(v[i]) : t.fconst(i == 3 ? 1.0f : 0.0f);
             col = t.m.compositeConstruct(t.tV4, {comps[0], comps[1], comps[2], comps[3]});
           }
-          t.m.store(colorOut, col);
+          t.m.store(colorOutVar(target), col);
         }
         break;
       }
@@ -907,7 +917,7 @@ bool translatePs(const uint32_t *psCode, Recompiled &r, Tr &t) {
     if (in.enc == Enc::sopp && in.opcode == 1) break;
   }
   if (!wroteColor)
-    t.m.store(colorOut, t.m.constComposite(t.tV4,
+    t.m.store(colorOutVar(0), t.m.constComposite(t.tV4,
               {t.fconst(1.f), t.fconst(1.f), t.fconst(1.f), t.fconst(1.f)}));
 
   t.m.returnVoid();

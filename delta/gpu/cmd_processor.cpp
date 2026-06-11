@@ -82,18 +82,6 @@ void dumpHist() {
 void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
   uint64_t vsA = g_regs.shaderAddr(mmSPI_SHADER_PGM_LO_VS);
   uint64_t psA = g_regs.shaderAddr(mmSPI_SHADER_PGM_LO_PS);
-  // One-time: recompile the first VS/PS pair to GLSL and print it (DELTA_GPU_SHTRACE),
-  // to validate the GCN->GLSL translator before wiring it into the pipeline.
-  static bool g_shTried = false;
-  if (std::getenv("DELTA_GPU_SHTRACE") && !g_shTried &&
-      vsA >= 0x1000000000ull && vsA < 0x20000000000ull &&
-      psA >= 0x1000000000ull && psA < 0x20000000000ull) {
-    g_shTried = true;
-    gcn::recompile(reinterpret_cast<const uint32_t *>(vsA),
-                   reinterpret_cast<const uint32_t *>(psA),
-                   &g_regs[mmSPI_SHADER_USER_DATA_VS_0],
-                   &g_regs[mmSPI_SHADER_USER_DATA_PS_0]);
-  }
   // One-time: find the first PS that samples a texture (has an MIMG instruction)
   // and dump how it loads its resources, so we can wire texture sampling.
   static bool g_texProbed = false;
@@ -150,6 +138,21 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
     d.rtBase = g_regs.cbColorBase(0);
     d.rtW = fbWidth();
     d.rtH = fbHeight();
+    d.mrtBase[0] = d.rtBase;
+    // Multiple render targets: CB_COLOR1..7. A target is bound when its CB_TARGET_MASK
+    // nibble (4 bits per MRT) is set AND its base is a valid guest address. mrtCount is
+    // the highest bound index + 1 (stays 1 for the usual single-RT case).
+    {
+      uint32_t tmask = g_regs[mmCB_TARGET_MASK];
+      for (int rt = 1; rt < 8; rt++) {
+        uint64_t base = g_regs.cbColorBase(rt);
+        if (((tmask >> (rt * 4)) & 0xF) && base >= 0x1000000000ull &&
+            base < 0x20000000000ull) {
+          d.mrtBase[rt] = base;
+          d.mrtCount = rt + 1;
+        }
+      }
+    }
 
     // Per-draw blend state from CB_BLEND0_CONTROL. Bit 30 is the per-target blend
     // enable; when clear the draw writes opaquely (no blend). Isaac's room
@@ -212,74 +215,6 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
         // d.uvOffset was derived from the fetch shader during vertex extraction.
       }
     }
-    // Floor trace (DELTA_GPU_FLOORTRACE): log draws into a room-sized (~832w) RT,
-    // including DROPPED ones (no vertex data), to find why the room floor (the
-    // large centre fill) is missing while the walls render.
-    static const bool floorTrace = std::getenv("DELTA_GPU_FLOORTRACE") != nullptr;
-    static int g_floorN = 0;
-    if (floorTrace && d.rtW >= 700 && d.rtW <= 900 && g_floorN < 60) {
-      g_floorN++;
-      // For a textured floor draw, sample the texture: count non-zero pixels and
-      // the uv range, and one-time dump the raw bytes so the texture content
-      // (black/unloaded vs garbled/tiled vs dark) can be inspected.
-      int nz = 0; float uvmin = 1e9f, uvmax = -1e9f;
-      if (d.texBase >= 0x1000000000ull && d.texW && d.texH) {
-        auto *px = reinterpret_cast<const uint32_t *>(d.texBase);
-        uint64_t cnt = (uint64_t)d.texW * d.texH, step = cnt > 4096 ? cnt / 4096 : 1;
-        for (uint64_t i = 0; i < cnt; i += step) if (px[i] & 0x00FFFFFF) nz++;
-        if (d.uvData) {
-          auto *vb = static_cast<const uint8_t *>(d.uvData);
-          for (uint32_t v = 0; v < d.vertexCount && v < 64; v++) {
-            auto *u = reinterpret_cast<const float *>(vb + (size_t)v * d.uvStride + d.uvOffset);
-            uvmin = u[0] < uvmin ? u[0] : uvmin; uvmax = u[0] > uvmax ? u[0] : uvmax;
-            uvmin = u[1] < uvmin ? u[1] : uvmin; uvmax = u[1] > uvmax ? u[1] : uvmax;
-          }
-        }
-        static bool dumped = false;
-        if (!dumped && d.texW == 512 && d.texH == 512) {
-          dumped = true;
-          FILE *f = std::fopen("/tmp/floor_tex.bin", "wb");
-          if (f) { std::fwrite(px, 1, (size_t)d.texW * d.texH * 4, f); std::fclose(f); }
-        }
-      }
-      // NDC bounds of the floor geometry (apply the extracted MVP), to tell a
-      // wrong-MVP (off-screen / degenerate) from a sampling problem.
-      float nx0=1e9f,ny0=1e9f,nx1=-1e9f,ny1=-1e9f;
-      if (d.vertexData) {
-        auto *vb = static_cast<const uint8_t *>(d.vertexData);
-        const float *m = d.mvp;
-        for (uint32_t v = 0; v < d.vertexCount && v < 64; v++) {
-          auto *p = reinterpret_cast<const float *>(vb + (size_t)v * d.vertexStride);
-          float cw = m[3]*p[0]+m[7]*p[1]+m[15]; if (cw==0) cw=1;
-          float ndx=(m[0]*p[0]+m[4]*p[1]+m[12])/cw, ndy=(m[1]*p[0]+m[5]*p[1]+m[13])/cw;
-          nx0=ndx<nx0?ndx:nx0; nx1=ndx>nx1?ndx:nx1; ny0=ndy<ny0?ndy:ny0; ny1=ndy>ny1?ndy:ny1;
-        }
-      }
-      std::fprintf(stderr, "[floor] rt=%#lx %ux%u stride=%u nrec=%u uvOff=%u tex=%#lx "
-                   "%ux%u nz=%d/4096 uv[%.2f..%.2f] ndc[%.2f,%.2f..%.2f,%.2f] "
-                   "mvp=[%.3f %.3f %.3f] blend=%#x\n",
-                   (unsigned long)d.rtBase, d.rtW, d.rtH, d.vertexStride,
-                   d.vertexCount, d.uvOffset, (unsigned long)d.texBase, d.texW, d.texH,
-                   nz, uvmin, uvmax, nx0,ny0,nx1,ny1, d.mvp[0],d.mvp[5],d.mvp[12],
-                   d.blendControl);
-    }
-    static int g_uvDbg = 0;
-    if (g_trace && d.texBase && g_uvDbg < 3 && d.vertexData) {
-      g_uvDbg++;
-      std::fprintf(stderr, "[gpu] TEX draw tex=%#lx %ux%u nv=%u posStride=%u "
-                   "uvStride=%u\n", (unsigned long)d.texBase, d.texW, d.texH,
-                   d.vertexCount, d.vertexStride, d.uvStride);
-      auto *ps = reinterpret_cast<const float *>(d.vertexData);
-      auto *uv = reinterpret_cast<const float *>(d.uvData);
-      std::fprintf(stderr, "[gpu]   VB0 base=%p VB1 base=%p\n", d.vertexData, d.uvData);
-      for (uint32_t v = 0; v < 4; v++) {
-        std::fprintf(stderr, "[gpu]   v%u VB0[", v);
-        for (int c = 0; c < 16; c++) std::fprintf(stderr, "%g ", ps[v*16+c]);
-        std::fprintf(stderr, "] VB1[");
-        if (uv) for (int c = 0; c < 16; c++) std::fprintf(stderr, "%g ", uv[v*16+c]);
-        std::fprintf(stderr, "]\n");
-      }
-    }
     // Recompiled-shader path: recompile the VS/PS pair (cached) and resolve the
     // live vertex-attribute buffers, so the renderer can run the game's actual
     // shaders. The heuristic fields above stay populated as the fallback.
@@ -301,7 +236,6 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
       gcn::Recompiled &rc = it->second;
       if (rc.ok && !rc.attrs.empty()) {
         const uint32_t *vud2 = &g_regs[mmSPI_SHADER_USER_DATA_VS_0];
-        const void *heurVtx0 = d.vertexData; uint32_t heurStride0 = d.vertexStride;
         uint64_t base0 = 0;
         bool good = true;
         for (size_t i = 0; i < rc.attrs.size() && i < 8; i++) {
@@ -314,15 +248,6 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
             d.vertexStride = vb.stride; d.vertexCount = vb.numRecords; }
           uint32_t off = (vb.base >= base0) ? (uint32_t)(vb.base - base0) : 0;
           d.vattrs[d.nvattrs++] = {a.location, off, a.numComps, vb.dfmt, vb.nfmt};
-          static int rcvN = 0;
-          if (std::getenv("DELTA_GPU_SHTRACE") && rcvN < 16) {
-            rcvN++;
-            std::fprintf(stderr, "[rcv] attr%zu loc=%u tblSgpr=%u dwOff=%u tbl=%#lx "
-                         "vb.base=%#lx stride=%u nrec=%u dfmt=%u off=%u | heurVtx=%p heurStride=%u\n",
-                         i, a.location, a.tableSgpr, a.vbufDwordOff, (unsigned long)tbl,
-                         (unsigned long)vb.base, vb.stride, vb.numRecords, vb.dfmt, off,
-                         heurVtx0, heurStride0);
-          }
         }
         if (good && d.nvattrs) { d.vsAddr = vsA; d.psAddr = psA; d.recomp = &rc; }
         else d.nvattrs = 0;
@@ -331,51 +256,6 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
     if (!g_frameActive) {
       vk::beginFrame();
       g_frameActive = true;
-    }
-    // All-draws map (DELTA_GPU_ALLDRAWS): once a busy frame (>15 draws into a room-
-    // sized RT) starts, log every draw's target RT, texture, vert/index count and
-    // shader for two frames, to see the complete layer structure (which RT the
-    // floor fill targets).
-    static const bool allDraws = std::getenv("DELTA_GPU_ALLDRAWS") != nullptr;
-    static int adFrame = 0, adSeen = 0;
-    if (allDraws) {
-      if (d.rtW >= 700 && d.rtW <= 900) adSeen++;
-      if (adSeen >= 1 && adFrame < 80) {
-        adFrame++;
-        std::fprintf(stderr, "[ad] rt=%#lx %ux%u vs=%#lx tex=%#lx %ux%u nattr=%u stride=%u "
-                     "ic=%u vc=%u prim=%u inst=%u\n",
-                     (unsigned long)d.rtBase, d.rtW, d.rtH, (unsigned long)vsA,
-                     (unsigned long)d.texBase, d.texW, d.texH, d.nvattrs, d.vertexStride,
-                     d.indexCount, d.vertexCount, d.primType, d.instanceCount);
-      }
-    }
-    // Dropped-draw trace (DELTA_GPU_DROPS): log draws we can't issue (no vertex
-    // data resolved from the fetch shader) once gameplay is up, to find a missing
-    // floor fill that never reaches the renderer.
-    if (!d.vertexData && std::getenv("DELTA_GPU_DROPS")) {
-      static int dn = 0;
-      if (dn++ < 60)
-        std::fprintf(stderr, "[drop] vs=%#lx ps=%#lx rt=%#lx %ux%u ic=%u prim=%u fetch=%#lx\n",
-                     (unsigned long)vsA, (unsigned long)psA, (unsigned long)d.rtBase,
-                     d.rtW, d.rtH, d.indexCount, d.primType, (unsigned long)fetch);
-    }
-    // RT-target census (DELTA_GPU_RTCENSUS): tally draw targets by size and whether
-    // they carry vertex data (drawn) or are dropped. Reveals whether the room-layer
-    // buffers the scene composite samples (e.g. 448x320, 704x448) are ever rendered
-    // into, or whether their floor draws are dropped (no vertex data resolved).
-    static const bool rtCensus = std::getenv("DELTA_GPU_RTCENSUS") != nullptr;
-    if (rtCensus && d.rtW && d.rtH) {
-      static std::map<uint32_t, std::pair<uint32_t,uint32_t>> hist;  // size -> {drawn, dropped}
-      static uint64_t cn = 0;
-      uint32_t key = (d.rtW << 16) | (d.rtH & 0xFFFF);
-      if (d.vertexData) hist[key].first++; else hist[key].second++;
-      if ((++cn % 6000) == 0) {
-        std::fprintf(stderr, "[rtcensus] cn=%lu (size: drawn/dropped):", (unsigned long)cn);
-        for (auto &kv : hist)
-          std::fprintf(stderr, " %ux%u:%u/%u", kv.first >> 16, kv.first & 0xFFFF,
-                       kv.second.first, kv.second.second);
-        std::fprintf(stderr, "\n");
-      }
     }
     if (d.vertexData)
       vk::draw(d);
