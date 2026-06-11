@@ -1081,9 +1081,16 @@ bool drawRecomp(const DrawInfo &d) {
   bool rtAsTex = texBase && texBase != d.rtBase && g_rts.count(texBase);
   uint32_t srcW = rtAsTex ? g_rts[texBase].w : 0;
   bool roomSrc = rtAsTex && srcW >= 700 && srcW <= 900;
-  // The fullscreen scene->scanout composite (large source) stays on the heuristic
-  // path: it relies on the forced-opaque (alpha=1) blit; running it through the real
-  // shader blacks the scanout.
+  // The room (700-900) and fullscreen scene->scanout (>=1280) composites stay on the
+  // heuristic path. The scanout composite is a trivial 1:1 blit (verified via COMPDIAG:
+  // one image_sample + one export, no branches, src*ONE+dst*ZERO replace blend, sampling
+  // a fully-rendered scene RT) -- the heuristic's opaque blit produces the identical
+  // result, so there is no shading to gain by running the game's copy shader, and routing
+  // it through the recompiled path instead regresses the scanout to black (the copy VS's
+  // fullscreen quad mis-transforms under our shared MVP push-constant). All MEANINGFUL
+  // shading (sprites incl. the alpha-test discard via the CFG path, geometry, colour, HUD)
+  // already runs through the real recompiled shaders; only this final framebuffer copy is
+  // an internal blit.
   bool fsSrc = rtAsTex && srcW >= 1280;
   if (texBase && texBase == d.rtBase) return false;
   if (rtAsTex && (roomSrc || fsSrc || !recompComposite)) return false;
