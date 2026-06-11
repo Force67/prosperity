@@ -164,8 +164,9 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
     d.targetMask = g_regs[mmCB_TARGET_MASK];
     d.colorControl = g_regs[mmCB_COLOR_CONTROL];
 
-    // MVP matrix: the VS sgpr[4..7] V# points at the constant buffer whose first
-    // 16 floats are the transform (s_buffer_load_dwordx16 in the VS).
+    // Constant buffer (transform): default to the sgpr[4..7] V# (the common VS cbuffer
+    // slot); the recompiled-shader path below re-resolves it from the SGPR the VS
+    // actually reads (rc.vsCbufs) when that differs.
     uint64_t cbuf = (static_cast<uint64_t>(vud[5] & 0xFFFF) << 32) | vud[4];
     if (cbuf >= 0x1000000000ull && cbuf < 0x20000000000ull)
       std::memcpy(d.mvp, reinterpret_cast<const void *>(cbuf), 64);
@@ -248,6 +249,20 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
             d.vertexStride = vb.stride; d.vertexCount = vb.numRecords; }
           uint32_t off = (vb.base >= base0) ? (uint32_t)(vb.base - base0) : 0;
           d.vattrs[d.nvattrs++] = {a.location, off, a.numComps, vb.dfmt, vb.nfmt};
+        }
+        // Constant buffer: the recompiled VS reads its cbuffer via push constants, so
+        // resolve it from the user-data SGPR the VS ACTUALLY uses (recorded in vsCbufs)
+        // rather than the hardcoded sgpr[4..7] above. For the common sprite VS this is
+        // sgpr 4 (identical to the default), but shaders whose cbuffer V# lives elsewhere
+        // (e.g. composite/post-process VS) then get the correct transform instead of the
+        // wrong one -- the general fix, not an Isaac special-case.
+        if (good && d.nvattrs && !rc.vsCbufs.empty()) {
+          uint32_t cbSgpr = rc.vsCbufs[0].udSgpr;
+          if (cbSgpr + 1 < 16) {
+            uint64_t vbase = (static_cast<uint64_t>(vud2[cbSgpr + 1] & 0xFFFF) << 32) | vud2[cbSgpr];
+            if (vbase >= 0x1000000000ull && vbase < 0x20000000000ull)
+              std::memcpy(d.mvp, reinterpret_cast<const void *>(vbase), 64);
+          }
         }
         if (good && d.nvattrs) { d.vsAddr = vsA; d.psAddr = psA; d.recomp = &rc; }
         else d.nvattrs = 0;
