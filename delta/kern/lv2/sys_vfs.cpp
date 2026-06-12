@@ -62,7 +62,7 @@ int PS4ABI sys_open(const char *path, uint32_t flags, uint32_t mode) {
 
       if (!dev->init(name, flags, mode)) {
         dev->releaseHandle();
-        return -1;
+        return -SysError::eNXIO;
       }
 
       return dev->handle();
@@ -130,6 +130,8 @@ int PS4ABI sys_fstat(uint32_t fd, void *stat) {
 }
 
 int PS4ABI sys_stat(const char *path, void *stat) {
+  if (!path || !stat)
+    return -SysError::eFAULT;
   int64_t size = 0;
   bool isDir = false;
   if (!vfs::stat(path, size, isDir))
@@ -155,6 +157,6 @@ int PS4ABI sys_close(uint32_t fd) {
   }
 
   LOG_WARNING("failed to release handle {}", fd);
-  return -1;
+  return -SysError::eBADF;
 }
 } // namespace krnl

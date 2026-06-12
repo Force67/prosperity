@@ -306,11 +306,13 @@ int PS4ABI sys_mdbg_service(uint32_t op, void *arg1, void *arg2, void *a3) {
   return 0;
 }
 
+// sceKernelGet/SetDirectMemoryContainer: -1 queries the current container id,
+// any other value selects it and returns the previous one. We don't enforce
+// separate dmem pools, so just track the selected id (default 0) and never trap.
 int PS4ABI sys_dmem_container(uint32_t op) {
-  if (op == -1)
-    return 0;
-
-  __debugbreak();
-  return -1;
+  static std::atomic<uint32_t> current{0};
+  if (op == 0xFFFFFFFFu)
+    return static_cast<int>(current.load());
+  return static_cast<int>(current.exchange(op));
 }
 } // namespace krnl

@@ -259,10 +259,39 @@ int PS4ABI sys_flock() { return 0; }
 int PS4ABI sys_utimes() { return 0; }
 int PS4ABI sys_futimes() { return 0; }
 
-// We can't answer per-path limits; -1 means "no determinable limit".
-int PS4ABI sys_pathconf() { return -1; }
-int PS4ABI sys_fpathconf() { return -1; }
-int PS4ABI sys_lpathconf() { return -1; }
+// pathconf/fpathconf/lpathconf: report the configurable limit for `name`. We
+// return concrete values rather than the -1 "indeterminate" sentinel: a -1 in
+// rax is indistinguishable from an errno under the syscall return convention, so
+// a caller sizing a buffer against it would misread a failure. Values match
+// FreeBSD's defaults for a UFS-like filesystem.
+static int64_t pathconf_value(int name) {
+  switch (name) {
+  case 1:  return 32767; // _PC_LINK_MAX
+  case 2:  return 255;   // _PC_MAX_CANON
+  case 3:  return 255;   // _PC_MAX_INPUT
+  case 4:  return 255;   // _PC_NAME_MAX
+  case 5:  return 1024;  // _PC_PATH_MAX
+  case 6:  return 512;   // _PC_PIPE_BUF
+  case 7:  return 1;     // _PC_CHOWN_RESTRICTED
+  case 8:  return 1;     // _PC_NO_TRUNC
+  case 9:  return 255;   // _PC_VDISABLE
+  case 11: return 64;    // _PC_ACL_PATH_MAX
+  case 12: return 64;    // _PC_FILESIZEBITS -> at least 64-bit offsets
+  default: return -SysError::eINVAL;
+  }
+}
+int PS4ABI sys_pathconf(const char *path, int name) {
+  (void)path;
+  return static_cast<int>(pathconf_value(name));
+}
+int PS4ABI sys_fpathconf(int fd, int name) {
+  (void)fd;
+  return static_cast<int>(pathconf_value(name));
+}
+int PS4ABI sys_lpathconf(const char *path, int name) {
+  (void)path;
+  return static_cast<int>(pathconf_value(name));
+}
 
 int PS4ABI sys_sigqueue() { return 0; }
 

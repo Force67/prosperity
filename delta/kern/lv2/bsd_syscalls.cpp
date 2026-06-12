@@ -8,6 +8,7 @@
  */
 
 #include "../proc.h"
+#include "error_table.h"
 #include <base.h>
 #include <logger/logger.h>
 
@@ -47,15 +48,33 @@ int PS4ABI sys_namedobj_create(const char *name, void *arg2, uint32_t arg3) {
 int PS4ABI sys_namedobj_delete() { return 0; }
 
 int PS4ABI sys_sysarch(int num, void *args) {
-  // amd64_set_fsbase
-  if (num == 129) {
+  // amd64 machine-dependent syscall. The four base ops are the only ones libc
+  // and libthr issue; everything else is genuinely unsupported (EINVAL), which
+  // is what the real kernel returns for an unknown number.
+  enum { AMD64_GET_FSBASE = 128, AMD64_SET_FSBASE, AMD64_GET_GSBASE, AMD64_SET_GSBASE };
+  auto &env = proc::getActive()->getEnv();
+  if (!args)
+    return -SysError::eFAULT;
+  switch (num) {
+  case AMD64_GET_FSBASE:
+    *static_cast<void **>(args) = env.fsBase;
+    return 0;
+  case AMD64_SET_FSBASE: {
     auto fsbase = *static_cast<void **>(args);
-    proc::getActive()->getEnv().fsBase = fsbase;
+    env.fsBase = fsbase;
     setThreadFsBase(reinterpret_cast<uint64_t>(fsbase));
     return 0;
   }
-
-  return -1;
+  case AMD64_GET_GSBASE:
+    // We don't track a separate gs base (amd64 TLS uses fs); report none set.
+    *static_cast<void **>(args) = nullptr;
+    return 0;
+  case AMD64_SET_GSBASE:
+    // Accept silently: no guest we run relies on a distinct gs base.
+    return 0;
+  default:
+    return -SysError::eINVAL;
+  }
 }
 
 struct nonsys_int {
