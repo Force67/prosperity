@@ -23,18 +23,18 @@ namespace krnl {
 int PS4ABI sys_dynlib_dlopen(const char *) {
   /*TODO: implement, however note that this function is only
   present in devkits*/
-  return SysError::eNOSYS;
+  return -SysError::eNOSYS;
 }
 
 int PS4ABI sys_dynlib_get_info(uint32_t handle, dynlib_info *dyn_info) {
-  if (dyn_info->size != sizeof(*dyn_info)) {
-    __debugbreak();
-    return SysError::eINVAL;
-  }
+  if (!dyn_info)
+    return -SysError::eFAULT;
+  if (dyn_info->size != sizeof(*dyn_info))
+    return -SysError::eINVAL;
 
   auto mod = proc::getActive()->getModule(handle);
   if (!mod)
-    return SysError::eSRCH;
+    return -SysError::eSRCH;
 
   auto &info = mod->getInfo();
   std::memset(dyn_info, 0, sizeof(dynlib_info));
@@ -58,14 +58,14 @@ int PS4ABI sys_dynlib_get_info(uint32_t handle, dynlib_info *dyn_info) {
 
 int PS4ABI sys_dynlib_get_info_ex(uint32_t handle, int32_t ukn /*always 1*/,
                                   dynlib_info_ex *dyn_info) {
-  if (dyn_info->size != sizeof(*dyn_info)) {
-    __debugbreak();
-    return SysError::eINVAL;
-  }
+  if (!dyn_info)
+    return -SysError::eFAULT;
+  if (dyn_info->size != sizeof(*dyn_info))
+    return -SysError::eINVAL;
 
   auto mod = proc::getActive()->getModule(handle);
   if (!mod)
-    return SysError::eSRCH;
+    return -SysError::eSRCH;
 
   auto &info = mod->getInfo();
   std::memset(dyn_info, 0, sizeof(dynlib_info_ex));
@@ -152,7 +152,7 @@ int PS4ABI sys_dynlib_get_obj_member(uint32_t handle, uint8_t index,
                                      void **value) {
   auto mod = proc::getActive()->getModule(handle);
   if (!mod)
-    return SysError::eSRCH;
+    return -SysError::eSRCH;
 
   auto &info = mod->getInfo();
   switch (index) {
@@ -168,7 +168,7 @@ int PS4ABI sys_dynlib_get_obj_member(uint32_t handle, uint8_t index,
   default:
     LOG_WARNING("get_obj_member: unhandled index {} for {}", index,
                 info.name.c_str());
-    return SysError::eINVAL;
+    return -SysError::eINVAL;
   }
 }
 
@@ -212,7 +212,7 @@ int PS4ABI sys_dynlib_load_prx(const char *path, uint64_t flags, int *pHandle,
   if (pRes)
     *pRes = 0;
   if (!path)
-    return SysError::eINVAL;
+    return -SysError::eINVAL;
 
   // Derive the module name from the path: basename minus its extension. The
   // module's internal name (set from the SCE module info) matches this for the
@@ -242,7 +242,7 @@ int PS4ABI sys_dynlib_load_prx(const char *path, uint64_t flags, int *pHandle,
   for (auto *s : kSkip) {
     if (std::strcmp(name.c_str(), s) == 0) {
       std::printf("[load_prx] skipping %s (init unsupported)\n", s);
-      return SysError::eNOENT;
+      return -SysError::eNOENT;
     }
   }
 
@@ -254,7 +254,7 @@ int PS4ABI sys_dynlib_load_prx(const char *path, uint64_t flags, int *pHandle,
     mod = proc->loadModule(base::StringRef(name));
     if (!mod) {
       LOG_ERROR("load_prx: unable to load {}", name.c_str());
-      return SysError::eNOENT;
+      return -SysError::eNOENT;
     }
   }
 
@@ -265,7 +265,7 @@ int PS4ABI sys_dynlib_load_prx(const char *path, uint64_t flags, int *pHandle,
   // is a no-op.
   if (!mod->resolveImports() || !mod->applyRelocations()) {
     LOG_ERROR("load_prx: relocate failed for {}", name.c_str());
-    return SysError::eNOEXEC;
+    return -SysError::eNOEXEC;
   }
 
   if (pHandle)

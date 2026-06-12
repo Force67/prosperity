@@ -18,7 +18,7 @@ namespace krnl {
 // monotonic (good enough for the deltas most callers want).
 int PS4ABI sys_clock_gettime(uint32_t clock_id, sce_timespec *tp) {
   if (!tp)
-    return SysError::eINVAL;
+    return -SysError::eINVAL;
 
   clockid_t host;
   switch (clock_id) {
@@ -42,7 +42,7 @@ int PS4ABI sys_clock_gettime(uint32_t clock_id, sce_timespec *tp) {
 // threads they're waiting on. The PS4 timespec matches the host layout.
 int PS4ABI sys_nanosleep(const sce_timespec *rqtp, sce_timespec *rmtp) {
   if (!rqtp)
-    return SysError::eINVAL;
+    return -SysError::eINVAL;
 
   struct timespec req {};
   req.tv_sec = static_cast<time_t>(rqtp->tv_sec);
@@ -54,6 +54,6 @@ int PS4ABI sys_nanosleep(const sce_timespec *rqtp, sce_timespec *rmtp) {
     rmtp->tv_sec = rem.tv_sec;
     rmtp->tv_nsec = rem.tv_nsec;
   }
-  return r == 0 ? 0 : SysError::eINTR;
+  return r == 0 ? 0 : -SysError::eINTR;
 }
 }  // namespace krnl

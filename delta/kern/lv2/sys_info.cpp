@@ -15,6 +15,7 @@
 #endif
 
 #include "../proc.h"
+#include "error_table.h"
 
 namespace krnl {
 int sys_budget_get_ptype();
@@ -175,7 +176,7 @@ int PS4ABI sys_sysctl(int *name, uint32_t namelen, void *oldp, size_t *oldlenp,
       static_cast<uint32_t *>(oldp)[0] = 0x1337;
       static_cast<uint32_t *>(oldp)[1] = 4;
       *oldlenp = 8;
-      return true;
+      return 0;
     }
 
     else if (name == "vm.ps4dev.vm1.cpu.pt_total" ||
@@ -184,8 +185,8 @@ int PS4ABI sys_sysctl(int *name, uint32_t namelen, void *oldp, size_t *oldlenp,
              name == "vm.ps4dev.vm1.gpu.pt_available" ||
              name == "vm.ps4dev.trcmem_total" ||
              name == "vm.ps4dev.trcmem_avail") {
-      /*DK, not present on retail*/
-      return 2;
+      /*devkit-only oid, not present on retail*/
+      return -SysError::eNOENT;
     }
 
     else if (name == "machdep.tsc_freq") {
@@ -209,7 +210,7 @@ int PS4ABI sys_sysctl(int *name, uint32_t namelen, void *oldp, size_t *oldlenp,
 
     std::printf("[sysctl] UNHANDLED name2oid: '%.*s'\n", (int)newlen,
                 static_cast<const char *>(newp));
-    return 2;
+    return -SysError::eNOENT;
   }
 
   /*for sceKernelGetLibkernelTextLocation*/
@@ -222,6 +223,6 @@ int PS4ABI sys_sysctl(int *name, uint32_t namelen, void *oldp, size_t *oldlenp,
   for (uint32_t i = 0; i < namelen && i < 8; i++)
     std::printf(" %d", name[i]);
   std::printf("\n");
-  return 2;  // ENOENT
+  return -SysError::eNOENT;
 }
 } // namespace krnl
