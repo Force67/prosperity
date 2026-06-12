@@ -71,6 +71,10 @@ struct thr_param {
 };
 
 int PS4ABI sys_thr_new(thr_param *p, int size) {
+  // The kernel rejects an oversized param block (copyin guard); param_size is
+  // exactly sizeof(thr_param) == 0x68 for every libthr we see.
+  if (!p || size < 0 || static_cast<size_t>(size) > sizeof(thr_param))
+    return -22 /*EINVAL*/;
   uint32_t tid = g_nextTid.fetch_add(1);
   std::printf("[thr_new] tid=%u start=%p arg=%p stack=%p+%#zx tls=%p\n", tid,
               (void *)p->start_func, p->arg, (void *)p->stack_base,
@@ -116,13 +120,25 @@ int PS4ABI sys_thr_new(thr_param *p, int size) {
   return 0;
 }
 
-int PS4ABI sys_thr_self(uint32_t *tid) {
+int PS4ABI sys_thr_self(int64_t *tid) {
+  if (!tid)
+    return -14 /*EFAULT*/;
+  // The kernel stores td_tid through suword64 (a full 64-bit, zero-extended
+  // store). Writing only 32 bits left the caller's high word as stack garbage.
   *tid = t_tid;
   return 0;
 }
 
-int PS4ABI sys_rtprio_thread(int a1, uint64_t a2, thread_prio *rtp) {
-  rtp->type = 3; /*normal time sharing process*/
+int PS4ABI sys_rtprio_thread(int function, uint64_t lwpid, thread_prio *rtp) {
+  if (!rtp)
+    return -14 /*EFAULT*/;
+  // function: RTP_LOOKUP(0) reports the priority, RTP_SET(1) applies the
+  // caller's. We don't model real-time scheduling, so accept a SET unchanged and
+  // report a normal class on LOOKUP.
+  constexpr int RTP_SET = 1;
+  if (function == RTP_SET)
+    return 0;
+  rtp->type = 3; /*RTP_PRIO_NORMAL: time-sharing*/
   rtp->prio = 1; /*almost highest prio*/
   return 0;
 }

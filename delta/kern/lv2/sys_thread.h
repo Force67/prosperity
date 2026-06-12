@@ -18,7 +18,7 @@ struct thread_prio {
 
 struct thr_param;
 int PS4ABI sys_thr_new(thr_param *p, int size);
-int PS4ABI sys_thr_self(uint32_t *tid);
+int PS4ABI sys_thr_self(int64_t *tid);
 int PS4ABI sys_rtprio_thread(int, uint64_t, thread_prio *);
 int PS4ABI sys_umtx_op(void *, int, uint32_t, void *, void *);
 }
