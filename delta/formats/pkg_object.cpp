@@ -512,8 +512,20 @@ struct PkgImpl {
     if (outerBs == 0)
       return;
 
-    // Inner image: PFSC-compressed, sitting at outer block 11.
-    auto *sub = make<SubSource>(outer, (uint64_t)11 * outerBs);
+    // The inner image is a contiguous, PFSC-compressed stream inside the outer
+    // PFS. Its start block depends on the size of the outer metadata (superblock
+    // + inodes + dirents + flat_path_table), so locate it by its "PFSC" magic
+    // rather than assuming a fixed block. (Isaac lands at block 11, P.T. at 19.)
+    uint64_t innerBlk = 11;
+    for (uint64_t bi = 1; bi < 256; ++bi) {
+      uint8_t magic[4];
+      outer->read(bi * outerBs, sizeof(magic), magic);
+      if (magic[0] == 'P' && magic[1] == 'F' && magic[2] == 'S' && magic[3] == 'C') {
+        innerBlk = bi;
+        break;
+      }
+    }
+    auto *sub = make<SubSource>(outer, innerBlk * outerBs);
     auto *pfsc = make<PfscSource>(sub);
 
     bool innerSigned = false;

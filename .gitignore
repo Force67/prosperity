@@ -321,3 +321,6 @@ build-arm/
 /android-dumps
 run-android.sh
 build-apk.sh
+
+# local agent scratch
+.claude/
