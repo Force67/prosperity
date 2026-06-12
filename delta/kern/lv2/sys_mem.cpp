@@ -155,23 +155,19 @@ uint8_t *PS4ABI sys_mmap(void *addr, size_t size, uint32_t prot, uint32_t flags,
     return reinterpret_cast<uint8_t *>(-1);
   }
 
-#if 0
-		/*auto tprot = ppt::r;
-		if (prot & mprotFlags::write)
-			tprot = ppt::w; /*intentional*/
-		if (prot & mprotFlags::exec)
-			tprot = ppt::rx; */
-#endif
-  // FIXME: apply real protections
-  auto tprot = ppt::rwx;
+  // Track the prot the guest actually asked for (BSD r=1/w=2/x=4 maps 1:1 onto
+  // pageProtection) so sceKernelVirtualQuery / QueryMemoryProtection report the
+  // truth instead of a blanket rwx. The host pages stay rwx: FEX reads guest
+  // memory directly and we don't deliver protection faults, so restricting them
+  // would only risk spurious crashes, not faithful behaviour.
+  auto gprot = static_cast<ppt>(prot & static_cast<uint32_t>(ppt::rwx));
 
   if (flags & mFlags::anon)
     std::memset(ptr, 0, size);
 
-  proc->getVma().add(static_cast<uint8_t *>(ptr), size, tprot);
+  proc->getVma().add(static_cast<uint8_t *>(ptr), size, gprot);
 
-  // now we apply target protection
-  utl::protectMem(static_cast<void *>(ptr), size, tprot);
+  utl::protectMem(static_cast<void *>(ptr), size, ppt::rwx);
 
   std::printf("mmap %p, %x, %p\n", addr, size, _ReturnAddress());
   // LOG_WARNING("addr={}, len={}, requested by {}", fmt::ptr(addr), len,
@@ -183,9 +179,22 @@ uint8_t *PS4ABI sys_mmap(void *addr, size_t size, uint32_t prot, uint32_t flags,
   return static_cast<uint8_t *>(ptr);
 }
 
-int PS4ABI sys_mprotect(uint8_t *, size_t len, int prot) {
-    //TODO
-    return 0;
+int PS4ABI sys_mprotect(uint8_t *addr, size_t len, int prot) {
+  auto *proc = proc::getActive();
+  if (!proc)
+    return -SysError::eINVAL;
+
+  // BSD prot bits (r=1/w=2/x=4) map 1:1 onto pageProtection. Reflect the change
+  // in the region we track so sceKernelVirtualQuery reports the new protection.
+  // We don't restrict the host pages (see sys_mmap) and we don't fail on an
+  // untracked range: the dynamic linker mprotects its own RELRO segments, which
+  // the module loader maps outside this table, and erroring there would break
+  // relocation finalisation. So update what we know and report success.
+  auto np = static_cast<ppt>(prot & static_cast<uint32_t>(ppt::rwx));
+  if (auto *region = proc->getVma().get(addr))
+    region->prot = np;
+  (void)len;
+  return 0;
 }
 
 int PS4ABI sys_shm_open(const char *path, uint32_t flags, uint16_t mode) {

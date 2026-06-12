@@ -11,7 +11,8 @@
 #include <base.h>
 
 namespace krnl {
-enum mprotFlags : uint32_t { none, exec = 1, write = 2, read = 4 };
+// BSD/PS4 mmap prot bits (matches PROT_* and utl::pageProtection's bit layout).
+enum mprotFlags : uint32_t { none = 0, read = 1, write = 2, exec = 4 };
 
 enum mFlags : uint32_t {
   fixed = 0x10,

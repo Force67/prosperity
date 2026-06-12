@@ -47,12 +47,15 @@ int PS4ABI sys_msync(void *, size_t, int) { return 0; }
 
 int PS4ABI sys_madvise(void *, size_t, int) { return 0; }
 
-// Report nothing resident; zero the status vector so it isn't read uninitialised.
+// Our guest arena is fully committed host memory that never pages out, so every
+// queried page is resident. Report MINCORE_INCORE for each so a caller probing
+// residency (e.g. an allocator deciding whether to madvise) sees the truth
+// instead of "all paged out".
 int PS4ABI sys_mincore(void *addr, size_t len, char *vec) {
-  if (vec) {
-    size_t pages = (len + 0x3FFF) >> 14;
-    std::memset(vec, 0, pages);
-  }
+  if (!vec)
+    return -SysError::eFAULT;
+  size_t pages = (len + 0x3FFF) >> 14;
+  std::memset(vec, 0x01 /*MINCORE_INCORE*/, pages);
   return 0;
 }
 

@@ -40,8 +40,12 @@ void vmManager::add(uint8_t *ptr, size_t size, mprot prot) {
 
 pageInfo *vmManager::get(uint8_t *ptr) {
   std::lock_guard lock(vmlock);
-  auto it = std::find_if(rtPages.begin(), rtPages.end(),
-                         [&ptr](const auto &page) { return page.ptr == ptr; });
+  // The kernel resolves the region *containing* an address, not just one that
+  // starts there: sceKernelVirtualQuery / QueryMemoryProtection / mname all pass
+  // interior pointers. Match by range so those report the right region.
+  auto it = std::find_if(rtPages.begin(), rtPages.end(), [&ptr](const auto &page) {
+    return ptr >= page.ptr && ptr < page.ptr + page.size;
+  });
 
   if (it != rtPages.end())
     return &*it;
