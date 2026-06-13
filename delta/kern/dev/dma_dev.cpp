@@ -36,7 +36,7 @@ namespace {
 // PS4 user-accessible direct memory is roughly 4.5 to 5 GiB depending on the
 // title budget. Report a flat large pool and bump offsets from a non-zero base
 // so a test for "offset 0 means invalid" still holds.
-constexpr uint64_t kDmemTotal = 0x180000000ull;  // 6 GiB
+constexpr uint64_t kDmemTotal = 0x300000000ull;  // 12 GiB (SOTTR working set)
 std::atomic<uint64_t> g_dmemNext{0x10000000ull};  // first free physical offset
 
 // Record of each direct-memory reservation so GetDirectMemoryType (ioctl

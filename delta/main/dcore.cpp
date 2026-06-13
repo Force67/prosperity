@@ -41,8 +41,11 @@ public:
       std::vector<std::string> all;
       fs_.paths(all);
       for (const auto &p : all)
-        if (sub[0] == '1' || p.find(sub) != std::string::npos)
-          std::fprintf(stderr, "[pkg] %s\n", p.c_str());
+        if (sub[0] == '1' || p.find(sub) != std::string::npos) {
+          const auto *n = fs_.find(p.c_str());
+          std::fprintf(stderr, "[pkg] %12lld  %s\n",
+                       n ? (long long)n->size : -1LL, p.c_str());
+        }
     }
     if (const char *want = std::getenv("DELTA_PKG_DUMP")) {
       if (const auto *node = fs_.find(want)) {

@@ -31,6 +31,7 @@
 #include <cstring>
 #include <mutex>
 #include <unordered_set>
+#include "kern/vfs.h"
 
 namespace krnl {
 
@@ -118,6 +119,44 @@ static bool payloadNamesPlayGo(void *in, uint64_t insize) {
   return false;
 }
 
+// PlayGo chunk count. The real per-title value lives in the pkg header file
+// /app0/sce_sys/playgo-chunk.dat (magic "pgd\0"; chunk_count is a u16 at offset
+// 0x0A). A wrong count breaks multi-chunk titles: Shadow of the Tomb Raider
+// enumerates chunk loci 0..N during boot and, when the count it reads back is
+// too small, an unsigned `count - 0x50` underflows into a ~4-billion-iteration
+// loop that smashes the stack. Read the real value once; fall back to one chunk
+// when the file is missing/unreadable (the single-chunk titles we already boot).
+// DELTA_PLAYGO_CHUNKS overrides for experimentation.
+static uint32_t playGoChunkCount() {
+  static uint32_t cached = 0;
+  if (cached)
+    return cached;
+  if (const char *ov = std::getenv("DELTA_PLAYGO_CHUNKS")) {
+    int v = std::atoi(ov);
+    cached = v > 0 ? static_cast<uint32_t>(v) : 1;
+    return cached;
+  }
+  // Default: 0x50. Multi-chunk titles enumerate chunk loci 0..N at boot and
+  // build per-chunk tables sized from this count; a too-small value underflows
+  // those loops (Shadow of the Tomb Raider) and a count of 1 (the old default)
+  // crashes. 0x50 is the value such titles treat as "the standard set, fully
+  // installed", which is exactly what an emulated whole-pkg mount is. Reading a
+  // real /app0/sce_sys/playgo-chunk.dat would refine this, but the pkgs we run
+  // don't ship one (PlayGo data is absent), so a sane installed-count is best.
+  cached = 0x50;
+  utl::File f = vfs::openRead("/app0/sce_sys/playgo-chunk.dat");
+  if (f.Exists()) {
+    uint8_t hdr[0x10] = {};
+    if (f.Read(hdr, sizeof(hdr)) == sizeof(hdr) && hdr[0] == 'p' &&
+        hdr[1] == 'g' && hdr[2] == 'd') {
+      uint32_t cc = static_cast<uint32_t>(hdr[0x0a] | (hdr[0x0b] << 8));
+      if (cc > 0)
+        cached = cc;
+    }
+  }
+  return cached;
+}
+
 // Answer a PlayGo invokeSyncMethod as a fully-installed single-chunk title.
 // Only the queried-data methods need a reply; the work area was zeroed at
 // scePlayGoInitialize, so "nothing pending" getters and setters just need
@@ -139,7 +178,7 @@ static void playGoInvoke(IpmiInvokeReq *req) {
     break;
   case 0x3000f: // get chunk count (0 -> scePlayGoOpen FATAL)
     if (out0 && out0sz >= 4)
-      *reinterpret_cast<uint32_t *>(out0) = 1;
+      *reinterpret_cast<uint32_t *>(out0) = playGoChunkCount();
     break;
   case 0x30008: // get per-chunk loci -> byte array indexed by chunk id
     if (out0 && out0sz && out0sz <= 0x10000)

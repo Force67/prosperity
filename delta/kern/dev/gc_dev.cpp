@@ -226,6 +226,18 @@ int32_t gcDevice::ioctl(uint32_t cmd, void *data) {
     unhandledLogged++;
     printf("[gc] UNHANDLED ioctl(%x) data=%p\n", cmd, data);
   }
+  // Zero the output buffer of an unhandled OUT/INOUT ioctl. The driver reads the
+  // buffer back as a query result (capability counts, status words, etc.); left
+  // uninitialised it returns stack/heap garbage, which the engine then trusts --
+  // e.g. a bogus huge "format count" that overruns a fixed table and smashes the
+  // stack. Zero is the benign "nothing/idle/none" answer (matches the explicit
+  // 0x16 submit-done handler). Length is encoded in the ioctl command (FreeBSD
+  // IOCPARM_LEN). Only touch OUT ioctls (bit 0x40000000).
+  if (data && (cmd & 0x40000000u)) {
+    uint32_t len = (cmd >> 16) & 0x1fff;
+    if (len)
+      std::memset(data, 0, len);
+  }
   return 0;
 }
 

@@ -384,6 +384,26 @@ static void applyBootPatches(proc &p) {
     }
   }
 #endif
+  // DEBUG (DELTA_TRAP_VADDR=0xADDR[,0xADDR...]): plant an int3 at guest code
+  // address(es) so reaching them traps into the crash handler, which dumps the
+  // guest RIP/registers/backtrace + stack scan. Lets us capture the context of a
+  // deterministic-but-hard-to-breakpoint site (e.g. a fatal-error spin) without
+  // gdb, which is far too slow under the boot's threading.
+  if (const char *t = std::getenv("DELTA_TRAP_VADDR")) {
+    base::String spec(t);
+    char *cur = const_cast<char *>(spec.c_str());
+    while (cur && *cur) {
+      uint64_t addr = std::strtoull(cur, &cur, 0);
+      if (addr) {
+        auto *c = reinterpret_cast<uint8_t *>(addr);
+        utl::protectMem(reinterpret_cast<void *>(addr & ~0xFFFull), 0x1000,
+                        utl::pageProtection::rwx);
+        c[0] = 0xCC; // int3 -> SIGTRAP -> crash handler dump
+        LOG_INFO("DELTA_TRAP_VADDR: planted int3 @ {:#x}", addr);
+      }
+      while (*cur == ',' || *cur == ' ') cur++;
+    }
+  }
   forceReturn0(p, "libkernel", 0x287e0);            // module-gen lib-id validator
   forceReturn0(p, "libSceAppContentUtil", 0x1a00);  // AppContent IPMI init
   // AppContent's IPMI client is stubbed, so the real Initialize/AppParamGetInt

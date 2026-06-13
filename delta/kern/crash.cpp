@@ -199,6 +199,30 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
     std::fprintf(stderr, "\n");
   }
   backtrace(gr[REG_RBP]);
+  // Raw stack scan: optimised guest code omits frame pointers, so the rbp chain
+  // above misses frames. Scan the guest stack for values that land in a loaded
+  // module's .text (the real call chain) and for pointers into the guest heap
+  // arena that hold a printable ASCII string (an asset filename / tag the
+  // faulting code was handling). The arena (0x40_0000_0000..0x41_0000_0000) is
+  // always mapped, so reading a string there can't fault.
+  std::fprintf(stderr, "  --- stack scan ---\n");
+  if (uintptr_t rsp = gr[REG_RSP]; rsp >= 0x10000) {
+    auto *sp = reinterpret_cast<uintptr_t *>(rsp);
+    for (int i = 0; i < 512; i++) {
+      uintptr_t v = sp[i];
+      char sym[256];
+      symbolize(v, sym, sizeof(sym));
+      if (std::strstr(sym, "(.text)")) {
+        std::fprintf(stderr, "  sp+%-5x %016lx  %s\n", i * 8, v, sym);
+      } else if (v >= 0x4000000000ull && v < 0x4100000000ull) {
+        auto *s = reinterpret_cast<const char *>(v);
+        int n = 0;
+        while (n < 40 && s[n] >= 0x20 && s[n] <= 0x7e) n++;
+        if (n >= 5 && s[n] == 0)
+          std::fprintf(stderr, "  sp+%-5x %016lx  str=\"%.40s\"\n", i * 8, v, s);
+      }
+    }
+  }
 #else
   // aarch64 host: guest x86 state lives in the FEXCore CPUState, not the host
   // ARM signal context. Reconstruct the precise guest RIP from the host JIT PC
@@ -294,6 +318,7 @@ void installSigAltStack() {
   sigaddset(&unb, SIGFPE);
   sigaddset(&unb, SIGTRAP);
   sigaddset(&unb, SIGABRT);
+  sigaddset(&unb, SIGUSR1);  // keep the deadlock probe deliverable on guest threads
   pthread_sigmask(SIG_UNBLOCK, &unb, nullptr);
 }
 

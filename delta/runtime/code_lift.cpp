@@ -172,6 +172,9 @@ bool codeLift::transform(uint8_t *data, size_t size, uint64_t base) {
 
 void codeLift::emit_syscall(uint8_t *base, uint32_t idx) {
   auto address = krnl::lv2_get(idx);
+  if (std::getenv("DELTA_SYSLIFT_TRACE"))
+    std::fprintf(stderr, "[syslift] site=%p idx=%u -> trampoline=%#lx\n",
+                 (void *)base, idx, (unsigned long)address);
   if (address) {
     /*call to rax*/
     *(uint16_t *)base = 0xB848;

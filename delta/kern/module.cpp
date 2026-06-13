@@ -277,6 +277,15 @@ void smodule::digestDynamic() {
       break;
     }
   }
+
+  if (std::getenv("DELTA_IMPLIB_TRACE")) {
+    for (auto &l : impLibs)
+      std::printf("[implib] %s id=%u %s\n", info.name.c_str(), l.id,
+                  l.name ? l.name : "?");
+    for (auto &m : impModules)
+      std::printf("[impmod] %s id=%u %s\n", info.name.c_str(), m.id,
+                  m.name ? m.name : "?");
+  }
 }
 
 bool smodule::mapImage() {
@@ -626,6 +635,10 @@ bool smodule::resolveImports() {
       LOG_WARNING("unresolved import {} in {} (jmpslot@{:#x})", name,
                   info.name.c_str(), r->offset);
     }
+
+    if (std::getenv("DELTA_RELOC_TRACE"))
+      std::printf("[reloc]   %s @%#lx resolved -> %#lx\n", name,
+                  (unsigned long)r->offset, (unsigned long)addr);
 
     *getAddress<uintptr_t>(r->offset) = addr;
   }
