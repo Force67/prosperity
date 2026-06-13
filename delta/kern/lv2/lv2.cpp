@@ -10,6 +10,8 @@
 #include <base.h>
 #include <cstdint>
 #include <cstdio>
+#include <mutex>
+#include <unordered_map>
 #ifdef _MSC_VER
 #include <intrin.h>
 #endif
@@ -17,6 +19,7 @@
 #include <xbyak.h>
 #endif
 
+#include "error_table.h"
 #include "sys_debug.h"
 #include "sys_dynlib.h"
 #include "sys_event.h"
@@ -798,18 +801,82 @@ static uintptr_t emit_calltrace(const char *name, uint32_t sid,
 
   return reinterpret_cast<uintptr_t>(gen->getCode());
 }
+
+// BSD/PS4 syscall return convention: on failure the kernel returns the positive
+// errno in rax with the carry flag SET; on success it clears carry and rax holds
+// the result. Our C handlers use the Linux-style convention instead (a negative
+// errno, or the result, in rax). Translate a raw handler return into the errno
+// the guest's `jb cerror` stub expects, or 0 when it is a normal result.
+//
+// An `int` handler zero-extends its 32-bit result into rax, an `int64_t` handler
+// fills all 64 bits, so a negative errno arrives as either 0x00000000_FFFFFFxx or
+// 0xFFFFFFFF_FFFFFFxx. We only treat the low 32 bits (as signed) being a valid
+// errno *and* the high half being 0 or all-ones as an error. Guest pointers live
+// at >= 64 GiB (high half != 0), so a returned address can never look like one.
+extern "C" uint32_t krnl_syscall_errno(uint64_t raw) {
+  int32_t lo = static_cast<int32_t>(static_cast<uint32_t>(raw));
+  uint32_t hi = static_cast<uint32_t>(raw >> 32);
+  if (lo < 0 && lo >= -static_cast<int32_t>(SysError::eLAST) &&
+      (hi == 0 || hi == 0xFFFFFFFFu))
+    return static_cast<uint32_t>(-lo);
+  return 0;
+}
+
+// One-time trampoline per handler: call it with the guest's arg registers
+// untouched, then set/clear the carry flag and normalise rax per the convention
+// above. Replaces the bare `call handler` so the guest sees faithful errors.
+static uintptr_t emit_bsd_trampoline(const void *handler) {
+  struct bsdRet : Xbyak::CodeGenerator {
+    bsdRet(uintptr_t handler) {
+      push(rbx);            // save guest rbx; rsp now 16-aligned for the calls
+      mov(rax, handler);
+      call(rax);            // handler(rdi,rsi,rdx,rcx,r8,r9) -> rax (args intact)
+      mov(rbx, rax);        // stash the raw return across the helper call
+      mov(rdi, rax);
+      mov(rax, reinterpret_cast<uintptr_t>(&krnl_syscall_errno));
+      call(rax);            // eax = errno, or 0 when the return is a result
+      test(eax, eax);
+      Xbyak::Label ok;
+      jz(ok);
+      pop(rbx);
+      stc();                // error: rax already = positive errno
+      ret();
+      L(ok);
+      mov(rax, rbx);        // success: restore the raw result
+      pop(rbx);
+      clc();
+      ret();
+    }
+  };
+  auto *gen = new bsdRet(reinterpret_cast<uintptr_t>(handler));
+  return reinterpret_cast<uintptr_t>(gen->getCode());
+}
 #endif // DELTA_BACKEND_NATIVE
 
 uintptr_t lv2_get(uint32_t sid) {
+  const void *handler = reinterpret_cast<const void *>(&null_handler_notable);
   for (auto &it : syscall_dpt) {
     if (sid == it.id) {
-      return reinterpret_cast<uintptr_t>(it.ptr);
-      // swap for the line above to trace every syscall + its return value:
-      // return emit_calltrace(syscall_getname(sid), sid, it.ptr);
+      handler = it.ptr;
+      break;
     }
   }
 
-  //	LOG_WARNING("unknown syscall {}", sid);
-  return reinterpret_cast<uintptr_t>(&null_handler_notable);
+#if defined(DELTA_BACKEND_NATIVE)
+  // Wrap each handler once in a trampoline that applies the BSD carry/errno
+  // return convention. Cache by handler so syscall ids that share a handler
+  // (and the many duplicate sites in the guest) reuse a single stub.
+  static std::mutex trMutex;
+  static std::unordered_map<const void *, uintptr_t> trCache;
+  std::lock_guard<std::mutex> lk(trMutex);
+  auto it = trCache.find(handler);
+  if (it != trCache.end())
+    return it->second;
+  uintptr_t tr = emit_bsd_trampoline(handler);
+  trCache.emplace(handler, tr);
+  return tr;
+#else
+  return reinterpret_cast<uintptr_t>(handler);
+#endif
 }
 } // namespace krnl
