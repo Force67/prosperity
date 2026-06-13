@@ -11,6 +11,7 @@
 #include "error_table.h"
 #include <base.h>
 #include <logger/logger.h>
+#include <cstring>
 
 namespace krnl {
 int PS4ABI sys_exit() {
@@ -28,9 +29,25 @@ int PS4ABI sys_execve() {
   return 0;
 }
 
-int PS4ABI sys_sigprocmask(int how, const int *sigset, int *oset) { return 0; }
+// We deliver no signals, so the mask is inert; still, a caller that saves the
+// old mask here to restore it later must not read uninitialised memory. The
+// FreeBSD sigset_t is 16 bytes (4x uint32). Report an empty old mask.
+int PS4ABI sys_sigprocmask(int how, const int *set, int *oset) {
+  (void)how;
+  (void)set;
+  if (oset)
+    std::memset(oset, 0, 16);
+  return 0;
+}
 
-int PS4ABI sys_sigaction(int how, void (*cb)(void *, void *, void *)) {
+// Likewise report "no previous handler" rather than leaving the caller's oldact
+// buffer uninitialised. struct sigaction on amd64 is 32 bytes (handler pointer +
+// flags + 16-byte sa_mask, padded).
+int PS4ABI sys_sigaction(int sig, const void *act, void *oact) {
+  (void)sig;
+  (void)act;
+  if (oact)
+    std::memset(oact, 0, 32);
   return 0;
 }
 

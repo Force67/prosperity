@@ -48,7 +48,7 @@ const char *syscall_getname(uint32_t idx);
 
 int sys_write(uint32_t fd, const void *buf, size_t nbytes);
 int sys_sigprocmask(int, const int *, int *);
-int sys_sigaction(int how, void (*cb)(void *, void *, void *));
+int sys_sigaction(int sig, const void *act, void *oact);
 int sys_regmgr_call(uint32_t op, uint32_t id, void *result, void *value,
                     uint64_t type);
 
