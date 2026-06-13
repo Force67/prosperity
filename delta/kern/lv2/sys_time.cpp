@@ -20,12 +20,26 @@ int PS4ABI sys_clock_gettime(uint32_t clock_id, sce_timespec *tp) {
   if (!tp)
     return -SysError::eINVAL;
 
+  // Map the guest clock id onto the closest host clock. The ids follow FreeBSD's
+  // (kern_clock_gettime): 0/9/10 realtime, 13 second (coarse realtime), 14/15
+  // thread/process cpu time, the rest monotonic/uptime.
   clockid_t host;
   switch (clock_id) {
-  case 0:  // SCE_KERNEL_CLOCK_REALTIME
+  case 0:   // CLOCK_REALTIME
+  case 9:   // CLOCK_REALTIME_PRECISE
+  case 10:  // CLOCK_REALTIME_FAST
+  case 13:  // CLOCK_SECOND (coarse wall clock)
     host = CLOCK_REALTIME;
     break;
-  default:  // monotonic / proctime / threadtime
+  case 1:   // CLOCK_VIRTUAL (user cpu time) -> process cpu time
+  case 2:   // CLOCK_PROF (user+sys cpu time)
+  case 15:  // CLOCK_PROCESS_CPUTIME_ID
+    host = CLOCK_PROCESS_CPUTIME_ID;
+    break;
+  case 14:  // CLOCK_THREAD_CPUTIME_ID
+    host = CLOCK_THREAD_CPUTIME_ID;
+    break;
+  default:  // 4/5/7/8/11/12: monotonic & uptime variants
     host = CLOCK_MONOTONIC;
     break;
   }
