@@ -11,6 +11,7 @@
 #include <base.h>
 #include <csetjmp>
 #include "cpu_backend.h"
+#include "kern/crash.h"
 #include "kern/proc.h"
 
 namespace krnl {
@@ -57,6 +58,10 @@ public:
 
   void runGuestThread(void *handle) override {
     auto *t = static_cast<NativeThread *>(handle);
+    // Give this guest thread a signal alt-stack so the fatal handler still runs
+    // (and dumps the guest RIP) when the guest blows or corrupts its own RSP --
+    // otherwise the kernel can't deliver SIGSEGV and silently core-dumps.
+    krnl::installSigAltStack();
     krnl::setThreadFsBase(t->fsbase);
     auto entry = t->entry;
     auto arg = t->arg;

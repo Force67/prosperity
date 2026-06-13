@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <atomic>
 #include <mutex>
 #include <thread>
 
@@ -10,6 +11,9 @@
 #include "threadsafe_queue.h"
 
 namespace utl {
+
+static std::atomic<bool> g_logSilenced{false};
+void silenceLogging() { g_logSilenced.store(true, std::memory_order_relaxed); }
 
 class LogRegistry {
   std::mutex writing_lock;
@@ -66,6 +70,8 @@ public:
 
   void AddEntry(logLevel lvl, uint32_t line, const char *func,
                 base::String msg) {
+    if (g_logSilenced.load(std::memory_order_relaxed))
+      return;  // crash handler is dumping; don't race it on stderr
     using std::chrono::duration_cast;
     using std::chrono::steady_clock;
 

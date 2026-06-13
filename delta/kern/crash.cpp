@@ -15,11 +15,13 @@
 #include <cstring>
 #include <ucontext.h>
 #include <unistd.h>
+#include <pthread.h>
 
 #include "crash.h"
 #include "module.h"
 #include "proc.h"
 #include "cpu/cpu_backend.h"
+#include <logger/logger.h>
 
 namespace krnl {
 const char *syscall_getname(uint32_t idx); // name_table.cpp
@@ -114,6 +116,13 @@ static void probeHandler(int, siginfo_t *, void *ucv) {
 #endif
 
 static void crashHandler(int sig, siginfo_t *si, void *ucv) {
+  // Async-signal-safe entry marker: proves the handler actually ran even if a
+  // later step (symbolize / backtrace) re-faults. Without it a re-fault inside
+  // the handler is indistinguishable from the handler never being entered.
+  { char m[48];
+    int n = std::snprintf(m, sizeof(m), "\n[crashHandler] entered sig=%d\n", sig);
+    if (n > 0) { ssize_t w = write(2, m, (size_t)n); (void)w; } }
+
   // Let the CPU backend handle JIT-internal signals (e.g. FEX unaligned-atomic
   // SIGBUS) and resume; only a genuinely fatal fault falls through to the dump.
   if (cpu::tryHandleJitSignal(sig, si, ucv))
@@ -125,6 +134,7 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
   if (s_dumping.exchange(true)) {
     for (;;) pause();  // park until the first thread's _Exit ends the process
   }
+  utl::silenceLogging();  // stop the async log thread racing us on stderr
 
 #if defined(__x86_64__)
   // Guest SDK assert/__debugbreak is `int 0x41` (cd 41); in userspace it raises
@@ -257,16 +267,55 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
   std::_Exit(128 + sig);
 }
 
+void installSigAltStack() {
+  // One alt stack per thread; 256 KiB easily holds our dump path. Leaked on
+  // purpose (lives for the thread's lifetime, freed at process exit).
+  static thread_local stack_t s_alt{};
+  if (s_alt.ss_sp)
+    return;  // already installed for this thread
+  constexpr size_t kAltSz = 256 * 1024;
+  void *mem = std::malloc(kAltSz);
+  if (!mem)
+    return;
+  s_alt.ss_sp = mem;
+  s_alt.ss_size = kAltSz;
+  s_alt.ss_flags = 0;
+  sigaltstack(&s_alt, nullptr);
+
+  // Guarantee the fatal signals are deliverable on this thread. Guest libthr
+  // (or a syscall the lifter missed) can leave them blocked in the host mask, in
+  // which case a synchronous fault force-kills the process before our handler
+  // runs (silent core, no dump). Unblock them unconditionally.
+  sigset_t unb;
+  sigemptyset(&unb);
+  sigaddset(&unb, SIGSEGV);
+  sigaddset(&unb, SIGILL);
+  sigaddset(&unb, SIGBUS);
+  sigaddset(&unb, SIGFPE);
+  sigaddset(&unb, SIGTRAP);
+  sigaddset(&unb, SIGABRT);
+  pthread_sigmask(SIG_UNBLOCK, &unb, nullptr);
+}
+
 void installCrashHandler() {
   struct sigaction sa = {};
   sa.sa_sigaction = crashHandler;
-  sa.sa_flags = SA_SIGINFO;
+  // SA_NODEFER: don't auto-mask the signal during the handler, so a re-fault
+  // inside the dump produces another catchable signal (and our s_dumping guard
+  // parks it) instead of the kernel forcing the default action -> silent core.
+  // SA_ONSTACK: run the handler on each thread's sigaltstack (installSigAltStack)
+  // so a stack-overflow / corrupt-RSP fault is still deliverable. Without it the
+  // kernel can't push the signal frame onto the bad guest stack and force-kills
+  // the process (silent core, no dump).
+  sa.sa_flags = SA_SIGINFO | SA_NODEFER | SA_ONSTACK;
   sigemptyset(&sa.sa_mask);
+  installSigAltStack();  // for the installing (ctx) thread
   sigaction(SIGSEGV, &sa, nullptr);
   sigaction(SIGILL, &sa, nullptr);
   sigaction(SIGTRAP, &sa, nullptr);
   sigaction(SIGFPE, &sa, nullptr);
   sigaction(SIGBUS, &sa, nullptr);
+  sigaction(SIGABRT, &sa, nullptr);  // guest/runtime std::abort, assert, libc
 #if defined(__x86_64__)
   struct sigaction pa = {};
   pa.sa_sigaction = probeHandler;

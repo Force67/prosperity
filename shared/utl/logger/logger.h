@@ -57,6 +57,10 @@ void formatLogMsg(logLevel lvl, uint32_t line, const char *func,
 
 void createLogger(bool withConsole = false);
 
+// Drop all further log entries. Called from the crash handler so the async log
+// backend thread stops writing to stderr and corrupting the fault dump.
+void silenceLogging();
+
 template <typename... Args>
 inline void fmtLogMsg(logLevel lvl, uint32_t line, const char *func,
                       const char *fmt, const Args &... args) {

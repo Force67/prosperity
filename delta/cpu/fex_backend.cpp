@@ -43,6 +43,7 @@
 #include "Common/HostFeatures.h" // FEX::FetchHostFeatures
 
 #include "cpu_backend.h"
+#include "kern/crash.h"
 #include "kern/module.h"
 #include "kern/proc.h"
 
@@ -133,6 +134,29 @@ std::atomic<uint32_t> g_liveSeq{0};
 static void startWatchdog() {
   static std::once_flag once;
   std::call_once(once, [] {
+    // DELTA_SAMPLE_MS=<ms>: high-frequency sampler. Prints a compact one-line
+    // RIP for every live guest thread every <ms> milliseconds. The last sample
+    // before a hard crash (one that bypasses the signal handler) pins where each
+    // thread was, with no dependence on signal delivery.
+    if (const char *s = std::getenv("DELTA_SAMPLE_MS")) {
+      int ms = std::atoi(s);
+      if (ms <= 0) ms = 50;
+      std::thread([ms] {
+        for (uint64_t tick = 0;; tick++) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+          std::lock_guard lk(g_liveMutex);
+          for (auto &t : g_live) {
+            auto &S = t.thread->CurrentFrame->State;
+            char sym[200];
+            symRange(S.rip, sym, sizeof(sym));
+            std::fprintf(stderr, "[smp %llu] tid=%u rip=%#llx %s\n",
+                         (unsigned long long)tick, t.id,
+                         (unsigned long long)S.rip, sym);
+          }
+          std::fflush(stderr);
+        }
+      }).detach();
+    }
     const char *e = std::getenv("DELTA_WATCHDOG");
     if (!e) return;
     int secs = std::atoi(e);
@@ -432,6 +456,11 @@ public:
   void runGuestThread(void *handle) override {
     auto *h = static_cast<FexThread *>(handle);
     t_curThread = h->thread;
+    krnl::installSigAltStack();  // fatal handler must survive a blown guest stack
+    // Re-assert our fatal handler: FEXCore init (which runs after proc::start's
+    // installCrashHandler) may have registered its own SIGSEGV/SIGILL handlers.
+    // sigaction is process-wide and idempotent, so the last writer wins.
+    krnl::installCrashHandler();
     FEXCore::Allocator::RegisterTLSData(h->thread); // FEX per-thread registration
     startWatchdog();
     uint32_t myId = g_liveSeq.fetch_add(1);
