@@ -79,7 +79,8 @@ int PS4ABI sys_app_state_change();
 int64_t PS4ABI sys_blockpool_map(int64_t pool, size_t len, uint32_t prot,
                                  uint32_t flags);
 int PS4ABI sys_blockpool_unmap();
-int PS4ABI sys_blockpool_batch();
+int64_t PS4ABI sys_blockpool_batch(uint64_t a0, uint64_t a1, uint64_t a2,
+                                   uint64_t a3, uint64_t a4, uint64_t a5);
 int PS4ABI sys_dynlib_get_info_for_libdbg();
 int PS4ABI sys_dynlib_get_list_for_libdbg();
 int PS4ABI sys_dynlib_get_list2();

@@ -6,8 +6,11 @@
  * in the root of the source tree.
  */
 
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <dirent.h>
+#include <map>
 
 #include <base/containers/vector.h>
 
@@ -121,6 +124,9 @@ utl::File openRead(const char *path) {
   if (!path)
     return utl::File();
 
+  if (std::getenv("DELTA_OPEN_TRACE"))
+    std::fprintf(stderr, "[open] %s\n", path);
+
   size_t len = 0;
   const mountPoint *m = findMount(path, len);
   if (!m)
@@ -151,14 +157,28 @@ bool stat(const char *path, int64_t &size, bool &isDir) {
     return false;
 
   const char *rest = path + len;
-  if (m->provider)
-    return m->provider->stat(rest, size);
+  if (m->provider) {
+    bool ok = m->provider->stat(rest, size);
+    if (std::getenv("DELTA_OPEN_TRACE"))
+      std::fprintf(stderr, "[stat] %s -> %s size=%lld\n", path,
+                   ok ? "ok" : "MISS", (long long)size);
+    return ok;
+  }
 
   utl::File f(joinHost(m->host, rest), utl::fileMode::read);
   if (!f.Exists() || !f.IsOpen())
     return false;
   size = static_cast<int64_t>(f.GetSize());
   return true;
+}
+
+static std::map<std::string, std::vector<uint8_t>> g_fileCache;
+void cacheFile(const std::string &key, std::vector<uint8_t> data) {
+  g_fileCache[key] = std::move(data);
+}
+const std::vector<uint8_t> *getCachedFile(const char *key) {
+  auto it = g_fileCache.find(key);
+  return it == g_fileCache.end() ? nullptr : &it->second;
 }
 
 bool listDir(const char *path, std::vector<DirEntry> &out) {

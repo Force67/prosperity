@@ -54,6 +54,14 @@ public:
   // Back this device with an already-opened file (e.g. a virtual VFS stream).
   bool adopt(utl::File &&file);
 
+  // SOTTR's TAFS loader issues manifest reads with an uninitialised (garbage)
+  // file offset, so the header at off 0 never loads. In sequential mode the
+  // device ignores the bogus absolute offsets and serves reads in order from an
+  // internal cursor, which reads the whole manifest correctly. Scoped to
+  // .manifest.bin opens (set in sys_open) so it can't affect random-access asset
+  // reads. Gated by DELTA_MANIFEST_SEQ.
+  void setSeqMode() { seq_ = true; }
+
   // A file mmap is satisfied by sys_mmap's anonymous-alloc + file-content fill
   // (via readAt), not a device-owned region; return -1 silently to take that path.
   uint8_t *map(void *, size_t, uint32_t, uint32_t, size_t) override {
@@ -67,5 +75,7 @@ public:
 private:
   utl::File file_;
   bool open_ = false;
+  bool seq_ = false;       // manifest sequential-read mode
+  uint64_t seqPos_ = 0;    // internal read cursor for seq_ mode
 };
 } // namespace krnl

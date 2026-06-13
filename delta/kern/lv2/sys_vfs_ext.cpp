@@ -132,13 +132,22 @@ int PS4ABI sys_getcwd(char *buf, size_t size) {
 // wrong place.
 int64_t PS4ABI sys_pread(uint32_t fd, void *buf, size_t nbytes, int64_t offset) {
   auto *d = fdToDevice(fd);
-  if (!d)
+  if (!d) {
+    if (std::getenv("DELTA_RDALL"))
+      std::fprintf(stderr, "[pread] fd=%u off=%lld -> EBADF (no device)\n", fd, (long long)offset);
     return -SysError::eBADF;
+  }
   int64_t saved = d->lseek(0, kSeekCur);
   d->lseek(offset, kSeekSet);
   int64_t r = d->read(buf, nbytes);
   if (saved >= 0)
     d->lseek(saved, kSeekSet);
+  if (std::getenv("DELTA_RDALL")) {
+    uint32_t f4 = 0;
+    if (buf && r >= 4) f4 = *reinterpret_cast<const uint32_t *>(buf);
+    std::fprintf(stderr, "[pread] t=%ld fd=%u off=%lld nbytes=%#zx -> %lld buf=%p first4=%08x\n",
+                 (long)gettid(), fd, (long long)offset, (size_t)nbytes, (long long)r, buf, f4);
+  }
   return r;
 }
 

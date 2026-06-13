@@ -583,6 +583,14 @@ struct PkgImpl {
     uint64_t innerOff =
         static_cast<uint64_t>(n.startBlock) * innerBs + static_cast<uint64_t>(off);
     inner->read(innerOff, take, static_cast<uint8_t *>(buf));
+    if (std::getenv("DELTA_PKGREAD_TRACE") && take >= 1) {
+      auto *b = static_cast<const uint8_t *>(buf);
+      uint32_t w = b[0] | (take > 1 ? b[1] << 8 : 0) | (take > 2 ? b[2] << 16 : 0) |
+                   (take > 3 ? uint32_t(b[3]) << 24 : 0);
+      std::fprintf(stderr, "[pkgread] blk=%u off=%lld len=%lld -> %llu  first4=%08x\n",
+                   n.startBlock, (long long)off, (long long)len,
+                   (unsigned long long)take, w);
+    }
     return static_cast<int64_t>(take);
   }
 

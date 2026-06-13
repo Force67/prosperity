@@ -9,11 +9,15 @@
 
 #include <base.h>
 #include <atomic>
+#include <cstdint>
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <mutex>
 #include <vector>
 #include "dma_dev.h"
 #include "kern/lv2/sys_mem.h"
+#include "kern/proc.h"
 
 namespace krnl {
 dmaDevice::dmaDevice(proc *p) : device(p) {}
@@ -80,6 +84,31 @@ int32_t dmaDevice::ioctl(uint32_t cmd, void *data) {
     uint64_t align = a[3] ? a[3] : 0x4000;
     if (len == 0)
       return -1;
+    // SCOUT (DELTA_DMEM_CALLER): on native the handler runs on the guest stack,
+    // so scan it for return addresses in a loaded module's .text to pin which
+    // guest code reserved this pool (e.g. the CPU heap's len constant).
+    if (std::getenv("DELTA_DMEM_CALLER")) {
+      std::printf("[dmem-alloc] len=%#llx memType=%#llx align=%#llx caller-chain:\n",
+                  (unsigned long long)len, (unsigned long long)a[4],
+                  (unsigned long long)align);
+      auto *sp = reinterpret_cast<uintptr_t *>(__builtin_frame_address(0));
+      auto *pr = proc::getActive();
+      int shown = 0;
+      for (int i = 0; i < 4096 && shown < 12; i++) {
+        uintptr_t v = sp[i];
+        if (!pr) break;
+        for (auto &m : pr->getModuleList()) {
+          auto &mi = m->getInfo();
+          auto *t = mi.textSeg.addr;
+          if (t && v >= (uintptr_t)t && v < (uintptr_t)t + mi.textSeg.size) {
+            std::printf("  sp+%-4x %s+%#lx\n", i * 8, mi.name.c_str(),
+                        v - (uintptr_t)t);
+            shown++;
+            break;
+          }
+        }
+      }
+    }
     // Bump-allocate an aligned offset, honoring a non-zero searchStart floor.
     uint64_t off;
     for (;;) {

@@ -67,4 +67,10 @@ bool stat(const char *guestPath, int64_t &size, bool &isDir);
 
 // List a directory's immediate children. Returns false if not a directory.
 bool listDir(const char *guestPath, std::vector<DirEntry> &out);
+
+// Small content cache keyed by a short name (SOTTR workaround: the engine's
+// async manifest reader races, so we cache the real manifest contents at mount
+// and let the count-setter fill the header buffer with correct data).
+void cacheFile(const std::string &key, std::vector<uint8_t> data);
+const std::vector<uint8_t> *getCachedFile(const char *key);
 } // namespace krnl::vfs

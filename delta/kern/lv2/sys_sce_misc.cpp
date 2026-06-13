@@ -204,7 +204,23 @@ int64_t PS4ABI sys_blockpool_map(int64_t pool, size_t len, uint32_t prot,
 }
 
 int PS4ABI sys_blockpool_unmap() { return 0; }
-int PS4ABI sys_blockpool_batch() { return 0; }
+int64_t PS4ABI sys_blockpool_batch(uint64_t a0, uint64_t a1, uint64_t a2,
+                                   uint64_t a3, uint64_t a4, uint64_t a5) {
+  if (std::getenv("DELTA_BLOCKPOOL_TRACE")) {
+    std::fprintf(stderr, "[blockpool_batch] a0=%#llx a1=%#llx a2=%#llx a3=%#llx a4=%#llx a5=%#llx\n",
+                 (unsigned long long)a0, (unsigned long long)a1, (unsigned long long)a2,
+                 (unsigned long long)a3, (unsigned long long)a4, (unsigned long long)a5);
+    // a1 commonly points at the command array; dump a few 64-bit words.
+    if (a1 > 0x10000) {
+      auto *w = reinterpret_cast<uint64_t *>(a1);
+      std::fprintf(stderr, "  cmd[0..7]: %#llx %#llx %#llx %#llx %#llx %#llx %#llx %#llx\n",
+                   (unsigned long long)w[0], (unsigned long long)w[1], (unsigned long long)w[2],
+                   (unsigned long long)w[3], (unsigned long long)w[4], (unsigned long long)w[5],
+                   (unsigned long long)w[6], (unsigned long long)w[7]);
+    }
+  }
+  return 0;
+}
 
 int PS4ABI sys_dynlib_get_info_for_libdbg() { return 0; }
 int PS4ABI sys_dynlib_get_list_for_libdbg() { return 0; }
@@ -216,8 +232,14 @@ int PS4ABI sys_get_page_table_stats() { return 0; }
 // synchronous IO. Every AIO entry point funnels here, so the log can't name
 // which one; pair it with FEX_SCTRACE to attribute the call.
 int PS4ABI sys_aio_unsupported() {
-  static std::atomic<bool> once{false};
-  logOnce(once, "aio unsupported; guest should fall back to sync IO");
+  static std::atomic<int> n{0};
+  int c = ++n;
+  if (std::getenv("DELTA_AIO_TRACE") && c <= 200)
+    std::fprintf(stderr, "[aio] unsupported call #%d\n", c);
+  else {
+    static std::atomic<bool> once{false};
+    logOnce(once, "aio unsupported; guest should fall back to sync IO");
+  }
   return -SysError::eOPNOTSUPP;
 }
 

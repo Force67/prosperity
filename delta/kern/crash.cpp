@@ -15,11 +15,13 @@
 #include <cstring>
 #include <ucontext.h>
 #include <unistd.h>
+#include <time.h>
 #include <pthread.h>
 
 #include "crash.h"
 #include "module.h"
 #include "proc.h"
+#include "vfs.h"
 #include "cpu/cpu_backend.h"
 #include <logger/logger.h>
 
@@ -115,7 +117,255 @@ static void probeHandler(int, siginfo_t *, void *ucv) {
 }
 #endif
 
+// DELTA_ALLOC_TRACE: a guest allocator-entry vaddr whose first byte is `push rbp`
+// (0x55), replaced with int3 so we log each large allocation's size without gdb
+// (gdb conditional breakpoints are far too slow on this hot path). The handler
+// logs rsi (the size arg) when big, emulates the push rbp, and resumes -- one
+// trap per call, no single-stepping. x86-native only.
+uintptr_t g_allocTraceAddr = 0;
+uint64_t g_allocTraceMin = 0x1000000;  // 16 MiB
+// DELTA_CNT_TRACE: same int3-emulate trick at an entry whose 1st byte is push rbp,
+// but logs the per-archive entry-count [rdi+0x30] and the inline name at [rdi+0x5c].
+uintptr_t g_cntTraceAddr = 0;
+// DELTA_FATAL_TRACE: int3 at a printf-style fatal handler entry (push rbp); log
+// rdi (the format string) + caller + the first varargs, then resume.
+uintptr_t g_fatalTraceAddr = 0;
+// DELTA_HDR_TRACE: int3 at each manifest consumer (push rbp) where rdi=parent;
+// the manifest header is [parent+0x8] and the archive name is [[parent+0x10]+0x5c].
+// Supports several addresses (comma-separated env) so every consumer that reads
+// the header (count-setter 0x606150, segcount-reader 0x6063a0, ...) gets it filled.
+uintptr_t g_hdrTraceAddrs[8] = {0};
+int g_hdrTraceCount = 0;
+// DELTA_RDOFF_FIX: int3 at the file-read-request setter 0x60b510 (push rbp), args
+// esi=fd edx=offset ecx=nbytes r8=buf. SOTTR passes a garbage offset for manifest
+// reads; force it to 0 (read from the start) when the fd is a .manifest.bin fd.
+uintptr_t g_rdoffAddr = 0;
+bool g_manifestFd[8192] = {false};
+void markManifestFd(uint32_t fd, bool v) { if (fd < 8192) g_manifestFd[fd] = v; }
+// DELTA_SKIP_FN: int3 at a function entry (push rbp); emulate an immediate
+// `ret` (the push rbp hasn't run, so [rsp] is the return addr) with rax=0. Skips
+// the whole function -- used to step past a guest function that crashes/wedges
+// (e.g. the localization loader 0x666410) to reach the next boot stage.
+uintptr_t g_skipFnAddrs[8] = {0};
+int g_skipFnCount = 0;
+
 static void crashHandler(int sig, siginfo_t *si, void *ucv) {
+#if defined(__x86_64__)
+  if (sig == SIGTRAP && g_skipFnCount && ucv) {
+    auto *uc = static_cast<ucontext_t *>(ucv);
+    auto *gr = uc->uc_mcontext.gregs;
+    for (int si2 = 0; si2 < g_skipFnCount; si2++) {
+      if ((uintptr_t)gr[REG_RIP] == g_skipFnAddrs[si2] + 1) {
+        uintptr_t rsp = (uintptr_t)gr[REG_RSP];
+        gr[REG_RIP] = *reinterpret_cast<uint64_t *>(rsp);  // return addr
+        gr[REG_RSP] = rsp + 8;
+        gr[REG_RAX] = 0;
+        return;
+      }
+    }
+  }
+  if (sig == SIGTRAP && g_rdoffAddr && ucv) {
+    auto *uc = static_cast<ucontext_t *>(ucv);
+    auto *gr = uc->uc_mcontext.gregs;
+    if ((uintptr_t)gr[REG_RIP] == g_rdoffAddr + 1) {
+      uint32_t fd = (uint32_t)gr[REG_RSI];
+      bool mf = (fd < 8192 && g_manifestFd[fd]);
+      if (std::getenv("DELTA_RDOFF_TRACE")) {
+        char m[128];
+        int n = std::snprintf(m, sizeof(m),
+                              "[rdoff] fd=%u off=%lld nbytes=%lld buf=%llx manifest=%d\n",
+                              fd, (long long)(int32_t)gr[REG_RDX],
+                              (long long)(int32_t)gr[REG_RCX],
+                              (unsigned long long)gr[REG_R8], mf);
+        if (n > 0) { ssize_t w = write(2, m, (size_t)n); (void)w; }
+      }
+      if (mf)
+        gr[REG_RDX] = 0;  // force manifest read offset to 0 (read from start)
+      gr[REG_RSP] -= 8;   // emulate push rbp
+      *reinterpret_cast<uint64_t *>(gr[REG_RSP]) = (uint64_t)gr[REG_RBP];
+      return;
+    }
+  }
+  if (sig == SIGTRAP && g_hdrTraceCount && ucv) {
+    auto *uc = static_cast<ucontext_t *>(ucv);
+    auto *gr = uc->uc_mcontext.gregs;
+    bool hit = false;
+    for (int hi = 0; hi < g_hdrTraceCount; hi++)
+      if ((uintptr_t)gr[REG_RIP] == g_hdrTraceAddrs[hi] + 1) { hit = true; break; }
+    if (hit) {
+      uint64_t parent = (uint64_t)gr[REG_RDI];
+      uint64_t hdr = 0, obj = 0;
+      uint32_t magic = 0, cnt = 0;
+      char nm[48] = {0};
+      if (parent >= 0x10000) {
+        hdr = *reinterpret_cast<uint64_t *>(parent + 0x8);
+        obj = *reinterpret_cast<uint64_t *>(parent + 0x10);
+        // DELTA_HDR_WAIT: test the producer-consumer-race hypothesis. If the
+        // manifest header buffer isn't filled yet (magic != "TAFS"), block this
+        // (consumer) thread to let the worker thread's read+copy complete.
+        static const bool waitMode = std::getenv("DELTA_HDR_WAIT") != nullptr;
+        if (waitMode && hdr >= 0x10000) {
+          for (int i = 0; i < 2000; i++) {
+            if (*reinterpret_cast<volatile uint32_t *>(hdr) == 0x53464154u)
+              break;
+            timespec ts{0, 200000};  // 0.2ms
+            nanosleep(&ts, nullptr);
+          }
+        }
+        if (hdr >= 0x10000) {
+          magic = *reinterpret_cast<uint32_t *>(hdr);
+          cnt = *reinterpret_cast<uint32_t *>(hdr + 0xc);
+        }
+        if (obj >= 0x10000) {
+          const char *s = reinterpret_cast<const char *>(obj + 0x5c);
+          int j = 0; for (; j < 47 && s[j] >= 0x20 && s[j] <= 0x7e; j++) nm[j] = s[j];
+          nm[j] = 0;
+        }
+        // DELTA_HDR_FILL: bypass the racy async manifest reader by copying the
+        // real (cached) manifest bytes straight into the header buffer, so the
+        // count-setter reads the correct count + entry table for THIS archive.
+        static const bool fill = std::getenv("DELTA_HDR_FILL") != nullptr;
+        if (fill && hdr >= 0x10000 && nm[0]) {
+          auto *h = reinterpret_cast<uint8_t *>(hdr);
+          // The header buffer [parent+0x8] is allocated filesize (at 0x605e30),
+          // so fill the WHOLE manifest at every consumer hook -- both the header
+          // (count) and the entry table must be correct for the downstream
+          // segment/entry processing (0x666xxx) not to read garbage.
+          if (const auto *mf = vfs::getCachedFile(nm)) {
+            std::memcpy(h, mf->data(), mf->size());
+          } else {
+            // Missing archive (e.g. JAPANESE not in this pkg): write a valid
+            // empty TAFS header (count=0) so the entry-table alloc is tiny and
+            // the archive is empty, instead of reading a garbage count -> OOM.
+            std::memset(h, 0, 0x34);
+            h[0] = 'T'; h[1] = 'A'; h[2] = 'F'; h[3] = 'S';
+            *reinterpret_cast<uint32_t *>(h + 4) = 3;     // version
+            *reinterpret_cast<uint32_t *>(h + 0x10) = 7;  // strlen("orbis-w")
+            std::memcpy(h + 0x14, "orbis-w", 7);
+          }
+          magic = *reinterpret_cast<uint32_t *>(h);
+          cnt = *reinterpret_cast<uint32_t *>(h + 0xc);
+        }
+      }
+      char m[176];
+      int n = std::snprintf(m, sizeof(m),
+                            "[hdr] t=%ld name=\"%s\" hdr=%#llx magic=%08x count=%u\n",
+                            (long)gettid(), nm, (unsigned long long)hdr, magic, cnt);
+      if (n > 0) { ssize_t w = write(2, m, (size_t)n); (void)w; }
+      static bool once = false;
+      if (!once && obj >= 0x10000) {
+        once = true;
+        uint64_t vt = *reinterpret_cast<uint64_t *>(obj);
+        uint64_t m58 = (vt >= 0x10000) ? *reinterpret_cast<uint64_t *>(vt + 0x58) : 0;
+        // 0x608390-style forward: inner obj = [obj+0x8], real method = inner.vt[0x58].
+        uint64_t inner = *reinterpret_cast<uint64_t *>(obj + 0x8);
+        uint64_t ivt = (inner >= 0x10000) ? *reinterpret_cast<uint64_t *>(inner) : 0;
+        uint64_t im58 = (ivt >= 0x10000) ? *reinterpret_cast<uint64_t *>(ivt + 0x58) : 0;
+        uint64_t im30 = (ivt >= 0x10000) ? *reinterpret_cast<uint64_t *>(ivt + 0x30) : 0;
+        char v[224];
+        int vn = std::snprintf(v, sizeof(v),
+                               "[hdr] obj=%#llx vt=%#llx m58=%#llx | inner=%#llx ivt=%#llx im30=%#llx im58=%#llx\n",
+                               (unsigned long long)obj, (unsigned long long)vt,
+                               (unsigned long long)m58, (unsigned long long)inner,
+                               (unsigned long long)ivt, (unsigned long long)im30,
+                               (unsigned long long)im58);
+        if (vn > 0) { ssize_t w = write(2, v, (size_t)vn); (void)w; }
+      }
+      gr[REG_RSP] -= 8;
+      *reinterpret_cast<uint64_t *>(gr[REG_RSP]) = (uint64_t)gr[REG_RBP];
+      return;
+    }
+  }
+  if (sig == SIGTRAP && g_fatalTraceAddr && ucv) {
+    auto *uc = static_cast<ucontext_t *>(ucv);
+    auto *gr = uc->uc_mcontext.gregs;
+    if ((uintptr_t)gr[REG_RIP] == g_fatalTraceAddr + 1) {
+      uint64_t fmt = (uint64_t)gr[REG_RDI];
+      uint64_t caller = 0;
+      uintptr_t rsp = (uintptr_t)gr[REG_RSP];
+      if (rsp >= 0x10000) caller = *reinterpret_cast<uint64_t *>(rsp);
+      char msg[256] = {0};
+      if (fmt >= 0x10000) {
+        const char *s = reinterpret_cast<const char *>(fmt);
+        int j = 0;
+        for (; j < 255 && s[j]; j++) msg[j] = (s[j] >= 0x20 || s[j] == '\n') ? s[j] : '.';
+        msg[j] = 0;
+      }
+      char out[480];
+      int n = std::snprintf(out, sizeof(out),
+                            "[FATAL] caller=%#llx rsi=%#llx rdx=%#llx rcx=%#llx\n        fmt=\"%s\"\n",
+                            (unsigned long long)caller, (unsigned long long)gr[REG_RSI],
+                            (unsigned long long)gr[REG_RDX], (unsigned long long)gr[REG_RCX], msg);
+      if (n > 0) { ssize_t w = write(2, out, (size_t)n); (void)w; }
+      gr[REG_RSP] -= 8;
+      *reinterpret_cast<uint64_t *>(gr[REG_RSP]) = (uint64_t)gr[REG_RBP];
+      return;
+    }
+  }
+  if (sig == SIGTRAP && g_cntTraceAddr && ucv) {
+    auto *uc = static_cast<ucontext_t *>(ucv);
+    auto *gr = uc->uc_mcontext.gregs;
+    if ((uintptr_t)gr[REG_RIP] == g_cntTraceAddr + 1) {
+      uint64_t obj = (uint64_t)gr[REG_RDI];
+      uint32_t cnt = 0; char nm[48] = {0};
+      if (obj >= 0x10000) {
+        cnt = *reinterpret_cast<uint32_t *>(obj + 0x30);
+        const char *s = reinterpret_cast<const char *>(obj + 0x5c);
+        int j = 0; for (; j < 47 && s[j] >= 0x20 && s[j] <= 0x7e; j++) nm[j] = s[j];
+        nm[j] = 0;
+      }
+      char m[128];
+      int n = std::snprintf(m, sizeof(m), "[cnt] obj=%llx count=%u (%#x) name=\"%s\"\n",
+                            (unsigned long long)obj, cnt, cnt, nm);
+      if (n > 0) { ssize_t w = write(2, m, (size_t)n); (void)w; }
+      // DELTA_CNT_CLAMP: experiment - if the entry count is absurd (uninitialised
+      // garbage), force it to 0 so the entry-table alloc is tiny and the boot can
+      // proceed past the OOM to reveal the next blocker.
+      static const bool clamp = std::getenv("DELTA_CNT_CLAMP") != nullptr;
+      if (clamp && obj >= 0x10000 && cnt > 0x100000)
+        *reinterpret_cast<uint32_t *>(obj + 0x30) = 0;
+      gr[REG_RSP] -= 8;
+      *reinterpret_cast<uint64_t *>(gr[REG_RSP]) = (uint64_t)gr[REG_RBP];
+      return;
+    }
+  }
+  // Allocator-trace trap: handle first so it neither marks s_dumping nor floods
+  // the entry marker. After int3 the RIP sits one byte past the hooked entry.
+  if (sig == SIGTRAP && g_allocTraceAddr && ucv) {
+    auto *uc = static_cast<ucontext_t *>(ucv);
+    auto *gr = uc->uc_mcontext.gregs;
+    if ((uintptr_t)gr[REG_RIP] == g_allocTraceAddr + 1) {
+      uint64_t size = (uint64_t)gr[REG_RSI];
+      if (size >= g_allocTraceMin) {
+        char m[96];
+        int n = std::snprintf(m, sizeof(m), "[alloc] %llu bytes (%.1f MB) heap=%llx\n",
+                              (unsigned long long)size, size / 1048576.0,
+                              (unsigned long long)gr[REG_RDI]);
+        if (n > 0) { ssize_t w = write(2, m, (size_t)n); (void)w; }
+        // Scan the guest stack for return addresses in a module .text to show
+        // which code computed this (garbage) size.
+        uintptr_t rsp = (uintptr_t)gr[REG_RSP];
+        if (rsp >= 0x10000) {
+          auto *sp = reinterpret_cast<uintptr_t *>(rsp);
+          int shown = 0;
+          for (int i = 0; i < 256 && shown < 8; i++) {
+            char sym[200];
+            symbolize(sp[i], sym, sizeof(sym));
+            if (std::strstr(sym, "(.text)")) {
+              char l[256];
+              int ln = std::snprintf(l, sizeof(l), "  sp+%-4x %s\n", i * 8, sym);
+              if (ln > 0) { ssize_t w = write(2, l, (size_t)ln); (void)w; }
+              shown++;
+            }
+          }
+        }
+      }
+      gr[REG_RSP] -= 8;  // emulate the displaced `push rbp`
+      *reinterpret_cast<uint64_t *>(gr[REG_RSP]) = (uint64_t)gr[REG_RBP];
+      return;            // resume at addr+1 (the mov rbp,rsp that follows)
+    }
+  }
+#endif
   // Async-signal-safe entry marker: proves the handler actually ran even if a
   // later step (symbolize / backtrace) re-faults. Without it a re-fault inside
   // the handler is indistinguishable from the handler never being entered.
@@ -290,6 +540,20 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
   std::fflush(stdout);  // _Exit won't flush; keep the guest trace up to the fault
   std::_Exit(128 + sig);
 }
+
+void setAllocTrace(uintptr_t addr, uint64_t minSize) {
+  g_allocTraceAddr = addr;
+  if (minSize)
+    g_allocTraceMin = minSize;
+}
+
+void setCntTrace(uintptr_t addr) { g_cntTraceAddr = addr; }
+void setFatalTrace(uintptr_t addr) { g_fatalTraceAddr = addr; }
+void setHdrTrace(uintptr_t addr) {
+  if (g_hdrTraceCount < 8) g_hdrTraceAddrs[g_hdrTraceCount++] = addr;
+}
+void setRdoffFix(uintptr_t addr) { g_rdoffAddr = addr; }
+void setSkipFn(uintptr_t addr) { if (g_skipFnCount < 8) g_skipFnAddrs[g_skipFnCount++] = addr; }
 
 void installSigAltStack() {
   // One alt stack per thread; 256 KiB easily holds our dump path. Leaked on

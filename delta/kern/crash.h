@@ -13,6 +13,26 @@ namespace krnl {
 // backtrace) to <module>+offset using the loaded module table, then exit.
 void installCrashHandler();
 
+// Enable the DELTA_ALLOC_TRACE allocator-entry tracer: addr's first byte must be
+// `push rbp` (0x55); the caller plants an int3 there and this records addr so the
+// fatal handler logs each allocation (size in rsi) >= minSize and resumes.
+void setAllocTrace(uintptr_t addr, uint64_t minSize);
+
+// DELTA_CNT_TRACE: like setAllocTrace but logs the archive entry-count [rdi+0x30]
+// and the inline name [rdi+0x5c] at the hooked entry (push rbp -> int3).
+void setCntTrace(uintptr_t addr);
+
+// DELTA_FATAL_TRACE: int3 at a printf-style fatal handler entry; logs rdi (the
+// format string) + caller + varargs so we learn why a worker thread bailed.
+void setFatalTrace(uintptr_t addr);
+void setHdrTrace(uintptr_t addr);
+
+// DELTA_RDOFF_FIX: hook the file-read-request setter to force a manifest read's
+// offset to 0; markManifestFd flags which fds are .manifest.bin (set in sys_open).
+void setRdoffFix(uintptr_t addr);
+void setSkipFn(uintptr_t addr);
+void markManifestFd(uint32_t fd, bool v);
+
 // Give the calling thread a dedicated signal-handler stack (SA_ONSTACK). The
 // fatal handler then runs even when the guest's own RSP is corrupt or blown
 // (a stack-overflow fault would otherwise be undeliverable -> silent core).

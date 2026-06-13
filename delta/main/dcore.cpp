@@ -66,6 +66,33 @@ public:
   }
   bool valid() const { return fs_.valid(); }
 
+  // SOTTR workaround: cache every .manifest.bin's bytes keyed by its base name
+  // (e.g. "PRIORITY7_ENGLISH"), so the count-setter can fill the header buffer
+  // with correct data (the engine's async manifest reader races on our threads).
+  void cacheManifests() {
+    if (!std::getenv("DELTA_HDR_FILL"))
+      return;
+    std::vector<std::string> all;
+    fs_.paths(all);
+    for (const auto &p : all) {
+      const char *suf = ".manifest.bin";
+      size_t sl = std::strlen(suf);
+      if (p.size() <= sl || p.compare(p.size() - sl, sl, suf) != 0)
+        continue;
+      const auto *node = fs_.find(p.c_str());
+      if (!node)
+        continue;
+      std::vector<uint8_t> buf(node->size);
+      int64_t n = fs_.read(*node, buf.data(), 0, node->size);
+      if (n <= 0)
+        continue;
+      buf.resize(static_cast<size_t>(n));
+      size_t start = (p[0] == '/') ? 1 : 0;
+      std::string key = p.substr(start, p.size() - start - sl);
+      krnl::vfs::cacheFile(key, std::move(buf));
+    }
+  }
+
   std::unique_ptr<krnl::vfs::VirtualFile> open(const char *rel) override {
     maybeDump();
     const auto *node = fs_.find(rel);
@@ -175,6 +202,7 @@ void deltaCore::boot(const base::String &xdir) {
       return;
     }
     krnl::vfs::mountVirtual("/app0", provider);
+    provider->cacheManifests();
     mainModule = base::String("/app0/eboot.bin");
   }
 

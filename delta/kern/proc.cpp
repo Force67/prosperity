@@ -404,6 +404,88 @@ static void applyBootPatches(proc &p) {
       while (*cur == ',' || *cur == ' ') cur++;
     }
   }
+  // DEBUG (DELTA_ALLOC_TRACE=0xADDR[,minMB]): trace large allocations through a
+  // guest allocator whose entry (ADDR) begins with `push rbp`. Replace it with
+  // int3; the fatal handler logs the size (rsi) and emulates the push. Lets us
+  // see what fills a fixed heap (e.g. SOTTR's 1 GiB pool) without gdb.
+  if (const char *at = std::getenv("DELTA_ALLOC_TRACE")) {
+    char *end = nullptr;
+    uint64_t addr = std::strtoull(at, &end, 0);
+    uint64_t minB = 0x1000000;
+    if (end && *end == ',') minB = std::strtoull(end + 1, nullptr, 0) * 1024 * 1024;
+    if (addr) {
+      auto *c = reinterpret_cast<uint8_t *>(addr);
+      utl::protectMem(reinterpret_cast<void *>(addr & ~0xFFFull), 0x1000,
+                      utl::pageProtection::rwx);
+      if (c[0] == 0x55) {  // push rbp
+        c[0] = 0xCC;       // int3
+        setAllocTrace(addr, minB);
+        LOG_INFO("DELTA_ALLOC_TRACE: hooked alloc entry {:#x} (>= {} MB)", addr,
+                 minB / (1024 * 1024));
+      } else {
+        LOG_WARNING("DELTA_ALLOC_TRACE: {:#x} first byte {:#x} != push rbp", addr,
+                    c[0]);
+      }
+    }
+  }
+  if (const char *ct = std::getenv("DELTA_CNT_TRACE")) {
+    uint64_t addr = std::strtoull(ct, nullptr, 0);
+    if (addr) {
+      auto *c = reinterpret_cast<uint8_t *>(addr);
+      utl::protectMem(reinterpret_cast<void *>(addr & ~0xFFFull), 0x1000,
+                      utl::pageProtection::rwx);
+      if (c[0] == 0x55) { c[0] = 0xCC; setCntTrace(addr); }
+    }
+  }
+  if (const char *ft = std::getenv("DELTA_FATAL_TRACE")) {
+    uint64_t addr = std::strtoull(ft, nullptr, 0);
+    if (addr) {
+      auto *c = reinterpret_cast<uint8_t *>(addr);
+      utl::protectMem(reinterpret_cast<void *>(addr & ~0xFFFull), 0x1000,
+                      utl::pageProtection::rwx);
+      if (c[0] == 0x55) { c[0] = 0xCC; setFatalTrace(addr); }
+    }
+  }
+  if (const char *ht = std::getenv("DELTA_HDR_TRACE")) {
+    // Comma-separated list of consumer entry vaddrs to hook (e.g. 0x606150,0x6063a0).
+    const char *s = ht;
+    while (*s) {
+      char *end = nullptr;
+      uint64_t addr = std::strtoull(s, &end, 0);
+      if (addr) {
+        auto *c = reinterpret_cast<uint8_t *>(addr);
+        utl::protectMem(reinterpret_cast<void *>(addr & ~0xFFFull), 0x1000,
+                        utl::pageProtection::rwx);
+        if (c[0] == 0x55) { c[0] = 0xCC; setHdrTrace(addr); }
+      }
+      s = (end && *end == ',') ? end + 1 : (end ? end : s + 1);
+      if (!*s || (end && *end != ',')) break;
+    }
+  }
+  if (const char *ro = std::getenv("DELTA_RDOFF_FIX")) {
+    uint64_t addr = std::strtoull(ro, nullptr, 0);
+    if (addr) {
+      auto *c = reinterpret_cast<uint8_t *>(addr);
+      utl::protectMem(reinterpret_cast<void *>(addr & ~0xFFFull), 0x1000,
+                      utl::pageProtection::rwx);
+      if (c[0] == 0x55) { c[0] = 0xCC; setRdoffFix(addr); }
+    }
+  }
+  if (const char *sf = std::getenv("DELTA_SKIP_FN")) {
+    const char *s2 = sf;
+    while (*s2) {
+      char *end = nullptr;
+      uint64_t addr = std::strtoull(s2, &end, 0);
+      if (addr) {
+        auto *c = reinterpret_cast<uint8_t *>(addr);
+        utl::protectMem(reinterpret_cast<void *>(addr & ~0xFFFull), 0x1000,
+                        utl::pageProtection::rwx);
+        if (c[0] == 0x55) { c[0] = 0xCC; setSkipFn(addr); }
+      }
+      s2 = (end && *end == ',') ? end + 1 : (end ? end : s2 + 1);
+      if (!*s2 || (end && *end != ',')) break;
+    }
+  }
   forceReturn0(p, "libkernel", 0x287e0);            // module-gen lib-id validator
   forceReturn0(p, "libSceAppContentUtil", 0x1a00);  // AppContent IPMI init
   // AppContent's IPMI client is stubbed, so the real Initialize/AppParamGetInt

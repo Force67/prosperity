@@ -8,6 +8,7 @@
  */
 
 #include <base.h>
+#include <unistd.h>
 #include <base/strings/string_ref.h>
 #include <cstdio>
 
@@ -21,6 +22,7 @@
 #include "kern/dev/gc_dev.h"
 #include "kern/dev/tty6_dev.h"
 #include "kern/proc.h"
+#include "kern/crash.h"
 #include "kern/vfs.h"
 #include "sys_mem.h"
 #include "sys_vfs.h"
@@ -131,6 +133,14 @@ int PS4ABI sys_open(const char *path, uint32_t flags, uint32_t mode) {
     file->releaseHandle();
     return -SysError::eNOENT;
   }
+  // SOTTR's TAFS loader reads .manifest.bin with an uninitialised file offset;
+  // serve those sequentially so the header (off 0) loads. See setSeqMode().
+  if (std::getenv("DELTA_MANIFEST_SEQ") && std::strstr(path, ".manifest.bin"))
+    file->setSeqMode();
+  // Flag manifest fds so the read-request setter hook (DELTA_RDOFF_FIX) can
+  // force their read offset to 0.
+  if (std::strstr(path, ".manifest.bin"))
+    markManifestFd(file->handle(), true);
   if (vtrace)
     std::fprintf(stderr, "[open]   -> fd=%u size=%lld %s\n", file->handle(),
                  (long long)fsize, path);
@@ -147,8 +157,11 @@ static device *fdToDevice(uint32_t fd) {
 
 int64_t PS4ABI sys_read(uint32_t fd, void *buf, size_t nbytes) {
   auto *d = fdToDevice(fd);
-  if (!d)
+  if (!d) {
+    if (std::getenv("DELTA_RDALL"))
+      std::fprintf(stderr, "[rd] fd=%u -> EBADF (no device)\n", fd);
     return -SysError::eBADF;
+  }
   int64_t r = d->read(buf, nbytes);
   // DELTA_READ_TRACE: log large reads (asset/texture loads) + their target buffer,
   // to see whether texture data lands in the GPU texture region (0x41x) directly or
@@ -157,6 +170,13 @@ int64_t PS4ABI sys_read(uint32_t fd, void *buf, size_t nbytes) {
   if (rt && nbytes >= 0x4000)
     std::fprintf(stderr, "[read] fd=%u buf=%p nbytes=%#zx -> %lld\n", fd, buf, nbytes,
                  (long long)r);
+  static const bool ra = std::getenv("DELTA_RDALL") != nullptr;
+  if (ra) {
+    uint32_t f4 = 0;
+    if (buf && r >= 4) f4 = *reinterpret_cast<const uint32_t *>(buf);
+    std::fprintf(stderr, "[rd] t=%ld fd=%u nbytes=%#zx -> %lld buf=%p first4=%08x\n", (long)gettid(), fd, nbytes,
+                 (long long)r, buf, f4);
+  }
   return r;
 }
 
@@ -188,7 +208,11 @@ int PS4ABI sys_fstat(uint32_t fd, void *stat) {
   auto *d = fdToDevice(fd);
   if (!d)
     return -SysError::eBADF;
-  return d->fstat(stat);
+  int r = d->fstat(stat);
+  if (std::getenv("DELTA_RDALL") && stat)
+    std::fprintf(stderr, "[fstat] fd=%u -> st_size=%lld\n", fd,
+                 (long long)static_cast<SceKernelStat *>(stat)->st_size);
+  return r;
 }
 
 int PS4ABI sys_stat(const char *path, void *stat) {
@@ -218,6 +242,14 @@ int PS4ABI sys_close(uint32_t fd) {
   auto *proc = proc::getActive();
 
   if (proc && fd != -1) {
+    if (std::getenv("DELTA_RDALL"))
+      std::fprintf(stderr, "[close] fd=%u\n", fd);
+    // DELTA_NO_CLOSE: test whether SOTTR's manifest cross-contamination is an
+    // fd-reuse race (async worker reads lag behind main's open/close/reopen, all
+    // recycling the same fd). Deferring close keeps each file's device alive ->
+    // unique fds -> lagged reads hit the right file.
+    if (std::getenv("DELTA_NO_CLOSE"))
+      return 0;
     proc->getObjTable().release(fd);
     return 0;
   }
