@@ -108,7 +108,10 @@ int PS4ABI sys_getrusage(int who, void *rusage) {
 // that never dumps core.
 int PS4ABI sys_getrlimit(int which, void *rlp) {
   if (!rlp)
-    return 0;
+    return -SysError::eFAULT;
+  // The kernel rejects a resource index past RLIM_NLIMITS-1 (0xC) with EINVAL.
+  if (static_cast<unsigned>(which) > 0xC)
+    return -SysError::eINVAL;
   enum { kCore = 4, kNproc = 7, kNofile = 8, kNpts = 11 };
   int64_t lim = INT64_MAX;
   switch (which) {
@@ -124,7 +127,11 @@ int PS4ABI sys_getrlimit(int which, void *rlp) {
   return 0;
 }
 
-int PS4ABI sys_setrlimit(int which, const void *rlp) { return 0; }
+int PS4ABI sys_setrlimit(int which, const void *rlp) {
+  if (static_cast<unsigned>(which) > 0xC)
+    return -SysError::eINVAL;
+  return 0; // accepted; we don't enforce soft/hard limits
+}
 
 // FreeBSD utsname: five char[SYS_NMLN(=32)] fields back to back.
 int PS4ABI sys_uname(void *name) {
