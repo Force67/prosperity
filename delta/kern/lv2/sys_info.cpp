@@ -134,13 +134,14 @@ int PS4ABI sys_sysctl(int *name, uint32_t namelen, void *oldp, size_t *oldlenp,
     return 0;
   }
 
-  // answer machdep.tsc_freq (synthetic oid {0x1337,5}). The TSC on the PS4 APU
-  // runs at a fixed ~1.6 GHz; libkernel's sceKernelGetTscFrequency divides by
-  // this during every module's CRT init, so a zero/garbage value risks a
-  // divide-by-zero or wildly wrong timing. Report a plausible fixed rate.
+  // answer machdep.tsc_freq (synthetic oid {0x1337,5}). The base PS4 "Liverpool"
+  // APU's Jaguar cores run at exactly 1.6 GHz (16x the 100 MHz reference clock),
+  // and the invariant TSC ticks at that rate. libkernel's sceKernelGetTscFrequency
+  // reads this and divides by it during every module's CRT init, so report the
+  // real 1.6 GHz rather than an approximation.
   else if (name[0] == 0x1337 && name[1] == 5 && namelen == 2) {
     if (oldp && oldlenp && *oldlenp >= sizeof(uint64_t)) {
-      *reinterpret_cast<uint64_t *>(oldp) = 1593600000ull;
+      *reinterpret_cast<uint64_t *>(oldp) = 1600000000ull; // 1.6 GHz
       *oldlenp = sizeof(uint64_t);
     }
     return 0;
