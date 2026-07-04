@@ -10,7 +10,10 @@
 #include <base.h>
 #include <unistd.h>
 #include <base/strings/string_ref.h>
+#include <algorithm>
 #include <cstdio>
+#include <deque>
+#include <mutex>
 
 #include "kern/dev/ajm_dev.h"
 #include "kern/dev/console_dev.h"
@@ -238,18 +241,47 @@ int64_t PS4ABI sys_getdents(uint32_t fd, void *buf, size_t nbytes) {
   return d->getdents(buf, nbytes);
 }
 
+// Regular-file fd slots are released a bounded number of closes late. Titles
+// (e.g. Shadow of the Tomb Raider) open a file, hand its fd to an async I/O
+// worker, then immediately close and reopen the next file. If we free the slot
+// at once it is reused for the next open, and the worker's still-pending read
+// lands on the wrong file -> a garbage archive header -> a huge (~32 GiB)
+// entry-table allocation. Keeping the last N closed file slots alive lets the
+// lagging read complete against the right file. The window is small; PFS-backed
+// files share one host fd, so this does not consume host descriptors. Char
+// devices (/dev/gc, ...) are released immediately.
+static std::mutex g_deferM;
+static std::deque<uint32_t> g_deferred;
+static constexpr size_t kDeferredCloseWindow = 256;
+
 int PS4ABI sys_close(uint32_t fd) {
   auto *proc = proc::getActive();
 
   if (proc && fd != -1) {
     if (std::getenv("DELTA_RDALL"))
       std::fprintf(stderr, "[close] fd=%u\n", fd);
-    // DELTA_NO_CLOSE: test whether SOTTR's manifest cross-contamination is an
-    // fd-reuse race (async worker reads lag behind main's open/close/reopen, all
-    // recycling the same fd). Deferring close keeps each file's device alive ->
-    // unique fds -> lagged reads hit the right file.
-    if (std::getenv("DELTA_NO_CLOSE"))
+    auto *d = fdToDevice(fd);
+    if (d && d->isRegularFile()) {
+      uint32_t evict = static_cast<uint32_t>(-1);
+      {
+        std::lock_guard<std::mutex> lk(g_deferM);
+        // A deferred fd keeps its slot pinned, so it can't have been reopened as
+        // a different file; a second close of it is a redundant double-close and
+        // must not queue a second (wrong) release.
+        bool already = std::find(g_deferred.begin(), g_deferred.end(), fd) !=
+                       g_deferred.end();
+        if (!already) {
+          g_deferred.push_back(fd);
+          if (g_deferred.size() > kDeferredCloseWindow) {
+            evict = g_deferred.front();
+            g_deferred.pop_front();
+          }
+        }
+      }
+      if (evict != static_cast<uint32_t>(-1))
+        proc->getObjTable().release(evict);
       return 0;
+    }
     proc->getObjTable().release(fd);
     return 0;
   }

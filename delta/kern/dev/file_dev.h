@@ -54,6 +54,8 @@ public:
   // Back this device with an already-opened file (e.g. a virtual VFS stream).
   bool adopt(utl::File &&file);
 
+  bool isRegularFile() const override { return true; }
+
   // SOTTR's TAFS loader issues manifest reads with an uninitialised (garbage)
   // file offset, so the header at off 0 never loads. In sequential mode the
   // device ignores the bogus absolute offsets and serves reads in order from an

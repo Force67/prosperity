@@ -22,6 +22,13 @@ public:
   inline device(proc *p) : kObject(p, kObject::oType::device) {}
 
   virtual bool init(const char *, uint32_t, uint32_t) { return true; }
+
+  // True for host/pfs-backed regular files. Titles read these from async worker
+  // threads that can lag behind the opening thread's close+reopen; sys_close
+  // defers releasing their fd slot so a still-pending read can't land on a freed
+  // (and reused) slot and read another file's bytes. Overridden by fileDevice.
+  virtual bool isRegularFile() const { return false; }
+
   // Unknown map/ioctl on a device: soft-fail (and log) instead of trapping, so
   // the boot keeps advancing and we can see what the guest actually wanted.
   virtual uint8_t *map(void *, size_t, uint32_t, uint32_t, size_t) {
