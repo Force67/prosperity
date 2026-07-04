@@ -84,7 +84,10 @@ static void printVideoOutCaller() {
   auto *sp = reinterpret_cast<uintptr_t *>(__builtin_frame_address(0));
   int shown = 0;
   uintptr_t lastoff = ~0ull;
-  for (int i = 0; i < 1024 && shown < 6; i++) {
+  // The caller return addresses sit within the first few frames; a wide scan can
+  // walk off the top of the guest stack (an unmapped page) and fault. 128 qwords
+  // (1 KiB) is well within the mapped stack and finds the wrapper reliably.
+  for (int i = 0; i < 128 && shown < 6; i++) {
     uintptr_t v = sp[i];
     if (v >= vbase && v < vbase + vsize) {
       uintptr_t off = v - vbase;
@@ -312,6 +315,9 @@ int32_t dceDevice::ioctl(uint32_t cmd, void *data) {
     g_dceCurrentBuffer.store(static_cast<uint32_t>(s[1]));
     g_dceFlipArg.store(static_cast<int64_t>(s[3]));
     g_dceFlipCount.fetch_add(1);  // a per-flip count reported back in GetFlipStatus
+    if (g_dceTrace())
+      std::printf("[dce] submitFlip buf=%d flipArg=%#llx\n", (int)s[1],
+                  (unsigned long long)s[3]);
     // Report success: arg[0x40] (s[8]) points at a status out-slot the caller
     // checks for 0x58 = ok.
     if (plausiblePtr(s[8]))
