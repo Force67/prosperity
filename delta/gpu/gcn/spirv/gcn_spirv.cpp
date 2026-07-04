@@ -23,7 +23,9 @@ bool recompileSpirv(const uint32_t *, const uint32_t *, const uint32_t *,
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <spirv/unified1/GLSL.std.450.h>
@@ -36,6 +38,18 @@ using Id = S::Id;
 
 bool inGuest(uint64_t a) { return a >= 0x1000000000ull && a < 0x20000000000ull; }
 const bool g_dbg = std::getenv("DELTA_GPU_SHTRACE") != nullptr;
+
+// Loud, deduplicated report of an instruction the translator does not implement,
+// so it falls back to an approximation. Logged once per distinct (encoding,opcode)
+// to stderr: silent wrong codegen is never acceptable, but a per-frame flood is
+// useless, so we dedup. `enc`/`op` are the disassembly-level identity.
+void warnUnsup(const char *enc, uint32_t op, uint32_t w0 = 0, uint32_t w1 = 0) {
+  static std::unordered_set<uint64_t> seen;
+  uint64_t key = (uint64_t)std::hash<std::string_view>{}(enc) ^ ((uint64_t)op << 40);
+  if (seen.size() > 512 || !seen.insert(key).second) return;
+  std::fprintf(stderr, "[gcnspv] UNSUPPORTED %s op=%#x (w0=%#x w1=%#x) -> approximated\n",
+               enc, op, w0, w1);
+}
 
 // Fetch-shader attribute (mirrors gcn_translate.cpp's parseFetch).
 struct FetchAttr { uint32_t semantic, numComps, destVgpr, tableSgpr, dwordOff; };
@@ -195,74 +209,113 @@ struct Tr {
 
 // ---- VOP emitters (mirror gcn_translate.cpp Emit::vop*) ---------------------
 void emitVop1(Tr &t, uint32_t op, uint32_t vdst, Id s0);
-void emitVop2(Tr &t, uint32_t op, uint32_t vdst, Id s0, Id s1);
+void emitVop2(Tr &t, uint32_t op, uint32_t vdst, Id s0, Id s1, uint32_t literal = 0);
 
+// GFX6/7 (Liverpool / Sea Islands) VOP1 numbering (AMD CI ISA). An earlier table
+// mis-numbered the transcendentals (rcp/rsq/sqrt/sin/cos), silently turning them
+// into mov/sqrt/etc.; the numbers below are the real ones the recompiler decodes.
 void emitVop1(Tr &t, uint32_t op, uint32_t vdst, Id s0) {
   auto setF = [&](Id f) { t.stVgF(vdst, f); };
   auto setU = [&](Id u) { t.stVg(vdst, u); };
+  Id u0 = t.m.bitcast(t.tU, s0);
   switch (op) {
-    case 0x01: setU(t.m.bitcast(t.tU, s0)); break;                       // mov_b32
-    case 0x05: setF(t.m.emit(spv::Op::OpConvertSToF, t.tF, {t.m.bitcast(t.tI, s0)})); break;  // f32_i32
-    case 0x06: setF(t.m.emit(spv::Op::OpConvertUToF, t.tF, {t.m.bitcast(t.tU, s0)})); break;  // f32_u32
-    case 0x07: setU(t.m.emit(spv::Op::OpConvertFToU, t.tU, {s0})); break;  // u32_f32
-    case 0x08: setU(t.m.bitcast(t.tU, t.m.emit(spv::Op::OpConvertFToS, t.tI, {s0}))); break;  // i32_f32
+    case 0x01: setU(u0); break;                                          // v_mov_b32
+    case 0x05: setF(t.m.emit(spv::Op::OpConvertSToF, t.tF, {t.m.bitcast(t.tI, u0)})); break;  // cvt_f32_i32
+    case 0x06: setF(t.m.emit(spv::Op::OpConvertUToF, t.tF, {u0})); break;  // cvt_f32_u32
+    case 0x07: setU(t.m.emit(spv::Op::OpConvertFToU, t.tU, {s0})); break;  // cvt_u32_f32
+    case 0x08: setU(t.m.bitcast(t.tU, t.m.emit(spv::Op::OpConvertFToS, t.tI, {s0}))); break;  // cvt_i32_f32
+    case 0x0c: setU(t.m.bitcast(t.tU, t.m.emit(spv::Op::OpConvertFToS, t.tI,
+                  {t.ext1(GLSLstd450Floor, t.fadd(s0, t.fconst(0.5f)))}))); break;  // cvt_rpi_i32_f32
     case 0x0d: setU(t.m.bitcast(t.tU, t.m.emit(spv::Op::OpConvertFToS, t.tI,
-                  {t.ext1(GLSLstd450Floor, t.fadd(s0, t.fconst(0.5f)))}))); break;  // rpi
-    case 0x0e: setU(t.m.bitcast(t.tU, t.m.emit(spv::Op::OpConvertFToS, t.tI,
-                  {t.ext1(GLSLstd450Floor, s0)}))); break;               // flr
-    // Transcendental/rounding ops, GFX6/7 (Liverpool / Sea Islands) VOP1 numbering. The
-    // earlier table used GFX8/9 numbers, so V_EXP_F32 (0x25) was decoded as floor and
-    // V_RCP_F32 (0x27) as a mov -- which collapsed any colour-processing shader (e.g. the
-    // scene->scanout composite's gamma: log2/mul/exp2) to black. These are the real
-    // opcodes the recompiler sees.
-    case 0x20: setF(t.ext1(GLSLstd450Fract, s0)); break;                 // V_FRACT_F32
-    case 0x21: setF(t.ext1(GLSLstd450Trunc, s0)); break;                 // V_TRUNC_F32
-    case 0x22: setF(t.ext1(GLSLstd450Ceil, s0)); break;                  // V_CEIL_F32
-    case 0x23: setF(t.ext1(GLSLstd450RoundEven, s0)); break;             // V_RNDNE_F32
-    case 0x24: setF(t.ext1(GLSLstd450Floor, s0)); break;                 // V_FLOOR_F32
-    case 0x25: setF(t.ext1(GLSLstd450Exp2, s0)); break;                  // V_EXP_F32
-    case 0x26: setF(t.ext1(GLSLstd450Log2, s0)); break;                  // V_LOG_F32
-    case 0x27: case 0x28: setF(t.fdiv(t.fconst(1.0f), s0)); break;       // V_RCP[_IFLAG]_F32
-    case 0x29: setF(t.ext1(GLSLstd450InverseSqrt, s0)); break;           // V_RSQ_F32
-    case 0x2e: setF(t.ext1(GLSLstd450Sqrt, s0)); break;                  // V_SQRT_F32
-    case 0x30: setF(t.ext1(GLSLstd450Sin, s0)); break;                   // V_SIN_F32
-    case 0x31: setF(t.ext1(GLSLstd450Cos, s0)); break;                   // V_COS_F32
-    default: setU(t.m.bitcast(t.tU, s0)); break;                         // mov fallback
+                  {t.ext1(GLSLstd450Floor, s0)}))); break;               // cvt_flr_i32_f32
+    case 0x11: case 0x12: case 0x13: case 0x14: {                        // cvt_f32_ubyte0..3
+      Id b = t.m.emit(spv::Op::OpBitwiseAnd, t.tU,
+                      {t.m.emit(spv::Op::OpShiftRightLogical, t.tU,
+                                {u0, t.m.constU32((op - 0x11) * 8)}), t.m.constU32(0xFF)});
+      setF(t.m.emit(spv::Op::OpConvertUToF, t.tF, {b}));
+      break;
+    }
+    case 0x20: setF(t.ext1(GLSLstd450Fract, s0)); break;                 // v_fract_f32
+    case 0x21: setF(t.ext1(GLSLstd450Trunc, s0)); break;                 // v_trunc_f32
+    case 0x22: setF(t.ext1(GLSLstd450Ceil, s0)); break;                  // v_ceil_f32
+    case 0x23: setF(t.ext1(GLSLstd450RoundEven, s0)); break;             // v_rndne_f32
+    case 0x24: setF(t.ext1(GLSLstd450Floor, s0)); break;                 // v_floor_f32
+    case 0x25: setF(t.ext1(GLSLstd450Exp2, s0)); break;                  // v_exp_f32
+    case 0x26: case 0x27: setF(t.ext1(GLSLstd450Log2, s0)); break;       // v_log[_clamp]_f32
+    case 0x28: case 0x29: case 0x2a: case 0x2b:
+      setF(t.fdiv(t.fconst(1.0f), s0)); break;                           // v_rcp[_clamp/legacy/iflag]_f32
+    case 0x2c: case 0x2d: case 0x2e:
+      setF(t.ext1(GLSLstd450InverseSqrt, s0)); break;                    // v_rsq[_clamp/legacy]_f32
+    case 0x33: setF(t.ext1(GLSLstd450Sqrt, s0)); break;                  // v_sqrt_f32
+    // GCN trig takes the argument in revolutions (1.0 == 2*pi), so scale to radians.
+    case 0x35: setF(t.ext1(GLSLstd450Sin, t.fmul(s0, t.fconst(6.28318530718f)))); break;  // v_sin_f32
+    case 0x36: setF(t.ext1(GLSLstd450Cos, t.fmul(s0, t.fconst(6.28318530718f)))); break;  // v_cos_f32
+    case 0x37: setU(t.m.emit(spv::Op::OpNot, t.tU, {u0})); break;        // v_not_b32
+    default: warnUnsup("vop1", op); setU(u0); break;                     // mov fallback
   }
 }
 
-void emitVop2(Tr &t, uint32_t op, uint32_t vdst, Id s0, Id s1) {
+// GFX6/7 VOP2 numbering (AMD CI ISA). The min/max and bitwise ops were previously
+// at the wrong opcodes (0x0a/0x0b and 0x25-0x27, which are actually integer mul-hi
+// and integer add/sub); the numbers below are the real ones.
+void emitVop2(Tr &t, uint32_t op, uint32_t vdst, Id s0, Id s1, uint32_t literal) {
   auto setF = [&](Id f) { t.stVgF(vdst, f); };
   auto setU = [&](Id u) { t.stVg(vdst, u); };
   Id u0 = t.m.bitcast(t.tU, s0), u1 = t.m.bitcast(t.tU, s1);
+  Id i0 = t.m.bitcast(t.tI, s0), i1 = t.m.bitcast(t.tI, s1);
+  auto sh = [&](Id x) { return t.m.emit(spv::Op::OpBitwiseAnd, t.tU, {x, t.m.constU32(31)}); };
   switch (op) {
-    case 0x00: {  // cndmask: VCC ? s1 : s0 (VCC stored as raw 1u/0u by VOPC)
+    case 0x00: {  // v_cndmask_b32: VCC ? s1 : s0 (VCC stored as raw 1u/0u by VOPC)
       Id cond = t.m.emit(spv::Op::OpINotEqual, t.tBool, {t.ldSg(106), t.m.constU32(0)});
       setF(t.m.emit(spv::Op::OpSelect, t.tF, {cond, s1, s0}));
       break;
     }
-    case 0x01: case 0x02: case 0x03: setF(t.fadd(s0, s1)); break;
-    case 0x04: setF(t.fsub(s0, s1)); break;
-    case 0x05: setF(t.fsub(s1, s0)); break;
-    case 0x06: setF(t.fmul(s0, s1)); break;
-    case 0x08: setF(t.fmul(s0, s1)); break;
-    case 0x0a: setF(t.ext2(GLSLstd450FMin, s0, s1)); break;
-    case 0x0b: setF(t.ext2(GLSLstd450FMax, s0, s1)); break;
-    case 0x1f: setF(t.fadd(t.fmul(s0, s1), t.ldVgF(vdst))); break;       // mac_f32
-    case 0x25: setU(t.m.emit(spv::Op::OpBitwiseAnd, t.tU, {u0, u1})); break;
-    case 0x26: setU(t.m.emit(spv::Op::OpBitwiseOr, t.tU, {u0, u1})); break;
-    case 0x27: setU(t.m.emit(spv::Op::OpBitwiseXor, t.tU, {u0, u1})); break;
+    case 0x03: setF(t.fadd(s0, s1)); break;                             // v_add_f32
+    case 0x04: setF(t.fsub(s0, s1)); break;                             // v_sub_f32
+    case 0x05: setF(t.fsub(s1, s0)); break;                             // v_subrev_f32
+    case 0x06: setF(t.fadd(t.fmul(s0, s1), t.ldVgF(vdst))); break;      // v_mac_legacy_f32
+    case 0x07: case 0x08: setF(t.fmul(s0, s1)); break;                  // v_mul[_legacy]_f32
+    case 0x09: case 0x0b: setU(t.m.emit(spv::Op::OpIMul, t.tU, {u0, u1})); break;  // v_mul_i32/u32_i24/u24 (low 32)
+    case 0x0d: case 0x0f: setF(t.ext2(GLSLstd450FMin, s0, s1)); break;  // v_min[_legacy]_f32
+    case 0x0e: case 0x10: setF(t.ext2(GLSLstd450FMax, s0, s1)); break;  // v_max[_legacy]_f32
+    case 0x11: setU(t.m.bitcast(t.tU, t.m.extInst(t.tI, GLSLstd450SMin, {i0, i1}))); break;  // v_min_i32
+    case 0x12: setU(t.m.bitcast(t.tU, t.m.extInst(t.tI, GLSLstd450SMax, {i0, i1}))); break;  // v_max_i32
+    case 0x13: setU(t.m.extInst(t.tU, GLSLstd450UMin, {u0, u1})); break;  // v_min_u32
+    case 0x14: setU(t.m.extInst(t.tU, GLSLstd450UMax, {u0, u1})); break;  // v_max_u32
+    case 0x15: setU(t.m.emit(spv::Op::OpShiftRightLogical, t.tU, {u0, sh(u1)})); break;   // v_lshr_b32
+    case 0x16: setU(t.m.emit(spv::Op::OpShiftRightLogical, t.tU, {u1, sh(u0)})); break;   // v_lshrrev_b32
+    case 0x17: setU(t.m.bitcast(t.tU, t.m.emit(spv::Op::OpShiftRightArithmetic, t.tI, {i0, sh(u1)}))); break;  // v_ashr_i32
+    case 0x18: setU(t.m.bitcast(t.tU, t.m.emit(spv::Op::OpShiftRightArithmetic, t.tI, {i1, sh(u0)}))); break;  // v_ashrrev_i32
+    case 0x19: setU(t.m.emit(spv::Op::OpShiftLeftLogical, t.tU, {u0, sh(u1)})); break;    // v_lshl_b32
+    case 0x1a: setU(t.m.emit(spv::Op::OpShiftLeftLogical, t.tU, {u1, sh(u0)})); break;    // v_lshlrev_b32
+    case 0x1b: setU(t.m.emit(spv::Op::OpBitwiseAnd, t.tU, {u0, u1})); break;  // v_and_b32
+    case 0x1c: setU(t.m.emit(spv::Op::OpBitwiseOr, t.tU, {u0, u1})); break;   // v_or_b32
+    case 0x1d: setU(t.m.emit(spv::Op::OpBitwiseXor, t.tU, {u0, u1})); break;  // v_xor_b32
+    case 0x1e: {  // v_bfm_b32: mask of s0[4:0] bits at offset s1[4:0]
+      Id ones = t.m.emit(spv::Op::OpISub, t.tU,
+                  {t.m.emit(spv::Op::OpShiftLeftLogical, t.tU, {t.m.constU32(1), sh(u0)}), t.m.constU32(1)});
+      setU(t.m.emit(spv::Op::OpShiftLeftLogical, t.tU, {ones, sh(u1)}));
+      break;
+    }
+    case 0x1f: setF(t.fadd(t.fmul(s0, s1), t.ldVgF(vdst))); break;      // v_mac_f32
+    case 0x20: setF(t.fadd(t.fmul(s0, t.m.bitcast(t.tF, t.m.constU32(literal))), s1)); break;  // v_madmk_f32: s0*K+s1
+    case 0x21: setF(t.fadd(t.fmul(s0, s1), t.m.bitcast(t.tF, t.m.constU32(literal)))); break;  // v_madak_f32: s0*s1+K
+    case 0x25: case 0x28: setU(t.m.emit(spv::Op::OpIAdd, t.tU, {u0, u1})); break;  // v_add_i32 / v_addc_u32
+    case 0x26: setU(t.m.emit(spv::Op::OpISub, t.tU, {u0, u1})); break;  // v_sub_i32
+    case 0x27: setU(t.m.emit(spv::Op::OpISub, t.tU, {u1, u0})); break;  // v_subrev_i32
     case 0x2f: setU(t.m.extInst(t.tU, GLSLstd450PackHalf2x16,
-                  {t.m.compositeConstruct(t.tV2, {s0, s1})})); break;    // cvt_pkrtz
-    default: setF(t.fmul(s0, s1)); break;
+                  {t.m.compositeConstruct(t.tV2, {s0, s1})})); break;    // v_cvt_pkrtz_f16_f32
+    default: warnUnsup("vop2", op); setF(t.fmul(s0, s1)); break;
   }
 }
 
-// VOPC: vector compare -> VCC (sgpr 106) as raw 1u/0u. The low nibble selects the
+// VOPC: vector compare -> a mask register as raw 1u/0u. The low nibble selects the
 // predicate (1=lt 2=eq 3=le 4=gt 5=ne 6=ge) for all of f32 (op 0x00-0x1f, incl. the
 // cmpx EXEC-writing variants which we treat the same), i32 (0x80-0x9f) and u32
-// (0xc0-0xdf). s0f/s1f are the float operands, s0u/s1u the raw uint operands.
-void emitVopc(Tr &t, uint32_t op, Id s0f, Id s1f, Id s0u, Id s1u) {
+// (0xc0-0xdf). s0f/s1f are the float operands, s0u/s1u the raw uint operands. `dst`
+// is the destination SGPR: 106 (VCC) for the VOPC encoding, or the VOP3 vdst when a
+// compare is emitted in VOP3 form (writing an explicit SGPR pair).
+void emitVopc(Tr &t, uint32_t op, Id s0f, Id s1f, Id s0u, Id s1u, uint32_t dst = 106) {
   uint32_t lo = op & 0xF;
   Id cond = 0;
   Id si0 = t.m.bitcast(t.tI, s0u), si1 = t.m.bitcast(t.tI, s1u);
@@ -298,23 +351,52 @@ void emitVopc(Tr &t, uint32_t op, Id s0f, Id s1f, Id s0u, Id s1u) {
     }
   }
   if (cond)
-    t.stSg(106, t.m.emit(spv::Op::OpSelect, t.tU, {cond, t.m.constU32(1), t.m.constU32(0)}));
+    t.stSg(dst, t.m.emit(spv::Op::OpSelect, t.tU, {cond, t.m.constU32(1), t.m.constU32(0)}));
 }
 
 void emitVop3(Tr &t, uint32_t op, uint32_t vdst, Id s0, Id s1, Id s2) {
+  // VOP3 reflects the VOPC (0x000-0x0FF), VOP2 (0x100-0x13F) and VOP1 (0x180-0x1FF)
+  // encodings; only 0x140-0x17F are VOP3-exclusive.
+  Id u0 = t.m.bitcast(t.tU, s0), u1 = t.m.bitcast(t.tU, s1), u2 = t.m.bitcast(t.tU, s2);
+  if (op < 0x100) {  // VOPC compare in VOP3 form: writes the mask to sgpr[vdst]
+    emitVopc(t, op, s0, s1, u0, u1, vdst); return;
+  }
   if (op >= 0x100 && op < 0x140) { emitVop2(t, op - 0x100, vdst, s0, s1); return; }
   if (op >= 0x180 && op < 0x200) { emitVop1(t, op - 0x180, vdst, s0); return; }
   auto setF = [&](Id f) { t.stVgF(vdst, f); };
+  auto setU = [&](Id u) { t.stVg(vdst, u); };
+  auto mulHi = [&](spv::Op mulOp) {  // high 32 bits of a 64-bit product
+    Id st = t.m.typeStruct({t.tU, t.tU});
+    return t.m.compositeExtract(t.tU, t.m.emit(mulOp, st, {u0, u1}), 1);
+  };
   switch (op) {
-    case 0x141: case 0x14b: case 0x143: setF(t.fadd(t.fmul(s0, s1), s2)); break;  // mad/fma
-    case 0x151: setF(t.ext2(GLSLstd450FMin, t.ext2(GLSLstd450FMin, s0, s1), s2)); break;
-    case 0x154: setF(t.ext2(GLSLstd450FMax, t.ext2(GLSLstd450FMax, s0, s1), s2)); break;
-    case 0x157: {  // med3 = clamp(s2, min(s0,s1), max(s0,s1))
+    case 0x140: case 0x141: case 0x14b:                                 // v_mad[_legacy]_f32 / v_fma_f32
+      setF(t.fadd(t.fmul(s0, s1), s2)); break;
+    case 0x142: case 0x143:                                             // v_mad_i32/u32_i24/u24 (low 32)
+      setU(t.m.emit(spv::Op::OpIAdd, t.tU, {t.m.emit(spv::Op::OpIMul, t.tU, {u0, u1}), u2})); break;
+    case 0x148:                                                         // v_bfe_u32
+      setU(t.m.emit(spv::Op::OpBitFieldUExtract, t.tU,
+                    {u0, t.m.emit(spv::Op::OpBitwiseAnd, t.tU, {u1, t.m.constU32(31)}),
+                     t.m.emit(spv::Op::OpBitwiseAnd, t.tU, {u2, t.m.constU32(31)})})); break;
+    case 0x149:                                                         // v_bfe_i32
+      setU(t.m.bitcast(t.tU, t.m.emit(spv::Op::OpBitFieldSExtract, t.tI,
+                    {t.m.bitcast(t.tI, u0), t.m.emit(spv::Op::OpBitwiseAnd, t.tU, {u1, t.m.constU32(31)}),
+                     t.m.emit(spv::Op::OpBitwiseAnd, t.tU, {u2, t.m.constU32(31)})}))); break;
+    case 0x14a:                                                         // v_bfi_b32: (s0&s1)|(~s0&s2)
+      setU(t.m.emit(spv::Op::OpBitwiseOr, t.tU,
+                    {t.m.emit(spv::Op::OpBitwiseAnd, t.tU, {u0, u1}),
+                     t.m.emit(spv::Op::OpBitwiseAnd, t.tU, {t.m.emit(spv::Op::OpNot, t.tU, {u0}), u2})})); break;
+    case 0x169: case 0x16b: setU(t.m.emit(spv::Op::OpIMul, t.tU, {u0, u1})); break;  // v_mul_lo_u32/i32
+    case 0x16a: setU(mulHi(spv::Op::OpUMulExtended)); break;             // v_mul_hi_u32
+    case 0x16c: setU(mulHi(spv::Op::OpSMulExtended)); break;             // v_mul_hi_i32
+    case 0x151: setF(t.ext2(GLSLstd450FMin, t.ext2(GLSLstd450FMin, s0, s1), s2)); break;  // v_min3_f32
+    case 0x154: setF(t.ext2(GLSLstd450FMax, t.ext2(GLSLstd450FMax, s0, s1), s2)); break;  // v_max3_f32
+    case 0x157: {  // v_med3_f32 = clamp(s2, min(s0,s1), max(s0,s1))
       Id lo = t.ext2(GLSLstd450FMin, s0, s1), hi = t.ext2(GLSLstd450FMax, s0, s1);
       setF(t.m.extInst(t.tF, GLSLstd450FClamp, {s2, lo, hi}));
       break;
     }
-    default: setF(s0); break;
+    default: warnUnsup("vop3", op); setF(s0); break;
   }
 }
 
@@ -333,7 +415,7 @@ struct StageCtx {
   uint32_t maxParam = 0;                        // VS
   bool haveCbuf = false;                        // VS
   Id colorOut = 0;                             // PS
-  Id sampImgTy = 0, pSampImg = 0;              // PS
+  Id sampImgTy = 0, pSampImg = 0, imgTy = 0;   // PS
   std::unordered_map<uint32_t, Id> inVars;     // PS
   uint32_t maxIn = 0;                           // PS
   bool wroteColor = false;                      // PS (compile-time: shader has an exp)
@@ -358,6 +440,45 @@ Id vsParamOut(Tr &t, StageCtx &sc, uint32_t p) {
   sc.iface->push_back(v);
   sc.paramOuts[p] = v;
   return v;
+}
+
+// Emit a MIMG image op. Declares the texture as a combined sampler at set 0 /
+// binding = the MIMG order, records it in psTexs, and samples/fetches it. Coords
+// are treated as 2D (x,y in the first two address VGPRs). Handles the sample
+// variants (implicit LOD, explicit LOD, LOD-zero) and the integer image_load; the
+// sampler resource (S#) uses the renderer's default sampler.
+void emitMimg(Tr &t, uint32_t op, uint32_t w0, uint32_t w1, Id imgTy, Id sampImgTy,
+              Id pSampImg, Recompiled &r) {
+  uint32_t dmask = (w0 >> 8) & 0xF, vaddr = w1 & 0xFF, vdata = (w1 >> 8) & 0xFF;
+  uint32_t srsrc = ((w1 >> 16) & 0x1F) * 4, bind = (uint32_t)r.psTexs.size();
+  r.psTexs.push_back({bind, srsrc});
+  Id texVar = t.m.variable(pSampImg, spv::StorageClass::UniformConstant);
+  t.m.decorate(texVar, spv::Decoration::DescriptorSet, {0});
+  t.m.decorate(texVar, spv::Decoration::Binding, {bind});
+  Id si = t.m.load(sampImgTy, texVar);
+  Id uv = t.m.compositeConstruct(t.tV2, {t.ldVgF(vaddr), t.ldVgF(vaddr + 1)});
+  uint32_t lodOp = (uint32_t)spv::ImageOperandsMask::Lod;
+  bool known = op == 0x00 || op == 0x01 || op == 0x20 || op == 0x21 ||
+               op == 0x24 || op == 0x25 || op == 0x27;
+  if (!known) warnUnsup("mimg", op, w0, w1);
+  Id texel;
+  if (op == 0x00 || op == 0x01) {  // image_load[_mip]: integer fetch, no filtering
+    Id ic = t.m.compositeConstruct(t.m.typeVec(t.tI, 2),
+              {t.m.bitcast(t.tI, t.ldVg(vaddr)), t.m.bitcast(t.tI, t.ldVg(vaddr + 1))});
+    Id img = t.m.emit(spv::Op::OpImage, imgTy, {si});
+    texel = t.m.emit(spv::Op::OpImageFetch, t.tV4, {img, ic, lodOp, t.m.constU32(0)});
+  } else if (op == 0x24) {  // image_sample_l: explicit LOD in the coord+2 VGPR
+    texel = t.m.emit(spv::Op::OpImageSampleExplicitLod, t.tV4,
+                     {si, uv, lodOp, t.ldVgF(vaddr + 2)});
+  } else if (op == 0x27 || op == 0x2f) {  // image_sample_lz / _c_lz: forced LOD 0
+    texel = t.m.emit(spv::Op::OpImageSampleExplicitLod, t.tV4,
+                     {si, uv, lodOp, t.fconst(0.0f)});
+  } else {  // image_sample / _cl / _b (bias/derivs/compare ignored): implicit LOD
+    texel = t.m.emit(spv::Op::OpImageSampleImplicitLod, t.tV4, {si, uv});
+  }
+  uint32_t comp = 0;
+  for (int i = 0; i < 4; i++)
+    if (dmask & (1 << i)) t.stVgF(vdata + comp++, t.m.compositeExtract(t.tF, texel, i));
 }
 
 // Emit one non-terminator instruction (branches are handled by the CFG driver).
@@ -444,7 +565,7 @@ void emitInst(Tr &t, const Inst &in, StageCtx &sc) {
     }
     case Enc::vop2: {
       uint32_t op = in.opcode, vdst = (w >> 17) & 0xFF, vsrc1 = (w >> 9) & 0xFF, src0 = w & 0x1FF;
-      emitVop2(t, op, vdst, t.srcF(src0, in.literal), t.srcF(256 + vsrc1, in.literal));
+      emitVop2(t, op, vdst, t.srcF(src0, in.literal), t.srcF(256 + vsrc1, in.literal), in.literal);
       break;
     }
     case Enc::vop1: {
@@ -477,18 +598,7 @@ void emitInst(Tr &t, const Inst &in, StageCtx &sc) {
     }
     case Enc::mimg: {
       if (!sc.isPs) break;
-      uint32_t dmask = (w >> 8) & 0xF, vaddr = w1 & 0xFF, vdata = (w1 >> 8) & 0xFF;
-      uint32_t srsrc = ((w1 >> 16) & 0x1F) * 4, bind = (uint32_t)sc.r->psTexs.size();
-      sc.r->psTexs.push_back({bind, srsrc});
-      Id texVar = t.m.variable(sc.pSampImg, spv::StorageClass::UniformConstant);
-      t.m.decorate(texVar, spv::Decoration::DescriptorSet, {0});
-      t.m.decorate(texVar, spv::Decoration::Binding, {bind});
-      Id uv = t.m.compositeConstruct(t.tV2, {t.ldVgF(vaddr), t.ldVgF(vaddr + 1)});
-      Id texel = t.m.emit(spv::Op::OpImageSampleImplicitLod, t.tV4,
-                          {t.m.load(sc.sampImgTy, texVar), uv});
-      uint32_t comp = 0;
-      for (int i = 0; i < 4; i++)
-        if (dmask & (1 << i)) t.stVgF(vdata + comp++, t.m.compositeExtract(t.tF, texel, i));
+      emitMimg(t, in.opcode, w, w1, sc.imgTy, sc.sampImgTy, sc.pSampImg, *sc.r);
       break;
     }
     case Enc::exp: {
@@ -730,7 +840,7 @@ bool translateVs(const uint32_t *vsCode, const uint32_t *vsUserData, Recompiled 
       }
       case Enc::vop2: {
         uint32_t op = in.opcode, vdst = (w >> 17) & 0xFF, vsrc1 = (w >> 9) & 0xFF, src0 = w & 0x1FF;
-        emitVop2(t, op, vdst, t.srcF(src0, in.literal), t.srcF(256 + vsrc1, in.literal));
+        emitVop2(t, op, vdst, t.srcF(src0, in.literal), t.srcF(256 + vsrc1, in.literal), in.literal);
         break;
       }
       case Enc::vop1: {
@@ -825,7 +935,6 @@ bool translatePs(const uint32_t *psCode, Recompiled &r, Tr &t) {
   // PS inputs (interpolants) are declared lazily as they are read.
   std::unordered_map<uint32_t, Id> inVars;  // attr index -> Input vec4 var
   uint32_t maxIn = 0;
-  std::vector<Id> texVars;
   bool wroteColor = false;
 
   Id main = t.m.beginFunction(t.tVoid, t.tFn);
@@ -849,7 +958,7 @@ bool translatePs(const uint32_t *psCode, Recompiled &r, Tr &t) {
     t.m.store(co, t.m.constComposite(t.tV4,
               {t.fconst(0.f), t.fconst(0.f), t.fconst(0.f), t.fconst(0.f)}));
     StageCtx sc; sc.isPs = true; sc.r = &r; sc.iface = &iface; sc.colorOut = co;
-    sc.sampImgTy = sampImgTy; sc.pSampImg = pSampImg;
+    sc.sampImgTy = sampImgTy; sc.pSampImg = pSampImg; sc.imgTy = imgTy;
     sc.colorWrittenVar = t.m.variable(t.pPrivU, spv::StorageClass::Private, t.m.constNull(t.tU));
     t.seedExec();
     emitCFG(t, insts, sc);
@@ -899,7 +1008,7 @@ bool translatePs(const uint32_t *psCode, Recompiled &r, Tr &t) {
       }
       case Enc::vop2: {
         uint32_t op = in.opcode, vdst = (w >> 17) & 0xFF, vsrc1 = (w >> 9) & 0xFF, src0 = w & 0x1FF;
-        emitVop2(t, op, vdst, t.srcF(src0, in.literal), t.srcF(256 + vsrc1, in.literal));
+        emitVop2(t, op, vdst, t.srcF(src0, in.literal), t.srcF(256 + vsrc1, in.literal), in.literal);
         break;
       }
       case Enc::vop1: {
@@ -922,21 +1031,7 @@ bool translatePs(const uint32_t *psCode, Recompiled &r, Tr &t) {
         break;
       }
       case Enc::mimg: {
-        uint32_t dmask = (w >> 8) & 0xF, vaddr = w1 & 0xFF, vdata = (w1 >> 8) & 0xFF;
-        uint32_t srsrc = ((w1 >> 16) & 0x1F) * 4;
-        uint32_t bind = (uint32_t)r.psTexs.size();
-        r.psTexs.push_back({bind, srsrc});
-        Id texVar = t.m.variable(pSampImg, spv::StorageClass::UniformConstant);
-        t.m.decorate(texVar, spv::Decoration::DescriptorSet, {0});
-        t.m.decorate(texVar, spv::Decoration::Binding, {bind});
-        texVars.push_back(texVar);
-        Id uv = t.m.compositeConstruct(t.tV2, {t.ldVgF(vaddr), t.ldVgF(vaddr + 1)});
-        Id si = t.m.load(sampImgTy, texVar);
-        Id texel = t.m.emit(spv::Op::OpImageSampleImplicitLod, t.tV4, {si, uv});
-        uint32_t comp = 0;
-        for (int i = 0; i < 4; i++)
-          if (dmask & (1 << i))
-            t.stVgF(vdata + comp++, t.m.compositeExtract(t.tF, texel, i));
+        emitMimg(t, in.opcode, w, w1, imgTy, sampImgTy, pSampImg, r);
         break;
       }
       case Enc::exp: {

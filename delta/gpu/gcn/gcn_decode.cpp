@@ -87,6 +87,10 @@ std::vector<Inst> decode(const uint32_t *code, uint32_t maxDwords) {
     case Enc::sop1: lit = sop1HasLit(code[i]); break;
     case Enc::sopc: lit = sopcHasLit(code[i]); break;
     case Enc::vop2:
+      // V_MADMK_F32 (0x20) and V_MADAK_F32 (0x21) always carry a trailing 32-bit
+      // literal (the K constant), independent of the src0=LITERAL_CONST signalling.
+      lit = vopHasLit(code[i]) || in.opcode == 0x20 || in.opcode == 0x21;
+      break;
     case Enc::vop1:
     case Enc::vopc: lit = vopHasLit(code[i]); break;
     default: break;
