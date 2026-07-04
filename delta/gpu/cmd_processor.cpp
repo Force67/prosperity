@@ -91,6 +91,19 @@ void writeLabel(uint64_t addr, uint64_t value, bool is64) {
     *reinterpret_cast<volatile uint32_t *>(addr) = static_cast<uint32_t>(value);
 }
 
+// EOP/RELEASE_MEM DATA_SEL 3 (GPU clock) and 4 (system clock) tell the GPU to
+// write its current 64-bit clock counter into the label, NOT the packet's
+// immediate data (which is 0 for these). A title that polls such a label for
+// "non-zero == the GPU reached this point" needs a real, monotonically-increasing,
+// non-zero value. Our submit is synchronous, so any advancing clock reads as
+// "already complete". Without this Doom64's per-frame submit-done wait (a spin on
+// this label with a hard 2s timeout) burns the full 2s every frame -> ~0.5 fps.
+uint64_t gpuClockTs() {
+  using namespace std::chrono;
+  return static_cast<uint64_t>(
+      duration_cast<nanoseconds>(steady_clock::now().time_since_epoch()).count());
+}
+
 // Opcode histogram (DELTA_GPU_TRACE): shows what the dcb
 // contains and whether the walker reaches a draw or desyncs.
 uint32_t g_opHist[256] = {};
@@ -950,11 +963,12 @@ void submitDcb(const void *dcb, uint32_t sizeBytes) {
         if (count >= 4) {
           uint64_t addr = (static_cast<uint64_t>(body[2] & 0xFFFF) << 32) |
                           (body[1] & ~0x3u);
-          uint32_t dataSel = (body[2] >> 29) & 0x7;  // 1=32-bit, 2=64-bit
+          uint32_t dataSel = (body[2] >> 29) & 0x7;  // 1=32b, 2=64b, 3/4=clock
           uint64_t val = static_cast<uint64_t>(body[3]) |
                          (static_cast<uint64_t>(count >= 5 ? body[4] : 0) << 32);
           if (dataSel == 1) writeLabel(addr, val, false);
-          else if (dataSel >= 2) writeLabel(addr, val, true);
+          else if (dataSel == 2) writeLabel(addr, val, true);
+          else if (dataSel >= 3) writeLabel(addr, gpuClockTs(), true);
           if (g_eopTrace)
             std::fprintf(stderr, "[eop] EOP addr=%#lx sel=%u val=%#lx\n",
                          (unsigned long)addr, dataSel, (unsigned long)val);
@@ -963,13 +977,14 @@ void submitDcb(const void *dcb, uint32_t sizeBytes) {
       }
       case IT_RELEASE_MEM: {  // body: eventCtrl, selBits, addrLo, addrHi, dataLo, dataHi
         if (count >= 5) {
-          uint32_t dataSel = (body[1] >> 29) & 0x7;  // 1=32-bit, 2=64-bit
+          uint32_t dataSel = (body[1] >> 29) & 0x7;  // 1=32b, 2=64b, 3/4=clock
           uint64_t addr = (static_cast<uint64_t>(body[3] & 0xFFFF) << 32) |
                           (body[2] & ~0x3u);
           uint64_t val = static_cast<uint64_t>(body[4]) |
                          (static_cast<uint64_t>(count >= 6 ? body[5] : 0) << 32);
           if (dataSel == 1) writeLabel(addr, val, false);
-          else if (dataSel >= 2) writeLabel(addr, val, true);
+          else if (dataSel == 2) writeLabel(addr, val, true);
+          else if (dataSel >= 3) writeLabel(addr, gpuClockTs(), true);
           if (g_eopTrace)
             std::fprintf(stderr, "[eop] RELEASE_MEM addr=%#lx sel=%u val=%#lx\n",
                          (unsigned long)addr, dataSel, (unsigned long)val);
