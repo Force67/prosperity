@@ -53,6 +53,17 @@ void warnUnsup(const char *enc, uint32_t op, uint32_t w0 = 0, uint32_t w1 = 0) {
                enc, op, w0, w1);
 }
 
+// Decode a shader bounded by its real code length (from the OrbShdr footer) so an
+// early-out s_endpgm no longer truncates the stream. Falls back to the legacy
+// stop-at-first-endpgm scan only when no footer is found (e.g. a driver-generated
+// sub-shader without one), which never over-reads into the footer/padding.
+std::vector<Inst> decodeShader(const uint32_t *code, uint32_t cap) {
+  uint32_t len = codeLength(code, cap);
+  if (len && len <= cap)
+    return decode(code, len, /*stopAtEndpgm=*/false);
+  return decode(code, cap, /*stopAtEndpgm=*/true);
+}
+
 // Fetch-shader attribute (mirrors gcn_translate.cpp's parseFetch).
 struct FetchAttr { uint32_t semantic, numComps, destVgpr, tableSgpr, dwordOff; };
 std::vector<FetchAttr> parseFetch(uint64_t fetchAddr) {
@@ -184,6 +195,38 @@ struct Tr {
   Id fdiv(Id a, Id b) { return m.emit(spv::Op::OpFDiv, tF, {a, b}); }
   Id fneg(Id a) { return m.emit(spv::Op::OpFNegate, tF, {a}); }
 
+  // Integer (uint-domain) helpers. Operands/results are raw uint Ids; signed ops
+  // bitcast through tI where the semantics require it. Shifts mask the amount to
+  // [4:0] as GCN does.
+  Id u32(uint32_t v) { return m.constU32(v); }
+  Id iadd(Id a, Id b) { return m.emit(spv::Op::OpIAdd, tU, {a, b}); }
+  Id isub(Id a, Id b) { return m.emit(spv::Op::OpISub, tU, {a, b}); }
+  Id imul(Id a, Id b) { return m.emit(spv::Op::OpIMul, tU, {a, b}); }
+  Id band(Id a, Id b) { return m.emit(spv::Op::OpBitwiseAnd, tU, {a, b}); }
+  Id bor(Id a, Id b) { return m.emit(spv::Op::OpBitwiseOr, tU, {a, b}); }
+  Id bxor(Id a, Id b) { return m.emit(spv::Op::OpBitwiseXor, tU, {a, b}); }
+  Id bnot(Id a) { return m.emit(spv::Op::OpNot, tU, {a}); }
+  Id shl(Id a, Id s) { return m.emit(spv::Op::OpShiftLeftLogical, tU, {a, band(s, u32(31))}); }
+  Id shr(Id a, Id s) { return m.emit(spv::Op::OpShiftRightLogical, tU, {a, band(s, u32(31))}); }
+  Id sar(Id a, Id s) {
+    return m.bitcast(tU, m.emit(spv::Op::OpShiftRightArithmetic, tI,
+                                {m.bitcast(tI, a), band(s, u32(31))}));
+  }
+  Id smin(Id a, Id b) { return m.bitcast(tU, m.extInst(tI, GLSLstd450SMin, {m.bitcast(tI, a), m.bitcast(tI, b)})); }
+  Id smax(Id a, Id b) { return m.bitcast(tU, m.extInst(tI, GLSLstd450SMax, {m.bitcast(tI, a), m.bitcast(tI, b)})); }
+  Id umin(Id a, Id b) { return m.extInst(tU, GLSLstd450UMin, {a, b}); }
+  Id umax(Id a, Id b) { return m.extInst(tU, GLSLstd450UMax, {a, b}); }
+  Id iselNZ(Id cond, Id a, Id b) {  // cond(uint!=0) ? a : b
+    return m.emit(spv::Op::OpSelect, tU, {isNonZero(cond), a, b});
+  }
+  Id iselB(Id b, Id a, Id c) { return m.emit(spv::Op::OpSelect, tU, {b, a, c}); }
+  Id popcnt(Id a) { return m.emit(spv::Op::OpBitCount, tU, {a}); }
+  Id bitrev(Id a) { return m.emit(spv::Op::OpBitReverse, tU, {a}); }
+  Id sext24(Id a) {  // sign-extend the low 24 bits
+    return m.bitcast(tU, m.emit(spv::Op::OpBitFieldSExtract, tI, {m.bitcast(tI, a), u32(0), u32(24)}));
+  }
+  Id pairU() { return m.typeStruct({tU, tU}); }  // {result, carry/hi} for extended ops
+
   // raw uint of a source operand field (mirrors srcRaw).
   Id srcRaw(uint32_t field, uint32_t literal) {
     if (field <= 127) return ldSg(field);
@@ -230,6 +273,12 @@ void emitVop1(Tr &t, uint32_t op, uint32_t vdst, Id s0) {
                   {t.ext1(GLSLstd450Floor, t.fadd(s0, t.fconst(0.5f)))}))); break;  // cvt_rpi_i32_f32
     case 0x0d: setU(t.m.bitcast(t.tU, t.m.emit(spv::Op::OpConvertFToS, t.tI,
                   {t.ext1(GLSLstd450Floor, s0)}))); break;               // cvt_flr_i32_f32
+    // f16<->f32 (V_CVT_F16_F32 = 0x0a, V_CVT_F32_F16 = 0x0b). cvt_f16_f32 packs the
+    // half into the low half-word (high half zero); cvt_f32_f16 reads it back.
+    case 0x0a: setU(t.m.extInst(t.tU, GLSLstd450PackHalf2x16,
+                  {t.m.compositeConstruct(t.tV2, {s0, t.fconst(0.f)})})); break;  // cvt_f16_f32
+    case 0x0b: setF(t.m.compositeExtract(t.tF,
+                  t.m.extInst(t.tV2, GLSLstd450UnpackHalf2x16, {u0}), 0)); break;  // cvt_f32_f16
     case 0x11: case 0x12: case 0x13: case 0x14: {                        // cvt_f32_ubyte0..3
       Id b = t.m.emit(spv::Op::OpBitwiseAnd, t.tU,
                       {t.m.emit(spv::Op::OpShiftRightLogical, t.tU,
@@ -253,6 +302,19 @@ void emitVop1(Tr &t, uint32_t op, uint32_t vdst, Id s0) {
     case 0x35: setF(t.ext1(GLSLstd450Sin, t.fmul(s0, t.fconst(6.28318530718f)))); break;  // v_sin_f32
     case 0x36: setF(t.ext1(GLSLstd450Cos, t.fmul(s0, t.fconst(6.28318530718f)))); break;  // v_cos_f32
     case 0x37: setU(t.m.emit(spv::Op::OpNot, t.tU, {u0})); break;        // v_not_b32
+    case 0x38: setU(t.bitrev(u0)); break;                                // v_bfrev_b32
+    case 0x39: {  // v_ffbh_u32: count leading zeros; -1 if src==0
+      Id msb = t.m.extInst(t.tU, GLSLstd450FindUMsb, {u0});
+      setU(t.iselB(t.isZero(u0), t.u32(0xFFFFFFFFu), t.isub(t.u32(31), msb)));
+      break;
+    }
+    case 0x3a: setU(t.m.extInst(t.tU, GLSLstd450FindILsb, {u0})); break;  // v_ffbl_b32
+    case 0x3b: {  // v_ffbh_i32: leading-sign-bit count; -1 if src is 0 or -1
+      Id smsb = t.m.bitcast(t.tU, t.m.extInst(t.tI, GLSLstd450FindSMsb, {t.m.bitcast(t.tI, u0)}));
+      setU(t.iselB(t.m.emit(spv::Op::OpIEqual, t.tBool, {smsb, t.u32(0xFFFFFFFFu)}),
+                   t.u32(0xFFFFFFFFu), t.isub(t.u32(31), smsb)));
+      break;
+    }
     default: warnUnsup("vop1", op); setU(u0); break;                     // mov fallback
   }
 }
@@ -272,6 +334,10 @@ void emitVop2(Tr &t, uint32_t op, uint32_t vdst, Id s0, Id s1, uint32_t literal)
       setF(t.m.emit(spv::Op::OpSelect, t.tF, {cond, s1, s0}));
       break;
     }
+    // v_readlane / v_writelane: pick/write a specific wave lane. Our SPIR-V is
+    // per-invocation (one lane), so there is no other lane to reach: the value is
+    // just s0 (the common uniform-broadcast use is exact).
+    case 0x01: case 0x02: setU(u0); break;
     case 0x03: setF(t.fadd(s0, s1)); break;                             // v_add_f32
     case 0x04: setF(t.fsub(s0, s1)); break;                             // v_sub_f32
     case 0x05: setF(t.fsub(s1, s0)); break;                             // v_subrev_f32
@@ -302,9 +368,23 @@ void emitVop2(Tr &t, uint32_t op, uint32_t vdst, Id s0, Id s1, uint32_t literal)
     case 0x1f: setF(t.fadd(t.fmul(s0, s1), t.ldVgF(vdst))); break;      // v_mac_f32
     case 0x20: setF(t.fadd(t.fmul(s0, t.m.bitcast(t.tF, t.m.constU32(literal))), s1)); break;  // v_madmk_f32: s0*K+s1
     case 0x21: setF(t.fadd(t.fmul(s0, s1), t.m.bitcast(t.tF, t.m.constU32(literal)))); break;  // v_madak_f32: s0*s1+K
-    case 0x25: case 0x28: setU(t.m.emit(spv::Op::OpIAdd, t.tU, {u0, u1})); break;  // v_add_i32 / v_addc_u32
+    case 0x22: setU(t.iadd(t.popcnt(u0), u1)); break;                   // v_bcnt_u32_b32
+    // v_mbcnt_lo/hi_u32_b32 compute this lane's index within the wave. Our SPIR-V
+    // is already per-invocation (one lane), so there are no prior lanes to count:
+    // the running accumulator s1 passes through unchanged.
+    case 0x23: case 0x24: setU(u1); break;
+    case 0x25: setU(t.iadd(u0, u1)); break;                            // v_add_i32
     case 0x26: setU(t.m.emit(spv::Op::OpISub, t.tU, {u0, u1})); break;  // v_sub_i32
     case 0x27: setU(t.m.emit(spv::Op::OpISub, t.tU, {u1, u0})); break;  // v_subrev_i32
+    case 0x28: {  // v_addc_u32: s0 + s1 + VCC, carry-out -> VCC
+      Id r = t.m.emit(spv::Op::OpIAddCarry, t.pairU(), {u0, u1});
+      Id lo = t.m.compositeExtract(t.tU, r, 0), c0 = t.m.compositeExtract(t.tU, r, 1);
+      Id r2 = t.m.emit(spv::Op::OpIAddCarry, t.pairU(), {lo, t.band(t.ldSg(106), t.u32(1))});
+      setU(t.m.compositeExtract(t.tU, r2, 0));
+      t.stSg(106, t.bor(c0, t.m.compositeExtract(t.tU, r2, 1)));
+      break;
+    }
+    case 0x2b: setF(t.m.extInst(t.tF, GLSLstd450Ldexp, {s0, t.m.bitcast(t.tI, u1)})); break;  // v_ldexp_f32
     case 0x2f: setU(t.m.extInst(t.tU, GLSLstd450PackHalf2x16,
                   {t.m.compositeConstruct(t.tV2, {s0, s1})})); break;    // v_cvt_pkrtz_f16_f32
     default: warnUnsup("vop2", op); setF(t.fmul(s0, s1)); break;
@@ -371,6 +451,10 @@ void emitVop3(Tr &t, uint32_t op, uint32_t vdst, Id s0, Id s1, Id s2) {
     Id st = t.m.typeStruct({t.tU, t.tU});
     return t.m.compositeExtract(t.tU, t.m.emit(mulOp, st, {u0, u1}), 1);
   };
+  // Median of 3 (no GLSL medN): max(min(a,b), min(max(a,b), c)).
+  auto med3 = [&](Id (Tr::*mn)(Id, Id), Id (Tr::*mx)(Id, Id)) {
+    return (t.*mx)((t.*mn)(u0, u1), (t.*mn)((t.*mx)(u0, u1), u2));
+  };
   switch (op) {
     case 0x140: case 0x141: case 0x14b:                                 // v_mad[_legacy]_f32 / v_fma_f32
       setF(t.fadd(t.fmul(s0, s1), s2)); break;
@@ -388,14 +472,71 @@ void emitVop3(Tr &t, uint32_t op, uint32_t vdst, Id s0, Id s1, Id s2) {
       setU(t.m.emit(spv::Op::OpBitwiseOr, t.tU,
                     {t.m.emit(spv::Op::OpBitwiseAnd, t.tU, {u0, u1}),
                      t.m.emit(spv::Op::OpBitwiseAnd, t.tU, {t.m.emit(spv::Op::OpNot, t.tU, {u0}), u2})})); break;
+    case 0x144: case 0x145: case 0x146: case 0x147:                     // v_cube{id,sc,tc,ma}_f32
+      warnUnsup("vop3.cube", op); setF(s0); break;                      // cubemap face select: not modelled
+    case 0x14d: {  // v_lerp_u8: per-byte (a + b + (c&1)) >> 1
+      Id r = t.u32(0);
+      for (int b = 0; b < 4; b++) {
+        Id shb = t.u32((uint32_t)b * 8), mask = t.u32(0xFF);
+        Id a = t.band(t.shr(u0, shb), mask), bb = t.band(t.shr(u1, shb), mask);
+        Id cc = t.band(t.shr(u2, shb), t.u32(1));
+        Id avg = t.shr(t.iadd(t.iadd(a, bb), cc), t.u32(1));
+        r = t.bor(r, t.shl(avg, shb));
+      }
+      setU(r);
+      break;
+    }
+    case 0x14e: {  // v_alignbit_b32: ({S0,S1} >> S2[4:0])[31:0] (S0 hi, S1 lo)
+      Id shf = t.band(u2, t.u32(31));
+      Id lo = t.shr(u1, shf);
+      Id hi = t.iselB(t.isZero(shf), t.u32(0), t.shl(u0, t.isub(t.u32(32), shf)));
+      setU(t.bor(lo, hi));
+      break;
+    }
+    case 0x14f: {  // v_alignbyte_b32: byte-granular funnel shift
+      Id shf = t.imul(t.band(u2, t.u32(3)), t.u32(8));
+      Id lo = t.shr(u1, shf);
+      Id hi = t.iselB(t.isZero(shf), t.u32(0), t.shl(u0, t.isub(t.u32(32), shf)));
+      setU(t.bor(lo, hi));
+      break;
+    }
     case 0x169: case 0x16b: setU(t.m.emit(spv::Op::OpIMul, t.tU, {u0, u1})); break;  // v_mul_lo_u32/i32
     case 0x16a: setU(mulHi(spv::Op::OpUMulExtended)); break;             // v_mul_hi_u32
     case 0x16c: setU(mulHi(spv::Op::OpSMulExtended)); break;             // v_mul_hi_i32
     case 0x151: setF(t.ext2(GLSLstd450FMin, t.ext2(GLSLstd450FMin, s0, s1), s2)); break;  // v_min3_f32
+    case 0x152: setU(t.smin(t.smin(u0, u1), u2)); break;               // v_min3_i32
+    case 0x153: setU(t.umin(t.umin(u0, u1), u2)); break;               // v_min3_u32
     case 0x154: setF(t.ext2(GLSLstd450FMax, t.ext2(GLSLstd450FMax, s0, s1), s2)); break;  // v_max3_f32
+    case 0x155: setU(t.smax(t.smax(u0, u1), u2)); break;               // v_max3_i32
+    case 0x156: setU(t.umax(t.umax(u0, u1), u2)); break;               // v_max3_u32
     case 0x157: {  // v_med3_f32 = clamp(s2, min(s0,s1), max(s0,s1))
       Id lo = t.ext2(GLSLstd450FMin, s0, s1), hi = t.ext2(GLSLstd450FMax, s0, s1);
       setF(t.m.extInst(t.tF, GLSLstd450FClamp, {s2, lo, hi}));
+      break;
+    }
+    case 0x158: setU(med3(&Tr::smin, &Tr::smax)); break;               // v_med3_i32
+    case 0x159: setU(med3(&Tr::umin, &Tr::umax)); break;               // v_med3_u32
+    case 0x15d: setU(t.iadd(t.isub(t.umax(u0, u1), t.umin(u0, u1)), u2)); break;  // v_sad_u32: |s0-s1|+s2
+    // IEEE divide sequence (div_scale -> rcp -> div_fmas -> div_fixup). We short it
+    // to an exact divide at the fixup (S2/S1); div_scale is an identity passthrough
+    // and div_fmas an FMA feeding the estimate the fixup ignores.
+    case 0x15f: setF(t.fdiv(s2, s1)); break;                          // v_div_fixup_f32 (S2/S1)
+    case 0x16d: setF(s0); break;                                      // v_div_scale_f32: identity
+    case 0x16f: setF(t.fadd(t.fmul(s0, s1), s2)); break;             // v_div_fmas_f32: FMA
+    case 0x176: case 0x177: {  // v_mad_u64_u32 / v_mad_i64_i32: {vdst,vdst+1} = S0*S1 + S2
+      // S2 is a 64-bit accumulator; only its low dword is decoded here, so it is
+      // zero-extended (u64) / sign-extended (i64). Exact for the address-generation
+      // idiom (idx*stride + 32-bit base) these ops are emitted for.
+      bool sgn = (op == 0x177);
+      Id prod = t.m.emit(sgn ? spv::Op::OpSMulExtended : spv::Op::OpUMulExtended,
+                         t.pairU(), {u0, u1});
+      Id plo = t.m.compositeExtract(t.tU, prod, 0), phi = t.m.compositeExtract(t.tU, prod, 1);
+      Id add = t.m.emit(spv::Op::OpIAddCarry, t.pairU(), {plo, u2});
+      Id rlo = t.m.compositeExtract(t.tU, add, 0), carry = t.m.compositeExtract(t.tU, add, 1);
+      Id s2hi = sgn ? t.sar(u2, t.u32(31)) : t.u32(0);
+      Id rhi = t.iadd(t.iadd(phi, carry), s2hi);
+      setU(rlo);
+      if (vdst + 1 < 256) t.stVg(vdst + 1, rhi);
       break;
     }
     default: warnUnsup("vop3", op); setF(s0); break;
@@ -709,43 +850,163 @@ void emitInst(Tr &t, const Inst &in, StageCtx &sc) {
   switch (in.enc) {
     case Enc::sop1: {
       uint32_t op = in.opcode, sdst = (w >> 16) & 0x7F, ssrc0 = w & 0xFF;
-      if (op == 0x03) t.stSg(sdst, t.srcRaw(ssrc0, in.literal));  // s_mov_b32
-      else if (op == 0x04) {                                      // s_mov_b64
-        t.stSg(sdst, t.srcRaw(ssrc0, in.literal));
-        if (ssrc0 <= 103) t.stSg(sdst + 1, t.ldSg(ssrc0 + 1));
-      } else if (op >= 0x24 && op <= 0x27) {  // s_{and,or,xor,andn2}_saveexec_b64
-        Id oldExec = t.ldExec(), src = t.srcRaw(ssrc0, in.literal), ne;
-        if (op == 0x24) ne = t.m.emit(spv::Op::OpBitwiseAnd, t.tU, {oldExec, src});
-        else if (op == 0x25) ne = t.m.emit(spv::Op::OpBitwiseOr, t.tU, {oldExec, src});
-        else if (op == 0x26) ne = t.m.emit(spv::Op::OpBitwiseXor, t.tU, {oldExec, src});
-        else ne = t.m.emit(spv::Op::OpBitwiseAnd, t.tU,
-                           {oldExec, t.m.emit(spv::Op::OpNot, t.tU, {src})});
-        t.stSg(sdst, oldExec);
-        t.stSg(126, ne);
-        t.stSccBool(t.isNonZero(ne));
+      Id a = t.srcRaw(ssrc0, in.literal);
+      Id ahi = (ssrc0 <= 127) ? t.ldSg((ssrc0 + 1) & 0x7F) : t.u32(0);  // b64 high dword
+      switch (op) {
+        case 0x03: t.stSg(sdst, a); break;                         // s_mov_b32
+        case 0x04:                                                 // s_mov_b64
+          t.stSg(sdst, a);
+          if (ssrc0 <= 103) t.stSg(sdst + 1, t.ldSg(ssrc0 + 1));
+          break;
+        case 0x05:                                                 // s_cmov_b32: SCC ? src : dst
+          t.stSg(sdst, t.iselNZ(t.ldScc(), a, t.ldSg(sdst)));
+          break;
+        case 0x06:                                                 // s_cmov_b64
+          t.stSg(sdst, t.iselNZ(t.ldScc(), a, t.ldSg(sdst)));
+          t.stSg(sdst + 1, t.iselNZ(t.ldScc(), ahi, t.ldSg(sdst + 1)));
+          break;
+        case 0x07: { Id r = t.bnot(a); t.stSg(sdst, r); t.stSccBool(t.isNonZero(r)); break; }  // s_not_b32
+        case 0x08: {                                               // s_not_b64
+          Id lo = t.bnot(a), hi = t.bnot(ahi);
+          t.stSg(sdst, lo); t.stSg(sdst + 1, hi);
+          t.stSccBool(t.isNonZero(t.bor(lo, hi)));
+          break;
+        }
+        // s_wqm (whole quad mode): a lane's bit is set if any lane in its quad is.
+        // Single-lane model -> identity; SCC = (result != 0).
+        case 0x09: t.stSg(sdst, a); t.stSccBool(t.isNonZero(a)); break;  // s_wqm_b32
+        case 0x0a:                                                       // s_wqm_b64
+          t.stSg(sdst, a); t.stSg(sdst + 1, ahi);
+          t.stSccBool(t.isNonZero(t.bor(a, ahi)));
+          break;
+        case 0x0b: t.stSg(sdst, t.bitrev(a)); break;               // s_brev_b32
+        case 0x0d: { Id r = t.isub(t.u32(32), t.popcnt(a)); t.stSg(sdst, r); t.stSccBool(t.isNonZero(r)); break; }  // s_bcnt0_i32_b32
+        case 0x0e: { Id r = t.isub(t.u32(64), t.iadd(t.popcnt(a), t.popcnt(ahi)));
+                     t.stSg(sdst, r); t.stSccBool(t.isNonZero(r)); break; }  // s_bcnt0_i32_b64
+        case 0x0f: { Id r = t.popcnt(a); t.stSg(sdst, r); t.stSccBool(t.isNonZero(r)); break; }  // s_bcnt1_i32_b32
+        case 0x10: { Id r = t.iadd(t.popcnt(a), t.popcnt(ahi)); t.stSg(sdst, r); t.stSccBool(t.isNonZero(r)); break; }  // s_bcnt1_i32_b64
+        case 0x11: t.stSg(sdst, t.m.extInst(t.tU, GLSLstd450FindILsb, {t.bnot(a)})); break;  // s_ff0_i32_b32
+        case 0x13: t.stSg(sdst, t.m.extInst(t.tU, GLSLstd450FindILsb, {a})); break;          // s_ff1_i32_b32
+        case 0x15: {  // s_flbit_i32_b32: leading-zero count from the MSB; -1 if src==0
+          Id msb = t.m.extInst(t.tU, GLSLstd450FindUMsb, {a});
+          t.stSg(sdst, t.iselB(t.isZero(a), t.u32(0xFFFFFFFFu), t.isub(t.u32(31), msb)));
+          break;
+        }
+        case 0x17: {  // s_flbit_i32: leading-sign-bit count; -1 if src is 0 or -1
+          Id smsb = t.m.bitcast(t.tU, t.m.extInst(t.tI, GLSLstd450FindSMsb, {t.m.bitcast(t.tI, a)}));
+          t.stSg(sdst, t.iselB(t.m.emit(spv::Op::OpIEqual, t.tBool, {smsb, t.u32(0xFFFFFFFFu)}),
+                               t.u32(0xFFFFFFFFu), t.isub(t.u32(31), smsb)));
+          break;
+        }
+        case 0x24: case 0x25: case 0x26: case 0x27: {  // s_{and,or,xor,andn2}_saveexec_b64
+          Id oldExec = t.ldExec(), src = a, ne;
+          if (op == 0x24) ne = t.band(oldExec, src);
+          else if (op == 0x25) ne = t.bor(oldExec, src);
+          else if (op == 0x26) ne = t.bxor(oldExec, src);
+          else ne = t.band(oldExec, t.bnot(src));
+          t.stSg(sdst, oldExec);
+          t.stSg(126, ne);
+          t.stSccBool(t.isNonZero(ne));
+          break;
+        }
+        case 0x34: { Id r = t.m.bitcast(t.tU, t.m.extInst(t.tI, GLSLstd450SAbs, {t.m.bitcast(t.tI, a)}));
+                     t.stSg(sdst, r); t.stSccBool(t.isNonZero(r)); break; }  // s_abs_i32
+        default: warnUnsup("sop1", op); break;
       }
       break;
     }
     case Enc::sop2: {
       uint32_t op = in.opcode, sdst = (w >> 16) & 0x7F, s0f = w & 0xFF, s1f = (w >> 8) & 0xFF;
       Id a = t.srcRaw(s0f, in.literal), b = t.srcRaw(s1f, in.literal), r = 0;
-      bool scc = false;
-      auto shamt = [&] { return t.m.emit(spv::Op::OpBitwiseAnd, t.tU, {b, t.m.constU32(31)}); };
+      bool scc = false;  // when set, SCC = (r != 0) (logical/shift/bfe/absdiff)
+      // Signed-overflow bit for add: (a^r) & (b^r), sign bit.
+      auto sovf = [&](Id x, Id y, Id res) {
+        return t.isNonZero(t.band(t.band(t.bxor(x, res), t.bxor(y, res)), t.u32(0x80000000u)));
+      };
       switch (op) {
-        case 0x00: case 0x02: case 0x04: r = t.m.emit(spv::Op::OpIAdd, t.tU, {a, b}); break;
-        case 0x01: case 0x03: case 0x05: r = t.m.emit(spv::Op::OpISub, t.tU, {a, b}); break;
-        case 0x0a: case 0x0b: r = t.m.emit(spv::Op::OpSelect, t.tU, {t.isNonZero(t.ldScc()), a, b}); break;
-        case 0x0e: case 0x0f: r = t.m.emit(spv::Op::OpBitwiseAnd, t.tU, {a, b}); scc = true; break;
-        case 0x10: case 0x11: r = t.m.emit(spv::Op::OpBitwiseOr, t.tU, {a, b}); scc = true; break;
-        case 0x12: case 0x13: r = t.m.emit(spv::Op::OpBitwiseXor, t.tU, {a, b}); scc = true; break;
-        case 0x14: case 0x15: r = t.m.emit(spv::Op::OpBitwiseAnd, t.tU,
-                              {a, t.m.emit(spv::Op::OpNot, t.tU, {b})}); scc = true; break;
-        case 0x1e: case 0x1f: r = t.m.emit(spv::Op::OpShiftLeftLogical, t.tU, {a, shamt()}); scc = true; break;
-        case 0x20: case 0x21: r = t.m.emit(spv::Op::OpShiftRightLogical, t.tU, {a, shamt()}); scc = true; break;
-        case 0x22: case 0x23: r = t.m.emit(spv::Op::OpShiftRightArithmetic, t.tU,
-                              {t.m.bitcast(t.tI, a), shamt()}); scc = true; break;
-        case 0x26: r = t.m.emit(spv::Op::OpIMul, t.tU, {a, b}); break;  // s_mul_i32 (0x24 is s_bfm_b32)
-        default: r = a; break;
+        case 0x00: {  // s_add_u32: SCC = unsigned carry-out
+          Id p = t.m.emit(spv::Op::OpIAddCarry, t.pairU(), {a, b});
+          r = t.m.compositeExtract(t.tU, p, 0);
+          t.stSccBool(t.isNonZero(t.m.compositeExtract(t.tU, p, 1)));
+          break;
+        }
+        case 0x01: {  // s_sub_u32: SCC = unsigned borrow
+          Id p = t.m.emit(spv::Op::OpISubBorrow, t.pairU(), {a, b});
+          r = t.m.compositeExtract(t.tU, p, 0);
+          t.stSccBool(t.isNonZero(t.m.compositeExtract(t.tU, p, 1)));
+          break;
+        }
+        case 0x02: r = t.iadd(a, b); t.stSccBool(sovf(a, b, r)); break;    // s_add_i32
+        case 0x03:  // s_sub_i32: overflow = (a^b) & (a^r), sign bit
+          r = t.isub(a, b);
+          t.stSccBool(t.isNonZero(t.band(t.band(t.bxor(a, b), t.bxor(a, r)), t.u32(0x80000000u))));
+          break;
+        case 0x04: {  // s_addc_u32: a + b + SCC, SCC = carry-out
+          Id p = t.m.emit(spv::Op::OpIAddCarry, t.pairU(), {a, b});
+          Id p2 = t.m.emit(spv::Op::OpIAddCarry, t.pairU(),
+                           {t.m.compositeExtract(t.tU, p, 0), t.band(t.ldScc(), t.u32(1))});
+          r = t.m.compositeExtract(t.tU, p2, 0);
+          t.stSccBool(t.isNonZero(t.bor(t.m.compositeExtract(t.tU, p, 1),
+                                        t.m.compositeExtract(t.tU, p2, 1))));
+          break;
+        }
+        case 0x05: {  // s_subb_u32: a - b - SCC, SCC = borrow-out
+          Id p = t.m.emit(spv::Op::OpISubBorrow, t.pairU(), {a, b});
+          Id p2 = t.m.emit(spv::Op::OpISubBorrow, t.pairU(),
+                           {t.m.compositeExtract(t.tU, p, 0), t.band(t.ldScc(), t.u32(1))});
+          r = t.m.compositeExtract(t.tU, p2, 0);
+          t.stSccBool(t.isNonZero(t.bor(t.m.compositeExtract(t.tU, p, 1),
+                                        t.m.compositeExtract(t.tU, p2, 1))));
+          break;
+        }
+        case 0x06: r = t.smin(a, b); t.stSccBool(t.m.emit(spv::Op::OpSLessThan, t.tBool,
+                        {t.m.bitcast(t.tI, a), t.m.bitcast(t.tI, b)})); break;  // s_min_i32
+        case 0x07: r = t.umin(a, b); t.stSccBool(t.m.emit(spv::Op::OpULessThan, t.tBool, {a, b})); break;  // s_min_u32
+        case 0x08: r = t.smax(a, b); t.stSccBool(t.m.emit(spv::Op::OpSGreaterThan, t.tBool,
+                        {t.m.bitcast(t.tI, a), t.m.bitcast(t.tI, b)})); break;  // s_max_i32
+        case 0x09: r = t.umax(a, b); t.stSccBool(t.m.emit(spv::Op::OpUGreaterThan, t.tBool, {a, b})); break;  // s_max_u32
+        case 0x0a: r = t.iselNZ(t.ldScc(), a, b); break;                   // s_cselect_b32
+        case 0x0b:                                                        // s_cselect_b64
+          r = t.iselNZ(t.ldScc(), a, b);
+          if (s0f <= 127 && s1f <= 127)
+            t.stSg(sdst + 1, t.iselNZ(t.ldScc(), t.ldSg((s0f + 1) & 0x7F), t.ldSg((s1f + 1) & 0x7F)));
+          break;
+        case 0x0e: case 0x0f: r = t.band(a, b); scc = true; break;         // s_and_b32/b64
+        case 0x10: case 0x11: r = t.bor(a, b); scc = true; break;          // s_or
+        case 0x12: case 0x13: r = t.bxor(a, b); scc = true; break;         // s_xor
+        case 0x14: case 0x15: r = t.band(a, t.bnot(b)); scc = true; break; // s_andn2
+        case 0x16: case 0x17: r = t.bor(a, t.bnot(b)); scc = true; break;  // s_orn2
+        case 0x18: case 0x19: r = t.bnot(t.band(a, b)); scc = true; break; // s_nand
+        case 0x1a: case 0x1b: r = t.bnot(t.bor(a, b)); scc = true; break;  // s_nor
+        case 0x1c: case 0x1d: r = t.bnot(t.bxor(a, b)); scc = true; break; // s_xnor
+        case 0x1e: case 0x1f: r = t.shl(a, b); scc = true; break;          // s_lshl_b32/b64
+        case 0x20: case 0x21: r = t.shr(a, b); scc = true; break;          // s_lshr
+        case 0x22: case 0x23: r = t.sar(a, b); scc = true; break;          // s_ashr
+        case 0x24: {  // s_bfm_b32: mask = ((1<<width)-1) << offset
+          Id width = t.band(a, t.u32(31)), off = t.band(b, t.u32(31));
+          r = t.shl(t.isub(t.shl(t.u32(1), width), t.u32(1)), off);
+          break;
+        }
+        case 0x26: r = t.imul(a, b); break;                               // s_mul_i32
+        case 0x27: {  // s_bfe_u32: offset=b[4:0], width=b[22:16]
+          Id off = t.band(b, t.u32(31)), width = t.band(t.shr(b, t.u32(16)), t.u32(0x7F));
+          r = t.m.emit(spv::Op::OpBitFieldUExtract, t.tU, {a, off, width});
+          scc = true;
+          break;
+        }
+        case 0x28: {  // s_bfe_i32: signed
+          Id off = t.band(b, t.u32(31)), width = t.band(t.shr(b, t.u32(16)), t.u32(0x7F));
+          r = t.m.bitcast(t.tU, t.m.emit(spv::Op::OpBitFieldSExtract, t.tI,
+                                         {t.m.bitcast(t.tI, a), off, width}));
+          scc = true;
+          break;
+        }
+        case 0x2c: {  // s_absdiff_i32: |a - b|
+          r = t.m.bitcast(t.tU, t.m.extInst(t.tI, GLSLstd450SAbs, {t.m.bitcast(t.tI, t.isub(a, b))}));
+          scc = true;
+          break;
+        }
+        default: warnUnsup("sop2", op); r = a; break;
       }
       if (r) { t.stSg(sdst, r); if (scc) t.stSccBool(t.isNonZero(r)); }
       break;
@@ -1032,7 +1293,7 @@ bool translateVs(const uint32_t *vsCode, const uint32_t *vsUserData, Recompiled 
     r.attrs.push_back({a.semantic, a.numComps, a.tableSgpr, a.dwordOff});
   }
 
-  auto insts = decode(vsCode, 4096);
+  auto insts = decodeShader(vsCode, 4096);
   uint32_t maxParam = 0;
   std::unordered_map<uint32_t, Id> paramOuts;  // param index -> Output var
   bool haveCbuf = false;
@@ -1154,7 +1415,7 @@ bool translateVs(const uint32_t *vsCode, const uint32_t *vsUserData, Recompiled 
 
 // ---- PS ---------------------------------------------------------------------
 bool translatePs(const uint32_t *psCode, Recompiled &r, Tr &t) {
-  auto insts = decode(psCode, 4096);
+  auto insts = decodeShader(psCode, 4096);
   std::vector<Id> iface;
   // Color outputs are declared lazily per MRT target (location == target index), so a
   // shader exporting to MRT0..7 produces a multi-attachment fragment output. Most 2D
@@ -1454,7 +1715,7 @@ bool recompileSpirv(const uint32_t *vsCode, const uint32_t *psCode,
   if (std::getenv("DELTA_GPU_SHDIS")) {
     static int dn = 0;
     auto dump = [&](const char *tag, const uint32_t *code) {
-      auto ins = decode(code, 4096);
+      auto ins = decodeShader(code, 4096);
       if (!hasControlFlow(ins) || dn >= 2) return;
       dn++;
       static const char *encName[] = {"unk","sop1","sop2","sopk","sopc","sopp","smrd",
@@ -1500,7 +1761,7 @@ bool recompileSpirv(const uint32_t *vsCode, const uint32_t *psCode,
   if (tally) {
     static int okN = 0, cfN = 0; static int logged = 0;
     if (r.ok) okN++;
-    if (hasControlFlow(decode(vsCode, 4096)) || hasControlFlow(decode(psCode, 4096))) cfN++;
+    if (hasControlFlow(decodeShader(vsCode, 4096)) || hasControlFlow(decodeShader(psCode, 4096))) cfN++;
     if (logged < 12) { logged++;
       std::fprintf(stderr, "[gcnspv] recompiled ok=%d (cfg-shaders=%d) this=%s\n", okN, cfN,
                    r.ok ? "spirv" : "FALLBACK"); }
