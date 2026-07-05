@@ -15,9 +15,18 @@
 // processor. See prosperity_gc_submit in libSceGnmDriver.cpp.
 extern "C" void prosperity_gc_submit(const void *descArray, uint32_t descCount);
 extern "C" void prosperity_gc_flip(int displayBufferIndex, int64_t flipArg);
+// PS5 AGC submit bridge (delta_gpu, gpu/ps5): the real libSceAgcDriver.sprx
+// submits its DCB through the /dev/gc AGC ioctl 0xc0408121; forward it to the
+// PS5 command processor.
+extern "C" void prosperity_agc_submit(uint64_t dcbBase, uint32_t sizeBytes);
 
 namespace krnl {
 gcDevice::gcDevice(proc *p) : device(p) {}
+
+static bool isPs5() {
+  auto *p = proc::getActive();
+  return p && p->getPlatform() == proc::platform::ps5;
+}
 
 bool gcDevice::init(const char *, uint32_t, uint32_t) { return true; }
 
@@ -157,6 +166,51 @@ int32_t gcDevice::ioctl(uint32_t cmd, void *data) {
                       // slot) so it stops falling through to the UNHANDLED logger.
     if (data)
       *static_cast<uint32_t *>(data) = 0;
+    return 0;
+  }
+  // PS5-only AGC /dev/gc protocol (libSceAgc/libSceAgcDriver). These command
+  // numbers are unused on PS4; gate on the platform so the PS4 path is untouched.
+  case 0x40048135:  // AGC/Gnm query: OUT dword (submit/queue id). The driver just
+                    // stores the value; 0 is accepted.
+    if (isPs5()) {
+      if (data)
+        *static_cast<uint32_t *>(data) = 0;
+      return 0;
+    }
+    break;
+  case 0xC004812E:  // AGC init: INOUT dword. 0 tells AgcDriver to map its own
+                    // submit doorbell (which then succeeds); non-zero skips it.
+    if (isPs5()) {
+      if (data)
+        *static_cast<uint32_t *>(data) = 0;
+      return 0;
+    }
+    break;
+  case 0xC0408121: {  // AGC submit (INOUT, 64 bytes). arg+0x30 = DCB GPU base
+                      // address, arg+0x38 = size in bytes. Forward the DCB to the
+                      // PS5 command processor (PM4 walk + completion labels), then
+                      // zero the arg per the OUT convention.
+    if (!isPs5())
+      break;
+    if (data) {
+      auto *a = static_cast<uint8_t *>(data);
+      uint64_t base = 0;
+      uint32_t size = 0;
+      std::memcpy(&base, a + 0x30, 8);
+      std::memcpy(&size, a + 0x38, 4);
+      static const bool trace = std::getenv("DELTA_AGC_TRACE") != nullptr;
+      static int dumps = 0;
+      if (trace && dumps < 4) {
+        dumps++;
+        auto *w = reinterpret_cast<uint32_t *>(a);
+        std::printf("[agc] submit arg[0..15]:");
+        for (int k = 0; k < 16; k++)
+          std::printf(" %08x", w[k]);
+        std::printf("\n[agc]   base=%#lx size=%u\n", (unsigned long)base, size);
+      }
+      prosperity_agc_submit(base, size);
+      std::memset(a, 0, 64);
+    }
     return 0;
   }
   }
