@@ -149,6 +149,16 @@ int32_t gcDevice::ioctl(uint32_t cmd, void *data) {
       *static_cast<uint32_t *>(data) = 0;
     return 0;
   }
+  case 0xC0048114: {  // GPU status poll. The GnmDriver wrapper (libSceGnmDriver
+                      // +0x5fd0) zeroes the 4-byte slot, issues this, and returns
+                      // (ret == 0) -- it never reads the output back, so only the
+                      // success return matters. A title's render thread polls it
+                      // in a tight loop; handle it here (return success, zero the
+                      // slot) so it stops falling through to the UNHANDLED logger.
+    if (data)
+      *static_cast<uint32_t *>(data) = 0;
+    return 0;
+  }
   }
 
   printGuestCaller();
