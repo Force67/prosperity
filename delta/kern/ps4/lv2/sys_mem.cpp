@@ -131,6 +131,14 @@ uint8_t *PS4ABI sys_mmap(void *addr, size_t size, uint32_t prot, uint32_t flags,
   /*align the page*/
   size = (size + 0x3FFF) & 0xFFFFFFFFFFFFC000LL;
 
+  // A zero-length mapping is invalid (BSD returns EINVAL). Guests hit this on an
+  // error-recovery path, e.g. mmap()ing an fd from a failed physhm_open/fstat.
+  // Without this it fell into allocLowGuest(0) -- 8192 failing mmap(len=0) host
+  // calls -- and returned (uint8_t*)-1, which the errno convention reports as
+  // EPERM (1) rather than EINVAL (22), misleading the guest's fallback.
+  if (size == 0)
+    return reinterpret_cast<uint8_t *>(-SysError::eINVAL);
+
   // addr is a hint unless MAP_FIXED: relocate it rather than alias an existing map
   if (!(flags & mFlags::fixed)) {
     if (!addr || proc->getVma().overlaps(static_cast<uint8_t *>(addr), size))

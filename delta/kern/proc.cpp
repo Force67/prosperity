@@ -472,7 +472,12 @@ static void applyBootPatches(proc &p) {
     uint64_t addr = std::strtoull(at, &end, 0);
     uint64_t minB = 0x1000000;
     if (end && *end == ',') minB = std::strtoull(end + 1, nullptr, 0) * 1024 * 1024;
-    if (addr) {
+    // DELTA_ALLOC_TRACE doubles as a boolean toggle for the [lowalloc] tracer in
+    // sys_mem.cpp, so a bare "=1" is legitimate and must NOT be treated as a code
+    // address here: addr=1 would protect/deref page 0 (host null-deref SIGSEGV).
+    // A real allocator entry is a guest .text vaddr (>= 64 KiB); ignore anything
+    // smaller so tracing can be enabled without planting an int3 at a bogus addr.
+    if (addr >= 0x10000) {
       auto *c = reinterpret_cast<uint8_t *>(addr);
       utl::protectMem(reinterpret_cast<void *>(addr & ~0xFFFull), 0x1000,
                       utl::pageProtection::rwx);
