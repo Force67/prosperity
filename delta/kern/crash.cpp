@@ -77,6 +77,10 @@ static void backtrace(uintptr_t rbp) {
 // Per-syscall call counter, filled by the lv2 trampoline under DELTA_SCHIST.
 extern "C" uint64_t g_sysHist[1024];
 
+// DELTA_HEAP_PROF: dump the top allocation sites (defined below).
+extern uintptr_t g_heapProfAddr;
+static void heapProfDumpOnce();
+
 // SIGUSR1 probe: dump the receiving thread's current guest RIP + a stack scan of
 // return addresses in loaded modules. Sent to every thread (one per /proc task)
 // to find what a wedged title's threads are blocked on. x86-native only.
@@ -113,6 +117,8 @@ static void probeHandler(int, siginfo_t *, void *ucv) {
                    (unsigned long long)g_sysHist[i]);
     }
   }
+  if (g_heapProfAddr)
+    heapProfDumpOnce();
   std::fflush(stderr);
 }
 #endif
@@ -124,6 +130,103 @@ static void probeHandler(int, siginfo_t *, void *ucv) {
 // trap per call, no single-stepping. x86-native only.
 uintptr_t g_allocTraceAddr = 0;
 uint64_t g_allocTraceMin = 0x1000000;  // 16 MiB
+// DELTA_HEAP_PROF: aggregate operator-new/malloc (size in rdi) by guest caller.
+// Fixed open-addressing table, claimed lock-free from the trap handler (called
+// concurrently from every guest thread). SIGUSR1 dumps the top sites by bytes.
+uintptr_t g_heapProfAddr = 0;  // non-zero once any hook is armed
+static constexpr int kHeapProfMaxHooks = 24;
+static uintptr_t g_heapProfHooks[kHeapProfMaxHooks];
+static int g_heapProfHookCount = 0;
+static std::atomic<uint64_t> g_heapProfHookBytes[kHeapProfMaxHooks];
+static std::atomic<uint64_t> g_heapProfHookCalls[kHeapProfMaxHooks];
+namespace {
+constexpr uint32_t kHeapProfSlots = 16384;
+struct HeapProfSlot {
+  std::atomic<uintptr_t> caller{0};
+  std::atomic<uint64_t> bytes{0};
+  std::atomic<uint64_t> count{0};
+};
+HeapProfSlot g_heapProf[kHeapProfSlots];
+std::atomic<uint64_t> g_heapProfTotal{0};
+void heapProfRecord(uintptr_t caller, uint64_t size) {
+  uint32_t h = static_cast<uint32_t>((caller * 2654435761u) >> 13) & (kHeapProfSlots - 1);
+  for (uint32_t i = 0; i < kHeapProfSlots; i++) {
+    uint32_t s = (h + i) & (kHeapProfSlots - 1);
+    uintptr_t c = g_heapProf[s].caller.load(std::memory_order_relaxed);
+    if (c == caller) {
+      g_heapProf[s].bytes.fetch_add(size, std::memory_order_relaxed);
+      g_heapProf[s].count.fetch_add(1, std::memory_order_relaxed);
+      break;
+    }
+    if (c == 0) {
+      uintptr_t expected = 0;
+      if (g_heapProf[s].caller.compare_exchange_strong(expected, caller,
+                                                       std::memory_order_relaxed)) {
+        g_heapProf[s].bytes.fetch_add(size, std::memory_order_relaxed);
+        g_heapProf[s].count.fetch_add(1, std::memory_order_relaxed);
+        break;
+      }
+      if (expected == caller) {
+        g_heapProf[s].bytes.fetch_add(size, std::memory_order_relaxed);
+        g_heapProf[s].count.fetch_add(1, std::memory_order_relaxed);
+        break;
+      }
+    }
+  }
+  g_heapProfTotal.fetch_add(size, std::memory_order_relaxed);
+}
+void heapProfDump() {
+  std::fprintf(stderr, "[heapprof] total=%llu bytes (%.1f MB) across sites; top by bytes:\n",
+               (unsigned long long)g_heapProfTotal.load(),
+               g_heapProfTotal.load() / 1048576.0);
+  for (int i = 0; i < g_heapProfHookCount; i++) {
+    uint64_t b = g_heapProfHookBytes[i].load(std::memory_order_relaxed);
+    std::fprintf(stderr, "[heapprof]  hook[%d] %#lx: %8.1f MB  %8llu calls\n", i,
+                 (unsigned long)g_heapProfHooks[i], b / 1048576.0,
+                 (unsigned long long)g_heapProfHookCalls[i].load(std::memory_order_relaxed));
+  }
+  // Select top 20 by bytes without allocating (linear passes).
+  uint64_t prevBytes = ~0ull;
+  uintptr_t prevCaller = 0;
+  for (int rank = 0; rank < 20; rank++) {
+    uint64_t bestB = 0; uint32_t bestS = kHeapProfSlots;
+    for (uint32_t s = 0; s < kHeapProfSlots; s++) {
+      uint64_t b = g_heapProf[s].bytes.load(std::memory_order_relaxed);
+      if (b == 0) continue;
+      uintptr_t c = g_heapProf[s].caller.load(std::memory_order_relaxed);
+      bool below = b < prevBytes || (b == prevBytes && c > prevCaller);
+      if (below && b >= bestB) { bestB = b; bestS = s; }
+    }
+    if (bestS == kHeapProfSlots) break;
+    uintptr_t c = g_heapProf[bestS].caller.load(std::memory_order_relaxed);
+    uint64_t cnt = g_heapProf[bestS].count.load(std::memory_order_relaxed);
+    char sym[200];
+    symbolize(c, sym, sizeof(sym));
+    std::fprintf(stderr, "[heapprof]  %8.1f MB  %8llu calls  %s\n",
+                 bestB / 1048576.0, (unsigned long long)cnt, sym);
+    prevBytes = bestB; prevCaller = c;
+  }
+  std::fflush(stderr);
+}
+}  // namespace
+void setHeapProf(uintptr_t addr) {
+  if (g_heapProfHookCount < kHeapProfMaxHooks)
+    g_heapProfHooks[g_heapProfHookCount++] = addr;
+  g_heapProfAddr = addr;  // any non-zero arms the SIGTRAP path
+}
+// Throttle to one dump per SIGUSR1 burst (every thread gets the signal).
+static void heapProfDumpOnce() {
+  static std::atomic<uint64_t> last{0};
+  timespec t{};
+  clock_gettime(CLOCK_MONOTONIC, &t);
+  uint64_t now = (uint64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000;
+  uint64_t prev = last.load(std::memory_order_relaxed);
+  if (now - prev < 300)
+    return;
+  if (!last.compare_exchange_strong(prev, now, std::memory_order_relaxed))
+    return;
+  heapProfDump();
+}
 // DELTA_CNT_TRACE: same int3-emulate trick at an entry whose 1st byte is push rbp,
 // but logs the per-archive entry-count [rdi+0x30] and the inline name at [rdi+0x5c].
 uintptr_t g_cntTraceAddr = 0;
@@ -333,6 +436,23 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
   }
   // Allocator-trace trap: handle first so it neither marks s_dumping nor floods
   // the entry marker. After int3 the RIP sits one byte past the hooked entry.
+  if (sig == SIGTRAP && g_heapProfAddr && ucv) {
+    auto *uc = static_cast<ucontext_t *>(ucv);
+    auto *gr = uc->uc_mcontext.gregs;
+    for (int i = 0; i < g_heapProfHookCount; i++) {
+      if ((uintptr_t)gr[REG_RIP] != g_heapProfHooks[i] + 1)
+        continue;
+      uintptr_t rsp = (uintptr_t)gr[REG_RSP];
+      uintptr_t caller = rsp >= 0x10000 ? *reinterpret_cast<uint64_t *>(rsp) : 0;
+      uint64_t size = (uint64_t)gr[REG_RDI];
+      heapProfRecord(caller, size);
+      g_heapProfHookBytes[i].fetch_add(size, std::memory_order_relaxed);
+      g_heapProfHookCalls[i].fetch_add(1, std::memory_order_relaxed);
+      gr[REG_RSP] -= 8;  // emulate the displaced `push rbp`
+      *reinterpret_cast<uint64_t *>(gr[REG_RSP]) = (uint64_t)gr[REG_RBP];
+      return;
+    }
+  }
   if (sig == SIGTRAP && g_allocTraceAddr && ucv) {
     auto *uc = static_cast<ucontext_t *>(ucv);
     auto *gr = uc->uc_mcontext.gregs;
@@ -387,6 +507,9 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
     for (;;) pause();  // park until the first thread's _Exit ends the process
   }
   utl::silenceLogging();  // stop the async log thread racing us on stderr
+
+  if (g_heapProfAddr)
+    heapProfDump();
 
 #if defined(__x86_64__)
   // Guest SDK assert/__debugbreak is a software interrupt (`int 0xNN`, cd NN);

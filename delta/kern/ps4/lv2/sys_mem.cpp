@@ -139,6 +139,33 @@ uint8_t *PS4ABI sys_mmap(void *addr, size_t size, uint32_t prot, uint32_t flags,
   if (size == 0)
     return reinterpret_cast<uint8_t *>(-SysError::eINVAL);
 
+  // SCOUT (DELTA_MMAP_CALLER=<minMB>): scan the guest stack for return addresses
+  // in a loaded module's .text to pin which guest code requested a big map (e.g.
+  // the libc heap). Handler runs on the guest stack on native.
+  if (const char *mc = std::getenv("DELTA_MMAP_CALLER")) {
+    size_t minB = static_cast<size_t>(std::strtoull(mc, nullptr, 0)) * 1024 * 1024;
+    if (minB == 0) minB = 64ull * 1024 * 1024;
+    if (size >= minB) {
+      std::fprintf(stderr, "[mmap-caller] size=%#zx prot=%#x flags=%#x fd=%u:\n",
+                   size, prot, flags, fd);
+      auto *sp = reinterpret_cast<uintptr_t *>(__builtin_frame_address(0));
+      int shown = 0;
+      for (int i = 0; i < 8192 && shown < 12; i++) {
+        uintptr_t v = sp[i];
+        for (auto &m : proc->getModuleList()) {
+          auto &mi = m->getInfo();
+          auto *t = mi.textSeg.addr;
+          if (t && v >= (uintptr_t)t && v < (uintptr_t)t + mi.textSeg.size) {
+            std::fprintf(stderr, "  sp+%-4x %s+%#lx\n", i * 8, mi.name.c_str(),
+                         v - (uintptr_t)t);
+            shown++;
+            break;
+          }
+        }
+      }
+    }
+  }
+
   // addr is a hint unless MAP_FIXED: relocate it rather than alias an existing map
   if (!(flags & mFlags::fixed)) {
     if (!addr || proc->getVma().overlaps(static_cast<uint8_t *>(addr), size))

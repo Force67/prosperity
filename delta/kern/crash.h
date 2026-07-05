@@ -18,6 +18,12 @@ void installCrashHandler();
 // fatal handler logs each allocation (size in rsi) >= minSize and resumes.
 void setAllocTrace(uintptr_t addr, uint64_t minSize);
 
+// DELTA_HEAP_PROF: int3 at a guest allocator entry (push rbp) whose size arg is
+// in rdi (operator new / malloc). Each hit aggregates bytes+count keyed by the
+// guest caller ([rsp]); SIGUSR1 dumps the top sites. Finds the heap's dominant
+// consumer/leaker without a per-call log flood.
+void setHeapProf(uintptr_t addr);
+
 // DELTA_CNT_TRACE: like setAllocTrace but logs the archive entry-count [rdi+0x30]
 // and the inline name [rdi+0x5c] at the hooked entry (push rbp -> int3).
 void setCntTrace(uintptr_t addr);

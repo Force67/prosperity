@@ -492,6 +492,25 @@ static void applyBootPatches(proc &p) {
       }
     }
   }
+  // DELTA_HEAP_PROF=0xADDR: plant int3 at an operator-new/malloc entry (push rbp,
+  // size in rdi) and aggregate bytes+count by guest caller; SIGUSR1 dumps top sites.
+  if (const char *hp = std::getenv("DELTA_HEAP_PROF")) {
+    char *cur = const_cast<char *>(hp);
+    while (cur && *cur) {
+      uint64_t addr = std::strtoull(cur, &cur, 0);
+      if (addr >= 0x10000) {
+        auto *c = reinterpret_cast<uint8_t *>(addr);
+        utl::protectMem(reinterpret_cast<void *>(addr & ~0xFFFull), 0x1000,
+                        utl::pageProtection::rwx);
+        if (c[0] == 0x55) { c[0] = 0xCC; setHeapProf(addr);
+          LOG_INFO("DELTA_HEAP_PROF: hooked alloc entry {:#x}", addr);
+        } else {
+          LOG_WARNING("DELTA_HEAP_PROF: {:#x} first byte {:#x} != push rbp", addr, c[0]);
+        }
+      }
+      while (*cur == ',' || *cur == ' ') cur++;
+    }
+  }
   if (const char *ct = std::getenv("DELTA_CNT_TRACE")) {
     uint64_t addr = std::strtoull(ct, nullptr, 0);
     if (addr) {
