@@ -36,6 +36,8 @@ proc::proc() : vmem(env) { g_activeProc = this; }
 
 proc *proc::getActive() { return g_activeProc; }
 
+static void bringUpRebirthEbootRegistry(smodule &m);
+
 bool proc::create(const base::String &path, bool fromVfs) {
   /*register HLE prx overrides*/
   runtime::vprx_init();
@@ -76,6 +78,11 @@ bool proc::create(const base::String &path, bool fromVfs) {
   // PS5 modules carry no DT_SCE_MODULEINFO, so name the main module ourselves.
   if (ps5 && first->getInfo().name.empty())
     first->getInfo().name = base::String("eboot");
+
+  // Engine bring-up: give Isaac's surface-name registry valid empty storage so
+  // main-init doesn't deref a null bucket array (self-gated by ctor signature).
+  if (ps5)
+    bringUpRebirthEbootRegistry(*first);
 
   return true;
 }
@@ -153,6 +160,47 @@ static void bringUpRebirthSurfaceRegistry(smodule &m) {
       }
     }).detach();
   }
+}
+
+// PS5 bring-up (mirror of bringUpRebirthSurfaceRegistry above). The PS5 eboot
+// statically links the same "rebirth" engine, so it has the same global surface-
+// name registry, here at eboot+0x985458 (bucket-array base pointer, a fixed 0x20
+// buckets * 0x20-byte stride). Its ctor at eboot+0x56a5d0 zeroes the pointer
+// (the null-write at eboot+0x56a5e7) and never allocates the array -- that
+// storage is meant to come from the renderer registering the base surfaces,
+// which needs the AGC/GPU device that isn't up yet. Main-init's first registry
+// find (eboot+0x568840) then iterates null+idx*0x20 and faults (eboot+0x56889e).
+// Hand it a valid empty bucket array up front and NOP the ctor's null-write, as
+// on PS4. Guarded by the exact ctor-instruction bytes so a different PS5 title's
+// eboot is left untouched. (Offsets verified against the decrypted eboot.)
+static void bringUpRebirthEbootRegistry(smodule &m) {
+  uint8_t *base = m.getInfo().base;
+  constexpr uint32_t kRegistryOff = 0x985458; // bucket-array base pointer
+  constexpr uint32_t kCtorZeroOff = 0x56a5e7; // `mov qword [registry], 0` (11 bytes)
+  constexpr size_t kBucketBytes = 0x20 * 0x20; // N buckets * stride
+
+  // `mov qword [rip+0x41ae66], 0` -> eboot+0x985458. Only this build has it.
+  static const uint8_t kCtorBytes[] = {0x48, 0xc7, 0x05, 0x66, 0xae, 0x41,
+                                       0x00, 0x00, 0x00, 0x00, 0x00};
+  if (std::memcmp(base + kCtorZeroOff, kCtorBytes, sizeof(kCtorBytes)) != 0)
+    return; // not this title's eboot; nothing to bring up
+
+  uint8_t *buckets = allocLowGuest(kBucketBytes);
+  if (!buckets) {
+    LOG_ERROR("rebirth eboot-registry: bucket alloc failed");
+    return;
+  }
+  *reinterpret_cast<uint64_t *>(base + kRegistryOff) =
+      reinterpret_cast<uint64_t>(buckets);
+
+  uint8_t *ctor = base + kCtorZeroOff;
+  utl::protectMem(
+      reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(ctor) & ~0xFFFull),
+      0x1000, utl::pageProtection::rwx);
+  std::memset(ctor, 0x90, 11); // NOP the ctor's null-write
+
+  LOG_INFO("rebirth eboot-registry: installed empty buckets@{} -> [+{:#x}]",
+           (void *)buckets, kRegistryOff);
 }
 
 // DIAGNOSTIC (DELTA_VO_PATCH): patch real libSceVideoOut export entries to
