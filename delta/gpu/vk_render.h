@@ -91,6 +91,22 @@ struct DrawInfo {
   uint32_t targetMask = 0xF;
   uint32_t colorControl = 0;
 
+  // Depth/stencil (DB) state. When depthBase is a valid guest address and depthValid
+  // is set the draw's region binds a Vulkan depth attachment keyed by depthBase, and
+  // honours the DB_DEPTH_CONTROL test/write/func below. 2D titles leave depthBase 0
+  // (DB_Z_INFO format invalid), so no depth attachment is bound (unchanged path).
+  uint64_t depthBase = 0;
+  bool depthValid = false;        // DB_Z_INFO format != 0
+  bool depthTestEnable = false;   // DB_DEPTH_CONTROL Z_ENABLE
+  bool depthWriteEnable = false;  // DB_DEPTH_CONTROL Z_WRITE_ENABLE
+  uint32_t depthFunc = 7;         // DB_DEPTH_CONTROL ZFUNC (maps 1:1 to VkCompareOp)
+  float depthClear = 1.0f;        // DB_DEPTH_CLEAR (fast-clear value)
+
+  // Primitive-setup: raster topology + face culling, from VGT_PRIMITIVE_TYPE and
+  // PA_SU_SC_MODE_CNTL. 2D titles draw triangle lists with no culling (unchanged).
+  uint32_t cullMode = 0;          // PA_SU_SC_MODE_CNTL: CULL_FRONT[0] CULL_BACK[1]
+  bool frontCCW = true;           // FACE[2] == 0
+
   // Recompiled-shader path. When recomp != null and nvattrs > 0 the renderer runs
   // the game's actual VS/PS (recompiled to SPIR-V) instead of the heuristic quad:
   // vertexData/vertexStride is the raw interleaved vertex buffer, vattrs describe

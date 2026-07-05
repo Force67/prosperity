@@ -52,6 +52,19 @@ constexpr uint32_t mmCB_COLOR_CONTROL = 0xA202;
 constexpr uint32_t mmVGT_PRIMITIVE_TYPE = 0xC242;
 constexpr uint32_t mmVGT_NUM_INDICES = 0xC24C;
 
+// --- depth/stencil (DB) state ---
+// DB_DEPTH_CONTROL: STENCIL_ENABLE[0] Z_ENABLE[1] Z_WRITE_ENABLE[2] ZFUNC[6:4].
+constexpr uint32_t mmDB_DEPTH_CONTROL = 0xA200;
+// DB_Z_INFO: FORMAT[1:0] (0=invalid/off, 1=Z16, 3=Z32_FLOAT).
+constexpr uint32_t mmDB_Z_INFO = 0xA010;
+// Depth surface base (byte addr = value << 8). Z_WRITE is what the draw renders to.
+constexpr uint32_t mmDB_Z_READ_BASE = 0xA012;
+constexpr uint32_t mmDB_Z_WRITE_BASE = 0xA014;
+// Fast-clear depth value (float) used when the buffer is bound with loadOp=CLEAR.
+constexpr uint32_t mmDB_DEPTH_CLEAR = 0xA00B;
+// Primitive-setup: cull + winding. CULL_FRONT[0] CULL_BACK[1] FACE[2] (0=CCW front).
+constexpr uint32_t mmPA_SU_SC_MODE_CNTL = 0xA205;
+
 // --- shader (SH) registers (absolute = kShRegBase + n) ---
 // Pixel shader program address + resources + user data.
 constexpr uint32_t mmSPI_SHADER_PGM_LO_PS = 0x2C08;

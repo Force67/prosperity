@@ -202,6 +202,55 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
     d.targetMask = g_regs[mmCB_TARGET_MASK];
     d.colorControl = g_regs[mmCB_COLOR_CONTROL];
 
+    // Depth/stencil state. A 3D title (Doom64, SOTTR) binds a Z buffer and Z-tests
+    // the world; 2D titles leave DB_Z_INFO format invalid so depthValid stays false
+    // and no depth attachment is bound (the 2D path is unchanged). We only render to
+    // the write base; internal format is always D32F (never read back to the guest).
+    {
+      static const bool noDepth = std::getenv("DELTA_GPU_NODEPTH") != nullptr;
+      uint32_t dc = g_regs[mmDB_DEPTH_CONTROL];
+      uint32_t zinfo = noDepth ? 0 : g_regs[mmDB_Z_INFO];
+      uint64_t zbase = static_cast<uint64_t>(g_regs[mmDB_Z_WRITE_BASE]) << 8;
+      static const bool dbTrace = std::getenv("DELTA_GPU_DBTRACE") != nullptr;
+      static int dbN = 0;
+      if (dbTrace && dbN < 24 && (zinfo || dc)) {
+        dbN++;
+        std::fprintf(stderr, "[db] DEPTH_CONTROL=%#x Z_INFO=%#x Zwrite=%#lx clear=%#x prim=%u\n",
+                     dc, zinfo, (unsigned long)zbase, g_regs[mmDB_DEPTH_CLEAR],
+                     g_regs[mmVGT_PRIMITIVE_TYPE]);
+      }
+      d.depthValid = (zinfo & 0x3) != 0;
+      if (d.depthValid && zbase >= 0x1000000000ull && zbase < 0x20000000000ull &&
+          ((dc >> 1) & 1u || (dc >> 2) & 1u)) {
+        d.depthBase = zbase;
+        d.depthTestEnable = (dc >> 1) & 1u;
+        d.depthWriteEnable = (dc >> 2) & 1u;
+        d.depthFunc = (dc >> 4) & 0x7;
+        std::memcpy(&d.depthClear, &g_regs[mmDB_DEPTH_CLEAR], 4);
+        if (!(d.depthClear >= 0.0f && d.depthClear <= 1.0f)) d.depthClear = 1.0f;
+      } else {
+        d.depthValid = false;
+      }
+      // DELTA_GPU_FORCEDEPTH: exercise the depth attachment/clear/pipeline path even on
+      // titles that bind no Z buffer (Doom64 is painter-ordered, Z_INFO=0), to validate
+      // it end-to-end. func=ALWAYS so no fragment is hidden (visible output unchanged);
+      // depthBase keys a synthetic depth image off the RT.
+      static const bool forceDepth = std::getenv("DELTA_GPU_FORCEDEPTH") != nullptr;
+      if (forceDepth && !d.depthBase && d.rtBase) {
+        d.depthBase = d.rtBase;
+        d.depthTestEnable = true;
+        d.depthWriteEnable = true;
+        d.depthFunc = 7;  // ALWAYS
+        d.depthClear = 1.0f;
+      }
+    }
+    // Primitive-setup: face culling + winding (PA_SU_SC_MODE_CNTL).
+    {
+      uint32_t sc = g_regs[mmPA_SU_SC_MODE_CNTL];
+      d.cullMode = sc & 0x3;      // CULL_FRONT[0] | CULL_BACK[1]
+      d.frontCCW = ((sc >> 2) & 1u) == 0;
+    }
+
     // Constant buffer (transform): default to the sgpr[4..7] V# (the common VS cbuffer
     // slot); the recompiled-shader path below re-resolves it from the SGPR the VS
     // actually reads (rc.vsCbufs) when that differs.

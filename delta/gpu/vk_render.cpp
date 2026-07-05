@@ -65,6 +65,7 @@ struct State {
   uint64_t curRt = 0;   // primary RT (MRT0) of the open region (0 = none)
   uint64_t curMrt[8] = {0};   // all color targets bound in the open region
   uint32_t curMrtCount = 0;   // how many of curMrt[] are bound
+  uint64_t curDepth = 0;      // depth target bound in the open region (0 = none)
   uint64_t lastRt = 0;  // last RT rendered to (present fallback)
   uint64_t busiestRt = 0;
   uint32_t busiestRtDraws = 0;
@@ -179,6 +180,21 @@ struct RTarget {
   bool everRendered = false;  // false until first real render (then loadOp can LOAD)
 };
 std::unordered_map<uint64_t, RTarget> g_rts;
+
+// Depth/stencil attachment, keyed by its guest DB_Z_WRITE_BASE. Allocated on demand
+// when a 3D draw binds a Z buffer. Internal format is always D32_SFLOAT (we never
+// read depth back to guest memory, so only a valid depth format is needed).
+constexpr VkFormat kDepthFormat = VK_FORMAT_D32_SFLOAT;
+struct DepthTarget {
+  VkImage image = VK_NULL_HANDLE;
+  VkDeviceMemory mem = VK_NULL_HANDLE;
+  VkImageView view = VK_NULL_HANDLE;
+  uint32_t w = 0, h = 0;
+  VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
+  int lastFrame = -1000;
+  bool usedThisFrame = false;
+};
+std::unordered_map<uint64_t, DepthTarget> g_depths;
 
 // Address -> image page table (the resource model's core). Maps a 64 KiB guest page
 // to the RT bases whose memory footprint covers it, so a sampled address resolves to
@@ -875,9 +891,15 @@ VkDescriptorSet getMultiTexSet(const DrawInfo &d) {
     return ci->second;
   }
   if (g_mtexCache.size() > 3500) return VK_NULL_HANDLE;
+  // DELTA_GPU_FORCEWHITE: bind the 1x1 white default for every sampler (diagnostic).
+  // Doom64's world textures are built by compute dispatches we don't execute, so the
+  // atlases are all-zero and the alpha-blended world samples transparent-black (=
+  // invisible). Forcing white makes the geometry render opaque, proving the 3D
+  // transform/raster/depth path works and isolating the blackness to the texture data.
+  static const bool forceWhite = std::getenv("DELTA_GPU_FORCEWHITE") != nullptr;
   VkImageView views[State::kMaxTex];
   for (uint32_t i = 0; i < State::kMaxTex; i++) {
-    VkImageView v = i < d.nTexs ? texViewFor(d.texs[i]) : VK_NULL_HANDLE;
+    VkImageView v = (i < d.nTexs && !forceWhite) ? texViewFor(d.texs[i]) : VK_NULL_HANDLE;
     views[i] = v ? v : g.whiteView;
   }
   VkDescriptorSetAllocateInfo da{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
@@ -972,6 +994,49 @@ RTarget *getRT(uint64_t base, uint32_t w, uint32_t h) {
 
 uint64_t rtByteSize(const RTarget &rt) { return rtByteSizeWH(rt.w, rt.h); }
 
+// Transition a depth image (aspect = DEPTH) between layouts.
+void depthBarrier(VkCommandBuffer c, VkImage img, VkImageLayout from,
+                  VkImageLayout to, VkAccessFlags srcA, VkAccessFlags dstA) {
+  VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+  b.oldLayout = from; b.newLayout = to;
+  b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+  b.image = img;
+  b.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+  b.srcAccessMask = srcA; b.dstAccessMask = dstA;
+  vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                       VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
+}
+
+// Find or create the depth target at guest address `base` (dimensions w x h).
+DepthTarget *getDepthRT(uint64_t base, uint32_t w, uint32_t h) {
+  auto it = g_depths.find(base);
+  if (it != g_depths.end()) return &it->second;
+  if (g_depths.size() > 32 || !w || !h) return nullptr;
+  DepthTarget t; t.w = w; t.h = h;
+  VkImageCreateInfo ii{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+  ii.imageType = VK_IMAGE_TYPE_2D;
+  ii.format = kDepthFormat;
+  ii.extent = {w, h, 1};
+  ii.mipLevels = 1; ii.arrayLayers = 1;
+  ii.samples = VK_SAMPLE_COUNT_1_BIT;
+  ii.tiling = VK_IMAGE_TILING_OPTIMAL;
+  ii.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+  if (vkCreateImage(g.device, &ii, nullptr, &t.image) != VK_SUCCESS) return nullptr;
+  VkMemoryRequirements mr; vkGetImageMemoryRequirements(g.device, t.image, &mr);
+  VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+  ai.allocationSize = mr.size;
+  ai.memoryTypeIndex = findMemoryType(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+  vkAllocateMemory(g.device, &ai, nullptr, &t.mem);
+  vkBindImageMemory(g.device, t.image, t.mem, 0);
+  VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+  vci.image = t.image; vci.viewType = VK_IMAGE_VIEW_TYPE_2D; vci.format = kDepthFormat;
+  vci.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+  vkCreateImageView(g.device, &vci, nullptr, &t.view);
+  std::fprintf(stderr, "[gpuvk] new depth %#lx %ux%u\n", (unsigned long)base, w, h);
+  g_depths[base] = t;
+  return &g_depths[base];
+}
+
 // Resolve a sampled texture address to the live RT image that backs it (the
 // resource model's "the page table collects all overlappers" lookup). The game
 // cycles/aliases RT addresses (double-buffered room layers, a pool of scene
@@ -1021,11 +1086,16 @@ void endRegion() {
   }
   g.curRt = 0;
   g.curMrtCount = 0;
+  g.curDepth = 0;
 }
 
 // Begin a dynamic-rendering region binding mrtCount color targets (mrtBase[0] is the
 // primary). The common single-RT case (mrtCount == 1) binds exactly one attachment.
-void beginRegion(const uint64_t *mrtBase, uint32_t mrtCount, uint32_t w, uint32_t h) {
+// depthBase != 0 additionally binds a depth attachment (cleared to depthClear on its
+// first use each frame, loaded thereafter); depthBase == 0 leaves depth unbound (the
+// 2D path).
+void beginRegion(const uint64_t *mrtBase, uint32_t mrtCount, uint32_t w, uint32_t h,
+                 uint64_t depthBase = 0, float depthClear = 1.0f) {
   static const bool lazyClear = [] { const char *e = std::getenv("DELTA_GPU_LAZYCLEAR");
     return !e || std::strcmp(e, "0") != 0; }();
   VkRenderingAttachmentInfo colors[8]{};
@@ -1059,9 +1129,27 @@ void beginRegion(const uint64_t *mrtBase, uint32_t mrtCount, uint32_t w, uint32_
   }
   RTarget &rt = *getRT(mrtBase[0], w, h);
   uint64_t base = mrtBase[0];
+  // Depth attachment (3D). Cleared to the guest DB_DEPTH_CLEAR value on its first use
+  // this frame, then loaded so multiple regions in a frame share one Z buffer.
+  VkRenderingAttachmentInfo depthAtt{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+  DepthTarget *dt = depthBase ? getDepthRT(depthBase, rt.w, rt.h) : nullptr;
+  if (dt) {
+    depthBarrier(g.cmd, dt->image, dt->layout, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                 0, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT);
+    dt->layout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+    depthAtt.imageView = dt->view;
+    depthAtt.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+    depthAtt.loadOp = dt->usedThisFrame ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_CLEAR;
+    depthAtt.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    depthAtt.clearValue.depthStencil = {depthClear, 0};
+    dt->usedThisFrame = true;
+    dt->lastFrame = g.frameNum;
+    g.curDepth = depthBase;
+  }
   VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
   ri.renderArea = {{0, 0}, {rt.w, rt.h}};
   ri.layerCount = 1; ri.colorAttachmentCount = g.curMrtCount; ri.pColorAttachments = colors;
+  if (dt) ri.pDepthAttachment = &depthAtt;
   p_vkCmdBeginRendering(g.cmd, &ri);
   // Negative-height (y-up) viewport: GCN/PS4 rasterises y-up, so we do too. This
   // stores render-target content in the game's orientation, so render-to-texture
@@ -1139,6 +1227,20 @@ VkFormat vfmt(uint32_t dfmt, uint32_t nfmt) {
   }
 }
 
+// VGT_PRIMITIVE_TYPE -> Vulkan topology. Unknown/2D types fall back to triangle list
+// (the previous hardcoded topology), so the 2D path is unchanged.
+VkPrimitiveTopology vkTopology(uint32_t prim) {
+  switch (prim) {
+    case 1:  return VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
+    case 2:  return VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
+    case 3:  return VK_PRIMITIVE_TOPOLOGY_LINE_STRIP;
+    case 5:  return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN;
+    case 6:  return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+    case 4:  // triangle list
+    default: return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+  }
+}
+
 struct RecompPipe {
   VkPipeline pipe = VK_NULL_HANDLE;
   VkPipelineLayout layout = VK_NULL_HANDLE;
@@ -1155,9 +1257,16 @@ VkShaderModule makeModuleVec(const std::vector<uint32_t> &spv) {
 // blend state + vertex layout.
 RecompPipe *getRecompPipe(const DrawInfo &d) {
   uint32_t mrtN = d.mrtCount ? (d.mrtCount > 8 ? 8 : d.mrtCount) : 1;
+  // Depth + primitive-setup state folded into the pipeline key (mixed through an FNV
+  // prime so it spreads across the whole 64-bit space, away from the blend/stride bits).
+  uint32_t dstate = (d.depthBase ? 1u : 0u) | (d.depthTestEnable ? 2u : 0u) |
+                    (d.depthWriteEnable ? 4u : 0u) | ((d.depthFunc & 7u) << 3) |
+                    ((d.primType & 0x1Fu) << 6) | ((d.cullMode & 3u) << 11) |
+                    (d.frontCCW ? 0u : (1u << 13));
   uint64_t key = d.vsAddr * 0x9e3779b97f4a7c15ull ^ d.psAddr ^
                  ((uint64_t)(d.blendEnable ? (d.blendControl & 0x7FFFFFFFu) : 0) << 1) ^
-                 ((uint64_t)d.vertexStride << 33) ^ ((uint64_t)mrtN << 60);
+                 ((uint64_t)d.vertexStride << 33) ^ ((uint64_t)mrtN << 60) ^
+                 ((uint64_t)dstate * 0x100000001b3ull);
   auto it = g_recompPipes.find(key);
   if (it != g_recompPipes.end()) return &it->second;
   RecompPipe rp;
@@ -1191,15 +1300,33 @@ RecompPipe *getRecompPipe(const DrawInfo &d) {
   vi.vertexAttributeDescriptionCount = d.nvattrs; vi.pVertexAttributeDescriptions = attrs;
 
   VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
-  ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+  ia.topology = vkTopology(d.primType);
   VkPipelineViewportStateCreateInfo vp{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
   vp.viewportCount = 1; vp.scissorCount = 1;
   VkPipelineRasterizationStateCreateInfo rs{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
-  rs.polygonMode = VK_POLYGON_MODE_FILL; rs.cullMode = VK_CULL_MODE_NONE;
-  rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE; rs.lineWidth = 1.0f;
+  rs.polygonMode = VK_POLYGON_MODE_FILL;
+  // Face culling from PA_SU_SC_MODE_CNTL (CULL_FRONT[0]/CULL_BACK[1] map 1:1 onto the
+  // Vulkan cull-mode bits). The render region uses a negative-height (y-up) viewport
+  // to match GCN rasterisation, which flips triangle winding in framebuffer space, so
+  // the guest's front-face sense is inverted here to compensate. Culling is opt-in
+  // (DELTA_GPU_CULL=1) until the winding can be validated against visible 3D geometry:
+  // Doom64's world textures are compute-built (unimplemented) so its geometry is not
+  // yet visible, and depth already resolves occlusion, so the default stays cull-none
+  // to avoid dropping correctly-drawn faces (some HUD draws set cull bits).
+  static const bool doCull = std::getenv("DELTA_GPU_CULL") != nullptr;
+  rs.cullMode = doCull ? (VkCullModeFlags)(d.cullMode & 0x3) : VK_CULL_MODE_NONE;
+  rs.frontFace = d.frontCCW ? VK_FRONT_FACE_CLOCKWISE : VK_FRONT_FACE_COUNTER_CLOCKWISE;
+  rs.lineWidth = 1.0f;
   VkPipelineMultisampleStateCreateInfo ms{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
   ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+  // Depth test/write from DB_DEPTH_CONTROL (only when the draw bound a Z buffer; 2D
+  // draws leave depthBase 0 so this stays fully disabled, unchanged from before).
   VkPipelineDepthStencilStateCreateInfo dss{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+  if (d.depthBase) {
+    dss.depthTestEnable = d.depthTestEnable ? VK_TRUE : VK_FALSE;
+    dss.depthWriteEnable = d.depthWriteEnable ? VK_TRUE : VK_FALSE;
+    dss.depthCompareOp = (VkCompareOp)(d.depthFunc & 0x7);  // ZFUNC maps 1:1
+  }
   // One blend attachment per bound MRT target (same blend for all; targets the PS does
   // not export to are write-masked off so they keep their loaded content).
   VkPipelineColorBlendAttachmentState cbAtt[8];
@@ -1217,6 +1344,7 @@ RecompPipe *getRecompPipe(const DrawInfo &d) {
   for (uint32_t i = 0; i < mrtN; i++) fmts[i] = g.rtFormat;
   VkPipelineRenderingCreateInfo rci{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
   rci.colorAttachmentCount = mrtN; rci.pColorAttachmentFormats = fmts;
+  if (d.depthBase) rci.depthAttachmentFormat = kDepthFormat;
   VkGraphicsPipelineCreateInfo pi{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
   pi.pNext = &rci; pi.stageCount = 2; pi.pStages = stages;
   pi.pVertexInputState = &vi; pi.pInputAssemblyState = &ia; pi.pViewportState = &vp;
@@ -1234,6 +1362,14 @@ RecompPipe *getRecompPipe(const DrawInfo &d) {
 // Issue an indexed draw running the game's recompiled VS/PS. Returns false if the
 // draw can't be handled (the caller falls back to the heuristic path).
 bool drawRecomp(const DrawInfo &d) {
+  static const bool drawTrace = std::getenv("DELTA_GPU_DRAWTRACE") != nullptr;
+  if (drawTrace && d.indexCount >= 300) {
+    static int n = 0;
+    if (n++ < 40)
+      std::fprintf(stderr, "[dt] enter recomp idx=%u rt=%#lx tex=%#lx nTexs=%u nvattrs=%u ok=%d\n",
+                   d.indexCount, (unsigned long)d.rtBase, (unsigned long)d.texBase,
+                   d.nTexs, d.nvattrs, d.recomp ? d.recomp->ok : 0);
+  }
   if (!d.recomp || !d.recomp->ok || !d.nvattrs || !d.indexData || d.indexCount < 3)
     return false;
   if (!g.texPipeline) return false;  // need the descriptor infra (dsPool/dsLayout)
@@ -1368,7 +1504,7 @@ bool drawRecomp(const DrawInfo &d) {
   // (the open region's attachment count must match the pipeline's). Barrier the sampled
   // RT readable here, outside any render region.
   uint32_t mrtN = d.mrtCount ? (d.mrtCount > 8 ? 8 : d.mrtCount) : 1;
-  if (g.curRt != d.rtBase || g.curMrtCount != mrtN) {
+  if (g.curRt != d.rtBase || g.curMrtCount != mrtN || g.curDepth != d.depthBase) {
     endRegion();
     if (rtAsTex) {
       auto &src = g_rts[texBase];
@@ -1380,7 +1516,7 @@ bool drawRecomp(const DrawInfo &d) {
     }
     RTarget *rt = getRT(d.rtBase, d.rtW, d.rtH);
     if (!rt) return true;  // RT cap hit: treat as handled (dropped)
-    beginRegion(d.mrtBase, mrtN, d.rtW, d.rtH);
+    beginRegion(d.mrtBase, mrtN, d.rtW, d.rtH, d.depthBase, d.depthClear);
   }
   if (rtAsTex) {
     auto &src = g_rts[texBase];
@@ -1409,6 +1545,12 @@ bool drawRecomp(const DrawInfo &d) {
     vkCmdBindDescriptorSets(g.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, rp->layout, 0, 1, &texSet, 0, nullptr);
   vkCmdBindVertexBuffers(g.cmd, 0, 1, &g.vb, &voff);
   vkCmdBindIndexBuffer(g.cmd, g.ib, ioff, VK_INDEX_TYPE_UINT32);
+  if (drawTrace && d.indexCount >= 300) {
+    static int n = 0;
+    if (n++ < 40)
+      std::fprintf(stderr, "[dt] RECOMP DREW idx=%u rt=%#lx nv=%u multiTex=%d\n",
+                   d.indexCount, (unsigned long)d.rtBase, nv, rp->multiTex);
+  }
   vkCmdDrawIndexed(g.cmd, d.indexCount, d.instanceCount ? d.instanceCount : 1, 0, 0, 0);
   g.vbOffset += vneed;
   g.ibOffset += (VkDeviceSize)d.indexCount * 4;
@@ -1429,6 +1571,7 @@ void beginFrame() {
   g.ibOffset = 0;
   g.uboOffset = 0;
   g.curRt = 0;
+  g.curDepth = 0;
   g.lastRt = 0;
   g.busiestRt = 0;
   g.busiestRtDraws = 0;
@@ -1438,6 +1581,8 @@ void beginFrame() {
     kv.second.usedThisFrame = false;
     kv.second.draws = 0;
   }
+  for (auto &kv : g_depths)
+    kv.second.usedThisFrame = false;
 
   vkResetCommandBuffer(g.cmd, 0);
   VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
@@ -1542,8 +1687,9 @@ void draw(const DrawInfo &d) {
     texSet = getTexture(d.texBase, d.texW, d.texH, d.texTiling, d.texPitch);
 
   // Switch render target if this draw targets a different RT than the open region (or
-  // the open region is multi-target: the heuristic path renders to a single attachment).
-  if (g.curRt != d.rtBase || g.curMrtCount != 1) {
+  // the open region is multi-target/has a depth attachment: the heuristic path renders
+  // to a single color attachment with no depth).
+  if (g.curRt != d.rtBase || g.curMrtCount != 1 || g.curDepth != 0) {
     endRegion();
     if (rtAsTex) {  // make the sampled RT shader-readable before we render
       auto &src = g_rts[texBase];
