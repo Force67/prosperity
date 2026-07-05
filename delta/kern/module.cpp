@@ -170,7 +170,19 @@ bool smodule::unload() {
 
 void smodule::digestDynamic() {
   const auto *dynS = getSegment(ElfSegType::PT_DYNAMIC);
+  if (!dynS)
+    return;
   const auto *dyldS = getSegment(ElfSegType::PT_SCE_DYNLIBDATA);
+
+  // PS5 (Prospero) modules have no PT_SCE_DYNLIBDATA: their string/symbol/rela
+  // tables are described by standard ELF dynamic tags as vaddrs into the mapped
+  // image, not DT_SCE_* offsets into a data segment. Route them to the PS5-only
+  // path and leave the PS4 handling below untouched.
+  if (!dyldS) {
+    ps5Layout = true;
+    digestDynamicPs5(dynS);
+    return;
+  }
 
   uint8_t *dynldPtr = getOffset<uint8_t>(dyldS->offset);
   uint8_t *dynldAddr = getAddress<uint8_t>(dyldS->vaddr);
@@ -286,6 +298,85 @@ void smodule::digestDynamic() {
       std::printf("[impmod] %s id=%u %s\n", info.name.c_str(), m.id,
                   m.name ? m.name : "?");
   }
+}
+
+// PS5-only dynamic parser. A Prospero module uses standard ELF dynamic tags:
+// DT_STRTAB/SYMTAB/RELA/JMPREL are vaddrs into the mapped image (mapImage() has
+// already run), unlike PS4 where DT_SCE_* tags are offsets into
+// PT_SCE_DYNLIBDATA. The symbol/reloc format itself (Elf64_Sym, Elf64_Rela,
+// x86-64 reloc types, NID#lib#mod mangling) is identical, so resolveImports()
+// and applyRelocations() are reused unchanged.
+void smodule::digestDynamicPs5(const ELFPgHeader *dynS) {
+  ELFDyn *dynamics = getOffset<ELFDyn>(dynS->offset);
+  const int count = static_cast<int>(dynS->filesz / sizeof(ELFDyn));
+
+  for (int i = 0; i < count; i++) {
+    auto *d = &dynamics[i];
+    switch (d->tag) {
+    case DT_STRTAB:
+      strtab.ptr = getAddress<char>(d->un.ptr);
+      break;
+    case DT_STRSZ:
+      strtab.size = d->un.value;
+      break;
+    case DT_SYMTAB:
+      symbols = getAddress<ElfSym>(d->un.ptr);
+      break;
+    // PS5 keeps the SCE symbol-table size tag even with a standard DT_SYMTAB.
+    case DT_SCE_SYMTABSZ:
+      numSymbols = static_cast<uint32_t>(d->un.value / sizeof(ElfSym));
+      break;
+    case DT_RELA:
+      rela = getAddress<ElfRel>(d->un.ptr);
+      break;
+    case DT_RELASZ:
+      numRela = static_cast<uint32_t>(d->un.value / sizeof(ElfRel));
+      break;
+    case DT_JMPREL:
+      jmpslots = getAddress<ElfRel>(d->un.ptr);
+      break;
+    case DT_PLTRELSZ:
+      numJmpSlots = static_cast<uint32_t>(d->un.value / sizeof(ElfRel));
+      break;
+    case DT_HASH:
+      hashes = getAddress<uint8_t>(d->un.ptr);
+      break;
+    case DT_INIT:
+      info.initAddr = getAddress<uint8_t>(d->un.ptr);
+      break;
+    case DT_FINI:
+      info.finiAddr = getAddress<uint8_t>(d->un.ptr);
+      break;
+    default:
+      break;
+    }
+  }
+
+  // DT_NEEDED entries usually precede DT_STRTAB, so resolve their names only
+  // once the string table pointer is known.
+  if (strtab.ptr) {
+    for (int i = 0; i < count; i++) {
+      auto *d = &dynamics[i];
+      if (d->tag != DT_NEEDED)
+        continue;
+      const char *name = strtab.ptr + (d->un.value & 0xFFFFFFFF);
+      base::String xname(name);
+      auto pos = xname.find(".prx");
+      if (pos != base::String::npos)
+        sharedObjects.push_back(xname.substr(0, pos));
+    }
+  }
+
+  // Standard ELF has no dynamic tag for the symbol count; fall back to the SysV
+  // hash chain count ([nbucket u32][nchain u32], nchain == #dynsyms).
+  if (numSymbols == 0 && hashes)
+    numSymbols = reinterpret_cast<uint32_t *>(hashes)[1];
+
+  if (std::getenv("DELTA_IMPLIB_TRACE"))
+    std::printf("[ps5dyn] %s strtab=%p sz=%llu syms=%u rela=%u jmp=%u needed=%llu\n",
+                info.name.c_str(), (void *)strtab.ptr,
+                (unsigned long long)strtab.size, numSymbols, numRela, numJmpSlots,
+                (unsigned long long)sharedObjects.size());
 }
 
 bool smodule::mapImage() {

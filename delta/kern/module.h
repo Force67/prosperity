@@ -108,6 +108,9 @@ private:
   moduleInfo info{};
 
   void digestDynamic();
+  // PS5 modules drop PT_SCE_DYNLIBDATA and use standard ELF dynamic tags; parsed
+  // on this separate path so PS4 handling stays byte-identical.
+  void digestDynamicPs5(const ELFPgHeader *dynS);
   void logDbgInfo();
   void installEHFrame();
   bool setupTLS();
@@ -159,6 +162,10 @@ private:
   base::Vector<modInfo> impModules;
   base::Vector<libInfo> impLibs;
   base::Vector<base::String> sharedObjects;
+
+  // True for a PS5 (Prospero) module: standard-ELF dynamic layout, no
+  // PT_SCE_DYNLIBDATA. Set by digestDynamic(); gates the PS5-only code path.
+  bool ps5Layout = false;
 
   // filled in by digestDynamic() from DT_ entries. must default to zero: a
   // module that omits one would otherwise relocate against garbage.
