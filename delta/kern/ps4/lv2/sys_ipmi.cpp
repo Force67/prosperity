@@ -33,9 +33,15 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include "kern/proc.h"
 #include "kern/vfs.h"
 
 namespace krnl {
+
+static bool onPs5() {
+  auto *p = proc::getActive();
+  return p && p->getPlatform() == proc::platform::ps5;
+}
 
 // IPMI manager command numbers (libSceIpmi op -> sys_ipmimgr_call).
 enum {
@@ -240,6 +246,25 @@ static void playGoInvoke(IpmiInvokeReq *req) {
   }
 }
 
+// PS5 system-service invoke (ShellCore/AppDb/SystemService/NpManager/Lnc/...):
+// with no daemon we cannot fill a meaningful reply, but leaving the client's out
+// buffers at their pre-call sentinel makes status getters read garbage and retry.
+// Zero every out descriptor so the invoke reads as an empty success. Sizes are
+// bounded because descriptor strides vary and a bogus large size would smash host
+// memory (the same reason playGoInvoke only touches out0).
+static void zeroInvokeOutputs(IpmiInvokeReq *req) {
+  if (req->pResult)
+    *req->pResult = 0;
+  if (!req->pOutData)
+    return;
+  for (uint32_t i = 0; i < req->numOut && i < 4; i++) {
+    auto *p = reinterpret_cast<uint8_t *>(req->pOutData[i * 2]);
+    uint64_t sz = req->pOutData[i * 2 + 1];
+    if (p && sz && sz <= 0x10000)
+      std::memset(p, 0, sz);
+  }
+}
+
 int PS4ABI sys_ipmimgr_call(uint32_t op, uint32_t kid, void *out, void *in,
                             uint64_t insize, uint64_t arg6) {
   (void)arg6;
@@ -275,8 +300,13 @@ int PS4ABI sys_ipmimgr_call(uint32_t op, uint32_t kid, void *out, void *in,
     return 0;
   }
   case IPMI_INVOKE_SYNC:
-    if (in && insize >= sizeof(IpmiInvokeReq) && isPlayGoKid(kid))
-      playGoInvoke(static_cast<IpmiInvokeReq *>(in));
+    if (in && insize >= sizeof(IpmiInvokeReq)) {
+      auto *req = static_cast<IpmiInvokeReq *>(in);
+      if (isPlayGoKid(kid))
+        playGoInvoke(req);
+      else if (onPs5())
+        zeroInvokeOutputs(req);
+    }
     setResult(0);
     return 0;
   case 784:
