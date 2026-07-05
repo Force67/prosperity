@@ -39,13 +39,15 @@ uint8_t *allocLowGuest(size_t size) {
   constexpr uintptr_t kFloor = 0x4000000000ull;   // 256 GiB
   constexpr uintptr_t kCeil = 0x6000000000ull;    // 384 GiB
 #else
-  // Start the arena at 256 GiB, not 64 GiB: titles map their own fixed-address
-  // direct/flexible memory pools low (Uncharted 2 maps Onion/Garlic at
-  // 0x10..0x12_0000_0000 and asserts vaddr == requested addr). With the arena
-  // floored at 0x10_0000_0000 our bookkeeping allocations sat exactly there and
-  // sys_mmap relocated the title's pool, tripping that assert. Leaving the low
-  // 64..256 GiB clear lets those exact-address maps land where the guest wants.
-  constexpr uintptr_t kFloor = 0x4000000000ull;   // 256 GiB
+  // Start the arena at 512 GiB. Titles map their own fixed-address direct/flexible
+  // memory pools at round 64 GiB slots (N * 0x10_0000_0000): Uncharted 2 uses
+  // 0x10..0x12_0000_0000 (Onion/Garlic/Flexible); GTA:SA's Gameface engine
+  // MAP_FIXEDs pools at 0x10/0x20/0x30/0x40_0000_0000, the last being a 128 MB
+  // direct-memory pool exactly on our old 256 GiB floor -- it clobbered the
+  // primary TCB (fs:0x10 -> 0), which crashed the first scePthreadMutexLock. Our
+  // bookkeeping must sit above every slot a title fixed-maps; 512 GiB clears all
+  // observed pools while staying under the PS4 2^40 user ceiling.
+  constexpr uintptr_t kFloor = 0x8000000000ull;   // 512 GiB
   constexpr uintptr_t kCeil = 0x10000000000ull;   // 2^40, the PS4 user ceiling
 #endif
   // Align bases to 64 KiB, not just the 16 KiB page: GNM tiled textures/render

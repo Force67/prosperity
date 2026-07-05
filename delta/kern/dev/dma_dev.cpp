@@ -129,6 +129,56 @@ int32_t dmaDevice::ioctl(uint32_t cmd, void *data) {
     }
     return 0;
   }
+  case 0xC0288011: {
+    // AllocateMainDirectMemory: struct = [offset(out), _, len, align, memType].
+    // Same physical bump-allocator as AllocateDirectMemory, but the search range
+    // is the whole pool (no start/end); the chosen physical offset goes back into
+    // [0]. Left unhandled it fell through to `return 0` without writing an offset,
+    // so every reservation aliased physical offset 0.
+    auto *a = static_cast<uint64_t *>(data);
+    if (!a)
+      return -1;
+    uint64_t len = a[2];
+    uint64_t align = a[3] ? a[3] : 0x4000;
+    if (len == 0)
+      return -1;
+    uint64_t off;
+    for (;;) {
+      uint64_t cur = g_dmemNext.load(std::memory_order_relaxed);
+      uint64_t base = (cur + (align - 1)) & ~(align - 1);
+      if (g_dmemNext.compare_exchange_weak(cur, base + len,
+                                            std::memory_order_relaxed)) {
+        off = base;
+        break;
+      }
+    }
+    a[0] = off;
+    {
+      std::lock_guard<std::mutex> lk(g_dmemMutex);
+      g_dmemRegions.push_back({off, off + len, static_cast<uint32_t>(a[4])});
+    }
+    return 0;
+  }
+  case 0xC0208016: {
+    // AvailableDirectMemorySize: struct = [searchStart, searchEnd, align, _].
+    // The kernel writes the largest free size at/after searchStart into [0] and
+    // its offset into [3] (layout from libkernel's wrapper). Left unhandled it
+    // fell through to `return 0` without writing, reporting zero free.
+    auto *a = static_cast<uint64_t *>(data);
+    if (!a)
+      return -1;
+    uint64_t start = a[0], end = a[1];
+    uint64_t align = a[2] ? a[2] : 0x4000;
+    if (end == 0 || end > kDmemTotal)
+      end = kDmemTotal;
+    uint64_t base = g_dmemNext.load(std::memory_order_relaxed);
+    if (start > base)
+      base = start;
+    base = (base + (align - 1)) & ~(align - 1);
+    a[0] = end > base ? end - base : 0; // available size
+    a[3] = base;                        // its physical offset
+    return 0;
+  }
   case 0xC0208004: {
     // GetDirectMemoryType: struct = [physAddr(in), regionStart(out),
     // regionEnd(out), memType(out, low 32b)]. Report the reservation that owns
