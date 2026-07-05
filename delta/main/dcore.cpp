@@ -23,6 +23,7 @@
 
 #include "formats/pkg_object.h"
 #include "formats/pup_object.h"
+#include "formats/ufs2_object.h"
 
 deltaCore::deltaCore() = default;
 deltaCore::~deltaCore() = default;
@@ -179,6 +180,67 @@ private:
   vfs::PkgFilesystem fs_;
 };
 
+// Bridges a UFS2 (*.ffpkg) game backup into the kernel VFS. The files inside are
+// already decrypted, so this is a straight filesystem mount (no crypto chain).
+class Ufs2Provider : public krnl::vfs::VirtualProvider {
+public:
+  explicit Ufs2Provider(const base::String &path) : fs_(path) {}
+  bool valid() const { return fs_.valid(); }
+
+  std::unique_ptr<krnl::vfs::VirtualFile> open(const char *rel) override {
+    const auto *node = fs_.find(rel);
+    if (!node)
+      return nullptr;
+    return std::make_unique<Ufs2File>(&fs_, *node);
+  }
+  bool stat(const char *rel, int64_t &size) override {
+    const auto *node = fs_.find(rel);
+    if (!node)
+      return false;
+    size = static_cast<int64_t>(node->size);
+    return true;
+  }
+  bool list(const char *rel, std::vector<krnl::vfs::DirEntry> &out) override {
+    std::string prefix(rel ? rel : "");
+    while (!prefix.empty() && prefix.back() == '/')
+      prefix.pop_back();
+    prefix += "/";
+    if (prefix[0] != '/')
+      prefix.insert(prefix.begin(), '/');
+    std::vector<std::string> all;
+    fs_.paths(all);
+    std::set<std::string> seen;
+    for (const auto &p : all) {
+      if (p.size() <= prefix.size() || p.compare(0, prefix.size(), prefix) != 0)
+        continue;
+      std::string rest = p.substr(prefix.size());
+      auto slash = rest.find('/');
+      bool isDir = slash != std::string::npos;
+      std::string child = isDir ? rest.substr(0, slash) : rest;
+      if (!child.empty() && seen.insert(child).second)
+        out.push_back({child, isDir});
+    }
+    return !out.empty();
+  }
+
+  // True when the backup carries a decrypted/ tree of plaintext ELFs.
+  bool hasDecrypted() { return fs_.find("/decrypted/eboot.bin") != nullptr; }
+
+private:
+  struct Ufs2File : krnl::vfs::VirtualFile {
+    vfs::Ufs2Filesystem *fs;
+    vfs::Ufs2Filesystem::Node node;
+    Ufs2File(vfs::Ufs2Filesystem *f, const vfs::Ufs2Filesystem::Node &n)
+        : fs(f), node(n) {}
+    int64_t read(void *buf, int64_t off, int64_t len) override {
+      return fs->read(node, buf, off, len);
+    }
+    int64_t size() override { return static_cast<int64_t>(node.size); }
+  };
+
+  vfs::Ufs2Filesystem fs_;
+};
+
 bool endsWithIgnoreCase(const base::String &s, const char *ext) {
   size_t n = s.length(), e = std::strlen(ext);
   if (n < e)
@@ -205,6 +267,7 @@ void deltaCore::boot(const base::String &xdir) {
 #endif
 
   const bool isPkg = endsWithIgnoreCase(xdir, ".pkg");
+  const bool isFfpkg = endsWithIgnoreCase(xdir, ".ffpkg");
   base::String mainModule = path;
 
   if (isPkg) {
@@ -216,11 +279,29 @@ void deltaCore::boot(const base::String &xdir) {
     krnl::vfs::mountVirtual("/app0", provider);
     provider->cacheManifests();
     mainModule = base::String("/app0/eboot.bin");
+  } else if (isFfpkg) {
+    // PS5 game backup (UFS2). Mount it at /app0 and prefer the decrypted/ tree
+    // of plaintext ELFs when the dump provides one (the top-level eboot.bin is a
+    // still-encrypted SELF).
+    auto provider = std::make_shared<Ufs2Provider>(path);
+    if (!provider->valid()) {
+      LOG_ERROR("failed to load ffpkg {}", path.c_str());
+      return;
+    }
+    bool decrypted = provider->hasDecrypted();
+    krnl::vfs::mountVirtual("/app0", provider);
+    mainModule = base::String(decrypted ? "/app0/decrypted/eboot.bin"
+                                        : "/app0/eboot.bin");
+    LOG_INFO("mounted ffpkg at /app0, boot module {}", mainModule.c_str());
   }
 
-  std::thread ctx([mainModule = std::move(mainModule), isPkg]() {
+  // Both .pkg and .ffpkg boot from a virtual /app0 mount rather than a host path.
+  const bool mounted = isPkg || isFfpkg;
+  std::thread ctx([mainModule = std::move(mainModule), mounted, isFfpkg]() {
     auto p = base::MakeUnique<krnl::proc>();
-    if (!p->create(mainModule, isPkg))
+    if (isFfpkg)
+      p->setPlatform(krnl::proc::platform::ps5);
+    if (!p->create(mainModule, mounted))
       return;
 
     p->start();

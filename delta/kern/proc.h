@@ -42,6 +42,8 @@ class proc {
 public:
   using moduleList = base::Vector<modulePtr>;
 
+  enum class platform { ps4, ps5 };
+
   proc();
   // Load the process. When fromVfs is set, path is a guest VFS path (e.g.
   // "/app0/eboot.bin") loaded through the mount table; otherwise a host file.
@@ -60,9 +62,13 @@ public:
   inline vmManager &getVma() { return vmem; }
   inline procInfo &getEnv() { return env; }
 
+  platform getPlatform() const { return plat; }
+  void setPlatform(platform p) { plat = p; }
+
 private:
   vmManager vmem;
   procInfo env;
+  platform plat = platform::ps4;
   moduleList modules;
   objectTable objects;
   uint32_t handleCounter = 1;
