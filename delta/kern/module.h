@@ -78,6 +78,9 @@ public:
   bool fromMem(base::UniquePointer<uint8_t[]>);
 
   uintptr_t getSymbol(uint64_t);
+  // LLE-only export lookup by NID (getSymbol without the HLE/vprx override), for
+  // the PS5 global-NID resolver.
+  uintptr_t getExport(uint64_t nid);
   uintptr_t getSymbolFullName(const char *name);
   uintptr_t getSymbol2(const char *name);
   // Resolve an exported symbol by its 11-char NID prefix (export strtab names

@@ -509,6 +509,11 @@ bool smodule::mapImage() {
     }
   }
 
+  // PS5 (Prospero) marks its code segments PF_X only (no PF_R), unlike PS4's
+  // PF_R|PF_X. Both the lifter gate and the page-protection map must account for
+  // that; gate the relaxation to PS5 so PS4 handling is unchanged.
+  const bool ps5 = process->getPlatform() == proc::platform::ps5;
+
   // step 1: lift code (x86 host only). The lifter rewrites syscall/int/fs reads
   // in place so raw guest x86-64 runs natively. On aarch64 the FEXCore JIT
   // handles all three, so the image is left byte-for-byte intact.
@@ -517,7 +522,8 @@ bool smodule::mapImage() {
   for (uint16_t i = 0; i < elf->phnum; i++) {
     const auto *s = &segments[i];
     uint32_t perm = s->flags & (PF_R | PF_W | PF_X);
-    if (s->type == PT_LOAD && perm == (PF_R | PF_X)) {
+    const bool exec = ps5 ? (perm & PF_X) != 0 : perm == (PF_R | PF_X);
+    if (s->type == PT_LOAD && exec) {
       runtime::codeLift lift(info.ripZone, ripEnd);
       LOG_ASSERT(lift.init());
 
@@ -543,7 +549,16 @@ bool smodule::mapImage() {
     const auto *s = &segments[i];
     if (s->type == PT_LOAD) {
       uint32_t perm = s->flags & (PF_R | PF_W | PF_X);
-      auto trans_perm = [](uint32_t op) {
+      auto trans_perm = [ps5](uint32_t op) {
+        // PS5 code is PF_X only; map any executable segment rx (x86 has no
+        // execute-without-read), writable rw, else r. PS4 handling unchanged.
+        if (ps5) {
+          if (op & PF_X)
+            return utl::pageProtection::rx;
+          if (op & PF_W)
+            return utl::pageProtection::w;
+          return utl::pageProtection::r;
+        }
         switch (op) {
         case (PF_R | PF_X):
           return utl::pageProtection::rx;
@@ -602,6 +617,22 @@ static bool decodeNid(const char *name, uint64_t &lid, uint64_t &mid) {
 }
 
 bool smodule::resolveObfSymbol(const char *name, uintptr_t &ptrOut) {
+  // PS5: the symbol's #lib#mod ids use different import metadata than PS4
+  // (impLibs/impModules aren't populated), so resolve by the global NID - a
+  // unique hash - across all loaded modules. LLE only: PS4 HLE stubs must not
+  // hijack a Prospero import.
+  if (ps5Layout) {
+    uint64_t hid = 0;
+    if (!runtime::decode_nid(name, 11, hid))
+      return false;
+    for (auto &mod : process->getModuleList())
+      if (uintptr_t a = mod->getExport(hid)) {
+        ptrOut = a;
+        return true;
+      }
+    return false;
+  }
+
   uint64_t libid = 0, modid = 0;
   if (!decodeNid(name, libid, modid))
     __debugbreak();
@@ -837,6 +868,19 @@ uintptr_t smodule::getSymbol(uint64_t nid) {
     }
   }
 
+  return 0;
+}
+
+uintptr_t smodule::getExport(uint64_t nid) {
+  for (uint32_t i = 0; i < numSymbols; i++) {
+    const auto *s = &symbols[i];
+    if (!s->st_value)
+      continue;
+    const char *name = &strtab.ptr[s->st_name];
+    uint64_t hid = 0;
+    if (runtime::decode_nid(name, 11, hid) && nid == hid)
+      return getAddressNPTR<uintptr_t>(s->st_value);
+  }
   return 0;
 }
 

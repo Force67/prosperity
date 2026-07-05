@@ -389,23 +389,26 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
   utl::silenceLogging();  // stop the async log thread racing us on stderr
 
 #if defined(__x86_64__)
-  // Guest SDK assert/__debugbreak is `int 0x41` (cd 41); in userspace it raises
-  // SIGSEGV (#GP). Real hardware with no kernel debugger attached just steps over
-  // it and the assert handler's caller continues, so do the same: skip the 2-byte
-  // instruction and resume. Otherwise every guest assertion would kill the boot.
+  // Guest SDK assert/__debugbreak is a software interrupt (`int 0xNN`, cd NN);
+  // in userspace it raises SIGSEGV (#GP). Real hardware with no kernel debugger
+  // attached just steps over it and the assert handler's caller continues, so do
+  // the same: skip the 2-byte instruction and resume. Otherwise every guest
+  // assertion would kill the boot. PS4 uses int 0x41; PS5 (Prospero) also uses
+  // int 0x44/0x45 (e.g. libkernel's `int 0x45; xor eax,eax; ret` assert stub).
   if (sig == SIGSEGV && ucv) {
     auto *uc = static_cast<ucontext_t *>(ucv);
     auto *ip = reinterpret_cast<const uint8_t *>(uc->uc_mcontext.gregs[REG_RIP]);
-    if (ip && ip[0] == 0xcd && ip[1] == 0x41) {
+    if (ip && ip[0] == 0xcd &&
+        (ip[1] == 0x41 || ip[1] == 0x44 || ip[1] == 0x45)) {
       static std::atomic<int> n{0};
       if (n.fetch_add(1) < 20) {
         char sym[256];
         symbolize(uc->uc_mcontext.gregs[REG_RIP], sym, sizeof(sym));
         auto *g = uc->uc_mcontext.gregs;
         std::fprintf(stderr,
-                     "[assert] skipped guest int 0x41 @ %s "
+                     "[assert] skipped guest int 0x%02x @ %s "
                      "rsi=%lld rdx=%lld r15=%lld rax=%lld rcx=%lld\n",
-                     sym, (long long)g[REG_RSI], (long long)g[REG_RDX],
+                     ip[1], sym, (long long)g[REG_RSI], (long long)g[REG_RDX],
                      (long long)g[REG_R15], (long long)g[REG_RAX],
                      (long long)g[REG_RCX]);
       }

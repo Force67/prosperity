@@ -23,6 +23,7 @@
 
 namespace krnl {
 uintptr_t lv2_get(uint32_t sysIndex);
+uintptr_t lv2_get_ps5(uint32_t sysIndex);
 }
 
 // returns the calling host thread's guest fs base (per-thread guest TLS).
@@ -171,7 +172,11 @@ bool codeLift::transform(uint8_t *data, size_t size, uint64_t base) {
 }
 
 void codeLift::emit_syscall(uint8_t *base, uint32_t idx) {
-  auto address = krnl::lv2_get(idx);
+  // PS5 titles route to the separate Prospero syscall layer (FreeBSD 11 ABI);
+  // never the PS4 table.
+  auto *proc = krnl::proc::getActive();
+  const bool ps5 = proc && proc->getPlatform() == krnl::proc::platform::ps5;
+  auto address = ps5 ? krnl::lv2_get_ps5(idx) : krnl::lv2_get(idx);
   if (std::getenv("DELTA_SYSLIFT_TRACE"))
     std::fprintf(stderr, "[syslift] site=%p idx=%u -> trampoline=%#lx\n",
                  (void *)base, idx, (unsigned long)address);

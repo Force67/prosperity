@@ -22,6 +22,7 @@
 #include "ps4/lv2/sys_mem.h"
 #include "runtime/vprx/vprx.h"
 
+#include <cstdlib>
 #include <cstring>
 
 namespace krnl {
@@ -48,6 +49,11 @@ bool proc::create(const base::String &path, bool fromVfs) {
 
   modules.emplace_back(first);
 
+  const bool ps5 = plat == platform::ps5;
+  if (ps5 && !std::getenv("DELTA_PS5_MODULES"))
+    LOG_WARNING("PS5 title but DELTA_PS5_MODULES is unset; system modules "
+                "(libkernel etc.) won't be found");
+
   /*pre-load required modules
    (the kernel does it, so do we)*/
   if (!loadModule(base::StringRef("libkernel")) ||
@@ -56,17 +62,20 @@ bool proc::create(const base::String &path, bool fromVfs) {
     return false;
   }
 
-  // libkernel is a thin forwarder: a chunk of its exports (the memory-pool
-  // helpers libSceSaveData & friends import as "libkernel") actually live in
-  // libkernel_sys. Preload it so those NIDs resolve via the cross-module
-  // fallback in resolveObfSymbol; tolerate absence on minimal module sets.
-  loadModule(base::StringRef("libkernel_sys"));
+  // PS4 libkernel is a thin forwarder: a chunk of its exports (memory-pool
+  // helpers) live in libkernel_sys. PS5 has no such split, so only preload it
+  // for PS4. Tolerate absence on minimal module sets.
+  if (!ps5)
+    loadModule(base::StringRef("libkernel_sys"));
 
   bool loaded = fromVfs ? first->fromVfs(path) : first->fromFile(path);
   if (!loaded) {
     LOG_ERROR("unable to load main process module");
     return false;
   }
+  // PS5 modules carry no DT_SCE_MODULEINFO, so name the main module ourselves.
+  if (ps5 && first->getInfo().name.empty())
+    first->getInfo().name = base::String("eboot");
 
   return true;
 }
@@ -272,6 +281,58 @@ modulePtr proc::loadModule(base::StringRef name) {
 
   modules.emplace_back(lib);
 
+  base::String sname;
+  sname.append(name.data(), name.length());
+
+  // PS5 titles use a coherent Prospero module set: system modules from a
+  // firmware dump (DELTA_PS5_MODULES, a ':'-separated list of dirs holding
+  // <name>.sprx), the title's own SDK modules from its decrypted/ tree. A PS5
+  // process never touches the PS4 modules/ dir - the ABIs are incompatible
+  // (FreeBSD 11 vs 9 syscall numbers, different struct layouts).
+  if (plat == platform::ps5) {
+    lib->getInfo().name = sname; // PS5 modules have no DT_SCE_MODULEINFO
+    bool ok = false;
+    if (const char *env = std::getenv("DELTA_PS5_MODULES")) {
+      for (const char *p = env; *p && !ok;) {
+        const char *sep = std::strchr(p, ':');
+        size_t len = sep ? static_cast<size_t>(sep - p) : std::strlen(p);
+        if (len) {
+          base::String hp;
+          hp.append(p, len);
+          if (hp.back() != '/')
+            hp += "/";
+          hp += sname.c_str();
+          hp += ".sprx";
+          if (utl::File(hp, utl::fileMode::read).IsOpen() && lib->fromFile(hp))
+            ok = true;
+        }
+        p = sep ? sep + 1 : p + len;
+      }
+    }
+    if (!ok) {
+      const char *roots[] = {"/app0/decrypted/sce_module/", "/app0/decrypted/",
+                             "/app0/sce_module/"};
+      for (const char *root : roots) {
+        base::String vp(root);
+        vp += sname.c_str();
+        vp += ".prx";
+        if (vfs::openRead(vp.c_str()).Exists() && lib->fromVfs(vp)) {
+          ok = true;
+          break;
+        }
+      }
+    }
+    if (!ok) {
+      // Drop the placeholder we emplaced above: a failed module left in the list
+      // gets enumerated and libkernel calls its null module_start (crash). Its
+      // imports fall through to the badcall stub instead, which is non-fatal.
+      LOG_ERROR("unable to load ps5 module {}", sname.c_str());
+      modules.pop_back();
+      return nullptr;
+    }
+    return lib;
+  }
+
   // HLE/system modules ship with the emulator; prefer those.
   base::String hostRel("modules/");
   hostRel.append(name.data(), name.length());
@@ -305,8 +366,6 @@ modulePtr proc::loadModule(base::StringRef name) {
     }
   }
 
-  base::String sname;
-  sname.append(name.data(), name.length());
   LOG_ERROR("unable to load module {}", sname.c_str());
   return nullptr;
 }

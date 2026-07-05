@@ -1,13 +1,14 @@
 
 bin/
 build/
+_ignore/
 .vscode
 
 # binaries
 *.exe
 *.elf
 
-# ida 
+# ida
 *.i64
 
 # QT generated code
@@ -324,3 +325,6 @@ build-apk.sh
 
 # local agent scratch
 .claude/
+
+# local PS5 boot helper (dev only)
+ps5run.sh

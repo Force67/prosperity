@@ -919,4 +919,23 @@ uintptr_t lv2_get(uint32_t sid) {
   return reinterpret_cast<uintptr_t>(handler);
 #endif
 }
+
+// Exposed so the PS5 syscall layer (kern/ps5/lv2) can wrap its own handlers in
+// the same BSD carry/errno trampoline without duplicating the codegen.
+uintptr_t lv2_trampoline(const void *handler, uint32_t sid) {
+#if defined(DELTA_BACKEND_NATIVE)
+  static std::mutex m;
+  static std::unordered_map<uint64_t, uintptr_t> cache;
+  std::lock_guard<std::mutex> lk(m);
+  uint64_t key = reinterpret_cast<uint64_t>(handler);
+  auto it = cache.find(key);
+  if (it != cache.end())
+    return it->second;
+  uintptr_t tr = emit_bsd_trampoline(handler, sid, false, false);
+  cache.emplace(key, tr);
+  return tr;
+#else
+  return reinterpret_cast<uintptr_t>(handler);
+#endif
+}
 } // namespace krnl
