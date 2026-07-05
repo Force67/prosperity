@@ -70,11 +70,16 @@ struct thr_param {
   void *spare[3];
 };
 
+void ps5MaybeInterposePthreadAlloc();
+
 int PS4ABI sys_thr_new(thr_param *p, int size) {
   // The kernel rejects an oversized param block (copyin guard); param_size is
   // exactly sizeof(thr_param) == 0x68 for every libthr we see.
   if (!p || size < 0 || static_cast<size_t>(size) > sizeof(thr_param))
     return -22 /*EINVAL*/;
+  // A new thread means malloc is about to go multithreaded; make sure libkernel's
+  // pthread-state allocator is interposed so the libc-mutex bootstrap can't recurse.
+  ps5MaybeInterposePthreadAlloc();
   uint32_t tid = g_nextTid.fetch_add(1);
   std::printf("[thr_new] tid=%u start=%p arg=%p stack=%p+%#zx tls=%p\n", tid,
               (void *)p->start_func, p->arg, (void *)p->stack_base,

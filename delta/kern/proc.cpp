@@ -398,6 +398,66 @@ static void forceGetterOk(proc &p, const char *mod, uint32_t off, uint32_t val) 
   c[8] = 0xC3;               // ret
 }
 
+#if defined(DELTA_BACKEND_NATIVE)
+// PS5 libc-heap / pthread-mutex bootstrap fix. Once we hand libc a sceLibcParam
+// (so its C++ operator-new arena can grow past the tiny 16 MiB default), libc's
+// malloc turns thread-safe and locks a static-initialised mutex whose kernel
+// state libkernel lazily allocates through the libc-malloc callback held at
+// libkernel data +0x68ec0. That malloc re-locks the still-uninitialised mutex ->
+// unbounded recursion (stack overflow) or deadlock. Interpose the allocator with
+// a per-thread re-entrancy guard: the outer call delegates to the real allocator
+// (so ordinary pthread objects are heap-backed and freed normally), while a
+// re-entrant call -- the bootstrap -- is served from a small malloc-free bump
+// pool so the mutex can finish initialising. Native x86 only (the thunk is a host
+// function the guest calls directly); PS5 only.
+using PthreadAllocFn = uint64_t(PS4ABI *)(uint64_t op, uint64_t arg);
+static PthreadAllocFn g_origPthreadAlloc = nullptr;
+static thread_local int g_pthreadAllocDepth = 0;
+
+static uint64_t PS4ABI ps5PthreadAlloc(uint64_t op, uint64_t arg) {
+  if (op == 1 && g_pthreadAllocDepth > 0) {
+    static std::atomic<size_t> off{0};
+    static uint8_t pool[64 * 1024];
+    size_t sz = (arg + 0xF) & ~size_t(0xF);
+    size_t o = off.fetch_add(sz, std::memory_order_relaxed);
+    return o + sz <= sizeof(pool) ? reinterpret_cast<uint64_t>(pool + o) : 0;
+  }
+  if (!g_origPthreadAlloc)
+    return 0;
+  ++g_pthreadAllocDepth;
+  uint64_t r = g_origPthreadAlloc(op, arg);
+  --g_pthreadAllocDepth;
+  return r;
+}
+#endif
+
+// libkernel populates its pthread-object allocator pointer (+0x68ec0) at runtime,
+// after boot patches run, so install our interpose lazily the first time it is
+// non-null (called from thread creation, which happens after libc init but before
+// the multithreaded malloc-mutex bootstrap). Idempotent; PS5 + native only.
+void ps5MaybeInterposePthreadAlloc() {
+#if defined(DELTA_BACKEND_NATIVE)
+  static std::atomic<bool> done{false};
+  auto *p = proc::getActive();
+  if (!p || p->getPlatform() != proc::platform::ps5 || done.load())
+    return;
+  auto k = p->getModule(base::StringRef("libkernel"));
+  if (!k)
+    return;
+  auto *slot = reinterpret_cast<uint64_t *>(k->getInfo().base + 0x68ec0);
+  uint64_t cur = *slot;
+  if (!cur || cur == reinterpret_cast<uint64_t>(&ps5PthreadAlloc))
+    return;  // not populated yet, or already ours
+  if (done.exchange(true))
+    return;
+  utl::protectMem(reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(slot) & ~0xFFFull),
+                  0x1000, utl::pageProtection::rwx);
+  g_origPthreadAlloc = reinterpret_cast<PthreadAllocFn>(cur);
+  *slot = reinterpret_cast<uint64_t>(&ps5PthreadAlloc);
+  LOG_INFO("interposed libkernel pthread-state alloc (+0x68ec0) orig={:#x}", cur);
+#endif
+}
+
 // Boot patches applied before entering the guest, needed by every boot path
 // (modexec and the real pkg boot), not just the modexec harness.
 static void applyBootPatches(proc &p) {
