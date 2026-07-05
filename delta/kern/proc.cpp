@@ -37,6 +37,7 @@ proc::proc() : vmem(env) { g_activeProc = this; }
 proc *proc::getActive() { return g_activeProc; }
 
 static void bringUpRebirthEbootRegistry(smodule &m);
+static void investigateDcbGate(smodule &m);
 
 bool proc::create(const base::String &path, bool fromVfs) {
   /*register HLE prx overrides*/
@@ -81,10 +82,108 @@ bool proc::create(const base::String &path, bool fromVfs) {
 
   // Engine bring-up: give Isaac's surface-name registry valid empty storage so
   // main-init doesn't deref a null bucket array (self-gated by ctor signature).
-  if (ps5)
+  if (ps5) {
     bringUpRebirthEbootRegistry(*first);
+    investigateDcbGate(*first);
+  }
 
   return true;
+}
+
+// DELTA_PS5_DCBWATCH: diagnose the null frame-0 DrawCommandBuffer gate.
+// (1) poll the DCB pointer slot manager[0] @ eboot+0x985a00 (renderer eboot+
+//     0x985508 + idx0*0x600 + 0x138 + 0x3c0) + adjacent manager fields, logging
+//     every change -> answers "is the DCB ever created before the render uses it?"
+// (2) int3 call-order trace over the renderer/DCB-creation entry points so the
+//     actual execution order (and which are reached) is visible before the crash.
+static void investigateDcbGate(smodule &m) {
+  if (!std::getenv("DELTA_PS5_DCBWATCH"))
+    return;
+  uint8_t *base = m.getInfo().base;
+  struct { uint32_t off; const char *label; } pts[] = {
+      {0x425ef0, "app_main(0x425ef0)"},   {0x4cc830, "app_render(0x4cc830)"},
+      {0x5535d0, "RenderInit(0x5535d0)"}, {0x58fb10, "VOInit(0x58fb10)"},
+      {0x58fd50, "DCBframeInit(0x58fd50)"}, {0x5901a0, "rendererFrame(0x5901a0)"},
+  };
+  for (auto &pt : pts) {
+    auto *c = base + pt.off;
+    utl::protectMem(reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(c) & ~0xFFFull),
+                    0x1000, utl::pageProtection::rwx);
+    if (c[0] == 0x55) {
+      c[0] = 0xCC;
+      setOrderTrace(reinterpret_cast<uintptr_t>(c), pt.label);
+    } else {
+      LOG_WARNING("dcbwatch: {} first byte {:#x} != push rbp", pt.label, c[0]);
+    }
+  }
+  // 0x69e720 is the graphics-subsystem run-once init that VOInit calls before
+  // sceVideoOutOpen; when it returns non-zero VOInit bails and the DCB is never
+  // created. It accumulates its error in ebx from three sub-calls; trace each
+  // `mov ebx,eax` return so we see which import fails.
+  struct { uint32_t off; const char *label; } rets[] = {
+      {0x69e761, "0x69e720:vSMAm3cxYTY#1"},
+      {0x69e78f, "0x69e720:vSMAm3cxYTY#2"},
+      {0x69e7aa, "0x69e720:23LRUSvYu1M"},
+  };
+  for (auto &r : rets) {
+    auto *c = base + r.off;
+    utl::protectMem(reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(c) & ~0xFFFull),
+                    0x1000, utl::pageProtection::rwx);
+    if (c[0] == 0x89 && c[1] == 0xc3) {
+      c[0] = 0xCC;
+      setRetTrace(reinterpret_cast<uintptr_t>(c), r.label);
+    } else {
+      LOG_WARNING("dcbwatch: {} bytes {:#x} {:#x} != mov ebx,eax", r.label, c[0], c[1]);
+    }
+  }
+  // Identify the imports 0x69e720 calls by symbolizing their resolved GOT slots
+  // (imports are already bound at this point).
+  auto *p = proc::getActive();
+  struct { uint32_t got; const char *nid; } gots[] = {
+      {0x8e8e38, "vSMAm3cxYTY"}, {0x8e8e40, "23LRUSvYu1M(FAILING)"},
+      {0x8e8e48, "2JtWUUiYBXs"}, {0x8e8d80, "1jfXLRVzisc"},
+  };
+  for (auto &g : gots) {
+    uint64_t tgt = *reinterpret_cast<uint64_t *>(base + g.got);
+    const char *mod = "??";
+    uint64_t off = tgt;
+    if (p)
+      for (auto &mm : p->getModuleList()) {
+        auto &mi = mm->getInfo();
+        auto tb = reinterpret_cast<uint64_t>(mi.textSeg.addr);
+        if (tb && tgt >= tb && tgt < tb + mi.textSeg.size) {
+          mod = mi.name.c_str();
+          off = tgt - tb;
+          break;
+        }
+      }
+    // Does any loaded module export this NID's hash? (is it resolvable?)
+    uint64_t hid = 0;
+    const char *expMod = "NONE";
+    uint64_t expAddr = 0;
+    if (runtime::decode_nid(g.nid, 11, hid) && p)
+      for (auto &mm : p->getModuleList())
+        if (uintptr_t a = mm->getExport(hid)) {
+          expMod = mm->getInfo().name.c_str();
+          expAddr = a;
+          break;
+        }
+    std::printf("[dcbimp] %s got=%s+%#llx exportedBy=%s(%#llx)\n", g.nid, mod,
+                (unsigned long long)off, expMod, (unsigned long long)expAddr);
+  }
+  auto *slot = reinterpret_cast<volatile uint64_t *>(base + 0x985a00);
+  std::thread([slot] {
+    uint64_t last = ~1ull;
+    for (int i = 0; i < 400000; i++) {
+      uint64_t v = *slot;
+      if (v != last) {
+        std::printf("[dcbwatch t=%dms] manager[0] (eboot+0x985a00) = %#llx\n",
+                    i / 2, (unsigned long long)v);
+        last = v;
+      }
+      std::this_thread::sleep_for(std::chrono::microseconds(500));
+    }
+  }).detach();
 }
 
 modulePtr proc::getModule(base::StringRef name) {

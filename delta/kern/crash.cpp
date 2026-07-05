@@ -252,8 +252,65 @@ void markManifestFd(uint32_t fd, bool v) { if (fd < 8192) g_manifestFd[fd] = v; 
 uintptr_t g_skipFnAddrs[8] = {0};
 int g_skipFnCount = 0;
 
+// DELTA_PS5_DCBWATCH call-order trace (see crash.h).
+static constexpr int kOrderMax = 12;
+static uintptr_t g_orderAddrs[kOrderMax];
+static const char *g_orderLabels[kOrderMax];
+static int g_orderCount = 0;
+static timespec g_orderStart;
+static uintptr_t g_retAddrs[8];
+static const char *g_retLabels[8];
+static int g_retCount = 0;
+
 static void crashHandler(int sig, siginfo_t *si, void *ucv) {
 #if defined(__x86_64__)
+  if (sig == SIGTRAP && g_retCount && ucv) {
+    auto *uc = static_cast<ucontext_t *>(ucv);
+    auto *gr = uc->uc_mcontext.gregs;
+    for (int i = 0; i < g_retCount; i++) {
+      if ((uintptr_t)gr[REG_RIP] != g_retAddrs[i] + 1)
+        continue;
+      uint32_t eax = (uint32_t)gr[REG_RAX];
+      // DELTA_PS5_DCBFORCE: force a failing graphics-init sub-call to report
+      // success (SCE_OK) so the run-once init 0x69e720 completes and the engine
+      // creates its DrawCommandBuffer -- lets us measure how far the boot gets
+      // when the (obfuscated) libSceAgc call is treated as succeeding.
+      static const int force = std::getenv("DELTA_PS5_DCBFORCE") != nullptr;
+      if (force && eax) {
+        gr[REG_RAX] = 0;
+        eax = 0;
+      }
+      char m[128];
+      int n = std::snprintf(m, sizeof(m), "[ret] %s eax=%#x\n", g_retLabels[i], eax);
+      if (n > 0) { ssize_t w = write(2, m, (size_t)n); (void)w; }
+      gr[REG_RBX] = eax;                  // emulate `mov ebx,eax` (zero-extends)
+      gr[REG_RIP] = g_retAddrs[i] + 2;    // resume past the 2-byte `89 c3`
+      return;
+    }
+  }
+  if (sig == SIGTRAP && g_orderCount && ucv) {
+    auto *uc = static_cast<ucontext_t *>(ucv);
+    auto *gr = uc->uc_mcontext.gregs;
+    for (int i = 0; i < g_orderCount; i++) {
+      if ((uintptr_t)gr[REG_RIP] != g_orderAddrs[i] + 1)
+        continue;
+      timespec t{};
+      clock_gettime(CLOCK_MONOTONIC, &t);
+      long ms = (t.tv_sec - g_orderStart.tv_sec) * 1000 +
+                (t.tv_nsec - g_orderStart.tv_nsec) / 1000000;
+      uintptr_t rsp = (uintptr_t)gr[REG_RSP];
+      uintptr_t caller = rsp >= 0x10000 ? *reinterpret_cast<uint64_t *>(rsp) : 0;
+      char csym[200];
+      symbolize(caller, csym, sizeof(csym));
+      char m[320];
+      int n = std::snprintf(m, sizeof(m), "[order t=%ldms tid=%ld] %s  <- %s\n",
+                            ms, (long)gettid(), g_orderLabels[i], csym);
+      if (n > 0) { ssize_t w = write(2, m, (size_t)n); (void)w; }
+      gr[REG_RSP] -= 8;  // emulate the displaced `push rbp`
+      *reinterpret_cast<uint64_t *>(gr[REG_RSP]) = (uint64_t)gr[REG_RBP];
+      return;
+    }
+  }
   if (sig == SIGTRAP && g_skipFnCount && ucv) {
     auto *uc = static_cast<ucontext_t *>(ucv);
     auto *gr = uc->uc_mcontext.gregs;
@@ -682,6 +739,22 @@ void setHdrTrace(uintptr_t addr) {
 }
 void setRdoffFix(uintptr_t addr) { g_rdoffAddr = addr; }
 void setSkipFn(uintptr_t addr) { if (g_skipFnCount < 8) g_skipFnAddrs[g_skipFnCount++] = addr; }
+void setOrderTrace(uintptr_t addr, const char *label) {
+  if (g_orderCount >= kOrderMax)
+    return;
+  if (g_orderCount == 0)
+    clock_gettime(CLOCK_MONOTONIC, &g_orderStart);
+  g_orderAddrs[g_orderCount] = addr;
+  g_orderLabels[g_orderCount] = label;
+  g_orderCount++;
+}
+void setRetTrace(uintptr_t addr, const char *label) {
+  if (g_retCount < 8) {
+    g_retAddrs[g_retCount] = addr;
+    g_retLabels[g_retCount] = label;
+    g_retCount++;
+  }
+}
 
 void installSigAltStack() {
   // One alt stack per thread; 256 KiB easily holds our dump path. Leaked on

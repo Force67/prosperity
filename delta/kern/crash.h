@@ -39,6 +39,17 @@ void setRdoffFix(uintptr_t addr);
 void setSkipFn(uintptr_t addr);
 void markManifestFd(uint32_t fd, bool v);
 
+// DELTA_PS5_DCBWATCH call-order trace: int3 at an engine entry (push rbp); on
+// each hit log "[order] <label> <- caller" with a timestamp, emulate the push,
+// and resume. Used to dump the actual call order of the renderer/DCB-creation
+// path (which functions run, in what order, before the null-DCB crash).
+void setOrderTrace(uintptr_t addr, const char *label);
+
+// Return-value trace: int3 at a `mov ebx,eax` (89 c3) site right after a call;
+// logs eax, emulates the mov (ebx=eax), and resumes. Pins which sub-call in a
+// run-once init returns the non-zero error that blocks the graphics bring-up.
+void setRetTrace(uintptr_t addr, const char *label);
+
 // Give the calling thread a dedicated signal-handler stack (SA_ONSTACK). The
 // fatal handler then runs even when the guest's own RSP is corrupt or blown
 // (a stack-overflow fault would otherwise be undeliverable -> silent core).
