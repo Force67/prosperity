@@ -18,8 +18,8 @@
 #include "proc.h"
 #include "vfs.h"
 #include "cpu/cpu_backend.h"
-#include "lv2/sys_dynlib.h"
-#include "lv2/sys_mem.h"
+#include "ps4/lv2/sys_dynlib.h"
+#include "ps4/lv2/sys_mem.h"
 #include "runtime/vprx/vprx.h"
 
 #include <cstring>

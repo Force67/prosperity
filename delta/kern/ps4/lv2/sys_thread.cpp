@@ -18,8 +18,8 @@
 #include <string>
 #include <thread>
 
-#include "../module.h"
-#include "../proc.h"
+#include "../../module.h"
+#include "../../proc.h"
 #include "cpu/cpu_backend.h"
 #include "sys_thread.h"
 

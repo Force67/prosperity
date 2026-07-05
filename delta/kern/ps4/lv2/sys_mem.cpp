@@ -19,7 +19,7 @@
 #include <sys/mman.h>
 #include <unordered_map>
 
-#include "../proc.h"
+#include "../../proc.h"
 #include "error_table.h"
 #include "sys_mem.h"
 

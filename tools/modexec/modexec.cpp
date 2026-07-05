@@ -11,7 +11,7 @@
 #include <logger/logger.h>
 #include <utl/mem.h>
 
-#include "kern/lv2/sys_dynlib.h"
+#include "kern/ps4/lv2/sys_dynlib.h"
 #include "kern/module.h"
 #include "kern/proc.h"
 #include "kern/vfs.h"

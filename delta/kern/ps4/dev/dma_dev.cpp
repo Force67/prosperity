@@ -16,7 +16,7 @@
 #include <mutex>
 #include <vector>
 #include "dma_dev.h"
-#include "kern/lv2/sys_mem.h"
+#include "kern/ps4/lv2/sys_mem.h"
 #include "kern/proc.h"
 
 namespace krnl {

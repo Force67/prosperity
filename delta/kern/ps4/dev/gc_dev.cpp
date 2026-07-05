@@ -7,8 +7,8 @@
 #include <cstring>
 #include "gc_dev.h"
 #include "kern/proc.h"
-#include "kern/lv2/sys_event.h"
-#include "kern/lv2/sys_mem.h"
+#include "kern/ps4/lv2/sys_event.h"
+#include "kern/ps4/lv2/sys_mem.h"
 
 // LLE GPU submit bridge (delta_runtime). The real libSceGnmDriver.sprx submits
 // PM4 through these ioctls; forward the descriptor array to the GPU command

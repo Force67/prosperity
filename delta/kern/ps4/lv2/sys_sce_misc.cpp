@@ -16,7 +16,7 @@
 #include "error_table.h"
 #include "sys_mem.h"
 #include "sys_sce_misc.h"
-#include "../proc.h"
+#include "../../proc.h"
 
 namespace krnl {
 // From sys_budget.cpp: the proc telemetry "process type". Mirrored so per-budget

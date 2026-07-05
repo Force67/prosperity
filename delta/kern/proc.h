@@ -12,7 +12,7 @@
 #include <base/strings/xstring.h>
 #include <base/strings/string_ref.h>
 
-#include "dev/device.h"
+#include "ps4/dev/device.h"
 #include "module.h"
 #include "object.h"
 #include "util/object_table.h"

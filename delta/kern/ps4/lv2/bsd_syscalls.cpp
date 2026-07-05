@@ -7,7 +7,7 @@
  * in the root of the source tree.
  */
 
-#include "../proc.h"
+#include "../../proc.h"
 #include "error_table.h"
 #include <base.h>
 #include <logger/logger.h>

@@ -13,7 +13,7 @@
 #include <cstring>
 #include <thread>
 
-#include "../proc.h"
+#include "../../proc.h"
 #include "cpu/cpu_backend.h"
 #include "error_table.h"
 #include "sys_thread_ext.h"

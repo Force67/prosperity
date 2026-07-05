@@ -15,8 +15,8 @@
 #include <logger/logger.h>
 
 #include "error_table.h"
-#include "kern/dev/device.h"
-#include "kern/dev/file_dev.h" // SceKernelStat, fillStat, kSceFileMode*
+#include "kern/ps4/dev/device.h"
+#include "kern/ps4/dev/file_dev.h" // SceKernelStat, fillStat, kSceFileMode*
 #include "kern/proc.h"
 #include "kern/vfs.h"
 #include "sys_vfs.h" // sys_open (sys_openat delegates to it)

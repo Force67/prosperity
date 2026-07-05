@@ -14,7 +14,7 @@
 #include <intrin.h>
 #endif
 
-#include "../proc.h"
+#include "../../proc.h"
 #include "error_table.h"
 #include <cstdio>
 

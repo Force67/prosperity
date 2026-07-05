@@ -17,7 +17,7 @@
 #include "gfx/gfx.h"
 #include "gpu/cmd_processor.h"
 #include "kern/proc.h"
-#include "kern/lv2/sys_event.h"
+#include "kern/ps4/lv2/sys_event.h"
 
 using namespace krnl;
 
