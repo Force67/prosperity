@@ -117,6 +117,22 @@ int PS4ABI sys_sysctl(int *name, uint32_t namelen, void *oldp, size_t *oldlenp,
     return 0;
   }
 
+  // PS5 kern.proc.{36,79}: extra app/process-info selectors the PS5 system-service
+  // client polls during net/NP init (kern.proc.35 is GetAppInfo above). Left as
+  // ENOENT they read as "retry", so the client thread spins re-querying and
+  // creating/destroying a wait object each pass -- leaking the guest's fixed
+  // ScePthread internal heap until it throws bad_alloc. Answer with a zeroed
+  // buffer + success (same as .35) so the poll resolves. PS5-only: PS4 titles
+  // never query these selectors, so the PS4 path stays byte-identical.
+  else if (name[0] == 1 && name[1] == 14 && (name[2] == 36 || name[2] == 79) &&
+           namelen >= 3 &&
+           proc::getActive()->getPlatform() == proc::platform::ps5) {
+    if (oldp && oldlenp) {
+      std::memset(oldp, 0, *oldlenp);
+    }
+    return 0;
+  }
+
   // kern.userstack
   else if (name[0] == 1 && name[1] == 33 && namelen == 2) {
     auto &info = proc::getActive()->getEnv();
