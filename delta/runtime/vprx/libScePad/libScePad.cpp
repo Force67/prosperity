@@ -5,9 +5,12 @@
 
 #include "../vprx.h"
 
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <string>
+#include <vector>
 
 #include "gfx/gfx.h"
 
@@ -176,6 +179,66 @@ static const bool g_keyboard = [] {
 }();
 #endif
 
+// Symbolic name <-> Orbis bitmask table, shared by the script parser and tracer.
+struct BtnName { uint32_t mask; const char *name; };
+constexpr BtnName kBtnNames[] = {
+    {kCross, "cross"},    {kCircle, "circle"}, {kSquare, "square"},
+    {kTriangle, "triangle"}, {kOptions, "options"}, {kUp, "up"},
+    {kDown, "down"},      {kLeft, "left"},     {kRight, "right"},
+    {kL1, "l1"},          {kR1, "r1"},         {kL2, "l2"},
+    {kR2, "r2"},          {kL3, "l3"},         {kR3, "r3"},
+    {kTouchPad, "touchpad"},
+};
+
+uint32_t buttonMask(const std::string &name) {
+  for (const auto &b : kBtnNames)
+    if (name == b.name) return b.mask;
+  std::fprintf(stderr, "[padscript] unknown button '%s'\n", name.c_str());
+  return 0;
+}
+
+std::string buttonNames(uint32_t buttons) {
+  std::string out;
+  for (const auto &b : kBtnNames)
+    if (buttons & b.mask) { if (!out.empty()) out += '+'; out += b.name; }
+  return out.empty() ? "none" : out;
+}
+
+// DELTA_PAD_SCRIPT="<time>:<buttons>[:<holdMs>],..." presses buttons at scripted
+// times (seconds after the first pad read) so a headless run can be driven past
+// intros/menus into gameplay. Buttons are symbolic (see kBtnNames) and combine
+// with '+', e.g. "12:cross,15:down+cross:200". holdMs defaults to 150. The
+// scripted buttons are OR'd into whatever state the read path produced.
+struct ScriptStep { double start, end; uint32_t buttons; };
+
+std::vector<ScriptStep> parseScript(const char *s) {
+  std::vector<ScriptStep> steps;
+  const std::string in(s);
+  size_t i = 0;
+  while (i < in.size()) {
+    size_t comma = in.find(',', i);
+    std::string e = in.substr(i, comma == std::string::npos ? comma : comma - i);
+    i = comma == std::string::npos ? in.size() : comma + 1;
+    size_t c1 = e.find(':');
+    if (c1 == std::string::npos) continue;
+    double t = std::atof(e.substr(0, c1).c_str());
+    size_t c2 = e.find(':', c1 + 1);
+    std::string btns =
+        e.substr(c1 + 1, c2 == std::string::npos ? c2 : c2 - c1 - 1);
+    double holdMs = c2 == std::string::npos ? 150.0 : std::atof(e.c_str() + c2 + 1);
+    uint32_t mask = 0;
+    size_t j = 0;
+    while (j < btns.size()) {
+      size_t plus = btns.find('+', j);
+      mask |= buttonMask(
+          btns.substr(j, plus == std::string::npos ? plus : plus - j));
+      j = plus == std::string::npos ? btns.size() : plus + 1;
+    }
+    if (mask) steps.push_back({t, t + holdMs / 1000.0, mask});
+  }
+  return steps;
+}
+
 void fillPadState(PadData *d) {
   if (!d) return;
   std::memset(d, 0, sizeof(*d));
@@ -232,6 +295,31 @@ void fillPadState(PadData *d) {
       if (dir==0) lx=255; else if (dir==1) lx=0; else if (dir==2) ly=0; else ly=255;
     }
   }
+  static const std::vector<ScriptStep> g_script = [] {
+    const char *e = std::getenv("DELTA_PAD_SCRIPT");
+    return e ? parseScript(e) : std::vector<ScriptStep>{};
+  }();
+  static const auto g_scriptT0 = std::chrono::steady_clock::now();
+  if (!g_script.empty()) {
+    double t = std::chrono::duration<double>(
+                   std::chrono::steady_clock::now() - g_scriptT0).count();
+    for (const auto &st : g_script)
+      if (t >= st.start && t < st.end) buttons |= st.buttons;
+  }
+
+  static const bool g_trace = std::getenv("DELTA_PAD_TRACE") != nullptr;
+  if (g_trace) {
+    static uint32_t lastTraced = 0;
+    static bool first = true;
+    if (first || buttons != lastTraced) {
+      first = false;
+      lastTraced = buttons;
+      std::fprintf(stderr, "[padtrace] readSeq=%llu buttons=%#x %s\n",
+                   (unsigned long long)g_readSeq, buttons,
+                   buttonNames(buttons).c_str());
+    }
+  }
+
   d->buttons = buttons;
   d->leftStick = {lx, ly};
   d->rightStick = {rx, ry};
