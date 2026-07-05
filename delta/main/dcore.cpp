@@ -47,20 +47,32 @@ public:
                        n ? (long long)n->size : -1LL, p.c_str());
         }
     }
-    if (const char *want = std::getenv("DELTA_PKG_DUMP")) {
-      if (const auto *node = fs_.find(want)) {
-        std::vector<uint8_t> buf(node->size);
-        int64_t n = fs_.read(*node, buf.data(), 0, node->size);
-        const char *base = std::strrchr(want, '/');
-        std::string out = std::string("/tmp/") + (base ? base + 1 : want);
-        if (FILE *f = std::fopen(out.c_str(), "wb")) {
-          std::fwrite(buf.data(), 1, n > 0 ? n : 0, f);
-          std::fclose(f);
-          std::fprintf(stderr, "[pkg] dumped %s -> %s (%lld bytes)\n", want,
-                       out.c_str(), (long long)n);
+    if (const char *wantEnv = std::getenv("DELTA_PKG_DUMP")) {
+      std::string list(wantEnv);
+      size_t pos = 0;
+      while (pos <= list.size()) {
+        size_t comma = list.find(',', pos);
+        std::string want = list.substr(pos, comma == std::string::npos
+                                                ? std::string::npos
+                                                : comma - pos);
+        pos = comma == std::string::npos ? list.size() + 1 : comma + 1;
+        if (want.empty())
+          continue;
+        if (const auto *node = fs_.find(want.c_str())) {
+          std::vector<uint8_t> buf(node->size);
+          int64_t n = fs_.read(*node, buf.data(), 0, node->size);
+          const char *base = std::strrchr(want.c_str(), '/');
+          std::string out =
+              std::string("/tmp/") + (base ? base + 1 : want.c_str());
+          if (FILE *f = std::fopen(out.c_str(), "wb")) {
+            std::fwrite(buf.data(), 1, n > 0 ? n : 0, f);
+            std::fclose(f);
+            std::fprintf(stderr, "[pkg] dumped %s -> %s (%lld bytes)\n",
+                         want.c_str(), out.c_str(), (long long)n);
+          }
+        } else {
+          std::fprintf(stderr, "[pkg] DUMP: %s not found\n", want.c_str());
         }
-      } else {
-        std::fprintf(stderr, "[pkg] DUMP: %s not found\n", want);
       }
     }
   }
