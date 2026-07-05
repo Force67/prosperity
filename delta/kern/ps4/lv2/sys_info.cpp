@@ -213,9 +213,71 @@ int PS4ABI sys_sysctl(int *name, uint32_t namelen, void *oldp, size_t *oldlenp,
     return 0;
   }
 
+  // hw.sce_main_socid (synthetic {0x1337,7}): the SoC identifier. The system
+  // init polls it repeatedly; a benign non-zero value stops the re-resolve.
+  else if (name[0] == 0x1337 && name[1] == 7 && namelen == 2) {
+    if (oldp && oldlenp && *oldlenp >= sizeof(uint32_t)) {
+      *reinterpret_cast<uint32_t *>(oldp) = 0x1400;
+      *oldlenp = sizeof(uint32_t);
+    }
+    return 0;
+  }
+
+  // vm.budgets.mlock_total (synthetic {0x1337,8}): total wired-memory budget in
+  // bytes. Report a large pool (6 GiB) so heap-sizing consumers get a sane value
+  // instead of 0; matches the order of the reported direct-memory pool.
+  else if (name[0] == 0x1337 && name[1] == 8 && namelen == 2) {
+    if (oldp && oldlenp) {
+      uint64_t v = 0x180000000ull;
+      size_t n = *oldlenp < sizeof(v) ? *oldlenp : sizeof(v);
+      std::memcpy(oldp, &v, n);
+      *oldlenp = n;
+    }
+    return 0;
+  }
+
+  // Benign zero-filled PS5 config oids (synthetic {0x1337,9}): kern.amm.param,
+  // kern.app.memconf, machdep.auto_update_version, kern.neomode. Zero is the
+  // default/"non-Neo"/"no-override" answer for each.
+  else if (name[0] == 0x1337 && name[1] == 9 && namelen == 2) {
+    if (oldp && oldlenp) {
+      size_t n = *oldlenp;
+      if (n > 256)
+        n = 256;
+      std::memset(oldp, 0, n);
+      *oldlenp = n;
+    }
+    return 0;
+  }
+
   if (name[0] == 0 && name[1] == 3 && namelen == 2) {
     auto name = base::StringRef(static_cast<const char *>(newp), newlen);
-    if (name == "kern.neomode") {
+
+    // PS5 system-info oids the network/system-service init resolves. Left
+    // unhandled they returned ENOENT and the KAGE net thread spun (sizing its
+    // heap from a missing budget), leaking sync objects until the pthread
+    // internal heap ran out. Map them to synthetic oids answered below.
+    if (name == "hw.sce_main_socid") {
+      static_cast<uint32_t *>(oldp)[0] = 0x1337;
+      static_cast<uint32_t *>(oldp)[1] = 7;
+      *oldlenp = 8;
+      return 0;
+    } else if (name == "vm.budgets.mlock_total") {
+      static_cast<uint32_t *>(oldp)[0] = 0x1337;
+      static_cast<uint32_t *>(oldp)[1] = 8;
+      *oldlenp = 8;
+      return 0;
+    } else if (name == "kern.amm.param" || name == "kern.app.memconf" ||
+               name == "machdep.auto_update_version" || name == "kern.neomode") {
+      static_cast<uint32_t *>(oldp)[0] = 0x1337;
+      static_cast<uint32_t *>(oldp)[1] = 9;
+      *oldlenp = 8;
+      return 0;
+    } else if (name == "kern.ps4_sdk_version") {
+      static_cast<uint32_t *>(oldp)[0] = 0x1337;
+      static_cast<uint32_t *>(oldp)[1] = 6;  // reuse kern.sdk_version answer
+      *oldlenp = 8;
+      return 0;
     }
 
     if (name == "kern.smp.cpus") {
