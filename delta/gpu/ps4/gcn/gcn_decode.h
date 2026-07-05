@@ -39,8 +39,19 @@ struct Inst {
 };
 
 // Decode a GCN program. `code` points at the bytecode (guest, host-readable),
-// `maxDwords` bounds the scan (use the BinaryInfo length). Stops at s_endpgm.
-std::vector<Inst> decode(const uint32_t *code, uint32_t maxDwords);
+// `maxDwords` bounds the scan (use codeLength() / the BinaryInfo length).
+// s_endpgm is a basic-block terminator, not an end-of-stream marker: with
+// stopAtEndpgm=false the whole program is decoded so blocks reached only after an
+// early-out s_endpgm are still lifted. stopAtEndpgm=true (default) keeps the
+// legacy "stop at the first s_endpgm" behaviour for callers that want it.
+std::vector<Inst> decode(const uint32_t *code, uint32_t maxDwords,
+                         bool stopAtEndpgm = true);
+
+// Recover the real GCN code length (in dwords) from the trailing Gnm
+// ShaderBinaryInfo ("OrbShdr") footer that the Orbis toolchain appends after the
+// bytecode. Returns 0 if no footer is found within `maxDwords`. Use this to bound
+// decode() so a shader with an early s_endpgm is not truncated.
+uint32_t codeLength(const uint32_t *code, uint32_t maxDwords);
 
 // Human-readable mnemonic for an instruction (best-effort; "?" for unmapped).
 const char *mnemonic(const Inst &i);

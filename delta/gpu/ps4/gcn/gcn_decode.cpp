@@ -11,6 +11,13 @@
 namespace gpu::gcn {
 namespace {
 
+// The 'OrbShdr' ShaderBinaryInfo signature at byte offset `off` in `code`?
+bool orbShdrAt(const uint32_t *code, uint32_t off) {
+  const char *s = reinterpret_cast<const char *>(code) + off;
+  return s[0] == 'O' && s[1] == 'r' && s[2] == 'b' && s[3] == 'S' &&
+         s[4] == 'h' && s[5] == 'd' && s[6] == 'r';
+}
+
 // A 32-bit-encoded scalar/vector op carries a trailing 32-bit literal when a
 // source-operand field selects LITERAL_CONST (255).
 bool sop2HasLit(uint32_t w) {
@@ -66,7 +73,26 @@ uint32_t baseSize(Enc e) {
 
 }  // namespace
 
-std::vector<Inst> decode(const uint32_t *code, uint32_t maxDwords) {
+uint32_t codeLength(const uint32_t *code, uint32_t maxDwords) {
+  if (!code || maxDwords < 2)
+    return 0;
+  // Fast path: the toolchain emits "s_mov_b32 vcc_hi, #imm" (0xBEEB03FF) as the
+  // first instruction, where the ShaderBinaryInfo footer sits at code[(imm+1)*2].
+  if (code[0] == 0xBEEB03FFu) {
+    uint64_t d = (uint64_t)(code[1] + 1) * 2;
+    if (d >= 2 && d + 2 <= maxDwords && orbShdrAt(code, (uint32_t)d * 4))
+      return (uint32_t)d;
+  }
+  // General case: scan (dword-aligned) for the footer signature. The GCN code ends
+  // exactly where its footer begins, so the footer's dword offset is the length.
+  for (uint32_t d = 1; d + 2 <= maxDwords; d++)
+    if (orbShdrAt(code, d * 4))
+      return d;
+  return 0;
+}
+
+std::vector<Inst> decode(const uint32_t *code, uint32_t maxDwords,
+                         bool stopAtEndpgm) {
   std::vector<Inst> out;
   if (!code)
     return out;
@@ -105,8 +131,10 @@ std::vector<Inst> decode(const uint32_t *code, uint32_t maxDwords) {
 
     out.push_back(in);
 
-    // s_endpgm (SOPP opcode 1) ends the program.
-    if (in.enc == Enc::sopp && in.opcode == 1)
+    // s_endpgm (SOPP opcode 1) terminates a basic block. When bounded by the real
+    // code length it is not an end-of-stream marker, so keep decoding: a block
+    // reached only after an early-out s_endpgm must still be lifted.
+    if (stopAtEndpgm && in.enc == Enc::sopp && in.opcode == 1)
       break;
     i += in.size;
   }
