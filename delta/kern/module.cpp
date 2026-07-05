@@ -625,6 +625,18 @@ bool smodule::resolveObfSymbol(const char *name, uintptr_t &ptrOut) {
     uint64_t hid = 0;
     if (!runtime::decode_nid(name, 11, hid))
       return false;
+    // libSceVideoOut runs LLE on PS5, but its port backend never registers in our
+    // env (its .bss port table stays zero), so the real sceVideoOutOpen returns
+    // 0x802900ff and the game's renderer bails before creating its command
+    // buffers (null AGC DrawCommandBuffer crash). Route the uniquely-hashed
+    // videoout NIDs to the HLE shim so the display path succeeds. Everything else
+    // (incl. libSceGnmDriver/AGC, which run LLE fine) is unaffected.
+    if (uintptr_t hle = runtime::vprx_get_forced("libSceVideoOut", hid)) {
+      char tn[64];
+      std::snprintf(tn, sizeof(tn), "libSceVideoOut!%.11s", name);
+      ptrOut = cpu::makeHostThunk(reinterpret_cast<void *>(hle), tn);
+      return true;
+    }
     for (auto &mod : process->getModuleList())
       if (uintptr_t a = mod->getExport(hid)) {
         ptrOut = a;

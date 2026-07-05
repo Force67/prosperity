@@ -112,6 +112,17 @@ static bool useHleShim(const char *lib, uint64_t hid) {
   return true;  // every other HLE module stays HLE
 }
 
+uintptr_t vprx_get_forced(const char *lib, uint64_t hid) {
+  for (const auto &t : vprxTable) {
+    if (std::strcmp(lib, t->namePtr) != 0)
+      continue;
+    for (int i = 0; i < t->funcCount; i++)
+      if (t->funcNodes[i].hashId == hid)
+        return reinterpret_cast<uintptr_t>(t->funcNodes[i].address);
+  }
+  return 0;
+}
+
 uintptr_t vprx_get(const char *lib, uint64_t hid) {
   if (!useHleShim(lib, hid))
     return 0;
