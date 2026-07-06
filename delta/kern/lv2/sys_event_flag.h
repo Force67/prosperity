@@ -9,6 +9,7 @@
  */
 
 #include <base.h>
+#include <atomic>
 #include <condition_variable>
 #include <mutex>
 
@@ -37,6 +38,11 @@ public:
   void clear(uint64_t bits);
 
   const base::String &fname() const { return name; }
+
+  // Tid of the last set() caller: lets trywait detect the request/response
+  // handshake pattern (this thread just posted a request bit and now polls for
+  // the responder's done bit). See sys_evf_trywait.
+  std::atomic<long> lastSetTid{0};
 
 private:
   bool satisfied(uint64_t pattern, uint32_t mode) const;

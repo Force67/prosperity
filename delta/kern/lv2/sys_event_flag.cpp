@@ -9,6 +9,9 @@
 #include <base.h>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <unistd.h>
 #include <unordered_map>
 
 #include "kern/proc.h"
@@ -71,6 +74,7 @@ int eventFlag::trywait(uint64_t pattern, uint32_t mode, uint64_t *result) {
 void eventFlag::set(uint64_t b) {
   std::lock_guard<std::mutex> lk(m);
   bits |= b;
+  lastSetTid.store((long)gettid(), std::memory_order_relaxed);
   cv.notify_all();
 }
 
@@ -84,6 +88,28 @@ static eventFlag *fromId(int id) {
   if (!obj || obj->type() != kObject::oType::eventflag)
     return nullptr;
   return static_cast<eventFlag *>(obj);
+}
+
+// DELTA_EVF_TRACE[=substr]: log every evf op (optionally only for flags whose
+// name contains substr) with tid + bits, to reconstruct producer/consumer
+// interleavings (e.g. SOTTR's file-I/O channel handshake).
+static bool evfTraceOn(const eventFlag *ef) {
+  static const char *filt = std::getenv("DELTA_EVF_TRACE");
+  if (!filt)
+    return false;
+  if (!*filt || std::strcmp(filt, "1") == 0)
+    return true;
+  return ef && std::strstr(ef->fname().c_str(), filt) != nullptr;
+}
+
+static void evfTrace(const char *op, int id, const eventFlag *ef,
+                     uint64_t pattern, uint32_t mode, int ret, uint64_t res) {
+  if (!evfTraceOn(ef))
+    return;
+  std::fprintf(stderr, "[evf] t=%ld %s id=%d '%s' pat=%#llx mode=%#x -> ret=%d res=%#llx\n",
+               (long)gettid(), op, id, ef ? ef->fname().c_str() : "?",
+               (unsigned long long)pattern, mode, ret,
+               (unsigned long long)res);
 }
 
 int PS4ABI sys_evf_create(const char *name, uint32_t attr,
@@ -148,7 +174,12 @@ int PS4ABI sys_evf_wait(int id, uint64_t pattern, uint32_t mode,
   auto *ef = fromId(id);
   if (!ef)
     return -SysError::eSRCH;
-  return ef->wait(pattern, mode, result, timeoutUs);
+  uint64_t res = 0;
+  int r = ef->wait(pattern, mode, &res, timeoutUs);
+  if (result)
+    *result = res;
+  evfTrace("wait", id, ef, pattern, mode, r, res);
+  return r;
 }
 
 int PS4ABI sys_evf_trywait(int id, uint64_t pattern, uint32_t mode,
@@ -156,7 +187,30 @@ int PS4ABI sys_evf_trywait(int id, uint64_t pattern, uint32_t mode,
   auto *ef = fromId(id);
   if (!ef)
     return -SysError::eSRCH;
-  return ef->trywait(pattern, mode, result);
+  uint64_t res = 0;
+  int r = ef->trywait(pattern, mode, &res);
+  // Handshake grace: when the polling thread itself posted the last set() on
+  // this flag, it is the requester of a request/response channel (it set the
+  // "request" bit and now polls for the responder's "done" bit). On the real
+  // console the responder runs at higher SCE priority, so the set() preempts
+  // the requester and the response is already posted by the time it polls;
+  // engines rely on that ordering (Shadow of the Tomb Raider's file-I/O
+  // channel streams garbage progress if the poll misses). Emulate it with a
+  // bounded wait for the response. Pure status pollers never set the flag
+  // themselves, so they keep true poll semantics and pay nothing.
+  // DELTA_NO_EVF_GRACE disables for A/B testing.
+  static const bool noGrace = std::getenv("DELTA_NO_EVF_GRACE") != nullptr;
+  if (r == -SysError::eBUSY && !noGrace &&
+      ef->lastSetTid.load(std::memory_order_relaxed) == (long)gettid()) {
+    uint32_t toUs = 250000;
+    r = ef->wait(pattern, mode, &res, &toUs);
+    if (r == -SysError::eTIMEDOUT)
+      r = -SysError::eBUSY;
+  }
+  if (result)
+    *result = res;
+  evfTrace("poll", id, ef, pattern, mode, r, res);
+  return r;
 }
 
 int PS4ABI sys_evf_set(int id, uint64_t bits) {
@@ -164,6 +218,7 @@ int PS4ABI sys_evf_set(int id, uint64_t bits) {
   if (!ef)
     return -SysError::eSRCH;
   ef->set(bits);
+  evfTrace("set", id, ef, bits, 0, 0, 0);
   return 0;
 }
 
