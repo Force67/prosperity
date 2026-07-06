@@ -305,6 +305,29 @@ int PS4ABI sys_umtx_op(void *ptr, int op, uint32_t val, void *a, void *b) {
     bk.cv.notify_all();                // waiters re-check their predicate
     return 0;
   }
+  // Userland semaphore (struct _usem { u32 _has_waiters; u32 _count; u32 _flags; }
+  // at ptr). SEM_WAIT publishes _has_waiters and blocks while _count == 0; the
+  // poster bumps _count (userland) and calls SEM_WAKE. Returning 0 immediately
+  // (the old default) turned sem_wait into a hot spin -- a savedata worker
+  // (Shadow of the Tomb Raider) pegged a core re-issuing the syscall, starving
+  // the threads it was waiting on. Block on _count like the other WAIT ops.
+  case 19: { // UMTX_OP_SEM_WAIT
+    auto &bk = umtxBucket(ptr);
+    auto *hasWaiters = static_cast<std::atomic<uint32_t> *>(ptr);
+    auto *count = reinterpret_cast<volatile uint32_t *>(
+        static_cast<uint8_t *>(ptr) + 4);
+    std::unique_lock<std::mutex> lk(bk.m);
+    uint32_t z = 0;
+    hasWaiters->compare_exchange_strong(z, 1);  // publish "has waiters"
+    bk.cv.wait_for(lk, umtxTimeout(), [&] { return *count != 0; });
+    return 0;
+  }
+  case 20: { // UMTX_OP_SEM_WAKE
+    auto &bk = umtxBucket(ptr);
+    std::lock_guard<std::mutex> lk(bk.m);
+    bk.cv.notify_all();
+    return 0;
+  }
   default: {
     static std::atomic<uint32_t> seen[32]{};
     if (op >= 0 && op < 32 && seen[op].fetch_add(1) == 0)
