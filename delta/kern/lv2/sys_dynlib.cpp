@@ -11,7 +11,9 @@
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <unordered_map>
+#include <unordered_set>
 #include <logger/logger.h>
 
 #include <utl/mem.h>
@@ -162,6 +164,9 @@ int PS4ABI sys_dynlib_get_obj_member(uint32_t handle, uint8_t index,
   switch (index) {
   case 1:  // module init proc
     *value = info.initAddr;
+    if (std::getenv("DELTA_MODINIT_TRACE"))
+      std::fprintf(stderr, "[modinit] h=%u %s init=%p\n", handle,
+                   info.name.c_str(), info.initAddr);
     return 0;
   case 2:  // module fini proc
     *value = info.finiAddr;
@@ -194,10 +199,41 @@ int PS4ABI sys_dynlib_get_proc_param(void **data, size_t *size) {
 
 int PS4ABI sys_dynlib_get_list(uint32_t *handles, size_t maxCount,
                                size_t *count) {
-  auto &list = proc::getActive()->getModuleList();
+  auto *proc = proc::getActive();
+  auto &list = proc->getModuleList();
+
+  // The real kernel loads each PRX's needed modules before the PRX itself, so
+  // the module list is dependency-ordered and libkernel's module-init walker
+  // (which runs inits in list order) always initializes a library before its
+  // dependents. Our list is discovery order, which can invert that: SOTTR's
+  // eboot names libSceNpManager before libSceHttp, so NpManager's PrxStart ran
+  // first, called sceHttpInit before libSceHttp's own init, got 0x80431001
+  // (before-init), and left its NP context null (later deref'd by Matching2).
+  // Emit the list dependency-first (postorder over DT_SCE_NEEDED_MODULE), with
+  // the main module kept up front like the real list.
+  base::Vector<smodule *> sorted;
+  std::unordered_set<smodule *> visited;
+  std::function<void(smodule *)> visit = [&](smodule *m) {
+    if (!visited.insert(m).second)
+      return;
+    for (auto &dep : m->neededObjects()) {
+      auto d = proc->getModule(base::StringRef(dep.c_str()));
+      if (d && d.get() != m)
+        visit(d.get());
+    }
+    sorted.push_back(m);
+  };
+  for (auto &mod : list)
+    visit(mod.get());
 
   size_t listCount = 0;
-  for (auto &mod : list) {
+  if (!list.empty() && !list[0]->getInfo().name.empty() && maxCount > 0) {
+    *(handles++) = list[0]->getInfo().handle;  // main module first
+    listCount++;
+  }
+  for (auto *mod : sorted) {
+    if (!list.empty() && mod == list[0].get())
+      continue;
     if (mod->getInfo().name.empty())
       continue;
     if (listCount >= maxCount)

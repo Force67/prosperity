@@ -92,6 +92,12 @@ public:
 
   inline moduleInfo &getInfo() { return info; }
 
+  // DT_NEEDED module names (".prx" suffix stripped), for dependency-ordered
+  // module enumeration (sys_dynlib_get_list).
+  inline const base::Vector<base::String> &neededObjects() const {
+    return sharedObjects;
+  }
+
   inline bool isDynlib() { return elf->type == ET_SCE_DYNAMIC; }
 
   /*traits -> object_ref TODO: properly implement*/
