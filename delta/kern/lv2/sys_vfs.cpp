@@ -227,10 +227,16 @@ int PS4ABI sys_stat(const char *path, void *stat) {
   std::memset(stat, 0, sizeof(SceKernelStat));
   int64_t size = 0;
   bool isDir = false;
-  if (!vfs::stat(path, size, isDir))
+  if (!vfs::stat(path, size, isDir)) {
+    if (std::getenv("DELTA_RDALL"))
+      std::fprintf(stderr, "[stat] %s -> ENOENT\n", path);
     return -SysError::eNOENT;
+  }
   fillStat(*reinterpret_cast<SceKernelStat *>(stat),
            isDir ? kSceFileModeDir : kSceFileModeReg, size);
+  if (std::getenv("DELTA_RDALL"))
+    std::fprintf(stderr, "[stat] %s -> size=%lld dir=%d\n", path,
+                 (long long)size, (int)isDir);
   return 0;
 }
 

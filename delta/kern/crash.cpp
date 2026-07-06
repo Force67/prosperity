@@ -179,7 +179,9 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
                               (unsigned long long)gr[REG_R8], mf);
         if (n > 0) { ssize_t w = write(2, m, (size_t)n); (void)w; }
       }
-      if (mf)
+      // DELTA_RDOFF_NOFIX: observe-only (log requests, don't rewrite offsets).
+      static const bool nofix = std::getenv("DELTA_RDOFF_NOFIX") != nullptr;
+      if (mf && !nofix)
         gr[REG_RDX] = 0;  // force manifest read offset to 0 (read from start)
       gr[REG_RSP] -= 8;   // emulate push rbp
       *reinterpret_cast<uint64_t *>(gr[REG_RSP]) = (uint64_t)gr[REG_RBP];
