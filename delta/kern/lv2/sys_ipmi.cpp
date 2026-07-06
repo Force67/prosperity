@@ -30,6 +30,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include "kern/vfs.h"
 
@@ -92,6 +94,8 @@ static void dumpStr(const char *tag, void *p) {
     std::fprintf(stderr, "    %s str=\"%.32s\"\n", tag, s);
 }
 
+static std::string kidService(uint32_t kid);
+
 static void ipmiTrace(uint32_t op, uint32_t kid, void *out, void *in,
                       uint64_t insize) {
   static const bool on = std::getenv("DELTA_IPMI_TRACE") != nullptr;
@@ -101,22 +105,61 @@ static void ipmiTrace(uint32_t op, uint32_t kid, void *out, void *in,
                out, in, (unsigned long long)insize);
   if (op == IPMI_INVOKE_SYNC && in && insize >= sizeof(IpmiInvokeReq)) {
     auto *req = static_cast<IpmiInvokeReq *>(in);
-    std::fprintf(stderr, "  invoke method=%#x numIn=%u numOut=%u\n",
-                 req->methodId, req->numIn, req->numOut);
+    std::fprintf(stderr, "  invoke svc=\"%s\" method=%#x numIn=%u numOut=%u",
+                 kidService(kid).c_str(), req->methodId, req->numIn,
+                 req->numOut);
+    // out descriptor sizes help identify the method's expected reply layout
+    if (req->pOutData && req->numOut >= 1 && req->numOut <= 4) {
+      std::fprintf(stderr, " outsz=[");
+      for (uint32_t i = 0; i < req->numOut; i++)
+        std::fprintf(stderr, "%s%llu", i ? "," : "",
+                     (unsigned long long)req->pOutData[i * 2 + 1]);
+      std::fprintf(stderr, "]");
+    }
+    std::fprintf(stderr, "\n");
   }
 }
 
-// True if any pointer field in the request payload points at "ScePlayGo".
-static bool payloadNamesPlayGo(void *in, uint64_t insize) {
+// Scan the request payload's pointer fields for the service-name string the
+// create/connect calls carry (e.g. "ScePlayGo", "SceNpMgrIpc", ...).
+static const char *payloadServiceName(void *in, uint64_t insize) {
   auto *q = static_cast<uint64_t *>(in);
   for (uint64_t i = 0; i < insize / 8; i++) {
     uint64_t v = q[i];
     if (v <= 0x10000) // skip nulls / small inline ints (never valid pointers)
       continue;
-    if (std::strncmp(reinterpret_cast<const char *>(v), "ScePlayGo", 9) == 0)
-      return true;
+    auto *s = reinterpret_cast<const char *>(v);
+    if (std::strncmp(s, "Sce", 3) == 0) {
+      int n = 3;
+      bool printable = true;
+      for (; n < 64 && s[n]; n++)
+        if (s[n] < 0x20 || s[n] > 0x7e) { printable = false; break; }
+      if (printable && n < 64)
+        return s;
+    }
   }
-  return false;
+  return nullptr;
+}
+
+static bool payloadNamesPlayGo(void *in, uint64_t insize) {
+  const char *s = payloadServiceName(in, insize);
+  return s && std::strncmp(s, "ScePlayGo", 9) == 0;
+}
+
+// kid -> service name (from the create payload), so invoke traffic is
+// attributable per service in traces and per-service handlers can match.
+static std::mutex g_kidNameMtx;
+static std::unordered_map<uint32_t, std::string> g_kidNames;
+
+static void rememberKid(uint32_t kid, const char *name) {
+  std::lock_guard<std::mutex> lk(g_kidNameMtx);
+  g_kidNames[kid] = name ? name : "";
+}
+
+static std::string kidService(uint32_t kid) {
+  std::lock_guard<std::mutex> lk(g_kidNameMtx);
+  auto it = g_kidNames.find(kid);
+  return it != g_kidNames.end() ? it->second : std::string();
 }
 
 // PlayGo chunk count. The real per-title value lives in the pkg header file
@@ -212,7 +255,13 @@ int PS4ABI sys_ipmimgr_call(uint32_t op, uint32_t kid, void *out, void *in,
     // create payload carries a pointer to the service name, so remember the kid
     // if this is the PlayGo daemon (so we can answer its method invokes).
     uint32_t newKid = g_nextClientKid.fetch_add(1);
-    if (in && payloadNamesPlayGo(in, insize)) {
+    const char *svc = in ? payloadServiceName(in, insize) : nullptr;
+    if (svc)
+      rememberKid(newKid, svc);
+    if (std::getenv("DELTA_IPMI_TRACE"))
+      std::fprintf(stderr, "  create kid=%u service=\"%s\"\n", newKid,
+                   svc ? svc : "?");
+    if (svc && std::strncmp(svc, "ScePlayGo", 9) == 0) {
       std::lock_guard<std::mutex> lk(g_playgoMtx);
       g_playgoKids.insert(newKid);
     }

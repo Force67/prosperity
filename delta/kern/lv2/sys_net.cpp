@@ -2,12 +2,17 @@
 
 #include <base.h>
 #include <cstdio>
+#include <cstdlib>
 #include "sys_net.h"
 #include "error_table.h"
 
 namespace krnl {
 int PS4ABI sys_netcontrol(uint32_t fd, uint32_t op, void* buffer,
         uint32_t size) {
+
+    if (std::getenv("DELTA_NET_TRACE"))
+      std::fprintf(stderr, "[netctl] fd=%d op=%#x buf=%p size=%u\n", (int)fd,
+                   op, buffer, size);
 
     if (size > 160)
     return -SysError::eINVAL;
