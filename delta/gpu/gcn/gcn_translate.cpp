@@ -19,4 +19,14 @@ Recompiled recompile(const uint32_t *vsCode, const uint32_t *psCode,
   return r;
 }
 
+RecompiledCs recompileCompute(const uint32_t *csCode, uint32_t numThreadX,
+                              uint32_t numThreadY, uint32_t numThreadZ,
+                              uint32_t userSgpr, uint32_t tgidEnable) {
+  RecompiledCs r;
+  if (!csCode) return r;
+  recompileComputeSpirv(csCode, numThreadX, numThreadY, numThreadZ, userSgpr,
+                        tgidEnable, r);  // fills r, sets r.ok
+  return r;
+}
+
 }  // namespace gpu::gcn

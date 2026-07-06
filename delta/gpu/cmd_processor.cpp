@@ -886,14 +886,76 @@ void handleDispatch(const uint32_t *body, uint32_t count) {
     gcn::disassemble(reinterpret_cast<const uint32_t *>(csAddr), 1024, "cs");
   }
 
-  // DELTA_GPU_CSRUN: execute the compute shader on the CPU (WIP) so Doom64's
-  // buffer->image atlas builders populate the dest textures the 3D world samples.
+  if (csAddr < 0x1000000000ull || csAddr >= 0x20000000000ull || !tgx || !tgy ||
+      !dimX || !dimY)
+    return;
+  const uint32_t *ud = &g_regs[mmCOMPUTE_USER_DATA_0];
+
+  // DELTA_GPU_CSRUN: execute the compute shader on the CPU interpreter (legacy A/B
+  // path). The default is GPU-side execution (below); DELTA_GPU_NOCS disables both.
   static const bool csRun = std::getenv("DELTA_GPU_CSRUN") != nullptr;
-  if (csRun && csAddr >= 0x1000000000ull && csAddr < 0x20000000000ull && tgx && tgy) {
-    const uint32_t *ud = &g_regs[mmCOMPUTE_USER_DATA_0];
+  if (csRun) {
     gcn::runComputeShader(csAddr, dimX, dimY, dimZ, tgx, tgy, tgz, userSgpr,
                           tgidEnable, ud);
+    return;
   }
+  static const bool noCs = std::getenv("DELTA_GPU_NOCS") != nullptr;
+  if (noCs || !vk::available())
+    return;
+
+  // Recompile the CS to a Vulkan compute pipeline (cached by address), resolve the
+  // guest memory ranges its descriptors point at from the live user data, and run it
+  // on the GPU. Doom64 builds its world-texture atlases this way. An unsupported CS
+  // fails the recompile and is skipped (loud, not silently corrupting memory).
+  static std::unordered_map<uint64_t, gcn::RecompiledCs> csCache;
+  auto cit = csCache.find(csAddr);
+  if (cit == csCache.end()) {
+    cit = csCache.emplace(csAddr,
+              gcn::recompileCompute(reinterpret_cast<const uint32_t *>(csAddr), tgx,
+                                    tgy, tgz, userSgpr, tgidEnable)).first;
+    static int reported = 0;
+    if (!cit->second.ok && reported < 8) {
+      reported++;
+      std::fprintf(stderr, "[csgpu] unsupported CS @%#lx groups=[%u %u %u] -- skipped\n",
+                   (unsigned long)csAddr, dimX, dimY, dimZ);
+    }
+  }
+  gcn::RecompiledCs &rc = cit->second;
+  if (!rc.ok)
+    return;
+
+  // Resolve each planned resource's live base/size from the descriptor in user data.
+  auto guestRange = [](uint64_t a, uint64_t n) {
+    return n && a >= 0x1000000000ull && a + n <= 0x20000000000ull;
+  };
+  constexpr uint64_t kMaxRes = 256ull * 1024 * 1024;  // sanity cap per storage buffer
+  vk::ComputeInfo ci;
+  ci.csAddr = csAddr;
+  ci.groups[0] = dimX; ci.groups[1] = dimY; ci.groups[2] = dimZ;
+  ci.recomp = &rc;
+  for (int i = 0; i < 16; i++) ci.userData[i] = ud[i];
+  bool resOk = true;
+  for (auto &r : rc.resources) {
+    if (r.baseSgpr + 3 >= 16) { resOk = false; break; }
+    uint64_t base = 0, size = 0;
+    if (r.kind == 1) {  // image (T#): linear pitch*height*4
+      gcn::TImage t = gcn::decodeTImage(&ud[r.baseSgpr]);
+      base = t.base;
+      size = (uint64_t)t.pitch * t.height * 4;
+    } else {            // buffer (V# / pointer): stride*num_records, else the min hint
+      gcn::VBuffer v = gcn::decodeVBuffer(&ud[r.baseSgpr]);
+      base = v.base;
+      size = v.stride ? (uint64_t)v.stride * v.numRecords : v.numRecords;
+      if (size < r.minBytes) size = r.minBytes;
+    }
+    if (size > kMaxRes) size = kMaxRes;
+    if (!guestRange(base, size)) { resOk = false; break; }
+    ci.res[ci.nres] = {base, size, r.binding, r.written};
+    ci.nres++;
+  }
+  if (!resOk || !ci.nres)
+    return;
+  vk::dispatch(ci);
 }
 
 void submitDcb(const void *dcb, uint32_t sizeBytes) {

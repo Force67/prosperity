@@ -13,7 +13,7 @@
 
 #include <cstdint>
 
-namespace gpu::gcn { struct Recompiled; }
+namespace gpu::gcn { struct Recompiled; struct RecompiledCs; }
 
 namespace gpu::vk {
 
@@ -117,10 +117,34 @@ struct DrawInfo {
   uint32_t nvattrs = 0;
 };
 
+// A compute dispatch resolved by the command processor: the recompiled CS + the
+// live guest memory ranges its descriptors point at (resolved from COMPUTE_USER_DATA)
+// + the raw user data (pushed to the shader). The renderer stages each range into a
+// storage buffer, runs the dispatch, and copies the written ranges back to guest
+// memory (where the graphics texture path re-reads them).
+struct ComputeInfo {
+  uint64_t csAddr = 0;             // pipeline cache key
+  uint32_t groups[3] = {1, 1, 1};  // workgroup counts (DISPATCH_DIRECT dims)
+  const gcn::RecompiledCs *recomp = nullptr;
+  uint32_t userData[16] = {};      // COMPUTE_USER_DATA_0..15 (push constants)
+  struct Res {
+    uint64_t base = 0;    // guest address the storage buffer aliases
+    uint64_t size = 0;    // bytes staged
+    uint32_t binding = 0;
+    bool written = false;  // copy back to guest after the dispatch
+  };
+  Res res[8];
+  uint32_t nres = 0;
+};
+
 // Bring up the headless Vulkan device. Returns false if Vulkan is unavailable
 // (then the renderer is disabled and the emulator runs without graphics).
 bool init();
 bool available();
+
+// Run a compute dispatch on the GPU. Returns true if it executed, false if it
+// could not be set up (the caller then skips the dispatch, as before).
+bool dispatch(const ComputeInfo &ci);
 
 // Frame lifecycle. Each draw renders into the Vulkan image for its DrawInfo.rtBase
 // (a render target keyed by guest address). beginFrame starts recording;

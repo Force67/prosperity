@@ -13,6 +13,8 @@
 namespace gpu::gcn {
 bool recompileSpirv(const uint32_t *, const uint32_t *, const uint32_t *,
                     const uint32_t *, Recompiled &) { return false; }
+bool recompileComputeSpirv(const uint32_t *, uint32_t, uint32_t, uint32_t, uint32_t,
+                           uint32_t, RecompiledCs &) { return false; }
 }  // namespace gpu::gcn
 #else
 
@@ -420,6 +422,15 @@ struct StageCtx {
   uint32_t maxIn = 0;                           // PS
   bool wroteColor = false;                      // PS (compile-time: shader has an exp)
   Id colorWrittenVar = 0;  // PS (runtime per-lane: this fragment reached a color exp)
+
+  // Compute (isCs): storage buffers modelling the guest memory the CS reads/writes.
+  // csBind maps a descriptor SGPR (V#/T# base) to its storage-buffer binding; csSsbo
+  // maps a binding to the emitted OpVariable. csUnsupported is set if an op the compute
+  // backend can't handle is reached (caller declines the recompile).
+  bool isCs = false;
+  std::unordered_map<uint32_t, uint32_t> csBind;  // baseSgpr -> binding
+  std::vector<Id> csSsbo;                          // binding -> storage-buffer var
+  bool csUnsupported = false;
 };
 
 Id psInputVar(Tr &t, StageCtx &sc, uint32_t attr) {
@@ -479,6 +490,217 @@ void emitMimg(Tr &t, uint32_t op, uint32_t w0, uint32_t w1, Id imgTy, Id sampImg
   uint32_t comp = 0;
   for (int i = 0; i < 4; i++)
     if (dmask & (1 << i)) t.stVgF(vdata + comp++, t.m.compositeExtract(t.tF, texel, i));
+}
+
+// ---- compute memory ops (guest memory modelled as storage buffers) ----------
+// Each bound resource is a `uint data[]` storage buffer that aliases the guest range
+// [descriptor.base, base+size); an access is by dword index relative to that base.
+Id csSsboPtr(Tr &t, StageCtx &sc, uint32_t binding, Id dwordIdx) {
+  Id pU = t.m.typePointer(spv::StorageClass::StorageBuffer, t.tU);
+  return t.m.accessChain(pU, sc.csSsbo[binding], {t.m.constU32(0), dwordIdx});
+}
+Id csSsboLoad(Tr &t, StageCtx &sc, uint32_t binding, Id dwordIdx) {
+  return t.m.load(t.tU, csSsboPtr(t, sc, binding, dwordIdx));
+}
+void csSsboStore(Tr &t, StageCtx &sc, uint32_t binding, Id dwordIdx, Id val) {
+  t.m.store(csSsboPtr(t, sc, binding, dwordIdx), val);
+}
+int csBindingFor(StageCtx &sc, uint32_t baseSgpr) {
+  auto it = sc.csBind.find(baseSgpr);
+  return it != sc.csBind.end() ? (int)it->second : -1;
+}
+Id csAnd(Tr &t, Id a, Id b) { return t.m.emit(spv::Op::OpBitwiseAnd, t.tU, {a, b}); }
+Id csOr(Tr &t, Id a, Id b) { return t.m.emit(spv::Op::OpBitwiseOr, t.tU, {a, b}); }
+Id csShr(Tr &t, Id a, uint32_t s) { return t.m.emit(spv::Op::OpShiftRightLogical, t.tU, {a, t.m.constU32(s)}); }
+Id csShrV(Tr &t, Id a, Id s) { return t.m.emit(spv::Op::OpShiftRightLogical, t.tU, {a, s}); }
+Id csShl(Tr &t, Id a, uint32_t s) { return t.m.emit(spv::Op::OpShiftLeftLogical, t.tU, {a, t.m.constU32(s)}); }
+Id csShlV(Tr &t, Id a, Id s) { return t.m.emit(spv::Op::OpShiftLeftLogical, t.tU, {a, s}); }
+Id csAdd(Tr &t, Id a, Id b) { return t.m.emit(spv::Op::OpIAdd, t.tU, {a, b}); }
+Id csMul(Tr &t, Id a, Id b) { return t.m.emit(spv::Op::OpIMul, t.tU, {a, b}); }
+Id csF(Tr &t, Id u) { return t.m.bitcast(t.tF, u); }   // uint bits -> float
+Id csUf(Tr &t, Id f) { return t.m.bitcast(t.tU, f); }  // float -> uint bits
+
+// Compute ALU emitters. Operands are raw uints; these mirror the CPU interpreter
+// (gcn_interp.cpp) opcode-for-opcode so the GPU path reproduces its exact semantics
+// (the graphics-path emitVop* use a different, VS/PS-calibrated opcode table).
+void emitCsVop1(Tr &t, uint32_t op, uint32_t vdst, Id u0) {
+  auto U = [&](Id u) { t.stVg(vdst, u); };
+  switch (op) {
+    case 0x01: U(u0); break;                                                     // mov_b32
+    case 0x05: U(csUf(t, t.m.emit(spv::Op::OpConvertSToF, t.tF, {t.m.bitcast(t.tI, u0)}))); break;  // f32_i32
+    case 0x06: U(csUf(t, t.m.emit(spv::Op::OpConvertUToF, t.tF, {u0}))); break;  // f32_u32
+    case 0x07: U(t.m.emit(spv::Op::OpConvertFToU, t.tU,
+                  {t.ext1(GLSLstd450Round, csF(t, u0))})); break;                // u32_f32 (round)
+    case 0x08: U(t.m.bitcast(t.tU, t.m.emit(spv::Op::OpConvertFToS, t.tI, {csF(t, u0)}))); break;  // i32_f32
+    default: U(u0); break;
+  }
+}
+void emitCsVop2(Tr &t, uint32_t op, uint32_t vdst, Id u0, Id u1) {
+  auto U = [&](Id u) { t.stVg(vdst, u); };
+  auto c = [&](uint32_t v) { return t.m.constU32(v); };
+  auto sh = [&](Id s) { return csAnd(t, s, c(31)); };
+  auto ff = [&](spv::Op o) { return csUf(t, t.m.emit(o, t.tF, {csF(t, u0), csF(t, u1)})); };
+  Id i0 = t.m.bitcast(t.tI, u0), i1 = t.m.bitcast(t.tI, u1);
+  auto sext24 = [&](Id u) { return t.m.emit(spv::Op::OpShiftRightArithmetic, t.tI,
+                              {t.m.bitcast(t.tI, csShl(t, u, 8)), c(8)}); };
+  switch (op) {
+    case 0x00: {  // cndmask (VCC ? u1 : u0)
+      Id cond = t.m.emit(spv::Op::OpINotEqual, t.tBool, {csAnd(t, t.ldSg(106), c(1)), c(0)});
+      U(t.m.emit(spv::Op::OpSelect, t.tU, {cond, u1, u0})); break;
+    }
+    case 0x03: U(ff(spv::Op::OpFAdd)); break;
+    case 0x04: U(ff(spv::Op::OpFSub)); break;
+    case 0x05: U(csUf(t, t.m.emit(spv::Op::OpFSub, t.tF, {csF(t, u1), csF(t, u0)}))); break;
+    case 0x08: U(ff(spv::Op::OpFMul)); break;
+    case 0x09: U(t.m.bitcast(t.tU, t.m.emit(spv::Op::OpIMul, t.tI, {sext24(u0), sext24(u1)}))); break;  // mul_i32_i24
+    case 0x0b: U(csMul(t, csAnd(t, u0, c(0xFFFFFF)), csAnd(t, u1, c(0xFFFFFF)))); break;  // mul_u32_u24
+    case 0x0f: U(t.m.bitcast(t.tU, t.m.extInst(t.tI, GLSLstd450SMin, {i0, i1}))); break;
+    case 0x10: U(t.m.bitcast(t.tU, t.m.extInst(t.tI, GLSLstd450SMax, {i0, i1}))); break;
+    case 0x11: U(t.m.extInst(t.tU, GLSLstd450UMin, {u0, u1})); break;
+    case 0x12: U(t.m.extInst(t.tU, GLSLstd450UMax, {u0, u1})); break;
+    case 0x13: U(csShrV(t, u0, sh(u1))); break;
+    case 0x14: U(csShrV(t, u1, sh(u0))); break;
+    case 0x15: U(t.m.bitcast(t.tU, t.m.emit(spv::Op::OpShiftRightArithmetic, t.tI, {i0, sh(u1)}))); break;
+    case 0x16: U(t.m.bitcast(t.tU, t.m.emit(spv::Op::OpShiftRightArithmetic, t.tI, {i1, sh(u0)}))); break;
+    case 0x19: U(csShlV(t, u0, sh(u1))); break;
+    case 0x1a: U(csShlV(t, u1, sh(u0))); break;
+    case 0x1b: U(csAnd(t, u0, u1)); break;
+    case 0x1c: U(csOr(t, u0, u1)); break;
+    case 0x1d: U(t.m.emit(spv::Op::OpBitwiseXor, t.tU, {u0, u1})); break;
+    case 0x1f: U(csUf(t, t.m.emit(spv::Op::OpFAdd, t.tF,  // mac_f32
+                  {t.m.emit(spv::Op::OpFMul, t.tF, {csF(t, u0), csF(t, u1)}), t.ldVgF(vdst)}))); break;
+    case 0x22: U(csAdd(t, t.m.emit(spv::Op::OpBitCount, t.tU, {u0}), u1)); break;  // bcnt_u32_b32
+    case 0x25: U(csAdd(t, u0, u1)); break;                                         // add_i32
+    case 0x26: U(t.m.emit(spv::Op::OpISub, t.tU, {u0, u1})); break;                // sub_i32
+    case 0x27: U(t.m.emit(spv::Op::OpISub, t.tU, {u1, u0})); break;                // subrev_i32
+    case 0x28: {  // addc_u32 (+VCC); VCC = carry out
+      Id st = t.m.typeStruct({t.tU, t.tU});
+      Id a = t.m.emit(spv::Op::OpIAddCarry, st, {u0, u1});
+      Id b = t.m.emit(spv::Op::OpIAddCarry, st,
+                      {t.m.compositeExtract(t.tU, a, 0), csAnd(t, t.ldSg(106), c(1))});
+      U(t.m.compositeExtract(t.tU, b, 0));
+      t.stSg(106, csOr(t, t.m.compositeExtract(t.tU, a, 1), t.m.compositeExtract(t.tU, b, 1)));
+      break;
+    }
+    default: break;  // unknown: leave dst (matches the interpreter's nop)
+  }
+}
+void emitCsVop3(Tr &t, uint32_t op, uint32_t vdst, Id u0, Id u1, Id u2) {
+  if (op < 0x100) {  // VOPC in VOP3 form: compare -> VCC, write the bool to sdst (=vdst)
+    emitVopc(t, op, csF(t, u0), csF(t, u1), u0, u1);
+    t.stSg(vdst, t.ldSg(106));
+    return;
+  }
+  if (op >= 0x100 && op < 0x140) { emitCsVop2(t, op - 0x100, vdst, u0, u1); return; }
+  if (op >= 0x180 && op < 0x200) { emitCsVop1(t, op - 0x180, vdst, u0); return; }
+  auto U = [&](Id u) { t.stVg(vdst, u); };
+  auto c = [&](uint32_t v) { return t.m.constU32(v); };
+  auto sext24 = [&](Id u) { return t.m.emit(spv::Op::OpShiftRightArithmetic, t.tI,
+                              {t.m.bitcast(t.tI, csShl(t, u, 8)), c(8)}); };
+  switch (op) {
+    case 0x141: case 0x14b: U(csUf(t, t.m.emit(spv::Op::OpFAdd, t.tF,  // mad/fma_f32
+                  {t.m.emit(spv::Op::OpFMul, t.tF, {csF(t, u0), csF(t, u1)}), csF(t, u2)}))); break;
+    case 0x142: U(csAdd(t, t.m.bitcast(t.tU, t.m.emit(spv::Op::OpIMul, t.tI, {sext24(u0), sext24(u1)})), u2)); break;  // mad_i24
+    case 0x143: U(csAdd(t, csMul(t, csAnd(t, u0, c(0xFFFFFF)), csAnd(t, u1, c(0xFFFFFF))), u2)); break;  // mad_u24
+    case 0x14a: {  // alignbit = (u2 >> (u0&31)) | (u1 << ((32-u0)&31))
+      Id lo = csShrV(t, u2, csAnd(t, u0, c(31)));
+      Id hi = csShlV(t, u1, csAnd(t, t.m.emit(spv::Op::OpISub, t.tU, {c(32), u0}), c(31)));
+      U(csOr(t, lo, hi)); break;
+    }
+    case 0x15d: {  // sad_u32 = |u0 - u1| + u2
+      Id gt = t.m.emit(spv::Op::OpUGreaterThan, t.tBool, {u0, u1});
+      Id d = t.m.emit(spv::Op::OpSelect, t.tU, {gt, t.m.emit(spv::Op::OpISub, t.tU, {u0, u1}),
+                                                t.m.emit(spv::Op::OpISub, t.tU, {u1, u0})});
+      U(csAdd(t, d, u2)); break;
+    }
+    case 0x169: case 0x16b: U(csMul(t, u0, u1)); break;  // mul_lo_u32 / mul_lo_i32
+    case 0x16a: case 0x16c: {  // mul_hi (high dword of the 64-bit product)
+      Id st = t.m.typeStruct({t.tU, t.tU});
+      U(t.m.compositeExtract(t.tU, t.m.emit(spv::Op::OpUMulExtended, st, {u0, u1}), 1)); break;
+    }
+    default: U(u0); break;
+  }
+}
+
+// SMRD s_load / s_buffer_load: read scalar constants from the bound buffer.
+void emitCsSmrd(Tr &t, const Inst &in, StageCtx &sc) {
+  uint32_t w = in.raw[0], op = in.opcode, sdst = (w >> 15) & 0x7F, sbase = (w >> 9) & 0x3F;
+  bool imm = (w >> 8) & 1; uint32_t off = w & 0xFF, baseSgpr = sbase * 2;
+  int b = csBindingFor(sc, baseSgpr);
+  if (b < 0) { sc.csUnsupported = true; return; }
+  uint32_t n = op < 0x08 ? (1u << op)
+             : op == 0x08 ? 1 : op == 0x09 ? 2 : op == 0x0a ? 4 : op == 0x0b ? 8 : 16;
+  // Immediate offset is a dword index; a register offset is a byte offset.
+  Id dwOff = imm ? t.m.constU32(off) : csShr(t, t.srcRaw(off, in.literal), 2);
+  for (uint32_t i = 0; i < n; i++)
+    t.stSg(sdst + i, csSsboLoad(t, sc, (uint32_t)b, csAdd(t, dwOff, t.m.constU32(i))));
+}
+
+// MUBUF buffer_load: read a source element into a VGPR. Mirrors the CPU interpreter's
+// raw byte/dword model (no format conversion): copy shaders load bytes and the image
+// store packs them, so the round trip is identity.
+void emitCsMubuf(Tr &t, const Inst &in, StageCtx &sc) {
+  uint32_t w = in.raw[0], w1 = in.raw[1];
+  uint32_t op = (w >> 18) & 0x7F, instOff = w & 0xFFF;
+  bool offen = (w >> 12) & 1, idxen = (w >> 13) & 1;
+  uint32_t vaddr = w1 & 0xFF, vdata = (w1 >> 8) & 0xFF;
+  uint32_t srsrc = ((w1 >> 16) & 0x1F) * 4, soffField = (w1 >> 24) & 0xFF;
+  if (op >= 0x18) { sc.csUnsupported = true; return; }  // buffer store: not handled
+  int b = csBindingFor(sc, srsrc);
+  if (b < 0) { sc.csUnsupported = true; return; }
+  Id byteOff = csAdd(t, t.srcRaw(soffField, in.literal), t.m.constU32(instOff));
+  if (idxen) {
+    Id stride = csAnd(t, csShr(t, t.ldSg(srsrc + 1), 16), t.m.constU32(0x3FFF));
+    byteOff = csAdd(t, byteOff, csMul(t, t.ldVg(vaddr), stride));
+  } else if (offen) {
+    byteOff = csAdd(t, byteOff, t.ldVg(vaddr));
+  }
+  Id raw = csSsboLoad(t, sc, (uint32_t)b, csShr(t, byteOff, 2));
+  bool fourByte = (op == 0x0c || op == 0x03);  // LOAD_DWORD / FORMAT_XYZW
+  if (fourByte)
+    t.stVg(vdata, raw);
+  else
+    t.stVg(vdata, csAnd(t, csShrV(t, raw, csShl(t, csAnd(t, byteOff, t.m.constU32(3)), 3)),
+                        t.m.constU32(0xFF)));
+}
+
+// MIMG image_load / image_store: linear RGBA8 image, dword index = y*pitch + x.
+void emitCsMimg(Tr &t, const Inst &in, StageCtx &sc) {
+  uint32_t w = in.raw[0], w1 = in.raw[1];
+  uint32_t op = (w >> 18) & 0x7F, dmask = (w >> 8) & 0xF;
+  uint32_t vaddr = w1 & 0xFF, vdata = (w1 >> 8) & 0xFF, srsrc = ((w1 >> 16) & 0x1F) * 4;
+  bool store = (op == 0x08), load = (op == 0x00 || op == 0x01);
+  if (!store && !load) { sc.csUnsupported = true; return; }  // sample/atomic: not handled
+  int b = csBindingFor(sc, srsrc);
+  if (b < 0) { sc.csUnsupported = true; return; }
+  Id pitch = csAdd(t, csAnd(t, csShr(t, t.ldSg(srsrc + 4), 13), t.m.constU32(0x3FFF)),
+                   t.m.constU32(1));
+  Id dwordIdx = csAdd(t, csMul(t, t.ldVg(vaddr + 1), pitch), t.ldVg(vaddr));
+  if (load) {
+    Id raw = csSsboLoad(t, sc, (uint32_t)b, dwordIdx);
+    uint32_t comp = 0;
+    for (int i = 0; i < 4; i++)
+      if (dmask & (1 << i))
+        t.stVg(vdata + comp++, csAnd(t, csShr(t, raw, i * 8u), t.m.constU32(0xFF)));
+    return;
+  }
+  Id packed;
+  if (dmask == 0xF) {
+    packed = csAnd(t, t.ldVg(vdata), t.m.constU32(0xFF));
+    packed = csOr(t, packed, csShl(t, csAnd(t, t.ldVg(vdata + 1), t.m.constU32(0xFF)), 8));
+    packed = csOr(t, packed, csShl(t, csAnd(t, t.ldVg(vdata + 2), t.m.constU32(0xFF)), 16));
+    packed = csOr(t, packed, csShl(t, csAnd(t, t.ldVg(vdata + 3), t.m.constU32(0xFF)), 24));
+  } else {
+    packed = csSsboLoad(t, sc, (uint32_t)b, dwordIdx);  // read-modify-write
+    uint32_t comp = 0;
+    for (int i = 0; i < 4; i++) {
+      if (!(dmask & (1 << i))) continue;
+      Id keep = csAnd(t, packed, t.m.constU32(~(0xFFu << (i * 8))));
+      Id ins = csShl(t, csAnd(t, t.ldVg(vdata + comp++), t.m.constU32(0xFF)), i * 8u);
+      packed = csOr(t, keep, ins);
+    }
+  }
+  csSsboStore(t, sc, (uint32_t)b, dwordIdx, packed);
 }
 
 // Emit one non-terminator instruction (branches are handled by the CFG driver).
@@ -551,6 +773,7 @@ void emitInst(Tr &t, const Inst &in, StageCtx &sc) {
       break;
     }
     case Enc::smrd: {
+      if (sc.isCs) { emitCsSmrd(t, in, sc); break; }
       if (sc.isPs) break;  // VS cbuffer only (PS has no push range in our layout)
       uint32_t op = in.opcode, sdst = (w >> 15) & 0x7F, sbase = (w >> 9) & 0x3F;
       bool imm = (w >> 8) & 1; uint32_t off = w & 0xFF;
@@ -565,17 +788,26 @@ void emitInst(Tr &t, const Inst &in, StageCtx &sc) {
     }
     case Enc::vop2: {
       uint32_t op = in.opcode, vdst = (w >> 17) & 0xFF, vsrc1 = (w >> 9) & 0xFF, src0 = w & 0x1FF;
-      emitVop2(t, op, vdst, t.srcF(src0, in.literal), t.srcF(256 + vsrc1, in.literal), in.literal);
+      if (sc.isCs)
+        emitCsVop2(t, op, vdst, t.srcRaw(src0, in.literal), t.srcRaw(256 + vsrc1, in.literal));
+      else
+        emitVop2(t, op, vdst, t.srcF(src0, in.literal), t.srcF(256 + vsrc1, in.literal), in.literal);
       break;
     }
     case Enc::vop1: {
       uint32_t op = in.opcode, vdst = (w >> 17) & 0xFF, src0 = w & 0x1FF;
-      emitVop1(t, op, vdst, t.srcF(src0, in.literal));
+      if (sc.isCs) emitCsVop1(t, op, vdst, t.srcRaw(src0, in.literal));
+      else emitVop1(t, op, vdst, t.srcF(src0, in.literal));
       break;
     }
     case Enc::vop3: {
       uint32_t op = in.opcode, vdst = w & 0xFF, abs = (w >> 8) & 7;
       uint32_t s0 = w1 & 0x1FF, s1 = (w1 >> 9) & 0x1FF, s2 = (w1 >> 18) & 0x1FF, neg = (w1 >> 29) & 7;
+      if (sc.isCs) {  // compute: integer-correct 3-src ALU (incl. VOP3-form VOPC/aliases)
+        emitCsVop3(t, op, vdst, t.srcRaw(s0, in.literal), t.srcRaw(s1, in.literal),
+                   t.srcRaw(s2, in.literal));
+        break;
+      }
       emitVop3(t, op, vdst, t.srcF(s0, in.literal, neg & 1, abs & 1),
                t.srcF(s1, in.literal, neg & 2, abs & 2), t.srcF(s2, in.literal, neg & 4, abs & 4));
       break;
@@ -596,12 +828,24 @@ void emitInst(Tr &t, const Inst &in, StageCtx &sc) {
       }
       break;
     }
+    case Enc::mubuf:
+    case Enc::mtbuf:
+      if (sc.isCs) {
+        if (in.enc == Enc::mubuf) emitCsMubuf(t, in, sc);
+        else sc.csUnsupported = true;  // tbuffer (typed) not modelled
+      }
+      break;
+    case Enc::ds:
+      if (sc.isCs) sc.csUnsupported = true;  // LDS/GDS not modelled
+      break;
     case Enc::mimg: {
+      if (sc.isCs) { emitCsMimg(t, in, sc); break; }
       if (!sc.isPs) break;
       emitMimg(t, in.opcode, w, w1, sc.imgTy, sc.sampImgTy, sc.pSampImg, *sc.r);
       break;
     }
     case Enc::exp: {
+      if (sc.isCs) { sc.csUnsupported = true; break; }  // no exports in compute
       uint32_t en = w & 0xF, target = (w >> 4) & 0x3F, compr = (w >> 10) & 1;
       uint32_t v[4] = {w1 & 0xFF, (w1 >> 8) & 0xFF, (w1 >> 16) & 0xFF, (w1 >> 24) & 0xFF};
       if (sc.isPs) {
@@ -1069,6 +1313,136 @@ bool translatePs(const uint32_t *psCode, Recompiled &r, Tr &t) {
   return true;
 }
 
+// ---- CS ---------------------------------------------------------------------
+// Scan the CS for the memory resources (source/dest buffers/images) it touches,
+// keyed by the descriptor SGPR. Fills r.resources + `bind` (baseSgpr -> binding).
+// Returns false if a memory op the compute backend can't model is present.
+bool planCsResources(const std::vector<Inst> &insts, RecompiledCs &r,
+                     std::unordered_map<uint32_t, uint32_t> &bind) {
+  auto resource = [&](uint32_t baseSgpr, uint8_t kind, bool written,
+                      uint32_t minBytes) -> bool {
+    auto it = bind.find(baseSgpr);
+    if (it != bind.end()) {
+      CsResource &res = r.resources[it->second];
+      if (res.kind != kind) return false;  // same SGPR as both buffer and image
+      res.written = res.written || written;
+      if (minBytes > res.minBytes) res.minBytes = minBytes;
+      return true;
+    }
+    uint32_t idx = (uint32_t)r.resources.size();
+    if (idx >= 8) return false;  // cap the storage-buffer binding count
+    bind[baseSgpr] = idx;
+    r.resources.push_back({baseSgpr, idx, kind, written, minBytes});
+    return true;
+  };
+  for (auto &in : insts) {
+    uint32_t w = in.raw[0], w1 = in.raw[1];
+    switch (in.enc) {
+      case Enc::smrd: {
+        uint32_t op = in.opcode, sbase = (w >> 9) & 0x3F;
+        bool imm = (w >> 8) & 1; uint32_t off = w & 0xFF;
+        if (op > 0x0c) return false;  // beyond s_buffer_load_dwordx16
+        uint32_t n = op < 0x08 ? (1u << op)
+                   : op == 0x08 ? 1 : op == 0x09 ? 2 : op == 0x0a ? 4 : op == 0x0b ? 8 : 16;
+        uint32_t bytes = imm ? (off + n) * 4 : 0;
+        if (!resource(sbase * 2, 0, false, bytes)) return false;
+        break;
+      }
+      case Enc::mubuf: {
+        uint32_t op = (w >> 18) & 0x7F, srsrc = ((w1 >> 16) & 0x1F) * 4;
+        if (op >= 0x18) return false;  // buffer store: not handled
+        if (!resource(srsrc, 0, false, 0)) return false;
+        break;
+      }
+      case Enc::mimg: {
+        uint32_t op = (w >> 18) & 0x7F, srsrc = ((w1 >> 16) & 0x1F) * 4;
+        bool store = (op == 0x08), load = (op == 0x00 || op == 0x01);
+        if (!store && !load) return false;
+        if (!resource(srsrc, 1, store, 0)) return false;
+        break;
+      }
+      case Enc::mtbuf:
+      case Enc::ds:
+        return false;  // typed buffer / LDS not modelled
+      default:
+        break;
+    }
+  }
+  return true;
+}
+
+// Translate a CS to a GLCompute SPIR-V module. Models guest memory as per-resource
+// storage buffers (see the compute mem-op emitters); user data is passed as push
+// constants and seeds the register file; thread ids come from the builtins.
+bool translateCs(const uint32_t *csCode, uint32_t ntx, uint32_t nty, uint32_t ntz,
+                 uint32_t userSgpr, uint32_t tgidEnable, RecompiledCs &r, Tr &t) {
+  auto insts = decode(csCode, 2048);
+  if (insts.empty()) return false;
+  std::unordered_map<uint32_t, uint32_t> bind;
+  if (!planCsResources(insts, r, bind) || r.resources.empty()) return false;
+
+  t.initTypes();
+  // Storage buffers: Buf { uint data[]; } at set 0, binding = resource index.
+  Id tRun = t.m.typeRuntimeArray(t.tU);
+  t.m.decorate(tRun, spv::Decoration::ArrayStride, {4});
+  Id tBuf = t.m.typeStruct({tRun});
+  t.m.decorate(tBuf, spv::Decoration::Block);
+  t.m.memberDecorate(tBuf, 0, spv::Decoration::Offset, {0});
+  Id pBuf = t.m.typePointer(spv::StorageClass::StorageBuffer, tBuf);
+  std::vector<Id> ssbo(r.resources.size());
+  for (auto &res : r.resources) {
+    Id v = t.m.variable(pBuf, spv::StorageClass::StorageBuffer);
+    t.m.decorate(v, spv::Decoration::DescriptorSet, {0});
+    t.m.decorate(v, spv::Decoration::Binding, {res.binding});
+    ssbo[res.binding] = v;
+  }
+
+  // Push constant: the 16 COMPUTE_USER_DATA dwords seed s0.. (descriptors + params).
+  Id tUArr16 = t.m.typeArray(t.tU, 16);
+  t.m.decorate(tUArr16, spv::Decoration::ArrayStride, {4});
+  Id tPc = t.m.typeStruct({tUArr16});
+  t.m.decorate(tPc, spv::Decoration::Block);
+  t.m.memberDecorate(tPc, 0, spv::Decoration::Offset, {0});
+  Id pPc = t.m.typePointer(spv::StorageClass::PushConstant, tPc);
+  Id pcVar = t.m.variable(pPc, spv::StorageClass::PushConstant);
+
+  // Builtins: gl_LocalInvocationID (-> v0..v2) and gl_WorkGroupID (-> s after user data).
+  Id tUV3 = t.m.typeVec(t.tU, 3);
+  Id pInV3 = t.m.typePointer(spv::StorageClass::Input, tUV3);
+  Id lid = t.m.variable(pInV3, spv::StorageClass::Input);
+  t.m.decorate(lid, spv::Decoration::BuiltIn, {(uint32_t)spv::BuiltIn::LocalInvocationId});
+  Id wid = t.m.variable(pInV3, spv::StorageClass::Input);
+  t.m.decorate(wid, spv::Decoration::BuiltIn, {(uint32_t)spv::BuiltIn::WorkgroupId});
+  std::vector<Id> iface{lid, wid};
+
+  Id main = t.m.beginFunction(t.tVoid, t.tFn);
+  Id pcU = t.m.typePointer(spv::StorageClass::PushConstant, t.tU);
+  for (uint32_t i = 0; i < 16; i++)  // user data -> s0..s15
+    t.stSg(i, t.m.load(t.tU, t.m.accessChain(pcU, pcVar, {t.m.constU32(0), t.m.constU32(i)})));
+  Id pInU = t.m.typePointer(spv::StorageClass::Input, t.tU);
+  auto widComp = [&](uint32_t c) { return t.m.load(t.tU, t.m.accessChain(pInU, wid, {t.m.constU32(c)})); };
+  uint32_t sg = userSgpr;  // workgroup id -> s[userSgpr..] per tgid_enable
+  if ((tgidEnable & 1) && sg < 106) t.stSg(sg++, widComp(0));
+  if ((tgidEnable & 2) && sg < 106) t.stSg(sg++, widComp(1));
+  if ((tgidEnable & 4) && sg < 106) t.stSg(sg++, widComp(2));
+  for (uint32_t c = 0; c < 3; c++)  // local invocation id (tidig) -> v0..v2
+    t.stVg(c, t.m.load(t.tU, t.m.accessChain(pInU, lid, {t.m.constU32(c)})));
+  t.seedExec();
+
+  StageCtx sc; sc.isCs = true; sc.csBind = bind; sc.csSsbo = ssbo;
+  emitCFG(t, insts, sc);
+  if (sc.csUnsupported) return false;
+  t.m.returnVoid();
+  t.m.endFunction();
+  t.m.entryPoint(spv::ExecutionModel::GLCompute, main, "main", iface);
+  t.m.execMode(main, spv::ExecutionMode::LocalSize,
+               {ntx ? ntx : 1, nty ? nty : 1, ntz ? ntz : 1});
+  r.localSize[0] = ntx ? ntx : 1;
+  r.localSize[1] = nty ? nty : 1;
+  r.localSize[2] = ntz ? ntz : 1;
+  return true;
+}
+
 }  // namespace
 
 bool recompileSpirv(const uint32_t *vsCode, const uint32_t *psCode,
@@ -1132,6 +1506,27 @@ bool recompileSpirv(const uint32_t *vsCode, const uint32_t *psCode,
                    r.ok ? "spirv" : "FALLBACK"); }
   }
   return r.ok;
+}
+
+bool recompileComputeSpirv(const uint32_t *csCode, uint32_t ntx, uint32_t nty,
+                           uint32_t ntz, uint32_t userSgpr, uint32_t tgidEnable,
+                           RecompiledCs &r) {
+  if (!csCode) return false;
+  Tr t;
+  RecompiledCs tmp;  // build into a temp so a mid-emit failure leaves r untouched
+  if (!translateCs(csCode, ntx, nty, ntz, userSgpr, tgidEnable, tmp, t)) return false;
+  auto spv = t.m.assemble();
+  std::string err;
+  if (!spirv::validate(spv, &err)) {
+    if (g_dbg) std::fprintf(stderr, "[gcnspv] CS invalid: %s\n", err.c_str());
+    return false;
+  }
+  static const bool noOpt = std::getenv("DELTA_GPU_SPIRV_NOOPT") != nullptr;
+  tmp.spirv = noOpt ? spv : spirv::optimize(spv);
+  if (tmp.spirv.empty()) return false;
+  tmp.ok = true;
+  r = std::move(tmp);
+  return true;
 }
 
 }  // namespace gpu::gcn

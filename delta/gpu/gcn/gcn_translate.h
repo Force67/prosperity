@@ -58,4 +58,38 @@ struct Recompiled {
 Recompiled recompile(const uint32_t *vsCode, const uint32_t *psCode,
                      const uint32_t *vsUserData, const uint32_t *psUserData);
 
+// A memory resource a compute shader touches (source/dest buffer or image). The
+// descriptor (V#/T#) lives in the seeded register file at `baseSgpr` (user data);
+// the renderer resolves its live guest base/size from the dispatch's COMPUTE_USER_DATA
+// and binds a storage buffer for it. The recompiled CS accesses it by `binding`,
+// computing offsets relative to the descriptor base (the storage buffer aliases the
+// guest range [base, base+size), so base maps to buffer offset 0).
+struct CsResource {
+  uint32_t baseSgpr = 0;  // SGPR index the descriptor sits at (in user data)
+  uint32_t binding = 0;   // storage-buffer binding (set 0)
+  uint8_t kind = 0;       // 0 = buffer (V#/pointer), 1 = image (T#)
+  bool written = false;   // dispatch writes it -> copy the storage buffer back to guest
+  uint32_t minBytes = 0;  // lower bound on size from immediate-offset accesses
+};
+
+// A recompiled compute shader: the GLCompute SPIR-V + its resource-binding plan +
+// the workgroup size. Cached by CS address (the plan/SPIR-V depend only on the code,
+// not the per-dispatch user data, which is passed to the shader as push constants).
+struct RecompiledCs {
+  bool ok = false;
+  std::vector<uint32_t> spirv;
+  std::vector<CsResource> resources;
+  uint32_t localSize[3] = {1, 1, 1};  // threads per workgroup (COMPUTE_NUM_THREAD_*)
+};
+
+// Recompile a compute shader to a Vulkan compute pipeline (GLCompute SPIR-V). csCode
+// is a guest pointer to the GCN code; numThread* the workgroup size; userSgpr the
+// number of user-data SGPRs seeded into s0.. (COMPUTE_PGM_RSRC2.user_sgpr); tgidEnable
+// which workgroup-id dims land in the SGPRs after the user data. Returns ok=false when
+// the shader uses a feature the compute backend does not implement (caller skips the
+// dispatch loudly rather than corrupting memory).
+RecompiledCs recompileCompute(const uint32_t *csCode, uint32_t numThreadX,
+                              uint32_t numThreadY, uint32_t numThreadZ,
+                              uint32_t userSgpr, uint32_t tgidEnable);
+
 }  // namespace gpu::gcn

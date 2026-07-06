@@ -25,4 +25,11 @@ bool recompileSpirv(const uint32_t *vsCode, const uint32_t *psCode,
                     const uint32_t *vsUserData, const uint32_t *psUserData,
                     Recompiled &r);
 
+// Recompile a compute shader directly to GLCompute SPIR-V (fills r.spirv/resources/
+// localSize + sets r.ok). Returns r.ok. Declines (ok=false) when the backend is
+// disabled or the CS uses an unimplemented feature.
+bool recompileComputeSpirv(const uint32_t *csCode, uint32_t numThreadX,
+                           uint32_t numThreadY, uint32_t numThreadZ,
+                           uint32_t userSgpr, uint32_t tgidEnable, RecompiledCs &r);
+
 }  // namespace gpu::gcn

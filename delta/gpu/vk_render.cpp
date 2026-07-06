@@ -352,6 +352,13 @@ bool createDevice() {
   dc.pNext = &f13;
   dc.queueCreateInfoCount = 1;
   dc.pQueueCreateInfos = &qc;
+  // robustBufferAccess makes out-of-bounds storage-buffer loads/stores safe (return 0
+  // / drop the write) so the compute path can't corrupt memory on a miscomputed index.
+  VkPhysicalDeviceFeatures avail{};
+  vkGetPhysicalDeviceFeatures(g.phys, &avail);
+  VkPhysicalDeviceFeatures wantFeat{};
+  if (avail.robustBufferAccess) wantFeat.robustBufferAccess = VK_TRUE;
+  dc.pEnabledFeatures = &wantFeat;
   VKOK(vkCreateDevice(g.phys, &dc, nullptr, &g.device));
   vkGetDeviceQueue(g.device, g.qfam, 0, &g.queue);
 
@@ -1211,6 +1218,162 @@ bool init() {
 }
 
 bool available() { return g.ready; }
+
+// ---- compute dispatch -------------------------------------------------------
+// A recompiled compute pipeline, cached by CS address: the SPIR-V + binding layout
+// depend only on the code, so only the descriptor set + push constants + storage
+// buffers are rebuilt per dispatch.
+struct CsPipe {
+  VkPipeline pipe = VK_NULL_HANDLE;
+  VkPipelineLayout layout = VK_NULL_HANDLE;
+  VkDescriptorSetLayout setLayout = VK_NULL_HANDLE;
+  uint32_t nres = 0;
+};
+std::unordered_map<uint64_t, CsPipe> g_csPipes;
+
+CsPipe *getCsPipe(const ComputeInfo &ci) {
+  auto it = g_csPipes.find(ci.csAddr);
+  if (it != g_csPipes.end())
+    return it->second.nres == ci.nres ? &it->second : nullptr;
+  CsPipe cp; cp.nres = ci.nres;
+  VkDescriptorSetLayoutBinding binds[8];
+  for (uint32_t i = 0; i < ci.nres; i++)
+    binds[i] = {i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+  VkDescriptorSetLayoutCreateInfo sl{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+  sl.bindingCount = ci.nres; sl.pBindings = binds;
+  if (vkCreateDescriptorSetLayout(g.device, &sl, nullptr, &cp.setLayout) != VK_SUCCESS)
+    return nullptr;
+  VkPushConstantRange pcr{VK_SHADER_STAGE_COMPUTE_BIT, 0, 64};  // 16 user-data dwords
+  VkPipelineLayoutCreateInfo li{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+  li.setLayoutCount = 1; li.pSetLayouts = &cp.setLayout;
+  li.pushConstantRangeCount = 1; li.pPushConstantRanges = &pcr;
+  if (vkCreatePipelineLayout(g.device, &li, nullptr, &cp.layout) != VK_SUCCESS) {
+    vkDestroyDescriptorSetLayout(g.device, cp.setLayout, nullptr); return nullptr; }
+  VkShaderModule cs = makeModule(ci.recomp->spirv.data(), ci.recomp->spirv.size() * 4);
+  VkComputePipelineCreateInfo pi{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+  pi.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+  pi.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT; pi.stage.module = cs; pi.stage.pName = "main";
+  pi.layout = cp.layout;
+  VkResult r = vkCreateComputePipelines(g.device, VK_NULL_HANDLE, 1, &pi, nullptr, &cp.pipe);
+  vkDestroyShaderModule(g.device, cs, nullptr);
+  if (r != VK_SUCCESS) {
+    std::fprintf(stderr, "[gpuvk] compute pipeline failed: %d\n", (int)r);
+    vkDestroyPipelineLayout(g.device, cp.layout, nullptr);
+    vkDestroyDescriptorSetLayout(g.device, cp.setLayout, nullptr);
+    return nullptr;
+  }
+  g_csPipes[ci.csAddr] = cp;
+  return &g_csPipes[ci.csAddr];
+}
+
+// Drop cached textures overlapping a written range so the graphics path re-uploads
+// the fresh compute output (the content hash would trigger this too, but erasing is
+// immediate and covers a size/format change).
+void invalidateTexRange(uint64_t base, uint64_t size) {
+  for (auto it = g_texCache.begin(); it != g_texCache.end();) {
+    if (it->first >= base && it->first < base + size) {
+      if (it->second.view) vkDestroyImageView(g.device, it->second.view, nullptr);
+      if (it->second.image) vkDestroyImage(g.device, it->second.image, nullptr);
+      if (it->second.mem) vkFreeMemory(g.device, it->second.mem, nullptr);
+      it = g_texCache.erase(it);
+    } else {
+      ++it;
+    }
+  }
+}
+
+bool dispatch(const ComputeInfo &ci) {
+  if (!g.ready || !ci.recomp || !ci.recomp->ok || !ci.nres || ci.nres > 8) return false;
+  CsPipe *cp = getCsPipe(ci);
+  if (!cp) return false;
+  static const bool verbose = std::getenv("DELTA_GPU_CSGPU_VERBOSE") != nullptr;
+
+  // Stage each resource's guest range into a host-visible storage buffer.
+  VkBuffer buf[8] = {}; VkDeviceMemory mem[8] = {}; void *map[8] = {};
+  VkDescriptorPool pool = VK_NULL_HANDLE;
+  VkCommandBuffer cmd = VK_NULL_HANDLE;
+  bool ok = true;
+  auto cleanup = [&] {
+    if (cmd) vkFreeCommandBuffers(g.device, g.pool, 1, &cmd);
+    if (pool) vkDestroyDescriptorPool(g.device, pool, nullptr);
+    for (uint32_t i = 0; i < ci.nres; i++) {
+      if (map[i]) vkUnmapMemory(g.device, mem[i]);
+      if (buf[i]) vkDestroyBuffer(g.device, buf[i], nullptr);
+      if (mem[i]) vkFreeMemory(g.device, mem[i], nullptr);
+    }
+  };
+  for (uint32_t i = 0; i < ci.nres; i++) {
+    VkDeviceSize sz = ci.res[i].size ? ci.res[i].size : 4;
+    sz = (sz + 3) & ~VkDeviceSize(3);
+    VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    bi.size = sz; bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    if (vkCreateBuffer(g.device, &bi, nullptr, &buf[i]) != VK_SUCCESS) { ok = false; break; }
+    VkMemoryRequirements mr; vkGetBufferMemoryRequirements(g.device, buf[i], &mr);
+    VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    ai.allocationSize = mr.size;
+    ai.memoryTypeIndex = findMemoryType(mr.memoryTypeBits,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    if (vkAllocateMemory(g.device, &ai, nullptr, &mem[i]) != VK_SUCCESS) { ok = false; break; }
+    vkBindBufferMemory(g.device, buf[i], mem[i], 0);
+    vkMapMemory(g.device, mem[i], 0, sz, 0, &map[i]);
+    std::memcpy(map[i], reinterpret_cast<const void *>(ci.res[i].base), ci.res[i].size);
+  }
+  if (!ok) { cleanup(); return false; }
+
+  // Descriptor set binding the storage buffers.
+  VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, ci.nres};
+  VkDescriptorPoolCreateInfo pci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+  pci.maxSets = 1; pci.poolSizeCount = 1; pci.pPoolSizes = &ps;
+  if (vkCreateDescriptorPool(g.device, &pci, nullptr, &pool) != VK_SUCCESS) { cleanup(); return false; }
+  VkDescriptorSet set;
+  VkDescriptorSetAllocateInfo da{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+  da.descriptorPool = pool; da.descriptorSetCount = 1; da.pSetLayouts = &cp->setLayout;
+  if (vkAllocateDescriptorSets(g.device, &da, &set) != VK_SUCCESS) { cleanup(); return false; }
+  VkDescriptorBufferInfo dbi[8]; VkWriteDescriptorSet wr[8];
+  for (uint32_t i = 0; i < ci.nres; i++) {
+    dbi[i] = {buf[i], 0, VK_WHOLE_SIZE};
+    wr[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    wr[i].dstSet = set; wr[i].dstBinding = ci.res[i].binding; wr[i].descriptorCount = 1;
+    wr[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; wr[i].pBufferInfo = &dbi[i];
+  }
+  vkUpdateDescriptorSets(g.device, ci.nres, wr, 0, nullptr);
+
+  // Record + submit the dispatch, wait for completion (synchronous: the result must
+  // be back in guest memory before the following draws/texture uploads read it).
+  VkCommandBufferAllocateInfo ca{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+  ca.commandPool = g.pool; ca.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; ca.commandBufferCount = 1;
+  if (vkAllocateCommandBuffers(g.device, &ca, &cmd) != VK_SUCCESS) { cleanup(); return false; }
+  VkCommandBufferBeginInfo cbi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+  cbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+  vkBeginCommandBuffer(cmd, &cbi);
+  vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, cp->pipe);
+  vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, cp->layout, 0, 1, &set, 0, nullptr);
+  vkCmdPushConstants(cmd, cp->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 64, ci.userData);
+  vkCmdDispatch(cmd, ci.groups[0], ci.groups[1], ci.groups[2]);
+  vkEndCommandBuffer(cmd);
+  VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+  si.commandBufferCount = 1; si.pCommandBuffers = &cmd;
+  vkResetFences(g.device, 1, &g.fence);
+  if (vkQueueSubmit(g.queue, 1, &si, g.fence) != VK_SUCCESS) { cleanup(); return false; }
+  vkWaitForFences(g.device, 1, &g.fence, VK_TRUE, UINT64_MAX);
+
+  // Copy written ranges back to guest memory + invalidate any cached texture there.
+  for (uint32_t i = 0; i < ci.nres; i++) {
+    if (!ci.res[i].written) continue;
+    std::memcpy(reinterpret_cast<void *>(ci.res[i].base), map[i], ci.res[i].size);
+    invalidateTexRange(ci.res[i].base, ci.res[i].size);
+    if (verbose) {
+      const uint8_t *b = static_cast<const uint8_t *>(map[i]);
+      uint64_t nz = 0, step = ci.res[i].size > 65536 ? ci.res[i].size / 65536 : 1;
+      for (uint64_t k = 0; k < ci.res[i].size; k += step) nz += b[k] != 0;
+      std::fprintf(stderr, "[csgpu] wrote back base=%#lx size=%lu nonzero=%lu/%lu\n",
+                   (unsigned long)ci.res[i].base, (unsigned long)ci.res[i].size,
+                   (unsigned long)nz, (unsigned long)(ci.res[i].size / step));
+    }
+  }
+  cleanup();
+  return true;
+}
 
 // ---- recompiled-shader path -------------------------------------------------
 // GCN data format -> Vulkan vertex format.
