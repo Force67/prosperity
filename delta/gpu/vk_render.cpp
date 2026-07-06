@@ -1050,12 +1050,22 @@ DepthTarget *getDepthRT(uint64_t base, uint32_t w, uint32_t h) {
 // cycles/aliases RT addresses (double-buffered room layers, a pool of scene
 // buffers), so a composite often samples an address that does not exactly match
 // the RT base it was rendered into. We gather every RT whose footprint touches
-// the sampled region's pages and pick the freshest rendered one that overlaps,
-// preferring an exact base + matching dimensions. Returns the g_rts key, or 0.
+// the sampled region's pages and resolve by IDENTITY, not recency: an exact base
+// whose size matches wins outright (the guest bound that buffer, so a more recently
+// rendered overlapping buffer must never override it); only when no exact match
+// exists do we fall back to the best-fitting overlapper (dimension match, then the
+// freshest). Returns the g_rts key, or 0.
 uint64_t resolveSampledRT(uint64_t addr, uint32_t w, uint32_t h) {
   if (!addr) return 0;
   uint64_t reqSize = w && h ? (uint64_t)w * h * 4 : 4;
   uint64_t a0 = addr, a1 = addr + reqSize;
+  // Exact-identity hit: the guest sampled this exact base and it is a live RT of the
+  // requested size. That is unambiguously the right image -- return it before any
+  // freshness comparison can pick an overlapping cycled buffer instead.
+  auto ex = g_rts.find(addr);
+  if (ex != g_rts.end() && ex->second.everRendered &&
+      ((!w || !h) || (ex->second.w == w && ex->second.h == h)))
+    return addr;
   uint64_t best = 0;
   long bestScore = -1;
   auto consider = [&](uint64_t b0) {
@@ -1517,12 +1527,15 @@ RecompPipe *getRecompPipe(const DrawInfo &d) {
     dss.depthWriteEnable = d.depthWriteEnable ? VK_TRUE : VK_FALSE;
     dss.depthCompareOp = (VkCompareOp)(d.depthFunc & 0x7);  // ZFUNC maps 1:1
   }
-  // One blend attachment per bound MRT target (same blend for all; targets the PS does
-  // not export to are write-masked off so they keep their loaded content).
+  // One blend attachment per bound MRT target, each from its own CB_BLENDn_CONTROL
+  // (mrtBlend[i] / mrtBlendMask bit i); target 0 mirrors blendControl/blendEnable so the
+  // single-RT path is unchanged. Targets the PS does not export to are write-masked off
+  // so they keep their loaded content.
   VkPipelineColorBlendAttachmentState cbAtt[8];
-  VkPipelineColorBlendAttachmentState cba = blendAttachment(d.blendControl, d.blendEnable);
   for (uint32_t i = 0; i < mrtN; i++) {
-    cbAtt[i] = cba;
+    uint32_t bc = i == 0 ? d.blendControl : d.mrtBlend[i];
+    bool en = i == 0 ? d.blendEnable : ((d.mrtBlendMask >> i) & 1u);
+    cbAtt[i] = blendAttachment(bc, en);
     if (i && !(d.recomp->psMrtMask & (1u << i))) cbAtt[i].colorWriteMask = 0;
   }
   VkPipelineColorBlendStateCreateInfo cb{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
@@ -1584,14 +1597,19 @@ bool drawRecomp(const DrawInfo &d) {
   }
   bool rtAsTex = texBase && texBase != d.rtBase && g_rts.count(texBase);
   uint32_t srcW = rtAsTex ? g_rts[texBase].w : 0;
-  // The room-layer composites (700-900 src) stay on the heuristic path. Each room is
-  // stacked from a floor layer and a wall layer (a border ring with a black interior)
-  // that the game REPLACE-blends; run through the real shader the wall layer's black
-  // interior overwrites the floor, because our per-address RT model does not
-  // reconstruct the game's double-buffered room-bake render graph (the RT-lifecycle
-  // gap). The heuristic keeps the floor visible until that resource model lands. Every
-  // other draw -- sprites, HUD, geometry, effect overlays, AND the fullscreen
-  // scene->scanout copy -- runs the game's real recompiled shader.
+  // The room-layer composites (700-900 src) stay on the heuristic textured-quad path,
+  // which renders them CORRECTLY (verified: floor + walls + tutorial text reach the
+  // scanout). The RT resolution is exact -- the floor/wall layers each bake into their
+  // own 832x512 buffer and the composite samples each buffer's own base -- and the
+  // composite geometry/UV are on-screen and correct. The blocker to routing them through
+  // the game's real recompiled shader is NOT the resource model (identity/resolve/blend
+  // are all correct here) but the recompiled room->scene composite SHADER: it draws yet
+  // writes black to the scene RT (confirmed by dumping the intermediate 1920x1088 scene
+  // target -- heuristic yields the full room, the recompiled composite yields black; the
+  // scene->scanout composite shader recompiles fine, so it is specific to this shader).
+  // Fixing it is a recompiler (gpu/ps4/gcn) task, out of this file's scope; until then
+  // the heuristic keeps the room correct. Every other draw -- sprites, HUD, geometry,
+  // effect overlays, AND the fullscreen scene->scanout copy -- runs the real shader.
   bool roomSrc = rtAsTex && srcW >= 700 && srcW <= 900;
   if (texBase && texBase == d.rtBase) return decline(DR_SELF);
   if (rtAsTex && roomSrc) return decline(DR_COMPOSITE);

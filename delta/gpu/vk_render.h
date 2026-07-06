@@ -84,6 +84,12 @@ struct DrawInfo {
   // factors/functions to a Vulkan pipeline (cached per unique state).
   uint32_t blendControl = 0;
   bool blendEnable = false;
+  // Per-MRT blend: CB_BLENDn_CONTROL for each color target, with a per-target enable
+  // bit in mrtBlendMask. mrtBlend[0]/mrtBlendMask bit0 mirror blendControl/blendEnable,
+  // so the single-RT path is unchanged; an MRT draw (CB_COLOR1..7) gets each target's
+  // own blend instead of target 0's blend applied to every attachment.
+  uint32_t mrtBlend[8] = {0};
+  uint32_t mrtBlendMask = 0;
   // CB_TARGET_MASK (per-MRT channel write enable; MRT0 = bits[3:0]) and
   // CB_COLOR_CONTROL (MODE field [6:4]; 0 = disable color output). Honoured as the
   // Vulkan colorWriteMask so a draw the game masks off (e.g. a fullscreen "clear"
