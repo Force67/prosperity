@@ -126,6 +126,7 @@ struct State {
   std::unordered_map<uint64_t, VkPipeline> pipeCache;
 
   uint32_t frameDraws = 0;
+  uint32_t frameHeuristic = 0;  // draws this frame that fell back to the heuristic quad path
   uint32_t frameMaxIdx = 0;  // largest indexCount of any draw this frame (3D geometry detector)
   int frameNum = 0;
   bool recording = false;
@@ -1159,11 +1160,10 @@ void beginRegion(const uint64_t *mrtBase, uint32_t mrtCount, uint32_t w, uint32_
   if (dt) ri.pDepthAttachment = &depthAtt;
   p_vkCmdBeginRendering(g.cmd, &ri);
   // Negative-height (y-up) viewport: GCN/PS4 rasterises y-up, so we do too. This
-  // stores render-target content in the game's orientation, so render-to-texture
-  // composites (room floor/walls) sample with aligned UVs -- the proper general fix
-  // for what the old per-composite RTVFLIP hack patched. The final scanout is still
-  // brought to display orientation by the readback flip (DELTA_GPU_FLIP, default Y);
-  // the two are independent (viewport = RT sampling, readback flip = present).
+  // stores render-target content upright, so render-to-texture composites (the
+  // scene->scanout copy, effect overlays) sample it with aligned UVs when run through
+  // the game's real recompiled shader, and the presented scanout is already upright
+  // (no readback flip needed; DELTA_GPU_FLIP defaults to 0).
   VkViewport vpt{0, (float)rt.h, (float)rt.w, -(float)rt.h, 0, 1};
   vkCmdSetViewport(g.cmd, 0, 1, &vpt);
   VkRect2D sc{{0, 0}, {rt.w, rt.h}};
@@ -1549,6 +1549,16 @@ RecompPipe *getRecompPipe(const DrawInfo &d) {
   return &g_recompPipes[key];
 }
 
+// Why a draw declined the recompiled path (falls back to the heuristic). Tallied
+// per reason so the remaining heuristic draws can be driven to zero; dumped with the
+// periodic frame log.
+enum DeclineReason { DR_NORECOMP, DR_NOTEXPIPE, DR_COMPOSITE, DR_SELF, DR_RING,
+                     DR_GUESTTEX, DR_MIDREGION, DR_NOPIPE, DR_MAX };
+static const char *kDeclineName[DR_MAX] = {
+    "norecomp", "notexpipe", "composite", "self", "ring", "guesttex", "midregion", "nopipe"};
+uint32_t g_decline[DR_MAX] = {0};
+inline bool decline(DeclineReason r) { g_decline[r]++; return false; }
+
 // Issue an indexed draw running the game's recompiled VS/PS. Returns false if the
 // draw can't be handled (the caller falls back to the heuristic path).
 bool drawRecomp(const DrawInfo &d) {
@@ -1561,49 +1571,30 @@ bool drawRecomp(const DrawInfo &d) {
                    d.nTexs, d.nvattrs, d.recomp ? d.recomp->ok : 0);
   }
   if (!d.recomp || !d.recomp->ok || !d.nvattrs || !d.indexData || d.indexCount < 3)
-    return false;
-  if (!g.texPipeline) return false;  // need the descriptor infra (dsPool/dsLayout)
-  // RT-as-texture composite: samples one of OUR render-target images. Room composites
-  // (700-900 src) stay on the heuristic path (its verified V-flip renders the tutorial
-  // floor). Other composites (e.g. the darkness/light overlay that the heuristic
-  // fake-blit mis-applies, blacking non-tutorial rooms) run the game's REAL shader
-  // binding the RT image -- the "run all draws through their real shaders" approach.
-  // Gated (DELTA_GPU_RECOMP_COMPOSITE) until validated; feedback loop guarded.
-  static const bool recompComposite = [] {
-    const char *e = std::getenv("DELTA_GPU_RECOMP_COMPOSITE");
-    return !e || std::strcmp(e, "0") != 0;
-  }();
+    return decline(DR_NORECOMP);
+  if (!g.texPipeline) return decline(DR_NOTEXPIPE);  // need the descriptor infra (dsPool/dsLayout)
   // Resolve the sampled texture address to an overlapping live RT (resource-model
-  // page-table lookup), so the primary recompiled path also binds the live image
-  // for cycled/aliased RT addresses instead of stale guest memory -- unifying
-  // RT-as-texture resolution with the heuristic draw() path. Additive: an exact RT
-  // base resolves to itself.
+  // page-table lookup), so an RT-as-texture sample binds the live image for
+  // cycled/aliased RT addresses instead of stale guest memory. Additive: an exact
+  // RT base resolves to itself.
   uint64_t texBase = d.texBase;
-  static const bool rtOverlap2 = [] {
-    const char *e = std::getenv("DELTA_GPU_RTOVERLAP");
-    return !e || std::strcmp(e, "0") != 0;
-  }();
-  if (rtOverlap2 && texBase && !g_rts.count(texBase)) {
+  if (texBase && !g_rts.count(texBase)) {
     uint64_t r = resolveSampledRT(texBase, d.texW, d.texH);
     if (r) texBase = r;
   }
   bool rtAsTex = texBase && texBase != d.rtBase && g_rts.count(texBase);
   uint32_t srcW = rtAsTex ? g_rts[texBase].w : 0;
+  // The room-layer composites (700-900 src) stay on the heuristic path. Each room is
+  // stacked from a floor layer and a wall layer (a border ring with a black interior)
+  // that the game REPLACE-blends; run through the real shader the wall layer's black
+  // interior overwrites the floor, because our per-address RT model does not
+  // reconstruct the game's double-buffered room-bake render graph (the RT-lifecycle
+  // gap). The heuristic keeps the floor visible until that resource model lands. Every
+  // other draw -- sprites, HUD, geometry, effect overlays, AND the fullscreen
+  // scene->scanout copy -- runs the game's real recompiled shader.
   bool roomSrc = rtAsTex && srcW >= 700 && srcW <= 900;
-  // The room (700-900) and fullscreen scene->scanout (>=1280) composites stay on the
-  // heuristic path. The scanout composite is a trivial 1:1 blit: one image_sample + one
-  // export, no branches, src*ONE+dst*ZERO replace blend, sampling a fully-rendered scene
-  // RT, with a fullscreen quad that (verified by dumping its vertices+cbuffer) projects to
-  // clip-space and covers the screen. The heuristic's opaque blit produces the identical
-  // result, so there is no shading to gain by running the game's copy shader; routing it
-  // through the recompiled path instead leaves the scanout black -- a sampling/bind nuance
-  // in the recomp RT-as-texture path for the large scene RT (NOT geometry/positioning).
-  // All MEANINGFUL shading (sprites incl. the alpha-test discard via the CFG path,
-  // geometry, colour, HUD) already runs through the real recompiled shaders; only this
-  // final framebuffer copy is an internal blit.
-  bool fsSrc = rtAsTex && srcW >= 1280;
-  if (texBase && texBase == d.rtBase) return false;
-  if (rtAsTex && (roomSrc || fsSrc || !recompComposite)) return false;
+  if (texBase && texBase == d.rtBase) return decline(DR_SELF);
+  if (rtAsTex && roomSrc) return decline(DR_COMPOSITE);
   // Index range -> vertex count.
   const uint16_t *i16 = nullptr; const uint32_t *i32 = nullptr;
   uint32_t maxIdx = 0;
@@ -1612,7 +1603,7 @@ bool drawRecomp(const DrawInfo &d) {
   else { i16 = (const uint16_t *)d.indexData;
     for (uint32_t i = 0; i < d.indexCount; i++) maxIdx = i16[i] > maxIdx ? i16[i] : maxIdx; }
   uint32_t nv = maxIdx + 1;
-  if (nv > 200000u || !d.vertexStride) return false;
+  if (nv > 200000u || !d.vertexStride) return decline(DR_NORECOMP);
 
   // A fullscreen, untextured, near-black REPLACE draw is the game CLEARING an RT.
   // Don't render it (that wipes the RT immediately); record a LAZY clear instead --
@@ -1669,18 +1660,18 @@ bool drawRecomp(const DrawInfo &d) {
   }
 
   VkDeviceSize vneed = (VkDeviceSize)nv * d.vertexStride;
-  if (g.vbOffset + vneed > kVbRing) return false;
-  if (g.ibOffset + (VkDeviceSize)d.indexCount * 4 > kIbRing) return false;
+  if (g.vbOffset + vneed > kVbRing) return decline(DR_RING);
+  if (g.ibOffset + (VkDeviceSize)d.indexCount * 4 > kIbRing) return decline(DR_RING);
 
   RecompPipe *rp = getRecompPipe(d);
-  if (!rp) return false;
+  if (!rp) return decline(DR_NOPIPE);
   // Guest-texture source resolved up front; an RT-as-texture source is resolved after
   // the region switch (transitioning it to readable must happen outside a region).
   VkDescriptorSet texSet = VK_NULL_HANDLE;
   if (rp->textured && !rtAsTex) {
     texSet = rp->multiTex ? getMultiTexSet(d)
                           : getTexture(d.texBase, d.texW, d.texH, d.texTiling, d.texPitch);
-    if (!texSet) return false;
+    if (!texSet) return decline(DR_GUESTTEX);
   }
 
   // Copy the raw interleaved vertex buffer and the indices into the rings.
@@ -1710,9 +1701,9 @@ bool drawRecomp(const DrawInfo &d) {
   }
   if (rtAsTex) {
     auto &src = g_rts[texBase];
-    if (src.layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) return false;  // mid-region; fall back
+    if (src.layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) return decline(DR_MIDREGION);
     texSet = src.set;
-    if (!texSet) return false;
+    if (!texSet) return decline(DR_MIDREGION);
   }
 
   vkCmdBindPipeline(g.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, rp->pipe);
@@ -1755,6 +1746,7 @@ void beginFrame() {
   if (!createPipeline()) return;
   createTexPipeline();  // best-effort; colored path still works without it
   g.frameDraws = 0;
+  g.frameHeuristic = 0;
   g.frameMaxIdx = 0;
   g.frameNum++;
   g.vbOffset = 0;
@@ -1858,16 +1850,6 @@ void draw(const DrawInfo &d) {
   }
   // Is this a render-to-texture sample (the draw samples another render target)?
   bool rtAsTex = texBase && texBase != d.rtBase && g_rts.count(texBase);
-  // A genuine fullscreen composite samples a near-fullscreen source RT (the scene
-  // buffer copied to the scanout, or a post pass). Those use screen-space UVs and
-  // must land opaquely. Sprite/effect draws that merely sample a smaller RT keep
-  // their real vertex UVs and blend (clipUV off), so dim overlays/glows tint
-  // instead of being forced opaque-white over the scene.
-  static const uint32_t fsMinW = [] {
-    const char *e = std::getenv("DELTA_GPU_FSCOMP_MINW");
-    return e ? (uint32_t)std::atoi(e) : 1280u;
-  }();
-  bool fsComposite = rtAsTex && g_rts[d.texBase].w >= fsMinW;
   if (rtAsTex && g_rts[d.texBase].w >= 700 && g_rts[d.texBase].w <= 900)
     g.frameHadRoom = true;
 
@@ -1897,18 +1879,15 @@ void draw(const DrawInfo &d) {
   if (rtAsTex && g_rts[texBase].layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
     texSet = g_rts[texBase].set;
 
+  g.frameHeuristic++;
   VkDeviceSize off = g.vbOffset;
   if (texSet) {
-    // Per-draw blend from the guest's CB_BLEND0_CONTROL. The fullscreen scene->
-    // scanout copy (fsComposite) must land opaquely regardless of the guest blend.
-    VkPipeline p = fsComposite ? getPipeline(true, 0, false)
-                               : getPipeline(true, d.blendControl, d.blendEnable);
-    vkCmdBindPipeline(g.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
-    // Push mat4 MVP + a clipUV flag (1 = fullscreen scene composite: screen-space
-    // uv, forced opaque).
+    // Per-draw blend from the guest's CB_BLEND0_CONTROL, real vertex UVs.
+    vkCmdBindPipeline(g.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                      getPipeline(true, d.blendControl, d.blendEnable));
     float pc[17];
     std::memcpy(pc, d.mvp, 64);
-    reinterpret_cast<uint32_t *>(pc)[16] = fsComposite ? 1u : 0u;
+    reinterpret_cast<uint32_t *>(pc)[16] = 0u;  // clipUV: real per-vertex uv/colour
     vkCmdPushConstants(g.cmd, g.texLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, 68, pc);
     vkCmdBindDescriptorSets(g.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, g.texLayout, 0,
                             1, &texSet, 0, nullptr);
@@ -2025,11 +2004,14 @@ void endFrame(uint64_t scanoutBase) {
   vkWaitForFences(g.device, 1, &g.fence, VK_TRUE, UINT64_MAX);
   g_nsReadback += nowNs() - _tr0;
 
-  // Readback transform (DELTA_GPU_FLIP: 0=none 1=Y 2=X 3=XY). Default 1 (Y): the
-  // guest scanout origin is bottom-up vs the display's top-down.
+  // Readback transform (DELTA_GPU_FLIP: 0=none 1=Y 2=X 3=XY). Default 0 (none): the
+  // y-up (negative-height) viewport already stores render-target content upright, and
+  // the scene->scanout copy runs the game's real recompiled shader (which samples that
+  // upright content correctly), so the presented image needs no flip. (The old default
+  // Y-flip existed only to undo the heuristic composite's upside-down output.)
   static const int flipMode = [] {
     const char *e = std::getenv("DELTA_GPU_FLIP");
-    return e ? std::atoi(e) : 1;
+    return e ? std::atoi(e) : 0;
   }();
   static std::vector<uint8_t> flipped;
   flipped.resize(static_cast<size_t>(rt.w) * rt.h * 4);
@@ -2133,9 +2115,13 @@ void endFrame(uint64_t scanoutBase) {
     writePpm(latest, pixels, rt.w, rt.h);
   }
   if (g_dump && g.frameNum % 200 == 0) {
-    std::fprintf(stderr, "[gpuvk] frame %d draws=%u rt=%#lx %ux%u  scanout=%#lx\n",
-                 g.frameNum, g.frameDraws, (unsigned long)presentBase, rt.w, rt.h,
+    std::fprintf(stderr, "[gpuvk] frame %d draws=%u heuristic=%u rt=%#lx %ux%u  scanout=%#lx\n",
+                 g.frameNum, g.frameDraws, g.frameHeuristic, (unsigned long)presentBase, rt.w, rt.h,
                  (unsigned long)scanoutBase);
+    std::fprintf(stderr, "[gpuvk]   decline:");
+    for (int i = 0; i < DR_MAX; i++)
+      if (g_decline[i]) std::fprintf(stderr, " %s=%u", kDeclineName[i], g_decline[i]);
+    std::fprintf(stderr, "\n");
     for (auto &kv : g_rts)
       if (kv.second.usedThisFrame)
         std::fprintf(stderr, "[gpuvk]    RT %#lx %ux%u draws=%u%s\n",
