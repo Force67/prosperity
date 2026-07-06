@@ -43,4 +43,18 @@ int PS4ABI sys_connect(int32_t fd, const void *addr, uint32_t addrlen) {
 int PS4ABI sys_recvmsg(int32_t fd, void *msg, int32_t flags) {
   return -SysError::eBADF;
 }
+
+// With no network stack every socket fd is invalid; fail sends/receives like a
+// closed socket so callers error out. The old null_handler returned 0, which a
+// sender reads as "0 bytes sent" and retries forever (Shadow of the Tomb
+// Raider's telemetry spun millions of sendto calls and wedged its boot).
+int64_t PS4ABI sys_sendto(int32_t fd, const void *buf, size_t len,
+                          int32_t flags, const void *to, uint32_t tolen) {
+  return -SysError::eBADF;
+}
+
+int64_t PS4ABI sys_recvfrom(int32_t fd, void *buf, size_t len, int32_t flags,
+                            void *from, uint32_t *fromlen) {
+  return -SysError::eBADF;
+}
 }

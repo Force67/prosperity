@@ -146,7 +146,7 @@ static const syscall_Reg syscall_dpt[] = {
     {26, (void *)&null_handler}, // sys_ptrace
     {27, (void *)&sys_recvmsg},
     {28, (void *)&null_handler}, // sys_sendmsg
-    {29, (void *)&null_handler}, // sys_recvfrom
+    {29, (void *)&sys_recvfrom},
     {30, (void *)&null_handler}, // sys_accept
     {31, (void *)&null_handler}, // sys_getpeername
     {32, (void *)&null_handler}, // sys_getsockname
@@ -250,7 +250,7 @@ static const syscall_Reg syscall_dpt[] = {
     {130, (void *)&null_handler}, // sys_ftruncate
     {131, (void *)&sys_flock}, // sys_flock
     {132, (void *)&null_handler}, // sys_mkfifo
-    {133, (void *)&null_handler}, // sys_sendto
+    {133, (void *)&sys_sendto},
     {134, (void *)&null_handler}, // sys_shutdown
     {135, (void *)&null_handler}, // sys_socketpair
     {136, (void *)&sys_mkdir}, // sys_mkdir

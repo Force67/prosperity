@@ -12,5 +12,9 @@ int PS4ABI sys_socketex(const char *name, int32_t domain, int32_t type,
 int PS4ABI sys_socket(int32_t domain, int32_t type, int32_t protocol);
 int PS4ABI sys_connect(int32_t fd, const void *addr, uint32_t addrlen);
 int PS4ABI sys_recvmsg(int32_t fd, void *msg, int32_t flags);
+int64_t PS4ABI sys_sendto(int32_t fd, const void *buf, size_t len,
+                          int32_t flags, const void *to, uint32_t tolen);
+int64_t PS4ABI sys_recvfrom(int32_t fd, void *buf, size_t len, int32_t flags,
+                            void *from, uint32_t *fromlen);
 
 } // namespace krnl
