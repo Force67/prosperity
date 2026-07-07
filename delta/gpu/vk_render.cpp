@@ -1282,56 +1282,86 @@ void invalidateTexRange(uint64_t base, uint64_t size) {
   }
 }
 
+// Persistent compute staging. Dispatches are serialized behind the fence, so one set
+// of staging buffers (+ descriptor pool + command buffer) is reused across every
+// dispatch: this avoids the per-dispatch vkCreateBuffer/vkAllocateMemory/pool/cmd-
+// buffer churn (~3ms/frame). The buffers are HOST_CACHED so the copy-BACK read after
+// the dispatch hits cache instead of stalling on write-combined memory (which was
+// ~25ms/frame for Doom64's 8 MB atlas: the dominant compute cost).
+struct CsStage {
+  VkBuffer buf = VK_NULL_HANDLE;
+  VkDeviceMemory mem = VK_NULL_HANDLE;
+  void *map = nullptr;
+  VkDeviceSize cap = 0;
+};
+CsStage g_csStage[8];
+VkDescriptorPool g_csDescPool = VK_NULL_HANDLE;
+VkCommandBuffer g_csCmd = VK_NULL_HANDLE;
+
+// Ensure staging slot i can hold `size` bytes (grow-on-demand, kept mapped).
+bool csEnsureStage(uint32_t i, VkDeviceSize size) {
+  CsStage &s = g_csStage[i];
+  if (s.buf && s.cap >= size) return true;
+  if (s.map) { vkUnmapMemory(g.device, s.mem); s.map = nullptr; }
+  if (s.buf) { vkDestroyBuffer(g.device, s.buf, nullptr); s.buf = VK_NULL_HANDLE; }
+  if (s.mem) { vkFreeMemory(g.device, s.mem, nullptr); s.mem = VK_NULL_HANDLE; }
+  VkDeviceSize cap = (size + 0xFFFFF) & ~VkDeviceSize(0xFFFFF);  // 1 MiB granularity
+  VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+  bi.size = cap; bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+  if (vkCreateBuffer(g.device, &bi, nullptr, &s.buf) != VK_SUCCESS) { s.buf = VK_NULL_HANDLE; return false; }
+  VkMemoryRequirements mr; vkGetBufferMemoryRequirements(g.device, s.buf, &mr);
+  VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+  ai.allocationSize = mr.size;
+  ai.memoryTypeIndex = findMemoryTypePref(mr.memoryTypeBits,
+      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT |
+          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  if (vkAllocateMemory(g.device, &ai, nullptr, &s.mem) != VK_SUCCESS) {
+    vkDestroyBuffer(g.device, s.buf, nullptr); s.buf = VK_NULL_HANDLE; s.mem = VK_NULL_HANDLE;
+    return false;
+  }
+  vkBindBufferMemory(g.device, s.buf, s.mem, 0);
+  vkMapMemory(g.device, s.mem, 0, cap, 0, &s.map);
+  s.cap = cap;
+  return true;
+}
+
 bool dispatch(const ComputeInfo &ci) {
   if (!g.ready || !ci.recomp || !ci.recomp->ok || !ci.nres || ci.nres > 8) return false;
   CsPipe *cp = getCsPipe(ci);
   if (!cp) return false;
   static const bool verbose = std::getenv("DELTA_GPU_CSGPU_VERBOSE") != nullptr;
 
-  // Stage each resource's guest range into a host-visible storage buffer.
-  VkBuffer buf[8] = {}; VkDeviceMemory mem[8] = {}; void *map[8] = {};
-  VkDescriptorPool pool = VK_NULL_HANDLE;
-  VkCommandBuffer cmd = VK_NULL_HANDLE;
-  bool ok = true;
-  auto cleanup = [&] {
-    if (cmd) vkFreeCommandBuffers(g.device, g.pool, 1, &cmd);
-    if (pool) vkDestroyDescriptorPool(g.device, pool, nullptr);
-    for (uint32_t i = 0; i < ci.nres; i++) {
-      if (map[i]) vkUnmapMemory(g.device, mem[i]);
-      if (buf[i]) vkDestroyBuffer(g.device, buf[i], nullptr);
-      if (mem[i]) vkFreeMemory(g.device, mem[i], nullptr);
-    }
-  };
-  for (uint32_t i = 0; i < ci.nres; i++) {
-    VkDeviceSize sz = ci.res[i].size ? ci.res[i].size : 4;
-    sz = (sz + 3) & ~VkDeviceSize(3);
-    VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-    bi.size = sz; bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
-    if (vkCreateBuffer(g.device, &bi, nullptr, &buf[i]) != VK_SUCCESS) { ok = false; break; }
-    VkMemoryRequirements mr; vkGetBufferMemoryRequirements(g.device, buf[i], &mr);
-    VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-    ai.allocationSize = mr.size;
-    ai.memoryTypeIndex = findMemoryType(mr.memoryTypeBits,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-    if (vkAllocateMemory(g.device, &ai, nullptr, &mem[i]) != VK_SUCCESS) { ok = false; break; }
-    vkBindBufferMemory(g.device, buf[i], mem[i], 0);
-    vkMapMemory(g.device, mem[i], 0, sz, 0, &map[i]);
-    std::memcpy(map[i], reinterpret_cast<const void *>(ci.res[i].base), ci.res[i].size);
+  // Persistent command buffer + descriptor pool (created once, reused).
+  if (g_csCmd == VK_NULL_HANDLE) {
+    VkCommandBufferAllocateInfo ca{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+    ca.commandPool = g.pool; ca.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; ca.commandBufferCount = 1;
+    if (vkAllocateCommandBuffers(g.device, &ca, &g_csCmd) != VK_SUCCESS) { g_csCmd = VK_NULL_HANDLE; return false; }
   }
-  if (!ok) { cleanup(); return false; }
+  if (g_csDescPool == VK_NULL_HANDLE) {
+    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 8};
+    VkDescriptorPoolCreateInfo pci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    pci.maxSets = 1; pci.poolSizeCount = 1; pci.pPoolSizes = &ps;
+    if (vkCreateDescriptorPool(g.device, &pci, nullptr, &g_csDescPool) != VK_SUCCESS) { g_csDescPool = VK_NULL_HANDLE; return false; }
+  }
 
-  // Descriptor set binding the storage buffers.
-  VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, ci.nres};
-  VkDescriptorPoolCreateInfo pci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-  pci.maxSets = 1; pci.poolSizeCount = 1; pci.pPoolSizes = &ps;
-  if (vkCreateDescriptorPool(g.device, &pci, nullptr, &pool) != VK_SUCCESS) { cleanup(); return false; }
+  // Stage each resource's guest range into its reused storage buffer.
+  VkDeviceSize sz[8];
+  for (uint32_t i = 0; i < ci.nres; i++) {
+    sz[i] = ci.res[i].size ? ((ci.res[i].size + 3) & ~VkDeviceSize(3)) : 4;
+    if (!csEnsureStage(i, sz[i])) return false;
+    std::memcpy(g_csStage[i].map, reinterpret_cast<const void *>(ci.res[i].base), ci.res[i].size);
+  }
+
+  // Descriptor set binding the storage buffers (pool reset each dispatch).
+  vkResetDescriptorPool(g.device, g_csDescPool, 0);
   VkDescriptorSet set;
   VkDescriptorSetAllocateInfo da{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-  da.descriptorPool = pool; da.descriptorSetCount = 1; da.pSetLayouts = &cp->setLayout;
-  if (vkAllocateDescriptorSets(g.device, &da, &set) != VK_SUCCESS) { cleanup(); return false; }
+  da.descriptorPool = g_csDescPool; da.descriptorSetCount = 1; da.pSetLayouts = &cp->setLayout;
+  if (vkAllocateDescriptorSets(g.device, &da, &set) != VK_SUCCESS) return false;
   VkDescriptorBufferInfo dbi[8]; VkWriteDescriptorSet wr[8];
   for (uint32_t i = 0; i < ci.nres; i++) {
-    dbi[i] = {buf[i], 0, VK_WHOLE_SIZE};
+    dbi[i] = {g_csStage[i].buf, 0, sz[i]};
     wr[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
     wr[i].dstSet = set; wr[i].dstBinding = ci.res[i].binding; wr[i].descriptorCount = 1;
     wr[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; wr[i].pBufferInfo = &dbi[i];
@@ -1340,30 +1370,28 @@ bool dispatch(const ComputeInfo &ci) {
 
   // Record + submit the dispatch, wait for completion (synchronous: the result must
   // be back in guest memory before the following draws/texture uploads read it).
-  VkCommandBufferAllocateInfo ca{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
-  ca.commandPool = g.pool; ca.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; ca.commandBufferCount = 1;
-  if (vkAllocateCommandBuffers(g.device, &ca, &cmd) != VK_SUCCESS) { cleanup(); return false; }
+  vkResetCommandBuffer(g_csCmd, 0);
   VkCommandBufferBeginInfo cbi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
   cbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-  vkBeginCommandBuffer(cmd, &cbi);
-  vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, cp->pipe);
-  vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, cp->layout, 0, 1, &set, 0, nullptr);
-  vkCmdPushConstants(cmd, cp->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 64, ci.userData);
-  vkCmdDispatch(cmd, ci.groups[0], ci.groups[1], ci.groups[2]);
-  vkEndCommandBuffer(cmd);
+  vkBeginCommandBuffer(g_csCmd, &cbi);
+  vkCmdBindPipeline(g_csCmd, VK_PIPELINE_BIND_POINT_COMPUTE, cp->pipe);
+  vkCmdBindDescriptorSets(g_csCmd, VK_PIPELINE_BIND_POINT_COMPUTE, cp->layout, 0, 1, &set, 0, nullptr);
+  vkCmdPushConstants(g_csCmd, cp->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 64, ci.userData);
+  vkCmdDispatch(g_csCmd, ci.groups[0], ci.groups[1], ci.groups[2]);
+  vkEndCommandBuffer(g_csCmd);
   VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-  si.commandBufferCount = 1; si.pCommandBuffers = &cmd;
+  si.commandBufferCount = 1; si.pCommandBuffers = &g_csCmd;
   vkResetFences(g.device, 1, &g.fence);
-  if (vkQueueSubmit(g.queue, 1, &si, g.fence) != VK_SUCCESS) { cleanup(); return false; }
+  if (vkQueueSubmit(g.queue, 1, &si, g.fence) != VK_SUCCESS) return false;
   vkWaitForFences(g.device, 1, &g.fence, VK_TRUE, UINT64_MAX);
 
   // Copy written ranges back to guest memory + invalidate any cached texture there.
   for (uint32_t i = 0; i < ci.nres; i++) {
     if (!ci.res[i].written) continue;
-    std::memcpy(reinterpret_cast<void *>(ci.res[i].base), map[i], ci.res[i].size);
+    std::memcpy(reinterpret_cast<void *>(ci.res[i].base), g_csStage[i].map, ci.res[i].size);
     invalidateTexRange(ci.res[i].base, ci.res[i].size);
     if (verbose) {
-      const uint8_t *b = static_cast<const uint8_t *>(map[i]);
+      const uint8_t *b = static_cast<const uint8_t *>(g_csStage[i].map);
       uint64_t nz = 0, step = ci.res[i].size > 65536 ? ci.res[i].size / 65536 : 1;
       for (uint64_t k = 0; k < ci.res[i].size; k += step) nz += b[k] != 0;
       std::fprintf(stderr, "[csgpu] wrote back base=%#lx size=%lu nonzero=%lu/%lu\n",
@@ -1371,7 +1399,6 @@ bool dispatch(const ComputeInfo &ci) {
                    (unsigned long)nz, (unsigned long)(ci.res[i].size / step));
     }
   }
-  cleanup();
   return true;
 }
 
