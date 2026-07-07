@@ -744,7 +744,7 @@ void emitInst(Tr &t, const Inst &in, StageCtx &sc) {
         case 0x20: case 0x21: r = t.m.emit(spv::Op::OpShiftRightLogical, t.tU, {a, shamt()}); scc = true; break;
         case 0x22: case 0x23: r = t.m.emit(spv::Op::OpShiftRightArithmetic, t.tU,
                               {t.m.bitcast(t.tI, a), shamt()}); scc = true; break;
-        case 0x24: r = t.m.emit(spv::Op::OpIMul, t.tU, {a, b}); break;  // s_mul_i32
+        case 0x26: r = t.m.emit(spv::Op::OpIMul, t.tU, {a, b}); break;  // s_mul_i32 (0x24 is s_bfm_b32)
         default: r = a; break;
       }
       if (r) { t.stSg(sdst, r); if (scc) t.stSccBool(t.isNonZero(r)); }
