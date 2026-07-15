@@ -55,7 +55,6 @@ set(_fex_archives
   ${FEX_BUILD}/FEXCore/Source/libFEXCore_Base.a
   ${FEX_BUILD}/FEXCore/Source/libJemallocDummy.a    # aligned_alloc/free (glibc)
   ${FEX_BUILD}/Source/Common/cpp-optparse/libcpp-optparse.a
-  ${FEX_BUILD}/External/fmt/libfmt.a
   ${FEX_BUILD}/External/xxhash/cmake_unofficial/libxxhash.a
   ${FEX_BUILD}/External/cephes/libcephes_128bit.a
   ${FEX_BUILD}/External/SoftFloat-3e/libsoftfloat_3e.a)

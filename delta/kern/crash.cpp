@@ -545,17 +545,17 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
     }
   }
 #endif
+  // Let the CPU backend handle JIT-internal signals (e.g. FEX unaligned-atomic
+  // SIGBUS) and resume; only a genuinely fatal fault falls through to the dump.
+  if (cpu::tryHandleJitSignal(sig, si, ucv))
+    return;
+
   // Async-signal-safe entry marker: proves the handler actually ran even if a
   // later step (symbolize / backtrace) re-faults. Without it a re-fault inside
   // the handler is indistinguishable from the handler never being entered.
   { char m[48];
     int n = std::snprintf(m, sizeof(m), "\n[crashHandler] entered sig=%d\n", sig);
     if (n > 0) { ssize_t w = write(2, m, (size_t)n); (void)w; } }
-
-  // Let the CPU backend handle JIT-internal signals (e.g. FEX unaligned-atomic
-  // SIGBUS) and resume; only a genuinely fatal fault falls through to the dump.
-  if (cpu::tryHandleJitSignal(sig, si, ucv))
-    return;
 
   // Only the first faulting thread prints. A second concurrent fault (common at
   // teardown) would interleave the dump and can itself core-dump, truncating it.
