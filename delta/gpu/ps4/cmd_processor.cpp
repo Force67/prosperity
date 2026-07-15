@@ -260,6 +260,10 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
       d.cullMode = sc & 0x3;      // CULL_FRONT[0] | CULL_BACK[1]
       d.frontCCW = ((sc >> 2) & 1u) == 0;
     }
+    std::memcpy(&d.viewportXScale, &g_regs[mmPA_CL_VPORT_XSCALE], 4);
+    std::memcpy(&d.viewportXOffset, &g_regs[mmPA_CL_VPORT_XOFFSET], 4);
+    std::memcpy(&d.viewportYScale, &g_regs[mmPA_CL_VPORT_YSCALE], 4);
+    std::memcpy(&d.viewportYOffset, &g_regs[mmPA_CL_VPORT_YOFFSET], 4);
 
     // Constant buffer (transform): default to the sgpr[4..7] V# (the common VS cbuffer
     // slot); the recompiled-shader path below re-resolves it from the SGPR the VS

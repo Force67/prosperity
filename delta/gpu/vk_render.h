@@ -113,6 +113,10 @@ struct DrawInfo {
   uint32_t cullMode = 0;          // PA_SU_SC_MODE_CNTL: CULL_FRONT[0] CULL_BACK[1]
   bool frontCCW = true;           // FACE[2] == 0
 
+  // XY viewport transform from PA_CL_VPORT_0_*.
+  float viewportXScale = 0, viewportXOffset = 0;
+  float viewportYScale = 0, viewportYOffset = 0;
+
   // Recompiled-shader path. When recomp != null and nvattrs > 0 the renderer runs
   // the game's actual VS/PS (recompiled to SPIR-V) instead of the heuristic quad:
   // vertexData/vertexStride is the raw interleaved vertex buffer, vattrs describe

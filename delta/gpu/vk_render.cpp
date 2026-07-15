@@ -11,6 +11,7 @@
 #include <vulkan/vulkan.h>
 
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -175,9 +176,9 @@ struct RTarget {
   uint32_t draws = 0;     // draws into this RT this frame
   int lastFrame = -1000;  // frame number this RT was last rendered into
   bool clearPending = false;  // a fullscreen black clear was requested; applied lazily
-                              // (as loadOp=CLEAR) only when content actually redraws this
-                              // RT, so baked-once content (the room floor) persists across
-                              // frames instead of being wiped by a stray clear.
+                              // (as loadOp=CLEAR) only when later content redraws this RT
+                              // in the same frame.
+  VkClearColorValue clearValue{{0.0f, 0.0f, 0.0f, 0.0f}};
   bool everRendered = false;  // false until first real render (then loadOp can LOAD)
 };
 std::unordered_map<uint64_t, RTarget> g_rts;
@@ -194,6 +195,8 @@ struct DepthTarget {
   VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
   int lastFrame = -1000;
   bool usedThisFrame = false;
+  bool clearPending = false;
+  float clearValue = 1.0f;
 };
 std::unordered_map<uint64_t, DepthTarget> g_depths;
 
@@ -1107,6 +1110,22 @@ void endRegion() {
   g.curDepth = 0;
 }
 
+void setGuestViewport(const DrawInfo &d) {
+  if (!std::isfinite(d.viewportXScale) || !std::isfinite(d.viewportXOffset) ||
+      !std::isfinite(d.viewportYScale) || !std::isfinite(d.viewportYOffset) ||
+      d.viewportXScale <= 0.0f || d.viewportYScale == 0.0f)
+    return;
+  VkViewport vp{
+      d.viewportXOffset - d.viewportXScale,
+      d.viewportYOffset - d.viewportYScale,
+      d.viewportXScale * 2.0f,
+      d.viewportYScale * 2.0f,
+      0.0f,
+      1.0f,
+  };
+  vkCmdSetViewport(g.cmd, 0, 1, &vp);
+}
+
 // Begin a dynamic-rendering region binding mrtCount color targets (mrtBase[0] is the
 // primary). The common single-RT case (mrtCount == 1) binds exactly one attachment.
 // depthBase != 0 additionally binds a depth attachment (cleared to depthClear on its
@@ -1140,7 +1159,7 @@ void beginRegion(const uint64_t *mrtBase, uint32_t mrtCount, uint32_t w, uint32_
     rt.clearPending = false;
     rt.everRendered = true;
     color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    color.clearValue.color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+    color.clearValue.color = rt.clearValue;
     rt.usedThisFrame = true;
     rt.lastFrame = g.frameNum;
     g.curMrt[g.curMrtCount++] = mrtBase[i];
@@ -1157,9 +1176,13 @@ void beginRegion(const uint64_t *mrtBase, uint32_t mrtCount, uint32_t w, uint32_
     dt->layout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
     depthAtt.imageView = dt->view;
     depthAtt.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
-    depthAtt.loadOp = dt->usedThisFrame ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_CLEAR;
+    bool clearDepth = dt->clearPending || !dt->usedThisFrame;
+    depthAtt.loadOp = clearDepth
+                          ? VK_ATTACHMENT_LOAD_OP_CLEAR
+                          : VK_ATTACHMENT_LOAD_OP_LOAD;
     depthAtt.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    depthAtt.clearValue.depthStencil = {depthClear, 0};
+    depthAtt.clearValue.depthStencil = {dt->clearPending ? dt->clearValue : depthClear, 0};
+    dt->clearPending = false;
     dt->usedThisFrame = true;
     dt->lastFrame = g.frameNum;
     g.curDepth = depthBase;
@@ -1565,10 +1588,10 @@ RecompPipe *getRecompPipe(const DrawInfo &d) {
 // Why a draw declined the recompiled path (falls back to the heuristic). Tallied
 // per reason so the remaining heuristic draws can be driven to zero; dumped with the
 // periodic frame log.
-enum DeclineReason { DR_NORECOMP, DR_NOTEXPIPE, DR_COMPOSITE, DR_SELF, DR_RING,
+enum DeclineReason { DR_NORECOMP, DR_NOTEXPIPE, DR_SELF, DR_RING,
                      DR_GUESTTEX, DR_MIDREGION, DR_NOPIPE, DR_MAX };
 static const char *kDeclineName[DR_MAX] = {
-    "norecomp", "notexpipe", "composite", "self", "ring", "guesttex", "midregion", "nopipe"};
+    "norecomp", "notexpipe", "self", "ring", "guesttex", "midregion", "nopipe"};
 uint32_t g_decline[DR_MAX] = {0};
 inline bool decline(DeclineReason r) { g_decline[r]++; return false; }
 
@@ -1596,23 +1619,9 @@ bool drawRecomp(const DrawInfo &d) {
     if (r) texBase = r;
   }
   bool rtAsTex = texBase && texBase != d.rtBase && g_rts.count(texBase);
-  uint32_t srcW = rtAsTex ? g_rts[texBase].w : 0;
-  // The room-layer composites (700-900 src) stay on the heuristic textured-quad path,
-  // which renders them CORRECTLY (verified: floor + walls + tutorial text reach the
-  // scanout). The RT resolution is exact -- the floor/wall layers each bake into their
-  // own 832x512 buffer and the composite samples each buffer's own base -- and the
-  // composite geometry/UV are on-screen and correct. The blocker to routing them through
-  // the game's real recompiled shader is NOT the resource model (identity/resolve/blend
-  // are all correct here) but the recompiled room->scene composite SHADER: it draws yet
-  // writes black to the scene RT (confirmed by dumping the intermediate 1920x1088 scene
-  // target -- heuristic yields the full room, the recompiled composite yields black; the
-  // scene->scanout composite shader recompiles fine, so it is specific to this shader).
-  // Fixing it is a recompiler (gpu/ps4/gcn) task, out of this file's scope; until then
-  // the heuristic keeps the room correct. Every other draw -- sprites, HUD, geometry,
-  // effect overlays, AND the fullscreen scene->scanout copy -- runs the real shader.
-  bool roomSrc = rtAsTex && srcW >= 700 && srcW <= 900;
+  if (rtAsTex && g_rts[texBase].w >= 700 && g_rts[texBase].w <= 900)
+    g.frameHadRoom = true;
   if (texBase && texBase == d.rtBase) return decline(DR_SELF);
-  if (rtAsTex && roomSrc) return decline(DR_COMPOSITE);
   // Index range -> vertex count.
   const uint16_t *i16 = nullptr; const uint32_t *i32 = nullptr;
   uint32_t maxIdx = 0;
@@ -1641,13 +1650,18 @@ bool drawRecomp(const DrawInfo &d) {
     if (replace) {
       const auto *vb = static_cast<const uint8_t *>(d.vertexData);
       bool nearBlack = true;
+      float clearColor[4] = {0, 0, 0, 0};
       for (uint32_t a = 0; a < d.nvattrs; a++) {
         if (d.vattrs[a].numComps == 4 && d.vattrs[a].offset != 0) {
           const uint8_t *cb0 = vb + d.vattrs[a].offset;  // vertex 0's colour
-          float r, gg, bl;
-          if (d.vattrs[a].dfmt == 10) { r = cb0[0]/255.f; gg = cb0[1]/255.f; bl = cb0[2]/255.f; }
-          else { const float *c = reinterpret_cast<const float *>(cb0); r = c[0]; gg = c[1]; bl = c[2]; }
-          if (r > 0.02f || gg > 0.02f || bl > 0.02f) nearBlack = false;
+          if (d.vattrs[a].dfmt == 10) {
+            for (int i = 0; i < 4; i++) clearColor[i] = cb0[i] / 255.f;
+          } else {
+            const float *c = reinterpret_cast<const float *>(cb0);
+            for (int i = 0; i < 4; i++) clearColor[i] = c[i];
+          }
+          if (clearColor[0] > 0.02f || clearColor[1] > 0.02f || clearColor[2] > 0.02f)
+            nearBlack = false;
           break;
         }
       }
@@ -1662,7 +1676,20 @@ bool drawRecomp(const DrawInfo &d) {
       bool fullscreenBlack = nearBlack && (nx1-nx0) >= 1.8f && (ny1-ny0) >= 1.8f;
       if (fullscreenBlack && lazyClear2) {
         RTarget *rt = getRT(d.rtBase, d.rtW, d.rtH);  // create if needed
-        if (rt) rt->clearPending = true;
+        if (rt) {
+          rt->clearPending = true;
+          std::memcpy(rt->clearValue.float32, clearColor, sizeof(clearColor));
+        }
+        // This draw also performs the guest's reverse-Z clear (depth write enabled,
+        // ZFUNC=ALWAYS). Suppressing its color write must not discard that depth
+        // effect, or stale depth rejects the following layer composites.
+        if (d.depthBase && d.depthWriteEnable && d.depthFunc == 7) {
+          DepthTarget *dt = getDepthRT(d.depthBase, d.rtW, d.rtH);
+          if (dt) {
+            dt->clearPending = true;
+            dt->clearValue = d.depthClear;
+          }
+        }
         g.frameDraws++;
         return true;  // suppressed; the clear is applied lazily on the next redraw
       }
@@ -1700,12 +1727,19 @@ bool drawRecomp(const DrawInfo &d) {
   else for (uint32_t i = 0; i < d.indexCount; i++) idst[i] = i16[i];
 
   // Switch render target. Re-begin when the primary target or the MRT count changes
-  // (the open region's attachment count must match the pipeline's). Barrier the sampled
-  // RT readable here, outside any render region.
+  // (the open region's attachment count must match the pipeline's), or when a new
+  // RT-as-texture source still needs a read transition. Barriers cannot be recorded
+  // inside dynamic rendering; consecutive layer composites often keep the same target
+  // while switching sources, so that source change must also close/reopen the region.
   uint32_t mrtN = d.mrtCount ? (d.mrtCount > 8 ? 8 : d.mrtCount) : 1;
-  if (g.curRt != d.rtBase || g.curMrtCount != mrtN || g.curDepth != d.depthBase) {
+  bool transitionSource = rtAsTex &&
+      g_rts[texBase].layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+  bool pendingDepthClear = d.depthBase && g_depths.count(d.depthBase) &&
+                           g_depths[d.depthBase].clearPending;
+  if (g.curRt != d.rtBase || g.curMrtCount != mrtN || g.curDepth != d.depthBase ||
+      transitionSource || pendingDepthClear) {
     endRegion();
-    if (rtAsTex) {
+    if (transitionSource) {
       auto &src = g_rts[texBase];
       if (src.layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
         imageBarrier(g.cmd, src.image, src.layout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
@@ -1724,6 +1758,7 @@ bool drawRecomp(const DrawInfo &d) {
     if (!texSet) return decline(DR_MIDREGION);
   }
 
+  setGuestViewport(d);
   vkCmdBindPipeline(g.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, rp->pipe);
   // Copy the guest cbuffer window into the per-frame ring and bind it as the set-1
   // dynamic UBO (the recompiled VS reads its transforms from it).
@@ -1780,6 +1815,9 @@ void beginFrame() {
   for (auto &kv : g_rts) {
     kv.second.usedThisFrame = false;
     kv.second.draws = 0;
+    // An orphaned lazy clear must not wipe persistent content when an unrelated
+    // incremental draw touches this RT in a later frame.
+    kv.second.clearPending = false;
   }
   for (auto &kv : g_depths)
     kv.second.usedThisFrame = false;
@@ -1868,8 +1906,8 @@ void draw(const DrawInfo &d) {
   }
   // Is this a render-to-texture sample (the draw samples another render target)?
   bool rtAsTex = texBase && texBase != d.rtBase && g_rts.count(texBase);
-  if (rtAsTex && g_rts[d.texBase].w >= 700 && g_rts[d.texBase].w <= 900)
-    g.frameHadRoom = true;
+  bool roomSrc = rtAsTex && g_rts[texBase].w >= 700 && g_rts[texBase].w <= 900;
+  if (roomSrc) g.frameHadRoom = true;
 
   // Upload guest texture (independent of the render region) if not RT-as-texture.
   VkDescriptorSet texSet = VK_NULL_HANDLE;
@@ -1898,6 +1936,7 @@ void draw(const DrawInfo &d) {
     texSet = g_rts[texBase].set;
 
   g.frameHeuristic++;
+  setGuestViewport(d);
   VkDeviceSize off = g.vbOffset;
   if (texSet) {
     // Per-draw blend from the guest's CB_BLEND0_CONTROL, real vertex UVs.

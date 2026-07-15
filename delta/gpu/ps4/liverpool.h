@@ -37,6 +37,9 @@ constexpr uint32_t mmPA_SC_GENERIC_SCISSOR_TL = 0xA090;
 constexpr uint32_t mmPA_SC_GENERIC_SCISSOR_BR = 0xA091;
 // Viewport 0 scale/offset (float).
 constexpr uint32_t mmPA_CL_VPORT_XSCALE = 0xA10F;
+constexpr uint32_t mmPA_CL_VPORT_XOFFSET = 0xA110;
+constexpr uint32_t mmPA_CL_VPORT_YSCALE = 0xA111;
+constexpr uint32_t mmPA_CL_VPORT_YOFFSET = 0xA112;
 // Render-target mask (which CB targets are written).
 constexpr uint32_t mmCB_TARGET_MASK = 0xA08E;
 constexpr uint32_t mmCB_SHADER_MASK = 0xA08F;
