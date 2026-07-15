@@ -32,6 +32,9 @@ bool sopcHasLit(uint32_t w) {
 // VOP src0 is 9 bits [8:0]; 255 selects a literal.
 bool vopHasLit(uint32_t w) { return (w & 0x1FF) == 255; }
 
+// Linux GFX 7.2 instruction-family constants and operand field layouts:
+// https://github.com/torvalds/linux/blob/master/drivers/gpu/drm/amd/include/asic_reg/gca/gfx_7_2_enum.h
+// https://github.com/torvalds/linux/blob/master/drivers/gpu/drm/amd/include/asic_reg/gca/gfx_7_2_sh_mask.h
 Enc classify(uint32_t w, uint32_t &opcode) {
   if ((w >> 30) == 0x2) {  // 10b => scalar
     uint32_t top9 = w >> 23;
@@ -152,7 +155,8 @@ const char *mnemonic(const Inst &i) {
   case Enc::sop2:
     switch (i.opcode) {
     case 0x00: return "s_add_u32";
-    case 0x02: return "s_sub_u32";
+    case 0x01: return "s_sub_u32";
+    case 0x02: return "s_add_i32";
     default: return "s_op2";
     }
   case Enc::sopp:

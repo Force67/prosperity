@@ -12,6 +12,9 @@
 
 namespace gpu {
 
+// Linux CIK packet headers, opcodes, and SET_* register windows:
+// https://github.com/torvalds/linux/blob/master/drivers/gpu/drm/amd/amdgpu/cikd.h
+
 // PM4 packet type is the top 2 bits of the header dword.
 enum class Pm4Type : uint32_t { type0 = 0, type1 = 1, type2 = 2, type3 = 3 };
 
@@ -42,7 +45,8 @@ enum Pm4It : uint32_t {
   IT_NUM_INSTANCES = 0x2F,
   IT_DRAW_INDEX_MULTI_AUTO = 0x30,
   IT_DRAW_INDEX_OFFSET_2 = 0x35,
-  IT_DRAW_INDEX_INDIRECT = 0x24,
+  IT_DRAW_INDIRECT = 0x24,
+  IT_DRAW_INDEX_INDIRECT = 0x25,
   IT_WAIT_REG_MEM = 0x3C,
   IT_INDIRECT_BUFFER = 0x3F,
   IT_COPY_DATA = 0x40,
@@ -67,7 +71,7 @@ enum Pm4It : uint32_t {
   IT_INCREMENT_CE_COUNTER = 0x84,
   IT_INCREMENT_DE_COUNTER = 0x85,
   IT_WAIT_ON_CE_COUNTER = 0x86,
-  IT_DUMP_CONST_RAM_OFFSET = 0x9E,
+  IT_DUMP_CONST_RAM_OFFSET = 0x9E,  // Orbis extension; absent from Linux CIK
 };
 
 // Base dword offsets the SET_*_REG packets are relative to (the register at

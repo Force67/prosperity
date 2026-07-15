@@ -9,7 +9,9 @@
  * registers (render target, shader pointers, primitive state) out of it.
  *
  * Register offsets below are GCN gen2 (Sea Islands / Liverpool) values, the same
- * the PS4 Gnm driver programs. Verified against the AMD PM4 / GCN docs.
+ * the PS4 Gnm driver programs. Linux GFX 7.2 register offsets and field layouts:
+ * https://github.com/torvalds/linux/blob/master/drivers/gpu/drm/amd/include/asic_reg/gca/gfx_7_2_d.h
+ * https://github.com/torvalds/linux/blob/master/drivers/gpu/drm/amd/include/asic_reg/gca/gfx_7_2_sh_mask.h
  */
 
 #include <array>
@@ -88,8 +90,8 @@ constexpr uint32_t mmCOMPUTE_NUM_THREAD_Y = 0x2E08;
 constexpr uint32_t mmCOMPUTE_NUM_THREAD_Z = 0x2E09;
 constexpr uint32_t mmCOMPUTE_PGM_LO = 0x2E0C;   // CS addr[39:8]
 constexpr uint32_t mmCOMPUTE_PGM_HI = 0x2E0D;   // CS addr[47:40] in [7:0]
-constexpr uint32_t mmCOMPUTE_PGM_RSRC1 = 0x2E0E;
-constexpr uint32_t mmCOMPUTE_PGM_RSRC2 = 0x2E0F;  // user_sgpr [4:0]<<1, tgid_en[8:6], lds[24:15]
+constexpr uint32_t mmCOMPUTE_PGM_RSRC1 = 0x2E12;
+constexpr uint32_t mmCOMPUTE_PGM_RSRC2 = 0x2E13;  // user_sgpr[5:1], tgid_en[9:7], lds[23:15]
 constexpr uint32_t mmCOMPUTE_USER_DATA_0 = 0x2E40;  // 16 user-data SGPRs
 
 // The full GPU register state. A draw is rendered from a snapshot of this.

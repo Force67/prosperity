@@ -26,6 +26,12 @@
 namespace gpu::gcn {
 namespace {
 
+// Linux defines the CIK array/tiling enums and GB_TILE_MODE fields, but not the
+// Liverpool table contents or the byte-address equations implemented below:
+// https://github.com/torvalds/linux/blob/master/drivers/gpu/drm/amd/include/asic_reg/gca/gfx_7_2_enum.h
+// https://github.com/torvalds/linux/blob/master/drivers/gpu/drm/amd/include/asic_reg/gca/gfx_7_2_sh_mask.h
+// https://github.com/torvalds/linux/blob/master/drivers/gpu/drm/amd/amdgpu/gfx_v7_0.c
+
 // --- GB_TILE_MODE decode (per tiling_index 0..31), Liverpool / base PS4. ----
 // The AddrLib GB_TILE_MODE decode (array mode / micro tile mode / pipe config /
 // sample split / tile split per index). We only need a compact form of each.

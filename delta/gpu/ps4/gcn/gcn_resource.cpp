@@ -15,18 +15,21 @@ namespace {
 const bool g_trace = std::getenv("DELTA_GPU_TRACE") != nullptr;
 }
 
+// Linux GFX 7.2 V#/T# descriptor fields and format enums:
+// https://github.com/torvalds/linux/blob/master/drivers/gpu/drm/amd/include/asic_reg/gca/gfx_7_2_sh_mask.h
+// https://github.com/torvalds/linux/blob/master/drivers/gpu/drm/amd/include/asic_reg/gca/gfx_7_2_enum.h
 VBuffer decodeVBuffer(const uint32_t *p) {
   // GCN V# (buffer resource descriptor), 4 dwords:
   //  [0]      base_address[31:0]
-  //  [1] 0:43 base_address[47:32] in [11:0]; stride[13:0] in [29:16]
+  //  [1]      base_address[47:32] in [15:0]; stride[13:0] in [29:16]
   //  [2]      num_records
-  //  [3]      dst_sel/nfmt/dfmt/...: dfmt[18:15], nfmt[21:19]
+  //  [3]      dst_sel/nfmt/dfmt/...: nfmt[14:12], dfmt[18:15]
   VBuffer v;
-  v.base = (static_cast<uint64_t>(p[1] & 0xFFF) << 32) | p[0];
+  v.base = (static_cast<uint64_t>(p[1] & 0xFFFF) << 32) | p[0];
   v.stride = (p[1] >> 16) & 0x3FFF;
   v.numRecords = p[2];
   v.dfmt = (p[3] >> 15) & 0xF;
-  v.nfmt = (p[3] >> 19) & 0x7;
+  v.nfmt = (p[3] >> 12) & 0x7;
   return v;
 }
 
