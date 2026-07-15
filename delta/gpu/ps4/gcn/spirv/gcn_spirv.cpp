@@ -1110,7 +1110,7 @@ void emitInst(Tr &t, const Inst &in, StageCtx &sc) {
       uint32_t en = w & 0xF, target = (w >> 4) & 0x3F, compr = (w >> 10) & 1;
       uint32_t v[4] = {w1 & 0xFF, (w1 >> 8) & 0xFF, (w1 >> 16) & 0xFF, (w1 >> 24) & 0xFF};
       if (sc.isPs) {
-        if (target <= 7) {
+        if (target <= 7 && en) {
           sc.wroteColor = true;
           Id col;
           if (compr) {
@@ -1542,7 +1542,7 @@ bool translatePs(const uint32_t *psCode, Recompiled &r, Tr &t) {
       case Enc::exp: {
         uint32_t en = w & 0xF, target = (w >> 4) & 0x3F, compr = (w >> 10) & 1;
         uint32_t v[4] = {w1 & 0xFF, (w1 >> 8) & 0xFF, (w1 >> 16) & 0xFF, (w1 >> 24) & 0xFF};
-        if (target <= 7) {  // MRT0..7
+        if (target <= 7 && en) {  // MRT0..7; EN=0 is a null export
           wroteColor = true;
           Id col;
           if (compr) {
