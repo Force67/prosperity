@@ -44,12 +44,15 @@ struct DrawInfo {
   uint32_t indexType = 0;
   uint32_t instanceCount = 1;  // from IT_NUM_INSTANCES (tilemaps draw instanced)
   float mvp[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
-  // Recompiled VS cbuffer (transforms): the guest constant-buffer base+size resolved
-  // from the VS's cbuffer V#. The renderer copies a window of it into a dynamic UBO
-  // (set 1) the recompiled VS reads. mvp[] mirrors the first 64 bytes (heuristic-path
-  // fallback). cbufBase==0 means unresolved (fall back to mvp).
+  // The legacy transform buffer fields feed heuristic rendering and mirror the first
+  // resolved VS cbuffer. Recompiled shaders use cbufs[] at set 1 bindings 0..7; each
+  // entry is copied into a zero-padded dynamic UBO window. mvp[] remains binding 0's
+  // fallback when the VS descriptor cannot be resolved.
   uint64_t cbufBase = 0;
   uint32_t cbufSize = 0;
+  struct DrawCbuf { uint64_t base = 0; uint32_t size = 0; };
+  DrawCbuf cbufs[8];
+  uint32_t nCbufs = 0;
   uint64_t rtBase = 0;         // CB_COLOR0 address; the draw's render target
   uint32_t rtW = 0, rtH = 0;   // render-target dimensions (shared by all MRT targets)
 
@@ -70,12 +73,21 @@ struct DrawInfo {
   uint32_t texW = 0, texH = 0;
   uint32_t texTiling = 8;       // T# tiling_index (8/31 = linear; else tiled)
   uint32_t texPitch = 0;        // T# surface pitch in pixels (0 = use texW)
+  uint32_t texLayers = 1;       // physical layers in the image allocation
+  uint32_t texBaseArray = 0;    // first layer exposed by the image view
+  uint32_t texViewLayers = 1;   // layers exposed by the image view
+  bool texArrayed = false;      // MIMG DA: shader consumes a layer coordinate
 
   // Multi-texture: a PS can sample several textures (Doom64's 3D walls/floors use
   // a diffuse + lightmap + ... loaded from the EUD resource table). texs[0] mirrors
   // texBase. When nTexs > 1 the renderer binds an N-sampler descriptor set; texs[i]
   // maps to the recompiled PS's sampler binding i.
-  struct DrawTex { uint64_t base = 0; uint32_t w = 0, h = 0, tiling = 8, pitch = 0; };
+  struct DrawTex {
+    uint64_t base = 0;
+    uint32_t w = 0, h = 0, tiling = 8, pitch = 0;
+    uint32_t layers = 1, baseArray = 0, viewLayers = 1;
+    bool arrayed = false;
+  };
   DrawTex texs[8];
   uint32_t nTexs = 0;
 

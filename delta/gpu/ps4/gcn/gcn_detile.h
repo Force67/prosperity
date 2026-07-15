@@ -22,9 +22,15 @@ bool tilingIsLinear(uint32_t tilingIdx);
 
 // De-tile a 32bpp (RGBA8) surface from `src` (tiled, guest layout) into `dst`
 // (row-major linear, stride = width*4). `pitch` is the tiled surface pitch in
-// pixels (T#.pitch). Linear surfaces are copied straight through. Returns false
-// if the mode is unsupported (caller should fall back to a linear copy).
+// pixels (T#.pitch), and `slice` selects the array slice for bank rotation. Linear
+// surfaces are copied straight through. Returns false if the mode is unsupported
+// (caller should fall back to a linear copy).
 bool detile32(const uint32_t *src, uint32_t *dst, uint32_t width, uint32_t height,
-              uint32_t tilingIdx, uint32_t pitch);
+              uint32_t tilingIdx, uint32_t pitch, uint32_t slice = 0);
+
+// Bytes occupied by one 32bpp array slice, including the height/pitch alignment
+// required by the selected tile mode.
+uint64_t tiledSliceSize32(uint32_t width, uint32_t height, uint32_t tilingIdx,
+                          uint32_t pitch);
 
 }  // namespace gpu::gcn

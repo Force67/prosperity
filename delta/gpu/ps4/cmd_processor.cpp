@@ -14,6 +14,7 @@
 #include "gcn/gcn_interp.h"
 #include "gcn/gcn_translate.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -141,7 +142,7 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
       std::fprintf(stderr, "\n");
       auto texs = gcn::trackTextures(reinterpret_cast<const uint32_t *>(psA), 4096, pud);
       std::fprintf(stderr, "[gpu]   trackTextures -> %zu\n", texs.size());
-      if (!texs.empty()) {
+      if (!texs.empty() && texs[0].valid) {
         auto &t = texs[0];
         // Dump the texture as a LINEAR interpretation (to inspect tiling).
         auto *px = reinterpret_cast<const uint8_t *>(t.base);
@@ -315,13 +316,18 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
         d.texH = texs[0].height;
         d.texTiling = texs[0].tilingIdx;
         d.texPitch = texs[0].pitch;
+        d.texLayers = texs[0].layers;
+        d.texBaseArray = texs[0].baseArray;
+        d.texViewLayers = texs[0].viewLayers;
+        d.texArrayed = texs[0].arrayed;
         d.uvData = d.vertexData;
         d.uvStride = d.vertexStride;
         // All sampled textures (binding order), for multi-texture PS (Doom64 3D).
         d.nTexs = static_cast<uint32_t>(texs.size() < 8 ? texs.size() : 8);
         for (uint32_t i = 0; i < d.nTexs; i++)
           d.texs[i] = {texs[i].base, texs[i].width, texs[i].height,
-                       texs[i].tilingIdx, texs[i].pitch};
+                        texs[i].tilingIdx, texs[i].pitch, texs[i].layers,
+                        texs[i].baseArray, texs[i].viewLayers, texs[i].arrayed};
         // d.uvOffset was derived from the fetch shader during vertex extraction.
         // DELTA_GPU_TEXFMT: dump sampled texture formats (dfmt/nfmt/tiling/dims) to
         // pin a scrambled draw (e.g. Doom64's menu) to a format/tiling we mishandle.
@@ -370,26 +376,35 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
           uint32_t off = (vb.base >= base0) ? (uint32_t)(vb.base - base0) : 0;
           d.vattrs[d.nvattrs++] = {a.location, off, a.numComps, vb.dfmt, vb.nfmt};
         }
-        // Constant buffer: the recompiled VS reads its cbuffer via push constants, so
-        // resolve it from the user-data SGPR the VS ACTUALLY uses (recorded in vsCbufs)
-        // rather than the hardcoded sgpr[4..7] above. For the common sprite VS this is
-        // sgpr 4 (identical to the default), but shaders whose cbuffer V# lives elsewhere
-        // (e.g. composite/post-process VS) then get the correct transform instead of the
-        // wrong one -- the general fix, not an Isaac special-case.
-        if (good && d.nvattrs && !rc.vsCbufs.empty()) {
-          uint32_t cbSgpr = rc.vsCbufs[0].udSgpr;
-          if (cbSgpr + 2 < 16) {
-            uint64_t vbase = (static_cast<uint64_t>(vud2[cbSgpr + 1] & 0xFFFF) << 32) | vud2[cbSgpr];
-            if (vbase >= 0x1000000000ull && vbase < 0x20000000000ull) {
-              std::memcpy(d.mvp, reinterpret_cast<const void *>(vbase), 64);
-              // Full cbuffer base+size for the set-1 UBO. V#: stride[29:16] of word1,
-              // num_records word2; byte size = stride ? stride*records : records.
-              d.cbufBase = vbase;
-              uint32_t stride = (vud2[cbSgpr + 1] >> 16) & 0x3FFF;
-              uint32_t records = vud2[cbSgpr + 2];
-              d.cbufSize = stride ? stride * records : records;
+        // Resolve every cbuffer V# the emitted VS/PS reads. Bindings are assigned by
+        // the translator and shared across both stages in descriptor set 1.
+        bool resolvedVsCbuf = false;
+        auto resolveCbufs = [&](const std::vector<gcn::ShaderCbuf> &cbufs,
+                                const uint32_t *userData, bool vertexStage) {
+          for (const auto &cb : cbufs) {
+            if (cb.binding >= 8 || cb.udSgpr + 3 >= 16) continue;
+            auto vb = gcn::decodeVBuffer(&userData[cb.udSgpr]);
+            uint64_t bytes = vb.stride ? (uint64_t)vb.stride * vb.numRecords
+                                       : vb.numRecords;
+            if (vb.base < 0x1000000000ull || vb.base >= 0x20000000000ull ||
+                !bytes || bytes > 0xFFFFFFFFull || vb.base + bytes > 0x20000000000ull)
+              continue;
+            d.cbufs[cb.binding] = {vb.base, static_cast<uint32_t>(bytes)};
+            d.nCbufs = std::max(d.nCbufs, cb.binding + 1);
+            if (vertexStage && !resolvedVsCbuf) {
+              resolvedVsCbuf = true;
+              d.cbufBase = vb.base;
+              d.cbufSize = static_cast<uint32_t>(bytes);
+              if (bytes >= sizeof(d.mvp))
+                std::memcpy(d.mvp, reinterpret_cast<const void *>(vb.base), sizeof(d.mvp));
             }
           }
+        };
+        if (good && d.nvattrs) {
+          resolveCbufs(rc.vsCbufs, vud2, true);
+          resolveCbufs(rc.psCbufs, &g_regs[mmSPI_SHADER_USER_DATA_PS_0], false);
+          for (const auto &cb : rc.vsCbufs) d.nCbufs = std::max(d.nCbufs, cb.binding + 1);
+          for (const auto &cb : rc.psCbufs) d.nCbufs = std::max(d.nCbufs, cb.binding + 1);
         }
         if (good && d.nvattrs) { d.vsAddr = vsA; d.psAddr = psA; d.recomp = &rc; }
         else d.nvattrs = 0;
@@ -492,7 +507,8 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
       std::fprintf(stderr,
           "[geom] idx=%u psTexs=%zu tex=%#lx %ux%u tiling=%u pitch=%u rt=%#lx %ux%u "
           "blend=%#x mask=%#x cc=%#x nvattrs=%u stride=%u pos0=[%.1f %.1f %.1f] cbufBase=%#lx\n",
-          d.indexCount, d.recomp ? d.recomp->psTexs.size() : 0, (unsigned long)d.texBase, d.texW, d.texH,
+          d.indexCount, d.recomp ? d.recomp->psTexs.size() : 0, (unsigned long)d.texBase,
+          d.texW, d.texH,
           d.texTiling, d.texPitch, (unsigned long)d.rtBase, d.rtW, d.rtH, d.blendControl,
           d.targetMask, d.colorControl, d.nvattrs, d.vertexStride,
           p0[0], p0[1], p0[2], (unsigned long)d.cbufBase);
@@ -938,7 +954,8 @@ void handleDispatch(const uint32_t *body, uint32_t count) {
 
   // Resolve each planned resource's live base/size from the descriptor in user data.
   auto guestRange = [](uint64_t a, uint64_t n) {
-    return n && a >= 0x1000000000ull && a + n <= 0x20000000000ull;
+    constexpr uint64_t lo = 0x1000000000ull, hi = 0x20000000000ull;
+    return n && a >= lo && a < hi && n <= hi - a;
   };
   constexpr uint64_t kMaxRes = 256ull * 1024 * 1024;  // sanity cap per storage buffer
   vk::ComputeInfo ci;
@@ -950,18 +967,20 @@ void handleDispatch(const uint32_t *body, uint32_t count) {
   for (auto &r : rc.resources) {
     if (r.baseSgpr + 3 >= 16) { resOk = false; break; }
     uint64_t base = 0, size = 0;
-    if (r.kind == 1) {  // image (T#): linear pitch*height*4
+    if (r.kind == 1) {  // image (T#): linear pitch*height*layers*4
       gcn::TImage t = gcn::decodeTImage(&ud[r.baseSgpr]);
       base = t.base;
-      size = (uint64_t)t.pitch * t.height * 4;
+      size = (uint64_t)t.pitch * t.height * t.layers * 4;
     } else {            // buffer (V# / pointer): stride*num_records, else the min hint
       gcn::VBuffer v = gcn::decodeVBuffer(&ud[r.baseSgpr]);
       base = v.base;
       size = v.stride ? (uint64_t)v.stride * v.numRecords : v.numRecords;
       if (size < r.minBytes) size = r.minBytes;
     }
-    if (size > kMaxRes) size = kMaxRes;
-    if (!guestRange(base, size)) { resOk = false; break; }
+    if (size > kMaxRes || !guestRange(base, size) || ci.nres >= 8) {
+      resOk = false;
+      break;
+    }
     ci.res[ci.nres] = {base, size, r.binding, r.written};
     ci.nres++;
   }

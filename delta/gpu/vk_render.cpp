@@ -10,6 +10,7 @@
 
 #include <vulkan/vulkan.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -93,6 +94,7 @@ struct State {
   VkPipelineLayout texLayout = VK_NULL_HANDLE;
   VkDescriptorSetLayout dsLayout = VK_NULL_HANDLE;
   VkDescriptorPool dsPool = VK_NULL_HANDLE;
+  std::vector<VkDescriptorPool> dsPools;
   VkSampler sampler = VK_NULL_HANDLE;
 
   // Multi-texture (recomp PS sampling >1 texture, e.g. Doom64 3D): an 8-binding
@@ -103,15 +105,17 @@ struct State {
   static constexpr uint32_t kMaxTex = 8;
   VkDescriptorSetLayout texArrayLayout = VK_NULL_HANDLE;
   VkDescriptorPool mtexPool = VK_NULL_HANDLE;
+  std::vector<VkDescriptorPool> mtexPools;
   VkImage whiteImg = VK_NULL_HANDLE;
   VkDeviceMemory whiteMem = VK_NULL_HANDLE;
   VkImageView whiteView = VK_NULL_HANDLE;
+  VkImageView whiteArrayView = VK_NULL_HANDLE;
+  VkDescriptorSet whiteSet = VK_NULL_HANDLE;
+  VkDescriptorSet whiteArraySet = VK_NULL_HANDLE;
 
-  // Recomp cbuffer ring: a per-frame host-visible dynamic uniform buffer. The
-  // recompiled VS reads its constant buffer (transforms) from descriptor set 1
-  // (textures stay at set 0). Per draw we copy the guest cbuffer window into the
-  // ring and bind set 1 with a dynamic offset. emptyLayout fills set 0 for
-  // untextured recomp draws (which still use the set-1 UBO).
+  // Recomp cbuffer ring: per-draw VS/PS constant buffers live at set 1 bindings
+  // 0..7. Textures stay at set 0. Each binding uses a dynamic offset into this
+  // host-visible ring; emptyLayout fills set 0 for untextured recomp draws.
   VkDescriptorSetLayout uboLayout = VK_NULL_HANDLE;
   VkDescriptorSetLayout emptyLayout = VK_NULL_HANDLE;
   VkDescriptorPool uboPool = VK_NULL_HANDLE;
@@ -135,28 +139,62 @@ struct State {
   bool frameRoomBake = false; // this frame RENDERED into a room-sized (~832w) RT
 } g;
 
+struct TexKey {
+  uint64_t base = 0;
+  uint32_t w = 0, h = 0, tiling = 8, pitch = 0, layers = 1;
+  uint32_t baseArray = 0, viewLayers = 1;
+  bool arrayed = false;
+  bool operator==(const TexKey &o) const {
+    return base == o.base && w == o.w && h == o.h && tiling == o.tiling &&
+           pitch == o.pitch && layers == o.layers && baseArray == o.baseArray &&
+           viewLayers == o.viewLayers && arrayed == o.arrayed;
+  }
+};
+uint64_t hashWord(uint64_t h, uint64_t v) {
+  return (h ^ v) * 1099511628211ull;
+}
+struct TexKeyHash {
+  size_t operator()(const TexKey &k) const {
+    uint64_t h = 1469598103934665603ull;
+    h = hashWord(h, k.base); h = hashWord(h, k.w); h = hashWord(h, k.h);
+    h = hashWord(h, k.tiling); h = hashWord(h, k.pitch); h = hashWord(h, k.layers);
+    h = hashWord(h, k.baseArray); h = hashWord(h, k.viewLayers);
+    return static_cast<size_t>(hashWord(h, k.arrayed));
+  }
+};
+
 struct TexEntry {
   VkImage image = VK_NULL_HANDLE;
   VkDeviceMemory mem = VK_NULL_HANDLE;
   VkImageView view = VK_NULL_HANDLE;
   VkDescriptorSet set = VK_NULL_HANDLE;
-  uint32_t w = 0, h = 0;
+  VkDescriptorPool pool = VK_NULL_HANDLE;
+  uint64_t footprint = 0;
   uint64_t hash = 0;  // cheap fingerprint of guest pixels; re-upload when it changes
 };
-std::unordered_map<uint64_t, TexEntry> g_texCache;
+std::unordered_map<TexKey, TexEntry, TexKeyHash> g_texCache;
+std::vector<TexEntry> g_retiredTex;
 
 // Cheap content fingerprint of a guest texture: sample a spread of dwords. Lets
 // us re-upload dynamic textures (room art composed/loaded after first sample)
 // instead of serving the stale first upload.
-uint64_t texHash(uint64_t base, uint32_t w, uint32_t h) {
+uint64_t texHash(uint64_t base, uint64_t bytes) {
   const uint32_t *p = reinterpret_cast<const uint32_t *>(base);
-  uint64_t count = (uint64_t)w * h;            // dwords (RGBA8)
+  uint64_t count = bytes / 4;
   uint64_t step = count > 512 ? count / 512 : 1;
   uint64_t hsh = 1469598103934665603ull;       // FNV-ish
   for (uint64_t i = 0; i < count; i += step) {
     hsh = (hsh ^ p[i]) * 1099511628211ull;
   }
   return hsh ^ (count << 1);
+}
+
+TexKey textureKey(uint64_t base, uint32_t w, uint32_t h, uint32_t tiling,
+                  uint32_t pitch, uint32_t layers, uint32_t baseArray,
+                  uint32_t viewLayers, bool arrayed) {
+  if (layers && baseArray < layers)
+    viewLayers = std::min(viewLayers, layers - baseArray);
+  return {base, w, h, tiling, pitch, layers, baseArray, viewLayers, arrayed};
 }
 
 // An image in the resource cache: a render target keyed by its guest base address,
@@ -277,13 +315,14 @@ uint32_t findMemoryTypePref(uint32_t typeBits, VkMemoryPropertyFlags pref,
 }
 
 void imageBarrier(VkCommandBuffer c, VkImage img, VkImageLayout from,
-                  VkImageLayout to, VkAccessFlags srcA, VkAccessFlags dstA) {
+                  VkImageLayout to, VkAccessFlags srcA, VkAccessFlags dstA,
+                  uint32_t layers = 1) {
   VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
   b.oldLayout = from;
   b.newLayout = to;
   b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
   b.image = img;
-  b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+  b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, layers};
   b.srcAccessMask = srcA;
   b.dstAccessMask = dstA;
   vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
@@ -420,7 +459,7 @@ bool createDevice() {
   vkGetPhysicalDeviceProperties(g.phys, &props);
   std::fprintf(stderr, "[gpuvk] device: %s\n", props.deviceName);
 
-  // Recomp cbuffer ring + dynamic-UBO descriptor (set 1) + empty set-0 layout.
+  // Recomp cbuffer ring + dynamic-UBO descriptors (set 1) + empty set-0 layout.
   g.uboAlign = (uint32_t)props.limits.minUniformBufferOffsetAlignment;
   if (g.uboAlign < 1) g.uboAlign = 1;
   {
@@ -438,27 +477,37 @@ bool createDevice() {
     VKOK(vkBindBufferMemory(g.device, g.uboBuf, g.uboMem, 0));
     VKOK(vkMapMemory(g.device, g.uboMem, 0, kUboRing, 0, (void **)&g.uboMap));
 
-    VkDescriptorSetLayoutBinding ub0{0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1,
-        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+    VkDescriptorSetLayoutBinding ubs[8]{};
+    for (uint32_t i = 0; i < 8; i++) {
+      ubs[i].binding = i;
+      ubs[i].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+      ubs[i].descriptorCount = 1;
+      ubs[i].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    }
     VkDescriptorSetLayoutCreateInfo ul{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    ul.bindingCount = 1; ul.pBindings = &ub0;
+    ul.bindingCount = 8; ul.pBindings = ubs;
     VKOK(vkCreateDescriptorSetLayout(g.device, &ul, nullptr, &g.uboLayout));
     VkDescriptorSetLayoutCreateInfo el{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
     el.bindingCount = 0;
     VKOK(vkCreateDescriptorSetLayout(g.device, &el, nullptr, &g.emptyLayout));
 
-    VkDescriptorPoolSize ups{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1};
+    VkDescriptorPoolSize ups{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 8};
     VkDescriptorPoolCreateInfo upi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     upi.maxSets = 1; upi.poolSizeCount = 1; upi.pPoolSizes = &ups;
     VKOK(vkCreateDescriptorPool(g.device, &upi, nullptr, &g.uboPool));
     VkDescriptorSetAllocateInfo uai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
     uai.descriptorPool = g.uboPool; uai.descriptorSetCount = 1; uai.pSetLayouts = &g.uboLayout;
     VKOK(vkAllocateDescriptorSets(g.device, &uai, &g.uboSet));
-    VkDescriptorBufferInfo ubinfo{g.uboBuf, 0, kCbufWindow};
-    VkWriteDescriptorSet uw{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-    uw.dstSet = g.uboSet; uw.dstBinding = 0; uw.descriptorCount = 1;
-    uw.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC; uw.pBufferInfo = &ubinfo;
-    vkUpdateDescriptorSets(g.device, 1, &uw, 0, nullptr);
+    VkDescriptorBufferInfo ubinfo[8];
+    VkWriteDescriptorSet uw[8];
+    for (uint32_t i = 0; i < 8; i++) {
+      ubinfo[i] = {g.uboBuf, 0, kCbufWindow};
+      uw[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+      uw[i].dstSet = g.uboSet; uw[i].dstBinding = i; uw[i].descriptorCount = 1;
+      uw[i].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+      uw[i].pBufferInfo = &ubinfo[i];
+    }
+    vkUpdateDescriptorSets(g.device, 8, uw, 0, nullptr);
   }
   return true;
 }
@@ -632,7 +681,8 @@ bool createPipeline() {
 }
 
 void uploadTexPixels(VkImage img, uint64_t base, uint32_t w, uint32_t h,
-                     uint32_t tiling, uint32_t pitch);  // defined below
+                      uint32_t tiling, uint32_t pitch,
+                      uint32_t layers = 1);  // defined below
 
 bool createTexPipeline() {
   if (g.texPipeline)
@@ -647,10 +697,12 @@ bool createTexPipeline() {
 
   VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4096};
   VkDescriptorPoolCreateInfo dp{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+  dp.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
   dp.maxSets = 4096;
   dp.poolSizeCount = 1;
   dp.pPoolSizes = &ps;
   VKOK(vkCreateDescriptorPool(g.device, &dp, nullptr, &g.dsPool));
+  g.dsPools.push_back(g.dsPool);
 
   VkSamplerCreateInfo sc{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
   sc.magFilter = sc.minFilter = VK_FILTER_LINEAR;
@@ -668,8 +720,10 @@ bool createTexPipeline() {
     VKOK(vkCreateDescriptorSetLayout(g.device, &ml, nullptr, &g.texArrayLayout));
     VkDescriptorPoolSize mps{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4096 * State::kMaxTex};
     VkDescriptorPoolCreateInfo mp{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    mp.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
     mp.maxSets = 4096; mp.poolSizeCount = 1; mp.pPoolSizes = &mps;
     VKOK(vkCreateDescriptorPool(g.device, &mp, nullptr, &g.mtexPool));
+    g.mtexPools.push_back(g.mtexPool);
 
     // 1x1 white default texture (for unresolved sampler bindings).
     VkImageCreateInfo wi{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
@@ -691,6 +745,26 @@ bool createTexPipeline() {
     wv.format = VK_FORMAT_R8G8B8A8_UNORM;
     wv.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
     VKOK(vkCreateImageView(g.device, &wv, nullptr, &g.whiteView));
+    wv.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+    VKOK(vkCreateImageView(g.device, &wv, nullptr, &g.whiteArrayView));
+
+    VkDescriptorSetLayout layouts[2] = {g.dsLayout, g.dsLayout};
+    VkDescriptorSet sets[2];
+    VkDescriptorSetAllocateInfo wa{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    wa.descriptorPool = g.dsPool; wa.descriptorSetCount = 2; wa.pSetLayouts = layouts;
+    VKOK(vkAllocateDescriptorSets(g.device, &wa, sets));
+    g.whiteSet = sets[0]; g.whiteArraySet = sets[1];
+    VkDescriptorImageInfo infos[2] = {
+        {g.sampler, g.whiteView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+        {g.sampler, g.whiteArrayView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}};
+    VkWriteDescriptorSet writes[2];
+    for (uint32_t i = 0; i < 2; i++) {
+      writes[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+      writes[i].dstSet = sets[i]; writes[i].descriptorCount = 1;
+      writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+      writes[i].pImageInfo = &infos[i];
+    }
+    vkUpdateDescriptorSets(g.device, 2, writes, 0, nullptr);
   }
 
   VkPushConstantRange pcr{VK_SHADER_STAGE_VERTEX_BIT, 0, 68};  // mat4 + clipUV flag
@@ -717,12 +791,43 @@ bool createTexPipeline() {
   return true;
 }
 
+VkDescriptorSet allocateSamplerSet(VkDescriptorSetLayout layout, bool multi,
+                                   VkDescriptorPool &owner) {
+  auto &pools = multi ? g.mtexPools : g.dsPools;
+  for (VkDescriptorPool pool : pools) {
+    VkDescriptorSet set;
+    VkDescriptorSetAllocateInfo da{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    da.descriptorPool = pool; da.descriptorSetCount = 1; da.pSetLayouts = &layout;
+    if (vkAllocateDescriptorSets(g.device, &da, &set) == VK_SUCCESS) {
+      owner = pool;
+      return set;
+    }
+  }
+
+  VkDescriptorPoolSize size{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                            4096u * (multi ? State::kMaxTex : 1u)};
+  VkDescriptorPoolCreateInfo ci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+  ci.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+  ci.maxSets = 4096; ci.poolSizeCount = 1; ci.pPoolSizes = &size;
+  VkDescriptorPool pool;
+  if (vkCreateDescriptorPool(g.device, &ci, nullptr, &pool) != VK_SUCCESS)
+    return VK_NULL_HANDLE;
+  pools.push_back(pool);
+  VkDescriptorSet set;
+  VkDescriptorSetAllocateInfo da{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+  da.descriptorPool = pool; da.descriptorSetCount = 1; da.pSetLayouts = &layout;
+  if (vkAllocateDescriptorSets(g.device, &da, &set) != VK_SUCCESS)
+    return VK_NULL_HANDLE;
+  owner = pool;
+  return set;
+}
+
 // Copy guest pixels (32bpp RGBA) into `img` via a staging buffer. If the source
 // surface is GCN-tiled (tiling not linear), de-tile into a linear scratch buffer
 // first so the texture isn't uploaded scrambled.
 void uploadTexPixels(VkImage img, uint64_t base, uint32_t w, uint32_t h,
-                     uint32_t tiling = 8, uint32_t pitch = 0) {
-  VkDeviceSize sz = (VkDeviceSize)w * h * 4;
+                      uint32_t tiling, uint32_t pitch, uint32_t layers) {
+  VkDeviceSize sz = (VkDeviceSize)w * h * layers * 4;
   static const bool noDetile = std::getenv("DELTA_GPU_NODETILE") != nullptr;
   // DELTA_GPU_FORCETILE=N: override the T# tiling index for ALL sampled textures, to
   // test whether a "linear" (tiling=8) buffer is actually GPU-tiled (e.g. Doom64's
@@ -732,9 +837,13 @@ void uploadTexPixels(VkImage img, uint64_t base, uint32_t w, uint32_t h,
   std::vector<uint32_t> linear;
   const void *srcPixels = reinterpret_cast<const void *>(base);
   if (!noDetile && !gcn::tilingIsLinear(tiling)) {
-    linear.resize((size_t)w * h);
-    gcn::detile32(reinterpret_cast<const uint32_t *>(base), linear.data(), w, h,
-                  tiling, pitch ? pitch : w);
+    uint32_t srcPitch = pitch ? pitch : w;
+    uint64_t srcSlice = gcn::tiledSliceSize32(w, h, tiling, srcPitch) / 4;
+    linear.resize((size_t)w * h * layers);
+    for (uint32_t layer = 0; layer < layers; layer++)
+      gcn::detile32(reinterpret_cast<const uint32_t *>(base) + srcSlice * layer,
+                    linear.data() + (size_t)w * h * layer, w, h, tiling, srcPitch,
+                    layer);
     srcPixels = linear.data();
   } else if (pitch && pitch != w) {
     // Linear surface whose row stride (pitch) differs from its width: the rows
@@ -743,11 +852,12 @@ void uploadTexPixels(VkImage img, uint64_t base, uint32_t w, uint32_t h,
     // into a tightly-packed w*h buffer row by row. (Common for Doom64's
     // composite/scaled surfaces; Isaac's textures have pitch==width so are
     // unaffected.)
-    linear.resize((size_t)w * h);
+    linear.resize((size_t)w * h * layers);
     const uint32_t *s = reinterpret_cast<const uint32_t *>(base);
-    for (uint32_t y = 0; y < h; y++)
-      std::memcpy(linear.data() + (size_t)y * w, s + (size_t)y * pitch,
-                  (size_t)w * 4);
+    for (uint32_t layer = 0; layer < layers; layer++)
+      for (uint32_t y = 0; y < h; y++)
+        std::memcpy(linear.data() + ((size_t)layer * h + y) * w,
+                    s + ((size_t)layer * h + y) * pitch, (size_t)w * 4);
     srcPixels = linear.data();
   }
   VkBuffer stg; VkDeviceMemory stgMem; void *map;
@@ -772,14 +882,14 @@ void uploadTexPixels(VkImage img, uint64_t base, uint32_t w, uint32_t h,
   cbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
   vkBeginCommandBuffer(c, &cbi);
   imageBarrier(c, img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-               0, VK_ACCESS_TRANSFER_WRITE_BIT);
+               0, VK_ACCESS_TRANSFER_WRITE_BIT, layers);
   VkBufferImageCopy cp{};
-  cp.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  cp.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, layers};
   cp.imageExtent = {w, h, 1};
   vkCmdCopyBufferToImage(c, stg, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &cp);
   imageBarrier(c, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
-               VK_ACCESS_SHADER_READ_BIT);
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
+                VK_ACCESS_SHADER_READ_BIT, layers);
   vkEndCommandBuffer(c);
   VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
   si.commandBufferCount = 1; si.pCommandBuffers = &c;
@@ -798,9 +908,24 @@ void uploadTexPixels(VkImage img, uint64_t base, uint32_t w, uint32_t h,
 // room art is composed/loaded into the same buffer after the first sample, so a
 // once-only cache would serve a stale black frame).
 VkDescriptorSet getTexture(uint64_t base, uint32_t w, uint32_t h,
-                           uint32_t tiling = 8, uint32_t pitch = 0) {
-  if (!w || !h) return VK_NULL_HANDLE;
-  uint64_t hsh = texHash(base, w, h);
+                             uint32_t tiling = 8, uint32_t pitch = 0,
+                             uint32_t layers = 1, uint32_t baseArray = 0,
+                             uint32_t viewLayers = 1, bool arrayed = false) {
+  constexpr uint64_t kGuestBegin = 0x1000000000ull;
+  constexpr uint64_t kGuestEnd = 0x20000000000ull;
+  constexpr uint64_t kMaxTextureBytes = 256ull * 1024 * 1024;
+  if (!w || !h || w > 8192 || h > 8192) return VK_NULL_HANDLE;
+  if (!layers || baseArray >= layers) return VK_NULL_HANDLE;
+  viewLayers = std::min(viewLayers, layers - baseArray);
+  if (!viewLayers) return VK_NULL_HANDLE;
+  uint64_t sliceBytes = gcn::tiledSliceSize32(w, h, tiling, pitch ? pitch : w);
+  if (!sliceBytes || sliceBytes > kMaxTextureBytes / layers) return VK_NULL_HANDLE;
+  uint64_t footprint = sliceBytes * layers;
+  if (base < kGuestBegin || footprint > kMaxTextureBytes || base > kGuestEnd - footprint)
+    return VK_NULL_HANDLE;
+  TexKey key = textureKey(base, w, h, tiling, pitch, layers, baseArray,
+                          viewLayers, arrayed);
+  uint64_t hsh = texHash(base, footprint);
   // Diagnostic (DELTA_GPU_TEXDUMP): in deep gameplay, dump the first few large guest
   // textures sampled, so a non-tutorial room's floor texture can be inspected (is it
   // loaded/brown or black/zero?). Counts non-zero pixels too.
@@ -826,25 +951,22 @@ VkDescriptorSet getTexture(uint64_t base, uint32_t w, uint32_t h,
       tdn++;
     }
   }
-  auto it = g_texCache.find(base);
+  auto it = g_texCache.find(key);
   if (it != g_texCache.end()) {
     TexEntry &e = it->second;
-    if (e.w == w && e.h == h) {
-      if (e.hash != hsh) {  // dynamic texture changed -> re-upload pixels
-        uploadTexPixels(e.image, base, w, h, tiling, pitch);
-        e.hash = hsh;
-      }
-      return e.set;
+    if (e.hash != hsh) {  // dynamic texture changed -> re-upload pixels
+      uploadTexPixels(e.image, base, w, h, tiling, pitch, layers);
+      e.hash = hsh;
     }
-    // size changed (buffer reused for a different texture): fall through to recreate
+    return e.set;
   }
-  if (g_texCache.size() > 3000) return VK_NULL_HANDLE;
-  TexEntry e; e.w = w; e.h = h; e.hash = hsh;
+  if (g_texCache.size() >= 3000) return VK_NULL_HANDLE;
+  TexEntry e; e.footprint = footprint; e.hash = hsh;
   VkImageCreateInfo ii{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
   ii.imageType = VK_IMAGE_TYPE_2D;
   ii.format = VK_FORMAT_R8G8B8A8_UNORM;
   ii.extent = {w, h, 1};
-  ii.mipLevels = 1; ii.arrayLayers = 1;
+  ii.mipLevels = 1; ii.arrayLayers = layers;
   ii.samples = VK_SAMPLE_COUNT_1_BIT;
   ii.tiling = VK_IMAGE_TILING_OPTIMAL;
   ii.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
@@ -856,17 +978,18 @@ VkDescriptorSet getTexture(uint64_t base, uint32_t w, uint32_t h,
   vkAllocateMemory(g.device, &ai, nullptr, &e.mem);
   vkBindImageMemory(g.device, e.image, e.mem, 0);
 
-  uploadTexPixels(e.image, base, w, h, tiling, pitch);
+  uploadTexPixels(e.image, base, w, h, tiling, pitch, layers);
 
   VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-  vci.image = e.image; vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+  vci.image = e.image;
+  vci.viewType = arrayed ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
   vci.format = VK_FORMAT_R8G8B8A8_UNORM;
-  vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+  vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, baseArray,
+                          arrayed ? viewLayers : 1};
   vkCreateImageView(g.device, &vci, nullptr, &e.view);
 
-  VkDescriptorSetAllocateInfo da{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-  da.descriptorPool = g.dsPool; da.descriptorSetCount = 1; da.pSetLayouts = &g.dsLayout;
-  if (vkAllocateDescriptorSets(g.device, &da, &e.set) != VK_SUCCESS) return VK_NULL_HANDLE;
+  e.set = allocateSamplerSet(g.dsLayout, false, e.pool);
+  if (!e.set) return VK_NULL_HANDLE;
   VkDescriptorImageInfo dii{g.sampler, e.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
   VkWriteDescriptorSet wr{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
   wr.dstSet = e.set; wr.descriptorCount = 1;
@@ -874,16 +997,18 @@ VkDescriptorSet getTexture(uint64_t base, uint32_t w, uint32_t h,
   wr.pImageInfo = &dii;
   vkUpdateDescriptorSets(g.device, 1, &wr, 0, nullptr);
 
-  g_texCache[base] = e;
+  g_texCache.emplace(key, e);
   return e.set;
 }
 
 // Image view for a guest texture (ensures it is cached/uploaded via getTexture).
 VkImageView texViewFor(const DrawInfo::DrawTex &t) {
   if (!t.base || !t.w || !t.h) return VK_NULL_HANDLE;
-  if (getTexture(t.base, t.w, t.h, t.tiling, t.pitch) == VK_NULL_HANDLE)
+  if (getTexture(t.base, t.w, t.h, t.tiling, t.pitch, t.layers, t.baseArray,
+                 t.viewLayers, t.arrayed) == VK_NULL_HANDLE)
     return VK_NULL_HANDLE;
-  auto it = g_texCache.find(t.base);
+  auto it = g_texCache.find(textureKey(t.base, t.w, t.h, t.tiling, t.pitch,
+                                       t.layers, t.baseArray, t.viewLayers, t.arrayed));
   return it != g_texCache.end() ? it->second.view : VK_NULL_HANDLE;
 }
 
@@ -891,15 +1016,44 @@ VkImageView texViewFor(const DrawInfo::DrawTex &t) {
 // samples >1 texture. Cached by the combination of the textures' (base,w,h); any
 // binding we cannot resolve gets the 1x1 white default so a diffuse*lightmap shader
 // with a missing map shows the diffuse instead of going black.
-std::unordered_map<uint64_t, VkDescriptorSet> g_mtexCache;
+struct MultiTexSet {
+  VkDescriptorSet set = VK_NULL_HANDLE;
+  VkDescriptorPool pool = VK_NULL_HANDLE;
+};
+std::unordered_map<uint64_t, MultiTexSet> g_mtexCache;
+std::vector<MultiTexSet> g_retiredMtex;
+void clearMultiTexCache() {
+  for (const auto &[key, entry] : g_mtexCache) {
+    (void)key;
+    if (entry.set) g_retiredMtex.push_back(entry);
+  }
+  g_mtexCache.clear();
+}
+void releaseRetiredTextures() {
+  for (const MultiTexSet &entry : g_retiredMtex)
+    vkFreeDescriptorSets(g.device, entry.pool, 1, &entry.set);
+  g_retiredMtex.clear();
+  for (const TexEntry &e : g_retiredTex) {
+    if (e.set) vkFreeDescriptorSets(g.device, e.pool, 1, &e.set);
+    if (e.view) vkDestroyImageView(g.device, e.view, nullptr);
+    if (e.image) vkDestroyImage(g.device, e.image, nullptr);
+    if (e.mem) vkFreeMemory(g.device, e.mem, nullptr);
+  }
+  g_retiredTex.clear();
+}
 VkDescriptorSet getMultiTexSet(const DrawInfo &d) {
-  uint64_t key = 1469598103934665603ull;
-  for (uint32_t i = 0; i < d.nTexs; i++)
-    key = (key ^ texHash(d.texs[i].base, d.texs[i].w, d.texs[i].h)) * 1099511628211ull;
+  uint64_t key = hashWord(1469598103934665603ull, d.nTexs);
+  for (uint32_t i = 0; i < d.nTexs; i++) {
+    const auto &t = d.texs[i];
+    key = hashWord(key, t.base); key = hashWord(key, t.w); key = hashWord(key, t.h);
+    key = hashWord(key, t.tiling); key = hashWord(key, t.pitch);
+    key = hashWord(key, t.layers); key = hashWord(key, t.baseArray);
+    key = hashWord(key, t.viewLayers); key = hashWord(key, t.arrayed);
+  }
   auto ci = g_mtexCache.find(key);
   if (ci != g_mtexCache.end()) {
     for (uint32_t i = 0; i < d.nTexs; i++) texViewFor(d.texs[i]);  // refresh content
-    return ci->second;
+    return ci->second.set;
   }
   if (g_mtexCache.size() > 3500) return VK_NULL_HANDLE;
   // DELTA_GPU_FORCEWHITE: bind the 1x1 white default for every sampler (diagnostic).
@@ -911,23 +1065,23 @@ VkDescriptorSet getMultiTexSet(const DrawInfo &d) {
   VkImageView views[State::kMaxTex];
   for (uint32_t i = 0; i < State::kMaxTex; i++) {
     VkImageView v = (i < d.nTexs && !forceWhite) ? texViewFor(d.texs[i]) : VK_NULL_HANDLE;
-    views[i] = v ? v : g.whiteView;
+    bool arrayed = i < d.nTexs && d.texs[i].arrayed;
+    views[i] = v ? v : (arrayed ? g.whiteArrayView : g.whiteView);
   }
-  VkDescriptorSetAllocateInfo da{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-  da.descriptorPool = g.mtexPool; da.descriptorSetCount = 1; da.pSetLayouts = &g.texArrayLayout;
-  VkDescriptorSet set;
-  if (vkAllocateDescriptorSets(g.device, &da, &set) != VK_SUCCESS) return VK_NULL_HANDLE;
+  MultiTexSet entry;
+  entry.set = allocateSamplerSet(g.texArrayLayout, true, entry.pool);
+  if (!entry.set) return VK_NULL_HANDLE;
   VkDescriptorImageInfo dii[State::kMaxTex];
   VkWriteDescriptorSet wr[State::kMaxTex];
   for (uint32_t i = 0; i < State::kMaxTex; i++) {
     dii[i] = {g.sampler, views[i], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
     wr[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-    wr[i].dstSet = set; wr[i].dstBinding = i; wr[i].descriptorCount = 1;
+    wr[i].dstSet = entry.set; wr[i].dstBinding = i; wr[i].descriptorCount = 1;
     wr[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; wr[i].pImageInfo = &dii[i];
   }
   vkUpdateDescriptorSets(g.device, State::kMaxTex, wr, 0, nullptr);
-  g_mtexCache[key] = set;
-  return set;
+  g_mtexCache[key] = entry;
+  return entry.set;
 }
 
 void ensureReadback(uint32_t w, uint32_t h) {
@@ -986,9 +1140,9 @@ RTarget *getRT(uint64_t base, uint32_t w, uint32_t h) {
   vkCreateImageView(g.device, &vci, nullptr, &t.view);
   // descriptor set so this RT can be sampled (render-to-texture).
   if (g.dsPool) {
-    VkDescriptorSetAllocateInfo da{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-    da.descriptorPool = g.dsPool; da.descriptorSetCount = 1; da.pSetLayouts = &g.dsLayout;
-    if (vkAllocateDescriptorSets(g.device, &da, &t.set) == VK_SUCCESS) {
+    VkDescriptorPool owner;
+    t.set = allocateSamplerSet(g.dsLayout, false, owner);
+    if (t.set) {
       VkDescriptorImageInfo dii{g.sampler, t.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
       VkWriteDescriptorSet wr{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
       wr.dstSet = t.set; wr.descriptorCount = 1;
@@ -1303,16 +1457,19 @@ CsPipe *getCsPipe(const ComputeInfo &ci) {
 // the fresh compute output (the content hash would trigger this too, but erasing is
 // immediate and covers a size/format change).
 void invalidateTexRange(uint64_t base, uint64_t size) {
+  bool erased = false;
+  uint64_t end = base + size;
   for (auto it = g_texCache.begin(); it != g_texCache.end();) {
-    if (it->first >= base && it->first < base + size) {
-      if (it->second.view) vkDestroyImageView(g.device, it->second.view, nullptr);
-      if (it->second.image) vkDestroyImage(g.device, it->second.image, nullptr);
-      if (it->second.mem) vkFreeMemory(g.device, it->second.mem, nullptr);
+    uint64_t texEnd = it->first.base + it->second.footprint;
+    if (it->first.base < end && base < texEnd) {
+      g_retiredTex.push_back(it->second);
       it = g_texCache.erase(it);
+      erased = true;
     } else {
       ++it;
     }
   }
+  if (erased) clearMultiTexCache();
 }
 
 // Persistent compute staging. Dispatches are serialized behind the fence, so one set
@@ -1614,11 +1771,11 @@ bool drawRecomp(const DrawInfo &d) {
   // cycled/aliased RT addresses instead of stale guest memory. Additive: an exact
   // RT base resolves to itself.
   uint64_t texBase = d.texBase;
-  if (texBase && !g_rts.count(texBase)) {
+  if (texBase && !d.texArrayed && !g_rts.count(texBase)) {
     uint64_t r = resolveSampledRT(texBase, d.texW, d.texH);
     if (r) texBase = r;
   }
-  bool rtAsTex = texBase && texBase != d.rtBase && g_rts.count(texBase);
+  bool rtAsTex = !d.texArrayed && texBase && texBase != d.rtBase && g_rts.count(texBase);
   if (rtAsTex && g_rts[texBase].w >= 700 && g_rts[texBase].w <= 900)
     g.frameHadRoom = true;
   if (texBase && texBase == d.rtBase) return decline(DR_SELF);
@@ -1714,8 +1871,14 @@ bool drawRecomp(const DrawInfo &d) {
   // the region switch (transitioning it to readable must happen outside a region).
   VkDescriptorSet texSet = VK_NULL_HANDLE;
   if (rp->textured && !rtAsTex) {
-    texSet = rp->multiTex ? getMultiTexSet(d)
-                          : getTexture(d.texBase, d.texW, d.texH, d.texTiling, d.texPitch);
+    if (rp->multiTex) {
+      texSet = getMultiTexSet(d);
+    } else {
+      texSet = getTexture(d.texBase, d.texW, d.texH, d.texTiling,
+                          d.texPitch, d.texLayers, d.texBaseArray,
+                          d.texViewLayers, d.texArrayed);
+      if (!texSet) texSet = d.texArrayed ? g.whiteArraySet : g.whiteSet;
+    }
     if (!texSet) return decline(DR_GUESTTEX);
   }
 
@@ -1760,21 +1923,28 @@ bool drawRecomp(const DrawInfo &d) {
 
   setGuestViewport(d);
   vkCmdBindPipeline(g.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, rp->pipe);
-  // Copy the guest cbuffer window into the per-frame ring and bind it as the set-1
-  // dynamic UBO (the recompiled VS reads its transforms from it).
+  // Copy each guest cbuffer window into the per-frame ring and bind set 1. Vulkan
+  // requires one dynamic offset for every dynamic descriptor in the set layout.
   VkDeviceSize cbOff = (g.uboOffset + g.uboAlign - 1) & ~(VkDeviceSize)(g.uboAlign - 1);
-  if (cbOff + kCbufWindow > kUboRing) cbOff = 0;  // wrap within the frame
-  uint8_t *cbDst = g.uboMap + cbOff;
-  std::memset(cbDst, 0, kCbufWindow);
-  if (d.cbufBase >= 0x1000000000ull && d.cbufBase < 0x20000000000ull) {
-    uint32_t n = (d.cbufSize && d.cbufSize < kCbufWindow) ? d.cbufSize : kCbufWindow;
-    std::memcpy(cbDst, reinterpret_cast<const void *>(d.cbufBase), n);
-  } else {
-    std::memcpy(cbDst, d.mvp, 64);  // fallback: the 64-byte MVP the cmd processor resolved
+  VkDeviceSize cbStride = (kCbufWindow + g.uboAlign - 1) & ~(VkDeviceSize)(g.uboAlign - 1);
+  if (cbOff + cbStride * 8 > kUboRing) return decline(DR_RING);
+  uint32_t dynOff[8];
+  for (uint32_t i = 0; i < 8; i++) {
+    VkDeviceSize bindingOff = cbOff + cbStride * i;
+    dynOff[i] = static_cast<uint32_t>(bindingOff);
+    uint8_t *cbDst = g.uboMap + bindingOff;
+    std::memset(cbDst, 0, kCbufWindow);
+    const auto &cb = d.cbufs[i];
+    if (cb.base >= 0x1000000000ull && cb.base < 0x20000000000ull) {
+      uint32_t n = cb.size < kCbufWindow ? cb.size : kCbufWindow;
+      std::memcpy(cbDst, reinterpret_cast<const void *>(cb.base), n);
+    } else if (i == 0) {
+      std::memcpy(cbDst, d.mvp, sizeof(d.mvp));
+    }
   }
-  g.uboOffset = cbOff + kCbufWindow;
-  uint32_t dynOff = (uint32_t)cbOff;
-  vkCmdBindDescriptorSets(g.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, rp->layout, 1, 1, &g.uboSet, 1, &dynOff);
+  g.uboOffset = cbOff + cbStride * 8;
+  vkCmdBindDescriptorSets(g.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, rp->layout,
+                          1, 1, &g.uboSet, 8, dynOff);
   if (texSet)
     vkCmdBindDescriptorSets(g.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, rp->layout, 0, 1, &texSet, 0, nullptr);
   vkCmdBindVertexBuffers(g.cmd, 0, 1, &g.vb, &voff);
@@ -1796,6 +1966,9 @@ bool drawRecomp(const DrawInfo &d) {
 
 void beginFrame() {
   if (!g.ready) return;
+  // endFrame waits for the prior frame's fence, so objects invalidated while that
+  // command buffer was recording are safe to release now.
+  releaseRetiredTextures();
   if (!createPipeline()) return;
   createTexPipeline();  // best-effort; colored path still works without it
   g.frameDraws = 0;
@@ -1900,18 +2073,18 @@ void draw(const DrawInfo &d) {
   // memory. This replaces the old per-symptom FRESHRT/CYCLEREDIR/ROOMALPHA address
   // heuristics with one principled, game-agnostic lookup.
   uint64_t texBase = d.texBase;
-  if (texBase && !g_rts.count(texBase)) {
+  if (texBase && !d.texArrayed && !g_rts.count(texBase)) {
     uint64_t r = resolveSampledRT(texBase, d.texW, d.texH);
     if (r) texBase = r;
   }
   // Is this a render-to-texture sample (the draw samples another render target)?
-  bool rtAsTex = texBase && texBase != d.rtBase && g_rts.count(texBase);
+  bool rtAsTex = !d.texArrayed && texBase && texBase != d.rtBase && g_rts.count(texBase);
   bool roomSrc = rtAsTex && g_rts[texBase].w >= 700 && g_rts[texBase].w <= 900;
   if (roomSrc) g.frameHadRoom = true;
 
   // Upload guest texture (independent of the render region) if not RT-as-texture.
   VkDescriptorSet texSet = VK_NULL_HANDLE;
-  if (d.texBase && g.texPipeline && !rtAsTex)
+  if (d.texBase && g.texPipeline && !rtAsTex && !d.texArrayed)
     texSet = getTexture(d.texBase, d.texW, d.texH, d.texTiling, d.texPitch);
 
   // Switch render target if this draw targets a different RT than the open region (or

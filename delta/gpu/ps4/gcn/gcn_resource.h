@@ -29,9 +29,14 @@ struct TImage {
   uint32_t width = 0;
   uint32_t height = 0;
   uint32_t pitch = 0;      // surface pitch in pixels (T#.pitch+1)
+  uint32_t layers = 1;     // physical array layers (T#.depth+1 for 2D arrays)
+  uint32_t baseArray = 0;  // first layer exposed by this descriptor view
+  uint32_t viewLayers = 1; // number of layers exposed by this descriptor view
   uint32_t dfmt = 0;
   uint32_t nfmt = 0;
+  uint32_t type = 0;       // SQ_RSRC_IMG_* (9 = 2D, 13 = 2D array)
   uint32_t tilingIdx = 0;  // 8/31 = linear; everything else is tiled (1D micro or 2D macro)
+  bool arrayed = false;    // MIMG DA bit: address contains an array-layer coordinate
   bool valid = false;
 };
 
@@ -40,7 +45,8 @@ TImage decodeTImage(const uint32_t *p);
 
 // Recover the image(s) a (textured) pixel shader samples, by tracking its
 // s_load_dwordx8 of T#s out of the PS user-data tables. Empty if the PS does no
-// texture sampling.
+// texture sampling. The result preserves MIMG binding order; unresolved entries
+// are returned with valid=false so later bindings are not compacted.
 std::vector<TImage> trackTextures(const uint32_t *psCode, uint32_t maxDwords,
                                   const uint32_t *psUserData);
 

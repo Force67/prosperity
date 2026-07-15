@@ -7,6 +7,7 @@
 #include "gcn_resource.h"
 #include "gcn_decode.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 
@@ -38,8 +39,9 @@ TImage decodeTImage(const uint32_t *p) {
   //  [0] base[39:8] (base = [0] << 8 with hi bits from [1])
   //  [1] base_hi[7:0]; min_lod[19:8]; dfmt[25:20]; nfmt[29:26]
   //  [2] width[13:0]; height[27:14]
-  //  [3] ...; tiling_index[24:20]
+  //  [3] ...; tiling_index[24:20]; type[31:28]
   //  [4] depth[12:0]; pitch[26:13]
+  //  [5] base_array[12:0]; last_array[25:13]
   TImage t;
   t.base = ((static_cast<uint64_t>(p[1] & 0xFF) << 32) | p[0]) << 8;
   // PS4 GFX7 colour buffers are addressed by a 32-bit CB_COLOR_BASE (= base[39:8],
@@ -57,10 +59,21 @@ TImage decodeTImage(const uint32_t *p) {
   t.width = ((p[2] & 0x3FFF)) + 1;
   t.height = ((p[2] >> 14) & 0x3FFF) + 1;
   t.tilingIdx = (p[3] >> 20) & 0x1F;
+  t.type = p[3] >> 28;
   t.pitch = ((p[4] >> 13) & 0x3FFF) + 1;
   if (t.pitch < t.width) t.pitch = t.width;  // fall back to width if unset
+  if (t.type == 13) {  // SQ_RSRC_IMG_2D_ARRAY
+    t.layers = (p[4] & 0x1FFF) + 1;
+    t.baseArray = p[5] & 0x1FFF;
+    t.viewLayers = 0;
+    uint32_t lastArray = (p[5] >> 13) & 0x1FFF;
+    if (t.baseArray < t.layers && lastArray >= t.baseArray)
+      t.viewLayers = std::min(lastArray, t.layers - 1) - t.baseArray + 1;
+  }
+  bool validView = t.type != 13 || (t.baseArray < t.layers && t.viewLayers > 0);
   t.valid = t.base >= 0x1000000000ull && t.base < 0x20000000000ull &&
-            t.width > 1 && t.width <= 8192 && t.height > 1 && t.height <= 8192;
+              t.width > 1 && t.width <= 8192 && t.height > 1 && t.height <= 8192 &&
+              t.layers <= 8192 && validView;
   return t;
 }
 
@@ -166,17 +179,20 @@ std::vector<TImage> trackTextures(const uint32_t *psCode, uint32_t maxDwords,
     // SSAMP). A PS either passes them inline in its user-data SGPRs (Isaac does
     // no s_load) or loads them from the resource table via s_load_dwordx8
     // (3D shaders that sample several maps). Resolve inline first, else from the
-    // s_load map, and return every valid texture in MIMG (= binding) order.
+    // s_load map, and preserve every MIMG binding. Invalid entries retain DA so
+    // the renderer can bind a type-compatible fallback without compacting slots.
     if (in.enc != Enc::mimg)
       continue;
     uint32_t word1 = in.raw[1];
     uint32_t srsrc = ((word1 >> 16) & 0x1F) * 4;  // T# base SGPR
     bool inline_ = srsrc + 8 <= 16;
     const Loaded *ld = inline_ ? nullptr : findLoad(srsrc);
-    if (!inline_ && !ld)
-      continue;
-    TImage t = inline_ ? decodeTImage(&psUserData[srsrc])
-                       : decodeTImage(reinterpret_cast<const uint32_t *>(ld->taddr));
+    TImage t;
+    if (inline_)
+      t = decodeTImage(&psUserData[srsrc]);
+    else if (ld)
+      t = decodeTImage(reinterpret_cast<const uint32_t *>(ld->taddr));
+    t.arrayed = (in.raw[0] & 0x4000) != 0;  // MIMG DA
     if (t.valid) {
       // Empirical tiling census (DELTA_GPU_TILEHIST): tally tilingIdx of every
       // sampled texture so we can confirm which modes are linear (8/31) vs 1D
@@ -200,8 +216,8 @@ std::vector<TImage> trackTextures(const uint32_t *psCode, uint32_t maxDwords,
                      "dfmt=%u nfmt=%u tiling=%u\n", inline_ ? "inline" : "s_load",
                      srsrc, (unsigned long)t.base, t.width, t.height, t.pitch,
                      t.dfmt, t.nfmt, t.tilingIdx);
-      result.push_back(t);
     }
+    result.push_back(t);
   }
   return result;
 }

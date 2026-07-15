@@ -195,8 +195,8 @@ uint32_t mubufLoad(Lane &L, const Inst &in) {
   return val;
 }
 
-// image_store: write vdata.. to the T# image at (v[vaddr], v[vaddr+1]). Linear
-// (tiling=8) 8888 dest. dmask selects components.
+// image_store: write vdata.. to a linear (tiling=8) 8888 T# image. Array views
+// select base_array, and MIMG DA adds vaddr+2 as a view-relative layer.
 void imageStore(Lane &L, const Inst &in) {
   uint32_t w = in.raw[0], w1 = in.raw[1];
   uint32_t dmask = (w >> 8) & 0xF;
@@ -209,15 +209,25 @@ void imageStore(Lane &L, const Inst &in) {
   static int dbg = 0;
   if (std::getenv("DELTA_GPU_CSRUN_VERBOSE") && dbg < 4) {
     dbg++;
-    std::fprintf(stderr, "[csimg] srsrc=%u base=%#lx %ux%u pitch=%u dfmt=%u coord=[%u %u]\n",
-                 srsrc, (unsigned long)base, t.width, t.height, t.pitch, t.dfmt,
-                 L.v[vaddr], L.v[vaddr + 1]);
+    uint32_t z = (w & 0x4000) ? L.v[vaddr + 2] : 0;
+    std::fprintf(stderr, "[csimg] srsrc=%u base=%#lx %ux%ux%u pitch=%u dfmt=%u "
+                          "coord=[%u %u %u]\n",
+                 srsrc, (unsigned long)base, t.width, t.height, t.layers, t.pitch,
+                 t.dfmt, L.v[vaddr], L.v[vaddr + 1], z);
   }
   if (!t.width || !t.height || !guestOk(base)) return;
   t.base = base;
-  uint32_t x = L.v[vaddr], y = L.v[vaddr + 1];
-  if (x >= t.width || y >= t.height) return;  // bounds (approximate exec)
-  uint8_t *px = reinterpret_cast<uint8_t *>(t.base) + ((uint64_t)y * t.pitch + x) * 4;
+  uint32_t x = L.v[vaddr], y = L.v[vaddr + 1], layer = 0;
+  if (t.type == 13) {
+    uint32_t viewLayer = (w & 0x4000) ? L.v[vaddr + 2] : 0;
+    if (viewLayer >= t.viewLayers) return;
+    layer = t.baseArray + viewLayer;
+  }
+  if (x >= t.width || y >= t.height || layer >= t.layers) return;
+  uint64_t pixel = ((uint64_t)layer * t.height + y) * t.pitch + x;
+  uint64_t addr = t.base + pixel * 4;
+  if (!guestOk(addr) || !guestOk(addr + 3)) return;
+  uint8_t *px = reinterpret_cast<uint8_t *>(addr);
   uint32_t comp = 0;
   for (int i = 0; i < 4; i++)
     if (dmask & (1 << i)) px[i] = (uint8_t)(L.v[vdata + comp++] & 0xFF);

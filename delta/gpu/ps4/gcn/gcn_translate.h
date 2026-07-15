@@ -28,7 +28,7 @@ struct ShaderAttr {
   uint32_t vbufDwordOff = 0;// dword offset of this attribute's V# within that table
 };
 
-// A constant buffer the VS reads (s_buffer_load). Bound as a UBO.
+// A constant buffer a shader stage reads (s_buffer_load). Bound as a UBO.
 struct ShaderCbuf {
   uint32_t binding = 0;
   uint32_t udSgpr = 0;      // VS user-data dword index of the 4-dword V# (cbuffer ptr)
@@ -46,7 +46,8 @@ struct Recompiled {
   std::vector<uint32_t> vsSpirv;  // emitted directly from GCN (empty on failure)
   std::vector<uint32_t> fsSpirv;
   std::vector<ShaderAttr> attrs;   // vertex inputs
-  std::vector<ShaderCbuf> vsCbufs; // VS UBOs (set 0, binding = .binding)
+  std::vector<ShaderCbuf> vsCbufs; // VS UBOs (set 1, binding = .binding)
+  std::vector<ShaderCbuf> psCbufs; // PS UBOs (set 1, binding = .binding)
   std::vector<ShaderTex> psTexs;   // PS samplers (set 0, binding = .binding)
   uint32_t numParams = 0;          // VS->PS interpolants (locations 0..numParams-1)
   uint8_t psMrtMask = 0;           // bit n set = PS exports to MRT color target n (0..7)

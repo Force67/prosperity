@@ -2,7 +2,7 @@
  * PS4Delta : GCN / Liverpool texture de-tiling (32bpp). See gcn_detile.h.
  *
  * Faithful port of the AMD AddrLib (Liverpool) tiling/de-tiling swizzle,
- * restricted to the 32bpp / 1-sample / single-mip / single-slice case that the
+ * restricted to the 32bpp / 1-sample / single-mip case that the
  * 2D sprite/RT-as-texture path needs.
  *
  * Unlike the previous version, every addressing parameter (array mode, micro
@@ -21,6 +21,7 @@
 
 #include "gcn_detile.h"
 
+#include <algorithm>
 #include <cstring>
 
 namespace gpu::gcn {
@@ -226,26 +227,36 @@ inline uint32_t pixIdx32(uint32_t x, uint32_t y, MicroMode m) {
 }
 
 // ComputePipeFromCoord (tiling.comp), 8-pipe configs.
-inline uint32_t pipeFromCoord(uint32_t x, uint32_t y, PipeConfig pc) {
+inline uint32_t pipeFromCoord(uint32_t x, uint32_t y, uint32_t slice,
+                              PipeConfig pc, ArrayMode am) {
   uint32_t tx = x >> 3, ty = y >> 3;
   uint32_t x3 = tx & 1, x4 = (tx >> 1) & 1, x5 = (tx >> 2) & 1;
   uint32_t y3 = ty & 1, y4 = (ty >> 1) & 1, y5 = (ty >> 2) & 1;
-  if (pc == PC_P2) return x3 ^ y3;
-  if (pc == PC_P8_32x32_8x16) {
+  uint32_t pipe;
+  if (pc == PC_P2) pipe = x3 ^ y3;
+  else if (pc == PC_P8_32x32_8x16) {
     uint32_t p0 = x4 ^ y3 ^ x5;
     uint32_t p1 = x3 ^ y4;
     uint32_t p2 = x5 ^ y5;
-    return p0 | (p1 << 1) | (p2 << 2);
+    pipe = p0 | (p1 << 1) | (p2 << 2);
+  } else {
+    // P8_32x32_16x16
+    uint32_t p0 = x3 ^ y3 ^ x4;
+    uint32_t p1 = x4 ^ y4;
+    uint32_t p2 = x5 ^ y5;
+    pipe = p0 | (p1 << 1) | (p2 << 2);
   }
-  // P8_32x32_16x16
-  uint32_t p0 = x3 ^ y3 ^ x4;
-  uint32_t p1 = x4 ^ y4;
-  uint32_t p2 = x5 ^ y5;
-  return p0 | (p1 << 1) | (p2 << 2);
+  if (am == AM_3DThin1 || am == AM_3DThick || am == AM_3DXThick) {
+    uint32_t rotation = std::max(1u, numPipesOf(pc) / 2 - 1) * slice;
+    pipe ^= rotation & (numPipesOf(pc) - 1);
+  }
+  return pipe;
 }
 
 // ComputeBankFromCoord (tiling.comp), parameterized by num_banks/widths.
-inline uint32_t bankFromCoord(uint32_t x, uint32_t y, const MacroParams &mp, uint32_t numPipes) {
+inline uint32_t bankFromCoord(uint32_t x, uint32_t y, uint32_t slice,
+                              const MacroParams &mp, uint32_t numPipes,
+                              ArrayMode am) {
   uint32_t tx = (x >> 3) / (mp.bankWidth * numPipes);
   uint32_t ty = (y >> 3) / mp.bankHeight;
   uint32_t x3 = tx & 1, x4 = (tx >> 1) & 1, x5 = (tx >> 2) & 1, x6 = (tx >> 3) & 1;
@@ -268,7 +279,12 @@ inline uint32_t bankFromCoord(uint32_t x, uint32_t y, const MacroParams &mp, uin
       bank = (x3 ^ y6) | ((x4 ^ y5 ^ y6) << 1) | ((x5 ^ y4) << 2) | ((x6 ^ y3) << 3);
       break;
   }
-  return bank & (mp.numBanks - 1);
+  uint32_t rotation = 0;
+  if (am == AM_2DThin1 || am == AM_2DThick || am == AM_2DXThick)
+    rotation = (mp.numBanks / 2 - 1) * slice;
+  else if (am == AM_3DThin1 || am == AM_3DThick || am == AM_3DXThick)
+    rotation = std::max(1u, numPipes / 2 - 1) * slice / numPipes;
+  return (bank ^ rotation) & (mp.numBanks - 1);
 }
 
 // 1D micro-tiled byte offset (32bpp), slice/sample 0.
@@ -279,6 +295,7 @@ inline uint32_t addrMicro32(uint32_t x, uint32_t y, uint32_t pitch, MicroMode m)
 }
 
 struct Macro2D {
+  ArrayMode am;
   MicroMode mm;
   PipeConfig pc;
   MacroParams mp;
@@ -294,7 +311,8 @@ inline uint32_t numBankBitsOf(uint32_t numBanks) {
 
 // 2D macro-tiled byte offset (32bpp), single slice/sample (tile_split inert at
 // 32bpp 1-sample, slice/bank rotation zero for single slice).
-inline uint32_t addrMacro32(uint32_t x, uint32_t y, uint32_t pitch, const Macro2D &c) {
+inline uint32_t addrMacro32(uint32_t x, uint32_t y, uint32_t slice,
+                            uint32_t pitch, const Macro2D &c) {
   uint32_t elementOffset = pixIdx32(x, y, c.mm) * 4;  // < kMicroTileBytes
 
   uint32_t macroTilesPerRow = pitch / c.macroPitch;
@@ -309,8 +327,8 @@ inline uint32_t addrMacro32(uint32_t x, uint32_t y, uint32_t pitch, const Macro2
 
   uint32_t totalOffset = macroTileOffset + elementOffset + tileOffset;
 
-  uint32_t pipe = pipeFromCoord(x, y, c.pc);
-  uint32_t bank = bankFromCoord(x, y, c.mp, c.numPipes);
+  uint32_t pipe = pipeFromCoord(x, y, slice, c.pc, c.am);
+  uint32_t bank = bankFromCoord(x, y, slice, c.mp, c.numPipes, c.am);
 
   uint32_t interleaveOffset = totalOffset & ((1u << kPipeInterleaveBits) - 1);
   uint32_t offset = totalOffset >> kPipeInterleaveBits;
@@ -320,6 +338,22 @@ inline uint32_t addrMacro32(uint32_t x, uint32_t y, uint32_t pitch, const Macro2
   addr |= bank << (kPipeInterleaveBits + c.numPipeBits);
   addr |= offset << (kPipeInterleaveBits + c.numPipeBits + c.numBankBits);
   return addr;
+}
+
+bool configureMacro2D(uint32_t tilingIdx, ArrayMode am, MicroMode mm, Macro2D &c) {
+  c.am = am;
+  c.mm = mm;
+  c.pc = pipeConfigOf(tilingIdx);
+  c.numPipes = numPipesOf(c.pc);
+  c.numPipeBits = numPipeBitsOf(c.pc);
+  uint32_t mtm = macroTileModeIndex(tilingIdx, mm, am);
+  c.mp = macroParamsForMode(mtm);
+  c.numBankBits = numBankBitsOf(c.mp.numBanks);
+  c.macroPitch = kMicroW * c.mp.bankWidth * c.numPipes * c.mp.macroAspect;
+  c.macroHeight = kMicroH * c.mp.bankHeight * c.mp.numBanks / c.mp.macroAspect;
+  c.macroTileBytes = kMicroTileBytes * (c.macroPitch / kMicroW) *
+                     (c.macroHeight / kMicroH) / (c.numPipes * c.mp.numBanks);
+  return c.macroPitch && c.macroHeight;
 }
 
 }  // namespace
@@ -333,7 +367,7 @@ bool tilingIsLinear(uint32_t tilingIdx) {
 }
 
 bool detile32(const uint32_t *src, uint32_t *dst, uint32_t width, uint32_t height,
-              uint32_t tilingIdx, uint32_t pitch) {
+              uint32_t tilingIdx, uint32_t pitch, uint32_t slice) {
   if (tilingIsLinear(tilingIdx)) {
     if (pitch == width) {
       std::memcpy(dst, src, (size_t)width * height * 4);
@@ -346,6 +380,7 @@ bool detile32(const uint32_t *src, uint32_t *dst, uint32_t width, uint32_t heigh
 
   const ArrayMode am = arrayModeOf(tilingIdx);
   const MicroMode mm = microModeOf(tilingIdx);
+  if (mm == MM_Thick) return false;  // z-interleaved thick tiles are not modelled
 
   // 1D micro-tiled (no pipe/bank interleave).
   const bool micro1D = (am == AM_1DThin1 || am == AM_1DThick);
@@ -360,30 +395,37 @@ bool detile32(const uint32_t *src, uint32_t *dst, uint32_t width, uint32_t heigh
 
   // 2D macro-tiled: derive every param from the tile mode.
   Macro2D c{};
-  c.mm = mm;
-  c.pc = pipeConfigOf(tilingIdx);
-  c.numPipes = numPipesOf(c.pc);
-  c.numPipeBits = numPipeBitsOf(c.pc);
-  uint32_t mtm = macroTileModeIndex(tilingIdx, mm, am);
-  c.mp = macroParamsForMode(mtm);
-  c.numBankBits = numBankBitsOf(c.mp.numBanks);
-
-  // macro_tile_pitch  = micro_w * bank_width  * num_pipes * macro_aspect
-  // macro_tile_height = micro_h * bank_height * num_banks / macro_aspect
-  c.macroPitch = kMicroW * c.mp.bankWidth * c.numPipes * c.mp.macroAspect;
-  c.macroHeight = kMicroH * c.mp.bankHeight * c.mp.numBanks / c.mp.macroAspect;
-  c.macroTileBytes = kMicroTileBytes * (c.macroPitch / kMicroW) * (c.macroHeight / kMicroH) /
-                     (c.numPipes * c.mp.numBanks);
-
-  if (!c.macroPitch || !c.macroHeight) return false;  // bad params -> caller falls back
+  if (!configureMacro2D(tilingIdx, am, mm, c)) return false;
 
   // Align pitch up to the macro-tile pitch so macro_tiles_per_row is right.
   uint32_t apitch = (pitch + (c.macroPitch - 1)) & ~(c.macroPitch - 1);
 
   for (uint32_t y = 0; y < height; y++)
     for (uint32_t x = 0; x < width; x++)
-      dst[(size_t)y * width + x] = src[addrMacro32(x, y, apitch, c) >> 2];
+      dst[(size_t)y * width + x] = src[addrMacro32(x, y, slice, apitch, c) >> 2];
   return true;
+}
+
+uint64_t tiledSliceSize32(uint32_t width, uint32_t height, uint32_t tilingIdx,
+                          uint32_t pitch) {
+  uint32_t p = pitch ? pitch : width;
+  if (tilingIsLinear(tilingIdx))
+    return static_cast<uint64_t>(p) * height * 4;
+
+  ArrayMode am = arrayModeOf(tilingIdx);
+  if (microModeOf(tilingIdx) == MM_Thick) return 0;
+  if (am == AM_1DThin1 || am == AM_1DThick) {
+    uint32_t apitch = (p + kMicroW - 1) & ~(kMicroW - 1);
+    uint32_t aheight = (height + kMicroH - 1) & ~(kMicroH - 1);
+    return static_cast<uint64_t>(apitch) * aheight * 4;
+  }
+
+  Macro2D c{};
+  if (!configureMacro2D(tilingIdx, am, microModeOf(tilingIdx), c))
+    return static_cast<uint64_t>(p) * height * 4;
+  uint32_t apitch = (p + c.macroPitch - 1) & ~(c.macroPitch - 1);
+  uint32_t aheight = (height + c.macroHeight - 1) & ~(c.macroHeight - 1);
+  return static_cast<uint64_t>(apitch) * aheight * 4;
 }
 
 }  // namespace gpu::gcn
