@@ -76,6 +76,13 @@ struct DrawInfo {
   uint32_t texLayers = 1;       // physical layers in the image allocation
   uint32_t texBaseArray = 0;    // first layer exposed by the image view
   uint32_t texViewLayers = 1;   // layers exposed by the image view
+  uint32_t texMipLevels = 1;    // physical mip levels in the image allocation
+  uint32_t texBaseMip = 0;      // first mip exposed by the image view
+  uint32_t texViewMips = 1;     // mip levels exposed by the image view
+  uint32_t texMinLod = 0;       // T# MIN_LOD clamp in U4.8 fixed-point
+  uint32_t texSampler[4] = {};  // guest sampler descriptor for this MIMG binding
+  bool texPow2Pad = false;      // physical mip dimensions/layers use POW2_PAD
+  bool texSamplerValid = false;
   bool texArrayed = false;      // MIMG DA: shader consumes a layer coordinate
 
   // Multi-texture: a PS can sample several textures (Doom64's 3D walls/floors use
@@ -86,6 +93,11 @@ struct DrawInfo {
     uint64_t base = 0;
     uint32_t w = 0, h = 0, tiling = 8, pitch = 0;
     uint32_t layers = 1, baseArray = 0, viewLayers = 1;
+    uint32_t mipLevels = 1, baseMip = 0, viewMips = 1;
+    uint32_t minLod = 0;
+    uint32_t sampler[4] = {};
+    bool pow2Pad = false;
+    bool samplerValid = false;
     bool arrayed = false;
   };
   DrawTex texs[8];

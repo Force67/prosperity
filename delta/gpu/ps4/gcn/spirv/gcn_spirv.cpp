@@ -108,6 +108,7 @@ struct Tr {
   Id imgTypes[2] = {0, 0};      // sampled 2D / 2D-array image types
   Id sampledTypes[2] = {0, 0};  // corresponding combined image-sampler types
   Id sampledPtrs[2] = {0, 0};   // UniformConstant pointers to sampledTypes
+  bool imageQuery = false;
 
   void initTypes() {
     tVoid = m.typeVoid();
@@ -789,9 +790,16 @@ void emitMimg(Tr &t, uint32_t op, uint32_t w0, uint32_t w1, Recompiled &r) {
             {ix, iy, t.m.bitcast(t.tI, t.ldVg(vaddr + 2))})
         : t.m.compositeConstruct(t.m.typeVec(t.tI, 2), {ix, iy});
     Id img = t.m.emit(spv::Op::OpImage, imgTy, {si});
-    // Texture uploads currently contain only the base mip. Keep explicit-mip loads
-    // in bounds until descriptor mip ranges and their storage are represented.
     Id lod = t.m.constU32(0);
+    if (op == 0x01) {
+      if (!t.imageQuery) {
+        t.m.capability(spv::Capability::ImageQuery);
+        t.imageQuery = true;
+      }
+      Id levels = t.m.emit(spv::Op::OpImageQueryLevels, t.tU, {img});
+      lod = t.umin(t.ldVg(vaddr + (arrayed ? 3 : 2)),
+                   t.isub(levels, t.u32(1)));
+    }
     texel = t.m.emit(spv::Op::OpImageFetch, t.tV4, {img, ic, lodOp, lod});
   } else if (op == 0x24) {  // image_sample_l: explicit LOD in the coord+2 VGPR
     texel = t.m.emit(spv::Op::OpImageSampleExplicitLod, t.tV4,

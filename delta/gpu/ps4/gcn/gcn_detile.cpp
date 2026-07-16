@@ -1,9 +1,10 @@
 /*
  * PS4Delta : GCN / Liverpool texture de-tiling (32bpp). See gcn_detile.h.
  *
- * Faithful port of the AMD AddrLib (Liverpool) tiling/de-tiling swizzle,
- * restricted to the 32bpp / 1-sample / single-mip case that the
- * 2D sprite/RT-as-texture path needs.
+ * Faithful port of the AMD AddrLib (Liverpool) tiling/de-tiling swizzle for
+ * 32bpp, one-sample 2D and 2D-array textures, including mip chains and thick
+ * microtile Z interleaving. XThick surfaces are degraded to Thick as AddrLib
+ * requires when a 32bpp microtile exceeds Liverpool's 1 KiB row size.
  *
  * Unlike the previous version, every addressing parameter (array mode, micro
  * tile mode, pipe config, num_pipes/banks, bank_width/height, macro aspect,
@@ -81,8 +82,9 @@ ArrayMode arrayModeOf(uint32_t idx) {
     case 17: // Thin2DThinPrt
       return AM_Prt2DThin1;
     case 15: // Thin3DThin
-    case 18: // Thin3DThinPrt
       return AM_3DThin1;
+    case 18: // Thin3DThinPrt
+      return AM_Prt3DThin1;
     case 19: return AM_1DThick;   // Thick1DThick
     case 20: return AM_2DThick;   // Thick2DThick
     case 21: return AM_3DThick;   // Thick3DThick
@@ -93,7 +95,7 @@ ArrayMode arrayModeOf(uint32_t idx) {
     case 26: return AM_3DXThick;  // Thick3DXThick
     case 8:  return AM_LinearAligned;  // DisplayLinearAligned
     case 31: return AM_LinearGeneral;  // DisplayLinearGeneral
-    default: return AM_2DThin1;         // unknown -> safest 2D thin
+    default: return AM_LinearGeneral;   // reserved; rejected by validTileMode()
   }
 }
 
@@ -185,6 +187,35 @@ constexpr uint32_t kMicroTilePixels = kMicroW * kMicroH;            // 64
 constexpr uint32_t kMicroTileBytes = kMicroTilePixels * kBpp / 8;   // 256
 constexpr uint32_t kPipeInterleaveBits = 8;
 
+bool validTileMode(uint32_t idx) {
+  // Modes 0/1 split a 256-byte depth microtile into 64/128-byte virtual slices;
+  // that address path is not implemented yet, so do not silently detile them.
+  return (idx >= 2 && idx <= 26) || idx == 31;
+}
+
+uint32_t effectiveTileMode(uint32_t idx) {
+  if (idx == 25) return 20;  // 2D XThick -> 2D Thick at 32bpp
+  if (idx == 26) return 21;  // 3D XThick -> 3D Thick at 32bpp
+  return idx;
+}
+
+uint32_t tileThickness(ArrayMode am) {
+  switch (am) {
+    case AM_1DThick: case AM_2DThick: case AM_PrtThick:
+    case AM_Prt2DThick: case AM_3DThick: case AM_Prt3DThick:
+      return 4;
+    case AM_2DXThick: case AM_3DXThick:
+      return 8;
+    default:
+      return 1;
+  }
+}
+
+bool isMacroTiled(ArrayMode am) {
+  return am != AM_LinearGeneral && am != AM_LinearAligned &&
+         am != AM_1DThin1 && am != AM_1DThick;
+}
+
 uint32_t numPipesOf(PipeConfig pc) { return pc == PC_P2 ? 2u : 8u; }
 uint32_t numPipeBitsOf(PipeConfig pc) { return pc == PC_P2 ? 1u : 3u; }
 
@@ -193,21 +224,23 @@ bool isPrt(ArrayMode am) {
          am == AM_Prt2DThick || am == AM_Prt3DThin1 || am == AM_Prt3DThick;
 }
 
-// tile_split for 32bpp / 1-sample (CalculateTileSplit + min vs num_samples*bytes).
-uint32_t tileSplitBytes(uint32_t idx, MicroMode mm) {
-  const uint32_t tileBytes1x = kMicroTileBytes;  // 32bpp, thickness 1
+// Effective tile size used to select the macro-tile table. Thick microtiles may
+// exceed the 1 KiB DRAM-row split, but unlike thin multisample tiles they are not
+// split into virtual slices by the address equation.
+uint32_t tileSizeBytes(uint32_t idx, MicroMode mm, uint32_t thickness) {
+  const uint32_t tileBytes1x = kMicroTileBytes * thickness;
   const uint32_t colorSplit = sampleSplitOf(idx) * tileBytes1x;
   const uint32_t cts = colorSplit < 256u ? 256u : colorSplit;
   uint32_t split = (mm == MM_Depth) ? tileSplitHwOf(idx) : cts;
   if (split > 1024u) split = 1024u;
-  // min with num_samples(1) * tile_bytes_1x:
-  if (split > tileBytes1x) split = tileBytes1x;  // 32bpp 1-sample => 256
+  if (split > tileBytes1x) split = tileBytes1x;
   return split;
 }
 
 // CalculateMacrotileMode: mtm = log2(tile_split/64); +8 if PRT.
-uint32_t macroTileModeIndex(uint32_t idx, MicroMode mm, ArrayMode am) {
-  uint32_t split = tileSplitBytes(idx, mm);
+uint32_t macroTileModeIndex(uint32_t idx, MicroMode mm, ArrayMode am,
+                            uint32_t thickness) {
+  uint32_t split = tileSizeBytes(idx, mm, thickness);
   uint32_t q = split / 64u;
   uint32_t mtm = 0;
   while ((1u << (mtm + 1)) <= q) mtm++;  // bit_width(q)-1
@@ -215,20 +248,25 @@ uint32_t macroTileModeIndex(uint32_t idx, MicroMode mm, ArrayMode am) {
   return mtm;
 }
 
-// Pixel index within an 8x8 micro tile for 32bpp (matches tiling.comp).
-// Display: x0 x1 y0 x2 y1 y2 ; Thin/Depth: x0 y0 x1 y1 x2 y2 (Morton/Z).
-inline uint32_t pixIdx32(uint32_t x, uint32_t y, MicroMode m) {
+// Pixel index within an 8x8x{1,4,8} microtile for 32bpp.
+inline uint32_t pixIdx32(uint32_t x, uint32_t y, uint32_t z, MicroMode m,
+                         uint32_t thickness) {
   uint32_t x0 = x & 1, x1 = (x >> 1) & 1, x2 = (x >> 2) & 1;
   uint32_t y0 = y & 1, y1 = (y >> 1) & 1, y2 = (y >> 2) & 1;
   if (m == MM_Display)
     return x0 | (x1 << 1) | (y0 << 2) | (x2 << 3) | (y1 << 4) | (y2 << 5);
-  // Thin / Depth / Thick all use the Morton order for the in-plane bits.
-  return x0 | (y0 << 1) | (x1 << 2) | (y1 << 3) | (x2 << 4) | (y2 << 5);
+  if (m != MM_Thick)
+    return x0 | (y0 << 1) | (x1 << 2) | (y1 << 3) | (x2 << 4) | (y2 << 5);
+  uint32_t z0 = z & 1, z1 = (z >> 1) & 1;
+  uint32_t index = x0 | (y0 << 1) | (x1 << 2) | (z0 << 3) |
+                   (y1 << 4) | (z1 << 5) | (x2 << 6) | (y2 << 7);
+  if (thickness == 8) index |= ((z >> 2) & 1) << 8;
+  return index;
 }
 
 // ComputePipeFromCoord (tiling.comp), 8-pipe configs.
 inline uint32_t pipeFromCoord(uint32_t x, uint32_t y, uint32_t slice,
-                              PipeConfig pc, ArrayMode am) {
+                               PipeConfig pc, ArrayMode am, uint32_t thickness) {
   uint32_t tx = x >> 3, ty = y >> 3;
   uint32_t x3 = tx & 1, x4 = (tx >> 1) & 1, x5 = (tx >> 2) & 1;
   uint32_t y3 = ty & 1, y4 = (ty >> 1) & 1, y5 = (ty >> 2) & 1;
@@ -247,7 +285,7 @@ inline uint32_t pipeFromCoord(uint32_t x, uint32_t y, uint32_t slice,
     pipe = p0 | (p1 << 1) | (p2 << 2);
   }
   if (am == AM_3DThin1 || am == AM_3DThick || am == AM_3DXThick) {
-    uint32_t rotation = std::max(1u, numPipesOf(pc) / 2 - 1) * slice;
+    uint32_t rotation = std::max(1u, numPipesOf(pc) / 2 - 1) * (slice / thickness);
     pipe ^= rotation & (numPipesOf(pc) - 1);
   }
   return pipe;
@@ -255,8 +293,8 @@ inline uint32_t pipeFromCoord(uint32_t x, uint32_t y, uint32_t slice,
 
 // ComputeBankFromCoord (tiling.comp), parameterized by num_banks/widths.
 inline uint32_t bankFromCoord(uint32_t x, uint32_t y, uint32_t slice,
-                              const MacroParams &mp, uint32_t numPipes,
-                              ArrayMode am) {
+                               const MacroParams &mp, uint32_t numPipes,
+                               ArrayMode am, uint32_t thickness) {
   uint32_t tx = (x >> 3) / (mp.bankWidth * numPipes);
   uint32_t ty = (y >> 3) / mp.bankHeight;
   uint32_t x3 = tx & 1, x4 = (tx >> 1) & 1, x5 = (tx >> 2) & 1, x6 = (tx >> 3) & 1;
@@ -281,17 +319,23 @@ inline uint32_t bankFromCoord(uint32_t x, uint32_t y, uint32_t slice,
   }
   uint32_t rotation = 0;
   if (am == AM_2DThin1 || am == AM_2DThick || am == AM_2DXThick)
-    rotation = (mp.numBanks / 2 - 1) * slice;
+    rotation = (mp.numBanks / 2 - 1) * (slice / thickness);
   else if (am == AM_3DThin1 || am == AM_3DThick || am == AM_3DXThick)
-    rotation = std::max(1u, numPipes / 2 - 1) * slice / numPipes;
+    rotation = std::max(1u, numPipes / 2 - 1) * (slice / thickness) / numPipes;
   return (bank ^ rotation) & (mp.numBanks - 1);
 }
 
-// 1D micro-tiled byte offset (32bpp), slice/sample 0.
-inline uint32_t addrMicro32(uint32_t x, uint32_t y, uint32_t pitch, MicroMode m) {
+// 1D micro-tiled byte offset (32bpp), including thick slice groups.
+inline uint64_t addrMicro32(uint32_t x, uint32_t y, uint32_t slice,
+                            uint32_t pitch, uint32_t height, MicroMode m,
+                            uint32_t thickness) {
   uint32_t microTilesPerRow = pitch / kMicroW;
-  uint32_t microTileOffset = ((y >> 3) * microTilesPerRow + (x >> 3)) * kMicroTileBytes;
-  return microTileOffset + pixIdx32(x, y, m) * 4;
+  uint64_t groupBytes = static_cast<uint64_t>(pitch) * height * thickness * 4;
+  uint64_t sliceOffset = (slice / thickness) * groupBytes;
+  uint64_t microTileOffset =
+      static_cast<uint64_t>((y >> 3) * microTilesPerRow + (x >> 3)) *
+      kMicroTileBytes * thickness;
+  return sliceOffset + microTileOffset + pixIdx32(x, y, slice, m, thickness) * 4;
 }
 
 struct Macro2D {
@@ -300,7 +344,8 @@ struct Macro2D {
   PipeConfig pc;
   MacroParams mp;
   uint32_t numPipes, numPipeBits, numBankBits;
-  uint32_t macroPitch, macroHeight, macroTileBytes;
+  uint32_t thickness, microTileBytes;
+  uint32_t macroPitch, macroHeight, macroTileBytes, baseAlign;
 };
 
 inline uint32_t numBankBitsOf(uint32_t numBanks) {
@@ -311,29 +356,40 @@ inline uint32_t numBankBitsOf(uint32_t numBanks) {
 
 // 2D macro-tiled byte offset (32bpp), single slice/sample (tile_split inert at
 // 32bpp 1-sample, slice/bank rotation zero for single slice).
-inline uint32_t addrMacro32(uint32_t x, uint32_t y, uint32_t slice,
-                            uint32_t pitch, const Macro2D &c) {
-  uint32_t elementOffset = pixIdx32(x, y, c.mm) * 4;  // < kMicroTileBytes
+inline uint64_t addrMacro32(uint32_t x, uint32_t y, uint32_t slice,
+                            uint32_t pitch, uint32_t height, const Macro2D &c) {
+  uint32_t elementOffset = pixIdx32(x, y, slice, c.mm, c.thickness) * 4;
 
   uint32_t macroTilesPerRow = pitch / c.macroPitch;
   uint32_t mtx = x / c.macroPitch;
   uint32_t mty = y / c.macroHeight;
-  uint32_t macroTileOffset = (mty * macroTilesPerRow + mtx) * c.macroTileBytes;
+  uint64_t macroTileOffset =
+      static_cast<uint64_t>(mty * macroTilesPerRow + mtx) * c.macroTileBytes;
+  uint32_t macroTilesPerSlice = macroTilesPerRow * (height / c.macroHeight);
+  uint64_t sliceBytes = static_cast<uint64_t>(macroTilesPerSlice) * c.macroTileBytes;
+  uint64_t sliceOffset = sliceBytes * (slice / c.thickness);
 
   // tile_row/tile_column rotation within the macro tile (0 when bw==bh==1).
   uint32_t tileRow = (y >> 3) % c.mp.bankHeight;
   uint32_t tileCol = ((x >> 3) / c.numPipes) % c.mp.bankWidth;
-  uint32_t tileOffset = (tileRow * c.mp.bankWidth + tileCol) * kMicroTileBytes;
+  uint32_t tileOffset =
+      (tileRow * c.mp.bankWidth + tileCol) * c.microTileBytes;
 
-  uint32_t totalOffset = macroTileOffset + elementOffset + tileOffset;
+  uint64_t totalOffset = sliceOffset + macroTileOffset + elementOffset + tileOffset;
 
-  uint32_t pipe = pipeFromCoord(x, y, slice, c.pc, c.am);
-  uint32_t bank = bankFromCoord(x, y, slice, c.mp, c.numPipes, c.am);
+  uint32_t swizzleX = x, swizzleY = y;
+  if (c.am == AM_PrtThin1 || c.am == AM_PrtThick) {
+    swizzleX %= c.macroPitch;
+    swizzleY %= c.macroHeight;
+  }
+  uint32_t pipe = pipeFromCoord(swizzleX, swizzleY, slice, c.pc, c.am, c.thickness);
+  uint32_t bank = bankFromCoord(swizzleX, swizzleY, slice, c.mp, c.numPipes,
+                                c.am, c.thickness);
 
-  uint32_t interleaveOffset = totalOffset & ((1u << kPipeInterleaveBits) - 1);
-  uint32_t offset = totalOffset >> kPipeInterleaveBits;
+  uint64_t interleaveOffset = totalOffset & ((1u << kPipeInterleaveBits) - 1);
+  uint64_t offset = totalOffset >> kPipeInterleaveBits;
 
-  uint32_t addr = interleaveOffset;
+  uint64_t addr = interleaveOffset;
   addr |= pipe << kPipeInterleaveBits;
   addr |= bank << (kPipeInterleaveBits + c.numPipeBits);
   addr |= offset << (kPipeInterleaveBits + c.numPipeBits + c.numBankBits);
@@ -346,14 +402,34 @@ bool configureMacro2D(uint32_t tilingIdx, ArrayMode am, MicroMode mm, Macro2D &c
   c.pc = pipeConfigOf(tilingIdx);
   c.numPipes = numPipesOf(c.pc);
   c.numPipeBits = numPipeBitsOf(c.pc);
-  uint32_t mtm = macroTileModeIndex(tilingIdx, mm, am);
+  c.thickness = tileThickness(am);
+  c.microTileBytes = kMicroTileBytes * c.thickness;
+  uint32_t mtm = macroTileModeIndex(tilingIdx, mm, am, c.thickness);
   c.mp = macroParamsForMode(mtm);
   c.numBankBits = numBankBitsOf(c.mp.numBanks);
   c.macroPitch = kMicroW * c.mp.bankWidth * c.numPipes * c.mp.macroAspect;
   c.macroHeight = kMicroH * c.mp.bankHeight * c.mp.numBanks / c.mp.macroAspect;
-  c.macroTileBytes = kMicroTileBytes * (c.macroPitch / kMicroW) *
-                     (c.macroHeight / kMicroH) / (c.numPipes * c.mp.numBanks);
+  c.macroTileBytes = c.microTileBytes * (c.macroPitch / kMicroW) *
+                      (c.macroHeight / kMicroH) / (c.numPipes * c.mp.numBanks);
+  c.baseAlign = c.numPipes * c.mp.bankWidth * c.mp.numBanks * c.mp.bankHeight *
+                tileSizeBytes(tilingIdx, mm, c.thickness);
   return c.macroPitch && c.macroHeight;
+}
+
+uint32_t alignUp(uint32_t value, uint32_t align) {
+  return (value + align - 1) & ~(align - 1);
+}
+
+uint64_t alignUp(uint64_t value, uint64_t align) {
+  return (value + align - 1) & ~(align - 1);
+}
+
+uint32_t bitCeil(uint32_t value) {
+  if (value <= 1) return 1;
+  value--;
+  value |= value >> 1; value |= value >> 2; value |= value >> 4;
+  value |= value >> 8; value |= value >> 16;
+  return value + 1;
 }
 
 }  // namespace
@@ -366,66 +442,112 @@ bool tilingIsLinear(uint32_t tilingIdx) {
   return tilingIdx == 8 || tilingIdx == 31;
 }
 
-bool detile32(const uint32_t *src, uint32_t *dst, uint32_t width, uint32_t height,
-              uint32_t tilingIdx, uint32_t pitch, uint32_t slice) {
-  if (tilingIsLinear(tilingIdx)) {
-    if (pitch == width) {
-      std::memcpy(dst, src, (size_t)width * height * 4);
-    } else {
-      for (uint32_t y = 0; y < height; y++)
-        std::memcpy(dst + (size_t)y * width, src + (size_t)y * pitch, (size_t)width * 4);
-    }
-    return true;
-  }
+bool buildTextureLayout32(TextureLayout32 &out, uint32_t width, uint32_t height,
+                          uint32_t pitch, uint32_t layers, uint32_t mipLevels,
+                          uint32_t tilingIdx, bool pow2Pad) {
+  out = {};
+  if (!width || !height || !layers || !mipLevels || mipLevels > out.mips.size() ||
+      width > 16384 || height > 16384 || pitch > 16384 || layers > 8192 ||
+      !validTileMode(tilingIdx))
+    return false;
 
+  tilingIdx = effectiveTileMode(tilingIdx);
+  out.mipLevels = mipLevels;
+  out.layers = layers;
+  out.tilingIdx = tilingIdx;
   const ArrayMode am = arrayModeOf(tilingIdx);
   const MicroMode mm = microModeOf(tilingIdx);
-  if (mm == MM_Thick) return false;  // z-interleaved thick tiles are not modelled
+  const uint32_t thickness = tileThickness(am);
+  Macro2D macro{};
+  if (isMacroTiled(am) && !configureMacro2D(tilingIdx, am, mm, macro))
+    return false;
 
-  // 1D micro-tiled (no pipe/bank interleave).
-  const bool micro1D = (am == AM_1DThin1 || am == AM_1DThick);
+  uint64_t end = 0;
+  for (uint32_t mip = 0; mip < mipLevels; mip++) {
+    TextureMipLayout32 &level = out.mips[mip];
+    level.width = std::max(width >> mip, 1u);
+    level.height = std::max(height >> mip, 1u);
+    uint32_t rawPitch = std::max(std::max(pitch >> mip, 1u), level.width);
+    uint32_t storageHeight = level.height;
+    if (pow2Pad) {
+      rawPitch = bitCeil(rawPitch);
+      storageHeight = bitCeil(storageHeight);
+    }
+    level.thickness = thickness;
 
-  if (micro1D) {
-    uint32_t apitch = (pitch + (kMicroW - 1)) & ~(kMicroW - 1);
-    for (uint32_t y = 0; y < height; y++)
-      for (uint32_t x = 0; x < width; x++)
-        dst[(size_t)y * width + x] = src[addrMicro32(x, y, apitch, mm) >> 2];
+    uint64_t baseAlign = 1;
+    if (tilingIdx == 31) {
+      level.pitch = rawPitch;
+      level.storedHeight = storageHeight;
+    } else if (tilingIdx == 8) {
+      level.pitch = alignUp(rawPitch, 16);
+      level.storedHeight = storageHeight;
+      while ((static_cast<uint64_t>(level.pitch) * level.storedHeight) % 64)
+        level.pitch += 16;
+      baseAlign = 256;
+    } else {
+      level.macroTiled = isMacroTiled(am) &&
+          !(mip > 0 && (rawPitch < macro.macroPitch ||
+                        storageHeight < macro.macroHeight));
+      if (level.macroTiled) {
+        level.pitch = alignUp(rawPitch, macro.macroPitch);
+        level.storedHeight = alignUp(storageHeight, macro.macroHeight);
+        baseAlign = macro.baseAlign;
+      } else {
+        level.pitch = alignUp(rawPitch, kMicroW);
+        level.storedHeight = alignUp(storageHeight, kMicroH);
+        baseAlign = 256;
+      }
+    }
+
+    const uint32_t storedLayers = alignUp(layers, thickness);
+    level.offset = alignUp(end, baseAlign);
+    level.size = static_cast<uint64_t>(level.pitch) * level.storedHeight *
+                 storedLayers * 4;
+    if (!level.size || level.offset > UINT64_MAX - level.size) return false;
+    end = level.offset + level.size;
+  }
+  out.size = end;
+  return out.size != 0;
+}
+
+bool detileTextureMip32(const uint32_t *src, uint32_t *dst,
+                        const TextureLayout32 &layout, uint32_t mip,
+                        uint32_t layer) {
+  if (!src || !dst || mip >= layout.mipLevels || layer >= layout.layers)
+    return false;
+  const TextureMipLayout32 &level = layout.mips[mip];
+  const uint32_t *levelSrc = src + level.offset / 4;
+
+  if (tilingIsLinear(layout.tilingIdx)) {
+    const uint32_t *layerSrc =
+        levelSrc + static_cast<uint64_t>(layer) * level.pitch * level.storedHeight;
+    for (uint32_t y = 0; y < level.height; y++)
+      std::memcpy(dst + static_cast<size_t>(y) * level.width,
+                  layerSrc + static_cast<size_t>(y) * level.pitch,
+                  static_cast<size_t>(level.width) * 4);
     return true;
   }
 
-  // 2D macro-tiled: derive every param from the tile mode.
-  Macro2D c{};
-  if (!configureMacro2D(tilingIdx, am, mm, c)) return false;
-
-  // Align pitch up to the macro-tile pitch so macro_tiles_per_row is right.
-  uint32_t apitch = (pitch + (c.macroPitch - 1)) & ~(c.macroPitch - 1);
-
-  for (uint32_t y = 0; y < height; y++)
-    for (uint32_t x = 0; x < width; x++)
-      dst[(size_t)y * width + x] = src[addrMacro32(x, y, slice, apitch, c) >> 2];
-  return true;
-}
-
-uint64_t tiledSliceSize32(uint32_t width, uint32_t height, uint32_t tilingIdx,
-                          uint32_t pitch) {
-  uint32_t p = pitch ? pitch : width;
-  if (tilingIsLinear(tilingIdx))
-    return static_cast<uint64_t>(p) * height * 4;
-
-  ArrayMode am = arrayModeOf(tilingIdx);
-  if (microModeOf(tilingIdx) == MM_Thick) return 0;
-  if (am == AM_1DThin1 || am == AM_1DThick) {
-    uint32_t apitch = (p + kMicroW - 1) & ~(kMicroW - 1);
-    uint32_t aheight = (height + kMicroH - 1) & ~(kMicroH - 1);
-    return static_cast<uint64_t>(apitch) * aheight * 4;
+  const ArrayMode am = arrayModeOf(layout.tilingIdx);
+  const MicroMode mm = microModeOf(layout.tilingIdx);
+  if (!level.macroTiled) {
+    for (uint32_t y = 0; y < level.height; y++)
+      for (uint32_t x = 0; x < level.width; x++)
+        dst[static_cast<size_t>(y) * level.width + x] =
+            levelSrc[addrMicro32(x, y, layer, level.pitch, level.storedHeight,
+                                 mm, level.thickness) >> 2];
+    return true;
   }
 
-  Macro2D c{};
-  if (!configureMacro2D(tilingIdx, am, microModeOf(tilingIdx), c))
-    return static_cast<uint64_t>(p) * height * 4;
-  uint32_t apitch = (p + c.macroPitch - 1) & ~(c.macroPitch - 1);
-  uint32_t aheight = (height + c.macroHeight - 1) & ~(c.macroHeight - 1);
-  return static_cast<uint64_t>(apitch) * aheight * 4;
+  Macro2D macro{};
+  if (!configureMacro2D(layout.tilingIdx, am, mm, macro)) return false;
+  for (uint32_t y = 0; y < level.height; y++)
+    for (uint32_t x = 0; x < level.width; x++)
+      dst[static_cast<size_t>(y) * level.width + x] =
+          levelSrc[addrMacro32(x, y, layer, level.pitch, level.storedHeight,
+                               macro) >> 2];
+  return true;
 }
 
 }  // namespace gpu::gcn

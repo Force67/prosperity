@@ -311,7 +311,10 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
       auto texs = gcn::trackTextures(reinterpret_cast<const uint32_t *>(psA), 4096,
                                      &g_regs[mmSPI_SHADER_USER_DATA_PS_0]);
       if (!texs.empty()) {
-        d.texBase = texs[0].base;
+        auto sampledRgba8 = [](const gcn::TImage &t) {
+          return t.valid && t.dfmt == 10 && t.nfmt == 0;
+        };
+        d.texBase = sampledRgba8(texs[0]) ? texs[0].base : 0;
         d.texW = texs[0].width;
         d.texH = texs[0].height;
         d.texTiling = texs[0].tilingIdx;
@@ -319,15 +322,29 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
         d.texLayers = texs[0].layers;
         d.texBaseArray = texs[0].baseArray;
         d.texViewLayers = texs[0].viewLayers;
+        d.texMipLevels = texs[0].mipLevels;
+        d.texBaseMip = texs[0].baseMip;
+        d.texViewMips = texs[0].viewMips;
+        d.texMinLod = texs[0].minLod;
+        std::memcpy(d.texSampler, texs[0].sampler, sizeof(d.texSampler));
+        d.texPow2Pad = texs[0].pow2Pad;
+        d.texSamplerValid = texs[0].samplerValid;
         d.texArrayed = texs[0].arrayed;
         d.uvData = d.vertexData;
         d.uvStride = d.vertexStride;
         // All sampled textures (binding order), for multi-texture PS (Doom64 3D).
         d.nTexs = static_cast<uint32_t>(texs.size() < 8 ? texs.size() : 8);
-        for (uint32_t i = 0; i < d.nTexs; i++)
-          d.texs[i] = {texs[i].base, texs[i].width, texs[i].height,
-                        texs[i].tilingIdx, texs[i].pitch, texs[i].layers,
-                        texs[i].baseArray, texs[i].viewLayers, texs[i].arrayed};
+        for (uint32_t i = 0; i < d.nTexs; i++) {
+          auto &dt = d.texs[i];
+          const auto &t = texs[i];
+          dt.base = sampledRgba8(t) ? t.base : 0; dt.w = t.width; dt.h = t.height;
+          dt.tiling = t.tilingIdx; dt.pitch = t.pitch; dt.layers = t.layers;
+          dt.baseArray = t.baseArray; dt.viewLayers = t.viewLayers;
+          dt.mipLevels = t.mipLevels; dt.baseMip = t.baseMip;
+          dt.viewMips = t.viewMips; dt.minLod = t.minLod; dt.pow2Pad = t.pow2Pad;
+          std::memcpy(dt.sampler, t.sampler, sizeof(dt.sampler));
+          dt.samplerValid = t.samplerValid; dt.arrayed = t.arrayed;
+        }
         // d.uvOffset was derived from the fetch shader during vertex extraction.
         // DELTA_GPU_TEXFMT: dump sampled texture formats (dfmt/nfmt/tiling/dims) to
         // pin a scrambled draw (e.g. Doom64's menu) to a format/tiling we mishandle.
