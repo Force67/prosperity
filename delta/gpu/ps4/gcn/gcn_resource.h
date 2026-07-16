@@ -32,10 +32,17 @@ struct TImage {
   uint32_t layers = 1;     // physical array layers (T#.depth+1 for 2D arrays)
   uint32_t baseArray = 0;  // first layer exposed by this descriptor view
   uint32_t viewLayers = 1; // number of layers exposed by this descriptor view
+  uint32_t mipLevels = 1;  // physical levels in storage (LAST_LEVEL + 1)
+  uint32_t baseMip = 0;     // first level exposed by this descriptor view
+  uint32_t viewMips = 1;    // levels exposed by this descriptor view
+  uint32_t minLod = 0;      // T# MIN_LOD clamp in U4.8 fixed-point
   uint32_t dfmt = 0;
   uint32_t nfmt = 0;
   uint32_t type = 0;       // SQ_RSRC_IMG_* (9 = 2D, 13 = 2D array)
   uint32_t tilingIdx = 0;  // 8/31 = linear; everything else is tiled (1D micro or 2D macro)
+  uint32_t sampler[4] = {}; // S# used by this MIMG sample instruction
+  bool pow2Pad = false;     // pad physical mip dimensions/layers to powers of two
+  bool samplerValid = false;
   bool arrayed = false;    // MIMG DA bit: address contains an array-layer coordinate
   bool valid = false;
 };

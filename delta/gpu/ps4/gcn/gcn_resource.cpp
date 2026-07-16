@@ -8,12 +8,18 @@
 #include "gcn_decode.h"
 
 #include <algorithm>
+#include <cstring>
 #include <cstdio>
 #include <cstdlib>
 
 namespace gpu::gcn {
 namespace {
 const bool g_trace = std::getenv("DELTA_GPU_TRACE") != nullptr;
+
+bool guestRange(uint64_t address, uint64_t size) {
+  constexpr uint64_t lo = 0x1000000000ull, hi = 0x20000000000ull;
+  return size && address >= lo && address < hi && size <= hi - address;
+}
 }
 
 // Linux GFX 7.2 V#/T# descriptor fields and format enums:
@@ -36,44 +42,51 @@ VBuffer decodeVBuffer(const uint32_t *p) {
 
 TImage decodeTImage(const uint32_t *p) {
   // GCN T# (image resource), 8 dwords:
-  //  [0] base[39:8] (base = [0] << 8 with hi bits from [1])
-  //  [1] base_hi[7:0]; min_lod[19:8]; dfmt[25:20]; nfmt[29:26]
+  //  [0] base[39:8] (base = [0] << 8 with high bits from [1])
+  //  [1] base_hi[5:0]; mtype_l2[7:6]; min_lod[19:8]; formats
   //  [2] width[13:0]; height[27:14]
-  //  [3] ...; tiling_index[24:20]; type[31:28]
+  //  [3] base_level[15:12]; last_level[19:16]; tiling_index[24:20];
+  //      pow2_pad[25]; type[31:28]
   //  [4] depth[12:0]; pitch[26:13]
   //  [5] base_array[12:0]; last_array[25:13]
   TImage t;
-  t.base = ((static_cast<uint64_t>(p[1] & 0xFF) << 32) | p[0]) << 8;
-  // PS4 GFX7 colour buffers are addressed by a 32-bit CB_COLOR_BASE (= base[39:8],
-  // so a 40-bit byte address). When such a render target is sampled as a texture,
-  // its T# carries a spurious base[47:40] byte (dword1[7:0]) that the colour buffer
-  // cannot express, pushing the decoded address far out of the guest VA range
-  // (e.g. Undertale's 640x480 surface: dword0<<8 = 0x40c3298000 = the RT, but
-  // dword1[7:0]=0x40 inflates it to 0x4040c3298000). Drop the high byte when it
-  // takes the address out of range so the T# resolves to the 40-bit RT the colour
-  // buffer rendered into. Normal guest textures have base[47:40]=0 -> unchanged.
-  if (t.base >= 0x20000000000ull)
-    t.base &= 0xFFFFFFFFFFull;  // mask to 40 bits (CB addressing)
+  t.base = ((static_cast<uint64_t>(p[1] & 0x3F) << 32) | p[0]) << 8;
+  t.minLod = (p[1] >> 8) & 0xFFF;
   t.dfmt = (p[1] >> 20) & 0x3F;
   t.nfmt = (p[1] >> 26) & 0xF;
   t.width = ((p[2] & 0x3FFF)) + 1;
   t.height = ((p[2] >> 14) & 0x3FFF) + 1;
+  t.baseMip = (p[3] >> 12) & 0xF;
+  uint32_t lastMip = (p[3] >> 16) & 0xF;
+  t.mipLevels = lastMip + 1;
+  t.viewMips = lastMip >= t.baseMip ? lastMip - t.baseMip + 1 : 0;
   t.tilingIdx = (p[3] >> 20) & 0x1F;
+  t.pow2Pad = (p[3] >> 25) & 1;
   t.type = p[3] >> 28;
   t.pitch = ((p[4] >> 13) & 0x3FFF) + 1;
   if (t.pitch < t.width) t.pitch = t.width;  // fall back to width if unset
   if (t.type == 13) {  // SQ_RSRC_IMG_2D_ARRAY
     t.layers = (p[4] & 0x1FFF) + 1;
+    if (t.pow2Pad) {
+      uint32_t v = t.layers - 1;
+      v |= v >> 1; v |= v >> 2; v |= v >> 4; v |= v >> 8; v |= v >> 16;
+      t.layers = v + 1;
+    }
     t.baseArray = p[5] & 0x1FFF;
     t.viewLayers = 0;
     uint32_t lastArray = (p[5] >> 13) & 0x1FFF;
     if (t.baseArray < t.layers && lastArray >= t.baseArray)
       t.viewLayers = std::min(lastArray, t.layers - 1) - t.baseArray + 1;
   }
+  bool supportedType = t.type == 9 || t.type == 13;
   bool validView = t.type != 13 || (t.baseArray < t.layers && t.viewLayers > 0);
-  t.valid = t.base >= 0x1000000000ull && t.base < 0x20000000000ull &&
-              t.width > 1 && t.width <= 8192 && t.height > 1 && t.height <= 8192 &&
-              t.layers <= 8192 && validView;
+  uint32_t maxLevels = 1;
+  for (uint32_t extent = std::max(t.width, t.height); extent > 1; extent >>= 1)
+    maxLevels++;
+  bool validMips = t.viewMips && t.mipLevels <= maxLevels;
+  t.valid = guestRange(t.base, 1) && supportedType &&
+                t.width <= 8192 && t.height <= 8192 && t.layers <= 8192 &&
+                validView && validMips;
   return t;
 }
 
@@ -141,40 +154,46 @@ std::vector<TImage> trackTextures(const uint32_t *psCode, uint32_t maxDwords,
     return result;
   auto insts = decode(psCode, maxDwords);
 
-  // First pass: track s_load_dwordx8 (SMRD op 3) that load a T# from the
-  // extended-user-data resource table. The base pointer sits in the user-data
-  // SGPR pair `sbase*2`; the T# is `off` dwords into that table. We record the
-  // destination SGPR so a later MIMG referencing it can resolve the T# the
-  // table holds. Isaac passes its single T# inline and emits no such load, so
-  // this map stays empty for it (the inline path below is unchanged).
-  struct Loaded { uint64_t taddr; };
-  std::vector<std::pair<uint32_t, Loaded>> sloads;  // dstSgpr -> resolved T# address
-  auto findLoad = [&](uint32_t sgpr) -> const Loaded * {
-    for (auto it = sloads.rbegin(); it != sloads.rend(); ++it)
-      if (it->first == sgpr) return &it->second;
-    return nullptr;
+  struct Loaded { uint32_t sgpr, dwords; uint64_t address; };
+  std::vector<Loaded> sloads;
+  auto findLoad = [&](uint32_t sgpr, uint32_t dwords, uint64_t &address) {
+    for (auto it = sloads.rbegin(); it != sloads.rend(); ++it) {
+      if (sgpr >= it->sgpr && sgpr + dwords <= it->sgpr + it->dwords) {
+        address = it->address + static_cast<uint64_t>(sgpr - it->sgpr) * 4;
+        return guestRange(address, static_cast<uint64_t>(dwords) * 4);
+      }
+    }
+    return false;
   };
-  for (const auto &in : insts) {
-    if (in.enc != Enc::smrd)
-      continue;
-    Smrd s = decodeSmrd(in.raw[0]);
-    if (s.op != 0x03)  // s_load_dwordx8 (an 8-dword T#)
-      continue;
-    uint32_t baseSgpr = s.sbase * 2;  // user_data index of the table pointer
-    if (baseSgpr + 1 >= 16)
-      continue;
-    uint64_t table = (static_cast<uint64_t>(psUserData[baseSgpr + 1] & 0xFFFF) << 32) |
-                     psUserData[baseSgpr];
-    if (table < 0x1000000000ull || table >= 0x20000000000ull)
-      continue;
-    uint64_t taddr = table + (s.imm ? static_cast<uint64_t>(s.offset) * 4 : 0);
-    sloads.push_back({s.sdst, {taddr}});
-    if (g_trace)
-      std::fprintf(stderr, "[gcnres] s_load_dwordx8 sgpr%u <- table=%#lx off=%u -> T# @%#lx\n",
-                   s.sdst, (unsigned long)table, s.offset, (unsigned long)taddr);
-  }
 
   for (const auto &in : insts) {
+    // Track descriptor-table loads as they execute so SGPR reuse resolves each
+    // MIMG against the descriptor that was live at that instruction.
+    if (in.enc == Enc::smrd) {
+      Smrd s = decodeSmrd(in.raw[0]);
+      if ((s.op == 0x02 || s.op == 0x03 || s.op == 0x04) && s.imm) {
+        uint32_t baseSgpr = s.sbase * 2;
+        uint32_t dwords = 1u << s.op;  // x4, x8, or x16
+        if (baseSgpr + 1 < 16) {
+          uint64_t table = (static_cast<uint64_t>(psUserData[baseSgpr + 1] & 0xFFFF) << 32) |
+                           psUserData[baseSgpr];
+          uint64_t byteOff = static_cast<uint64_t>(s.offset) * 4;
+          if (guestRange(table, byteOff + static_cast<uint64_t>(dwords) * 4)) {
+            uint64_t address = table + byteOff;
+            sloads.erase(std::remove_if(sloads.begin(), sloads.end(), [&](const Loaded &ld) {
+              return s.sdst < ld.sgpr + ld.dwords && ld.sgpr < s.sdst + dwords;
+            }), sloads.end());
+            sloads.push_back({s.sdst, dwords, address});
+            if (g_trace)
+              std::fprintf(stderr,
+                           "[gcnres] s_load_dwordx%u sgpr%u <- table=%#lx off=%u -> %#lx\n",
+                           dwords, s.sdst, (unsigned long)table, s.offset,
+                           (unsigned long)address);
+          }
+        }
+      }
+      continue;
+    }
     // MIMG image_sample: the T# / S# are referenced by SGPR indices (SRSRC /
     // SSAMP). A PS either passes them inline in its user-data SGPRs (Isaac does
     // no s_load) or loads them from the resource table via s_load_dwordx8
@@ -185,13 +204,28 @@ std::vector<TImage> trackTextures(const uint32_t *psCode, uint32_t maxDwords,
       continue;
     uint32_t word1 = in.raw[1];
     uint32_t srsrc = ((word1 >> 16) & 0x1F) * 4;  // T# base SGPR
-    bool inline_ = srsrc + 8 <= 16;
-    const Loaded *ld = inline_ ? nullptr : findLoad(srsrc);
+    uint64_t imageAddress = 0;
+    bool loaded = findLoad(srsrc, 8, imageAddress);
+    bool inline_ = !loaded && srsrc + 8 <= 16;
     TImage t;
     if (inline_)
       t = decodeTImage(&psUserData[srsrc]);
-    else if (ld)
-      t = decodeTImage(reinterpret_cast<const uint32_t *>(ld->taddr));
+    else if (loaded)
+      t = decodeTImage(reinterpret_cast<const uint32_t *>(imageAddress));
+    uint32_t op = (in.raw[0] >> 18) & 0x7F;
+    if (op >= 0x20) {
+      uint32_t ssamp = ((word1 >> 21) & 0x1F) * 4;
+      uint64_t samplerAddress = 0;
+      bool loadedSampler = findLoad(ssamp, 4, samplerAddress);
+      bool inlineSampler = !loadedSampler && ssamp + 4 <= 16;
+      const uint32_t *sampler = loadedSampler
+          ? reinterpret_cast<const uint32_t *>(samplerAddress)
+          : inlineSampler ? &psUserData[ssamp] : nullptr;
+      if (sampler) {
+        std::memcpy(t.sampler, sampler, sizeof(t.sampler));
+        t.samplerValid = true;
+      }
+    }
     t.arrayed = (in.raw[0] & 0x4000) != 0;  // MIMG DA
     if (t.valid) {
       // Empirical tiling census (DELTA_GPU_TILEHIST): tally tilingIdx of every
