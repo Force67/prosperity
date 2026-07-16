@@ -10,6 +10,7 @@
 #include "liverpool.h"
 #include "vk_render.h"
 #include "gcn/gcn_decode.h"
+#include "gcn/gcn_detile.h"
 #include "gcn/gcn_resource.h"
 #include "gcn/gcn_interp.h"
 #include "gcn/gcn_translate.h"
@@ -982,13 +983,22 @@ void handleDispatch(const uint32_t *body, uint32_t count) {
   for (int i = 0; i < 16; i++) ci.userData[i] = ud[i];
   bool resOk = true;
   for (auto &r : rc.resources) {
-    if (r.baseSgpr + 3 >= 16) { resOk = false; break; }
     uint64_t base = 0, size = 0;
-    if (r.kind == 1) {  // image (T#): linear pitch*height*layers*4
+    if (r.kind == 1) {  // image (T#): compute SSBO model supports linear RGBA8
+      if (r.baseSgpr + 7 >= 16) { resOk = false; break; }
       gcn::TImage t = gcn::decodeTImage(&ud[r.baseSgpr]);
+      gcn::TextureLayout32 layout;
+      if (!t.valid || t.dfmt != 10 || (t.nfmt != 0 && t.nfmt != 4) ||
+           !gcn::tilingIsLinear(t.tilingIdx) ||
+          !gcn::buildTextureLayout32(layout, t.width, t.height, t.pitch, t.layers,
+                                     t.mipLevels, t.tilingIdx, t.pow2Pad)) {
+        resOk = false;
+        break;
+      }
       base = t.base;
-      size = (uint64_t)t.pitch * t.height * t.layers * 4;
+      size = layout.size;
     } else {            // buffer (V# / pointer): stride*num_records, else the min hint
+      if (r.baseSgpr + 3 >= 16) { resOk = false; break; }
       gcn::VBuffer v = gcn::decodeVBuffer(&ud[r.baseSgpr]);
       base = v.base;
       size = v.stride ? (uint64_t)v.stride * v.numRecords : v.numRecords;

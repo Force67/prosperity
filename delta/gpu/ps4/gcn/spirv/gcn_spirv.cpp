@@ -842,6 +842,34 @@ Id csAdd(Tr &t, Id a, Id b) { return t.m.emit(spv::Op::OpIAdd, t.tU, {a, b}); }
 Id csMul(Tr &t, Id a, Id b) { return t.m.emit(spv::Op::OpIMul, t.tU, {a, b}); }
 Id csF(Tr &t, Id u) { return t.m.bitcast(t.tF, u); }   // uint bits -> float
 Id csUf(Tr &t, Id f) { return t.m.bitcast(t.tU, f); }  // float -> uint bits
+Id csMax1(Tr &t, Id value) {
+  return t.m.extInst(t.tU, GLSLstd450UMax, {value, t.m.constU32(1)});
+}
+
+Id csBitCeil(Tr &t, Id value) {
+  Id v = t.isub(csMax1(t, value), t.m.constU32(1));
+  v = csOr(t, v, csShr(t, v, 1));
+  v = csOr(t, v, csShr(t, v, 2));
+  v = csOr(t, v, csShr(t, v, 4));
+  v = csOr(t, v, csShr(t, v, 8));
+  v = csOr(t, v, csShr(t, v, 16));
+  return csAdd(t, v, t.m.constU32(1));
+}
+
+Id csLinearMipPitch(Tr &t, Id basePitch, Id height, Id mip, Id linearGeneral,
+                    Id pow2Pad) {
+  Id raw = csMax1(t, csShrV(t, basePitch, mip));
+  raw = t.m.emit(spv::Op::OpSelect, t.tU, {pow2Pad, csBitCeil(t, raw), raw});
+  Id aligned = csAnd(t, csAdd(t, raw, t.m.constU32(15)), t.m.constU32(~15u));
+  for (uint32_t i = 0; i < 3; i++) {
+    Id ok = t.m.emit(spv::Op::OpIEqual, t.tBool,
+                     {csAnd(t, csMul(t, aligned, height), t.m.constU32(63)),
+                      t.m.constU32(0)});
+    aligned = t.m.emit(spv::Op::OpSelect, t.tU,
+                       {ok, aligned, csAdd(t, aligned, t.m.constU32(16))});
+  }
+  return t.m.emit(spv::Op::OpSelect, t.tU, {linearGeneral, raw, aligned});
+}
 
 // Compute ALU emitters. Operands are raw uints; these mirror the CPU interpreter
 // (gcn_interp.cpp) opcode-for-opcode so the GPU path reproduces its exact semantics
@@ -1030,33 +1058,60 @@ void emitCsMubuf(Tr &t, const Inst &in, StageCtx &sc) {
                         t.m.constU32(0xFF)));
 }
 
-// MIMG image_load / image_store: linear RGBA8 image. Array descriptors include the
-// descriptor's base layer and, with DA, the address's third VGPR.
+// MIMG image_load/store[_mip] for staged linear RGBA8 images. Storage is mip-major;
+// each level contains all physical array layers and explicit LOD is view-relative.
 void emitCsMimg(Tr &t, const Inst &in, StageCtx &sc) {
   uint32_t w = in.raw[0], w1 = in.raw[1];
   uint32_t op = (w >> 18) & 0x7F, dmask = (w >> 8) & 0xF;
   uint32_t vaddr = w1 & 0xFF, vdata = (w1 >> 8) & 0xFF, srsrc = ((w1 >> 16) & 0x1F) * 4;
-  // The staged image currently contains only mip zero, so image_load_mip aliases
-  // that base level rather than declining the entire compute pass.
-  bool store = (op == 0x08), load = (op == 0x00 || op == 0x01);
+  bool mipOp = op == 0x01 || op == 0x09;
+  bool store = op == 0x08 || op == 0x09;
+  bool load = op == 0x00 || op == 0x01;
   if (!store && !load) { sc.csUnsupported = true; return; }  // sample/atomic: not handled
   int b = csBindingFor(sc, srsrc);
   if (b < 0) { sc.csUnsupported = true; return; }
+  const bool da = (w & 0x4000) != 0;
   Id x = t.ldVg(vaddr), y = t.ldVg(vaddr + 1);
-  Id width = csAdd(t, csAnd(t, t.ldSg(srsrc + 2), t.m.constU32(0x3FFF)),
-                   t.m.constU32(1));
-  Id pitch = csAdd(t, csAnd(t, csShr(t, t.ldSg(srsrc + 4), 13), t.m.constU32(0x3FFF)),
-                   t.m.constU32(1));
-  Id height = csAdd(t, csAnd(t, csShr(t, t.ldSg(srsrc + 2), 14),
-                             t.m.constU32(0x3FFF)), t.m.constU32(1));
+  Id baseWidth = csAdd(t, csAnd(t, t.ldSg(srsrc + 2), t.m.constU32(0x3FFF)),
+                       t.m.constU32(1));
+  Id baseHeight = csAdd(t, csAnd(t, csShr(t, t.ldSg(srsrc + 2), 14),
+                                 t.m.constU32(0x3FFF)), t.m.constU32(1));
+  Id basePitch = csAdd(t, csAnd(t, csShr(t, t.ldSg(srsrc + 4), 13),
+                                t.m.constU32(0x3FFF)), t.m.constU32(1));
+  Id baseMip = csAnd(t, csShr(t, t.ldSg(srsrc + 3), 12), t.m.constU32(0xF));
+  Id lastMip = csAnd(t, csShr(t, t.ldSg(srsrc + 3), 16), t.m.constU32(0xF));
+  Id nfmt = csAnd(t, csShr(t, t.ldSg(srsrc + 1), 26), t.m.constU32(0xF));
+  Id isUnorm = t.m.emit(spv::Op::OpIEqual, t.tBool,
+                         {nfmt, t.m.constU32(0)});
+  Id safeLastMip = t.m.extInst(t.tU, GLSLstd450UMax, {baseMip, lastMip});
+  Id requestedMip = mipOp ? t.ldVg(vaddr + (da ? 3 : 2)) : t.m.constU32(0);
+  Id viewMip = t.m.extInst(t.tU, GLSLstd450UMin,
+                           {requestedMip, t.isub(safeLastMip, baseMip)});
+  Id physicalMip = csAdd(t, baseMip, viewMip);
+  Id width = csMax1(t, csShrV(t, baseWidth, physicalMip));
+  Id height = csMax1(t, csShrV(t, baseHeight, physicalMip));
+  Id tiling = csAnd(t, csShr(t, t.ldSg(srsrc + 3), 20), t.m.constU32(0x1F));
+  Id linearGeneral = t.m.emit(spv::Op::OpIEqual, t.tBool,
+                              {tiling, t.m.constU32(31)});
+  Id pow2Pad = t.m.emit(spv::Op::OpINotEqual, t.tBool,
+                        {csAnd(t, csShr(t, t.ldSg(srsrc + 3), 25),
+                               t.m.constU32(1)), t.m.constU32(0)});
+  Id storedHeight = t.m.emit(spv::Op::OpSelect, t.tU,
+                             {pow2Pad, csBitCeil(t, height), height});
+  Id pitch = csLinearMipPitch(t, basePitch, storedHeight, physicalMip,
+                              linearGeneral, pow2Pad);
   Id baseArray = csAnd(t, t.ldSg(srsrc + 5), t.m.constU32(0x1FFF));
   Id lastArray = csAnd(t, csShr(t, t.ldSg(srsrc + 5), 13), t.m.constU32(0x1FFF));
-  Id viewLayer = (w & 0x4000) ? t.ldVg(vaddr + 2) : t.m.constU32(0);
+  Id viewLayer = da ? t.ldVg(vaddr + 2) : t.m.constU32(0);
   Id physicalLayer = csAdd(t, baseArray, viewLayer);
-  Id layers = csAdd(t, csAnd(t, t.ldSg(srsrc + 4), t.m.constU32(0x1FFF)),
-                    t.m.constU32(1));
   Id type = csShr(t, t.ldSg(srsrc + 3), 28);
   Id isArray = t.m.emit(spv::Op::OpIEqual, t.tBool, {type, t.m.constU32(13)});
+  Id descriptorLayers = csAdd(t, csAnd(t, t.ldSg(srsrc + 4), t.m.constU32(0x1FFF)),
+                               t.m.constU32(1));
+  descriptorLayers = t.m.emit(spv::Op::OpSelect, t.tU,
+                              {pow2Pad, csBitCeil(t, descriptorLayers), descriptorLayers});
+  Id layers = t.m.emit(spv::Op::OpSelect, t.tU,
+                       {isArray, descriptorLayers, t.m.constU32(1)});
   Id baseOk = t.m.emit(spv::Op::OpULessThan, t.tBool, {baseArray, layers});
   Id lastOk = t.m.emit(spv::Op::OpUGreaterThanEqual, t.tBool, {lastArray, baseArray});
   Id viewOk = t.m.emit(spv::Op::OpULessThanEqual, t.tBool,
@@ -1066,11 +1121,13 @@ void emitCsMimg(Tr &t, const Inst &in, StageCtx &sc) {
   arrayOk = t.m.emit(spv::Op::OpLogicalAnd, t.tBool, {arrayOk, viewOk});
   arrayOk = t.m.emit(spv::Op::OpLogicalAnd, t.tBool, {arrayOk, physicalOk});
   Id layerOk = t.m.emit(spv::Op::OpSelect, t.tBool,
-                        {isArray, arrayOk, t.m.constBool(true)});
+                         {isArray, arrayOk, t.m.constBool(true)});
+  Id mipOk = t.m.emit(spv::Op::OpUGreaterThanEqual, t.tBool, {lastMip, baseMip});
   Id valid = t.m.emit(spv::Op::OpULessThan, t.tBool, {x, width});
   valid = t.m.emit(spv::Op::OpLogicalAnd, t.tBool,
                    {valid, t.m.emit(spv::Op::OpULessThan, t.tBool, {y, height})});
   valid = t.m.emit(spv::Op::OpLogicalAnd, t.tBool, {valid, layerOk});
+  valid = t.m.emit(spv::Op::OpLogicalAnd, t.tBool, {valid, mipOk});
   if (load) {
     uint32_t comp = 0;
     for (int i = 0; i < 4; i++)
@@ -1081,29 +1138,61 @@ void emitCsMimg(Tr &t, const Inst &in, StageCtx &sc) {
   t.m.branchConditional(valid, accessBlk, mergeBlk);
   t.m.openBlock(accessBlk);
   Id layer = t.m.emit(spv::Op::OpSelect, t.tU,
-                      {isArray, physicalLayer, t.m.constU32(0)});
-  Id layerOff = csMul(t, layer, csMul(t, pitch, height));
-  Id dwordIdx = csAdd(t, layerOff, csAdd(t, csMul(t, y, pitch), x));
+                       {isArray, physicalLayer, t.m.constU32(0)});
+  Id mipOff = t.m.constU32(0);
+  for (uint32_t mip = 0; mip < 16; mip++) {
+    Id level = t.m.constU32(mip);
+    Id levelHeight = csMax1(t, csShr(t, baseHeight, mip));
+    Id levelStoredHeight = t.m.emit(spv::Op::OpSelect, t.tU,
+                                    {pow2Pad, csBitCeil(t, levelHeight), levelHeight});
+    Id levelPitch = csLinearMipPitch(t, basePitch, levelStoredHeight, level,
+                                     linearGeneral, pow2Pad);
+    Id levelSize = csMul(t, csMul(t, levelPitch, levelStoredHeight), layers);
+    Id before = t.m.emit(spv::Op::OpULessThan, t.tBool, {level, physicalMip});
+    mipOff = csAdd(t, mipOff, t.m.emit(spv::Op::OpSelect, t.tU,
+                                       {before, levelSize, t.m.constU32(0)}));
+  }
+  Id layerOff = csMul(t, layer, csMul(t, pitch, storedHeight));
+  Id dwordIdx = csAdd(t, mipOff,
+                      csAdd(t, layerOff, csAdd(t, csMul(t, y, pitch), x)));
   if (load) {
     Id raw = csSsboLoad(t, sc, (uint32_t)b, dwordIdx);
     uint32_t comp = 0;
-    for (int i = 0; i < 4; i++)
-      if (dmask & (1 << i))
-        t.stVg(vdata + comp++, csAnd(t, csShr(t, raw, i * 8u), t.m.constU32(0xFF)));
+    for (int i = 0; i < 4; i++) {
+      if (!(dmask & (1 << i))) continue;
+      Id byte = csAnd(t, csShr(t, raw, i * 8u), t.m.constU32(0xFF));
+      Id normalized = t.m.emit(spv::Op::OpConvertUToF, t.tF, {byte});
+      normalized = t.m.emit(spv::Op::OpFMul, t.tF,
+                             {normalized, t.fconst(1.0f / 255.0f)});
+      Id value = t.m.emit(spv::Op::OpSelect, t.tU,
+                           {isUnorm, csUf(t, normalized), byte});
+      t.stVg(vdata + comp++, value);
+    }
   } else {
+    auto storeByte = [&](uint32_t reg) {
+      Id value = t.ldVg(reg);
+      Id normalized = t.m.extInst(t.tF, GLSLstd450FClamp,
+                                   {csF(t, value), t.fconst(0.0f), t.fconst(1.0f)});
+      normalized = t.m.emit(spv::Op::OpFMul, t.tF,
+                             {normalized, t.fconst(255.0f)});
+      normalized = t.m.extInst(t.tF, GLSLstd450RoundEven, {normalized});
+      Id unorm = t.m.emit(spv::Op::OpConvertFToU, t.tU, {normalized});
+      return csAnd(t, t.m.emit(spv::Op::OpSelect, t.tU,
+                               {isUnorm, unorm, value}), t.m.constU32(0xFF));
+    };
     Id packed;
     if (dmask == 0xF) {
-      packed = csAnd(t, t.ldVg(vdata), t.m.constU32(0xFF));
-      packed = csOr(t, packed, csShl(t, csAnd(t, t.ldVg(vdata + 1), t.m.constU32(0xFF)), 8));
-      packed = csOr(t, packed, csShl(t, csAnd(t, t.ldVg(vdata + 2), t.m.constU32(0xFF)), 16));
-      packed = csOr(t, packed, csShl(t, csAnd(t, t.ldVg(vdata + 3), t.m.constU32(0xFF)), 24));
+      packed = storeByte(vdata);
+      packed = csOr(t, packed, csShl(t, storeByte(vdata + 1), 8));
+      packed = csOr(t, packed, csShl(t, storeByte(vdata + 2), 16));
+      packed = csOr(t, packed, csShl(t, storeByte(vdata + 3), 24));
     } else {
       packed = csSsboLoad(t, sc, (uint32_t)b, dwordIdx);  // read-modify-write
       uint32_t comp = 0;
       for (int i = 0; i < 4; i++) {
         if (!(dmask & (1 << i))) continue;
         Id keep = csAnd(t, packed, t.m.constU32(~(0xFFu << (i * 8))));
-        Id ins = csShl(t, csAnd(t, t.ldVg(vdata + comp++), t.m.constU32(0xFF)), i * 8u);
+        Id ins = csShl(t, storeByte(vdata + comp++), i * 8u);
         packed = csOr(t, keep, ins);
       }
     }
@@ -1952,8 +2041,10 @@ bool planCsResources(const std::vector<Inst> &insts, RecompiledCs &r,
       }
       case Enc::mimg: {
         uint32_t op = (w >> 18) & 0x7F, srsrc = ((w1 >> 16) & 0x1F) * 4;
-        bool store = (op == 0x08), load = (op == 0x00 || op == 0x01);
-        if (!store && !load) return false;
+        bool r128 = (w & 0x8000) != 0;
+        bool store = (op == 0x08 || op == 0x09);
+        bool load = (op == 0x00 || op == 0x01);
+        if (!store && !load || r128 || srsrc + 7 >= 16) return false;
         if (!resource(srsrc, 1, store, 0)) return false;
         break;
       }

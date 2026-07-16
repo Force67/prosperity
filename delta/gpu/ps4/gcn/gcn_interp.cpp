@@ -20,6 +20,7 @@
 #include <algorithm>
 
 #include "gcn_decode.h"
+#include "gcn_detile.h"
 #include "gcn_resource.h"
 
 namespace gpu::gcn {
@@ -195,42 +196,83 @@ uint32_t mubufLoad(Lane &L, const Inst &in) {
   return val;
 }
 
-// image_store: write vdata.. to a linear (tiling=8) 8888 T# image. Array views
-// select base_array, and MIMG DA adds vaddr+2 as a view-relative layer.
+// Resolve a linear RGBA8 image texel. Array and mip coordinates are relative to
+// the descriptor view; the returned pointer addresses the physical mip chain.
+uint8_t *imagePixel(Lane &L, const Inst &in, TImage &t) {
+  uint32_t w = in.raw[0], w1 = in.raw[1];
+  bool mipOp = in.opcode == 0x01 || in.opcode == 0x09;
+  uint32_t vaddr = w1 & 0xFF, srsrc = ((w1 >> 16) & 0x1F) * 4;
+  t = decodeTImage(&L.s[srsrc]);
+  uint64_t base = t.base;
+  if (!t.valid || t.dfmt != 10 || (t.nfmt != 0 && t.nfmt != 4) ||
+      !tilingIsLinear(t.tilingIdx) || !guestOk(base)) return nullptr;
+  TextureLayout32 layout;
+  if (!buildTextureLayout32(layout, t.width, t.height, t.pitch, t.layers,
+                            t.mipLevels, t.tilingIdx, t.pow2Pad)) return nullptr;
+  uint32_t viewMip = mipOp ? L.v[vaddr + ((w & 0x4000) ? 3 : 2)] : 0;
+  viewMip = std::min(viewMip, t.viewMips - 1);
+  uint32_t mip = t.baseMip + viewMip;
+  const TextureMipLayout32 &level = layout.mips[mip];
+  uint32_t x = L.v[vaddr], y = L.v[vaddr + 1], layer = 0;
+  if (t.type == 13) {
+    uint32_t viewLayer = (w & 0x4000) ? L.v[vaddr + 2] : 0;
+    if (viewLayer >= t.viewLayers) return nullptr;
+    layer = t.baseArray + viewLayer;
+  }
+  if (x >= level.width || y >= level.height || layer >= t.layers) return nullptr;
+  uint64_t pixel = ((uint64_t)layer * level.storedHeight + y) * level.pitch + x;
+  uint64_t addr = base + level.offset + pixel * 4;
+  if (!guestOk(addr) || !guestOk(addr + 3)) return nullptr;
+  return reinterpret_cast<uint8_t *>(addr);
+}
+
+uint32_t imageChannelLoad(uint8_t value, uint32_t nfmt) {
+  if (nfmt == 4) return value;  // UINT
+  float normalized = static_cast<float>(value) / 255.0f;
+  uint32_t bits;
+  std::memcpy(&bits, &normalized, sizeof(bits));
+  return bits;
+}
+
+uint8_t imageChannelStore(uint32_t value, uint32_t nfmt) {
+  if (nfmt == 4) return static_cast<uint8_t>(value & 0xFF);  // UINT
+  float normalized;
+  std::memcpy(&normalized, &value, sizeof(normalized));
+  if (!std::isfinite(normalized)) normalized = 0.0f;
+  normalized = std::clamp(normalized, 0.0f, 1.0f);
+  return static_cast<uint8_t>(std::nearbyint(normalized * 255.0f));
+}
+
+void imageLoad(Lane &L, const Inst &in) {
+  uint32_t w = in.raw[0], w1 = in.raw[1];
+  uint32_t dmask = (w >> 8) & 0xF, vdata = (w1 >> 8) & 0xFF;
+  TImage t;
+  uint8_t *px = imagePixel(L, in, t);
+  if (!px) return;
+  uint32_t comp = 0;
+  for (int i = 0; i < 4; i++)
+    if (dmask & (1 << i)) L.wrV(vdata + comp++, imageChannelLoad(px[i], t.nfmt));
+}
+
 void imageStore(Lane &L, const Inst &in) {
   uint32_t w = in.raw[0], w1 = in.raw[1];
-  uint32_t dmask = (w >> 8) & 0xF;
-  uint32_t vaddr = w1 & 0xFF, vdata = (w1 >> 8) & 0xFF, srsrc = ((w1 >> 16) & 0x1F) * 4;
-  TImage t = decodeTImage(&L.s[srsrc]);
-  // GFX6/7 image base is 40-bit (dword0<<8); decodeTImage also folds in dword1[7:0]
-  // which on Liverpool is min_lod, not base[47:40], yielding a bogus >40-bit address.
-  // Use the 40-bit base so the dest matches where the draw samples it.
-  uint64_t base = ((uint64_t)L.s[srsrc] << 8) & 0xFFFFFFFFFFull;
+  uint32_t dmask = (w >> 8) & 0xF, vaddr = w1 & 0xFF;
+  uint32_t vdata = (w1 >> 8) & 0xFF, srsrc = ((w1 >> 16) & 0x1F) * 4;
+  TImage t;
+  uint8_t *px = imagePixel(L, in, t);
   static int dbg = 0;
   if (std::getenv("DELTA_GPU_CSRUN_VERBOSE") && dbg < 4) {
     dbg++;
     uint32_t z = (w & 0x4000) ? L.v[vaddr + 2] : 0;
     std::fprintf(stderr, "[csimg] srsrc=%u base=%#lx %ux%ux%u pitch=%u dfmt=%u "
-                          "coord=[%u %u %u]\n",
-                 srsrc, (unsigned long)base, t.width, t.height, t.layers, t.pitch,
-                 t.dfmt, L.v[vaddr], L.v[vaddr + 1], z);
+                         "nfmt=%u coord=[%u %u %u] valid=%d\n",
+                 srsrc, (unsigned long)t.base, t.width, t.height, t.layers, t.pitch,
+                 t.dfmt, t.nfmt, L.v[vaddr], L.v[vaddr + 1], z, px != nullptr);
   }
-  if (!t.width || !t.height || !guestOk(base)) return;
-  t.base = base;
-  uint32_t x = L.v[vaddr], y = L.v[vaddr + 1], layer = 0;
-  if (t.type == 13) {
-    uint32_t viewLayer = (w & 0x4000) ? L.v[vaddr + 2] : 0;
-    if (viewLayer >= t.viewLayers) return;
-    layer = t.baseArray + viewLayer;
-  }
-  if (x >= t.width || y >= t.height || layer >= t.layers) return;
-  uint64_t pixel = ((uint64_t)layer * t.height + y) * t.pitch + x;
-  uint64_t addr = t.base + pixel * 4;
-  if (!guestOk(addr) || !guestOk(addr + 3)) return;
-  uint8_t *px = reinterpret_cast<uint8_t *>(addr);
+  if (!px) return;
   uint32_t comp = 0;
   for (int i = 0; i < 4; i++)
-    if (dmask & (1 << i)) px[i] = (uint8_t)(L.v[vdata + comp++] & 0xFF);
+    if (dmask & (1 << i)) px[i] = imageChannelStore(L.v[vdata + comp++], t.nfmt);
 }
 
 void runLane(Lane &L, const std::vector<Inst> &insts) {
@@ -300,7 +342,8 @@ void runLane(Lane &L, const std::vector<Inst> &insts) {
         break;
       }
       case Enc::mimg:
-        if (in.opcode == 0x08 && L.exec) imageStore(L, in);  // image_store
+        if ((in.opcode == 0x00 || in.opcode == 0x01) && L.exec) imageLoad(L, in);
+        else if ((in.opcode == 0x08 || in.opcode == 0x09) && L.exec) imageStore(L, in);
         break;
       case Enc::sopp:
         // s_cbranch_execz (op 0x08): if exec==0, jump past the (bounds-guarded)
