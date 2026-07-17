@@ -145,13 +145,13 @@ struct State {
 struct TexImageKey {
   uint64_t base = 0;
   uint32_t w = 0, h = 0, tiling = 8, pitch = 0, layers = 1;
-  uint32_t mipLevels = 1;
+  uint32_t mip_levels = 1;
   VkFormat format = VK_FORMAT_UNDEFINED;
-  bool pow2Pad = false;
+  bool pow2_pad = false;
   bool operator==(const TexImageKey &o) const {
     return base == o.base && w == o.w && h == o.h && tiling == o.tiling &&
-           pitch == o.pitch && layers == o.layers && mipLevels == o.mipLevels &&
-           format == o.format && pow2Pad == o.pow2Pad;
+           pitch == o.pitch && layers == o.layers && mip_levels == o.mip_levels &&
+           format == o.format && pow2_pad == o.pow2_pad;
   }
 };
 uint64_t hashWord(uint64_t h, uint64_t v) {
@@ -162,7 +162,7 @@ struct TexImageKeyHash {
     uint64_t h = 1469598103934665603ull;
     h = hashWord(h, k.base); h = hashWord(h, k.w); h = hashWord(h, k.h);
     h = hashWord(h, k.tiling); h = hashWord(h, k.pitch); h = hashWord(h, k.layers);
-    h = hashWord(h, k.mipLevels); h = hashWord(h, k.pow2Pad);
+    h = hashWord(h, k.mip_levels); h = hashWord(h, k.pow2_pad);
     h = hashWord(h, k.format);
     return static_cast<size_t>(h);
   }
@@ -172,11 +172,11 @@ struct SamplerKey {
   uint32_t raw[4] = {};
   uint32_t imageMinLod = 0;
   bool valid = false;
-  bool forceLodZero = false;
-  bool depthCompare = false;
+  bool force_lod_zero = false;
+  bool depth_compare = false;
   bool operator==(const SamplerKey &o) const {
     return valid == o.valid && imageMinLod == o.imageMinLod &&
-           forceLodZero == o.forceLodZero && depthCompare == o.depthCompare &&
+           force_lod_zero == o.force_lod_zero && depth_compare == o.depth_compare &&
            std::memcmp(raw, o.raw, sizeof(raw)) == 0;
   }
 };
@@ -185,30 +185,30 @@ struct SamplerKeyHash {
     uint64_t h = hashWord(1469598103934665603ull, k.valid);
     for (uint32_t word : k.raw) h = hashWord(h, word);
     h = hashWord(h, k.imageMinLod);
-    h = hashWord(h, k.forceLodZero);
-    h = hashWord(h, k.depthCompare);
+    h = hashWord(h, k.force_lod_zero);
+    h = hashWord(h, k.depth_compare);
     return static_cast<size_t>(h);
   }
 };
 
 struct TexKey {
   TexImageKey image;
-  uint32_t baseArray = 0, viewLayers = 1;
-  uint32_t baseMip = 0, viewMips = 1;
+  uint32_t base_array = 0, view_layers = 1;
+  uint32_t base_mip = 0, view_mips = 1;
   SamplerKey sampler;
   bool arrayed = false;
   bool operator==(const TexKey &o) const {
-    return image == o.image && baseArray == o.baseArray &&
-           viewLayers == o.viewLayers && baseMip == o.baseMip &&
-           viewMips == o.viewMips && sampler == o.sampler &&
+    return image == o.image && base_array == o.base_array &&
+           view_layers == o.view_layers && base_mip == o.base_mip &&
+           view_mips == o.view_mips && sampler == o.sampler &&
            arrayed == o.arrayed;
   }
 };
 struct TexKeyHash {
   size_t operator()(const TexKey &k) const {
     uint64_t h = TexImageKeyHash{}(k.image);
-    h = hashWord(h, k.baseArray); h = hashWord(h, k.viewLayers);
-    h = hashWord(h, k.baseMip); h = hashWord(h, k.viewMips);
+    h = hashWord(h, k.base_array); h = hashWord(h, k.view_layers);
+    h = hashWord(h, k.base_mip); h = hashWord(h, k.view_mips);
     h = hashWord(h, SamplerKeyHash{}(k.sampler));
     return static_cast<size_t>(hashWord(h, k.arrayed));
   }
@@ -216,20 +216,20 @@ struct TexKeyHash {
 
 struct TexViewKey {
   TexImageKey image;
-  uint32_t baseArray = 0, viewLayers = 1;
-  uint32_t baseMip = 0, viewMips = 1;
+  uint32_t base_array = 0, view_layers = 1;
+  uint32_t base_mip = 0, view_mips = 1;
   bool arrayed = false;
   bool operator==(const TexViewKey &o) const {
-    return image == o.image && baseArray == o.baseArray &&
-           viewLayers == o.viewLayers && baseMip == o.baseMip &&
-           viewMips == o.viewMips && arrayed == o.arrayed;
+    return image == o.image && base_array == o.base_array &&
+           view_layers == o.view_layers && base_mip == o.base_mip &&
+           view_mips == o.view_mips && arrayed == o.arrayed;
   }
 };
 struct TexViewKeyHash {
   size_t operator()(const TexViewKey &k) const {
     uint64_t h = TexImageKeyHash{}(k.image);
-    h = hashWord(h, k.baseArray); h = hashWord(h, k.viewLayers);
-    h = hashWord(h, k.baseMip); h = hashWord(h, k.viewMips);
+    h = hashWord(h, k.base_array); h = hashWord(h, k.view_layers);
+    h = hashWord(h, k.base_mip); h = hashWord(h, k.view_mips);
     return static_cast<size_t>(hashWord(h, k.arrayed));
   }
 };
@@ -323,32 +323,32 @@ uint32_t formatBytes(VkFormat fmt) {
 
 TexKey textureKey(uint64_t base, uint32_t w, uint32_t h, uint32_t dfmt,
                    uint32_t nfmt, uint32_t tiling,
-                   uint32_t pitch, uint32_t layers, uint32_t baseArray,
-                   uint32_t viewLayers, uint32_t mipLevels, uint32_t baseMip,
-                   uint32_t viewMips, uint32_t minLod, bool pow2Pad,
-                   const uint32_t *sampler, bool samplerValid, bool arrayed,
-                   bool forceLodZero, bool depthCompare) {
-  if (layers && baseArray < layers)
-    viewLayers = std::min(viewLayers, layers - baseArray);
-  if (!arrayed) viewLayers = 1;
-  if (mipLevels && baseMip < mipLevels)
-    viewMips = std::min(viewMips, mipLevels - baseMip);
+                   uint32_t pitch, uint32_t layers, uint32_t base_array,
+                   uint32_t view_layers, uint32_t mip_levels, uint32_t base_mip,
+                   uint32_t view_mips, uint32_t min_lod, bool pow2_pad,
+                   const uint32_t *sampler, bool sampler_valid, bool arrayed,
+                   bool force_lod_zero, bool depth_compare) {
+  if (layers && base_array < layers)
+    view_layers = std::min(view_layers, layers - base_array);
+  if (!arrayed) view_layers = 1;
+  if (mip_levels && base_mip < mip_levels)
+    view_mips = std::min(view_mips, mip_levels - base_mip);
   TexKey key;
-  key.image = {base, w, h, tiling, pitch, layers, mipLevels,
-               guestTextureFormat(dfmt, nfmt), pow2Pad};
-  key.baseArray = baseArray; key.viewLayers = viewLayers;
-  key.baseMip = baseMip; key.viewMips = viewMips;
-  key.sampler.valid = samplerValid && sampler;
+  key.image = {base, w, h, tiling, pitch, layers, mip_levels,
+               guestTextureFormat(dfmt, nfmt), pow2_pad};
+  key.base_array = base_array; key.view_layers = view_layers;
+  key.base_mip = base_mip; key.view_mips = view_mips;
+  key.sampler.valid = sampler_valid && sampler;
   if (key.sampler.valid) std::memcpy(key.sampler.raw, sampler, sizeof(key.sampler.raw));
-  key.sampler.imageMinLod = minLod;
-  key.sampler.forceLodZero = forceLodZero;
-  key.sampler.depthCompare = depthCompare;
+  key.sampler.imageMinLod = min_lod;
+  key.sampler.force_lod_zero = force_lod_zero;
+  key.sampler.depth_compare = depth_compare;
   key.arrayed = arrayed;
   return key;
 }
 
 TexViewKey textureViewKey(const TexKey &key) {
-  return {key.image, key.baseArray, key.viewLayers, key.baseMip, key.viewMips,
+  return {key.image, key.base_array, key.view_layers, key.base_mip, key.view_mips,
           key.arrayed};
 }
 
@@ -491,13 +491,13 @@ uint32_t findMemoryTypePref(uint32_t typeBits, VkMemoryPropertyFlags pref,
 
 void imageBarrier(VkCommandBuffer c, VkImage img, VkImageLayout from,
                    VkImageLayout to, VkAccessFlags srcA, VkAccessFlags dstA,
-                   uint32_t layers = 1, uint32_t mipLevels = 1) {
+                   uint32_t layers = 1, uint32_t mip_levels = 1) {
   VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
   b.oldLayout = from;
   b.newLayout = to;
   b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
   b.image = img;
-  b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, mipLevels, 0, layers};
+  b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, mip_levels, 0, layers};
   b.srcAccessMask = srcA;
   b.dstAccessMask = dstA;
   vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
@@ -926,7 +926,7 @@ bool createTexPipeline() {
     vkBindImageMemory(g.device, g.whiteImg, g.whiteMem, 0);
     uint32_t white = 0xFFFFFFFFu;
     gcn::TextureLayout32 whiteLayout;
-    gcn::buildTextureLayout32(whiteLayout, 1, 1, 1, 1, 1, 31, false);
+    gcn::BuildTextureLayout32(whiteLayout, 1, 1, 1, 1, 1, 31, false);
     uploadTexPixels(g.whiteImg, reinterpret_cast<uint64_t>(&white), whiteLayout);
     VkImageViewCreateInfo wv{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
     wv.image = g.whiteImg; wv.viewType = VK_IMAGE_VIEW_TYPE_2D;
@@ -1011,7 +1011,7 @@ VkDescriptorSet allocateSamplerSet(VkDescriptorSetLayout layout, bool multi,
 }
 
 VkSampler samplerFor(const SamplerKey &key) {
-  if (!key.valid && !key.forceLodZero && !key.depthCompare) return g.sampler;
+  if (!key.valid && !key.force_lod_zero && !key.depth_compare) return g.sampler;
   auto found = g_samplerCache.find(key);
   if (found != g_samplerCache.end()) return found->second;
   if (g_samplerCache.size() >= 4096) return g.sampler;
@@ -1039,12 +1039,12 @@ VkSampler samplerFor(const SamplerKey &key) {
   ci.mipmapMode = mipFilter == 2 ? VK_SAMPLER_MIPMAP_MODE_LINEAR
                                   : VK_SAMPLER_MIPMAP_MODE_NEAREST;
   if (mipFilter) {
-    uint32_t minLod = std::max(key.raw[1] & 0xFFF, key.imageMinLod);
-    ci.minLod = static_cast<float>(minLod) / 256.0f;
+    uint32_t min_lod = std::max(key.raw[1] & 0xFFF, key.imageMinLod);
+    ci.minLod = static_cast<float>(min_lod) / 256.0f;
     ci.maxLod = static_cast<float>((key.raw[1] >> 12) & 0xFFF) / 256.0f;
     ci.maxLod = std::max(ci.minLod, ci.maxLod);
   }
-  if (key.forceLodZero) ci.minLod = ci.maxLod = 0.0f;
+  if (key.force_lod_zero) ci.minLod = ci.maxLod = 0.0f;
   int32_t bias = static_cast<int32_t>(key.raw[2] << 18) >> 18;
   VkPhysicalDeviceProperties props;
   vkGetPhysicalDeviceProperties(g.phys, &props);
@@ -1056,7 +1056,7 @@ VkSampler samplerFor(const SamplerKey &key) {
     case 2: ci.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE; break;
     default: ci.borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK; break;
   }
-  ci.compareEnable = key.depthCompare;
+  ci.compareEnable = key.depth_compare;
   switch ((key.raw[0] >> 12) & 7) {
     case 0: ci.compareOp = VK_COMPARE_OP_NEVER; break;
     case 1: ci.compareOp = VK_COMPARE_OP_LESS; break;
@@ -1089,7 +1089,7 @@ void uploadTexPixels(VkImage img, uint64_t base,
   static const bool noDetile = std::getenv("DELTA_GPU_NODETILE") != nullptr;
   std::vector<uint32_t> linear;
   uint64_t linearDwords = 0;
-  for (uint32_t mip = 0; mip < layout.mipLevels; mip++)
+  for (uint32_t mip = 0; mip < layout.mip_levels; mip++)
     linearDwords += static_cast<uint64_t>(layout.mips[mip].width) *
                     layout.mips[mip].height * layout.layers;
   linear.resize(static_cast<size_t>(linearDwords));
@@ -1097,7 +1097,7 @@ void uploadTexPixels(VkImage img, uint64_t base,
   VkBufferImageCopy copies[16]{};
   uint64_t linearOffset = 0;
   const uint32_t *src = reinterpret_cast<const uint32_t *>(base);
-  for (uint32_t mip = 0; mip < layout.mipLevels; mip++) {
+  for (uint32_t mip = 0; mip < layout.mip_levels; mip++) {
     const auto &level = layout.mips[mip];
     copies[mip].bufferOffset = linearOffset * 4;
     copies[mip].imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, mip, 0, layout.layers};
@@ -1106,10 +1106,10 @@ void uploadTexPixels(VkImage img, uint64_t base,
       uint32_t *dst = linear.data() + linearOffset +
                       static_cast<uint64_t>(layer) * level.width * level.height;
       if (!noDetile) {
-        gcn::detileTextureMip32(src, dst, layout, mip, layer);
+        gcn::DetileTextureMip32(src, dst, layout, mip, layer);
       } else {
         const uint32_t *levelSrc = src + level.offset / 4 +
-            static_cast<uint64_t>(layer) * level.pitch * level.storedHeight;
+            static_cast<uint64_t>(layer) * level.pitch * level.stored_height;
         for (uint32_t y = 0; y < level.height; y++)
           std::memcpy(dst + static_cast<size_t>(y) * level.width,
                       levelSrc + static_cast<size_t>(y) * level.pitch,
@@ -1141,12 +1141,12 @@ void uploadTexPixels(VkImage img, uint64_t base,
   cbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
   vkBeginCommandBuffer(c, &cbi);
   imageBarrier(c, img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-               0, VK_ACCESS_TRANSFER_WRITE_BIT, layout.layers, layout.mipLevels);
+               0, VK_ACCESS_TRANSFER_WRITE_BIT, layout.layers, layout.mip_levels);
   vkCmdCopyBufferToImage(c, stg, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                         layout.mipLevels, copies);
+                         layout.mip_levels, copies);
   imageBarrier(c, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
-               VK_ACCESS_SHADER_READ_BIT, layout.layers, layout.mipLevels);
+               VK_ACCESS_SHADER_READ_BIT, layout.layers, layout.mip_levels);
   vkEndCommandBuffer(c);
   VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
   si.commandBufferCount = 1; si.pCommandBuffers = &c;
@@ -1198,40 +1198,40 @@ void retireTextureImage(const TexImageKey &key) {
 VkDescriptorSet getTexture(uint64_t base, uint32_t w, uint32_t h,
                              uint32_t dfmt, uint32_t nfmt,
                              uint32_t tiling = 8, uint32_t pitch = 0,
-                            uint32_t layers = 1, uint32_t baseArray = 0,
-                             uint32_t viewLayers = 1, uint32_t mipLevels = 1,
-                             uint32_t baseMip = 0, uint32_t viewMips = 1,
-                              uint32_t minLod = 0, bool pow2Pad = false,
+                            uint32_t layers = 1, uint32_t base_array = 0,
+                             uint32_t view_layers = 1, uint32_t mip_levels = 1,
+                             uint32_t base_mip = 0, uint32_t view_mips = 1,
+                              uint32_t min_lod = 0, bool pow2_pad = false,
                               const uint32_t *sampler = nullptr,
-                              bool samplerValid = false, bool arrayed = false,
-                              bool forceLodZero = false,
-                              bool depthCompare = false) {
+                              bool sampler_valid = false, bool arrayed = false,
+                              bool force_lod_zero = false,
+                              bool depth_compare = false) {
   constexpr uint64_t kGuestBegin = 0x1000000000ull;
   constexpr uint64_t kGuestEnd = 0x20000000000ull;
   constexpr uint64_t kMaxTextureBytes = 256ull * 1024 * 1024;
   if (!w || !h || w > 8192 || h > 8192) return VK_NULL_HANDLE;
   VkFormat format = guestTextureFormat(dfmt, nfmt);
   if (format == VK_FORMAT_UNDEFINED) return VK_NULL_HANDLE;
-  if (!layers || baseArray >= layers) return VK_NULL_HANDLE;
-  viewLayers = std::min(viewLayers, layers - baseArray);
-  if (!arrayed) viewLayers = 1;
-  if (!viewLayers) return VK_NULL_HANDLE;
-  if (!mipLevels || baseMip >= mipLevels) return VK_NULL_HANDLE;
-  viewMips = std::min(viewMips, mipLevels - baseMip);
-  if (!viewMips) return VK_NULL_HANDLE;
+  if (!layers || base_array >= layers) return VK_NULL_HANDLE;
+  view_layers = std::min(view_layers, layers - base_array);
+  if (!arrayed) view_layers = 1;
+  if (!view_layers) return VK_NULL_HANDLE;
+  if (!mip_levels || base_mip >= mip_levels) return VK_NULL_HANDLE;
+  view_mips = std::min(view_mips, mip_levels - base_mip);
+  if (!view_mips) return VK_NULL_HANDLE;
   // Diagnostic override used to identify incorrectly described guest surfaces.
   tiling = textureTiling(tiling);
   gcn::TextureLayout32 layout;
-  if (!gcn::buildTextureLayout32(layout, w, h, pitch ? pitch : w, layers,
-                                  mipLevels, tiling, pow2Pad))
+  if (!gcn::BuildTextureLayout32(layout, w, h, pitch ? pitch : w, layers,
+                                  mip_levels, tiling, pow2_pad))
     return VK_NULL_HANDLE;
   uint64_t footprint = layout.size;
   if (base < kGuestBegin || footprint > kMaxTextureBytes || base > kGuestEnd - footprint)
     return VK_NULL_HANDLE;
-  TexKey key = textureKey(base, w, h, dfmt, nfmt, tiling, pitch, layers, baseArray,
-                             viewLayers, mipLevels, baseMip, viewMips, minLod,
-                             pow2Pad, sampler, samplerValid, arrayed,
-                             forceLodZero, depthCompare);
+  TexKey key = textureKey(base, w, h, dfmt, nfmt, tiling, pitch, layers, base_array,
+                             view_layers, mip_levels, base_mip, view_mips, min_lod,
+                             pow2_pad, sampler, sampler_valid, arrayed,
+                             force_lod_zero, depth_compare);
   // Diagnostic (DELTA_GPU_TEXDUMP): in deep gameplay, dump the first few large guest
   // textures sampled, so a non-tutorial room's floor texture can be inspected (is it
   // loaded/brown or black/zero?). Counts non-zero pixels too.
@@ -1276,7 +1276,7 @@ VkDescriptorSet getTexture(uint64_t base, uint32_t w, uint32_t h,
     ii.imageType = VK_IMAGE_TYPE_2D;
     ii.format = format;
     ii.extent = {w, h, 1};
-    ii.mipLevels = mipLevels; ii.arrayLayers = layers;
+    ii.mipLevels = mip_levels; ii.arrayLayers = layers;
     ii.samples = VK_SAMPLE_COUNT_1_BIT;
     ii.tiling = VK_IMAGE_TILING_OPTIMAL;
     ii.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
@@ -1313,8 +1313,8 @@ VkDescriptorSet getTexture(uint64_t base, uint32_t w, uint32_t h,
     vci.image = imageIt->second.image;
     vci.viewType = arrayed ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
     vci.format = format;
-    vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, baseMip, viewMips, baseArray,
-                            arrayed ? viewLayers : 1};
+    vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, base_mip, view_mips, base_array,
+                            arrayed ? view_layers : 1};
     if (vkCreateImageView(g.device, &vci, nullptr, &viewEntry.view) != VK_SUCCESS)
       return VK_NULL_HANDLE;
     viewIt = g_texViews.emplace(viewKey, viewEntry).first;
@@ -1346,17 +1346,17 @@ VkImageView texViewFor(const DrawInfo::DrawTex &t) {
   if (!t.base || !t.w || !t.h || !guestTextureUploadSupported(t.dfmt, t.nfmt))
     return VK_NULL_HANDLE;
   if (getTexture(t.base, t.w, t.h, t.dfmt, t.nfmt, t.tiling, t.pitch,
-                   t.layers, t.baseArray,
-                   t.viewLayers, t.mipLevels, t.baseMip, t.viewMips,
-                   t.minLod, t.pow2Pad, t.sampler, t.samplerValid,
-                   t.arrayed, t.forceLodZero, t.depthCompare) == VK_NULL_HANDLE)
+                   t.layers, t.base_array,
+                   t.view_layers, t.mip_levels, t.base_mip, t.view_mips,
+                   t.min_lod, t.pow2_pad, t.sampler, t.sampler_valid,
+                   t.arrayed, t.force_lod_zero, t.depth_compare) == VK_NULL_HANDLE)
     return VK_NULL_HANDLE;
   TexKey key = textureKey(t.base, t.w, t.h, t.dfmt, t.nfmt,
                            textureTiling(t.tiling), t.pitch,
-                           t.layers, t.baseArray, t.viewLayers, t.mipLevels,
-                           t.baseMip, t.viewMips, t.minLod, t.pow2Pad, t.sampler,
-                           t.samplerValid, t.arrayed, t.forceLodZero,
-                           t.depthCompare);
+                           t.layers, t.base_array, t.view_layers, t.mip_levels,
+                           t.base_mip, t.view_mips, t.min_lod, t.pow2_pad, t.sampler,
+                           t.sampler_valid, t.arrayed, t.force_lod_zero,
+                           t.depth_compare);
   auto it = g_texViews.find(textureViewKey(key));
   return it != g_texViews.end() ? it->second.view : VK_NULL_HANDLE;
 }
@@ -1426,10 +1426,10 @@ VkDescriptorSet getMultiTexSet(const DrawInfo &d, const VkImageView *resolvedVie
     const auto &t = d.texs[i];
     key.tex[i] = textureKey(t.base, t.w, t.h, t.dfmt, t.nfmt,
                             textureTiling(t.tiling), t.pitch,
-                            t.layers, t.baseArray, t.viewLayers, t.mipLevels,
-                            t.baseMip, t.viewMips, t.minLod, t.pow2Pad, t.sampler,
-                            t.samplerValid, t.arrayed, t.forceLodZero,
-                            t.depthCompare);
+                            t.layers, t.base_array, t.view_layers, t.mip_levels,
+                            t.base_mip, t.view_mips, t.min_lod, t.pow2_pad, t.sampler,
+                            t.sampler_valid, t.arrayed, t.force_lod_zero,
+                            t.depth_compare);
     key.view[i] = resolvedViews[i];
     key.layout[i] = resolvedLayouts[i];
   }
@@ -1458,11 +1458,11 @@ VkDescriptorSet getMultiTexSet(const DrawInfo &d, const VkImageView *resolvedVie
   for (uint32_t i = 0; i < State::kMaxTex; i++) {
     SamplerKey sampler;
     if (i < key.nTexs) {
-      sampler.valid = d.texs[i].samplerValid;
+      sampler.valid = d.texs[i].sampler_valid;
       std::memcpy(sampler.raw, d.texs[i].sampler, sizeof(sampler.raw));
-      sampler.imageMinLod = d.texs[i].minLod;
-      sampler.forceLodZero = d.texs[i].forceLodZero;
-      sampler.depthCompare = d.texs[i].depthCompare;
+      sampler.imageMinLod = d.texs[i].min_lod;
+      sampler.force_lod_zero = d.texs[i].force_lod_zero;
+      sampler.depth_compare = d.texs[i].depth_compare;
     }
     dii[i] = {samplerFor(sampler), views[i], layouts[i]};
     wr[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
@@ -2303,15 +2303,15 @@ RecompPipe *getRecompPipe(const DrawInfo &d) {
   for (uint32_t i = 0; i < d.nvattrs; i++) {
     key = hashWord(key, d.vattrs[i].location);
     key = hashWord(key, d.vattrs[i].offset);
-    key = hashWord(key, d.vattrs[i].numComps);
+    key = hashWord(key, d.vattrs[i].num_comps);
     key = hashWord(key, d.vattrs[i].dfmt);
     key = hashWord(key, d.vattrs[i].nfmt);
   }
   auto it = g_recompPipes.find(key);
   if (it != g_recompPipes.end()) return &it->second;
   RecompPipe rp;
-  rp.textured = !d.recomp->psTexs.empty();
-  rp.multiTex = d.recomp->psTexs.size() > 1;  // multi-sampler set-0 layout
+  rp.textured = !d.recomp->ps_texs.empty();
+  rp.multiTex = d.recomp->ps_texs.size() > 1;  // multi-sampler set-0 layout
 
   // set 0 = texture(s) (or an empty layout when untextured), set 1 = cbuffer UBO.
   // A multi-texture PS uses the 8-binding layout; single-texture keeps the 1-binding.
@@ -2323,10 +2323,10 @@ RecompPipe *getRecompPipe(const DrawInfo &d) {
   li.pSetLayouts = sls;
   if (vkCreatePipelineLayout(g.device, &li, nullptr, &rp.layout) != VK_SUCCESS) return nullptr;
 
-  VkShaderModule vs = makeModuleVec(d.recomp->vsSpirv);
-  VkShaderModule fs = makeModuleVec(d.recomp->fsSpirv);
-  bool rectList = d.primType == 17 && g.geometryShader && !d.recomp->gsSpirv.empty();
-  VkShaderModule gs = rectList ? makeModuleVec(d.recomp->gsSpirv) : VK_NULL_HANDLE;
+  VkShaderModule vs = makeModuleVec(d.recomp->vs_spirv);
+  VkShaderModule fs = makeModuleVec(d.recomp->fs_spirv);
+  bool rectList = d.primType == 17 && g.geometryShader && !d.recomp->gs_spirv.empty();
+  VkShaderModule gs = rectList ? makeModuleVec(d.recomp->gs_spirv) : VK_NULL_HANDLE;
   VkPipelineShaderStageCreateInfo stages[3]{};
   uint32_t stageCount = 0;
   stages[stageCount] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
@@ -2387,7 +2387,7 @@ RecompPipe *getRecompPipe(const DrawInfo &d) {
     uint32_t bc = i == 0 ? d.blendControl : d.mrtBlend[i];
     bool en = i == 0 ? d.blendEnable : ((d.mrtBlendMask >> i) & 1u);
     cbAtt[i] = blendAttachment(bc, en);
-    if (i && !(d.recomp->psMrtMask & (1u << i))) cbAtt[i].colorWriteMask = 0;
+    if (i && !(d.recomp->ps_mrt_mask & (1u << i))) cbAtt[i].colorWriteMask = 0;
   }
   VkPipelineColorBlendStateCreateInfo cb{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
   cb.attachmentCount = mrtN; cb.pAttachments = cbAtt;
@@ -2497,7 +2497,7 @@ bool drawRecomp(const DrawInfo &d) {
   }();
   static const bool lazyClear2 = [] { const char *e = std::getenv("DELTA_GPU_LAZYCLEAR");
     return !e || std::strcmp(e, "0") != 0; }();
-  if (noWipe && d.vertexData && d.nvattrs && d.recomp->psTexs.empty() && nv <= 8) {
+  if (noWipe && d.vertexData && d.nvattrs && d.recomp->ps_texs.empty() && nv <= 8) {
     uint32_t cdst = (d.blendControl >> 8) & 0x1F, csrc = d.blendControl & 0x1F;
     bool replace = d.blendEnable && csrc == 1 && cdst == 0;
     if (replace) {
@@ -2505,7 +2505,7 @@ bool drawRecomp(const DrawInfo &d) {
       bool nearBlack = true;
       float clearColor[4] = {0, 0, 0, 0};
       for (uint32_t a = 0; a < d.nvattrs; a++) {
-        if (d.vattrs[a].numComps == 4 && d.vattrs[a].offset != 0) {
+        if (d.vattrs[a].num_comps == 4 && d.vattrs[a].offset != 0) {
           const uint8_t *cb0 = vb + d.vattrs[a].offset;  // vertex 0's colour
           if (d.vattrs[a].dfmt == 10) {
             for (int i = 0; i < 4; i++) clearColor[i] = cb0[i] / 255.f;

@@ -141,11 +141,11 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
   // and dump how it loads its resources, so we can wire texture sampling.
   static bool g_texProbed = false;
   if (g_trace && !g_texProbed && psA >= 0x1000000000ull && psA < 0x20000000000ull) {
-    auto pi = gcn::decode(reinterpret_cast<const uint32_t *>(psA), 256);
+    auto pi = gcn::Decode(reinterpret_cast<const uint32_t *>(psA), 256);
     int nMimg = 0, nSmrd = 0;
     for (auto &in : pi) {
-      if (in.enc == gcn::Enc::mimg) nMimg++;
-      if (in.enc == gcn::Enc::smrd) nSmrd++;
+      if (in.enc == gcn::Enc::kMimg) nMimg++;
+      if (in.enc == gcn::Enc::kSmrd) nSmrd++;
     }
     if (nMimg > 0) {
       g_texProbed = true;
@@ -155,8 +155,8 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
       std::fprintf(stderr, "[gpu]   PS user_data:");
       for (int k = 0; k < 16; k++) std::fprintf(stderr, " %08x", pud[k]);
       std::fprintf(stderr, "\n");
-      auto texs = gcn::trackTextures(reinterpret_cast<const uint32_t *>(psA), 4096, pud);
-      std::fprintf(stderr, "[gpu]   trackTextures -> %zu\n", texs.size());
+      auto texs = gcn::TrackTextures(*gcn::CachedProgram(psA, 4096), pud);
+      std::fprintf(stderr, "[gpu]   TrackTextures -> %zu\n", texs.size());
       if (!texs.empty() && texs[0].valid) {
         auto &t = texs[0];
         // Dump the texture as a LINEAR interpretation (to inspect tiling).
@@ -289,7 +289,7 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
 
     // Constant buffer (transform): default to the sgpr[4..7] V# (the common VS cbuffer
     // slot); the recompiled-shader path below re-resolves it from the SGPR the VS
-    // actually reads (rc.vsCbufs) when that differs.
+    // actually reads (rc.vs_cbufs) when that differs.
     uint64_t cbuf = (static_cast<uint64_t>(vud[5] & 0xFFFF) << 32) | vud[4];
     if (cbuf >= 0x1000000000ull && cbuf < 0x20000000000ull) {
       std::memcpy(d.mvp, reinterpret_cast<const void *>(cbuf), 64);
@@ -299,11 +299,10 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
     // Vertex buffer: resource-track the fetch shader (VS sgpr[0..1] ptr).
     uint64_t fetch = (static_cast<uint64_t>(vud[1] & 0xFFFF) << 32) | vud[0];
     if (fetch >= 0x1000000000ull && fetch < 0x20000000000ull) {
-      auto vbs = gcn::trackVertexBuffers(reinterpret_cast<const uint32_t *>(fetch),
-                                         64, vud);
+      auto vbs = gcn::TrackVertexBuffers(*gcn::CachedProgram(fetch, 64), vud);
       if (!vbs.empty()) {
         d.vertexData = reinterpret_cast<const void *>(vbs[0].base);
-        d.vertexCount = vbs[0].numRecords;
+        d.vertexCount = vbs[0].num_records;
         d.vertexStride = vbs[0].stride;
         d.posOffset = 0;
         // Per-attribute offsets from the fetch shader's V# bases: each attribute's
@@ -328,7 +327,7 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
     // sprite vertex format is {pos.xyzw @0, color @0x10, uv.xy @0x1c} in a
     // 64-byte vertex, so the UV lives in the position buffer at offset 0x1c.
     if (psA >= 0x1000000000ull && psA < 0x20000000000ull) {
-      auto texs = gcn::trackTextures(reinterpret_cast<const uint32_t *>(psA), 4096,
+      auto texs = gcn::TrackTextures(*gcn::CachedProgram(psA, 4096),
                                      &g_regs[mmSPI_SHADER_USER_DATA_PS_0]);
       if (!texs.empty()) {
         // Preserve every valid GFX7 T# address. Format support is relevant only when
@@ -340,21 +339,21 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
         d.texH = texs[0].height;
         d.texDfmt = texs[0].dfmt;
         d.texNfmt = texs[0].nfmt;
-        d.texTiling = texs[0].tilingIdx;
+        d.texTiling = texs[0].tiling_idx;
         d.texPitch = texs[0].pitch;
         d.texLayers = texs[0].layers;
-        d.texBaseArray = texs[0].baseArray;
-        d.texViewLayers = texs[0].viewLayers;
-        d.texMipLevels = texs[0].mipLevels;
-        d.texBaseMip = texs[0].baseMip;
-        d.texViewMips = texs[0].viewMips;
-        d.texMinLod = texs[0].minLod;
+        d.texBaseArray = texs[0].base_array;
+        d.texViewLayers = texs[0].view_layers;
+        d.texMipLevels = texs[0].mip_levels;
+        d.texBaseMip = texs[0].base_mip;
+        d.texViewMips = texs[0].view_mips;
+        d.texMinLod = texs[0].min_lod;
         std::memcpy(d.texSampler, texs[0].sampler, sizeof(d.texSampler));
-        d.texPow2Pad = texs[0].pow2Pad;
-        d.texSamplerValid = texs[0].samplerValid;
+        d.texPow2Pad = texs[0].pow2_pad;
+        d.texSamplerValid = texs[0].sampler_valid;
         d.texArrayed = texs[0].arrayed;
-        d.texForceLodZero = texs[0].forceLodZero;
-        d.texDepthCompare = texs[0].depthCompare;
+        d.texForceLodZero = texs[0].force_lod_zero;
+        d.texDepthCompare = texs[0].depth_compare;
         d.uvData = d.vertexData;
         d.uvStride = d.vertexStride;
         // All sampled textures (binding order), for multi-texture PS (Doom64 3D).
@@ -364,13 +363,13 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
           const auto &t = texs[i];
           dt.base = t.valid ? t.base : 0; dt.w = t.width; dt.h = t.height;
           dt.dfmt = t.dfmt; dt.nfmt = t.nfmt;
-          dt.tiling = t.tilingIdx; dt.pitch = t.pitch; dt.layers = t.layers;
-          dt.baseArray = t.baseArray; dt.viewLayers = t.viewLayers;
-          dt.mipLevels = t.mipLevels; dt.baseMip = t.baseMip;
-          dt.viewMips = t.viewMips; dt.minLod = t.minLod; dt.pow2Pad = t.pow2Pad;
+          dt.tiling = t.tiling_idx; dt.pitch = t.pitch; dt.layers = t.layers;
+          dt.base_array = t.base_array; dt.view_layers = t.view_layers;
+          dt.mip_levels = t.mip_levels; dt.base_mip = t.base_mip;
+          dt.view_mips = t.view_mips; dt.min_lod = t.min_lod; dt.pow2_pad = t.pow2_pad;
           std::memcpy(dt.sampler, t.sampler, sizeof(dt.sampler));
-          dt.samplerValid = t.samplerValid; dt.arrayed = t.arrayed;
-          dt.forceLodZero = t.forceLodZero; dt.depthCompare = t.depthCompare;
+          dt.sampler_valid = t.sampler_valid; dt.arrayed = t.arrayed;
+          dt.force_lod_zero = t.force_lod_zero; dt.depth_compare = t.depth_compare;
         }
         // d.uvOffset was derived from the fetch shader during vertex extraction.
         // DELTA_GPU_TEXFMT: dump sampled texture formats (dfmt/nfmt/tiling/dims) to
@@ -381,12 +380,12 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
           tfN++;
           std::fprintf(stderr, "[texfmt] base=%#lx %ux%u pitch=%u dfmt=%u nfmt=%u tiling=%u rt=%ux%u\n",
                        (unsigned long)texs[0].base, texs[0].width, texs[0].height,
-                       texs[0].pitch, texs[0].dfmt, texs[0].nfmt, texs[0].tilingIdx,
+                       texs[0].pitch, texs[0].dfmt, texs[0].nfmt, texs[0].tiling_idx,
                        d.rtW, d.rtH);
         }
       }
     }
-    // Recompiled-shader path: recompile the VS/PS pair (cached) and resolve the
+    // Recompiled-shader path: Recompile the VS/PS pair (cached) and resolve the
     // live vertex-attribute buffers, so the renderer can run the game's actual
     // shaders. The heuristic fields above stay populated as the fallback.
     static const bool recompOn = [] {
@@ -403,7 +402,7 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
       ShaderKey key{vsA, psA, fetch};
       auto it = shCache.find(key);
       if (it == shCache.end())
-        it = shCache.emplace(key, gcn::recompile(
+        it = shCache.emplace(key, gcn::Recompile(
                  reinterpret_cast<const uint32_t *>(vsA),
                  reinterpret_cast<const uint32_t *>(psA),
                  &g_regs[mmSPI_SHADER_USER_DATA_VS_0],
@@ -416,15 +415,15 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
         bool good = true;
         for (size_t i = 0; i < rc.attrs.size() && i < 8; i++) {
           auto &a = rc.attrs[i];
-          if (a.tableSgpr + 1 >= 16) { good = false; break; }
-          uint64_t tbl = (static_cast<uint64_t>(vud2[a.tableSgpr + 1] & 0xFFFF) << 32) | vud2[a.tableSgpr];
+          if (a.table_sgpr + 1 >= 16) { good = false; break; }
+          uint64_t tbl = (static_cast<uint64_t>(vud2[a.table_sgpr + 1] & 0xFFFF) << 32) | vud2[a.table_sgpr];
           if (tbl < 0x1000000000ull || tbl >= 0x20000000000ull) { good = false; break; }
-          auto vb = gcn::decodeVBuffer(reinterpret_cast<const uint32_t *>(tbl + a.vbufDwordOff * 4));
+          auto vb = gcn::DecodeVBuffer(reinterpret_cast<const uint32_t *>(tbl + a.vbuf_dword_off * 4));
           if (vb.base < 0x1000000000ull || vb.base >= 0x20000000000ull || !vb.stride) { good = false; break; }
           if (i == 0) { base0 = vb.base; d.vertexData = reinterpret_cast<const void *>(vb.base);
-            d.vertexStride = vb.stride; d.vertexCount = vb.numRecords; }
+            d.vertexStride = vb.stride; d.vertexCount = vb.num_records; }
           uint32_t off = (vb.base >= base0) ? (uint32_t)(vb.base - base0) : 0;
-          d.vattrs[d.nvattrs++] = {a.location, off, a.numComps, vb.dfmt, vb.nfmt};
+          d.vattrs[d.nvattrs++] = {a.location, off, a.num_comps, vb.dfmt, vb.nfmt};
         }
         // Resolve every cbuffer V# the emitted VS/PS reads. Bindings are assigned by
         // the translator and shared across both stages in descriptor set 1.
@@ -432,10 +431,10 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
         auto resolveCbufs = [&](const std::vector<gcn::ShaderCbuf> &cbufs,
                                 const uint32_t *userData, bool vertexStage) {
           for (const auto &cb : cbufs) {
-            if (cb.binding >= 8 || cb.udSgpr + 3 >= 16) continue;
-            auto vb = gcn::decodeVBuffer(&userData[cb.udSgpr]);
-            uint64_t bytes = vb.stride ? (uint64_t)vb.stride * vb.numRecords
-                                       : vb.numRecords;
+            if (cb.binding >= 8 || cb.ud_sgpr + 3 >= 16) continue;
+            auto vb = gcn::DecodeVBuffer(&userData[cb.ud_sgpr]);
+            uint64_t bytes = vb.stride ? (uint64_t)vb.stride * vb.num_records
+                                       : vb.num_records;
             if (vb.base < 0x1000000000ull || vb.base >= 0x20000000000ull ||
                 !bytes || bytes > 0xFFFFFFFFull || vb.base + bytes > 0x20000000000ull)
               continue;
@@ -451,10 +450,10 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
           }
         };
         if (good) {
-          resolveCbufs(rc.vsCbufs, vud2, true);
-          resolveCbufs(rc.psCbufs, &g_regs[mmSPI_SHADER_USER_DATA_PS_0], false);
-          for (const auto &cb : rc.vsCbufs) d.nCbufs = std::max(d.nCbufs, cb.binding + 1);
-          for (const auto &cb : rc.psCbufs) d.nCbufs = std::max(d.nCbufs, cb.binding + 1);
+          resolveCbufs(rc.vs_cbufs, vud2, true);
+          resolveCbufs(rc.ps_cbufs, &g_regs[mmSPI_SHADER_USER_DATA_PS_0], false);
+          for (const auto &cb : rc.vs_cbufs) d.nCbufs = std::max(d.nCbufs, cb.binding + 1);
+          for (const auto &cb : rc.ps_cbufs) d.nCbufs = std::max(d.nCbufs, cb.binding + 1);
         }
         if (good) { d.vsAddr = vsA; d.psAddr = psA; d.recomp = &rc;
           recompStatus = "ok"; }
@@ -468,7 +467,7 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
       g_frameActive = true;
     }
     // DELTA_GPU_BLITDUMP: for the first few draws targeting a wide (scanout-sized)
-    // RT, disassemble the PS and report what trackTextures resolved. Pins why
+    // RT, Disassemble the PS and report what TrackTextures resolved. Pins why
     // Undertale's surface->scanout blit renders untextured (tex=0): is the PS doing
     // an image_sample we miss, or is the T# pointing outside the guest range?
     static const bool blitDump = std::getenv("DELTA_GPU_BLITDUMP") != nullptr;
@@ -497,30 +496,30 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
                    g_regs[mmCB_COLOR0_PITCH], g_regs[mmCB_COLOR0_SLICE],
                    g_regs[mmCB_COLOR0_INFO], g_regs[mmCB_COLOR0_ATTRIB]);
       if (psA >= 0x1000000000ull && psA < 0x20000000000ull) {
-        auto texs = gcn::trackTextures(reinterpret_cast<const uint32_t *>(psA), 4096,
+        auto texs = gcn::TrackTextures(*gcn::CachedProgram(psA, 4096),
                                        &g_regs[mmSPI_SHADER_USER_DATA_PS_0]);
-        std::fprintf(stderr, "[blit]   trackTextures -> %zu T#\n", texs.size());
+        std::fprintf(stderr, "[blit]   TrackTextures -> %zu T#\n", texs.size());
         for (auto &t : texs)
           std::fprintf(stderr, "[blit]     T# base=%#lx %ux%u pitch=%u dfmt=%u nfmt=%u tiling=%u\n",
                        (unsigned long)t.base, t.width, t.height, t.pitch, t.dfmt,
-                       t.nfmt, t.tilingIdx);
+                       t.nfmt, t.tiling_idx);
         const uint32_t *psCode = reinterpret_cast<const uint32_t *>(psA);
-        uint32_t psWords = gcn::codeLength(psCode, 4096);
-        gcn::disassemble(psCode, psWords ? psWords : 512, "blit.PS");
+        uint32_t psWords = gcn::CodeLength(psCode, 4096);
+        gcn::Disassemble(psCode, psWords ? psWords : 512, "blit.PS");
         if (bdN == 1 && d.recomp) {
           const uint32_t *pud = &g_regs[mmSPI_SHADER_USER_DATA_PS_0];
           std::fprintf(stderr, "[blit]   PS user data:");
           for (uint32_t i = 0; i < 16; i++) std::fprintf(stderr, " %08x", pud[i]);
           std::fprintf(stderr, "\n");
-          for (const auto &cb : d.recomp->psCbufs) {
+          for (const auto &cb : d.recomp->ps_cbufs) {
             const auto &resolved = d.cbufs[cb.binding];
             std::fprintf(stderr,
                          "[blit]   PS CB binding=%u sgpr=%u dwords=%u base=%#lx size=%u\n",
-                         cb.binding, cb.udSgpr, cb.numDwords,
+                         cb.binding, cb.ud_sgpr, cb.num_dwords,
                          (unsigned long)resolved.base, resolved.size);
             if (!resolved.base) continue;
             const uint32_t *words = reinterpret_cast<const uint32_t *>(resolved.base);
-            uint32_t rows = std::min({(cb.numDwords + 3) / 4,
+            uint32_t rows = std::min({(cb.num_dwords + 3) / 4,
                                       resolved.size / 16, 64u});
             for (uint32_t row = 0; row < rows; row++) {
               float values[4];
@@ -565,7 +564,7 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
     // why textured draws render black (degenerate MVP vs UV=0 vs blend).
     static const bool spriteDump = std::getenv("DELTA_GPU_SPRITEDUMP") != nullptr;
     static int sdN = 0;
-    if (spriteDump && d.recomp && !d.recomp->psTexs.empty() && d.vertexData && sdN < 12) {
+    if (spriteDump && d.recomp && !d.recomp->ps_texs.empty() && d.vertexData && sdN < 12) {
       sdN++;
       const float *m = d.mvp;
       std::fprintf(stderr,
@@ -579,9 +578,9 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
       for (uint32_t a = 0; a < d.nvattrs && a < 4; a++) {
         const float *f = reinterpret_cast<const float *>(vb + d.vattrs[a].offset);
         std::fprintf(stderr, "[sprite]   attr%u loc=%u off=%u nc=%u dfmt=%u v0=[%.4f %.4f %.4f %.4f]\n",
-            a, d.vattrs[a].location, d.vattrs[a].offset, d.vattrs[a].numComps,
-            d.vattrs[a].dfmt, f[0], d.vattrs[a].numComps>1?f[1]:0.f,
-            d.vattrs[a].numComps>2?f[2]:0.f, d.vattrs[a].numComps>3?f[3]:0.f);
+            a, d.vattrs[a].location, d.vattrs[a].offset, d.vattrs[a].num_comps,
+            d.vattrs[a].dfmt, f[0], d.vattrs[a].num_comps>1?f[1]:0.f,
+            d.vattrs[a].num_comps>2?f[2]:0.f, d.vattrs[a].num_comps>3?f[3]:0.f);
       }
     }
     // DELTA_GPU_GEOMDUMP: dump the full state of high-index (3D level geometry)
@@ -603,9 +602,9 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
       const auto *vb = static_cast<const uint8_t *>(d.vertexData);
       const float *p0 = reinterpret_cast<const float *>(vb + d.vattrs[0].offset);
       std::fprintf(stderr,
-          "[geom] idx=%u psTexs=%zu tex=%#lx %ux%u tiling=%u pitch=%u rt=%#lx %ux%u "
+          "[geom] idx=%u ps_texs=%zu tex=%#lx %ux%u tiling=%u pitch=%u rt=%#lx %ux%u "
           "blend=%#x mask=%#x cc=%#x nvattrs=%u stride=%u pos0=[%.1f %.1f %.1f] cbufBase=%#lx\n",
-          d.indexCount, d.recomp ? d.recomp->psTexs.size() : 0, (unsigned long)d.texBase,
+          d.indexCount, d.recomp ? d.recomp->ps_texs.size() : 0, (unsigned long)d.texBase,
           d.texW, d.texH,
           d.texTiling, d.texPitch, (unsigned long)d.rtBase, d.rtW, d.rtH, d.blendControl,
           d.targetMask, d.colorControl, d.nvattrs, d.vertexStride,
@@ -656,7 +655,7 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
         // identifies the true position attribute the renderer should be feeding.
         uint32_t firstIdx = i16 ? i16[0] : i32 ? i32[0] : 0;
         for (uint32_t a = 0; a < d.nvattrs && a < 8; a++) {
-          if (d.vattrs[a].numComps < 3) continue;
+          if (d.vattrs[a].num_comps < 3) continue;
           int onA = 0;
           for (int i = 0; i < n; i++) {
             uint32_t idx = i16 ? i16[i] : i32 ? i32[i] : (uint32_t)i;
@@ -666,7 +665,7 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
           }
           const float *pv = reinterpret_cast<const float *>(vb + (size_t)firstIdx * d.vertexStride + d.vattrs[a].offset);
           std::fprintf(stderr, "    attr%u off=%u nc=%u dfmt=%u v0=[%.2f %.2f %.2f] onscreen(col)=%d\n",
-                       a, d.vattrs[a].offset, d.vattrs[a].numComps, d.vattrs[a].dfmt, pv[0], pv[1], pv[2], onA);
+                       a, d.vattrs[a].offset, d.vattrs[a].num_comps, d.vattrs[a].dfmt, pv[0], pv[1], pv[2], onA);
         }
       }
       // Sample the bound texture's ALPHA: is the source genuinely alpha=0 (so the PS
@@ -686,16 +685,16 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
       }
       // Dump the PS's texture-load pattern: SMRD (op/sdst/sbase/imm/off) + MIMG srsrc,
       // and the first 8 user-data dwords, to see how the 4 T#s are loaded.
-      auto psI = gcn::decode(reinterpret_cast<const uint32_t *>(d.psAddr), 4096);
+      auto psI = gcn::Decode(reinterpret_cast<const uint32_t *>(d.psAddr), 4096);
       const uint32_t *pud = &g_regs[mmSPI_SHADER_USER_DATA_PS_0];
       std::fprintf(stderr, "  ps_ud=[%08x %08x %08x %08x %08x %08x %08x %08x]\n",
                    pud[0],pud[1],pud[2],pud[3],pud[4],pud[5],pud[6],pud[7]);
       for (auto &in : psI) {
-        if (in.enc == gcn::Enc::smrd) {
+        if (in.enc == gcn::Enc::kSmrd) {
           uint32_t w = in.raw[0];
           std::fprintf(stderr, "  smrd op=%u sdst=%u sbase=%u imm=%u off=%#x\n",
                        (w>>22)&0x1F, (w>>15)&0x7F, (w>>9)&0x3F, (w>>8)&1, w&0xFF);
-        } else if (in.enc == gcn::Enc::mimg) {
+        } else if (in.enc == gcn::Enc::kMimg) {
           std::fprintf(stderr, "  mimg srsrc=%u\n", ((in.raw[1]>>16)&0x1F)*4);
         }
       }
@@ -704,13 +703,13 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
       // matrix the VS uses), vs the heuristic cbuf above -- to find whether the VS
       // reads a different cbuffer/offset (the true MVP) than we bind.
       if (d.vsAddr >= 0x1000000000ull && d.vsAddr < 0x20000000000ull) {
-        auto vsI = gcn::decode(reinterpret_cast<const uint32_t *>(d.vsAddr), 4096);
+        auto vsI = gcn::Decode(reinterpret_cast<const uint32_t *>(d.vsAddr), 4096);
         const uint32_t *vud = &g_regs[mmSPI_SHADER_USER_DATA_VS_0];
         std::fprintf(stderr, "  vs_ud=[%08x %08x %08x %08x %08x %08x %08x %08x]\n",
                      vud[0],vud[1],vud[2],vud[3],vud[4],vud[5],vud[6],vud[7]);
         int shown = 0;
         for (auto &in : vsI) {
-          if (in.enc != gcn::Enc::smrd || shown >= 6) continue;
+          if (in.enc != gcn::Enc::kSmrd || shown >= 6) continue;
           uint32_t w = in.raw[0], op = (w>>22)&0x1F, sbase = (w>>9)&0x3F;
           bool imm = (w>>8)&1; uint32_t off = w&0xFF;
           shown++;
@@ -861,20 +860,19 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
     // Disassemble the shaders to validate the GCN decoder and reveal the
     // vertex-fetch / resource-load pattern. The fetch shader (sgpr0 ptr, just
     // past the VS code) does the s_load(V# table) + buffer_load(attributes).
-    gcn::disassemble(reinterpret_cast<const uint32_t *>(vs), 512, "VS");
-    gcn::disassemble(reinterpret_cast<const uint32_t *>(ps), 512, "PS");
+    gcn::Disassemble(reinterpret_cast<const uint32_t *>(vs), 512, "VS");
+    gcn::Disassemble(reinterpret_cast<const uint32_t *>(ps), 512, "PS");
     uint64_t fetch = ((uint64_t)(vud[1] & 0xFFFF) << 32) | vud[0];
     if (fetch >= 0x1000000000ull && fetch < 0x20000000000ull) {
-      gcn::disassemble(reinterpret_cast<const uint32_t *>(fetch), 128, "VS.fetch");
+      gcn::Disassemble(reinterpret_cast<const uint32_t *>(fetch), 128, "VS.fetch");
       // Recover the actual vertex-attribute buffers and dump the first vertices.
-      auto vbs = gcn::trackVertexBuffers(reinterpret_cast<const uint32_t *>(fetch),
-                                         64, vud);
+      auto vbs = gcn::TrackVertexBuffers(*gcn::CachedProgram(fetch, 64), vud);
       for (size_t bi = 0; bi < vbs.size(); bi++) {
         auto &v = vbs[bi];
         std::fprintf(stderr, "[gpu]   VB%zu base=%#lx stride=%u nrec=%u\n", bi,
-                     (unsigned long)v.base, v.stride, v.numRecords);
+                     (unsigned long)v.base, v.stride, v.num_records);
         auto *f = reinterpret_cast<const float *>(v.base);
-        for (uint32_t r = 0; r < v.numRecords && r < 6; r++) {
+        for (uint32_t r = 0; r < v.num_records && r < 6; r++) {
           std::fprintf(stderr, "[gpu]     r%u:", r);
           for (uint32_t c = 0; c < v.stride / 4 && c < 8; c++)
             std::fprintf(stderr, " %g", f[r * (v.stride / 4) + c]);
@@ -1009,7 +1007,7 @@ void handleDispatch(const uint32_t *body, uint32_t count) {
     std::fprintf(stderr, "[cs]   user_data:");
     for (int k = 0; k < 16; k++) std::fprintf(stderr, " %08x", ud[k]);
     std::fprintf(stderr, "\n");
-    gcn::disassemble(reinterpret_cast<const uint32_t *>(csAddr), 1024, "cs");
+    gcn::Disassemble(reinterpret_cast<const uint32_t *>(csAddr), 1024, "cs");
   }
 
   if (csAddr < 0x1000000000ull || csAddr >= 0x20000000000ull || !tgx || !tgy ||
@@ -1021,16 +1019,25 @@ void handleDispatch(const uint32_t *body, uint32_t count) {
   if (noCs || !vk::available())
     return;
 
-  // Recompile the CS to a Vulkan compute pipeline (cached by address), resolve the
-  // guest memory ranges its descriptors point at from the live user data, and run it
-  // on the GPU. Doom64 builds its world-texture atlases this way. An unsupported CS
+  // Recompile the CS to a Vulkan compute pipeline, resolve the guest memory
+  // ranges its descriptors point at from the live user data, and run it on the
+  // GPU. Doom64 builds its world-texture atlases this way. An unsupported CS
   // fails the recompile and is skipped (loud, not silently corrupting memory).
+  // The cache key covers everything baked into the module (workgroup shape +
+  // RSRC2 state), not just the code address: the same CS can legally be
+  // re-dispatched with a different workgroup size.
+  const uint64_t csKey = csAddr ^ (static_cast<uint64_t>(tgx) << 40) ^
+                         (static_cast<uint64_t>(tgy) << 48) ^
+                         (static_cast<uint64_t>(tgz) << 56) ^
+                         (static_cast<uint64_t>(userSgpr) << 1) ^
+                         (static_cast<uint64_t>(tgidEnable) << 6) ^
+                         (static_cast<uint64_t>(ldsDwords) << 9);
   static std::unordered_map<uint64_t, gcn::RecompiledCs> csCache;
-  auto cit = csCache.find(csAddr);
+  auto cit = csCache.find(csKey);
   if (cit == csCache.end()) {
-    cit = csCache.emplace(csAddr,
-              gcn::recompileCompute(reinterpret_cast<const uint32_t *>(csAddr), tgx,
-                                    tgy, tgz, userSgpr, tgidEnable)).first;
+    cit = csCache.emplace(csKey,
+              gcn::RecompileCompute(reinterpret_cast<const uint32_t *>(csAddr), tgx,
+                                    tgy, tgz, userSgpr, tgidEnable, ldsDwords)).first;
     static int reported = 0;
     if (!cit->second.ok && reported < 8) {
       reported++;
@@ -1057,24 +1064,24 @@ void handleDispatch(const uint32_t *body, uint32_t count) {
   for (auto &r : rc.resources) {
     uint64_t base = 0, size = 0;
     if (r.kind == 1) {  // image (T#): compute SSBO model supports linear RGBA8
-      if (r.baseSgpr + 7 >= 16) { resOk = false; break; }
-      gcn::TImage t = gcn::decodeTImage(&ud[r.baseSgpr]);
+      if (r.base_sgpr + 7 >= 16) { resOk = false; break; }
+      gcn::TImage t = gcn::DecodeTImage(&ud[r.base_sgpr]);
       gcn::TextureLayout32 layout;
       if (!t.valid || t.dfmt != 10 || (t.nfmt != 0 && t.nfmt != 4) ||
-           !gcn::tilingIsLinear(t.tilingIdx) ||
-          !gcn::buildTextureLayout32(layout, t.width, t.height, t.pitch, t.layers,
-                                     t.mipLevels, t.tilingIdx, t.pow2Pad)) {
+           !gcn::TilingIsLinear(t.tiling_idx) ||
+          !gcn::BuildTextureLayout32(layout, t.width, t.height, t.pitch, t.layers,
+                                     t.mip_levels, t.tiling_idx, t.pow2_pad)) {
         resOk = false;
         break;
       }
       base = t.base;
       size = layout.size;
     } else {            // buffer (V# / pointer): stride*num_records, else the min hint
-      if (r.baseSgpr + 3 >= 16) { resOk = false; break; }
-      gcn::VBuffer v = gcn::decodeVBuffer(&ud[r.baseSgpr]);
+      if (r.base_sgpr + 3 >= 16) { resOk = false; break; }
+      gcn::VBuffer v = gcn::DecodeVBuffer(&ud[r.base_sgpr]);
       base = v.base;
-      size = v.stride ? (uint64_t)v.stride * v.numRecords : v.numRecords;
-      if (size < r.minBytes) size = r.minBytes;
+      size = v.stride ? (uint64_t)v.stride * v.num_records : v.num_records;
+      if (size < r.min_bytes) size = r.min_bytes;
     }
     if (size > kMaxRes || !guestRange(base, size) || ci.nres >= 8) {
       resOk = false;

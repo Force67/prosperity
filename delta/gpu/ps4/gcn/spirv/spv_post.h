@@ -21,9 +21,9 @@ namespace gpu::gcn::spirv {
 
 // Legalize + optimize a module. Returns the optimized binary; on failure returns
 // the input unchanged (the naive SPIR-V is still valid, just unoptimized).
-std::vector<uint32_t> optimize(const std::vector<uint32_t> &spv);
+std::vector<uint32_t> Optimize(const std::vector<uint32_t> &spv);
 
 // Validate against the Vulkan 1.1 environment. On failure fills *err (if given).
-bool validate(const std::vector<uint32_t> &spv, std::string *err = nullptr);
+bool Validate(const std::vector<uint32_t> &spv, std::string *err = nullptr);
 
 }  // namespace gpu::gcn::spirv

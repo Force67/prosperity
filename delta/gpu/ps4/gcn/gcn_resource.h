@@ -5,22 +5,28 @@
  *
  * GCN resource tracking: extract the V# (buffer) / T# (image) / S# (sampler)
  * "sharps" a shader uses by analysing how it loads them out of the user-data
- * SGPRs. For Isaac's vertex-fetch VS this recovers the vertex-attribute buffers
- * so the renderer can pull real geometry.
+ * SGPRs. The renderer uses this per draw to resolve the live guest resources
+ * behind a decoded shader's bindings.
+ *
+ * Descriptor field layouts:
+ * https://github.com/torvalds/linux/blob/master/drivers/gpu/drm/amd/include/asic_reg/gca/gfx_7_2_sh_mask.h
+ * https://github.com/torvalds/linux/blob/master/drivers/gpu/drm/amd/include/asic_reg/gca/gfx_7_2_enum.h
  */
 
 #include <cstdint>
 #include <vector>
 
+#include "gcn_decode.h"
+
 namespace gpu::gcn {
 
 // A decoded vertex-buffer resource (GCN V#, 4 dwords).
 struct VBuffer {
-  uint64_t base = 0;       // guest address of the vertex data
-  uint32_t stride = 0;     // bytes per vertex
-  uint32_t numRecords = 0; // vertex count
-  uint32_t dfmt = 0;       // data format (nfmt<<...|dfmt)
-  uint32_t nfmt = 0;
+  uint64_t base = 0;         // guest address of the vertex data
+  uint32_t stride = 0;       // bytes per vertex
+  uint32_t num_records = 0;  // vertex count
+  uint32_t dfmt = 0;         // data format
+  uint32_t nfmt = 0;         // numeric format
 };
 
 // A decoded image resource (GCN T#, 8 dwords).
@@ -28,46 +34,47 @@ struct TImage {
   uint64_t base = 0;
   uint32_t width = 0;
   uint32_t height = 0;
-  uint32_t pitch = 0;      // surface pitch in pixels (T#.pitch+1)
-  uint32_t layers = 1;     // physical array layers (T#.depth+1 for 2D arrays)
-  uint32_t baseArray = 0;  // first layer exposed by this descriptor view
-  uint32_t viewLayers = 1; // number of layers exposed by this descriptor view
-  uint32_t mipLevels = 1;  // physical levels in storage (LAST_LEVEL + 1)
-  uint32_t baseMip = 0;     // first level exposed by this descriptor view
-  uint32_t viewMips = 1;    // levels exposed by this descriptor view
-  uint32_t minLod = 0;      // T# MIN_LOD clamp in U4.8 fixed-point
+  uint32_t pitch = 0;        // surface pitch in pixels (T#.pitch+1)
+  uint32_t layers = 1;       // physical array layers (T#.depth+1 for 2D arrays)
+  uint32_t base_array = 0;   // first layer exposed by this descriptor view
+  uint32_t view_layers = 1;  // number of layers exposed by this descriptor view
+  uint32_t mip_levels = 1;   // physical levels in storage (LAST_LEVEL + 1)
+  uint32_t base_mip = 0;     // first level exposed by this descriptor view
+  uint32_t view_mips = 1;    // levels exposed by this descriptor view
+  uint32_t min_lod = 0;      // T# MIN_LOD clamp in U4.8 fixed-point
   uint32_t dfmt = 0;
   uint32_t nfmt = 0;
-  uint32_t type = 0;       // SQ_RSRC_IMG_* (9 = 2D, 13 = 2D array)
-  uint32_t tilingIdx = 0;  // 8/31 = linear; everything else is tiled (1D micro or 2D macro)
-  uint32_t sampler[4] = {}; // S# used by this MIMG sample instruction
-  bool pow2Pad = false;     // pad physical mip dimensions/layers to powers of two
-  bool samplerValid = false;
-  bool arrayed = false;    // MIMG DA bit: address contains an array-layer coordinate
-  bool forceLodZero = false; // gather4_lz needs an implicit gather clamped to mip 0
-  bool depthCompare = false; // MIMG _C uses the sampler's depth comparison function
+  uint32_t type = 0;         // SQ_RSRC_IMG_* (9 = 2D, 13 = 2D array)
+  uint32_t tiling_idx = 0;   // 8/31 = linear; everything else is tiled
+  uint32_t sampler[4] = {};  // S# used by the sampling MIMG instruction
+  bool pow2_pad = false;     // pad physical mip dims/layers to powers of two
+  bool sampler_valid = false;
+  bool arrayed = false;      // MIMG DA bit: address carries an array layer
+  bool force_lod_zero = false;  // gather4_lz: implicit gather clamped to mip 0
+  bool depth_compare = false;   // MIMG _C uses the sampler's compare function
   bool valid = false;
 };
 
-// Decode a T# from 8 dwords.
-TImage decodeTImage(const uint32_t *p);
-
-// Recover the image(s) a (textured) pixel shader samples, by tracking its
-// s_load_dwordx8 of T#s out of the PS user-data tables. Empty if the PS does no
-// texture sampling. The result preserves MIMG binding order; unresolved entries
-// are returned with valid=false so later bindings are not compacted.
-std::vector<TImage> trackTextures(const uint32_t *psCode, uint32_t maxDwords,
-                                  const uint32_t *psUserData);
-
 // Decode a V# from 4 consecutive dwords.
-VBuffer decodeVBuffer(const uint32_t *p);
+VBuffer DecodeVBuffer(const uint32_t* dwords);
 
-// Given a fetch shader (guest code) and the VS user-data SGPRs (16 dwords),
-// recover the vertex-attribute buffers it fetches. Returns the V#s in attribute
-// order. Best-effort: handles the common Gnm fetch-shader pattern (s_load_dwordx4
-// of a V# table pointed to by a user SGPR, then buffer_load_format per attribute).
-std::vector<VBuffer> trackVertexBuffers(const uint32_t *fetchCode,
-                                        uint32_t maxDwords,
-                                        const uint32_t *vsUserData);
+// Decode a T# from 8 consecutive dwords.
+TImage DecodeTImage(const uint32_t* dwords);
+
+// Recover the image(s) a pixel shader references, by tracking its
+// s_load_dwordx4/x8/x16 of descriptor tables out of the user-data SGPRs.
+// The result preserves MIMG order (it is the shader's set-0 binding order);
+// unresolved entries are returned with valid=false so later bindings are not
+// compacted. Pass a CachedProgram()/DecodeShader() of the PS code.
+std::vector<TImage> TrackTextures(const Program& ps_program,
+                                  const uint32_t* ps_user_data);
+
+// Given a decoded fetch shader and the VS user-data SGPRs (16 dwords), recover
+// the vertex-attribute buffers it fetches, in attribute order. Handles the
+// common Gnm fetch-shader pattern (s_load_dwordx4 of a V# from the
+// vertex-buffer table a user SGPR points at, then buffer_load_format per
+// attribute).
+std::vector<VBuffer> TrackVertexBuffers(const Program& fetch_program,
+                                        const uint32_t* vs_user_data);
 
 }  // namespace gpu::gcn

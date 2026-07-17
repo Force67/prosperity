@@ -22,7 +22,7 @@ namespace gpu::vk {
 struct VertexAttr {
   uint32_t location = 0;
   uint32_t offset = 0;    // byte offset within the vertex
-  uint32_t numComps = 0;  // 1..4
+  uint32_t num_comps = 0;  // 1..4
   uint32_t dfmt = 0;      // GCN data format (selects the Vulkan format)
   uint32_t nfmt = 0;      // GCN number format
 };
@@ -99,15 +99,15 @@ struct DrawInfo {
     uint64_t base = 0;
     uint32_t w = 0, h = 0, tiling = 8, pitch = 0;
     uint32_t dfmt = 0, nfmt = 0;
-    uint32_t layers = 1, baseArray = 0, viewLayers = 1;
-    uint32_t mipLevels = 1, baseMip = 0, viewMips = 1;
-    uint32_t minLod = 0;
+    uint32_t layers = 1, base_array = 0, view_layers = 1;
+    uint32_t mip_levels = 1, base_mip = 0, view_mips = 1;
+    uint32_t min_lod = 0;
     uint32_t sampler[4] = {};
-    bool pow2Pad = false;
-    bool samplerValid = false;
+    bool pow2_pad = false;
+    bool sampler_valid = false;
     bool arrayed = false;
-    bool forceLodZero = false;
-    bool depthCompare = false;
+    bool force_lod_zero = false;
+    bool depth_compare = false;
   };
   DrawTex texs[8];
   uint32_t nTexs = 0;

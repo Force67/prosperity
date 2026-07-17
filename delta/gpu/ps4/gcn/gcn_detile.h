@@ -17,9 +17,9 @@
 
 namespace gpu::gcn {
 
-// True if tilingIdx denotes a linear surface (no de-tile needed): only
+// True if tiling_idx denotes a linear surface (no de-tile needed): only
 // DisplayLinearAligned(8) and DisplayLinearGeneral(31) are linear on Liverpool.
-bool tilingIsLinear(uint32_t tilingIdx);
+bool TilingIsLinear(uint32_t tiling_idx);
 
 struct TextureMipLayout32 {
   uint64_t offset = 0;       // byte offset of this complete mip level
@@ -27,28 +27,28 @@ struct TextureMipLayout32 {
   uint32_t width = 0;        // logical dimensions copied to Vulkan
   uint32_t height = 0;
   uint32_t pitch = 0;        // storage dimensions after tile-mode alignment
-  uint32_t storedHeight = 0;
+  uint32_t stored_height = 0;
   uint32_t thickness = 1;    // slices interleaved in each thick microtile
-  bool macroTiled = false;   // false for linear and mip-downgraded 1D tiling
+  bool macro_tiled = false;   // false for linear and mip-downgraded 1D tiling
 };
 
 struct TextureLayout32 {
   std::array<TextureMipLayout32, 16> mips{};
   uint64_t size = 0;
-  uint32_t mipLevels = 0;
+  uint32_t mip_levels = 0;
   uint32_t layers = 0;
-  uint32_t tilingIdx = 0;
+  uint32_t tiling_idx = 0;
 };
 
 // Compute the complete physical layout of a 32bpp, one-sample 2D/2D-array image.
 // Mips are stored mip-major; each mip contains all array layers. Later macro-tiled
 // mips are downgraded to 1D microtiling when they no longer span a macro tile.
-bool buildTextureLayout32(TextureLayout32 &out, uint32_t width, uint32_t height,
-                          uint32_t pitch, uint32_t layers, uint32_t mipLevels,
-                          uint32_t tilingIdx, bool pow2Pad);
+bool BuildTextureLayout32(TextureLayout32 &out, uint32_t width, uint32_t height,
+                          uint32_t pitch, uint32_t layers, uint32_t mip_levels,
+                          uint32_t tiling_idx, bool pow2_pad);
 
 // De-tile one physical mip/layer into tightly packed row-major RGBA8 pixels.
-bool detileTextureMip32(const uint32_t *src, uint32_t *dst,
+bool DetileTextureMip32(const uint32_t *src, uint32_t *dst,
                         const TextureLayout32 &layout, uint32_t mip,
                         uint32_t layer);
 

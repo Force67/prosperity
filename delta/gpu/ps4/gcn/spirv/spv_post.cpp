@@ -15,7 +15,7 @@
 
 namespace gpu::gcn::spirv {
 
-std::vector<uint32_t> optimize(const std::vector<uint32_t> &spv) {
+std::vector<uint32_t> Optimize(const std::vector<uint32_t> &spv) {
   spvtools::Optimizer opt(SPV_ENV_VULKAN_1_1);
   opt.SetMessageConsumer([](spv_message_level_t lvl, const char *, const spv_position_t &,
                             const char *msg) {
@@ -33,7 +33,7 @@ std::vector<uint32_t> optimize(const std::vector<uint32_t> &spv) {
   return out;
 }
 
-bool validate(const std::vector<uint32_t> &spv, std::string *err) {
+bool Validate(const std::vector<uint32_t> &spv, std::string *err) {
   spv_context ctx = spvContextCreate(SPV_ENV_VULKAN_1_1);
   spv_diagnostic diag = nullptr;
   spv_const_binary_t bin{spv.data(), spv.size()};

@@ -2,30 +2,33 @@
  * PS4Delta : PS4 emulation and research project
  *
  * GCN shader recompiler entry point. Recompilation goes GCN -> SPIR-V directly
- * (delta/gpu/gcn/spirv), with a SPIRV-Tools optimize pass; there is no GLSL
- * intermediate. This file is just the public recompile() facade over that backend.
+ * (spirv/), with a SPIRV-Tools optimize pass. This file is just the public
+ * facade over that backend.
  */
 
 #include "gcn_translate.h"
+
 #include "spirv/gcn_spirv.h"
 
 namespace gpu::gcn {
 
-Recompiled recompile(const uint32_t *vsCode, const uint32_t *psCode,
-                     const uint32_t *vsUserData, const uint32_t *psUserData) {
+Recompiled Recompile(const uint32_t* vs_code, const uint32_t* ps_code,
+                     const uint32_t* vs_user_data,
+                     const uint32_t* ps_user_data) {
   Recompiled r;
-  if (!vsCode || !vsUserData || !psUserData) return r;
-  recompileSpirv(vsCode, psCode, vsUserData, psUserData, r);  // fills r, sets r.ok
+  if (!vs_code || !vs_user_data || !ps_user_data) return r;
+  RecompileSpirv(vs_code, ps_code, vs_user_data, ps_user_data, r);
   return r;
 }
 
-RecompiledCs recompileCompute(const uint32_t *csCode, uint32_t numThreadX,
-                              uint32_t numThreadY, uint32_t numThreadZ,
-                              uint32_t userSgpr, uint32_t tgidEnable) {
+RecompiledCs RecompileCompute(const uint32_t* cs_code, uint32_t num_thread_x,
+                              uint32_t num_thread_y, uint32_t num_thread_z,
+                              uint32_t user_sgpr, uint32_t tgid_enable,
+                              uint32_t lds_dwords) {
   RecompiledCs r;
-  if (!csCode) return r;
-  recompileComputeSpirv(csCode, numThreadX, numThreadY, numThreadZ, userSgpr,
-                        tgidEnable, r);  // fills r, sets r.ok
+  if (!cs_code) return r;
+  RecompileComputeSpirv(cs_code, num_thread_x, num_thread_y, num_thread_z,
+                        user_sgpr, tgid_enable, lds_dwords, r);
   return r;
 }
 

@@ -3,33 +3,30 @@
 /*
  * PS4Delta : PS4 emulation and research project
  *
- * GCN (GFX6/7 "Liverpool") -> SPIR-V translator. Direct backend: emits SPIR-V
- * from the GCN bytecode (no GLSL/shaderc), then a spirv-opt pass legalises and
- * optimises it (see spv_post). Produces the same resource-binding plan and the
- * same pipeline interface (push-constant cbuffer, set-0 samplers, vertex inputs
- * by location) as the GLSL backend, so it is a drop-in alternative.
- *
- * Models the GCN register file as Private-storage uint arrays (sgpr[128],
- * vgpr[256]); float ops go through OpBitcast, exactly mirroring the GLSL Ff/Uf
- * helpers. spirv-opt's SSA rewrite promotes the register file out of memory.
+ * Direct GCN -> SPIR-V backend entry points. Emits SPIR-V via spv_emit and
+ * cleans it up with a SPIRV-Tools optimize pass (spv_post). Only
+ * gcn_translate.cpp calls these; everything else goes through the
+ * gcn_translate.h facade.
  */
 
-#include "../gcn_translate.h"  // Recompiled / ShaderAttr / ShaderCbuf / ShaderTex
+#include <cstdint>
+
+#include "../gcn_translate.h"
 
 namespace gpu::gcn {
 
-// Recompile a VS+PS pair directly to SPIR-V. Fills r.vsSpirv/r.fsSpirv +
-// attrs/vsCbufs/psTexs/numParams and sets r.ok. Returns r.ok. On any failure the
-// caller can fall back to the GLSL backend.
-bool recompileSpirv(const uint32_t *vsCode, const uint32_t *psCode,
-                    const uint32_t *vsUserData, const uint32_t *psUserData,
-                    Recompiled &r);
+// Translate a VS+PS pair into r (fills the SPIR-V binaries + binding plan,
+// sets r.ok). Returns r.ok. When the backend is compiled out
+// (no SPIRV-Tools/Headers) this always declines.
+bool RecompileSpirv(const uint32_t* vs_code, const uint32_t* ps_code,
+                    const uint32_t* vs_user_data, const uint32_t* ps_user_data,
+                    Recompiled& r);
 
-// Recompile a compute shader directly to GLCompute SPIR-V (fills r.spirv/resources/
-// localSize + sets r.ok). Returns r.ok. Declines (ok=false) when the backend is
-// disabled or the CS uses an unimplemented feature.
-bool recompileComputeSpirv(const uint32_t *csCode, uint32_t numThreadX,
-                           uint32_t numThreadY, uint32_t numThreadZ,
-                           uint32_t userSgpr, uint32_t tgidEnable, RecompiledCs &r);
+// Translate a compute shader into r (GLCompute SPIR-V + resource plan).
+// lds_dwords is the raw COMPUTE_PGM_RSRC2.LDS_SIZE field (128-dword granules).
+bool RecompileComputeSpirv(const uint32_t* cs_code, uint32_t num_thread_x,
+                           uint32_t num_thread_y, uint32_t num_thread_z,
+                           uint32_t user_sgpr, uint32_t tgid_enable,
+                           uint32_t lds_dwords, RecompiledCs& r);
 
 }  // namespace gpu::gcn
