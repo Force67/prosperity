@@ -18,6 +18,8 @@
 #include <string>
 #include <thread>
 
+#include <utl/mem.h>
+
 #include "../../module.h"
 #include "../../proc.h"
 #include "cpu/cpu_backend.h"
@@ -89,6 +91,42 @@ int PS4ABI sys_thr_new(thr_param *p, int size) {
     *p->child_tid = tid;
   if (p->parent_tid)
     *p->parent_tid = tid;
+
+  // The guest's libthr switches RSP onto this caller-provided stack the instant
+  // the thread starts (its trampoline does a `mov rsp, <stack_top>`). If any page
+  // of [stack_base, stack_base+stack_size) is not actually backed -- e.g. the
+  // guest's own stack mmap landed part of the region at a different address than
+  // the base it hands us -- that very first push faults. This surfaced as P.T.'s
+  // "GameSave" worker crashing on entry at stack_top-0x18 (the top page of its
+  // 64 KiB stack was unmapped). Guarantee the whole range is committed + writable
+  // before the thread runs. We only fill pages that are currently FREE (reserve
+  // == MAP_FIXED_NOREPLACE returns non-null only then), so an intentional
+  // PROT_NONE guard page or already-valid stack memory is never clobbered.
+  if (auto *proc = proc::getActive(); proc && p->stack_base && p->stack_size) {
+    constexpr size_t kPage = 0x4000;  // PS4 16 KiB page
+    const auto sb = reinterpret_cast<uintptr_t>(p->stack_base);
+    const auto lo = sb & ~(kPage - 1);
+    const auto hi = (sb + p->stack_size + kPage - 1) & ~(kPage - 1);
+    int filled = 0;
+    for (uintptr_t a = lo; a < hi; a += kPage) {
+      void *pg = reinterpret_cast<void *>(a);
+      if (!utl::allocMem(pg, kPage, utl::pageProtection::w,
+                         utl::allocationType::reserve))
+        continue;  // page already mapped -> leave it (guard / live stack)
+      void *c = utl::allocMem(pg, kPage, utl::pageProtection::w,
+                              utl::allocationType::commit);
+      if (c) {
+        utl::protectMem(c, kPage, utl::pageProtection::rwx);
+        proc->getVma().add(static_cast<uint8_t *>(c), kPage,
+                           utl::pageProtection::w);
+        filled++;
+      }
+    }
+    if (filled)
+      std::printf(
+          "[thr_new] tid=%u backed %d unmapped stack page(s) for %p+%#zx\n", tid,
+          filled, (void *)p->stack_base, p->stack_size);
+  }
 
   auto fn = p->start_func;
   auto arg = p->arg;
