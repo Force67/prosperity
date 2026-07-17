@@ -54,7 +54,72 @@ uint32_t NextPow2(uint32_t v) {
   return v + 1;
 }
 
+// Symbolic identity of the descriptor pair an MIMG instruction references:
+// the T#/S# SGPR indices plus WHICH s_load last wrote each of them (0xFFFF =
+// inline user data), plus the access-type bits that select a distinct Vulkan
+// binding (arrayed / depth-compare / gather-lz). Packs into one dword-pair key.
+uint64_t MimgDescriptorKey(uint32_t srsrc, uint32_t ssamp, uint32_t load_rsrc,
+                           uint32_t load_samp, uint32_t flags) {
+  return (static_cast<uint64_t>(srsrc) << 0) |
+         (static_cast<uint64_t>(ssamp) << 8) |
+         (static_cast<uint64_t>(load_rsrc & 0xFFFF) << 16) |
+         (static_cast<uint64_t>(load_samp & 0xFFFF) << 32) |
+         (static_cast<uint64_t>(flags) << 48);
+}
+
 }  // namespace
+
+MimgBindingPlan PlanMimgBindings(const Program& program) {
+  MimgBindingPlan plan;
+  // Track, per SGPR range, the index of the last SMRD instruction covering it.
+  struct Load {
+    uint32_t sgpr, dwords, index;
+  };
+  std::vector<Load> loads;
+  const auto covering_load = [&](uint32_t sgpr, uint32_t dwords) -> uint32_t {
+    for (auto it = loads.rbegin(); it != loads.rend(); ++it)
+      if (sgpr >= it->sgpr && sgpr + dwords <= it->sgpr + it->dwords)
+        return it->index;
+    return 0xFFFF;  // inline user data (no covering load)
+  };
+
+  std::unordered_map<uint64_t, uint32_t> binding_of;
+  uint32_t inst_index = 0;
+  for (const Inst& inst : program) {
+    const uint32_t idx = inst_index++;
+    if (inst.enc == Enc::kSmrd) {
+      const Smrd s = DecodeSmrd(inst.raw[0]);
+      if (s.op <= 0x04) {  // s_load_dword..x16 can rewrite descriptor SGPRs
+        const uint32_t dwords = 1u << s.op;
+        loads.erase(std::remove_if(loads.begin(), loads.end(),
+                                   [&](const Load& ld) {
+                                     return s.sdst < ld.sgpr + ld.dwords &&
+                                            ld.sgpr < s.sdst + dwords;
+                                   }),
+                    loads.end());
+        loads.push_back({s.sdst, dwords, idx});
+      }
+      continue;
+    }
+    if (inst.enc != Enc::kMimg) continue;
+    const uint32_t w0 = inst.raw[0], w1 = inst.raw[1];
+    const uint32_t op = (w0 >> 18) & 0x7F;
+    const uint32_t srsrc = ((w1 >> 16) & 0x1F) * 4;
+    const bool sampling = op >= 0x20;
+    const uint32_t ssamp = sampling ? ((w1 >> 21) & 0x1F) * 4 : 0xFF;
+    const uint32_t flags = (((w0 >> 14) & 1) << 0) |               // DA
+                           (((op == 0x28 || op == 0x2f) ? 1 : 0) << 1) |  // dref
+                           ((op == 0x47 ? 1 : 0) << 2);            // gather4_lz
+    const uint64_t key = MimgDescriptorKey(
+        srsrc, ssamp, covering_load(srsrc, 8),
+        sampling ? covering_load(ssamp, 4) : 0xFFFE, flags);
+    const auto [it, inserted] =
+        binding_of.emplace(key, static_cast<uint32_t>(plan.binding_srsrc.size()));
+    if (inserted) plan.binding_srsrc.push_back(srsrc);
+    plan.binding_by_pc[inst.pc] = it->second;
+  }
+  return plan;
+}
 
 VBuffer DecodeVBuffer(const uint32_t* p) {
   // GCN V# (buffer resource descriptor), 4 dwords:
@@ -158,6 +223,10 @@ std::vector<TImage> TrackTextures(const Program& ps_program,
   std::vector<TImage> result;
   if (!ps_user_data) return result;
 
+  // Bindings come from the shared plan (one per unique descriptor identity),
+  // so this list pairs 1:1 with the recompiled shader's set-0 samplers.
+  const MimgBindingPlan plan = PlanMimgBindings(ps_program);
+
   // Descriptor-table loads live at the SGPRs they wrote, tracked in program
   // order so SGPR reuse resolves each MIMG against the load live at that
   // instruction.
@@ -211,12 +280,44 @@ std::vector<TImage> TrackTextures(const Program& ps_program,
     // MIMG: the T# / S# are referenced by SGPR indices (SRSRC / SSAMP). A PS
     // either passes them inline in its user-data SGPRs or loads them from the
     // resource table via s_load_dwordx8. Resolve inline first, else from the
-    // s_load map, and preserve every MIMG binding. Invalid entries retain DA
-    // so the renderer can bind a type-compatible fallback without compacting
-    // slots.
+    // s_load map. Invalid entries retain DA so the renderer can bind a
+    // type-compatible fallback without compacting slots.
     if (inst.enc != Enc::kMimg) continue;
+    const auto plan_it = plan.binding_by_pc.find(inst.pc);
+    if (plan_it == plan.binding_by_pc.end()) continue;  // unreachable
+    const uint32_t binding = plan_it->second;
     const uint32_t word1 = inst.raw[1];
     const uint32_t srsrc = ((word1 >> 16) & 0x1F) * 4;  // T# base SGPR
+    const uint32_t op = (inst.raw[0] >> 18) & 0x7F;
+
+    // Resolve the sampler for sampling ops (used both for new bindings and to
+    // backfill a binding first seen through a non-sampling op like resinfo).
+    uint32_t sampler[4] = {};
+    bool sampler_ok = false;
+    if (op >= 0x20) {
+      const uint32_t ssamp = ((word1 >> 21) & 0x1F) * 4;
+      uint64_t sampler_address = 0;
+      const bool loaded_sampler = find_load(ssamp, 4, sampler_address);
+      const bool inline_sampler = !loaded_sampler && ssamp + 4 <= 16;
+      const uint32_t* src =
+          loaded_sampler ? reinterpret_cast<const uint32_t*>(sampler_address)
+          : inline_sampler ? &ps_user_data[ssamp]
+                           : nullptr;
+      if (src) {
+        std::memcpy(sampler, src, sizeof(sampler));
+        sampler_ok = true;
+      }
+    }
+
+    if (binding < result.size()) {  // repeat use of an existing binding
+      TImage& entry = result[binding];
+      if (sampler_ok && !entry.sampler_valid) {
+        std::memcpy(entry.sampler, sampler, sizeof(entry.sampler));
+        entry.sampler_valid = true;
+      }
+      continue;
+    }
+
     uint64_t image_address = 0;
     const bool loaded = find_load(srsrc, 8, image_address);
     const bool inline_desc = !loaded && srsrc + 8 <= 16;
@@ -225,20 +326,9 @@ std::vector<TImage> TrackTextures(const Program& ps_program,
       t = DecodeTImage(&ps_user_data[srsrc]);
     else if (loaded)
       t = DecodeTImage(reinterpret_cast<const uint32_t*>(image_address));
-    const uint32_t op = (inst.raw[0] >> 18) & 0x7F;
-    if (op >= 0x20) {  // sampling op: resolve the S# as well
-      const uint32_t ssamp = ((word1 >> 21) & 0x1F) * 4;
-      uint64_t sampler_address = 0;
-      const bool loaded_sampler = find_load(ssamp, 4, sampler_address);
-      const bool inline_sampler = !loaded_sampler && ssamp + 4 <= 16;
-      const uint32_t* sampler =
-          loaded_sampler ? reinterpret_cast<const uint32_t*>(sampler_address)
-          : inline_sampler ? &ps_user_data[ssamp]
-                           : nullptr;
-      if (sampler) {
-        std::memcpy(t.sampler, sampler, sizeof(t.sampler));
-        t.sampler_valid = true;
-      }
+    if (sampler_ok) {
+      std::memcpy(t.sampler, sampler, sizeof(t.sampler));
+      t.sampler_valid = true;
     }
     t.arrayed = (inst.raw[0] & 0x4000) != 0;  // MIMG DA
     t.force_lod_zero = op == 0x47;            // IMAGE_GATHER4_LZ

@@ -149,34 +149,48 @@ bool PlanCbufs(const Program& program, uint32_t first_binding,
 }
 
 // ---- graphics: MIMG ---------------------------------------------------------
-// Declares the texture as a combined sampler at set 0 / binding = MIMG order,
-// records it in ps_texs, and samples/fetches/queries it. MIMG DA selects a
-// 2D-array resource and appends the layer coordinate after x/y.
-void EmitMimg(Translator& t, const Inst& inst, Recompiled& r) {
+// References the texture as a combined sampler at set 0. The binding comes
+// from the shared MimgBindingPlan (one binding per unique descriptor, matching
+// TrackTextures); the variable is created on the binding's first use. MIMG DA
+// selects a 2D-array resource and appends the layer coordinate after x/y.
+void EmitMimg(Translator& t, const Inst& inst, StageContext& sc) {
   const uint32_t w0 = inst.raw[0], w1 = inst.raw[1], op = inst.opcode;
   const uint32_t dmask = (w0 >> 8) & 0xF, vaddr = w1 & 0xFF;
-  const uint32_t vdata = (w1 >> 8) & 0xFF, srsrc = ((w1 >> 16) & 0x1F) * 4;
-  const uint32_t bind = static_cast<uint32_t>(r.ps_texs.size());
+  const uint32_t vdata = (w1 >> 8) & 0xFF;
   const bool arrayed = (w0 & 0x4000) != 0;
-  r.ps_texs.push_back({bind, srsrc});
   const bool dref = op == 0x28 || op == 0x2f;
   const bool offset = op == 0x37;
   const bool gather = op == 0x47;
-  const uint32_t type_idx = (arrayed ? 1u : 0u) | (dref ? 2u : 0u);
-  if (!t.img_types[type_idx]) {
-    t.img_types[type_idx] =
-        t.m.TypeImage(t.t_f, spv::Dim::Dim2D, dref ? 1 : 0, arrayed ? 1 : 0, 0,
-                      1, spv::ImageFormat::Unknown);
-    t.sampled_types[type_idx] = t.m.TypeSampledImage(t.img_types[type_idx]);
-    t.sampled_ptrs[type_idx] = t.m.TypePointer(
-        spv::StorageClass::UniformConstant, t.sampled_types[type_idx]);
+
+  uint32_t bind = StageContext::kMaxPsSamplers;
+  if (sc.mimg_plan) {
+    const auto plan_it = sc.mimg_plan->binding_by_pc.find(inst.pc);
+    if (plan_it != sc.mimg_plan->binding_by_pc.end()) bind = plan_it->second;
   }
+  if (bind >= StageContext::kMaxPsSamplers) {
+    WarnUnsupported("mimg.unplanned", op, w0, w1);
+    return;
+  }
+  if (!sc.tex_vars[bind]) {
+    const uint32_t type_idx = (arrayed ? 1u : 0u) | (dref ? 2u : 0u);
+    if (!t.img_types[type_idx]) {
+      t.img_types[type_idx] =
+          t.m.TypeImage(t.t_f, spv::Dim::Dim2D, dref ? 1 : 0, arrayed ? 1 : 0,
+                        0, 1, spv::ImageFormat::Unknown);
+      t.sampled_types[type_idx] = t.m.TypeSampledImage(t.img_types[type_idx]);
+      t.sampled_ptrs[type_idx] = t.m.TypePointer(
+          spv::StorageClass::UniformConstant, t.sampled_types[type_idx]);
+    }
+    const Id var = t.m.Variable(t.sampled_ptrs[type_idx],
+                                spv::StorageClass::UniformConstant);
+    t.m.Decorate(var, spv::Decoration::DescriptorSet, {0});
+    t.m.Decorate(var, spv::Decoration::Binding, {bind});
+    sc.tex_vars[bind] = var;
+    sc.tex_types[bind] = type_idx;
+  }
+  const uint32_t type_idx = sc.tex_types[bind];
   const Id img_ty = t.img_types[type_idx];
-  const Id tex_var =
-      t.m.Variable(t.sampled_ptrs[type_idx], spv::StorageClass::UniformConstant);
-  t.m.Decorate(tex_var, spv::Decoration::DescriptorSet, {0});
-  t.m.Decorate(tex_var, spv::Decoration::Binding, {bind});
-  const Id si = t.m.Load(t.sampled_types[type_idx], tex_var);
+  const Id si = t.m.Load(t.sampled_types[type_idx], sc.tex_vars[bind]);
 
   if (op == 0x0e) {  // image_get_resinfo: dimensions/levels for mip v[vaddr]
     t.RequireImageQuery();

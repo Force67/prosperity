@@ -230,7 +230,7 @@ void EmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       break;
     case Enc::kMimg:
       if (sc.is_cs) EmitCsMimg(t, inst, sc);
-      else if (sc.is_ps) EmitMimg(t, inst, *sc.r);
+      else if (sc.is_ps) EmitMimg(t, inst, sc);
       break;
     case Enc::kExp: {
       if (sc.is_cs) {
@@ -557,6 +557,19 @@ bool TranslatePs(const Program& program,
   if (!PlanCbufs(program, r.vs_cbufs.size(), r.ps_cbufs, sc.cbuf_bind))
     return false;
 
+  // Sampler bindings: one per unique descriptor (shared plan with
+  // TrackTextures). More unique samplers than the renderer's set-0 layout
+  // provides cannot be expressed -- decline (the draw falls back).
+  const MimgBindingPlan mimg_plan = PlanMimgBindings(program);
+  if (mimg_plan.binding_srsrc.size() > StageContext::kMaxPsSamplers) {
+    WarnUnsupported("mimg.binding-count",
+                    static_cast<uint32_t>(mimg_plan.binding_srsrc.size()));
+    return false;
+  }
+  sc.mimg_plan = &mimg_plan;
+  for (uint32_t i = 0; i < mimg_plan.binding_srsrc.size(); i++)
+    r.ps_texs.push_back({i, mimg_plan.binding_srsrc[i]});
+
   sc.main_fn = t.m.BeginFunction(t.t_void, t.t_fn);
 
   const bool cfg = ForceCfg() || HasControlFlow(program);
@@ -848,17 +861,6 @@ bool RecompileSpirv(const uint32_t* vs_code, const uint32_t* ps_code,
     if (TraceEnabled())
       std::fprintf(stderr, "[gcnspv] PS translation rejected @%p\n",
                    static_cast<const void*>(ps_code));
-    return false;
-  }
-  // The renderer's set-0 layout provides a fixed number of combined-sampler
-  // bindings; a PS whose SPIR-V declares more would reference bindings absent
-  // from the pipeline layout, which is invalid (and crashes inside driver
-  // pipeline creation, e.g. lavapipe's ycbcr lowering walking the layout).
-  // Decline such shaders loudly; the draw falls back to the heuristic path.
-  constexpr size_t kMaxPsSamplerBindings = 8;  // == vk_render State::kMaxTex
-  if (r.ps_texs.size() > kMaxPsSamplerBindings) {
-    WarnUnsupported("mimg.binding-count",
-                    static_cast<uint32_t>(r.ps_texs.size()));
     return false;
   }
 

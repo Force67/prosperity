@@ -14,6 +14,7 @@
  */
 
 #include <cstdint>
+#include <unordered_map>
 #include <vector>
 
 #include "gcn_decode.h"
@@ -60,6 +61,20 @@ VBuffer DecodeVBuffer(const uint32_t* dwords);
 
 // Decode a T# from 8 consecutive dwords.
 TImage DecodeTImage(const uint32_t* dwords);
+
+// Sampler-binding plan for a pixel shader: MIMG instructions that reference
+// the same descriptor (same T#/S# SGPRs, written by the same s_load -- or
+// inline user data -- and used with the same access type) share one binding.
+// Bindings are numbered in first-appearance order. This is the contract
+// between the recompiler's set-0 sampler declarations and TrackTextures'
+// per-binding result: both derive from this one plan so they cannot drift.
+struct MimgBindingPlan {
+  // MIMG instruction pc -> binding id.
+  std::unordered_map<uint32_t, uint32_t> binding_by_pc;
+  // Per binding: the T# base SGPR of its first-use MIMG.
+  std::vector<uint32_t> binding_srsrc;
+};
+MimgBindingPlan PlanMimgBindings(const Program& program);
 
 // Recover the image(s) a pixel shader references, by tracking its
 // s_load_dwordx4/x8/x16 of descriptor tables out of the user-data SGPRs.

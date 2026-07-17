@@ -25,6 +25,7 @@
 #include <spirv/unified1/GLSL.std.450.h>
 
 #include "../gcn_decode.h"
+#include "../gcn_resource.h"
 #include "../gcn_translate.h"
 #include "spv_emit.h"
 
@@ -284,6 +285,13 @@ struct StageContext {
   bool wrote_color = false;  // compile-time: shader has a color export
   Id color_written_var = 0;  // runtime: this fragment reached a color export
   const std::unordered_set<uint32_t>* flat_attrs = nullptr;
+  // Sampler-binding plan (see PlanMimgBindings): MIMGs referencing the same
+  // descriptor share one set-0 binding; variables are created lazily per
+  // binding. The plan is also what TrackTextures pairs against at draw time.
+  const MimgBindingPlan* mimg_plan = nullptr;
+  static constexpr uint32_t kMaxPsSamplers = 8;  // == vk_render State::kMaxTex
+  Id tex_vars[kMaxPsSamplers] = {};
+  uint32_t tex_types[kMaxPsSamplers] = {};
 
   // shared graphics
   std::unordered_map<uint32_t, uint32_t> cbuf_bind;  // V# SGPR -> set-1 binding
@@ -326,7 +334,7 @@ bool PlanCbufs(const Program& program, uint32_t first_binding,
                std::unordered_map<uint32_t, uint32_t>& bindings);
 void EmitCbufSmrd(Translator& t, const Inst& inst,
                   const std::unordered_map<uint32_t, uint32_t>& bindings);
-void EmitMimg(Translator& t, const Inst& inst, Recompiled& r);
+void EmitMimg(Translator& t, const Inst& inst, StageContext& sc);
 bool PlanCsResources(const Program& program, uint32_t lds_dwords,
                      RecompiledCs& r,
                      std::unordered_map<uint32_t, uint32_t>& bind);
