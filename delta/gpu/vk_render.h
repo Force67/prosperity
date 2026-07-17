@@ -57,20 +57,24 @@ struct DrawInfo {
   uint32_t rtW = 0, rtH = 0;   // render-target dimensions (shared by all MRT targets)
 
   // Multiple render targets (CB_COLOR0..7). mrtBase[0] mirrors rtBase. A target is
-  // bound when its CB_TARGET_MASK nibble is non-zero and its base is a valid guest
-  // address; mrtCount is highest-bound-index + 1 (1 for the common single-RT case,
-  // so the renderer's single-attachment path is unchanged). All targets share rtW/rtH.
+  // bound when its CB_TARGET_MASK nibble and CB_COLORn_INFO format are non-zero and
+  // its base is a valid guest address. mrtInfo preserves CB_COLORn_INFO so image and
+  // pipeline attachment formats match the guest surface. mrtCount is zero for a
+  // depth-only draw.
   uint64_t mrtBase[8] = {0};
-  uint32_t mrtCount = 1;
+  uint32_t mrtInfo[8] = {0};
+  uint32_t mrtCount = 0;
 
-  // Texturing (optional). If texBase != 0 the draw is textured: uvData holds the
-  // float2 UVs (same vertexCount/stride as the position buffer's source).
+  // Texturing (optional). texBase preserves every valid T# address so the renderer
+  // can resolve non-RGBA guest formats to live render targets. Direct guest-memory
+  // uploads remain limited to formats the upload path can decode.
   const void *uvData = nullptr;
   uint32_t uvStride = 0;
   uint32_t uvOffset = 0;       // byte offset of the float2 uv within the vertex
   uint32_t colorOffset = 0xFFFFFFFFu;  // byte offset of float3 color; ~0 = white
   uint64_t texBase = 0;
   uint32_t texW = 0, texH = 0;
+  uint32_t texDfmt = 0, texNfmt = 0;
   uint32_t texTiling = 8;       // T# tiling_index (8/31 = linear; else tiled)
   uint32_t texPitch = 0;        // T# surface pitch in pixels (0 = use texW)
   uint32_t texLayers = 1;       // physical layers in the image allocation
@@ -84,6 +88,8 @@ struct DrawInfo {
   bool texPow2Pad = false;      // physical mip dimensions/layers use POW2_PAD
   bool texSamplerValid = false;
   bool texArrayed = false;      // MIMG DA: shader consumes a layer coordinate
+  bool texForceLodZero = false;
+  bool texDepthCompare = false;
 
   // Multi-texture: a PS can sample several textures (Doom64's 3D walls/floors use
   // a diffuse + lightmap + ... loaded from the EUD resource table). texs[0] mirrors
@@ -92,6 +98,7 @@ struct DrawInfo {
   struct DrawTex {
     uint64_t base = 0;
     uint32_t w = 0, h = 0, tiling = 8, pitch = 0;
+    uint32_t dfmt = 0, nfmt = 0;
     uint32_t layers = 1, baseArray = 0, viewLayers = 1;
     uint32_t mipLevels = 1, baseMip = 0, viewMips = 1;
     uint32_t minLod = 0;
@@ -99,6 +106,8 @@ struct DrawInfo {
     bool pow2Pad = false;
     bool samplerValid = false;
     bool arrayed = false;
+    bool forceLodZero = false;
+    bool depthCompare = false;
   };
   DrawTex texs[8];
   uint32_t nTexs = 0;
@@ -141,8 +150,8 @@ struct DrawInfo {
   float viewportXScale = 0, viewportXOffset = 0;
   float viewportYScale = 0, viewportYOffset = 0;
 
-  // Recompiled-shader path. When recomp != null and nvattrs > 0 the renderer runs
-  // the game's actual VS/PS (recompiled to SPIR-V) instead of the heuristic quad:
+  // Recompiled-shader path. When recomp != null the renderer runs the game's actual
+  // VS/PS instead of the heuristic quad; procedural VS programs may have no attributes.
   // vertexData/vertexStride is the raw interleaved vertex buffer, vattrs describe
   // the inputs, mvp holds the constant buffer (pushed), texBase the sampler.
   uint64_t vsAddr = 0, psAddr = 0;       // pipeline cache key

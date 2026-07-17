@@ -56,6 +56,15 @@ static uint64_t guestTsc() {
 static std::atomic<uint32_t> g_dceCurrentBuffer{0};
 static std::atomic<int64_t> g_dceFlipArg{0};
 static std::atomic<uint64_t> g_dceFlipCount{0};
+static std::atomic<uint64_t> g_dceScanoutBuffers[16]{};
+
+uint32_t dceCurrentBuffer() { return g_dceCurrentBuffer.load(); }
+
+int64_t dceCurrentFlipArg() { return g_dceFlipArg.load(); }
+
+uint64_t dceScanoutBuffer(uint32_t index) {
+  return index < 16 ? g_dceScanoutBuffers[index].load() : 0;
+}
 
 static bool g_dceTrace() {
   static const bool on = std::getenv("DELTA_DCE_TRACE") != nullptr;
@@ -280,9 +289,12 @@ int32_t dceDevice::ioctl(uint32_t cmd, void *data) {
     }
   }
 
-  if (cmd == 0xc0308206) {
-    // Register one scanout buffer (GPU base path). The module already resolved
-    // and validated the buffer's GPU VA via sceKernelVirtualQuery; accept it.
+  if (cmd == 0xc0308206 && data) {
+    // Register one scanout buffer: {display handle, buffer index, GPU base}.
+    // Preserve the address so a later GC submit-and-flip can present the render
+    // target selected by the DCE flip rather than whichever RT was drawn last.
+    if (s[1] < 16)
+      g_dceScanoutBuffers[s[1]].store(s[2]);
     return 0;
   }
 

@@ -44,6 +44,8 @@ struct TImage {
   bool pow2Pad = false;     // pad physical mip dimensions/layers to powers of two
   bool samplerValid = false;
   bool arrayed = false;    // MIMG DA bit: address contains an array-layer coordinate
+  bool forceLodZero = false; // gather4_lz needs an implicit gather clamped to mip 0
+  bool depthCompare = false; // MIMG _C uses the sampler's depth comparison function
   bool valid = false;
 };
 

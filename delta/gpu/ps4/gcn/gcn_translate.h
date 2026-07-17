@@ -3,15 +3,14 @@
 /*
  * PS4Delta : PS4 emulation and research project
  *
- * GCN (GFX6/7 "Liverpool") shader recompiler. Translates a guest vertex + pixel
- * shader pair directly to SPIR-V (a register-VM model cleaned up by spirv-opt), plus
- * a resource binding plan the renderer uses to wire the real vertex buffers /
- * constant buffers / textures from the guest at draw time. Replaces the old heuristic
- * quad path with the shaders the game actually runs.
- *
- * Scope: the straight-line VS/PS patterns 2D titles like Isaac use (vertex fetch +
- * MVP transform + export; interpolate + texture sample + modulate + export). Control
- * flow is not reconstructed (single basic block); unhandled ops degrade gracefully.
+ * GCN (GFX6/7 "Liverpool") shader recompiler. Translates guest shaders directly
+ * to SPIR-V (a register-VM model cleaned up by spirv-opt), plus a resource
+ * binding plan the renderer uses to wire the real vertex buffers / constant
+ * buffers / textures from the guest at draw time. This is the only shader
+ * execution path: VS+PS pairs become Vulkan graphics pipelines, compute shaders
+ * become Vulkan compute pipelines. Branchy shaders are lowered to a while/switch
+ * state machine over basic blocks; unhandled ops degrade gracefully (graphics)
+ * or decline the recompile (compute).
  */
 
 #include <cstdint>
@@ -44,6 +43,7 @@ struct ShaderTex {
 struct Recompiled {
   bool ok = false;
   std::vector<uint32_t> vsSpirv;  // emitted directly from GCN (empty on failure)
+  std::vector<uint32_t> gsSpirv;  // fixed RECTLIST expansion stage
   std::vector<uint32_t> fsSpirv;
   std::vector<ShaderAttr> attrs;   // vertex inputs
   std::vector<ShaderCbuf> vsCbufs; // VS UBOs (set 1, binding = .binding)

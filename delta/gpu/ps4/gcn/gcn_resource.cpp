@@ -227,6 +227,8 @@ std::vector<TImage> trackTextures(const uint32_t *psCode, uint32_t maxDwords,
       }
     }
     t.arrayed = (in.raw[0] & 0x4000) != 0;  // MIMG DA
+    t.forceLodZero = op == 0x47;             // IMAGE_GATHER4_LZ
+    t.depthCompare = op == 0x28 || op == 0x2f;
     if (t.valid) {
       // Empirical tiling census (DELTA_GPU_TILEHIST): tally tilingIdx of every
       // sampled texture so we can confirm which modes are linear (8/31) vs 1D

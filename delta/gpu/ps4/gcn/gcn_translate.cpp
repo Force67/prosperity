@@ -14,7 +14,7 @@ namespace gpu::gcn {
 Recompiled recompile(const uint32_t *vsCode, const uint32_t *psCode,
                      const uint32_t *vsUserData, const uint32_t *psUserData) {
   Recompiled r;
-  if (!vsCode || !psCode || !vsUserData || !psUserData) return r;
+  if (!vsCode || !vsUserData || !psUserData) return r;
   recompileSpirv(vsCode, psCode, vsUserData, psUserData, r);  // fills r, sets r.ok
   return r;
 }

@@ -189,7 +189,7 @@ static void umtxTrace(int op, void *ptr, uint32_t self, uint32_t owner) {
                  self, owner);
 }
 
-int PS4ABI sys_umtx_op(void *ptr, int op, uint32_t val, void *a, void *b) {
+int PS4ABI sys_umtx_op(void *ptr, int op, uint64_t val, void *a, void *b) {
   using namespace std::chrono_literals;
   markThreadStarted();  // first sync point => our init is done
   switch (op) {
@@ -331,6 +331,18 @@ int PS4ABI sys_umtx_op(void *ptr, int op, uint32_t val, void *a, void *b) {
     auto &bk = umtxBucket(ptr);
     std::lock_guard<std::mutex> lk(bk.m);
     bk.cv.notify_all();
+    return 0;
+  }
+  case 21: { // UMTX_OP_NWAKE_PRIVATE: wake all waiters on each listed address
+    // FreeBSD's libthr batches deferred condition-variable wakes into an array
+    // and releases all waiters for every address when the mutex is unlocked:
+    // https://github.com/freebsd/freebsd-src/blob/release/9.0.0/sys/kern/kern_umtx.c#L2995-L3019
+    auto **addrs = static_cast<void **>(ptr);
+    for (uint64_t i = 0; i < val; ++i) {
+      auto &bk = umtxBucket(addrs[i]);
+      std::lock_guard<std::mutex> lk(bk.m);
+      bk.cv.notify_all();
+    }
     return 0;
   }
   default: {

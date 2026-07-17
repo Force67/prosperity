@@ -480,7 +480,34 @@ modulePtr proc::loadModule(base::StringRef name) {
     return lib;
   }
 
-  // HLE/system modules ship with the emulator; prefer those.
+  const bool isPackagedSdkModule =
+      name == base::StringRef("libc") || name == base::StringRef("libSceFios2");
+  auto loadPackagedModule = [&] {
+    // Retail applications provide these SDK compatibility modules in
+    // /app0/sce_module rather than using the firmware copies. The firmware-
+    // derived classification used here is documented by shadPS4:
+    // https://github.com/shadps4-emu/shadPS4/blob/2c9caf6bfbe7e1dc7a1b4565af8d84c56469dd56/src/core/libraries/sysmodule/sysmodule_table.h#L363-L372
+    const char *roots[] = {"/app0/sce_module/", "/app0/"};
+    for (const char *root : roots) {
+      base::String vfsPath(root);
+      vfsPath.append(name.data(), name.length());
+      vfsPath += ".prx";
+      if (!vfs::openRead(vfsPath.c_str()).Exists())
+        continue;
+      if (!lib->fromVfs(vfsPath))
+        return false;
+      if (name == base::StringRef("rebirth"))
+        bringUpRebirthSurfaceRegistry(*lib);
+      return true;
+    }
+    return false;
+  };
+
+  if (isPackagedSdkModule && loadPackagedModule())
+    return lib;
+
+  // HLE/system modules ship with the emulator; prefer those for modules that
+  // are not supplied by the application.
   base::String hostRel("modules/");
   hostRel.append(name.data(), name.length());
   hostRel += ".sprx";
@@ -498,19 +525,8 @@ modulePtr proc::loadModule(base::StringRef name) {
   } else {
     // The game's own modules live inside the pkg: SDK prx under
     // /app0/sce_module, the title's own prx at the app root.
-    const char *roots[] = {"/app0/sce_module/", "/app0/"};
-    for (const char *root : roots) {
-      base::String vfsPath(root);
-      vfsPath.append(name.data(), name.length());
-      vfsPath += ".prx";
-      if (vfs::openRead(vfsPath.c_str()).Exists()) {
-        if (!lib->fromVfs(vfsPath))
-          return nullptr;
-        if (isRebirth)
-          bringUpRebirthSurfaceRegistry(*lib);
-        return lib;
-      }
-    }
+    if (loadPackagedModule())
+      return lib;
   }
 
   LOG_ERROR("unable to load module {}", sname.c_str());

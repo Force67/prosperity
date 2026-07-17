@@ -67,15 +67,12 @@ extern "C" void prosperity_gc_submit(const void *descArray, uint32_t descCount) 
   }
 }
 
-// LLE flip bridge: end the frame and present. displayBufferIndex < 0 means we
-// couldn't recover the flip's target buffer, so present the last RT the renderer
-// drew (endFrame falls back to it). The videoout flip pump posts the
-// flip-complete event independently, so the guest's flip wait still unblocks.
-extern "C" void prosperity_gc_flip(int displayBufferIndex, int64_t flipArg) {
-  uint64_t scanout = displayBufferIndex >= 0
-                         ? prosperity_videoout_buffer(displayBufferIndex)
-                         : 0;
-  gpu::endFrame(scanout);
+// LLE flip bridge: /dev/dce owns display-buffer registration and supplies the
+// selected scanout address to /dev/gc when the real GnmDriver submits the frame.
+// endFrame falls back to the last RT if the address was not registered.
+extern "C" void prosperity_gc_flip(uint64_t scanoutBase, int displayBufferIndex,
+                                    int64_t flipArg) {
+  gpu::endFrame(scanoutBase);
   if (displayBufferIndex >= 0)
     prosperity_videoout_set_flip(displayBufferIndex, flipArg);
 }

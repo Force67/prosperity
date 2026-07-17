@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cstring>
 #include "gc_dev.h"
+#include "dce_dev.h"
 #include "kern/proc.h"
 #include "kern/ps4/lv2/sys_event.h"
 #include "kern/ps4/lv2/sys_mem.h"
@@ -14,7 +15,8 @@
 // PM4 through these ioctls; forward the descriptor array to the GPU command
 // processor. See prosperity_gc_submit in libSceGnmDriver.cpp.
 extern "C" void prosperity_gc_submit(const void *descArray, uint32_t descCount);
-extern "C" void prosperity_gc_flip(int displayBufferIndex, int64_t flipArg);
+extern "C" void prosperity_gc_flip(uint64_t scanoutBase, int displayBufferIndex,
+                                    int64_t flipArg);
 // PS5 AGC submit bridge (delta_gpu, gpu/ps5): the real libSceAgcDriver.sprx
 // submits its DCB through the /dev/gc AGC ioctl 0xc0408121; forward it to the
 // PS5 command processor.
@@ -125,9 +127,7 @@ int32_t gcDevice::ioctl(uint32_t cmd, void *data) {
     };
     auto *a = static_cast<argl *>(data);
     prosperity_gc_submit(reinterpret_cast<const void *>(a->descPtr), a->count);
-    // SCOUT (DELTA_GC_FLIP): the flip target buffer/arg live behind flipPtr; dump
-    // it the first few times so we can decode the layout. Until then present the
-    // last RT (index -1) and let the videoout pump post the flip event.
+    // SCOUT (DELTA_GC_FLIP): dump the opaque completion pointer for diagnostics.
     static const bool flipTrace = std::getenv("DELTA_GC_FLIP") != nullptr;
     static int flipDumps = 0;
     if (flipTrace && flipDumps < 8) {
@@ -142,7 +142,9 @@ int32_t gcDevice::ioctl(uint32_t cmd, void *data) {
       }
     }
     completeFlipLabels(a->flipPtr);
-    prosperity_gc_flip(-1, 0);
+    uint32_t bufferIndex = dceCurrentBuffer();
+    prosperity_gc_flip(dceScanoutBuffer(bufferIndex),
+                       static_cast<int>(bufferIndex), dceCurrentFlipArg());
     noteFlip();  // advance the flip count + post the display event for pacing
     return 0;
   }

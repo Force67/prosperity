@@ -137,6 +137,7 @@ struct State {
   bool recording = false;
   bool samplerAnisotropy = false;
   bool samplerMirrorClamp = false;
+  bool geometryShader = false;
   bool frameHadRoom = false;  // this frame sampled a room-sized (~832w) RT
   bool frameRoomBake = false; // this frame RENDERED into a room-sized (~832w) RT
 } g;
@@ -145,11 +146,12 @@ struct TexImageKey {
   uint64_t base = 0;
   uint32_t w = 0, h = 0, tiling = 8, pitch = 0, layers = 1;
   uint32_t mipLevels = 1;
+  VkFormat format = VK_FORMAT_UNDEFINED;
   bool pow2Pad = false;
   bool operator==(const TexImageKey &o) const {
     return base == o.base && w == o.w && h == o.h && tiling == o.tiling &&
            pitch == o.pitch && layers == o.layers && mipLevels == o.mipLevels &&
-           pow2Pad == o.pow2Pad;
+           format == o.format && pow2Pad == o.pow2Pad;
   }
 };
 uint64_t hashWord(uint64_t h, uint64_t v) {
@@ -161,6 +163,7 @@ struct TexImageKeyHash {
     h = hashWord(h, k.base); h = hashWord(h, k.w); h = hashWord(h, k.h);
     h = hashWord(h, k.tiling); h = hashWord(h, k.pitch); h = hashWord(h, k.layers);
     h = hashWord(h, k.mipLevels); h = hashWord(h, k.pow2Pad);
+    h = hashWord(h, k.format);
     return static_cast<size_t>(h);
   }
 };
@@ -169,8 +172,11 @@ struct SamplerKey {
   uint32_t raw[4] = {};
   uint32_t imageMinLod = 0;
   bool valid = false;
+  bool forceLodZero = false;
+  bool depthCompare = false;
   bool operator==(const SamplerKey &o) const {
     return valid == o.valid && imageMinLod == o.imageMinLod &&
+           forceLodZero == o.forceLodZero && depthCompare == o.depthCompare &&
            std::memcmp(raw, o.raw, sizeof(raw)) == 0;
   }
 };
@@ -179,6 +185,8 @@ struct SamplerKeyHash {
     uint64_t h = hashWord(1469598103934665603ull, k.valid);
     for (uint32_t word : k.raw) h = hashWord(h, word);
     h = hashWord(h, k.imageMinLod);
+    h = hashWord(h, k.forceLodZero);
+    h = hashWord(h, k.depthCompare);
     return static_cast<size_t>(h);
   }
 };
@@ -257,23 +265,84 @@ uint64_t texHash(uint64_t base, uint64_t bytes) {
   return hsh ^ (count << 1);
 }
 
-TexKey textureKey(uint64_t base, uint32_t w, uint32_t h, uint32_t tiling,
-                  uint32_t pitch, uint32_t layers, uint32_t baseArray,
+VkFormat guestTextureFormat(uint32_t dfmt, uint32_t nfmt) {
+  if (dfmt == 5 && nfmt == 7) return VK_FORMAT_R16G16_SFLOAT;
+  if (dfmt == 6 && nfmt == 7) return VK_FORMAT_B10G11R11_UFLOAT_PACK32;
+  if (dfmt == 10 && nfmt == 0) return VK_FORMAT_R8G8B8A8_UNORM;
+  if (dfmt == 10 && nfmt == 9) return VK_FORMAT_R8G8B8A8_SRGB;
+  return VK_FORMAT_UNDEFINED;
+}
+
+// CB_COLORn_INFO uses the GFX7 SurfaceFormat/SurfaceNumber encodings. Keep the
+// established BGRA8 host path for 8_8_8_8 targets; floating-point effect buffers
+// must retain their native precision or HDR/negative values clamp to black.
+VkFormat colorTargetFormat(uint32_t info) {
+  uint32_t dfmt = (info >> 2) & 0x1F;
+  uint32_t nfmt = (info >> 8) & 0x7;
+  if (nfmt == 7) {
+    switch (dfmt) {
+      case 2: return VK_FORMAT_R16_SFLOAT;
+      case 4: return VK_FORMAT_R32_SFLOAT;
+      case 5: return VK_FORMAT_R16G16_SFLOAT;
+      case 6: return VK_FORMAT_B10G11R11_UFLOAT_PACK32;
+      case 11: return VK_FORMAT_R32G32_SFLOAT;
+      case 12: return VK_FORMAT_R16G16B16A16_SFLOAT;
+      case 13: return VK_FORMAT_R32G32B32_SFLOAT;
+      case 14: return VK_FORMAT_R32G32B32A32_SFLOAT;
+      default: break;
+    }
+  }
+  if (nfmt == 0) {
+    switch (dfmt) {
+      case 1: return VK_FORMAT_R8_UNORM;
+      case 2: return VK_FORMAT_R16_UNORM;
+      case 3: return VK_FORMAT_R8G8_UNORM;
+      case 5: return VK_FORMAT_R16G16_UNORM;
+      case 10: return VK_FORMAT_B8G8R8A8_UNORM;
+      case 12: return VK_FORMAT_R16G16B16A16_UNORM;
+      default: break;
+    }
+  }
+  return g.rtFormat;
+}
+
+uint32_t formatBytes(VkFormat fmt) {
+  switch (fmt) {
+    case VK_FORMAT_R8_UNORM: return 1;
+    case VK_FORMAT_R16_UNORM:
+    case VK_FORMAT_R16_SFLOAT:
+    case VK_FORMAT_R8G8_UNORM: return 2;
+    case VK_FORMAT_R16G16B16A16_SFLOAT:
+    case VK_FORMAT_R16G16B16A16_UNORM:
+    case VK_FORMAT_R32G32_SFLOAT: return 8;
+    case VK_FORMAT_R32G32B32_SFLOAT: return 12;
+    case VK_FORMAT_R32G32B32A32_SFLOAT: return 16;
+    default: return 4;
+  }
+}
+
+TexKey textureKey(uint64_t base, uint32_t w, uint32_t h, uint32_t dfmt,
+                   uint32_t nfmt, uint32_t tiling,
+                   uint32_t pitch, uint32_t layers, uint32_t baseArray,
                    uint32_t viewLayers, uint32_t mipLevels, uint32_t baseMip,
                    uint32_t viewMips, uint32_t minLod, bool pow2Pad,
-                   const uint32_t *sampler, bool samplerValid, bool arrayed) {
+                   const uint32_t *sampler, bool samplerValid, bool arrayed,
+                   bool forceLodZero, bool depthCompare) {
   if (layers && baseArray < layers)
     viewLayers = std::min(viewLayers, layers - baseArray);
   if (!arrayed) viewLayers = 1;
   if (mipLevels && baseMip < mipLevels)
     viewMips = std::min(viewMips, mipLevels - baseMip);
   TexKey key;
-  key.image = {base, w, h, tiling, pitch, layers, mipLevels, pow2Pad};
+  key.image = {base, w, h, tiling, pitch, layers, mipLevels,
+               guestTextureFormat(dfmt, nfmt), pow2Pad};
   key.baseArray = baseArray; key.viewLayers = viewLayers;
   key.baseMip = baseMip; key.viewMips = viewMips;
   key.sampler.valid = samplerValid && sampler;
   if (key.sampler.valid) std::memcpy(key.sampler.raw, sampler, sizeof(key.sampler.raw));
   key.sampler.imageMinLod = minLod;
+  key.sampler.forceLodZero = forceLodZero;
+  key.sampler.depthCompare = depthCompare;
   key.arrayed = arrayed;
   return key;
 }
@@ -300,6 +369,14 @@ struct RTarget {
   VkDeviceMemory mem = VK_NULL_HANDLE;
   VkImageView view = VK_NULL_HANDLE;
   VkDescriptorSet set = VK_NULL_HANDLE;  // for sampling this RT as a texture
+  // Sampling an image while it is also a color attachment requires Vulkan's
+  // attachment-feedback-loop extension. Keep a lazy copy instead so the shader
+  // reads the attachment contents as they existed before the draw.
+  VkImage feedbackImage = VK_NULL_HANDLE;
+  VkDeviceMemory feedbackMem = VK_NULL_HANDLE;
+  VkImageView feedbackView = VK_NULL_HANDLE;
+  VkDescriptorSet feedbackSet = VK_NULL_HANDLE;
+  VkImageLayout feedbackLayout = VK_IMAGE_LAYOUT_UNDEFINED;
   uint32_t w = 0, h = 0;
   VkFormat fmt = VK_FORMAT_B8G8R8A8_UNORM;  // identity: addr alone doesn't pin format
   bool isDepth = false;                      // depth/stencil attachment (MRT/depth task)
@@ -323,6 +400,7 @@ struct DepthTarget {
   VkImage image = VK_NULL_HANDLE;
   VkDeviceMemory mem = VK_NULL_HANDLE;
   VkImageView view = VK_NULL_HANDLE;
+  VkDescriptorSet set = VK_NULL_HANDLE;
   uint32_t w = 0, h = 0;
   VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
   int lastFrame = -1000;
@@ -340,11 +418,14 @@ std::unordered_map<uint64_t, DepthTarget> g_depths;
 constexpr uint32_t kRtPageShift = 16;  // 64 KiB
 std::unordered_map<uint64_t, std::vector<uint64_t>> g_rtPages;
 
-uint64_t rtByteSizeWH(uint32_t w, uint32_t h) { return (uint64_t)w * h * 4; }
+uint64_t rtByteSizeWH(uint32_t w, uint32_t h, VkFormat fmt) {
+  return (uint64_t)w * h * formatBytes(fmt);
+}
 
 // Register an RT's footprint pages so the page table can find it by overlap.
-void registerRtPages(uint64_t base, uint32_t w, uint32_t h) {
-  uint64_t lo = base >> kRtPageShift, hi = (base + rtByteSizeWH(w, h) - 1) >> kRtPageShift;
+void registerRtPages(uint64_t base, uint32_t w, uint32_t h, VkFormat fmt) {
+  uint64_t lo = base >> kRtPageShift;
+  uint64_t hi = (base + rtByteSizeWH(w, h, fmt) - 1) >> kRtPageShift;
   for (uint64_t p = lo; p <= hi; p++) {
     auto &v = g_rtPages[p];
     bool seen = false;
@@ -501,8 +582,10 @@ bool createDevice() {
   VkPhysicalDeviceFeatures wantFeat{};
   if (avail2.features.robustBufferAccess) wantFeat.robustBufferAccess = VK_TRUE;
   if (avail2.features.samplerAnisotropy) wantFeat.samplerAnisotropy = VK_TRUE;
+  if (avail2.features.geometryShader) wantFeat.geometryShader = VK_TRUE;
   g.samplerAnisotropy = wantFeat.samplerAnisotropy;
   g.samplerMirrorClamp = f12.samplerMirrorClampToEdge;
+  g.geometryShader = wantFeat.geometryShader;
   dc.pEnabledFeatures = &wantFeat;
   VKOK(vkCreateDevice(g.phys, &dc, nullptr, &g.device));
   vkGetDeviceQueue(g.device, g.qfam, 0, &g.queue);
@@ -687,7 +770,8 @@ VkPipelineColorBlendAttachmentState blendAttachment(uint32_t bc, bool en) {
 
 // Build a graphics pipeline for the colored (textured=false) or textured quad
 // with the given colour-blend attachment. Shaders + layout selected by `textured`.
-VkPipeline buildPipeline(bool textured, VkPipelineColorBlendAttachmentState cba) {
+VkPipeline buildPipeline(bool textured, VkPipelineColorBlendAttachmentState cba,
+                         VkFormat colorFormat) {
   VkShaderModule vs = makeModule(textured ? tex_vert_spv : quad_vert_spv,
                                  textured ? sizeof(tex_vert_spv) : sizeof(quad_vert_spv));
   VkShaderModule fs = makeModule(textured ? tex_frag_spv : quad_frag_spv,
@@ -730,7 +814,7 @@ VkPipeline buildPipeline(bool textured, VkPipelineColorBlendAttachmentState cba)
   VkPipelineDynamicStateCreateInfo dy{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
   dy.dynamicStateCount = 2; dy.pDynamicStates = dyns;
   VkPipelineRenderingCreateInfo rci{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
-  rci.colorAttachmentCount = 1; rci.pColorAttachmentFormats = &g.rtFormat;
+  rci.colorAttachmentCount = 1; rci.pColorAttachmentFormats = &colorFormat;
   VkGraphicsPipelineCreateInfo pi{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
   pi.pNext = &rci; pi.stageCount = 2; pi.pStages = stages;
   pi.pVertexInputState = &vi; pi.pInputAssemblyState = &ia; pi.pViewportState = &vp;
@@ -746,14 +830,15 @@ VkPipeline buildPipeline(bool textured, VkPipelineColorBlendAttachmentState cba)
 
 // Pipeline for a draw's blend state, cached. Returns the default src-alpha pipeline
 // when the per-state build fails so a draw never silently drops.
-VkPipeline getPipeline(bool textured, uint32_t bc, bool en) {
+VkPipeline getPipeline(bool textured, uint32_t bc, bool en, VkFormat colorFormat) {
   uint64_t key = (textured ? 1ull : 0) | (en ? 2ull : 0) |
                  ((uint64_t)(en ? (bc & 0x7FFFFFFFu) : 0u) << 2);
+  key = hashWord(key, colorFormat);
   auto it = g.pipeCache.find(key);
   if (it != g.pipeCache.end())
     return it->second;
-  VkPipeline p = buildPipeline(textured, blendAttachment(bc, en));
-  if (!p) p = textured ? g.texPipeline : g.pipeline;
+  VkPipeline p = buildPipeline(textured, blendAttachment(bc, en), colorFormat);
+  if (!p && colorFormat == g.rtFormat) p = textured ? g.texPipeline : g.pipeline;
   g.pipeCache[key] = p;
   return p;
 }
@@ -777,7 +862,7 @@ bool createPipeline() {
   cba.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
   cba.alphaBlendOp = VK_BLEND_OP_ADD;
   cba.colorWriteMask = 0xF;
-  g.pipeline = buildPipeline(false, cba);
+  g.pipeline = buildPipeline(false, cba, g.rtFormat);
   if (!g.pipeline) { std::fprintf(stderr, "[gpuvk] pipeline failed\n"); return false; }
   return true;
 }
@@ -889,7 +974,7 @@ bool createTexPipeline() {
   cba.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
   cba.alphaBlendOp = VK_BLEND_OP_ADD;
   cba.colorWriteMask = 0xF;
-  g.texPipeline = buildPipeline(true, cba);
+  g.texPipeline = buildPipeline(true, cba, g.rtFormat);
   if (!g.texPipeline) { std::fprintf(stderr, "[gpuvk] tex pipeline failed\n"); return false; }
   return true;
 }
@@ -926,7 +1011,7 @@ VkDescriptorSet allocateSamplerSet(VkDescriptorSetLayout layout, bool multi,
 }
 
 VkSampler samplerFor(const SamplerKey &key) {
-  if (!key.valid) return g.sampler;
+  if (!key.valid && !key.forceLodZero && !key.depthCompare) return g.sampler;
   auto found = g_samplerCache.find(key);
   if (found != g_samplerCache.end()) return found->second;
   if (g_samplerCache.size() >= 4096) return g.sampler;
@@ -959,6 +1044,7 @@ VkSampler samplerFor(const SamplerKey &key) {
     ci.maxLod = static_cast<float>((key.raw[1] >> 12) & 0xFFF) / 256.0f;
     ci.maxLod = std::max(ci.minLod, ci.maxLod);
   }
+  if (key.forceLodZero) ci.minLod = ci.maxLod = 0.0f;
   int32_t bias = static_cast<int32_t>(key.raw[2] << 18) >> 18;
   VkPhysicalDeviceProperties props;
   vkGetPhysicalDeviceProperties(g.phys, &props);
@@ -969,6 +1055,17 @@ VkSampler samplerFor(const SamplerKey &key) {
     case 1: ci.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK; break;
     case 2: ci.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE; break;
     default: ci.borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK; break;
+  }
+  ci.compareEnable = key.depthCompare;
+  switch ((key.raw[0] >> 12) & 7) {
+    case 0: ci.compareOp = VK_COMPARE_OP_NEVER; break;
+    case 1: ci.compareOp = VK_COMPARE_OP_LESS; break;
+    case 2: ci.compareOp = VK_COMPARE_OP_EQUAL; break;
+    case 3: ci.compareOp = VK_COMPARE_OP_LESS_OR_EQUAL; break;
+    case 4: ci.compareOp = VK_COMPARE_OP_GREATER; break;
+    case 5: ci.compareOp = VK_COMPARE_OP_NOT_EQUAL; break;
+    case 6: ci.compareOp = VK_COMPARE_OP_GREATER_OR_EQUAL; break;
+    default: ci.compareOp = VK_COMPARE_OP_ALWAYS; break;
   }
   if (g.samplerAnisotropy && (mag >= 2 || min >= 2)) {
     VkPhysicalDeviceProperties props;
@@ -1099,17 +1196,22 @@ void retireTextureImage(const TexImageKey &key) {
 // room art is composed/loaded into the same buffer after the first sample, so a
 // once-only cache would serve a stale black frame).
 VkDescriptorSet getTexture(uint64_t base, uint32_t w, uint32_t h,
-                            uint32_t tiling = 8, uint32_t pitch = 0,
+                             uint32_t dfmt, uint32_t nfmt,
+                             uint32_t tiling = 8, uint32_t pitch = 0,
                             uint32_t layers = 1, uint32_t baseArray = 0,
                              uint32_t viewLayers = 1, uint32_t mipLevels = 1,
                              uint32_t baseMip = 0, uint32_t viewMips = 1,
-                             uint32_t minLod = 0, bool pow2Pad = false,
-                             const uint32_t *sampler = nullptr,
-                             bool samplerValid = false, bool arrayed = false) {
+                              uint32_t minLod = 0, bool pow2Pad = false,
+                              const uint32_t *sampler = nullptr,
+                              bool samplerValid = false, bool arrayed = false,
+                              bool forceLodZero = false,
+                              bool depthCompare = false) {
   constexpr uint64_t kGuestBegin = 0x1000000000ull;
   constexpr uint64_t kGuestEnd = 0x20000000000ull;
   constexpr uint64_t kMaxTextureBytes = 256ull * 1024 * 1024;
   if (!w || !h || w > 8192 || h > 8192) return VK_NULL_HANDLE;
+  VkFormat format = guestTextureFormat(dfmt, nfmt);
+  if (format == VK_FORMAT_UNDEFINED) return VK_NULL_HANDLE;
   if (!layers || baseArray >= layers) return VK_NULL_HANDLE;
   viewLayers = std::min(viewLayers, layers - baseArray);
   if (!arrayed) viewLayers = 1;
@@ -1126,9 +1228,10 @@ VkDescriptorSet getTexture(uint64_t base, uint32_t w, uint32_t h,
   uint64_t footprint = layout.size;
   if (base < kGuestBegin || footprint > kMaxTextureBytes || base > kGuestEnd - footprint)
     return VK_NULL_HANDLE;
-  TexKey key = textureKey(base, w, h, tiling, pitch, layers, baseArray,
-                            viewLayers, mipLevels, baseMip, viewMips, minLod,
-                            pow2Pad, sampler, samplerValid, arrayed);
+  TexKey key = textureKey(base, w, h, dfmt, nfmt, tiling, pitch, layers, baseArray,
+                             viewLayers, mipLevels, baseMip, viewMips, minLod,
+                             pow2Pad, sampler, samplerValid, arrayed,
+                             forceLodZero, depthCompare);
   // Diagnostic (DELTA_GPU_TEXDUMP): in deep gameplay, dump the first few large guest
   // textures sampled, so a non-tutorial room's floor texture can be inspected (is it
   // loaded/brown or black/zero?). Counts non-zero pixels too.
@@ -1171,7 +1274,7 @@ VkDescriptorSet getTexture(uint64_t base, uint32_t w, uint32_t h,
     imageEntry.lastCheckedFrame = g.frameNum;
     VkImageCreateInfo ii{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
     ii.imageType = VK_IMAGE_TYPE_2D;
-    ii.format = VK_FORMAT_R8G8B8A8_UNORM;
+    ii.format = format;
     ii.extent = {w, h, 1};
     ii.mipLevels = mipLevels; ii.arrayLayers = layers;
     ii.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -1209,7 +1312,7 @@ VkDescriptorSet getTexture(uint64_t base, uint32_t w, uint32_t h,
     VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
     vci.image = imageIt->second.image;
     vci.viewType = arrayed ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
-    vci.format = VK_FORMAT_R8G8B8A8_UNORM;
+    vci.format = format;
     vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, baseMip, viewMips, baseArray,
                             arrayed ? viewLayers : 1};
     if (vkCreateImageView(g.device, &vci, nullptr, &viewEntry.view) != VK_SUCCESS)
@@ -1233,17 +1336,27 @@ VkDescriptorSet getTexture(uint64_t base, uint32_t w, uint32_t h,
 }
 
 // Image view for a guest texture (ensures it is cached/uploaded via getTexture).
+bool guestTextureUploadSupported(uint32_t dfmt, uint32_t nfmt) {
+  // The detiler preserves packed 32-bpp texels; Vulkan applies the descriptor's
+  // numeric interpretation when sampling.
+  return guestTextureFormat(dfmt, nfmt) != VK_FORMAT_UNDEFINED;
+}
+
 VkImageView texViewFor(const DrawInfo::DrawTex &t) {
-  if (!t.base || !t.w || !t.h) return VK_NULL_HANDLE;
-  if (getTexture(t.base, t.w, t.h, t.tiling, t.pitch, t.layers, t.baseArray,
-                   t.viewLayers, t.mipLevels, t.baseMip, t.viewMips,
-                  t.minLod, t.pow2Pad, t.sampler, t.samplerValid,
-                  t.arrayed) == VK_NULL_HANDLE)
+  if (!t.base || !t.w || !t.h || !guestTextureUploadSupported(t.dfmt, t.nfmt))
     return VK_NULL_HANDLE;
-  TexKey key = textureKey(t.base, t.w, t.h, textureTiling(t.tiling), t.pitch,
-                          t.layers, t.baseArray, t.viewLayers, t.mipLevels,
-                          t.baseMip, t.viewMips, t.minLod, t.pow2Pad, t.sampler,
-                          t.samplerValid, t.arrayed);
+  if (getTexture(t.base, t.w, t.h, t.dfmt, t.nfmt, t.tiling, t.pitch,
+                   t.layers, t.baseArray,
+                   t.viewLayers, t.mipLevels, t.baseMip, t.viewMips,
+                   t.minLod, t.pow2Pad, t.sampler, t.samplerValid,
+                   t.arrayed, t.forceLodZero, t.depthCompare) == VK_NULL_HANDLE)
+    return VK_NULL_HANDLE;
+  TexKey key = textureKey(t.base, t.w, t.h, t.dfmt, t.nfmt,
+                           textureTiling(t.tiling), t.pitch,
+                           t.layers, t.baseArray, t.viewLayers, t.mipLevels,
+                           t.baseMip, t.viewMips, t.minLod, t.pow2Pad, t.sampler,
+                           t.samplerValid, t.arrayed, t.forceLodZero,
+                           t.depthCompare);
   auto it = g_texViews.find(textureViewKey(key));
   return it != g_texViews.end() ? it->second.view : VK_NULL_HANDLE;
 }
@@ -1259,17 +1372,24 @@ struct MultiTexSet {
 struct MultiTexKey {
   uint32_t nTexs = 0;
   TexKey tex[State::kMaxTex];
+  VkImageView view[State::kMaxTex] = {};
+  VkImageLayout layout[State::kMaxTex] = {};
   bool operator==(const MultiTexKey &o) const {
     if (nTexs != o.nTexs) return false;
     for (uint32_t i = 0; i < nTexs; i++)
-      if (!(tex[i] == o.tex[i])) return false;
+      if (!(tex[i] == o.tex[i]) || view[i] != o.view[i] || layout[i] != o.layout[i])
+        return false;
     return true;
   }
 };
 struct MultiTexKeyHash {
   size_t operator()(const MultiTexKey &k) const {
     uint64_t h = hashWord(1469598103934665603ull, k.nTexs);
-    for (uint32_t i = 0; i < k.nTexs; i++) h = hashWord(h, TexKeyHash{}(k.tex[i]));
+    for (uint32_t i = 0; i < k.nTexs; i++) {
+      h = hashWord(h, TexKeyHash{}(k.tex[i]));
+      h = hashWord(h, std::hash<VkImageView>{}(k.view[i]));
+      h = hashWord(h, k.layout[i]);
+    }
     return static_cast<size_t>(h);
   }
 };
@@ -1298,17 +1418,21 @@ void releaseRetiredTextures() {
   }
   g_retiredTexImages.clear();
 }
-VkDescriptorSet getMultiTexSet(const DrawInfo &d) {
+VkDescriptorSet getMultiTexSet(const DrawInfo &d, const VkImageView *resolvedViews,
+                               const VkImageLayout *resolvedLayouts) {
   MultiTexKey key;
   key.nTexs = std::min(d.nTexs, State::kMaxTex);
   for (uint32_t i = 0; i < key.nTexs; i++) {
     const auto &t = d.texs[i];
-    key.tex[i] = textureKey(t.base, t.w, t.h, textureTiling(t.tiling), t.pitch,
+    key.tex[i] = textureKey(t.base, t.w, t.h, t.dfmt, t.nfmt,
+                            textureTiling(t.tiling), t.pitch,
                             t.layers, t.baseArray, t.viewLayers, t.mipLevels,
                             t.baseMip, t.viewMips, t.minLod, t.pow2Pad, t.sampler,
-                            t.samplerValid, t.arrayed);
+                            t.samplerValid, t.arrayed, t.forceLodZero,
+                            t.depthCompare);
+    key.view[i] = resolvedViews[i];
+    key.layout[i] = resolvedLayouts[i];
   }
-  for (uint32_t i = 0; i < key.nTexs; i++) texViewFor(d.texs[i]);
   auto ci = g_mtexCache.find(key);
   if (ci != g_mtexCache.end()) return ci->second.set;
   if (g_mtexCache.size() > 3500) return VK_NULL_HANDLE;
@@ -1319,10 +1443,12 @@ VkDescriptorSet getMultiTexSet(const DrawInfo &d) {
   // transform/raster/depth path works and isolating the blackness to the texture data.
   static const bool forceWhite = std::getenv("DELTA_GPU_FORCEWHITE") != nullptr;
   VkImageView views[State::kMaxTex];
+  VkImageLayout layouts[State::kMaxTex];
   for (uint32_t i = 0; i < State::kMaxTex; i++) {
-    VkImageView v = (i < key.nTexs && !forceWhite) ? texViewFor(d.texs[i]) : VK_NULL_HANDLE;
+    VkImageView v = (i < key.nTexs && !forceWhite) ? resolvedViews[i] : VK_NULL_HANDLE;
     bool arrayed = i < key.nTexs && d.texs[i].arrayed;
     views[i] = v ? v : (arrayed ? g.whiteArrayView : g.whiteView);
+    layouts[i] = v ? resolvedLayouts[i] : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
   }
   MultiTexSet entry;
   entry.set = allocateSamplerSet(g.texArrayLayout, true, entry.pool);
@@ -1335,8 +1461,10 @@ VkDescriptorSet getMultiTexSet(const DrawInfo &d) {
       sampler.valid = d.texs[i].samplerValid;
       std::memcpy(sampler.raw, d.texs[i].sampler, sizeof(sampler.raw));
       sampler.imageMinLod = d.texs[i].minLod;
+      sampler.forceLodZero = d.texs[i].forceLodZero;
+      sampler.depthCompare = d.texs[i].depthCompare;
     }
-    dii[i] = {samplerFor(sampler), views[i], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    dii[i] = {samplerFor(sampler), views[i], layouts[i]};
     wr[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
     wr[i].dstSet = entry.set; wr[i].dstBinding = i; wr[i].descriptorCount = 1;
     wr[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; wr[i].pImageInfo = &dii[i];
@@ -1346,8 +1474,8 @@ VkDescriptorSet getMultiTexSet(const DrawInfo &d) {
   return entry.set;
 }
 
-void ensureReadback(uint32_t w, uint32_t h) {
-  VkDeviceSize need = (VkDeviceSize)w * h * 4;
+void ensureReadback(uint32_t w, uint32_t h, VkFormat fmt) {
+  VkDeviceSize need = (VkDeviceSize)w * h * formatBytes(fmt);
   if (g.readback && need <= g.readbackSize)
     return;
   vkDeviceWaitIdle(g.device);
@@ -1373,16 +1501,26 @@ void ensureReadback(uint32_t w, uint32_t h) {
 }
 
 // Find or create the render target at guest address `base` (dimensions w x h).
-RTarget *getRT(uint64_t base, uint32_t w, uint32_t h) {
+RTarget *getRT(uint64_t base, uint32_t w, uint32_t h, VkFormat fmt) {
   auto it = g_rts.find(base);
-  if (it != g_rts.end())
+  if (it != g_rts.end()) {
+    static std::unordered_map<uint64_t, bool> aliasWarned;
+    if ((it->second.w != w || it->second.h != h || it->second.fmt != fmt) &&
+        !aliasWarned[base]) {
+      aliasWarned[base] = true;
+      std::fprintf(stderr,
+                   "[gpuvk] RT alias mismatch %#lx: have %ux%u fmt=%d, requested %ux%u fmt=%d\n",
+                   (unsigned long)base, it->second.w, it->second.h, (int)it->second.fmt,
+                   w, h, (int)fmt);
+    }
     return &it->second;
+  }
   if (g_rts.size() > 64 || !w || !h)
     return nullptr;
-  RTarget t; t.w = w; t.h = h;
+  RTarget t; t.w = w; t.h = h; t.fmt = fmt;
   VkImageCreateInfo ii{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
   ii.imageType = VK_IMAGE_TYPE_2D;
-  ii.format = g.rtFormat;
+  ii.format = fmt;
   ii.extent = {w, h, 1};
   ii.mipLevels = 1; ii.arrayLayers = 1;
   ii.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -1397,7 +1535,7 @@ RTarget *getRT(uint64_t base, uint32_t w, uint32_t h) {
   vkAllocateMemory(g.device, &ai, nullptr, &t.mem);
   vkBindImageMemory(g.device, t.image, t.mem, 0);
   VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-  vci.image = t.image; vci.viewType = VK_IMAGE_VIEW_TYPE_2D; vci.format = g.rtFormat;
+  vci.image = t.image; vci.viewType = VK_IMAGE_VIEW_TYPE_2D; vci.format = fmt;
   vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
   vkCreateImageView(g.device, &vci, nullptr, &t.view);
   // descriptor set so this RT can be sampled (render-to-texture).
@@ -1413,13 +1551,93 @@ RTarget *getRT(uint64_t base, uint32_t w, uint32_t h) {
       vkUpdateDescriptorSets(g.device, 1, &wr, 0, nullptr);
     }
   }
-  std::fprintf(stderr, "[gpuvk] new RT %#lx %ux%u\n", (unsigned long)base, w, h);
+  std::fprintf(stderr, "[gpuvk] new RT %#lx %ux%u fmt=%d\n",
+               (unsigned long)base, w, h, (int)fmt);
   g_rts[base] = t;
-  registerRtPages(base, w, h);  // resource-model page table
+  registerRtPages(base, w, h, fmt);  // resource-model page table
   return &g_rts[base];
 }
 
-uint64_t rtByteSize(const RTarget &rt) { return rtByteSizeWH(rt.w, rt.h); }
+VkDescriptorSet snapshotRT(RTarget &rt) {
+  if (!rt.feedbackImage) {
+    VkImageCreateInfo ii{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    ii.imageType = VK_IMAGE_TYPE_2D;
+    ii.format = rt.fmt;
+    ii.extent = {rt.w, rt.h, 1};
+    ii.mipLevels = 1; ii.arrayLayers = 1;
+    ii.samples = VK_SAMPLE_COUNT_1_BIT;
+    ii.tiling = VK_IMAGE_TILING_OPTIMAL;
+    ii.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    if (vkCreateImage(g.device, &ii, nullptr, &rt.feedbackImage) != VK_SUCCESS)
+      return VK_NULL_HANDLE;
+    VkMemoryRequirements mr;
+    vkGetImageMemoryRequirements(g.device, rt.feedbackImage, &mr);
+    VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    ai.allocationSize = mr.size;
+    ai.memoryTypeIndex = findMemoryType(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (vkAllocateMemory(g.device, &ai, nullptr, &rt.feedbackMem) != VK_SUCCESS) {
+      vkDestroyImage(g.device, rt.feedbackImage, nullptr);
+      rt.feedbackImage = VK_NULL_HANDLE;
+      return VK_NULL_HANDLE;
+    }
+    if (vkBindImageMemory(g.device, rt.feedbackImage, rt.feedbackMem, 0) != VK_SUCCESS) {
+      vkFreeMemory(g.device, rt.feedbackMem, nullptr);
+      vkDestroyImage(g.device, rt.feedbackImage, nullptr);
+      rt.feedbackMem = VK_NULL_HANDLE;
+      rt.feedbackImage = VK_NULL_HANDLE;
+      return VK_NULL_HANDLE;
+    }
+    VkImageViewCreateInfo vi{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    vi.image = rt.feedbackImage;
+    vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    vi.format = rt.fmt;
+    vi.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    if (vkCreateImageView(g.device, &vi, nullptr, &rt.feedbackView) != VK_SUCCESS)
+      return VK_NULL_HANDLE;
+    VkDescriptorPool owner;
+    rt.feedbackSet = allocateSamplerSet(g.dsLayout, false, owner);
+    if (!rt.feedbackSet) return VK_NULL_HANDLE;
+    VkDescriptorImageInfo dii{g.sampler, rt.feedbackView,
+                              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    VkWriteDescriptorSet wr{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    wr.dstSet = rt.feedbackSet;
+    wr.descriptorCount = 1;
+    wr.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    wr.pImageInfo = &dii;
+    vkUpdateDescriptorSets(g.device, 1, &wr, 0, nullptr);
+  }
+
+  VkAccessFlags srcAccess = rt.layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+                                ? VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
+                            : rt.layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                                ? VK_ACCESS_SHADER_READ_BIT
+                            : rt.layout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
+                                ? VK_ACCESS_TRANSFER_READ_BIT
+                                : 0;
+  imageBarrier(g.cmd, rt.image, rt.layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+               srcAccess, VK_ACCESS_TRANSFER_READ_BIT);
+  rt.layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+  VkAccessFlags feedbackAccess = rt.feedbackLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                                     ? VK_ACCESS_SHADER_READ_BIT
+                                     : 0;
+  imageBarrier(g.cmd, rt.feedbackImage, rt.feedbackLayout,
+               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, feedbackAccess,
+               VK_ACCESS_TRANSFER_WRITE_BIT);
+  rt.feedbackLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+  VkImageCopy copy{};
+  copy.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  copy.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  copy.extent = {rt.w, rt.h, 1};
+  vkCmdCopyImage(g.cmd, rt.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                 rt.feedbackImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+  imageBarrier(g.cmd, rt.feedbackImage, rt.feedbackLayout,
+               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+               VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
+  rt.feedbackLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+  return rt.feedbackSet;
+}
+
+uint64_t rtByteSize(const RTarget &rt) { return rtByteSizeWH(rt.w, rt.h, rt.fmt); }
 
 // Transition a depth image (aspect = DEPTH) between layouts.
 void depthBarrier(VkCommandBuffer c, VkImage img, VkImageLayout from,
@@ -1447,7 +1665,7 @@ DepthTarget *getDepthRT(uint64_t base, uint32_t w, uint32_t h) {
   ii.mipLevels = 1; ii.arrayLayers = 1;
   ii.samples = VK_SAMPLE_COUNT_1_BIT;
   ii.tiling = VK_IMAGE_TILING_OPTIMAL;
-  ii.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+  ii.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
   if (vkCreateImage(g.device, &ii, nullptr, &t.image) != VK_SUCCESS) return nullptr;
   VkMemoryRequirements mr; vkGetImageMemoryRequirements(g.device, t.image, &mr);
   VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
@@ -1459,6 +1677,19 @@ DepthTarget *getDepthRT(uint64_t base, uint32_t w, uint32_t h) {
   vci.image = t.image; vci.viewType = VK_IMAGE_VIEW_TYPE_2D; vci.format = kDepthFormat;
   vci.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
   vkCreateImageView(g.device, &vci, nullptr, &t.view);
+  if (g.dsPool) {
+    VkDescriptorPool owner;
+    t.set = allocateSamplerSet(g.dsLayout, false, owner);
+    if (t.set) {
+      VkDescriptorImageInfo dii{g.sampler, t.view,
+                                VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL};
+      VkWriteDescriptorSet wr{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+      wr.dstSet = t.set; wr.descriptorCount = 1;
+      wr.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+      wr.pImageInfo = &dii;
+      vkUpdateDescriptorSets(g.device, 1, &wr, 0, nullptr);
+    }
+  }
   std::fprintf(stderr, "[gpuvk] new depth %#lx %ux%u\n", (unsigned long)base, w, h);
   g_depths[base] = t;
   return &g_depths[base];
@@ -1492,7 +1723,7 @@ uint64_t resolveSampledRT(uint64_t addr, uint32_t w, uint32_t h) {
     if (it == g_rts.end()) return;
     const RTarget &rt = it->second;
     if (!rt.everRendered) return;  // never sample an RT with no content
-    uint64_t b1 = b0 + rtByteSizeWH(rt.w, rt.h);
+    uint64_t b1 = b0 + rtByteSize(rt);
     if (!(a0 < b1 && b0 < a1)) return;  // no interval overlap
     bool dimMatch = (!w || !h) || (rt.w == w && rt.h == h);
     long score = (long)rt.lastFrame;
@@ -1508,9 +1739,34 @@ uint64_t resolveSampledRT(uint64_t addr, uint32_t w, uint32_t h) {
   return best;
 }
 
+// Depth images use a separate registry from color RTs. A GFX7 depth surface may be
+// sampled through an R32_FLOAT descriptor whose base denotes an overlapping view
+// rather than DB_Z_WRITE_BASE, so resolve typed depth aliases by footprint too.
+uint64_t resolveSampledDepth(uint64_t addr, uint32_t w, uint32_t h) {
+  if (!addr) return 0;
+  uint64_t reqSize = w && h ? (uint64_t)w * h * 4 : 4;
+  uint64_t a1 = addr + reqSize;
+  uint64_t best = 0;
+  long bestScore = -1;
+  for (const auto &[base, depth] : g_depths) {
+    if (depth.lastFrame <= -1000) continue;
+    uint64_t b1 = base + rtByteSizeWH(depth.w, depth.h, kDepthFormat);
+    if (!(addr < b1 && base < a1)) continue;
+    bool dimMatch = (!w || !h) || (depth.w == w && depth.h == h);
+    long score = depth.lastFrame;
+    if (dimMatch) score += 1L << 30;
+    if (base == addr) score += 1L << 31;
+    if (score > bestScore) {
+      bestScore = score;
+      best = base;
+    }
+  }
+  return best;
+}
+
 // End the current dynamic-rendering region (if any), leaving its RTs readable.
 void endRegion() {
-  if (!g.curRt) return;
+  if (!g.curRt && !g.curDepth) return;
   p_vkCmdEndRendering(g.cmd);
   for (uint32_t i = 0; i < g.curMrtCount; i++) {
     auto it = g_rts.find(g.curMrt[i]);
@@ -1520,6 +1776,17 @@ void endRegion() {
                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                  VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
     rt.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+  }
+  if (g.curDepth) {
+    auto it = g_depths.find(g.curDepth);
+    if (it != g_depths.end()) {
+      auto &depth = it->second;
+      depthBarrier(g.cmd, depth.image, depth.layout,
+                   VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL,
+                   VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                   VK_ACCESS_SHADER_READ_BIT);
+      depth.layout = VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL;
+    }
   }
   g.curRt = 0;
   g.curMrtCount = 0;
@@ -1547,17 +1814,26 @@ void setGuestViewport(const DrawInfo &d) {
 // depthBase != 0 additionally binds a depth attachment (cleared to depthClear on its
 // first use each frame, loaded thereafter); depthBase == 0 leaves depth unbound (the
 // 2D path).
-void beginRegion(const uint64_t *mrtBase, uint32_t mrtCount, uint32_t w, uint32_t h,
+void beginRegion(const uint64_t *mrtBase, const uint32_t *mrtInfo,
+                 uint32_t mrtCount, uint32_t w, uint32_t h,
                  uint64_t depthBase = 0, float depthClear = 1.0f) {
   static const bool lazyClear = [] { const char *e = std::getenv("DELTA_GPU_LAZYCLEAR");
     return !e || std::strcmp(e, "0") != 0; }();
   VkRenderingAttachmentInfo colors[8]{};
   g.curMrtCount = 0;
   for (uint32_t i = 0; i < mrtCount && i < 8; i++) {
-    RTarget *rtp = getRT(mrtBase[i], w, h);
+    RTarget *rtp = getRT(mrtBase[i], w, h, colorTargetFormat(mrtInfo[i]));
+    if (!rtp) continue;
     RTarget &rt = *rtp;
+    VkAccessFlags srcAccess = rt.layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                                  ? VK_ACCESS_SHADER_READ_BIT
+                              : rt.layout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
+                                  ? VK_ACCESS_TRANSFER_READ_BIT
+                              : rt.layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+                                  ? VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
+                                  : 0;
     imageBarrier(g.cmd, rt.image, rt.layout, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                 0, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
+                 srcAccess, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
     rt.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     auto &color = colors[i];
     color.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
@@ -1580,12 +1856,14 @@ void beginRegion(const uint64_t *mrtBase, uint32_t mrtCount, uint32_t w, uint32_
     rt.lastFrame = g.frameNum;
     g.curMrt[g.curMrtCount++] = mrtBase[i];
   }
-  RTarget &rt = *getRT(mrtBase[0], w, h);
-  uint64_t base = mrtBase[0];
+  RTarget *primary = mrtCount
+                         ? getRT(mrtBase[0], w, h, colorTargetFormat(mrtInfo[0]))
+                         : nullptr;
+  uint64_t base = primary ? mrtBase[0] : 0;
   // Depth attachment (3D). Cleared to the guest DB_DEPTH_CLEAR value on its first use
   // this frame, then loaded so multiple regions in a frame share one Z buffer.
   VkRenderingAttachmentInfo depthAtt{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
-  DepthTarget *dt = depthBase ? getDepthRT(depthBase, rt.w, rt.h) : nullptr;
+  DepthTarget *dt = depthBase ? getDepthRT(depthBase, w, h) : nullptr;
   if (dt) {
     depthBarrier(g.cmd, dt->image, dt->layout, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
                  0, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT);
@@ -1604,7 +1882,7 @@ void beginRegion(const uint64_t *mrtBase, uint32_t mrtCount, uint32_t w, uint32_
     g.curDepth = depthBase;
   }
   VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
-  ri.renderArea = {{0, 0}, {rt.w, rt.h}};
+  ri.renderArea = {{0, 0}, {w, h}};
   ri.layerCount = 1; ri.colorAttachmentCount = g.curMrtCount; ri.pColorAttachments = colors;
   if (dt) ri.pDepthAttachment = &depthAtt;
   p_vkCmdBeginRendering(g.cmd, &ri);
@@ -1613,20 +1891,22 @@ void beginRegion(const uint64_t *mrtBase, uint32_t mrtCount, uint32_t w, uint32_
   // scene->scanout copy, effect overlays) sample it with aligned UVs when run through
   // the game's real recompiled shader, and the presented scanout is already upright
   // (no readback flip needed; DELTA_GPU_FLIP defaults to 0).
-  VkViewport vpt{0, (float)rt.h, (float)rt.w, -(float)rt.h, 0, 1};
+  VkViewport vpt{0, (float)h, (float)w, -(float)h, 0, 1};
   vkCmdSetViewport(g.cmd, 0, 1, &vpt);
-  VkRect2D sc{{0, 0}, {rt.w, rt.h}};
+  VkRect2D sc{{0, 0}, {w, h}};
   vkCmdSetScissor(g.cmd, 0, 1, &sc);
-  rt.usedThisFrame = true;
-  rt.lastFrame = g.frameNum;
-  if (rt.w >= 700 && rt.w <= 900) g.frameRoomBake = true;  // room background baked
+  if (primary) {
+    primary->usedThisFrame = true;
+    primary->lastFrame = g.frameNum;
+    if (primary->w >= 700 && primary->w <= 900) g.frameRoomBake = true;
+    g.lastRt = base;
+  }
   g.curRt = base;
-  g.lastRt = base;
   static const bool regTrace = std::getenv("DELTA_GPU_REGTRACE") != nullptr;
-  if (regTrace && rt.w < 1280)
+  if (regTrace && w < 1280)
     std::fprintf(stderr, "[reg] f%d begin RT %#lx %ux%u mrt=%u clear=%d\n", g.frameNum,
-                 (unsigned long)base, rt.w, rt.h, g.curMrtCount,
-                 colors[0].loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR);
+                  (unsigned long)base, w, h, g.curMrtCount,
+                  g.curMrtCount && colors[0].loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR);
 }
 
 void writePpm(const char *path, const uint8_t *bgra, uint32_t w, uint32_t h) {
@@ -1639,6 +1919,119 @@ void writePpm(const char *path, const uint8_t *bgra, uint32_t w, uint32_t h) {
     std::fputc(bgra[i * 4 + 0], f);
   }
   std::fclose(f);
+}
+
+float halfToFloat(uint16_t value) {
+  uint32_t sign = static_cast<uint32_t>(value & 0x8000) << 16;
+  uint32_t exponent = (value >> 10) & 0x1F;
+  uint32_t mantissa = value & 0x3FF;
+  uint32_t bits;
+  if (!exponent) {
+    if (!mantissa) {
+      bits = sign;
+    } else {
+      int unbiased = -14;
+      while (!(mantissa & 0x400)) {
+        mantissa <<= 1;
+        unbiased--;
+      }
+      bits = sign | static_cast<uint32_t>(unbiased + 127) << 23 |
+             (mantissa & 0x3FF) << 13;
+    }
+  } else if (exponent == 0x1F) {
+    bits = sign | 0x7F800000 | mantissa << 13;
+  } else {
+    bits = sign | (exponent + (127 - 15)) << 23 | mantissa << 13;
+  }
+  float result;
+  std::memcpy(&result, &bits, sizeof(result));
+  return result;
+}
+
+uint8_t unorm8(float value) {
+  if (!std::isfinite(value)) return 0;
+  return static_cast<uint8_t>(std::lround(std::clamp(value, 0.0f, 1.0f) * 255.0f));
+}
+
+float packedUfloat(uint32_t value, uint32_t mantissaBits) {
+  uint32_t mantissaMask = (1u << mantissaBits) - 1;
+  uint32_t mantissa = value & mantissaMask;
+  uint32_t exponent = value >> mantissaBits;
+  if (!exponent)
+    return std::ldexp(static_cast<float>(mantissa), -14 - static_cast<int>(mantissaBits));
+  if (exponent == 0x1F)
+    return mantissa ? NAN : INFINITY;
+  return std::ldexp(1.0f + static_cast<float>(mantissa) / (1u << mantissaBits),
+                    static_cast<int>(exponent) - 15);
+}
+
+void readbackPixelBgra(const uint8_t *src, VkFormat fmt, uint8_t *dst) {
+  float rgba[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+  switch (fmt) {
+    case VK_FORMAT_B8G8R8A8_UNORM:
+      std::memcpy(dst, src, 4);
+      return;
+    case VK_FORMAT_R8_UNORM:
+      rgba[0] = src[0] / 255.0f;
+      break;
+    case VK_FORMAT_R8G8_UNORM:
+      rgba[0] = src[0] / 255.0f; rgba[1] = src[1] / 255.0f;
+      break;
+    case VK_FORMAT_R16_UNORM: {
+      uint16_t v; std::memcpy(&v, src, sizeof(v)); rgba[0] = v / 65535.0f;
+      break;
+    }
+    case VK_FORMAT_R16_SFLOAT: {
+      uint16_t v; std::memcpy(&v, src, sizeof(v)); rgba[0] = halfToFloat(v);
+      break;
+    }
+    case VK_FORMAT_R16G16_UNORM: {
+      uint16_t v[2]; std::memcpy(v, src, sizeof(v));
+      rgba[0] = v[0] / 65535.0f; rgba[1] = v[1] / 65535.0f;
+      break;
+    }
+    case VK_FORMAT_R16G16_SFLOAT: {
+      uint16_t v[2]; std::memcpy(v, src, sizeof(v));
+      rgba[0] = halfToFloat(v[0]); rgba[1] = halfToFloat(v[1]);
+      break;
+    }
+    case VK_FORMAT_R16G16B16A16_UNORM: {
+      uint16_t v[4]; std::memcpy(v, src, sizeof(v));
+      for (int i = 0; i < 4; i++) rgba[i] = v[i] / 65535.0f;
+      break;
+    }
+    case VK_FORMAT_R16G16B16A16_SFLOAT: {
+      uint16_t v[4]; std::memcpy(v, src, sizeof(v));
+      for (int i = 0; i < 4; i++) rgba[i] = halfToFloat(v[i]);
+      break;
+    }
+    case VK_FORMAT_R32_SFLOAT:
+      std::memcpy(&rgba[0], src, sizeof(float));
+      break;
+    case VK_FORMAT_R32G32_SFLOAT:
+      std::memcpy(rgba, src, sizeof(float) * 2);
+      break;
+    case VK_FORMAT_R32G32B32_SFLOAT:
+      std::memcpy(rgba, src, sizeof(float) * 3);
+      break;
+    case VK_FORMAT_R32G32B32A32_SFLOAT:
+      std::memcpy(rgba, src, sizeof(rgba));
+      break;
+    case VK_FORMAT_B10G11R11_UFLOAT_PACK32: {
+      uint32_t packed; std::memcpy(&packed, src, sizeof(packed));
+      rgba[0] = packedUfloat(packed & 0x7FF, 6);
+      rgba[1] = packedUfloat((packed >> 11) & 0x7FF, 6);
+      rgba[2] = packedUfloat(packed >> 22, 5);
+      break;
+    }
+    default:
+      std::memcpy(dst, src, 4);
+      return;
+  }
+  dst[0] = unorm8(rgba[2]);
+  dst[1] = unorm8(rgba[1]);
+  dst[2] = unorm8(rgba[0]);
+  dst[3] = unorm8(rgba[3]);
 }
 
 void dumpPpm(const uint8_t *bgra, uint32_t w, uint32_t h) {
@@ -1893,7 +2286,7 @@ VkShaderModule makeModuleVec(const std::vector<uint32_t> &spv) {
 // Build (or fetch) the pipeline for a recompiled draw, keyed by the shader pair +
 // blend state + vertex layout.
 RecompPipe *getRecompPipe(const DrawInfo &d) {
-  uint32_t mrtN = d.mrtCount ? (d.mrtCount > 8 ? 8 : d.mrtCount) : 1;
+  uint32_t mrtN = std::min(d.mrtCount, 8u);
   // Depth + primitive-setup state folded into the pipeline key (mixed through an FNV
   // prime so it spreads across the whole 64-bit space, away from the blend/stride bits).
   uint32_t dstate = (d.depthBase ? 1u : 0u) | (d.depthTestEnable ? 2u : 0u) |
@@ -1903,7 +2296,17 @@ RecompPipe *getRecompPipe(const DrawInfo &d) {
   uint64_t key = d.vsAddr * 0x9e3779b97f4a7c15ull ^ d.psAddr ^
                  ((uint64_t)(d.blendEnable ? (d.blendControl & 0x7FFFFFFFu) : 0) << 1) ^
                  ((uint64_t)d.vertexStride << 33) ^ ((uint64_t)mrtN << 60) ^
-                 ((uint64_t)dstate * 0x100000001b3ull);
+                  ((uint64_t)dstate * 0x100000001b3ull);
+  key = hashWord(key, d.nvattrs);
+  for (uint32_t i = 0; i < mrtN; i++)
+    key = hashWord(key, colorTargetFormat(d.mrtInfo[i]));
+  for (uint32_t i = 0; i < d.nvattrs; i++) {
+    key = hashWord(key, d.vattrs[i].location);
+    key = hashWord(key, d.vattrs[i].offset);
+    key = hashWord(key, d.vattrs[i].numComps);
+    key = hashWord(key, d.vattrs[i].dfmt);
+    key = hashWord(key, d.vattrs[i].nfmt);
+  }
   auto it = g_recompPipes.find(key);
   if (it != g_recompPipes.end()) return &it->second;
   RecompPipe rp;
@@ -1922,18 +2325,29 @@ RecompPipe *getRecompPipe(const DrawInfo &d) {
 
   VkShaderModule vs = makeModuleVec(d.recomp->vsSpirv);
   VkShaderModule fs = makeModuleVec(d.recomp->fsSpirv);
-  VkPipelineShaderStageCreateInfo stages[2]{};
-  stages[0] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
-  stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT; stages[0].module = vs; stages[0].pName = "main";
-  stages[1] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
-  stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT; stages[1].module = fs; stages[1].pName = "main";
+  bool rectList = d.primType == 17 && g.geometryShader && !d.recomp->gsSpirv.empty();
+  VkShaderModule gs = rectList ? makeModuleVec(d.recomp->gsSpirv) : VK_NULL_HANDLE;
+  VkPipelineShaderStageCreateInfo stages[3]{};
+  uint32_t stageCount = 0;
+  stages[stageCount] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+  stages[stageCount].stage = VK_SHADER_STAGE_VERTEX_BIT;
+  stages[stageCount].module = vs; stages[stageCount++].pName = "main";
+  if (rectList) {
+    stages[stageCount] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+    stages[stageCount].stage = VK_SHADER_STAGE_GEOMETRY_BIT;
+    stages[stageCount].module = gs; stages[stageCount++].pName = "main";
+  }
+  stages[stageCount] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+  stages[stageCount].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+  stages[stageCount].module = fs; stages[stageCount++].pName = "main";
 
   VkVertexInputBindingDescription bind{0, d.vertexStride, VK_VERTEX_INPUT_RATE_VERTEX};
   VkVertexInputAttributeDescription attrs[8];
   for (uint32_t i = 0; i < d.nvattrs; i++)
     attrs[i] = {d.vattrs[i].location, 0, vfmt(d.vattrs[i].dfmt, d.vattrs[i].nfmt), d.vattrs[i].offset};
   VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
-  vi.vertexBindingDescriptionCount = 1; vi.pVertexBindingDescriptions = &bind;
+  vi.vertexBindingDescriptionCount = d.nvattrs ? 1 : 0;
+  vi.pVertexBindingDescriptions = d.nvattrs ? &bind : nullptr;
   vi.vertexAttributeDescriptionCount = d.nvattrs; vi.pVertexAttributeDescriptions = attrs;
 
   VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
@@ -1981,17 +2395,19 @@ RecompPipe *getRecompPipe(const DrawInfo &d) {
   VkPipelineDynamicStateCreateInfo dy{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
   dy.dynamicStateCount = 2; dy.pDynamicStates = dyns;
   VkFormat fmts[8];
-  for (uint32_t i = 0; i < mrtN; i++) fmts[i] = g.rtFormat;
+  for (uint32_t i = 0; i < mrtN; i++)
+    fmts[i] = colorTargetFormat(d.mrtInfo[i]);
   VkPipelineRenderingCreateInfo rci{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
   rci.colorAttachmentCount = mrtN; rci.pColorAttachmentFormats = fmts;
   if (d.depthBase) rci.depthAttachmentFormat = kDepthFormat;
   VkGraphicsPipelineCreateInfo pi{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
-  pi.pNext = &rci; pi.stageCount = 2; pi.pStages = stages;
+  pi.pNext = &rci; pi.stageCount = stageCount; pi.pStages = stages;
   pi.pVertexInputState = &vi; pi.pInputAssemblyState = &ia; pi.pViewportState = &vp;
   pi.pRasterizationState = &rs; pi.pMultisampleState = &ms; pi.pDepthStencilState = &dss;
   pi.pColorBlendState = &cb; pi.pDynamicState = &dy; pi.layout = rp.layout;
   VkResult r = vkCreateGraphicsPipelines(g.device, VK_NULL_HANDLE, 1, &pi, nullptr, &rp.pipe);
   vkDestroyShaderModule(g.device, vs, nullptr);
+  if (gs) vkDestroyShaderModule(g.device, gs, nullptr);
   vkDestroyShaderModule(g.device, fs, nullptr);
   if (r != VK_SUCCESS) { std::fprintf(stderr, "[gpuvk] recomp pipeline failed: %d\n", (int)r);
     return nullptr; }
@@ -2009,42 +2425,65 @@ static const char *kDeclineName[DR_MAX] = {
 uint32_t g_decline[DR_MAX] = {0};
 inline bool decline(DeclineReason r) { g_decline[r]++; return false; }
 
-// Issue an indexed draw running the game's recompiled VS/PS. Returns false if the
-// draw can't be handled (the caller falls back to the heuristic path).
+// Issue a draw running the game's recompiled VS/PS. Returns false if the draw
+// can't be handled (the caller falls back to the heuristic path).
 bool drawRecomp(const DrawInfo &d) {
+  bool indexed = d.indexData && d.indexCount >= 3;
+  uint32_t drawCount = indexed ? d.indexCount : d.vertexCount;
   static const bool drawTrace = std::getenv("DELTA_GPU_DRAWTRACE") != nullptr;
-  if (drawTrace && d.indexCount >= 300) {
+  if (drawTrace && drawCount >= 300) {
     static int n = 0;
     if (n++ < 40)
-      std::fprintf(stderr, "[dt] enter recomp idx=%u rt=%#lx tex=%#lx nTexs=%u nvattrs=%u ok=%d\n",
-                   d.indexCount, (unsigned long)d.rtBase, (unsigned long)d.texBase,
+      std::fprintf(stderr, "[dt] enter recomp count=%u rt=%#lx tex=%#lx nTexs=%u nvattrs=%u ok=%d\n",
+                   drawCount, (unsigned long)d.rtBase, (unsigned long)d.texBase,
                    d.nTexs, d.nvattrs, d.recomp ? d.recomp->ok : 0);
   }
-  if (!d.recomp || !d.recomp->ok || !d.nvattrs || !d.indexData || d.indexCount < 3)
+  if (!d.recomp || !d.recomp->ok || drawCount < 3)
     return decline(DR_NORECOMP);
+  if (!d.mrtCount && !d.depthBase) {
+    g.frameDraws++;
+    return true;
+  }
   if (!g.texPipeline) return decline(DR_NOTEXPIPE);  // need the descriptor infra (dsPool/dsLayout)
   // Resolve the sampled texture address to an overlapping live RT (resource-model
   // page-table lookup), so an RT-as-texture sample binds the live image for
   // cycled/aliased RT addresses instead of stale guest memory. Additive: an exact
   // RT base resolves to itself.
   uint64_t texBase = d.texBase;
-  if (texBase && !d.texArrayed && !g_rts.count(texBase)) {
-    uint64_t r = resolveSampledRT(texBase, d.texW, d.texH);
+  if (texBase && !d.texArrayed && !g_rts.count(texBase) &&
+      !g_depths.count(texBase)) {
+    bool depthFormat = d.texDfmt == 4 && d.texNfmt == 7;
+    uint64_t r = depthFormat ? resolveSampledDepth(texBase, d.texW, d.texH) : 0;
+    if (!r) r = resolveSampledRT(texBase, d.texW, d.texH);
+    if (!r && !depthFormat) r = resolveSampledDepth(texBase, d.texW, d.texH);
     if (r) texBase = r;
   }
-  bool rtAsTex = !d.texArrayed && texBase && texBase != d.rtBase && g_rts.count(texBase);
-  if (rtAsTex && g_rts[texBase].w >= 700 && g_rts[texBase].w <= 900)
+  bool colorAsTex = !d.texArrayed && texBase && texBase != d.rtBase &&
+                    g_rts.count(texBase);
+  bool feedbackAsTex = !d.texArrayed && texBase && texBase == d.rtBase &&
+                       g_rts.count(texBase) && g_rts[texBase].everRendered;
+  bool depthAsTex = !d.texArrayed && texBase && texBase != d.depthBase &&
+                    g_depths.count(texBase);
+  bool rtAsTex = colorAsTex || feedbackAsTex || depthAsTex;
+  if (colorAsTex && g_rts[texBase].w >= 700 && g_rts[texBase].w <= 900)
     g.frameHadRoom = true;
-  if (texBase && texBase == d.rtBase) return decline(DR_SELF);
-  // Index range -> vertex count.
+  if (texBase && (texBase == d.depthBase ||
+                  (texBase == d.rtBase && !feedbackAsTex)))
+    return decline(DR_SELF);
+  // Indexed draws derive the copied vertex range from their indices. DRAW_INDEX_AUTO
+  // consumes the packet's sequential vertex count directly.
   const uint16_t *i16 = nullptr; const uint32_t *i32 = nullptr;
-  uint32_t maxIdx = 0;
-  if (d.indexType == 1) { i32 = (const uint32_t *)d.indexData;
-    for (uint32_t i = 0; i < d.indexCount; i++) maxIdx = i32[i] > maxIdx ? i32[i] : maxIdx; }
-  else { i16 = (const uint16_t *)d.indexData;
-    for (uint32_t i = 0; i < d.indexCount; i++) maxIdx = i16[i] > maxIdx ? i16[i] : maxIdx; }
-  uint32_t nv = maxIdx + 1;
-  if (nv > 200000u || !d.vertexStride) return decline(DR_NORECOMP);
+  uint32_t nv = d.vertexCount;
+  if (indexed) {
+    uint32_t maxIdx = 0;
+    if (d.indexType == 1) { i32 = (const uint32_t *)d.indexData;
+      for (uint32_t i = 0; i < d.indexCount; i++) maxIdx = i32[i] > maxIdx ? i32[i] : maxIdx; }
+    else { i16 = (const uint16_t *)d.indexData;
+      for (uint32_t i = 0; i < d.indexCount; i++) maxIdx = i16[i] > maxIdx ? i16[i] : maxIdx; }
+    nv = maxIdx + 1;
+  }
+  if (nv > 200000u || (d.nvattrs && (!d.vertexData || !d.vertexStride)))
+    return decline(DR_NORECOMP);
 
   // A fullscreen, untextured, near-black REPLACE draw is the game CLEARING an RT.
   // Don't render it (that wipes the RT immediately); record a LAZY clear instead --
@@ -2058,7 +2497,7 @@ bool drawRecomp(const DrawInfo &d) {
   }();
   static const bool lazyClear2 = [] { const char *e = std::getenv("DELTA_GPU_LAZYCLEAR");
     return !e || std::strcmp(e, "0") != 0; }();
-  if (noWipe && d.recomp->psTexs.empty() && nv <= 8) {
+  if (noWipe && d.vertexData && d.nvattrs && d.recomp->psTexs.empty() && nv <= 8) {
     uint32_t cdst = (d.blendControl >> 8) & 0x1F, csrc = d.blendControl & 0x1F;
     bool replace = d.blendEnable && csrc == 1 && cdst == 0;
     if (replace) {
@@ -2089,7 +2528,10 @@ bool drawRecomp(const DrawInfo &d) {
       }
       bool fullscreenBlack = nearBlack && (nx1-nx0) >= 1.8f && (ny1-ny0) >= 1.8f;
       if (fullscreenBlack && lazyClear2) {
-        RTarget *rt = getRT(d.rtBase, d.rtW, d.rtH);  // create if needed
+        RTarget *rt = d.rtBase
+                          ? getRT(d.rtBase, d.rtW, d.rtH,
+                                  colorTargetFormat(d.mrtInfo[0]))
+                          : nullptr;
         if (rt) {
           rt->clearPending = true;
           std::memcpy(rt->clearValue.float32, clearColor, sizeof(clearColor));
@@ -2118,50 +2560,103 @@ bool drawRecomp(const DrawInfo &d) {
     }
   }
 
-  VkDeviceSize vneed = (VkDeviceSize)nv * d.vertexStride;
+  VkDeviceSize vneed = d.nvattrs ? (VkDeviceSize)nv * d.vertexStride : 0;
   if (g.vbOffset + vneed > kVbRing) return decline(DR_RING);
-  if (g.ibOffset + (VkDeviceSize)d.indexCount * 4 > kIbRing) return decline(DR_RING);
+  if (indexed && g.ibOffset + (VkDeviceSize)d.indexCount * 4 > kIbRing)
+    return decline(DR_RING);
 
   RecompPipe *rp = getRecompPipe(d);
   if (!rp) return decline(DR_NOPIPE);
   // Guest-texture source resolved up front; an RT-as-texture source is resolved after
   // the region switch (transitioning it to readable must happen outside a region).
   VkDescriptorSet texSet = VK_NULL_HANDLE;
-  if (rp->textured && !rtAsTex) {
-    if (rp->multiTex) {
-      texSet = getMultiTexSet(d);
-    } else {
-      texSet = getTexture(d.texBase, d.texW, d.texH, d.texTiling,
-                           d.texPitch, d.texLayers, d.texBaseArray,
-                           d.texViewLayers, d.texMipLevels, d.texBaseMip,
+  if (rp->textured && !rp->multiTex && !rtAsTex) {
+    if (guestTextureUploadSupported(d.texDfmt, d.texNfmt))
+      texSet = getTexture(d.texBase, d.texW, d.texH, d.texDfmt, d.texNfmt,
+                           d.texTiling,
+                          d.texPitch, d.texLayers, d.texBaseArray,
+                          d.texViewLayers, d.texMipLevels, d.texBaseMip,
                            d.texViewMips, d.texMinLod, d.texPow2Pad, d.texSampler,
-                          d.texSamplerValid, d.texArrayed);
-      if (!texSet) texSet = d.texArrayed ? g.whiteArraySet : g.whiteSet;
-    }
+                           d.texSamplerValid, d.texArrayed, d.texForceLodZero,
+                           d.texDepthCompare);
+    if (!texSet) texSet = d.texArrayed ? g.whiteArraySet : g.whiteSet;
     if (!texSet) return decline(DR_GUESTTEX);
   }
 
-  // Copy the raw interleaved vertex buffer and the indices into the rings.
+  uint64_t multiColor[State::kMaxTex] = {};
+  uint64_t multiDepth[State::kMaxTex] = {};
+  uint64_t multiFeedback[State::kMaxTex] = {};
+  VkImageView multiViews[State::kMaxTex] = {};
+  VkImageLayout multiLayouts[State::kMaxTex];
+  bool multiTransitionSource = false;
+  uint32_t multiN = std::min(d.nTexs, State::kMaxTex);
+  if (rp->multiTex) {
+    auto isBoundTarget = [&](uint64_t base) {
+      uint32_t count = std::min(d.mrtCount, 8u);
+      for (uint32_t m = 0; m < count; m++)
+        if (d.mrtBase[m] == base) return true;
+      return false;
+    };
+    for (uint32_t i = 0; i < State::kMaxTex; i++)
+      multiLayouts[i] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    for (uint32_t i = 0; i < multiN; i++) {
+      const auto &t = d.texs[i];
+      uint64_t base = t.base;
+      if (base && !t.arrayed && !g_rts.count(base) && !g_depths.count(base)) {
+        bool depthFormat = t.dfmt == 4 && t.nfmt == 7;
+        uint64_t resolved = depthFormat ? resolveSampledDepth(base, t.w, t.h) : 0;
+        if (!resolved) resolved = resolveSampledRT(base, t.w, t.h);
+        if (!resolved && !depthFormat)
+          resolved = resolveSampledDepth(base, t.w, t.h);
+        if (resolved) base = resolved;
+      }
+      if (base && !t.arrayed && isBoundTarget(base) && g_rts.count(base) &&
+          g_rts[base].everRendered) {
+        multiFeedback[i] = base;
+        multiTransitionSource = true;
+      } else if (base && !t.arrayed && g_rts.count(base) &&
+                 g_rts[base].everRendered) {
+        multiColor[i] = base;
+        multiTransitionSource |=
+            g_rts[base].layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+      } else if (base && !t.arrayed && base != d.depthBase && g_depths.count(base)) {
+        multiDepth[i] = base;
+        multiTransitionSource |=
+            g_depths[base].layout != VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL;
+      } else {
+        multiViews[i] = texViewFor(t);
+      }
+    }
+  }
+
+  // Copy the raw interleaved vertex buffer and, for indexed draws, the indices.
   VkDeviceSize voff = g.vbOffset, ioff = g.ibOffset;
-  std::memcpy(g.vbMap + voff, d.vertexData, (size_t)vneed);
-  auto *idst = reinterpret_cast<uint32_t *>(g.ibMap + ioff);
-  if (i32) std::memcpy(idst, i32, (size_t)d.indexCount * 4);
-  else for (uint32_t i = 0; i < d.indexCount; i++) idst[i] = i16[i];
+  if (vneed)
+    std::memcpy(g.vbMap + voff, d.vertexData, (size_t)vneed);
+  if (indexed) {
+    auto *idst = reinterpret_cast<uint32_t *>(g.ibMap + ioff);
+    if (i32) std::memcpy(idst, i32, (size_t)d.indexCount * 4);
+    else for (uint32_t i = 0; i < d.indexCount; i++) idst[i] = i16[i];
+  }
 
   // Switch render target. Re-begin when the primary target or the MRT count changes
   // (the open region's attachment count must match the pipeline's), or when a new
   // RT-as-texture source still needs a read transition. Barriers cannot be recorded
   // inside dynamic rendering; consecutive layer composites often keep the same target
   // while switching sources, so that source change must also close/reopen the region.
-  uint32_t mrtN = d.mrtCount ? (d.mrtCount > 8 ? 8 : d.mrtCount) : 1;
-  bool transitionSource = rtAsTex &&
-      g_rts[texBase].layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+  uint32_t mrtN = std::min(d.mrtCount, 8u);
+  bool transitionSource = rp->multiTex ? multiTransitionSource :
+      feedbackAsTex ||
+          (colorAsTex && g_rts[texBase].layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) ||
+          (depthAsTex && g_depths[texBase].layout != VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL);
   bool pendingDepthClear = d.depthBase && g_depths.count(d.depthBase) &&
                            g_depths[d.depthBase].clearPending;
-  if (g.curRt != d.rtBase || g.curMrtCount != mrtN || g.curDepth != d.depthBase ||
-      transitionSource || pendingDepthClear) {
+  bool restartRegion = g.curRt != d.rtBase || g.curMrtCount != mrtN ||
+                       g.curDepth != d.depthBase || transitionSource ||
+                       pendingDepthClear;
+  if (restartRegion) {
     endRegion();
-    if (transitionSource) {
+    if (!rp->multiTex && colorAsTex && transitionSource) {
       auto &src = g_rts[texBase];
       if (src.layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
         imageBarrier(g.cmd, src.image, src.layout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
@@ -2169,13 +2664,103 @@ bool drawRecomp(const DrawInfo &d) {
         src.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
       }
     }
-    RTarget *rt = getRT(d.rtBase, d.rtW, d.rtH);
-    if (!rt) return true;  // RT cap hit: treat as handled (dropped)
-    beginRegion(d.mrtBase, mrtN, d.rtW, d.rtH, d.depthBase, d.depthClear);
+    if (!rp->multiTex && depthAsTex && transitionSource) {
+      auto &src = g_depths[texBase];
+      if (src.layout != VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL) {
+        depthBarrier(g.cmd, src.image, src.layout,
+                     VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL,
+                     VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                     VK_ACCESS_SHADER_READ_BIT);
+        src.layout = VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL;
+      }
+    }
+    if (!rp->multiTex && feedbackAsTex) {
+      texSet = snapshotRT(g_rts[texBase]);
+      if (!texSet) return decline(DR_MIDREGION);
+    }
+    if (rp->multiTex) {
+      for (uint32_t i = 0; i < multiN; i++) {
+        if (multiColor[i]) {
+          auto &src = g_rts[multiColor[i]];
+          if (src.layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+            VkAccessFlags srcAccess =
+                src.layout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
+                    ? VK_ACCESS_TRANSFER_READ_BIT
+                    : VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+            imageBarrier(g.cmd, src.image, src.layout,
+                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                         srcAccess, VK_ACCESS_SHADER_READ_BIT);
+            src.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+          }
+        } else if (multiDepth[i]) {
+          auto &src = g_depths[multiDepth[i]];
+          if (src.layout != VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL) {
+            depthBarrier(g.cmd, src.image, src.layout,
+                         VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL,
+                         VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                         VK_ACCESS_SHADER_READ_BIT);
+            src.layout = VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL;
+          }
+        } else if (multiFeedback[i]) {
+          bool alreadyCopied = false;
+          for (uint32_t prior = 0; prior < i; prior++)
+            alreadyCopied |= multiFeedback[prior] == multiFeedback[i];
+          if (!alreadyCopied && !snapshotRT(g_rts[multiFeedback[i]]))
+            return decline(DR_MIDREGION);
+        }
+      }
+    }
+    if (rp->multiTex) {
+      for (uint32_t i = 0; i < multiN; i++) {
+        if (multiFeedback[i]) {
+          auto &src = g_rts[multiFeedback[i]];
+          multiViews[i] = src.feedbackView;
+          multiLayouts[i] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        } else if (multiColor[i]) {
+          multiViews[i] = g_rts[multiColor[i]].view;
+          multiLayouts[i] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        } else if (multiDepth[i]) {
+          multiViews[i] = g_depths[multiDepth[i]].view;
+          multiLayouts[i] = VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL;
+        }
+      }
+      texSet = getMultiTexSet(d, multiViews, multiLayouts);
+      if (!texSet) return decline(DR_GUESTTEX);
+    }
+    RTarget *rt = d.rtBase
+                      ? getRT(d.rtBase, d.rtW, d.rtH,
+                              colorTargetFormat(d.mrtInfo[0]))
+                      : nullptr;
+    if (d.rtBase && !rt) return true;  // RT cap hit: treat as handled (dropped)
+    beginRegion(d.mrtBase, d.mrtInfo, mrtN, d.rtW, d.rtH,
+                d.depthBase, d.depthClear);
   }
-  if (rtAsTex) {
+  if (rp->multiTex) {
+    if (!texSet) {
+      for (uint32_t i = 0; i < multiN; i++) {
+        if (multiFeedback[i]) {
+          multiViews[i] = g_rts[multiFeedback[i]].feedbackView;
+        } else if (multiColor[i]) {
+          multiViews[i] = g_rts[multiColor[i]].view;
+        } else if (multiDepth[i]) {
+          multiViews[i] = g_depths[multiDepth[i]].view;
+          multiLayouts[i] = VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL;
+        }
+      }
+      texSet = getMultiTexSet(d, multiViews, multiLayouts);
+    }
+    if (!texSet) return decline(DR_GUESTTEX);
+  } else if (feedbackAsTex) {
+    if (!texSet) return decline(DR_MIDREGION);
+  } else if (colorAsTex) {
     auto &src = g_rts[texBase];
     if (src.layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) return decline(DR_MIDREGION);
+    texSet = src.set;
+    if (!texSet) return decline(DR_MIDREGION);
+  } else if (depthAsTex) {
+    auto &src = g_depths[texBase];
+    if (src.layout != VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL)
+      return decline(DR_MIDREGION);
     texSet = src.set;
     if (!texSet) return decline(DR_MIDREGION);
   }
@@ -2206,17 +2791,24 @@ bool drawRecomp(const DrawInfo &d) {
                           1, 1, &g.uboSet, 8, dynOff);
   if (texSet)
     vkCmdBindDescriptorSets(g.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, rp->layout, 0, 1, &texSet, 0, nullptr);
-  vkCmdBindVertexBuffers(g.cmd, 0, 1, &g.vb, &voff);
-  vkCmdBindIndexBuffer(g.cmd, g.ib, ioff, VK_INDEX_TYPE_UINT32);
-  if (drawTrace && d.indexCount >= 300) {
+  if (d.nvattrs)
+    vkCmdBindVertexBuffers(g.cmd, 0, 1, &g.vb, &voff);
+  if (indexed)
+    vkCmdBindIndexBuffer(g.cmd, g.ib, ioff, VK_INDEX_TYPE_UINT32);
+  if (drawTrace && drawCount >= 300) {
     static int n = 0;
     if (n++ < 40)
-      std::fprintf(stderr, "[dt] RECOMP DREW idx=%u rt=%#lx nv=%u multiTex=%d\n",
-                   d.indexCount, (unsigned long)d.rtBase, nv, rp->multiTex);
+      std::fprintf(stderr, "[dt] RECOMP DREW count=%u rt=%#lx nv=%u multiTex=%d\n",
+                   drawCount, (unsigned long)d.rtBase, nv, rp->multiTex);
   }
-  vkCmdDrawIndexed(g.cmd, d.indexCount, d.instanceCount ? d.instanceCount : 1, 0, 0, 0);
+  if (indexed)
+    vkCmdDrawIndexed(g.cmd, d.indexCount, d.instanceCount ? d.instanceCount : 1,
+                     0, 0, 0);
+  else
+    vkCmdDraw(g.cmd, d.vertexCount, d.instanceCount ? d.instanceCount : 1, 0, 0);
   g.vbOffset += vneed;
-  g.ibOffset += (VkDeviceSize)d.indexCount * 4;
+  if (indexed)
+    g.ibOffset += (VkDeviceSize)d.indexCount * 4;
   g.frameDraws++;
   if (g.curRt) { auto &rt = g_rts[g.curRt];
     if (++rt.draws > g.busiestRtDraws) { g.busiestRtDraws = rt.draws; g.busiestRt = g.curRt; } }
@@ -2262,8 +2854,7 @@ void beginFrame() {
 }
 
 void draw(const DrawInfo &d) {
-  if (!g.recording || !d.vertexData || !d.vertexStride)
-    return;
+  if (!g.recording) return;
   if (d.indexCount > g.frameMaxIdx) g.frameMaxIdx = d.indexCount;
   ScopeNs _t(&g_nsDraw);
   // Recompiled-shader path: run the game's actual VS/PS. Falls through to the
@@ -2274,6 +2865,8 @@ void draw(const DrawInfo &d) {
     return !e || std::strcmp(e, "0") != 0;
   }();
   if (recompPath && d.recomp && drawRecomp(d))
+    return;
+  if (!d.vertexData || !d.vertexStride)
     return;
   // Indexed triangle list (the common GNM draw): the index buffer selects which
   // vertices form each triangle. Find how many vertices the indices reference so
@@ -2343,12 +2936,15 @@ void draw(const DrawInfo &d) {
 
   // Upload guest texture (independent of the render region) if not RT-as-texture.
   VkDescriptorSet texSet = VK_NULL_HANDLE;
-  if (d.texBase && g.texPipeline && !rtAsTex && !d.texArrayed)
-    texSet = getTexture(d.texBase, d.texW, d.texH, d.texTiling, d.texPitch,
+  if (d.texBase && g.texPipeline && !rtAsTex && !d.texArrayed &&
+      guestTextureUploadSupported(d.texDfmt, d.texNfmt))
+    texSet = getTexture(d.texBase, d.texW, d.texH, d.texDfmt, d.texNfmt,
+                         d.texTiling, d.texPitch,
                          d.texLayers, d.texBaseArray, d.texViewLayers,
                          d.texMipLevels, d.texBaseMip, d.texViewMips,
-                         d.texMinLod, d.texPow2Pad, d.texSampler,
-                         d.texSamplerValid, false);
+                          d.texMinLod, d.texPow2Pad, d.texSampler,
+                          d.texSamplerValid, false, d.texForceLodZero,
+                          d.texDepthCompare);
 
   // Switch render target if this draw targets a different RT than the open region (or
   // the open region is multi-target/has a depth attachment: the heuristic path renders
@@ -2364,9 +2960,10 @@ void draw(const DrawInfo &d) {
         src.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
       }
     }
-    RTarget *rt = getRT(d.rtBase, d.rtW, d.rtH);
+    VkFormat rtFormat = colorTargetFormat(d.mrtInfo[0]);
+    RTarget *rt = getRT(d.rtBase, d.rtW, d.rtH, rtFormat);
     if (!rt) { g.frameDraws++; return; }
-    beginRegion(d.mrtBase, 1, d.rtW, d.rtH);  // heuristic path is single-RT
+    beginRegion(d.mrtBase, d.mrtInfo, 1, d.rtW, d.rtH);  // heuristic path is single-RT
   }
   if (rtAsTex && g_rts[texBase].layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
     texSet = g_rts[texBase].set;
@@ -2377,7 +2974,8 @@ void draw(const DrawInfo &d) {
   if (texSet) {
     // Per-draw blend from the guest's CB_BLEND0_CONTROL, real vertex UVs.
     vkCmdBindPipeline(g.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                      getPipeline(true, d.blendControl, d.blendEnable));
+                      getPipeline(true, d.blendControl, d.blendEnable,
+                                  colorTargetFormat(d.mrtInfo[0])));
     float pc[17];
     std::memcpy(pc, d.mvp, 64);
     reinterpret_cast<uint32_t *>(pc)[16] = 0u;  // clipUV: real per-vertex uv/colour
@@ -2386,7 +2984,8 @@ void draw(const DrawInfo &d) {
                             1, &texSet, 0, nullptr);
   } else {
     vkCmdBindPipeline(g.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                      getPipeline(false, d.blendControl, d.blendEnable));
+                      getPipeline(false, d.blendControl, d.blendEnable,
+                                  colorTargetFormat(d.mrtInfo[0])));
     vkCmdPushConstants(g.cmd, g.layout, VK_SHADER_STAGE_VERTEX_BIT, 0, 64, d.mvp);
   }
   vkCmdBindVertexBuffers(g.cmd, 0, 1, &g.vb, &off);
@@ -2477,7 +3076,7 @@ void endFrame(uint64_t scanoutBase) {
     return;
   }
   RTarget &rt = it->second;
-  ensureReadback(rt.w, rt.h);
+  ensureReadback(rt.w, rt.h, rt.fmt);
   imageBarrier(g.cmd, rt.image, rt.layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
   rt.layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
@@ -2509,14 +3108,16 @@ void endFrame(uint64_t scanoutBase) {
   static std::vector<uint8_t> flipped;
   flipped.resize(static_cast<size_t>(rt.w) * rt.h * 4);
   const auto *rb = static_cast<const uint8_t *>(g.readbackMap);
+  uint32_t srcStride = rt.w * formatBytes(rt.fmt);
   for (uint32_t y = 0; y < rt.h; y++) {
     uint32_t sy = (flipMode & 1) ? (rt.h - 1 - y) : y;
-    const uint32_t *srow = reinterpret_cast<const uint32_t *>(rb + (size_t)sy * rt.w * 4);
-    uint32_t *drow = reinterpret_cast<uint32_t *>(flipped.data() + (size_t)y * rt.w * 4);
-    if (flipMode & 2)
-      for (uint32_t x = 0; x < rt.w; x++) drow[x] = srow[rt.w - 1 - x];
-    else
-      std::memcpy(drow, srow, (size_t)rt.w * 4);
+    const uint8_t *srow = rb + static_cast<size_t>(sy) * srcStride;
+    uint8_t *drow = flipped.data() + static_cast<size_t>(y) * rt.w * 4;
+    for (uint32_t x = 0; x < rt.w; x++) {
+      uint32_t sx = (flipMode & 2) ? (rt.w - 1 - x) : x;
+      readbackPixelBgra(srow + static_cast<size_t>(sx) * formatBytes(rt.fmt),
+                        rt.fmt, drow + static_cast<size_t>(x) * 4);
+    }
   }
   const uint8_t *pixels = flipped.data();
   // Minimal single-shot capture (DELTA_GPU_SNAP=N): write ONE ppm of the presented

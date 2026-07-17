@@ -12,7 +12,6 @@
 #include "gcn/gcn_decode.h"
 #include "gcn/gcn_detile.h"
 #include "gcn/gcn_resource.h"
-#include "gcn/gcn_interp.h"
 #include "gcn/gcn_translate.h"
 
 #include <algorithm>
@@ -34,6 +33,21 @@ std::atomic<uint64_t> g_totalSubmits{0};
 std::atomic<uint64_t> g_totalDraws{0};
 bool g_vkTried = false;
 bool g_frameActive = false;
+
+struct ShaderKey {
+  uint64_t vs = 0, ps = 0, fetch = 0;
+  bool operator==(const ShaderKey &o) const {
+    return vs == o.vs && ps == o.ps && fetch == o.fetch;
+  }
+};
+struct ShaderKeyHash {
+  size_t operator()(const ShaderKey &k) const {
+    uint64_t h = (k.vs ^ (k.ps + 0x9e3779b97f4a7c15ull + (k.vs << 6) +
+                          (k.vs >> 2)));
+    h ^= k.fetch + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
+    return static_cast<size_t>(h);
+  }
+};
 
 // Index-buffer state, set by IT_INDEX_TYPE / IT_INDEX_BASE before a draw.
 uint32_t g_indexType = 0;  // 0 = 16-bit, 1 = 32-bit (VGT_DMA_INDEX_TYPE bits[1:0])
@@ -162,6 +176,8 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
     vk::DrawInfo d;
     d.primType = g_regs[mmVGT_PRIMITIVE_TYPE];
     d.instanceCount = g_numInstances;
+    uint32_t autoVertexCount =
+        op == IT_DRAW_INDEX_AUTO && count >= 1 ? body[0] : 0;
     // Index buffer. DRAW_INDEX_2 (5 dwords): maxSize, baseLo, baseHi, indexCount,
     // drawInitiator. The draws are indexed triangle lists; without the index
     // buffer (drawing raw vertices as a strip) batched sprites smear into long
@@ -176,23 +192,24 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
         d.indexType = g_indexType;  // 0 = 16-bit, 1 = 32-bit
       }
     }
-    d.rtBase = g_regs.cbColorBase(0);
     d.rtW = fbWidth();
     d.rtH = fbHeight();
-    d.mrtBase[0] = d.rtBase;
-    // Multiple render targets: CB_COLOR1..7. A target is bound when its CB_TARGET_MASK
-    // nibble (4 bits per MRT) is set AND its base is a valid guest address. mrtCount is
-    // the highest bound index + 1 (stays 1 for the usual single-RT case).
+    // A stale CB_COLORn_BASE remains programmed during depth-only passes. Bind a color
+    // attachment only when both its write mask and CB_COLORn_INFO format are valid.
     {
       uint32_t tmask = g_regs[mmCB_TARGET_MASK];
-      for (int rt = 1; rt < 8; rt++) {
+      for (int rt = 0; rt < 8; rt++) {
         uint64_t base = g_regs.cbColorBase(rt);
-        if (((tmask >> (rt * 4)) & 0xF) && base >= 0x1000000000ull &&
+        uint32_t info = g_regs[mmCB_COLOR0_INFO + rt * kCbColorStride];
+        if (((tmask >> (rt * 4)) & 0xF) && ((info >> 2) & 0x1F) &&
+            base >= 0x1000000000ull &&
             base < 0x20000000000ull) {
           d.mrtBase[rt] = base;
+          d.mrtInfo[rt] = info;
           d.mrtCount = rt + 1;
         }
       }
+      d.rtBase = d.mrtCount ? d.mrtBase[0] : 0;
     }
 
     // Per-draw blend state from CB_BLEND0_CONTROL. Bit 30 is the per-target blend
@@ -223,13 +240,15 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
       static const bool noDepth = std::getenv("DELTA_GPU_NODEPTH") != nullptr;
       uint32_t dc = g_regs[mmDB_DEPTH_CONTROL];
       uint32_t zinfo = noDepth ? 0 : g_regs[mmDB_Z_INFO];
+      uint64_t zread = static_cast<uint64_t>(g_regs[mmDB_Z_READ_BASE]) << 8;
       uint64_t zbase = static_cast<uint64_t>(g_regs[mmDB_Z_WRITE_BASE]) << 8;
       static const bool dbTrace = std::getenv("DELTA_GPU_DBTRACE") != nullptr;
       static int dbN = 0;
       if (dbTrace && dbN < 24 && (zinfo || dc)) {
         dbN++;
-        std::fprintf(stderr, "[db] DEPTH_CONTROL=%#x Z_INFO=%#x Zwrite=%#lx clear=%#x prim=%u\n",
-                     dc, zinfo, (unsigned long)zbase, g_regs[mmDB_DEPTH_CLEAR],
+        std::fprintf(stderr, "[db] DEPTH_CONTROL=%#x Z_INFO=%#x Zread=%#lx Zwrite=%#lx "
+                     "clear=%#x prim=%u\n", dc, zinfo, (unsigned long)zread,
+                     (unsigned long)zbase, g_regs[mmDB_DEPTH_CLEAR],
                      g_regs[mmVGT_PRIMITIVE_TYPE]);
       }
       d.depthValid = (zinfo & 0x3) != 0;
@@ -308,16 +327,19 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
     // Texture: the PS samples an inline T# (image_sample). Isaac's textured
     // sprite vertex format is {pos.xyzw @0, color @0x10, uv.xy @0x1c} in a
     // 64-byte vertex, so the UV lives in the position buffer at offset 0x1c.
-    if (psA >= 0x1000000000ull && psA < 0x20000000000ull && d.vertexData) {
+    if (psA >= 0x1000000000ull && psA < 0x20000000000ull) {
       auto texs = gcn::trackTextures(reinterpret_cast<const uint32_t *>(psA), 4096,
                                      &g_regs[mmSPI_SHADER_USER_DATA_PS_0]);
       if (!texs.empty()) {
-        auto sampledRgba8 = [](const gcn::TImage &t) {
-          return t.valid && t.dfmt == 10 && t.nfmt == 0;
-        };
-        d.texBase = sampledRgba8(texs[0]) ? texs[0].base : 0;
+        // Preserve every valid GFX7 T# address. Format support is relevant only when
+        // uploading guest memory; a T# with R32F/RG16F/RGBA16F semantics may alias a
+        // live renderer RT and must still resolve to that image.
+        // https://github.com/torvalds/linux/blob/fce2dfa773ced15f27dd27cd0b482a7473cdcf2a/drivers/gpu/drm/amd/include/asic_reg/gca/gfx_7_2_enum.h#L6049-L6060
+        d.texBase = texs[0].valid ? texs[0].base : 0;
         d.texW = texs[0].width;
         d.texH = texs[0].height;
+        d.texDfmt = texs[0].dfmt;
+        d.texNfmt = texs[0].nfmt;
         d.texTiling = texs[0].tilingIdx;
         d.texPitch = texs[0].pitch;
         d.texLayers = texs[0].layers;
@@ -331,6 +353,8 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
         d.texPow2Pad = texs[0].pow2Pad;
         d.texSamplerValid = texs[0].samplerValid;
         d.texArrayed = texs[0].arrayed;
+        d.texForceLodZero = texs[0].forceLodZero;
+        d.texDepthCompare = texs[0].depthCompare;
         d.uvData = d.vertexData;
         d.uvStride = d.vertexStride;
         // All sampled textures (binding order), for multi-texture PS (Doom64 3D).
@@ -338,13 +362,15 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
         for (uint32_t i = 0; i < d.nTexs; i++) {
           auto &dt = d.texs[i];
           const auto &t = texs[i];
-          dt.base = sampledRgba8(t) ? t.base : 0; dt.w = t.width; dt.h = t.height;
+          dt.base = t.valid ? t.base : 0; dt.w = t.width; dt.h = t.height;
+          dt.dfmt = t.dfmt; dt.nfmt = t.nfmt;
           dt.tiling = t.tilingIdx; dt.pitch = t.pitch; dt.layers = t.layers;
           dt.baseArray = t.baseArray; dt.viewLayers = t.viewLayers;
           dt.mipLevels = t.mipLevels; dt.baseMip = t.baseMip;
           dt.viewMips = t.viewMips; dt.minLod = t.minLod; dt.pow2Pad = t.pow2Pad;
           std::memcpy(dt.sampler, t.sampler, sizeof(dt.sampler));
           dt.samplerValid = t.samplerValid; dt.arrayed = t.arrayed;
+          dt.forceLodZero = t.forceLodZero; dt.depthCompare = t.depthCompare;
         }
         // d.uvOffset was derived from the fetch shader during vertex extraction.
         // DELTA_GPU_TEXFMT: dump sampled texture formats (dfmt/nfmt/tiling/dims) to
@@ -367,10 +393,14 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
       const char *e = std::getenv("DELTA_GPU_RECOMP");
       return !e || std::strcmp(e, "0") != 0;
     }();
+    const char *recompStatus = recompOn ? "bad-address" : "disabled";
     if (recompOn && vsA >= 0x1000000000ull && vsA < 0x20000000000ull &&
-        psA >= 0x1000000000ull && psA < 0x20000000000ull) {
-      static std::unordered_map<uint64_t, gcn::Recompiled> shCache;
-      uint64_t key = vsA * 0x9e3779b97f4a7c15ull ^ psA;
+        (!psA || (psA >= 0x1000000000ull && psA < 0x20000000000ull))) {
+      // Attribute translation depends on the fetch shader as well as the VS/PS code.
+      // Keying only by VS/PS can reuse an attributed plan for a procedural draw (or
+      // vice versa), and a single mixed hash can alias unrelated shader pairs.
+      static std::unordered_map<ShaderKey, gcn::Recompiled, ShaderKeyHash> shCache;
+      ShaderKey key{vsA, psA, fetch};
       auto it = shCache.find(key);
       if (it == shCache.end())
         it = shCache.emplace(key, gcn::recompile(
@@ -379,12 +409,14 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
                  &g_regs[mmSPI_SHADER_USER_DATA_VS_0],
                  &g_regs[mmSPI_SHADER_USER_DATA_PS_0])).first;
       gcn::Recompiled &rc = it->second;
-      if (rc.ok && !rc.attrs.empty()) {
+      recompStatus = rc.ok ? "bad-attrs" : "rejected";
+      if (rc.ok) {
         const uint32_t *vud2 = &g_regs[mmSPI_SHADER_USER_DATA_VS_0];
         uint64_t base0 = 0;
         bool good = true;
         for (size_t i = 0; i < rc.attrs.size() && i < 8; i++) {
           auto &a = rc.attrs[i];
+          if (a.tableSgpr + 1 >= 16) { good = false; break; }
           uint64_t tbl = (static_cast<uint64_t>(vud2[a.tableSgpr + 1] & 0xFFFF) << 32) | vud2[a.tableSgpr];
           if (tbl < 0x1000000000ull || tbl >= 0x20000000000ull) { good = false; break; }
           auto vb = gcn::decodeVBuffer(reinterpret_cast<const uint32_t *>(tbl + a.vbufDwordOff * 4));
@@ -418,16 +450,19 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
             }
           }
         };
-        if (good && d.nvattrs) {
+        if (good) {
           resolveCbufs(rc.vsCbufs, vud2, true);
           resolveCbufs(rc.psCbufs, &g_regs[mmSPI_SHADER_USER_DATA_PS_0], false);
           for (const auto &cb : rc.vsCbufs) d.nCbufs = std::max(d.nCbufs, cb.binding + 1);
           for (const auto &cb : rc.psCbufs) d.nCbufs = std::max(d.nCbufs, cb.binding + 1);
         }
-        if (good && d.nvattrs) { d.vsAddr = vsA; d.psAddr = psA; d.recomp = &rc; }
+        if (good) { d.vsAddr = vsA; d.psAddr = psA; d.recomp = &rc;
+          recompStatus = "ok"; }
         else d.nvattrs = 0;
       }
     }
+    if (autoVertexCount && autoVertexCount <= 0x100000)
+      d.vertexCount = autoVertexCount;
     if (!g_frameActive) {
       vk::beginFrame();
       g_frameActive = true;
@@ -437,15 +472,30 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
     // Undertale's surface->scanout blit renders untextured (tex=0): is the PS doing
     // an image_sample we miss, or is the T# pointing outside the guest range?
     static const bool blitDump = std::getenv("DELTA_GPU_BLITDUMP") != nullptr;
+    static const uint64_t blitRt = [] {
+      const char *e = std::getenv("DELTA_GPU_BLIT_RT");
+      return e ? std::strtoull(e, nullptr, 0) : 0ull;
+    }();
     static int bdN = 0;
-    if (blitDump && d.rtW >= 1280 && bdN < 6) {
+    bool blitTargetBound = !blitRt || d.rtBase == blitRt;
+    for (uint32_t i = 0; blitRt && i < std::min(d.mrtCount, 8u); i++)
+      blitTargetBound |= d.mrtBase[i] == blitRt;
+    if (blitDump && blitTargetBound &&
+        (blitRt || d.rtW >= 1280) && bdN < 6) {
       bdN++;
       std::fprintf(stderr,
           "[blit] #%d rt=%#lx %ux%u VS=%#lx PS=%#lx texBase=%#lx %ux%u nvattrs=%u "
           "stride=%u idx=%u blendCtl=%#x\n",
           bdN, (unsigned long)d.rtBase, d.rtW, d.rtH, (unsigned long)vsA,
           (unsigned long)psA, (unsigned long)d.texBase, d.texW, d.texH, d.nvattrs,
-          d.vertexStride, d.indexCount, d.blendControl);
+           d.vertexStride, d.indexCount, d.blendControl);
+      std::fprintf(stderr, "[blit]   MRT(%u):", d.mrtCount);
+      for (uint32_t i = 0; i < std::min(d.mrtCount, 8u); i++)
+        std::fprintf(stderr, " %#lx", (unsigned long)d.mrtBase[i]);
+      std::fprintf(stderr, "\n");
+      std::fprintf(stderr, "[blit]   CB0 pitch=%#x slice=%#x info=%#x attrib=%#x\n",
+                   g_regs[mmCB_COLOR0_PITCH], g_regs[mmCB_COLOR0_SLICE],
+                   g_regs[mmCB_COLOR0_INFO], g_regs[mmCB_COLOR0_ATTRIB]);
       if (psA >= 0x1000000000ull && psA < 0x20000000000ull) {
         auto texs = gcn::trackTextures(reinterpret_cast<const uint32_t *>(psA), 4096,
                                        &g_regs[mmSPI_SHADER_USER_DATA_PS_0]);
@@ -454,7 +504,35 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
           std::fprintf(stderr, "[blit]     T# base=%#lx %ux%u pitch=%u dfmt=%u nfmt=%u tiling=%u\n",
                        (unsigned long)t.base, t.width, t.height, t.pitch, t.dfmt,
                        t.nfmt, t.tilingIdx);
-        gcn::disassemble(reinterpret_cast<const uint32_t *>(psA), 64, "blit.PS");
+        const uint32_t *psCode = reinterpret_cast<const uint32_t *>(psA);
+        uint32_t psWords = gcn::codeLength(psCode, 4096);
+        gcn::disassemble(psCode, psWords ? psWords : 512, "blit.PS");
+        if (bdN == 1 && d.recomp) {
+          const uint32_t *pud = &g_regs[mmSPI_SHADER_USER_DATA_PS_0];
+          std::fprintf(stderr, "[blit]   PS user data:");
+          for (uint32_t i = 0; i < 16; i++) std::fprintf(stderr, " %08x", pud[i]);
+          std::fprintf(stderr, "\n");
+          for (const auto &cb : d.recomp->psCbufs) {
+            const auto &resolved = d.cbufs[cb.binding];
+            std::fprintf(stderr,
+                         "[blit]   PS CB binding=%u sgpr=%u dwords=%u base=%#lx size=%u\n",
+                         cb.binding, cb.udSgpr, cb.numDwords,
+                         (unsigned long)resolved.base, resolved.size);
+            if (!resolved.base) continue;
+            const uint32_t *words = reinterpret_cast<const uint32_t *>(resolved.base);
+            uint32_t rows = std::min({(cb.numDwords + 3) / 4,
+                                      resolved.size / 16, 64u});
+            for (uint32_t row = 0; row < rows; row++) {
+              float values[4];
+              std::memcpy(values, words + row * 4, sizeof(values));
+              std::fprintf(stderr,
+                           "[blit]     %03x: %08x %08x %08x %08x | %.6g %.6g %.6g %.6g\n",
+                           row * 4, words[row * 4], words[row * 4 + 1],
+                           words[row * 4 + 2], words[row * 4 + 3],
+                           values[0], values[1], values[2], values[3]);
+            }
+          }
+        }
       }
     }
     // DELTA_GPU_DRAWLIST: one line per draw BEFORE any vertexData gating, so draws
@@ -474,11 +552,13 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
         std::chrono::steady_clock::now() - dlStart).count();
     if (drawList && dlElapsed >= dlAfter && dlN < 400) {
       dlN++;
-      std::fprintf(stderr, "[draw] idx=%u rt=%#lx %ux%u tex=%#lx %ux%u vd=%d recomp=%d nvattrs=%u prim=%u\n",
-                   d.indexCount, (unsigned long)d.rtBase, d.rtW, d.rtH,
+      std::fprintf(stderr, "[draw] count=%u rt=%#lx %ux%u tex=%#lx %ux%u vd=%d "
+                   "recomp=%s nvattrs=%u prim=%u VS=%#lx PS=%#lx fetch=%#lx\n",
+                   d.indexData ? d.indexCount : d.vertexCount,
+                   (unsigned long)d.rtBase, d.rtW, d.rtH,
                    (unsigned long)d.texBase, d.texW, d.texH, d.vertexData ? 1 : 0,
-                   (d.recomp && d.recomp->ok) ? 1 : 0, d.nvattrs,
-                   g_regs[mmVGT_PRIMITIVE_TYPE]);
+                   recompStatus, d.nvattrs, g_regs[mmVGT_PRIMITIVE_TYPE],
+                   (unsigned long)vsA, (unsigned long)psA, (unsigned long)fetch);
     }
     // DELTA_GPU_SPRITEDUMP: for the first few TEXTURED draws, dump the resolved
     // transform + first vertex (pos/uv via the resolved attrs) + texture, to pin
@@ -662,7 +742,7 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
     static const bool skipStale = std::getenv("DELTA_GPU_SKIPSTALE") != nullptr;
     if (skipStale && d.texBase && d.texW >= 2048)
       ; // skip the wide stale-buffer blit
-    else if (d.vertexData)
+    else if (d.vertexData || (d.recomp && d.recomp->ok && d.nvattrs == 0))
       vk::draw(d);
   }
   if (!g_trace)
@@ -919,7 +999,7 @@ void handleDispatch(const uint32_t *body, uint32_t count) {
 
   static const bool csDump = std::getenv("DELTA_GPU_CSDUMP") != nullptr;
   static int cdN = 0;
-  if (csDump && cdN < 6 && csAddr >= 0x1000000000ull && csAddr < 0x20000000000ull) {
+  if (csDump && cdN < 12 && csAddr >= 0x1000000000ull && csAddr < 0x20000000000ull) {
     cdN++;
     const uint32_t *ud = &g_regs[mmCOMPUTE_USER_DATA_0];
     std::fprintf(stderr,
@@ -937,14 +1017,6 @@ void handleDispatch(const uint32_t *body, uint32_t count) {
     return;
   const uint32_t *ud = &g_regs[mmCOMPUTE_USER_DATA_0];
 
-  // DELTA_GPU_CSRUN: execute the compute shader on the CPU interpreter (legacy A/B
-  // path). The default is GPU-side execution (below); DELTA_GPU_NOCS disables both.
-  static const bool csRun = std::getenv("DELTA_GPU_CSRUN") != nullptr;
-  if (csRun) {
-    gcn::runComputeShader(csAddr, dimX, dimY, dimZ, tgx, tgy, tgz, userSgpr,
-                          tgidEnable, ud);
-    return;
-  }
   static const bool noCs = std::getenv("DELTA_GPU_NOCS") != nullptr;
   if (noCs || !vk::available())
     return;

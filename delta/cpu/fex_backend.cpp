@@ -50,6 +50,7 @@
 namespace krnl {
 uintptr_t lv2_get(uint32_t sysIndex);
 const char *syscall_getname(uint32_t idx);
+extern "C" uint32_t krnl_syscall_errno(uint64_t raw);
 struct tls_index;
 void *PS4ABI guest_tls_get_addr(tls_index *ti); // HLE dynamic-TLS resolver
 }
@@ -302,10 +303,8 @@ public:
                    Args->Argument[5], Args->Argument[6]);
 
     // The lv2 handlers are plain AArch64 functions (PS4ABI is empty off-x86);
-    // call with the six GPR args and return the result into RAX.
-    // TODO(boot): PS4/BSD return convention reports error via carry flag + errno, and
-    // a few syscalls return a second value in RDX. We currently surface only
-    // RAX, matching the native path's simplified handlers.
+    // call with the six GPR args and translate their Linux-style negative errno
+    // returns to the BSD/PS4 carry + positive errno convention.
     using Fn = uint64_t(PS4ABI *)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
     auto fn = reinterpret_cast<Fn>(handler);
     t_lastSyscall = num;
@@ -314,23 +313,23 @@ public:
     ev = {'s', num, Args->Argument[1], Args->Argument[2], Args->Argument[3],
           Args->Argument[4], ~0ull, 0, nullptr};
     uint64_t ret = fn(Args->Argument[1], Args->Argument[2], Args->Argument[3],
-                      Args->Argument[4], Args->Argument[5], Args->Argument[6]);
+                       Args->Argument[4], Args->Argument[5], Args->Argument[6]);
+    const uint32_t error = krnl::krnl_syscall_errno(ret);
+    if (error)
+      ret = error;
     ev.ret = ret;
     t_inSyscall = false;
     if (trace)
       std::fprintf(stderr, "    -> %#lx\n", ret);
 
-    // FreeBSD/PS4 syscall convention: carry clear = success. Our HLE handlers
-    // return the result in rax and don't signal errors via carry; the native
-    // lifted path leaves CF clear (handler epilogue / the calltrace clc()).
-    // FEX's OS_LINUX64 path reports errors as negative rax and leaves the
-    // pre-syscall flags untouched, so the guest's `jb cerror` reads a stale
-    // carry and treats a good call as failure (e.g. ScePthread aborting on a
-    // perfectly good sysctl(kern.usrstack)). CF isn't stored directly in
-    // flags[]; clear it through FEX's compacted-EFLAGS API so it sticks.
+    // CF isn't stored directly in flags[]; update it through FEX's compacted-
+    // EFLAGS API so the guest's `jb cerror` observes the syscall result.
     if (g_ctxPtr) {
       uint32_t ef = g_ctxPtr->ReconstructCompactedEFLAGS(Frame->Thread, false, nullptr, 0);
-      ef &= ~1u; // EFLAGS.CF (bit 0)
+      if (error)
+        ef |= 1u;  // EFLAGS.CF
+      else
+        ef &= ~1u;
       g_ctxPtr->SetFlagsFromCompactedEFLAGS(Frame->Thread, ef);
     }
     return ret;

@@ -7,6 +7,10 @@
 namespace krnl {
 class proc;
 
+uint32_t dceCurrentBuffer();
+int64_t dceCurrentFlipArg();
+uint64_t dceScanoutBuffer(uint32_t index);
+
 // /dev/dce: the Display Control Engine (framebuffer scanout). The real
 // libSceVideoOut.sprx (LLE) opens it and drives the whole display pipe through
 // it: a multiplexed control ioctl (0xc0308203, sub-op in arg[0]), scanout-buffer

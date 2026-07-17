@@ -28,8 +28,9 @@ find_package(PkgConfig QUIET)
 # Direct GCN->SPIR-V backend (gcn/spirv): emits SPIR-V from the GCN bytecode then
 # runs a SPIRV-Tools optimize/validate pass. Needs SPIRV-Headers (spirv.hpp11) and
 # SPIRV-Tools (static lib: the C++ Optimizer + the C validation API). When the
-# packages are unavailable the backend self-disables at build time (the GLSL path
-# stays the only one) via the DELTA_HAVE_SPIRV_BACKEND define.
+# packages are unavailable the backend self-disables at build time (no shader
+# recompilation at all -- guest draws/dispatches are skipped) via the
+# DELTA_HAVE_SPIRV_BACKEND define.
 if(PkgConfig_FOUND)
   pkg_check_modules(SPIRVTOOLS QUIET SPIRV-Tools)
   pkg_check_modules(SPIRVHEADERS QUIET SPIRV-Headers)

@@ -737,6 +737,24 @@ static const syscall_Reg syscall_dpt[] = {
     {672, (void *)&sys_dynlib_get_list_for_libdbg}, // sys_dynlib_get_list_for_libdbg
 };
 
+// BSD/PS4 syscall return convention: on failure the kernel returns the positive
+// errno in rax with the carry flag SET; on success it clears carry and rax holds
+// the result. Our C handlers use the Linux-style convention instead (a negative
+// errno, or the result, in rax). Classify a raw handler return for both the
+// native trampoline and the FEX syscall bridge.
+//
+// An `int` handler zero-extends its 32-bit result into rax, an `int64_t` handler
+// fills all 64 bits, so a negative errno arrives as either 0x00000000_FFFFFFxx or
+// 0xFFFFFFFF_FFFFFFxx. Guest pointers live at >= 64 GiB and cannot match this.
+extern "C" uint32_t krnl_syscall_errno(uint64_t raw) {
+  int32_t lo = static_cast<int32_t>(static_cast<uint32_t>(raw));
+  uint32_t hi = static_cast<uint32_t>(raw >> 32);
+  if (lo < 0 && lo >= -static_cast<int32_t>(SysError::eLAST) &&
+      (hi == 0 || hi == 0xFFFFFFFFu))
+    return static_cast<uint32_t>(-lo);
+  return 0;
+}
+
 #if defined(DELTA_BACKEND_NATIVE)
 static void PS4ABI trace_syscall(const char *name, int index, void *addr) {
   std::fprintf(stderr, "[syscall] %d %s\n", index, name);
@@ -810,26 +828,6 @@ static uintptr_t emit_calltrace(const char *name, uint32_t sid,
                                  reinterpret_cast<uintptr_t>(dest));
 
   return reinterpret_cast<uintptr_t>(gen->getCode());
-}
-
-// BSD/PS4 syscall return convention: on failure the kernel returns the positive
-// errno in rax with the carry flag SET; on success it clears carry and rax holds
-// the result. Our C handlers use the Linux-style convention instead (a negative
-// errno, or the result, in rax). Translate a raw handler return into the errno
-// the guest's `jb cerror` stub expects, or 0 when it is a normal result.
-//
-// An `int` handler zero-extends its 32-bit result into rax, an `int64_t` handler
-// fills all 64 bits, so a negative errno arrives as either 0x00000000_FFFFFFxx or
-// 0xFFFFFFFF_FFFFFFxx. We only treat the low 32 bits (as signed) being a valid
-// errno *and* the high half being 0 or all-ones as an error. Guest pointers live
-// at >= 64 GiB (high half != 0), so a returned address can never look like one.
-extern "C" uint32_t krnl_syscall_errno(uint64_t raw) {
-  int32_t lo = static_cast<int32_t>(static_cast<uint32_t>(raw));
-  uint32_t hi = static_cast<uint32_t>(raw >> 32);
-  if (lo < 0 && lo >= -static_cast<int32_t>(SysError::eLAST) &&
-      (hi == 0 || hi == 0xFFFFFFFFu))
-    return static_cast<uint32_t>(-lo);
-  return 0;
 }
 
 // Per-syscall-id call counter (DELTA_SCHIST). The only profiler available on this
