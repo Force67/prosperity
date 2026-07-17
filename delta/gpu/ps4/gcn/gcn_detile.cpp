@@ -325,17 +325,20 @@ inline uint32_t BankFromCoord(uint32_t x, uint32_t y, uint32_t slice,
   return (bank ^ rotation) & (mp.num_banks - 1);
 }
 
-// 1D micro-tiled byte offset (32bpp), including thick slice groups.
+// 1D micro-tiled byte offset, including thick slice groups. `elem` is the
+// element size in bytes (4 = pixel, 8/16 = BCn block); the intra-tile swizzle
+// is an element index, so it scales directly.
 inline uint64_t AddrMicro32(uint32_t x, uint32_t y, uint32_t slice,
                             uint32_t pitch, uint32_t height, MicroMode m,
-                            uint32_t thickness) {
+                            uint32_t thickness, uint32_t elem) {
   uint32_t micro_tiles_per_row = pitch / kMicroW;
-  uint64_t group_bytes = static_cast<uint64_t>(pitch) * height * thickness * 4;
+  uint64_t group_bytes = static_cast<uint64_t>(pitch) * height * thickness * elem;
   uint64_t slice_offset = (slice / thickness) * group_bytes;
   uint64_t micro_tile_offset =
       static_cast<uint64_t>((y >> 3) * micro_tiles_per_row + (x >> 3)) *
-      kMicroTileBytes * thickness;
-  return slice_offset + micro_tile_offset + PixIdx32(x, y, slice, m, thickness) * 4;
+      (kMicroTilePixels * elem) * thickness;
+  return slice_offset + micro_tile_offset +
+         static_cast<uint64_t>(PixIdx32(x, y, slice, m, thickness)) * elem;
 }
 
 struct Macro2D {
@@ -444,20 +447,26 @@ bool TilingIsLinear(uint32_t tiling_idx) {
 
 bool BuildTextureLayout32(TextureLayout32 &out, uint32_t width, uint32_t height,
                           uint32_t pitch, uint32_t layers, uint32_t mip_levels,
-                          uint32_t tiling_idx, bool pow2_pad) {
+                          uint32_t tiling_idx, bool pow2_pad,
+                          uint32_t elem_bytes) {
   out = {};
   if (!width || !height || !layers || !mip_levels || mip_levels > out.mips.size() ||
       width > 16384 || height > 16384 || pitch > 16384 || layers > 8192 ||
       !ValidTileMode(tiling_idx))
     return false;
+  if (elem_bytes != 4 && elem_bytes != 8 && elem_bytes != 16) return false;
 
   tiling_idx = EffectiveTileMode(tiling_idx);
   out.mip_levels = mip_levels;
   out.layers = layers;
   out.tiling_idx = tiling_idx;
+  out.elem_bytes = elem_bytes;
   const ArrayMode am = ArrayModeOf(tiling_idx);
   const MicroMode mm = MicroModeOf(tiling_idx);
   const uint32_t thickness = TileThickness(am);
+  // The macro-tiled bank/pipe swizzle below is calibrated for 32bpp elements;
+  // wider (BCn-block) elements support linear + 1D micro tiling only.
+  if (elem_bytes != 4 && IsMacroTiled(am)) return false;
   Macro2D macro{};
   if (IsMacroTiled(am) && !ConfigureMacro2D(tiling_idx, am, mm, macro))
     return false;
@@ -503,7 +512,7 @@ bool BuildTextureLayout32(TextureLayout32 &out, uint32_t width, uint32_t height,
     const uint32_t stored_layers = AlignUp(layers, thickness);
     level.offset = AlignUp(end, base_align);
     level.size = static_cast<uint64_t>(level.pitch) * level.stored_height *
-                 stored_layers * 4;
+                 stored_layers * elem_bytes;
     if (!level.size || level.offset > UINT64_MAX - level.size) return false;
     end = level.offset + level.size;
   }
@@ -511,21 +520,24 @@ bool BuildTextureLayout32(TextureLayout32 &out, uint32_t width, uint32_t height,
   return out.size != 0;
 }
 
-bool DetileTextureMip32(const uint32_t *src, uint32_t *dst,
+bool DetileTextureMip32(const void *src, void *dst,
                         const TextureLayout32 &layout, uint32_t mip,
                         uint32_t layer) {
   if (!src || !dst || mip >= layout.mip_levels || layer >= layout.layers)
     return false;
   const TextureMipLayout32 &level = layout.mips[mip];
-  const uint32_t *level_src = src + level.offset / 4;
+  const uint32_t elem = layout.elem_bytes;
+  const uint8_t *level_src = static_cast<const uint8_t *>(src) + level.offset;
+  uint8_t *out = static_cast<uint8_t *>(dst);
 
   if (TilingIsLinear(layout.tiling_idx)) {
-    const uint32_t *layer_src =
-        level_src + static_cast<uint64_t>(layer) * level.pitch * level.stored_height;
+    const uint8_t *layer_src =
+        level_src + static_cast<uint64_t>(layer) * level.pitch *
+                        level.stored_height * elem;
     for (uint32_t y = 0; y < level.height; y++)
-      std::memcpy(dst + static_cast<size_t>(y) * level.width,
-                  layer_src + static_cast<size_t>(y) * level.pitch,
-                  static_cast<size_t>(level.width) * 4);
+      std::memcpy(out + static_cast<size_t>(y) * level.width * elem,
+                  layer_src + static_cast<size_t>(y) * level.pitch * elem,
+                  static_cast<size_t>(level.width) * elem);
     return true;
   }
 
@@ -534,19 +546,24 @@ bool DetileTextureMip32(const uint32_t *src, uint32_t *dst,
   if (!level.macro_tiled) {
     for (uint32_t y = 0; y < level.height; y++)
       for (uint32_t x = 0; x < level.width; x++)
-        dst[static_cast<size_t>(y) * level.width + x] =
-            level_src[AddrMicro32(x, y, layer, level.pitch, level.stored_height,
-                                 mm, level.thickness) >> 2];
+        std::memcpy(out + (static_cast<size_t>(y) * level.width + x) * elem,
+                    level_src + AddrMicro32(x, y, layer, level.pitch,
+                                            level.stored_height, mm,
+                                            level.thickness, elem),
+                    elem);
     return true;
   }
 
+  if (elem != 4) return false;  // macro swizzle is 32bpp-calibrated
   Macro2D macro{};
   if (!ConfigureMacro2D(layout.tiling_idx, am, mm, macro)) return false;
+  const uint32_t *src32 = reinterpret_cast<const uint32_t *>(level_src);
+  uint32_t *dst32 = reinterpret_cast<uint32_t *>(out);
   for (uint32_t y = 0; y < level.height; y++)
     for (uint32_t x = 0; x < level.width; x++)
-      dst[static_cast<size_t>(y) * level.width + x] =
-          level_src[AddrMacro32(x, y, layer, level.pitch, level.stored_height,
-                               macro) >> 2];
+      dst32[static_cast<size_t>(y) * level.width + x] =
+          src32[AddrMacro32(x, y, layer, level.pitch, level.stored_height,
+                            macro) >> 2];
   return true;
 }
 

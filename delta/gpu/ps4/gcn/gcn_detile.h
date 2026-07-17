@@ -38,17 +38,22 @@ struct TextureLayout32 {
   uint32_t mip_levels = 0;
   uint32_t layers = 0;
   uint32_t tiling_idx = 0;
+  uint32_t elem_bytes = 4;  // bytes per element (4 = pixel, 8/16 = BCn block)
 };
 
-// Compute the complete physical layout of a 32bpp, one-sample 2D/2D-array image.
-// Mips are stored mip-major; each mip contains all array layers. Later macro-tiled
-// mips are downgraded to 1D microtiling when they no longer span a macro tile.
+// Compute the complete physical layout of a one-sample 2D/2D-array image whose
+// elements are `elem_bytes` wide (4 = a 32bpp pixel; 8/16 = a BCn block, with
+// width/height/pitch given in blocks). Mips are stored mip-major; each mip
+// contains all array layers. Later macro-tiled mips are downgraded to 1D
+// microtiling when they no longer span a macro tile. Non-4-byte elements
+// support the linear and 1D-micro-tiled modes only (macro-tiled BCn declines).
 bool BuildTextureLayout32(TextureLayout32 &out, uint32_t width, uint32_t height,
                           uint32_t pitch, uint32_t layers, uint32_t mip_levels,
-                          uint32_t tiling_idx, bool pow2_pad);
+                          uint32_t tiling_idx, bool pow2_pad,
+                          uint32_t elem_bytes = 4);
 
-// De-tile one physical mip/layer into tightly packed row-major RGBA8 pixels.
-bool DetileTextureMip32(const uint32_t *src, uint32_t *dst,
+// De-tile one physical mip/layer into tightly packed row-major elements.
+bool DetileTextureMip32(const void *src, void *dst,
                         const TextureLayout32 &layout, uint32_t mip,
                         uint32_t layer);
 

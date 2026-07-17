@@ -270,7 +270,30 @@ VkFormat guestTextureFormat(uint32_t dfmt, uint32_t nfmt) {
   if (dfmt == 6 && nfmt == 7) return VK_FORMAT_B10G11R11_UFLOAT_PACK32;
   if (dfmt == 10 && nfmt == 0) return VK_FORMAT_R8G8B8A8_UNORM;
   if (dfmt == 10 && nfmt == 9) return VK_FORMAT_R8G8B8A8_SRGB;
+  // Block-compressed (IMG_DATA_FORMAT_BC1..BC7 = 35..41); sampled natively.
+  if (dfmt == 35) return nfmt == 9 ? VK_FORMAT_BC1_RGBA_SRGB_BLOCK
+                                   : VK_FORMAT_BC1_RGBA_UNORM_BLOCK;
+  if (dfmt == 36) return nfmt == 9 ? VK_FORMAT_BC2_SRGB_BLOCK
+                                   : VK_FORMAT_BC2_UNORM_BLOCK;
+  if (dfmt == 37) return nfmt == 9 ? VK_FORMAT_BC3_SRGB_BLOCK
+                                   : VK_FORMAT_BC3_UNORM_BLOCK;
+  if (dfmt == 38) return nfmt == 1 ? VK_FORMAT_BC4_SNORM_BLOCK
+                                   : VK_FORMAT_BC4_UNORM_BLOCK;
+  if (dfmt == 39) return nfmt == 1 ? VK_FORMAT_BC5_SNORM_BLOCK
+                                   : VK_FORMAT_BC5_UNORM_BLOCK;
+  if (dfmt == 41) return nfmt == 9 ? VK_FORMAT_BC7_SRGB_BLOCK
+                                   : VK_FORMAT_BC7_UNORM_BLOCK;
   return VK_FORMAT_UNDEFINED;
+}
+
+// Block-compressed guest formats: 4x4-texel blocks of 8 or 16 bytes. The
+// detiler and upload then work in block ("element") space.
+bool guestFormatBlockCompressed(uint32_t dfmt) {
+  return dfmt >= 35 && dfmt <= 41;
+}
+uint32_t guestFormatElemBytes(uint32_t dfmt) {
+  if (!guestFormatBlockCompressed(dfmt)) return 4;
+  return (dfmt == 35 || dfmt == 38) ? 8 : 16;  // BC1/BC4 = 8B, rest 16B
 }
 
 // CB_COLORn_INFO uses the GFX7 SurfaceFormat/SurfaceNumber encodings. Keep the
@@ -868,7 +891,8 @@ bool createPipeline() {
 }
 
 void uploadTexPixels(VkImage img, uint64_t base,
-                     const gcn::TextureLayout32 &layout);  // defined below
+                     const gcn::TextureLayout32 &layout, uint32_t texel_w,
+                     uint32_t texel_h);  // defined below
 
 bool createTexPipeline() {
   if (g.texPipeline)
@@ -927,7 +951,7 @@ bool createTexPipeline() {
     uint32_t white = 0xFFFFFFFFu;
     gcn::TextureLayout32 whiteLayout;
     gcn::BuildTextureLayout32(whiteLayout, 1, 1, 1, 1, 1, 31, false);
-    uploadTexPixels(g.whiteImg, reinterpret_cast<uint64_t>(&white), whiteLayout);
+    uploadTexPixels(g.whiteImg, reinterpret_cast<uint64_t>(&white), whiteLayout, 1, 1);
     VkImageViewCreateInfo wv{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
     wv.image = g.whiteImg; wv.viewType = VK_IMAGE_VIEW_TYPE_2D;
     wv.format = VK_FORMAT_R8G8B8A8_UNORM;
@@ -1085,40 +1109,46 @@ VkSampler samplerFor(const SamplerKey &key) {
 // offsets and swizzles; this function only packs the logical mip/layer images for
 // Vulkan buffer-to-image copies.
 void uploadTexPixels(VkImage img, uint64_t base,
-                     const gcn::TextureLayout32 &layout) {
+                     const gcn::TextureLayout32 &layout, uint32_t texel_w,
+                     uint32_t texel_h) {
   static const bool noDetile = std::getenv("DELTA_GPU_NODETILE") != nullptr;
-  std::vector<uint32_t> linear;
-  uint64_t linearDwords = 0;
+  const uint32_t elem = layout.elem_bytes;
+  std::vector<uint8_t> linear;
+  uint64_t linearBytes = 0;
   for (uint32_t mip = 0; mip < layout.mip_levels; mip++)
-    linearDwords += static_cast<uint64_t>(layout.mips[mip].width) *
-                    layout.mips[mip].height * layout.layers;
-  linear.resize(static_cast<size_t>(linearDwords));
+    linearBytes += static_cast<uint64_t>(layout.mips[mip].width) *
+                   layout.mips[mip].height * layout.layers * elem;
+  linear.resize(static_cast<size_t>(linearBytes));
 
   VkBufferImageCopy copies[16]{};
   uint64_t linearOffset = 0;
-  const uint32_t *src = reinterpret_cast<const uint32_t *>(base);
+  const uint8_t *src = reinterpret_cast<const uint8_t *>(base);
   for (uint32_t mip = 0; mip < layout.mip_levels; mip++) {
     const auto &level = layout.mips[mip];
-    copies[mip].bufferOffset = linearOffset * 4;
+    copies[mip].bufferOffset = linearOffset;
     copies[mip].imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, mip, 0, layout.layers};
-    copies[mip].imageExtent = {level.width, level.height, 1};
+    // The copy extent is in texels; for block-compressed formats the staged
+    // data is level.width x level.height BLOCKS covering that texel extent.
+    copies[mip].imageExtent = {std::max(texel_w >> mip, 1u),
+                               std::max(texel_h >> mip, 1u), 1};
+    const uint64_t layerBytes =
+        static_cast<uint64_t>(level.width) * level.height * elem;
     for (uint32_t layer = 0; layer < layout.layers; layer++) {
-      uint32_t *dst = linear.data() + linearOffset +
-                      static_cast<uint64_t>(layer) * level.width * level.height;
+      uint8_t *dst = linear.data() + linearOffset + layer * layerBytes;
       if (!noDetile) {
         gcn::DetileTextureMip32(src, dst, layout, mip, layer);
       } else {
-        const uint32_t *levelSrc = src + level.offset / 4 +
-            static_cast<uint64_t>(layer) * level.pitch * level.stored_height;
+        const uint8_t *levelSrc = src + level.offset +
+            static_cast<uint64_t>(layer) * level.pitch * level.stored_height * elem;
         for (uint32_t y = 0; y < level.height; y++)
-          std::memcpy(dst + static_cast<size_t>(y) * level.width,
-                      levelSrc + static_cast<size_t>(y) * level.pitch,
-                      static_cast<size_t>(level.width) * 4);
+          std::memcpy(dst + static_cast<size_t>(y) * level.width * elem,
+                      levelSrc + static_cast<size_t>(y) * level.pitch * elem,
+                      static_cast<size_t>(level.width) * elem);
       }
     }
-    linearOffset += static_cast<uint64_t>(level.width) * level.height * layout.layers;
+    linearOffset += layerBytes * layout.layers;
   }
-  VkDeviceSize sz = linear.size() * sizeof(uint32_t);
+  VkDeviceSize sz = linear.size();
   VkBuffer stg; VkDeviceMemory stgMem; void *map;
   VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
   bi.size = sz; bi.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
@@ -1221,9 +1251,19 @@ VkDescriptorSet getTexture(uint64_t base, uint32_t w, uint32_t h,
   if (!view_mips) return VK_NULL_HANDLE;
   // Diagnostic override used to identify incorrectly described guest surfaces.
   tiling = textureTiling(tiling);
+  // Block-compressed formats lay out and detile in 4x4-block ("element")
+  // space. Mip chains only halve cleanly in block space for power-of-two
+  // texel dimensions; decline others (rare) rather than mis-address them.
+  const bool bc = guestFormatBlockCompressed(dfmt);
+  const uint32_t elemBytes = guestFormatElemBytes(dfmt);
+  if (bc && mip_levels > 1 && ((w & (w - 1)) || (h & (h - 1))))
+    return VK_NULL_HANDLE;
+  const uint32_t lw = bc ? (w + 3) / 4 : w;
+  const uint32_t lh = bc ? (h + 3) / 4 : h;
+  const uint32_t lpitch = bc ? ((pitch ? pitch : w) + 3) / 4 : (pitch ? pitch : w);
   gcn::TextureLayout32 layout;
-  if (!gcn::BuildTextureLayout32(layout, w, h, pitch ? pitch : w, layers,
-                                  mip_levels, tiling, pow2_pad))
+  if (!gcn::BuildTextureLayout32(layout, lw, lh, lpitch, layers,
+                                  mip_levels, tiling, pow2_pad, elemBytes))
     return VK_NULL_HANDLE;
   uint64_t footprint = layout.size;
   if (base < kGuestBegin || footprint > kMaxTextureBytes || base > kGuestEnd - footprint)
@@ -1295,7 +1335,7 @@ VkDescriptorSet getTexture(uint64_t base, uint32_t w, uint32_t h,
       vkDestroyImage(g.device, imageEntry.image, nullptr);
       return VK_NULL_HANDLE;
     }
-    uploadTexPixels(imageEntry.image, base, layout);
+    uploadTexPixels(imageEntry.image, base, layout, w, h);
     imageIt = g_texImages.emplace(key.image, imageEntry).first;
   } else {
     imageIt->second.lastCheckedFrame = g.frameNum;
@@ -1444,9 +1484,23 @@ VkDescriptorSet getMultiTexSet(const DrawInfo &d, const VkImageView *resolvedVie
   static const bool forceWhite = std::getenv("DELTA_GPU_FORCEWHITE") != nullptr;
   VkImageView views[State::kMaxTex];
   VkImageLayout layouts[State::kMaxTex];
+  // DELTA_GPU_TEXMISS: report every sampler binding that falls back to the 1x1
+  // white default (the source of "everything renders white" chains) with the
+  // descriptor state that failed to resolve.
+  static const bool texMiss = std::getenv("DELTA_GPU_TEXMISS") != nullptr;
+  static int texMissLogged = 0;
   for (uint32_t i = 0; i < State::kMaxTex; i++) {
     VkImageView v = (i < key.nTexs && !forceWhite) ? resolvedViews[i] : VK_NULL_HANDLE;
     bool arrayed = i < key.nTexs && d.texs[i].arrayed;
+    if (texMiss && !v && i < key.nTexs && texMissLogged < 64) {
+      texMissLogged++;
+      const auto &t = d.texs[i];
+      std::fprintf(stderr,
+                   "[texmiss] bind=%u base=%#lx %ux%u dfmt=%u nfmt=%u tiling=%u "
+                   "layers=%u mips=%u arrayed=%d\n",
+                   i, (unsigned long)t.base, t.w, t.h, t.dfmt, t.nfmt, t.tiling,
+                   t.layers, t.mip_levels, t.arrayed);
+    }
     views[i] = v ? v : (arrayed ? g.whiteArrayView : g.whiteView);
     layouts[i] = v ? resolvedLayouts[i] : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
   }
@@ -2387,7 +2441,10 @@ RecompPipe *getRecompPipe(const DrawInfo &d) {
     uint32_t bc = i == 0 ? d.blendControl : d.mrtBlend[i];
     bool en = i == 0 ? d.blendEnable : ((d.mrtBlendMask >> i) & 1u);
     cbAtt[i] = blendAttachment(bc, en);
-    if (i && !(d.recomp->ps_mrt_mask & (1u << i))) cbAtt[i].colorWriteMask = 0;
+    // Mask attachments the PS does not export to. A PS with no color export
+    // at all (depth-only / buffer-store passes) writes nothing -- previously a
+    // white fallback was painted, which poisoned multi-pass chains (PT).
+    if (!(d.recomp->ps_mrt_mask & (1u << i))) cbAtt[i].colorWriteMask = 0;
   }
   VkPipelineColorBlendStateCreateInfo cb{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
   cb.attachmentCount = mrtN; cb.pAttachments = cbAtt;

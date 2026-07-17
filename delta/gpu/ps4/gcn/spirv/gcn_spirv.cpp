@@ -636,8 +636,17 @@ bool TranslatePs(const Program& program,
 
   sc.main_fn = t.m.BeginFunction(t.t_void, t.t_fn);
 
+  // A PS with no color export writes nothing to the color targets (hardware
+  // semantics: only exports write; e.g. depth-only or buffer-store passes).
+  // ps_mrt_mask stays 0 and the renderer masks every color attachment.
+  const bool has_color_export = std::any_of(
+      program.begin(), program.end(), [](const Inst& inst) {
+        return inst.enc == Enc::kExp && ((inst.raw[0] >> 4) & 0x3F) <= 7 &&
+               (inst.raw[0] & 0xF);
+      });
+
   const bool cfg = ForceCfg() || HasControlFlow(program);
-  if (cfg) {
+  if (cfg && has_color_export) {
     // Default MRT0 to transparent so a fragment that never reaches an export
     // leaves a defined value even if the discard lowering is bypassed.
     t.m.Store(PsColorOut(t, sc, 0),
@@ -648,12 +657,7 @@ bool TranslatePs(const Program& program,
   }
   EmitBody(t, program, sc);
 
-  if (!sc.wrote_color) {
-    // Shader has no color export at all: opaque white fallback.
-    t.m.Store(PsColorOut(t, sc, 0),
-              t.m.ConstComposite(t.t_v4, {t.F32(1.f), t.F32(1.f), t.F32(1.f),
-                                          t.F32(1.f)}));
-  } else if (sc.color_written_var) {
+  if (sc.wrote_color && sc.color_written_var) {
     // GCN alpha-test/kill idiom (CFG path): control flow branches over the
     // color export for failing fragments (e.g. s_cmp + s_cbranch_scc0 ->
     // s_endpgm). Discard those (OpKill) instead of leaving the output
