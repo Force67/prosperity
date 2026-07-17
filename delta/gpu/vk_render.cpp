@@ -2444,7 +2444,9 @@ RecompPipe *getRecompPipe(const DrawInfo &d) {
     // Mask attachments the PS does not export to. A PS with no color export
     // at all (depth-only / buffer-store passes) writes nothing -- previously a
     // white fallback was painted, which poisoned multi-pass chains (PT).
-    if (!(d.recomp->ps_mrt_mask & (1u << i))) cbAtt[i].colorWriteMask = 0;
+    static const bool noMaskDiag = std::getenv("DELTA_GPU_NOMASK") != nullptr;
+    if (!noMaskDiag && !(d.recomp->ps_mrt_mask & (1u << i)))
+      cbAtt[i].colorWriteMask = 0;
   }
   VkPipelineColorBlendStateCreateInfo cb{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
   cb.attachmentCount = mrtN; cb.pAttachments = cbAtt;
@@ -2910,8 +2912,23 @@ void beginFrame() {
   g.recording = true;
 }
 
-void draw(const DrawInfo &d) {
+void draw(const DrawInfo &d_in) {
   if (!g.recording) return;
+  // Diagnostic kill-switches for bisecting "renders nothing" chains:
+  // DELTA_GPU_NODEPTH disables depth test/write, DELTA_GPU_NOCULL disables
+  // face culling, DELTA_GPU_NOMASK forces full color write masks.
+  static const bool noDepth = std::getenv("DELTA_GPU_NODEPTH") != nullptr;
+  static const bool noCull = std::getenv("DELTA_GPU_NOCULL") != nullptr;
+  static const bool noMask = std::getenv("DELTA_GPU_NOMASK") != nullptr;
+  DrawInfo dd;
+  const bool patched = noDepth || noCull || noMask;
+  if (patched) {
+    dd = d_in;
+    if (noDepth) { dd.depthTestEnable = false; dd.depthWriteEnable = false; }
+    if (noCull) dd.cullMode = 0;
+    if (noMask) { dd.targetMask = 0xFFFFFFFFu; dd.colorControl = 0x10; }
+  }
+  const DrawInfo &d = patched ? dd : d_in;
   if (d.indexCount > g.frameMaxIdx) g.frameMaxIdx = d.indexCount;
   ScopeNs _t(&g_nsDraw);
   // Recompiled-shader path: run the game's actual VS/PS. Falls through to the
@@ -3091,6 +3108,64 @@ void reportFps() {
     frames = 0;
     g_nsDraw = g_nsEnd = g_nsReadback = g_nsTexUp = 0;
     g_texUps = 0;
+  }
+}
+
+// DELTA_GPU_RTSTAT: every 200th frame, read back each render target used this
+// frame and report how many sampled texels are non-zero. Shows exactly where a
+// multi-pass chain (g-buffer -> lighting -> post -> scanout) loses its content.
+void reportRtContents() {
+  static const bool enabled = std::getenv("DELTA_GPU_RTSTAT") != nullptr;
+  if (!enabled || g.frameNum % 200 != 0) return;
+  int reported = 0;
+  for (auto &kv : g_rts) {
+    RTarget &rt = kv.second;
+    if (!rt.usedThisFrame || reported >= 12) continue;
+    reported++;
+    ensureReadback(rt.w, rt.h, rt.fmt);
+    VkCommandBufferAllocateInfo ca{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+    ca.commandPool = g.pool; ca.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    ca.commandBufferCount = 1;
+    VkCommandBuffer c; vkAllocateCommandBuffers(g.device, &ca, &c);
+    VkCommandBufferBeginInfo cbi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    cbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(c, &cbi);
+    imageBarrier(c, rt.image, rt.layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                 VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+    rt.layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    VkBufferImageCopy copy{};
+    copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    copy.imageExtent = {rt.w, rt.h, 1};
+    vkCmdCopyImageToBuffer(c, rt.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           g.readback, 1, &copy);
+    vkEndCommandBuffer(c);
+    VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    si.commandBufferCount = 1; si.pCommandBuffers = &c;
+    vkResetFences(g.device, 1, &g.fence);
+    vkQueueSubmit(g.queue, 1, &si, g.fence);
+    vkWaitForFences(g.device, 1, &g.fence, VK_TRUE, UINT64_MAX);
+    vkFreeCommandBuffers(g.device, g.pool, 1, &c);
+    const uint32_t *px = static_cast<const uint32_t *>(g.readbackMap);
+    const uint64_t n = static_cast<uint64_t>(rt.w) * rt.h;
+    const uint64_t step = n > 16384 ? n / 16384 : 1;
+    uint64_t nz = 0, rgb_nz = 0, samples = 0;
+    uint32_t distinct[4] = {};
+    uint32_t num_distinct = 0;
+    for (uint64_t i = 0; i < n; i += step, samples++) {
+      const uint32_t v = px[i];
+      if (v) nz++;
+      if (v & 0x00FFFFFFu) rgb_nz++;  // ignores an opaque-black alpha channel
+      bool seen = false;
+      for (uint32_t k = 0; k < num_distinct; k++) seen |= distinct[k] == v;
+      if (!seen && num_distinct < 4) distinct[num_distinct++] = v;
+    }
+    std::fprintf(stderr,
+                 "[rtstat] f%d RT %#lx %ux%u draws=%u nz=%lu rgbnz=%lu/%lu "
+                 "vals=%08x %08x %08x %08x\n",
+                 g.frameNum, (unsigned long)kv.first, rt.w, rt.h, rt.draws,
+                 (unsigned long)nz, (unsigned long)rgb_nz,
+                 (unsigned long)samples, distinct[0], distinct[1], distinct[2],
+                 distinct[3]);
   }
 }
 
@@ -3291,6 +3366,10 @@ void endFrame(uint64_t scanoutBase) {
   // idempotent and runs on this (the presenting) thread.
   if (!noPresent && gfx::ensure("prosperity", rt.w, rt.h) && gfx::pumpEvents())
     gfx::present(pixels, rt.w, rt.h, rt.w * 4, gfx::PixelFormat::bgra8);
+
+  // Runs last: reuses (and clobbers) the readback buffer the present path
+  // above already consumed.
+  reportRtContents();
 }
 
 }  // namespace gpu::vk
