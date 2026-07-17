@@ -44,6 +44,10 @@ extern "C" int vprx_anchor_libSceSystemService;
 // HLE libfmod: the game's bundled FMOD .prx. Its real init needs the un-emulated
 // AJM ATRAC9 decoder; stub the API to "succeed" with null audio so Doom64 boots.
 extern "C" int vprx_anchor_libfmod;
+// HLE libSceNetCtl: report a connected wired network (state IPOBTAINED). The
+// LLE .sprx polls a non-existent system net daemon, so titles that gate boot on
+// connectivity (PT) would stall 10s and then continue down a broken init path.
+extern "C" int vprx_anchor_libSceNetCtl;
 static volatile int *const vprx_anchors[] = {&vprx_anchor_libSceVideoOut,
                                              &vprx_anchor_libfmod,
                                              &vprx_anchor_libSceGnmDriver,
@@ -55,7 +59,8 @@ static volatile int *const vprx_anchors[] = {&vprx_anchor_libSceVideoOut,
                                              &vprx_anchor_libSceAudioIn,
                                              &vprx_anchor_libSceNpTrophy,
                                              &vprx_anchor_libSceAvPlayer,
-                                             &vprx_anchor_libSceSystemService};
+                                             &vprx_anchor_libSceSystemService,
+                                             &vprx_anchor_libSceNetCtl};
 
 void vprx_init() {
   // Touch the anchors so the references aren't optimized away.
