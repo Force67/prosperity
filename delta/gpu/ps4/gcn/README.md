@@ -41,6 +41,12 @@ corrupting memory.
   SSBO plumbing (guest-range aliasing like the compute path) — currently
   ignored with a warning. Vertex fetch through the Gnm fetch shader is fully
   supported (that is the common path).
+- A PS with more than 8 MIMG instructions declines the recompile (the
+  renderer's set-0 layout has 8 combined-sampler bindings; exceeding it
+  produced out-of-layout bindings that crash driver pipeline creation — seen
+  with PT's FOX shaders, which run up to 44 MIMG instructions). Follow-up:
+  deduplicate bindings by (srsrc, type) in EmitMimg *and* TrackTextures
+  together (their per-MIMG order is a shared contract) so those shaders fit.
 - `SPI_PS_INPUT_ENA` ABI VGPR seeding (frag-coord / face / barycentrics in
   v0..) is not modelled; V_INTERP results are read directly from Vulkan
   inputs instead (correct for the interpolate-then-use pattern).
