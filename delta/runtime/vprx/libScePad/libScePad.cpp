@@ -7,9 +7,11 @@
 
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "gfx/gfx.h"
@@ -77,6 +79,48 @@ struct PadControllerInformation {
 
 uint64_t g_readSeq = 0;
 
+// DELTA_MEMWATCH=addr[,addr...]: spawn a background thread that prints the qword
+// at each guest VA every ~250ms with a wall-clock delta, so the lifecycle of a
+// guest global (e.g. a lazily-constructed singleton pointer transitioning
+// null->non-null) can be correlated with boot/crash timing. Generic diagnostic;
+// guest memory is identity-mapped so a fixed VA reads as a host pointer. Started
+// once from the first pad read (guaranteed to run for any title that polls input).
+void startMemWatch() {
+  const char *e = std::getenv("DELTA_MEMWATCH");
+  if (!e) return;
+  std::vector<uint64_t> addrs;
+  for (const char *p = e; *p;) {
+    while (*p == ',' || *p == ' ') p++;
+    char *end = nullptr;
+    uint64_t v = std::strtoull(p, &end, 0);
+    if (end == p) break;
+    if (v >= 0x1000) addrs.push_back(v);
+    p = end;
+  }
+  if (addrs.empty()) return;
+  std::thread([addrs] {
+    const auto t0 = std::chrono::steady_clock::now();
+    std::vector<uint64_t> last(addrs.size(), 0xdeadbeefdeadbeefull);
+    for (;;) {
+      double t = std::chrono::duration<double>(
+                     std::chrono::steady_clock::now() - t0).count();
+      bool any = false;
+      for (size_t i = 0; i < addrs.size(); i++) {
+        uint64_t cur = *reinterpret_cast<volatile uint64_t *>(addrs[i]);
+        if (cur != last[i]) {
+          std::fprintf(stderr, "[memwatch] t=%.2f  *%#llx: %016llx -> %016llx\n",
+                       t, (unsigned long long)addrs[i],
+                       (unsigned long long)last[i], (unsigned long long)cur);
+          last[i] = cur;
+          any = true;
+        }
+      }
+      (void)any;
+      std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    }
+  }).detach();
+}
+
 // Auto-skip pulse: advance the intro/title/menus into actual gameplay for a
 // headless verification run. Gated by g_autoskip at the call site, where it
 // takes precedence over the keyboard. NEVER pulse Circle (back/cancel) together
@@ -108,6 +152,19 @@ uint32_t autoSkipButtons() {
     return e ? std::strtoull(e, nullptr, 10) : 0ull;
   }();
   if (stopAt && g_readSeq > stopAt)
+    return 0;
+  // DELTA_PAD_AUTOSKIP_START=N: hold neutral for the first N pad reads before any
+  // pulsing. Some engines (FOX/PT) lazily construct subsystem singletons on a
+  // worker/job thread during boot; feeding a progression input (which triggers a
+  // fade/scene transition) before that construction completes dereferences a null
+  // component pointer. A warm-up delay lets init finish so the first triggered
+  // transition finds a live object. Generic; the value is title/hardware-timing
+  // dependent (PT: the renderer needs a few thousand reads to spin up).
+  static const uint64_t startAt = [] {
+    const char *e = std::getenv("DELTA_PAD_AUTOSKIP_START");
+    return e ? std::strtoull(e, nullptr, 10) : 0ull;
+  }();
+  if (g_readSeq < startAt)
     return 0;
   // DELTA_PAD_AUTOSKIP_NOOPT: don't pulse Options, only Cross. The Options pulse is
   // for Isaac's "PRESS OPTIONS" title; in Undertale (and other Z-to-advance titles)
@@ -241,6 +298,8 @@ std::vector<ScriptStep> parseScript(const char *s) {
 
 void fillPadState(PadData *d) {
   if (!d) return;
+  static const bool memwatchStarted = [] { startMemWatch(); return true; }();
+  (void)memwatchStarted;
   std::memset(d, 0, sizeof(*d));
   uint32_t buttons = 0;
   uint8_t lx = 128, ly = 128, rx = 128, ry = 128;
