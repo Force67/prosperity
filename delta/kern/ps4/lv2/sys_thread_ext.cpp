@@ -109,7 +109,18 @@ int PS4ABI sys_yield() {
   return 0;
 }
 int PS4ABI sys_sched_yield() {
-  cpuRelax();
+  // Default: a `pause` hint (see cpuRelax above) — correct + fast when guest
+  // workers each own a host core. But FOX/FIOS2 asset streaming spins one thread
+  // on sched_yield (~40% of all syscalls) while a sibling must run to advance the
+  // stream; with more runnable guest threads than host cores a pure pause never
+  // lets that sibling run, throttling the load. DELTA_SCHED_YIELD_REAL=1 issues a
+  // real host yield so the runnable sibling gets scheduled. Env-gated (default off)
+  // so it can't regress the many-core pause path (Doom64's job manager).
+  static const bool real = std::getenv("DELTA_SCHED_YIELD_REAL") != nullptr;
+  if (real)
+    std::this_thread::yield();
+  else
+    cpuRelax();
   return 0;
 }
 
