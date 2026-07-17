@@ -280,8 +280,15 @@ int PS4ABI sys_rmdir(const char *path) {
   return 0;
 }
 int PS4ABI sys_mkdir(const char *path, uint32_t mode) {
-  std::printf("[vfs] mkdir('%s') ignored (read-only host)\n",
-              path ? path : "(null)");
+  (void)mode;
+  // Real directory creation under a writable mount (savedata); otherwise a
+  // no-op success as before (the read-only host content the game expects to
+  // exist already does).
+  if (path && vfs::makeDir(path)) {
+    if (std::getenv("DELTA_VFS_TRACE"))
+      std::fprintf(stderr, "[vfs] mkdir('%s') -> host\n", path);
+    return 0;
+  }
   return 0;
 }
 int PS4ABI sys_rename(const char *from, const char *to) {

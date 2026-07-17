@@ -23,7 +23,7 @@ namespace utl {
 // reach down to the FILE* themselves.
 using native_handle = void *;
 
-enum class fileMode { read, write, append, create, trunc };
+enum class fileMode { read, write, append, create, trunc, readWrite };
 
 enum class seekMode : uint32_t {
   seek_set,

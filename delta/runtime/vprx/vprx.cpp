@@ -48,7 +48,12 @@ extern "C" int vprx_anchor_libfmod;
 // LLE .sprx polls a non-existent system net daemon, so titles that gate boot on
 // connectivity (PT) would stall 10s and then continue down a broken init path.
 extern "C" int vprx_anchor_libSceNetCtl;
+// HLE libSceSaveData: PS4 saves are client/server (the LLE .sprx forwards over
+// IPMI to the SceSaveData system-service process we don't host, so it blocks
+// forever). Replace the library and back saves with a writable host directory.
+extern "C" int vprx_anchor_libSceSaveData;
 static volatile int *const vprx_anchors[] = {&vprx_anchor_libSceVideoOut,
+                                             &vprx_anchor_libSceSaveData,
                                              &vprx_anchor_libfmod,
                                              &vprx_anchor_libSceGnmDriver,
                                              &vprx_anchor_libSceMsgDialog,

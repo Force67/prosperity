@@ -18,6 +18,12 @@ enum fcFlags {
   O_RDWR,
   O_ACCMODE,
 
+  // FreeBSD/Orbis open() flag bits.
+  O_APPEND = 0x00000008,
+  O_CREAT = 0x00000200,
+  O_TRUNC = 0x00000400,
+  O_EXCL = 0x00000800,
+
   O_EXEC = 0x00040000,
   O_DIRECTORY = 0x00020000,
 };

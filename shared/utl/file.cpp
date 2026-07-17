@@ -21,19 +21,28 @@ class PhysFile final : public fileBase {
 
 public:
   PhysFile(const base::String &name, fileMode mode) : fptr(nullptr) {
-    // convert access mode
+    // convert access mode. The writable modes open "+" (read+write) so a
+    // caller can read a file back after writing it (savedata round-trips a save
+    // within one mount); `write` stays create-or-truncate but is now also
+    // readable (a superset -- the write-once exporters that use it are
+    // unaffected). `readWrite` opens an existing file without truncating.
     const char *modeStr = "a+";
     if (mode == fileMode::read)
       modeStr = "rb";
-    else if (mode == fileMode::write)
-      modeStr = "wb";
+    else if (mode == fileMode::write || mode == fileMode::create ||
+             mode == fileMode::trunc)
+      modeStr = "wb+";
+    else if (mode == fileMode::readWrite)
+      modeStr = "rb+";
+    else if (mode == fileMode::append)
+      modeStr = "ab+";
 
     fopen_s(&fptr, name.c_str(), modeStr);
 
-    // we can cache the size now
-    if (fptr && mode == fileMode::read) {
-
-      // determine initial size
+    // Cache the initial size for any mode that opens an existing file (read or
+    // read-write); the write/create/trunc modes start empty.
+    if (fptr && (mode == fileMode::read || mode == fileMode::readWrite ||
+                 mode == fileMode::append)) {
       std::fseek(fptr, 0, SEEK_END);
       sizeTracker = static_cast<size_t>(std::ftell(fptr));
     } else {

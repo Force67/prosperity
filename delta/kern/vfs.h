@@ -26,9 +26,26 @@ struct DirEntry {
 // wins at resolve time.
 void mount(const char *guestPrefix, const char *hostDir);
 
+// Like mount(), but the mount is writable: guest opens with a write/create flag
+// create/modify files on the host underneath it (used for savedata). The host
+// directory is created if absent. Read-only titles never open host mounts for
+// write, so this cannot affect them.
+void mountWritable(const char *guestPrefix, const char *hostDir);
+
 // Resolve a guest path to a host path, or empty if no host mount matches.
 // (Virtual mounts have no host path; use openRead/stat for those.)
 base::String resolve(const char *guestPath);
+
+// Resolve a guest path to its host path IFF it lies under a WRITABLE host mount
+// (else empty). sys_open/sys_mkdir use this to service create/write requests.
+base::String resolveWritable(const char *guestPath);
+
+// Create a directory (and parents) on the host for a guest path under a
+// writable mount. Returns false if the path is not under a writable mount.
+bool makeDir(const char *guestPath);
+
+// Remove a file on the host for a guest path under a writable mount.
+bool removeFile(const char *guestPath);
 
 // A lazily-read file backing a virtual mount, e.g. a file inside a .pkg PFS.
 struct VirtualFile {

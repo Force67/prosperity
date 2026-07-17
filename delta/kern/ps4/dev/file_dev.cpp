@@ -37,6 +37,38 @@ bool fileDevice::open(const base::String &hostPath, uint32_t /*flags*/) {
   return true;
 }
 
+bool fileDevice::openWritable(const base::String &hostPath, bool create,
+                              bool truncate) {
+  // Probe existence (open-read then close) to pick the fopen mode: an existing
+  // file opens rb+ (keep contents), else wb+ when creating.
+  utl::File probe(hostPath, utl::fileMode::read);
+  const bool exists = probe.Exists() && probe.IsOpen();
+  probe.Close();
+
+  utl::fileMode mode;
+  if (truncate || (!exists && create))
+    mode = utl::fileMode::create;  // wb+ : create/truncate, read+write
+  else if (exists)
+    mode = utl::fileMode::readWrite;  // rb+ : keep contents, read+write
+  else
+    return false;  // open-existing for write, but absent and no create
+
+  utl::File f(hostPath, mode);
+  if (!f.Exists() || !f.IsOpen())
+    return false;
+  file_.Reset(f.GetBase());
+  open_ = true;
+  writable_ = true;
+  return true;
+}
+
+int64_t fileDevice::write(const void *buf, size_t n) {
+  if (!open_ || !writable_)
+    return -SysError::eBADF;
+  // PhysFile::Write returns 1 on a complete fwrite; report bytes written.
+  return file_.Write(buf, n) ? static_cast<int64_t>(n) : 0;
+}
+
 bool fileDevice::adopt(utl::File &&file) {
   if (!file.Exists())
     return false;

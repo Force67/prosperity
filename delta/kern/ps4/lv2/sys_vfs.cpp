@@ -122,6 +122,28 @@ int PS4ABI sys_open(const char *path, uint32_t flags, uint32_t mode) {
     return -SysError::eNOENT;
   }
 
+  // Writable open (savedata): a create/write flag on a path under a writable
+  // host mount goes to a writable fileDevice. Read-only titles never take this
+  // (they open /app0, a read-only virtual mount), so it can't affect them.
+  const uint32_t accmode = flags & O_ACCMODE;
+  const bool writeIntent =
+      accmode == O_WRONLY || accmode == O_RDWR || (flags & O_CREAT);
+  if (writeIntent) {
+    base::String host = vfs::resolveWritable(path);
+    if (!host.empty()) {
+      auto *file = new fileDevice(proc::getActive());
+      if (file->openWritable(host, (flags & O_CREAT) != 0,
+                             (flags & O_TRUNC) != 0)) {
+        if (vtrace)
+          std::fprintf(stderr, "[open]   -> writable fd=%u %s\n",
+                       file->handle(), host.c_str());
+        return file->handle();
+      }
+      file->releaseHandle();
+      return -SysError::eNOENT;
+    }
+  }
+
   // Regular file: resolve through the VFS (host + virtual mounts).
   utl::File vf = vfs::openRead(path);
   if (!vf.Exists()) {

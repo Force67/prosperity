@@ -11,6 +11,8 @@
 #include <cstring>
 #include <dirent.h>
 #include <map>
+#include <sys/stat.h>
+#include <sys/types.h>
 
 #include <base/containers/vector.h>
 
@@ -21,12 +23,31 @@ struct mountPoint {
   base::String guest;
   base::String host;                        // host mount
   std::shared_ptr<VirtualProvider> provider; // virtual mount (else null)
+  bool writable = false;                     // host mount opened for writing
 };
 
 static base::Vector<mountPoint> g_mounts;
 
 void mount(const char *guest, const char *host) {
-  g_mounts.push_back({base::String(guest), base::String(host), nullptr});
+  g_mounts.push_back({base::String(guest), base::String(host), nullptr, false});
+}
+
+// Create hostDir and each parent (mkdir -p).
+static void makeHostDirs(const char *hostDir) {
+  std::string p(hostDir);
+  for (size_t i = 1; i < p.size(); i++) {
+    if (p[i] == '/') {
+      p[i] = 0;
+      ::mkdir(p.c_str(), 0755);
+      p[i] = '/';
+    }
+  }
+  ::mkdir(p.c_str(), 0755);
+}
+
+void mountWritable(const char *guest, const char *host) {
+  makeHostDirs(host);
+  g_mounts.push_back({base::String(guest), base::String(host), nullptr, true});
 }
 
 void mountVirtual(const char *guest, std::shared_ptr<VirtualProvider> provider) {
@@ -144,6 +165,31 @@ utl::File openRead(const char *path) {
   if (!f.Exists() || !f.IsOpen())
     return utl::File();
   return f;
+}
+
+base::String resolveWritable(const char *path) {
+  if (!path)
+    return {};
+  size_t len = 0;
+  const mountPoint *m = findMount(path, len);
+  if (!m || m->provider || !m->writable)
+    return {};
+  return joinHost(m->host, path + len);
+}
+
+bool makeDir(const char *path) {
+  base::String host = resolveWritable(path);
+  if (host.empty())
+    return false;
+  makeHostDirs(host.c_str());
+  return true;
+}
+
+bool removeFile(const char *path) {
+  base::String host = resolveWritable(path);
+  if (host.empty())
+    return false;
+  return std::remove(host.c_str()) == 0;
 }
 
 bool stat(const char *path, int64_t &size, bool &isDir) {

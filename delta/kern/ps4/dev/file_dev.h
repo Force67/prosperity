@@ -51,6 +51,12 @@ public:
   // Open the resolved host path. Returns false if it doesn't exist.
   bool open(const base::String &hostPath, uint32_t flags);
 
+  // Open a resolved host path for writing (savedata). `create` creates the file
+  // if absent; `truncate` discards existing contents. The file is opened
+  // read+write so the guest can read back what it wrote. Returns false on
+  // failure (e.g. open-existing with no create and the file is absent).
+  bool openWritable(const base::String &hostPath, bool create, bool truncate);
+
   // Back this device with an already-opened file (e.g. a virtual VFS stream).
   bool adopt(utl::File &&file);
 
@@ -70,6 +76,7 @@ public:
     return reinterpret_cast<uint8_t *>(-1);
   }
   int64_t read(void *buf, size_t n) override;
+  int64_t write(const void *buf, size_t n) override;
   int64_t lseek(int64_t off, int whence) override;
   int64_t readAt(void *buf, size_t n, int64_t off) override;
   int fstat(void *stat) override;
@@ -77,6 +84,7 @@ public:
 private:
   utl::File file_;
   bool open_ = false;
+  bool writable_ = false;  // opened for writing (savedata)
   bool seq_ = false;       // manifest sequential-read mode
   uint64_t seqPos_ = 0;    // internal read cursor for seq_ mode
 };
