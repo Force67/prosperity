@@ -15,6 +15,7 @@
 #include <cstring>
 #include <ucontext.h>
 #include <unistd.h>
+#include <sys/mman.h>
 #include <time.h>
 #include <pthread.h>
 
@@ -703,7 +704,7 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
     // into loaded-module space (>= 0x2000_0000_0000). An indirect call/jmp through
     // a garbage/null vtable slot is our most common late-boot fault; seeing the
     // object bytes + where the slot points identifies the uninitialised object.
-    if (std::getenv("DELTA_CRASH_PEEK")) {
+    if (const char *pk = std::getenv("DELTA_CRASH_PEEK")) {
       const uint64_t regs[] = {g[RAX], g[RBX], g[RDI], g[RSI], g[RCX], g[RDX]};
       const char *rn[] = {"rax", "rbx", "rdi", "rsi", "rcx", "rdx"};
       for (int r = 0; r < 6; r++) {
@@ -718,6 +719,33 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
         for (int i = 0; i < n; i++) {
           if ((i % 4) == 0)
             std::fprintf(stderr, "\n  peek %s+%03x:", rn[r], i * 8);
+          std::fprintf(stderr, " %016llx", (unsigned long long)q[i]);
+        }
+        std::fprintf(stderr, "\n");
+      }
+      // Explicit address list: DELTA_CRASH_PEEK=0x1c92d00,0x1c2fc00 also dumps a
+      // window of guest memory at each given VA (comma/space separated). Unlike the
+      // register scan this is NOT restricted to the loaded-module window, so it can
+      // read low ET_SCE_EXEC globals/BSS (e.g. a null singleton pointer). Guarded by
+      // mincore so an unmapped address can't fault the crash handler.
+      for (const char *p = pk; *p;) {
+        while (*p == ',' || *p == ' ') p++;
+        char *end = nullptr;
+        uint64_t va = std::strtoull(p, &end, 0);
+        if (end == p) { if (*p) p++; continue; }
+        p = end;
+        if (va < 0x10000) continue;  // "1"/tiny -> register scan only
+        long pg = sysconf(_SC_PAGESIZE);
+        unsigned char vec[2] = {0, 0};
+        void *pa = reinterpret_cast<void *>(va & ~((uint64_t)pg - 1));
+        if (mincore(pa, 1, vec) != 0) {
+          std::fprintf(stderr, "  peek %#llx: <unmapped>\n", (unsigned long long)va);
+          continue;
+        }
+        auto *q = reinterpret_cast<const uint64_t *>(va);
+        for (int i = 0; i < 16; i++) {
+          if ((i % 4) == 0)
+            std::fprintf(stderr, "\n  peek %#llx+%03x:", (unsigned long long)va, i * 8);
           std::fprintf(stderr, " %016llx", (unsigned long long)q[i]);
         }
         std::fprintf(stderr, "\n");
