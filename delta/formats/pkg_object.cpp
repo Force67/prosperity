@@ -569,6 +569,46 @@ struct PkgImpl {
 
     valid = true;
     LOG_INFO("pkg: mounted image, {} files", files.size());
+
+    // DELTA_QAR_SELFTEST: dump the bytes our read chain returns for a named file
+    // at a spread of offsets, so it can be diffed against an independent
+    // ground-truth extraction (validates large-file decrypt/decompress). Reads
+    // the file whose path contains the env value (default "texture.qar").
+    if (const char *st = std::getenv("DELTA_QAR_SELFTEST")) {
+      const char *want = *st ? st : "texture.qar";
+      const PkgFilesystem::Node *node = nullptr;
+      std::string nodePath;
+      for (const auto &kv : files)
+        if (kv.first.find(want) != std::string::npos) {
+          node = &kv.second;
+          nodePath = kv.first;
+          break;
+        }
+      if (node) {
+        std::fprintf(stderr, "[qarself] %s size=%llu startBlock=%u innerBs=%u\n",
+                     nodePath.c_str(), (unsigned long long)node->size,
+                     node->startBlock, innerBs);
+        uint64_t offs[] = {0, 1ull << 20, 100ull << 20, 400ull << 20,
+                           800ull << 20,
+                           node->size > 256 ? node->size - 256 : 0};
+        for (uint64_t o : offs) {
+          if (o >= node->size)
+            continue;
+          uint8_t buf[64] = {0};
+          int64_t r = readNode(*node, buf, static_cast<int64_t>(o), 64);
+          std::fprintf(stderr, "[qarself] off=%llu r=%lld:",
+                       (unsigned long long)o, (long long)r);
+          for (int i = 0; i < 16 && i < r; ++i)
+            std::fprintf(stderr, " %02x", buf[i]);
+          std::fprintf(stderr, " |");
+          for (int i = 16; i < 32 && i < r; ++i)
+            std::fprintf(stderr, " %02x", buf[i]);
+          std::fprintf(stderr, "\n");
+        }
+      } else {
+        std::fprintf(stderr, "[qarself] no file matching '%s'\n", want);
+      }
+    }
   }
 
   int64_t readNode(const PkgFilesystem::Node &n, void *buf, int64_t off,

@@ -28,6 +28,7 @@
 #include "kern/crash.h"
 #include "kern/vfs.h"
 #include "sys_mem.h"
+#include "sys_vfs_ext.h"
 #include "sys_vfs.h"
 
 #include <utl/object_ref.h>
@@ -166,6 +167,9 @@ int PS4ABI sys_open(const char *path, uint32_t flags, uint32_t mode) {
   // force their read offset to 0.
   if (std::strstr(path, ".manifest.bin"))
     markManifestFd(file->handle(), true);
+  // Flag .qar archive fds for the DELTA_QARBUF read-destination trace.
+  if (std::strstr(path, ".qar"))
+    markQarFd(file->handle(), true);
   if (vtrace)
     std::fprintf(stderr, "[open]   -> fd=%u size=%lld %s\n", file->handle(),
                  (long long)fsize, path);

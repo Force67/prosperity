@@ -133,6 +133,12 @@ int PS4ABI sys_getcwd(char *buf, size_t size) {
 // seek+read, so snapshot the current offset, do the positioned I/O, then
 // restore it. Without the restore a following read() would resume from the
 // wrong place.
+static bool g_qarFd[8192] = {false};
+void markQarFd(uint32_t fd, bool v) {
+  if (fd < 8192)
+    g_qarFd[fd] = v;
+}
+
 int64_t PS4ABI sys_pread(uint32_t fd, void *buf, size_t nbytes, int64_t offset) {
   auto *d = fdToDevice(fd);
   if (!d) {
@@ -150,6 +156,15 @@ int64_t PS4ABI sys_pread(uint32_t fd, void *buf, size_t nbytes, int64_t offset) 
     if (buf && r >= 4) f4 = *reinterpret_cast<const uint32_t *>(buf);
     std::fprintf(stderr, "[pread] t=%ld fd=%u off=%lld nbytes=%#zx -> %lld buf=%p first4=%08x\n",
                  (long)gettid(), fd, (long long)offset, (size_t)nbytes, (long long)r, buf, f4);
+  }
+  // DELTA_QARBUF: where does streamed .qar data land? Reports the destination
+  // buffer for reads on a *.qar fd, so we can tell whether textures stream into
+  // a GPU-mapped region (0x81xx, directly bindable) or a low staging buffer that
+  // still needs a copy/commit step the engine never performs.
+  if (fd < 8192 && g_qarFd[fd] && std::getenv("DELTA_QARBUF")) {
+    std::fprintf(stderr,
+                 "[qarbuf] fd=%u off=%lld nbytes=%#zx -> %lld buf=%p\n", fd,
+                 (long long)offset, (size_t)nbytes, (long long)r, buf);
   }
   // DELTA_IOPROGRESS: throttled per-fd streaming high-water mark. FOX/FIOS2 streams
   // large world archives via pread; this shows whether that streaming is advancing

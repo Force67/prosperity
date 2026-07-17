@@ -61,4 +61,9 @@ int64_t PS4ABI sys_getdirentries(uint32_t fd, void *buf, size_t nbytes,
                                  int64_t *basep);
 
 int PS4ABI sys_closefrom(uint32_t lowfd);
+
+// DELTA_QARBUF diagnostic: flag fds opened on a *.qar archive so sys_pread can
+// report where the streamed texture data lands (a GPU-mapped 0x81xx region vs a
+// low staging buffer). Set from sys_vfs.cpp at open time.
+void markQarFd(uint32_t fd, bool v);
 } // namespace krnl
