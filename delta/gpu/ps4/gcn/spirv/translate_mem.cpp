@@ -296,8 +296,8 @@ void EmitMimg(Translator& t, const Inst& inst, StageContext& sc) {
 }
 
 // ---- compute: resource plan -------------------------------------------------
-bool PlanCsResources(const Program& program, uint32_t lds_dwords,
-                     RecompiledCs& r,
+bool PlanCsResources(const Program& program, const uint8_t* reachable,
+                     uint32_t lds_dwords, RecompiledCs& r,
                      std::unordered_map<uint32_t, uint32_t>& bind) {
   const auto resource = [&](uint32_t base_sgpr, uint8_t kind, bool written,
                             uint32_t min_bytes) {
@@ -316,7 +316,10 @@ bool PlanCsResources(const Program& program, uint32_t lds_dwords,
     return true;
   };
 
+  uint32_t idx = 0;
   for (const Inst& inst : program) {
+    const uint32_t inst_idx = idx++;
+    if (reachable && !reachable[inst_idx]) continue;  // dead block/padding
     const uint32_t w = inst.raw[0], w1 = inst.raw[1];
     switch (inst.enc) {
       case Enc::kSmrd: {

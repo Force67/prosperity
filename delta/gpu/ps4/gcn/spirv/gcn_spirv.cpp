@@ -336,18 +336,15 @@ Id BranchTaken(Translator& t, int kind) {
   }
 }
 
-// Lower arbitrary control flow (reducible or not) to a while/switch state
-// machine over basic blocks.
-void EmitCfg(Translator& t, const Program& program, StageContext& sc) {
-  const uint32_t max_pc =
-      program.empty() ? 0 : program.back().pc + program.back().size;
-  // Basic-block leaders: entry, every branch target, the slot after a branch.
+// Block leaders under the same rule EmitCfg uses: entry, every branch target,
+// the slot after a branch.
+std::vector<uint32_t> BlockStarts(const Program& program, uint32_t max_pc) {
   std::vector<uint32_t> leaders{0};
   for (const Inst& inst : program) {
     const int k = BranchKind(inst);
     if (k == 0) continue;
-    leaders.push_back(inst.pc + inst.size);  // fall-through
-    if (k >= 1 && k <= 7) {                  // has a PC-relative target
+    leaders.push_back(inst.pc + inst.size);
+    if (k >= 1 && k <= 7) {
       const int32_t simm = static_cast<int16_t>(inst.raw[0] & 0xFFFF);
       leaders.push_back(static_cast<uint32_t>(
           static_cast<int32_t>(inst.pc) + static_cast<int32_t>(inst.size) +
@@ -356,10 +353,74 @@ void EmitCfg(Translator& t, const Program& program, StageContext& sc) {
   }
   std::sort(leaders.begin(), leaders.end());
   leaders.erase(std::unique(leaders.begin(), leaders.end()), leaders.end());
-  // Drop out-of-range leaders (targets past the decoded program -> EXIT).
   std::vector<uint32_t> starts;
   for (uint32_t l : leaders)
     if (l < max_pc) starts.push_back(l);
+  return starts;
+}
+
+}  // namespace
+
+std::vector<uint8_t> ComputeReachability(const Program& program) {
+  std::vector<uint8_t> reachable(program.size(), 0);
+  if (program.empty()) return reachable;
+  const uint32_t max_pc = program.back().pc + program.back().size;
+  const std::vector<uint32_t> starts = BlockStarts(program, max_pc);
+  const uint32_t num_blocks = static_cast<uint32_t>(starts.size());
+  const auto block_of = [&](uint32_t pc) {
+    uint32_t b = 0;
+    for (uint32_t i = 0; i < num_blocks; i++)
+      if (starts[i] <= pc) b = i;
+      else break;
+    return b;
+  };
+
+  // Per-block successors: the block's branch (always its last instruction,
+  // since a branch forces a leader right after it) or plain fallthrough.
+  std::vector<uint8_t> block_reachable(num_blocks, 0);
+  std::vector<uint32_t> worklist{0};
+  while (!worklist.empty()) {
+    const uint32_t b = worklist.back();
+    worklist.pop_back();
+    if (b >= num_blocks || block_reachable[b]) continue;
+    block_reachable[b] = 1;
+    const uint32_t blk_start = starts[b];
+    const uint32_t blk_end = (b + 1 < num_blocks) ? starts[b + 1] : max_pc;
+    bool terminated = false;
+    for (const Inst& inst : program) {
+      if (inst.pc < blk_start || inst.pc >= blk_end) continue;
+      const int k = BranchKind(inst);
+      if (k == 0) continue;
+      terminated = true;
+      if (k == 8) break;  // endpgm: no successors
+      const int32_t simm = static_cast<int16_t>(inst.raw[0] & 0xFFFF);
+      const uint32_t target = static_cast<uint32_t>(
+          static_cast<int32_t>(inst.pc) + static_cast<int32_t>(inst.size) +
+          simm);
+      if (target < max_pc) worklist.push_back(block_of(target));
+      if (k != 1) worklist.push_back(b + 1);  // conditional: fallthrough too
+      break;
+    }
+    if (!terminated) worklist.push_back(b + 1);  // plain fallthrough
+  }
+
+  uint32_t idx = 0;
+  for (const Inst& inst : program)
+    reachable[idx++] = block_reachable[block_of(inst.pc)];
+  return reachable;
+}
+
+namespace {
+
+// Lower arbitrary control flow (reducible or not) to a while/switch state
+// machine over basic blocks. `reachable` (optional, program-index aligned)
+// suppresses instructions in dead blocks -- decoded footer padding must not
+// influence translation.
+void EmitCfg(Translator& t, const Program& program, StageContext& sc,
+             const uint8_t* reachable = nullptr) {
+  const uint32_t max_pc =
+      program.empty() ? 0 : program.back().pc + program.back().size;
+  const std::vector<uint32_t> starts = BlockStarts(program, max_pc);
   const uint32_t num_blocks = static_cast<uint32_t>(starts.size());
   const uint32_t kExit = num_blocks;
   const auto block_of = [&](uint32_t pc) -> uint32_t {
@@ -395,8 +456,11 @@ void EmitCfg(Translator& t, const Program& program, StageContext& sc) {
     const uint32_t blk_start = starts[bi];
     const uint32_t blk_end = (bi + 1 < num_blocks) ? starts[bi + 1] : max_pc;
     bool terminated = false;
+    uint32_t idx = 0;
     for (const Inst& inst : program) {
+      const uint32_t inst_idx = idx++;
       if (inst.pc < blk_start || inst.pc >= blk_end) continue;
+      if (reachable && !reachable[inst_idx]) continue;  // dead block/padding
       const int k = BranchKind(inst);
       if (k == 0) {
         EmitInst(t, inst, sc);
@@ -635,7 +699,12 @@ bool TranslateCs(const Program& program, uint32_t num_thread_x,
   sc.is_cs = true;
   // RSRC2.LDS_SIZE is in 128-dword granules.
   sc.lds_dwords = lds_dwords * 128;
-  if (!PlanCsResources(program, sc.lds_dwords, r, sc.cs_bind) ||
+  // Footer-bounded decode keeps blocks reached only after an early-out
+  // s_endpgm, but also picks up dead padding between the real code and the
+  // OrbShdr footer -- only reachable instructions may influence translation.
+  const std::vector<uint8_t> reachable = ComputeReachability(program);
+  if (!PlanCsResources(program, reachable.data(), sc.lds_dwords, r,
+                       sc.cs_bind) ||
       r.resources.empty())
     return false;
 
@@ -704,7 +773,7 @@ bool TranslateCs(const Program& program, uint32_t num_thread_x,
   for (uint32_t c = 0; c < 3; c++)  // local invocation id (tidig) -> v0..v2
     t.SetVg(c, t.m.Load(t.t_u, t.m.AccessChain(p_in_u, local_id, {t.U32(c)})));
   t.SeedExec();
-  EmitCfg(t, const_cast<Program&>(program), sc);
+  EmitCfg(t, program, sc, reachable.data());
   if (sc.cs_unsupported) return false;
   t.m.ReturnVoid();
   t.m.EndFunction();

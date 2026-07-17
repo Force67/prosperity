@@ -329,14 +329,19 @@ bool IsVop3b(uint32_t op);
 
 // ---- memory emitters (translate_mem.cpp) -----------------------------------
 uint32_t SmrdLoadCount(uint32_t op);
+// Per-instruction reachability from the entry block (program-index aligned).
+// Instructions after an early-out s_endpgm that no branch targets are dead --
+// typically OrbShdr footer padding decoded past the real code -- and must not
+// influence translation (a garbage "memory op" would decline a compute shader).
+std::vector<uint8_t> ComputeReachability(const Program& program);
 bool PlanCbufs(const Program& program, uint32_t first_binding,
                std::vector<ShaderCbuf>& cbufs,
                std::unordered_map<uint32_t, uint32_t>& bindings);
 void EmitCbufSmrd(Translator& t, const Inst& inst,
                   const std::unordered_map<uint32_t, uint32_t>& bindings);
 void EmitMimg(Translator& t, const Inst& inst, StageContext& sc);
-bool PlanCsResources(const Program& program, uint32_t lds_dwords,
-                     RecompiledCs& r,
+bool PlanCsResources(const Program& program, const uint8_t* reachable,
+                     uint32_t lds_dwords, RecompiledCs& r,
                      std::unordered_map<uint32_t, uint32_t>& bind);
 void EmitCsSmrd(Translator& t, const Inst& inst, StageContext& sc);
 void EmitCsMubuf(Translator& t, const Inst& inst, StageContext& sc);
