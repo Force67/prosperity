@@ -699,6 +699,30 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
     std::fprintf(stderr, "  r12=%016llx r13=%016llx r14=%016llx r15=%016llx\n",
                  (unsigned long long)g[R12], (unsigned long long)g[R13],
                  (unsigned long long)g[R14], (unsigned long long)g[R15]);
+    // DELTA_CRASH_PEEK: dump a window of guest memory around each GPR that points
+    // into loaded-module space (>= 0x2000_0000_0000). An indirect call/jmp through
+    // a garbage/null vtable slot is our most common late-boot fault; seeing the
+    // object bytes + where the slot points identifies the uninitialised object.
+    if (std::getenv("DELTA_CRASH_PEEK")) {
+      const uint64_t regs[] = {g[RAX], g[RBX], g[RDI], g[RSI], g[RCX], g[RDX]};
+      const char *rn[] = {"rax", "rbx", "rdi", "rsi", "rcx", "rdx"};
+      for (int r = 0; r < 6; r++) {
+        uint64_t base = regs[r];
+        if (base < 0x200000000000ull || base >= 0x210000000000ull)
+          continue;  // only the module VA window is reliably mapped to read
+        auto *q = reinterpret_cast<const uint64_t *>(base);
+        // rax/rbx are the usual object/this pointers: dump far enough to cover a
+        // deep vtable/member-fn slot (the fault operand disp can be several
+        // hundred bytes in). Other regs get just a header.
+        int n = (r < 2) ? 56 : 8;
+        for (int i = 0; i < n; i++) {
+          if ((i % 4) == 0)
+            std::fprintf(stderr, "\n  peek %s+%03x:", rn[r], i * 8);
+          std::fprintf(stderr, " %016llx", (unsigned long long)q[i]);
+        }
+        std::fprintf(stderr, "\n");
+      }
+    }
     // Print the boundary-call trace before the (best-effort, occasionally
     // out-of-bounds) stack scan so it survives even if the scan faults.
     cpu::dumpThreadTrace(stderr);

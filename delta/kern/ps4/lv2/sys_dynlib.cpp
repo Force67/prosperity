@@ -331,20 +331,37 @@ int PS4ABI sys_dynlib_load_prx(const char *path, uint64_t flags, int *pHandle,
   std::printf("[load_prx] path='%s' -> '%s' flags=%#llx\n", path, name.c_str(),
               (unsigned long long)flags);
 
-  // Modules whose module_start needs a backend we don't emulate yet. libkernel's
-  // sysmodule preload tolerates a "can't load" here (it does the same for
-  // genuinely-absent modules), so we skip running their init. libSceNet's init
-  // does network setup that, with our socket stubs, takes an error path and
-  // faults on a __thread errno access (its TLS isn't in the DTV).
-  static const char *kSkip[] = {"libSceNet", "libSceSsl2", "libSceHttp2",
-                                "libSceNpManager", "libSceNpWebApi2",
-                                // file basename differs from its internal name
-                                // (libSceAppContentUtil); already preloaded and
-                                // its IPMI init scout-patched, so skip the dup.
-                                "libSceAppContent"};
-  for (auto *s : kSkip) {
+  // Modules whose LLE module_start needs a backend we don't emulate yet fall into
+  // two groups by how the guest reacts to a failed load-start.
+  //
+  // kLoadOk: the application itself load-starts these directly and *asserts* that
+  // it succeeded (Doom64: `sceSysmoduleLoadModule(SCE_SYSMODULE_APP_CONTENT) ==
+  // SCE_OK`), aborting on any signalled failure. Report load-start SUCCESS with a
+  // real handle and merely skip running the LLE module_start (it's a preloaded
+  // dup of libSceAppContentUtil whose IPMI init is already scout-patched). These
+  // "worked" before only because the FEX syscall bridge used to drop the BSD
+  // carry flag so every errno read as success; now that the bridge signals carry
+  // correctly (needed for genuine error returns) a -ENOENT here aborts the title.
+  static const char *kLoadOk[] = {"libSceAppContent"};
+  // kSkipNotFound: libkernel *preloads* these via sceSysmodulePreloadModuleFor-
+  // Libkernel, which strictly verifies the module actually STARTED and aborts
+  // ("cannot be loaded", 0x80020064) if we report a load we then can't start
+  // (their module_start is unresolved, so we can't run it, e.g. libSceNet's init
+  // faults on a __thread errno whose TLS isn't in the DTV). Report a genuine
+  // "not found" so the preloader treats the sysmodule as absent and skips it.
+  static const char *kSkipNotFound[] = {"libSceNet", "libSceSsl2", "libSceHttp2",
+                                        "libSceNpManager", "libSceNpWebApi2"};
+  bool skipInit = false;
+  for (auto *s : kLoadOk) {
     if (std::strcmp(name.c_str(), s) == 0) {
-      std::printf("[load_prx] skipping %s (init unsupported)\n", s);
+      std::printf("[load_prx] %s: load-start ok, skipping LLE module_start\n", s);
+      skipInit = true;
+      break;
+    }
+  }
+  for (auto *s : kSkipNotFound) {
+    if (std::strcmp(name.c_str(), s) == 0) {
+      std::printf("[load_prx] %s: reporting not-found (init unsupported)\n", s);
       return -SysError::eNOENT;
     }
   }
@@ -366,7 +383,7 @@ int PS4ABI sys_dynlib_load_prx(const char *path, uint64_t flags, int *pHandle,
   // holds raw offsets and module_start calls a bad pointer. applyRelocations
   // is idempotent (guarded), so re-running it on an already-relocated module
   // is a no-op.
-  if (!mod->resolveImports() || !mod->applyRelocations()) {
+  if ((!mod->resolveImports() || !mod->applyRelocations()) && !skipInit) {
     LOG_ERROR("load_prx: relocate failed for {}", name.c_str());
     return -SysError::eNOEXEC;
   }
@@ -380,7 +397,7 @@ int PS4ABI sys_dynlib_load_prx(const char *path, uint64_t flags, int *pHandle,
   // we don't emulate and fault); scope it to the ones we've verified.
   static const char *kRunInit[] = {"libSceVideoOut"};
   for (auto *s : kRunInit) {
-    if (std::strcmp(name.c_str(), s) == 0 && !mod->getInfo().initRan) {
+    if (!skipInit && std::strcmp(name.c_str(), s) == 0 && !mod->getInfo().initRan) {
       mod->getInfo().initRan = true;
       auto baseAddr = reinterpret_cast<uintptr_t>(mod->getInfo().base);
       // PS4 PRX carry module_start separately from DT_INIT (which is often 0 with
