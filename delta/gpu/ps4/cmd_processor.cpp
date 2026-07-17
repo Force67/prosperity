@@ -429,10 +429,20 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
         // the translator and shared across both stages in descriptor set 1.
         bool resolvedVsCbuf = false;
         auto resolveCbufs = [&](const std::vector<gcn::ShaderCbuf> &cbufs,
-                                const uint32_t *userData, bool vertexStage) {
+                                const uint32_t *userData, const gcn::Program &prog,
+                                bool vertexStage) {
+          // Resolve every cbuffer V# the stage reads, following EUD/SRT pointer
+          // chains (FOX loads the V# through an extended-user-data pointer, so
+          // it is not sitting directly in user data at cb.ud_sgpr).
+          auto resolved = gcn::ResolveCbuffers(prog, userData);
           for (const auto &cb : cbufs) {
-            if (cb.binding >= 8 || cb.ud_sgpr + 3 >= 16) continue;
-            auto vb = gcn::DecodeVBuffer(&userData[cb.ud_sgpr]);
+            if (cb.binding >= 8) continue;
+            gcn::VBuffer vb{};
+            auto rit = resolved.find(cb.ud_sgpr);
+            if (rit != resolved.end())
+              vb = rit->second;  // EUD-resolved V# (handles indirection)
+            else if (cb.ud_sgpr + 3 < 16)
+              vb = gcn::DecodeVBuffer(&userData[cb.ud_sgpr]);  // inline V#
             uint64_t bytes = vb.stride ? (uint64_t)vb.stride * vb.num_records
                                        : vb.num_records;
             if (vb.base < 0x1000000000ull || vb.base >= 0x20000000000ull ||
@@ -450,8 +460,10 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
           }
         };
         if (good) {
-          resolveCbufs(rc.vs_cbufs, vud2, true);
-          resolveCbufs(rc.ps_cbufs, &g_regs[mmSPI_SHADER_USER_DATA_PS_0], false);
+          resolveCbufs(rc.vs_cbufs, vud2, *gcn::CachedProgram(vsA, 4096), true);
+          if (psA >= 0x1000000000ull && psA < 0x20000000000ull)
+            resolveCbufs(rc.ps_cbufs, &g_regs[mmSPI_SHADER_USER_DATA_PS_0],
+                         *gcn::CachedProgram(psA, 4096), false);
           for (const auto &cb : rc.vs_cbufs) d.nCbufs = std::max(d.nCbufs, cb.binding + 1);
           for (const auto &cb : rc.ps_cbufs) d.nCbufs = std::max(d.nCbufs, cb.binding + 1);
         }

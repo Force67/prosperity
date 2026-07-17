@@ -84,6 +84,15 @@ MimgBindingPlan PlanMimgBindings(const Program& program);
 std::vector<TImage> TrackTextures(const Program& ps_program,
                                   const uint32_t* ps_user_data);
 
+// Resolve the live 4-dword V# behind each constant buffer a graphics stage
+// reads (s_buffer_load), following the same extended-user-data / SRT pointer
+// chains as TrackTextures. Returns a map from the cbuffer's base SGPR
+// (== ShaderCbuf.ud_sgpr) to its resolved V#. FOX passes cbuffer descriptors
+// through EUD, so reading the V# straight out of user data yields base=0; this
+// walks the chain and reads the V# at the point of the s_buffer_load.
+std::unordered_map<uint32_t, VBuffer> ResolveCbuffers(
+    const Program& program, const uint32_t* user_data);
+
 // Given a decoded fetch shader and the VS user-data SGPRs (16 dwords), recover
 // the vertex-attribute buffers it fetches, in attribute order. Handles the
 // common Gnm fetch-shader pattern (s_load_dwordx4 of a V# from the
