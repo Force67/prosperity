@@ -52,8 +52,14 @@ extern "C" int vprx_anchor_libSceNetCtl;
 // IPMI to the SceSaveData system-service process we don't host, so it blocks
 // forever). Replace the library and back saves with a writable host directory.
 extern "C" int vprx_anchor_libSceSaveData;
+// HLE libSceSaveDataDialog: the LLE .sprx forwards the dialog to the SceShellUI
+// service (over IPMI) we don't host, so its status never reaches FINISHED and a
+// title that waits for the save dialog to close (PT's world-load save flow)
+// hangs. Complete the dialog immediately with a default OK.
+extern "C" int vprx_anchor_libSceSaveDataDialog;
 static volatile int *const vprx_anchors[] = {&vprx_anchor_libSceVideoOut,
                                              &vprx_anchor_libSceSaveData,
+                                             &vprx_anchor_libSceSaveDataDialog,
                                              &vprx_anchor_libfmod,
                                              &vprx_anchor_libSceGnmDriver,
                                              &vprx_anchor_libSceMsgDialog,
