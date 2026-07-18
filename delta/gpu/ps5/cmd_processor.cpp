@@ -66,21 +66,42 @@ void writeLabel(uint64_t addr, uint64_t value, bool is64) {
     *reinterpret_cast<volatile uint32_t *>(addr) = static_cast<uint32_t>(value);
 }
 
+// gfx10.3 buffer descriptors carry a SINGLE 7-bit FORMAT enum (f3[18:12]), not
+// the GCN dfmt/nfmt pair -- the old split (dfmt=fmt&0xF, nfmt=fmt>>4) produced a
+// garbage vertex format (e.g. Isaac's fmt=0x4d -> dfmt=13/nfmt=4). Translate the
+// vertex-relevant gfx10 formats to the (dfmt,nfmt) values vfmt()/
+// guestTextureFormat() already map to a VkFormat; unknown values keep the legacy
+// split so nothing regresses while an unmapped format is identified from the dump.
+void gfx10BufFmt(uint32_t g, uint32_t &dfmt, uint32_t &nfmt) {
+  switch (g) {
+    case 1:  dfmt = 1;  nfmt = 0; return;  // 8_UNORM        -> R8_UNORM
+    case 5:  dfmt = 1;  nfmt = 4; return;  // 8_UINT
+    case 14: dfmt = 3;  nfmt = 0; return;  // 8_8_UNORM      -> R8G8_UNORM
+    case 20: dfmt = 4;  nfmt = 4; return;  // 32_UINT        -> R32_UINT
+    case 22: dfmt = 4;  nfmt = 7; return;  // 32_FLOAT       -> R32_SFLOAT
+    case 42: dfmt = 10; nfmt = 0; return;  // 8_8_8_8_UNORM  -> R8G8B8A8_UNORM
+    case 46: dfmt = 10; nfmt = 4; return;  // 8_8_8_8_UINT   -> R8G8B8A8_UINT
+    case 48: dfmt = 11; nfmt = 4; return;  // 32_32_UINT     -> R32G32 (uint n/a)
+    case 50: dfmt = 11; nfmt = 7; return;  // 32_32_FLOAT    -> R32G32_SFLOAT
+    case 60: dfmt = 13; nfmt = 7; return;  // 32_32_32_FLOAT -> R32G32B32_SFLOAT
+    case 63: dfmt = 14; nfmt = 7; return;  // 32_32_32_32_FLOAT -> R32G32B32A32
+    default: dfmt = g & 0xF; nfmt = (g >> 4) & 0x7; return;  // unmapped: legacy split
+  }
+}
+
 // gfx10 128-bit V# (buffer descriptor). base48 = f0 | (f1[15:0] << 32);
-// stride f1[29:16]; num_records f2; combined 7-bit format f3[18:12]
-// (dfmt = fmt[3:0], nfmt = fmt[6:4]).
+// stride f1[29:16]; num_records f2; unified 7-bit FORMAT enum f3[18:12].
 struct VBuffer {
   uint64_t base = 0;
-  uint32_t stride = 0, numRecords = 0, dfmt = 0, nfmt = 0;
+  uint32_t stride = 0, numRecords = 0, dfmt = 0, nfmt = 0, gfmt = 0;
 };
 VBuffer decodeVBuffer(const uint32_t *p) {
   VBuffer v;
   v.base = (static_cast<uint64_t>(p[1] & 0xFFFF) << 32) | p[0];
   v.stride = (p[1] >> 16) & 0x3FFF;
   v.numRecords = p[2];
-  uint32_t fmt = (p[3] >> 12) & 0x7F;
-  v.dfmt = fmt & 0xF;
-  v.nfmt = (fmt >> 4) & 0x7;
+  v.gfmt = (p[3] >> 12) & 0x7F;
+  gfx10BufFmt(v.gfmt, v.dfmt, v.nfmt);
   return v;
 }
 
@@ -461,9 +482,10 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
         }
         if (dl)
           std::fprintf(stderr, "[agc]   attr%zu loc=%u nc=%u tbl_sgpr=%u off=%u (%s) -> "
-                       "base=%#lx stride=%u nrec=%u dfmt=%u nfmt=%u\n",
+                       "base=%#lx stride=%u nrec=%u gfmt=%u -> dfmt=%u nfmt=%u\n",
                        i, a.location, a.num_comps, a.table_sgpr, a.vbuf_dword_off, how,
-                       (unsigned long)vb.base, vb.stride, vb.numRecords, vb.dfmt, vb.nfmt);
+                       (unsigned long)vb.base, vb.stride, vb.numRecords, vb.gfmt,
+                       vb.dfmt, vb.nfmt);
         if (!inGuest(vb.base) || !vb.stride) continue;  // unresolved: keep the rest
         if (!haveBase) {
           haveBase = true;
@@ -514,6 +536,42 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
 
   if (autoVertexCount && autoVertexCount <= 0x100000) d.vertexCount = autoVertexCount;
   if (!d.recomp) return;  // no shader -> nothing the renderer can run yet
+
+  // One-shot ground-truth dump of the first few resolved draws: the raw vertex
+  // bytes (as float32 AND uint32, to read off the real attribute format), the
+  // constant-buffer/MVP state, and the viewport -- so we can tell whether the
+  // positions are garbage (wrong format), screen-space (missing projection), or
+  // clip-space (a downstream/viewport issue).
+  static int s_vdump = 0;
+  if (g_trace && s_vdump < 8 && d.nvattrs && d.vertexData &&
+      inGuest(reinterpret_cast<uint64_t>(d.vertexData))) {
+    s_vdump++;
+    std::fprintf(stderr,
+                 "[agc] VDUMP draw#%lu nvattrs=%u stride=%u count=%u prim=%u "
+                 "vp=[xs=%g xo=%g ys=%g yo=%g] nCbufs=%u cbufBase=%#lx cbufSize=%u\n",
+                 (unsigned long)myDraw, d.nvattrs, d.vertexStride, d.vertexCount,
+                 d.primType, d.viewportXScale, d.viewportXOffset, d.viewportYScale,
+                 d.viewportYOffset, d.nCbufs, (unsigned long)d.cbufBase, d.cbufSize);
+    for (uint32_t a = 0; a < d.nvattrs; a++)
+      std::fprintf(stderr, "[agc]   vattr%u loc=%u off=%u nc=%u dfmt=%u nfmt=%u\n",
+                   a, d.vattrs[a].location, d.vattrs[a].offset, d.vattrs[a].num_comps,
+                   d.vattrs[a].dfmt, d.vattrs[a].nfmt);
+    const auto *vb = reinterpret_cast<const uint8_t *>(d.vertexData);
+    uint32_t nv = d.vertexCount ? d.vertexCount : 4;
+    uint32_t vbytes = std::min<uint32_t>(d.vertexStride * nv, 128u);
+    for (uint32_t o = 0; o + 4 <= vbytes; o += 4) {
+      uint32_t u;
+      float f;
+      std::memcpy(&u, vb + o, 4);
+      std::memcpy(&f, vb + o, 4);
+      std::fprintf(stderr, "[agc]     vtx[+%02u] u=%08x f=%g\n", o, u, f);
+    }
+    const float *m = d.mvp;
+    std::fprintf(stderr,
+                 "[agc]   mvp=[%g %g %g %g / %g %g %g %g / %g %g %g %g / %g %g %g %g]\n",
+                 m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10],
+                 m[11], m[12], m[13], m[14], m[15]);
+  }
 
   if (!g_frameActive) {
     if (dl) std::fprintf(stderr, "[agc] DL beginFrame...\n");

@@ -53,6 +53,17 @@ bool ShDbg() {
   return on;
 }
 
+// A buffer_load_format is a real PER-VERTEX fetch only when it is indexed by the
+// vertex-index register (IDXEN with vaddr == v0, the ABI vertex-index VGPR). A
+// load with no index, or indexed by a computed/non-v0 register, reads a CONSTANT
+// (e.g. Isaac's 2D VS reads its ortho matrix via buffer_load): that must be bound
+// as a UBO and read in the shader body, NOT lifted to a vertex input.
+bool BufLoadIsVertexFetch(const Inst& in) {
+  const bool idxen = (in.raw[0] >> 13) & 1;
+  const uint32_t vaddr = in.raw[1] & 0xFF;
+  return idxen && vaddr == 0;
+}
+
 // Dwords loaded by an SMEM s_buffer_load / s_load opcode (x1/x2/x4/x8/x16).
 uint32_t SmemLoadCount(uint32_t op) {
   switch (op) {
@@ -113,6 +124,25 @@ bool RdnaPlanCbufs(const Program& program, uint32_t first_binding,
     }
   }
   return true;
+}
+
+// Plan set-1 UBO bindings for CONSTANT buffer_load_format ops (a load whose index
+// is not the vertex index reads a uniform, e.g. the 2D ortho matrix). Each distinct
+// srsrc V# gets one binding; the renderer resolves the live V# from user data at
+// draw time, exactly like the SMEM cbufs (decodeVBuffer(&vud[srsrc])).
+void RdnaPlanBufLoadCbufs(const Program& program, uint32_t first_binding,
+                          std::vector<ShaderCbuf>& cbufs,
+                          std::unordered_map<uint32_t, uint32_t>& bindings) {
+  for (const Inst& inst : program) {
+    if (inst.enc != Enc::kMubuf || inst.opcode > 0x03) continue;
+    if (BufLoadIsVertexFetch(inst)) continue;  // real fetch -> vertex input path
+    const uint32_t srsrc = ((inst.raw[1] >> 16) & 0x1F) * 4;
+    if (bindings.count(srsrc)) continue;
+    const uint32_t binding = first_binding + static_cast<uint32_t>(cbufs.size());
+    if (binding >= 8) return;  // set 1 has 8 UBO bindings
+    bindings[srsrc] = binding;
+    cbufs.push_back({binding, srsrc, 16});  // mat4-sized default window (16 dwords)
+  }
 }
 
 void RdnaEmitSmem(Translator& t, const Inst& inst, StageContext& sc) {
@@ -277,14 +307,38 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       break;
     }
     case Enc::kExp: EmitExport(t, inst, sc); break;
-    case Enc::kMubuf:
-      // buffer_load_format_x..xyzw is the inline vertex fetch: TranslateVs lifts
-      // it to a Location vertex input and seeds the destination VGPRs before the
-      // body runs (see ParseFetchInsts), so nothing is emitted here. Other MUBUF
-      // ops (stores / raw dword loads) don't occur in Isaac's VS/PS.
-      if (inst.opcode > 0x03)
+    case Enc::kMubuf: {
+      if (inst.opcode > 0x03) {  // stores / raw loads: not used by Isaac's VS/PS
         gpu::gcn::WarnUnsupported("mubuf.rdna", inst.opcode, w, w1);
+        break;
+      }
+      // A per-vertex fetch was lifted to a Location vertex input and its VGPRs are
+      // seeded before the body, so nothing is emitted here. A CONSTANT load (e.g.
+      // the 2D ortho matrix) reads num_comps dwords from the bound UBO at the
+      // computed byte offset into the destination VGPRs.
+      if (BufLoadIsVertexFetch(inst)) break;
+      const uint32_t srsrc = ((w1 >> 16) & 0x1F) * 4;
+      auto it = sc.cbuf_bind.find(srsrc);
+      if (it == sc.cbuf_bind.end()) {
+        gpu::gcn::WarnUnsupported("mubuf.cbuf-unplanned", inst.opcode, w, w1);
+        break;
+      }
+      const uint32_t nc = (inst.opcode & 3) + 1;
+      const uint32_t inst_offset = w & 0xFFF, vdata = (w1 >> 8) & 0xFF;
+      const bool idxen = (w >> 13) & 1, offen = (w >> 12) & 1;
+      const uint32_t vaddr = w1 & 0xFF;
+      // byte offset = inst_offset + index*stride + voffset. The V# stride is not
+      // available in the shader (the descriptor SGPRs are not seeded), so an
+      // indexed uniform row-select assumes tight packing (stride == nc*4); an
+      // unindexed load uses the immediate offset directly.
+      Id byte_off = t.U32(inst_offset);
+      if (idxen) byte_off = t.Add(byte_off, t.Mul(t.Vg(vaddr), t.U32(nc * 4)));
+      if (offen) byte_off = t.Add(byte_off, t.Vg(vaddr + (idxen ? 1u : 0u)));
+      const Id dword0 = t.Shr(byte_off, t.U32(2));
+      for (uint32_t k = 0; k < nc; k++)
+        t.SetVg(vdata + k, t.CbufDwordId(it->second, t.Add(dword0, t.U32(k))));
       break;
+    }
     case Enc::kMimg:
       // TODO(ps5): RDNA2 MIMG sampling (gfx10 T#/S# + NSA addressing).
       gpu::gcn::WarnUnsupported("mimg.rdna", inst.opcode, w, w1);
@@ -457,39 +511,27 @@ struct FetchAttr {
 // so buffer_load_format never reaches RdnaEmitInst as an unsupported op.
 std::vector<FetchAttr> ParseFetchInsts(const Program& insts) {
   std::vector<FetchAttr> out;
-  struct Load {
-    uint32_t table_sgpr, dword_off;
-  };
-  std::unordered_map<uint32_t, Load> loads;  // sdst -> table load
   uint32_t sem = 0;
   for (const Inst& in : insts) {
     if (in.enc == Enc::kSop1 && in.opcode == 0x20) break;  // s_setpc_b64 (return)
     if (in.enc == Enc::kSopp && in.opcode == 1) break;     // s_endpgm
-    if (in.enc == Enc::kSmrd && in.opcode == 0x02) {       // s_load_dwordx4 (V# table)
-      const uint32_t sdst = (in.raw[0] >> 6) & 0x7F;
-      const uint32_t sbase = (in.raw[0] & 0x3F) * 2;
-      const int32_t off = SignExt21(in.raw[1] & 0x1FFFFF);
-      loads[sdst] = {sbase, static_cast<uint32_t>(off < 0 ? 0 : off) / 4};
-    } else if (in.enc == Enc::kMubuf && in.opcode <= 0x03) {  // buffer_load_format_x..xyzw
-      const uint32_t vdata = (in.raw[1] >> 8) & 0xFF;
-      const uint32_t srsrc = ((in.raw[1] >> 16) & 0x1F) * 4;
-      const uint32_t nc = (in.opcode & 3) + 1;
-      const bool via_load = loads.count(srsrc) != 0;
-      // The descriptor is the V# in the buffer_load's own srsrc SGPRs. For the
-      // PS5 inline NGG fetch that is the inline V# the guest placed in user data,
-      // so the renderer decodes vud[srsrc..srsrc+3] directly (it validates that
-      // and falls back to a table pointer only if it isn't a real V#). An s_load
-      // into srsrc (via_load) is unreliable to trace and often spurious (e.g. an
-      // unrelated s_load_dwordx4 that also targets s0), so ignore it and key off
-      // srsrc, which is where the descriptor actually sits at draw time.
-      const uint32_t tbl = srsrc;
-      const uint32_t doff = 0;
-      if (ShDbg())
-        std::fprintf(stderr,
-                     "[gcnspv] fetch attr sem=%u nc=%u vdst=v%u srsrc=s%u "
-                     "table_sgpr=%u dword_off=%u via_load=%d\n",
-                     sem, nc, vdata, srsrc, tbl, doff, via_load);
-      out.push_back({sem, nc, vdata, tbl, doff});
+    if (in.enc != Enc::kMubuf || in.opcode > 0x03) continue;  // buffer_load_format_*
+    const uint32_t vdata = (in.raw[1] >> 8) & 0xFF;
+    const uint32_t srsrc = ((in.raw[1] >> 16) & 0x1F) * 4;
+    const uint32_t nc = (in.opcode & 3) + 1;
+    const bool idxen = (in.raw[0] >> 13) & 1, offen = (in.raw[0] >> 12) & 1;
+    const uint32_t vaddr = in.raw[1] & 0xFF, soffset = (in.raw[1] >> 24) & 0xFF;
+    const bool vtx = BufLoadIsVertexFetch(in);
+    if (ShDbg())
+      std::fprintf(stderr,
+                   "[gcnspv] buf_load nc=%u vdst=v%u srsrc=s%u idxen=%u offen=%u "
+                   "vaddr=v%u soffset=s%u -> %s\n",
+                   nc, vdata, srsrc, idxen, offen, vaddr, soffset,
+                   vtx ? "vertex-attr" : "const-ubo");
+    // Only a genuine per-vertex fetch becomes a vertex input (table_sgpr = srsrc,
+    // the descriptor's own SGPRs). A constant load is left for the UBO path.
+    if (vtx) {
+      out.push_back({sem, nc, vdata, srsrc, 0});
       sem++;
     }
   }
@@ -568,6 +610,9 @@ bool TranslateVs(const Program& program, const uint32_t* vs_user_data,
   sc.pos_out = pos_out;
   sc.flat_attrs = &flat_attrs;
   if (!RdnaPlanCbufs(program, 0, r.vs_cbufs, sc.cbuf_bind)) return false;
+  // Constant buffer_load descriptors (e.g. the ortho matrix a procedural 2D VS
+  // reads) become additional set-1 UBOs after the SMEM cbufs.
+  RdnaPlanBufLoadCbufs(program, 0, r.vs_cbufs, sc.cbuf_bind);
 
   EmitBody(t, program, sc);
   r.num_params = sc.max_param;
