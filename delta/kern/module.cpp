@@ -538,7 +538,8 @@ bool smodule::mapImage() {
   // handle==1 is only libkernel on a real boot; bounds-check so a smaller
   // handle-1 image can't get written out of range.
   constexpr uint32_t kLibkernelDbgOff = 0x68264;
-  if (info.handle == 1 && kLibkernelDbgOff + sizeof(uint32_t) <= info.codeSize) {
+  if (std::getenv("DELTA_LIBK_DEBUG") && info.handle == 1 &&
+      kLibkernelDbgOff + sizeof(uint32_t) <= info.codeSize) {
     *getAddress<uint32_t>(kLibkernelDbgOff) = UINT32_MAX;
     LOG_WARNING("Enabling libkernel debug messages");
   }
@@ -625,17 +626,26 @@ bool smodule::resolveObfSymbol(const char *name, uintptr_t &ptrOut) {
     uint64_t hid = 0;
     if (!runtime::decode_nid(name, 11, hid))
       return false;
-    // libSceVideoOut runs LLE on PS5, but its port backend never registers in our
-    // env (its .bss port table stays zero), so the real sceVideoOutOpen returns
-    // 0x802900ff and the game's renderer bails before creating its command
-    // buffers (null AGC DrawCommandBuffer crash). Route the uniquely-hashed
-    // videoout NIDs to the HLE shim so the display path succeeds. Everything else
-    // (incl. libSceGnmDriver/AGC, which run LLE fine) is unaffected.
-    if (uintptr_t hle = runtime::vprx_get_forced("libSceVideoOut", hid)) {
-      char tn[64];
-      std::snprintf(tn, sizeof(tn), "libSceVideoOut!%.11s", name);
-      ptrOut = cpu::makeHostThunk(reinterpret_cast<void *>(hle), tn);
-      return true;
+    // A few system libraries must run HLE on PS5 because their LLE backend needs a
+    // service daemon we don't host:
+    //   - libSceVideoOut: its .bss port table never registers, so the real
+    //     sceVideoOutOpen returns 0x802900ff and the renderer bails before creating
+    //     its command buffers (null AGC DrawCommandBuffer crash).
+    //   - libSceUserService: the real sceUserServiceInitialize spins allocating
+    //     buffers forever waiting on the SceUserService IPMI daemon, stalling the
+    //     engine's RenderInit before it ever submits GPU work.
+    // NIDs are globally unique, so probing each forced-HLE table by name is safe
+    // (a userService NID only ever matches the userService table). Everything else
+    // (incl. libSceGnmDriver/AGC, which run LLE fine) stays LLE.
+    static const char *const kPs5ForcedHle[] = {"libSceVideoOut",
+                                                "libSceUserService"};
+    for (const char *lib : kPs5ForcedHle) {
+      if (uintptr_t hle = runtime::vprx_get_forced(lib, hid)) {
+        char tn[64];
+        std::snprintf(tn, sizeof(tn), "%s!%.11s", lib, name);
+        ptrOut = cpu::makeHostThunk(reinterpret_cast<void *>(hle), tn);
+        return true;
+      }
     }
     for (auto &mod : process->getModuleList())
       if (uintptr_t a = mod->getExport(hid)) {

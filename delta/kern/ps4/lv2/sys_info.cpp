@@ -229,11 +229,16 @@ int PS4ABI sys_sysctl(int *name, uint32_t namelen, void *oldp, size_t *oldlenp,
     return 0;
   }
 
-  // hw.sce_main_socid (synthetic {0x1337,7}): the SoC identifier. The system
-  // init polls it repeatedly; a benign non-zero value stops the re-resolve.
+  // hw.sce_main_socid (synthetic {0x1337,7}): the SoC identifier, which doubles as
+  // the GPU chip revision. libSceAgc's shader-create (f3dg2CSgRKY) gates on it:
+  // shaders whose min-GPU-target field (.shader_header[0x4c]) is > 5 are REJECTED
+  // (0x8a6c003d) unless chipRev > 0x840f4f. All of Isaac's 38 embedded shaders use
+  // target 6, so we must report the real Oberon revision (0x840fc0) or every shader
+  // create fails -> empty pipelines -> zero SPI_SHADER_PGM -> nothing renders. This
+  // oid is PS5-only (the 0x1337 family is synthetic PS5 config), so PS4 is unaffected.
   else if (name[0] == 0x1337 && name[1] == 7 && namelen == 2) {
     if (oldp && oldlenp && *oldlenp >= sizeof(uint32_t)) {
-      *reinterpret_cast<uint32_t *>(oldp) = 0x1400;
+      *reinterpret_cast<uint32_t *>(oldp) = 0x840fc0;
       *oldlenp = sizeof(uint32_t);
     }
     return 0;

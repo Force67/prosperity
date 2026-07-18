@@ -85,6 +85,42 @@ bool proc::create(const base::String &path, bool fromVfs) {
   if (ps5) {
     bringUpRebirthEbootRegistry(*first);
     investigateDcbGate(*first);
+    // DELTA_PS5_GLYPHGUARD: recover the first-frame unbound-font null derefs in
+    // the UI/text renderer so the render reaches real draws (diagnostic; the real
+    // fix binds the font before rendererFrame).
+    if (std::getenv("DELTA_PS5_GLYPHGUARD")) {
+      auto *base8 = first->getInfo().base;
+      auto eb = reinterpret_cast<uintptr_t>(base8);
+      // movzx esi,[rdi+rcx*2+0x2e] (glyph cmap count), rdi==0
+      krnl::setNullGuard(eb + 0x5cab56, krnl::GuardReg::rsi, 5);
+      // mov rax,[rax+0x28]; mov rax,[rax+0x18] (chained font-object load), rax==0
+      krnl::setNullGuard(eb + 0x5c7c53, krnl::GuardReg::rax, 8);
+      // ROOT FIX: the renderer-init chain 0x5535d0 bails at its gate checks
+      // (`test al,al; je 0x55365d`) when VOInit (gate C, 0x58fb10) returns false
+      // -- a GPU render-context vtable step that fails in our env -- SKIPPING the
+      // Shape-Renderer install at 0x55361b (0x58ec90). That leaves the global
+      // active renderer *(0x9854f0) null, which is the source of the whole
+      // first-frame null-object cascade. Force the chain past its three bail
+      // branches so the game installs the renderer + builds its RTs/fonts itself.
+      // DELTA_PS5_NOFORCE: skip the RenderInit gate force-through. Now that the PS5
+      // videoout NIDs are HLE'd (RegisterBuffers returns 0), VOInit (gate C) should
+      // return TRUE on its own -- forcing past it leaves an INVALID render context
+      // (null pipelines / zero shader PGM). Test whether it succeeds naturally.
+      struct { uint32_t off; uint8_t b1; } gates[] = {
+          {0x553602, 0x59}, {0x553612, 0x49}, {0x553622, 0x39}};
+      bool noForce = std::getenv("DELTA_PS5_NOFORCE") != nullptr;
+      for (auto &g : gates) {
+        if (noForce) break;
+        uint8_t *c = base8 + g.off;
+        if (c[0] == 0x74 && c[1] == g.b1) {  // je 0x55365d
+          utl::protectMem(reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(c) & ~0xFFFull),
+                          0x1000, utl::pageProtection::rwx);
+          c[0] = 0x90;  // NOP the bail so the chain runs the Shape-Renderer install
+          c[1] = 0x90;
+        }
+      }
+      LOG_INFO("ps5 glyphguard: forced renderer-init chain through the Shape-Renderer install");
+    }
   }
 
   return true;
@@ -565,9 +601,11 @@ static void forceGetterOk(proc &p, const char *mod, uint32_t off, uint32_t val) 
 // PS5 libc-heap / pthread-mutex bootstrap fix. Once we hand libc a sceLibcParam
 // (so its C++ operator-new arena can grow past the tiny 16 MiB default), libc's
 // malloc turns thread-safe and locks a static-initialised mutex whose kernel
-// state libkernel lazily allocates through the libc-malloc callback held at
-// libkernel data +0x68ec0. That malloc re-locks the still-uninitialised mutex ->
-// unbounded recursion (stack overflow) or deadlock. Interpose the allocator with
+// state libkernel lazily allocates through the libc-malloc callback held at a
+// libkernel data slot (fw 01.14.00: +0x5cfd8, loaded into rdx before every
+// call to the lazy-init helper 0x34a10; was +0x68ec0 on fw 12.60). That malloc
+// re-locks the still-uninitialised mutex -> unbounded recursion (stack overflow)
+// or deadlock. Interpose the allocator with
 // a per-thread re-entrancy guard: the outer call delegates to the real allocator
 // (so ordinary pthread objects are heap-backed and freed normally), while a
 // re-entrant call -- the bootstrap -- is served from a small malloc-free bump
@@ -594,10 +632,11 @@ static uint64_t PS4ABI ps5PthreadAlloc(uint64_t op, uint64_t arg) {
 }
 #endif
 
-// libkernel populates its pthread-object allocator pointer (+0x68ec0) at runtime,
-// after boot patches run, so install our interpose lazily the first time it is
+// libkernel populates its pthread-object allocator pointer at runtime, after
+// boot patches run, so install our interpose lazily the first time it is
 // non-null (called from thread creation, which happens after libc init but before
 // the multithreaded malloc-mutex bootstrap). Idempotent; PS5 + native only.
+constexpr uintptr_t kPthreadAllocSlot = 0x5cfd8;  // fw 01.14.00 libkernel data
 void ps5MaybeInterposePthreadAlloc() {
 #if defined(DELTA_BACKEND_NATIVE)
   static std::atomic<bool> done{false};
@@ -607,7 +646,7 @@ void ps5MaybeInterposePthreadAlloc() {
   auto k = p->getModule(base::StringRef("libkernel"));
   if (!k)
     return;
-  auto *slot = reinterpret_cast<uint64_t *>(k->getInfo().base + 0x68ec0);
+  auto *slot = reinterpret_cast<uint64_t *>(k->getInfo().base + kPthreadAllocSlot);
   uint64_t cur = *slot;
   if (!cur || cur == reinterpret_cast<uint64_t>(&ps5PthreadAlloc))
     return;  // not populated yet, or already ours
@@ -617,7 +656,8 @@ void ps5MaybeInterposePthreadAlloc() {
                   0x1000, utl::pageProtection::rwx);
   g_origPthreadAlloc = reinterpret_cast<PthreadAllocFn>(cur);
   *slot = reinterpret_cast<uint64_t>(&ps5PthreadAlloc);
-  LOG_INFO("interposed libkernel pthread-state alloc (+0x68ec0) orig={:#x}", cur);
+  LOG_INFO("interposed libkernel pthread-state alloc (+{:#x}) orig={:#x}",
+           kPthreadAllocSlot, cur);
 #endif
 }
 
