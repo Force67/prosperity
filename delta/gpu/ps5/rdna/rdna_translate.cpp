@@ -126,24 +126,26 @@ uint32_t RemapVop2(uint32_t op) {
 }
 
 // ---- SMEM (constant buffers) ------------------------------------------------
-// Plan the set-1 UBO bindings a stage's s_buffer_load* ops reference. Each
-// distinct V# base SGPR (a user-data dword pair) gets one binding; the renderer
-// resolves the live V# at draw time (like the GFX7 PlanCbufs, but decoding the
-// RDNA2 SMEM encoding instead of GCN SMRD).
+// Plan the set-1 UBO bindings a stage's SMEM loads reference. Both s_buffer_load*
+// (op 0x08-0x0C, a 4-SGPR V# in the sbase pair) and s_load* (op 0x00-0x04, a raw
+// 64-bit pointer in the sbase pair -- how a 2D VS often reads its transform
+// matrix) resolve to a base + dword window; the renderer materializes the live
+// descriptor from user data at draw time. Each distinct sbase gets one binding.
 bool RdnaPlanCbufs(const Program& program, uint32_t first_binding,
                    std::vector<ShaderCbuf>& cbufs,
                    std::unordered_map<uint32_t, uint32_t>& bindings) {
   for (const Inst& inst : program) {
     if (inst.enc != Enc::kSmrd) continue;
     const uint32_t op = inst.opcode;
-    if (op < 0x08 || op > 0x0C) continue;  // s_buffer_load_dword{,x2,x4,x8,x16}
-    const uint32_t sbase = (inst.raw[0] & 0x3F) * 2;  // user-data dword of the V#
+    if (op > 0x04 && (op < 0x08 || op > 0x0C)) continue;  // s_load* / s_buffer_load*
+    const uint32_t sbase = (inst.raw[0] & 0x3F) * 2;  // user-data dword of the descriptor
     const int32_t off = SignExt21(inst.raw[1] & 0x1FFFFF);
     const uint32_t hi = static_cast<uint32_t>(off < 0 ? 0 : off) / 4 +
                         SmemLoadCount(op);
     auto it = bindings.find(sbase);
     if (it == bindings.end()) {
       const uint32_t binding = first_binding + static_cast<uint32_t>(cbufs.size());
+      if (binding >= 8) return true;  // set 1 has 8 UBO bindings; ignore extras
       bindings[sbase] = binding;
       cbufs.push_back({binding, sbase, hi});
     } else {
@@ -178,7 +180,11 @@ void RdnaEmitSmem(Translator& t, const Inst& inst, StageContext& sc) {
   const uint32_t sdst = (inst.raw[0] >> 6) & 0x7F;
   const uint32_t sbase = (inst.raw[0] & 0x3F) * 2;
   const int32_t off = SignExt21(inst.raw[1] & 0x1FFFFF);
-  if (op >= 0x08 && op <= 0x0C) {  // s_buffer_load*: read from the bound UBO
+  // s_load* (op 0x00-0x04, from a raw 64-bit pointer in the sbase pair) and
+  // s_buffer_load* (op 0x08-0x0C, from a V# in the sbase quad) both read `off`
+  // bytes into sdst.. from the UBO the renderer bound for this sbase. A 2D VS
+  // reads its transform matrix this way, so dropping it left the position untransformed.
+  if (op <= 0x04 || (op >= 0x08 && op <= 0x0C)) {
     auto it = sc.cbuf_bind.find(sbase);
     if (it == sc.cbuf_bind.end()) {
       gpu::gcn::WarnUnsupported("smem.cbuf-unplanned", op, inst.raw[0], inst.raw[1]);
@@ -190,9 +196,6 @@ void RdnaEmitSmem(Translator& t, const Inst& inst, StageContext& sc) {
       t.SetSg(sdst + k, t.CbufDword(it->second, dword0 + k));
     return;
   }
-  // s_load_dword* (op 0x00-0x04) load descriptor tables (V#/T#) into SGPRs; the
-  // renderer resolves those from user data via resource tracking, so they do not
-  // emit into the shader body (matches the GFX7 path).
 }
 
 // ---- exports ----------------------------------------------------------------

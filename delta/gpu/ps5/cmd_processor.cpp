@@ -184,14 +184,18 @@ void loadRegs(uint32_t base, const uint32_t *body, uint32_t count) {
 // CB_TARGET_MASK), so without it draws hit no target and no shader.
 void loadRegPairs(uint32_t base, const uint32_t *body, uint32_t cnt) {
   if (cnt < 4) return;
-  uint64_t addr = (static_cast<uint64_t>(body[1] & 0xFFFF) << 32) | body[0];
+  uint64_t addr = (static_cast<uint64_t>(body[1] & 0xFFFF) << 32) | (body[0] & 0xFFFFFFFCu);
   if (addr < 0x8000000000ull || addr >= 0x8100000000ull) return;
-  uint32_t num = body[3];
-  if (num > 0x4000) num = 0x4000;  // sanity cap
+  // body[3] is the count of (reg_offset, value) register PAIRS, not dwords: each
+  // iteration reads two dwords (KytyPS5 CpOpIndirectUcRegs / CpOpIndirectCtxRegs
+  // loop `i < (buffer[3] & 0x3fff)` advancing the pointer by 2). The old
+  // dword-count reading wrote nothing for a single-register indirect (num == 1),
+  // so VGT_PRIMITIVE_TYPE (set this way) never landed and prim assembly died.
+  uint32_t numPairs = body[3] & 0x3FFF;
   const uint32_t *p = reinterpret_cast<const uint32_t *>(addr);
-  for (uint32_t i = 0; i + 1 < num; i += 2) {
-    uint32_t off = p[i] & 0xFFFF;
-    if (base + off < kRegFileSize) g_regs[base + off] = p[i + 1];
+  for (uint32_t i = 0; i < numPairs; i++) {
+    uint32_t off = p[i * 2] & ~kRegSelectorMask;  // strip gfx10 selector bits
+    if (base + off < kRegFileSize) g_regs[base + off] = p[i * 2 + 1];
   }
   // Report the first few shader binds that actually carry a nonzero PGM (SH off 0x88
   // = PGM_LO_GS, 0x08 = PGM_LO_PS) -- these are the real sprite-pipeline binds.
@@ -425,8 +429,15 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
     ShaderKey key{vsA, psA, fetch};
     auto it = g_shCache.find(key);
     if (it == g_shCache.end()) {
-      if (dl) std::fprintf(stderr, "[agc] DL recompile vs=%#lx ps=%#lx...\n",
-                           (unsigned long)vsA, (unsigned long)psA);
+      if (dl) {
+        const uint32_t *vc = reinterpret_cast<const uint32_t *>(vsA);
+        const uint32_t *pc = psA ? reinterpret_cast<const uint32_t *>(psA) : nullptr;
+        // AGC shader code starts with the 0xBEEB03FF sentinel; a psA that isn't
+        // (e.g. 0xffc9dfe7 poison fill) means the PS PGM_LO reg didn't land.
+        std::fprintf(stderr, "[agc] DL recompile vs=%#lx (%08x) ps=%#lx (%08x %08x)...\n",
+                     (unsigned long)vsA, vc[0], (unsigned long)psA,
+                     pc ? pc[0] : 0, pc ? pc[1] : 0);
+      }
       it = g_shCache
                .emplace(key, rdna::Recompile(reinterpret_cast<const uint32_t *>(vsA),
                                              psA ? reinterpret_cast<const uint32_t *>(psA)
@@ -484,21 +495,28 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
       // recovered attrs, seeds from VertexIndex) draws without a vertex buffer.
       bool good = d.nvattrs > 0 || rc.attrs.empty();
 
-      // Constant buffers: resolve each stage's V# from user data (inline).
+      // Constant buffers: resolve each SMEM descriptor from user data. base comes
+      // from the sbase pair (a V# base for s_buffer_load, a raw 64-bit pointer for
+      // s_load); the bind size is the recompiler's planned dword window (num_dwords)
+      // -- the V# stride/records fields are meaningless for an s_load pointer.
       auto resolveCbufs = [&](const std::vector<gcn::ShaderCbuf> &cbufs,
                               const uint32_t *userData, bool vertexStage) {
         for (const auto &cb : cbufs) {
           if (cb.binding >= 8 || cb.ud_sgpr + 3 >= 32) continue;
           VBuffer vb = decodeVBuffer(&userData[cb.ud_sgpr]);
-          uint64_t bytes = vb.stride ? static_cast<uint64_t>(vb.stride) * vb.numRecords
-                                     : vb.numRecords;
-          if (!inGuest(vb.base) || !bytes || bytes > 0xFFFFFFFFull) continue;
-          d.cbufs[cb.binding] = {vb.base, static_cast<uint32_t>(bytes)};
+          uint64_t base = vb.base & ~uint64_t{3};  // dword-align (SMEM base)
+          uint64_t bytes = static_cast<uint64_t>(cb.num_dwords) * 4;
+          if (dl)
+            std::fprintf(stderr, "[agc]   cbuf %s bind=%u sgpr=%u base=%#lx dwords=%u\n",
+                         vertexStage ? "vs" : "ps", cb.binding, cb.ud_sgpr,
+                         (unsigned long)base, cb.num_dwords);
+          if (!inGuest(base) || !bytes) continue;
+          d.cbufs[cb.binding] = {base, static_cast<uint32_t>(bytes)};
           d.nCbufs = std::max(d.nCbufs, cb.binding + 1);
           if (vertexStage && bytes >= sizeof(d.mvp)) {
-            d.cbufBase = vb.base;
+            d.cbufBase = base;
             d.cbufSize = static_cast<uint32_t>(bytes);
-            std::memcpy(d.mvp, reinterpret_cast<const void *>(vb.base), sizeof(d.mvp));
+            std::memcpy(d.mvp, reinterpret_cast<const void *>(base), sizeof(d.mvp));
           }
         }
       };
