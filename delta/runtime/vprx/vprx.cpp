@@ -17,11 +17,17 @@
 
 namespace runtime {
 static base::Vector<const modInfo *> vprxTable;
+// PS5-only NID alias tables (runtime/vprx/ps5/*). Kept separate from vprxTable so
+// PS4 resolution is byte-for-byte unchanged; only vprx_get_forced (PS5) reads it.
+static base::Vector<const modInfo *> vprxTablePs5;
 
 // HLE-module anchors. Each vprx HLE module's _api.cpp defines one of these; we
 // reference them here so the linker keeps those archive members (otherwise the
 // MODULE_INIT static initializers never run and the HLE tables stay empty).
 extern "C" int vprx_anchor_libSceVideoOut;
+// PS5 module copies (runtime/vprx/ps5/*). Separate registry (vprxTablePs5).
+extern "C" int vprx_anchor_ps5_libSceVideoOut;
+extern "C" int vprx_anchor_ps5_libSceUserService;
 extern "C" int vprx_anchor_libSceGnmDriver;
 extern "C" int vprx_anchor_libSceMsgDialog;
 // Pad + userService HLE: a connected controller + one logged-in user lets the
@@ -58,6 +64,8 @@ extern "C" int vprx_anchor_libSceSaveData;
 // hangs. Complete the dialog immediately with a default OK.
 extern "C" int vprx_anchor_libSceSaveDataDialog;
 static volatile int *const vprx_anchors[] = {&vprx_anchor_libSceVideoOut,
+                                             &vprx_anchor_ps5_libSceVideoOut,
+                                             &vprx_anchor_ps5_libSceUserService,
                                              &vprx_anchor_libSceSaveData,
                                              &vprx_anchor_libSceSaveDataDialog,
                                              &vprx_anchor_libfmod,
@@ -83,6 +91,7 @@ void vprx_init() {
 }
 
 void vprx_reg(const modInfo *info) { vprxTable.push_back(info); }
+void vprx_reg_ps5(const modInfo *info) { vprxTablePs5.push_back(info); }
 
 // Per-module HLE policy. We prefer running the real sprx (LLE) for modules whose
 // syscall/device backing we emulate, falling back to the HLE shim only when the
@@ -129,7 +138,11 @@ static bool useHleShim(const char *lib, uint64_t hid) {
 }
 
 uintptr_t vprx_get_forced(const char *lib, uint64_t hid) {
-  for (const auto &t : vprxTable) {
+  // PS5-only: resolve exclusively from the PS5 registry (runtime/vprx/ps5/*).
+  // PS5 must NOT borrow the PS4 HLE modules -- each forced-HLE library has its own
+  // full PS5 copy so behaviour can diverge safely. A miss here falls through to the
+  // real .sprx (LLE) in the caller, never to a PS4 stub.
+  for (const auto &t : vprxTablePs5) {
     if (std::strcmp(lib, t->namePtr) != 0)
       continue;
     for (int i = 0; i < t->funcCount; i++)
