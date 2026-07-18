@@ -226,19 +226,19 @@ void loadRegPairs(uint32_t base, const uint32_t *body, uint32_t cnt) {
   }
 }
 
-// Render-target dimensions. The screen scissor is often set to a "no-clip" max
-// (0x4000 = 16384) which is NOT the RT size; clamp to a sane display resolution so
-// we create a correctly-sized target instead of a 16384^2 one the driver rejects.
-uint32_t fbWidth() {
-  uint32_t br = g_regs[mmPA_SC_SCREEN_SCISSOR_BR];
-  uint32_t w = br & 0xFFFF;
-  return (w && w <= 4096) ? w : 1920;
+// Render-target dimensions, derived from the viewport the title programmed: the RT
+// spans [center-halfSize, center+halfSize] where halfSize = |VPORT_xSCALE|. The
+// screen scissor is a "no-clip" max (e.g. 16384) and is NOT the RT size. Reading the
+// viewport keeps this title-agnostic (no fixed default resolution); a 0 scale (no
+// viewport yet) yields 0 so getRT skips the draw until real state is set.
+uint32_t fbDim(uint32_t scaleReg) {
+  float s;
+  std::memcpy(&s, &g_regs[scaleReg], 4);
+  if (s < 0.0f) s = -s;
+  return static_cast<uint32_t>(s * 2.0f + 0.5f);
 }
-uint32_t fbHeight() {
-  uint32_t br = g_regs[mmPA_SC_SCREEN_SCISSOR_BR];
-  uint32_t h = (br >> 16) & 0xFFFF;
-  return (h && h <= 4096) ? h : 1080;
-}
+uint32_t fbWidth() { return fbDim(mmPA_CL_VPORT_XSCALE); }
+uint32_t fbHeight() { return fbDim(mmPA_CL_VPORT_YSCALE); }
 
 bool isDraw(uint32_t op) {
   return op == IT_DRAW_INDEX_AUTO || op == IT_DRAW_INDEX_2 ||
