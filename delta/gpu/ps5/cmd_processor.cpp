@@ -68,7 +68,7 @@ void writeLabel(uint64_t addr, uint64_t value, bool is64) {
 
 // gfx10.3 128-bit V# (buffer descriptor). base48 = f0 | (f1[15:0] << 32);
 // stride f1[29:16]; num_records f2; format f3[18:12]. The 7-bit format field is
-// the GCN (nfmt<<4)|dfmt packing (KytyPS5 BufferFormat.h DecodeTBufferFormat =
+// the GCN (nfmt<<4)|dfmt packing (gfx10.3 DecodeTBufferFormat =
 // ((nfmt & 0x7) << 4) | (dfmt & 0xf)), so dfmt = fmt&0xF, nfmt = (fmt>>4)&0x7.
 struct VBuffer {
   uint64_t base = 0;
@@ -187,7 +187,7 @@ void loadRegPairs(uint32_t base, const uint32_t *body, uint32_t cnt) {
   uint64_t addr = (static_cast<uint64_t>(body[1] & 0xFFFF) << 32) | (body[0] & 0xFFFFFFFCu);
   if (addr < 0x8000000000ull || addr >= 0x8100000000ull) return;
   // body[3] is the count of (reg_offset, value) register PAIRS, not dwords: each
-  // iteration reads two dwords (KytyPS5 CpOpIndirectUcRegs / CpOpIndirectCtxRegs
+  // iteration reads two dwords (the gfx10.3 SET_*_REG_INDIRECT handlers
   // loop `i < (buffer[3] & 0x3fff)` advancing the pointer by 2). The old
   // dword-count reading wrote nothing for a single-register indirect (num == 1),
   // so VGT_PRIMITIVE_TYPE (set this way) never landed and prim assembly died.

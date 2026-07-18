@@ -10,7 +10,7 @@
  * target / shader pointers / primitive state out of it.
  *
  * The offsets below are gfx10.3 values (context 0xA000 / sh 0x2C00 /
- * uconfig 0xC000), verified against the KytyPS5 gfx10.3 register map
+ * uconfig 0xC000), verified against published gfx10.3 register maps
  * (src/graphics/guest_gpu/pm4.h). They differ from the PS4's GCN-gen2 values:
  * CB_COLOR moved and gained 64-bit BASE_EXT high-bit registers, there is no
  * hardware VS stage (vertex work runs as a merged ES/GS NGG shader), and the
@@ -29,7 +29,7 @@ constexpr uint32_t kRegFileSize = 0xD000;
 
 // gfx10 SET_*_REG offset-dword selector bits. AGC (and real gfx10 hardware)
 // encode a register-space selector in [30:28] of the offset dword; strip it to
-// recover the plain register offset (KytyPS5 pm4Handlers.cpp NormalizeRegisterOffset).
+// recover the plain register offset (gfx10.3 register-offset normalization).
 constexpr uint32_t kRegSelectorMask = 0x70000000u;
 
 // --- key context registers (absolute dword offset = kContextRegBase + n) ---

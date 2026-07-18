@@ -624,9 +624,10 @@ bool TranslateVs(const Program& program, const uint32_t* vs_user_data,
 
   const Id main_fn = t.m.BeginFunction(t.t_void, t.t_fn);
 
+  Id vertex_index = 0;
   if (attrs.empty()) {  // procedural VS: seed the ABI VGPRs from Vulkan built-ins
     const Id p_in_u = t.m.TypePointer(spv::StorageClass::Input, t.t_u);
-    const Id vertex_index = t.m.Variable(p_in_u, spv::StorageClass::Input);
+    vertex_index = t.m.Variable(p_in_u, spv::StorageClass::Input);
     const Id instance_index = t.m.Variable(p_in_u, spv::StorageClass::Input);
     t.m.Decorate(vertex_index, spv::Decoration::BuiltIn,
                  {static_cast<uint32_t>(spv::BuiltIn::VertexIndex)});
@@ -668,9 +669,24 @@ bool TranslateVs(const Program& program, const uint32_t* vs_user_data,
   // Constant buffer_load descriptors (e.g. the ortho matrix a procedural 2D VS
   // reads) become additional set-1 UBOs after the SMEM cbufs.
   RdnaPlanBufLoadCbufs(program, 0, r.vs_cbufs, sc.cbuf_bind);
+  if (ShDbg())
+    std::fprintf(stderr, "[gcnspv] vs planned %zu cbufs\n", r.vs_cbufs.size());
 
   EmitBody(t, program, sc);
   r.num_params = sc.max_param;
+
+  // DELTA_GPU_FORCEQUAD: ignore the VS's computed position and emit a full-screen
+  // quad straight from gl_VertexIndex (0..3 -> the four NDC corners). If this
+  // renders (with the PS forced white) the raster/PS pipeline is sound and the real
+  // position math is the culprit (e.g. an unbound MVP -> degenerate); if it still
+  // draws nothing the problem is downstream (index/vertexCount/render target).
+  static const bool force_quad = std::getenv("DELTA_GPU_FORCEQUAD") != nullptr;
+  if (force_quad) {
+    const Id vidx = vertex_index ? t.m.Load(t.t_u, vertex_index) : t.Vg(0);
+    const Id fx = t.SelectF(t.IsNonZero(t.And(vidx, t.U32(1))), t.F32(1.f), t.F32(-1.f));
+    const Id fy = t.SelectF(t.IsNonZero(t.And(vidx, t.U32(2))), t.F32(1.f), t.F32(-1.f));
+    t.m.Store(pos_out, t.m.CompositeConstruct(t.t_v4, {fx, fy, t.F32(0.f), t.F32(1.f)}));
+  }
 
   // GL clip space (z in [-w,w]) -> Vulkan (z in [0,w]): z = (z + w) * 0.5.
   const Id p_out_f = t.m.TypePointer(spv::StorageClass::Output, t.t_f);

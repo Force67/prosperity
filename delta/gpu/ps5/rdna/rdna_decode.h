@@ -11,7 +11,7 @@
  * numbers are RDNA2-specific; see gpu/ps5/rdna/rdna_translate.cpp for the
  * per-instruction dispatch that maps RDNA2 opcodes onto the shared emitters.
  *
- * Encoding-family dispatch and opcode tables verified against the KytyPS5
+ * Encoding-family dispatch and opcode tables verified against the a gfx10.3 reference
  * gfx10.3 decoder (src/graphics/shader/recompiler/ShaderDecoder.cpp).
  */
 

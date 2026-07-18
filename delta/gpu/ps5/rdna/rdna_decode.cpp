@@ -36,13 +36,13 @@ bool scalar1HasLit(uint32_t w) { return (w & 0xFF) == 255; }
 // word. Missing the SDWA/DPP dword desyncs the decoder (the control word is then
 // read as the next instruction) -- 249/250 are reserved src0 values, never real
 // operands, so treating them as size-extending is always correct (matches
-// KytyPS5 VectorAluOps.cpp, which decodes SDWA/DPP as 2-word instructions).
+// published gfx10.3 references, which decode SDWA/DPP as 2-word instructions).
 bool valuSrc0Extra(uint32_t w) {
   const uint32_t s = w & 0x1FF;
   return s == 255 || s == 249 || s == 250;
 }
 
-// Family classification, mirroring KytyPS5 ShaderDecoder.cpp DecodeProgram. The
+// Family classification, mirroring the gfx10.3 encoding-family dispatch. The
 // VALU branch (bit31 == 0) further resolves VOP1/VOPC from the VOP2 opcode
 // field; we resolve it here so the shared translator sees the right Enc.
 Enc classify(uint32_t w, uint32_t& opcode) {
