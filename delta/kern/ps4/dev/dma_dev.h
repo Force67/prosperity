@@ -20,4 +20,14 @@ public:
   int32_t ioctl(uint32_t command, void *args) override;
   uint8_t *map(void *, size_t, uint32_t, uint32_t, size_t) override;
 };
+
+// Shared physical-dmem backing store (a memfd) so that every virtual address
+// mapping the same physical offset aliases the same bytes -- the direct-memory
+// coherency the AGC/GNM command buffers rely on (a CPU-written command buffer
+// and the GPU's view of it map one physOffset at possibly-different VAs). The
+// dmem physical-offset bump-allocator lives in the /dev/dmem ioctls; the mapper
+// (syscall 628) commits VA -> backing_fd@physOffset via MAP_SHARED. Returns -1
+// if the backing could not be created. See ps5-boot-progress memory.
+int dmemBackingFd();
+uint64_t dmemBackingSize();
 }

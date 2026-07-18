@@ -15,6 +15,10 @@
 #include <cstring>
 #include <mutex>
 #include <vector>
+
+#include <sys/mman.h>
+#include <unistd.h>
+
 #include "dma_dev.h"
 #include "kern/ps4/lv2/sys_mem.h"
 #include "kern/proc.h"
@@ -53,7 +57,26 @@ struct DmemRegion {
 };
 std::mutex g_dmemMutex;
 std::vector<DmemRegion> g_dmemRegions;
+
+// One host backing store (a memfd) for the whole dmem pool. Every VA that maps a
+// given physical offset maps this fd at that offset (MAP_SHARED), so all aliases
+// share bytes. Sparse: only touched pages consume RAM.
+int g_dmemBackingFd = -1;
+std::once_flag g_dmemBackingOnce;
 }  // namespace
+
+int dmemBackingFd() {
+  std::call_once(g_dmemBackingOnce, [] {
+    int fd = memfd_create("delta_dmem", 0);
+    if (fd >= 0 && ftruncate(fd, static_cast<off_t>(kDmemTotal)) != 0) {
+      close(fd);
+      fd = -1;
+    }
+    g_dmemBackingFd = fd;
+  });
+  return g_dmemBackingFd;
+}
+uint64_t dmemBackingSize() { return kDmemTotal; }
 
 /* dmem_ioctl */
 int32_t dmaDevice::ioctl(uint32_t cmd, void *data) {
@@ -61,12 +84,15 @@ int32_t dmaDevice::ioctl(uint32_t cmd, void *data) {
   if (trace) {
     auto *q = static_cast<uint64_t *>(data);
     std::fprintf(stderr,
-                 "[dmem-ioctl] cmd=%#x data=%p [%#llx %#llx %#llx %#llx %#llx]\n",
+                 "[dmem-ioctl] cmd=%#x data=%p [%#llx %#llx %#llx %#llx %#llx %#llx %#llx %#llx]\n",
                  cmd, data, q ? (unsigned long long)q[0] : 0ull,
                  q ? (unsigned long long)q[1] : 0ull,
                  q ? (unsigned long long)q[2] : 0ull,
                  q ? (unsigned long long)q[3] : 0ull,
-                 q ? (unsigned long long)q[4] : 0ull);
+                 q ? (unsigned long long)q[4] : 0ull,
+                 q ? (unsigned long long)q[5] : 0ull,
+                 q ? (unsigned long long)q[6] : 0ull,
+                 q ? (unsigned long long)q[7] : 0ull);
   }
   switch (cmd) {
   case 0x4008800A: {
@@ -229,8 +255,10 @@ int32_t dmaDevice::ioctl(uint32_t cmd, void *data) {
   return 0;
 }
 
-uint8_t *dmaDevice::map(void *addr, size_t, uint32_t, uint32_t, size_t) {
-  //__debugbreak();
+// PS4 /dev/dmem has no device-backed mapping: fall back to the anonymous path in
+// sys_mmap (returns -1). The PS5 shared-memfd coherency mapping lives in the
+// dmaDevicePs5 override (kern/ps5/dev/dma_dev.cpp).
+uint8_t *dmaDevice::map(void *, size_t, uint32_t, uint32_t, size_t) {
   return reinterpret_cast<uint8_t *>(-1);
 }
 } // namespace krnl

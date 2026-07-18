@@ -23,6 +23,8 @@
 #include "kern/ps4/dev/dma_dev.h"
 #include "kern/ps4/dev/file_dev.h"
 #include "kern/ps4/dev/gc_dev.h"
+#include "kern/ps5/dev/gc_dev.h"   // PS5 AGC /dev/gc device
+#include "kern/ps5/dev/dma_dev.h"  // PS5 /dev/dmem (shared-memfd mapping)
 #include "kern/ps4/dev/tty6_dev.h"
 #include "kern/proc.h"
 #include "kern/crash.h"
@@ -71,7 +73,9 @@ static device *make_device(const char *deviceName) {
   if (xname == "deci_tty6")
     dev = new tty6Device(proc);
   if (xname == "gc")
-    dev = new gcDevice(proc);
+    dev = (proc && proc->getPlatform() == krnl::proc::platform::ps5)
+              ? static_cast<device *>(new gcDevicePs5(proc))
+              : static_cast<device *>(new gcDevice(proc));
   if (xname == "dce")
     dev = new dceDevice(proc);
   if (xname == "dipsw")
@@ -80,7 +84,9 @@ static device *make_device(const char *deviceName) {
     dev = new ajmDevice(proc);
   /*there are multiple of these*/
   if (xname.find("dmem", 0, 4) != base::StringRef::npos)
-    dev = new dmaDevice(proc);
+    dev = (proc && proc->getPlatform() == krnl::proc::platform::ps5)
+              ? static_cast<device *>(new dmaDevicePs5(proc))
+              : static_cast<device *>(new dmaDevice(proc));
 
   return dev;
 }
