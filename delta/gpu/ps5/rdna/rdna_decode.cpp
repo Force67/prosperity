@@ -31,7 +31,16 @@ bool scalar2HasLit(uint32_t w) {
   return (w & 0xFF) == 255 || ((w >> 8) & 0xFF) == 255;
 }
 bool scalar1HasLit(uint32_t w) { return (w & 0xFF) == 255; }
-bool valuSrc0HasLit(uint32_t w) { return (w & 0x1FF) == 255; }
+// VALU src0 (9-bit [8:0]) encodings that append an extra dword: 255 selects a
+// 32-bit literal, 249 selects an SDWA control word, 250 selects a DPP control
+// word. Missing the SDWA/DPP dword desyncs the decoder (the control word is then
+// read as the next instruction) -- 249/250 are reserved src0 values, never real
+// operands, so treating them as size-extending is always correct (matches
+// KytyPS5 VectorAluOps.cpp, which decodes SDWA/DPP as 2-word instructions).
+bool valuSrc0Extra(uint32_t w) {
+  const uint32_t s = w & 0x1FF;
+  return s == 255 || s == 249 || s == 250;
+}
 
 // Family classification, mirroring KytyPS5 ShaderDecoder.cpp DecodeProgram. The
 // VALU branch (bit31 == 0) further resolves VOP1/VOPC from the VOP2 opcode
@@ -140,11 +149,11 @@ Program Decode(const uint32_t* code, uint32_t max_dwords, bool stop_at_endpgm) {
       case Enc::kSopc: lit = scalar2HasLit(code[i]); break;
       case Enc::kSop1: lit = scalar1HasLit(code[i]); break;
       case Enc::kVop2:
-        lit = valuSrc0HasLit(code[i]) || in.opcode == 0x20 || in.opcode == 0x21 ||
+        lit = valuSrc0Extra(code[i]) || in.opcode == 0x20 || in.opcode == 0x21 ||
               in.opcode == 0x2C || in.opcode == 0x2D;
         break;
       case Enc::kVop1:
-      case Enc::kVopc: lit = valuSrc0HasLit(code[i]); break;
+      case Enc::kVopc: lit = valuSrc0Extra(code[i]); break;
       case Enc::kVop3:
         // A src field == 255 selects a literal after the two base words.
         if (i + 1 < max_dwords) {

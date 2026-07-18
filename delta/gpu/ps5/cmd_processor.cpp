@@ -66,31 +66,10 @@ void writeLabel(uint64_t addr, uint64_t value, bool is64) {
     *reinterpret_cast<volatile uint32_t *>(addr) = static_cast<uint32_t>(value);
 }
 
-// gfx10.3 buffer descriptors carry a SINGLE 7-bit FORMAT enum (f3[18:12]), not
-// the GCN dfmt/nfmt pair -- the old split (dfmt=fmt&0xF, nfmt=fmt>>4) produced a
-// garbage vertex format (e.g. Isaac's fmt=0x4d -> dfmt=13/nfmt=4). Translate the
-// vertex-relevant gfx10 formats to the (dfmt,nfmt) values vfmt()/
-// guestTextureFormat() already map to a VkFormat; unknown values keep the legacy
-// split so nothing regresses while an unmapped format is identified from the dump.
-void gfx10BufFmt(uint32_t g, uint32_t &dfmt, uint32_t &nfmt) {
-  switch (g) {
-    case 1:  dfmt = 1;  nfmt = 0; return;  // 8_UNORM        -> R8_UNORM
-    case 5:  dfmt = 1;  nfmt = 4; return;  // 8_UINT
-    case 14: dfmt = 3;  nfmt = 0; return;  // 8_8_UNORM      -> R8G8_UNORM
-    case 20: dfmt = 4;  nfmt = 4; return;  // 32_UINT        -> R32_UINT
-    case 22: dfmt = 4;  nfmt = 7; return;  // 32_FLOAT       -> R32_SFLOAT
-    case 42: dfmt = 10; nfmt = 0; return;  // 8_8_8_8_UNORM  -> R8G8B8A8_UNORM
-    case 46: dfmt = 10; nfmt = 4; return;  // 8_8_8_8_UINT   -> R8G8B8A8_UINT
-    case 48: dfmt = 11; nfmt = 4; return;  // 32_32_UINT     -> R32G32 (uint n/a)
-    case 50: dfmt = 11; nfmt = 7; return;  // 32_32_FLOAT    -> R32G32_SFLOAT
-    case 60: dfmt = 13; nfmt = 7; return;  // 32_32_32_FLOAT -> R32G32B32_SFLOAT
-    case 63: dfmt = 14; nfmt = 7; return;  // 32_32_32_32_FLOAT -> R32G32B32A32
-    default: dfmt = g & 0xF; nfmt = (g >> 4) & 0x7; return;  // unmapped: legacy split
-  }
-}
-
-// gfx10 128-bit V# (buffer descriptor). base48 = f0 | (f1[15:0] << 32);
-// stride f1[29:16]; num_records f2; unified 7-bit FORMAT enum f3[18:12].
+// gfx10.3 128-bit V# (buffer descriptor). base48 = f0 | (f1[15:0] << 32);
+// stride f1[29:16]; num_records f2; format f3[18:12]. The 7-bit format field is
+// the GCN (nfmt<<4)|dfmt packing (KytyPS5 BufferFormat.h DecodeTBufferFormat =
+// ((nfmt & 0x7) << 4) | (dfmt & 0xf)), so dfmt = fmt&0xF, nfmt = (fmt>>4)&0x7.
 struct VBuffer {
   uint64_t base = 0;
   uint32_t stride = 0, numRecords = 0, dfmt = 0, nfmt = 0, gfmt = 0;
@@ -101,7 +80,8 @@ VBuffer decodeVBuffer(const uint32_t *p) {
   v.stride = (p[1] >> 16) & 0x3FFF;
   v.numRecords = p[2];
   v.gfmt = (p[3] >> 12) & 0x7F;
-  gfx10BufFmt(v.gfmt, v.dfmt, v.nfmt);
+  v.dfmt = v.gfmt & 0xF;
+  v.nfmt = (v.gfmt >> 4) & 0x7;
   return v;
 }
 

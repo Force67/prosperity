@@ -64,6 +64,34 @@ bool BufLoadIsVertexFetch(const Inst& in) {
   return idxen && vaddr == 0;
 }
 
+const char* EncName(Enc e) {
+  switch (e) {
+    case Enc::kSop1: return "sop1"; case Enc::kSop2: return "sop2";
+    case Enc::kSopk: return "sopk"; case Enc::kSopc: return "sopc";
+    case Enc::kSopp: return "sopp"; case Enc::kSmrd: return "smem";
+    case Enc::kVop1: return "vop1"; case Enc::kVop2: return "vop2";
+    case Enc::kVop3: return "vop3"; case Enc::kVopc: return "vopc";
+    case Enc::kVintrp: return "vintrp"; case Enc::kDs: return "ds";
+    case Enc::kMubuf: return "mubuf"; case Enc::kMtbuf: return "mtbuf";
+    case Enc::kMimg: return "mimg"; case Enc::kExp: return "exp";
+    default: return "UNKNOWN";
+  }
+}
+
+// Per-instruction decode trace: pc / decoded length / encoding / opcode / raw
+// dword(s). A length that lands the next pc mid-instruction shows up as a garbage
+// "UNKNOWN" op on the following line (a decoder desync).
+void DumpProgram(const Program& prog, const char* tag) {
+  std::fprintf(stderr, "[gcnspv] === %s decode: %zu insts ===\n", tag, prog.size());
+  for (const Inst& in : prog) {
+    std::fprintf(stderr, "[gcnspv]   pc=%04x len=%u %-6s op=%#05x  %08x", in.pc,
+                 in.size, EncName(in.enc), in.opcode, in.raw[0]);
+    if (in.size >= 2) std::fprintf(stderr, " %08x", in.raw[1]);
+    if (in.has_literal) std::fprintf(stderr, " lit=%08x", in.literal);
+    std::fprintf(stderr, "\n");
+  }
+}
+
 // Dwords loaded by an SMEM s_buffer_load / s_load opcode (x1/x2/x4/x8/x16).
 uint32_t SmemLoadCount(uint32_t op) {
   switch (op) {
@@ -222,6 +250,25 @@ void EmitExport(Translator& t, const Inst& inst, StageContext& sc) {
   // target == 20 (PRIM) / 9 (NULL): NGG bookkeeping, nothing to emit.
 }
 
+// SDWA (src0 field == 249) / DPP (== 250) put the real src0 VGPR in the extra
+// control dword (its [7:0]); the decoder already consumed that dword (see
+// valuSrc0Extra) and stashed it in inst.literal. Resolve the effective src0 field
+// + literal so the shared VALU emitters see the real operand. The sub-dword byte/
+// word selection (SDWA) and lane swizzle (DPP) are approximated as full-dword
+// identity, so a VOP with a modifier at least reads the right register instead of
+// decoding the escape (249/250) as zero.
+void ResolveValuSrc0(const Inst& inst, uint32_t src0, uint32_t& field,
+                     uint32_t& literal) {
+  if (src0 == 249 || src0 == 250) {
+    field = 256 + (inst.literal & 0xFF);
+    literal = 0;
+    gpu::gcn::WarnUnsupported("valu.sdwa/dpp-approx", src0, inst.raw[0], inst.literal);
+  } else {
+    field = src0;
+    literal = inst.literal;
+  }
+}
+
 // ---- per-instruction dispatch ----------------------------------------------
 // Decodes RDNA2 field layouts and calls the shared GFX7 emitters (which take
 // pre-decoded operands + a GFX7-canonical opcode). The scalar and VOP1/2/C
@@ -240,15 +287,19 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       break;  // s_nop / s_waitcnt / branches: no-op here (CFG handles branches)
     case Enc::kSmrd: RdnaEmitSmem(t, inst, sc); break;
     case Enc::kVop1: {
-      const uint32_t op = inst.opcode, vdst = (w >> 17) & 0xFF, src0 = w & 0x1FF;
-      gpu::gcn::EmitVop1(t, op, vdst, t.SrcF(src0, inst.literal));
+      const uint32_t op = inst.opcode, vdst = (w >> 17) & 0xFF;
+      uint32_t src0, lit;
+      ResolveValuSrc0(inst, w & 0x1FF, src0, lit);
+      gpu::gcn::EmitVop1(t, op, vdst, t.SrcF(src0, lit));
       break;
     }
     case Enc::kVop2: {
       const uint32_t op = inst.opcode, vdst = (w >> 17) & 0xFF;
-      const uint32_t vsrc1 = (w >> 9) & 0xFF, src0 = w & 0x1FF;
-      const Id s0u = t.SrcRaw(src0, inst.literal);
-      const Id s1u = t.SrcRaw(256 + vsrc1, inst.literal);
+      const uint32_t vsrc1 = (w >> 9) & 0xFF;
+      uint32_t src0, lit;
+      ResolveValuSrc0(inst, w & 0x1FF, src0, lit);
+      const Id s0u = t.SrcRaw(src0, lit);
+      const Id s1u = t.SrcRaw(256 + vsrc1, lit);
       // RDNA2-only VOP2 numbers the shared GFX7 emitter would misinterpret: the
       // no-carry integer add/sub forms must NOT write VCC (a later v_cndmask
       // reads it), and v_xnor_b32 sits where GFX7 has v_bfm_b32.
@@ -258,8 +309,8 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
         case 0x26: t.SetVg(vdst, t.Sub(s0u, s1u)); break;         // v_sub_nc_u32
         case 0x27: t.SetVg(vdst, t.Sub(s1u, s0u)); break;         // v_subrev_nc_u32
         default:
-          gpu::gcn::EmitVop2(t, RemapVop2(op), vdst, t.SrcF(src0, inst.literal),
-                             t.SrcF(256 + vsrc1, inst.literal), inst.literal);
+          gpu::gcn::EmitVop2(t, RemapVop2(op), vdst, t.SrcF(src0, lit),
+                             t.SrcF(256 + vsrc1, lit), lit);
           break;
       }
       break;
@@ -288,11 +339,11 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
     }
     case Enc::kVopc: {
       const uint32_t op = inst.opcode;
-      const uint32_t vsrc1 = (w >> 9) & 0xFF, src0 = w & 0x1FF;
-      gpu::gcn::EmitVopc(t, op, t.SrcF(src0, inst.literal),
-                         t.SrcF(256 + vsrc1, inst.literal),
-                         t.SrcRaw(src0, inst.literal),
-                         t.SrcRaw(256 + vsrc1, inst.literal));
+      const uint32_t vsrc1 = (w >> 9) & 0xFF;
+      uint32_t src0, lit;
+      ResolveValuSrc0(inst, w & 0x1FF, src0, lit);
+      gpu::gcn::EmitVopc(t, op, t.SrcF(src0, lit), t.SrcF(256 + vsrc1, lit),
+                         t.SrcRaw(src0, lit), t.SrcRaw(256 + vsrc1, lit));
       break;
     }
     case Enc::kVintrp: {
@@ -548,6 +599,7 @@ std::vector<FetchAttr> ParseFetch(uint64_t fetch_addr) {
 bool TranslateVs(const Program& program, const uint32_t* vs_user_data,
                  const std::unordered_set<uint32_t>& flat_attrs, Recompiled& r,
                  Translator& t) {
+  if (ShDbg()) DumpProgram(program, "vs");
   const uint64_t fetch =
       (static_cast<uint64_t>(vs_user_data[1] & 0xFFFF) << 32) | vs_user_data[0];
   // Prefer a stand-alone fetch sub-shader; otherwise recover the fetch that the
@@ -633,6 +685,7 @@ bool TranslateVs(const Program& program, const uint32_t* vs_user_data,
 bool TranslatePs(const Program& program,
                  const std::unordered_set<uint32_t>& flat_attrs, Recompiled& r,
                  Translator& t) {
+  if (ShDbg()) DumpProgram(program, "ps");
   std::vector<Id> iface;
   StageContext sc;
   sc.is_ps = true;
