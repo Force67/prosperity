@@ -1571,6 +1571,14 @@ RTarget *getRT(uint64_t base, uint32_t w, uint32_t h, VkFormat fmt) {
   }
   if (g_rts.size() > 64 || !w || !h)
     return nullptr;
+  // Robustness: reject render targets with implausible dimensions or an undefined
+  // format. A garbage CB_COLOR base/scissor (e.g. a stray shader-pool RT address on
+  // the PS5 path) would otherwise feed the driver an invalid image and hard-crash it.
+  if (w > 8192 || h > 8192 || fmt == VK_FORMAT_UNDEFINED) {
+    std::fprintf(stderr, "[gpuvk] skip bad RT %#lx %ux%u fmt=%d\n",
+                 (unsigned long)base, w, h, (int)fmt);
+    return nullptr;
+  }
   RTarget t; t.w = w; t.h = h; t.fmt = fmt;
   VkImageCreateInfo ii{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
   ii.imageType = VK_IMAGE_TYPE_2D;
@@ -1586,7 +1594,10 @@ RTarget *getRT(uint64_t base, uint32_t w, uint32_t h, VkFormat fmt) {
   VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
   ai.allocationSize = mr.size;
   ai.memoryTypeIndex = findMemoryType(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-  vkAllocateMemory(g.device, &ai, nullptr, &t.mem);
+  if (vkAllocateMemory(g.device, &ai, nullptr, &t.mem) != VK_SUCCESS) {
+    vkDestroyImage(g.device, t.image, nullptr);
+    return nullptr;  // GPU OOM -> don't bind/view a memory-less image (driver crash)
+  }
   vkBindImageMemory(g.device, t.image, t.mem, 0);
   VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
   vci.image = t.image; vci.viewType = VK_IMAGE_VIEW_TYPE_2D; vci.format = fmt;
