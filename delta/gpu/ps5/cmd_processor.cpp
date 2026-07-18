@@ -248,12 +248,27 @@ std::unordered_map<ShaderKey, gcn::Recompiled, ShaderKeyHash> g_shCache;
 void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
   if (!vk::available()) return;
 
-  // gfx10.3 has no HW VS: the vertex program is the merged ES/GS NGG shader,
-  // read from the GS SH block. The PS is the ordinary pixel shader.
+  // gfx10.3 has no HW VS: the vertex program is the merged NGG shader, whose
+  // address is written to the ES (front half, 0xC8) and/or GS (back half, 0x88)
+  // PGM_LO. Some pipelines populate only the ES slot, so fall back to it when the
+  // GS slot reads 0. User data (cbuffer/MVP pointers) stays in the GS block.
   uint64_t vsA = g_regs.shaderAddr(mmSPI_SHADER_PGM_LO_GS);
+  if (!inGuest(vsA)) vsA = g_regs.shaderAddr(mmSPI_SHADER_PGM_LO_ES);
   uint64_t psA = g_regs.shaderAddr(mmSPI_SHADER_PGM_LO_PS);
   const uint32_t *vud = &g_regs[mmSPI_SHADER_USER_DATA_GS_0];
   const uint32_t *pud = &g_regs[mmSPI_SHADER_USER_DATA_PS_0];
+
+  static int s_uddump = 0;
+  if (g_trace && s_uddump < 4) {
+    s_uddump++;
+    const uint32_t *gs = &g_regs[mmSPI_SHADER_USER_DATA_GS_0];
+    const uint32_t *es = &g_regs[mmSPI_SHADER_USER_DATA_ES_0];
+    std::fprintf(stderr, "[agc]   UD GS:");
+    for (int j = 0; j < 16; j++) std::fprintf(stderr, " %08x", gs[j]);
+    std::fprintf(stderr, "\n[agc]   UD ES:");
+    for (int j = 0; j < 16; j++) std::fprintf(stderr, " %08x", es[j]);
+    std::fprintf(stderr, "\n");
+  }
 
   // This title programs the shader PGM_LO/HI at non-standard SH offsets (via the
   // inline op 0x93), so the fixed GS/PS regs above read 0. Fallback: scan the SH
@@ -338,6 +353,20 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
       d.indexData = reinterpret_cast<const void *>(ibase);
       d.indexCount = icount;
       d.indexType = g_indexType;
+      static int s_idxdump = 0;
+      if (g_trace && s_idxdump < 8) {
+        s_idxdump++;
+        const uint16_t *i16 = reinterpret_cast<const uint16_t *>(ibase);
+        const uint32_t *i32 = reinterpret_cast<const uint32_t *>(ibase);
+        std::fprintf(stderr, "[agc]   IDX ibase=%#lx count=%u type=%u  u16:",
+                     (unsigned long)ibase, icount, g_indexType);
+        for (uint32_t k = 0; k < icount && k < 8; k++)
+          std::fprintf(stderr, " %u", i16[k]);
+        std::fprintf(stderr, "  u32:");
+        for (uint32_t k = 0; k < icount && k < 8; k++)
+          std::fprintf(stderr, " %u", i32[k]);
+        std::fprintf(stderr, "\n");
+      }
     }
   }
 

@@ -1917,6 +1917,13 @@ void beginRegion(const uint64_t *mrtBase, const uint32_t *mrtInfo,
     rt.everRendered = true;
     color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     color.clearValue.color = rt.clearValue;
+    // DELTA_GPU_CLEARCOLOR: force every bound RT to clear to green this frame, to
+    // verify (via the present path) which RTs are actually bound/rendered.
+    static const bool forceClear = std::getenv("DELTA_GPU_CLEARCOLOR") != nullptr;
+    if (forceClear) {
+      color.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+      color.clearValue.color = {{0.f, 1.f, 0.f, 1.f}};
+    }
     rt.usedThisFrame = true;
     rt.lastFrame = g.frameNum;
     g.curMrt[g.curMrtCount++] = mrtBase[i];

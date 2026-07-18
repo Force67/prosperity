@@ -224,6 +224,14 @@ void EmitExport(Translator& t, const Inst& inst, StageContext& sc) {
           c[i] = (en & (1 << i)) ? t.VgF(v[i]) : t.F32(i == 3 ? 1.f : 0.f);
         col = t.m.CompositeConstruct(t.t_v4, {c[0], c[1], c[2], c[3]});
       }
+      // DELTA_GPU_FORCECOLOR: override the PS color output with opaque red, so a
+      // rendered draw is unmistakably visible regardless of texture/vertex-color
+      // math. Combined with FORCEQUAD this isolates rasterization/scanout from the
+      // PS color path.
+      static const bool force_col = std::getenv("DELTA_GPU_FORCECOLOR") != nullptr;
+      if (force_col)
+        col = t.m.CompositeConstruct(
+            t.t_v4, {t.F32(1.f), t.F32(0.f), t.F32(0.f), t.F32(1.f)});
       t.m.Store(gpu::gcn::PsColorOut(t, sc, target), col);
       if (sc.color_written_var) t.m.Store(sc.color_written_var, t.U32(1));
     } else if (target == 8 && (en & 1)) {  // MRTZ: depth export
