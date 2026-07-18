@@ -31,7 +31,7 @@ const char *syscall_getname(uint32_t idx); // name_table.cpp
 
 // Resolve a host address to "<module>+0x<off> (<seg>)" by scanning loaded module
 // images, so a guest fault points straight at a guest module offset.
-static void symbolize(uintptr_t addr, char *out, size_t n) {
+void symbolize(uintptr_t addr, char *out, size_t n) {
   if (auto *proc = proc::getActive()) {
     for (auto &mod : proc->getModuleList()) {
       auto &mi = mod->getInfo();
@@ -253,6 +253,19 @@ void markManifestFd(uint32_t fd, bool v) { if (fd < 8192) g_manifestFd[fd] = v; 
 uintptr_t g_skipFnAddrs[8] = {0};
 int g_skipFnCount = 0;
 
+// DELTA_PS5_GLYPHGUARD: recover the first-frame unbound-font null derefs in the
+// game's UI/text renderer. Each entry: the faulting rip, the GP register the
+// faulting instruction writes (zeroed so the code proceeds with a benign value),
+// and the instruction length (rip is advanced past it). The fault only fires when
+// the base register is null, so normal (bound-font) calls are untouched.
+struct NullGuard {
+  uintptr_t addr;
+  int greg;  // REG_* index to zero
+  int len;   // faulting instruction length
+};
+NullGuard g_nullGuards[16] = {};
+int g_nullGuardCount = 0;
+
 // DELTA_PS5_DCBWATCH call-order trace (see crash.h).
 static constexpr int kOrderMax = 12;
 static uintptr_t g_orderAddrs[kOrderMax];
@@ -262,6 +275,13 @@ static timespec g_orderStart;
 static uintptr_t g_retAddrs[8];
 static const char *g_retLabels[8];
 static int g_retCount = 0;
+
+// DELTA_PS5_GLYPHGUARD call-skip (see crash.h): int3 planted over a blocking
+// vtable-dispatch call; on hit, inject rax and step past the whole call insn.
+static uintptr_t g_callSkipAddrs[8];
+static long g_callSkipVals[8];
+static int g_callSkipLens[8];
+static int g_callSkipCount = 0;
 
 static void crashHandler(int sig, siginfo_t *si, void *ucv) {
 #if defined(__x86_64__)
@@ -286,6 +306,25 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
       if (n > 0) { ssize_t w = write(2, m, (size_t)n); (void)w; }
       gr[REG_RBX] = eax;                  // emulate `mov ebx,eax` (zero-extends)
       gr[REG_RIP] = g_retAddrs[i] + 2;    // resume past the 2-byte `89 c3`
+      return;
+    }
+  }
+  if (sig == SIGTRAP && g_callSkipCount && ucv) {
+    auto *uc = static_cast<ucontext_t *>(ucv);
+    auto *gr = uc->uc_mcontext.gregs;
+    for (int i = 0; i < g_callSkipCount; i++) {
+      if ((uintptr_t)gr[REG_RIP] != g_callSkipAddrs[i] + 1)
+        continue;
+      static bool s_seen[8] = {};
+      if (!s_seen[i]) {
+        s_seen[i] = true;
+        char m[64];
+        int n = std::snprintf(m, sizeof(m), "[callskip] #%d fired -> rax=%ld\n",
+                              i, g_callSkipVals[i]);
+        if (n > 0) { ssize_t w = write(2, m, (size_t)n); (void)w; }
+      }
+      gr[REG_RAX] = g_callSkipVals[i];         // inject the blocked call's return
+      gr[REG_RIP] = g_callSkipAddrs[i] + g_callSkipLens[i];  // step past the call
       return;
     }
   }
@@ -551,6 +590,22 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
   if (cpu::tryHandleJitSignal(sig, si, ucv))
     return;
 
+#if defined(__x86_64__)
+  // DELTA_PS5_GLYPHGUARD: recover a registered null-object deref in the UI/text
+  // renderer -- zero the destination register and step past the faulting load so
+  // the code continues with a benign value (unbound-font text renders empty).
+  if (sig == SIGSEGV && g_nullGuardCount && ucv) {
+    auto *uc = static_cast<ucontext_t *>(ucv);
+    auto *gr = uc->uc_mcontext.gregs;
+    for (int i = 0; i < g_nullGuardCount; i++) {
+      if ((uintptr_t)gr[REG_RIP] != g_nullGuards[i].addr) continue;
+      gr[g_nullGuards[i].greg] = 0;
+      gr[REG_RIP] += g_nullGuards[i].len;
+      return;
+    }
+  }
+#endif
+
   // Async-signal-safe entry marker: proves the handler actually ran even if a
   // later step (symbolize / backtrace) re-faults. Without it a re-fault inside
   // the handler is indistinguishable from the handler never being entered.
@@ -791,6 +846,26 @@ void setHdrTrace(uintptr_t addr) {
 }
 void setRdoffFix(uintptr_t addr) { g_rdoffAddr = addr; }
 void setSkipFn(uintptr_t addr) { if (g_skipFnCount < 8) g_skipFnAddrs[g_skipFnCount++] = addr; }
+void setNullGuard(uintptr_t addr, GuardReg reg, int insnLen) {
+#if defined(__x86_64__)
+  if (g_nullGuardCount >= 16) return;
+  int greg = reg == GuardReg::rax ? REG_RAX : REG_RSI;
+  g_nullGuards[g_nullGuardCount++] = {addr, greg, insnLen};
+#else
+  (void)addr; (void)reg; (void)insnLen;
+#endif
+}
+void setCallSkip(uintptr_t addr, long raxVal, int insnLen) {
+#if defined(__x86_64__)
+  if (g_callSkipCount >= 8) return;
+  g_callSkipAddrs[g_callSkipCount] = addr;
+  g_callSkipVals[g_callSkipCount] = raxVal;
+  g_callSkipLens[g_callSkipCount] = insnLen;
+  g_callSkipCount++;
+#else
+  (void)addr; (void)raxVal; (void)insnLen;
+#endif
+}
 void setOrderTrace(uintptr_t addr, const char *label) {
   if (g_orderCount >= kOrderMax)
     return;

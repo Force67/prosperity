@@ -4,6 +4,7 @@
 
 #include <base.h>
 #include <cstring>
+#include <cstdlib>
 #include "sys_generic.h"
 #include "kern/proc.h"
 
@@ -22,7 +23,9 @@ int PS4ABI sys_ioctl(uint32_t fd, uint32_t cmd, void *data) {
   // some middleware treats an ioctl error on its setup probe as fatal (DOOM's
   // bundled FMOD aborts audio init on the EBADF). Zero the IOC_OUT payload so
   // the caller reads a benign result instead of stack garbage.
-  std::printf("[ioctl] soft-ok: fd=%u cmd=%#x\n", fd, cmd);
+  static const bool trace = std::getenv("DELTA_IOCTL_TRACE") != nullptr;
+  if (trace)
+    std::printf("[ioctl] soft-ok: fd=%u cmd=%#x\n", fd, cmd);
   if (data) {
     uint32_t sz = (cmd >> 16) & 0x1fff;
     if (cmd & 0x40000000u) // IOC_OUT

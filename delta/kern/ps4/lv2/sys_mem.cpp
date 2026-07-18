@@ -20,6 +20,7 @@
 #include <unordered_map>
 
 #include "../../proc.h"
+#include "../../crash.h"
 #include "error_table.h"
 #include "sys_mem.h"
 
@@ -249,9 +250,37 @@ uint8_t *PS4ABI sys_mmap(void *addr, size_t size, uint32_t prot, uint32_t flags,
 
   utl::protectMem(static_cast<void *>(ptr), size, ppt::rwx);
 
-  std::printf("mmap %p, %x, %p\n", addr, size, _ReturnAddress());
-  // LOG_WARNING("addr={}, len={}, requested by {}", fmt::ptr(addr), len,
-  // fmt::ptr(_ReturnAddress()));
+  // DELTA_GNMAP_TRACE: log any mapping that lands in the GNM/GPU aperture
+  // (0x8000_.. below the big dmem pools) to pin how the AGC ring buffers (ACQRB
+  // etc.) are mapped and by whom (return address). The AGC command ring is mapped
+  // here as plain anon (fd=-1); its coherency with the guest's PM4 writes is an
+  // open item (Onion/Garlic dual mapping -- see ps5-boot-progress memory).
+  static const bool gnmapTrace = std::getenv("DELTA_GNMAP_TRACE") != nullptr;
+  if (gnmapTrace) {
+    uint64_t r = reinterpret_cast<uint64_t>(ptr);
+    if (r >= 0x8000000000ull && r < 0x8300000000ull) {
+      // Walk the guest frame chain (libkernel keeps frame pointers) so we see the
+      // real caller above libkernel's mmap wrapper, not just the wrapper itself.
+      std::fprintf(stderr, "[gnmap] %p size=%#x fd=%d flags=%#x  callers:", ptr,
+                   size, static_cast<int>(fd), flags);
+      void *fp = __builtin_frame_address(0);
+      for (int depth = 0; depth < 20 && fp; depth++) {
+        auto *frame = static_cast<void **>(fp);
+        void *ret = frame[1];
+        if (!ret) break;
+        char sym[160];
+        krnl::symbolize(reinterpret_cast<uintptr_t>(ret), sym, sizeof(sym));
+        std::fprintf(stderr, " [%s]", sym);
+        fp = frame[0];
+        if (reinterpret_cast<uintptr_t>(fp) < 0x10000) break;
+      }
+      std::fprintf(stderr, "\n");
+    }
+  }
+
+  static const bool mmapLog = std::getenv("DELTA_MMAP_LOG") != nullptr;
+  if (mmapLog)
+    std::printf("mmap %p, %x, %p\n", addr, size, _ReturnAddress());
 
   if (flags & mFlags::stack)
     return &static_cast<uint8_t *>(ptr)[size];

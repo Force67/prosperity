@@ -19,6 +19,7 @@
 #include <sys/mman.h>
 
 #include "../../proc.h"
+#include "../dev/dma_dev.h"  // dmemBackingFd/Size (shared physical dmem store)
 #include "error_table.h"
 #include "sys_mem.h"      // shared enums + sys_mmap (dmem maps delegate to it)
 #include "sys_mem_ext.h"
@@ -174,16 +175,42 @@ int PS4ABI sys_batch_map(uint32_t /*handle*/, uint32_t /*flags*/, void *,
 
 int PS4ABI sys_set_vm_container(uint32_t) { return 0; }
 
-// Map a direct-memory region. We don't track physical dmem, so satisfy it with
-// an ordinary anonymous low-guest mapping. sys_mmap returns (uint8_t*)-1 on
-// failure, propagated as ENOMEM.
-int64_t PS4ABI sys_mmap_dmem(void *addr, size_t len, int memType, int prot,
-                             int /*flags*/, int64_t directMemoryStart) {
-  uint8_t *p = sys_mmap(addr, len, static_cast<uint32_t>(prot), mFlags::anon,
-                        static_cast<uint32_t>(-1), 0);
+// Map a direct-memory region (sceKernelMapDirectMemory, syscall 628). Real ABI
+// (verified from libkernel 01.14.00): rdi=VA hint, rsi=len, rdx=prot,
+// rcx=flags (bit 0x10 = FIXED), r8=packed(alignShift<<24 | memType),
+// r9=directMemoryStart (the PHYSICAL dmem offset from AllocateMainDirectMemory).
+//
+// The physical offset is the source of truth: map the VA to the shared dmem
+// backing store at that offset (MAP_SHARED) so every VA that maps the same
+// physOffset -- a CPU-written GPU command buffer and the GPU's own view of it --
+// aliases the same bytes. Without this the two views were independent anonymous
+// pages and the command processor read all-zero DCBs. Falls back to anonymous
+// memory when the backing is unavailable. Returns the mapped VA (rax).
+int64_t PS4ABI sys_mmap_dmem(void *addr, size_t len, int prot, int flags,
+                             int64_t /*packed*/, int64_t physOffset) {
+  const bool fixedReq = (flags & 0x10) != 0;
+  auto *active = proc::getActive();
+  const bool ps5 = active && active->getPlatform() == proc::platform::ps5;
+  const int fd = ps5 ? dmemBackingFd() : -1;  // PS5-only shared store (WIP)
   if (std::getenv("DELTA_DMEM_TRACE"))
-    std::fprintf(stderr, "[dmem] map req_addr=%p len=%#zx memType=%d prot=%#x dmStart=%#llx -> %p\n",
-                 addr, len, memType, prot, (unsigned long long)directMemoryStart, (void *)p);
+    std::fprintf(stderr,
+                 "[dmem] map628 va=%p len=%#zx prot=%#x flags=%#x physOff=%#llx fixed=%d\n",
+                 addr, len, prot, flags, (unsigned long long)physOffset, fixedReq ? 1 : 0);
+  if (fd >= 0 && physOffset >= 0 &&
+      static_cast<uint64_t>(physOffset) + len <= dmemBackingSize()) {
+    const int mflags = MAP_SHARED | (fixedReq ? MAP_FIXED : 0);
+    void *p = ::mmap(addr, len, PROT_READ | PROT_WRITE, mflags, fd,
+                     static_cast<off_t>(physOffset));
+    if (p != MAP_FAILED) {
+      proc::getActive()->getVma().add(reinterpret_cast<uint8_t *>(p), len,
+                                      utl::pageProtection::w);
+      return reinterpret_cast<int64_t>(p);
+    }
+  }
+  // Fallback: plain anonymous mapping (loses aliasing but keeps the region live).
+  uint8_t *p = sys_mmap(addr, len, PROT_READ | PROT_WRITE,
+                        mFlags::anon | (fixedReq ? mFlags::fixed : 0),
+                        static_cast<uint32_t>(-1), 0);
   if (p == reinterpret_cast<uint8_t *>(-1))
     return -SysError::eNOMEM;
   return reinterpret_cast<int64_t>(p);

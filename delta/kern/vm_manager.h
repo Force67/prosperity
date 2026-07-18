@@ -48,6 +48,13 @@ public:
   // true if [ptr, ptr+size) hits a tracked mapping
   bool overlaps(uint8_t *ptr, size_t size) const;
 
+  // Diagnostic: invoke `fn(ctx, ptr, size)` for every tracked mapping in the GPU
+  // aperture [0x8000_0000_00, 0x8100_0000_00) that is small enough to sweep
+  // (<= 4 MiB) -- used to locate the guest's PM4 command buffers without a
+  // multi-GB scan of the big dmem pools.
+  void forEachGpuAperturePage(void (*fn)(void *, uint8_t *, size_t),
+                              void *ctx) const;
+
   uint8_t *mapMemory(uint8_t *preference, size_t size, utl::pageProtection);
   void unmapRtMemory(uint8_t *);
 

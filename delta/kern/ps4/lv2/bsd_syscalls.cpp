@@ -12,6 +12,8 @@
 #include <base.h>
 #include <logger/logger.h>
 #include <cstring>
+#include <cstdlib>
+#include <cstdio>
 
 namespace krnl {
 int PS4ABI sys_exit() {
@@ -176,10 +178,13 @@ int PS4ABI sys_getpid() { return 0x1337; }
 int PS4ABI sys_write(uint32_t fd, const void *buf, size_t nbytes) {
   if (fd == 1 || fd == 2) // stdout, stderr
   {
-    auto b = static_cast<const char *>(buf);
-    for (size_t i = 0; i < nbytes; ++i, ++b) {
-      printf("%c", *b);
-    }
+    // DELTA_QUIET_GUEST: the game's debug prints (per-frame message-pump chatter)
+    // flood stdout char-by-char and corrupt our diagnostic logs via interleaving.
+    // Suppress guest fd1/2 output while diagnosing the host-side render path.
+    static const bool quiet = std::getenv("DELTA_QUIET_GUEST") != nullptr;
+    if (quiet)
+      return static_cast<int>(nbytes);
+    fwrite(buf, 1, nbytes, stdout);
     return static_cast<int>(nbytes);
   }
 

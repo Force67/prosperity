@@ -34,8 +34,8 @@ int PS4ABI sys_virtual_query(const void *addr, int flags, void *info,
 int PS4ABI sys_batch_map(uint32_t handle, uint32_t flags, void *entries,
                          int count, int *processed);
 int PS4ABI sys_set_vm_container(uint32_t container);
-int64_t PS4ABI sys_mmap_dmem(void *addr, size_t len, int memType, int prot,
-                             int flags, int64_t directMemoryStart);
+int64_t PS4ABI sys_mmap_dmem(void *addr, size_t len, int prot, int flags,
+                             int64_t packed, int64_t physOffset);
 int PS4ABI sys_cpuset(void *out, int level, int which, int64_t id, size_t size,
                       void *mask);
 int PS4ABI sys_extend_page_table_pool();

@@ -18,7 +18,10 @@ kObject::kObject(proc *process, oType type) : otype(type), process(process) {
   uint32_t temp = 0;
   process->getObjTable().add(this, temp);
 
-  LOG_INFO("assigned handle {}", temp);
+  static const char *tn[] = {"file", "device", "equeue", "eventflag",
+                             "semaphore", "shm"};
+  LOG_INFO("assigned handle {} type={}", temp,
+           tn[static_cast<int>(type)]);
 }
 
 void kObject::release() {

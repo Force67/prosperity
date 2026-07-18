@@ -63,6 +63,16 @@ bool vmManager::overlaps(uint8_t *ptr, size_t size) const {
   return false;
 }
 
+void vmManager::forEachGpuAperturePage(void (*fn)(void *, uint8_t *, size_t),
+                                       void *ctx) const {
+  std::lock_guard lock(vmlock);
+  for (const auto &page : rtPages) {
+    auto a = reinterpret_cast<uint64_t>(page.ptr);
+    if (a >= 0x8000000000ull && a < 0x8100000000ull)
+      fn(ctx, page.ptr, page.size);  // callback caps how much of a big pool it sweeps
+  }
+}
+
 uint8_t *vmManager::mapMemory(uint8_t *preference, size_t size,
                               utl::pageProtection prot) {
   const auto allocType = utl::allocationType::reservecommit;
