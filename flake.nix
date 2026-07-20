@@ -74,17 +74,49 @@
 
           shellHook = ''
             echo "ps4delta dev shell, run:  cmake -G Ninja -B build && ninja -C build"
-            # Vulkan ICD: prefer the system GPU driver. NixOS exposes hardware
-            # Vulkan ICDs under /run/opengl-driver, so when those exist we leave
-            # VK_ICD_FILENAMES unset and let the loader find the real GPU (the
-            # backend then prefers a discrete device over llvmpipe). Only pin nix
-            # lavapipe (software Vulkan) when there is no system driver at all
-            # (headless / GPU-less CI), so rendering still works there.
-            if [ -z "$VK_ICD_FILENAMES" ] && \
-               ! ls /run/opengl-driver/share/vulkan/icd.d/*.json >/dev/null 2>&1; then
-              for f in ${pkgs.mesa}/share/vulkan/icd.d/lvp_icd.*.json; do
-                [ -e "$f" ] && export VK_ICD_FILENAMES="$f" && break
+            # Vulkan ICD: prefer the system GPU driver. Hardware ICDs live under
+            # /run/opengl-driver on NixOS and /usr/share/vulkan/icd.d (or
+            # /etc/vulkan/icd.d) on FHS distros. When one exists, point
+            # VK_ICD_FILENAMES at it explicitly (plus nix lavapipe as fallback):
+            # the nix vulkan-loader does not scan the system data dirs, so
+            # leaving it unset used to silently select lavapipe and run the
+            # whole renderer on a ~30ms/frame software rasteriser even on a box
+            # with a real GPU. Only pin lavapipe alone when there is no system
+            # driver at all (headless / GPU-less CI).
+            if [ -z "$VK_ICD_FILENAMES" ]; then
+              icds=""
+              for d in /run/opengl-driver/share/vulkan/icd.d \
+                       /usr/share/vulkan/icd.d /etc/vulkan/icd.d; do
+                for f in "$d"/nvidia_icd*.json "$d"/radeon_icd*.json \
+                         "$d"/intel_icd*.json; do
+                  [ -e "$f" ] && icds="$icds''${icds:+:}$f"
+                done
               done
+              for f in ${pkgs.mesa}/share/vulkan/icd.d/lvp_icd.*.json; do
+                [ -e "$f" ] && icds="$icds''${icds:+:}$f" && break
+              done
+              [ -n "$icds" ] && export VK_ICD_FILENAMES="$icds"
+              # nix glibc ignores /etc/ld.so.cache, so dlopen of a system ICD
+              # (libGLX_nvidia.so.0 etc.) cannot find the driver library. The
+              # FHS lib dirs must NOT go on LD_LIBRARY_PATH (it outranks nix
+              # RUNPATHs, so the system glibc would shadow the nix one and break
+              # every binary in the shell). Instead expose ONLY the driver libs
+              # through a symlink dir: nix binaries never request these names,
+              # and the driver's own libc/libX11 deps still resolve to nix libs.
+              nvdir="/tmp/ps4delta-nvlibs-$(id -u)"
+              mkdir -p "$nvdir" && rm -f "$nvdir"/*.so* 2>/dev/null
+              for l in /usr/lib/aarch64-linux-gnu/libGLX_nvidia.so* \
+                       /usr/lib/aarch64-linux-gnu/libnvidia*.so* \
+                       /usr/lib/x86_64-linux-gnu/libGLX_nvidia.so* \
+                       /usr/lib/x86_64-linux-gnu/libnvidia*.so*; do
+                [ -e "$l" ] && ln -sf "$l" "$nvdir/"
+              done
+              if ls "$nvdir"/*.so* >/dev/null 2>&1; then
+                # The driver's DT_NEEDED includes X11 libs that nothing else has
+                # loaded yet when the renderer (windowless) dlopens the ICD, so
+                # give it the nix X11 libs too (X-only dirs: no libc shadowing).
+                export LD_LIBRARY_PATH="$LD_LIBRARY_PATH''${LD_LIBRARY_PATH:+:}$nvdir:${pkgs.xorg.libX11}/lib:${pkgs.xorg.libXext}/lib:${pkgs.xorg.libxcb}/lib:${pkgs.libglvnd}/lib"
+              fi
             fi
           '';
         };
