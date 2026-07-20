@@ -13,10 +13,12 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -140,7 +142,48 @@ struct State {
   bool geometryShader = false;
   bool frameHadRoom = false;  // this frame sampled a room-sized (~832w) RT
   bool frameRoomBake = false; // this frame RENDERED into a room-sized (~832w) RT
+
+  // Frame pipelining: two frame slots so frame N records (and the guest
+  // emulates) while frame N-1 still rasterizes on the (software) GPU. Slot N-1's
+  // fence is waited -- and its readback presented, one frame late -- at frame
+  // N's endFrame. Each slot owns a command buffer, a fence, a readback buffer,
+  // and half of each host-visible ring; cmd/readback* above alias the active
+  // slot (g.fence stays dedicated to the synchronous aux submits: texture
+  // uploads, compute dispatches, rtstat).
+  struct FrameSlot {
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    VkFence fence = VK_NULL_HANDLE;
+    VkBuffer readback = VK_NULL_HANDLE;
+    VkDeviceMemory readbackMem = VK_NULL_HANDLE;
+    void *readbackMap = nullptr;
+    VkDeviceSize readbackSize = 0;
+    bool submitted = false;    // fence submitted and not yet waited
+    bool presentable = false;  // the frame copied pixels into `readback`
+    // Metadata of the recorded frame, consumed when it is presented.
+    uint32_t w = 0, h = 0;
+    VkFormat fmt = VK_FORMAT_UNDEFINED;
+    int frameNum = 0;
+    uint32_t frameDraws = 0, frameMaxIdx = 0;
+    bool frameHadRoom = false;
+    uint64_t presentBase = 0, scanoutBase = 0;
+  };
+  FrameSlot slots[2];
+  uint32_t slotIdx = 0;
+  // Per-frame ring windows (each slot gets half of vb/ib/ubo).
+  VkDeviceSize vbEnd = kVbRing, ibEnd = kIbRing, uboEnd = kUboRing;
 } g;
+
+// Pipelined by default; DELTA_GPU_SYNC=1 restores the submit-and-wait frame.
+// DELTA_GPU_RTSTAT also forces sync: its readback reuses the active slot's
+// buffer mid-flight, which pipelining would present a frame later.
+bool framePipelined() {
+  static const bool sync = [] {
+    const char *e = std::getenv("DELTA_GPU_SYNC");
+    return (e && e[0] && e[0] != '0') ||
+           std::getenv("DELTA_GPU_RTSTAT") != nullptr;
+  }();
+  return !sync;
+}
 
 struct TexImageKey {
   uint64_t base = 0;
@@ -254,15 +297,33 @@ std::vector<TexImageEntry> g_retiredTexImages;
 std::vector<TexViewEntry> g_retiredTexViews;
 std::vector<TexEntry> g_retiredTexSets;
 
-// Content fingerprint of every guest dword. This is checked at most once per
-// frame unless a compute write explicitly invalidates the resource.
+// Content fingerprint of every guest byte. This is checked at most once per
+// frame per texture unless a compute write explicitly invalidates the
+// resource, and big atlases make it the dominant per-frame CPU cost -- so it
+// runs four independent FNV lanes over 64-bit words (instead of one dependent
+// multiply per dword) to break the serial multiply chain and go memory-bound.
 uint64_t texHash(uint64_t base, uint64_t bytes) {
-  const uint32_t *p = reinterpret_cast<const uint32_t *>(base);
-  uint64_t count = bytes / 4;
-  uint64_t hsh = 1469598103934665603ull;
-  for (uint64_t i = 0; i < count; i++)
-    hsh = (hsh ^ p[i]) * 1099511628211ull;
-  return hsh ^ (count << 1);
+  constexpr uint64_t kPrime = 1099511628211ull;
+  const uint64_t *w = reinterpret_cast<const uint64_t *>(base);
+  const uint64_t nw = bytes / 8;
+  uint64_t h0 = 1469598103934665603ull, h1 = 0x9e3779b97f4a7c15ull,
+           h2 = 0xc2b2ae3d27d4eb4full, h3 = 0x165667b19e3779f9ull;
+  uint64_t i = 0;
+  for (; i + 4 <= nw; i += 4) {
+    h0 = (h0 ^ w[i + 0]) * kPrime;
+    h1 = (h1 ^ w[i + 1]) * kPrime;
+    h2 = (h2 ^ w[i + 2]) * kPrime;
+    h3 = (h3 ^ w[i + 3]) * kPrime;
+  }
+  for (; i < nw; i++) h0 = (h0 ^ w[i]) * kPrime;
+  if (const uint64_t tail = bytes & 7) {
+    uint64_t last = 0;
+    std::memcpy(&last, reinterpret_cast<const uint8_t *>(base) + bytes - tail,
+                tail);
+    h1 = (h1 ^ last) * kPrime;
+  }
+  uint64_t h = ((h0 * kPrime + h1) * kPrime + h2) * kPrime + h3;
+  return h ^ (bytes << 1);
 }
 
 VkFormat guestTextureFormat(uint32_t dfmt, uint32_t nfmt) {
@@ -464,7 +525,22 @@ int g_dumpedFrames = 0;
 // per-frame wall time goes: our GPU code (draw + endFrame, incl. the readback
 // stall and synchronous texture uploads) vs the guest/FEX time outside it.
 uint64_t g_nsDraw = 0, g_nsEnd = 0, g_nsReadback = 0, g_nsTexUp = 0;
+uint64_t g_nsSubmit = 0, g_nsPresent = 0;
 uint32_t g_texUps = 0;
+
+// Per-frame stage accumulators (ns) feeding the on-screen perf overlay: reset
+// when a frame's sample is pushed (pushStageSample), filled by the same code
+// paths as the g_ns* window counters above.
+uint64_t g_frDraw = 0, g_frSubmit = 0, g_frWait = 0, g_frPresent = 0,
+         g_frTexUp = 0;
+
+// Rolling per-frame stage history for the overlay graph (~4s at 60 fps).
+struct StageSample {
+  float rec, sub, gpu, prs, tex, oth, wall;  // ms
+};
+constexpr int kStageHistN = 240;
+StageSample g_stageHist[kStageHistN];
+int g_stageHistPos = 0, g_stageHistCount = 0;
 inline uint64_t nowNs() {
   return std::chrono::duration_cast<std::chrono::nanoseconds>(
              std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -629,9 +705,13 @@ bool createDevice() {
   ca.commandPool = g.pool;
   ca.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
   ca.commandBufferCount = 1;
-  VKOK(vkAllocateCommandBuffers(g.device, &ca, &g.cmd));
   VkFenceCreateInfo fc{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-  VKOK(vkCreateFence(g.device, &fc, nullptr, &g.fence));
+  VKOK(vkCreateFence(g.device, &fc, nullptr, &g.fence));  // aux submits only
+  for (auto &slot : g.slots) {
+    VKOK(vkAllocateCommandBuffers(g.device, &ca, &slot.cmd));
+    VKOK(vkCreateFence(g.device, &fc, nullptr, &slot.fence));
+  }
+  g.cmd = g.slots[0].cmd;
 
   // Vertex ring.
   VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
@@ -1184,7 +1264,8 @@ void uploadTexPixels(VkImage img, uint64_t base,
   vkResetFences(g.device, 1, &g.fence);
   vkQueueSubmit(g.queue, 1, &si, g.fence);
   vkWaitForFences(g.device, 1, &g.fence, VK_TRUE, UINT64_MAX);
-  g_nsTexUp += nowNs() - _t0; g_texUps++;
+  uint64_t _texDt = nowNs() - _t0;
+  g_nsTexUp += _texDt; g_frTexUp += _texDt; g_texUps++;
   vkFreeCommandBuffers(g.device, g.pool, 1, &c);
   vkDestroyBuffer(g.device, stg, nullptr);
   vkFreeMemory(g.device, stgMem, nullptr);
@@ -1443,19 +1524,32 @@ void clearMultiTexCache() {
   g_mtexCache.clear();
 }
 void releaseRetiredTextures() {
-  for (const MultiTexSet &entry : g_retiredMtex)
+  // Two-stage aging for the pipelined frame: an object retired while frame N
+  // recorded may still be referenced by BOTH in-flight command buffers (N-1
+  // until N's endFrame, N until N+1's endFrame). Objects therefore rest one
+  // extra beginFrame in the `aged` generation before being destroyed -- by
+  // then every command buffer that could reference them has been fence-waited.
+  static std::vector<MultiTexSet> agedMtex;
+  static std::vector<TexEntry> agedTexSets;
+  static std::vector<TexViewEntry> agedTexViews;
+  static std::vector<TexImageEntry> agedTexImages;
+  for (const MultiTexSet &entry : agedMtex)
     vkFreeDescriptorSets(g.device, entry.pool, 1, &entry.set);
-  g_retiredMtex.clear();
-  for (const TexEntry &e : g_retiredTexSets)
+  for (const TexEntry &e : agedTexSets)
     if (e.set) vkFreeDescriptorSets(g.device, e.pool, 1, &e.set);
-  g_retiredTexSets.clear();
-  for (const TexViewEntry &e : g_retiredTexViews)
+  for (const TexViewEntry &e : agedTexViews)
     if (e.view) vkDestroyImageView(g.device, e.view, nullptr);
-  g_retiredTexViews.clear();
-  for (const TexImageEntry &e : g_retiredTexImages) {
+  for (const TexImageEntry &e : agedTexImages) {
     if (e.image) vkDestroyImage(g.device, e.image, nullptr);
     if (e.mem) vkFreeMemory(g.device, e.mem, nullptr);
   }
+  agedMtex = std::move(g_retiredMtex);
+  agedTexSets = std::move(g_retiredTexSets);
+  agedTexViews = std::move(g_retiredTexViews);
+  agedTexImages = std::move(g_retiredTexImages);
+  g_retiredMtex.clear();
+  g_retiredTexSets.clear();
+  g_retiredTexViews.clear();
   g_retiredTexImages.clear();
 }
 VkDescriptorSet getMultiTexSet(const DrawInfo &d, const VkImageView *resolvedViews,
@@ -1963,6 +2057,203 @@ void beginRegion(const uint64_t *mrtBase, const uint32_t *mrtInfo,
                   g.curMrtCount && colors[0].loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR);
 }
 
+// ---- performance overlay ----------------------------------------------------
+// Stacked per-stage frame-time columns drawn over the presented image (default
+// on; DELTA_GPU_OVERLAY=0 disables). One column per frame, 2 px per ms:
+//   green  REC  command recording + per-draw analysis (vk::draw)
+//   yellow SUB  command-buffer end + queue submit
+//   red    GPU  fence wait (the rasterizer)
+//   blue   PRS  window present (SDL blit)
+//   purple TEX  synchronous texture uploads
+//   gray   OTH  everything else (guest emulation between frames)
+// Drawn AFTER the PPM capture paths so dumps stay clean.
+
+void pushStageSample() {
+  static uint64_t prevNs = 0;
+  const uint64_t now = nowNs();
+  const float wall = prevNs ? (now - prevNs) / 1e6f : 0.0f;
+  prevNs = now;
+  StageSample s;
+  s.rec = g_frDraw / 1e6f;
+  s.sub = g_frSubmit / 1e6f;
+  s.gpu = g_frWait / 1e6f;
+  s.prs = g_frPresent / 1e6f;  // accrued after last frame's sample (1-frame lag)
+  s.tex = g_frTexUp / 1e6f;
+  const float known = s.rec + s.sub + s.gpu + s.prs + s.tex;
+  s.oth = wall > known ? wall - known : 0.0f;
+  s.wall = wall;
+  g_frDraw = g_frSubmit = g_frWait = g_frPresent = g_frTexUp = 0;
+  g_stageHist[g_stageHistPos] = s;
+  g_stageHistPos = (g_stageHistPos + 1) % kStageHistN;
+  if (g_stageHistCount < kStageHistN) g_stageHistCount++;
+}
+
+// 3x5 bitmap font (rows top-down, bit 2 = left pixel). Uppercase + digits only.
+const uint8_t *ovGlyph(char c) {
+  struct Glyph { char c; uint8_t rows[5]; };
+  static const Glyph f[] = {
+      {'0', {7, 5, 5, 5, 7}}, {'1', {2, 6, 2, 2, 7}}, {'2', {7, 1, 7, 4, 7}},
+      {'3', {7, 1, 7, 1, 7}}, {'4', {5, 5, 7, 1, 1}}, {'5', {7, 4, 7, 1, 7}},
+      {'6', {7, 4, 7, 5, 7}}, {'7', {7, 1, 1, 2, 2}}, {'8', {7, 5, 7, 5, 7}},
+      {'9', {7, 5, 7, 1, 7}}, {'.', {0, 0, 0, 0, 2}}, {'A', {7, 5, 7, 5, 5}},
+      {'B', {6, 5, 6, 5, 6}}, {'C', {7, 4, 4, 4, 7}}, {'D', {6, 5, 5, 5, 6}},
+      {'E', {7, 4, 7, 4, 7}}, {'F', {7, 4, 7, 4, 4}}, {'G', {7, 4, 5, 5, 7}},
+      {'H', {5, 5, 7, 5, 5}}, {'I', {7, 2, 2, 2, 7}}, {'L', {4, 4, 4, 4, 7}},
+      {'M', {5, 7, 7, 5, 5}}, {'N', {5, 7, 7, 7, 5}}, {'O', {7, 5, 5, 5, 7}},
+      {'P', {7, 5, 7, 4, 4}}, {'R', {7, 5, 6, 5, 5}}, {'S', {7, 4, 7, 1, 7}},
+      {'T', {7, 2, 2, 2, 2}}, {'U', {5, 5, 5, 5, 7}}, {'V', {5, 5, 5, 5, 2}},
+      {'W', {5, 5, 7, 7, 5}}, {'X', {5, 5, 2, 5, 5}},
+  };
+  for (const Glyph &gl : f)
+    if (gl.c == c) return gl.rows;
+  return nullptr;  // unknown/space -> blank
+}
+
+inline void ovFill(uint8_t *b, uint32_t w, uint32_t h, int x, int y, int fw,
+                   int fh, uint32_t bgra) {
+  if (x < 0 || y < 0) return;
+  for (int yy = y; yy < y + fh && yy < (int)h; yy++) {
+    uint32_t *row = reinterpret_cast<uint32_t *>(b + (size_t)yy * w * 4);
+    for (int xx = x; xx < x + fw && xx < (int)w; xx++) row[xx] = bgra;
+  }
+}
+
+void ovText(uint8_t *b, uint32_t w, uint32_t h, int x, int y, int scale,
+            uint32_t bgra, const char *s) {
+  for (; *s; s++, x += 4 * scale) {
+    const uint8_t *rows = ovGlyph(*s);
+    if (!rows) continue;
+    for (int ry = 0; ry < 5; ry++)
+      for (int rx = 0; rx < 3; rx++)
+        if (rows[ry] & (4 >> rx))
+          ovFill(b, w, h, x + rx * scale, y + ry * scale, scale, scale, bgra);
+  }
+}
+
+void drawPerfOverlay(uint8_t *bgra, uint32_t w, uint32_t h) {
+  static const bool off = [] {
+    const char *e = std::getenv("DELTA_GPU_OVERLAY");
+    return e && e[0] == '0';
+  }();
+  if (off || !g_stageHistCount || w < 560 || h < 280) return;
+  // BGRA little-endian constants (0xAARRGGBB written as a uint32).
+  static constexpr uint32_t kCol[6] = {
+      0xFF32C832,  // REC green
+      0xFFC8C828,  // SUB yellow
+      0xFFE63232,  // GPU red
+      0xFF3288E6,  // PRS blue
+      0xFFC832C8,  // TEX purple
+      0xFF828282,  // OTH gray
+  };
+  static const char *kLabel[6] = {"REC", "SUB", "GPU", "PRS", "TEX", "OTH"};
+  constexpr int colW = 2, graphH = 120;
+  constexpr float pxPerMs = 2.0f;
+  const int graphW = kStageHistN * colW;
+  const int x0 = 10, y1 = (int)h - 10, y0 = y1 - graphH;
+  const int legendH = 7 * 14 + 4;
+  const int panelY0 = y0 - legendH - 4;
+  // Darken the panel background (keeps the game visible underneath).
+  for (int yy = panelY0 - 4; yy < y1 + 4 && yy < (int)h; yy++) {
+    if (yy < 0) continue;
+    uint32_t *row = reinterpret_cast<uint32_t *>(bgra + (size_t)yy * w * 4);
+    for (int xx = x0 - 4; xx < x0 + graphW + 4 && xx < (int)w; xx++)
+      row[xx] = (row[xx] >> 2) & 0x3F3F3F3F;
+  }
+  // Columns: oldest left, newest right; stages stacked bottom-up.
+  for (int i = 0; i < kStageHistN; i++) {
+    int idx = g_stageHistPos - kStageHistN + i;
+    if (idx < g_stageHistPos - g_stageHistCount) continue;  // no sample yet
+    idx = ((idx % kStageHistN) + kStageHistN) % kStageHistN;
+    const StageSample &s = g_stageHist[idx];
+    const float vals[6] = {s.rec, s.sub, s.gpu, s.prs, s.tex, s.oth};
+    int x = x0 + i * colW, yBase = y1;
+    for (int st = 0; st < 6; st++) {
+      int hpx = (int)(vals[st] * pxPerMs + 0.5f);
+      if (yBase - hpx < y0) hpx = yBase - y0;
+      if (hpx > 0) ovFill(bgra, w, h, x, yBase - hpx, colW, hpx, kCol[st]);
+      yBase -= hpx;
+      if (yBase <= y0) break;
+    }
+  }
+  // 60 / 30 fps reference lines.
+  for (int xx = x0; xx < x0 + graphW; xx += 3) {
+    ovFill(bgra, w, h, xx, y1 - (int)(16.7f * pxPerMs), 1, 1, 0xFFF0F0F0);
+    ovFill(bgra, w, h, xx, y1 - (int)(33.3f * pxPerMs), 1, 1, 0xFFF0F0F0);
+  }
+  // Legend: averages over the last second's worth of samples.
+  const int nAvg = g_stageHistCount < 60 ? g_stageHistCount : 60;
+  float avg[6] = {}, avgWall = 0;
+  for (int i = 1; i <= nAvg; i++) {
+    const StageSample &s =
+        g_stageHist[((g_stageHistPos - i) % kStageHistN + kStageHistN) %
+                    kStageHistN];
+    avg[0] += s.rec; avg[1] += s.sub; avg[2] += s.gpu;
+    avg[3] += s.prs; avg[4] += s.tex; avg[5] += s.oth;
+    avgWall += s.wall;
+  }
+  for (float &v : avg) v /= nAvg;
+  avgWall /= nAvg;
+  char buf[64];
+  int ty = panelY0;
+  std::snprintf(buf, sizeof buf, "FPS %.1f  %.1f MS", avgWall > 0.01f ? 1000.0f / avgWall : 0.0f, avgWall);
+  ovText(bgra, w, h, x0, ty, 2, 0xFFFFFFFF, buf);
+  ty += 14;
+  for (int st = 0; st < 6; st++, ty += 14) {
+    ovFill(bgra, w, h, x0, ty + 1, 8, 8, kCol[st]);
+    std::snprintf(buf, sizeof buf, "%s %5.1f", kLabel[st], avg[st]);
+    ovText(bgra, w, h, x0 + 14, ty, 2, 0xFFE6E6E6, buf);
+  }
+}
+
+// ---- asynchronous window present --------------------------------------------
+// gfx::present blocks on the window swapchain (previous-present fence, vsync /
+// compositor pacing) and, on a software Vulkan driver, rasterizes the blit on
+// the CPU -- ~10ms+ that used to sit on the frame loop. A dedicated presenter
+// thread owns the window (creation, event pump, and present all happen on it)
+// and always shows the newest completed frame; the frame loop just snapshots
+// the pixels and signals. DELTA_GPU_SYNCPRESENT=1 restores the inline call.
+struct Presenter {
+  std::thread th;
+  std::mutex mtx;
+  std::condition_variable cv;
+  std::vector<uint8_t> buf;  // pending frame (BGRA, tight pitch); latest wins
+  uint32_t w = 0, h = 0;
+  bool pending = false;
+  bool started = false;
+};
+Presenter g_presenter;
+
+void presenterLoop() {
+  std::unique_lock<std::mutex> lk(g_presenter.mtx);
+  std::vector<uint8_t> local;
+  while (true) {
+    g_presenter.cv.wait(lk, [] { return g_presenter.pending; });
+    // Steal the pending buffer (the allocations ping-pong, no per-frame alloc).
+    local.swap(g_presenter.buf);
+    const uint32_t w = g_presenter.w, h = g_presenter.h;
+    g_presenter.pending = false;
+    lk.unlock();
+    if (gfx::ensure("prosperity", w, h) && gfx::pumpEvents())
+      gfx::present(local.data(), w, h, w * 4, gfx::PixelFormat::bgra8);
+    lk.lock();
+  }
+}
+
+void presentAsync(const uint8_t *pixels, uint32_t w, uint32_t h) {
+  Presenter &p = g_presenter;
+  if (!p.started) {
+    p.started = true;
+    p.th = std::thread(presenterLoop);
+    p.th.detach();
+  }
+  std::lock_guard<std::mutex> lk(p.mtx);
+  p.buf.assign(pixels, pixels + (size_t)w * h * 4);
+  p.w = w;
+  p.h = h;
+  p.pending = true;
+  p.cv.notify_one();
+}
+
 void writePpm(const char *path, const uint8_t *bgra, uint32_t w, uint32_t h) {
   FILE *f = std::fopen(path, "wb");
   if (!f) return;
@@ -2105,7 +2396,15 @@ void dumpPpm(const uint8_t *bgra, uint32_t w, uint32_t h) {
 
 bool init() {
   if (g.ready) return true;
-  if (!createDevice()) {
+  // Create the device from a clean host thread: init() is reached on a FEX
+  // guest thread (guest stack / TLS), where the NVIDIA ICD's
+  // vk_icdGetInstanceProcAddr silently fails and enumeration falls back to
+  // llvmpipe -- a ~30ms/frame software rasteriser on a box with a real GPU.
+  // llvmpipe never cared, so this is behaviour-neutral for pure-software runs.
+  bool ok = false;
+  std::thread initThread([&ok] { ok = createDevice(); });
+  initThread.join();
+  if (!ok) {
     std::fprintf(stderr, "[gpuvk] headless Vulkan unavailable; gpu disabled\n");
     return false;
   }
@@ -2620,8 +2919,8 @@ bool drawRecomp(const DrawInfo &d) {
   }
 
   VkDeviceSize vneed = d.nvattrs ? (VkDeviceSize)nv * d.vertexStride : 0;
-  if (g.vbOffset + vneed > kVbRing) return decline(DR_RING);
-  if (indexed && g.ibOffset + (VkDeviceSize)d.indexCount * 4 > kIbRing)
+  if (g.vbOffset + vneed > g.vbEnd) return decline(DR_RING);
+  if (indexed && g.ibOffset + (VkDeviceSize)d.indexCount * 4 > g.ibEnd)
     return decline(DR_RING);
 
   RecompPipe *rp = getRecompPipe(d);
@@ -2830,22 +3129,30 @@ bool drawRecomp(const DrawInfo &d) {
   // requires one dynamic offset for every dynamic descriptor in the set layout.
   VkDeviceSize cbOff = (g.uboOffset + g.uboAlign - 1) & ~(VkDeviceSize)(g.uboAlign - 1);
   VkDeviceSize cbStride = (kCbufWindow + g.uboAlign - 1) & ~(VkDeviceSize)(g.uboAlign - 1);
-  if (cbOff + cbStride * 8 > kUboRing) return decline(DR_RING);
+  if (cbOff + cbStride * 8 > g.uboEnd) return decline(DR_RING);
   uint32_t dynOff[8];
+  VkDeviceSize next = cbOff;
   for (uint32_t i = 0; i < 8; i++) {
-    VkDeviceSize bindingOff = cbOff + cbStride * i;
-    dynOff[i] = static_cast<uint32_t>(bindingOff);
-    uint8_t *cbDst = g.uboMap + bindingOff;
-    std::memset(cbDst, 0, kCbufWindow);
     const auto &cb = d.cbufs[i];
-    if (cb.base >= 0x1000000000ull && cb.base < 0x20000000000ull) {
-      uint32_t n = cb.size < kCbufWindow ? cb.size : kCbufWindow;
-      std::memcpy(cbDst, reinterpret_cast<const void *>(cb.base), n);
-    } else if (i == 0) {
-      std::memcpy(cbDst, d.mvp, sizeof(d.mvp));
+    const bool haveCbuf = cb.base >= 0x1000000000ull && cb.base < 0x20000000000ull;
+    if (!haveCbuf && i != 0) {
+      dynOff[i] = 0;  // shared zero window (see beginFrame)
+      continue;
     }
+    uint8_t *cbDst = g.uboMap + next;
+    uint32_t n;
+    if (haveCbuf) {
+      n = cb.size < kCbufWindow ? cb.size : kCbufWindow;
+      std::memcpy(cbDst, reinterpret_cast<const void *>(cb.base), n);
+    } else {  // binding 0 without a resolved cbuffer: the heuristic MVP
+      n = sizeof(d.mvp);
+      std::memcpy(cbDst, d.mvp, n);
+    }
+    if (n < kCbufWindow) std::memset(cbDst + n, 0, kCbufWindow - n);
+    dynOff[i] = static_cast<uint32_t>(next);
+    next += cbStride;
   }
-  g.uboOffset = cbOff + cbStride * 8;
+  g.uboOffset = next;
   vkCmdBindDescriptorSets(g.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, rp->layout,
                           1, 1, &g.uboSet, 8, dynOff);
   if (texSet)
@@ -2876,8 +3183,8 @@ bool drawRecomp(const DrawInfo &d) {
 
 void beginFrame() {
   if (!g.ready) return;
-  // endFrame waits for the prior frame's fence, so objects invalidated while that
-  // command buffer was recording are safe to release now.
+  // Objects retired two frames ago are past every in-flight command buffer
+  // (see releaseRetiredTextures) and safe to destroy now.
   releaseRetiredTextures();
   if (!createPipeline()) return;
   createTexPipeline();  // best-effort; colored path still works without it
@@ -2885,9 +3192,35 @@ void beginFrame() {
   g.frameHeuristic = 0;
   g.frameMaxIdx = 0;
   g.frameNum++;
-  g.vbOffset = 0;
-  g.ibOffset = 0;
-  g.uboOffset = 0;
+  // Bind the active frame slot: its command buffer + readback aliases, and its
+  // half of each host-visible ring (the other half may still be read by the
+  // in-flight previous frame).
+  State::FrameSlot &slot = g.slots[g.slotIdx];
+  g.cmd = slot.cmd;
+  g.readback = slot.readback;
+  g.readbackMem = slot.readbackMem;
+  g.readbackMap = slot.readbackMap;
+  g.readbackSize = slot.readbackSize;
+  const VkDeviceSize vbBase = g.slotIdx * (kVbRing / 2);
+  const VkDeviceSize ibBase = g.slotIdx * (kIbRing / 2);
+  const VkDeviceSize uboBase = g.slotIdx * (kUboRing / 2);
+  g.vbOffset = vbBase; g.vbEnd = vbBase + kVbRing / 2;
+  g.ibOffset = ibBase; g.ibEnd = ibBase + kIbRing / 2;
+  g.uboOffset = uboBase; g.uboEnd = uboBase + kUboRing / 2;
+  // Window 0 of the cbuffer ring is a permanently-zero window: every binding a
+  // draw does not use points there (dynamic offset 0), so drawRecomp only
+  // writes the windows it actually fills instead of zeroing 8 windows per
+  // draw. Slot 0's usable range starts after it; nothing ever writes it again.
+  if (g.uboMap) {
+    static bool zeroWindowInit = false;
+    if (!zeroWindowInit) {
+      zeroWindowInit = true;
+      std::memset(g.uboMap, 0, kCbufWindow);
+    }
+    if (g.slotIdx == 0)
+      g.uboOffset =
+          (kCbufWindow + g.uboAlign - 1) & ~(VkDeviceSize)(g.uboAlign - 1);
+  }
   g.curRt = 0;
   g.curDepth = 0;
   g.lastRt = 0;
@@ -2931,6 +3264,7 @@ void draw(const DrawInfo &d_in) {
   const DrawInfo &d = patched ? dd : d_in;
   if (d.indexCount > g.frameMaxIdx) g.frameMaxIdx = d.indexCount;
   ScopeNs _t(&g_nsDraw);
+  ScopeNs _tf(&g_frDraw);
   // Recompiled-shader path: run the game's actual VS/PS. Falls through to the
   // heuristic quad path when the draw can't be handled. On by default now that it
   // renders gameplay correctly; DELTA_GPU_RECOMP=0 forces the old heuristic path.
@@ -2963,9 +3297,9 @@ void draw(const DrawInfo &d_in) {
   }
   if (nv < 3 || nv > 200000u) return;  // sane cap
   VkDeviceSize need = (VkDeviceSize)nv * 32;  // pos.xy + color.rgba + uv.xy
-  if (g.vbOffset + need > kVbRing)
+  if (g.vbOffset + need > g.vbEnd)
     return;  // ring full this frame
-  if (indexed && g.ibOffset + (VkDeviceSize)d.indexCount * 4 > kIbRing)
+  if (indexed && g.ibOffset + (VkDeviceSize)d.indexCount * 4 > g.ibEnd)
     return;
   // Repack pos / color / uv interleaved into the vertex ring (stride 32).
   auto *base = static_cast<const uint8_t *>(d.vertexData);
@@ -3100,13 +3434,15 @@ void reportFps() {
   if (dt >= 2.0) {
     double f = frames ? frames : 1;
     std::fprintf(stderr,
-        "[fps] %.1f fps | per-frame gpu-code: draw=%.2fms end=%.2fms (readback=%.2fms) "
-        "texup=%.2fms x%.1f\n",
+        "[fps] %.1f fps | per-frame gpu-code: draw=%.2fms end=%.2fms (wait=%.2fms "
+        "submit=%.2fms present=%.2fms) texup=%.2fms x%.1f\n",
         frames / dt, g_nsDraw / f / 1e6, g_nsEnd / f / 1e6, g_nsReadback / f / 1e6,
+        g_nsSubmit / f / 1e6, g_nsPresent / f / 1e6,
         g_nsTexUp / f / 1e6, g_texUps / f);
     last = now;
     frames = 0;
     g_nsDraw = g_nsEnd = g_nsReadback = g_nsTexUp = 0;
+    g_nsSubmit = g_nsPresent = 0;
     g_texUps = 0;
   }
 }
@@ -3198,35 +3534,76 @@ void endFrame(uint64_t scanoutBase) {
   }();
   if (wantAddr && g_rts.count(wantAddr)) presentBase = wantAddr;
   auto it = g_rts.find(presentBase);
-  if (it == g_rts.end()) {  // nothing rendered this frame
+
+  // Record the presented RT's readback copy into this frame's slot, submit it,
+  // and DON'T wait: the (software) GPU rasterizes this frame while the guest
+  // emulates the next one. The fence is waited one endFrame later, where the
+  // slot's pixels are presented (one frame of latency). DELTA_GPU_SYNC=1
+  // restores wait-here (framePipelined()).
+  State::FrameSlot &cur = g.slots[g.slotIdx];
+  cur.presentable = false;
+  if (it != g_rts.end()) {
+    RTarget &rt = it->second;
+    ensureReadback(rt.w, rt.h, rt.fmt);
+    imageBarrier(g.cmd, rt.image, rt.layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                 VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+    rt.layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    VkBufferImageCopy copy{};
+    copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    copy.imageExtent = {rt.w, rt.h, 1};
+    vkCmdCopyImageToBuffer(g.cmd, rt.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           g.readback, 1, &copy);
+    cur.presentable = true;
+    cur.w = rt.w; cur.h = rt.h; cur.fmt = rt.fmt;
+  }
+  {
+    ScopeNs _ts(&g_nsSubmit);
+    ScopeNs _tsf(&g_frSubmit);
     vkEndCommandBuffer(g.cmd);
     VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-    si.commandBufferCount = 1; si.pCommandBuffers = &g.cmd;
-    vkResetFences(g.device, 1, &g.fence);
-    vkQueueSubmit(g.queue, 1, &si, g.fence);
-    vkWaitForFences(g.device, 1, &g.fence, VK_TRUE, UINT64_MAX);
-    return;
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &g.cmd;
+    vkResetFences(g.device, 1, &cur.fence);
+    vkQueueSubmit(g.queue, 1, &si, cur.fence);
   }
-  RTarget &rt = it->second;
-  ensureReadback(rt.w, rt.h, rt.fmt);
-  imageBarrier(g.cmd, rt.image, rt.layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-               VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
-  rt.layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-  VkBufferImageCopy copy{};
-  copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-  copy.imageExtent = {rt.w, rt.h, 1};
-  vkCmdCopyImageToBuffer(g.cmd, rt.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                         g.readback, 1, &copy);
-  vkEndCommandBuffer(g.cmd);
+  cur.submitted = true;
+  cur.frameNum = g.frameNum;
+  cur.frameDraws = g.frameDraws;
+  cur.frameMaxIdx = g.frameMaxIdx;
+  cur.frameHadRoom = g.frameHadRoom;
+  cur.presentBase = presentBase;
+  cur.scanoutBase = scanoutBase;
+  // ensureReadback may have (re)created the aliased buffer; store it back.
+  cur.readback = g.readback;
+  cur.readbackMem = g.readbackMem;
+  cur.readbackMap = g.readbackMap;
+  cur.readbackSize = g.readbackSize;
 
-  VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-  si.commandBufferCount = 1;
-  si.pCommandBuffers = &g.cmd;
-  uint64_t _tr0 = nowNs();
-  vkResetFences(g.device, 1, &g.fence);
-  vkQueueSubmit(g.queue, 1, &si, g.fence);
-  vkWaitForFences(g.device, 1, &g.fence, VK_TRUE, UINT64_MAX);
-  g_nsReadback += nowNs() - _tr0;
+  // Gameplay latches judge the just-recorded frame's command stream (no pixels
+  // involved): sustained room frames with real draw counts, or a huge-index 3D
+  // draw, mean a run is underway -- stop the headless autoskip mashing menus.
+  static int roomStreak = 0;
+  if (g.frameHadRoom && g.frameDraws > 20 && ++roomStreak >= 4)
+    gfx::setInGameplay(true);  // latch fast, before the autoskip re-pauses
+  if (g.frameMaxIdx >= 1500)
+    gfx::setInGameplay(true);
+
+  // Finish a completed frame: the previous slot when pipelined (its raster ran
+  // while this frame recorded), this frame's own when synchronous.
+  const uint32_t finishIdx = framePipelined() ? (g.slotIdx ^ 1) : g.slotIdx;
+  if (framePipelined()) g.slotIdx ^= 1;
+  State::FrameSlot &fin = g.slots[finishIdx];
+  const bool waited = fin.submitted;
+  if (fin.submitted) {
+    uint64_t _tr0 = nowNs();
+    vkWaitForFences(g.device, 1, &fin.fence, VK_TRUE, UINT64_MAX);
+    uint64_t dt = nowNs() - _tr0;
+    g_nsReadback += dt;
+    g_frWait += dt;
+    fin.submitted = false;
+  }
+  pushStageSample();
+  if (!waited || !fin.presentable) return;
 
   // Readback transform (DELTA_GPU_FLIP: 0=none 1=Y 2=X 3=XY). Default 0 (none): the
   // y-up (negative-height) viewport already stores render-target content upright, and
@@ -3238,20 +3615,30 @@ void endFrame(uint64_t scanoutBase) {
     return e ? std::atoi(e) : 0;
   }();
   static std::vector<uint8_t> flipped;
-  flipped.resize(static_cast<size_t>(rt.w) * rt.h * 4);
-  const auto *rb = static_cast<const uint8_t *>(g.readbackMap);
-  uint32_t srcStride = rt.w * formatBytes(rt.fmt);
-  for (uint32_t y = 0; y < rt.h; y++) {
-    uint32_t sy = (flipMode & 1) ? (rt.h - 1 - y) : y;
-    const uint8_t *srow = rb + static_cast<size_t>(sy) * srcStride;
-    uint8_t *drow = flipped.data() + static_cast<size_t>(y) * rt.w * 4;
-    for (uint32_t x = 0; x < rt.w; x++) {
-      uint32_t sx = (flipMode & 2) ? (rt.w - 1 - x) : x;
-      readbackPixelBgra(srow + static_cast<size_t>(sx) * formatBytes(rt.fmt),
-                        rt.fmt, drow + static_cast<size_t>(x) * 4);
+  auto *rb = static_cast<uint8_t *>(fin.readbackMap);
+  uint8_t *pixels;
+  if (flipMode == 0 && fin.fmt == VK_FORMAT_B8G8R8A8_UNORM) {
+    // Common case: the readback is already BGRA8 in presentation order; the
+    // consumers below (writePpm/present) read it in place, so skip the 8 MB
+    // per-pixel convert-and-copy entirely. reportRtContents (the only other
+    // readback-buffer user) runs after the last consumer.
+    pixels = rb;
+  } else {
+    flipped.resize(static_cast<size_t>(fin.w) * fin.h * 4);
+    const uint32_t srcBytes = formatBytes(fin.fmt);
+    const uint32_t srcStride = fin.w * srcBytes;
+    for (uint32_t y = 0; y < fin.h; y++) {
+      uint32_t sy = (flipMode & 1) ? (fin.h - 1 - y) : y;
+      const uint8_t *srow = rb + static_cast<size_t>(sy) * srcStride;
+      uint8_t *drow = flipped.data() + static_cast<size_t>(y) * fin.w * 4;
+      for (uint32_t x = 0; x < fin.w; x++) {
+        uint32_t sx = (flipMode & 2) ? (fin.w - 1 - x) : x;
+        readbackPixelBgra(srow + static_cast<size_t>(sx) * srcBytes,
+                          fin.fmt, drow + static_cast<size_t>(x) * 4);
+      }
     }
+    pixels = flipped.data();
   }
-  const uint8_t *pixels = flipped.data();
   // Minimal single-shot capture (DELTA_GPU_SNAP=N): write ONE ppm of the presented
   // scanout to <dumpdir>/gpu_snap.ppm at the first drawing frame >= N, then never
   // again. For verifying gfx without the rolling DELTA_GPU_DUMP firehose (hundreds
@@ -3274,23 +3661,23 @@ void endFrame(uint64_t scanoutBase) {
   static const bool snapBest = std::getenv("DELTA_GPU_SNAP_BEST") != nullptr;
   static int snapBestDraws = 0;
   static bool snapped = false;
-  bool snapNow = snapAt && g.frameNum >= snapAt && g.frameDraws > 0 &&
-                 (int)g.frameDraws >= snapMinDraws &&
-                 (int)g.frameMaxIdx >= snapMinIdx &&
-                 (!snapRoom || (g.frameHadRoom && g.frameDraws > 20));
+  bool snapNow = snapAt && fin.frameNum >= snapAt && fin.frameDraws > 0 &&
+                 (int)fin.frameDraws >= snapMinDraws &&
+                 (int)fin.frameMaxIdx >= snapMinIdx &&
+                 (!snapRoom || (fin.frameHadRoom && fin.frameDraws > 20));
   // With a min-indices gate, "best" tracks the largest index count seen (the busiest
   // 3D frame) rather than the draw count.
   if (snapBest && snapMinIdx)
-    snapNow = snapNow && (int)g.frameMaxIdx > snapBestDraws;
+    snapNow = snapNow && (int)fin.frameMaxIdx > snapBestDraws;
   else if (snapBest)
-    snapNow = snapNow && (int)g.frameDraws > snapBestDraws;
+    snapNow = snapNow && (int)fin.frameDraws > snapBestDraws;
   else
     snapNow = snapNow && !snapped;
   if (snapNow) {
-    snapBestDraws = snapMinIdx ? (int)g.frameMaxIdx : (int)g.frameDraws;
+    snapBestDraws = snapMinIdx ? (int)fin.frameMaxIdx : (int)fin.frameDraws;
     char p[256]; std::snprintf(p, sizeof p, "%s/gpu_snap.ppm", dumpDir());
-    writePpm(p, pixels, rt.w, rt.h);
-    std::fprintf(stderr, "[snap] wrote %s (f%d %ux%u draws=%u)\n", p, g.frameNum, rt.w, rt.h, g.frameDraws);
+    writePpm(p, pixels, fin.w, fin.h);
+    std::fprintf(stderr, "[snap] wrote %s (f%d %ux%u draws=%u)\n", p, fin.frameNum, fin.w, fin.h, fin.frameDraws);
     snapped = true;
   }
   // Sequence capture (DELTA_GPU_SNAPSEQ=K): write up to K numbered gameplay-room
@@ -3298,52 +3685,41 @@ void endFrame(uint64_t scanoutBase) {
   // lets a long explore run be inspected for non-start rooms without the firehose.
   static const int snapSeqN = [] { const char *e = std::getenv("DELTA_GPU_SNAPSEQ"); return e ? std::atoi(e) : 0; }();
   static int seqDone = 0, seqLastFrame = -10000;
-  if (snapSeqN && seqDone < snapSeqN && g.frameHadRoom && g.frameDraws > 20 &&
-      g.frameNum - seqLastFrame >= 250) {
+  if (snapSeqN && seqDone < snapSeqN && fin.frameHadRoom && fin.frameDraws > 20 &&
+      fin.frameNum - seqLastFrame >= 250) {
     char p[256]; std::snprintf(p, sizeof p, "%s/seq_%02d.ppm", dumpDir(), seqDone);
-    writePpm(p, pixels, rt.w, rt.h);
-    std::fprintf(stderr, "[snapseq] %d -> f%d draws=%u\n", seqDone, g.frameNum, g.frameDraws);
-    seqDone++; seqLastFrame = g.frameNum;
+    writePpm(p, pixels, fin.w, fin.h);
+    std::fprintf(stderr, "[snapseq] %d -> f%d draws=%u\n", seqDone, fin.frameNum, fin.frameDraws);
+    seqDone++; seqLastFrame = fin.frameNum;
   }
-
-  // Latch the gameplay signal once a run is clearly underway (sustained room
-  // frames with real draw counts) so the headless autoskip stops opening menus
-  // and stays in the run instead of bouncing back out via the pause menu.
-  static int roomStreak = 0;
-  if (g.frameHadRoom && g.frameDraws > 20 && ++roomStreak >= 4)
-    gfx::setInGameplay(true);  // latch fast, before the autoskip re-pauses
-  // A frame with a huge index count is 3D level geometry (Doom64: ~2400-index
-  // draws; 2D titles stay well under this). Latch gameplay so the input autoskip/
-  // sweep stops mashing menus and the loaded level stays stable for capture.
-  if (g.frameMaxIdx >= 1500)
-    gfx::setInGameplay(true);
 
   // Deterministic room capture: whenever this frame sampled a room RT, roll the
   // presented image to /tmp/gpu_room.ppm (atomic). The last write is guaranteed a
   // gameplay frame regardless of when the flaky autoskip enters/leaves a run. Skip
   // sparse transition frames (few draws) so the capture is representative gameplay.
-  if (g_dump && g.frameHadRoom && g.frameDraws > 20) {
+  if (g_dump && fin.frameHadRoom && fin.frameDraws > 20) {
     char p[256], tmp[256];
     std::snprintf(p, sizeof(p), "%s/gpu_room.ppm", dumpDir());
     std::snprintf(tmp, sizeof(tmp), "%s/gpu_room.tmp", dumpDir());
-    writePpm(tmp, pixels, rt.w, rt.h);
+    writePpm(tmp, pixels, fin.w, fin.h);
     std::rename(tmp, p);
   }
-  if (g_dump && g.frameNum >= 1000 && g.frameNum % 2000 == 0 && g.frameDraws > 0)
-    dumpPpm(pixels, rt.w, rt.h);
+  if (g_dump && fin.frameNum >= 1000 && fin.frameNum % 2000 == 0 && fin.frameDraws > 0)
+    dumpPpm(pixels, fin.w, fin.h);
   // Rolling latest-frame capture (uncapped) so late transitions (menu/gameplay)
   // can be inspected from a long headless run without knowing the frame number.
   static const int latestEvery = [] { const char *e = std::getenv("DELTA_GPU_LATEST_EVERY");
     return e ? std::atoi(e) : 300; }();
-  if (g_dump && g.frameNum % latestEvery == 0 && g.frameDraws > 0) {
+  if (g_dump && fin.frameNum % latestEvery == 0 && fin.frameDraws > 0) {
     char latest[256];
     std::snprintf(latest, sizeof(latest), "%s/gpu_latest.ppm", dumpDir());
-    writePpm(latest, pixels, rt.w, rt.h);
+    writePpm(latest, pixels, fin.w, fin.h);
   }
-  if (g_dump && g.frameNum % 200 == 0) {
+  if (g_dump && fin.frameNum % 200 == 0) {
     std::fprintf(stderr, "[gpuvk] frame %d draws=%u heuristic=%u rt=%#lx %ux%u  scanout=%#lx\n",
-                 g.frameNum, g.frameDraws, g.frameHeuristic, (unsigned long)presentBase, rt.w, rt.h,
-                 (unsigned long)scanoutBase);
+                 fin.frameNum, fin.frameDraws, g.frameHeuristic,
+                 (unsigned long)fin.presentBase, fin.w, fin.h,
+                 (unsigned long)fin.scanoutBase);
     std::fprintf(stderr, "[gpuvk]   decline:");
     for (int i = 0; i < DR_MAX; i++)
       if (g_decline[i]) std::fprintf(stderr, " %s=%u", kDeclineName[i], g_decline[i]);
@@ -3353,7 +3729,21 @@ void endFrame(uint64_t scanoutBase) {
         std::fprintf(stderr, "[gpuvk]    RT %#lx %ux%u draws=%u%s\n",
                      (unsigned long)kv.first, kv.second.w, kv.second.h,
                      kv.second.draws,
-                     kv.first == scanoutBase ? " <-SCANOUT" : "");
+                     kv.first == fin.scanoutBase ? " <-SCANOUT" : "");
+  }
+  // Perf overlay, drawn into the presented buffer only -- the PPM capture
+  // paths above already consumed `pixels`, so dumps stay clean.
+  drawPerfOverlay(pixels, fin.w, fin.h);
+  // DELTA_GPU_OVERLAY_DUMP: one post-overlay ppm (visual check of the overlay
+  // itself, which the clean capture paths above deliberately exclude).
+  static const bool overlayDump = std::getenv("DELTA_GPU_OVERLAY_DUMP") != nullptr;
+  static bool overlayDumped = false;
+  if (overlayDump && !overlayDumped && fin.frameNum >= 600) {
+    overlayDumped = true;
+    char p[256];
+    std::snprintf(p, sizeof p, "%s/gpu_overlay.ppm", dumpDir());
+    writePpm(p, pixels, fin.w, fin.h);
+    std::fprintf(stderr, "[overlay] wrote %s\n", p);
   }
   // Present the rendered scanout into the window the VideoOut HLE opened. When
   // there is no display (headless) the window was never created, so we skip
@@ -3364,8 +3754,20 @@ void endFrame(uint64_t scanoutBase) {
   // creates it from its own scanout-present path, which the GPU (Gnm) title
   // never takes, so the renderer owns window creation here. ensure() is
   // idempotent and runs on this (the presenting) thread.
-  if (!noPresent && gfx::ensure("prosperity", rt.w, rt.h) && gfx::pumpEvents())
-    gfx::present(pixels, rt.w, rt.h, rt.w * 4, gfx::PixelFormat::bgra8);
+  if (!noPresent) {
+    ScopeNs _tp(&g_nsPresent);
+    ScopeNs _tpf(&g_frPresent);
+    static const bool syncPresent = [] {
+      const char *e = std::getenv("DELTA_GPU_SYNCPRESENT");
+      return e && e[0] && e[0] != '0';
+    }();
+    if (syncPresent) {
+      if (gfx::ensure("prosperity", fin.w, fin.h) && gfx::pumpEvents())
+        gfx::present(pixels, fin.w, fin.h, fin.w * 4, gfx::PixelFormat::bgra8);
+    } else {
+      presentAsync(pixels, fin.w, fin.h);
+    }
+  }
 
   // Runs last: reuses (and clobbers) the readback buffer the present path
   // above already consumed.

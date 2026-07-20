@@ -155,7 +155,7 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
       std::fprintf(stderr, "[gpu]   PS user_data:");
       for (int k = 0; k < 16; k++) std::fprintf(stderr, " %08x", pud[k]);
       std::fprintf(stderr, "\n");
-      auto texs = gcn::TrackTextures(*gcn::CachedProgram(psA, 4096), pud);
+      auto texs = gcn::TrackTextures(gcn::CachedProgram(psA, 4096), pud);
       std::fprintf(stderr, "[gpu]   TrackTextures -> %zu\n", texs.size());
       if (!texs.empty() && texs[0].valid) {
         auto &t = texs[0];
@@ -326,8 +326,10 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
     // Texture: the PS samples an inline T# (image_sample). Isaac's textured
     // sprite vertex format is {pos.xyzw @0, color @0x10, uv.xy @0x1c} in a
     // 64-byte vertex, so the UV lives in the position buffer at offset 0x1c.
+    std::shared_ptr<const gcn::Program> psProg;
     if (psA >= 0x1000000000ull && psA < 0x20000000000ull) {
-      auto texs = gcn::TrackTextures(*gcn::CachedProgram(psA, 4096),
+      psProg = gcn::CachedProgram(psA, 4096);
+      auto texs = gcn::TrackTextures(psProg,
                                      &g_regs[mmSPI_SHADER_USER_DATA_PS_0]);
       if (!texs.empty()) {
         // Preserve every valid GFX7 T# address. Format support is relevant only when
@@ -429,7 +431,8 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
         // the translator and shared across both stages in descriptor set 1.
         bool resolvedVsCbuf = false;
         auto resolveCbufs = [&](const std::vector<gcn::ShaderCbuf> &cbufs,
-                                const uint32_t *userData, const gcn::Program &prog,
+                                const uint32_t *userData,
+                                const std::shared_ptr<const gcn::Program> &prog,
                                 bool vertexStage) {
           // Resolve every cbuffer V# the stage reads, following EUD/SRT pointer
           // chains (FOX loads the V# through an extended-user-data pointer, so
@@ -460,10 +463,10 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
           }
         };
         if (good) {
-          resolveCbufs(rc.vs_cbufs, vud2, *gcn::CachedProgram(vsA, 4096), true);
+          resolveCbufs(rc.vs_cbufs, vud2, gcn::CachedProgram(vsA, 4096), true);
           if (psA >= 0x1000000000ull && psA < 0x20000000000ull)
             resolveCbufs(rc.ps_cbufs, &g_regs[mmSPI_SHADER_USER_DATA_PS_0],
-                         *gcn::CachedProgram(psA, 4096), false);
+                         psProg ? psProg : gcn::CachedProgram(psA, 4096), false);
           for (const auto &cb : rc.vs_cbufs) d.nCbufs = std::max(d.nCbufs, cb.binding + 1);
           for (const auto &cb : rc.ps_cbufs) d.nCbufs = std::max(d.nCbufs, cb.binding + 1);
         }
@@ -508,7 +511,7 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
                    g_regs[mmCB_COLOR0_PITCH], g_regs[mmCB_COLOR0_SLICE],
                    g_regs[mmCB_COLOR0_INFO], g_regs[mmCB_COLOR0_ATTRIB]);
       if (psA >= 0x1000000000ull && psA < 0x20000000000ull) {
-        auto texs = gcn::TrackTextures(*gcn::CachedProgram(psA, 4096),
+        auto texs = gcn::TrackTextures(gcn::CachedProgram(psA, 4096),
                                        &g_regs[mmSPI_SHADER_USER_DATA_PS_0]);
         std::fprintf(stderr, "[blit]   TrackTextures -> %zu T#\n", texs.size());
         for (auto &t : texs)
@@ -559,9 +562,9 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
     static const auto dlStart = std::chrono::steady_clock::now();
     static const int dlAfter = [] { const char *e = std::getenv("DELTA_GPU_DRAWLIST_AFTER");
       return e ? std::atoi(e) : 90; }();
-    auto dlElapsed = std::chrono::duration_cast<std::chrono::seconds>(
-        std::chrono::steady_clock::now() - dlStart).count();
-    if (drawList && dlElapsed >= dlAfter && dlN < 400) {
+    if (drawList && dlN < 400 &&
+        std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::steady_clock::now() - dlStart).count() >= dlAfter) {
       dlN++;
       std::fprintf(stderr, "[draw] count=%u rt=%#lx %ux%u tex=%#lx %ux%u vd=%d "
                    "recomp=%s nvattrs=%u prim=%u VS=%#lx PS=%#lx fetch=%#lx\n",
@@ -901,6 +904,9 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
 // render target the flip displays.
 void endFrame(uint64_t scanoutBase) {
   std::lock_guard<std::mutex> lk(g_mtx);
+  // New frame -> shader code may have been rewritten; let CachedProgram
+  // revalidate each address once next frame instead of once per draw.
+  gcn::NextProgramCacheGeneration();
   if (g_frameActive && vk::available()) {
     vk::endFrame(scanoutBase);
     g_frameActive = false;
@@ -1332,9 +1338,9 @@ void submitDcb(const void *dcb, uint32_t sizeBytes) {
   static const auto ohStart = std::chrono::steady_clock::now();
   static const int ohAfter = [] { const char *e = std::getenv("DELTA_GPU_OPHIST_AFTER");
     return e ? std::atoi(e) : 100; }();
-  auto ohElapsed = std::chrono::duration_cast<std::chrono::seconds>(
-      std::chrono::steady_clock::now() - ohStart).count();
-  if (opHist && !opHistDumped && ohElapsed >= ohAfter) {
+  if (opHist && !opHistDumped &&
+      std::chrono::duration_cast<std::chrono::seconds>(
+          std::chrono::steady_clock::now() - ohStart).count() >= ohAfter) {
     opHistDumped = true;
     dumpHist();
   }

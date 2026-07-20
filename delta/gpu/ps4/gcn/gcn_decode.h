@@ -74,6 +74,13 @@ Program DecodeShader(const uint32_t* code, uint32_t max_dwords);
 std::shared_ptr<const Program> CachedProgram(uint64_t addr,
                                              uint32_t max_dwords);
 
+// Advance the CachedProgram revalidation generation (call once per frame, from
+// the command processor's end-of-frame). Entries revalidate their code hash at
+// most once per generation; repeat lookups within a frame are pure map hits.
+// Shader uploads happen between frames, so a same-address rewrite is still
+// picked up on the next frame's first use.
+void NextProgramCacheGeneration();
+
 // Human-readable mnemonic for an instruction (best-effort; "?" for unmapped).
 const char* Mnemonic(const Inst& inst);
 

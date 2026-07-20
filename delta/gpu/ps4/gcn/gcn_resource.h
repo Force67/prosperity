@@ -14,6 +14,7 @@
  */
 
 #include <cstdint>
+#include <memory>
 #include <unordered_map>
 #include <vector>
 
@@ -80,9 +81,12 @@ MimgBindingPlan PlanMimgBindings(const Program& program);
 // s_load_dwordx4/x8/x16 of descriptor tables out of the user-data SGPRs.
 // The result preserves MIMG order (it is the shader's set-0 binding order);
 // unresolved entries are returned with valid=false so later bindings are not
-// compacted. Pass a CachedProgram()/DecodeShader() of the PS code.
-std::vector<TImage> TrackTextures(const Program& ps_program,
-                                  const uint32_t* ps_user_data);
+// compacted. Pass a CachedProgram() of the PS code: the shared_ptr keys a
+// per-program cache of the binding plan + the scalar-relevant instruction
+// subset, so per-draw calls skip re-planning and walking the VALU bulk.
+std::vector<TImage> TrackTextures(
+    const std::shared_ptr<const Program>& ps_program,
+    const uint32_t* ps_user_data);
 
 // Resolve the live 4-dword V# behind each constant buffer a graphics stage
 // reads (s_buffer_load), following the same extended-user-data / SRT pointer
@@ -91,7 +95,7 @@ std::vector<TImage> TrackTextures(const Program& ps_program,
 // through EUD, so reading the V# straight out of user data yields base=0; this
 // walks the chain and reads the V# at the point of the s_buffer_load.
 std::unordered_map<uint32_t, VBuffer> ResolveCbuffers(
-    const Program& program, const uint32_t* user_data);
+    const std::shared_ptr<const Program>& program, const uint32_t* user_data);
 
 // Given a decoded fetch shader and the VS user-data SGPRs (16 dwords), recover
 // the vertex-attribute buffers it fetches, in attribute order. Handles the

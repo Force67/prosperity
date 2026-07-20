@@ -152,11 +152,18 @@ Program DecodeShader(const uint32_t* code, uint32_t max_dwords) {
   return Decode(code, max_dwords, /*stop_at_endpgm=*/true);
 }
 
+namespace {
+uint64_t g_progCacheGeneration = 1;
+}  // namespace
+
+void NextProgramCacheGeneration() { g_progCacheGeneration++; }
+
 std::shared_ptr<const Program> CachedProgram(uint64_t addr,
                                              uint32_t max_dwords) {
   struct Entry {
     uint64_t hash = 0;
     uint32_t hashed_dwords = 0;
+    uint64_t generation = 0;
     std::shared_ptr<const Program> program;
   };
   static std::unordered_map<uint64_t, Entry> cache;
@@ -164,20 +171,28 @@ std::shared_ptr<const Program> CachedProgram(uint64_t addr,
   const auto* code = reinterpret_cast<const uint32_t*>(addr);
   if (!code) return std::make_shared<const Program>();
 
+  // Fast path: already revalidated this generation (frame). A draw touches the
+  // same shader several times (textures, cbuffers, attributes), so skipping the
+  // footer scan + code hash on repeats is what keeps this per-draw-affordable.
+  auto it = cache.find(addr);
+  if (it != cache.end() && it->second.generation == g_progCacheGeneration)
+    return it->second.program;
+
   // Hash the real code span (footer-bounded when available) so an in-place
   // rewrite at the same address invalidates the entry.
   const uint32_t len = CodeLength(code, max_dwords);
   const uint32_t hashed = len ? len : (max_dwords < 64 ? max_dwords : 64);
   const uint64_t hash = HashCode(code, hashed);
 
-  auto it = cache.find(addr);
   if (it != cache.end() && it->second.hash == hash &&
-      it->second.hashed_dwords == hashed)
+      it->second.hashed_dwords == hashed) {
+    it->second.generation = g_progCacheGeneration;
     return it->second.program;
+  }
 
   if (cache.size() > 512) cache.clear();  // unbounded-growth backstop
   auto program = std::make_shared<const Program>(DecodeShader(code, max_dwords));
-  cache[addr] = {hash, hashed, program};
+  cache[addr] = {hash, hashed, g_progCacheGeneration, program};
   return program;
 }
 

@@ -91,7 +91,8 @@ struct ScalarEval {
       sgpr[i] = user_data[i];
       known[i] = true;
     }
-    trace = std::getenv("DELTA_GPU_EUDTRACE") != nullptr;
+    static const bool eud_trace = std::getenv("DELTA_GPU_EUDTRACE") != nullptr;
+    trace = eud_trace;
   }
 
   uint64_t Ptr(uint32_t s) const {  // 48-bit descriptor-table pointer pair
@@ -159,6 +160,41 @@ struct ScalarEval {
                    static_cast<unsigned long>(address));
   }
 };
+
+// Per-program analysis reused across draws: the MIMG binding plan plus the
+// subset of instructions the scalar walk actually consumes (descriptor-chain
+// s_movs, SMRD loads, MIMG uses). TrackTextures/ResolveCbuffers run once per
+// draw on shaders that are mostly VALU code, so stepping only this subset --
+// and planning bindings once instead of per draw -- removes the bulk of the
+// per-draw analysis cost. Keyed by the Program object; the cached shared_ptr
+// pins the object so the pointer cannot be reused while the entry lives. A
+// shader rewrite yields a new Program from CachedProgram -> a new entry.
+struct ScalarPassInfo {
+  MimgBindingPlan plan;
+  std::vector<Inst> insts;  // program-order subset relevant to ScalarEval users
+};
+
+const ScalarPassInfo& CachedScalarInfo(
+    const std::shared_ptr<const Program>& program) {
+  struct Entry {
+    std::shared_ptr<const Program> pin;
+    ScalarPassInfo info;
+  };
+  static std::unordered_map<const Program*, Entry> cache;
+  auto it = cache.find(program.get());
+  if (it != cache.end()) return it->second.info;
+  if (cache.size() > 512) cache.clear();  // unbounded-growth backstop
+  Entry e;
+  e.pin = program;
+  e.info.plan = PlanMimgBindings(*program);
+  for (const Inst& inst : *program) {
+    const bool scalar_move =
+        inst.enc == Enc::kSop1 && (inst.opcode == 0x03 || inst.opcode == 0x04);
+    if (scalar_move || inst.enc == Enc::kSmrd || inst.enc == Enc::kMimg)
+      e.info.insts.push_back(inst);
+  }
+  return cache.emplace(program.get(), std::move(e)).first->second.info;
+}
 
 }  // namespace
 
@@ -311,21 +347,23 @@ std::vector<VBuffer> TrackVertexBuffers(const Program& fetch_program,
   return result;
 }
 
-std::vector<TImage> TrackTextures(const Program& ps_program,
-                                  const uint32_t* ps_user_data) {
+std::vector<TImage> TrackTextures(
+    const std::shared_ptr<const Program>& ps_program,
+    const uint32_t* ps_user_data) {
   std::vector<TImage> result;
-  if (!ps_user_data) return result;
+  if (!ps_program || !ps_user_data) return result;
 
   // Bindings come from the shared plan (one per unique descriptor identity),
   // so this list pairs 1:1 with the recompiled shader's set-0 samplers.
-  const MimgBindingPlan plan = PlanMimgBindings(ps_program);
+  const ScalarPassInfo& cached = CachedScalarInfo(ps_program);
+  const MimgBindingPlan& plan = cached.plan;
 
   // Step the scalar register file across the program; at each MIMG read the
   // live T#/S# straight out of the resolved SGPRs. Inline user data, a single
   // indirect load, and nested EUD chains all land here identically.
   ScalarEval eval(ps_user_data);
 
-  for (const Inst& inst : ps_program) {
+  for (const Inst& inst : cached.insts) {
     eval.Step(inst);
     if (inst.enc != Enc::kMimg) continue;
     const auto plan_it = plan.binding_by_pc.find(inst.pc);
@@ -404,9 +442,9 @@ std::vector<TImage> TrackTextures(const Program& ps_program,
 }
 
 std::unordered_map<uint32_t, VBuffer> ResolveCbuffers(
-    const Program& program, const uint32_t* user_data) {
+    const std::shared_ptr<const Program>& program, const uint32_t* user_data) {
   std::unordered_map<uint32_t, VBuffer> result;
-  if (!user_data) return result;
+  if (!program || !user_data) return result;
 
   // Mirror TrackTextures: step the scalar register file, and at each
   // s_buffer_load read the live 4-dword V# out of the resolved SGPRs. FOX
@@ -416,7 +454,7 @@ std::unordered_map<uint32_t, VBuffer> ResolveCbuffers(
   // per base SGPR (PlanCbufs), so key by base SGPR and keep the first
   // resolvable V# seen for it.
   ScalarEval eval(user_data);
-  for (const Inst& inst : program) {
+  for (const Inst& inst : CachedScalarInfo(program).insts) {
     eval.Step(inst);
     if (inst.enc != Enc::kSmrd) continue;
     const Smrd s = DecodeSmrd(inst.raw[0]);
