@@ -304,7 +304,11 @@ int PS4ABI sys_ipmimgr_call(uint32_t op, uint32_t kid, void *out, void *in,
       auto *req = static_cast<IpmiInvokeReq *>(in);
       if (isPlayGoKid(kid))
         playGoInvoke(req);
-      else if (onPs5())
+      else
+        // No daemon exists for any service; leaving pResult/out buffers at
+        // their pre-call sentinel makes clients poll forever (SotC spins on
+        // SceShareUtil method 0x12350012 until it reads result 0). Reply as an
+        // empty success on PS4 exactly like the PS5 path always has.
         zeroInvokeOutputs(req);
     }
     setResult(0);

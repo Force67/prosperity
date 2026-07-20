@@ -249,7 +249,7 @@ uint8_t *PS4ABI sys_mmap(void *addr, size_t size, uint32_t prot, uint32_t flags,
 
   utl::protectMem(static_cast<void *>(ptr), size, ppt::rwx);
 
-  std::printf("mmap %p, %x, %p\n", addr, size, _ReturnAddress());
+  std::printf("mmap %p, %x, %p -> %p\n", addr, size, _ReturnAddress(), ptr);
   // LOG_WARNING("addr={}, len={}, requested by {}", fmt::ptr(addr), len,
   // fmt::ptr(_ReturnAddress()));
 

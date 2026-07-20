@@ -160,10 +160,11 @@ int32_t dmaDevice::ioctl(uint32_t cmd, void *data) {
     return 0;
   }
   case 0xC0208016: {
-    // AvailableDirectMemorySize: struct = [searchStart, searchEnd, align, _].
-    // The kernel writes the largest free size at/after searchStart into [0] and
-    // its offset into [3] (layout from libkernel's wrapper). Left unhandled it
-    // fell through to `return 0` without writing, reporting zero free.
+    // AvailableDirectMemorySize: struct = [searchStart(in)/physOut, searchEnd,
+    // align, sizeOut]. The kernel writes the offset of the largest free hole
+    // at/after searchStart back into [0] and its size into [3]. (SotC prints
+    // the available byte count it read from [3]; with the fields swapped it saw
+    // our physical offset - 256 MiB - as the budget and starved its allocator.)
     auto *a = static_cast<uint64_t *>(data);
     if (!a)
       return -1;
@@ -175,8 +176,8 @@ int32_t dmaDevice::ioctl(uint32_t cmd, void *data) {
     if (start > base)
       base = start;
     base = (base + (align - 1)) & ~(align - 1);
-    a[0] = end > base ? end - base : 0; // available size
-    a[3] = base;                        // its physical offset
+    a[0] = base;                        // physical offset of the hole
+    a[3] = end > base ? end - base : 0; // available size
     return 0;
   }
   case 0xC0208004: {

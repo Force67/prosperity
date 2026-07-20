@@ -553,7 +553,8 @@ int scePadSetForceIntercepted() {
 }
 
 int scePadSetLightBar() {
-  LOG_UNIMPLEMENTED;
+  // Accepted silently: no light bar to drive, and titles (SotC) set it every
+  // frame -- the unimplemented log became per-frame spam.
   return 0;
 }
 

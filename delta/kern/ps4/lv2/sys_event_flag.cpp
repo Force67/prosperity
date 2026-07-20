@@ -134,6 +134,10 @@ static uint64_t systemFlagInit(const char *name) {
       n.find("PowerControl", 0, 12) != base::StringRef::npos ||
       n.find("SystemStateMgr", 0, 14) != base::StringRef::npos)
     return 0x1;  // bit0 = focused / powered / running
+  // ShellCore publishes boot progress here bit-by-bit (SotC waits for 0x400);
+  // with no ShellCore, report every boot stage as already complete.
+  if (n.find("BootStatus", 0, 10) != base::StringRef::npos)
+    return ~0ull;
   return 0;
 }
 
