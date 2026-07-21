@@ -14,9 +14,12 @@
 #include <cstdlib>
 #include <condition_variable>
 #include <cstdio>
+#include <ctime>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
+#include <unordered_map>
 
 #include <utl/mem.h>
 
@@ -187,12 +190,25 @@ int PS4ABI sys_rtprio_thread(int function, uint64_t lwpid, thread_prio *rtp) {
 }
 
 // Address-keyed wait/wake (a small futex). A fixed bucket array avoids per-
-// address allocation; hash collisions only cause harmless spurious wakeups
-// since every waiter re-checks its condition.
+// address allocation; hash collisions only cause harmless spurious wakeups of
+// the HOST condvar -- never spurious returns to the guest, because every wait
+// below re-checks its own exit condition in a loop before returning.
 namespace {
+// Per-address wake state. CV_WAIT has no value to re-check, so a waiter needs
+// proof "a signal aimed at MY address happened since I went to sleep" that
+// survives bucket collisions and re-poll ticks; the value-WAIT ops use it to
+// keep real futex semantics (an explicit WAKE releases the waiter even if the
+// value never changed). unordered_map guarantees reference stability across
+// inserts, so a sleeping waiter may hold its WaitChan& while others register.
+struct WaitChan {
+  uint64_t gen = 0;      // bumped by WAKE/BROADCAST: releases every waiter
+  uint64_t signals = 0;  // pending single-waiter releases (CV_SIGNAL)
+  uint32_t waiters = 0;  // live CV_WAIT sleepers (drives ucond c_has_waiters)
+};
 struct Bucket {
   std::mutex m;
   std::condition_variable cv;
+  std::unordered_map<const void *, WaitChan> chan;
 };
 std::array<Bucket, 256> g_umtxBuckets;
 Bucket &umtxBucket(const void *a) {
@@ -204,16 +220,58 @@ constexpr uint32_t UMUTEX_CONTESTED = 0x80000000u;
 // lock-free store and NO wake syscall (it expects the waiter to re-check), so a
 // long timeout left such a waiter asleep for the whole interval -> Doom64's KEX
 // job scheduler stalled ~1s per frame (~1fps). Re-checking every few ms turns
-// that into full speed (Doom64 1fps -> 60fps). Correctness is unaffected: every
-// path re-checks its predicate (op2/11/15/17 the value, op8 libthr's app-level
-// while(!cond)) before proceeding, so a short interval only changes poll latency,
-// never lets a waiter run early. DELTA_UMTX_TIMEOUT_MS overrides it.
+// that into full speed (Doom64 1fps -> 60fps). The tick is ONLY a re-poll: no
+// wait below returns to the guest because of it (a poll tick with the exit
+// condition still false goes back to sleep). Returning "woken" with the
+// predicate unpublished let engines deref half-built state -- SotC's fiber
+// job/stream managers crashed intermittently on null / -1 / partially-written
+// pointers exactly that way. DELTA_UMTX_TIMEOUT_MS overrides the tick.
 std::chrono::milliseconds umtxTimeout() {
   static const long ms = [] {
     const char *e = std::getenv("DELTA_UMTX_TIMEOUT_MS");
     return e ? std::atol(e) : 2;
   }();
   return std::chrono::milliseconds(ms);
+}
+
+// The WAIT-class ops take an optional timeout at uaddr2 (FreeBSD 9 passes a
+// struct timespec there; NULL = wait forever). Relative time.
+struct GuestTimespec {
+  int64_t sec;
+  int64_t nsec;
+};
+using SteadyTp = std::chrono::steady_clock::time_point;
+std::optional<SteadyTp> umtxRelDeadline(const void *b) {
+  if (!b)
+    return std::nullopt;
+  auto *ts = static_cast<const GuestTimespec *>(b);
+  auto d = std::chrono::seconds(ts->sec) + std::chrono::nanoseconds(ts->nsec);
+  if (d < d.zero())
+    d = d.zero();
+  return std::chrono::steady_clock::now() +
+         std::chrono::duration_cast<std::chrono::steady_clock::duration>(d);
+}
+
+// CV_WAIT's val argument carries flags: with CVWAIT_ABSTIME the timespec is
+// absolute on the ucond's c_clockid clock; convert to a steady deadline.
+constexpr uint64_t kCvWaitAbsTime = 0x02;
+std::optional<SteadyTp> cvDeadline(const void *ucond, uint64_t flags,
+                                   const void *b) {
+  if (!b)
+    return std::nullopt;
+  if (!(flags & kCvWaitAbsTime))
+    return umtxRelDeadline(b);
+  auto *ts = static_cast<const GuestTimespec *>(b);
+  const uint32_t clockid = *reinterpret_cast<const uint32_t *>(
+      static_cast<const uint8_t *>(ucond) + 8);  // ucond.c_clockid
+  struct timespec now {};
+  clock_gettime(clockid == 0 ? CLOCK_REALTIME : CLOCK_MONOTONIC, &now);
+  auto rel = std::chrono::seconds(ts->sec - now.tv_sec) +
+             std::chrono::nanoseconds(ts->nsec - now.tv_nsec);
+  if (rel < rel.zero())
+    rel = rel.zero();
+  return std::chrono::steady_clock::now() +
+         std::chrono::duration_cast<std::chrono::steady_clock::duration>(rel);
 }
 }  // namespace
 
@@ -232,25 +290,40 @@ int PS4ABI sys_umtx_op(void *ptr, int op, uint64_t val, void *a, void *b) {
   markThreadStarted();  // first sync point => our init is done
   switch (op) {
   // WAIT/WAKE both take the bucket lock, so a wake can't slip in between a
-  // waiter's value check and its sleep => no lost wake. So block on the value
-  // (predicate) rather than a short poll: a worker that waits for the main
-  // thread to publish data must keep sleeping until that store actually lands,
-  // not wake after 5ms and read it half-built. The long timeout is only a
-  // safety net for a genuinely missed wake.
-  case 2:    // UMTX_OP_WAIT
+  // waiter's value check and its sleep => no lost wake. A waiter leaves ONLY
+  // when the value changed, an explicit WAKE hit this address (gen bump), or
+  // the caller's own timeout expired -- never on the internal re-poll tick.
+  case 2:    // UMTX_OP_WAIT (compares a full u_long, unlike the UINT ops)
   case 11:   // UMTX_OP_WAIT_UINT
   case 15: { // UMTX_OP_WAIT_UINT_PRIVATE
     auto &bk = umtxBucket(ptr);
-    auto *p = static_cast<volatile uint32_t *>(ptr);
+    auto changed = [&] {
+      return op == 2 ? *static_cast<volatile uint64_t *>(ptr) != val
+                     : *static_cast<volatile uint32_t *>(ptr) !=
+                           static_cast<uint32_t>(val);
+    };
+    const auto dl = umtxRelDeadline(b);
     std::unique_lock<std::mutex> lk(bk.m);
-    bk.cv.wait_for(lk, umtxTimeout(), [&] { return *p != val; });
+    auto &ch = bk.chan[ptr];
+    const uint64_t g0 = ch.gen;
+    while (!changed() && ch.gen == g0) {
+      if (dl && std::chrono::steady_clock::now() >= *dl)
+        return -SysError::eTIMEDOUT;
+      bk.cv.wait_for(lk, umtxTimeout());
+    }
     return 0;
   }
   case 17: { // UMTX_OP_MUTEX_WAIT: block while the umutex is owned
     auto &bk = umtxBucket(ptr);
     auto *p = static_cast<volatile uint32_t *>(ptr);
     std::unique_lock<std::mutex> lk(bk.m);
-    bk.cv.wait_for(lk, umtxTimeout(), [&] { return (*p & ~UMUTEX_CONTESTED) == 0; });
+    auto &ch = bk.chan[ptr];
+    const uint64_t g0 = ch.gen;
+    // A spurious exit here is harmless (libthr re-runs its CAS loop), but
+    // still leave only on "free" or an explicit MUTEX_WAKE so a heavily
+    // contended mutex doesn't degrade into a 2ms spin per waiter.
+    while ((*p & ~UMUTEX_CONTESTED) != 0 && ch.gen == g0)
+      bk.cv.wait_for(lk, umtxTimeout());
     return 0;
   }
   case 3:    // UMTX_OP_WAKE
@@ -259,6 +332,7 @@ int PS4ABI sys_umtx_op(void *ptr, int op, uint64_t val, void *a, void *b) {
   case 22: { // UMTX_OP_MUTEX_WAKE2
     auto &bk = umtxBucket(ptr);
     std::lock_guard<std::mutex> lk(bk.m);
+    bk.chan[ptr].gen++;
     bk.cv.notify_all();
     return 0;
   }
@@ -314,38 +388,79 @@ int PS4ABI sys_umtx_op(void *ptr, int op, uint64_t val, void *a, void *b) {
     std::unique_lock<std::mutex> lk(bk.m);
     umtxTrace(6, ptr, t_tid, p->load());
     p->store(0);                       // release
+    bk.chan[ptr].gen++;                // releases MUTEX_WAIT sleepers
     bk.cv.notify_all();
     return 0;
   }
   // Kernel condvar. CV_WAIT atomically releases the umutex (uaddr1=a) and sleeps
   // on the ucond (ptr) until signaled; libthr re-locks the mutex (op 5) on return.
   // Hold the cond bucket across the mutex release so a concurrent signal can't be
-  // lost between unlock and sleep.
-  case 8: { // UMTX_OP_CV_WAIT: ptr=ucond, a=umutex, b=timespec
+  // lost between unlock and sleep. Two details real engines depend on:
+  //  - ucond.c_has_waiters must be raised BEFORE the mutex is released:
+  //    pthread_cond_signal only issues the CV_SIGNAL syscall when it sees the
+  //    flag (it reads it under the mutex the waiter just held); without it no
+  //    signal ever reaches the kernel and every wake here would be spurious.
+  //  - a waiter returns only on a real signal/broadcast or its own timeout,
+  //    never on the safety re-poll: libthr reports any 0/EINTR return of this
+  //    op as "signaled" to the app, and engines deref state the signaling
+  //    thread has not published yet (SotC fiber/stream managers).
+  case 8: { // UMTX_OP_CV_WAIT: ptr=ucond, a=umutex, b=timespec, val=flags
     auto &cbk = umtxBucket(ptr);
     auto &mbk = umtxBucket(a);
+    const auto dl = cvDeadline(ptr, val, b);
     std::unique_lock<std::mutex> clk(cbk.m);
-    if (a)
+    auto &ch = cbk.chan[ptr];  // stable ref: unordered_map never moves nodes
+    ch.waiters++;
+    static_cast<std::atomic<uint32_t> *>(ptr)->store(1);  // c_has_waiters
+    if (a) {                           // release the mutex (waking its waiters)
       umtxTrace(8, a, t_tid,
                 static_cast<std::atomic<uint32_t> *>(a)->load());
-    if (a) {                           // release the mutex (waking its waiters)
       auto *m = static_cast<std::atomic<uint32_t> *>(a);
       if (&mbk == &cbk) {              // same bucket: already locked, don't re-lock
         m->store(0);
+        mbk.chan[a].gen++;
       } else {
         std::lock_guard<std::mutex> mlk(mbk.m);
         m->store(0);
+        mbk.chan[a].gen++;
       }
       mbk.cv.notify_all();
     }
-    cbk.cv.wait_for(clk, umtxTimeout());
-    return 0;
+    const uint64_t g0 = ch.gen;
+    int r = 0;
+    for (;;) {
+      if (ch.gen != g0)                // broadcast: releases every sleeper
+        break;
+      if (ch.signals > 0) {            // signal: exactly one sleeper consumes it
+        ch.signals--;
+        break;
+      }
+      if (dl && std::chrono::steady_clock::now() >= *dl) {
+        r = -SysError::eTIMEDOUT;
+        break;
+      }
+      cbk.cv.wait_for(clk, umtxTimeout());
+    }
+    if (--ch.waiters == 0) {           // last one out lowers c_has_waiters
+      ch.signals = 0;                  // unconsumed signals don't outlive waiters
+      static_cast<std::atomic<uint32_t> *>(ptr)->store(0);
+    }
+    return r;
   }
-  case 9:    // UMTX_OP_CV_SIGNAL
-  case 10: { // UMTX_OP_CV_BROADCAST
+  case 9: {  // UMTX_OP_CV_SIGNAL: release one waiter
     auto &bk = umtxBucket(ptr);
     std::lock_guard<std::mutex> lk(bk.m);
-    bk.cv.notify_all();                // waiters re-check their predicate
+    auto &ch = bk.chan[ptr];
+    if (ch.waiters > ch.signals)       // signal with nobody waiting is lost
+      ch.signals++;
+    bk.cv.notify_all();
+    return 0;
+  }
+  case 10: { // UMTX_OP_CV_BROADCAST: release all waiters
+    auto &bk = umtxBucket(ptr);
+    std::lock_guard<std::mutex> lk(bk.m);
+    bk.chan[ptr].gen++;
+    bk.cv.notify_all();
     return 0;
   }
   // Userland semaphore (struct _usem { u32 _has_waiters; u32 _count; u32 _flags; }
@@ -359,15 +474,23 @@ int PS4ABI sys_umtx_op(void *ptr, int op, uint64_t val, void *a, void *b) {
     auto *hasWaiters = static_cast<std::atomic<uint32_t> *>(ptr);
     auto *count = reinterpret_cast<volatile uint32_t *>(
         static_cast<uint8_t *>(ptr) + 4);
+    const auto dl = umtxRelDeadline(b);
     std::unique_lock<std::mutex> lk(bk.m);
     uint32_t z = 0;
     hasWaiters->compare_exchange_strong(z, 1);  // publish "has waiters"
-    bk.cv.wait_for(lk, umtxTimeout(), [&] { return *count != 0; });
+    auto &ch = bk.chan[ptr];
+    const uint64_t g0 = ch.gen;
+    while (*count == 0 && ch.gen == g0) {
+      if (dl && std::chrono::steady_clock::now() >= *dl)
+        return -SysError::eTIMEDOUT;
+      bk.cv.wait_for(lk, umtxTimeout());
+    }
     return 0;
   }
   case 20: { // UMTX_OP_SEM_WAKE
     auto &bk = umtxBucket(ptr);
     std::lock_guard<std::mutex> lk(bk.m);
+    bk.chan[ptr].gen++;
     bk.cv.notify_all();
     return 0;
   }
@@ -379,6 +502,7 @@ int PS4ABI sys_umtx_op(void *ptr, int op, uint64_t val, void *a, void *b) {
     for (uint64_t i = 0; i < val; ++i) {
       auto &bk = umtxBucket(addrs[i]);
       std::lock_guard<std::mutex> lk(bk.m);
+      bk.chan[addrs[i]].gen++;
       bk.cv.notify_all();
     }
     return 0;

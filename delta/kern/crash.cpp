@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fcntl.h>
 #include <ucontext.h>
 #include <unistd.h>
 #include <sys/mman.h>
@@ -607,6 +608,46 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
     std::fprintf(stderr, "  in syscall %d (%s)\n", sc, syscall_getname((uint32_t)sc));
   std::fprintf(stderr, "  fault = %016llx  %s\n",
                (unsigned long long)si->si_addr, fault);
+  // Show what the host VA space holds around the fault: which mapping it hit,
+  // or which two mappings it fell between. Async-signal-safe (read+write only).
+  if (si->si_addr) {
+    const uint64_t fa = (uint64_t)si->si_addr;
+    int mf = open("/proc/self/maps", O_RDONLY);
+    if (mf >= 0) {
+      static char mbuf[1 << 20];
+      ssize_t n = 0, off = 0, r;
+      while ((r = read(mf, mbuf + off, sizeof(mbuf) - 1 - off)) > 0)
+        off += r;
+      n = off;
+      close(mf);
+      mbuf[n] = 0;
+      char *prev = nullptr, *line = mbuf;
+      while (line && *line) {
+        char *nl = strchr(line, '\n');
+        if (nl) *nl = 0;
+        uint64_t lo = strtoull(line, nullptr, 16);
+        const char *dash = strchr(line, '-');
+        uint64_t hi = dash ? strtoull(dash + 1, nullptr, 16) : 0;
+        if (fa < hi || !nl) {
+          if (prev)
+            std::fprintf(stderr, "  maps prev: %s\n", prev);
+          std::fprintf(stderr, "  maps %s : %s\n",
+                       (fa >= lo && fa < hi) ? "HIT " : "next", line);
+          // A couple of following lines: what the faulting pointer sits under.
+          char *after = nl ? nl + 1 : nullptr;
+          for (int k = 0; k < 3 && after && *after; k++) {
+            char *anl = strchr(after, '\n');
+            if (anl) *anl = 0;
+            std::fprintf(stderr, "  maps  +%d : %s\n", k + 1, after);
+            after = anl ? anl + 1 : nullptr;
+          }
+          break;
+        }
+        prev = line;
+        line = nl ? nl + 1 : nullptr;
+      }
+    }
+  }
 #if defined(__x86_64__)
   // Native x86 host: the host signal context IS the guest context.
   auto *uc = static_cast<ucontext_t *>(ucv);
@@ -746,6 +787,24 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
         for (int i = 0; i < 16; i++) {
           if ((i % 4) == 0)
             std::fprintf(stderr, "\n  peek %#llx+%03x:", (unsigned long long)va, i * 8);
+          std::fprintf(stderr, " %016llx", (unsigned long long)q[i]);
+        }
+        std::fprintf(stderr, "\n");
+      }
+    }
+    // DELTA_CRASH_PEEK also dumps the raw stack window around rsp: for a fault
+    // inside a leaf helper (e.g. a lookup that returned null) the caller's
+    // locals -- the key being freed, the object under operation -- are the
+    // fastest route to "what data was this actually working on".
+    if (std::getenv("DELTA_CRASH_PEEK") && g[RSP] >= 0x10000) {
+      long pg = sysconf(_SC_PAGESIZE);
+      unsigned char vec[2] = {0, 0};
+      void *pa = reinterpret_cast<void *>(g[RSP] & ~((uint64_t)pg - 1));
+      if (mincore(pa, 1, vec) == 0) {
+        auto *q = reinterpret_cast<const uint64_t *>(g[RSP] & ~7ull);
+        for (int i = -8; i < 64; i++) {
+          if (((i + 8) % 4) == 0)
+            std::fprintf(stderr, "\n  stack rsp%+05x:", i * 8);
           std::fprintf(stderr, " %016llx", (unsigned long long)q[i]);
         }
         std::fprintf(stderr, "\n");

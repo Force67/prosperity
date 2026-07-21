@@ -32,7 +32,7 @@ using alt = utl::allocationType;
 // hands mmap(NULL) addresses far above that ceiling, so when we have to pick an
 // address ourselves, carve it from a dedicated low arena instead. Bump-only and
 // MAP_FIXED_NOREPLACE so we never clobber an existing mapping.
-uint8_t *allocLowGuest(size_t size) {
+uint8_t *allocLowGuest(size_t size, size_t align) {
 #ifdef __ANDROID__
   // 39-bit user VA: keep the guest arena clear of the module region (32..~224
   // GiB) and the FEX heap / bionic up top, and still under the PS4 2^40 ceiling.
@@ -57,9 +57,15 @@ uint8_t *allocLowGuest(size_t size) {
   constexpr uintptr_t kAlign = 0x10000;
   static std::atomic<uintptr_t> next{kFloor};
   size = (size + 0x3FFF) & ~uintptr_t(0x3FFF);
+  // Caller-requested alignment (MAP_ALIGNED(n) in the mmap flags): the kernel
+  // CONTRACTUALLY returns a base aligned to 2^n. Engines size their arena
+  // bookkeeping around it -- SotC reserves its streaming arenas with
+  // MAP_ALIGNED(20) and indexes them by VA>>20; a 64 KiB-aligned base breaks
+  // every lookup (AllocationTracker null-record crash in LoadInitialWorld).
+  const uintptr_t al = align > kAlign ? align : kAlign;
   for (int tries = 0; tries < 8192; tries++) {
     uintptr_t raw = next.load(std::memory_order_relaxed);
-    uintptr_t base = (raw + (kAlign - 1)) & ~(kAlign - 1);  // align the base up
+    uintptr_t base = (raw + (al - 1)) & ~(al - 1);  // align the base up
     if (base + size + 0x4000 > kCeil)
       return nullptr;  // doesn't fit; do NOT poison `next` (CAS, not fetch_add)
     if (!next.compare_exchange_weak(raw, base + size + 0x4000,
@@ -196,6 +202,18 @@ uint8_t *PS4ABI sys_mmap(void *addr, size_t size, uint32_t prot, uint32_t flags,
     }
   }
 
+  // MAP_ALIGNED(n): bits 31..24 of the flags carry log2 of a base alignment the
+  // kernel must honor (FreeBSD 9 semantics; Sony titles rely on it -- SotC
+  // reserves streaming arenas with MAP_ALIGNED(20) and keys its allocator
+  // bookkeeping on the 1 MiB-aligned base).
+  const uint32_t alignLog = (flags >> 24) & 0x1F;
+  const size_t mapAlign = (alignLog >= 14 && alignLog < 40)
+                              ? (size_t(1) << alignLog)
+                              : 0;
+  if (mapAlign && addr && !(flags & mFlags::fixed) &&
+      (reinterpret_cast<uintptr_t>(addr) & (mapAlign - 1)))
+    addr = nullptr;  // misaligned hint: pick our own aligned base instead
+
   void *ptr = nullptr;
   if (addr) {
     if (flags & mFlags::fixed) {
@@ -215,7 +233,7 @@ uint8_t *PS4ABI sys_mmap(void *addr, size_t size, uint32_t prot, uint32_t flags,
   // No usable hint (or it was taken): pick a low (<2^40) address the guest's
   // own allocators will accept, not whatever high address the host hands out.
   if (!ptr)
-    ptr = allocLowGuest(size);
+    ptr = allocLowGuest(size, mapAlign);
   if (!ptr) {
     return reinterpret_cast<uint8_t *>(-1);
   }
@@ -249,7 +267,8 @@ uint8_t *PS4ABI sys_mmap(void *addr, size_t size, uint32_t prot, uint32_t flags,
 
   utl::protectMem(static_cast<void *>(ptr), size, ppt::rwx);
 
-  std::printf("mmap %p, %x, %p -> %p\n", addr, size, _ReturnAddress(), ptr);
+  std::printf("mmap %p, %x, prot=%x flags=%x, %p -> %p\n", addr, size, prot,
+              flags, _ReturnAddress(), ptr);
   // LOG_WARNING("addr={}, len={}, requested by {}", fmt::ptr(addr), len,
   // fmt::ptr(_ReturnAddress()));
 

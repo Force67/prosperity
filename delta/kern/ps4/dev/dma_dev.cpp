@@ -41,18 +41,87 @@ namespace {
 // title budget. Report a flat large pool and bump offsets from a non-zero base
 // so a test for "offset 0 means invalid" still holds.
 constexpr uint64_t kDmemTotal = 0x300000000ull;  // 12 GiB (SOTTR working set)
-std::atomic<uint64_t> g_dmemNext{0x10000000ull};  // first free physical offset
+// Floor for window-less requests so physical offset 0 stays invalid ("offset 0
+// means the allocation failed" checks in titles keep working).
+constexpr uint64_t kDmemBase = 0x10000000ull;
 
 // Record of each direct-memory reservation so GetDirectMemoryType (ioctl
 // 0xC0208004) can answer "which region owns this physical offset, and of what
 // type". The renderer queries the regions it just allocated and refuses to
-// initialise if they come back as a zero-length, type-0 hole.
+// initialise if they come back as a zero-length, type-0 hole. Kept sorted by
+// start so allocation can walk holes in order.
 struct DmemRegion {
   uint64_t start, end;
   uint32_t memType;
 };
 std::mutex g_dmemMutex;
 std::vector<DmemRegion> g_dmemRegions;
+
+// First-fit hole search within [lo, hi). The window is part of the contract,
+// not a hint: SotC carves the whole pool into fixed windows up front (0x220000
+// tail scratch that ends exactly at pool end, a 1 GiB CPU heap, the ~11 GiB
+// streaming/GPU heap between them) and derives which internal heap partition
+// owns an address from the physical range. The old bump allocator satisfied
+// the tail window and then bumped every later reservation past the end of the
+// pool, so the two MAIN heaps lived outside their windows -- the engine's
+// AllocationTracker range lookup then missed on free and the job fiber
+// dereferenced the null/-1 result (Shadow_Shipping+0x189a7 / +0x8d9b7).
+int dmemAllocate(uint64_t lo, uint64_t hi, uint64_t len, uint64_t align,
+                 uint32_t memType, uint64_t *out) {
+  if (hi == 0 || hi > kDmemTotal)
+    hi = kDmemTotal;
+  if (lo == 0)
+    lo = kDmemBase;
+  if (len == 0 || align == 0 || (align & (align - 1)) || lo >= hi)
+    return -22 /*EINVAL*/;
+  std::lock_guard<std::mutex> lk(g_dmemMutex);
+  uint64_t cand = (lo + align - 1) & ~(align - 1);
+  for (const auto &r : g_dmemRegions) {
+    if (r.end <= cand)
+      continue;                 // fully below the candidate
+    if (r.start >= cand + len)
+      break;                    // hole before this region fits (list is sorted)
+    cand = ((r.end > cand ? r.end : cand) + align - 1) & ~(align - 1);
+  }
+  if (cand + len > hi)
+    return -12 /*ENOMEM: window exhausted*/;
+  auto it = g_dmemRegions.begin();
+  while (it != g_dmemRegions.end() && it->start < cand)
+    ++it;
+  g_dmemRegions.insert(it, {cand, cand + len, memType});
+  *out = cand;
+  return 0;
+}
+
+// Largest free hole inside [lo, hi) (AvailableDirectMemorySize).
+void dmemLargestHole(uint64_t lo, uint64_t hi, uint64_t align,
+                     uint64_t *holeBase, uint64_t *holeSize) {
+  if (hi == 0 || hi > kDmemTotal)
+    hi = kDmemTotal;
+  if (lo == 0)
+    lo = kDmemBase;
+  if (align == 0)
+    align = 0x4000;
+  *holeBase = 0;
+  *holeSize = 0;
+  std::lock_guard<std::mutex> lk(g_dmemMutex);
+  uint64_t cur = (lo + align - 1) & ~(align - 1);
+  auto consider = [&](uint64_t end) {
+    if (end > cur && end - cur > *holeSize) {
+      *holeBase = cur;
+      *holeSize = end - cur;
+    }
+  };
+  for (const auto &r : g_dmemRegions) {
+    if (r.end <= cur)
+      continue;
+    if (r.start >= hi)
+      break;
+    consider(r.start < hi ? r.start : hi);
+    cur = ((r.end > cur ? r.end : cur) + align - 1) & ~(align - 1);
+  }
+  consider(hi);
+}
 }  // namespace
 
 /* dmem_ioctl */
@@ -109,24 +178,17 @@ int32_t dmaDevice::ioctl(uint32_t cmd, void *data) {
         }
       }
     }
-    // Bump-allocate an aligned offset, honoring a non-zero searchStart floor.
-    uint64_t off;
-    for (;;) {
-      uint64_t cur = g_dmemNext.load(std::memory_order_relaxed);
-      uint64_t base = (cur + (align - 1)) & ~(align - 1);
-      if (a[0] > base)
-        base = (a[0] + (align - 1)) & ~(align - 1);
-      if (g_dmemNext.compare_exchange_weak(cur, base + len,
-                                            std::memory_order_relaxed)) {
-        off = base;
-        break;
-      }
+    uint64_t off = 0;
+    int r = dmemAllocate(a[0], a[1], len, align, static_cast<uint32_t>(a[4]),
+                         &off);
+    if (r < 0) {
+      std::fprintf(stderr,
+                   "[dmem] alloc FAILED window=[%#llx,%#llx) len=%#llx -> %d\n",
+                   (unsigned long long)a[0], (unsigned long long)a[1],
+                   (unsigned long long)len, r);
+      return r;
     }
     a[0] = off;  // physical offset out
-    {
-      std::lock_guard<std::mutex> lk(g_dmemMutex);
-      g_dmemRegions.push_back({off, off + len, static_cast<uint32_t>(a[4])});
-    }
     return 0;
   }
   case 0xC0288011: {
@@ -142,21 +204,12 @@ int32_t dmaDevice::ioctl(uint32_t cmd, void *data) {
     uint64_t align = a[3] ? a[3] : 0x4000;
     if (len == 0)
       return -1;
-    uint64_t off;
-    for (;;) {
-      uint64_t cur = g_dmemNext.load(std::memory_order_relaxed);
-      uint64_t base = (cur + (align - 1)) & ~(align - 1);
-      if (g_dmemNext.compare_exchange_weak(cur, base + len,
-                                            std::memory_order_relaxed)) {
-        off = base;
-        break;
-      }
-    }
+    uint64_t off = 0;
+    int r = dmemAllocate(0, kDmemTotal, len, align,
+                         static_cast<uint32_t>(a[4]), &off);
+    if (r < 0)
+      return r;
     a[0] = off;
-    {
-      std::lock_guard<std::mutex> lk(g_dmemMutex);
-      g_dmemRegions.push_back({off, off + len, static_cast<uint32_t>(a[4])});
-    }
     return 0;
   }
   case 0xC0208016: {
@@ -168,16 +221,10 @@ int32_t dmaDevice::ioctl(uint32_t cmd, void *data) {
     auto *a = static_cast<uint64_t *>(data);
     if (!a)
       return -1;
-    uint64_t start = a[0], end = a[1];
-    uint64_t align = a[2] ? a[2] : 0x4000;
-    if (end == 0 || end > kDmemTotal)
-      end = kDmemTotal;
-    uint64_t base = g_dmemNext.load(std::memory_order_relaxed);
-    if (start > base)
-      base = start;
-    base = (base + (align - 1)) & ~(align - 1);
+    uint64_t base = 0, size = 0;
+    dmemLargestHole(a[0], a[1], a[2], &base, &size);
     a[0] = base;                        // physical offset of the hole
-    a[3] = end > base ? end - base : 0; // available size
+    a[3] = size;                        // available size
     return 0;
   }
   case 0xC0208004: {
