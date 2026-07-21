@@ -131,7 +131,15 @@ static void symRange(uint64_t a, char *out, size_t n) {
 // Live guest threads, for the DELTA_WATCHDOG=secs deadlock dump: after N seconds
 // it prints every live thread's current guest RIP so a stalled boot's blocking
 // site can be symbolized to a module+offset without a debugger.
-struct LiveThread { FEXCore::Core::InternalThreadState *thread; uint32_t id; };
+struct LiveThread {
+  FEXCore::Core::InternalThreadState *thread;
+  uint32_t id;
+  // This thread's TLS syscall/HLE trace ring (valid while the thread lives):
+  // lets the DELTA_WATCHDOG stall dump show every parked thread's last
+  // syscalls WITH arguments, not just its rip.
+  const TraceEvt *trace = nullptr;
+  const uint32_t *tracePos = nullptr;
+};
 std::mutex g_liveMutex;
 std::vector<LiveThread> g_live;
 std::atomic<uint32_t> g_liveSeq{0};
@@ -175,16 +183,62 @@ static void startWatchdog() {
           auto &S = t.thread->CurrentFrame->State;
           char sym[256];
           symRange(S.rip, sym, sizeof(sym));
-          std::fprintf(stderr, "  tid=%u rip=%#llx (%s)\n", t.id,
-                       (unsigned long long)S.rip, sym);
+          // scN = total syscalls this thread has made: compare across rounds
+          // to tell a thread that is genuinely STUCK in one wait (scN frozen)
+          // from one that loops through waits (scN advancing).
+          std::fprintf(stderr, "  tid=%u rip=%#llx scN=%u (%s)\n", t.id,
+                       (unsigned long long)S.rip,
+                       t.tracePos ? *t.tracePos : 0, sym);
           // Scan the stack upward for return addresses into known modules (the
           // wait stub omits frame pointers, so a raw scan beats an rbp walk) to
           // reveal which subsystem this thread is parked inside.
+          // Parked thread's last syscalls WITH ARGUMENTS (its TLS trace ring,
+          // registered in g_live): the difference between "waiting" and "waiting
+          // on WHAT".
+          if (t.trace && t.tracePos) {
+            uint32_t pos = *t.tracePos;
+            uint32_t cnt = pos < kTraceRing ? pos : kTraceRing;
+            uint32_t from = cnt > 6 ? cnt - 6 : 0;
+            for (uint32_t k = from; k < cnt; k++) {
+              const TraceEvt &e = t.trace[(pos - cnt + k) % kTraceRing];
+              if (e.kind != 's')
+                continue;
+              std::fprintf(stderr,
+                           "      sc %3u %-18s (%#llx,%#llx,%#llx,%#llx) -> %#llx\n",
+                           e.id, krnl::syscall_getname(e.id),
+                           (unsigned long long)e.a0, (unsigned long long)e.a1,
+                           (unsigned long long)e.a2, (unsigned long long)e.a3,
+                           (unsigned long long)e.ret);
+              // Thread parked in UMTX_OP_MUTEX_WAIT (last ring entry, op 17):
+              // decode the umutex owner word -- the owner tid is the whole
+              // ballgame in a deadlock (who holds it and what are THEY doing).
+              if (k == cnt - 1 && e.id == 454 && e.a1 == 17 && e.a0 >= 0x10000) {
+                unsigned char mv = 0;
+                long pg = sysconf(_SC_PAGESIZE);
+                if (mincore(reinterpret_cast<void *>(e.a0 & ~((uint64_t)pg - 1)),
+                            1, &mv) == 0) {
+                  uint32_t ow = *reinterpret_cast<volatile uint32_t *>(e.a0);
+                  std::fprintf(stderr,
+                               "      ^ umutex %#llx word=%#x owner-tid=%u%s\n",
+                               (unsigned long long)e.a0, ow, ow & 0x7fffffff,
+                               (ow & 0x80000000u) ? " CONTESTED" : "");
+                }
+              }
+            }
+          }
           uint64_t rsp = S.gregs[FEXCore::X86State::REG_RSP];
           int shown = 0;
           for (int i = 0; i < 1024 && shown < 12; i++) {
             uint64_t a = rsp + (uint64_t)i * 8;
             if (a < 0x1000) break;
+            // Guard every read: the scan walks past stack tops and the old
+            // unguarded memcpy CRASHED the process mid-dump (fault at the
+            // mapping end above a guest stack).
+            unsigned char mv = 0;
+            long pg = sysconf(_SC_PAGESIZE);
+            if (mincore(reinterpret_cast<void *>(a & ~((uint64_t)pg - 1)), 1,
+                        &mv) != 0)
+              break;
             uint64_t v = 0;
             std::memcpy(&v, reinterpret_cast<void *>(a), 8);
             // a plausible code return address that lands in a named module range
@@ -520,7 +574,8 @@ public:
                    "[fex] gthread rip=%#llx gstack=[%p+%#zx] hoststack=[%p+%#zx]\n",
                    (unsigned long long)entryRip, h->stack, h->stackSize, hsp, hsz);
     }
-    { std::lock_guard lk(g_liveMutex); g_live.push_back({h->thread, myId}); }
+    { std::lock_guard lk(g_liveMutex);
+      g_live.push_back({h->thread, myId, t_trace, &t_tracePos}); }
     LOG_INFO("fex: running guest thread rip={:#x} (watchdog tid={})",
              h->thread->CurrentFrame->State.rip, myId);
     // thr_exit (cpu::exitGuestThread) longjmps here to leave the JIT without
@@ -854,13 +909,46 @@ uint64_t reconstructGuestRip(uint64_t hostPC) {
 
 bool tryHandleJitSignal(int sig, void *infop, void *ucv) {
 #if defined(__aarch64__)
+  if (!g_ctxPtr || !t_curThread || !ucv || !infop)
+    return false;
+  auto *uc = static_cast<ucontext_t *>(ucv);
+
+  // FEX's call-ret prediction stack: the JIT pushes/pops a predictor entry on
+  // every guest call/ret through x25. Guest code whose calls and rets don't
+  // pair up -- sceFiber switches jump between fiber stacks without returning
+  // (SotC's BPE job system does this thousands of times per streaming second)
+  // -- drifts the predictor sp until it walks into one of the buffer's guard
+  // pages. Upstream FEX treats that as EXPECTED (SyscallsSMCTracking.cpp
+  // HandleSegfault): reset x25 to the default mid-buffer location and resume.
+  // Without this mirror, a purely internal predictor overflow surfaced as a
+  // fatal "guest fault" at the guard page (0x...feff0) ~9s into SotC's
+  // LoadInitialWorld.
+  if (sig == SIGSEGV && t_curThread->CallRetStackBase) {
+    const uint64_t fa =
+        reinterpret_cast<uint64_t>(static_cast<siginfo_t *>(infop)->si_addr);
+    const uint64_t crBase =
+        reinterpret_cast<uint64_t>(t_curThread->CallRetStackBase);
+    constexpr size_t kCrSize =
+        FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE;
+    constexpr size_t kPage = 0x1000;
+    if (fa >= crBase - kPage && fa < crBase + kCrSize + kPage) {
+      uc->uc_mcontext.regs[25] = crBase + kCrSize / 4;
+      static std::atomic<uint32_t> n{0};
+      uint32_t c = n.fetch_add(1);
+      if (c < 8 || (c & (c - 1)) == 0)  // first few, then powers of two
+        std::fprintf(stderr,
+                     "[fex] callret predictor over/underflow #%u reset (fault %#llx)\n",
+                     c, (unsigned long long)fa);
+      return true;
+    }
+  }
+
   // FEX raises SIGBUS(BUS_ADRALN) from the JIT for unaligned atomic accesses
   // and backpatches them. Mirror FEX's frontend SIGBUS handler. (FEX's own
   // SignalDelegator owns the richer SIGSEGV/SMC path; we only need this one
   // case.)
-  if (sig != SIGBUS || !g_ctxPtr || !t_curThread || !ucv || !infop)
+  if (sig != SIGBUS)
     return false;
-  auto *uc = static_cast<ucontext_t *>(ucv);
   const uint64_t pc = uc->uc_mcontext.pc;
   if (!g_ctxPtr->IsAddressInCodeBuffer(t_curThread, pc))
     return false;

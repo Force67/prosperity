@@ -263,7 +263,12 @@ uint8_t *PS4ABI sys_mmap(void *addr, size_t size, uint32_t prot, uint32_t flags,
       }
   }
 
-  proc->getVma().add(static_cast<uint8_t *>(ptr), size, gprot, prot);
+  // 0x100 = Sony MAP_VOID: an address-space reservation (titles later commit
+  // pieces inside with MAP_FIXED, which punches the reservation apart in the
+  // VMA). Virtual query must see it as reserved, not committed memory.
+  const bool voidReserve = (flags & 0x100) && prot == 0;
+  proc->getVma().add(static_cast<uint8_t *>(ptr), size, gprot, prot,
+                     voidReserve);
 
   utl::protectMem(static_cast<void *>(ptr), size, ppt::rwx);
 

@@ -93,18 +93,22 @@ static eventFlag *fromId(int id) {
 // DELTA_EVF_TRACE[=substr]: log every evf op (optionally only for flags whose
 // name contains substr) with tid + bits, to reconstruct producer/consumer
 // interleavings (e.g. SOTTR's file-I/O channel handshake).
-static bool evfTraceOn(const eventFlag *ef) {
+static bool evfTraceOn(const eventFlag *ef, int id) {
   static const char *filt = std::getenv("DELTA_EVF_TRACE");
   if (!filt)
     return false;
   if (!*filt || std::strcmp(filt, "1") == 0)
     return true;
+  // "id:<n>" filters by handle (names like PS4SyncEvent repeat dozens of
+  // times; the handle is the only unique identity).
+  if (std::strncmp(filt, "id:", 3) == 0)
+    return id == std::atoi(filt + 3);
   return ef && std::strstr(ef->fname().c_str(), filt) != nullptr;
 }
 
 static void evfTrace(const char *op, int id, const eventFlag *ef,
                      uint64_t pattern, uint32_t mode, int ret, uint64_t res) {
-  if (!evfTraceOn(ef))
+  if (!evfTraceOn(ef, id))
     return;
   std::fprintf(stderr, "[evf] t=%ld %s id=%d '%s' pat=%#llx mode=%#x -> ret=%d res=%#llx\n",
                (long)gettid(), op, id, ef ? ef->fname().c_str() : "?",
@@ -178,6 +182,9 @@ int PS4ABI sys_evf_wait(int id, uint64_t pattern, uint32_t mode,
   auto *ef = fromId(id);
   if (!ef)
     return -SysError::eSRCH;
+  // Trace the ENTRY too: a wait that never satisfies never reaches the exit
+  // trace, which is exactly the wait one is usually hunting.
+  evfTrace("waitE", id, ef, pattern, mode, 0, 0);
   uint64_t res = 0;
   int r = ef->wait(pattern, mode, &res, timeoutUs);
   if (result)

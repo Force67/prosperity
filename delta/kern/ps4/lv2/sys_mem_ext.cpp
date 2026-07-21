@@ -25,17 +25,21 @@
 
 namespace krnl {
 
-// Our VM is a flat, host-backed low arena that is never compacted. We don't
-// reclaim guest mappings: utl::freeMem() takes only a base (no length) so it
-// can't honour a partial munmap, and a wrong base would corrupt the arena. The
-// host reclaims every page at exit. Logged once so a workload that churns large
-// mappings (and would actually need reclaim) is visible.
+// Our VM is a flat, host-backed low arena that is never compacted, so the HOST
+// pages stay mapped (utl::freeMem() takes only a base, no length, and can't
+// honour a partial munmap; stale guest pointers then read stable garbage
+// rather than faulting). The BOOKKEEPING, however, must be released: titles
+// churn VA (SotC recycles multi-MB fiber/streaming regions constantly) and key
+// real allocator state off sceKernelVirtualQuery's [start, end) — leaving dead
+// entries in the VMA made later queries report stale bounds.
 int PS4ABI sys_munmap(void *addr, size_t len) {
   static std::atomic<bool> warned{false};
   if (!warned.exchange(true))
-    LOG_WARNING("sys_munmap: unmaps are ignored (regions leak until exit); "
-                "first was {} (+{:#x})",
+    LOG_WARNING("sys_munmap: host pages are retained (first was {} +{:#x}); "
+                "only the VMA bookkeeping is released",
                 fmt::ptr(addr), len);
+  if (auto *proc = proc::getActive(); proc && addr && len)
+    proc->getVma().remove(static_cast<uint8_t *>(addr), len);
   return 0;
 }
 
@@ -144,11 +148,14 @@ int PS4ABI sys_virtual_query(const void *addr, int /*flags*/, void *info,
     std::memcpy(vq + 0x1C, &memType, sizeof(int));
   }
   if (std::getenv("DELTA_VQ_TRACE"))
-    std::printf("[vq] addr=%p region=[%p..%p) sceProt=%#x memType=%d\n", addr,
-                start, end, region->sceProt, gpu ? 3 : 0);
+    std::printf("[vq] addr=%p region=[%p..%p) sceProt=%#x memType=%d rsv=%d\n",
+                addr, start, end, region->sceProt, gpu ? 3 : 0,
+                region->reserved ? 1 : 0);
   if (infoSize >= 0x21) {
-    // flexible(0x01) | direct(0x02, GPU mem) | committed(0x10)
-    vq[0x20] = 0x01 | 0x10 | (gpu ? 0x02 : 0x00);
+    // flexible(0x01) | direct(0x02, GPU mem) | committed(0x10). A MAP_VOID
+    // reservation is none of these -- titles branch on isCommitted to decide
+    // whether a range still needs a real commit.
+    vq[0x20] = region->reserved ? 0x00 : (0x01 | 0x10 | (gpu ? 0x02 : 0x00));
     if (region->name) {
       size_t n = std::strlen(region->name);
       if (n > 31)
@@ -215,7 +222,10 @@ int PS4ABI sys_batch_map(uint32_t /*handle*/, uint32_t /*flags*/,
       }
       break;
     }
-    case 1: // UNMAP: unmaps are ignored globally (see sys_munmap)
+    case 1: // UNMAP: host pages retained, bookkeeping released (see sys_munmap)
+      if (auto *pr = proc::getActive(); pr && op.start && op.length)
+        pr->getVma().remove(reinterpret_cast<uint8_t *>(op.start), op.length);
+      break;
     case 2: // PROTECT / TYPE_PROTECT: our flat arena stays permissive; the
     case 4: // title only narrows protections it already owns
       break;

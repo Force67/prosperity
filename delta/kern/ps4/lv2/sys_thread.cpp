@@ -19,6 +19,8 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <tuple>
+#include <pthread.h>
 #include <unordered_map>
 
 #include <utl/mem.h>
@@ -120,8 +122,12 @@ int PS4ABI sys_thr_new(thr_param *p, int size) {
                               utl::allocationType::commit);
       if (c) {
         utl::protectMem(c, kPage, utl::pageProtection::rwx);
-        proc->getVma().add(static_cast<uint8_t *>(c), kPage,
-                           utl::pageProtection::w);
+        // Only register pages the VMA doesn't know: the stack region usually
+        // already has a guest mmap entry, and re-adding pages would punch it
+        // into fragments (add() keeps intervals disjoint by splitting).
+        if (!proc->getVma().get(static_cast<uint8_t *>(c)))
+          proc->getVma().add(static_cast<uint8_t *>(c), kPage,
+                             utl::pageProtection::w);
         filled++;
       }
     }
@@ -146,11 +152,50 @@ int PS4ABI sys_thr_new(thr_param *p, int size) {
   void *gthread =
       cpu::backend().createGuestThread(reinterpret_cast<uintptr_t>(fn), arg, fsbase);
 
-  std::thread([gthread, tid, started] {
-    t_tid = tid;
-    t_started = started.get();
-    cpu::backend().runGuestThread(gthread);
-  }).detach();
+  // DIAGNOSTIC (env-gated, default off): the FEX guest-worker
+  // HOST pthread stack is the glibc default (8 MiB). Deep BPE streaming jobs
+  // (FIOS2 decompress -> libkernel HLE -> FEX dispatcher/thunk round-trips) blow
+  // it ~9s into LoadInitialWorld, faulting at the host-stack guard 0x...feff0
+  // (same root cause fex_backend.cpp ties to the SotC AllocationTracker crash).
+  // DELTA_HOST_STACK_MB=<N> spawns guest workers with an N-MiB native stack to
+  // test/mitigate the overflow; UNSET keeps the original std::thread behaviour.
+  const char *hsEnv = std::getenv("DELTA_HOST_STACK_MB");
+  if (hsEnv) {
+    auto *ctx = new std::tuple<void *, uint32_t, std::shared_ptr<std::atomic<bool>>>(
+        gthread, tid, started);
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    size_t hostStack = (size_t)std::strtoull(hsEnv, nullptr, 0) * 1024 * 1024;
+    if (hostStack < 8ull * 1024 * 1024) hostStack = 256ull * 1024 * 1024;
+    pthread_attr_setstacksize(&attr, hostStack);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    auto trampoline = +[](void *pv) -> void * {
+      auto *c = static_cast<
+          std::tuple<void *, uint32_t, std::shared_ptr<std::atomic<bool>>> *>(pv);
+      t_tid = std::get<1>(*c);
+      t_started = std::get<2>(*c).get();
+      void *gt = std::get<0>(*c);
+      delete c;
+      cpu::backend().runGuestThread(gt);
+      return nullptr;
+    };
+    pthread_t th;
+    if (pthread_create(&th, &attr, trampoline, ctx) != 0) {
+      delete ctx;
+      std::thread([gthread, tid, started] {
+        t_tid = tid;
+        t_started = started.get();
+        cpu::backend().runGuestThread(gthread);
+      }).detach();
+    }
+    pthread_attr_destroy(&attr);
+  } else {
+    std::thread([gthread, tid, started] {
+      t_tid = tid;
+      t_started = started.get();
+      cpu::backend().runGuestThread(gthread);
+    }).detach();
+  }
 
   // Wait for the new thread to finish its init and hit its first sync point so
   // it wins the races the game expects it to. Bounded so a thread that never
@@ -412,21 +457,34 @@ int PS4ABI sys_umtx_op(void *ptr, int op, uint64_t val, void *a, void *b) {
     auto &ch = cbk.chan[ptr];  // stable ref: unordered_map never moves nodes
     ch.waiters++;
     static_cast<std::atomic<uint32_t> *>(ptr)->store(1);  // c_has_waiters
+    // Snapshot the wake generation BEFORE releasing the guest mutex: any
+    // signal that lands from here on bumps gen/signals under cbk.m and the
+    // wait loop below will see it. That makes it safe to DROP the cond bucket
+    // while releasing the mutex -- never hold two bucket locks at once. The
+    // old hold-cbk-lock-mbk order deadlocked against a second CV_WAIT whose
+    // cond/mutex hashed to the opposite buckets (SotC: whole process wedged
+    // ~9s in, every thread queued on two host bucket mutexes while the guest
+    // umutex word itself read 0/free).
+    const uint64_t g0 = ch.gen;
     if (a) {                           // release the mutex (waking its waiters)
       umtxTrace(8, a, t_tid,
                 static_cast<std::atomic<uint32_t> *>(a)->load());
       auto *m = static_cast<std::atomic<uint32_t> *>(a);
-      if (&mbk == &cbk) {              // same bucket: already locked, don't re-lock
+      if (&mbk == &cbk) {              // same bucket: already locked
         m->store(0);
         mbk.chan[a].gen++;
+        mbk.cv.notify_all();
       } else {
-        std::lock_guard<std::mutex> mlk(mbk.m);
-        m->store(0);
-        mbk.chan[a].gen++;
+        clk.unlock();
+        {
+          std::lock_guard<std::mutex> mlk(mbk.m);
+          m->store(0);
+          mbk.chan[a].gen++;
+        }
+        mbk.cv.notify_all();
+        clk.lock();
       }
-      mbk.cv.notify_all();
     }
-    const uint64_t g0 = ch.gen;
     int r = 0;
     for (;;) {
       if (ch.gen != g0)                // broadcast: releases every sleeper
