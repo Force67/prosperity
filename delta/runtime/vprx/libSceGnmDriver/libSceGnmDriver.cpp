@@ -18,6 +18,7 @@
  */
 
 #include "libSceGnmDriver.h"
+#include <utl/mem.h>
 
 #include <cstdint>
 #include <cstdio>
@@ -43,6 +44,18 @@ extern "C" void prosperity_gc_submit(const void *descArray, uint32_t descCount) 
   auto *d = static_cast<const uint32_t *>(descArray);
   if (!d)
     return;
+  // Guest bug shields: submits arrive with guest-controlled pointers. A stray
+  // descriptor array (or a descriptor whose IB address is garbage) must be
+  // dropped loudly, not dereferenced — SotC's debug menu produced a submit
+  // whose descPtr pointed at unmapped host space and SIGSEGV'd the CP.
+  if (descCount > 4096 ||
+      !utl::isMemoryRangeMapped(descArray, descCount * 16ull)) {
+    static int warned = 0;
+    if (warned++ < 8)
+      std::fprintf(stderr, "[gc] DROPPED bad submit descArray=%p count=%u\n",
+                   descArray, descCount);
+    return;
+  }
   static const bool traceSubmit = std::getenv("DELTA_GC_SUBMIT") != nullptr;
   static int submitDumps = 0;
   const bool dumpThis = traceSubmit && submitDumps++ < 12;
@@ -60,6 +73,14 @@ extern "C" void prosperity_gc_submit(const void *descArray, uint32_t descCount) 
                    i, e[0], e[1], e[2], e[3], (unsigned long)addr, bytes);
     if (!addr || !bytes)
       continue;
+    if (!utl::isMemoryRangeMapped(reinterpret_cast<const void *>(addr),
+                                  bytes)) {
+      static int warned = 0;
+      if (warned++ < 8)
+        std::fprintf(stderr, "[gc] DROPPED bad IB addr=%#lx bytes=%u\n",
+                     (unsigned long)addr, bytes);
+      continue;
+    }
     if (hdr == 0xC0023300u)
       gpu::submitCcb(reinterpret_cast<const void *>(addr), bytes);
     else if (hdr == 0xC0023F00u)

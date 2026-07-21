@@ -2796,6 +2796,7 @@ struct CsRange {
   int lastValidatedFrame = -1;
   int lastUsedFrame = -1;
   bool gpuDirty = false;    // buffer newer than guest memory
+  bool pendingBatch = false;  // referenced by the open dispatch batch
   bool imageStaging = false;
   ComputeInfo::Res res;     // writeback needs the full layout description
 };
@@ -2863,10 +2864,47 @@ void csRangeDestroy(CsRange &e) {
   e = CsRange{};
 }
 
+// Dispatch batching: dispatches are recorded into one command buffer and
+// submitted/waited only when something needs their results (a flush point,
+// a staging hazard, or the batch cap). 228 individual submit+fence round
+// trips per frame were ~40% of the whole compute cost.
+bool g_csBatchOpen = false;
+uint32_t g_csBatchCount = 0;
+VkFence g_csBatchFence = VK_NULL_HANDLE;
+bool g_csStagePending[ComputeInfo::kMaxResources] = {};
+
+void csBatchFlush() {
+  if (!g_csBatchOpen) return;
+  const uint64_t t0 = nowNs();
+  vkEndCommandBuffer(g_csCmd);
+  VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+  si.commandBufferCount = 1;
+  si.pCommandBuffers = &g_csCmd;
+  vkResetFences(g.device, 1, &g_csBatchFence);
+  const VkResult sr = vkQueueSubmit(g.queue, 1, &si, g_csBatchFence);
+  const VkResult wr =
+      sr == VK_SUCCESS
+          ? vkWaitForFences(g.device, 1, &g_csBatchFence, VK_TRUE, UINT64_MAX)
+          : sr;
+  if (sr != VK_SUCCESS || wr != VK_SUCCESS) {
+    std::fprintf(stderr,
+                 "[gpuvk] cs batch DEVICE FAULT: submit=%d wait=%d n=%u\n",
+                 (int)sr, (int)wr, g_csBatchCount);
+    reportDeviceFault(g.device);
+  }
+  vkResetDescriptorPool(g.device, g_csDescPool, 0);
+  g_csBatchOpen = false;
+  g_csBatchCount = 0;
+  for (auto &kv : g_csRanges) kv.second.pendingBatch = false;
+  std::memset(g_csStagePending, 0, sizeof g_csStagePending);
+  g_nsCsGpu += nowNs() - t0;
+}
+
 // Write one dirty range back to guest memory (retile for images) and re-stamp
 // its hash so the next validation sees guest == buffer.
 bool csRangeFlushOne(uint64_t base, CsRange &e) {
   if (!e.gpuDirty) return true;
+  if (e.pendingBatch) csBatchFlush();  // results must exist before readback
   g_csFlushN++;
   if (e.imageStaging) {
     if (!writebackCsImage(e.res, e.map)) return false;
@@ -2932,11 +2970,19 @@ bool dispatch(const ComputeInfo &ci) {
     if (vkAllocateCommandBuffers(g.device, &ca, &g_csCmd) != VK_SUCCESS) { g_csCmd = VK_NULL_HANDLE; return false; }
   }
   if (g_csDescPool == VK_NULL_HANDLE) {
+    // Sized for a whole batch of dispatches between flushes.
     VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                            ComputeInfo::kMaxResources};
+                            256 * ComputeInfo::kMaxResources};
     VkDescriptorPoolCreateInfo pci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-    pci.maxSets = 1; pci.poolSizeCount = 1; pci.pPoolSizes = &ps;
+    pci.maxSets = 256; pci.poolSizeCount = 1; pci.pPoolSizes = &ps;
     if (vkCreateDescriptorPool(g.device, &pci, nullptr, &g_csDescPool) != VK_SUCCESS) { g_csDescPool = VK_NULL_HANDLE; return false; }
+  }
+  if (g_csBatchFence == VK_NULL_HANDLE) {
+    VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+    if (vkCreateFence(g.device, &fci, nullptr, &g_csBatchFence) != VK_SUCCESS) {
+      g_csBatchFence = VK_NULL_HANDLE;
+      return false;
+    }
   }
 
   // DELTA_GPU_CSLIST: per-dispatch resource staging list for the first 200
@@ -2966,6 +3012,9 @@ bool dispatch(const ComputeInfo &ci) {
   for (uint32_t i = 0; i < ci.nres; i++) {
     sz[i] = ci.res[i].size ? ((ci.res[i].size + 3) & ~VkDeviceSize(3)) : 4;
     if (ci.res[i].zeroFill) {
+      // Growing the scratch slot recreates its buffer; a pending batched
+      // dispatch still references the old handle.
+      if (g_csStagePending[i] && g_csStage[i].cap < sz[i]) csBatchFlush();
       if (!csEnsureStage(i, sz[i])) return false;
       std::memset(g_csStage[i].map, 0, sz[i]);
       bindBuf[i] = g_csStage[i].buf;
@@ -2988,6 +3037,8 @@ bool dispatch(const ComputeInfo &ci) {
                            e.imageStaging == ci.res[i].imageStaging;
     if (!sameShape && e.gpuDirty)
       if (!csRangeFlushOne(base, e)) return false;  // reshaped: keep its data
+    if (e.pendingBatch && (!e.buf || e.cap < sz[i]))
+      csBatchFlush();  // growth would destroy a buffer the batch references
     if (!csRangeEnsureBuffer(e, sz[i])) return false;
     bool valid = sameShape && (e.gpuDirty || e.lastValidatedFrame == g.frameNum);
     if (!valid && sameShape) {
@@ -2996,6 +3047,8 @@ bool dispatch(const ComputeInfo &ci) {
       e.lastValidatedFrame = g.frameNum;
     }
     if (!valid) {
+      // CPU write into a buffer a pending batched dispatch reads/writes.
+      if (e.pendingBatch) csBatchFlush();
       if (ci.res[i].imageStaging) {
         if (!stageCsImage(ci.res[i], e.map)) return false;
       } else {
@@ -3027,12 +3080,16 @@ bool dispatch(const ComputeInfo &ci) {
 
   g_nsCsIn += nowNs() - _tIn0;
 
-  // Descriptor set binding the storage buffers (pool reset each dispatch).
-  vkResetDescriptorPool(g.device, g_csDescPool, 0);
+  // Descriptor set binding the storage buffers (pool lives for a whole batch;
+  // reset happens at batch flush).
   VkDescriptorSet set;
   VkDescriptorSetAllocateInfo da{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
   da.descriptorPool = g_csDescPool; da.descriptorSetCount = 1; da.pSetLayouts = &cp->setLayout;
-  if (vkAllocateDescriptorSets(g.device, &da, &set) != VK_SUCCESS) return false;
+  if (vkAllocateDescriptorSets(g.device, &da, &set) != VK_SUCCESS) {
+    csBatchFlush();  // pool exhausted: flush resets it, then retry once
+    if (vkAllocateDescriptorSets(g.device, &da, &set) != VK_SUCCESS)
+      return false;
+  }
   VkDescriptorBufferInfo dbi[ComputeInfo::kMaxResources];
   VkWriteDescriptorSet wr[ComputeInfo::kMaxResources];
   for (uint32_t i = 0; i < ci.nres; i++) {
@@ -3043,36 +3100,34 @@ bool dispatch(const ComputeInfo &ci) {
   }
   vkUpdateDescriptorSets(g.device, ci.nres, wr, 0, nullptr);
 
-  // Record + submit the dispatch, wait for completion (synchronous: the result must
-  // be back in guest memory before the following draws/texture uploads read it).
-  vkResetCommandBuffer(g_csCmd, 0);
-  VkCommandBufferBeginInfo cbi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-  cbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-  vkBeginCommandBuffer(g_csCmd, &cbi);
+  // Record the dispatch into the open batch. Submission + the fence wait
+  // happen at the next flush point, not here.
+  if (!g_csBatchOpen) {
+    vkResetCommandBuffer(g_csCmd, 0);
+    VkCommandBufferBeginInfo cbi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    cbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(g_csCmd, &cbi);
+    g_csBatchOpen = true;
+  }
   vkCmdBindPipeline(g_csCmd, VK_PIPELINE_BIND_POINT_COMPUTE, cp->pipe);
   vkCmdBindDescriptorSets(g_csCmd, VK_PIPELINE_BIND_POINT_COMPUTE, cp->layout, 0, 1, &set, 0, nullptr);
   vkCmdPushConstants(g_csCmd, cp->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 64, ci.userData);
   vkCmdDispatch(g_csCmd, ci.groups[0], ci.groups[1], ci.groups[2]);
-  vkEndCommandBuffer(g_csCmd);
-  VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-  si.commandBufferCount = 1; si.pCommandBuffers = &g_csCmd;
-  vkResetFences(g.device, 1, &g.fence);
-  const uint64_t _tGpu0 = nowNs();
-  const VkResult csSubmit = vkQueueSubmit(g.queue, 1, &si, g.fence);
-  const VkResult csWait =
-      csSubmit == VK_SUCCESS
-          ? vkWaitForFences(g.device, 1, &g.fence, VK_TRUE, UINT64_MAX)
-          : csSubmit;
-  g_nsCsGpu += nowNs() - _tGpu0;
-  if (csSubmit != VK_SUCCESS || csWait != VK_SUCCESS) {
-    std::fprintf(stderr,
-                 "[gpuvk] cs dispatch DEVICE FAULT: submit=%d wait=%d "
-                 "cs=%#llx groups=%ux%ux%u\n",
-                 (int)csSubmit, (int)csWait, (unsigned long long)ci.csAddr,
-                 ci.groups[0], ci.groups[1], ci.groups[2]);
-    reportDeviceFault(g.device);
-    return false;
+  VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+  mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+  mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+  vkCmdPipelineBarrier(g_csCmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                       VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &mb, 0,
+                       nullptr, 0, nullptr);
+  for (uint32_t i = 0; i < ci.nres; i++) {
+    if (ci.res[i].zeroFill) {
+      g_csStagePending[i] = true;
+    } else {
+      auto it = g_csRanges.find(ci.res[i].base);
+      if (it != g_csRanges.end()) it->second.pendingBatch = true;
+    }
   }
+  if (++g_csBatchCount >= 128 || verbose) csBatchFlush();
 
   // Mark written ranges GPU-dirty. Guest memory catches up lazily at the next
   // flush point (draw / DMA / frame end) — writing every dispatch's outputs
@@ -3106,6 +3161,7 @@ void flushCsWrites() {
   for (auto it = g_csRanges.begin(); it != g_csRanges.end();) {
     csRangeFlushOne(it->first, it->second);
     if (g_csRangeBytes > (1ull << 30) && !it->second.gpuDirty &&
+        !it->second.pendingBatch &&
         it->second.lastUsedFrame + 300 < g.frameNum) {
       csRangeDestroy(it->second);
       it = g_csRanges.erase(it);
