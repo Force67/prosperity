@@ -49,19 +49,36 @@ int eventFlag::take(uint64_t pattern, uint32_t mode, uint64_t *result) {
   return 0;
 }
 
+void eventFlag::removeWaiter(Waiter *waiter) {
+  for (auto it = waiters.begin(); it != waiters.end(); ++it) {
+    if (*it == waiter) {
+      waiters.erase(it);
+      return;
+    }
+  }
+}
+
 int eventFlag::wait(uint64_t pattern, uint32_t mode, uint64_t *result,
                     uint32_t *timeoutUs) {
   std::unique_lock<std::mutex> lk(m);
   if (satisfied(pattern, mode))
     return take(pattern, mode, result);
+
+  Waiter waiter{pattern, mode};
+  waiters.push_back(&waiter);
   if (timeoutUs) {
     if (!cv.wait_for(lk, std::chrono::microseconds(*timeoutUs),
-                     [&] { return satisfied(pattern, mode); }))
+                     [&] { return waiter.done; })) {
+      removeWaiter(&waiter);
       return -SysError::eTIMEDOUT;
+    }
   } else {
-    cv.wait(lk, [&] { return satisfied(pattern, mode); });
+    cv.wait(lk, [&] { return waiter.done; });
   }
-  return take(pattern, mode, result);
+  removeWaiter(&waiter);
+  if (result)
+    *result = waiter.result;
+  return 0;
 }
 
 int eventFlag::trywait(uint64_t pattern, uint32_t mode, uint64_t *result) {
@@ -75,6 +92,15 @@ void eventFlag::set(uint64_t b) {
   std::lock_guard<std::mutex> lk(m);
   bits |= b;
   lastSetTid.store((long)gettid(), std::memory_order_relaxed);
+  // A kernel event flag commits satisfied queued waits during set(). Keeping
+  // that result on the waiter prevents a later clear from revoking the wake
+  // before the host thread gets scheduled and reacquires this mutex.
+  for (auto *waiter : waiters) {
+    if (waiter->done || !satisfied(waiter->pattern, waiter->mode))
+      continue;
+    take(waiter->pattern, waiter->mode, &waiter->result);
+    waiter->done = true;
+  }
   cv.notify_all();
 }
 
@@ -142,6 +168,11 @@ static uint64_t systemFlagInit(const char *name) {
   // with no ShellCore, report every boot stage as already complete.
   if (n.find("BootStatus", 0, 10) != base::StringRef::npos)
     return ~0ull;
+  // The settings service raises bit 32 after publishing /SceAvSetting. We
+  // provide that shared-memory block in sys_shm_open, so publish its matching
+  // ready state as well; otherwise the real libSceVideoOut blocks during open.
+  if (n == "SceAvSettingEvf")
+    return 1ull << 32;
   return 0;
 }
 
@@ -238,6 +269,7 @@ int PS4ABI sys_evf_clear(int id, uint64_t bits) {
   if (!ef)
     return -SysError::eSRCH;
   ef->clear(bits);
+  evfTrace("clear", id, ef, bits, 0, 0, 0);
   return 0;
 }
 

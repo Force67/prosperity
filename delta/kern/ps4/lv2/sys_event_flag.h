@@ -12,6 +12,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <mutex>
+#include <vector>
 
 #include "kern/object.h"
 
@@ -45,11 +46,20 @@ public:
   std::atomic<long> lastSetTid{0};
 
 private:
+  struct Waiter {
+    uint64_t pattern;
+    uint32_t mode;
+    uint64_t result = 0;
+    bool done = false;
+  };
+
   bool satisfied(uint64_t pattern, uint32_t mode) const;
   int take(uint64_t pattern, uint32_t mode, uint64_t *result);
+  void removeWaiter(Waiter *waiter);
 
   std::mutex m;
   std::condition_variable cv;
+  std::vector<Waiter *> waiters;
   uint64_t bits;
   uint64_t sticky;
 };
