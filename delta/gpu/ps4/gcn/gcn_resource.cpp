@@ -261,8 +261,11 @@ const ScalarPassInfo& CachedScalarInfo(
   if (cache.size() > 512) cache.clear();  // unbounded-growth backstop
   Entry e;
   e.pin = program;
-  e.info.plan = PlanMimgBindings(*program);
+  const std::vector<uint8_t> reachable = ComputeReachability(*program);
+  e.info.plan = PlanMimgBindings(*program, reachable.data());
+  uint32_t index = 0;
   for (const Inst& inst : *program) {
+    if (!reachable[index++]) continue;
     const bool scalar_move =
         inst.enc == Enc::kSop1 && (inst.opcode == 0x03 || inst.opcode == 0x04);
     if (scalar_move || inst.enc == Enc::kSmrd || inst.enc == Enc::kMimg)
@@ -273,7 +276,8 @@ const ScalarPassInfo& CachedScalarInfo(
 
 }  // namespace
 
-MimgBindingPlan PlanMimgBindings(const Program& program) {
+MimgBindingPlan PlanMimgBindings(const Program& program,
+                                 const uint8_t* reachable) {
   MimgBindingPlan plan;
   // Track, per SGPR range, the index of the last SMRD instruction covering it.
   struct Load {
@@ -291,6 +295,7 @@ MimgBindingPlan PlanMimgBindings(const Program& program) {
   uint32_t inst_index = 0;
   for (const Inst& inst : program) {
     const uint32_t idx = inst_index++;
+    if (reachable && !reachable[idx]) continue;
     if (inst.enc == Enc::kSmrd) {
       const Smrd s = DecodeSmrd(inst.raw[0]);
       if (s.op <= 0x04) {  // s_load_dword..x16 can rewrite descriptor SGPRs
@@ -310,16 +315,21 @@ MimgBindingPlan PlanMimgBindings(const Program& program) {
     const uint32_t op = (w0 >> 18) & 0x7F;
     const uint32_t srsrc = ((w1 >> 16) & 0x1F) * 4;
     const bool sampling = op >= 0x20;
+    const bool storage = op == 0x08 || op == 0x09;
     const uint32_t ssamp = sampling ? ((w1 >> 21) & 0x1F) * 4 : 0xFF;
     const uint32_t flags = (((w0 >> 14) & 1) << 0) |               // DA
                            (((op == 0x28 || op == 0x2f) ? 1 : 0) << 1) |  // dref
-                           ((op == 0x47 ? 1 : 0) << 2);            // gather4_lz
+                           ((op == 0x47 ? 1 : 0) << 2) |           // gather4_lz
+                           (static_cast<uint32_t>(storage) << 3);
     const uint64_t key = MimgDescriptorKey(
         srsrc, ssamp, covering_load(srsrc, 8),
         sampling ? covering_load(ssamp, 4) : 0xFFFE, flags);
     const auto [it, inserted] =
         binding_of.emplace(key, static_cast<uint32_t>(plan.binding_srsrc.size()));
-    if (inserted) plan.binding_srsrc.push_back(srsrc);
+    if (inserted) {
+      plan.binding_srsrc.push_back(srsrc);
+      plan.binding_storage.push_back(storage);
+    }
     plan.binding_by_pc[inst.pc] = it->second;
   }
   return plan;
@@ -489,6 +499,7 @@ std::vector<TImage> TrackTextures(
     t.arrayed = (inst.raw[0] & 0x4000) != 0;  // MIMG DA
     t.force_lod_zero = op == 0x47;            // IMAGE_GATHER4_LZ
     t.depth_compare = op == 0x28 || op == 0x2f;
+    t.storage = op == 0x08 || op == 0x09;
     if (t.valid) {
       // Empirical tiling census (DELTA_GPU_TILEHIST): tally tiling_idx of
       // every sampled texture to confirm which modes are linear vs tiled.

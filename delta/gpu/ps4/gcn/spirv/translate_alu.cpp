@@ -444,6 +444,14 @@ void EmitVop1(Translator& t, uint32_t op, uint32_t vdst, Id s0, bool clamp) {
       set_u(t.m.Bitcast(t.t_u, t.m.Emit(spv::Op::OpConvertFToS, t.t_i,
             {t.Ext1(GLSLstd450Floor, s0)})));
       break;
+    case 0x0e: {  // v_cvt_off_f32_i4: signed low nibble in sixteenths
+      const Id nibble = t.m.Emit(
+          spv::Op::OpBitFieldSExtract, t.t_i,
+          {t.m.Bitcast(t.t_i, u0), t.U32(0), t.U32(4)});
+      set_f(t.FMul(t.m.Emit(spv::Op::OpConvertSToF, t.t_f, {nibble}),
+                   t.F32(1.0f / 16.0f)));
+      break;
+    }
     // f16 <-> f32. cvt_f16_f32 packs the half into the low half-word (high
     // half zero); cvt_f32_f16 reads it back.
     case 0x0a:

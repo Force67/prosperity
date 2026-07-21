@@ -56,6 +56,7 @@ struct TImage {
   bool arrayed = false;      // MIMG DA bit: address carries an array layer
   bool force_lod_zero = false;  // gather4_lz: implicit gather clamped to mip 0
   bool depth_compare = false;   // MIMG _C uses the sampler's compare function
+  bool storage = false;         // image_store target
   bool valid = false;
 };
 
@@ -76,8 +77,11 @@ struct MimgBindingPlan {
   std::unordered_map<uint32_t, uint32_t> binding_by_pc;
   // Per binding: the T# base SGPR of its first-use MIMG.
   std::vector<uint32_t> binding_srsrc;
+  // Per binding: true when the descriptor is an image_store target.
+  std::vector<bool> binding_storage;
 };
-MimgBindingPlan PlanMimgBindings(const Program& program);
+MimgBindingPlan PlanMimgBindings(const Program& program,
+                                 const uint8_t* reachable = nullptr);
 
 // Recover the image(s) a pixel shader references, by tracking its
 // s_load_dwordx4/x8/x16 of descriptor tables out of the user-data SGPRs.

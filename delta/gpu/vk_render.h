@@ -108,8 +108,9 @@ struct DrawInfo {
     bool arrayed = false;
     bool force_lod_zero = false;
     bool depth_compare = false;
+    bool storage = false;
   };
-  DrawTex texs[8];
+  DrawTex texs[16];
   uint32_t nTexs = 0;
 
   // Per-draw blend state, decoded from CB_BLEND0_CONTROL (raw dword) + whether
@@ -155,6 +156,8 @@ struct DrawInfo {
   // vertexData/vertexStride is the raw interleaved vertex buffer, vattrs describe
   // the inputs, mvp holds the constant buffer (pushed), texBase the sampler.
   uint64_t vsAddr = 0, psAddr = 0;       // pipeline cache key
+  uint32_t vsUserData[16] = {};
+  uint32_t psUserData[16] = {};
   const gcn::Recompiled *recomp = nullptr;
   VertexAttr vattrs[8];
   uint32_t nvattrs = 0;

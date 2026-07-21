@@ -396,7 +396,7 @@ void fillPadState(PadData *d) {
 }  // namespace
 
 int scePadClose() {
-  LOG_UNIMPLEMENTED;
+  // Single fixed handle with no per-open state; nothing to tear down.
   return 0;
 }
 
@@ -486,7 +486,9 @@ int scePadGetVersionInfo() {
 }
 
 int scePadInit() {
-  LOG_UNIMPLEMENTED;
+  // No device to bring up: the HLE pad is always available. Accept silently
+  // (titles call this once at boot; the unimplemented log was misleading since
+  // the pad is fully serviced through the read/open path below).
   return 0;
 }
 
@@ -518,12 +520,12 @@ int scePadReadState(int handle, void *data) {
 }
 
 int scePadResetLightBar() {
-  LOG_UNIMPLEMENTED;
+  // No light bar to drive; accept silently (mirrors scePadSetLightBar).
   return 0;
 }
 
 int scePadResetOrientation() {
-  LOG_UNIMPLEMENTED;
+  // Orientation is reported as identity every read, so a reset is a no-op.
   return 0;
 }
 
@@ -569,7 +571,8 @@ int scePadSetLightBarBlinking() {
 }
 
 int scePadSetMotionSensorState() {
-  LOG_UNIMPLEMENTED;
+  // Motion data is synthesized (identity orientation, zero accel/gyro); toggling
+  // the sensor has no backing device, so accept silently.
   return 0;
 }
 

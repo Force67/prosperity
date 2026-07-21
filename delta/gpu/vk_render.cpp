@@ -76,6 +76,7 @@ struct State {
   uint32_t curMrtCount = 0;   // how many of curMrt[] are bound
   uint64_t curDepth = 0;      // depth target bound in the open region (0 = none)
   uint64_t lastRt = 0;  // last RT rendered to (present fallback)
+  uint64_t firstRt = 0;  // first color RT created (diagnostic selector)
   uint64_t busiestRt = 0;
   uint32_t busiestRtDraws = 0;
 
@@ -109,7 +110,7 @@ struct State {
   // binding the PS samples that we couldn't resolve (so diffuse*lightmap with a
   // missing map shows the diffuse instead of going black). The single-texture path
   // (Isaac/Undertale/composites) is unchanged.
-  static constexpr uint32_t kMaxTex = 8;
+  static constexpr uint32_t kMaxTex = 16;
   VkDescriptorSetLayout texArrayLayout = VK_NULL_HANDLE;
   VkDescriptorPool mtexPool = VK_NULL_HANDLE;
   std::vector<VkDescriptorPool> mtexPools;
@@ -142,9 +143,11 @@ struct State {
   uint32_t frameMaxIdx = 0;  // largest indexCount of any draw this frame (3D geometry detector)
   int frameNum = 0;
   bool recording = false;
+  bool regionOpen = false;
   bool samplerAnisotropy = false;
   bool samplerMirrorClamp = false;
   bool geometryShader = false;
+  bool storageImageWriteWithoutFormat = false;
   bool frameHadRoom = false;  // this frame sampled a room-sized (~832w) RT
   bool frameRoomBake = false; // this frame RENDERED into a room-sized (~832w) RT
 
@@ -204,6 +207,40 @@ struct TexImageKey {
 };
 uint64_t hashWord(uint64_t h, uint64_t v) {
   return (h ^ v) * 1099511628211ull;
+}
+
+bool g_hasDeviceFault = false;
+
+// Ask the driver what the GPU actually faulted on (VK_EXT_device_fault).
+// Prints once per process — every later DEVICE_LOST is collateral of the first.
+void reportDeviceFault(VkDevice device) {
+  static bool reported = false;
+  if (reported || !g_hasDeviceFault) return;
+  reported = true;
+  auto p_getFault = (PFN_vkGetDeviceFaultInfoEXT)vkGetDeviceProcAddr(
+      device, "vkGetDeviceFaultInfoEXT");
+  if (!p_getFault) return;
+  VkDeviceFaultCountsEXT counts{VK_STRUCTURE_TYPE_DEVICE_FAULT_COUNTS_EXT};
+  if (p_getFault(device, &counts, nullptr) < 0) return;
+  std::vector<VkDeviceFaultAddressInfoEXT> addrs(counts.addressInfoCount);
+  std::vector<VkDeviceFaultVendorInfoEXT> vendors(counts.vendorInfoCount);
+  VkDeviceFaultInfoEXT info{VK_STRUCTURE_TYPE_DEVICE_FAULT_INFO_EXT};
+  info.pAddressInfos = addrs.data();
+  info.pVendorInfos = vendors.data();
+  counts.vendorBinarySize = 0;
+  p_getFault(device, &counts, &info);
+  std::fprintf(stderr, "[gpuvk] device fault: '%s' addrs=%u vendor=%u\n",
+               info.description, counts.addressInfoCount,
+               counts.vendorInfoCount);
+  for (const auto &a : addrs)
+    std::fprintf(stderr, "[gpuvk]   fault addr type=%d va=%#llx prec=%#llx\n",
+                 (int)a.addressType,
+                 (unsigned long long)a.reportedAddress,
+                 (unsigned long long)a.addressPrecision);
+  for (const auto &v : vendors)
+    std::fprintf(stderr, "[gpuvk]   vendor '%s' code=%#llx data=%#llx\n",
+                 v.description, (unsigned long long)v.vendorFaultCode,
+                 (unsigned long long)v.vendorFaultData);
 }
 struct TexImageKeyHash {
   size_t operator()(const TexImageKey &k) const {
@@ -334,6 +371,7 @@ uint64_t texHash(uint64_t base, uint64_t bytes) {
 VkFormat guestTextureFormat(uint32_t dfmt, uint32_t nfmt) {
   if (dfmt == 5 && nfmt == 7) return VK_FORMAT_R16G16_SFLOAT;
   if (dfmt == 6 && nfmt == 7) return VK_FORMAT_B10G11R11_UFLOAT_PACK32;
+  if (dfmt == 12 && nfmt == 7) return VK_FORMAT_R16G16B16A16_SFLOAT;
   if (dfmt == 10 && nfmt == 0) return VK_FORMAT_R8G8B8A8_UNORM;
   if (dfmt == 10 && nfmt == 9) return VK_FORMAT_R8G8B8A8_SRGB;
   // Block-compressed (IMG_DATA_FORMAT_BC1..BC7 = 35..41); sampled natively.
@@ -358,8 +396,17 @@ bool guestFormatBlockCompressed(uint32_t dfmt) {
   return dfmt >= 35 && dfmt <= 41;
 }
 uint32_t guestFormatElemBytes(uint32_t dfmt) {
-  if (!guestFormatBlockCompressed(dfmt)) return 4;
-  return (dfmt == 35 || dfmt == 38) ? 8 : 16;  // BC1/BC4 = 8B, rest 16B
+  switch (dfmt) {
+    case 1: return 1;                              // 8
+    case 2: case 3: return 2;                      // 16, 8_8
+    case 11: case 12: return 8;                    // 32_32, 16_16_16_16
+    case 13: return 12;                            // 32_32_32
+    case 14: return 16;                            // 32_32_32_32
+    case 35: case 38: return 8;                    // BC1/BC4 block
+    default:
+      return guestFormatBlockCompressed(dfmt) ? 16 // BC2/3/5/6/7 block
+                                              : 4; // all 32-bit texel formats
+  }
 }
 
 // CB_COLORn_INFO uses the GFX7 SurfaceFormat/SurfaceNumber encodings. Keep the
@@ -530,6 +577,9 @@ int g_dumpedFrames = 0;
 // per-frame wall time goes: our GPU code (draw + endFrame, incl. the readback
 // stall and synchronous texture uploads) vs the guest/FEX time outside it.
 uint64_t g_nsDraw = 0, g_nsEnd = 0, g_nsReadback = 0, g_nsTexUp = 0;
+uint64_t g_nsCs = 0, g_csBytes = 0;
+uint64_t g_nsCsIn = 0, g_nsCsGpu = 0, g_nsCsOut = 0;
+uint32_t g_csCount = 0;
 uint64_t g_nsSubmit = 0, g_nsPresent = 0;
 uint32_t g_texUps = 0;
 
@@ -681,15 +731,42 @@ bool createDevice() {
   dc.pNext = &f13;
   dc.queueCreateInfoCount = 1;
   dc.pQueueCreateInfos = &qc;
+  // VK_EXT_device_fault: on DEVICE_LOST, vkGetDeviceFaultInfoEXT reports what
+  // the GPU actually faulted on (page fault address etc.) — keep it enabled,
+  // it costs nothing until a fault is queried.
+  const char *devExts[1] = {};
+  {
+    uint32_t en = 0;
+    vkEnumerateDeviceExtensionProperties(g.phys, nullptr, &en, nullptr);
+    std::vector<VkExtensionProperties> eprops(en);
+    vkEnumerateDeviceExtensionProperties(g.phys, nullptr, &en, eprops.data());
+    for (const auto &ep : eprops)
+      if (!std::strcmp(ep.extensionName, VK_EXT_DEVICE_FAULT_EXTENSION_NAME))
+        g_hasDeviceFault = true;
+  }
+  static VkPhysicalDeviceFaultFeaturesEXT faultFeat{
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT};
+  if (g_hasDeviceFault) {
+    faultFeat.deviceFault = VK_TRUE;
+    faultFeat.pNext = f13.pNext;
+    f13.pNext = &faultFeat;
+    devExts[0] = VK_EXT_DEVICE_FAULT_EXTENSION_NAME;
+    dc.enabledExtensionCount = 1;
+    dc.ppEnabledExtensionNames = devExts;
+  }
   // robustBufferAccess makes out-of-bounds storage-buffer loads/stores safe (return 0
   // / drop the write) so the compute path can't corrupt memory on a miscomputed index.
   VkPhysicalDeviceFeatures wantFeat{};
   if (avail2.features.robustBufferAccess) wantFeat.robustBufferAccess = VK_TRUE;
   if (avail2.features.samplerAnisotropy) wantFeat.samplerAnisotropy = VK_TRUE;
   if (avail2.features.geometryShader) wantFeat.geometryShader = VK_TRUE;
+  if (avail2.features.shaderStorageImageWriteWithoutFormat)
+    wantFeat.shaderStorageImageWriteWithoutFormat = VK_TRUE;
   g.samplerAnisotropy = wantFeat.samplerAnisotropy;
   g.samplerMirrorClamp = f12.samplerMirrorClampToEdge;
   g.geometryShader = wantFeat.geometryShader;
+  g.storageImageWriteWithoutFormat =
+      wantFeat.shaderStorageImageWriteWithoutFormat;
   dc.pEnabledFeatures = &wantFeat;
   VKOK(vkCreateDevice(g.phys, &dc, nullptr, &g.device));
   vkGetDeviceQueue(g.device, g.qfam, 0, &g.queue);
@@ -1008,7 +1085,7 @@ bool createTexPipeline() {
   sc.addressModeU = sc.addressModeV = sc.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
   VKOK(vkCreateSampler(g.device, &sc, nullptr, &g.sampler));
 
-  // Multi-texture path: an 8-binding set-0 layout + a pool, used only by recomp PS
+  // Multi-texture path: a 16-binding set-0 layout + a pool, used only by recomp PS
   // that sample >1 texture (single-texture draws keep the 1-binding dsLayout/dsPool).
   {
     VkDescriptorSetLayoutBinding mb[State::kMaxTex];
@@ -1017,10 +1094,13 @@ bool createTexPipeline() {
     VkDescriptorSetLayoutCreateInfo ml{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
     ml.bindingCount = State::kMaxTex; ml.pBindings = mb;
     VKOK(vkCreateDescriptorSetLayout(g.device, &ml, nullptr, &g.texArrayLayout));
-    VkDescriptorPoolSize mps{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4096 * State::kMaxTex};
+    VkDescriptorPoolSize mps[2] = {
+        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4096 * State::kMaxTex},
+        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 4096 * State::kMaxTex},
+    };
     VkDescriptorPoolCreateInfo mp{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     mp.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-    mp.maxSets = 4096; mp.poolSizeCount = 1; mp.pPoolSizes = &mps;
+    mp.maxSets = 4096; mp.poolSizeCount = 2; mp.pPoolSizes = mps;
     VKOK(vkCreateDescriptorPool(g.device, &mp, nullptr, &g.mtexPool));
     g.mtexPools.push_back(g.mtexPool);
 
@@ -1105,11 +1185,15 @@ VkDescriptorSet allocateSamplerSet(VkDescriptorSetLayout layout, bool multi,
     }
   }
 
-  VkDescriptorPoolSize size{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                            4096u * (multi ? State::kMaxTex : 1u)};
+  VkDescriptorPoolSize sizes[2] = {
+      {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+       4096u * (multi ? State::kMaxTex : 1u)},
+      {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+       4096u * (multi ? State::kMaxTex : 1u)},
+  };
   VkDescriptorPoolCreateInfo ci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
   ci.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-  ci.maxSets = 4096; ci.poolSizeCount = 1; ci.pPoolSizes = &size;
+  ci.maxSets = 4096; ci.poolSizeCount = multi ? 2u : 1u; ci.pPoolSizes = sizes;
   VkDescriptorPool pool;
   if (vkCreateDescriptorPool(g.device, &ci, nullptr, &pool) != VK_SUCCESS)
     return VK_NULL_HANDLE;
@@ -1271,8 +1355,19 @@ void uploadTexPixels(VkImage img, uint64_t base,
   si.commandBufferCount = 1; si.pCommandBuffers = &c;
   uint64_t _t0 = nowNs();
   vkResetFences(g.device, 1, &g.fence);
-  vkQueueSubmit(g.queue, 1, &si, g.fence);
-  vkWaitForFences(g.device, 1, &g.fence, VK_TRUE, UINT64_MAX);
+  const VkResult upSubmit = vkQueueSubmit(g.queue, 1, &si, g.fence);
+  const VkResult upWait =
+      vkWaitForFences(g.device, 1, &g.fence, VK_TRUE, UINT64_MAX);
+  if (upSubmit != VK_SUCCESS || upWait != VK_SUCCESS) {
+    std::fprintf(stderr,
+                 "[gpuvk] tex upload DEVICE FAULT: submit=%d wait=%d "
+                 "base=%#lx %ux%u mips=%u layers=%u bytes=%llu\n",
+                 (int)upSubmit, (int)upWait, (unsigned long)base,
+                 layout.mips[0].width, layout.mips[0].height,
+                 layout.mip_levels, layout.layers,
+                 (unsigned long long)sz);
+    reportDeviceFault(g.device);
+  }
   uint64_t _texDt = nowNs() - _t0;
   g_nsTexUp += _texDt; g_frTexUp += _texDt; g_texUps++;
   vkFreeCommandBuffers(g.device, g.pool, 1, &c);
@@ -1504,10 +1599,12 @@ struct MultiTexKey {
   TexKey tex[State::kMaxTex];
   VkImageView view[State::kMaxTex] = {};
   VkImageLayout layout[State::kMaxTex] = {};
+  bool storage[State::kMaxTex] = {};
   bool operator==(const MultiTexKey &o) const {
     if (nTexs != o.nTexs) return false;
     for (uint32_t i = 0; i < nTexs; i++)
-      if (!(tex[i] == o.tex[i]) || view[i] != o.view[i] || layout[i] != o.layout[i])
+      if (!(tex[i] == o.tex[i]) || view[i] != o.view[i] ||
+          layout[i] != o.layout[i] || storage[i] != o.storage[i])
         return false;
     return true;
   }
@@ -1519,6 +1616,7 @@ struct MultiTexKeyHash {
       h = hashWord(h, TexKeyHash{}(k.tex[i]));
       h = hashWord(h, std::hash<VkImageView>{}(k.view[i]));
       h = hashWord(h, k.layout[i]);
+      h = hashWord(h, k.storage[i]);
     }
     return static_cast<size_t>(h);
   }
@@ -1561,8 +1659,9 @@ void releaseRetiredTextures() {
   g_retiredTexViews.clear();
   g_retiredTexImages.clear();
 }
-VkDescriptorSet getMultiTexSet(const DrawInfo &d, const VkImageView *resolvedViews,
-                               const VkImageLayout *resolvedLayouts) {
+VkDescriptorSet getMultiTexSet(const DrawInfo &d, VkDescriptorSetLayout setLayout,
+                                const VkImageView *resolvedViews,
+                                const VkImageLayout *resolvedLayouts) {
   MultiTexKey key;
   key.nTexs = std::min(d.nTexs, State::kMaxTex);
   for (uint32_t i = 0; i < key.nTexs; i++) {
@@ -1575,6 +1674,7 @@ VkDescriptorSet getMultiTexSet(const DrawInfo &d, const VkImageView *resolvedVie
                             t.depth_compare);
     key.view[i] = resolvedViews[i];
     key.layout[i] = resolvedLayouts[i];
+    key.storage[i] = d.texs[i].storage;
   }
   auto ci = g_mtexCache.find(key);
   if (ci != g_mtexCache.end()) return ci->second.set;
@@ -1592,7 +1692,7 @@ VkDescriptorSet getMultiTexSet(const DrawInfo &d, const VkImageView *resolvedVie
   // descriptor state that failed to resolve.
   static const bool texMiss = std::getenv("DELTA_GPU_TEXMISS") != nullptr;
   static int texMissLogged = 0;
-  for (uint32_t i = 0; i < State::kMaxTex; i++) {
+  for (uint32_t i = 0; i < key.nTexs; i++) {
     VkImageView v = (i < key.nTexs && !forceWhite) ? resolvedViews[i] : VK_NULL_HANDLE;
     bool arrayed = i < key.nTexs && d.texs[i].arrayed;
     if (texMiss && !v && i < key.nTexs && texMissLogged < 64) {
@@ -1604,15 +1704,16 @@ VkDescriptorSet getMultiTexSet(const DrawInfo &d, const VkImageView *resolvedVie
                    i, (unsigned long)t.base, t.w, t.h, t.dfmt, t.nfmt, t.tiling,
                    t.layers, t.mip_levels, t.arrayed);
     }
+    if (d.texs[i].storage && !v) return VK_NULL_HANDLE;
     views[i] = v ? v : (arrayed ? g.whiteArrayView : g.whiteView);
     layouts[i] = v ? resolvedLayouts[i] : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
   }
   MultiTexSet entry;
-  entry.set = allocateSamplerSet(g.texArrayLayout, true, entry.pool);
+  entry.set = allocateSamplerSet(setLayout, true, entry.pool);
   if (!entry.set) return VK_NULL_HANDLE;
   VkDescriptorImageInfo dii[State::kMaxTex];
   VkWriteDescriptorSet wr[State::kMaxTex];
-  for (uint32_t i = 0; i < State::kMaxTex; i++) {
+  for (uint32_t i = 0; i < key.nTexs; i++) {
     SamplerKey sampler;
     if (i < key.nTexs) {
       sampler.valid = d.texs[i].sampler_valid;
@@ -1621,12 +1722,16 @@ VkDescriptorSet getMultiTexSet(const DrawInfo &d, const VkImageView *resolvedVie
       sampler.force_lod_zero = d.texs[i].force_lod_zero;
       sampler.depth_compare = d.texs[i].depth_compare;
     }
-    dii[i] = {samplerFor(sampler), views[i], layouts[i]};
+    dii[i] = {d.texs[i].storage ? VK_NULL_HANDLE : samplerFor(sampler), views[i],
+              layouts[i]};
     wr[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
     wr[i].dstSet = entry.set; wr[i].dstBinding = i; wr[i].descriptorCount = 1;
-    wr[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; wr[i].pImageInfo = &dii[i];
+    wr[i].descriptorType = d.texs[i].storage
+                               ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE
+                               : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    wr[i].pImageInfo = &dii[i];
   }
-  vkUpdateDescriptorSets(g.device, State::kMaxTex, wr, 0, nullptr);
+  vkUpdateDescriptorSets(g.device, key.nTexs, wr, 0, nullptr);
   g_mtexCache[key] = entry;
   return entry.set;
 }
@@ -1683,6 +1788,7 @@ RTarget *getRT(uint64_t base, uint32_t w, uint32_t h, VkFormat fmt) {
   ii.samples = VK_SAMPLE_COUNT_1_BIT;
   ii.tiling = VK_IMAGE_TILING_OPTIMAL;
   ii.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+             VK_IMAGE_USAGE_STORAGE_BIT |
              VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
   if (vkCreateImage(g.device, &ii, nullptr, &t.image) != VK_SUCCESS) return nullptr;
   VkMemoryRequirements mr; vkGetImageMemoryRequirements(g.device, t.image, &mr);
@@ -1711,6 +1817,7 @@ RTarget *getRT(uint64_t base, uint32_t w, uint32_t h, VkFormat fmt) {
   std::fprintf(stderr, "[gpuvk] new RT %#lx %ux%u fmt=%d\n",
                (unsigned long)base, w, h, (int)fmt);
   g_rts[base] = t;
+  if (!g.firstRt) g.firstRt = base;
   registerRtPages(base, w, h, fmt);  // resource-model page table
   return &g_rts[base];
 }
@@ -1923,8 +2030,9 @@ uint64_t resolveSampledDepth(uint64_t addr, uint32_t w, uint32_t h) {
 
 // End the current dynamic-rendering region (if any), leaving its RTs readable.
 void endRegion() {
-  if (!g.curRt && !g.curDepth) return;
+  if (!g.regionOpen) return;
   p_vkCmdEndRendering(g.cmd);
+  g.regionOpen = false;
   for (uint32_t i = 0; i < g.curMrtCount; i++) {
     auto it = g_rts.find(g.curMrt[i]);
     if (it == g_rts.end()) continue;
@@ -1986,9 +2094,11 @@ void beginRegion(const uint64_t *mrtBase, const uint32_t *mrtInfo,
                                   ? VK_ACCESS_SHADER_READ_BIT
                               : rt.layout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
                                   ? VK_ACCESS_TRANSFER_READ_BIT
-                              : rt.layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
-                                  ? VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
-                                  : 0;
+                               : rt.layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+                                   ? VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
+                               : rt.layout == VK_IMAGE_LAYOUT_GENERAL
+                                   ? VK_ACCESS_SHADER_WRITE_BIT
+                                   : 0;
     imageBarrier(g.cmd, rt.image, rt.layout, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                  srcAccess, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
     rt.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
@@ -2009,6 +2119,11 @@ void beginRegion(const uint64_t *mrtBase, const uint32_t *mrtInfo,
     rt.everRendered = true;
     color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     color.clearValue.color = rt.clearValue;
+    static const bool clearRed = std::getenv("DELTA_GPU_CLEARRED") != nullptr;
+    if (clearRed) {
+      color.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+      color.clearValue.color = {{1.0f, 0.0f, 0.0f, 1.0f}};
+    }
     rt.usedThisFrame = true;
     rt.lastFrame = g.frameNum;
     g.curMrt[g.curMrtCount++] = mrtBase[i];
@@ -2043,6 +2158,7 @@ void beginRegion(const uint64_t *mrtBase, const uint32_t *mrtInfo,
   ri.layerCount = 1; ri.colorAttachmentCount = g.curMrtCount; ri.pColorAttachments = colors;
   if (dt) ri.pDepthAttachment = &depthAtt;
   p_vkCmdBeginRendering(g.cmd, &ri);
+  g.regionOpen = true;
   // Negative-height (y-up) viewport: GCN/PS4 rasterises y-up, so we do too. This
   // stores render-target content upright, so render-to-texture composites (the
   // scene->scanout copy, effect overlays) sample it with aligned UVs when run through
@@ -2660,6 +2776,69 @@ bool writebackCsImage(const ComputeInfo::Res &res, const void *src) {
   return true;
 }
 
+// Detiled-image staging cache. The post chain re-reads the same big images
+// across dozens of dispatches per frame; a fresh CPU detile per read cost
+// ~440ms/frame (SotC). Same-frame hits are reused verbatim; cross-frame hits
+// revalidate against a content hash of the guest range; any CS write that
+// overlaps an entry's guest range refreshes or drops it.
+struct CsImgStage {
+  uint64_t size = 0, guestBytes = 0, hash = 0;
+  int lastFrame = -1;
+  std::vector<uint8_t> data;
+};
+std::unordered_map<uint64_t, CsImgStage> g_csImgCache;
+uint64_t g_csImgCacheBytes = 0;
+
+bool stageCsImageCached(const ComputeInfo::Res &res, void *dst) {
+  const uint64_t guestBytes = res.guestSize ? res.guestSize : res.size;
+  auto it = g_csImgCache.find(res.base);
+  if (it != g_csImgCache.end() && it->second.size == res.size) {
+    CsImgStage &e = it->second;
+    if (e.lastFrame == g.frameNum ||
+        e.hash == texHash(res.base, e.guestBytes)) {
+      e.lastFrame = g.frameNum;
+      std::memcpy(dst, e.data.data(), e.data.size());
+      return true;
+    }
+  }
+  if (!stageCsImage(res, dst)) return false;
+  if (g_csImgCacheBytes > (512ull << 20)) {
+    g_csImgCache.clear();
+    g_csImgCacheBytes = 0;
+  }
+  CsImgStage &e = g_csImgCache[res.base];
+  g_csImgCacheBytes -= e.data.size();
+  e.size = res.size;
+  e.guestBytes = guestBytes;
+  e.lastFrame = g.frameNum;
+  e.hash = texHash(res.base, guestBytes);
+  e.data.assign(static_cast<const uint8_t *>(dst),
+                static_cast<const uint8_t *>(dst) + res.size);
+  g_csImgCacheBytes += e.data.size();
+  return true;
+}
+
+// A CS wrote guest range [base, base+bytes): refresh the cache entry it
+// exactly corresponds to (fresh staging content in `src`), drop any other
+// overlapping entry.
+void csImgCacheWritten(uint64_t base, uint64_t bytes, uint64_t stagedSize,
+                       const void *src) {
+  for (auto it = g_csImgCache.begin(); it != g_csImgCache.end();) {
+    CsImgStage &e = it->second;
+    const bool overlap = it->first < base + bytes && base < it->first + e.guestBytes;
+    if (!overlap) { ++it; continue; }
+    if (src && it->first == base && e.size == stagedSize) {
+      e.hash = texHash(base, e.guestBytes);
+      e.lastFrame = g.frameNum;
+      std::memcpy(e.data.data(), src, e.data.size());
+      ++it;
+    } else {
+      g_csImgCacheBytes -= e.data.size();
+      it = g_csImgCache.erase(it);
+    }
+  }
+}
+
 // Ensure staging slot i can hold `size` bytes (grow-on-demand, kept mapped).
 bool csEnsureStage(uint32_t i, VkDeviceSize size) {
   CsStage &s = g_csStage[i];
@@ -2688,10 +2867,17 @@ bool csEnsureStage(uint32_t i, VkDeviceSize size) {
   return true;
 }
 
+struct ScopeCs {
+  uint64_t t0 = nowNs();
+  ~ScopeCs() { g_nsCs += nowNs() - t0; g_csCount++; }
+};
+
 bool dispatch(const ComputeInfo &ci) {
   if (!g.ready || !ci.recomp || !ci.recomp->ok || !ci.nres ||
       ci.nres > g.maxCsResources)
     return false;
+  ScopeCs _cs;
+  for (uint32_t i = 0; i < ci.nres; i++) g_csBytes += ci.res[i].size;
   for (uint32_t i = 0; i < ci.nres; i++)
     if (ci.res[i].size > g.maxStorageBufferRange) return false;
   CsPipe *cp = getCsPipe(ci);
@@ -2712,7 +2898,26 @@ bool dispatch(const ComputeInfo &ci) {
     if (vkCreateDescriptorPool(g.device, &pci, nullptr, &g_csDescPool) != VK_SUCCESS) { g_csDescPool = VK_NULL_HANDLE; return false; }
   }
 
+  // DELTA_GPU_CSLIST: per-dispatch resource staging list for the first 200
+  // dispatches — shows what the chain actually round-trips per frame.
+  static const bool csList = std::getenv("DELTA_GPU_CSLIST") != nullptr;
+  static uint32_t csListed = 0;
+  if (csList && g.frameNum > 25 && csListed < 200) {
+    csListed++;
+    for (uint32_t i = 0; i < ci.nres; i++)
+      std::fprintf(stderr,
+                   "[cslist] cs=%#llx bind=%u base=%#lx size=%#lx %s%s\n",
+                   (unsigned long long)ci.csAddr, ci.res[i].binding,
+                   (unsigned long)ci.res[i].base,
+                   (unsigned long)ci.res[i].size,
+                   ci.res[i].imageStaging ? "img"
+                   : ci.res[i].zeroFill   ? "zero"
+                                          : "buf",
+                   ci.res[i].written ? " written" : "");
+  }
+
   // Stage each resource's guest range into its reused storage buffer.
+  const uint64_t _tIn0 = nowNs();
   VkDeviceSize sz[ComputeInfo::kMaxResources];
   for (uint32_t i = 0; i < ci.nres; i++) {
     sz[i] = ci.res[i].size ? ((ci.res[i].size + 3) & ~VkDeviceSize(3)) : 4;
@@ -2720,7 +2925,7 @@ bool dispatch(const ComputeInfo &ci) {
     if (ci.res[i].zeroFill) {
       std::memset(g_csStage[i].map, 0, sz[i]);
     } else if (ci.res[i].imageStaging) {
-      if (!stageCsImage(ci.res[i], g_csStage[i].map)) return false;
+      if (!stageCsImageCached(ci.res[i], g_csStage[i].map)) return false;
     } else {
       std::memcpy(g_csStage[i].map,
                   reinterpret_cast<const void *>(ci.res[i].base),
@@ -2730,6 +2935,8 @@ bool dispatch(const ComputeInfo &ci) {
       std::memset(static_cast<uint8_t *>(g_csStage[i].map) + ci.res[i].size, 0,
                   sz[i] - ci.res[i].size);
   }
+
+  g_nsCsIn += nowNs() - _tIn0;
 
   // Descriptor set binding the storage buffers (pool reset each dispatch).
   vkResetDescriptorPool(g.device, g_csDescPool, 0);
@@ -2761,17 +2968,37 @@ bool dispatch(const ComputeInfo &ci) {
   VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
   si.commandBufferCount = 1; si.pCommandBuffers = &g_csCmd;
   vkResetFences(g.device, 1, &g.fence);
-  if (vkQueueSubmit(g.queue, 1, &si, g.fence) != VK_SUCCESS) return false;
-  vkWaitForFences(g.device, 1, &g.fence, VK_TRUE, UINT64_MAX);
+  const uint64_t _tGpu0 = nowNs();
+  const VkResult csSubmit = vkQueueSubmit(g.queue, 1, &si, g.fence);
+  const VkResult csWait =
+      csSubmit == VK_SUCCESS
+          ? vkWaitForFences(g.device, 1, &g.fence, VK_TRUE, UINT64_MAX)
+          : csSubmit;
+  g_nsCsGpu += nowNs() - _tGpu0;
+  if (csSubmit != VK_SUCCESS || csWait != VK_SUCCESS) {
+    std::fprintf(stderr,
+                 "[gpuvk] cs dispatch DEVICE FAULT: submit=%d wait=%d "
+                 "cs=%#llx groups=%ux%ux%u\n",
+                 (int)csSubmit, (int)csWait, (unsigned long long)ci.csAddr,
+                 ci.groups[0], ci.groups[1], ci.groups[2]);
+    reportDeviceFault(g.device);
+    return false;
+  }
 
   // Copy written ranges back to guest memory + invalidate any cached texture there.
+  const uint64_t _tOut0 = nowNs();
   for (uint32_t i = 0; i < ci.nres; i++) {
     if (!ci.res[i].written) continue;
+    const uint64_t wrBytes =
+        ci.res[i].guestSize ? ci.res[i].guestSize : ci.res[i].size;
     if (ci.res[i].imageStaging) {
       if (!writebackCsImage(ci.res[i], g_csStage[i].map)) return false;
+      csImgCacheWritten(ci.res[i].base, wrBytes, ci.res[i].size,
+                        g_csStage[i].map);
     } else {
       std::memcpy(reinterpret_cast<void *>(ci.res[i].base), g_csStage[i].map,
                   ci.res[i].size);
+      csImgCacheWritten(ci.res[i].base, wrBytes, 0, nullptr);
     }
     invalidateTexRange(ci.res[i].base, ci.res[i].guestSize);
     if (verbose) {
@@ -2783,6 +3010,7 @@ bool dispatch(const ComputeInfo &ci) {
                    (unsigned long)nz, (unsigned long)(ci.res[i].size / step));
     }
   }
+  g_nsCsOut += nowNs() - _tOut0;
   return true;
 }
 
@@ -2818,8 +3046,9 @@ VkPrimitiveTopology vkTopology(uint32_t prim) {
 struct RecompPipe {
   VkPipeline pipe = VK_NULL_HANDLE;
   VkPipelineLayout layout = VK_NULL_HANDLE;
+  VkDescriptorSetLayout texSetLayout = VK_NULL_HANDLE;
   bool textured = false;
-  bool multiTex = false;  // PS samples >1 texture -> set 0 = the N-sampler layout
+  bool multiTex = false;  // custom set 0 for multiple and/or storage images
 };
 std::unordered_map<uint64_t, RecompPipe> g_recompPipes;
 
@@ -2855,16 +3084,42 @@ RecompPipe *getRecompPipe(const DrawInfo &d) {
   if (it != g_recompPipes.end()) return &it->second;
   RecompPipe rp;
   rp.textured = !d.recomp->ps_texs.empty();
-  rp.multiTex = d.recomp->ps_texs.size() > 1;  // multi-sampler set-0 layout
+  const bool hasStorage = std::any_of(
+      d.recomp->ps_texs.begin(), d.recomp->ps_texs.end(),
+      [](const gcn::ShaderTex &tex) { return tex.storage; });
+  rp.multiTex = d.recomp->ps_texs.size() > 1 || hasStorage;
 
   // set 0 = texture(s) (or an empty layout when untextured), set 1 = cbuffer UBO.
-  // A multi-texture PS uses the 8-binding layout; single-texture keeps the 1-binding.
-  VkDescriptorSetLayout set0 = !rp.textured ? g.emptyLayout
-                             : rp.multiTex ? g.texArrayLayout : g.dsLayout;
+  // Multi/storage shaders use an exact per-binding descriptor layout;
+  // single-sampler shaders retain the shared one-binding layout.
+  VkDescriptorSetLayout set0 = !rp.textured ? g.emptyLayout : g.dsLayout;
+  if (rp.multiTex) {
+    VkDescriptorSetLayoutBinding bindings[State::kMaxTex];
+    for (uint32_t i = 0; i < d.recomp->ps_texs.size(); i++) {
+      bindings[i] = {i,
+                     d.recomp->ps_texs[i].storage
+                         ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE
+                         : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                     1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+    }
+    VkDescriptorSetLayoutCreateInfo sl{
+        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    sl.bindingCount = static_cast<uint32_t>(d.recomp->ps_texs.size());
+    sl.pBindings = bindings;
+    if (vkCreateDescriptorSetLayout(g.device, &sl, nullptr,
+                                    &rp.texSetLayout) != VK_SUCCESS)
+      return nullptr;
+    set0 = rp.texSetLayout;
+  }
   VkDescriptorSetLayout sls[2] = {set0, g.uboLayout};
+  VkPushConstantRange push{VK_SHADER_STAGE_VERTEX_BIT |
+                               VK_SHADER_STAGE_FRAGMENT_BIT,
+                           0, 64};
   VkPipelineLayoutCreateInfo li{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
   li.setLayoutCount = 2;
   li.pSetLayouts = sls;
+  li.pushConstantRangeCount = 1;
+  li.pPushConstantRanges = &push;
   if (vkCreatePipelineLayout(g.device, &li, nullptr, &rp.layout) != VK_SUCCESS) return nullptr;
 
   VkShaderModule vs = makeModuleVec(d.recomp->vs_spirv);
@@ -2989,7 +3244,10 @@ bool drawRecomp(const DrawInfo &d) {
   }
   if (!d.recomp || !d.recomp->ok || drawCount < 3)
     return decline(DR_NORECOMP);
-  if (!d.mrtCount && !d.depthBase) {
+  const bool hasStorageImage = std::any_of(
+      d.recomp->ps_texs.begin(), d.recomp->ps_texs.end(),
+      [](const gcn::ShaderTex &tex) { return tex.storage; });
+  if (!d.mrtCount && !d.depthBase && !hasStorageImage) {
     g.frameDraws++;
     return true;
   }
@@ -3135,6 +3393,7 @@ bool drawRecomp(const DrawInfo &d) {
   uint64_t multiColor[State::kMaxTex] = {};
   uint64_t multiDepth[State::kMaxTex] = {};
   uint64_t multiFeedback[State::kMaxTex] = {};
+  uint64_t multiStorage[State::kMaxTex] = {};
   VkImageView multiViews[State::kMaxTex] = {};
   VkImageLayout multiLayouts[State::kMaxTex];
   bool multiTransitionSource = false;
@@ -3151,6 +3410,22 @@ bool drawRecomp(const DrawInfo &d) {
     for (uint32_t i = 0; i < multiN; i++) {
       const auto &t = d.texs[i];
       uint64_t base = t.base;
+      if (t.storage) {
+        if (base && !g_rts.count(base)) {
+          uint64_t resolved = resolveSampledRT(base, t.w, t.h);
+          if (resolved) base = resolved;
+        }
+        if (base && !g_rts.count(base)) {
+          const VkFormat format = guestTextureFormat(t.dfmt, t.nfmt);
+          if (format != VK_FORMAT_UNDEFINED) getRT(base, t.w, t.h, format);
+        }
+        if (base && g_rts.count(base)) {
+          multiStorage[i] = base;
+          multiTransitionSource |=
+              g_rts[base].layout != VK_IMAGE_LAYOUT_GENERAL;
+        }
+        continue;
+      }
       if (base && !t.arrayed && !g_rts.count(base) && !g_depths.count(base)) {
         bool depthFormat = t.dfmt == 4 && t.nfmt == 7;
         uint64_t resolved = depthFormat ? resolveSampledDepth(base, t.w, t.h) : 0;
@@ -3229,7 +3504,22 @@ bool drawRecomp(const DrawInfo &d) {
     }
     if (rp->multiTex) {
       for (uint32_t i = 0; i < multiN; i++) {
-        if (multiColor[i]) {
+        if (multiStorage[i]) {
+          auto &dst = g_rts[multiStorage[i]];
+          if (dst.layout != VK_IMAGE_LAYOUT_GENERAL) {
+            VkAccessFlags srcAccess =
+                dst.layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                    ? VK_ACCESS_SHADER_READ_BIT
+                : dst.layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+                    ? VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
+                : dst.layout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
+                    ? VK_ACCESS_TRANSFER_READ_BIT
+                    : 0;
+            imageBarrier(g.cmd, dst.image, dst.layout, VK_IMAGE_LAYOUT_GENERAL,
+                         srcAccess, VK_ACCESS_SHADER_WRITE_BIT);
+            dst.layout = VK_IMAGE_LAYOUT_GENERAL;
+          }
+        } else if (multiColor[i]) {
           auto &src = g_rts[multiColor[i]];
           if (src.layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
             VkAccessFlags srcAccess =
@@ -3261,7 +3551,10 @@ bool drawRecomp(const DrawInfo &d) {
     }
     if (rp->multiTex) {
       for (uint32_t i = 0; i < multiN; i++) {
-        if (multiFeedback[i]) {
+        if (multiStorage[i]) {
+          multiViews[i] = g_rts[multiStorage[i]].view;
+          multiLayouts[i] = VK_IMAGE_LAYOUT_GENERAL;
+        } else if (multiFeedback[i]) {
           auto &src = g_rts[multiFeedback[i]];
           multiViews[i] = src.feedbackView;
           multiLayouts[i] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
@@ -3273,7 +3566,7 @@ bool drawRecomp(const DrawInfo &d) {
           multiLayouts[i] = VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL;
         }
       }
-      texSet = getMultiTexSet(d, multiViews, multiLayouts);
+      texSet = getMultiTexSet(d, rp->texSetLayout, multiViews, multiLayouts);
       if (!texSet) return decline(DR_GUESTTEX);
     }
     RTarget *rt = d.rtBase
@@ -3287,7 +3580,10 @@ bool drawRecomp(const DrawInfo &d) {
   if (rp->multiTex) {
     if (!texSet) {
       for (uint32_t i = 0; i < multiN; i++) {
-        if (multiFeedback[i]) {
+        if (multiStorage[i]) {
+          multiViews[i] = g_rts[multiStorage[i]].view;
+          multiLayouts[i] = VK_IMAGE_LAYOUT_GENERAL;
+        } else if (multiFeedback[i]) {
           multiViews[i] = g_rts[multiFeedback[i]].feedbackView;
         } else if (multiColor[i]) {
           multiViews[i] = g_rts[multiColor[i]].view;
@@ -3296,7 +3592,7 @@ bool drawRecomp(const DrawInfo &d) {
           multiLayouts[i] = VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL;
         }
       }
-      texSet = getMultiTexSet(d, multiViews, multiLayouts);
+      texSet = getMultiTexSet(d, rp->texSetLayout, multiViews, multiLayouts);
     }
     if (!texSet) return decline(DR_GUESTTEX);
   } else if (feedbackAsTex) {
@@ -3316,6 +3612,10 @@ bool drawRecomp(const DrawInfo &d) {
 
   setGuestViewport(d);
   vkCmdBindPipeline(g.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, rp->pipe);
+  vkCmdPushConstants(g.cmd, rp->layout, VK_SHADER_STAGE_VERTEX_BIT, 0,
+                     sizeof(d.vsUserData), d.vsUserData);
+  vkCmdPushConstants(g.cmd, rp->layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+                     sizeof(d.psUserData), d.psUserData);
   // Copy each guest cbuffer window into the per-frame ring and bind set 1. Vulkan
   // requires one dynamic offset for every dynamic descriptor in the set layout.
   VkDeviceSize cbOff = (g.uboOffset + g.uboAlign - 1) & ~(VkDeviceSize)(g.uboAlign - 1);
@@ -3363,6 +3663,13 @@ bool drawRecomp(const DrawInfo &d) {
                      0, 0, 0);
   else
     vkCmdDraw(g.cmd, d.vertexCount, d.instanceCount ? d.instanceCount : 1, 0, 0);
+  for (uint32_t i = 0; i < multiN; i++) {
+    if (!multiStorage[i]) continue;
+    RTarget &target = g_rts[multiStorage[i]];
+    target.everRendered = true;
+    target.usedThisFrame = true;
+    target.lastFrame = g.frameNum;
+  }
   g.vbOffset += vneed;
   if (indexed)
     g.ibOffset += (VkDeviceSize)d.indexCount * 4;
@@ -3414,6 +3721,7 @@ void beginFrame() {
   }
   g.curRt = 0;
   g.curDepth = 0;
+  g.regionOpen = false;
   g.lastRt = 0;
   g.busiestRt = 0;
   g.busiestRtDraws = 0;
@@ -3463,8 +3771,22 @@ void draw(const DrawInfo &d_in) {
     const char *e = std::getenv("DELTA_GPU_RECOMP");
     return !e || std::strcmp(e, "0") != 0;
   }();
-  if (recompPath && d.recomp && drawRecomp(d))
-    return;
+  const bool recompiled = recompPath && d.recomp && drawRecomp(d);
+  static const bool drawTraceAll = std::getenv("DELTA_GPU_DRAWTRACE") != nullptr;
+  if (drawTraceAll) {
+    static uint32_t traced = 0;
+    if (traced++ < 100)
+      std::fprintf(stderr,
+                   "[dt] f%d rt=%#lx count=%u indexed=%u nv=%u mrt=%u mask=%#x "
+                   "psmask=%#x prim=%u vp=[%.1f %.1f %.1f %.1f] depth=%#lx "
+                   "handled=%d\n",
+                   g.frameNum, (unsigned long)d.rtBase, d.vertexCount,
+                   d.indexCount, d.nvattrs, d.mrtCount, d.targetMask,
+                   d.recomp ? d.recomp->ps_mrt_mask : 0, d.primType,
+                   d.viewportXScale, d.viewportXOffset, d.viewportYScale,
+                   d.viewportYOffset, (unsigned long)d.depthBase, recompiled);
+  }
+  if (recompiled) return;
   if (!d.vertexData || !d.vertexStride)
     return;
   // Indexed triangle list (the common GNM draw): the index buffer selects which
@@ -3626,15 +3948,21 @@ void reportFps() {
     double f = frames ? frames : 1;
     std::fprintf(stderr,
         "[fps] %.1f fps | per-frame gpu-code: draw=%.2fms end=%.2fms (wait=%.2fms "
-        "submit=%.2fms present=%.2fms) texup=%.2fms x%.1f\n",
+        "submit=%.2fms present=%.2fms) texup=%.2fms x%.1f cs=%.2fms x%.1f %.1fMB "
+        "(in=%.2f gpu=%.2f out=%.2f)\n",
         frames / dt, g_nsDraw / f / 1e6, g_nsEnd / f / 1e6, g_nsReadback / f / 1e6,
         g_nsSubmit / f / 1e6, g_nsPresent / f / 1e6,
-        g_nsTexUp / f / 1e6, g_texUps / f);
+        g_nsTexUp / f / 1e6, g_texUps / f,
+        g_nsCs / f / 1e6, g_csCount / f, g_csBytes / f / 1e6,
+        g_nsCsIn / f / 1e6, g_nsCsGpu / f / 1e6, g_nsCsOut / f / 1e6);
     last = now;
     frames = 0;
     g_nsDraw = g_nsEnd = g_nsReadback = g_nsTexUp = 0;
     g_nsSubmit = g_nsPresent = 0;
     g_texUps = 0;
+    g_nsCs = g_csBytes = 0;
+    g_nsCsIn = g_nsCsGpu = g_nsCsOut = 0;
+    g_csCount = 0;
   }
 }
 
@@ -3726,6 +4054,9 @@ void endFrame(uint64_t scanoutBase) {
   // Debug: present the busiest RT (the scene) instead of the composited scanout.
   static const bool presentScene = std::getenv("DELTA_GPU_PRESENT_SCENE") != nullptr;
   if (presentScene && g.busiestRt) presentBase = g.busiestRt;
+  static const bool presentFirst =
+      std::getenv("DELTA_GPU_PRESENT_FIRST_RT") != nullptr;
+  if (presentFirst && g.firstRt) presentBase = g.firstRt;
   // Debug: present the first RT matching DELTA_GPU_PRESENT_RTW x RTH (inspect a
   // specific render target, e.g. the 832x512 room buffer).
   static const int wantW = [] { const char *e = std::getenv("DELTA_GPU_PRESENT_RTW"); return e ? std::atoi(e) : 0; }();
@@ -3754,8 +4085,31 @@ void endFrame(uint64_t scanoutBase) {
   if (it != g_rts.end()) {
     RTarget &rt = it->second;
     ensureReadback(rt.w, rt.h, rt.fmt);
+    static const bool clearRedTransfer =
+        std::getenv("DELTA_GPU_CLEARRED") != nullptr;
+    if (clearRedTransfer) {
+      VkAccessFlags srcAccess =
+          rt.layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+              ? VK_ACCESS_SHADER_READ_BIT
+          : rt.layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+              ? VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
+          : rt.layout == VK_IMAGE_LAYOUT_GENERAL
+              ? VK_ACCESS_SHADER_WRITE_BIT
+              : 0;
+      imageBarrier(g.cmd, rt.image, rt.layout,
+                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, srcAccess,
+                   VK_ACCESS_TRANSFER_WRITE_BIT);
+      rt.layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+      VkClearColorValue red{{1.0f, 0.0f, 0.0f, 1.0f}};
+      VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+      vkCmdClearColorImage(g.cmd, rt.image, rt.layout, &red, 1, &range);
+    }
+    const VkAccessFlags presentSrc =
+        rt.layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
+            ? VK_ACCESS_TRANSFER_WRITE_BIT
+            : VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
     imageBarrier(g.cmd, rt.image, rt.layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                 VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+                 presentSrc, VK_ACCESS_TRANSFER_READ_BIT);
     rt.layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
     VkBufferImageCopy copy{};
     copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
@@ -3768,12 +4122,15 @@ void endFrame(uint64_t scanoutBase) {
   {
     ScopeNs _ts(&g_nsSubmit);
     ScopeNs _tsf(&g_frSubmit);
-    vkEndCommandBuffer(g.cmd);
+    const VkResult endResult = vkEndCommandBuffer(g.cmd);
     VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     si.commandBufferCount = 1;
     si.pCommandBuffers = &g.cmd;
     vkResetFences(g.device, 1, &cur.fence);
-    vkQueueSubmit(g.queue, 1, &si, cur.fence);
+    const VkResult submitResult = vkQueueSubmit(g.queue, 1, &si, cur.fence);
+    if (endResult != VK_SUCCESS || submitResult != VK_SUCCESS)
+      std::fprintf(stderr, "[gpuvk] frame submit failed: end=%d submit=%d\n",
+                   (int)endResult, (int)submitResult);
   }
   cur.submitted = true;
   cur.frameNum = g.frameNum;
@@ -3805,7 +4162,14 @@ void endFrame(uint64_t scanoutBase) {
   const bool waited = fin.submitted;
   if (fin.submitted) {
     uint64_t _tr0 = nowNs();
-    vkWaitForFences(g.device, 1, &fin.fence, VK_TRUE, UINT64_MAX);
+    const VkResult finWait =
+        vkWaitForFences(g.device, 1, &fin.fence, VK_TRUE, UINT64_MAX);
+    if (finWait != VK_SUCCESS) {
+      std::fprintf(stderr,
+                   "[gpuvk] frame %d fence DEVICE FAULT: wait=%d draws=%u\n",
+                   fin.frameNum, (int)finWait, fin.frameDraws);
+      reportDeviceFault(g.device);
+    }
     uint64_t dt = nowNs() - _tr0;
     g_nsReadback += dt;
     g_frWait += dt;
@@ -3886,7 +4250,11 @@ void endFrame(uint64_t scanoutBase) {
     snapBestDraws = snapMinIdx ? (int)fin.frameMaxIdx : (int)fin.frameDraws;
     char p[256]; std::snprintf(p, sizeof p, "%s/gpu_snap.ppm", dumpDir());
     writePpm(p, pixels, fin.w, fin.h);
-    std::fprintf(stderr, "[snap] wrote %s (f%d %ux%u draws=%u)\n", p, fin.frameNum, fin.w, fin.h, fin.frameDraws);
+    std::fprintf(stderr,
+                 "[snap] wrote %s (f%d %ux%u draws=%u rt=%#lx scanout=%#lx)\n",
+                 p, fin.frameNum, fin.w, fin.h, fin.frameDraws,
+                 (unsigned long)fin.presentBase,
+                 (unsigned long)fin.scanoutBase);
     snapped = true;
   }
   // Sequence capture (DELTA_GPU_SNAPSEQ=K): write up to K numbered gameplay-room

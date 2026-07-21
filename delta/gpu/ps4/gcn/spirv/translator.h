@@ -60,6 +60,8 @@ struct Translator {
   Id img_types[4] = {};      // sampled 2D / 2D-array, color / depth images
   Id sampled_types[4] = {};  // corresponding combined image-sampler types
   Id sampled_ptrs[4] = {};   // UniformConstant pointers to sampled_types
+  Id storage_img_types[2] = {};  // storage 2D / 2D-array images
+  Id storage_img_ptrs[2] = {};   // UniformConstant pointers to storage images
   bool image_query = false;
 
   void InitTypes() {
@@ -277,6 +279,7 @@ struct StageContext {
   // VS
   Id pos_out = 0;
   std::unordered_map<uint32_t, Id> param_outs;
+  std::unordered_set<uint32_t> direct_vfetch;  // MUBUF pc seeded as vertex input
   uint32_t max_param = 0;
 
   // PS
@@ -290,7 +293,7 @@ struct StageContext {
   // descriptor share one set-0 binding; variables are created lazily per
   // binding. The plan is also what TrackTextures pairs against at draw time.
   const MimgBindingPlan* mimg_plan = nullptr;
-  static constexpr uint32_t kMaxPsSamplers = 8;  // == vk_render State::kMaxTex
+  static constexpr uint32_t kMaxPsSamplers = 16;  // == vk_render State::kMaxTex
   Id tex_vars[kMaxPsSamplers] = {};
   uint32_t tex_types[kMaxPsSamplers] = {};
 
@@ -331,14 +334,10 @@ bool IsVop3b(uint32_t op);
 
 // ---- memory emitters (translate_mem.cpp) -----------------------------------
 uint32_t SmrdLoadCount(uint32_t op);
-// Per-instruction reachability from the entry block (program-index aligned).
-// Instructions after an early-out s_endpgm that no branch targets are dead --
-// typically OrbShdr footer padding decoded past the real code -- and must not
-// influence translation (a garbage "memory op" would decline a compute shader).
-std::vector<uint8_t> ComputeReachability(const Program& program);
 bool PlanCbufs(const Program& program, uint32_t first_binding,
-               std::vector<ShaderCbuf>& cbufs,
-               std::unordered_map<uint32_t, uint32_t>& bindings);
+                std::vector<ShaderCbuf>& cbufs,
+                std::unordered_map<uint32_t, uint32_t>& bindings,
+                const uint8_t* reachable = nullptr);
 void EmitCbufSmrd(Translator& t, const Inst& inst,
                   const std::unordered_map<uint32_t, uint32_t>& bindings);
 void EmitMimg(Translator& t, const Inst& inst, StageContext& sc);

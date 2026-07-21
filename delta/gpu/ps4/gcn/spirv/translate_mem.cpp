@@ -128,9 +128,16 @@ void EmitCbufSmrd(Translator& t, const Inst& inst,
 }
 
 bool PlanCbufs(const Program& program, uint32_t first_binding,
-               std::vector<ShaderCbuf>& cbufs,
-               std::unordered_map<uint32_t, uint32_t>& bindings) {
+                std::vector<ShaderCbuf>& cbufs,
+                std::unordered_map<uint32_t, uint32_t>& bindings,
+                const uint8_t* reachable) {
+  uint32_t index = 0;
   for (const Inst& inst : program) {
+    if (reachable && !reachable[index]) {
+      index++;
+      continue;
+    }
+    index++;
     if (inst.enc != Enc::kSmrd) continue;
     const uint32_t n = SmrdLoadCount(inst.opcode);
     if (!n) continue;
@@ -178,6 +185,44 @@ void EmitMimg(Translator& t, const Inst& inst, StageContext& sc) {
     WarnUnsupported("mimg.unplanned", op, w0, w1);
     return;
   }
+
+  if (op == 0x08 || op == 0x09) {  // image_store[_mip]
+    const uint32_t type_idx = arrayed ? 1u : 0u;
+    if (!t.storage_img_types[type_idx]) {
+      t.m.Capability(spv::Capability::StorageImageWriteWithoutFormat);
+      t.storage_img_types[type_idx] = t.m.TypeImage(
+          t.t_f, spv::Dim::Dim2D, 0, arrayed ? 1 : 0, 0, 2,
+          spv::ImageFormat::Unknown);
+      t.storage_img_ptrs[type_idx] = t.m.TypePointer(
+          spv::StorageClass::UniformConstant, t.storage_img_types[type_idx]);
+    }
+    if (!sc.tex_vars[bind]) {
+      const Id var = t.m.Variable(t.storage_img_ptrs[type_idx],
+                                  spv::StorageClass::UniformConstant);
+      t.m.Decorate(var, spv::Decoration::DescriptorSet, {0});
+      t.m.Decorate(var, spv::Decoration::Binding, {bind});
+      sc.tex_vars[bind] = var;
+      sc.tex_types[bind] = type_idx;
+    }
+    const Id ix = t.m.Bitcast(t.t_i, t.Vg(vaddr));
+    const Id iy = t.m.Bitcast(t.t_i, t.Vg(vaddr + 1));
+    const Id coord =
+        arrayed ? t.m.CompositeConstruct(
+                      t.m.TypeVec(t.t_i, 3),
+                      {ix, iy, t.m.Bitcast(t.t_i, t.Vg(vaddr + 2))})
+                : t.m.CompositeConstruct(t.m.TypeVec(t.t_i, 2), {ix, iy});
+    Id components[4] = {t.F32(0.f), t.F32(0.f), t.F32(0.f), t.F32(1.f)};
+    uint32_t source = 0;
+    for (uint32_t channel = 0; channel < 4; channel++)
+      if (dmask & (1u << channel)) components[channel] = t.VgF(vdata + source++);
+    const Id texel = t.m.CompositeConstruct(
+        t.t_v4, {components[0], components[1], components[2], components[3]});
+    const Id image =
+        t.m.Load(t.storage_img_types[type_idx], sc.tex_vars[bind]);
+    t.m.EmitVoid(spv::Op::OpImageWrite, {image, coord, texel});
+    return;
+  }
+
   if (!sc.tex_vars[bind]) {
     const uint32_t type_idx = (arrayed ? 1u : 0u) | (dref ? 2u : 0u);
     if (!t.img_types[type_idx]) {
@@ -858,7 +903,7 @@ void EmitCsMimg(Translator& t, const Inst& inst, StageContext& sc) {
   t.m.OpenBlock(merge_blk);
 }
 
-// ---- compute: DS (LDS) ------------------------------------------------------
+// ---- DS (LDS / subgroup swizzle) -------------------------------------------
 // LDS is a Workgroup uint array; addresses are byte-based. Single ops add the
 // 16-bit offset to the address; pair ops address elements at offset0/1 *
 // element size (x64 for the st64 forms). Indices clamp into the allocation.
@@ -901,7 +946,7 @@ void EmitDs(Translator& t, const Inst& inst, StageContext& sc) {
     }
     case 53: {  // ds_swizzle_b32
       if (!sc.subgroup_local_id) {
-        sc.cs_unsupported = true;
+        if (sc.is_cs) sc.cs_unsupported = true;
         break;
       }
       const Id lane = t.m.Load(t.t_u, sc.subgroup_local_id);

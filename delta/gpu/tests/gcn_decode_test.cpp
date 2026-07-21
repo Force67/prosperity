@@ -39,4 +39,27 @@ TEST(GcnDecode, SmrdImmediateOffsetDoesNotConsumeTrailingDword) {
   EXPECT_EQ(program[1].pc, 1u);
 }
 
+TEST(GcnDecode, ReachabilityExcludesUnconditionalBranchFallthrough) {
+  const uint32_t code[] = {
+      0xbf820003,  // s_branch pc+4
+      0xffffffff, 0xffffffff,
+      0xbf810000,  // s_endpgm in dead fallthrough
+      0xbe800380,  // s_mov_b32 s0, 0
+      0xbf810000,  // reachable s_endpgm
+  };
+
+  const gpu::gcn::Program program =
+      gpu::gcn::Decode(code, 6, /*stop_at_endpgm=*/false);
+  const std::vector<uint8_t> reachable =
+      gpu::gcn::ComputeReachability(program);
+
+  ASSERT_EQ(reachable.size(), 6u);
+  EXPECT_EQ(reachable[0], 1u);
+  EXPECT_EQ(reachable[1], 0u);
+  EXPECT_EQ(reachable[2], 0u);
+  EXPECT_EQ(reachable[3], 0u);
+  EXPECT_EQ(reachable[4], 1u);
+  EXPECT_EQ(reachable[5], 1u);
+}
+
 }  // namespace

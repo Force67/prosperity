@@ -112,6 +112,8 @@ namespace {
 // semantic order.
 struct FetchAttr {
   uint32_t semantic, num_comps, dest_vgpr, table_sgpr, dword_off;
+  bool inline_descriptor = false;
+  uint32_t pc = ~0u;
 };
 
 std::vector<FetchAttr> ParseFetch(uint64_t fetch_addr) {
@@ -140,7 +142,7 @@ std::vector<FetchAttr> ParseFetch(uint64_t fetch_addr) {
       const auto it = loads.find(srsrc);
       const uint32_t tbl = it != loads.end() ? it->second.table_sgpr : 0;
       const uint32_t off = it != loads.end() ? it->second.dword_off : 0;
-      out.push_back({semantic, nc, vdata, tbl, off});
+      out.push_back({semantic, nc, vdata, tbl, off, false, ~0u});
       semantic++;
     }
   }
@@ -218,14 +220,17 @@ void EmitInst(Translator& t, const Inst& inst, StageContext& sc) {
     }
     case Enc::kMubuf:
       if (sc.is_cs) EmitCsMubuf(t, inst, sc);
-      else WarnUnsupported("mubuf.graphics", inst.opcode, w, w1);
+      else if (!sc.is_ps && sc.direct_vfetch.count(inst.pc)) break;
+      else WarnUnsupported(sc.is_ps ? "mubuf.ps" : "mubuf.vs",
+                           inst.opcode, w, w1);
       break;
     case Enc::kMtbuf:
       if (sc.is_cs) EmitCsMtbuf(t, inst, sc);
-      else WarnUnsupported("mtbuf.graphics", inst.opcode, w, w1);
+      else WarnUnsupported(sc.is_ps ? "mtbuf.ps" : "mtbuf.vs",
+                           inst.opcode, w, w1);
       break;
     case Enc::kDs:
-      if (sc.is_cs) EmitDs(t, inst, sc);
+      if (sc.is_cs || inst.opcode == 0x35) EmitDs(t, inst, sc);
       else WarnUnsupported("ds.graphics", inst.opcode, w, w1);
       break;
     case Enc::kMimg:
@@ -361,55 +366,6 @@ std::vector<uint32_t> BlockStarts(const Program& program, uint32_t max_pc) {
 
 }  // namespace
 
-std::vector<uint8_t> ComputeReachability(const Program& program) {
-  std::vector<uint8_t> reachable(program.size(), 0);
-  if (program.empty()) return reachable;
-  const uint32_t max_pc = program.back().pc + program.back().size;
-  const std::vector<uint32_t> starts = BlockStarts(program, max_pc);
-  const uint32_t num_blocks = static_cast<uint32_t>(starts.size());
-  const auto block_of = [&](uint32_t pc) {
-    uint32_t b = 0;
-    for (uint32_t i = 0; i < num_blocks; i++)
-      if (starts[i] <= pc) b = i;
-      else break;
-    return b;
-  };
-
-  // Per-block successors: the block's branch (always its last instruction,
-  // since a branch forces a leader right after it) or plain fallthrough.
-  std::vector<uint8_t> block_reachable(num_blocks, 0);
-  std::vector<uint32_t> worklist{0};
-  while (!worklist.empty()) {
-    const uint32_t b = worklist.back();
-    worklist.pop_back();
-    if (b >= num_blocks || block_reachable[b]) continue;
-    block_reachable[b] = 1;
-    const uint32_t blk_start = starts[b];
-    const uint32_t blk_end = (b + 1 < num_blocks) ? starts[b + 1] : max_pc;
-    bool terminated = false;
-    for (const Inst& inst : program) {
-      if (inst.pc < blk_start || inst.pc >= blk_end) continue;
-      const int k = BranchKind(inst);
-      if (k == 0) continue;
-      terminated = true;
-      if (k == 8) break;  // endpgm: no successors
-      const int32_t simm = static_cast<int16_t>(inst.raw[0] & 0xFFFF);
-      const uint32_t target = static_cast<uint32_t>(
-          static_cast<int32_t>(inst.pc) + static_cast<int32_t>(inst.size) +
-          simm);
-      if (target < max_pc) worklist.push_back(block_of(target));
-      if (k != 1) worklist.push_back(b + 1);  // conditional: fallthrough too
-      break;
-    }
-    if (!terminated) worklist.push_back(b + 1);  // plain fallthrough
-  }
-
-  uint32_t idx = 0;
-  for (const Inst& inst : program)
-    reachable[idx++] = block_reachable[block_of(inst.pc)];
-  return reachable;
-}
-
 namespace {
 
 // Lower arbitrary control flow (reducible or not) to a while/switch state
@@ -439,13 +395,34 @@ void EmitCfg(Translator& t, const Program& program, StageContext& sc,
   std::vector<Id> case_labels(num_blocks);
   for (Id& l : case_labels) l = t.m.NewBlock();
 
+  // Runaway guard: one mistranslated branch condition/target leaves the state
+  // machine spinning forever, and a single spinning invocation takes the whole
+  // VkDevice down (DEVICE_LOST). Cap block-steps per invocation; a capped
+  // shader renders wrong, loudly bisectable, instead of killing the device.
+  // DELTA_GPU_CFG_MAXITER overrides the cap (0 disables the guard).
+  static const uint32_t max_iter = [] {
+    const char* e = std::getenv("DELTA_GPU_CFG_MAXITER");
+    return e ? static_cast<uint32_t>(std::strtoul(e, nullptr, 0)) : 16384u;
+  }();
+  const Id iter_var =
+      max_iter ? t.m.Variable(t.p_priv_u, spv::StorageClass::Private,
+                              t.m.ConstNull(t.t_u))
+               : 0;
+
   t.SetState(0);
   t.m.Branch(header);
   t.m.OpenBlock(header);
   t.m.LoopMerge(merge, cont);
   t.m.Branch(dispatch);
   t.m.OpenBlock(dispatch);
-  const Id state = t.State();
+  Id state = t.State();
+  if (max_iter) {
+    const Id it = t.m.Load(t.t_u, iter_var);
+    t.m.Store(iter_var, t.m.Emit(spv::Op::OpIAdd, t.t_u, {it, t.U32(1)}));
+    const Id over =
+        t.m.Emit(spv::Op::OpUGreaterThan, t.t_bool, {it, t.U32(max_iter)});
+    state = t.SelectB(over, t.U32(kExit), state);
+  }
   t.m.SelectionMerge(merge_sel);
   std::vector<std::pair<uint32_t, Id>> cases;
   for (uint32_t i = 0; i < num_blocks; i++) cases.push_back({i, case_labels[i]});
@@ -507,16 +484,57 @@ bool ForceCfg() {
 // their control flow (the GCN alpha-test/discard idiom, conditional shading)
 // is honoured; single-basic-block shaders emit the same instruction stream
 // straight-line.
-void EmitBody(Translator& t, const Program& program, StageContext& sc) {
+void EmitBody(Translator& t, const Program& program, StageContext& sc,
+              const uint8_t* reachable) {
+  t.SeedExec();
   if (ForceCfg() || HasControlFlow(program)) {
-    t.SeedExec();
-    EmitCfg(t, program, sc);
+    EmitCfg(t, program, sc, reachable);
     return;
   }
+  uint32_t index = 0;
   for (const Inst& inst : program) {
+    if (reachable && !reachable[index++]) continue;
     if (inst.enc == Enc::kSopp && inst.opcode == 1) break;  // s_endpgm
     EmitInst(t, inst, sc);
   }
+}
+
+bool UsesDsSwizzle(const Program& program, const uint8_t* reachable) {
+  for (uint32_t i = 0; i < program.size(); i++)
+    if ((!reachable || reachable[i]) && program[i].enc == Enc::kDs &&
+        program[i].opcode == 0x35)
+      return true;
+  return false;
+}
+
+void EnableDsSwizzle(Translator& t, StageContext& sc, std::vector<Id>& iface) {
+  t.m.Capability(spv::Capability::GroupNonUniform);
+  t.m.Capability(spv::Capability::GroupNonUniformShuffle);
+  sc.subgroup_local_id = t.m.Variable(
+      t.m.TypePointer(spv::StorageClass::Input, t.t_u),
+      spv::StorageClass::Input);
+  t.m.Decorate(sc.subgroup_local_id, spv::Decoration::BuiltIn,
+               {static_cast<uint32_t>(spv::BuiltIn::SubgroupLocalInvocationId)});
+  t.m.Decorate(sc.subgroup_local_id, spv::Decoration::Flat);
+  iface.push_back(sc.subgroup_local_id);
+}
+
+Id DeclareUserData(Translator& t) {
+  const Id words = t.m.TypeArray(t.t_u, 16);
+  t.m.Decorate(words, spv::Decoration::ArrayStride, {4});
+  const Id block = t.m.TypeStruct({words});
+  t.m.Decorate(block, spv::Decoration::Block);
+  t.m.MemberDecorate(block, 0, spv::Decoration::Offset, {0});
+  return t.m.Variable(
+      t.m.TypePointer(spv::StorageClass::PushConstant, block),
+      spv::StorageClass::PushConstant);
+}
+
+void SeedUserData(Translator& t, Id user_data) {
+  const Id p_u = t.m.TypePointer(spv::StorageClass::PushConstant, t.t_u);
+  for (uint32_t i = 0; i < 16; i++)
+    t.SetSg(i, t.m.Load(t.t_u, t.m.AccessChain(
+                                  p_u, user_data, {t.U32(0), t.U32(i)})));
 }
 
 // ---- VS ---------------------------------------------------------------------
@@ -525,7 +543,23 @@ bool TranslateVs(const Program& program, const uint32_t* vs_user_data,
                  Translator& t) {
   const uint64_t fetch =
       (static_cast<uint64_t>(vs_user_data[1] & 0xFFFF) << 32) | vs_user_data[0];
-  const std::vector<FetchAttr> attrs = ParseFetch(fetch);
+  const std::vector<uint8_t> reachable = ComputeReachability(program);
+  std::vector<FetchAttr> direct_attrs;
+  for (uint32_t i = 0; i < program.size(); i++) {
+    const Inst& inst = program[i];
+    if (!reachable[i] || inst.enc != Enc::kMubuf || inst.opcode > 0x03)
+      continue;
+    const uint32_t w = inst.raw[0], w1 = inst.raw[1];
+    const bool offen = (w >> 12) & 1, idxen = (w >> 13) & 1;
+    const uint32_t srsrc = ((w1 >> 16) & 0x1F) * 4;
+    const uint32_t soffset = (w1 >> 24) & 0xFF;
+    if (!idxen || offen || soffset != 128 || srsrc + 3 >= 16) continue;
+    direct_attrs.push_back({static_cast<uint32_t>(direct_attrs.size()),
+                            inst.opcode + 1, (w1 >> 8) & 0xFF, srsrc, 0, true,
+                            inst.pc});
+  }
+  std::vector<FetchAttr> attrs =
+      direct_attrs.empty() ? ParseFetch(fetch) : std::move(direct_attrs);
   t.InitTypes();
 
   std::vector<Id> iface;
@@ -536,21 +570,49 @@ bool TranslateVs(const Program& program, const uint32_t* vs_user_data,
                {static_cast<uint32_t>(spv::BuiltIn::Position)});
   iface.push_back(pos_out);
 
-  const Id main_fn = t.m.BeginFunction(t.t_void, t.t_fn);
+  StageContext sc;
+  sc.r = &r;
+  sc.iface = &iface;
+  sc.pos_out = pos_out;
+  sc.flat_attrs = &flat_attrs;
+  for (const FetchAttr& attr : attrs)
+    if (attr.inline_descriptor) sc.direct_vfetch.insert(attr.pc);
+  if (UsesDsSwizzle(program, reachable.data())) EnableDsSwizzle(t, sc, iface);
+  const Id user_data = DeclareUserData(t);
 
-  if (attrs.empty()) {
-    // A procedural VS has no fetch shader. On GFX6-8, VertexID enters in v0;
-    // InstanceID/StepRate0 enters in v1 and raw InstanceID is available in v3.
+  const Id main_fn = t.m.BeginFunction(t.t_void, t.t_fn);
+  sc.main_fn = main_fn;
+  SeedUserData(t, user_data);
+
+  static const bool force_fullscreen_vs =
+      std::getenv("DELTA_GPU_VSFULL") != nullptr;
+  Id debug_vertex_index = 0;
+  if (force_fullscreen_vs) {
+    const Id p_in_u = t.m.TypePointer(spv::StorageClass::Input, t.t_u);
+    debug_vertex_index = t.m.Variable(p_in_u, spv::StorageClass::Input);
+    t.m.Decorate(debug_vertex_index, spv::Decoration::BuiltIn,
+                 {static_cast<uint32_t>(spv::BuiltIn::VertexIndex)});
+    iface.push_back(debug_vertex_index);
+  }
+
+  if (attrs.empty() || !sc.direct_vfetch.empty()) {
+    // A procedural or direct-fetch VS receives VertexID in v0 before its main
+    // instruction stream. Attribute loads below overwrite their destination
+    // VGPRs just as the direct MUBUF instructions would.
+    // On GFX6-8, InstanceID/StepRate0 enters in v1 and raw InstanceID in v3.
     // Seed those ABI inputs from Vulkan's draw built-ins.
     // https://gitlab.freedesktop.org/mesa/mesa/-/blob/be00f53d4d50b87a87f83e8fa243b77e614eb0b8/src/gallium/drivers/radeonsi/gfx/si_state_shaders.cpp#L269-307
     const Id p_in_u = t.m.TypePointer(spv::StorageClass::Input, t.t_u);
-    const Id vertex_index = t.m.Variable(p_in_u, spv::StorageClass::Input);
+    Id vertex_index = debug_vertex_index;
+    if (!vertex_index) {
+      vertex_index = t.m.Variable(p_in_u, spv::StorageClass::Input);
+      t.m.Decorate(vertex_index, spv::Decoration::BuiltIn,
+                   {static_cast<uint32_t>(spv::BuiltIn::VertexIndex)});
+      iface.push_back(vertex_index);
+    }
     const Id instance_index = t.m.Variable(p_in_u, spv::StorageClass::Input);
-    t.m.Decorate(vertex_index, spv::Decoration::BuiltIn,
-                 {static_cast<uint32_t>(spv::BuiltIn::VertexIndex)});
     t.m.Decorate(instance_index, spv::Decoration::BuiltIn,
                  {static_cast<uint32_t>(spv::BuiltIn::InstanceIndex)});
-    iface.push_back(vertex_index);
     iface.push_back(instance_index);
     t.SetVg(0, t.m.Load(t.t_u, vertex_index));
     const Id instance = t.m.Load(t.t_u, instance_index);
@@ -579,19 +641,25 @@ bool TranslateVs(const Program& program, const uint32_t* vs_user_data,
         comp = t.FNeg(comp);
       t.SetVgF(a.dest_vgpr + c, comp);
     }
-    r.attrs.push_back({a.semantic, a.num_comps, a.table_sgpr, a.dword_off});
+    r.attrs.push_back({a.semantic, a.num_comps, a.table_sgpr, a.dword_off,
+                       a.inline_descriptor});
   }
 
-  StageContext sc;
-  sc.r = &r;
-  sc.iface = &iface;
-  sc.main_fn = main_fn;
-  sc.pos_out = pos_out;
-  sc.flat_attrs = &flat_attrs;
-  if (!PlanCbufs(program, 0, r.vs_cbufs, sc.cbuf_bind)) return false;
+  if (!PlanCbufs(program, 0, r.vs_cbufs, sc.cbuf_bind, reachable.data()))
+    return false;
 
-  EmitBody(t, program, sc);
+  if (!force_fullscreen_vs) EmitBody(t, program, sc, reachable.data());
   r.num_params = sc.max_param;
+
+  if (debug_vertex_index) {
+    const Id vertex = t.m.Load(t.t_u, debug_vertex_index);
+    const Id x = t.SelectF(t.IsNonZero(t.And(vertex, t.U32(1))), t.F32(1.f),
+                           t.F32(-1.f));
+    const Id y = t.SelectF(t.IsNonZero(t.And(vertex, t.U32(2))), t.F32(-1.f),
+                           t.F32(1.f));
+    t.m.Store(pos_out, t.m.CompositeConstruct(
+                           t.t_v4, {x, y, t.F32(0.f), t.F32(1.f)}));
+  }
 
   // GL clip space (z in [-w,w]) -> Vulkan (z in [0,w]): z = (z + w) * 0.5.
   const Id p_out_f = t.m.TypePointer(spv::StorageClass::Output, t.t_f);
@@ -613,18 +681,21 @@ bool TranslatePs(const Program& program,
   // Color outputs (PsColorOut) are declared lazily per MRT target (location ==
   // target); PS inputs (PsInputVar) likewise as they are read.
   std::vector<Id> iface;
+  const std::vector<uint8_t> reachable = ComputeReachability(program);
   StageContext sc;
   sc.is_ps = true;
   sc.r = &r;
   sc.iface = &iface;
   sc.flat_attrs = &flat_attrs;
-  if (!PlanCbufs(program, r.vs_cbufs.size(), r.ps_cbufs, sc.cbuf_bind))
+  if (!PlanCbufs(program, r.vs_cbufs.size(), r.ps_cbufs, sc.cbuf_bind,
+                 reachable.data()))
     return false;
 
   // Sampler bindings: one per unique descriptor (shared plan with
   // TrackTextures). More unique samplers than the renderer's set-0 layout
   // provides cannot be expressed -- decline (the draw falls back).
-  const MimgBindingPlan mimg_plan = PlanMimgBindings(program);
+  const MimgBindingPlan mimg_plan =
+      PlanMimgBindings(program, reachable.data());
   if (mimg_plan.binding_srsrc.size() > StageContext::kMaxPsSamplers) {
     WarnUnsupported("mimg.binding-count",
                     static_cast<uint32_t>(mimg_plan.binding_srsrc.size()));
@@ -632,19 +703,28 @@ bool TranslatePs(const Program& program,
   }
   sc.mimg_plan = &mimg_plan;
   for (uint32_t i = 0; i < mimg_plan.binding_srsrc.size(); i++)
-    r.ps_texs.push_back({i, mimg_plan.binding_srsrc[i]});
+    r.ps_texs.push_back(
+        {i, mimg_plan.binding_srsrc[i], mimg_plan.binding_storage[i]});
 
+  if (UsesDsSwizzle(program, reachable.data())) EnableDsSwizzle(t, sc, iface);
+  const Id user_data = DeclareUserData(t);
   sc.main_fn = t.m.BeginFunction(t.t_void, t.t_fn);
+  SeedUserData(t, user_data);
 
   // A PS with no color export writes nothing to the color targets (hardware
   // semantics: only exports write; e.g. depth-only or buffer-store passes).
   // ps_mrt_mask stays 0 and the renderer masks every color attachment.
-  const bool has_color_export = std::any_of(
-      program.begin(), program.end(), [](const Inst& inst) {
-        return inst.enc == Enc::kExp && ((inst.raw[0] >> 4) & 0x3F) <= 7 &&
-               (inst.raw[0] & 0xF);
-      });
+  bool has_color_export = false;
+  for (uint32_t i = 0; i < program.size(); i++) {
+    const Inst& inst = program[i];
+    if (reachable[i] && inst.enc == Enc::kExp &&
+        ((inst.raw[0] >> 4) & 0x3F) <= 7 && (inst.raw[0] & 0xF)) {
+      has_color_export = true;
+      break;
+    }
+  }
 
+  static const bool force_white = std::getenv("DELTA_GPU_PSWHITE") != nullptr;
   const bool cfg = ForceCfg() || HasControlFlow(program);
   if (cfg && has_color_export) {
     // Default MRT0 to transparent so a fragment that never reaches an export
@@ -655,7 +735,7 @@ bool TranslatePs(const Program& program,
     sc.color_written_var =
         t.m.Variable(t.p_priv_u, spv::StorageClass::Private, t.m.ConstNull(t.t_u));
   }
-  EmitBody(t, program, sc);
+  if (!force_white) EmitBody(t, program, sc, reachable.data());
 
   if (sc.wrote_color && sc.color_written_var) {
     // GCN alpha-test/kill idiom (CFG path): control flow branches over the
@@ -673,6 +753,12 @@ bool TranslatePs(const Program& program,
       t.m.OpenBlock(after_kill);
     }
   }
+
+  // DELTA_GPU_PSWHITE: isolate VS/rasterization from fragment color math.
+  if (force_white && has_color_export)
+    t.m.Store(PsColorOut(t, sc, 0),
+              t.m.ConstComposite(t.t_v4, {t.F32(1.f), t.F32(1.f), t.F32(1.f),
+                                          t.F32(1.f)}));
 
   t.m.ReturnVoid();
   t.m.EndFunction();
@@ -886,6 +972,20 @@ std::vector<uint32_t> EmitRectListGeometry(
   return m.Assemble();
 }
 
+void DumpProgram(const char* tag, const Program& program) {
+  static const char* kEncNames[] = {"unk",  "sop1",   "sop2",  "sopk", "sopc",
+                                    "sopp", "smrd",   "vop1",  "vop2", "vop3",
+                                    "vopc", "vintrp", "ds",    "mubuf",
+                                    "mtbuf", "mimg",  "exp"};
+  std::fprintf(stderr, "[shdis] %s, %zu insts:\n", tag, program.size());
+  for (const Inst& inst : program)
+    std::fprintf(stderr, "[shdis]  pc=%u %s op=%#x w0=%#x w1=%#x\n", inst.pc,
+                 kEncNames[static_cast<int>(inst.enc) <= 16
+                               ? static_cast<int>(inst.enc)
+                               : 0],
+                 inst.opcode, inst.raw[0], inst.raw[1]);
+}
+
 // One-shot disassembly (DELTA_GPU_SHDIS): for the first branchy shaders, list
 // each instruction's encoding + opcode.
 void MaybeDumpBranchy(const char* tag, const Program& program) {
@@ -894,17 +994,24 @@ void MaybeDumpBranchy(const char* tag, const Program& program) {
   static int dumped = 0;
   if (!HasControlFlow(program) || dumped >= 2) return;
   dumped++;
-  static const char* kEncNames[] = {"unk",  "sop1",   "sop2",  "sopk", "sopc",
-                                    "sopp", "smrd",   "vop1",  "vop2", "vop3",
-                                    "vopc", "vintrp", "ds",    "mubuf",
-                                    "mtbuf", "mimg",  "exp"};
-  std::fprintf(stderr, "[shdis] %s branchy, %zu insts:\n", tag, program.size());
-  for (const Inst& inst : program)
-    std::fprintf(stderr, "[shdis]  pc=%u %s op=%#x w0=%#x w1=%#x\n", inst.pc,
-                 kEncNames[static_cast<int>(inst.enc) <= 16
-                               ? static_cast<int>(inst.enc)
-                               : 0],
-                 inst.opcode, inst.raw[0], inst.raw[1]);
+  std::fprintf(stderr, "[shdis] (branchy)\n");
+  DumpProgram(tag, program);
+}
+
+// DELTA_GPU_SHDIS_ADDR=hexaddr: dump the full instruction list of the shader
+// whose GCN code lives at that guest address, once, whatever its shape.
+void MaybeDumpByAddr(const char* tag, const void* code,
+                     const Program& program) {
+  static const uint64_t want = [] {
+    const char* e = std::getenv("DELTA_GPU_SHDIS_ADDR");
+    return e ? std::strtoull(e, nullptr, 16) : 0ull;
+  }();
+  if (!want || reinterpret_cast<uint64_t>(code) != want) return;
+  static bool dumped = false;
+  if (dumped) return;
+  dumped = true;
+  std::fprintf(stderr, "[shdis] @%p:\n", code);
+  DumpProgram(tag, program);
 }
 
 bool NoOpt() {
@@ -928,6 +1035,8 @@ bool RecompileSpirv(const uint32_t* vs_code, const uint32_t* ps_code,
   const Program ps_program = ps_code ? DecodeShader(ps_code, 4096) : Program{};
   MaybeDumpBranchy("VS", vs_program);
   if (!ps_program.empty()) MaybeDumpBranchy("PS", ps_program);
+  MaybeDumpByAddr("VS", vs_code, vs_program);
+  if (!ps_program.empty()) MaybeDumpByAddr("PS", ps_code, ps_program);
 
   // V_INTERP_MOV P0 reads a per-primitive parameter rather than a smoothly
   // interpolated value: represent those locations as flat varyings in both

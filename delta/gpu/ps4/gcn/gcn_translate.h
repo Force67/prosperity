@@ -28,6 +28,7 @@ struct ShaderAttr {
   uint32_t num_comps = 0;       // 1..4 (from the buffer_load_format opcode)
   uint32_t table_sgpr = 0;      // VS user-data dword of the vertex-table ptr
   uint32_t vbuf_dword_off = 0;  // dword offset of this attr's V# in the table
+  bool inline_descriptor = false;  // V# lives directly in VS user data
 };
 
 // A constant buffer a shader stage reads (s_buffer_load). Bound as a UBO.
@@ -42,6 +43,7 @@ struct ShaderCbuf {
 struct ShaderTex {
   uint32_t binding = 0;
   uint32_t ud_sgpr = 0;  // PS user-data dword index of the 8-dword T#
+  bool storage = false;  // image_store binding rather than a sampled image
 };
 
 struct Recompiled {

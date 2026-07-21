@@ -175,8 +175,11 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
     }
   }
   if (vk::available()) {
-    const uint32_t *vud = &g_regs[mmSPI_SHADER_USER_DATA_VS_0];
     vk::DrawInfo d;
+    const uint32_t *vud = &g_regs[mmSPI_SHADER_USER_DATA_VS_0];
+    std::memcpy(d.vsUserData, vud, sizeof(d.vsUserData));
+    std::memcpy(d.psUserData, &g_regs[mmSPI_SHADER_USER_DATA_PS_0],
+                sizeof(d.psUserData));
     d.primType = g_regs[mmVGT_PRIMITIVE_TYPE];
     d.instanceCount = g_numInstances;
     uint32_t autoVertexCount =
@@ -362,7 +365,7 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
         d.uvData = d.vertexData;
         d.uvStride = d.vertexStride;
         // All sampled textures (binding order), for multi-texture PS (Doom64 3D).
-        d.nTexs = static_cast<uint32_t>(texs.size() < 8 ? texs.size() : 8);
+        d.nTexs = static_cast<uint32_t>(texs.size() < 16 ? texs.size() : 16);
         for (uint32_t i = 0; i < d.nTexs; i++) {
           auto &dt = d.texs[i];
           const auto &t = texs[i];
@@ -375,6 +378,7 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
           std::memcpy(dt.sampler, t.sampler, sizeof(dt.sampler));
           dt.sampler_valid = t.sampler_valid; dt.arrayed = t.arrayed;
           dt.force_lod_zero = t.force_lod_zero; dt.depth_compare = t.depth_compare;
+          dt.storage = t.storage;
         }
         // d.uvOffset was derived from the fetch shader during vertex extraction.
         // DELTA_GPU_TEXFMT: dump sampled texture formats (dfmt/nfmt/tiling/dims) to
@@ -397,8 +401,27 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
       const char *e = std::getenv("DELTA_GPU_RECOMP");
       return !e || std::strcmp(e, "0") != 0;
     }();
+    // DELTA_GPU_SKIPSH=addr[,addr...] (hex): refuse to recompile draws whose
+    // VS or PS lives at one of these guest addresses — shader-hang bisection.
+    static const std::vector<uint64_t> skipSh = [] {
+      std::vector<uint64_t> v;
+      if (const char *e = std::getenv("DELTA_GPU_SKIPSH"))
+        for (const char *p = e; *p;) {
+          char *end;
+          const uint64_t a = std::strtoull(p, &end, 16);
+          if (end == p) break;
+          v.push_back(a);
+          p = *end == ',' ? end + 1 : end;
+        }
+      return v;
+    }();
+    const bool shSkipped =
+        !skipSh.empty() &&
+        (std::find(skipSh.begin(), skipSh.end(), vsA) != skipSh.end() ||
+         std::find(skipSh.begin(), skipSh.end(), psA) != skipSh.end());
     const char *recompStatus = recompOn ? "bad-address" : "disabled";
-    if (recompOn && vsA >= 0x1000000000ull && vsA < 0x20000000000ull &&
+    if (shSkipped) recompStatus = "skipsh";
+    if (!shSkipped && recompOn && vsA >= 0x1000000000ull && vsA < 0x20000000000ull &&
         (!psA || (psA >= 0x1000000000ull && psA < 0x20000000000ull))) {
       // Attribute translation depends on the fetch shader as well as the VS/PS code.
       // Keying only by VS/PS can reuse an attributed plan for a procedural draw (or
@@ -416,19 +439,50 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
       recompStatus = rc.ok ? "bad-attrs" : "rejected";
       if (rc.ok) {
         const uint32_t *vud2 = &g_regs[mmSPI_SHADER_USER_DATA_VS_0];
-        uint64_t base0 = 0;
+        gcn::VBuffer attrBuffers[8];
+        uint32_t attrCount = 0;
+        uint64_t base0 = UINT64_MAX;
         bool good = true;
         for (size_t i = 0; i < rc.attrs.size() && i < 8; i++) {
           auto &a = rc.attrs[i];
-          if (a.table_sgpr + 1 >= 16) { good = false; break; }
-          uint64_t tbl = (static_cast<uint64_t>(vud2[a.table_sgpr + 1] & 0xFFFF) << 32) | vud2[a.table_sgpr];
-          if (tbl < 0x1000000000ull || tbl >= 0x20000000000ull) { good = false; break; }
-          auto vb = gcn::DecodeVBuffer(reinterpret_cast<const uint32_t *>(tbl + a.vbuf_dword_off * 4));
+          if (a.table_sgpr + (a.inline_descriptor ? 3 : 1) >= 16) {
+            good = false;
+            break;
+          }
+          gcn::VBuffer vb;
+          if (a.inline_descriptor) {
+            vb = gcn::DecodeVBuffer(&vud2[a.table_sgpr]);
+          } else {
+            uint64_t tbl =
+                (static_cast<uint64_t>(vud2[a.table_sgpr + 1] & 0xFFFF) << 32) |
+                vud2[a.table_sgpr];
+            if (tbl < 0x1000000000ull || tbl >= 0x20000000000ull) {
+              good = false;
+              break;
+            }
+            vb = gcn::DecodeVBuffer(reinterpret_cast<const uint32_t *>(
+                tbl + a.vbuf_dword_off * 4));
+          }
           if (vb.base < 0x1000000000ull || vb.base >= 0x20000000000ull || !vb.stride) { good = false; break; }
-          if (i == 0) { base0 = vb.base; d.vertexData = reinterpret_cast<const void *>(vb.base);
-            d.vertexStride = vb.stride; d.vertexCount = vb.num_records; }
-          uint32_t off = (vb.base >= base0) ? (uint32_t)(vb.base - base0) : 0;
-          d.vattrs[d.nvattrs++] = {a.location, off, a.num_comps, vb.dfmt, vb.nfmt};
+          attrBuffers[attrCount++] = vb;
+          base0 = std::min(base0, vb.base);
+        }
+        if (good && attrCount) {
+          d.vertexData = reinterpret_cast<const void *>(base0);
+          d.vertexStride = attrBuffers[0].stride;
+          d.vertexCount = attrBuffers[0].num_records;
+          for (uint32_t i = 0; i < attrCount; i++) {
+            const auto &a = rc.attrs[i];
+            const auto &vb = attrBuffers[i];
+            const uint64_t offset = vb.base - base0;
+            if (vb.stride != d.vertexStride || offset >= d.vertexStride) {
+              good = false;
+              break;
+            }
+            d.vertexCount = std::min(d.vertexCount, vb.num_records);
+            d.vattrs[d.nvattrs++] = {a.location, static_cast<uint32_t>(offset),
+                                     a.num_comps, vb.dfmt, vb.nfmt};
+          }
         }
         // Resolve every cbuffer V# the emitted VS/PS reads. Bindings are assigned by
         // the translator and shared across both stages in descriptor set 1.
@@ -1077,6 +1131,7 @@ void handleDispatch(const uint32_t *body, uint32_t count) {
            utl::isMemoryRangeMapped(reinterpret_cast<const void *>(a), n);
   };
   constexpr uint64_t kMaxRes = 256ull * 1024 * 1024;  // sanity cap per storage buffer
+  constexpr uint64_t kMaxUnboundedBuffer = 16ull * 1024 * 1024;
   vk::ComputeInfo ci;
   ci.csAddr = csKey;
   ci.groups[0] = dimX; ci.groups[1] = dimY; ci.groups[2] = dimZ;
@@ -1091,17 +1146,21 @@ void handleDispatch(const uint32_t *body, uint32_t count) {
       tracedCsResources.insert(csAddr).second;
   bool resOk = true;
   for (auto &r : rc.resources) {
-    if (r.binding >= resolved.size() || !resolved[r.binding].valid) {
+    const bool resourceResolved =
+        r.binding < resolved.size() && resolved[r.binding].valid;
+    if (!resourceResolved) {
       if (traceCsResources) {
         std::fprintf(stderr,
-                     "[csres] cs=%#lx bind=%u kind=%u s%u pc=%#x unresolved\n",
+                     "[csres] cs=%#lx bind=%u kind=%u s%u pc=%#x unresolved; "
+                     "using dummy\n",
                      (unsigned long)csAddr, r.binding, r.kind, r.base_sgpr,
                      r.use_pc);
       }
-      resOk = false;
-      break;
     }
-    const uint32_t *descriptor = resolved[r.binding].descriptor;
+    static constexpr uint32_t nullDescriptor[8] = {};
+    const uint32_t *descriptor = resourceResolved
+                                     ? resolved[r.binding].descriptor
+                                     : nullDescriptor;
     uint64_t base = 0, size = 0, guestSize = 0;
     gcn::TImage image;
     bool imageStaging = false;
@@ -1170,11 +1229,31 @@ void handleDispatch(const uint32_t *body, uint32_t count) {
       base = (static_cast<uint64_t>(descriptor[1] & 0xFFFF) << 32) |
              descriptor[0];
       size = r.min_bytes;
+      if (!guestRange(base, 1)) {
+        zeroFill = true;
+        base = 0;
+        size = std::max<uint64_t>(size, 16);
+      }
     } else {                    // buffer V#: stride*num_records, else the min hint
       gcn::VBuffer v = gcn::DecodeVBuffer(descriptor);
       base = v.base;
       size = v.stride ? (uint64_t)v.stride * v.num_records : v.num_records;
       if (size < r.min_bytes) size = r.min_bytes;
+      if (!guestRange(base, 1)) {
+        zeroFill = true;
+        base = 0;
+        size = 16;
+      } else if (size > kMaxRes) {
+        const uint64_t declaredSize = size;
+        size = utl::mappedMemoryPrefix(
+            reinterpret_cast<const void *>(base), kMaxUnboundedBuffer);
+        if (traceCsResources)
+          std::fprintf(stderr,
+                       "[csres] cs=%#lx bind=%u windowed buffer declared=%#lx "
+                       "mapped=%#lx\n",
+                       (unsigned long)csAddr, r.binding,
+                       (unsigned long)declaredSize, (unsigned long)size);
+      }
     }
     if (!guestSize && !zeroFill) guestSize = size;
     if (traceCsResources) {
@@ -1185,7 +1264,7 @@ void handleDispatch(const uint32_t *body, uint32_t count) {
                    r.use_pc, (unsigned long)base, (unsigned long)size,
                    r.written ? 1 : 0);
     }
-    if (size > kMaxRes || guestSize > kMaxRes ||
+    if (size < r.min_bytes || size > kMaxRes || guestSize > kMaxRes ||
         (!zeroFill && !guestRange(base, guestSize)) ||
         ci.nres >= gcn::kMaxCsResources) {
       if (traceCsResources)

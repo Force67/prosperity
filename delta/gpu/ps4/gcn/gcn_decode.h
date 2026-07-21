@@ -65,6 +65,11 @@ uint32_t CodeLength(const uint32_t* code, uint32_t max_dwords);
 // sub-shader), which never over-reads into the footer/padding.
 Program DecodeShader(const uint32_t* code, uint32_t max_dwords);
 
+// Mark instructions reachable from the entry block. Shader binaries may
+// contain footer padding after an early s_endpgm; decoded dead data must not
+// influence translation or resource planning.
+std::vector<uint8_t> ComputeReachability(const Program& program);
+
 // Shared, cached DecodeShader for per-draw analysis (resource tracking runs on
 // every draw; decoding 4K dwords each time is measurable). The cache key is the
 // guest address; entries revalidate against a hash of the code so an in-place

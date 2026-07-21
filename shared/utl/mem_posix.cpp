@@ -83,6 +83,21 @@ bool isMemoryRangeMapped(const void *addr, size_t len) {
                    residency.data()) == 0;
 }
 
+size_t mappedMemoryPrefix(const void *addr, size_t maxLen) {
+  if (!addr || !maxLen) return 0;
+  size_t mapped = 0, remaining = maxLen;
+  while (remaining) {
+    const size_t probe = mapped + remaining / 2 + remaining % 2;
+    if (isMemoryRangeMapped(addr, probe)) {
+      mapped = probe;
+      remaining = maxLen - mapped;
+    } else {
+      remaining = probe - mapped - 1;
+    }
+  }
+  return mapped;
+}
+
 size_t getAvailableMem() {
   long pages = ::sysconf(_SC_PHYS_PAGES);
   long page_size = ::sysconf(_SC_PAGE_SIZE);
