@@ -166,17 +166,28 @@ struct DrawInfo {
 // storage buffer, runs the dispatch, and copies the written ranges back to guest
 // memory (where the graphics texture path re-reads them).
 struct ComputeInfo {
+  static constexpr uint32_t kMaxResources = 32;
+
   uint64_t csAddr = 0;             // pipeline cache key
   uint32_t groups[3] = {1, 1, 1};  // workgroup counts (DISPATCH_DIRECT dims)
   const gcn::RecompiledCs *recomp = nullptr;
   uint32_t userData[16] = {};      // COMPUTE_USER_DATA_0..15 (push constants)
   struct Res {
     uint64_t base = 0;    // guest address the storage buffer aliases
-    uint64_t size = 0;    // bytes staged
+    uint64_t size = 0;    // bytes staged in linear SSBO layout
+    uint64_t guestSize = 0;  // physical guest bytes (same as size when linear)
     uint32_t binding = 0;
     bool written = false;  // copy back to guest after the dispatch
+    bool zeroFill = false;  // inactive/null descriptor: bind zeroed dummy storage
+    bool imageStaging = false;  // detile and/or expand compact texels
+    uint32_t width = 0, height = 0, pitch = 0;
+    uint32_t layers = 0, mipLevels = 0, tilingIdx = 0;
+    uint32_t elemBytes = 4;
+    uint32_t stageElemBytes = 4;
+    uint32_t dfmt = 0;
+    bool pow2Pad = false;
   };
-  Res res[8];
+  Res res[kMaxResources];
   uint32_t nres = 0;
 };
 

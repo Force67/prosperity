@@ -125,7 +125,6 @@ static void win32PostInit() {
 #endif
 
 EXPORT int dcoreMain(int argc, char **argv) {
-  cpu::earlyInit(); // segregate guest/JIT memory before anything maps (FEX path)
   utl::createLogger(true);
   // Bring the render Vulkan device up NOW, before any guest memory is mapped:
   // initialized lazily (first Gnm submit), the NVIDIA driver fails its
@@ -134,6 +133,7 @@ EXPORT int dcoreMain(int argc, char **argv) {
   // back to the llvmpipe software rasteriser -- ~30 ms/frame instead of a real
   // GPU. Harmless when only llvmpipe exists (same device either way).
   gpu::vk::init();
+  cpu::earlyInit(); // segregate guest/JIT memory before guest modules map
 
   if (!verifyViablity())
     return -1;

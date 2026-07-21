@@ -6,10 +6,14 @@
 
 #include "gcn_resource.h"
 
+#include "gcn_translate.h"
+
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+
+#include <utl/mem.h>
 
 namespace gpu::gcn {
 namespace {
@@ -21,7 +25,8 @@ constexpr uint64_t kGuestHi = 0x20000000000ull;
 
 bool GuestRange(uint64_t address, uint64_t size) {
   return size && address >= kGuestLo && address < kGuestHi &&
-         size <= kGuestHi - address;
+         size <= kGuestHi - address &&
+         utl::isMemoryRangeMapped(reinterpret_cast<const void *>(address), size);
 }
 
 // SMRD operand fields (GFX7).
@@ -110,6 +115,33 @@ struct ScalarEval {
   void Clear(uint32_t s) {
     if (s < kRegs) known[s] = false;
   }
+  bool Source(uint32_t field, uint32_t literal, uint32_t& value) const {
+    if (field <= 127) {
+      if (!known[field]) return false;
+      value = sgpr[field];
+      return true;
+    }
+    if (field == 128) value = 0;
+    else if (field >= 129 && field <= 192) value = field - 128;
+    else if (field >= 193 && field <= 208)
+      value = static_cast<uint32_t>(-static_cast<int32_t>(field - 192));
+    else if (field == 240) value = 0x3f000000u;
+    else if (field == 241) value = 0xbf000000u;
+    else if (field == 242) value = 0x3f800000u;
+    else if (field == 243) value = 0xbf800000u;
+    else if (field == 244) value = 0x40000000u;
+    else if (field == 245) value = 0xc0000000u;
+    else if (field == 246) value = 0x40800000u;
+    else if (field == 247) value = 0xc0800000u;
+    else if (field == 255) value = literal;
+    else return false;
+    return true;
+  }
+  bool SourceHi(uint32_t field, uint32_t& value) const {
+    if (field <= 126) return Source(field + 1, 0, value);
+    value = 0;
+    return true;
+  }
 
   // Advance the register file across one instruction. Only scalar moves and
   // pointer-relative scalar loads (the descriptor-chain ops) mutate it; every
@@ -121,14 +153,52 @@ struct ScalarEval {
       const uint32_t w = inst.raw[0];
       const uint32_t sdst = (w >> 16) & 0x7F, ssrc0 = w & 0xFF;
       if (inst.opcode == 0x03) {  // s_mov_b32: stage a pointer via a scalar move
-        if (ssrc0 < kRegs && known[ssrc0]) Set(sdst, sgpr[ssrc0]);
+        uint32_t value;
+        if (Source(ssrc0, inst.literal, value)) Set(sdst, value);
         else Clear(sdst);
       } else if (inst.opcode == 0x04) {  // s_mov_b64
-        if (ssrc0 + 1 < kRegs && known[ssrc0] && known[ssrc0 + 1]) {
-          Set(sdst, sgpr[ssrc0]);
-          Set(sdst + 1, sgpr[ssrc0 + 1]);
+        uint32_t lo, hi;
+        const bool source_known = Source(ssrc0, inst.literal, lo) &&
+                                  SourceHi(ssrc0, hi);
+        if (source_known) {
+          Set(sdst, lo);
+          Set(sdst + 1, hi);
         } else { Clear(sdst); Clear(sdst + 1); }
       }
+      return;
+    }
+    if (inst.enc == Enc::kSop2) {
+      const uint32_t w = inst.raw[0], op = inst.opcode;
+      const uint32_t sdst = (w >> 16) & 0x7F;
+      uint32_t a, b;
+      const bool inputs_known = Source(w & 0xFF, inst.literal, a) &&
+                                Source((w >> 8) & 0xFF, inst.literal, b);
+      if (!inputs_known) {
+        Clear(sdst);
+        return;
+      }
+      uint32_t value;
+      switch (op) {
+        case 0x00: case 0x02: value = a + b; break;
+        case 0x01: case 0x03: value = a - b; break;
+        case 0x0e: value = a & b; break;
+        case 0x10: value = a | b; break;
+        case 0x12: value = a ^ b; break;
+        case 0x14: value = a & ~b; break;
+        case 0x16: value = a | ~b; break;
+        case 0x18: value = ~(a & b); break;
+        case 0x1a: value = ~(a | b); break;
+        case 0x1c: value = ~(a ^ b); break;
+        case 0x1e: value = a << (b & 31); break;
+        case 0x20: value = a >> (b & 31); break;
+        case 0x22: value = static_cast<uint32_t>(
+            static_cast<int32_t>(a) >> (b & 31)); break;
+        case 0x26: value = a * b; break;
+        default:
+          Clear(sdst);
+          return;
+      }
+      Set(sdst, value);
       return;
     }
     if (inst.enc != Enc::kSmrd) return;
@@ -136,21 +206,26 @@ struct ScalarEval {
     if (s.op > 0x04) return;  // s_load_dword..dwordx16 only
     const uint32_t dwords = 1u << s.op;
     const uint32_t base = s.sbase * 2;
-    // A load rewrites its destination SGPRs even if it cannot be resolved;
-    // invalidate first so a later consumer does not read stale values.
-    for (uint32_t i = 0; i < dwords; i++) Clear(s.sdst + i);
-    if (!AllKnown(base, 2)) return;
-    const uint64_t table = Ptr(base);
+    const bool base_known = AllKnown(base, 2);
+    const uint64_t table = base_known ? Ptr(base) : 0;
+    bool offset_known = true;
     uint64_t byte_off = 0;
     if (s.imm) {
       byte_off = static_cast<uint64_t>(s.offset) * 4;  // dword offset field
+    } else if (s.offset == 0xFF && inst.has_literal) {
+      byte_off = inst.literal;
     } else if (s.offset < kRegs && known[s.offset]) {
       byte_off = sgpr[s.offset];  // SOFFSET SGPR carries a byte offset
     } else {
-      return;
+      offset_known = false;
     }
-    if (!GuestRange(table, byte_off + static_cast<uint64_t>(dwords) * 4)) return;
+    // A load rewrites its destination SGPRs even if it cannot be resolved;
+    // snapshot its inputs before invalidating an overlapping destination.
+    for (uint32_t i = 0; i < dwords; i++) Clear(s.sdst + i);
+    if (!base_known || !offset_known) return;
+    if (byte_off > UINT64_MAX - table) return;
     const uint64_t address = table + byte_off;
+    if (!GuestRange(address, static_cast<uint64_t>(dwords) * 4)) return;
     const uint32_t* src = reinterpret_cast<const uint32_t*>(address);
     for (uint32_t i = 0; i < dwords; i++) Set(s.sdst + i, src[i]);
     if (trace)
@@ -329,7 +404,10 @@ std::vector<VBuffer> TrackVertexBuffers(const Program& fetch_program,
     if (base_sgpr + 1 >= 16) continue;
     const uint64_t table = UserDataPointer(vs_user_data, base_sgpr);
     if (!GuestRange(table, 16)) continue;
-    const uint32_t byte_off = s.imm ? s.offset * 4 : 0;
+    const uint32_t byte_off = s.imm ? s.offset * 4
+                                    : (s.offset == 0xFF && inst.has_literal
+                                           ? inst.literal
+                                           : 0);
     const VBuffer v =
         DecodeVBuffer(reinterpret_cast<const uint32_t*>(table + byte_off));
     if (v.base >= kGuestLo && v.base < kGuestHi && v.stride &&
@@ -467,6 +545,31 @@ std::unordered_map<uint32_t, VBuffer> ResolveCbuffers(
       std::fprintf(stderr,
                    "[eud] cbuf s%u -> base=%#lx stride=%u nrec=%u\n", base,
                    static_cast<unsigned long>(v.base), v.stride, v.num_records);
+  }
+  return result;
+}
+
+std::vector<ResolvedCsResource> ResolveCsResources(
+    const Program& program, const RecompiledCs& plan,
+    const uint32_t* user_data) {
+  std::vector<ResolvedCsResource> result(plan.resources.size());
+  if (!user_data) return result;
+
+  ScalarEval eval(user_data);
+  for (const Inst& inst : program) {
+    // Capture before Step(): an s_load may use a pointer in the same SGPR range
+    // it overwrites with the loaded descriptor.
+    for (const CsResource& resource : plan.resources) {
+      if (resource.use_pc != inst.pc || resource.binding >= result.size())
+        continue;
+      const uint32_t dwords = resource.kind == 1 ? 8 : resource.kind == 2 ? 2 : 4;
+      if (!eval.AllKnown(resource.base_sgpr, dwords)) continue;
+      ResolvedCsResource& resolved = result[resource.binding];
+      std::memcpy(resolved.descriptor, &eval.sgpr[resource.base_sgpr],
+                  dwords * sizeof(uint32_t));
+      resolved.valid = true;
+    }
+    eval.Step(inst);
   }
   return result;
 }

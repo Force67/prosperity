@@ -73,7 +73,8 @@ struct Translator {
     t_v3 = m.TypeVec(t_f, 3);
     t_v4 = m.TypeVec(t_f, 4);
     p_priv_u = m.TypePointer(spv::StorageClass::Private, t_u);
-    const Id arr_sg = m.TypeArray(t_u, 128), arr_vg = m.TypeArray(t_u, 256);
+    // A T# can start at s124 and extend through s131.
+    const Id arr_sg = m.TypeArray(t_u, 136), arr_vg = m.TypeArray(t_u, 256);
     sgpr = m.Variable(m.TypePointer(spv::StorageClass::Private, arr_sg),
                       spv::StorageClass::Private, m.ConstNull(arr_sg));
     vgpr = m.Variable(m.TypePointer(spv::StorageClass::Private, arr_vg),
@@ -297,10 +298,11 @@ struct StageContext {
   std::unordered_map<uint32_t, uint32_t> cbuf_bind;  // V# SGPR -> set-1 binding
 
   // Compute: storage buffers modelling the guest memory the CS reads/writes.
-  std::unordered_map<uint32_t, uint32_t> cs_bind;  // base SGPR -> binding
+  std::unordered_map<uint32_t, uint32_t> cs_bind;  // instruction pc -> binding
   std::vector<Id> cs_ssbo;                         // binding -> SSBO variable
   Id lds_var = 0;          // Workgroup-storage uint array (0 = no LDS)
   uint32_t lds_dwords = 0;  // its length
+  Id subgroup_local_id = 0;  // SubgroupLocalInvocationId for DS swizzles
   bool cs_unsupported = false;  // op the compute backend can't model
 };
 

@@ -18,6 +18,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <limits>
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -32,6 +33,8 @@
 
 namespace gpu::vk {
 namespace {
+
+static_assert(ComputeInfo::kMaxResources == gcn::kMaxCsResources);
 
 #define VKOK(x)                                                                \
   do {                                                                         \
@@ -57,6 +60,8 @@ struct State {
   VkCommandPool pool = VK_NULL_HANDLE;
   VkCommandBuffer cmd = VK_NULL_HANDLE;
   VkFence fence = VK_NULL_HANDLE;
+  uint32_t maxCsResources = 0;
+  VkDeviceSize maxStorageBufferRange = 0;
 
   VkFormat rtFormat = VK_FORMAT_B8G8R8A8_UNORM;
 
@@ -745,6 +750,10 @@ bool createDevice() {
 
   VkPhysicalDeviceProperties props;
   vkGetPhysicalDeviceProperties(g.phys, &props);
+  g.maxCsResources = std::min(
+      {gcn::kMaxCsResources, props.limits.maxPerStageDescriptorStorageBuffers,
+       props.limits.maxDescriptorSetStorageBuffers});
+  g.maxStorageBufferRange = props.limits.maxStorageBufferRange;
   std::fprintf(stderr, "[gpuvk] device: %s\n", props.deviceName);
 
   // Recomp cbuffer ring + dynamic-UBO descriptors (set 1) + empty set-0 layout.
@@ -2431,7 +2440,7 @@ CsPipe *getCsPipe(const ComputeInfo &ci) {
   if (it != g_csPipes.end())
     return it->second.nres == ci.nres ? &it->second : nullptr;
   CsPipe cp; cp.nres = ci.nres;
-  VkDescriptorSetLayoutBinding binds[8];
+  VkDescriptorSetLayoutBinding binds[ComputeInfo::kMaxResources];
   for (uint32_t i = 0; i < ci.nres; i++)
     binds[i] = {i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
   VkDescriptorSetLayoutCreateInfo sl{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
@@ -2487,9 +2496,169 @@ struct CsStage {
   void *map = nullptr;
   VkDeviceSize cap = 0;
 };
-CsStage g_csStage[8];
+CsStage g_csStage[ComputeInfo::kMaxResources];
 VkDescriptorPool g_csDescPool = VK_NULL_HANDLE;
 VkCommandBuffer g_csCmd = VK_NULL_HANDLE;
+
+bool buildCsImageLayouts(const ComputeInfo::Res &res,
+                         gcn::TextureLayout32 &tiled,
+                         gcn::TextureLayout32 &linear) {
+  const uint32_t stageTiling = res.tilingIdx == 31 ? 31 : 8;
+  return res.imageStaging &&
+         gcn::BuildTextureLayout32(tiled, res.width, res.height, res.pitch,
+                                   res.layers, res.mipLevels, res.tilingIdx,
+                                   res.pow2Pad, res.elemBytes) &&
+         gcn::BuildTextureLayout32(linear, res.width, res.height, res.pitch,
+                                   res.layers, res.mipLevels, stageTiling,
+                                   res.pow2Pad, res.stageElemBytes) &&
+         tiled.size == res.guestSize && linear.size == res.size;
+}
+
+float unpackUnsignedFloat(uint32_t value, uint32_t mantissaBits) {
+  const uint32_t mantissaMask = (1u << mantissaBits) - 1;
+  const uint32_t mantissa = value & mantissaMask;
+  const uint32_t exponent = (value >> mantissaBits) & 0x1F;
+  if (!exponent)
+    return std::ldexp(static_cast<float>(mantissa), 1 - 15 - mantissaBits);
+  if (exponent == 0x1F)
+    return mantissa ? std::numeric_limits<float>::quiet_NaN()
+                    : std::numeric_limits<float>::infinity();
+  return std::ldexp(1.f + static_cast<float>(mantissa) /
+                              static_cast<float>(1u << mantissaBits),
+                    static_cast<int>(exponent) - 15);
+}
+
+uint32_t packUnsignedFloat(float value, uint32_t mantissaBits) {
+  if (std::isnan(value)) return (0x1Fu << mantissaBits) | 1u;
+  if (value <= 0.f) return 0;
+  if (std::isinf(value)) return 0x1Fu << mantissaBits;
+  int exponent;
+  const float fraction = std::frexp(value, &exponent);
+  int targetExponent = exponent - 1 + 15;
+  if (targetExponent <= 0) {
+    const long mantissa =
+        std::lround(std::ldexp(value, 14 + mantissaBits));
+    return static_cast<uint32_t>(std::clamp<long>(
+        mantissa, 0, static_cast<long>(1u << mantissaBits)));
+  }
+  if (targetExponent >= 0x1F) return 0x1Fu << mantissaBits;
+  long mantissa = std::lround(
+      (fraction * 2.f - 1.f) * static_cast<float>(1u << mantissaBits));
+  if (mantissa == static_cast<long>(1u << mantissaBits)) {
+    mantissa = 0;
+    if (++targetExponent >= 0x1F) return 0x1Fu << mantissaBits;
+  }
+  return (static_cast<uint32_t>(targetExponent) << mantissaBits) |
+         static_cast<uint32_t>(mantissa);
+}
+
+void unpackR11G11B10(uint32_t packed, uint8_t *dst) {
+  const float value[4] = {
+      unpackUnsignedFloat(packed, 6),
+      unpackUnsignedFloat(packed >> 11, 6),
+      unpackUnsignedFloat(packed >> 22, 5),
+      1.f,
+  };
+  std::memcpy(dst, value, sizeof(value));
+}
+
+uint32_t packR11G11B10(const uint8_t *src) {
+  float value[4];
+  std::memcpy(value, src, sizeof(value));
+  return packUnsignedFloat(value[0], 6) |
+         (packUnsignedFloat(value[1], 6) << 11) |
+         (packUnsignedFloat(value[2], 5) << 22);
+}
+
+bool stageCsImage(const ComputeInfo::Res &res, void *dst) {
+  gcn::TextureLayout32 tiled, linear;
+  if (!buildCsImageLayouts(res, tiled, linear)) return false;
+  std::memset(dst, 0, res.size);
+  std::vector<uint8_t> tight(static_cast<size_t>(res.width) * res.height *
+                             res.elemBytes);
+  for (uint32_t mip = 0; mip < tiled.mip_levels; mip++) {
+    const auto &srcLevel = tiled.mips[mip];
+    const auto &dstLevel = linear.mips[mip];
+    for (uint32_t layer = 0; layer < tiled.layers; layer++) {
+      if (!gcn::DetileTextureMip32(reinterpret_cast<const void *>(res.base),
+                                   tight.data(), tiled, mip, layer))
+        return false;
+      uint8_t *levelDst = static_cast<uint8_t *>(dst) + dstLevel.offset +
+          static_cast<uint64_t>(layer) * dstLevel.pitch *
+              dstLevel.stored_height * res.stageElemBytes;
+      for (uint32_t y = 0; y < srcLevel.height; y++) {
+        uint8_t *dstRow = levelDst + static_cast<size_t>(y) * dstLevel.pitch *
+                                         res.stageElemBytes;
+        const uint8_t *srcRow =
+            tight.data() + static_cast<size_t>(y) * srcLevel.width * res.elemBytes;
+        if (res.dfmt == 6) {
+          for (uint32_t x = 0; x < srcLevel.width; x++) {
+            uint32_t packed;
+            std::memcpy(&packed, srcRow + static_cast<size_t>(x) * 4, 4);
+            unpackR11G11B10(packed,
+                            dstRow + static_cast<size_t>(x) * 16);
+          }
+        } else if (res.elemBytes == res.stageElemBytes) {
+          std::memcpy(dstRow, srcRow,
+                      static_cast<size_t>(srcLevel.width) * res.elemBytes);
+        } else {
+          for (uint32_t x = 0; x < srcLevel.width; x++) {
+            uint16_t value;
+            std::memcpy(&value, srcRow + static_cast<size_t>(x) * 2, 2);
+            const uint32_t expanded = value;
+            std::memcpy(dstRow + static_cast<size_t>(x) * 4, &expanded, 4);
+          }
+        }
+      }
+    }
+  }
+  return true;
+}
+
+bool writebackCsImage(const ComputeInfo::Res &res, const void *src) {
+  gcn::TextureLayout32 tiled, linear;
+  if (!buildCsImageLayouts(res, tiled, linear)) return false;
+  std::vector<uint8_t> tight(static_cast<size_t>(res.width) * res.height *
+                             res.elemBytes);
+  for (uint32_t mip = 0; mip < tiled.mip_levels; mip++) {
+    const auto &dstLevel = tiled.mips[mip];
+    const auto &srcLevel = linear.mips[mip];
+    for (uint32_t layer = 0; layer < tiled.layers; layer++) {
+      const uint8_t *levelSrc = static_cast<const uint8_t *>(src) +
+          srcLevel.offset + static_cast<uint64_t>(layer) * srcLevel.pitch *
+                                srcLevel.stored_height * res.stageElemBytes;
+      for (uint32_t y = 0; y < dstLevel.height; y++) {
+        uint8_t *dstRow = tight.data() +
+            static_cast<size_t>(y) * dstLevel.width * res.elemBytes;
+        const uint8_t *srcRow =
+            levelSrc + static_cast<size_t>(y) * srcLevel.pitch *
+                           res.stageElemBytes;
+        if (res.dfmt == 6) {
+          for (uint32_t x = 0; x < dstLevel.width; x++) {
+            const uint32_t packed =
+                packR11G11B10(srcRow + static_cast<size_t>(x) * 16);
+            std::memcpy(dstRow + static_cast<size_t>(x) * 4, &packed, 4);
+          }
+        } else if (res.elemBytes == res.stageElemBytes) {
+          std::memcpy(dstRow, srcRow,
+                      static_cast<size_t>(dstLevel.width) * res.elemBytes);
+        } else {
+          for (uint32_t x = 0; x < dstLevel.width; x++) {
+            uint32_t expanded;
+            std::memcpy(&expanded, srcRow + static_cast<size_t>(x) * 4, 4);
+            const uint16_t value = static_cast<uint16_t>(expanded);
+            std::memcpy(dstRow + static_cast<size_t>(x) * 2, &value, 2);
+          }
+        }
+      }
+      if (!gcn::RetileTextureMip32(tight.data(),
+                                   reinterpret_cast<void *>(res.base), tiled,
+                                   mip, layer))
+        return false;
+    }
+  }
+  return true;
+}
 
 // Ensure staging slot i can hold `size` bytes (grow-on-demand, kept mapped).
 bool csEnsureStage(uint32_t i, VkDeviceSize size) {
@@ -2520,7 +2689,11 @@ bool csEnsureStage(uint32_t i, VkDeviceSize size) {
 }
 
 bool dispatch(const ComputeInfo &ci) {
-  if (!g.ready || !ci.recomp || !ci.recomp->ok || !ci.nres || ci.nres > 8) return false;
+  if (!g.ready || !ci.recomp || !ci.recomp->ok || !ci.nres ||
+      ci.nres > g.maxCsResources)
+    return false;
+  for (uint32_t i = 0; i < ci.nres; i++)
+    if (ci.res[i].size > g.maxStorageBufferRange) return false;
   CsPipe *cp = getCsPipe(ci);
   if (!cp) return false;
   static const bool verbose = std::getenv("DELTA_GPU_CSGPU_VERBOSE") != nullptr;
@@ -2532,18 +2705,30 @@ bool dispatch(const ComputeInfo &ci) {
     if (vkAllocateCommandBuffers(g.device, &ca, &g_csCmd) != VK_SUCCESS) { g_csCmd = VK_NULL_HANDLE; return false; }
   }
   if (g_csDescPool == VK_NULL_HANDLE) {
-    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 8};
+    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                            ComputeInfo::kMaxResources};
     VkDescriptorPoolCreateInfo pci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     pci.maxSets = 1; pci.poolSizeCount = 1; pci.pPoolSizes = &ps;
     if (vkCreateDescriptorPool(g.device, &pci, nullptr, &g_csDescPool) != VK_SUCCESS) { g_csDescPool = VK_NULL_HANDLE; return false; }
   }
 
   // Stage each resource's guest range into its reused storage buffer.
-  VkDeviceSize sz[8];
+  VkDeviceSize sz[ComputeInfo::kMaxResources];
   for (uint32_t i = 0; i < ci.nres; i++) {
     sz[i] = ci.res[i].size ? ((ci.res[i].size + 3) & ~VkDeviceSize(3)) : 4;
     if (!csEnsureStage(i, sz[i])) return false;
-    std::memcpy(g_csStage[i].map, reinterpret_cast<const void *>(ci.res[i].base), ci.res[i].size);
+    if (ci.res[i].zeroFill) {
+      std::memset(g_csStage[i].map, 0, sz[i]);
+    } else if (ci.res[i].imageStaging) {
+      if (!stageCsImage(ci.res[i], g_csStage[i].map)) return false;
+    } else {
+      std::memcpy(g_csStage[i].map,
+                  reinterpret_cast<const void *>(ci.res[i].base),
+                  ci.res[i].size);
+    }
+    if (!ci.res[i].imageStaging && sz[i] > ci.res[i].size)
+      std::memset(static_cast<uint8_t *>(g_csStage[i].map) + ci.res[i].size, 0,
+                  sz[i] - ci.res[i].size);
   }
 
   // Descriptor set binding the storage buffers (pool reset each dispatch).
@@ -2552,7 +2737,8 @@ bool dispatch(const ComputeInfo &ci) {
   VkDescriptorSetAllocateInfo da{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
   da.descriptorPool = g_csDescPool; da.descriptorSetCount = 1; da.pSetLayouts = &cp->setLayout;
   if (vkAllocateDescriptorSets(g.device, &da, &set) != VK_SUCCESS) return false;
-  VkDescriptorBufferInfo dbi[8]; VkWriteDescriptorSet wr[8];
+  VkDescriptorBufferInfo dbi[ComputeInfo::kMaxResources];
+  VkWriteDescriptorSet wr[ComputeInfo::kMaxResources];
   for (uint32_t i = 0; i < ci.nres; i++) {
     dbi[i] = {g_csStage[i].buf, 0, sz[i]};
     wr[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
@@ -2581,8 +2767,13 @@ bool dispatch(const ComputeInfo &ci) {
   // Copy written ranges back to guest memory + invalidate any cached texture there.
   for (uint32_t i = 0; i < ci.nres; i++) {
     if (!ci.res[i].written) continue;
-    std::memcpy(reinterpret_cast<void *>(ci.res[i].base), g_csStage[i].map, ci.res[i].size);
-    invalidateTexRange(ci.res[i].base, ci.res[i].size);
+    if (ci.res[i].imageStaging) {
+      if (!writebackCsImage(ci.res[i], g_csStage[i].map)) return false;
+    } else {
+      std::memcpy(reinterpret_cast<void *>(ci.res[i].base), g_csStage[i].map,
+                  ci.res[i].size);
+    }
+    invalidateTexRange(ci.res[i].base, ci.res[i].guestSize);
     if (verbose) {
       const uint8_t *b = static_cast<const uint8_t *>(g_csStage[i].map);
       uint64_t nz = 0, step = ci.res[i].size > 65536 ? ci.res[i].size / 65536 : 1;
@@ -3448,11 +3639,18 @@ void reportFps() {
 }
 
 // DELTA_GPU_RTSTAT: every 200th frame, read back each render target used this
-// frame and report how many sampled texels are non-zero. Shows exactly where a
-// multi-pass chain (g-buffer -> lighting -> post -> scanout) loses its content.
+// frame and report how many sampled texels are non-zero. RTSTAT_FRAME selects a
+// single early frame instead. DELTA_GPU_RTDUMP also writes the selected targets.
 void reportRtContents() {
   static const bool enabled = std::getenv("DELTA_GPU_RTSTAT") != nullptr;
-  if (!enabled || g.frameNum % 200 != 0) return;
+  static const bool dump = std::getenv("DELTA_GPU_RTDUMP") != nullptr;
+  static const int reportFrame = [] {
+    const char *e = std::getenv("DELTA_GPU_RTSTAT_FRAME");
+    return e ? std::atoi(e) : 0;
+  }();
+  if (!enabled || (reportFrame ? g.frameNum != reportFrame
+                               : g.frameNum % 200 != 0))
+    return;
   int reported = 0;
   for (auto &kv : g_rts) {
     RTarget &rt = kv.second;
@@ -3502,6 +3700,17 @@ void reportRtContents() {
                  (unsigned long)nz, (unsigned long)rgb_nz,
                  (unsigned long)samples, distinct[0], distinct[1], distinct[2],
                  distinct[3]);
+    if (dump) {
+      std::vector<uint8_t> bgra(n * 4);
+      const auto *src = static_cast<const uint8_t *>(g.readbackMap);
+      const uint32_t srcBytes = formatBytes(rt.fmt);
+      for (uint64_t i = 0; i < n; i++)
+        readbackPixelBgra(src + i * srcBytes, rt.fmt, bgra.data() + i * 4);
+      char path[256];
+      std::snprintf(path, sizeof(path), "%s/rt_f%d_%#lx_%ux%u.ppm", dumpDir(),
+                    g.frameNum, (unsigned long)kv.first, rt.w, rt.h);
+      writePpm(path, bgra.data(), rt.w, rt.h);
+    }
   }
 }
 

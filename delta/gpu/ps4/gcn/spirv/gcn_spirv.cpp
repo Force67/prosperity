@@ -712,6 +712,14 @@ bool TranslateCs(const Program& program, uint32_t num_thread_x,
       r.resources.empty())
     return false;
 
+  bool uses_ds_swizzle = false;
+  for (uint32_t i = 0; i < program.size(); i++)
+    if (reachable[i] && program[i].enc == Enc::kDs &&
+        program[i].opcode == 0x35) {
+      uses_ds_swizzle = true;
+      break;
+    }
+
   t.InitTypes();
   // Storage buffers: Buf { uint data[]; } at set 0, binding = resource index.
   const Id t_run = t.m.TypeRuntimeArray(t.t_u);
@@ -759,6 +767,17 @@ bool TranslateCs(const Program& program, uint32_t num_thread_x,
   t.m.Decorate(group_id, spv::Decoration::BuiltIn,
                {static_cast<uint32_t>(spv::BuiltIn::WorkgroupId)});
   std::vector<Id> iface{local_id, group_id};
+  if (uses_ds_swizzle) {
+    t.m.Capability(spv::Capability::GroupNonUniform);
+    t.m.Capability(spv::Capability::GroupNonUniformShuffle);
+    sc.subgroup_local_id = t.m.Variable(
+        t.m.TypePointer(spv::StorageClass::Input, t.t_u),
+        spv::StorageClass::Input);
+    t.m.Decorate(sc.subgroup_local_id, spv::Decoration::BuiltIn,
+                 {static_cast<uint32_t>(
+                     spv::BuiltIn::SubgroupLocalInvocationId)});
+    iface.push_back(sc.subgroup_local_id);
+  }
 
   const Id main_fn = t.m.BeginFunction(t.t_void, t.t_fn);
   sc.main_fn = main_fn;

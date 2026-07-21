@@ -77,6 +77,10 @@ bool HasTrailingLiteral(const Inst& inst, uint32_t w) {
       return Sop2HasLiteral(w);
     case Enc::kSop1:
       return Sop1HasLiteral(w);
+    case Enc::kSmrd:
+      // With IMM=0, SOFFSET uses the scalar-source encoding; 255 selects a
+      // trailing literal byte offset instead of an SGPR.
+      return ((w >> 8) & 1) == 0 && (w & 0xFF) == 255;
     case Enc::kVop2:
       // V_MADMK_F32 (0x20) and V_MADAK_F32 (0x21) always carry a trailing
       // 32-bit literal (the K constant), independent of src0=LITERAL_CONST.

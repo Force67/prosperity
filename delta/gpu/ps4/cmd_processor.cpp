@@ -22,6 +22,9 @@
 #include <mutex>
 #include <map>
 #include <unordered_map>
+#include <unordered_set>
+
+#include <utl/mem.h>
 
 namespace gpu {
 namespace {
@@ -1014,9 +1017,9 @@ void handleDispatch(const uint32_t *body, uint32_t count) {
   uint32_t ldsDwords = (rsrc2hi >> 15) & 0x1FF;
 
   static const bool csDump = std::getenv("DELTA_GPU_CSDUMP") != nullptr;
-  static int cdN = 0;
-  if (csDump && cdN < 12 && csAddr >= 0x1000000000ull && csAddr < 0x20000000000ull) {
-    cdN++;
+  static std::unordered_set<uint64_t> dumpedCs;
+  if (csDump && dumpedCs.size() < 32 && csAddr >= 0x1000000000ull &&
+      csAddr < 0x20000000000ull && dumpedCs.insert(csAddr).second) {
     const uint32_t *ud = &g_regs[mmCOMPUTE_USER_DATA_0];
     std::fprintf(stderr,
         "[cs] addr=%#lx groups=[%u %u %u] tg=[%u %u %u] usgpr=%u tgiden=%u lds=%u\n",
@@ -1070,47 +1073,158 @@ void handleDispatch(const uint32_t *body, uint32_t count) {
   // Resolve each planned resource's live base/size from the descriptor in user data.
   auto guestRange = [](uint64_t a, uint64_t n) {
     constexpr uint64_t lo = 0x1000000000ull, hi = 0x20000000000ull;
-    return n && a >= lo && a < hi && n <= hi - a;
+    return n && a >= lo && a < hi && n <= hi - a &&
+           utl::isMemoryRangeMapped(reinterpret_cast<const void *>(a), n);
   };
   constexpr uint64_t kMaxRes = 256ull * 1024 * 1024;  // sanity cap per storage buffer
   vk::ComputeInfo ci;
-  ci.csAddr = csAddr;
+  ci.csAddr = csKey;
   ci.groups[0] = dimX; ci.groups[1] = dimY; ci.groups[2] = dimZ;
   ci.recomp = &rc;
   for (int i = 0; i < 16; i++) ci.userData[i] = ud[i];
+  const auto csProgram = gcn::CachedProgram(csAddr, 4096);
+  const auto resolved = gcn::ResolveCsResources(*csProgram, rc, ud);
+  static const bool csResTrace = std::getenv("DELTA_GPU_CSRES") != nullptr;
+  static std::unordered_set<uint64_t> tracedCsResources;
+  const bool traceCsResources =
+      csResTrace && tracedCsResources.size() < 64 &&
+      tracedCsResources.insert(csAddr).second;
   bool resOk = true;
   for (auto &r : rc.resources) {
-    uint64_t base = 0, size = 0;
-    if (r.kind == 1) {  // image (T#): compute SSBO model supports linear RGBA8
-      if (r.base_sgpr + 7 >= 16) { resOk = false; break; }
-      gcn::TImage t = gcn::DecodeTImage(&ud[r.base_sgpr]);
+    if (r.binding >= resolved.size() || !resolved[r.binding].valid) {
+      if (traceCsResources) {
+        std::fprintf(stderr,
+                     "[csres] cs=%#lx bind=%u kind=%u s%u pc=%#x unresolved\n",
+                     (unsigned long)csAddr, r.binding, r.kind, r.base_sgpr,
+                     r.use_pc);
+      }
+      resOk = false;
+      break;
+    }
+    const uint32_t *descriptor = resolved[r.binding].descriptor;
+    uint64_t base = 0, size = 0, guestSize = 0;
+    gcn::TImage image;
+    bool imageStaging = false;
+    bool zeroFill = false;
+    uint32_t elemBytes = 4;
+    uint32_t stageElemBytes = 4;
+    if (r.kind == 1) {
+      gcn::TImage t = gcn::DecodeTImage(descriptor);
       gcn::TextureLayout32 layout;
-      if (!t.valid || t.dfmt != 10 || (t.nfmt != 0 && t.nfmt != 4) ||
-           !gcn::TilingIsLinear(t.tiling_idx) ||
-          !gcn::BuildTextureLayout32(layout, t.width, t.height, t.pitch, t.layers,
-                                     t.mip_levels, t.tiling_idx, t.pow2_pad)) {
+      const bool rgba8 = t.dfmt == 10 && (t.nfmt == 0 || t.nfmt == 4);
+      const bool r32 = t.dfmt == 4 &&
+                       (t.nfmt == 4 || t.nfmt == 5 || t.nfmt == 7);
+      const bool rg16f = t.dfmt == 5 && t.nfmt == 7;
+      const bool r16f = t.dfmt == 2 && t.nfmt == 7;
+      const bool rg8 = t.dfmt == 3 && t.nfmt == 0;
+      const bool rgba16f = t.dfmt == 12 && t.nfmt == 7;
+      const bool r11g11b10f = t.dfmt == 6 && t.nfmt == 7;
+      const bool supportedType = t.type == 9 || t.type == 13;
+      const bool supportedFormat = rgba8 || r32 || rg16f || r16f || rg8 ||
+                                   rgba16f || r11g11b10f;
+      elemBytes = rgba16f ? 8 : (r16f || rg8) ? 2 : 4;
+      stageElemBytes = r11g11b10f ? 16 : std::max(elemBytes, 4u);
+      if (!supportedType || !supportedFormat) {
+        // Invalid/null T# values can be present on paths the guest shader does
+        // not take. The translator guards these descriptors and returns zero.
+        zeroFill = true;
+        size = 16;
+      } else if (!t.valid ||
+                 !gcn::BuildTextureLayout32(
+                     layout, t.width, t.height, t.pitch, t.layers, t.mip_levels,
+                     t.tiling_idx, t.pow2_pad, elemBytes)) {
+        if (traceCsResources)
+          std::fprintf(stderr,
+                      "[csres] cs=%#lx bind=%u unsupported image valid=%d "
+                       "base=%#lx type=%u dfmt=%u nfmt=%u tiling=%u %ux%u "
+                       "pitch=%u layers=%u words=[%08x %08x %08x %08x %08x "
+                       "%08x %08x %08x]\n",
+                       (unsigned long)csAddr, r.binding, t.valid ? 1 : 0,
+                       (unsigned long)t.base, t.type, t.dfmt, t.nfmt,
+                       t.tiling_idx, t.width, t.height, t.pitch, t.layers,
+                       descriptor[0], descriptor[1], descriptor[2], descriptor[3],
+                       descriptor[4], descriptor[5], descriptor[6], descriptor[7]);
         resOk = false;
         break;
+      } else {
+        base = t.base;
+        guestSize = layout.size;
+        imageStaging = !gcn::TilingIsLinear(t.tiling_idx) ||
+                        elemBytes != stageElemBytes;
+        if (imageStaging) {
+          gcn::TextureLayout32 linear;
+          const uint32_t stageTiling = t.tiling_idx == 31 ? 31 : 8;
+          if (!gcn::BuildTextureLayout32(linear, t.width, t.height, t.pitch,
+                                         t.layers, t.mip_levels, stageTiling,
+                                         t.pow2_pad, stageElemBytes)) {
+            resOk = false;
+            break;
+          }
+          size = linear.size;
+          image = t;
+        } else {
+          size = guestSize;
+        }
       }
-      base = t.base;
-      size = layout.size;
-    } else {            // buffer (V# / pointer): stride*num_records, else the min hint
-      if (r.base_sgpr + 3 >= 16) { resOk = false; break; }
-      gcn::VBuffer v = gcn::DecodeVBuffer(&ud[r.base_sgpr]);
+    } else if (r.kind == 2) {  // scalar-load pointer into an SRT/descriptor table
+      base = (static_cast<uint64_t>(descriptor[1] & 0xFFFF) << 32) |
+             descriptor[0];
+      size = r.min_bytes;
+    } else {                    // buffer V#: stride*num_records, else the min hint
+      gcn::VBuffer v = gcn::DecodeVBuffer(descriptor);
       base = v.base;
       size = v.stride ? (uint64_t)v.stride * v.num_records : v.num_records;
       if (size < r.min_bytes) size = r.min_bytes;
     }
-    if (size > kMaxRes || !guestRange(base, size) || ci.nres >= 8) {
+    if (!guestSize && !zeroFill) guestSize = size;
+    if (traceCsResources) {
+      std::fprintf(stderr,
+                   "[csres] cs=%#lx bind=%u kind=%u s%u pc=%#x base=%#lx "
+                   "size=%#lx written=%d\n",
+                   (unsigned long)csAddr, r.binding, r.kind, r.base_sgpr,
+                   r.use_pc, (unsigned long)base, (unsigned long)size,
+                   r.written ? 1 : 0);
+    }
+    if (size > kMaxRes || guestSize > kMaxRes ||
+        (!zeroFill && !guestRange(base, guestSize)) ||
+        ci.nres >= gcn::kMaxCsResources) {
+      if (traceCsResources)
+        std::fprintf(stderr,
+                     "[csres] cs=%#lx bind=%u invalid range base=%#lx size=%#lx\n",
+                     (unsigned long)csAddr, r.binding, (unsigned long)base,
+                     (unsigned long)guestSize);
       resOk = false;
       break;
     }
-    ci.res[ci.nres] = {base, size, r.binding, r.written};
+    vk::ComputeInfo::Res &out = ci.res[ci.nres];
+    out.base = base;
+    out.size = size;
+    out.guestSize = guestSize;
+    out.binding = r.binding;
+    out.written = r.written && !zeroFill;
+    out.zeroFill = zeroFill;
+    out.imageStaging = imageStaging;
+    if (imageStaging) {
+      out.width = image.width;
+      out.height = image.height;
+      out.pitch = image.pitch;
+      out.layers = image.layers;
+      out.mipLevels = image.mip_levels;
+      out.tilingIdx = image.tiling_idx;
+      out.elemBytes = elemBytes;
+      out.stageElemBytes = stageElemBytes;
+      out.dfmt = image.dfmt;
+      out.pow2Pad = image.pow2_pad;
+    }
     ci.nres++;
   }
   if (!resOk || !ci.nres)
     return;
-  vk::dispatch(ci);
+  const bool dispatched = vk::dispatch(ci);
+  if (traceCsResources)
+    std::fprintf(stderr, "[csres] cs=%#lx dispatch %s (%u resources)\n",
+                 (unsigned long)csAddr, dispatched ? "executed" : "failed",
+                 ci.nres);
 }
 
 void submitDcb(const void *dcb, uint32_t sizeBytes) {

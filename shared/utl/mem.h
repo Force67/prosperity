@@ -41,6 +41,7 @@ inline pageProtection &operator|=(pageProtection &lhs, pageProtection rhs) {
 void *allocMem(void *preferredAddr, size_t len, pageProtection, allocationType);
 void freeMem(void *addr);
 bool protectMem(void *addr, size_t len, pageProtection);
+bool isMemoryRangeMapped(const void *addr, size_t len);
 
 size_t getAvailableMem();
 }

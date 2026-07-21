@@ -22,6 +22,8 @@
 
 namespace gpu::gcn {
 
+struct RecompiledCs;
+
 // A decoded vertex-buffer resource (GCN V#, 4 dwords).
 struct VBuffer {
   uint64_t base = 0;         // guest address of the vertex data
@@ -96,6 +98,17 @@ std::vector<TImage> TrackTextures(
 // walks the chain and reads the V# at the point of the s_buffer_load.
 std::unordered_map<uint32_t, VBuffer> ResolveCbuffers(
     const std::shared_ptr<const Program>& program, const uint32_t* user_data);
+
+// Replay a compute shader's uniform scalar descriptor loads and capture each
+// planned V#/T#/pointer at the instruction where it is consumed. This resolves
+// SRT chains into SGPRs above the direct COMPUTE_USER_DATA range.
+struct ResolvedCsResource {
+  bool valid = false;
+  uint32_t descriptor[8] = {};
+};
+std::vector<ResolvedCsResource> ResolveCsResources(
+    const Program& program, const RecompiledCs& plan,
+    const uint32_t* user_data);
 
 // Given a decoded fetch shader and the VS user-data SGPRs (16 dwords), recover
 // the vertex-attribute buffers it fetches, in attribute order. Handles the

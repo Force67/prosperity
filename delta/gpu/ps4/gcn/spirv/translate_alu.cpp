@@ -150,13 +150,20 @@ void EmitSop1(Translator& t, const Inst& inst) {
     // attributes are decoded from that fetch program and supplied as Vulkan
     // inputs, so no runtime jump remains in the translated shader.
     case 0x20: case 0x21: break;  // s_setpc_b64 / s_swappc_b64
-    case 0x24: case 0x25: case 0x26: case 0x27: {  // s_{and,or,xor,andn2}_saveexec_b64
+    case 0x24: case 0x25: case 0x26: case 0x27:
+    case 0x28: case 0x29: case 0x2a: case 0x2b: {
+      // s_{and,or,xor,andn2,orn2,nand,nor,xnor}_saveexec_b64
       const Id old_exec = t.Exec();
       Id new_exec;
       if (op == 0x24) new_exec = t.And(old_exec, a);
       else if (op == 0x25) new_exec = t.Or(old_exec, a);
       else if (op == 0x26) new_exec = t.Xor(old_exec, a);
-      else new_exec = t.And(old_exec, t.Not(a));
+      else if (op == 0x27) new_exec = t.And(a, t.Not(old_exec));
+      else if (op == 0x28) new_exec = t.Or(a, t.Not(old_exec));
+      else if (op == 0x29) new_exec = t.Not(t.And(a, old_exec));
+      else if (op == 0x2a) new_exec = t.Not(t.Or(a, old_exec));
+      else new_exec = t.Not(t.Xor(a, old_exec));
+      new_exec = t.And(new_exec, t.U32(1));
       t.SetSg(sdst, old_exec);
       t.SetSg(sdst + 1, t.U32(0));
       t.SetSg(126, new_exec);
