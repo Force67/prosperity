@@ -1385,9 +1385,11 @@ void submitDcb(const void *dcb, uint32_t sizeBytes) {
           auto memOk = [](uint64_t a) { return a >= 0x1000000ull && a < 0x20000000000ull; };
           if (!noCopy && srcMem && dstMem && bytes && bytes <= 0x1000000u &&
               src != dst && memOk(src) && memOk(src + bytes) &&
-              memOk(dst) && memOk(dst + bytes))
+              memOk(dst) && memOk(dst + bytes)) {
+            if (vk::available()) vk::flushCsWrites();  // src may be CS-written
             std::memcpy(reinterpret_cast<void *>(dst),
                         reinterpret_cast<const void *>(src), bytes);
+          }
           if (std::getenv("DELTA_GPU_DMATRACE")) {
             static int dmn = 0;
             if (dmn++ < 200)

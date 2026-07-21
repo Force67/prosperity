@@ -203,6 +203,13 @@ bool available();
 // could not be set up (the caller then skips the dispatch, as before).
 bool dispatch(const ComputeInfo &ci);
 
+// Write every GPU-dirty compute range back to guest memory. Must run before
+// anything reads guest memory that a dispatch may have written: draw
+// recording, CP DMA, frame end. No-op when nothing is dirty.
+void flushCsWrites();
+// Flush only dirty ranges overlapping [base, base+bytes).
+void flushCsWritesRange(uint64_t base, uint64_t bytes);
+
 // Frame lifecycle. Each draw renders into the Vulkan image for its DrawInfo.rtBase
 // (a render target keyed by guest address). beginFrame starts recording;
 // endFrame submits, reads back the render target at `scanoutBase` (the flip
