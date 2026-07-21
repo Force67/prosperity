@@ -677,17 +677,26 @@ void EmitCsMimg(Translator& t, const Inst& inst, StageContext& sc) {
   const Id width = Max1(t, t.Shr(base_width, physical_mip));
   const Id height = Max1(t, t.Shr(base_height, physical_mip));
   Id x = t.Vg(vaddr), y = t.Vg(vaddr + 1);
+  Id sample_fx = t.F32(0.f), sample_fy = t.F32(0.f);
   if (sample) {
-    WarnUnsupported("mimg.sample-nearest", op, w, w1);
-    const Id width_f =
-        t.m.Emit(spv::Op::OpConvertUToF, t.t_f, {width});
-    const Id height_f =
-        t.m.Emit(spv::Op::OpConvertUToF, t.t_f, {height});
-    x = t.UMin(t.m.Emit(spv::Op::OpConvertFToU, t.t_u,
-                        {t.FMul(t.FClamp01(t.VgF(vaddr)), width_f)}),
+    // Bilinear filter of the linear staging image with clamp addressing and
+    // texel-centre coordinates. image_sample_l (0x24) takes an explicit LOD in
+    // the address; _lz (0x27) forces LOD 0 -- both already folded into the mip
+    // maths above. x/y hold the lower texel; the upper corner and fractional
+    // weights are formed in the access block.
+    const Id width_f = t.m.Emit(spv::Op::OpConvertUToF, t.t_f, {width});
+    const Id height_f = t.m.Emit(spv::Op::OpConvertUToF, t.t_f, {height});
+    sample_fx =
+        t.FSub(t.FMul(t.FClamp01(t.VgF(vaddr)), width_f), t.F32(0.5f));
+    sample_fy =
+        t.FSub(t.FMul(t.FClamp01(t.VgF(vaddr + 1)), height_f), t.F32(0.5f));
+    const Id fx0 = t.Ext1(GLSLstd450Floor, t.Ext2(GLSLstd450FMax, sample_fx,
+                                                  t.F32(0.f)));
+    const Id fy0 = t.Ext1(GLSLstd450Floor, t.Ext2(GLSLstd450FMax, sample_fy,
+                                                  t.F32(0.f)));
+    x = t.UMin(t.m.Emit(spv::Op::OpConvertFToU, t.t_u, {fx0}),
                t.Sub(width, t.U32(1)));
-    y = t.UMin(t.m.Emit(spv::Op::OpConvertFToU, t.t_u,
-                        {t.FMul(t.FClamp01(t.VgF(vaddr + 1)), height_f)}),
+    y = t.UMin(t.m.Emit(spv::Op::OpConvertFToU, t.t_u, {fy0}),
                t.Sub(height, t.U32(1)));
   }
   const Id linear_general = t.Eq(field(3, 20, 0x1F), t.U32(31));
@@ -744,7 +753,7 @@ void EmitCsMimg(Translator& t, const Inst& inst, StageContext& sc) {
   dword_idx =
       t.SelectB(is_r11g11b10f, t.Mul(texel_idx, t.U32(4)), dword_idx);
 
-  if (load || sample) {
+  if (load) {
     const Id raw = CsSsboLoad(t, sc, binding, dword_idx);
     const Id has_second = t.m.Emit(spv::Op::OpLogicalOr, t.t_bool,
                                    {is_rgba16f, is_r11g11b10f});
@@ -785,6 +794,72 @@ void EmitCsMimg(Translator& t, const Inst& inst, StageContext& sc) {
       value = t.SelectB(is_r11g11b10f, float_component[i], value);
       value = t.SelectB(is_r32, i == 0 ? raw : t.U32(0), value);
       t.SetVg(vdata + out++, value);
+    }
+  } else if (sample) {
+    const Id has_second = t.m.Emit(spv::Op::OpLogicalOr, t.t_bool,
+                                   {is_rgba16f, is_r11g11b10f});
+    // Storage-buffer index of texel (xx,yy) in the current mip/layer, scaled
+    // for the multi-dword formats (matches the single-texel index above).
+    const auto texel_at = [&](Id xx, Id yy) {
+      Id ti = t.Add(mip_off, t.Add(layer_off, t.Add(t.Mul(yy, pitch), xx)));
+      ti = t.SelectB(is_rgba16f, t.Mul(ti, t.U32(2)), ti);
+      ti = t.SelectB(is_r11g11b10f, t.Mul(ti, t.U32(4)), ti);
+      return ti;
+    };
+    // Decode one texel to float RGBA, honouring the storage format. Sampling
+    // always yields floats (the shader reads the filtered colour), unlike the
+    // raw integer fetch of image_load above.
+    const auto decode = [&](Id idx, Id out[4]) {
+      const Id raw = CsSsboLoad(t, sc, binding, idx);
+      const Id raw_hi = CsSsboLoad(
+          t, sc, binding, t.SelectB(has_second, t.Add(idx, t.U32(1)), idx));
+      const Id raw_2 = CsSsboLoad(
+          t, sc, binding, t.SelectB(is_r11g11b10f, t.Add(idx, t.U32(2)), idx));
+      const Id raw_3 = CsSsboLoad(
+          t, sc, binding, t.SelectB(is_r11g11b10f, t.Add(idx, t.U32(3)), idx));
+      const Id halfs = t.m.ExtInst(t.t_v2, GLSLstd450UnpackHalf2x16, {raw});
+      const Id halfs_hi = t.m.ExtInst(t.t_v2, GLSLstd450UnpackHalf2x16, {raw_hi});
+      const Id fcomp[4] = {raw, raw_hi, raw_2, raw_3};
+      for (int i = 0; i < 4; i++) {
+        const Id byte = t.And(t.Shr(raw, t.U32(i * 8u)), t.U32(0xFF));
+        const Id byteF = t.FMul(t.m.Emit(spv::Op::OpConvertUToF, t.t_f, {byte}),
+                                t.F32(1.0f / 255.0f));
+        Id v = byteF;  // rgba8 unorm default
+        v = t.SelectF(is_r32, i == 0 ? t.m.Bitcast(t.t_f, raw) : t.F32(0.f), v);
+        const Id half =
+            i < 2 ? t.m.CompositeExtract(t.t_f, halfs, i) : t.F32(0.f);
+        v = t.SelectF(is_rg16f, half, v);
+        v = t.SelectF(
+            is_r16f, i == 0 ? t.m.CompositeExtract(t.t_f, halfs, 0) : t.F32(0.f),
+            v);
+        v = t.SelectF(is_rg8, i < 2 ? byteF : t.F32(0.f), v);
+        const Id wide = t.m.CompositeExtract(t.t_f, i < 2 ? halfs : halfs_hi,
+                                             i < 2 ? i : i - 2);
+        v = t.SelectF(is_rgba16f, wide, v);
+        v = t.SelectF(is_r11g11b10f, t.m.Bitcast(t.t_f, fcomp[i]), v);
+        out[i] = v;
+      }
+    };
+    const Id x1 = t.UMin(t.Add(x, t.U32(1)), t.Sub(width, t.U32(1)));
+    const Id y1 = t.UMin(t.Add(y, t.U32(1)), t.Sub(height, t.U32(1)));
+    const Id wx = t.FClamp01(
+        t.FSub(sample_fx, t.m.Emit(spv::Op::OpConvertUToF, t.t_f, {x})));
+    const Id wy = t.FClamp01(
+        t.FSub(sample_fy, t.m.Emit(spv::Op::OpConvertUToF, t.t_f, {y})));
+    Id c00[4], c10[4], c01[4], c11[4];
+    decode(texel_at(x, y), c00);
+    decode(texel_at(x1, y), c10);
+    decode(texel_at(x, y1), c01);
+    decode(texel_at(x1, y1), c11);
+    const auto mix = [&](Id a, Id b, Id w) {
+      return t.FAdd(a, t.FMul(t.FSub(b, a), w));
+    };
+    uint32_t out = 0;
+    for (int i = 0; i < 4; i++) {
+      if (!(dmask & (1 << i))) continue;
+      const Id top = mix(c00[i], c10[i], wx);
+      const Id bot = mix(c01[i], c11[i], wx);
+      t.SetVgF(vdata + out++, mix(top, bot, wy));
     }
   } else {
     const auto store_byte = [&](uint32_t reg) {

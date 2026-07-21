@@ -571,6 +571,7 @@ void registerRtPages(uint64_t base, uint32_t w, uint32_t h, VkFormat fmt) {
 }
 
 const bool g_dump = std::getenv("DELTA_GPU_DUMP") != nullptr;
+const bool g_declines = std::getenv("DELTA_GPU_DECLINES") != nullptr;
 int g_dumpedFrames = 0;
 
 // Perf profiling accumulators (ns), reset each FPS window. Reveals where the
@@ -3202,6 +3203,25 @@ VkFormat vfmt(uint32_t dfmt, uint32_t nfmt) {
   }
 }
 
+// Byte size of one vertex element in the given GCN data format -- must match the
+// VkFormat vfmt() selects. Used to size a stride-0 (constant) binding's upload,
+// where there is no source stride to derive the record extent from.
+uint32_t vfmtBytes(uint32_t dfmt) {
+  switch (dfmt) {
+    case 1:  return 1;   // R8
+    case 3:  return 2;   // R8G8
+    case 4:  return 4;   // R32
+    case 5:  return 4;   // R16G16
+    case 6:  return 4;   // R11G11B10
+    case 10: return 4;   // R8G8B8A8
+    case 11: return 8;   // R32G32
+    case 12: return 8;   // R16G16B16A16
+    case 13: return 12;  // R32G32B32
+    case 14: return 16;  // R32G32B32A32
+    default: return 16;
+  }
+}
+
 // VGT_PRIMITIVE_TYPE -> Vulkan topology. Unknown/2D types fall back to triangle list
 // (the previous hardcoded topology), so the 2D path is unchanged.
 VkPrimitiveTopology vkTopology(uint32_t prim) {
@@ -3246,8 +3266,15 @@ RecompPipe *getRecompPipe(const DrawInfo &d) {
   key = hashWord(key, d.nvattrs);
   for (uint32_t i = 0; i < mrtN; i++)
     key = hashWord(key, colorTargetFormat(d.mrtInfo[i]));
+  // The vertex-input layout (binding count + per-binding strides + per-attr
+  // binding assignment) is baked into the pipeline, so it must be part of the key
+  // or a later multi-stream draw would reuse a single-stream pipeline (or vice
+  // versa) for the same shader pair.
+  key = hashWord(key, d.nvbufs);
+  for (uint32_t j = 0; j < d.nvbufs; j++) key = hashWord(key, d.vbufs[j].stride);
   for (uint32_t i = 0; i < d.nvattrs; i++) {
     key = hashWord(key, d.vattrs[i].location);
+    key = hashWord(key, d.vattrs[i].binding);
     key = hashWord(key, d.vattrs[i].offset);
     key = hashWord(key, d.vattrs[i].num_comps);
     key = hashWord(key, d.vattrs[i].dfmt);
@@ -3313,13 +3340,19 @@ RecompPipe *getRecompPipe(const DrawInfo &d) {
   stages[stageCount].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
   stages[stageCount].module = fs; stages[stageCount++].pName = "main";
 
-  VkVertexInputBindingDescription bind{0, d.vertexStride, VK_VERTEX_INPUT_RATE_VERTEX};
+  // One Vulkan binding per resolved vertex buffer (single-stream draws stay a
+  // single binding, identical to before); attributes reference their binding.
+  uint32_t nbind = d.nvattrs ? std::min(d.nvbufs, 8u) : 0;
+  VkVertexInputBindingDescription binds[8];
+  for (uint32_t j = 0; j < nbind; j++)
+    binds[j] = {j, d.vbufs[j].stride, VK_VERTEX_INPUT_RATE_VERTEX};
   VkVertexInputAttributeDescription attrs[8];
   for (uint32_t i = 0; i < d.nvattrs; i++)
-    attrs[i] = {d.vattrs[i].location, 0, vfmt(d.vattrs[i].dfmt, d.vattrs[i].nfmt), d.vattrs[i].offset};
+    attrs[i] = {d.vattrs[i].location, d.vattrs[i].binding,
+                vfmt(d.vattrs[i].dfmt, d.vattrs[i].nfmt), d.vattrs[i].offset};
   VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
-  vi.vertexBindingDescriptionCount = d.nvattrs ? 1 : 0;
-  vi.pVertexBindingDescriptions = d.nvattrs ? &bind : nullptr;
+  vi.vertexBindingDescriptionCount = nbind;
+  vi.pVertexBindingDescriptions = nbind ? binds : nullptr;
   vi.vertexAttributeDescriptionCount = d.nvattrs; vi.pVertexAttributeDescriptions = attrs;
 
   VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
@@ -3486,7 +3519,10 @@ bool drawRecomp(const DrawInfo &d) {
       float clearColor[4] = {0, 0, 0, 0};
       for (uint32_t a = 0; a < d.nvattrs; a++) {
         if (d.vattrs[a].num_comps == 4 && d.vattrs[a].offset != 0) {
-          const uint8_t *cb0 = vb + d.vattrs[a].offset;  // vertex 0's colour
+          // Colour may live in its own binding; read from that binding's base.
+          const auto *cbuf = static_cast<const uint8_t *>(
+              d.vbufs[d.vattrs[a].binding].data);
+          const uint8_t *cb0 = cbuf + d.vattrs[a].offset;  // vertex 0's colour
           if (d.vattrs[a].dfmt == 10) {
             for (int i = 0; i < 4; i++) clearColor[i] = cb0[i] / 255.f;
           } else {
@@ -3540,7 +3576,29 @@ bool drawRecomp(const DrawInfo &d) {
     }
   }
 
-  VkDeviceSize vneed = d.nvattrs ? (VkDeviceSize)nv * d.vertexStride : 0;
+  // Lay out one contiguous ring range per vertex binding. Binding 0 sits at the
+  // ring offset (single-stream draws are byte-identical to before); additional
+  // bindings are 16-byte aligned so no attribute straddles a coarse boundary.
+  const uint32_t nbind = d.nvattrs ? std::min(d.nvbufs, 8u) : 0;
+  VkDeviceSize bindOff[8] = {}, bindSize[8] = {};
+  VkDeviceSize vneed = 0;
+  for (uint32_t j = 0; j < nbind; j++) {
+    if (j) vneed = (vneed + 15) & ~VkDeviceSize(15);
+    bindOff[j] = vneed;
+    if (d.vbufs[j].stride) {
+      bindSize[j] = (VkDeviceSize)nv * d.vbufs[j].stride;
+    } else {
+      // Stride-0 (constant) binding: upload a single record large enough to cover
+      // every attribute that reads it; the pipeline binds it with stride 0 so all
+      // vertices fetch this one record.
+      uint32_t rec = 0;
+      for (uint32_t a = 0; a < d.nvattrs; a++)
+        if (d.vattrs[a].binding == j)
+          rec = std::max(rec, d.vattrs[a].offset + vfmtBytes(d.vattrs[a].dfmt));
+      bindSize[j] = rec;
+    }
+    vneed += bindSize[j];
+  }
   if (g.vbOffset + vneed > g.vbEnd) return decline(DR_RING);
   if (indexed && g.ibOffset + (VkDeviceSize)d.indexCount * 4 > g.ibEnd)
     return decline(DR_RING);
@@ -3626,11 +3684,14 @@ bool drawRecomp(const DrawInfo &d) {
     }
   }
 
-  // Copy the raw interleaved vertex buffer and, for indexed draws, the indices.
+  // Copy each vertex binding's source range into the ring and, for indexed
+  // draws, the indices.
   VkDeviceSize voff = g.vbOffset, ioff = g.ibOffset;
-  if (vneed)
-    flushCsWritesRange(reinterpret_cast<uint64_t>(d.vertexData), vneed);
-    std::memcpy(g.vbMap + voff, d.vertexData, (size_t)vneed);
+  for (uint32_t j = 0; j < nbind; j++) {
+    if (!bindSize[j]) continue;
+    flushCsWritesRange(reinterpret_cast<uint64_t>(d.vbufs[j].data), bindSize[j]);
+    std::memcpy(g.vbMap + voff + bindOff[j], d.vbufs[j].data, (size_t)bindSize[j]);
+  }
   if (indexed) {
     auto *idst = reinterpret_cast<uint32_t *>(g.ibMap + ioff);
     if (i32) std::memcpy(idst, i32, (size_t)d.indexCount * 4);
@@ -3823,8 +3884,12 @@ bool drawRecomp(const DrawInfo &d) {
                           1, 1, &g.uboSet, 8, dynOff);
   if (texSet)
     vkCmdBindDescriptorSets(g.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, rp->layout, 0, 1, &texSet, 0, nullptr);
-  if (d.nvattrs)
-    vkCmdBindVertexBuffers(g.cmd, 0, 1, &g.vb, &voff);
+  if (nbind) {
+    VkBuffer bufs[8];
+    VkDeviceSize offs[8];
+    for (uint32_t j = 0; j < nbind; j++) { bufs[j] = g.vb; offs[j] = voff + bindOff[j]; }
+    vkCmdBindVertexBuffers(g.cmd, 0, nbind, bufs, offs);
+  }
   if (indexed)
     vkCmdBindIndexBuffer(g.cmd, g.ib, ioff, VK_INDEX_TYPE_UINT32);
   if (drawTrace && drawCount >= 300) {
@@ -4473,15 +4538,17 @@ void endFrame(uint64_t scanoutBase) {
     std::snprintf(latest, sizeof(latest), "%s/gpu_latest.ppm", dumpDir());
     writePpm(latest, pixels, fin.w, fin.h);
   }
+  if ((g_dump || g_declines) && fin.frameNum % 30 == 0) {
+    std::fprintf(stderr, "[gpuvk]   decline:");
+    for (int i = 0; i < DR_MAX; i++)
+      if (g_decline[i]) std::fprintf(stderr, " %s=%u", kDeclineName[i], g_decline[i]);
+    std::fprintf(stderr, "\n");
+  }
   if (g_dump && fin.frameNum % 200 == 0) {
     std::fprintf(stderr, "[gpuvk] frame %d draws=%u heuristic=%u rt=%#lx %ux%u  scanout=%#lx\n",
                  fin.frameNum, fin.frameDraws, g.frameHeuristic,
                  (unsigned long)fin.presentBase, fin.w, fin.h,
                  (unsigned long)fin.scanoutBase);
-    std::fprintf(stderr, "[gpuvk]   decline:");
-    for (int i = 0; i < DR_MAX; i++)
-      if (g_decline[i]) std::fprintf(stderr, " %s=%u", kDeclineName[i], g_decline[i]);
-    std::fprintf(stderr, "\n");
     for (auto &kv : g_rts)
       if (kv.second.usedThisFrame)
         std::fprintf(stderr, "[gpuvk]    RT %#lx %ux%u draws=%u%s\n",

@@ -203,11 +203,20 @@ struct ScalarEval {
     }
     if (inst.enc != Enc::kSmrd) return;
     const Smrd s = DecodeSmrd(inst.raw[0]);
-    if (s.op > 0x04) return;  // s_load_dword..dwordx16 only
-    const uint32_t dwords = 1u << s.op;
+    // s_load reads a descriptor through a raw 2-dword pointer; s_buffer_load
+    // (op 0x08..0x0c) reads it through a 4-dword V# resource table -- FOX and
+    // other engines stash T#/pointer descriptors in a cbuffer/SRT accessed this
+    // way, so following it here is what lets those bindings resolve.
+    const bool buffer_load = s.op >= 0x08 && s.op <= 0x0c;
+    if (s.op > 0x04 && !buffer_load) return;  // s_load / s_buffer_load only
+    const uint32_t dwords =
+        buffer_load ? (1u << (s.op - 0x08)) : (1u << s.op);
     const uint32_t base = s.sbase * 2;
-    const bool base_known = AllKnown(base, 2);
-    const uint64_t table = base_known ? Ptr(base) : 0;
+    const uint32_t desc_dwords = buffer_load ? 4 : 2;
+    const bool base_known = AllKnown(base, desc_dwords);
+    const uint64_t table =
+        base_known ? (buffer_load ? DecodeVBuffer(&sgpr[base]).base : Ptr(base))
+                   : 0;
     bool offset_known = true;
     uint64_t byte_off = 0;
     if (s.imm) {
@@ -222,10 +231,25 @@ struct ScalarEval {
     // A load rewrites its destination SGPRs even if it cannot be resolved;
     // snapshot its inputs before invalidating an overlapping destination.
     for (uint32_t i = 0; i < dwords; i++) Clear(s.sdst + i);
-    if (!base_known || !offset_known) return;
+    static const bool fail_trace = std::getenv("DELTA_GPU_EUDFAIL") != nullptr;
+    if (!base_known || !offset_known) {
+      if (fail_trace)
+        std::fprintf(stderr,
+                     "[eudfail] s_load x%u s%u <- s%u: base_known=%d off_known=%d\n",
+                     dwords, s.sdst, base, base_known, offset_known);
+      return;
+    }
     if (byte_off > UINT64_MAX - table) return;
     const uint64_t address = table + byte_off;
-    if (!GuestRange(address, static_cast<uint64_t>(dwords) * 4)) return;
+    if (!GuestRange(address, static_cast<uint64_t>(dwords) * 4)) {
+      if (fail_trace)
+        std::fprintf(stderr,
+                     "[eudfail] s_load UNMAPPED x%u s%u <- [s%u=%#lx + %#lx] = %#lx\n",
+                     dwords, s.sdst, base, static_cast<unsigned long>(table),
+                     static_cast<unsigned long>(byte_off),
+                     static_cast<unsigned long>(address));
+      return;
+    }
     const uint32_t* src = reinterpret_cast<const uint32_t*>(address);
     for (uint32_t i = 0; i < dwords; i++) Set(s.sdst + i, src[i]);
     if (trace)

@@ -439,9 +439,8 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
       recompStatus = rc.ok ? "bad-attrs" : "rejected";
       if (rc.ok) {
         const uint32_t *vud2 = &g_regs[mmSPI_SHADER_USER_DATA_VS_0];
-        gcn::VBuffer attrBuffers[8];
+        gcn::VBuffer attrVbs[8];
         uint32_t attrCount = 0;
-        uint64_t base0 = UINT64_MAX;
         bool good = true;
         for (size_t i = 0; i < rc.attrs.size() && i < 8; i++) {
           auto &a = rc.attrs[i];
@@ -463,25 +462,79 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
             vb = gcn::DecodeVBuffer(reinterpret_cast<const uint32_t *>(
                 tbl + a.vbuf_dword_off * 4));
           }
-          if (vb.base < 0x1000000000ull || vb.base >= 0x20000000000ull || !vb.stride) { good = false; break; }
-          attrBuffers[attrCount++] = vb;
-          base0 = std::min(base0, vb.base);
+          if (vb.base < 0x1000000000ull || vb.base >= 0x20000000000ull) {
+            good = false;
+            break;
+          }
+          // A stride-0 V# is a per-draw constant input (all vertices read the same
+          // record); it becomes a stride-0 Vulkan binding below. Instance stepping
+          // is NOT a stride-0 V# -- it uses a normal stride indexed by the fetch
+          // shader -- so a zero stride is unambiguously a constant, not per-instance.
+          attrVbs[attrCount++] = vb;
         }
+        // Group attributes into vertex bindings. Attributes that interleave in one
+        // buffer (same stride, base within one stride of the binding base) share a
+        // binding with distinct offsets; attributes fed from a separate buffer
+        // (different stride, or a base more than one stride away) get their own
+        // binding. SotC streams position/normal/uv/etc from distinct buffers with
+        // distinct strides, which the old single-stream model declined outright.
+        uint32_t attrBinding[8] = {};
         if (good && attrCount) {
-          d.vertexData = reinterpret_cast<const void *>(base0);
-          d.vertexStride = attrBuffers[0].stride;
-          d.vertexCount = attrBuffers[0].num_records;
           for (uint32_t i = 0; i < attrCount; i++) {
-            const auto &a = rc.attrs[i];
-            const auto &vb = attrBuffers[i];
-            const uint64_t offset = vb.base - base0;
-            if (vb.stride != d.vertexStride || offset >= d.vertexStride) {
+            const gcn::VBuffer &vb = attrVbs[i];
+            int sel = -1;
+            for (uint32_t j = 0; j < d.nvbufs; j++) {
+              if (d.vbufs[j].stride != vb.stride) continue;
+              uint64_t b = reinterpret_cast<uint64_t>(d.vbufs[j].data);
+              uint64_t lo = b < vb.base ? b : vb.base;
+              uint64_t hi = b < vb.base ? vb.base : b;
+              if (hi - lo < vb.stride) { sel = static_cast<int>(j); break; }
+            }
+            if (sel < 0) {
+              if (d.nvbufs >= 8) { good = false; recompStatus = "attr-nbind"; break; }
+              sel = static_cast<int>(d.nvbufs);
+              d.vbufs[d.nvbufs++] = {reinterpret_cast<const void *>(vb.base),
+                                     vb.stride, vb.num_records};
+            } else {
+              auto &bind = d.vbufs[sel];
+              if (vb.base < reinterpret_cast<uint64_t>(bind.data))
+                bind.data = reinterpret_cast<const void *>(vb.base);
+              bind.numRecords = std::min(bind.numRecords, vb.num_records);
+            }
+            attrBinding[i] = static_cast<uint32_t>(sel);
+          }
+          // Second pass: offsets are relative to each binding's final (lowest) base.
+          for (uint32_t i = 0; good && i < attrCount; i++) {
+            const gcn::ShaderAttr &a = rc.attrs[i];
+            const gcn::VBuffer &vb = attrVbs[i];
+            const uint32_t b = attrBinding[i];
+            const uint64_t offset =
+                vb.base - reinterpret_cast<uint64_t>(d.vbufs[b].data);
+            // Strided bindings must keep every attribute inside one record; a
+            // stride-0 (constant) binding has no record extent to bound.
+            if (d.vbufs[b].stride && offset >= d.vbufs[b].stride) {
               good = false;
+              recompStatus = "attr-offset";
               break;
             }
-            d.vertexCount = std::min(d.vertexCount, vb.num_records);
-            d.vattrs[d.nvattrs++] = {a.location, static_cast<uint32_t>(offset),
+            d.vattrs[d.nvattrs++] = {a.location, b, static_cast<uint32_t>(offset),
                                      a.num_comps, vb.dfmt, vb.nfmt};
+          }
+          if (good) {
+            // vertexData/vertexStride mirror the first per-vertex (strided)
+            // binding for the heuristic fallback + clear detection; vertexCount is
+            // bounded by the smallest strided binding's record count (stride-0
+            // constant bindings do not constrain the vertex count).
+            uint32_t primary = 0;
+            while (primary < d.nvbufs && !d.vbufs[primary].stride) primary++;
+            d.vertexData = d.vbufs[primary < d.nvbufs ? primary : 0].data;
+            d.vertexStride =
+                primary < d.nvbufs ? d.vbufs[primary].stride : 0;
+            uint32_t count = UINT32_MAX;
+            for (uint32_t j = 0; j < d.nvbufs; j++)
+              if (d.vbufs[j].stride)
+                count = std::min(count, d.vbufs[j].numRecords);
+            d.vertexCount = count == UINT32_MAX ? 0 : count;
           }
         }
         // Resolve every cbuffer V# the emitted VS/PS reads. Bindings are assigned by
@@ -529,7 +582,7 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
         }
         if (good) { d.vsAddr = vsA; d.psAddr = psA; d.recomp = &rc;
           recompStatus = "ok"; }
-        else d.nvattrs = 0;
+        else { d.nvattrs = 0; d.nvbufs = 0; }
       }
     }
     if (autoVertexCount && autoVertexCount <= 0x100000)

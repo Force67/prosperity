@@ -18,13 +18,26 @@ namespace gpu::gcn { struct Recompiled; struct RecompiledCs; }
 namespace gpu::vk {
 
 // One vertex attribute for the recompiled-shader path: where the recompiled VS
-// reads input `location` from within the (interleaved) vertex buffer.
+// reads input `location` from within a vertex buffer binding. `binding` indexes
+// DrawInfo::vbufs -- multiple attributes that interleave in one buffer share a
+// binding (distinct offsets); attributes fed from separate buffers each get
+// their own binding (SotC streams position/normal/uv from distinct buffers).
 struct VertexAttr {
   uint32_t location = 0;
-  uint32_t offset = 0;    // byte offset within the vertex
+  uint32_t binding = 0;   // index into DrawInfo::vbufs
+  uint32_t offset = 0;    // byte offset within the binding's vertex record
   uint32_t num_comps = 0;  // 1..4
   uint32_t dfmt = 0;      // GCN data format (selects the Vulkan format)
   uint32_t nfmt = 0;      // GCN number format
+};
+
+// One vertex buffer binding for the recompiled-shader path. Each distinct guest
+// V# base + stride becomes one Vulkan vertex binding; its records are uploaded
+// into the vertex ring and bound via vkCmdBindVertexBuffers.
+struct VertexBinding {
+  const void *data = nullptr;  // guest base of this binding's vertex data
+  uint32_t stride = 0;         // bytes per record (VK_VERTEX_INPUT_RATE_VERTEX)
+  uint32_t numRecords = 0;     // records available in the source buffer
 };
 
 // Per-draw inputs extracted by the command processor (resource-tracked from the
@@ -161,6 +174,11 @@ struct DrawInfo {
   const gcn::Recompiled *recomp = nullptr;
   VertexAttr vattrs[8];
   uint32_t nvattrs = 0;
+  // Vertex buffer bindings the attributes read from. vbufs[0] mirrors
+  // vertexData/vertexStride so the single-binding fast path and the heuristic
+  // fallback are unchanged; a multi-stream draw fills one entry per distinct V#.
+  VertexBinding vbufs[8];
+  uint32_t nvbufs = 0;
 };
 
 // A compute dispatch resolved by the command processor: the recompiled CS + the
