@@ -34,6 +34,44 @@ bool deltaCore::init() {
 }
 
 namespace {
+// Minimal param.sfo reader: return the string value of `key` (e.g. "TITLE_ID"),
+// or "" if absent. The SFO is a small flat table; all offsets are bounds-checked.
+std::string sfoGet(const uint8_t *d, size_t n, const char *key) {
+  if (n < 20)
+    return {};
+  auto rd16 = [&](size_t o) -> uint16_t {
+    return o + 2 <= n ? uint16_t(d[o] | (d[o + 1] << 8)) : 0;
+  };
+  auto rd32 = [&](size_t o) -> uint32_t {
+    return o + 4 <= n ? uint32_t(d[o]) | (uint32_t(d[o + 1]) << 8) |
+                            (uint32_t(d[o + 2]) << 16) | (uint32_t(d[o + 3]) << 24)
+                      : 0;
+  };
+  if (rd32(0) != 0x46535000u) // "\0PSF"
+    return {};
+  uint32_t keyStart = rd32(8), dataStart = rd32(12), count = rd32(16);
+  size_t klen = std::strlen(key);
+  for (uint32_t i = 0, idx = 20; i < count; i++, idx += 16) {
+    if (idx + 16 > n)
+      break;
+    size_t kpos = size_t(keyStart) + rd16(idx);
+    if (kpos + klen + 1 > n)
+      continue;
+    if (std::memcmp(d + kpos, key, klen) != 0 || d[kpos + klen] != '\0')
+      continue;
+    size_t dpos = size_t(dataStart) + rd32(idx + 12);
+    if (dpos >= n)
+      return {};
+    size_t avail = n - dpos, len = rd32(idx + 4);
+    std::string s(reinterpret_cast<const char *>(d + dpos),
+                  len < avail ? len : avail);
+    while (!s.empty() && s.back() == '\0')
+      s.pop_back();
+    return s;
+  }
+  return {};
+}
+
 // Bridges a PkgFilesystem into the kernel VFS as an on-demand virtual mount.
 class PkgProvider : public krnl::vfs::VirtualProvider {
 public:
@@ -78,6 +116,17 @@ public:
     }
   }
   bool valid() const { return fs_.valid(); }
+
+  // The title's TITLE_ID from the outer-PKG param.sfo (entry 0x1000). That entry
+  // lives in the PKG header, outside the encrypted PFS, so it reads even for
+  // titles (e.g. Isaac) whose only param.sfo copy is there and never appears at
+  // /app0/sce_sys. Returns "" when unavailable.
+  std::string titleId() {
+    std::vector<uint8_t> sfo;
+    if (fs_.readPkgEntry(0x1000, sfo) > 0)
+      return sfoGet(sfo.data(), sfo.size(), "TITLE_ID");
+    return {};
+  }
 
   // SOTTR workaround: cache every .manifest.bin's bytes keyed by its base name
   // (e.g. "PRIORITY7_ENGLISH"), so the count-setter can fill the header buffer
@@ -278,6 +327,9 @@ void deltaCore::boot(const base::String &xdir) {
     }
     krnl::vfs::mountVirtual("/app0", provider);
     provider->cacheManifests();
+    // Publish the title id so savedata can give this game its own host save
+    // root (else saves for different titles collide under one directory).
+    krnl::vfs::setTitleId(provider->titleId());
     mainModule = base::String("/app0/eboot.bin");
   } else if (isFfpkg) {
     // PS5 game backup (UFS2). Mount it at /app0 and prefer the decrypted/ tree
