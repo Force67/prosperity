@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <vector>
 
@@ -150,6 +151,14 @@ void Verify16BitRoundTrip(uint32_t tiling_index) {
   }
 }
 
+uint64_t HashBytes(const uint8_t *data, size_t size, uint64_t hash) {
+  for (size_t i = 0; i < size; ++i) {
+    hash ^= data[i];
+    hash *= 1099511628211ull;
+  }
+  return hash;
+}
+
 TEST(GcnDetile, Depth64ByteSplitIsBijectiveAcrossArrayLayers) {
   VerifySplitMode({0, 64, 4, 4});
 }
@@ -181,6 +190,91 @@ TEST(GcnDetile, Thin2DMacroSupports64BitElements) {
   ASSERT_TRUE(gpu::gcn::DetileTextureMip32(tiled.data(), result.data(), layout,
                                            0, 0));
   EXPECT_EQ(result, source);
+}
+
+TEST(GcnDetile, AllModesAndElementWidthsMatchReferenceDigest) {
+  uint64_t hash = 1469598103934665603ull;
+  for (uint32_t tiling = 0; tiling <= 31; ++tiling) {
+    if (tiling > 26 && tiling != 31) continue;
+    for (uint32_t elem : {2u, 4u, 8u, 16u}) {
+      gpu::gcn::TextureLayout32 layout;
+      ASSERT_TRUE(gpu::gcn::BuildTextureLayout32(
+          layout, 263, 137, 271, 3, 4, tiling, false, elem));
+      std::vector<uint8_t> tiled(layout.size);
+      for (size_t i = 0; i < tiled.size(); ++i)
+        tiled[i] = static_cast<uint8_t>((i * 193u + i / 29u + tiling) & 255u);
+
+      for (uint32_t mip = 0; mip < layout.mip_levels; ++mip) {
+        const auto &level = layout.mips[mip];
+        std::vector<uint8_t> linear(static_cast<size_t>(level.width) *
+                                    level.height * elem);
+        for (uint32_t layer = 0; layer < layout.layers; ++layer) {
+          ASSERT_TRUE(gpu::gcn::DetileTextureMip32(
+              tiled.data(), linear.data(), layout, mip, layer));
+          hash = HashBytes(linear.data(), linear.size(), hash);
+        }
+      }
+
+      std::fill(tiled.begin(), tiled.end(), 0xa5);
+      for (uint32_t mip = 0; mip < layout.mip_levels; ++mip) {
+        const auto &level = layout.mips[mip];
+        std::vector<uint8_t> linear(static_cast<size_t>(level.width) *
+                                    level.height * elem);
+        for (uint32_t layer = 0; layer < layout.layers; ++layer) {
+          for (size_t i = 0; i < linear.size(); ++i)
+            linear[i] =
+                static_cast<uint8_t>((i * 157u + layer * 17u + mip) & 255u);
+          ASSERT_TRUE(gpu::gcn::RetileTextureMip32(
+              linear.data(), tiled.data(), layout, mip, layer));
+        }
+      }
+      hash = HashBytes(tiled.data(), tiled.size(), hash);
+    }
+  }
+  EXPECT_EQ(hash, 0xe0e2ac1035064882ull);
+}
+
+TEST(GcnDetile, PitchedTransfersLeaveLinearPaddingUntouched) {
+  constexpr uint32_t kWidth = 263;
+  constexpr uint32_t kHeight = 137;
+  constexpr uint32_t kElem = 8;
+  constexpr size_t kRowBytes = kWidth * kElem + 40;
+  gpu::gcn::TextureLayout32 layout;
+  ASSERT_TRUE(gpu::gcn::BuildTextureLayout32(
+      layout, kWidth, kHeight, 271, 1, 1, 14, false, kElem));
+
+  std::vector<uint8_t> source(kRowBytes * kHeight, 0xcd);
+  std::vector<uint8_t> result(kRowBytes * kHeight, 0xee);
+  std::vector<uint8_t> tiled(layout.size, 0xa5);
+  for (uint32_t y = 0; y < kHeight; ++y)
+    for (uint32_t x = 0; x < kWidth * kElem; ++x)
+      source[static_cast<size_t>(y) * kRowBytes + x] =
+          static_cast<uint8_t>((y * 37u + x * 13u) & 255u);
+
+  ASSERT_TRUE(gpu::gcn::RetileTextureMip32Pitched(
+      source.data(), kRowBytes, tiled.data(), layout, 0, 0));
+  ASSERT_TRUE(gpu::gcn::DetileTextureMip32Pitched(
+      tiled.data(), result.data(), kRowBytes, layout, 0, 0));
+  for (uint32_t y = 0; y < kHeight; ++y) {
+    const size_t row = static_cast<size_t>(y) * kRowBytes;
+    EXPECT_TRUE(std::equal(source.begin() + row,
+                           source.begin() + row + kWidth * kElem,
+                           result.begin() + row));
+    EXPECT_TRUE(std::all_of(result.begin() + row + kWidth * kElem,
+                            result.begin() + row + kRowBytes,
+                            [](uint8_t value) { return value == 0xee; }));
+  }
+}
+
+TEST(GcnDetile, NestedParallelRegionsRunInline) {
+  std::atomic<uint32_t> work{0};
+  gpu::gcn::DetileParallelRows(32, [&](uint32_t outer0, uint32_t outer1) {
+    gpu::gcn::DetileParallelRows(32, [&](uint32_t inner0, uint32_t inner1) {
+      work.fetch_add((outer1 - outer0) * (inner1 - inner0),
+                     std::memory_order_relaxed);
+    });
+  });
+  EXPECT_EQ(work.load(std::memory_order_relaxed), 32u * 32u);
 }
 
 }  // namespace

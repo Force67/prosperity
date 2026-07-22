@@ -13,6 +13,7 @@
  */
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 
@@ -22,9 +23,10 @@ namespace gpu::gcn {
 // an internal persistent worker pool, joining before return. Falls back to a
 // single fn(0, rows) call when the multithreaded path is disabled
 // (DELTA_GPU_DETILE_MT=0) or the workload is too small to be worth splitting.
+// DELTA_GPU_DETILE_THREADS sets the total lane count, including the caller.
 // The pool is owned entirely by this module; callers see a plain blocking call
-// and need no synchronization of their own. The detilers use it for their
-// per-row swizzle loops; the GPU staging paths reuse it for row-major
+// and need no synchronization of their own. The detilers use it for 8-row
+// microtile bands; the GPU staging paths reuse it for row-major
 // format-convert loops. Only one row-parallel region runs at a time (calls are
 // serialized), matching the single-threaded GPU pipeline.
 void DetileParallelRows(uint32_t rows,
@@ -69,9 +71,21 @@ bool DetileTextureMip32(const void *src, void *dst,
                          const TextureLayout32 &layout, uint32_t mip,
                          uint32_t layer);
 
+// De-tile into rows separated by dst_row_bytes. This avoids an intermediate
+// tightly packed buffer when the consumer already has a pitched linear layout.
+bool DetileTextureMip32Pitched(const void *src, void *dst,
+                               size_t dst_row_bytes,
+                               const TextureLayout32 &layout, uint32_t mip,
+                               uint32_t layer);
+
 // Tile one tightly packed row-major physical mip/layer back into guest layout.
 bool RetileTextureMip32(const void *src, void *dst,
                         const TextureLayout32 &layout, uint32_t mip,
                         uint32_t layer);
+
+// Re-tile from rows separated by src_row_bytes.
+bool RetileTextureMip32Pitched(const void *src, size_t src_row_bytes, void *dst,
+                               const TextureLayout32 &layout, uint32_t mip,
+                               uint32_t layer);
 
 }  // namespace gpu::gcn

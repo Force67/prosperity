@@ -1287,16 +1287,29 @@ void uploadTexPixels(VkImage img, uint64_t base,
                      uint32_t texel_h) {
   static const bool noDetile = std::getenv("DELTA_GPU_NODETILE") != nullptr;
   const uint32_t elem = layout.elem_bytes;
-  std::vector<uint8_t> linear;
   uint64_t linearBytes = 0;
   for (uint32_t mip = 0; mip < layout.mip_levels; mip++)
     linearBytes += static_cast<uint64_t>(layout.mips[mip].width) *
                    layout.mips[mip].height * layout.layers * elem;
-  linear.resize(static_cast<size_t>(linearBytes));
+
+  const VkDeviceSize sz = linearBytes;
+  VkBuffer stg; VkDeviceMemory stgMem; void *map;
+  VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+  bi.size = sz; bi.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+  vkCreateBuffer(g.device, &bi, nullptr, &stg);
+  VkMemoryRequirements br; vkGetBufferMemoryRequirements(g.device, stg, &br);
+  VkMemoryAllocateInfo ba{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+  ba.allocationSize = br.size;
+  ba.memoryTypeIndex = findMemoryType(br.memoryTypeBits,
+      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  vkAllocateMemory(g.device, &ba, nullptr, &stgMem);
+  vkBindBufferMemory(g.device, stg, stgMem, 0);
+  vkMapMemory(g.device, stgMem, 0, sz, 0, &map);
 
   VkBufferImageCopy copies[16]{};
   uint64_t linearOffset = 0;
   const uint8_t *src = reinterpret_cast<const uint8_t *>(base);
+  uint8_t *linear = static_cast<uint8_t *>(map);
   for (uint32_t mip = 0; mip < layout.mip_levels; mip++) {
     const auto &level = layout.mips[mip];
     copies[mip].bufferOffset = linearOffset;
@@ -1308,7 +1321,7 @@ void uploadTexPixels(VkImage img, uint64_t base,
     const uint64_t layerBytes =
         static_cast<uint64_t>(level.width) * level.height * elem;
     for (uint32_t layer = 0; layer < layout.layers; layer++) {
-      uint8_t *dst = linear.data() + linearOffset + layer * layerBytes;
+      uint8_t *dst = linear + linearOffset + layer * layerBytes;
       if (!noDetile) {
         gcn::DetileTextureMip32(src, dst, layout, mip, layer);
       } else {
@@ -1322,20 +1335,6 @@ void uploadTexPixels(VkImage img, uint64_t base,
     }
     linearOffset += layerBytes * layout.layers;
   }
-  VkDeviceSize sz = linear.size();
-  VkBuffer stg; VkDeviceMemory stgMem; void *map;
-  VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-  bi.size = sz; bi.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-  vkCreateBuffer(g.device, &bi, nullptr, &stg);
-  VkMemoryRequirements br; vkGetBufferMemoryRequirements(g.device, stg, &br);
-  VkMemoryAllocateInfo ba{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-  ba.allocationSize = br.size;
-  ba.memoryTypeIndex = findMemoryType(br.memoryTypeBits,
-      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-  vkAllocateMemory(g.device, &ba, nullptr, &stgMem);
-  vkBindBufferMemory(g.device, stg, stgMem, 0);
-  vkMapMemory(g.device, stgMem, 0, sz, 0, &map);
-  std::memcpy(map, linear.data(), sz);
   vkUnmapMemory(g.device, stgMem);
 
   VkCommandBufferAllocateInfo ca{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
@@ -2691,43 +2690,65 @@ uint32_t packR11G11B10(const uint8_t *src) {
 bool stageCsImage(const ComputeInfo::Res &res, void *dst) {
   gcn::TextureLayout32 tiled, linear;
   if (!buildCsImageLayouts(res, tiled, linear)) return false;
-  std::memset(dst, 0, res.size);
-  std::vector<uint8_t> tight(static_cast<size_t>(res.width) * res.height *
-                             res.elemBytes);
+  const bool direct = res.elemBytes == res.stageElemBytes;
+  bool fillsCompleteLayout = direct;
+  uint64_t filledBytes = 0;
+  for (uint32_t mip = 0; fillsCompleteLayout && mip < linear.mip_levels; ++mip) {
+    const auto &level = linear.mips[mip];
+    const uint64_t logicalBytes = static_cast<uint64_t>(level.width) *
+                                  level.height * linear.layers *
+                                  res.stageElemBytes;
+    fillsCompleteLayout = level.offset == filledBytes &&
+                          level.pitch == level.width &&
+                          level.stored_height == level.height &&
+                          level.size == logicalBytes;
+    filledBytes = level.offset + level.size;
+  }
+  fillsCompleteLayout = fillsCompleteLayout && filledBytes == res.size;
+  if (!fillsCompleteLayout) std::memset(dst, 0, res.size);
+  std::vector<uint8_t> tight;
+  if (!direct)
+    tight.resize(static_cast<size_t>(res.width) * res.height * res.elemBytes);
   for (uint32_t mip = 0; mip < tiled.mip_levels; mip++) {
     const auto &srcLevel = tiled.mips[mip];
     const auto &dstLevel = linear.mips[mip];
     for (uint32_t layer = 0; layer < tiled.layers; layer++) {
-      if (!gcn::DetileTextureMip32(reinterpret_cast<const void *>(res.base),
-                                   tight.data(), tiled, mip, layer))
-        return false;
       uint8_t *levelDst = static_cast<uint8_t *>(dst) + dstLevel.offset +
           static_cast<uint64_t>(layer) * dstLevel.pitch *
               dstLevel.stored_height * res.stageElemBytes;
+      if (direct) {
+        if (!gcn::DetileTextureMip32Pitched(
+                reinterpret_cast<const void *>(res.base), levelDst,
+                static_cast<size_t>(dstLevel.pitch) * res.stageElemBytes, tiled,
+                mip, layer))
+          return false;
+        continue;
+      }
+      if (!gcn::DetileTextureMip32(reinterpret_cast<const void *>(res.base),
+                                   tight.data(), tiled, mip, layer))
+        return false;
       gcn::DetileParallelRows(srcLevel.height, [&](uint32_t y0, uint32_t y1) {
         for (uint32_t y = y0; y < y1; y++) {
-        uint8_t *dstRow = levelDst + static_cast<size_t>(y) * dstLevel.pitch *
-                                         res.stageElemBytes;
-        const uint8_t *srcRow =
-            tight.data() + static_cast<size_t>(y) * srcLevel.width * res.elemBytes;
-        if (res.dfmt == 6) {
-          for (uint32_t x = 0; x < srcLevel.width; x++) {
-            uint32_t packed;
-            std::memcpy(&packed, srcRow + static_cast<size_t>(x) * 4, 4);
-            unpackR11G11B10(packed,
-                            dstRow + static_cast<size_t>(x) * 16);
+          uint8_t *dstRow = levelDst + static_cast<size_t>(y) *
+                                           dstLevel.pitch * res.stageElemBytes;
+          const uint8_t *srcRow = tight.data() + static_cast<size_t>(y) *
+                                                     srcLevel.width *
+                                                     res.elemBytes;
+          if (res.dfmt == 6) {
+            for (uint32_t x = 0; x < srcLevel.width; x++) {
+              uint32_t packed;
+              std::memcpy(&packed, srcRow + static_cast<size_t>(x) * 4, 4);
+              unpackR11G11B10(packed,
+                              dstRow + static_cast<size_t>(x) * 16);
+            }
+          } else {
+            for (uint32_t x = 0; x < srcLevel.width; x++) {
+              uint16_t value;
+              std::memcpy(&value, srcRow + static_cast<size_t>(x) * 2, 2);
+              const uint32_t expanded = value;
+              std::memcpy(dstRow + static_cast<size_t>(x) * 4, &expanded, 4);
+            }
           }
-        } else if (res.elemBytes == res.stageElemBytes) {
-          std::memcpy(dstRow, srcRow,
-                      static_cast<size_t>(srcLevel.width) * res.elemBytes);
-        } else {
-          for (uint32_t x = 0; x < srcLevel.width; x++) {
-            uint16_t value;
-            std::memcpy(&value, srcRow + static_cast<size_t>(x) * 2, 2);
-            const uint32_t expanded = value;
-            std::memcpy(dstRow + static_cast<size_t>(x) * 4, &expanded, 4);
-          }
-        }
         }
       });
     }
@@ -2738,8 +2759,10 @@ bool stageCsImage(const ComputeInfo::Res &res, void *dst) {
 bool writebackCsImage(const ComputeInfo::Res &res, const void *src) {
   gcn::TextureLayout32 tiled, linear;
   if (!buildCsImageLayouts(res, tiled, linear)) return false;
-  std::vector<uint8_t> tight(static_cast<size_t>(res.width) * res.height *
-                             res.elemBytes);
+  const bool direct = res.elemBytes == res.stageElemBytes;
+  std::vector<uint8_t> tight;
+  if (!direct)
+    tight.resize(static_cast<size_t>(res.width) * res.height * res.elemBytes);
   for (uint32_t mip = 0; mip < tiled.mip_levels; mip++) {
     const auto &dstLevel = tiled.mips[mip];
     const auto &srcLevel = linear.mips[mip];
@@ -2747,30 +2770,35 @@ bool writebackCsImage(const ComputeInfo::Res &res, const void *src) {
       const uint8_t *levelSrc = static_cast<const uint8_t *>(src) +
           srcLevel.offset + static_cast<uint64_t>(layer) * srcLevel.pitch *
                                 srcLevel.stored_height * res.stageElemBytes;
+      if (direct) {
+        if (!gcn::RetileTextureMip32Pitched(
+                levelSrc,
+                static_cast<size_t>(srcLevel.pitch) * res.stageElemBytes,
+                reinterpret_cast<void *>(res.base), tiled, mip, layer))
+          return false;
+        continue;
+      }
       gcn::DetileParallelRows(dstLevel.height, [&](uint32_t y0, uint32_t y1) {
         for (uint32_t y = y0; y < y1; y++) {
-        uint8_t *dstRow = tight.data() +
-            static_cast<size_t>(y) * dstLevel.width * res.elemBytes;
-        const uint8_t *srcRow =
-            levelSrc + static_cast<size_t>(y) * srcLevel.pitch *
-                           res.stageElemBytes;
-        if (res.dfmt == 6) {
-          for (uint32_t x = 0; x < dstLevel.width; x++) {
-            const uint32_t packed =
-                packR11G11B10(srcRow + static_cast<size_t>(x) * 16);
-            std::memcpy(dstRow + static_cast<size_t>(x) * 4, &packed, 4);
+          uint8_t *dstRow = tight.data() + static_cast<size_t>(y) *
+                                               dstLevel.width * res.elemBytes;
+          const uint8_t *srcRow = levelSrc + static_cast<size_t>(y) *
+                                                 srcLevel.pitch *
+                                                 res.stageElemBytes;
+          if (res.dfmt == 6) {
+            for (uint32_t x = 0; x < dstLevel.width; x++) {
+              const uint32_t packed =
+                  packR11G11B10(srcRow + static_cast<size_t>(x) * 16);
+              std::memcpy(dstRow + static_cast<size_t>(x) * 4, &packed, 4);
+            }
+          } else {
+            for (uint32_t x = 0; x < dstLevel.width; x++) {
+              uint32_t expanded;
+              std::memcpy(&expanded, srcRow + static_cast<size_t>(x) * 4, 4);
+              const uint16_t value = static_cast<uint16_t>(expanded);
+              std::memcpy(dstRow + static_cast<size_t>(x) * 2, &value, 2);
+            }
           }
-        } else if (res.elemBytes == res.stageElemBytes) {
-          std::memcpy(dstRow, srcRow,
-                      static_cast<size_t>(dstLevel.width) * res.elemBytes);
-        } else {
-          for (uint32_t x = 0; x < dstLevel.width; x++) {
-            uint32_t expanded;
-            std::memcpy(&expanded, srcRow + static_cast<size_t>(x) * 4, 4);
-            const uint16_t value = static_cast<uint16_t>(expanded);
-            std::memcpy(dstRow + static_cast<size_t>(x) * 2, &value, 2);
-          }
-        }
         }
       });
       if (!gcn::RetileTextureMip32(tight.data(),
