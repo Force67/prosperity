@@ -2704,7 +2704,8 @@ bool stageCsImage(const ComputeInfo::Res &res, void *dst) {
       uint8_t *levelDst = static_cast<uint8_t *>(dst) + dstLevel.offset +
           static_cast<uint64_t>(layer) * dstLevel.pitch *
               dstLevel.stored_height * res.stageElemBytes;
-      for (uint32_t y = 0; y < srcLevel.height; y++) {
+      gcn::DetileParallelRows(srcLevel.height, [&](uint32_t y0, uint32_t y1) {
+        for (uint32_t y = y0; y < y1; y++) {
         uint8_t *dstRow = levelDst + static_cast<size_t>(y) * dstLevel.pitch *
                                          res.stageElemBytes;
         const uint8_t *srcRow =
@@ -2727,7 +2728,8 @@ bool stageCsImage(const ComputeInfo::Res &res, void *dst) {
             std::memcpy(dstRow + static_cast<size_t>(x) * 4, &expanded, 4);
           }
         }
-      }
+        }
+      });
     }
   }
   return true;
@@ -2745,7 +2747,8 @@ bool writebackCsImage(const ComputeInfo::Res &res, const void *src) {
       const uint8_t *levelSrc = static_cast<const uint8_t *>(src) +
           srcLevel.offset + static_cast<uint64_t>(layer) * srcLevel.pitch *
                                 srcLevel.stored_height * res.stageElemBytes;
-      for (uint32_t y = 0; y < dstLevel.height; y++) {
+      gcn::DetileParallelRows(dstLevel.height, [&](uint32_t y0, uint32_t y1) {
+        for (uint32_t y = y0; y < y1; y++) {
         uint8_t *dstRow = tight.data() +
             static_cast<size_t>(y) * dstLevel.width * res.elemBytes;
         const uint8_t *srcRow =
@@ -2768,7 +2771,8 @@ bool writebackCsImage(const ComputeInfo::Res &res, const void *src) {
             std::memcpy(dstRow + static_cast<size_t>(x) * 2, &value, 2);
           }
         }
-      }
+        }
+      });
       if (!gcn::RetileTextureMip32(tight.data(),
                                    reinterpret_cast<void *>(res.base), tiled,
                                    mip, layer))

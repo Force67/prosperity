@@ -14,8 +14,21 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 
 namespace gpu::gcn {
+
+// Split the row range [0, rows) into chunks and invoke fn(y0, y1) on each across
+// an internal persistent worker pool, joining before return. Falls back to a
+// single fn(0, rows) call when the multithreaded path is disabled
+// (DELTA_GPU_DETILE_MT=0) or the workload is too small to be worth splitting.
+// The pool is owned entirely by this module; callers see a plain blocking call
+// and need no synchronization of their own. The detilers use it for their
+// per-row swizzle loops; the GPU staging paths reuse it for row-major
+// format-convert loops. Only one row-parallel region runs at a time (calls are
+// serialized), matching the single-threaded GPU pipeline.
+void DetileParallelRows(uint32_t rows,
+                        const std::function<void(uint32_t, uint32_t)> &fn);
 
 // True if tiling_idx denotes a linear surface (no de-tile needed): only
 // DisplayLinearAligned(8) and DisplayLinearGeneral(31) are linear on Liverpool.

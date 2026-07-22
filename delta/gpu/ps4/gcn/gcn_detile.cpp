@@ -23,10 +23,125 @@
 #include "gcn_detile.h"
 
 #include <algorithm>
+#include <atomic>
+#include <condition_variable>
+#include <cstdlib>
 #include <cstring>
+#include <mutex>
+#include <thread>
+#include <vector>
 
 namespace gpu::gcn {
 namespace {
+
+// --- Row-parallel worker pool. --------------------------------------------
+// The de-tile / re-tile inner loops iterate over image ROWS, and each row's
+// tile-address math is a pure function of (x, y, layer) + config, so rows are
+// independent and can be split across cores. A 16 MB single-mip colossus
+// surface is thousands of rows of per-element swizzle -- the CPU hot path this
+// pool exists to knock down. Threads are created once and parked on a condvar;
+// work is claimed with an atomic cursor (dynamic chunking absorbs any per-row
+// cost imbalance). The calling thread participates too, so N pool threads give
+// ~N+1 lanes. DELTA_GPU_DETILE_MT=0 forces the single-threaded fallback.
+class RowPool {
+ public:
+  static RowPool &get() {
+    static RowPool inst;
+    return inst;
+  }
+
+  void run(uint32_t rows, const std::function<void(uint32_t, uint32_t)> &fn) {
+    // Serialize whole regions: the GPU pipeline is single-threaded, but this
+    // guards the shared state should two callers ever overlap.
+    std::lock_guard<std::mutex> serial(run_mutex_);
+    if (!enabled_ || threads_.empty() || rows < kMinRows) {
+      if (rows) fn(0, rows);
+      return;
+    }
+    {
+      std::unique_lock<std::mutex> lk(mtx_);
+      fn_ = &fn;
+      total_rows_ = rows;
+      cursor_.store(0, std::memory_order_relaxed);
+      // Aim for several chunks per lane so stealing balances uneven rows.
+      const uint32_t lanes = static_cast<uint32_t>(threads_.size()) + 1;
+      block_ = std::max(1u, rows / (lanes * 4u));
+      active_ = static_cast<uint32_t>(threads_.size());
+      ++generation_;
+      start_cv_.notify_all();
+    }
+    drain();  // the caller is a lane too
+    {
+      std::unique_lock<std::mutex> lk(mtx_);
+      done_cv_.wait(lk, [this] { return active_ == 0; });
+      fn_ = nullptr;
+    }
+  }
+
+ private:
+  static constexpr uint32_t kMinRows = 32;
+
+  RowPool() {
+    const char *mt = std::getenv("DELTA_GPU_DETILE_MT");
+    enabled_ = !(mt && mt[0] == '0');
+    uint32_t hw = std::thread::hardware_concurrency();
+    uint32_t n = std::min(8u, hw ? hw / 2u : 1u);
+    if (!enabled_) n = 0;
+    for (uint32_t i = 0; i < n; i++)
+      threads_.emplace_back([this] { worker(); });
+  }
+
+  ~RowPool() {
+    {
+      std::unique_lock<std::mutex> lk(mtx_);
+      stop_ = true;
+      start_cv_.notify_all();
+    }
+    for (auto &t : threads_)
+      if (t.joinable()) t.join();
+  }
+
+  // Claim and process row chunks until the range is exhausted.
+  void drain() {
+    for (;;) {
+      uint32_t s = cursor_.fetch_add(block_, std::memory_order_relaxed);
+      if (s >= total_rows_) break;
+      uint32_t e = std::min(s + block_, total_rows_);
+      (*fn_)(s, e);
+    }
+  }
+
+  void worker() {
+    uint32_t local_gen = 0;
+    for (;;) {
+      {
+        std::unique_lock<std::mutex> lk(mtx_);
+        start_cv_.wait(lk,
+                       [this, &local_gen] { return stop_ || generation_ != local_gen; });
+        if (stop_) return;
+        local_gen = generation_;
+      }
+      drain();
+      {
+        std::lock_guard<std::mutex> lk(mtx_);
+        if (--active_ == 0) done_cv_.notify_one();
+      }
+    }
+  }
+
+  std::vector<std::thread> threads_;
+  std::mutex mtx_;
+  std::mutex run_mutex_;
+  std::condition_variable start_cv_, done_cv_;
+  const std::function<void(uint32_t, uint32_t)> *fn_ = nullptr;
+  std::atomic<uint32_t> cursor_{0};
+  uint32_t total_rows_ = 0;
+  uint32_t block_ = 1;
+  uint32_t generation_ = 0;
+  uint32_t active_ = 0;
+  bool stop_ = false;
+  bool enabled_ = true;
+};
 
 // Linux defines the CIK array/tiling enums and GB_TILE_MODE fields, but not the
 // Liverpool table contents or the byte-address equations implemented below:
@@ -478,6 +593,11 @@ uint32_t BitCeil(uint32_t value) {
 
 }  // namespace
 
+void DetileParallelRows(uint32_t rows,
+                        const std::function<void(uint32_t, uint32_t)> &fn) {
+  RowPool::get().run(rows, fn);
+}
+
 bool TilingIsLinear(uint32_t tiling_idx) {
   // Per the Liverpool GB_TILE_MODE table only DisplayLinearAligned(8) and
   // DisplayLinearGeneral(31) are genuinely linear (ArrayLinearAligned/General).
@@ -575,34 +695,40 @@ bool DetileTextureMip32(const void *src, void *dst,
     const uint8_t *layer_src =
         level_src + static_cast<uint64_t>(layer) * level.pitch *
                         level.stored_height * elem;
-    for (uint32_t y = 0; y < level.height; y++)
-      std::memcpy(out + static_cast<size_t>(y) * level.width * elem,
-                  layer_src + static_cast<size_t>(y) * level.pitch * elem,
-                  static_cast<size_t>(level.width) * elem);
+    DetileParallelRows(level.height, [&](uint32_t y0, uint32_t y1) {
+      for (uint32_t y = y0; y < y1; y++)
+        std::memcpy(out + static_cast<size_t>(y) * level.width * elem,
+                    layer_src + static_cast<size_t>(y) * level.pitch * elem,
+                    static_cast<size_t>(level.width) * elem);
+    });
     return true;
   }
 
   const ArrayMode am = ArrayModeOf(layout.tiling_idx);
   const MicroMode mm = MicroModeOf(layout.tiling_idx);
   if (!level.macro_tiled) {
-    for (uint32_t y = 0; y < level.height; y++)
-      for (uint32_t x = 0; x < level.width; x++)
-        std::memcpy(out + (static_cast<size_t>(y) * level.width + x) * elem,
-                    level_src + AddrMicro32(x, y, layer, level.pitch,
-                                            level.stored_height, mm,
-                                            level.thickness, elem),
-                    elem);
+    DetileParallelRows(level.height, [&](uint32_t y0, uint32_t y1) {
+      for (uint32_t y = y0; y < y1; y++)
+        for (uint32_t x = 0; x < level.width; x++)
+          std::memcpy(out + (static_cast<size_t>(y) * level.width + x) * elem,
+                      level_src + AddrMicro32(x, y, layer, level.pitch,
+                                              level.stored_height, mm,
+                                              level.thickness, elem),
+                      elem);
+    });
     return true;
   }
 
   Macro2D macro{};
   if (!ConfigureMacro2D(layout.tiling_idx, am, mm, elem, macro)) return false;
-  for (uint32_t y = 0; y < level.height; y++)
-    for (uint32_t x = 0; x < level.width; x++)
-      std::memcpy(out + (static_cast<size_t>(y) * level.width + x) * elem,
-                  level_src + AddrMacro32(x, y, layer, level.pitch,
-                                           level.stored_height, macro),
-                  elem);
+  DetileParallelRows(level.height, [&](uint32_t y0, uint32_t y1) {
+    for (uint32_t y = y0; y < y1; y++)
+      for (uint32_t x = 0; x < level.width; x++)
+        std::memcpy(out + (static_cast<size_t>(y) * level.width + x) * elem,
+                    level_src + AddrMacro32(x, y, layer, level.pitch,
+                                             level.stored_height, macro),
+                    elem);
+  });
   return true;
 }
 
@@ -620,34 +746,40 @@ bool RetileTextureMip32(const void *src, void *dst,
     uint8_t *layer_dst =
         level_dst + static_cast<uint64_t>(layer) * level.pitch *
                         level.stored_height * elem;
-    for (uint32_t y = 0; y < level.height; y++)
-      std::memcpy(layer_dst + static_cast<size_t>(y) * level.pitch * elem,
-                  in + static_cast<size_t>(y) * level.width * elem,
-                  static_cast<size_t>(level.width) * elem);
+    DetileParallelRows(level.height, [&](uint32_t y0, uint32_t y1) {
+      for (uint32_t y = y0; y < y1; y++)
+        std::memcpy(layer_dst + static_cast<size_t>(y) * level.pitch * elem,
+                    in + static_cast<size_t>(y) * level.width * elem,
+                    static_cast<size_t>(level.width) * elem);
+    });
     return true;
   }
 
   const ArrayMode am = ArrayModeOf(layout.tiling_idx);
   const MicroMode mm = MicroModeOf(layout.tiling_idx);
   if (!level.macro_tiled) {
-    for (uint32_t y = 0; y < level.height; y++)
-      for (uint32_t x = 0; x < level.width; x++)
-        std::memcpy(level_dst + AddrMicro32(x, y, layer, level.pitch,
-                                            level.stored_height, mm,
-                                            level.thickness, elem),
-                    in + (static_cast<size_t>(y) * level.width + x) * elem,
-                    elem);
+    DetileParallelRows(level.height, [&](uint32_t y0, uint32_t y1) {
+      for (uint32_t y = y0; y < y1; y++)
+        for (uint32_t x = 0; x < level.width; x++)
+          std::memcpy(level_dst + AddrMicro32(x, y, layer, level.pitch,
+                                              level.stored_height, mm,
+                                              level.thickness, elem),
+                      in + (static_cast<size_t>(y) * level.width + x) * elem,
+                      elem);
+    });
     return true;
   }
 
   Macro2D macro{};
   if (!ConfigureMacro2D(layout.tiling_idx, am, mm, elem, macro)) return false;
-  for (uint32_t y = 0; y < level.height; y++)
-    for (uint32_t x = 0; x < level.width; x++)
-      std::memcpy(level_dst + AddrMacro32(x, y, layer, level.pitch,
-                                          level.stored_height, macro),
-                  in + (static_cast<size_t>(y) * level.width + x) * elem,
-                  elem);
+  DetileParallelRows(level.height, [&](uint32_t y0, uint32_t y1) {
+    for (uint32_t y = y0; y < y1; y++)
+      for (uint32_t x = 0; x < level.width; x++)
+        std::memcpy(level_dst + AddrMacro32(x, y, layer, level.pitch,
+                                            level.stored_height, macro),
+                    in + (static_cast<size_t>(y) * level.width + x) * elem,
+                    elem);
+  });
   return true;
 }
 
