@@ -241,16 +241,63 @@ int PS4ABI sys_rtprio_thread(int function, uint64_t lwpid, thread_prio *rtp) {
 // the HOST condvar -- never spurious returns to the guest, because every wait
 // below re-checks its own exit condition in a loop before returning.
 namespace {
-// Per-address wake state. CV_WAIT has no value to re-check, so a waiter needs
-// proof "a signal aimed at MY address happened since I went to sleep" that
-// survives bucket collisions and re-poll ticks; the value-WAIT ops use it to
-// keep real futex semantics (an explicit WAKE releases the waiter even if the
-// value never changed). unordered_map guarantees reference stability across
-// inserts, so a sleeping waiter may hold its WaitChan& while others register.
+// Per-address wake state. Simple WAIT uses an explicit queue because WAKE's val
+// limits how many already-registered waiters it releases. The other object
+// classes retain generation/tokens appropriate to their own operations.
+// unordered_map guarantees reference stability across inserts, so a sleeping
+// waiter may hold its WaitChan& while others register.
+struct SimpleWaiter {
+  SimpleWaiter *prev = nullptr;
+  SimpleWaiter *next = nullptr;
+  bool queued = false;
+  bool selected = false;
+};
 struct WaitChan {
-  uint64_t gen = 0;      // bumped by WAKE/BROADCAST: releases every waiter
+  uint64_t gen = 0;      // broadcast generation for mutex/CV/semaphore waits
   uint64_t signals = 0;  // pending single-waiter releases (CV_SIGNAL)
   uint32_t waiters = 0;  // live CV_WAIT sleepers (drives ucond c_has_waiters)
+  SimpleWaiter *simpleHead = nullptr;
+  SimpleWaiter *simpleTail = nullptr;
+
+  void queueSimple(SimpleWaiter &waiter) {
+    waiter.prev = simpleTail;
+    if (simpleTail)
+      simpleTail->next = &waiter;
+    else
+      simpleHead = &waiter;
+    simpleTail = &waiter;
+    waiter.queued = true;
+  }
+
+  void removeSimple(SimpleWaiter &waiter) {
+    if (!waiter.queued)
+      return;
+    if (waiter.prev)
+      waiter.prev->next = waiter.next;
+    else
+      simpleHead = waiter.next;
+    if (waiter.next)
+      waiter.next->prev = waiter.prev;
+    else
+      simpleTail = waiter.prev;
+    waiter.prev = nullptr;
+    waiter.next = nullptr;
+    waiter.queued = false;
+  }
+
+  uint32_t wakeSimple(uint64_t requested) {
+    // FreeBSD narrows val to int and its queue loop wakes one even for <= 0.
+    const int32_t count = static_cast<int32_t>(requested);
+    uint32_t remaining = count > 1 ? static_cast<uint32_t>(count) : 1;
+    uint32_t woken = 0;
+    while (simpleHead && remaining-- > 0) {
+      auto *waiter = simpleHead;
+      removeSimple(*waiter);
+      waiter->selected = true;
+      ++woken;
+    }
+    return woken;
+  }
 };
 struct Bucket {
   std::mutex m;
@@ -337,10 +384,9 @@ int PS4ABI sys_umtx_op(void *ptr, int op, uint64_t val, void *a, void *b) {
   using namespace std::chrono_literals;
   markThreadStarted();  // first sync point => our init is done
   switch (op) {
-  // WAIT/WAKE both take the bucket lock, so a wake can't slip in between a
-  // waiter's value check and its sleep => no lost wake. A waiter leaves ONLY
-  // when the value changed, an explicit WAKE hit this address (gen bump), or
-  // the caller's own timeout expired -- never on the internal re-poll tick.
+  // WAIT registers before checking the value while holding the same bucket lock
+  // as WAKE, so a wake can't slip between the check and sleep. A waiter leaves
+  // only when the value changed, WAKE selected it, or its own timeout expired.
   case 2:    // UMTX_OP_WAIT (compares a full u_long, unlike the UINT ops)
   case 11:   // UMTX_OP_WAIT_UINT
   case 15: { // UMTX_OP_WAIT_UINT_PRIVATE
@@ -353,12 +399,16 @@ int PS4ABI sys_umtx_op(void *ptr, int op, uint64_t val, void *a, void *b) {
     const auto dl = umtxRelDeadline(b);
     std::unique_lock<std::mutex> lk(bk.m);
     auto &ch = bk.chan[ptr];
-    const uint64_t g0 = ch.gen;
-    while (!changed() && ch.gen == g0) {
-      if (dl && std::chrono::steady_clock::now() >= *dl)
+    SimpleWaiter waiter;
+    ch.queueSimple(waiter);
+    while (!changed() && !waiter.selected) {
+      if (dl && std::chrono::steady_clock::now() >= *dl) {
+        ch.removeSimple(waiter);
         return -SysError::eTIMEDOUT;
+      }
       bk.cv.wait_for(lk, umtxTimeout());
     }
+    ch.removeSimple(waiter);
     return 0;
   }
   case 17: { // UMTX_OP_MUTEX_WAIT: block while the umutex is owned
@@ -375,7 +425,17 @@ int PS4ABI sys_umtx_op(void *ptr, int op, uint64_t val, void *a, void *b) {
     return 0;
   }
   case 3:    // UMTX_OP_WAKE
-  case 16:   // UMTX_OP_WAKE_PRIVATE
+  case 16: { // UMTX_OP_WAKE_PRIVATE
+    auto &bk = umtxBucket(ptr);
+    bool woke = false;
+    {
+      std::lock_guard<std::mutex> lk(bk.m);
+      woke = bk.chan[ptr].wakeSimple(val) != 0;
+    }
+    if (woke)
+      bk.cv.notify_all();
+    return 0;
+  }
   case 18:   // UMTX_OP_MUTEX_WAKE
   case 22: { // UMTX_OP_MUTEX_WAKE2
     auto &bk = umtxBucket(ptr);
@@ -562,9 +622,13 @@ int PS4ABI sys_umtx_op(void *ptr, int op, uint64_t val, void *a, void *b) {
     auto **addrs = static_cast<void **>(ptr);
     for (uint64_t i = 0; i < val; ++i) {
       auto &bk = umtxBucket(addrs[i]);
-      std::lock_guard<std::mutex> lk(bk.m);
-      bk.chan[addrs[i]].gen++;
-      bk.cv.notify_all();
+      bool woke = false;
+      {
+        std::lock_guard<std::mutex> lk(bk.m);
+        woke = bk.chan[addrs[i]].wakeSimple(0x7fffffff) != 0;
+      }
+      if (woke)
+        bk.cv.notify_all();
     }
     return 0;
   }
