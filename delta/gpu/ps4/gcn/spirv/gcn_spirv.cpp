@@ -1111,6 +1111,7 @@ bool RecompileComputeSpirv(const uint32_t* cs_code, uint32_t num_thread_x,
                            uint32_t lds_dwords, RecompiledCs& r) {
   if (!cs_code) return false;
   const Program program = DecodeShader(cs_code, 2048);
+  MaybeDumpByAddr("CS", cs_code, program);
   Translator t;
   RecompiledCs tmp;  // build into a temp so a mid-emit failure leaves r intact
   if (!TranslateCs(program, num_thread_x, num_thread_y, num_thread_z, user_sgpr,

@@ -169,6 +169,65 @@ static void startWatchdog() {
         }
       }).detach();
     }
+    // DELTA_LOADWATCH=<ms>: SotC world-load counter poller. The eboot's
+    // "[MSG-Init] LoadInitialWorld() Remaining Resources To Load: N" line is
+    // only printed twice during init; the live count is the sum of 10 per-
+    // category int32 queues at obj+0x110 + i*0x28, where obj = *(base+0x2ee2d00)
+    // (base = Shadow_Shipping @ 0x201400000000). This reads that sum every <ms>
+    // ms so we can see whether the load DECREASES, PLATEAUS, or stops, and which
+    // of the 10 category queues is stuck. Env overrides: DELTA_LOADWATCH_BASE,
+    // DELTA_LOADWATCH_GOFF (global offset), all optional. See sotcdis notes.
+    if (const char *s = std::getenv("DELTA_LOADWATCH")) {
+      int ms = std::atoi(s);
+      if (ms <= 0) ms = 2000;
+      uint64_t base = 0x201400000000ull;
+      if (const char *b = std::getenv("DELTA_LOADWATCH_BASE")) base = strtoull(b, nullptr, 0);
+      uint64_t goff = 0x2ee2d00ull;
+      if (const char *g = std::getenv("DELTA_LOADWATCH_GOFF")) goff = strtoull(g, nullptr, 0);
+      std::thread([ms, base, goff] {
+        auto rd = [](uint64_t a, void *dst, size_t n) -> bool {
+          long pg = sysconf(_SC_PAGESIZE);
+          for (uint64_t p = a & ~((uint64_t)pg - 1); p < a + n; p += pg) {
+            unsigned char mv = 0;
+            if (mincore(reinterpret_cast<void *>(p), 1, &mv) != 0) return false;
+          }
+          std::memcpy(dst, reinterpret_cast<void *>(a), n);
+          return true;
+        };
+        uint64_t pobj = base + goff;
+        int lastTotal = -1, plateau = 0;
+        for (uint64_t tick = 0;; tick++) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+          uint64_t obj = 0;
+          if (!rd(pobj, &obj, 8) || obj < 0x1000) {
+            std::fprintf(stderr, "[loadwatch %llu] obj ptr @%#llx not ready (obj=%#llx)\n",
+                         (unsigned long long)tick, (unsigned long long)pobj,
+                         (unsigned long long)obj);
+            std::fflush(stderr);
+            continue;
+          }
+          int32_t c[10] = {0};
+          int total = 0;
+          bool ok = true;
+          for (int i = 0; i < 10; i++) {
+            int32_t v = 0;
+            if (!rd(obj + 0x110 + (uint64_t)i * 0x28, &v, 4)) { ok = false; break; }
+            c[i] = v;
+            total += v;
+          }
+          if (!ok) { std::fprintf(stderr, "[loadwatch %llu] obj=%#llx read fault\n",
+                                  (unsigned long long)tick, (unsigned long long)obj);
+                     std::fflush(stderr); continue; }
+          if (total == lastTotal) plateau++; else plateau = 0;
+          lastTotal = total;
+          std::fprintf(stderr,
+              "[loadwatch %llu] obj=%#llx REMAINING=%d plateau=%dx q=[%d %d %d %d %d %d %d %d %d %d]\n",
+              (unsigned long long)tick, (unsigned long long)obj, total, plateau,
+              c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8], c[9]);
+          std::fflush(stderr);
+        }
+      }).detach();
+    }
     const char *e = std::getenv("DELTA_WATCHDOG");
     if (!e) return;
     int secs = std::atoi(e);

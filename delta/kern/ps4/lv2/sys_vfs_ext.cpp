@@ -172,7 +172,12 @@ int64_t PS4ABI sys_pread(uint32_t fd, void *buf, size_t nbytes, int64_t offset) 
   // At most one line per fd per ~2 s; prints the current + max offset and MB/s since
   // the last line so a long headless load can be tracked to completion.
   if (std::getenv("DELTA_IOPROGRESS")) {
-    struct FdIo { int64_t maxOff, lastMax; long lastMs; };
+    // maxOff/lastMax = streaming high-water. nNew/nReread since last line tell
+    // whether the FIOS2 streamer is fetching NEW file bytes (nNew climbing,
+    // offset+r > previous max) or RE-READING already-covered blocks (nReread) --
+    // the latter signals a downstream consume/decompress stage that never drains,
+    // so the streamer re-issues the same reads. lastOff catches exact-repeat reads.
+    struct FdIo { int64_t maxOff, lastMax, lastOff; long lastMs; long nNew, nReread, nSame; };
     static std::mutex m;
     static std::unordered_map<uint32_t, FdIo> tbl;
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -180,16 +185,22 @@ int64_t PS4ABI sys_pread(uint32_t fd, void *buf, size_t nbytes, int64_t offset) 
     std::lock_guard<std::mutex> lk(m);
     auto &e = tbl[fd];
     int64_t end = offset + (r > 0 ? r : 0);
+    if (end > e.maxOff) e.nNew++; else e.nReread++;
+    if (offset == e.lastOff) e.nSame++;
+    e.lastOff = offset;
     if (end > e.maxOff) e.maxOff = end;
     if (e.lastMs == 0) e.lastMs = nowMs;
     if (nowMs - e.lastMs >= 2000) {
       double mb = (e.maxOff - e.lastMax) / 1048576.0;
       double sec = (nowMs - e.lastMs) / 1000.0;
-      std::fprintf(stderr, "[ioprog] fd=%u off=%lld max=%lld (%.1f MB) +%.2f MB/s\n",
+      std::fprintf(stderr,
+                   "[ioprog] fd=%u off=%lld max=%lld (%.1f MB) +%.2f MB/s  new=%ld reread=%ld same=%ld\n",
                    fd, (long long)offset, (long long)e.maxOff,
-                   e.maxOff / 1048576.0, sec > 0 ? mb / sec : 0.0);
+                   e.maxOff / 1048576.0, sec > 0 ? mb / sec : 0.0,
+                   e.nNew, e.nReread, e.nSame);
       e.lastMax = e.maxOff;
       e.lastMs = nowMs;
+      e.nNew = e.nReread = e.nSame = 0;
     }
   }
   return r;

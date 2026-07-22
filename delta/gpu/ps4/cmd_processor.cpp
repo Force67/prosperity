@@ -1191,7 +1191,22 @@ void handleDispatch(const uint32_t *body, uint32_t count) {
   ci.recomp = &rc;
   for (int i = 0; i < 16; i++) ci.userData[i] = ud[i];
   const auto csProgram = gcn::CachedProgram(csAddr, 4096);
-  const auto resolved = gcn::ResolveCsResources(*csProgram, rc, ud);
+  auto resolved = gcn::ResolveCsResources(*csProgram, rc, ud);
+  // Descriptor chains live in guest memory, which an earlier dispatch may have
+  // written — and writebacks are lazy. If any binding failed to resolve, land
+  // pending compute writes in guest memory and re-resolve once before falling
+  // back to a dummy (the fallback zeroes a real input and silently corrupts
+  // whatever pipeline this CS belongs to).
+  {
+    bool anyUnresolved = false;
+    for (auto &r : rc.resources)
+      if (r.binding >= resolved.size() || !resolved[r.binding].valid)
+        anyUnresolved = true;
+    if (anyUnresolved && vk::available()) {
+      vk::flushCsWrites();
+      resolved = gcn::ResolveCsResources(*csProgram, rc, ud);
+    }
+  }
   static const bool csResTrace = std::getenv("DELTA_GPU_CSRES") != nullptr;
   static std::unordered_set<uint64_t> tracedCsResources;
   const bool traceCsResources =
@@ -1208,6 +1223,18 @@ void handleDispatch(const uint32_t *body, uint32_t count) {
                      "using dummy\n",
                      (unsigned long)csAddr, r.binding, r.kind, r.base_sgpr,
                      r.use_pc);
+      }
+      // DELTA_GPU_EUDFAIL: raw code dump of an unresolvable CS (once) so the
+      // descriptor chain can be decoded offline against the eudfail trace.
+      static const bool eudFail = std::getenv("DELTA_GPU_EUDFAIL") != nullptr;
+      static std::unordered_set<uint64_t> dumped;
+      if (eudFail && dumped.insert(csAddr).second) {
+        const uint32_t *c = reinterpret_cast<const uint32_t *>(csAddr);
+        std::fprintf(stderr, "[csdump] cs=%#lx first 0x360 dwords:\n",
+                     (unsigned long)csAddr);
+        for (uint32_t k = 0; k < 0x360; k += 8)
+          std::fprintf(stderr, "[csdump] %04x: %08x %08x %08x %08x %08x %08x %08x %08x\n",
+                       k, c[k], c[k+1], c[k+2], c[k+3], c[k+4], c[k+5], c[k+6], c[k+7]);
       }
     }
     static constexpr uint32_t nullDescriptor[8] = {};
