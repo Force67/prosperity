@@ -12,6 +12,7 @@ c++ -std=c++20 -DDELTA_HAVE_SPIRV_BACKEND=1 \
   tools/rdna_selftest.cpp \
   "$G/ps5/rdna/rdna_decode.cpp" \
   "$G/ps5/rdna/rdna_translate.cpp" \
+  "$G/ps5/rdna/rdna_resource.cpp" \
   "$G/ps4/gcn/gcn_decode.cpp" \
   "$G/ps4/gcn/gcn_resource.cpp" \
   shared/utl/mem_posix.cpp \

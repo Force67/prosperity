@@ -32,6 +32,7 @@ gpu::gcn::Recompiled Recompile(const uint32_t*, const uint32_t*, const uint32_t*
 #include "ps4/gcn/spirv/spv_post.h"
 #include "ps4/gcn/spirv/translator.h"
 #include "rdna_decode.h"
+#include "rdna_resource.h"
 
 namespace gpu::rdna {
 namespace {
@@ -90,18 +91,6 @@ void DumpProgram(const Program& prog, const char* tag) {
     if (in.size >= 2) std::fprintf(stderr, " %08x", in.raw[1]);
     if (in.has_literal) std::fprintf(stderr, " lit=%08x", in.literal);
     std::fprintf(stderr, "\n");
-  }
-}
-
-// Dwords loaded by an SMEM s_buffer_load / s_load opcode (x1/x2/x4/x8/x16).
-uint32_t SmemLoadCount(uint32_t op) {
-  switch (op) {
-    case 0x00: case 0x08: return 1;
-    case 0x01: case 0x09: return 2;
-    case 0x02: case 0x0A: return 4;
-    case 0x03: case 0x0B: return 8;
-    case 0x04: case 0x0C: return 16;
-    default: return 0;
   }
 }
 
@@ -266,62 +255,6 @@ void RdnaPlanBufLoadCbufs(const Program& program, uint32_t first_binding,
     bindings[srsrc] = binding;
     cbufs.push_back({binding, srsrc, 16});  // mat4-sized default window (16 dwords)
   }
-}
-
-// ---- MIMG (texture sampling) ------------------------------------------------
-// RDNA2 counterpart of the shared PlanMimgBindings: MIMGs reading the same
-// T#/S# descriptor share one set-0 binding, in first-use order. EmitMimg pairs
-// against this plan. `arrayed` (DA[14]) is approximate on RDNA2 (DIM replaced DA).
-gpu::gcn::MimgBindingPlan RdnaPlanMimg(const Program& program) {
-  gpu::gcn::MimgBindingPlan plan;
-  struct Load { uint32_t sgpr, dwords, index; };
-  std::vector<Load> loads;
-  auto coveringLoad = [&](uint32_t sgpr, uint32_t dwords) -> uint32_t {
-    for (auto it = loads.rbegin(); it != loads.rend(); ++it)
-      if (sgpr >= it->sgpr && sgpr + dwords <= it->sgpr + it->dwords)
-        return it->index;
-    return 0xFFFF;  // inline user data (no covering load)
-  };
-  std::unordered_map<uint64_t, uint32_t> binding_of;
-  uint32_t idx = 0;
-  for (const Inst& inst : program) {
-    const uint32_t i = idx++;
-    if (inst.enc == Enc::kSmrd) {
-      if (inst.opcode <= 0x04) {  // s_load_dword..x16 (re)defines descriptor SGPRs
-        const uint32_t sdst = (inst.raw[0] >> 6) & 0x7F;
-        const uint32_t dwords = SmemLoadCount(inst.opcode);
-        loads.erase(std::remove_if(loads.begin(), loads.end(), [&](const Load& ld) {
-          return sdst < ld.sgpr + ld.dwords && ld.sgpr < sdst + dwords;
-        }), loads.end());
-        loads.push_back({sdst, dwords, i});
-      }
-      continue;
-    }
-    if (inst.enc != Enc::kMimg) continue;
-    const uint32_t w0 = inst.raw[0], w1 = inst.raw[1];
-    const uint32_t op = (w0 >> 18) & 0x7F;
-    const uint32_t srsrc = ((w1 >> 16) & 0x1F) * 4;
-    const bool sampling = op >= 0x20;
-    const bool storage = op == 0x08 || op == 0x09;
-    const uint32_t ssamp = sampling ? ((w1 >> 21) & 0x1F) * 4 : 0xFFu;
-    const uint32_t flags = ((w0 >> 14) & 1) |                          // DA (approx)
-                           ((op == 0x28 || op == 0x2f ? 1u : 0u) << 1) |  // dref
-                           ((op == 0x47 ? 1u : 0u) << 2) |             // gather
-                           (static_cast<uint32_t>(storage) << 3);
-    const uint64_t key =
-        static_cast<uint64_t>(srsrc) | (static_cast<uint64_t>(ssamp) << 8) |
-        (static_cast<uint64_t>(coveringLoad(srsrc, 8)) << 16) |
-        (static_cast<uint64_t>(sampling ? coveringLoad(ssamp, 4) : 0xFFFEu) << 32) |
-        (static_cast<uint64_t>(flags) << 48);
-    auto [it, inserted] = binding_of.emplace(
-        key, static_cast<uint32_t>(plan.binding_srsrc.size()));
-    if (inserted) {
-      plan.binding_srsrc.push_back(srsrc);
-      plan.binding_storage.push_back(storage);
-    }
-    plan.binding_by_pc[inst.pc] = it->second;
-  }
-  return plan;
 }
 
 void RdnaEmitSmem(Translator& t, const Inst& inst, StageContext& sc) {
@@ -882,6 +815,8 @@ bool TranslatePs(const Program& program,
     return false;
   const gpu::gcn::MimgBindingPlan mimg_plan = RdnaPlanMimg(program);
   sc.mimg_plan = &mimg_plan;  // borrowed by EmitBody
+  for (uint32_t i = 0; i < mimg_plan.binding_srsrc.size(); i++)
+    r.ps_texs.push_back({i, mimg_plan.binding_srsrc[i], mimg_plan.binding_storage[i]});
 
   sc.main_fn = t.m.BeginFunction(t.t_void, t.t_fn);
 

@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "ps5/rdna/rdna_decode.h"
+#include "ps5/rdna/rdna_resource.h"
 #include "ps5/rdna/rdna_translate.h"
 #include "ps4/gcn/spirv/spv_post.h"
 
@@ -332,6 +333,22 @@ int main() {
     expect(gpu::gcn::spirv::Validate(r.fs_spirv, &err),
            "VOP3P packed-f16 PS SPIR-V validates");
     if (!err.empty()) std::printf("      ps: %s\n", err.c_str());
+  }
+
+  std::printf("== gfx10.3 T# decode ==\n");
+  {
+    // 256x128 2D texture at 0x800000000. width-1=255 -> d1[31:30]|d2[11:0];
+    // height-1=127 -> d2[27:14]; type=9 (2D) -> d3[31:28].
+    uint32_t d[8] = {0};
+    d[0] = 0x08000000;                       // base_units[31:0] (base = <<8)
+    d[1] = (255u & 0x3u) << 30;              // width-1 low 2 bits
+    d[2] = ((255u >> 2) & 0xFFF) | (127u << 14);
+    d[3] = 9u << 28;                         // type = 2D
+    gpu::gcn::TImage t = gpu::rdna::DecodeTImage(d);
+    expect(t.base == 0x800000000ull, "T# base decodes (256-byte units << 8)");
+    expect(t.width == 256 && t.height == 128, "T# 256x128 dimensions decode");
+    expect(t.type == 9 && !t.arrayed, "T# type 2D, non-arrayed");
+    expect(t.mip_levels == 1 && t.tiling_idx == 8, "T# single mip, linear");
   }
 
   std::printf(g_failures ? "\nFAILED (%d)\n" : "\nOK\n", g_failures);
