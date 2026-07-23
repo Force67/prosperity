@@ -532,19 +532,29 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
       // memory per chain_off[] (the VS loads its transform's V# from a root
       // descriptor table this way). The bind size is the recompiler's planned dword
       // window (the V# stride/records are meaningless for an s_load pointer).
+      // The merged ES/GS NGG vertex shader reads its GS user data starting at a
+      // nonzero wave SGPR (sgpr 0..udBase-1 are ES/system), but the AGC latches it
+      // into SPI_SHADER_USER_DATA_GS_0 which we index from 0. DELTA_PS5_UDBASE
+      // shifts the vertex-stage user-data index so shader sgpr N -> userData[N-udBase].
+      static const uint32_t udBaseEnv = [] {
+        const char *e = std::getenv("DELTA_PS5_UDBASE");
+        return e ? static_cast<uint32_t>(std::atoi(e)) : 0u;
+      }();
       auto resolveCbufs = [&](const std::vector<gcn::ShaderCbuf> &cbufs,
                               const uint32_t *userData, bool vertexStage) {
+        const uint32_t udBase = vertexStage ? udBaseEnv : 0;
         for (const auto &cb : cbufs) {
           if (cb.binding >= 8) continue;
           VBuffer vb{};
           const char *how = "direct";
+          const uint32_t udi = cb.ud_sgpr >= udBase ? cb.ud_sgpr - udBase : cb.ud_sgpr;
           if (cb.chain_len == 0) {
-            if (cb.ud_sgpr + 3 >= 32) continue;
-            vb = decodeVBuffer(&userData[cb.ud_sgpr]);
+            if (udi + 3 >= 32) continue;
+            vb = decodeVBuffer(&userData[udi]);
           } else {  // walk the s_load pointer chain to the final V#
-            if (cb.ud_sgpr + 1 >= 32) continue;
-            uint64_t ptr = (static_cast<uint64_t>(userData[cb.ud_sgpr + 1] & 0xFFFF) << 32) |
-                           userData[cb.ud_sgpr];
+            if (udi + 1 >= 32) continue;
+            uint64_t ptr = (static_cast<uint64_t>(userData[udi + 1] & 0xFFFF) << 32) |
+                           userData[udi];
             bool ok = true;
             for (uint32_t i = 0; i + 1 < cb.chain_len; i++) {  // deref intermediate pointers
               uint64_t at = (ptr + cb.chain_off[i]) & ~uint64_t{3};
