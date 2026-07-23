@@ -18,12 +18,17 @@
 
 namespace gpu::gcn {
 
+// Upper bound used by the compute resource planner and Vulkan staging path.
+// The renderer additionally checks the selected device's descriptor limits.
+inline constexpr uint32_t kMaxCsResources = 32;
+
 // A vertex attribute recovered from the VS fetch shader, in semantic order.
 struct ShaderAttr {
   uint32_t location = 0;        // GLSL `in` location == semantic index
   uint32_t num_comps = 0;       // 1..4 (from the buffer_load_format opcode)
   uint32_t table_sgpr = 0;      // VS user-data dword of the vertex-table ptr
   uint32_t vbuf_dword_off = 0;  // dword offset of this attr's V# in the table
+  bool inline_descriptor = false;  // V# lives directly in VS user data
 };
 
 // A constant buffer a shader stage reads (s_buffer_load). Bound as a UBO.
@@ -46,6 +51,7 @@ struct ShaderCbuf {
 struct ShaderTex {
   uint32_t binding = 0;
   uint32_t ud_sgpr = 0;  // PS user-data dword index of the 8-dword T#
+  bool storage = false;  // image_store binding rather than a sampled image
 };
 
 struct Recompiled {
@@ -68,17 +74,16 @@ Recompiled Recompile(const uint32_t* vs_code, const uint32_t* ps_code,
                      const uint32_t* vs_user_data,
                      const uint32_t* ps_user_data);
 
-// A memory resource a compute shader touches (source/dest buffer or image).
-// The descriptor (V#/T#) lives in the seeded register file at `base_sgpr`
-// (user data); the renderer resolves its live guest base/size from the
-// dispatch's COMPUTE_USER_DATA and binds a storage buffer for it. The
+// A memory resource a compute shader touches. The descriptor may be inline in
+// user data or loaded through an SRT chain; `base_sgpr` names its live location
+// at `use_pc`, where the command processor resolves it before dispatch. The
 // recompiled CS accesses it by `binding`, computing offsets relative to the
-// descriptor base (the storage buffer aliases the guest range
-// [base, base + size), so base maps to buffer offset 0).
+// descriptor base (the storage buffer aliases [base, base + size)).
 struct CsResource {
-  uint32_t base_sgpr = 0;  // SGPR index the descriptor sits at (in user data)
+  uint32_t base_sgpr = 0;  // SGPR index of the live descriptor at use_pc
+  uint32_t use_pc = 0;     // representative instruction consuming it
   uint32_t binding = 0;    // storage-buffer binding (set 0)
-  uint8_t kind = 0;        // 0 = buffer (V#/pointer), 1 = image (T#)
+  uint8_t kind = 0;        // 0 = buffer V#, 1 = image T#, 2 = scalar pointer
   bool written = false;    // dispatch writes it -> copy back to guest
   uint32_t min_bytes = 0;  // lower bound on size from immediate offsets
 };

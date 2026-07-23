@@ -602,19 +602,23 @@ bool smodule::setupTLS() {
 }
 
 static bool decodeNid(const char *name, uint64_t &lid, uint64_t &mid) {
-  /*nid's are always 16 bytes long so we should get away
-   with hard coding the access offset*/
-
-  bool decodeSuccess = true;
-  if (!runtime::decode_nid(&name[12], 1, lid))
-    decodeSuccess = false;
-  if (!runtime::decode_nid(&name[14], 1, mid))
-    decodeSuccess = false;
-  if (!decodeSuccess) {
-    LOG_ERROR("decodeNid: can't decode symbol");
+  // Obfuscated imports are "<11-char nid>#<libid>#<modid>" where both ids are
+  // variable-length base64: one char for 0..63, two chars once an index passes
+  // 63 (games importing from >64 libraries hit the long form, which shifts the
+  // second '#' — the ids can't be read at fixed offsets).
+  const char *h1 = std::strchr(name, '#');
+  if (!h1)
     return false;
-  }
-  return decodeSuccess;
+  const char *h2 = std::strchr(h1 + 1, '#');
+  if (!h2 || h2 == h1 + 1 || !h2[1])
+    return false;
+  lid = 0;
+  mid = 0;
+  if (!runtime::decode_nid(h1 + 1, static_cast<size_t>(h2 - (h1 + 1)), lid))
+    return false;
+  if (!runtime::decode_nid(h2 + 1, std::strlen(h2 + 1), mid))
+    return false;
+  return true;
 }
 
 bool smodule::resolveObfSymbol(const char *name, uintptr_t &ptrOut) {
@@ -656,8 +660,12 @@ bool smodule::resolveObfSymbol(const char *name, uintptr_t &ptrOut) {
   }
 
   uint64_t libid = 0, modid = 0;
-  if (!decodeNid(name, libid, modid))
-    __debugbreak();
+  if (!decodeNid(name, libid, modid)) {
+    // Not an obfuscated NID import (or a malformed one): let the caller route
+    // it to the badcall stub instead of taking the whole process down.
+    LOG_ERROR("resolveObfSymbol: can't decode symbol '{}'", name);
+    return false;
+  }
 
   const char *libname = nullptr;
 

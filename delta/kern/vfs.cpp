@@ -218,6 +218,10 @@ bool stat(const char *path, int64_t &size, bool &isDir) {
   return true;
 }
 
+static std::string g_titleId;
+void setTitleId(const std::string &id) { g_titleId = id; }
+const std::string &titleId() { return g_titleId; }
+
 static std::map<std::string, std::vector<uint8_t>> g_fileCache;
 void cacheFile(const std::string &key, std::vector<uint8_t> data) {
   g_fileCache[key] = std::move(data);

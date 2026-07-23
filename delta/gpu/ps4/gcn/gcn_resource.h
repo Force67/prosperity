@@ -14,12 +14,15 @@
  */
 
 #include <cstdint>
+#include <memory>
 #include <unordered_map>
 #include <vector>
 
 #include "gcn_decode.h"
 
 namespace gpu::gcn {
+
+struct RecompiledCs;
 
 // A decoded vertex-buffer resource (GCN V#, 4 dwords).
 struct VBuffer {
@@ -53,6 +56,7 @@ struct TImage {
   bool arrayed = false;      // MIMG DA bit: address carries an array layer
   bool force_lod_zero = false;  // gather4_lz: implicit gather clamped to mip 0
   bool depth_compare = false;   // MIMG _C uses the sampler's compare function
+  bool storage = false;         // image_store target
   bool valid = false;
 };
 
@@ -73,16 +77,22 @@ struct MimgBindingPlan {
   std::unordered_map<uint32_t, uint32_t> binding_by_pc;
   // Per binding: the T# base SGPR of its first-use MIMG.
   std::vector<uint32_t> binding_srsrc;
+  // Per binding: true when the descriptor is an image_store target.
+  std::vector<bool> binding_storage;
 };
-MimgBindingPlan PlanMimgBindings(const Program& program);
+MimgBindingPlan PlanMimgBindings(const Program& program,
+                                 const uint8_t* reachable = nullptr);
 
 // Recover the image(s) a pixel shader references, by tracking its
 // s_load_dwordx4/x8/x16 of descriptor tables out of the user-data SGPRs.
 // The result preserves MIMG order (it is the shader's set-0 binding order);
 // unresolved entries are returned with valid=false so later bindings are not
-// compacted. Pass a CachedProgram()/DecodeShader() of the PS code.
-std::vector<TImage> TrackTextures(const Program& ps_program,
-                                  const uint32_t* ps_user_data);
+// compacted. Pass a CachedProgram() of the PS code: the shared_ptr keys a
+// per-program cache of the binding plan + the scalar-relevant instruction
+// subset, so per-draw calls skip re-planning and walking the VALU bulk.
+std::vector<TImage> TrackTextures(
+    const std::shared_ptr<const Program>& ps_program,
+    const uint32_t* ps_user_data);
 
 // Resolve the live 4-dword V# behind each constant buffer a graphics stage
 // reads (s_buffer_load), following the same extended-user-data / SRT pointer
@@ -91,7 +101,18 @@ std::vector<TImage> TrackTextures(const Program& ps_program,
 // through EUD, so reading the V# straight out of user data yields base=0; this
 // walks the chain and reads the V# at the point of the s_buffer_load.
 std::unordered_map<uint32_t, VBuffer> ResolveCbuffers(
-    const Program& program, const uint32_t* user_data);
+    const std::shared_ptr<const Program>& program, const uint32_t* user_data);
+
+// Replay a compute shader's uniform scalar descriptor loads and capture each
+// planned V#/T#/pointer at the instruction where it is consumed. This resolves
+// SRT chains into SGPRs above the direct COMPUTE_USER_DATA range.
+struct ResolvedCsResource {
+  bool valid = false;
+  uint32_t descriptor[8] = {};
+};
+std::vector<ResolvedCsResource> ResolveCsResources(
+    const Program& program, const RecompiledCs& plan,
+    const uint32_t* user_data);
 
 // Given a decoded fetch shader and the VS user-data SGPRs (16 dwords), recover
 // the vertex-attribute buffers it fetches, in attribute order. Handles the

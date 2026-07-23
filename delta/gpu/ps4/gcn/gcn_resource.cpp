@@ -6,10 +6,14 @@
 
 #include "gcn_resource.h"
 
+#include "gcn_translate.h"
+
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+
+#include <utl/mem.h>
 
 namespace gpu::gcn {
 namespace {
@@ -21,7 +25,8 @@ constexpr uint64_t kGuestHi = 0x20000000000ull;
 
 bool GuestRange(uint64_t address, uint64_t size) {
   return size && address >= kGuestLo && address < kGuestHi &&
-         size <= kGuestHi - address;
+         size <= kGuestHi - address &&
+         utl::isMemoryRangeMapped(reinterpret_cast<const void *>(address), size);
 }
 
 // SMRD operand fields (GFX7).
@@ -91,7 +96,8 @@ struct ScalarEval {
       sgpr[i] = user_data[i];
       known[i] = true;
     }
-    trace = std::getenv("DELTA_GPU_EUDTRACE") != nullptr;
+    static const bool eud_trace = std::getenv("DELTA_GPU_EUDTRACE") != nullptr;
+    trace = eud_trace;
   }
 
   uint64_t Ptr(uint32_t s) const {  // 48-bit descriptor-table pointer pair
@@ -109,6 +115,33 @@ struct ScalarEval {
   void Clear(uint32_t s) {
     if (s < kRegs) known[s] = false;
   }
+  bool Source(uint32_t field, uint32_t literal, uint32_t& value) const {
+    if (field <= 127) {
+      if (!known[field]) return false;
+      value = sgpr[field];
+      return true;
+    }
+    if (field == 128) value = 0;
+    else if (field >= 129 && field <= 192) value = field - 128;
+    else if (field >= 193 && field <= 208)
+      value = static_cast<uint32_t>(-static_cast<int32_t>(field - 192));
+    else if (field == 240) value = 0x3f000000u;
+    else if (field == 241) value = 0xbf000000u;
+    else if (field == 242) value = 0x3f800000u;
+    else if (field == 243) value = 0xbf800000u;
+    else if (field == 244) value = 0x40000000u;
+    else if (field == 245) value = 0xc0000000u;
+    else if (field == 246) value = 0x40800000u;
+    else if (field == 247) value = 0xc0800000u;
+    else if (field == 255) value = literal;
+    else return false;
+    return true;
+  }
+  bool SourceHi(uint32_t field, uint32_t& value) const {
+    if (field <= 126) return Source(field + 1, 0, value);
+    value = 0;
+    return true;
+  }
 
   // Advance the register file across one instruction. Only scalar moves and
   // pointer-relative scalar loads (the descriptor-chain ops) mutate it; every
@@ -120,36 +153,103 @@ struct ScalarEval {
       const uint32_t w = inst.raw[0];
       const uint32_t sdst = (w >> 16) & 0x7F, ssrc0 = w & 0xFF;
       if (inst.opcode == 0x03) {  // s_mov_b32: stage a pointer via a scalar move
-        if (ssrc0 < kRegs && known[ssrc0]) Set(sdst, sgpr[ssrc0]);
+        uint32_t value;
+        if (Source(ssrc0, inst.literal, value)) Set(sdst, value);
         else Clear(sdst);
       } else if (inst.opcode == 0x04) {  // s_mov_b64
-        if (ssrc0 + 1 < kRegs && known[ssrc0] && known[ssrc0 + 1]) {
-          Set(sdst, sgpr[ssrc0]);
-          Set(sdst + 1, sgpr[ssrc0 + 1]);
+        uint32_t lo, hi;
+        const bool source_known = Source(ssrc0, inst.literal, lo) &&
+                                  SourceHi(ssrc0, hi);
+        if (source_known) {
+          Set(sdst, lo);
+          Set(sdst + 1, hi);
         } else { Clear(sdst); Clear(sdst + 1); }
       }
       return;
     }
+    if (inst.enc == Enc::kSop2) {
+      const uint32_t w = inst.raw[0], op = inst.opcode;
+      const uint32_t sdst = (w >> 16) & 0x7F;
+      uint32_t a, b;
+      const bool inputs_known = Source(w & 0xFF, inst.literal, a) &&
+                                Source((w >> 8) & 0xFF, inst.literal, b);
+      if (!inputs_known) {
+        Clear(sdst);
+        return;
+      }
+      uint32_t value;
+      switch (op) {
+        case 0x00: case 0x02: value = a + b; break;
+        case 0x01: case 0x03: value = a - b; break;
+        case 0x0e: value = a & b; break;
+        case 0x10: value = a | b; break;
+        case 0x12: value = a ^ b; break;
+        case 0x14: value = a & ~b; break;
+        case 0x16: value = a | ~b; break;
+        case 0x18: value = ~(a & b); break;
+        case 0x1a: value = ~(a | b); break;
+        case 0x1c: value = ~(a ^ b); break;
+        case 0x1e: value = a << (b & 31); break;
+        case 0x20: value = a >> (b & 31); break;
+        case 0x22: value = static_cast<uint32_t>(
+            static_cast<int32_t>(a) >> (b & 31)); break;
+        case 0x26: value = a * b; break;
+        default:
+          Clear(sdst);
+          return;
+      }
+      Set(sdst, value);
+      return;
+    }
     if (inst.enc != Enc::kSmrd) return;
     const Smrd s = DecodeSmrd(inst.raw[0]);
-    if (s.op > 0x04) return;  // s_load_dword..dwordx16 only
-    const uint32_t dwords = 1u << s.op;
+    // s_load reads a descriptor through a raw 2-dword pointer; s_buffer_load
+    // (op 0x08..0x0c) reads it through a 4-dword V# resource table -- FOX and
+    // other engines stash T#/pointer descriptors in a cbuffer/SRT accessed this
+    // way, so following it here is what lets those bindings resolve.
+    const bool buffer_load = s.op >= 0x08 && s.op <= 0x0c;
+    if (s.op > 0x04 && !buffer_load) return;  // s_load / s_buffer_load only
+    const uint32_t dwords =
+        buffer_load ? (1u << (s.op - 0x08)) : (1u << s.op);
     const uint32_t base = s.sbase * 2;
-    // A load rewrites its destination SGPRs even if it cannot be resolved;
-    // invalidate first so a later consumer does not read stale values.
-    for (uint32_t i = 0; i < dwords; i++) Clear(s.sdst + i);
-    if (!AllKnown(base, 2)) return;
-    const uint64_t table = Ptr(base);
+    const uint32_t desc_dwords = buffer_load ? 4 : 2;
+    const bool base_known = AllKnown(base, desc_dwords);
+    const uint64_t table =
+        base_known ? (buffer_load ? DecodeVBuffer(&sgpr[base]).base : Ptr(base))
+                   : 0;
+    bool offset_known = true;
     uint64_t byte_off = 0;
     if (s.imm) {
       byte_off = static_cast<uint64_t>(s.offset) * 4;  // dword offset field
+    } else if (s.offset == 0xFF && inst.has_literal) {
+      byte_off = inst.literal;
     } else if (s.offset < kRegs && known[s.offset]) {
       byte_off = sgpr[s.offset];  // SOFFSET SGPR carries a byte offset
     } else {
+      offset_known = false;
+    }
+    // A load rewrites its destination SGPRs even if it cannot be resolved;
+    // snapshot its inputs before invalidating an overlapping destination.
+    for (uint32_t i = 0; i < dwords; i++) Clear(s.sdst + i);
+    static const bool fail_trace = std::getenv("DELTA_GPU_EUDFAIL") != nullptr;
+    if (!base_known || !offset_known) {
+      if (fail_trace)
+        std::fprintf(stderr,
+                     "[eudfail] s_load x%u s%u <- s%u: base_known=%d off_known=%d\n",
+                     dwords, s.sdst, base, base_known, offset_known);
       return;
     }
-    if (!GuestRange(table, byte_off + static_cast<uint64_t>(dwords) * 4)) return;
+    if (byte_off > UINT64_MAX - table) return;
     const uint64_t address = table + byte_off;
+    if (!GuestRange(address, static_cast<uint64_t>(dwords) * 4)) {
+      if (fail_trace)
+        std::fprintf(stderr,
+                     "[eudfail] s_load UNMAPPED x%u s%u <- [s%u=%#lx + %#lx] = %#lx\n",
+                     dwords, s.sdst, base, static_cast<unsigned long>(table),
+                     static_cast<unsigned long>(byte_off),
+                     static_cast<unsigned long>(address));
+      return;
+    }
     const uint32_t* src = reinterpret_cast<const uint32_t*>(address);
     for (uint32_t i = 0; i < dwords; i++) Set(s.sdst + i, src[i]);
     if (trace)
@@ -160,9 +260,48 @@ struct ScalarEval {
   }
 };
 
+// Per-program analysis reused across draws: the MIMG binding plan plus the
+// subset of instructions the scalar walk actually consumes (descriptor-chain
+// s_movs, SMRD loads, MIMG uses). TrackTextures/ResolveCbuffers run once per
+// draw on shaders that are mostly VALU code, so stepping only this subset --
+// and planning bindings once instead of per draw -- removes the bulk of the
+// per-draw analysis cost. Keyed by the Program object; the cached shared_ptr
+// pins the object so the pointer cannot be reused while the entry lives. A
+// shader rewrite yields a new Program from CachedProgram -> a new entry.
+struct ScalarPassInfo {
+  MimgBindingPlan plan;
+  std::vector<Inst> insts;  // program-order subset relevant to ScalarEval users
+};
+
+const ScalarPassInfo& CachedScalarInfo(
+    const std::shared_ptr<const Program>& program) {
+  struct Entry {
+    std::shared_ptr<const Program> pin;
+    ScalarPassInfo info;
+  };
+  static std::unordered_map<const Program*, Entry> cache;
+  auto it = cache.find(program.get());
+  if (it != cache.end()) return it->second.info;
+  if (cache.size() > 512) cache.clear();  // unbounded-growth backstop
+  Entry e;
+  e.pin = program;
+  const std::vector<uint8_t> reachable = ComputeReachability(*program);
+  e.info.plan = PlanMimgBindings(*program, reachable.data());
+  uint32_t index = 0;
+  for (const Inst& inst : *program) {
+    if (!reachable[index++]) continue;
+    const bool scalar_move =
+        inst.enc == Enc::kSop1 && (inst.opcode == 0x03 || inst.opcode == 0x04);
+    if (scalar_move || inst.enc == Enc::kSmrd || inst.enc == Enc::kMimg)
+      e.info.insts.push_back(inst);
+  }
+  return cache.emplace(program.get(), std::move(e)).first->second.info;
+}
+
 }  // namespace
 
-MimgBindingPlan PlanMimgBindings(const Program& program) {
+MimgBindingPlan PlanMimgBindings(const Program& program,
+                                 const uint8_t* reachable) {
   MimgBindingPlan plan;
   // Track, per SGPR range, the index of the last SMRD instruction covering it.
   struct Load {
@@ -180,6 +319,7 @@ MimgBindingPlan PlanMimgBindings(const Program& program) {
   uint32_t inst_index = 0;
   for (const Inst& inst : program) {
     const uint32_t idx = inst_index++;
+    if (reachable && !reachable[idx]) continue;
     if (inst.enc == Enc::kSmrd) {
       const Smrd s = DecodeSmrd(inst.raw[0]);
       if (s.op <= 0x04) {  // s_load_dword..x16 can rewrite descriptor SGPRs
@@ -199,16 +339,21 @@ MimgBindingPlan PlanMimgBindings(const Program& program) {
     const uint32_t op = (w0 >> 18) & 0x7F;
     const uint32_t srsrc = ((w1 >> 16) & 0x1F) * 4;
     const bool sampling = op >= 0x20;
+    const bool storage = op == 0x08 || op == 0x09;
     const uint32_t ssamp = sampling ? ((w1 >> 21) & 0x1F) * 4 : 0xFF;
     const uint32_t flags = (((w0 >> 14) & 1) << 0) |               // DA
                            (((op == 0x28 || op == 0x2f) ? 1 : 0) << 1) |  // dref
-                           ((op == 0x47 ? 1 : 0) << 2);            // gather4_lz
+                           ((op == 0x47 ? 1 : 0) << 2) |           // gather4_lz
+                           (static_cast<uint32_t>(storage) << 3);
     const uint64_t key = MimgDescriptorKey(
         srsrc, ssamp, covering_load(srsrc, 8),
         sampling ? covering_load(ssamp, 4) : 0xFFFE, flags);
     const auto [it, inserted] =
         binding_of.emplace(key, static_cast<uint32_t>(plan.binding_srsrc.size()));
-    if (inserted) plan.binding_srsrc.push_back(srsrc);
+    if (inserted) {
+      plan.binding_srsrc.push_back(srsrc);
+      plan.binding_storage.push_back(storage);
+    }
     plan.binding_by_pc[inst.pc] = it->second;
   }
   return plan;
@@ -293,7 +438,10 @@ std::vector<VBuffer> TrackVertexBuffers(const Program& fetch_program,
     if (base_sgpr + 1 >= 16) continue;
     const uint64_t table = UserDataPointer(vs_user_data, base_sgpr);
     if (!GuestRange(table, 16)) continue;
-    const uint32_t byte_off = s.imm ? s.offset * 4 : 0;
+    const uint32_t byte_off = s.imm ? s.offset * 4
+                                    : (s.offset == 0xFF && inst.has_literal
+                                           ? inst.literal
+                                           : 0);
     const VBuffer v =
         DecodeVBuffer(reinterpret_cast<const uint32_t*>(table + byte_off));
     if (v.base >= kGuestLo && v.base < kGuestHi && v.stride &&
@@ -311,21 +459,23 @@ std::vector<VBuffer> TrackVertexBuffers(const Program& fetch_program,
   return result;
 }
 
-std::vector<TImage> TrackTextures(const Program& ps_program,
-                                  const uint32_t* ps_user_data) {
+std::vector<TImage> TrackTextures(
+    const std::shared_ptr<const Program>& ps_program,
+    const uint32_t* ps_user_data) {
   std::vector<TImage> result;
-  if (!ps_user_data) return result;
+  if (!ps_program || !ps_user_data) return result;
 
   // Bindings come from the shared plan (one per unique descriptor identity),
   // so this list pairs 1:1 with the recompiled shader's set-0 samplers.
-  const MimgBindingPlan plan = PlanMimgBindings(ps_program);
+  const ScalarPassInfo& cached = CachedScalarInfo(ps_program);
+  const MimgBindingPlan& plan = cached.plan;
 
   // Step the scalar register file across the program; at each MIMG read the
   // live T#/S# straight out of the resolved SGPRs. Inline user data, a single
   // indirect load, and nested EUD chains all land here identically.
   ScalarEval eval(ps_user_data);
 
-  for (const Inst& inst : ps_program) {
+  for (const Inst& inst : cached.insts) {
     eval.Step(inst);
     if (inst.enc != Enc::kMimg) continue;
     const auto plan_it = plan.binding_by_pc.find(inst.pc);
@@ -373,6 +523,7 @@ std::vector<TImage> TrackTextures(const Program& ps_program,
     t.arrayed = (inst.raw[0] & 0x4000) != 0;  // MIMG DA
     t.force_lod_zero = op == 0x47;            // IMAGE_GATHER4_LZ
     t.depth_compare = op == 0x28 || op == 0x2f;
+    t.storage = op == 0x08 || op == 0x09;
     if (t.valid) {
       // Empirical tiling census (DELTA_GPU_TILEHIST): tally tiling_idx of
       // every sampled texture to confirm which modes are linear vs tiled.
@@ -404,9 +555,9 @@ std::vector<TImage> TrackTextures(const Program& ps_program,
 }
 
 std::unordered_map<uint32_t, VBuffer> ResolveCbuffers(
-    const Program& program, const uint32_t* user_data) {
+    const std::shared_ptr<const Program>& program, const uint32_t* user_data) {
   std::unordered_map<uint32_t, VBuffer> result;
-  if (!user_data) return result;
+  if (!program || !user_data) return result;
 
   // Mirror TrackTextures: step the scalar register file, and at each
   // s_buffer_load read the live 4-dword V# out of the resolved SGPRs. FOX
@@ -416,7 +567,7 @@ std::unordered_map<uint32_t, VBuffer> ResolveCbuffers(
   // per base SGPR (PlanCbufs), so key by base SGPR and keep the first
   // resolvable V# seen for it.
   ScalarEval eval(user_data);
-  for (const Inst& inst : program) {
+  for (const Inst& inst : CachedScalarInfo(program).insts) {
     eval.Step(inst);
     if (inst.enc != Enc::kSmrd) continue;
     const Smrd s = DecodeSmrd(inst.raw[0]);
@@ -429,6 +580,31 @@ std::unordered_map<uint32_t, VBuffer> ResolveCbuffers(
       std::fprintf(stderr,
                    "[eud] cbuf s%u -> base=%#lx stride=%u nrec=%u\n", base,
                    static_cast<unsigned long>(v.base), v.stride, v.num_records);
+  }
+  return result;
+}
+
+std::vector<ResolvedCsResource> ResolveCsResources(
+    const Program& program, const RecompiledCs& plan,
+    const uint32_t* user_data) {
+  std::vector<ResolvedCsResource> result(plan.resources.size());
+  if (!user_data) return result;
+
+  ScalarEval eval(user_data);
+  for (const Inst& inst : program) {
+    // Capture before Step(): an s_load may use a pointer in the same SGPR range
+    // it overwrites with the loaded descriptor.
+    for (const CsResource& resource : plan.resources) {
+      if (resource.use_pc != inst.pc || resource.binding >= result.size())
+        continue;
+      const uint32_t dwords = resource.kind == 1 ? 8 : resource.kind == 2 ? 2 : 4;
+      if (!eval.AllKnown(resource.base_sgpr, dwords)) continue;
+      ResolvedCsResource& resolved = result[resource.binding];
+      std::memcpy(resolved.descriptor, &eval.sgpr[resource.base_sgpr],
+                  dwords * sizeof(uint32_t));
+      resolved.valid = true;
+    }
+    eval.Step(inst);
   }
   return result;
 }

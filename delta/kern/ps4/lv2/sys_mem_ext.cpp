@@ -26,17 +26,21 @@
 
 namespace krnl {
 
-// Our VM is a flat, host-backed low arena that is never compacted. We don't
-// reclaim guest mappings: utl::freeMem() takes only a base (no length) so it
-// can't honour a partial munmap, and a wrong base would corrupt the arena. The
-// host reclaims every page at exit. Logged once so a workload that churns large
-// mappings (and would actually need reclaim) is visible.
+// Our VM is a flat, host-backed low arena that is never compacted, so the HOST
+// pages stay mapped (utl::freeMem() takes only a base, no length, and can't
+// honour a partial munmap; stale guest pointers then read stable garbage
+// rather than faulting). The BOOKKEEPING, however, must be released: titles
+// churn VA (SotC recycles multi-MB fiber/streaming regions constantly) and key
+// real allocator state off sceKernelVirtualQuery's [start, end) — leaving dead
+// entries in the VMA made later queries report stale bounds.
 int PS4ABI sys_munmap(void *addr, size_t len) {
   static std::atomic<bool> warned{false};
   if (!warned.exchange(true))
-    LOG_WARNING("sys_munmap: unmaps are ignored (regions leak until exit); "
-                "first was {} (+{:#x})",
+    LOG_WARNING("sys_munmap: host pages are retained (first was {} +{:#x}); "
+                "only the VMA bookkeeping is released",
                 fmt::ptr(addr), len);
+  if (auto *proc = proc::getActive(); proc && addr && len)
+    proc->getVma().remove(static_cast<uint8_t *>(addr), len);
   return 0;
 }
 
@@ -145,11 +149,14 @@ int PS4ABI sys_virtual_query(const void *addr, int /*flags*/, void *info,
     std::memcpy(vq + 0x1C, &memType, sizeof(int));
   }
   if (std::getenv("DELTA_VQ_TRACE"))
-    std::printf("[vq] addr=%p region=[%p..%p) sceProt=%#x memType=%d\n", addr,
-                start, end, region->sceProt, gpu ? 3 : 0);
+    std::printf("[vq] addr=%p region=[%p..%p) sceProt=%#x memType=%d rsv=%d\n",
+                addr, start, end, region->sceProt, gpu ? 3 : 0,
+                region->reserved ? 1 : 0);
   if (infoSize >= 0x21) {
-    // flexible(0x01) | direct(0x02, GPU mem) | committed(0x10)
-    vq[0x20] = 0x01 | 0x10 | (gpu ? 0x02 : 0x00);
+    // flexible(0x01) | direct(0x02, GPU mem) | committed(0x10). A MAP_VOID
+    // reservation is none of these -- titles branch on isCommitted to decide
+    // whether a range still needs a real commit.
+    vq[0x20] = region->reserved ? 0x00 : (0x01 | 0x10 | (gpu ? 0x02 : 0x00));
     if (region->name) {
       size_t n = std::strlen(region->name);
       if (n > 31)
@@ -161,15 +168,76 @@ int PS4ABI sys_virtual_query(const void *addr, int /*flags*/, void *info,
   return 0;
 }
 
-// Applies a list of dmem map/unmap/protect ops in one call. We don't model the
-// direct-memory pool, so accept and report all entries processed. Logged so a
-// title that actually drives dmem through this path is visible.
-int PS4ABI sys_batch_map(uint32_t /*handle*/, uint32_t /*flags*/, void *,
-                         int count, int *processed) {
-  LOG_WARNING("sys_batch_map: dmem batch of {} op(s) not modeled; ignoring",
-              count);
+// Applies a list of dmem map/unmap/protect ops in one call
+// (sceKernelBatchMap/BatchMap2). Entry layout from the libkernel wrapper:
+//   0x00 void*  start      (VA the title already chose)
+//   0x08 u64    offset     (physical dmem offset, MAP_DIRECT only)
+//   0x10 u64    length
+//   0x18 u8     protection (SCE prot incl. GPU bits)
+//   0x19 u8     memoryType
+//   0x1c u32    operation
+// Ops: 0 = MAP_DIRECT, 1 = UNMAP, 2 = PROTECT, 3 = MAP_FLEXIBLE,
+// 4 = TYPE_PROTECT. The maps must actually commit memory at `start`: SotC
+// batch-maps its GPU pools this way, and with the old ignore-stub the PM4
+// stream referenced VAs that were never backed and the submit faulted.
+int PS4ABI sys_batch_map(uint32_t /*handle*/, uint32_t /*flags*/,
+                         void *entries, int count, int *processed) {
+  struct BatchMapEntry {
+    uint64_t start;
+    uint64_t offset;
+    uint64_t length;
+    uint8_t prot;
+    uint8_t type;
+    uint16_t pad;
+    uint32_t operation;
+  };
+  static_assert(sizeof(BatchMapEntry) == 0x20, "batch-map entry is 32 bytes");
+
+  static const bool trace = std::getenv("DELTA_DMEM_TRACE") != nullptr;
+  auto *e = static_cast<BatchMapEntry *>(entries);
+  int done = 0;
+  for (; e && done < count; done++) {
+    const auto &op = e[done];
+    if (trace)
+      std::fprintf(stderr,
+                   "[dmem] batch[%d/%d] op=%u start=%#llx off=%#llx len=%#llx "
+                   "prot=%#x type=%u\n",
+                   done, count, op.operation, (unsigned long long)op.start,
+                   (unsigned long long)op.offset, (unsigned long long)op.length,
+                   op.prot, op.type);
+    switch (op.operation) {
+    case 0:   // MAP_DIRECT: identity model, back the chosen VA with anon memory
+    case 3: { // MAP_FLEXIBLE: same, no physical offset
+      if (!op.start || !op.length) {
+        if (processed)
+          *processed = done;
+        return -SysError::eINVAL;
+      }
+      uint8_t *p = sys_mmap(reinterpret_cast<void *>(op.start), op.length,
+                            op.prot, mFlags::fixed | mFlags::anon,
+                            static_cast<uint32_t>(-1), 0);
+      if (p == reinterpret_cast<uint8_t *>(-1)) {
+        if (processed)
+          *processed = done;
+        return -SysError::eNOMEM;
+      }
+      break;
+    }
+    case 1: // UNMAP: host pages retained, bookkeeping released (see sys_munmap)
+      if (auto *pr = proc::getActive(); pr && op.start && op.length)
+        pr->getVma().remove(reinterpret_cast<uint8_t *>(op.start), op.length);
+      break;
+    case 2: // PROTECT / TYPE_PROTECT: our flat arena stays permissive; the
+    case 4: // title only narrows protections it already owns
+      break;
+    default:
+      LOG_WARNING("sys_batch_map: unknown op {} (entry {})", op.operation,
+                  done);
+      break;
+    }
+  }
   if (processed)
-    *processed = count;
+    *processed = done;
   return 0;
 }
 

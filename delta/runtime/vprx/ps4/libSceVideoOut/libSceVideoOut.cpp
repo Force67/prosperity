@@ -18,6 +18,7 @@
 #include "gpu/cmd_processor.h"
 #include "kern/proc.h"
 #include "kern/ps4/lv2/sys_event.h"
+#include "kern/ps4/lv2/sys_mem.h"
 
 // PS5 present bridge: forwards the flip to the AGC command processor's
 // vk::endFrame (gpu/ps5/cmd_processor.cpp).
@@ -117,12 +118,29 @@ struct VideoPort {
   int vblankEqueue = -1;
   void *vblankUdata = nullptr;
 
-  // a 16-byte guest label region per port (sceVideoOutGetBufferLabelAddress).
-  uint64_t labels[16] = {};
+  // Flip labels handed to the title via sceVideoOutGetBufferLabelAddress.
+  // MUST live in GUEST-addressable memory, not this struct: the title embeds
+  // the address in PM4 (Gnm's prepareFlip WRITE_DATA / EOP fence) and the
+  // command processor's label range check rightly refuses to write host .bss
+  // -- SotC's render fence never landed and its LoadInitialWorld job chain
+  // stalled forever on the unset label.
+  uint64_t *labels = nullptr;
 };
+
+uint64_t *videoLabels();  // fwd (needs g_mtx/g_port below)
 
 std::mutex g_mtx;
 VideoPort g_port;            // single display port is enough for Isaac
+
+// Guest-visible 16-slot label block, allocated on first use (either the pump
+// or the title asking for the address can get here first).
+uint64_t *videoLabels() {
+  std::lock_guard<std::mutex> lk(g_mtx);
+  if (!g_port.labels)
+    g_port.labels =
+        reinterpret_cast<uint64_t *>(krnl::allocLowGuest(16 * sizeof(uint64_t)));
+  return g_port.labels;
+}
 std::atomic<bool> g_gfxUp{false};
 
 std::atomic<int> g_gfxState{0};  // 0=untried, 1=up, 2=failed
@@ -207,8 +225,17 @@ void startFlipPump() {
       // to recycle buffers. With no real GPU we write it ourselves: a monotonic
       // value (the flip count) satisfies the ">= submitted id" poll so the game
       // stops waiting and submits the next frame.
-      for (int i = 0; i < 16; i++)
-        g_port.labels[i] = c;
+      // DELTA_VO_NOSTOMP: leave the labels to the title's own GPU fence
+      // writes (Gnm prepareFlip WRITE_DATA, which the command processor now
+      // lands in this guest-visible block). The blanket stomp below satisfies
+      // ">= submitted id" polls for HLE-only titles with no real GPU fences
+      // (Isaac), but overwrites the EXACT flip-arg a real Gnm flip protocol
+      // may compare against.
+      static const bool noStomp = std::getenv("DELTA_VO_NOSTOMP") != nullptr;
+      if (!noStomp)
+        if (uint64_t *lb = videoLabels())
+          for (int i = 0; i < 16; i++)
+            lb[i] = c;
       // post the flip-complete event to whichever equeue holds a flip knote.
       triggerAllEqueues(kEventFlip, kFilterFlip, static_cast<int64_t>(c));
     }
@@ -499,7 +526,7 @@ int PS4ABI sceVideoOutGetBufferLabelAddress(int handle, uintptr_t *label) {
   // GPU completion-label write). Returning the slot count here makes Gnm treat
   // the flip request as failed ("flip request failed"). Return 0 = success.
   if (label)
-    *label = reinterpret_cast<uintptr_t>(&g_port.labels[0]);
+    *label = reinterpret_cast<uintptr_t>(videoLabels());
   return 0;
 }
 

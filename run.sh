@@ -66,8 +66,10 @@ INNER+='
   [[ -f "'"$PKG"'" ]] || { echo "missing pkg: '"$PKG"'"; exit 1; }
   cd "$(dirname "'"$BIN"'")"
   cmd=(stdbuf -o0 -e0)'
+# -k: the emulator ignores SIGTERM (FEX guest threads), which leaves runaway
+# processes burning every core after the timeout; escalate to SIGKILL.
 [[ -n "$TIMEOUT" ]] && INNER+='
-  cmd+=(timeout "'"$TIMEOUT"'")'
+  cmd+=(timeout -k 5 --signal=KILL "'"$TIMEOUT"'")'
 INNER+='
   cmd+=("'"$BIN"'" "'"$PKG"'" '"${EXTRA[*]:-}"')'
 [[ $TRACE -eq 1 ]] && INNER+='

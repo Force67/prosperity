@@ -11,6 +11,7 @@
 
 #include "pkg_object.h"
 
+#include <cctype>
 #include <cstring>
 #include <mutex>
 #include <string>
@@ -309,6 +310,10 @@ struct PkgImpl {
   DataSource *inner = nullptr;
   uint32_t innerBs = 0;
   std::unordered_map<std::string, PkgFilesystem::Node> files;
+  // lowercased path -> canonical key in `files`. PFS lookups on the console are
+  // case-insensitive for app content; titles rely on it (SotC opens
+  // "pakn.psarc" for a shipped "pakN.psarc").
+  std::unordered_map<std::string, std::string> filesCI;
   bool valid = false;
 
   explicit PkgImpl(const base::String &path) : pkg(path, utl::fileMode::read) {
@@ -567,6 +572,13 @@ struct PkgImpl {
     int64_t root = findChildDir(0, "uroot", inner, innerBs);
     walk(root >= 0 ? static_cast<uint32_t>(root) : 0, "", inner, innerBs);
 
+    for (const auto &kv : files) {
+      std::string lower(kv.first);
+      for (auto &c : lower)
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+      filesCI.emplace(std::move(lower), kv.first);
+    }
+
     valid = true;
     LOG_INFO("pkg: mounted image, {} files", files.size());
 
@@ -695,7 +707,21 @@ const PkgFilesystem::Node *PkgFilesystem::find(const char *relPath) const {
     key.push_back(*p);
   }
   auto it = impl_->files.find(key);
-  return it == impl_->files.end() ? nullptr : &it->second;
+  if (it != impl_->files.end())
+    return &it->second;
+
+  // Case-insensitive fallback (PFS app-content semantics): exact match wins,
+  // otherwise resolve through the lowercased index.
+  std::string lower(key);
+  for (auto &c : lower)
+    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  auto ci = impl_->filesCI.find(lower);
+  if (ci != impl_->filesCI.end()) {
+    it = impl_->files.find(ci->second);
+    if (it != impl_->files.end())
+      return &it->second;
+  }
+  return nullptr;
 }
 
 int64_t PkgFilesystem::read(const Node &node, void *buf, int64_t off,

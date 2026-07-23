@@ -6,6 +6,7 @@
 
 #include "gcn_decode.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <unordered_map>
@@ -77,6 +78,10 @@ bool HasTrailingLiteral(const Inst& inst, uint32_t w) {
       return Sop2HasLiteral(w);
     case Enc::kSop1:
       return Sop1HasLiteral(w);
+    case Enc::kSmrd:
+      // With IMM=0, SOFFSET uses the scalar-source encoding; 255 selects a
+      // trailing literal byte offset instead of an SGPR.
+      return ((w >> 8) & 1) == 0 && (w & 0xFF) == 255;
     case Enc::kVop2:
       // V_MADMK_F32 (0x20) and V_MADAK_F32 (0x21) always carry a trailing
       // 32-bit literal (the K constant), independent of src0=LITERAL_CONST.
@@ -152,11 +157,95 @@ Program DecodeShader(const uint32_t* code, uint32_t max_dwords) {
   return Decode(code, max_dwords, /*stop_at_endpgm=*/true);
 }
 
+std::vector<uint8_t> ComputeReachability(const Program& program) {
+  std::vector<uint8_t> reachable(program.size(), 0);
+  if (program.empty()) return reachable;
+
+  const auto branch_kind = [](const Inst& inst) {
+    if (inst.enc != Enc::kSopp) return 0;
+    switch (inst.opcode) {
+      case 0x01: return 8;  // endpgm
+      case 0x02: return 1;  // unconditional
+      case 0x04: return 2;  // scc0
+      case 0x05: return 3;  // scc1
+      case 0x06: return 4;  // vccz
+      case 0x07: return 5;  // vccnz
+      case 0x08: return 6;  // execz
+      case 0x09: return 7;  // execnz
+      default: return 0;
+    }
+  };
+  const uint32_t max_pc = program.back().pc + program.back().size;
+  std::vector<uint32_t> starts{0};
+  for (const Inst& inst : program) {
+    const int kind = branch_kind(inst);
+    if (!kind) continue;
+    starts.push_back(inst.pc + inst.size);
+    if (kind >= 1 && kind <= 7) {
+      const int32_t simm = static_cast<int16_t>(inst.raw[0] & 0xFFFF);
+      starts.push_back(static_cast<uint32_t>(
+          static_cast<int32_t>(inst.pc) + static_cast<int32_t>(inst.size) +
+          simm));
+    }
+  }
+  std::sort(starts.begin(), starts.end());
+  starts.erase(std::unique(starts.begin(), starts.end()), starts.end());
+  starts.erase(std::remove_if(starts.begin(), starts.end(),
+                              [max_pc](uint32_t pc) { return pc >= max_pc; }),
+               starts.end());
+  const auto block_of = [&](uint32_t pc) {
+    uint32_t block = 0;
+    for (uint32_t i = 0; i < starts.size(); i++) {
+      if (starts[i] > pc) break;
+      block = i;
+    }
+    return block;
+  };
+
+  std::vector<uint8_t> block_reachable(starts.size(), 0);
+  std::vector<uint32_t> worklist{0};
+  while (!worklist.empty()) {
+    const uint32_t block = worklist.back();
+    worklist.pop_back();
+    if (block >= starts.size() || block_reachable[block]) continue;
+    block_reachable[block] = 1;
+    const uint32_t block_end =
+        block + 1 < starts.size() ? starts[block + 1] : max_pc;
+    bool terminated = false;
+    for (const Inst& inst : program) {
+      if (inst.pc < starts[block] || inst.pc >= block_end) continue;
+      const int kind = branch_kind(inst);
+      if (!kind) continue;
+      terminated = true;
+      if (kind == 8) break;
+      const int32_t simm = static_cast<int16_t>(inst.raw[0] & 0xFFFF);
+      const uint32_t target = static_cast<uint32_t>(
+          static_cast<int32_t>(inst.pc) + static_cast<int32_t>(inst.size) +
+          simm);
+      if (target < max_pc) worklist.push_back(block_of(target));
+      if (kind != 1) worklist.push_back(block + 1);
+      break;
+    }
+    if (!terminated) worklist.push_back(block + 1);
+  }
+
+  for (uint32_t i = 0; i < program.size(); i++)
+    reachable[i] = block_reachable[block_of(program[i].pc)];
+  return reachable;
+}
+
+namespace {
+uint64_t g_progCacheGeneration = 1;
+}  // namespace
+
+void NextProgramCacheGeneration() { g_progCacheGeneration++; }
+
 std::shared_ptr<const Program> CachedProgram(uint64_t addr,
                                              uint32_t max_dwords) {
   struct Entry {
     uint64_t hash = 0;
     uint32_t hashed_dwords = 0;
+    uint64_t generation = 0;
     std::shared_ptr<const Program> program;
   };
   static std::unordered_map<uint64_t, Entry> cache;
@@ -164,20 +253,28 @@ std::shared_ptr<const Program> CachedProgram(uint64_t addr,
   const auto* code = reinterpret_cast<const uint32_t*>(addr);
   if (!code) return std::make_shared<const Program>();
 
+  // Fast path: already revalidated this generation (frame). A draw touches the
+  // same shader several times (textures, cbuffers, attributes), so skipping the
+  // footer scan + code hash on repeats is what keeps this per-draw-affordable.
+  auto it = cache.find(addr);
+  if (it != cache.end() && it->second.generation == g_progCacheGeneration)
+    return it->second.program;
+
   // Hash the real code span (footer-bounded when available) so an in-place
   // rewrite at the same address invalidates the entry.
   const uint32_t len = CodeLength(code, max_dwords);
   const uint32_t hashed = len ? len : (max_dwords < 64 ? max_dwords : 64);
   const uint64_t hash = HashCode(code, hashed);
 
-  auto it = cache.find(addr);
   if (it != cache.end() && it->second.hash == hash &&
-      it->second.hashed_dwords == hashed)
+      it->second.hashed_dwords == hashed) {
+    it->second.generation = g_progCacheGeneration;
     return it->second.program;
+  }
 
   if (cache.size() > 512) cache.clear();  // unbounded-growth backstop
   auto program = std::make_shared<const Program>(DecodeShader(code, max_dwords));
-  cache[addr] = {hash, hashed, program};
+  cache[addr] = {hash, hashed, g_progCacheGeneration, program};
   return program;
 }
 

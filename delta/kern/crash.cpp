@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fcntl.h>
 #include <ucontext.h>
 #include <unistd.h>
 #include <sys/mman.h>
@@ -74,6 +75,122 @@ static void backtrace(uintptr_t rbp) {
     rbp = next;
   }
 }
+
+// ---------------------------------------------------------------------------
+// SOTC AllocationTracker walk (crash-scoped diagnostic; only runs on faults
+// inside that title's tracker code). On a fault inside the Shadow_Shipping
+// eboot's slot-21 "untrack on
+// free" methods (fn @+0x18920 CPU tracker, +0x8d930 GPU/renderer tracker), the
+// record lookup @+0x47ab0 returned NULL and the caller unconditionally read
+// [rec+0x58]/[rec+0x50] -> #GP. We walk the tracker's own record list to answer:
+// is the freed KEY absent, present at a different base, or in the other tracker?
+//
+// Object layout (verified from disasm of +0x18920 / +0x47ab0 / +0x476f0):
+//   tracker+0x28  listener; +0x38  embedded list SENTINEL node;
+//   tracker+0x48  == sentinel.next (first record); +0x70 spinlock;
+//   +0x80 total bytes; +0x90 count.
+//   record node:  +0x08 prev, +0x10 next (circular list threaded here),
+//                 +0x58 size (interval-end field used by the lookup),
+//                 +0x60 base/key. (+0x50 is a second size copy on the GPU var.)
+// Recovery of (tracker,key) at fault time is done from RSP, NOT the callee-saved
+// regs (FEX reconstruction of those is unreliable): both fns push
+// rbp;r15;r14;r13;r12;rbx;rax with NO further stack alloc before the fault, so
+//   [rsp+0x18]=saved r13=TRACKER   [rsp+0x20]=saved r14=KEY.
+namespace {
+inline bool trkMincore(uint64_t va) {
+  if (va < 0x10000) return false;
+  long pg = sysconf(_SC_PAGESIZE);
+  unsigned char vec = 0;
+  void *pa = reinterpret_cast<void *>(va & ~((uint64_t)pg - 1));
+  return mincore(pa, 1, &vec) == 0;
+}
+inline bool trkRd64(uint64_t va, uint64_t &out) {
+  if (!trkMincore(va) || !trkMincore(va + 7)) return false;
+  out = *reinterpret_cast<const uint64_t *>(va);
+  return true;
+}
+// Walk one tracker's circular record list; report count/bytes, whether `key`
+// is covered by a record, and the 8 records nearest to `key` by |base-key|.
+// Returns true if `key` fell inside some record's [base,base+size).
+bool sotcWalkTracker(uint64_t tracker, uint64_t key, const char *tag) {
+  std::fprintf(stderr, "  [trkwalk:%s] tracker=%#llx key=%#llx\n", tag,
+               (unsigned long long)tracker, (unsigned long long)key);
+  if (!trkMincore(tracker) || !trkMincore(tracker + 0x98)) {
+    std::fprintf(stderr, "  [trkwalk:%s]   tracker not mapped -- skip\n", tag);
+    return false;
+  }
+  uint64_t sentinel = tracker + 0x38;
+  uint64_t first = 0, hdrCount = 0, hdrBytes = 0, listener = 0;
+  trkRd64(tracker + 0x48, first);
+  trkRd64(tracker + 0x90, hdrCount);
+  trkRd64(tracker + 0x80, hdrBytes);
+  trkRd64(tracker + 0x28, listener);
+  std::fprintf(stderr,
+               "  [trkwalk:%s]   listener=%#llx first=%#llx count(+0x90)=%llu "
+               "bytes(+0x80)=%#llx\n",
+               tag, (unsigned long long)listener, (unsigned long long)first,
+               (unsigned long long)hdrCount, (unsigned long long)hdrBytes);
+  // Nearest-8 online selection by absolute distance from key.
+  uint64_t nb[8], ns[8], nd[8];
+  for (int i = 0; i < 8; i++) { nb[i] = ns[i] = 0; nd[i] = ~0ull; }
+  uint64_t node = first, walked = 0, sumSize = 0;
+  bool covered = false, coverPrinted = false;
+  for (; walked < 200000; walked++) {
+    if (node == sentinel || node == 0) break;
+    if (!trkMincore(node) || !trkMincore(node + 0x60 + 7)) {
+      std::fprintf(stderr, "  [trkwalk:%s]   node %#llx unmapped -- stop\n", tag,
+                   (unsigned long long)node);
+      break;
+    }
+    uint64_t base = 0, size = 0, next = 0;
+    trkRd64(node + 0x60, base);
+    trkRd64(node + 0x58, size);
+    trkRd64(node + 0x10, next);
+    sumSize += size;
+    if (base <= key && key < base + size) {
+      covered = true;
+      if (!coverPrinted) {
+        std::fprintf(stderr,
+                     "  [trkwalk:%s]   *** COVER: rec %#llx base=%#llx size=%#llx "
+                     "end=%#llx contains key ***\n",
+                     tag, (unsigned long long)node, (unsigned long long)base,
+                     (unsigned long long)size, (unsigned long long)(base + size));
+        coverPrinted = true;
+      }
+    }
+    uint64_t d = base > key ? base - key : key - base;
+    // insert into nearest-8 if closer than the current worst
+    int worst = 0;
+    for (int i = 1; i < 8; i++) if (nd[i] > nd[worst]) worst = i;
+    if (d < nd[worst]) { nd[worst] = d; nb[worst] = base; ns[worst] = size; }
+    node = next;
+  }
+  std::fprintf(stderr,
+               "  [trkwalk:%s]   walked %llu records, sum(size)=%#llx, key %s\n",
+               tag, (unsigned long long)walked, (unsigned long long)sumSize,
+               covered ? "IS COVERED" : "is NOT covered by any record");
+  // sort nearest-8 by distance (tiny insertion sort)
+  for (int i = 0; i < 8; i++)
+    for (int j = i + 1; j < 8; j++)
+      if (nd[j] < nd[i]) {
+        uint64_t t;
+        t = nd[i]; nd[i] = nd[j]; nd[j] = t;
+        t = nb[i]; nb[i] = nb[j]; nb[j] = t;
+        t = ns[i]; ns[i] = ns[j]; ns[j] = t;
+      }
+  std::fprintf(stderr, "  [trkwalk:%s]   8 nearest records to key (by |base-key|):\n", tag);
+  for (int i = 0; i < 8; i++) {
+    if (nd[i] == ~0ull) break;
+    long long signedDelta = (long long)(nb[i] - key);
+    std::fprintf(stderr,
+                 "  [trkwalk:%s]     base=%#llx size=%#llx end=%#llx  base-key=%+lld (%#llx)\n",
+                 tag, (unsigned long long)nb[i], (unsigned long long)ns[i],
+                 (unsigned long long)(nb[i] + ns[i]), signedDelta,
+                 (unsigned long long)nd[i]);
+  }
+  return covered;
+}
+}  // namespace
 
 // Per-syscall call counter, filled by the lv2 trampoline under DELTA_SCHIST.
 extern "C" uint64_t g_sysHist[1024];
@@ -662,6 +779,46 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
     std::fprintf(stderr, "  in syscall %d (%s)\n", sc, syscall_getname((uint32_t)sc));
   std::fprintf(stderr, "  fault = %016llx  %s\n",
                (unsigned long long)si->si_addr, fault);
+  // Show what the host VA space holds around the fault: which mapping it hit,
+  // or which two mappings it fell between. Async-signal-safe (read+write only).
+  if (si->si_addr) {
+    const uint64_t fa = (uint64_t)si->si_addr;
+    int mf = open("/proc/self/maps", O_RDONLY);
+    if (mf >= 0) {
+      static char mbuf[1 << 20];
+      ssize_t n = 0, off = 0, r;
+      while ((r = read(mf, mbuf + off, sizeof(mbuf) - 1 - off)) > 0)
+        off += r;
+      n = off;
+      close(mf);
+      mbuf[n] = 0;
+      char *prev = nullptr, *line = mbuf;
+      while (line && *line) {
+        char *nl = strchr(line, '\n');
+        if (nl) *nl = 0;
+        uint64_t lo = strtoull(line, nullptr, 16);
+        const char *dash = strchr(line, '-');
+        uint64_t hi = dash ? strtoull(dash + 1, nullptr, 16) : 0;
+        if (fa < hi || !nl) {
+          if (prev)
+            std::fprintf(stderr, "  maps prev: %s\n", prev);
+          std::fprintf(stderr, "  maps %s : %s\n",
+                       (fa >= lo && fa < hi) ? "HIT " : "next", line);
+          // A couple of following lines: what the faulting pointer sits under.
+          char *after = nl ? nl + 1 : nullptr;
+          for (int k = 0; k < 3 && after && *after; k++) {
+            char *anl = strchr(after, '\n');
+            if (anl) *anl = 0;
+            std::fprintf(stderr, "  maps  +%d : %s\n", k + 1, after);
+            after = anl ? anl + 1 : nullptr;
+          }
+          break;
+        }
+        prev = line;
+        line = nl ? nl + 1 : nullptr;
+      }
+    }
+  }
 #if defined(__x86_64__)
   // Native x86 host: the host signal context IS the guest context.
   auto *uc = static_cast<ucontext_t *>(ucv);
@@ -755,6 +912,94 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
     std::fprintf(stderr, "  r12=%016llx r13=%016llx r14=%016llx r15=%016llx\n",
                  (unsigned long long)g[R12], (unsigned long long)g[R13],
                  (unsigned long long)g[R14], (unsigned long long)g[R15]);
+
+    // ---- SOTC AllocationTracker walk (diagnostic; see helper above) ----
+    // Fire only when the fault is inside the eboot's slot-21 untrack-on-free
+    // methods: fn @+0x18920 (CPU tracker) / +0x8d930 (GPU tracker). Resolve the
+    // eboot base from the module whose .text contains grip (== textSeg.addr, so
+    // grip-base is the module-relative ELF vaddr), like symbolize() does.
+    {
+      uint64_t ebase = 0;
+      if (auto *proc = proc::getActive()) {
+        for (auto &mod : proc->getModuleList()) {
+          auto &mi = mod->getInfo();
+          auto *t = mi.textSeg.addr;
+          if (t && grip >= (uintptr_t)t && grip < (uintptr_t)t + mi.textSeg.size) {
+            ebase = (uint64_t)t;
+            break;
+          }
+        }
+      }
+      uint64_t off = ebase ? grip - ebase : 0;
+      bool inTrk = ebase && ((off >= 0x18000 && off < 0x19000) ||
+                             (off >= 0x8d000 && off < 0x8e000));
+      if (inTrk) {
+        std::fprintf(stderr,
+                     "\n  === SOTC tracker walk (eboot base=%#llx, fault off=%#llx) ===\n",
+                     (unsigned long long)ebase, (unsigned long long)off);
+        // Recover (tracker,key) from the saved-register slots on the stack,
+        // which are reliable regardless of FEX callee-saved reconstruction.
+        // Layout after the prologue pushes (no further stack alloc):
+        //   [rsp+0x18]=saved r13=TRACKER   [rsp+0x20]=saved r14=KEY
+        uint64_t rsp = g[RSP];
+        uint64_t trkStk = 0, keyStk = 0;
+        bool haveStk = trkRd64(rsp + 0x18, trkStk) && trkRd64(rsp + 0x20, keyStk);
+        std::fprintf(stderr,
+                     "  [trkwalk] from-stack: tracker=%#llx key=%#llx (ok=%d) | "
+                     "from-reg: r13=%#llx r14=%#llx\n",
+                     (unsigned long long)trkStk, (unsigned long long)keyStk,
+                     haveStk, (unsigned long long)g[R13], (unsigned long long)g[R14]);
+        // Prefer the stack-recovered tracker/key; fall back to the regs if the
+        // stack slot doesn't look like a mapped module-space pointer.
+        auto plausible = [](uint64_t t) {
+          return t >= 0x200000000000ull && t < 0x210000000000ull && trkMincore(t);
+        };
+        uint64_t tracker = plausible(trkStk) ? trkStk : g[R13];
+        uint64_t key = (haveStk && keyStk) ? keyStk : g[R14];
+        // Raw tracker header window (fallback context: +0x00..0xa0).
+        if (trkMincore(tracker)) {
+          auto *q = reinterpret_cast<const uint64_t *>(tracker);
+          for (int i = 0; i < 20; i++) {
+            if ((i % 4) == 0)
+              std::fprintf(stderr, "\n  trk+%03x:", i * 8);
+            std::fprintf(stderr, " %016llx", (unsigned long long)q[i]);
+          }
+          std::fprintf(stderr, "\n");
+        }
+        // 1) Walk the tracker the fault came from.
+        bool inThis = sotcWalkTracker(tracker, key, "fault");
+        // 2) Cross-check the other known tracker instances (the two GPU/renderer
+        //    tracker globals @ base+0x2ed3350 / +0x2ed33b0) for the same key.
+        uint64_t gpuA = ebase + 0x2ed3350, gpuB = ebase + 0x2ed33b0;
+        bool inA = false, inB = false;
+        if (gpuA != tracker) inA = sotcWalkTracker(gpuA, key, "gpuA");
+        if (gpuB != tracker) inB = sotcWalkTracker(gpuB, key, "gpuB");
+        // 3) Emulator-side VMA view of the key.
+        if (auto *proc = proc::getActive()) {
+          auto *pi = proc->getVma().get(reinterpret_cast<uint8_t *>(key));
+          if (pi) {
+            uint64_t vb = (uint64_t)pi->ptr, ve = vb + pi->size;
+            std::fprintf(stderr,
+                         "  [trkwalk] emu VMA: key %#llx is IN region [%#llx,%#llx) "
+                         "size=%#llx sceProt=%#x reserved=%d name=%s  key-regionbase=%+lld\n",
+                         (unsigned long long)key, (unsigned long long)vb,
+                         (unsigned long long)ve, (unsigned long long)pi->size,
+                         pi->sceProt, pi->reserved, pi->name ? pi->name : "(null)",
+                         (long long)(key - vb));
+          } else {
+            std::fprintf(stderr,
+                         "  [trkwalk] emu VMA: key %#llx is in NO tracked region\n",
+                         (unsigned long long)key);
+          }
+        }
+        std::fprintf(stderr,
+                     "  [trkwalk] SUMMARY: key covered in fault-tracker=%d gpuA=%d gpuB=%d\n",
+                     inThis, inA, inB);
+        std::fprintf(stderr, "  === end SOTC tracker walk ===\n\n");
+        std::fflush(stderr);
+      }
+    }
+
     // DELTA_CRASH_PEEK: dump a window of guest memory around each GPR that points
     // into loaded-module space (>= 0x2000_0000_0000). An indirect call/jmp through
     // a garbage/null vtable slot is our most common late-boot fault; seeing the
@@ -801,6 +1046,24 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
         for (int i = 0; i < 16; i++) {
           if ((i % 4) == 0)
             std::fprintf(stderr, "\n  peek %#llx+%03x:", (unsigned long long)va, i * 8);
+          std::fprintf(stderr, " %016llx", (unsigned long long)q[i]);
+        }
+        std::fprintf(stderr, "\n");
+      }
+    }
+    // DELTA_CRASH_PEEK also dumps the raw stack window around rsp: for a fault
+    // inside a leaf helper (e.g. a lookup that returned null) the caller's
+    // locals -- the key being freed, the object under operation -- are the
+    // fastest route to "what data was this actually working on".
+    if (std::getenv("DELTA_CRASH_PEEK") && g[RSP] >= 0x10000) {
+      long pg = sysconf(_SC_PAGESIZE);
+      unsigned char vec[2] = {0, 0};
+      void *pa = reinterpret_cast<void *>(g[RSP] & ~((uint64_t)pg - 1));
+      if (mincore(pa, 1, vec) == 0) {
+        auto *q = reinterpret_cast<const uint64_t *>(g[RSP] & ~7ull);
+        for (int i = -8; i < 64; i++) {
+          if (((i + 8) % 4) == 0)
+            std::fprintf(stderr, "\n  stack rsp%+05x:", i * 8);
           std::fprintf(stderr, " %016llx", (unsigned long long)q[i]);
         }
         std::fprintf(stderr, "\n");

@@ -11,6 +11,8 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
+#include <vector>
+
 namespace utl {
 
 static int protection_ToPosix(pageProtection prot) {
@@ -64,6 +66,36 @@ void freeMem(void* addr) {
 
 bool protectMem(void* addr, size_t len, pageProtection prot) {
   return ::mprotect(addr, len, protection_ToPosix(prot)) == 0;
+}
+
+bool isMemoryRangeMapped(const void *addr, size_t len) {
+  if (!addr || !len) return false;
+  const uintptr_t begin = reinterpret_cast<uintptr_t>(addr);
+  if (len > UINTPTR_MAX - begin) return false;
+  const long page_size_raw = ::sysconf(_SC_PAGE_SIZE);
+  if (page_size_raw <= 0) return false;
+  const uintptr_t page_size = static_cast<uintptr_t>(page_size_raw);
+  const uintptr_t first = begin & ~(page_size - 1);
+  const uintptr_t last = (begin + len - 1) & ~(page_size - 1);
+  const size_t pages = static_cast<size_t>((last - first) / page_size + 1);
+  std::vector<unsigned char> residency(pages);
+  return ::mincore(reinterpret_cast<void *>(first), pages * page_size,
+                   residency.data()) == 0;
+}
+
+size_t mappedMemoryPrefix(const void *addr, size_t maxLen) {
+  if (!addr || !maxLen) return 0;
+  size_t mapped = 0, remaining = maxLen;
+  while (remaining) {
+    const size_t probe = mapped + remaining / 2 + remaining % 2;
+    if (isMemoryRangeMapped(addr, probe)) {
+      mapped = probe;
+      remaining = maxLen - mapped;
+    } else {
+      remaining = probe - mapped - 1;
+    }
+  }
+  return mapped;
 }
 
 size_t getAvailableMem() {

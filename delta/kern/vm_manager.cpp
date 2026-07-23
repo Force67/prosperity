@@ -33,9 +33,53 @@ bool vmManager::init() {
   return pinfo.userStack;
 }
 
-void vmManager::add(uint8_t *ptr, size_t size, mprot prot, uint32_t sceProt) {
+// Erase [p, p+s) from the interval set, splitting straddlers. Caller holds
+// vmlock. Keeps entries DISJOINT, which is what makes get() unambiguous: the
+// guest keys real bookkeeping (SotC's streaming-heap trackers) off the exact
+// [start, end) sceKernelVirtualQuery reports, so the newest mapping of a range
+// must win and stale overlaps must not shadow it.
+void vmManager::punchHoleLocked(uint8_t *p, size_t s) {
+  uint8_t *end = p + s;
+  for (size_t i = 0; i < rtPages.size();) {
+    pageInfo &e = rtPages[i];
+    uint8_t *eEnd = e.ptr + e.size;
+    if (eEnd <= p || e.ptr >= end) {  // disjoint
+      ++i;
+      continue;
+    }
+    if (e.ptr >= p && eEnd <= end) {  // fully covered: drop
+      rtPages.erase(rtPages.begin() + i);
+      continue;
+    }
+    if (e.ptr < p && eEnd > end) {  // strictly contains: split into two
+      pageInfo tail(end, static_cast<size_t>(eEnd - end), e.prot, e.sceProt,
+                    e.reserved);
+      tail.name = e.name;
+      e.size = static_cast<size_t>(p - e.ptr);
+      rtPages.emplace_back(tail);  // append; disjointness keeps get() correct
+      ++i;
+      continue;
+    }
+    if (e.ptr < p) {  // overlaps our head from below: truncate its tail
+      e.size = static_cast<size_t>(p - e.ptr);
+    } else {          // overlaps our tail from above: advance its head
+      e.size = static_cast<size_t>(eEnd - end);
+      e.ptr = end;
+    }
+    ++i;
+  }
+}
+
+void vmManager::add(uint8_t *ptr, size_t size, mprot prot, uint32_t sceProt,
+                    bool reserved) {
   std::lock_guard lock(vmlock);
-  rtPages.emplace_back(ptr, size, prot, sceProt);
+  punchHoleLocked(ptr, size);
+  rtPages.emplace_back(ptr, size, prot, sceProt, reserved);
+}
+
+void vmManager::remove(uint8_t *ptr, size_t size) {
+  std::lock_guard lock(vmlock);
+  punchHoleLocked(ptr, size);
 }
 
 pageInfo *vmManager::get(uint8_t *ptr) {

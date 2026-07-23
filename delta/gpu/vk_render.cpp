@@ -13,10 +13,13 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <limits>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -30,6 +33,8 @@
 
 namespace gpu::vk {
 namespace {
+
+static_assert(ComputeInfo::kMaxResources == gcn::kMaxCsResources);
 
 #define VKOK(x)                                                                \
   do {                                                                         \
@@ -55,6 +60,8 @@ struct State {
   VkCommandPool pool = VK_NULL_HANDLE;
   VkCommandBuffer cmd = VK_NULL_HANDLE;
   VkFence fence = VK_NULL_HANDLE;
+  uint32_t maxCsResources = 0;
+  VkDeviceSize maxStorageBufferRange = 0;
 
   VkFormat rtFormat = VK_FORMAT_B8G8R8A8_UNORM;
 
@@ -69,6 +76,7 @@ struct State {
   uint32_t curMrtCount = 0;   // how many of curMrt[] are bound
   uint64_t curDepth = 0;      // depth target bound in the open region (0 = none)
   uint64_t lastRt = 0;  // last RT rendered to (present fallback)
+  uint64_t firstRt = 0;  // first color RT created (diagnostic selector)
   uint64_t busiestRt = 0;
   uint32_t busiestRtDraws = 0;
 
@@ -102,7 +110,7 @@ struct State {
   // binding the PS samples that we couldn't resolve (so diffuse*lightmap with a
   // missing map shows the diffuse instead of going black). The single-texture path
   // (Isaac/Undertale/composites) is unchanged.
-  static constexpr uint32_t kMaxTex = 8;
+  static constexpr uint32_t kMaxTex = 16;
   VkDescriptorSetLayout texArrayLayout = VK_NULL_HANDLE;
   VkDescriptorPool mtexPool = VK_NULL_HANDLE;
   std::vector<VkDescriptorPool> mtexPools;
@@ -135,12 +143,55 @@ struct State {
   uint32_t frameMaxIdx = 0;  // largest indexCount of any draw this frame (3D geometry detector)
   int frameNum = 0;
   bool recording = false;
+  bool regionOpen = false;
   bool samplerAnisotropy = false;
   bool samplerMirrorClamp = false;
   bool geometryShader = false;
+  bool storageImageWriteWithoutFormat = false;
   bool frameHadRoom = false;  // this frame sampled a room-sized (~832w) RT
   bool frameRoomBake = false; // this frame RENDERED into a room-sized (~832w) RT
+
+  // Frame pipelining: two frame slots so frame N records (and the guest
+  // emulates) while frame N-1 still rasterizes on the (software) GPU. Slot N-1's
+  // fence is waited -- and its readback presented, one frame late -- at frame
+  // N's endFrame. Each slot owns a command buffer, a fence, a readback buffer,
+  // and half of each host-visible ring; cmd/readback* above alias the active
+  // slot (g.fence stays dedicated to the synchronous aux submits: texture
+  // uploads, compute dispatches, rtstat).
+  struct FrameSlot {
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    VkFence fence = VK_NULL_HANDLE;
+    VkBuffer readback = VK_NULL_HANDLE;
+    VkDeviceMemory readbackMem = VK_NULL_HANDLE;
+    void *readbackMap = nullptr;
+    VkDeviceSize readbackSize = 0;
+    bool submitted = false;    // fence submitted and not yet waited
+    bool presentable = false;  // the frame copied pixels into `readback`
+    // Metadata of the recorded frame, consumed when it is presented.
+    uint32_t w = 0, h = 0;
+    VkFormat fmt = VK_FORMAT_UNDEFINED;
+    int frameNum = 0;
+    uint32_t frameDraws = 0, frameMaxIdx = 0;
+    bool frameHadRoom = false;
+    uint64_t presentBase = 0, scanoutBase = 0;
+  };
+  FrameSlot slots[2];
+  uint32_t slotIdx = 0;
+  // Per-frame ring windows (each slot gets half of vb/ib/ubo).
+  VkDeviceSize vbEnd = kVbRing, ibEnd = kIbRing, uboEnd = kUboRing;
 } g;
+
+// Pipelined by default; DELTA_GPU_SYNC=1 restores the submit-and-wait frame.
+// DELTA_GPU_RTSTAT also forces sync: its readback reuses the active slot's
+// buffer mid-flight, which pipelining would present a frame later.
+bool framePipelined() {
+  static const bool sync = [] {
+    const char *e = std::getenv("DELTA_GPU_SYNC");
+    return (e && e[0] && e[0] != '0') ||
+           std::getenv("DELTA_GPU_RTSTAT") != nullptr;
+  }();
+  return !sync;
+}
 
 struct TexImageKey {
   uint64_t base = 0;
@@ -156,6 +207,40 @@ struct TexImageKey {
 };
 uint64_t hashWord(uint64_t h, uint64_t v) {
   return (h ^ v) * 1099511628211ull;
+}
+
+bool g_hasDeviceFault = false;
+
+// Ask the driver what the GPU actually faulted on (VK_EXT_device_fault).
+// Prints once per process — every later DEVICE_LOST is collateral of the first.
+void reportDeviceFault(VkDevice device) {
+  static bool reported = false;
+  if (reported || !g_hasDeviceFault) return;
+  reported = true;
+  auto p_getFault = (PFN_vkGetDeviceFaultInfoEXT)vkGetDeviceProcAddr(
+      device, "vkGetDeviceFaultInfoEXT");
+  if (!p_getFault) return;
+  VkDeviceFaultCountsEXT counts{VK_STRUCTURE_TYPE_DEVICE_FAULT_COUNTS_EXT};
+  if (p_getFault(device, &counts, nullptr) < 0) return;
+  std::vector<VkDeviceFaultAddressInfoEXT> addrs(counts.addressInfoCount);
+  std::vector<VkDeviceFaultVendorInfoEXT> vendors(counts.vendorInfoCount);
+  VkDeviceFaultInfoEXT info{VK_STRUCTURE_TYPE_DEVICE_FAULT_INFO_EXT};
+  info.pAddressInfos = addrs.data();
+  info.pVendorInfos = vendors.data();
+  counts.vendorBinarySize = 0;
+  p_getFault(device, &counts, &info);
+  std::fprintf(stderr, "[gpuvk] device fault: '%s' addrs=%u vendor=%u\n",
+               info.description, counts.addressInfoCount,
+               counts.vendorInfoCount);
+  for (const auto &a : addrs)
+    std::fprintf(stderr, "[gpuvk]   fault addr type=%d va=%#llx prec=%#llx\n",
+                 (int)a.addressType,
+                 (unsigned long long)a.reportedAddress,
+                 (unsigned long long)a.addressPrecision);
+  for (const auto &v : vendors)
+    std::fprintf(stderr, "[gpuvk]   vendor '%s' code=%#llx data=%#llx\n",
+                 v.description, (unsigned long long)v.vendorFaultCode,
+                 (unsigned long long)v.vendorFaultData);
 }
 struct TexImageKeyHash {
   size_t operator()(const TexImageKey &k) const {
@@ -254,20 +339,39 @@ std::vector<TexImageEntry> g_retiredTexImages;
 std::vector<TexViewEntry> g_retiredTexViews;
 std::vector<TexEntry> g_retiredTexSets;
 
-// Content fingerprint of every guest dword. This is checked at most once per
-// frame unless a compute write explicitly invalidates the resource.
+// Content fingerprint of every guest byte. This is checked at most once per
+// frame per texture unless a compute write explicitly invalidates the
+// resource, and big atlases make it the dominant per-frame CPU cost -- so it
+// runs four independent FNV lanes over 64-bit words (instead of one dependent
+// multiply per dword) to break the serial multiply chain and go memory-bound.
 uint64_t texHash(uint64_t base, uint64_t bytes) {
-  const uint32_t *p = reinterpret_cast<const uint32_t *>(base);
-  uint64_t count = bytes / 4;
-  uint64_t hsh = 1469598103934665603ull;
-  for (uint64_t i = 0; i < count; i++)
-    hsh = (hsh ^ p[i]) * 1099511628211ull;
-  return hsh ^ (count << 1);
+  constexpr uint64_t kPrime = 1099511628211ull;
+  const uint64_t *w = reinterpret_cast<const uint64_t *>(base);
+  const uint64_t nw = bytes / 8;
+  uint64_t h0 = 1469598103934665603ull, h1 = 0x9e3779b97f4a7c15ull,
+           h2 = 0xc2b2ae3d27d4eb4full, h3 = 0x165667b19e3779f9ull;
+  uint64_t i = 0;
+  for (; i + 4 <= nw; i += 4) {
+    h0 = (h0 ^ w[i + 0]) * kPrime;
+    h1 = (h1 ^ w[i + 1]) * kPrime;
+    h2 = (h2 ^ w[i + 2]) * kPrime;
+    h3 = (h3 ^ w[i + 3]) * kPrime;
+  }
+  for (; i < nw; i++) h0 = (h0 ^ w[i]) * kPrime;
+  if (const uint64_t tail = bytes & 7) {
+    uint64_t last = 0;
+    std::memcpy(&last, reinterpret_cast<const uint8_t *>(base) + bytes - tail,
+                tail);
+    h1 = (h1 ^ last) * kPrime;
+  }
+  uint64_t h = ((h0 * kPrime + h1) * kPrime + h2) * kPrime + h3;
+  return h ^ (bytes << 1);
 }
 
 VkFormat guestTextureFormat(uint32_t dfmt, uint32_t nfmt) {
   if (dfmt == 5 && nfmt == 7) return VK_FORMAT_R16G16_SFLOAT;
   if (dfmt == 6 && nfmt == 7) return VK_FORMAT_B10G11R11_UFLOAT_PACK32;
+  if (dfmt == 12 && nfmt == 7) return VK_FORMAT_R16G16B16A16_SFLOAT;
   if (dfmt == 10 && nfmt == 0) return VK_FORMAT_R8G8B8A8_UNORM;
   if (dfmt == 10 && nfmt == 9) return VK_FORMAT_R8G8B8A8_SRGB;
   // Block-compressed (IMG_DATA_FORMAT_BC1..BC7 = 35..41); sampled natively.
@@ -292,8 +396,17 @@ bool guestFormatBlockCompressed(uint32_t dfmt) {
   return dfmt >= 35 && dfmt <= 41;
 }
 uint32_t guestFormatElemBytes(uint32_t dfmt) {
-  if (!guestFormatBlockCompressed(dfmt)) return 4;
-  return (dfmt == 35 || dfmt == 38) ? 8 : 16;  // BC1/BC4 = 8B, rest 16B
+  switch (dfmt) {
+    case 1: return 1;                              // 8
+    case 2: case 3: return 2;                      // 16, 8_8
+    case 11: case 12: return 8;                    // 32_32, 16_16_16_16
+    case 13: return 12;                            // 32_32_32
+    case 14: return 16;                            // 32_32_32_32
+    case 35: case 38: return 8;                    // BC1/BC4 block
+    default:
+      return guestFormatBlockCompressed(dfmt) ? 16 // BC2/3/5/6/7 block
+                                              : 4; // all 32-bit texel formats
+  }
 }
 
 // CB_COLORn_INFO uses the GFX7 SurfaceFormat/SurfaceNumber encodings. Keep the
@@ -458,13 +571,32 @@ void registerRtPages(uint64_t base, uint32_t w, uint32_t h, VkFormat fmt) {
 }
 
 const bool g_dump = std::getenv("DELTA_GPU_DUMP") != nullptr;
+const bool g_declines = std::getenv("DELTA_GPU_DECLINES") != nullptr;
 int g_dumpedFrames = 0;
 
 // Perf profiling accumulators (ns), reset each FPS window. Reveals where the
 // per-frame wall time goes: our GPU code (draw + endFrame, incl. the readback
 // stall and synchronous texture uploads) vs the guest/FEX time outside it.
 uint64_t g_nsDraw = 0, g_nsEnd = 0, g_nsReadback = 0, g_nsTexUp = 0;
+uint64_t g_nsCs = 0, g_csBytes = 0;
+uint64_t g_nsCsIn = 0, g_nsCsGpu = 0, g_nsCsOut = 0;
+uint32_t g_csCount = 0;
+uint64_t g_nsSubmit = 0, g_nsPresent = 0;
 uint32_t g_texUps = 0;
+
+// Per-frame stage accumulators (ns) feeding the on-screen perf overlay: reset
+// when a frame's sample is pushed (pushStageSample), filled by the same code
+// paths as the g_ns* window counters above.
+uint64_t g_frDraw = 0, g_frSubmit = 0, g_frWait = 0, g_frPresent = 0,
+         g_frTexUp = 0;
+
+// Rolling per-frame stage history for the overlay graph (~4s at 60 fps).
+struct StageSample {
+  float rec, sub, gpu, prs, tex, oth, wall;  // ms
+};
+constexpr int kStageHistN = 240;
+StageSample g_stageHist[kStageHistN];
+int g_stageHistPos = 0, g_stageHistCount = 0;
 inline uint64_t nowNs() {
   return std::chrono::duration_cast<std::chrono::nanoseconds>(
              std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -600,15 +732,42 @@ bool createDevice() {
   dc.pNext = &f13;
   dc.queueCreateInfoCount = 1;
   dc.pQueueCreateInfos = &qc;
+  // VK_EXT_device_fault: on DEVICE_LOST, vkGetDeviceFaultInfoEXT reports what
+  // the GPU actually faulted on (page fault address etc.) — keep it enabled,
+  // it costs nothing until a fault is queried.
+  const char *devExts[1] = {};
+  {
+    uint32_t en = 0;
+    vkEnumerateDeviceExtensionProperties(g.phys, nullptr, &en, nullptr);
+    std::vector<VkExtensionProperties> eprops(en);
+    vkEnumerateDeviceExtensionProperties(g.phys, nullptr, &en, eprops.data());
+    for (const auto &ep : eprops)
+      if (!std::strcmp(ep.extensionName, VK_EXT_DEVICE_FAULT_EXTENSION_NAME))
+        g_hasDeviceFault = true;
+  }
+  static VkPhysicalDeviceFaultFeaturesEXT faultFeat{
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT};
+  if (g_hasDeviceFault) {
+    faultFeat.deviceFault = VK_TRUE;
+    faultFeat.pNext = f13.pNext;
+    f13.pNext = &faultFeat;
+    devExts[0] = VK_EXT_DEVICE_FAULT_EXTENSION_NAME;
+    dc.enabledExtensionCount = 1;
+    dc.ppEnabledExtensionNames = devExts;
+  }
   // robustBufferAccess makes out-of-bounds storage-buffer loads/stores safe (return 0
   // / drop the write) so the compute path can't corrupt memory on a miscomputed index.
   VkPhysicalDeviceFeatures wantFeat{};
   if (avail2.features.robustBufferAccess) wantFeat.robustBufferAccess = VK_TRUE;
   if (avail2.features.samplerAnisotropy) wantFeat.samplerAnisotropy = VK_TRUE;
   if (avail2.features.geometryShader) wantFeat.geometryShader = VK_TRUE;
+  if (avail2.features.shaderStorageImageWriteWithoutFormat)
+    wantFeat.shaderStorageImageWriteWithoutFormat = VK_TRUE;
   g.samplerAnisotropy = wantFeat.samplerAnisotropy;
   g.samplerMirrorClamp = f12.samplerMirrorClampToEdge;
   g.geometryShader = wantFeat.geometryShader;
+  g.storageImageWriteWithoutFormat =
+      wantFeat.shaderStorageImageWriteWithoutFormat;
   dc.pEnabledFeatures = &wantFeat;
   VKOK(vkCreateDevice(g.phys, &dc, nullptr, &g.device));
   vkGetDeviceQueue(g.device, g.qfam, 0, &g.queue);
@@ -629,9 +788,13 @@ bool createDevice() {
   ca.commandPool = g.pool;
   ca.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
   ca.commandBufferCount = 1;
-  VKOK(vkAllocateCommandBuffers(g.device, &ca, &g.cmd));
   VkFenceCreateInfo fc{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-  VKOK(vkCreateFence(g.device, &fc, nullptr, &g.fence));
+  VKOK(vkCreateFence(g.device, &fc, nullptr, &g.fence));  // aux submits only
+  for (auto &slot : g.slots) {
+    VKOK(vkAllocateCommandBuffers(g.device, &ca, &slot.cmd));
+    VKOK(vkCreateFence(g.device, &fc, nullptr, &slot.fence));
+  }
+  g.cmd = g.slots[0].cmd;
 
   // Vertex ring.
   VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
@@ -665,6 +828,10 @@ bool createDevice() {
 
   VkPhysicalDeviceProperties props;
   vkGetPhysicalDeviceProperties(g.phys, &props);
+  g.maxCsResources = std::min(
+      {gcn::kMaxCsResources, props.limits.maxPerStageDescriptorStorageBuffers,
+       props.limits.maxDescriptorSetStorageBuffers});
+  g.maxStorageBufferRange = props.limits.maxStorageBufferRange;
   std::fprintf(stderr, "[gpuvk] device: %s\n", props.deviceName);
 
   // Recomp cbuffer ring + dynamic-UBO descriptors (set 1) + empty set-0 layout.
@@ -919,7 +1086,7 @@ bool createTexPipeline() {
   sc.addressModeU = sc.addressModeV = sc.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
   VKOK(vkCreateSampler(g.device, &sc, nullptr, &g.sampler));
 
-  // Multi-texture path: an 8-binding set-0 layout + a pool, used only by recomp PS
+  // Multi-texture path: a 16-binding set-0 layout + a pool, used only by recomp PS
   // that sample >1 texture (single-texture draws keep the 1-binding dsLayout/dsPool).
   {
     VkDescriptorSetLayoutBinding mb[State::kMaxTex];
@@ -928,10 +1095,13 @@ bool createTexPipeline() {
     VkDescriptorSetLayoutCreateInfo ml{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
     ml.bindingCount = State::kMaxTex; ml.pBindings = mb;
     VKOK(vkCreateDescriptorSetLayout(g.device, &ml, nullptr, &g.texArrayLayout));
-    VkDescriptorPoolSize mps{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4096 * State::kMaxTex};
+    VkDescriptorPoolSize mps[2] = {
+        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4096 * State::kMaxTex},
+        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 4096 * State::kMaxTex},
+    };
     VkDescriptorPoolCreateInfo mp{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     mp.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-    mp.maxSets = 4096; mp.poolSizeCount = 1; mp.pPoolSizes = &mps;
+    mp.maxSets = 4096; mp.poolSizeCount = 2; mp.pPoolSizes = mps;
     VKOK(vkCreateDescriptorPool(g.device, &mp, nullptr, &g.mtexPool));
     g.mtexPools.push_back(g.mtexPool);
 
@@ -1016,11 +1186,15 @@ VkDescriptorSet allocateSamplerSet(VkDescriptorSetLayout layout, bool multi,
     }
   }
 
-  VkDescriptorPoolSize size{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                            4096u * (multi ? State::kMaxTex : 1u)};
+  VkDescriptorPoolSize sizes[2] = {
+      {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+       4096u * (multi ? State::kMaxTex : 1u)},
+      {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+       4096u * (multi ? State::kMaxTex : 1u)},
+  };
   VkDescriptorPoolCreateInfo ci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
   ci.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-  ci.maxSets = 4096; ci.poolSizeCount = 1; ci.pPoolSizes = &size;
+  ci.maxSets = 4096; ci.poolSizeCount = multi ? 2u : 1u; ci.pPoolSizes = sizes;
   VkDescriptorPool pool;
   if (vkCreateDescriptorPool(g.device, &ci, nullptr, &pool) != VK_SUCCESS)
     return VK_NULL_HANDLE;
@@ -1113,16 +1287,29 @@ void uploadTexPixels(VkImage img, uint64_t base,
                      uint32_t texel_h) {
   static const bool noDetile = std::getenv("DELTA_GPU_NODETILE") != nullptr;
   const uint32_t elem = layout.elem_bytes;
-  std::vector<uint8_t> linear;
   uint64_t linearBytes = 0;
   for (uint32_t mip = 0; mip < layout.mip_levels; mip++)
     linearBytes += static_cast<uint64_t>(layout.mips[mip].width) *
                    layout.mips[mip].height * layout.layers * elem;
-  linear.resize(static_cast<size_t>(linearBytes));
+
+  const VkDeviceSize sz = linearBytes;
+  VkBuffer stg; VkDeviceMemory stgMem; void *map;
+  VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+  bi.size = sz; bi.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+  vkCreateBuffer(g.device, &bi, nullptr, &stg);
+  VkMemoryRequirements br; vkGetBufferMemoryRequirements(g.device, stg, &br);
+  VkMemoryAllocateInfo ba{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+  ba.allocationSize = br.size;
+  ba.memoryTypeIndex = findMemoryType(br.memoryTypeBits,
+      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  vkAllocateMemory(g.device, &ba, nullptr, &stgMem);
+  vkBindBufferMemory(g.device, stg, stgMem, 0);
+  vkMapMemory(g.device, stgMem, 0, sz, 0, &map);
 
   VkBufferImageCopy copies[16]{};
   uint64_t linearOffset = 0;
   const uint8_t *src = reinterpret_cast<const uint8_t *>(base);
+  uint8_t *linear = static_cast<uint8_t *>(map);
   for (uint32_t mip = 0; mip < layout.mip_levels; mip++) {
     const auto &level = layout.mips[mip];
     copies[mip].bufferOffset = linearOffset;
@@ -1134,7 +1321,7 @@ void uploadTexPixels(VkImage img, uint64_t base,
     const uint64_t layerBytes =
         static_cast<uint64_t>(level.width) * level.height * elem;
     for (uint32_t layer = 0; layer < layout.layers; layer++) {
-      uint8_t *dst = linear.data() + linearOffset + layer * layerBytes;
+      uint8_t *dst = linear + linearOffset + layer * layerBytes;
       if (!noDetile) {
         gcn::DetileTextureMip32(src, dst, layout, mip, layer);
       } else {
@@ -1148,20 +1335,6 @@ void uploadTexPixels(VkImage img, uint64_t base,
     }
     linearOffset += layerBytes * layout.layers;
   }
-  VkDeviceSize sz = linear.size();
-  VkBuffer stg; VkDeviceMemory stgMem; void *map;
-  VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-  bi.size = sz; bi.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-  vkCreateBuffer(g.device, &bi, nullptr, &stg);
-  VkMemoryRequirements br; vkGetBufferMemoryRequirements(g.device, stg, &br);
-  VkMemoryAllocateInfo ba{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-  ba.allocationSize = br.size;
-  ba.memoryTypeIndex = findMemoryType(br.memoryTypeBits,
-      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-  vkAllocateMemory(g.device, &ba, nullptr, &stgMem);
-  vkBindBufferMemory(g.device, stg, stgMem, 0);
-  vkMapMemory(g.device, stgMem, 0, sz, 0, &map);
-  std::memcpy(map, linear.data(), sz);
   vkUnmapMemory(g.device, stgMem);
 
   VkCommandBufferAllocateInfo ca{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
@@ -1182,9 +1355,21 @@ void uploadTexPixels(VkImage img, uint64_t base,
   si.commandBufferCount = 1; si.pCommandBuffers = &c;
   uint64_t _t0 = nowNs();
   vkResetFences(g.device, 1, &g.fence);
-  vkQueueSubmit(g.queue, 1, &si, g.fence);
-  vkWaitForFences(g.device, 1, &g.fence, VK_TRUE, UINT64_MAX);
-  g_nsTexUp += nowNs() - _t0; g_texUps++;
+  const VkResult upSubmit = vkQueueSubmit(g.queue, 1, &si, g.fence);
+  const VkResult upWait =
+      vkWaitForFences(g.device, 1, &g.fence, VK_TRUE, UINT64_MAX);
+  if (upSubmit != VK_SUCCESS || upWait != VK_SUCCESS) {
+    std::fprintf(stderr,
+                 "[gpuvk] tex upload DEVICE FAULT: submit=%d wait=%d "
+                 "base=%#lx %ux%u mips=%u layers=%u bytes=%llu\n",
+                 (int)upSubmit, (int)upWait, (unsigned long)base,
+                 layout.mips[0].width, layout.mips[0].height,
+                 layout.mip_levels, layout.layers,
+                 (unsigned long long)sz);
+    reportDeviceFault(g.device);
+  }
+  uint64_t _texDt = nowNs() - _t0;
+  g_nsTexUp += _texDt; g_frTexUp += _texDt; g_texUps++;
   vkFreeCommandBuffers(g.device, g.pool, 1, &c);
   vkDestroyBuffer(g.device, stg, nullptr);
   vkFreeMemory(g.device, stgMem, nullptr);
@@ -1297,6 +1482,7 @@ VkDescriptorSet getTexture(uint64_t base, uint32_t w, uint32_t h,
       tdn++;
     }
   }
+  flushCsWritesRange(base, footprint);
   auto imageIt = g_texImages.find(key.image);
   uint64_t hsh = 0;
   if (imageIt == g_texImages.end() || imageIt->second.lastCheckedFrame != g.frameNum) {
@@ -1414,10 +1600,12 @@ struct MultiTexKey {
   TexKey tex[State::kMaxTex];
   VkImageView view[State::kMaxTex] = {};
   VkImageLayout layout[State::kMaxTex] = {};
+  bool storage[State::kMaxTex] = {};
   bool operator==(const MultiTexKey &o) const {
     if (nTexs != o.nTexs) return false;
     for (uint32_t i = 0; i < nTexs; i++)
-      if (!(tex[i] == o.tex[i]) || view[i] != o.view[i] || layout[i] != o.layout[i])
+      if (!(tex[i] == o.tex[i]) || view[i] != o.view[i] ||
+          layout[i] != o.layout[i] || storage[i] != o.storage[i])
         return false;
     return true;
   }
@@ -1429,6 +1617,7 @@ struct MultiTexKeyHash {
       h = hashWord(h, TexKeyHash{}(k.tex[i]));
       h = hashWord(h, std::hash<VkImageView>{}(k.view[i]));
       h = hashWord(h, k.layout[i]);
+      h = hashWord(h, k.storage[i]);
     }
     return static_cast<size_t>(h);
   }
@@ -1443,23 +1632,37 @@ void clearMultiTexCache() {
   g_mtexCache.clear();
 }
 void releaseRetiredTextures() {
-  for (const MultiTexSet &entry : g_retiredMtex)
+  // Two-stage aging for the pipelined frame: an object retired while frame N
+  // recorded may still be referenced by BOTH in-flight command buffers (N-1
+  // until N's endFrame, N until N+1's endFrame). Objects therefore rest one
+  // extra beginFrame in the `aged` generation before being destroyed -- by
+  // then every command buffer that could reference them has been fence-waited.
+  static std::vector<MultiTexSet> agedMtex;
+  static std::vector<TexEntry> agedTexSets;
+  static std::vector<TexViewEntry> agedTexViews;
+  static std::vector<TexImageEntry> agedTexImages;
+  for (const MultiTexSet &entry : agedMtex)
     vkFreeDescriptorSets(g.device, entry.pool, 1, &entry.set);
-  g_retiredMtex.clear();
-  for (const TexEntry &e : g_retiredTexSets)
+  for (const TexEntry &e : agedTexSets)
     if (e.set) vkFreeDescriptorSets(g.device, e.pool, 1, &e.set);
-  g_retiredTexSets.clear();
-  for (const TexViewEntry &e : g_retiredTexViews)
+  for (const TexViewEntry &e : agedTexViews)
     if (e.view) vkDestroyImageView(g.device, e.view, nullptr);
-  g_retiredTexViews.clear();
-  for (const TexImageEntry &e : g_retiredTexImages) {
+  for (const TexImageEntry &e : agedTexImages) {
     if (e.image) vkDestroyImage(g.device, e.image, nullptr);
     if (e.mem) vkFreeMemory(g.device, e.mem, nullptr);
   }
+  agedMtex = std::move(g_retiredMtex);
+  agedTexSets = std::move(g_retiredTexSets);
+  agedTexViews = std::move(g_retiredTexViews);
+  agedTexImages = std::move(g_retiredTexImages);
+  g_retiredMtex.clear();
+  g_retiredTexSets.clear();
+  g_retiredTexViews.clear();
   g_retiredTexImages.clear();
 }
-VkDescriptorSet getMultiTexSet(const DrawInfo &d, const VkImageView *resolvedViews,
-                               const VkImageLayout *resolvedLayouts) {
+VkDescriptorSet getMultiTexSet(const DrawInfo &d, VkDescriptorSetLayout setLayout,
+                                const VkImageView *resolvedViews,
+                                const VkImageLayout *resolvedLayouts) {
   MultiTexKey key;
   key.nTexs = std::min(d.nTexs, State::kMaxTex);
   for (uint32_t i = 0; i < key.nTexs; i++) {
@@ -1472,6 +1675,7 @@ VkDescriptorSet getMultiTexSet(const DrawInfo &d, const VkImageView *resolvedVie
                             t.depth_compare);
     key.view[i] = resolvedViews[i];
     key.layout[i] = resolvedLayouts[i];
+    key.storage[i] = d.texs[i].storage;
   }
   auto ci = g_mtexCache.find(key);
   if (ci != g_mtexCache.end()) return ci->second.set;
@@ -1489,7 +1693,7 @@ VkDescriptorSet getMultiTexSet(const DrawInfo &d, const VkImageView *resolvedVie
   // descriptor state that failed to resolve.
   static const bool texMiss = std::getenv("DELTA_GPU_TEXMISS") != nullptr;
   static int texMissLogged = 0;
-  for (uint32_t i = 0; i < State::kMaxTex; i++) {
+  for (uint32_t i = 0; i < key.nTexs; i++) {
     VkImageView v = (i < key.nTexs && !forceWhite) ? resolvedViews[i] : VK_NULL_HANDLE;
     bool arrayed = i < key.nTexs && d.texs[i].arrayed;
     if (texMiss && !v && i < key.nTexs && texMissLogged < 64) {
@@ -1501,15 +1705,16 @@ VkDescriptorSet getMultiTexSet(const DrawInfo &d, const VkImageView *resolvedVie
                    i, (unsigned long)t.base, t.w, t.h, t.dfmt, t.nfmt, t.tiling,
                    t.layers, t.mip_levels, t.arrayed);
     }
+    if (d.texs[i].storage && !v) return VK_NULL_HANDLE;
     views[i] = v ? v : (arrayed ? g.whiteArrayView : g.whiteView);
     layouts[i] = v ? resolvedLayouts[i] : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
   }
   MultiTexSet entry;
-  entry.set = allocateSamplerSet(g.texArrayLayout, true, entry.pool);
+  entry.set = allocateSamplerSet(setLayout, true, entry.pool);
   if (!entry.set) return VK_NULL_HANDLE;
   VkDescriptorImageInfo dii[State::kMaxTex];
   VkWriteDescriptorSet wr[State::kMaxTex];
-  for (uint32_t i = 0; i < State::kMaxTex; i++) {
+  for (uint32_t i = 0; i < key.nTexs; i++) {
     SamplerKey sampler;
     if (i < key.nTexs) {
       sampler.valid = d.texs[i].sampler_valid;
@@ -1518,12 +1723,16 @@ VkDescriptorSet getMultiTexSet(const DrawInfo &d, const VkImageView *resolvedVie
       sampler.force_lod_zero = d.texs[i].force_lod_zero;
       sampler.depth_compare = d.texs[i].depth_compare;
     }
-    dii[i] = {samplerFor(sampler), views[i], layouts[i]};
+    dii[i] = {d.texs[i].storage ? VK_NULL_HANDLE : samplerFor(sampler), views[i],
+              layouts[i]};
     wr[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
     wr[i].dstSet = entry.set; wr[i].dstBinding = i; wr[i].descriptorCount = 1;
-    wr[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; wr[i].pImageInfo = &dii[i];
+    wr[i].descriptorType = d.texs[i].storage
+                               ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE
+                               : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    wr[i].pImageInfo = &dii[i];
   }
-  vkUpdateDescriptorSets(g.device, State::kMaxTex, wr, 0, nullptr);
+  vkUpdateDescriptorSets(g.device, key.nTexs, wr, 0, nullptr);
   g_mtexCache[key] = entry;
   return entry.set;
 }
@@ -1588,6 +1797,7 @@ RTarget *getRT(uint64_t base, uint32_t w, uint32_t h, VkFormat fmt) {
   ii.samples = VK_SAMPLE_COUNT_1_BIT;
   ii.tiling = VK_IMAGE_TILING_OPTIMAL;
   ii.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+             VK_IMAGE_USAGE_STORAGE_BIT |
              VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
   if (vkCreateImage(g.device, &ii, nullptr, &t.image) != VK_SUCCESS) return nullptr;
   VkMemoryRequirements mr; vkGetImageMemoryRequirements(g.device, t.image, &mr);
@@ -1619,6 +1829,7 @@ RTarget *getRT(uint64_t base, uint32_t w, uint32_t h, VkFormat fmt) {
   std::fprintf(stderr, "[gpuvk] new RT %#lx %ux%u fmt=%d\n",
                (unsigned long)base, w, h, (int)fmt);
   g_rts[base] = t;
+  if (!g.firstRt) g.firstRt = base;
   registerRtPages(base, w, h, fmt);  // resource-model page table
   return &g_rts[base];
 }
@@ -1831,8 +2042,9 @@ uint64_t resolveSampledDepth(uint64_t addr, uint32_t w, uint32_t h) {
 
 // End the current dynamic-rendering region (if any), leaving its RTs readable.
 void endRegion() {
-  if (!g.curRt && !g.curDepth) return;
+  if (!g.regionOpen) return;
   p_vkCmdEndRendering(g.cmd);
+  g.regionOpen = false;
   for (uint32_t i = 0; i < g.curMrtCount; i++) {
     auto it = g_rts.find(g.curMrt[i]);
     if (it == g_rts.end()) continue;
@@ -1894,9 +2106,11 @@ void beginRegion(const uint64_t *mrtBase, const uint32_t *mrtInfo,
                                   ? VK_ACCESS_SHADER_READ_BIT
                               : rt.layout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
                                   ? VK_ACCESS_TRANSFER_READ_BIT
-                              : rt.layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
-                                  ? VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
-                                  : 0;
+                               : rt.layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+                                   ? VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
+                               : rt.layout == VK_IMAGE_LAYOUT_GENERAL
+                                   ? VK_ACCESS_SHADER_WRITE_BIT
+                                   : 0;
     imageBarrier(g.cmd, rt.image, rt.layout, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                  srcAccess, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
     rt.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
@@ -1917,12 +2131,17 @@ void beginRegion(const uint64_t *mrtBase, const uint32_t *mrtInfo,
     rt.everRendered = true;
     color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     color.clearValue.color = rt.clearValue;
-    // DELTA_GPU_CLEARCOLOR: force every bound RT to clear to green this frame, to
-    // verify (via the present path) which RTs are actually bound/rendered.
+    // DELTA_GPU_CLEARCOLOR / DELTA_GPU_CLEARRED: diagnostic knobs that force every
+    // bound RT to clear to a solid colour this frame, to verify which RTs are bound.
     static const bool forceClear = std::getenv("DELTA_GPU_CLEARCOLOR") != nullptr;
+    static const bool clearRed = std::getenv("DELTA_GPU_CLEARRED") != nullptr;
     if (forceClear) {
       color.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
       color.clearValue.color = {{0.f, 1.f, 0.f, 1.f}};
+    }
+    if (clearRed) {
+      color.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+      color.clearValue.color = {{1.0f, 0.0f, 0.0f, 1.0f}};
     }
     rt.usedThisFrame = true;
     rt.lastFrame = g.frameNum;
@@ -1958,6 +2177,7 @@ void beginRegion(const uint64_t *mrtBase, const uint32_t *mrtInfo,
   ri.layerCount = 1; ri.colorAttachmentCount = g.curMrtCount; ri.pColorAttachments = colors;
   if (dt) ri.pDepthAttachment = &depthAtt;
   p_vkCmdBeginRendering(g.cmd, &ri);
+  g.regionOpen = true;
   // Negative-height (y-up) viewport: GCN/PS4 rasterises y-up, so we do too. This
   // stores render-target content upright, so render-to-texture composites (the
   // scene->scanout copy, effect overlays) sample it with aligned UVs when run through
@@ -1979,6 +2199,203 @@ void beginRegion(const uint64_t *mrtBase, const uint32_t *mrtInfo,
     std::fprintf(stderr, "[reg] f%d begin RT %#lx %ux%u mrt=%u clear=%d\n", g.frameNum,
                   (unsigned long)base, w, h, g.curMrtCount,
                   g.curMrtCount && colors[0].loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR);
+}
+
+// ---- performance overlay ----------------------------------------------------
+// Stacked per-stage frame-time columns drawn over the presented image (default
+// on; DELTA_GPU_OVERLAY=0 disables). One column per frame, 2 px per ms:
+//   green  REC  command recording + per-draw analysis (vk::draw)
+//   yellow SUB  command-buffer end + queue submit
+//   red    GPU  fence wait (the rasterizer)
+//   blue   PRS  window present (SDL blit)
+//   purple TEX  synchronous texture uploads
+//   gray   OTH  everything else (guest emulation between frames)
+// Drawn AFTER the PPM capture paths so dumps stay clean.
+
+void pushStageSample() {
+  static uint64_t prevNs = 0;
+  const uint64_t now = nowNs();
+  const float wall = prevNs ? (now - prevNs) / 1e6f : 0.0f;
+  prevNs = now;
+  StageSample s;
+  s.rec = g_frDraw / 1e6f;
+  s.sub = g_frSubmit / 1e6f;
+  s.gpu = g_frWait / 1e6f;
+  s.prs = g_frPresent / 1e6f;  // accrued after last frame's sample (1-frame lag)
+  s.tex = g_frTexUp / 1e6f;
+  const float known = s.rec + s.sub + s.gpu + s.prs + s.tex;
+  s.oth = wall > known ? wall - known : 0.0f;
+  s.wall = wall;
+  g_frDraw = g_frSubmit = g_frWait = g_frPresent = g_frTexUp = 0;
+  g_stageHist[g_stageHistPos] = s;
+  g_stageHistPos = (g_stageHistPos + 1) % kStageHistN;
+  if (g_stageHistCount < kStageHistN) g_stageHistCount++;
+}
+
+// 3x5 bitmap font (rows top-down, bit 2 = left pixel). Uppercase + digits only.
+const uint8_t *ovGlyph(char c) {
+  struct Glyph { char c; uint8_t rows[5]; };
+  static const Glyph f[] = {
+      {'0', {7, 5, 5, 5, 7}}, {'1', {2, 6, 2, 2, 7}}, {'2', {7, 1, 7, 4, 7}},
+      {'3', {7, 1, 7, 1, 7}}, {'4', {5, 5, 7, 1, 1}}, {'5', {7, 4, 7, 1, 7}},
+      {'6', {7, 4, 7, 5, 7}}, {'7', {7, 1, 1, 2, 2}}, {'8', {7, 5, 7, 5, 7}},
+      {'9', {7, 5, 7, 1, 7}}, {'.', {0, 0, 0, 0, 2}}, {'A', {7, 5, 7, 5, 5}},
+      {'B', {6, 5, 6, 5, 6}}, {'C', {7, 4, 4, 4, 7}}, {'D', {6, 5, 5, 5, 6}},
+      {'E', {7, 4, 7, 4, 7}}, {'F', {7, 4, 7, 4, 4}}, {'G', {7, 4, 5, 5, 7}},
+      {'H', {5, 5, 7, 5, 5}}, {'I', {7, 2, 2, 2, 7}}, {'L', {4, 4, 4, 4, 7}},
+      {'M', {5, 7, 7, 5, 5}}, {'N', {5, 7, 7, 7, 5}}, {'O', {7, 5, 5, 5, 7}},
+      {'P', {7, 5, 7, 4, 4}}, {'R', {7, 5, 6, 5, 5}}, {'S', {7, 4, 7, 1, 7}},
+      {'T', {7, 2, 2, 2, 2}}, {'U', {5, 5, 5, 5, 7}}, {'V', {5, 5, 5, 5, 2}},
+      {'W', {5, 5, 7, 7, 5}}, {'X', {5, 5, 2, 5, 5}},
+  };
+  for (const Glyph &gl : f)
+    if (gl.c == c) return gl.rows;
+  return nullptr;  // unknown/space -> blank
+}
+
+inline void ovFill(uint8_t *b, uint32_t w, uint32_t h, int x, int y, int fw,
+                   int fh, uint32_t bgra) {
+  if (x < 0 || y < 0) return;
+  for (int yy = y; yy < y + fh && yy < (int)h; yy++) {
+    uint32_t *row = reinterpret_cast<uint32_t *>(b + (size_t)yy * w * 4);
+    for (int xx = x; xx < x + fw && xx < (int)w; xx++) row[xx] = bgra;
+  }
+}
+
+void ovText(uint8_t *b, uint32_t w, uint32_t h, int x, int y, int scale,
+            uint32_t bgra, const char *s) {
+  for (; *s; s++, x += 4 * scale) {
+    const uint8_t *rows = ovGlyph(*s);
+    if (!rows) continue;
+    for (int ry = 0; ry < 5; ry++)
+      for (int rx = 0; rx < 3; rx++)
+        if (rows[ry] & (4 >> rx))
+          ovFill(b, w, h, x + rx * scale, y + ry * scale, scale, scale, bgra);
+  }
+}
+
+void drawPerfOverlay(uint8_t *bgra, uint32_t w, uint32_t h) {
+  static const bool off = [] {
+    const char *e = std::getenv("DELTA_GPU_OVERLAY");
+    return e && e[0] == '0';
+  }();
+  if (off || !g_stageHistCount || w < 560 || h < 280) return;
+  // BGRA little-endian constants (0xAARRGGBB written as a uint32).
+  static constexpr uint32_t kCol[6] = {
+      0xFF32C832,  // REC green
+      0xFFC8C828,  // SUB yellow
+      0xFFE63232,  // GPU red
+      0xFF3288E6,  // PRS blue
+      0xFFC832C8,  // TEX purple
+      0xFF828282,  // OTH gray
+  };
+  static const char *kLabel[6] = {"REC", "SUB", "GPU", "PRS", "TEX", "OTH"};
+  constexpr int colW = 2, graphH = 120;
+  constexpr float pxPerMs = 2.0f;
+  const int graphW = kStageHistN * colW;
+  const int x0 = 10, y1 = (int)h - 10, y0 = y1 - graphH;
+  const int legendH = 7 * 14 + 4;
+  const int panelY0 = y0 - legendH - 4;
+  // Darken the panel background (keeps the game visible underneath).
+  for (int yy = panelY0 - 4; yy < y1 + 4 && yy < (int)h; yy++) {
+    if (yy < 0) continue;
+    uint32_t *row = reinterpret_cast<uint32_t *>(bgra + (size_t)yy * w * 4);
+    for (int xx = x0 - 4; xx < x0 + graphW + 4 && xx < (int)w; xx++)
+      row[xx] = (row[xx] >> 2) & 0x3F3F3F3F;
+  }
+  // Columns: oldest left, newest right; stages stacked bottom-up.
+  for (int i = 0; i < kStageHistN; i++) {
+    int idx = g_stageHistPos - kStageHistN + i;
+    if (idx < g_stageHistPos - g_stageHistCount) continue;  // no sample yet
+    idx = ((idx % kStageHistN) + kStageHistN) % kStageHistN;
+    const StageSample &s = g_stageHist[idx];
+    const float vals[6] = {s.rec, s.sub, s.gpu, s.prs, s.tex, s.oth};
+    int x = x0 + i * colW, yBase = y1;
+    for (int st = 0; st < 6; st++) {
+      int hpx = (int)(vals[st] * pxPerMs + 0.5f);
+      if (yBase - hpx < y0) hpx = yBase - y0;
+      if (hpx > 0) ovFill(bgra, w, h, x, yBase - hpx, colW, hpx, kCol[st]);
+      yBase -= hpx;
+      if (yBase <= y0) break;
+    }
+  }
+  // 60 / 30 fps reference lines.
+  for (int xx = x0; xx < x0 + graphW; xx += 3) {
+    ovFill(bgra, w, h, xx, y1 - (int)(16.7f * pxPerMs), 1, 1, 0xFFF0F0F0);
+    ovFill(bgra, w, h, xx, y1 - (int)(33.3f * pxPerMs), 1, 1, 0xFFF0F0F0);
+  }
+  // Legend: averages over the last second's worth of samples.
+  const int nAvg = g_stageHistCount < 60 ? g_stageHistCount : 60;
+  float avg[6] = {}, avgWall = 0;
+  for (int i = 1; i <= nAvg; i++) {
+    const StageSample &s =
+        g_stageHist[((g_stageHistPos - i) % kStageHistN + kStageHistN) %
+                    kStageHistN];
+    avg[0] += s.rec; avg[1] += s.sub; avg[2] += s.gpu;
+    avg[3] += s.prs; avg[4] += s.tex; avg[5] += s.oth;
+    avgWall += s.wall;
+  }
+  for (float &v : avg) v /= nAvg;
+  avgWall /= nAvg;
+  char buf[64];
+  int ty = panelY0;
+  std::snprintf(buf, sizeof buf, "FPS %.1f  %.1f MS", avgWall > 0.01f ? 1000.0f / avgWall : 0.0f, avgWall);
+  ovText(bgra, w, h, x0, ty, 2, 0xFFFFFFFF, buf);
+  ty += 14;
+  for (int st = 0; st < 6; st++, ty += 14) {
+    ovFill(bgra, w, h, x0, ty + 1, 8, 8, kCol[st]);
+    std::snprintf(buf, sizeof buf, "%s %5.1f", kLabel[st], avg[st]);
+    ovText(bgra, w, h, x0 + 14, ty, 2, 0xFFE6E6E6, buf);
+  }
+}
+
+// ---- asynchronous window present --------------------------------------------
+// gfx::present blocks on the window swapchain (previous-present fence, vsync /
+// compositor pacing) and, on a software Vulkan driver, rasterizes the blit on
+// the CPU -- ~10ms+ that used to sit on the frame loop. A dedicated presenter
+// thread owns the window (creation, event pump, and present all happen on it)
+// and always shows the newest completed frame; the frame loop just snapshots
+// the pixels and signals. DELTA_GPU_SYNCPRESENT=1 restores the inline call.
+struct Presenter {
+  std::thread th;
+  std::mutex mtx;
+  std::condition_variable cv;
+  std::vector<uint8_t> buf;  // pending frame (BGRA, tight pitch); latest wins
+  uint32_t w = 0, h = 0;
+  bool pending = false;
+  bool started = false;
+};
+Presenter g_presenter;
+
+void presenterLoop() {
+  std::unique_lock<std::mutex> lk(g_presenter.mtx);
+  std::vector<uint8_t> local;
+  while (true) {
+    g_presenter.cv.wait(lk, [] { return g_presenter.pending; });
+    // Steal the pending buffer (the allocations ping-pong, no per-frame alloc).
+    local.swap(g_presenter.buf);
+    const uint32_t w = g_presenter.w, h = g_presenter.h;
+    g_presenter.pending = false;
+    lk.unlock();
+    if (gfx::ensure("prosperity", w, h) && gfx::pumpEvents())
+      gfx::present(local.data(), w, h, w * 4, gfx::PixelFormat::bgra8);
+    lk.lock();
+  }
+}
+
+void presentAsync(const uint8_t *pixels, uint32_t w, uint32_t h) {
+  Presenter &p = g_presenter;
+  if (!p.started) {
+    p.started = true;
+    p.th = std::thread(presenterLoop);
+    p.th.detach();
+  }
+  std::lock_guard<std::mutex> lk(p.mtx);
+  p.buf.assign(pixels, pixels + (size_t)w * h * 4);
+  p.w = w;
+  p.h = h;
+  p.pending = true;
+  p.cv.notify_one();
 }
 
 void writePpm(const char *path, const uint8_t *bgra, uint32_t w, uint32_t h) {
@@ -2123,7 +2540,15 @@ void dumpPpm(const uint8_t *bgra, uint32_t w, uint32_t h) {
 
 bool init() {
   if (g.ready) return true;
-  if (!createDevice()) {
+  // Create the device from a clean host thread: init() is reached on a FEX
+  // guest thread (guest stack / TLS), where the NVIDIA ICD's
+  // vk_icdGetInstanceProcAddr silently fails and enumeration falls back to
+  // llvmpipe -- a ~30ms/frame software rasteriser on a box with a real GPU.
+  // llvmpipe never cared, so this is behaviour-neutral for pure-software runs.
+  bool ok = false;
+  std::thread initThread([&ok] { ok = createDevice(); });
+  initThread.join();
+  if (!ok) {
     std::fprintf(stderr, "[gpuvk] headless Vulkan unavailable; gpu disabled\n");
     return false;
   }
@@ -2150,7 +2575,7 @@ CsPipe *getCsPipe(const ComputeInfo &ci) {
   if (it != g_csPipes.end())
     return it->second.nres == ci.nres ? &it->second : nullptr;
   CsPipe cp; cp.nres = ci.nres;
-  VkDescriptorSetLayoutBinding binds[8];
+  VkDescriptorSetLayoutBinding binds[ComputeInfo::kMaxResources];
   for (uint32_t i = 0; i < ci.nres; i++)
     binds[i] = {i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
   VkDescriptorSetLayoutCreateInfo sl{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
@@ -2206,9 +2631,343 @@ struct CsStage {
   void *map = nullptr;
   VkDeviceSize cap = 0;
 };
-CsStage g_csStage[8];
+CsStage g_csStage[ComputeInfo::kMaxResources];
 VkDescriptorPool g_csDescPool = VK_NULL_HANDLE;
 VkCommandBuffer g_csCmd = VK_NULL_HANDLE;
+
+bool buildCsImageLayouts(const ComputeInfo::Res &res,
+                         gcn::TextureLayout32 &tiled,
+                         gcn::TextureLayout32 &linear) {
+  const uint32_t stageTiling = res.tilingIdx == 31 ? 31 : 8;
+  return res.imageStaging &&
+         gcn::BuildTextureLayout32(tiled, res.width, res.height, res.pitch,
+                                   res.layers, res.mipLevels, res.tilingIdx,
+                                   res.pow2Pad, res.elemBytes) &&
+         gcn::BuildTextureLayout32(linear, res.width, res.height, res.pitch,
+                                   res.layers, res.mipLevels, stageTiling,
+                                   res.pow2Pad, res.stageElemBytes) &&
+         tiled.size == res.guestSize && linear.size == res.size;
+}
+
+float unpackUnsignedFloat(uint32_t value, uint32_t mantissaBits) {
+  const uint32_t mantissaMask = (1u << mantissaBits) - 1;
+  const uint32_t mantissa = value & mantissaMask;
+  const uint32_t exponent = (value >> mantissaBits) & 0x1F;
+  if (!exponent)
+    return std::ldexp(static_cast<float>(mantissa), 1 - 15 - mantissaBits);
+  if (exponent == 0x1F)
+    return mantissa ? std::numeric_limits<float>::quiet_NaN()
+                    : std::numeric_limits<float>::infinity();
+  return std::ldexp(1.f + static_cast<float>(mantissa) /
+                              static_cast<float>(1u << mantissaBits),
+                    static_cast<int>(exponent) - 15);
+}
+
+uint32_t packUnsignedFloat(float value, uint32_t mantissaBits) {
+  if (std::isnan(value)) return (0x1Fu << mantissaBits) | 1u;
+  if (value <= 0.f) return 0;
+  if (std::isinf(value)) return 0x1Fu << mantissaBits;
+  int exponent;
+  const float fraction = std::frexp(value, &exponent);
+  int targetExponent = exponent - 1 + 15;
+  if (targetExponent <= 0) {
+    const long mantissa =
+        std::lround(std::ldexp(value, 14 + mantissaBits));
+    return static_cast<uint32_t>(std::clamp<long>(
+        mantissa, 0, static_cast<long>(1u << mantissaBits)));
+  }
+  if (targetExponent >= 0x1F) return 0x1Fu << mantissaBits;
+  long mantissa = std::lround(
+      (fraction * 2.f - 1.f) * static_cast<float>(1u << mantissaBits));
+  if (mantissa == static_cast<long>(1u << mantissaBits)) {
+    mantissa = 0;
+    if (++targetExponent >= 0x1F) return 0x1Fu << mantissaBits;
+  }
+  return (static_cast<uint32_t>(targetExponent) << mantissaBits) |
+         static_cast<uint32_t>(mantissa);
+}
+
+void unpackR11G11B10(uint32_t packed, uint8_t *dst) {
+  const float value[4] = {
+      unpackUnsignedFloat(packed, 6),
+      unpackUnsignedFloat(packed >> 11, 6),
+      unpackUnsignedFloat(packed >> 22, 5),
+      1.f,
+  };
+  std::memcpy(dst, value, sizeof(value));
+}
+
+uint32_t packR11G11B10(const uint8_t *src) {
+  float value[4];
+  std::memcpy(value, src, sizeof(value));
+  return packUnsignedFloat(value[0], 6) |
+         (packUnsignedFloat(value[1], 6) << 11) |
+         (packUnsignedFloat(value[2], 5) << 22);
+}
+
+bool stageCsImage(const ComputeInfo::Res &res, void *dst) {
+  gcn::TextureLayout32 tiled, linear;
+  if (!buildCsImageLayouts(res, tiled, linear)) return false;
+  const bool direct = res.elemBytes == res.stageElemBytes;
+  bool fillsCompleteLayout = direct;
+  uint64_t filledBytes = 0;
+  for (uint32_t mip = 0; fillsCompleteLayout && mip < linear.mip_levels; ++mip) {
+    const auto &level = linear.mips[mip];
+    const uint64_t logicalBytes = static_cast<uint64_t>(level.width) *
+                                  level.height * linear.layers *
+                                  res.stageElemBytes;
+    fillsCompleteLayout = level.offset == filledBytes &&
+                          level.pitch == level.width &&
+                          level.stored_height == level.height &&
+                          level.size == logicalBytes;
+    filledBytes = level.offset + level.size;
+  }
+  fillsCompleteLayout = fillsCompleteLayout && filledBytes == res.size;
+  if (!fillsCompleteLayout) std::memset(dst, 0, res.size);
+  std::vector<uint8_t> tight;
+  if (!direct)
+    tight.resize(static_cast<size_t>(res.width) * res.height * res.elemBytes);
+  for (uint32_t mip = 0; mip < tiled.mip_levels; mip++) {
+    const auto &srcLevel = tiled.mips[mip];
+    const auto &dstLevel = linear.mips[mip];
+    for (uint32_t layer = 0; layer < tiled.layers; layer++) {
+      uint8_t *levelDst = static_cast<uint8_t *>(dst) + dstLevel.offset +
+          static_cast<uint64_t>(layer) * dstLevel.pitch *
+              dstLevel.stored_height * res.stageElemBytes;
+      if (direct) {
+        if (!gcn::DetileTextureMip32Pitched(
+                reinterpret_cast<const void *>(res.base), levelDst,
+                static_cast<size_t>(dstLevel.pitch) * res.stageElemBytes, tiled,
+                mip, layer))
+          return false;
+        continue;
+      }
+      if (!gcn::DetileTextureMip32(reinterpret_cast<const void *>(res.base),
+                                   tight.data(), tiled, mip, layer))
+        return false;
+      gcn::DetileParallelRows(srcLevel.height, [&](uint32_t y0, uint32_t y1) {
+        for (uint32_t y = y0; y < y1; y++) {
+          uint8_t *dstRow = levelDst + static_cast<size_t>(y) *
+                                           dstLevel.pitch * res.stageElemBytes;
+          const uint8_t *srcRow = tight.data() + static_cast<size_t>(y) *
+                                                     srcLevel.width *
+                                                     res.elemBytes;
+          if (res.dfmt == 6) {
+            for (uint32_t x = 0; x < srcLevel.width; x++) {
+              uint32_t packed;
+              std::memcpy(&packed, srcRow + static_cast<size_t>(x) * 4, 4);
+              unpackR11G11B10(packed,
+                              dstRow + static_cast<size_t>(x) * 16);
+            }
+          } else {
+            for (uint32_t x = 0; x < srcLevel.width; x++) {
+              uint16_t value;
+              std::memcpy(&value, srcRow + static_cast<size_t>(x) * 2, 2);
+              const uint32_t expanded = value;
+              std::memcpy(dstRow + static_cast<size_t>(x) * 4, &expanded, 4);
+            }
+          }
+        }
+      });
+    }
+  }
+  return true;
+}
+
+bool writebackCsImage(const ComputeInfo::Res &res, const void *src) {
+  gcn::TextureLayout32 tiled, linear;
+  if (!buildCsImageLayouts(res, tiled, linear)) return false;
+  const bool direct = res.elemBytes == res.stageElemBytes;
+  std::vector<uint8_t> tight;
+  if (!direct)
+    tight.resize(static_cast<size_t>(res.width) * res.height * res.elemBytes);
+  for (uint32_t mip = 0; mip < tiled.mip_levels; mip++) {
+    const auto &dstLevel = tiled.mips[mip];
+    const auto &srcLevel = linear.mips[mip];
+    for (uint32_t layer = 0; layer < tiled.layers; layer++) {
+      const uint8_t *levelSrc = static_cast<const uint8_t *>(src) +
+          srcLevel.offset + static_cast<uint64_t>(layer) * srcLevel.pitch *
+                                srcLevel.stored_height * res.stageElemBytes;
+      if (direct) {
+        if (!gcn::RetileTextureMip32Pitched(
+                levelSrc,
+                static_cast<size_t>(srcLevel.pitch) * res.stageElemBytes,
+                reinterpret_cast<void *>(res.base), tiled, mip, layer))
+          return false;
+        continue;
+      }
+      gcn::DetileParallelRows(dstLevel.height, [&](uint32_t y0, uint32_t y1) {
+        for (uint32_t y = y0; y < y1; y++) {
+          uint8_t *dstRow = tight.data() + static_cast<size_t>(y) *
+                                               dstLevel.width * res.elemBytes;
+          const uint8_t *srcRow = levelSrc + static_cast<size_t>(y) *
+                                                 srcLevel.pitch *
+                                                 res.stageElemBytes;
+          if (res.dfmt == 6) {
+            for (uint32_t x = 0; x < dstLevel.width; x++) {
+              const uint32_t packed =
+                  packR11G11B10(srcRow + static_cast<size_t>(x) * 16);
+              std::memcpy(dstRow + static_cast<size_t>(x) * 4, &packed, 4);
+            }
+          } else {
+            for (uint32_t x = 0; x < dstLevel.width; x++) {
+              uint32_t expanded;
+              std::memcpy(&expanded, srcRow + static_cast<size_t>(x) * 4, 4);
+              const uint16_t value = static_cast<uint16_t>(expanded);
+              std::memcpy(dstRow + static_cast<size_t>(x) * 2, &value, 2);
+            }
+          }
+        }
+      });
+      if (!gcn::RetileTextureMip32(tight.data(),
+                                   reinterpret_cast<void *>(res.base), tiled,
+                                   mip, layer))
+        return false;
+    }
+  }
+  return true;
+}
+
+// GPU-resident compute working set. Each guest range a CS touches gets a
+// persistent host-visible storage buffer keyed by its base address. Staged
+// content persists across dispatches and frames: a range the GPU wrote
+// (gpuDirty) is the newest copy and is bound directly with no re-staging;
+// guest-sourced ranges revalidate against a content hash at most once per
+// frame. Writebacks to guest memory (the expensive image retile) happen
+// LAZILY — only when a draw / DMA / frame boundary needs guest memory to be
+// current (flushCsWrites), not after every dispatch.
+struct CsRange {
+  VkBuffer buf = VK_NULL_HANDLE;
+  VkDeviceMemory mem = VK_NULL_HANDLE;
+  void *map = nullptr;
+  VkDeviceSize cap = 0;
+  uint64_t size = 0;        // active staged (linear) byte size
+  uint64_t guestBytes = 0;  // guest footprint (hash + overlap checks)
+  uint64_t hash = 0;        // texHash of guest content when last in sync
+  int lastValidatedFrame = -1;
+  int lastUsedFrame = -1;
+  bool gpuDirty = false;    // buffer newer than guest memory
+  bool pendingBatch = false;  // referenced by the open dispatch batch
+  bool imageStaging = false;
+  ComputeInfo::Res res;     // writeback needs the full layout description
+};
+std::unordered_map<uint64_t, CsRange> g_csRanges;
+uint64_t g_csRangeBytes = 0;
+uint32_t g_csStageN = 0, g_csFlushN = 0;
+uint64_t g_csStageBytes = 0;
+
+// Sampled content hash for CS range validation: length + 256 evenly spaced
+// 64-byte windows. Reading a whole 16MB image per validation was the point of
+// the exercise; a CPU write that dodges every window for a whole frame is a
+// risk we accept for the ~50x cheaper check (full texHash still guards the
+// sampled-texture cache).
+uint64_t rangeHash(uint64_t base, uint64_t bytes) {
+  if (bytes <= 16384) return texHash(base, bytes);
+  constexpr uint64_t kPrime = 1099511628211ull;
+  uint64_t h = 1469598103934665603ull ^ (bytes * kPrime);
+  const uint64_t step = (bytes - 64) / 255;
+  for (uint32_t i = 0; i < 256; i++) {
+    uint64_t w[8];
+    std::memcpy(w, reinterpret_cast<const void *>(base + i * step), 64);
+    for (int j = 0; j < 8; j++) h = (h ^ w[j]) * kPrime;
+  }
+  return h;
+}
+
+bool csRangeEnsureBuffer(CsRange &e, VkDeviceSize size) {
+  if (e.buf && e.cap >= size) return true;
+  if (e.map) { vkUnmapMemory(g.device, e.mem); e.map = nullptr; }
+  if (e.buf) { vkDestroyBuffer(g.device, e.buf, nullptr); e.buf = VK_NULL_HANDLE; }
+  if (e.mem) { vkFreeMemory(g.device, e.mem, nullptr); e.mem = VK_NULL_HANDLE; }
+  g_csRangeBytes -= e.cap;
+  e.cap = 0;
+  VkDeviceSize cap = (size + 0xFFFF) & ~VkDeviceSize(0xFFFF);
+  VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+  bi.size = cap; bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+  if (vkCreateBuffer(g.device, &bi, nullptr, &e.buf) != VK_SUCCESS) {
+    e.buf = VK_NULL_HANDLE;
+    return false;
+  }
+  VkMemoryRequirements mr; vkGetBufferMemoryRequirements(g.device, e.buf, &mr);
+  VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+  ai.allocationSize = mr.size;
+  ai.memoryTypeIndex = findMemoryTypePref(mr.memoryTypeBits,
+      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT |
+          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  if (vkAllocateMemory(g.device, &ai, nullptr, &e.mem) != VK_SUCCESS) {
+    vkDestroyBuffer(g.device, e.buf, nullptr);
+    e.buf = VK_NULL_HANDLE; e.mem = VK_NULL_HANDLE;
+    return false;
+  }
+  vkBindBufferMemory(g.device, e.buf, e.mem, 0);
+  vkMapMemory(g.device, e.mem, 0, cap, 0, &e.map);
+  e.cap = cap;
+  g_csRangeBytes += cap;
+  return true;
+}
+
+void csRangeDestroy(CsRange &e) {
+  if (e.map) vkUnmapMemory(g.device, e.mem);
+  if (e.buf) vkDestroyBuffer(g.device, e.buf, nullptr);
+  if (e.mem) vkFreeMemory(g.device, e.mem, nullptr);
+  g_csRangeBytes -= e.cap;
+  e = CsRange{};
+}
+
+// Dispatch batching: dispatches are recorded into one command buffer and
+// submitted/waited only when something needs their results (a flush point,
+// a staging hazard, or the batch cap). 228 individual submit+fence round
+// trips per frame were ~40% of the whole compute cost.
+bool g_csBatchOpen = false;
+uint32_t g_csBatchCount = 0;
+VkFence g_csBatchFence = VK_NULL_HANDLE;
+bool g_csStagePending[ComputeInfo::kMaxResources] = {};
+
+void csBatchFlush() {
+  if (!g_csBatchOpen) return;
+  const uint64_t t0 = nowNs();
+  vkEndCommandBuffer(g_csCmd);
+  VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+  si.commandBufferCount = 1;
+  si.pCommandBuffers = &g_csCmd;
+  vkResetFences(g.device, 1, &g_csBatchFence);
+  const VkResult sr = vkQueueSubmit(g.queue, 1, &si, g_csBatchFence);
+  const VkResult wr =
+      sr == VK_SUCCESS
+          ? vkWaitForFences(g.device, 1, &g_csBatchFence, VK_TRUE, UINT64_MAX)
+          : sr;
+  if (sr != VK_SUCCESS || wr != VK_SUCCESS) {
+    std::fprintf(stderr,
+                 "[gpuvk] cs batch DEVICE FAULT: submit=%d wait=%d n=%u\n",
+                 (int)sr, (int)wr, g_csBatchCount);
+    reportDeviceFault(g.device);
+  }
+  vkResetDescriptorPool(g.device, g_csDescPool, 0);
+  g_csBatchOpen = false;
+  g_csBatchCount = 0;
+  for (auto &kv : g_csRanges) kv.second.pendingBatch = false;
+  std::memset(g_csStagePending, 0, sizeof g_csStagePending);
+  g_nsCsGpu += nowNs() - t0;
+}
+
+// Write one dirty range back to guest memory (retile for images) and re-stamp
+// its hash so the next validation sees guest == buffer.
+bool csRangeFlushOne(uint64_t base, CsRange &e) {
+  if (!e.gpuDirty) return true;
+  if (e.pendingBatch) csBatchFlush();  // results must exist before readback
+  g_csFlushN++;
+  if (e.imageStaging) {
+    if (!writebackCsImage(e.res, e.map)) return false;
+  } else {
+    std::memcpy(reinterpret_cast<void *>(base), e.map, e.size);
+  }
+  invalidateTexRange(base, e.guestBytes);
+  e.gpuDirty = false;
+  e.hash = rangeHash(base, e.guestBytes);
+  e.lastValidatedFrame = g.frameNum;
+  return true;
+}
 
 // Ensure staging slot i can hold `size` bytes (grow-on-demand, kept mapped).
 bool csEnsureStage(uint32_t i, VkDeviceSize size) {
@@ -2238,8 +2997,19 @@ bool csEnsureStage(uint32_t i, VkDeviceSize size) {
   return true;
 }
 
+struct ScopeCs {
+  uint64_t t0 = nowNs();
+  ~ScopeCs() { g_nsCs += nowNs() - t0; g_csCount++; }
+};
+
 bool dispatch(const ComputeInfo &ci) {
-  if (!g.ready || !ci.recomp || !ci.recomp->ok || !ci.nres || ci.nres > 8) return false;
+  if (!g.ready || !ci.recomp || !ci.recomp->ok || !ci.nres ||
+      ci.nres > g.maxCsResources)
+    return false;
+  ScopeCs _cs;
+  for (uint32_t i = 0; i < ci.nres; i++) g_csBytes += ci.res[i].size;
+  for (uint32_t i = 0; i < ci.nres; i++)
+    if (ci.res[i].size > g.maxStorageBufferRange) return false;
   CsPipe *cp = getCsPipe(ci);
   if (!cp) return false;
   static const bool verbose = std::getenv("DELTA_GPU_CSGPU_VERBOSE") != nullptr;
@@ -2251,67 +3021,221 @@ bool dispatch(const ComputeInfo &ci) {
     if (vkAllocateCommandBuffers(g.device, &ca, &g_csCmd) != VK_SUCCESS) { g_csCmd = VK_NULL_HANDLE; return false; }
   }
   if (g_csDescPool == VK_NULL_HANDLE) {
-    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 8};
+    // Sized for a whole batch of dispatches between flushes.
+    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                            256 * ComputeInfo::kMaxResources};
     VkDescriptorPoolCreateInfo pci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-    pci.maxSets = 1; pci.poolSizeCount = 1; pci.pPoolSizes = &ps;
+    pci.maxSets = 256; pci.poolSizeCount = 1; pci.pPoolSizes = &ps;
     if (vkCreateDescriptorPool(g.device, &pci, nullptr, &g_csDescPool) != VK_SUCCESS) { g_csDescPool = VK_NULL_HANDLE; return false; }
   }
-
-  // Stage each resource's guest range into its reused storage buffer.
-  VkDeviceSize sz[8];
-  for (uint32_t i = 0; i < ci.nres; i++) {
-    sz[i] = ci.res[i].size ? ((ci.res[i].size + 3) & ~VkDeviceSize(3)) : 4;
-    if (!csEnsureStage(i, sz[i])) return false;
-    std::memcpy(g_csStage[i].map, reinterpret_cast<const void *>(ci.res[i].base), ci.res[i].size);
+  if (g_csBatchFence == VK_NULL_HANDLE) {
+    VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+    if (vkCreateFence(g.device, &fci, nullptr, &g_csBatchFence) != VK_SUCCESS) {
+      g_csBatchFence = VK_NULL_HANDLE;
+      return false;
+    }
   }
 
-  // Descriptor set binding the storage buffers (pool reset each dispatch).
-  vkResetDescriptorPool(g.device, g_csDescPool, 0);
+  // DELTA_GPU_CSLIST: per-dispatch resource staging list for the first 200
+  // dispatches — shows what the chain actually round-trips per frame.
+  static const bool csList = std::getenv("DELTA_GPU_CSLIST") != nullptr;
+  static uint32_t csListed = 0;
+  if (csList && g.frameNum > 25 && csListed < 200) {
+    csListed++;
+    for (uint32_t i = 0; i < ci.nres; i++)
+      std::fprintf(stderr,
+                   "[cslist] cs=%#llx bind=%u base=%#lx size=%#lx %s%s\n",
+                   (unsigned long long)ci.csAddr, ci.res[i].binding,
+                   (unsigned long)ci.res[i].base,
+                   (unsigned long)ci.res[i].size,
+                   ci.res[i].imageStaging ? "img"
+                   : ci.res[i].zeroFill   ? "zero"
+                                          : "buf",
+                   ci.res[i].written ? " written" : "");
+  }
+
+  // Bind each resource: zero-fill scratch per binding slot; everything else
+  // uses the persistent range buffer for its guest base, staged only when the
+  // buffer doesn't already hold current content.
+  const uint64_t _tIn0 = nowNs();
+  VkBuffer bindBuf[ComputeInfo::kMaxResources];
+  VkDeviceSize sz[ComputeInfo::kMaxResources];
+  for (uint32_t i = 0; i < ci.nres; i++) {
+    sz[i] = ci.res[i].size ? ((ci.res[i].size + 3) & ~VkDeviceSize(3)) : 4;
+    if (ci.res[i].zeroFill) {
+      // Growing the scratch slot recreates its buffer; a pending batched
+      // dispatch still references the old handle.
+      if (g_csStagePending[i] && g_csStage[i].cap < sz[i]) csBatchFlush();
+      if (!csEnsureStage(i, sz[i])) return false;
+      std::memset(g_csStage[i].map, 0, sz[i]);
+      bindBuf[i] = g_csStage[i].buf;
+      continue;
+    }
+    const uint64_t base = ci.res[i].base;
+    const uint64_t guestBytes =
+        ci.res[i].guestSize ? ci.res[i].guestSize : ci.res[i].size;
+    // A read overlapping some OTHER dirty range must see that data through
+    // guest memory: flush those first.
+    for (auto &kv : g_csRanges) {
+      if (kv.first == base) continue;
+      CsRange &o = kv.second;
+      if (o.gpuDirty && kv.first < base + guestBytes &&
+          base < kv.first + o.guestBytes)
+        if (!csRangeFlushOne(kv.first, o)) return false;
+    }
+    CsRange &e = g_csRanges[base];
+    const bool sameShape = e.buf && e.size == static_cast<uint64_t>(sz[i]) &&
+                           e.imageStaging == ci.res[i].imageStaging;
+    if (!sameShape && e.gpuDirty)
+      if (!csRangeFlushOne(base, e)) return false;  // reshaped: keep its data
+    if (e.pendingBatch && (!e.buf || e.cap < sz[i]))
+      csBatchFlush();  // growth would destroy a buffer the batch references
+    if (!csRangeEnsureBuffer(e, sz[i])) return false;
+    bool valid = sameShape && (e.gpuDirty || e.lastValidatedFrame == g.frameNum);
+    if (!valid && sameShape) {
+      const uint64_t h = rangeHash(base, guestBytes);
+      if (h == e.hash) valid = true; else e.hash = h;
+      e.lastValidatedFrame = g.frameNum;
+    }
+    if (!valid) {
+      // CPU write into a buffer a pending batched dispatch reads/writes.
+      if (e.pendingBatch) csBatchFlush();
+      if (ci.res[i].imageStaging) {
+        if (!stageCsImage(ci.res[i], e.map)) return false;
+      } else {
+        std::memcpy(e.map, reinterpret_cast<const void *>(base),
+                    ci.res[i].size);
+        if (sz[i] > ci.res[i].size)
+          std::memset(static_cast<uint8_t *>(e.map) + ci.res[i].size, 0,
+                      sz[i] - ci.res[i].size);
+      }
+      if (!sameShape) {
+        e.hash = rangeHash(base, guestBytes);
+        e.lastValidatedFrame = g.frameNum;
+      }
+      e.gpuDirty = false;
+      g_csStageN++;
+      g_csStageBytes += sz[i];
+    }
+    e.size = sz[i];
+    e.guestBytes = guestBytes;
+    e.imageStaging = ci.res[i].imageStaging;
+    e.res = ci.res[i];
+    e.lastUsedFrame = g.frameNum;
+    bindBuf[i] = e.buf;
+  }
+  // Re-resolve handles: a later binding sharing an earlier binding's base may
+  // have grown (destroyed + recreated) that range's buffer.
+  for (uint32_t i = 0; i < ci.nres; i++)
+    if (!ci.res[i].zeroFill) bindBuf[i] = g_csRanges[ci.res[i].base].buf;
+
+  g_nsCsIn += nowNs() - _tIn0;
+
+  // Descriptor set binding the storage buffers (pool lives for a whole batch;
+  // reset happens at batch flush).
   VkDescriptorSet set;
   VkDescriptorSetAllocateInfo da{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
   da.descriptorPool = g_csDescPool; da.descriptorSetCount = 1; da.pSetLayouts = &cp->setLayout;
-  if (vkAllocateDescriptorSets(g.device, &da, &set) != VK_SUCCESS) return false;
-  VkDescriptorBufferInfo dbi[8]; VkWriteDescriptorSet wr[8];
+  if (vkAllocateDescriptorSets(g.device, &da, &set) != VK_SUCCESS) {
+    csBatchFlush();  // pool exhausted: flush resets it, then retry once
+    if (vkAllocateDescriptorSets(g.device, &da, &set) != VK_SUCCESS)
+      return false;
+  }
+  VkDescriptorBufferInfo dbi[ComputeInfo::kMaxResources];
+  VkWriteDescriptorSet wr[ComputeInfo::kMaxResources];
   for (uint32_t i = 0; i < ci.nres; i++) {
-    dbi[i] = {g_csStage[i].buf, 0, sz[i]};
+    dbi[i] = {bindBuf[i], 0, sz[i]};
     wr[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
     wr[i].dstSet = set; wr[i].dstBinding = ci.res[i].binding; wr[i].descriptorCount = 1;
     wr[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; wr[i].pBufferInfo = &dbi[i];
   }
   vkUpdateDescriptorSets(g.device, ci.nres, wr, 0, nullptr);
 
-  // Record + submit the dispatch, wait for completion (synchronous: the result must
-  // be back in guest memory before the following draws/texture uploads read it).
-  vkResetCommandBuffer(g_csCmd, 0);
-  VkCommandBufferBeginInfo cbi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-  cbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-  vkBeginCommandBuffer(g_csCmd, &cbi);
+  // Record the dispatch into the open batch. Submission + the fence wait
+  // happen at the next flush point, not here.
+  if (!g_csBatchOpen) {
+    vkResetCommandBuffer(g_csCmd, 0);
+    VkCommandBufferBeginInfo cbi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    cbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(g_csCmd, &cbi);
+    g_csBatchOpen = true;
+  }
   vkCmdBindPipeline(g_csCmd, VK_PIPELINE_BIND_POINT_COMPUTE, cp->pipe);
   vkCmdBindDescriptorSets(g_csCmd, VK_PIPELINE_BIND_POINT_COMPUTE, cp->layout, 0, 1, &set, 0, nullptr);
   vkCmdPushConstants(g_csCmd, cp->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 64, ci.userData);
   vkCmdDispatch(g_csCmd, ci.groups[0], ci.groups[1], ci.groups[2]);
-  vkEndCommandBuffer(g_csCmd);
-  VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-  si.commandBufferCount = 1; si.pCommandBuffers = &g_csCmd;
-  vkResetFences(g.device, 1, &g.fence);
-  if (vkQueueSubmit(g.queue, 1, &si, g.fence) != VK_SUCCESS) return false;
-  vkWaitForFences(g.device, 1, &g.fence, VK_TRUE, UINT64_MAX);
-
-  // Copy written ranges back to guest memory + invalidate any cached texture there.
+  VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+  mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+  mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+  vkCmdPipelineBarrier(g_csCmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                       VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &mb, 0,
+                       nullptr, 0, nullptr);
   for (uint32_t i = 0; i < ci.nres; i++) {
-    if (!ci.res[i].written) continue;
-    std::memcpy(reinterpret_cast<void *>(ci.res[i].base), g_csStage[i].map, ci.res[i].size);
-    invalidateTexRange(ci.res[i].base, ci.res[i].size);
+    if (ci.res[i].zeroFill) {
+      g_csStagePending[i] = true;
+    } else {
+      auto it = g_csRanges.find(ci.res[i].base);
+      if (it != g_csRanges.end()) it->second.pendingBatch = true;
+    }
+  }
+  if (++g_csBatchCount >= 128 || verbose) csBatchFlush();
+
+  // Mark written ranges GPU-dirty. Guest memory catches up lazily at the next
+  // flush point (draw / DMA / frame end) — writing every dispatch's outputs
+  // back immediately (the image retile especially) was ~100ms/frame.
+  const uint64_t _tOut0 = nowNs();
+  for (uint32_t i = 0; i < ci.nres; i++) {
+    if (!ci.res[i].written || ci.res[i].zeroFill) continue;
+    auto it = g_csRanges.find(ci.res[i].base);
+    if (it == g_csRanges.end()) continue;
+    it->second.gpuDirty = true;
     if (verbose) {
-      const uint8_t *b = static_cast<const uint8_t *>(g_csStage[i].map);
+      const uint8_t *b = static_cast<const uint8_t *>(it->second.map);
       uint64_t nz = 0, step = ci.res[i].size > 65536 ? ci.res[i].size / 65536 : 1;
       for (uint64_t k = 0; k < ci.res[i].size; k += step) nz += b[k] != 0;
-      std::fprintf(stderr, "[csgpu] wrote back base=%#lx size=%lu nonzero=%lu/%lu\n",
+      std::fprintf(stderr, "[csgpu] gpu wrote base=%#lx size=%lu nonzero=%lu/%lu\n",
                    (unsigned long)ci.res[i].base, (unsigned long)ci.res[i].size,
                    (unsigned long)nz, (unsigned long)(ci.res[i].size / step));
     }
   }
+  g_nsCsOut += nowNs() - _tOut0;
   return true;
+}
+
+// Make guest memory current with every GPU-written compute range. Called
+// before anything that consumes guest memory: draws (vertex/texture reads at
+// record time), CP DMA copies, and the end of each frame (bounds staleness
+// for direct guest CPU readers to one frame). Cheap no-op when nothing is
+// dirty; also evicts cold entries so the working set stays bounded.
+void flushCsWrites() {
+  const uint64_t _t0 = nowNs();
+  for (auto it = g_csRanges.begin(); it != g_csRanges.end();) {
+    csRangeFlushOne(it->first, it->second);
+    if (g_csRangeBytes > (1ull << 30) && !it->second.gpuDirty &&
+        !it->second.pendingBatch &&
+        it->second.lastUsedFrame + 300 < g.frameNum) {
+      csRangeDestroy(it->second);
+      it = g_csRanges.erase(it);
+    } else {
+      ++it;
+    }
+  }
+  g_nsCsOut += nowNs() - _t0;
+}
+
+// Targeted variant: flush only dirty ranges overlapping [base, base+bytes).
+// The per-draw guest readers (texture upload, vertex copy, cbuffer ring) call
+// this instead of the full flush — flushing every dirty range at every draw
+// re-tiled the whole post chain ~19x/frame.
+void flushCsWritesRange(uint64_t base, uint64_t bytes) {
+  if (!base || !bytes || g_csRanges.empty()) return;
+  const uint64_t _t0 = nowNs();
+  for (auto &kv : g_csRanges) {
+    CsRange &e = kv.second;
+    if (e.gpuDirty && kv.first < base + bytes && base < kv.first + e.guestBytes)
+      csRangeFlushOne(kv.first, e);
+  }
+  g_nsCsOut += nowNs() - _t0;
 }
 
 // ---- recompiled-shader path -------------------------------------------------
@@ -2326,6 +3250,25 @@ VkFormat vfmt(uint32_t dfmt, uint32_t nfmt) {
     case 13: return VK_FORMAT_R32G32B32_SFLOAT;
     case 14: return VK_FORMAT_R32G32B32A32_SFLOAT;
     default: return VK_FORMAT_R32G32B32A32_SFLOAT;
+  }
+}
+
+// Byte size of one vertex element in the given GCN data format -- must match the
+// VkFormat vfmt() selects. Used to size a stride-0 (constant) binding's upload,
+// where there is no source stride to derive the record extent from.
+uint32_t vfmtBytes(uint32_t dfmt) {
+  switch (dfmt) {
+    case 1:  return 1;   // R8
+    case 3:  return 2;   // R8G8
+    case 4:  return 4;   // R32
+    case 5:  return 4;   // R16G16
+    case 6:  return 4;   // R11G11B10
+    case 10: return 4;   // R8G8B8A8
+    case 11: return 8;   // R32G32
+    case 12: return 8;   // R16G16B16A16
+    case 13: return 12;  // R32G32B32
+    case 14: return 16;  // R32G32B32A32
+    default: return 16;
   }
 }
 
@@ -2346,8 +3289,9 @@ VkPrimitiveTopology vkTopology(uint32_t prim) {
 struct RecompPipe {
   VkPipeline pipe = VK_NULL_HANDLE;
   VkPipelineLayout layout = VK_NULL_HANDLE;
+  VkDescriptorSetLayout texSetLayout = VK_NULL_HANDLE;
   bool textured = false;
-  bool multiTex = false;  // PS samples >1 texture -> set 0 = the N-sampler layout
+  bool multiTex = false;  // custom set 0 for multiple and/or storage images
 };
 std::unordered_map<uint64_t, RecompPipe> g_recompPipes;
 
@@ -2372,8 +3316,15 @@ RecompPipe *getRecompPipe(const DrawInfo &d) {
   key = hashWord(key, d.nvattrs);
   for (uint32_t i = 0; i < mrtN; i++)
     key = hashWord(key, colorTargetFormat(d.mrtInfo[i]));
+  // The vertex-input layout (binding count + per-binding strides + per-attr
+  // binding assignment) is baked into the pipeline, so it must be part of the key
+  // or a later multi-stream draw would reuse a single-stream pipeline (or vice
+  // versa) for the same shader pair.
+  key = hashWord(key, d.nvbufs);
+  for (uint32_t j = 0; j < d.nvbufs; j++) key = hashWord(key, d.vbufs[j].stride);
   for (uint32_t i = 0; i < d.nvattrs; i++) {
     key = hashWord(key, d.vattrs[i].location);
+    key = hashWord(key, d.vattrs[i].binding);
     key = hashWord(key, d.vattrs[i].offset);
     key = hashWord(key, d.vattrs[i].num_comps);
     key = hashWord(key, d.vattrs[i].dfmt);
@@ -2383,16 +3334,42 @@ RecompPipe *getRecompPipe(const DrawInfo &d) {
   if (it != g_recompPipes.end()) return &it->second;
   RecompPipe rp;
   rp.textured = !d.recomp->ps_texs.empty();
-  rp.multiTex = d.recomp->ps_texs.size() > 1;  // multi-sampler set-0 layout
+  const bool hasStorage = std::any_of(
+      d.recomp->ps_texs.begin(), d.recomp->ps_texs.end(),
+      [](const gcn::ShaderTex &tex) { return tex.storage; });
+  rp.multiTex = d.recomp->ps_texs.size() > 1 || hasStorage;
 
   // set 0 = texture(s) (or an empty layout when untextured), set 1 = cbuffer UBO.
-  // A multi-texture PS uses the 8-binding layout; single-texture keeps the 1-binding.
-  VkDescriptorSetLayout set0 = !rp.textured ? g.emptyLayout
-                             : rp.multiTex ? g.texArrayLayout : g.dsLayout;
+  // Multi/storage shaders use an exact per-binding descriptor layout;
+  // single-sampler shaders retain the shared one-binding layout.
+  VkDescriptorSetLayout set0 = !rp.textured ? g.emptyLayout : g.dsLayout;
+  if (rp.multiTex) {
+    VkDescriptorSetLayoutBinding bindings[State::kMaxTex];
+    for (uint32_t i = 0; i < d.recomp->ps_texs.size(); i++) {
+      bindings[i] = {i,
+                     d.recomp->ps_texs[i].storage
+                         ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE
+                         : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                     1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+    }
+    VkDescriptorSetLayoutCreateInfo sl{
+        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    sl.bindingCount = static_cast<uint32_t>(d.recomp->ps_texs.size());
+    sl.pBindings = bindings;
+    if (vkCreateDescriptorSetLayout(g.device, &sl, nullptr,
+                                    &rp.texSetLayout) != VK_SUCCESS)
+      return nullptr;
+    set0 = rp.texSetLayout;
+  }
   VkDescriptorSetLayout sls[2] = {set0, g.uboLayout};
+  VkPushConstantRange push{VK_SHADER_STAGE_VERTEX_BIT |
+                               VK_SHADER_STAGE_FRAGMENT_BIT,
+                           0, 64};
   VkPipelineLayoutCreateInfo li{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
   li.setLayoutCount = 2;
   li.pSetLayouts = sls;
+  li.pushConstantRangeCount = 1;
+  li.pPushConstantRanges = &push;
   if (vkCreatePipelineLayout(g.device, &li, nullptr, &rp.layout) != VK_SUCCESS) return nullptr;
 
   VkShaderModule vs = makeModuleVec(d.recomp->vs_spirv);
@@ -2413,13 +3390,19 @@ RecompPipe *getRecompPipe(const DrawInfo &d) {
   stages[stageCount].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
   stages[stageCount].module = fs; stages[stageCount++].pName = "main";
 
-  VkVertexInputBindingDescription bind{0, d.vertexStride, VK_VERTEX_INPUT_RATE_VERTEX};
+  // One Vulkan binding per resolved vertex buffer (single-stream draws stay a
+  // single binding, identical to before); attributes reference their binding.
+  uint32_t nbind = d.nvattrs ? std::min(d.nvbufs, 8u) : 0;
+  VkVertexInputBindingDescription binds[8];
+  for (uint32_t j = 0; j < nbind; j++)
+    binds[j] = {j, d.vbufs[j].stride, VK_VERTEX_INPUT_RATE_VERTEX};
   VkVertexInputAttributeDescription attrs[8];
   for (uint32_t i = 0; i < d.nvattrs; i++)
-    attrs[i] = {d.vattrs[i].location, 0, vfmt(d.vattrs[i].dfmt, d.vattrs[i].nfmt), d.vattrs[i].offset};
+    attrs[i] = {d.vattrs[i].location, d.vattrs[i].binding,
+                vfmt(d.vattrs[i].dfmt, d.vattrs[i].nfmt), d.vattrs[i].offset};
   VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
-  vi.vertexBindingDescriptionCount = d.nvattrs ? 1 : 0;
-  vi.pVertexBindingDescriptions = d.nvattrs ? &bind : nullptr;
+  vi.vertexBindingDescriptionCount = nbind;
+  vi.pVertexBindingDescriptions = nbind ? binds : nullptr;
   vi.vertexAttributeDescriptionCount = d.nvattrs; vi.pVertexAttributeDescriptions = attrs;
 
   VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
@@ -2517,7 +3500,10 @@ bool drawRecomp(const DrawInfo &d) {
   }
   if (!d.recomp || !d.recomp->ok || drawCount < 3)
     return decline(DR_NORECOMP);
-  if (!d.mrtCount && !d.depthBase) {
+  const bool hasStorageImage = std::any_of(
+      d.recomp->ps_texs.begin(), d.recomp->ps_texs.end(),
+      [](const gcn::ShaderTex &tex) { return tex.storage; });
+  if (!d.mrtCount && !d.depthBase && !hasStorageImage) {
     g.frameDraws++;
     return true;
   }
@@ -2583,7 +3569,10 @@ bool drawRecomp(const DrawInfo &d) {
       float clearColor[4] = {0, 0, 0, 0};
       for (uint32_t a = 0; a < d.nvattrs; a++) {
         if (d.vattrs[a].num_comps == 4 && d.vattrs[a].offset != 0) {
-          const uint8_t *cb0 = vb + d.vattrs[a].offset;  // vertex 0's colour
+          // Colour may live in its own binding; read from that binding's base.
+          const auto *cbuf = static_cast<const uint8_t *>(
+              d.vbufs[d.vattrs[a].binding].data);
+          const uint8_t *cb0 = cbuf + d.vattrs[a].offset;  // vertex 0's colour
           if (d.vattrs[a].dfmt == 10) {
             for (int i = 0; i < 4; i++) clearColor[i] = cb0[i] / 255.f;
           } else {
@@ -2637,9 +3626,31 @@ bool drawRecomp(const DrawInfo &d) {
     }
   }
 
-  VkDeviceSize vneed = d.nvattrs ? (VkDeviceSize)nv * d.vertexStride : 0;
-  if (g.vbOffset + vneed > kVbRing) return decline(DR_RING);
-  if (indexed && g.ibOffset + (VkDeviceSize)d.indexCount * 4 > kIbRing)
+  // Lay out one contiguous ring range per vertex binding. Binding 0 sits at the
+  // ring offset (single-stream draws are byte-identical to before); additional
+  // bindings are 16-byte aligned so no attribute straddles a coarse boundary.
+  const uint32_t nbind = d.nvattrs ? std::min(d.nvbufs, 8u) : 0;
+  VkDeviceSize bindOff[8] = {}, bindSize[8] = {};
+  VkDeviceSize vneed = 0;
+  for (uint32_t j = 0; j < nbind; j++) {
+    if (j) vneed = (vneed + 15) & ~VkDeviceSize(15);
+    bindOff[j] = vneed;
+    if (d.vbufs[j].stride) {
+      bindSize[j] = (VkDeviceSize)nv * d.vbufs[j].stride;
+    } else {
+      // Stride-0 (constant) binding: upload a single record large enough to cover
+      // every attribute that reads it; the pipeline binds it with stride 0 so all
+      // vertices fetch this one record.
+      uint32_t rec = 0;
+      for (uint32_t a = 0; a < d.nvattrs; a++)
+        if (d.vattrs[a].binding == j)
+          rec = std::max(rec, d.vattrs[a].offset + vfmtBytes(d.vattrs[a].dfmt));
+      bindSize[j] = rec;
+    }
+    vneed += bindSize[j];
+  }
+  if (g.vbOffset + vneed > g.vbEnd) return decline(DR_RING);
+  if (indexed && g.ibOffset + (VkDeviceSize)d.indexCount * 4 > g.ibEnd)
     return decline(DR_RING);
 
   RecompPipe *rp = getRecompPipe(d);
@@ -2663,6 +3674,7 @@ bool drawRecomp(const DrawInfo &d) {
   uint64_t multiColor[State::kMaxTex] = {};
   uint64_t multiDepth[State::kMaxTex] = {};
   uint64_t multiFeedback[State::kMaxTex] = {};
+  uint64_t multiStorage[State::kMaxTex] = {};
   VkImageView multiViews[State::kMaxTex] = {};
   VkImageLayout multiLayouts[State::kMaxTex];
   bool multiTransitionSource = false;
@@ -2679,6 +3691,22 @@ bool drawRecomp(const DrawInfo &d) {
     for (uint32_t i = 0; i < multiN; i++) {
       const auto &t = d.texs[i];
       uint64_t base = t.base;
+      if (t.storage) {
+        if (base && !g_rts.count(base)) {
+          uint64_t resolved = resolveSampledRT(base, t.w, t.h);
+          if (resolved) base = resolved;
+        }
+        if (base && !g_rts.count(base)) {
+          const VkFormat format = guestTextureFormat(t.dfmt, t.nfmt);
+          if (format != VK_FORMAT_UNDEFINED) getRT(base, t.w, t.h, format);
+        }
+        if (base && g_rts.count(base)) {
+          multiStorage[i] = base;
+          multiTransitionSource |=
+              g_rts[base].layout != VK_IMAGE_LAYOUT_GENERAL;
+        }
+        continue;
+      }
       if (base && !t.arrayed && !g_rts.count(base) && !g_depths.count(base)) {
         bool depthFormat = t.dfmt == 4 && t.nfmt == 7;
         uint64_t resolved = depthFormat ? resolveSampledDepth(base, t.w, t.h) : 0;
@@ -2706,10 +3734,14 @@ bool drawRecomp(const DrawInfo &d) {
     }
   }
 
-  // Copy the raw interleaved vertex buffer and, for indexed draws, the indices.
+  // Copy each vertex binding's source range into the ring and, for indexed
+  // draws, the indices.
   VkDeviceSize voff = g.vbOffset, ioff = g.ibOffset;
-  if (vneed)
-    std::memcpy(g.vbMap + voff, d.vertexData, (size_t)vneed);
+  for (uint32_t j = 0; j < nbind; j++) {
+    if (!bindSize[j]) continue;
+    flushCsWritesRange(reinterpret_cast<uint64_t>(d.vbufs[j].data), bindSize[j]);
+    std::memcpy(g.vbMap + voff + bindOff[j], d.vbufs[j].data, (size_t)bindSize[j]);
+  }
   if (indexed) {
     auto *idst = reinterpret_cast<uint32_t *>(g.ibMap + ioff);
     if (i32) std::memcpy(idst, i32, (size_t)d.indexCount * 4);
@@ -2757,7 +3789,22 @@ bool drawRecomp(const DrawInfo &d) {
     }
     if (rp->multiTex) {
       for (uint32_t i = 0; i < multiN; i++) {
-        if (multiColor[i]) {
+        if (multiStorage[i]) {
+          auto &dst = g_rts[multiStorage[i]];
+          if (dst.layout != VK_IMAGE_LAYOUT_GENERAL) {
+            VkAccessFlags srcAccess =
+                dst.layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                    ? VK_ACCESS_SHADER_READ_BIT
+                : dst.layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+                    ? VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
+                : dst.layout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
+                    ? VK_ACCESS_TRANSFER_READ_BIT
+                    : 0;
+            imageBarrier(g.cmd, dst.image, dst.layout, VK_IMAGE_LAYOUT_GENERAL,
+                         srcAccess, VK_ACCESS_SHADER_WRITE_BIT);
+            dst.layout = VK_IMAGE_LAYOUT_GENERAL;
+          }
+        } else if (multiColor[i]) {
           auto &src = g_rts[multiColor[i]];
           if (src.layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
             VkAccessFlags srcAccess =
@@ -2789,7 +3836,10 @@ bool drawRecomp(const DrawInfo &d) {
     }
     if (rp->multiTex) {
       for (uint32_t i = 0; i < multiN; i++) {
-        if (multiFeedback[i]) {
+        if (multiStorage[i]) {
+          multiViews[i] = g_rts[multiStorage[i]].view;
+          multiLayouts[i] = VK_IMAGE_LAYOUT_GENERAL;
+        } else if (multiFeedback[i]) {
           auto &src = g_rts[multiFeedback[i]];
           multiViews[i] = src.feedbackView;
           multiLayouts[i] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
@@ -2801,7 +3851,7 @@ bool drawRecomp(const DrawInfo &d) {
           multiLayouts[i] = VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL;
         }
       }
-      texSet = getMultiTexSet(d, multiViews, multiLayouts);
+      texSet = getMultiTexSet(d, rp->texSetLayout, multiViews, multiLayouts);
       if (!texSet) return decline(DR_GUESTTEX);
     }
     RTarget *rt = d.rtBase
@@ -2815,7 +3865,10 @@ bool drawRecomp(const DrawInfo &d) {
   if (rp->multiTex) {
     if (!texSet) {
       for (uint32_t i = 0; i < multiN; i++) {
-        if (multiFeedback[i]) {
+        if (multiStorage[i]) {
+          multiViews[i] = g_rts[multiStorage[i]].view;
+          multiLayouts[i] = VK_IMAGE_LAYOUT_GENERAL;
+        } else if (multiFeedback[i]) {
           multiViews[i] = g_rts[multiFeedback[i]].feedbackView;
         } else if (multiColor[i]) {
           multiViews[i] = g_rts[multiColor[i]].view;
@@ -2824,7 +3877,7 @@ bool drawRecomp(const DrawInfo &d) {
           multiLayouts[i] = VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL;
         }
       }
-      texSet = getMultiTexSet(d, multiViews, multiLayouts);
+      texSet = getMultiTexSet(d, rp->texSetLayout, multiViews, multiLayouts);
     }
     if (!texSet) return decline(DR_GUESTTEX);
   } else if (feedbackAsTex) {
@@ -2844,32 +3897,49 @@ bool drawRecomp(const DrawInfo &d) {
 
   setGuestViewport(d);
   vkCmdBindPipeline(g.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, rp->pipe);
+  vkCmdPushConstants(g.cmd, rp->layout, VK_SHADER_STAGE_VERTEX_BIT, 0,
+                     sizeof(d.vsUserData), d.vsUserData);
+  vkCmdPushConstants(g.cmd, rp->layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+                     sizeof(d.psUserData), d.psUserData);
   // Copy each guest cbuffer window into the per-frame ring and bind set 1. Vulkan
   // requires one dynamic offset for every dynamic descriptor in the set layout.
   VkDeviceSize cbOff = (g.uboOffset + g.uboAlign - 1) & ~(VkDeviceSize)(g.uboAlign - 1);
   VkDeviceSize cbStride = (kCbufWindow + g.uboAlign - 1) & ~(VkDeviceSize)(g.uboAlign - 1);
-  if (cbOff + cbStride * 8 > kUboRing) return decline(DR_RING);
+  if (cbOff + cbStride * 8 > g.uboEnd) return decline(DR_RING);
   uint32_t dynOff[8];
+  VkDeviceSize next = cbOff;
   for (uint32_t i = 0; i < 8; i++) {
-    VkDeviceSize bindingOff = cbOff + cbStride * i;
-    dynOff[i] = static_cast<uint32_t>(bindingOff);
-    uint8_t *cbDst = g.uboMap + bindingOff;
-    std::memset(cbDst, 0, kCbufWindow);
     const auto &cb = d.cbufs[i];
-    if (cb.base >= 0x1000000000ull && cb.base < 0x20000000000ull) {
-      uint32_t n = cb.size < kCbufWindow ? cb.size : kCbufWindow;
-      std::memcpy(cbDst, reinterpret_cast<const void *>(cb.base), n);
-    } else if (i == 0) {
-      std::memcpy(cbDst, d.mvp, sizeof(d.mvp));
+    const bool haveCbuf = cb.base >= 0x1000000000ull && cb.base < 0x20000000000ull;
+    if (!haveCbuf && i != 0) {
+      dynOff[i] = 0;  // shared zero window (see beginFrame)
+      continue;
     }
+    uint8_t *cbDst = g.uboMap + next;
+    uint32_t n;
+    if (haveCbuf) flushCsWritesRange(cb.base, kCbufWindow);
+    if (haveCbuf) {
+      n = cb.size < kCbufWindow ? cb.size : kCbufWindow;
+      std::memcpy(cbDst, reinterpret_cast<const void *>(cb.base), n);
+    } else {  // binding 0 without a resolved cbuffer: the heuristic MVP
+      n = sizeof(d.mvp);
+      std::memcpy(cbDst, d.mvp, n);
+    }
+    if (n < kCbufWindow) std::memset(cbDst + n, 0, kCbufWindow - n);
+    dynOff[i] = static_cast<uint32_t>(next);
+    next += cbStride;
   }
-  g.uboOffset = cbOff + cbStride * 8;
+  g.uboOffset = next;
   vkCmdBindDescriptorSets(g.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, rp->layout,
                           1, 1, &g.uboSet, 8, dynOff);
   if (texSet)
     vkCmdBindDescriptorSets(g.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, rp->layout, 0, 1, &texSet, 0, nullptr);
-  if (d.nvattrs)
-    vkCmdBindVertexBuffers(g.cmd, 0, 1, &g.vb, &voff);
+  if (nbind) {
+    VkBuffer bufs[8];
+    VkDeviceSize offs[8];
+    for (uint32_t j = 0; j < nbind; j++) { bufs[j] = g.vb; offs[j] = voff + bindOff[j]; }
+    vkCmdBindVertexBuffers(g.cmd, 0, nbind, bufs, offs);
+  }
   if (indexed)
     vkCmdBindIndexBuffer(g.cmd, g.ib, ioff, VK_INDEX_TYPE_UINT32);
   if (drawTrace && drawCount >= 300) {
@@ -2883,6 +3953,13 @@ bool drawRecomp(const DrawInfo &d) {
                      0, 0, 0);
   else
     vkCmdDraw(g.cmd, d.vertexCount, d.instanceCount ? d.instanceCount : 1, 0, 0);
+  for (uint32_t i = 0; i < multiN; i++) {
+    if (!multiStorage[i]) continue;
+    RTarget &target = g_rts[multiStorage[i]];
+    target.everRendered = true;
+    target.usedThisFrame = true;
+    target.lastFrame = g.frameNum;
+  }
   g.vbOffset += vneed;
   if (indexed)
     g.ibOffset += (VkDeviceSize)d.indexCount * 4;
@@ -2894,8 +3971,8 @@ bool drawRecomp(const DrawInfo &d) {
 
 void beginFrame() {
   if (!g.ready) return;
-  // endFrame waits for the prior frame's fence, so objects invalidated while that
-  // command buffer was recording are safe to release now.
+  // Objects retired two frames ago are past every in-flight command buffer
+  // (see releaseRetiredTextures) and safe to destroy now.
   releaseRetiredTextures();
   if (!createPipeline()) return;
   createTexPipeline();  // best-effort; colored path still works without it
@@ -2903,11 +3980,38 @@ void beginFrame() {
   g.frameHeuristic = 0;
   g.frameMaxIdx = 0;
   g.frameNum++;
-  g.vbOffset = 0;
-  g.ibOffset = 0;
-  g.uboOffset = 0;
+  // Bind the active frame slot: its command buffer + readback aliases, and its
+  // half of each host-visible ring (the other half may still be read by the
+  // in-flight previous frame).
+  State::FrameSlot &slot = g.slots[g.slotIdx];
+  g.cmd = slot.cmd;
+  g.readback = slot.readback;
+  g.readbackMem = slot.readbackMem;
+  g.readbackMap = slot.readbackMap;
+  g.readbackSize = slot.readbackSize;
+  const VkDeviceSize vbBase = g.slotIdx * (kVbRing / 2);
+  const VkDeviceSize ibBase = g.slotIdx * (kIbRing / 2);
+  const VkDeviceSize uboBase = g.slotIdx * (kUboRing / 2);
+  g.vbOffset = vbBase; g.vbEnd = vbBase + kVbRing / 2;
+  g.ibOffset = ibBase; g.ibEnd = ibBase + kIbRing / 2;
+  g.uboOffset = uboBase; g.uboEnd = uboBase + kUboRing / 2;
+  // Window 0 of the cbuffer ring is a permanently-zero window: every binding a
+  // draw does not use points there (dynamic offset 0), so drawRecomp only
+  // writes the windows it actually fills instead of zeroing 8 windows per
+  // draw. Slot 0's usable range starts after it; nothing ever writes it again.
+  if (g.uboMap) {
+    static bool zeroWindowInit = false;
+    if (!zeroWindowInit) {
+      zeroWindowInit = true;
+      std::memset(g.uboMap, 0, kCbufWindow);
+    }
+    if (g.slotIdx == 0)
+      g.uboOffset =
+          (kCbufWindow + g.uboAlign - 1) & ~(VkDeviceSize)(g.uboAlign - 1);
+  }
   g.curRt = 0;
   g.curDepth = 0;
+  g.regionOpen = false;
   g.lastRt = 0;
   g.busiestRt = 0;
   g.busiestRtDraws = 0;
@@ -2949,6 +4053,7 @@ void draw(const DrawInfo &d_in) {
   const DrawInfo &d = patched ? dd : d_in;
   if (d.indexCount > g.frameMaxIdx) g.frameMaxIdx = d.indexCount;
   ScopeNs _t(&g_nsDraw);
+  ScopeNs _tf(&g_frDraw);
   // Recompiled-shader path: run the game's actual VS/PS. Falls through to the
   // heuristic quad path when the draw can't be handled. On by default now that it
   // renders gameplay correctly; DELTA_GPU_RECOMP=0 forces the old heuristic path.
@@ -2956,10 +4061,27 @@ void draw(const DrawInfo &d_in) {
     const char *e = std::getenv("DELTA_GPU_RECOMP");
     return !e || std::strcmp(e, "0") != 0;
   }();
-  if (recompPath && d.recomp && drawRecomp(d))
-    return;
+  const bool recompiled = recompPath && d.recomp && drawRecomp(d);
+  static const bool drawTraceAll = std::getenv("DELTA_GPU_DRAWTRACE") != nullptr;
+  if (drawTraceAll) {
+    static uint32_t traced = 0;
+    if (traced++ < 100)
+      std::fprintf(stderr,
+                   "[dt] f%d rt=%#lx count=%u indexed=%u nv=%u mrt=%u mask=%#x "
+                   "psmask=%#x prim=%u vp=[%.1f %.1f %.1f %.1f] depth=%#lx "
+                   "handled=%d\n",
+                   g.frameNum, (unsigned long)d.rtBase, d.vertexCount,
+                   d.indexCount, d.nvattrs, d.mrtCount, d.targetMask,
+                   d.recomp ? d.recomp->ps_mrt_mask : 0, d.primType,
+                   d.viewportXScale, d.viewportXOffset, d.viewportYScale,
+                   d.viewportYOffset, (unsigned long)d.depthBase, recompiled);
+  }
+  if (recompiled) return;
   if (!d.vertexData || !d.vertexStride)
     return;
+  flushCsWritesRange(reinterpret_cast<uint64_t>(d.vertexData),
+                     static_cast<uint64_t>(d.vertexStride) *
+                         (d.vertexCount ? d.vertexCount : 1));
   // Indexed triangle list (the common GNM draw): the index buffer selects which
   // vertices form each triangle. Find how many vertices the indices reference so
   // we repack exactly that many (the V# num_records can be the whole shared batch).
@@ -2981,9 +4103,9 @@ void draw(const DrawInfo &d_in) {
   }
   if (nv < 3 || nv > 200000u) return;  // sane cap
   VkDeviceSize need = (VkDeviceSize)nv * 32;  // pos.xy + color.rgba + uv.xy
-  if (g.vbOffset + need > kVbRing)
+  if (g.vbOffset + need > g.vbEnd)
     return;  // ring full this frame
-  if (indexed && g.ibOffset + (VkDeviceSize)d.indexCount * 4 > kIbRing)
+  if (indexed && g.ibOffset + (VkDeviceSize)d.indexCount * 4 > g.ibEnd)
     return;
   // Repack pos / color / uv interleaved into the vertex ring (stride 32).
   auto *base = static_cast<const uint8_t *>(d.vertexData);
@@ -3118,23 +4240,40 @@ void reportFps() {
   if (dt >= 2.0) {
     double f = frames ? frames : 1;
     std::fprintf(stderr,
-        "[fps] %.1f fps | per-frame gpu-code: draw=%.2fms end=%.2fms (readback=%.2fms) "
-        "texup=%.2fms x%.1f\n",
+        "[fps] %.1f fps | per-frame gpu-code: draw=%.2fms end=%.2fms (wait=%.2fms "
+        "submit=%.2fms present=%.2fms) texup=%.2fms x%.1f cs=%.2fms x%.1f "
+        "(in=%.2f gpu=%.2f out=%.2f stage=%.1fx%.1fMB flush=%.1f)\n",
         frames / dt, g_nsDraw / f / 1e6, g_nsEnd / f / 1e6, g_nsReadback / f / 1e6,
-        g_nsTexUp / f / 1e6, g_texUps / f);
+        g_nsSubmit / f / 1e6, g_nsPresent / f / 1e6,
+        g_nsTexUp / f / 1e6, g_texUps / f,
+        g_nsCs / f / 1e6, g_csCount / f,
+        g_nsCsIn / f / 1e6, g_nsCsGpu / f / 1e6, g_nsCsOut / f / 1e6,
+        g_csStageN / f, g_csStageBytes / f / 1e6, g_csFlushN / f);
     last = now;
     frames = 0;
     g_nsDraw = g_nsEnd = g_nsReadback = g_nsTexUp = 0;
+    g_nsSubmit = g_nsPresent = 0;
     g_texUps = 0;
+    g_nsCs = g_csBytes = 0;
+    g_nsCsIn = g_nsCsGpu = g_nsCsOut = 0;
+    g_csCount = g_csStageN = g_csFlushN = 0;
+    g_csStageBytes = 0;
   }
 }
 
 // DELTA_GPU_RTSTAT: every 200th frame, read back each render target used this
-// frame and report how many sampled texels are non-zero. Shows exactly where a
-// multi-pass chain (g-buffer -> lighting -> post -> scanout) loses its content.
+// frame and report how many sampled texels are non-zero. RTSTAT_FRAME selects a
+// single early frame instead. DELTA_GPU_RTDUMP also writes the selected targets.
 void reportRtContents() {
   static const bool enabled = std::getenv("DELTA_GPU_RTSTAT") != nullptr;
-  if (!enabled || g.frameNum % 200 != 0) return;
+  static const bool dump = std::getenv("DELTA_GPU_RTDUMP") != nullptr;
+  static const int reportFrame = [] {
+    const char *e = std::getenv("DELTA_GPU_RTSTAT_FRAME");
+    return e ? std::atoi(e) : 0;
+  }();
+  if (!enabled || (reportFrame ? g.frameNum != reportFrame
+                               : g.frameNum % 200 != 0))
+    return;
   int reported = 0;
   for (auto &kv : g_rts) {
     RTarget &rt = kv.second;
@@ -3184,11 +4323,23 @@ void reportRtContents() {
                  (unsigned long)nz, (unsigned long)rgb_nz,
                  (unsigned long)samples, distinct[0], distinct[1], distinct[2],
                  distinct[3]);
+    if (dump) {
+      std::vector<uint8_t> bgra(n * 4);
+      const auto *src = static_cast<const uint8_t *>(g.readbackMap);
+      const uint32_t srcBytes = formatBytes(rt.fmt);
+      for (uint64_t i = 0; i < n; i++)
+        readbackPixelBgra(src + i * srcBytes, rt.fmt, bgra.data() + i * 4);
+      char path[256];
+      std::snprintf(path, sizeof(path), "%s/rt_f%d_%#lx_%ux%u.ppm", dumpDir(),
+                    g.frameNum, (unsigned long)kv.first, rt.w, rt.h);
+      writePpm(path, bgra.data(), rt.w, rt.h);
+    }
   }
 }
 
 void endFrame(uint64_t scanoutBase) {
   if (!g.ready || !g.recording) return;
+  flushCsWrites();  // bound CS-write staleness for guest CPU readers
   g.recording = false;
   reportFps();
   ScopeNs _t(&g_nsEnd);
@@ -3199,6 +4350,9 @@ void endFrame(uint64_t scanoutBase) {
   // Debug: present the busiest RT (the scene) instead of the composited scanout.
   static const bool presentScene = std::getenv("DELTA_GPU_PRESENT_SCENE") != nullptr;
   if (presentScene && g.busiestRt) presentBase = g.busiestRt;
+  static const bool presentFirst =
+      std::getenv("DELTA_GPU_PRESENT_FIRST_RT") != nullptr;
+  if (presentFirst && g.firstRt) presentBase = g.firstRt;
   // Debug: present the first RT matching DELTA_GPU_PRESENT_RTW x RTH (inspect a
   // specific render target, e.g. the 832x512 room buffer).
   static const int wantW = [] { const char *e = std::getenv("DELTA_GPU_PRESENT_RTW"); return e ? std::atoi(e) : 0; }();
@@ -3216,35 +4370,109 @@ void endFrame(uint64_t scanoutBase) {
   }();
   if (wantAddr && g_rts.count(wantAddr)) presentBase = wantAddr;
   auto it = g_rts.find(presentBase);
-  if (it == g_rts.end()) {  // nothing rendered this frame
-    vkEndCommandBuffer(g.cmd);
-    VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-    si.commandBufferCount = 1; si.pCommandBuffers = &g.cmd;
-    vkResetFences(g.device, 1, &g.fence);
-    vkQueueSubmit(g.queue, 1, &si, g.fence);
-    vkWaitForFences(g.device, 1, &g.fence, VK_TRUE, UINT64_MAX);
-    return;
-  }
-  RTarget &rt = it->second;
-  ensureReadback(rt.w, rt.h, rt.fmt);
-  imageBarrier(g.cmd, rt.image, rt.layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-               VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
-  rt.layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-  VkBufferImageCopy copy{};
-  copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-  copy.imageExtent = {rt.w, rt.h, 1};
-  vkCmdCopyImageToBuffer(g.cmd, rt.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                         g.readback, 1, &copy);
-  vkEndCommandBuffer(g.cmd);
 
-  VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-  si.commandBufferCount = 1;
-  si.pCommandBuffers = &g.cmd;
-  uint64_t _tr0 = nowNs();
-  vkResetFences(g.device, 1, &g.fence);
-  vkQueueSubmit(g.queue, 1, &si, g.fence);
-  vkWaitForFences(g.device, 1, &g.fence, VK_TRUE, UINT64_MAX);
-  g_nsReadback += nowNs() - _tr0;
+  // Record the presented RT's readback copy into this frame's slot, submit it,
+  // and DON'T wait: the (software) GPU rasterizes this frame while the guest
+  // emulates the next one. The fence is waited one endFrame later, where the
+  // slot's pixels are presented (one frame of latency). DELTA_GPU_SYNC=1
+  // restores wait-here (framePipelined()).
+  State::FrameSlot &cur = g.slots[g.slotIdx];
+  cur.presentable = false;
+  if (it != g_rts.end()) {
+    RTarget &rt = it->second;
+    ensureReadback(rt.w, rt.h, rt.fmt);
+    static const bool clearRedTransfer =
+        std::getenv("DELTA_GPU_CLEARRED") != nullptr;
+    if (clearRedTransfer) {
+      VkAccessFlags srcAccess =
+          rt.layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+              ? VK_ACCESS_SHADER_READ_BIT
+          : rt.layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+              ? VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
+          : rt.layout == VK_IMAGE_LAYOUT_GENERAL
+              ? VK_ACCESS_SHADER_WRITE_BIT
+              : 0;
+      imageBarrier(g.cmd, rt.image, rt.layout,
+                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, srcAccess,
+                   VK_ACCESS_TRANSFER_WRITE_BIT);
+      rt.layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+      VkClearColorValue red{{1.0f, 0.0f, 0.0f, 1.0f}};
+      VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+      vkCmdClearColorImage(g.cmd, rt.image, rt.layout, &red, 1, &range);
+    }
+    const VkAccessFlags presentSrc =
+        rt.layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
+            ? VK_ACCESS_TRANSFER_WRITE_BIT
+            : VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    imageBarrier(g.cmd, rt.image, rt.layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                 presentSrc, VK_ACCESS_TRANSFER_READ_BIT);
+    rt.layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    VkBufferImageCopy copy{};
+    copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    copy.imageExtent = {rt.w, rt.h, 1};
+    vkCmdCopyImageToBuffer(g.cmd, rt.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           g.readback, 1, &copy);
+    cur.presentable = true;
+    cur.w = rt.w; cur.h = rt.h; cur.fmt = rt.fmt;
+  }
+  {
+    ScopeNs _ts(&g_nsSubmit);
+    ScopeNs _tsf(&g_frSubmit);
+    const VkResult endResult = vkEndCommandBuffer(g.cmd);
+    VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &g.cmd;
+    vkResetFences(g.device, 1, &cur.fence);
+    const VkResult submitResult = vkQueueSubmit(g.queue, 1, &si, cur.fence);
+    if (endResult != VK_SUCCESS || submitResult != VK_SUCCESS)
+      std::fprintf(stderr, "[gpuvk] frame submit failed: end=%d submit=%d\n",
+                   (int)endResult, (int)submitResult);
+  }
+  cur.submitted = true;
+  cur.frameNum = g.frameNum;
+  cur.frameDraws = g.frameDraws;
+  cur.frameMaxIdx = g.frameMaxIdx;
+  cur.frameHadRoom = g.frameHadRoom;
+  cur.presentBase = presentBase;
+  cur.scanoutBase = scanoutBase;
+  // ensureReadback may have (re)created the aliased buffer; store it back.
+  cur.readback = g.readback;
+  cur.readbackMem = g.readbackMem;
+  cur.readbackMap = g.readbackMap;
+  cur.readbackSize = g.readbackSize;
+
+  // Gameplay latches judge the just-recorded frame's command stream (no pixels
+  // involved): sustained room frames with real draw counts, or a huge-index 3D
+  // draw, mean a run is underway -- stop the headless autoskip mashing menus.
+  static int roomStreak = 0;
+  if (g.frameHadRoom && g.frameDraws > 20 && ++roomStreak >= 4)
+    gfx::setInGameplay(true);  // latch fast, before the autoskip re-pauses
+  if (g.frameMaxIdx >= 1500)
+    gfx::setInGameplay(true);
+
+  // Finish a completed frame: the previous slot when pipelined (its raster ran
+  // while this frame recorded), this frame's own when synchronous.
+  const uint32_t finishIdx = framePipelined() ? (g.slotIdx ^ 1) : g.slotIdx;
+  if (framePipelined()) g.slotIdx ^= 1;
+  State::FrameSlot &fin = g.slots[finishIdx];
+  const bool waited = fin.submitted;
+  if (fin.submitted) {
+    uint64_t _tr0 = nowNs();
+    const VkResult finWait =
+        vkWaitForFences(g.device, 1, &fin.fence, VK_TRUE, UINT64_MAX);
+    if (finWait != VK_SUCCESS) {
+      std::fprintf(stderr,
+                   "[gpuvk] frame %d fence DEVICE FAULT: wait=%d draws=%u\n",
+                   fin.frameNum, (int)finWait, fin.frameDraws);
+      reportDeviceFault(g.device);
+    }
+    uint64_t dt = nowNs() - _tr0;
+    g_nsReadback += dt;
+    g_frWait += dt;
+    fin.submitted = false;
+  }
+  pushStageSample();
+  if (!waited || !fin.presentable) return;
 
   // Readback transform (DELTA_GPU_FLIP: 0=none 1=Y 2=X 3=XY). Default 0 (none): the
   // y-up (negative-height) viewport already stores render-target content upright, and
@@ -3256,20 +4484,30 @@ void endFrame(uint64_t scanoutBase) {
     return e ? std::atoi(e) : 0;
   }();
   static std::vector<uint8_t> flipped;
-  flipped.resize(static_cast<size_t>(rt.w) * rt.h * 4);
-  const auto *rb = static_cast<const uint8_t *>(g.readbackMap);
-  uint32_t srcStride = rt.w * formatBytes(rt.fmt);
-  for (uint32_t y = 0; y < rt.h; y++) {
-    uint32_t sy = (flipMode & 1) ? (rt.h - 1 - y) : y;
-    const uint8_t *srow = rb + static_cast<size_t>(sy) * srcStride;
-    uint8_t *drow = flipped.data() + static_cast<size_t>(y) * rt.w * 4;
-    for (uint32_t x = 0; x < rt.w; x++) {
-      uint32_t sx = (flipMode & 2) ? (rt.w - 1 - x) : x;
-      readbackPixelBgra(srow + static_cast<size_t>(sx) * formatBytes(rt.fmt),
-                        rt.fmt, drow + static_cast<size_t>(x) * 4);
+  auto *rb = static_cast<uint8_t *>(fin.readbackMap);
+  uint8_t *pixels;
+  if (flipMode == 0 && fin.fmt == VK_FORMAT_B8G8R8A8_UNORM) {
+    // Common case: the readback is already BGRA8 in presentation order; the
+    // consumers below (writePpm/present) read it in place, so skip the 8 MB
+    // per-pixel convert-and-copy entirely. reportRtContents (the only other
+    // readback-buffer user) runs after the last consumer.
+    pixels = rb;
+  } else {
+    flipped.resize(static_cast<size_t>(fin.w) * fin.h * 4);
+    const uint32_t srcBytes = formatBytes(fin.fmt);
+    const uint32_t srcStride = fin.w * srcBytes;
+    for (uint32_t y = 0; y < fin.h; y++) {
+      uint32_t sy = (flipMode & 1) ? (fin.h - 1 - y) : y;
+      const uint8_t *srow = rb + static_cast<size_t>(sy) * srcStride;
+      uint8_t *drow = flipped.data() + static_cast<size_t>(y) * fin.w * 4;
+      for (uint32_t x = 0; x < fin.w; x++) {
+        uint32_t sx = (flipMode & 2) ? (fin.w - 1 - x) : x;
+        readbackPixelBgra(srow + static_cast<size_t>(sx) * srcBytes,
+                          fin.fmt, drow + static_cast<size_t>(x) * 4);
+      }
     }
+    pixels = flipped.data();
   }
-  const uint8_t *pixels = flipped.data();
   // Minimal single-shot capture (DELTA_GPU_SNAP=N): write ONE ppm of the presented
   // scanout to <dumpdir>/gpu_snap.ppm at the first drawing frame >= N, then never
   // again. For verifying gfx without the rolling DELTA_GPU_DUMP firehose (hundreds
@@ -3292,23 +4530,27 @@ void endFrame(uint64_t scanoutBase) {
   static const bool snapBest = std::getenv("DELTA_GPU_SNAP_BEST") != nullptr;
   static int snapBestDraws = 0;
   static bool snapped = false;
-  bool snapNow = snapAt && g.frameNum >= snapAt && g.frameDraws > 0 &&
-                 (int)g.frameDraws >= snapMinDraws &&
-                 (int)g.frameMaxIdx >= snapMinIdx &&
-                 (!snapRoom || (g.frameHadRoom && g.frameDraws > 20));
+  bool snapNow = snapAt && fin.frameNum >= snapAt && fin.frameDraws > 0 &&
+                 (int)fin.frameDraws >= snapMinDraws &&
+                 (int)fin.frameMaxIdx >= snapMinIdx &&
+                 (!snapRoom || (fin.frameHadRoom && fin.frameDraws > 20));
   // With a min-indices gate, "best" tracks the largest index count seen (the busiest
   // 3D frame) rather than the draw count.
   if (snapBest && snapMinIdx)
-    snapNow = snapNow && (int)g.frameMaxIdx > snapBestDraws;
+    snapNow = snapNow && (int)fin.frameMaxIdx > snapBestDraws;
   else if (snapBest)
-    snapNow = snapNow && (int)g.frameDraws > snapBestDraws;
+    snapNow = snapNow && (int)fin.frameDraws > snapBestDraws;
   else
     snapNow = snapNow && !snapped;
   if (snapNow) {
-    snapBestDraws = snapMinIdx ? (int)g.frameMaxIdx : (int)g.frameDraws;
+    snapBestDraws = snapMinIdx ? (int)fin.frameMaxIdx : (int)fin.frameDraws;
     char p[256]; std::snprintf(p, sizeof p, "%s/gpu_snap.ppm", dumpDir());
-    writePpm(p, pixels, rt.w, rt.h);
-    std::fprintf(stderr, "[snap] wrote %s (f%d %ux%u draws=%u)\n", p, g.frameNum, rt.w, rt.h, g.frameDraws);
+    writePpm(p, pixels, fin.w, fin.h);
+    std::fprintf(stderr,
+                 "[snap] wrote %s (f%d %ux%u draws=%u rt=%#lx scanout=%#lx)\n",
+                 p, fin.frameNum, fin.w, fin.h, fin.frameDraws,
+                 (unsigned long)fin.presentBase,
+                 (unsigned long)fin.scanoutBase);
     snapped = true;
   }
   // Sequence capture (DELTA_GPU_SNAPSEQ=K): write up to K numbered gameplay-room
@@ -3316,62 +4558,67 @@ void endFrame(uint64_t scanoutBase) {
   // lets a long explore run be inspected for non-start rooms without the firehose.
   static const int snapSeqN = [] { const char *e = std::getenv("DELTA_GPU_SNAPSEQ"); return e ? std::atoi(e) : 0; }();
   static int seqDone = 0, seqLastFrame = -10000;
-  if (snapSeqN && seqDone < snapSeqN && g.frameHadRoom && g.frameDraws > 20 &&
-      g.frameNum - seqLastFrame >= 250) {
+  if (snapSeqN && seqDone < snapSeqN && fin.frameHadRoom && fin.frameDraws > 20 &&
+      fin.frameNum - seqLastFrame >= 250) {
     char p[256]; std::snprintf(p, sizeof p, "%s/seq_%02d.ppm", dumpDir(), seqDone);
-    writePpm(p, pixels, rt.w, rt.h);
-    std::fprintf(stderr, "[snapseq] %d -> f%d draws=%u\n", seqDone, g.frameNum, g.frameDraws);
-    seqDone++; seqLastFrame = g.frameNum;
+    writePpm(p, pixels, fin.w, fin.h);
+    std::fprintf(stderr, "[snapseq] %d -> f%d draws=%u\n", seqDone, fin.frameNum, fin.frameDraws);
+    seqDone++; seqLastFrame = fin.frameNum;
   }
-
-  // Latch the gameplay signal once a run is clearly underway (sustained room
-  // frames with real draw counts) so the headless autoskip stops opening menus
-  // and stays in the run instead of bouncing back out via the pause menu.
-  static int roomStreak = 0;
-  if (g.frameHadRoom && g.frameDraws > 20 && ++roomStreak >= 4)
-    gfx::setInGameplay(true);  // latch fast, before the autoskip re-pauses
-  // A frame with a huge index count is 3D level geometry (Doom64: ~2400-index
-  // draws; 2D titles stay well under this). Latch gameplay so the input autoskip/
-  // sweep stops mashing menus and the loaded level stays stable for capture.
-  if (g.frameMaxIdx >= 1500)
-    gfx::setInGameplay(true);
 
   // Deterministic room capture: whenever this frame sampled a room RT, roll the
   // presented image to /tmp/gpu_room.ppm (atomic). The last write is guaranteed a
   // gameplay frame regardless of when the flaky autoskip enters/leaves a run. Skip
   // sparse transition frames (few draws) so the capture is representative gameplay.
-  if (g_dump && g.frameHadRoom && g.frameDraws > 20) {
+  if (g_dump && fin.frameHadRoom && fin.frameDraws > 20) {
     char p[256], tmp[256];
     std::snprintf(p, sizeof(p), "%s/gpu_room.ppm", dumpDir());
     std::snprintf(tmp, sizeof(tmp), "%s/gpu_room.tmp", dumpDir());
-    writePpm(tmp, pixels, rt.w, rt.h);
+    writePpm(tmp, pixels, fin.w, fin.h);
     std::rename(tmp, p);
   }
-  if (g_dump && g.frameNum >= 1000 && g.frameNum % 2000 == 0 && g.frameDraws > 0)
-    dumpPpm(pixels, rt.w, rt.h);
+  if (g_dump && fin.frameNum >= 1000 && fin.frameNum % 2000 == 0 && fin.frameDraws > 0)
+    dumpPpm(pixels, fin.w, fin.h);
   // Rolling latest-frame capture (uncapped) so late transitions (menu/gameplay)
   // can be inspected from a long headless run without knowing the frame number.
   static const int latestEvery = [] { const char *e = std::getenv("DELTA_GPU_LATEST_EVERY");
     return e ? std::atoi(e) : 300; }();
-  if (g_dump && g.frameNum % latestEvery == 0 && g.frameDraws > 0) {
+  if (g_dump && fin.frameNum % latestEvery == 0 && fin.frameDraws > 0) {
     char latest[256];
     std::snprintf(latest, sizeof(latest), "%s/gpu_latest.ppm", dumpDir());
-    writePpm(latest, pixels, rt.w, rt.h);
+    writePpm(latest, pixels, fin.w, fin.h);
   }
-  if (g_dump && g.frameNum % 200 == 0) {
-    std::fprintf(stderr, "[gpuvk] frame %d draws=%u heuristic=%u rt=%#lx %ux%u  scanout=%#lx\n",
-                 g.frameNum, g.frameDraws, g.frameHeuristic, (unsigned long)presentBase, rt.w, rt.h,
-                 (unsigned long)scanoutBase);
+  if ((g_dump || g_declines) && fin.frameNum % 30 == 0) {
     std::fprintf(stderr, "[gpuvk]   decline:");
     for (int i = 0; i < DR_MAX; i++)
       if (g_decline[i]) std::fprintf(stderr, " %s=%u", kDeclineName[i], g_decline[i]);
     std::fprintf(stderr, "\n");
+  }
+  if (g_dump && fin.frameNum % 200 == 0) {
+    std::fprintf(stderr, "[gpuvk] frame %d draws=%u heuristic=%u rt=%#lx %ux%u  scanout=%#lx\n",
+                 fin.frameNum, fin.frameDraws, g.frameHeuristic,
+                 (unsigned long)fin.presentBase, fin.w, fin.h,
+                 (unsigned long)fin.scanoutBase);
     for (auto &kv : g_rts)
       if (kv.second.usedThisFrame)
         std::fprintf(stderr, "[gpuvk]    RT %#lx %ux%u draws=%u%s\n",
                      (unsigned long)kv.first, kv.second.w, kv.second.h,
                      kv.second.draws,
-                     kv.first == scanoutBase ? " <-SCANOUT" : "");
+                     kv.first == fin.scanoutBase ? " <-SCANOUT" : "");
+  }
+  // Perf overlay, drawn into the presented buffer only -- the PPM capture
+  // paths above already consumed `pixels`, so dumps stay clean.
+  drawPerfOverlay(pixels, fin.w, fin.h);
+  // DELTA_GPU_OVERLAY_DUMP: one post-overlay ppm (visual check of the overlay
+  // itself, which the clean capture paths above deliberately exclude).
+  static const bool overlayDump = std::getenv("DELTA_GPU_OVERLAY_DUMP") != nullptr;
+  static bool overlayDumped = false;
+  if (overlayDump && !overlayDumped && fin.frameNum >= 600) {
+    overlayDumped = true;
+    char p[256];
+    std::snprintf(p, sizeof p, "%s/gpu_overlay.ppm", dumpDir());
+    writePpm(p, pixels, fin.w, fin.h);
+    std::fprintf(stderr, "[overlay] wrote %s\n", p);
   }
   // Present the rendered scanout into the window the VideoOut HLE opened. When
   // there is no display (headless) the window was never created, so we skip
@@ -3382,8 +4629,20 @@ void endFrame(uint64_t scanoutBase) {
   // creates it from its own scanout-present path, which the GPU (Gnm) title
   // never takes, so the renderer owns window creation here. ensure() is
   // idempotent and runs on this (the presenting) thread.
-  if (!noPresent && gfx::ensure("prosperity", rt.w, rt.h) && gfx::pumpEvents())
-    gfx::present(pixels, rt.w, rt.h, rt.w * 4, gfx::PixelFormat::bgra8);
+  if (!noPresent) {
+    ScopeNs _tp(&g_nsPresent);
+    ScopeNs _tpf(&g_frPresent);
+    static const bool syncPresent = [] {
+      const char *e = std::getenv("DELTA_GPU_SYNCPRESENT");
+      return e && e[0] && e[0] != '0';
+    }();
+    if (syncPresent) {
+      if (gfx::ensure("prosperity", fin.w, fin.h) && gfx::pumpEvents())
+        gfx::present(pixels, fin.w, fin.h, fin.w * 4, gfx::PixelFormat::bgra8);
+    } else {
+      presentAsync(pixels, fin.w, fin.h);
+    }
+  }
 
   // Runs last: reuses (and clobbers) the readback buffer the present path
   // above already consumed.

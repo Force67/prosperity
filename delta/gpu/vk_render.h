@@ -18,13 +18,26 @@ namespace gpu::gcn { struct Recompiled; struct RecompiledCs; }
 namespace gpu::vk {
 
 // One vertex attribute for the recompiled-shader path: where the recompiled VS
-// reads input `location` from within the (interleaved) vertex buffer.
+// reads input `location` from within a vertex buffer binding. `binding` indexes
+// DrawInfo::vbufs -- multiple attributes that interleave in one buffer share a
+// binding (distinct offsets); attributes fed from separate buffers each get
+// their own binding (SotC streams position/normal/uv from distinct buffers).
 struct VertexAttr {
   uint32_t location = 0;
-  uint32_t offset = 0;    // byte offset within the vertex
+  uint32_t binding = 0;   // index into DrawInfo::vbufs
+  uint32_t offset = 0;    // byte offset within the binding's vertex record
   uint32_t num_comps = 0;  // 1..4
   uint32_t dfmt = 0;      // GCN data format (selects the Vulkan format)
   uint32_t nfmt = 0;      // GCN number format
+};
+
+// One vertex buffer binding for the recompiled-shader path. Each distinct guest
+// V# base + stride becomes one Vulkan vertex binding; its records are uploaded
+// into the vertex ring and bound via vkCmdBindVertexBuffers.
+struct VertexBinding {
+  const void *data = nullptr;  // guest base of this binding's vertex data
+  uint32_t stride = 0;         // bytes per record (VK_VERTEX_INPUT_RATE_VERTEX)
+  uint32_t numRecords = 0;     // records available in the source buffer
 };
 
 // Per-draw inputs extracted by the command processor (resource-tracked from the
@@ -108,8 +121,9 @@ struct DrawInfo {
     bool arrayed = false;
     bool force_lod_zero = false;
     bool depth_compare = false;
+    bool storage = false;
   };
-  DrawTex texs[8];
+  DrawTex texs[16];
   uint32_t nTexs = 0;
 
   // Per-draw blend state, decoded from CB_BLEND0_CONTROL (raw dword) + whether
@@ -155,9 +169,16 @@ struct DrawInfo {
   // vertexData/vertexStride is the raw interleaved vertex buffer, vattrs describe
   // the inputs, mvp holds the constant buffer (pushed), texBase the sampler.
   uint64_t vsAddr = 0, psAddr = 0;       // pipeline cache key
+  uint32_t vsUserData[16] = {};
+  uint32_t psUserData[16] = {};
   const gcn::Recompiled *recomp = nullptr;
   VertexAttr vattrs[8];
   uint32_t nvattrs = 0;
+  // Vertex buffer bindings the attributes read from. vbufs[0] mirrors
+  // vertexData/vertexStride so the single-binding fast path and the heuristic
+  // fallback are unchanged; a multi-stream draw fills one entry per distinct V#.
+  VertexBinding vbufs[8];
+  uint32_t nvbufs = 0;
 };
 
 // A compute dispatch resolved by the command processor: the recompiled CS + the
@@ -166,17 +187,28 @@ struct DrawInfo {
 // storage buffer, runs the dispatch, and copies the written ranges back to guest
 // memory (where the graphics texture path re-reads them).
 struct ComputeInfo {
+  static constexpr uint32_t kMaxResources = 32;
+
   uint64_t csAddr = 0;             // pipeline cache key
   uint32_t groups[3] = {1, 1, 1};  // workgroup counts (DISPATCH_DIRECT dims)
   const gcn::RecompiledCs *recomp = nullptr;
   uint32_t userData[16] = {};      // COMPUTE_USER_DATA_0..15 (push constants)
   struct Res {
     uint64_t base = 0;    // guest address the storage buffer aliases
-    uint64_t size = 0;    // bytes staged
+    uint64_t size = 0;    // bytes staged in linear SSBO layout
+    uint64_t guestSize = 0;  // physical guest bytes (same as size when linear)
     uint32_t binding = 0;
     bool written = false;  // copy back to guest after the dispatch
+    bool zeroFill = false;  // inactive/null descriptor: bind zeroed dummy storage
+    bool imageStaging = false;  // detile and/or expand compact texels
+    uint32_t width = 0, height = 0, pitch = 0;
+    uint32_t layers = 0, mipLevels = 0, tilingIdx = 0;
+    uint32_t elemBytes = 4;
+    uint32_t stageElemBytes = 4;
+    uint32_t dfmt = 0;
+    bool pow2Pad = false;
   };
-  Res res[8];
+  Res res[kMaxResources];
   uint32_t nres = 0;
 };
 
@@ -188,6 +220,13 @@ bool available();
 // Run a compute dispatch on the GPU. Returns true if it executed, false if it
 // could not be set up (the caller then skips the dispatch, as before).
 bool dispatch(const ComputeInfo &ci);
+
+// Write every GPU-dirty compute range back to guest memory. Must run before
+// anything reads guest memory that a dispatch may have written: draw
+// recording, CP DMA, frame end. No-op when nothing is dirty.
+void flushCsWrites();
+// Flush only dirty ranges overlapping [base, base+bytes).
+void flushCsWritesRange(uint64_t base, uint64_t bytes);
 
 // Frame lifecycle. Each draw renders into the Vulkan image for its DrawInfo.rtBase
 // (a render target keyed by guest address). beginFrame starts recording;

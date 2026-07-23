@@ -60,6 +60,8 @@ struct Translator {
   Id img_types[4] = {};      // sampled 2D / 2D-array, color / depth images
   Id sampled_types[4] = {};  // corresponding combined image-sampler types
   Id sampled_ptrs[4] = {};   // UniformConstant pointers to sampled_types
+  Id storage_img_types[2] = {};  // storage 2D / 2D-array images
+  Id storage_img_ptrs[2] = {};   // UniformConstant pointers to storage images
   bool image_query = false;
 
   void InitTypes() {
@@ -73,7 +75,8 @@ struct Translator {
     t_v3 = m.TypeVec(t_f, 3);
     t_v4 = m.TypeVec(t_f, 4);
     p_priv_u = m.TypePointer(spv::StorageClass::Private, t_u);
-    const Id arr_sg = m.TypeArray(t_u, 128), arr_vg = m.TypeArray(t_u, 256);
+    // A T# can start at s124 and extend through s131.
+    const Id arr_sg = m.TypeArray(t_u, 136), arr_vg = m.TypeArray(t_u, 256);
     sgpr = m.Variable(m.TypePointer(spv::StorageClass::Private, arr_sg),
                       spv::StorageClass::Private, m.ConstNull(arr_sg));
     vgpr = m.Variable(m.TypePointer(spv::StorageClass::Private, arr_vg),
@@ -276,6 +279,7 @@ struct StageContext {
   // VS
   Id pos_out = 0;
   std::unordered_map<uint32_t, Id> param_outs;
+  std::unordered_set<uint32_t> direct_vfetch;  // MUBUF pc seeded as vertex input
   uint32_t max_param = 0;
 
   // PS
@@ -289,7 +293,7 @@ struct StageContext {
   // descriptor share one set-0 binding; variables are created lazily per
   // binding. The plan is also what TrackTextures pairs against at draw time.
   const MimgBindingPlan* mimg_plan = nullptr;
-  static constexpr uint32_t kMaxPsSamplers = 8;  // == vk_render State::kMaxTex
+  static constexpr uint32_t kMaxPsSamplers = 16;  // == vk_render State::kMaxTex
   Id tex_vars[kMaxPsSamplers] = {};
   uint32_t tex_types[kMaxPsSamplers] = {};
 
@@ -297,10 +301,11 @@ struct StageContext {
   std::unordered_map<uint32_t, uint32_t> cbuf_bind;  // V# SGPR -> set-1 binding
 
   // Compute: storage buffers modelling the guest memory the CS reads/writes.
-  std::unordered_map<uint32_t, uint32_t> cs_bind;  // base SGPR -> binding
+  std::unordered_map<uint32_t, uint32_t> cs_bind;  // instruction pc -> binding
   std::vector<Id> cs_ssbo;                         // binding -> SSBO variable
   Id lds_var = 0;          // Workgroup-storage uint array (0 = no LDS)
   uint32_t lds_dwords = 0;  // its length
+  Id subgroup_local_id = 0;  // SubgroupLocalInvocationId for DS swizzles
   bool cs_unsupported = false;  // op the compute backend can't model
 };
 
@@ -329,14 +334,10 @@ bool IsVop3b(uint32_t op);
 
 // ---- memory emitters (translate_mem.cpp) -----------------------------------
 uint32_t SmrdLoadCount(uint32_t op);
-// Per-instruction reachability from the entry block (program-index aligned).
-// Instructions after an early-out s_endpgm that no branch targets are dead --
-// typically OrbShdr footer padding decoded past the real code -- and must not
-// influence translation (a garbage "memory op" would decline a compute shader).
-std::vector<uint8_t> ComputeReachability(const Program& program);
 bool PlanCbufs(const Program& program, uint32_t first_binding,
-               std::vector<ShaderCbuf>& cbufs,
-               std::unordered_map<uint32_t, uint32_t>& bindings);
+                std::vector<ShaderCbuf>& cbufs,
+                std::unordered_map<uint32_t, uint32_t>& bindings,
+                const uint8_t* reachable = nullptr);
 void EmitCbufSmrd(Translator& t, const Inst& inst,
                   const std::unordered_map<uint32_t, uint32_t>& bindings);
 void EmitMimg(Translator& t, const Inst& inst, StageContext& sc);

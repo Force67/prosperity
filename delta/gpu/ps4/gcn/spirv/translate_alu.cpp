@@ -150,13 +150,20 @@ void EmitSop1(Translator& t, const Inst& inst) {
     // attributes are decoded from that fetch program and supplied as Vulkan
     // inputs, so no runtime jump remains in the translated shader.
     case 0x20: case 0x21: break;  // s_setpc_b64 / s_swappc_b64
-    case 0x24: case 0x25: case 0x26: case 0x27: {  // s_{and,or,xor,andn2}_saveexec_b64
+    case 0x24: case 0x25: case 0x26: case 0x27:
+    case 0x28: case 0x29: case 0x2a: case 0x2b: {
+      // s_{and,or,xor,andn2,orn2,nand,nor,xnor}_saveexec_b64
       const Id old_exec = t.Exec();
       Id new_exec;
       if (op == 0x24) new_exec = t.And(old_exec, a);
       else if (op == 0x25) new_exec = t.Or(old_exec, a);
       else if (op == 0x26) new_exec = t.Xor(old_exec, a);
-      else new_exec = t.And(old_exec, t.Not(a));
+      else if (op == 0x27) new_exec = t.And(a, t.Not(old_exec));
+      else if (op == 0x28) new_exec = t.Or(a, t.Not(old_exec));
+      else if (op == 0x29) new_exec = t.Not(t.And(a, old_exec));
+      else if (op == 0x2a) new_exec = t.Not(t.Or(a, old_exec));
+      else new_exec = t.Not(t.Xor(a, old_exec));
+      new_exec = t.And(new_exec, t.U32(1));
       t.SetSg(sdst, old_exec);
       t.SetSg(sdst + 1, t.U32(0));
       t.SetSg(126, new_exec);
@@ -437,6 +444,14 @@ void EmitVop1(Translator& t, uint32_t op, uint32_t vdst, Id s0, bool clamp) {
       set_u(t.m.Bitcast(t.t_u, t.m.Emit(spv::Op::OpConvertFToS, t.t_i,
             {t.Ext1(GLSLstd450Floor, s0)})));
       break;
+    case 0x0e: {  // v_cvt_off_f32_i4: signed low nibble in sixteenths
+      const Id nibble = t.m.Emit(
+          spv::Op::OpBitFieldSExtract, t.t_i,
+          {t.m.Bitcast(t.t_i, u0), t.U32(0), t.U32(4)});
+      set_f(t.FMul(t.m.Emit(spv::Op::OpConvertSToF, t.t_f, {nibble}),
+                   t.F32(1.0f / 16.0f)));
+      break;
+    }
     // f16 <-> f32. cvt_f16_f32 packs the half into the low half-word (high
     // half zero); cvt_f32_f16 reads it back.
     case 0x0a:

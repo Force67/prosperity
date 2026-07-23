@@ -32,6 +32,12 @@ bool gcDevice::init(const char *, uint32_t, uint32_t) { return true; }
 static void completeFlipLabels(uint64_t flipPtr) {
   if (!flipPtr)
     return;
+  // The flip arg block is caller-controlled; not every title passes a pointer
+  // here (layout varies by GnmDriver revision). Never dereference a value that
+  // isn't a mapped guest VA.
+  auto *pr = proc::getActive();
+  if (!pr || !pr->getVma().get(reinterpret_cast<uint8_t *>(flipPtr)))
+    return;
 
   auto *p = reinterpret_cast<uint32_t *>(flipPtr);
   // Gnm prepareFlip emits a PM4-like EOP-label packet:
@@ -42,6 +48,8 @@ static void completeFlipLabels(uint64_t flipPtr) {
     uint64_t addr = (static_cast<uint64_t>(p[2] & 0xFF) << 32) | p[1];
     uint64_t value = static_cast<uint64_t>(p[3]) |
                      (static_cast<uint64_t>(p[4]) << 32);
+    if (addr && !pr->getVma().get(reinterpret_cast<uint8_t *>(addr)))
+      return;
     if (addr) {
       *reinterpret_cast<uint64_t *>(addr) = value;
       static const bool trace = std::getenv("DELTA_GC_FLIP") != nullptr;
@@ -114,31 +122,38 @@ int32_t gcDevice::ioctl(uint32_t cmd, void *data) {
     prosperity_gc_submit(reinterpret_cast<const void *>(a->descPtr), a->count);
     return 0;
   }
-  case 0xC020810C: {  // gc submit-and-flip: adds u64 flipPtr, u32 flag
+  case 0xC020810C: {  // gc submit + EOP: {u32 pid, u32 count, u64 descPtr,
+                      //   u64 eopVal, u32 wait}. Layout per fpPS4 dev_gc.pas
+                      // t_submit_args: +0x10 is the EOP completion VALUE
+                      // ("submit_id | vmid<<32") -- a scalar the kernel writes
+                      // on GPU completion, never a pointer. EOP label writes
+                      // come from EVENT_WRITE_EOP packets inside the dcb and
+                      // are the CP's job. (We used to dereference +0x10 as a
+                      // prepareFlip packet pointer; SotC passes a scalar there
+                      // and the read faulted.)
     struct argl {
-      uint32_t a0;
+      uint32_t pid;
       uint32_t count;
       uint64_t descPtr;
-      uint64_t flipPtr;
-      uint32_t flag;
+      uint64_t eopVal;
+      uint32_t wait;
     };
     auto *a = static_cast<argl *>(data);
-    prosperity_gc_submit(reinterpret_cast<const void *>(a->descPtr), a->count);
-    // SCOUT (DELTA_GC_FLIP): dump the opaque completion pointer for diagnostics.
+    // SCOUT (DELTA_GC_FLIP): dump the raw args + first descriptor.
     static const bool flipTrace = std::getenv("DELTA_GC_FLIP") != nullptr;
     static int flipDumps = 0;
     if (flipTrace && flipDumps < 8) {
       flipDumps++;
-      printf("[gc] flip a0=%x count=%u descPtr=%lx flipPtr=%lx flag=%x\n", a->a0,
-             a->count, (unsigned long)a->descPtr, (unsigned long)a->flipPtr,
-             a->flag);
-      if (a->flipPtr) {
-        auto *fp = reinterpret_cast<const uint32_t *>(a->flipPtr);
-        printf("[gc]   flipPtr[0..7]: %x %x %x %x %x %x %x %x\n", fp[0], fp[1],
-               fp[2], fp[3], fp[4], fp[5], fp[6], fp[7]);
+      printf("[gc] flip pid=%x count=%u descPtr=%lx eopVal=%lx wait=%x\n",
+             a->pid, a->count, (unsigned long)a->descPtr,
+             (unsigned long)a->eopVal, a->wait);
+      if (a->descPtr && a->count) {
+        auto *d = reinterpret_cast<const uint32_t *>(a->descPtr);
+        printf("[gc]   desc[0..7]: %x %x %x %x %x %x %x %x\n", d[0], d[1], d[2],
+               d[3], d[4], d[5], d[6], d[7]);
       }
     }
-    completeFlipLabels(a->flipPtr);
+    prosperity_gc_submit(reinterpret_cast<const void *>(a->descPtr), a->count);
     uint32_t bufferIndex = dceCurrentBuffer();
     prosperity_gc_flip(dceScanoutBuffer(bufferIndex),
                        static_cast<int>(bufferIndex), dceCurrentFlipArg());
@@ -217,6 +232,23 @@ int32_t gcDevice::ioctl(uint32_t cmd, void *data) {
     printf("gc ioctl(%x): trace-info -> %p\n", cmd, (void *)traceInfo);
     return 0;
   }
+  case 0xC030810D:   // sceGnmMapComputeQueue
+  case 0xC030811A: { // sceGnmMapComputeQueueWithPriority (same 0x30 struct)
+    // Synchronous CPU submit path: no real HQD/doorbell to program. Accept the
+    // mapping and return success WITHOUT touching the caller's struct --
+    // vqueueId (+0x0C) is the handle the GnmDriver wrapper hands back to the
+    // app for DingDong/Unmap; the UNHANDLED fallthrough used to memset the
+    // whole struct, so the app saw handle 0, treated the map as failed and
+    // remapped in a loop. The retail kernel validates and returns 0 with the
+    // inputs intact.
+    return 0;
+  }
+  case 0xC00C810E: // sceGnmUnmapComputeQueue
+    return 0;
+  case 0xC010811C: // sceGnmDingDong: kicks a mapped compute queue. No-op is
+                   // safe for boot but drops async-compute work; wire into the
+                   // CP if a title depends on compute results.
+    return 0;
   case 0xC0848119: {
     struct argl {
       uint32_t unknown_00;

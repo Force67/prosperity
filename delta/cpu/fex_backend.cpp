@@ -18,12 +18,15 @@
 
 #include <atomic>
 #include <thread>
+#include <condition_variable>
 #include <csetjmp>
 #include <csignal>
+#include <functional>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <set>
 #include <ucontext.h>
 #include <vector>
 #include <sys/mman.h>
@@ -128,7 +131,15 @@ static void symRange(uint64_t a, char *out, size_t n) {
 // Live guest threads, for the DELTA_WATCHDOG=secs deadlock dump: after N seconds
 // it prints every live thread's current guest RIP so a stalled boot's blocking
 // site can be symbolized to a module+offset without a debugger.
-struct LiveThread { FEXCore::Core::InternalThreadState *thread; uint32_t id; };
+struct LiveThread {
+  FEXCore::Core::InternalThreadState *thread;
+  uint32_t id;
+  // This thread's TLS syscall/HLE trace ring (valid while the thread lives):
+  // lets the DELTA_WATCHDOG stall dump show every parked thread's last
+  // syscalls WITH arguments, not just its rip.
+  const TraceEvt *trace = nullptr;
+  const uint32_t *tracePos = nullptr;
+};
 std::mutex g_liveMutex;
 std::vector<LiveThread> g_live;
 std::atomic<uint32_t> g_liveSeq{0};
@@ -158,6 +169,65 @@ static void startWatchdog() {
         }
       }).detach();
     }
+    // DELTA_LOADWATCH=<ms>: SotC world-load counter poller. The eboot's
+    // "[MSG-Init] LoadInitialWorld() Remaining Resources To Load: N" line is
+    // only printed twice during init; the live count is the sum of 10 per-
+    // category int32 queues at obj+0x110 + i*0x28, where obj = *(base+0x2ee2d00)
+    // (base = Shadow_Shipping @ 0x201400000000). This reads that sum every <ms>
+    // ms so we can see whether the load DECREASES, PLATEAUS, or stops, and which
+    // of the 10 category queues is stuck. Env overrides: DELTA_LOADWATCH_BASE,
+    // DELTA_LOADWATCH_GOFF (global offset), all optional. See sotcdis notes.
+    if (const char *s = std::getenv("DELTA_LOADWATCH")) {
+      int ms = std::atoi(s);
+      if (ms <= 0) ms = 2000;
+      uint64_t base = 0x201400000000ull;
+      if (const char *b = std::getenv("DELTA_LOADWATCH_BASE")) base = strtoull(b, nullptr, 0);
+      uint64_t goff = 0x2ee2d00ull;
+      if (const char *g = std::getenv("DELTA_LOADWATCH_GOFF")) goff = strtoull(g, nullptr, 0);
+      std::thread([ms, base, goff] {
+        auto rd = [](uint64_t a, void *dst, size_t n) -> bool {
+          long pg = sysconf(_SC_PAGESIZE);
+          for (uint64_t p = a & ~((uint64_t)pg - 1); p < a + n; p += pg) {
+            unsigned char mv = 0;
+            if (mincore(reinterpret_cast<void *>(p), 1, &mv) != 0) return false;
+          }
+          std::memcpy(dst, reinterpret_cast<void *>(a), n);
+          return true;
+        };
+        uint64_t pobj = base + goff;
+        int lastTotal = -1, plateau = 0;
+        for (uint64_t tick = 0;; tick++) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+          uint64_t obj = 0;
+          if (!rd(pobj, &obj, 8) || obj < 0x1000) {
+            std::fprintf(stderr, "[loadwatch %llu] obj ptr @%#llx not ready (obj=%#llx)\n",
+                         (unsigned long long)tick, (unsigned long long)pobj,
+                         (unsigned long long)obj);
+            std::fflush(stderr);
+            continue;
+          }
+          int32_t c[10] = {0};
+          int total = 0;
+          bool ok = true;
+          for (int i = 0; i < 10; i++) {
+            int32_t v = 0;
+            if (!rd(obj + 0x110 + (uint64_t)i * 0x28, &v, 4)) { ok = false; break; }
+            c[i] = v;
+            total += v;
+          }
+          if (!ok) { std::fprintf(stderr, "[loadwatch %llu] obj=%#llx read fault\n",
+                                  (unsigned long long)tick, (unsigned long long)obj);
+                     std::fflush(stderr); continue; }
+          if (total == lastTotal) plateau++; else plateau = 0;
+          lastTotal = total;
+          std::fprintf(stderr,
+              "[loadwatch %llu] obj=%#llx REMAINING=%d plateau=%dx q=[%d %d %d %d %d %d %d %d %d %d]\n",
+              (unsigned long long)tick, (unsigned long long)obj, total, plateau,
+              c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8], c[9]);
+          std::fflush(stderr);
+        }
+      }).detach();
+    }
     const char *e = std::getenv("DELTA_WATCHDOG");
     if (!e) return;
     int secs = std::atoi(e);
@@ -172,16 +242,62 @@ static void startWatchdog() {
           auto &S = t.thread->CurrentFrame->State;
           char sym[256];
           symRange(S.rip, sym, sizeof(sym));
-          std::fprintf(stderr, "  tid=%u rip=%#llx (%s)\n", t.id,
-                       (unsigned long long)S.rip, sym);
+          // scN = total syscalls this thread has made: compare across rounds
+          // to tell a thread that is genuinely STUCK in one wait (scN frozen)
+          // from one that loops through waits (scN advancing).
+          std::fprintf(stderr, "  tid=%u rip=%#llx scN=%u (%s)\n", t.id,
+                       (unsigned long long)S.rip,
+                       t.tracePos ? *t.tracePos : 0, sym);
           // Scan the stack upward for return addresses into known modules (the
           // wait stub omits frame pointers, so a raw scan beats an rbp walk) to
           // reveal which subsystem this thread is parked inside.
+          // Parked thread's last syscalls WITH ARGUMENTS (its TLS trace ring,
+          // registered in g_live): the difference between "waiting" and "waiting
+          // on WHAT".
+          if (t.trace && t.tracePos) {
+            uint32_t pos = *t.tracePos;
+            uint32_t cnt = pos < kTraceRing ? pos : kTraceRing;
+            uint32_t from = cnt > 6 ? cnt - 6 : 0;
+            for (uint32_t k = from; k < cnt; k++) {
+              const TraceEvt &e = t.trace[(pos - cnt + k) % kTraceRing];
+              if (e.kind != 's')
+                continue;
+              std::fprintf(stderr,
+                           "      sc %3u %-18s (%#llx,%#llx,%#llx,%#llx) -> %#llx\n",
+                           e.id, krnl::syscall_getname(e.id),
+                           (unsigned long long)e.a0, (unsigned long long)e.a1,
+                           (unsigned long long)e.a2, (unsigned long long)e.a3,
+                           (unsigned long long)e.ret);
+              // Thread parked in UMTX_OP_MUTEX_WAIT (last ring entry, op 17):
+              // decode the umutex owner word -- the owner tid is the whole
+              // ballgame in a deadlock (who holds it and what are THEY doing).
+              if (k == cnt - 1 && e.id == 454 && e.a1 == 17 && e.a0 >= 0x10000) {
+                unsigned char mv = 0;
+                long pg = sysconf(_SC_PAGESIZE);
+                if (mincore(reinterpret_cast<void *>(e.a0 & ~((uint64_t)pg - 1)),
+                            1, &mv) == 0) {
+                  uint32_t ow = *reinterpret_cast<volatile uint32_t *>(e.a0);
+                  std::fprintf(stderr,
+                               "      ^ umutex %#llx word=%#x owner-tid=%u%s\n",
+                               (unsigned long long)e.a0, ow, ow & 0x7fffffff,
+                               (ow & 0x80000000u) ? " CONTESTED" : "");
+                }
+              }
+            }
+          }
           uint64_t rsp = S.gregs[FEXCore::X86State::REG_RSP];
           int shown = 0;
           for (int i = 0; i < 1024 && shown < 12; i++) {
             uint64_t a = rsp + (uint64_t)i * 8;
             if (a < 0x1000) break;
+            // Guard every read: the scan walks past stack tops and the old
+            // unguarded memcpy CRASHED the process mid-dump (fault at the
+            // mapping end above a guest stack).
+            unsigned char mv = 0;
+            long pg = sysconf(_SC_PAGESIZE);
+            if (mincore(reinterpret_cast<void *>(a & ~((uint64_t)pg - 1)), 1,
+                        &mv) != 0)
+              break;
             uint64_t v = 0;
             std::memcpy(&v, reinterpret_cast<void *>(a), 8);
             // a plausible code return address that lands in a named module range
@@ -379,7 +495,7 @@ public:
 
   // Per-guest-thread bookkeeping. The gdt lives here (FEX tracks GDT/LDT per
   // thread; sharing one array across threads is incorrect) alongside the guest
-  // stack and call-ret stack so they can be freed when the thread finishes.
+  // stack and call-ret stack so they can be recycled when the thread finishes.
   struct FexThread {
     FEXCore::Core::InternalThreadState *thread;
     void *stack;
@@ -389,15 +505,51 @@ public:
     FEXCore::Core::CPUState::gdt_segment gdt[32];
   };
 
+  // Retired guest stacks are pooled, never munmap'd. Guest code captures its
+  // current rsp into long-lived structures (FIOS2/module_start register
+  // callback contexts and sync objects during init; on a real PS4 those point
+  // into the loader thread's PERMANENT stack). runGuestFunction used to unmap
+  // its 8 MiB stack after every synchronous guest call, so such captured
+  // pointers dangled -- a later switch/longjmp onto one faulted at the dead
+  // stack's top (libSceFios2/libkernel call-push at 0x....feff0), and when the
+  // hole had been REUSED by a newer guest thread's stack the two silently
+  // corrupted each other (SotC: AllocationTracker null/-1 lookups on a job
+  // fiber ~10s into LoadInitialWorld, or a yield-loop stall). Pooling keeps
+  // retired stacks mapped and only ever re-issues them as stacks, which is the
+  // closest host analogue of the console's stable stack memory.
+  std::mutex stackPoolM;
+  std::vector<std::pair<void *, size_t>> stackPool;    // guest rsp stacks
+  std::vector<std::pair<void *, size_t>> callretPool;  // FEX call-ret stacks
+
+  void *poolTake(std::vector<std::pair<void *, size_t>> &pool, size_t size) {
+    std::lock_guard<std::mutex> lk(stackPoolM);
+    for (size_t i = 0; i < pool.size(); i++) {
+      if (pool[i].second == size) {
+        void *p = pool[i].first;
+        pool.erase(pool.begin() + i);
+        return p;
+      }
+    }
+    return nullptr;
+  }
+  void poolPut(std::vector<std::pair<void *, size_t>> &pool, void *p,
+               size_t size) {
+    std::lock_guard<std::mutex> lk(stackPoolM);
+    pool.push_back({p, size});
+  }
+
   void *createGuestThread(uintptr_t entry, void *arg, uint64_t fsbase) override {
     ensureInit();
     auto *h = new FexThread{};
 
     // Guest stack (the guest's own RSP); HLE handlers run on the host thread
-    // stack, so this only needs to satisfy guest code.
+    // stack, so this only needs to satisfy guest code. Reuse a pooled retired
+    // stack when one exists (see stackPool above for why they never unmap).
     h->stackSize = 8ull * 1024 * 1024;
-    h->stack = mmap(nullptr, h->stackSize, PROT_READ | PROT_WRITE,
-                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    h->stack = poolTake(stackPool, h->stackSize);
+    if (!h->stack)
+      h->stack = mmap(nullptr, h->stackSize, PROT_READ | PROT_WRITE,
+                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     uint64_t rsp = (reinterpret_cast<uint64_t>(h->stack) + h->stackSize - 0x200) & ~0xFULL;
 
     // IMPORTANT: create on the calling (parent) thread, as FEX's ThreadManager
@@ -411,7 +563,9 @@ public:
       constexpr size_t kSize = FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE;
       constexpr size_t kPage = 0x1000;
       h->callretSize = kSize + 2 * kPage;
-      void *alloc = mmap(nullptr, h->callretSize, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+      void *alloc = poolTake(callretPool, h->callretSize);
+      if (!alloc)
+        alloc = mmap(nullptr, h->callretSize, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
       if (alloc != MAP_FAILED) {
         h->callret = alloc;
         void *crBase = reinterpret_cast<uint8_t *>(alloc) + kPage;
@@ -464,7 +618,23 @@ public:
     startWatchdog();
     uint32_t myId = g_liveSeq.fetch_add(1);
     uint64_t entryRip = h->thread->CurrentFrame->State.rip;
-    { std::lock_guard lk(g_liveMutex); g_live.push_back({h->thread, myId}); }
+    {
+      // Map out this guest thread's memory identity: its FEX-allocated guest
+      // stack and the HOST pthread stack it runs on, so a later fault address
+      // can be attributed ("dead host stack of thread N" vs guest stack).
+      pthread_attr_t at;
+      void *hsp = nullptr;
+      size_t hsz = 0;
+      if (pthread_getattr_np(pthread_self(), &at) == 0) {
+        pthread_attr_getstack(&at, &hsp, &hsz);
+        pthread_attr_destroy(&at);
+      }
+      std::fprintf(stderr,
+                   "[fex] gthread rip=%#llx gstack=[%p+%#zx] hoststack=[%p+%#zx]\n",
+                   (unsigned long long)entryRip, h->stack, h->stackSize, hsp, hsz);
+    }
+    { std::lock_guard lk(g_liveMutex);
+      g_live.push_back({h->thread, myId, t_trace, &t_tracePos}); }
     LOG_INFO("fex: running guest thread rip={:#x} (watchdog tid={})",
              h->thread->CurrentFrame->State.rip, myId);
     // thr_exit (cpu::exitGuestThread) longjmps here to leave the JIT without
@@ -529,8 +699,11 @@ public:
     FEXCore::Allocator::UninstallTLSData(h->thread);
     CTX->DestroyThread(h->thread);
     t_curThread = nullptr;
-    if (h->stack) munmap(h->stack, h->stackSize);
-    if (h->callret) munmap(h->callret, h->callretSize);
+    // Pool, never unmap: guest code may hold pointers into this stack (see
+    // stackPool). Keeping it mapped turns a use-after-retire into a stale read
+    // of stable memory instead of a fault or cross-thread corruption.
+    if (h->stack) poolPut(stackPool, h->stack, h->stackSize);
+    if (h->callret) poolPut(callretPool, h->callret, h->callretSize);
     delete h;
   }
 
@@ -559,11 +732,50 @@ public:
     rsp -= 8;
     *reinterpret_cast<uint64_t *>(rsp) = exitThunk;
     S.gregs[FEXCore::X86State::REG_RSP] = rsp;
-    // Run on a fresh host thread (never nest ExecuteThread on the caller's host
-    // thread) and block until it finishes. fn returns -> exitThunk -> longjmp.
-    std::thread([this, h] { runGuestThread(h); }).join();
+    // Run on a PERSISTENT host worker (never nest ExecuteThread on the caller's
+    // host thread) and block until it finishes. fn returns -> exitThunk ->
+    // longjmp. The worker must outlive the call: guest code run here (module
+    // inits above all) records pointers derived from the executing host
+    // thread's identity (glibc TCB/static-TLS sits just above the pthread
+    // stack). With a fresh std::thread per call those blocks died with the
+    // thread, and SotC's FIOS2 dereferenced a dangling one (host_stack_top +
+    // 0xff0) minutes later during world streaming. On a real console module
+    // inits all run on the loader's permanent thread; mirror that.
+    {
+      std::unique_lock<std::mutex> lk(initWorkerM);
+      if (!initWorkerStarted) {
+        initWorkerStarted = true;
+        std::thread([this] {
+          for (;;) {
+            std::function<void()> job;
+            {
+              std::unique_lock<std::mutex> wl(initWorkerM);
+              initWorkerCv.wait(wl, [this] { return (bool)initWorkerJob; });
+              job = std::move(initWorkerJob);
+              initWorkerJob = nullptr;
+            }
+            job();
+            {
+              std::lock_guard<std::mutex> wl(initWorkerM);
+              initWorkerDone = true;
+            }
+            initWorkerCv.notify_all();
+          }
+        }).detach();  // process-lifetime worker; its TCB/TLS stay mapped
+      }
+      initWorkerDone = false;
+      initWorkerJob = [this, h] { runGuestThread(h); };
+      initWorkerCv.notify_all();
+      initWorkerCv.wait(lk, [this] { return initWorkerDone; });
+    }
     return 0;
   }
+
+  std::mutex initWorkerM;
+  std::condition_variable initWorkerCv;
+  bool initWorkerStarted = false;
+  std::function<void()> initWorkerJob;
+  bool initWorkerDone = false;
 
 private:
   void ensureInit() {
@@ -571,6 +783,12 @@ private:
       FEXCore::Config::Initialize();
       FEXCore::Config::ReloadMetaLayer();
       FEXCore::Config::Set(FEXCore::Config::CONFIG_IS64BIT_MODE, "1");
+      // Unaligned LOCK-prefixed RMWs (x86 split locks) are emulated with dual-
+      // CAS loops that can tear on ARM. Serialize them under FEX's global
+      // split-lock mutex: engines with variably-aligned atomic fields (SotC's
+      // BPE allocator/job system: >1000 unaligned-atomic sites in the eboot)
+      // otherwise corrupt their lock-free structures intermittently.
+      FEXCore::Config::Set(FEXCore::Config::CONFIG_STRICTINPROCESSSPLITLOCKS, "1");
 
       auto HostFeatures = FEX::FetchHostFeatures();
       CTX = FEXCore::Context::Context::CreateNewContext(HostFeatures);
@@ -750,13 +968,46 @@ uint64_t reconstructGuestRip(uint64_t hostPC) {
 
 bool tryHandleJitSignal(int sig, void *infop, void *ucv) {
 #if defined(__aarch64__)
+  if (!g_ctxPtr || !t_curThread || !ucv || !infop)
+    return false;
+  auto *uc = static_cast<ucontext_t *>(ucv);
+
+  // FEX's call-ret prediction stack: the JIT pushes/pops a predictor entry on
+  // every guest call/ret through x25. Guest code whose calls and rets don't
+  // pair up -- sceFiber switches jump between fiber stacks without returning
+  // (SotC's BPE job system does this thousands of times per streaming second)
+  // -- drifts the predictor sp until it walks into one of the buffer's guard
+  // pages. Upstream FEX treats that as EXPECTED (SyscallsSMCTracking.cpp
+  // HandleSegfault): reset x25 to the default mid-buffer location and resume.
+  // Without this mirror, a purely internal predictor overflow surfaced as a
+  // fatal "guest fault" at the guard page (0x...feff0) ~9s into SotC's
+  // LoadInitialWorld.
+  if (sig == SIGSEGV && t_curThread->CallRetStackBase) {
+    const uint64_t fa =
+        reinterpret_cast<uint64_t>(static_cast<siginfo_t *>(infop)->si_addr);
+    const uint64_t crBase =
+        reinterpret_cast<uint64_t>(t_curThread->CallRetStackBase);
+    constexpr size_t kCrSize =
+        FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE;
+    constexpr size_t kPage = 0x1000;
+    if (fa >= crBase - kPage && fa < crBase + kCrSize + kPage) {
+      uc->uc_mcontext.regs[25] = crBase + kCrSize / 4;
+      static std::atomic<uint32_t> n{0};
+      uint32_t c = n.fetch_add(1);
+      if (c < 8 || (c & (c - 1)) == 0)  // first few, then powers of two
+        std::fprintf(stderr,
+                     "[fex] callret predictor over/underflow #%u reset (fault %#llx)\n",
+                     c, (unsigned long long)fa);
+      return true;
+    }
+  }
+
   // FEX raises SIGBUS(BUS_ADRALN) from the JIT for unaligned atomic accesses
   // and backpatches them. Mirror FEX's frontend SIGBUS handler. (FEX's own
   // SignalDelegator owns the richer SIGSEGV/SMC path; we only need this one
   // case.)
-  if (sig != SIGBUS || !g_ctxPtr || !t_curThread || !ucv || !infop)
+  if (sig != SIGBUS)
     return false;
-  auto *uc = static_cast<ucontext_t *>(ucv);
   const uint64_t pc = uc->uc_mcontext.pc;
   if (!g_ctxPtr->IsAddressInCodeBuffer(t_curThread, pc))
     return false;
@@ -765,6 +1016,18 @@ bool tryHandleJitSignal(int sig, void *infop, void *ucv) {
   auto result = FEXCore::ArchHelpers::Arm64::HandleUnalignedAccess(
       t_curThread, FEXCore::ArchHelpers::Arm64::UnalignedHandlerType::HalfBarrier,
       pc, reinterpret_cast<uint64_t *>(&uc->uc_mcontext.regs[0]));
+  // A backpatched unaligned ATOMIC stops being atomic (HalfBarrier splits it
+  // into plain ops + barriers). That silently breaks guest spinlocks/queues,
+  // so make every backpatch visible: log the first ones with the guest RIP.
+  static std::mutex logM;
+  static std::set<uint64_t> seenRips;
+  const uint64_t grip = reconstructGuestRip(pc);
+  {
+    std::lock_guard<std::mutex> lk(logM);
+    if (seenRips.insert(grip).second)
+      std::fprintf(stderr, "[fex] unaligned-atomic backpatch site guest rip=%#llx (%u sites)\n",
+                   (unsigned long long)grip, (unsigned)seenRips.size());
+  }
   uc->uc_mcontext.pc = pc + result.value_or(0);
   return result.has_value();
 #else
