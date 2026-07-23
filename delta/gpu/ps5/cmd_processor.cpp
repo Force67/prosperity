@@ -20,9 +20,11 @@
 
 #include "agc_regs.h"
 #include "ps4/pm4.h"
+#include "rdna/rdna_resource.h"
 #include "rdna/rdna_translate.h"
 #include "vk_render.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -574,6 +576,37 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
       if (good) {
         resolveCbufs(rc.vs_cbufs, vud, true);
         if (psA) resolveCbufs(rc.ps_cbufs, pud, false);
+        // Textures: resolve the live gfx10.3 T#/S# each PS sampler reads, in the
+        // recompiler's set-0 binding order (rdna::TrackTextures re-derives the same
+        // plan). texs[i] maps to PS sampler binding i.
+        if (psA && !rc.ps_texs.empty()) {
+          auto texs = rdna::TrackTextures(reinterpret_cast<const uint32_t *>(psA), pud);
+          for (size_t i = 0; i < texs.size() && i < 16; i++) {
+            const auto &s = texs[i];
+            auto &dt = d.texs[i];
+            dt.base = s.valid ? s.base : 0;
+            dt.w = s.width;
+            dt.h = s.height;
+            dt.tiling = s.tiling_idx;
+            dt.pitch = s.pitch;
+            dt.dfmt = s.dfmt;
+            dt.nfmt = s.nfmt;
+            dt.layers = s.layers;
+            dt.base_array = s.base_array;
+            dt.view_layers = s.view_layers;
+            dt.mip_levels = s.mip_levels;
+            dt.base_mip = s.base_mip;
+            dt.view_mips = s.view_mips;
+            dt.min_lod = s.min_lod;
+            std::memcpy(dt.sampler, s.sampler, sizeof(dt.sampler));
+            dt.sampler_valid = s.sampler_valid;
+            dt.arrayed = s.arrayed;
+            dt.force_lod_zero = s.force_lod_zero;
+            dt.depth_compare = s.depth_compare;
+            dt.storage = s.storage;
+          }
+          d.nTexs = static_cast<uint32_t>(std::min<size_t>(texs.size(), 16));
+        }
         d.vsAddr = vsA;
         d.psAddr = psA;
         d.recomp = &rc;

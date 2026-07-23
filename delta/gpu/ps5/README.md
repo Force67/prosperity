@@ -47,13 +47,15 @@ isolation via `tools/rdna_selftest.cpp` until submission is unblocked.
   `v_add/sub/subrev_i32`.
 - MIMG texture sampling (recompiler side): `RdnaPlanMimg` + the shared `EmitMimg`.
 - VOP3P packed f16 (`v_pk_mul/add/fma/min/max_f16`).
+- Draw-time texture binding: `rdna::TrackTextures` resolves the live gfx10.3 T#/S#
+  each PS sampler reads (`rdna_resource`) and the cmd processor fills `DrawInfo::texs`.
 
 ## Known gaps (loud degradation until implemented)
 
-- MIMG draw-time binding: the cmd processor does not yet resolve the live gfx10.3
-  T#/S# descriptors from user data and bind them to `vk_render` (PS4
-  `TrackTextures` equivalent), so samples read an unbound texture. Resolve against
-  `MimgBindingPlan.binding_srsrc`.
+- Texture resolution only follows inline user data and a single table-pointer
+  indirection; deeper SGPR dataflow (the PS4 `ScalarEval`) is not modelled.
+- gfx10.3 T# format: only the geometric fields decode; the 9-bit unified format
+  defaults to RGBA8_UNORM, and tiled surfaces are not de-tiled.
 - MIMG `arrayed`/DIM detection and NSA (non-sequential address) sampling.
 - VOP3P op_sel/neg/clamp modifiers and packed integer ops.
 - f16 VOPC compares (0xC9-0xCE) collide with the GFX7 u32 integer-compare space.
