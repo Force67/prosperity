@@ -47,6 +47,7 @@ isolation via `tools/rdna_selftest.cpp` until submission is unblocked.
   `v_add/sub/subrev_i32`.
 - MIMG texture sampling (recompiler side): `RdnaPlanMimg` + the shared `EmitMimg`.
 - VOP3P packed f16 (`v_pk_mul/add/fma/min/max_f16`).
+- f16 VOPC compares (0xC8-0xCF): low-half f16 operands run the float predicate.
 - Draw-time texture binding: `rdna::TrackTextures` resolves the live gfx10.3 T#/S#
   each PS sampler reads (`rdna_resource`) and the cmd processor fills `DrawInfo::texs`.
 
@@ -58,7 +59,8 @@ isolation via `tools/rdna_selftest.cpp` until submission is unblocked.
   defaults to RGBA8_UNORM, and tiled surfaces are not de-tiled.
 - MIMG `arrayed`/DIM detection and NSA (non-sequential address) sampling.
 - VOP3P op_sel/neg/clamp modifiers and packed integer ops.
-- f16 VOPC compares (0xC9-0xCE) collide with the GFX7 u32 integer-compare space.
+- f16 VOPC cmpx (EXEC-writing) forms and the unordered predicates above 0xCF.
+- SDWA/DPP sub-dword select and lane swizzle (decoded but applied as identity).
 - MTBUF and graphics-stage MUBUF/DS.
 - RECTLIST geometry expansion (gfx10 prim type 7 vs vk_render's `primType == 17`).
 - AGC input-usage-table-driven vertex fetch (the fetch pointer is currently a

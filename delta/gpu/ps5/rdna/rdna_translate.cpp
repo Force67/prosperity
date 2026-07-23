@@ -444,6 +444,19 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       const uint32_t vsrc1 = (w >> 9) & 0xFF;
       uint32_t src0, lit;
       ResolveValuSrc0(inst, w & 0x1FF, src0, lit);
+      // RDNA2 f16 compares sit at 0xC8-0xCF, which the GFX7-numbered EmitVopc
+      // would read as u32 integer compares; run the float predicate (op-0xC8) on
+      // the low-half f16 operands instead. u32 compares stay at 0xC0-0xC7.
+      if (op >= 0xC8 && op <= 0xCF) {
+        auto f16 = [&](uint32_t f) {
+          return t.m.CompositeExtract(
+              t.t_f, t.m.ExtInst(t.t_v2, GLSLstd450UnpackHalf2x16,
+                                 {t.SrcRaw(f, lit)}), 0);
+        };
+        gpu::gcn::EmitVopc(t, op - 0xC8, f16(src0), f16(256 + vsrc1),
+                           t.SrcRaw(src0, lit), t.SrcRaw(256 + vsrc1, lit));
+        break;
+      }
       gpu::gcn::EmitVopc(t, op, t.SrcF(src0, lit), t.SrcF(256 + vsrc1, lit),
                          t.SrcRaw(src0, lit), t.SrcRaw(256 + vsrc1, lit));
       break;

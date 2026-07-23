@@ -335,6 +335,37 @@ int main() {
     if (!err.empty()) std::printf("      ps: %s\n", err.c_str());
   }
 
+  {
+    // RDNA2 f16 compare (v_cmp_lt_f16 = 0xC9), which GFX7 numbers as u32. Must
+    // convert the low-half f16 operands (UnpackHalf2x16, OpExtInst) and run a
+    // float predicate rather than an integer compare.
+    std::vector<uint32_t> vs;
+    vs.push_back(vop1(0x01, 0, kInline0));
+    vs.push_back(vop1(0x01, 1, kInline0));
+    vs.push_back(vop1(0x01, 2, kInline0));
+    vs.push_back(vop1(0x01, 3, kInline1f));
+    exp(vs, 12, 0xF, true, 0, 1, 2, 3);
+    vs.push_back(sopp(kEndpgm, 0));
+
+    std::vector<uint32_t> ps;
+    ps.push_back(vop1(0x01, 0, kInline0));    // v0
+    ps.push_back(vop1(0x01, 1, kInline1f));   // v1
+    ps.push_back(vopc(0xC9, 256, 257));       // v_cmp_lt_f16 v0,v1 -> VCC
+    ps.push_back(vop2(0x01, 2, 256, 257));    // v_cndmask v2 = VCC ? v1 : v0
+    exp(ps, 0, 0xF, true, 2, 2, 2, 2);
+    ps.push_back(sopp(kEndpgm, 0));
+
+    uint32_t user_data[16] = {0};
+    gpu::gcn::Recompiled r =
+        gpu::rdna::Recompile(vs.data(), ps.data(), user_data, user_data);
+    expect(r.ok, "f16-VOPC PS recompiled ok");
+    expect(hasOpcode(r.fs_spirv, 12), "f16-VOPC converts operands (OpExtInst)");
+    std::string err;
+    expect(gpu::gcn::spirv::Validate(r.fs_spirv, &err),
+           "f16-VOPC PS SPIR-V validates");
+    if (!err.empty()) std::printf("      ps: %s\n", err.c_str());
+  }
+
   std::printf("== gfx10.3 T# decode ==\n");
   {
     // 256x128 2D texture at 0x800000000. width-1=255 -> d1[31:30]|d2[11:0];
