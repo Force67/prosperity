@@ -126,6 +126,49 @@ uint32_t RemapVop2(uint32_t op) {
   }
 }
 
+// RDNA2 VOP3-only integer ops the GFX7 emitter doesn't number (3-input fused +
+// native add/sub_i32). Carry-out is dropped, like v_add_nc_u32.
+bool RdnaEmitVop3Int(Translator& t, uint32_t op, uint32_t vdst, Id s0, Id s1,
+                     Id s2) {
+  switch (op) {
+    case 0x30F: t.SetVg(vdst, t.Add(s0, s1)); return true;             // v_add_i32
+    case 0x310: t.SetVg(vdst, t.Sub(s0, s1)); return true;             // v_sub_i32
+    case 0x319: t.SetVg(vdst, t.Sub(s1, s0)); return true;             // v_subrev_i32
+    case 0x346: t.SetVg(vdst, t.Add(t.Shl(s0, s1), s2)); return true;  // v_lshl_add_u32
+    case 0x347: t.SetVg(vdst, t.Shl(t.Add(s0, s1), s2)); return true;  // v_add_lshl_u32
+    case 0x36D: t.SetVg(vdst, t.Add(t.Add(s0, s1), s2)); return true;  // v_add3_u32
+    case 0x36F: t.SetVg(vdst, t.Or(t.Shl(s0, s1), s2)); return true;   // v_lshl_or_b32
+    case 0x371: t.SetVg(vdst, t.Or(t.And(s0, s1), s2)); return true;   // v_and_or_b32
+    case 0x372: t.SetVg(vdst, t.Or(t.Or(s0, s1), s2)); return true;    // v_or3_b32
+    default: return false;
+  }
+}
+
+// VOP3P packed f16: componentwise on the unpacked f32x2. op_sel/neg/clamp and
+// packed-integer ops are not modelled (fall back).
+bool RdnaEmitVop3p(Translator& t, uint32_t op, uint32_t vdst, uint32_t s0,
+                   uint32_t s1, uint32_t s2, uint32_t lit) {
+  auto unpack = [&](uint32_t f) {
+    return t.m.ExtInst(t.t_v2, GLSLstd450UnpackHalf2x16, {t.SrcRaw(f, lit)});
+  };
+  auto pack = [&](Id v2) {
+    return t.m.ExtInst(t.t_u, GLSLstd450PackHalf2x16, {v2});
+  };
+  const Id a = unpack(s0), b = unpack(s1);
+  switch (op & 0x7F) {
+    case 0x0F: t.SetVg(vdst, pack(t.m.Emit(spv::Op::OpFAdd, t.t_v2, {a, b}))); return true;  // v_pk_add_f16
+    case 0x10: t.SetVg(vdst, pack(t.m.Emit(spv::Op::OpFMul, t.t_v2, {a, b}))); return true;  // v_pk_mul_f16
+    case 0x11: t.SetVg(vdst, pack(t.m.ExtInst(t.t_v2, GLSLstd450FMin, {a, b}))); return true; // v_pk_min_f16
+    case 0x12: t.SetVg(vdst, pack(t.m.ExtInst(t.t_v2, GLSLstd450FMax, {a, b}))); return true; // v_pk_max_f16
+    case 0x0E: {  // v_pk_fma_f16
+      const Id mul = t.m.Emit(spv::Op::OpFMul, t.t_v2, {a, b});
+      t.SetVg(vdst, pack(t.m.Emit(spv::Op::OpFAdd, t.t_v2, {mul, unpack(s2)})));
+      return true;
+    }
+    default: return false;
+  }
+}
+
 // ---- SMEM (constant buffers) ------------------------------------------------
 // Walk the s_load pointer chain feeding a descriptor base SGPR back to a
 // user-data root. `loads` maps an s_load's destination SGPR to its {source base
@@ -382,19 +425,25 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
     case Enc::kVop3: {
       uint32_t op = inst.opcode;
       const uint32_t vdst = w & 0xFF;
-      if (op & 0x400) {  // VOP3P (packed 16-bit math): not modelled
-        gpu::gcn::WarnUnsupported("vop3p", op & 0x3FF, w, w1);
+      if (op & 0x400) {  // VOP3P (packed 16-bit math)
+        const uint32_t p0 = w1 & 0x1FF, p1 = (w1 >> 9) & 0x1FF;
+        const uint32_t p2 = (w1 >> 18) & 0x1FF;
+        if (!RdnaEmitVop3p(t, op, vdst, p0, p1, p2, inst.literal))
+          gpu::gcn::WarnUnsupported("vop3p", op & 0x3FF, w, w1);
         break;
       }
       // VOP3-form v_cndmask is the VOP2 alias 0x101 on RDNA2 (0x01 renumber);
       // GFX7's explicit-S2 cndmask VOP3 op is 0x100.
       if (op == 0x101) op = 0x100;
+      const uint32_t s0 = w1 & 0x1FF, s1 = (w1 >> 9) & 0x1FF;
+      const uint32_t s2 = (w1 >> 18) & 0x1FF, neg = (w1 >> 29) & 7;
+      if (RdnaEmitVop3Int(t, op, vdst, t.SrcRaw(s0, inst.literal),
+                          t.SrcRaw(s1, inst.literal), t.SrcRaw(s2, inst.literal)))
+        break;
       const bool vop3b = gpu::gcn::IsVop3b(op);
       const uint32_t sdst = vop3b ? ((w >> 8) & 0x7F) : 106;
       const uint32_t abs = vop3b ? 0 : ((w >> 8) & 7);
       const bool clamp = !vop3b && ((w >> 15) & 1);  // RDNA2 CLAMP at bit 15
-      const uint32_t s0 = w1 & 0x1FF, s1 = (w1 >> 9) & 0x1FF;
-      const uint32_t s2 = (w1 >> 18) & 0x1FF, neg = (w1 >> 29) & 7;
       gpu::gcn::EmitVop3(t, op, vdst, t.SrcF(s0, inst.literal, neg & 1, abs & 1),
                          t.SrcF(s1, inst.literal, neg & 2, abs & 2),
                          t.SrcF(s2, inst.literal, neg & 4, abs & 4),

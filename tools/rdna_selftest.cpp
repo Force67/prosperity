@@ -29,6 +29,19 @@ void expect(bool cond, const char* what) {
   if (!cond) g_failures++;
 }
 
+// True if the SPIR-V word stream contains an instruction with the given opcode.
+// Each instruction's first word packs wordCount[31:16] | opcode[15:0].
+bool hasOpcode(const std::vector<uint32_t>& spv, uint32_t opcode) {
+  size_t i = 5;  // skip the 5-word module header
+  while (i < spv.size()) {
+    const uint32_t wc = spv[i] >> 16;
+    if (wc == 0) break;
+    if ((spv[i] & 0xFFFF) == opcode) return true;
+    i += wc;
+  }
+  return false;
+}
+
 // ---- RDNA2 instruction encoders (little bit-twiddling for readability) ------
 // VOP1: [31:25]=0x3F, vdst[24:17], op[16:9], src0[8:0].
 uint32_t vop1(uint32_t op, uint32_t vdst, uint32_t src0) {
@@ -69,6 +82,14 @@ void smem(std::vector<uint32_t>& out, uint32_t op, uint32_t sdst, uint32_t sbase
   out.push_back((0x3Du << 26) | ((op & 0xFF) << 18) | ((sdst & 0x7F) << 6) |
                 (sbase & 0x3F));
   out.push_back(imm & 0x1FFFFF);
+}
+
+// VOP3P: word0 [31:26]=0x33, op[22:16], vdst[7:0]; word1 src2[26:18],
+// src1[17:9], src0[8:0] (same source layout as VOP3).
+void vop3p(std::vector<uint32_t>& out, uint32_t op, uint32_t vdst, uint32_t s0,
+           uint32_t s1, uint32_t s2) {
+  out.push_back((0x33u << 26) | ((op & 0x7F) << 16) | (vdst & 0xFF));
+  out.push_back(((s2 & 0x1FF) << 18) | ((s1 & 0x1FF) << 9) | (s0 & 0x1FF));
 }
 
 constexpr uint32_t kInline0 = 128;    // integer/float 0
@@ -198,6 +219,73 @@ int main() {
     expect(r.ok, "cndmask/add_nc PS recompiled ok");
     std::string err;
     expect(gpu::gcn::spirv::Validate(r.fs_spirv, &err), "cndmask PS SPIR-V validates");
+    if (!err.empty()) std::printf("      ps: %s\n", err.c_str());
+  }
+
+  {
+    // RDNA2 VOP3-only integer ops (native add/sub_i32 + 3-input fused forms).
+    std::vector<uint32_t> vs;
+    vs.push_back(vop1(0x01, 0, kInline0));
+    vs.push_back(vop1(0x01, 1, kInline0));
+    vs.push_back(vop1(0x01, 2, kInline0));
+    vs.push_back(vop1(0x01, 3, kInline1f));
+    exp(vs, 12, 0xF, true, 0, 1, 2, 3);
+    vs.push_back(sopp(kEndpgm, 0));
+
+    std::vector<uint32_t> ps;
+    ps.push_back(vop1(0x01, 0, kInline0));      // v0 = 0
+    ps.push_back(vop1(0x01, 1, kInline1f));     // v1 = 1.0 bits
+    vop3(ps, /*v_add_i32*/ 0x30F, 4, 256, 257, 0);      // v4 = v0 + v1
+    vop3(ps, /*v_sub_i32*/ 0x310, 5, 256, 257, 0);      // v5 = v0 - v1
+    vop3(ps, /*v_subrev_i32*/ 0x319, 6, 256, 257, 0);   // v6 = v1 - v0
+    vop3(ps, /*v_add3_u32*/ 0x36D, 7, 256, 257, 260);   // v7 = v0+v1+v4
+    vop3(ps, /*v_lshl_or_b32*/ 0x36F, 8, 256, 257, 260);   // v8 = (v0<<v1)|v4
+    vop3(ps, /*v_lshl_add_u32*/ 0x346, 9, 256, 257, 260);  // v9 = (v0<<v1)+v4
+    vop3(ps, /*v_add_lshl_u32*/ 0x347, 10, 256, 257, 260); // v10 = (v0+v1)<<v4
+    vop3(ps, /*v_or3_b32*/ 0x372, 11, 256, 257, 260);   // v11 = v0|v1|v4
+    vop3(ps, /*v_and_or_b32*/ 0x371, 12, 256, 257, 260);   // v12 = (v0&v1)|v4
+    exp(ps, 0, 0xF, true, 7, 8, 11, 12);
+    ps.push_back(sopp(kEndpgm, 0));
+
+    uint32_t user_data[16] = {0};
+    gpu::gcn::Recompiled r =
+        gpu::rdna::Recompile(vs.data(), ps.data(), user_data, user_data);
+    expect(r.ok, "VOP3 int-ALU PS recompiled ok");
+    std::string err;
+    expect(gpu::gcn::spirv::Validate(r.fs_spirv, &err),
+           "VOP3 int-ALU PS SPIR-V validates");
+    if (!err.empty()) std::printf("      ps: %s\n", err.c_str());
+  }
+
+  {
+    // VOP3P packed f16: v_pk_mul_f16, v_pk_add_f16, v_pk_fma_f16.
+    std::vector<uint32_t> vs;
+    vs.push_back(vop1(0x01, 0, kInline0));
+    vs.push_back(vop1(0x01, 1, kInline0));
+    vs.push_back(vop1(0x01, 2, kInline0));
+    vs.push_back(vop1(0x01, 3, kInline1f));
+    exp(vs, 12, 0xF, true, 0, 1, 2, 3);
+    vs.push_back(sopp(kEndpgm, 0));
+
+    std::vector<uint32_t> ps;
+    ps.push_back(vop1(0x01, 0, kInline1f));  // v0 = two f16 lanes (bit pattern)
+    ps.push_back(vop1(0x01, 1, kInline1f));  // v1
+    vop3p(ps, /*v_pk_mul_f16*/ 0x10, 4, 256, 257, 0);   // v4 = v0 .* v1
+    vop3p(ps, /*v_pk_add_f16*/ 0x0F, 5, 256, 257, 0);   // v5 = v0 .+ v1
+    vop3p(ps, /*v_pk_fma_f16*/ 0x0E, 6, 256, 257, 260); // v6 = v0.*v1 .+ v4
+    exp(ps, 0, 0xF, true, 4, 5, 6, 4);
+    ps.push_back(sopp(kEndpgm, 0));
+
+    uint32_t user_data[16] = {0};
+    gpu::gcn::Recompiled r =
+        gpu::rdna::Recompile(vs.data(), ps.data(), user_data, user_data);
+    expect(r.ok, "VOP3P packed-f16 PS recompiled ok");
+    // OpExtInst == 12: PackHalf2x16/UnpackHalf2x16 both go through it, so its
+    // presence proves the packed path emitted rather than warned.
+    expect(hasOpcode(r.fs_spirv, 12), "VOP3P PS emits pack/unpack ext-insts");
+    std::string err;
+    expect(gpu::gcn::spirv::Validate(r.fs_spirv, &err),
+           "VOP3P packed-f16 PS SPIR-V validates");
     if (!err.empty()) std::printf("      ps: %s\n", err.c_str());
   }
 
