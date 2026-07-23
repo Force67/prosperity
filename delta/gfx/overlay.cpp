@@ -1,18 +1,21 @@
 /*
  * PS4Delta : PS4 emulation and research project
  *
- * Keyboard->DualSense legend overlay (desktop/Linux). We let Dear ImGui build a
- * raw draw list (rounded panel + text) and rasterise the resulting ImDrawData
- * ourselves into the present framebuffer, so no extra Vulkan pipeline/render
- * pass is needed: it slots into the same CPU staging buffer that gfx_vk.cpp
- * uploads each frame. Android has its own touch overlay (gfx_android.cpp).
+ * On-screen overlay content (Dear ImGui): the keyboard->DualSense legend, a
+ * memory-pressure gauge (VRAM + system RAM) bottom-right, and a CPU/GPU
+ * utilization gauge top-right. This file only builds the ImDrawData + gathers
+ * host metrics; overlay_vk.cpp rasterises it through a Vulkan pipeline.
  */
 #ifndef __ANDROID__
 
 #include <algorithm>
 #include <cfloat>
-#include <cmath>
 #include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <ctime>
+#include <mutex>
+#include <unistd.h>
 
 #include "imgui.h"
 #include "overlay.h"
@@ -22,11 +25,10 @@ namespace {
 
 bool g_visible = true;
 bool g_inited = false;
-const unsigned char *g_atlas = nullptr;  // alpha8 font pixels (owned by ImGui)
-int g_atlasW = 0, g_atlasH = 0;
 
-// Mirrors the keyboard map in gfx_vk.cpp::pollKeyboardPad. ProggyClean (the
-// default font) is monospaced, so the two columns line up on the pixel grid.
+std::mutex g_perfMtx;
+float g_fps = 0, g_gpuMs = 0, g_frameMs = 0;
+
 struct Row {
   const char *key, *button;
 };
@@ -46,22 +48,101 @@ const Row kRows[] = {
 };
 const char *kTitle = "Controls  (F1 to toggle)";
 
-void initImGui() {
-  if (g_inited)
+// ---- host metrics (Linux /proc), refreshed ~2x/second ----------------------
+struct Metrics {
+  float cpuPct = 0;    // whole-process CPU%, can exceed 100 (multi-threaded)
+  float cpuMax = 100;  // ncpu*100, for the bar scale
+  uint64_t ramUsed = 0, ramTotal = 0;  // bytes
+} g_metrics;
+
+double nowSec() {
+  timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return ts.tv_sec + ts.tv_nsec * 1e-9;
+}
+
+void refreshMetrics() {
+  static double lastAt = 0;
+  static uint64_t lastJiffies = 0;
+  static double lastCpuAt = 0;
+  const double t = nowSec();
+  if (t - lastAt < 0.5)
     return;
-  IMGUI_CHECKVERSION();
-  ImGui::CreateContext();
-  ImGuiIO &io = ImGui::GetIO();
-  io.IniFilename = nullptr;  // headless overlay: never touch disk
-  io.LogFilename = nullptr;
-  unsigned char *px = nullptr;
-  int w = 0, h = 0;
-  io.Fonts->GetTexDataAsAlpha8(&px, &w, &h);  // also builds the atlas
-  io.Fonts->SetTexID((ImTextureID)(intptr_t)1);  // we sample g_atlas ourselves
-  g_atlas = px;
-  g_atlasW = w;
-  g_atlasH = h;
-  g_inited = true;
+  lastAt = t;
+
+  // Process CPU time (utime+stime) from /proc/self/stat field 14/15.
+  if (FILE *f = std::fopen("/proc/self/stat", "r")) {
+    char buf[1024];
+    size_t n = std::fread(buf, 1, sizeof(buf) - 1, f);
+    std::fclose(f);
+    buf[n] = 0;
+    const char *p = std::strrchr(buf, ')');  // comm may contain spaces/parens
+    unsigned long ut = 0, st = 0;
+    if (p) {
+      // after ") ": field 3 (state) onward; utime=14, stime=15 -> skip 11 fields
+      int field = 3;
+      p += 2;
+      while (*p && field < 14) {
+        if (*p == ' ') field++;
+        p++;
+      }
+      std::sscanf(p, "%lu %lu", &ut, &st);
+    }
+    const long hz = sysconf(_SC_CLK_TCK);
+    const uint64_t jiffies = ut + st;
+    if (lastCpuAt > 0 && hz > 0) {
+      const double dt = t - lastCpuAt;
+      const double dj = double(jiffies - lastJiffies) / hz;
+      g_metrics.cpuPct = dt > 0 ? float(dj / dt * 100.0) : 0;
+    }
+    lastJiffies = jiffies;
+    lastCpuAt = t;
+    const long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
+    g_metrics.cpuMax = ncpu > 0 ? float(ncpu * 100) : 100;
+  }
+
+  // System RAM from /proc/meminfo (kB).
+  if (FILE *f = std::fopen("/proc/meminfo", "r")) {
+    char line[256];
+    uint64_t total = 0, avail = 0;
+    while (std::fgets(line, sizeof(line), f)) {
+      unsigned long kb = 0;
+      if (std::sscanf(line, "MemTotal: %lu kB", &kb) == 1) total = kb * 1024ull;
+      else if (std::sscanf(line, "MemAvailable: %lu kB", &kb) == 1) avail = kb * 1024ull;
+    }
+    std::fclose(f);
+    g_metrics.ramTotal = total;
+    g_metrics.ramUsed = total > avail ? total - avail : 0;
+  }
+}
+
+// ---- drawing helpers (foreground draw list) --------------------------------
+float gib(uint64_t b) { return float(b) / (1024.0f * 1024.0f * 1024.0f); }
+
+// A labeled horizontal bar: title on top, "value" right-aligned, filled to frac.
+// Returns the height consumed.
+float bar(ImDrawList *dl, float x, float y, float w, const char *label,
+          const char *value, float frac, ImU32 col) {
+  const float fs = ImGui::GetFontSize();
+  const float barH = fs * 0.55f;
+  dl->AddText(ImVec2(x, y), IM_COL32(210, 210, 210, 255), label);
+  ImFont *font = ImGui::GetFont();
+  float vw = font->CalcTextSizeA(fs, FLT_MAX, 0.0f, value).x;
+  dl->AddText(ImVec2(x + w - vw, y), IM_COL32(255, 255, 255, 255), value);
+  const float by = y + fs + 2.0f;
+  frac = std::clamp(frac, 0.0f, 1.0f);
+  dl->AddRectFilled(ImVec2(x, by), ImVec2(x + w, by + barH),
+                    IM_COL32(40, 40, 46, 220), 2.0f);
+  if (frac > 0)
+    dl->AddRectFilled(ImVec2(x, by), ImVec2(x + w * frac, by + barH), col, 2.0f);
+  dl->AddRect(ImVec2(x, by), ImVec2(x + w, by + barH),
+              IM_COL32(255, 255, 255, 30), 2.0f);
+  return fs + 2.0f + barH + fs * 0.5f;
+}
+
+void panelBg(ImDrawList *dl, ImVec2 tl, ImVec2 br) {
+  dl->AddRectFilled(tl, br, IM_COL32(15, 15, 18, 205), 5.0f);
+  dl->AddRect(tl, br, IM_COL32(255, 255, 255, 40), 5.0f);
 }
 
 void buildLegend() {
@@ -69,23 +150,17 @@ void buildLegend() {
   ImFont *font = ImGui::GetFont();
   const float fs = ImGui::GetFontSize();
   const float pad = 8.0f, gap = fs, lh = fs + 3.0f;
-
   float keyW = 0.0f;
   for (auto &r : kRows)
     keyW = std::max(keyW, font->CalcTextSizeA(fs, FLT_MAX, 0.0f, r.key).x);
   float bodyW = 0.0f;
   for (auto &r : kRows)
-    bodyW = std::max(bodyW, keyW + gap +
-                                font->CalcTextSizeA(fs, FLT_MAX, 0.0f, r.button).x);
+    bodyW = std::max(bodyW, keyW + gap + font->CalcTextSizeA(fs, FLT_MAX, 0.0f, r.button).x);
   float titleW = font->CalcTextSizeA(fs, FLT_MAX, 0.0f, kTitle).x;
-
   const ImVec2 o(10.0f, 10.0f);
   float panelW = std::max(titleW, bodyW) + pad * 2.0f;
   float panelH = pad * 2.0f + lh + 4.0f + lh * IM_ARRAYSIZE(kRows);
-  ImVec2 br(o.x + panelW, o.y + panelH);
-  dl->AddRectFilled(o, br, IM_COL32(15, 15, 18, 205), 5.0f);
-  dl->AddRect(o, br, IM_COL32(255, 255, 255, 40), 5.0f);
-
+  panelBg(dl, o, ImVec2(o.x + panelW, o.y + panelH));
   float x = o.x + pad, y = o.y + pad;
   dl->AddText(ImVec2(x, y), IM_COL32(120, 200, 255, 255), kTitle);
   y += lh + 4.0f;
@@ -96,92 +171,97 @@ void buildLegend() {
   }
 }
 
-inline float edge(const ImVec2 &p0, const ImVec2 &p1, float px, float py) {
-  return (px - p0.x) * (p1.y - p0.y) - (py - p0.y) * (p1.x - p0.x);
-}
-
-inline void blend(uint8_t *fb, int W, int H, bool bgra, int x, int y, float r,
-                  float g, float b, float a) {
-  if (a <= 0.0f || x < 0 || y < 0 || x >= W || y >= H)
-    return;
-  if (a > 1.0f)
-    a = 1.0f;
-  uint8_t *p = fb + (size_t)(y * W + x) * 4;
-  int ri = bgra ? 2 : 0, bi = bgra ? 0 : 2;
-  p[ri] = uint8_t(p[ri] * (1.0f - a) + r * a);
-  p[1] = uint8_t(p[1] * (1.0f - a) + g * a);
-  p[bi] = uint8_t(p[bi] * (1.0f - a) + b * a);
-}
-
-// Software-rasterise one ImGui draw list: textured triangles, the texture being
-// the alpha8 font atlas (filled prims sample its opaque white pixel). Vertex
-// colour and atlas alpha are interpolated, so ImGui's edge anti-aliasing works.
-void rasterize(const ImDrawList *dl, uint8_t *fb, int W, int H, bool bgra) {
-  const ImDrawVert *vtx = dl->VtxBuffer.Data;
-  const ImDrawIdx *idx = dl->IdxBuffer.Data;
-  for (const ImDrawCmd &cmd : dl->CmdBuffer) {
-    if (cmd.UserCallback)
-      continue;
-    int cx0 = std::max(0, (int)cmd.ClipRect.x);
-    int cy0 = std::max(0, (int)cmd.ClipRect.y);
-    int cx1 = std::min(W, (int)cmd.ClipRect.z);
-    int cy1 = std::min(H, (int)cmd.ClipRect.w);
-    const ImDrawIdx *ii = idx + cmd.IdxOffset;
-    for (unsigned n = 0; n + 3 <= cmd.ElemCount; n += 3) {
-      const ImDrawVert &a = vtx[cmd.VtxOffset + ii[n + 0]];
-      const ImDrawVert &b = vtx[cmd.VtxOffset + ii[n + 1]];
-      const ImDrawVert &c = vtx[cmd.VtxOffset + ii[n + 2]];
-      float area = edge(a.pos, b.pos, c.pos.x, c.pos.y);
-      if (area == 0.0f)
-        continue;
-      float inv = 1.0f / area;
-      int x0 = std::max(cx0, (int)std::floor(std::min({a.pos.x, b.pos.x, c.pos.x})));
-      int y0 = std::max(cy0, (int)std::floor(std::min({a.pos.y, b.pos.y, c.pos.y})));
-      int x1 = std::min(cx1, (int)std::ceil(std::max({a.pos.x, b.pos.x, c.pos.x})));
-      int y1 = std::min(cy1, (int)std::ceil(std::max({a.pos.y, b.pos.y, c.pos.y})));
-
-      auto chan = [](ImU32 col, int s) { return float((col >> s) & 0xFF); };
-      for (int y = y0; y < y1; y++)
-        for (int x = x0; x < x1; x++) {
-          float px = x + 0.5f, py = y + 0.5f;
-          // barycentrics (sign of `area` cancels, so winding doesn't matter)
-          float w0 = edge(b.pos, c.pos, px, py) * inv;
-          float w1 = edge(c.pos, a.pos, px, py) * inv;
-          float w2 = edge(a.pos, b.pos, px, py) * inv;
-          if (w0 < 0.0f || w1 < 0.0f || w2 < 0.0f)
-            continue;
-          float u = w0 * a.uv.x + w1 * b.uv.x + w2 * c.uv.x;
-          float v = w0 * a.uv.y + w1 * b.uv.y + w2 * c.uv.y;
-          int ax = std::clamp((int)(u * g_atlasW), 0, g_atlasW - 1);
-          int ay = std::clamp((int)(v * g_atlasH), 0, g_atlasH - 1);
-          float cov = g_atlas[ay * g_atlasW + ax] / 255.0f;
-          float cr = w0 * chan(a.col, 0) + w1 * chan(b.col, 0) + w2 * chan(c.col, 0);
-          float cg = w0 * chan(a.col, 8) + w1 * chan(b.col, 8) + w2 * chan(c.col, 8);
-          float cb = w0 * chan(a.col, 16) + w1 * chan(b.col, 16) + w2 * chan(c.col, 16);
-          float ca = w0 * chan(a.col, 24) + w1 * chan(b.col, 24) + w2 * chan(c.col, 24);
-          blend(fb, W, H, bgra, x, y, cr, cg, cb, (ca / 255.0f) * cov);
-        }
-    }
+// CPU/GPU utilization, top-right.
+void buildUtilGauge(float dispW) {
+  ImDrawList *dl = ImGui::GetForegroundDrawList();
+  const float fs = ImGui::GetFontSize(), pad = 8.0f, w = 190.0f;
+  const float panelW = w + pad * 2.0f, panelH = pad * 2.0f + fs + (fs * 2.05f) * 2;
+  const ImVec2 tl(dispW - panelW - 10.0f, 10.0f);
+  panelBg(dl, tl, ImVec2(tl.x + panelW, tl.y + panelH));
+  float x = tl.x + pad, y = tl.y + pad;
+  dl->AddText(ImVec2(x, y), IM_COL32(120, 200, 255, 255), "Utilization");
+  y += fs + 4.0f;
+  float cpu, gpu;
+  {
+    std::lock_guard<std::mutex> lk(g_perfMtx);
+    cpu = g_metrics.cpuPct;
+    gpu = g_frameMs > 0.01f ? std::min(100.0f, g_gpuMs / g_frameMs * 100.0f) : 0;
   }
+  char val[32];
+  std::snprintf(val, sizeof val, "%.0f%%", cpu);
+  y += bar(dl, x, y, w, "CPU", val, cpu / g_metrics.cpuMax, IM_COL32(90, 200, 120, 255));
+  std::snprintf(val, sizeof val, "%.0f%%", gpu);
+  bar(dl, x, y, w, "GPU", val, gpu / 100.0f, IM_COL32(230, 150, 90, 255));
+}
+
+// FPS + memory pressure (VRAM + system RAM), bottom-right (mirrors the fps meter).
+void buildMemGauge(float dispW, float dispH, uint64_t vramUsed, uint64_t vramTotal) {
+  ImDrawList *dl = ImGui::GetForegroundDrawList();
+  const float fs = ImGui::GetFontSize(), pad = 8.0f, w = 190.0f;
+  const float panelW = w + pad * 2.0f;
+  const float panelH = pad * 2.0f + fs + fs + 2.0f + (fs * 2.05f) * 2;
+  const ImVec2 tl(dispW - panelW - 10.0f, dispH - panelH - 10.0f);
+  panelBg(dl, tl, ImVec2(tl.x + panelW, tl.y + panelH));
+  float x = tl.x + pad, y = tl.y + pad;
+  float fps, ms;
+  {
+    std::lock_guard<std::mutex> lk(g_perfMtx);
+    fps = g_fps;
+    ms = g_frameMs;
+  }
+  char buf[64];
+  std::snprintf(buf, sizeof buf, "%.0f FPS   %.1f ms", fps, ms);
+  dl->AddText(ImVec2(x, y), IM_COL32(120, 200, 255, 255), buf);
+  y += fs + 4.0f;
+  char val[48];
+  if (vramTotal) {
+    std::snprintf(val, sizeof val, "%.1f / %.1f GB", gib(vramUsed), gib(vramTotal));
+    y += bar(dl, x, y, w, "VRAM", val, float(vramUsed) / float(vramTotal),
+             IM_COL32(200, 120, 220, 255));
+  } else {
+    y += bar(dl, x, y, w, "VRAM", "n/a", 0, IM_COL32(200, 120, 220, 255));
+  }
+  std::snprintf(val, sizeof val, "%.1f / %.1f GB", gib(g_metrics.ramUsed),
+                gib(g_metrics.ramTotal));
+  bar(dl, x, y, w, "RAM", val,
+      g_metrics.ramTotal ? float(g_metrics.ramUsed) / float(g_metrics.ramTotal) : 0,
+      IM_COL32(90, 160, 230, 255));
 }
 
 }  // namespace
 
-void overlayDraw(uint8_t *fb, uint32_t w, uint32_t h, bool bgra) {
-  if (!g_visible || !fb || !w || !h)
+void overlayEnsureImGui() {
+  if (g_inited)
     return;
-  initImGui();
+  IMGUI_CHECKVERSION();
+  ImGui::CreateContext();
+  ImGuiIO &io = ImGui::GetIO();
+  io.IniFilename = nullptr;
+  io.LogFilename = nullptr;
+  g_inited = true;
+}
+
+void overlaySetPerf(float fps, float gpuMs, float frameMs) {
+  std::lock_guard<std::mutex> lk(g_perfMtx);
+  g_fps = fps;
+  g_gpuMs = gpuMs;
+  g_frameMs = frameMs;
+}
+
+void overlayBuildFrame(uint32_t w, uint32_t h, uint64_t vramUsed,
+                       uint64_t vramTotal) {
+  overlayEnsureImGui();
   ImGuiIO &io = ImGui::GetIO();
   io.DisplaySize = ImVec2((float)w, (float)h);
   io.DeltaTime = 1.0f / 60.0f;
   ImGui::NewFrame();
-  buildLegend();
+  if (g_visible) {
+    refreshMetrics();
+    buildLegend();
+    buildUtilGauge((float)w);
+    buildMemGauge((float)w, (float)h, vramUsed, vramTotal);
+  }
   ImGui::Render();
-  const ImDrawData *dd = ImGui::GetDrawData();
-  if (!dd)
-    return;
-  for (int i = 0; i < dd->CmdListsCount; i++)
-    rasterize(dd->CmdLists[i], fb, (int)w, (int)h, bgra);
 }
 
 void overlayToggle() { g_visible = !g_visible; }

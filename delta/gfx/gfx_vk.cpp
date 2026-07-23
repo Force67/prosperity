@@ -28,6 +28,7 @@
 
 #include "gfx.h"
 #include "overlay.h"
+#include "overlay_vk.h"
 
 namespace gfx {
 namespace {
@@ -73,6 +74,7 @@ struct State {
   SDL_Gamepad *gamepad = nullptr;  // first connected controller (for input + rumble)
 
   bool needRecreate = false;
+  bool hasMemBudget = false;
 };
 
 State g;
@@ -183,6 +185,7 @@ bool createSwapchain() {
   g.swapImages.resize(n);
   vkGetSwapchainImagesKHR(g.device, g.swapchain, &n, g.swapImages.data());
   g.needRecreate = false;
+  overlayVkSetSwapchain(g.swapImages, g.swapExtent, g.swapFormat);  // no-op pre-init
   return true;
 }
 
@@ -370,12 +373,23 @@ bool init(const char *title, uint32_t width, uint32_t height) {
   qci.queueFamilyIndex = g.queueFamily;
   qci.queueCount = 1;
   qci.pQueuePriorities = &prio;
-  const char *devExts[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+  std::vector<const char *> devExts = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+  {  // VK_EXT_memory_budget (optional): powers the overlay VRAM gauge.
+    uint32_t ne = 0;
+    vkEnumerateDeviceExtensionProperties(g.phys, nullptr, &ne, nullptr);
+    std::vector<VkExtensionProperties> ext(ne);
+    vkEnumerateDeviceExtensionProperties(g.phys, nullptr, &ne, ext.data());
+    for (auto &e : ext)
+      if (!std::strcmp(e.extensionName, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME)) {
+        devExts.push_back(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
+        g.hasMemBudget = true;
+      }
+  }
   VkDeviceCreateInfo dci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
   dci.queueCreateInfoCount = 1;
   dci.pQueueCreateInfos = &qci;
-  dci.enabledExtensionCount = 1;
-  dci.ppEnabledExtensionNames = devExts;
+  dci.enabledExtensionCount = (uint32_t)devExts.size();
+  dci.ppEnabledExtensionNames = devExts.data();
   VK_CHECK(vkCreateDevice(g.phys, &dci, nullptr, &g.device));
   vkGetDeviceQueue(g.device, g.queueFamily, 0, &g.queue);
 
@@ -401,7 +415,28 @@ bool init(const char *title, uint32_t width, uint32_t height) {
     return false;
   std::printf("[gfx] swapchain %ux%u, %u images\n", g.swapExtent.width,
               g.swapExtent.height, (uint32_t)g.swapImages.size());
+  overlayVkInit(g.phys, g.device, g.queue, g.queueFamily, g.cmdPool,
+                g.swapFormat);
+  overlayVkSetSwapchain(g.swapImages, g.swapExtent, g.swapFormat);
   return true;
+}
+
+void queryVram(uint64_t &used, uint64_t &total) {
+  used = total = 0;
+  VkPhysicalDeviceMemoryProperties2 mp2{
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2};
+  VkPhysicalDeviceMemoryBudgetPropertiesEXT budget{
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT};
+  if (g.hasMemBudget)
+    mp2.pNext = &budget;
+  vkGetPhysicalDeviceMemoryProperties2(g.phys, &mp2);
+  const VkPhysicalDeviceMemoryProperties &mp = mp2.memoryProperties;
+  for (uint32_t i = 0; i < mp.memoryHeapCount; i++)
+    if (mp.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) {
+      total += g.hasMemBudget ? budget.heapBudget[i] : mp.memoryHeaps[i].size;
+      if (g.hasMemBudget)
+        used += budget.heapUsage[i];
+    }
 }
 
 void present(const void *pixels, uint32_t w, uint32_t h, uint32_t srcPitch,
@@ -421,9 +456,6 @@ void present(const void *pixels, uint32_t w, uint32_t h, uint32_t srcPitch,
   for (uint32_t y = 0; y < h; y++)
     std::memcpy(dst + (size_t)y * w * 4, src + (size_t)y * srcPitch, w * 4);
 
-  // Composite the keyboard->DualSense legend over the frame (toggle with F1).
-  overlayDraw(dst, w, h, fmt == PixelFormat::bgra8);
-
   vkWaitForFences(g.device, 1, &g.fence, VK_TRUE, UINT64_MAX);
 
   if (g.needRecreate && !createSwapchain())
@@ -438,6 +470,10 @@ void present(const void *pixels, uint32_t w, uint32_t h, uint32_t srcPitch,
   }
   if (ar != VK_SUCCESS)
     return;
+
+  uint64_t vramUsed = 0, vramTotal = 0;
+  queryVram(vramUsed, vramTotal);
+  overlayBuildFrame(g.swapExtent.width, g.swapExtent.height, vramUsed, vramTotal);
 
   vkResetFences(g.device, 1, &g.fence);
   vkResetCommandBuffer(g.cmd, 0);
@@ -476,11 +512,13 @@ void present(const void *pixels, uint32_t w, uint32_t h, uint32_t srcPitch,
                  g.swapImages[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
                  &blit, VK_FILTER_LINEAR);
 
-  // swapchain image -> PRESENT
-  imageBarrier(g.cmd, g.swapImages[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-               VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_ACCESS_TRANSFER_WRITE_BIT, 0,
-               VK_PIPELINE_STAGE_TRANSFER_BIT,
-               VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+  // The overlay's LOAD render pass draws over the blitted frame and transitions
+  // the image to PRESENT_SRC; without it, do that transition directly.
+  if (!overlayVkRender(g.cmd, idx))
+    imageBarrier(g.cmd, g.swapImages[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                 VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_ACCESS_TRANSFER_WRITE_BIT, 0,
+                 VK_PIPELINE_STAGE_TRANSFER_BIT,
+                 VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
   vkEndCommandBuffer(g.cmd);
 
   VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_TRANSFER_BIT;

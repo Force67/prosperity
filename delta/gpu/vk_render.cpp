@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "gfx/gfx.h"
+#include "gfx/overlay.h"
 #include "gcn/gcn_translate.h"
 #include "gcn/gcn_detile.h"
 #include "shaders/quad_vert_spv.h"
@@ -4249,6 +4250,9 @@ void reportFps() {
         g_nsCs / f / 1e6, g_csCount / f,
         g_nsCsIn / f / 1e6, g_nsCsGpu / f / 1e6, g_nsCsOut / f / 1e6,
         g_csStageN / f, g_csStageBytes / f / 1e6, g_csFlushN / f);
+    // Feed the on-screen overlay gauge (gpuMs = GPU end/present-dominated cost).
+    gfx::overlaySetPerf(float(frames / dt), float(g_nsEnd / f / 1e6),
+                        float(1000.0 * dt / frames));
     last = now;
     frames = 0;
     g_nsDraw = g_nsEnd = g_nsReadback = g_nsTexUp = 0;
