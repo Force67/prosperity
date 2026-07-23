@@ -40,18 +40,22 @@ through `vk_render`. The guest (Isaac, PPSA03311) does not yet submit AGC DCBs
 (libSceAgc never registers its GPU context), so the stack is validated in
 isolation via `tools/rdna_selftest.cpp` until submission is unblocked.
 
+## Implemented (verified via `tools/rdna_selftest.cpp`)
+
+- RDNA2 3-input integer ALU (address math): `v_add3_u32`, `v_lshl_or_b32`,
+  `v_and_or_b32`, `v_or3_b32`, `v_lshl_add_u32`, `v_add_lshl_u32`, native
+  `v_add/sub/subrev_i32`.
+- MIMG texture sampling (recompiler side): `RdnaPlanMimg` + the shared `EmitMimg`.
+- VOP3P packed f16 (`v_pk_mul/add/fma/min/max_f16`).
+
 ## Known gaps (loud degradation until implemented)
 
-The RDNA2 -> SPIR-V path reuses the shared GFX7 opcode emitters; opcodes that
-RDNA2 added or renumbered outside GFX7's range currently warn (`[gcnspv]
-UNSUPPORTED`) and fall back rather than emit. These are the follow-ups a real
-guest shader will need:
-
-- RDNA2 3-input integer ALU used for address math: `v_add3_u32` (0x36D),
-  `v_lshl_or_b32` (0x36F), `v_or3_b32` (0x372), `v_lshl_add_u32` (0x346),
-  `v_add_lshl_u32` (0x347), and the native VOP3 int add/sub-with-carry
-  (`v_add_i32` 0x30F / `v_sub_i32` 0x310 / `v_subrev_i32` 0x319).
-- MIMG texture sampling (gfx10 T#/S# + NSA addressing).
+- MIMG draw-time binding: the cmd processor does not yet resolve the live gfx10.3
+  T#/S# descriptors from user data and bind them to `vk_render` (PS4
+  `TrackTextures` equivalent), so samples read an unbound texture. Resolve against
+  `MimgBindingPlan.binding_srsrc`.
+- MIMG `arrayed`/DIM detection and NSA (non-sequential address) sampling.
+- VOP3P op_sel/neg/clamp modifiers and packed integer ops.
 - f16 VOPC compares (0xC9-0xCE) collide with the GFX7 u32 integer-compare space.
 - MTBUF and graphics-stage MUBUF/DS.
 - RECTLIST geometry expansion (gfx10 prim type 7 vs vk_render's `primType == 17`).

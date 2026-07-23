@@ -84,6 +84,17 @@ void smem(std::vector<uint32_t>& out, uint32_t op, uint32_t sdst, uint32_t sbase
   out.push_back(imm & 0x1FFFFF);
 }
 
+// MIMG (NSA=0, 64-bit): word0 [31:26]=0x3C, op[24:18], da[14], dmask[11:8],
+// op[7] at bit 0; word1 ssamp[25:21], srsrc[20:16], vdata[15:8], vaddr[7:0].
+// srsrc/ssamp are the SGPR index >> 2 (4-SGPR-aligned).
+void mimg(std::vector<uint32_t>& out, uint32_t op, uint32_t dmask, uint32_t vdata,
+          uint32_t vaddr, uint32_t srsrc, uint32_t ssamp) {
+  out.push_back((0x3Cu << 26) | ((op & 0x7F) << 18) | ((dmask & 0xF) << 8) |
+                ((op >> 7) & 1));
+  out.push_back(((ssamp & 0x1F) << 21) | ((srsrc & 0x1F) << 16) |
+                ((vdata & 0xFF) << 8) | (vaddr & 0xFF));
+}
+
 // VOP3P: word0 [31:26]=0x33, op[22:16], vdst[7:0]; word1 src2[26:18],
 // src1[17:9], src0[8:0] (same source layout as VOP3).
 void vop3p(std::vector<uint32_t>& out, uint32_t op, uint32_t vdst, uint32_t s0,
@@ -254,6 +265,40 @@ int main() {
     std::string err;
     expect(gpu::gcn::spirv::Validate(r.fs_spirv, &err),
            "VOP3 int-ALU PS SPIR-V validates");
+    if (!err.empty()) std::printf("      ps: %s\n", err.c_str());
+  }
+
+  {
+    // PS sampling a 2D texture: s_load T# (x8->s8) + S# (x4->s16), image_sample,
+    // export the texel. Exercises RdnaPlanMimg + the shared EmitMimg.
+    std::vector<uint32_t> vs;
+    vs.push_back(vop1(0x01, 0, kInline0));
+    vs.push_back(vop1(0x01, 1, kInline0));
+    vs.push_back(vop1(0x01, 2, kInline0));
+    vs.push_back(vop1(0x01, 3, kInline1f));
+    exp(vs, 12, 0xF, true, 0, 1, 2, 3);
+    vs.push_back(sopp(kEndpgm, 0));
+
+    std::vector<uint32_t> ps;
+    smem(ps, /*s_load_dwordx8 T#*/ 0x03, /*sdst s8*/ 8, /*sbase s0*/ 0, 0);
+    smem(ps, /*s_load_dwordx4 S#*/ 0x02, /*sdst s16*/ 16, /*sbase s2*/ 1, 0);
+    ps.push_back(vop1(0x01, 0, kInline0));   // v0 = u = 0.0
+    ps.push_back(vop1(0x01, 1, kInline0));   // v1 = v = 0.0
+    mimg(ps, /*image_sample*/ 0x20, /*dmask*/ 0xF, /*vdata v0*/ 0, /*vaddr v0*/ 0,
+         /*srsrc s8>>2*/ 2, /*ssamp s16>>2*/ 4);
+    exp(ps, /*MRT0*/ 0, 0xF, true, 0, 1, 2, 3);
+    ps.push_back(sopp(kEndpgm, 0));
+
+    uint32_t user_data[16] = {0};
+    gpu::gcn::Recompiled r =
+        gpu::rdna::Recompile(vs.data(), ps.data(), user_data, user_data);
+    expect(r.ok, "image_sample PS recompiled ok");
+    // Prove EmitMimg actually emitted a texture sample (not the silent
+    // unplanned-fallback): OpImageSampleImplicitLod == 87.
+    expect(hasOpcode(r.fs_spirv, 87), "image_sample PS emits OpImageSampleImplicitLod");
+    std::string err;
+    expect(gpu::gcn::spirv::Validate(r.fs_spirv, &err),
+           "image_sample PS SPIR-V validates");
     if (!err.empty()) std::printf("      ps: %s\n", err.c_str());
   }
 
