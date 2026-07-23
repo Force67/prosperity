@@ -26,6 +26,7 @@ gpu::gcn::Recompiled Recompile(const uint32_t*, const uint32_t*, const uint32_t*
 #include <cstdlib>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "ps4/gcn/spirv/spv_post.h"
@@ -126,31 +127,80 @@ uint32_t RemapVop2(uint32_t op) {
 }
 
 // ---- SMEM (constant buffers) ------------------------------------------------
-// Plan the set-1 UBO bindings a stage's SMEM loads reference. Both s_buffer_load*
-// (op 0x08-0x0C, a 4-SGPR V# in the sbase pair) and s_load* (op 0x00-0x04, a raw
-// 64-bit pointer in the sbase pair -- how a 2D VS often reads its transform
-// matrix) resolve to a base + dword window; the renderer materializes the live
-// descriptor from user data at draw time. Each distinct sbase gets one binding.
+// Walk the s_load pointer chain feeding a descriptor base SGPR back to a
+// user-data root. `loads` maps an s_load's destination SGPR to its {source base
+// SGPR, byte offset}. Fills chain_off[] (root-first resolution order) and returns
+// the root user-data SGPR; *len is the number of dereferences (0 == already a
+// user-data descriptor). Bounded to 3 levels.
+uint32_t TraceCbufChain(
+    uint32_t sbase,
+    const std::unordered_map<uint32_t, std::pair<uint32_t, uint32_t>>& loads,
+    uint32_t chain_off[3], uint32_t* len) {
+  uint32_t cur = sbase, n = 0, tmp[3] = {};
+  while (n < 3) {
+    auto it = loads.find(cur);
+    if (it == loads.end()) break;
+    tmp[n++] = it->second.second;  // byte offset
+    cur = it->second.first;        // the s_load's own source base SGPR
+  }
+  for (uint32_t i = 0; i < n; i++) chain_off[i] = tmp[n - 1 - i];  // reverse
+  *len = n;
+  return cur;
+}
+
+// Plan the set-1 UBO bindings a stage's SMEM loads reference. A leaf read is an
+// s_buffer_load* (op 0x08-0x0C, V# in the sbase quad) or an s_load* (op 0x00-0x04,
+// pointer in the sbase pair) whose result is used as data -- not as another SMEM's
+// descriptor base. When the base SGPR was itself s_load'd (a runtime pointer
+// chain, e.g. a 2D VS that loads its transform's V# from a root descriptor table),
+// the chain back to the user-data root is recorded so the renderer can walk it.
 bool RdnaPlanCbufs(const Program& program, uint32_t first_binding,
                    std::vector<ShaderCbuf>& cbufs,
                    std::unordered_map<uint32_t, uint32_t>& bindings) {
+  std::unordered_map<uint32_t, std::pair<uint32_t, uint32_t>> loads;  // sdst->{src,off}
+  std::unordered_set<uint32_t> used_as_base;
   for (const Inst& inst : program) {
     if (inst.enc != Enc::kSmrd) continue;
     const uint32_t op = inst.opcode;
-    if (op > 0x04 && (op < 0x08 || op > 0x0C)) continue;  // s_load* / s_buffer_load*
-    const uint32_t sbase = (inst.raw[0] & 0x3F) * 2;  // user-data dword of the descriptor
+    if (op > 0x04 && (op < 0x08 || op > 0x0C)) continue;
+    const uint32_t sbase = (inst.raw[0] & 0x3F) * 2;
+    used_as_base.insert(sbase);
+    if (op <= 0x04) {  // s_load*: record the dest<-src edge for chain tracing
+      const uint32_t sdst = (inst.raw[0] >> 6) & 0x7F;
+      const int32_t off = SignExt21(inst.raw[1] & 0x1FFFFF);
+      loads[sdst] = {sbase, static_cast<uint32_t>(off < 0 ? 0 : off)};
+    }
+  }
+
+  for (const Inst& inst : program) {
+    if (inst.enc != Enc::kSmrd) continue;
+    const uint32_t op = inst.opcode;
+    const bool sbufload = op >= 0x08 && op <= 0x0C, sload = op <= 0x04;
+    if (!sbufload && !sload) continue;
+    const uint32_t sbase = (inst.raw[0] & 0x3F) * 2;
+    const uint32_t sdst = (inst.raw[0] >> 6) & 0x7F;
+    if (sload && used_as_base.count(sdst)) continue;  // chain link: host-resolved
     const int32_t off = SignExt21(inst.raw[1] & 0x1FFFFF);
-    const uint32_t hi = static_cast<uint32_t>(off < 0 ? 0 : off) / 4 +
-                        SmemLoadCount(op);
+    const uint32_t hi = static_cast<uint32_t>(off < 0 ? 0 : off) / 4 + SmemLoadCount(op);
+
+    uint32_t chain_off[3] = {}, chain_len = 0;
+    const uint32_t root = TraceCbufChain(sbase, loads, chain_off, &chain_len);
+
     auto it = bindings.find(sbase);
     if (it == bindings.end()) {
       const uint32_t binding = first_binding + static_cast<uint32_t>(cbufs.size());
       if (binding >= 8) return true;  // set 1 has 8 UBO bindings; ignore extras
       bindings[sbase] = binding;
-      cbufs.push_back({binding, sbase, hi});
+      ShaderCbuf cb;
+      cb.binding = binding;
+      cb.ud_sgpr = root;
+      cb.num_dwords = hi;
+      cb.chain_len = chain_len;
+      for (uint32_t i = 0; i < 3; i++) cb.chain_off[i] = chain_off[i];
+      cbufs.push_back(cb);
     } else {
       for (ShaderCbuf& cb : cbufs)
-        if (cb.ud_sgpr == sbase && hi > cb.num_dwords) cb.num_dwords = hi;
+        if (cb.binding == it->second && hi > cb.num_dwords) cb.num_dwords = hi;
     }
   }
   return true;
@@ -180,14 +230,17 @@ void RdnaEmitSmem(Translator& t, const Inst& inst, StageContext& sc) {
   const uint32_t sdst = (inst.raw[0] >> 6) & 0x7F;
   const uint32_t sbase = (inst.raw[0] & 0x3F) * 2;
   const int32_t off = SignExt21(inst.raw[1] & 0x1FFFFF);
-  // s_load* (op 0x00-0x04, from a raw 64-bit pointer in the sbase pair) and
-  // s_buffer_load* (op 0x08-0x0C, from a V# in the sbase quad) both read `off`
-  // bytes into sdst.. from the UBO the renderer bound for this sbase. A 2D VS
-  // reads its transform matrix this way, so dropping it left the position untransformed.
+  // s_load* (op 0x00-0x04, a pointer in the sbase pair) and s_buffer_load* (op
+  // 0x08-0x0C, a V# in the sbase quad) read `off` bytes into sdst.. from the UBO
+  // the renderer bound for this sbase. A 2D VS reads its transform matrix this way.
   if (op <= 0x04 || (op >= 0x08 && op <= 0x0C)) {
     auto it = sc.cbuf_bind.find(sbase);
     if (it == sc.cbuf_bind.end()) {
-      gpu::gcn::WarnUnsupported("smem.cbuf-unplanned", op, inst.raw[0], inst.raw[1]);
+      // An s_load whose result feeds a later SMEM is a pointer-chain link: the
+      // renderer resolves that descriptor host-side, so it has no UBO and emits
+      // nothing. An unplanned s_buffer_load is a real gap.
+      if (op >= 0x08)
+        gpu::gcn::WarnUnsupported("smem.cbuf-unplanned", op, inst.raw[0], inst.raw[1]);
       return;
     }
     const uint32_t dword0 = static_cast<uint32_t>(off < 0 ? 0 : off) / 4;

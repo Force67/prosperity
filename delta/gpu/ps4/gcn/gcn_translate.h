@@ -29,8 +29,16 @@ struct ShaderAttr {
 // A constant buffer a shader stage reads (s_buffer_load). Bound as a UBO.
 struct ShaderCbuf {
   uint32_t binding = 0;
-  uint32_t ud_sgpr = 0;     // user-data dword index of the 4-dword V#
+  uint32_t ud_sgpr = 0;     // user-data dword index of the 4-dword V# / chain root
   uint32_t num_dwords = 0;  // highest dword index read + 1 (UBO size)
+  // Descriptor pointer chain (RDNA2 SMEM): when the descriptor is not directly in
+  // user data but s_load'd from a chain of user-data root pointers. chain_len == 0
+  // means direct (the V# is inline at ud_sgpr). Otherwise ud_sgpr is the root
+  // user-data SGPR (a pointer pair) and chain_off[0..len-1] are the byte offsets
+  // dereferenced at each level; the last one addresses the final 4-dword V#. The
+  // GFX7 path leaves this 0 (direct), so its behavior is unchanged.
+  uint32_t chain_len = 0;
+  uint32_t chain_off[3] = {};
 };
 
 // A texture the PS references (MIMG). Bound as a combined image sampler at

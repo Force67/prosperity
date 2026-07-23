@@ -524,21 +524,43 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
       // recovered attrs, seeds from VertexIndex) draws without a vertex buffer.
       bool good = d.nvattrs > 0 || rc.attrs.empty();
 
-      // Constant buffers: resolve each SMEM descriptor from user data. base comes
-      // from the sbase pair (a V# base for s_buffer_load, a raw 64-bit pointer for
-      // s_load); the bind size is the recompiler's planned dword window (num_dwords)
-      // -- the V# stride/records fields are meaningless for an s_load pointer.
+      // Constant buffers: resolve each SMEM descriptor. For a direct cbuf the V# is
+      // inline at ud_sgpr in user data; for a chained cbuf the descriptor is reached
+      // by reading the root pointer from user data and dereferencing through guest
+      // memory per chain_off[] (the VS loads its transform's V# from a root
+      // descriptor table this way). The bind size is the recompiler's planned dword
+      // window (the V# stride/records are meaningless for an s_load pointer).
       auto resolveCbufs = [&](const std::vector<gcn::ShaderCbuf> &cbufs,
                               const uint32_t *userData, bool vertexStage) {
         for (const auto &cb : cbufs) {
-          if (cb.binding >= 8 || cb.ud_sgpr + 3 >= 32) continue;
-          VBuffer vb = decodeVBuffer(&userData[cb.ud_sgpr]);
+          if (cb.binding >= 8) continue;
+          VBuffer vb{};
+          const char *how = "direct";
+          if (cb.chain_len == 0) {
+            if (cb.ud_sgpr + 3 >= 32) continue;
+            vb = decodeVBuffer(&userData[cb.ud_sgpr]);
+          } else {  // walk the s_load pointer chain to the final V#
+            if (cb.ud_sgpr + 1 >= 32) continue;
+            uint64_t ptr = (static_cast<uint64_t>(userData[cb.ud_sgpr + 1] & 0xFFFF) << 32) |
+                           userData[cb.ud_sgpr];
+            bool ok = true;
+            for (uint32_t i = 0; i + 1 < cb.chain_len; i++) {  // deref intermediate pointers
+              uint64_t at = (ptr + cb.chain_off[i]) & ~uint64_t{3};
+              if (!inGuest(at)) { ok = false; break; }
+              const uint32_t *q = reinterpret_cast<const uint32_t *>(at);
+              ptr = (static_cast<uint64_t>(q[1] & 0xFFFF) << 32) | q[0];
+            }
+            uint64_t vAddr = (ptr + cb.chain_off[cb.chain_len - 1]) & ~uint64_t{3};
+            if (!ok || !inGuest(vAddr)) continue;
+            vb = decodeVBuffer(reinterpret_cast<const uint32_t *>(vAddr));
+            how = "chain";
+          }
           uint64_t base = vb.base & ~uint64_t{3};  // dword-align (SMEM base)
           uint64_t bytes = static_cast<uint64_t>(cb.num_dwords) * 4;
           if (dl)
-            std::fprintf(stderr, "[agc]   cbuf %s bind=%u sgpr=%u base=%#lx dwords=%u\n",
-                         vertexStage ? "vs" : "ps", cb.binding, cb.ud_sgpr,
-                         (unsigned long)base, cb.num_dwords);
+            std::fprintf(stderr, "[agc]   cbuf %s bind=%u root=%u %s(len=%u) base=%#lx dwords=%u\n",
+                         vertexStage ? "vs" : "ps", cb.binding, cb.ud_sgpr, how,
+                         cb.chain_len, (unsigned long)base, cb.num_dwords);
           if (!inGuest(base) || !bytes) continue;
           d.cbufs[cb.binding] = {base, static_cast<uint32_t>(bytes)};
           d.nCbufs = std::max(d.nCbufs, cb.binding + 1);

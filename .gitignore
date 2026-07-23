@@ -332,3 +332,4 @@ ps5run.sh
 # stray local CMake build tree + vendor-lib copy (compile artifacts, not source)
 /build-system/
 /code/
+/.claude_
