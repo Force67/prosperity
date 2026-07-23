@@ -120,9 +120,9 @@ uint32_t RemapVop2(uint32_t op) {
 bool RdnaEmitVop3Int(Translator& t, uint32_t op, uint32_t vdst, Id s0, Id s1,
                      Id s2) {
   switch (op) {
-    case 0x30F: t.SetVg(vdst, t.Add(s0, s1)); return true;             // v_add_i32
-    case 0x310: t.SetVg(vdst, t.Sub(s0, s1)); return true;             // v_sub_i32
-    case 0x319: t.SetVg(vdst, t.Sub(s1, s0)); return true;             // v_subrev_i32
+    case 0x30F: t.SetVg(vdst, t.Add(s0, s1)); return true;             // v_add_nc_i32
+    case 0x310: t.SetVg(vdst, t.Sub(s0, s1)); return true;             // v_sub_nc_i32
+    case 0x319: t.SetVg(vdst, t.Sub(s1, s0)); return true;             // v_subrev_nc_u32
     case 0x346: t.SetVg(vdst, t.Add(t.Shl(s0, s1), s2)); return true;  // v_lshl_add_u32
     case 0x347: t.SetVg(vdst, t.Shl(t.Add(s0, s1), s2)); return true;  // v_add_lshl_u32
     case 0x36D: t.SetVg(vdst, t.Add(t.Add(s0, s1), s2)); return true;  // v_add3_u32
