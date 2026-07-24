@@ -1024,6 +1024,16 @@ bool TranslatePs(const Program& program,
     sc.color_written_var =
         t.m.Variable(t.p_priv_u, spv::StorageClass::Private, t.m.ConstNull(t.t_u));
   }
+  // DELTA_GPU_FORCECOLOR + DELTA_GPU_NOKILL: paint every rasterized fragment
+  // green at entry, before any exec-mask discard can suppress the export. This
+  // separates "draw produced no fragments" from "all fragments were discarded"
+  // (FORCECOLOR alone only recolors fragments that reach the export).
+  static const bool paint_raster = std::getenv("DELTA_GPU_FORCECOLOR") &&
+                                   std::getenv("DELTA_GPU_NOKILL");
+  if (paint_raster)
+    t.m.Store(gpu::gcn::PsColorOut(t, sc, 0),
+              t.m.ConstComposite(t.t_v4, {t.F32(0.f), t.F32(1.f), t.F32(0.f),
+                                          t.F32(1.f)}));
   EmitBody(t, program, sc);
 
   if (!sc.wrote_color) {
