@@ -43,6 +43,22 @@ bool hasOpcode(const std::vector<uint32_t>& spv, uint32_t opcode) {
   return false;
 }
 
+// True if the module decorates any id with BuiltIn `builtin` (OpDecorate == 71,
+// Decoration BuiltIn == 11, then the BuiltIn enum). Used to prove a PS input
+// VGPR was seeded from a Vulkan built-in (gl_FragCoord == 15).
+bool hasBuiltin(const std::vector<uint32_t>& spv, uint32_t builtin) {
+  size_t i = 5;
+  while (i < spv.size()) {
+    const uint32_t wc = spv[i] >> 16;
+    if (wc == 0) break;
+    if ((spv[i] & 0xFFFF) == 71 && wc >= 4 && spv[i + 2] == 11 &&
+        spv[i + 3] == builtin)
+      return true;
+    i += wc;
+  }
+  return false;
+}
+
 // ---- RDNA2 instruction encoders (little bit-twiddling for readability) ------
 // VOP1: [31:25]=0x3F, vdst[24:17], op[16:9], src0[8:0].
 uint32_t vop1(uint32_t op, uint32_t vdst, uint32_t src0) {
@@ -363,6 +379,36 @@ int main() {
     std::string err;
     expect(gpu::gcn::spirv::Validate(r.fs_spirv, &err),
            "f16-VOPC PS SPIR-V validates");
+    if (!err.empty()) std::printf("      ps: %s\n", err.c_str());
+  }
+
+  {
+    // SPI_PS_INPUT_ENA VGPR seeding: a 2D-clip PS reads screen position from the
+    // POS_X/POS_Y input VGPRs (not through v_interp). With PERSP_CENTER (bit 1)
+    // + POS_X (bit 8) + POS_Y (bit 9) enabled they land in v2/v3; unseeded they
+    // stay zero and a frag.x*a+frag.y*b<c clip discards every fragment. The seed
+    // must load them from gl_FragCoord.
+    std::vector<uint32_t> vs;
+    vs.push_back(vop1(0x01, 0, kInline0));
+    vs.push_back(vop1(0x01, 1, kInline0));
+    vs.push_back(vop1(0x01, 2, kInline0));
+    vs.push_back(vop1(0x01, 3, kInline1f));
+    exp(vs, 12, 0xF, true, 0, 1, 2, 3);
+    vs.push_back(sopp(kEndpgm, 0));
+
+    std::vector<uint32_t> ps;
+    ps.push_back(vop2(0x03, 0, 256 + 2, 3));  // v0 = v2 + v3 (reads seeded frag x/y)
+    exp(ps, 0, 0xF, true, 0, 0, 0, 0);
+    ps.push_back(sopp(kEndpgm, 0));
+
+    uint32_t user_data[16] = {0};
+    gpu::gcn::Recompiled r = gpu::rdna::Recompile(vs.data(), ps.data(), user_data,
+                                                  user_data, /*ps_input_ena*/ 0x302);
+    expect(r.ok, "frag-coord seed PS recompiled ok");
+    expect(hasBuiltin(r.fs_spirv, 15), "POS_X/Y VGPRs seeded from gl_FragCoord");
+    std::string err;
+    expect(gpu::gcn::spirv::Validate(r.fs_spirv, &err),
+           "frag-coord seed PS SPIR-V validates");
     if (!err.empty()) std::printf("      ps: %s\n", err.c_str());
   }
 
