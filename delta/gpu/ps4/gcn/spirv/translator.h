@@ -299,6 +299,13 @@ struct StageContext {
 
   // shared graphics
   std::unordered_map<uint32_t, uint32_t> cbuf_bind;  // V# SGPR -> set-1 binding
+  // Per-instruction cbuf bindings for constant buffer_loads whose srsrc SGPRs
+  // are reused (PS5 table-chained descriptors); takes precedence over cbuf_bind.
+  std::unordered_map<uint32_t, uint32_t> mubuf_cbuf_by_pc;
+  // pcs of `s_mov exec, sN` movs where sN holds unmodelled SPI launch state
+  // (e.g. the PS coverage mask); emitting them would zero EXEC and skip every
+  // export in the CFG path, so they are dropped (EXEC keeps its all-on seed).
+  std::unordered_set<uint32_t> skip_launch_movs;
 
   // Compute: storage buffers modelling the guest memory the CS reads/writes.
   std::unordered_map<uint32_t, uint32_t> cs_bind;  // instruction pc -> binding

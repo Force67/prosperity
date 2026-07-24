@@ -189,21 +189,20 @@ uint32_t TraceCbufChain(
 bool RdnaPlanCbufs(const Program& program, uint32_t first_binding,
                    std::vector<ShaderCbuf>& cbufs,
                    std::unordered_map<uint32_t, uint32_t>& bindings) {
-  std::unordered_map<uint32_t, std::pair<uint32_t, uint32_t>> loads;  // sdst->{src,off}
   std::unordered_set<uint32_t> used_as_base;
   for (const Inst& inst : program) {
     if (inst.enc != Enc::kSmrd) continue;
     const uint32_t op = inst.opcode;
     if (op > 0x04 && (op < 0x08 || op > 0x0C)) continue;
-    const uint32_t sbase = (inst.raw[0] & 0x3F) * 2;
-    used_as_base.insert(sbase);
-    if (op <= 0x04) {  // s_load*: record the dest<-src edge for chain tracing
-      const uint32_t sdst = (inst.raw[0] >> 6) & 0x7F;
-      const int32_t off = SignExt21(inst.raw[1] & 0x1FFFFF);
-      loads[sdst] = {sbase, static_cast<uint32_t>(off < 0 ? 0 : off)};
-    }
+    used_as_base.insert((inst.raw[0] & 0x3F) * 2);
   }
 
+  // Walk in program order, growing the def map as s_loads appear, so each
+  // SMEM's base traces through the defs live AT that instruction. Shaders
+  // reuse SGPRs (the sprite VS s_buffer_loads its transform from the s[8:11]
+  // user-data V#, then s_loads the vertex V# INTO s[8:11]); a whole-program
+  // last-write map would misroute the transform to the vertex chain.
+  std::unordered_map<uint32_t, std::pair<uint32_t, uint32_t>> loads;  // sdst->{src,off}
   for (const Inst& inst : program) {
     if (inst.enc != Enc::kSmrd) continue;
     const uint32_t op = inst.opcode;
@@ -211,8 +210,11 @@ bool RdnaPlanCbufs(const Program& program, uint32_t first_binding,
     if (!sbufload && !sload) continue;
     const uint32_t sbase = (inst.raw[0] & 0x3F) * 2;
     const uint32_t sdst = (inst.raw[0] >> 6) & 0x7F;
-    if (sload && used_as_base.count(sdst)) continue;  // chain link: host-resolved
     const int32_t off = SignExt21(inst.raw[1] & 0x1FFFFF);
+    if (sload && used_as_base.count(sdst)) {  // chain link: host-resolved
+      loads[sdst] = {sbase, static_cast<uint32_t>(off < 0 ? 0 : off)};
+      continue;
+    }
     const uint32_t hi = static_cast<uint32_t>(off < 0 ? 0 : off) / 4 + SmemLoadCount(op);
 
     uint32_t chain_off[3] = {}, chain_len = 0;
@@ -244,17 +246,99 @@ bool RdnaPlanCbufs(const Program& program, uint32_t first_binding,
 // draw time, exactly like the SMEM cbufs (decodeVBuffer(&vud[srsrc])).
 void RdnaPlanBufLoadCbufs(const Program& program, uint32_t first_binding,
                           std::vector<ShaderCbuf>& cbufs,
-                          std::unordered_map<uint32_t, uint32_t>& bindings) {
+                          std::unordered_map<uint32_t, uint32_t>& bindings,
+                          std::unordered_map<uint32_t, uint32_t>& by_pc) {
+  // Mirror ParseFetchInsts' walk: srsrc SGPRs written by an s_load hold V#s from
+  // the user-data descriptor TABLE, whose entries are consumed by buffer loads
+  // in program order (the sprite VS reads 6 vertex V#s then 2 constant-block
+  // V#s). A constant load through such a V# becomes a chained cbuf (root = the
+  // s_load's sbase pair, table offset = slot * 16 bytes); the renderer derefs
+  // the table pointer at draw time. srsrc-keyed bindings collide when the shader
+  // reuses an SGPR quad (s[8:11] = MVP V# then vertex V#), so constant loads are
+  // bound per-instruction (by_pc) instead.
+  int32_t loaded_from[128];
+  for (int i = 0; i < 128; i++) loaded_from[i] = -1;
+  uint32_t slot = 0;
   for (const Inst& inst : program) {
+    if (inst.enc == Enc::kSop1 && inst.opcode == 0x20) break;  // s_setpc_b64
+    if (inst.enc == Enc::kSopp && inst.opcode == 1) break;     // s_endpgm
+    if (inst.enc == Enc::kSmrd && inst.opcode <= 0x04) {
+      const uint32_t sdst = (inst.raw[0] >> 6) & 0x7F;
+      const uint32_t sbase = (inst.raw[0] & 0x3F) * 2;
+      const uint32_t nreg = inst.opcode == 0 ? 1 : inst.opcode == 1 ? 2
+                          : inst.opcode == 2 ? 4 : inst.opcode == 3 ? 8 : 16;
+      for (uint32_t k = 0; k < nreg && sdst + k < 128; k++)
+        loaded_from[sdst + k] = static_cast<int32_t>(sbase);
+      continue;
+    }
     if (inst.enc != Enc::kMubuf || inst.opcode > 0x03) continue;
-    if (BufLoadIsVertexFetch(inst)) continue;  // real fetch -> vertex input path
     const uint32_t srsrc = ((inst.raw[1] >> 16) & 0x1F) * 4;
-    if (bindings.count(srsrc)) continue;
+    const bool chained = srsrc < 128 && loaded_from[srsrc] >= 0;
+    const uint32_t my_slot = chained ? slot++ : 0;
+    if (BufLoadIsVertexFetch(inst)) continue;  // real fetch -> vertex input path
     const uint32_t binding = first_binding + static_cast<uint32_t>(cbufs.size());
+    if (chained) {
+      if (binding >= 8) return;
+      by_pc[inst.pc] = binding;
+      ShaderCbuf cb;
+      cb.binding = binding;
+      cb.ud_sgpr = static_cast<uint32_t>(loaded_from[srsrc]);
+      cb.num_dwords = 16;
+      cb.chain_len = 1;
+      cb.chain_off[0] = my_slot * 16;
+      cbufs.push_back(cb);
+      continue;
+    }
+    if (bindings.count(srsrc)) continue;
     if (binding >= 8) return;  // set 1 has 8 UBO bindings
     bindings[srsrc] = binding;
     cbufs.push_back({binding, srsrc, 16});  // mat4-sized default window (16 dwords)
   }
+}
+
+// Find `s_mov exec, sN` movs whose source SGPR is never written before the mov:
+// sN then holds SPI launch state we do not model (the PS ABI saves the initial
+// coverage mask in the first post-user-data SGPR and reloads EXEC from it).
+// Emitting the mov would read our zero-initialised register file and turn EXEC
+// off, making the CFG path skip every export (the PS then kills all fragments).
+// Those movs are dropped so EXEC keeps its all-on seed.
+std::unordered_set<uint32_t> LaunchExecMovPcs(const Program& program) {
+  std::unordered_set<uint32_t> skip, written;
+  for (const Inst& in : program) {
+    uint32_t d0 = 0xFFFF, n = 1;
+    switch (in.enc) {
+      case Enc::kSop1: {
+        const uint32_t sdst = (in.raw[0] >> 16) & 0x7F;
+        const uint32_t src = in.raw[0] & 0xFF;
+        const bool b64 = in.opcode == 0x04;
+        if ((in.opcode == 0x03 || b64) && sdst == 126 && src <= 105 &&
+            !written.count(src) && (!b64 || !written.count(src + 1))) {
+          skip.insert(in.pc);
+          if (ShDbg())
+            std::fprintf(stderr, "[gcnspv] drop launch-state exec mov @pc=%04x (s%u)\n",
+                         in.pc, src);
+        }
+        d0 = sdst;
+        n = b64 ? 2 : 1;
+        break;
+      }
+      case Enc::kSop2:
+      case Enc::kSopk:
+        d0 = (in.raw[0] >> 16) & 0x7F;
+        break;
+      case Enc::kSmrd:
+        if (in.opcode <= 0x0C) {
+          d0 = (in.raw[0] >> 6) & 0x7F;
+          n = SmemLoadCount(in.opcode);
+        }
+        break;
+      default:
+        break;
+    }
+    if (d0 <= 105)
+      for (uint32_t k = 0; k < n; k++) written.insert(d0 + k);
+  }
+  return skip;
 }
 
 void RdnaEmitSmem(Translator& t, const Inst& inst, StageContext& sc) {
@@ -373,7 +457,10 @@ void ResolveValuSrc0(const Inst& inst, uint32_t src0, uint32_t& field,
 void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
   const uint32_t w = inst.raw[0], w1 = inst.raw[1];
   switch (inst.enc) {
-    case Enc::kSop1: gpu::gcn::EmitSop1(t, inst); break;
+    case Enc::kSop1:
+      if (sc.skip_launch_movs.count(inst.pc)) break;
+      gpu::gcn::EmitSop1(t, inst);
+      break;
     case Enc::kSop2: gpu::gcn::EmitSop2(t, inst); break;
     case Enc::kSopc: gpu::gcn::EmitSopc(t, inst); break;
     case Enc::kSopk: gpu::gcn::EmitSopk(t, inst); break;
@@ -484,10 +571,17 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       // computed byte offset into the destination VGPRs.
       if (BufLoadIsVertexFetch(inst)) break;
       const uint32_t srsrc = ((w1 >> 16) & 0x1F) * 4;
-      auto it = sc.cbuf_bind.find(srsrc);
-      if (it == sc.cbuf_bind.end()) {
-        gpu::gcn::WarnUnsupported("mubuf.cbuf-unplanned", inst.opcode, w, w1);
-        break;
+      uint32_t binding;
+      auto pit = sc.mubuf_cbuf_by_pc.find(inst.pc);
+      if (pit != sc.mubuf_cbuf_by_pc.end()) {
+        binding = pit->second;
+      } else {
+        auto it = sc.cbuf_bind.find(srsrc);
+        if (it == sc.cbuf_bind.end()) {
+          gpu::gcn::WarnUnsupported("mubuf.cbuf-unplanned", inst.opcode, w, w1);
+          break;
+        }
+        binding = it->second;
       }
       const uint32_t nc = (inst.opcode & 3) + 1;
       const uint32_t inst_offset = w & 0xFFF, vdata = (w1 >> 8) & 0xFF;
@@ -502,7 +596,7 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       if (offen) byte_off = t.Add(byte_off, t.Vg(vaddr + (idxen ? 1u : 0u)));
       const Id dword0 = t.Shr(byte_off, t.U32(2));
       for (uint32_t k = 0; k < nc; k++)
-        t.SetVg(vdata + k, t.CbufDwordId(it->second, t.Add(dword0, t.U32(k))));
+        t.SetVg(vdata + k, t.CbufDwordId(binding, t.Add(dword0, t.U32(k))));
       break;
     }
     case Enc::kMimg:
@@ -677,7 +771,9 @@ struct FetchAttr {
 // so buffer_load_format never reaches RdnaEmitInst as an unsupported op.
 std::vector<FetchAttr> ParseFetchInsts(const Program& insts) {
   std::vector<FetchAttr> out;
-  uint32_t sem = 0;
+  uint32_t sem = 0;   // dense vertex-input location (per-vertex fetches only)
+  uint32_t slot = 0;  // V#-table entry index (ALL table-chained buffer loads
+                      // consume entries in program order, incl. constant loads)
   // Track SGPRs written by s_load* -- the NGG VS loads its vertex-fetch V# into
   // srsrc from a user_data pointer (a TABLE of V#s), so the real table root is
   // that s_load's sbase, not srsrc itself. Map each loaded SGPR -> its sbase.
@@ -707,9 +803,11 @@ std::vector<FetchAttr> ParseFetchInsts(const Program& insts) {
     // this attribute is the sem-th 16-byte (4-dword) V# in the table. Otherwise
     // the V# is inline in user data at srsrc (table_sgpr = srsrc, dword_off = 0).
     uint32_t table_sgpr = srsrc, dword_off = 0;
-    if (srsrc < 128 && loaded_from[srsrc] >= 0) {
+    const bool chained = srsrc < 128 && loaded_from[srsrc] >= 0;
+    if (chained) {
       table_sgpr = static_cast<uint32_t>(loaded_from[srsrc]);
-      dword_off = sem * 4;
+      dword_off = slot * 4;
+      slot++;
     }
     if (ShDbg())
       std::fprintf(stderr,
@@ -718,7 +816,7 @@ std::vector<FetchAttr> ParseFetchInsts(const Program& insts) {
                    nc, vdata, srsrc, idxen, offen, vaddr, soffset,
                    vtx ? "vertex-attr" : "const-ubo", table_sgpr, dword_off);
     // Only a genuine per-vertex fetch becomes a vertex input. A constant load is
-    // left for the UBO path.
+    // left for the UBO path (RdnaPlanBufLoadCbufs assigns the same table slots).
     if (vtx) {
       out.push_back({sem, nc, vdata, table_sgpr, dword_off});
       sem++;
@@ -758,6 +856,11 @@ bool TranslateVs(const Program& program, const uint32_t* vs_user_data,
   iface.push_back(pos_out);
 
   const Id main_fn = t.m.BeginFunction(t.t_void, t.t_fn);
+
+  // NGG merged-wave prologue: the VS derives its EXEC/lane bookkeeping from
+  // merged_wave_info in s3 (verts-in-wave [7:0], prims [15:8]); model a
+  // 1-vert/1-prim wave so that math yields a live lane instead of zeros.
+  t.SetSg(3, t.U32(0x0101));
 
   Id vertex_index = 0;
   if (attrs.empty()) {  // procedural VS: seed the ABI VGPRs from Vulkan built-ins
@@ -800,10 +903,11 @@ bool TranslateVs(const Program& program, const uint32_t* vs_user_data,
   sc.main_fn = main_fn;
   sc.pos_out = pos_out;
   sc.flat_attrs = &flat_attrs;
+  sc.skip_launch_movs = LaunchExecMovPcs(program);
   if (!RdnaPlanCbufs(program, 0, r.vs_cbufs, sc.cbuf_bind)) return false;
   // Constant buffer_load descriptors (e.g. the ortho matrix a procedural 2D VS
   // reads) become additional set-1 UBOs after the SMEM cbufs.
-  RdnaPlanBufLoadCbufs(program, 0, r.vs_cbufs, sc.cbuf_bind);
+  RdnaPlanBufLoadCbufs(program, 0, r.vs_cbufs, sc.cbuf_bind, sc.mubuf_cbuf_by_pc);
   if (ShDbg())
     std::fprintf(stderr, "[gcnspv] vs planned %zu cbufs\n", r.vs_cbufs.size());
 
@@ -856,6 +960,7 @@ bool TranslatePs(const Program& program,
   sc.r = &r;
   sc.iface = &iface;
   sc.flat_attrs = &flat_attrs;
+  sc.skip_launch_movs = LaunchExecMovPcs(program);
   if (!RdnaPlanCbufs(program, static_cast<uint32_t>(r.vs_cbufs.size()),
                      r.ps_cbufs, sc.cbuf_bind))
     return false;
