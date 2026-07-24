@@ -372,7 +372,7 @@ int main() {
     // height-1=127 -> d2[27:14]; type=9 (2D) -> d3[31:28].
     uint32_t d[8] = {0};
     d[0] = 0x08000000;                       // base_units[31:0] (base = <<8)
-    d[1] = (255u & 0x3u) << 30;              // width-1 low 2 bits
+    d[1] = (255u & 0x3u) << 30 | (56u << 20);  // width-1 low 2 bits, fmt 8888UNORM
     d[2] = ((255u >> 2) & 0xFFF) | (127u << 14);
     d[3] = 9u << 28;                         // type = 2D
     gpu::gcn::TImage t = gpu::rdna::DecodeTImage(d);
@@ -380,6 +380,13 @@ int main() {
     expect(t.width == 256 && t.height == 128, "T# 256x128 dimensions decode");
     expect(t.type == 9 && !t.arrayed, "T# type 2D, non-arrayed");
     expect(t.mip_levels == 1 && t.tiling_idx == 8, "T# single mip, linear");
+    expect(t.dfmt == 10 && t.nfmt == 0, "T# fmt 56 -> 8_8_8_8 UNORM");
+    expect(t.pitch == 256, "T# linear pitch 256B-row-aligned");
+    d[1] = (255u & 0x3u) << 30 | (130u << 20);  // fmt 8_8_8_8_SRGB
+    d[3] |= 25u << 20;                          // sw_mode 64KB_S_X (tiled)
+    t = gpu::rdna::DecodeTImage(d);
+    expect(t.dfmt == 10 && t.nfmt == 9, "T# fmt 130 -> 8_8_8_8 SRGB");
+    expect(t.tiling_idx > 0x40, "T# gfx10 tiled mode maps out of GCN range");
   }
 
   std::printf(g_failures ? "\nFAILED (%d)\n" : "\nOK\n", g_failures);

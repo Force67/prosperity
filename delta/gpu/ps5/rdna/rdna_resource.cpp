@@ -7,6 +7,8 @@
 #include "rdna_resource.h"
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <unordered_map>
 #include <utility>
@@ -23,6 +25,38 @@ using gpu::gcn::TImage;
 bool inGuest(uint64_t a) { return a >= 0x10000ull && a < 0x1000000000000ull; }
 
 int32_t signExt21(uint32_t v) { return static_cast<int32_t>(v << 11) >> 11; }
+
+// gfx10.3 T#s carry a 9-bit unified format enum (word1 [28:20]). Values 1..77
+// are the buffer format table (GPU Shader Core ISA spec 4.x "Buffer Format
+// Conversions"); 130+ are image-only (SRGB, packed 16-bit, BCn). Map the
+// sampled subset onto the GCN (dfmt,nfmt) pairs the shared renderer's
+// guestTextureFormat() understands; unmapped formats yield (0,0) so the upload
+// declines (white fallback) instead of misreading texels.
+void gfx10ImgFormat(uint32_t gfmt, uint32_t &dfmt, uint32_t &nfmt) {
+  switch (gfmt) {
+    case 22:  dfmt = 4;  nfmt = 7; break;  // 32_FLOAT (also depth-resolve key)
+    case 29:  dfmt = 5;  nfmt = 7; break;  // 16_16_FLOAT
+    case 36:  dfmt = 6;  nfmt = 7; break;  // 11_11_10_FLOAT
+    case 56:  dfmt = 10; nfmt = 0; break;  // 8_8_8_8_UNORM
+    case 57:  dfmt = 10; nfmt = 1; break;  // 8_8_8_8_SNORM
+    case 60:  dfmt = 10; nfmt = 4; break;  // 8_8_8_8_UINT
+    case 71:  dfmt = 12; nfmt = 7; break;  // 16_16_16_16_FLOAT
+    case 130: dfmt = 10; nfmt = 9; break;  // 8_8_8_8_SRGB
+    case 169: dfmt = 35; nfmt = 0; break;  // BC1
+    case 170: dfmt = 35; nfmt = 9; break;
+    case 171: dfmt = 36; nfmt = 0; break;  // BC2
+    case 172: dfmt = 36; nfmt = 9; break;
+    case 173: dfmt = 37; nfmt = 0; break;  // BC3
+    case 174: dfmt = 37; nfmt = 9; break;
+    case 175: dfmt = 38; nfmt = 0; break;  // BC4
+    case 176: dfmt = 38; nfmt = 1; break;
+    case 177: dfmt = 39; nfmt = 0; break;  // BC5
+    case 178: dfmt = 39; nfmt = 1; break;
+    case 181: dfmt = 41; nfmt = 0; break;  // BC7
+    case 182: dfmt = 41; nfmt = 9; break;
+    default:  dfmt = 0;  nfmt = 0; break;
+  }
+}
 
 // Copy the `n`-dword descriptor at SGPR `sgpr` into `dst`. It is either inline in
 // user data or one s_load from a user-data table pointer (`loads[sgpr]` gives the
@@ -123,11 +157,35 @@ TImage DecodeTImage(const uint32_t* d) {
   t.view_layers = t.arrayed ? std::max<uint32_t>(depth + 1 - t.base_array, 1) : 1;
   t.mip_levels = max_mip + 1;
   t.view_mips = std::max<uint32_t>(last_level + 1 - t.base_mip, 1);
-  t.tiling_idx = sw_mode == 0 ? 8 : sw_mode;  // gfx10 detile TODO for tiled modes
-  // TODO(ps5): map the gfx10.3 9-bit unified format ((d[1]>>20)&0x1FF) to a
-  // VkFormat; defaulting to RGBA8_UNORM covers the common 2D/UI sampler.
-  t.dfmt = 10;  // FMT_8_8_8_8
-  t.nfmt = 0;   // UNORM
+  const uint32_t gfmt = (d[1] >> 20) & 0x1FF;
+  gfx10ImgFormat(gfmt, t.dfmt, t.nfmt);
+  // gfx10 swizzle mode 0 = SW_LINEAR; map it to the renderer's linear index.
+  // Tiled gfx10 modes have no GCN equivalent and no gfx10 detiler yet, so shift
+  // them past the valid GCN tiling range: BuildTextureLayout32 rejects them and
+  // the draw gets the white fallback instead of scrambled texels.
+  t.tiling_idx = sw_mode == 0 ? 8 : 0x40 + sw_mode;
+  if (sw_mode == 0 && t.dfmt && t.dfmt < 35) {
+    // gfx10 linear surfaces align each row to 256 bytes.
+    const uint32_t eb = t.dfmt == 12 ? 8 : 4;
+    const uint32_t pa = 256 / eb;
+    t.pitch = (t.width + pa - 1) & ~(pa - 1);
+  }
+  static const bool trace = std::getenv("DELTA_AGC_TRACE") != nullptr;
+  if (trace) {
+    static uint32_t seen[32], nSeen = 0;
+    const uint32_t key = (gfmt << 8) | sw_mode;
+    bool isNew = true;
+    for (uint32_t i = 0; i < nSeen; i++)
+      if (seen[i] == key) { isNew = false; break; }
+    if (isNew && nSeen < 32) {
+      seen[nSeen++] = key;
+      std::fprintf(stderr,
+                   "[agc] T# base=%#lx %ux%u gfmt=%u sw=%u type=%u mips=%u -> "
+                   "dfmt=%u nfmt=%u tiling=%u pitch=%u\n",
+                   (unsigned long)t.base, t.width, t.height, gfmt, sw_mode,
+                   t.type, t.mip_levels, t.dfmt, t.nfmt, t.tiling_idx, t.pitch);
+    }
+  }
   t.valid = t.base != 0;
   return t;
 }
