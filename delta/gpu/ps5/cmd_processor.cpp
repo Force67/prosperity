@@ -502,11 +502,12 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
       bool haveBase = false;
       // The merged ES/GS NGG vertex shader reads its GS user data starting at wave
       // SGPR udBase (sgpr 0..udBase-1 are ES/system), but the AGC latches it into
-      // SPI_SHADER_USER_DATA_GS_0 which we index from 0. DELTA_PS5_UDBASE shifts the
-      // shader SGPR N -> userData[N-udBase] for both attrs and cbufs.
+      // SPI_SHADER_USER_DATA_GS_0 which we index from 0, so shift shader SGPR N ->
+      // userData[N-udBase] for both attrs and cbufs. Defaults to 8 (the observed
+      // merged-NGG layout); DELTA_PS5_UDBASE overrides. TODO: derive from RSRC2.
       static const uint32_t udBaseEnv = [] {
         const char *e = std::getenv("DELTA_PS5_UDBASE");
-        return e ? static_cast<uint32_t>(std::atoi(e)) : 0u;
+        return e ? static_cast<uint32_t>(std::atoi(e)) : 8u;
       }();
       if (dl)
         std::fprintf(stderr, "[agc] DL attrs=%zu vud[0..7]=%08x %08x %08x %08x %08x %08x %08x %08x\n",
