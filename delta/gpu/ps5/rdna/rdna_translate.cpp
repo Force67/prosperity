@@ -565,11 +565,27 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
         gpu::gcn::WarnUnsupported("mubuf.rdna", inst.opcode, w, w1);
         break;
       }
-      // A per-vertex fetch was lifted to a Location vertex input and its VGPRs are
-      // seeded before the body, so nothing is emitted here. A CONSTANT load (e.g.
-      // the 2D ortho matrix) reads num_comps dwords from the bound UBO at the
-      // computed byte offset into the destination VGPRs.
-      if (BufLoadIsVertexFetch(inst)) break;
+      // A per-vertex fetch was lifted to a Location vertex input. Re-seed its
+      // destination VGPRs from that input HERE (where the real buffer_load_format
+      // runs), overwriting any value the merged-wave index math clobbered them
+      // with (e.g. v0, reused as the fetch index). A CONSTANT load (e.g. the 2D
+      // ortho matrix) reads num_comps dwords from the bound UBO at the computed
+      // byte offset into the destination VGPRs.
+      if (BufLoadIsVertexFetch(inst)) {
+        auto sit = sc.vfetch_seed.find(inst.pc);
+        if (sit != sc.vfetch_seed.end()) {
+          const auto &vs = sit->second;
+          const Id comp_ty = vs.num_comps == 1   ? t.t_f
+                             : vs.num_comps == 2 ? t.t_v2
+                             : vs.num_comps == 3 ? t.t_v3
+                                                 : t.t_v4;
+          const Id val = t.m.Load(comp_ty, vs.in_var);
+          for (uint32_t c = 0; c < vs.num_comps; c++)
+            t.SetVgF(vs.dest_vgpr + c,
+                     vs.num_comps == 1 ? val : t.m.CompositeExtract(t.t_f, val, c));
+        }
+        break;
+      }
       const uint32_t srsrc = ((w1 >> 16) & 0x1F) * 4;
       uint32_t binding;
       auto pit = sc.mubuf_cbuf_by_pc.find(inst.pc);
@@ -763,6 +779,7 @@ void EmitBody(Translator& t, const Program& program, StageContext& sc) {
 // and the VS seeds from VertexIndex/InstanceIndex (procedural path).
 struct FetchAttr {
   uint32_t semantic, num_comps, dest_vgpr, table_sgpr, dword_off;
+  uint32_t pc = ~0u;  // inline fetch MUBUF pc (~0 = standalone fetch sub-shader)
 };
 
 // Scan an instruction stream for the s_load_dwordx4(V# table) + buffer_load_format
@@ -818,7 +835,7 @@ std::vector<FetchAttr> ParseFetchInsts(const Program& insts) {
     // Only a genuine per-vertex fetch becomes a vertex input. A constant load is
     // left for the UBO path (RdnaPlanBufLoadCbufs assigns the same table slots).
     if (vtx) {
-      out.push_back({sem, nc, vdata, table_sgpr, dword_off});
+      out.push_back({sem, nc, vdata, table_sgpr, dword_off, in.pc});
       sem++;
     }
   }
@@ -862,6 +879,7 @@ bool TranslateVs(const Program& program, const uint32_t* vs_user_data,
   // 1-vert/1-prim wave so that math yields a live lane instead of zeros.
   t.SetSg(3, t.U32(0x0101));
 
+  std::unordered_map<uint32_t, StageContext::VfetchSeed> vfetch_seed;
   Id vertex_index = 0;
   if (attrs.empty()) {  // procedural VS: seed the ABI VGPRs from Vulkan built-ins
     const Id p_in_u = t.m.TypePointer(spv::StorageClass::Input, t.t_u);
@@ -894,6 +912,11 @@ bool TranslateVs(const Program& program, const uint32_t* vs_user_data,
       const Id comp = a.num_comps == 1 ? val : t.m.CompositeExtract(t.t_f, val, c);
       t.SetVgF(a.dest_vgpr + c, comp);
     }
+    // An inline fetch is a no-op in the body, but the merged-wave index math can
+    // clobber its destination VGPRs (e.g. v0) between here and the transform, so
+    // re-seed them at the fetch's pc where the real buffer_load_format would run.
+    if (a.pc != ~0u)
+      vfetch_seed[a.pc] = {in_var, a.dest_vgpr, a.num_comps};
     r.attrs.push_back({a.semantic, a.num_comps, a.table_sgpr, a.dword_off});
   }
 
@@ -903,6 +926,7 @@ bool TranslateVs(const Program& program, const uint32_t* vs_user_data,
   sc.main_fn = main_fn;
   sc.pos_out = pos_out;
   sc.flat_attrs = &flat_attrs;
+  sc.vfetch_seed = std::move(vfetch_seed);
   sc.skip_launch_movs = LaunchExecMovPcs(program);
   if (!RdnaPlanCbufs(program, 0, r.vs_cbufs, sc.cbuf_bind)) return false;
   // Constant buffer_load descriptors (e.g. the ortho matrix a procedural 2D VS

@@ -281,6 +281,13 @@ struct StageContext {
   std::unordered_map<uint32_t, Id> param_outs;
   std::unordered_set<uint32_t> direct_vfetch;  // MUBUF pc seeded as vertex input
   uint32_t max_param = 0;
+  // PS5 inline vertex fetch: (Location input, first dest VGPR, component count)
+  // keyed by the fetch MUBUF's pc. The destination VGPRs are (re)seeded from the
+  // input AT the fetch instruction, because an NGG merged-wave's index math can
+  // overwrite them (e.g. v0, reused as the fetch index) between the function
+  // prologue and the position transform.
+  struct VfetchSeed { Id in_var; uint32_t dest_vgpr, num_comps; };
+  std::unordered_map<uint32_t, VfetchSeed> vfetch_seed;
 
   // PS
   Id color_outs[8] = {};  // lazily declared per MRT target (location == target)
