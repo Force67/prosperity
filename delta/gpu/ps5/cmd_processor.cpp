@@ -82,10 +82,15 @@ struct VBuffer {
 // back to the GCN-style split (harmless for descriptors that never reach vfmt()).
 void gfx10VBufFormat(uint32_t gfmt, uint32_t &dfmt, uint32_t &nfmt) {
   switch (gfmt) {
+    case 13: dfmt = 2;  nfmt = 7; break;  // 16_FLOAT
     case 20: dfmt = 4;  nfmt = 4; break;  // 32_UINT
     case 22: dfmt = 4;  nfmt = 7; break;  // 32_FLOAT
-    case 42: dfmt = 10; nfmt = 0; break;  // 8_8_8_8_UNORM
-    case 46: dfmt = 10; nfmt = 4; break;  // 8_8_8_8_UINT
+    case 29: dfmt = 5;  nfmt = 7; break;  // 16_16_FLOAT
+    case 56: dfmt = 10; nfmt = 0; break;  // 8_8_8_8_UNORM
+    case 57: dfmt = 10; nfmt = 1; break;  // 8_8_8_8_SNORM
+    case 60: dfmt = 10; nfmt = 4; break;  // 8_8_8_8_UINT
+    case 64: dfmt = 11; nfmt = 7; break;  // 32_32_FLOAT
+    case 71: dfmt = 12; nfmt = 7; break;  // 16_16_16_16_FLOAT
     case 74: dfmt = 13; nfmt = 7; break;  // 32_32_32_FLOAT
     case 77: dfmt = 14; nfmt = 7; break;  // 32_32_32_32_FLOAT
     default: dfmt = gfmt & 0xF; nfmt = (gfmt >> 4) & 0x7; break;
@@ -271,6 +276,12 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
   uint64_t vsA = g_regs.shaderAddr(mmSPI_SHADER_PGM_LO_GS);
   if (!inGuest(vsA)) vsA = g_regs.shaderAddr(mmSPI_SHADER_PGM_LO_ES);
   uint64_t psA = g_regs.shaderAddr(mmSPI_SHADER_PGM_LO_PS);
+  // DELTA_PS5_SKIPVS=hexaddr: drop draws using this VS (draw-isolation bisect).
+  static const uint64_t skipVs = [] {
+    const char *e = std::getenv("DELTA_PS5_SKIPVS");
+    return e ? std::strtoull(e, nullptr, 16) : 0ull;
+  }();
+  if (skipVs && vsA == skipVs) return;
   const uint32_t *vud = &g_regs[mmSPI_SHADER_USER_DATA_GS_0];
   const uint32_t *pud = &g_regs[mmSPI_SHADER_USER_DATA_PS_0];
 
@@ -428,7 +439,15 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
   d.colorControl = g_regs[mmCB_COLOR_CONTROL];
 
   // Depth/stencil (gfx10 Z base = (WRITE_BASE | WRITE_BASE_HI<<32) << 8).
-  {
+  // Default OFF: the depth-clear path (DB fast clears) isn't modelled yet, so a
+  // stale depth buffer fails the GREATER test on every sprite/composite draw
+  // after the first frame. Isaac is 2D painter-ordered; DELTA_PS5_DEPTH=1
+  // re-enables for bring-up of depth-dependent titles.
+  static const bool depthOn = [] {
+    const char *e = std::getenv("DELTA_PS5_DEPTH");
+    return e && std::strcmp(e, "0") != 0;
+  }();
+  if (depthOn) {
     uint32_t dc = g_regs[mmDB_DEPTH_CONTROL];
     uint32_t zinfo = g_regs[mmDB_Z_INFO];
     uint64_t zbase = ((static_cast<uint64_t>(g_regs[mmDB_Z_WRITE_BASE_HI]) << 32) |
@@ -495,11 +514,15 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
     if (rc.ok) {
       // Vertex attributes: the V# is either inline in user data at table_sgpr
       // (AGC frequently passes the vertex V# directly) or reached through a table
-      // pointer at {table_sgpr, +1}. vk_render binds a single interleaved buffer,
-      // so resolve as many attrs as possible into it and skip any that don't
-      // decode to a valid V# (a partial fetch still rasterizes).
-      uint64_t base0 = 0;
-      bool haveBase = false;
+      // pointer at {table_sgpr, +1}. Resolve each attr's V#, then group the
+      // attrs into vertex bindings: same-stride V#s within one stride of each
+      // other interleave in one binding; others get their own binding (the
+      // textured sprite VS streams pos/color and uv/params from two buffers, so
+      // a single interleaved binding would feed the PS garbage UVs). Attrs that
+      // don't decode to a valid V# are skipped (a partial fetch still rasterizes).
+      VBuffer attrVbs[8];
+      const gcn::ShaderAttr *attrRes[8];
+      uint32_t attrN = 0;
       // The merged ES/GS NGG vertex shader reads its GS user data starting at wave
       // SGPR udBase (sgpr 0..udBase-1 are ES/system), but the AGC latches it into
       // SPI_SHADER_USER_DATA_GS_0 which we index from 0, so shift shader SGPR N ->
@@ -534,22 +557,53 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
                        (unsigned long)vb.base, vb.stride, vb.numRecords, vb.gfmt,
                        vb.dfmt, vb.nfmt);
         if (!inGuest(vb.base) || !vb.stride) continue;  // unresolved: keep the rest
-        if (!haveBase) {
-          haveBase = true;
-          base0 = vb.base;
-          d.vertexData = reinterpret_cast<const void *>(vb.base);
-          d.vertexStride = vb.stride;
-          d.vertexCount = vb.numRecords;
-          // Single interleaved Vulkan binding (binding 0); the recompiled-shader
-          // draw path binds vertex buffers from d.vbufs[], not d.vertexData.
-          d.vbufs[0] = {reinterpret_cast<const void *>(vb.base), vb.stride, vb.numRecords};
-          d.nvbufs = 1;
+        attrVbs[attrN] = vb;
+        attrRes[attrN++] = &a;
+      }
+      // Group the resolved attrs into bindings (mirrors the PS4 recomp path).
+      uint32_t attrBinding[8] = {};
+      for (uint32_t i = 0; i < attrN; i++) {
+        const VBuffer &vb = attrVbs[i];
+        int sel = -1;
+        for (uint32_t j = 0; j < d.nvbufs; j++) {
+          if (d.vbufs[j].stride != vb.stride) continue;
+          uint64_t b = reinterpret_cast<uint64_t>(d.vbufs[j].data);
+          uint64_t lo = b < vb.base ? b : vb.base;
+          uint64_t hi = b < vb.base ? vb.base : b;
+          if (hi - lo < vb.stride) { sel = static_cast<int>(j); break; }
         }
-        // Single interleaved binding: only fold in attrs that sit inside the base
-        // buffer's stride; a separate buffer would alias garbage at a huge offset.
-        uint32_t off = (vb.base >= base0 && vb.base - base0 < d.vertexStride)
-                           ? static_cast<uint32_t>(vb.base - base0) : 0;
-        d.vattrs[d.nvattrs++] = {a.location, 0u, off, a.num_comps, vb.dfmt, vb.nfmt};
+        if (sel < 0) {
+          if (d.nvbufs >= 8) break;
+          sel = static_cast<int>(d.nvbufs);
+          d.vbufs[d.nvbufs++] = {reinterpret_cast<const void *>(vb.base),
+                                 vb.stride, vb.numRecords};
+        } else {
+          auto &bind = d.vbufs[sel];
+          if (vb.base < reinterpret_cast<uint64_t>(bind.data))
+            bind.data = reinterpret_cast<const void *>(vb.base);
+          bind.numRecords = std::min(bind.numRecords, vb.numRecords);
+        }
+        attrBinding[i] = static_cast<uint32_t>(sel);
+      }
+      // Offsets are relative to each binding's final (lowest) base.
+      for (uint32_t i = 0; i < attrN && d.nvattrs < 8; i++) {
+        const VBuffer &vb = attrVbs[i];
+        const uint32_t b = attrBinding[i];
+        if (b >= d.nvbufs) continue;
+        const uint64_t off = vb.base - reinterpret_cast<uint64_t>(d.vbufs[b].data);
+        if (off >= d.vbufs[b].stride) continue;
+        d.vattrs[d.nvattrs++] = {attrRes[i]->location, b, static_cast<uint32_t>(off),
+                                 attrRes[i]->num_comps, vb.dfmt, vb.nfmt};
+      }
+      if (d.nvbufs) {
+        // Mirror binding 0 into the legacy single-stream fields; the vertex
+        // count is bounded by the smallest binding's record count.
+        d.vertexData = d.vbufs[0].data;
+        d.vertexStride = d.vbufs[0].stride;
+        uint32_t count = UINT32_MAX;
+        for (uint32_t j = 0; j < d.nvbufs; j++)
+          count = std::min(count, d.vbufs[j].numRecords);
+        d.vertexCount = count;
       }
       // A fetch VS needs at least one attribute resolved; a procedural VS (no
       // recovered attrs, seeds from VertexIndex) draws without a vertex buffer.
@@ -612,6 +666,30 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
         // plan). texs[i] maps to PS sampler binding i.
         if (psA && !rc.ps_texs.empty()) {
           auto texs = rdna::TrackTextures(reinterpret_cast<const uint32_t *>(psA), pud);
+          // The single-texture render path reads the legacy tex* mirror of
+          // texs[0], so populate it too (the PS4 path does the same).
+          if (!texs.empty()) {
+            d.texBase = texs[0].valid ? texs[0].base : 0;
+            d.texW = texs[0].width;
+            d.texH = texs[0].height;
+            d.texDfmt = texs[0].dfmt;
+            d.texNfmt = texs[0].nfmt;
+            d.texTiling = texs[0].tiling_idx;
+            d.texPitch = texs[0].pitch;
+            d.texLayers = texs[0].layers;
+            d.texBaseArray = texs[0].base_array;
+            d.texViewLayers = texs[0].view_layers;
+            d.texMipLevels = texs[0].mip_levels;
+            d.texBaseMip = texs[0].base_mip;
+            d.texViewMips = texs[0].view_mips;
+            d.texMinLod = texs[0].min_lod;
+            std::memcpy(d.texSampler, texs[0].sampler, sizeof(d.texSampler));
+            d.texPow2Pad = texs[0].pow2_pad;
+            d.texSamplerValid = texs[0].sampler_valid;
+            d.texArrayed = texs[0].arrayed;
+            d.texForceLodZero = texs[0].force_lod_zero;
+            d.texDepthCompare = texs[0].depth_compare;
+          }
           for (size_t i = 0; i < texs.size() && i < 16; i++) {
             const auto &s = texs[i];
             auto &dt = d.texs[i];
@@ -637,6 +715,12 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
             dt.storage = s.storage;
           }
           d.nTexs = static_cast<uint32_t>(std::min<size_t>(texs.size(), 16));
+          if (dl)
+            for (uint32_t i = 0; i < d.nTexs; i++)
+              std::fprintf(stderr,
+                           "[agc]   tex%u base=%#lx %ux%u dfmt=%u nfmt=%u tiling=%u\n",
+                           i, (unsigned long)d.texs[i].base, d.texs[i].w, d.texs[i].h,
+                           d.texs[i].dfmt, d.texs[i].nfmt, d.texs[i].tiling);
         }
         d.vsAddr = vsA;
         d.psAddr = psA;
@@ -656,7 +740,11 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
   // positions are garbage (wrong format), screen-space (missing projection), or
   // clip-space (a downstream/viewport issue).
   static int s_vdump = 0;
-  if (g_trace && s_vdump < 8 && d.nvattrs && d.vertexData &&
+  static const int vdumpN = [] {
+    const char *e = std::getenv("DELTA_AGC_VDUMPN");
+    return e ? std::atoi(e) : 8;
+  }();
+  if (g_trace && s_vdump < vdumpN && d.nvattrs && d.vertexData &&
       inGuest(reinterpret_cast<uint64_t>(d.vertexData))) {
     s_vdump++;
     std::fprintf(stderr,
@@ -692,12 +780,21 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
       if (!inGuest(p)) continue;
       const uint32_t *pw = reinterpret_cast<const uint32_t *>(p);
       std::fprintf(stderr, "[agc]   ud[%d]->%#lx dwords:", k, (unsigned long)p);
-      for (int j = 0; j < 8; j++) std::fprintf(stderr, " %08x", pw[j]);
+      for (int j = 0; j < (k == 4 ? 32 : 8); j++)
+        std::fprintf(stderr, " %08x", pw[j]);
       std::fprintf(stderr, "  floats:");
       for (int j = 0; j < 8; j++) {
         float f; std::memcpy(&f, &pw[j], 4);
         std::fprintf(stderr, " %g", f);
       }
+      std::fprintf(stderr, "\n");
+    }
+    for (uint32_t b = 0; b < d.nCbufs; b++) {
+      if (!d.cbufs[b].base || !inGuest(d.cbufs[b].base)) continue;
+      const float *cf = reinterpret_cast<const float *>(d.cbufs[b].base);
+      std::fprintf(stderr, "[agc]   cbuf[%u]@%#lx floats:", b,
+                   (unsigned long)d.cbufs[b].base);
+      for (int j = 0; j < 8; j++) std::fprintf(stderr, " %g", cf[j]);
       std::fprintf(stderr, "\n");
     }
   }
@@ -707,8 +804,12 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
     vk::beginFrame();
     g_frameActive = true;
   }
-  if (dl) std::fprintf(stderr, "[agc] DL draw#%lu vk::draw nvattrs=%d rt=%#lx...\n",
-                       (unsigned long)myDraw, d.nvattrs, (unsigned long)d.rtBase);
+  if (dl) std::fprintf(stderr, "[agc] DL draw#%lu vk::draw nvattrs=%d rt=%#lx "
+                       "tmask=%#x cc=%#x blend=%u dv=%d db=%#lx dt=%u dw=%u df=%u...\n",
+                       (unsigned long)myDraw, d.nvattrs, (unsigned long)d.rtBase,
+                       d.targetMask, d.colorControl, d.blendEnable, d.depthValid,
+                       (unsigned long)d.depthBase, d.depthTestEnable,
+                       d.depthWriteEnable, d.depthFunc);
   vk::draw(d);
   if (dl) std::fprintf(stderr, "[agc] DL draw#%lu done\n", (unsigned long)myDraw);
 }
