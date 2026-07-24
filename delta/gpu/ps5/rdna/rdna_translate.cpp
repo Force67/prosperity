@@ -55,15 +55,17 @@ bool ShDbg() {
   return on;
 }
 
-// A buffer_load_format is a real PER-VERTEX fetch only when it is indexed by the
-// vertex-index register (IDXEN with vaddr == v0, the ABI vertex-index VGPR). A
-// load with no index, or indexed by a computed/non-v0 register, reads a CONSTANT
-// (e.g. Isaac's 2D VS reads its ortho matrix via buffer_load): that must be bound
-// as a UBO and read in the shader body, NOT lifted to a vertex input.
-bool BufLoadIsVertexFetch(const Inst& in) {
+// A buffer_load_format is a real PER-VERTEX fetch when it is IDXEN and its srsrc
+// V# is TABLE-CHAINED (loaded from a user-data descriptor table, `chained`) --
+// regardless of which VGPR indexes it. NGG streams index per-vertex data by v0
+// or a computed register (the composite VS uses v3, the sprite VS's uv/param
+// streams use v4); the Vulkan vertex-input stage supplies per-vertex data by the
+// draw index either way. A NON-chained IDXEN load reads an inline user-data
+// descriptor (e.g. a 2D VS's ortho matrix): that is a CONSTANT bound as a UBO and
+// read in the shader body, NOT lifted to a vertex input.
+bool BufLoadIsVertexFetch(const Inst& in, bool chained) {
   const bool idxen = (in.raw[0] >> 13) & 1;
-  const uint32_t vaddr = in.raw[1] & 0xFF;
-  return idxen && vaddr == 0;
+  return idxen && chained;
 }
 
 const char* EncName(Enc e) {
@@ -275,7 +277,7 @@ void RdnaPlanBufLoadCbufs(const Program& program, uint32_t first_binding,
     const uint32_t srsrc = ((inst.raw[1] >> 16) & 0x1F) * 4;
     const bool chained = srsrc < 128 && loaded_from[srsrc] >= 0;
     const uint32_t my_slot = chained ? slot++ : 0;
-    if (BufLoadIsVertexFetch(inst)) continue;  // real fetch -> vertex input path
+    if (BufLoadIsVertexFetch(inst, chained)) continue;  // real fetch -> vertex input
     const uint32_t binding = first_binding + static_cast<uint32_t>(cbufs.size());
     if (chained) {
       if (binding >= 8) return;
@@ -565,25 +567,22 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
         gpu::gcn::WarnUnsupported("mubuf.rdna", inst.opcode, w, w1);
         break;
       }
-      // A per-vertex fetch was lifted to a Location vertex input. Re-seed its
-      // destination VGPRs from that input HERE (where the real buffer_load_format
-      // runs), overwriting any value the merged-wave index math clobbered them
-      // with (e.g. v0, reused as the fetch index). A CONSTANT load (e.g. the 2D
-      // ortho matrix) reads num_comps dwords from the bound UBO at the computed
-      // byte offset into the destination VGPRs.
-      if (BufLoadIsVertexFetch(inst)) {
-        auto sit = sc.vfetch_seed.find(inst.pc);
-        if (sit != sc.vfetch_seed.end()) {
-          const auto &vs = sit->second;
-          const Id comp_ty = vs.num_comps == 1   ? t.t_f
-                             : vs.num_comps == 2 ? t.t_v2
-                             : vs.num_comps == 3 ? t.t_v3
-                                                 : t.t_v4;
-          const Id val = t.m.Load(comp_ty, vs.in_var);
-          for (uint32_t c = 0; c < vs.num_comps; c++)
-            t.SetVgF(vs.dest_vgpr + c,
-                     vs.num_comps == 1 ? val : t.m.CompositeExtract(t.t_f, val, c));
-        }
+      // A per-vertex fetch was lifted to a Location vertex input; its pc has a
+      // seed. Re-seed its destination VGPRs from that input HERE (where the real
+      // buffer_load_format runs), overwriting any value the merged-wave index math
+      // clobbered them with (e.g. v0/v3/v4, reused as the fetch index). A CONSTANT
+      // load (e.g. the 2D ortho matrix) has no seed and reads num_comps dwords from
+      // the bound UBO at the computed byte offset into the destination VGPRs.
+      if (auto sit = sc.vfetch_seed.find(inst.pc); sit != sc.vfetch_seed.end()) {
+        const auto &vs = sit->second;
+        const Id comp_ty = vs.num_comps == 1   ? t.t_f
+                           : vs.num_comps == 2 ? t.t_v2
+                           : vs.num_comps == 3 ? t.t_v3
+                                               : t.t_v4;
+        const Id val = t.m.Load(comp_ty, vs.in_var);
+        for (uint32_t c = 0; c < vs.num_comps; c++)
+          t.SetVgF(vs.dest_vgpr + c,
+                   vs.num_comps == 1 ? val : t.m.CompositeExtract(t.t_f, val, c));
         break;
       }
       const uint32_t srsrc = ((w1 >> 16) & 0x1F) * 4;
@@ -814,10 +813,9 @@ std::vector<FetchAttr> ParseFetchInsts(const Program& insts) {
     const uint32_t nc = (in.opcode & 3) + 1;
     const bool idxen = (in.raw[0] >> 13) & 1, offen = (in.raw[0] >> 12) & 1;
     const uint32_t vaddr = in.raw[1] & 0xFF, soffset = (in.raw[1] >> 24) & 0xFF;
-    const bool vtx = BufLoadIsVertexFetch(in);
     // If srsrc's V# was loaded via s_load from a user_data pointer, this fetch
     // reads a TABLE of V#s at that pointer: table_sgpr = the s_load's sbase and
-    // this attribute is the sem-th 16-byte (4-dword) V# in the table. Otherwise
+    // this attribute is the slot-th 16-byte (4-dword) V# in the table. Otherwise
     // the V# is inline in user data at srsrc (table_sgpr = srsrc, dword_off = 0).
     uint32_t table_sgpr = srsrc, dword_off = 0;
     const bool chained = srsrc < 128 && loaded_from[srsrc] >= 0;
@@ -826,6 +824,7 @@ std::vector<FetchAttr> ParseFetchInsts(const Program& insts) {
       dword_off = slot * 4;
       slot++;
     }
+    const bool vtx = BufLoadIsVertexFetch(in, chained);
     if (ShDbg())
       std::fprintf(stderr,
                    "[gcnspv] buf_load nc=%u vdst=v%u srsrc=s%u idxen=%u offen=%u "
