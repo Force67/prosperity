@@ -29,6 +29,15 @@
 // vk::endFrame (gpu/ps5/cmd_processor.cpp).
 extern "C" void prosperity_agc_flip(uint64_t scanoutBase);
 
+// The guest address of the display buffer the game most recently flipped
+// (sceVideoOutSubmitFlip*'s bufferIndex resolved through the registered-buffer
+// table). The PS5 /dev/gc AGC flip ioctls carry no buffer field, so they read
+// the scanout target here instead of presenting whichever RT was drawn last.
+static std::atomic<uint64_t> g_currentScanout{0};
+extern "C" uint64_t prosperity_ps5_scanout_base() {
+  return g_currentScanout.load(std::memory_order_relaxed);
+}
+
 using namespace krnl;
 
 namespace {
@@ -181,8 +190,13 @@ int PS4ABI vSetBufferAttribute(void *attribute, uint32_t pixelFormat,
   return 0;
 }
 
-// PS5 ABI: extra `option` arg before addresses vs PS4.
-int PS4ABI vRegisterBuffers(int, int startIndex, int option, void *const *addresses,
+// The PS5 sceVideoOutRegisterBuffers2 `buffers` arg is an array of 32-byte
+// SceVideoOutBuffers descriptors (base VA at offset 0), not raw void* pointers
+// as on PS4. Stride over the descriptors; the base is the display buffer address.
+constexpr int kBufDescStride = 4;  // u64s per descriptor (0x20 bytes)
+
+// PS5 ABI: extra `option` arg before the descriptor array vs PS4.
+int PS4ABI vRegisterBuffers(int, int startIndex, int option, void *const *buffers,
                             int bufferNum, const void *attribute) {
   (void)option;
   std::lock_guard<std::mutex> lk(g_mtx);
@@ -193,16 +207,19 @@ int PS4ABI vRegisterBuffers(int, int startIndex, int option, void *const *addres
     g_port.pitch = a->pitchInPixel ? a->pitchInPixel : g_port.width;
     g_port.pixelFormat = a->pixelFormat;
   }
+  const uint64_t *desc = reinterpret_cast<const uint64_t *>(buffers);
   int n = 0;
   for (int i = 0; i < bufferNum && (startIndex + i) < kMaxBuffers; i++) {
-    g_port.buffers[startIndex + i] = addresses ? addresses[i] : nullptr;
+    g_port.buffers[startIndex + i] =
+        desc ? reinterpret_cast<void *>(desc[i * kBufDescStride]) : nullptr;
     n++;
   }
   g_port.bufferCount = startIndex + n;
   std::printf("[videoout/ps5] registerBuffers start=%d num=%d -> %ux%u pitch=%u "
-              "fmt=%#x (buf0=%p)\n",
+              "fmt=%#x (buf0=%p buf1=%p)\n",
               startIndex, bufferNum, g_port.width, g_port.height, g_port.pitch,
-              g_port.pixelFormat, addresses ? addresses[0] : nullptr);
+              g_port.pixelFormat, g_port.buffers[startIndex],
+              bufferNum > 1 ? g_port.buffers[startIndex + 1] : nullptr);
   return 0;
 }
 
@@ -263,6 +280,8 @@ int PS4ABI vSubmitFlip(int, int bufferIndex, int, int64_t flipArg) {
       fb = g_port.buffers[bufferIndex];
     w = g_port.width; h = g_port.height; pitch = g_port.pitch; fmt = g_port.pixelFormat;
     g_port.currentBuffer = bufferIndex;
+    g_currentScanout.store(reinterpret_cast<uint64_t>(fb),
+                           std::memory_order_relaxed);
     g_port.lastFlipArg = flipArg;
     g_port.submitCount.fetch_add(1);
   }
@@ -292,6 +311,7 @@ int PS4ABI vSubmitFlipEop(int, int bufferIndex, int, int64_t flipArg, void *) {
       scanout = reinterpret_cast<uint64_t>(g_port.buffers[bufferIndex]);
       g_port.currentBuffer = bufferIndex;
     }
+    g_currentScanout.store(scanout, std::memory_order_relaxed);
     g_port.lastFlipArg = flipArg;
     g_port.submitCount.fetch_add(1);
     eqHandle = g_port.flipEqueue;
