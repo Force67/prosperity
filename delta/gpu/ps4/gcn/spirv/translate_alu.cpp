@@ -314,10 +314,53 @@ void EmitSop2(Translator& t, const Inst& inst) {
       scc = true;
       break;
     }
+    case 0x29: {  // s_bfe_u64: 64-bit unsigned bitfield extract (off=b[5:0], width=b[22:16])
+      const Id off = t.And(b, t.U32(63));
+      const Id width = t.And(t.Shr(b, t.U32(16)), t.U32(0x7F));
+      // 64-bit logical shift-right of {a, a_hi} by off.
+      const Id n_lo = t.And(off, t.U32(31));
+      const Id ge32 = t.Uge(off, t.U32(32));
+      const Id inv = t.And(t.Sub(t.U32(32), n_lo), t.U32(31));
+      const Id cross = t.SelectB(t.IsZero(off), t.U32(0), t.Shl(a_hi, inv));
+      const Id lo_small = t.Or(t.Shr(a, n_lo), cross);
+      const Id sh_lo = t.SelectB(ge32, t.Shr(a_hi, n_lo), lo_small);
+      const Id sh_hi = t.SelectB(ge32, t.U32(0), t.Shr(a_hi, n_lo));
+      // Mask the low/high words to `width` bits.
+      const Id wge32 = t.Uge(width, t.U32(32));
+      const Id w_lo = t.And(width, t.U32(31));
+      const Id part = t.Sub(t.Shl(t.U32(1), w_lo), t.U32(1));
+      r = t.And(sh_lo, t.SelectB(wge32, t.U32(0xFFFFFFFFu), part));
+      r_hi = t.And(sh_hi, t.SelectB(wge32, part, t.U32(0)));
+      scc = wide_scc = true;
+      break;
+    }
     case 0x2c:  // s_absdiff_i32: |a - b|
       r = t.m.Bitcast(t.t_u, t.m.ExtInst(t.t_i, GLSLstd450SAbs,
                                          {t.m.Bitcast(t.t_i, t.Sub(a, b))}));
       scc = true;
+      break;
+    case 0x2f: case 0x30: case 0x31: case 0x32: {  // s_lshl{1,2,3,4}_add_u32
+      const CarryResult c = AddCarry(t, t.Shl(a, t.U32(op - 0x2e)), b);
+      r = c.value;
+      t.SetSccBool(t.IsNonZero(c.flag));
+      break;
+    }
+    case 0x33:  // s_pack_ll_b32_b16: {b[15:0], a[15:0]}
+      r = t.Or(t.And(a, t.U32(0xFFFF)), t.Shl(t.And(b, t.U32(0xFFFF)), t.U32(16)));
+      break;
+    case 0x34:  // s_pack_lh_b32_b16: {b[31:16], a[15:0]}
+      r = t.Or(t.And(a, t.U32(0xFFFF)), t.And(b, t.U32(0xFFFF0000u)));
+      break;
+    case 0x35:  // s_pack_hh_b32_b16: {b[31:16], a[31:16]}
+      r = t.Or(t.Shr(a, t.U32(16)), t.And(b, t.U32(0xFFFF0000u)));
+      break;
+    case 0x36:  // s_mul_hi_u32
+      r = t.m.CompositeExtract(t.t_u,
+            t.m.Emit(spv::Op::OpUMulExtended, t.PairType(), {a, b}), 1);
+      break;
+    case 0x37:  // s_mul_hi_i32
+      r = t.m.CompositeExtract(t.t_u,
+            t.m.Emit(spv::Op::OpSMulExtended, t.PairType(), {a, b}), 1);
       break;
     default:
       WarnUnsupported("sop2", op);
