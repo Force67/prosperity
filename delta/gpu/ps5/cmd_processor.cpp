@@ -501,12 +501,14 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
         std::fprintf(stderr, "[agc] DL recompile vs=%#lx (%08x) ps=%#lx (%08x %08x)...\n",
                      (unsigned long)vsA, vc[0], (unsigned long)psA,
                      pc ? pc[0] : 0, pc ? pc[1] : 0);
+        std::fprintf(stderr, "[agc] DL psInputEna=%#x (frag-coord/face VGPR seed)\n",
+                     g_regs[mmSPI_PS_INPUT_ENA]);
       }
       it = g_shCache
                .emplace(key, rdna::Recompile(reinterpret_cast<const uint32_t *>(vsA),
                                              psA ? reinterpret_cast<const uint32_t *>(psA)
                                                  : nullptr,
-                                             vud, pud))
+                                             vud, pud, g_regs[mmSPI_PS_INPUT_ENA]))
                .first;
       if (dl) std::fprintf(stderr, "[agc] DL recompile done ok=%d\n", it->second.ok);
     }

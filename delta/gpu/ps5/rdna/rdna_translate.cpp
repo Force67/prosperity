@@ -15,7 +15,7 @@
 #ifndef DELTA_HAVE_SPIRV_BACKEND
 namespace gpu::rdna {
 gpu::gcn::Recompiled Recompile(const uint32_t*, const uint32_t*, const uint32_t*,
-                               const uint32_t*) {
+                               const uint32_t*, uint32_t) {
   return {};
 }
 }  // namespace gpu::rdna
@@ -950,9 +950,47 @@ bool TranslateVs(const Program& program, const uint32_t* vs_user_data,
   return true;
 }
 
+// SPI_PS_INPUT_ENA lays the PS's system input VGPRs into v0.. in ascending bit
+// order (each set bit consumes the width below). The v_interp i/j barycentrics
+// come from the first pair, which the Vulkan-interpolated Location inputs model,
+// so those VGPRs need no value. But a shader that reads screen position directly
+// (a 2D clip such as frag.x*a + frag.y*b < c) reads the POS_{X,Y,Z,W} VGPRs;
+// unseeded they stay zero, collapsing the clip to "0 < c" and discarding every
+// fragment. Seed those from gl_FragCoord (and FRONT_FACE from gl_FrontFacing).
+void SeedPsInputVgprs(Translator& t, uint32_t ena, std::vector<Id>& iface) {
+  if (!ena) return;
+  static const uint8_t width[16] = {2, 2, 2, 3, 2, 2, 2, 1,
+                                    1, 1, 1, 1, 1, 1, 1, 1};
+  uint32_t vg[16] = {}, next = 0;
+  for (uint32_t b = 0; b < 16; b++)
+    if (ena & (1u << b)) { vg[b] = next; next += width[b]; }
+
+  if ((ena >> 8) & 0xF) {  // POS_X..W at bits 8..11 -> gl_FragCoord.xyzw
+    const Id fc = t.m.Variable(t.m.TypePointer(spv::StorageClass::Input, t.t_v4),
+                               spv::StorageClass::Input);
+    t.m.Decorate(fc, spv::Decoration::BuiltIn,
+                 {static_cast<uint32_t>(spv::BuiltIn::FragCoord)});
+    iface.push_back(fc);
+    const Id v = t.m.Load(t.t_v4, fc);
+    for (uint32_t c = 0; c < 4; c++)
+      if (ena & (1u << (8 + c)))
+        t.SetVgF(vg[8 + c], t.m.CompositeExtract(t.t_f, v, c));
+  }
+  if (ena & (1u << 12)) {  // FRONT_FACE -> 0xffffffff front / 0 back
+    const Id ff =
+        t.m.Variable(t.m.TypePointer(spv::StorageClass::Input, t.t_bool),
+                     spv::StorageClass::Input);
+    t.m.Decorate(ff, spv::Decoration::BuiltIn,
+                 {static_cast<uint32_t>(spv::BuiltIn::FrontFacing)});
+    iface.push_back(ff);
+    t.SetVg(vg[12],
+            t.SelectB(t.m.Load(t.t_bool, ff), t.U32(0xFFFFFFFFu), t.U32(0)));
+  }
+}
+
 bool TranslatePs(const Program& program,
-                 const std::unordered_set<uint32_t>& flat_attrs, Recompiled& r,
-                 Translator& t) {
+                 const std::unordered_set<uint32_t>& flat_attrs,
+                 uint32_t ps_input_ena, Recompiled& r, Translator& t) {
   if (ShDbg()) DumpProgram(program, "ps");
   std::vector<Id> iface;
   StageContext sc;
@@ -970,6 +1008,7 @@ bool TranslatePs(const Program& program,
     r.ps_texs.push_back({i, mimg_plan.binding_srsrc[i], mimg_plan.binding_storage[i]});
 
   sc.main_fn = t.m.BeginFunction(t.t_void, t.t_fn);
+  SeedPsInputVgprs(t, ps_input_ena, iface);
 
   const bool has_color_export =
       std::any_of(program.begin(), program.end(), [](const Inst& inst) {
@@ -1029,7 +1068,8 @@ bool NoOpt() {
 }  // namespace
 
 Recompiled Recompile(const uint32_t* vs_code, const uint32_t* ps_code,
-                     const uint32_t* vs_user_data, const uint32_t* ps_user_data) {
+                     const uint32_t* vs_user_data, const uint32_t* ps_user_data,
+                     uint32_t ps_input_ena) {
   Recompiled r;
   if (!vs_code || !vs_user_data || !ps_user_data) return r;
 
@@ -1047,7 +1087,7 @@ Recompiled Recompile(const uint32_t* vs_code, const uint32_t* ps_code,
   if (!TranslateVs(vs_program, vs_user_data, flat_attrs, r, tv)) return r;
   Translator tp;
   tp.InitTypes();
-  if (ps_code ? !TranslatePs(ps_program, flat_attrs, r, tp)
+  if (ps_code ? !TranslatePs(ps_program, flat_attrs, ps_input_ena, r, tp)
               : !TranslateDepthOnlyPs(tp))
     return r;
 
