@@ -515,12 +515,16 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
           d.vertexData = reinterpret_cast<const void *>(vb.base);
           d.vertexStride = vb.stride;
           d.vertexCount = vb.numRecords;
+          // Single interleaved Vulkan binding (binding 0); the recompiled-shader
+          // draw path binds vertex buffers from d.vbufs[], not d.vertexData.
+          d.vbufs[0] = {reinterpret_cast<const void *>(vb.base), vb.stride, vb.numRecords};
+          d.nvbufs = 1;
         }
         // Single interleaved binding: only fold in attrs that sit inside the base
         // buffer's stride; a separate buffer would alias garbage at a huge offset.
         uint32_t off = (vb.base >= base0 && vb.base - base0 < d.vertexStride)
                            ? static_cast<uint32_t>(vb.base - base0) : 0;
-        d.vattrs[d.nvattrs++] = {a.location, off, a.num_comps, vb.dfmt, vb.nfmt};
+        d.vattrs[d.nvattrs++] = {a.location, 0u, off, a.num_comps, vb.dfmt, vb.nfmt};
       }
       // A fetch VS needs at least one attribute resolved; a procedural VS (no
       // recovered attrs, seeds from VertexIndex) draws without a vertex buffer.
