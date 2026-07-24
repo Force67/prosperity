@@ -794,7 +794,17 @@ bool TranslateVs(const Program& program, const uint32_t* vs_user_data,
   // draws nothing the problem is downstream (index/vertexCount/render target).
   static const bool force_quad = std::getenv("DELTA_GPU_FORCEQUAD") != nullptr;
   if (force_quad) {
-    const Id vidx = vertex_index ? t.m.Load(t.t_u, vertex_index) : t.Vg(0);
+    // A fetch-path VS never created a VertexIndex input, and its v0 is clobbered by
+    // the vertex fetch -- bind a real VertexIndex here so the quad is valid either way.
+    Id vidx_var = vertex_index;
+    if (!vidx_var) {
+      vidx_var = t.m.Variable(t.m.TypePointer(spv::StorageClass::Input, t.t_u),
+                              spv::StorageClass::Input);
+      t.m.Decorate(vidx_var, spv::Decoration::BuiltIn,
+                   {static_cast<uint32_t>(spv::BuiltIn::VertexIndex)});
+      iface.push_back(vidx_var);
+    }
+    const Id vidx = t.m.Load(t.t_u, vidx_var);
     const Id fx = t.SelectF(t.IsNonZero(t.And(vidx, t.U32(1))), t.F32(1.f), t.F32(-1.f));
     const Id fy = t.SelectF(t.IsNonZero(t.And(vidx, t.U32(2))), t.F32(1.f), t.F32(-1.f));
     t.m.Store(pos_out, t.m.CompositeConstruct(t.t_v4, {fx, fy, t.F32(0.f), t.F32(1.f)}));
