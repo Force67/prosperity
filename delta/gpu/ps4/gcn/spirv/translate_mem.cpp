@@ -332,6 +332,13 @@ void EmitMimg(Translator& t, const Inst& inst, StageContext& sc) {
     texel = t.m.Emit(spv::Op::OpImageSampleImplicitLod, t.t_v4, {si, uv});
   }
 
+  // DELTA_GPU_DEBUGUV: output the sample UV as R/G instead of the texel, to see
+  // the coordinate distribution reaching the sampler (normalized 0..1 vs texel
+  // units). Diagnostic only.
+  static const bool dbgUv = std::getenv("DELTA_GPU_DEBUGUV") != nullptr;
+  if (dbgUv && !dref && !gather)
+    texel = t.m.CompositeConstruct(t.t_v4, {x, y, t.F32(0.f), t.F32(1.f)});
+
   if (dref) {
     if (dmask) t.SetVgF(vdata, texel);
     return;
