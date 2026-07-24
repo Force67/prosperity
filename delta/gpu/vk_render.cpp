@@ -4373,6 +4373,11 @@ void endFrame(uint64_t scanoutBase) {
     return e ? strtoull(e, nullptr, 0) : 0ull;
   }();
   if (wantAddr && g_rts.count(wantAddr)) presentBase = wantAddr;
+  static const bool presentTrace = std::getenv("DELTA_PRESENT_TRACE") != nullptr;
+  if (presentTrace)
+    std::fprintf(stderr, "[present] f%d scanout=%#lx -> present=%#lx%s\n",
+                 g.frameNum, (unsigned long)scanoutBase, (unsigned long)presentBase,
+                 (scanoutBase && presentBase == scanoutBase) ? "" : " (fallback lastRt)");
   auto it = g_rts.find(presentBase);
 
   // Record the presented RT's readback copy into this frame's slot, submit it,

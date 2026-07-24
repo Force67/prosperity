@@ -24,6 +24,19 @@
 extern "C" void prosperity_agc_submit(uint64_t dcbBase, uint32_t sizeBytes);
 // PS5 present bridge: end the frame and present the rendered RT to the window.
 extern "C" void prosperity_agc_flip(uint64_t scanoutBase);
+// Guest address of the display buffer the game most recently flipped, resolved
+// from sceVideoOutSubmitFlip*'s bufferIndex via the registered-buffer table
+// (libSceVideoOut_ps5.cpp). The AGC flip ioctls below carry no buffer field, so
+// they present this instead of falling back to whichever RT was drawn last.
+extern "C" uint64_t prosperity_ps5_scanout_base();
+
+// DELTA_FLIP_TRACE: log the scanout base each AGC flip presents, so the derived
+// per-flip buffer can be checked against the registered display buffers.
+static void traceFlip(const char *site, uint64_t base) {
+  static const bool on = std::getenv("DELTA_FLIP_TRACE") != nullptr;
+  if (on)
+    std::printf("[flip] %s present=%#lx\n", site, (unsigned long)base);
+}
 
 namespace krnl {
 gcDevicePs5::gcDevicePs5(proc *p) : device(p) {}
@@ -91,7 +104,9 @@ int32_t gcDevicePs5::ioctl(uint32_t cmd, void *data) {
     struct argl { uint32_t a0, count; uint64_t descPtr, flipPtr; uint32_t flag; };
     auto *a = static_cast<argl *>(data);
     if (a) submitGnmDescArray(a->descPtr, a->count);
-    prosperity_agc_flip(0);  // present the frame
+    uint64_t scanout = prosperity_ps5_scanout_base();
+    traceFlip("0xC020810C", scanout);
+    prosperity_agc_flip(scanout);  // present the flipped display buffer
     return 0;
   }
   case 0x40048135:  // AGC query: OUT dword (submit/queue id). The driver stores
@@ -174,9 +189,12 @@ int32_t gcDevicePs5::ioctl(uint32_t cmd, void *data) {
                       // command processor, which follows the IBs and renders.
     if (data) {
       // Present the previous frame's accumulated draws at the start of each new
-      // frame's state submit (the title issues no videoout SubmitFlip and no
-      // 0x8133), then submit this frame's register state.
-      prosperity_agc_flip(0);
+      // frame's state submit, then submit this frame's register state. The
+      // display buffer to scan out is the one the game last flipped via the HLE
+      // videoout (bufferIndex -> registered address), not whichever RT drew last.
+      uint64_t scanout = prosperity_ps5_scanout_base();
+      traceFlip("0x80488131", scanout);
+      prosperity_agc_flip(scanout);
       prosperity_agc_submit(reinterpret_cast<uint64_t>(data), (cmd >> 16) & 0x1fff);
     }
     return 0;
@@ -203,11 +221,15 @@ int32_t gcDevicePs5::ioctl(uint32_t cmd, void *data) {
     }
     return 0;
   }
-  case 0x80088133:  // AGC mode-1 end-of-frame / flip signal (IN, 8 bytes), issued
+  case 0x80088133: {  // AGC mode-1 end-of-frame / flip signal (IN, 8 bytes), issued
                     // once per frame after the 0x8131 state + 0x8132 draw submits.
-                    // Present the rendered render target (0 -> the last RT drawn).
-    prosperity_agc_flip(0);
+                    // The 8-byte arg carries no buffer field (observed all-zero);
+                    // present the buffer the game flipped via the HLE videoout.
+    uint64_t scanout = prosperity_ps5_scanout_base();
+    traceFlip("0x80088133", scanout);
+    prosperity_agc_flip(scanout);
     return 0;
+  }
   }
 
   // DELTA_AGC_TRACE: dump the mode-1 ioctl family (0x8131 submit, 0x8132/0x8133
