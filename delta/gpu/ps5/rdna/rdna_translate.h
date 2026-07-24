@@ -24,10 +24,13 @@ namespace gpu::rdna {
 // Recompile an RDNA2 VS+PS pair. vs_code/ps_code are guest pointers to the
 // RDNA2 bytecode; the user-data arrays are the shader-stage user SGPRs (used to
 // read the fetch-shader pointer during translation). On gfx10.3 the "VS" is the
-// merged ES/GS NGG vertex program (read from the GS SH block). Returns a
-// gpu::gcn::Recompiled (r.ok == false when a required feature is unsupported).
+// merged ES/GS NGG vertex program (read from the GS SH block). ps_input_ena is
+// SPI_PS_INPUT_ENA: it fixes the PS input-VGPR layout (frag-coord / face) the
+// shader reads directly, not through v_interp. Returns a gpu::gcn::Recompiled
+// (r.ok == false when a required feature is unsupported).
 gpu::gcn::Recompiled Recompile(const uint32_t* vs_code, const uint32_t* ps_code,
                                const uint32_t* vs_user_data,
-                               const uint32_t* ps_user_data);
+                               const uint32_t* ps_user_data,
+                               uint32_t ps_input_ena = 0);
 
 }  // namespace gpu::rdna
