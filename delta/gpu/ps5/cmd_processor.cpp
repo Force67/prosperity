@@ -751,10 +751,12 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
     s_vdump++;
     std::fprintf(stderr,
                  "[agc] VDUMP draw#%lu nvattrs=%u stride=%u count=%u prim=%u "
-                 "vp=[xs=%g xo=%g ys=%g yo=%g] nCbufs=%u cbufBase=%#lx cbufSize=%u\n",
+                 "vp=[xs=%g xo=%g ys=%g yo=%g] nCbufs=%u cbufBase=%#lx cbufSize=%u "
+                 "rt=%#lx ps=%#lx\n",
                  (unsigned long)myDraw, d.nvattrs, d.vertexStride, d.vertexCount,
                  d.primType, d.viewportXScale, d.viewportXOffset, d.viewportYScale,
-                 d.viewportYOffset, d.nCbufs, (unsigned long)d.cbufBase, d.cbufSize);
+                 d.viewportYOffset, d.nCbufs, (unsigned long)d.cbufBase, d.cbufSize,
+                 (unsigned long)d.rtBase, (unsigned long)d.psAddr);
     for (uint32_t a = 0; a < d.nvattrs; a++)
       std::fprintf(stderr, "[agc]   vattr%u loc=%u off=%u nc=%u dfmt=%u nfmt=%u\n",
                    a, d.vattrs[a].location, d.vattrs[a].offset, d.vattrs[a].num_comps,
