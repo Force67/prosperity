@@ -76,14 +76,28 @@ struct VBuffer {
   uint64_t base = 0;
   uint32_t stride = 0, numRecords = 0, dfmt = 0, nfmt = 0, gfmt = 0;
 };
+// gfx10.3 buffer V#s carry a UNIFIED 7-bit FORMAT enum (word3 [18:12]), not GCN's
+// separate data/number format. Map the enum to the GCN (dfmt,nfmt) pair vk_render's
+// vfmt() understands. Only the vertex-attribute formats are covered; unknowns fall
+// back to the GCN-style split (harmless for descriptors that never reach vfmt()).
+void gfx10VBufFormat(uint32_t gfmt, uint32_t &dfmt, uint32_t &nfmt) {
+  switch (gfmt) {
+    case 20: dfmt = 4;  nfmt = 4; break;  // 32_UINT
+    case 22: dfmt = 4;  nfmt = 7; break;  // 32_FLOAT
+    case 42: dfmt = 10; nfmt = 0; break;  // 8_8_8_8_UNORM
+    case 46: dfmt = 10; nfmt = 4; break;  // 8_8_8_8_UINT
+    case 74: dfmt = 13; nfmt = 7; break;  // 32_32_32_FLOAT
+    case 77: dfmt = 14; nfmt = 7; break;  // 32_32_32_32_FLOAT
+    default: dfmt = gfmt & 0xF; nfmt = (gfmt >> 4) & 0x7; break;
+  }
+}
 VBuffer decodeVBuffer(const uint32_t *p) {
   VBuffer v;
   v.base = (static_cast<uint64_t>(p[1] & 0xFFFF) << 32) | p[0];
   v.stride = (p[1] >> 16) & 0x3FFF;
   v.numRecords = p[2];
   v.gfmt = (p[3] >> 12) & 0x7F;
-  v.dfmt = v.gfmt & 0xF;
-  v.nfmt = (v.gfmt >> 4) & 0x7;
+  gfx10VBufFormat(v.gfmt, v.dfmt, v.nfmt);
   return v;
 }
 
@@ -486,17 +500,27 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
       // decode to a valid V# (a partial fetch still rasterizes).
       uint64_t base0 = 0;
       bool haveBase = false;
+      // The merged ES/GS NGG vertex shader reads its GS user data starting at wave
+      // SGPR udBase (sgpr 0..udBase-1 are ES/system), but the AGC latches it into
+      // SPI_SHADER_USER_DATA_GS_0 which we index from 0. DELTA_PS5_UDBASE shifts the
+      // shader SGPR N -> userData[N-udBase] for both attrs and cbufs.
+      static const uint32_t udBaseEnv = [] {
+        const char *e = std::getenv("DELTA_PS5_UDBASE");
+        return e ? static_cast<uint32_t>(std::atoi(e)) : 0u;
+      }();
       if (dl)
         std::fprintf(stderr, "[agc] DL attrs=%zu vud[0..7]=%08x %08x %08x %08x %08x %08x %08x %08x\n",
                      rc.attrs.size(), vud[0], vud[1], vud[2], vud[3], vud[4], vud[5], vud[6], vud[7]);
       for (size_t i = 0; i < rc.attrs.size() && i < 8; i++) {
         auto &a = rc.attrs[i];
-        if (a.table_sgpr + 3 >= 32) continue;
-        VBuffer vb = decodeVBuffer(&vud[a.table_sgpr]);  // inline V#
+        const uint32_t ti =
+            a.table_sgpr >= udBaseEnv ? a.table_sgpr - udBaseEnv : a.table_sgpr;
+        if (ti + 3 >= 32) continue;
+        VBuffer vb = decodeVBuffer(&vud[ti]);  // inline V#
         const char *how = "inline";
         if (!inGuest(vb.base) || !vb.stride) {  // else follow a table pointer
-          uint64_t tbl = (static_cast<uint64_t>(vud[a.table_sgpr + 1] & 0xFFFF) << 32) |
-                         vud[a.table_sgpr];
+          uint64_t tbl = (static_cast<uint64_t>(vud[ti + 1] & 0xFFFF) << 32) |
+                         vud[ti];
           if (inGuest(tbl)) {
             vb = decodeVBuffer(reinterpret_cast<const uint32_t *>(tbl + a.vbuf_dword_off * 4));
             how = "table";
@@ -536,14 +560,6 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
       // memory per chain_off[] (the VS loads its transform's V# from a root
       // descriptor table this way). The bind size is the recompiler's planned dword
       // window (the V# stride/records are meaningless for an s_load pointer).
-      // The merged ES/GS NGG vertex shader reads its GS user data starting at a
-      // nonzero wave SGPR (sgpr 0..udBase-1 are ES/system), but the AGC latches it
-      // into SPI_SHADER_USER_DATA_GS_0 which we index from 0. DELTA_PS5_UDBASE
-      // shifts the vertex-stage user-data index so shader sgpr N -> userData[N-udBase].
-      static const uint32_t udBaseEnv = [] {
-        const char *e = std::getenv("DELTA_PS5_UDBASE");
-        return e ? static_cast<uint32_t>(std::atoi(e)) : 0u;
-      }();
       auto resolveCbufs = [&](const std::vector<gcn::ShaderCbuf> &cbufs,
                               const uint32_t *userData, bool vertexStage) {
         const uint32_t udBase = vertexStage ? udBaseEnv : 0;
@@ -667,6 +683,22 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
                  "[agc]   mvp=[%g %g %g %g / %g %g %g %g / %g %g %g %g / %g %g %g %g]\n",
                  m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10],
                  m[11], m[12], m[13], m[14], m[15]);
+    // The VS loads its real vertex V# via SMEM from a pointer in GS user_data[4..7]
+    // (pc0x23 s_load s0-3 from user_data[4..5]). Follow each such pointer one level
+    // and dump what's there (a V# or raw vertices) to locate the real vertex source.
+    for (int k = 4; k <= 6; k += 2) {
+      uint64_t p = (static_cast<uint64_t>(vud[k + 1] & 0xFFFF) << 32) | vud[k];
+      if (!inGuest(p)) continue;
+      const uint32_t *pw = reinterpret_cast<const uint32_t *>(p);
+      std::fprintf(stderr, "[agc]   ud[%d]->%#lx dwords:", k, (unsigned long)p);
+      for (int j = 0; j < 8; j++) std::fprintf(stderr, " %08x", pw[j]);
+      std::fprintf(stderr, "  floats:");
+      for (int j = 0; j < 8; j++) {
+        float f; std::memcpy(&f, &pw[j], 4);
+        std::fprintf(stderr, " %g", f);
+      }
+      std::fprintf(stderr, "\n");
+    }
   }
 
   if (!g_frameActive) {

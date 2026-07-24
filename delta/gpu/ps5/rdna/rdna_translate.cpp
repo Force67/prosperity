@@ -678,9 +678,23 @@ struct FetchAttr {
 std::vector<FetchAttr> ParseFetchInsts(const Program& insts) {
   std::vector<FetchAttr> out;
   uint32_t sem = 0;
+  // Track SGPRs written by s_load* -- the NGG VS loads its vertex-fetch V# into
+  // srsrc from a user_data pointer (a TABLE of V#s), so the real table root is
+  // that s_load's sbase, not srsrc itself. Map each loaded SGPR -> its sbase.
+  int32_t loaded_from[128];
+  for (int i = 0; i < 128; i++) loaded_from[i] = -1;
   for (const Inst& in : insts) {
     if (in.enc == Enc::kSop1 && in.opcode == 0x20) break;  // s_setpc_b64 (return)
     if (in.enc == Enc::kSopp && in.opcode == 1) break;     // s_endpgm
+    if (in.enc == Enc::kSmrd && in.opcode <= 0x04) {  // s_load_dword{,x2,x4,x8,x16}
+      const uint32_t sdst = (in.raw[0] >> 6) & 0x7F;
+      const uint32_t sbase = (in.raw[0] & 0x3F) * 2;
+      const uint32_t nreg = in.opcode == 0 ? 1 : in.opcode == 1 ? 2
+                          : in.opcode == 2 ? 4 : in.opcode == 3 ? 8 : 16;
+      for (uint32_t k = 0; k < nreg && sdst + k < 128; k++)
+        loaded_from[sdst + k] = static_cast<int32_t>(sbase);
+      continue;
+    }
     if (in.enc != Enc::kMubuf || in.opcode > 0x03) continue;  // buffer_load_format_*
     const uint32_t vdata = (in.raw[1] >> 8) & 0xFF;
     const uint32_t srsrc = ((in.raw[1] >> 16) & 0x1F) * 4;
@@ -688,16 +702,25 @@ std::vector<FetchAttr> ParseFetchInsts(const Program& insts) {
     const bool idxen = (in.raw[0] >> 13) & 1, offen = (in.raw[0] >> 12) & 1;
     const uint32_t vaddr = in.raw[1] & 0xFF, soffset = (in.raw[1] >> 24) & 0xFF;
     const bool vtx = BufLoadIsVertexFetch(in);
+    // If srsrc's V# was loaded via s_load from a user_data pointer, this fetch
+    // reads a TABLE of V#s at that pointer: table_sgpr = the s_load's sbase and
+    // this attribute is the sem-th 16-byte (4-dword) V# in the table. Otherwise
+    // the V# is inline in user data at srsrc (table_sgpr = srsrc, dword_off = 0).
+    uint32_t table_sgpr = srsrc, dword_off = 0;
+    if (srsrc < 128 && loaded_from[srsrc] >= 0) {
+      table_sgpr = static_cast<uint32_t>(loaded_from[srsrc]);
+      dword_off = sem * 4;
+    }
     if (ShDbg())
       std::fprintf(stderr,
                    "[gcnspv] buf_load nc=%u vdst=v%u srsrc=s%u idxen=%u offen=%u "
-                   "vaddr=v%u soffset=s%u -> %s\n",
+                   "vaddr=v%u soffset=s%u -> %s (table_sgpr=s%u doff=%u)\n",
                    nc, vdata, srsrc, idxen, offen, vaddr, soffset,
-                   vtx ? "vertex-attr" : "const-ubo");
-    // Only a genuine per-vertex fetch becomes a vertex input (table_sgpr = srsrc,
-    // the descriptor's own SGPRs). A constant load is left for the UBO path.
+                   vtx ? "vertex-attr" : "const-ubo", table_sgpr, dword_off);
+    // Only a genuine per-vertex fetch becomes a vertex input. A constant load is
+    // left for the UBO path.
     if (vtx) {
-      out.push_back({sem, nc, vdata, srsrc, 0});
+      out.push_back({sem, nc, vdata, table_sgpr, dword_off});
       sem++;
     }
   }
