@@ -32,6 +32,8 @@ class kObject;
 // Set the calling host thread's guest fs base (guest TLS pointer). Called for
 // the main thread (sysarch 129) and for each guest thread we spawn.
 void setThreadFsBase(uint64_t);
+int32_t hostGuestFsOffset();
+int32_t hostFsScratchOffset();
 
 /*TODO: FIX MISUSE OF modulePtr*/
 using modulePtr = utl::object_ref<smodule>;
