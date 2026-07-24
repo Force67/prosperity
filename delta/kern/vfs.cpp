@@ -145,6 +145,12 @@ bool stat(const char *path, int64_t &size, bool &isDir) {
   if (!path)
     return false;
 
+  if (path[0] == '/' && path[1] == '\0') {
+    size = 0;
+    isDir = true;
+    return true;
+  }
+
   size_t len = 0;
   const mountPoint *m = findMount(path, len);
   if (!m)

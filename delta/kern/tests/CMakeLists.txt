@@ -5,3 +5,7 @@ add_delta_test(object_table_test
 add_delta_test(sys_info_test
   SOURCES sys_info_test.cpp
   DEPS delta_kern)
+
+add_delta_test(vfs_test
+  SOURCES vfs_test.cpp
+  DEPS delta_kern)
