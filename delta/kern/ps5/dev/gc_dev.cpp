@@ -206,6 +206,15 @@ int32_t gcDevicePs5::ioctl(uint32_t cmd, void *data) {
       uint64_t scanout = prosperity_ps5_scanout_base();
       traceFlip("0x80488131", scanout);
       prosperity_agc_flip(scanout);
+      static const bool agcTrace1 = std::getenv("DELTA_AGC_TRACE") != nullptr;
+      static int s_d131 = 0;
+      if (agcTrace1 && s_d131 < 6) {
+        s_d131++;
+        auto *w = static_cast<const uint32_t *>(data);
+        std::printf("[agc] 8131 arg(18 dwords):");
+        for (int i = 0; i < 18; i++) std::printf(" %08x", w[i]);
+        std::printf("\n");
+      }
       prosperity_agc_submit(reinterpret_cast<uint64_t>(data), (cmd >> 16) & 0x1fff);
     }
     return 0;
@@ -220,6 +229,19 @@ int32_t gcDevicePs5::ioctl(uint32_t cmd, void *data) {
       auto *w = static_cast<uint32_t *>(data);
       uint32_t count = w[1];
       uint64_t ptr = (static_cast<uint64_t>(w[3]) << 32) | w[2];
+      static const bool agcTrace2 = std::getenv("DELTA_AGC_TRACE") != nullptr;
+      static int s_d132 = 0;
+      if (agcTrace2 && s_d132 < 8) {
+        s_d132++;
+        std::printf("[agc] 8132 arg=[%08x %08x %08x %08x] ptr=%#lx count=%u\n",
+                    w[0], w[1], w[2], w[3], (unsigned long)ptr, count);
+        if (ptr && count && count < 4096) {
+          auto *dd = reinterpret_cast<const uint32_t *>(ptr);
+          for (uint32_t i = 0; i < count && i < 24; i++)
+            std::printf("[agc]   desc[%u] = %08x %08x %08x %08x\n", i,
+                        dd[i * 4], dd[i * 4 + 1], dd[i * 4 + 2], dd[i * 4 + 3]);
+        }
+      }
       if (ptr && count && count < 64) {
         auto *d = reinterpret_cast<uint32_t *>(ptr);
         for (uint32_t i = 0; i < count; i++) {

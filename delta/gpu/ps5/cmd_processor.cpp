@@ -131,13 +131,26 @@ VBuffer decodeVBuffer(const uint32_t *p) {
   return v;
 }
 
+// Registers per space, so a LOAD_*_REG range can never spill into the next one.
+// A LOAD_SH_REG whose range ran long wrote zeros from its (empty) shadow image
+// straight over CB_COLOR0_BASE at 0xA318, unbinding the render target that
+// op 0x49 had just set -- every colour draw after it hit no target and the
+// frame came out black.
+constexpr uint32_t kRegSpaceSize = 0x400;
+
+inline uint32_t regSpaceLimit(uint32_t base) {
+  return base + kRegSpaceSize <= kRegFileSize ? base + kRegSpaceSize
+                                              : kRegFileSize;
+}
+
 // Latch a SET_*_REG packet into the register file. body[0] is the register
 // offset dword (with the gfx10 selector bits stripped), body[1..] the values.
 void setRegs(uint32_t base, const uint32_t *body, uint32_t count) {
   if (count < 1) return;
   uint32_t off = base + (body[0] & ~kRegSelectorMask);
+  const uint32_t limit = regSpaceLimit(base);
   for (uint32_t i = 1; i < count; i++)
-    if (off + (i - 1) < kRegFileSize) g_regs[off + (i - 1)] = body[i];
+    if (off + (i - 1) < limit) g_regs[off + (i - 1)] = body[i];
 }
 
 // A guest GPU address. Isaac's AGC pool sits in the 0x80_xx_xx_xx_xx band, but a
@@ -162,6 +175,20 @@ void loadRegs(uint32_t base, const uint32_t *body, uint32_t count) {
   // COHERENCY TEST: dump the LOAD image content. If a context/SH image reads all
   // zero, it's non-coherent (the driver wrote it via a different VA) -- the shader
   // would be present but invisible. If it has real reg values, the image is fine.
+  // Coherency census: a title that drives its whole context through register
+  // shadows is invisible if those images read zero. Sample one late.
+  static int s_imgN = 0;
+  if (base == kContextRegBase) s_imgN++;
+  if (g_trace && base == kContextRegBase && s_imgN >= 100 && s_imgN <= 106) {
+    uint32_t nz = 0, first = 0;
+    for (uint32_t j = 0; j < 0x400; j++)
+      if (src[j]) { nz++; if (!first) first = j; }
+    std::fprintf(stderr,
+                 "[agc] IMGCENSUS #%d base=%#x mem=%#lx nonzero=%u/1024 first=%#x "
+                 "img[0x318]=%08x img[0x31c]=%08x ranges=%u\n",
+                 s_imgN, base, (unsigned long)mem, nz, first, src[0x318],
+                 src[0x31c], (count - 2) / 2);
+  }
   static int s_img = 0;
   if (g_trace && s_img < 6) {
     s_img++;
@@ -211,12 +238,30 @@ void loadRegs(uint32_t base, const uint32_t *body, uint32_t count) {
       }
     }
   }
+  const uint32_t limit = regSpaceLimit(base);
+  // LOAD_*_REG restores a register shadow the command processor is supposed to
+  // have SAVED into. We do not model the save side, so a shadow the title never
+  // wrote reads as all zeros -- and applying it wipes live state: Skyrim binds
+  // CB_COLOR0_BASE with SET_CONTEXT_REG_INDIRECT (0x9f) and the very next
+  // LOAD_CONTEXT_REG zeroed it again, leaving every colour draw with no render
+  // target. An all-zero shadow carries nothing to restore, so skip it.
+  {
+    bool anyValue = false;
+    for (uint32_t i = 2; i + 1 < count && !anyValue; i += 2) {
+      uint32_t off = body[i] & 0xFFFF;
+      uint32_t num = body[i + 1] & 0xFFFF;
+      if (num > 0x2000) num = 0x2000;
+      for (uint32_t j = 0; j < num; j++)
+        if (base + off + j < limit && src[off + j]) { anyValue = true; break; }
+    }
+    if (!anyValue) return;
+  }
   for (uint32_t i = 2; i + 1 < count; i += 2) {
     uint32_t off = body[i] & 0xFFFF;
     uint32_t num = body[i + 1] & 0xFFFF;
     if (num > 0x2000) num = 0x2000;  // sanity cap
     for (uint32_t j = 0; j < num; j++) {
-      if (base + off + j >= kRegFileSize) break;
+      if (base + off + j >= limit) break;
       uint32_t v = src[off + j];
       g_regs[base + off + j] = v;
       // Pinpoint where the shader PGM_LO lands: a shader at 0x8001xxxxxx has
@@ -247,9 +292,10 @@ void loadRegPairs(uint32_t base, const uint32_t *body, uint32_t cnt) {
   // so VGT_PRIMITIVE_TYPE (set this way) never landed and prim assembly died.
   uint32_t numPairs = body[3] & 0x3FFF;
   const uint32_t *p = reinterpret_cast<const uint32_t *>(addr);
+  const uint32_t limit = regSpaceLimit(base);
   for (uint32_t i = 0; i < numPairs; i++) {
     uint32_t off = p[i * 2] & ~kRegSelectorMask;  // strip gfx10 selector bits
-    if (base + off < kRegFileSize) g_regs[base + off] = p[i * 2 + 1];
+    if (base + off < limit) g_regs[base + off] = p[i * 2 + 1];
   }
   // Report the first few shader binds that actually carry a nonzero PGM (SH off 0x88
   // = PGM_LO_GS, 0x08 = PGM_LO_PS) -- these are the real sprite-pipeline binds.
@@ -897,6 +943,26 @@ void walk(const uint32_t *p, uint32_t words, bool dumpThis, int depth) {
       // follows. Instead of bailing, skip one dword and resync on the next header.
       if (i + 1 + cnt > words) { i += 1; continue; }
       g_opHist[op & 0xFF]++;
+      // Who actually binds the render target: report the packet that first makes
+      // CB_COLOR0_BASE non-zero, and every later change.
+      if (g_trace) {
+        static uint32_t s_lastCb = 0;
+        static int s_cbLog = 0;
+        uint32_t cur = g_regs[mmCB_COLOR0_BASE];
+        static uint32_t s_prevOp = 0;
+        if (cur != s_lastCb && s_cbLog < 16) {
+          s_cbLog++;
+          std::fprintf(stderr,
+                       "[agc] CB0BASE %08x -> %08x by op %#04x (next %#04x)\n",
+                       s_lastCb, cur, s_prevOp, op);
+          s_lastCb = cur;
+        }
+        s_prevOp = op;
+        if (false) {
+        } else if (cur != s_lastCb) {
+          s_lastCb = cur;
+        }
+      }
       if (dumpThis) {
         std::fprintf(stderr, "[agc]   @%-5u T3 op=%#04x count=%u body:", i, op, cnt);
         uint32_t showN = (op == 0x93 || op == 0x79) ? cnt : (cnt < 6 ? cnt : 6);
@@ -951,6 +1017,41 @@ void walk(const uint32_t *p, uint32_t words, bool dumpThis, int depth) {
         }
         break;
       }
+      case IT_DMA_DATA:  // CP DMA: ctrl, srcLo/Hi, dstLo/Hi, command(byteCount).
+        // Skyrim never issues SET_CONTEXT_REG: it builds its context state (so
+        // CB_COLOR -- the render target) into a shadow image with CP DMA and then
+        // restores it with LOAD_CONTEXT_REG. Without the copy the shadow reads
+        // zero, every colour draw runs with no target bound and the frame is
+        // black. ctrl: SRC_SEL[30:29], DST_SEL[21:20]; sel 0/3 = memory address,
+        // 2 = immediate (a fill) -- only copy true memory to memory.
+        if (cnt >= 6) {
+          uint32_t ctrl = body[0];
+          uint32_t srcSel = (ctrl >> 29) & 0x3;
+          uint32_t dstSel = (ctrl >> 20) & 0x3;
+          uint64_t src = (static_cast<uint64_t>(body[2] & 0xFFFF) << 32) | body[1];
+          uint64_t dst = (static_cast<uint64_t>(body[4] & 0xFFFF) << 32) | body[3];
+          uint32_t bytes = body[5] & 0x1FFFFF;
+          const bool srcMem = (srcSel == 0 || srcSel == 3);
+          const bool dstMem = (dstSel == 0 || dstSel == 3);
+          static const bool noCopy = std::getenv("DELTA_GPU_NODMACOPY") != nullptr;
+          auto memOk = [](uint64_t a) {
+            return a >= 0x1000000ull && a < 0x20000000000ull;
+          };
+          if (!noCopy && srcMem && dstMem && bytes && bytes <= 0x1000000u &&
+              src != dst && memOk(src) && memOk(src + bytes) && memOk(dst) &&
+              memOk(dst + bytes))
+            std::memcpy(reinterpret_cast<void *>(dst),
+                        reinterpret_cast<const void *>(src), bytes);
+          if (std::getenv("DELTA_GPU_DMATRACE")) {
+            static int dmn = 0;
+            if (dmn++ < 60)
+              std::fprintf(stderr,
+                           "[dma] ctrl=%#x src=%#lx dst=%#lx bytes=%u%s\n", ctrl,
+                           (unsigned long)src, (unsigned long)dst, bytes,
+                           (srcMem && dstMem) ? " COPIED" : "");
+          }
+        }
+        break;
       case IT_INDEX_TYPE:
         if (cnt >= 1) g_indexType = body[0] & 0x3;
         break;
