@@ -90,6 +90,14 @@ std::string jsonGetString(const std::string &js, const char *key) {
   return js.substr(open + 1, close - open - 1);
 }
 
+// param.json stores sdkVersion as "0xMMmmpppp00000000"; libkernel wants the top
+// half (0x03000000 for a 3.00 title). Empty/unparsable -> 0.
+uint32_t parseSdkVersion(const std::string &s) {
+  if (s.empty())
+    return 0;
+  return static_cast<uint32_t>(std::strtoull(s.c_str(), nullptr, 0) >> 32);
+}
+
 // Bridges a PkgFilesystem into the kernel VFS as an on-demand virtual mount.
 class PkgProvider : public krnl::vfs::VirtualProvider {
 public:
@@ -295,17 +303,23 @@ public:
 
   // The title's id (e.g. "PPSA03311"). PS5 backups carry sce_sys/param.json
   // instead of the PS4 param.sfo; pull the "titleId" string out of it.
-  std::string titleId() {
+  std::string titleId() { return paramJsonField("titleId"); }
+
+  // param.json spells the SDK version as a 64-bit hex string ("0x0300...")
+  // whose top half is the 0xMMmmpppp form libkernel compares against.
+  uint32_t sdkVersion() { return parseSdkVersion(paramJsonField("sdkVersion")); }
+
+private:
+  std::string paramJsonField(const char *key) {
     const auto *node = fs_.find("/sce_sys/param.json");
     if (!node || node->size > (1u << 20))
       return {};
     std::string js(node->size, '\0');
     if (fs_.read(*node, js.data(), 0, static_cast<int64_t>(js.size())) <= 0)
       return {};
-    return jsonGetString(js, "titleId");
+    return jsonGetString(js, key);
   }
 
-private:
   struct Ufs2File : krnl::vfs::VirtualFile {
     vfs::Ufs2Filesystem *fs;
     vfs::Ufs2Filesystem::Node node;
@@ -353,6 +367,7 @@ void deltaCore::boot(const base::String &xdir) {
   const bool isAppDir = !isPkg && !isFfpkg && utl::File(base::String(appJson.c_str()),
                                                        utl::fileMode::read).Exists();
   base::String mainModule = path;
+  uint32_t sdkVersion = 0;
 
   if (isPkg) {
     auto provider = std::make_shared<PkgProvider>(path);
@@ -378,6 +393,7 @@ void deltaCore::boot(const base::String &xdir) {
     bool decrypted = provider->hasDecrypted();
     krnl::vfs::mountVirtual("/app0", provider);
     krnl::vfs::setTitleId(provider->titleId());
+    sdkVersion = provider->sdkVersion();
     mainModule = base::String(decrypted ? "/app0/decrypted/eboot.bin"
                                         : "/app0/eboot.bin");
     LOG_INFO("mounted ffpkg at /app0 ({}), boot module {}",
@@ -388,10 +404,24 @@ void deltaCore::boot(const base::String &xdir) {
       std::string js(static_cast<size_t>(f.GetSize()), '\0');
       f.Read(js.data(), js.size());
       krnl::vfs::setTitleId(jsonGetString(js, "titleId"));
+      sdkVersion = parseSdkVersion(jsonGetString(js, "sdkVersion"));
     }
     mainModule = base::String("/app0/eboot.bin");
     LOG_INFO("mounted app dir at /app0 ({}), boot module {}",
              krnl::vfs::titleId().c_str(), mainModule.c_str());
+  }
+
+  // /download0 is the title's writable data volume (patches, add-on content,
+  // its own bookkeeping). It always exists on the console, and a title that
+  // writes there and reads back fails hard when it doesn't: Skyrim rebuilds its
+  // plugin list into /download0/Plugins.txt, and with the write lost it boots
+  // with no plugins, no archives and a null menu movie.
+  if (isPkg || isFfpkg || isAppDir) {
+    const char *home = std::getenv("HOME");
+    std::string tid = krnl::vfs::titleId();
+    std::string dl = std::string(home ? home : ".") + "/.prosperity/download/" +
+                     (tid.empty() ? std::string("UNKNOWN") : tid);
+    krnl::vfs::mountWritable("/download0", dl.c_str());
   }
 
   // These all boot from an /app0 mount rather than a bare host path.
@@ -404,10 +434,11 @@ void deltaCore::boot(const base::String &xdir) {
     gfx::setTitle(("prosperity - " + (tid.empty() ? std::string("unknown") : tid) +
                    (isPs5 ? " (PS5)" : " (PS4)")).c_str());
   }
-  std::thread ctx([mainModule = std::move(mainModule), mounted, isPs5]() {
+  std::thread ctx([mainModule = std::move(mainModule), mounted, isPs5, sdkVersion]() {
     auto p = base::MakeUnique<krnl::proc>();
     if (isPs5)
       p->setPlatform(krnl::proc::platform::ps5);
+    p->setSdkVersion(sdkVersion);
     if (!p->create(mainModule, mounted))
       return;
 

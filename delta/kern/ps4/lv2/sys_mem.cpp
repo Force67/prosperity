@@ -179,6 +179,20 @@ uint8_t *PS4ABI sys_mmap(void *addr, size_t size, uint32_t prot, uint32_t flags,
       addr = nullptr;
   }
 
+  // A hint inside the reserved user-stack region is guest-owned address space:
+  // kern.usrstack hands the guest that region's top and libkernel places the
+  // initial thread's system TLS just below it. Our own PROT_NONE reservation
+  // makes the MAP_FIXED_NOREPLACE probe below fail, so the block would get
+  // relocated and libkernel then reports its internal memory pool as exhausted.
+  // Commit it where the guest asked instead.
+  bool inUserStack = false;
+  if (addr) {
+    auto &env = proc->getEnv();
+    auto a = reinterpret_cast<uintptr_t>(addr);
+    auto lo = reinterpret_cast<uintptr_t>(env.userStack);
+    inUserStack = env.userStack && a >= lo && a + size <= lo + env.userStackSize;
+  }
+
   if (fd != -1) {
     auto *obj = proc->getObjTable().get(fd);
     if (std::getenv("DELTA_MMAPFD_TRACE"))
@@ -222,6 +236,8 @@ uint8_t *PS4ABI sys_mmap(void *addr, size_t size, uint32_t prot, uint32_t flags,
       ptr = utl::allocMem(addr, size, ppt::w, alt::reservecommit);
       if (!ptr)
         ptr = utl::allocMem(addr, size, ppt::w, alt::commit);  // maybe pre-reserved
+    } else if (inUserStack) {
+      ptr = utl::allocMem(addr, size, ppt::w, alt::commit);
     } else if (utl::allocMem(addr, size, ppt::w, alt::reserve)) {
       // A hint must never alias an existing mapping. reservecommit uses MAP_FIXED
       // and would clobber it, so probe with a NOREPLACE reserve first and only

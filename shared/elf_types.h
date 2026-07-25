@@ -65,6 +65,10 @@ enum ELFDynTag {
   DT_SCE_RELA = 0x6100002f,
   DT_SCE_RELASZ = 0x61000031,
   DT_SCE_HASH = 0x61000025,
+  // Prospero replaces DT_SCE_NEEDED_MODULE/DT_SCE_IMPLIB with these; the value
+  // is (index << 48) | (version << 32) | strtabOffset.
+  DT_SCE_PS5_IMPORT_MODULE = 0x61000045,
+  DT_SCE_PS5_IMPORT_LIB = 0x61000049,
 };
 
 enum sceModuleAttr {

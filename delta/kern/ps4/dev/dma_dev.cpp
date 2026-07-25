@@ -78,23 +78,54 @@ std::once_flag g_dmemBackingOnce;
 // dereferenced the null/-1 result (Shadow_Shipping+0x189a7 / +0x8d9b7).
 int dmemAllocate(uint64_t lo, uint64_t hi, uint64_t len, uint64_t align,
                  uint32_t memType, uint64_t *out) {
+  // A caller that supplies its own search window means it, offset 0 included:
+  // Skyrim reserves exactly [0, 0x200000) and falls back to carving its whole
+  // heap out of 64 KiB mmaps when that fails.
+  const bool windowed = hi != 0 && hi < kDmemTotal;
   if (hi == 0 || hi > kDmemTotal)
     hi = kDmemTotal;
-  if (lo == 0)
-    lo = kDmemBase;
   if (len == 0 || align == 0 || (align & (align - 1)) || lo >= hi)
     return -22 /*EINVAL*/;
   std::lock_guard<std::mutex> lk(g_dmemMutex);
-  uint64_t cand = (lo + align - 1) & ~(align - 1);
-  for (const auto &r : g_dmemRegions) {
-    if (r.end <= cand)
-      continue;                 // fully below the candidate
-    if (r.start >= cand + len)
-      break;                    // hole before this region fits (list is sorted)
-    cand = ((r.end > cand ? r.end : cand) + align - 1) & ~(align - 1);
+  uint64_t cand;
+  if (windowed) {
+    // First fit inside the window the caller asked for.
+    cand = (lo + align - 1) & ~(align - 1);
+    for (const auto &r : g_dmemRegions) {
+      if (r.end <= cand)
+        continue;               // fully below the candidate
+      if (r.start >= cand + len)
+        break;                  // hole before this region fits (list is sorted)
+      cand = ((r.end > cand ? r.end : cand) + align - 1) & ~(align - 1);
+    }
+    if (cand + len > hi)
+      return -12 /*ENOMEM: window exhausted*/;
+  } else {
+    // "Anywhere" (searchStart 0, whole pool): take the highest hole that fits.
+    // Titles carve their own windows upwards from offset 0 -- Skyrim walks the
+    // pool in 2 MiB steps -- so placing these at the bottom would have the two
+    // collide; kDmemBase then also keeps offset 0 out of a window-less answer.
+    uint64_t top = hi;
+    cand = UINT64_MAX;
+    for (auto it = g_dmemRegions.rbegin(); it != g_dmemRegions.rend(); ++it) {
+      if (it->start >= top) {
+        top = it->start;
+        continue;
+      }
+      uint64_t base = (top - len) & ~(align - 1);
+      if (top >= len && base >= it->end && base >= kDmemBase) {
+        cand = base;
+        break;
+      }
+      top = it->start;
+    }
+    if (cand == UINT64_MAX) {
+      uint64_t base = (top - len) & ~(align - 1);
+      if (top < len || base < kDmemBase)
+        return -12 /*ENOMEM*/;
+      cand = base;
+    }
   }
-  if (cand + len > hi)
-    return -12 /*ENOMEM: window exhausted*/;
   auto it = g_dmemRegions.begin();
   while (it != g_dmemRegions.end() && it->start < cand)
     ++it;

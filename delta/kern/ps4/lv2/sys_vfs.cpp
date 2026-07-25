@@ -193,6 +193,12 @@ static device *fdToDevice(uint32_t fd) {
 int64_t PS4ABI sys_read(uint32_t fd, void *buf, size_t nbytes) {
   auto *d = fdToDevice(fd);
   if (!d) {
+    // The three standard descriptors exist on a real process but have nothing to
+    // read; report end-of-file rather than EBADF. Skyrim's INI parser falls back
+    // to stderr when the file is missing and its fgets loop only stops on EOF --
+    // an error return left it reading fd 2 forever at 100% CPU.
+    if (fd <= 2)
+      return 0;
     if (std::getenv("DELTA_RDALL"))
       std::fprintf(stderr, "[rd] fd=%u -> EBADF (no device)\n", fd);
     return -SysError::eBADF;

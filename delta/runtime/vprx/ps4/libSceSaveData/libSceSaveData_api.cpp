@@ -37,5 +37,12 @@ static const runtime::funcInfo functions[] = {
 
 MODULE_INIT(libSceSaveData);
 
+// PS5 shares this table: Prospero's libSceSaveData.native exports the same NIDs
+// for the calls below with the same ABI. Its newer mount/search entry points are
+// not here and stay LLE. Without the shim sceSaveDataInitialize3 fails (it opens
+// an IPMI session to the save-data daemon we don't host) and a title that retries
+// it spins forever.
+MODULE_INIT_PS5(libSceSaveData);
+
 // Anchor referenced from vprx.cpp so the linker keeps this archive member.
 extern "C" int vprx_anchor_libSceSaveData = 1;

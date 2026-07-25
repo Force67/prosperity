@@ -117,15 +117,46 @@ int PS4ABI sys_sysctl(int *name, uint32_t namelen, void *oldp, size_t *oldlenp,
     return 0;
   }
 
-  // PS5 kern.proc.{36,79}: extra app/process-info selectors the PS5 system-service
+  // PS5 kern.proc.36: the SDK version the title was compiled against.
+  // sceKernelGetCompiledSdkVersion reads it from here and libkernel branches on
+  // it all over process init -- notably, below SDK 1.70 it carves the initial
+  // thread's static TLS out of the small SceKernelInternalMemory arena instead
+  // of mmap'ing it, which a title with a 2 MiB PT_TLS (Skyrim) overflows.
+  else if (name[0] == 1 && name[1] == 14 && name[2] == 36 && namelen >= 3 &&
+           proc::getActive()->getPlatform() == proc::platform::ps5) {
+    if (oldp && oldlenp) {
+      std::memset(oldp, 0, *oldlenp);
+      if (*oldlenp >= sizeof(uint32_t))
+        *reinterpret_cast<uint32_t *>(oldp) = proc::getActive()->getSdkVersion();
+    }
+    return 0;
+  }
+
+  // PS5 kern.proc.68: an 8-byte per-process info block libkernel caches for a
+  // getter libSceSaveData calls during sceSaveDataInitialize3. libkernel reads
+  // the second dword as the value and treats a non-zero block as "already
+  // cached". Left as ENOENT the getter returns 0x80020001 forever and the
+  // title's save-data init state machine spins at 100% CPU with no syscalls.
+  // libkernel's own caller defaults the value to 0 when the getter fails, so 0
+  // is the safe answer.
+  else if (name[0] == 1 && name[1] == 14 && name[2] == 68 && namelen >= 3 &&
+           proc::getActive()->getPlatform() == proc::platform::ps5) {
+    if (oldp && oldlenp) {
+      std::memset(oldp, 0, *oldlenp);
+      if (*oldlenp >= 2 * sizeof(uint32_t))
+        static_cast<uint32_t *>(oldp)[0] = 1;
+    }
+    return 0;
+  }
+
+  // PS5 kern.proc.79: another app/process-info selector the PS5 system-service
   // client polls during net/NP init (kern.proc.35 is GetAppInfo above). Left as
-  // ENOENT they read as "retry", so the client thread spins re-querying and
+  // ENOENT it reads as "retry", so the client thread spins re-querying and
   // creating/destroying a wait object each pass -- leaking the guest's fixed
   // ScePthread internal heap until it throws bad_alloc. Answer with a zeroed
   // buffer + success (same as .35) so the poll resolves. PS5-only: PS4 titles
-  // never query these selectors, so the PS4 path stays byte-identical.
-  else if (name[0] == 1 && name[1] == 14 && (name[2] == 36 || name[2] == 79) &&
-           namelen >= 3 &&
+  // never query this selector, so the PS4 path stays byte-identical.
+  else if (name[0] == 1 && name[1] == 14 && name[2] == 79 && namelen >= 3 &&
            proc::getActive()->getPlatform() == proc::platform::ps5) {
     if (oldp && oldlenp) {
       std::memset(oldp, 0, *oldlenp);

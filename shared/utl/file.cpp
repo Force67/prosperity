@@ -65,17 +65,11 @@ public:
   }
 
   uint64_t Read(void *buf, size_t size) override {
-    uint64_t x = std::fread(buf, size, 1, fptr);
-#if DELTA_DBG
-    if (x != 1) {
-      __debugbreak();
-    }
-#endif
-
-    if (x == 1)
-      return size;
-
-    return x;
+    // Count bytes, not one object of `size` bytes: fread(buf, size, 1, f)
+    // returns 0 for any partial object, so a guest read() that asks for more
+    // than the file holds (Skyrim reads its 2 KiB INI in 16 KiB chunks) came
+    // back as end-of-file and the title loaded nothing.
+    return std::fread(buf, 1, size, fptr);
   }
 
   uint64_t Write(const void *buf, size_t size) override {

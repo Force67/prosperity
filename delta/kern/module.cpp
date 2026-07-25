@@ -347,8 +347,34 @@ void smodule::digestDynamicPs5(const ELFPgHeader *dynS) {
     case DT_FINI:
       info.finiAddr = getAddress<uint8_t>(d->un.ptr);
       break;
+    case DT_SCE_PS5_IMPORT_LIB: {
+      auto &e = impLibs.emplace_back();
+      e.id = static_cast<int32_t>(d->un.value >> 48);
+      e.exported = false;
+      e.name = nullptr;  // strtab may not be known yet; filled in below
+      break;
+    }
+    case DT_SCE_PS5_IMPORT_MODULE: {
+      auto &e = impModules.emplace_back();
+      e.id = static_cast<int32_t>(d->un.value >> 48);
+      e.name = nullptr;
+      break;
+    }
     default:
       break;
+    }
+  }
+
+  // Both tables index the string table, which DT_STRTAB may only have announced
+  // after them; resolve the names in a second pass.
+  if (strtab.ptr) {
+    size_t li = 0, mi = 0;
+    for (int i = 0; i < count; i++) {
+      auto *d = &dynamics[i];
+      if (d->tag == DT_SCE_PS5_IMPORT_LIB && li < impLibs.size())
+        impLibs[li++].name = strtab.ptr + (d->un.value & 0xFFFFFFFF);
+      else if (d->tag == DT_SCE_PS5_IMPORT_MODULE && mi < impModules.size())
+        impModules[mi++].name = strtab.ptr + (d->un.value & 0xFFFFFFFF);
     }
   }
 
@@ -641,17 +667,40 @@ bool smodule::resolveObfSymbol(const char *name, uintptr_t &ptrOut) {
     //   - libScePad: the real one reads controller state the pad daemon writes
     //     into its shared block, so the title only ever sees a disconnected pad
     //     and no input. The HLE feeds it SDL keyboard/gamepad instead.
+    //   - libSceSaveData: sceSaveDataInitialize3 opens an IPMI session to the
+    //     save-data daemon; without it every call returns an error and a title
+    //     that retries (Skyrim's boot state machine) spins at 100% CPU forever.
     // NIDs are globally unique, so probing each forced-HLE table by name is safe
     // (a userService NID only ever matches the userService table). Everything else
     // (incl. libSceGnmDriver/AGC, which run LLE fine) stays LLE.
     static const char *const kPs5ForcedHle[] = {"libSceVideoOut",
-                                                "libSceUserService", "libScePad"};
+                                                "libSceUserService", "libScePad",
+                                                "libSceSaveData"};
     for (const char *lib : kPs5ForcedHle) {
       if (uintptr_t hle = runtime::vprx_get_forced(lib, hid)) {
         char tn[64];
         std::snprintf(tn, sizeof(tn), "%s!%.11s", lib, name);
         ptrOut = cpu::makeHostThunk(reinterpret_cast<void *>(hle), tn);
         return true;
+      }
+    }
+    // Bind to the module the import actually names. A title that ships SDK
+    // modules in /app0/sce_module (libc.prx) gets the same NIDs from its own
+    // copy and from the firmware's libSceLibcInternal, but only the named one
+    // has the title's SceLibcMallocReplace installed in its dispatch table --
+    // resolving by load order alone sends Skyrim's malloc/memalign into
+    // libSceLibcInternal's 16 MiB internal arena instead of the game's manager.
+    uint64_t libid = 0, modid = 0;
+    if (decodeNid(name, libid, modid)) {
+      for (auto &m : impModules) {
+        if (m.id != static_cast<int32_t>(modid) || !m.name)
+          continue;
+        if (auto named = process->getModule(base::StringRef(m.name)))
+          if (uintptr_t a = named->getExport(hid)) {
+            ptrOut = a;
+            return true;
+          }
+        break;
       }
     }
     for (auto &mod : process->getModuleList())

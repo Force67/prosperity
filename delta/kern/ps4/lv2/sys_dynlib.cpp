@@ -24,7 +24,6 @@
 #include "error_table.h"
 #include "sys_dynlib.h"
 
-#include "kern/ps5/lv2/proc_param.h"
 #include "sys_mem.h"
 #include <runtime/vprx/vprx.h>
 
@@ -192,11 +191,7 @@ int PS4ABI sys_dynlib_get_proc_param(void **data, size_t *size) {
   if (mod) {
     auto &info = mod->getInfo();
 
-    void *pp = reinterpret_cast<void *>(info.procParam);
-    if (proc::getActive()->getPlatform() == proc::platform::ps5)
-      pp = ps5::procParam(pp, info.procParamSize);
-
-    *data = pp;
+    *data = reinterpret_cast<void *>(info.procParam);
     *size = info.procParamSize;
     if (std::getenv("DELTA_PROCPARAM_TRACE"))
       std::fprintf(stderr, "[procparam] get_proc_param -> data=%p size=%#zx\n",

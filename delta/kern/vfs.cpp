@@ -6,11 +6,14 @@
  * in the root of the source tree.
  */
 
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <dirent.h>
 #include <map>
+#include <mutex>
+#include <string>
 #include <sys/stat.h>
 #include <sys/types.h>
 
@@ -53,6 +56,18 @@ void mountWritable(const char *guest, const char *host) {
 void mountVirtual(const char *guest, std::shared_ptr<VirtualProvider> provider) {
   g_mounts.push_back(
       {base::String(guest), base::String(), std::move(provider)});
+}
+
+// The process working directory is /app0 (sys_getcwd reports it) and the guest
+// separator is '/'. Bethesda's engine opens plain relative paths ("Settings")
+// and Windows-style ones, so normalise both before the mount lookup.
+static base::String normalizePath(const char *path) {
+  base::String out;
+  if (path && path[0] != '/')
+    out += "/app0/";
+  for (const char *p = path; p && *p; p++)
+    out += (*p == '\\') ? '/' : *p;
+  return out;
 }
 
 // Longest matching mount (host or virtual). prefixLen is the matched length.
@@ -139,6 +154,67 @@ base::String joinHost(const base::String &host, const char *rest) {
   out += rest;
   return out;
 }
+
+// /app0 is case-insensitive on the console: Skyrim's disc image holds "data/"
+// and "Skyrim_de.ini", and the engine opens "/app0/Data/..." and "Skyrim.INI".
+// When the exact spelling misses, walk the path a component at a time and take
+// the unique case-insensitive match. Directory listings are memoised: a title
+// streaming thousands of assets would otherwise rescan the same directory on
+// every open.
+std::mutex g_caseMutex;
+std::map<std::string, std::map<std::string, std::string>> g_caseIndex;
+
+// Returns the on-disc spelling of `name` in `dir`, or null. Caller holds no
+// lock; the index is shared across the title's streaming threads.
+const std::string *lookupCaseInsensitive(const std::string &dir,
+                                         const std::string &name) {
+  std::lock_guard<std::mutex> lk(g_caseMutex);
+  auto it = g_caseIndex.find(dir);
+  if (it == g_caseIndex.end()) {
+    std::map<std::string, std::string> index;
+    if (DIR *d = opendir(dir.c_str())) {
+      while (dirent *e = readdir(d)) {
+        std::string lower(e->d_name);
+        for (auto &c : lower)
+          c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        index.emplace(std::move(lower), e->d_name);
+      }
+      closedir(d);
+    }
+    it = g_caseIndex.emplace(dir, std::move(index)).first;
+  }
+  std::string lower(name);
+  for (auto &c : lower)
+    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  auto hit = it->second.find(lower);
+  return hit == it->second.end() ? nullptr : &hit->second;
+}
+
+base::String fixHostCase(const base::String &host) {
+  struct stat st;
+  if (::stat(host.c_str(), &st) == 0)
+    return host;
+
+  std::string path(host.c_str());
+  size_t pos = path.find('/', 1);
+  std::string built = pos == std::string::npos ? path : path.substr(0, pos);
+  while (pos != std::string::npos) {
+    size_t next = path.find('/', pos + 1);
+    std::string comp = path.substr(pos + 1, next == std::string::npos
+                                                ? std::string::npos
+                                                : next - pos - 1);
+    std::string cand = built + "/" + comp;
+    if (::stat(cand.c_str(), &st) != 0) {
+      const std::string *real = lookupCaseInsensitive(built, comp);
+      if (!real)
+        return host;  // no match: let the caller report the original miss
+      cand = built + "/" + *real;
+    }
+    built = std::move(cand);
+    pos = next;
+  }
+  return base::String(built.c_str());
+}
 } // namespace
 
 utl::File openRead(const char *path) {
@@ -147,6 +223,22 @@ utl::File openRead(const char *path) {
 
   if (std::getenv("DELTA_OPEN_TRACE"))
     std::fprintf(stderr, "[open] %s\n", path);
+
+  // DELTA_VFS_HIDE=<substr>[,<substr>]: report a matching path as missing, to
+  // test whether an optional asset (an intro movie, a DLC list) is what a boot
+  // path chokes on.
+  if (const char *hide = std::getenv("DELTA_VFS_HIDE")) {
+    for (const char *p = hide; *p;) {
+      const char *sep = std::strchr(p, ',');
+      std::string pat(p, sep ? size_t(sep - p) : std::strlen(p));
+      if (!pat.empty() && std::strstr(path, pat.c_str()))
+        return utl::File();
+      p = sep ? sep + 1 : p + pat.size();
+    }
+  }
+
+  base::String norm = normalizePath(path);
+  path = norm.c_str();
 
   size_t len = 0;
   const mountPoint *m = findMount(path, len);
@@ -164,7 +256,7 @@ utl::File openRead(const char *path) {
   // A raw console app dump keeps each executable twice: the encrypted SELF under
   // its real name and the decrypted ELF beside it as "<name>.esbak". Prefer the
   // decrypted one; we have no SELF crypto.
-  base::String host = joinHost(m->host, rest);
+  base::String host = fixHostCase(joinHost(m->host, rest));
   utl::File esbak(host + ".esbak", utl::fileMode::read);
   if (esbak.Exists() && esbak.IsOpen())
     return esbak;
@@ -178,6 +270,8 @@ utl::File openRead(const char *path) {
 base::String resolveWritable(const char *path) {
   if (!path)
     return {};
+  base::String norm = normalizePath(path);
+  path = norm.c_str();
   size_t len = 0;
   const mountPoint *m = findMount(path, len);
   if (!m || m->provider || !m->writable)
@@ -249,6 +343,8 @@ bool listDir(const char *path, std::vector<DirEntry> &out) {
   if (!path)
     return false;
 
+  base::String norm = normalizePath(path);
+  path = norm.c_str();
   size_t len = 0;
   const mountPoint *m = findMount(path, len);
   if (!m)
@@ -259,7 +355,7 @@ bool listDir(const char *path, std::vector<DirEntry> &out) {
     return m->provider->list(rest, out);
 
   // Host mount: enumerate the host directory.
-  base::String hostDir = joinHost(m->host, rest);
+  base::String hostDir = fixHostCase(joinHost(m->host, rest));
   DIR *d = opendir(hostDir.c_str());
   if (!d)
     return false;

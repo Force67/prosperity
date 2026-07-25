@@ -67,10 +67,17 @@ public:
   platform getPlatform() const { return plat; }
   void setPlatform(platform p) { plat = p; }
 
+  // SDK version the title was built against, 0xMMmmpppp (PS5 titles carry it in
+  // sce_sys/param.json). libkernel reads it back through sysctl kern.proc.36 and
+  // branches on it; 0 makes it take pre-1.70 code paths.
+  uint32_t getSdkVersion() const { return sdkVersion; }
+  void setSdkVersion(uint32_t v) { sdkVersion = v; }
+
 private:
   vmManager vmem;
   procInfo env;
   platform plat = platform::ps4;
+  uint32_t sdkVersion = 0;
   moduleList modules;
   objectTable objects;
   uint32_t handleCounter = 1;
