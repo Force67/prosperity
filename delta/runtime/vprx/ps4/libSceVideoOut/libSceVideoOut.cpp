@@ -12,9 +12,11 @@
 #include <cstdio>
 #include <cstring>
 #include <mutex>
+#include <string>
 #include <thread>
 
 #include "gfx/gfx.h"
+#include "kern/vfs.h"
 #include "gpu/cmd_processor.h"
 #include "kern/proc.h"
 #include "kern/ps4/lv2/sys_event.h"
@@ -155,7 +157,10 @@ bool ensureGfx(uint32_t w, uint32_t h) {
   st = g_gfxState.load();
   if (st != 0)
     return st == 1;
-  if (!gfx::init("prosperity - The Binding of Isaac", w, h)) {
+  const std::string &tid = krnl::vfs::titleId();
+  const std::string title =
+      "prosperity - " + (tid.empty() ? std::string("unknown") : tid) + " (PS4)";
+  if (!gfx::init(title.c_str(), w, h)) {
     std::printf("[videoout] gfx::init FAILED (no window this run)\n");
     g_gfxState.store(2);
     return false;

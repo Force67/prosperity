@@ -68,6 +68,45 @@ bool BufLoadIsVertexFetch(const Inst& in, bool chained) {
   return idxen && chained;
 }
 
+// Which entry of a user-data descriptor TABLE each buffer_load reads.
+//
+// A V# is 4 dwords, so one s_load_dwordx4 per table entry; the entry is selected
+// by that s_load's SGPR soffset, computed at runtime from an index table the game
+// uploads (`s_lshl_b32 soff, sN, 4` + `s_and_b32 soff, soff, 0x1f0`). The compiler
+// emits those s_loads in entry order, but SCHEDULES the buffer_loads that consume
+// them in a different order -- so the entry must be taken from the s_load, not
+// from the position of the load. Returns, per buffer_load pc, {table root SGPR
+// pair, entry index}; absent means the V# is inline in user data at srsrc.
+std::unordered_map<uint32_t, std::pair<uint32_t, uint32_t>> MapTableChainedLoads(
+    const Program& insts) {
+  std::unordered_map<uint32_t, std::pair<uint32_t, uint32_t>> out;
+  int32_t root[128];
+  uint32_t slot[128] = {};
+  for (int i = 0; i < 128; i++) root[i] = -1;
+  std::unordered_map<uint32_t, uint32_t> next_slot;  // per table root
+  for (const Inst& in : insts) {
+    if (in.enc == Enc::kSop1 && in.opcode == 0x20) break;  // s_setpc_b64 (return)
+    if (in.enc == Enc::kSopp && in.opcode == 1) break;     // s_endpgm
+    if (in.enc == Enc::kSmrd && in.opcode <= 0x04) {  // s_load_dword{,x2,x4,x8,x16}
+      const uint32_t sdst = (in.raw[0] >> 6) & 0x7F;
+      const uint32_t sbase = (in.raw[0] & 0x3F) * 2;
+      const uint32_t nreg = in.opcode == 0 ? 1 : in.opcode == 1 ? 2
+                          : in.opcode == 2 ? 4 : in.opcode == 3 ? 8 : 16;
+      const uint32_t s = in.opcode == 2 ? next_slot[sbase]++ : 0;
+      for (uint32_t k = 0; k < nreg && sdst + k < 128; k++) {
+        root[sdst + k] = static_cast<int32_t>(sbase);
+        slot[sdst + k] = s;
+      }
+      continue;
+    }
+    if (in.enc != Enc::kMubuf || in.opcode > 0x03) continue;
+    const uint32_t srsrc = ((in.raw[1] >> 16) & 0x1F) * 4;
+    if (srsrc < 128 && root[srsrc] >= 0)
+      out[in.pc] = {static_cast<uint32_t>(root[srsrc]), slot[srsrc]};
+  }
+  return out;
+}
+
 const char* EncName(Enc e) {
   switch (e) {
     case Enc::kSop1: return "sop1"; case Enc::kSop2: return "sop2";
@@ -251,32 +290,20 @@ void RdnaPlanBufLoadCbufs(const Program& program, uint32_t first_binding,
                           std::unordered_map<uint32_t, uint32_t>& bindings,
                           std::unordered_map<uint32_t, uint32_t>& by_pc) {
   // Mirror ParseFetchInsts' walk: srsrc SGPRs written by an s_load hold V#s from
-  // the user-data descriptor TABLE, whose entries are consumed by buffer loads
-  // in program order (the sprite VS reads 6 vertex V#s then 2 constant-block
-  // V#s). A constant load through such a V# becomes a chained cbuf (root = the
-  // s_load's sbase pair, table offset = slot * 16 bytes); the renderer derefs
-  // the table pointer at draw time. srsrc-keyed bindings collide when the shader
-  // reuses an SGPR quad (s[8:11] = MVP V# then vertex V#), so constant loads are
-  // bound per-instruction (by_pc) instead.
-  int32_t loaded_from[128];
-  for (int i = 0; i < 128; i++) loaded_from[i] = -1;
-  uint32_t slot = 0;
+  // the user-data descriptor TABLE (entry index from MapTableChainedLoads). A
+  // constant load through such a V# becomes a chained cbuf (root = the s_load's
+  // sbase pair, table offset = entry * 16 bytes); the renderer derefs the table
+  // pointer at draw time. srsrc-keyed bindings collide when the shader reuses an
+  // SGPR quad (s[8:11] = MVP V# then vertex V#), so constant loads are bound
+  // per-instruction (by_pc) instead.
+  const auto chained_loads = MapTableChainedLoads(program);
   for (const Inst& inst : program) {
     if (inst.enc == Enc::kSop1 && inst.opcode == 0x20) break;  // s_setpc_b64
     if (inst.enc == Enc::kSopp && inst.opcode == 1) break;     // s_endpgm
-    if (inst.enc == Enc::kSmrd && inst.opcode <= 0x04) {
-      const uint32_t sdst = (inst.raw[0] >> 6) & 0x7F;
-      const uint32_t sbase = (inst.raw[0] & 0x3F) * 2;
-      const uint32_t nreg = inst.opcode == 0 ? 1 : inst.opcode == 1 ? 2
-                          : inst.opcode == 2 ? 4 : inst.opcode == 3 ? 8 : 16;
-      for (uint32_t k = 0; k < nreg && sdst + k < 128; k++)
-        loaded_from[sdst + k] = static_cast<int32_t>(sbase);
-      continue;
-    }
     if (inst.enc != Enc::kMubuf || inst.opcode > 0x03) continue;
     const uint32_t srsrc = ((inst.raw[1] >> 16) & 0x1F) * 4;
-    const bool chained = srsrc < 128 && loaded_from[srsrc] >= 0;
-    const uint32_t my_slot = chained ? slot++ : 0;
+    const auto chain = chained_loads.find(inst.pc);
+    const bool chained = chain != chained_loads.end();
     if (BufLoadIsVertexFetch(inst, chained)) continue;  // real fetch -> vertex input
     const uint32_t binding = first_binding + static_cast<uint32_t>(cbufs.size());
     if (chained) {
@@ -284,10 +311,10 @@ void RdnaPlanBufLoadCbufs(const Program& program, uint32_t first_binding,
       by_pc[inst.pc] = binding;
       ShaderCbuf cb;
       cb.binding = binding;
-      cb.ud_sgpr = static_cast<uint32_t>(loaded_from[srsrc]);
+      cb.ud_sgpr = chain->second.first;
       cb.num_dwords = 16;
       cb.chain_len = 1;
-      cb.chain_off[0] = my_slot * 16;
+      cb.chain_off[0] = chain->second.second * 16;
       cbufs.push_back(cb);
       continue;
     }
@@ -787,26 +814,11 @@ struct FetchAttr {
 // so buffer_load_format never reaches RdnaEmitInst as an unsupported op.
 std::vector<FetchAttr> ParseFetchInsts(const Program& insts) {
   std::vector<FetchAttr> out;
-  uint32_t sem = 0;   // dense vertex-input location (per-vertex fetches only)
-  uint32_t slot = 0;  // V#-table entry index (ALL table-chained buffer loads
-                      // consume entries in program order, incl. constant loads)
-  // Track SGPRs written by s_load* -- the NGG VS loads its vertex-fetch V# into
-  // srsrc from a user_data pointer (a TABLE of V#s), so the real table root is
-  // that s_load's sbase, not srsrc itself. Map each loaded SGPR -> its sbase.
-  int32_t loaded_from[128];
-  for (int i = 0; i < 128; i++) loaded_from[i] = -1;
+  uint32_t sem = 0;  // dense vertex-input location (per-vertex fetches only)
+  const auto chained_loads = MapTableChainedLoads(insts);
   for (const Inst& in : insts) {
     if (in.enc == Enc::kSop1 && in.opcode == 0x20) break;  // s_setpc_b64 (return)
     if (in.enc == Enc::kSopp && in.opcode == 1) break;     // s_endpgm
-    if (in.enc == Enc::kSmrd && in.opcode <= 0x04) {  // s_load_dword{,x2,x4,x8,x16}
-      const uint32_t sdst = (in.raw[0] >> 6) & 0x7F;
-      const uint32_t sbase = (in.raw[0] & 0x3F) * 2;
-      const uint32_t nreg = in.opcode == 0 ? 1 : in.opcode == 1 ? 2
-                          : in.opcode == 2 ? 4 : in.opcode == 3 ? 8 : 16;
-      for (uint32_t k = 0; k < nreg && sdst + k < 128; k++)
-        loaded_from[sdst + k] = static_cast<int32_t>(sbase);
-      continue;
-    }
     if (in.enc != Enc::kMubuf || in.opcode > 0x03) continue;  // buffer_load_format_*
     const uint32_t vdata = (in.raw[1] >> 8) & 0xFF;
     const uint32_t srsrc = ((in.raw[1] >> 16) & 0x1F) * 4;
@@ -815,15 +827,12 @@ std::vector<FetchAttr> ParseFetchInsts(const Program& insts) {
     const uint32_t vaddr = in.raw[1] & 0xFF, soffset = (in.raw[1] >> 24) & 0xFF;
     // If srsrc's V# was loaded via s_load from a user_data pointer, this fetch
     // reads a TABLE of V#s at that pointer: table_sgpr = the s_load's sbase and
-    // this attribute is the slot-th 16-byte (4-dword) V# in the table. Otherwise
-    // the V# is inline in user data at srsrc (table_sgpr = srsrc, dword_off = 0).
-    uint32_t table_sgpr = srsrc, dword_off = 0;
-    const bool chained = srsrc < 128 && loaded_from[srsrc] >= 0;
-    if (chained) {
-      table_sgpr = static_cast<uint32_t>(loaded_from[srsrc]);
-      dword_off = slot * 4;
-      slot++;
-    }
+    // this attribute is that s_load's 16-byte (4-dword) entry. Otherwise the V#
+    // is inline in user data at srsrc (table_sgpr = srsrc, dword_off = 0).
+    const auto chain = chained_loads.find(in.pc);
+    const bool chained = chain != chained_loads.end();
+    const uint32_t table_sgpr = chained ? chain->second.first : srsrc;
+    const uint32_t dword_off = chained ? chain->second.second * 4 : 0;
     const bool vtx = BufLoadIsVertexFetch(in, chained);
     if (ShDbg())
       std::fprintf(stderr,
