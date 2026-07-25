@@ -638,11 +638,14 @@ bool smodule::resolveObfSymbol(const char *name, uintptr_t &ptrOut) {
     //   - libSceUserService: the real sceUserServiceInitialize spins allocating
     //     buffers forever waiting on the SceUserService IPMI daemon, stalling the
     //     engine's RenderInit before it ever submits GPU work.
+    //   - libScePad: the real one reads controller state the pad daemon writes
+    //     into its shared block, so the title only ever sees a disconnected pad
+    //     and no input. The HLE feeds it SDL keyboard/gamepad instead.
     // NIDs are globally unique, so probing each forced-HLE table by name is safe
     // (a userService NID only ever matches the userService table). Everything else
     // (incl. libSceGnmDriver/AGC, which run LLE fine) stays LLE.
     static const char *const kPs5ForcedHle[] = {"libSceVideoOut",
-                                                "libSceUserService"};
+                                                "libSceUserService", "libScePad"};
     for (const char *lib : kPs5ForcedHle) {
       if (uintptr_t hle = runtime::vprx_get_forced(lib, hid)) {
         char tn[64];

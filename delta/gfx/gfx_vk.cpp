@@ -27,6 +27,8 @@
 #include <vulkan/vulkan.h>
 
 #include "gfx.h"
+#include <string>
+
 #include "overlay.h"
 #include "overlay_vk.h"
 
@@ -41,6 +43,11 @@ namespace {
       return false;                                                            \
     }                                                                          \
   } while (0)
+
+// Window title set by the boot path (title id + platform). The renderer and the
+// videoout HLE race to bring the window up and each passes its own generic
+// title, so whoever wins uses this instead when it is set.
+std::string g_title;
 
 struct State {
   SDL_Window *window = nullptr;
@@ -276,7 +283,8 @@ bool init(const char *title, uint32_t width, uint32_t height) {
                  SDL_GetError());
     return false;
   }
-  g.window = SDL_CreateWindow(title, (int)width, (int)height,
+  g.window = SDL_CreateWindow(g_title.empty() ? title : g_title.c_str(),
+                              (int)width, (int)height,
                               SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
   if (!g.window) {
     std::fprintf(stderr, "[gfx] SDL_CreateWindow failed: %s\n", SDL_GetError());
@@ -541,6 +549,12 @@ void present(const void *pixels, uint32_t w, uint32_t h, uint32_t srcPitch,
   VkResult pr = vkQueuePresentKHR(g.queue, &pi);
   if (pr == VK_ERROR_OUT_OF_DATE_KHR || pr == VK_SUBOPTIMAL_KHR)
     g.needRecreate = true;
+}
+
+void setTitle(const char *title) {
+  g_title = title ? title : "";
+  if (g.window && !g_title.empty())
+    SDL_SetWindowTitle(g.window, g_title.c_str());
 }
 
 bool available() { return g.window != nullptr && g.swapchain != VK_NULL_HANDLE; }

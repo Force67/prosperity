@@ -20,6 +20,10 @@ enum class PixelFormat {
   bgra8,  // B8G8R8A8 unorm (PS4 scanout default)
 };
 
+// Set the window title (title id + platform). Applies immediately if the window
+// already exists, otherwise it overrides the title the creator passes.
+void setTitle(const char *title);
+
 // Create the window, Vulkan device and swapchain. Returns false on failure.
 // Idempotent: returns true immediately if a window already exists.
 bool init(const char *title, uint32_t width, uint32_t height);

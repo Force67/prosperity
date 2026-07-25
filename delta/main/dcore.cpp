@@ -19,6 +19,7 @@
 #include <logger/logger.h>
 #include <utl/file.h>
 
+#include <gfx/gfx.h>
 #include <kern/vfs.h>
 
 #include "formats/pkg_object.h"
@@ -275,6 +276,25 @@ public:
   // True when the backup carries a decrypted/ tree of plaintext ELFs.
   bool hasDecrypted() { return fs_.find("/decrypted/eboot.bin") != nullptr; }
 
+  // The title's id (e.g. "PPSA03311"). PS5 backups carry sce_sys/param.json
+  // instead of the PS4 param.sfo; pull the "titleId" string out of it.
+  std::string titleId() {
+    const auto *node = fs_.find("/sce_sys/param.json");
+    if (!node || node->size > (1u << 20))
+      return {};
+    std::string js(node->size, '\0');
+    if (fs_.read(*node, js.data(), 0, static_cast<int64_t>(js.size())) <= 0)
+      return {};
+    size_t k = js.find("\"titleId\"");
+    if (k == std::string::npos)
+      return {};
+    size_t open = js.find('"', js.find(':', k) + 1);
+    size_t close = open == std::string::npos ? open : js.find('"', open + 1);
+    if (close == std::string::npos)
+      return {};
+    return js.substr(open + 1, close - open - 1);
+  }
+
 private:
   struct Ufs2File : krnl::vfs::VirtualFile {
     vfs::Ufs2Filesystem *fs;
@@ -342,13 +362,22 @@ void deltaCore::boot(const base::String &xdir) {
     }
     bool decrypted = provider->hasDecrypted();
     krnl::vfs::mountVirtual("/app0", provider);
+    krnl::vfs::setTitleId(provider->titleId());
     mainModule = base::String(decrypted ? "/app0/decrypted/eboot.bin"
                                         : "/app0/eboot.bin");
-    LOG_INFO("mounted ffpkg at /app0, boot module {}", mainModule.c_str());
+    LOG_INFO("mounted ffpkg at /app0 ({}), boot module {}",
+             krnl::vfs::titleId().c_str(), mainModule.c_str());
   }
 
   // Both .pkg and .ffpkg boot from a virtual /app0 mount rather than a host path.
   const bool mounted = isPkg || isFfpkg;
+  // Name the window after the booted title, since the renderer and the videoout
+  // HLE both bring it up with a generic title depending on who gets there first.
+  {
+    const std::string &tid = krnl::vfs::titleId();
+    gfx::setTitle(("prosperity - " + (tid.empty() ? std::string("unknown") : tid) +
+                   (isFfpkg ? " (PS5)" : " (PS4)")).c_str());
+  }
   std::thread ctx([mainModule = std::move(mainModule), mounted, isFfpkg]() {
     auto p = base::MakeUnique<krnl::proc>();
     if (isFfpkg)

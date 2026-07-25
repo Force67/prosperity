@@ -98,6 +98,12 @@ static const runtime::funcInfo functions[] = {
 
 MODULE_INIT(libScePad);
 
+// PS5 shares this table rather than getting its own copy: Prospero's libScePad
+// exports the same NIDs and its scePadReadState writes the SAME ScePadData
+// (connected@0x4c, timestamp@0x50, connectedCount@0x68 -- read off the 01.14
+// libScePad.sprx). Split it into runtime/vprx/ps5/ if the two ever diverge.
+MODULE_INIT_PS5(libScePad);
+
 // Anchor referenced from vprx.cpp so this module's HLE table is registered (and
 // the LLE libScePad, which has no controller backing here, is overridden).
 extern "C" int vprx_anchor_libScePad = 1;
