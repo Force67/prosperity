@@ -60,11 +60,14 @@ void mountVirtual(const char *guest, std::shared_ptr<VirtualProvider> provider) 
 
 // The process working directory is /app0 (sys_getcwd reports it) and the guest
 // separator is '/'. Bethesda's engine opens plain relative paths ("Settings")
-// and Windows-style ones, so normalise both before the mount lookup.
-static base::String normalizePath(const char *path) {
+// and Windows-style ones, so normalise both before the mount lookup. relPrefix
+// picks where a bare relative path lands: /app0 for reads (the game image),
+// /download0 for writes (relative creates against a read-only mount could never
+// succeed -- see resolveWritable).
+static base::String normalizePath(const char *path, const char *relPrefix = "/app0/") {
   base::String out;
   if (path && path[0] != '/')
-    out += "/app0/";
+    out += relPrefix;
   for (const char *p = path; p && *p; p++)
     out += (*p == '\\') ? '/' : *p;
   return out;
@@ -270,7 +273,10 @@ utl::File openRead(const char *path) {
 base::String resolveWritable(const char *path) {
   if (!path)
     return {};
-  base::String norm = normalizePath(path);
+  // A bare relative create ("Settings") can't mean the read-only game image:
+  // route it to the title's writable data volume instead of /app0, where it
+  // could never succeed.
+  base::String norm = normalizePath(path, "/download0/");
   path = norm.c_str();
   size_t len = 0;
   const mountPoint *m = findMount(path, len);
