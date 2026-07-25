@@ -26,9 +26,6 @@ uintptr_t lv2_get(uint32_t sysIndex);
 uintptr_t lv2_get_ps5(uint32_t sysIndex);
 }
 
-// returns the calling host thread's guest fs base (per-thread guest TLS).
-extern "C" uint64_t krnl_current_fsbase();
-
 namespace runtime {
 static Xbyak::Operand::Code capstone_to_xbyak(x86_reg reg) {
 #define CASE_R(x)                                                              \
@@ -216,63 +213,51 @@ void codeLift::emit_fsbase(uint8_t *base) {
     return;
   if (gpr.size != 8 && gpr.size != 4)
     return;
+  if (insn->size < 5)
+    return;
 
   const bool isWrite = (memIdx == 0);  // mov fs:[disp], reg
   auto reg = Xbyak::Reg64(capstone_to_xbyak(gpr.reg));
 
-  // Per-thread guest fs base: call krnl_current_fsbase() (a trivial leaf that
-  // does `mov rax, fs:[tpoff]; ret`, clobbering only rax). mov/push/pop/call/ret
-  // leave flags untouched. A read clobbers only its destination register; a store
-  // must clobber nothing, so the write path preserves rax and rcx (rcx is the
-  // value scratch, captured before rax is reused for the helper call).
   struct fsGen : Xbyak::CodeGenerator {
     fsGen(Xbyak::Reg64 reg, int32_t disp, uint8_t size, bool isWrite,
-          uintptr_t helper) {
+          int32_t guestFsOffset, int32_t scratchOffset) {
       if (!isWrite) {
-        bool isRax = reg.getIdx() == Xbyak::Operand::RAX;
-        if (!isRax)
-          push(rax);
-        mov(rax, helper);
-        call(rax);  // rax = this thread's guest fs base
-        // disp may be negative (static TLS sits below fs)
-        auto dst = isRax ? rax : reg;
+        putSeg(fs);
+        mov(reg, ptr[guestFsOffset]);
         if (size == 4)
-          mov(dst.cvt32(), ptr[rax + disp]);
+          mov(reg.cvt32(), ptr[reg + disp]);
         else
-          mov(dst, ptr[rax + disp]);
-        if (!isRax)
-          pop(rax);
-        ret();
+          mov(reg, ptr[reg + disp]);
       } else {
-        push(rax);
-        push(rcx);
-        mov(rcx, reg);  // capture value first (handles reg == rax/rcx)
-        mov(rax, helper);
-        call(rax);  // rax = guest fs base
+        auto tmp = reg.getIdx() == Xbyak::Operand::RAX ? rcx : rax;
+        putSeg(fs);
+        mov(ptr[scratchOffset], tmp);
+        putSeg(fs);
+        mov(tmp, ptr[guestFsOffset]);
         if (size == 4)
-          mov(ptr[rax + disp], ecx);
+          mov(ptr[tmp + disp], reg.cvt32());
         else
-          mov(ptr[rax + disp], rcx);
-        pop(rcx);
-        pop(rax);
-        ret();
+          mov(ptr[tmp + disp], reg);
+        putSeg(fs);
+        mov(tmp, ptr[scratchOffset]);
       }
     }
   };
 
   auto fsDisp = static_cast<int32_t>(mem.mem.disp);
-  fsGen gen(reg, fsDisp, gpr.size, isWrite,
-            reinterpret_cast<uintptr_t>(&krnl_current_fsbase));
+  fsGen gen(reg, fsDisp, gpr.size, isWrite, krnl::hostGuestFsOffset(),
+            krnl::hostFsScratchOffset());
 
   // Don't run past the rip-zone (sized to the segment in the loader). Leaving a
   // tail access raw is worse than ideal but far better than scribbling past the
   // zone into the next module; in practice the zone is sized so this never trips.
-  const auto alignedSize = align_up<size_t>(gen.getSize(), 8);
+  const auto stubSize = gen.getSize() + 5;
+  const auto alignedSize = align_up<size_t>(stubSize, 8);
   if (ripEnd && ripPointer + alignedSize > ripEnd)
     return;
 
-  /*call directly in rip zone*/
-  base[0] = 0xE8;
+  base[0] = 0xE9;
   auto disp = static_cast<uint32_t>(ripPointer - &base[5]);
   *reinterpret_cast<uint32_t *>(&base[1]) = disp;
 
@@ -280,11 +265,13 @@ void codeLift::emit_fsbase(uint8_t *base) {
   if (insn->size > 5)
     std::memset(&base[5], 0x90, insn->size - 5);
 
-  /*align the block and pad out the rest*/
-  if (gen.getSize() < alignedSize)
-    std::memset(ripPointer + gen.getSize(), 0xCC, alignedSize - gen.getSize());
-
   std::memcpy(ripPointer, gen.getCode(), gen.getSize());
+  auto *returnJump = ripPointer + gen.getSize();
+  returnJump[0] = 0xE9;
+  *reinterpret_cast<uint32_t *>(&returnJump[1]) =
+      static_cast<uint32_t>(&base[insn->size] - &returnJump[5]);
+  if (stubSize < alignedSize)
+    std::memset(ripPointer + stubSize, 0xCC, alignedSize - stubSize);
   ripPointer += alignedSize;
 }
 } // namespace runtime

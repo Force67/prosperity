@@ -3,8 +3,8 @@
  *
  * NativeBackend (x86-64 host). Guest code runs directly on the host CPU; the
  * lifter has already rewritten syscalls/fs-TLS in-place, so "entering the guest"
- * is just a host function call and the guest fs base is a host thread_local that
- * the lifted fs stub reads back via krnl_current_fsbase().
+ * is just a host function call and the lifted FS stubs read the guest FS base
+ * from host thread-local storage.
  */
 #if defined(DELTA_BACKEND_NATIVE)
 
@@ -16,13 +16,19 @@
 
 namespace krnl {
 
-// Per-thread guest fs base (TLS). The lifter rewrites guest `fs:[disp]` reads to
-// call krnl_current_fsbase() so each host thread running guest code reads its
-// own thread's TLS. initial-exec model => the access is a single
-// `mov rax, fs:[off]; ret` that clobbers only rax, which the lifter stub relies
-// on (it preserves only rax around the call).
+// Per-thread guest fs base and spill slot used by stackless FS lift stubs.
 __attribute__((tls_model("initial-exec"))) static thread_local uint64_t t_fsbase = 0;
-extern "C" uint64_t krnl_current_fsbase() { return t_fsbase; }
+__attribute__((tls_model("initial-exec"))) static thread_local uint64_t t_fs_scratch = 0;
+
+static int32_t hostTlsOffset(const void *address) {
+  uintptr_t thread_pointer;
+  asm("mov %%fs:0, %0" : "=r"(thread_pointer));
+  return static_cast<int32_t>(reinterpret_cast<uintptr_t>(address) -
+                              thread_pointer);
+}
+
+int32_t hostGuestFsOffset() { return hostTlsOffset(&t_fsbase); }
+int32_t hostFsScratchOffset() { return hostTlsOffset(&t_fs_scratch); }
 void setThreadFsBase(uint64_t v) { t_fsbase = v; }
 
 } // namespace krnl
