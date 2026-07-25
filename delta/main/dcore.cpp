@@ -73,6 +73,23 @@ std::string sfoGet(const uint8_t *d, size_t n, const char *key) {
   return {};
 }
 
+// PS5 titles carry sce_sys/param.json instead of the PS4 param.sfo. Pull one
+// top-level string value out of it (flat file, no nesting on the keys we want).
+std::string jsonGetString(const std::string &js, const char *key) {
+  std::string pat = std::string("\"") + key + "\"";
+  size_t k = js.find(pat);
+  if (k == std::string::npos)
+    return {};
+  size_t colon = js.find(':', k + pat.size());
+  if (colon == std::string::npos)
+    return {};
+  size_t open = js.find('"', colon);
+  size_t close = open == std::string::npos ? open : js.find('"', open + 1);
+  if (close == std::string::npos)
+    return {};
+  return js.substr(open + 1, close - open - 1);
+}
+
 // Bridges a PkgFilesystem into the kernel VFS as an on-demand virtual mount.
 class PkgProvider : public krnl::vfs::VirtualProvider {
 public:
@@ -285,14 +302,7 @@ public:
     std::string js(node->size, '\0');
     if (fs_.read(*node, js.data(), 0, static_cast<int64_t>(js.size())) <= 0)
       return {};
-    size_t k = js.find("\"titleId\"");
-    if (k == std::string::npos)
-      return {};
-    size_t open = js.find('"', js.find(':', k) + 1);
-    size_t close = open == std::string::npos ? open : js.find('"', open + 1);
-    if (close == std::string::npos)
-      return {};
-    return js.substr(open + 1, close - open - 1);
+    return jsonGetString(js, "titleId");
   }
 
 private:
@@ -337,6 +347,11 @@ void deltaCore::boot(const base::String &xdir) {
 
   const bool isPkg = endsWithIgnoreCase(xdir, ".pkg");
   const bool isFfpkg = endsWithIgnoreCase(xdir, ".ffpkg");
+  // A raw app dump: the extracted /app0 tree itself, identified by its PS5
+  // sce_sys/param.json. Host-mounted rather than read through an image reader.
+  std::string appJson = std::string(path.c_str()) + "/sce_sys/param.json";
+  const bool isAppDir = !isPkg && !isFfpkg && utl::File(base::String(appJson.c_str()),
+                                                       utl::fileMode::read).Exists();
   base::String mainModule = path;
 
   if (isPkg) {
@@ -367,20 +382,31 @@ void deltaCore::boot(const base::String &xdir) {
                                         : "/app0/eboot.bin");
     LOG_INFO("mounted ffpkg at /app0 ({}), boot module {}",
              krnl::vfs::titleId().c_str(), mainModule.c_str());
+  } else if (isAppDir) {
+    krnl::vfs::mount("/app0", path.c_str());
+    if (utl::File f(base::String(appJson.c_str()), utl::fileMode::read); f.IsOpen()) {
+      std::string js(static_cast<size_t>(f.GetSize()), '\0');
+      f.Read(js.data(), js.size());
+      krnl::vfs::setTitleId(jsonGetString(js, "titleId"));
+    }
+    mainModule = base::String("/app0/eboot.bin");
+    LOG_INFO("mounted app dir at /app0 ({}), boot module {}",
+             krnl::vfs::titleId().c_str(), mainModule.c_str());
   }
 
-  // Both .pkg and .ffpkg boot from a virtual /app0 mount rather than a host path.
-  const bool mounted = isPkg || isFfpkg;
+  // These all boot from an /app0 mount rather than a bare host path.
+  const bool mounted = isPkg || isFfpkg || isAppDir;
+  const bool isPs5 = isFfpkg || isAppDir;
   // Name the window after the booted title, since the renderer and the videoout
   // HLE both bring it up with a generic title depending on who gets there first.
   {
     const std::string &tid = krnl::vfs::titleId();
     gfx::setTitle(("prosperity - " + (tid.empty() ? std::string("unknown") : tid) +
-                   (isFfpkg ? " (PS5)" : " (PS4)")).c_str());
+                   (isPs5 ? " (PS5)" : " (PS4)")).c_str());
   }
-  std::thread ctx([mainModule = std::move(mainModule), mounted, isFfpkg]() {
+  std::thread ctx([mainModule = std::move(mainModule), mounted, isPs5]() {
     auto p = base::MakeUnique<krnl::proc>();
-    if (isFfpkg)
+    if (isPs5)
       p->setPlatform(krnl::proc::platform::ps5);
     if (!p->create(mainModule, mounted))
       return;

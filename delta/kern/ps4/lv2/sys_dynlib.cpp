@@ -23,6 +23,8 @@
 
 #include "error_table.h"
 #include "sys_dynlib.h"
+
+#include "kern/ps5/lv2/proc_param.h"
 #include "sys_mem.h"
 #include <runtime/vprx/vprx.h>
 
@@ -185,52 +187,6 @@ int PS4ABI sys_dynlib_get_obj_member(uint32_t handle, uint8_t index,
   }
 }
 
-// PS5 Isaac's sceProcessParam ships a NULL sceLibcParam (proc+0x38), so
-// libSceLibcInternal's heap-init (libc+0xdc51) takes its default path: the C++
-// operator-new arena becomes a small fixed 16 MiB mspace that runs out during
-// asset preload (std::bad_alloc). Hand libc a proc-param copy whose sceLibcParam
-// enables extended (grow-on-demand) allocation with no size cap. Field offsets
-// verified against libc's heap-init disassembly:
-//   sceLibcParam+0x10 -> *heapSize (size_t; -1 = no limit, kept unrounded)
-//   sceLibcParam+0x20 -> *heapExtendedAlloc (int; !=0 clears the fixed-size flag)
-// reached only when version(+0x8) >= 2 and (+0xc) >= 2. Every non-libc consumer
-// still reads the real fields (we copy the app's proc param first). PS4-gated
-// off: PS4 titles ship their own sceLibcParam and their path stays byte-identical.
-static void *ps5SynthProcParam(void *appPP, size_t appSize) {
-  static void *synth = nullptr;
-  if (synth)
-    return synth;
-
-  uint8_t *pp = allocLowGuest(0x100);
-  uint8_t *lp = allocLowGuest(0x100);
-  uint8_t *vals = allocLowGuest(0x40);
-  if (!pp || !lp || !vals)
-    return appPP;
-  std::memset(pp, 0, 0x100);
-  std::memset(lp, 0, 0x100);
-  std::memset(vals, 0, 0x40);
-
-  if (appPP && appSize)
-    std::memcpy(pp, appPP, appSize < 0x100 ? appSize : 0x100);
-  if (*reinterpret_cast<uint64_t *>(pp) < 0x40)
-    *reinterpret_cast<uint64_t *>(pp) = 0x40;  // libc requires proc[0] >= 0x40
-
-  // Large FIXED heap rather than extended (grow-on-demand): the extended path
-  // re-enters malloc while growing a segment and blows the stack. A fixed 1.5 GiB
-  // C++ arena is mapped up front and is ample for asset preload + gameplay.
-  auto *heapSize = reinterpret_cast<uint64_t *>(vals + 0x00);
-  *heapSize = 0x60000000ull;  // 1.5 GiB
-
-  *reinterpret_cast<uint64_t *>(lp + 0x00) = 0x48;  // sceLibcParam size
-  *reinterpret_cast<uint32_t *>(lp + 0x08) = 2;     // version -> heap-config path
-  *reinterpret_cast<uint32_t *>(lp + 0x0c) = 2;
-  *reinterpret_cast<uint64_t *>(lp + 0x10) = reinterpret_cast<uint64_t>(heapSize);
-
-  *reinterpret_cast<uint64_t *>(pp + 0x38) = reinterpret_cast<uint64_t>(lp);
-  synth = pp;
-  return synth;
-}
-
 int PS4ABI sys_dynlib_get_proc_param(void **data, size_t *size) {
   auto mod = proc::getActive()->getModuleList()[0];
   if (mod) {
@@ -238,7 +194,7 @@ int PS4ABI sys_dynlib_get_proc_param(void **data, size_t *size) {
 
     void *pp = reinterpret_cast<void *>(info.procParam);
     if (proc::getActive()->getPlatform() == proc::platform::ps5)
-      pp = ps5SynthProcParam(pp, info.procParamSize);
+      pp = ps5::procParam(pp, info.procParamSize);
 
     *data = pp;
     *size = info.procParamSize;

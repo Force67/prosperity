@@ -161,7 +161,15 @@ utl::File openRead(const char *path) {
     return utl::File(base::MakeUnique<PfsFileStream>(std::move(vf)));
   }
 
-  utl::File f(joinHost(m->host, rest), utl::fileMode::read);
+  // A raw console app dump keeps each executable twice: the encrypted SELF under
+  // its real name and the decrypted ELF beside it as "<name>.esbak". Prefer the
+  // decrypted one; we have no SELF crypto.
+  base::String host = joinHost(m->host, rest);
+  utl::File esbak(host + ".esbak", utl::fileMode::read);
+  if (esbak.Exists() && esbak.IsOpen())
+    return esbak;
+
+  utl::File f(host, utl::fileMode::read);
   if (!f.Exists() || !f.IsOpen())
     return utl::File();
   return f;
