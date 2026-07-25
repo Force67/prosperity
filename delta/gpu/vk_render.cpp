@@ -370,6 +370,28 @@ uint64_t texHash(uint64_t base, uint64_t bytes) {
 }
 
 VkFormat guestTextureFormat(uint32_t dfmt, uint32_t nfmt) {
+  // Narrow and float channel counts: RDNA2 titles sample single-channel masks
+  // and packed HDR buffers that the PS4 titles never used.
+  if (dfmt == 1 && nfmt == 0) return VK_FORMAT_R8_UNORM;
+  if (dfmt == 1 && nfmt == 1) return VK_FORMAT_R8_SNORM;
+  if (dfmt == 1 && nfmt == 4) return VK_FORMAT_R8_UINT;
+  if (dfmt == 2 && nfmt == 0) return VK_FORMAT_R16_UNORM;
+  if (dfmt == 2 && nfmt == 4) return VK_FORMAT_R16_UINT;
+  if (dfmt == 2 && nfmt == 7) return VK_FORMAT_R16_SFLOAT;
+  if (dfmt == 3 && nfmt == 0) return VK_FORMAT_R8G8_UNORM;
+  if (dfmt == 3 && nfmt == 4) return VK_FORMAT_R8G8_UINT;
+  if (dfmt == 4 && nfmt == 4) return VK_FORMAT_R32_UINT;
+  if (dfmt == 4 && nfmt == 7) return VK_FORMAT_R32_SFLOAT;
+  if (dfmt == 5 && nfmt == 0) return VK_FORMAT_R16G16_UNORM;
+  if (dfmt == 5 && nfmt == 4) return VK_FORMAT_R16G16_UINT;
+  if (dfmt == 8 && nfmt == 0) return VK_FORMAT_A2R10G10B10_UNORM_PACK32;
+  if (dfmt == 9 && nfmt == 0) return VK_FORMAT_A2B10G10R10_UNORM_PACK32;
+  if (dfmt == 10 && nfmt == 1) return VK_FORMAT_R8G8B8A8_SNORM;
+  if (dfmt == 10 && nfmt == 4) return VK_FORMAT_R8G8B8A8_UINT;
+  if (dfmt == 11 && nfmt == 4) return VK_FORMAT_R32G32_UINT;
+  if (dfmt == 11 && nfmt == 7) return VK_FORMAT_R32G32_SFLOAT;
+  if (dfmt == 12 && nfmt == 0) return VK_FORMAT_R16G16B16A16_UNORM;
+  if (dfmt == 14 && nfmt == 7) return VK_FORMAT_R32G32B32A32_SFLOAT;
   if (dfmt == 5 && nfmt == 7) return VK_FORMAT_R16G16_SFLOAT;
   if (dfmt == 6 && nfmt == 7) return VK_FORMAT_B10G11R11_UFLOAT_PACK32;
   if (dfmt == 12 && nfmt == 7) return VK_FORMAT_R16G16B16A16_SFLOAT;

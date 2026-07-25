@@ -332,8 +332,39 @@ constexpr uint32_t kMicroW = 8, kMicroH = 8;
 constexpr uint32_t kMicroTilePixels = kMicroW * kMicroH;
 constexpr uint32_t kPipeInterleaveBits = 8;
 
+// gfx10.3 (RDNA2) "standard" swizzle, encoded as kGfx10StdBase + log2 of the
+// block size in KiB (256 B, 4 KiB, 64 KiB). Prospero titles describe their
+// textures with these, not with Liverpool's GB_TILE_MODE indices, so they get
+// their own id range rather than being squeezed into that table.
+constexpr uint32_t kGfx10StdBase = 0x50;
+constexpr uint32_t kGfx10StdModes = 3;
+
+bool TilingIsGfx10Std(uint32_t idx) {
+  return idx >= kGfx10StdBase && idx < kGfx10StdBase + kGfx10StdModes;
+}
+
+// Micro-tiles are always 256 B; their shape follows the element size.
+void Gfx10MicroShape(uint32_t elem_bytes, uint32_t &mw, uint32_t &mh) {
+  switch (elem_bytes) {
+    case 1:  mw = 16; mh = 16; break;
+    case 2:  mw = 16; mh = 8;  break;
+    case 4:  mw = 8;  mh = 8;  break;
+    case 8:  mw = 8;  mh = 4;  break;
+    default: mw = 4;  mh = 4;  break;  // 16
+  }
+}
+
+// Micro-tiles per block edge: 1 (256 B), 4 (4 KiB) or 16 (64 KiB).
+uint32_t Gfx10BlockTiles(uint32_t idx) {
+  switch (idx - kGfx10StdBase) {
+    case 0:  return 1;
+    case 1:  return 4;
+    default: return 16;
+  }
+}
+
 bool ValidTileMode(uint32_t idx) {
-  return idx <= 26 || idx == 31;
+  return idx <= 26 || idx == 31 || TilingIsGfx10Std(idx);
 }
 
 uint32_t EffectiveTileMode(uint32_t idx) {
@@ -760,6 +791,45 @@ void CopyMacroTiledMip(uint8_t *tiled, uint8_t *linear,
   });
 }
 
+// gfx10.3 standard swizzle: 256 B micro-tiles stored row-major internally, the
+// micro-tiles of a block interleaved in Morton order (x bit first), and the
+// blocks themselves row-major across the surface.
+template <uint32_t Elem, bool Detile>
+void CopyGfx10StdMip(uint8_t *tiled, uint8_t *linear,
+                     const TextureMipLayout32 &level, uint32_t layer,
+                     size_t linear_row_bytes, uint32_t tiling_idx) {
+  uint32_t mw = 0, mh = 0;
+  Gfx10MicroShape(Elem, mw, mh);
+  const uint32_t n = Gfx10BlockTiles(tiling_idx);
+  const uint32_t bw = mw * n, bh = mh * n;
+  const uint32_t blocksPerRow = level.pitch / bw;
+  const uint64_t blockBytes = static_cast<uint64_t>(bw) * bh * Elem;
+  const uint64_t sliceBytes =
+      static_cast<uint64_t>(level.pitch) * level.stored_height * Elem;
+  uint8_t *slice = tiled + sliceBytes * layer;
+  DetileParallelRows(level.height, [&](uint32_t y0, uint32_t y1) {
+    for (uint32_t y = y0; y < y1; y++) {
+      uint8_t *linear_row = linear + static_cast<size_t>(y) * linear_row_bytes;
+      const uint32_t by = y / bh, myt = (y % bh) / mh, iy = y % mh;
+      for (uint32_t x = 0; x < level.width; x++) {
+        const uint32_t bx = x / bw, mxt = (x % bw) / mw, ix = x % mw;
+        uint32_t micro = 0;
+        for (uint32_t b = 0; (1u << b) < n; b++)
+          micro |= (((mxt >> b) & 1) << (2 * b)) | (((myt >> b) & 1) << (2 * b + 1));
+        const uint64_t off = (static_cast<uint64_t>(by) * blocksPerRow + bx) * blockBytes +
+                             static_cast<uint64_t>(micro) * 256 +
+                             (static_cast<uint64_t>(iy) * mw + ix) * Elem;
+        uint8_t *t = slice + off;
+        uint8_t *l = linear_row + static_cast<size_t>(x) * Elem;
+        if (Detile)
+          std::memcpy(l, t, Elem);
+        else
+          std::memcpy(t, l, Elem);
+      }
+    }
+  });
+}
+
 template <uint32_t Elem, bool Detile>
 bool CopyTextureMip(uint8_t *tiled_image, uint8_t *linear,
                     size_t linear_row_bytes, const TextureLayout32 &layout,
@@ -769,6 +839,12 @@ bool CopyTextureMip(uint8_t *tiled_image, uint8_t *linear,
   if (TilingIsLinear(layout.tiling_idx)) {
     CopyLinearMip<Elem, Detile>(tiled, linear, level, layer,
                                 linear_row_bytes);
+    return true;
+  }
+
+  if (TilingIsGfx10Std(layout.tiling_idx)) {
+    CopyGfx10StdMip<Elem, Detile>(tiled, linear, level, layer, linear_row_bytes,
+                                  layout.tiling_idx);
     return true;
   }
 
@@ -817,8 +893,8 @@ bool BuildTextureLayout32(TextureLayout32 &out, uint32_t width, uint32_t height,
       width > 16384 || height > 16384 || pitch > 16384 || layers > 8192 ||
       !ValidTileMode(tiling_idx))
     return false;
-  if (elem_bytes != 2 && elem_bytes != 4 && elem_bytes != 8 &&
-      elem_bytes != 16)
+  if (elem_bytes != 1 && elem_bytes != 2 && elem_bytes != 4 &&
+      elem_bytes != 8 && elem_bytes != 16)
     return false;
 
   tiling_idx = EffectiveTileMode(tiling_idx);
@@ -848,7 +924,17 @@ bool BuildTextureLayout32(TextureLayout32 &out, uint32_t width, uint32_t height,
     level.thickness = thickness;
 
     uint64_t base_align = 1;
-    if (tiling_idx == 31) {
+    if (TilingIsGfx10Std(tiling_idx)) {
+      // Each mip is padded to whole blocks and starts on a block boundary.
+      uint32_t mw = 0, mh = 0;
+      Gfx10MicroShape(elem_bytes, mw, mh);
+      const uint32_t n = Gfx10BlockTiles(tiling_idx);
+      const uint32_t bw = mw * n, bh = mh * n;
+      level.pitch = AlignUp(raw_pitch, bw);
+      level.stored_height = AlignUp(storage_height, bh);
+      base_align = static_cast<uint64_t>(bw) * bh * elem_bytes;
+      level.macro_tiled = false;
+    } else if (tiling_idx == 31) {
       level.pitch = raw_pitch;
       level.stored_height = storage_height;
     } else if (tiling_idx == 8) {
@@ -906,6 +992,9 @@ bool DetileTextureMip32Pitched(const void *src, void *dst,
   auto *tiled = const_cast<uint8_t *>(static_cast<const uint8_t *>(src));
   auto *linear = static_cast<uint8_t *>(dst);
   switch (layout.elem_bytes) {
+    case 1:
+      return CopyTextureMip<1, true>(tiled, linear, dst_row_bytes, layout, mip,
+                                      layer);
     case 2:
       return CopyTextureMip<2, true>(tiled, linear, dst_row_bytes, layout, mip,
                                       layer);

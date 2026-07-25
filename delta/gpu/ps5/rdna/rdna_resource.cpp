@@ -34,13 +34,32 @@ int32_t signExt21(uint32_t v) { return static_cast<int32_t>(v << 11) >> 11; }
 // declines (white fallback) instead of misreading texels.
 void gfx10ImgFormat(uint32_t gfmt, uint32_t &dfmt, uint32_t &nfmt) {
   switch (gfmt) {
+    case 1:   dfmt = 1;  nfmt = 0; break;  // 8_UNORM
+    case 2:   dfmt = 1;  nfmt = 1; break;  // 8_SNORM
+    case 5:   dfmt = 1;  nfmt = 4; break;  // 8_UINT
+    case 6:   dfmt = 1;  nfmt = 5; break;  // 8_SINT
+    case 7:   dfmt = 2;  nfmt = 0; break;  // 16_UNORM
+    case 11:  dfmt = 2;  nfmt = 4; break;  // 16_UINT
+    case 13:  dfmt = 2;  nfmt = 7; break;  // 16_FLOAT
+    case 14:  dfmt = 3;  nfmt = 0; break;  // 8_8_UNORM
+    case 18:  dfmt = 3;  nfmt = 4; break;  // 8_8_UINT
+    case 20:  dfmt = 4;  nfmt = 4; break;  // 32_UINT
+    case 21:  dfmt = 4;  nfmt = 5; break;  // 32_SINT
     case 22:  dfmt = 4;  nfmt = 7; break;  // 32_FLOAT (also depth-resolve key)
+    case 23:  dfmt = 5;  nfmt = 0; break;  // 16_16_UNORM
+    case 27:  dfmt = 5;  nfmt = 4; break;  // 16_16_UINT
     case 29:  dfmt = 5;  nfmt = 7; break;  // 16_16_FLOAT
     case 36:  dfmt = 6;  nfmt = 7; break;  // 11_11_10_FLOAT
+    case 44:  dfmt = 9;  nfmt = 0; break;  // 2_10_10_10_UNORM
+    case 50:  dfmt = 8;  nfmt = 0; break;  // 10_10_10_2_UNORM
     case 56:  dfmt = 10; nfmt = 0; break;  // 8_8_8_8_UNORM
+    case 62:  dfmt = 11; nfmt = 4; break;  // 32_32_UINT
+    case 64:  dfmt = 11; nfmt = 7; break;  // 32_32_FLOAT
+    case 71:  dfmt = 12; nfmt = 7; break;  // 16_16_16_16_FLOAT
+    case 74:  dfmt = 13; nfmt = 7; break;  // 32_32_32_FLOAT
+    case 77:  dfmt = 14; nfmt = 7; break;  // 32_32_32_32_FLOAT
     case 57:  dfmt = 10; nfmt = 1; break;  // 8_8_8_8_SNORM
     case 60:  dfmt = 10; nfmt = 4; break;  // 8_8_8_8_UINT
-    case 71:  dfmt = 12; nfmt = 7; break;  // 16_16_16_16_FLOAT
     case 130: dfmt = 10; nfmt = 9; break;  // 8_8_8_8_SRGB
     case 169: dfmt = 35; nfmt = 0; break;  // BC1
     case 170: dfmt = 35; nfmt = 9; break;
@@ -159,11 +178,19 @@ TImage DecodeTImage(const uint32_t* d) {
   t.view_mips = std::max<uint32_t>(last_level + 1 - t.base_mip, 1);
   const uint32_t gfmt = (d[1] >> 20) & 0x1FF;
   gfx10ImgFormat(gfmt, t.dfmt, t.nfmt);
-  // gfx10 swizzle mode 0 = SW_LINEAR; map it to the renderer's linear index.
-  // Tiled gfx10 modes have no GCN equivalent and no gfx10 detiler yet, so shift
-  // them past the valid GCN tiling range: BuildTextureLayout32 rejects them and
-  // the draw gets the white fallback instead of scrambled texels.
-  t.tiling_idx = sw_mode == 0 ? 8 : 0x40 + sw_mode;
+  // gfx10 swizzle mode 0 = SW_LINEAR -> the renderer's linear index. The
+  // "standard" modes (256 B / 4 KiB / 64 KiB, ids 1/5/9) map onto the gfx10
+  // detiler's own id range. Everything else (Z/D/R, the _X pipe-XOR and _T
+  // variants) has no detiler yet, so it is shifted past the valid range:
+  // BuildTextureLayout32 rejects it and the draw gets the white fallback
+  // instead of scrambled texels.
+  switch (sw_mode) {
+    case 0:  t.tiling_idx = 8; break;
+    case 1:  t.tiling_idx = 0x50; break;
+    case 5:  t.tiling_idx = 0x51; break;
+    case 9:  t.tiling_idx = 0x52; break;
+    default: t.tiling_idx = 0x40 + sw_mode; break;
+  }
   if (sw_mode == 0 && t.dfmt && t.dfmt < 35) {
     // gfx10 linear surfaces align each row to 256 bytes.
     const uint32_t eb = t.dfmt == 12 ? 8 : 4;
@@ -185,6 +212,16 @@ TImage DecodeTImage(const uint32_t* d) {
                    (unsigned long)t.base, t.width, t.height, gfmt, sw_mode,
                    t.type, t.mip_levels, t.dfmt, t.nfmt, t.tiling_idx, t.pitch);
     }
+  }
+  // gfx10 mip chains pack their small levels into a shared "mip tail" block
+  // whose layout the detiler does not model; only level 0 is addressed
+  // correctly, so sample that one rather than reading a wrong offset.
+  if (t.tiling_idx >= 0x50 && t.tiling_idx < 0x53 && t.mip_levels > 1) {
+    t.mip_levels = 1;
+    t.view_mips = 1;
+    t.base_mip = 0;
+    t.min_lod = 0;
+    t.force_lod_zero = true;
   }
   t.valid = t.base != 0;
   return t;
