@@ -16,6 +16,8 @@
 #include "crash.h"
 #include "module.h"
 #include "proc.h"
+
+#include "ps5/lv2/initial_tcb.h"
 #include "vfs.h"
 #include "cpu/cpu_backend.h"
 #include "ps4/lv2/sys_dynlib.h"
@@ -873,7 +875,10 @@ void proc::start() {
 
   // Enter libkernel's entry with the PS4 convention (arg block in rdi). The
   // backend runs it natively (x86 host) or via the FEXCore JIT (aarch64 host).
+  // PS5 starts with the TCB its kernel would have installed; libkernel reads
+  // fs:0x10 before it gets around to setting up its own (see makeInitialTcb).
+  const uint64_t fsbase = plat == platform::ps5 ? ps5::makeInitialTcb() : 0;
   cpu::backend().enterGuest(reinterpret_cast<uintptr_t>(kinfo.entry), stack,
-                            /*fsbase*/ 0);
+                            fsbase);
 }
 }  // namespace krnl
