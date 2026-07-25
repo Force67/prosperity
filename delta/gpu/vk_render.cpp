@@ -2750,6 +2750,14 @@ bool stageCsImage(const ComputeInfo::Res &res, void *dst) {
   std::vector<uint8_t> tight;
   if (!direct)
     tight.resize(static_cast<size_t>(res.width) * res.height * res.elemBytes);
+  // DELTA_GPU_DETILEDUMP=<base>: write the de-tiled level-0 bytes of that guest
+  // surface to <dumpdir>/detiled.bin once, so the swizzle can be checked against
+  // an offline decode of the same texture.
+  static const uint64_t detileDump = [] {
+    const char *e = std::getenv("DELTA_GPU_DETILEDUMP");
+    return e ? std::strtoull(e, nullptr, 0) : 0ull;
+  }();
+  static bool detileDumped = false;
   for (uint32_t mip = 0; mip < tiled.mip_levels; mip++) {
     const auto &srcLevel = tiled.mips[mip];
     const auto &dstLevel = linear.mips[mip];
@@ -2763,6 +2771,21 @@ bool stageCsImage(const ComputeInfo::Res &res, void *dst) {
                 static_cast<size_t>(dstLevel.pitch) * res.stageElemBytes, tiled,
                 mip, layer))
           return false;
+        if (detileDump && res.base == detileDump && !mip && !layer &&
+            !detileDumped) {
+          detileDumped = true;
+          char p[256];
+          std::snprintf(p, sizeof p, "%s/detiled.bin", dumpDir());
+          if (FILE *f = std::fopen(p, "wb")) {
+            std::fwrite(levelDst, 1,
+                        static_cast<size_t>(dstLevel.pitch) *
+                            dstLevel.stored_height * res.stageElemBytes, f);
+            std::fclose(f);
+            std::fprintf(stderr, "[detiledump] %#lx pitch=%u h=%u elem=%u\n",
+                         (unsigned long)res.base, dstLevel.pitch,
+                         dstLevel.stored_height, res.stageElemBytes);
+          }
+        }
         continue;
       }
       if (!gcn::DetileTextureMip32(reinterpret_cast<const void *>(res.base),
@@ -3264,12 +3287,75 @@ void flushCsWritesRange(uint64_t base, uint64_t bytes) {
 // ---- recompiled-shader path -------------------------------------------------
 // GCN data format -> Vulkan vertex format.
 VkFormat vfmt(uint32_t dfmt, uint32_t nfmt) {
+  // GCN number formats: 0 UNORM, 1 SNORM, 2 USCALED, 3 SSCALED, 4 UINT,
+  // 5 SINT, 7 FLOAT. The scaled forms deliver the integer value as a float,
+  // which is what Vulkan's *_SSCALED/_USCALED do.
   switch (dfmt) {
-    case 1:  return VK_FORMAT_R8_UNORM;
-    case 3:  return VK_FORMAT_R8G8_UNORM;
-    case 4:  return nfmt == 4 ? VK_FORMAT_R32_UINT : VK_FORMAT_R32_SFLOAT;
-    case 10: return nfmt == 4 ? VK_FORMAT_R8G8B8A8_UINT : VK_FORMAT_R8G8B8A8_UNORM;
-    case 11: return VK_FORMAT_R32G32_SFLOAT;
+    case 1:  // 8
+      switch (nfmt) {
+        case 1: return VK_FORMAT_R8_SNORM;
+        case 2: return VK_FORMAT_R8_USCALED;
+        case 3: return VK_FORMAT_R8_SSCALED;
+        case 4: return VK_FORMAT_R8_UINT;
+        case 5: return VK_FORMAT_R8_SINT;
+        default: return VK_FORMAT_R8_UNORM;
+      }
+    case 2:  // 16
+      switch (nfmt) {
+        case 1: return VK_FORMAT_R16_SNORM;
+        case 2: return VK_FORMAT_R16_USCALED;
+        case 3: return VK_FORMAT_R16_SSCALED;
+        case 4: return VK_FORMAT_R16_UINT;
+        case 5: return VK_FORMAT_R16_SINT;
+        case 7: return VK_FORMAT_R16_SFLOAT;
+        default: return VK_FORMAT_R16_UNORM;
+      }
+    case 3:  // 8_8
+      switch (nfmt) {
+        case 1: return VK_FORMAT_R8G8_SNORM;
+        case 2: return VK_FORMAT_R8G8_USCALED;
+        case 3: return VK_FORMAT_R8G8_SSCALED;
+        case 4: return VK_FORMAT_R8G8_UINT;
+        case 5: return VK_FORMAT_R8G8_SINT;
+        default: return VK_FORMAT_R8G8_UNORM;
+      }
+    case 4:  // 32
+      return nfmt == 4 ? VK_FORMAT_R32_UINT
+                       : nfmt == 5 ? VK_FORMAT_R32_SINT : VK_FORMAT_R32_SFLOAT;
+    case 5:  // 16_16
+      switch (nfmt) {
+        case 0: return VK_FORMAT_R16G16_UNORM;
+        case 1: return VK_FORMAT_R16G16_SNORM;
+        case 2: return VK_FORMAT_R16G16_USCALED;
+        case 3: return VK_FORMAT_R16G16_SSCALED;
+        case 4: return VK_FORMAT_R16G16_UINT;
+        case 5: return VK_FORMAT_R16G16_SINT;
+        default: return VK_FORMAT_R16G16_SFLOAT;
+      }
+    case 8:  return VK_FORMAT_A2R10G10B10_UNORM_PACK32;   // 10_10_10_2
+    case 9:  return VK_FORMAT_A2B10G10R10_UNORM_PACK32;   // 2_10_10_10
+    case 10: // 8_8_8_8
+      switch (nfmt) {
+        case 1: return VK_FORMAT_R8G8B8A8_SNORM;
+        case 2: return VK_FORMAT_R8G8B8A8_USCALED;
+        case 3: return VK_FORMAT_R8G8B8A8_SSCALED;
+        case 4: return VK_FORMAT_R8G8B8A8_UINT;
+        case 5: return VK_FORMAT_R8G8B8A8_SINT;
+        default: return VK_FORMAT_R8G8B8A8_UNORM;
+      }
+    case 11: return nfmt == 4 ? VK_FORMAT_R32G32_UINT
+                              : nfmt == 5 ? VK_FORMAT_R32G32_SINT
+                                          : VK_FORMAT_R32G32_SFLOAT;
+    case 12: // 16_16_16_16
+      switch (nfmt) {
+        case 0: return VK_FORMAT_R16G16B16A16_UNORM;
+        case 1: return VK_FORMAT_R16G16B16A16_SNORM;
+        case 2: return VK_FORMAT_R16G16B16A16_USCALED;
+        case 3: return VK_FORMAT_R16G16B16A16_SSCALED;
+        case 4: return VK_FORMAT_R16G16B16A16_UINT;
+        case 5: return VK_FORMAT_R16G16B16A16_SINT;
+        default: return VK_FORMAT_R16G16B16A16_SFLOAT;
+      }
     case 13: return VK_FORMAT_R32G32B32_SFLOAT;
     case 14: return VK_FORMAT_R32G32B32A32_SFLOAT;
     default: return VK_FORMAT_R32G32B32A32_SFLOAT;
@@ -3283,9 +3369,11 @@ uint32_t vfmtBytes(uint32_t dfmt) {
   switch (dfmt) {
     case 1:  return 1;   // R8
     case 3:  return 2;   // R8G8
+    case 2:  return 2;   // R16
     case 4:  return 4;   // R32
     case 5:  return 4;   // R16G16
     case 6:  return 4;   // R11G11B10
+    case 8: case 9: return 4;   // 10_10_10_2 / 2_10_10_10
     case 10: return 4;   // R8G8B8A8
     case 11: return 8;   // R32G32
     case 12: return 8;   // R16G16B16A16

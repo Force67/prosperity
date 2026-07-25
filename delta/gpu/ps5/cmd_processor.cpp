@@ -81,20 +81,45 @@ struct VBuffer {
 // vfmt() understands. Only the vertex-attribute formats are covered; unknowns fall
 // back to the GCN-style split (harmless for descriptors that never reach vfmt()).
 void gfx10VBufFormat(uint32_t gfmt, uint32_t &dfmt, uint32_t &nfmt) {
-  switch (gfmt) {
-    case 13: dfmt = 2;  nfmt = 7; break;  // 16_FLOAT
-    case 20: dfmt = 4;  nfmt = 4; break;  // 32_UINT
-    case 22: dfmt = 4;  nfmt = 7; break;  // 32_FLOAT
-    case 29: dfmt = 5;  nfmt = 7; break;  // 16_16_FLOAT
-    case 56: dfmt = 10; nfmt = 0; break;  // 8_8_8_8_UNORM
-    case 57: dfmt = 10; nfmt = 1; break;  // 8_8_8_8_SNORM
-    case 60: dfmt = 10; nfmt = 4; break;  // 8_8_8_8_UINT
-    case 64: dfmt = 11; nfmt = 7; break;  // 32_32_FLOAT
-    case 71: dfmt = 12; nfmt = 7; break;  // 16_16_16_16_FLOAT
-    case 74: dfmt = 13; nfmt = 7; break;  // 32_32_32_FLOAT
-    case 77: dfmt = 14; nfmt = 7; break;  // 32_32_32_32_FLOAT
-    default: dfmt = gfmt & 0xF; nfmt = (gfmt >> 4) & 0x7; break;
+  // The gfx10.3 unified buffer-format enum (ISA spec "Buffer Format
+  // Conversions"): consecutive runs of one channel layout in the order
+  // UNorm, SNorm, UScaled, SScaled, UInt, SInt [, Float]. Map each run onto the
+  // GCN (dfmt, nfmt) pair the shared renderer speaks. The old code only listed
+  // the float formats and split the rest as GCN bitfields, which turned
+  // Skyrim's 16_16_SScaled UI positions (26) into 8_8_8_8_SNorm and collapsed
+  // every glyph quad to a degenerate triangle.
+  struct Run { uint8_t first, count, dfmt; bool hasFloat; };
+  static constexpr Run kRuns[] = {
+      { 1, 6,  1, false},  // 8
+      { 7, 7,  2, true },  // 16
+      {14, 6,  3, false},  // 8_8
+      {20, 3,  4, true },  // 32 (UInt, SInt, Float)
+      {23, 7,  5, true },  // 16_16
+      {30, 7,  7, true },  // 11_11_10
+      {37, 7,  6, true },  // 10_11_11
+      {44, 6,  9, false},  // 2_10_10_10
+      {50, 6,  8, false},  // 10_10_10_2
+      {56, 6, 10, false},  // 8_8_8_8
+      {62, 3, 11, true },  // 32_32
+      {65, 7, 12, true },  // 16_16_16_16
+      {72, 3, 13, true },  // 32_32_32
+      {75, 3, 14, true },  // 32_32_32_32
+  };
+  static constexpr uint8_t kNfmt[6] = {0, 1, 2, 3, 4, 5};
+  for (const Run &r : kRuns) {
+    if (gfmt < r.first || gfmt >= r.first + r.count) continue;
+    const uint32_t i = gfmt - r.first;
+    dfmt = r.dfmt;
+    if (r.count == 3)              // UInt, SInt, Float
+      nfmt = i == 0 ? 4u : i == 1 ? 5u : 7u;
+    else if (r.hasFloat && i == 6) // trailing Float of a 7-wide run
+      nfmt = 7;
+    else
+      nfmt = kNfmt[i];
+    return;
   }
+  dfmt = 0;
+  nfmt = 0;
 }
 VBuffer decodeVBuffer(const uint32_t *p) {
   VBuffer v;
@@ -422,6 +447,17 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
       }
     }
     d.rtBase = d.mrtCount ? d.mrtBase[0] : 0;
+    // Why a colour draw ended up with no target: print the state that rejected
+    // CB_COLOR0 (a stale/zero base, or an INFO with no format).
+    static int s_nort = 0;
+    if (g_trace && !d.mrtCount && (tmask & 0xF) && s_nort < 12) {
+      s_nort++;
+      std::fprintf(stderr,
+                   "[agc]   NO-RT tmask=%#x cb0Base=%#lx info0=%#x fmt=%u\n",
+                   tmask, (unsigned long)g_regs.cbColorBase(0),
+                   g_regs[mmCB_COLOR0_INFO],
+                   (g_regs[mmCB_COLOR0_INFO] >> 2) & 0x1F);
+    }
     static int s_rtdbg = 0;
     if (g_trace && s_rtdbg < 12) {
       s_rtdbg++;
@@ -754,7 +790,20 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
     const char *e = std::getenv("DELTA_AGC_VDUMPN");
     return e ? std::atoi(e) : 8;
   }();
-  if (g_trace && s_vdump < vdumpN && d.nvattrs && d.vertexData &&
+  // DELTA_AGC_VDUMPFROM=N: skip the opening blits and dump the draws that
+  // actually shade the frame.
+  static const unsigned long vdumpFrom = [] {
+    const char *e = std::getenv("DELTA_AGC_VDUMPFROM");
+    return e ? std::strtoul(e, nullptr, 0) : 0ul;
+  }();
+  // DELTA_AGC_VDUMPRT=<base>: only dump draws that target this render target.
+  // Draw indices shift between runs; the target does not.
+  static const uint64_t vdumpRt = [] {
+    const char *e = std::getenv("DELTA_AGC_VDUMPRT");
+    return e ? std::strtoull(e, nullptr, 0) : 0ull;
+  }();
+  if (g_trace && myDraw >= vdumpFrom && (!vdumpRt || d.rtBase == vdumpRt) &&
+      s_vdump < vdumpN && d.nvattrs && d.vertexData &&
       inGuest(reinterpret_cast<uint64_t>(d.vertexData))) {
     s_vdump++;
     std::fprintf(stderr,
@@ -789,7 +838,7 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
     // and dump what's there (a V# or raw vertices) to locate the real vertex source.
     for (int k = 4; k <= 6; k += 2) {
       uint64_t p = (static_cast<uint64_t>(vud[k + 1] & 0xFFFF) << 32) | vud[k];
-      if (!inGuest(p)) continue;
+      if (!gpuAddr(p)) continue;  // user data holds non-pointers too
       const uint32_t *pw = reinterpret_cast<const uint32_t *>(p);
       std::fprintf(stderr, "[agc]   ud[%d]->%#lx dwords:", k, (unsigned long)p);
       for (int j = 0; j < (k == 4 ? 32 : 8); j++)
