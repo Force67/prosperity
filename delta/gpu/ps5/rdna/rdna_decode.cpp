@@ -162,6 +162,14 @@ Program Decode(const uint32_t* code, uint32_t max_dwords, bool stop_at_endpgm) {
                 ((w1 >> 18) & 0x1FF) == 255;
         }
         break;
+      case Enc::kMimg:
+        // NSA: the address VGPRs after the first are listed a byte each in the
+        // extra dwords, not taken sequentially from vaddr. Keep the first extra
+        // dword (four components, enough for any 2D/3D sample) so the emitter
+        // can read the real coordinate registers.
+        if (((code[i] >> 1) & 0x3) && i + 2 < max_dwords)
+          in.literal = code[i + 2];
+        break;
       default: break;
     }
     if (lit && i + in.size < max_dwords) {

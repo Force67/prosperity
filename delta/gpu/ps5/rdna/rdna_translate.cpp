@@ -705,10 +705,27 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
         t.SetVg(vdata + k, t.CbufDwordId(binding, t.Add(dword0, t.U32(k))));
       break;
     }
-    case Enc::kMimg:
-      // Fields line up with the shared emitter; NSA=0 (sequential vaddr) only.
+    case Enc::kMimg: {
+      // NSA (word0[2:1] != 0): the address components after the first are named
+      // one byte each in the extra dword rather than running sequentially from
+      // vaddr. The shared emitter reads them sequentially, so stage the real
+      // registers into a scratch run and point vaddr at it. Skyrim's grading pass
+      // samples this way; taking vaddr+1 instead gave a coordinate that never
+      // varied vertically, smearing the whole frame into vertical bands.
+      const uint32_t nsa = (w >> 1) & 0x3;
+      if (nsa) {
+        constexpr uint32_t kScratch = 240;  // above any register these shaders use
+        t.SetVg(kScratch, t.Vg(w1 & 0xFF));
+        for (uint32_t c = 0; c < 4; c++)
+          t.SetVg(kScratch + 1 + c, t.Vg((inst.literal >> (c * 8)) & 0xFF));
+        Inst seq = inst;
+        seq.raw[1] = (inst.raw[1] & ~0xFFu) | kScratch;
+        gpu::gcn::EmitMimg(t, seq, sc);
+        break;
+      }
       gpu::gcn::EmitMimg(t, inst, sc);
       break;
+    }
     default:
       gpu::gcn::WarnUnsupported("rdna", inst.opcode, w, w1);
       break;
@@ -934,6 +951,10 @@ bool TranslateVs(const Program& program, const uint32_t* vs_user_data,
   // vertex buffers from r.attrs.
   std::vector<FetchAttr> attrs = ParseFetch(fetch);
   if (attrs.empty()) attrs = ParseFetchInsts(program);
+  if (ShDbg())
+    for (const FetchAttr& a : attrs)
+      std::fprintf(stderr, "[gcnspv] vs attr loc=%u nc=%u vgpr=%u pc=%#x\n",
+                   a.semantic, a.num_comps, a.dest_vgpr, a.pc);
   t.InitTypes();
 
   std::vector<Id> iface;
@@ -1196,6 +1217,18 @@ bool TranslatePs(const Program& program,
       t.m.Kill();
       t.m.OpenBlock(after_kill);
     }
+  }
+
+  // DELTA_GPU_PSUV: replace MRT0 with the interpolated location-0 varying, to see
+  // the coordinate field a pass actually receives (a pure horizontal ramp means
+  // the vertical component never made it across the VS->PS link).
+  if (std::getenv("DELTA_GPU_PSUV")) {
+    const Id in0 = gpu::gcn::PsInputVar(t, sc, 0);
+    const Id p_in_f = t.m.TypePointer(spv::StorageClass::Input, t.t_f);
+    const Id u = t.m.Load(t.t_f, t.m.AccessChain(p_in_f, in0, {t.U32(0)}));
+    const Id v = t.m.Load(t.t_f, t.m.AccessChain(p_in_f, in0, {t.U32(1)}));
+    t.m.Store(gpu::gcn::PsColorOut(t, sc, 0),
+              t.m.CompositeConstruct(t.t_v4, {u, v, t.F32(0.f), t.F32(1.f)}));
   }
 
   t.m.ReturnVoid();

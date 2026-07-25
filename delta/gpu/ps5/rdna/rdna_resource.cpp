@@ -86,7 +86,12 @@ bool resolveDesc(uint32_t sgpr, uint32_t n, const uint32_t* pud,
   auto it = loads.find(sgpr);
   if (it != loads.end()) {
     const uint32_t sbase = it->second.first, off = it->second.second;
-    if (sbase + 1 >= 16) return false;
+    // The user-data block is 32 dwords, not 16: the final grading pass reaches
+    // its textures through a pointer pair at s[28:29], and bounding this at 16
+    // dropped those samplers to the 1x1 white default. The dereference is
+    // self-validating (the address must land in guest memory), unlike reading
+    // the user-data image directly.
+    if (sbase + 1 >= 32) return false;
     const uint64_t ptr = pud[sbase] | (static_cast<uint64_t>(pud[sbase + 1] & 0xFFFF) << 32);
     const uint64_t addr = ptr + off;
     if (!inGuest(addr)) return false;

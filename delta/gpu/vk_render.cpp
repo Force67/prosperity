@@ -4096,16 +4096,27 @@ bool drawRecomp(const DrawInfo &d) {
       return e ? std::strtoull(e, nullptr, 0) : 0ull;
     }();
     static int shown = 0;
-    if (want && g.curRt == want && shown < 8) {
+    // DELTA_GPU_DRAWRT=1 logs EVERY draw (the whole frame graph) instead of one
+    // target's draws, so a broken producer/consumer link is visible directly.
+    const bool all = want == 1;
+    // DELTA_GPU_DRAWRT_FRAME=N: only this frame, so the graph is a steady-state
+    // frame rather than the opening composites.
+    static const int wantFrame = [] {
+      const char *e = std::getenv("DELTA_GPU_DRAWRT_FRAME");
+      return e ? std::atoi(e) : 0;
+    }();
+    if (want && (all || g.curRt == want) && shown < (all ? 60 : 8) &&
+        (!wantFrame || (int)g.frameNum == wantFrame)) {
       shown++;
       std::fprintf(stderr,
                    "[drawrt] rt=%#lx %ux%u indexed=%d vcount=%u icount=%u "
                    "prim=%u tmask=%#x nvbufs=%u stride=%u mrt=%u "
-                   "vp=%g,%g scale %g,%g off\n",
+                   "vp=%g,%g scale %g,%g off vs=%#lx ps=%#lx\n",
                    (unsigned long)g.curRt, d.rtW, d.rtH, (int)indexed,
                    d.vertexCount, d.indexCount, d.primType, d.targetMask,
                    d.nvbufs, d.vertexStride, d.mrtCount, d.viewportXScale,
-                   d.viewportYScale, d.viewportXOffset, d.viewportYOffset);
+                   d.viewportYScale, d.viewportXOffset, d.viewportYOffset,
+                   (unsigned long)d.vsAddr, (unsigned long)d.psAddr);
       for (uint32_t i = 0; i < multiN; i++) {
         const auto &t = d.texs[i];
         if (!t.base) continue;
@@ -4120,17 +4131,6 @@ bool drawRecomp(const DrawInfo &d) {
                      (unsigned long)(multiColor[i] ? multiColor[i]
                                      : multiFeedback[i] ? multiFeedback[i]
                                      : multiDepth[i] ? multiDepth[i] : 0));
-        if (t.base >= 0x1000000000ull && t.base < 0x20000000000ull) {
-          const uint32_t *px = reinterpret_cast<const uint32_t *>(t.base);
-          uint32_t nz = 0, probes = 0;
-          // w*h BYTES worth of dwords: safe for any bpp >= 1, and enough of the
-          // surface to tell "never written" from "written further in".
-          const uint64_t span = (uint64_t)t.w * t.h / 4;
-          for (uint64_t k = 0; k < span; k += 977, probes++)
-            if (px[k]) nz++;
-          std::fprintf(stderr, "[drawrt]   mem nz=%u/%u first=%08x %08x\n", nz,
-                       probes, px[0], px[1]);
-        }
       }
       for (uint32_t c = 0; c < kCbufBindings; c++) {
         const auto &cb = d.cbufs[c];
@@ -4478,7 +4478,7 @@ void reportRtContents() {
   int reported = 0;
   for (auto &kv : g_rts) {
     RTarget &rt = kv.second;
-    if (!rt.usedThisFrame || reported >= 12) continue;
+    if (!rt.usedThisFrame || reported >= 32) continue;
     reported++;
     ensureReadback(rt.w, rt.h, rt.fmt);
     VkCommandBufferAllocateInfo ca{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};

@@ -373,13 +373,20 @@ void handleDispatch(const uint32_t *body, uint32_t count) {
     static uint64_t nTotal = 0, nValid = 0;
     static std::unordered_set<uint64_t> seen;
     nTotal++;
-    if (gpuAddr(csAddr)) nValid++;
+    if (inGuest(csAddr)) nValid++;
     seen.insert(csAddr);
-    if ((nTotal % 500) == 0)
-      std::fprintf(stderr, "[cs] dispatches=%lu valid=%lu unique=%zu\n",
+    if ((nTotal % 2000) == 0) {
+      std::fprintf(stderr, "[cs] dispatches=%lu valid=%lu unique=%zu:",
                    (unsigned long)nTotal, (unsigned long)nValid, seen.size());
+      int shown = 0;
+      for (uint64_t a : seen) {
+        if (shown++ >= 8) break;
+        std::fprintf(stderr, " %#lx", (unsigned long)a);
+      }
+      std::fprintf(stderr, " rsrc2=%08x tg=[%u %u %u]\n", rsrc2, tgx, tgy, tgz);
+    }
   }
-  if (csDump && dumpedCs.size() < 24 && gpuAddr(csAddr) &&
+  if (csDump && dumpedCs.size() < 24 && inGuest(csAddr) &&
       dumpedCs.insert(csAddr).second) {
     const uint32_t *ud = &g_regs[mmCOMPUTE_USER_DATA_0];
     std::fprintf(stderr,
@@ -423,6 +430,32 @@ void handleDispatch(const uint32_t *body, uint32_t count) {
   }
 }
 
+// DELTA_AGC_DUMPSH=<hexaddr>: decode and print one shader by address, once.
+// Shader dumps are otherwise tied to recompile time or to a draw index, neither
+// of which is reachable for a steady-state pass without a full trace.
+void maybeDumpShader(uint64_t addr) {
+  static const uint64_t want = [] {
+    const char *e = std::getenv("DELTA_AGC_DUMPSH");
+    return e ? std::strtoull(e, nullptr, 0) : 0ull;
+  }();
+  static bool done = false;
+  if (!want || done || addr != want || !inGuest(addr)) return;
+  done = true;
+  const auto prog = rdna::DecodeShader(reinterpret_cast<const uint32_t *>(addr), 4096);
+  std::fprintf(stderr, "[agc] SHADER %#lx: %zu insts\n", (unsigned long)addr,
+               prog.size());
+  for (const auto &in : prog) {
+    std::fprintf(stderr, "[agc]  pc=%04x %-6s op=%#05x %08x", in.pc,
+                 kEncName[static_cast<uint32_t>(in.enc) < 17
+                              ? static_cast<uint32_t>(in.enc)
+                              : 0],
+                 in.opcode, in.raw[0]);
+    if (in.size >= 2) std::fprintf(stderr, " %08x", in.raw[1]);
+    if (in.has_literal) std::fprintf(stderr, " lit=%08x", in.literal);
+    std::fprintf(stderr, "\n");
+  }
+}
+
 void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
   if (!vk::available()) return;
 
@@ -433,6 +466,8 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
   uint64_t vsA = g_regs.shaderAddr(mmSPI_SHADER_PGM_LO_GS);
   if (!inGuest(vsA)) vsA = g_regs.shaderAddr(mmSPI_SHADER_PGM_LO_ES);
   uint64_t psA = g_regs.shaderAddr(mmSPI_SHADER_PGM_LO_PS);
+  maybeDumpShader(vsA);
+  maybeDumpShader(psA);
   // DELTA_PS5_SKIPVS=hexaddr: drop draws using this VS (draw-isolation bisect).
   static const uint64_t skipVs = [] {
     const char *e = std::getenv("DELTA_PS5_SKIPVS");
@@ -946,10 +981,12 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
     // DELTA_AGC_VDUMPPROG: the decoded VS for this exact draw (shader dumps are
     // otherwise emitted once at recompile time and cannot be tied to a draw).
     if (std::getenv("DELTA_AGC_VDUMPPROG") && inGuest(vsA)) {
+      const bool wantPs = std::getenv("DELTA_AGC_VDUMPPS") != nullptr;
+      const uint64_t addr = wantPs ? psA : vsA;
       const auto prog =
-          rdna::DecodeShader(reinterpret_cast<const uint32_t *>(vsA), 4096);
-      std::fprintf(stderr, "[agc]   VS %#lx: %zu insts\n", (unsigned long)vsA,
-                   prog.size());
+          rdna::DecodeShader(reinterpret_cast<const uint32_t *>(addr), 4096);
+      std::fprintf(stderr, "[agc]   %s %#lx: %zu insts\n", wantPs ? "PS" : "VS",
+                   (unsigned long)addr, prog.size());
       for (const auto &in : prog) {
         std::fprintf(stderr, "[agc]    pc=%04x %-6s op=%#05x %08x", in.pc,
                      kEncName[static_cast<uint32_t>(in.enc) < 17
