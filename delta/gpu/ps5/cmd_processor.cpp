@@ -30,6 +30,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <sys/mman.h>
+#include <unistd.h>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -131,6 +133,14 @@ VBuffer decodeVBuffer(const uint32_t *p) {
   gfx10VBufFormat(v.gfmt, v.dfmt, v.nfmt);
   return v;
 }
+// A V# read from an unbound/garbage SGPR slot decodes to an in-range but bogus
+// address with an implausible stride/record count (e.g. a depth-only pre-pass
+// with an inactive vertex slot decoded stride=14915 nrec=480622080, which then
+// segfaulted reading the vertex ring). Mirrors the PS4 fetch-shader sanity gate
+// (gpu/ps4/gcn/gcn_resource.cpp).
+bool plausibleVb(const VBuffer &v) {
+  return v.stride && v.stride <= 256 && v.numRecords && v.numRecords <= 0x100000;
+}
 
 // Registers per space, so a LOAD_*_REG range can never spill into the next one.
 // A LOAD_SH_REG whose range ran long wrote zeros from its (empty) shadow image
@@ -160,6 +170,23 @@ void setRegs(uint32_t base, const uint32_t *body, uint32_t count) {
 // whole range the guest allocator can hand out instead of one title's band.
 inline bool gpuAddr(uint64_t a) {
   return a >= 0x1000000000ull && a < 0x8100000000ull;
+}
+
+// inGuest()'s bound spans essentially the whole 48-bit VA (see above), so a
+// heuristically-recovered pointer (e.g. reinterpreting a V#'s raw SGPR bits as a
+// table root when the inline descriptor doesn't decode) can pass it while still
+// pointing at memory the guest never mapped -- an inactive/uninitialized vertex
+// slot did exactly this and segfaulted the host. Probe with mincore (same
+// technique as kern/crash.cpp's guest-pointer walks) before dereferencing.
+inline bool mapped(uint64_t va, uint64_t bytes) {
+  const long pg = sysconf(_SC_PAGESIZE);
+  const uint64_t start = va & ~static_cast<uint64_t>(pg - 1);
+  const uint64_t end = (va + bytes + pg - 1) & ~static_cast<uint64_t>(pg - 1);
+  for (uint64_t p = start; p < end; p += static_cast<uint64_t>(pg)) {
+    unsigned char vec = 0;
+    if (mincore(reinterpret_cast<void *>(p), 1, &vec) != 0) return false;
+  }
+  return true;
 }
 
 // Latch a LOAD_*_REG packet: the register values live in a GPU-memory image at
@@ -641,18 +668,15 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
   d.targetMask = g_regs[mmCB_TARGET_MASK];
   d.colorControl = g_regs[mmCB_COLOR_CONTROL];
 
-  // Depth/stencil (gfx10 Z base = (WRITE_BASE | WRITE_BASE_HI<<32) << 8).
-  // Default OFF: the depth-clear path (DB fast clears) isn't modelled yet, so a
-  // stale depth buffer fails the GREATER test on every sprite/composite draw
-  // after the first frame. Isaac is 2D painter-ordered; DELTA_PS5_DEPTH=1
-  // re-enables for bring-up of depth-dependent titles.
-  static const bool depthOn = [] {
-    const char *e = std::getenv("DELTA_PS5_DEPTH");
-    return e && std::strcmp(e, "0") != 0;
-  }();
-  if (depthOn) {
+  // Depth/stencil (gfx10 Z base = (WRITE_BASE | WRITE_BASE_HI<<32) << 8). Mirrors
+  // the PS4 path (gpu/ps4/cmd_processor.cpp): DELTA_GPU_NODEPTH is the shared kill
+  // switch, otherwise the title's own DB_Z_INFO/DB_DEPTH_CONTROL state decides. 2D
+  // titles (Isaac) leave DB_Z_INFO's format field invalid so depthValid stays false
+  // and no depth attachment binds (unchanged 2D path).
+  {
+    static const bool noDepth = std::getenv("DELTA_GPU_NODEPTH") != nullptr;
     uint32_t dc = g_regs[mmDB_DEPTH_CONTROL];
-    uint32_t zinfo = g_regs[mmDB_Z_INFO];
+    uint32_t zinfo = noDepth ? 0 : g_regs[mmDB_Z_INFO];
     uint64_t zbase = ((static_cast<uint64_t>(g_regs[mmDB_Z_WRITE_BASE_HI]) << 32) |
                       g_regs[mmDB_Z_WRITE_BASE]) << 8;
     d.depthValid = (zinfo & 0x3) != 0;
@@ -747,11 +771,12 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
         if (ti + 3 >= 32) continue;
         VBuffer vb = decodeVBuffer(&vud[ti]);  // inline V#
         const char *how = "inline";
-        if (!inGuest(vb.base) || !vb.stride) {  // else follow a table pointer
+        if (!inGuest(vb.base) || !plausibleVb(vb)) {  // else follow a table pointer
           uint64_t tbl = (static_cast<uint64_t>(vud[ti + 1] & 0xFFFF) << 32) |
                          vud[ti];
-          if (inGuest(tbl)) {
-            vb = decodeVBuffer(reinterpret_cast<const uint32_t *>(tbl + a.vbuf_dword_off * 4));
+          uint64_t tblAddr = tbl + a.vbuf_dword_off * 4;
+          if (inGuest(tbl) && mapped(tblAddr, 16)) {
+            vb = decodeVBuffer(reinterpret_cast<const uint32_t *>(tblAddr));
             how = "table";
           }
         }
@@ -761,7 +786,7 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
                        i, a.location, a.num_comps, a.table_sgpr, a.vbuf_dword_off, how,
                        (unsigned long)vb.base, vb.stride, vb.numRecords, vb.gfmt,
                        vb.dfmt, vb.nfmt);
-        if (!inGuest(vb.base) || !vb.stride) continue;  // unresolved: keep the rest
+        if (!inGuest(vb.base) || !plausibleVb(vb)) continue;  // unresolved: keep the rest
         attrVbs[attrN] = vb;
         attrRes[attrN++] = &a;
       }
@@ -838,12 +863,12 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
             bool ok = true;
             for (uint32_t i = 0; i + 1 < cb.chain_len; i++) {  // deref intermediate pointers
               uint64_t at = (ptr + cb.chain_off[i]) & ~uint64_t{3};
-              if (!inGuest(at)) { ok = false; break; }
+              if (!inGuest(at) || !mapped(at, 8)) { ok = false; break; }
               const uint32_t *q = reinterpret_cast<const uint32_t *>(at);
               ptr = (static_cast<uint64_t>(q[1] & 0xFFFF) << 32) | q[0];
             }
             uint64_t vAddr = (ptr + cb.chain_off[cb.chain_len - 1]) & ~uint64_t{3};
-            if (!ok || !inGuest(vAddr)) continue;
+            if (!ok || !inGuest(vAddr) || !mapped(vAddr, 16)) continue;
             vb = decodeVBuffer(reinterpret_cast<const uint32_t *>(vAddr));
             how = "chain";
           }
@@ -1045,13 +1070,25 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
     vk::beginFrame();
     g_frameActive = true;
   }
-  if (dl) std::fprintf(stderr, "[agc] DL draw#%lu vk::draw nvattrs=%d rt=%#lx "
-                       "tmask=%#x cc=%#x blend=%u dv=%d db=%#lx dt=%u dw=%u df=%u ntex=%u tex0=%#lx\n",
-                       (unsigned long)myDraw, d.nvattrs, (unsigned long)d.rtBase,
-                       d.targetMask, d.colorControl, d.blendEnable, d.depthValid,
-                       (unsigned long)d.depthBase, d.depthTestEnable,
-                       d.depthWriteEnable, d.depthFunc, d.nTexs,
-                       (unsigned long)(d.nTexs ? d.texs[0].base : 0));
+  if (dl) {
+    std::fprintf(stderr, "[agc] DL draw#%lu vk::draw nvattrs=%d rt=%#lx "
+                 "tmask=%#x cc=%#x blend=%u dv=%d db=%#lx dt=%u dw=%u df=%u ntex=%u tex0=%#lx\n",
+                 (unsigned long)myDraw, d.nvattrs, (unsigned long)d.rtBase,
+                 d.targetMask, d.colorControl, d.blendEnable, d.depthValid,
+                 (unsigned long)d.depthBase, d.depthTestEnable,
+                 d.depthWriteEnable, d.depthFunc, d.nTexs,
+                 (unsigned long)(d.nTexs ? d.texs[0].base : 0));
+    for (uint32_t i = 0; i < d.nTexs; i++)
+      std::fprintf(stderr, "[agc]   DL tex%u base=%#lx %ux%u dfmt=%u nfmt=%u tiling=%u pitch=%u\n",
+                   i, (unsigned long)d.texs[i].base, d.texs[i].w, d.texs[i].h,
+                   d.texs[i].dfmt, d.texs[i].nfmt, d.texs[i].tiling, d.texs[i].pitch);
+    std::fprintf(stderr, "[agc]   DL vtx data=%#lx stride=%u count=%u nvbufs=%u idx=%#lx icount=%u\n",
+                 (unsigned long)d.vertexData, d.vertexStride, d.vertexCount, d.nvbufs,
+                 (unsigned long)d.indexData, d.indexCount);
+    for (uint32_t i = 0; i < d.nvbufs; i++)
+      std::fprintf(stderr, "[agc]   DL vbuf%u data=%#lx stride=%u nrec=%u\n",
+                   i, (unsigned long)d.vbufs[i].data, d.vbufs[i].stride, d.vbufs[i].numRecords);
+  }
   vk::draw(d);
   if (dl) std::fprintf(stderr, "[agc] DL draw#%lu done\n", (unsigned long)myDraw);
 }

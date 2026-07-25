@@ -10,6 +10,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <sys/mman.h>
+#include <unistd.h>
 #include <unordered_map>
 #include <utility>
 
@@ -23,6 +25,22 @@ using gpu::gcn::Program;
 using gpu::gcn::TImage;
 
 bool inGuest(uint64_t a) { return a >= 0x10000ull && a < 0x1000000000000ull; }
+
+// inGuest()'s bound spans essentially the whole 48-bit VA, so a T#/S# root
+// pointer recovered by reinterpreting raw SGPR bits can pass it while still
+// pointing at memory the guest never mapped -- an inactive/uninitialized
+// descriptor slot does exactly this for some early draws and segfaults the
+// host. Probe with mincore (same technique as kern/crash.cpp) before reading.
+bool mapped(uint64_t va, uint64_t bytes) {
+  const long pg = sysconf(_SC_PAGESIZE);
+  const uint64_t start = va & ~static_cast<uint64_t>(pg - 1);
+  const uint64_t end = (va + bytes + pg - 1) & ~static_cast<uint64_t>(pg - 1);
+  for (uint64_t p = start; p < end; p += static_cast<uint64_t>(pg)) {
+    unsigned char vec = 0;
+    if (mincore(reinterpret_cast<void *>(p), 1, &vec) != 0) return false;
+  }
+  return true;
+}
 
 int32_t signExt21(uint32_t v) { return static_cast<int32_t>(v << 11) >> 11; }
 
@@ -94,7 +112,7 @@ bool resolveDesc(uint32_t sgpr, uint32_t n, const uint32_t* pud,
     if (sbase + 1 >= 32) return false;
     const uint64_t ptr = pud[sbase] | (static_cast<uint64_t>(pud[sbase + 1] & 0xFFFF) << 32);
     const uint64_t addr = ptr + off;
-    if (!inGuest(addr)) return false;
+    if (!inGuest(addr) || !mapped(addr, n * 4)) return false;
     std::memcpy(dst, reinterpret_cast<const void*>(addr), n * 4);
     return true;
   }
