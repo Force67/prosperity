@@ -817,11 +817,12 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
     g_frameActive = true;
   }
   if (dl) std::fprintf(stderr, "[agc] DL draw#%lu vk::draw nvattrs=%d rt=%#lx "
-                       "tmask=%#x cc=%#x blend=%u dv=%d db=%#lx dt=%u dw=%u df=%u...\n",
+                       "tmask=%#x cc=%#x blend=%u dv=%d db=%#lx dt=%u dw=%u df=%u ntex=%u tex0=%#lx\n",
                        (unsigned long)myDraw, d.nvattrs, (unsigned long)d.rtBase,
                        d.targetMask, d.colorControl, d.blendEnable, d.depthValid,
                        (unsigned long)d.depthBase, d.depthTestEnable,
-                       d.depthWriteEnable, d.depthFunc);
+                       d.depthWriteEnable, d.depthFunc, d.nTexs,
+                       (unsigned long)(d.nTexs ? d.texs[0].base : 0));
   vk::draw(d);
   if (dl) std::fprintf(stderr, "[agc] DL draw#%lu done\n", (unsigned long)myDraw);
 }
