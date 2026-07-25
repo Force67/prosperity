@@ -86,7 +86,18 @@ static void submitGnmDescArray(uint64_t descPtr, uint32_t count) {
   }
 }
 
+// A guest GPU address: see gpuAddr() in gpu/ps5/cmd_processor.cpp. A title that
+// batch-maps its direct memory (Skyrim) gets buffers well below Isaac's
+// 0x80_xx_xx_xx_xx AGC pool, and the old fixed band silently dropped every one of
+// its command buffers -- so nothing ever rendered and the game waited forever on
+// a GPU label the dropped submits would have written.
+static inline bool gpuAddr(uint64_t a) {
+  return a >= 0x1000000000ull && a < 0x8100000000ull;
+}
+
 int32_t gcDevicePs5::ioctl(uint32_t cmd, void *data) {
+  if (std::getenv("DELTA_GC_TRACE"))
+    std::printf("[gc] ioctl(%x) data=%p\n", cmd, data);
   switch (cmd) {
   case 0xC0108102: {  // GNM submit: {u32 a0, u32 count, u64 descPtr}
     struct argl { uint32_t a0; uint32_t count; uint64_t descPtr; };
@@ -142,7 +153,7 @@ int32_t gcDevicePs5::ioctl(uint32_t cmd, void *data) {
                     (unsigned long)base2, size);
         for (int k = 0; k + 1 < 16; k++) {
           uint64_t p = (static_cast<uint64_t>(w[k + 1]) << 32) | w[k];
-          if (p >= 0x8000000000ull && p < 0x8100000000ull) {
+          if (gpuAddr(p)) {
             auto *pw = reinterpret_cast<const uint32_t *>(p);
             std::printf("[agc]   arg[%d] ptr=%#lx ->", k, (unsigned long)p);
             for (int j = 0; j < 8; j++) std::printf(" %08x", pw[j]);
@@ -209,12 +220,12 @@ int32_t gcDevicePs5::ioctl(uint32_t cmd, void *data) {
       auto *w = static_cast<uint32_t *>(data);
       uint32_t count = w[1];
       uint64_t ptr = (static_cast<uint64_t>(w[3]) << 32) | w[2];
-      if (ptr >= 0x7ff000000000ull && count && count < 64) {
+      if (ptr && count && count < 64) {
         auto *d = reinterpret_cast<uint32_t *>(ptr);
         for (uint32_t i = 0; i < count; i++) {
           uint64_t buf = (static_cast<uint64_t>(d[i * 4 + 1]) << 32) | d[i * 4];
           uint32_t sz = d[i * 4 + 2];
-          if (buf >= 0x8000000000ull && buf < 0x8100000000ull && sz)
+          if (gpuAddr(buf) && sz)
             prosperity_agc_submit(buf, sz * 4);
         }
       }
@@ -252,7 +263,7 @@ int32_t gcDevicePs5::ioctl(uint32_t cmd, void *data) {
         uint64_t p = (static_cast<uint64_t>(w[k + 1]) << 32) | w[k];
         // Follow both GPU-aperture pointers AND host/stack pointers (the mode-1
         // flip/wait ioctls embed a stack ptr to a label/status struct).
-        bool gpu = p >= 0x8000000000ull && p < 0x8100000000ull;
+        bool gpu = gpuAddr(p);
         bool stk = p >= 0x7ff000000000ull && p < 0x800000000000ull;
         if (gpu || stk) {
           auto *pw = reinterpret_cast<const uint32_t *>(p);
@@ -262,7 +273,7 @@ int32_t gcDevicePs5::ioctl(uint32_t cmd, void *data) {
           if (stk) {
             for (int e = 0; e < 6; e++) {
               uint64_t cand = (static_cast<uint64_t>(pw[e + 1]) << 32) | pw[e];
-              if (cand >= 0x8000000000ull && cand < 0x8100000000ull) {
+              if (gpuAddr(cand)) {
                 auto *cw = reinterpret_cast<const uint32_t *>(cand);
                 std::printf("\n[agc]     [+%d] buf %#lx sz=%08x ->", e * 4,
                             (unsigned long)cand, pw[e + 2]);

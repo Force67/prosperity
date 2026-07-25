@@ -210,6 +210,18 @@ static void probeHandler(int, siginfo_t *, void *ucv) {
   symbolize(gr[REG_RIP], rip, sizeof(rip));
   std::fprintf(stderr, "[probe] tid=%ld rip=%016llx %s\n", (long)gettid(),
                (unsigned long long)gr[REG_RIP], rip);
+  // GPRs too: a thread caught in a busy-wait only makes sense with the address
+  // and value it is polling.
+  std::fprintf(stderr,
+               "[probe]   rax=%016llx rbx=%016llx rcx=%016llx rdx=%016llx\n"
+               "[probe]   rsi=%016llx rdi=%016llx r8 =%016llx r9 =%016llx\n"
+               "[probe]   r12=%016llx r13=%016llx r14=%016llx r15=%016llx\n",
+               (unsigned long long)gr[REG_RAX], (unsigned long long)gr[REG_RBX],
+               (unsigned long long)gr[REG_RCX], (unsigned long long)gr[REG_RDX],
+               (unsigned long long)gr[REG_RSI], (unsigned long long)gr[REG_RDI],
+               (unsigned long long)gr[REG_R8], (unsigned long long)gr[REG_R9],
+               (unsigned long long)gr[REG_R12], (unsigned long long)gr[REG_R13],
+               (unsigned long long)gr[REG_R14], (unsigned long long)gr[REG_R15]);
   uintptr_t rsp = gr[REG_RSP];
   if (rsp >= 0x10000) {
     auto *sp = reinterpret_cast<uintptr_t *>(rsp);

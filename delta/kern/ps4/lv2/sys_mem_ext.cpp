@@ -206,12 +206,29 @@ int PS4ABI sys_batch_map(uint32_t /*handle*/, uint32_t /*flags*/,
                    (unsigned long long)op.offset, (unsigned long long)op.length,
                    op.prot, op.type);
     switch (op.operation) {
-    case 0:   // MAP_DIRECT: identity model, back the chosen VA with anon memory
-    case 3: { // MAP_FLEXIBLE: same, no physical offset
+    case 0:   // MAP_DIRECT: back the VA with the shared dmem store at op.offset,
+              // so every VA mapping that physical offset aliases the same bytes
+              // (syscall 628 already does this). Skyrim maps its GPU pools with
+              // batch-map and then waits on a label the GPU writes; with private
+              // anonymous pages per mapping the CPU never sees the write.
+    case 3: { // MAP_FLEXIBLE: no physical offset, plain anonymous memory
       if (!op.start || !op.length) {
         if (processed)
           *processed = done;
         return -SysError::eINVAL;
+      }
+      auto *pr = proc::getActive();
+      const bool ps5 = pr && pr->getPlatform() == proc::platform::ps5;
+      const int fd = (op.operation == 0 && ps5) ? dmemBackingFd() : -1;
+      if (fd >= 0 && op.offset + op.length <= dmemBackingSize()) {
+        void *p = ::mmap(reinterpret_cast<void *>(op.start), op.length,
+                         PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd,
+                         static_cast<off_t>(op.offset));
+        if (p != MAP_FAILED) {
+          pr->getVma().add(reinterpret_cast<uint8_t *>(p), op.length,
+                           utl::pageProtection::w);
+          break;
+        }
       }
       uint8_t *p = sys_mmap(reinterpret_cast<void *>(op.start), op.length,
                             op.prot, mFlags::fixed | mFlags::anon,

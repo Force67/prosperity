@@ -112,7 +112,9 @@ void vmManager::forEachGpuAperturePage(void (*fn)(void *, uint8_t *, size_t),
   std::lock_guard lock(vmlock);
   for (const auto &page : rtPages) {
     auto a = reinterpret_cast<uint64_t>(page.ptr);
-    if (a >= 0x8000000000ull && a < 0x8100000000ull)
+    // Same range as gpu/ps5's gpuAddr(): a title that batch-maps direct memory
+    // gets pages well below the 0x80_xx_xx_xx_xx AGC pool.
+    if (a >= 0x1000000000ull && a < 0x8100000000ull)
       fn(ctx, page.ptr, page.size);  // callback caps how much of a big pool it sweeps
   }
 }

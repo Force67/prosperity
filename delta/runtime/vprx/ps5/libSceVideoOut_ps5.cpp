@@ -173,16 +173,17 @@ int PS4ABI vGetResolutionStatus(int, void *status) {
   return 0;
 }
 
+// Prospero drops PS4's aspectRatio argument, so width/height/pitch each sit one
+// register earlier. Read as the PS4 shape, Skyrim's 3840x2160 attribute decoded
+// as "2160x0 pitch 0" and every buffer registered at the wrong size.
 int PS4ABI vSetBufferAttribute(void *attribute, uint32_t pixelFormat,
-                               uint32_t tilingMode, uint32_t aspectRatio,
-                               uint32_t width, uint32_t height,
-                               uint32_t pitchInPixel) {
+                               uint32_t tilingMode, uint32_t width,
+                               uint32_t height, uint32_t pitchInPixel) {
   if (!attribute) return -1;
   auto *a = static_cast<BufferAttribute *>(attribute);
   std::memset(a, 0, sizeof(*a));
   a->pixelFormat = pixelFormat;
   a->tilingMode = static_cast<int32_t>(tilingMode);
-  a->aspectRatio = static_cast<int32_t>(aspectRatio);
   a->width = width;
   a->height = height;
   a->pitchInPixel = pitchInPixel;

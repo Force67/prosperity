@@ -115,6 +115,14 @@ void setRegs(uint32_t base, const uint32_t *body, uint32_t count) {
     if (off + (i - 1) < kRegFileSize) g_regs[off + (i - 1)] = body[i];
 }
 
+// A guest GPU address. Isaac's AGC pool sits in the 0x80_xx_xx_xx_xx band, but a
+// title that batch-maps its direct memory gets whatever the kernel handed it --
+// Skyrim's command buffers and labels land around 0x10_00_00_00_00. Test the
+// whole range the guest allocator can hand out instead of one title's band.
+inline bool gpuAddr(uint64_t a) {
+  return a >= 0x1000000000ull && a < 0x8100000000ull;
+}
+
 // Latch a LOAD_*_REG packet: the register values live in a GPU-memory image at
 // body[0..1]; body[2..] are (reg_offset, num_dwords) ranges. Each range copies
 // `num` dwords from the image (image[reg_offset..]) into the reg file at
@@ -124,7 +132,7 @@ void setRegs(uint32_t base, const uint32_t *body, uint32_t count) {
 void loadRegs(uint32_t base, const uint32_t *body, uint32_t count) {
   if (count < 4) return;
   uint64_t mem = (static_cast<uint64_t>(body[1] & 0xFFFF) << 32) | body[0];
-  if (mem < 0x8000000000ull || mem >= 0x8100000000ull) return;  // GPU aperture only
+  if (!gpuAddr(mem)) return;  // GPU aperture only
   const uint32_t *src = reinterpret_cast<const uint32_t *>(mem);
   // COHERENCY TEST: dump the LOAD image content. If a context/SH image reads all
   // zero, it's non-coherent (the driver wrote it via a different VA) -- the shader
@@ -170,7 +178,7 @@ void loadRegs(uint32_t base, const uint32_t *body, uint32_t count) {
       uint32_t v = src[j];
       if ((v >> 24) == 0x80) {
         uint64_t a = (uint64_t)v << 8;
-        if (a >= 0x8000000000ull && a < 0x8100000000ull) {
+        if (gpuAddr(a)) {
           const uint32_t *w = reinterpret_cast<const uint32_t *>(a);
           std::fprintf(stderr, "[agc]   img[%#x]=%08x -> %#lx ISA? %08x %08x\n",
                        j, v, (unsigned long)a, w[0], w[1]);
@@ -206,7 +214,7 @@ void loadRegs(uint32_t base, const uint32_t *body, uint32_t count) {
 void loadRegPairs(uint32_t base, const uint32_t *body, uint32_t cnt) {
   if (cnt < 4) return;
   uint64_t addr = (static_cast<uint64_t>(body[1] & 0xFFFF) << 32) | (body[0] & 0xFFFFFFFCu);
-  if (addr < 0x8000000000ull || addr >= 0x8100000000ull) return;
+  if (!gpuAddr(addr)) return;
   // body[3] is the count of (reg_offset, value) register PAIRS, not dwords: each
   // iteration reads two dwords (the gfx10.3 SET_*_REG_INDIRECT handlers
   // loop `i < (buffer[3] & 0x3fff)` advancing the pointer by 2). The old
@@ -308,7 +316,7 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
     // file points at shader code -- the AGC binds shaders outside the PM4 stream --
     // so this stays inert until that path is decoded.
     auto tryAddr = [&](uint32_t o, uint64_t a) {
-      if (nf >= 16 || a < 0x8000000000ull || a >= 0x8100000000ull || (a & 0xFF))
+      if (nf >= 16 || !gpuAddr(a) || (a & 0xFF))
         return;
       uint32_t w0 = *reinterpret_cast<const uint32_t *>(a);
       if ((w0 >> 24) < 0x7e || w0 == 0xffffffffu) return;  // ISA plausibility
@@ -326,7 +334,7 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
     static int s_hdr = 0;
     uint64_t a113 = (static_cast<uint64_t>(g_regs[kShRegBase + 0x114] & 0xFFFF) << 32) |
                     g_regs[kShRegBase + 0x113];
-    if (g_trace && s_hdr < 3 && a113 >= 0x8000000000ull && a113 < 0x8100000000ull) {
+    if (g_trace && s_hdr < 3 && gpuAddr(a113)) {
       s_hdr++;
       auto *w = reinterpret_cast<const uint32_t *>(a113);
       std::fprintf(stderr, "[agc]   reg0x113 -> %#lx dump:", (unsigned long)a113);
@@ -356,7 +364,7 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
         std::fprintf(stderr, "\n");
         for (int k = 0; k + 1 < 16; k++) {
           uint64_t p = (static_cast<uint64_t>(ud[k + 1] & 0xFFFF) << 32) | ud[k];
-          if (p >= 0x8000000000ull && p < 0x8100000000ull) {
+          if (gpuAddr(p)) {
             auto *pw = reinterpret_cast<const uint32_t *>(p);
             std::fprintf(stderr, "[agc]     UD[%d]->%#lx:", k, (unsigned long)p);
             for (int j = 0; j < 8; j++) std::fprintf(stderr, " %08x", pw[j]);
@@ -848,7 +856,7 @@ void walk(const uint32_t *p, uint32_t words, bool dumpThis, int depth) {
         // so we can RE the register layout (which offset holds CB_COLOR/shaders).
         if ((op == 0x9f || op == 0x93 || op == 0x64 || op == 0x7a || op == 0x63) && cnt >= 2) {
           uint64_t a = (static_cast<uint64_t>(body[1] & 0xFFFF) << 32) | body[0];
-          if (a >= 0x8000000000ull && a < 0x8100000000ull) {
+          if (gpuAddr(a)) {
             auto *aw = reinterpret_cast<const uint32_t *>(a);
             std::fprintf(stderr, " -> buf %#lx:", (unsigned long)a);
             for (int b = 0; b < 12; b++) std::fprintf(stderr, " %08x", aw[b]);
@@ -865,7 +873,7 @@ void walk(const uint32_t *p, uint32_t words, bool dumpThis, int depth) {
           uint32_t ibw = body[2] & 0xFFFFF;
           // Bounds-guard: only follow IBs into the GPU aperture with a sane size,
           // so a stale/garbage ring window can't fault the walker.
-          if (ib >= 0x8000000000ull && ib < 0x8100000000ull && ibw &&
+          if (gpuAddr(ib) && ibw &&
               ibw <= 0x40000)
             walk(reinterpret_cast<const uint32_t *>(ib), ibw, dumpThis, depth + 1);
         }
@@ -998,7 +1006,7 @@ void submitDcb(const void *dcb, uint32_t sizeBytes) {
       for (uint32_t w = 0; w < (0x200000 / 4) && shown < 16; w += 2) {
         uint32_t lo = sh[w], hi = sh[w + 1];
         uint64_t a = (static_cast<uint64_t>(lo) << 8) | ((uint64_t)(hi & 0xFF) << 40);
-        if ((lo >> 24) == 0x80 && a >= 0x8000000000ull && a < 0x8100000000ull) {
+        if (gpuAddr(a)) {
           std::fprintf(stderr, "[agc]   SHADOW+%#x lo=%08x hi=%08x -> addr %#lx\n",
                        w * 4, lo, hi, (unsigned long)a);
           shown++;
