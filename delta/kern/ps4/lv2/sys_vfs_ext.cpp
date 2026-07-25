@@ -296,6 +296,10 @@ int PS4ABI sys_fchdir(uint32_t fd) { return 0; }
 // here being readable back, that read returns stale VFS data and this trace is
 // the only sign of why.
 int PS4ABI sys_unlink(const char *path) {
+  // Under a writable mount (savedata, /download0) do the real thing: a title
+  // that rewrites a file by unlink+create reads back stale content otherwise.
+  if (path && vfs::removeFile(path))
+    return 0;
   std::printf("[vfs] unlink('%s') ignored (read-only host)\n",
               path ? path : "(null)");
   return 0;
@@ -318,6 +322,10 @@ int PS4ABI sys_mkdir(const char *path, uint32_t mode) {
   return 0;
 }
 int PS4ABI sys_rename(const char *from, const char *to) {
+  base::String hf = from ? vfs::resolveWritable(from) : base::String();
+  base::String ht = to ? vfs::resolveWritable(to) : base::String();
+  if (!hf.empty() && !ht.empty() && std::rename(hf.c_str(), ht.c_str()) == 0)
+    return 0;
   std::printf("[vfs] rename('%s' -> '%s') ignored (read-only host)\n",
               from ? from : "(null)", to ? to : "(null)");
   return 0;

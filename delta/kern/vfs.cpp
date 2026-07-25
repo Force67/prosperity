@@ -305,6 +305,9 @@ bool stat(const char *path, int64_t &size, bool &isDir) {
     return true;
   }
 
+  base::String norm = normalizePath(path);
+  path = norm.c_str();
+
   size_t len = 0;
   const mountPoint *m = findMount(path, len);
   if (!m)
@@ -319,10 +322,12 @@ bool stat(const char *path, int64_t &size, bool &isDir) {
     return ok;
   }
 
-  utl::File f(joinHost(m->host, rest), utl::fileMode::read);
-  if (!f.Exists() || !f.IsOpen())
+  base::String host = fixHostCase(joinHost(m->host, rest));
+  struct ::stat st;
+  if (::stat(host.c_str(), &st) != 0)
     return false;
-  size = static_cast<int64_t>(f.GetSize());
+  isDir = S_ISDIR(st.st_mode);
+  size = static_cast<int64_t>(st.st_size);
   return true;
 }
 
