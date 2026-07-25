@@ -17,6 +17,7 @@
 #include "module.h"
 #include "proc.h"
 
+#include "ps5/lv2/ctor_probe.h"
 #include "ps5/lv2/initial_tcb.h"
 #include "vfs.h"
 #include "cpu/cpu_backend.h"
@@ -834,6 +835,7 @@ static void applyBootPatches(proc &p) {
       if (!*s2 || (end && *end != ',')) break;
     }
   }
+  ps5::maybePrependCtor(p);
   forceReturn0(p, "libkernel", 0x287e0);            // module-gen lib-id validator
   forceReturn0(p, "libSceAppContentUtil", 0x1a00);  // AppContent IPMI init
   // AppContent's IPMI client is stubbed, so the real Initialize/AppParamGetInt
