@@ -31,6 +31,7 @@
 #include <cstring>
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace gpu::ps5 {
 namespace {
@@ -344,6 +345,83 @@ struct ShaderKeyHash {
   }
 };
 std::unordered_map<ShaderKey, gcn::Recompiled, ShaderKeyHash> g_shCache;
+
+// IT_DISPATCH_DIRECT: body = [dim_x, dim_y, dim_z, initiator] workgroup counts.
+// The CS program address, workgroup shape, RSRC and user data come from the
+// COMPUTE_* SH registers programmed before it.
+const char *const kEncName[17] = {"?",    "sop1", "sop2",  "sopk", "sopc",
+                                  "sopp", "smem", "vop1",  "vop2", "vop3",
+                                  "vopc", "vint", "ds",    "mubuf/flat",
+                                  "mtbuf", "mimg", "exp"};
+
+void handleDispatch(const uint32_t *body, uint32_t count) {
+  const uint32_t dimX = count >= 1 ? body[0] : 0;
+  const uint32_t dimY = count >= 2 ? body[1] : 0;
+  const uint32_t dimZ = count >= 3 ? body[2] : 0;
+  const uint64_t csAddr =
+      (static_cast<uint64_t>(g_regs[mmCOMPUTE_PGM_HI] & 0xFF) << 32 |
+       g_regs[mmCOMPUTE_PGM_LO])
+      << 8;
+  const uint32_t tgx = g_regs[mmCOMPUTE_NUM_THREAD_X] & 0xFFFF;
+  const uint32_t tgy = g_regs[mmCOMPUTE_NUM_THREAD_Y] & 0xFFFF;
+  const uint32_t tgz = g_regs[mmCOMPUTE_NUM_THREAD_Z] & 0xFFFF;
+  const uint32_t rsrc2 = g_regs[mmCOMPUTE_PGM_RSRC2];
+
+  static const bool csDump = std::getenv("DELTA_GPU_CSDUMP") != nullptr;
+  static std::unordered_set<uint64_t> dumpedCs;
+  if (csDump) {
+    static uint64_t nTotal = 0, nValid = 0;
+    static std::unordered_set<uint64_t> seen;
+    nTotal++;
+    if (gpuAddr(csAddr)) nValid++;
+    seen.insert(csAddr);
+    if ((nTotal % 500) == 0)
+      std::fprintf(stderr, "[cs] dispatches=%lu valid=%lu unique=%zu\n",
+                   (unsigned long)nTotal, (unsigned long)nValid, seen.size());
+  }
+  if (csDump && dumpedCs.size() < 24 && gpuAddr(csAddr) &&
+      dumpedCs.insert(csAddr).second) {
+    const uint32_t *ud = &g_regs[mmCOMPUTE_USER_DATA_0];
+    std::fprintf(stderr,
+                 "[cs] addr=%#lx groups=[%u %u %u] tg=[%u %u %u] rsrc2=%08x\n",
+                 (unsigned long)csAddr, dimX, dimY, dimZ, tgx, tgy, tgz, rsrc2);
+    std::fprintf(stderr, "[cs]   user_data:");
+    for (int k = 0; k < 16; k++) std::fprintf(stderr, " %08x", ud[k]);
+    std::fprintf(stderr, "\n");
+    // Follow each user-data pointer pair one level: the descriptor tables the CS
+    // dereferences say which surfaces it actually reads and writes.
+    for (int k = 0; k < 15; k++) {
+      uint64_t p = (static_cast<uint64_t>(ud[k + 1] & 0xFFFF) << 32) | ud[k];
+      if (!gpuAddr(p)) continue;
+      const uint32_t *tw = reinterpret_cast<const uint32_t *>(p);
+      std::fprintf(stderr, "[cs]   ud%d -> %#lx:", k, (unsigned long)p);
+      for (int b = 0; b < 8; b++) std::fprintf(stderr, " %08x", tw[b]);
+      std::fprintf(stderr, "\n");
+    }
+    // Encoding census: says which instruction families a compute backend must
+    // cover before any of these dispatches can run.
+    const auto prog =
+        rdna::DecodeShader(reinterpret_cast<const uint32_t *>(csAddr), 4096);
+    uint32_t hist[24] = {};
+    uint32_t flatSeg[4] = {}, flatOps[128] = {};
+    for (const auto &in : prog) {
+      const uint32_t e = static_cast<uint32_t>(in.enc);
+      if (e < 24) hist[e]++;
+      if (in.enc == gcn::Enc::kMubuf && (in.raw[0] >> 26) == 0x37) {
+        flatSeg[(in.raw[0] >> 14) & 3]++;
+        flatOps[(in.raw[0] >> 18) & 0x7F]++;
+      }
+    }
+    std::fprintf(stderr, "[cs]   insts=%zu enc:", prog.size());
+    for (uint32_t e = 0; e < 24; e++)
+      if (hist[e]) std::fprintf(stderr, " %u=%u", e, hist[e]);
+    std::fprintf(stderr, " flatseg: %u/%u/%u/%u ops:", flatSeg[0], flatSeg[1],
+                 flatSeg[2], flatSeg[3]);
+    for (uint32_t o = 0; o < 128; o++)
+      if (flatOps[o]) std::fprintf(stderr, " %#x=%u", o, flatOps[o]);
+    std::fprintf(stderr, "\n");
+  }
+}
 
 void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
   if (!vk::available()) return;
@@ -711,7 +789,7 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
                               const uint32_t *userData, bool vertexStage) {
         const uint32_t udBase = vertexStage ? udBaseEnv : 0;
         for (const auto &cb : cbufs) {
-          if (cb.binding >= 8) continue;
+          if (cb.binding >= gpu::gcn::kMaxCbufBindings) continue;
           VBuffer vb{};
           const char *how = "direct";
           const uint32_t udi = cb.ud_sgpr >= udBase ? cb.ud_sgpr - udBase : cb.ud_sgpr;
@@ -855,15 +933,34 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
     std::fprintf(stderr,
                  "[agc] VDUMP draw#%lu nvattrs=%u stride=%u count=%u prim=%u "
                  "vp=[xs=%g xo=%g ys=%g yo=%g] nCbufs=%u cbufBase=%#lx cbufSize=%u "
-                 "rt=%#lx ps=%#lx\n",
+                 "rt=%#lx ps=%#lx vs=%#lx\n",
                  (unsigned long)myDraw, d.nvattrs, d.vertexStride, d.vertexCount,
                  d.primType, d.viewportXScale, d.viewportXOffset, d.viewportYScale,
                  d.viewportYOffset, d.nCbufs, (unsigned long)d.cbufBase, d.cbufSize,
-                 (unsigned long)d.rtBase, (unsigned long)d.psAddr);
+                 (unsigned long)d.rtBase, (unsigned long)d.psAddr,
+                 (unsigned long)vsA);
     for (uint32_t a = 0; a < d.nvattrs; a++)
       std::fprintf(stderr, "[agc]   vattr%u loc=%u off=%u nc=%u dfmt=%u nfmt=%u\n",
                    a, d.vattrs[a].location, d.vattrs[a].offset, d.vattrs[a].num_comps,
                    d.vattrs[a].dfmt, d.vattrs[a].nfmt);
+    // DELTA_AGC_VDUMPPROG: the decoded VS for this exact draw (shader dumps are
+    // otherwise emitted once at recompile time and cannot be tied to a draw).
+    if (std::getenv("DELTA_AGC_VDUMPPROG") && inGuest(vsA)) {
+      const auto prog =
+          rdna::DecodeShader(reinterpret_cast<const uint32_t *>(vsA), 4096);
+      std::fprintf(stderr, "[agc]   VS %#lx: %zu insts\n", (unsigned long)vsA,
+                   prog.size());
+      for (const auto &in : prog) {
+        std::fprintf(stderr, "[agc]    pc=%04x %-6s op=%#05x %08x", in.pc,
+                     kEncName[static_cast<uint32_t>(in.enc) < 17
+                                  ? static_cast<uint32_t>(in.enc)
+                                  : 0],
+                     in.opcode, in.raw[0]);
+        if (in.size >= 2) std::fprintf(stderr, " %08x", in.raw[1]);
+        if (in.has_literal) std::fprintf(stderr, " lit=%08x", in.literal);
+        std::fprintf(stderr, "\n");
+      }
+    }
     const auto *vb = reinterpret_cast<const uint8_t *>(d.vertexData);
     uint32_t nv = d.vertexCount ? d.vertexCount : 4;
     uint32_t vbytes = std::min<uint32_t>(d.vertexStride * nv, 128u);
@@ -1058,6 +1155,7 @@ void walk(const uint32_t *p, uint32_t words, bool dumpThis, int depth) {
       case IT_NUM_INSTANCES:
         if (cnt >= 1) g_numInstances = body[0] ? body[0] : 1;
         break;
+      case IT_DISPATCH_DIRECT: handleDispatch(body, cnt); break;
       case IT_WRITE_DATA: {  // control, dstLo, dstHi, data...
         if (cnt >= 4) {
           uint64_t addr = (static_cast<uint64_t>(body[2] & 0xFFFF) << 32) |

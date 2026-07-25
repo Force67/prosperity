@@ -64,7 +64,7 @@ struct DrawInfo {
   uint64_t cbufBase = 0;
   uint32_t cbufSize = 0;
   struct DrawCbuf { uint64_t base = 0; uint32_t size = 0; };
-  DrawCbuf cbufs[8];
+  DrawCbuf cbufs[16];
   uint32_t nCbufs = 0;
   uint64_t rtBase = 0;         // CB_COLOR0 address; the draw's render target
   uint32_t rtW = 0, rtH = 0;   // render-target dimensions (shared by all MRT targets)

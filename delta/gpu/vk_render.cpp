@@ -50,6 +50,7 @@ constexpr VkDeviceSize kVbRing = 16ull * 1024 * 1024;  // per-frame vertex ring
 constexpr VkDeviceSize kIbRing = 8ull * 1024 * 1024;   // per-frame index ring (32-bit)
 constexpr VkDeviceSize kUboRing = 64ull * 1024 * 1024; // per-frame recomp cbuffer ring
 constexpr uint32_t kCbufWindow = 1024;                 // bytes per draw (uvec4 data[64])
+constexpr uint32_t kCbufBindings = gpu::gcn::kMaxCbufBindings;  // set-1 UBO bindings
 
 struct State {
   bool ready = false;
@@ -860,6 +861,11 @@ bool createDevice() {
   // Recomp cbuffer ring + dynamic-UBO descriptors (set 1) + empty set-0 layout.
   g.uboAlign = (uint32_t)props.limits.minUniformBufferOffsetAlignment;
   if (g.uboAlign < 1) g.uboAlign = 1;
+  if (props.limits.maxDescriptorSetUniformBuffersDynamic < kCbufBindings ||
+      props.limits.maxPerStageDescriptorUniformBuffers < kCbufBindings)
+    std::fprintf(stderr, "[gpuvk] only %u/%u dynamic UBOs available, need %u\n",
+                 props.limits.maxDescriptorSetUniformBuffersDynamic,
+                 props.limits.maxPerStageDescriptorUniformBuffers, kCbufBindings);
   {
     VkBufferCreateInfo ub{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
     ub.size = kUboRing;
@@ -875,37 +881,42 @@ bool createDevice() {
     VKOK(vkBindBufferMemory(g.device, g.uboBuf, g.uboMem, 0));
     VKOK(vkMapMemory(g.device, g.uboMem, 0, kUboRing, 0, (void **)&g.uboMap));
 
-    VkDescriptorSetLayoutBinding ubs[8]{};
-    for (uint32_t i = 0; i < 8; i++) {
+    // kMaxCbufBindings, not 8: a shader pair whose constant buffers exceed the
+    // cap is planned only up to it, and every s_buffer_load from a dropped base
+    // emits nothing, leaving its destination SGPRs zero. Skyrim's UI shaders sit
+    // right at 8 cbufs, so their transform matrix read back as an all-zero
+    // matrix and collapsed every vertex position.
+    VkDescriptorSetLayoutBinding ubs[kCbufBindings]{};
+    for (uint32_t i = 0; i < kCbufBindings; i++) {
       ubs[i].binding = i;
       ubs[i].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
       ubs[i].descriptorCount = 1;
       ubs[i].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
     }
     VkDescriptorSetLayoutCreateInfo ul{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    ul.bindingCount = 8; ul.pBindings = ubs;
+    ul.bindingCount = kCbufBindings; ul.pBindings = ubs;
     VKOK(vkCreateDescriptorSetLayout(g.device, &ul, nullptr, &g.uboLayout));
     VkDescriptorSetLayoutCreateInfo el{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
     el.bindingCount = 0;
     VKOK(vkCreateDescriptorSetLayout(g.device, &el, nullptr, &g.emptyLayout));
 
-    VkDescriptorPoolSize ups{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 8};
+    VkDescriptorPoolSize ups{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, kCbufBindings};
     VkDescriptorPoolCreateInfo upi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     upi.maxSets = 1; upi.poolSizeCount = 1; upi.pPoolSizes = &ups;
     VKOK(vkCreateDescriptorPool(g.device, &upi, nullptr, &g.uboPool));
     VkDescriptorSetAllocateInfo uai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
     uai.descriptorPool = g.uboPool; uai.descriptorSetCount = 1; uai.pSetLayouts = &g.uboLayout;
     VKOK(vkAllocateDescriptorSets(g.device, &uai, &g.uboSet));
-    VkDescriptorBufferInfo ubinfo[8];
-    VkWriteDescriptorSet uw[8];
-    for (uint32_t i = 0; i < 8; i++) {
+    VkDescriptorBufferInfo ubinfo[kCbufBindings];
+    VkWriteDescriptorSet uw[kCbufBindings];
+    for (uint32_t i = 0; i < kCbufBindings; i++) {
       ubinfo[i] = {g.uboBuf, 0, kCbufWindow};
       uw[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
       uw[i].dstSet = g.uboSet; uw[i].dstBinding = i; uw[i].descriptorCount = 1;
       uw[i].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
       uw[i].pBufferInfo = &ubinfo[i];
     }
-    vkUpdateDescriptorSets(g.device, 8, uw, 0, nullptr);
+    vkUpdateDescriptorSets(g.device, kCbufBindings, uw, 0, nullptr);
   }
   return true;
 }
@@ -4030,10 +4041,10 @@ bool drawRecomp(const DrawInfo &d) {
   // requires one dynamic offset for every dynamic descriptor in the set layout.
   VkDeviceSize cbOff = (g.uboOffset + g.uboAlign - 1) & ~(VkDeviceSize)(g.uboAlign - 1);
   VkDeviceSize cbStride = (kCbufWindow + g.uboAlign - 1) & ~(VkDeviceSize)(g.uboAlign - 1);
-  if (cbOff + cbStride * 8 > g.uboEnd) return decline(DR_RING);
-  uint32_t dynOff[8];
+  if (cbOff + cbStride * kCbufBindings > g.uboEnd) return decline(DR_RING);
+  uint32_t dynOff[kCbufBindings];
   VkDeviceSize next = cbOff;
-  for (uint32_t i = 0; i < 8; i++) {
+  for (uint32_t i = 0; i < kCbufBindings; i++) {
     const auto &cb = d.cbufs[i];
     const bool haveCbuf = cb.base >= 0x1000000000ull && cb.base < 0x20000000000ull;
     if (!haveCbuf && i != 0) {
@@ -4056,7 +4067,7 @@ bool drawRecomp(const DrawInfo &d) {
   }
   g.uboOffset = next;
   vkCmdBindDescriptorSets(g.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, rp->layout,
-                          1, 1, &g.uboSet, 8, dynOff);
+                          1, 1, &g.uboSet, kCbufBindings, dynOff);
   if (texSet)
     vkCmdBindDescriptorSets(g.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, rp->layout, 0, 1, &texSet, 0, nullptr);
   if (nbind) {
@@ -4078,6 +4089,68 @@ bool drawRecomp(const DrawInfo &d) {
                      0, 0, 0);
   else
     vkCmdDraw(g.cmd, d.vertexCount, d.instanceCount ? d.instanceCount : 1, 0, 0);
+  // DELTA_GPU_DRAWRT=<base>: report what was actually issued for one target.
+  {
+    static const uint64_t want = [] {
+      const char *e = std::getenv("DELTA_GPU_DRAWRT");
+      return e ? std::strtoull(e, nullptr, 0) : 0ull;
+    }();
+    static int shown = 0;
+    if (want && g.curRt == want && shown < 8) {
+      shown++;
+      std::fprintf(stderr,
+                   "[drawrt] rt=%#lx %ux%u indexed=%d vcount=%u icount=%u "
+                   "prim=%u tmask=%#x nvbufs=%u stride=%u mrt=%u "
+                   "vp=%g,%g scale %g,%g off\n",
+                   (unsigned long)g.curRt, d.rtW, d.rtH, (int)indexed,
+                   d.vertexCount, d.indexCount, d.primType, d.targetMask,
+                   d.nvbufs, d.vertexStride, d.mrtCount, d.viewportXScale,
+                   d.viewportYScale, d.viewportXOffset, d.viewportYOffset);
+      for (uint32_t i = 0; i < multiN; i++) {
+        const auto &t = d.texs[i];
+        if (!t.base) continue;
+        std::fprintf(stderr,
+                     "[drawrt]  tex%u %#lx %ux%u dfmt=%u tiling=%u -> %s%#lx\n",
+                     i, (unsigned long)t.base, t.w, t.h, t.dfmt, t.tiling,
+                     multiColor[i]    ? "rt "
+                     : multiFeedback[i] ? "fb "
+                     : multiDepth[i]  ? "depth "
+                     : multiViews[i]  ? "guest "
+                                      : "MISS ",
+                     (unsigned long)(multiColor[i] ? multiColor[i]
+                                     : multiFeedback[i] ? multiFeedback[i]
+                                     : multiDepth[i] ? multiDepth[i] : 0));
+        if (t.base >= 0x1000000000ull && t.base < 0x20000000000ull) {
+          const uint32_t *px = reinterpret_cast<const uint32_t *>(t.base);
+          uint32_t nz = 0, probes = 0;
+          // w*h BYTES worth of dwords: safe for any bpp >= 1, and enough of the
+          // surface to tell "never written" from "written further in".
+          const uint64_t span = (uint64_t)t.w * t.h / 4;
+          for (uint64_t k = 0; k < span; k += 977, probes++)
+            if (px[k]) nz++;
+          std::fprintf(stderr, "[drawrt]   mem nz=%u/%u first=%08x %08x\n", nz,
+                       probes, px[0], px[1]);
+        }
+      }
+      for (uint32_t c = 0; c < kCbufBindings; c++) {
+        const auto &cb = d.cbufs[c];
+        if (cb.base < 0x1000000000ull || cb.base >= 0x20000000000ull) continue;
+        const uint32_t *w = reinterpret_cast<const uint32_t *>(cb.base);
+        std::fprintf(stderr, "[drawrt]  cb%u %#lx sz=%u:", c,
+                     (unsigned long)cb.base, cb.size);
+        for (uint32_t k = 0; k < 8 && k * 4 < cb.size; k++)
+          std::fprintf(stderr, " %g", *reinterpret_cast<const float *>(&w[k]));
+        // The 3D VS loads its transform with s_buffer_load_dwordx16 at byte
+        // offset 0x80; show that window when the binding is big enough to hold it.
+        if (cb.size >= 192) {
+          std::fprintf(stderr, "\n[drawrt]   @0x80:");
+          for (uint32_t k = 32; k < 48; k++)
+            std::fprintf(stderr, " %g", *reinterpret_cast<const float *>(&w[k]));
+        }
+        std::fprintf(stderr, "\n");
+      }
+    }
+  }
   for (uint32_t i = 0; i < multiN; i++) {
     if (!multiStorage[i]) continue;
     RTarget &target = g_rts[multiStorage[i]];

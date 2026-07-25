@@ -31,6 +31,11 @@ struct ShaderAttr {
   bool inline_descriptor = false;  // V# lives directly in VS user data
 };
 
+// Set-1 UBO bindings shared by VS + PS. A shader pair whose constant buffers
+// exceed this gets planned only up to the cap, and every s_buffer_load from a
+// dropped base then emits nothing, leaving its destination SGPRs zero.
+constexpr uint32_t kMaxCbufBindings = 16;
+
 // A constant buffer a shader stage reads (s_buffer_load). Bound as a UBO.
 struct ShaderCbuf {
   uint32_t binding = 0;

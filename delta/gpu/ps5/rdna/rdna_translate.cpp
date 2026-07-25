@@ -38,6 +38,7 @@ namespace gpu::rdna {
 namespace {
 
 using gpu::gcn::Enc;
+using gpu::gcn::kMaxCbufBindings;
 using gpu::gcn::Id;
 using gpu::gcn::Inst;
 using gpu::gcn::Program;
@@ -264,7 +265,7 @@ bool RdnaPlanCbufs(const Program& program, uint32_t first_binding,
     auto it = bindings.find(sbase);
     if (it == bindings.end()) {
       const uint32_t binding = first_binding + static_cast<uint32_t>(cbufs.size());
-      if (binding >= 8) return true;  // set 1 has 8 UBO bindings; ignore extras
+      if (binding >= kMaxCbufBindings) return true;  // ignore extras
       bindings[sbase] = binding;
       ShaderCbuf cb;
       cb.binding = binding;
@@ -307,7 +308,7 @@ void RdnaPlanBufLoadCbufs(const Program& program, uint32_t first_binding,
     if (BufLoadIsVertexFetch(inst, chained)) continue;  // real fetch -> vertex input
     const uint32_t binding = first_binding + static_cast<uint32_t>(cbufs.size());
     if (chained) {
-      if (binding >= 8) return;
+      if (binding >= kMaxCbufBindings) return;
       by_pc[inst.pc] = binding;
       ShaderCbuf cb;
       cb.binding = binding;
@@ -319,7 +320,7 @@ void RdnaPlanBufLoadCbufs(const Program& program, uint32_t first_binding,
       continue;
     }
     if (bindings.count(srsrc)) continue;
-    if (binding >= 8) return;  // set 1 has 8 UBO bindings
+    if (binding >= kMaxCbufBindings) return;
     bindings[srsrc] = binding;
     cbufs.push_back({binding, srsrc, 16});  // mat4-sized default window (16 dwords)
   }
@@ -459,19 +460,57 @@ void EmitExport(Translator& t, const Inst& inst, StageContext& sc) {
   // target == 20 (PRIM) / 9 (NULL): NGG bookkeeping, nothing to emit.
 }
 
-// SDWA (src0 field == 249) / DPP (== 250) put the real src0 VGPR in the extra
-// control dword (its [7:0]); the decoder already consumed that dword (see
-// valuSrc0Extra) and stashed it in inst.literal. Resolve the effective src0 field
-// + literal so the shared VALU emitters see the real operand. The sub-dword byte/
-// word selection (SDWA) and lane swizzle (DPP) are approximated as full-dword
-// identity, so a VOP with a modifier at least reads the right register instead of
-// decoding the escape (249/250) as zero.
+// SDWA (src0 field == 249) / DPP (== 250) put the real operands in the extra
+// control dword; the decoder already consumed it (see valuSrc0Extra) and stashed
+// it in inst.literal.
+struct SdwaMod {
+  uint32_t src0 = 0, src1 = 0;         // resolved operand fields
+  uint32_t src0_sel = 6, src1_sel = 6;  // 0-3 byte, 4-5 word, 6 whole dword
+  bool src0_sext = false, src1_sext = false;
+  bool src0_neg = false, src0_abs = false;
+  bool src1_neg = false, src1_abs = false;
+  uint32_t dst_sel = 6;
+};
+
+// S0/S1 (bits 23/31) choose the SCALAR file for that operand. Reading them as
+// VGPRs instead is silent corruption: a 3D vertex shader multiplies its
+// transform out of SGPRs, so the matrix comes back as zeros and every position
+// collapses. DPP has no scalar-source form (its src0 is always a VGPR).
+SdwaMod DecodeSdwa(const Inst& inst, uint32_t vsrc1, bool dpp) {
+  const uint32_t m = inst.literal;
+  SdwaMod s;
+  s.src0 = (m & 0xFF) + ((!dpp && ((m >> 23) & 1)) ? 0u : 256u);
+  s.src1 = vsrc1 + 256u;
+  if (dpp) return s;
+  s.dst_sel = (m >> 8) & 7;
+  s.src0_sel = (m >> 16) & 7;
+  s.src0_sext = (m >> 19) & 1;
+  s.src0_neg = (m >> 20) & 1;
+  s.src0_abs = (m >> 21) & 1;
+  s.src1_sel = (m >> 24) & 7;
+  s.src1_sext = (m >> 27) & 1;
+  s.src1_neg = (m >> 28) & 1;
+  s.src1_abs = (m >> 29) & 1;
+  if ((m >> 31) & 1) s.src1 = vsrc1;
+  return s;
+}
+
+// Apply one operand's SDWA sub-dword selection to its raw 32-bit value.
+Id SdwaSelect(Translator& t, Id raw, uint32_t sel, bool sext) {
+  if (sel >= 6) return raw;
+  const uint32_t bits = sel < 4 ? 8u : 16u;
+  const uint32_t off = sel < 4 ? sel * 8u : (sel - 4) * 16u;
+  const Id shifted = t.Shr(raw, t.U32(off));
+  if (!sext) return t.And(shifted, t.U32(bits == 8 ? 0xFFu : 0xFFFFu));
+  return t.m.Emit(spv::Op::OpBitFieldSExtract, t.t_u,
+                  {shifted, t.U32(0), t.U32(bits)});
+}
+
 void ResolveValuSrc0(const Inst& inst, uint32_t src0, uint32_t& field,
                      uint32_t& literal) {
   if (src0 == 249 || src0 == 250) {
-    field = 256 + (inst.literal & 0xFF);
+    field = DecodeSdwa(inst, 0, src0 == 250).src0;
     literal = 0;
-    gpu::gcn::WarnUnsupported("valu.sdwa/dpp-approx", src0, inst.raw[0], inst.literal);
   } else {
     field = src0;
     literal = inst.literal;
@@ -500,18 +539,36 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
     case Enc::kSmrd: RdnaEmitSmem(t, inst, sc); break;
     case Enc::kVop1: {
       const uint32_t op = inst.opcode, vdst = (w >> 17) & 0xFF;
+      const uint32_t raw0 = w & 0x1FF;
       uint32_t src0, lit;
-      ResolveValuSrc0(inst, w & 0x1FF, src0, lit);
+      ResolveValuSrc0(inst, raw0, src0, lit);
+      if (raw0 == 249) {  // SDWA: apply the source's sub-dword selection
+        const SdwaMod sd = DecodeSdwa(inst, 0, false);
+        gpu::gcn::EmitVop1(
+            t, op, vdst,
+            t.m.Bitcast(t.t_f, SdwaSelect(t, t.SrcRaw(src0, 0), sd.src0_sel,
+                                          sd.src0_sext)));
+        break;
+      }
       gpu::gcn::EmitVop1(t, op, vdst, t.SrcF(src0, lit));
       break;
     }
     case Enc::kVop2: {
       const uint32_t op = inst.opcode, vdst = (w >> 17) & 0xFF;
       const uint32_t vsrc1 = (w >> 9) & 0xFF;
+      const uint32_t raw0 = w & 0x1FF;
       uint32_t src0, lit;
-      ResolveValuSrc0(inst, w & 0x1FF, src0, lit);
-      const Id s0u = t.SrcRaw(src0, lit);
-      const Id s1u = t.SrcRaw(256 + vsrc1, lit);
+      ResolveValuSrc0(inst, raw0, src0, lit);
+      uint32_t src1 = 256 + vsrc1;
+      Id sdwa0 = 0, sdwa1 = 0;
+      if (raw0 == 249) {
+        const SdwaMod sd = DecodeSdwa(inst, vsrc1, false);
+        src1 = sd.src1;
+        sdwa0 = SdwaSelect(t, t.SrcRaw(sd.src0, 0), sd.src0_sel, sd.src0_sext);
+        sdwa1 = SdwaSelect(t, t.SrcRaw(sd.src1, 0), sd.src1_sel, sd.src1_sext);
+      }
+      const Id s0u = sdwa0 ? sdwa0 : t.SrcRaw(src0, lit);
+      const Id s1u = sdwa1 ? sdwa1 : t.SrcRaw(src1, lit);
       // RDNA2-only VOP2 numbers the shared GFX7 emitter would misinterpret: the
       // no-carry integer add/sub forms must NOT write VCC (a later v_cndmask
       // reads it), and v_xnor_b32 sits where GFX7 has v_bfm_b32.
@@ -521,8 +578,12 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
         case 0x26: t.SetVg(vdst, t.Sub(s0u, s1u)); break;         // v_sub_nc_u32
         case 0x27: t.SetVg(vdst, t.Sub(s1u, s0u)); break;         // v_subrev_nc_u32
         default:
-          gpu::gcn::EmitVop2(t, RemapVop2(op), vdst, t.SrcF(src0, lit),
-                             t.SrcF(256 + vsrc1, lit), lit);
+          gpu::gcn::EmitVop2(t, RemapVop2(op), vdst,
+                             sdwa0 ? t.m.Bitcast(t.t_f, sdwa0)
+                                   : t.SrcF(src0, lit),
+                             sdwa1 ? t.m.Bitcast(t.t_f, sdwa1)
+                                   : t.SrcF(src1, lit),
+                             lit);
           break;
       }
       break;
@@ -557,9 +618,12 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
     }
     case Enc::kVopc: {
       const uint32_t op = inst.opcode;
-      const uint32_t vsrc1 = (w >> 9) & 0xFF;
+      uint32_t vsrc1 = (w >> 9) & 0xFF;
+      const uint32_t raw0 = w & 0x1FF;
       uint32_t src0, lit;
-      ResolveValuSrc0(inst, w & 0x1FF, src0, lit);
+      ResolveValuSrc0(inst, raw0, src0, lit);
+      uint32_t vopc_src1 = 256 + vsrc1;
+      if (raw0 == 249) vopc_src1 = DecodeSdwa(inst, vsrc1, false).src1;
       // RDNA2 f16 compares sit at 0xC8-0xCF, which the GFX7-numbered EmitVopc
       // would read as u32 integer compares; run the float predicate (op-0xC8) on
       // the low-half f16 operands instead. u32 compares stay at 0xC0-0xC7.
@@ -569,12 +633,12 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
               t.t_f, t.m.ExtInst(t.t_v2, GLSLstd450UnpackHalf2x16,
                                  {t.SrcRaw(f, lit)}), 0);
         };
-        gpu::gcn::EmitVopc(t, op - 0xC8, f16(src0), f16(256 + vsrc1),
-                           t.SrcRaw(src0, lit), t.SrcRaw(256 + vsrc1, lit));
+        gpu::gcn::EmitVopc(t, op - 0xC8, f16(src0), f16(vopc_src1),
+                           t.SrcRaw(src0, lit), t.SrcRaw(vopc_src1, lit));
         break;
       }
-      gpu::gcn::EmitVopc(t, op, t.SrcF(src0, lit), t.SrcF(256 + vsrc1, lit),
-                         t.SrcRaw(src0, lit), t.SrcRaw(256 + vsrc1, lit));
+      gpu::gcn::EmitVopc(t, op, t.SrcF(src0, lit), t.SrcF(vopc_src1, lit),
+                         t.SrcRaw(src0, lit), t.SrcRaw(vopc_src1, lit));
       break;
     }
     case Enc::kVintrp: {
@@ -905,6 +969,8 @@ bool TranslateVs(const Program& program, const uint32_t* vs_user_data,
     t.SetVg(3, instance);
   }
 
+  Id first_attr_var = 0;
+  uint32_t first_attr_comps = 0;
   for (const FetchAttr& a : attrs) {
     const Id comp_ty = a.num_comps == 1   ? t.t_f
                        : a.num_comps == 2 ? t.t_v2
@@ -925,6 +991,10 @@ bool TranslateVs(const Program& program, const uint32_t* vs_user_data,
     // re-seed them at the fetch's pc where the real buffer_load_format would run.
     if (a.pc != ~0u)
       vfetch_seed[a.pc] = {in_var, a.dest_vgpr, a.num_comps};
+    if (!first_attr_var) {
+      first_attr_var = in_var;
+      first_attr_comps = a.num_comps;
+    }
     r.attrs.push_back({a.semantic, a.num_comps, a.table_sgpr, a.dword_off});
   }
 
@@ -967,6 +1037,48 @@ bool TranslateVs(const Program& program, const uint32_t* vs_user_data,
     const Id fx = t.SelectF(t.IsNonZero(t.And(vidx, t.U32(1))), t.F32(1.f), t.F32(-1.f));
     const Id fy = t.SelectF(t.IsNonZero(t.And(vidx, t.U32(2))), t.F32(1.f), t.F32(-1.f));
     t.m.Store(pos_out, t.m.CompositeConstruct(t.t_v4, {fx, fy, t.F32(0.f), t.F32(1.f)}));
+  }
+
+  // DELTA_GPU_RAWPOS=<scale>: bypass the shader's transform and emit the raw
+  // location-0 vertex input scaled into NDC. Separates "the vertex inputs never
+  // reach the shader" from "the transform math is wrong": FORCEQUAD proves the
+  // raster path but uses no vertex data at all, this uses the real attribute.
+  static const float raw_pos = [] {
+    const char* e = std::getenv("DELTA_GPU_RAWPOS");
+    return e ? static_cast<float>(std::atof(e)) : 0.f;
+  }();
+  if (raw_pos != 0.f && first_attr_var && first_attr_comps >= 2) {
+    const Id comp_ty = first_attr_comps == 2   ? t.t_v2
+                       : first_attr_comps == 3 ? t.t_v3
+                                               : t.t_v4;
+    const Id val = t.m.Load(comp_ty, first_attr_var);
+    t.m.Store(pos_out,
+              t.m.CompositeConstruct(
+                  t.t_v4,
+                  {t.FMul(t.m.CompositeExtract(t.t_f, val, 0), t.F32(raw_pos)),
+                   t.FMul(t.m.CompositeExtract(t.t_f, val, 1), t.F32(raw_pos)),
+                   t.F32(0.f), t.F32(1.f)}));
+  }
+
+  // DELTA_GPU_POSPROBE: squash the shader's own clip position into the viewport
+  // (x/(1+|x|) after the perspective divide). Any FINITE position then covers
+  // pixels, so a still-black target means w is zero/NaN rather than the geometry
+  // merely landing off-screen.
+  static const bool pos_probe = std::getenv("DELTA_GPU_POSPROBE") != nullptr;
+  if (pos_probe) {
+    const Id p_out_f0 = t.m.TypePointer(spv::StorageClass::Output, t.t_f);
+    const Id px = t.m.Load(t.t_f, t.m.AccessChain(p_out_f0, pos_out, {t.U32(0)}));
+    const Id py = t.m.Load(t.t_f, t.m.AccessChain(p_out_f0, pos_out, {t.U32(1)}));
+    const Id pw = t.m.Load(t.t_f, t.m.AccessChain(p_out_f0, pos_out, {t.U32(3)}));
+    auto squash = [&](Id v) {
+      const Id q = t.m.Emit(spv::Op::OpFDiv, t.t_f, {v, pw});
+      const Id a = t.m.ExtInst(t.t_f, GLSLstd450FAbs, {q});
+      return t.m.Emit(spv::Op::OpFDiv, t.t_f,
+                      {q, t.m.Emit(spv::Op::OpFAdd, t.t_f, {t.F32(1.f), a})});
+    };
+    t.m.Store(pos_out, t.m.CompositeConstruct(
+                           t.t_v4, {squash(px), squash(py), t.F32(0.f),
+                                    t.F32(1.f)}));
   }
 
   // GL clip space (z in [-w,w]) -> Vulkan (z in [0,w]): z = (z + w) * 0.5.
@@ -1145,6 +1257,23 @@ Recompiled Recompile(const uint32_t* vs_code, const uint32_t* ps_code,
     if (gpu::gcn::TraceEnabled())
       std::fprintf(stderr, "[rdna] PS invalid: %s\n", err.c_str());
     return r;
+  }
+  // DELTA_GPU_SPVDUMP=<dir>: write each recompiled stage's SPIR-V so it can be
+  // read with spirv-dis (the only way to see what the position math became).
+  if (const char* dir = std::getenv("DELTA_GPU_SPVDUMP")) {
+    char path[512];
+    std::snprintf(path, sizeof(path), "%s/vs_%lx.spv", dir,
+                  (unsigned long)reinterpret_cast<uintptr_t>(vs_code));
+    if (FILE* f = std::fopen(path, "wb")) {
+      std::fwrite(vs.data(), 4, vs.size(), f);
+      std::fclose(f);
+    }
+    std::snprintf(path, sizeof(path), "%s/ps_%lx.spv", dir,
+                  (unsigned long)reinterpret_cast<uintptr_t>(ps_code));
+    if (FILE* f = std::fopen(path, "wb")) {
+      std::fwrite(ps.data(), 4, ps.size(), f);
+      std::fclose(f);
+    }
   }
   r.vs_spirv = NoOpt() ? vs : gpu::gcn::spirv::Optimize(vs);
   r.fs_spirv = NoOpt() ? ps : gpu::gcn::spirv::Optimize(ps);
