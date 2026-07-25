@@ -3671,7 +3671,21 @@ bool drawRecomp(const DrawInfo &d) {
   }();
   static const bool lazyClear2 = [] { const char *e = std::getenv("DELTA_GPU_LAZYCLEAR");
     return !e || std::strcmp(e, "0") != 0; }();
-  if (noWipe && d.vertexData && d.nvattrs && d.recomp->ps_texs.empty() && nv <= 8) {
+  // The extent test below reads the position attribute as float32s. A title
+  // whose positions are not floats (Skyrim's UI uses 16_16_SScaled) would have
+  // its geometry read as garbage, land a bogus fullscreen extent, and get
+  // swallowed as a "clear" -- which is exactly what turned its whole frame
+  // black. Only consider draws whose position really is float.
+  bool floatPos = false;
+  for (uint32_t a = 0; a < d.nvattrs; a++) {
+    if (d.vattrs[a].location != 0) continue;
+    const uint32_t df = d.vattrs[a].dfmt;
+    floatPos = d.vattrs[a].nfmt == 7 &&
+               (df == 4 || df == 11 || df == 13 || df == 14);
+    break;
+  }
+  if (noWipe && floatPos && d.vertexData && d.nvattrs &&
+      d.recomp->ps_texs.empty() && nv <= 8) {
     uint32_t cdst = (d.blendControl >> 8) & 0x1F, csrc = d.blendControl & 0x1F;
     bool replace = d.blendEnable && csrc == 1 && cdst == 0;
     if (replace) {
