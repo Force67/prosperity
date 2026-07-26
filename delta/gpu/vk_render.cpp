@@ -4283,6 +4283,16 @@ void beginFrame() {
 
 void draw(const DrawInfo &d_in) {
   if (!g.recording) return;
+  // DELTA_GPU_MAXDRAW=<n> / DELTA_GPU_ONLYDRAW=<n>: build a frame up one draw at
+  // a time, or isolate a single one, to see what each pass contributes.
+  static const int maxDraw = [] {
+    const char *e = std::getenv("DELTA_GPU_MAXDRAW"); return e ? std::atoi(e) : -1;
+  }();
+  static const int onlyDraw = [] {
+    const char *e = std::getenv("DELTA_GPU_ONLYDRAW"); return e ? std::atoi(e) : -1;
+  }();
+  if (maxDraw >= 0 && (int)g.frameDraws >= maxDraw) return;
+  if (onlyDraw >= 0 && (int)g.frameDraws != onlyDraw) { g.frameDraws++; return; }
   // Diagnostic kill-switches for bisecting "renders nothing" chains:
   // DELTA_GPU_NODEPTH disables depth test/write, DELTA_GPU_NOCULL disables
   // face culling, DELTA_GPU_NOMASK forces full color write masks.

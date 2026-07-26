@@ -168,6 +168,12 @@ static void noteClipWrite(const char *how, uint32_t val) {
     std::fprintf(stderr, "[agc] CLIP_CNTL <- %#x by %s\n", val, how);
 }
 
+// Draw accounting. DELTA_GPU_DRAWRT only sees draws that reach the renderer, so
+// a draw dropped earlier (no usable render target, unrecoverable shader address)
+// is indistinguishable from one the title never issued. Count both ends.
+static std::atomic<uint64_t> g_drawsSeen{0}, g_drawsIssued{0}, g_dropNoRt{0},
+    g_dropNoShader{0};
+
 void setRegs(uint32_t base, const uint32_t *body, uint32_t count) {
   if (count < 1) return;
   uint32_t off = base + (body[0] & ~kRegSelectorMask);
@@ -340,6 +346,23 @@ void loadRegPairs(uint32_t base, const uint32_t *body, uint32_t cnt) {
     uint32_t off = p[i * 2] & ~kRegSelectorMask;  // strip gfx10 selector bits
     if (base + off < limit) g_regs[base + off] = p[i * 2 + 1];
     if (base + off == mmPA_CL_CLIP_CNTL) noteClipWrite("SET_REG_INDIRECT", p[i * 2 + 1]);
+    // DELTA_AGC_CBTRACE: every write to the colour-target base/format, with the
+    // packet's own bookkeeping, so a zero write can be traced to a mis-parse.
+    static const int cbTraceFrom = [] {
+      const char *e = std::getenv("DELTA_AGC_CBTRACE");
+      return e ? std::atoi(e) : -1;
+    }();
+    static int cbN = 0;
+    const bool cbTrace = cbTraceFrom >= 0 &&
+                         (int)g_drawsSeen.load(std::memory_order_relaxed) >= cbTraceFrom;
+    if (cbTrace && cbN < 60 &&
+        (base + off == mmCB_COLOR0_BASE || base + off == mmCB_COLOR0_INFO)) {
+      cbN++;
+      std::fprintf(stderr,
+                   "[agc] CB0 %s <- %08x  (pair %u/%u from %#lx, raw off %08x)\n",
+                   base + off == mmCB_COLOR0_BASE ? "BASE" : "INFO", p[i * 2 + 1],
+                   i, numPairs, (unsigned long)addr, p[i * 2]);
+    }
   }
   // Report the first few shader binds that actually carry a nonzero PGM (SH off 0x88
   // = PGM_LO_GS, 0x08 = PGM_LO_PS) -- these are the real sprite-pipeline binds.
@@ -500,11 +523,6 @@ void maybeDumpShader(uint64_t addr) {
   }
 }
 
-// Draw accounting. DELTA_GPU_DRAWRT only sees draws that reach the renderer, so
-// a draw dropped earlier (no usable render target, unrecoverable shader address)
-// is indistinguishable from one the title never issued. Count both ends.
-static std::atomic<uint64_t> g_drawsSeen{0}, g_drawsIssued{0}, g_dropNoRt{0},
-    g_dropNoShader{0};
 
 // A context register read as the float it holds (viewport scales/offsets).
 static float regF(uint32_t reg) {
@@ -692,6 +710,19 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
       }
     }
     d.rtBase = d.mrtCount ? d.mrtBase[0] : 0;
+    // DELTA_GPU_STICKYRT: a draw whose target mask asks for colour but whose
+    // CB_COLOR0_INFO is zero keeps the last target that was valid. Experiment for
+    // the passes whose bind we never see; not a model of the hardware.
+    static const bool stickyRt = std::getenv("DELTA_GPU_STICKYRT") != nullptr;
+    static uint64_t lastBase = 0;
+    static uint32_t lastInfo = 0;
+    if (d.mrtCount) { lastBase = d.mrtBase[0]; lastInfo = d.mrtInfo[0]; }
+    else if (stickyRt && (g_regs[mmCB_TARGET_MASK] & 0xF) && lastBase) {
+      d.mrtBase[0] = lastBase;
+      d.mrtInfo[0] = lastInfo;
+      d.mrtCount = 1;
+      d.rtBase = lastBase;
+    }
     // DELTA_AGC_RTPROBE: one line per draw naming the packet that last touched
     // CB_COLOR0_BASE. A draw with no target and a stale "last write" points at a
     // bind we never executed; one whose last write zeroed the base points at a
@@ -1175,12 +1206,22 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
       }
       std::fprintf(stderr, "\n");
     }
+    // DELTA_AGC_VDUMPCB=<n>: how many floats of each bound cbuffer to print. The
+    // default shows the head; a transform hides further in (48-dword windows hold
+    // several matrices).
+    static const int cbFloats = [] {
+      const char *e = std::getenv("DELTA_AGC_VDUMPCB"); return e ? std::atoi(e) : 8;
+    }();
     for (uint32_t b = 0; b < d.nCbufs; b++) {
       if (!d.cbufs[b].base || !inGuest(d.cbufs[b].base)) continue;
       const float *cf = reinterpret_cast<const float *>(d.cbufs[b].base);
-      std::fprintf(stderr, "[agc]   cbuf[%u]@%#lx floats:", b,
-                   (unsigned long)d.cbufs[b].base);
-      for (int j = 0; j < 8; j++) std::fprintf(stderr, " %g", cf[j]);
+      const int n = std::min<int>(cbFloats, d.cbufs[b].size / 4);
+      std::fprintf(stderr, "[agc]   cbuf[%u]@%#lx (%u dw) floats:", b,
+                   (unsigned long)d.cbufs[b].base, d.cbufs[b].size / 4);
+      for (int j = 0; j < n; j++) {
+        if (j && j % 4 == 0) std::fprintf(stderr, " |");
+        std::fprintf(stderr, " %g", cf[j]);
+      }
       std::fprintf(stderr, "\n");
     }
   }
