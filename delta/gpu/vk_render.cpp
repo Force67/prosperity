@@ -4739,11 +4739,15 @@ void reportRtContents() {
     const uint32_t *px = static_cast<const uint32_t *>(g.readbackMap);
     const uint64_t n = static_cast<uint64_t>(rt.w) * rt.h;
     const uint64_t step = n > 16384 ? n / 16384 : 1;
-    uint64_t nz = 0, rgb_nz = 0, samples = 0;
+    uint64_t nz = 0, rgb_nz = 0, samples = 0, lumaSum = 0;
     uint32_t distinct[4] = {};
     uint32_t num_distinct = 0;
     for (uint64_t i = 0; i < n; i += step, samples++) {
       const uint32_t v = px[i];
+      // Mean brightness of the sampled grid: a count of non-zero pixels cannot
+      // show a target drifting brighter frame over frame, which is what a
+      // runaway exposure or an accumulating pass looks like.
+      lumaSum += ((v & 0xFF) + ((v >> 8) & 0xFF) + ((v >> 16) & 0xFF)) / 3;
       if (v) nz++;
       if (v & 0x00FFFFFFu) rgb_nz++;  // ignores an opaque-black alpha channel
       bool seen = false;
@@ -4752,11 +4756,12 @@ void reportRtContents() {
     }
     std::fprintf(stderr,
                  "[rtstat] f%d RT %#lx %ux%u draws=%u nz=%lu rgbnz=%lu/%lu "
-                 "vals=%08x %08x %08x %08x\n",
+                 "mean=%lu vals=%08x %08x %08x %08x\n",
                  g.frameNum, (unsigned long)kv.first, rt.w, rt.h, rt.draws,
                  (unsigned long)nz, (unsigned long)rgb_nz,
-                 (unsigned long)samples, distinct[0], distinct[1], distinct[2],
-                 distinct[3]);
+                 (unsigned long)samples,
+                 (unsigned long)(samples ? lumaSum / samples : 0), distinct[0],
+                 distinct[1], distinct[2], distinct[3]);
     if (dump) {
       std::vector<uint8_t> bgra(n * 4);
       const auto *src = static_cast<const uint8_t *>(g.readbackMap);
