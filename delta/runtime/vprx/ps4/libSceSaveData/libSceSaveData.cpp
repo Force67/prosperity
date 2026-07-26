@@ -23,6 +23,15 @@
 
 namespace {
 
+// DELTA_SAVEDATA_TRACE: which save-data entry points the title actually calls.
+// A menu that waits on save enumeration gives no other sign of it, so "was this
+// even called" is the first thing worth knowing.
+static void sdTrace(const char* fn) {
+  static const bool on = std::getenv("DELTA_SAVEDATA_TRACE") != nullptr;
+  if (on)
+    std::fprintf(stderr, "[savedata] call %s\n", fn);
+}
+
 // Mount modes (SCE_SAVE_DATA_MOUNT_MODE_*).
 constexpr uint32_t kModeRdOnly = 1;
 constexpr uint32_t kModeRdWr = 2;
@@ -314,33 +323,43 @@ int doMount(const char *dir_name, uint32_t mode, void *result) {
 
 // ---------------- init / term ----------------
 
-int PS4ABI sceSaveDataInitialize(void *) { return kOk; }
-int PS4ABI sceSaveDataInitialize2(void *) { return kOk; }
-int PS4ABI sceSaveDataInitialize3(void *) { return kOk; }
-int PS4ABI sceSaveDataTerminate() { return kOk; }
+int PS4ABI sceSaveDataInitialize(void *) {
+  sdTrace("sceSaveDataInitialize"); return kOk; }
+int PS4ABI sceSaveDataInitialize2(void *) {
+  sdTrace("sceSaveDataInitialize2"); return kOk; }
+int PS4ABI sceSaveDataInitialize3(void *) {
+  sdTrace("sceSaveDataInitialize3"); return kOk; }
+int PS4ABI sceSaveDataTerminate() {
+  sdTrace("sceSaveDataTerminate"); return kOk; }
 
 // ---------------- mount ----------------
 
 int PS4ABI sceSaveDataMount2(const void *mount, void *result) {
+  sdTrace("sceSaveDataMount2");
   if (!mount)
     return kErrParameter;
   return doMount(cstrOf(ptrAt(mount, 8)), u32At(mount, 24), result);
 }
 
 int PS4ABI sceSaveDataMount(const void *mount, void *result) {
+  sdTrace("sceSaveDataMount");
   if (!mount)
     return kErrParameter;
   return doMount(cstrOf(ptrAt(mount, 16)), u32At(mount, 40), result);
 }
 
 int PS4ABI sceSaveDataMount5(const void *mount, void *result) {
+  sdTrace("sceSaveDataMount5");
   return sceSaveDataMount2(mount, result);  // same leading layout for our use
 }
 
-int PS4ABI sceSaveDataUmount(const void *) { return kOk; }
-int PS4ABI sceSaveDataUmountWithBackup(const void *) { return kOk; }
+int PS4ABI sceSaveDataUmount(const void *) {
+  sdTrace("sceSaveDataUmount"); return kOk; }
+int PS4ABI sceSaveDataUmountWithBackup(const void *) {
+  sdTrace("sceSaveDataUmountWithBackup"); return kOk; }
 
 int PS4ABI sceSaveDataGetMountInfo(const void *, void *info) {
+  sdTrace("sceSaveDataGetMountInfo");
   if (info) {
     auto *i = static_cast<uint8_t *>(info);
     std::memset(i, 0, 48);
@@ -353,6 +372,7 @@ int PS4ABI sceSaveDataGetMountInfo(const void *, void *info) {
 // ---------------- enumerate / delete / backup ----------------
 
 int PS4ABI sceSaveDataDirNameSearch(const void *cond, void *result) {
+  sdTrace("sceSaveDataDirNameSearch");
   if (!result)
     return kErrParameter;
   auto *r = static_cast<uint8_t *>(result);
@@ -421,6 +441,7 @@ int PS4ABI sceSaveDataDirNameSearch(const void *cond, void *result) {
 }
 
 int PS4ABI sceSaveDataDelete(const void *del) {
+  sdTrace("sceSaveDataDelete");
   if (!del)
     return kErrParameter;
   const void *dn = ptrAt(del, 16);
@@ -436,6 +457,7 @@ int PS4ABI sceSaveDataDelete(const void *del) {
 }
 
 int PS4ABI sceSaveDataCheckBackupData(const void *check) {
+  sdTrace("sceSaveDataCheckBackupData");
   if (!check)
     return kErrParameter;
   // We keep no separate backup image (the save dir itself persists across
@@ -445,6 +467,7 @@ int PS4ABI sceSaveDataCheckBackupData(const void *check) {
 }
 
 int PS4ABI sceSaveDataRestoreBackupData(const void *restore) {
+  sdTrace("sceSaveDataRestoreBackupData");
   if (!restore)
     return kErrParameter;
   return kErrNotFound;  // no backup image (see sceSaveDataCheckBackupData)
@@ -454,6 +477,7 @@ int PS4ABI sceSaveDataRestoreBackupData(const void *restore) {
 
 int PS4ABI sceSaveDataGetParam(const void *mountPoint, uint32_t paramType,
                                void *buf, uint64_t size, uint64_t *result) {
+  sdTrace("sceSaveDataGetParam");
   if (buf && size)
     std::memset(buf, 0, size);
   if (result)
@@ -504,6 +528,7 @@ int PS4ABI sceSaveDataGetParam(const void *mountPoint, uint32_t paramType,
 
 int PS4ABI sceSaveDataSetParam(const void *mountPoint, uint32_t paramType,
                                const void *buf, uint64_t size) {
+  sdTrace("sceSaveDataSetParam");
   const std::string host = hostForPoint(mountPoint);
   if (host.empty())
     return kErrNotMounted;
@@ -551,6 +576,7 @@ int PS4ABI sceSaveDataSetParam(const void *mountPoint, uint32_t paramType,
 }
 
 int PS4ABI sceSaveDataSaveIcon(const void *mountPoint, const void *icon) {
+  sdTrace("sceSaveDataSaveIcon");
   const std::string host = hostForPoint(mountPoint);
   if (host.empty())
     return kErrNotMounted;
@@ -575,11 +601,13 @@ int PS4ABI sceSaveDataSaveIcon(const void *mountPoint, const void *icon) {
 
 int PS4ABI sceSaveDataSetupSaveDataMemory(uint32_t, uint64_t memorySize,
                                           void *) {
+  sdTrace("sceSaveDataSetupSaveDataMemory");
   return memorySetup(memorySize, 0, nullptr);
 }
 
 int PS4ABI sceSaveDataSetupSaveDataMemory2(const void *setupParam,
                                            void *result) {
+  sdTrace("sceSaveDataSetupSaveDataMemory2");
   if (!setupParam) {
     if (result)
       std::memset(result, 0, 24);
@@ -592,10 +620,12 @@ int PS4ABI sceSaveDataSetupSaveDataMemory2(const void *setupParam,
 
 int PS4ABI sceSaveDataGetSaveDataMemory(uint32_t, void *buf, uint64_t bufSize,
                                         int64_t offset) {
+  sdTrace("sceSaveDataGetSaveDataMemory");
   return memoryRead(0, buf, bufSize, offset);
 }
 
 int PS4ABI sceSaveDataGetSaveDataMemory2(void *getParam) {
+  sdTrace("sceSaveDataGetSaveDataMemory2");
   if (!getParam)
     return kErrParameter;
   const uint32_t slotId = u32At(getParam, 32);
@@ -610,10 +640,12 @@ int PS4ABI sceSaveDataGetSaveDataMemory2(void *getParam) {
 
 int PS4ABI sceSaveDataSetSaveDataMemory(uint32_t, const void *buf,
                                         uint64_t bufSize, int64_t offset) {
+  sdTrace("sceSaveDataSetSaveDataMemory");
   return memoryWrite(0, buf, bufSize, offset);
 }
 
 int PS4ABI sceSaveDataSetSaveDataMemory2(const void *setParam) {
+  sdTrace("sceSaveDataSetSaveDataMemory2");
   if (!setParam)
     return kErrParameter;
   const uint32_t slotId = u32At(setParam, 36);
@@ -626,5 +658,7 @@ int PS4ABI sceSaveDataSetSaveDataMemory2(const void *setParam) {
   return memoryWrite(slotId, buf, bufSize, offset);
 }
 
-int PS4ABI sceSaveDataSyncSaveDataMemory(void *) { return kOk; }
-int PS4ABI sceSaveDataRestoreLoadSaveDataMemory(const void *) { return kOk; }
+int PS4ABI sceSaveDataSyncSaveDataMemory(void *) {
+  sdTrace("sceSaveDataSyncSaveDataMemory"); return kOk; }
+int PS4ABI sceSaveDataRestoreLoadSaveDataMemory(const void *) {
+  sdTrace("sceSaveDataRestoreLoadSaveDataMemory"); return kOk; }
