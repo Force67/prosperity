@@ -86,6 +86,9 @@ constexpr uint32_t mmDB_Z_WRITE_BASE_HI = 0xA01C;
 constexpr uint32_t mmDB_DEPTH_CLEAR = 0xA00B;
 // Primitive-setup: cull + winding. CULL_FRONT[0] CULL_BACK[1] FACE[2] (0=CCW front).
 constexpr uint32_t mmPA_SU_SC_MODE_CNTL = 0xA205;
+// Clip control. DX_CLIP_SPACE_DEF[19]: 1 = clip z in [0,w] (Vulkan's convention),
+// 0 = OpenGL's [-w,w], which the recompiled VS then has to remap.
+constexpr uint32_t mmPA_CL_CLIP_CNTL = 0xA204;
 
 // --- SPI shader-interface (context) ---
 constexpr uint32_t mmSPI_VS_OUT_CONFIG = 0xA1B1;    // # of VS output params

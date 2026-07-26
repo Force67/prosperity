@@ -15,7 +15,7 @@
 #ifndef DELTA_HAVE_SPIRV_BACKEND
 namespace gpu::rdna {
 gpu::gcn::Recompiled Recompile(const uint32_t*, const uint32_t*, const uint32_t*,
-                               const uint32_t*, uint32_t) {
+                               const uint32_t*, uint32_t, bool) {
   return {};
 }
 }  // namespace gpu::rdna
@@ -301,7 +301,8 @@ void RdnaPlanBufLoadCbufs(const Program& program, uint32_t first_binding,
   for (const Inst& inst : program) {
     if (inst.enc == Enc::kSop1 && inst.opcode == 0x20) break;  // s_setpc_b64
     if (inst.enc == Enc::kSopp && inst.opcode == 1) break;     // s_endpgm
-    if (inst.enc != Enc::kMubuf || inst.opcode > 0x03) continue;
+    if ((inst.enc != Enc::kMubuf && inst.enc != Enc::kMtbuf) || inst.opcode > 0x03)
+      continue;
     const uint32_t srsrc = ((inst.raw[1] >> 16) & 0x1F) * 4;
     const auto chain = chained_loads.find(inst.pc);
     const bool chained = chain != chained_loads.end();
@@ -444,6 +445,28 @@ void EmitExport(Translator& t, const Inst& inst, StageContext& sc) {
     return;
   }
   if (target == 12) {  // POS0 -> gl_Position
+    if (sc.dbg_pos_in && sc.dbg_pos_cbuf >= 0) {
+      Id in[4];
+      const Id val = t.m.Load(sc.dbg_pos_comps == 2   ? t.t_v2
+                              : sc.dbg_pos_comps == 3 ? t.t_v3
+                                                      : t.t_v4,
+                              sc.dbg_pos_in);
+      for (uint32_t i = 0; i < 4; i++)
+        in[i] = i < sc.dbg_pos_comps ? t.m.CompositeExtract(t.t_f, val, i)
+                                     : t.F32(i == 3 ? 1.f : 0.f);
+      Id row[4];
+      for (uint32_t r = 0; r < 4; r++) {
+        row[r] = t.F32(0.f);
+        for (uint32_t c = 0; c < 4; c++) {
+          const Id m = t.m.Bitcast(
+              t.t_f, t.CbufDword(static_cast<uint32_t>(sc.dbg_pos_cbuf), r * 4 + c));
+          row[r] = t.FAdd(row[r], t.FMul(m, in[c]));
+        }
+      }
+      t.m.Store(sc.pos_out,
+                t.m.CompositeConstruct(t.t_v4, {row[0], row[1], row[2], row[3]}));
+      return;
+    }
     Id c[4];
     for (int i = 0; i < 4; i++)
       c[i] = (en & (1 << i)) ? t.VgF(v[i]) : t.F32(i == 3 ? 1.f : 0.f);
@@ -653,9 +676,11 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       break;
     }
     case Enc::kExp: EmitExport(t, inst, sc); break;
+    case Enc::kMtbuf:
     case Enc::kMubuf: {
       if (inst.opcode > 0x03) {  // stores / raw loads: not used by Isaac's VS/PS
-        gpu::gcn::WarnUnsupported("mubuf.rdna", inst.opcode, w, w1);
+        gpu::gcn::WarnUnsupported(
+            inst.enc == Enc::kMtbuf ? "mtbuf.rdna" : "mubuf.rdna", inst.opcode, w, w1);
         break;
       }
       // A per-vertex fetch was lifted to a Location vertex input; its pc has a
@@ -690,6 +715,13 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
         binding = it->second;
       }
       const uint32_t nc = (inst.opcode & 3) + 1;
+      // A typed constant load delivers the buffer's dwords unchanged only when
+      // its format is 32-bit per channel; narrower ones would need unpacking.
+      if (inst.enc == Enc::kMtbuf) {
+        const uint32_t fmt = (w >> 19) & 0x7F;
+        if (!(fmt >= 20 && (fmt <= 22 || (fmt >= 62 && fmt <= 77))))
+          gpu::gcn::WarnUnsupported("mtbuf.fmt", fmt, w, w1);
+      }
       const uint32_t inst_offset = w & 0xFFF, vdata = (w1 >> 8) & 0xFF;
       const bool idxen = (w >> 13) & 1, offen = (w >> 12) & 1;
       const uint32_t vaddr = w1 & 0xFF;
@@ -887,6 +919,7 @@ void EmitBody(Translator& t, const Program& program, StageContext& sc) {
 struct FetchAttr {
   uint32_t semantic, num_comps, dest_vgpr, table_sgpr, dword_off;
   uint32_t pc = ~0u;  // inline fetch MUBUF pc (~0 = standalone fetch sub-shader)
+  uint32_t inst_format = 0;  // typed (MTBUF) fetch format; 0 = take the V#'s
 };
 
 // Scan an instruction stream for the s_load_dwordx4(V# table) + buffer_load_format
@@ -900,7 +933,11 @@ std::vector<FetchAttr> ParseFetchInsts(const Program& insts) {
   for (const Inst& in : insts) {
     if (in.enc == Enc::kSop1 && in.opcode == 0x20) break;  // s_setpc_b64 (return)
     if (in.enc == Enc::kSopp && in.opcode == 1) break;     // s_endpgm
-    if (in.enc != Enc::kMubuf || in.opcode > 0x03) continue;  // buffer_load_format_*
+    // buffer_load_format_* (untyped, format from the V#) and its typed twin
+    // tbuffer_load_format_* (MTBUF, format in the instruction). Skyrim's world
+    // geometry fetches positions with the typed form.
+    const bool typed = in.enc == Enc::kMtbuf;
+    if ((in.enc != Enc::kMubuf && !typed) || in.opcode > 0x03) continue;
     const uint32_t vdata = (in.raw[1] >> 8) & 0xFF;
     const uint32_t srsrc = ((in.raw[1] >> 16) & 0x1F) * 4;
     const uint32_t nc = (in.opcode & 3) + 1;
@@ -924,7 +961,8 @@ std::vector<FetchAttr> ParseFetchInsts(const Program& insts) {
     // Only a genuine per-vertex fetch becomes a vertex input. A constant load is
     // left for the UBO path (RdnaPlanBufLoadCbufs assigns the same table slots).
     if (vtx) {
-      out.push_back({sem, nc, vdata, table_sgpr, dword_off, in.pc});
+      out.push_back({sem, nc, vdata, table_sgpr, dword_off, in.pc,
+                     typed ? ((in.raw[0] >> 19) & 0x7F) : 0u});
       sem++;
     }
   }
@@ -937,10 +975,13 @@ std::vector<FetchAttr> ParseFetch(uint64_t fetch_addr) {
   return ParseFetchInsts(Decode(code, 256));
 }
 
+// Address of the VS being translated, for shader-specific debug knobs.
+thread_local uint64_t g_vs_addr = 0;
+
 // ---- VS / PS drivers --------------------------------------------------------
 bool TranslateVs(const Program& program, const uint32_t* vs_user_data,
                  const std::unordered_set<uint32_t>& flat_attrs, Recompiled& r,
-                 Translator& t) {
+                 Translator& t, bool gl_clip_space) {
   if (ShDbg()) DumpProgram(program, "vs");
   const uint64_t fetch =
       (static_cast<uint64_t>(vs_user_data[1] & 0xFFFF) << 32) | vs_user_data[0];
@@ -1016,7 +1057,8 @@ bool TranslateVs(const Program& program, const uint32_t* vs_user_data,
       first_attr_var = in_var;
       first_attr_comps = a.num_comps;
     }
-    r.attrs.push_back({a.semantic, a.num_comps, a.table_sgpr, a.dword_off});
+    r.attrs.push_back({a.semantic, a.num_comps, a.table_sgpr, a.dword_off, false,
+                       a.inst_format});
   }
 
   StageContext sc;
@@ -1033,6 +1075,18 @@ bool TranslateVs(const Program& program, const uint32_t* vs_user_data,
   RdnaPlanBufLoadCbufs(program, 0, r.vs_cbufs, sc.cbuf_bind, sc.mubuf_cbuf_by_pc);
   if (ShDbg())
     std::fprintf(stderr, "[gcnspv] vs planned %zu cbufs\n", r.vs_cbufs.size());
+  // DELTA_GPU_DBGPOS=<vs address>: recompute this one shader's position export
+  // from its position input and its 4x4 transform cbuffer (0 = every shader).
+  static const uint64_t dbg_pos_vs = [] {
+    const char* e = std::getenv("DELTA_GPU_DBGPOS");
+    return e ? std::strtoull(e, nullptr, 0) : ~0ull;
+  }();
+  if (dbg_pos_vs == 0 || dbg_pos_vs == g_vs_addr) {
+    sc.dbg_pos_in = first_attr_var;
+    sc.dbg_pos_comps = first_attr_comps;
+    for (const auto& cb : r.vs_cbufs)
+      if (cb.num_dwords >= 16) { sc.dbg_pos_cbuf = static_cast<int>(cb.binding); break; }
+  }
 
   EmitBody(t, program, sc);
   r.num_params = sc.max_param;
@@ -1102,12 +1156,19 @@ bool TranslateVs(const Program& program, const uint32_t* vs_user_data,
                                     t.F32(1.f)}));
   }
 
-  // GL clip space (z in [-w,w]) -> Vulkan (z in [0,w]): z = (z + w) * 0.5.
-  const Id p_out_f = t.m.TypePointer(spv::StorageClass::Output, t.t_f);
-  const Id z_ptr = t.m.AccessChain(p_out_f, pos_out, {t.U32(2)});
-  const Id w_ptr = t.m.AccessChain(p_out_f, pos_out, {t.U32(3)});
-  const Id z = t.m.Load(t.t_f, z_ptr), wv = t.m.Load(t.t_f, w_ptr);
-  t.m.Store(z_ptr, t.FMul(t.FAdd(z, wv), t.F32(0.5f)));
+  // Clip-space convention, from PA_CL_CLIP_CNTL.DX_CLIP_SPACE_DEF. In DX mode
+  // the shader already exports z in [0,w], exactly what Vulkan wants; remapping
+  // it there squeezes depth into the far half AND lets geometry behind the near
+  // plane survive clipping (Skyrim drew its world from inside itself). In GL
+  // mode z spans [-w,w] and has to be remapped or everything is clipped away
+  // (Isaac renders nothing without it).
+  if (gl_clip_space) {
+    const Id p_out_f = t.m.TypePointer(spv::StorageClass::Output, t.t_f);
+    const Id z_ptr = t.m.AccessChain(p_out_f, pos_out, {t.U32(2)});
+    const Id w_ptr = t.m.AccessChain(p_out_f, pos_out, {t.U32(3)});
+    const Id z = t.m.Load(t.t_f, z_ptr), wv = t.m.Load(t.t_f, w_ptr);
+    t.m.Store(z_ptr, t.FMul(t.FAdd(z, wv), t.F32(0.5f)));
+  }
 
   t.m.ReturnVoid();
   t.m.EndFunction();
@@ -1256,7 +1317,7 @@ bool NoOpt() {
 
 Recompiled Recompile(const uint32_t* vs_code, const uint32_t* ps_code,
                      const uint32_t* vs_user_data, const uint32_t* ps_user_data,
-                     uint32_t ps_input_ena) {
+                     uint32_t ps_input_ena, bool gl_clip_space) {
   Recompiled r;
   if (!vs_code || !vs_user_data || !ps_user_data) return r;
 
@@ -1271,7 +1332,9 @@ Recompiled Recompile(const uint32_t* vs_code, const uint32_t* ps_code,
       flat_attrs.insert((inst.raw[0] >> 10) & 0x3F);
 
   Translator tv;
-  if (!TranslateVs(vs_program, vs_user_data, flat_attrs, r, tv)) return r;
+  g_vs_addr = reinterpret_cast<uintptr_t>(vs_code);
+  if (!TranslateVs(vs_program, vs_user_data, flat_attrs, r, tv, gl_clip_space))
+    return r;
   Translator tp;
   tp.InitTypes();
   if (ps_code ? !TranslatePs(ps_program, flat_attrs, ps_input_ena, r, tp)

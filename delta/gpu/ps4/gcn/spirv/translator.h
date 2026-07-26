@@ -288,6 +288,13 @@ struct StageContext {
   // prologue and the position transform.
   struct VfetchSeed { Id in_var; uint32_t dest_vgpr, num_comps; };
   std::unordered_map<uint32_t, VfetchSeed> vfetch_seed;
+  // DELTA_GPU_DBGPOS: the position input and the cbuffer holding a 4x4
+  // transform, so the position export can be recomputed the way the draw's
+  // host-side state says it should be. Splits "the lifted math is wrong" from
+  // "the values reaching the shader are wrong".
+  Id dbg_pos_in = 0;
+  uint32_t dbg_pos_comps = 0;
+  int dbg_pos_cbuf = -1;
 
   // PS
   Id color_outs[8] = {};  // lazily declared per MRT target (location == target)

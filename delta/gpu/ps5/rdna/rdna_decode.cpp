@@ -78,10 +78,9 @@ Enc classify(uint32_t w, uint32_t& opcode) {
     case 0x36: opcode = (w >> 18) & 0xFF; return Enc::kDs;
     case 0x37: opcode = (w >> 18) & 0x7F; return Enc::kMubuf;  // FLAT/GLOBAL/SCRATCH -> buffer slot
     case 0x38: opcode = ((w >> 18) & 0x7F) | (((w >> 25) & 1) << 7); return Enc::kMubuf;
-    // MTBUF: the opcode MSB actually lives in word1[21] (not word0); classify()
-    // only sees word0, so this opcode is approximate. Harmless while MTBUF is not
-    // emitted (RdnaEmitInst warns on it); revisit if graphics MTBUF is added.
-    case 0x3A: opcode = ((w >> 16) & 0x7) | (((w >> 21) & 1) << 3); return Enc::kMtbuf;
+    // MTBUF carries op[2:0] here and op[3] in word1[21]; Decode() adds that bit
+    // once the second dword is in hand. word0[25:19] is the unified format.
+    case 0x3A: opcode = (w >> 16) & 0x7; return Enc::kMtbuf;
     case 0x3C: opcode = ((w >> 18) & 0x7F) | ((w & 1) << 7); return Enc::kMimg;
     case 0x3D: opcode = (w >> 18) & 0xFF; return Enc::kSmrd;  // SMEM (replaces GCN SMRD)
     // RDNA2 EXP is 0b111110 (0xf8 prefix), same slot as GCN; target/en live in
@@ -140,6 +139,7 @@ Program Decode(const uint32_t* code, uint32_t max_dwords, bool stop_at_endpgm) {
     in.enc = classify(code[i], in.opcode);
     in.size = baseSize(in.enc, code[i]);
     if (in.size >= 2 && i + 1 < max_dwords) in.raw[1] = code[i + 1];
+    if (in.enc == Enc::kMtbuf) in.opcode |= ((in.raw[1] >> 21) & 1) << 3;
 
     // Trailing 32-bit literal (the 1-dword ALU encodings, and VOP3 when a source
     // selects LITERAL_CONST). VOP2 madmk/madak/fmamk/fmaak always carry a K.

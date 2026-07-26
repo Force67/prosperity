@@ -29,6 +29,9 @@ struct ShaderAttr {
   uint32_t table_sgpr = 0;      // VS user-data dword of the vertex-table ptr
   uint32_t vbuf_dword_off = 0;  // dword offset of this attr's V# in the table
   bool inline_descriptor = false;  // V# lives directly in VS user data
+  // gfx10 unified buffer format carried by a TYPED fetch (tbuffer_load_format_*),
+  // which overrides the V#'s own format. 0 = untyped fetch, use the V#.
+  uint32_t inst_format = 0;
 };
 
 // Set-1 UBO bindings shared by VS + PS. A shader pair whose constant buffers

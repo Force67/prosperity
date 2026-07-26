@@ -158,12 +158,24 @@ inline uint32_t regSpaceLimit(uint32_t base) {
 
 // Latch a SET_*_REG packet into the register file. body[0] is the register
 // offset dword (with the gfx10 selector bits stripped), body[1..] the values.
+// DELTA_AGC_CLIPTRACE: name every packet that writes PA_CL_CLIP_CNTL. The
+// clip-space convention lives there, and a title whose writes never reach us
+// silently gets the reset value (OpenGL clip space).
+static void noteClipWrite(const char *how, uint32_t val) {
+  static const bool on = std::getenv("DELTA_AGC_CLIPTRACE") != nullptr;
+  static int n = 0;
+  if (on && n++ < 12)
+    std::fprintf(stderr, "[agc] CLIP_CNTL <- %#x by %s\n", val, how);
+}
+
 void setRegs(uint32_t base, const uint32_t *body, uint32_t count) {
   if (count < 1) return;
   uint32_t off = base + (body[0] & ~kRegSelectorMask);
   const uint32_t limit = regSpaceLimit(base);
-  for (uint32_t i = 1; i < count; i++)
+  for (uint32_t i = 1; i < count; i++) {
     if (off + (i - 1) < limit) g_regs[off + (i - 1)] = body[i];
+    if (off + (i - 1) == mmPA_CL_CLIP_CNTL) noteClipWrite("SET_REG", body[i]);
+  }
 }
 
 // A guest GPU address. Isaac's AGC pool sits in the 0x80_xx_xx_xx_xx band, but a
@@ -294,6 +306,7 @@ void loadRegs(uint32_t base, const uint32_t *body, uint32_t count) {
       if (base + off + j >= limit) break;
       uint32_t v = src[off + j];
       g_regs[base + off + j] = v;
+      if (base + off + j == mmPA_CL_CLIP_CNTL) noteClipWrite("LOAD_REG", v);
       // Pinpoint where the shader PGM_LO lands: a shader at 0x8001xxxxxx has
       // PGM_LO ~0x800xxxxx (top byte 0x80). Log SH-space hits to find the reg.
       static int s_sh = 0;
@@ -326,6 +339,7 @@ void loadRegPairs(uint32_t base, const uint32_t *body, uint32_t cnt) {
   for (uint32_t i = 0; i < numPairs; i++) {
     uint32_t off = p[i * 2] & ~kRegSelectorMask;  // strip gfx10 selector bits
     if (base + off < limit) g_regs[base + off] = p[i * 2 + 1];
+    if (base + off == mmPA_CL_CLIP_CNTL) noteClipWrite("SET_REG_INDIRECT", p[i * 2 + 1]);
   }
   // Report the first few shader binds that actually carry a nonzero PGM (SH off 0x88
   // = PGM_LO_GS, 0x08 = PGM_LO_PS) -- these are the real sprite-pipeline binds.
@@ -363,14 +377,15 @@ bool isDraw(uint32_t op) {
 // program, not just the VS/PS code).
 struct ShaderKey {
   uint64_t vs, ps, fetch;
+  bool glClip;  // clip convention is baked into the VS (see PA_CL_CLIP_CNTL)
   bool operator==(const ShaderKey &o) const {
-    return vs == o.vs && ps == o.ps && fetch == o.fetch;
+    return vs == o.vs && ps == o.ps && fetch == o.fetch && glClip == o.glClip;
   }
 };
 struct ShaderKeyHash {
   size_t operator()(const ShaderKey &k) const {
     return std::hash<uint64_t>{}(k.vs) ^ (std::hash<uint64_t>{}(k.ps) << 1) ^
-           (std::hash<uint64_t>{}(k.fetch) << 2);
+           (std::hash<uint64_t>{}(k.fetch) << 2) ^ (k.glClip ? 0x9e3779b9u : 0u);
   }
 };
 std::unordered_map<ShaderKey, gcn::Recompiled, ShaderKeyHash> g_shCache;
@@ -490,6 +505,17 @@ void maybeDumpShader(uint64_t addr) {
 // is indistinguishable from one the title never issued. Count both ends.
 static std::atomic<uint64_t> g_drawsSeen{0}, g_drawsIssued{0}, g_dropNoRt{0},
     g_dropNoShader{0};
+
+// A context register read as the float it holds (viewport scales/offsets).
+static float regF(uint32_t reg) {
+  float f;
+  std::memcpy(&f, &g_regs[reg], 4);
+  return f;
+}
+
+// Last packet that changed CB_COLOR0_BASE (see DELTA_AGC_RTPROBE).
+static uint32_t g_cb0Op = 0, g_cb0Val = 0;
+static uint64_t g_cb0Draw = 0;
 
 static void drawCensus() {
   static const bool on = std::getenv("DELTA_GPU_DRAWCENSUS") != nullptr;
@@ -666,6 +692,22 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
       }
     }
     d.rtBase = d.mrtCount ? d.mrtBase[0] : 0;
+    // DELTA_AGC_RTPROBE: one line per draw naming the packet that last touched
+    // CB_COLOR0_BASE. A draw with no target and a stale "last write" points at a
+    // bind we never executed; one whose last write zeroed the base points at a
+    // packet we execute but should not.
+    static const bool rtProbe = std::getenv("DELTA_AGC_RTPROBE") != nullptr;
+    static int s_probe = 0;
+    if (rtProbe && s_probe < 200) {
+      s_probe++;
+      std::fprintf(stderr,
+                   "[agc] RTPROBE draw#%lu rt=%#lx tmask=%#x info0=%#x clip=%#x "
+                   "zscale=%g zoff=%g\n",
+                   (unsigned long)g_drawsSeen.load(), (unsigned long)d.rtBase,
+                   g_regs[mmCB_TARGET_MASK], g_regs[mmCB_COLOR0_INFO],
+                   g_regs[mmPA_CL_CLIP_CNTL], regF(mmPA_CL_VPORT_ZSCALE),
+                   regF(mmPA_CL_VPORT_ZOFFSET));
+    }
     // Why a colour draw ended up with no target: print the state that rejected
     // CB_COLOR0 (a stale/zero base, or an INFO with no format).
     static int s_nort = 0;
@@ -750,7 +792,9 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
   uint64_t myDraw = s_dlN++;
   bool dl = g_trace && s_dlN < 5000;
   if (recompOn && inGuest(vsA) && (!psA || inGuest(psA))) {
-    ShaderKey key{vsA, psA, fetch};
+    // DX_CLIP_SPACE_DEF (bit 19) picks the guest's clip-z convention.
+    const bool glClip = !((g_regs[mmPA_CL_CLIP_CNTL] >> 19) & 1);
+    ShaderKey key{vsA, psA, fetch, glClip};
     auto it = g_shCache.find(key);
     if (it == g_shCache.end()) {
       if (dl) {
@@ -768,7 +812,8 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
                .emplace(key, rdna::Recompile(reinterpret_cast<const uint32_t *>(vsA),
                                              psA ? reinterpret_cast<const uint32_t *>(psA)
                                                  : nullptr,
-                                             vud, pud, g_regs[mmSPI_PS_INPUT_ENA]))
+                                             vud, pud, g_regs[mmSPI_PS_INPUT_ENA],
+                                             glClip))
                .first;
       if (dl) std::fprintf(stderr, "[agc] DL recompile done ok=%d\n", it->second.ok);
       // A shader we cannot recompile drops its draw entirely, which is
@@ -865,8 +910,13 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
         if (b >= d.nvbufs) continue;
         const uint64_t off = vb.base - reinterpret_cast<uint64_t>(d.vbufs[b].data);
         if (off >= d.vbufs[b].stride) continue;
+        // A typed fetch (tbuffer_load_format_*) carries its own format and the
+        // hardware ignores the V#'s; Skyrim's world positions come in that way.
+        uint32_t dfmt = vb.dfmt, nfmt = vb.nfmt;
+        if (attrRes[i]->inst_format)
+          gfx10VBufFormat(attrRes[i]->inst_format, dfmt, nfmt);
         d.vattrs[d.nvattrs++] = {attrRes[i]->location, b, static_cast<uint32_t>(off),
-                                 attrRes[i]->num_comps, vb.dfmt, vb.nfmt};
+                                 attrRes[i]->num_comps, dfmt, nfmt};
       }
       if (d.nvbufs) {
         // Mirror binding 0 into the legacy single-stream fields; the vertex
@@ -1222,6 +1272,9 @@ void walk(const uint32_t *p, uint32_t words, bool dumpThis, int depth) {
         }
         std::fprintf(stderr, "\n");
       }
+      // DELTA_AGC_RTPROBE: remember which packet last changed CB_COLOR0_BASE, so a
+      // draw that ends up with no colour target can name what unbound it.
+      const uint32_t cb0Before = g_regs[mmCB_COLOR0_BASE];
       switch (op) {
       case IT_INDIRECT_BUFFER:       // baseLo, baseHi, sizeDwords(+flags)
       case 0x33: {                   // IT_INDIRECT_BUFFER_CNST (AGC constant/Cue chain
@@ -1350,6 +1403,11 @@ void walk(const uint32_t *p, uint32_t words, bool dumpThis, int depth) {
         if (isDraw(op)) handleDraw(op, body, cnt);
         break;
       }
+      if (g_regs[mmCB_COLOR0_BASE] != cb0Before) {
+        g_cb0Op = op;
+        g_cb0Val = g_regs[mmCB_COLOR0_BASE];
+        g_cb0Draw = g_drawsSeen;
+      }
       i += 1 + cnt;
     } else if (type == Pm4Type::type2 || hdr == 0) {
       i += 1;  // filler / alignment
@@ -1361,8 +1419,10 @@ void walk(const uint32_t *p, uint32_t words, bool dumpThis, int depth) {
       uint32_t cnt0 = pm4Count(hdr);
       uint32_t base0 = hdr & 0xFFFF;
       if (i + 1 + cnt0 <= words) {
-        for (uint32_t j = 0; j < cnt0; j++)
+        for (uint32_t j = 0; j < cnt0; j++) {
           if (base0 + j < kRegFileSize) g_regs[base0 + j] = p[i + 1 + j];
+          if (base0 + j == mmPA_CL_CLIP_CNTL) noteClipWrite("type0", p[i + 1 + j]);
+        }
         static int s_t0 = 0;
         if (g_trace && s_t0 < 20 && base0 >= kShRegBase && base0 < kShRegBase + 0x300) {
           s_t0++;
