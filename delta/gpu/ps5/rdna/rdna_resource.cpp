@@ -101,26 +101,39 @@ void gfx10ImgFormat(uint32_t gfmt, uint32_t &dfmt, uint32_t &nfmt) {
 bool resolveDesc(uint32_t sgpr, uint32_t n, const uint32_t* pud,
                  const std::unordered_map<uint32_t, std::pair<uint32_t, uint32_t>>& loads,
                  uint32_t* dst) {
-  auto it = loads.find(sgpr);
-  if (it != loads.end()) {
-    const uint32_t sbase = it->second.first, off = it->second.second;
-    // The user-data block is 32 dwords, not 16: the final grading pass reaches
-    // its textures through a pointer pair at s[28:29], and bounding this at 16
-    // dropped those samplers to the 1x1 white default. The dereference is
-    // self-validating (the address must land in guest memory), unlike reading
-    // the user-data image directly.
-    if (sbase + 1 >= 32) return false;
-    const uint64_t ptr = pud[sbase] | (static_cast<uint64_t>(pud[sbase + 1] & 0xFFFF) << 32);
-    const uint64_t addr = ptr + off;
-    if (!inGuest(addr) || !mapped(addr, n * 4)) return false;
-    std::memcpy(dst, reinterpret_cast<const void*>(addr), n * 4);
-    return true;
+  // Walk the s_load chain from the descriptor's SGPR back to a user-data root.
+  // One link is a table in user data; Skyrim's grading pass uses two (a table of
+  // resource tables), and stopping at one link left those samplers on the 1x1
+  // white default.
+  uint32_t off[4] = {};
+  uint32_t root = sgpr;
+  int links = 0;
+  for (; links < 4; links++) {
+    auto it = loads.find(root);
+    if (it == loads.end()) break;
+    off[links] = it->second.second;
+    root = it->second.first;
   }
-  if (sgpr + n <= 16) {
+  if (!links) {
+    if (sgpr + n > 16) return false;
     std::memcpy(dst, &pud[sgpr], n * 4);
     return true;
   }
-  return false;
+  // The user-data block is 32 dwords, not 16. Each dereference is
+  // self-validating (the address must land in mapped guest memory), unlike
+  // reading the user-data image directly.
+  if (root + 1 >= 32) return false;
+  uint64_t ptr = pud[root] | (static_cast<uint64_t>(pud[root + 1] & 0xFFFF) << 32);
+  for (int i = links - 1; i > 0; i--) {
+    const uint64_t at = ptr + off[i];
+    if (!inGuest(at) || !mapped(at, 8)) return false;
+    const auto* q = reinterpret_cast<const uint32_t*>(at);
+    ptr = q[0] | (static_cast<uint64_t>(q[1] & 0xFFFF) << 32);
+  }
+  const uint64_t addr = ptr + off[0];
+  if (!inGuest(addr) || !mapped(addr, n * 4)) return false;
+  std::memcpy(dst, reinterpret_cast<const void*>(addr), n * 4);
+  return true;
 }
 
 }  // namespace

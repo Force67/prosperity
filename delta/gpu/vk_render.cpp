@@ -1166,6 +1166,7 @@ bool createTexPipeline() {
     wv.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
     VKOK(vkCreateImageView(g.device, &wv, nullptr, &g.whiteArrayView));
 
+
     VkDescriptorSetLayout layouts[2] = {g.dsLayout, g.dsLayout};
     VkDescriptorSet sets[2];
     VkDescriptorSetAllocateInfo wa{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
@@ -3903,9 +3904,9 @@ bool drawRecomp(const DrawInfo &d) {
                           : multiStorage[i]  ? "storage"
                           : multiViews[i]    ? "guest"
                                              : "WHITE";
-        std::fprintf(stderr, " [%u]%s@%#lx %ux%u arr=%u mips=%u fmt=%u/%u rt?=%u er=%u",
+        std::fprintf(stderr, " [%u]%s@%#lx %ux%u layers=%u mips=%u fmt=%u/%u rt?=%u er=%u",
                      i, how, (unsigned long)d.texs[i].base, d.texs[i].w,
-                     d.texs[i].h, d.texs[i].arrayed, d.texs[i].mip_levels,
+                     d.texs[i].h, d.texs[i].layers, d.texs[i].mip_levels,
                      d.texs[i].dfmt, d.texs[i].nfmt,
                      (unsigned)g_rts.count(d.texs[i].base),
                      (unsigned)(g_rts.count(d.texs[i].base)
