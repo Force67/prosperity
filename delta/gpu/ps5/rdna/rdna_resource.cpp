@@ -247,6 +247,14 @@ TImage DecodeTImage(const uint32_t* d) {
     if (sw_mode < 64 && seen[sw_mode]++ == 0)
       std::fprintf(stderr, "[swcensus] sw_mode=%u first seen (%ux%u gfmt=%u)\n",
                    sw_mode, t.width, t.height, gfmt);
+    static uint32_t seenSel[4096] = {};
+    const uint32_t packed = (t.dst_sel[0]) | (t.dst_sel[1] << 3) |
+                            (t.dst_sel[2] << 6) | (t.dst_sel[3] << 9);
+    if (packed < 4096 && seenSel[packed]++ == 0)
+      std::fprintf(stderr,
+                   "[swcensus] dst_sel = %u,%u,%u,%u (word3=%08x) on %ux%u gfmt=%u\n",
+                   t.dst_sel[0], t.dst_sel[1], t.dst_sel[2], t.dst_sel[3], d[3],
+                   t.width, t.height, gfmt);
   }
   switch (sw_mode) {
     case 0:  t.tiling_idx = 8; break;

@@ -1484,6 +1484,16 @@ void walk(const uint32_t *p, uint32_t words, bool dumpThis, int depth) {
               memOk(dst + bytes))
             std::memcpy(reinterpret_cast<void *>(dst),
                         reinterpret_cast<const void *>(src), bytes);
+          // srcSel 2 = the packet's own dword, repeated: a fill. That is how this
+          // title clears a surface -- there is no clear packet -- so apply it to
+          // guest memory and let the renderer clear any target it covers.
+          if (!noCopy && srcSel == 2 && dstMem && bytes && bytes <= 0x8000000u &&
+              memOk(dst) && memOk(dst + bytes)) {
+            const uint32_t fill = body[1];
+            auto *p32 = reinterpret_cast<uint32_t *>(dst);
+            for (uint32_t k = 0; k < bytes / 4; k++) p32[k] = fill;
+            vk::noteMemoryFill(dst, bytes, fill);
+          }
           if (std::getenv("DELTA_GPU_DMATRACE")) {
             static int dmn = 0;
             if (dmn++ < 60)

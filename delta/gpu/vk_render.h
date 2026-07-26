@@ -230,6 +230,11 @@ void flushCsWrites();
 // Flush only dirty ranges overlapping [base, base+bytes).
 void flushCsWritesRange(uint64_t base, uint64_t bytes);
 
+// A CP DMA immediate fill over guest memory. When the range covers a live render
+// target that is how the title clears it -- there is no clear packet on this
+// hardware -- so the target takes a pending clear with the filled value.
+void noteMemoryFill(uint64_t base, uint64_t bytes, uint32_t value);
+
 // Frame lifecycle. Each draw renders into the Vulkan image for its DrawInfo.rtBase
 // (a render target keyed by guest address). beginFrame starts recording;
 // endFrame submits, reads back the render target at `scanoutBase` (the flip

@@ -4299,6 +4299,32 @@ int rdocFrame() {
 // RenderDoc identifies a Vulkan device by its instance's dispatch pointer.
 void *rdocDevice() { return *reinterpret_cast<void **>(g.instance); }
 
+void noteMemoryFill(uint64_t base, uint64_t bytes, uint32_t value) {
+  if (!g.ready || !bytes) return;
+  const uint64_t end = base + bytes;
+  for (auto &kv : g_rts) {
+    RTarget &rt = kv.second;
+    const uint64_t rtEnd = kv.first + rtByteSize(rt);
+    // Only a fill that covers the whole surface is a clear; a partial one is a
+    // buffer update that happens to overlap.
+    if (base > kv.first || end < rtEnd) continue;
+    rt.clearPending = true;
+    // The fill value is one dword of the target's own format. Unpacking every
+    // format is not worth it: a clear is almost always zero (black), and a
+    // non-zero fill lands as its 8-bit-per-channel reading.
+    const float inv = 1.0f / 255.0f;
+    rt.clearValue.float32[0] = ((value >> 0) & 0xFF) * inv;
+    rt.clearValue.float32[1] = ((value >> 8) & 0xFF) * inv;
+    rt.clearValue.float32[2] = ((value >> 16) & 0xFF) * inv;
+    rt.clearValue.float32[3] = ((value >> 24) & 0xFF) * inv;
+    static const bool trace = std::getenv("DELTA_GPU_FILLTRACE") != nullptr;
+    static int n = 0;
+    if (trace && n++ < 20)
+      std::fprintf(stderr, "[fill] RT %#lx cleared by CP DMA fill %08x (%lu bytes)\n",
+                   (unsigned long)kv.first, value, (unsigned long)bytes);
+  }
+}
+
 void beginFrame() {
   if (!g.ready) return;
   // Objects retired two frames ago are past every in-flight command buffer
@@ -4310,6 +4336,17 @@ void beginFrame() {
   g.frameHeuristic = 0;
   g.frameMaxIdx = 0;
   g.frameNum++;
+  // DELTA_GPU_FORCECLEAR=<rt address>: clear that target at the top of every
+  // frame. Diagnostic for a target the title clears by a means we do not see --
+  // additive passes into it otherwise accumulate frame over frame.
+  static const uint64_t forceClear = [] {
+    const char *e = std::getenv("DELTA_GPU_FORCECLEAR");
+    return e ? std::strtoull(e, nullptr, 0) : 0ull;
+  }();
+  if (forceClear) {
+    auto it = g_rts.find(forceClear);
+    if (it != g_rts.end()) it->second.clearPending = true;
+  }
   if (rdocFrame() && g.frameNum == rdocFrame() && rdocApi()) {
     rdocApi()->StartFrameCapture(rdocDevice(), nullptr);
     std::fprintf(stderr, "[rdoc] capturing frame %d\n", g.frameNum);
