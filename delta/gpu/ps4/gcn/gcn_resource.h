@@ -50,6 +50,11 @@ struct TImage {
   uint32_t nfmt = 0;
   uint32_t type = 0;         // SQ_RSRC_IMG_* (9 = 2D, 13 = 2D array)
   uint32_t tiling_idx = 0;   // 8/31 = linear; everything else is tiled
+  // T# DST_SEL_X/Y/Z/W: which source channel (or constant) each sampled
+  // component reads. 0=0, 1=1, 4=R, 5=G, 6=B, 7=A. A single-channel mask (a
+  // font atlas) is declared with its coverage selected into the components the
+  // shader reads; ignoring that samples alpha as 1 and fills every glyph solid.
+  uint32_t dst_sel[4] = {4, 5, 6, 7};
   uint32_t sampler[4] = {};  // S# used by the sampling MIMG instruction
   bool pow2_pad = false;     // pad physical mip dims/layers to powers of two
   bool sampler_valid = false;

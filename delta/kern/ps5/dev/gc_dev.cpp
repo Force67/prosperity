@@ -168,6 +168,39 @@ int32_t gcDevicePs5::ioctl(uint32_t cmd, void *data) {
             std::printf("[agc]   no PM4 anywhere in the GPU aperture (empty ring?)\n");
         }
       }
+      // DELTA_AGC_RINGDUMP: the submit arg in full plus the ring descriptor table
+      // it references, with a PM4 sniff of each buffer. The per-pass register
+      // state Skyrim never seems to program (a colour target for some passes, PS
+      // user data above 15) has to come from one of these.
+      static const bool ringDump = std::getenv("DELTA_AGC_RINGDUMP") != nullptr;
+      static int ringN = 0;
+      if (ringDump && ringN < 3) {
+        ringN++;
+        auto *w = reinterpret_cast<const uint32_t *>(a);
+        std::printf("[ring] arg:");
+        for (int k = 0; k < 16; k++) std::printf(" %08x", w[k]);
+        std::printf("\n");
+        auto sniff = [](uint64_t p, const char *what) {
+          if (!gpuAddr(p)) return;
+          const auto *q = reinterpret_cast<const uint32_t *>(p);
+          uint32_t t3 = 0;
+          for (int i = 0; i < 256; i++)
+            if ((q[i] >> 30) == 3) t3++;
+          std::printf("[ring]   %s %#lx: %08x %08x %08x %08x  (type3 hdrs in 256 dw: %u)\n",
+                      what, (unsigned long)p, q[0], q[1], q[2], q[3], t3);
+        };
+        for (int k = 0; k + 1 < 16; k++)
+          sniff((static_cast<uint64_t>(w[k + 1]) << 32) | w[k], "argptr");
+        const uint64_t tbl = 0x80014981d8ull;
+        if (gpuAddr(tbl)) {
+          const auto *t = reinterpret_cast<const uint32_t *>(tbl);
+          std::printf("[ring] table @%#lx:", (unsigned long)tbl);
+          for (int k = 0; k < 16; k++) std::printf(" %08x", t[k]);
+          std::printf("\n");
+          for (int k = 0; k + 1 < 16; k += 2)
+            sniff((static_cast<uint64_t>(t[k + 1] & 0xFFFF) << 32) | t[k], "tblptr");
+        }
+      }
       // NOTE: the arg window reads empty for this title (mode-1 path is used); the
       // real per-frame PM4 (with the SET_SH_REG shader setup) lives in surrounding
       // ring windows listed by a descriptor table @0x80014981d8 -> 0x8002670000..

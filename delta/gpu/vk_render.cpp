@@ -284,10 +284,11 @@ struct TexKey {
   TexImageKey image;
   uint32_t base_array = 0, view_layers = 1;
   uint32_t base_mip = 0, view_mips = 1;
+  uint32_t swizzle = 0;  // packed T# DST_SEL (0 = identity)
   SamplerKey sampler;
   bool arrayed = false;
   bool operator==(const TexKey &o) const {
-    return image == o.image && base_array == o.base_array &&
+    return swizzle == o.swizzle && image == o.image && base_array == o.base_array &&
            view_layers == o.view_layers && base_mip == o.base_mip &&
            view_mips == o.view_mips && sampler == o.sampler &&
            arrayed == o.arrayed;
@@ -298,6 +299,7 @@ struct TexKeyHash {
     uint64_t h = TexImageKeyHash{}(k.image);
     h = hashWord(h, k.base_array); h = hashWord(h, k.view_layers);
     h = hashWord(h, k.base_mip); h = hashWord(h, k.view_mips);
+    h = hashWord(h, k.swizzle);
     h = hashWord(h, SamplerKeyHash{}(k.sampler));
     return static_cast<size_t>(hashWord(h, k.arrayed));
   }
@@ -307,9 +309,10 @@ struct TexViewKey {
   TexImageKey image;
   uint32_t base_array = 0, view_layers = 1;
   uint32_t base_mip = 0, view_mips = 1;
+  uint32_t swizzle = 0;  // packed T# DST_SEL_X/Y/Z/W
   bool arrayed = false;
   bool operator==(const TexViewKey &o) const {
-    return image == o.image && base_array == o.base_array &&
+    return swizzle == o.swizzle && image == o.image && base_array == o.base_array &&
            view_layers == o.view_layers && base_mip == o.base_mip &&
            view_mips == o.view_mips && arrayed == o.arrayed;
   }
@@ -319,6 +322,7 @@ struct TexViewKeyHash {
     uint64_t h = TexImageKeyHash{}(k.image);
     h = hashWord(h, k.base_array); h = hashWord(h, k.view_layers);
     h = hashWord(h, k.base_mip); h = hashWord(h, k.view_mips);
+    h = hashWord(h, k.swizzle);
     return static_cast<size_t>(hashWord(h, k.arrayed));
   }
 };
@@ -489,7 +493,7 @@ TexKey textureKey(uint64_t base, uint32_t w, uint32_t h, uint32_t dfmt,
                    uint32_t view_layers, uint32_t mip_levels, uint32_t base_mip,
                    uint32_t view_mips, uint32_t min_lod, bool pow2_pad,
                    const uint32_t *sampler, bool sampler_valid, bool arrayed,
-                   bool force_lod_zero, bool depth_compare) {
+                   bool force_lod_zero, bool depth_compare, uint32_t swizzle) {
   if (layers && base_array < layers)
     view_layers = std::min(view_layers, layers - base_array);
   if (!arrayed) view_layers = 1;
@@ -500,6 +504,7 @@ TexKey textureKey(uint64_t base, uint32_t w, uint32_t h, uint32_t dfmt,
                guestTextureFormat(dfmt, nfmt), pow2_pad};
   key.base_array = base_array; key.view_layers = view_layers;
   key.base_mip = base_mip; key.view_mips = view_mips;
+  key.swizzle = swizzle;
   key.sampler.valid = sampler_valid && sampler;
   if (key.sampler.valid) std::memcpy(key.sampler.raw, sampler, sizeof(key.sampler.raw));
   key.sampler.imageMinLod = min_lod;
@@ -511,7 +516,7 @@ TexKey textureKey(uint64_t base, uint32_t w, uint32_t h, uint32_t dfmt,
 
 TexViewKey textureViewKey(const TexKey &key) {
   return {key.image, key.base_array, key.view_layers, key.base_mip, key.view_mips,
-          key.arrayed};
+          key.swizzle, key.arrayed};
 }
 
 uint32_t textureTiling(uint32_t tiling) {
@@ -1457,7 +1462,7 @@ VkDescriptorSet getTexture(uint64_t base, uint32_t w, uint32_t h,
                               const uint32_t *sampler = nullptr,
                               bool sampler_valid = false, bool arrayed = false,
                               bool force_lod_zero = false,
-                              bool depth_compare = false) {
+                              bool depth_compare = false, uint32_t swizzle = 0) {
   constexpr uint64_t kGuestBegin = 0x1000000000ull;
   constexpr uint64_t kGuestEnd = 0x20000000000ull;
   constexpr uint64_t kMaxTextureBytes = 256ull * 1024 * 1024;
@@ -1484,16 +1489,37 @@ VkDescriptorSet getTexture(uint64_t base, uint32_t w, uint32_t h,
   const uint32_t lh = bc ? (h + 3) / 4 : h;
   const uint32_t lpitch = bc ? ((pitch ? pitch : w) + 3) / 4 : (pitch ? pitch : w);
   gcn::TextureLayout32 layout;
+  // DELTA_GPU_TEXFAIL: why a guest texture declines to upload. Skyrim's font
+  // atlas fell out here and every glyph then sampled the white default, which
+  // fills each glyph quad solid instead of masking it.
+  static const bool texFail = std::getenv("DELTA_GPU_TEXFAIL") != nullptr;
   if (!gcn::BuildTextureLayout32(layout, lw, lh, lpitch, layers,
-                                  mip_levels, tiling, pow2_pad, elemBytes))
+                                  mip_levels, tiling, pow2_pad, elemBytes)) {
+    if (texFail) {
+      static int n = 0;
+      if (n++ < 12)
+        std::fprintf(stderr,
+                     "[texfail] layout %#lx %ux%u pitch=%u tiling=%u elem=%u mips=%u\n",
+                     (unsigned long)base, w, h, lpitch, tiling, elemBytes, mip_levels);
+    }
     return VK_NULL_HANDLE;
+  }
   uint64_t footprint = layout.size;
-  if (base < kGuestBegin || footprint > kMaxTextureBytes || base > kGuestEnd - footprint)
+  if (base < kGuestBegin || footprint > kMaxTextureBytes || base > kGuestEnd - footprint) {
+    if (texFail) {
+      static int n = 0;
+      if (n++ < 12)
+        std::fprintf(stderr,
+                     "[texfail] range %#lx %ux%u footprint=%lu (max %lu)\n",
+                     (unsigned long)base, w, h, (unsigned long)footprint,
+                     (unsigned long)kMaxTextureBytes);
+    }
     return VK_NULL_HANDLE;
+  }
   TexKey key = textureKey(base, w, h, dfmt, nfmt, tiling, pitch, layers, base_array,
                              view_layers, mip_levels, base_mip, view_mips, min_lod,
                              pow2_pad, sampler, sampler_valid, arrayed,
-                             force_lod_zero, depth_compare);
+                             force_lod_zero, depth_compare, swizzle);
   // Diagnostic (DELTA_GPU_TEXDUMP): in deep gameplay, dump the first few large guest
   // textures sampled, so a non-tutorial room's floor texture can be inspected (is it
   // loaded/brown or black/zero?). Counts non-zero pixels too.
@@ -1578,6 +1604,25 @@ VkDescriptorSet getTexture(uint64_t base, uint32_t w, uint32_t h,
     vci.format = format;
     vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, base_mip, view_mips, base_array,
                             arrayed ? view_layers : 1};
+    // T# DST_SEL: 0 = zero, 1 = one, 4..7 = R/G/B/A. A single-channel mask (a
+    // font atlas) selects its coverage into the components the shader reads;
+    // without this every glyph samples alpha = 1 and fills solid.
+    static const bool noSwizzle = std::getenv("DELTA_GPU_NOSWIZZLE") != nullptr;
+    if (viewKey.swizzle && !noSwizzle) {
+      auto comp = [](uint32_t sel) {
+        switch (sel) {
+          case 0: return VK_COMPONENT_SWIZZLE_ZERO;
+          case 1: return VK_COMPONENT_SWIZZLE_ONE;
+          case 4: return VK_COMPONENT_SWIZZLE_R;
+          case 5: return VK_COMPONENT_SWIZZLE_G;
+          case 6: return VK_COMPONENT_SWIZZLE_B;
+          case 7: return VK_COMPONENT_SWIZZLE_A;
+          default: return VK_COMPONENT_SWIZZLE_IDENTITY;
+        }
+      };
+      vci.components = {comp(viewKey.swizzle & 7), comp((viewKey.swizzle >> 3) & 7),
+                        comp((viewKey.swizzle >> 6) & 7), comp((viewKey.swizzle >> 9) & 7)};
+    }
     if (vkCreateImageView(g.device, &vci, nullptr, &viewEntry.view) != VK_SUCCESS)
       return VK_NULL_HANDLE;
     viewIt = g_texViews.emplace(viewKey, viewEntry).first;
@@ -1612,14 +1657,15 @@ VkImageView texViewFor(const DrawInfo::DrawTex &t) {
                    t.layers, t.base_array,
                    t.view_layers, t.mip_levels, t.base_mip, t.view_mips,
                    t.min_lod, t.pow2_pad, t.sampler, t.sampler_valid,
-                   t.arrayed, t.force_lod_zero, t.depth_compare) == VK_NULL_HANDLE)
+                   t.arrayed, t.force_lod_zero, t.depth_compare,
+                   t.swizzle) == VK_NULL_HANDLE)
     return VK_NULL_HANDLE;
   TexKey key = textureKey(t.base, t.w, t.h, t.dfmt, t.nfmt,
                            textureTiling(t.tiling), t.pitch,
                            t.layers, t.base_array, t.view_layers, t.mip_levels,
                            t.base_mip, t.view_mips, t.min_lod, t.pow2_pad, t.sampler,
                            t.sampler_valid, t.arrayed, t.force_lod_zero,
-                           t.depth_compare);
+                           t.depth_compare, t.swizzle);
   auto it = g_texViews.find(textureViewKey(key));
   return it != g_texViews.end() ? it->second.view : VK_NULL_HANDLE;
 }
@@ -1709,7 +1755,7 @@ VkDescriptorSet getMultiTexSet(const DrawInfo &d, VkDescriptorSetLayout setLayou
                             t.layers, t.base_array, t.view_layers, t.mip_levels,
                             t.base_mip, t.view_mips, t.min_lod, t.pow2_pad, t.sampler,
                             t.sampler_valid, t.arrayed, t.force_lod_zero,
-                            t.depth_compare);
+                            t.depth_compare, t.swizzle);
     key.view[i] = resolvedViews[i];
     key.layout[i] = resolvedLayouts[i];
     key.storage[i] = d.texs[i].storage;
@@ -3809,7 +3855,7 @@ bool drawRecomp(const DrawInfo &d) {
                           d.texViewLayers, d.texMipLevels, d.texBaseMip,
                            d.texViewMips, d.texMinLod, d.texPow2Pad, d.texSampler,
                            d.texSamplerValid, d.texArrayed, d.texForceLodZero,
-                           d.texDepthCompare);
+                           d.texDepthCompare, d.texSwizzle);
     if (!texSet) texSet = d.texArrayed ? g.whiteArraySet : g.whiteSet;
     if (!texSet) return decline(DR_GUESTTEX);
   }
@@ -4456,7 +4502,7 @@ void draw(const DrawInfo &d_in) {
                          d.texMipLevels, d.texBaseMip, d.texViewMips,
                           d.texMinLod, d.texPow2Pad, d.texSampler,
                           d.texSamplerValid, false, d.texForceLodZero,
-                          d.texDepthCompare);
+                          d.texDepthCompare, d.texSwizzle);
 
   // Switch render target if this draw targets a different RT than the open region (or
   // the open region is multi-target/has a depth attachment: the heuristic path renders

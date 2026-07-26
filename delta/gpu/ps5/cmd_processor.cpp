@@ -158,6 +158,20 @@ inline uint32_t regSpaceLimit(uint32_t base) {
 
 // Latch a SET_*_REG packet into the register file. body[0] is the register
 // offset dword (with the gfx10 selector bits stripped), body[1..] the values.
+// DELTA_AGC_UDTRACE: every write to the PS user-data SGPRs above 15. Skyrim's
+// grading pass reads a texture descriptor from s16..s23, and if nothing in the
+// command stream programs those the shader samples whatever was left there.
+static void noteUdWrite(const char *how, uint32_t reg, uint32_t val) {
+  static const bool on = std::getenv("DELTA_AGC_UDTRACE") != nullptr;
+  static int n = 0;
+  if (on && n < 40 && val && reg >= mmSPI_SHADER_USER_DATA_PS_0 + 16 &&
+      reg < mmSPI_SHADER_USER_DATA_PS_0 + 32) {
+    n++;
+    std::fprintf(stderr, "[agc] PS ud%u <- %08x by %s\n",
+                 reg - mmSPI_SHADER_USER_DATA_PS_0, val, how);
+  }
+}
+
 // DELTA_AGC_CLIPTRACE: name every packet that writes PA_CL_CLIP_CNTL. The
 // clip-space convention lives there, and a title whose writes never reach us
 // silently gets the reset value (OpenGL clip space).
@@ -181,6 +195,7 @@ void setRegs(uint32_t base, const uint32_t *body, uint32_t count) {
   for (uint32_t i = 1; i < count; i++) {
     if (off + (i - 1) < limit) g_regs[off + (i - 1)] = body[i];
     if (off + (i - 1) == mmPA_CL_CLIP_CNTL) noteClipWrite("SET_REG", body[i]);
+    noteUdWrite("SET_REG", off + (i - 1), body[i]);
   }
 }
 
@@ -313,6 +328,7 @@ void loadRegs(uint32_t base, const uint32_t *body, uint32_t count) {
       uint32_t v = src[off + j];
       g_regs[base + off + j] = v;
       if (base + off + j == mmPA_CL_CLIP_CNTL) noteClipWrite("LOAD_REG", v);
+      noteUdWrite("LOAD_REG", base + off + j, v);
       // Pinpoint where the shader PGM_LO lands: a shader at 0x8001xxxxxx has
       // PGM_LO ~0x800xxxxx (top byte 0x80). Log SH-space hits to find the reg.
       static int s_sh = 0;
@@ -346,6 +362,7 @@ void loadRegPairs(uint32_t base, const uint32_t *body, uint32_t cnt) {
     uint32_t off = p[i * 2] & ~kRegSelectorMask;  // strip gfx10 selector bits
     if (base + off < limit) g_regs[base + off] = p[i * 2 + 1];
     if (base + off == mmPA_CL_CLIP_CNTL) noteClipWrite("SET_REG_INDIRECT", p[i * 2 + 1]);
+    noteUdWrite("SET_REG_INDIRECT", base + off, p[i * 2 + 1]);
     // DELTA_AGC_CBTRACE: every write to the colour-target base/format, with the
     // packet's own bookkeeping, so a zero write can be traced to a mis-parse.
     static const int cbTraceFrom = [] {
@@ -523,6 +540,15 @@ void maybeDumpShader(uint64_t addr) {
   }
 }
 
+
+// The T#'s four DST_SEL channel selects, packed 3 bits each for the renderer's
+// image view. The identity selection (R,G,B,A) packs to 0 so views that need no
+// swizzle keep sharing one cache entry.
+static uint32_t packDstSel(const gcn::TImage &t) {
+  const uint32_t p = (t.dst_sel[0] & 7) | ((t.dst_sel[1] & 7) << 3) |
+                     ((t.dst_sel[2] & 7) << 6) | ((t.dst_sel[3] & 7) << 9);
+  return p == (4u | (5u << 3) | (6u << 6) | (7u << 9)) ? 0u : p;
+}
 
 // A context register read as the float it holds (viewport scales/offsets).
 static float regF(uint32_t reg) {
@@ -741,11 +767,12 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
       s_probe++;
       std::fprintf(stderr,
                    "[agc] RTPROBE draw#%lu rt=%#lx tmask=%#x info0=%#x clip=%#x "
-                   "zscale=%g zoff=%g\n",
+                   "psrsrc2=%#x psUserSgpr=%u zscale=%g zoff=%g\n",
                    (unsigned long)g_drawsSeen.load(), (unsigned long)d.rtBase,
                    g_regs[mmCB_TARGET_MASK], g_regs[mmCB_COLOR0_INFO],
-                   g_regs[mmPA_CL_CLIP_CNTL], regF(mmPA_CL_VPORT_ZSCALE),
-                   regF(mmPA_CL_VPORT_ZOFFSET));
+                   g_regs[mmPA_CL_CLIP_CNTL], g_regs[kShRegBase + 0x0B],
+                   (g_regs[kShRegBase + 0x0B] >> 1) & 0x1F,
+                   regF(mmPA_CL_VPORT_ZSCALE), regF(mmPA_CL_VPORT_ZOFFSET));
     }
     // Why a colour draw ended up with no target: print the state that rejected
     // CB_COLOR0 (a stale/zero base, or an INFO with no format).
@@ -1038,11 +1065,29 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
         // recompiler's set-0 binding order (rdna::TrackTextures re-derives the same
         // plan). texs[i] maps to PS sampler binding i.
         if (psA && !rc.ps_texs.empty()) {
-          auto texs = rdna::TrackTextures(reinterpret_cast<const uint32_t *>(psA), pud);
+          // USER_SGPR[5:1] with USER_SGPR_MSB[27] as bit 5: how many user-data
+          // SGPRs this PS was launched with.
+          const uint32_t rsrc2 = g_regs[mmSPI_SHADER_PGM_RSRC2_PS];
+          // The hardware window is what RSRC2 declares. Skyrim's grading pass
+          // declares 32 and keeps a T# at s16 -- resolving it is correct, but the
+          // texture it names (a 3840x2160 R16G16F target) then tints the whole
+          // frame magenta, so something downstream of that sample is still wrong
+          // and the conservative 16-dword window renders better today.
+          // DELTA_GPU_UDBOUND=0 uses the declared window, or pins any value.
+          const uint32_t declared =
+              ((rsrc2 >> 1) & 0x1F) | (((rsrc2 >> 27) & 1) << 5);
+          static const int udBound = [] {
+            const char *e = std::getenv("DELTA_GPU_UDBOUND"); return e ? std::atoi(e) : 16;
+          }();
+          const uint32_t psUserSgprs =
+              udBound > 0 ? static_cast<uint32_t>(udBound) : declared;
+          auto texs = rdna::TrackTextures(reinterpret_cast<const uint32_t *>(psA), pud,
+                                          psUserSgprs);
           // The single-texture render path reads the legacy tex* mirror of
           // texs[0], so populate it too (the PS4 path does the same).
           if (!texs.empty()) {
             d.texBase = texs[0].valid ? texs[0].base : 0;
+            d.texSwizzle = packDstSel(texs[0]);
             d.texW = texs[0].width;
             d.texH = texs[0].height;
             d.texDfmt = texs[0].dfmt;
@@ -1086,6 +1131,7 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
             dt.force_lod_zero = s.force_lod_zero;
             dt.depth_compare = s.depth_compare;
             dt.storage = s.storage;
+            dt.swizzle = packDstSel(s);
           }
           d.nTexs = static_cast<uint32_t>(std::min<size_t>(texs.size(), 16));
           if (dl)
@@ -1320,7 +1366,19 @@ void walk(const uint32_t *p, uint32_t words, bool dumpThis, int depth) {
       // RELEASE_MEM trailer 0xffff1000 parsed as NOP count=16384) would abandon the
       // rest of the buffer -- and with it the SET_SH_REG_INDIRECT shader bind that
       // follows. Instead of bailing, skip one dword and resync on the next header.
-      if (i + 1 + cnt > words) { i += 1; continue; }
+      if (i + 1 + cnt > words) {
+        // DELTA_AGC_WALKSTAT: a packet whose count runs past the buffer means we
+        // mis-parsed something earlier; the walker resyncs a dword at a time and
+        // every packet in between is lost.
+        static const bool walkStat = std::getenv("DELTA_AGC_WALKSTAT") != nullptr;
+        static uint64_t resyncs = 0;
+        if (walkStat && (++resyncs % 500) == 1)
+          std::fprintf(stderr,
+                       "[walkstat] resync #%llu at word %u/%u (hdr %08x op %#x cnt %u)\n",
+                       (unsigned long long)resyncs, i, words, hdr, op, cnt);
+        i += 1;
+        continue;
+      }
       g_opHist[op & 0xFF]++;
       // Who actually binds the render target: report the packet that first makes
       // CB_COLOR0_BASE non-zero, and every later change.
@@ -1394,8 +1452,10 @@ void walk(const uint32_t *p, uint32_t words, bool dumpThis, int depth) {
       case 0x93: {
         if (cnt >= 2) {
           uint32_t off = kShRegBase + (body[0] & 0xFFFF);
-          for (uint32_t k = 1; k < cnt; k++)
+          for (uint32_t k = 1; k < cnt; k++) {
             if (off + (k - 1) < kRegFileSize) g_regs[off + (k - 1)] = body[k];
+            noteUdWrite("SET_SH_INLINE(0x93)", off + (k - 1), body[k]);
+          }
         }
         break;
       }
@@ -1509,6 +1569,7 @@ void walk(const uint32_t *p, uint32_t words, bool dumpThis, int depth) {
         for (uint32_t j = 0; j < cnt0; j++) {
           if (base0 + j < kRegFileSize) g_regs[base0 + j] = p[i + 1 + j];
           if (base0 + j == mmPA_CL_CLIP_CNTL) noteClipWrite("type0", p[i + 1 + j]);
+          noteUdWrite("type0", base0 + j, p[i + 1 + j]);
         }
         static int s_t0 = 0;
         if (g_trace && s_t0 < 20 && base0 >= kShRegBase && base0 < kShRegBase + 0x300) {

@@ -40,9 +40,11 @@ gpu::gcn::MimgBindingPlan RdnaPlanMimg(const Program& program);
 gpu::gcn::TImage DecodeTImage(const uint32_t* dwords);
 
 // Resolve the live T#/S# each MIMG in a pixel shader samples, in binding order.
-// Descriptors that are inline in user data or loaded one level from a user-data
-// table pointer resolve; deeper SGPR dataflow does not (returns valid=false).
+// user_sgprs is how many user-data SGPRs the stage was launched with
+// (SPI_SHADER_PGM_RSRC2_*.USER_SGPR): a descriptor inline beyond that window is
+// not user data at all, just whatever the previous draw left in those registers.
 std::vector<gpu::gcn::TImage> TrackTextures(const uint32_t* ps_code,
-                                            const uint32_t* ps_user_data);
+                                            const uint32_t* ps_user_data,
+                                            uint32_t user_sgprs = 16);
 
 }  // namespace gpu::rdna

@@ -108,7 +108,7 @@ struct DescLink {
   bool buffer;      // root is a V#, not a pointer
 };
 
-bool resolveDesc(uint32_t sgpr, uint32_t n, const uint32_t* pud,
+bool resolveDesc(uint32_t sgpr, uint32_t n, const uint32_t* pud, uint32_t user_sgprs,
                  const std::unordered_map<uint32_t, DescLink>& loads,
                  uint32_t* dst) {
   // Walk the s_load chain from the descriptor's SGPR back to a user-data root.
@@ -125,12 +125,11 @@ bool resolveDesc(uint32_t sgpr, uint32_t n, const uint32_t* pud,
     root = it->second.root;
   }
   if (!links) {
-    // Only the first 16 user-data SGPRs are trusted for an inline descriptor.
-    // The block is 32 wide, but a shader that declares fewer leaves the rest
-    // stale: reading Skyrim's grading pass T# at s16 that way yields a
-    // descriptor that paints half the frame magenta. Its real source is not
-    // an s_load either (see DELTA_GPU_TEXRESOLVE) -- still unknown.
-    if (sgpr + n > 16) return false;
+    // An inline descriptor must lie inside the stage's user-data window. Skyrim's
+    // grading pass is launched with 32 user SGPRs and keeps a T# at s16; passes
+    // launched with fewer leave those registers holding the previous draw's
+    // values, and reading them anyway paints half the frame magenta.
+    if (sgpr + n > user_sgprs) return false;
     std::memcpy(dst, &pud[sgpr], n * 4);
     return true;
   }
@@ -220,6 +219,7 @@ TImage DecodeTImage(const uint32_t* d) {
   const uint32_t last_level = (d[3] >> 16) & 0xF;
   const uint32_t sw_mode = (d[3] >> 20) & 0x1F;
   t.type = (d[3] >> 28) & 0xF;
+  for (int i = 0; i < 4; i++) t.dst_sel[i] = (d[3] >> (i * 3)) & 0x7;
   const uint32_t depth = d[4] & 0xFFFF;
   t.base_array = (d[4] >> 16) & 0xFFFF;
   const uint32_t max_mip = (d[5] >> 4) & 0xF;
@@ -239,6 +239,15 @@ TImage DecodeTImage(const uint32_t* d) {
   // variants) has no detiler yet, so it is shifted past the valid range:
   // BuildTextureLayout32 rejects it and the draw gets the white fallback
   // instead of scrambled texels.
+  // DELTA_GPU_SWCENSUS: which gfx10 swizzle modes this title's textures use --
+  // the detiler only covers linear and the three "standard" modes, and anything
+  // else is rejected into the white fallback (flat-coloured quads).
+  if (std::getenv("DELTA_GPU_SWCENSUS")) {
+    static uint32_t seen[64] = {};
+    if (sw_mode < 64 && seen[sw_mode]++ == 0)
+      std::fprintf(stderr, "[swcensus] sw_mode=%u first seen (%ux%u gfmt=%u)\n",
+                   sw_mode, t.width, t.height, gfmt);
+  }
   switch (sw_mode) {
     case 0:  t.tiling_idx = 8; break;
     case 1:  t.tiling_idx = 0x50; break;
@@ -282,7 +291,8 @@ TImage DecodeTImage(const uint32_t* d) {
   return t;
 }
 
-std::vector<TImage> TrackTextures(const uint32_t* ps_code, const uint32_t* pud) {
+std::vector<TImage> TrackTextures(const uint32_t* ps_code, const uint32_t* pud,
+                                  uint32_t user_sgprs) {
   std::vector<TImage> out;
   if (!ps_code || !pud || !inGuest(reinterpret_cast<uint64_t>(ps_code))) return out;
   const Program prog = DecodeShader(ps_code, 4096);
@@ -310,6 +320,26 @@ std::vector<TImage> TrackTextures(const uint32_t* ps_code, const uint32_t* pud) 
     // descriptor or a chain we failed to walk.
     static const bool trResolve = std::getenv("DELTA_GPU_TEXRESOLVE") != nullptr;
     const uint32_t srsrc = ((w1 >> 16) & 0x1F) * 4;
+    if (trResolve && loads.find(srsrc) == loads.end()) {
+      std::fprintf(stderr,
+                   "[texres]   mimg pc=%04x w0=%08x w1=%08x op=%#x nsa=%u "
+                   "srsrc_field=%u ssamp_field=%u vaddr=%u vdata=%u\n",
+                   in.pc, w0, w1, op, (w0 >> 1) & 3, (w1 >> 16) & 0x1F,
+                   (w1 >> 21) & 0x1F, w1 & 0xFF, (w1 >> 8) & 0xFF);
+      // An "inline" descriptor that user data never programmed has to come from
+      // somewhere else in the shader: list every scalar write to its registers.
+      for (const Inst& w : prog) {
+        uint32_t d0 = 0xFFFF, cnt = 1;
+        if (w.enc == Enc::kSop1) { d0 = (w.raw[0] >> 16) & 0x7F; cnt = w.opcode == 0x04 ? 2 : 1; }
+        else if (w.enc == Enc::kSop2) d0 = (w.raw[0] >> 16) & 0x7F;
+        else if (w.enc == Enc::kSmrd && w.opcode <= 0x0C) { d0 = (w.raw[0] >> 6) & 0x7F; cnt = 8; }
+        if (d0 == 0xFFFF) continue;
+        if (d0 + cnt <= srsrc || d0 >= srsrc + 8) continue;
+        std::fprintf(stderr,
+                     "[texres]   writer pc=%04x enc=%d op=%#x -> s%u..%u (%08x %08x)\n",
+                     w.pc, (int)w.enc, w.opcode, d0, d0 + cnt - 1, w.raw[0], w.raw[1]);
+      }
+    }
     if (trResolve) {
       auto lit = loads.find(srsrc);
       std::fprintf(stderr,
@@ -320,13 +350,13 @@ std::vector<TImage> TrackTextures(const uint32_t* ps_code, const uint32_t* pud) 
                    lit == loads.end() ? 0 : lit->second.root,
                    lit == loads.end() ? 0 : lit->second.off);
     }
-    if (resolveDesc(srsrc, 8, pud, loads, desc)) {
+    if (resolveDesc(srsrc, 8, pud, user_sgprs, loads, desc)) {
       out[b] = DecodeTImage(desc);
       out[b].arrayed = (w0 >> 14) & 1;
       out[b].depth_compare = op == 0x28 || op == 0x2f;
       out[b].force_lod_zero = op == 0x47;
       out[b].storage = op == 0x08 || op == 0x09;
-      if (op >= 0x20 && resolveDesc(((w1 >> 21) & 0x1F) * 4, 4, pud, loads, desc)) {
+      if (op >= 0x20 && resolveDesc(((w1 >> 21) & 0x1F) * 4, 4, pud, user_sgprs, loads, desc)) {
         std::memcpy(out[b].sampler, desc, sizeof(out[b].sampler));
         out[b].sampler_valid = true;
       }

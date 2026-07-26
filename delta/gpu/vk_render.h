@@ -103,6 +103,7 @@ struct DrawInfo {
   bool texArrayed = false;      // MIMG DA: shader consumes a layer coordinate
   bool texForceLodZero = false;
   bool texDepthCompare = false;
+  uint32_t texSwizzle = 0;      // packed T# DST_SEL for the legacy single texture
 
   // Multi-texture: a PS can sample several textures (Doom64's 3D walls/floors use
   // a diffuse + lightmap + ... loaded from the EUD resource table). texs[0] mirrors
@@ -122,6 +123,7 @@ struct DrawInfo {
     bool force_lod_zero = false;
     bool depth_compare = false;
     bool storage = false;
+    uint32_t swizzle = 0;  // packed T# DST_SEL_X/Y/Z/W (0 = identity)
   };
   DrawTex texs[16];
   uint32_t nTexs = 0;
