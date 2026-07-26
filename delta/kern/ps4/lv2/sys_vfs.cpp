@@ -14,6 +14,7 @@
 #include <atomic>
 #include <thread>
 #include <chrono>
+#include <unordered_map>
 #include <cstdio>
 #include <deque>
 #include <mutex>
@@ -282,8 +283,30 @@ int PS4ABI sys_fstat(uint32_t fd, void *stat) {
     return 0;
   }
   auto *d = fdToDevice(fd);
-  if (!d)
+  if (!d) {
+    // The three standard descriptors exist on a real process but are not
+    // device-backed here. Report them as character devices rather than EBADF,
+    // the same reason sys_read returns EOF for them: Skyrim's INI parser falls
+    // back to stderr when a file is missing and stats it, and an error there
+    // makes its stdio layer treat the stream as broken.
+    if (fd <= 2) {
+      if (stat) {
+        auto *st = static_cast<SceKernelStat *>(stat);
+        st->st_mode = 0x2000;  // S_IFCHR
+        st->st_blksize = 0x4000;
+      }
+      return 0;
+    }
+    static const bool trace = std::getenv("DELTA_FSTAT_TRACE") != nullptr;
+    if (trace) {
+      static std::mutex m;
+      static std::unordered_map<uint32_t, uint64_t> bad;
+      std::lock_guard<std::mutex> lk(m);
+      if (bad[fd]++ == 0)
+        std::fprintf(stderr, "[fstat] fd=%u -> EBADF (unknown descriptor)\n", fd);
+    }
     return -SysError::eBADF;
+  }
   int r = d->fstat(stat);
   if (std::getenv("DELTA_RDALL") && stat)
     std::fprintf(stderr, "[fstat] fd=%u -> st_size=%lld\n", fd,
