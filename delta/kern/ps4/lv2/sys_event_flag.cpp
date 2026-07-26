@@ -8,6 +8,7 @@
 
 #include <base.h>
 
+#include <mutex>
 #include "wait_probe.h"
 #include <chrono>
 #include <cstdio>
@@ -258,7 +259,29 @@ int PS4ABI sys_evf_trywait(int id, uint64_t pattern, uint32_t mode,
   return r;
 }
 
+// DELTA_WAIT_PROBE also tallies which flags are ever SET. A flag that threads
+// park on but nobody signals is the stall; comparing the two lists names it.
+static void evfSetTally(int id) {
+  static const bool on = std::getenv("DELTA_WAIT_PROBE") != nullptr;
+  if (!on)
+    return;
+  static std::mutex m;
+  static std::unordered_map<int, uint64_t> hist;
+  static auto last = std::chrono::steady_clock::now();
+  std::lock_guard<std::mutex> lk(m);
+  hist[id]++;
+  const auto now = std::chrono::steady_clock::now();
+  if (now - last < std::chrono::seconds(10))
+    return;
+  last = now;
+  std::fprintf(stderr, "[evfset] ids ever signalled:");
+  for (const auto &[k, v] : hist) std::fprintf(stderr, " %d(x%llu)", k,
+                                               (unsigned long long)v);
+  std::fprintf(stderr, "\n");
+}
+
 int PS4ABI sys_evf_set(int id, uint64_t bits) {
+  evfSetTally(id);
   auto *ef = fromId(id);
   if (!ef)
     return -SysError::eSRCH;
