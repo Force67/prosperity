@@ -718,9 +718,14 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
     // DELTA_GPU_NOSTICKYRT restores the drop.
     static const bool stickyRt = std::getenv("DELTA_GPU_NOSTICKYRT") == nullptr;
     static uint64_t lastBase = 0;
-    static uint32_t lastInfo = 0;
-    if (d.mrtCount) { lastBase = d.mrtBase[0]; lastInfo = d.mrtInfo[0]; }
-    else if (stickyRt && (g_regs[mmCB_TARGET_MASK] & 0xF) && lastBase) {
+    static uint32_t lastInfo = 0, lastW = 0, lastH = 0;
+    if (d.mrtCount) {
+      lastBase = d.mrtBase[0];
+      lastInfo = d.mrtInfo[0];
+      lastW = d.rtW;
+      lastH = d.rtH;
+    } else if (stickyRt && (g_regs[mmCB_TARGET_MASK] & 0xF) && lastBase &&
+               d.rtW == lastW && d.rtH == lastH) {
       d.mrtBase[0] = lastBase;
       d.mrtInfo[0] = lastInfo;
       d.mrtCount = 1;
@@ -1208,6 +1213,44 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
         std::fprintf(stderr, " %g", f);
       }
       std::fprintf(stderr, "\n");
+    }
+    // DELTA_AGC_VDUMPPROJ: project this draw's first vertices on the host, using
+    // the 4x3 world matrix (a 12-dword cbuffer) and the view-projection (dwords
+    // 32-47 of a 48-dword one), and print the NDC the shader ought to produce.
+    // Comparing that with the drawn extent says whether the transform chain in
+    // the recompiled VS is the thing that is wrong.
+    // DELTA_AGC_VDUMPPROJ=<world binding>:<vp binding>:<vp dword> names the
+    // matrices, since a cbuffer window holds several and only the shader knows
+    // which (read it off the SPIR-V's sgpr <- cbuf loads).
+    if (const char *projEnv = std::getenv("DELTA_AGC_VDUMPPROJ");
+        projEnv && d.nvattrs && d.vertexData) {
+      uint32_t wb = 1, vb2 = 2, vdw = 32;
+      std::sscanf(projEnv, "%u:%u:%u", &wb, &vb2, &vdw);
+      const float *world = nullptr, *vp = nullptr;
+      if (wb < d.nCbufs && d.cbufs[wb].base && inGuest(d.cbufs[wb].base))
+        world = reinterpret_cast<const float *>(d.cbufs[wb].base);
+      if (vb2 < d.nCbufs && d.cbufs[vb2].base && inGuest(d.cbufs[vb2].base) &&
+          d.cbufs[vb2].size / 4 >= vdw + 16)
+        vp = reinterpret_cast<const float *>(d.cbufs[vb2].base) + vdw;
+      if (world && vp) {
+        const auto *vb = reinterpret_cast<const uint8_t *>(d.vertexData);
+        for (uint32_t v = 0; v < 8 && v < d.vertexCount; v++) {
+          const float *p = reinterpret_cast<const float *>(vb + (size_t)v * d.vertexStride);
+          float w4[4] = {0, 0, 0, 1};
+          for (int r = 0; r < 3; r++)
+            w4[r] = world[r * 4 + 0] * p[0] + world[r * 4 + 1] * p[1] +
+                    world[r * 4 + 2] * p[2] + world[r * 4 + 3];
+          float c[4];
+          for (int r = 0; r < 4; r++)
+            c[r] = vp[r * 4 + 0] * w4[0] + vp[r * 4 + 1] * w4[1] +
+                   vp[r * 4 + 2] * w4[2] + vp[r * 4 + 3] * w4[3];
+          std::fprintf(stderr,
+                       "[agc]   proj v%u obj=(%g %g %g) world=(%g %g %g) "
+                       "clip=(%g %g %g %g) ndc=(%g %g)\n",
+                       v, p[0], p[1], p[2], w4[0], w4[1], w4[2], c[0], c[1], c[2],
+                       c[3], c[3] ? c[0] / c[3] : 0.f, c[3] ? c[1] / c[3] : 0.f);
+        }
+      }
     }
     // DELTA_AGC_VDUMPCB=<n>: how many floats of each bound cbuffer to print. The
     // default shows the head; a transform hides further in (48-dword windows hold
