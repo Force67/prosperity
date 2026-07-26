@@ -8,8 +8,13 @@
  */
 
 #include <base.h>
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <map>
+#include <chrono>
+#include <thread>
 #include <mutex>
 #include <unordered_map>
 #ifdef _MSC_VER
@@ -87,6 +92,9 @@ moduleInfo *called_in(void *addr) {
   return nullptr;
 }
 
+void dumpSyscallHist();
+extern const bool g_scHist;
+
 static int PS4ABI null_handler() {
 #ifdef _MSC_VER
   void *ret = _ReturnAddress();
@@ -95,7 +103,14 @@ static int PS4ABI null_handler() {
 #endif
   called_in(ret);
 
-  std::printf(">>>>>>>>>>>>> NULL HANDLER CALLED BY %p\n", ret);
+  static std::atomic<uint64_t> nulls{0};
+  const uint64_t n = ++nulls;
+  if (n == 1 || (g_scHist && n % 400 == 0)) {
+    std::printf(">>>>>>>>>>>>> NULL HANDLER called %llu times\n",
+                (unsigned long long)n);
+    if (g_scHist)
+      dumpSyscallHist();
+  }
   return 0;
 }
 
@@ -363,8 +378,8 @@ static const syscall_Reg syscall_dpt[] = {
     {278, (void *)&null_handler}, // sys_nstat
     {279, (void *)&null_handler}, // sys_nfstat
     {280, (void *)&null_handler}, // sys_nlstat
-    {289, (void *)&null_handler}, // sys_preadv
-    {290, (void *)&null_handler}, // sys_pwritev
+    {289, (void *)&sys_preadv}, // sys_preadv
+    {290, (void *)&sys_pwritev}, // sys_pwritev
     {297, (void *)&null_handler}, // sys_fhstatfs
     {298, (void *)&null_handler}, // sys_fhopen
     {299, (void *)&null_handler}, // sys_fhstat
@@ -835,7 +850,40 @@ static uintptr_t emit_calltrace(const char *name, uint32_t sid,
 // wedged/slow title hammers, count every syscall in the trampoline and dump the
 // histogram from the SIGUSR1 probe (crash.cpp). Racy increments are fine here.
 extern "C" uint64_t g_sysHist[1024] = {};
-static const bool g_scHist = std::getenv("DELTA_SCHIST") != nullptr;
+extern const bool g_scHist;
+const bool g_scHist = std::getenv("DELTA_SCHIST") != nullptr;
+
+// The histogram was only ever printed by the crash reporter, so a clean run
+// discarded it. "Which syscall is this title hammering" is the question it
+// exists to answer, and most runs neither crash nor exit gracefully (the
+// emulator is normally SIGKILLed), so it is also dumped from the unimplemented
+// -syscall stub, which is where the question usually comes up.
+void dumpSyscallHist() {
+  std::fprintf(stderr, "[schist] syscall call counts:\n");
+  for (int i = 0; i < 1024; i++) {
+    if (!g_sysHist[i])
+      continue;
+    const char *n = syscall_getname(i);
+    std::fprintf(stderr, "[schist] %4d %-24s %llu\n", i, n ? n : "?",
+                 (unsigned long long)g_sysHist[i]);
+  }
+}
+
+static const bool g_scHistDump = [] {
+  if (!g_scHist)
+    return false;
+  std::atexit(&dumpSyscallHist);
+  // The emulator is normally SIGKILLed, so also sample on a timer: what a title
+  // is doing in STEADY STATE is a different question from what it did at boot,
+  // and only a periodic dump answers it.
+  std::thread([] {
+    for (;;) {
+      std::this_thread::sleep_for(std::chrono::seconds(20));
+      dumpSyscallHist();
+    }
+  }).detach();
+  return true;
+}();
 
 // One-time trampoline per handler: call it with the guest's arg registers
 // untouched, then set/clear the carry flag and normalise rax per the convention

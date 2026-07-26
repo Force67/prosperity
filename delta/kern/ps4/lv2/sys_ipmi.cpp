@@ -29,6 +29,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <chrono>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -102,8 +103,56 @@ static void dumpStr(const char *tag, void *p) {
 
 static std::string kidService(uint32_t kid);
 
+// DELTA_IPMI_HIST: per-op (and per invoked method) call counts, dumped every
+// 20 s. A title that spins on IPMI issues billions of calls, which the
+// per-call trace cannot show without drowning the log; only the histogram
+// identifies WHICH request is being retried forever.
+static void ipmiHist(uint32_t op, uint32_t kid, void *in, uint64_t insize) {
+  static const bool on = std::getenv("DELTA_IPMI_HIST") != nullptr;
+  if (!on)
+    return;
+  struct Key {
+    uint32_t op, method;
+    bool operator==(const Key &o) const {
+      return op == o.op && method == o.method;
+    }
+  };
+  struct Hash {
+    size_t operator()(const Key &k) const {
+      return (static_cast<size_t>(k.op) << 32) ^ k.method;
+    }
+  };
+  static std::mutex m;
+  static std::unordered_map<Key, uint64_t, Hash> hist;
+  static std::unordered_map<Key, std::string, Hash> svc;
+  uint32_t method = 0;
+  const char *name = nullptr;
+  if (op == IPMI_INVOKE_SYNC && in && insize >= sizeof(IpmiInvokeReq)) {
+    auto *req = static_cast<IpmiInvokeReq *>(in);
+    method = req->methodId;
+  }
+  const Key k{op, method};
+  std::lock_guard<std::mutex> lk(m);
+  if (hist[k]++ == 0) {
+    auto s = kidService(kid);
+    svc[k] = s.empty() ? "?" : s;
+    (void)name;
+  }
+  static auto last = std::chrono::steady_clock::now();
+  const auto now = std::chrono::steady_clock::now();
+  if (now - last < std::chrono::seconds(20))
+    return;
+  last = now;
+  std::fprintf(stderr, "[ipmihist] op/method call counts:\n");
+  for (auto &e : hist)
+    std::fprintf(stderr, "[ipmihist]   op=%u method=%#x svc=%s  %llu\n",
+                 e.first.op, e.first.method, svc[e.first].c_str(),
+                 (unsigned long long)e.second);
+}
+
 static void ipmiTrace(uint32_t op, uint32_t kid, void *out, void *in,
                       uint64_t insize) {
+  ipmiHist(op, kid, in, insize);
   static const bool on = std::getenv("DELTA_IPMI_TRACE") != nullptr;
   if (!on)
     return;

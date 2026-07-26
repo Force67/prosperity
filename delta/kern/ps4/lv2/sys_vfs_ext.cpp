@@ -266,6 +266,64 @@ int64_t PS4ABI sys_readv(uint32_t fd, const void *iov, int iovcnt) {
   return total;
 }
 
+// Positional vectored I/O. These were stubbed to return 0, which reads as a
+// clean end-of-file to the caller: a title that loads through preadv gets empty
+// buffers and no error to notice it by. Offsets advance across the segments and
+// the file position is left alone, like pread/pwrite.
+int64_t PS4ABI sys_preadv(uint32_t fd, const void *iov, int iovcnt,
+                          int64_t offset) {
+  auto *segs = static_cast<const sce_iovec *>(iov);
+  if (!segs || iovcnt < 0 || offset < 0)
+    return -SysError::eINVAL;
+  auto *d = fdToDevice(fd);
+  if (!d)
+    return -SysError::eBADF;
+  const int64_t saved = d->lseek(0, kSeekCur);
+  int64_t total = 0;
+  for (int i = 0; i < iovcnt; ++i) {
+    d->lseek(offset + total, kSeekSet);
+    int64_t r = d->read(segs[i].iov_base, segs[i].iov_len);
+    if (r < 0) {
+      if (saved >= 0)
+        d->lseek(saved, kSeekSet);
+      return total ? total : r;
+    }
+    total += r;
+    if (static_cast<size_t>(r) < segs[i].iov_len)
+      break;  // short read: end of file
+  }
+  if (saved >= 0)
+    d->lseek(saved, kSeekSet);
+  return total;
+}
+
+int64_t PS4ABI sys_pwritev(uint32_t fd, const void *iov, int iovcnt,
+                           int64_t offset) {
+  auto *segs = static_cast<const sce_iovec *>(iov);
+  if (!segs || iovcnt < 0 || offset < 0)
+    return -SysError::eINVAL;
+  auto *d = fdToDevice(fd);
+  if (!d)
+    return -SysError::eBADF;
+  const int64_t saved = d->lseek(0, kSeekCur);
+  int64_t total = 0;
+  for (int i = 0; i < iovcnt; ++i) {
+    d->lseek(offset + total, kSeekSet);
+    int64_t r = d->write(segs[i].iov_base, segs[i].iov_len);
+    if (r < 0) {
+      if (saved >= 0)
+        d->lseek(saved, kSeekSet);
+      return total ? total : r;
+    }
+    total += r;
+    if (static_cast<size_t>(r) < segs[i].iov_len)
+      break;
+  }
+  if (saved >= 0)
+    d->lseek(saved, kSeekSet);
+  return total;
+}
+
 // We have no pollable fds. Returning 0 (zero ready) immediately would turn a
 // timed poll into a busy-spin, so honour the caller's timeout by sleeping it
 // first (capped). timeout is in milliseconds; negative means "wait forever",

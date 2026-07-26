@@ -37,6 +37,8 @@ int PS4ABI sys_fdatasync(uint32_t fd);
 int PS4ABI sys_getcwd(char *buf, size_t size);
 
 int64_t PS4ABI sys_pread(uint32_t fd, void *buf, size_t nbytes, int64_t offset);
+int64_t PS4ABI sys_preadv(uint32_t fd, const void *iov, int iovcnt, int64_t offset);
+int64_t PS4ABI sys_pwritev(uint32_t fd, const void *iov, int iovcnt, int64_t offset);
 int64_t PS4ABI sys_pwrite(uint32_t fd, const void *buf, size_t nbytes,
                           int64_t offset);
 
