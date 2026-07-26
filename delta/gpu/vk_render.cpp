@@ -4705,8 +4705,14 @@ void reportRtContents() {
     const char *e = std::getenv("DELTA_GPU_RTSTAT_FRAME");
     return e ? std::atoi(e) : 0;
   }();
+  // DELTA_GPU_RTSTAT_EVERY=<n>: sample every n frames instead of every 200, so a
+  // per-frame flicker can be told apart from a slow animation.
+  static const int every = [] {
+    const char *e = std::getenv("DELTA_GPU_RTSTAT_EVERY");
+    return e ? std::max(1, std::atoi(e)) : 200;
+  }();
   if (!enabled || (reportFrame ? g.frameNum != reportFrame
-                               : g.frameNum % 200 != 0))
+                               : g.frameNum % every != 0))
     return;
   int reported = 0;
   for (auto &kv : g_rts) {
