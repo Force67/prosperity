@@ -32,6 +32,9 @@ void mount(const char *guestPrefix, const char *hostDir);
 // write, so this cannot affect them.
 void mountWritable(const char *guestPrefix, const char *hostDir);
 
+// Remove the most recently added mount for a guest prefix.
+void unmount(const char *guestPrefix);
+
 // Resolve a guest path to a host path, or empty if no host mount matches.
 // (Virtual mounts have no host path; use openRead/stat for those.)
 base::String resolve(const char *guestPath);

@@ -12,3 +12,11 @@ TEST(Vfs, ReportsRootDirectory) {
   EXPECT_EQ(size, 0);
   EXPECT_TRUE(is_dir);
 }
+
+TEST(Vfs, UnmountRemovesGuestPrefix) {
+  krnl::vfs::mount("/vfs-unmount-test", "/tmp");
+  EXPECT_FALSE(krnl::vfs::resolve("/vfs-unmount-test/file").empty());
+
+  krnl::vfs::unmount("/vfs-unmount-test");
+  EXPECT_TRUE(krnl::vfs::resolve("/vfs-unmount-test/file").empty());
+}

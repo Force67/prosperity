@@ -21,6 +21,8 @@
 //   Mount2 { s32 userId@0; DirName*@8; u64 blocks@16; u32 mountMode@24; }
 //   Mount  { s32 userId@0; TitleId*@8; DirName*@16; Fingerprint*@24;
 //            u64 blocks@32; u32 mountMode@40; }
+//   Mount3 { s32 userId@0; DirName*@8; u64 blocks@16; u64 systemBlocks@24;
+//            u32 mountMode@32; s32 resource@40; }
 //   MountResult { char mount_point[16]@0; u64 required_blocks@16; u32 unused@24;
 //                 u32 mount_status@28; u8 rsv[28]; }
 //   DirName { char data[32] }.  MountPoint { char data[16] }.
@@ -47,10 +49,17 @@ int PS4ABI sceSaveDataTerminate();
 
 int PS4ABI sceSaveDataMount(const void *mount, void *result);
 int PS4ABI sceSaveDataMount2(const void *mount, void *result);
+int PS4ABI sceSaveDataMount3(const void *mount, void *result);
 int PS4ABI sceSaveDataMount5(const void *mount, void *result);
 int PS4ABI sceSaveDataUmount(const void *mountPoint);
 int PS4ABI sceSaveDataUmountWithBackup(const void *mountPoint);
+int PS4ABI sceSaveDataUmount2(uint32_t mode, const void *mountPoint);
 int PS4ABI sceSaveDataGetMountInfo(const void *mountPoint, void *info);
+
+int PS4ABI sceSaveDataCreateTransactionResource(uint32_t size);
+int PS4ABI sceSaveDataDeleteTransactionResource(int32_t resource);
+int PS4ABI sceSaveDataPrepare(const void *mountPoint, const void *param);
+int PS4ABI sceSaveDataCommit(const void *param);
 
 int PS4ABI sceSaveDataDirNameSearch(const void *cond, void *result);
 int PS4ABI sceSaveDataDelete(const void *del);
@@ -62,6 +71,7 @@ int PS4ABI sceSaveDataGetParam(const void *mountPoint, uint32_t paramType,
 int PS4ABI sceSaveDataSetParam(const void *mountPoint, uint32_t paramType,
                                const void *buf, uint64_t size);
 int PS4ABI sceSaveDataSaveIcon(const void *mountPoint, const void *icon);
+int PS4ABI sceSaveDataLoadIcon(const void *mountPoint, void *icon);
 
 // SaveDataMemory: a small fixed-size memory blob per (title, slot), used for
 // auto-save style data. Backed by a host file under sce_sdmemory/.

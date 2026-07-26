@@ -66,6 +66,7 @@ constexpr uint32_t kParamMtime = 5;
 
 std::mutex g_mtx;
 int g_nextSlot = 0;
+int g_nextTransactionResource = 1;
 
 struct Slot {
   std::string point;  // "/savedataN"
@@ -171,6 +172,21 @@ std::string hostForPoint(const void *mountPoint) {
     if (s.point == point)
       return s.host;
   return {};
+}
+
+int unmountPoint(const void *mountPoint) {
+  if (!mountPoint)
+    return kErrParameter;
+  const char *point = static_cast<const char *>(mountPoint);
+  std::lock_guard<std::mutex> lk(g_mtx);
+  for (auto it = g_slots.begin(); it != g_slots.end(); ++it) {
+    if (it->point == point) {
+      krnl::vfs::unmount(point);
+      g_slots.erase(it);
+      return kOk;
+    }
+  }
+  return kErrNotMounted;
 }
 
 // Read a guest pointer stored at byte offset `off` in `base`.
@@ -348,15 +364,25 @@ int PS4ABI sceSaveDataMount(const void *mount, void *result) {
   return doMount(cstrOf(ptrAt(mount, 16)), u32At(mount, 40), result);
 }
 
+int PS4ABI sceSaveDataMount3(const void *mount, void *result) {
+  sdTrace("sceSaveDataMount3");
+  if (!mount)
+    return kErrParameter;
+  return doMount(cstrOf(ptrAt(mount, 8)), u32At(mount, 32), result);
+}
+
 int PS4ABI sceSaveDataMount5(const void *mount, void *result) {
   sdTrace("sceSaveDataMount5");
   return sceSaveDataMount2(mount, result);  // same leading layout for our use
 }
 
-int PS4ABI sceSaveDataUmount(const void *) {
-  sdTrace("sceSaveDataUmount"); return kOk; }
-int PS4ABI sceSaveDataUmountWithBackup(const void *) {
-  sdTrace("sceSaveDataUmountWithBackup"); return kOk; }
+int PS4ABI sceSaveDataUmount(const void *mountPoint) {
+  sdTrace("sceSaveDataUmount"); return unmountPoint(mountPoint); }
+int PS4ABI sceSaveDataUmountWithBackup(const void *mountPoint) {
+  sdTrace("sceSaveDataUmountWithBackup"); return unmountPoint(mountPoint); }
+
+int PS4ABI sceSaveDataUmount2(uint32_t, const void *mountPoint) {
+  sdTrace("sceSaveDataUmount2"); return unmountPoint(mountPoint); }
 
 int PS4ABI sceSaveDataGetMountInfo(const void *, void *info) {
   sdTrace("sceSaveDataGetMountInfo");
@@ -369,6 +395,27 @@ int PS4ABI sceSaveDataGetMountInfo(const void *, void *info) {
   return kOk;
 }
 
+int PS4ABI sceSaveDataCreateTransactionResource(uint32_t) {
+  sdTrace("sceSaveDataCreateTransactionResource");
+  std::lock_guard<std::mutex> lk(g_mtx);
+  return g_nextTransactionResource++;
+}
+
+int PS4ABI sceSaveDataDeleteTransactionResource(int32_t) {
+  sdTrace("sceSaveDataDeleteTransactionResource");
+  return kOk;
+}
+
+int PS4ABI sceSaveDataPrepare(const void *mountPoint, const void *param) {
+  sdTrace("sceSaveDataPrepare");
+  return mountPoint && param ? kOk : kErrParameter;
+}
+
+int PS4ABI sceSaveDataCommit(const void *param) {
+  sdTrace("sceSaveDataCommit");
+  return param ? kOk : kErrParameter;
+}
+
 // ---------------- enumerate / delete / backup ----------------
 
 int PS4ABI sceSaveDataDirNameSearch(const void *cond, void *result) {
@@ -376,6 +423,13 @@ int PS4ABI sceSaveDataDirNameSearch(const void *cond, void *result) {
   if (!result)
     return kErrParameter;
   auto *r = static_cast<uint8_t *>(result);
+  std::string searchRoot = titleRoot();
+  if (cond) {
+    const void *titleId = ptrAt(cond, 8);
+    if (titleId && cstrOf(titleId)[0])
+      searchRoot = saveRoot() + "/" +
+                   std::string(cstrOf(titleId), strnlen(cstrOf(titleId), 10));
+  }
   // dirNamesNum@16 is the caller's array capacity (input).
   const uint32_t capacity = u32At(result, 16);
   auto *dirNames = static_cast<uint8_t *>(const_cast<void *>(ptrAt(result, 8)));
@@ -392,11 +446,11 @@ int PS4ABI sceSaveDataDirNameSearch(const void *cond, void *result) {
 
   // Enumerate existing save directories under the title root.
   std::vector<std::string> hits;
-  if (DIR *d = ::opendir(titleRoot().c_str())) {
+  if (DIR *d = ::opendir(searchRoot.c_str())) {
     while (dirent *e = ::readdir(d)) {
       if (e->d_name[0] == '.' || !std::strncmp(e->d_name, "sce_", 4))
         continue;
-      std::string child = titleRoot() + "/" + e->d_name;
+      std::string child = searchRoot + "/" + e->d_name;
       struct stat st;
       if (::stat(child.c_str(), &st) != 0 || !(st.st_mode & S_IFDIR))
         continue;
@@ -421,7 +475,7 @@ int PS4ABI sceSaveDataDirNameSearch(const void *cond, void *result) {
     }
     if (params) {
       uint8_t *pslot = params + i * kParamSize;
-      loadParam(titleRoot() + "/" + hits[i], pslot);
+      loadParam(searchRoot + "/" + hits[i], pslot);
     }
     if (infos) {
       uint8_t *islot = infos + i * 48;  // SearchInfo { u64 blocks; u64 free; }
@@ -594,6 +648,34 @@ int PS4ABI sceSaveDataSaveIcon(const void *mountPoint, const void *icon) {
   }
   if (g_trace())
     std::fprintf(stderr, "[savedata] saveIcon -> %s\n", host.c_str());
+  return kOk;
+}
+
+int PS4ABI sceSaveDataLoadIcon(const void *mountPoint, void *icon) {
+  sdTrace("sceSaveDataLoadIcon");
+  const std::string host = hostForPoint(mountPoint);
+  if (host.empty())
+    return kErrNotMounted;
+  if (!icon)
+    return kErrParameter;
+
+  const std::string path = host + "/.sce_icon.bin";
+  struct stat st;
+  if (::stat(path.c_str(), &st) != 0)
+    return kErrNotFound;
+
+  void *iconBuf = const_cast<void *>(ptrAt(icon, 0));
+  const uint64_t bufSize = u64At(icon, 8);
+  const uint64_t dataSize = static_cast<uint64_t>(st.st_size);
+  if (iconBuf && bufSize) {
+    FILE *f = std::fopen(path.c_str(), "rb");
+    if (!f)
+      return kErrNotFound;
+    const uint64_t copySize = dataSize < bufSize ? dataSize : bufSize;
+    std::fread(iconBuf, 1, static_cast<size_t>(copySize), f);
+    std::fclose(f);
+  }
+  std::memcpy(static_cast<uint8_t *>(icon) + 16, &dataSize, sizeof(dataSize));
   return kOk;
 }
 

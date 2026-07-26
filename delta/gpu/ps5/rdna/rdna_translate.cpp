@@ -31,6 +31,7 @@ gpu::gcn::Recompiled Recompile(const uint32_t *, const uint32_t *,
 #include <utility>
 #include <vector>
 
+#include "guest_memory.h"
 #include "ps4/gcn/spirv/spv_post.h"
 #include "ps4/gcn/spirv/translator.h"
 #include "rdna_decode.h"
@@ -1138,7 +1139,9 @@ std::vector<FetchAttr> ParseFetchInsts(const Program& insts) {
 }
 
 std::vector<FetchAttr> ParseFetch(uint64_t fetch_addr) {
-  if (!gpu::gcn::InGuest(fetch_addr))
+  constexpr uint64_t kMaxFetchBytes = 256 * sizeof(uint32_t);
+  if (!gpu::gcn::InGuest(fetch_addr) ||
+      !gpu::IsReadableRange(fetch_addr, kMaxFetchBytes))
     return {};
   const auto *code = reinterpret_cast<const uint32_t *>(fetch_addr);
   std::vector<FetchAttr> attrs = ParseFetchInsts(Decode(code, 256));
@@ -1555,11 +1558,6 @@ bool TranslateDepthOnlyPs(Translator& t) {
   return true;
 }
 
-bool NoOpt() {
-  static const bool no_opt = std::getenv("DELTA_GPU_SPIRV_NOOPT") != nullptr;
-  return no_opt;
-}
-
 } // namespace
 
 Recompiled Recompile(const uint32_t *vs_code, const uint32_t *ps_code,
@@ -1568,6 +1566,13 @@ Recompiled Recompile(const uint32_t *vs_code, const uint32_t *ps_code,
                      uint32_t vs_user_sgprs, uint32_t ps_user_sgprs) {
   Recompiled r;
   if (!vs_code || !vs_user_data || !ps_user_data)
+    return r;
+
+  constexpr uint64_t kMaxShaderBytes = 4096 * sizeof(uint32_t);
+  const uint64_t vs_address = reinterpret_cast<uintptr_t>(vs_code);
+  const uint64_t ps_address = reinterpret_cast<uintptr_t>(ps_code);
+  if (!gpu::IsReadableRange(vs_address, kMaxShaderBytes) ||
+      (ps_code && !gpu::IsReadableRange(ps_address, kMaxShaderBytes)))
     return r;
 
   const Program vs_program = DecodeShader(vs_code, 4096);
@@ -1628,11 +1633,13 @@ Recompiled Recompile(const uint32_t *vs_code, const uint32_t *ps_code,
       std::fclose(f);
     }
   }
-  r.vs_spirv = NoOpt() ? vs : gpu::gcn::spirv::Optimize(vs);
-  r.fs_spirv = NoOpt() ? ps : gpu::gcn::spirv::Optimize(ps);
+  // SPIRV-Tools' def-use rewrite takes minutes on some large Skyrim modules.
+  // These binaries were validated above, so submit them without post-processing.
+  r.vs_spirv = vs;
+  r.fs_spirv = ps;
   std::string gsErr;
   if (!gs.empty() && gpu::gcn::spirv::Validate(gs, &gsErr))
-    r.gs_spirv = NoOpt() ? gs : gpu::gcn::spirv::Optimize(gs);
+    r.gs_spirv = gs;
   else if (gpu::gcn::TraceEnabled())
     std::fprintf(stderr, "[rdna] RECTLIST GS invalid: %s\n", gsErr.c_str());
   r.ok = !r.vs_spirv.empty() && !r.fs_spirv.empty();

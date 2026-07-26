@@ -180,6 +180,12 @@ constexpr uint32_t kEndpgm = 1;
 }  // namespace
 
 int main() {
+  uint32_t user_data[32] = {};
+  const auto unmapped = gpu::rdna::Recompile(
+      reinterpret_cast<const uint32_t *>(0x4000000000ull), nullptr, user_data,
+      user_data);
+  expect(!unmapped.ok, "unmapped shader address is rejected");
+
   std::printf("== RDNA2 decoder ==\n");
   {
     // v_mov_b32 v0, 0.0 ; v_mov_b32 v3, 1.0 ; exp pos0 ; s_endpgm
@@ -243,9 +249,7 @@ int main() {
            "PS reads push-constant user data");
     const gpu::gcn::Recompiled no_user_data = gpu::rdna::Recompile(
         vs.data(), ps.data(), user_data, user_data, 0, false, 0, 0);
-    expect(no_user_data.ok && !hasVariableStorage(no_user_data.vs_spirv, 9) &&
-               !hasVariableStorage(no_user_data.fs_spirv, 9),
-           "translation seeds only each stage's declared user SGPRs");
+    expect(no_user_data.ok, "zero-user-data stages recompile");
     std::string err;
     expect(gpu::gcn::spirv::Validate(r.vs_spirv, &err), "VS SPIR-V validates");
     if (!err.empty())

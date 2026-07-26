@@ -221,6 +221,18 @@ void loadRegs(uint32_t base, const uint32_t *body, uint32_t count) {
   uint64_t mem = (static_cast<uint64_t>(body[1] & 0xFFFF) << 32) | body[0];
   if (!gpuAddr(mem))
     return; // GPU aperture only
+  const uint32_t limit = regSpaceLimit(base);
+  uint64_t sourceDwords = g_trace ? 0x400 : 0;
+  for (uint32_t i = 2; i + 1 < count; i += 2) {
+    const uint32_t off = body[i] & 0xFFFF;
+    const uint32_t num = std::min<uint32_t>(body[i + 1] & 0xFFFF, 0x2000);
+    if (base + off < limit)
+      sourceDwords = std::max<uint64_t>(
+          sourceDwords, off + std::min<uint32_t>(num, limit - base - off));
+  }
+  if (!sourceDwords ||
+      !gpu::IsReadableRange(mem, sourceDwords * sizeof(uint32_t)))
+    return;
   const uint32_t *src = reinterpret_cast<const uint32_t *>(mem);
   // COHERENCY TEST: dump the LOAD image content. If a context/SH image reads
   // all zero, it's non-coherent (the driver wrote it via a different VA) -- the
@@ -280,7 +292,8 @@ void loadRegs(uint32_t base, const uint32_t *body, uint32_t count) {
       uint32_t v = src[j];
       if ((v >> 24) == 0x80) {
         uint64_t a = (uint64_t)v << 8;
-        if (gpuAddr(a)) {
+        if (gpuAddr(a) &&
+            gpu::IsReadableRange(a, 2 * sizeof(uint32_t))) {
           const uint32_t *w = reinterpret_cast<const uint32_t *>(a);
           std::fprintf(stderr, "[agc]   img[%#x]=%08x -> %#lx ISA? %08x %08x\n",
                        j, v, (unsigned long)a, w[0], w[1]);
@@ -288,7 +301,6 @@ void loadRegs(uint32_t base, const uint32_t *body, uint32_t count) {
       }
     }
   }
-  const uint32_t limit = regSpaceLimit(base);
   // LOAD_*_REG restores a register shadow the command processor is supposed to
   // have SAVED into. We do not model the save side, so a shadow the title never
   // wrote reads as all zeros -- and applying it wipes live state: Skyrim binds
@@ -343,6 +355,10 @@ void loadRegPairs(uint32_t base, const uint32_t *body, uint32_t cnt) {
   // dword-count reading wrote nothing for a single-register indirect (num == 1),
   // so VGT_PRIMITIVE_TYPE (set this way) never landed and prim assembly died.
   uint32_t numPairs = body[3] & 0x3FFF;
+  if (!numPairs || !gpu::IsReadableRange(
+                       addr, static_cast<uint64_t>(numPairs) * 2 *
+                                 sizeof(uint32_t)))
+    return;
   const uint32_t *p = reinterpret_cast<const uint32_t *>(addr);
   const uint32_t limit = regSpaceLimit(base);
   for (uint32_t i = 0; i < numPairs; i++) {
@@ -468,7 +484,9 @@ void handleDispatch(const uint32_t *body, uint32_t count) {
       std::fprintf(stderr, " rsrc2=%08x tg=[%u %u %u]\n", rsrc2, tgx, tgy, tgz);
     }
   }
+  constexpr uint64_t kMaxShaderBytes = 4096 * sizeof(uint32_t);
   if (csDump && dumpedCs.size() < 24 && inGuest(csAddr) &&
+      gpu::IsReadableRange(csAddr, kMaxShaderBytes) &&
       dumpedCs.insert(csAddr).second) {
     const uint32_t *ud = &g_regs[mmCOMPUTE_USER_DATA_0];
     std::fprintf(stderr,
@@ -481,7 +499,9 @@ void handleDispatch(const uint32_t *body, uint32_t count) {
     // dereferences say which surfaces it actually reads and writes.
     for (int k = 0; k < 15; k++) {
       uint64_t p = (static_cast<uint64_t>(ud[k + 1] & 0xFFFF) << 32) | ud[k];
-      if (!gpuAddr(p)) continue;
+      if (!gpuAddr(p) ||
+          !gpu::IsReadableRange(p, 8 * sizeof(uint32_t)))
+        continue;
       const uint32_t *tw = reinterpret_cast<const uint32_t *>(p);
       std::fprintf(stderr, "[cs]   ud%d -> %#lx:", k, (unsigned long)p);
       for (int b = 0; b < 8; b++) std::fprintf(stderr, " %08x", tw[b]);
@@ -521,7 +541,10 @@ void maybeDumpShader(uint64_t addr) {
     return e ? std::strtoull(e, nullptr, 0) : 0ull;
   }();
   static bool done = false;
-  if (!want || done || addr != want || !inGuest(addr)) return;
+  constexpr uint64_t kMaxShaderBytes = 4096 * sizeof(uint32_t);
+  if (!want || done || addr != want || !inGuest(addr) ||
+      !gpu::IsReadableRange(addr, kMaxShaderBytes))
+    return;
   done = true;
   const auto prog = rdna::DecodeShader(reinterpret_cast<const uint32_t *>(addr), 4096);
   std::fprintf(stderr, "[agc] SHADER %#lx: %zu insts\n", (unsigned long)addr,
@@ -629,7 +652,8 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
     // file points at shader code -- the AGC binds shaders outside the PM4 stream --
     // so this stays inert until that path is decoded.
     auto tryAddr = [&](uint32_t o, uint64_t a) {
-      if (nf >= 16 || !gpuAddr(a) || (a & 0xFF))
+      if (nf >= 16 || !gpuAddr(a) || (a & 0xFF) ||
+          !gpu::IsReadableRange(a, sizeof(uint32_t)))
         return;
       uint32_t w0 = *reinterpret_cast<const uint32_t *>(a);
       if ((w0 >> 24) < 0x7e || w0 == 0xffffffffu) return;  // ISA plausibility
@@ -647,7 +671,8 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
     static int s_hdr = 0;
     uint64_t a113 = (static_cast<uint64_t>(g_regs[kShRegBase + 0x114] & 0xFFFF) << 32) |
                     g_regs[kShRegBase + 0x113];
-    if (g_trace && s_hdr < 3 && gpuAddr(a113)) {
+    if (g_trace && s_hdr < 3 && gpuAddr(a113) &&
+        gpu::IsReadableRange(a113, 32 * sizeof(uint32_t))) {
       s_hdr++;
       auto *w = reinterpret_cast<const uint32_t *>(a113);
       std::fprintf(stderr, "[agc]   reg0x113 -> %#lx dump:", (unsigned long)a113);
@@ -677,7 +702,8 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
         std::fprintf(stderr, "\n");
         for (int k = 0; k + 1 < 16; k++) {
           uint64_t p = (static_cast<uint64_t>(ud[k + 1] & 0xFFFF) << 32) | ud[k];
-          if (gpuAddr(p)) {
+          if (gpuAddr(p) &&
+              gpu::IsReadableRange(p, 8 * sizeof(uint32_t))) {
             auto *pw = reinterpret_cast<const uint32_t *>(p);
             std::fprintf(stderr, "[agc]     UD[%d]->%#lx:", k, (unsigned long)p);
             for (int j = 0; j < 8; j++) std::fprintf(stderr, " %08x", pw[j]);
@@ -699,12 +725,16 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
   if (op == IT_DRAW_INDEX_2 && count >= 4) {
     uint64_t ibase = (static_cast<uint64_t>(body[2] & 0xFFFF) << 32) | body[1];
     uint32_t icount = body[3];
-    if (inGuest(ibase) && icount && icount <= 0x100000) {
+    const uint64_t indexSize = g_indexType == 1 ? 4 : g_indexType == 2 ? 1 : 2;
+    if (inGuest(ibase) && icount && icount <= 0x100000 &&
+        gpu::IsReadableRange(ibase, icount * indexSize)) {
       d.indexData = reinterpret_cast<const void *>(ibase);
       d.indexCount = icount;
       d.indexType = g_indexType;
       static int s_idxdump = 0;
-      if (g_trace && s_idxdump < 8) {
+      const uint64_t dumpBytes = std::min<uint32_t>(icount, 8) * sizeof(uint32_t);
+      if (g_trace && s_idxdump < 8 &&
+          gpu::IsReadableRange(ibase, dumpBytes)) {
         s_idxdump++;
         const uint16_t *i16 = reinterpret_cast<const uint16_t *>(ibase);
         const uint32_t *i32 = reinterpret_cast<const uint32_t *>(ibase);
@@ -864,6 +894,10 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
   uint64_t myDraw = s_dlN++;
   bool dl = g_trace && s_dlN < 5000;
   if (recompOn && inGuest(vsA) && (!psA || inGuest(psA))) {
+    constexpr uint64_t kMaxShaderBytes = 4096 * sizeof(uint32_t);
+    if (!gpu::IsReadableRange(vsA, kMaxShaderBytes) ||
+        (psA && !gpu::IsReadableRange(psA, kMaxShaderBytes)))
+      return;
     // DX_CLIP_SPACE_DEF (bit 19) picks the guest's clip-z convention.
     const bool glClip = !((g_regs[mmPA_CL_CLIP_CNTL] >> 19) & 1);
     ShaderKey key{vsA, psA, fetch, gsUserSgprs, psUserSgprs, glClip};
@@ -1206,9 +1240,14 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
     const char *e = std::getenv("DELTA_AGC_VDUMPRT");
     return e ? std::strtoull(e, nullptr, 0) : 0ull;
   }();
+  const uint64_t vertexBytes = std::min<uint64_t>(
+      static_cast<uint64_t>(d.vertexStride) * (d.vertexCount ? d.vertexCount : 4),
+      128);
   if (g_trace && myDraw >= vdumpFrom && (!vdumpRt || d.rtBase == vdumpRt) &&
       s_vdump < vdumpN && d.nvattrs && d.vertexData &&
-      inGuest(reinterpret_cast<uint64_t>(d.vertexData))) {
+      inGuest(reinterpret_cast<uint64_t>(d.vertexData)) && vertexBytes &&
+      gpu::IsReadableRange(reinterpret_cast<uint64_t>(d.vertexData),
+                           vertexBytes)) {
     s_vdump++;
     std::fprintf(stderr,
                  "[agc] VDUMP draw#%lu nvattrs=%u stride=%u count=%u prim=%u "
@@ -1228,24 +1267,27 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
     if (std::getenv("DELTA_AGC_VDUMPPROG") && inGuest(vsA)) {
       const bool wantPs = std::getenv("DELTA_AGC_VDUMPPS") != nullptr;
       const uint64_t addr = wantPs ? psA : vsA;
-      const auto prog =
-          rdna::DecodeShader(reinterpret_cast<const uint32_t *>(addr), 4096);
-      std::fprintf(stderr, "[agc]   %s %#lx: %zu insts\n", wantPs ? "PS" : "VS",
-                   (unsigned long)addr, prog.size());
-      for (const auto &in : prog) {
-        std::fprintf(stderr, "[agc]    pc=%04x %-6s op=%#05x %08x", in.pc,
-                     kEncName[static_cast<uint32_t>(in.enc) < 17
-                                  ? static_cast<uint32_t>(in.enc)
-                                  : 0],
-                     in.opcode, in.raw[0]);
-        if (in.size >= 2) std::fprintf(stderr, " %08x", in.raw[1]);
-        if (in.has_literal) std::fprintf(stderr, " lit=%08x", in.literal);
-        std::fprintf(stderr, "\n");
+      constexpr uint64_t kMaxShaderBytes = 4096 * sizeof(uint32_t);
+      if (gpu::IsReadableRange(addr, kMaxShaderBytes)) {
+        const auto prog =
+            rdna::DecodeShader(reinterpret_cast<const uint32_t *>(addr), 4096);
+        std::fprintf(stderr, "[agc]   %s %#lx: %zu insts\n",
+                     wantPs ? "PS" : "VS", (unsigned long)addr, prog.size());
+        for (const auto &in : prog) {
+          std::fprintf(stderr, "[agc]    pc=%04x %-6s op=%#05x %08x", in.pc,
+                       kEncName[static_cast<uint32_t>(in.enc) < 17
+                                    ? static_cast<uint32_t>(in.enc)
+                                    : 0],
+                       in.opcode, in.raw[0]);
+          if (in.size >= 2) std::fprintf(stderr, " %08x", in.raw[1]);
+          if (in.has_literal) std::fprintf(stderr, " lit=%08x", in.literal);
+          std::fprintf(stderr, "\n");
+        }
       }
     }
     const auto *vb = reinterpret_cast<const uint8_t *>(d.vertexData);
     uint32_t nv = d.vertexCount ? d.vertexCount : 4;
-    uint32_t vbytes = std::min<uint32_t>(d.vertexStride * nv, 128u);
+    uint32_t vbytes = static_cast<uint32_t>(vertexBytes);
     for (uint32_t o = 0; o + 4 <= vbytes; o += 4) {
       uint32_t u;
       float f;
@@ -1263,7 +1305,9 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
     // and dump what's there (a V# or raw vertices) to locate the real vertex source.
     for (int k = 4; k <= 6; k += 2) {
       uint64_t p = (static_cast<uint64_t>(vud[k + 1] & 0xFFFF) << 32) | vud[k];
-      if (!gpuAddr(p)) continue;  // user data holds non-pointers too
+      const uint64_t bytes = (k == 4 ? 32 : 8) * sizeof(uint32_t);
+      if (!gpuAddr(p) || !gpu::IsReadableRange(p, bytes))
+        continue;  // user data holds non-pointers too
       const uint32_t *pw = reinterpret_cast<const uint32_t *>(p);
       std::fprintf(stderr, "[agc]   ud[%d]->%#lx dwords:", k, (unsigned long)p);
       for (int j = 0; j < (k == 4 ? 32 : 8); j++)
@@ -1288,10 +1332,13 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
       uint32_t wb = 1, vb2 = 2, vdw = 32;
       std::sscanf(projEnv, "%u:%u:%u", &wb, &vb2, &vdw);
       const float *world = nullptr, *vp = nullptr;
-      if (wb < d.nCbufs && d.cbufs[wb].base && inGuest(d.cbufs[wb].base))
+      if (wb < d.nCbufs && d.cbufs[wb].size >= 12 * sizeof(float) &&
+          gpu::IsReadableRange(d.cbufs[wb].base, 12 * sizeof(float)))
         world = reinterpret_cast<const float *>(d.cbufs[wb].base);
-      if (vb2 < d.nCbufs && d.cbufs[vb2].base && inGuest(d.cbufs[vb2].base) &&
-          d.cbufs[vb2].size / 4 >= vdw + 16)
+      const uint64_t vpOffset = static_cast<uint64_t>(vdw) * sizeof(float);
+      if (vb2 < d.nCbufs && d.cbufs[vb2].size >= vpOffset + 16 * sizeof(float) &&
+          gpu::IsReadableRange(d.cbufs[vb2].base + vpOffset,
+                               16 * sizeof(float)))
         vp = reinterpret_cast<const float *>(d.cbufs[vb2].base) + vdw;
       if (world && vp) {
         const auto *vb = reinterpret_cast<const uint8_t *>(d.vertexData);
@@ -1320,9 +1367,11 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
       const char *e = std::getenv("DELTA_AGC_VDUMPCB"); return e ? std::atoi(e) : 8;
     }();
     for (uint32_t b = 0; b < d.nCbufs; b++) {
-      if (!d.cbufs[b].base || !inGuest(d.cbufs[b].base)) continue;
-      const float *cf = reinterpret_cast<const float *>(d.cbufs[b].base);
       const int n = std::min<int>(cbFloats, d.cbufs[b].size / 4);
+      if (n <= 0 || !gpu::IsReadableRange(d.cbufs[b].base,
+                                           n * sizeof(float)))
+        continue;
+      const float *cf = reinterpret_cast<const float *>(d.cbufs[b].base);
       std::fprintf(stderr, "[agc]   cbuf[%u]@%#lx (%u dw) floats:", b,
                    (unsigned long)d.cbufs[b].base, d.cbufs[b].size / 4);
       for (int j = 0; j < n; j++) {
@@ -1424,7 +1473,8 @@ void walk(const uint32_t *p, uint32_t words, bool dumpThis, int depth) {
         // so we can RE the register layout (which offset holds CB_COLOR/shaders).
         if ((op == 0x9f || op == 0x93 || op == 0x64 || op == 0x7a || op == 0x63) && cnt >= 2) {
           uint64_t a = (static_cast<uint64_t>(body[1] & 0xFFFF) << 32) | body[0];
-          if (gpuAddr(a)) {
+          if (gpuAddr(a) &&
+              gpu::IsReadableRange(a, 12 * sizeof(uint32_t))) {
             auto *aw = reinterpret_cast<const uint32_t *>(a);
             std::fprintf(stderr, " -> buf %#lx:", (unsigned long)a);
             for (int b = 0; b < 12; b++) std::fprintf(stderr, " %08x", aw[b]);
@@ -1444,9 +1494,10 @@ void walk(const uint32_t *p, uint32_t words, bool dumpThis, int depth) {
           uint32_t ibw = body[2] & 0xFFFFF;
           // Bounds-guard: only follow IBs into the GPU aperture with a sane size,
           // so a stale/garbage ring window can't fault the walker.
-          if (gpuAddr(ib) && ibw &&
-              ibw <= 0x40000)
-            walk(reinterpret_cast<const uint32_t *>(ib), ibw, dumpThis, depth + 1);
+           if (gpuAddr(ib) && ibw && ibw <= 0x40000 &&
+               gpu::IsReadableRange(ib, static_cast<uint64_t>(ibw) *
+                                             sizeof(uint32_t)))
+             walk(reinterpret_cast<const uint32_t *>(ib), ibw, dumpThis, depth + 1);
         }
         break;
       }
@@ -1627,8 +1678,11 @@ void submitDcb(const void *dcb, uint32_t sizeBytes) {
   // block that contains a shader-PGM-like value (top byte 0x80 => addr>>8 in aperture).
   if (g_trace) {
     static uint64_t s_scanAt = 0;
-    if (++s_scanAt == 2000) {
-      const uint32_t *sh = reinterpret_cast<const uint32_t *>(0x8002860000ull);
+    constexpr uint64_t kShadowAddress = 0x8002860000ull;
+    constexpr uint64_t kShadowBytes = 0x200000;
+    if (++s_scanAt == 2000 &&
+        gpu::IsReadableRange(kShadowAddress, kShadowBytes)) {
+      const uint32_t *sh = reinterpret_cast<const uint32_t *>(kShadowAddress);
       int shown = 0;
       for (uint32_t w = 0; w < (0x200000 / 4) && shown < 16; w += 2) {
         uint32_t lo = sh[w], hi = sh[w + 1];

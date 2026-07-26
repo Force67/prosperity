@@ -30,8 +30,10 @@ struct mountPoint {
 };
 
 static base::Vector<mountPoint> g_mounts;
+static std::mutex g_mountsMutex;
 
 void mount(const char *guest, const char *host) {
+  std::lock_guard<std::mutex> lock(g_mountsMutex);
   g_mounts.push_back({base::String(guest), base::String(host), nullptr, false});
 }
 
@@ -50,10 +52,22 @@ static void makeHostDirs(const char *hostDir) {
 
 void mountWritable(const char *guest, const char *host) {
   makeHostDirs(host);
+  std::lock_guard<std::mutex> lock(g_mountsMutex);
   g_mounts.push_back({base::String(guest), base::String(host), nullptr, true});
 }
 
+void unmount(const char *guest) {
+  std::lock_guard<std::mutex> lock(g_mountsMutex);
+  for (mem_size i = g_mounts.size(); i > 0; --i) {
+    if (g_mounts[i - 1].guest == guest) {
+      g_mounts.erase(g_mounts.begin() + i - 1);
+      return;
+    }
+  }
+}
+
 void mountVirtual(const char *guest, std::shared_ptr<VirtualProvider> provider) {
+  std::lock_guard<std::mutex> lock(g_mountsMutex);
   g_mounts.push_back(
       {base::String(guest), base::String(), std::move(provider)});
 }
@@ -73,11 +87,15 @@ static base::String normalizePath(const char *path, const char *relPrefix = "/ap
   return out;
 }
 
-// Longest matching mount (host or virtual). prefixLen is the matched length.
-static const mountPoint *findMount(const char *path, size_t &prefixLen) {
+// Longest matching mount. prefixLen is the matched length.
+static bool findMount(const char *path, bool hostOnly, mountPoint &result,
+                      size_t &prefixLen) {
+  std::lock_guard<std::mutex> lock(g_mountsMutex);
   const mountPoint *best = nullptr;
   size_t bestLen = 0;
   for (auto &m : g_mounts) {
+    if (hostOnly && m.provider)
+      continue;
     size_t len = m.guest.length();
     if (std::strncmp(path, m.guest.c_str(), len) == 0 && len >= bestLen) {
       best = &m;
@@ -85,28 +103,25 @@ static const mountPoint *findMount(const char *path, size_t &prefixLen) {
     }
   }
   prefixLen = bestLen;
-  return best;
+  if (!best)
+    return false;
+  result.guest = best->guest;
+  result.host = best->host;
+  result.provider = best->provider;
+  result.writable = best->writable;
+  return true;
 }
 
 base::String resolve(const char *path) {
   if (!path)
     return {};
 
-  const mountPoint *best = nullptr;
   size_t bestLen = 0;
-  for (auto &m : g_mounts) {
-    if (m.provider)
-      continue; // host-only
-    size_t len = m.guest.length();
-    if (std::strncmp(path, m.guest.c_str(), len) == 0 && len >= bestLen) {
-      best = &m;
-      bestLen = len;
-    }
-  }
-  if (!best)
+  mountPoint best;
+  if (!findMount(path, true, best, bestLen))
     return {};
 
-  base::String out(best->host);
+  base::String out(best.host);
   const char *rest = path + bestLen;
   if (*rest && *rest != '/')
     out += "/";
@@ -244,13 +259,13 @@ utl::File openRead(const char *path) {
   path = norm.c_str();
 
   size_t len = 0;
-  const mountPoint *m = findMount(path, len);
-  if (!m)
+  mountPoint m;
+  if (!findMount(path, false, m, len))
     return utl::File();
 
   const char *rest = path + len;
-  if (m->provider) {
-    auto vf = m->provider->open(rest);
+  if (m.provider) {
+    auto vf = m.provider->open(rest);
     if (!vf)
       return utl::File();
     return utl::File(base::MakeUnique<PfsFileStream>(std::move(vf)));
@@ -259,7 +274,7 @@ utl::File openRead(const char *path) {
   // A raw console app dump keeps each executable twice: the encrypted SELF under
   // its real name and the decrypted ELF beside it as "<name>.esbak". Prefer the
   // decrypted one; we have no SELF crypto.
-  base::String host = fixHostCase(joinHost(m->host, rest));
+  base::String host = fixHostCase(joinHost(m.host, rest));
   utl::File esbak(host + ".esbak", utl::fileMode::read);
   if (esbak.Exists() && esbak.IsOpen())
     return esbak;
@@ -279,10 +294,10 @@ base::String resolveWritable(const char *path) {
   base::String norm = normalizePath(path, "/download0/");
   path = norm.c_str();
   size_t len = 0;
-  const mountPoint *m = findMount(path, len);
-  if (!m || m->provider || !m->writable)
+  mountPoint m;
+  if (!findMount(path, false, m, len) || m.provider || !m.writable)
     return {};
-  return joinHost(m->host, path + len);
+  return joinHost(m.host, path + len);
 }
 
 bool makeDir(const char *path) {
@@ -315,20 +330,20 @@ bool stat(const char *path, int64_t &size, bool &isDir) {
   path = norm.c_str();
 
   size_t len = 0;
-  const mountPoint *m = findMount(path, len);
-  if (!m)
+  mountPoint m;
+  if (!findMount(path, false, m, len))
     return false;
 
   const char *rest = path + len;
-  if (m->provider) {
-    bool ok = m->provider->stat(rest, size);
+  if (m.provider) {
+    bool ok = m.provider->stat(rest, size);
     if (std::getenv("DELTA_OPEN_TRACE"))
       std::fprintf(stderr, "[stat] %s -> %s size=%lld\n", path,
                    ok ? "ok" : "MISS", (long long)size);
     return ok;
   }
 
-  base::String host = fixHostCase(joinHost(m->host, rest));
+  base::String host = fixHostCase(joinHost(m.host, rest));
   struct ::stat st;
   if (::stat(host.c_str(), &st) != 0)
     return false;
@@ -357,16 +372,16 @@ bool listDir(const char *path, std::vector<DirEntry> &out) {
   base::String norm = normalizePath(path);
   path = norm.c_str();
   size_t len = 0;
-  const mountPoint *m = findMount(path, len);
-  if (!m)
+  mountPoint m;
+  if (!findMount(path, false, m, len))
     return false;
 
   const char *rest = path + len;
-  if (m->provider)
-    return m->provider->list(rest, out);
+  if (m.provider)
+    return m.provider->list(rest, out);
 
   // Host mount: enumerate the host directory.
-  base::String hostDir = fixHostCase(joinHost(m->host, rest));
+  base::String hostDir = fixHostCase(joinHost(m.host, rest));
   DIR *d = opendir(hostDir.c_str());
   if (!d)
     return false;
