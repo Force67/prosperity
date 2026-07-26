@@ -8,6 +8,7 @@
  */
 
 #include <base.h>
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -242,13 +243,39 @@ int32_t gcDevicePs5::ioctl(uint32_t cmd, void *data) {
                         dd[i * 4], dd[i * 4 + 1], dd[i * 4 + 2], dd[i * 4 + 3]);
         }
       }
+      // Census: a whole submit used to be dropped when it carried >= 64
+      // descriptors, and individual buffers are skipped when the address does
+      // not look like GPU memory. Both are invisible without counting them.
+      static std::atomic<uint64_t> nSubmits{0}, nDropBatch{0}, nDesc{0},
+          nFwd{0}, nSkipAddr{0};
+      nSubmits.fetch_add(1, std::memory_order_relaxed);
+      if (count >= 64) nDropBatch.fetch_add(1, std::memory_order_relaxed);
+      if (std::getenv("DELTA_GC_CENSUS")) {
+        static std::atomic<uint64_t> last{0};
+        uint64_t n = nSubmits.load();
+        if (n - last.load() >= 2000) {
+          last.store(n);
+          std::printf("[gccensus] submits=%llu batch-dropped(count>=64)=%llu "
+                      "desc=%llu forwarded=%llu skipped-addr=%llu\n",
+                      (unsigned long long)n,
+                      (unsigned long long)nDropBatch.load(),
+                      (unsigned long long)nDesc.load(),
+                      (unsigned long long)nFwd.load(),
+                      (unsigned long long)nSkipAddr.load());
+        }
+      }
       if (ptr && count && count < 64) {
         auto *d = reinterpret_cast<uint32_t *>(ptr);
         for (uint32_t i = 0; i < count; i++) {
           uint64_t buf = (static_cast<uint64_t>(d[i * 4 + 1]) << 32) | d[i * 4];
           uint32_t sz = d[i * 4 + 2];
-          if (gpuAddr(buf) && sz)
+          nDesc.fetch_add(1, std::memory_order_relaxed);
+          if (gpuAddr(buf) && sz) {
+            nFwd.fetch_add(1, std::memory_order_relaxed);
             prosperity_agc_submit(buf, sz * 4);
+          } else if (sz) {
+            nSkipAddr.fetch_add(1, std::memory_order_relaxed);
+          }
         }
       }
     }

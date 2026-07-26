@@ -11,6 +11,9 @@
 #include <unistd.h>
 #include <base/strings/string_ref.h>
 #include <algorithm>
+#include <atomic>
+#include <thread>
+#include <chrono>
 #include <cstdio>
 #include <deque>
 #include <mutex>
@@ -190,6 +193,37 @@ static device *fdToDevice(uint32_t fd) {
   return static_cast<device *>(obj);
 }
 
+// DELTA_FD_STATS: bytes read per fd, dumped periodically. "Was this file ever
+// actually read, or only opened?" is otherwise unanswerable without the
+// per-call firehose, and an opened-but-never-read asset is a strong signal that
+// whatever consumes it is stuck.
+void fdReadStat(uint32_t fd, int64_t n) {
+  static const bool on = std::getenv("DELTA_FD_STATS") != nullptr;
+  if (!on || n <= 0)
+    return;
+  static std::atomic<uint64_t> bytes[4096];
+  static std::atomic<uint64_t> calls[4096];
+  if (fd >= 4096)
+    return;
+  bytes[fd].fetch_add(static_cast<uint64_t>(n), std::memory_order_relaxed);
+  calls[fd].fetch_add(1, std::memory_order_relaxed);
+  static const bool started = [] {
+    std::thread([] {
+      for (;;) {
+        std::this_thread::sleep_for(std::chrono::seconds(20));
+        std::fprintf(stderr, "[fdstats] --- bytes read per fd ---\n");
+        for (uint32_t i = 0; i < 4096; i++)
+          if (uint64_t b = bytes[i].load(std::memory_order_relaxed))
+            std::fprintf(stderr, "[fdstats] fd=%u calls=%llu bytes=%llu\n", i,
+                         (unsigned long long)calls[i].load(),
+                         (unsigned long long)b);
+      }
+    }).detach();
+    return true;
+  }();
+  (void)started;
+}
+
 int64_t PS4ABI sys_read(uint32_t fd, void *buf, size_t nbytes) {
   auto *d = fdToDevice(fd);
   if (!d) {
@@ -204,6 +238,7 @@ int64_t PS4ABI sys_read(uint32_t fd, void *buf, size_t nbytes) {
     return -SysError::eBADF;
   }
   int64_t r = d->read(buf, nbytes);
+  fdReadStat(fd, r);
   // DELTA_READ_TRACE: log large reads (asset/texture loads) + their target buffer,
   // to see whether texture data lands in the GPU texture region (0x41x) directly or
   // a staging buffer the game later copies from.
