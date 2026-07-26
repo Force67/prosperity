@@ -23,6 +23,7 @@ gpu::gcn::Recompiled Recompile(const uint32_t*, const uint32_t*, const uint32_t*
 
 #include <algorithm>
 #include <cstdio>
+#include <cstring>
 #include <cstdlib>
 #include <unordered_map>
 #include <unordered_set>
@@ -459,7 +460,8 @@ void EmitExport(Translator& t, const Inst& inst, StageContext& sc) {
         row[r] = t.F32(0.f);
         for (uint32_t c = 0; c < 4; c++) {
           const Id m = t.m.Bitcast(
-              t.t_f, t.CbufDword(static_cast<uint32_t>(sc.dbg_pos_cbuf), r * 4 + c));
+              t.t_f, t.CbufDword(static_cast<uint32_t>(sc.dbg_pos_cbuf),
+                                 sc.dbg_pos_dword + r * 4 + c));
           row[r] = t.FAdd(row[r], t.FMul(m, in[c]));
         }
       }
@@ -1075,11 +1077,17 @@ bool TranslateVs(const Program& program, const uint32_t* vs_user_data,
   RdnaPlanBufLoadCbufs(program, 0, r.vs_cbufs, sc.cbuf_bind, sc.mubuf_cbuf_by_pc);
   if (ShDbg())
     std::fprintf(stderr, "[gcnspv] vs planned %zu cbufs\n", r.vs_cbufs.size());
-  // DELTA_GPU_DBGPOS=<vs address>: recompute this one shader's position export
-  // from its position input and its 4x4 transform cbuffer (0 = every shader).
+  // DELTA_GPU_DBGPOS=<vs address>[:<dword offset>]: recompute this one shader's
+  // position export from its position input and a 4x4 transform in its cbuffer
+  // (address 0 = every shader; the offset picks which matrix in the window).
   static const uint64_t dbg_pos_vs = [] {
     const char* e = std::getenv("DELTA_GPU_DBGPOS");
     return e ? std::strtoull(e, nullptr, 0) : ~0ull;
+  }();
+  static const uint32_t dbg_pos_off = [] {
+    const char* e = std::getenv("DELTA_GPU_DBGPOS");
+    const char* c = e ? std::strchr(e, ':') : nullptr;
+    return c ? (uint32_t)std::strtoul(c + 1, nullptr, 0) : 0u;
   }();
   if (dbg_pos_vs == 0 || dbg_pos_vs == g_vs_addr) {
     sc.dbg_pos_in = first_attr_var;
