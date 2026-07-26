@@ -30,6 +30,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <chrono>
+#include <thread>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -103,51 +104,92 @@ static void dumpStr(const char *tag, void *p) {
 
 static std::string kidService(uint32_t kid);
 
-// DELTA_IPMI_HIST: per-op (and per invoked method) call counts, dumped every
-// 20 s. A title that spins on IPMI issues billions of calls, which the
-// per-call trace cannot show without drowning the log; only the histogram
-// identifies WHICH request is being retried forever.
+// DELTA_IPMI_HIST: per-op call counts. Deliberately lock-free: an earlier
+// mutex-guarded version throttled the very spin it was meant to measure (a
+// polling loop dropped from ~30M calls/s to ~200), so the numbers lied.
+static std::atomic<uint64_t> g_ipmiOpHist[2048];
+static std::atomic<uint64_t> g_ipmiMethodHist[64];
+static std::atomic<uint32_t> g_ipmiMethodId[64];
+
 static void ipmiHist(uint32_t op, uint32_t kid, void *in, uint64_t insize) {
   static const bool on = std::getenv("DELTA_IPMI_HIST") != nullptr;
   if (!on)
     return;
-  struct Key {
-    uint32_t op, method;
-    bool operator==(const Key &o) const {
-      return op == o.op && method == o.method;
-    }
-  };
-  struct Hash {
-    size_t operator()(const Key &k) const {
-      return (static_cast<size_t>(k.op) << 32) ^ k.method;
-    }
-  };
-  static std::mutex m;
-  static std::unordered_map<Key, uint64_t, Hash> hist;
-  static std::unordered_map<Key, std::string, Hash> svc;
-  uint32_t method = 0;
-  const char *name = nullptr;
+  if (op < 2048)
+    g_ipmiOpHist[op].fetch_add(1, std::memory_order_relaxed);
   if (op == IPMI_INVOKE_SYNC && in && insize >= sizeof(IpmiInvokeReq)) {
-    auto *req = static_cast<IpmiInvokeReq *>(in);
-    method = req->methodId;
+    const uint32_t m = static_cast<IpmiInvokeReq *>(in)->methodId;
+    for (uint32_t i = 0; i < 64; i++) {
+      uint32_t want = g_ipmiMethodId[i].load(std::memory_order_relaxed);
+      if (want == m) {
+        g_ipmiMethodHist[i].fetch_add(1, std::memory_order_relaxed);
+        break;
+      }
+      if (!want) {
+        uint32_t expect = 0;
+        if (g_ipmiMethodId[i].compare_exchange_strong(expect, m))
+          g_ipmiMethodHist[i].fetch_add(1, std::memory_order_relaxed);
+        break;
+      }
+    }
   }
-  const Key k{op, method};
-  std::lock_guard<std::mutex> lk(m);
-  if (hist[k]++ == 0) {
-    auto s = kidService(kid);
-    svc[k] = s.empty() ? "?" : s;
-    (void)name;
+  // DELTA_IPMI_DUMP: one-shot payload dump for a chosen op, so an unknown
+  // request's buffer layout can be read instead of guessed.
+  static const uint32_t dumpOp = [] {
+    const char *e = std::getenv("DELTA_IPMI_DUMP");
+    return e ? static_cast<uint32_t>(std::strtoul(e, nullptr, 0)) : 0u;
+  }();
+  if (dumpOp && op == dumpOp &&
+      (op >= 2048 || g_ipmiOpHist[op].load(std::memory_order_relaxed) > 1000000)) {
+    static std::atomic<int> n{0};
+    if (n.fetch_add(1) < 4) {
+      std::fprintf(stderr, "[ipmidump] op=%u kid=%u svc=\"%s\" insize=%llu in=%p\n",
+                   op, kid, kidService(kid).c_str(), (unsigned long long)insize,
+                   in);
+      if (in && insize && insize <= 256) {
+        const uint8_t *b = static_cast<const uint8_t *>(in);
+        std::fprintf(stderr, "[ipmidump]   in:");
+        for (uint64_t i = 0; i < insize; i++) std::fprintf(stderr, " %02x", b[i]);
+        std::fprintf(stderr, "\n");
+      }
+      if (op == IPMI_INVOKE_SYNC && in && insize >= sizeof(IpmiInvokeReq)) {
+        auto *r = static_cast<IpmiInvokeReq *>(in);
+        auto descr = [](const char *tag, uint64_t *d, uint32_t n) {
+          if (!d || !n) return;
+          for (uint32_t i = 0; i < n && i < 4; i++) {
+            auto *p = reinterpret_cast<const uint8_t *>(d[i * 2]);
+            const uint64_t sz = d[i * 2 + 1];
+            std::fprintf(stderr, "[ipmidump]   %s[%u] ptr=%p size=%llu:", tag, i,
+                         (void *)p, (unsigned long long)sz);
+            if (p && sz && sz <= 64)
+              for (uint64_t k = 0; k < sz; k++) std::fprintf(stderr, " %02x", p[k]);
+            std::fprintf(stderr, "\n");
+          }
+        };
+        descr("in", r->pInData, r->numIn);
+        descr("out", r->pOutData, r->numOut);
+      }
+    }
   }
-  static auto last = std::chrono::steady_clock::now();
-  const auto now = std::chrono::steady_clock::now();
-  if (now - last < std::chrono::seconds(20))
-    return;
-  last = now;
-  std::fprintf(stderr, "[ipmihist] op/method call counts:\n");
-  for (auto &e : hist)
-    std::fprintf(stderr, "[ipmihist]   op=%u method=%#x svc=%s  %llu\n",
-                 e.first.op, e.first.method, svc[e.first].c_str(),
-                 (unsigned long long)e.second);
+  static const bool started = [] {
+    std::thread([] {
+      for (;;) {
+        std::this_thread::sleep_for(std::chrono::seconds(15));
+        std::fprintf(stderr, "[ipmihist] --- per-op ---\n");
+        for (uint32_t i = 0; i < 2048; i++)
+          if (uint64_t c = g_ipmiOpHist[i].load(std::memory_order_relaxed))
+            std::fprintf(stderr, "[ipmihist] op=%u %llu\n", i,
+                         (unsigned long long)c);
+        for (uint32_t i = 0; i < 64; i++)
+          if (uint64_t c = g_ipmiMethodHist[i].load(std::memory_order_relaxed))
+            std::fprintf(stderr, "[ipmihist] method=%#x %llu\n",
+                         g_ipmiMethodId[i].load(std::memory_order_relaxed),
+                         (unsigned long long)c);
+      }
+    }).detach();
+    return true;
+  }();
+  (void)started;
 }
 
 static void ipmiTrace(uint32_t op, uint32_t kid, void *out, void *in,
@@ -362,6 +404,30 @@ int PS4ABI sys_ipmimgr_call(uint32_t op, uint32_t kid, void *out, void *in,
     }
     setResult(0);
     return 0;
+  case 1168: {
+    // Async-reply poll. With no service daemon the request block keeps its
+    // pre-call sentinel (0xFFFFFFFF at +8) and the client spins on it: measured
+    // at ~30M calls/s, paired 1:1 with the INVOKE_SYNC before it. Report an
+    // empty, successful reply so the caller can move on, matching how
+    // IPMI_INVOKE_SYNC already answers for daemonless services.
+    if (in && insize >= 40) {
+      auto *b = static_cast<uint8_t *>(in);
+      uint32_t status = 0;
+      std::memcpy(&status, b + 8, sizeof(status));
+      if (status == 0xFFFFFFFFu) {
+        const uint32_t done = 0;
+        std::memcpy(b + 8, &done, sizeof(done));
+      }
+      uint32_t *outWords[2] = {};
+      std::memcpy(&outWords[0], b + 24, sizeof(outWords[0]));
+      std::memcpy(&outWords[1], b + 32, sizeof(outWords[1]));
+      for (uint32_t *w : outWords)
+        if (w && utl::isMemoryRangeMapped(w, sizeof(*w)))
+          *w = 0;
+    }
+    setResult(0);
+    return 0;
+  }
   case 784:
     // StopSession/Disconnect-style calls pass a pointer to a guest status word
     // in the request payload. libSceIpmi asserts that status is zero after the

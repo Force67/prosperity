@@ -738,6 +738,16 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
                                              vud, pud, g_regs[mmSPI_PS_INPUT_ENA]))
                .first;
       if (dl) std::fprintf(stderr, "[agc] DL recompile done ok=%d\n", it->second.ok);
+      // A shader we cannot recompile drops its draw entirely, which is
+      // indistinguishable from "the title never issued it" unless it is said out
+      // loud. Report each failing pair once.
+      if (!it->second.ok) {
+        static int failed = 0;
+        if (failed++ < 32)
+          std::fprintf(stderr,
+                       "[agc] recompile FAILED vs=%#lx ps=%#lx -- draw dropped\n",
+                       (unsigned long)vsA, (unsigned long)psA);
+      }
     }
     gcn::Recompiled &rc = it->second;
     if (rc.ok) {
