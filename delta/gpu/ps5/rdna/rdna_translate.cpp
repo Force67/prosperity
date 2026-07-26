@@ -399,6 +399,9 @@ void RdnaEmitSmem(Translator& t, const Inst& inst, StageContext& sc) {
   }
 }
 
+// Address of the shader being translated, for shader-specific debug output.
+thread_local uint64_t g_ps_addr = 0;
+
 // ---- exports ----------------------------------------------------------------
 // gfx10.3 export targets: MRT0..7 = 0..7, MRTZ = 8, NULL = 9, POS0..4 = 12..16,
 // PRIM = 20 (NGG connectivity, ignored), PARAM0..31 = 32..63.
@@ -412,13 +415,41 @@ void EmitExport(Translator& t, const Inst& inst, StageContext& sc) {
                  "[gcnspv] %s-exp target=%u en=%#x compr=%u done=%u vsrc=%08x\n",
                  sc.is_ps ? "ps" : "vs", target, en, compr, (w >> 11) & 1, w1);
   if (sc.is_ps) {
+    // DELTA_GPU_EXPTRACE: the EN mask of each colour export. A component the
+    // shader does not export gets a default here, and defaulting alpha to 1
+    // would make every SRC_ALPHA blend opaque.
+    if (std::getenv("DELTA_GPU_EXPTRACE") && target <= 7) {
+      static uint32_t seen[256] = {};
+      const uint32_t k = ((target & 7) << 5) | ((en & 0xF) << 1) | compr;
+      if (seen[k]++ == 0)
+        std::fprintf(stderr, "[exp] ps %#lx mrt%u en=%#x compr=%u\n",
+                     (unsigned long)g_ps_addr, target, en, compr);
+    }
     if (target <= 7 && en) {  // MRT0..7 (EN=0 is a null export)
       sc.wrote_color = true;
       Id col;
       if (compr) {
-        const Id c01 = t.m.ExtInst(t.t_v2, GLSLstd450UnpackHalf2x16, {t.Vg(v[0])});
-        const Id c23 = t.m.ExtInst(t.t_v2, GLSLstd450UnpackHalf2x16, {t.Vg(v[1])});
-        col = t.m.VectorShuffle(t.t_v4, c01, c23, {0, 1, 2, 3});
+        // A compressed export packs two components per VGPR, and EN selects
+        // PAIRS: bit 0 covers components 0-1 in v[0], bit 2 covers 2-3 in v[1].
+        // Reading v[1] when the shader never wrote it produced a garbage alpha,
+        // which with SRC_ALPHA blending draws every blended pass fully opaque.
+        Id c[4];
+        if (en & 0x1) {
+          const Id c01 = t.m.ExtInst(t.t_v2, GLSLstd450UnpackHalf2x16, {t.Vg(v[0])});
+          c[0] = t.m.CompositeExtract(t.t_f, c01, 0);
+          c[1] = t.m.CompositeExtract(t.t_f, c01, 1);
+        } else {
+          c[0] = c[1] = t.F32(0.f);
+        }
+        if (en & 0x4) {
+          const Id c23 = t.m.ExtInst(t.t_v2, GLSLstd450UnpackHalf2x16, {t.Vg(v[1])});
+          c[2] = t.m.CompositeExtract(t.t_f, c23, 0);
+          c[3] = t.m.CompositeExtract(t.t_f, c23, 1);
+        } else {
+          c[2] = t.F32(0.f);
+          c[3] = t.F32(1.f);
+        }
+        col = t.m.CompositeConstruct(t.t_v4, {c[0], c[1], c[2], c[3]});
       } else {
         Id c[4];
         for (int i = 0; i < 4; i++)
@@ -447,6 +478,11 @@ void EmitExport(Translator& t, const Inst& inst, StageContext& sc) {
           comps[i] = t.m.Emit(spv::Op::OpSelect, t.t_f, {finite, clamped, t.F32(0.f)});
         }
         col = t.m.CompositeConstruct(t.t_v4, {comps[0], comps[1], comps[2], comps[3]});
+      }
+      // DELTA_GPU_DEBUGALPHA: show the alpha the blend will use as greyscale.
+      if (std::getenv("DELTA_GPU_DEBUGALPHA")) {
+        const Id a = t.m.CompositeExtract(t.t_f, col, 3);
+        col = t.m.CompositeConstruct(t.t_v4, {a, a, a, t.F32(1.f)});
       }
       static const bool force_col = std::getenv("DELTA_GPU_FORCECOLOR") != nullptr;
       if (force_col)
@@ -1310,6 +1346,24 @@ bool TranslatePs(const Program& program,
                                           t.F32(1.f)}));
   EmitBody(t, program, sc);
 
+  // A lane whose EXEC bit is clear at the end of the shader wrote nothing on
+  // hardware. The straight-line kill idiom is exactly that: v_cmpx_* against the
+  // alpha threshold clears EXEC and the export then applies to no lane. Nothing
+  // consulted EXEC here, so a masked-out fragment was written anyway -- Skyrim's
+  // logo quad painted its fully transparent area over the whole screen.
+  if (sc.wrote_color) {
+    static const bool no_kill = std::getenv("DELTA_GPU_NOKILL") != nullptr;
+    if (!no_kill) {
+      const Id live = t.IsNonZero(t.Exec());
+      const Id kill_blk = t.m.NewBlock(), after_kill = t.m.NewBlock();
+      t.m.SelectionMerge(after_kill);
+      t.m.BranchConditional(live, after_kill, kill_blk);
+      t.m.OpenBlock(kill_blk);
+      t.m.Kill();
+      t.m.OpenBlock(after_kill);
+    }
+  }
+
   if (!sc.wrote_color) {
     // No color export at all: opaque white fallback (matches the GFX7 path).
     t.m.Store(gpu::gcn::PsColorOut(t, sc, 0),
@@ -1384,6 +1438,7 @@ Recompiled Recompile(const uint32_t* vs_code, const uint32_t* ps_code,
   if (!TranslateVs(vs_program, vs_user_data, flat_attrs, r, tv, gl_clip_space))
     return r;
   Translator tp;
+  g_ps_addr = reinterpret_cast<uintptr_t>(ps_code);
   tp.InitTypes();
   if (ps_code ? !TranslatePs(ps_program, flat_attrs, ps_input_ena, r, tp)
               : !TranslateDepthOnlyPs(tp))

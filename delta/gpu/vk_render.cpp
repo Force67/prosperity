@@ -2205,10 +2205,22 @@ void beginRegion(const uint64_t *mrtBase, const uint32_t *mrtInfo,
     // (LOAD), clearing only when the game explicitly requested a clear (clearPending) or
     // the RT was never rendered. The old per-frame auto-clear wiped baked-once content
     // (room floor) whose redraw lands on a different frame than its clear.
-    if (lazyClear)
+    if (lazyClear) {
+      // DELTA_GPU_CLEARTRACE: which draw opens a region with a clear, and to what.
+      if (std::getenv("DELTA_GPU_CLEARTRACE") && (rt.clearPending || !rt.everRendered)) {
+        static int n = 0;
+        if (n++ < 24)
+          std::fprintf(stderr,
+                       "[clear] draw#%u RT %ux%u loadOp=CLEAR value=(%g %g %g %g) "
+                       "pending=%d ever=%d\n",
+                       g.frameDraws, rt.w, rt.h, rt.clearValue.float32[0],
+                       rt.clearValue.float32[1], rt.clearValue.float32[2],
+                       rt.clearValue.float32[3], (int)rt.clearPending,
+                       (int)rt.everRendered);
+      }
       color.loadOp = (rt.clearPending || !rt.everRendered) ? VK_ATTACHMENT_LOAD_OP_CLEAR
                                                            : VK_ATTACHMENT_LOAD_OP_LOAD;
-    else
+    } else
       color.loadOp = rt.usedThisFrame ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_CLEAR;
     rt.clearPending = false;
     rt.everRendered = true;
@@ -3931,6 +3943,10 @@ bool drawRecomp(const DrawInfo &d) {
     static const int texBindFrame = [] {
       const char *e = std::getenv("DELTA_GPU_TEXBIND"); return e ? std::atoi(e) : -1;
     }();
+    if (texBindFrame >= 0 && (int)g.frameNum == texBindFrame)
+      std::fprintf(stderr, "[blend] draw#%u rt=%#lx blend=%u ctl=%#x mask=%#x mrt=%u\n",
+                   g.frameDraws, (unsigned long)d.rtBase, d.blendEnable,
+                   d.blendControl, d.targetMask, d.mrtCount);
     if (texBindFrame >= 0 && (int)g.frameNum == texBindFrame && !rp->multiTex)
       std::fprintf(stderr,
                    "[texbind] draw#%u rt=%#lx %ux%u LEGACY tex=%#lx %ux%u "
