@@ -3876,6 +3876,46 @@ bool drawRecomp(const DrawInfo &d) {
     }
   }
 
+  // DELTA_GPU_TEXBIND=<frame>: how each sampler of each draw resolved -- to a
+  // live render target, a depth target, guest memory, or the 1x1 white default.
+  // A post-processing chain that samples its own previous target reads zero the
+  // moment one of those lands on guest memory.
+  {
+    static const int texBindFrame = [] {
+      const char *e = std::getenv("DELTA_GPU_TEXBIND"); return e ? std::atoi(e) : -1;
+    }();
+    if (texBindFrame >= 0 && (int)g.frameNum == texBindFrame && !rp->multiTex)
+      std::fprintf(stderr,
+                   "[texbind] draw#%u rt=%#lx %ux%u LEGACY tex=%#lx %ux%u "
+                   "rtAsTex=%u color=%u feedback=%u depth=%u set=%u\n",
+                   g.frameDraws, (unsigned long)d.rtBase, d.rtW, d.rtH,
+                   (unsigned long)d.texBase, d.texW, d.texH, (unsigned)rtAsTex,
+                   (unsigned)colorAsTex, (unsigned)feedbackAsTex,
+                   (unsigned)depthAsTex, (unsigned)(texSet != VK_NULL_HANDLE));
+    if (texBindFrame >= 0 && (int)g.frameNum == texBindFrame && multiN &&
+        rp->multiTex) {
+      std::fprintf(stderr, "[texbind] draw#%u rt=%#lx %ux%u ntex=%u:",
+                   g.frameDraws, (unsigned long)d.rtBase, d.rtW, d.rtH, multiN);
+      for (uint32_t i = 0; i < multiN; i++) {
+        const char *how = multiColor[i]   ? "RT"
+                          : multiFeedback[i] ? "feedback"
+                          : multiDepth[i]    ? "depth"
+                          : multiStorage[i]  ? "storage"
+                          : multiViews[i]    ? "guest"
+                                             : "WHITE";
+        std::fprintf(stderr, " [%u]%s@%#lx %ux%u arr=%u mips=%u fmt=%u/%u rt?=%u er=%u",
+                     i, how, (unsigned long)d.texs[i].base, d.texs[i].w,
+                     d.texs[i].h, d.texs[i].arrayed, d.texs[i].mip_levels,
+                     d.texs[i].dfmt, d.texs[i].nfmt,
+                     (unsigned)g_rts.count(d.texs[i].base),
+                     (unsigned)(g_rts.count(d.texs[i].base)
+                                    ? g_rts[d.texs[i].base].everRendered
+                                    : 0));
+      }
+      std::fprintf(stderr, "\n");
+    }
+  }
+
   // Copy each vertex binding's source range into the ring and, for indexed
   // draws, the indices.
   VkDeviceSize voff = g.vbOffset, ioff = g.ibOffset;

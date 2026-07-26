@@ -429,6 +429,25 @@ void EmitExport(Translator& t, const Inst& inst, StageContext& sc) {
       // rendered draw is unmistakably visible regardless of texture/vertex-color
       // math. Combined with FORCEQUAD this isolates rasterization/scanout from the
       // PS color path.
+      // Replace non-finite colour components with zero and clamp to the half
+      // range. A NaN written into an HDR target poisons every pass that reads
+      // it: Skyrim's 2x2 exposure buffer ends up all-ones (NaN), the tonemap
+      // then has no usable exposure, and the frame swings between near-black
+      // and flat green. The NaNs come from our own approximations, not from the
+      // title. DELTA_GPU_ALLOWNAN keeps whatever the shader produced.
+      static const bool no_nan = std::getenv("DELTA_GPU_ALLOWNAN") == nullptr;
+      if (no_nan) {
+        const Id v = col;
+        Id comps[4];
+        for (int i = 0; i < 4; i++) {
+          const Id c = t.m.CompositeExtract(t.t_f, v, i);
+          const Id finite = t.m.Emit(spv::Op::OpFOrdEqual, t.t_bool, {c, c});
+          const Id clamped = t.m.ExtInst(t.t_f, GLSLstd450FClamp,
+                                         {c, t.F32(-65504.f), t.F32(65504.f)});
+          comps[i] = t.m.Emit(spv::Op::OpSelect, t.t_f, {finite, clamped, t.F32(0.f)});
+        }
+        col = t.m.CompositeConstruct(t.t_v4, {comps[0], comps[1], comps[2], comps[3]});
+      }
       static const bool force_col = std::getenv("DELTA_GPU_FORCECOLOR") != nullptr;
       if (force_col)
         col = t.m.CompositeConstruct(
