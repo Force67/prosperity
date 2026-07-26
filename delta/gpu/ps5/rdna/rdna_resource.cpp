@@ -98,23 +98,38 @@ void gfx10ImgFormat(uint32_t gfmt, uint32_t &dfmt, uint32_t &nfmt) {
 // Copy the `n`-dword descriptor at SGPR `sgpr` into `dst`. It is either inline in
 // user data or one s_load from a user-data table pointer (`loads[sgpr]` gives the
 // root pointer SGPR + byte offset).
+// Where an SGPR quad's dwords came from: an s_load through a pointer pair, or an
+// s_buffer_load through a V# (a shader that keeps its descriptors in a constant
+// buffer reaches them that way, and treating that as "inline user data" reads
+// whatever the previous draw left in those registers).
+struct DescLink {
+  uint32_t root;    // SGPR holding the pointer pair or the V#
+  uint32_t off;     // byte offset from it
+  bool buffer;      // root is a V#, not a pointer
+};
+
 bool resolveDesc(uint32_t sgpr, uint32_t n, const uint32_t* pud,
-                 const std::unordered_map<uint32_t, std::pair<uint32_t, uint32_t>>& loads,
+                 const std::unordered_map<uint32_t, DescLink>& loads,
                  uint32_t* dst) {
   // Walk the s_load chain from the descriptor's SGPR back to a user-data root.
   // One link is a table in user data; Skyrim's grading pass uses two (a table of
   // resource tables), and stopping at one link left those samplers on the 1x1
   // white default.
-  uint32_t off[4] = {};
+  DescLink link[4] = {};
   uint32_t root = sgpr;
   int links = 0;
   for (; links < 4; links++) {
     auto it = loads.find(root);
     if (it == loads.end()) break;
-    off[links] = it->second.second;
-    root = it->second.first;
+    link[links] = it->second;
+    root = it->second.root;
   }
   if (!links) {
+    // Only the first 16 user-data SGPRs are trusted for an inline descriptor.
+    // The block is 32 wide, but a shader that declares fewer leaves the rest
+    // stale: reading Skyrim's grading pass T# at s16 that way yields a
+    // descriptor that paints half the frame magenta. Its real source is not
+    // an s_load either (see DELTA_GPU_TEXRESOLVE) -- still unknown.
     if (sgpr + n > 16) return false;
     std::memcpy(dst, &pud[sgpr], n * 4);
     return true;
@@ -122,15 +137,19 @@ bool resolveDesc(uint32_t sgpr, uint32_t n, const uint32_t* pud,
   // The user-data block is 32 dwords, not 16. Each dereference is
   // self-validating (the address must land in mapped guest memory), unlike
   // reading the user-data image directly.
-  if (root + 1 >= 32) return false;
-  uint64_t ptr = pud[root] | (static_cast<uint64_t>(pud[root + 1] & 0xFFFF) << 32);
+  if (root + 3 >= 32) return false;
+  auto ptrAt = [](const uint32_t* p, bool buffer) -> uint64_t {
+    // A V# keeps its 48-bit base in the first two dwords, exactly where a
+    // pointer pair does; only the high-word mask differs.
+    return p[0] | (static_cast<uint64_t>(p[1] & 0xFFFF) << 32);
+  };
+  uint64_t ptr = ptrAt(&pud[root], link[links - 1].buffer);
   for (int i = links - 1; i > 0; i--) {
-    const uint64_t at = ptr + off[i];
-    if (!inGuest(at) || !mapped(at, 8)) return false;
-    const auto* q = reinterpret_cast<const uint32_t*>(at);
-    ptr = q[0] | (static_cast<uint64_t>(q[1] & 0xFFFF) << 32);
+    const uint64_t at = ptr + link[i].off;
+    if (!inGuest(at) || !mapped(at, 16)) return false;
+    ptr = ptrAt(reinterpret_cast<const uint32_t*>(at), link[i - 1].buffer);
   }
-  const uint64_t addr = ptr + off[0];
+  const uint64_t addr = ptr + link[0].off;
   if (!inGuest(addr) || !mapped(addr, n * 4)) return false;
   std::memcpy(dst, reinterpret_cast<const void*>(addr), n * 4);
   return true;
@@ -271,13 +290,13 @@ std::vector<TImage> TrackTextures(const uint32_t* ps_code, const uint32_t* pud) 
   out.resize(plan.binding_srsrc.size());
   std::vector<bool> filled(out.size(), false);
 
-  std::unordered_map<uint32_t, std::pair<uint32_t, uint32_t>> loads;  // sdst->{root,off}
+  std::unordered_map<uint32_t, DescLink> loads;  // sdst -> where its dwords came from
   for (const Inst& in : prog) {
-    if (in.enc == Enc::kSmrd && in.opcode <= 0x04) {
+    if (in.enc == Enc::kSmrd && (in.opcode <= 0x04 || (in.opcode >= 0x08 && in.opcode <= 0x0C))) {
       const uint32_t sdst = (in.raw[0] >> 6) & 0x7F;
       const uint32_t sbase = (in.raw[0] & 0x3F) * 2;
       const int32_t off = signExt21(in.raw[1] & 0x1FFFFF);
-      loads[sdst] = {sbase, off < 0 ? 0u : static_cast<uint32_t>(off)};
+      loads[sdst] = {sbase, off < 0 ? 0u : static_cast<uint32_t>(off), in.opcode >= 0x08};
       continue;
     }
     if (in.enc != Enc::kMimg) continue;
@@ -286,7 +305,22 @@ std::vector<TImage> TrackTextures(const uint32_t* ps_code, const uint32_t* pud) 
     const uint32_t b = it->second;
     const uint32_t w0 = in.raw[0], w1 = in.raw[1], op = (w0 >> 18) & 0x7F;
     uint32_t desc[8];
-    if (resolveDesc(((w1 >> 16) & 0x1F) * 4, 8, pud, loads, desc)) {
+    // DELTA_GPU_TEXRESOLVE: which SGPR quad each sampler's T# comes from, and
+    // whether it resolved. A binding that reads back base 0 is either a null
+    // descriptor or a chain we failed to walk.
+    static const bool trResolve = std::getenv("DELTA_GPU_TEXRESOLVE") != nullptr;
+    const uint32_t srsrc = ((w1 >> 16) & 0x1F) * 4;
+    if (trResolve) {
+      auto lit = loads.find(srsrc);
+      std::fprintf(stderr,
+                   "[texres] binding=%u srsrc=s%u %s root=s%u off=%u\n", b, srsrc,
+                   lit == loads.end()      ? "inline"
+                   : lit->second.buffer    ? "bufload"
+                                           : "chained",
+                   lit == loads.end() ? 0 : lit->second.root,
+                   lit == loads.end() ? 0 : lit->second.off);
+    }
+    if (resolveDesc(srsrc, 8, pud, loads, desc)) {
       out[b] = DecodeTImage(desc);
       out[b].arrayed = (w0 >> 14) & 1;
       out[b].depth_compare = op == 0x28 || op == 0x2f;
