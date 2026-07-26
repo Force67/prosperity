@@ -7,6 +7,8 @@
  */
 
 #include <base.h>
+
+#include "wait_probe.h"
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -210,6 +212,7 @@ int PS4ABI sys_evf_close(int id) { return sys_evf_delete(id); }
 
 int PS4ABI sys_evf_wait(int id, uint64_t pattern, uint32_t mode,
                         uint64_t *result, uint32_t *timeoutUs) {
+  WaitProbe _wp("evf_wait", (long)id, (long)pattern);
   auto *ef = fromId(id);
   if (!ef)
     return -SysError::eSRCH;

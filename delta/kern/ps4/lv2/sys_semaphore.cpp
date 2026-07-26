@@ -7,6 +7,8 @@
  */
 
 #include <base.h>
+
+#include "wait_probe.h"
 #include <chrono>
 #include <cstdio>
 #include <unordered_map>
@@ -127,6 +129,7 @@ int PS4ABI sys_osem_delete(int id) {
 int PS4ABI sys_osem_close(int id) { return sys_osem_delete(id); }
 
 int PS4ABI sys_osem_wait(int id, int need, uint32_t *timeoutUs) {
+  WaitProbe _wp("osem_wait", (long)id, (long)need);
   auto *s = fromId(id);
   if (!s)
     return -SysError::eSRCH;

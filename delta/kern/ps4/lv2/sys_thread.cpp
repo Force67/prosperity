@@ -8,6 +8,8 @@
  */
 
 #include <base.h>
+
+#include "wait_probe.h"
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -331,6 +333,7 @@ static void umtxTrace(int op, void *ptr, uint32_t self, uint32_t owner) {
 }
 
 int PS4ABI sys_umtx_op(void *ptr, int op, uint64_t val, void *a, void *b) {
+  WaitProbe _wp("umtx_op", (long)(long)ptr, (long)op);
   using namespace std::chrono_literals;
   markThreadStarted();  // first sync point => our init is done
   switch (op) {
