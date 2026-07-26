@@ -474,6 +474,19 @@ void EmitExport(Translator& t, const Inst& inst, StageContext& sc) {
       for (uint32_t i = 0; i < 4; i++)
         in[i] = i < sc.dbg_pos_comps ? t.m.CompositeExtract(t.t_f, val, i)
                                      : t.F32(i == 3 ? 1.f : 0.f);
+      if (sc.dbg_pos_world >= 0) {
+        Id w[4];
+        for (uint32_t r = 0; r < 3; r++) {
+          w[r] = t.F32(0.f);
+          for (uint32_t c = 0; c < 4; c++) {
+            const Id m = t.m.Bitcast(
+                t.t_f, t.CbufDword(static_cast<uint32_t>(sc.dbg_pos_world), r * 4 + c));
+            w[r] = t.FAdd(w[r], t.FMul(m, in[c]));
+          }
+        }
+        w[3] = t.F32(1.f);
+        for (int i = 0; i < 4; i++) in[i] = w[i];
+      }
       Id row[4];
       for (uint32_t r = 0; r < 4; r++) {
         row[r] = t.F32(0.f);
@@ -1107,6 +1120,14 @@ bool TranslateVs(const Program& program, const uint32_t* vs_user_data,
     const char* e = std::getenv("DELTA_GPU_DBGPOS");
     const char* c = e ? std::strchr(e, ':') : nullptr;
     return c ? (uint32_t)std::strtoul(c + 1, nullptr, 0) : 0u;
+  }();
+  // ...:<world binding> applies a 4x3 world matrix from that binding first, so
+  // the probe can reproduce a world-then-view-projection chain.
+  static const int dbg_pos_world = [] {
+    const char* e = std::getenv("DELTA_GPU_DBGPOS");
+    const char* c = e ? std::strchr(e, ':') : nullptr;
+    const char* c2 = c ? std::strchr(c + 1, ':') : nullptr;
+    return c2 ? std::atoi(c2 + 1) : -1;
   }();
   if (dbg_pos_vs == 0 || dbg_pos_vs == g_vs_addr) {
     sc.dbg_pos_in = first_attr_var;

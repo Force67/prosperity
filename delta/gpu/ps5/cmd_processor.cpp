@@ -767,12 +767,13 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
       s_probe++;
       std::fprintf(stderr,
                    "[agc] RTPROBE draw#%lu rt=%#lx tmask=%#x info0=%#x clip=%#x "
-                   "psrsrc2=%#x psUserSgpr=%u zscale=%g zoff=%g\n",
+                   "blend=%u ctl=%#x cc=%#x zscale=%g zoff=%g\n",
                    (unsigned long)g_drawsSeen.load(), (unsigned long)d.rtBase,
                    g_regs[mmCB_TARGET_MASK], g_regs[mmCB_COLOR0_INFO],
-                   g_regs[mmPA_CL_CLIP_CNTL], g_regs[kShRegBase + 0x0B],
-                   (g_regs[kShRegBase + 0x0B] >> 1) & 0x1F,
-                   regF(mmPA_CL_VPORT_ZSCALE), regF(mmPA_CL_VPORT_ZOFFSET));
+                   g_regs[mmPA_CL_CLIP_CNTL], (g_regs[mmCB_BLEND0_CONTROL] >> 30) & 1,
+                   g_regs[mmCB_BLEND0_CONTROL], g_regs[mmCB_COLOR_CONTROL],
+                   regF(mmPA_CL_VPORT_ZSCALE),
+                   regF(mmPA_CL_VPORT_ZOFFSET));
     }
     // Why a colour draw ended up with no target: print the state that rejected
     // CB_COLOR0 (a stale/zero base, or an INFO with no format).

@@ -296,6 +296,7 @@ struct StageContext {
   uint32_t dbg_pos_comps = 0;
   int dbg_pos_cbuf = -1;
   uint32_t dbg_pos_dword = 0;
+  int dbg_pos_world = -1;
 
   // PS
   Id color_outs[8] = {};  // lazily declared per MRT target (location == target)

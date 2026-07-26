@@ -4407,6 +4407,15 @@ void beginFrame() {
 
 void draw(const DrawInfo &d_in) {
   if (!g.recording) return;
+  // DELTA_GPU_SWAPTEX01: bisect a suspected sampler-binding order mismatch by
+  // exchanging the first two textures of every multi-texture draw.
+  static const bool swapTex = std::getenv("DELTA_GPU_SWAPTEX01") != nullptr;
+  DrawInfo swapped;
+  if (swapTex && d_in.nTexs >= 2) {
+    swapped = d_in;
+    std::swap(swapped.texs[0], swapped.texs[1]);
+  }
+  const DrawInfo &d_sw = (swapTex && d_in.nTexs >= 2) ? swapped : d_in;
   // DELTA_GPU_MAXDRAW=<n> / DELTA_GPU_ONLYDRAW=<n>: build a frame up one draw at
   // a time, or isolate a single one, to see what each pass contributes.
   static const int maxDraw = [] {
@@ -4426,12 +4435,12 @@ void draw(const DrawInfo &d_in) {
   DrawInfo dd;
   const bool patched = noDepth || noCull || noMask;
   if (patched) {
-    dd = d_in;
+    dd = d_sw;
     if (noDepth) { dd.depthTestEnable = false; dd.depthWriteEnable = false; }
     if (noCull) dd.cullMode = 0;
     if (noMask) { dd.targetMask = 0xFFFFFFFFu; dd.colorControl = 0x10; }
   }
-  const DrawInfo &d = patched ? dd : d_in;
+  const DrawInfo &d = patched ? dd : d_sw;
   if (d.indexCount > g.frameMaxIdx) g.frameMaxIdx = d.indexCount;
   ScopeNs _t(&g_nsDraw);
   ScopeNs _tf(&g_frDraw);
