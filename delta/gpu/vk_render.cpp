@@ -3496,7 +3496,11 @@ RecompPipe *getRecompPipe(const DrawInfo &d) {
 
   VkShaderModule vs = makeModuleVec(d.recomp->vs_spirv);
   VkShaderModule fs = makeModuleVec(d.recomp->fs_spirv);
-  bool rectList = d.primType == 17 && g.geometryShader && !d.recomp->gs_spirv.empty();
+  // RECTLIST is primitive type 17 on GFX7 but 7 on gfx10.3 (PrimitiveType::
+  // kRectList; 17 is kRectListLegacy there). Missing the gfx10 number rendered
+  // every PS5 fullscreen pass as a single triangle covering half the rect.
+  const bool isRectList = d.primType == 17 || d.primType == 7;
+  bool rectList = isRectList && g.geometryShader && !d.recomp->gs_spirv.empty();
   VkShaderModule gs = rectList ? makeModuleVec(d.recomp->gs_spirv) : VK_NULL_HANDLE;
   VkPipelineShaderStageCreateInfo stages[3]{};
   uint32_t stageCount = 0;

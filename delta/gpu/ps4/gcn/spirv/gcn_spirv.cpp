@@ -896,6 +896,59 @@ bool TranslateCs(const Program& program, uint32_t num_thread_x,
   return true;
 }
 
+
+void DumpProgram(const char* tag, const Program& program) {
+  static const char* kEncNames[] = {"unk",  "sop1",   "sop2",  "sopk", "sopc",
+                                    "sopp", "smrd",   "vop1",  "vop2", "vop3",
+                                    "vopc", "vintrp", "ds",    "mubuf",
+                                    "mtbuf", "mimg",  "exp"};
+  std::fprintf(stderr, "[shdis] %s, %zu insts:\n", tag, program.size());
+  for (const Inst& inst : program)
+    std::fprintf(stderr, "[shdis]  pc=%u %s op=%#x w0=%#x w1=%#x\n", inst.pc,
+                 kEncNames[static_cast<int>(inst.enc) <= 16
+                               ? static_cast<int>(inst.enc)
+                               : 0],
+                 inst.opcode, inst.raw[0], inst.raw[1]);
+}
+
+// One-shot disassembly (DELTA_GPU_SHDIS): for the first branchy shaders, list
+// each instruction's encoding + opcode.
+void MaybeDumpBranchy(const char* tag, const Program& program) {
+  static const bool enabled = std::getenv("DELTA_GPU_SHDIS") != nullptr;
+  if (!enabled) return;
+  static int dumped = 0;
+  if (!HasControlFlow(program) || dumped >= 2) return;
+  dumped++;
+  std::fprintf(stderr, "[shdis] (branchy)\n");
+  DumpProgram(tag, program);
+}
+
+// DELTA_GPU_SHDIS_ADDR=hexaddr: dump the full instruction list of the shader
+// whose GCN code lives at that guest address, once, whatever its shape.
+void MaybeDumpByAddr(const char* tag, const void* code,
+                     const Program& program) {
+  static const uint64_t want = [] {
+    const char* e = std::getenv("DELTA_GPU_SHDIS_ADDR");
+    return e ? std::strtoull(e, nullptr, 16) : 0ull;
+  }();
+  if (!want || reinterpret_cast<uint64_t>(code) != want) return;
+  static bool dumped = false;
+  if (dumped) return;
+  dumped = true;
+  std::fprintf(stderr, "[shdis] @%p:\n", code);
+  DumpProgram(tag, program);
+}
+
+bool NoOpt() {
+  // DELTA_GPU_SPIRV_NOOPT: skip the optimize pass (keep the naive
+  // memory-backed register SPIR-V). Isolates an emission bug from a spirv-opt
+  // mis-promotion.
+  static const bool no_opt = std::getenv("DELTA_GPU_SPIRV_NOOPT") != nullptr;
+  return no_opt;
+}
+
+}  // namespace
+
 // ---- RECTLIST geometry expansion -------------------------------------------
 // RECTLIST consumes three post-VS corners and rasterizes the fourth corner as
 // a second triangle. Vulkan has no matching input topology, so insert a
@@ -971,58 +1024,6 @@ std::vector<uint32_t> EmitRectListGeometry(
   m.ExecMode(main_fn, spv::ExecutionMode::OutputVertices, {4});
   return m.Assemble();
 }
-
-void DumpProgram(const char* tag, const Program& program) {
-  static const char* kEncNames[] = {"unk",  "sop1",   "sop2",  "sopk", "sopc",
-                                    "sopp", "smrd",   "vop1",  "vop2", "vop3",
-                                    "vopc", "vintrp", "ds",    "mubuf",
-                                    "mtbuf", "mimg",  "exp"};
-  std::fprintf(stderr, "[shdis] %s, %zu insts:\n", tag, program.size());
-  for (const Inst& inst : program)
-    std::fprintf(stderr, "[shdis]  pc=%u %s op=%#x w0=%#x w1=%#x\n", inst.pc,
-                 kEncNames[static_cast<int>(inst.enc) <= 16
-                               ? static_cast<int>(inst.enc)
-                               : 0],
-                 inst.opcode, inst.raw[0], inst.raw[1]);
-}
-
-// One-shot disassembly (DELTA_GPU_SHDIS): for the first branchy shaders, list
-// each instruction's encoding + opcode.
-void MaybeDumpBranchy(const char* tag, const Program& program) {
-  static const bool enabled = std::getenv("DELTA_GPU_SHDIS") != nullptr;
-  if (!enabled) return;
-  static int dumped = 0;
-  if (!HasControlFlow(program) || dumped >= 2) return;
-  dumped++;
-  std::fprintf(stderr, "[shdis] (branchy)\n");
-  DumpProgram(tag, program);
-}
-
-// DELTA_GPU_SHDIS_ADDR=hexaddr: dump the full instruction list of the shader
-// whose GCN code lives at that guest address, once, whatever its shape.
-void MaybeDumpByAddr(const char* tag, const void* code,
-                     const Program& program) {
-  static const uint64_t want = [] {
-    const char* e = std::getenv("DELTA_GPU_SHDIS_ADDR");
-    return e ? std::strtoull(e, nullptr, 16) : 0ull;
-  }();
-  if (!want || reinterpret_cast<uint64_t>(code) != want) return;
-  static bool dumped = false;
-  if (dumped) return;
-  dumped = true;
-  std::fprintf(stderr, "[shdis] @%p:\n", code);
-  DumpProgram(tag, program);
-}
-
-bool NoOpt() {
-  // DELTA_GPU_SPIRV_NOOPT: skip the optimize pass (keep the naive
-  // memory-backed register SPIR-V). Isolates an emission bug from a spirv-opt
-  // mis-promotion.
-  static const bool no_opt = std::getenv("DELTA_GPU_SPIRV_NOOPT") != nullptr;
-  return no_opt;
-}
-
-}  // namespace
 
 // ---- entry points -----------------------------------------------------------
 bool RecompileSpirv(const uint32_t* vs_code, const uint32_t* ps_code,

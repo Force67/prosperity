@@ -1280,6 +1280,10 @@ Recompiled Recompile(const uint32_t* vs_code, const uint32_t* ps_code,
 
   const std::vector<uint32_t> vs = tv.m.Assemble();
   const std::vector<uint32_t> ps = tp.m.Assemble();
+  // gfx10.3 RECTLIST draws reach us as three corners of a rectangle; Vulkan has
+  // no such topology, so carry the same expansion stage the GFX7 path uses.
+  const std::vector<uint32_t> gs =
+      gpu::gcn::EmitRectListGeometry(r.num_params, flat_attrs);
   std::string err;
   if (!gpu::gcn::spirv::Validate(vs, &err)) {
     if (gpu::gcn::TraceEnabled())
@@ -1310,8 +1314,11 @@ Recompiled Recompile(const uint32_t* vs_code, const uint32_t* ps_code,
   }
   r.vs_spirv = NoOpt() ? vs : gpu::gcn::spirv::Optimize(vs);
   r.fs_spirv = NoOpt() ? ps : gpu::gcn::spirv::Optimize(ps);
-  // No RECTLIST geometry stage for PS5 yet: gfx10.3 triangle-list draws render
-  // VS+PS directly (RECTLIST/fullscreen passes are a follow-up).
+  std::string gsErr;
+  if (!gs.empty() && gpu::gcn::spirv::Validate(gs, &gsErr))
+    r.gs_spirv = NoOpt() ? gs : gpu::gcn::spirv::Optimize(gs);
+  else if (gpu::gcn::TraceEnabled())
+    std::fprintf(stderr, "[rdna] RECTLIST GS invalid: %s\n", gsErr.c_str());
   r.ok = !r.vs_spirv.empty() && !r.fs_spirv.empty();
   return r;
 }

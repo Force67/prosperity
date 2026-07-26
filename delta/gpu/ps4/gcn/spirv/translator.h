@@ -364,4 +364,10 @@ void EmitCsMtbuf(Translator& t, const Inst& inst, StageContext& sc);
 void EmitCsMimg(Translator& t, const Inst& inst, StageContext& sc);
 void EmitDs(Translator& t, const Inst& inst, StageContext& sc);
 
+// RECTLIST expansion stage: three post-VS corners in, two triangles out. Shared
+// with the RDNA2 path, which reaches RECTLIST under a different primitive-type
+// number but needs the identical fixed-function expansion.
+std::vector<uint32_t> EmitRectListGeometry(
+    uint32_t num_params, const std::unordered_set<uint32_t>& flat_attrs);
+
 }  // namespace gpu::gcn
