@@ -29,6 +29,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <atomic>
+#include <thread>
 #include <mutex>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -483,7 +485,38 @@ void maybeDumpShader(uint64_t addr) {
   }
 }
 
+// Draw accounting. DELTA_GPU_DRAWRT only sees draws that reach the renderer, so
+// a draw dropped earlier (no usable render target, unrecoverable shader address)
+// is indistinguishable from one the title never issued. Count both ends.
+static std::atomic<uint64_t> g_drawsSeen{0}, g_drawsIssued{0}, g_dropNoRt{0},
+    g_dropNoShader{0};
+
+static void drawCensus() {
+  static const bool on = std::getenv("DELTA_GPU_DRAWCENSUS") != nullptr;
+  if (!on)
+    return;
+  static const bool started = [] {
+    std::thread([] {
+      for (;;) {
+        std::this_thread::sleep_for(std::chrono::seconds(15));
+        std::fprintf(stderr,
+                     "[drawcensus] seen=%llu issued=%llu dropped: no-rt=%llu "
+                     "no-shader=%llu\n",
+                     (unsigned long long)g_drawsSeen.load(),
+                     (unsigned long long)g_drawsIssued.load(),
+                     (unsigned long long)g_dropNoRt.load(),
+                     (unsigned long long)g_dropNoShader.load());
+      }
+    }).detach();
+    return true;
+  }();
+  (void)started;
+}
+
 void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
+  size_t dropAttrCount = 0;
+  g_drawsSeen.fetch_add(1, std::memory_order_relaxed);
+  drawCensus();
   if (!vk::available()) return;
 
   // gfx10.3 has no HW VS: the vertex program is the merged NGG shader, whose
@@ -847,7 +880,18 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
       }
       // A fetch VS needs at least one attribute resolved; a procedural VS (no
       // recovered attrs, seeds from VertexIndex) draws without a vertex buffer.
+      // A fetch VS needs at least one attribute resolved; a procedural VS (no
+      // recovered attrs, seeds from VertexIndex) draws without a vertex buffer.
+      // A fullscreen pass binds NO vertex buffer at all even though its shader
+      // contains fetch instructions (the same shader is used both ways), so
+      // demanding a resolved attribute there discarded the whole pass. Let it
+      // through with no vertex inputs declared instead.
       bool good = d.nvattrs > 0 || rc.attrs.empty();
+      if (!good && !d.nvbufs) {
+        d.nvattrs = 0;
+        good = true;
+      }
+      dropAttrCount = rc.attrs.size();
 
       // Constant buffers: resolve each SMEM descriptor. For a direct cbuf the V# is
       // inline at ud_sgpr in user data; for a chained cbuf the descriptor is reached
@@ -972,7 +1016,23 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
   }
 
   if (autoVertexCount && autoVertexCount <= 0x100000) d.vertexCount = autoVertexCount;
-  if (!d.recomp) return;  // no shader -> nothing the renderer can run yet
+  if (!d.recomp) {
+    // No usable shader pair: the draw is discarded here, which looks exactly
+    // like the title never issuing it. Report the addresses that failed so the
+    // gap is attributable.
+    g_dropNoShader.fetch_add(1, std::memory_order_relaxed);
+    static int shown = 0;
+    if (shown < 16 && std::getenv("DELTA_GPU_DRAWCENSUS")) {
+      shown++;
+      std::fprintf(stderr,
+                   "[drawcensus] dropped: vs=%#lx ps=%#lx prim=%u vcount=%u "
+                   "mrt=%u rt=%#lx nvattrs=%u shaderAttrs=%zu nvbufs=%u\n",
+                   (unsigned long)vsA, (unsigned long)psA, d.primType,
+                   d.vertexCount, d.mrtCount, (unsigned long)d.rtBase,
+                   d.nvattrs, dropAttrCount, d.nvbufs);
+    }
+    return;
+  }
 
   // One-shot ground-truth dump of the first few resolved draws: the raw vertex
   // bytes (as float32 AND uint32, to read off the real attribute format), the
@@ -1099,6 +1159,7 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
       std::fprintf(stderr, "[agc]   DL vbuf%u data=%#lx stride=%u nrec=%u\n",
                    i, (unsigned long)d.vbufs[i].data, d.vbufs[i].stride, d.vbufs[i].numRecords);
   }
+  g_drawsIssued.fetch_add(1, std::memory_order_relaxed);
   vk::draw(d);
   if (dl) std::fprintf(stderr, "[agc] DL draw#%lu done\n", (unsigned long)myDraw);
 }
