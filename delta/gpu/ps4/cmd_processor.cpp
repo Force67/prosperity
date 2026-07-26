@@ -8,7 +8,7 @@
 #include "cmd_processor.h"
 #include "pm4.h"
 #include "liverpool.h"
-#include "vk_render.h"
+#include "rhi/renderer.h"
 #include "gcn/gcn_decode.h"
 #include "gcn/gcn_detile.h"
 #include "gcn/gcn_resource.h"
@@ -174,8 +174,8 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
       }
     }
   }
-  if (vk::available()) {
-    vk::DrawInfo d;
+  if (rhi::available()) {
+    rhi::DrawInfo d;
     const uint32_t *vud = &g_regs[mmSPI_SHADER_USER_DATA_VS_0];
     std::memcpy(d.vsUserData, vud, 16 * sizeof(uint32_t));
     std::memcpy(d.psUserData, &g_regs[mmSPI_SHADER_USER_DATA_PS_0],
@@ -588,7 +588,7 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
     if (autoVertexCount && autoVertexCount <= 0x100000)
       d.vertexCount = autoVertexCount;
     if (!g_frameActive) {
-      vk::beginFrame();
+      rhi::beginFrame();
       g_frameActive = true;
     }
     // DELTA_GPU_BLITDUMP: for the first few draws targeting a wide (scanout-sized)
@@ -867,7 +867,7 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
     if (skipStale && d.texBase && d.texW >= 2048)
       ; // skip the wide stale-buffer blit
     else if (d.vertexData || (d.recomp && d.recomp->ok && d.nvattrs == 0))
-      vk::draw(d);
+      rhi::draw(d);
   }
   if (!g_trace)
     return;
@@ -1017,8 +1017,8 @@ void endFrame(uint64_t scanoutBase) {
   // New frame -> shader code may have been rewritten; let CachedProgram
   // revalidate each address once next frame instead of once per draw.
   gcn::NextProgramCacheGeneration();
-  if (g_frameActive && vk::available()) {
-    vk::endFrame(scanoutBase);
+  if (g_frameActive && rhi::available()) {
+    rhi::endFrame(scanoutBase);
     g_frameActive = false;
   }
 }
@@ -1144,7 +1144,7 @@ void handleDispatch(const uint32_t *body, uint32_t count) {
   const uint32_t *ud = &g_regs[mmCOMPUTE_USER_DATA_0];
 
   static const bool noCs = std::getenv("DELTA_GPU_NOCS") != nullptr;
-  if (noCs || !vk::available())
+  if (noCs || !rhi::available())
     return;
 
   // Recompile the CS to a Vulkan compute pipeline, resolve the guest memory
@@ -1185,7 +1185,7 @@ void handleDispatch(const uint32_t *body, uint32_t count) {
   };
   constexpr uint64_t kMaxRes = 256ull * 1024 * 1024;  // sanity cap per storage buffer
   constexpr uint64_t kMaxUnboundedBuffer = 16ull * 1024 * 1024;
-  vk::ComputeInfo ci;
+  rhi::ComputeInfo ci;
   ci.csAddr = csKey;
   ci.groups[0] = dimX; ci.groups[1] = dimY; ci.groups[2] = dimZ;
   ci.recomp = &rc;
@@ -1202,8 +1202,8 @@ void handleDispatch(const uint32_t *body, uint32_t count) {
     for (auto &r : rc.resources)
       if (r.binding >= resolved.size() || !resolved[r.binding].valid)
         anyUnresolved = true;
-    if (anyUnresolved && vk::available()) {
-      vk::flushCsWrites();
+    if (anyUnresolved && rhi::available()) {
+      rhi::flushCsWrites();
       resolved = gcn::ResolveCsResources(*csProgram, rc, ud);
     }
   }
@@ -1355,7 +1355,7 @@ void handleDispatch(const uint32_t *body, uint32_t count) {
       resOk = false;
       break;
     }
-    vk::ComputeInfo::Res &out = ci.res[ci.nres];
+    rhi::ComputeInfo::Res &out = ci.res[ci.nres];
     out.base = base;
     out.size = size;
     out.guestSize = guestSize;
@@ -1379,7 +1379,7 @@ void handleDispatch(const uint32_t *body, uint32_t count) {
   }
   if (!resOk || !ci.nres)
     return;
-  const bool dispatched = vk::dispatch(ci);
+  const bool dispatched = rhi::dispatch(ci);
   if (traceCsResources)
     std::fprintf(stderr, "[csres] cs=%#lx dispatch %s (%u resources)\n",
                  (unsigned long)csAddr, dispatched ? "executed" : "failed",
@@ -1392,7 +1392,7 @@ void submitDcb(const void *dcb, uint32_t sizeBytes) {
   std::lock_guard<std::mutex> lk(g_mtx);
   if (!g_vkTried) {
     g_vkTried = true;
-    vk::init();
+    rhi::init();
   }
   auto *p = static_cast<const uint32_t *>(dcb);
   uint32_t words = sizeBytes / 4;
@@ -1466,7 +1466,7 @@ void submitDcb(const void *dcb, uint32_t sizeBytes) {
           if (!noCopy && srcMem && dstMem && bytes && bytes <= 0x1000000u &&
               src != dst && memOk(src) && memOk(src + bytes) &&
               memOk(dst) && memOk(dst + bytes)) {
-            if (vk::available()) vk::flushCsWrites();  // src may be CS-written
+            if (rhi::available()) rhi::flushCsWrites();  // src may be CS-written
             std::memcpy(reinterpret_cast<void *>(dst),
                         reinterpret_cast<const void *>(src), bytes);
           }

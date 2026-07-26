@@ -6,7 +6,7 @@
  * RDNA2 (gfx10.3) shader recompiler facade. Translates PS5 guest shaders
  * (decoded by rdna_decode) directly to SPIR-V and returns the same
  * gpu::gcn::Recompiled binding plan the shared Vulkan renderer consumes, so the
- * whole gpu/vk_render path is reused unchanged.
+ * whole gpu/rhi + gpu/vulkan path is reused unchanged.
  *
  * The translator reuses the shared gpu::gcn SPIR-V backend: the register-file
  * model (gpu::gcn::Translator), the scalar/vector ALU emitters, exports, and

@@ -1,21 +1,21 @@
 #pragma once
 
 /*
- * PS4Delta : PS4 emulation and research project
+ * PS4Delta : PS4/PS5 emulation and research project
  *
- * Headless Vulkan renderer for the GPU command processor. Owns its own Vulkan
- * device (no surface): rendering is offscreen into a render-target image that
- * matches the guest scanout). The command processor calls beginFrame() once per
- * submitted frame, draw() per decoded PM4 draw, and endFrame() to finish and
- * read the result back (presented to the window when a display exists, or dumped
- * for headless verification).
+ * The work a command processor hands the renderer: one decoded draw, or one
+ * decoded compute dispatch. Backend-agnostic by construction -- nothing here
+ * names a graphics API type, so the PS4 (PM4/GCN) and PS5 (AGC/RDNA2) command
+ * processors compile without seeing the backend at all.
+ *
+ * Addresses are guest addresses (identity-mapped, host-readable).
  */
 
 #include <cstdint>
 
 namespace gpu::gcn { struct Recompiled; struct RecompiledCs; }
 
-namespace gpu::vk {
+namespace gpu::rhi {
 
 // One vertex attribute for the recompiled-shader path: where the recompiled VS
 // reads input `location` from within a vertex buffer binding. `binding` indexes
@@ -27,21 +27,21 @@ struct VertexAttr {
   uint32_t binding = 0;   // index into DrawInfo::vbufs
   uint32_t offset = 0;    // byte offset within the binding's vertex record
   uint32_t num_comps = 0;  // 1..4
-  uint32_t dfmt = 0;      // GCN data format (selects the Vulkan format)
+  uint32_t dfmt = 0;      // GCN data format (selects the backend format)
   uint32_t nfmt = 0;      // GCN number format
 };
 
 // One vertex buffer binding for the recompiled-shader path. Each distinct guest
-// V# base + stride becomes one Vulkan vertex binding; its records are uploaded
-// into the vertex ring and bound via vkCmdBindVertexBuffers.
+// V# base + stride becomes one vertex binding; its records are uploaded into
+// the renderer's vertex ring and bound for the draw.
 struct VertexBinding {
   const void *data = nullptr;  // guest base of this binding's vertex data
-  uint32_t stride = 0;         // bytes per record (VK_VERTEX_INPUT_RATE_VERTEX)
+  uint32_t stride = 0;         // bytes per record
   uint32_t numRecords = 0;     // records available in the source buffer
 };
 
 // Per-draw inputs extracted by the command processor (resource-tracked from the
-// shader + register state). Addresses are guest (identity-mapped, host-readable).
+// shader + register state).
 struct DrawInfo {
   const void *vertexData = nullptr;  // base of attribute-0 (position) buffer
   uint32_t vertexCount = 0;
@@ -130,7 +130,7 @@ struct DrawInfo {
 
   // Per-draw blend state, decoded from CB_BLEND0_CONTROL (raw dword) + whether
   // blending is enabled for color target 0. The renderer maps the GNM blend
-  // factors/functions to a Vulkan pipeline (cached per unique state).
+  // factors/functions to a pipeline (cached per unique state).
   uint32_t blendControl = 0;
   bool blendEnable = false;
   // Per-MRT blend: CB_BLENDn_CONTROL for each color target, with a per-target enable
@@ -141,20 +141,20 @@ struct DrawInfo {
   uint32_t mrtBlendMask = 0;
   // CB_TARGET_MASK (per-MRT channel write enable; MRT0 = bits[3:0]) and
   // CB_COLOR_CONTROL (MODE field [6:4]; 0 = disable color output). Honoured as the
-  // Vulkan colorWriteMask so a draw the game masks off (e.g. a fullscreen "clear"
+  // colour write mask so a draw the game masks off (e.g. a fullscreen "clear"
   // it expects to write nothing) does not overwrite the target.
   uint32_t targetMask = 0xF;
   uint32_t colorControl = 0;
 
   // Depth/stencil (DB) state. When depthBase is a valid guest address and depthValid
-  // is set the draw's region binds a Vulkan depth attachment keyed by depthBase, and
+  // is set the draw's region binds a depth attachment keyed by depthBase, and
   // honours the DB_DEPTH_CONTROL test/write/func below. 2D titles leave depthBase 0
   // (DB_Z_INFO format invalid), so no depth attachment is bound (unchanged path).
   uint64_t depthBase = 0;
   bool depthValid = false;        // DB_Z_INFO format != 0
   bool depthTestEnable = false;   // DB_DEPTH_CONTROL Z_ENABLE
   bool depthWriteEnable = false;  // DB_DEPTH_CONTROL Z_WRITE_ENABLE
-  uint32_t depthFunc = 7;         // DB_DEPTH_CONTROL ZFUNC (maps 1:1 to VkCompareOp)
+  uint32_t depthFunc = 7;         // DB_DEPTH_CONTROL ZFUNC (maps 1:1 to the compare op)
   float depthClear = 1.0f;        // DB_DEPTH_CLEAR (fast-clear value)
 
   // Primitive-setup: raster topology + face culling, from VGT_PRIMITIVE_TYPE and
@@ -214,33 +214,4 @@ struct ComputeInfo {
   uint32_t nres = 0;
 };
 
-// Bring up the headless Vulkan device. Returns false if Vulkan is unavailable
-// (then the renderer is disabled and the emulator runs without graphics).
-bool init();
-bool available();
-
-// Run a compute dispatch on the GPU. Returns true if it executed, false if it
-// could not be set up (the caller then skips the dispatch, as before).
-bool dispatch(const ComputeInfo &ci);
-
-// Write every GPU-dirty compute range back to guest memory. Must run before
-// anything reads guest memory that a dispatch may have written: draw
-// recording, CP DMA, frame end. No-op when nothing is dirty.
-void flushCsWrites();
-// Flush only dirty ranges overlapping [base, base+bytes).
-void flushCsWritesRange(uint64_t base, uint64_t bytes);
-
-// A CP DMA immediate fill over guest memory. When the range covers a live render
-// target that is how the title clears it -- there is no clear packet on this
-// hardware -- so the target takes a pending clear with the filled value.
-void noteMemoryFill(uint64_t base, uint64_t bytes, uint32_t value);
-
-// Frame lifecycle. Each draw renders into the Vulkan image for its DrawInfo.rtBase
-// (a render target keyed by guest address). beginFrame starts recording;
-// endFrame submits, reads back the render target at `scanoutBase` (the flip
-// buffer) and presents/dumps it.
-void beginFrame();
-void draw(const DrawInfo &d);
-void endFrame(uint64_t scanoutBase);
-
-}  // namespace gpu::vk
+}  // namespace gpu::rhi

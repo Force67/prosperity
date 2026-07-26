@@ -23,7 +23,7 @@
 
 #include "dcore.h"
 #include "cpu/cpu_backend.h"
-#include "gpu/vk_render.h"
+#include "gpu/rhi/renderer.h"
 
 static bool verifyViablity() {
 #ifdef _WIN32
@@ -132,7 +132,7 @@ EXPORT int dcoreMain(int argc, char **argv) {
   // (vk_icdGetInstanceProcAddr returns NULL) and enumeration silently falls
   // back to the llvmpipe software rasteriser -- ~30 ms/frame instead of a real
   // GPU. Harmless when only llvmpipe exists (same device either way).
-  gpu::vk::init();
+  gpu::rhi::init();
   cpu::earlyInit(); // segregate guest/JIT memory before guest modules map
 
   if (!verifyViablity())

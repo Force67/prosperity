@@ -6,11 +6,11 @@
  * [[ps5-agc-gpu]]), so the packet walk + completion-label handling reuse
  * gpu/ps4/pm4.h. What differs on PS5 is the gfx10.3 register offsets (agc_regs.h)
  * and the RDNA2 shader ISA (gpu/ps5/rdna) -- both new; the Vulkan renderer
- * (gpu/vk_render) and the DrawInfo contract are shared with the PS4 path.
+ * (gpu/rhi) and the DrawInfo contract are shared with the PS4 path.
  *
  * The register-latch model mirrors gpu/ps4/cmd_processor.cpp: SET_*_REG packets
  * write into a flat gfx10.3 register file (masking the gfx10 selector bits), a
- * draw packet snapshots that state into gpu::vk::DrawInfo, the VS(from the merged
+ * draw packet snapshots that state into gpu::rhi::DrawInfo, the VS(from the merged
  * ES/GS NGG block)/PS pair is recompiled (cached), and the shared renderer runs
  * the game's real shaders. Completion labels (EOP / RELEASE_MEM / WRITE_DATA)
  * are still serviced so the engine's per-frame command-buffer fences advance.
@@ -23,7 +23,7 @@
 #include "ps4/pm4.h"
 #include "rdna/rdna_resource.h"
 #include "rdna/rdna_translate.h"
-#include "vk_render.h"
+#include "rhi/renderer.h"
 
 #include <algorithm>
 #include <atomic>
@@ -82,7 +82,7 @@ struct VBuffer {
   uint32_t stride = 0, numRecords = 0, dfmt = 0, nfmt = 0, gfmt = 0;
 };
 // gfx10.3 buffer V#s carry a UNIFIED 7-bit FORMAT enum (word3 [18:12]), not GCN's
-// separate data/number format. Map the enum to the GCN (dfmt,nfmt) pair vk_render's
+// separate data/number format. Map the enum to the GCN (dfmt,nfmt) pair the renderer's
 // vfmt() understands. Only the vertex-attribute formats are covered; unknowns fall
 // back to the GCN-style split (harmless for descriptors that never reach vfmt()).
 void gfx10VBufFormat(uint32_t gfmt, uint32_t &dfmt, uint32_t &nfmt) {
@@ -609,7 +609,7 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
   size_t dropAttrCount = 0;
   g_drawsSeen.fetch_add(1, std::memory_order_relaxed);
   drawCensus();
-  if (!vk::available()) return;
+  if (!rhi::available()) return;
 
   // gfx10.3 has no HW VS: the vertex program is the merged NGG shader, whose
   // address is written to the ES (front half, 0xC8) and/or GS (back half, 0x88)
@@ -714,7 +714,7 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
     }
   }
 
-  vk::DrawInfo d;
+  rhi::DrawInfo d;
   std::memcpy(d.vsUserData, vud, sizeof(d.vsUserData));
   std::memcpy(d.psUserData, pud, sizeof(d.psUserData));
   d.primType = g_regs[mmVGT_PRIMITIVE_TYPE];
@@ -1384,11 +1384,11 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
 
   if (!g_frameActive) {
     if (dl) std::fprintf(stderr, "[agc] DL beginFrame...\n");
-    vk::beginFrame();
+    rhi::beginFrame();
     g_frameActive = true;
   }
   if (dl) {
-    std::fprintf(stderr, "[agc] DL draw#%lu vk::draw nvattrs=%d rt=%#lx "
+    std::fprintf(stderr, "[agc] DL draw#%lu rhi::draw nvattrs=%d rt=%#lx "
                  "tmask=%#x cc=%#x blend=%u dv=%d db=%#lx dt=%u dw=%u df=%u ntex=%u tex0=%#lx\n",
                  (unsigned long)myDraw, d.nvattrs, (unsigned long)d.rtBase,
                  d.targetMask, d.colorControl, d.blendEnable, d.depthValid,
@@ -1407,7 +1407,7 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
                    i, (unsigned long)d.vbufs[i].data, d.vbufs[i].stride, d.vbufs[i].numRecords);
   }
   g_drawsIssued.fetch_add(1, std::memory_order_relaxed);
-  vk::draw(d);
+  rhi::draw(d);
   if (dl) std::fprintf(stderr, "[agc] DL draw#%lu done\n", (unsigned long)myDraw);
 }
 
@@ -1558,7 +1558,7 @@ void walk(const uint32_t *p, uint32_t words, bool dumpThis, int depth) {
             const uint32_t fill = body[1];
             auto *p32 = reinterpret_cast<uint32_t *>(dst);
             for (uint32_t k = 0; k < bytes / 4; k++) p32[k] = fill;
-            vk::noteMemoryFill(dst, bytes, fill);
+            rhi::noteMemoryFill(dst, bytes, fill);
           }
           if (std::getenv("DELTA_GPU_DMATRACE")) {
             static int dmn = 0;
@@ -1670,7 +1670,7 @@ void submitDcb(const void *dcb, uint32_t sizeBytes) {
   static bool s_vkTried = false;
   if (!s_vkTried) {
     s_vkTried = true;
-    vk::init();
+    rhi::init();
   }
   // ONE-SHOT: after some frames, scan the 2MB SceAgcRegShadow (0x8002860000) for
   // non-zero content -- if setShader wrote the shader state to a DIFFERENT shadow
@@ -1738,8 +1738,8 @@ void submitCcb(const void *ccb, uint32_t sizeBytes) {
 
 void endFrame(uint64_t scanoutBase) {
   std::lock_guard<std::mutex> lk(g_mtx);
-  if (g_frameActive && vk::available()) {
-    vk::endFrame(scanoutBase);
+  if (g_frameActive && rhi::available()) {
+    rhi::endFrame(scanoutBase);
     g_frameActive = false;
   }
 }
@@ -1754,7 +1754,7 @@ extern "C" void prosperity_agc_submit(uint64_t dcbBase, uint32_t sizeBytes) {
 
 // PS5 flip bridge: the shared dce/VideoOut flip path calls this when the active
 // process is PS5, so the frame the AGC submit rendered is read back + presented
-// through vk::endFrame (mirrors prosperity_gc_flip on the PS4 path).
+// through rhi::endFrame (mirrors prosperity_gc_flip on the PS4 path).
 extern "C" void prosperity_agc_flip(uint64_t scanoutBase) {
   gpu::ps5::endFrame(scanoutBase);
 }

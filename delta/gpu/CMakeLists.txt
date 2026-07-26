@@ -13,11 +13,12 @@ else()
   add_delta_module(gpu DEPS Vulkan::Vulkan delta_gfx)
 endif()
 
-# Platform split: the shared Vulkan renderer (vk_render) and SPIR-V fallback
-# shaders stay here; the PS4 PM4/Liverpool + GCN path lives in ps4/, and the PS5
-# AGC/RDNA2 path is scaffolded in ps5/. add_delta_module GLOB_RECURSEs the whole
-# tree, so both subfolders are already compiled into delta_gpu; we only add their
-# include roots so intra-gpu includes ("vk_render.h", "gcn/...") keep resolving.
+# Layering: rhi/ is the backend-free renderer interface the command processors
+# talk to, vulkan/ is the only backend implementing it, and the PS4
+# PM4/Liverpool + GCN and PS5 AGC/RDNA2 paths live in ps4/ and ps5/.
+# add_delta_module GLOB_RECURSEs the whole tree, so every subfolder is already
+# compiled into delta_gpu; we only add their include roots so intra-gpu includes
+# ("rhi/renderer.h", "vulkan/...", "gcn/...") keep resolving.
 target_include_directories(delta_gpu PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
   ${CMAKE_CURRENT_SOURCE_DIR}/ps4)
