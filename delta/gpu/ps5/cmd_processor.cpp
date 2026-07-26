@@ -710,10 +710,13 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
       }
     }
     d.rtBase = d.mrtCount ? d.mrtBase[0] : 0;
-    // DELTA_GPU_STICKYRT: a draw whose target mask asks for colour but whose
-    // CB_COLOR0_INFO is zero keeps the last target that was valid. Experiment for
-    // the passes whose bind we never see; not a model of the hardware.
-    static const bool stickyRt = std::getenv("DELTA_GPU_STICKYRT") != nullptr;
+    // A draw whose target mask asks for colour but whose CB_COLOR0_INFO reads
+    // zero keeps the last target that was valid. Skyrim's logo and menu passes
+    // are bound through a path we do not see yet (the driver's default-state
+    // block zeroes CB_COLOR0 and only some passes get a re-bind), and dropping
+    // them entirely is certainly wrong where reusing the target is only maybe.
+    // DELTA_GPU_NOSTICKYRT restores the drop.
+    static const bool stickyRt = std::getenv("DELTA_GPU_NOSTICKYRT") == nullptr;
     static uint64_t lastBase = 0;
     static uint32_t lastInfo = 0;
     if (d.mrtCount) { lastBase = d.mrtBase[0]; lastInfo = d.mrtInfo[0]; }
