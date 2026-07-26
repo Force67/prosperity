@@ -3636,6 +3636,20 @@ RecompPipe *getRecompPipe(const DrawInfo &d) {
     if (!noMaskDiag && !(d.recomp->ps_mrt_mask & (1u << i)))
       cbAtt[i].colorWriteMask = 0;
   }
+  // DELTA_GPU_PIPETRACE: the colour-blend state a pipeline is actually built
+  // with, next to the PS's export mask -- the two have to agree or an attachment
+  // is silently write-masked off (or written unblended).
+  if (std::getenv("DELTA_GPU_PIPETRACE")) {
+    static int n = 0;
+    if (n++ < 24)
+      std::fprintf(stderr,
+                   "[pipe] ps=%#lx mrtN=%u psMrtMask=%#x att0: en=%u src=%d dst=%d "
+                   "srcA=%d dstA=%d writeMask=%#x\n",
+                   (unsigned long)d.psAddr, mrtN, d.recomp->ps_mrt_mask,
+                   cbAtt[0].blendEnable, (int)cbAtt[0].srcColorBlendFactor,
+                   (int)cbAtt[0].dstColorBlendFactor, (int)cbAtt[0].srcAlphaBlendFactor,
+                   (int)cbAtt[0].dstAlphaBlendFactor, cbAtt[0].colorWriteMask);
+  }
   VkPipelineColorBlendStateCreateInfo cb{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
   cb.attachmentCount = mrtN; cb.pAttachments = cbAtt;
   VkDynamicState dyns[2] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
@@ -4164,7 +4178,18 @@ bool drawRecomp(const DrawInfo &d) {
     uint32_t n;
     if (haveCbuf) flushCsWritesRange(cb.base, kCbufWindow);
     if (haveCbuf) {
-      n = cb.size < kCbufWindow ? cb.size : kCbufWindow;
+      // Upload as much of the window as the base's page holds, not just the
+      // recompiler's planned size. A shader that indexes its constants
+      // dynamically -- a UI batch picking a per-quad transform out of an array --
+      // reads past the planned size, and the truncated copy left those entries
+      // zero: Skyrim's menu drew its sprite atlas at screen size over everything.
+      // Clamped to the page so a cbuffer at the end of a mapping cannot fault.
+      static const bool tightCbuf = std::getenv("DELTA_GPU_TIGHTCBUF") != nullptr;
+      const uint32_t planned = cb.size < kCbufWindow ? cb.size : kCbufWindow;
+      const uint64_t pageEnd = (cb.base + 0x1000) & ~uint64_t{0xFFF};
+      const uint32_t avail =
+          static_cast<uint32_t>(std::min<uint64_t>(kCbufWindow, pageEnd - cb.base));
+      n = tightCbuf ? planned : std::max(planned, avail);
       std::memcpy(cbDst, reinterpret_cast<const void *>(cb.base), n);
     } else {  // binding 0 without a resolved cbuffer: the heuristic MVP
       n = sizeof(d.mvp);

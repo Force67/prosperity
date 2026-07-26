@@ -1346,22 +1346,31 @@ bool TranslatePs(const Program& program,
                                           t.F32(1.f)}));
   EmitBody(t, program, sc);
 
-  // A lane whose EXEC bit is clear at the end of the shader wrote nothing on
-  // hardware. The straight-line kill idiom is exactly that: v_cmpx_* against the
-  // alpha threshold clears EXEC and the export then applies to no lane. Nothing
-  // consulted EXEC here, so a masked-out fragment was written anyway -- Skyrim's
-  // logo quad painted its fully transparent area over the whole screen.
-  if (sc.wrote_color) {
-    static const bool no_kill = std::getenv("DELTA_GPU_NOKILL") != nullptr;
-    if (!no_kill) {
-      const Id live = t.IsNonZero(t.Exec());
-      const Id kill_blk = t.m.NewBlock(), after_kill = t.m.NewBlock();
-      t.m.SelectionMerge(after_kill);
-      t.m.BranchConditional(live, after_kill, kill_blk);
-      t.m.OpenBlock(kill_blk);
-      t.m.Kill();
-      t.m.OpenBlock(after_kill);
-    }
+  // The straight-line alpha kill: v_cmpx_* compares and clears EXEC, and the
+  // export then applies to no lane. Nothing consulted EXEC, so those fragments
+  // were written anyway -- Skyrim's menu quads painted their transparent area
+  // over the whole screen. Gate the fragment on EXEC only for shaders that
+  // actually contain a cmpx: our EXEC model is one bit, not a lane mask, and
+  // applying it everywhere discards everything in a shader that merely moves
+  // EXEC around (Isaac's frame goes black). DELTA_GPU_NOKILL disables it.
+  bool kills_lanes = false;
+  for (const Inst& in : program) {
+    // v_cmpx_* compares and writes EXEC.
+    if ((in.enc == Enc::kVopc && (in.opcode & 0x10)) ||
+        (in.enc == Enc::kVop3 && in.opcode <= 0xFF && (in.opcode & 0x10)))
+      kills_lanes = true;
+    // A scalar EXEC write is NOT a usable signal: every shader with control
+    // flow moves EXEC around, and our model is a single bit, so gating on it
+    // discards Isaac's entire frame. Only the explicit compare-and-kill counts.
+  }
+  if (sc.wrote_color && kills_lanes && !std::getenv("DELTA_GPU_NOKILL")) {
+    const Id live = t.IsNonZero(t.Exec());
+    const Id kill_blk = t.m.NewBlock(), after_kill = t.m.NewBlock();
+    t.m.SelectionMerge(after_kill);
+    t.m.BranchConditional(live, after_kill, kill_blk);
+    t.m.OpenBlock(kill_blk);
+    t.m.Kill();
+    t.m.OpenBlock(after_kill);
   }
 
   if (!sc.wrote_color) {
