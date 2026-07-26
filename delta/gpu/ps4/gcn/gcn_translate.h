@@ -24,25 +24,28 @@ inline constexpr uint32_t kMaxCsResources = 32;
 
 // A vertex attribute recovered from the VS fetch shader, in semantic order.
 struct ShaderAttr {
-  uint32_t location = 0;        // GLSL `in` location == semantic index
-  uint32_t num_comps = 0;       // 1..4 (from the buffer_load_format opcode)
-  uint32_t table_sgpr = 0;      // VS user-data dword of the vertex-table ptr
-  uint32_t vbuf_dword_off = 0;  // dword offset of this attr's V# in the table
-  bool inline_descriptor = false;  // V# lives directly in VS user data
-  // gfx10 unified buffer format carried by a TYPED fetch (tbuffer_load_format_*),
-  // which overrides the V#'s own format. 0 = untyped fetch, use the V#.
+  uint32_t location = 0;          // GLSL `in` location == semantic index
+  uint32_t num_comps = 0;         // 1..4 (from the buffer_load_format opcode)
+  uint32_t table_sgpr = 0;        // VS user-data dword of the vertex-table ptr
+  uint32_t vbuf_dword_off = 0;    // dword offset of this attr's V# in the table
+  bool inline_descriptor = false; // V# lives directly in VS user data
+  // gfx10 unified buffer format carried by a TYPED fetch
+  // (tbuffer_load_format_*), which overrides the V#'s own format. 0 = untyped
+  // fetch, use the V#.
   uint32_t inst_format = 0;
+  uint32_t use_pc = ~0u; // inline RDNA fetch consumer for scalar replay
 };
 
 // Set-1 UBO bindings shared by VS + PS. A shader pair whose constant buffers
 // exceed this gets planned only up to the cap, and every s_buffer_load from a
 // dropped base then emits nothing, leaving its destination SGPRs zero.
 constexpr uint32_t kMaxCbufBindings = 16;
+constexpr uint32_t kCbufDwords = 4096;
 
 // A constant buffer a shader stage reads (s_buffer_load). Bound as a UBO.
 struct ShaderCbuf {
   uint32_t binding = 0;
-  uint32_t ud_sgpr = 0;     // user-data dword index of the 4-dword V# / chain root
+  uint32_t ud_sgpr = 0; // user-data dword index of the 4-dword V# / chain root
   uint32_t num_dwords = 0;  // highest dword index read + 1 (UBO size)
   // Descriptor pointer chain (RDNA2 SMEM): when the descriptor is not directly in
   // user data but s_load'd from a chain of user-data root pointers. chain_len == 0
@@ -52,6 +55,7 @@ struct ShaderCbuf {
   // GFX7 path leaves this 0 (direct), so its behavior is unchanged.
   uint32_t chain_len = 0;
   uint32_t chain_off[3] = {};
+  uint32_t use_pc = ~0u;  // RDNA consumer used for draw-time scalar replay
 };
 
 // A texture the PS references (MIMG). Bound as a combined image sampler at

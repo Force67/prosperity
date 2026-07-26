@@ -171,8 +171,8 @@ struct DrawInfo {
   // vertexData/vertexStride is the raw interleaved vertex buffer, vattrs describe
   // the inputs, mvp holds the constant buffer (pushed), texBase the sampler.
   uint64_t vsAddr = 0, psAddr = 0;       // pipeline cache key
-  uint32_t vsUserData[16] = {};
-  uint32_t psUserData[16] = {};
+  uint32_t vsUserData[32] = {};
+  uint32_t psUserData[32] = {};
   const gcn::Recompiled *recomp = nullptr;
   VertexAttr vattrs[8];
   uint32_t nvattrs = 0;

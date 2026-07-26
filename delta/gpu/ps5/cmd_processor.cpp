@@ -19,20 +19,20 @@
 #include "cmd_processor.h"
 
 #include "agc_regs.h"
+#include "guest_memory.h"
 #include "ps4/pm4.h"
 #include "rdna/rdna_resource.h"
 #include "rdna/rdna_translate.h"
 #include "vk_render.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <atomic>
-#include <thread>
 #include <mutex>
-#include <sys/mman.h>
+#include <thread>
 #include <unistd.h>
 #include <unordered_map>
 #include <unordered_set>
@@ -193,35 +193,20 @@ void setRegs(uint32_t base, const uint32_t *body, uint32_t count) {
   uint32_t off = base + (body[0] & ~kRegSelectorMask);
   const uint32_t limit = regSpaceLimit(base);
   for (uint32_t i = 1; i < count; i++) {
-    if (off + (i - 1) < limit) g_regs[off + (i - 1)] = body[i];
-    if (off + (i - 1) == mmPA_CL_CLIP_CNTL) noteClipWrite("SET_REG", body[i]);
+    if (off + (i - 1) < limit)
+      g_regs[off + (i - 1)] = body[i];
+    if (off + (i - 1) == mmPA_CL_CLIP_CNTL)
+      noteClipWrite("SET_REG", body[i]);
     noteUdWrite("SET_REG", off + (i - 1), body[i]);
   }
 }
 
-// A guest GPU address. Isaac's AGC pool sits in the 0x80_xx_xx_xx_xx band, but a
-// title that batch-maps its direct memory gets whatever the kernel handed it --
-// Skyrim's command buffers and labels land around 0x10_00_00_00_00. Test the
+// A guest GPU address. Isaac's AGC pool sits in the 0x80_xx_xx_xx_xx band, but
+// a title that batch-maps its direct memory gets whatever the kernel handed it
+// -- Skyrim's command buffers and labels land around 0x10_00_00_00_00. Test the
 // whole range the guest allocator can hand out instead of one title's band.
 inline bool gpuAddr(uint64_t a) {
   return a >= 0x1000000000ull && a < 0x8100000000ull;
-}
-
-// inGuest()'s bound spans essentially the whole 48-bit VA (see above), so a
-// heuristically-recovered pointer (e.g. reinterpreting a V#'s raw SGPR bits as a
-// table root when the inline descriptor doesn't decode) can pass it while still
-// pointing at memory the guest never mapped -- an inactive/uninitialized vertex
-// slot did exactly this and segfaulted the host. Probe with mincore (same
-// technique as kern/crash.cpp's guest-pointer walks) before dereferencing.
-inline bool mapped(uint64_t va, uint64_t bytes) {
-  const long pg = sysconf(_SC_PAGESIZE);
-  const uint64_t start = va & ~static_cast<uint64_t>(pg - 1);
-  const uint64_t end = (va + bytes + pg - 1) & ~static_cast<uint64_t>(pg - 1);
-  for (uint64_t p = start; p < end; p += static_cast<uint64_t>(pg)) {
-    unsigned char vec = 0;
-    if (mincore(reinterpret_cast<void *>(p), 1, &vec) != 0) return false;
-  }
-  return true;
 }
 
 // Latch a LOAD_*_REG packet: the register values live in a GPU-memory image at
@@ -231,15 +216,17 @@ inline bool mapped(uint64_t va, uint64_t bytes) {
 // this title (it uses LOAD_*_REG, not inline SET_*_REG), so without it CB_COLOR
 // (the render target) is never bound and draws hit no visible target.
 void loadRegs(uint32_t base, const uint32_t *body, uint32_t count) {
-  if (count < 4) return;
+  if (count < 4)
+    return;
   uint64_t mem = (static_cast<uint64_t>(body[1] & 0xFFFF) << 32) | body[0];
-  if (!gpuAddr(mem)) return;  // GPU aperture only
+  if (!gpuAddr(mem))
+    return; // GPU aperture only
   const uint32_t *src = reinterpret_cast<const uint32_t *>(mem);
-  // COHERENCY TEST: dump the LOAD image content. If a context/SH image reads all
-  // zero, it's non-coherent (the driver wrote it via a different VA) -- the shader
-  // would be present but invisible. If it has real reg values, the image is fine.
-  // Coherency census: a title that drives its whole context through register
-  // shadows is invisible if those images read zero. Sample one late.
+  // COHERENCY TEST: dump the LOAD image content. If a context/SH image reads
+  // all zero, it's non-coherent (the driver wrote it via a different VA) -- the
+  // shader would be present but invisible. If it has real reg values, the image
+  // is fine. Coherency census: a title that drives its whole context through
+  // register shadows is invisible if those images read zero. Sample one late.
   static int s_imgN = 0;
   if (base == kContextRegBase) s_imgN++;
   if (g_trace && base == kContextRegBase && s_imgN >= 100 && s_imgN <= 106) {
@@ -417,26 +404,37 @@ bool isDraw(uint32_t op) {
 // program, not just the VS/PS code).
 struct ShaderKey {
   uint64_t vs, ps, fetch;
-  bool glClip;  // clip convention is baked into the VS (see PA_CL_CLIP_CNTL)
+  uint32_t gsUserSgprs, psUserSgprs;
+  bool glClip; // clip convention is baked into the VS (see PA_CL_CLIP_CNTL)
   bool operator==(const ShaderKey &o) const {
-    return vs == o.vs && ps == o.ps && fetch == o.fetch && glClip == o.glClip;
+    return vs == o.vs && ps == o.ps && fetch == o.fetch &&
+           gsUserSgprs == o.gsUserSgprs && psUserSgprs == o.psUserSgprs &&
+           glClip == o.glClip;
   }
 };
 struct ShaderKeyHash {
   size_t operator()(const ShaderKey &k) const {
     return std::hash<uint64_t>{}(k.vs) ^ (std::hash<uint64_t>{}(k.ps) << 1) ^
-           (std::hash<uint64_t>{}(k.fetch) << 2) ^ (k.glClip ? 0x9e3779b9u : 0u);
+           (std::hash<uint64_t>{}(k.fetch) << 2) ^
+           (static_cast<size_t>(k.gsUserSgprs) << 3) ^
+           (static_cast<size_t>(k.psUserSgprs) << 9) ^
+           (k.glClip ? 0x9e3779b9u : 0u);
   }
 };
 std::unordered_map<ShaderKey, gcn::Recompiled, ShaderKeyHash> g_shCache;
 
+uint32_t userSgprCount(uint32_t rsrc2) {
+  const uint32_t count = ((rsrc2 >> 1) & 0x1F) | (((rsrc2 >> 27) & 1) << 5);
+  return std::min(count, 32u);
+}
+
 // IT_DISPATCH_DIRECT: body = [dim_x, dim_y, dim_z, initiator] workgroup counts.
 // The CS program address, workgroup shape, RSRC and user data come from the
 // COMPUTE_* SH registers programmed before it.
-const char *const kEncName[17] = {"?",    "sop1", "sop2",  "sopk", "sopc",
-                                  "sopp", "smem", "vop1",  "vop2", "vop3",
-                                  "vopc", "vint", "ds",    "mubuf/flat",
-                                  "mtbuf", "mimg", "exp"};
+const char *const kEncName[17] = {"?",    "sop1", "sop2", "sopk",       "sopc",
+                                  "sopp", "smem", "vop1", "vop2",       "vop3",
+                                  "vopc", "vint", "ds",   "mubuf/flat", "mtbuf",
+                                  "mimg", "exp"};
 
 void handleDispatch(const uint32_t *body, uint32_t count) {
   const uint32_t dimX = count >= 1 ? body[0] : 0;
@@ -547,7 +545,8 @@ void maybeDumpShader(uint64_t addr) {
 static uint32_t packDstSel(const gcn::TImage &t) {
   const uint32_t p = (t.dst_sel[0] & 7) | ((t.dst_sel[1] & 7) << 3) |
                      ((t.dst_sel[2] & 7) << 6) | ((t.dst_sel[3] & 7) << 9);
-  return p == (4u | (5u << 3) | (6u << 6) | (7u << 9)) ? 0u : p;
+  return p == (4u | (5u << 3) | (6u << 6) | (7u << 9)) ? 0u
+                                                        : p | (1u << 12);
 }
 
 // A context register read as the float it holds (viewport scales/offsets).
@@ -690,6 +689,8 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
   }
 
   vk::DrawInfo d;
+  std::memcpy(d.vsUserData, vud, sizeof(d.vsUserData));
+  std::memcpy(d.psUserData, pud, sizeof(d.psUserData));
   d.primType = g_regs[mmVGT_PRIMITIVE_TYPE];
   d.instanceCount = g_numInstances;
   uint32_t autoVertexCount = op == IT_DRAW_INDEX_AUTO && count >= 1 ? body[0] : 0;
@@ -827,7 +828,8 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
       d.depthWriteEnable = (dc >> 2) & 1u;
       d.depthFunc = (dc >> 4) & 0x7;
       std::memcpy(&d.depthClear, &g_regs[mmDB_DEPTH_CLEAR], 4);
-      if (!(d.depthClear >= 0.0f && d.depthClear <= 1.0f)) d.depthClear = 1.0f;
+      if (!(d.depthClear >= 0.0f && d.depthClear <= 1.0f))
+        d.depthClear = 1.0f;
     } else {
       d.depthValid = false;
     }
@@ -844,9 +846,13 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
   std::memcpy(&d.viewportYScale, &g_regs[mmPA_CL_VPORT_YSCALE], 4);
   std::memcpy(&d.viewportYOffset, &g_regs[mmPA_CL_VPORT_YOFFSET], 4);
 
+  const uint32_t gsUserSgprs = userSgprCount(g_regs[mmSPI_SHADER_PGM_RSRC2_GS]);
+  const uint32_t psUserSgprs = userSgprCount(g_regs[mmSPI_SHADER_PGM_RSRC2_PS]);
   // Fetch-shader pointer (a heuristic default: GS user data[0..1]; the AGC
   // input-usage table is authoritative and a follow-up).
-  uint64_t fetch = (static_cast<uint64_t>(vud[1] & 0xFFFF) << 32) | vud[0];
+  const uint64_t fetch =
+      gsUserSgprs >= 2 ? (static_cast<uint64_t>(vud[1] & 0xFFFF) << 32) | vud[0]
+                       : 0;
 
   // Recompile the VS/PS pair (cached) and resolve the live vertex-attribute
   // buffers + constant buffers from the RDNA2 descriptors in user data.
@@ -860,87 +866,116 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
   if (recompOn && inGuest(vsA) && (!psA || inGuest(psA))) {
     // DX_CLIP_SPACE_DEF (bit 19) picks the guest's clip-z convention.
     const bool glClip = !((g_regs[mmPA_CL_CLIP_CNTL] >> 19) & 1);
-    ShaderKey key{vsA, psA, fetch, glClip};
+    ShaderKey key{vsA, psA, fetch, gsUserSgprs, psUserSgprs, glClip};
     auto it = g_shCache.find(key);
     if (it == g_shCache.end()) {
       if (dl) {
         const uint32_t *vc = reinterpret_cast<const uint32_t *>(vsA);
-        const uint32_t *pc = psA ? reinterpret_cast<const uint32_t *>(psA) : nullptr;
+        const uint32_t *pc =
+            psA ? reinterpret_cast<const uint32_t *>(psA) : nullptr;
         // AGC shader code starts with the 0xBEEB03FF sentinel; a psA that isn't
         // (e.g. 0xffc9dfe7 poison fill) means the PS PGM_LO reg didn't land.
-        std::fprintf(stderr, "[agc] DL recompile vs=%#lx (%08x) ps=%#lx (%08x %08x)...\n",
-                     (unsigned long)vsA, vc[0], (unsigned long)psA,
-                     pc ? pc[0] : 0, pc ? pc[1] : 0);
-        std::fprintf(stderr, "[agc] DL psInputEna=%#x (frag-coord/face VGPR seed)\n",
+        std::fprintf(
+            stderr,
+            "[agc] DL recompile vs=%#lx (%08x) ps=%#lx (%08x %08x)...\n",
+            (unsigned long)vsA, vc[0], (unsigned long)psA, pc ? pc[0] : 0,
+            pc ? pc[1] : 0);
+        std::fprintf(stderr,
+                     "[agc] DL psInputEna=%#x (frag-coord/face VGPR seed)\n",
                      g_regs[mmSPI_PS_INPUT_ENA]);
       }
       it = g_shCache
-               .emplace(key, rdna::Recompile(reinterpret_cast<const uint32_t *>(vsA),
-                                             psA ? reinterpret_cast<const uint32_t *>(psA)
-                                                 : nullptr,
-                                             vud, pud, g_regs[mmSPI_PS_INPUT_ENA],
-                                             glClip))
+               .emplace(key, rdna::Recompile(
+                                 reinterpret_cast<const uint32_t *>(vsA),
+                                 psA ? reinterpret_cast<const uint32_t *>(psA)
+                                     : nullptr,
+                                 vud, pud, g_regs[mmSPI_PS_INPUT_ENA], glClip,
+                                 gsUserSgprs, psUserSgprs))
                .first;
-      if (dl) std::fprintf(stderr, "[agc] DL recompile done ok=%d\n", it->second.ok);
+      if (dl)
+        std::fprintf(stderr, "[agc] DL recompile done ok=%d\n", it->second.ok);
       // A shader we cannot recompile drops its draw entirely, which is
-      // indistinguishable from "the title never issued it" unless it is said out
-      // loud. Report each failing pair once.
+      // indistinguishable from "the title never issued it" unless it is said
+      // out loud. Report each failing pair once.
       if (!it->second.ok) {
         static int failed = 0;
         if (failed++ < 32)
-          std::fprintf(stderr,
-                       "[agc] recompile FAILED vs=%#lx ps=%#lx -- draw dropped\n",
-                       (unsigned long)vsA, (unsigned long)psA);
+          std::fprintf(
+              stderr,
+              "[agc] recompile FAILED vs=%#lx ps=%#lx -- draw dropped\n",
+              (unsigned long)vsA, (unsigned long)psA);
       }
     }
     gcn::Recompiled &rc = it->second;
     if (rc.ok) {
       // Vertex attributes: the V# is either inline in user data at table_sgpr
-      // (AGC frequently passes the vertex V# directly) or reached through a table
-      // pointer at {table_sgpr, +1}. Resolve each attr's V#, then group the
-      // attrs into vertex bindings: same-stride V#s within one stride of each
-      // other interleave in one binding; others get their own binding (the
+      // (AGC frequently passes the vertex V# directly) or reached through a
+      // table pointer at {table_sgpr, +1}. Resolve each attr's V#, then group
+      // the attrs into vertex bindings: same-stride V#s within one stride of
+      // each other interleave in one binding; others get their own binding (the
       // textured sprite VS streams pos/color and uv/params from two buffers, so
       // a single interleaved binding would feed the PS garbage UVs). Attrs that
-      // don't decode to a valid V# are skipped (a partial fetch still rasterizes).
+      // don't decode to a valid V# are skipped (a partial fetch still
+      // rasterizes).
       VBuffer attrVbs[8];
       const gcn::ShaderAttr *attrRes[8];
       uint32_t attrN = 0;
-      // The merged ES/GS NGG vertex shader reads its GS user data starting at wave
-      // SGPR udBase (sgpr 0..udBase-1 are ES/system), but the AGC latches it into
-      // SPI_SHADER_USER_DATA_GS_0 which we index from 0, so shift shader SGPR N ->
-      // userData[N-udBase] for both attrs and cbufs. Defaults to 8 (the observed
-      // merged-NGG layout); DELTA_PS5_UDBASE overrides. TODO: derive from RSRC2.
+      // The merged ES/GS NGG vertex shader reads its GS user data starting at
+      // wave SGPR udBase (sgpr 0..udBase-1 are ES/system), but the AGC latches
+      // it into SPI_SHADER_USER_DATA_GS_0 which we index from 0, so shift
+      // shader SGPR N -> userData[N-udBase] for both attrs and cbufs. Defaults
+      // to 8 (the observed merged-NGG layout); DELTA_PS5_UDBASE overrides.
+      // TODO: derive from RSRC2.
       static const uint32_t udBaseEnv = [] {
         const char *e = std::getenv("DELTA_PS5_UDBASE");
         return e ? static_cast<uint32_t>(std::atoi(e)) : 8u;
       }();
+      const auto vsResources = rdna::ResolveBuffers(
+          reinterpret_cast<const uint32_t *>(vsA), vud, gsUserSgprs, udBaseEnv);
       if (dl)
-        std::fprintf(stderr, "[agc] DL attrs=%zu vud[0..7]=%08x %08x %08x %08x %08x %08x %08x %08x\n",
-                     rc.attrs.size(), vud[0], vud[1], vud[2], vud[3], vud[4], vud[5], vud[6], vud[7]);
+        std::fprintf(stderr,
+                     "[agc] DL attrs=%zu vud[0..7]=%08x %08x %08x %08x %08x "
+                     "%08x %08x %08x\n",
+                     rc.attrs.size(), vud[0], vud[1], vud[2], vud[3], vud[4],
+                     vud[5], vud[6], vud[7]);
       for (size_t i = 0; i < rc.attrs.size() && i < 8; i++) {
         auto &a = rc.attrs[i];
-        const uint32_t ti =
-            a.table_sgpr >= udBaseEnv ? a.table_sgpr - udBaseEnv : a.table_sgpr;
-        if (ti + 3 >= 32) continue;
-        VBuffer vb = decodeVBuffer(&vud[ti]);  // inline V#
-        const char *how = "inline";
-        if (!inGuest(vb.base) || !plausibleVb(vb)) {  // else follow a table pointer
-          uint64_t tbl = (static_cast<uint64_t>(vud[ti + 1] & 0xFFFF) << 32) |
-                         vud[ti];
-          uint64_t tblAddr = tbl + a.vbuf_dword_off * 4;
-          if (inGuest(tbl) && mapped(tblAddr, 16)) {
-            vb = decodeVBuffer(reinterpret_cast<const uint32_t *>(tblAddr));
-            how = "table";
+        VBuffer vb{};
+        const char *how = "replay";
+        if (a.use_pc != ~0u) {
+          const auto resolved = vsResources.find(a.use_pc);
+          if (resolved == vsResources.end() ||
+              !resolved->second.descriptor_valid)
+            continue;
+          vb = decodeVBuffer(resolved->second.descriptor);
+        } else {
+          const uint32_t ti = a.table_sgpr >= udBaseEnv
+                                  ? a.table_sgpr - udBaseEnv
+                                  : a.table_sgpr;
+          if (ti + 3 >= gsUserSgprs)
+            continue;
+          vb = decodeVBuffer(&vud[ti]);
+          how = "inline";
+          if (!inGuest(vb.base) || !plausibleVb(vb)) {
+            const uint64_t tbl =
+                (static_cast<uint64_t>(vud[ti + 1] & 0xFFFF) << 32) | vud[ti];
+            const uint64_t tblAddr = tbl + a.vbuf_dword_off * 4;
+            if (inGuest(tbl) && gpu::IsReadableRange(tblAddr, 16)) {
+              vb = decodeVBuffer(reinterpret_cast<const uint32_t *>(tblAddr));
+              how = "table";
+            }
           }
         }
         if (dl)
-          std::fprintf(stderr, "[agc]   attr%zu loc=%u nc=%u tbl_sgpr=%u off=%u (%s) -> "
-                       "base=%#lx stride=%u nrec=%u gfmt=%u -> dfmt=%u nfmt=%u\n",
-                       i, a.location, a.num_comps, a.table_sgpr, a.vbuf_dword_off, how,
-                       (unsigned long)vb.base, vb.stride, vb.numRecords, vb.gfmt,
-                       vb.dfmt, vb.nfmt);
-        if (!inGuest(vb.base) || !plausibleVb(vb)) continue;  // unresolved: keep the rest
+          std::fprintf(
+              stderr,
+              "[agc]   attr%zu loc=%u nc=%u tbl_sgpr=%u off=%u (%s) -> "
+              "base=%#lx stride=%u nrec=%u gfmt=%u -> dfmt=%u nfmt=%u\n",
+              i, a.location, a.num_comps, a.table_sgpr, a.vbuf_dword_off, how,
+              (unsigned long)vb.base, vb.stride, vb.numRecords, vb.gfmt,
+              vb.dfmt, vb.nfmt);
+        if (!inGuest(vb.base) || !plausibleVb(vb))
+          continue; // unresolved: keep the rest
         attrVbs[attrN] = vb;
         attrRes[attrN++] = &a;
       }
@@ -950,14 +985,19 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
         const VBuffer &vb = attrVbs[i];
         int sel = -1;
         for (uint32_t j = 0; j < d.nvbufs; j++) {
-          if (d.vbufs[j].stride != vb.stride) continue;
+          if (d.vbufs[j].stride != vb.stride)
+            continue;
           uint64_t b = reinterpret_cast<uint64_t>(d.vbufs[j].data);
           uint64_t lo = b < vb.base ? b : vb.base;
           uint64_t hi = b < vb.base ? vb.base : b;
-          if (hi - lo < vb.stride) { sel = static_cast<int>(j); break; }
+          if (hi - lo < vb.stride) {
+            sel = static_cast<int>(j);
+            break;
+          }
         }
         if (sel < 0) {
-          if (d.nvbufs >= 8) break;
+          if (d.nvbufs >= 8)
+            break;
           sel = static_cast<int>(d.nvbufs);
           d.vbufs[d.nvbufs++] = {reinterpret_cast<const void *>(vb.base),
                                  vb.stride, vb.numRecords};
@@ -973,16 +1013,20 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
       for (uint32_t i = 0; i < attrN && d.nvattrs < 8; i++) {
         const VBuffer &vb = attrVbs[i];
         const uint32_t b = attrBinding[i];
-        if (b >= d.nvbufs) continue;
-        const uint64_t off = vb.base - reinterpret_cast<uint64_t>(d.vbufs[b].data);
-        if (off >= d.vbufs[b].stride) continue;
+        if (b >= d.nvbufs)
+          continue;
+        const uint64_t off =
+            vb.base - reinterpret_cast<uint64_t>(d.vbufs[b].data);
+        if (off >= d.vbufs[b].stride)
+          continue;
         // A typed fetch (tbuffer_load_format_*) carries its own format and the
         // hardware ignores the V#'s; Skyrim's world positions come in that way.
         uint32_t dfmt = vb.dfmt, nfmt = vb.nfmt;
         if (attrRes[i]->inst_format)
           gfx10VBufFormat(attrRes[i]->inst_format, dfmt, nfmt);
-        d.vattrs[d.nvattrs++] = {attrRes[i]->location, b, static_cast<uint32_t>(off),
-                                 attrRes[i]->num_comps, dfmt, nfmt};
+        d.vattrs[d.nvattrs++] = {
+            attrRes[i]->location,  b,    static_cast<uint32_t>(off),
+            attrRes[i]->num_comps, dfmt, nfmt};
       }
       if (d.nvbufs) {
         // Mirror binding 0 into the legacy single-stream fields; the vertex
@@ -1009,80 +1053,51 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
       }
       dropAttrCount = rc.attrs.size();
 
-      // Constant buffers: resolve each SMEM descriptor. For a direct cbuf the V# is
-      // inline at ud_sgpr in user data; for a chained cbuf the descriptor is reached
-      // by reading the root pointer from user data and dereferencing through guest
-      // memory per chain_off[] (the VS loads its transform's V# from a root
-      // descriptor table this way). The bind size is the recompiler's planned dword
-      // window (the V# stride/records are meaningless for an s_load pointer).
-      auto resolveCbufs = [&](const std::vector<gcn::ShaderCbuf> &cbufs,
-                              const uint32_t *userData, bool vertexStage) {
-        const uint32_t udBase = vertexStage ? udBaseEnv : 0;
-        for (const auto &cb : cbufs) {
-          if (cb.binding >= gpu::gcn::kMaxCbufBindings) continue;
-          VBuffer vb{};
-          const char *how = "direct";
-          const uint32_t udi = cb.ud_sgpr >= udBase ? cb.ud_sgpr - udBase : cb.ud_sgpr;
-          if (cb.chain_len == 0) {
-            if (udi + 3 >= 32) continue;
-            vb = decodeVBuffer(&userData[udi]);
-          } else {  // walk the s_load pointer chain to the final V#
-            if (udi + 1 >= 32) continue;
-            uint64_t ptr = (static_cast<uint64_t>(userData[udi + 1] & 0xFFFF) << 32) |
-                           userData[udi];
-            bool ok = true;
-            for (uint32_t i = 0; i + 1 < cb.chain_len; i++) {  // deref intermediate pointers
-              uint64_t at = (ptr + cb.chain_off[i]) & ~uint64_t{3};
-              if (!inGuest(at) || !mapped(at, 8)) { ok = false; break; }
-              const uint32_t *q = reinterpret_cast<const uint32_t *>(at);
-              ptr = (static_cast<uint64_t>(q[1] & 0xFFFF) << 32) | q[0];
+      const auto psResources =
+          psA ? rdna::ResolveBuffers(reinterpret_cast<const uint32_t *>(psA),
+                                     pud, psUserSgprs)
+              : std::unordered_map<uint32_t, rdna::BufferResource>{};
+      auto resolveCbufs =
+          [&](const std::vector<gcn::ShaderCbuf> &cbufs,
+              const std::unordered_map<uint32_t, rdna::BufferResource>
+                  &resolved,
+              bool vertexStage) {
+            for (const auto &cb : cbufs) {
+              if (cb.binding >= gpu::gcn::kMaxCbufBindings)
+                continue;
+              const auto it = resolved.find(cb.use_pc);
+              if (it == resolved.end())
+                continue;
+              uint64_t base = it->second.base & ~uint64_t{3};
+              uint64_t bytes = static_cast<uint64_t>(cb.num_dwords) * 4;
+              if (dl)
+                std::fprintf(
+                    stderr,
+                    "[agc]   cbuf %s bind=%u use_pc=%#x base=%#lx dwords=%u\n",
+                    vertexStage ? "vs" : "ps", cb.binding, cb.use_pc,
+                    (unsigned long)base, cb.num_dwords);
+              if (!inGuest(base) || !gpu::IsReadableRange(base, bytes))
+                continue;
+              d.cbufs[cb.binding] = {base, static_cast<uint32_t>(bytes)};
+              d.nCbufs = std::max(d.nCbufs, cb.binding + 1);
+              if (vertexStage && bytes >= sizeof(d.mvp)) {
+                d.cbufBase = base;
+                d.cbufSize = static_cast<uint32_t>(bytes);
+                std::memcpy(d.mvp, reinterpret_cast<const void *>(base),
+                            sizeof(d.mvp));
+              }
             }
-            uint64_t vAddr = (ptr + cb.chain_off[cb.chain_len - 1]) & ~uint64_t{3};
-            if (!ok || !inGuest(vAddr) || !mapped(vAddr, 16)) continue;
-            vb = decodeVBuffer(reinterpret_cast<const uint32_t *>(vAddr));
-            how = "chain";
-          }
-          uint64_t base = vb.base & ~uint64_t{3};  // dword-align (SMEM base)
-          uint64_t bytes = static_cast<uint64_t>(cb.num_dwords) * 4;
-          if (dl)
-            std::fprintf(stderr, "[agc]   cbuf %s bind=%u root=%u %s(len=%u) base=%#lx dwords=%u\n",
-                         vertexStage ? "vs" : "ps", cb.binding, cb.ud_sgpr, how,
-                         cb.chain_len, (unsigned long)base, cb.num_dwords);
-          if (!inGuest(base) || !bytes) continue;
-          d.cbufs[cb.binding] = {base, static_cast<uint32_t>(bytes)};
-          d.nCbufs = std::max(d.nCbufs, cb.binding + 1);
-          if (vertexStage && bytes >= sizeof(d.mvp)) {
-            d.cbufBase = base;
-            d.cbufSize = static_cast<uint32_t>(bytes);
-            std::memcpy(d.mvp, reinterpret_cast<const void *>(base), sizeof(d.mvp));
-          }
-        }
-      };
+          };
       if (good) {
-        resolveCbufs(rc.vs_cbufs, vud, true);
-        if (psA) resolveCbufs(rc.ps_cbufs, pud, false);
-        // Textures: resolve the live gfx10.3 T#/S# each PS sampler reads, in the
-        // recompiler's set-0 binding order (rdna::TrackTextures re-derives the same
-        // plan). texs[i] maps to PS sampler binding i.
+        resolveCbufs(rc.vs_cbufs, vsResources, true);
+        if (psA)
+          resolveCbufs(rc.ps_cbufs, psResources, false);
+        // Textures: resolve the live gfx10.3 T#/S# each PS sampler reads, in
+        // the recompiler's set-0 binding order (rdna::TrackTextures re-derives
+        // the same plan). texs[i] maps to PS sampler binding i.
         if (psA && !rc.ps_texs.empty()) {
-          // USER_SGPR[5:1] with USER_SGPR_MSB[27] as bit 5: how many user-data
-          // SGPRs this PS was launched with.
-          const uint32_t rsrc2 = g_regs[mmSPI_SHADER_PGM_RSRC2_PS];
-          // The hardware window is what RSRC2 declares. Skyrim's grading pass
-          // declares 32 and keeps a T# at s16 -- resolving it is correct, but the
-          // texture it names (a 3840x2160 R16G16F target) then tints the whole
-          // frame magenta, so something downstream of that sample is still wrong
-          // and the conservative 16-dword window renders better today.
-          // DELTA_GPU_UDBOUND=0 uses the declared window, or pins any value.
-          const uint32_t declared =
-              ((rsrc2 >> 1) & 0x1F) | (((rsrc2 >> 27) & 1) << 5);
-          static const int udBound = [] {
-            const char *e = std::getenv("DELTA_GPU_UDBOUND"); return e ? std::atoi(e) : 16;
-          }();
-          const uint32_t psUserSgprs =
-              udBound > 0 ? static_cast<uint32_t>(udBound) : declared;
-          auto texs = rdna::TrackTextures(reinterpret_cast<const uint32_t *>(psA), pud,
-                                          psUserSgprs);
+          auto texs = rdna::TrackTextures(
+              reinterpret_cast<const uint32_t *>(psA), pud, psUserSgprs);
           // The single-texture render path reads the legacy tex* mirror of
           // texs[0], so populate it too (the PS4 path does the same).
           if (!texs.empty()) {
@@ -1675,7 +1690,7 @@ void endFrame(uint64_t scanoutBase) {
   }
 }
 
-}  // namespace gpu::ps5
+} // namespace gpu::ps5
 
 // LLE submit bridge: the kernel /dev/gc AGC ioctls (gc_dev.cpp) forward the DCB
 // here, mirroring prosperity_gc_submit on the PS4 path.

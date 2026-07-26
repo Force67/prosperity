@@ -189,41 +189,44 @@ struct Translator {
     return m.Emit(spv::Op::OpSelect, t_f, {cond, a, b});
   }
 
-  Id PairType() { return m.TypeStruct({t_u, t_u}); }  // {result, carry/hi}
+  Id PairType() { return m.TypeStruct({t_u, t_u}); } // {result, carry/hi}
 
   // ---- constant buffers (graphics SMRD model) ----
-  // Declared as CB { uvec4 data[64]; } at set 1. Separate bindings preserve
+  // Declared as CB { uvec4 data[]; } at set 1. Separate bindings preserve
   // the distinct V# resources selected by each s_buffer_load.
   Id EnsureCbuf(uint32_t binding) {
     auto it = cbuf_vars.find(binding);
-    if (it != cbuf_vars.end()) return it->second;
+    if (it != cbuf_vars.end())
+      return it->second;
     if (!cbuf_type) {
-      const Id arr = m.TypeArray(m.TypeVec(t_u, 4), 64);
+      const Id arr = m.TypeArray(m.TypeVec(t_u, 4), kCbufDwords / 4);
       m.Decorate(arr, spv::Decoration::ArrayStride, {16});
       cbuf_type = m.TypeStruct({arr});
       m.Decorate(cbuf_type, spv::Decoration::Block);
       m.MemberDecorate(cbuf_type, 0, spv::Decoration::Offset, {0});
     }
-    const Id v = m.Variable(m.TypePointer(spv::StorageClass::Uniform, cbuf_type),
-                            spv::StorageClass::Uniform);
+    const Id v =
+        m.Variable(m.TypePointer(spv::StorageClass::Uniform, cbuf_type),
+                   spv::StorageClass::Uniform);
     m.Decorate(v, spv::Decoration::DescriptorSet, {1});
     m.Decorate(v, spv::Decoration::Binding, {binding});
     cbuf_vars[binding] = v;
     return v;
   }
   // Read cbuffer dword k (== uvec4 data[k>>2][k&3]) as a uint. The uvec4 index
-  // clamps into the 64-element (1 KiB) window so an out-of-range constant
+  // clamps into the declared window so an out-of-range constant
   // index cannot produce an invalid access chain.
   Id CbufDword(uint32_t binding, uint32_t k) {
     const Id var = EnsureCbuf(binding);
     const Id p_u = m.TypePointer(spv::StorageClass::Uniform, t_u);
     const Id ch = m.AccessChain(
-        p_u, var, {U32(0), U32((k >> 2) & 63), U32(k & 3)});
+        p_u, var,
+        {U32(0), U32(std::min(k >> 2, kCbufDwords / 4 - 1)), U32(k & 3)});
     return m.Load(t_u, ch);
   }
   Id CbufDwordId(uint32_t binding, Id k) {
     const Id var = EnsureCbuf(binding);
-    const Id v4 = UMin(Shr(k, U32(2)), U32(63));
+    const Id v4 = UMin(Shr(k, U32(2)), U32(kCbufDwords / 4 - 1));
     const Id p_u = m.TypePointer(spv::StorageClass::Uniform, t_u);
     const Id ch = m.AccessChain(p_u, var, {U32(0), v4, And(k, U32(3))});
     return m.Load(t_u, ch);
@@ -318,6 +321,8 @@ struct StageContext {
   // Per-instruction cbuf bindings for constant buffer_loads whose srsrc SGPRs
   // are reused (PS5 table-chained descriptors); takes precedence over cbuf_bind.
   std::unordered_map<uint32_t, uint32_t> mubuf_cbuf_by_pc;
+  // Per-instruction RDNA SMEM binding when one sbase has multiple producers.
+  std::unordered_map<uint32_t, uint32_t> smem_cbuf_by_pc;
   // pcs of `s_mov exec, sN` movs where sN holds unmodelled SPI launch state
   // (e.g. the PS coverage mask); emitting them would zero EXEC and skip every
   // export in the CFG path, so they are dropped (EXEC keeps its all-on seed).

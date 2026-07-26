@@ -8,6 +8,8 @@
 
 #include "vk_render.h"
 
+#include "guest_memory.h"
+
 #include <vulkan/vulkan.h>
 
 #include <dlfcn.h>
@@ -19,20 +21,20 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <mutex>
 #include <limits>
+#include <mutex>
 #include <thread>
 #include <unordered_map>
 #include <vector>
 
+#include "gcn/gcn_detile.h"
+#include "gcn/gcn_translate.h"
 #include "gfx/gfx.h"
 #include "gfx/overlay.h"
-#include "gcn/gcn_translate.h"
-#include "gcn/gcn_detile.h"
-#include "shaders/quad_vert_spv.h"
 #include "shaders/quad_frag_spv.h"
-#include "shaders/tex_vert_spv.h"
+#include "shaders/quad_vert_spv.h"
 #include "shaders/tex_frag_spv.h"
+#include "shaders/tex_vert_spv.h"
 
 namespace gpu::vk {
 namespace {
@@ -51,7 +53,7 @@ static_assert(ComputeInfo::kMaxResources == gcn::kMaxCsResources);
 constexpr VkDeviceSize kVbRing = 16ull * 1024 * 1024;  // per-frame vertex ring
 constexpr VkDeviceSize kIbRing = 8ull * 1024 * 1024;   // per-frame index ring (32-bit)
 constexpr VkDeviceSize kUboRing = 64ull * 1024 * 1024; // per-frame recomp cbuffer ring
-constexpr uint32_t kCbufWindow = 1024;                 // bytes per draw (uvec4 data[64])
+constexpr uint32_t kCbufWindow = gpu::gcn::kCbufDwords * 4;
 constexpr uint32_t kCbufBindings = gpu::gcn::kMaxCbufBindings;  // set-1 UBO bindings
 
 struct State {
@@ -472,6 +474,32 @@ VkFormat colorTargetFormat(uint32_t info) {
   return g.rtFormat;
 }
 
+VkComponentMapping textureComponents(uint32_t swizzle) {
+  static const bool noSwizzle = std::getenv("DELTA_GPU_NOSWIZZLE") != nullptr;
+  if (!swizzle || noSwizzle)
+    return {};
+  const auto comp = [](uint32_t sel) {
+    switch (sel) {
+    case 0:
+      return VK_COMPONENT_SWIZZLE_ZERO;
+    case 1:
+      return VK_COMPONENT_SWIZZLE_ONE;
+    case 4:
+      return VK_COMPONENT_SWIZZLE_R;
+    case 5:
+      return VK_COMPONENT_SWIZZLE_G;
+    case 6:
+      return VK_COMPONENT_SWIZZLE_B;
+    case 7:
+      return VK_COMPONENT_SWIZZLE_A;
+    default:
+      return VK_COMPONENT_SWIZZLE_IDENTITY;
+    }
+  };
+  return {comp(swizzle & 7), comp((swizzle >> 3) & 7), comp((swizzle >> 6) & 7),
+          comp((swizzle >> 9) & 7)};
+}
+
 uint32_t formatBytes(VkFormat fmt) {
   switch (fmt) {
     case VK_FORMAT_R8_UNORM: return 1;
@@ -543,6 +571,8 @@ struct RTarget {
   VkDeviceMemory feedbackMem = VK_NULL_HANDLE;
   VkImageView feedbackView = VK_NULL_HANDLE;
   VkDescriptorSet feedbackSet = VK_NULL_HANDLE;
+  std::unordered_map<uint32_t, VkImageView> sampledViews;
+  std::unordered_map<uint32_t, VkImageView> feedbackSampledViews;
   VkImageLayout feedbackLayout = VK_IMAGE_LAYOUT_UNDEFINED;
   uint32_t w = 0, h = 0;
   VkFormat fmt = VK_FORMAT_B8G8R8A8_UNORM;  // identity: addr alone doesn't pin format
@@ -568,6 +598,7 @@ struct DepthTarget {
   VkDeviceMemory mem = VK_NULL_HANDLE;
   VkImageView view = VK_NULL_HANDLE;
   VkDescriptorSet set = VK_NULL_HANDLE;
+  std::unordered_map<uint32_t, VkImageView> sampledViews;
   uint32_t w = 0, h = 0;
   VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
   int lastFrame = -1000;
@@ -576,6 +607,47 @@ struct DepthTarget {
   float clearValue = 1.0f;
 };
 std::unordered_map<uint64_t, DepthTarget> g_depths;
+
+VkImageView sampledImageView(VkImage image, VkImageView identity,
+                             VkFormat format, VkImageAspectFlags aspect,
+                             uint32_t swizzle,
+                             std::unordered_map<uint32_t, VkImageView> &views) {
+  const VkComponentMapping components = textureComponents(swizzle);
+  if (components.r == VK_COMPONENT_SWIZZLE_IDENTITY &&
+      components.g == VK_COMPONENT_SWIZZLE_IDENTITY &&
+      components.b == VK_COMPONENT_SWIZZLE_IDENTITY &&
+      components.a == VK_COMPONENT_SWIZZLE_IDENTITY)
+    return identity;
+  const auto it = views.find(swizzle);
+  if (it != views.end())
+    return it->second;
+  VkImageViewCreateInfo vi{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+  vi.image = image;
+  vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+  vi.format = format;
+  vi.components = components;
+  vi.subresourceRange = {aspect, 0, 1, 0, 1};
+  VkImageView view = VK_NULL_HANDLE;
+  if (vkCreateImageView(g.device, &vi, nullptr, &view) != VK_SUCCESS)
+    return VK_NULL_HANDLE;
+  views.emplace(swizzle, view);
+  return view;
+}
+
+VkImageView sampledView(RTarget &rt, uint32_t swizzle, bool feedback = false) {
+  return feedback ? sampledImageView(rt.feedbackImage, rt.feedbackView, rt.fmt,
+                                     VK_IMAGE_ASPECT_COLOR_BIT, swizzle,
+                                     rt.feedbackSampledViews)
+                  : sampledImageView(rt.image, rt.view, rt.fmt,
+                                     VK_IMAGE_ASPECT_COLOR_BIT, swizzle,
+                                     rt.sampledViews);
+}
+
+VkImageView sampledView(DepthTarget &depth, uint32_t swizzle) {
+  return sampledImageView(depth.image, depth.view, kDepthFormat,
+                          VK_IMAGE_ASPECT_DEPTH_BIT, swizzle,
+                          depth.sampledViews);
+}
 
 // Address -> image page table (the resource model's core). Maps a 64 KiB guest page
 // to the RT bases whose memory footprint covers it, so a sampled address resolves to
@@ -630,10 +702,12 @@ StageSample g_stageHist[kStageHistN];
 int g_stageHistPos = 0, g_stageHistCount = 0;
 inline uint64_t nowNs() {
   return std::chrono::duration_cast<std::chrono::nanoseconds>(
-             std::chrono::steady_clock::now().time_since_epoch()).count();
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
 }
 struct ScopeNs {
-  uint64_t t0; uint64_t *acc;
+  uint64_t t0;
+  uint64_t *acc;
   explicit ScopeNs(uint64_t *a) : t0(nowNs()), acc(a) {}
   ~ScopeNs() { *acc += nowNs() - t0; }
 };
@@ -659,11 +733,12 @@ uint32_t findMemoryType(uint32_t typeBits, VkMemoryPropertyFlags props) {
   return 0;
 }
 
-// Pick a memory type matching `pref` if any exists, else fall back to `req`. Used
-// for the readback buffer: the CPU READS it every frame (the scanout flip), so it
-// must be HOST_CACHED -- reading from the default HOST_COHERENT (write-combined,
-// uncached) staging memory byte-by-byte is ~30x slower and was dominating frame
-// time. CACHED+COHERENT (present on desktop GPUs) needs no manual invalidate.
+// Pick a memory type matching `pref` if any exists, else fall back to `req`.
+// Used for the readback buffer: the CPU READS it every frame (the scanout
+// flip), so it must be HOST_CACHED -- reading from the default HOST_COHERENT
+// (write-combined, uncached) staging memory byte-by-byte is ~30x slower and was
+// dominating frame time. CACHED+COHERENT (present on desktop GPUs) needs no
+// manual invalidate.
 uint32_t findMemoryTypePref(uint32_t typeBits, VkMemoryPropertyFlags pref,
                             VkMemoryPropertyFlags req) {
   VkPhysicalDeviceMemoryProperties mp;
@@ -1452,30 +1527,33 @@ void retireTextureImage(const TexImageKey &key) {
 // to it. Cached by guest base; re-uploaded when the guest pixels change (the
 // room art is composed/loaded into the same buffer after the first sample, so a
 // once-only cache would serve a stale black frame).
-VkDescriptorSet getTexture(uint64_t base, uint32_t w, uint32_t h,
-                             uint32_t dfmt, uint32_t nfmt,
-                             uint32_t tiling = 8, uint32_t pitch = 0,
-                            uint32_t layers = 1, uint32_t base_array = 0,
-                             uint32_t view_layers = 1, uint32_t mip_levels = 1,
-                             uint32_t base_mip = 0, uint32_t view_mips = 1,
-                              uint32_t min_lod = 0, bool pow2_pad = false,
-                              const uint32_t *sampler = nullptr,
-                              bool sampler_valid = false, bool arrayed = false,
-                              bool force_lod_zero = false,
-                              bool depth_compare = false, uint32_t swizzle = 0) {
-  constexpr uint64_t kGuestBegin = 0x1000000000ull;
-  constexpr uint64_t kGuestEnd = 0x20000000000ull;
+VkDescriptorSet
+getTexture(uint64_t base, uint32_t w, uint32_t h, uint32_t dfmt, uint32_t nfmt,
+           uint32_t tiling = 8, uint32_t pitch = 0, uint32_t layers = 1,
+           uint32_t base_array = 0, uint32_t view_layers = 1,
+           uint32_t mip_levels = 1, uint32_t base_mip = 0,
+           uint32_t view_mips = 1, uint32_t min_lod = 0, bool pow2_pad = false,
+           const uint32_t *sampler = nullptr, bool sampler_valid = false,
+           bool arrayed = false, bool force_lod_zero = false,
+           bool depth_compare = false, uint32_t swizzle = 0) {
   constexpr uint64_t kMaxTextureBytes = 256ull * 1024 * 1024;
-  if (!w || !h || w > 8192 || h > 8192) return VK_NULL_HANDLE;
+  if (!w || !h || w > 8192 || h > 8192)
+    return VK_NULL_HANDLE;
   VkFormat format = guestTextureFormat(dfmt, nfmt);
-  if (format == VK_FORMAT_UNDEFINED) return VK_NULL_HANDLE;
-  if (!layers || base_array >= layers) return VK_NULL_HANDLE;
+  if (format == VK_FORMAT_UNDEFINED)
+    return VK_NULL_HANDLE;
+  if (!layers || base_array >= layers)
+    return VK_NULL_HANDLE;
   view_layers = std::min(view_layers, layers - base_array);
-  if (!arrayed) view_layers = 1;
-  if (!view_layers) return VK_NULL_HANDLE;
-  if (!mip_levels || base_mip >= mip_levels) return VK_NULL_HANDLE;
+  if (!arrayed)
+    view_layers = 1;
+  if (!view_layers)
+    return VK_NULL_HANDLE;
+  if (!mip_levels || base_mip >= mip_levels)
+    return VK_NULL_HANDLE;
   view_mips = std::min(view_mips, mip_levels - base_mip);
-  if (!view_mips) return VK_NULL_HANDLE;
+  if (!view_mips)
+    return VK_NULL_HANDLE;
   // Diagnostic override used to identify incorrectly described guest surfaces.
   tiling = textureTiling(tiling);
   // Block-compressed formats lay out and detile in 4x4-block ("element")
@@ -1487,25 +1565,27 @@ VkDescriptorSet getTexture(uint64_t base, uint32_t w, uint32_t h,
     return VK_NULL_HANDLE;
   const uint32_t lw = bc ? (w + 3) / 4 : w;
   const uint32_t lh = bc ? (h + 3) / 4 : h;
-  const uint32_t lpitch = bc ? ((pitch ? pitch : w) + 3) / 4 : (pitch ? pitch : w);
+  const uint32_t lpitch =
+      bc ? ((pitch ? pitch : w) + 3) / 4 : (pitch ? pitch : w);
   gcn::TextureLayout32 layout;
   // DELTA_GPU_TEXFAIL: why a guest texture declines to upload. Skyrim's font
   // atlas fell out here and every glyph then sampled the white default, which
   // fills each glyph quad solid instead of masking it.
   static const bool texFail = std::getenv("DELTA_GPU_TEXFAIL") != nullptr;
-  if (!gcn::BuildTextureLayout32(layout, lw, lh, lpitch, layers,
-                                  mip_levels, tiling, pow2_pad, elemBytes)) {
+  if (!gcn::BuildTextureLayout32(layout, lw, lh, lpitch, layers, mip_levels,
+                                 tiling, pow2_pad, elemBytes)) {
     if (texFail) {
       static int n = 0;
       if (n++ < 12)
-        std::fprintf(stderr,
-                     "[texfail] layout %#lx %ux%u pitch=%u tiling=%u elem=%u mips=%u\n",
-                     (unsigned long)base, w, h, lpitch, tiling, elemBytes, mip_levels);
+        std::fprintf(
+            stderr,
+            "[texfail] layout %#lx %ux%u pitch=%u tiling=%u elem=%u mips=%u\n",
+            (unsigned long)base, w, h, lpitch, tiling, elemBytes, mip_levels);
     }
     return VK_NULL_HANDLE;
   }
   uint64_t footprint = layout.size;
-  if (base < kGuestBegin || footprint > kMaxTextureBytes || base > kGuestEnd - footprint) {
+  if (footprint > kMaxTextureBytes) {
     if (texFail) {
       static int n = 0;
       if (n++ < 12)
@@ -1516,20 +1596,25 @@ VkDescriptorSet getTexture(uint64_t base, uint32_t w, uint32_t h,
     }
     return VK_NULL_HANDLE;
   }
-  TexKey key = textureKey(base, w, h, dfmt, nfmt, tiling, pitch, layers, base_array,
-                             view_layers, mip_levels, base_mip, view_mips, min_lod,
-                             pow2_pad, sampler, sampler_valid, arrayed,
-                             force_lod_zero, depth_compare, swizzle);
-  // Diagnostic (DELTA_GPU_TEXDUMP): in deep gameplay, dump the first few large guest
-  // textures sampled, so a non-tutorial room's floor texture can be inspected (is it
-  // loaded/brown or black/zero?). Counts non-zero pixels too.
+  if (!gpu::IsReadableRange(base, footprint))
+    return VK_NULL_HANDLE;
+  TexKey key = textureKey(base, w, h, dfmt, nfmt, tiling, pitch, layers,
+                          base_array, view_layers, mip_levels, base_mip,
+                          view_mips, min_lod, pow2_pad, sampler, sampler_valid,
+                          arrayed, force_lod_zero, depth_compare, swizzle);
+  // Diagnostic (DELTA_GPU_TEXDUMP): in deep gameplay, dump the first few large
+  // guest textures sampled, so a non-tutorial room's floor texture can be
+  // inspected (is it loaded/brown or black/zero?). Counts non-zero pixels too.
   static const bool texDump = std::getenv("DELTA_GPU_TEXDUMP") != nullptr;
   if (texDump && g.frameNum > 1200 && w >= 128 && h >= 128) {
     static int tdn = 0;
     if (tdn < 16) {
       const uint32_t *px = reinterpret_cast<const uint32_t *>(base);
-      uint64_t cnt = (uint64_t)w * h, nz = 0, step = cnt > 8192 ? cnt / 8192 : 1;
-      for (uint64_t i = 0; i < cnt; i += step) if (px[i] & 0x00FFFFFFu) nz++;
+      uint64_t cnt = (uint64_t)w * h, nz = 0,
+               step = cnt > 8192 ? cnt / 8192 : 1;
+      for (uint64_t i = 0; i < cnt; i += step)
+        if (px[i] & 0x00FFFFFFu)
+          nz++;
       char p[256];
       std::snprintf(p, sizeof(p), "%s/tex_%02d_%#lx_%ux%u.ppm", dumpDir(), tdn,
                     (unsigned long)base, w, h);
@@ -1591,39 +1676,29 @@ VkDescriptorSet getTexture(uint64_t base, uint32_t w, uint32_t h,
   }
 
   auto it = g_texCache.find(key);
-  if (it != g_texCache.end()) return it->second.set;
-  if (g_texCache.size() >= 12000) return VK_NULL_HANDLE;
+  if (it != g_texCache.end())
+    return it->second.set;
+  if (g_texCache.size() >= 12000)
+    return VK_NULL_HANDLE;
   TexViewKey viewKey = textureViewKey(key);
   auto viewIt = g_texViews.find(viewKey);
   if (viewIt == g_texViews.end()) {
-    if (g_texViews.size() >= 12000) return VK_NULL_HANDLE;
+    if (g_texViews.size() >= 12000)
+      return VK_NULL_HANDLE;
     TexViewEntry viewEntry;
     VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
     vci.image = imageIt->second.image;
-    vci.viewType = arrayed ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
+    vci.viewType =
+        arrayed ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
     vci.format = format;
-    vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, base_mip, view_mips, base_array,
-                            arrayed ? view_layers : 1};
+    vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, base_mip, view_mips,
+                            base_array, arrayed ? view_layers : 1};
     // T# DST_SEL: 0 = zero, 1 = one, 4..7 = R/G/B/A. A single-channel mask (a
     // font atlas) selects its coverage into the components the shader reads;
     // without this every glyph samples alpha = 1 and fills solid.
-    static const bool noSwizzle = std::getenv("DELTA_GPU_NOSWIZZLE") != nullptr;
-    if (viewKey.swizzle && !noSwizzle) {
-      auto comp = [](uint32_t sel) {
-        switch (sel) {
-          case 0: return VK_COMPONENT_SWIZZLE_ZERO;
-          case 1: return VK_COMPONENT_SWIZZLE_ONE;
-          case 4: return VK_COMPONENT_SWIZZLE_R;
-          case 5: return VK_COMPONENT_SWIZZLE_G;
-          case 6: return VK_COMPONENT_SWIZZLE_B;
-          case 7: return VK_COMPONENT_SWIZZLE_A;
-          default: return VK_COMPONENT_SWIZZLE_IDENTITY;
-        }
-      };
-      vci.components = {comp(viewKey.swizzle & 7), comp((viewKey.swizzle >> 3) & 7),
-                        comp((viewKey.swizzle >> 6) & 7), comp((viewKey.swizzle >> 9) & 7)};
-    }
-    if (vkCreateImageView(g.device, &vci, nullptr, &viewEntry.view) != VK_SUCCESS)
+    vci.components = textureComponents(viewKey.swizzle);
+    if (vkCreateImageView(g.device, &vci, nullptr, &viewEntry.view) !=
+        VK_SUCCESS)
       return VK_NULL_HANDLE;
     viewIt = g_texViews.emplace(viewKey, viewEntry).first;
   }
@@ -3482,20 +3557,24 @@ VkShaderModule makeModuleVec(const std::vector<uint32_t> &spv) {
   return makeModule(spv.data(), spv.size() * 4);
 }
 
-// Build (or fetch) the pipeline for a recompiled draw, keyed by the shader pair +
-// blend state + vertex layout.
+// Build (or fetch) the pipeline for a recompiled draw, keyed by the shader pair
+// + blend state + vertex layout.
 RecompPipe *getRecompPipe(const DrawInfo &d) {
+  if (d.recomp->ps_texs.size() > State::kMaxTex)
+    return nullptr;
   uint32_t mrtN = std::min(d.mrtCount, 8u);
-  // Depth + primitive-setup state folded into the pipeline key (mixed through an FNV
-  // prime so it spreads across the whole 64-bit space, away from the blend/stride bits).
+  // Depth + primitive-setup state folded into the pipeline key (mixed through
+  // an FNV prime so it spreads across the whole 64-bit space, away from the
+  // blend/stride bits).
   uint32_t dstate = (d.depthBase ? 1u : 0u) | (d.depthTestEnable ? 2u : 0u) |
                     (d.depthWriteEnable ? 4u : 0u) | ((d.depthFunc & 7u) << 3) |
                     ((d.primType & 0x1Fu) << 6) | ((d.cullMode & 3u) << 11) |
                     (d.frontCCW ? 0u : (1u << 13));
-  uint64_t key = d.vsAddr * 0x9e3779b97f4a7c15ull ^ d.psAddr ^
-                 ((uint64_t)(d.blendEnable ? (d.blendControl & 0x7FFFFFFFu) : 0) << 1) ^
-                 ((uint64_t)d.vertexStride << 33) ^ ((uint64_t)mrtN << 60) ^
-                  ((uint64_t)dstate * 0x100000001b3ull);
+  uint64_t key =
+      d.vsAddr * 0x9e3779b97f4a7c15ull ^ d.psAddr ^
+      ((uint64_t)(d.blendEnable ? (d.blendControl & 0x7FFFFFFFu) : 0) << 1) ^
+      ((uint64_t)d.vertexStride << 33) ^ ((uint64_t)mrtN << 60) ^
+      ((uint64_t)dstate * 0x100000001b3ull);
   key = hashWord(key, d.nvattrs);
   for (uint32_t i = 0; i < mrtN; i++)
     key = hashWord(key, colorTargetFormat(d.mrtInfo[i]));
@@ -3547,7 +3626,7 @@ RecompPipe *getRecompPipe(const DrawInfo &d) {
   VkDescriptorSetLayout sls[2] = {set0, g.uboLayout};
   VkPushConstantRange push{VK_SHADER_STAGE_VERTEX_BIT |
                                VK_SHADER_STAGE_FRAGMENT_BIT,
-                           0, 64};
+                            0, 128};
   VkPipelineLayoutCreateInfo li{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
   li.setLayoutCount = 2;
   li.pSetLayouts = sls;
@@ -3643,9 +3722,9 @@ RecompPipe *getRecompPipe(const DrawInfo &d) {
     static int n = 0;
     if (n++ < 24)
       std::fprintf(stderr,
-                   "[pipe] ps=%#lx mrtN=%u psMrtMask=%#x att0: en=%u src=%d dst=%d "
+                    "[pipe] ps=%#lx mrtN=%u psMrtMask=%#x att0: en=%u src=%d dst=%d "
                    "srcA=%d dstA=%d writeMask=%#x\n",
-                   (unsigned long)d.psAddr, mrtN, d.recomp->ps_mrt_mask,
+                    (unsigned long)d.psAddr, mrtN, d.recomp->ps_mrt_mask,
                    cbAtt[0].blendEnable, (int)cbAtt[0].srcColorBlendFactor,
                    (int)cbAtt[0].dstColorBlendFactor, (int)cbAtt[0].srcAlphaBlendFactor,
                    (int)cbAtt[0].dstAlphaBlendFactor, cbAtt[0].colorWriteMask);
@@ -3732,8 +3811,21 @@ bool drawRecomp(const DrawInfo &d) {
   if (colorAsTex && g_rts[texBase].w >= 700 && g_rts[texBase].w <= 900)
     g.frameHadRoom = true;
   if (texBase && (texBase == d.depthBase ||
-                  (texBase == d.rtBase && !feedbackAsTex)))
+                  (texBase == d.rtBase && !feedbackAsTex))) {
+    // DELTA_GPU_SELFTRACE: which pass reads the target it is drawing into. We
+    // drop those, and dropping one every frame leaves whatever it was meant to
+    // produce stale.
+    static const bool selfTrace = std::getenv("DELTA_GPU_SELFTRACE") != nullptr;
+    static int n = 0;
+    if (selfTrace && n++ < 20)
+      std::fprintf(stderr,
+                   "[self] draw#%u ps=%#lx rt=%#lx tex=%#lx depth=%#lx dtest=%d "
+                   "dwrite=%d ntex=%u\n",
+                   g.frameDraws, (unsigned long)d.psAddr, (unsigned long)d.rtBase,
+                   (unsigned long)texBase, (unsigned long)d.depthBase,
+                   (int)d.depthTestEnable, (int)d.depthWriteEnable, d.nTexs);
     return decline(DR_SELF);
+  }
   // Indexed draws derive the copied vertex range from their indices. DRAW_INDEX_AUTO
   // consumes the packet's sequential vertex count directly.
   const uint16_t *i16 = nullptr; const uint32_t *i32 = nullptr;
@@ -3964,11 +4056,11 @@ bool drawRecomp(const DrawInfo &d) {
     if (texBindFrame >= 0 && (int)g.frameNum == texBindFrame && !rp->multiTex)
       std::fprintf(stderr,
                    "[texbind] draw#%u rt=%#lx %ux%u LEGACY tex=%#lx %ux%u "
-                   "rtAsTex=%u color=%u feedback=%u depth=%u set=%u\n",
+                    "rtAsTex=%u color=%u feedback=%u depth=%u set=%u\n",
                    g.frameDraws, (unsigned long)d.rtBase, d.rtW, d.rtH,
                    (unsigned long)d.texBase, d.texW, d.texH, (unsigned)rtAsTex,
                    (unsigned)colorAsTex, (unsigned)feedbackAsTex,
-                   (unsigned)depthAsTex, (unsigned)(texSet != VK_NULL_HANDLE));
+                    (unsigned)depthAsTex, (unsigned)(texSet != VK_NULL_HANDLE));
     if (texBindFrame >= 0 && (int)g.frameNum == texBindFrame && multiN &&
         rp->multiTex) {
       std::fprintf(stderr, "[texbind] draw#%u rt=%#lx %ux%u ntex=%u:",
@@ -4100,26 +4192,28 @@ bool drawRecomp(const DrawInfo &d) {
           multiLayouts[i] = VK_IMAGE_LAYOUT_GENERAL;
         } else if (multiFeedback[i]) {
           auto &src = g_rts[multiFeedback[i]];
-          multiViews[i] = src.feedbackView;
+          multiViews[i] = sampledView(src, d.texs[i].swizzle, true);
           multiLayouts[i] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         } else if (multiColor[i]) {
-          multiViews[i] = g_rts[multiColor[i]].view;
+          multiViews[i] = sampledView(g_rts[multiColor[i]], d.texs[i].swizzle);
           multiLayouts[i] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         } else if (multiDepth[i]) {
-          multiViews[i] = g_depths[multiDepth[i]].view;
+          multiViews[i] =
+              sampledView(g_depths[multiDepth[i]], d.texs[i].swizzle);
           multiLayouts[i] = VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL;
         }
       }
       texSet = getMultiTexSet(d, rp->texSetLayout, multiViews, multiLayouts);
-      if (!texSet) return decline(DR_GUESTTEX);
+      if (!texSet)
+        return decline(DR_GUESTTEX);
     }
-    RTarget *rt = d.rtBase
-                      ? getRT(d.rtBase, d.rtW, d.rtH,
-                              colorTargetFormat(d.mrtInfo[0]))
-                      : nullptr;
-    if (d.rtBase && !rt) return true;  // RT cap hit: treat as handled (dropped)
-    beginRegion(d.mrtBase, d.mrtInfo, mrtN, d.rtW, d.rtH,
-                d.depthBase, d.depthClear);
+    RTarget *rt = d.rtBase ? getRT(d.rtBase, d.rtW, d.rtH,
+                                   colorTargetFormat(d.mrtInfo[0]))
+                           : nullptr;
+    if (d.rtBase && !rt)
+      return true; // RT cap hit: treat as handled (dropped)
+    beginRegion(d.mrtBase, d.mrtInfo, mrtN, d.rtW, d.rtH, d.depthBase,
+                d.depthClear);
   }
   if (rp->multiTex) {
     if (!texSet) {
@@ -4128,30 +4222,50 @@ bool drawRecomp(const DrawInfo &d) {
           multiViews[i] = g_rts[multiStorage[i]].view;
           multiLayouts[i] = VK_IMAGE_LAYOUT_GENERAL;
         } else if (multiFeedback[i]) {
-          multiViews[i] = g_rts[multiFeedback[i]].feedbackView;
+          multiViews[i] =
+              sampledView(g_rts[multiFeedback[i]], d.texs[i].swizzle, true);
         } else if (multiColor[i]) {
-          multiViews[i] = g_rts[multiColor[i]].view;
+          multiViews[i] = sampledView(g_rts[multiColor[i]], d.texs[i].swizzle);
         } else if (multiDepth[i]) {
-          multiViews[i] = g_depths[multiDepth[i]].view;
+          multiViews[i] =
+              sampledView(g_depths[multiDepth[i]], d.texs[i].swizzle);
           multiLayouts[i] = VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL;
         }
       }
       texSet = getMultiTexSet(d, rp->texSetLayout, multiViews, multiLayouts);
     }
-    if (!texSet) return decline(DR_GUESTTEX);
+    if (!texSet)
+      return decline(DR_GUESTTEX);
   } else if (feedbackAsTex) {
-    if (!texSet) return decline(DR_MIDREGION);
+    VkImageView views[State::kMaxTex] = {};
+    VkImageLayout layouts[State::kMaxTex] = {};
+    views[0] = sampledView(g_rts[texBase], d.texSwizzle, true);
+    layouts[0] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    texSet = getMultiTexSet(d, g.dsLayout, views, layouts);
+    if (!texSet)
+      return decline(DR_MIDREGION);
   } else if (colorAsTex) {
     auto &src = g_rts[texBase];
-    if (src.layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) return decline(DR_MIDREGION);
-    texSet = src.set;
-    if (!texSet) return decline(DR_MIDREGION);
+    if (src.layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+      return decline(DR_MIDREGION);
+    VkImageView views[State::kMaxTex] = {};
+    VkImageLayout layouts[State::kMaxTex] = {};
+    views[0] = sampledView(src, d.texSwizzle);
+    layouts[0] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    texSet = getMultiTexSet(d, g.dsLayout, views, layouts);
+    if (!texSet)
+      return decline(DR_MIDREGION);
   } else if (depthAsTex) {
     auto &src = g_depths[texBase];
     if (src.layout != VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL)
       return decline(DR_MIDREGION);
-    texSet = src.set;
-    if (!texSet) return decline(DR_MIDREGION);
+    VkImageView views[State::kMaxTex] = {};
+    VkImageLayout layouts[State::kMaxTex] = {};
+    views[0] = sampledView(src, d.texSwizzle);
+    layouts[0] = VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL;
+    texSet = getMultiTexSet(d, g.dsLayout, views, layouts);
+    if (!texSet)
+      return decline(DR_MIDREGION);
   }
 
   setGuestViewport(d);
@@ -4163,39 +4277,46 @@ bool drawRecomp(const DrawInfo &d) {
   // Copy each guest cbuffer window into the per-frame ring and bind set 1. Vulkan
   // requires one dynamic offset for every dynamic descriptor in the set layout.
   VkDeviceSize cbOff = (g.uboOffset + g.uboAlign - 1) & ~(VkDeviceSize)(g.uboAlign - 1);
-  VkDeviceSize cbStride = (kCbufWindow + g.uboAlign - 1) & ~(VkDeviceSize)(g.uboAlign - 1);
-  if (cbOff + cbStride * kCbufBindings > g.uboEnd) return decline(DR_RING);
+  VkDeviceSize cbStride =
+      (kCbufWindow + g.uboAlign - 1) & ~(VkDeviceSize)(g.uboAlign - 1);
+  if (cbOff + cbStride * kCbufBindings > g.uboEnd)
+    return decline(DR_RING);
   uint32_t dynOff[kCbufBindings];
   VkDeviceSize next = cbOff;
   for (uint32_t i = 0; i < kCbufBindings; i++) {
     const auto &cb = d.cbufs[i];
-    const bool haveCbuf = cb.base >= 0x1000000000ull && cb.base < 0x20000000000ull;
+    const uint32_t readable = std::min(cb.size, kCbufWindow);
+    const bool haveCbuf = readable && gpu::IsReadableRange(cb.base, readable);
     if (!haveCbuf && i != 0) {
-      dynOff[i] = 0;  // shared zero window (see beginFrame)
+      dynOff[i] = 0; // shared zero window (see beginFrame)
       continue;
     }
     uint8_t *cbDst = g.uboMap + next;
     uint32_t n;
-    if (haveCbuf) flushCsWritesRange(cb.base, kCbufWindow);
+    if (haveCbuf)
+      flushCsWritesRange(cb.base, kCbufWindow);
     if (haveCbuf) {
       // Upload as much of the window as the base's page holds, not just the
       // recompiler's planned size. A shader that indexes its constants
-      // dynamically -- a UI batch picking a per-quad transform out of an array --
-      // reads past the planned size, and the truncated copy left those entries
-      // zero: Skyrim's menu drew its sprite atlas at screen size over everything.
-      // Clamped to the page so a cbuffer at the end of a mapping cannot fault.
-      static const bool tightCbuf = std::getenv("DELTA_GPU_TIGHTCBUF") != nullptr;
+      // dynamically -- a UI batch picking a per-quad transform out of an array
+      // -- reads past the planned size, and the truncated copy left those
+      // entries zero: Skyrim's menu drew its sprite atlas at screen size over
+      // everything. Clamped to the page so a cbuffer at the end of a mapping
+      // cannot fault.
+      static const bool tightCbuf =
+          std::getenv("DELTA_GPU_TIGHTCBUF") != nullptr;
       const uint32_t planned = cb.size < kCbufWindow ? cb.size : kCbufWindow;
       const uint64_t pageEnd = (cb.base + 0x1000) & ~uint64_t{0xFFF};
-      const uint32_t avail =
-          static_cast<uint32_t>(std::min<uint64_t>(kCbufWindow, pageEnd - cb.base));
+      const uint32_t avail = static_cast<uint32_t>(
+          std::min<uint64_t>(kCbufWindow, pageEnd - cb.base));
       n = tightCbuf ? planned : std::max(planned, avail);
       std::memcpy(cbDst, reinterpret_cast<const void *>(cb.base), n);
-    } else {  // binding 0 without a resolved cbuffer: the heuristic MVP
+    } else { // binding 0 without a resolved cbuffer: the heuristic MVP
       n = sizeof(d.mvp);
       std::memcpy(cbDst, d.mvp, n);
     }
-    if (n < kCbufWindow) std::memset(cbDst + n, 0, kCbufWindow - n);
+    if (n < kCbufWindow)
+      std::memset(cbDst + n, 0, kCbufWindow - n);
     dynOff[i] = static_cast<uint32_t>(next);
     next += cbStride;
   }
@@ -4257,29 +4378,33 @@ bool drawRecomp(const DrawInfo &d) {
         std::fprintf(stderr,
                      "[drawrt]  tex%u %#lx %ux%u dfmt=%u tiling=%u -> %s%#lx\n",
                      i, (unsigned long)t.base, t.w, t.h, t.dfmt, t.tiling,
-                     multiColor[i]    ? "rt "
+                     multiColor[i]      ? "rt "
                      : multiFeedback[i] ? "fb "
-                     : multiDepth[i]  ? "depth "
-                     : multiViews[i]  ? "guest "
-                                      : "MISS ",
-                     (unsigned long)(multiColor[i] ? multiColor[i]
+                     : multiDepth[i]    ? "depth "
+                     : multiViews[i]    ? "guest "
+                                        : "MISS ",
+                     (unsigned long)(multiColor[i]      ? multiColor[i]
                                      : multiFeedback[i] ? multiFeedback[i]
-                                     : multiDepth[i] ? multiDepth[i] : 0));
+                                     : multiDepth[i]    ? multiDepth[i]
+                                                        : 0));
       }
       for (uint32_t c = 0; c < kCbufBindings; c++) {
         const auto &cb = d.cbufs[c];
-        if (cb.base < 0x1000000000ull || cb.base >= 0x20000000000ull) continue;
+        if (!gpu::IsReadableRange(cb.base, std::min(cb.size, 192u)))
+          continue;
         const uint32_t *w = reinterpret_cast<const uint32_t *>(cb.base);
         std::fprintf(stderr, "[drawrt]  cb%u %#lx sz=%u:", c,
                      (unsigned long)cb.base, cb.size);
         for (uint32_t k = 0; k < 8 && k * 4 < cb.size; k++)
           std::fprintf(stderr, " %g", *reinterpret_cast<const float *>(&w[k]));
         // The 3D VS loads its transform with s_buffer_load_dwordx16 at byte
-        // offset 0x80; show that window when the binding is big enough to hold it.
+        // offset 0x80; show that window when the binding is big enough to hold
+        // it.
         if (cb.size >= 192) {
           std::fprintf(stderr, "\n[drawrt]   @0x80:");
           for (uint32_t k = 32; k < 48; k++)
-            std::fprintf(stderr, " %g", *reinterpret_cast<const float *>(&w[k]));
+            std::fprintf(stderr, " %g",
+                         *reinterpret_cast<const float *>(&w[k]));
         }
         std::fprintf(stderr, "\n");
       }
@@ -4463,23 +4588,43 @@ void draw(const DrawInfo &d_in) {
     const char *e = std::getenv("DELTA_GPU_MAXDRAW"); return e ? std::atoi(e) : -1;
   }();
   static const int onlyDraw = [] {
-    const char *e = std::getenv("DELTA_GPU_ONLYDRAW"); return e ? std::atoi(e) : -1;
+    const char *e = std::getenv("DELTA_GPU_ONLYDRAW");
+    return e ? std::atoi(e) : -1;
   }();
-  if (maxDraw >= 0 && (int)g.frameDraws >= maxDraw) return;
-  if (onlyDraw >= 0 && (int)g.frameDraws != onlyDraw) { g.frameDraws++; return; }
+  if (maxDraw >= 0 && (int)g.frameDraws >= maxDraw)
+    return;
+  if (onlyDraw >= 0 && (int)g.frameDraws != onlyDraw) {
+    g.frameDraws++;
+    return;
+  }
   // Diagnostic kill-switches for bisecting "renders nothing" chains:
   // DELTA_GPU_NODEPTH disables depth test/write, DELTA_GPU_NOCULL disables
   // face culling, DELTA_GPU_NOMASK forces full color write masks.
   static const bool noDepth = std::getenv("DELTA_GPU_NODEPTH") != nullptr;
   static const bool noCull = std::getenv("DELTA_GPU_NOCULL") != nullptr;
   static const bool noMask = std::getenv("DELTA_GPU_NOMASK") != nullptr;
+  // A pass that samples the depth buffer it also has bound is reading it as a
+  // texture, which is legal while depth testing and writes are off. Detaching
+  // the unused attachment lets the draw run instead of being declined as
+  // self-sampling: Skyrim's grading pass does exactly this, and dropping it
+  // left the display buffer showing ungraded content on those frames -- the
+  // frame alternated between graded and raw as the pass came and went.
+  bool detachDepth = false;
+  if (d_sw.depthBase && !d_sw.depthTestEnable && !d_sw.depthWriteEnable) {
+    if (d_sw.texBase == d_sw.depthBase)
+      detachDepth = true;
+    for (uint32_t i = 0; i < d_sw.nTexs && !detachDepth; i++)
+      if (d_sw.texs[i].base == d_sw.depthBase)
+        detachDepth = true;
+  }
   DrawInfo dd;
-  const bool patched = noDepth || noCull || noMask;
+  const bool patched = noDepth || noCull || noMask || detachDepth;
   if (patched) {
     dd = d_sw;
     if (noDepth) { dd.depthTestEnable = false; dd.depthWriteEnable = false; }
     if (noCull) dd.cullMode = 0;
     if (noMask) { dd.targetMask = 0xFFFFFFFFu; dd.colorControl = 0x10; }
+    if (detachDepth) { dd.depthBase = 0; dd.depthTestEnable = false; }
   }
   const DrawInfo &d = patched ? dd : d_sw;
   if (d.indexCount > g.frameMaxIdx) g.frameMaxIdx = d.indexCount;

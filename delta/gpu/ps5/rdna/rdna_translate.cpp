@@ -14,11 +14,12 @@
 
 #ifndef DELTA_HAVE_SPIRV_BACKEND
 namespace gpu::rdna {
-gpu::gcn::Recompiled Recompile(const uint32_t*, const uint32_t*, const uint32_t*,
-                               const uint32_t*, uint32_t, bool) {
+gpu::gcn::Recompiled Recompile(const uint32_t *, const uint32_t *,
+                               const uint32_t *, const uint32_t *, uint32_t,
+                               bool, uint32_t, uint32_t) {
   return {};
 }
-}  // namespace gpu::rdna
+} // namespace gpu::rdna
 #else
 
 #include <algorithm>
@@ -72,28 +73,36 @@ bool BufLoadIsVertexFetch(const Inst& in, bool chained) {
 
 // Which entry of a user-data descriptor TABLE each buffer_load reads.
 //
-// A V# is 4 dwords, so one s_load_dwordx4 per table entry; the entry is selected
-// by that s_load's SGPR soffset, computed at runtime from an index table the game
-// uploads (`s_lshl_b32 soff, sN, 4` + `s_and_b32 soff, soff, 0x1f0`). The compiler
-// emits those s_loads in entry order, but SCHEDULES the buffer_loads that consume
-// them in a different order -- so the entry must be taken from the s_load, not
-// from the position of the load. Returns, per buffer_load pc, {table root SGPR
-// pair, entry index}; absent means the V# is inline in user data at srsrc.
-std::unordered_map<uint32_t, std::pair<uint32_t, uint32_t>> MapTableChainedLoads(
-    const Program& insts) {
+// A V# is 4 dwords, so one s_load_dwordx4 per table entry; the entry is
+// selected by that s_load's SGPR soffset, computed at runtime from an index
+// table the game uploads (`s_lshl_b32 soff, sN, 4` + `s_and_b32 soff, soff,
+// 0x1f0`). The compiler emits those s_loads in entry order, but SCHEDULES the
+// buffer_loads that consume them in a different order -- so the entry must be
+// taken from the s_load, not from the position of the load. Returns, per
+// buffer_load pc, {table root SGPR pair, entry index}; absent means the V# is
+// inline in user data at srsrc.
+std::unordered_map<uint32_t, std::pair<uint32_t, uint32_t>>
+MapTableChainedLoads(const Program &insts) {
   std::unordered_map<uint32_t, std::pair<uint32_t, uint32_t>> out;
   int32_t root[128];
   uint32_t slot[128] = {};
-  for (int i = 0; i < 128; i++) root[i] = -1;
-  std::unordered_map<uint32_t, uint32_t> next_slot;  // per table root
-  for (const Inst& in : insts) {
-    if (in.enc == Enc::kSop1 && in.opcode == 0x20) break;  // s_setpc_b64 (return)
-    if (in.enc == Enc::kSopp && in.opcode == 1) break;     // s_endpgm
-    if (in.enc == Enc::kSmrd && in.opcode <= 0x04) {  // s_load_dword{,x2,x4,x8,x16}
+  for (int i = 0; i < 128; i++)
+    root[i] = -1;
+  std::unordered_map<uint32_t, uint32_t> next_slot; // per table root
+  for (const Inst &in : insts) {
+    if (in.enc == Enc::kSop1 && in.opcode == 0x20)
+      break; // s_setpc_b64 (return)
+    if (in.enc == Enc::kSopp && in.opcode == 1)
+      break; // s_endpgm
+    if (in.enc == Enc::kSmrd &&
+        in.opcode <= 0x04) { // s_load_dword{,x2,x4,x8,x16}
       const uint32_t sdst = (in.raw[0] >> 6) & 0x7F;
       const uint32_t sbase = (in.raw[0] & 0x3F) * 2;
-      const uint32_t nreg = in.opcode == 0 ? 1 : in.opcode == 1 ? 2
-                          : in.opcode == 2 ? 4 : in.opcode == 3 ? 8 : 16;
+      const uint32_t nreg = in.opcode == 0   ? 1
+                            : in.opcode == 1 ? 2
+                            : in.opcode == 2 ? 4
+                            : in.opcode == 3 ? 8
+                                             : 16;
       const uint32_t s = in.opcode == 2 ? next_slot[sbase]++ : 0;
       for (uint32_t k = 0; k < nreg && sdst + k < 128; k++) {
         root[sdst + k] = static_cast<int32_t>(sbase);
@@ -101,7 +110,8 @@ std::unordered_map<uint32_t, std::pair<uint32_t, uint32_t>> MapTableChainedLoads
       }
       continue;
     }
-    if (in.enc != Enc::kMubuf || in.opcode > 0x03) continue;
+    if ((in.enc != Enc::kMubuf && in.enc != Enc::kMtbuf) || in.opcode > 0x03)
+      continue;
     const uint32_t srsrc = ((in.raw[1] >> 16) & 0x1F) * 4;
     if (srsrc < 128 && root[srsrc] >= 0)
       out[in.pc] = {static_cast<uint32_t>(root[srsrc]), slot[srsrc]};
@@ -135,10 +145,6 @@ void DumpProgram(const Program& prog, const char* tag) {
     if (in.has_literal) std::fprintf(stderr, " lit=%08x", in.literal);
     std::fprintf(stderr, "\n");
   }
-}
-
-int32_t SignExt21(uint32_t v) {
-  return static_cast<int32_t>(v << 11) >> 11;
 }
 
 // RDNA2 VOP2 opcodes that carry different numbers than the GFX7 emitter expects.
@@ -197,88 +203,165 @@ bool RdnaEmitVop3p(Translator& t, uint32_t op, uint32_t vdst, uint32_t s0,
       t.SetVg(vdst, pack(t.m.Emit(spv::Op::OpFAdd, t.t_v2, {mul, unpack(s2)})));
       return true;
     }
-    default: return false;
-  }
+    default:
+      return false;
+    }
 }
 
 // ---- SMEM (constant buffers) ------------------------------------------------
 // Walk the s_load pointer chain feeding a descriptor base SGPR back to a
 // user-data root. `loads` maps an s_load's destination SGPR to its {source base
-// SGPR, byte offset}. Fills chain_off[] (root-first resolution order) and returns
-// the root user-data SGPR; *len is the number of dereferences (0 == already a
-// user-data descriptor). Bounded to 3 levels.
-uint32_t TraceCbufChain(
-    uint32_t sbase,
-    const std::unordered_map<uint32_t, std::pair<uint32_t, uint32_t>>& loads,
-    uint32_t chain_off[3], uint32_t* len) {
+// SGPR, byte offset}. Fills chain_off[] (root-first resolution order) and
+// returns the root user-data SGPR; *len is the number of dereferences (0 ==
+// already a user-data descriptor). Bounded to 3 levels.
+struct CbufDef {
+  uint32_t source, offset, count;
+};
+
+bool Overlaps(uint32_t first, uint32_t count, uint32_t other_first,
+              uint32_t other_count) {
+  return first < other_first + other_count && other_first < first + count;
+}
+
+void InvalidateCbufDefs(std::unordered_map<uint32_t, CbufDef> &loads,
+                        ScalarWrite write) {
+  if (!write.count)
+    return;
+  for (auto it = loads.begin(); it != loads.end();) {
+    if (Overlaps(it->first, it->second.count, write.first, write.count))
+      it = loads.erase(it);
+    else
+      ++it;
+  }
+}
+
+bool UsedAsBaseBeforeOverwrite(const Program &program, uint32_t index,
+                               uint32_t sdst, uint32_t count) {
+  for (uint32_t i = index + 1; i < program.size(); i++) {
+    const Inst &inst = program[i];
+    if (inst.enc == Enc::kSmrd && SmemLoadCount(inst.opcode) &&
+        DecodeSmem(inst).sbase == sdst)
+      return true;
+    const ScalarWrite write = DecodeScalarWrite(inst);
+    if (Overlaps(sdst, count, write.first, write.count))
+      return false;
+  }
+  return false;
+}
+
+std::unordered_map<uint32_t, uint64_t>
+BufferVersionKeys(const Program &program) {
+  std::unordered_map<uint32_t, uint64_t> out;
+  uint32_t versions[136] = {};
+  uint32_t generation = 1;
+  for (const Inst &inst : program) {
+    if (inst.enc == Enc::kSmrd && SmemLoadCount(inst.opcode)) {
+      const Smem smem = DecodeSmem(inst);
+      const uint32_t dwords = smem.op >= 0x08 ? 4 : 2;
+      uint64_t key = smem.sbase | (static_cast<uint64_t>(dwords == 4) << 7);
+      for (uint32_t i = 0; i < dwords; i++)
+        key |= static_cast<uint64_t>(versions[smem.sbase + i]) << (8 + i * 13);
+      out.emplace(inst.pc, key);
+    }
+    const ScalarWrite write = DecodeScalarWrite(inst);
+    for (uint32_t i = 0; i < write.count && write.first + i < 136; i++)
+      versions[write.first + i] = generation;
+    generation++;
+  }
+  return out;
+}
+
+uint32_t TraceCbufChain(uint32_t sbase,
+                        const std::unordered_map<uint32_t, CbufDef> &loads,
+                        uint32_t chain_off[3], uint32_t *len) {
   uint32_t cur = sbase, n = 0, tmp[3] = {};
   while (n < 3) {
     auto it = loads.find(cur);
-    if (it == loads.end()) break;
-    tmp[n++] = it->second.second;  // byte offset
-    cur = it->second.first;        // the s_load's own source base SGPR
+    if (it == loads.end())
+      break;
+    tmp[n++] = it->second.offset;
+    cur = it->second.source;
   }
-  for (uint32_t i = 0; i < n; i++) chain_off[i] = tmp[n - 1 - i];  // reverse
+  for (uint32_t i = 0; i < n; i++)
+    chain_off[i] = tmp[n - 1 - i]; // reverse
   *len = n;
   return cur;
 }
 
 // Plan the set-1 UBO bindings a stage's SMEM loads reference. A leaf read is an
-// s_buffer_load* (op 0x08-0x0C, V# in the sbase quad) or an s_load* (op 0x00-0x04,
-// pointer in the sbase pair) whose result is used as data -- not as another SMEM's
-// descriptor base. When the base SGPR was itself s_load'd (a runtime pointer
-// chain, e.g. a 2D VS that loads its transform's V# from a root descriptor table),
-// the chain back to the user-data root is recorded so the renderer can walk it.
-bool RdnaPlanCbufs(const Program& program, uint32_t first_binding,
-                   std::vector<ShaderCbuf>& cbufs,
-                   std::unordered_map<uint32_t, uint32_t>& bindings) {
-  std::unordered_set<uint32_t> used_as_base;
-  for (const Inst& inst : program) {
-    if (inst.enc != Enc::kSmrd) continue;
-    const uint32_t op = inst.opcode;
-    if (op > 0x04 && (op < 0x08 || op > 0x0C)) continue;
-    used_as_base.insert((inst.raw[0] & 0x3F) * 2);
-  }
-
+// s_buffer_load* (op 0x08-0x0C, V# in the sbase quad) or an s_load* (op
+// 0x00-0x04, pointer in the sbase pair) whose result is used as data -- not as
+// another SMEM's descriptor base. When the base SGPR was itself s_load'd (a
+// runtime pointer chain, e.g. a 2D VS that loads its transform's V# from a root
+// descriptor table), the chain back to the user-data root is recorded so the
+// renderer can walk it.
+bool RdnaPlanCbufs(const Program &program, uint32_t first_binding,
+                   std::vector<ShaderCbuf> &cbufs,
+                   std::unordered_map<uint32_t, uint32_t> &bindings,
+                   std::unordered_map<uint32_t, uint32_t> &by_pc) {
   // Walk in program order, growing the def map as s_loads appear, so each
   // SMEM's base traces through the defs live AT that instruction. Shaders
   // reuse SGPRs (the sprite VS s_buffer_loads its transform from the s[8:11]
   // user-data V#, then s_loads the vertex V# INTO s[8:11]); a whole-program
   // last-write map would misroute the transform to the vertex chain.
-  std::unordered_map<uint32_t, std::pair<uint32_t, uint32_t>> loads;  // sdst->{src,off}
-  for (const Inst& inst : program) {
-    if (inst.enc != Enc::kSmrd) continue;
-    const uint32_t op = inst.opcode;
-    const bool sbufload = op >= 0x08 && op <= 0x0C, sload = op <= 0x04;
-    if (!sbufload && !sload) continue;
-    const uint32_t sbase = (inst.raw[0] & 0x3F) * 2;
-    const uint32_t sdst = (inst.raw[0] >> 6) & 0x7F;
-    const int32_t off = SignExt21(inst.raw[1] & 0x1FFFFF);
-    if (sload && used_as_base.count(sdst)) {  // chain link: host-resolved
-      loads[sdst] = {sbase, static_cast<uint32_t>(off < 0 ? 0 : off)};
+  std::unordered_map<uint32_t, CbufDef> loads;
+  std::unordered_map<uint64_t, uint32_t> binding_by_producer;
+  const auto version_keys = BufferVersionKeys(program);
+  uint32_t inst_index = 0;
+  for (const Inst &inst : program) {
+    const uint32_t producer = inst_index++;
+    if (inst.enc != Enc::kSmrd) {
+      InvalidateCbufDefs(loads, DecodeScalarWrite(inst));
       continue;
     }
-    const uint32_t hi = static_cast<uint32_t>(off < 0 ? 0 : off) / 4 + SmemLoadCount(op);
+    const Smem smem = DecodeSmem(inst);
+    const uint32_t op = smem.op;
+    const bool sbufload = op >= 0x08 && op <= 0x0C, sload = op <= 0x04;
+    if (!sbufload && !sload)
+      continue;
+    const uint32_t sbase = smem.sbase, sdst = smem.sdst;
+    const uint32_t load_count = SmemLoadCount(op);
+    const int32_t off =
+        sbufload ? static_cast<int32_t>(inst.raw[1] & 0xFFFFF) : smem.offset;
+    if (sload &&
+        UsedAsBaseBeforeOverwrite(program, producer, sdst, load_count)) {
+      InvalidateCbufDefs(loads, {sdst, load_count});
+      loads[sdst] = {sbase, static_cast<uint32_t>(off), load_count};
+      continue;
+    }
+    const uint32_t hi =
+        smem.soffset != 125
+            ? gpu::gcn::kCbufDwords
+            : static_cast<uint32_t>(off < 0 ? 0 : off) / 4 + SmemLoadCount(op);
 
     uint32_t chain_off[3] = {}, chain_len = 0;
     const uint32_t root = TraceCbufChain(sbase, loads, chain_off, &chain_len);
+    const uint64_t key = version_keys.at(inst.pc);
 
-    auto it = bindings.find(sbase);
-    if (it == bindings.end()) {
-      const uint32_t binding = first_binding + static_cast<uint32_t>(cbufs.size());
-      if (binding >= kMaxCbufBindings) return true;  // ignore extras
-      bindings[sbase] = binding;
+    auto it = binding_by_producer.find(key);
+    if (it == binding_by_producer.end()) {
+      const uint32_t binding =
+          first_binding + static_cast<uint32_t>(cbufs.size());
+      if (binding >= kMaxCbufBindings)
+        return true; // ignore extras
+      it = binding_by_producer.emplace(key, binding).first;
+      bindings.emplace(sbase, binding);
       ShaderCbuf cb;
       cb.binding = binding;
       cb.ud_sgpr = root;
       cb.num_dwords = hi;
       cb.chain_len = chain_len;
-      for (uint32_t i = 0; i < 3; i++) cb.chain_off[i] = chain_off[i];
+      for (uint32_t i = 0; i < 3; i++)
+        cb.chain_off[i] = chain_off[i];
+      cb.use_pc = inst.pc;
       cbufs.push_back(cb);
     } else {
-      for (ShaderCbuf& cb : cbufs)
-        if (cb.binding == it->second && hi > cb.num_dwords) cb.num_dwords = hi;
+      for (ShaderCbuf &cb : cbufs)
+        if (cb.binding == it->second && hi > cb.num_dwords)
+          cb.num_dwords = hi;
     }
+    by_pc[inst.pc] = it->second;
+    InvalidateCbufDefs(loads, {sdst, load_count});
   }
   return true;
 }
@@ -318,13 +401,19 @@ void RdnaPlanBufLoadCbufs(const Program& program, uint32_t first_binding,
       cb.num_dwords = 16;
       cb.chain_len = 1;
       cb.chain_off[0] = chain->second.second * 16;
+      cb.use_pc = inst.pc;
       cbufs.push_back(cb);
       continue;
     }
     if (bindings.count(srsrc)) continue;
     if (binding >= kMaxCbufBindings) return;
     bindings[srsrc] = binding;
-    cbufs.push_back({binding, srsrc, 16});  // mat4-sized default window (16 dwords)
+    ShaderCbuf cb;
+    cb.binding = binding;
+    cb.ud_sgpr = srsrc;
+    cb.num_dwords = 16;
+    cb.use_pc = inst.pc;
+    cbufs.push_back(cb);
   }
 }
 
@@ -374,16 +463,15 @@ std::unordered_set<uint32_t> LaunchExecMovPcs(const Program& program) {
 }
 
 void RdnaEmitSmem(Translator& t, const Inst& inst, StageContext& sc) {
-  const uint32_t op = inst.opcode;
-  const uint32_t sdst = (inst.raw[0] >> 6) & 0x7F;
-  const uint32_t sbase = (inst.raw[0] & 0x3F) * 2;
-  const int32_t off = SignExt21(inst.raw[1] & 0x1FFFFF);
+  const Smem smem = DecodeSmem(inst);
+  const uint32_t op = smem.op;
   // s_load* (op 0x00-0x04, a pointer in the sbase pair) and s_buffer_load* (op
   // 0x08-0x0C, a V# in the sbase quad) read `off` bytes into sdst.. from the UBO
   // the renderer bound for this sbase. A 2D VS reads its transform matrix this way.
   if (op <= 0x04 || (op >= 0x08 && op <= 0x0C)) {
-    auto it = sc.cbuf_bind.find(sbase);
-    if (it == sc.cbuf_bind.end()) {
+    auto pc_it = sc.smem_cbuf_by_pc.find(inst.pc);
+    auto base_it = sc.cbuf_bind.find(smem.sbase);
+    if (pc_it == sc.smem_cbuf_by_pc.end() && base_it == sc.cbuf_bind.end()) {
       // An s_load whose result feeds a later SMEM is a pointer-chain link: the
       // renderer resolves that descriptor host-side, so it has no UBO and emits
       // nothing. An unplanned s_buffer_load is a real gap.
@@ -391,10 +479,18 @@ void RdnaEmitSmem(Translator& t, const Inst& inst, StageContext& sc) {
         gpu::gcn::WarnUnsupported("smem.cbuf-unplanned", op, inst.raw[0], inst.raw[1]);
       return;
     }
-    const uint32_t dword0 = static_cast<uint32_t>(off < 0 ? 0 : off) / 4;
+    const uint32_t binding = pc_it != sc.smem_cbuf_by_pc.end()
+                                 ? pc_it->second : base_it->second;
+    const uint32_t immediate = op >= 0x08 ? inst.raw[1] & 0xFFFFC
+                                          : static_cast<uint32_t>(smem.offset) & ~3u;
+    const Id soffset = smem.soffset == 125 ? t.U32(0)
+                                           : t.SrcRaw(smem.soffset, 0);
+    const Id byte_offset = t.Add(t.And(soffset, t.U32(~3u)), t.U32(immediate));
+    const Id dword0 = t.Shr(byte_offset, t.U32(2));
     const uint32_t n = SmemLoadCount(op);
     for (uint32_t k = 0; k < n; k++)
-      t.SetSg(sdst + k, t.CbufDword(it->second, dword0 + k));
+      t.SetSg(smem.sdst + k,
+              t.CbufDwordId(binding, t.Add(dword0, t.U32(k))));
     return;
   }
 }
@@ -808,6 +904,9 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       break;
     }
     case Enc::kMimg: {
+      Inst lowered = inst;
+      const uint32_t dim = (w >> 3) & 0x7;
+      lowered.raw[0] = (w & ~0x4000u) | (dim == 5 ? 0x4000u : 0u);
       // NSA (word0[2:1] != 0): the address components after the first are named
       // one byte each in the extra dword rather than running sequentially from
       // vaddr. The shared emitter reads them sequentially, so stage the real
@@ -820,12 +919,11 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
         t.SetVg(kScratch, t.Vg(w1 & 0xFF));
         for (uint32_t c = 0; c < 4; c++)
           t.SetVg(kScratch + 1 + c, t.Vg((inst.literal >> (c * 8)) & 0xFF));
-        Inst seq = inst;
-        seq.raw[1] = (inst.raw[1] & ~0xFFu) | kScratch;
-        gpu::gcn::EmitMimg(t, seq, sc);
+        lowered.raw[1] = (inst.raw[1] & ~0xFFu) | kScratch;
+        gpu::gcn::EmitMimg(t, lowered, sc);
         break;
       }
-      gpu::gcn::EmitMimg(t, inst, sc);
+      gpu::gcn::EmitMimg(t, lowered, sc);
       break;
     }
     default:
@@ -1040,30 +1138,58 @@ std::vector<FetchAttr> ParseFetchInsts(const Program& insts) {
 }
 
 std::vector<FetchAttr> ParseFetch(uint64_t fetch_addr) {
-  if (!gpu::gcn::InGuest(fetch_addr)) return {};
-  const auto* code = reinterpret_cast<const uint32_t*>(fetch_addr);
-  return ParseFetchInsts(Decode(code, 256));
+  if (!gpu::gcn::InGuest(fetch_addr))
+    return {};
+  const auto *code = reinterpret_cast<const uint32_t *>(fetch_addr);
+  std::vector<FetchAttr> attrs = ParseFetchInsts(Decode(code, 256));
+  for (FetchAttr &attr : attrs)
+    attr.pc = ~0u;
+  return attrs;
 }
 
 // Address of the VS being translated, for shader-specific debug knobs.
 thread_local uint64_t g_vs_addr = 0;
 
 // ---- VS / PS drivers --------------------------------------------------------
-bool TranslateVs(const Program& program, const uint32_t* vs_user_data,
-                 const std::unordered_set<uint32_t>& flat_attrs, Recompiled& r,
-                 Translator& t, bool gl_clip_space) {
-  if (ShDbg()) DumpProgram(program, "vs");
+Id DeclareUserData(Translator& t) {
+  const Id words = t.m.TypeArray(t.t_u, 32);
+  t.m.Decorate(words, spv::Decoration::ArrayStride, {4});
+  const Id block = t.m.TypeStruct({words});
+  t.m.Decorate(block, spv::Decoration::Block);
+  t.m.MemberDecorate(block, 0, spv::Decoration::Offset, {0});
+  return t.m.Variable(t.m.TypePointer(spv::StorageClass::PushConstant, block),
+                      spv::StorageClass::PushConstant);
+}
+
+void SeedUserData(Translator &t, Id user_data, uint32_t sgpr_base,
+                  uint32_t count) {
+  const Id p_u = t.m.TypePointer(spv::StorageClass::PushConstant, t.t_u);
+  for (uint32_t i = 0; i < std::min(count, 32u); i++)
+    t.SetSg(
+        sgpr_base + i,
+        t.m.Load(t.t_u, t.m.AccessChain(p_u, user_data, {t.U32(0), t.U32(i)})));
+}
+
+bool TranslateVs(const Program &program, const uint32_t *vs_user_data,
+                 const std::unordered_set<uint32_t> &flat_attrs, Recompiled &r,
+                 Translator &t, bool gl_clip_space, uint32_t user_sgprs) {
+  if (ShDbg())
+    DumpProgram(program, "vs");
   const uint64_t fetch =
-      (static_cast<uint64_t>(vs_user_data[1] & 0xFFFF) << 32) | vs_user_data[0];
+      user_sgprs >= 2
+          ? (static_cast<uint64_t>(vs_user_data[1] & 0xFFFF) << 32) |
+                vs_user_data[0]
+          : 0;
   // Prefer a stand-alone fetch sub-shader; otherwise recover the fetch that the
   // NGG vertex program does inline (buffer_load_format in its own body). Either
-  // way each attribute becomes a Location vertex input (RdnaEmitInst then treats
-  // the inline buffer_load_format as a no-op) and the renderer binds the real
-  // vertex buffers from r.attrs.
+  // way each attribute becomes a Location vertex input (RdnaEmitInst then
+  // treats the inline buffer_load_format as a no-op) and the renderer binds the
+  // real vertex buffers from r.attrs.
   std::vector<FetchAttr> attrs = ParseFetch(fetch);
-  if (attrs.empty()) attrs = ParseFetchInsts(program);
+  if (attrs.empty())
+    attrs = ParseFetchInsts(program);
   if (ShDbg())
-    for (const FetchAttr& a : attrs)
+    for (const FetchAttr &a : attrs)
       std::fprintf(stderr, "[gcnspv] vs attr loc=%u nc=%u vgpr=%u pc=%#x\n",
                    a.semantic, a.num_comps, a.dest_vgpr, a.pc);
   t.InitTypes();
@@ -1076,7 +1202,9 @@ bool TranslateVs(const Program& program, const uint32_t* vs_user_data,
                {static_cast<uint32_t>(spv::BuiltIn::Position)});
   iface.push_back(pos_out);
 
+  const Id user_data = DeclareUserData(t);
   const Id main_fn = t.m.BeginFunction(t.t_void, t.t_fn);
+  SeedUserData(t, user_data, 8, user_sgprs);
 
   // NGG merged-wave prologue: the VS derives its EXEC/lane bookkeeping from
   // merged_wave_info in s3 (verts-in-wave [7:0], prims [15:8]); model a
@@ -1127,8 +1255,8 @@ bool TranslateVs(const Program& program, const uint32_t* vs_user_data,
       first_attr_var = in_var;
       first_attr_comps = a.num_comps;
     }
-    r.attrs.push_back({a.semantic, a.num_comps, a.table_sgpr, a.dword_off, false,
-                       a.inst_format});
+    r.attrs.push_back({a.semantic, a.num_comps, a.table_sgpr, a.dword_off,
+                       false, a.inst_format, a.pc});
   }
 
   StageContext sc;
@@ -1139,7 +1267,8 @@ bool TranslateVs(const Program& program, const uint32_t* vs_user_data,
   sc.flat_attrs = &flat_attrs;
   sc.vfetch_seed = std::move(vfetch_seed);
   sc.skip_launch_movs = LaunchExecMovPcs(program);
-  if (!RdnaPlanCbufs(program, 0, r.vs_cbufs, sc.cbuf_bind)) return false;
+  if (!RdnaPlanCbufs(program, 0, r.vs_cbufs, sc.cbuf_bind,
+                     sc.smem_cbuf_by_pc)) return false;
   // Constant buffer_load descriptors (e.g. the ortho matrix a procedural 2D VS
   // reads) become additional set-1 UBOs after the SMEM cbufs.
   RdnaPlanBufLoadCbufs(program, 0, r.vs_cbufs, sc.cbuf_bind, sc.mubuf_cbuf_by_pc);
@@ -1298,10 +1427,12 @@ void SeedPsInputVgprs(Translator& t, uint32_t ena, std::vector<Id>& iface) {
   }
 }
 
-bool TranslatePs(const Program& program,
-                 const std::unordered_set<uint32_t>& flat_attrs,
-                 uint32_t ps_input_ena, Recompiled& r, Translator& t) {
-  if (ShDbg()) DumpProgram(program, "ps");
+bool TranslatePs(const Program &program,
+                 const std::unordered_set<uint32_t> &flat_attrs,
+                 uint32_t ps_input_ena, Recompiled &r, Translator &t,
+                 uint32_t user_sgprs) {
+  if (ShDbg())
+    DumpProgram(program, "ps");
   std::vector<Id> iface;
   StageContext sc;
   sc.is_ps = true;
@@ -1310,14 +1441,19 @@ bool TranslatePs(const Program& program,
   sc.flat_attrs = &flat_attrs;
   sc.skip_launch_movs = LaunchExecMovPcs(program);
   if (!RdnaPlanCbufs(program, static_cast<uint32_t>(r.vs_cbufs.size()),
-                     r.ps_cbufs, sc.cbuf_bind))
+                     r.ps_cbufs, sc.cbuf_bind, sc.smem_cbuf_by_pc))
     return false;
   const gpu::gcn::MimgBindingPlan mimg_plan = RdnaPlanMimg(program);
-  sc.mimg_plan = &mimg_plan;  // borrowed by EmitBody
+  if (mimg_plan.binding_srsrc.size() > StageContext::kMaxPsSamplers)
+    return false;
+  sc.mimg_plan = &mimg_plan; // borrowed by EmitBody
   for (uint32_t i = 0; i < mimg_plan.binding_srsrc.size(); i++)
-    r.ps_texs.push_back({i, mimg_plan.binding_srsrc[i], mimg_plan.binding_storage[i]});
+    r.ps_texs.push_back(
+        {i, mimg_plan.binding_srsrc[i], mimg_plan.binding_storage[i]});
 
+  const Id user_data = DeclareUserData(t);
   sc.main_fn = t.m.BeginFunction(t.t_void, t.t_fn);
+  SeedUserData(t, user_data, 0, user_sgprs);
   SeedPsInputVgprs(t, ps_input_ena, iface);
 
   const bool has_color_export =
@@ -1424,13 +1560,15 @@ bool NoOpt() {
   return no_opt;
 }
 
-}  // namespace
+} // namespace
 
-Recompiled Recompile(const uint32_t* vs_code, const uint32_t* ps_code,
-                     const uint32_t* vs_user_data, const uint32_t* ps_user_data,
-                     uint32_t ps_input_ena, bool gl_clip_space) {
+Recompiled Recompile(const uint32_t *vs_code, const uint32_t *ps_code,
+                     const uint32_t *vs_user_data, const uint32_t *ps_user_data,
+                     uint32_t ps_input_ena, bool gl_clip_space,
+                     uint32_t vs_user_sgprs, uint32_t ps_user_sgprs) {
   Recompiled r;
-  if (!vs_code || !vs_user_data || !ps_user_data) return r;
+  if (!vs_code || !vs_user_data || !ps_user_data)
+    return r;
 
   const Program vs_program = DecodeShader(vs_code, 4096);
   const Program ps_program = ps_code ? DecodeShader(ps_code, 4096) : Program{};
@@ -1438,18 +1576,21 @@ Recompiled Recompile(const uint32_t* vs_code, const uint32_t* ps_code,
   // V_INTERP_MOV P0 reads a per-primitive (flat) parameter; represent those
   // locations as flat varyings in both stages.
   std::unordered_set<uint32_t> flat_attrs;
-  for (const Inst& inst : ps_program)
-    if (inst.enc == Enc::kVintrp && inst.opcode == 2 && (inst.raw[0] & 0xFF) == 2)
+  for (const Inst &inst : ps_program)
+    if (inst.enc == Enc::kVintrp && inst.opcode == 2 &&
+        (inst.raw[0] & 0xFF) == 2)
       flat_attrs.insert((inst.raw[0] >> 10) & 0x3F);
 
   Translator tv;
   g_vs_addr = reinterpret_cast<uintptr_t>(vs_code);
-  if (!TranslateVs(vs_program, vs_user_data, flat_attrs, r, tv, gl_clip_space))
+  if (!TranslateVs(vs_program, vs_user_data, flat_attrs, r, tv, gl_clip_space,
+                   vs_user_sgprs))
     return r;
   Translator tp;
   g_ps_addr = reinterpret_cast<uintptr_t>(ps_code);
   tp.InitTypes();
-  if (ps_code ? !TranslatePs(ps_program, flat_attrs, ps_input_ena, r, tp)
+  if (ps_code ? !TranslatePs(ps_program, flat_attrs, ps_input_ena, r, tp,
+                             ps_user_sgprs)
               : !TranslateDepthOnlyPs(tp))
     return r;
 

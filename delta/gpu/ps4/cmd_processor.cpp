@@ -177,9 +177,9 @@ void handleDraw(uint32_t op, const uint32_t *body, uint32_t count) {
   if (vk::available()) {
     vk::DrawInfo d;
     const uint32_t *vud = &g_regs[mmSPI_SHADER_USER_DATA_VS_0];
-    std::memcpy(d.vsUserData, vud, sizeof(d.vsUserData));
+    std::memcpy(d.vsUserData, vud, 16 * sizeof(uint32_t));
     std::memcpy(d.psUserData, &g_regs[mmSPI_SHADER_USER_DATA_PS_0],
-                sizeof(d.psUserData));
+                16 * sizeof(uint32_t));
     d.primType = g_regs[mmVGT_PRIMITIVE_TYPE];
     d.instanceCount = g_numInstances;
     uint32_t autoVertexCount =
