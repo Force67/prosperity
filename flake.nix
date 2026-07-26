@@ -70,10 +70,16 @@
             mesa            # lavapipe: software Vulkan for headless testing
             sdl3
             shaderc         # runtime GLSL -> SPIR-V for the shader recompiler
+            renderdoc       # frame capture: qrenderdoc UI, renderdoccmd, python API
           ];
 
           shellHook = ''
             echo "ps4delta dev shell, run:  cmake -G Ninja -B build && ninja -C build"
+            # RenderDoc's capture layer is implicit: the loader picks it up from
+            # this shell's XDG_DATA_DIRS. A stale renderdoc_capture.json in
+            # ~/.local/share (pointing at a collected store path) shadows it and
+            # makes capture silently fail, so pin the good one for capture runs.
+            export DELTA_RDOC_LAYER_PATH="${pkgs.renderdoc}/share/vulkan/implicit_layer.d"
             # Vulkan ICD: prefer the system GPU driver. Hardware ICDs live under
             # /run/opengl-driver on NixOS and /usr/share/vulkan/icd.d (or
             # /etc/vulkan/icd.d) on FHS distros. When one exists, point

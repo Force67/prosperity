@@ -10,6 +10,8 @@
 
 #include <vulkan/vulkan.h>
 
+#include <dlfcn.h>
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -4171,6 +4173,45 @@ bool drawRecomp(const DrawInfo &d) {
   return true;
 }
 
+// DELTA_RDOC_FRAME=N: bracket frame N's guest rendering with a RenderDoc capture.
+// The guest draws run on this device, which owns no swapchain (the compositor
+// presents the read-back pixels from its own device), so a capture taken at a
+// present boundary only ever catches that final blit. The frame has to be marked
+// explicitly, and the instance named, or RenderDoc picks the wrong device.
+// RENDERDOC_API_1_0_0 is append-only, so these entry indices hold in every
+// version; the ones in between are options and keybind setters we do not use.
+struct RdocApi {
+  void *entry0[19];
+  void (*StartFrameCapture)(void *dev, void *wnd);
+  uint32_t (*IsFrameCapturing)();
+  uint32_t (*EndFrameCapture)(void *dev, void *wnd);
+};
+
+RdocApi *rdocApi() {
+  static RdocApi *api = [] () -> RdocApi * {
+    using GetApi = int (*)(uint32_t version, void **out);
+    void *lib = dlopen("librenderdoc.so", RTLD_NOW | RTLD_NOLOAD);
+    auto get = lib ? reinterpret_cast<GetApi>(dlsym(lib, "RENDERDOC_GetAPI")) : nullptr;
+    RdocApi *a = nullptr;
+    if (!get || get(10000, reinterpret_cast<void **>(&a)) != 1) {
+      std::fprintf(stderr, "[rdoc] no capture layer attached\n");
+      return nullptr;
+    }
+    return a;
+  }();
+  return api;
+}
+
+int rdocFrame() {
+  static const int f = [] {
+    const char *e = std::getenv("DELTA_RDOC_FRAME"); return e ? std::atoi(e) : 0;
+  }();
+  return f;
+}
+
+// RenderDoc identifies a Vulkan device by its instance's dispatch pointer.
+void *rdocDevice() { return *reinterpret_cast<void **>(g.instance); }
+
 void beginFrame() {
   if (!g.ready) return;
   // Objects retired two frames ago are past every in-flight command buffer
@@ -4182,6 +4223,10 @@ void beginFrame() {
   g.frameHeuristic = 0;
   g.frameMaxIdx = 0;
   g.frameNum++;
+  if (rdocFrame() && g.frameNum == rdocFrame() && rdocApi()) {
+    rdocApi()->StartFrameCapture(rdocDevice(), nullptr);
+    std::fprintf(stderr, "[rdoc] capturing frame %d\n", g.frameNum);
+  }
   // Bind the active frame slot: its command buffer + readback aliases, and its
   // half of each host-visible ring (the other half may still be read by the
   // in-flight previous frame).
@@ -4857,6 +4902,11 @@ void endFrame(uint64_t scanoutBase) {
   // Runs last: reuses (and clobbers) the readback buffer the present path
   // above already consumed.
   reportRtContents();
+
+  if (rdocFrame() && rdocApi() && rdocApi()->IsFrameCapturing()) {
+    uint32_t ok = rdocApi()->EndFrameCapture(rdocDevice(), nullptr);
+    std::fprintf(stderr, "[rdoc] capture %s\n", ok ? "written" : "FAILED");
+  }
 }
 
 }  // namespace gpu::vk
