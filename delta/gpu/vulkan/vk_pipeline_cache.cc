@@ -111,7 +111,8 @@ VkPipeline BuildPipeline(bool textured,
   pi.pDynamicState = &dy;
   pi.layout = textured ? g_quad.tex_layout : g_quad.layout;
   VkPipeline p = VK_NULL_HANDLE;
-  vkCreateGraphicsPipelines(g_dev.device, VK_NULL_HANDLE, 1, &pi, nullptr, &p);
+  vkCreateGraphicsPipelines(g_dev.device, g_dev.pipeline_cache, 1, &pi, nullptr,
+                            &p);
   vkDestroyShaderModule(g_dev.device, vs, nullptr);
   vkDestroyShaderModule(g_dev.device, fs, nullptr);
   return p;
@@ -427,8 +428,8 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
   pi.pColorBlendState = &cb;
   pi.pDynamicState = &dy;
   pi.layout = rp.layout;
-  VkResult r = vkCreateGraphicsPipelines(g_dev.device, VK_NULL_HANDLE, 1, &pi,
-                                         nullptr, &rp.pipe);
+  VkResult r = vkCreateGraphicsPipelines(g_dev.device, g_dev.pipeline_cache, 1,
+                                         &pi, nullptr, &rp.pipe);
   vkDestroyShaderModule(g_dev.device, vs, nullptr);
   if (gs)
     vkDestroyShaderModule(g_dev.device, gs, nullptr);

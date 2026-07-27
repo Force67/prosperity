@@ -33,10 +33,13 @@ struct DeviceState {
   uint32_t qfam = 0;
   VkQueue queue = VK_NULL_HANDLE;
   VkCommandPool pool = VK_NULL_HANDLE;
-  // Dedicated to the synchronous aux submits: texture uploads, rtstat.
+  VkPipelineCache pipeline_cache = VK_NULL_HANDLE;
+  // Dedicated to one-time initialization and diagnostic aux submits.
   VkFence fence = VK_NULL_HANDLE;
   uint32_t max_cs_resources = 0;
   VkDeviceSize max_storage_buffer_range = 0;
+  float timestamp_period = 0.0f;
+  uint32_t timestamp_valid_bits = 0;
   bool sampler_anisotropy = false;
   bool sampler_mirror_clamp = false;
   bool geometry_shader = false;
@@ -56,6 +59,7 @@ uint32_t FindMemoryType(uint32_t type_bits, VkMemoryPropertyFlags props);
 uint32_t FindMemoryTypePref(uint32_t type_bits,
                             VkMemoryPropertyFlags pref,
                             VkMemoryPropertyFlags req);
+VkAccessFlags ColorImageAccess(VkImageLayout layout);
 
 void ImageBarrier(VkCommandBuffer c,
                   VkImage img,

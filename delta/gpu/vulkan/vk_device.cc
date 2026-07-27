@@ -16,6 +16,28 @@
 
 namespace gpu::vk {
 
+namespace {
+
+VkPipelineStageFlags StageForAccess(VkAccessFlags access, bool source) {
+  VkPipelineStageFlags stages = 0;
+  if (access & (VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT))
+    stages |= VK_PIPELINE_STAGE_TRANSFER_BIT;
+  if (access & (VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
+                VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT))
+    stages |= VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+  if (access & (VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT))
+    stages |= VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+              VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+  if (access & (VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT))
+    stages |= VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+  return stages   ? stages
+         : source ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT
+                  : VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
+}
+
+}  // namespace
+
 bool g_has_device_fault = false;
 
 // Ask the driver what the GPU actually faulted on (VK_EXT_device_fault).
@@ -80,6 +102,24 @@ uint32_t FindMemoryTypePref(uint32_t type_bits,
   return FindMemoryType(type_bits, req);
 }
 
+VkAccessFlags ColorImageAccess(VkImageLayout layout) {
+  switch (layout) {
+    case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
+      return VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
+             VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+      return VK_ACCESS_SHADER_READ_BIT;
+    case VK_IMAGE_LAYOUT_GENERAL:
+      return VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
+      return VK_ACCESS_TRANSFER_READ_BIT;
+    case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
+      return VK_ACCESS_TRANSFER_WRITE_BIT;
+    default:
+      return 0;
+  }
+}
+
 void ImageBarrier(VkCommandBuffer c,
                   VkImage img,
                   VkImageLayout from,
@@ -96,9 +136,9 @@ void ImageBarrier(VkCommandBuffer c,
   b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, mip_levels, 0, layers};
   b.srcAccessMask = src_a;
   b.dstAccessMask = dst_a;
-  vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-                       VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0,
-                       nullptr, 1, &b);
+  vkCmdPipelineBarrier(c, StageForAccess(src_a, true),
+                       StageForAccess(dst_a, false), 0, 0, nullptr, 0, nullptr,
+                       1, &b);
 }
 
 // Transition a depth image (aspect = DEPTH) between layouts.
@@ -116,9 +156,9 @@ void DepthBarrier(VkCommandBuffer c,
   b.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
   b.srcAccessMask = src_a;
   b.dstAccessMask = dst_a;
-  vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-                       VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0,
-                       nullptr, 1, &b);
+  vkCmdPipelineBarrier(c, StageForAccess(src_a, true),
+                       StageForAccess(dst_a, false), 0, 0, nullptr, 0, nullptr,
+                       1, &b);
 }
 
 bool CreateDevice() {
@@ -205,6 +245,7 @@ bool CreateDevice() {
     std::fprintf(stderr, "[gpuvk] no gfx queue\n");
     return false;
   }
+  g_dev.timestamp_valid_bits = qprops[g_dev.qfam].timestampValidBits;
 
   float prio = 1.0f;
   VkDeviceQueueCreateInfo qc{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
@@ -272,6 +313,11 @@ bool CreateDevice() {
   dc.pEnabledFeatures = &want_feat;
   VKOK(vkCreateDevice(g_dev.phys, &dc, nullptr, &g_dev.device));
   vkGetDeviceQueue(g_dev.device, g_dev.qfam, 0, &g_dev.queue);
+  VkPipelineCacheCreateInfo pipeline_cache_info{
+      VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
+  if (vkCreatePipelineCache(g_dev.device, &pipeline_cache_info, nullptr,
+                            &g_dev.pipeline_cache) != VK_SUCCESS)
+    g_dev.pipeline_cache = VK_NULL_HANDLE;
 
   g_cmd_begin_rendering = (PFN_vkCmdBeginRenderingKHR)vkGetDeviceProcAddr(
       g_dev.device, "vkCmdBeginRendering");
@@ -300,6 +346,7 @@ bool CreateDevice() {
 
   VkPhysicalDeviceProperties props;
   vkGetPhysicalDeviceProperties(g_dev.phys, &props);
+  g_dev.timestamp_period = props.limits.timestampPeriod;
   g_dev.max_cs_resources = std::min(
       {gcn::kMaxCsResources, props.limits.maxPerStageDescriptorStorageBuffers,
        props.limits.maxDescriptorSetStorageBuffers});
