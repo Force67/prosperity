@@ -9,8 +9,14 @@
 #include <vulkan/vulkan.h>
 
 #include <cstdint>
+#include <unordered_set>
+#include <vector>
+
+#include "gpu/vulkan/vk_memory_span.h"
 
 namespace gpu::vk {
+
+struct DeviceState;
 
 struct ImageAllocation {
   VkDeviceMemory memory = VK_NULL_HANDLE;
@@ -20,7 +26,36 @@ struct ImageAllocation {
   bool dedicated = false;
 };
 
-bool AllocateImageMemory(VkImage image, ImageAllocation& allocation);
-void FreeImageMemory(ImageAllocation& allocation);
+class ImageMemoryPool {
+ public:
+  ImageMemoryPool() = default;
+  ImageMemoryPool(const ImageMemoryPool&) = delete;
+  ImageMemoryPool& operator=(const ImageMemoryPool&) = delete;
+
+  bool Allocate(const DeviceState& device,
+                VkImage image,
+                ImageAllocation& allocation);
+  void Free(const DeviceState& device, ImageAllocation& allocation);
+
+ private:
+  struct Block {
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    VkDeviceSize size = 0;
+    uint32_t memory_type = 0;
+    MemorySpanAllocator spans;
+  };
+
+  static bool AllocateFromBlock(Block& block,
+                                VkDeviceSize size,
+                                VkDeviceSize alignment,
+                                ImageAllocation& allocation);
+  VkDevice device_ = VK_NULL_HANDLE;
+  std::unordered_set<VkDeviceMemory> dedicated_allocations_;
+  std::vector<Block> blocks_;
+};
+
+// Transitional alias into rhi::BackendState while callers are migrated to
+// receive the image pool explicitly.
+extern ImageMemoryPool& g_image_memory;
 
 }  // namespace gpu::vk

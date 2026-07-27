@@ -14,7 +14,9 @@
 
 #include "gpu/vulkan/vk_device.h"
 #include "gpu/vulkan/vk_frame.h"
+#include "gpu/vulkan/vk_memory.h"
 #include "gpu/vulkan/vk_pipeline_cache.h"
+#include "gpu/vulkan/vk_present.h"
 #include "gpu/vulkan/vk_render_target.h"
 #include "gpu/vulkan/vk_texture_cache.h"
 #include "gpu/vulkan/vk_upload_ring.h"
@@ -30,6 +32,8 @@ struct BackendState {
   vk::FrameState frame;
   vk::UploadRings rings;
   vk::QuadPipelines quad;
+  vk::RecompiledPipelineCache recompiled_pipelines;
+  vk::ImageMemoryPool image_memory;
   vk::TextureBindings tex;
 
   // Render targets keyed by guest address + the guest-page -> target index.
@@ -41,6 +45,10 @@ struct BackendState {
   // Dynamic rendering entry points (core in 1.3, KHR on older drivers).
   PFN_vkCmdBeginRenderingKHR cmd_begin_rendering = nullptr;
   PFN_vkCmdEndRenderingKHR cmd_end_rendering = nullptr;
+
+  // Declared last so its worker stops before the device-owned state above is
+  // destroyed during process teardown.
+  vk::LatestFramePresenter presenter;
 };
 
 }  // namespace gpu::rhi

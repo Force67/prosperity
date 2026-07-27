@@ -22,6 +22,7 @@ bool init(const char *, uint32_t, uint32_t) { return false; }
 bool ensure(const char *, uint32_t, uint32_t) { return false; }
 bool available() { return false; }
 bool canPresent() { return false; }
+void requestPresentStop() {}
 void present(const void *, uint32_t, uint32_t, uint32_t, PixelFormat) {}
 bool pumpEvents() { return true; }
 bool pollKeyboardPad(PadKeys &) { return false; }

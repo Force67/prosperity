@@ -127,7 +127,7 @@ RTarget* GetRT(uint64_t base, uint32_t w, uint32_t h, VkFormat fmt) {
              VK_IMAGE_USAGE_TRANSFER_DST_BIT;
   if (vkCreateImage(g_dev.device, &ii, nullptr, &t.image) != VK_SUCCESS)
     return nullptr;
-  if (!AllocateImageMemory(t.image, t.allocation)) {
+  if (!g_image_memory.Allocate(g_dev, t.image, t.allocation)) {
     vkDestroyImage(g_dev.device, t.image, nullptr);
     return nullptr;  // GPU OOM -> don't bind/view a memory-less image (driver
                      // crash)
@@ -139,7 +139,7 @@ RTarget* GetRT(uint64_t base, uint32_t w, uint32_t h, VkFormat fmt) {
   vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
   if (vkCreateImageView(g_dev.device, &vci, nullptr, &t.view) != VK_SUCCESS) {
     vkDestroyImage(g_dev.device, t.image, nullptr);
-    FreeImageMemory(t.allocation);
+    g_image_memory.Free(g_dev, t.allocation);
     return nullptr;
   }
   // descriptor set so this RT can be sampled (render-to-texture).
@@ -180,7 +180,8 @@ VkDescriptorSet SnapshotRT(RTarget& rt) {
     if (vkCreateImage(g_dev.device, &ii, nullptr, &rt.feedback_image) !=
         VK_SUCCESS)
       return VK_NULL_HANDLE;
-    if (!AllocateImageMemory(rt.feedback_image, rt.feedback_allocation)) {
+    if (!g_image_memory.Allocate(g_dev, rt.feedback_image,
+                                 rt.feedback_allocation)) {
       vkDestroyImage(g_dev.device, rt.feedback_image, nullptr);
       rt.feedback_image = VK_NULL_HANDLE;
       return VK_NULL_HANDLE;
@@ -193,7 +194,7 @@ VkDescriptorSet SnapshotRT(RTarget& rt) {
     if (vkCreateImageView(g_dev.device, &vi, nullptr, &rt.feedback_view) !=
         VK_SUCCESS) {
       vkDestroyImage(g_dev.device, rt.feedback_image, nullptr);
-      FreeImageMemory(rt.feedback_allocation);
+      g_image_memory.Free(g_dev, rt.feedback_allocation);
       rt.feedback_image = VK_NULL_HANDLE;
       return VK_NULL_HANDLE;
     }
@@ -202,7 +203,7 @@ VkDescriptorSet SnapshotRT(RTarget& rt) {
     if (!rt.feedback_set) {
       vkDestroyImageView(g_dev.device, rt.feedback_view, nullptr);
       vkDestroyImage(g_dev.device, rt.feedback_image, nullptr);
-      FreeImageMemory(rt.feedback_allocation);
+      g_image_memory.Free(g_dev, rt.feedback_allocation);
       rt.feedback_view = VK_NULL_HANDLE;
       rt.feedback_image = VK_NULL_HANDLE;
       return VK_NULL_HANDLE;
@@ -268,7 +269,7 @@ DepthTarget* GetDepthRT(uint64_t base, uint32_t w, uint32_t h) {
       VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
   if (vkCreateImage(g_dev.device, &ii, nullptr, &t.image) != VK_SUCCESS)
     return nullptr;
-  if (!AllocateImageMemory(t.image, t.allocation)) {
+  if (!g_image_memory.Allocate(g_dev, t.image, t.allocation)) {
     vkDestroyImage(g_dev.device, t.image, nullptr);
     return nullptr;
   }
@@ -279,7 +280,7 @@ DepthTarget* GetDepthRT(uint64_t base, uint32_t w, uint32_t h) {
   vci.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
   if (vkCreateImageView(g_dev.device, &vci, nullptr, &t.view) != VK_SUCCESS) {
     vkDestroyImage(g_dev.device, t.image, nullptr);
-    FreeImageMemory(t.allocation);
+    g_image_memory.Free(g_dev, t.allocation);
     return nullptr;
   }
   if (g_tex.ds_pool) {

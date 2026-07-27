@@ -19,13 +19,21 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <utility>
 #include <vector>
 
 namespace gpu::vk {
 
 using rhi::DrawInfo;
 
-std::unordered_map<uint64_t, RecompPipe> g_recomp_pipes;
+RecompPipe* RecompiledPipelineCache::Find(uint64_t key) {
+  const auto it = pipelines_.find(key);
+  return it == pipelines_.end() ? nullptr : &it->second;
+}
+
+RecompPipe* RecompiledPipelineCache::Store(uint64_t key, RecompPipe pipeline) {
+  return &pipelines_.emplace(key, std::move(pipeline)).first->second;
+}
 
 // Build a graphics pipeline for the colored (textured=false) or textured quad
 // with the given colour-blend attachment. Shaders + layout selected by
@@ -234,9 +242,8 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
     key = HashWord(key, d.vattrs[i].dfmt);
     key = HashWord(key, d.vattrs[i].nfmt);
   }
-  auto it = g_recomp_pipes.find(key);
-  if (it != g_recomp_pipes.end())
-    return &it->second;
+  if (RecompPipe* pipeline = g_recomp_cache.Find(key))
+    return pipeline;
   RecompPipe rp;
   rp.textured = !d.recomp->ps_texs.empty();
   const bool has_storage =
@@ -438,8 +445,7 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
     std::fprintf(stderr, "[gpuvk] recomp pipeline failed: %d\n", (int)r);
     return nullptr;
   }
-  g_recomp_pipes[key] = rp;
-  return &g_recomp_pipes[key];
+  return g_recomp_cache.Store(key, std::move(rp));
 }
 
 }  // namespace gpu::vk

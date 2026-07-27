@@ -12,7 +12,6 @@
 #include <vector>
 
 namespace gpu::vk {
-namespace {
 
 // gfx::present blocks on the window swapchain (previous-present fence, vsync /
 // compositor pacing) and, on a software Vulkan driver, rasterizes the blit on
@@ -20,64 +19,75 @@ namespace {
 // thread owns the window (creation, event pump, and present all happen on it)
 // and always shows the newest completed frame; the frame loop just snapshots
 // the pixels and signals. DELTA_GPU_SYNCPRESENT=1 restores the inline call.
-struct Presenter {
-  std::thread th;
-  std::mutex mtx;
-  std::condition_variable cv;
-  std::vector<uint8_t> buf;  // pending frame (BGRA, tight pitch); latest wins
-  uint32_t w = 0, h = 0;
-  bool pending = false;
-  bool started = false;
-};
+LatestFramePresenter::~LatestFramePresenter() {
+  Stop();
+}
 
-Presenter g_presenter;
+void LatestFramePresenter::StartLocked() {
+  if (!thread_.joinable())
+    thread_ = std::thread(&LatestFramePresenter::Run, this);
+}
 
-void PresenterLoop() {
-  std::unique_lock<std::mutex> lk(g_presenter.mtx);
+void LatestFramePresenter::Run() {
+  std::unique_lock<std::mutex> lock(mutex_);
   std::vector<uint8_t> local;
   while (true) {
-    g_presenter.cv.wait(lk, [] { return g_presenter.pending; });
+    ready_.wait(lock, [this] { return pending_ || stopping_; });
+    if (stopping_)
+      return;
     // Steal the pending buffer (the allocations ping-pong, no per-frame alloc).
-    local.swap(g_presenter.buf);
-    const uint32_t w = g_presenter.w, h = g_presenter.h;
-    g_presenter.pending = false;
-    lk.unlock();
+    local.swap(pending_pixels_);
+    const uint32_t w = width_;
+    const uint32_t h = height_;
+    pending_ = false;
+    lock.unlock();
     if (gfx::ensure("prosperity", w, h) && gfx::pumpEvents())
       gfx::present(local.data(), w, h, w * 4, gfx::PixelFormat::bgra8);
-    lk.lock();
+    lock.lock();
   }
 }
 
-}  // namespace
-
-void PresentAsync(const uint8_t* pixels, uint32_t w, uint32_t h) {
-  Presenter& p = g_presenter;
-  if (!p.started) {
-    p.started = true;
-    p.th = std::thread(PresenterLoop);
-    p.th.detach();
-  }
-  std::lock_guard<std::mutex> lk(p.mtx);
-  p.buf.assign(pixels, pixels + (size_t)w * h * 4);
-  p.w = w;
-  p.h = h;
-  p.pending = true;
-  p.cv.notify_one();
+void LatestFramePresenter::Present(const uint8_t* pixels,
+                                   uint32_t w,
+                                   uint32_t h) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (stopping_)
+    return;
+  StartLocked();
+  pending_pixels_.assign(pixels, pixels + static_cast<size_t>(w) * h * 4);
+  width_ = w;
+  height_ = h;
+  pending_ = true;
+  ready_.notify_one();
 }
 
-void PresentAsync(std::vector<uint8_t>&& pixels, uint32_t w, uint32_t h) {
-  Presenter& p = g_presenter;
-  if (!p.started) {
-    p.started = true;
-    p.th = std::thread(PresenterLoop);
-    p.th.detach();
+void LatestFramePresenter::Present(std::vector<uint8_t>&& pixels,
+                                   uint32_t w,
+                                   uint32_t h) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (stopping_)
+    return;
+  StartLocked();
+  pending_pixels_.swap(pixels);
+  width_ = w;
+  height_ = h;
+  pending_ = true;
+  ready_.notify_one();
+}
+
+void LatestFramePresenter::Stop() {
+  std::thread thread;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    stopping_ = true;
+    pending_ = false;
+    thread = std::move(thread_);
   }
-  std::lock_guard<std::mutex> lk(p.mtx);
-  p.buf.swap(pixels);
-  p.w = w;
-  p.h = h;
-  p.pending = true;
-  p.cv.notify_one();
+  if (thread.joinable())
+    gfx::requestPresentStop();
+  ready_.notify_one();
+  if (thread.joinable())
+    thread.join();
 }
 
 }  // namespace gpu::vk

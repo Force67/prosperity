@@ -582,7 +582,7 @@ bool CsBatchFlush() {
                  "n=%u\n",
                  (int)end_result, (int)submit_result, (int)wait_result,
                  g_cs_batch_count);
-    ReportDeviceFault(g_dev.device);
+    ReportDeviceFault(g_dev);
     g_cs_failed = true;
     g_ns_cs_gpu += NowNs() - t0;
     return false;

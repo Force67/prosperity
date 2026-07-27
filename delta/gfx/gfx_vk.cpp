@@ -99,10 +99,25 @@ struct State {
 
 State g;
 std::atomic_bool g_canPresent{true};
+constexpr uint64_t kPresentWaitSliceNs = 50'000'000;
 
 void stopPresenting(const char *operation, VkResult result) {
   std::fprintf(stderr, "[gfx] %s failed: VkResult=%d\n", operation, result);
   g_canPresent.store(false, std::memory_order_release);
+}
+
+bool waitForPresentFence(VkFence fence, const char *operation) {
+  while (g_canPresent.load(std::memory_order_acquire)) {
+    const VkResult result =
+        vkWaitForFences(g.device, 1, &fence, VK_TRUE, kPresentWaitSliceNs);
+    if (result == VK_SUCCESS)
+      return true;
+    if (result != VK_TIMEOUT) {
+      stopPresenting(operation, result);
+      return false;
+    }
+  }
+  return false;
 }
 
 uint32_t findMemoryType(uint32_t typeBits, VkMemoryPropertyFlags props) {
@@ -589,12 +604,8 @@ void present(const void *pixels, uint32_t w, uint32_t h, uint32_t srcPitch,
   FrameSlot &slot = g.slots[g.nextSlot];
   // The previous submission may still be reading this slot's mapped buffer.
   // Host writes must not begin until its fence signals.
-  VkResult result =
-      vkWaitForFences(g.device, 1, &slot.fence, VK_TRUE, UINT64_MAX);
-  if (result != VK_SUCCESS) {
-    stopPresenting("vkWaitForFences(submit)", result);
+  if (!waitForPresentFence(slot.fence, "vkWaitForFences(submit)"))
     return;
-  }
 
   // Upload rows into the staging buffer (tightly packed w*4).
   auto *dst = static_cast<uint8_t *>(slot.stagingMap);
@@ -603,13 +614,18 @@ void present(const void *pixels, uint32_t w, uint32_t h, uint32_t srcPitch,
     std::memcpy(dst + (size_t)y * w * 4, src + (size_t)y * srcPitch, w * 4);
 
   uint32_t idx = 0;
-  result = vkResetFences(g.device, 1, &slot.acquireFence);
+  VkResult result = vkResetFences(g.device, 1, &slot.acquireFence);
   if (result != VK_SUCCESS) {
     stopPresenting("vkResetFences(acquire)", result);
     return;
   }
-  VkResult ar = vkAcquireNextImageKHR(g.device, g.swapchain, UINT64_MAX,
-                                      slot.acquireSem, slot.acquireFence, &idx);
+  VkResult ar;
+  do {
+    ar = vkAcquireNextImageKHR(g.device, g.swapchain, kPresentWaitSliceNs,
+                               slot.acquireSem, slot.acquireFence, &idx);
+  } while (ar == VK_TIMEOUT && g_canPresent.load(std::memory_order_acquire));
+  if (!g_canPresent.load(std::memory_order_acquire))
+    return;
   if (ar == VK_ERROR_OUT_OF_DATE_KHR) {
     g.needRecreate = true;
     return;
@@ -620,12 +636,8 @@ void present(const void *pixels, uint32_t w, uint32_t h, uint32_t srcPitch,
   }
   if (ar == VK_SUBOPTIMAL_KHR)
     g.needRecreate = true;
-  result =
-      vkWaitForFences(g.device, 1, &slot.acquireFence, VK_TRUE, UINT64_MAX);
-  if (result != VK_SUCCESS) {
-    stopPresenting("vkWaitForFences(acquire)", result);
+  if (!waitForPresentFence(slot.acquireFence, "vkWaitForFences(acquire)"))
     return;
-  }
 
   uint64_t vramUsed = 0, vramTotal = 0;
   queryVram(vramUsed, vramTotal);
@@ -734,6 +746,10 @@ bool available() {
 }
 
 bool canPresent() { return g_canPresent.load(std::memory_order_acquire); }
+
+void requestPresentStop() {
+  g_canPresent.store(false, std::memory_order_release);
+}
 
 // Idempotent bring-up: create the window/swapchain on the first call, then just
 // report availability. Safe to call every frame from the presenting thread;

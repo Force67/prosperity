@@ -86,11 +86,28 @@ struct State {
 };
 State g;
 std::atomic_bool g_presentFailed{false};
+std::atomic_bool g_presentStopRequested{false};
+constexpr uint64_t kPresentWaitSliceNs = 50'000'000;
 
 void stopPresenting(const char *operation, VkResult result) {
   std::fprintf(stderr, "[gfx-android] %s failed: VkResult=%d\n", operation,
                result);
   g_presentFailed.store(true, std::memory_order_release);
+}
+
+bool waitForPresentFence(VkFence fence, const char *operation) {
+  while (!g_presentFailed.load(std::memory_order_acquire) &&
+         !g_presentStopRequested.load(std::memory_order_acquire)) {
+    const VkResult result =
+        vkWaitForFences(g.device, 1, &fence, VK_TRUE, kPresentWaitSliceNs);
+    if (result == VK_SUCCESS)
+      return true;
+    if (result != VK_TIMEOUT) {
+      stopPresenting(operation, result);
+      return false;
+    }
+  }
+  return false;
 }
 
 // Window handle + touch state published by android_main (other thread).
@@ -669,9 +686,14 @@ bool available() {
 
 bool canPresent() {
   std::lock_guard<std::mutex> lk(g_inMutex);
-  return (g_windowChanged ||
+  return !g_presentStopRequested.load(std::memory_order_acquire) &&
+         (g_windowChanged ||
           !g_presentFailed.load(std::memory_order_acquire)) &&
          (g_pendingWindow != nullptr || g.window != nullptr);
+}
+
+void requestPresentStop() {
+  g_presentStopRequested.store(true, std::memory_order_release);
 }
 
 bool ensure(const char *, uint32_t, uint32_t) {
@@ -691,7 +713,8 @@ bool ensure(const char *, uint32_t, uint32_t) {
       }
     }
   }
-  if (g_presentFailed.load(std::memory_order_acquire))
+  if (g_presentFailed.load(std::memory_order_acquire) ||
+      g_presentStopRequested.load(std::memory_order_acquire))
     return false;
   if (!g.window)
     return false;
@@ -708,7 +731,8 @@ bool ensure(const char *, uint32_t, uint32_t) {
 
 void present(const void *pixels, uint32_t w, uint32_t h, uint32_t srcPitch,
              PixelFormat fmt) {
-  if (g_presentFailed.load(std::memory_order_acquire) || !g.device ||
+  if (g_presentFailed.load(std::memory_order_acquire) ||
+      g_presentStopRequested.load(std::memory_order_acquire) || !g.device ||
       !g.swapchain || !pixels || !w || !h)
     return;
   if (g.needRecreate && !createSwapchain())
@@ -723,12 +747,8 @@ void present(const void *pixels, uint32_t w, uint32_t h, uint32_t srcPitch,
   FrameSlot &slot = g.slots[g.nextSlot];
   // The previous submission may still be reading this slot's mapped buffer.
   // Host writes and the CPU overlay must wait for that use to finish.
-  VkResult result =
-      vkWaitForFences(g.device, 1, &slot.fence, VK_TRUE, UINT64_MAX);
-  if (result != VK_SUCCESS) {
-    stopPresenting("vkWaitForFences", result);
+  if (!waitForPresentFence(slot.fence, "vkWaitForFences"))
     return;
-  }
 
   auto *dst = static_cast<uint8_t *>(slot.stagingMap);
   auto *src = static_cast<const uint8_t *>(pixels);
@@ -739,13 +759,20 @@ void present(const void *pixels, uint32_t w, uint32_t h, uint32_t srcPitch,
   drawOverlay(dst, w, h, fmt == PixelFormat::bgra8);
 
   uint32_t idx = 0;
-  result = vkResetFences(g.device, 1, &slot.acquireFence);
+  VkResult result = vkResetFences(g.device, 1, &slot.acquireFence);
   if (result != VK_SUCCESS) {
     stopPresenting("vkResetFences(acquire)", result);
     return;
   }
-  VkResult ar = vkAcquireNextImageKHR(g.device, g.swapchain, UINT64_MAX,
-                                      slot.acquireSem, slot.acquireFence, &idx);
+  VkResult ar;
+  do {
+    ar = vkAcquireNextImageKHR(g.device, g.swapchain, kPresentWaitSliceNs,
+                               slot.acquireSem, slot.acquireFence, &idx);
+  } while (ar == VK_TIMEOUT &&
+           !g_presentFailed.load(std::memory_order_acquire) &&
+           !g_presentStopRequested.load(std::memory_order_acquire));
+  if (g_presentStopRequested.load(std::memory_order_acquire))
+    return;
   if (ar == VK_ERROR_OUT_OF_DATE_KHR) {
     g.needRecreate = true;
     return;
@@ -754,12 +781,8 @@ void present(const void *pixels, uint32_t w, uint32_t h, uint32_t srcPitch,
     stopPresenting("vkAcquireNextImageKHR", ar);
     return;
   }
-  result =
-      vkWaitForFences(g.device, 1, &slot.acquireFence, VK_TRUE, UINT64_MAX);
-  if (result != VK_SUCCESS) {
-    stopPresenting("vkWaitForFences(acquire)", result);
+  if (!waitForPresentFence(slot.acquireFence, "vkWaitForFences(acquire)"))
     return;
-  }
 
   result = vkResetCommandBuffer(slot.cmd, 0);
   if (result != VK_SUCCESS) {

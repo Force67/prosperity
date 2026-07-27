@@ -39,6 +39,10 @@ bool available();
 // available(), this is also true before lazy window initialization.
 bool canPresent();
 
+// Permanently interrupt presentation for shutdown. Vulkan waits use bounded
+// slices so a presenting worker observes this request before it is joined.
+void requestPresentStop();
+
 // Upload pixels (w by h, srcPitch bytes per row, 0 means w*4) and present them,
 // scaling to the current window size.
 void present(const void *pixels, uint32_t w, uint32_t h, uint32_t srcPitch = 0,

@@ -44,6 +44,8 @@ struct DeviceState {
   bool sampler_mirror_clamp = false;
   bool geometry_shader = false;
   bool storage_image_write_without_format = false;
+  bool device_fault_available = false;
+  bool device_fault_reported = false;
 };
 
 extern DeviceState& g_dev;
@@ -80,6 +82,6 @@ VkShaderModule MakeModule(const uint32_t* spv, size_t bytes);
 VkShaderModule MakeModuleVec(const std::vector<uint32_t>& spv);
 
 // Ask the driver what the GPU actually faulted on (VK_EXT_device_fault).
-void ReportDeviceFault(VkDevice device);
+void ReportDeviceFault(DeviceState& device);
 
 }  // namespace gpu::vk

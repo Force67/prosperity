@@ -324,7 +324,8 @@ bool CreateTextureDescriptors() {
     wi.tiling = VK_IMAGE_TILING_OPTIMAL;
     wi.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     VKOK(vkCreateImage(g_dev.device, &wi, nullptr, &g_tex.white_img));
-    if (!AllocateImageMemory(g_tex.white_img, g_tex.white_allocation)) {
+    if (!g_image_memory.Allocate(g_dev, g_tex.white_img,
+                                 g_tex.white_allocation)) {
       vkDestroyImage(g_dev.device, g_tex.white_img, nullptr);
       g_tex.white_img = VK_NULL_HANDLE;
       return false;
@@ -336,7 +337,7 @@ bool CreateTextureDescriptors() {
                                   reinterpret_cast<uint64_t>(&white),
                                   white_layout, 1, 1)) {
       vkDestroyImage(g_dev.device, g_tex.white_img, nullptr);
-      FreeImageMemory(g_tex.white_allocation);
+      g_image_memory.Free(g_dev, g_tex.white_allocation);
       g_tex.white_img = VK_NULL_HANDLE;
       return false;
     }
@@ -675,7 +676,7 @@ bool UploadTexPixelsImmediate(VkImage img,
                  (int)up_submit, (int)up_wait, (unsigned long)base,
                  layout.mips[0].width, layout.mips[0].height, layout.mip_levels,
                  layout.layers, (unsigned long long)sz);
-    ReportDeviceFault(g_dev.device);
+    ReportDeviceFault(g_dev);
   }
   uint64_t _tex_dt = NowNs() - _t0;
   g_ns_tex_up += _tex_dt;
@@ -947,14 +948,15 @@ VkDescriptorSet GetTexture(uint64_t base,
         vkDestroyImage(g_dev.device, image_entry.image, nullptr);
         return VK_NULL_HANDLE;
       }
-    if (!AllocateImageMemory(image_entry.image, image_entry.allocation)) {
+    if (!g_image_memory.Allocate(g_dev, image_entry.image,
+                                 image_entry.allocation)) {
       vkDestroyImage(g_dev.device, image_entry.image, nullptr);
       return VK_NULL_HANDLE;
     }
     if (!RecordTexPixels(image_entry.image, VK_IMAGE_LAYOUT_UNDEFINED, base,
                          layout, w, h)) {
       vkDestroyImage(g_dev.device, image_entry.image, nullptr);
-      FreeImageMemory(image_entry.allocation);
+      g_image_memory.Free(g_dev, image_entry.allocation);
       return VK_NULL_HANDLE;
     }
     image_entry.allocation_size = mr.size;
@@ -1110,7 +1112,7 @@ void ReleaseRetiredTextures() {
     if (e.image)
       vkDestroyImage(g_dev.device, e.image, nullptr);
     ImageAllocation allocation = e.allocation;
-    FreeImageMemory(allocation);
+    g_image_memory.Free(g_dev, allocation);
   }
   aged_mtex = std::move(g_retired_mtex);
   aged_tex_sets = std::move(g_retired_tex_sets);

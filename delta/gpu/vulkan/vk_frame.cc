@@ -6,6 +6,7 @@
 
 #include "gfx/gfx.h"
 #include "gpu/rhi/renderer.h"
+#include "gpu/vulkan/vk_backend.h"
 #include "gpu/vulkan/vk_capture.h"
 #include "gpu/vulkan/vk_device.h"
 #include "gpu/vulkan/vk_draw_recomp.h"
@@ -323,9 +324,8 @@ void BeginFrame(Renderer& renderer) {
   // writes the windows it actually fills instead of zeroing 8 windows per
   // draw. Slot 0's usable range starts after it; nothing ever writes it again.
   if (g_ring.ubo_map) {
-    static bool zero_window_init = false;
-    if (!zero_window_init) {
-      zero_window_init = true;
+    if (!g_ring.zero_window_initialized) {
+      g_ring.zero_window_initialized = true;
       std::memset(g_ring.ubo_map, 0, kCbufWindow);
     }
     if (g_frame.slot_idx == 0)
@@ -550,7 +550,7 @@ void EndFrame(Renderer& renderer, uint64_t scanout_base) {
       std::fprintf(stderr,
                    "[gpuvk] frame %d fence DEVICE FAULT: wait=%d draws=%u\n",
                    fin.frame_num, (int)fin_wait, fin.frame_draws);
-      ReportDeviceFault(g_dev.device);
+      ReportDeviceFault(g_dev);
       renderer.state = nullptr;
       return;
     }
@@ -776,9 +776,9 @@ void EndFrame(Renderer& renderer, uint64_t scanout_base) {
       if (gfx::ensure("prosperity", fin.w, fin.h) && gfx::pumpEvents())
         gfx::present(pixels, fin.w, fin.h, fin.w * 4, gfx::PixelFormat::bgra8);
     } else if (pixels == flipped.data()) {
-      PresentAsync(std::move(flipped), fin.w, fin.h);
+      renderer.state->presenter.Present(std::move(flipped), fin.w, fin.h);
     } else {
-      PresentAsync(pixels, fin.w, fin.h);
+      renderer.state->presenter.Present(pixels, fin.w, fin.h);
     }
   }
 

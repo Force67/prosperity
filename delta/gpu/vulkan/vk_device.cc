@@ -11,6 +11,7 @@
 #include "gpu/vulkan/vk_upload_ring.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <thread>
 
@@ -38,21 +39,18 @@ VkPipelineStageFlags StageForAccess(VkAccessFlags access, bool source) {
 
 }  // namespace
 
-bool g_has_device_fault = false;
-
 // Ask the driver what the GPU actually faulted on (VK_EXT_device_fault).
-// Prints once per process — every later DEVICE_LOST is collateral of the first.
-void ReportDeviceFault(VkDevice device) {
-  static bool reported = false;
-  if (reported || !g_has_device_fault)
+// Prints once per device -- every later DEVICE_LOST is collateral of the first.
+void ReportDeviceFault(DeviceState& device) {
+  if (device.device_fault_reported || !device.device_fault_available)
     return;
-  reported = true;
+  device.device_fault_reported = true;
   auto p_get_fault = (PFN_vkGetDeviceFaultInfoEXT)vkGetDeviceProcAddr(
-      device, "vkGetDeviceFaultInfoEXT");
+      device.device, "vkGetDeviceFaultInfoEXT");
   if (!p_get_fault)
     return;
   VkDeviceFaultCountsEXT counts{VK_STRUCTURE_TYPE_DEVICE_FAULT_COUNTS_EXT};
-  if (p_get_fault(device, &counts, nullptr) < 0)
+  if (p_get_fault(device.device, &counts, nullptr) < 0)
     return;
   std::vector<VkDeviceFaultAddressInfoEXT> addrs(counts.addressInfoCount);
   std::vector<VkDeviceFaultVendorInfoEXT> vendors(counts.vendorInfoCount);
@@ -60,7 +58,7 @@ void ReportDeviceFault(VkDevice device) {
   info.pAddressInfos = addrs.data();
   info.pVendorInfos = vendors.data();
   counts.vendorBinarySize = 0;
-  p_get_fault(device, &counts, &info);
+  p_get_fault(device.device, &counts, &info);
   std::fprintf(stderr, "[gpuvk] device fault: '%s' addrs=%u vendor=%u\n",
                info.description, counts.addressInfoCount,
                counts.vendorInfoCount);
@@ -281,11 +279,11 @@ bool CreateDevice() {
                                          eprops.data());
     for (const auto& ep : eprops)
       if (!std::strcmp(ep.extensionName, VK_EXT_DEVICE_FAULT_EXTENSION_NAME))
-        g_has_device_fault = true;
+        g_dev.device_fault_available = true;
   }
-  static VkPhysicalDeviceFaultFeaturesEXT fault_feat{
+  VkPhysicalDeviceFaultFeaturesEXT fault_feat{
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT};
-  if (g_has_device_fault) {
+  if (g_dev.device_fault_available) {
     fault_feat.deviceFault = VK_TRUE;
     fault_feat.pNext = f13.pNext;
     f13.pNext = &fault_feat;
@@ -378,6 +376,11 @@ using namespace gpu::vk;
 bool Init(Renderer& renderer) {
   if (renderer.available())
     return true;
+  // A partial creation or a disabled live device cannot safely be initialized
+  // over: its pools and caches still contain handles from that attempt. A clean
+  // failure before instance creation remains retryable on the first submit.
+  if (g_dev.ready || g_dev.instance)
+    return false;
   // Create the device from a clean host thread: Init() is reached on a FEX
   // guest thread (guest stack / TLS), where the NVIDIA ICD's
   // vk_icdGetInstanceProcAddr silently fails and enumeration falls back to
@@ -391,6 +394,9 @@ bool Init(Renderer& renderer) {
     return false;
   }
   g_dev.ready = true;
+  // Registered after all static initialization, so the worker is joined before
+  // BackendState and gfx translation-unit globals begin destruction.
+  std::atexit([] { g_backend.presenter.Stop(); });
   renderer.state = &g_backend;
   return true;
 }

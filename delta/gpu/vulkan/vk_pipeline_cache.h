@@ -44,6 +44,19 @@ struct RecompPipe {
   bool multi_tex = false;  // custom set 0 for multiple and/or storage images
 };
 
+class RecompiledPipelineCache {
+ public:
+  RecompPipe* Find(uint64_t key);
+  RecompPipe* Store(uint64_t key, RecompPipe pipeline);
+
+ private:
+  std::unordered_map<uint64_t, RecompPipe> pipelines_;
+};
+
+// Transitional alias into rhi::BackendState while pipeline creation is
+// migrated to receive its cache explicitly.
+extern RecompiledPipelineCache& g_recomp_cache;
+
 RecompPipe* GetRecompPipe(const rhi::DrawInfo& d);
 
 }  // namespace gpu::vk
