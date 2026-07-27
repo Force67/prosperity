@@ -30,8 +30,12 @@ ALLOWED = {
     # header is shared with the PS4 path.
     'ps5': ('gpu/ps5/', 'gpu/ps4/gcn/', 'gpu/ps4/pm4.h', 'gpu/rhi/',
             'gpu/guest_memory.h'),
+    # The gcn allowance is the two headers the backend actually consumes (the
+    # recompiled-program types and the detiler), not the directory: a backend
+    # reaching into the decoder or spirv/ internals is a layering bug.
     'vulkan': ('gpu/vulkan/', 'gpu/rhi/', 'gpu/shaders/',
-               'gpu/guest_memory.h', 'gpu/ps4/gcn/'),
+               'gpu/guest_memory.h', 'gpu/ps4/gcn/gcn_translate.h',
+               'gpu/ps4/gcn/gcn_detile.h'),
     'tests': ('gpu/',),
     'shaders': (),
     '': (),  # module-root headers depend on nothing in the module
@@ -39,9 +43,36 @@ ALLOWED = {
 
 PUBLIC = ('gpu/rhi/', 'gpu/ps4/cmd_processor.h', 'gpu/ps5/cmd_processor.h')
 
-INCLUDE = re.compile(r'^\s*#include "(gpu/[^"]+)"', re.M)
+# Quoted or angle form: DELTA_ROOT is a plain -I directory, so both spellings
+# resolve and both must be policed.
+INCLUDE = re.compile(r'^\s*#include ["<](gpu/[^">]+)[">]', re.M)
+# Any quoted include: used to catch the includer-relative bypasses (a bare
+# "vk_device.h" or a "../vulkan/..." path compiles without ever naming gpu/).
+ANY_QUOTED = re.compile(r'^\s*#include "([^"]+)"', re.M)
+
+EXTS = ('.cc', '.cpp', '.h', '.hpp', '.inl')
 
 failures = []
+
+
+def gpu_includes(path, text):
+    """Yield every include of a gpu header, canonicalised to its gpu/... form.
+
+    Catches the quoted/angle "gpu/..." spellings plus the includer-relative
+    forms (bare filename, ../ paths) that quoted lookup resolves without the
+    gpu/ prefix; those are reported as violations of the spelling rule."""
+    for inc in INCLUDE.findall(text):
+        yield inc
+    for inc in ANY_QUOTED.findall(text):
+        if inc.startswith('gpu/'):
+            continue  # already handled above
+        resolved = os.path.normpath(os.path.join(os.path.dirname(path), inc))
+        if os.path.abspath(resolved).startswith(os.path.abspath(GPU) + os.sep) \
+                and os.path.exists(resolved):
+            failures.append(f'{path}: includes "{inc}" relative to the '
+                            f'includer; spell gpu includes from the delta '
+                            f'root ("gpu/...")')
+
 
 for cur, _, names in os.walk(GPU):
     rel = os.path.relpath(cur, GPU)
@@ -52,28 +83,29 @@ for cur, _, names in os.walk(GPU):
                         f'add it to check_layering.py')
         continue
     for n in names:
-        if not n.endswith(('.cc', '.cpp', '.h')):
+        if not n.endswith(EXTS):
             continue
         path = os.path.join(cur, n)
         text = open(path, encoding='utf-8', errors='replace').read()
-        for inc in INCLUDE.findall(text):
+        for inc in gpu_includes(path, text):
             if not any(inc.startswith(a) for a in allowed):
                 failures.append(f'{path}: includes "{inc}" '
                                 f'(not allowed from {top or "module root"}/)')
 
-for cur, dirs, names in os.walk(DELTA):
-    if cur.startswith(GPU):
-        dirs[:] = []
-        continue
-    for n in names:
-        if not n.endswith(('.cc', '.cpp', '.h')):
+for outside in (DELTA, os.path.join(ROOT, 'shared'), os.path.join(ROOT, 'tools')):
+    for cur, dirs, names in os.walk(outside):
+        if cur.startswith(GPU):
+            dirs[:] = []
             continue
-        path = os.path.join(cur, n)
-        text = open(path, encoding='utf-8', errors='replace').read()
-        for inc in INCLUDE.findall(text):
-            if not any(inc.startswith(p) for p in PUBLIC):
-                failures.append(f'{path}: includes gpu-internal "{inc}" '
-                                f'(public surface is {", ".join(PUBLIC)})')
+        for n in names:
+            if not n.endswith(EXTS):
+                continue
+            path = os.path.join(cur, n)
+            text = open(path, encoding='utf-8', errors='replace').read()
+            for inc in gpu_includes(path, text):
+                if not any(inc.startswith(p) for p in PUBLIC):
+                    failures.append(f'{path}: includes gpu-internal "{inc}" '
+                                    f'(public surface is {", ".join(PUBLIC)})')
 
 if failures:
     print(f'{len(failures)} layering violation(s):')

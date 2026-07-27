@@ -3,22 +3,30 @@
 Turns guest GPU command streams into rendered frames.
 
 ```
-rhi/        the renderer as its callers see it (command.h, renderer.h)
-vulkan/     the only backend implementing it
-ps4/        PM4 / Liverpool command processor + the GCN -> SPIR-V recompiler
-ps5/        AGC / gfx10.3 command processor + the RDNA2 -> SPIR-V recompiler
-shaders/    prebuilt SPIR-V for the heuristic quad path
+rhi/            the renderer as its callers see it (command.h, renderer.h)
+vulkan/         the only backend implementing it
+ps4/            PM4 / Liverpool command processor + the GCN -> SPIR-V recompiler
+ps5/            AGC / gfx10.3 command processor + the RDNA2 -> SPIR-V recompiler
+shaders/        prebuilt SPIR-V for the heuristic quad path
+guest_memory.h  safe reads of guest memory shared by both command processors
+tests/          unit tests + the layering check
 ```
 
 Dependencies run one way: `ps4/` and `ps5/` depend on `rhi/`, `vulkan/` depends
-on `rhi/`, and `rhi/` depends on nothing in this module. A command processor
-decodes guest packets into an `rhi::DrawInfo` or `rhi::ComputeInfo` and calls
-the entry points in `rhi/renderer.h`; it never names a graphics API type, and
-never includes anything from `vulkan/`.
+on `rhi/` (plus the `ps4/gcn/` recompiled-program and detile types it consumes),
+and `rhi/` includes nothing in this module -- though `command.h` does
+forward-declare `gcn::Recompiled`/`gcn::RecompiledCs`, so the seam is
+backend-free, not recompiler-free. A command processor decodes guest packets
+into an `rhi::DrawInfo` or `rhi::ComputeInfo` and calls the entry points in
+`rhi/renderer.h`; it never names a graphics API type, and never includes
+anything from `vulkan/`.
 
-Only `rhi/` is reachable from outside the module (`gpu/rhi/renderer.h` from the
-delta root). `vulkan/` and the platform directories are on the module's private
-include path, so a second backend can be added without touching a caller.
+The public surface is `rhi/` plus the two `cmd_processor.h` entry headers the
+HLE submit paths call (`gpu/ps4/cmd_processor.h`, `gpu/ps5/cmd_processor.h`).
+Everything else is internal, so a second backend can be added without touching
+a caller. Note this is enforced by `tests/check_layering.py` at test time, not
+by the build: every module shares one include root, so an out-of-bounds
+include compiles and only `gpu_layering` rejects it.
 
 ## rhi/
 
@@ -42,14 +50,18 @@ One unit per decision, roughly in dependency order:
 
 | unit | hides |
 |---|---|
+| `vk_backend` | the whole backend state as one value behind `rhi::BackendState` |
 | `vk_device` | instance/adapter/queue selection, memory types, barriers, shader modules |
 | `vk_format` | every guest encoding -> Vulkan mapping (surface, vertex, blend, topology, readback) |
 | `vk_hash` | key mixing and the guest-memory content fingerprint |
+| `vk_memory_span` / `vk_memory` | aligned free-span suballocation, and device-local image memory pooled with it |
+| `vk_index_upload` | guest index decoding (8-bit widened to 16) and the upload element policy |
 | `vk_upload_ring` | how per-draw vertices, indices and constants reach the GPU each frame |
 | `vk_texture_cache` | guest textures as images: descriptors, upload, revalidation, retirement |
 | `vk_render_target` | render targets keyed by guest address, the address -> image page table, the rendering region |
 | `vk_pipeline_cache` | which pipeline a given piece of guest state needs |
 | `vk_compute` | the GPU-resident compute working set and lazy writeback to guest memory |
+| `vk_compute_hazard` | the buffer-hazard predicate deciding when a dispatch batch needs a barrier |
 | `vk_draw_recomp` | running the game's own recompiled VS/PS for a draw |
 | `vk_draw` | the draw entry point and the heuristic quad fallback |
 | `vk_frame` | the two-slot frame ring, readback and presentation of a finished frame |

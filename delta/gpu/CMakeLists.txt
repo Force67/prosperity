@@ -33,11 +33,15 @@ if(PkgConfig_FOUND)
   pkg_check_modules(SPIRVHEADERS QUIET SPIRV-Headers)
 endif()
 if(SPIRVTOOLS_FOUND AND SPIRVHEADERS_FOUND)
-  target_link_libraries(delta_gpu PUBLIC ${SPIRVTOOLS_LIBRARIES})
-  target_link_directories(delta_gpu PUBLIC ${SPIRVTOOLS_LIBRARY_DIRS})
-  target_include_directories(delta_gpu PUBLIC ${SPIRVTOOLS_INCLUDE_DIRS}
+  # PRIVATE: SPIRV-Tools is an implementation detail of the recompiler; no
+  # header on the public surface needs it, and keeping it off dependents'
+  # include paths stops accidental use outside the module. LINK_LIBRARIES
+  # (absolute paths) instead of LIBRARIES+link_directories so the link
+  # requirement still reaches the final executable through the static lib.
+  target_link_libraries(delta_gpu PRIVATE ${SPIRVTOOLS_LINK_LIBRARIES})
+  target_include_directories(delta_gpu PRIVATE ${SPIRVTOOLS_INCLUDE_DIRS}
                              ${SPIRVHEADERS_INCLUDE_DIRS})
-  target_compile_definitions(delta_gpu PUBLIC DELTA_HAVE_SPIRV_BACKEND=1)
+  target_compile_definitions(delta_gpu PRIVATE DELTA_HAVE_SPIRV_BACKEND=1)
 else()
   message(STATUS "SPIRV-Tools/Headers not found; direct GCN->SPIR-V backend disabled")
 endif()

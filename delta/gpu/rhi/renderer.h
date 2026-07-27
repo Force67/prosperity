@@ -21,8 +21,9 @@
 
 #include <cstdint>
 
-// Spelled from the delta root so this header resolves for callers outside the
-// gpu module too (the gpu-internal include root is not exported).
+// Spelled from the delta root, the one include convention the layering check
+// (tests/check_layering.py) accepts; all modules share that include root, so
+// internal headers are kept private by the check, not by the build.
 #include "gpu/rhi/command.h"
 
 namespace gpu::rhi {
