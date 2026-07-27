@@ -19,6 +19,7 @@
 #include <cstdio>
 #include <cstring>
 #include <mutex>
+#include <utility>
 #include <vector>
 
 #define VK_USE_PLATFORM_ANDROID_KHR
@@ -75,6 +76,8 @@ struct State {
   VkCommandPool cmdPool = VK_NULL_HANDLE;
   std::array<FrameSlot, kFrameSlotCount> slots;
   std::vector<VkSemaphore> renderSems;
+  // Semaphores of a replaced swapchain; see retireRenderSemaphores.
+  std::vector<VkSemaphore> retiredRenderSems;
   uint32_t nextSlot = 0;
 
   // Framebuffer dimensions shared by the per-slot upload resources.
@@ -315,8 +318,22 @@ void imageBarrier(VkCommandBuffer c, VkImage img, VkImageLayout from,
 }
 
 void destroyRenderSemaphores() {
+  for (VkSemaphore sem : g.retiredRenderSems)
+    vkDestroySemaphore(g.device, sem, nullptr);
+  g.retiredRenderSems.clear();
   for (VkSemaphore sem : g.renderSems)
     vkDestroySemaphore(g.device, sem, nullptr);
+  g.renderSems.clear();
+}
+
+// Park the current semaphores instead of destroying them: the presentation
+// engine may still wait on one after vkDeviceWaitIdle returns (that guarantee
+// needs VK_EXT_swapchain_maintenance1). Whatever the previous recreation
+// parked is destroyed now -- a full swapchain generation later.
+void retireRenderSemaphores() {
+  for (VkSemaphore sem : g.retiredRenderSems)
+    vkDestroySemaphore(g.device, sem, nullptr);
+  g.retiredRenderSems = std::move(g.renderSems);
   g.renderSems.clear();
 }
 
@@ -414,7 +431,7 @@ bool createSwapchain() {
   auto discardRetiredSwapchain = [&] {
     if (!oldSwapchain)
       return;
-    destroyRenderSemaphores();
+    retireRenderSemaphores();
     vkDestroySwapchainKHR(g.device, oldSwapchain, nullptr);
     g.swapchain = VK_NULL_HANDLE;
     g.swapImages.clear();
@@ -442,7 +459,7 @@ bool createSwapchain() {
     return false;
   }
 
-  destroyRenderSemaphores();
+  retireRenderSemaphores();
   if (g.swapchain)
     vkDestroySwapchainKHR(g.device, g.swapchain, nullptr);
 

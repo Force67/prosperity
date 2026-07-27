@@ -23,6 +23,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <utility>
 #include <vector>
 
 #include <SDL3/SDL.h>
@@ -84,6 +85,11 @@ struct State {
   VkCommandPool cmdPool = VK_NULL_HANDLE;
   std::array<FrameSlot, kFrameSlotCount> slots;
   std::vector<VkSemaphore> renderSems;
+  // Semaphores of a replaced swapchain. vkDeviceWaitIdle does not cover the
+  // presentation engine's pending semaphore waits (that needs
+  // VK_EXT_swapchain_maintenance1), so a retired swapchain's semaphores rest
+  // here for one whole swapchain generation before being destroyed.
+  std::vector<VkSemaphore> retiredRenderSems;
   uint32_t nextSlot = 0;
 
   // Framebuffer dimensions shared by the per-slot upload resources.
@@ -146,8 +152,22 @@ void imageBarrier(VkCommandBuffer c, VkImage img, VkImageLayout from,
 }
 
 void destroyRenderSemaphores() {
+  for (VkSemaphore sem : g.retiredRenderSems)
+    vkDestroySemaphore(g.device, sem, nullptr);
+  g.retiredRenderSems.clear();
   for (VkSemaphore sem : g.renderSems)
     vkDestroySemaphore(g.device, sem, nullptr);
+  g.renderSems.clear();
+}
+
+// Park the current semaphores instead of destroying them: the presentation
+// engine may still wait on one after vkDeviceWaitIdle returns. Whatever was
+// parked by the previous recreation is destroyed now -- by then a full
+// swapchain generation (plus another idle) has passed.
+void retireRenderSemaphores() {
+  for (VkSemaphore sem : g.retiredRenderSems)
+    vkDestroySemaphore(g.device, sem, nullptr);
+  g.retiredRenderSems = std::move(g.renderSems);
   g.renderSems.clear();
 }
 
@@ -251,7 +271,7 @@ bool createSwapchain() {
     if (!oldSwapchain)
       return;
     overlayVkSetSwapchain({}, {}, chosen.format);
-    destroyRenderSemaphores();
+    retireRenderSemaphores();
     vkDestroySwapchainKHR(g.device, oldSwapchain, nullptr);
     g.swapchain = VK_NULL_HANDLE;
     g.swapImages.clear();
@@ -281,7 +301,7 @@ bool createSwapchain() {
   // This destroys framebuffers and views for the old images before their
   // swapchain is destroyed, then creates attachments for the replacement.
   overlayVkSetSwapchain(newImages, ext, chosen.format); // no-op pre-init
-  destroyRenderSemaphores();
+  retireRenderSemaphores();
   if (g.swapchain)
     vkDestroySwapchainKHR(g.device, g.swapchain, nullptr);
 
