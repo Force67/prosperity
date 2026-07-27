@@ -50,7 +50,7 @@ struct {
 
   std::vector<VkImageView> views;
   std::vector<VkFramebuffer> fbs;
-  Frame frame;  // single in-flight frame (present() serialises on a fence)
+  std::vector<Frame> frames;
   bool ready = false;
 } v;
 
@@ -65,18 +65,21 @@ uint32_t memType(uint32_t bits, VkMemoryPropertyFlags props) {
 }
 
 bool makeBuffer(VkDeviceSize size, VkBufferUsageFlags usage,
-                VkMemoryPropertyFlags props, VkBuffer &buf, VkDeviceMemory &mem) {
+                VkMemoryPropertyFlags props, VkBuffer &buf,
+                VkDeviceMemory &mem) {
   VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
   bi.size = size;
   bi.usage = usage;
   bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-  if (vkCreateBuffer(v.device, &bi, nullptr, &buf) != VK_SUCCESS) return false;
+  if (vkCreateBuffer(v.device, &bi, nullptr, &buf) != VK_SUCCESS)
+    return false;
   VkMemoryRequirements req;
   vkGetBufferMemoryRequirements(v.device, buf, &req);
   VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
   ai.allocationSize = req.size;
   ai.memoryTypeIndex = memType(req.memoryTypeBits, props);
-  if (vkAllocateMemory(v.device, &ai, nullptr, &mem) != VK_SUCCESS) return false;
+  if (vkAllocateMemory(v.device, &ai, nullptr, &mem) != VK_SUCCESS)
+    return false;
   vkBindBufferMemory(v.device, buf, mem, 0);
   return true;
 }
@@ -94,11 +97,11 @@ bool createPipeline() {
   VkAttachmentDescription att{};
   att.format = v.format;
   att.samples = VK_SAMPLE_COUNT_1_BIT;
-  att.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;  // preserve the blitted frame
+  att.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD; // preserve the blitted frame
   att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
   att.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
   att.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-  att.initialLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;  // after the blit
+  att.initialLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL; // after the blit
   att.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
   VkAttachmentReference ref{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
   VkSubpassDescription sub{};
@@ -242,8 +245,8 @@ bool uploadFont() {
   vkGetImageMemoryRequirements(v.device, v.fontImg, &req);
   VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
   ai.allocationSize = req.size;
-  ai.memoryTypeIndex = memType(req.memoryTypeBits,
-                               VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+  ai.memoryTypeIndex =
+      memType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
   vkAllocateMemory(v.device, &ai, nullptr, &v.fontMem);
   vkBindImageMemory(v.device, v.fontImg, v.fontMem, 0);
 
@@ -290,8 +293,9 @@ bool uploadFont() {
   vkCmdCopyBufferToImage(cmd, stg, v.fontImg,
                          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &cp);
   barrier(VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
-          VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+          VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+          VK_PIPELINE_STAGE_TRANSFER_BIT,
           VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
   vkEndCommandBuffer(cmd);
   VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
@@ -340,22 +344,42 @@ bool uploadFont() {
   return true;
 }
 
-void ensureFrameCapacity(VkDeviceSize vtxBytes, VkDeviceSize idxBytes) {
-  Frame &f = v.frame;
+void destroyMappedBuffer(VkBuffer &buffer, VkDeviceMemory &memory, void *&map) {
+  if (map)
+    vkUnmapMemory(v.device, memory);
+  if (buffer)
+    vkDestroyBuffer(v.device, buffer, nullptr);
+  if (memory)
+    vkFreeMemory(v.device, memory, nullptr);
+  buffer = VK_NULL_HANDLE;
+  memory = VK_NULL_HANDLE;
+  map = nullptr;
+}
+
+void destroyFrame(Frame &frame) {
+  destroyMappedBuffer(frame.vtx, frame.vtxMem, frame.vtxMap);
+  destroyMappedBuffer(frame.idx, frame.idxMem, frame.idxMap);
+  frame = {};
+}
+
+void ensureFrameCapacity(Frame &f, VkDeviceSize vtxBytes,
+                         VkDeviceSize idxBytes) {
   if (f.vtxCap < vtxBytes) {
-    if (f.vtx) { vkDestroyBuffer(v.device, f.vtx, nullptr); vkFreeMemory(v.device, f.vtxMem, nullptr); }
+    destroyMappedBuffer(f.vtx, f.vtxMem, f.vtxMap);
     VkDeviceSize cap = vtxBytes + 4096;
     makeBuffer(cap, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                   VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                f.vtx, f.vtxMem);
     vkMapMemory(v.device, f.vtxMem, 0, cap, 0, &f.vtxMap);
     f.vtxCap = cap;
   }
   if (f.idxCap < idxBytes) {
-    if (f.idx) { vkDestroyBuffer(v.device, f.idx, nullptr); vkFreeMemory(v.device, f.idxMem, nullptr); }
+    destroyMappedBuffer(f.idx, f.idxMem, f.idxMap);
     VkDeviceSize cap = idxBytes + 4096;
     makeBuffer(cap, VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
-               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                   VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                f.idx, f.idxMem);
     vkMapMemory(v.device, f.idxMem, 0, cap, 0, &f.idxMap);
     f.idxCap = cap;
@@ -363,18 +387,21 @@ void ensureFrameCapacity(VkDeviceSize vtxBytes, VkDeviceSize idxBytes) {
 }
 
 void destroyFramebuffers() {
-  for (VkFramebuffer fb : v.fbs) vkDestroyFramebuffer(v.device, fb, nullptr);
-  for (VkImageView iv : v.views) vkDestroyImageView(v.device, iv, nullptr);
+  for (VkFramebuffer fb : v.fbs)
+    vkDestroyFramebuffer(v.device, fb, nullptr);
+  for (VkImageView iv : v.views)
+    vkDestroyImageView(v.device, iv, nullptr);
   v.fbs.clear();
   v.views.clear();
 }
 
-}  // namespace
+} // namespace
 
 bool overlayVkInit(VkPhysicalDevice phys, VkDevice device, VkQueue queue,
                    uint32_t queueFamily, VkCommandPool pool,
                    VkFormat swapFormat) {
-  if (v.ready) return true;
+  if (v.ready)
+    return true;
   v.phys = phys;
   v.device = device;
   v.queue = queue;
@@ -389,12 +416,17 @@ bool overlayVkInit(VkPhysicalDevice phys, VkDevice device, VkQueue queue,
   return true;
 }
 
-void overlayVkSetSwapchain(const std::vector<VkImage> &images, VkExtent2D extent,
-                           VkFormat format) {
-  if (!v.device) return;
+void overlayVkSetSwapchain(const std::vector<VkImage> &images,
+                           VkExtent2D extent, VkFormat format) {
+  if (!v.device)
+    return;
   destroyFramebuffers();
+  for (Frame &frame : v.frames)
+    destroyFrame(frame);
+  v.frames.clear();
   v.extent = extent;
   v.format = format;
+  v.frames.resize(images.size());
   for (VkImage img : images) {
     VkImageViewCreateInfo iv{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
     iv.image = img;
@@ -418,15 +450,17 @@ void overlayVkSetSwapchain(const std::vector<VkImage> &images, VkExtent2D extent
 }
 
 bool overlayVkRender(VkCommandBuffer cmd, uint32_t imageIndex) {
-  if (!v.ready || imageIndex >= v.fbs.size()) return false;
+  if (!v.ready || imageIndex >= v.fbs.size() || imageIndex >= v.frames.size())
+    return false;
   const ImDrawData *dd = ImGui::GetDrawData();
   const int fbW = v.extent.width, fbH = v.extent.height;
+  Frame &frame = v.frames[imageIndex];
 
   if (dd && dd->TotalVtxCount > 0) {
-    ensureFrameCapacity(dd->TotalVtxCount * sizeof(ImDrawVert),
+    ensureFrameCapacity(frame, dd->TotalVtxCount * sizeof(ImDrawVert),
                         dd->TotalIdxCount * sizeof(ImDrawIdx));
-    auto *vtx = static_cast<ImDrawVert *>(v.frame.vtxMap);
-    auto *idx = static_cast<ImDrawIdx *>(v.frame.idxMap);
+    auto *vtx = static_cast<ImDrawVert *>(frame.vtxMap);
+    auto *idx = static_cast<ImDrawIdx *>(frame.idxMap);
     for (int i = 0; i < dd->CmdListsCount; i++) {
       const ImDrawList *cl = dd->CmdLists[i];
       std::memcpy(vtx, cl->VtxBuffer.Data,
@@ -454,8 +488,8 @@ bool overlayVkRender(VkCommandBuffer cmd, uint32_t imageIndex) {
     vkCmdPushConstants(cmd, v.pipeLayout, VK_SHADER_STAGE_VERTEX_BIT, 0,
                        sizeof(push), push);
     VkDeviceSize off = 0;
-    vkCmdBindVertexBuffers(cmd, 0, 1, &v.frame.vtx, &off);
-    vkCmdBindIndexBuffer(cmd, v.frame.idx, 0,
+    vkCmdBindVertexBuffers(cmd, 0, 1, &frame.vtx, &off);
+    vkCmdBindIndexBuffer(cmd, frame.idx, 0,
                          sizeof(ImDrawIdx) == 2 ? VK_INDEX_TYPE_UINT16
                                                 : VK_INDEX_TYPE_UINT32);
     int vtxOff = 0, idxOff = 0;
@@ -480,26 +514,35 @@ bool overlayVkRender(VkCommandBuffer cmd, uint32_t imageIndex) {
 }
 
 void overlayVkShutdown() {
-  if (!v.device) return;
+  if (!v.device)
+    return;
   vkDeviceWaitIdle(v.device);
   destroyFramebuffers();
-  Frame &f = v.frame;
-  if (f.vtx) { vkDestroyBuffer(v.device, f.vtx, nullptr); vkFreeMemory(v.device, f.vtxMem, nullptr); }
-  if (f.idx) { vkDestroyBuffer(v.device, f.idx, nullptr); vkFreeMemory(v.device, f.idxMem, nullptr); }
-  if (v.pipe) vkDestroyPipeline(v.device, v.pipe, nullptr);
-  if (v.pipeLayout) vkDestroyPipelineLayout(v.device, v.pipeLayout, nullptr);
-  if (v.descPool) vkDestroyDescriptorPool(v.device, v.descPool, nullptr);
-  if (v.descLayout) vkDestroyDescriptorSetLayout(v.device, v.descLayout, nullptr);
-  if (v.sampler) vkDestroySampler(v.device, v.sampler, nullptr);
-  if (v.fontView) vkDestroyImageView(v.device, v.fontView, nullptr);
-  if (v.fontImg) vkDestroyImage(v.device, v.fontImg, nullptr);
-  if (v.fontMem) vkFreeMemory(v.device, v.fontMem, nullptr);
-  if (v.pass) vkDestroyRenderPass(v.device, v.pass, nullptr);
+  for (Frame &frame : v.frames)
+    destroyFrame(frame);
+  if (v.pipe)
+    vkDestroyPipeline(v.device, v.pipe, nullptr);
+  if (v.pipeLayout)
+    vkDestroyPipelineLayout(v.device, v.pipeLayout, nullptr);
+  if (v.descPool)
+    vkDestroyDescriptorPool(v.device, v.descPool, nullptr);
+  if (v.descLayout)
+    vkDestroyDescriptorSetLayout(v.device, v.descLayout, nullptr);
+  if (v.sampler)
+    vkDestroySampler(v.device, v.sampler, nullptr);
+  if (v.fontView)
+    vkDestroyImageView(v.device, v.fontView, nullptr);
+  if (v.fontImg)
+    vkDestroyImage(v.device, v.fontImg, nullptr);
+  if (v.fontMem)
+    vkFreeMemory(v.device, v.fontMem, nullptr);
+  if (v.pass)
+    vkDestroyRenderPass(v.device, v.pass, nullptr);
   v = {};
 }
 
 bool overlayVkReady() { return v.ready && !v.fbs.empty(); }
 
-}  // namespace gfx
+} // namespace gfx
 
-#endif  // !__ANDROID__
+#endif // !__ANDROID__

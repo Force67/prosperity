@@ -16,8 +16,8 @@
 namespace gfx {
 
 enum class PixelFormat {
-  rgba8,  // R8G8B8A8 unorm, byte order R,G,B,A
-  bgra8,  // B8G8R8A8 unorm (PS4 scanout default)
+  rgba8, // R8G8B8A8 unorm, byte order R,G,B,A
+  bgra8, // B8G8R8A8 unorm (PS4 scanout default)
 };
 
 // Set the window title (title id + platform). Applies immediately if the window
@@ -34,6 +34,10 @@ bool ensure(const char *title, uint32_t width, uint32_t height);
 
 // True once a window + swapchain exist (init succeeded and not shut down).
 bool available();
+
+// True while this backend can create or keep presenting to a window. Unlike
+// available(), this is also true before lazy window initialization.
+bool canPresent();
 
 // Upload pixels (w by h, srcPitch bytes per row, 0 means w*4) and present them,
 // scaling to the current window size.
@@ -52,7 +56,8 @@ struct PadKeys {
   bool options = false, touchpad = false;
   uint8_t lx = 128, ly = 128, rx = 128, ry = 128;
 };
-// Fill `out` from the current keyboard state. Returns false if no window exists.
+// Fill `out` from the current keyboard state. Returns false if no window
+// exists.
 bool pollKeyboardPad(PadKeys &out);
 
 // Drive haptics on the active controller. large/small are the DS4 motor
@@ -60,13 +65,14 @@ bool pollKeyboardPad(PadKeys &out);
 // vibrator (Android); a no-op when no haptic device is present.
 void setRumble(uint8_t largeMotor, uint8_t smallMotor);
 
-// Harness signal shared between the GPU renderer and the input layer. The renderer
-// raises it once sustained gameplay (room rendering) is on screen, so the headless
-// autoskip (DELTA_PAD_AUTOSKIP) stops pressing menu buttons and stays in the run
-// instead of bouncing back out through the pause menu. Latches on (a run started).
+// Harness signal shared between the GPU renderer and the input layer. The
+// renderer raises it once sustained gameplay (room rendering) is on screen, so
+// the headless autoskip (DELTA_PAD_AUTOSKIP) stops pressing menu buttons and
+// stays in the run instead of bouncing back out through the pause menu. Latches
+// on (a run started).
 void setInGameplay(bool v);
 bool inGameplay();
 
 void shutdown();
 
-}  // namespace gfx
+} // namespace gfx
