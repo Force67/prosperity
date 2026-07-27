@@ -53,7 +53,7 @@ struct UploadRings {
   VkDescriptorSet ubo_set = VK_NULL_HANDLE;
 };
 
-extern UploadRings g_ring;
+extern UploadRings& g_ring;
 
 bool CreateUploadRings(const VkPhysicalDeviceProperties& props);
 

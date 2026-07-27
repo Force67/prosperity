@@ -55,7 +55,7 @@ struct RTarget {
       false;  // false until first real render (then loadOp can LOAD)
 };
 
-extern std::unordered_map<uint64_t, RTarget> g_rts;
+extern std::unordered_map<uint64_t, RTarget>& g_rts;
 
 // Depth/stencil attachment, keyed by its guest DB_Z_WRITE_BASE. Allocated on
 // demand when a 3D draw binds a Z buffer. Internal format is always D32_SFLOAT
@@ -76,7 +76,7 @@ struct DepthTarget {
   float clear_value = 1.0f;
 };
 
-extern std::unordered_map<uint64_t, DepthTarget> g_depths;
+extern std::unordered_map<uint64_t, DepthTarget>& g_depths;
 
 // Address -> image page table (the resource model's core). Maps a 64 KiB guest
 // page to the RT bases whose memory footprint covers it, so a sampled address
@@ -85,7 +85,7 @@ extern std::unordered_map<uint64_t, DepthTarget> g_depths;
 // (double-buffer pairs, a pool of cycled scene buffers), so each page holds a
 // list.
 constexpr uint32_t kRtPageShift = 16;  // 64 KiB
-extern std::unordered_map<uint64_t, std::vector<uint64_t>> g_rt_pages;
+extern std::unordered_map<uint64_t, std::vector<uint64_t>>& g_rt_pages;
 
 uint64_t RtByteSizeWH(uint32_t w, uint32_t h, VkFormat fmt);
 uint64_t RtByteSize(const RTarget& rt);
@@ -117,7 +117,7 @@ struct RenderRegion {
   bool open = false;
 };
 
-extern RenderRegion g_region;
+extern RenderRegion& g_region;
 
 void BeginRegion(const uint64_t* mrt_base,
                  const uint32_t* mrt_info,

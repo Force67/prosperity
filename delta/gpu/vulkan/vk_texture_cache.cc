@@ -24,9 +24,6 @@
 namespace gpu::vk {
 
 using rhi::DrawInfo;
-using rhi::FlushCsWritesRange;
-
-TextureBindings g_tex;
 
 struct TexImageKey {
   uint64_t base = 0;
@@ -759,7 +756,7 @@ VkDescriptorSet GetTexture(uint64_t base,
       tdn++;
     }
   }
-  FlushCsWritesRange(base, footprint);
+  rhi::FlushCsWritesRange(rhi::DefaultRenderer(), base, footprint);
   auto image_it = g_tex_images.find(key.image);
   uint64_t hsh = 0;
   if (image_it == g_tex_images.end() ||

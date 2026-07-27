@@ -60,7 +60,7 @@ void ReportDeclines() {
 
 // Issue a draw running the game's recompiled VS/PS. Returns false if the draw
 // can't be handled (the caller falls back to the heuristic path).
-bool DrawRecomp(const DrawInfo& d) {
+bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
   bool indexed = d.index_data && d.index_count >= 3;
   uint32_t draw_count = indexed ? d.index_count : d.vertex_count;
   static const bool kDrawTrace = std::getenv("DELTA_GPU_DRAWTRACE") != nullptr;
@@ -439,7 +439,7 @@ bool DrawRecomp(const DrawInfo& d) {
   for (uint32_t j = 0; j < nbind; j++) {
     if (!bind_size[j])
       continue;
-    FlushCsWritesRange(reinterpret_cast<uint64_t>(d.vbufs[j].data),
+    FlushCsWritesRange(renderer, reinterpret_cast<uint64_t>(d.vbufs[j].data),
                        bind_size[j]);
     std::memcpy(g_ring.vb_map + voff + bind_off[j], d.vbufs[j].data,
                 (size_t)bind_size[j]);
@@ -665,7 +665,7 @@ bool DrawRecomp(const DrawInfo& d) {
     uint8_t* cb_dst = g_ring.ubo_map + next;
     uint32_t n;
     if (have_cbuf)
-      FlushCsWritesRange(cb.base, kCbufWindow);
+      FlushCsWritesRange(renderer, cb.base, kCbufWindow);
     if (have_cbuf) {
       // Upload as much of the window as the base's page holds, not just the
       // recompiler's planned size. A shader that indexes its constants

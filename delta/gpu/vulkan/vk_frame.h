@@ -53,7 +53,7 @@ struct FrameState {
   uint32_t slot_idx = 0;
 };
 
-extern FrameState g_frame;
+extern FrameState& g_frame;
 
 bool CreateFrameSlots();
 // Pipelined by default; DELTA_GPU_SYNC=1 restores the submit-and-wait frame.

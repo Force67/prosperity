@@ -19,11 +19,6 @@ namespace gpu::vk {
 
 using rhi::DrawInfo;
 
-std::unordered_map<uint64_t, RTarget> g_rts;
-std::unordered_map<uint64_t, DepthTarget> g_depths;
-std::unordered_map<uint64_t, std::vector<uint64_t>> g_rt_pages;
-RenderRegion g_region;
-
 VkImageView SampledImageView(VkImage image,
                              VkImageView identity,
                              VkFormat format,
@@ -617,8 +612,11 @@ void BeginRegion(const uint64_t* mrt_base,
 namespace gpu::rhi {
 using namespace gpu::vk;
 
-void NoteMemoryFill(uint64_t base, uint64_t bytes, uint32_t value) {
-  if (!g_dev.ready || !bytes)
+void NoteMemoryFill(Renderer& renderer,
+                    uint64_t base,
+                    uint64_t bytes,
+                    uint32_t value) {
+  if (!renderer.available() || !bytes)
     return;
   const uint64_t end = base + bytes;
   for (auto& kv : g_rts) {

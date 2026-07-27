@@ -25,8 +25,6 @@
 
 namespace gpu::vk {
 
-FrameState g_frame;
-
 bool CreateFrameSlots() {
   VkCommandBufferAllocateInfo ca{
       VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
@@ -238,8 +236,8 @@ void ReportRtContents() {
 namespace gpu::rhi {
 using namespace gpu::vk;
 
-void BeginFrame() {
-  if (!g_dev.ready)
+void BeginFrame(Renderer& renderer) {
+  if (!renderer.available())
     return;
   // Objects retired two frames ago are past every in-flight command buffer
   // (see ReleaseRetiredTextures) and safe to destroy now.
@@ -324,10 +322,10 @@ void BeginFrame() {
   g_frame.recording = true;
 }
 
-void EndFrame(uint64_t scanout_base) {
-  if (!g_dev.ready || !g_frame.recording)
+void EndFrame(Renderer& renderer, uint64_t scanout_base) {
+  if (!renderer.available() || !g_frame.recording)
     return;
-  FlushCsWrites();  // bound CS-write staleness for guest CPU readers
+  FlushCsWrites(renderer);  // bound CS-write staleness for guest CPU readers
   g_frame.recording = false;
   ReportFps();
   ScopeNs end_timer(&g_ns_end);

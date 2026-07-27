@@ -27,10 +27,14 @@ terms (addresses, GCN data/number formats, GNM blend words). It is deliberately
 not a "translated" description -- the backend owns every mapping decision, so
 both command processors stay free of graphics API policy.
 
-`renderer.h` is the operation set: bring-up, the frame lifecycle
+`renderer.h` is the operation set: a `Renderer` value (a struct with a couple
+of cheap queries; all backend state hangs off its opaque `BackendState*`)
+operated on by free functions -- bring-up (`Init`), the frame lifecycle
 (`BeginFrame` / `Draw` / `EndFrame`), compute (`Dispatch` and the guest-memory
 coherency flushes), and `NoteMemoryFill` for the CP DMA fills a title uses in
-place of a clear packet.
+place of a clear packet. `DefaultRenderer()` hands out the process-wide
+instance the command processors drive (the guest-called HLE entry points
+cannot thread a handle); it is the one piece of ambient state at this seam.
 
 ## vulkan/
 

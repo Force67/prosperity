@@ -43,12 +43,12 @@ struct DeviceState {
   bool storage_image_write_without_format = false;
 };
 
-extern DeviceState g_dev;
+extern DeviceState& g_dev;
 
 // Dynamic rendering (core in 1.3, KHR on older drivers), resolved at device
 // creation: the renderer records no render passes.
-extern PFN_vkCmdBeginRenderingKHR g_cmd_begin_rendering;
-extern PFN_vkCmdEndRenderingKHR g_cmd_end_rendering;
+extern PFN_vkCmdBeginRenderingKHR& g_cmd_begin_rendering;
+extern PFN_vkCmdEndRenderingKHR& g_cmd_end_rendering;
 
 bool CreateDevice();
 

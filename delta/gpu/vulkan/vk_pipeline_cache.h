@@ -27,7 +27,7 @@ struct QuadPipelines {
   std::unordered_map<uint64_t, VkPipeline> cache;
 };
 
-extern QuadPipelines g_quad;
+extern QuadPipelines& g_quad;
 
 bool CreatePipeline();
 bool CreateTexPipeline();

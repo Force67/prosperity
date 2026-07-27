@@ -6,6 +6,7 @@
 
 #include "gpu/ps4/gcn/gcn_translate.h"
 #include "gpu/rhi/renderer.h"
+#include "gpu/vulkan/vk_backend.h"
 #include "gpu/vulkan/vk_frame.h"
 #include "gpu/vulkan/vk_upload_ring.h"
 
@@ -15,10 +16,6 @@
 
 namespace gpu::vk {
 
-DeviceState g_dev;
-
-PFN_vkCmdBeginRenderingKHR g_cmd_begin_rendering = nullptr;
-PFN_vkCmdEndRenderingKHR g_cmd_end_rendering = nullptr;
 bool g_has_device_fault = false;
 
 // Ask the driver what the GPU actually faulted on (VK_EXT_device_fault).
@@ -331,10 +328,10 @@ VkShaderModule MakeModuleVec(const std::vector<uint32_t>& spv) {
 namespace gpu::rhi {
 using namespace gpu::vk;
 
-bool Init() {
-  if (g_dev.ready)
+bool Init(Renderer& renderer) {
+  if (renderer.available())
     return true;
-  // Create the device from a clean host thread: init() is reached on a FEX
+  // Create the device from a clean host thread: Init() is reached on a FEX
   // guest thread (guest stack / TLS), where the NVIDIA ICD's
   // vk_icdGetInstanceProcAddr silently fails and enumeration falls back to
   // llvmpipe -- a ~30ms/frame software rasteriser on a box with a real GPU.
@@ -347,11 +344,8 @@ bool Init() {
     return false;
   }
   g_dev.ready = true;
+  renderer.state = &g_backend;
   return true;
-}
-
-bool Available() {
-  return g_dev.ready;
 }
 
 }  // namespace gpu::rhi

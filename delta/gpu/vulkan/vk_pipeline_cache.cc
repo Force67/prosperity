@@ -25,7 +25,6 @@ namespace gpu::vk {
 
 using rhi::DrawInfo;
 
-QuadPipelines g_quad;
 std::unordered_map<uint64_t, RecompPipe> g_recomp_pipes;
 
 // Build a graphics pipeline for the colored (textured=false) or textured quad

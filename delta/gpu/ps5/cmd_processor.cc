@@ -668,7 +668,7 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
   size_t drop_attr_count = 0;
   g_draws_seen.fetch_add(1, std::memory_order_relaxed);
   DrawCensus();
-  if (!rhi::Available())
+  if (!rhi::DefaultRenderer().available())
     return;
 
   // gfx10.3 has no HW VS: the vertex program is the merged NGG shader, whose
@@ -1501,7 +1501,7 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
   if (!g_frame_active) {
     if (dl)
       std::fprintf(stderr, "[agc] DL BeginFrame...\n");
-    rhi::BeginFrame();
+    rhi::BeginFrame(rhi::DefaultRenderer());
     g_frame_active = true;
   }
   if (dl) {
@@ -1532,7 +1532,7 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
                    d.vbufs[i].num_records);
   }
   g_draws_issued.fetch_add(1, std::memory_order_relaxed);
-  rhi::Draw(d);
+  rhi::Draw(rhi::DefaultRenderer(), d);
   if (dl)
     std::fprintf(stderr, "[agc] DL draw#%lu done\n", (unsigned long)my_draw);
 }
@@ -1728,7 +1728,7 @@ void Walk(const uint32_t* p, uint32_t words, bool dump_this, int depth) {
               auto* p32 = reinterpret_cast<uint32_t*>(dst);
               for (uint32_t k = 0; k < bytes / 4; k++)
                 p32[k] = fill;
-              rhi::NoteMemoryFill(dst, bytes, fill);
+              rhi::NoteMemoryFill(rhi::DefaultRenderer(), dst, bytes, fill);
             }
             if (std::getenv("DELTA_GPU_DMATRACE")) {
               static int dmn = 0;
@@ -1863,7 +1863,7 @@ void SubmitDcb(const void* dcb, uint32_t size_bytes) {
   static bool s_vk_tried = false;
   if (!s_vk_tried) {
     s_vk_tried = true;
-    rhi::Init();
+    rhi::Init(rhi::DefaultRenderer());
   }
   // ONE-SHOT: after some frames, scan the 2MB SceAgcRegShadow (0x8002860000)
   // for non-zero content -- if setShader wrote the shader state to a DIFFERENT
@@ -1941,8 +1941,8 @@ void SubmitCcb(const void* ccb, uint32_t size_bytes) {
 
 void EndFrame(uint64_t scanout_base) {
   std::lock_guard<std::mutex> lk(g_mtx);
-  if (g_frame_active && rhi::Available()) {
-    rhi::EndFrame(scanout_base);
+  if (g_frame_active && rhi::DefaultRenderer().available()) {
+    rhi::EndFrame(rhi::DefaultRenderer(), scanout_base);
     g_frame_active = false;
   }
 }

@@ -185,7 +185,7 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
       }
     }
   }
-  if (rhi::Available()) {
+  if (rhi::DefaultRenderer().available()) {
     rhi::DrawInfo d;
     const uint32_t* vud = &g_regs[mmSPI_SHADER_USER_DATA_VS_0];
     std::memcpy(d.vs_user_data, vud, 16 * sizeof(uint32_t));
@@ -668,7 +668,7 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
     if (auto_vertex_count && auto_vertex_count <= 0x100000)
       d.vertex_count = auto_vertex_count;
     if (!g_frame_active) {
-      rhi::BeginFrame();
+      rhi::BeginFrame(rhi::DefaultRenderer());
       g_frame_active = true;
     }
     // DELTA_GPU_BLITDUMP: for the first few draws targeting a wide
@@ -1049,7 +1049,7 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
     if (kSkipStale && d.tex_base && d.tex_w >= 2048)
       ;  // skip the wide stale-buffer blit
     else if (d.vertex_data || (d.recomp && d.recomp->ok && d.num_vattrs == 0))
-      rhi::Draw(d);
+      rhi::Draw(rhi::DefaultRenderer(), d);
   }
   if (!kTrace)
     return;
@@ -1214,8 +1214,8 @@ void EndFrame(uint64_t scanout_base) {
   // New frame -> shader code may have been rewritten; let CachedProgram
   // revalidate each address once next frame instead of once per draw.
   gcn::NextProgramCacheGeneration();
-  if (g_frame_active && rhi::Available()) {
-    rhi::EndFrame(scanout_base);
+  if (g_frame_active && rhi::DefaultRenderer().available()) {
+    rhi::EndFrame(rhi::DefaultRenderer(), scanout_base);
     g_frame_active = false;
   }
 }
@@ -1361,7 +1361,7 @@ void HandleDispatch(const uint32_t* body, uint32_t count) {
   const uint32_t* ud = &g_regs[mmCOMPUTE_USER_DATA_0];
 
   static const bool kNoCs = std::getenv("DELTA_GPU_NOCS") != nullptr;
-  if (kNoCs || !rhi::Available())
+  if (kNoCs || !rhi::DefaultRenderer().available())
     return;
 
   // Recompile the CS to a Vulkan compute pipeline, resolve the guest memory
@@ -1428,8 +1428,8 @@ void HandleDispatch(const uint32_t* body, uint32_t count) {
     for (auto& r : rc.resources)
       if (r.binding >= resolved.size() || !resolved[r.binding].valid)
         any_unresolved = true;
-    if (any_unresolved && rhi::Available()) {
-      rhi::FlushCsWrites();
+    if (any_unresolved && rhi::DefaultRenderer().available()) {
+      rhi::FlushCsWrites(rhi::DefaultRenderer());
       resolved = gcn::ResolveCsResources(*cs_program, rc, ud);
     }
   }
@@ -1612,7 +1612,7 @@ void HandleDispatch(const uint32_t* body, uint32_t count) {
   }
   if (!res_ok || !ci.num_res)
     return;
-  const bool dispatched = rhi::Dispatch(ci);
+  const bool dispatched = rhi::Dispatch(rhi::DefaultRenderer(), ci);
   if (trace_cs_resources)
     std::fprintf(stderr, "[csres] cs=%#lx dispatch %s (%u resources)\n",
                  (unsigned long)cs_addr, dispatched ? "executed" : "failed",
@@ -1625,7 +1625,7 @@ void SubmitDcb(const void* dcb, uint32_t size_bytes) {
   std::lock_guard<std::mutex> lk(g_mtx);
   if (!g_vk_tried) {
     g_vk_tried = true;
-    rhi::Init();
+    rhi::Init(rhi::DefaultRenderer());
   }
   auto* p = static_cast<const uint32_t*>(dcb);
   uint32_t words = size_bytes / 4;
@@ -1721,8 +1721,9 @@ void SubmitDcb(const void* dcb, uint32_t size_bytes) {
             if (!kNoCopy && src_mem && dst_mem && bytes &&
                 bytes <= 0x1000000u && src != dst && mem_ok(src) &&
                 mem_ok(src + bytes) && mem_ok(dst) && mem_ok(dst + bytes)) {
-              if (rhi::Available())
-                rhi::FlushCsWrites();  // src may be CS-written
+              if (rhi::DefaultRenderer().available())
+                rhi::FlushCsWrites(
+                    rhi::DefaultRenderer());  // src may be CS-written
               std::memcpy(reinterpret_cast<void*>(dst),
                           reinterpret_cast<const void*>(src), bytes);
             }

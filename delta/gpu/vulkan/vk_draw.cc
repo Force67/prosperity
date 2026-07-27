@@ -27,7 +27,7 @@
 namespace gpu::rhi {
 using namespace gpu::vk;
 
-void Draw(const DrawInfo& d_in) {
+void Draw(Renderer& renderer, const DrawInfo& d_in) {
   if (!g_frame.recording)
     return;
   // DELTA_GPU_SWAPTEX01: bisect a suspected sampler-binding order mismatch by
@@ -107,7 +107,7 @@ void Draw(const DrawInfo& d_in) {
     const char* e = std::getenv("DELTA_GPU_RECOMP");
     return !e || std::strcmp(e, "0") != 0;
   }();
-  const bool recompiled = kRecompPath && d.recomp && DrawRecomp(d);
+  const bool recompiled = kRecompPath && d.recomp && DrawRecomp(renderer, d);
   static const bool kDrawTraceAll =
       std::getenv("DELTA_GPU_DRAWTRACE") != nullptr;
   if (kDrawTraceAll) {
@@ -128,7 +128,7 @@ void Draw(const DrawInfo& d_in) {
     return;
   if (!d.vertex_data || !d.vertex_stride)
     return;
-  FlushCsWritesRange(reinterpret_cast<uint64_t>(d.vertex_data),
+  FlushCsWritesRange(renderer, reinterpret_cast<uint64_t>(d.vertex_data),
                      static_cast<uint64_t>(d.vertex_stride) *
                          (d.vertex_count ? d.vertex_count : 1));
   // Indexed triangle list (the common GNM draw): the index buffer selects which

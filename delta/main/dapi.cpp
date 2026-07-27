@@ -132,7 +132,7 @@ EXPORT int dcoreMain(int argc, char **argv) {
   // (vk_icdGetInstanceProcAddr returns NULL) and enumeration silently falls
   // back to the llvmpipe software rasteriser -- ~30 ms/frame instead of a real
   // GPU. Harmless when only llvmpipe exists (same device either way).
-  gpu::rhi::Init();
+  gpu::rhi::Init(gpu::rhi::DefaultRenderer());
   cpu::earlyInit(); // segregate guest/JIT memory before guest modules map
 
   if (!verifyViablity())

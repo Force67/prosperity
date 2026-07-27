@@ -10,7 +10,6 @@
 
 namespace gpu::vk {
 
-UploadRings g_ring;
 
 bool CreateUploadRings(const VkPhysicalDeviceProperties& props) {
   // Vertex ring.

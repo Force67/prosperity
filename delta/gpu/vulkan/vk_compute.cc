@@ -569,8 +569,8 @@ struct ScopeCs {
 namespace gpu::rhi {
 using namespace gpu::vk;
 
-bool Dispatch(const ComputeInfo& ci) {
-  if (!g_dev.ready || !ci.recomp || !ci.recomp->ok || !ci.num_res ||
+bool Dispatch(Renderer& renderer, const ComputeInfo& ci) {
+  if (!renderer.available() || !ci.recomp || !ci.recomp->ok || !ci.num_res ||
       ci.num_res > g_dev.max_cs_resources)
     return false;
   ScopeCs _cs;
@@ -817,7 +817,7 @@ bool Dispatch(const ComputeInfo& ci) {
 // record time), CP DMA copies, and the end of each frame (bounds staleness
 // for direct guest CPU readers to one frame). Cheap no-op when nothing is
 // dirty; also evicts cold entries so the working set stays bounded.
-void FlushCsWrites() {
+void FlushCsWrites(Renderer& renderer) {
   const uint64_t _t0 = NowNs();
   for (auto it = g_cs_ranges.begin(); it != g_cs_ranges.end();) {
     CsRangeFlushOne(it->first, it->second);
@@ -837,7 +837,7 @@ void FlushCsWrites() {
 // The per-draw guest readers (texture upload, vertex copy, cbuffer ring) call
 // this instead of the full flush — flushing every dirty range at every draw
 // re-tiled the whole post chain ~19x/frame.
-void FlushCsWritesRange(uint64_t base, uint64_t bytes) {
+void FlushCsWritesRange(Renderer& renderer, uint64_t base, uint64_t bytes) {
   if (!base || !bytes || g_cs_ranges.empty())
     return;
   const uint64_t _t0 = NowNs();

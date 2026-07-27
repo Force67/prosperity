@@ -44,7 +44,7 @@ struct TextureBindings {
   VkDescriptorSet white_array_set = VK_NULL_HANDLE;
 };
 
-extern TextureBindings g_tex;
+extern TextureBindings& g_tex;
 
 bool CreateTextureDescriptors();
 
