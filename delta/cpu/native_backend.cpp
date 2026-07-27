@@ -99,6 +99,18 @@ void exitGuestThread() {
 // Native host is x86-64: the guest can call the host function directly.
 uintptr_t makeHostThunk(void *hostFn, const char * /*name*/) { return reinterpret_cast<uintptr_t>(hostFn); }
 
+// Native x86 host: int3 return hooks work directly, so guest-fn return hooking
+// isn't needed; hand back the real target unchanged (no wrap).
+uintptr_t makeGuestReturnHook(void *realTarget, uint32_t /*hookId*/,
+                              void * /*loggerFn*/, const char * /*name*/) {
+  return reinterpret_cast<uintptr_t>(realTarget);
+}
+
+uintptr_t makeGuestTrampoline(const void *fnBytes, uint32_t /*prologueLen*/,
+                              const void * /*continueAt*/) {
+  return reinterpret_cast<uintptr_t>(const_cast<void *>(fnBytes));
+}
+
 void earlyInit() {} // native: nothing to segregate
 
 ICpuBackend &backend() {
@@ -107,6 +119,7 @@ ICpuBackend &backend() {
 }
 
 uint64_t currentGuestRip() { return 0; }
+uint64_t currentGuestFsBase() { return 0; }
 const uint64_t *currentGuestGregs() { return nullptr; }
 int faultingSyscall() { return -1; }
 uint64_t reconstructGuestRip(uint64_t) { return 0; }

@@ -849,6 +849,11 @@ bool smodule::resolveImports() {
       std::printf("[reloc]   %s @%#lx resolved -> %#lx\n", name,
                   (unsigned long)r->offset, (unsigned long)addr);
 
+    // DELTA_FIOS_TRACE: substitute a return-capturing guest wrapper for the
+    // libSceFios2 whole-file APIs so the SotC world-container's FHGetSize/FHRead
+    // can be traced on aarch64 (int3 hooks are x86-host-only). No-op when unset.
+    addr = maybeWrapFiosImport(name, addr);
+
     *getAddress<uintptr_t>(r->offset) = addr;
   }
 

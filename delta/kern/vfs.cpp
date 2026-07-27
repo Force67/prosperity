@@ -143,8 +143,26 @@ struct PfsFileStream final : utl::fileBase {
                          static_cast<int64_t>(size));
     if (n <= 0)
       return 0;
-    pos += static_cast<uint64_t>(n);
-    return static_cast<uint64_t>(n);
+    // DELTA_PREAD_ZEROPAD: return the FULL requested length even when the read
+    // was clamped short at EOF. The provider's read chain already zero-fills the
+    // whole destination buffer, so the tail bytes are valid (zeros). SotC's world
+    // container is loaded by libSceFios2's whole-file sceFiosFHRead as ONE async
+    // op; FIOS2 block-pads its final chunk past the member's EOF and treats the
+    // resulting short read as an OP FAILURE -> actualCount 0 -> the loader (which
+    // ignores the read error) commits payload=0,err=0 and RETRIES FOREVER (the
+    // post-LoadInitialWorld freeze). Reporting the full length lets that op
+    // complete. Off by default so other titles keep true short-at-EOF semantics.
+    static const bool zeroPad = std::getenv("DELTA_PREAD_ZEROPAD") != nullptr;
+    // DELTA_SHORTREAD: log every clamped-short provider read (raw n < requested),
+    // which is exactly the FIOS2-op-failure trigger, regardless of zeroPad. Cheap:
+    // only fires on the anomaly, not on full reads.
+    if (static_cast<uint64_t>(n) < size && std::getenv("DELTA_SHORTREAD"))
+      std::fprintf(stderr, "[shortread] pos=%llu req=%zu got=%lld%s\n",
+                   (unsigned long long)pos, size, (long long)n,
+                   zeroPad ? " (zeropadded->full)" : "");
+    uint64_t reported = zeroPad ? size : static_cast<uint64_t>(n);
+    pos += reported;
+    return reported;
   }
   uint64_t Write(const void *, size_t) override { return 0; }
   uint64_t Seek(int64_t off, utl::seekMode whence) override {
@@ -268,7 +286,14 @@ utl::File openRead(const char *path) {
     auto vf = m.provider->open(rest);
     if (!vf)
       return utl::File();
-    return utl::File(base::MakeUnique<PfsFileStream>(std::move(vf)));
+    utl::File out(base::MakeUnique<PfsFileStream>(std::move(vf)));
+    // DELTA_OPEN_TRACE: also report the size we hand back. A file that opens OK
+    // but reports size 0 (e.g. a >4 GiB member whose size truncated) makes the
+    // resource loader hang forever with {payload=0, err=0} (SotC world container).
+    if (std::getenv("DELTA_OPEN_TRACE"))
+      std::fprintf(stderr, "[opensz] %s -> size=%llu (provider)\n", path,
+                   (unsigned long long)out.GetSize());
+    return out;
   }
 
   // A raw console app dump keeps each executable twice: the encrypted SELF under
@@ -282,6 +307,9 @@ utl::File openRead(const char *path) {
   utl::File f(host, utl::fileMode::read);
   if (!f.Exists() || !f.IsOpen())
     return utl::File();
+  if (std::getenv("DELTA_OPEN_TRACE"))
+    std::fprintf(stderr, "[opensz] %s -> size=%llu (host)\n", path,
+                 (unsigned long long)f.GetSize());
   return f;
 }
 
@@ -351,6 +379,10 @@ bool stat(const char *path, int64_t &size, bool &isDir) {
   size = static_cast<int64_t>(st.st_size);
   return true;
 }
+
+static std::string g_titleId;
+void setTitleId(const std::string &id) { g_titleId = id; }
+const std::string &titleId() { return g_titleId; }
 
 static std::string g_titleId;
 void setTitleId(const std::string &id) { g_titleId = id; }

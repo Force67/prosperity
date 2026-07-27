@@ -99,6 +99,25 @@ void exitGuestThread();
 // vprx HLE exports (e.g. libSceVideoOut) into guest import slots. Thread-safe.
 uintptr_t makeHostThunk(void *hostFn, const char *name = nullptr);
 
+// Wrap an already-resolved guest function `realTarget` with a return-capturing
+// guest trampoline: it calls realTarget, then invokes native
+// `loggerFn(hookId, a0,a1,a2,a3, ret)` (a0..a3 = original rdi/rsi/rdx/rcx, ret =
+// realTarget's rax), and returns realTarget's value. Install by overwriting the
+// GOT slot that held realTarget. ARM-safe guest-function trace/hook facility
+// (int3 hooks are x86-host-only). On the native x86 backend this is a no-op that
+// returns realTarget unchanged (int3 works there). Returns guest addr, 0 on fail.
+uintptr_t makeGuestReturnHook(void *realTarget, uint32_t hookId, void *loggerFn,
+                              const char *name = nullptr);
+
+// Build a callable copy (trampoline) of an internal guest function whose first
+// `prologueLen` bytes will be overwritten by an entry detour. Returns a
+// guest-executable address that runs the original from the top and continues
+// into its body; pass it as `realTarget` to makeGuestReturnHook to wrap an
+// eboot-internal (non-import) function. Native backend: returns the original
+// entry unchanged. See makeGuestTrampoline in fex_backend.cpp for constraints.
+uintptr_t makeGuestTrampoline(const void *fnBytes, uint32_t prologueLen,
+                              const void *continueAt);
+
 // Called once at process start, before any large allocation or guest mapping.
 // FEX: reserves/segregates the address space so guest memory can't collide with
 // FEXCore's own JIT/internal allocations (Setup48BitAllocator + SetupHooks, in
@@ -112,6 +131,10 @@ ICpuBackend &backend();
 // On FEX this is the live CPUState.rip; on native the host RIP is the guest RIP
 // already (the crash handler reads it from the signal context), so this is 0.
 uint64_t currentGuestRip();
+
+// Guest fs-segment base (TLS pointer) of the guest thread running on this host
+// thread, or 0. Used by hook loggers to read guest thread-local state.
+uint64_t currentGuestFsBase();
 
 // The 16 guest GPRs (FEXCore::X86State::REG_* order) of the guest thread on this
 // host thread, or nullptr. FEX only; lets the crash handler dump guest regs and

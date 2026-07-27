@@ -20,6 +20,8 @@
 #include <sys/mman.h>
 #include <time.h>
 #include <pthread.h>
+#include <thread>
+#include <chrono>
 
 #include "crash.h"
 #include "module.h"
@@ -413,6 +415,13 @@ static long g_callSkipVals[8];
 static int g_callSkipLens[8];
 static int g_callSkipCount = 0;
 
+// DELTA_FNWATCH hit counter (see crash.h).
+static constexpr int kFnWatchMax = 16;
+static uintptr_t g_fnWatchAddrs[kFnWatchMax];
+static const char *g_fnWatchLabels[kFnWatchMax];
+static std::atomic<uint64_t> g_fnWatchHits[kFnWatchMax];
+static int g_fnWatchCount = 0;
+
 static void crashHandler(int sig, siginfo_t *si, void *ucv) {
 #if defined(__x86_64__)
   if (sig == SIGTRAP && g_retCount && ucv) {
@@ -477,6 +486,19 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
                             ms, (long)gettid(), g_orderLabels[i], csym);
       if (n > 0) { ssize_t w = write(2, m, (size_t)n); (void)w; }
       gr[REG_RSP] -= 8;  // emulate the displaced `push rbp`
+      *reinterpret_cast<uint64_t *>(gr[REG_RSP]) = (uint64_t)gr[REG_RBP];
+      return;
+    }
+  }
+  if (sig == SIGTRAP && g_fnWatchCount && ucv) {
+    auto *uc = static_cast<ucontext_t *>(ucv);
+    auto *gr = uc->uc_mcontext.gregs;
+    for (int i = 0; i < g_fnWatchCount; i++) {
+      if ((uintptr_t)gr[REG_RIP] != g_fnWatchAddrs[i] + 1)
+        continue;
+      g_fnWatchHits[i].fetch_add(1, std::memory_order_relaxed);
+      // Emulate the displaced `push rbp`; RIP stays at addr+1 (the `mov rbp,rsp`).
+      gr[REG_RSP] -= 8;
       *reinterpret_cast<uint64_t *>(gr[REG_RSP]) = (uint64_t)gr[REG_RBP];
       return;
     }
@@ -1168,6 +1190,38 @@ void setRetTrace(uintptr_t addr, const char *label) {
     g_retLabels[g_retCount] = label;
     g_retCount++;
   }
+}
+
+void setFnWatch(uintptr_t addr, const char *label) {
+  if (g_fnWatchCount >= kFnWatchMax)
+    return;
+  g_fnWatchAddrs[g_fnWatchCount] = addr;
+  g_fnWatchLabels[g_fnWatchCount] = label;
+  g_fnWatchHits[g_fnWatchCount].store(0, std::memory_order_relaxed);
+  g_fnWatchCount++;
+}
+
+void startFnWatchPrinter() {
+  static std::atomic<bool> started{false};
+  bool exp = false;
+  if (!started.compare_exchange_strong(exp, true))
+    return;
+  std::thread([] {
+    uint64_t last[kFnWatchMax] = {0};
+    for (;;) {
+      std::this_thread::sleep_for(std::chrono::seconds(2));
+      char line[512];
+      int off = std::snprintf(line, sizeof line, "[fnwatch]");
+      for (int i = 0; i < g_fnWatchCount && off < (int)sizeof line; i++) {
+        uint64_t h = g_fnWatchHits[i].load(std::memory_order_relaxed);
+        off += std::snprintf(line + off, sizeof line - off, " %s=%llu(+%llu)",
+                             g_fnWatchLabels[i], (unsigned long long)h,
+                             (unsigned long long)(h - last[i]));
+        last[i] = h;
+      }
+      std::fprintf(stderr, "%s\n", line);
+    }
+  }).detach();
 }
 
 void installSigAltStack() {

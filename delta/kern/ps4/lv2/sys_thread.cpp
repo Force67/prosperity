@@ -48,6 +48,11 @@ moduleInfo *called_in(void *addr);
 static DELTA_TLS_IE thread_local uint32_t t_tid = 1;
 static std::atomic<uint32_t> g_nextTid{2};
 
+// Address of the calling thread's guest tid TLS. The FEX watchdog captures this
+// per live thread so it can map a umutex owner word (a guest tid) to the actual
+// thread that holds the lock and dump WHAT that owner is blocked on.
+const uint32_t *currentGuestTidPtr() { return &t_tid; }
+
 // Thread-startup handshake: sys_thr_new blocks until the new thread has run its
 // init and reached its first sync point (umtx). The game spawns workers that
 // produce shared state the main thread then reads with no explicit ordering
@@ -416,6 +421,25 @@ int PS4ABI sys_umtx_op(void *ptr, int op, uint64_t val, void *a, void *b) {
     auto *p = static_cast<volatile uint32_t *>(ptr);
     std::unique_lock<std::mutex> lk(bk.m);
     auto &ch = bk.chan[ptr];
+    // Ghost-owner unstick: a thread MUST NOT be waiting on a umutex whose owner
+    // word already names ITSELF -- libthr only issues MUTEX_WAIT after its
+    // CAS(0->tid) failed, and with word==tid that CAS can never succeed again, so
+    // the thread spins forever and everyone else queued behind it starves. This is
+    // exactly how SotC's JobSystem scheduler mutex (guest 0x200004140) wedges
+    // post-load: word==owner==the waiter's own tid, 4 workers livelocked, the
+    // world-container load job never claimed. Clear the stale self-ownership so the
+    // re-CAS acquires cleanly, and wake the other queued waiters. A correct thread
+    // never waits on a lock it holds, so this only ever fires on the wedged state.
+    if ((*p & ~UMUTEX_CONTESTED) == t_tid) {
+      static std::atomic<uint32_t> logged{0};
+      if (logged.fetch_add(1) < 8)
+        std::fprintf(stderr, "[umtx] self-owned MUTEX_WAIT unstick ptr=%p tid=%u word=%#x\n",
+                     ptr, t_tid, *p);
+      *p = 0;
+      ch.gen++;
+      bk.cv.notify_all();
+      return 0;
+    }
     const uint64_t g0 = ch.gen;
     // A spurious exit here is harmless (libthr re-runs its CAS loop), but
     // still leave only on "free" or an explicit MUTEX_WAKE so a heavily

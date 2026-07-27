@@ -95,6 +95,13 @@ bool listDir(const char *guestPath, std::vector<DirEntry> &out);
 void setTitleId(const std::string &id);
 const std::string &titleId();
 
+// The booted title's TITLE_ID (e.g. "CUSA00792"), or empty if unknown. Set once
+// at boot by dcore from the pkg's param.sfo (the outer PKG metadata entry, which
+// is the only copy for titles like Isaac). savedata reads it to give each title
+// its own host save root.
+void setTitleId(const std::string &id);
+const std::string &titleId();
+
 // Small content cache keyed by a short name (SOTTR workaround: the engine's
 // async manifest reader races, so we cache the real manifest contents at mount
 // and let the count-setter fill the header buffer with correct data).

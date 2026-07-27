@@ -69,6 +69,14 @@ void setOrderTrace(uintptr_t addr, const char *label);
 // run-once init returns the non-zero error that blocks the graphics bring-up.
 void setRetTrace(uintptr_t addr, const char *label);
 
+// DELTA_FNWATCH="off:label,...": int3 hit-COUNTER at guest function entries (push
+// rbp). Unlike setOrderTrace (per-hit log), this only counts hits per address and
+// a background thread prints running totals every 2s -- safe at any call frequency
+// (e.g. a retry-churn loop). setFnWatch registers; startFnWatchPrinter spawns the
+// printer once. Used to answer "does function X ever run / how fast does it churn".
+void setFnWatch(uintptr_t addr, const char *label);
+void startFnWatchPrinter();
+
 // Give the calling thread a dedicated signal-handler stack (SA_ONSTACK). The
 // fatal handler then runs even when the guest's own RSP is corrupt or blown
 // (a stack-overflow fault would otherwise be undeliverable -> silent core).

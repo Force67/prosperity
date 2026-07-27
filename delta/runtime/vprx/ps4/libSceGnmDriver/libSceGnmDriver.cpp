@@ -19,6 +19,7 @@
 
 #include "libSceGnmDriver.h"
 #include <utl/mem.h>
+#include <utl/mem.h>
 
 #include <cstdint>
 #include <cstdio>
@@ -44,6 +45,18 @@ extern "C" void prosperity_gc_submit(const void *descArray, uint32_t descCount) 
   auto *d = static_cast<const uint32_t *>(descArray);
   if (!d)
     return;
+  // Guest bug shields: submits arrive with guest-controlled pointers. A stray
+  // descriptor array (or a descriptor whose IB address is garbage) must be
+  // dropped loudly, not dereferenced — SotC's debug menu produced a submit
+  // whose descPtr pointed at unmapped host space and SIGSEGV'd the CP.
+  if (descCount > 4096 ||
+      !utl::isMemoryRangeMapped(descArray, descCount * 16ull)) {
+    static int warned = 0;
+    if (warned++ < 8)
+      std::fprintf(stderr, "[gc] DROPPED bad submit descArray=%p count=%u\n",
+                   descArray, descCount);
+    return;
+  }
   // Guest bug shields: submits arrive with guest-controlled pointers. A stray
   // descriptor array (or a descriptor whose IB address is garbage) must be
   // dropped loudly, not dereferenced — SotC's debug menu produced a submit

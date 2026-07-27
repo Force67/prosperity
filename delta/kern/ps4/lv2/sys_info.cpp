@@ -76,6 +76,19 @@ int PS4ABI sys_cpuset_getaffinity(int /*level*/, int /*which*/, int64_t /*id*/,
   if (mask && cpusetsize) {
     std::memset(mask, 0, cpusetsize);
     uint64_t bits = 0x3F;  // cores 0..5
+    // DELTA_SOTC_7CORE: also grant core 6. SotC's engine hardcodes its "Resource
+    // Loading" thread to core 6 (mask 0x40) and its BPE JobSystem sizes its worker
+    // pool from the set-bit count here, giving each worker an ordinal = spawn seq.
+    // The job CLAIM path tests (job_affinity_mask & (1<<worker_ordinal)); a job the
+    // engine pins to core 6 (mask 0x40) is then UNCLAIMABLE when only workers with
+    // ordinals 0..5 exist -> the workers hot-spin on the scheduler umutex
+    // (0x200004140) forever and the world-load finalize job never dispatches
+    // (loader parks on its evf "job done" flag, the game loops on the loading
+    // screen). Granting core 6 spawns a 7th worker (ordinal 6, bit 0x40) so that
+    // job becomes claimable. Off by default (Isaac/Doom64 keep 6 cores).
+    static const bool sevenCore = std::getenv("DELTA_SOTC_7CORE") != nullptr;
+    if (sevenCore)
+      bits = 0x7F;  // cores 0..6
     std::memcpy(mask, &bits,
                 cpusetsize < sizeof(bits) ? cpusetsize : sizeof(bits));
   }

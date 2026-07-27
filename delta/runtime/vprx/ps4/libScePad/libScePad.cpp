@@ -121,6 +121,101 @@ void startMemWatch() {
   }).detach();
 }
 
+// DELTA_MEMPOKE=<spec>[,<spec>...]: runtime guest-memory patch experiment. Each
+// spec = addr:width:value[:delayMs], colon-separated:
+//   addr   literal hex VA (e.g. 0x201402ee2d00), OR *PTR+OFF meaning "read the
+//          u64 at PTR, add OFF" -- resolves a singleton object every apply (so a
+//          pointer that is null until constructed is followed once it is live).
+//   width  1/2/4/8 bytes.
+//   value  hex (0x..) or decimal.
+//   delayMs optional; hold neutral this long after the first pad read before the
+//          first write (default 0).
+// Writes are RE-APPLIED every 200ms so the value is HELD against the guest's own
+// updates -- an experiment can pin a guest global (e.g. force a load counter to
+// 0, or set a completion event word) to probe what a value change triggers.
+// Guest memory is identity-mapped, so a resolved VA is written as a host pointer.
+struct PokeSpec {
+  bool indirect = false;
+  uint64_t ptrAddr = 0;   // for indirect: address holding the object pointer
+  uint64_t off = 0;       // offset added to literal addr or to *ptrAddr
+  int width = 8;
+  uint64_t value = 0;
+  uint64_t delayMs = 0;
+};
+
+void startMemPoke() {
+  const char *e = std::getenv("DELTA_MEMPOKE");
+  if (!e) return;
+  std::vector<PokeSpec> specs;
+  const std::string in(e);
+  size_t i = 0;
+  while (i < in.size()) {
+    size_t comma = in.find(',', i);
+    std::string s = in.substr(i, comma == std::string::npos ? comma : comma - i);
+    i = comma == std::string::npos ? in.size() : comma + 1;
+    // split s on ':' but the addr field may itself contain no ':'
+    std::vector<std::string> f;
+    size_t j = 0;
+    while (j <= s.size()) {
+      size_t c = s.find(':', j);
+      f.push_back(s.substr(j, c == std::string::npos ? c : c - j));
+      if (c == std::string::npos) break;
+      j = c + 1;
+    }
+    if (f.size() < 3) continue;
+    PokeSpec p;
+    std::string addr = f[0];
+    if (!addr.empty() && addr[0] == '*') {
+      p.indirect = true;
+      size_t plus = addr.find('+');
+      p.ptrAddr = std::strtoull(addr.c_str() + 1, nullptr, 0);
+      p.off = plus == std::string::npos ? 0 : std::strtoull(addr.c_str() + plus + 1, nullptr, 0);
+    } else {
+      p.off = std::strtoull(addr.c_str(), nullptr, 0);
+    }
+    p.width = std::atoi(f[1].c_str());
+    p.value = std::strtoull(f[2].c_str(), nullptr, 0);
+    if (f.size() >= 4) p.delayMs = std::strtoull(f[3].c_str(), nullptr, 0);
+    if (p.width == 1 || p.width == 2 || p.width == 4 || p.width == 8)
+      specs.push_back(p);
+  }
+  if (specs.empty()) return;
+  std::thread([specs] {
+    const auto t0 = std::chrono::steady_clock::now();
+    std::vector<bool> announced(specs.size(), false);
+    for (;;) {
+      double ms = std::chrono::duration<double, std::milli>(
+                      std::chrono::steady_clock::now() - t0).count();
+      for (size_t k = 0; k < specs.size(); k++) {
+        const auto &p = specs[k];
+        if (ms < (double)p.delayMs) continue;
+        uint64_t target;
+        if (p.indirect) {
+          uint64_t obj = *reinterpret_cast<volatile uint64_t *>(p.ptrAddr);
+          if (obj < 0x1000) continue;  // singleton not constructed yet
+          target = obj + p.off;
+        } else {
+          target = p.off;
+        }
+        if (target < 0x1000) continue;
+        switch (p.width) {
+        case 1: *reinterpret_cast<volatile uint8_t *>(target)  = (uint8_t)p.value; break;
+        case 2: *reinterpret_cast<volatile uint16_t *>(target) = (uint16_t)p.value; break;
+        case 4: *reinterpret_cast<volatile uint32_t *>(target) = (uint32_t)p.value; break;
+        case 8: *reinterpret_cast<volatile uint64_t *>(target) = p.value; break;
+        }
+        if (!announced[k]) {
+          announced[k] = true;
+          std::fprintf(stderr, "[mempoke] t=%.0fms first write %#llx <- %#llx (w%d)\n",
+                       ms, (unsigned long long)target,
+                       (unsigned long long)p.value, p.width);
+        }
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+  }).detach();
+}
+
 // Auto-skip pulse: advance the intro/title/menus into actual gameplay for a
 // headless verification run. Gated by g_autoskip at the call site, where it
 // takes precedence over the keyboard. NEVER pulse Circle (back/cancel) together
@@ -298,7 +393,7 @@ std::vector<ScriptStep> parseScript(const char *s) {
 
 void fillPadState(PadData *d) {
   if (!d) return;
-  static const bool memwatchStarted = [] { startMemWatch(); return true; }();
+  static const bool memwatchStarted = [] { startMemWatch(); startMemPoke(); return true; }();
   (void)memwatchStarted;
   std::memset(d, 0, sizeof(*d));
   uint32_t buttons = 0;

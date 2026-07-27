@@ -27,6 +27,13 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <cctype>
+#include <cstdio>
+#include <mutex>
+#include <string>
+#include <vector>
+#include <set>
+#include <atomic>
 
 namespace krnl {
 static proc *g_activeProc{nullptr};
@@ -41,6 +48,10 @@ proc *proc::getActive() { return g_activeProc; }
 
 static void bringUpRebirthEbootRegistry(smodule &m);
 static void investigateDcbGate(smodule &m);
+static void investigateFnWatch(smodule &m);
+static void forceSotcPayload(smodule &m);
+static void probeFiosPaths();
+static void installJobTrace(smodule &m);
 
 bool proc::create(const base::String &path, bool fromVfs) {
   /*register HLE prx overrides*/
@@ -125,6 +136,12 @@ bool proc::create(const base::String &path, bool fromVfs) {
       LOG_INFO("ps5 glyphguard: forced renderer-init chain through the Shape-Renderer install");
     }
   }
+  // Generic guest-function hit counter (works for PS4 and PS5 eboots).
+  investigateFnWatch(*first);
+  forceSotcPayload(*first);
+  installJobTrace(*first);
+  // Note: DELTA_FIOS_PROBE runs lazily on the first FIOS2 call (see
+  // fiosTraceLogger); at proc::create the /app0 PFS provider isn't mounted yet.
 
   return true;
 }
@@ -135,6 +152,468 @@ bool proc::create(const base::String &path, bool fromVfs) {
 //     every change -> answers "is the DCB ever created before the render uses it?"
 // (2) int3 call-order trace over the renderer/DCB-creation entry points so the
 //     actual execution order (and which are reached) is visible before the crash.
+// DELTA_FNWATCH="hexoff:label,hexoff:label,...": arm an int3 hit-counter at each
+// guest function entry (first byte must be push rbp). Offsets are relative to the
+// eboot base. The crash-handler counts hits and a printer thread logs totals every
+// 2s (see crash.h). Generic; used to probe which functions in a stuck pipeline run.
+static void investigateFnWatch(smodule &m) {
+  const char *e = std::getenv("DELTA_FNWATCH");
+  if (!e)
+    return;
+  uint8_t *base = m.getInfo().base;
+  for (const char *p = e; *p;) {
+    while (*p == ',' || *p == ' ')
+      p++;
+    if (!*p)
+      break;
+    char *endp = nullptr;
+    uint64_t off = std::strtoull(p, &endp, 0);
+    const char *label = "fn";
+    if (endp && *endp == ':') {
+      const char *lb = endp + 1;
+      const char *le = lb;
+      while (*le && *le != ',')
+        le++;
+      label = strndup(lb, (size_t)(le - lb));  // persists for setFnWatch
+      p = le;
+    } else {
+      p = endp;
+    }
+    auto *c = base + off;
+    utl::protectMem(reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(c) & ~0xFFFull),
+                    0x1000, utl::pageProtection::rwx);
+    if (c[0] == 0x55) {
+      c[0] = 0xCC;
+      setFnWatch(reinterpret_cast<uintptr_t>(c), label);
+      LOG_INFO("fnwatch: armed {} @ eboot+{:#x}", label, off);
+    } else {
+      LOG_WARNING("fnwatch: eboot+{:#x} first byte {:#x} != push rbp", off, c[0]);
+    }
+  }
+  startFnWatchPrinter();
+}
+
+// DELTA_SOTC_FORCE_PAYLOAD: experiment to get past LoadInitialWorld. The SotC
+// world-container's whole-file libSceFios2 read returns actualCount 0 (root cause
+// still open), so the loader's payload accessor at eboot+0x14c000 --
+//   xor eax,eax; cmp [rdi+0x80],0; je +0x9 (return null); mov rax,[rdi+0x90]; ret
+// -- returns NULL, FinalizeResource commits result=0, CommitResult re-enqueues
+// forever and the game-logic thread wedges polling [op+0x98]==0xb. The buffer at
+// [ldr+0x90] IS allocated (before the read), so NOP the `je 74 07` -> `90 90` and
+// the accessor always returns that buffer; an empty precache container should
+// parse as 0 entries and let boot proceed to the title/main menu. This is a
+// runtime patching EXPERIMENT (env-gated, off by default; not a shipped fix).
+static void forceSotcPayload(smodule &m) {
+  uint8_t *base = m.getInfo().base;
+  auto rwx = [](uint8_t *p) {
+    utl::protectMem(reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(p) & ~0xFFFull),
+                    0x1000, utl::pageProtection::rwx);
+  };
+  if (std::getenv("DELTA_SOTC_FORCE_PAYLOAD")) {
+    uint8_t *je = base + 0x14c00a;  // `74 07` je +9 (return null) in accessor 0x14c000
+    rwx(je);
+    if (je[0] == 0x74 && je[1] == 0x07) {
+      je[0] = 0x90; je[1] = 0x90;
+      LOG_INFO("sotc force-payload: NOPed payload-null je @ eboot+0x14c00a");
+    } else {
+      LOG_WARNING("sotc force-payload: unexpected bytes {:#x} {:#x}", je[0], je[1]);
+    }
+  }
+  // DELTA_SOTC_SKIP_WORLDWAIT: force CGame::LoadInitialWorld's busy-poll loop
+  // (0x3c54e0..0x3c55fd) to EXIT immediately instead of spinning until the world-
+  // container op reaches state 0xb (which never happens -- FHGetSize=0 on the
+  // container, infinite retry). The loop tail `0f84 ddfeffff` (je 0x3c54e0 = "not
+  // done -> loop") is NOPed (6x 0x90) so it falls through to the epilogue 0x3c5603
+  // and returns to the boot driver at 0x25c1ff, which already tolerates a NULL
+  // result (`test rbx,rbx; je 0x25c253` skips world-registration). Lets boot
+  // proceed past the wedge to the title/menu, skipping the (broken) precache.
+  // Runtime patching EXPERIMENT (env-gated, off by default).
+  if (std::getenv("DELTA_SOTC_SKIP_WORLDWAIT")) {
+    uint8_t *je = base + 0x3c55fd;
+    rwx(je);
+    if (je[0] == 0x0f && je[1] == 0x84) {
+      for (int i = 0; i < 6; i++) je[i] = 0x90;
+      LOG_INFO("sotc skip-worldwait: NOPed LoadInitialWorld poll-loop je @ eboot+0x3c55fd");
+    } else {
+      LOG_WARNING("sotc skip-worldwait: unexpected bytes {:#x} {:#x}", je[0], je[1]);
+    }
+  }
+  // DELTA_SOTC_FORCE_WORLDDONE: force the world-container async op to read as
+  // COMPLETE so the main-loop gate passes and boot proceeds to the title/menu,
+  // skipping the (broken, FHGetSize=0) precache. Two byte-patches:
+  //  (1) CommitResult 0x14d768 `je 0x14d777` (result==0 -> retry) NOPed so a
+  //      null-payload commit always writes op-state 0xb (0x14d76a) instead of
+  //      re-enqueuing forever;
+  //  (2) IsDone 0x14cf0e `setne al` (needs op+0x20 result != 0) -> `mov al,1` so
+  //      IsDone returns done on state==0xb alone (the op has no result object).
+  // The boot continuation at 0x25c1ff already tolerates a NULL result
+  // (`test rbx,rbx; je 0x25c253`). Runtime patch EXPERIMENT, env-gated.
+  // DELTA_SOTC_JOBFIX: the world-load hang is a BPE-JobSystem livelock. The
+  // world-op finalize job is DIRECT-ASSIGNED to worker ordinal 6 (the "Resource
+  // Loading" coordinator, hardcoded-pinned to core 6, mask 0x40 -- outside our
+  // 6-core cpuset), but SotC spawns only 4 job-claim workers with ordinals 0..3;
+  // none services direct-assign slot 6 and the coordinator thread itself parks on
+  // its evf "job done" flag, so the job never runs and the main loop spins the
+  // loading screen forever (proven live: [jobclaim] directAssign[6]=0x1, workers
+  // ordinal 0..3, ~99.4% claim failures). The ordinal comes from fn 0x33350
+  // (reads [tcb-0x10]=0x8000|core, returns core or -1). Clamp its result into the
+  // worker range [0,3]: the coordinator (ord 6 -> 6&3=2) then direct-assigns to a
+  // serviced slot, worker 2 claims+runs the finalize, the op reaches state 0xb and
+  // the game advances. Workers (0..3) and unbound threads (-1) are unchanged.
+  // Patch the fn tail 0x3337f (`pop rbp; ret` + pad) in place:
+  //   test eax,eax; js .r; cmp eax,4; jb .r; and eax,3; .r: pop rbp; ret
+  if (std::getenv("DELTA_SOTC_JOBFIX")) {
+    uint8_t *t = base + 0x3337f;
+    rwx(t);
+    if (t[0] == 0x5d && t[1] == 0xc3) {
+      static const uint8_t code[] = {0x85, 0xc0,             // test eax,eax
+                                     0x78, 0x08,             // js .r (+8 -> pop)
+                                     0x83, 0xf8, 0x04,       // cmp eax,4
+                                     0x72, 0x03,             // jb .r (+3 -> pop)
+                                     0x83, 0xe0, 0x03,       // and eax,3
+                                     0x5d, 0xc3};            // .r: pop rbp; ret
+      std::memcpy(t, code, sizeof(code));
+      t[14] = 0x90; t[15] = 0x90;
+      LOG_INFO("sotc jobfix: clamped worker-ordinal fn 0x33350 to [0,3] "
+               "(core-6 coordinator's direct-assign now serviced)");
+    } else {
+      LOG_WARNING("sotc jobfix: unexpected bytes at 0x3337f {:#x} {:#x}", t[0], t[1]);
+    }
+  }
+  if (std::getenv("DELTA_SOTC_FORCE_WORLDDONE")) {
+    uint8_t *je = base + 0x14d768;   // 74 0d  je 0x14d777 (retry)
+    uint8_t *sn = base + 0x14cf0e;   // 0f 95 c0  setne al
+    rwx(je); rwx(sn);
+    bool ok = true;
+    if (je[0] == 0x74 && je[1] == 0x0d) { je[0] = 0x90; je[1] = 0x90; }
+    else { LOG_WARNING("sotc force-worlddone: retry je bytes {:#x} {:#x}", je[0], je[1]); ok = false; }
+    if (sn[0] == 0x0f && sn[1] == 0x95 && sn[2] == 0xc0) { sn[0] = 0xb0; sn[1] = 0x01; sn[2] = 0x90; }
+    else { LOG_WARNING("sotc force-worlddone: setne bytes {:#x} {:#x} {:#x}", sn[0], sn[1], sn[2]); ok = false; }
+    if (ok)
+      LOG_INFO("sotc force-worlddone: patched CommitResult retry->0xb + IsDone always-done");
+  }
+}
+
+// ===========================================================================
+// DELTA_FIOS_TRACE: ARM-compatible guest-function trace of libSceFios2's
+// FHOpen/FHGetSize/FHRead/FHPread (the whole-file API the SotC world-container
+// loads through). int3 hooks are x86-host-only and inert under FEX on aarch64;
+// this uses cpu::makeGuestReturnHook to WRAP each import via a guest x86
+// trampoline that runs the real PRX export and reports its args AND return.
+//
+// Wrapping happens at IMPORT-RESOLUTION time (maybeWrapFiosImport, called from
+// smodule::resolveImports): the eboot's PLT jump-slots are lazy and unresolved
+// until the guest runs sys_dynlib_process_needed_and_relocate, so a GOT patch at
+// proc::create is too early (the slot still holds the PLT stub, and eager
+// resolution would overwrite it). At resolveImports the REAL export address is in
+// hand; we substitute the wrapper for it before it is written to the GOT, so the
+// hook is installed exactly when the slot is bound and stays for the whole run.
+// The smoking gun is FHGetSize returning 0 for "$/misc/****/mainMenuPrecacheList
+// .calt" while the 18k sibling members size non-zero.
+// ===========================================================================
+namespace {
+struct FiosOpen {          // one FHOpen (all opens tracked so any fh maps to a path)
+  uint64_t pOutFH;         // guest ptr the async open writes the SceFiosFH into
+  std::string path;
+};
+std::mutex g_fiosMx;
+std::vector<FiosOpen> g_fiosOpens;          // all opens, for fh->path reverse lookup
+std::set<uint64_t> g_zeroSizeFh;            // FHGetSize==0 fh's already reported
+std::set<uint64_t> g_zeroActOp;             // OpGetActualCount==0 ops already reported
+std::set<std::string> g_seenPaths;          // DELTA_FIOS_ALLOPEN: dedup full open list
+std::atomic<uint64_t> g_fiosOpenN{0}, g_zeroSizeChurn{0}, g_zeroActChurn{0};
+
+// Safe-ish read of a guest C string (guest memory is identity-mapped to host).
+const char *guestStr(uint64_t va, char *buf, size_t cap) {
+  if (!va || va < 0x10000) { buf[0] = 0; return buf; }
+  const char *s = reinterpret_cast<const char *>(va);
+  size_t i = 0;
+  for (; i < cap - 1; ++i) { char c = s[i]; if (!c) break; buf[i] = c; }
+  buf[i] = 0;
+  return buf;
+}
+
+// Reverse-map an SceFiosFH to the path that opened it (newest first). Only ever
+// called on the RARE zero-size/zero-count anomaly, so the O(n) scan is fine.
+// Caller holds g_fiosMx.
+std::string pathForFh(uint64_t fh) {
+  if (!fh) return "<null-fh>";
+  for (auto it = g_fiosOpens.rbegin(); it != g_fiosOpens.rend(); ++it) {
+    uint64_t v = it->pOutFH ? *reinterpret_cast<uint64_t *>(it->pOutFH) : 0;
+    if (v && v == fh) return it->path;
+  }
+  return "<unknown-fh>";
+}
+
+// The native logger the guest wrapper calls AFTER the real FIOS2 fn returns.
+// hookId: 1=FHOpen 2=FHGetSize 3=FHRead 4=FHPread 5=OpGetActualCount.
+//  FHOpen           : a1=pOutFH  a2=path   ret=op
+//  FHGetSize        : a0=fh                ret=size          <-- smoking gun
+//  FHRead/FHPread   : a1=fh a2=buf a3=len  ret=op
+//  OpGetActualCount : a0=op                ret=actualCount   <-- smoking gun
+// Detection is path-agnostic: a size or count of 0 is the anomaly; we then map
+// the fh back to the file that opened it. Zero events are deduped per-fh/op so
+// the post-drain retry churn (millions of calls) can't flood the log.
+void PS4ABI fiosTraceLogger(uint64_t hookId, uint64_t a0, uint64_t a1,
+                            uint64_t a2, uint64_t a3, uint64_t ret) {
+  char pb[512];
+  switch (hookId) {
+  case 1: { // FHOpen
+    uint64_t n = ++g_fiosOpenN;
+    // Run the DELTA_FIOS_PROBE once, after enough opens that PlayGo chunks for
+    // /app0/misc and /app0/scripts are mounted (the guest opens /app0/misc files
+    // by open ~#905). Firing at proc::create or the first open is too early.
+    if (n == 2000) {
+      static std::once_flag probeOnce;
+      std::call_once(probeOnce, [] { probeFiosPaths(); });
+    }
+    const char *path = guestStr(a2, pb, sizeof(pb));
+    static const bool allOpen = std::getenv("DELTA_FIOS_ALLOPEN") != nullptr;
+    bool firstSeen = false;
+    { std::lock_guard lk(g_fiosMx);
+      if (g_fiosOpens.size() < 80000) g_fiosOpens.push_back({a1, std::string(path)});
+      if (allOpen) firstSeen = g_seenPaths.insert(std::string(path)).second; }
+    // DELTA_FIOS_ALLOPEN: log every DISTINCT path once (full file inventory, to
+    // find whether the world-op file is ever even opened). Else sample first 40 +
+    // container types.
+    if (firstSeen || n <= 40 || std::strstr(path, ".calt") ||
+        std::strstr(path, "recacheList") || std::strstr(path, "PrecacheList")) {
+      std::fprintf(stderr, "[fios] FHOpen path='%s' pOutFH=%#llx op=%#llx (#%llu)\n",
+                   path, (unsigned long long)a1, (unsigned long long)ret,
+                   (unsigned long long)n);
+      std::fflush(stderr);
+    }
+    break;
+  }
+  case 2: { // FHGetSize(fh) -> size ; ANY zero/neg is the anomaly
+    if ((int64_t)ret <= 0) {
+      std::lock_guard lk(g_fiosMx);
+      if (g_zeroSizeFh.insert(a0).second) {
+        std::fprintf(stderr,
+          "[fios] *** FHGetSize ZERO fh=%#llx -> size=%lld  path='%s'\n",
+          (unsigned long long)a0, (long long)ret, pathForFh(a0).c_str());
+        std::fflush(stderr);
+      } else if ((++g_zeroSizeChurn % 500000) == 0) {
+        std::fprintf(stderr, "[fios] (FHGetSize-zero churn count=%llu)\n",
+                     (unsigned long long)g_zeroSizeChurn.load());
+        std::fflush(stderr);
+      }
+    } else if (std::getenv("DELTA_FIOS_ALLOPEN") && (int64_t)ret > (4 << 20)) {
+      // Large files (>4MB) are candidates for the world container; log once/fh.
+      std::lock_guard lk(g_fiosMx);
+      if (g_zeroSizeFh.insert(a0 ^ 0x5A5A5A5Aull).second)
+        std::fprintf(stderr, "[fios] FHGetSize BIG fh=%#llx -> size=%lld path='%s'\n",
+                     (unsigned long long)a0, (long long)ret, pathForFh(a0).c_str()),
+        std::fflush(stderr);
+    }
+    break;
+  }
+  case 3:
+  case 4: { // FHRead / FHPread ; log zero-length reads (the container's read)
+    if (a3 == 0) {
+      std::lock_guard lk(g_fiosMx);
+      std::fprintf(stderr,
+        "[fios] *** %s ZERO-LEN fh=%#llx buf=%#llx len=0 op=%#llx path='%s'\n",
+        hookId == 3 ? "FHRead" : "FHPread", (unsigned long long)a1,
+        (unsigned long long)a2, (unsigned long long)ret, pathForFh(a1).c_str());
+      std::fflush(stderr);
+    }
+    break;
+  }
+  case 5: { // OpGetActualCount(op) -> count ; ANY zero/neg is the anomaly
+    if ((int64_t)ret <= 0) {
+      std::lock_guard lk(g_fiosMx);
+      if (g_zeroActOp.insert(a0).second) {
+        std::fprintf(stderr,
+          "[fios] *** OpGetActualCount ZERO op=%#llx -> count=%lld\n",
+          (unsigned long long)a0, (long long)ret);
+        std::fflush(stderr);
+      } else if ((++g_zeroActChurn % 500000) == 0) {
+        std::fprintf(stderr, "[fios] (OpGetActualCount-zero churn count=%llu)\n",
+                     (unsigned long long)g_zeroActChurn.load());
+        std::fflush(stderr);
+      }
+    }
+    break;
+  }
+  default: break;
+  }
+}
+} // namespace
+
+// Called from smodule::resolveImports for every PLT import. If DELTA_FIOS_TRACE
+// is set and `nidName` (an encoded "NID#lib#mod") is one of the libSceFios2
+// whole-file APIs, return a guest wrapper around the resolved `realAddr` that
+// logs args+return; otherwise return realAddr unchanged. NID prefixes from the
+// SCE dynamic tables (report §10.2), cryptographically verified there.
+uintptr_t maybeWrapFiosImport(const char *nidName, uintptr_t realAddr) {
+  static const bool on = std::getenv("DELTA_FIOS_TRACE") != nullptr;
+  if (!on || !nidName || !realAddr)
+    return realAddr;
+  struct { const char *nid; uint32_t hookId; const char *nm; } tbl[] = {
+      {"er6TkQFUvp0", 1, "sceFiosFHOpen"},
+      {"FdjoqFQOlt0", 2, "sceFiosFHGetSize"},
+      {"cg-VoPqZYss", 3, "sceFiosFHRead"},
+      {"rR8wq7YFRZs", 4, "sceFiosFHPread"},
+      {"+FRvKknUj1I", 5, "sceFiosOpGetActualCount"},
+  };
+  for (auto &e : tbl) {
+    if (std::strncmp(nidName, e.nid, 11) == 0) {
+      uintptr_t wrap = cpu::makeGuestReturnHook(reinterpret_cast<void *>(realAddr),
+                                                e.hookId,
+                                                reinterpret_cast<void *>(&fiosTraceLogger),
+                                                e.nm);
+      if (wrap) {
+        LOG_INFO("fiostrace: wrapped {} real={:#x} -> wrapper={:#x}", e.nm,
+                 (unsigned long)realAddr, (unsigned long)wrap);
+        return wrap;
+      }
+      LOG_WARNING("fiostrace: makeGuestReturnHook failed for {}", e.nm);
+      return realAddr;
+    }
+  }
+  return realAddr;
+}
+
+// DELTA_FIOS_PROBE=path1,path2,...  Boot-time probe: resolve each guest path
+// through the VFS exactly as the guest would and log Exists/size. Lets us read
+// the world-op container's backing WITHOUT waiting ~50min for the JobSystem to
+// schedule its (low-priority, retry-churning) load job. Paths are guest paths
+// like "/app0/misc/_cmn/mainmenuprecachelist.calt" (FIOS2 lowercases; $ -> /app0).
+static void probeFiosPaths() {
+  const char *e = std::getenv("DELTA_FIOS_PROBE");
+  if (!e)
+    return;
+  std::string list(e);
+  size_t start = 0;
+  while (start < list.size()) {
+    size_t comma = list.find(',', start);
+    std::string path = list.substr(start, comma == std::string::npos
+                                              ? std::string::npos
+                                              : comma - start);
+    if (!path.empty()) {
+      utl::File f = vfs::openRead(path.c_str());
+      if (f.Exists())
+        std::fprintf(stderr, "[fiosprobe] '%s' EXISTS size=%llu\n", path.c_str(),
+                     (unsigned long long)f.GetSize());
+      else
+        std::fprintf(stderr, "[fiosprobe] '%s' MISSING (openRead empty)\n",
+                     path.c_str());
+      std::fflush(stderr);
+    }
+    if (comma == std::string::npos)
+      break;
+    start = comma + 1;
+  }
+}
+
+// ===========================================================================
+// DELTA_JOB_TRACE: instrument SotC's BPE JobSystem to find why the 4 workers
+// livelock post-drain, unable to claim the final world-op finalize job. Uses an
+// INTERNAL-function entry detour (not GOT-based, since these are eboot-internal
+// calls): overwrite the target's prologue with an abs jmp to a return-capturing
+// wrapper whose realTarget is a trampoline (relocated prologue + jmp back). The
+// wrapper reports args+return via the magic-syscall to jobTraceLogger.
+//   claim 0x38d40: worker ordinal = fs:[-8]; ret = claimed job (0 = fail)
+//   kick  0x35480: job affinity/prio submitted
+// ===========================================================================
+namespace {
+void PS4ABI jobTraceLogger(uint64_t hookId, uint64_t a0, uint64_t a1,
+                           uint64_t a2, uint64_t a3, uint64_t ret) {
+  switch (hookId) {
+  case 12: { // CLAIM 0x38d40 -> ret = claimed job ptr (0 = failed to claim)
+    // Log each worker's ordinal (fs:[-8]) exactly once, cheaply (thread_local).
+    thread_local bool logged = false;
+    if (!logged) {
+      logged = true;
+      // Replicate get-core-ordinal fn 0x33350: tcb = *(fsbase); v = [tcb-0x10];
+      // ord = (v & 0x8000) ? (v & ~0x8000) : -1.  This is the value the claim
+      // path (0x38d70/0x38d7f) uses for 1<<ord AND the direct-assign slot index.
+      uint64_t fsb = cpu::currentGuestFsBase();
+      uint64_t tcb = fsb ? *reinterpret_cast<uint64_t *>(fsb) : 0;
+      uint64_t v = tcb ? *reinterpret_cast<uint64_t *>(tcb - 0x10) : 0;
+      int64_t ord = (v & 0x8000) ? (int64_t)(v & ~0x8000ULL) : -1;
+      static std::mutex m; std::lock_guard lk(m);
+      std::fprintf(stderr,
+        "[jobclaim] worker fsbase=%#llx tcb=%#llx [tcb-0x10]=%#llx -> ordinal=%lld "
+        "(1<<ord=%#x) firstClaim->%#llx\n",
+        (unsigned long long)fsb, (unsigned long long)tcb, (unsigned long long)v,
+        (long long)ord, (ord >= 0 && ord < 32) ? (1u << (unsigned)ord) : 0u,
+        (unsigned long long)ret);
+      std::fflush(stderr);
+    }
+    static std::atomic<uint64_t> claims{0}, fails{0};
+    uint64_t c = ++claims;
+    if (ret == 0) ++fails;
+    // Periodically dump the 8 per-ordinal direct-assign slots (a0=jobsys=r14;
+    // slot = [jobsys + ord*0x120 + 0xeb0]) so a job stranded in a slot whose
+    // ordinal no job-worker (0..3) services shows up as a non-zero high slot.
+    if ((c % 4000000) == 0) {
+      std::fprintf(stderr, "[jobclaim] claims=%llu fails=%llu directAssign[0..7]=",
+                   (unsigned long long)c, (unsigned long long)fails.load());
+      for (int i = 0; i < 8; i++) {
+        uint64_t slot = 0;
+        uint64_t addr = a0 + (uint64_t)i * 0x120 + 0xeb0;
+        if (addr > 0x10000) slot = *reinterpret_cast<uint64_t *>(addr);
+        std::fprintf(stderr, "%d:%#llx ", i, (unsigned long long)slot);
+      }
+      std::fprintf(stderr, "\n");
+      std::fflush(stderr);
+    }
+    break;
+  }
+  case 10: { // KICK 0x35480 -> ret = job-slot handle; a0=rdi job descriptor
+    // Log the first submits + a periodic sample so we see affinity/prio spread.
+    static std::atomic<uint64_t> n{0};
+    uint64_t k = ++n;
+    if (k <= 30 || (k % 4000) == 0) {
+      std::fprintf(stderr,
+        "[jobkick] #%llu desc=%#llx a1=%#llx a2=%#llx a3=%#llx -> slot=%#llx\n",
+        (unsigned long long)k, (unsigned long long)a0, (unsigned long long)a1,
+        (unsigned long long)a2, (unsigned long long)a3, (unsigned long long)ret);
+      std::fflush(stderr);
+    }
+    break;
+  }
+  default: break;
+  }
+}
+
+// Install an entry detour on an eboot-internal function. prologueLen must be the
+// smallest instruction boundary >= 14 in the prologue (position-independent).
+void installInternalHook(uint8_t *base, uint32_t off, uint32_t prologueLen,
+                         uint32_t hookId, const char *name) {
+  uint8_t *target = base + off;
+  utl::protectMem(reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(target) & ~0xFFFull),
+                  0x2000, utl::pageProtection::rwx);
+  uintptr_t tramp = cpu::makeGuestTrampoline(target, prologueLen, target + prologueLen);
+  if (!tramp) { LOG_WARNING("jobtrace: trampoline failed for {}", name); return; }
+  uintptr_t wrap = cpu::makeGuestReturnHook(reinterpret_cast<void *>(tramp), hookId,
+                                            reinterpret_cast<void *>(&jobTraceLogger), name);
+  if (!wrap) { LOG_WARNING("jobtrace: wrapper failed for {}", name); return; }
+  uint8_t patch[32];
+  patch[0] = 0xFF; patch[1] = 0x25;
+  patch[2] = patch[3] = patch[4] = patch[5] = 0x00;   // jmp qword [rip+0]
+  uint64_t w = wrap; std::memcpy(patch + 6, &w, 8);
+  for (uint32_t i = 14; i < prologueLen; i++) patch[i] = 0x90;
+  std::memcpy(target, patch, prologueLen);
+  LOG_INFO("jobtrace: hooked {} eboot+{:#x} tramp={:#x} wrapper={:#x}", name, off,
+           (unsigned long)tramp, (unsigned long)wrap);
+}
+} // namespace
+
+static void installJobTrace(smodule &m) {
+  if (!std::getenv("DELTA_JOB_TRACE"))
+    return;
+  uint8_t *base = m.getInfo().base;
+  // prologue cut points (smallest instr boundary >= 14, verified by disasm):
+  //   claim 0x38d40 -> 20 (through `sub rsp,0xa8`)
+  //   kick  0x35480 -> 17 (through `sub rsp,0x38`)
+  installInternalHook(base, 0x38d40, 20, 12, "DoClaimJob(0x38d40)");
+  if (std::getenv("DELTA_JOB_TRACE_KICK"))
+    installInternalHook(base, 0x35480, 17, 10, "JobKick(0x35480)");
+}
+
 static void investigateDcbGate(smodule &m) {
   if (!std::getenv("DELTA_PS5_DCBWATCH"))
     return;

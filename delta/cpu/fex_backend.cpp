@@ -56,6 +56,7 @@ const char *syscall_getname(uint32_t idx);
 extern "C" uint32_t krnl_syscall_errno(uint64_t raw);
 struct tls_index;
 void *PS4ABI guest_tls_get_addr(tls_index *ti); // HLE dynamic-TLS resolver
+const uint32_t *currentGuestTidPtr();           // this thread's guest tid TLS addr
 }
 
 namespace cpu {
@@ -139,6 +140,7 @@ struct LiveThread {
   // syscalls WITH arguments, not just its rip.
   const TraceEvt *trace = nullptr;
   const uint32_t *tracePos = nullptr;
+  const uint32_t *gtid = nullptr;  // this thread's guest tid (umutex owner space)
 };
 std::mutex g_liveMutex;
 std::vector<LiveThread> g_live;
@@ -228,6 +230,65 @@ static void startWatchdog() {
         }
       }).detach();
     }
+    // DELTA_LOADWATCH=<ms>: SotC world-load counter poller. The eboot's
+    // "[MSG-Init] LoadInitialWorld() Remaining Resources To Load: N" line is
+    // only printed twice during init; the live count is the sum of 10 per-
+    // category int32 queues at obj+0x110 + i*0x28, where obj = *(base+0x2ee2d00)
+    // (base = Shadow_Shipping @ 0x201400000000). This reads that sum every <ms>
+    // ms so we can see whether the load DECREASES, PLATEAUS, or stops, and which
+    // of the 10 category queues is stuck. Env overrides: DELTA_LOADWATCH_BASE,
+    // DELTA_LOADWATCH_GOFF (global offset), all optional. See sotcdis notes.
+    if (const char *s = std::getenv("DELTA_LOADWATCH")) {
+      int ms = std::atoi(s);
+      if (ms <= 0) ms = 2000;
+      uint64_t base = 0x201400000000ull;
+      if (const char *b = std::getenv("DELTA_LOADWATCH_BASE")) base = strtoull(b, nullptr, 0);
+      uint64_t goff = 0x2ee2d00ull;
+      if (const char *g = std::getenv("DELTA_LOADWATCH_GOFF")) goff = strtoull(g, nullptr, 0);
+      std::thread([ms, base, goff] {
+        auto rd = [](uint64_t a, void *dst, size_t n) -> bool {
+          long pg = sysconf(_SC_PAGESIZE);
+          for (uint64_t p = a & ~((uint64_t)pg - 1); p < a + n; p += pg) {
+            unsigned char mv = 0;
+            if (mincore(reinterpret_cast<void *>(p), 1, &mv) != 0) return false;
+          }
+          std::memcpy(dst, reinterpret_cast<void *>(a), n);
+          return true;
+        };
+        uint64_t pobj = base + goff;
+        int lastTotal = -1, plateau = 0;
+        for (uint64_t tick = 0;; tick++) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+          uint64_t obj = 0;
+          if (!rd(pobj, &obj, 8) || obj < 0x1000) {
+            std::fprintf(stderr, "[loadwatch %llu] obj ptr @%#llx not ready (obj=%#llx)\n",
+                         (unsigned long long)tick, (unsigned long long)pobj,
+                         (unsigned long long)obj);
+            std::fflush(stderr);
+            continue;
+          }
+          int32_t c[10] = {0};
+          int total = 0;
+          bool ok = true;
+          for (int i = 0; i < 10; i++) {
+            int32_t v = 0;
+            if (!rd(obj + 0x110 + (uint64_t)i * 0x28, &v, 4)) { ok = false; break; }
+            c[i] = v;
+            total += v;
+          }
+          if (!ok) { std::fprintf(stderr, "[loadwatch %llu] obj=%#llx read fault\n",
+                                  (unsigned long long)tick, (unsigned long long)obj);
+                     std::fflush(stderr); continue; }
+          if (total == lastTotal) plateau++; else plateau = 0;
+          lastTotal = total;
+          std::fprintf(stderr,
+              "[loadwatch %llu] obj=%#llx REMAINING=%d plateau=%dx q=[%d %d %d %d %d %d %d %d %d %d]\n",
+              (unsigned long long)tick, (unsigned long long)obj, total, plateau,
+              c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8], c[9]);
+          std::fflush(stderr);
+        }
+      }).detach();
+    }
     const char *e = std::getenv("DELTA_WATCHDOG");
     if (!e) return;
     int secs = std::atoi(e);
@@ -245,8 +306,8 @@ static void startWatchdog() {
           // scN = total syscalls this thread has made: compare across rounds
           // to tell a thread that is genuinely STUCK in one wait (scN frozen)
           // from one that loops through waits (scN advancing).
-          std::fprintf(stderr, "  tid=%u rip=%#llx scN=%u (%s)\n", t.id,
-                       (unsigned long long)S.rip,
+          std::fprintf(stderr, "  tid=%u gtid=%u rip=%#llx scN=%u (%s)\n", t.id,
+                       t.gtid ? *t.gtid : 0, (unsigned long long)S.rip,
                        t.tracePos ? *t.tracePos : 0, sym);
           // Scan the stack upward for return addresses into known modules (the
           // wait stub omits frame pointers, so a raw scan beats an rbp walk) to
@@ -277,10 +338,32 @@ static void startWatchdog() {
                 if (mincore(reinterpret_cast<void *>(e.a0 & ~((uint64_t)pg - 1)),
                             1, &mv) == 0) {
                   uint32_t ow = *reinterpret_cast<volatile uint32_t *>(e.a0);
+                  uint32_t ownerTid = ow & 0x7fffffff;
                   std::fprintf(stderr,
                                "      ^ umutex %#llx word=%#x owner-tid=%u%s\n",
-                               (unsigned long long)e.a0, ow, ow & 0x7fffffff,
+                               (unsigned long long)e.a0, ow, ownerTid,
                                (ow & 0x80000000u) ? " CONTESTED" : "");
+                  // Cross-reference: find the live thread that OWNS this umutex
+                  // (its guest tid == owner-tid) and print what IT is doing. If
+                  // the owner is itself parked in a wait while holding the lock,
+                  // THAT wait is the real deadlock root.
+                  for (auto &o : g_live) {
+                    if (!o.gtid || *o.gtid != ownerTid || &o == &t) continue;
+                    const TraceEvt *ot = o.trace;
+                    uint32_t opos = o.tracePos ? *o.tracePos : 0;
+                    const char *osc = "?";
+                    uint64_t oa0 = 0, oa1 = 0;
+                    uint32_t oid = 0;
+                    if (ot && opos) {
+                      const TraceEvt &le = ot[(opos - 1) % kTraceRing];
+                      if (le.kind == 's') { oid = le.id; osc = krnl::syscall_getname(le.id); oa0 = le.a0; oa1 = le.a1; }
+                    }
+                    std::fprintf(stderr,
+                                 "      ^^ OWNER is watchdog tid=%u rip=%#llx scN=%u last: sc %u %s (%#llx,%#llx)\n",
+                                 o.id, (unsigned long long)o.thread->CurrentFrame->State.rip,
+                                 opos, oid, osc, (unsigned long long)oa0, (unsigned long long)oa1);
+                    break;
+                  }
                 }
               }
             }
@@ -634,7 +717,7 @@ public:
                    (unsigned long long)entryRip, h->stack, h->stackSize, hsp, hsz);
     }
     { std::lock_guard lk(g_liveMutex);
-      g_live.push_back({h->thread, myId, t_trace, &t_tracePos}); }
+      g_live.push_back({h->thread, myId, t_trace, &t_tracePos, krnl::currentGuestTidPtr()}); }
     LOG_INFO("fex: running guest thread rip={:#x} (watchdog tid={})",
              h->thread->CurrentFrame->State.rip, myId);
     // thr_exit (cpu::exitGuestThread) longjmps here to leave the JIT without
@@ -922,8 +1005,120 @@ uintptr_t makeHostThunk(void *hostFn, const char *name) {
   return reinterpret_cast<uintptr_t>(t);
 }
 
+// Plant a guest x86 trampoline that WRAPS an existing resolved guest function
+// `realTarget`, capturing both its arguments and its RETURN VALUE. The wrapper:
+//   1. calls realTarget with the caller's original args (rdi,rsi,rdx,rcx,...),
+//   2. then invokes native `loggerFn(hookId, a0,a1,a2,a3, ret)` via the
+//      kHostThunkSyscallBase magic syscall (a0..a3 = the ORIGINAL rdi/rsi/rdx/rcx,
+//      ret = realTarget's rax),
+//   3. returns realTarget's return value to the original caller.
+// Install by writing the returned guest address into the import GOT slot that
+// used to hold `realTarget` (the game's `jmp [GOT]` PLT stub then lands here).
+// This is the ARM-compatible replacement for int3 return hooks: FEX JITs the
+// emitted bytes and the `call r11 -> realTarget` chains into the real callee.
+// Reentrant/thread-safe (all transient state on the guest stack). 0 on failure.
+uintptr_t makeGuestReturnHook(void *realTarget, uint32_t hookId, void *loggerFn,
+                              const char *name) {
+  std::lock_guard lk(g_thunkMutex);
+  if (!g_thunkPool) {
+    g_thunkPool = static_cast<uint8_t *>(
+        mmap(nullptr, g_thunkPoolSize, PROT_READ | PROT_WRITE | PROT_EXEC,
+             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+    if (g_thunkPool == MAP_FAILED) {
+      g_thunkPool = nullptr;
+      LOG_ERROR("fex: guest-hook pool mmap failed");
+      return 0;
+    }
+    std::lock_guard rk(g_rangeMutex);
+    g_ranges.push_back({reinterpret_cast<uint64_t>(g_thunkPool), g_thunkPoolSize});
+  }
+  // Register the native logger as a host-thunk index for the magic syscall.
+  const uint32_t loggerIdx = static_cast<uint32_t>(g_hostThunks.size());
+  g_hostThunks.push_back(loggerFn);
+  g_thunkNames.resize(g_hostThunks.size());
+  g_thunkNames[loggerIdx] = name ? name : "guesthook";
+  const uint32_t magic = kHostThunkSyscallBase | loggerIdx;
+
+  constexpr size_t kWrapStride = 64; // emitted body is ~51 bytes
+  if (g_thunkPoolUsed + kWrapStride > g_thunkPoolSize) {
+    LOG_ERROR("fex: guest-hook pool exhausted");
+    return 0;
+  }
+  uint8_t *t = g_thunkPool + g_thunkPoolUsed;
+  g_thunkPoolUsed += kWrapStride;
+  uint8_t *p = t;
+  auto emit = [&](std::initializer_list<uint8_t> b) { for (uint8_t x : b) *p++ = x; };
+  auto emit32 = [&](uint32_t v) { std::memcpy(p, &v, 4); p += 4; };
+  auto emit64 = [&](uint64_t v) { std::memcpy(p, &v, 8); p += 8; };
+  // On entry: rsp%16==8; args rdi,rsi,rdx,rcx; [rsp]=caller return address.
+  emit({0x57});                    // push rdi                 ; save a0
+  emit({0x56});                    // push rsi                 ; save a1
+  emit({0x52});                    // push rdx                 ; save a2
+  emit({0x51});                    // push rcx                 ; save a3
+  emit({0x48, 0x83, 0xEC, 0x08});  // sub rsp, 8               ; realign to 16
+  emit({0x49, 0xBB});              // movabs r11, realTarget
+  emit64(reinterpret_cast<uint64_t>(realTarget));
+  emit({0x41, 0xFF, 0xD3});        // call r11                 ; run real fn -> rax=ret
+  emit({0x48, 0x83, 0xC4, 0x08});  // add rsp, 8
+  emit({0x49, 0x89, 0xC1});        // mov r9, rax              ; logger arg6 = ret
+  emit({0x41, 0x58});              // pop r8                   ; a3 -> r8
+  emit({0x59});                    // pop rcx                  ; a2 -> rcx
+  emit({0x5A});                    // pop rdx                  ; a1 -> rdx
+  emit({0x5E});                    // pop rsi                  ; a0 -> rsi
+  emit({0xBF});                    // mov edi, imm32
+  emit32(hookId);                  //   = hookId
+  emit({0x50});                    // push rax                 ; preserve ret across syscall
+  emit({0x49, 0x89, 0xCA});        // mov r10, rcx             ; handler reads a2 from r10
+  emit({0xB8});                    // mov eax, imm32
+  emit32(magic);                   //   = kHostThunkSyscallBase|loggerIdx
+  emit({0x0F, 0x05});              // syscall                  ; -> loggerFn(rdi,rsi,rdx,rcx,r8,r9)
+  emit({0x58});                    // pop rax                  ; restore realTarget's ret
+  emit({0xC3});                    // ret                      ; return to caller with ret
+  return reinterpret_cast<uintptr_t>(t);
+}
+
+// Build a callable copy of an internal guest function whose first `prologueLen`
+// bytes are about to be overwritten by an entry detour. Emits [the prologueLen
+// original bytes] + [abs jmp to continueAt] into the thunk pool and returns its
+// address. The caller then patches the real entry to jump to a wrapper whose
+// realTarget is this trampoline; calling the trampoline runs the original
+// function from the top (relocated prologue) and falls through into its body.
+// `prologueLen` bytes MUST be position-independent (no rip-relative / relative
+// branches) and end on an instruction boundary >= 14 (the detour's abs-jmp size).
+uintptr_t makeGuestTrampoline(const void *fnBytes, uint32_t prologueLen,
+                              const void *continueAt) {
+  std::lock_guard lk(g_thunkMutex);
+  if (!g_thunkPool) {
+    g_thunkPool = static_cast<uint8_t *>(
+        mmap(nullptr, g_thunkPoolSize, PROT_READ | PROT_WRITE | PROT_EXEC,
+             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+    if (g_thunkPool == MAP_FAILED) { g_thunkPool = nullptr; return 0; }
+    std::lock_guard rk(g_rangeMutex);
+    g_ranges.push_back({reinterpret_cast<uint64_t>(g_thunkPool), g_thunkPoolSize});
+  }
+  const size_t need = prologueLen + 14;
+  const size_t stride = (need + 15) & ~size_t(15);
+  if (g_thunkPoolUsed + stride > g_thunkPoolSize) return 0;
+  uint8_t *t = g_thunkPool + g_thunkPoolUsed;
+  g_thunkPoolUsed += stride;
+  std::memcpy(t, fnBytes, prologueLen);           // relocated prologue
+  uint8_t *p = t + prologueLen;
+  *p++ = 0xFF; *p++ = 0x25;                        // jmp qword [rip+0]
+  uint32_t zero = 0; std::memcpy(p, &zero, 4); p += 4;
+  uint64_t cont = reinterpret_cast<uint64_t>(continueAt);
+  std::memcpy(p, &cont, 8);
+  return reinterpret_cast<uintptr_t>(t);
+}
+
 uint64_t currentGuestRip() {
   return t_curThread ? t_curThread->CurrentFrame->State.rip : 0;
+}
+
+// Guest fs-segment base of the thread currently executing on this host thread
+// (0 if none). Lets a native hook logger read the guest's TLS (e.g. the BPE
+// JobSystem worker ordinal at fs:[-8]) without emitting guest fs-relative code.
+uint64_t currentGuestFsBase() {
+  return t_curThread ? t_curThread->CurrentFrame->State.fs_cached : 0;
 }
 
 const uint64_t *currentGuestGregs() {
