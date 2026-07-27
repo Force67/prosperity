@@ -28,8 +28,8 @@ not a "translated" description -- the backend owns every mapping decision, so
 both command processors stay free of graphics API policy.
 
 `renderer.h` is the operation set: bring-up, the frame lifecycle
-(`beginFrame` / `draw` / `endFrame`), compute (`dispatch` and the guest-memory
-coherency flushes), and `noteMemoryFill` for the CP DMA fills a title uses in
+(`BeginFrame` / `Draw` / `EndFrame`), compute (`Dispatch` and the guest-memory
+coherency flushes), and `NoteMemoryFill` for the CP DMA fills a title uses in
 place of a clear packet.
 
 ## vulkan/
@@ -53,9 +53,35 @@ One unit per decision, roughly in dependency order:
 | `vk_capture` / `vk_present` | frames out to disk / to the window |
 
 Rendering is offscreen: there is no swapchain on this device. Each draw renders
-into the image for its `rtBase`, and `endFrame` reads back the target at the
+into the image for its `rt_base`, and `EndFrame` reads back the target at the
 scanout address and hands the pixels to the window (or to a PPM, headless).
 
 The heuristic quad path in `vk_draw` predates the recompiler and is still the
 fallback for draws `vk_draw_recomp` declines; `DELTA_GPU_DECLINES=1` reports why
 draws are still landing there.
+
+## Conventions
+
+The module follows [Chromium C++ style](https://chromium.googlesource.com/chromium/src/+/main/styleguide/c++/c++.md),
+enforced by the local `.clang-format` / `.clang-tidy` (naming) and by
+`tests/check_layering.py` (dependencies, registered with CTest as
+`gpu_layering`):
+
+- Types `CamelCase`; functions `CamelCase()`; variables, struct members and
+  parameters `snake_case` (private class members would take a trailing `_`);
+  constants `kCamelCase`; mutable globals `g_snake_case`; macros `UPPER_CASE`.
+- Every include is spelled from the delta root (`gpu/vulkan/vk_device.h`),
+  including inside the module. No extra include roots.
+- Directory dependencies are one-way and machine-checked; the module's public
+  surface is `rhi/` plus the two `cmd_processor.h` entry headers. Everything
+  else is internal: nothing outside `delta/gpu` may include it.
+
+Deliberate deviations from Chromium:
+
+- `.cpp` extension, not `.cc` (repo-wide convention; the shared
+  `add_delta_module` glob and every other delta module use `.cpp`).
+- Unit tests live in `tests/`, not next to the code (repo-wide
+  `add_delta_module`/CTest wiring).
+- Hardware mnemonics keep AMD's canonical spelling (`IT_DRAW_INDEX_2`,
+  register names) so they can be grepped against cikd.h and the ISA docs;
+  such enums carry `NOLINT` guards.

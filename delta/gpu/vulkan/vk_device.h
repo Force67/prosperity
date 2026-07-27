@@ -16,13 +16,13 @@
 namespace gpu::vk {
 
 // Bail out of the enclosing bool-returning creation function on a Vulkan error.
-#define VKOK(x)                                                                \
-  do {                                                                         \
-    VkResult _r = (x);                                                         \
-    if (_r != VK_SUCCESS) {                                                    \
-      std::fprintf(stderr, "[gpuvk] %s failed: %d\n", #x, (int)_r);            \
-      return false;                                                            \
-    }                                                                          \
+#define VKOK(x)                                                     \
+  do {                                                              \
+    VkResult _r = (x);                                              \
+    if (_r != VK_SUCCESS) {                                         \
+      std::fprintf(stderr, "[gpuvk] %s failed: %d\n", #x, (int)_r); \
+      return false;                                                 \
+    }                                                               \
   } while (0)
 
 struct DeviceState {
@@ -35,37 +35,47 @@ struct DeviceState {
   VkCommandPool pool = VK_NULL_HANDLE;
   // Dedicated to the synchronous aux submits: texture uploads, rtstat.
   VkFence fence = VK_NULL_HANDLE;
-  uint32_t maxCsResources = 0;
-  VkDeviceSize maxStorageBufferRange = 0;
-  bool samplerAnisotropy = false;
-  bool samplerMirrorClamp = false;
-  bool geometryShader = false;
-  bool storageImageWriteWithoutFormat = false;
+  uint32_t max_cs_resources = 0;
+  VkDeviceSize max_storage_buffer_range = 0;
+  bool sampler_anisotropy = false;
+  bool sampler_mirror_clamp = false;
+  bool geometry_shader = false;
+  bool storage_image_write_without_format = false;
 };
 
 extern DeviceState g_dev;
 
 // Dynamic rendering (core in 1.3, KHR on older drivers), resolved at device
 // creation: the renderer records no render passes.
-extern PFN_vkCmdBeginRenderingKHR p_vkCmdBeginRendering;
-extern PFN_vkCmdEndRenderingKHR p_vkCmdEndRendering;
+extern PFN_vkCmdBeginRenderingKHR g_cmd_begin_rendering;
+extern PFN_vkCmdEndRenderingKHR g_cmd_end_rendering;
 
-bool createDevice();
+bool CreateDevice();
 
-uint32_t findMemoryType(uint32_t typeBits, VkMemoryPropertyFlags props);
-uint32_t findMemoryTypePref(uint32_t typeBits, VkMemoryPropertyFlags pref,
+uint32_t FindMemoryType(uint32_t type_bits, VkMemoryPropertyFlags props);
+uint32_t FindMemoryTypePref(uint32_t type_bits,
+                            VkMemoryPropertyFlags pref,
                             VkMemoryPropertyFlags req);
 
-void imageBarrier(VkCommandBuffer c, VkImage img, VkImageLayout from,
-                  VkImageLayout to, VkAccessFlags srcA, VkAccessFlags dstA,
-                  uint32_t layers = 1, uint32_t mip_levels = 1);
-void depthBarrier(VkCommandBuffer c, VkImage img, VkImageLayout from,
-                  VkImageLayout to, VkAccessFlags srcA, VkAccessFlags dstA);
+void ImageBarrier(VkCommandBuffer c,
+                  VkImage img,
+                  VkImageLayout from,
+                  VkImageLayout to,
+                  VkAccessFlags src_a,
+                  VkAccessFlags dst_a,
+                  uint32_t layers = 1,
+                  uint32_t mip_levels = 1);
+void DepthBarrier(VkCommandBuffer c,
+                  VkImage img,
+                  VkImageLayout from,
+                  VkImageLayout to,
+                  VkAccessFlags src_a,
+                  VkAccessFlags dst_a);
 
-VkShaderModule makeModule(const uint32_t *spv, size_t bytes);
-VkShaderModule makeModuleVec(const std::vector<uint32_t> &spv);
+VkShaderModule MakeModule(const uint32_t* spv, size_t bytes);
+VkShaderModule MakeModuleVec(const std::vector<uint32_t>& spv);
 
 // Ask the driver what the GPU actually faulted on (VK_EXT_device_fault).
-void reportDeviceFault(VkDevice device);
+void ReportDeviceFault(VkDevice device);
 
 }  // namespace gpu::vk

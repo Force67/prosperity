@@ -11,6 +11,6 @@
 
 namespace gpu::vk {
 
-void presentAsync(const uint8_t *pixels, uint32_t w, uint32_t h);
+void PresentAsync(const uint8_t* pixels, uint32_t w, uint32_t h);
 
 }  // namespace gpu::vk

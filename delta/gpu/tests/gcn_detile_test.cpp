@@ -16,8 +16,12 @@ struct SplitMode {
   uint32_t macro_aspect;
 };
 
-uint64_t ExpectedTiledOffset(const SplitMode &mode, uint32_t x, uint32_t y,
-                             uint32_t layer, uint32_t pitch, uint32_t height) {
+uint64_t ExpectedTiledOffset(const SplitMode& mode,
+                             uint32_t x,
+                             uint32_t y,
+                             uint32_t layer,
+                             uint32_t pitch,
+                             uint32_t height) {
   constexpr uint32_t kNumPipes = 8;
   constexpr uint32_t kNumBanks = 16;
 
@@ -72,7 +76,7 @@ uint64_t ExpectedTiledOffset(const SplitMode &mode, uint32_t x, uint32_t y,
          (static_cast<uint64_t>(bank) << 11) | ((total_offset >> 8) << 15);
 }
 
-void VerifySplitMode(const SplitMode &mode) {
+void VerifySplitMode(const SplitMode& mode) {
   constexpr uint32_t kLayers = 2;
   const uint32_t macro_pitch = 8 * 8 * mode.macro_aspect;
   const uint32_t macro_height = 8 * mode.bank_height * 16 / mode.macro_aspect;
@@ -102,9 +106,9 @@ void VerifySplitMode(const SplitMode &mode) {
       }
     }
   }
-  ASSERT_EQ(static_cast<size_t>(
-                std::count(occupied.begin(), occupied.end(), true)),
-            occupied.size());
+  ASSERT_EQ(
+      static_cast<size_t>(std::count(occupied.begin(), occupied.end(), true)),
+      occupied.size());
 
   std::vector<uint32_t> linear(static_cast<size_t>(width) * height);
   std::vector<uint32_t> expected(linear.size());
@@ -151,7 +155,7 @@ void Verify16BitRoundTrip(uint32_t tiling_index) {
   }
 }
 
-uint64_t HashBytes(const uint8_t *data, size_t size, uint64_t hash) {
+uint64_t HashBytes(const uint8_t* data, size_t size, uint64_t hash) {
   for (size_t i = 0; i < size; ++i) {
     hash ^= data[i];
     hash *= 1099511628211ull;
@@ -179,53 +183,55 @@ TEST(GcnDetile, Thin2DMacroSupports64BitElements) {
   constexpr uint32_t kWidth = 256;
   constexpr uint32_t kHeight = 128;
   gpu::gcn::TextureLayout32 layout;
-  ASSERT_TRUE(gpu::gcn::BuildTextureLayout32(
-      layout, kWidth, kHeight, kWidth, 1, 1, 14, false, 8));
+  ASSERT_TRUE(gpu::gcn::BuildTextureLayout32(layout, kWidth, kHeight, kWidth, 1,
+                                             1, 14, false, 8));
   std::vector<uint64_t> source(static_cast<size_t>(kWidth) * kHeight);
-  for (size_t i = 0; i < source.size(); i++) source[i] = i + 1;
+  for (size_t i = 0; i < source.size(); i++)
+    source[i] = i + 1;
   std::vector<uint8_t> tiled(layout.size);
   std::vector<uint64_t> result(source.size());
-  ASSERT_TRUE(gpu::gcn::RetileTextureMip32(source.data(), tiled.data(), layout,
-                                           0, 0));
-  ASSERT_TRUE(gpu::gcn::DetileTextureMip32(tiled.data(), result.data(), layout,
-                                           0, 0));
+  ASSERT_TRUE(
+      gpu::gcn::RetileTextureMip32(source.data(), tiled.data(), layout, 0, 0));
+  ASSERT_TRUE(
+      gpu::gcn::DetileTextureMip32(tiled.data(), result.data(), layout, 0, 0));
   EXPECT_EQ(result, source);
 }
 
 TEST(GcnDetile, AllModesAndElementWidthsMatchReferenceDigest) {
   uint64_t hash = 1469598103934665603ull;
   for (uint32_t tiling = 0; tiling <= 31; ++tiling) {
-    if (tiling > 26 && tiling != 31) continue;
+    if (tiling > 26 && tiling != 31)
+      continue;
     for (uint32_t elem : {2u, 4u, 8u, 16u}) {
       gpu::gcn::TextureLayout32 layout;
-      ASSERT_TRUE(gpu::gcn::BuildTextureLayout32(
-          layout, 263, 137, 271, 3, 4, tiling, false, elem));
+      ASSERT_TRUE(gpu::gcn::BuildTextureLayout32(layout, 263, 137, 271, 3, 4,
+                                                 tiling, false, elem));
       std::vector<uint8_t> tiled(layout.size);
       for (size_t i = 0; i < tiled.size(); ++i)
         tiled[i] = static_cast<uint8_t>((i * 193u + i / 29u + tiling) & 255u);
 
       for (uint32_t mip = 0; mip < layout.mip_levels; ++mip) {
-        const auto &level = layout.mips[mip];
+        const auto& level = layout.mips[mip];
         std::vector<uint8_t> linear(static_cast<size_t>(level.width) *
                                     level.height * elem);
         for (uint32_t layer = 0; layer < layout.layers; ++layer) {
-          ASSERT_TRUE(gpu::gcn::DetileTextureMip32(
-              tiled.data(), linear.data(), layout, mip, layer));
+          ASSERT_TRUE(gpu::gcn::DetileTextureMip32(tiled.data(), linear.data(),
+                                                   layout, mip, layer));
           hash = HashBytes(linear.data(), linear.size(), hash);
         }
       }
 
       std::fill(tiled.begin(), tiled.end(), 0xa5);
       for (uint32_t mip = 0; mip < layout.mip_levels; ++mip) {
-        const auto &level = layout.mips[mip];
+        const auto& level = layout.mips[mip];
         std::vector<uint8_t> linear(static_cast<size_t>(level.width) *
                                     level.height * elem);
         for (uint32_t layer = 0; layer < layout.layers; ++layer) {
           for (size_t i = 0; i < linear.size(); ++i)
             linear[i] =
                 static_cast<uint8_t>((i * 157u + layer * 17u + mip) & 255u);
-          ASSERT_TRUE(gpu::gcn::RetileTextureMip32(
-              linear.data(), tiled.data(), layout, mip, layer));
+          ASSERT_TRUE(gpu::gcn::RetileTextureMip32(linear.data(), tiled.data(),
+                                                   layout, mip, layer));
         }
       }
       hash = HashBytes(tiled.data(), tiled.size(), hash);
@@ -240,8 +246,8 @@ TEST(GcnDetile, PitchedTransfersLeaveLinearPaddingUntouched) {
   constexpr uint32_t kElem = 8;
   constexpr size_t kRowBytes = kWidth * kElem + 40;
   gpu::gcn::TextureLayout32 layout;
-  ASSERT_TRUE(gpu::gcn::BuildTextureLayout32(
-      layout, kWidth, kHeight, 271, 1, 1, 14, false, kElem));
+  ASSERT_TRUE(gpu::gcn::BuildTextureLayout32(layout, kWidth, kHeight, 271, 1, 1,
+                                             14, false, kElem));
 
   std::vector<uint8_t> source(kRowBytes * kHeight, 0xcd);
   std::vector<uint8_t> result(kRowBytes * kHeight, 0xee);
@@ -251,10 +257,10 @@ TEST(GcnDetile, PitchedTransfersLeaveLinearPaddingUntouched) {
       source[static_cast<size_t>(y) * kRowBytes + x] =
           static_cast<uint8_t>((y * 37u + x * 13u) & 255u);
 
-  ASSERT_TRUE(gpu::gcn::RetileTextureMip32Pitched(
-      source.data(), kRowBytes, tiled.data(), layout, 0, 0));
-  ASSERT_TRUE(gpu::gcn::DetileTextureMip32Pitched(
-      tiled.data(), result.data(), kRowBytes, layout, 0, 0));
+  ASSERT_TRUE(gpu::gcn::RetileTextureMip32Pitched(source.data(), kRowBytes,
+                                                  tiled.data(), layout, 0, 0));
+  ASSERT_TRUE(gpu::gcn::DetileTextureMip32Pitched(tiled.data(), result.data(),
+                                                  kRowBytes, layout, 0, 0));
   for (uint32_t y = 0; y < kHeight; ++y) {
     const size_t row = static_cast<size_t>(y) * kRowBytes;
     EXPECT_TRUE(std::equal(source.begin() + row,

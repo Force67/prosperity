@@ -1,12 +1,13 @@
 /*
  * PS4Delta : PS4/PS5 emulation and research project
  *
- * RDNA2 (gfx10.3) resource decode + per-draw texture tracking. See rdna_resource.h.
+ * RDNA2 (gfx10.3) resource decode + per-draw texture tracking. See
+ * rdna_resource.h.
  */
 
-#include "rdna_resource.h"
+#include "gpu/ps5/rdna/rdna_resource.h"
 
-#include "guest_memory.h"
+#include "gpu/guest_memory.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -24,183 +25,187 @@ using gpu::gcn::MimgBindingPlan;
 using gpu::gcn::Program;
 using gpu::gcn::TImage;
 
-bool inGuest(uint64_t a) { return a >= 0x10000ull && a < 0x1000000000000ull; }
+bool InGuest(uint64_t a) {
+  return a >= 0x10000ull && a < 0x1000000000000ull;
+}
 
-bool guestRange(uint64_t address, uint64_t bytes) {
-  return bytes && inGuest(address) && bytes <= 0x1000000000000ull - address &&
+bool GuestRange(uint64_t address, uint64_t bytes) {
+  return bytes && InGuest(address) && bytes <= 0x1000000000000ull - address &&
          gpu::IsReadableRange(address, bytes);
 }
 
-bool mimgArrayed(uint32_t dim) { return dim == 5; }
+bool MimgArrayed(uint32_t dim) {
+  return dim == 5;
+}
 
 // gfx10.3 T#s carry a 9-bit unified format enum (word1 [28:20]). Values 1..77
 // are the buffer format table (GPU Shader Core ISA spec 4.x "Buffer Format
 // Conversions"); 130+ are image-only (SRGB, packed 16-bit, BCn). Map the
 // sampled subset onto the GCN (dfmt,nfmt) pairs the shared renderer's
-// guestTextureFormat() understands; unmapped formats yield (0,0) so the upload
+// GuestTextureFormat() understands; unmapped formats yield (0,0) so the upload
 // declines (white fallback) instead of misreading texels.
-void gfx10ImgFormat(uint32_t gfmt, uint32_t &dfmt, uint32_t &nfmt) {
+void Gfx10ImgFormat(uint32_t gfmt, uint32_t& dfmt, uint32_t& nfmt) {
   switch (gfmt) {
-  case 1:
-    dfmt = 1;
-    nfmt = 0;
-    break; // 8_UNORM
-  case 2:
-    dfmt = 1;
-    nfmt = 1;
-    break; // 8_SNORM
-  case 5:
-    dfmt = 1;
-    nfmt = 4;
-    break; // 8_UINT
-  case 6:
-    dfmt = 1;
-    nfmt = 5;
-    break; // 8_SINT
-  case 7:
-    dfmt = 2;
-    nfmt = 0;
-    break; // 16_UNORM
-  case 11:
-    dfmt = 2;
-    nfmt = 4;
-    break; // 16_UINT
-  case 13:
-    dfmt = 2;
-    nfmt = 7;
-    break; // 16_FLOAT
-  case 14:
-    dfmt = 3;
-    nfmt = 0;
-    break; // 8_8_UNORM
-  case 18:
-    dfmt = 3;
-    nfmt = 4;
-    break; // 8_8_UINT
-  case 20:
-    dfmt = 4;
-    nfmt = 4;
-    break; // 32_UINT
-  case 21:
-    dfmt = 4;
-    nfmt = 5;
-    break; // 32_SINT
-  case 22:
-    dfmt = 4;
-    nfmt = 7;
-    break; // 32_FLOAT (also depth-resolve key)
-  case 23:
-    dfmt = 5;
-    nfmt = 0;
-    break; // 16_16_UNORM
-  case 27:
-    dfmt = 5;
-    nfmt = 4;
-    break; // 16_16_UINT
-  case 29:
-    dfmt = 5;
-    nfmt = 7;
-    break; // 16_16_FLOAT
-  case 36:
-    dfmt = 6;
-    nfmt = 7;
-    break; // 11_11_10_FLOAT
-  case 44:
-    dfmt = 9;
-    nfmt = 0;
-    break; // 2_10_10_10_UNORM
-  case 50:
-    dfmt = 8;
-    nfmt = 0;
-    break; // 10_10_10_2_UNORM
-  case 56:
-    dfmt = 10;
-    nfmt = 0;
-    break; // 8_8_8_8_UNORM
-  case 62:
-    dfmt = 11;
-    nfmt = 4;
-    break; // 32_32_UINT
-  case 64:
-    dfmt = 11;
-    nfmt = 7;
-    break; // 32_32_FLOAT
-  case 71:
-    dfmt = 12;
-    nfmt = 7;
-    break; // 16_16_16_16_FLOAT
-  case 74:
-    dfmt = 13;
-    nfmt = 7;
-    break; // 32_32_32_FLOAT
-  case 77:
-    dfmt = 14;
-    nfmt = 7;
-    break; // 32_32_32_32_FLOAT
-  case 57:
-    dfmt = 10;
-    nfmt = 1;
-    break; // 8_8_8_8_SNORM
-  case 60:
-    dfmt = 10;
-    nfmt = 4;
-    break; // 8_8_8_8_UINT
-  case 130:
-    dfmt = 10;
-    nfmt = 9;
-    break; // 8_8_8_8_SRGB
-  case 169:
-    dfmt = 35;
-    nfmt = 0;
-    break; // BC1
-  case 170:
-    dfmt = 35;
-    nfmt = 9;
-    break;
-  case 171:
-    dfmt = 36;
-    nfmt = 0;
-    break; // BC2
-  case 172:
-    dfmt = 36;
-    nfmt = 9;
-    break;
-  case 173:
-    dfmt = 37;
-    nfmt = 0;
-    break; // BC3
-  case 174:
-    dfmt = 37;
-    nfmt = 9;
-    break;
-  case 175:
-    dfmt = 38;
-    nfmt = 0;
-    break; // BC4
-  case 176:
-    dfmt = 38;
-    nfmt = 1;
-    break;
-  case 177:
-    dfmt = 39;
-    nfmt = 0;
-    break; // BC5
-  case 178:
-    dfmt = 39;
-    nfmt = 1;
-    break;
-  case 181:
-    dfmt = 41;
-    nfmt = 0;
-    break; // BC7
-  case 182:
-    dfmt = 41;
-    nfmt = 9;
-    break;
-  default:
-    dfmt = 0;
-    nfmt = 0;
-    break;
+    case 1:
+      dfmt = 1;
+      nfmt = 0;
+      break;  // 8_UNORM
+    case 2:
+      dfmt = 1;
+      nfmt = 1;
+      break;  // 8_SNORM
+    case 5:
+      dfmt = 1;
+      nfmt = 4;
+      break;  // 8_UINT
+    case 6:
+      dfmt = 1;
+      nfmt = 5;
+      break;  // 8_SINT
+    case 7:
+      dfmt = 2;
+      nfmt = 0;
+      break;  // 16_UNORM
+    case 11:
+      dfmt = 2;
+      nfmt = 4;
+      break;  // 16_UINT
+    case 13:
+      dfmt = 2;
+      nfmt = 7;
+      break;  // 16_FLOAT
+    case 14:
+      dfmt = 3;
+      nfmt = 0;
+      break;  // 8_8_UNORM
+    case 18:
+      dfmt = 3;
+      nfmt = 4;
+      break;  // 8_8_UINT
+    case 20:
+      dfmt = 4;
+      nfmt = 4;
+      break;  // 32_UINT
+    case 21:
+      dfmt = 4;
+      nfmt = 5;
+      break;  // 32_SINT
+    case 22:
+      dfmt = 4;
+      nfmt = 7;
+      break;  // 32_FLOAT (also depth-resolve key)
+    case 23:
+      dfmt = 5;
+      nfmt = 0;
+      break;  // 16_16_UNORM
+    case 27:
+      dfmt = 5;
+      nfmt = 4;
+      break;  // 16_16_UINT
+    case 29:
+      dfmt = 5;
+      nfmt = 7;
+      break;  // 16_16_FLOAT
+    case 36:
+      dfmt = 6;
+      nfmt = 7;
+      break;  // 11_11_10_FLOAT
+    case 44:
+      dfmt = 9;
+      nfmt = 0;
+      break;  // 2_10_10_10_UNORM
+    case 50:
+      dfmt = 8;
+      nfmt = 0;
+      break;  // 10_10_10_2_UNORM
+    case 56:
+      dfmt = 10;
+      nfmt = 0;
+      break;  // 8_8_8_8_UNORM
+    case 62:
+      dfmt = 11;
+      nfmt = 4;
+      break;  // 32_32_UINT
+    case 64:
+      dfmt = 11;
+      nfmt = 7;
+      break;  // 32_32_FLOAT
+    case 71:
+      dfmt = 12;
+      nfmt = 7;
+      break;  // 16_16_16_16_FLOAT
+    case 74:
+      dfmt = 13;
+      nfmt = 7;
+      break;  // 32_32_32_FLOAT
+    case 77:
+      dfmt = 14;
+      nfmt = 7;
+      break;  // 32_32_32_32_FLOAT
+    case 57:
+      dfmt = 10;
+      nfmt = 1;
+      break;  // 8_8_8_8_SNORM
+    case 60:
+      dfmt = 10;
+      nfmt = 4;
+      break;  // 8_8_8_8_UINT
+    case 130:
+      dfmt = 10;
+      nfmt = 9;
+      break;  // 8_8_8_8_SRGB
+    case 169:
+      dfmt = 35;
+      nfmt = 0;
+      break;  // BC1
+    case 170:
+      dfmt = 35;
+      nfmt = 9;
+      break;
+    case 171:
+      dfmt = 36;
+      nfmt = 0;
+      break;  // BC2
+    case 172:
+      dfmt = 36;
+      nfmt = 9;
+      break;
+    case 173:
+      dfmt = 37;
+      nfmt = 0;
+      break;  // BC3
+    case 174:
+      dfmt = 37;
+      nfmt = 9;
+      break;
+    case 175:
+      dfmt = 38;
+      nfmt = 0;
+      break;  // BC4
+    case 176:
+      dfmt = 38;
+      nfmt = 1;
+      break;
+    case 177:
+      dfmt = 39;
+      nfmt = 0;
+      break;  // BC5
+    case 178:
+      dfmt = 39;
+      nfmt = 1;
+      break;
+    case 181:
+      dfmt = 41;
+      nfmt = 0;
+      break;  // BC7
+    case 182:
+      dfmt = 41;
+      nfmt = 9;
+      break;
+    default:
+      dfmt = 0;
+      nfmt = 0;
+      break;
   }
 }
 
@@ -211,7 +216,8 @@ struct ScalarEval {
   bool scc = false;
   bool scc_known = false;
 
-  ScalarEval(const uint32_t *user_data, uint32_t user_sgprs,
+  ScalarEval(const uint32_t* user_data,
+             uint32_t user_sgprs,
              uint32_t user_sgpr_base) {
     const uint32_t count = std::min(user_sgprs, 32u);
     for (uint32_t i = 0; i < count && user_sgpr_base + i < kRegs; i++) {
@@ -246,7 +252,7 @@ struct ScalarEval {
       known[s] = false;
   }
 
-  bool Source(uint32_t field, uint32_t literal, uint32_t &value) const {
+  bool Source(uint32_t field, uint32_t literal, uint32_t& value) const {
     if (field == 125) {
       value = 0;
       return true;
@@ -285,14 +291,14 @@ struct ScalarEval {
       return false;
     return true;
   }
-  bool SourceHi(uint32_t field, uint32_t &value) const {
+  bool SourceHi(uint32_t field, uint32_t& value) const {
     if (field <= 126)
       return Source(field + 1, 0, value);
     value = 0;
     return true;
   }
 
-  void Step(const Inst &inst) {
+  void Step(const Inst& inst) {
     if (inst.enc == Enc::kSop1) {
       const uint32_t sdst = (inst.raw[0] >> 16) & 0x7F,
                      ssrc = inst.raw[0] & 0xFF;
@@ -354,91 +360,91 @@ struct ScalarEval {
       }
       uint32_t value;
       switch (inst.opcode) {
-      case 0x00:
-      case 0x02:
-        value = a + b;
-        break;
-      case 0x01:
-      case 0x03:
-        value = a - b;
-        break;
-      case 0x0e:
-        value = a & b;
-        break;
-      case 0x10:
-        value = a | b;
-        break;
-      case 0x12:
-        value = a ^ b;
-        break;
-      case 0x14:
-        value = a & ~b;
-        break;
-      case 0x16:
-        value = a | ~b;
-        break;
-      case 0x18:
-        value = ~(a & b);
-        break;
-      case 0x1a:
-        value = ~(a | b);
-        break;
-      case 0x1c:
-        value = ~(a ^ b);
-        break;
-      case 0x1e:
-        value = a << (b & 31);
-        break;
-      case 0x20:
-        value = a >> (b & 31);
-        break;
-      case 0x22:
-        value = static_cast<uint32_t>(static_cast<int32_t>(a) >> (b & 31));
-        break;
-      case 0x26:
-        value = a * b;
-        break;
-      case 0x27: {
-        const uint32_t offset = b & 31;
-        const uint32_t width = (b >> 16) & 0x7F;
-        value = width >= 32 - offset
-                    ? a >> offset
-                    : (a >> offset) & ((uint32_t{1} << width) - 1);
-        break;
-      }
-      case 0x2f:
-      case 0x30:
-      case 0x31:
-      case 0x32:
-        value = (a << (inst.opcode - 0x2e)) + b;
-        break;
-      default:
-        Clear(sdst);
-        if (inst.opcode == 0x0B || inst.opcode == 0x29 ||
-            (inst.opcode >= 0x0F && inst.opcode <= 0x23 && (inst.opcode & 1)))
-          Clear(sdst + 1);
-        scc_known = false;
-        return;
+        case 0x00:
+        case 0x02:
+          value = a + b;
+          break;
+        case 0x01:
+        case 0x03:
+          value = a - b;
+          break;
+        case 0x0e:
+          value = a & b;
+          break;
+        case 0x10:
+          value = a | b;
+          break;
+        case 0x12:
+          value = a ^ b;
+          break;
+        case 0x14:
+          value = a & ~b;
+          break;
+        case 0x16:
+          value = a | ~b;
+          break;
+        case 0x18:
+          value = ~(a & b);
+          break;
+        case 0x1a:
+          value = ~(a | b);
+          break;
+        case 0x1c:
+          value = ~(a ^ b);
+          break;
+        case 0x1e:
+          value = a << (b & 31);
+          break;
+        case 0x20:
+          value = a >> (b & 31);
+          break;
+        case 0x22:
+          value = static_cast<uint32_t>(static_cast<int32_t>(a) >> (b & 31));
+          break;
+        case 0x26:
+          value = a * b;
+          break;
+        case 0x27: {
+          const uint32_t offset = b & 31;
+          const uint32_t width = (b >> 16) & 0x7F;
+          value = width >= 32 - offset
+                      ? a >> offset
+                      : (a >> offset) & ((uint32_t{1} << width) - 1);
+          break;
+        }
+        case 0x2f:
+        case 0x30:
+        case 0x31:
+        case 0x32:
+          value = (a << (inst.opcode - 0x2e)) + b;
+          break;
+        default:
+          Clear(sdst);
+          if (inst.opcode == 0x0B || inst.opcode == 0x29 ||
+              (inst.opcode >= 0x0F && inst.opcode <= 0x23 && (inst.opcode & 1)))
+            Clear(sdst + 1);
+          scc_known = false;
+          return;
       }
       Set(sdst, value);
       if (inst.opcode <= 0x03 || (inst.opcode >= 0x2f && inst.opcode <= 0x32))
         scc_known = false;
       switch (inst.opcode) {
-      case 0x0e:
-      case 0x10:
-      case 0x12:
-      case 0x14:
-      case 0x16:
-      case 0x18:
-      case 0x1a:
-      case 0x1c:
-      case 0x1e:
-      case 0x20:
-      case 0x22:
-      case 0x27:
-        scc = value != 0;
-        scc_known = true;
-        break;
+        case 0x0e:
+        case 0x10:
+        case 0x12:
+        case 0x14:
+        case 0x16:
+        case 0x18:
+        case 0x1a:
+        case 0x1c:
+        case 0x1e:
+        case 0x20:
+        case 0x22:
+        case 0x27:
+          scc = value != 0;
+          scc_known = true;
+          break;
       }
       return;
     }
@@ -462,42 +468,42 @@ struct ScalarEval {
         const int32_t a = static_cast<int32_t>(sgpr[sdst]);
         const int32_t b = static_cast<int32_t>(simm);
         switch (inst.opcode) {
-        case 0x03:
-          scc = a == b;
-          break;
-        case 0x04:
-          scc = a != b;
-          break;
-        case 0x05:
-          scc = a > b;
-          break;
-        case 0x06:
-          scc = a >= b;
-          break;
-        case 0x07:
-          scc = a < b;
-          break;
-        case 0x08:
-          scc = a <= b;
-          break;
-        case 0x09:
-          scc = sgpr[sdst] == imm;
-          break;
-        case 0x0A:
-          scc = sgpr[sdst] != imm;
-          break;
-        case 0x0B:
-          scc = sgpr[sdst] > imm;
-          break;
-        case 0x0C:
-          scc = sgpr[sdst] >= imm;
-          break;
-        case 0x0D:
-          scc = sgpr[sdst] < imm;
-          break;
-        case 0x0E:
-          scc = sgpr[sdst] <= imm;
-          break;
+          case 0x03:
+            scc = a == b;
+            break;
+          case 0x04:
+            scc = a != b;
+            break;
+          case 0x05:
+            scc = a > b;
+            break;
+          case 0x06:
+            scc = a >= b;
+            break;
+          case 0x07:
+            scc = a < b;
+            break;
+          case 0x08:
+            scc = a <= b;
+            break;
+          case 0x09:
+            scc = sgpr[sdst] == imm;
+            break;
+          case 0x0A:
+            scc = sgpr[sdst] != imm;
+            break;
+          case 0x0B:
+            scc = sgpr[sdst] > imm;
+            break;
+          case 0x0C:
+            scc = sgpr[sdst] >= imm;
+            break;
+          case 0x0D:
+            scc = sgpr[sdst] < imm;
+            break;
+          case 0x0E:
+            scc = sgpr[sdst] <= imm;
+            break;
         }
         scc_known = true;
       } else if (inst.opcode == 0x0F || inst.opcode == 0x10) {
@@ -519,47 +525,47 @@ struct ScalarEval {
         return;
       }
       switch (inst.opcode) {
-      case 0x00:
-      case 0x06:
-        scc = a == b;
-        break;
-      case 0x01:
-      case 0x07:
-        scc = a != b;
-        break;
-      case 0x02:
-        scc = static_cast<int32_t>(a) > static_cast<int32_t>(b);
-        break;
-      case 0x03:
-        scc = static_cast<int32_t>(a) >= static_cast<int32_t>(b);
-        break;
-      case 0x04:
-        scc = static_cast<int32_t>(a) < static_cast<int32_t>(b);
-        break;
-      case 0x05:
-        scc = static_cast<int32_t>(a) <= static_cast<int32_t>(b);
-        break;
-      case 0x08:
-        scc = a > b;
-        break;
-      case 0x09:
-        scc = a >= b;
-        break;
-      case 0x0a:
-        scc = a < b;
-        break;
-      case 0x0b:
-        scc = a <= b;
-        break;
-      case 0x0c:
-        scc = ((a >> (b & 31)) & 1) == 0;
-        break;
-      case 0x0d:
-        scc = ((a >> (b & 31)) & 1) != 0;
-        break;
-      default:
-        scc_known = false;
-        return;
+        case 0x00:
+        case 0x06:
+          scc = a == b;
+          break;
+        case 0x01:
+        case 0x07:
+          scc = a != b;
+          break;
+        case 0x02:
+          scc = static_cast<int32_t>(a) > static_cast<int32_t>(b);
+          break;
+        case 0x03:
+          scc = static_cast<int32_t>(a) >= static_cast<int32_t>(b);
+          break;
+        case 0x04:
+          scc = static_cast<int32_t>(a) < static_cast<int32_t>(b);
+          break;
+        case 0x05:
+          scc = static_cast<int32_t>(a) <= static_cast<int32_t>(b);
+          break;
+        case 0x08:
+          scc = a > b;
+          break;
+        case 0x09:
+          scc = a >= b;
+          break;
+        case 0x0a:
+          scc = a < b;
+          break;
+        case 0x0b:
+          scc = a <= b;
+          break;
+        case 0x0c:
+          scc = ((a >> (b & 31)) & 1) == 0;
+          break;
+        case 0x0d:
+          scc = ((a >> (b & 31)) & 1) != 0;
+          break;
+        default:
+          scc_known = false;
+          return;
       }
       scc_known = true;
       return;
@@ -575,26 +581,28 @@ struct ScalarEval {
     const uint64_t base = base_known ? Ptr(smem.sbase) : 0;
     uint32_t soffset = 0;
     const bool offset_known = Source(smem.soffset, 0, soffset);
-    const int64_t immediate = buffer ? static_cast<int64_t>(inst.raw[1] & 0xFFFFF)
-                                     : static_cast<int64_t>(smem.offset);
-    const int64_t byte_offset = static_cast<int64_t>(soffset & ~3u) +
-                                (immediate & ~int64_t{3});
-    for (uint32_t i = 0; i < dwords; i++) Clear(smem.sdst + i);
+    const int64_t immediate = buffer
+                                  ? static_cast<int64_t>(inst.raw[1] & 0xFFFFF)
+                                  : static_cast<int64_t>(smem.offset);
+    const int64_t byte_offset =
+        static_cast<int64_t>(soffset & ~3u) + (immediate & ~int64_t{3});
+    for (uint32_t i = 0; i < dwords; i++)
+      Clear(smem.sdst + i);
     if (!base_known || !offset_known || byte_offset < 0 ||
         static_cast<uint64_t>(byte_offset) > UINT64_MAX - base)
       return;
     const uint64_t address = base + static_cast<uint64_t>(byte_offset);
-    if (!guestRange(address, static_cast<uint64_t>(dwords) * 4))
+    if (!GuestRange(address, static_cast<uint64_t>(dwords) * 4))
       return;
-    const auto *src = reinterpret_cast<const uint32_t *>(address);
+    const auto* src = reinterpret_cast<const uint32_t*>(address);
     for (uint32_t i = 0; i < dwords; i++)
       Set(smem.sdst + i, src[i]);
   }
 };
 
-} // namespace
+}  // namespace
 
-MimgBindingPlan RdnaPlanMimg(const Program &program) {
+MimgBindingPlan RdnaPlanMimg(const Program& program) {
   MimgBindingPlan plan;
   struct BindingKey {
     uint32_t srsrc;
@@ -605,7 +613,7 @@ MimgBindingPlan RdnaPlanMimg(const Program &program) {
   std::vector<BindingKey> keys;
   uint32_t versions[136] = {};
   uint32_t generation = 1;
-  for (const Inst &inst : program) {
+  for (const Inst& inst : program) {
     if (inst.enc == Enc::kMimg) {
       const uint32_t w0 = inst.raw[0], w1 = inst.raw[1], op = inst.opcode;
       const uint32_t dim = (w0 >> 3) & 0x7;
@@ -616,7 +624,7 @@ MimgBindingPlan RdnaPlanMimg(const Program &program) {
       BindingKey key{
           .srsrc = srsrc,
           .ssamp = ssamp,
-          .flags = static_cast<uint32_t>(mimgArrayed(dim)) |
+          .flags = static_cast<uint32_t>(MimgArrayed(dim)) |
                    ((op == 0x28 || op == 0x2f ? 1u : 0u) << 1) |
                    ((op == 0x47 ? 1u : 0u) << 2) |
                    (static_cast<uint32_t>(storage) << 3),
@@ -649,7 +657,7 @@ MimgBindingPlan RdnaPlanMimg(const Program &program) {
   return plan;
 }
 
-TImage DecodeTImage(const uint32_t *d) {
+TImage DecodeTImage(const uint32_t* d) {
   TImage t;
   const uint64_t base_units = d[0] | (static_cast<uint64_t>(d[1] & 0xFF) << 32);
   t.base = base_units << 8;
@@ -667,15 +675,16 @@ TImage DecodeTImage(const uint32_t *d) {
   const uint32_t max_mip = (d[5] >> 4) & 0xF;
 
   t.pitch = t.width;
-  t.arrayed = t.type == 12 || t.type == 13;  // 1D/2D array
+  t.arrayed = t.type == 12 || t.type == 13;              // 1D/2D array
   const bool volumetric = t.type == 10 || t.type == 11;  // 3D / cube
   t.layers = (t.arrayed || volumetric) ? depth + 1 : 1;
-  t.view_layers = t.arrayed ? std::max<uint32_t>(depth + 1 - t.base_array, 1) : 1;
+  t.view_layers =
+      t.arrayed ? std::max<uint32_t>(depth + 1 - t.base_array, 1) : 1;
   t.mip_levels = max_mip + 1;
   t.view_mips = std::max<uint32_t>(last_level + 1 - t.base_mip, 1);
   const bool valid_array = !t.arrayed || t.base_array <= depth;
   const uint32_t gfmt = (d[1] >> 20) & 0x1FF;
-  gfx10ImgFormat(gfmt, t.dfmt, t.nfmt);
+  Gfx10ImgFormat(gfmt, t.dfmt, t.nfmt);
   // gfx10 swizzle mode 0 = SW_LINEAR -> the renderer's linear index. The
   // "standard" modes (256 B / 4 KiB / 64 KiB, ids 1/5/9) map onto the gfx10
   // detiler's own id range. Everything else (Z/D/R, the _X pipe-XOR and _T
@@ -690,21 +699,32 @@ TImage DecodeTImage(const uint32_t *d) {
     if (sw_mode < 64 && seen[sw_mode]++ == 0)
       std::fprintf(stderr, "[swcensus] sw_mode=%u first seen (%ux%u gfmt=%u)\n",
                    sw_mode, t.width, t.height, gfmt);
-    static uint32_t seenSel[4096] = {};
+    static uint32_t seen_sel[4096] = {};
     const uint32_t packed = (t.dst_sel[0]) | (t.dst_sel[1] << 3) |
                             (t.dst_sel[2] << 6) | (t.dst_sel[3] << 9);
-    if (packed < 4096 && seenSel[packed]++ == 0)
-      std::fprintf(stderr,
-                   "[swcensus] dst_sel = %u,%u,%u,%u (word3=%08x) on %ux%u gfmt=%u\n",
-                   t.dst_sel[0], t.dst_sel[1], t.dst_sel[2], t.dst_sel[3], d[3],
-                   t.width, t.height, gfmt);
+    if (packed < 4096 && seen_sel[packed]++ == 0)
+      std::fprintf(
+          stderr,
+          "[swcensus] dst_sel = %u,%u,%u,%u (word3=%08x) on %ux%u gfmt=%u\n",
+          t.dst_sel[0], t.dst_sel[1], t.dst_sel[2], t.dst_sel[3], d[3], t.width,
+          t.height, gfmt);
   }
   switch (sw_mode) {
-    case 0:  t.tiling_idx = 8; break;
-    case 1:  t.tiling_idx = 0x50; break;
-    case 5:  t.tiling_idx = 0x51; break;
-    case 9:  t.tiling_idx = 0x52; break;
-    default: t.tiling_idx = 0x40 + sw_mode; break;
+    case 0:
+      t.tiling_idx = 8;
+      break;
+    case 1:
+      t.tiling_idx = 0x50;
+      break;
+    case 5:
+      t.tiling_idx = 0x51;
+      break;
+    case 9:
+      t.tiling_idx = 0x52;
+      break;
+    default:
+      t.tiling_idx = 0x40 + sw_mode;
+      break;
   }
   if (sw_mode == 0 && t.dfmt && t.dfmt < 35) {
     // gfx10 linear surfaces align each row to 256 bytes.
@@ -714,13 +734,16 @@ TImage DecodeTImage(const uint32_t *d) {
   }
   static const bool trace = std::getenv("DELTA_AGC_TRACE") != nullptr;
   if (trace) {
-    static uint32_t seen[32], nSeen = 0;
+    static uint32_t seen[32], n_seen = 0;
     const uint32_t key = (gfmt << 8) | sw_mode;
-    bool isNew = true;
-    for (uint32_t i = 0; i < nSeen; i++)
-      if (seen[i] == key) { isNew = false; break; }
-    if (isNew && nSeen < 32) {
-      seen[nSeen++] = key;
+    bool is_new = true;
+    for (uint32_t i = 0; i < n_seen; i++)
+      if (seen[i] == key) {
+        is_new = false;
+        break;
+      }
+    if (is_new && n_seen < 32) {
+      seen[n_seen++] = key;
       std::fprintf(stderr,
                    "[agc] T# base=%#lx %ux%u gfmt=%u sw=%u type=%u mips=%u -> "
                    "dfmt=%u nfmt=%u tiling=%u pitch=%u\n",
@@ -743,15 +766,16 @@ TImage DecodeTImage(const uint32_t *d) {
     t.min_lod = 0;
     t.force_lod_zero = true;
   }
-  t.valid = inGuest(t.base) && t.dfmt && t.width <= 16384 &&
+  t.valid = InGuest(t.base) && t.dfmt && t.width <= 16384 &&
             t.height <= 16384 && t.layers <= 16384 && valid_array && valid_mips;
   return t;
 }
 
-std::vector<TImage> TrackTextures(const uint32_t *ps_code, const uint32_t *pud,
+std::vector<TImage> TrackTextures(const uint32_t* ps_code,
+                                  const uint32_t* pud,
                                   uint32_t user_sgprs) {
   std::vector<TImage> out;
-  if (!ps_code || !pud || !inGuest(reinterpret_cast<uint64_t>(ps_code)))
+  if (!ps_code || !pud || !InGuest(reinterpret_cast<uint64_t>(ps_code)))
     return out;
   const Program prog = DecodeShader(ps_code, 4096);
   const MimgBindingPlan plan = RdnaPlanMimg(prog);
@@ -761,17 +785,20 @@ std::vector<TImage> TrackTextures(const uint32_t *ps_code, const uint32_t *pud,
 
   for (const Inst& in : prog) {
     eval.Step(in);
-    if (in.enc != Enc::kMimg) continue;
+    if (in.enc != Enc::kMimg)
+      continue;
     auto it = plan.binding_by_pc.find(in.pc);
-    if (it == plan.binding_by_pc.end() || filled[it->second]) continue;
+    if (it == plan.binding_by_pc.end() || filled[it->second])
+      continue;
     const uint32_t b = it->second;
     const uint32_t w0 = in.raw[0], w1 = in.raw[1], op = in.opcode;
     // DELTA_GPU_TEXRESOLVE: which SGPR quad each sampler's T# comes from, and
     // whether it resolved. A binding that reads back base 0 is either a null
     // descriptor or a chain we failed to walk.
-    static const bool trResolve = std::getenv("DELTA_GPU_TEXRESOLVE") != nullptr;
+    static const bool tr_resolve =
+        std::getenv("DELTA_GPU_TEXRESOLVE") != nullptr;
     const uint32_t srsrc = ((w1 >> 16) & 0x1F) * 4;
-    if (trResolve && !eval.AllKnown(srsrc, 8)) {
+    if (tr_resolve && !eval.AllKnown(srsrc, 8)) {
       std::fprintf(stderr,
                    "[texres]   mimg pc=%04x w0=%08x w1=%08x op=%#x nsa=%u "
                    "srsrc_field=%u ssamp_field=%u vaddr=%u vdata=%u\n",
@@ -781,22 +808,31 @@ std::vector<TImage> TrackTextures(const uint32_t *ps_code, const uint32_t *pud,
       // somewhere else in the shader: list every scalar write to its registers.
       for (const Inst& w : prog) {
         uint32_t d0 = 0xFFFF, cnt = 1;
-        if (w.enc == Enc::kSop1) { d0 = (w.raw[0] >> 16) & 0x7F; cnt = w.opcode == 0x04 ? 2 : 1; }
-        else if (w.enc == Enc::kSop2) d0 = (w.raw[0] >> 16) & 0x7F;
-        else if (w.enc == Enc::kSmrd && w.opcode <= 0x0C) { d0 = (w.raw[0] >> 6) & 0x7F; cnt = 8; }
-        if (d0 == 0xFFFF) continue;
-        if (d0 + cnt <= srsrc || d0 >= srsrc + 8) continue;
-        std::fprintf(stderr,
-                     "[texres]   writer pc=%04x enc=%d op=%#x -> s%u..%u (%08x %08x)\n",
-                     w.pc, (int)w.enc, w.opcode, d0, d0 + cnt - 1, w.raw[0], w.raw[1]);
+        if (w.enc == Enc::kSop1) {
+          d0 = (w.raw[0] >> 16) & 0x7F;
+          cnt = w.opcode == 0x04 ? 2 : 1;
+        } else if (w.enc == Enc::kSop2)
+          d0 = (w.raw[0] >> 16) & 0x7F;
+        else if (w.enc == Enc::kSmrd && w.opcode <= 0x0C) {
+          d0 = (w.raw[0] >> 6) & 0x7F;
+          cnt = 8;
+        }
+        if (d0 == 0xFFFF)
+          continue;
+        if (d0 + cnt <= srsrc || d0 >= srsrc + 8)
+          continue;
+        std::fprintf(
+            stderr,
+            "[texres]   writer pc=%04x enc=%d op=%#x -> s%u..%u (%08x %08x)\n",
+            w.pc, (int)w.enc, w.opcode, d0, d0 + cnt - 1, w.raw[0], w.raw[1]);
       }
     }
-    if (trResolve)
-      std::fprintf(stderr, "[texres] binding=%u srsrc=s%u known=%d\n", b,
-                   srsrc, eval.AllKnown(srsrc, 8));
+    if (tr_resolve)
+      std::fprintf(stderr, "[texres] binding=%u srsrc=s%u known=%d\n", b, srsrc,
+                   eval.AllKnown(srsrc, 8));
     if (eval.AllKnown(srsrc, 8)) {
       out[b] = DecodeTImage(&eval.sgpr[srsrc]);
-      out[b].arrayed = mimgArrayed((w0 >> 3) & 0x7);
+      out[b].arrayed = MimgArrayed((w0 >> 3) & 0x7);
       out[b].depth_compare = op == 0x28 || op == 0x2f;
       out[b].force_lod_zero = op == 0x47;
       out[b].storage = op == 0x08 || op == 0x09;
@@ -811,14 +847,16 @@ std::vector<TImage> TrackTextures(const uint32_t *ps_code, const uint32_t *pud,
   return out;
 }
 
-std::unordered_map<uint32_t, BufferResource>
-ResolveBuffers(const uint32_t *code, const uint32_t *user_data,
-               uint32_t user_sgprs, uint32_t user_sgpr_base) {
+std::unordered_map<uint32_t, BufferResource> ResolveBuffers(
+    const uint32_t* code,
+    const uint32_t* user_data,
+    uint32_t user_sgprs,
+    uint32_t user_sgpr_base) {
   std::unordered_map<uint32_t, BufferResource> out;
-  if (!code || !user_data || !inGuest(reinterpret_cast<uint64_t>(code)))
+  if (!code || !user_data || !InGuest(reinterpret_cast<uint64_t>(code)))
     return out;
   ScalarEval eval(user_data, user_sgprs, user_sgpr_base);
-  for (const Inst &inst : DecodeShader(code, 4096)) {
+  for (const Inst& inst : DecodeShader(code, 4096)) {
     if (inst.enc == Enc::kSmrd && SmemLoadCount(inst.opcode)) {
       const Smem smem = DecodeSmem(inst);
       const bool buffer = smem.op >= 0x08;
@@ -844,4 +882,4 @@ ResolveBuffers(const uint32_t *code, const uint32_t *user_data,
   return out;
 }
 
-} // namespace gpu::rdna
+}  // namespace gpu::rdna

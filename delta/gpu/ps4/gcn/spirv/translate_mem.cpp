@@ -17,7 +17,7 @@
 
 #include <algorithm>
 
-#include "translator.h"
+#include "gpu/ps4/gcn/spirv/translator.h"
 
 namespace gpu::gcn {
 namespace {
@@ -30,8 +30,11 @@ Id CsSsboPtr(Translator& t, StageContext& sc, uint32_t binding, Id dword_idx) {
 Id CsSsboLoad(Translator& t, StageContext& sc, uint32_t binding, Id dword_idx) {
   return t.m.Load(t.t_u, CsSsboPtr(t, sc, binding, dword_idx));
 }
-void CsSsboStore(Translator& t, StageContext& sc, uint32_t binding,
-                 Id dword_idx, Id value) {
+void CsSsboStore(Translator& t,
+                 StageContext& sc,
+                 uint32_t binding,
+                 Id dword_idx,
+                 Id value) {
   t.m.Store(CsSsboPtr(t, sc, binding, dword_idx), value);
 }
 int CsBindingFor(StageContext& sc, uint32_t pc) {
@@ -39,17 +42,24 @@ int CsBindingFor(StageContext& sc, uint32_t pc) {
   return it != sc.cs_bind.end() ? static_cast<int>(it->second) : -1;
 }
 
-Id Max1(Translator& t, Id value) { return t.UMax(value, t.U32(1)); }
+Id Max1(Translator& t, Id value) {
+  return t.UMax(value, t.U32(1));
+}
 
 // Next power of two >= max(value, 1) (bit-smearing form).
 Id BitCeil(Translator& t, Id value) {
   Id v = t.Sub(Max1(t, value), t.U32(1));
-  for (uint32_t s : {1u, 2u, 4u, 8u, 16u}) v = t.Or(v, t.Shr(v, t.U32(s)));
+  for (uint32_t s : {1u, 2u, 4u, 8u, 16u})
+    v = t.Or(v, t.Shr(v, t.U32(s)));
   return t.Add(v, t.U32(1));
 }
 
-Id LinearMipPitch(Translator& t, Id base_pitch, Id height, Id mip,
-                  Id linear_general, Id pow2_pad) {
+Id LinearMipPitch(Translator& t,
+                  Id base_pitch,
+                  Id height,
+                  Id mip,
+                  Id linear_general,
+                  Id pow2_pad) {
   Id raw = Max1(t, t.Shr(base_pitch, mip));
   raw = t.SelectB(pow2_pad, BitCeil(t, raw), raw);
   Id aligned = t.And(t.Add(raw, t.U32(15)), t.U32(~15u));
@@ -63,23 +73,34 @@ Id LinearMipPitch(Translator& t, Id base_pitch, Id height, Id mip,
 // MUBUF/MTBUF shared addressing: byte offset within the bound resource.
 // soffset + instruction offset, plus the vaddr index/offset registers per the
 // IDXEN/OFFEN bits (both set: vaddr = index, vaddr+1 = offset).
-Id BufferByteOffset(Translator& t, const Inst& inst, uint32_t inst_offset,
-                    bool idxen, bool offen, uint32_t vaddr, uint32_t srsrc,
+Id BufferByteOffset(Translator& t,
+                    const Inst& inst,
+                    uint32_t inst_offset,
+                    bool idxen,
+                    bool offen,
+                    uint32_t vaddr,
+                    uint32_t srsrc,
                     uint32_t soffset_field) {
-  Id byte_off = t.Add(t.SrcRaw(soffset_field, inst.literal), t.U32(inst_offset));
+  Id byte_off =
+      t.Add(t.SrcRaw(soffset_field, inst.literal), t.U32(inst_offset));
   uint32_t va = vaddr;
   if (idxen) {
     const Id stride = t.And(t.Shr(t.Sg(srsrc + 1), t.U32(16)), t.U32(0x3FFF));
     byte_off = t.Add(byte_off, t.Mul(t.Vg(va++), stride));
   }
-  if (offen) byte_off = t.Add(byte_off, t.Vg(va));
+  if (offen)
+    byte_off = t.Add(byte_off, t.Vg(va));
   return byte_off;
 }
 
 // Sub-dword read out of a dword-granular SSBO: value = bits [off*8 .. off*8+n)
 // of the containing dword. `byte_off` may be misaligned only within the dword.
-Id LoadSubDword(Translator& t, StageContext& sc, uint32_t binding, Id byte_off,
-                uint32_t bits, bool sign_extend) {
+Id LoadSubDword(Translator& t,
+                StageContext& sc,
+                uint32_t binding,
+                Id byte_off,
+                uint32_t bits,
+                bool sign_extend) {
   const Id word = CsSsboLoad(t, sc, binding, t.Shr(byte_off, t.U32(2)));
   const Id shift = t.Shl(t.And(byte_off, t.U32(3)), t.U32(3));
   if (sign_extend)
@@ -91,8 +112,12 @@ Id LoadSubDword(Translator& t, StageContext& sc, uint32_t binding, Id byte_off,
 }
 
 // Sub-dword store: read-modify-write the containing dword.
-void StoreSubDword(Translator& t, StageContext& sc, uint32_t binding,
-                   Id byte_off, uint32_t bits, Id value) {
+void StoreSubDword(Translator& t,
+                   StageContext& sc,
+                   uint32_t binding,
+                   Id byte_off,
+                   uint32_t bits,
+                   Id value) {
   const Id idx = t.Shr(byte_off, t.U32(2));
   const Id shift = t.Shl(t.And(byte_off, t.U32(3)), t.U32(3));
   const Id old = CsSsboLoad(t, sc, binding, idx);
@@ -105,17 +130,20 @@ void StoreSubDword(Translator& t, StageContext& sc, uint32_t binding,
 
 // ---- graphics: SMRD -> cbuffer ---------------------------------------------
 uint32_t SmrdLoadCount(uint32_t op) {
-  if (op < 0x08 || op > 0x0c) return 0;  // s_buffer_load_dword{,x2,x4,x8,x16}
+  if (op < 0x08 || op > 0x0c)
+    return 0;  // s_buffer_load_dword{,x2,x4,x8,x16}
   return op == 0x08 ? 1 : op == 0x09 ? 2 : op == 0x0a ? 4 : op == 0x0b ? 8 : 16;
 }
 
-void EmitCbufSmrd(Translator& t, const Inst& inst,
+void EmitCbufSmrd(Translator& t,
+                  const Inst& inst,
                   const std::unordered_map<uint32_t, uint32_t>& bindings) {
   const uint32_t w = inst.raw[0], n = SmrdLoadCount(inst.opcode);
   const uint32_t sdst = (w >> 15) & 0x7F, base_sgpr = ((w >> 9) & 0x3F) * 2;
   const bool imm = (w >> 8) & 1;
   const auto it = bindings.find(base_sgpr);
-  if (!n || it == bindings.end()) return;
+  if (!n || it == bindings.end())
+    return;
   const uint32_t off = w & 0xFF;
   if (imm) {
     for (uint32_t i = 0; i < n; i++)
@@ -127,10 +155,11 @@ void EmitCbufSmrd(Translator& t, const Inst& inst,
   }
 }
 
-bool PlanCbufs(const Program& program, uint32_t first_binding,
-                std::vector<ShaderCbuf>& cbufs,
-                std::unordered_map<uint32_t, uint32_t>& bindings,
-                const uint8_t* reachable) {
+bool PlanCbufs(const Program& program,
+               uint32_t first_binding,
+               std::vector<ShaderCbuf>& cbufs,
+               std::unordered_map<uint32_t, uint32_t>& bindings,
+               const uint8_t* reachable) {
   uint32_t index = 0;
   for (const Inst& inst : program) {
     if (reachable && !reachable[index]) {
@@ -138,23 +167,26 @@ bool PlanCbufs(const Program& program, uint32_t first_binding,
       continue;
     }
     index++;
-    if (inst.enc != Enc::kSmrd) continue;
+    if (inst.enc != Enc::kSmrd)
+      continue;
     const uint32_t n = SmrdLoadCount(inst.opcode);
-    if (!n) continue;
+    if (!n)
+      continue;
     const uint32_t w = inst.raw[0], base_sgpr = ((w >> 9) & 0x3F) * 2;
-    if (base_sgpr + 3 >= 16) continue;
+    if (base_sgpr + 3 >= 16)
+      continue;
     const auto [it, inserted] =
         bindings.emplace(base_sgpr, first_binding + cbufs.size());
     if (inserted) {
-      if (it->second >= 8) return false;
+      if (it->second >= 8)
+        return false;
       cbufs.push_back({it->second, base_sgpr, 0});
     }
     const uint32_t off = w & 0xFF;
-    const uint32_t end = ((w >> 8) & 1)
-                             ? off + n
-                             : (off == 0xFF && inst.has_literal
-                                    ? inst.literal / 4 + n
-                                    : 256);
+    const uint32_t end =
+        ((w >> 8) & 1)
+            ? off + n
+            : (off == 0xFF && inst.has_literal ? inst.literal / 4 + n : 256);
     for (ShaderCbuf& cb : cbufs)
       if (cb.binding == it->second)
         cb.num_dwords = std::max(cb.num_dwords, end);
@@ -179,7 +211,8 @@ void EmitMimg(Translator& t, const Inst& inst, StageContext& sc) {
   uint32_t bind = StageContext::kMaxPsSamplers;
   if (sc.mimg_plan) {
     const auto plan_it = sc.mimg_plan->binding_by_pc.find(inst.pc);
-    if (plan_it != sc.mimg_plan->binding_by_pc.end()) bind = plan_it->second;
+    if (plan_it != sc.mimg_plan->binding_by_pc.end())
+      bind = plan_it->second;
   }
   if (bind >= StageContext::kMaxPsSamplers) {
     WarnUnsupported("mimg.unplanned", op, w0, w1);
@@ -190,9 +223,9 @@ void EmitMimg(Translator& t, const Inst& inst, StageContext& sc) {
     const uint32_t type_idx = arrayed ? 1u : 0u;
     if (!t.storage_img_types[type_idx]) {
       t.m.Capability(spv::Capability::StorageImageWriteWithoutFormat);
-      t.storage_img_types[type_idx] = t.m.TypeImage(
-          t.t_f, spv::Dim::Dim2D, 0, arrayed ? 1 : 0, 0, 2,
-          spv::ImageFormat::Unknown);
+      t.storage_img_types[type_idx] =
+          t.m.TypeImage(t.t_f, spv::Dim::Dim2D, 0, arrayed ? 1 : 0, 0, 2,
+                        spv::ImageFormat::Unknown);
       t.storage_img_ptrs[type_idx] = t.m.TypePointer(
           spv::StorageClass::UniformConstant, t.storage_img_types[type_idx]);
     }
@@ -214,11 +247,11 @@ void EmitMimg(Translator& t, const Inst& inst, StageContext& sc) {
     Id components[4] = {t.F32(0.f), t.F32(0.f), t.F32(0.f), t.F32(1.f)};
     uint32_t source = 0;
     for (uint32_t channel = 0; channel < 4; channel++)
-      if (dmask & (1u << channel)) components[channel] = t.VgF(vdata + source++);
+      if (dmask & (1u << channel))
+        components[channel] = t.VgF(vdata + source++);
     const Id texel = t.m.CompositeConstruct(
         t.t_v4, {components[0], components[1], components[2], components[3]});
-    const Id image =
-        t.m.Load(t.storage_img_types[type_idx], sc.tex_vars[bind]);
+    const Id image = t.m.Load(t.storage_img_types[type_idx], sc.tex_vars[bind]);
     t.m.EmitVoid(spv::Op::OpImageWrite, {image, coord, texel});
     return;
   }
@@ -248,18 +281,20 @@ void EmitMimg(Translator& t, const Inst& inst, StageContext& sc) {
     t.RequireImageQuery();
     const Id img = t.m.Emit(spv::Op::OpImage, img_ty, {si});
     const Id levels = t.m.Emit(spv::Op::OpImageQueryLevels, t.t_u, {img});
-    const Id lod = t.UMin(t.Vg(vaddr), t.Sub(t.UMax(levels, t.U32(1)), t.U32(1)));
+    const Id lod =
+        t.UMin(t.Vg(vaddr), t.Sub(t.UMax(levels, t.U32(1)), t.U32(1)));
     const Id size_ty = t.m.TypeVec(t.t_u, arrayed ? 3 : 2);
     const Id size = t.m.Emit(spv::Op::OpImageQuerySizeLod, size_ty, {img, lod});
     const Id comps[4] = {
-        t.m.CompositeExtract(t.t_u, size, 0),  // width
-        t.m.CompositeExtract(t.t_u, size, 1),  // height
+        t.m.CompositeExtract(t.t_u, size, 0),                       // width
+        t.m.CompositeExtract(t.t_u, size, 1),                       // height
         arrayed ? t.m.CompositeExtract(t.t_u, size, 2) : t.U32(1),  // depth
         levels,                                                     // mips
     };
     uint32_t out = 0;
     for (int i = 0; i < 4; i++)
-      if (dmask & (1 << i)) t.SetVg(vdata + out++, comps[i]);
+      if (dmask & (1 << i))
+        t.SetVg(vdata + out++, comps[i]);
     return;
   }
 
@@ -289,21 +324,23 @@ void EmitMimg(Translator& t, const Inst& inst, StageContext& sc) {
   const Id uv =
       arrayed ? t.m.CompositeConstruct(t.t_v3, {x, y, t.VgF(body_addr + 2)})
               : t.m.CompositeConstruct(t.t_v2, {x, y});
-  const uint32_t lod_operand = static_cast<uint32_t>(spv::ImageOperandsMask::Lod);
+  const uint32_t lod_operand =
+      static_cast<uint32_t>(spv::ImageOperandsMask::Lod);
   const bool known = op == 0x00 || op == 0x01 || op == 0x20 || op == 0x21 ||
                      op == 0x24 || op == 0x25 || op == 0x27 || op == 0x28 ||
                      op == 0x2f || op == 0x37 || op == 0x47;
-  if (!known) WarnUnsupported("mimg", op, w0, w1);
+  if (!known)
+    WarnUnsupported("mimg", op, w0, w1);
 
   Id texel;
   if (op == 0x00 || op == 0x01) {  // image_load[_mip]: integer fetch
     const Id ix = t.m.Bitcast(t.t_i, t.Vg(vaddr));
     const Id iy = t.m.Bitcast(t.t_i, t.Vg(vaddr + 1));
-    const Id ic =
-        arrayed ? t.m.CompositeConstruct(
-                      t.m.TypeVec(t.t_i, 3),
-                      {ix, iy, t.m.Bitcast(t.t_i, t.Vg(vaddr + 2))})
-                : t.m.CompositeConstruct(t.m.TypeVec(t.t_i, 2), {ix, iy});
+    const Id ic = arrayed
+                      ? t.m.CompositeConstruct(
+                            t.m.TypeVec(t.t_i, 3),
+                            {ix, iy, t.m.Bitcast(t.t_i, t.Vg(vaddr + 2))})
+                      : t.m.CompositeConstruct(t.m.TypeVec(t.t_i, 2), {ix, iy});
     const Id img = t.m.Emit(spv::Op::OpImage, img_ty, {si});
     Id lod = t.U32(0);
     if (op == 0x01) {
@@ -311,7 +348,8 @@ void EmitMimg(Translator& t, const Inst& inst, StageContext& sc) {
       const Id levels = t.m.Emit(spv::Op::OpImageQueryLevels, t.t_u, {img});
       lod = t.UMin(t.Vg(vaddr + (arrayed ? 3 : 2)), t.Sub(levels, t.U32(1)));
     }
-    texel = t.m.Emit(spv::Op::OpImageFetch, t.t_v4, {img, ic, lod_operand, lod});
+    texel =
+        t.m.Emit(spv::Op::OpImageFetch, t.t_v4, {img, ic, lod_operand, lod});
   } else if (op == 0x24) {  // image_sample_l: explicit LOD after the body
     texel = t.m.Emit(spv::Op::OpImageSampleExplicitLod, t.t_v4,
                      {si, uv, lod_operand, t.VgF(vaddr + (arrayed ? 3 : 2))});
@@ -326,8 +364,10 @@ void EmitMimg(Translator& t, const Inst& inst, StageContext& sc) {
                      {si, uv, lod_operand, t.F32(0.0f)});
   } else if (gather) {  // DMASK selects the gathered channel
     uint32_t component = 0;
-    while (component < 3 && !(dmask & (1u << component))) component++;
-    texel = t.m.Emit(spv::Op::OpImageGather, t.t_v4, {si, uv, t.U32(component)});
+    while (component < 3 && !(dmask & (1u << component)))
+      component++;
+    texel =
+        t.m.Emit(spv::Op::OpImageGather, t.t_v4, {si, uv, t.U32(component)});
   } else {  // image_sample / _cl / _b (bias/derivs ignored): implicit LOD
     texel = t.m.Emit(spv::Op::OpImageSampleImplicitLod, t.t_v4, {si, uv});
   }
@@ -335,12 +375,13 @@ void EmitMimg(Translator& t, const Inst& inst, StageContext& sc) {
   // DELTA_GPU_DEBUGUV: output the sample UV as R/G instead of the texel, to see
   // the coordinate distribution reaching the sampler (normalized 0..1 vs texel
   // units). Diagnostic only.
-  static const bool dbgUv = std::getenv("DELTA_GPU_DEBUGUV") != nullptr;
-  if (dbgUv && !dref && !gather)
+  static const bool dbg_uv = std::getenv("DELTA_GPU_DEBUGUV") != nullptr;
+  if (dbg_uv && !dref && !gather)
     texel = t.m.CompositeConstruct(t.t_v4, {x, y, t.F32(0.f), t.F32(1.f)});
 
   if (dref) {
-    if (dmask) t.SetVgF(vdata, texel);
+    if (dmask)
+      t.SetVgF(vdata, texel);
     return;
   }
   if (gather) {
@@ -355,8 +396,10 @@ void EmitMimg(Translator& t, const Inst& inst, StageContext& sc) {
 }
 
 // ---- compute: resource plan -------------------------------------------------
-bool PlanCsResources(const Program& program, const uint8_t* reachable,
-                     uint32_t lds_dwords, RecompiledCs& r,
+bool PlanCsResources(const Program& program,
+                     const uint8_t* reachable,
+                     uint32_t lds_dwords,
+                     RecompiledCs& r,
                      std::unordered_map<uint32_t, uint32_t>& bind) {
   struct ScalarLoad {
     uint32_t sgpr;
@@ -373,15 +416,15 @@ bool PlanCsResources(const Program& program, const uint8_t* reachable,
   std::unordered_map<uint64_t, uint32_t> resource_by_version;
   const auto resource = [&](uint32_t pc, uint32_t base_sgpr, uint32_t dwords,
                             uint8_t kind, bool written, uint32_t min_bytes) {
-    const uint64_t key = static_cast<uint64_t>(kind) |
-                         (static_cast<uint64_t>(base_sgpr) << 8) |
-                         (static_cast<uint64_t>(descriptor_version(base_sgpr, dwords))
-                          << 16);
+    const uint64_t key =
+        static_cast<uint64_t>(kind) | (static_cast<uint64_t>(base_sgpr) << 8) |
+        (static_cast<uint64_t>(descriptor_version(base_sgpr, dwords)) << 16);
     const auto it = resource_by_version.find(key);
     if (it != resource_by_version.end()) {
       CsResource& res = r.resources[it->second];
       res.written = res.written || written;
-      if (min_bytes > res.min_bytes) res.min_bytes = min_bytes;
+      if (min_bytes > res.min_bytes)
+        res.min_bytes = min_bytes;
       bind[pc] = it->second;
       return true;
     }
@@ -399,29 +442,33 @@ bool PlanCsResources(const Program& program, const uint8_t* reachable,
   uint32_t idx = 0;
   for (const Inst& inst : program) {
     const uint32_t inst_idx = idx++;
-    if (reachable && !reachable[inst_idx]) continue;  // dead block/padding
+    if (reachable && !reachable[inst_idx])
+      continue;  // dead block/padding
     const uint32_t w = inst.raw[0], w1 = inst.raw[1];
     switch (inst.enc) {
       case Enc::kSmrd: {
         const uint32_t op = inst.opcode, sbase = (w >> 9) & 0x3F;
         const bool imm = (w >> 8) & 1;
         const uint32_t off = w & 0xFF;
-        if (op > 0x0c) return false;  // beyond s_buffer_load_dwordx16
+        if (op > 0x0c)
+          return false;  // beyond s_buffer_load_dwordx16
         const uint32_t n = op < 0x08 ? (1u << op) : SmrdLoadCount(op);
-        if (!n) return false;  // reserved scalar-load opcode
-        const uint32_t bytes = imm ? (off + n) * 4
-                                   : (off == 0xFF && inst.has_literal
-                                          ? inst.literal + n * 4
-                                          : 0);
+        if (!n)
+          return false;  // reserved scalar-load opcode
+        const uint32_t bytes =
+            imm ? (off + n) * 4
+                : (off == 0xFF && inst.has_literal ? inst.literal + n * 4 : 0);
         const uint32_t base_sgpr = sbase * 2;
         const uint8_t kind = op < 0x08 ? 2 : 0;
         if (!resource(inst.pc, base_sgpr, kind == 2 ? 2 : 4, kind, false,
                       bytes))
           return false;
         const uint32_t sdst = (w >> 15) & 0x7F;
-        loads.erase(std::remove_if(loads.begin(), loads.end(), [&](const auto& ld) {
-                      return sdst < ld.sgpr + ld.dwords && ld.sgpr < sdst + n;
-                    }),
+        loads.erase(std::remove_if(loads.begin(), loads.end(),
+                                   [&](const auto& ld) {
+                                     return sdst < ld.sgpr + ld.dwords &&
+                                            ld.sgpr < sdst + n;
+                                   }),
                     loads.end());
         loads.push_back({sdst, n, inst_idx});
         break;
@@ -430,36 +477,42 @@ bool PlanCsResources(const Program& program, const uint8_t* reachable,
         const uint32_t op = (w >> 18) & 0x7F;
         const uint32_t srsrc = ((w1 >> 16) & 0x1F) * 4;
         const bool load = op <= 0x03 || (op >= 0x08 && op <= 0x0f);
-        const bool store = (op >= 0x04 && op <= 0x07) ||
-                           op == 0x18 || op == 0x1a ||
-                           (op >= 0x1c && op <= 0x1f);
-        if (!load && !store) return false;  // atomics etc.
-        if (!resource(inst.pc, srsrc, 4, 0, store, 0)) return false;
+        const bool store = (op >= 0x04 && op <= 0x07) || op == 0x18 ||
+                           op == 0x1a || (op >= 0x1c && op <= 0x1f);
+        if (!load && !store)
+          return false;  // atomics etc.
+        if (!resource(inst.pc, srsrc, 4, 0, store, 0))
+          return false;
         break;
       }
       case Enc::kMtbuf: {
         const uint32_t op = (w >> 16) & 0x7;
         const uint32_t srsrc = ((w1 >> 16) & 0x1F) * 4;
-        if (!resource(inst.pc, srsrc, 4, 0, op >= 4, 0)) return false;
+        if (!resource(inst.pc, srsrc, 4, 0, op >= 4, 0))
+          return false;
         break;
       }
       case Enc::kMimg: {
         const uint32_t op = (w >> 18) & 0x7F;
         const uint32_t srsrc = ((w1 >> 16) & 0x1F) * 4;
         const bool r128 = (w & 0x8000) != 0;
-        if (op == 0x0e) break;  // get_resinfo reads only descriptor SGPRs
+        if (op == 0x0e)
+          break;  // get_resinfo reads only descriptor SGPRs
         const bool store = op == 0x08 || op == 0x09;
         const bool load = op == 0x00 || op == 0x01;
         const bool sample = op == 0x24 || op == 0x27;
         if ((!store && !load && !sample) || r128 || srsrc + 7 >= 136)
           return false;
-        if (!resource(inst.pc, srsrc, 8, 1, store, 0)) return false;
+        if (!resource(inst.pc, srsrc, 8, 1, store, 0))
+          return false;
         break;
       }
       case Enc::kDs:
         // DS swizzle uses the wave cross-lane path, not LDS memory.
-        if (!lds_dwords && inst.opcode != 0x35) return false;
-        if ((w >> 17) & 1) return false;  // GDS not modelled
+        if (!lds_dwords && inst.opcode != 0x35)
+          return false;
+        if ((w >> 17) & 1)
+          return false;  // GDS not modelled
         break;
       default:
         break;
@@ -502,8 +555,8 @@ void EmitCsMubuf(Translator& t, const Inst& inst, StageContext& sc) {
     return;
   }
   const uint32_t binding = static_cast<uint32_t>(b);
-  const Id byte_off =
-      BufferByteOffset(t, inst, inst_offset, idxen, offen, vaddr, srsrc, soffset);
+  const Id byte_off = BufferByteOffset(t, inst, inst_offset, idxen, offen,
+                                       vaddr, srsrc, soffset);
   const Id dword_idx = t.Shr(byte_off, t.U32(2));
 
   // Format load/stores move raw dwords: the buffer-format -> image-store round
@@ -519,10 +572,16 @@ void EmitCsMubuf(Translator& t, const Inst& inst, StageContext& sc) {
   };
 
   switch (op) {
-    case 0x00: case 0x01: case 0x02: case 0x03:  // buffer_load_format_x..xyzw
+    case 0x00:
+    case 0x01:
+    case 0x02:
+    case 0x03:  // buffer_load_format_x..xyzw
       load_dwords(op + 1);
       break;
-    case 0x04: case 0x05: case 0x06: case 0x07:  // buffer_store_format_x..xyzw
+    case 0x04:
+    case 0x05:
+    case 0x06:
+    case 0x07:  // buffer_store_format_x..xyzw
       store_dwords(op - 3);
       break;
     case 0x08:  // buffer_load_ubyte
@@ -537,20 +596,36 @@ void EmitCsMubuf(Translator& t, const Inst& inst, StageContext& sc) {
     case 0x0b:  // buffer_load_sshort
       t.SetVg(vdata, LoadSubDword(t, sc, binding, byte_off, 16, true));
       break;
-    case 0x0c: load_dwords(1); break;  // buffer_load_dword
-    case 0x0d: load_dwords(2); break;  // buffer_load_dwordx2
-    case 0x0e: load_dwords(4); break;  // buffer_load_dwordx4
-    case 0x0f: load_dwords(3); break;  // buffer_load_dwordx3
+    case 0x0c:
+      load_dwords(1);
+      break;  // buffer_load_dword
+    case 0x0d:
+      load_dwords(2);
+      break;  // buffer_load_dwordx2
+    case 0x0e:
+      load_dwords(4);
+      break;  // buffer_load_dwordx4
+    case 0x0f:
+      load_dwords(3);
+      break;    // buffer_load_dwordx3
     case 0x18:  // buffer_store_byte
       StoreSubDword(t, sc, binding, byte_off, 8, t.Vg(vdata));
       break;
     case 0x1a:  // buffer_store_short
       StoreSubDword(t, sc, binding, byte_off, 16, t.Vg(vdata));
       break;
-    case 0x1c: store_dwords(1); break;  // buffer_store_dword
-    case 0x1d: store_dwords(2); break;  // buffer_store_dwordx2
-    case 0x1e: store_dwords(4); break;  // buffer_store_dwordx4
-    case 0x1f: store_dwords(3); break;  // buffer_store_dwordx3
+    case 0x1c:
+      store_dwords(1);
+      break;  // buffer_store_dword
+    case 0x1d:
+      store_dwords(2);
+      break;  // buffer_store_dwordx2
+    case 0x1e:
+      store_dwords(4);
+      break;  // buffer_store_dwordx4
+    case 0x1f:
+      store_dwords(3);
+      break;  // buffer_store_dwordx3
     default:
       WarnUnsupported("mubuf", op, w, w1);
       sc.cs_unsupported = true;
@@ -575,13 +650,14 @@ void EmitCsMtbuf(Translator& t, const Inst& inst, StageContext& sc) {
   }
   WarnUnsupported("mtbuf.raw-format", op, w, w1);
   const uint32_t binding = static_cast<uint32_t>(b);
-  const Id byte_off =
-      BufferByteOffset(t, inst, inst_offset, idxen, offen, vaddr, srsrc, soffset);
+  const Id byte_off = BufferByteOffset(t, inst, inst_offset, idxen, offen,
+                                       vaddr, srsrc, soffset);
   const Id dword_idx = t.Shr(byte_off, t.U32(2));
   const uint32_t n = (op & 3) + 1;
   if (op < 4) {  // tbuffer_load_format_x..xyzw
     for (uint32_t i = 0; i < n; i++)
-      t.SetVg(vdata + i, CsSsboLoad(t, sc, binding, t.Add(dword_idx, t.U32(i))));
+      t.SetVg(vdata + i,
+              CsSsboLoad(t, sc, binding, t.Add(dword_idx, t.U32(i))));
   } else {  // tbuffer_store_format_x..xyzw
     for (uint32_t i = 0; i < n; i++)
       CsSsboStore(t, sc, binding, t.Add(dword_idx, t.U32(i)), t.Vg(vdata + i));
@@ -635,7 +711,8 @@ void EmitCsMimg(Translator& t, const Inst& inst, StageContext& sc) {
     };
     uint32_t out = 0;
     for (int i = 0; i < 4; i++)
-      if (dmask & (1 << i)) t.SetVg(vdata + out++, comps[i]);
+      if (dmask & (1 << i))
+        t.SetVg(vdata + out++, comps[i]);
     return;
   }
 
@@ -649,30 +726,24 @@ void EmitCsMimg(Translator& t, const Inst& inst, StageContext& sc) {
   const Id base_pitch = t.Add(field(4, 13, 0x3FFF), t.U32(1));
   const Id dfmt = field(1, 20, 0x3F), nfmt = field(1, 26, 0xF);
   const Id is_unorm = t.IsZero(nfmt);  // nfmt 0 = UNORM
-  const Id is_rgba8 = t.LAnd(
-      t.Eq(dfmt, t.U32(10)),
-      logical_or(is_unorm, t.Eq(nfmt, t.U32(4))));
+  const Id is_rgba8 =
+      t.LAnd(t.Eq(dfmt, t.U32(10)), logical_or(is_unorm, t.Eq(nfmt, t.U32(4))));
   const Id is_r32 = t.LAnd(
       t.Eq(dfmt, t.U32(4)),
       logical_or(t.Eq(nfmt, t.U32(4)),
                  logical_or(t.Eq(nfmt, t.U32(5)), t.Eq(nfmt, t.U32(7)))));
-  const Id is_rg16f = t.LAnd(t.Eq(dfmt, t.U32(5)),
-                              t.Eq(nfmt, t.U32(7)));
-  const Id is_r16f = t.LAnd(t.Eq(dfmt, t.U32(2)),
-                             t.Eq(nfmt, t.U32(7)));
+  const Id is_rg16f = t.LAnd(t.Eq(dfmt, t.U32(5)), t.Eq(nfmt, t.U32(7)));
+  const Id is_r16f = t.LAnd(t.Eq(dfmt, t.U32(2)), t.Eq(nfmt, t.U32(7)));
   const Id is_rg8 = t.LAnd(t.Eq(dfmt, t.U32(3)), is_unorm);
-  const Id is_rgba16f = t.LAnd(t.Eq(dfmt, t.U32(12)),
-                                t.Eq(nfmt, t.U32(7)));
-  const Id is_r11g11b10f = t.LAnd(t.Eq(dfmt, t.U32(6)),
-                                   t.Eq(nfmt, t.U32(7)));
+  const Id is_rgba16f = t.LAnd(t.Eq(dfmt, t.U32(12)), t.Eq(nfmt, t.U32(7)));
+  const Id is_r11g11b10f = t.LAnd(t.Eq(dfmt, t.U32(6)), t.Eq(nfmt, t.U32(7)));
   Id supported_format = logical_or(is_rgba8, is_r32);
   supported_format = logical_or(supported_format, is_rg16f);
   supported_format = logical_or(supported_format, is_r16f);
   supported_format = logical_or(supported_format, is_rg8);
   supported_format = logical_or(supported_format, is_rgba16f);
   supported_format = logical_or(supported_format, is_r11g11b10f);
-  const Id supported_type =
-      logical_or(t.Eq(image_type, t.U32(9)), is_array);
+  const Id supported_type = logical_or(t.Eq(image_type, t.U32(9)), is_array);
   Id requested_mip = mip_op ? t.Vg(vaddr + (da ? 3 : 2)) : t.U32(0);
   if (op == 0x24) {
     const Id lod = t.m.ExtInst(t.t_f, GLSLstd450FMax,
@@ -693,14 +764,13 @@ void EmitCsMimg(Translator& t, const Inst& inst, StageContext& sc) {
     // weights are formed in the access block.
     const Id width_f = t.m.Emit(spv::Op::OpConvertUToF, t.t_f, {width});
     const Id height_f = t.m.Emit(spv::Op::OpConvertUToF, t.t_f, {height});
-    sample_fx =
-        t.FSub(t.FMul(t.FClamp01(t.VgF(vaddr)), width_f), t.F32(0.5f));
+    sample_fx = t.FSub(t.FMul(t.FClamp01(t.VgF(vaddr)), width_f), t.F32(0.5f));
     sample_fy =
         t.FSub(t.FMul(t.FClamp01(t.VgF(vaddr + 1)), height_f), t.F32(0.5f));
-    const Id fx0 = t.Ext1(GLSLstd450Floor, t.Ext2(GLSLstd450FMax, sample_fx,
-                                                  t.F32(0.f)));
-    const Id fy0 = t.Ext1(GLSLstd450Floor, t.Ext2(GLSLstd450FMax, sample_fy,
-                                                  t.F32(0.f)));
+    const Id fx0 =
+        t.Ext1(GLSLstd450Floor, t.Ext2(GLSLstd450FMax, sample_fx, t.F32(0.f)));
+    const Id fy0 =
+        t.Ext1(GLSLstd450Floor, t.Ext2(GLSLstd450FMax, sample_fy, t.F32(0.f)));
     x = t.UMin(t.m.Emit(spv::Op::OpConvertFToU, t.t_u, {fx0}),
                t.Sub(width, t.U32(1)));
     y = t.UMin(t.m.Emit(spv::Op::OpConvertFToU, t.t_u, {fy0}),
@@ -718,7 +788,8 @@ void EmitCsMimg(Translator& t, const Inst& inst, StageContext& sc) {
   const Id padded_layers =
       t.SelectB(pow2_pad, BitCeil(t, descriptor_layers), descriptor_layers);
   const Id layers = t.SelectB(is_array, padded_layers, t.U32(1));
-  Id array_ok = t.LAnd(t.Ult(base_array, layers), t.Uge(last_array, base_array));
+  Id array_ok =
+      t.LAnd(t.Ult(base_array, layers), t.Uge(last_array, base_array));
   array_ok = t.LAnd(array_ok, t.Ule(view_layer, t.Sub(last_array, base_array)));
   array_ok = t.LAnd(array_ok, t.Ult(physical_layer, layers));
   const Id layer_ok = t.m.Emit(spv::Op::OpSelect, t.t_bool,
@@ -731,7 +802,8 @@ void EmitCsMimg(Translator& t, const Inst& inst, StageContext& sc) {
   if (load || sample) {  // default loaded components to 0 for invalid accesses
     uint32_t out = 0;
     for (int i = 0; i < 4; i++)
-      if (dmask & (1 << i)) t.SetVg(vdata + out++, t.U32(0));
+      if (dmask & (1 << i))
+        t.SetVg(vdata + out++, t.U32(0));
   }
 
   const Id access_blk = t.m.NewBlock(), merge_blk = t.m.NewBlock();
@@ -746,24 +818,22 @@ void EmitCsMimg(Translator& t, const Inst& inst, StageContext& sc) {
     const Id level_height = Max1(t, t.Shr(base_height, level));
     const Id level_stored =
         t.SelectB(pow2_pad, BitCeil(t, level_height), level_height);
-    const Id level_pitch =
-        LinearMipPitch(t, base_pitch, level_stored, level, linear_general, pow2_pad);
+    const Id level_pitch = LinearMipPitch(t, base_pitch, level_stored, level,
+                                          linear_general, pow2_pad);
     const Id level_size = t.Mul(t.Mul(level_pitch, level_stored), layers);
-    mip_off = t.Add(mip_off,
-                    t.SelectB(t.Ult(level, physical_mip), level_size, t.U32(0)));
+    mip_off = t.Add(
+        mip_off, t.SelectB(t.Ult(level, physical_mip), level_size, t.U32(0)));
   }
   const Id layer_off = t.Mul(layer, t.Mul(pitch, stored_height));
   const Id texel_idx =
       t.Add(mip_off, t.Add(layer_off, t.Add(t.Mul(y, pitch), x)));
-  Id dword_idx =
-      t.SelectB(is_rgba16f, t.Mul(texel_idx, t.U32(2)), texel_idx);
-  dword_idx =
-      t.SelectB(is_r11g11b10f, t.Mul(texel_idx, t.U32(4)), dword_idx);
+  Id dword_idx = t.SelectB(is_rgba16f, t.Mul(texel_idx, t.U32(2)), texel_idx);
+  dword_idx = t.SelectB(is_r11g11b10f, t.Mul(texel_idx, t.U32(4)), dword_idx);
 
   if (load) {
     const Id raw = CsSsboLoad(t, sc, binding, dword_idx);
-    const Id has_second = t.m.Emit(spv::Op::OpLogicalOr, t.t_bool,
-                                   {is_rgba16f, is_r11g11b10f});
+    const Id has_second =
+        t.m.Emit(spv::Op::OpLogicalOr, t.t_bool, {is_rgba16f, is_r11g11b10f});
     const Id raw_hi = CsSsboLoad(
         t, sc, binding,
         t.SelectB(has_second, t.Add(dword_idx, t.U32(1)), dword_idx));
@@ -773,24 +843,21 @@ void EmitCsMimg(Translator& t, const Inst& inst, StageContext& sc) {
     const Id raw_3 = CsSsboLoad(
         t, sc, binding,
         t.SelectB(is_r11g11b10f, t.Add(dword_idx, t.U32(3)), dword_idx));
-    const Id halfs =
-        t.m.ExtInst(t.t_v2, GLSLstd450UnpackHalf2x16, {raw});
-    const Id halfs_hi =
-        t.m.ExtInst(t.t_v2, GLSLstd450UnpackHalf2x16, {raw_hi});
+    const Id halfs = t.m.ExtInst(t.t_v2, GLSLstd450UnpackHalf2x16, {raw});
+    const Id halfs_hi = t.m.ExtInst(t.t_v2, GLSLstd450UnpackHalf2x16, {raw_hi});
     const Id float_component[4] = {raw, raw_hi, raw_2, raw_3};
     uint32_t out = 0;
     for (int i = 0; i < 4; i++) {
-      if (!(dmask & (1 << i))) continue;
+      if (!(dmask & (1 << i)))
+        continue;
       const Id byte = t.And(t.Shr(raw, t.U32(i * 8u)), t.U32(0xFF));
       const Id normalized =
           t.FMul(t.m.Emit(spv::Op::OpConvertUToF, t.t_f, {byte}),
                  t.F32(1.0f / 255.0f));
       Id value = t.SelectB(is_unorm, t.m.Bitcast(t.t_u, normalized), byte);
-      const Id half = i < 2
-                          ? t.m.Bitcast(
-                                t.t_u,
-                                t.m.CompositeExtract(t.t_f, halfs, i))
-                          : t.U32(0);
+      const Id half =
+          i < 2 ? t.m.Bitcast(t.t_u, t.m.CompositeExtract(t.t_f, halfs, i))
+                : t.U32(0);
       value = t.SelectB(is_rg16f, half, value);
       value = t.SelectB(is_r16f, i == 0 ? half : t.U32(0), value);
       value = t.SelectB(is_rg8, i < 2 ? value : t.U32(0), value);
@@ -803,8 +870,8 @@ void EmitCsMimg(Translator& t, const Inst& inst, StageContext& sc) {
       t.SetVg(vdata + out++, value);
     }
   } else if (sample) {
-    const Id has_second = t.m.Emit(spv::Op::OpLogicalOr, t.t_bool,
-                                   {is_rgba16f, is_r11g11b10f});
+    const Id has_second =
+        t.m.Emit(spv::Op::OpLogicalOr, t.t_bool, {is_rgba16f, is_r11g11b10f});
     // Storage-buffer index of texel (xx,yy) in the current mip/layer, scaled
     // for the multi-dword formats (matches the single-texel index above).
     const auto texel_at = [&](Id xx, Id yy) {
@@ -825,21 +892,23 @@ void EmitCsMimg(Translator& t, const Inst& inst, StageContext& sc) {
       const Id raw_3 = CsSsboLoad(
           t, sc, binding, t.SelectB(is_r11g11b10f, t.Add(idx, t.U32(3)), idx));
       const Id halfs = t.m.ExtInst(t.t_v2, GLSLstd450UnpackHalf2x16, {raw});
-      const Id halfs_hi = t.m.ExtInst(t.t_v2, GLSLstd450UnpackHalf2x16, {raw_hi});
+      const Id halfs_hi =
+          t.m.ExtInst(t.t_v2, GLSLstd450UnpackHalf2x16, {raw_hi});
       const Id fcomp[4] = {raw, raw_hi, raw_2, raw_3};
       for (int i = 0; i < 4; i++) {
         const Id byte = t.And(t.Shr(raw, t.U32(i * 8u)), t.U32(0xFF));
-        const Id byteF = t.FMul(t.m.Emit(spv::Op::OpConvertUToF, t.t_f, {byte}),
-                                t.F32(1.0f / 255.0f));
-        Id v = byteF;  // rgba8 unorm default
+        const Id byte_f =
+            t.FMul(t.m.Emit(spv::Op::OpConvertUToF, t.t_f, {byte}),
+                   t.F32(1.0f / 255.0f));
+        Id v = byte_f;  // rgba8 unorm default
         v = t.SelectF(is_r32, i == 0 ? t.m.Bitcast(t.t_f, raw) : t.F32(0.f), v);
         const Id half =
             i < 2 ? t.m.CompositeExtract(t.t_f, halfs, i) : t.F32(0.f);
         v = t.SelectF(is_rg16f, half, v);
         v = t.SelectF(
-            is_r16f, i == 0 ? t.m.CompositeExtract(t.t_f, halfs, 0) : t.F32(0.f),
-            v);
-        v = t.SelectF(is_rg8, i < 2 ? byteF : t.F32(0.f), v);
+            is_r16f,
+            i == 0 ? t.m.CompositeExtract(t.t_f, halfs, 0) : t.F32(0.f), v);
+        v = t.SelectF(is_rg8, i < 2 ? byte_f : t.F32(0.f), v);
         const Id wide = t.m.CompositeExtract(t.t_f, i < 2 ? halfs : halfs_hi,
                                              i < 2 ? i : i - 2);
         v = t.SelectF(is_rgba16f, wide, v);
@@ -863,7 +932,8 @@ void EmitCsMimg(Translator& t, const Inst& inst, StageContext& sc) {
     };
     uint32_t out = 0;
     for (int i = 0; i < 4; i++) {
-      if (!(dmask & (1 << i))) continue;
+      if (!(dmask & (1 << i)))
+        continue;
       const Id top = mix(c00[i], c10[i], wx);
       const Id bot = mix(c01[i], c11[i], wx);
       t.SetVgF(vdata + out++, mix(top, bot, wy));
@@ -878,8 +948,8 @@ void EmitCsMimg(Translator& t, const Inst& inst, StageContext& sc) {
       return t.And(t.SelectB(is_unorm, unorm, value), t.U32(0xFF));
     };
     const Id old_raw = CsSsboLoad(t, sc, binding, dword_idx);
-    const Id has_second = t.m.Emit(spv::Op::OpLogicalOr, t.t_bool,
-                                   {is_rgba16f, is_r11g11b10f});
+    const Id has_second =
+        t.m.Emit(spv::Op::OpLogicalOr, t.t_bool, {is_rgba16f, is_r11g11b10f});
     const Id old_raw_hi = CsSsboLoad(
         t, sc, binding,
         t.SelectB(has_second, t.Add(dword_idx, t.U32(1)), dword_idx));
@@ -899,7 +969,8 @@ void EmitCsMimg(Translator& t, const Inst& inst, StageContext& sc) {
       packed = old_raw;  // read-modify-write
       uint32_t comp = 0;
       for (int i = 0; i < 4; i++) {
-        if (!(dmask & (1 << i))) continue;
+        if (!(dmask & (1 << i)))
+          continue;
         const Id keep = t.And(packed, t.U32(~(0xFFu << (i * 8))));
         packed = t.Or(keep, t.Shl(store_byte(vdata + comp++), t.U32(i * 8u)));
       }
@@ -912,14 +983,15 @@ void EmitCsMimg(Translator& t, const Inst& inst, StageContext& sc) {
     for (uint32_t i = 0; i < 2; i++)
       if (dmask & (1u << i))
         half[i] = t.m.Bitcast(t.t_f, t.Vg(vdata + half_reg++));
-    const Id packed_rg16f = t.m.ExtInst(
-        t.t_u, GLSLstd450PackHalf2x16,
-        {t.m.CompositeConstruct(t.t_v2, {half[0], half[1]})});
+    const Id packed_rg16f =
+        t.m.ExtInst(t.t_u, GLSLstd450PackHalf2x16,
+                    {t.m.CompositeConstruct(t.t_v2, {half[0], half[1]})});
     Id r16f = t.m.CompositeExtract(t.t_f, old_halfs, 0);
-    if (dmask & 1) r16f = t.m.Bitcast(t.t_f, t.Vg(vdata));
-    const Id packed_r16f = t.m.ExtInst(
-        t.t_u, GLSLstd450PackHalf2x16,
-        {t.m.CompositeConstruct(t.t_v2, {r16f, t.F32(0.f)})});
+    if (dmask & 1)
+      r16f = t.m.Bitcast(t.t_f, t.Vg(vdata));
+    const Id packed_r16f =
+        t.m.ExtInst(t.t_u, GLSLstd450PackHalf2x16,
+                    {t.m.CompositeConstruct(t.t_v2, {r16f, t.F32(0.f)})});
     const Id old_halfs_hi =
         t.m.ExtInst(t.t_v2, GLSLstd450UnpackHalf2x16, {old_raw_hi});
     Id wide_half[4] = {
@@ -941,14 +1013,16 @@ void EmitCsMimg(Translator& t, const Inst& inst, StageContext& sc) {
     Id packed_float[4] = {old_raw, old_raw_hi, old_raw_2, old_raw_3};
     uint32_t packed_float_reg = 0;
     for (uint32_t i = 0; i < 4; i++) {
-      if (!(dmask & (1u << i))) continue;
+      if (!(dmask & (1u << i)))
+        continue;
       packed_float[i] = t.Vg(vdata + packed_float_reg);
       packed_float_reg++;
     }
     Id packed_rg8 = old_raw;
     uint32_t rg8_reg = 0;
     for (uint32_t i = 0; i < 4; i++) {
-      if (!(dmask & (1u << i))) continue;
+      if (!(dmask & (1u << i)))
+        continue;
       if (i < 2) {
         const Id keep = t.And(packed_rg8, t.U32(~(0xFFu << (i * 8))));
         packed_rg8 =
@@ -967,8 +1041,7 @@ void EmitCsMimg(Translator& t, const Inst& inst, StageContext& sc) {
     t.m.SelectionMerge(store_done);
     t.m.BranchConditional(is_rgba16f, wide_store, store_done);
     t.m.OpenBlock(wide_store);
-    CsSsboStore(t, sc, binding, t.Add(dword_idx, t.U32(1)),
-                packed_rgba16f_hi);
+    CsSsboStore(t, sc, binding, t.Add(dword_idx, t.U32(1)), packed_rgba16f_hi);
     t.m.Branch(store_done);
     t.m.OpenBlock(store_done);
     const Id packed_store = t.m.NewBlock(), packed_done = t.m.NewBlock();
@@ -976,8 +1049,7 @@ void EmitCsMimg(Translator& t, const Inst& inst, StageContext& sc) {
     t.m.BranchConditional(is_r11g11b10f, packed_store, packed_done);
     t.m.OpenBlock(packed_store);
     for (uint32_t i = 1; i < 4; i++)
-      CsSsboStore(t, sc, binding, t.Add(dword_idx, t.U32(i)),
-                  packed_float[i]);
+      CsSsboStore(t, sc, binding, t.Add(dword_idx, t.U32(i)), packed_float[i]);
     t.m.Branch(packed_done);
     t.m.OpenBlock(packed_done);
   }
@@ -1002,15 +1074,14 @@ void EmitDs(Translator& t, const Inst& inst, StageContext& sc) {
 
   const Id p_lds = t.m.TypePointer(spv::StorageClass::Workgroup, t.t_u);
   const auto lds_at = [&](Id byte_addr) {
-    const Id idx =
-        t.UMin(t.Shr(byte_addr, t.U32(2)), t.U32(sc.lds_dwords - 1));
+    const Id idx = t.UMin(t.Shr(byte_addr, t.U32(2)), t.U32(sc.lds_dwords - 1));
     return t.m.AccessChain(p_lds, sc.lds_var, {idx});
   };
   const Id addr = t.Vg(addr_reg);
   const auto single_addr = [&] { return t.Add(addr, t.U32(offset16)); };
   const auto pair_addr = [&](uint32_t which, uint32_t elem_bytes, bool st64) {
-    const uint32_t off = (which == 0 ? offset0 : offset1) * elem_bytes *
-                         (st64 ? 64u : 1u);
+    const uint32_t off =
+        (which == 0 ? offset0 : offset1) * elem_bytes * (st64 ? 64u : 1u);
     return t.Add(addr, t.U32(off));
   };
 
@@ -1020,23 +1091,26 @@ void EmitDs(Translator& t, const Inst& inst, StageContext& sc) {
           spv::Op::OpAtomicIAdd, t.t_u,
           {lds_at(single_addr()),
            t.U32(static_cast<uint32_t>(spv::Scope::Workgroup)),
-           t.U32(static_cast<uint32_t>(spv::MemorySemanticsMask::AcquireRelease) |
-                 static_cast<uint32_t>(spv::MemorySemanticsMask::WorkgroupMemory)),
+           t.U32(
+               static_cast<uint32_t>(spv::MemorySemanticsMask::AcquireRelease) |
+               static_cast<uint32_t>(
+                   spv::MemorySemanticsMask::WorkgroupMemory)),
            t.Vg(data0)});
       t.SetVg(vdst, old);
       break;
     }
     case 53: {  // ds_swizzle_b32
       if (!sc.subgroup_local_id) {
-        if (sc.is_cs) sc.cs_unsupported = true;
+        if (sc.is_cs)
+          sc.cs_unsupported = true;
         break;
       }
       const Id lane = t.m.Load(t.t_u, sc.subgroup_local_id);
       Id source_lane;
       if (offset16 & 0x8000) {
         const Id quad_lane = t.And(lane, t.U32(3));
-        const Id selector = t.And(
-            t.Shr(t.U32(offset16), t.Mul(quad_lane, t.U32(2))), t.U32(3));
+        const Id selector =
+            t.And(t.Shr(t.U32(offset16), t.Mul(quad_lane, t.U32(2))), t.U32(3));
         source_lane = t.Or(t.And(lane, t.U32(~3u)), selector);
       } else {
         const uint32_t and_mask = offset16 & 0x1f;
@@ -1058,7 +1132,8 @@ void EmitDs(Translator& t, const Inst& inst, StageContext& sc) {
     case 13:  // ds_write_b32
       t.m.Store(lds_at(single_addr()), t.Vg(data0));
       break;
-    case 14: case 15: {  // ds_write2_b32 / ds_write2st64_b32
+    case 14:
+    case 15: {  // ds_write2_b32 / ds_write2st64_b32
       const bool st64 = op == 15;
       t.m.Store(lds_at(pair_addr(0, 4, st64)), t.Vg(data0));
       t.m.Store(lds_at(pair_addr(1, 4, st64)), t.Vg(data1));
@@ -1067,7 +1142,8 @@ void EmitDs(Translator& t, const Inst& inst, StageContext& sc) {
     case 54:  // ds_read_b32
       t.SetVg(vdst, t.m.Load(t.t_u, lds_at(single_addr())));
       break;
-    case 55: case 56: {  // ds_read2_b32 / ds_read2st64_b32
+    case 55:
+    case 56: {  // ds_read2_b32 / ds_read2st64_b32
       const bool st64 = op == 56;
       t.SetVg(vdst, t.m.Load(t.t_u, lds_at(pair_addr(0, 4, st64))));
       t.SetVg(vdst + 1, t.m.Load(t.t_u, lds_at(pair_addr(1, 4, st64))));
@@ -1089,8 +1165,7 @@ void EmitDs(Translator& t, const Inst& inst, StageContext& sc) {
       for (uint32_t i = 0; i < 2; i++) {
         const Id a = t.And(pair_addr(i, 8, false), t.U32(~7u));
         t.SetVg(vdst + i * 2, t.m.Load(t.t_u, lds_at(a)));
-        t.SetVg(vdst + i * 2 + 1,
-                t.m.Load(t.t_u, lds_at(t.Add(a, t.U32(4)))));
+        t.SetVg(vdst + i * 2 + 1, t.m.Load(t.t_u, lds_at(t.Add(a, t.U32(4)))));
       }
       break;
     }

@@ -10,10 +10,10 @@
 
 namespace gpu::vk {
 
-inline uint64_t hashWord(uint64_t h, uint64_t v) {
+inline uint64_t HashWord(uint64_t h, uint64_t v) {
   return (h ^ v) * 1099511628211ull;
 }
 
-uint64_t texHash(uint64_t base, uint64_t bytes);
+uint64_t TexHash(uint64_t base, uint64_t bytes);
 
 }  // namespace gpu::vk

@@ -1,0 +1,4 @@
+# delta/gpu follows Chromium style (the repo default is LLVM). Scoped here so
+# the gpu module can be formatted/checked independently of the rest of delta.
+BasedOnStyle: Chromium
+SortIncludes: true

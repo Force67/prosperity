@@ -2,7 +2,7 @@
  * PS4Delta : PS4/PS5 emulation and research project
  */
 
-#include "vulkan/vk_present.h"
+#include "gpu/vulkan/vk_present.h"
 
 #include "gfx/gfx.h"
 
@@ -32,7 +32,7 @@ struct Presenter {
 
 Presenter g_presenter;
 
-void presenterLoop() {
+void PresenterLoop() {
   std::unique_lock<std::mutex> lk(g_presenter.mtx);
   std::vector<uint8_t> local;
   while (true) {
@@ -50,11 +50,11 @@ void presenterLoop() {
 
 }  // namespace
 
-void presentAsync(const uint8_t *pixels, uint32_t w, uint32_t h) {
-  Presenter &p = g_presenter;
+void PresentAsync(const uint8_t* pixels, uint32_t w, uint32_t h) {
+  Presenter& p = g_presenter;
   if (!p.started) {
     p.started = true;
-    p.th = std::thread(presenterLoop);
+    p.th = std::thread(PresenterLoop);
     p.th.detach();
   }
   std::lock_guard<std::mutex> lk(p.mtx);

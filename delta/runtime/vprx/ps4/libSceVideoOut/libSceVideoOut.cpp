@@ -16,7 +16,7 @@
 #include <thread>
 
 #include "gfx/gfx.h"
-#include "gpu/cmd_processor.h"
+#include "gpu/ps4/cmd_processor.h"
 #include "kern/proc.h"
 #include "kern/ps4/lv2/sys_event.h"
 #include "kern/ps4/lv2/sys_mem.h"
@@ -213,7 +213,7 @@ void startFlipPump() {
     for (;;) {
       std::this_thread::sleep_for(std::chrono::microseconds(16667));
       // NB: do NOT present here. The window is driven solely by the GPU
-      // renderer (Gnm submit -> gpu::endFrame -> gfx::present) on the submit
+      // renderer (Gnm submit -> gpu::EndFrame -> gfx::present) on the submit
       // thread. gfx has one swapchain/command buffer and is not thread-safe, so
       // a present from this pump thread races the renderer's present and
       // intermittently deadlocks Vulkan. This pump only synthesizes flip
@@ -473,12 +473,12 @@ int PS4ABI sceVideoOutSubmitFlipEop(int handle, int bufferIndex, int flipMode,
   // endFrame takes the GPU's own lock; call it outside g_mtx. It presents the RT
   // matching `scanout`, falling back to the last RT rendered when it isn't one.
   // On PS5 the frame was rendered by the AGC command processor (gpu::ps5), so
-  // route the present there; the PS4 Gnm path uses gpu::endFrame.
+  // route the present there; the PS4 Gnm path uses gpu::EndFrame.
   auto *active = proc::getActive();
   if (active && active->getPlatform() == proc::platform::ps5)
     prosperity_agc_flip(scanout);
   else
-    gpu::endFrame(scanout);
+    gpu::EndFrame(scanout);
   (void)udata;
 
   g_port.flipCount.fetch_add(1);

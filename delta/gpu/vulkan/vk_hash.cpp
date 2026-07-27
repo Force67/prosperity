@@ -2,7 +2,7 @@
  * PS4Delta : PS4/PS5 emulation and research project
  */
 
-#include "vulkan/vk_hash.h"
+#include "gpu/vulkan/vk_hash.h"
 
 #include <cstring>
 
@@ -12,9 +12,9 @@ namespace gpu::vk {
 // resource, and big atlases make it the dominant per-frame CPU cost -- so it
 // runs four independent FNV lanes over 64-bit words (instead of one dependent
 // multiply per dword) to break the serial multiply chain and go memory-bound.
-uint64_t texHash(uint64_t base, uint64_t bytes) {
+uint64_t TexHash(uint64_t base, uint64_t bytes) {
   constexpr uint64_t kPrime = 1099511628211ull;
-  const uint64_t *w = reinterpret_cast<const uint64_t *>(base);
+  const uint64_t* w = reinterpret_cast<const uint64_t*>(base);
   const uint64_t nw = bytes / 8;
   uint64_t h0 = 1469598103934665603ull, h1 = 0x9e3779b97f4a7c15ull,
            h2 = 0xc2b2ae3d27d4eb4full, h3 = 0x165667b19e3779f9ull;
@@ -25,10 +25,11 @@ uint64_t texHash(uint64_t base, uint64_t bytes) {
     h2 = (h2 ^ w[i + 2]) * kPrime;
     h3 = (h3 ^ w[i + 3]) * kPrime;
   }
-  for (; i < nw; i++) h0 = (h0 ^ w[i]) * kPrime;
+  for (; i < nw; i++)
+    h0 = (h0 ^ w[i]) * kPrime;
   if (const uint64_t tail = bytes & 7) {
     uint64_t last = 0;
-    std::memcpy(&last, reinterpret_cast<const uint8_t *>(base) + bytes - tail,
+    std::memcpy(&last, reinterpret_cast<const uint8_t*>(base) + bytes - tail,
                 tail);
     h1 = (h1 ^ last) * kPrime;
   }

@@ -13,13 +13,13 @@ namespace gpu::vk {
 // Directory frame dumps go to. Defaults to /tmp; Android has no /tmp, so the
 // runner sets DELTA_GPU_DUMP_DIR to a writable path (e.g. the cwd under
 // /data/local/tmp). Returned without a trailing slash.
-const char *dumpDir();
+const char* DumpDir();
 
-void writePpm(const char *path, const uint8_t *bgra, uint32_t w, uint32_t h);
+void WritePpm(const char* path, const uint8_t* bgra, uint32_t w, uint32_t h);
 // Rolling numbered dump, capped at a handful of frames per run.
-void dumpPpm(const uint8_t *bgra, uint32_t w, uint32_t h);
+void DumpPpm(const uint8_t* bgra, uint32_t w, uint32_t h);
 
-extern const bool g_dump;      // DELTA_GPU_DUMP
-extern const bool g_declines;  // DELTA_GPU_DECLINES
+extern const bool g_dump;     // DELTA_GPU_DUMP
+extern const bool kDeclines;  // DELTA_GPU_DECLINES
 
 }  // namespace gpu::vk

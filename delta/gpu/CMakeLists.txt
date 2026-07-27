@@ -15,13 +15,9 @@ endif()
 
 # Layering: rhi/ is the backend-free renderer interface the command processors
 # talk to, vulkan/ is the only backend implementing it, and the PS4
-# PM4/Liverpool + GCN and PS5 AGC/RDNA2 paths live in ps4/ and ps5/.
-# add_delta_module GLOB_RECURSEs the whole tree, so every subfolder is already
-# compiled into delta_gpu; we only add their include roots so intra-gpu includes
-# ("rhi/renderer.h", "vulkan/...", "gcn/...") keep resolving.
-target_include_directories(delta_gpu PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}
-  ${CMAKE_CURRENT_SOURCE_DIR}/ps4)
+# PM4/Liverpool + GCN and PS5 AGC/RDNA2 paths live in ps4/ and ps5/. Every
+# include inside the module is spelled from the delta root ("gpu/..."), which
+# the shared DELTA_ROOT include dir already resolves -- no extra include roots.
 
 # The recompiler emits SPIR-V directly (no GLSL/shaderc).
 find_package(PkgConfig QUIET)

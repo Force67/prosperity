@@ -17,7 +17,7 @@
 
 #include <cstdint>
 
-#include "ps4/gcn/gcn_translate.h"
+#include "gpu/ps4/gcn/gcn_translate.h"
 
 namespace gpu::rdna {
 
@@ -30,10 +30,13 @@ namespace gpu::rdna {
 // guest's clip convention (PA_CL_CLIP_CNTL.DX_CLIP_SPACE_DEF == 0): the VS then
 // remaps its z from [-w,w] to Vulkan's [0,w]. Returns a gpu::gcn::Recompiled
 // (r.ok == false when a required feature is unsupported).
-gpu::gcn::Recompiled
-Recompile(const uint32_t *vs_code, const uint32_t *ps_code,
-          const uint32_t *vs_user_data, const uint32_t *ps_user_data,
-          uint32_t ps_input_ena = 0, bool gl_clip_space = false,
-          uint32_t vs_user_sgprs = 32, uint32_t ps_user_sgprs = 32);
+gpu::gcn::Recompiled Recompile(const uint32_t* vs_code,
+                               const uint32_t* ps_code,
+                               const uint32_t* vs_user_data,
+                               const uint32_t* ps_user_data,
+                               uint32_t ps_input_ena = 0,
+                               bool gl_clip_space = false,
+                               uint32_t vs_user_sgprs = 32,
+                               uint32_t ps_user_sgprs = 32);
 
-} // namespace gpu::rdna
+}  // namespace gpu::rdna

@@ -6,27 +6,33 @@
  * facade over that backend.
  */
 
-#include "gcn_translate.h"
+#include "gpu/ps4/gcn/gcn_translate.h"
 
-#include "spirv/gcn_spirv.h"
+#include "gpu/ps4/gcn/spirv/gcn_spirv.h"
 
 namespace gpu::gcn {
 
-Recompiled Recompile(const uint32_t* vs_code, const uint32_t* ps_code,
+Recompiled Recompile(const uint32_t* vs_code,
+                     const uint32_t* ps_code,
                      const uint32_t* vs_user_data,
                      const uint32_t* ps_user_data) {
   Recompiled r;
-  if (!vs_code || !vs_user_data || !ps_user_data) return r;
+  if (!vs_code || !vs_user_data || !ps_user_data)
+    return r;
   RecompileSpirv(vs_code, ps_code, vs_user_data, ps_user_data, r);
   return r;
 }
 
-RecompiledCs RecompileCompute(const uint32_t* cs_code, uint32_t num_thread_x,
-                              uint32_t num_thread_y, uint32_t num_thread_z,
-                              uint32_t user_sgpr, uint32_t tgid_enable,
+RecompiledCs RecompileCompute(const uint32_t* cs_code,
+                              uint32_t num_thread_x,
+                              uint32_t num_thread_y,
+                              uint32_t num_thread_z,
+                              uint32_t user_sgpr,
+                              uint32_t tgid_enable,
                               uint32_t lds_dwords) {
   RecompiledCs r;
-  if (!cs_code) return r;
+  if (!cs_code)
+    return r;
   RecompileComputeSpirv(cs_code, num_thread_x, num_thread_y, num_thread_z,
                         user_sgpr, tgid_enable, lds_dwords, r);
   return r;

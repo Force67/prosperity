@@ -18,7 +18,7 @@
 #include <unordered_map>
 #include <vector>
 
-#include "gcn_decode.h"
+#include "gpu/ps4/gcn/gcn_decode.h"
 
 namespace gpu::gcn {
 
@@ -48,8 +48,8 @@ struct TImage {
   uint32_t min_lod = 0;      // T# MIN_LOD clamp in U4.8 fixed-point
   uint32_t dfmt = 0;
   uint32_t nfmt = 0;
-  uint32_t type = 0;         // SQ_RSRC_IMG_* (9 = 2D, 13 = 2D array)
-  uint32_t tiling_idx = 0;   // 8/31 = linear; everything else is tiled
+  uint32_t type = 0;        // SQ_RSRC_IMG_* (9 = 2D, 13 = 2D array)
+  uint32_t tiling_idx = 0;  // 8/31 = linear; everything else is tiled
   // T# DST_SEL_X/Y/Z/W: which source channel (or constant) each sampled
   // component reads. 0=0, 1=1, 4=R, 5=G, 6=B, 7=A. A single-channel mask (a
   // font atlas) is declared with its coverage selected into the components the
@@ -58,7 +58,7 @@ struct TImage {
   uint32_t sampler[4] = {};  // S# used by the sampling MIMG instruction
   bool pow2_pad = false;     // pad physical mip dims/layers to powers of two
   bool sampler_valid = false;
-  bool arrayed = false;      // MIMG DA bit: address carries an array layer
+  bool arrayed = false;         // MIMG DA bit: address carries an array layer
   bool force_lod_zero = false;  // gather4_lz: implicit gather clamped to mip 0
   bool depth_compare = false;   // MIMG _C uses the sampler's compare function
   bool storage = false;         // image_store target
@@ -106,7 +106,8 @@ std::vector<TImage> TrackTextures(
 // through EUD, so reading the V# straight out of user data yields base=0; this
 // walks the chain and reads the V# at the point of the s_buffer_load.
 std::unordered_map<uint32_t, VBuffer> ResolveCbuffers(
-    const std::shared_ptr<const Program>& program, const uint32_t* user_data);
+    const std::shared_ptr<const Program>& program,
+    const uint32_t* user_data);
 
 // Replay a compute shader's uniform scalar descriptor loads and capture each
 // planned V#/T#/pointer at the instruction where it is consumed. This resolves
@@ -115,9 +116,9 @@ struct ResolvedCsResource {
   bool valid = false;
   uint32_t descriptor[8] = {};
 };
-std::vector<ResolvedCsResource> ResolveCsResources(
-    const Program& program, const RecompiledCs& plan,
-    const uint32_t* user_data);
+std::vector<ResolvedCsResource> ResolveCsResources(const Program& program,
+                                                   const RecompiledCs& plan,
+                                                   const uint32_t* user_data);
 
 // Given a decoded fetch shader and the VS user-data SGPRs (16 dwords), recover
 // the vertex-attribute buffers it fetches, in attribute order. Handles the

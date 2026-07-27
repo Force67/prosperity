@@ -6,7 +6,7 @@
 
 #ifdef DELTA_HAVE_SPIRV_BACKEND
 
-#include "spv_post.h"
+#include "gpu/ps4/gcn/spirv/spv_post.h"
 
 #include <cstdio>
 
@@ -15,10 +15,10 @@
 
 namespace gpu::gcn::spirv {
 
-std::vector<uint32_t> Optimize(const std::vector<uint32_t> &spv) {
+std::vector<uint32_t> Optimize(const std::vector<uint32_t>& spv) {
   spvtools::Optimizer opt(SPV_ENV_VULKAN_1_1);
-  opt.SetMessageConsumer([](spv_message_level_t lvl, const char *, const spv_position_t &,
-                            const char *msg) {
+  opt.SetMessageConsumer([](spv_message_level_t lvl, const char*,
+                            const spv_position_t&, const char* msg) {
     if (lvl <= SPV_MSG_WARNING)
       std::fprintf(stderr, "[spv-opt] %s\n", msg);
   });
@@ -33,13 +33,14 @@ std::vector<uint32_t> Optimize(const std::vector<uint32_t> &spv) {
   return out;
 }
 
-bool Validate(const std::vector<uint32_t> &spv, std::string *err) {
+bool Validate(const std::vector<uint32_t>& spv, std::string* err) {
   spv_context ctx = spvContextCreate(SPV_ENV_VULKAN_1_1);
   spv_diagnostic diag = nullptr;
   spv_const_binary_t bin{spv.data(), spv.size()};
   spv_result_t r = spvValidate(ctx, &bin, &diag);
   bool ok = r == SPV_SUCCESS;
-  if (!ok && err && diag) *err = diag->error;
+  if (!ok && err && diag)
+    *err = diag->error;
   spvDiagnosticDestroy(diag);
   spvContextDestroy(ctx);
   return ok;

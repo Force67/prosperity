@@ -3,20 +3,20 @@
  */
 #pragma once
 
+#include <sys/syscall.h>
+#include <sys/uio.h>
+#include <unistd.h>
 #include <algorithm>
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <limits>
-#include <sys/syscall.h>
-#include <sys/uio.h>
-#include <unistd.h>
 
 namespace gpu {
 
 inline bool IsReadableMapping(uint64_t address, uint64_t bytes) {
-  FILE *maps = std::fopen("/proc/self/maps", "r");
+  FILE* maps = std::fopen("/proc/self/maps", "r");
   if (!maps)
     return false;
 
@@ -54,7 +54,7 @@ inline bool IsReadableRange(uint64_t address, uint64_t bytes) {
   while (cursor < end) {
     size_t count = 0;
     while (cursor < end && count < kBatch) {
-      remote[count++] = {reinterpret_cast<void *>(cursor), 1};
+      remote[count++] = {reinterpret_cast<void*>(cursor), 1};
       const uint64_t next_page = (cursor & ~(page - 1)) + page;
       cursor = next_page > cursor ? std::min(end, next_page) : end;
     }
@@ -73,4 +73,4 @@ inline bool IsReadableRange(uint64_t address, uint64_t bytes) {
   return true;
 }
 
-} // namespace gpu
+}  // namespace gpu

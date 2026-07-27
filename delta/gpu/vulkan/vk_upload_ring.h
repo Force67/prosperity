@@ -12,46 +12,49 @@
 
 #include <cstdint>
 
-#include "gcn/gcn_translate.h"
+#include "gpu/ps4/gcn/gcn_translate.h"
 
 namespace gpu::vk {
 
-constexpr VkDeviceSize kVbRing = 16ull * 1024 * 1024;   // per-frame vertex ring
-constexpr VkDeviceSize kIbRing = 8ull * 1024 * 1024;    // per-frame index ring (32-bit)
-constexpr VkDeviceSize kUboRing = 64ull * 1024 * 1024;  // per-frame recomp cbuffer ring
+constexpr VkDeviceSize kVbRing = 16ull * 1024 * 1024;  // per-frame vertex ring
+constexpr VkDeviceSize kIbRing =
+    8ull * 1024 * 1024;  // per-frame index ring (32-bit)
+constexpr VkDeviceSize kUboRing =
+    64ull * 1024 * 1024;  // per-frame recomp cbuffer ring
 constexpr uint32_t kCbufWindow = gpu::gcn::kCbufDwords * 4;
-constexpr uint32_t kCbufBindings = gpu::gcn::kMaxCbufBindings;  // set-1 UBO bindings
+constexpr uint32_t kCbufBindings =
+    gpu::gcn::kMaxCbufBindings;  // set-1 UBO bindings
 
 struct UploadRings {
   // Vertex ring: interleaved pos+colour+uv for the heuristic path, the raw
   // guest vertex records for the recompiled path.
   VkBuffer vb = VK_NULL_HANDLE;
-  VkDeviceMemory vbMem = VK_NULL_HANDLE;
-  uint8_t *vbMap = nullptr;
-  VkDeviceSize vbOffset = 0, vbEnd = kVbRing;
+  VkDeviceMemory vb_mem = VK_NULL_HANDLE;
+  uint8_t* vb_map = nullptr;
+  VkDeviceSize vb_offset = 0, vb_end = kVbRing;
 
   // Index ring: 32-bit indices (16-bit guest indices are widened on upload).
   VkBuffer ib = VK_NULL_HANDLE;
-  VkDeviceMemory ibMem = VK_NULL_HANDLE;
-  uint8_t *ibMap = nullptr;
-  VkDeviceSize ibOffset = 0, ibEnd = kIbRing;
+  VkDeviceMemory ib_mem = VK_NULL_HANDLE;
+  uint8_t* ib_map = nullptr;
+  VkDeviceSize ib_offset = 0, ib_end = kIbRing;
 
   // Recomp cbuffer ring: per-draw VS/PS constant buffers live at set 1 bindings
   // 0..kCbufBindings-1, each addressed by a dynamic offset into this ring.
-  // emptyLayout fills set 0 for untextured recomp draws.
-  VkBuffer uboBuf = VK_NULL_HANDLE;
-  VkDeviceMemory uboMem = VK_NULL_HANDLE;
-  uint8_t *uboMap = nullptr;
-  VkDeviceSize uboOffset = 0, uboEnd = kUboRing;
-  uint32_t uboAlign = 256;
-  VkDescriptorSetLayout uboLayout = VK_NULL_HANDLE;
-  VkDescriptorSetLayout emptyLayout = VK_NULL_HANDLE;
-  VkDescriptorPool uboPool = VK_NULL_HANDLE;
-  VkDescriptorSet uboSet = VK_NULL_HANDLE;
+  // empty_layout fills set 0 for untextured recomp draws.
+  VkBuffer ubo_buf = VK_NULL_HANDLE;
+  VkDeviceMemory ubo_mem = VK_NULL_HANDLE;
+  uint8_t* ubo_map = nullptr;
+  VkDeviceSize ubo_offset = 0, ubo_end = kUboRing;
+  uint32_t ubo_align = 256;
+  VkDescriptorSetLayout ubo_layout = VK_NULL_HANDLE;
+  VkDescriptorSetLayout empty_layout = VK_NULL_HANDLE;
+  VkDescriptorPool ubo_pool = VK_NULL_HANDLE;
+  VkDescriptorSet ubo_set = VK_NULL_HANDLE;
 };
 
 extern UploadRings g_ring;
 
-bool createUploadRings(const VkPhysicalDeviceProperties &props);
+bool CreateUploadRings(const VkPhysicalDeviceProperties& props);
 
 }  // namespace gpu::vk

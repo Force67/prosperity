@@ -50,8 +50,7 @@ TEST(GcnDecode, ReachabilityExcludesUnconditionalBranchFallthrough) {
 
   const gpu::gcn::Program program =
       gpu::gcn::Decode(code, 6, /*stop_at_endpgm=*/false);
-  const std::vector<uint8_t> reachable =
-      gpu::gcn::ComputeReachability(program);
+  const std::vector<uint8_t> reachable = gpu::gcn::ComputeReachability(program);
 
   ASSERT_EQ(reachable.size(), 6u);
   EXPECT_EQ(reachable[0], 1u);

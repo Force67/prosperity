@@ -12,7 +12,7 @@
 #include <cstdint>
 #include <unordered_map>
 
-#include "rhi/command.h"
+#include "gpu/rhi/command.h"
 
 namespace gpu::vk {
 
@@ -21,27 +21,29 @@ namespace gpu::vk {
 struct QuadPipelines {
   VkPipelineLayout layout = VK_NULL_HANDLE;
   VkPipeline pipeline = VK_NULL_HANDLE;
-  VkPipelineLayout texLayout = VK_NULL_HANDLE;
-  VkPipeline texPipeline = VK_NULL_HANDLE;
-  // Keyed by (textured<<0, enable<<1, blendControl<<2), mixed with the format.
+  VkPipelineLayout tex_layout = VK_NULL_HANDLE;
+  VkPipeline tex_pipeline = VK_NULL_HANDLE;
+  // Keyed by (textured<<0, enable<<1, blend_control<<2), mixed with the format.
   std::unordered_map<uint64_t, VkPipeline> cache;
 };
 
 extern QuadPipelines g_quad;
 
-bool createPipeline();
-bool createTexPipeline();
-VkPipeline getPipeline(bool textured, uint32_t bc, bool en,
-                       VkFormat colorFormat);
+bool CreatePipeline();
+bool CreateTexPipeline();
+VkPipeline GetPipeline(bool textured,
+                       uint32_t bc,
+                       bool en,
+                       VkFormat color_format);
 
 struct RecompPipe {
   VkPipeline pipe = VK_NULL_HANDLE;
   VkPipelineLayout layout = VK_NULL_HANDLE;
-  VkDescriptorSetLayout texSetLayout = VK_NULL_HANDLE;
+  VkDescriptorSetLayout tex_set_layout = VK_NULL_HANDLE;
   bool textured = false;
-  bool multiTex = false;  // custom set 0 for multiple and/or storage images
+  bool multi_tex = false;  // custom set 0 for multiple and/or storage images
 };
 
-RecompPipe *getRecompPipe(const rhi::DrawInfo &d);
+RecompPipe* GetRecompPipe(const rhi::DrawInfo& d);
 
 }  // namespace gpu::vk

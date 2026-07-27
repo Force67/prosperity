@@ -17,21 +17,21 @@ namespace gpu::vk {
 // CB_COLORn_INFO encoding we do not map.
 constexpr VkFormat kDefaultRtFormat = VK_FORMAT_B8G8R8A8_UNORM;
 
-VkFormat guestTextureFormat(uint32_t dfmt, uint32_t nfmt);
-bool guestFormatBlockCompressed(uint32_t dfmt);
-uint32_t guestFormatElemBytes(uint32_t dfmt);
-VkFormat colorTargetFormat(uint32_t info);
-VkComponentMapping textureComponents(uint32_t swizzle);
-uint32_t formatBytes(VkFormat fmt);
+VkFormat GuestTextureFormat(uint32_t dfmt, uint32_t nfmt);
+bool GuestFormatBlockCompressed(uint32_t dfmt);
+uint32_t GuestFormatElemBytes(uint32_t dfmt);
+VkFormat ColorTargetFormat(uint32_t info);
+VkComponentMapping TextureComponents(uint32_t swizzle);
+uint32_t FormatBytes(VkFormat fmt);
 
-VkBlendFactor vkFactor(uint32_t f);
-VkBlendOp vkBlendOp(uint32_t f);
-VkPipelineColorBlendAttachmentState blendAttachment(uint32_t bc, bool en);
+VkBlendFactor BlendFactor(uint32_t f);
+VkBlendOp BlendOp(uint32_t f);
+VkPipelineColorBlendAttachmentState BlendAttachment(uint32_t bc, bool en);
 
-VkFormat vfmt(uint32_t dfmt, uint32_t nfmt);
-uint32_t vfmtBytes(uint32_t dfmt);
-VkPrimitiveTopology vkTopology(uint32_t prim);
+VkFormat VertexFormat(uint32_t dfmt, uint32_t nfmt);
+uint32_t VertexFormatBytes(uint32_t dfmt);
+VkPrimitiveTopology PrimitiveTopology(uint32_t prim);
 
-void readbackPixelBgra(const uint8_t *src, VkFormat fmt, uint8_t *dst);
+void ReadbackPixelBgra(const uint8_t* src, VkFormat fmt, uint8_t* dst);
 
 }  // namespace gpu::vk
