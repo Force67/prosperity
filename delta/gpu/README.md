@@ -9,6 +9,7 @@ ps4/            PM4 / Liverpool command processor + the GCN -> SPIR-V recompiler
 ps5/            AGC / gfx10.3 command processor + the RDNA2 -> SPIR-V recompiler
 shaders/        prebuilt SPIR-V for the heuristic quad path
 guest_memory.h  safe reads of guest memory shared by both command processors
+gpu_check.h     GPU_BUGCHECK: always-on fail-fast checks for module invariants
 tests/          unit tests + the layering check
 ```
 

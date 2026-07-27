@@ -34,8 +34,8 @@ ALLOWED = {
     # recompiled-program types and the detiler), not the directory: a backend
     # reaching into the decoder or spirv/ internals is a layering bug.
     'vulkan': ('gpu/vulkan/', 'gpu/rhi/', 'gpu/shaders/',
-               'gpu/guest_memory.h', 'gpu/ps4/gcn/gcn_translate.h',
-               'gpu/ps4/gcn/gcn_detile.h'),
+               'gpu/guest_memory.h', 'gpu/gpu_check.h',
+               'gpu/ps4/gcn/gcn_translate.h', 'gpu/ps4/gcn/gcn_detile.h'),
     'tests': ('gpu/',),
     'shaders': (),
     '': (),  # module-root headers depend on nothing in the module

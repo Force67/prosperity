@@ -4,6 +4,8 @@
 
 #include "gpu/vulkan/vk_memory_span.h"
 
+#include "gpu/gpu_check.h"
+
 #include <algorithm>
 #include <limits>
 
@@ -55,6 +57,12 @@ void MemorySpanAllocator::Free(uint64_t offset, uint64_t size) {
             });
   size_t out = 0;
   for (const MemorySpan& span : free_) {
+    // Strict overlap between free spans means the same bytes were freed
+    // twice (or a free span was allocated over): the allocator's map is
+    // corrupt and every later Allocate may hand out live memory.
+    GPU_BUGCHECK(!out ||
+                     free_[out - 1].offset + free_[out - 1].size <= span.offset,
+                 "double free: span overlaps an already-free span");
     if (out && free_[out - 1].offset + free_[out - 1].size >= span.offset) {
       const uint64_t end = std::max(free_[out - 1].offset + free_[out - 1].size,
                                     span.offset + span.size);

@@ -30,6 +30,14 @@ TEST(MemorySpanAllocator, CoalescesReturnedSpans) {
   EXPECT_EQ(whole, 0u);
 }
 
+TEST(MemorySpanAllocatorDeathTest, DoubleFreeDiesAtTheViolation) {
+  MemorySpanAllocator allocator(1024);
+  uint64_t offset = 0;
+  ASSERT_TRUE(allocator.Allocate(128, 1, offset));
+  allocator.Free(offset, 128);
+  EXPECT_DEATH(allocator.Free(offset, 128), "double free");
+}
+
 TEST(MemorySpanAllocator, RejectsInvalidAndExhaustedRequests) {
   MemorySpanAllocator allocator(128);
   uint64_t offset = 0;

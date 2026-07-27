@@ -9,6 +9,7 @@
 
 #include "gpu/rhi/renderer.h"
 
+#include "gpu/gpu_check.h"
 #include "gpu/ps4/gcn/gcn_detile.h"
 #include "gpu/ps4/gcn/gcn_translate.h"
 #include "gpu/vulkan/vk_capture.h"
@@ -635,6 +636,8 @@ bool CsRangeFlushOne(uint64_t base, CsRange& e) {
 
 // Ensure staging slot i can hold `size` bytes (grow-on-demand, kept mapped).
 bool CsEnsureStage(uint32_t i, VkDeviceSize size) {
+  GPU_BUGCHECK(i < ComputeInfo::kMaxResources,
+               "stage index %u out of bounds", i);
   CsStage& s = g_cs_stage[i];
   if (s.buf && s.cap >= size)
     return true;

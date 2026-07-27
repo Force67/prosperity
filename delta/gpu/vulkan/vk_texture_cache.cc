@@ -4,6 +4,7 @@
 
 #include "gpu/vulkan/vk_texture_cache.h"
 
+#include "gpu/gpu_check.h"
 #include "gpu/guest_memory.h"
 #include "gpu/ps4/gcn/gcn_detile.h"
 #include "gpu/ps4/gcn/gcn_translate.h"
@@ -747,6 +748,10 @@ void RetireTextureImage(const TexImageKey& key) {
   auto image = g_tex_images.find(key);
   if (image != g_tex_images.end()) {
     UnregisterTexturePages(key, image->second.footprint);
+    GPU_BUGCHECK(g_tex_image_bytes >= image->second.allocation_size,
+                 "texture budget underflow: %llu live < %llu retiring",
+                 (unsigned long long)g_tex_image_bytes,
+                 (unsigned long long)image->second.allocation_size);
     g_tex_image_bytes -= image->second.allocation_size;
     g_retired_tex_images.push_back(image->second);
     g_tex_images.erase(image);
@@ -938,6 +943,11 @@ VkDescriptorSet GetTexture(uint64_t base,
       return VK_NULL_HANDLE;
     VkMemoryRequirements mr;
     vkGetImageMemoryRequirements(g_dev.device, image_entry.image, &mr);
+    // Budget on LIVE image bytes. Retired images are only destroyed two
+    // BeginFrames later (ReleaseRetiredTextures), so actual allocated memory
+    // can transiently exceed the budget by up to two frames of retirements;
+    // capping allocated bytes instead would make creation fail outright at
+    // the budget edge, since eviction cannot free memory mid-frame.
     static const uint64_t kTextureBudget = [] {
       const char* value = std::getenv("DELTA_GPU_TEX_MB");
       const uint64_t mb = value ? std::strtoull(value, nullptr, 10) : 1024;
