@@ -206,7 +206,8 @@ public class LauncherActivity extends Activity {
         JSONArray lib = loadLibrary();
         if (lib.length() == 0) {
             TextView hint = new TextView(this);
-            hint.setText("No games yet. Tap the + button and pick a .pkg on your phone.");
+            hint.setText("No games yet. Tap the + button and pick a PS4 .pkg, "
+                    + "a PS5 .ffpkg, or an extracted PS5 game folder.");
             hint.setTextColor(0xFF6A7178);
             hint.setPadding(dp(16), dp(24), dp(16), dp(16));
             gamesContainer.addView(hint);
@@ -270,29 +271,35 @@ public class LauncherActivity extends Activity {
     private void addGame() {
         if (!requireAccess())
             return;
-        browse(Environment.getExternalStorageDirectory(), new String[]{".pkg"}, false, f -> {
+        // PS4 titles are .pkg; PS5 ones are a .ffpkg backup or an extracted app
+        // directory (eboot.bin + sce_sys), so folders are pickable too.
+        browse(Environment.getExternalStorageDirectory(),
+               new String[]{".pkg", ".ffpkg"}, true, f -> {
             runBusy("Reading " + f.getName() + " ...", () -> {
                 String titleId = "";
                 String title = "";
-                String info = safePkgInfo(f.getAbsolutePath());
-                if (info != null && info.indexOf('\t') >= 0) {
-                    String[] parts = info.split("\t", 2);
-                    titleId = parts[0];
-                    title = parts.length > 1 ? parts[1] : "";
+                String iconPath = "";
+                // Title and cover art come from the outer PKG entry table, which
+                // only a .pkg has; the other layouts fall back to their name.
+                if (f.isFile() && f.getName().toLowerCase().endsWith(".pkg")) {
+                    String info = safePkgInfo(f.getAbsolutePath());
+                    if (info != null && info.indexOf('\t') >= 0) {
+                        String[] parts = info.split("\t", 2);
+                        titleId = parts[0];
+                        title = parts.length > 1 ? parts[1] : "";
+                    }
+                    File iconsDir = new File(getFilesDir(), "icons");
+                    iconsDir.mkdirs();
+                    File iconFile = new File(iconsDir,
+                            Integer.toHexString(f.getAbsolutePath().hashCode()) + ".png");
+                    try {
+                        if (NativeBridge.pkgIcon(f.getAbsolutePath(), iconFile.getAbsolutePath()))
+                            iconPath = iconFile.getAbsolutePath();
+                    } catch (Throwable ignored) {
+                    }
                 }
                 if (title.isEmpty())
                     title = f.getName();
-
-                String iconPath = "";
-                File iconsDir = new File(getFilesDir(), "icons");
-                iconsDir.mkdirs();
-                File iconFile = new File(iconsDir,
-                        Integer.toHexString(f.getAbsolutePath().hashCode()) + ".png");
-                try {
-                    if (NativeBridge.pkgIcon(f.getAbsolutePath(), iconFile.getAbsolutePath()))
-                        iconPath = iconFile.getAbsolutePath();
-                } catch (Throwable ignored) {
-                }
                 addToLibrary(f.getAbsolutePath(), title, titleId, iconPath);
                 return "Added " + title;
             });
