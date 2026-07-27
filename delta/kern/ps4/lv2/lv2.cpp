@@ -845,10 +845,15 @@ static uintptr_t emit_calltrace(const char *name, uint32_t sid,
   return reinterpret_cast<uintptr_t>(gen->getCode());
 }
 
+#endif // DELTA_BACKEND_NATIVE
+
 // Per-syscall-id call counter (DELTA_SCHIST). The only profiler available on this
 // build: perf/strace/`/proc/PID/mem` are all yama-blocked, so to find what a
 // wedged/slow title hammers, count every syscall in the trampoline and dump the
 // histogram from the SIGUSR1 probe (crash.cpp). Racy increments are fine here.
+// Deliberately outside the DELTA_BACKEND_NATIVE guard: null_handler reads
+// g_scHist/dumpSyscallHist unconditionally, so the FEX build must link them too
+// (only the trampoline that increments g_sysHist is native-only).
 extern "C" uint64_t g_sysHist[1024] = {};
 extern const bool g_scHist;
 const bool g_scHist = std::getenv("DELTA_SCHIST") != nullptr;
@@ -885,6 +890,7 @@ static const bool g_scHistDump = [] {
   return true;
 }();
 
+#if defined(DELTA_BACKEND_NATIVE)
 // One-time trampoline per handler: call it with the guest's arg registers
 // untouched, then set/clear the carry flag and normalise rax per the convention
 // above. Replaces the bare `call handler` so the guest sees faithful errors.
