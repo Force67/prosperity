@@ -416,12 +416,15 @@ void deltaCore::boot(const base::String &xdir) {
   const std::string appRoot(path.c_str());
   const std::string appSfo = appRoot + "/sce_sys/param.sfo";
   const std::string appJson = appRoot + "/sce_sys/param.json";
+  // IsOpen(), not Exists(): the File ctor always allocates its backing object, so
+  // Exists() is true even for a missing path. A PS5 dump has no param.sfo, and
+  // treating it as a PS4 app dir loses both the title id and the platform.
   const bool isPs4AppDir =
       !isPkg && !isFfpkg &&
-      utl::File(base::String(appSfo.c_str()), utl::fileMode::read).Exists();
+      utl::File(base::String(appSfo.c_str()), utl::fileMode::read).IsOpen();
   const bool isPs5AppDir =
       !isPkg && !isFfpkg && !isPs4AppDir &&
-      utl::File(base::String(appJson.c_str()), utl::fileMode::read).Exists();
+      utl::File(base::String(appJson.c_str()), utl::fileMode::read).IsOpen();
   const bool isAppDir = isPs4AppDir || isPs5AppDir;
   base::String mainModule = path;
   uint32_t sdkVersion = 0;
