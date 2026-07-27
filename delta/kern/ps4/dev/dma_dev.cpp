@@ -19,6 +19,15 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
+#ifdef __ANDROID__
+// bionic only declares memfd_create at API >= 30; we target 29. The syscall
+// itself is present on every kernel the emulator runs on.
+#include <sys/syscall.h>
+static int memfd_create(const char *name, unsigned flags) {
+  return static_cast<int>(::syscall(__NR_memfd_create, name, flags));
+}
+#endif
+
 #include "dma_dev.h"
 #include "kern/ps4/lv2/sys_mem.h"
 #include "kern/proc.h"

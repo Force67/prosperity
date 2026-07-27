@@ -35,10 +35,31 @@ endif()
 if(SPIRVTOOLS_FOUND AND SPIRVHEADERS_FOUND)
   # PRIVATE: SPIRV-Tools is an implementation detail of the recompiler; no
   # header on the public surface needs it, and keeping it off dependents'
-  # include paths stops accidental use outside the module. LINK_LIBRARIES
-  # (absolute paths) instead of LIBRARIES+link_directories so the link
-  # requirement still reaches the final executable through the static lib.
-  target_link_libraries(delta_gpu PRIVATE ${SPIRVTOOLS_LINK_LIBRARIES})
+  # include paths stops accidental use outside the module.
+  #
+  # delta_gpu is a static library, so only the library list propagates to the
+  # final executable -- link directories do not. Absolute paths are therefore
+  # the only form that works, and a cross build (the Android NDK sysroot) gets
+  # bare -l names out of pkg-config, so resolve each entry against the .pc
+  # libdir ourselves.
+  set(_spirv_libs "")
+  foreach(_lib IN LISTS SPIRVTOOLS_LIBRARIES)
+    set(_found "")
+    foreach(_dir IN LISTS SPIRVTOOLS_LIBRARY_DIRS)
+      set(_cand
+          "${_dir}/${CMAKE_STATIC_LIBRARY_PREFIX}${_lib}${CMAKE_STATIC_LIBRARY_SUFFIX}")
+      if(EXISTS "${_cand}")
+        set(_found "${_cand}")
+        break()
+      endif()
+    endforeach()
+    if(_found)
+      list(APPEND _spirv_libs "${_found}")
+    else()
+      list(APPEND _spirv_libs "${_lib}")
+    endif()
+  endforeach()
+  target_link_libraries(delta_gpu PRIVATE ${_spirv_libs})
   target_include_directories(delta_gpu PRIVATE ${SPIRVTOOLS_INCLUDE_DIRS}
                              ${SPIRVHEADERS_INCLUDE_DIRS})
   target_compile_definitions(delta_gpu PRIVATE DELTA_HAVE_SPIRV_BACKEND=1)

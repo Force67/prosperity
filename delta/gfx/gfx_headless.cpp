@@ -15,6 +15,7 @@
 #if defined(__ANDROID__) && !defined(DELTA_ANDROID_APP)
 
 #include "gfx.h"
+#include "overlay.h"
 
 namespace gfx {
 
@@ -28,6 +29,8 @@ bool pumpEvents() { return true; }
 bool pollKeyboardPad(PadKeys &) { return false; }
 void setRumble(uint8_t, uint8_t) {}
 void shutdown() {}
+void setTitle(const char *) {}
+void overlaySetPerf(float, float, float) {}
 
 } // namespace gfx
 

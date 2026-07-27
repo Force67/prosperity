@@ -28,6 +28,7 @@
 
 #include "gfx.h"
 #include "gfx_android.h"
+#include "overlay.h"
 
 namespace gfx {
 namespace {
@@ -899,6 +900,11 @@ bool pollKeyboardPad(PadKeys &out) {
 // Haptics on the touch-gamepad build would need a JNI call to the Vibrator
 // service; no-op until that's wired through the NativeActivity.
 void setRumble(uint8_t, uint8_t) {}
+
+// The activity is fullscreen and has no title bar; the perf numbers already
+// reach logcat through the renderer's [fps] line.
+void setTitle(const char *) {}
+void overlaySetPerf(float, float, float) {}
 
 void shutdown() { teardown(); }
 
