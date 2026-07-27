@@ -30,6 +30,11 @@
 
 namespace {
 
+// Optional unbuffered copy of the log. logd drops bursts from a chatty uid and
+// anything still in the pipe when the process dies is lost with it, which is
+// exactly the output a crash dump consists of; a plain file loses neither.
+FILE *g_logFile = nullptr;
+
 // Pump stdout/stderr (the emulator logs through both) into logcat so a plain
 // `adb logcat -s prosperity` shows the whole boot.
 void *logPump(void *arg) {
@@ -41,11 +46,21 @@ void *logPump(void *arg) {
       --n;
     buf[n] = '\0';
     __android_log_write(ANDROID_LOG_INFO, "prosperity", buf);
+    if (g_logFile) {
+      std::fputs(buf, g_logFile);
+      std::fputc('\n', g_logFile);
+      std::fflush(g_logFile);
+    }
   }
   return nullptr;
 }
 
-void redirectStdioToLogcat() {
+void redirectStdioToLogcat(const base::String &dataDir) {
+  if (std::getenv("DELTA_ANDROID_LOGFILE")) {
+    base::String path = dataDir;
+    path += "/emu.log";
+    g_logFile = ::fopen(path.c_str(), "w");
+  }
   static int pfd[2];
   if (::pipe(pfd) != 0)
     return;
@@ -90,6 +105,59 @@ base::String resolveBootPkg(const base::String &dataDir) {
   base::String fallback = dataDir;
   fallback += "/game.pkg";
   return fallback;
+}
+
+// The DELTA_* knobs are the emulator's whole debug interface and an adb-started
+// Activity inherits no environment, so read them from <dataDir>/env.cfg as
+// KEY=VALUE lines ('#' comments). Existing variables win, so anything already
+// exported (e.g. by the launcher) is not overridden.
+void loadEnvConfig(const base::String &dataDir) {
+  base::String cfg = dataDir;
+  cfg += "/env.cfg";
+  FILE *f = ::fopen(cfg.c_str(), "rb");
+  if (!f)
+    return;
+  char line[1024];
+  while (::fgets(line, sizeof(line), f)) {
+    char *p = line;
+    while (*p == ' ' || *p == '\t')
+      ++p;
+    if (*p == '#' || *p == '\n' || *p == '\r' || *p == '\0')
+      continue;
+    char *eq = std::strchr(p, '=');
+    if (!eq)
+      continue;
+    *eq = '\0';
+    char *val = eq + 1;
+    for (char *e = eq; e > p && (e[-1] == ' ' || e[-1] == '\t');)
+      *--e = '\0';
+    size_t vlen = std::strlen(val);
+    while (vlen > 0 && (val[vlen - 1] == '\n' || val[vlen - 1] == '\r' ||
+                        val[vlen - 1] == ' ' || val[vlen - 1] == '\t'))
+      val[--vlen] = '\0';
+    if (*p) {
+      setenv(p, val, 0);
+      LOGI("env %s=%s", p, val);
+    }
+  }
+  ::fclose(f);
+}
+
+// PS5 titles need a decrypted Prospero module set; point at the staged copy
+// unless env.cfg already named one.
+void defaultPs5Modules(const base::String &dataDir) {
+  if (std::getenv("DELTA_PS5_MODULES"))
+    return;
+  base::String common = dataDir;
+  common += "/ps5-modules/common_lib";
+  if (::access(common.c_str(), R_OK) != 0)
+    return;
+  base::String paths = common;
+  paths += ":";
+  paths += dataDir;
+  paths += "/ps5-modules/priv_lib";
+  setenv("DELTA_PS5_MODULES", paths.c_str(), 1);
+  LOGI("ps5 modules = %s", paths.c_str());
 }
 
 void bootOnce(AppState *s) {
@@ -157,14 +225,17 @@ int32_t onInput(android_app *, AInputEvent *ev) {
 }  // namespace
 
 extern "C" void android_main(android_app *app) {
-  redirectStdioToLogcat();
-  cpu::earlyInit();  // reserve the FEX heap before any large guest mapping
-  utl::createLogger(true);
-
   AppState state;
   const char *ext = app->activity->externalDataPath;
   state.dataDir = base::String(ext ? ext : "/data/local/tmp/prosperity");
   setenv("DELTA_DATA_DIR", state.dataDir.c_str(), 1);
+  // env.cfg first: it can ask for the log file the redirect is about to open.
+  loadEnvConfig(state.dataDir);
+  defaultPs5Modules(state.dataDir);
+
+  redirectStdioToLogcat(state.dataDir);
+  cpu::earlyInit();  // reserve the FEX heap before any large guest mapping
+  utl::createLogger(true);
   LOGI("data dir = %s", state.dataDir.c_str());
 
   app->userData = &state;
