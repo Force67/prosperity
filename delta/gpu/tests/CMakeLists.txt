@@ -18,3 +18,20 @@ add_delta_test(gcn_decode_test
     gcn_decode_test.cc
     ../ps4/gcn/gcn_decode.cc
   DEPS delta_deps)
+
+add_delta_test(vk_memory_span_test
+  SOURCES
+    vk_memory_span_test.cc
+    ../vulkan/vk_memory_span.cc
+  DEPS delta_deps)
+
+add_delta_test(vk_compute_hazard_test
+  SOURCES
+    vk_compute_hazard_test.cc
+  DEPS delta_deps)
+
+add_delta_test(vk_index_upload_test
+  SOURCES
+    vk_index_upload_test.cc
+    ../vulkan/vk_index_upload.cc
+  DEPS delta_deps)
