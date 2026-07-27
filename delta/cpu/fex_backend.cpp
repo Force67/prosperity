@@ -872,6 +872,26 @@ private:
       // BPE allocator/job system: >1000 unaligned-atomic sites in the eboot)
       // otherwise corrupt their lock-free structures intermittently.
       FEXCore::Config::Set(FEXCore::Config::CONFIG_STRICTINPROCESSSPLITLOCKS, "1");
+      // FEX only emulates x86's store ordering for SCALAR loadstores by
+      // default: VectorTSOEnabled and MemcpySetTSOEnabled are off, so SIMD
+      // copies and REP MOVS/STOS are reordered freely on ARM. PS4 engines
+      // publish shared structures with SIMD stores -- SotC's BPE JobSystem
+      // copies each job's descriptor block as a `vmovups ymm` pair (claim
+      // 0x38d40 reads [jobsys+ord*0x120+0xea8/0xeb8]; the enqueue side writes
+      // it the same way) -- so an unordered vector store lets a worker observe
+      // the "work available" flag against a stale or half-published
+      // descriptor. That is a work-visible-but-unclaimable livelock: the
+      // workers spin failing to claim while the producer waits for a
+      // completion that never comes. Ordering costs throughput on vector
+      // copies, so allow opting out for perf experiments.
+      // The two halves are priced very differently: ordering SIMD loadstores
+      // (DELTA_FEX_VECTOR_TSO) is what the JobSystem descriptor publish needs,
+      // while ordering REP MOVS/STOS (DELTA_FEX_MEMCPY_TSO) makes every guest
+      // memcpy atomic and costs far more. Both default off; enable per run.
+      if (const char *v = std::getenv("DELTA_FEX_VECTOR_TSO"); v && v[0] != '0')
+        FEXCore::Config::Set(FEXCore::Config::CONFIG_VECTORTSOENABLED, "1");
+      if (const char *m = std::getenv("DELTA_FEX_MEMCPY_TSO"); m && m[0] != '0')
+        FEXCore::Config::Set(FEXCore::Config::CONFIG_MEMCPYSETTSOENABLED, "1");
 
       auto HostFeatures = FEX::FetchHostFeatures();
       CTX = FEXCore::Context::Context::CreateNewContext(HostFeatures);
@@ -1119,6 +1139,21 @@ uint64_t currentGuestRip() {
 // JobSystem worker ordinal at fs:[-8]) without emitting guest fs-relative code.
 uint64_t currentGuestFsBase() {
   return t_curThread ? t_curThread->CurrentFrame->State.fs_cached : 0;
+}
+
+// Every live guest thread's fs base, for host-side surveys of guest TLS. The
+// BPE JobSystem's worker ordinal lives at [*(fsbase) - 0x10] as 0x8000|core,
+// and the claim path tests `job_affinity & (1 << ordinal)` -- so enumerating
+// the ordinals that actually exist decides whether a job whose affinity names
+// a core we never assign (e.g. SotC's core-6 "Resource Loading" pin, mask
+// 0x40) can be claimed by anyone at all.
+void guestThreadFsBases(std::vector<uint64_t> &out) {
+  out.clear();
+  std::lock_guard lk(g_liveMutex);
+  out.reserve(g_live.size());
+  for (auto &t : g_live)
+    if (t.thread && t.thread->CurrentFrame)
+      out.push_back(t.thread->CurrentFrame->State.fs_cached);
 }
 
 const uint64_t *currentGuestGregs() {

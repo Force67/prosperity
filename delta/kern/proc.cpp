@@ -518,6 +518,13 @@ static void probeFiosPaths() {
 //   kick  0x35480: job affinity/prio submitted
 // ===========================================================================
 namespace {
+std::atomic<uint64_t> g_jobClaims{0}, g_jobFails{0};
+
+// Host-side JobSystem watcher. Spawned once with the guest jobsys base
+// (identity-mapped, safe to read from a host thread). Everything expensive
+// happens here, off the guest's hot paths.
+void spawnJobWatcher(uint64_t base);
+
 void PS4ABI jobTraceLogger(uint64_t hookId, uint64_t a0, uint64_t a1,
                            uint64_t a2, uint64_t a3, uint64_t ret) {
   switch (hookId) {
@@ -542,41 +549,180 @@ void PS4ABI jobTraceLogger(uint64_t hookId, uint64_t a0, uint64_t a1,
         (unsigned long long)ret);
       std::fflush(stderr);
     }
-    static std::atomic<uint64_t> claims{0}, fails{0};
-    uint64_t c = ++claims;
-    if (ret == 0) ++fails;
-    // Periodically dump the 8 per-ordinal direct-assign slots (a0=jobsys=r14;
-    // slot = [jobsys + ord*0x120 + 0xeb0]) so a job stranded in a slot whose
-    // ordinal no job-worker (0..3) services shows up as a non-zero high slot.
-    if ((c % 4000000) == 0) {
-      std::fprintf(stderr, "[jobclaim] claims=%llu fails=%llu directAssign[0..7]=",
-                   (unsigned long long)c, (unsigned long long)fails.load());
-      for (int i = 0; i < 8; i++) {
-        uint64_t slot = 0;
-        uint64_t addr = a0 + (uint64_t)i * 0x120 + 0xeb0;
-        if (addr > 0x10000) slot = *reinterpret_cast<uint64_t *>(addr);
-        std::fprintf(stderr, "%d:%#llx ", i, (unsigned long long)slot);
-      }
-      std::fprintf(stderr, "\n");
-      std::fflush(stderr);
-    }
+    ++g_jobClaims;
+    if (ret == 0) ++g_jobFails;
+    if (a0 > 0x10000)
+      spawnJobWatcher(a0);
     break;
   }
-  case 10: { // KICK 0x35480 -> ret = job-slot handle; a0=rdi job descriptor
-    // Log the first submits + a periodic sample so we see affinity/prio spread.
-    static std::atomic<uint64_t> n{0};
-    uint64_t k = ++n;
-    if (k <= 30 || (k % 4000) == 0) {
-      std::fprintf(stderr,
-        "[jobkick] #%llu desc=%#llx a1=%#llx a2=%#llx a3=%#llx -> slot=%#llx\n",
-        (unsigned long long)k, (unsigned long long)a0, (unsigned long long)a1,
-        (unsigned long long)a2, (unsigned long long)a3, (unsigned long long)ret);
+  case 11: { // CTOR 0x36210 -> a0 = rdi = the JobSystem object being built.
+    // The zero-cost watcher bootstrap: this runs ONCE at init, returns
+    // normally, and takes its argument in a register. Verified to be the same
+    // base the claim path indexes: the ctor zeroes per-ordinal blocks at
+    // +0xeb0/+0xfd0/... (stride 0x120), exactly what claim tests at
+    // [jobsys + ordinal*0x120 + 0xeb0].
+    //
+    // Do NOT hook JobKick(0x35480) here: it reads its 7th argument from the
+    // CALLER's frame (`mov r14d,[rbp+0x10]`), and an entry detour relocates
+    // the `mov rbp,rsp` prologue so rbp lands in the wrapper's frame -- every
+    // job then gets a garbage affinity and the title wedges before its main
+    // loop. Entry detours are only safe on functions whose arguments never
+    // come off the caller's stack.
+    if (a0 > 0x10000) {
+      std::fprintf(stderr, "[jobctor] JobSystem ctor this=%#llx\n",
+                   (unsigned long long)a0);
       std::fflush(stderr);
+      spawnJobWatcher(a0);
     }
     break;
   }
   default: break;
   }
+}
+
+// Watcher body: every 30s dump the 8 per-ordinal direct-assign blocks
+// (jobsys + i*0x120 + 0xeb0) plus the job-table survey. The round-10 livelock
+// signature is a persistent marker in a block whose ordinal (4..7) no
+// claim-worker (0..3) services while blocks 0..3 sit empty.
+// DELTA_SOTC_JOBMOVE (flawed, kept for experiments): when the signature holds
+// across two consecutive dumps, move the marker qword into block 2 -- note the
+// claim path copies a 0x40-byte descriptor at +0xea8, so a single-qword move
+// hands worker 2 a zeroed job; superseded by the job-table affinity survey.
+void spawnJobWatcher(uint64_t base) {
+  static std::atomic<uint64_t> once{0};
+  uint64_t expect = 0;
+  if (!once.compare_exchange_strong(expect, base))
+    return;
+  std::thread([base] {
+        const bool doMove = std::getenv("DELTA_SOTC_JOBMOVE") != nullptr;
+        uint64_t prev[8] = {0};
+        int persist = 0;
+        for (;;) {
+          std::this_thread::sleep_for(std::chrono::seconds(30));
+          uint64_t slot[8];
+          for (int i = 0; i < 8; i++)
+            slot[i] = *reinterpret_cast<volatile uint64_t *>(base + (uint64_t)i * 0x120 + 0xeb0);
+          std::fprintf(stderr,
+                       "[jobwatch] claims=%llu fails=%llu directAssign[0..7]= "
+                       "0:%#llx 1:%#llx 2:%#llx 3:%#llx 4:%#llx 5:%#llx 6:%#llx 7:%#llx\n",
+                       (unsigned long long)g_jobClaims.load(), (unsigned long long)g_jobFails.load(),
+                       (unsigned long long)slot[0], (unsigned long long)slot[1],
+                       (unsigned long long)slot[2], (unsigned long long)slot[3],
+                       (unsigned long long)slot[4], (unsigned long long)slot[5],
+                       (unsigned long long)slot[6], (unsigned long long)slot[7]);
+          // Context dump of any occupied block: the direct-assign descriptor
+          // is the 0x40 bytes at block+0xea8 (claim copies +0xea8/+0xeb8 ymm
+          // pair; +0xeb0 is the occupancy discriminator).
+          for (int i = 0; i < 8; i++) {
+            if (!slot[i])
+              continue;
+            const uint64_t *q = reinterpret_cast<const uint64_t *>(base + (uint64_t)i * 0x120 + 0xea8);
+            std::fprintf(stderr,
+                         "[jobwatch]   block%d desc@+0xea8: %#llx %#llx %#llx %#llx %#llx %#llx %#llx %#llx\n",
+                         i, (unsigned long long)q[0], (unsigned long long)q[1],
+                         (unsigned long long)q[2], (unsigned long long)q[3],
+                         (unsigned long long)q[4], (unsigned long long)q[5],
+                         (unsigned long long)q[6], (unsigned long long)q[7]);
+          }
+          // The decisive post-drain read: live entries in the 1024-slot job
+          // table ([jobsys+0xb60], stride 0x9b8, alloc bitmap at +0xac0).
+          // JobKick writes job+0x998 = affinity (arg7, default [jobsys+0x3c])
+          // and job+0x9a0 = prio; the claim path tests 1<<worker-ordinal
+          // against the affinity. A stuck finalize job shows up here with a
+          // mask the 4 workers (0xF) cannot satisfy.
+          // Which worker ordinals exist process-wide. The claim path tests
+          // `job_affinity & (1 << ordinal)` with ordinal = [*(fsbase)-0x10]
+          // (0x8000|core, bit 15 = valid; fn 0x33350). A job whose affinity
+          // names only a core no live thread reports -- e.g. SotC's core-6
+          // "Resource Loading" pin, mask 0x40 -- is unclaimable by anyone.
+          {
+            std::vector<uint64_t> fsb;
+            cpu::guestThreadFsBases(fsb);
+            uint32_t present = 0;
+            int valid = 0;
+            std::string list;
+            for (uint64_t f : fsb) {
+              if (!f)
+                continue;
+              uint64_t tcb = *reinterpret_cast<volatile uint64_t *>(f);
+              if (tcb < 0x10000)
+                continue;
+              uint64_t v = *reinterpret_cast<volatile uint64_t *>(tcb - 0x10);
+              if (!(v & 0x8000))
+                continue;
+              int ord = (int)(v & 0x7fff);
+              if (ord >= 0 && ord < 32) {
+                present |= 1u << ord;
+                valid++;
+                char b[16];
+                std::snprintf(b, sizeof b, "%d ", ord);
+                list += b;
+              }
+            }
+            std::fprintf(stderr,
+                         "[jobwatch] threads=%zu withOrdinal=%d ordinals={ %s} claimable-mask=%#x\n",
+                         fsb.size(), valid, list.c_str(), present);
+          }
+          static int tableDumps = 0;
+          uint64_t defAff = *reinterpret_cast<volatile uint32_t *>(base + 0x3c);
+          uint64_t tab = *reinterpret_cast<volatile uint64_t *>(base + 0xb60);
+          const uint64_t *bm = reinterpret_cast<const uint64_t *>(base + 0xac0);
+          uint64_t used = 0;
+          for (int w = 0; w < 16; w++) used += __builtin_popcountll(~bm[w]);
+          if (tableDumps < 200) {
+            std::fprintf(stderr, "[jobwatch] jobsys=%#llx defaultAffinity[+0x3c]=%#llx table=%#llx bitmapFreeInv=%llu bm0=%#llx\n",
+                         (unsigned long long)base, (unsigned long long)defAff,
+                         (unsigned long long)tab, (unsigned long long)used,
+                         (unsigned long long)bm[0]);
+            if (tab > 0x10000) {
+              int shown = 0;
+              for (int j = 0; j < 1024 && shown < 12; j++) {
+                // Print any table entry with a plausible live affinity word;
+                // polarity of the bitmap is unknown, so filter on content.
+                const uint8_t *job = reinterpret_cast<const uint8_t *>(tab + (uint64_t)j * 0x9b8);
+                uint32_t aff = *reinterpret_cast<const uint32_t *>(job + 0x998);
+                uint32_t prio = *reinterpret_cast<const uint32_t *>(job + 0x9a0);
+                // The mask the claim path actually tests (0x38fc5:
+                // `test [node+0xf0], 1<<ordinal`); kick's 0x34e60 helper
+                // copies the submitted spec here.
+                uint32_t mask = *reinterpret_cast<const uint32_t *>(job + 0xf0);
+                uint64_t q0 = *reinterpret_cast<const uint64_t *>(job);
+                if (!aff && !q0)
+                  continue;
+                std::fprintf(stderr,
+                             "[jobwatch]   job[%d] q0=%#llx claimMask[+0xf0]=%#x aff[+0x998]=%#x prio=%#x q+0x9a8=%#llx\n",
+                             j, (unsigned long long)q0, mask, aff, prio,
+                             (unsigned long long)*reinterpret_cast<const uint64_t *>(job + 0x9a8));
+                shown++;
+              }
+              tableDumps++;
+            }
+          }
+          const bool stranded =
+              (slot[4] | slot[5] | slot[6] | slot[7]) != 0 &&
+              (slot[0] | slot[1] | slot[2] | slot[3]) == 0 &&
+              slot[4] == prev[4] && slot[5] == prev[5] && slot[6] == prev[6] &&
+              slot[7] == prev[7];
+          persist = stranded ? persist + 1 : 0;
+          std::memcpy(prev, slot, sizeof(prev));
+          if (doMove && persist >= 2) {
+            for (int i = 4; i < 8; i++) {
+              if (!slot[i])
+                continue;
+              auto *src = reinterpret_cast<volatile uint64_t *>(base + (uint64_t)i * 0x120 + 0xeb0);
+              auto *dst = reinterpret_cast<volatile uint64_t *>(base + 2ULL * 0x120 + 0xeb0);
+              uint64_t v = *src;
+              *dst = v;
+              *src = 0;
+              std::fprintf(stderr,
+                           "[jobwatch] JOBMOVE: moved direct-assign marker %#llx block%d -> block2\n",
+                           (unsigned long long)v, i);
+            }
+            persist = 0;
+          }
+          std::fflush(stderr);
+        }
+  }).detach();
 }
 
 // Install an entry detour on an eboot-internal function. prologueLen must be the
@@ -609,9 +755,15 @@ static void installJobTrace(smodule &m) {
   // prologue cut points (smallest instr boundary >= 14, verified by disasm):
   //   claim 0x38d40 -> 20 (through `sub rsp,0xa8`)
   //   kick  0x35480 -> 17 (through `sub rsp,0x38`)
-  installInternalHook(base, 0x38d40, 20, 12, "DoClaimJob(0x38d40)");
-  if (std::getenv("DELTA_JOB_TRACE_KICK"))
-    installInternalHook(base, 0x35480, 17, 10, "JobKick(0x35480)");
+  //   ctor  0x36210 -> 15 (through `sub rsp,0x40`)
+  // The ctor hook alone is enough to arm the watcher and costs one call per
+  // run. The claim hook additionally counts claim/fail rates, but the workers
+  // hit it ~2M times/sec, and the magic-syscall round trip roughly halves the
+  // world-load drain rate -- opt in with DELTA_JOB_TRACE_CLAIM when the rates
+  // are what you're after.
+  installInternalHook(base, 0x36210, 15, 11, "JobSystemCtor(0x36210)");
+  if (std::getenv("DELTA_JOB_TRACE_CLAIM"))
+    installInternalHook(base, 0x38d40, 20, 12, "DoClaimJob(0x38d40)");
 }
 
 static void investigateDcbGate(smodule &m) {

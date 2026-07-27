@@ -21,6 +21,7 @@
 #pragma once
 
 #include <cstdint>
+#include <vector>
 
 namespace krnl {
 struct moduleInfo;
@@ -135,6 +136,11 @@ uint64_t currentGuestRip();
 // Guest fs-segment base (TLS pointer) of the guest thread running on this host
 // thread, or 0. Used by hook loggers to read guest thread-local state.
 uint64_t currentGuestFsBase();
+
+// Every live guest thread's fs base. Lets a host thread survey guest TLS
+// across the whole process (e.g. which BPE JobSystem worker ordinals exist)
+// without instrumenting a hot guest path. FEX only; empty on native.
+void guestThreadFsBases(std::vector<uint64_t> &out);
 
 // The 16 guest GPRs (FEXCore::X86State::REG_* order) of the guest thread on this
 // host thread, or nullptr. FEX only; lets the crash handler dump guest regs and
