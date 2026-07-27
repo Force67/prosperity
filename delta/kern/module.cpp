@@ -673,9 +673,14 @@ bool smodule::resolveObfSymbol(const char *name, uintptr_t &ptrOut) {
     // NIDs are globally unique, so probing each forced-HLE table by name is safe
     // (a userService NID only ever matches the userService table). Everything else
     // (incl. libSceGnmDriver/AGC, which run LLE fine) stays LLE.
-    static const char *const kPs5ForcedHle[] = {"libSceVideoOut",
-                                                "libSceUserService", "libScePad",
-                                                "libSceSaveData"};
+    //   - libkernel / libSceAgcDriver / libSceAgc / libSceNgs2: only the handful of
+    //     exports missing from firmware 01.14.00 that newer-SDK titles import (see
+    //     vprx/ps5/*_ps5.cpp); every other NID in those libraries misses the tables
+    //     and stays LLE.
+    static const char *const kPs5ForcedHle[] = {
+        "libSceVideoOut",   "libSceUserService", "libScePad",
+        "libSceSaveData",   "libkernel",         "libSceAgcDriver",
+        "libSceAgc",        "libSceNgs2"};
     for (const char *lib : kPs5ForcedHle) {
       if (uintptr_t hle = runtime::vprx_get_forced(lib, hid)) {
         char tn[64];

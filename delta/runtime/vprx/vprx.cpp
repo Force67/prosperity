@@ -28,6 +28,13 @@ extern "C" int vprx_anchor_libSceVideoOut;
 // PS5 module copies (runtime/vprx/ps5/*). Separate registry (vprxTablePs5).
 extern "C" int vprx_anchor_ps5_libSceVideoOut;
 extern "C" int vprx_anchor_ps5_libSceUserService;
+// A few libkernel exports newer SDK libc.prx builds import that firmware 01.14.00
+// doesn't export at all; the rest of libkernel stays LLE.
+extern "C" int vprx_anchor_ps5_libkernel;
+// Same story for the AGC/Ngs2 exports newer-SDK titles import.
+extern "C" int vprx_anchor_ps5_libSceAgcDriver;
+extern "C" int vprx_anchor_ps5_libSceAgc;
+extern "C" int vprx_anchor_ps5_libSceNgs2;
 extern "C" int vprx_anchor_libSceGnmDriver;
 extern "C" int vprx_anchor_libSceMsgDialog;
 // Pad + userService HLE: a connected controller + one logged-in user lets the
@@ -66,6 +73,10 @@ extern "C" int vprx_anchor_libSceSaveDataDialog;
 static volatile int *const vprx_anchors[] = {&vprx_anchor_libSceVideoOut,
                                              &vprx_anchor_ps5_libSceVideoOut,
                                              &vprx_anchor_ps5_libSceUserService,
+                                             &vprx_anchor_ps5_libkernel,
+                                             &vprx_anchor_ps5_libSceAgcDriver,
+                                             &vprx_anchor_ps5_libSceAgc,
+                                             &vprx_anchor_ps5_libSceNgs2,
                                              &vprx_anchor_libSceSaveData,
                                              &vprx_anchor_libSceSaveDataDialog,
                                              &vprx_anchor_libfmod,
