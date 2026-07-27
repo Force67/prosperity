@@ -93,6 +93,22 @@ std::string jsonGetString(const std::string &js, const char *key) {
   return js.substr(open + 1, close - open - 1);
 }
 
+// param.json keeps the display name under localizedParameters.<defaultLanguage>
+// .titleName. Search from the default language's block so a title shipping
+// several languages doesn't pick whichever one happens to come first.
+std::string jsonGetTitleName(const std::string &js) {
+  const std::string lang = jsonGetString(js, "defaultLanguage");
+  if (!lang.empty()) {
+    const size_t block = js.find("\"" + lang + "\"");
+    if (block != std::string::npos) {
+      std::string name = jsonGetString(js.substr(block), "titleName");
+      if (!name.empty())
+        return name;
+    }
+  }
+  return jsonGetString(js, "titleName");
+}
+
 bool readHostFile(const std::string &path, uint64_t maxSize,
                   std::vector<uint8_t> &out) {
   utl::File file(base::String(path.c_str()), utl::fileMode::read);
@@ -343,6 +359,8 @@ public:
   // instead of the PS4 param.sfo; pull the "titleId" string out of it.
   std::string titleId() { return paramJsonField("titleId"); }
 
+  std::string title() { return jsonGetTitleName(paramJson()); }
+
   std::vector<uint8_t> icon() {
     const auto *node = fs_.find("/sce_sys/icon0.png");
     if (!node || node->size > kMaxIconSize)
@@ -360,14 +378,18 @@ public:
   uint32_t sdkVersion() { return parseSdkVersion(paramJsonField("sdkVersion")); }
 
 private:
-  std::string paramJsonField(const char *key) {
+  std::string paramJson() {
     const auto *node = fs_.find("/sce_sys/param.json");
     if (!node || node->size > (1u << 20))
       return {};
     std::string js(node->size, '\0');
     if (fs_.read(*node, js.data(), 0, static_cast<int64_t>(js.size())) <= 0)
       return {};
-    return jsonGetString(js, key);
+    return js;
+  }
+
+  std::string paramJsonField(const char *key) {
+    return jsonGetString(paramJson(), key);
   }
 
   struct Ufs2File : krnl::vfs::VirtualFile {
@@ -461,6 +483,7 @@ void deltaCore::boot(const base::String &xdir) {
     bool decrypted = provider->hasDecrypted();
     krnl::vfs::mountVirtual("/app0", provider);
     krnl::vfs::setTitleId(provider->titleId());
+    gameTitle = provider->title();
 #if defined(__linux__) && !defined(__ANDROID__)
     gameIcon = provider->icon();
 #endif
@@ -486,6 +509,7 @@ void deltaCore::boot(const base::String &xdir) {
       readHostFile(appJson, kMaxSfoSize, json);
       const std::string js(json.begin(), json.end());
       krnl::vfs::setTitleId(jsonGetString(js, "titleId"));
+      gameTitle = jsonGetTitleName(js);
       sdkVersion = parseSdkVersion(jsonGetString(js, "sdkVersion"));
 #if defined(__linux__) && !defined(__ANDROID__)
       if (!readHostFile(appRoot + "/sce_sys/icon0.png", kMaxIconSize, gameIcon))
@@ -530,11 +554,12 @@ void deltaCore::boot(const base::String &xdir) {
   // HLE both bring it up with a generic title depending on who gets there first.
   {
     const std::string &tid = krnl::vfs::titleId();
-    std::string title =
-        gameTitle.empty() ? (tid.empty() ? std::string("unknown") : tid)
-                          : gameTitle;
-    title += " - prosperity";
-    title += isPs5 ? " (PS5)" : " (PS4)";
+    std::string title = "prosperity - ";
+    title += gameTitle.empty() ? std::string("unknown") : gameTitle;
+    title += " - [";
+    title += tid.empty() ? std::string("unknown") : tid;
+    title += isPs5 ? "] (PS5)" : "] (PS4)";
+    LOG_INFO("window title: {}", title.c_str());
     gfx::setTitle(title.c_str());
   }
 #if defined(__linux__) && !defined(__ANDROID__)

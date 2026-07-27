@@ -122,12 +122,19 @@ constexpr int kMaxIconDimension = 4096;
 #if defined(__linux__)
 void drawBadge(uint8_t *pixels, int width, int height, const uint8_t *logo,
                int logoWidth, int logoHeight) {
-  const int size = std::max(1, std::min(width, height) * 3 / 8);
+  const int size = std::max(1, std::min(width, height) * 3 / 4);
   const int left = width - size;
+  // The logo art carries ~11% transparent margin, so a top-anchored badge reads
+  // as floating below the edge. Lift it by that margin; the rows that fall off
+  // the top are the empty ones.
+  const int top = -(size / 8);
   for (int y = 0; y < size; ++y) {
+    const int py = top + y;
+    if (py < 0 || py >= height)
+      continue;
     for (int x = 0; x < size; ++x) {
       const int px = left + x;
-      uint8_t *rgba = pixels + (static_cast<size_t>(y) * width + px) * 4;
+      uint8_t *rgba = pixels + (static_cast<size_t>(py) * width + px) * 4;
       const uint8_t *badge =
           logo + (static_cast<size_t>(y * logoHeight / size) * logoWidth +
                   x * logoWidth / size) *
@@ -143,6 +150,20 @@ void drawBadge(uint8_t *pixels, int width, int height, const uint8_t *logo,
               outAlpha);
       }
       rgba[3] = static_cast<uint8_t>((outAlpha + 127) / 255);
+    }
+  }
+}
+
+// Blue frame around the artwork, so the icon reads as ours at taskbar size.
+void drawBorder(uint8_t *pixels, int width, int height) {
+  constexpr uint8_t kFrame[4] = {0x18, 0x60, 0xCC, 0xFF};
+  const int thickness = std::max(2, std::min(width, height) / 24);
+  for (int y = 0; y < height; ++y) {
+    const bool edgeRow = y < thickness || y >= height - thickness;
+    for (int x = 0; x < width; ++x) {
+      if (!edgeRow && x >= thickness && x < width - thickness)
+        continue;
+      std::memcpy(pixels + (static_cast<size_t>(y) * width + x) * 4, kFrame, 4);
     }
   }
 }
@@ -175,6 +196,7 @@ void applyWindowIcon() {
     return;
   }
   drawBadge(pixels, width, height, logo, logoWidth, logoHeight);
+  drawBorder(pixels, width, height);
   SDL_Surface *surface = SDL_CreateSurfaceFrom(
       width, height, SDL_PIXELFORMAT_RGBA32, pixels, width * STBI_rgb_alpha);
   if (surface) {
