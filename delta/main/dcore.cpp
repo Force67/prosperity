@@ -35,6 +35,9 @@ bool deltaCore::init() {
 }
 
 namespace {
+constexpr uint64_t kMaxSfoSize = 1u << 20;
+constexpr uint64_t kMaxIconSize = 16u << 20;
+
 // Minimal param.sfo reader: return the string value of `key` (e.g. "TITLE_ID"),
 // or "" if absent. The SFO is a small flat table; all offsets are bounds-checked.
 std::string sfoGet(const uint8_t *d, size_t n, const char *key) {
@@ -88,6 +91,28 @@ std::string jsonGetString(const std::string &js, const char *key) {
   if (close == std::string::npos)
     return {};
   return js.substr(open + 1, close - open - 1);
+}
+
+bool readHostFile(const std::string &path, uint64_t maxSize,
+                  std::vector<uint8_t> &out) {
+  utl::File file(base::String(path.c_str()), utl::fileMode::read);
+  if (!file.IsOpen())
+    return false;
+  const uint64_t size = file.GetSize();
+  if (size == 0 || size > maxSize)
+    return false;
+  out.resize(static_cast<size_t>(size));
+  if (file.Read(out.data(), out.size()) != size) {
+    out.clear();
+    return false;
+  }
+  return true;
+}
+
+std::string parentPath(const base::String &path) {
+  const std::string value(path.c_str());
+  const size_t slash = value.find_last_of("/\\");
+  return slash == std::string::npos ? std::string(".") : value.substr(0, slash);
 }
 
 // param.json stores sdkVersion as "0xMMmmpppp00000000"; libkernel wants the top
@@ -152,6 +177,19 @@ public:
     if (fs_.readPkgEntry(0x1000, sfo) > 0)
       return sfoGet(sfo.data(), sfo.size(), "TITLE_ID");
     return {};
+  }
+
+  std::string title() {
+    std::vector<uint8_t> sfo;
+    if (fs_.readPkgEntry(0x1000, sfo) > 0)
+      return sfoGet(sfo.data(), sfo.size(), "TITLE");
+    return {};
+  }
+
+  std::vector<uint8_t> icon() {
+    std::vector<uint8_t> png;
+    fs_.readPkgEntry(0x1200, png);
+    return png;
   }
 
   // SOTTR workaround: cache every .manifest.bin's bytes keyed by its base name
@@ -305,6 +343,18 @@ public:
   // instead of the PS4 param.sfo; pull the "titleId" string out of it.
   std::string titleId() { return paramJsonField("titleId"); }
 
+  std::vector<uint8_t> icon() {
+    const auto *node = fs_.find("/sce_sys/icon0.png");
+    if (!node || node->size > kMaxIconSize)
+      return {};
+    std::vector<uint8_t> png(node->size);
+    const int64_t read = fs_.read(*node, png.data(), 0, node->size);
+    if (read <= 0)
+      return {};
+    png.resize(static_cast<size_t>(read));
+    return png;
+  }
+
   // param.json spells the SDK version as a 64-bit hex string ("0x0300...")
   // whose top half is the 0xMMmmpppp form libkernel compares against.
   uint32_t sdkVersion() { return parseSdkVersion(paramJsonField("sdkVersion")); }
@@ -361,13 +411,24 @@ void deltaCore::boot(const base::String &xdir) {
 
   const bool isPkg = endsWithIgnoreCase(xdir, ".pkg");
   const bool isFfpkg = endsWithIgnoreCase(xdir, ".ffpkg");
-  // A raw app dump: the extracted /app0 tree itself, identified by its PS5
-  // sce_sys/param.json. Host-mounted rather than read through an image reader.
-  std::string appJson = std::string(path.c_str()) + "/sce_sys/param.json";
-  const bool isAppDir = !isPkg && !isFfpkg && utl::File(base::String(appJson.c_str()),
-                                                       utl::fileMode::read).Exists();
+  // A raw app dump: the extracted /app0 tree itself, identified by its console
+  // metadata. Host-mounted rather than read through an image reader.
+  const std::string appRoot(path.c_str());
+  const std::string appSfo = appRoot + "/sce_sys/param.sfo";
+  const std::string appJson = appRoot + "/sce_sys/param.json";
+  const bool isPs4AppDir =
+      !isPkg && !isFfpkg &&
+      utl::File(base::String(appSfo.c_str()), utl::fileMode::read).Exists();
+  const bool isPs5AppDir =
+      !isPkg && !isFfpkg && !isPs4AppDir &&
+      utl::File(base::String(appJson.c_str()), utl::fileMode::read).Exists();
+  const bool isAppDir = isPs4AppDir || isPs5AppDir;
   base::String mainModule = path;
   uint32_t sdkVersion = 0;
+  std::string gameTitle;
+#if defined(__linux__) && !defined(__ANDROID__)
+  std::vector<uint8_t> gameIcon;
+#endif
 
   if (isPkg) {
     auto provider = std::make_shared<PkgProvider>(path);
@@ -380,6 +441,10 @@ void deltaCore::boot(const base::String &xdir) {
     // Publish the title id so savedata can give this game its own host save
     // root (else saves for different titles collide under one directory).
     krnl::vfs::setTitleId(provider->titleId());
+    gameTitle = provider->title();
+#if defined(__linux__) && !defined(__ANDROID__)
+    gameIcon = provider->icon();
+#endif
     mainModule = base::String("/app0/eboot.bin");
   } else if (isFfpkg) {
     // PS5 game backup (UFS2). Mount it at /app0 and prefer the decrypted/ tree
@@ -393,6 +458,9 @@ void deltaCore::boot(const base::String &xdir) {
     bool decrypted = provider->hasDecrypted();
     krnl::vfs::mountVirtual("/app0", provider);
     krnl::vfs::setTitleId(provider->titleId());
+#if defined(__linux__) && !defined(__ANDROID__)
+    gameIcon = provider->icon();
+#endif
     sdkVersion = provider->sdkVersion();
     mainModule = base::String(decrypted ? "/app0/decrypted/eboot.bin"
                                         : "/app0/eboot.bin");
@@ -400,15 +468,43 @@ void deltaCore::boot(const base::String &xdir) {
              krnl::vfs::titleId().c_str(), mainModule.c_str());
   } else if (isAppDir) {
     krnl::vfs::mount("/app0", path.c_str());
-    if (utl::File f(base::String(appJson.c_str()), utl::fileMode::read); f.IsOpen()) {
-      std::string js(static_cast<size_t>(f.GetSize()), '\0');
-      f.Read(js.data(), js.size());
+    if (isPs4AppDir) {
+      std::vector<uint8_t> sfo;
+      if (readHostFile(appSfo, kMaxSfoSize, sfo)) {
+        krnl::vfs::setTitleId(sfoGet(sfo.data(), sfo.size(), "TITLE_ID"));
+        gameTitle = sfoGet(sfo.data(), sfo.size(), "TITLE");
+      }
+#if defined(__linux__) && !defined(__ANDROID__)
+      if (!readHostFile(appRoot + "/sce_sys/icon0.png", kMaxIconSize, gameIcon))
+        readHostFile(appRoot + "/icon0.png", kMaxIconSize, gameIcon);
+#endif
+    } else {
+      std::vector<uint8_t> json;
+      readHostFile(appJson, kMaxSfoSize, json);
+      const std::string js(json.begin(), json.end());
       krnl::vfs::setTitleId(jsonGetString(js, "titleId"));
       sdkVersion = parseSdkVersion(jsonGetString(js, "sdkVersion"));
+#if defined(__linux__) && !defined(__ANDROID__)
+      if (!readHostFile(appRoot + "/sce_sys/icon0.png", kMaxIconSize, gameIcon))
+        readHostFile(appRoot + "/icon0.png", kMaxIconSize, gameIcon);
+#endif
     }
     mainModule = base::String("/app0/eboot.bin");
     LOG_INFO("mounted app dir at /app0 ({}), boot module {}",
              krnl::vfs::titleId().c_str(), mainModule.c_str());
+  } else {
+    const std::string root = parentPath(path);
+    std::vector<uint8_t> sfo;
+    if (!readHostFile(root + "/sce_sys/param.sfo", kMaxSfoSize, sfo))
+      readHostFile(root + "/param.sfo", kMaxSfoSize, sfo);
+    if (!sfo.empty()) {
+      krnl::vfs::setTitleId(sfoGet(sfo.data(), sfo.size(), "TITLE_ID"));
+      gameTitle = sfoGet(sfo.data(), sfo.size(), "TITLE");
+    }
+#if defined(__linux__) && !defined(__ANDROID__)
+    if (!readHostFile(root + "/sce_sys/icon0.png", kMaxIconSize, gameIcon))
+      readHostFile(root + "/icon0.png", kMaxIconSize, gameIcon);
+#endif
   }
 
   // /download0 is the title's writable data volume (patches, add-on content,
@@ -426,14 +522,22 @@ void deltaCore::boot(const base::String &xdir) {
 
   // These all boot from an /app0 mount rather than a bare host path.
   const bool mounted = isPkg || isFfpkg || isAppDir;
-  const bool isPs5 = isFfpkg || isAppDir;
-  // Name the window after the booted title, since the renderer and the videoout
+  const bool isPs5 = isFfpkg || isPs5AppDir;
+  // Name the window after the booted game, since the renderer and the videoout
   // HLE both bring it up with a generic title depending on who gets there first.
   {
     const std::string &tid = krnl::vfs::titleId();
-    gfx::setTitle(("prosperity - " + (tid.empty() ? std::string("unknown") : tid) +
-                   (isPs5 ? " (PS5)" : " (PS4)")).c_str());
+    std::string title =
+        gameTitle.empty() ? (tid.empty() ? std::string("unknown") : tid)
+                          : gameTitle;
+    title += " - prosperity";
+    title += isPs5 ? " (PS5)" : " (PS4)";
+    gfx::setTitle(title.c_str());
   }
+#if defined(__linux__) && !defined(__ANDROID__)
+  if (!gameIcon.empty())
+    gfx::setIcon(gameIcon.data(), gameIcon.size());
+#endif
   std::thread ctx([mainModule = std::move(mainModule), mounted, isPs5, sdkVersion]() {
     auto p = base::MakeUnique<krnl::proc>();
     if (isPs5)

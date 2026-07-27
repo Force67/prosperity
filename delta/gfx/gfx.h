@@ -8,6 +8,7 @@
  * in the root of the source tree.
  */
 
+#include <cstddef>
 #include <cstdint>
 
 // SDL3 window backed by a Vulkan swapchain. present() uploads a CPU framebuffer
@@ -23,6 +24,10 @@ enum class PixelFormat {
 // Set the window title (title id + platform). Applies immediately if the window
 // already exists, otherwise it overrides the title the creator passes.
 void setTitle(const char *title);
+
+// Set PNG artwork for the game window. The desktop backend applies a small
+// emulator badge before using it as the taskbar icon.
+void setIcon(const uint8_t *png, size_t size);
 
 // Create the window, Vulkan device and swapchain. Returns false on failure.
 // Idempotent: returns true immediately if a window already exists.

@@ -674,7 +674,11 @@ struct PkgImpl {
       if (be32(e) != wantId)
         continue;
       uint32_t off = be32(e + 16), sz = be32(e + 20);
-      if (sz == 0 || static_cast<uint64_t>(off) + sz > pkg.GetSize())
+      const uint32_t maxSize =
+          wantId == 0x1000 ? 1u << 20
+                           : (wantId == 0x1200 ? 16u << 20 : UINT32_MAX);
+      if (sz == 0 || sz > maxSize ||
+          static_cast<uint64_t>(off) + sz > pkg.GetSize())
         return false;
       out.resize(sz);
       R(off, sz, out.data());
