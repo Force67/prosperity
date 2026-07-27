@@ -1,0 +1,3 @@
+# Generated SPIR-V word arrays (*_spv.h) are machine output; don't format them.
+DisableFormat: true
+SortIncludes: Never

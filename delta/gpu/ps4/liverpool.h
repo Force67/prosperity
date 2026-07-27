@@ -8,8 +8,9 @@
  * register offset (base + packet offset). Draw handlers read the relevant
  * registers (render target, shader pointers, primitive state) out of it.
  *
- * Register offsets below are GCN gen2 (Sea Islands / Liverpool) values, the same
- * the PS4 Gnm driver programs. Linux GFX 7.2 register offsets and field layouts:
+ * Register offsets below are GCN gen2 (Sea Islands / Liverpool) values, the
+ * same the PS4 Gnm driver programs. Linux GFX 7.2 register offsets and field
+ * layouts:
  * https://github.com/torvalds/linux/blob/master/drivers/gpu/drm/amd/include/asic_reg/gca/gfx_7_2_d.h
  * https://github.com/torvalds/linux/blob/master/drivers/gpu/drm/amd/include/asic_reg/gca/gfx_7_2_sh_mask.h
  */
@@ -29,8 +30,8 @@ constexpr uint32_t mmCB_COLOR0_BASE = 0xA318;
 constexpr uint32_t mmCB_COLOR0_PITCH = 0xA319;
 constexpr uint32_t mmCB_COLOR0_SLICE = 0xA31A;
 constexpr uint32_t mmCB_COLOR0_VIEW = 0xA31B;
-constexpr uint32_t mmCB_COLOR0_INFO = 0xA31C;   // format/number-type
-constexpr uint32_t mmCB_COLOR0_ATTRIB = 0xA31D; // tiling/dims
+constexpr uint32_t mmCB_COLOR0_INFO = 0xA31C;    // format/number-type
+constexpr uint32_t mmCB_COLOR0_ATTRIB = 0xA31D;  // tiling/dims
 constexpr uint32_t kCbColorStride = 0xF;
 // Screen scissor gives the render area (width/height).
 constexpr uint32_t mmPA_SC_SCREEN_SCISSOR_TL = 0xA00C;
@@ -45,7 +46,8 @@ constexpr uint32_t mmPA_CL_VPORT_YOFFSET = 0xA112;
 // Render-target mask (which CB targets are written).
 constexpr uint32_t mmCB_TARGET_MASK = 0xA08E;
 constexpr uint32_t mmCB_SHADER_MASK = 0xA08F;
-// Per-MRT blend control. CB_BLENDn_CONTROL are 1 dword apart. Layout (GCN gen2):
+// Per-MRT blend control. CB_BLENDn_CONTROL are 1 dword apart. Layout (GCN
+// gen2):
 //  [0:4] color_src_factor  [5:7] color_func   [8:12] color_dst_factor
 //  [16:20] alpha_src_factor [21:23] alpha_func [24:28] alpha_dst_factor
 //  [29] separate_alpha_blend  [30] enable
@@ -62,12 +64,15 @@ constexpr uint32_t mmVGT_NUM_INDICES = 0xC24C;
 constexpr uint32_t mmDB_DEPTH_CONTROL = 0xA200;
 // DB_Z_INFO: FORMAT[1:0] (0=invalid/off, 1=Z16, 3=Z32_FLOAT).
 constexpr uint32_t mmDB_Z_INFO = 0xA010;
-// Depth surface base (byte addr = value << 8). Z_WRITE is what the draw renders to.
+// Depth surface base (byte addr = value << 8). Z_WRITE is what the draw renders
+// to.
 constexpr uint32_t mmDB_Z_READ_BASE = 0xA012;
 constexpr uint32_t mmDB_Z_WRITE_BASE = 0xA014;
-// Fast-clear depth value (float) used when the buffer is bound with loadOp=CLEAR.
+// Fast-clear depth value (float) used when the buffer is bound with
+// loadOp=CLEAR.
 constexpr uint32_t mmDB_DEPTH_CLEAR = 0xA00B;
-// Primitive-setup: cull + winding. CULL_FRONT[0] CULL_BACK[1] FACE[2] (0=CCW front).
+// Primitive-setup: cull + winding. CULL_FRONT[0] CULL_BACK[1] FACE[2] (0=CCW
+// front).
 constexpr uint32_t mmPA_SU_SC_MODE_CNTL = 0xA205;
 
 // --- shader (SH) registers (absolute = kShRegBase + n) ---
@@ -84,32 +89,37 @@ constexpr uint32_t mmSPI_SHADER_PGM_RSRC1_VS = 0x2C4A;
 constexpr uint32_t mmSPI_SHADER_PGM_RSRC2_VS = 0x2C4B;
 constexpr uint32_t mmSPI_SHADER_USER_DATA_VS_0 = 0x2C4C;  // 16 user-data SGPRs
 
-// Compute program registers (SET_SH_REG relative 0x200..; absolute = 0x2C00+rel).
+// Compute program registers (SET_SH_REG relative 0x200..; absolute =
+// 0x2C00+rel).
 constexpr uint32_t mmCOMPUTE_NUM_THREAD_X = 0x2E07;  // u16 full | u16 partial
 constexpr uint32_t mmCOMPUTE_NUM_THREAD_Y = 0x2E08;
 constexpr uint32_t mmCOMPUTE_NUM_THREAD_Z = 0x2E09;
-constexpr uint32_t mmCOMPUTE_PGM_LO = 0x2E0C;   // CS addr[39:8]
-constexpr uint32_t mmCOMPUTE_PGM_HI = 0x2E0D;   // CS addr[47:40] in [7:0]
+constexpr uint32_t mmCOMPUTE_PGM_LO = 0x2E0C;  // CS addr[39:8]
+constexpr uint32_t mmCOMPUTE_PGM_HI = 0x2E0D;  // CS addr[47:40] in [7:0]
 constexpr uint32_t mmCOMPUTE_PGM_RSRC1 = 0x2E12;
-constexpr uint32_t mmCOMPUTE_PGM_RSRC2 = 0x2E13;  // user_sgpr[5:1], tgid_en[9:7], lds[23:15]
+constexpr uint32_t mmCOMPUTE_PGM_RSRC2 =
+    0x2E13;  // user_sgpr[5:1], tgid_en[9:7], lds[23:15]
 constexpr uint32_t mmCOMPUTE_USER_DATA_0 = 0x2E40;  // 16 user-data SGPRs
 
 // The full GPU register state. A draw is rendered from a snapshot of this.
 struct Regs {
   std::array<uint32_t, kRegFileSize> data{};
 
-  uint32_t &operator[](uint32_t off) { return data[off]; }
-  uint32_t operator[](uint32_t off) const { return off < kRegFileSize ? data[off] : 0; }
+  uint32_t& operator[](uint32_t off) { return data[off]; }
+  uint32_t operator[](uint32_t off) const {
+    return off < kRegFileSize ? data[off] : 0;
+  }
 
   // 48-bit GPU address from a LO/HI register pair (HI holds the top bits << 0,
   // i.e. addr = ((u64)HI << 32 | LO) << 8 for shader program pointers).
-  uint64_t shaderAddr(uint32_t loReg) const {
-    uint64_t lo = data[loReg];
-    uint64_t hi = data[loReg + 1] & 0xFF;
+  uint64_t ShaderAddr(uint32_t lo_reg) const {
+    uint64_t lo = data[lo_reg];
+    uint64_t hi = data[lo_reg + 1] & 0xFF;
     return ((hi << 32) | lo) << 8;
   }
-  uint64_t cbColorBase(int rt = 0) const {
-    return static_cast<uint64_t>(data[mmCB_COLOR0_BASE + rt * kCbColorStride]) << 8;
+  uint64_t CbColorBase(int rt = 0) const {
+    return static_cast<uint64_t>(data[mmCB_COLOR0_BASE + rt * kCbColorStride])
+           << 8;
   }
 };
 

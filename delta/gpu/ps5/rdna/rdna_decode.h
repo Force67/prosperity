@@ -8,16 +8,16 @@
  * / `Program` representation the PS4 GCN path uses, so the shared SPIR-V
  * translator infrastructure (register-file model, ALU/scalar emitters,
  * control-flow lowering) can be reused. Only the encoding families and opcode
- * numbers are RDNA2-specific; see gpu/ps5/rdna/rdna_translate.cpp for the
+ * numbers are RDNA2-specific; see gpu/ps5/rdna/rdna_translate.cc for the
  * per-instruction dispatch that maps RDNA2 opcodes onto the shared emitters.
  *
- * Encoding-family dispatch and opcode tables verified against the a gfx10.3 reference
- * gfx10.3 decoder (src/graphics/shader/recompiler/ShaderDecoder.cpp).
+ * Encoding-family dispatch and opcode tables verified against the a gfx10.3
+ * reference gfx10.3 decoder (src/graphics/shader/recompiler/ShaderDecoder.cpp).
  */
 
 #include <cstdint>
 
-#include "ps4/gcn/gcn_decode.h"
+#include "gpu/ps4/gcn/gcn_decode.h"
 
 namespace gpu::rdna {
 
@@ -32,7 +32,8 @@ using gpu::gcn::Program;
 // Decode an RDNA2 program bounded by `max_dwords`. s_endpgm terminates decode
 // unless a later branch targets past it (matching the GCN decoder), so a block
 // reached only after an early-out s_endpgm is still lifted.
-Program Decode(const uint32_t* code, uint32_t max_dwords,
+Program Decode(const uint32_t* code,
+               uint32_t max_dwords,
                bool stop_at_endpgm = true);
 
 // Recover the real code length (in dwords) from the trailing ShaderBinaryInfo

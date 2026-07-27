@@ -52,8 +52,13 @@ class Module {
   Id TypeStruct(const std::vector<Id>& members);
   Id TypePointer(spv::StorageClass sc, Id pointee);
   Id TypeFunction(Id ret, const std::vector<Id>& params = {});
-  Id TypeImage(Id sampled_type, spv::Dim dim, uint32_t depth, uint32_t arrayed,
-               uint32_t ms, uint32_t sampled, spv::ImageFormat fmt);
+  Id TypeImage(Id sampled_type,
+               spv::Dim dim,
+               uint32_t depth,
+               uint32_t arrayed,
+               uint32_t ms,
+               uint32_t sampled,
+               spv::ImageFormat fmt);
   Id TypeSampledImage(Id image_type);
 
   // ---- constants (cached) ----
@@ -66,17 +71,23 @@ class Module {
 
   // ---- global variables / decorations ----
   Id Variable(Id ptr_type, spv::StorageClass sc, Id init = 0);
-  void Decorate(Id target, spv::Decoration dec,
+  void Decorate(Id target,
+                spv::Decoration dec,
                 const std::vector<uint32_t>& operands = {});
-  void MemberDecorate(Id struct_type, uint32_t member, spv::Decoration dec,
+  void MemberDecorate(Id struct_type,
+                      uint32_t member,
+                      spv::Decoration dec,
                       const std::vector<uint32_t>& operands = {});
   void Name(Id target, const std::string& n);
   void MemberName(Id struct_type, uint32_t member, const std::string& n);
 
   // entry point + exec modes
-  void EntryPoint(spv::ExecutionModel model, Id fn, const std::string& name,
+  void EntryPoint(spv::ExecutionModel model,
+                  Id fn,
+                  const std::string& name,
                   const std::vector<Id>& interface);
-  void ExecMode(Id fn, spv::ExecutionMode mode,
+  void ExecMode(Id fn,
+                spv::ExecutionMode mode,
                 const std::vector<uint32_t>& operands = {});
   void Capability(spv::Capability cap);
 
@@ -110,7 +121,8 @@ class Module {
   void Branch(Id target);
   void BranchConditional(Id cond, Id t, Id f);
   // OpSwitch: selector + default label + (literal, label) cases.
-  void Switch(Id selector, Id default_label,
+  void Switch(Id selector,
+              Id default_label,
               const std::vector<std::pair<uint32_t, Id>>& cases);
   void ReturnVoid();
   void Unreachable();
@@ -120,22 +132,38 @@ class Module {
   // Packed cache key: kind (8 bits) | a (32 bits) | b (24 bits). Exact -- every
   // cached entity maps to a unique key, no hashing of the payload.
   enum class CacheKind : uint8_t {
-    kVoid, kBool, kInt, kFloat, kVec, kArray, kRuntimeArray, kPointer,
-    kConstU32, kConstI32, kConstF32, kConstBool, kConstNull,
+    kVoid,
+    kBool,
+    kInt,
+    kFloat,
+    kVec,
+    kArray,
+    kRuntimeArray,
+    kPointer,
+    kConstU32,
+    kConstI32,
+    kConstF32,
+    kConstBool,
+    kConstNull,
   };
   static uint64_t Key(CacheKind kind, uint64_t a = 0, uint64_t b = 0) {
     return (static_cast<uint64_t>(kind) << 56) | (a << 24) | (b & 0xFFFFFF);
   }
-  Id Cached(uint64_t key, Id id) { cache_[key] = id; return id; }
+  Id Cached(uint64_t key, Id id) {
+    cache_[key] = id;
+    return id;
+  }
   bool Lookup(uint64_t key, Id& id) const {
     auto it = cache_.find(key);
-    if (it == cache_.end()) return false;
+    if (it == cache_.end())
+      return false;
     id = it->second;
     return true;
   }
 
   void PutWord(std::vector<uint32_t>& sec, uint32_t w) { sec.push_back(w); }
-  void Instr(std::vector<uint32_t>& sec, spv::Op op,
+  void Instr(std::vector<uint32_t>& sec,
+             spv::Op op,
              const std::vector<uint32_t>& ops);
   void PutString(std::vector<uint32_t>& sec, const std::string& s);
 

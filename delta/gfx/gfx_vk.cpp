@@ -8,18 +8,22 @@
 
 // SDL3 window with a Vulkan swapchain. A CPU framebuffer is copied into a
 // host-visible staging buffer, then into a device-local image, then blitted
-// (scaling) into the acquired swapchain image and presented. The buffer-to-image
-// copy plus image-to-image blit avoids host-writes-to-image layout constraints
-// and lets the window be any size relative to the framebuffer.
+// (scaling) into the acquired swapchain image and presented. The
+// buffer-to-image copy plus image-to-image blit avoids host-writes-to-image
+// layout constraints and lets the window be any size relative to the
+// framebuffer.
 
 // SDL3 is not available on Android; that build uses the headless gfx stub
 // (gfx_headless.cpp) and the GPU renderer dumps frames instead of presenting.
 #ifndef __ANDROID__
 
+#include <array>
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <utility>
 #include <vector>
 
 #include <SDL3/SDL.h>
@@ -49,6 +53,21 @@ namespace {
 // title, so whoever wins uses this instead when it is set.
 std::string g_title;
 
+constexpr uint32_t kFrameSlotCount = 2;
+
+struct FrameSlot {
+  VkCommandBuffer cmd = VK_NULL_HANDLE;
+  VkSemaphore acquireSem = VK_NULL_HANDLE;
+  VkFence acquireFence = VK_NULL_HANDLE;
+  VkFence fence = VK_NULL_HANDLE;
+
+  VkBuffer staging = VK_NULL_HANDLE;
+  VkDeviceMemory stagingMem = VK_NULL_HANDLE;
+  void *stagingMap = nullptr;
+  VkImage frameImg = VK_NULL_HANDLE;
+  VkDeviceMemory frameMem = VK_NULL_HANDLE;
+};
+
 struct State {
   SDL_Window *window = nullptr;
   VkInstance instance = VK_NULL_HANDLE;
@@ -64,27 +83,48 @@ struct State {
   std::vector<VkImage> swapImages;
 
   VkCommandPool cmdPool = VK_NULL_HANDLE;
-  VkCommandBuffer cmd = VK_NULL_HANDLE;
-  VkSemaphore acquireSem = VK_NULL_HANDLE;
-  VkSemaphore renderSem = VK_NULL_HANDLE;
-  VkFence fence = VK_NULL_HANDLE;
+  std::array<FrameSlot, kFrameSlotCount> slots;
+  std::vector<VkSemaphore> renderSems;
+  // Semaphores of a replaced swapchain. vkDeviceWaitIdle does not cover the
+  // presentation engine's pending semaphore waits (that needs
+  // VK_EXT_swapchain_maintenance1), so a retired swapchain's semaphores rest
+  // here for one whole swapchain generation before being destroyed.
+  std::vector<VkSemaphore> retiredRenderSems;
+  uint32_t nextSlot = 0;
 
-  // Per-framebuffer-size upload resources (staging buffer + device frame image).
+  // Framebuffer dimensions shared by the per-slot upload resources.
   uint32_t fbW = 0, fbH = 0;
   VkFormat fbFormat = VK_FORMAT_R8G8B8A8_UNORM;
-  VkBuffer staging = VK_NULL_HANDLE;
-  VkDeviceMemory stagingMem = VK_NULL_HANDLE;
-  void *stagingMap = nullptr;
-  VkImage frameImg = VK_NULL_HANDLE;
-  VkDeviceMemory frameMem = VK_NULL_HANDLE;
 
-  SDL_Gamepad *gamepad = nullptr;  // first connected controller (for input + rumble)
+  SDL_Gamepad *gamepad =
+      nullptr; // first connected controller (for input + rumble)
 
   bool needRecreate = false;
   bool hasMemBudget = false;
 };
 
 State g;
+std::atomic_bool g_canPresent{true};
+constexpr uint64_t kPresentWaitSliceNs = 50'000'000;
+
+void stopPresenting(const char *operation, VkResult result) {
+  std::fprintf(stderr, "[gfx] %s failed: VkResult=%d\n", operation, result);
+  g_canPresent.store(false, std::memory_order_release);
+}
+
+bool waitForPresentFence(VkFence fence, const char *operation) {
+  while (g_canPresent.load(std::memory_order_acquire)) {
+    const VkResult result =
+        vkWaitForFences(g.device, 1, &fence, VK_TRUE, kPresentWaitSliceNs);
+    if (result == VK_SUCCESS)
+      return true;
+    if (result != VK_TIMEOUT) {
+      stopPresenting(operation, result);
+      return false;
+    }
+  }
+  return false;
+}
 
 uint32_t findMemoryType(uint32_t typeBits, VkMemoryPropertyFlags props) {
   VkPhysicalDeviceMemoryProperties mp;
@@ -111,6 +151,43 @@ void imageBarrier(VkCommandBuffer c, VkImage img, VkImageLayout from,
   vkCmdPipelineBarrier(c, srcS, dstS, 0, 0, nullptr, 0, nullptr, 1, &b);
 }
 
+void destroyRenderSemaphores() {
+  for (VkSemaphore sem : g.retiredRenderSems)
+    vkDestroySemaphore(g.device, sem, nullptr);
+  g.retiredRenderSems.clear();
+  for (VkSemaphore sem : g.renderSems)
+    vkDestroySemaphore(g.device, sem, nullptr);
+  g.renderSems.clear();
+}
+
+// Park the current semaphores instead of destroying them: the presentation
+// engine may still wait on one after vkDeviceWaitIdle returns. Whatever was
+// parked by the previous recreation is destroyed now -- by then a full
+// swapchain generation (plus another idle) has passed.
+void retireRenderSemaphores() {
+  for (VkSemaphore sem : g.retiredRenderSems)
+    vkDestroySemaphore(g.device, sem, nullptr);
+  g.retiredRenderSems = std::move(g.renderSems);
+  g.renderSems.clear();
+}
+
+bool createRenderSemaphores(uint32_t count,
+                            std::vector<VkSemaphore> &semaphores) {
+  VkSemaphoreCreateInfo si{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+  semaphores.resize(count);
+  for (VkSemaphore &sem : semaphores) {
+    if (vkCreateSemaphore(g.device, &si, nullptr, &sem) != VK_SUCCESS) {
+      for (VkSemaphore created : semaphores) {
+        if (created)
+          vkDestroySemaphore(g.device, created, nullptr);
+      }
+      semaphores.clear();
+      return false;
+    }
+  }
+  return true;
+}
+
 bool createSwapchain() {
   VkSurfaceCapabilitiesKHR caps;
   vkGetPhysicalDeviceSurfaceCapabilitiesKHR(g.phys, g.surface, &caps);
@@ -125,8 +202,6 @@ bool createSwapchain() {
     if (f.format == VK_FORMAT_B8G8R8A8_UNORM &&
         f.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)
       chosen = f;
-  g.swapFormat = chosen.format;
-
   VkExtent2D ext = caps.currentExtent;
   if (ext.width == 0xFFFFFFFF) {
     int w = 0, h = 0;
@@ -135,8 +210,7 @@ bool createSwapchain() {
     ext.height = (uint32_t)h;
   }
   if (ext.width == 0 || ext.height == 0)
-    return false;  // minimised; try again later
-  g.swapExtent = ext;
+    return false; // minimised; try again later
 
   uint32_t imgCount = caps.minImageCount + 1;
   if (caps.maxImageCount && imgCount > caps.maxImageCount)
@@ -153,17 +227,22 @@ bool createSwapchain() {
   sc.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
   sc.preTransform = caps.currentTransform;
   sc.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
-  // Present mode: FIFO (vsync) is always supported but double-buffer-misses to half
-  // the refresh when a frame lands late, and adds latency. Prefer MAILBOX (triple-
-  // buffer: latest frame wins, no tearing, no half-rate drop). DELTA_GPU_VSYNC=0
-  // forces IMMEDIATE (uncapped, for benchmarking); =1 forces FIFO.
+  // Present mode: FIFO (vsync) is always supported but double-buffer-misses to
+  // half the refresh when a frame lands late, and adds latency. Prefer MAILBOX
+  // (triple- buffer: latest frame wins, no tearing, no half-rate drop).
+  // DELTA_GPU_VSYNC=0 forces IMMEDIATE (uncapped, for benchmarking); =1 forces
+  // FIFO.
   {
     uint32_t npm = 0;
     vkGetPhysicalDeviceSurfacePresentModesKHR(g.phys, g.surface, &npm, nullptr);
     std::vector<VkPresentModeKHR> pms(npm);
-    vkGetPhysicalDeviceSurfacePresentModesKHR(g.phys, g.surface, &npm, pms.data());
+    vkGetPhysicalDeviceSurfacePresentModesKHR(g.phys, g.surface, &npm,
+                                              pms.data());
     auto has = [&](VkPresentModeKHR m) {
-      for (auto p : pms) if (p == m) return true; return false;
+      for (auto p : pms)
+        if (p == m)
+          return true;
+      return false;
     };
     const char *vs = std::getenv("DELTA_GPU_VSYNC");
     VkPresentModeKHR mode = VK_PRESENT_MODE_FIFO_KHR;
@@ -173,69 +252,106 @@ bool createSwapchain() {
       mode = VK_PRESENT_MODE_MAILBOX_KHR;
     sc.presentMode = mode;
     if (mode == VK_PRESENT_MODE_MAILBOX_KHR && imgCount < 3) {
-      imgCount = 3;  // mailbox wants >=3 images to actually triple-buffer
-      if (caps.maxImageCount && imgCount > caps.maxImageCount) imgCount = caps.maxImageCount;
+      imgCount = 3; // mailbox wants >=3 images to actually triple-buffer
+      if (caps.maxImageCount && imgCount > caps.maxImageCount)
+        imgCount = caps.maxImageCount;
       sc.minImageCount = imgCount;
     }
   }
   sc.clipped = VK_TRUE;
-  sc.oldSwapchain = g.swapchain;
+  const VkSwapchainKHR oldSwapchain = g.swapchain;
+  sc.oldSwapchain = oldSwapchain;
+
+  // Swapchain replacement is exceptional. Idle once here so every old image,
+  // semaphore, and overlay attachment can be torn down together.
+  if (g.swapchain)
+    vkDeviceWaitIdle(g.device);
+
+  auto discardRetiredSwapchain = [&] {
+    if (!oldSwapchain)
+      return;
+    overlayVkSetSwapchain({}, {}, chosen.format);
+    retireRenderSemaphores();
+    vkDestroySwapchainKHR(g.device, oldSwapchain, nullptr);
+    g.swapchain = VK_NULL_HANDLE;
+    g.swapImages.clear();
+  };
 
   VkSwapchainKHR newSwap = VK_NULL_HANDLE;
-  VK_CHECK(vkCreateSwapchainKHR(g.device, &sc, nullptr, &newSwap));
-  if (g.swapchain)
-    vkDestroySwapchainKHR(g.device, g.swapchain, nullptr);
-  g.swapchain = newSwap;
+  const VkResult createResult =
+      vkCreateSwapchainKHR(g.device, &sc, nullptr, &newSwap);
+  if (createResult != VK_SUCCESS) {
+    discardRetiredSwapchain();
+    std::fprintf(stderr, "[gfx] vkCreateSwapchainKHR failed: VkResult=%d\n",
+                 createResult);
+    return false;
+  }
 
   uint32_t n = 0;
-  vkGetSwapchainImagesKHR(g.device, g.swapchain, &n, nullptr);
-  g.swapImages.resize(n);
-  vkGetSwapchainImagesKHR(g.device, g.swapchain, &n, g.swapImages.data());
+  vkGetSwapchainImagesKHR(g.device, newSwap, &n, nullptr);
+  std::vector<VkImage> newImages(n);
+  vkGetSwapchainImagesKHR(g.device, newSwap, &n, newImages.data());
+  std::vector<VkSemaphore> newRenderSems;
+  if (!createRenderSemaphores(n, newRenderSems)) {
+    discardRetiredSwapchain();
+    vkDestroySwapchainKHR(g.device, newSwap, nullptr);
+    return false;
+  }
+
+  // This destroys framebuffers and views for the old images before their
+  // swapchain is destroyed, then creates attachments for the replacement.
+  overlayVkSetSwapchain(newImages, ext, chosen.format); // no-op pre-init
+  retireRenderSemaphores();
+  if (g.swapchain)
+    vkDestroySwapchainKHR(g.device, g.swapchain, nullptr);
+
+  g.swapchain = newSwap;
+  g.swapFormat = chosen.format;
+  g.swapExtent = ext;
+  g.swapImages.swap(newImages);
+  g.renderSems.swap(newRenderSems);
   g.needRecreate = false;
-  overlayVkSetSwapchain(g.swapImages, g.swapExtent, g.swapFormat);  // no-op pre-init
   return true;
 }
 
-void destroyFrameResources() {
-  if (g.stagingMap) {
-    vkUnmapMemory(g.device, g.stagingMem);
-    g.stagingMap = nullptr;
+void destroyFrameResources(FrameSlot &slot) {
+  if (slot.stagingMap) {
+    vkUnmapMemory(g.device, slot.stagingMem);
+    slot.stagingMap = nullptr;
   }
-  if (g.staging) vkDestroyBuffer(g.device, g.staging, nullptr);
-  if (g.stagingMem) vkFreeMemory(g.device, g.stagingMem, nullptr);
-  if (g.frameImg) vkDestroyImage(g.device, g.frameImg, nullptr);
-  if (g.frameMem) vkFreeMemory(g.device, g.frameMem, nullptr);
-  g.staging = VK_NULL_HANDLE;
-  g.stagingMem = VK_NULL_HANDLE;
-  g.frameImg = VK_NULL_HANDLE;
-  g.frameMem = VK_NULL_HANDLE;
+  if (slot.staging)
+    vkDestroyBuffer(g.device, slot.staging, nullptr);
+  if (slot.stagingMem)
+    vkFreeMemory(g.device, slot.stagingMem, nullptr);
+  if (slot.frameImg)
+    vkDestroyImage(g.device, slot.frameImg, nullptr);
+  if (slot.frameMem)
+    vkFreeMemory(g.device, slot.frameMem, nullptr);
+  slot.staging = VK_NULL_HANDLE;
+  slot.stagingMem = VK_NULL_HANDLE;
+  slot.frameImg = VK_NULL_HANDLE;
+  slot.frameMem = VK_NULL_HANDLE;
 }
 
-bool ensureFrameResources(uint32_t w, uint32_t h, VkFormat fmt) {
-  if (g.fbW == w && g.fbH == h && g.fbFormat == fmt && g.staging)
-    return true;
-  vkDeviceWaitIdle(g.device);
-  destroyFrameResources();
-  g.fbW = w;
-  g.fbH = h;
-  g.fbFormat = fmt;
-
+bool createFrameResources(FrameSlot &slot, uint32_t w, uint32_t h,
+                          VkFormat fmt) {
   VkDeviceSize size = (VkDeviceSize)w * h * 4;
   VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
   bi.size = size;
   bi.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
   bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-  VK_CHECK(vkCreateBuffer(g.device, &bi, nullptr, &g.staging));
+  VK_CHECK(vkCreateBuffer(g.device, &bi, nullptr, &slot.staging));
   VkMemoryRequirements br;
-  vkGetBufferMemoryRequirements(g.device, g.staging, &br);
+  vkGetBufferMemoryRequirements(g.device, slot.staging, &br);
   VkMemoryAllocateInfo ba{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
   ba.allocationSize = br.size;
   ba.memoryTypeIndex = findMemoryType(br.memoryTypeBits,
                                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
                                           VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-  VK_CHECK(vkAllocateMemory(g.device, &ba, nullptr, &g.stagingMem));
-  VK_CHECK(vkBindBufferMemory(g.device, g.staging, g.stagingMem, 0));
-  VK_CHECK(vkMapMemory(g.device, g.stagingMem, 0, size, 0, &g.stagingMap));
+  VK_CHECK(vkAllocateMemory(g.device, &ba, nullptr, &slot.stagingMem));
+  VK_CHECK(vkBindBufferMemory(g.device, slot.staging, slot.stagingMem, 0));
+  VK_CHECK(
+      vkMapMemory(g.device, slot.stagingMem, 0, size, 0, &slot.stagingMap));
 
   VkImageCreateInfo ii{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
   ii.imageType = VK_IMAGE_TYPE_2D;
@@ -247,23 +363,41 @@ bool ensureFrameResources(uint32_t w, uint32_t h, VkFormat fmt) {
   ii.tiling = VK_IMAGE_TILING_OPTIMAL;
   ii.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
   ii.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-  VK_CHECK(vkCreateImage(g.device, &ii, nullptr, &g.frameImg));
+  VK_CHECK(vkCreateImage(g.device, &ii, nullptr, &slot.frameImg));
   VkMemoryRequirements ir;
-  vkGetImageMemoryRequirements(g.device, g.frameImg, &ir);
+  vkGetImageMemoryRequirements(g.device, slot.frameImg, &ir);
   VkMemoryAllocateInfo ia{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
   ia.allocationSize = ir.size;
   ia.memoryTypeIndex =
       findMemoryType(ir.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-  VK_CHECK(vkAllocateMemory(g.device, &ia, nullptr, &g.frameMem));
-  VK_CHECK(vkBindImageMemory(g.device, g.frameImg, g.frameMem, 0));
+  VK_CHECK(vkAllocateMemory(g.device, &ia, nullptr, &slot.frameMem));
+  VK_CHECK(vkBindImageMemory(g.device, slot.frameImg, slot.frameMem, 0));
   return true;
 }
 
-}  // namespace
+bool ensureFrameResources(uint32_t w, uint32_t h, VkFormat fmt) {
+  bool ready = true;
+  for (const FrameSlot &slot : g.slots)
+    ready &= slot.staging != VK_NULL_HANDLE && slot.frameImg != VK_NULL_HANDLE;
+  if (g.fbW == w && g.fbH == h && g.fbFormat == fmt && ready)
+    return true;
+  vkDeviceWaitIdle(g.device);
+  for (FrameSlot &slot : g.slots)
+    destroyFrameResources(slot);
+  g.fbW = w;
+  g.fbH = h;
+  g.fbFormat = fmt;
+  for (FrameSlot &slot : g.slots)
+    if (!createFrameResources(slot, w, h, fmt))
+      return false;
+  return true;
+}
+
+} // namespace
 
 bool init(const char *title, uint32_t width, uint32_t height) {
   if (available())
-    return true;  // already up; init is idempotent
+    return true; // already up; init is idempotent
   if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) {
     std::fprintf(stderr, "[gfx] SDL_Init failed: %s\n", SDL_GetError());
     return false;
@@ -274,7 +408,8 @@ bool init(const char *title, uint32_t width, uint32_t height) {
     int n = 0;
     SDL_JoystickID *ids = SDL_GetGamepads(&n);
     if (ids) {
-      if (n > 0) g.gamepad = SDL_OpenGamepad(ids[0]);
+      if (n > 0)
+        g.gamepad = SDL_OpenGamepad(ids[0]);
       SDL_free(ids);
     }
   }
@@ -283,9 +418,9 @@ bool init(const char *title, uint32_t width, uint32_t height) {
                  SDL_GetError());
     return false;
   }
-  g.window = SDL_CreateWindow(g_title.empty() ? title : g_title.c_str(),
-                              (int)width, (int)height,
-                              SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
+  g.window =
+      SDL_CreateWindow(g_title.empty() ? title : g_title.c_str(), (int)width,
+                       (int)height, SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
   if (!g.window) {
     std::fprintf(stderr, "[gfx] SDL_CreateWindow failed: %s\n", SDL_GetError());
     return false;
@@ -334,9 +469,9 @@ bool init(const char *title, uint32_t width, uint32_t height) {
   }
   std::vector<VkPhysicalDevice> phs(nphys);
   vkEnumeratePhysicalDevices(g.instance, &nphys, phs.data());
-  // Prefer a real GPU over the llvmpipe software rasteriser (type CPU) among the
-  // devices that can both render and present; discrete > integrated > virtual >
-  // CPU. DELTA_VK_GPU=<name-substring> forces a specific device.
+  // Prefer a real GPU over the llvmpipe software rasteriser (type CPU) among
+  // the devices that can both render and present; discrete > integrated >
+  // virtual > CPU. DELTA_VK_GPU=<name-substring> forces a specific device.
   const char *want = SDL_getenv("DELTA_VK_GPU");
   bool found = false;
   int best = -1;
@@ -349,22 +484,41 @@ bool init(const char *title, uint32_t width, uint32_t height) {
     for (uint32_t i = 0; i < nq; i++) {
       VkBool32 present = VK_FALSE;
       vkGetPhysicalDeviceSurfaceSupportKHR(pd, i, g.surface, &present);
-      if ((qf[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) && present) { fam = i; break; }
+      if ((qf[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) && present) {
+        fam = i;
+        break;
+      }
     }
     if (fam == UINT32_MAX)
-      continue;  // can't both render and present
+      continue; // can't both render and present
     VkPhysicalDeviceProperties pp;
     vkGetPhysicalDeviceProperties(pd, &pp);
     int score;
     switch (pp.deviceType) {
-      case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU:   score = 4; break;
-      case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU: score = 3; break;
-      case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU:    score = 2; break;
-      case VK_PHYSICAL_DEVICE_TYPE_CPU:            score = 0; break;  // llvmpipe
-      default:                                     score = 1; break;
+    case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU:
+      score = 4;
+      break;
+    case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU:
+      score = 3;
+      break;
+    case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU:
+      score = 2;
+      break;
+    case VK_PHYSICAL_DEVICE_TYPE_CPU:
+      score = 0;
+      break; // llvmpipe
+    default:
+      score = 1;
+      break;
     }
-    if (want && std::strstr(pp.deviceName, want)) score = 100;
-    if (score > best) { best = score; g.phys = pd; g.queueFamily = fam; found = true; }
+    if (want && std::strstr(pp.deviceName, want))
+      score = 100;
+    if (score > best) {
+      best = score;
+      g.phys = pd;
+      g.queueFamily = fam;
+      found = true;
+    }
   }
   if (!found) {
     std::fprintf(stderr, "[gfx] no graphics+present queue\n");
@@ -382,7 +536,7 @@ bool init(const char *title, uint32_t width, uint32_t height) {
   qci.queueCount = 1;
   qci.pQueuePriorities = &prio;
   std::vector<const char *> devExts = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
-  {  // VK_EXT_memory_budget (optional): powers the overlay VRAM gauge.
+  { // VK_EXT_memory_budget (optional): powers the overlay VRAM gauge.
     uint32_t ne = 0;
     vkEnumerateDeviceExtensionProperties(g.phys, nullptr, &ne, nullptr);
     std::vector<VkExtensionProperties> ext(ne);
@@ -409,15 +563,21 @@ bool init(const char *title, uint32_t width, uint32_t height) {
       VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
   cbi.commandPool = g.cmdPool;
   cbi.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-  cbi.commandBufferCount = 1;
-  VK_CHECK(vkAllocateCommandBuffers(g.device, &cbi, &g.cmd));
+  cbi.commandBufferCount = kFrameSlotCount;
+  std::array<VkCommandBuffer, kFrameSlotCount> commands;
+  VK_CHECK(vkAllocateCommandBuffers(g.device, &cbi, commands.data()));
 
   VkSemaphoreCreateInfo si{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
-  VK_CHECK(vkCreateSemaphore(g.device, &si, nullptr, &g.acquireSem));
-  VK_CHECK(vkCreateSemaphore(g.device, &si, nullptr, &g.renderSem));
   VkFenceCreateInfo fi{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
   fi.flags = VK_FENCE_CREATE_SIGNALED_BIT;
-  VK_CHECK(vkCreateFence(g.device, &fi, nullptr, &g.fence));
+  VkFenceCreateInfo acquireFi{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+  for (uint32_t i = 0; i < kFrameSlotCount; i++) {
+    g.slots[i].cmd = commands[i];
+    VK_CHECK(vkCreateSemaphore(g.device, &si, nullptr, &g.slots[i].acquireSem));
+    VK_CHECK(
+        vkCreateFence(g.device, &acquireFi, nullptr, &g.slots[i].acquireFence));
+    VK_CHECK(vkCreateFence(g.device, &fi, nullptr, &g.slots[i].fence));
+  }
 
   if (!createSwapchain())
     return false;
@@ -449,7 +609,10 @@ void queryVram(uint64_t &used, uint64_t &total) {
 
 void present(const void *pixels, uint32_t w, uint32_t h, uint32_t srcPitch,
              PixelFormat fmt) {
-  if (!g.device || !pixels || !w || !h)
+  if (!g_canPresent.load(std::memory_order_acquire) || !g.device || !pixels ||
+      !w || !h)
+    return;
+  if (g.needRecreate && !createSwapchain())
     return;
   if (srcPitch == 0)
     srcPitch = w * 4;
@@ -458,54 +621,79 @@ void present(const void *pixels, uint32_t w, uint32_t h, uint32_t srcPitch,
   if (!ensureFrameResources(w, h, vkfmt))
     return;
 
+  FrameSlot &slot = g.slots[g.nextSlot];
+  // The previous submission may still be reading this slot's mapped buffer.
+  // Host writes must not begin until its fence signals.
+  if (!waitForPresentFence(slot.fence, "vkWaitForFences(submit)"))
+    return;
+
   // Upload rows into the staging buffer (tightly packed w*4).
-  auto *dst = static_cast<uint8_t *>(g.stagingMap);
+  auto *dst = static_cast<uint8_t *>(slot.stagingMap);
   auto *src = static_cast<const uint8_t *>(pixels);
   for (uint32_t y = 0; y < h; y++)
     std::memcpy(dst + (size_t)y * w * 4, src + (size_t)y * srcPitch, w * 4);
 
-  vkWaitForFences(g.device, 1, &g.fence, VK_TRUE, UINT64_MAX);
-
-  if (g.needRecreate && !createSwapchain())
-    return;
-
   uint32_t idx = 0;
-  VkResult ar = vkAcquireNextImageKHR(g.device, g.swapchain, UINT64_MAX,
-                                      g.acquireSem, VK_NULL_HANDLE, &idx);
-  if (ar == VK_ERROR_OUT_OF_DATE_KHR || ar == VK_SUBOPTIMAL_KHR) {
+  VkResult result = vkResetFences(g.device, 1, &slot.acquireFence);
+  if (result != VK_SUCCESS) {
+    stopPresenting("vkResetFences(acquire)", result);
+    return;
+  }
+  VkResult ar;
+  do {
+    ar = vkAcquireNextImageKHR(g.device, g.swapchain, kPresentWaitSliceNs,
+                               slot.acquireSem, slot.acquireFence, &idx);
+  } while (ar == VK_TIMEOUT && g_canPresent.load(std::memory_order_acquire));
+  if (!g_canPresent.load(std::memory_order_acquire))
+    return;
+  if (ar == VK_ERROR_OUT_OF_DATE_KHR) {
     g.needRecreate = true;
     return;
   }
-  if (ar != VK_SUCCESS)
+  if (ar != VK_SUCCESS && ar != VK_SUBOPTIMAL_KHR) {
+    stopPresenting("vkAcquireNextImageKHR", ar);
+    return;
+  }
+  if (ar == VK_SUBOPTIMAL_KHR)
+    g.needRecreate = true;
+  if (!waitForPresentFence(slot.acquireFence, "vkWaitForFences(acquire)"))
     return;
 
   uint64_t vramUsed = 0, vramTotal = 0;
   queryVram(vramUsed, vramTotal);
-  overlayBuildFrame(g.swapExtent.width, g.swapExtent.height, vramUsed, vramTotal);
+  overlayBuildFrame(g.swapExtent.width, g.swapExtent.height, vramUsed,
+                    vramTotal);
 
-  vkResetFences(g.device, 1, &g.fence);
-  vkResetCommandBuffer(g.cmd, 0);
+  result = vkResetCommandBuffer(slot.cmd, 0);
+  if (result != VK_SUCCESS) {
+    stopPresenting("vkResetCommandBuffer", result);
+    return;
+  }
   VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
   bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-  vkBeginCommandBuffer(g.cmd, &bi);
+  result = vkBeginCommandBuffer(slot.cmd, &bi);
+  if (result != VK_SUCCESS) {
+    stopPresenting("vkBeginCommandBuffer", result);
+    return;
+  }
 
   // staging buffer -> frame image (TRANSFER_DST)
-  imageBarrier(g.cmd, g.frameImg, VK_IMAGE_LAYOUT_UNDEFINED,
+  imageBarrier(slot.cmd, slot.frameImg, VK_IMAGE_LAYOUT_UNDEFINED,
                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0,
                VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                VK_PIPELINE_STAGE_TRANSFER_BIT);
   VkBufferImageCopy cp{};
   cp.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
   cp.imageExtent = {w, h, 1};
-  vkCmdCopyBufferToImage(g.cmd, g.staging, g.frameImg,
+  vkCmdCopyBufferToImage(slot.cmd, slot.staging, slot.frameImg,
                          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &cp);
 
   // frame image -> TRANSFER_SRC ; swapchain image -> TRANSFER_DST
-  imageBarrier(g.cmd, g.frameImg, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+  imageBarrier(slot.cmd, slot.frameImg, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
                VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
-  imageBarrier(g.cmd, g.swapImages[idx], VK_IMAGE_LAYOUT_UNDEFINED,
+  imageBarrier(slot.cmd, g.swapImages[idx], VK_IMAGE_LAYOUT_UNDEFINED,
                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0,
                VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                VK_PIPELINE_STAGE_TRANSFER_BIT);
@@ -516,39 +704,55 @@ void present(const void *pixels, uint32_t w, uint32_t h, uint32_t srcPitch,
   blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
   blit.dstOffsets[1] = {(int32_t)g.swapExtent.width,
                         (int32_t)g.swapExtent.height, 1};
-  vkCmdBlitImage(g.cmd, g.frameImg, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+  vkCmdBlitImage(slot.cmd, slot.frameImg, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                  g.swapImages[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
                  &blit, VK_FILTER_LINEAR);
 
   // The overlay's LOAD render pass draws over the blitted frame and transitions
   // the image to PRESENT_SRC; without it, do that transition directly.
-  if (!overlayVkRender(g.cmd, idx))
-    imageBarrier(g.cmd, g.swapImages[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                 VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_ACCESS_TRANSFER_WRITE_BIT, 0,
-                 VK_PIPELINE_STAGE_TRANSFER_BIT,
-                 VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
-  vkEndCommandBuffer(g.cmd);
+  if (!overlayVkRender(slot.cmd, idx))
+    imageBarrier(
+        slot.cmd, g.swapImages[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_ACCESS_TRANSFER_WRITE_BIT, 0,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+  result = vkEndCommandBuffer(slot.cmd);
+  if (result != VK_SUCCESS) {
+    stopPresenting("vkEndCommandBuffer", result);
+    return;
+  }
 
   VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
   VkSubmitInfo subi{VK_STRUCTURE_TYPE_SUBMIT_INFO};
   subi.waitSemaphoreCount = 1;
-  subi.pWaitSemaphores = &g.acquireSem;
+  subi.pWaitSemaphores = &slot.acquireSem;
   subi.pWaitDstStageMask = &waitStage;
   subi.commandBufferCount = 1;
-  subi.pCommandBuffers = &g.cmd;
+  subi.pCommandBuffers = &slot.cmd;
   subi.signalSemaphoreCount = 1;
-  subi.pSignalSemaphores = &g.renderSem;
-  vkQueueSubmit(g.queue, 1, &subi, g.fence);
+  subi.pSignalSemaphores = &g.renderSems[idx];
+  result = vkResetFences(g.device, 1, &slot.fence);
+  if (result != VK_SUCCESS) {
+    stopPresenting("vkResetFences(submit)", result);
+    return;
+  }
+  result = vkQueueSubmit(g.queue, 1, &subi, slot.fence);
+  if (result != VK_SUCCESS) {
+    stopPresenting("vkQueueSubmit", result);
+    return;
+  }
+  g.nextSlot = (g.nextSlot + 1) % kFrameSlotCount;
 
   VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
   pi.waitSemaphoreCount = 1;
-  pi.pWaitSemaphores = &g.renderSem;
+  pi.pWaitSemaphores = &g.renderSems[idx];
   pi.swapchainCount = 1;
   pi.pSwapchains = &g.swapchain;
   pi.pImageIndices = &idx;
   VkResult pr = vkQueuePresentKHR(g.queue, &pi);
   if (pr == VK_ERROR_OUT_OF_DATE_KHR || pr == VK_SUBOPTIMAL_KHR)
     g.needRecreate = true;
+  else if (pr != VK_SUCCESS)
+    stopPresenting("vkQueuePresentKHR", pr);
 }
 
 void setTitle(const char *title) {
@@ -557,7 +761,15 @@ void setTitle(const char *title) {
     SDL_SetWindowTitle(g.window, g_title.c_str());
 }
 
-bool available() { return g.window != nullptr && g.swapchain != VK_NULL_HANDLE; }
+bool available() {
+  return g.window != nullptr && g.swapchain != VK_NULL_HANDLE;
+}
+
+bool canPresent() { return g_canPresent.load(std::memory_order_acquire); }
+
+void requestPresentStop() {
+  g_canPresent.store(false, std::memory_order_release);
+}
 
 // Idempotent bring-up: create the window/swapchain on the first call, then just
 // report availability. Safe to call every frame from the presenting thread;
@@ -565,11 +777,12 @@ bool available() { return g.window != nullptr && g.swapchain != VK_NULL_HANDLE; 
 bool ensure(const char *title, uint32_t width, uint32_t height) {
   if (available())
     return true;
-  static bool failed = false;
-  if (failed)
+  if (!g_canPresent.load(std::memory_order_acquire))
     return false;
+  if (g.device)
+    return createSwapchain();
   if (!init(title, width, height)) {
-    failed = true;
+    g_canPresent.store(false, std::memory_order_release);
     return false;
   }
   return true;
@@ -578,8 +791,10 @@ bool ensure(const char *title, uint32_t width, uint32_t height) {
 bool pumpEvents() {
   SDL_Event e;
   while (SDL_PollEvent(&e)) {
-    if (e.type == SDL_EVENT_QUIT)
+    if (e.type == SDL_EVENT_QUIT) {
+      g_canPresent.store(false, std::memory_order_release);
       return false;
+    }
     if (e.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED ||
         e.type == SDL_EVENT_WINDOW_RESIZED)
       g.needRecreate = true;
@@ -620,21 +835,25 @@ bool pollKeyboardPad(PadKeys &out) {
   out.rx = down(SDL_SCANCODE_LEFT) ? 0 : (down(SDL_SCANCODE_RIGHT) ? 255 : 128);
   out.ry = down(SDL_SCANCODE_UP) ? 0 : (down(SDL_SCANCODE_DOWN) ? 255 : 128);
 
-  out.cross = down(SDL_SCANCODE_SPACE);                                  // confirm / accept
-  out.circle = down(SDL_SCANCODE_ESCAPE) || down(SDL_SCANCODE_BACKSPACE);// cancel / back
-  out.square = down(SDL_SCANCODE_F);                                     // use card / pill
-  out.triangle = down(SDL_SCANCODE_R);                                   // pick up / swap
+  out.cross = down(SDL_SCANCODE_SPACE); // confirm / accept
+  out.circle = down(SDL_SCANCODE_ESCAPE) ||
+               down(SDL_SCANCODE_BACKSPACE); // cancel / back
+  out.square = down(SDL_SCANCODE_F);         // use card / pill
+  out.triangle = down(SDL_SCANCODE_R);       // pick up / swap
   out.l1 = down(SDL_SCANCODE_Q);
   out.r1 = down(SDL_SCANCODE_E);
   out.l2 = down(SDL_SCANCODE_LSHIFT);
   out.r2 = down(SDL_SCANCODE_RSHIFT);
-  out.options = down(SDL_SCANCODE_RETURN) || down(SDL_SCANCODE_P);       // start / pause
-  out.touchpad = down(SDL_SCANCODE_TAB);                                 // map / select
+  out.options =
+      down(SDL_SCANCODE_RETURN) || down(SDL_SCANCODE_P); // start / pause
+  out.touchpad = down(SDL_SCANCODE_TAB);                 // map / select
 
   // Overlay a real controller when one is connected (it takes precedence over
   // keyboard for any button/axis it actively asserts).
   if (g.gamepad) {
-    auto b = [&](SDL_GamepadButton n) { return SDL_GetGamepadButton(g.gamepad, n); };
+    auto b = [&](SDL_GamepadButton n) {
+      return SDL_GetGamepadButton(g.gamepad, n);
+    };
     out.cross |= b(SDL_GAMEPAD_BUTTON_SOUTH);
     out.circle |= b(SDL_GAMEPAD_BUTTON_EAST);
     out.square |= b(SDL_GAMEPAD_BUTTON_WEST);
@@ -647,20 +866,27 @@ bool pollKeyboardPad(PadKeys &out) {
     out.r1 |= b(SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER);
     out.options |= b(SDL_GAMEPAD_BUTTON_START);
     out.touchpad |= b(SDL_GAMEPAD_BUTTON_TOUCHPAD);
-    // Sticks: map [-32768,32767] to [0,255]; only override the centred keyboard value.
+    // Sticks: map [-32768,32767] to [0,255]; only override the centred keyboard
+    // value.
     auto axis = [&](SDL_GamepadAxis n) -> int {
       int v = SDL_GetGamepadAxis(g.gamepad, n);
       return (v + 32768) * 255 / 65535;
     };
     int lx = axis(SDL_GAMEPAD_AXIS_LEFTX), ly = axis(SDL_GAMEPAD_AXIS_LEFTY);
     int rx = axis(SDL_GAMEPAD_AXIS_RIGHTX), ry = axis(SDL_GAMEPAD_AXIS_RIGHTY);
-    if (std::abs(lx - 128) > 12) out.lx = (uint8_t)lx;
-    if (std::abs(ly - 128) > 12) out.ly = (uint8_t)ly;
-    if (std::abs(rx - 128) > 12) out.rx = (uint8_t)rx;
-    if (std::abs(ry - 128) > 12) out.ry = (uint8_t)ry;
+    if (std::abs(lx - 128) > 12)
+      out.lx = (uint8_t)lx;
+    if (std::abs(ly - 128) > 12)
+      out.ly = (uint8_t)ly;
+    if (std::abs(rx - 128) > 12)
+      out.rx = (uint8_t)rx;
+    if (std::abs(ry - 128) > 12)
+      out.ry = (uint8_t)ry;
     // Triggers -> L2/R2 (and the analog buttons via the bit, see fillPadState).
-    if (SDL_GetGamepadAxis(g.gamepad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > 8000) out.l2 = true;
-    if (SDL_GetGamepadAxis(g.gamepad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > 8000) out.r2 = true;
+    if (SDL_GetGamepadAxis(g.gamepad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > 8000)
+      out.l2 = true;
+    if (SDL_GetGamepadAxis(g.gamepad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > 8000)
+      out.r2 = true;
   }
   return true;
 }
@@ -668,8 +894,9 @@ bool pollKeyboardPad(PadKeys &out) {
 void setRumble(uint8_t largeMotor, uint8_t smallMotor) {
   if (!g.gamepad)
     return;
-  // DS4 motors are 0..255; SDL rumble is 0..65535. Large = low-freq, small = high-freq.
-  // Duration 0 means "until the next call"; the game re-issues continuously.
+  // DS4 motors are 0..255; SDL rumble is 0..65535. Large = low-freq, small =
+  // high-freq. Duration 0 means "until the next call"; the game re-issues
+  // continuously.
   SDL_RumbleGamepad(g.gamepad, (uint16_t)(largeMotor * 257),
                     (uint16_t)(smallMotor * 257), 0);
 }
@@ -677,20 +904,34 @@ void setRumble(uint8_t largeMotor, uint8_t smallMotor) {
 void shutdown() {
   if (g.device)
     vkDeviceWaitIdle(g.device);
-  destroyFrameResources();
-  if (g.fence) vkDestroyFence(g.device, g.fence, nullptr);
-  if (g.acquireSem) vkDestroySemaphore(g.device, g.acquireSem, nullptr);
-  if (g.renderSem) vkDestroySemaphore(g.device, g.renderSem, nullptr);
-  if (g.cmdPool) vkDestroyCommandPool(g.device, g.cmdPool, nullptr);
-  if (g.swapchain) vkDestroySwapchainKHR(g.device, g.swapchain, nullptr);
-  if (g.device) vkDestroyDevice(g.device, nullptr);
-  if (g.surface) vkDestroySurfaceKHR(g.instance, g.surface, nullptr);
-  if (g.instance) vkDestroyInstance(g.instance, nullptr);
-  if (g.window) SDL_DestroyWindow(g.window);
+  overlayVkShutdown();
+  for (FrameSlot &slot : g.slots) {
+    destroyFrameResources(slot);
+    if (slot.fence)
+      vkDestroyFence(g.device, slot.fence, nullptr);
+    if (slot.acquireFence)
+      vkDestroyFence(g.device, slot.acquireFence, nullptr);
+    if (slot.acquireSem)
+      vkDestroySemaphore(g.device, slot.acquireSem, nullptr);
+  }
+  destroyRenderSemaphores();
+  if (g.cmdPool)
+    vkDestroyCommandPool(g.device, g.cmdPool, nullptr);
+  if (g.swapchain)
+    vkDestroySwapchainKHR(g.device, g.swapchain, nullptr);
+  if (g.device)
+    vkDestroyDevice(g.device, nullptr);
+  if (g.surface)
+    vkDestroySurfaceKHR(g.instance, g.surface, nullptr);
+  if (g.instance)
+    vkDestroyInstance(g.instance, nullptr);
+  if (g.window)
+    SDL_DestroyWindow(g.window);
   SDL_Quit();
   g = State{};
+  g_canPresent.store(true, std::memory_order_release);
 }
 
-}  // namespace gfx
+} // namespace gfx
 
-#endif  // !__ANDROID__
+#endif // !__ANDROID__

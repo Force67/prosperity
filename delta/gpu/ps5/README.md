@@ -4,13 +4,13 @@ The PS5 GPU is an RDNA2 part (Oberon, gfx10.3-like) driven by the AGC command
 format. The AGC command buffer libSceAgc builds is a **PM4 type-3 stream using
 the same `IT_` opcode table as the PS4** (verified at runtime), so the packet
 walk, the register-latch model, the submit bridge, and the entire Vulkan
-renderer (`gpu/vk_render.*`) are reused from the PS4 path. What is genuinely new
+renderer (`gpu/rhi` + `gpu/vulkan`) are reused from the PS4 path. What is genuinely new
 for PS5, and lives here:
 
 | File | Role | Mirrors (PS4) |
 | --- | --- | --- |
 | `agc_regs.h` | gfx10.3 register file + offsets (context 0xA000 / sh 0x2C00 / uconfig 0xC000). | `gpu/ps4/liverpool.h` |
-| `cmd_processor.{h,cpp}` | AGC PM4 walk: `SET_*_REG` latch, draw/dispatch decode into `gpu::vk::DrawInfo`, completion labels, flip. | `gpu/ps4/cmd_processor.cpp` |
+| `cmd_processor.{h,cpp}` | AGC PM4 walk: `SET_*_REG` latch, draw/dispatch decode into `gpu::rhi::DrawInfo`, completion labels, flip. | `gpu/ps4/cmd_processor.cc` |
 | `rdna/rdna_decode.{h,cpp}` | RDNA2 instruction decoder -> `gpu::gcn::Program` (shared `Inst` repr). Different encoding prefixes + opcode numbers than GFX7. | `gpu/ps4/gcn/gcn_decode.*` |
 | `rdna/rdna_resource.{h,cpp}` | gfx10 128-bit V#/T#/S# descriptor decode + fetch/texture tracking. | `gpu/ps4/gcn/gcn_resource.*` |
 | `rdna/rdna_translate.{h,cpp}` | RDNA2 -> SPIR-V: per-instruction dispatch that decodes RDNA2 fields, remaps opcodes to the GFX7-canonical numbers, and calls the **shared** `gpu::gcn` emitters (`EmitVop*`, `EmitSop*`, exports, cbuf). Recompile facade. | `gpu/ps4/gcn/spirv/*` |
@@ -36,7 +36,7 @@ encoding, and the gfx10 128-bit descriptor layouts.
 ## Status
 
 Milestone-0 target: a bound render target + a first triangle / clear color
-through `vk_render`. The guest (Isaac, PPSA03311) does not yet submit AGC DCBs
+through the renderer. The guest (Isaac, PPSA03311) does not yet submit AGC DCBs
 (libSceAgc never registers its GPU context), so the stack is validated in
 isolation via `tools/rdna_selftest.cpp` until submission is unblocked.
 
@@ -62,7 +62,7 @@ isolation via `tools/rdna_selftest.cpp` until submission is unblocked.
 - f16 VOPC cmpx (EXEC-writing) forms and the unordered predicates above 0xCF.
 - SDWA/DPP sub-dword select and lane swizzle (decoded but applied as identity).
 - MTBUF and graphics-stage MUBUF/DS.
-- RECTLIST geometry expansion (gfx10 prim type 7 vs vk_render's `primType == 17`).
+- RECTLIST geometry expansion (gfx10 prim type 7 vs the renderer's `primType == 17`).
 - AGC input-usage-table-driven vertex fetch (the fetch pointer is currently a
   heuristic read of GS user-data[0..1]).
 - gfx10 swizzle-mode de-tiling for tiled render targets / textures.

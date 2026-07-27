@@ -15,17 +15,18 @@ namespace gpu {
 // Process one PM4 draw command buffer (guest GPU address, identity-mapped to a
 // host pointer; size in bytes). Walks the packet stream, updating register
 // state and issuing draws. Safe to call from the guest's GPU submit thread.
-void submitDcb(const void *dcb, uint32_t sizeBytes);
+void SubmitDcb(const void* dcb, uint32_t size_bytes);
 
 // Process one PM4 constant command buffer (ccb). The Constant Engine fills its
 // on-chip CE RAM (WRITE/LOAD_CONST_RAM) and dumps it to guest memory
 // (DUMP_CONST_RAM) where shaders read it as constant buffers. The DE-only path
 // ignored this; draws whose cbuffers come via the CE then read stale memory.
-// Must run before the matching submitDcb (the CE runs ahead of the draw engine).
-void submitCcb(const void *ccb, uint32_t sizeBytes);
+// Must run before the matching SubmitDcb (the CE runs ahead of the draw
+// engine).
+void SubmitCcb(const void* ccb, uint32_t size_bytes);
 
-// End the current frame and present the render target at `scanoutBase` (the
+// End the current frame and present the render target at `scanout_base` (the
 // videoout flip buffer). Called by the Gnm submit-and-flip HLE.
-void endFrame(uint64_t scanoutBase);
+void EndFrame(uint64_t scanout_base);
 
 }  // namespace gpu

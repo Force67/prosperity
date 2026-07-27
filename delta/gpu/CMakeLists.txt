@@ -13,14 +13,11 @@ else()
   add_delta_module(gpu DEPS Vulkan::Vulkan delta_gfx)
 endif()
 
-# Platform split: the shared Vulkan renderer (vk_render) and SPIR-V fallback
-# shaders stay here; the PS4 PM4/Liverpool + GCN path lives in ps4/, and the PS5
-# AGC/RDNA2 path is scaffolded in ps5/. add_delta_module GLOB_RECURSEs the whole
-# tree, so both subfolders are already compiled into delta_gpu; we only add their
-# include roots so intra-gpu includes ("vk_render.h", "gcn/...") keep resolving.
-target_include_directories(delta_gpu PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}
-  ${CMAKE_CURRENT_SOURCE_DIR}/ps4)
+# Layering: rhi/ is the backend-free renderer interface the command processors
+# talk to, vulkan/ is the only backend implementing it, and the PS4
+# PM4/Liverpool + GCN and PS5 AGC/RDNA2 paths live in ps4/ and ps5/. Every
+# include inside the module is spelled from the delta root ("gpu/..."), which
+# the shared DELTA_ROOT include dir already resolves -- no extra include roots.
 
 # The recompiler emits SPIR-V directly (no GLSL/shaderc).
 find_package(PkgConfig QUIET)
@@ -36,11 +33,15 @@ if(PkgConfig_FOUND)
   pkg_check_modules(SPIRVHEADERS QUIET SPIRV-Headers)
 endif()
 if(SPIRVTOOLS_FOUND AND SPIRVHEADERS_FOUND)
-  target_link_libraries(delta_gpu PUBLIC ${SPIRVTOOLS_LIBRARIES})
-  target_link_directories(delta_gpu PUBLIC ${SPIRVTOOLS_LIBRARY_DIRS})
-  target_include_directories(delta_gpu PUBLIC ${SPIRVTOOLS_INCLUDE_DIRS}
+  # PRIVATE: SPIRV-Tools is an implementation detail of the recompiler; no
+  # header on the public surface needs it, and keeping it off dependents'
+  # include paths stops accidental use outside the module. LINK_LIBRARIES
+  # (absolute paths) instead of LIBRARIES+link_directories so the link
+  # requirement still reaches the final executable through the static lib.
+  target_link_libraries(delta_gpu PRIVATE ${SPIRVTOOLS_LINK_LIBRARIES})
+  target_include_directories(delta_gpu PRIVATE ${SPIRVTOOLS_INCLUDE_DIRS}
                              ${SPIRVHEADERS_INCLUDE_DIRS})
-  target_compile_definitions(delta_gpu PUBLIC DELTA_HAVE_SPIRV_BACKEND=1)
+  target_compile_definitions(delta_gpu PRIVATE DELTA_HAVE_SPIRV_BACKEND=1)
 else()
   message(STATUS "SPIRV-Tools/Headers not found; direct GCN->SPIR-V backend disabled")
 endif()

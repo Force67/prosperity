@@ -15,8 +15,8 @@ intermediate).
 | `spirv/spv_emit.{h,cpp}` | Minimal SPIR-V module builder (types/constants de-duped via packed-integer cache). |
 | `spirv/spv_post.{h,cpp}` | SPIRV-Tools optimize (legalize + performance passes) and validation. |
 | `spirv/translator.h` | Internal shared translator context (`Translator`, `StageContext`) + emitter declarations. |
-| `spirv/translate_alu.cpp` | Scalar + vector ALU (SOP1/SOP2/SOPC/SOPK, VOP1/VOP2/VOP3, full VOPC predicate set incl. `cmpx` -> EXEC). |
-| `spirv/translate_mem.cpp` | Memory ops: graphics cbuffers (SMRD) + MIMG (sample/load/gather/resinfo); compute SSBO model (SMRD/MUBUF/MTBUF/MIMG), LDS (DS). |
+| `spirv/translate_alu.cc` | Scalar + vector ALU (SOP1/SOP2/SOPC/SOPK, VOP1/VOP2/VOP3, full VOPC predicate set incl. `cmpx` -> EXEC). |
+| `spirv/translate_mem.cc` | Memory ops: graphics cbuffers (SMRD) + MIMG (sample/load/gather/resinfo); compute SSBO model (SMRD/MUBUF/MTBUF/MIMG), LDS (DS). |
 | `spirv/gcn_spirv.{h,cpp}` | Per-instruction dispatch, control-flow lowering (while/switch state machine), stage drivers (VS/PS/CS), RECTLIST geometry expansion, entry points. |
 
 ## Execution model

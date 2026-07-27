@@ -22,14 +22,22 @@ namespace gpu::gcn {
 // and whether a 32-bit literal/inline constant dword follows.
 enum class Enc : uint8_t {
   kUnknown,
-  kSop1, kSop2, kSopk, kSopc, kSopp,  // scalar ALU
-  kSmrd,                              // scalar memory (loads V#/T# tables)
-  kVop1, kVop2, kVop3, kVopc,         // vector ALU
-  kVintrp,                            // interpolation
-  kDs,                                // LDS/GDS
-  kMubuf, kMtbuf,                     // buffer load/store (vertex fetch via V#)
-  kMimg,                              // image sample/load/store (uses T#/S#)
-  kExp,                               // export (PS color / VS position out)
+  kSop1,
+  kSop2,
+  kSopk,
+  kSopc,
+  kSopp,  // scalar ALU
+  kSmrd,  // scalar memory (loads V#/T# tables)
+  kVop1,
+  kVop2,
+  kVop3,
+  kVopc,    // vector ALU
+  kVintrp,  // interpolation
+  kDs,      // LDS/GDS
+  kMubuf,
+  kMtbuf,  // buffer load/store (vertex fetch via V#)
+  kMimg,   // image sample/load/store (uses T#/S#)
+  kExp,    // export (PS color / VS position out)
 };
 
 struct Inst {
@@ -51,7 +59,8 @@ using Program = std::vector<Inst>;
 // stop_at_endpgm=false the whole program is decoded so blocks reached only
 // after an early-out s_endpgm are still lifted. stop_at_endpgm=true stops at
 // the first s_endpgm for callers without a reliable length bound.
-Program Decode(const uint32_t* code, uint32_t max_dwords,
+Program Decode(const uint32_t* code,
+               uint32_t max_dwords,
                bool stop_at_endpgm = true);
 
 // Recover the real GCN code length (in dwords) from the trailing Gnm

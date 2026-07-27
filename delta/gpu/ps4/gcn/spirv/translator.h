@@ -4,7 +4,7 @@
  * PS4Delta : PS4 emulation and research project
  *
  * Internal shared state of the GCN -> SPIR-V translator. Only the backend TUs
- * (gcn_spirv.cpp, translate_alu.cpp, translate_mem.cpp) include this; the
+ * (gcn_spirv.cc, translate_alu.cc, translate_mem.cc) include this; the
  * public surface is gcn_spirv.h / gcn_translate.h.
  *
  * The translator models the GCN register file as Private-storage arrays
@@ -24,10 +24,10 @@
 
 #include <spirv/unified1/GLSL.std.450.h>
 
-#include "../gcn_decode.h"
-#include "../gcn_resource.h"
-#include "../gcn_translate.h"
-#include "spv_emit.h"
+#include "gpu/ps4/gcn/gcn_decode.h"
+#include "gpu/ps4/gcn/gcn_resource.h"
+#include "gpu/ps4/gcn/gcn_translate.h"
+#include "gpu/ps4/gcn/spirv/spv_emit.h"
 
 namespace gpu::gcn {
 
@@ -35,13 +35,17 @@ using spirv::Id;
 
 constexpr uint64_t kGuestLo = 0x1000000000ull;
 constexpr uint64_t kGuestHi = 0x20000000000ull;
-inline bool InGuest(uint64_t a) { return a >= kGuestLo && a < kGuestHi; }
+inline bool InGuest(uint64_t a) {
+  return a >= kGuestLo && a < kGuestHi;
+}
 
 // Loud, deduplicated report of an instruction the translator does not
 // implement, so it falls back to an approximation. Logged once per distinct
 // (encoding, opcode): silent wrong codegen is never acceptable, but a
 // per-frame flood is useless.
-void WarnUnsupported(const char* enc, uint32_t op, uint32_t w0 = 0,
+void WarnUnsupported(const char* enc,
+                     uint32_t op,
+                     uint32_t w0 = 0,
                      uint32_t w1 = 0);
 
 // DELTA_GPU_SHTRACE: translator debug logging.
@@ -57,9 +61,9 @@ struct Translator {
   Id state_var = 0;  // CFG block index for the while-switch dispatch
   Id cbuf_type = 0;  // shared CB { uvec4 data[64]; } type
   std::unordered_map<uint32_t, Id> cbuf_vars;  // binding -> cbuffer UBO var
-  Id img_types[4] = {};      // sampled 2D / 2D-array, color / depth images
-  Id sampled_types[4] = {};  // corresponding combined image-sampler types
-  Id sampled_ptrs[4] = {};   // UniformConstant pointers to sampled_types
+  Id img_types[4] = {};          // sampled 2D / 2D-array, color / depth images
+  Id sampled_types[4] = {};      // corresponding combined image-sampler types
+  Id sampled_ptrs[4] = {};       // UniformConstant pointers to sampled_types
   Id storage_img_types[2] = {};  // storage 2D / 2D-array images
   Id storage_img_ptrs[2] = {};   // UniformConstant pointers to storage images
   bool image_query = false;
@@ -83,8 +87,10 @@ struct Translator {
                       spv::StorageClass::Private, m.ConstNull(arr_vg));
     m.Name(sgpr, "sgpr");
     m.Name(vgpr, "vgpr");
-    scc_var = m.Variable(p_priv_u, spv::StorageClass::Private, m.ConstNull(t_u));
-    state_var = m.Variable(p_priv_u, spv::StorageClass::Private, m.ConstNull(t_u));
+    scc_var =
+        m.Variable(p_priv_u, spv::StorageClass::Private, m.ConstNull(t_u));
+    state_var =
+        m.Variable(p_priv_u, spv::StorageClass::Private, m.ConstNull(t_u));
     m.Name(scc_var, "scc");
     m.Name(state_var, "state");
   }
@@ -94,7 +100,8 @@ struct Translator {
   void SeedExec() { SetSg(126, U32(1)); }
 
   void RequireImageQuery() {
-    if (image_query) return;
+    if (image_query)
+      return;
     m.Capability(spv::Capability::ImageQuery);
     image_query = true;
   }
@@ -172,11 +179,15 @@ struct Translator {
   Id Low24(Id a) { return And(a, U32(0xFFFFFF)); }
 
   // ---- comparisons / selects (Bool domain) ----
-  Id IsNonZero(Id u) { return m.Emit(spv::Op::OpINotEqual, t_bool, {u, U32(0)}); }
+  Id IsNonZero(Id u) {
+    return m.Emit(spv::Op::OpINotEqual, t_bool, {u, U32(0)});
+  }
   Id IsZero(Id u) { return m.Emit(spv::Op::OpIEqual, t_bool, {u, U32(0)}); }
   Id Eq(Id a, Id b) { return m.Emit(spv::Op::OpIEqual, t_bool, {a, b}); }
   Id Ult(Id a, Id b) { return m.Emit(spv::Op::OpULessThan, t_bool, {a, b}); }
-  Id Ule(Id a, Id b) { return m.Emit(spv::Op::OpULessThanEqual, t_bool, {a, b}); }
+  Id Ule(Id a, Id b) {
+    return m.Emit(spv::Op::OpULessThanEqual, t_bool, {a, b});
+  }
   Id Uge(Id a, Id b) {
     return m.Emit(spv::Op::OpUGreaterThanEqual, t_bool, {a, b});
   }
@@ -184,12 +195,14 @@ struct Translator {
   Id SelectB(Id cond, Id a, Id b) {
     return m.Emit(spv::Op::OpSelect, t_u, {cond, a, b});
   }
-  Id SelectNz(Id cond_u, Id a, Id b) { return SelectB(IsNonZero(cond_u), a, b); }
+  Id SelectNz(Id cond_u, Id a, Id b) {
+    return SelectB(IsNonZero(cond_u), a, b);
+  }
   Id SelectF(Id cond, Id a, Id b) {
     return m.Emit(spv::Op::OpSelect, t_f, {cond, a, b});
   }
 
-  Id PairType() { return m.TypeStruct({t_u, t_u}); } // {result, carry/hi}
+  Id PairType() { return m.TypeStruct({t_u, t_u}); }  // {result, carry/hi}
 
   // ---- constant buffers (graphics SMRD model) ----
   // Declared as CB { uvec4 data[]; } at set 1. Separate bindings preserve
@@ -210,6 +223,7 @@ struct Translator {
                    spv::StorageClass::Uniform);
     m.Decorate(v, spv::Decoration::DescriptorSet, {1});
     m.Decorate(v, spv::Decoration::Binding, {binding});
+    m.Name(v, "cbuf" + std::to_string(binding));
     cbuf_vars[binding] = v;
     return v;
   }
@@ -235,38 +249,58 @@ struct Translator {
   // ---- operand sources ----
   // Raw uint of a source operand field (SSRC/VSRC encoding).
   Id SrcRaw(uint32_t field, uint32_t literal) {
-    if (field <= 127) return Sg(field);
-    if (field == 128) return U32(0);
-    if (field >= 129 && field <= 192) return U32(field - 128);
+    if (field <= 127)
+      return Sg(field);
+    if (field == 128)
+      return U32(0);
+    if (field >= 129 && field <= 192)
+      return U32(field - 128);
     if (field >= 193 && field <= 208)
       return U32(static_cast<uint32_t>(-static_cast<int>(field - 192)));
     switch (field) {  // inline float constants
-      case 240: return U32(0x3f000000u);
-      case 241: return U32(0xbf000000u);
-      case 242: return U32(0x3f800000u);
-      case 243: return U32(0xbf800000u);
-      case 244: return U32(0x40000000u);
-      case 245: return U32(0xc0000000u);
-      case 246: return U32(0x40800000u);
-      case 247: return U32(0xc0800000u);
+      case 240:
+        return U32(0x3f000000u);
+      case 241:
+        return U32(0xbf000000u);
+      case 242:
+        return U32(0x3f800000u);
+      case 243:
+        return U32(0xbf800000u);
+      case 244:
+        return U32(0x40000000u);
+      case 245:
+        return U32(0xc0000000u);
+      case 246:
+        return U32(0x40800000u);
+      case 247:
+        return U32(0xc0800000u);
     }
-    if (field == 255) return U32(literal);
-    if (field >= 256) return Vg(field - 256);
+    if (field == 255)
+      return U32(literal);
+    if (field >= 256)
+      return Vg(field - 256);
     return U32(0);
   }
   // High dword of a 64-bit source. Register operands use the adjacent
   // SGPR/VGPR; inline and literal operands are extended from their low dword.
   Id SrcRawHi(uint32_t field, uint32_t literal, bool sign_extend) {
-    if (field <= 126) return Sg(field + 1);
-    if (field >= 256 && field <= 510) return Vg(field - 255);
+    if (field <= 126)
+      return Sg(field + 1);
+    if (field >= 256 && field <= 510)
+      return Vg(field - 255);
     const Id lo = SrcRaw(field, literal);
     return sign_extend ? Sar(lo, U32(31)) : U32(0);
   }
   // Float source with the VOP3 neg/abs input modifiers applied.
-  Id SrcF(uint32_t field, uint32_t literal, bool neg = false, bool abs = false) {
+  Id SrcF(uint32_t field,
+          uint32_t literal,
+          bool neg = false,
+          bool abs = false) {
     Id f = m.Bitcast(t_f, SrcRaw(field, literal));
-    if (abs) f = Ext1(GLSLstd450FAbs, f);
-    if (neg) f = FNeg(f);
+    if (abs)
+      f = Ext1(GLSLstd450FAbs, f);
+    if (neg)
+      f = FNeg(f);
     return f;
   }
 };
@@ -282,14 +316,18 @@ struct StageContext {
   // VS
   Id pos_out = 0;
   std::unordered_map<uint32_t, Id> param_outs;
-  std::unordered_set<uint32_t> direct_vfetch;  // MUBUF pc seeded as vertex input
+  std::unordered_set<uint32_t>
+      direct_vfetch;  // MUBUF pc seeded as vertex input
   uint32_t max_param = 0;
   // PS5 inline vertex fetch: (Location input, first dest VGPR, component count)
-  // keyed by the fetch MUBUF's pc. The destination VGPRs are (re)seeded from the
-  // input AT the fetch instruction, because an NGG merged-wave's index math can
-  // overwrite them (e.g. v0, reused as the fetch index) between the function
-  // prologue and the position transform.
-  struct VfetchSeed { Id in_var; uint32_t dest_vgpr, num_comps; };
+  // keyed by the fetch MUBUF's pc. The destination VGPRs are (re)seeded from
+  // the input AT the fetch instruction, because an NGG merged-wave's index math
+  // can overwrite them (e.g. v0, reused as the fetch index) between the
+  // function prologue and the position transform.
+  struct VfetchSeed {
+    Id in_var;
+    uint32_t dest_vgpr, num_comps;
+  };
   std::unordered_map<uint32_t, VfetchSeed> vfetch_seed;
   // DELTA_GPU_DBGPOS: the position input and the cbuffer holding a 4x4
   // transform, so the position export can be recomputed the way the draw's
@@ -312,14 +350,15 @@ struct StageContext {
   // descriptor share one set-0 binding; variables are created lazily per
   // binding. The plan is also what TrackTextures pairs against at draw time.
   const MimgBindingPlan* mimg_plan = nullptr;
-  static constexpr uint32_t kMaxPsSamplers = 16;  // == vk_render State::kMaxTex
+  static constexpr uint32_t kMaxPsSamplers = 16;  // == gpu::vk::kMaxTex
   Id tex_vars[kMaxPsSamplers] = {};
   uint32_t tex_types[kMaxPsSamplers] = {};
 
   // shared graphics
   std::unordered_map<uint32_t, uint32_t> cbuf_bind;  // V# SGPR -> set-1 binding
   // Per-instruction cbuf bindings for constant buffer_loads whose srsrc SGPRs
-  // are reused (PS5 table-chained descriptors); takes precedence over cbuf_bind.
+  // are reused (PS5 table-chained descriptors); takes precedence over
+  // cbuf_bind.
   std::unordered_map<uint32_t, uint32_t> mubuf_cbuf_by_pc;
   // Per-instruction RDNA SMEM binding when one sbase has multiple producers.
   std::unordered_map<uint32_t, uint32_t> smem_cbuf_by_pc;
@@ -331,46 +370,70 @@ struct StageContext {
   // Compute: storage buffers modelling the guest memory the CS reads/writes.
   std::unordered_map<uint32_t, uint32_t> cs_bind;  // instruction pc -> binding
   std::vector<Id> cs_ssbo;                         // binding -> SSBO variable
-  Id lds_var = 0;          // Workgroup-storage uint array (0 = no LDS)
-  uint32_t lds_dwords = 0;  // its length
-  Id subgroup_local_id = 0;  // SubgroupLocalInvocationId for DS swizzles
+  Id lds_var = 0;               // Workgroup-storage uint array (0 = no LDS)
+  uint32_t lds_dwords = 0;      // its length
+  Id subgroup_local_id = 0;     // SubgroupLocalInvocationId for DS swizzles
   bool cs_unsupported = false;  // op the compute backend can't model
 };
 
-// ---- stage-io helpers (gcn_spirv.cpp) --------------------------------------
+// ---- stage-io helpers (gcn_spirv.cc) --------------------------------------
 Id PsInputVar(Translator& t, StageContext& sc, uint32_t attr);
 Id VsParamOut(Translator& t, StageContext& sc, uint32_t p);
 Id PsColorOut(Translator& t, StageContext& sc, uint32_t target);
 Id PsDepthOut(Translator& t, StageContext& sc);
 
-// ---- ALU emitters (translate_alu.cpp) --------------------------------------
+// ---- ALU emitters (translate_alu.cc) --------------------------------------
 void EmitSop1(Translator& t, const Inst& inst);
 void EmitSop2(Translator& t, const Inst& inst);
 void EmitSopc(Translator& t, const Inst& inst);
 void EmitSopk(Translator& t, const Inst& inst);
-void EmitVop1(Translator& t, uint32_t op, uint32_t vdst, Id s0,
+void EmitVop1(Translator& t,
+              uint32_t op,
+              uint32_t vdst,
+              Id s0,
               bool clamp = false);
-void EmitVop2(Translator& t, uint32_t op, uint32_t vdst, Id s0, Id s1,
-              uint32_t literal = 0, bool clamp = false);
-void EmitVop3(Translator& t, uint32_t op, uint32_t vdst, Id s0, Id s1, Id s2,
-              Id s2_hi, uint32_t sdst, bool clamp);
+void EmitVop2(Translator& t,
+              uint32_t op,
+              uint32_t vdst,
+              Id s0,
+              Id s1,
+              uint32_t literal = 0,
+              bool clamp = false);
+void EmitVop3(Translator& t,
+              uint32_t op,
+              uint32_t vdst,
+              Id s0,
+              Id s1,
+              Id s2,
+              Id s2_hi,
+              uint32_t sdst,
+              bool clamp);
 // Vector compare: writes the 0/1 predicate to sgpr[dst]; the cmpx forms also
 // replace EXEC.
-void EmitVopc(Translator& t, uint32_t op, Id s0f, Id s1f, Id s0u, Id s1u,
+void EmitVopc(Translator& t,
+              uint32_t op,
+              Id s0f,
+              Id s1f,
+              Id s0u,
+              Id s1u,
               uint32_t dst = 106);
 bool IsVop3b(uint32_t op);
 
-// ---- memory emitters (translate_mem.cpp) -----------------------------------
+// ---- memory emitters (translate_mem.cc) -----------------------------------
 uint32_t SmrdLoadCount(uint32_t op);
-bool PlanCbufs(const Program& program, uint32_t first_binding,
-                std::vector<ShaderCbuf>& cbufs,
-                std::unordered_map<uint32_t, uint32_t>& bindings,
-                const uint8_t* reachable = nullptr);
-void EmitCbufSmrd(Translator& t, const Inst& inst,
+bool PlanCbufs(const Program& program,
+               uint32_t first_binding,
+               std::vector<ShaderCbuf>& cbufs,
+               std::unordered_map<uint32_t, uint32_t>& bindings,
+               const uint8_t* reachable = nullptr);
+void EmitCbufSmrd(Translator& t,
+                  const Inst& inst,
                   const std::unordered_map<uint32_t, uint32_t>& bindings);
 void EmitMimg(Translator& t, const Inst& inst, StageContext& sc);
-bool PlanCsResources(const Program& program, const uint8_t* reachable,
-                     uint32_t lds_dwords, RecompiledCs& r,
+bool PlanCsResources(const Program& program,
+                     const uint8_t* reachable,
+                     uint32_t lds_dwords,
+                     RecompiledCs& r,
                      std::unordered_map<uint32_t, uint32_t>& bind);
 void EmitCsSmrd(Translator& t, const Inst& inst, StageContext& sc);
 void EmitCsMubuf(Translator& t, const Inst& inst, StageContext& sc);
@@ -382,6 +445,7 @@ void EmitDs(Translator& t, const Inst& inst, StageContext& sc);
 // with the RDNA2 path, which reaches RECTLIST under a different primitive-type
 // number but needs the identical fixed-function expansion.
 std::vector<uint32_t> EmitRectListGeometry(
-    uint32_t num_params, const std::unordered_set<uint32_t>& flat_attrs);
+    uint32_t num_params,
+    const std::unordered_set<uint32_t>& flat_attrs);
 
 }  // namespace gpu::gcn

@@ -38,13 +38,17 @@ constexpr uint32_t kRegSelectorMask = 0x70000000u;
 // in _BASE, the high bits in the separate _BASE_EXT register (64-bit address).
 constexpr uint32_t mmCB_COLOR0_BASE = 0xA318;
 constexpr uint32_t mmCB_COLOR0_VIEW = 0xA31B;
-constexpr uint32_t mmCB_COLOR0_INFO = 0xA31C;    // FORMAT[6:2], NUMBER_TYPE[10:8], COMP_SWAP[12:11]
-constexpr uint32_t mmCB_COLOR0_ATTRIB = 0xA31D;  // NUM_SAMPLES[14:12], NUM_FRAGMENTS[16:15]
+constexpr uint32_t mmCB_COLOR0_INFO =
+    0xA31C;  // FORMAT[6:2], NUMBER_TYPE[10:8], COMP_SWAP[12:11]
+constexpr uint32_t mmCB_COLOR0_ATTRIB =
+    0xA31D;  // NUM_SAMPLES[14:12], NUM_FRAGMENTS[16:15]
 constexpr uint32_t kCbColorStride = 0xF;
 // gfx10 64-bit high-bit extension registers (stride 1 across the 8 slots).
-constexpr uint32_t mmCB_COLOR0_BASE_EXT = 0xA390;   // high bits of the RT base
-constexpr uint32_t mmCB_COLOR0_ATTRIB2 = 0xA3B0;    // MIP0_HEIGHT[13:0], MIP0_WIDTH[27:14]
-constexpr uint32_t mmCB_COLOR0_ATTRIB3 = 0xA3B8;    // COLOR_SW_MODE[18:14] (gfx10 swizzle mode)
+constexpr uint32_t mmCB_COLOR0_BASE_EXT = 0xA390;  // high bits of the RT base
+constexpr uint32_t mmCB_COLOR0_ATTRIB2 =
+    0xA3B0;  // MIP0_HEIGHT[13:0], MIP0_WIDTH[27:14]
+constexpr uint32_t mmCB_COLOR0_ATTRIB3 =
+    0xA3B8;  // COLOR_SW_MODE[18:14] (gfx10 swizzle mode)
 constexpr uint32_t kCbColorExtStride = 0x1;
 // Screen scissor gives the render area (width/height).
 constexpr uint32_t mmPA_SC_SCREEN_SCISSOR_TL = 0xA00C;
@@ -82,19 +86,21 @@ constexpr uint32_t mmDB_Z_READ_BASE = 0xA012;
 constexpr uint32_t mmDB_Z_WRITE_BASE = 0xA014;
 constexpr uint32_t mmDB_Z_READ_BASE_HI = 0xA01A;
 constexpr uint32_t mmDB_Z_WRITE_BASE_HI = 0xA01C;
-// Fast-clear depth value (float) used when the buffer is bound with loadOp=CLEAR.
+// Fast-clear depth value (float) used when the buffer is bound with
+// loadOp=CLEAR.
 constexpr uint32_t mmDB_DEPTH_CLEAR = 0xA00B;
-// Primitive-setup: cull + winding. CULL_FRONT[0] CULL_BACK[1] FACE[2] (0=CCW front).
+// Primitive-setup: cull + winding. CULL_FRONT[0] CULL_BACK[1] FACE[2] (0=CCW
+// front).
 constexpr uint32_t mmPA_SU_SC_MODE_CNTL = 0xA205;
-// Clip control. DX_CLIP_SPACE_DEF[19]: 1 = clip z in [0,w] (Vulkan's convention),
-// 0 = OpenGL's [-w,w], which the recompiled VS then has to remap.
+// Clip control. DX_CLIP_SPACE_DEF[19]: 1 = clip z in [0,w] (Vulkan's
+// convention), 0 = OpenGL's [-w,w], which the recompiled VS then has to remap.
 constexpr uint32_t mmPA_CL_CLIP_CNTL = 0xA204;
 
 // --- SPI shader-interface (context) ---
-constexpr uint32_t mmSPI_VS_OUT_CONFIG = 0xA1B1;    // # of VS output params
-constexpr uint32_t mmSPI_PS_INPUT_ENA = 0xA1B3;     // interpolants the PS reads
+constexpr uint32_t mmSPI_VS_OUT_CONFIG = 0xA1B1;  // # of VS output params
+constexpr uint32_t mmSPI_PS_INPUT_ENA = 0xA1B3;   // interpolants the PS reads
 constexpr uint32_t mmSPI_PS_INPUT_ADDR = 0xA1B4;
-constexpr uint32_t mmSPI_PS_IN_CONTROL = 0xA1B6;    // NUM_INTERP
+constexpr uint32_t mmSPI_PS_IN_CONTROL = 0xA1B6;  // NUM_INTERP
 constexpr uint32_t mmSPI_SHADER_POS_FORMAT = 0xA1C3;
 constexpr uint32_t mmSPI_SHADER_Z_FORMAT = 0xA1C4;
 constexpr uint32_t mmSPI_SHADER_COL_FORMAT = 0xA1C5;  // per-MRT export format
@@ -112,8 +118,10 @@ constexpr uint32_t mmGE_CNTL = 0xC25B;
 constexpr uint32_t mmSPI_SHADER_PGM_LO_PS = 0x2C08;
 constexpr uint32_t mmSPI_SHADER_PGM_HI_PS = 0x2C09;
 constexpr uint32_t mmSPI_SHADER_PGM_RSRC1_PS = 0x2C0A;
-constexpr uint32_t mmSPI_SHADER_PGM_RSRC2_PS = 0x2C0B;  // USER_SGPR[5:1], USER_SGPR_MSB[27]
-constexpr uint32_t mmSPI_SHADER_USER_DATA_PS_0 = 0x2C0C;  // 32 user-data SGPRs (0x0C..0x2B)
+constexpr uint32_t mmSPI_SHADER_PGM_RSRC2_PS =
+    0x2C0B;  // USER_SGPR[5:1], USER_SGPR_MSB[27]
+constexpr uint32_t mmSPI_SHADER_USER_DATA_PS_0 =
+    0x2C0C;  // 32 user-data SGPRs (0x0C..0x2B)
 
 // gfx10.3 has no hardware VS stage: vertex work runs as a merged ES(front)/GS
 // (back) NGG primitive shader. AGC writes the vertex program address into BOTH
@@ -123,8 +131,10 @@ constexpr uint32_t mmSPI_SHADER_PGM_LO_GS = 0x2C88;
 constexpr uint32_t mmSPI_SHADER_PGM_HI_GS = 0x2C89;
 constexpr uint32_t mmSPI_SHADER_PGM_RSRC1_GS = 0x2C8A;
 constexpr uint32_t mmSPI_SHADER_PGM_RSRC2_GS = 0x2C8B;
-constexpr uint32_t mmSPI_SHADER_USER_DATA_GS_0 = 0x2C8C;  // 32 user-data SGPRs (0x8C..0xAB)
-constexpr uint32_t mmSPI_SHADER_PGM_LO_ES = 0x2CC8;       // ES front half (== GS addr)
+constexpr uint32_t mmSPI_SHADER_USER_DATA_GS_0 =
+    0x2C8C;  // 32 user-data SGPRs (0x8C..0xAB)
+constexpr uint32_t mmSPI_SHADER_PGM_LO_ES =
+    0x2CC8;  // ES front half (== GS addr)
 constexpr uint32_t mmSPI_SHADER_PGM_HI_ES = 0x2CC9;
 constexpr uint32_t mmSPI_SHADER_USER_DATA_ES_0 = 0x2CCC;
 
@@ -132,29 +142,32 @@ constexpr uint32_t mmSPI_SHADER_USER_DATA_ES_0 = 0x2CCC;
 constexpr uint32_t mmCOMPUTE_NUM_THREAD_X = 0x2E07;  // u16 full | u16 partial
 constexpr uint32_t mmCOMPUTE_NUM_THREAD_Y = 0x2E08;
 constexpr uint32_t mmCOMPUTE_NUM_THREAD_Z = 0x2E09;
-constexpr uint32_t mmCOMPUTE_PGM_LO = 0x2E0C;   // CS addr[39:8]
-constexpr uint32_t mmCOMPUTE_PGM_HI = 0x2E0D;   // CS addr[47:40] in [7:0]
+constexpr uint32_t mmCOMPUTE_PGM_LO = 0x2E0C;     // CS addr[39:8]
+constexpr uint32_t mmCOMPUTE_PGM_HI = 0x2E0D;     // CS addr[47:40] in [7:0]
 constexpr uint32_t mmCOMPUTE_PGM_RSRC1 = 0x2E12;  // W32_EN[30] (wave32)
-constexpr uint32_t mmCOMPUTE_PGM_RSRC2 = 0x2E13;  // user_sgpr[5:1], tgid_en[9:7], lds[23:15]
+constexpr uint32_t mmCOMPUTE_PGM_RSRC2 =
+    0x2E13;  // user_sgpr[5:1], tgid_en[9:7], lds[23:15]
 constexpr uint32_t mmCOMPUTE_USER_DATA_0 = 0x2E40;  // 16 user-data SGPRs
 
 // The full GPU register state. A draw is rendered from a snapshot of this.
 struct Regs {
   std::array<uint32_t, kRegFileSize> data{};
 
-  uint32_t &operator[](uint32_t off) { return data[off]; }
-  uint32_t operator[](uint32_t off) const { return off < kRegFileSize ? data[off] : 0; }
+  uint32_t& operator[](uint32_t off) { return data[off]; }
+  uint32_t operator[](uint32_t off) const {
+    return off < kRegFileSize ? data[off] : 0;
+  }
 
   // 48-bit GPU shader address from a PGM_LO/HI register pair:
   // addr = (LO << 8) | ((HI & 0xFF) << 40)  (LO holds bits [39:8], HI [47:40]).
-  uint64_t shaderAddr(uint32_t loReg) const {
-    uint64_t lo = data[loReg];
-    uint64_t hi = data[loReg + 1] & 0xFF;
+  uint64_t ShaderAddr(uint32_t lo_reg) const {
+    uint64_t lo = data[lo_reg];
+    uint64_t hi = data[lo_reg + 1] & 0xFF;
     return (lo << 8) | (hi << 40);
   }
   // Full 64-bit color-target base from the gfx10 _BASE (low) + _BASE_EXT (high)
   // register pair; the stored value is 256-byte aligned (<< 8).
-  uint64_t cbColorBase(int rt = 0) const {
+  uint64_t CbColorBase(int rt = 0) const {
     uint64_t lo = data[mmCB_COLOR0_BASE + rt * kCbColorStride];
     uint64_t hi = data[mmCB_COLOR0_BASE_EXT + rt * kCbColorExtStride];
     return ((hi << 32) | lo) << 8;
