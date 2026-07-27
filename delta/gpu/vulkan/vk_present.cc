@@ -65,4 +65,19 @@ void PresentAsync(const uint8_t* pixels, uint32_t w, uint32_t h) {
   p.cv.notify_one();
 }
 
+void PresentAsync(std::vector<uint8_t>&& pixels, uint32_t w, uint32_t h) {
+  Presenter& p = g_presenter;
+  if (!p.started) {
+    p.started = true;
+    p.th = std::thread(PresenterLoop);
+    p.th.detach();
+  }
+  std::lock_guard<std::mutex> lk(p.mtx);
+  p.buf.swap(pixels);
+  p.w = w;
+  p.h = h;
+  p.pending = true;
+  p.cv.notify_one();
+}
+
 }  // namespace gpu::vk

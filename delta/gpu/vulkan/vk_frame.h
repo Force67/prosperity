@@ -17,12 +17,14 @@ namespace gpu::vk {
 struct FrameSlot {
   VkCommandBuffer cmd = VK_NULL_HANDLE;
   VkFence fence = VK_NULL_HANDLE;
+  VkQueryPool timestamps = VK_NULL_HANDLE;
   VkBuffer readback = VK_NULL_HANDLE;
   VkDeviceMemory readback_mem = VK_NULL_HANDLE;
   void* readback_map = nullptr;
   VkDeviceSize readback_size = 0;
   bool submitted = false;    // fence submitted and not yet waited
   bool presentable = false;  // the frame copied pixels into `readback`
+  bool present_to_window = false;
   // Metadata of the recorded frame, consumed when it is presented.
   uint32_t w = 0, h = 0;
   VkFormat fmt = VK_FORMAT_UNDEFINED;

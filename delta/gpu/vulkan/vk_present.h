@@ -8,9 +8,11 @@
 // dedicated thread owns the window and always shows the newest complete frame.
 
 #include <cstdint>
+#include <vector>
 
 namespace gpu::vk {
 
 void PresentAsync(const uint8_t* pixels, uint32_t w, uint32_t h);
+void PresentAsync(std::vector<uint8_t>&& pixels, uint32_t w, uint32_t h);
 
 }  // namespace gpu::vk

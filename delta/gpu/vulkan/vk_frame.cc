@@ -35,6 +35,14 @@ bool CreateFrameSlots() {
   for (auto& slot : g_frame.slots) {
     VKOK(vkAllocateCommandBuffers(g_dev.device, &ca, &slot.cmd));
     VKOK(vkCreateFence(g_dev.device, &fc, nullptr, &slot.fence));
+    if (g_dev.timestamp_valid_bits) {
+      VkQueryPoolCreateInfo qi{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+      qi.queryType = VK_QUERY_TYPE_TIMESTAMP;
+      qi.queryCount = 2;
+      if (vkCreateQueryPool(g_dev.device, &qi, nullptr, &slot.timestamps) !=
+          VK_SUCCESS)
+        slot.timestamps = VK_NULL_HANDLE;
+    }
   }
   g_frame.cmd = g_frame.slots[0].cmd;
   return true;
@@ -136,7 +144,7 @@ void* RdocDevice() {
 // frame and report how many sampled texels are non-zero. RTSTAT_FRAME selects a
 // single early frame instead. DELTA_GPU_RTDUMP also writes the selected
 // targets.
-void ReportRtContents() {
+bool ReportRtContents(FrameSlot& owner) {
   static const bool enabled = std::getenv("DELTA_GPU_RTSTAT") != nullptr;
   static const bool dump = std::getenv("DELTA_GPU_RTDUMP") != nullptr;
   static const int kReportFrame = [] {
@@ -151,7 +159,7 @@ void ReportRtContents() {
   }();
   if (!enabled ||
       (kReportFrame ? g_frame.num != kReportFrame : g_frame.num % every != 0))
-    return;
+    return true;
   int reported = 0;
   for (auto& kv : g_rts) {
     RTarget& rt = kv.second;
@@ -159,32 +167,57 @@ void ReportRtContents() {
       continue;
     reported++;
     EnsureReadback(rt.w, rt.h, rt.fmt);
+    owner.readback = g_frame.readback;
+    owner.readback_mem = g_frame.readback_mem;
+    owner.readback_map = g_frame.readback_map;
+    owner.readback_size = g_frame.readback_size;
     VkCommandBufferAllocateInfo ca{
         VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
     ca.commandPool = g_dev.pool;
     ca.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     ca.commandBufferCount = 1;
-    VkCommandBuffer c;
-    vkAllocateCommandBuffers(g_dev.device, &ca, &c);
+    VkCommandBuffer c = VK_NULL_HANDLE;
+    if (vkAllocateCommandBuffers(g_dev.device, &ca, &c) != VK_SUCCESS)
+      return false;
     VkCommandBufferBeginInfo cbi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     cbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(c, &cbi);
+    if (vkBeginCommandBuffer(c, &cbi) != VK_SUCCESS) {
+      vkFreeCommandBuffers(g_dev.device, g_dev.pool, 1, &c);
+      return false;
+    }
+    const VkImageLayout old_layout = rt.layout;
     ImageBarrier(c, rt.image, rt.layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                 VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-                 VK_ACCESS_TRANSFER_READ_BIT);
+                 ColorImageAccess(rt.layout), VK_ACCESS_TRANSFER_READ_BIT);
     rt.layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
     VkBufferImageCopy copy{};
     copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
     copy.imageExtent = {rt.w, rt.h, 1};
     vkCmdCopyImageToBuffer(c, rt.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                            g_frame.readback, 1, &copy);
-    vkEndCommandBuffer(c);
+    const VkResult end_result = vkEndCommandBuffer(c);
     VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     si.commandBufferCount = 1;
     si.pCommandBuffers = &c;
-    vkResetFences(g_dev.device, 1, &g_dev.fence);
-    vkQueueSubmit(g_dev.queue, 1, &si, g_dev.fence);
-    vkWaitForFences(g_dev.device, 1, &g_dev.fence, VK_TRUE, UINT64_MAX);
+    VkResult submit_result = end_result;
+    if (submit_result == VK_SUCCESS)
+      submit_result = vkResetFences(g_dev.device, 1, &g_dev.fence);
+    if (submit_result == VK_SUCCESS)
+      submit_result = vkQueueSubmit(g_dev.queue, 1, &si, g_dev.fence);
+    const VkResult wait_result =
+        submit_result == VK_SUCCESS
+            ? vkWaitForFences(g_dev.device, 1, &g_dev.fence, VK_TRUE,
+                              UINT64_MAX)
+            : submit_result;
+    if (wait_result != VK_SUCCESS) {
+      if (submit_result != VK_SUCCESS) {
+        vkFreeCommandBuffers(g_dev.device, g_dev.pool, 1, &c);
+        rt.layout = old_layout;
+      }
+      std::fprintf(
+          stderr, "[rtstat] readback submit failed: end=%d submit=%d wait=%d\n",
+          (int)end_result, (int)submit_result, (int)wait_result);
+      return false;
+    }
     vkFreeCommandBuffers(g_dev.device, g_dev.pool, 1, &c);
     const uint32_t* px = static_cast<const uint32_t*>(g_frame.readback_map);
     const uint64_t n = static_cast<uint64_t>(rt.w) * rt.h;
@@ -228,6 +261,7 @@ void ReportRtContents() {
       WritePpm(path, bgra.data(), rt.w, rt.h);
     }
   }
+  return true;
 }
 
 }  // namespace
@@ -274,6 +308,7 @@ void BeginFrame(Renderer& renderer) {
   g_frame.readback_mem = slot.readback_mem;
   g_frame.readback_map = slot.readback_map;
   g_frame.readback_size = slot.readback_size;
+  ResetTextureUploads(g_frame.slot_idx);
   const VkDeviceSize vb_base = g_frame.slot_idx * (kVbRing / 2);
   const VkDeviceSize ib_base = g_frame.slot_idx * (kIbRing / 2);
   const VkDeviceSize ubo_base = g_frame.slot_idx * (kUboRing / 2);
@@ -319,13 +354,23 @@ void BeginFrame(Renderer& renderer) {
   VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
   bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
   vkBeginCommandBuffer(g_frame.cmd, &bi);
+  if (slot.timestamps) {
+    vkCmdResetQueryPool(g_frame.cmd, slot.timestamps, 0, 2);
+    vkCmdWriteTimestamp(g_frame.cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                        slot.timestamps, 0);
+  }
   g_frame.recording = true;
 }
 
 void EndFrame(Renderer& renderer, uint64_t scanout_base) {
   if (!renderer.available() || !g_frame.recording)
     return;
-  FlushCsWrites(renderer);  // bound CS-write staleness for guest CPU readers
+  if (!FlushCsWrites(renderer)) {
+    g_frame.recording = false;
+    renderer.state = nullptr;
+    return;
+  }
+  // Bound CS-write staleness for guest CPU readers.
   g_frame.recording = false;
   ReportFps();
   ScopeNs end_timer(&g_ns_end);
@@ -390,7 +435,15 @@ void EndFrame(Renderer& renderer, uint64_t scanout_base) {
   // restores wait-here (FramePipelined()).
   FrameSlot& cur = g_frame.slots[g_frame.slot_idx];
   cur.presentable = false;
-  if (it != g_rts.end()) {
+  static const bool kNoPresent = std::getenv("DELTA_GPU_NOPRESENT") != nullptr;
+  static const bool kNeedsCpuCapture = [] {
+    return std::getenv("DELTA_GPU_SNAP") || std::getenv("DELTA_GPU_SNAPSEQ") ||
+           std::getenv("DELTA_GPU_OVERLAY_DUMP");
+  }();
+  const bool present_to_window = !kNoPresent && gfx::canPresent();
+  const bool need_scanout = present_to_window || g_dump || kNeedsCpuCapture;
+  cur.present_to_window = present_to_window;
+  if (it != g_rts.end() && need_scanout) {
     RTarget& rt = it->second;
     EnsureReadback(rt.w, rt.h, rt.fmt);
     static const bool kClearRedTransfer =
@@ -414,6 +467,12 @@ void EndFrame(Renderer& renderer, uint64_t scanout_base) {
     const VkAccessFlags present_src =
         rt.layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
             ? VK_ACCESS_TRANSFER_WRITE_BIT
+        : rt.layout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
+            ? VK_ACCESS_TRANSFER_READ_BIT
+        : rt.layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+            ? VK_ACCESS_SHADER_READ_BIT
+        : rt.layout == VK_IMAGE_LAYOUT_GENERAL
+            ? VK_ACCESS_SHADER_WRITE_BIT
             : VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
     ImageBarrier(g_frame.cmd, rt.image, rt.layout,
                  VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, present_src,
@@ -433,18 +492,27 @@ void EndFrame(Renderer& renderer, uint64_t scanout_base) {
   {
     ScopeNs submit_timer(&g_ns_submit);
     ScopeNs frame_submit_timer(&g_fr_submit);
+    if (cur.timestamps)
+      vkCmdWriteTimestamp(g_frame.cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                          cur.timestamps, 1);
     const VkResult end_result = vkEndCommandBuffer(g_frame.cmd);
     VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     si.commandBufferCount = 1;
     si.pCommandBuffers = &g_frame.cmd;
-    vkResetFences(g_dev.device, 1, &cur.fence);
-    const VkResult submit_result =
-        vkQueueSubmit(g_dev.queue, 1, &si, cur.fence);
+    VkResult submit_result = end_result;
+    if (submit_result == VK_SUCCESS)
+      submit_result = vkResetFences(g_dev.device, 1, &cur.fence);
+    if (submit_result == VK_SUCCESS)
+      submit_result = vkQueueSubmit(g_dev.queue, 1, &si, cur.fence);
     if (end_result != VK_SUCCESS || submit_result != VK_SUCCESS)
       std::fprintf(stderr, "[gpuvk] frame submit failed: end=%d submit=%d\n",
                    (int)end_result, (int)submit_result);
+    cur.submitted = submit_result == VK_SUCCESS;
   }
-  cur.submitted = true;
+  if (!cur.submitted) {
+    renderer.state = nullptr;
+    return;
+  }
   cur.frame_num = g_frame.num;
   cur.frame_draws = g_frame.draws;
   cur.frame_max_idx = g_frame.max_idx;
@@ -483,15 +551,44 @@ void EndFrame(Renderer& renderer, uint64_t scanout_base) {
                    "[gpuvk] frame %d fence DEVICE FAULT: wait=%d draws=%u\n",
                    fin.frame_num, (int)fin_wait, fin.frame_draws);
       ReportDeviceFault(g_dev.device);
+      renderer.state = nullptr;
+      return;
     }
     uint64_t dt = NowNs() - _tr0;
     g_ns_readback += dt;
     g_fr_wait += dt;
+    if (fin.timestamps) {
+      uint64_t timestamps[2] = {};
+      if (vkGetQueryPoolResults(g_dev.device, fin.timestamps, 0, 2,
+                                sizeof(timestamps), timestamps,
+                                sizeof(uint64_t),
+                                VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
+        const uint64_t mask =
+            g_dev.timestamp_valid_bits >= 64
+                ? UINT64_MAX
+                : (uint64_t{1} << g_dev.timestamp_valid_bits) - 1;
+        const uint64_t ticks = (timestamps[1] - timestamps[0]) & mask;
+        g_ns_gpu_exec += static_cast<uint64_t>(static_cast<double>(ticks) *
+                                               g_dev.timestamp_period);
+        g_gpu_exec_samples++;
+      }
+    }
     fin.submitted = false;
   }
   PushStageSample();
-  if (!waited || !fin.presentable)
+  if (waited && (g_dump || kDeclines) && fin.frame_num % 30 == 0)
+    ReportDeclines();
+  if (!waited || !fin.presentable) {
+    if (!ReportRtContents(cur)) {
+      renderer.state = nullptr;
+      return;
+    }
+    if (RdocFrame() && GetRdocApi() && GetRdocApi()->IsFrameCapturing()) {
+      uint32_t ok = GetRdocApi()->EndFrameCapture(RdocDevice(), nullptr);
+      std::fprintf(stderr, "[rdoc] capture %s\n", ok ? "written" : "FAILED");
+    }
     return;
+  }
 
   // Readback transform (DELTA_GPU_FLIP: 0=none 1=Y 2=X 3=XY). Default 0 (none):
   // the y-up (negative-height) viewport already stores render-target content
@@ -631,9 +728,6 @@ void EndFrame(Renderer& renderer, uint64_t scanout_base) {
     std::snprintf(latest, sizeof(latest), "%s/gpu_latest.ppm", DumpDir());
     WritePpm(latest, pixels, fin.w, fin.h);
   }
-  if ((g_dump || kDeclines) && fin.frame_num % 30 == 0) {
-    ReportDeclines();
-  }
   if (g_dump && fin.frame_num % 200 == 0) {
     std::fprintf(
         stderr,
@@ -667,12 +761,11 @@ void EndFrame(Renderer& renderer, uint64_t scanout_base) {
   // there is no display (headless) the window was never created, so we skip
   // present and rely on the readback/PPM path. DELTA_GPU_NOPRESENT forces that
   // headless path even on a display.
-  static const bool kNoPresent = std::getenv("DELTA_GPU_NOPRESENT") != nullptr;
   // Bring the window up on the first presentable frame: the videoout HLE only
   // creates it from its own scanout-present path, which the GPU (Gnm) title
   // never takes, so the renderer owns window creation here. ensure() is
   // idempotent and runs on this (the presenting) thread.
-  if (!kNoPresent) {
+  if (fin.present_to_window) {
     ScopeNs present_timer(&g_ns_present);
     ScopeNs frame_present_timer(&g_fr_present);
     static const bool kSyncPresent = [] {
@@ -682,6 +775,8 @@ void EndFrame(Renderer& renderer, uint64_t scanout_base) {
     if (kSyncPresent) {
       if (gfx::ensure("prosperity", fin.w, fin.h) && gfx::pumpEvents())
         gfx::present(pixels, fin.w, fin.h, fin.w * 4, gfx::PixelFormat::bgra8);
+    } else if (pixels == flipped.data()) {
+      PresentAsync(std::move(flipped), fin.w, fin.h);
     } else {
       PresentAsync(pixels, fin.w, fin.h);
     }
@@ -689,7 +784,10 @@ void EndFrame(Renderer& renderer, uint64_t scanout_base) {
 
   // Runs last: reuses (and clobbers) the readback buffer the present path
   // above already consumed.
-  ReportRtContents();
+  if (!ReportRtContents(cur)) {
+    renderer.state = nullptr;
+    return;
+  }
 
   if (RdocFrame() && GetRdocApi() && GetRdocApi()->IsFrameCapturing()) {
     uint32_t ok = GetRdocApi()->EndFrameCapture(RdocDevice(), nullptr);

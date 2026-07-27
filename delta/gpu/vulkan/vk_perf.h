@@ -20,7 +20,9 @@ extern uint64_t g_ns_draw, g_ns_end, g_ns_readback, g_ns_tex_up;
 extern uint64_t g_ns_cs, g_cs_bytes;
 extern uint64_t g_ns_cs_in, g_ns_cs_gpu, g_ns_cs_out;
 extern uint64_t g_ns_submit, g_ns_present;
+extern uint64_t g_ns_gpu_exec;
 extern uint32_t g_cs_count, g_tex_ups;
+extern uint32_t g_gpu_exec_samples;
 extern uint32_t g_cs_stage_n, g_cs_flush_n;
 extern uint64_t g_cs_stage_bytes;
 
