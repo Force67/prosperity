@@ -1428,8 +1428,9 @@ void HandleDispatch(const uint32_t* body, uint32_t count) {
     for (auto& r : rc.resources)
       if (r.binding >= resolved.size() || !resolved[r.binding].valid)
         any_unresolved = true;
-    if (any_unresolved && rhi::DefaultRenderer().available()) {
-      rhi::FlushCsWrites(rhi::DefaultRenderer());
+    if (any_unresolved) {
+      if (!rhi::FlushCsWrites(rhi::DefaultRenderer()))
+        return;
       resolved = gcn::ResolveCsResources(*cs_program, rc, ud);
     }
   }
@@ -1593,6 +1594,7 @@ void HandleDispatch(const uint32_t* body, uint32_t count) {
     out.size = size;
     out.guest_size = guest_size;
     out.binding = r.binding;
+    out.shader_writes = r.written;
     out.written = r.written && !zero_fill;
     out.zero_fill = zero_fill;
     out.image_staging = image_staging;
@@ -1721,11 +1723,11 @@ void SubmitDcb(const void* dcb, uint32_t size_bytes) {
             if (!kNoCopy && src_mem && dst_mem && bytes &&
                 bytes <= 0x1000000u && src != dst && mem_ok(src) &&
                 mem_ok(src + bytes) && mem_ok(dst) && mem_ok(dst + bytes)) {
-              if (rhi::DefaultRenderer().available())
-                rhi::FlushCsWrites(
-                    rhi::DefaultRenderer());  // src may be CS-written
-              std::memcpy(reinterpret_cast<void*>(dst),
-                          reinterpret_cast<const void*>(src), bytes);
+              const bool source_current = rhi::FlushCsWrites(
+                  rhi::DefaultRenderer());  // src may be CS-written
+              if (source_current)
+                std::memcpy(reinterpret_cast<void*>(dst),
+                            reinterpret_cast<const void*>(src), bytes);
             }
             if (std::getenv("DELTA_GPU_DMATRACE")) {
               static int dmn = 0;

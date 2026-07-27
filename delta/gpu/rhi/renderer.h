@@ -56,10 +56,12 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci);
 
 // Write every GPU-dirty compute range back to guest memory. Must run before
 // anything reads guest memory that a dispatch may have written: draw
-// recording, CP DMA, frame end. No-op when nothing is dirty.
-void FlushCsWrites(Renderer& renderer);
-// Flush only dirty ranges overlapping [base, base+bytes).
-void FlushCsWritesRange(Renderer& renderer, uint64_t base, uint64_t bytes);
+// recording, CP DMA, frame end. No-op when nothing is dirty; returns false when
+// the data could not be made current.
+bool FlushCsWrites(Renderer& renderer);
+// Flush only dirty ranges overlapping [base, base+bytes), with the same result
+// contract as FlushCsWrites.
+bool FlushCsWritesRange(Renderer& renderer, uint64_t base, uint64_t bytes);
 
 // A CP DMA immediate fill over guest memory. When the range covers a live
 // render target that is how the title clears it -- there is no clear packet on

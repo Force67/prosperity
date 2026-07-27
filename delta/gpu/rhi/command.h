@@ -54,8 +54,8 @@ struct DrawInfo {
 
   // Index buffer (DRAW_INDEX_2). When index_data != null the draw is indexed:
   // the indices select vertices out of the vertex buffer. index_type: 0 =
-  // 16-bit, 1 = 32-bit. Without an index buffer the draw is sequential
-  // (DRAW_INDEX_AUTO).
+  // 16-bit, 1 = 32-bit, 2 = 8-bit. Without an index buffer the draw is
+  // sequential (DRAW_INDEX_AUTO).
   const void* index_data = nullptr;
   uint32_t index_count = 0;
   uint32_t index_type = 0;
@@ -218,7 +218,8 @@ struct ComputeInfo {
     uint64_t size = 0;        // bytes staged in linear SSBO layout
     uint64_t guest_size = 0;  // physical guest bytes (same as size when linear)
     uint32_t binding = 0;
-    bool written = false;  // copy back to guest after the dispatch
+    bool shader_writes = false;  // shader access, including dummy resources
+    bool written = false;        // copy back to guest after the dispatch
     bool zero_fill =
         false;  // inactive/null descriptor: bind zeroed dummy storage
     bool image_staging = false;  // detile and/or expand compact texels

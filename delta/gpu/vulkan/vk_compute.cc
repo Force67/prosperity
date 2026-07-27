@@ -12,6 +12,7 @@
 #include "gpu/ps4/gcn/gcn_detile.h"
 #include "gpu/ps4/gcn/gcn_translate.h"
 #include "gpu/vulkan/vk_capture.h"
+#include "gpu/vulkan/vk_compute_hazard.h"
 #include "gpu/vulkan/vk_device.h"
 #include "gpu/vulkan/vk_frame.h"
 #include "gpu/vulkan/vk_hash.h"
@@ -45,6 +46,34 @@ struct CsPipe {
 };
 
 std::unordered_map<uint64_t, CsPipe> g_cs_pipes;
+
+uint32_t FindComputeMemoryType(uint32_t type_bits) {
+  VkPhysicalDeviceMemoryProperties properties;
+  vkGetPhysicalDeviceMemoryProperties(g_dev.phys, &properties);
+  uint32_t best = UINT32_MAX;
+  int best_score = -1;
+  for (uint32_t i = 0; i < properties.memoryTypeCount; i++) {
+    if (!(type_bits & (1u << i)))
+      continue;
+    const VkMemoryPropertyFlags flags = properties.memoryTypes[i].propertyFlags;
+    constexpr VkMemoryPropertyFlags kRequired =
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+        VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    if ((flags & kRequired) != kRequired)
+      continue;
+    const int score = ((flags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) ? 4 : 0) +
+                      ((flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) ? 2 : 0);
+    if (score > best_score) {
+      best = i;
+      best_score = score;
+    }
+  }
+  return best == UINT32_MAX
+             ? FindMemoryType(type_bits,
+                              VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                  VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+             : best;
+}
 
 CsPipe* GetCsPipe(const ComputeInfo& ci) {
   auto it = g_cs_pipes.find(ci.cs_addr);
@@ -84,8 +113,8 @@ CsPipe* GetCsPipe(const ComputeInfo& ci) {
   pi.stage.module = cs;
   pi.stage.pName = "main";
   pi.layout = cp.layout;
-  VkResult r = vkCreateComputePipelines(g_dev.device, VK_NULL_HANDLE, 1, &pi,
-                                        nullptr, &cp.pipe);
+  VkResult r = vkCreateComputePipelines(g_dev.device, g_dev.pipeline_cache, 1,
+                                        &pi, nullptr, &cp.pipe);
   vkDestroyShaderModule(g_dev.device, cs, nullptr);
   if (r != VK_SUCCESS) {
     std::fprintf(stderr, "[gpuvk] compute pipeline failed: %d\n", (int)r);
@@ -366,8 +395,83 @@ struct CsRange {
   ComputeInfo::Res res;  // writeback needs the full layout description
 };
 
+bool SameCsResourceShape(const ComputeInfo::Res& a, const ComputeInfo::Res& b) {
+  if (a.image_staging != b.image_staging)
+    return false;
+  if (!a.image_staging)
+    return true;
+  return a.width == b.width && a.height == b.height && a.pitch == b.pitch &&
+         a.layers == b.layers && a.mip_levels == b.mip_levels &&
+         a.tiling_idx == b.tiling_idx && a.elem_bytes == b.elem_bytes &&
+         a.stage_elem_bytes == b.stage_elem_bytes && a.dfmt == b.dfmt &&
+         a.pow2_pad == b.pow2_pad;
+}
+
 std::unordered_map<uint64_t, CsRange> g_cs_ranges;
 uint64_t g_cs_range_bytes = 0;
+constexpr uint32_t kCsDirtyPageShift = 16;
+std::unordered_map<uint64_t, std::vector<uint64_t>> g_cs_dirty_pages;
+
+uint64_t RangeEnd(uint64_t base, uint64_t bytes) {
+  return bytes > UINT64_MAX - base ? UINT64_MAX : base + bytes;
+}
+
+void IndexDirtyRange(uint64_t base, uint64_t bytes) {
+  if (!bytes)
+    return;
+  const uint64_t end = RangeEnd(base, bytes);
+  for (uint64_t page = base >> kCsDirtyPageShift;
+       page <= (end - 1) >> kCsDirtyPageShift; page++)
+    g_cs_dirty_pages[page].push_back(base);
+}
+
+void UnindexDirtyRange(uint64_t base, uint64_t bytes) {
+  if (!bytes)
+    return;
+  const uint64_t end = RangeEnd(base, bytes);
+  for (uint64_t page = base >> kCsDirtyPageShift;
+       page <= (end - 1) >> kCsDirtyPageShift; page++) {
+    auto found = g_cs_dirty_pages.find(page);
+    if (found == g_cs_dirty_pages.end())
+      continue;
+    auto& bases = found->second;
+    bases.erase(std::remove(bases.begin(), bases.end(), base), bases.end());
+    if (bases.empty())
+      g_cs_dirty_pages.erase(found);
+  }
+}
+
+std::vector<uint64_t> DirtyRangesOverlapping(uint64_t base,
+                                             uint64_t bytes,
+                                             uint64_t exclude = UINT64_MAX) {
+  std::vector<uint64_t> candidates;
+  if (!bytes)
+    return candidates;
+  const uint64_t end = RangeEnd(base, bytes);
+  for (uint64_t page = base >> kCsDirtyPageShift;
+       page <= (end - 1) >> kCsDirtyPageShift; page++) {
+    auto found = g_cs_dirty_pages.find(page);
+    if (found != g_cs_dirty_pages.end())
+      candidates.insert(candidates.end(), found->second.begin(),
+                        found->second.end());
+  }
+  std::sort(candidates.begin(), candidates.end());
+  candidates.erase(std::unique(candidates.begin(), candidates.end()),
+                   candidates.end());
+  candidates.erase(
+      std::remove_if(candidates.begin(), candidates.end(),
+                     [&](uint64_t other) {
+                       if (other == exclude)
+                         return true;
+                       auto found = g_cs_ranges.find(other);
+                       return found == g_cs_ranges.end() ||
+                              !found->second.gpu_dirty || other >= end ||
+                              base >=
+                                  RangeEnd(other, found->second.guest_bytes);
+                     }),
+      candidates.end());
+  return candidates;
+}
 
 // Sampled content hash for CS range validation: length + 256 evenly spaced
 // 64-byte windows. Reading a whole 16MB image per validation was the point of
@@ -418,12 +522,7 @@ bool CsRangeEnsureBuffer(CsRange& e, VkDeviceSize size) {
   vkGetBufferMemoryRequirements(g_dev.device, e.buf, &mr);
   VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
   ai.allocationSize = mr.size;
-  ai.memoryTypeIndex = FindMemoryTypePref(
-      mr.memoryTypeBits,
-      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT |
-          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  ai.memoryTypeIndex = FindComputeMemoryType(mr.memoryTypeBits);
   if (vkAllocateMemory(g_dev.device, &ai, nullptr, &e.mem) != VK_SUCCESS) {
     vkDestroyBuffer(g_dev.device, e.buf, nullptr);
     e.buf = VK_NULL_HANDLE;
@@ -453,37 +552,54 @@ void CsRangeDestroy(CsRange& e) {
 // a staging hazard, or the batch cap). 228 individual submit+fence round
 // trips per frame were ~40% of the whole compute cost.
 bool g_cs_batch_open = false;
+bool g_cs_failed = false;
 uint32_t g_cs_batch_count = 0;
 VkFence g_cs_batch_fence = VK_NULL_HANDLE;
 bool g_cs_stage_pending[ComputeInfo::kMaxResources] = {};
+std::unordered_map<VkBuffer, ComputeBufferAccess> g_cs_batch_access;
 
-void CsBatchFlush() {
+bool CsBatchFlush() {
   if (!g_cs_batch_open)
-    return;
+    return !g_cs_failed;
   const uint64_t t0 = NowNs();
-  vkEndCommandBuffer(g_cs_cmd);
+  const VkResult end_result = vkEndCommandBuffer(g_cs_cmd);
   VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
   si.commandBufferCount = 1;
   si.pCommandBuffers = &g_cs_cmd;
-  vkResetFences(g_dev.device, 1, &g_cs_batch_fence);
-  const VkResult sr = vkQueueSubmit(g_dev.queue, 1, &si, g_cs_batch_fence);
-  const VkResult wr = sr == VK_SUCCESS
-                          ? vkWaitForFences(g_dev.device, 1, &g_cs_batch_fence,
-                                            VK_TRUE, UINT64_MAX)
-                          : sr;
-  if (sr != VK_SUCCESS || wr != VK_SUCCESS) {
+  VkResult submit_result = end_result;
+  if (submit_result == VK_SUCCESS)
+    submit_result = vkResetFences(g_dev.device, 1, &g_cs_batch_fence);
+  if (submit_result == VK_SUCCESS)
+    submit_result = vkQueueSubmit(g_dev.queue, 1, &si, g_cs_batch_fence);
+  const VkResult wait_result =
+      submit_result == VK_SUCCESS
+          ? vkWaitForFences(g_dev.device, 1, &g_cs_batch_fence, VK_TRUE,
+                            UINT64_MAX)
+          : submit_result;
+  if (wait_result != VK_SUCCESS) {
     std::fprintf(stderr,
-                 "[gpuvk] cs batch DEVICE FAULT: submit=%d wait=%d n=%u\n",
-                 (int)sr, (int)wr, g_cs_batch_count);
+                 "[gpuvk] cs batch DEVICE FAULT: end=%d submit=%d wait=%d "
+                 "n=%u\n",
+                 (int)end_result, (int)submit_result, (int)wait_result,
+                 g_cs_batch_count);
     ReportDeviceFault(g_dev.device);
+    g_cs_failed = true;
+    g_ns_cs_gpu += NowNs() - t0;
+    return false;
   }
-  vkResetDescriptorPool(g_dev.device, g_cs_desc_pool, 0);
+  if (vkResetDescriptorPool(g_dev.device, g_cs_desc_pool, 0) != VK_SUCCESS) {
+    g_cs_failed = true;
+    g_ns_cs_gpu += NowNs() - t0;
+    return false;
+  }
   g_cs_batch_open = false;
   g_cs_batch_count = 0;
   for (auto& kv : g_cs_ranges)
     kv.second.pending_batch = false;
   std::memset(g_cs_stage_pending, 0, sizeof g_cs_stage_pending);
+  g_cs_batch_access.clear();
   g_ns_cs_gpu += NowNs() - t0;
+  return true;
 }
 
 // Write one dirty range back to guest memory (retile for images) and re-stamp
@@ -491,8 +607,10 @@ void CsBatchFlush() {
 bool CsRangeFlushOne(uint64_t base, CsRange& e) {
   if (!e.gpu_dirty)
     return true;
-  if (e.pending_batch)
-    CsBatchFlush();  // results must exist before readback
+  if (e.pending_batch && !CsBatchFlush())
+    return false;  // results must exist before readback
+  if (g_cs_failed)
+    return false;
   g_cs_flush_n++;
   if (e.image_staging) {
     if (!WritebackCsImage(e.res, e.map))
@@ -501,6 +619,7 @@ bool CsRangeFlushOne(uint64_t base, CsRange& e) {
     std::memcpy(reinterpret_cast<void*>(base), e.map, e.size);
   }
   InvalidateTexRange(base, e.guest_bytes);
+  UnindexDirtyRange(base, e.guest_bytes);
   e.gpu_dirty = false;
   e.hash = RangeHash(base, e.guest_bytes);
   e.last_validated_frame = g_frame.num;
@@ -528,7 +647,8 @@ bool CsEnsureStage(uint32_t i, VkDeviceSize size) {
       (size + 0xFFFFF) & ~VkDeviceSize(0xFFFFF);  // 1 MiB granularity
   VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
   bi.size = cap;
-  bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+  bi.usage =
+      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
   if (vkCreateBuffer(g_dev.device, &bi, nullptr, &s.buf) != VK_SUCCESS) {
     s.buf = VK_NULL_HANDLE;
     return false;
@@ -537,12 +657,7 @@ bool CsEnsureStage(uint32_t i, VkDeviceSize size) {
   vkGetBufferMemoryRequirements(g_dev.device, s.buf, &mr);
   VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
   ai.allocationSize = mr.size;
-  ai.memoryTypeIndex = FindMemoryTypePref(
-      mr.memoryTypeBits,
-      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT |
-          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  ai.memoryTypeIndex = FindComputeMemoryType(mr.memoryTypeBits);
   if (vkAllocateMemory(g_dev.device, &ai, nullptr, &s.mem) != VK_SUCCESS) {
     vkDestroyBuffer(g_dev.device, s.buf, nullptr);
     s.buf = VK_NULL_HANDLE;
@@ -570,6 +685,10 @@ namespace gpu::rhi {
 using namespace gpu::vk;
 
 bool Dispatch(Renderer& renderer, const ComputeInfo& ci) {
+  if (g_cs_failed) {
+    renderer.state = nullptr;
+    return false;
+  }
   if (!renderer.available() || !ci.recomp || !ci.recomp->ok || !ci.num_res ||
       ci.num_res > g_dev.max_cs_resources)
     return false;
@@ -579,6 +698,25 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci) {
   for (uint32_t i = 0; i < ci.num_res; i++)
     if (ci.res[i].size > g_dev.max_storage_buffer_range)
       return false;
+  for (uint32_t i = 0; i < ci.num_res; i++) {
+    if (ci.res[i].zero_fill)
+      continue;
+    const uint64_t guest_bytes =
+        ci.res[i].guest_size ? ci.res[i].guest_size : ci.res[i].size;
+    const VkDeviceSize size =
+        ci.res[i].size ? ((ci.res[i].size + 3) & ~VkDeviceSize(3)) : 4;
+    for (uint32_t j = 0; j < i; j++) {
+      if (ci.res[j].zero_fill || ci.res[j].base != ci.res[i].base)
+        continue;
+      const uint64_t other_guest_bytes =
+          ci.res[j].guest_size ? ci.res[j].guest_size : ci.res[j].size;
+      const VkDeviceSize other_size =
+          ci.res[j].size ? ((ci.res[j].size + 3) & ~VkDeviceSize(3)) : 4;
+      if (size != other_size || guest_bytes != other_guest_bytes ||
+          !SameCsResourceShape(ci.res[i], ci.res[j]))
+        return false;
+    }
+  }
   CsPipe* cp = GetCsPipe(ci);
   if (!cp)
     return false;
@@ -648,11 +786,13 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci) {
     if (ci.res[i].zero_fill) {
       // Growing the scratch slot recreates its buffer; a pending batched
       // dispatch still references the old handle.
-      if (g_cs_stage_pending[i] && g_cs_stage[i].cap < sz[i])
-        CsBatchFlush();
+      if (g_cs_stage_pending[i] && g_cs_stage[i].cap < sz[i] &&
+          !CsBatchFlush()) {
+        renderer.state = nullptr;
+        return false;
+      }
       if (!CsEnsureStage(i, sz[i]))
         return false;
-      std::memset(g_cs_stage[i].map, 0, sz[i]);
       bind_buf[i] = g_cs_stage[i].buf;
       continue;
     }
@@ -661,23 +801,22 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci) {
         ci.res[i].guest_size ? ci.res[i].guest_size : ci.res[i].size;
     // A read overlapping some OTHER dirty range must see that data through
     // guest memory: flush those first.
-    for (auto& kv : g_cs_ranges) {
-      if (kv.first == base)
-        continue;
-      CsRange& o = kv.second;
-      if (o.gpu_dirty && kv.first < base + guest_bytes &&
-          base < kv.first + o.guest_bytes)
-        if (!CsRangeFlushOne(kv.first, o))
-          return false;
+    for (uint64_t dirty : DirtyRangesOverlapping(base, guest_bytes, base)) {
+      auto found = g_cs_ranges.find(dirty);
+      if (found != g_cs_ranges.end() && !CsRangeFlushOne(dirty, found->second))
+        return false;
     }
     CsRange& e = g_cs_ranges[base];
     const bool same_shape = e.buf && e.size == static_cast<uint64_t>(sz[i]) &&
-                            e.image_staging == ci.res[i].image_staging;
+                            e.guest_bytes == guest_bytes &&
+                            SameCsResourceShape(e.res, ci.res[i]);
     if (!same_shape && e.gpu_dirty)
       if (!CsRangeFlushOne(base, e))
         return false;  // reshaped: keep its data
-    if (e.pending_batch && (!e.buf || e.cap < sz[i]))
-      CsBatchFlush();  // growth would destroy a buffer the batch references
+    if (e.pending_batch && (!e.buf || e.cap < sz[i]) && !CsBatchFlush()) {
+      renderer.state = nullptr;
+      return false;  // growth would destroy a buffer the batch references
+    }
     if (!CsRangeEnsureBuffer(e, sz[i]))
       return false;
     bool valid =
@@ -692,8 +831,10 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci) {
     }
     if (!valid) {
       // CPU write into a buffer a pending batched dispatch reads/writes.
-      if (e.pending_batch)
-        CsBatchFlush();
+      if (e.pending_batch && !CsBatchFlush()) {
+        renderer.state = nullptr;
+        return false;
+      }
       if (ci.res[i].image_staging) {
         if (!StageCsImage(ci.res[i], e.map))
           return false;
@@ -735,7 +876,10 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci) {
   da.descriptorSetCount = 1;
   da.pSetLayouts = &cp->set_layout;
   if (vkAllocateDescriptorSets(g_dev.device, &da, &set) != VK_SUCCESS) {
-    CsBatchFlush();  // pool exhausted: flush resets it, then retry once
+    if (!CsBatchFlush()) {
+      renderer.state = nullptr;
+      return false;
+    }
     if (vkAllocateDescriptorSets(g_dev.device, &da, &set) != VK_SUCCESS)
       return false;
   }
@@ -761,18 +905,89 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci) {
     vkBeginCommandBuffer(g_cs_cmd, &cbi);
     g_cs_batch_open = true;
   }
+  VkBufferMemoryBarrier zero_before[ComputeInfo::kMaxResources];
+  VkBufferMemoryBarrier zero_after[ComputeInfo::kMaxResources];
+  uint32_t zero_count = 0;
+  for (uint32_t i = 0; i < ci.num_res; i++) {
+    if (!ci.res[i].zero_fill)
+      continue;
+    VkBufferMemoryBarrier& before = zero_before[zero_count];
+    before = {VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+    before.srcAccessMask =
+        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    before.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    before.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    before.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    before.buffer = bind_buf[i];
+    before.offset = 0;
+    before.size = sz[i];
+    VkBufferMemoryBarrier& after = zero_after[zero_count++];
+    after = before;
+    after.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    after.dstAccessMask =
+        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    g_cs_batch_access.erase(bind_buf[i]);
+  }
+  if (zero_count) {
+    vkCmdPipelineBarrier(g_cs_cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr,
+                         zero_count, zero_before, 0, nullptr);
+    for (uint32_t i = 0; i < ci.num_res; i++)
+      if (ci.res[i].zero_fill)
+        vkCmdFillBuffer(g_cs_cmd, bind_buf[i], 0, sz[i], 0);
+    vkCmdPipelineBarrier(g_cs_cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr,
+                         zero_count, zero_after, 0, nullptr);
+  }
   vkCmdBindPipeline(g_cs_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, cp->pipe);
   vkCmdBindDescriptorSets(g_cs_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, cp->layout,
                           0, 1, &set, 0, nullptr);
   vkCmdPushConstants(g_cs_cmd, cp->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 64,
                      ci.user_data);
+  VkBufferMemoryBarrier barriers[ComputeInfo::kMaxResources];
+  uint32_t barrier_count = 0;
+  VkBuffer unique_buffers[ComputeInfo::kMaxResources];
+  bool unique_writes[ComputeInfo::kMaxResources] = {};
+  uint32_t unique_count = 0;
+  for (uint32_t i = 0; i < ci.num_res; i++) {
+    uint32_t j = 0;
+    while (j < unique_count && unique_buffers[j] != bind_buf[i])
+      j++;
+    if (j == unique_count) {
+      unique_buffers[unique_count] = bind_buf[i];
+      unique_writes[unique_count] = ci.res[i].shader_writes;
+      unique_count++;
+    } else {
+      unique_writes[j] |= ci.res[i].shader_writes;
+    }
+  }
+  for (uint32_t i = 0; i < unique_count; i++) {
+    ComputeBufferAccess& prior = g_cs_batch_access[unique_buffers[i]];
+    const ComputeBufferAccess current{true, unique_writes[i]};
+    const bool hazard = NeedsComputeBarrier(prior, current);
+    if (hazard) {
+      VkBufferMemoryBarrier& barrier = barriers[barrier_count++];
+      barrier = {VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+      barrier.srcAccessMask = (prior.read ? VK_ACCESS_SHADER_READ_BIT : 0) |
+                              (prior.write ? VK_ACCESS_SHADER_WRITE_BIT : 0);
+      barrier.dstAccessMask =
+          VK_ACCESS_SHADER_READ_BIT |
+          (unique_writes[i] ? VK_ACCESS_SHADER_WRITE_BIT : 0);
+      barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+      barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+      barrier.buffer = unique_buffers[i];
+      barrier.offset = 0;
+      barrier.size = VK_WHOLE_SIZE;
+      prior = {};
+    }
+    prior.read = true;
+    prior.write |= unique_writes[i];
+  }
+  if (barrier_count)
+    vkCmdPipelineBarrier(g_cs_cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr,
+                         barrier_count, barriers, 0, nullptr);
   vkCmdDispatch(g_cs_cmd, ci.groups[0], ci.groups[1], ci.groups[2]);
-  VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-  mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-  mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-  vkCmdPipelineBarrier(g_cs_cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                       VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &mb, 0,
-                       nullptr, 0, nullptr);
   for (uint32_t i = 0; i < ci.num_res; i++) {
     if (ci.res[i].zero_fill) {
       g_cs_stage_pending[i] = true;
@@ -782,8 +997,10 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci) {
         it->second.pending_batch = true;
     }
   }
-  if (++g_cs_batch_count >= 128 || verbose)
-    CsBatchFlush();
+  if ((++g_cs_batch_count >= 128 || verbose) && !CsBatchFlush()) {
+    renderer.state = nullptr;
+    return false;
+  }
 
   // Mark written ranges GPU-dirty. Guest memory catches up lazily at the next
   // flush point (draw / DMA / frame end) — writing every dispatch's outputs
@@ -795,6 +1012,8 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci) {
     auto it = g_cs_ranges.find(ci.res[i].base);
     if (it == g_cs_ranges.end())
       continue;
+    if (!it->second.gpu_dirty)
+      IndexDirtyRange(ci.res[i].base, it->second.guest_bytes);
     it->second.gpu_dirty = true;
     if (verbose) {
       const uint8_t* b = static_cast<const uint8_t*>(it->second.map);
@@ -817,10 +1036,18 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci) {
 // record time), CP DMA copies, and the end of each frame (bounds staleness
 // for direct guest CPU readers to one frame). Cheap no-op when nothing is
 // dirty; also evicts cold entries so the working set stays bounded.
-void FlushCsWrites(Renderer& renderer) {
+bool FlushCsWrites(Renderer& renderer) {
+  if (g_cs_failed) {
+    renderer.state = nullptr;
+    return false;
+  }
   const uint64_t _t0 = NowNs();
   for (auto it = g_cs_ranges.begin(); it != g_cs_ranges.end();) {
-    CsRangeFlushOne(it->first, it->second);
+    if (!CsRangeFlushOne(it->first, it->second)) {
+      if (g_cs_failed)
+        renderer.state = nullptr;
+      return false;
+    }
     if (g_cs_range_bytes > (1ull << 30) && !it->second.gpu_dirty &&
         !it->second.pending_batch &&
         it->second.last_used_frame + 300 < g_frame.num) {
@@ -831,23 +1058,31 @@ void FlushCsWrites(Renderer& renderer) {
     }
   }
   g_ns_cs_out += NowNs() - _t0;
+  return true;
 }
 
 // Targeted variant: flush only dirty ranges overlapping [base, base+bytes).
 // The per-draw guest readers (texture upload, vertex copy, cbuffer ring) call
 // this instead of the full flush — flushing every dirty range at every draw
 // re-tiled the whole post chain ~19x/frame.
-void FlushCsWritesRange(Renderer& renderer, uint64_t base, uint64_t bytes) {
+bool FlushCsWritesRange(Renderer& renderer, uint64_t base, uint64_t bytes) {
+  if (g_cs_failed) {
+    renderer.state = nullptr;
+    return false;
+  }
   if (!base || !bytes || g_cs_ranges.empty())
-    return;
+    return true;
   const uint64_t _t0 = NowNs();
-  for (auto& kv : g_cs_ranges) {
-    CsRange& e = kv.second;
-    if (e.gpu_dirty && kv.first < base + bytes &&
-        base < kv.first + e.guest_bytes)
-      CsRangeFlushOne(kv.first, e);
+  for (uint64_t dirty : DirtyRangesOverlapping(base, bytes)) {
+    auto found = g_cs_ranges.find(dirty);
+    if (found != g_cs_ranges.end() && !CsRangeFlushOne(dirty, found->second)) {
+      if (g_cs_failed)
+        renderer.state = nullptr;
+      return false;
+    }
   }
   g_ns_cs_out += NowNs() - _t0;
+  return true;
 }
 
 }  // namespace gpu::rhi
