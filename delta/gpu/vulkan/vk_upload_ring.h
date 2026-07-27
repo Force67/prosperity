@@ -11,10 +11,25 @@
 #include <vulkan/vulkan.h>
 
 #include <cstdint>
+#include <vector>
 
 #include "gpu/ps4/gcn/gcn_translate.h"
 
 namespace gpu::vk {
+
+struct TextureUploadBlock {
+  VkBuffer buffer = VK_NULL_HANDLE;
+  VkDeviceMemory memory = VK_NULL_HANDLE;
+  uint8_t* map = nullptr;
+  VkDeviceSize capacity = 0;
+  VkDeviceSize offset = 0;
+};
+
+struct TextureUploadSlice {
+  VkBuffer buffer = VK_NULL_HANDLE;
+  VkDeviceSize offset = 0;
+  uint8_t* map = nullptr;
+};
 
 constexpr VkDeviceSize kVbRing = 16ull * 1024 * 1024;  // per-frame vertex ring
 constexpr VkDeviceSize kIbRing =
@@ -47,14 +62,25 @@ struct UploadRings {
   uint8_t* ubo_map = nullptr;
   VkDeviceSize ubo_offset = 0, ubo_end = kUboRing;
   uint32_t ubo_align = 256;
+  VkDeviceSize ubo_stride = kCbufWindow;
+  std::vector<uint32_t> ubo_written;
   VkDescriptorSetLayout ubo_layout = VK_NULL_HANDLE;
   VkDescriptorSetLayout empty_layout = VK_NULL_HANDLE;
   VkDescriptorPool ubo_pool = VK_NULL_HANDLE;
   VkDescriptorSet ubo_set = VK_NULL_HANDLE;
+
+  // Texture uploads are recorded into the active frame command buffer. Each
+  // frame slot owns its blocks so an in-flight transfer is never overwritten.
+  std::vector<TextureUploadBlock> texture_uploads[2];
 };
 
 extern UploadRings& g_ring;
 
 bool CreateUploadRings(const VkPhysicalDeviceProperties& props);
+bool AllocateTextureUpload(uint32_t slot,
+                           VkDeviceSize bytes,
+                           VkDeviceSize alignment,
+                           TextureUploadSlice& slice);
+void ResetTextureUploads(uint32_t slot);
 
 }  // namespace gpu::vk

@@ -6,10 +6,12 @@
 
 #include "gpu/vulkan/vk_device.h"
 
+#include <algorithm>
 #include <cstdio>
+#include <cstring>
+#include <limits>
 
 namespace gpu::vk {
-
 
 bool CreateUploadRings(const VkPhysicalDeviceProperties& props) {
   // Vertex ring.
@@ -71,6 +73,11 @@ bool CreateUploadRings(const VkPhysicalDeviceProperties& props) {
     VKOK(vkBindBufferMemory(g_dev.device, g_ring.ubo_buf, g_ring.ubo_mem, 0));
     VKOK(vkMapMemory(g_dev.device, g_ring.ubo_mem, 0, kUboRing, 0,
                      (void**)&g_ring.ubo_map));
+    std::memset(g_ring.ubo_map, 0, kUboRing);
+    g_ring.ubo_stride = (kCbufWindow + g_ring.ubo_align - 1) &
+                        ~(VkDeviceSize)(g_ring.ubo_align - 1);
+    g_ring.ubo_written.resize(static_cast<size_t>(
+        (kUboRing + g_ring.ubo_stride - 1) / g_ring.ubo_stride));
 
     // kMaxCbufBindings, not 8: a shader pair whose constant buffers exceed the
     // cap is planned only up to it, and every s_buffer_load from a dropped base
@@ -125,6 +132,71 @@ bool CreateUploadRings(const VkPhysicalDeviceProperties& props) {
     vkUpdateDescriptorSets(g_dev.device, kCbufBindings, uw, 0, nullptr);
   }
   return true;
+}
+
+bool AllocateTextureUpload(uint32_t slot,
+                           VkDeviceSize bytes,
+                           VkDeviceSize alignment,
+                           TextureUploadSlice& slice) {
+  if (slot >= 2 || !bytes)
+    return false;
+  alignment = std::max<VkDeviceSize>(alignment, 4);
+  auto& blocks = g_ring.texture_uploads[slot];
+  for (auto& block : blocks) {
+    const VkDeviceSize aligned =
+        (block.offset + alignment - 1) & ~(alignment - 1);
+    if (aligned <= block.capacity && bytes <= block.capacity - aligned) {
+      slice = {block.buffer, aligned, block.map + aligned};
+      block.offset = aligned + bytes;
+      return true;
+    }
+  }
+
+  constexpr VkDeviceSize kInitialCapacity = 16ull * 1024 * 1024;
+  VkDeviceSize capacity = kInitialCapacity;
+  while (capacity < bytes) {
+    if (capacity > std::numeric_limits<VkDeviceSize>::max() / 2)
+      return false;
+    capacity *= 2;
+  }
+  TextureUploadBlock block;
+  VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+  bi.size = capacity;
+  bi.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+  if (vkCreateBuffer(g_dev.device, &bi, nullptr, &block.buffer) != VK_SUCCESS)
+    return false;
+  VkMemoryRequirements requirements;
+  vkGetBufferMemoryRequirements(g_dev.device, block.buffer, &requirements);
+  VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+  ai.allocationSize = requirements.size;
+  ai.memoryTypeIndex = FindMemoryType(requirements.memoryTypeBits,
+                                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  if (vkAllocateMemory(g_dev.device, &ai, nullptr, &block.memory) !=
+      VK_SUCCESS) {
+    vkDestroyBuffer(g_dev.device, block.buffer, nullptr);
+    return false;
+  }
+  if (vkBindBufferMemory(g_dev.device, block.buffer, block.memory, 0) !=
+          VK_SUCCESS ||
+      vkMapMemory(g_dev.device, block.memory, 0, capacity, 0,
+                  reinterpret_cast<void**>(&block.map)) != VK_SUCCESS) {
+    vkDestroyBuffer(g_dev.device, block.buffer, nullptr);
+    vkFreeMemory(g_dev.device, block.memory, nullptr);
+    return false;
+  }
+  block.capacity = capacity;
+  block.offset = bytes;
+  slice = {block.buffer, 0, block.map};
+  blocks.push_back(block);
+  return true;
+}
+
+void ResetTextureUploads(uint32_t slot) {
+  if (slot >= 2)
+    return;
+  for (auto& block : g_ring.texture_uploads[slot])
+    block.offset = 0;
 }
 
 }  // namespace gpu::vk

@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "gpu/rhi/command.h"
+#include "gpu/vulkan/vk_memory.h"
 
 namespace gpu::vk {
 
@@ -23,6 +24,7 @@ constexpr uint32_t kMaxTex = 16;
 // Descriptor infrastructure shared by every sampled image (guest textures,
 // render targets sampled as textures, the 1x1 white fallback).
 struct TextureBindings {
+  bool descriptors_ready = false;
   VkDescriptorSetLayout ds_layout =
       VK_NULL_HANDLE;  // binding 0 = combined sampler
   VkDescriptorPool ds_pool = VK_NULL_HANDLE;
@@ -37,7 +39,7 @@ struct TextureBindings {
   VkDescriptorPool mtex_pool = VK_NULL_HANDLE;
   std::vector<VkDescriptorPool> mtex_pools;
   VkImage white_img = VK_NULL_HANDLE;
-  VkDeviceMemory white_mem = VK_NULL_HANDLE;
+  ImageAllocation white_allocation;
   VkImageView white_view = VK_NULL_HANDLE;
   VkImageView white_array_view = VK_NULL_HANDLE;
   VkDescriptorSet white_set = VK_NULL_HANDLE;

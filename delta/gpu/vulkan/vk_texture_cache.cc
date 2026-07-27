@@ -13,7 +13,10 @@
 #include "gpu/vulkan/vk_format.h"
 #include "gpu/vulkan/vk_frame.h"
 #include "gpu/vulkan/vk_hash.h"
+#include "gpu/vulkan/vk_memory.h"
 #include "gpu/vulkan/vk_perf.h"
+#include "gpu/vulkan/vk_render_target.h"
+#include "gpu/vulkan/vk_upload_ring.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -137,10 +140,12 @@ struct TexViewKeyHash {
 
 struct TexImageEntry {
   VkImage image = VK_NULL_HANDLE;
-  VkDeviceMemory mem = VK_NULL_HANDLE;
+  ImageAllocation allocation;
   uint64_t footprint = 0;
+  VkDeviceSize allocation_size = 0;
   uint64_t hash = 0;
   int last_checked_frame = -1;
+  int last_used_frame = -1;
 };
 
 struct TexViewEntry {
@@ -155,9 +160,33 @@ std::unordered_map<TexImageKey, TexImageEntry, TexImageKeyHash> g_tex_images;
 std::unordered_map<TexViewKey, TexViewEntry, TexViewKeyHash> g_tex_views;
 std::unordered_map<TexKey, TexEntry, TexKeyHash> g_tex_cache;
 std::unordered_map<SamplerKey, VkSampler, SamplerKeyHash> g_sampler_cache;
+constexpr uint32_t kTexturePageShift = 16;
+std::unordered_map<uint64_t, std::vector<TexImageKey>> g_texture_pages;
+uint64_t g_tex_image_bytes = 0;
 std::vector<TexImageEntry> g_retired_tex_images;
 std::vector<TexViewEntry> g_retired_tex_views;
 std::vector<TexEntry> g_retired_tex_sets;
+
+void RegisterTexturePages(const TexImageKey& key, uint64_t bytes) {
+  const uint64_t end = key.base + bytes;
+  for (uint64_t page = key.base >> kTexturePageShift;
+       page <= (end - 1) >> kTexturePageShift; page++)
+    g_texture_pages[page].push_back(key);
+}
+
+void UnregisterTexturePages(const TexImageKey& key, uint64_t bytes) {
+  const uint64_t end = key.base + bytes;
+  for (uint64_t page = key.base >> kTexturePageShift;
+       page <= (end - 1) >> kTexturePageShift; page++) {
+    auto found = g_texture_pages.find(page);
+    if (found == g_texture_pages.end())
+      continue;
+    auto& keys = found->second;
+    keys.erase(std::remove(keys.begin(), keys.end(), key), keys.end());
+    if (keys.empty())
+      g_texture_pages.erase(found);
+  }
+}
 TexKey TextureKey(uint64_t base,
                   uint32_t w,
                   uint32_t h,
@@ -217,16 +246,18 @@ uint32_t TextureTiling(uint32_t tiling) {
   return forced >= 0 ? static_cast<uint32_t>(forced) : tiling;
 }
 
-void UploadTexPixels(VkImage img,
-                     uint64_t base,
-                     const gcn::TextureLayout32& layout,
-                     uint32_t texel_w,
-                     uint32_t texel_h);  // defined below
+bool UploadTexPixelsImmediate(VkImage img,
+                              uint64_t base,
+                              const gcn::TextureLayout32& layout,
+                              uint32_t texel_w,
+                              uint32_t texel_h);  // defined below
 void ClearMultiTexCache();
 
 bool CreateTextureDescriptors() {
-  if (g_tex.ds_layout)
+  if (g_tex.descriptors_ready)
     return true;
+  if (g_tex.ds_layout)
+    return false;
   // descriptor set layout: binding 0 = combined image sampler (fragment).
   VkDescriptorSetLayoutBinding b{0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
                                  1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
@@ -237,10 +268,13 @@ bool CreateTextureDescriptors() {
   VKOK(vkCreateDescriptorSetLayout(g_dev.device, &dl, nullptr,
                                    &g_tex.ds_layout));
 
-  VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4096};
+  constexpr uint32_t kSinglePoolSets = 1024;
+  constexpr uint32_t kMultiPoolSets = 512;
+  VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                          kSinglePoolSets};
   VkDescriptorPoolCreateInfo dp{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
   dp.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-  dp.maxSets = 4096;
+  dp.maxSets = kSinglePoolSets;
   dp.poolSizeCount = 1;
   dp.pPoolSizes = &ps;
   VKOK(vkCreateDescriptorPool(g_dev.device, &dp, nullptr, &g_tex.ds_pool));
@@ -267,13 +301,13 @@ bool CreateTextureDescriptors() {
     VKOK(vkCreateDescriptorSetLayout(g_dev.device, &ml, nullptr,
                                      &g_tex.tex_array_layout));
     VkDescriptorPoolSize mps[2] = {
-        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4096 * kMaxTex},
-        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 4096 * kMaxTex},
+        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kMultiPoolSets * kMaxTex},
+        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, kMultiPoolSets * kMaxTex},
     };
     VkDescriptorPoolCreateInfo mp{
         VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     mp.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-    mp.maxSets = 4096;
+    mp.maxSets = kMultiPoolSets;
     mp.poolSizeCount = 2;
     mp.pPoolSizes = mps;
     VKOK(vkCreateDescriptorPool(g_dev.device, &mp, nullptr, &g_tex.mtex_pool));
@@ -290,19 +324,22 @@ bool CreateTextureDescriptors() {
     wi.tiling = VK_IMAGE_TILING_OPTIMAL;
     wi.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     VKOK(vkCreateImage(g_dev.device, &wi, nullptr, &g_tex.white_img));
-    VkMemoryRequirements wmr;
-    vkGetImageMemoryRequirements(g_dev.device, g_tex.white_img, &wmr);
-    VkMemoryAllocateInfo wai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-    wai.allocationSize = wmr.size;
-    wai.memoryTypeIndex =
-        FindMemoryType(wmr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-    VKOK(vkAllocateMemory(g_dev.device, &wai, nullptr, &g_tex.white_mem));
-    vkBindImageMemory(g_dev.device, g_tex.white_img, g_tex.white_mem, 0);
+    if (!AllocateImageMemory(g_tex.white_img, g_tex.white_allocation)) {
+      vkDestroyImage(g_dev.device, g_tex.white_img, nullptr);
+      g_tex.white_img = VK_NULL_HANDLE;
+      return false;
+    }
     uint32_t white = 0xFFFFFFFFu;
     gcn::TextureLayout32 white_layout;
     gcn::BuildTextureLayout32(white_layout, 1, 1, 1, 1, 1, 31, false);
-    UploadTexPixels(g_tex.white_img, reinterpret_cast<uint64_t>(&white),
-                    white_layout, 1, 1);
+    if (!UploadTexPixelsImmediate(g_tex.white_img,
+                                  reinterpret_cast<uint64_t>(&white),
+                                  white_layout, 1, 1)) {
+      vkDestroyImage(g_dev.device, g_tex.white_img, nullptr);
+      FreeImageMemory(g_tex.white_allocation);
+      g_tex.white_img = VK_NULL_HANDLE;
+      return false;
+    }
     VkImageViewCreateInfo wv{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
     wv.image = g_tex.white_img;
     wv.viewType = VK_IMAGE_VIEW_TYPE_2D;
@@ -338,6 +375,7 @@ bool CreateTextureDescriptors() {
     }
     vkUpdateDescriptorSets(g_dev.device, 2, writes, 0, nullptr);
   }
+  g_tex.descriptors_ready = true;
   return true;
 }
 
@@ -345,27 +383,33 @@ VkDescriptorSet AllocateSamplerSet(VkDescriptorSetLayout layout,
                                    bool multi,
                                    VkDescriptorPool& owner) {
   auto& pools = multi ? g_tex.mtex_pools : g_tex.ds_pools;
-  for (VkDescriptorPool pool : pools) {
+  for (auto it = pools.rbegin(); it != pools.rend(); ++it) {
+    const VkDescriptorPool pool = *it;
     VkDescriptorSet set;
     VkDescriptorSetAllocateInfo da{
         VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
     da.descriptorPool = pool;
     da.descriptorSetCount = 1;
     da.pSetLayouts = &layout;
-    if (vkAllocateDescriptorSets(g_dev.device, &da, &set) == VK_SUCCESS) {
+    const VkResult result = vkAllocateDescriptorSets(g_dev.device, &da, &set);
+    if (result == VK_SUCCESS) {
       owner = pool;
       return set;
     }
+    if (result != VK_ERROR_OUT_OF_POOL_MEMORY &&
+        result != VK_ERROR_FRAGMENTED_POOL)
+      return VK_NULL_HANDLE;
   }
 
+  const uint32_t set_capacity = multi ? 512u : 1024u;
   VkDescriptorPoolSize sizes[2] = {
       {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-       4096u * (multi ? kMaxTex : 1u)},
-      {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 4096u * (multi ? kMaxTex : 1u)},
+       set_capacity * (multi ? kMaxTex : 1u)},
+      {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, set_capacity * (multi ? kMaxTex : 1u)},
   };
   VkDescriptorPoolCreateInfo ci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
   ci.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-  ci.maxSets = 4096;
+  ci.maxSets = set_capacity;
   ci.poolSizeCount = multi ? 2u : 1u;
   ci.pPoolSizes = sizes;
   VkDescriptorPool pool;
@@ -378,8 +422,11 @@ VkDescriptorSet AllocateSamplerSet(VkDescriptorSetLayout layout,
   da.descriptorPool = pool;
   da.descriptorSetCount = 1;
   da.pSetLayouts = &layout;
-  if (vkAllocateDescriptorSets(g_dev.device, &da, &set) != VK_SUCCESS)
+  if (vkAllocateDescriptorSets(g_dev.device, &da, &set) != VK_SUCCESS) {
+    pools.pop_back();
+    vkDestroyDescriptorPool(g_dev.device, pool, nullptr);
     return VK_NULL_HANDLE;
+  }
   owner = pool;
   return set;
 }
@@ -490,51 +537,30 @@ VkSampler SamplerFor(const SamplerKey& key) {
   return sampler;
 }
 
-// Copy a complete guest mip chain into `img`. The layout module owns all
-// physical offsets and swizzles; this function only packs the logical mip/layer
-// images for Vulkan buffer-to-image copies.
-void UploadTexPixels(VkImage img,
-                     uint64_t base,
-                     const gcn::TextureLayout32& layout,
-                     uint32_t texel_w,
-                     uint32_t texel_h) {
+uint64_t TextureLinearBytes(const gcn::TextureLayout32& layout) {
+  uint64_t bytes = 0;
+  for (uint32_t mip = 0; mip < layout.mip_levels; mip++)
+    bytes += static_cast<uint64_t>(layout.mips[mip].width) *
+             layout.mips[mip].height * layout.layers * layout.elem_bytes;
+  return bytes;
+}
+
+void PackTexPixels(uint8_t* linear,
+                   VkDeviceSize buffer_offset,
+                   uint64_t base,
+                   const gcn::TextureLayout32& layout,
+                   uint32_t texel_w,
+                   uint32_t texel_h,
+                   VkBufferImageCopy* copies) {
   static const bool kNoDetile = std::getenv("DELTA_GPU_NODETILE") != nullptr;
   const uint32_t elem = layout.elem_bytes;
-  uint64_t linear_bytes = 0;
-  for (uint32_t mip = 0; mip < layout.mip_levels; mip++)
-    linear_bytes += static_cast<uint64_t>(layout.mips[mip].width) *
-                    layout.mips[mip].height * layout.layers * elem;
-
-  const VkDeviceSize sz = linear_bytes;
-  VkBuffer stg;
-  VkDeviceMemory stg_mem;
-  void* map;
-  VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-  bi.size = sz;
-  bi.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-  vkCreateBuffer(g_dev.device, &bi, nullptr, &stg);
-  VkMemoryRequirements br;
-  vkGetBufferMemoryRequirements(g_dev.device, stg, &br);
-  VkMemoryAllocateInfo ba{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-  ba.allocationSize = br.size;
-  ba.memoryTypeIndex = FindMemoryType(br.memoryTypeBits,
-                                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                                          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-  vkAllocateMemory(g_dev.device, &ba, nullptr, &stg_mem);
-  vkBindBufferMemory(g_dev.device, stg, stg_mem, 0);
-  vkMapMemory(g_dev.device, stg_mem, 0, sz, 0, &map);
-
-  VkBufferImageCopy copies[16]{};
-  uint64_t linear_offset = 0;
   const uint8_t* src = reinterpret_cast<const uint8_t*>(base);
-  uint8_t* linear = static_cast<uint8_t*>(map);
+  uint64_t linear_offset = 0;
   for (uint32_t mip = 0; mip < layout.mip_levels; mip++) {
     const auto& level = layout.mips[mip];
-    copies[mip].bufferOffset = linear_offset;
+    copies[mip].bufferOffset = buffer_offset + linear_offset;
     copies[mip].imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, mip, 0,
                                     layout.layers};
-    // The copy extent is in texels; for block-compressed formats the staged
-    // data is level.width x level.height BLOCKS covering that texel extent.
     copies[mip].imageExtent = {std::max(texel_w >> mip, 1u),
                                std::max(texel_h >> mip, 1u), 1};
     const uint64_t layer_bytes =
@@ -555,37 +581,94 @@ void UploadTexPixels(VkImage img,
     }
     linear_offset += layer_bytes * layout.layers;
   }
+}
+
+// One-time initialization upload used before frame recording starts.
+bool UploadTexPixelsImmediate(VkImage img,
+                              uint64_t base,
+                              const gcn::TextureLayout32& layout,
+                              uint32_t texel_w,
+                              uint32_t texel_h) {
+  const VkDeviceSize sz = TextureLinearBytes(layout);
+  VkBuffer stg = VK_NULL_HANDLE;
+  VkDeviceMemory stg_mem = VK_NULL_HANDLE;
+  VkCommandBuffer command = VK_NULL_HANDLE;
+  void* map = nullptr;
+  auto cleanup = [&] {
+    if (map)
+      vkUnmapMemory(g_dev.device, stg_mem);
+    if (command)
+      vkFreeCommandBuffers(g_dev.device, g_dev.pool, 1, &command);
+    if (stg)
+      vkDestroyBuffer(g_dev.device, stg, nullptr);
+    if (stg_mem)
+      vkFreeMemory(g_dev.device, stg_mem, nullptr);
+  };
+  VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+  bi.size = sz;
+  bi.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+  if (vkCreateBuffer(g_dev.device, &bi, nullptr, &stg) != VK_SUCCESS)
+    return false;
+  VkMemoryRequirements br;
+  vkGetBufferMemoryRequirements(g_dev.device, stg, &br);
+  VkMemoryAllocateInfo ba{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+  ba.allocationSize = br.size;
+  ba.memoryTypeIndex = FindMemoryType(br.memoryTypeBits,
+                                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  if (vkAllocateMemory(g_dev.device, &ba, nullptr, &stg_mem) != VK_SUCCESS ||
+      vkBindBufferMemory(g_dev.device, stg, stg_mem, 0) != VK_SUCCESS ||
+      vkMapMemory(g_dev.device, stg_mem, 0, sz, 0, &map) != VK_SUCCESS) {
+    cleanup();
+    return false;
+  }
+
+  VkBufferImageCopy copies[16]{};
+  PackTexPixels(static_cast<uint8_t*>(map), 0, base, layout, texel_w, texel_h,
+                copies);
   vkUnmapMemory(g_dev.device, stg_mem);
+  map = nullptr;
 
   VkCommandBufferAllocateInfo ca{
       VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
   ca.commandPool = g_dev.pool;
   ca.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
   ca.commandBufferCount = 1;
-  VkCommandBuffer c;
-  vkAllocateCommandBuffers(g_dev.device, &ca, &c);
+  if (vkAllocateCommandBuffers(g_dev.device, &ca, &command) != VK_SUCCESS) {
+    cleanup();
+    return false;
+  }
   VkCommandBufferBeginInfo cbi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
   cbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-  vkBeginCommandBuffer(c, &cbi);
-  ImageBarrier(c, img, VK_IMAGE_LAYOUT_UNDEFINED,
+  if (vkBeginCommandBuffer(command, &cbi) != VK_SUCCESS) {
+    cleanup();
+    return false;
+  }
+  ImageBarrier(command, img, VK_IMAGE_LAYOUT_UNDEFINED,
                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0,
                VK_ACCESS_TRANSFER_WRITE_BIT, layout.layers, layout.mip_levels);
-  vkCmdCopyBufferToImage(c, stg, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+  vkCmdCopyBufferToImage(command, stg, img,
+                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                          layout.mip_levels, copies);
-  ImageBarrier(c, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+  ImageBarrier(command, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
                layout.layers, layout.mip_levels);
-  vkEndCommandBuffer(c);
+  const VkResult end_result = vkEndCommandBuffer(command);
   VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
   si.commandBufferCount = 1;
-  si.pCommandBuffers = &c;
+  si.pCommandBuffers = &command;
   uint64_t _t0 = NowNs();
   vkResetFences(g_dev.device, 1, &g_dev.fence);
-  const VkResult up_submit = vkQueueSubmit(g_dev.queue, 1, &si, g_dev.fence);
+  const VkResult up_submit =
+      end_result == VK_SUCCESS ? vkQueueSubmit(g_dev.queue, 1, &si, g_dev.fence)
+                               : end_result;
   const VkResult up_wait =
-      vkWaitForFences(g_dev.device, 1, &g_dev.fence, VK_TRUE, UINT64_MAX);
-  if (up_submit != VK_SUCCESS || up_wait != VK_SUCCESS) {
+      up_submit == VK_SUCCESS
+          ? vkWaitForFences(g_dev.device, 1, &g_dev.fence, VK_TRUE, UINT64_MAX)
+          : up_submit;
+  if (end_result != VK_SUCCESS || up_submit != VK_SUCCESS ||
+      up_wait != VK_SUCCESS) {
     std::fprintf(stderr,
                  "[gpuvk] tex upload DEVICE FAULT: submit=%d wait=%d "
                  "base=%#lx %ux%u mips=%u layers=%u bytes=%llu\n",
@@ -598,9 +681,46 @@ void UploadTexPixels(VkImage img,
   g_ns_tex_up += _tex_dt;
   g_fr_tex_up += _tex_dt;
   g_tex_ups++;
-  vkFreeCommandBuffers(g_dev.device, g_dev.pool, 1, &c);
-  vkDestroyBuffer(g_dev.device, stg, nullptr);
-  vkFreeMemory(g_dev.device, stg_mem, nullptr);
+  cleanup();
+  return end_result == VK_SUCCESS && up_submit == VK_SUCCESS &&
+         up_wait == VK_SUCCESS;
+}
+
+bool RecordTexPixels(VkImage img,
+                     VkImageLayout old_layout,
+                     uint64_t base,
+                     const gcn::TextureLayout32& layout,
+                     uint32_t texel_w,
+                     uint32_t texel_h) {
+  const VkDeviceSize bytes = TextureLinearBytes(layout);
+  TextureUploadSlice upload;
+  if (!AllocateTextureUpload(g_frame.slot_idx, bytes,
+                             std::max<uint32_t>(16, layout.elem_bytes), upload))
+    return false;
+  const uint64_t start = NowNs();
+  VkBufferImageCopy copies[16]{};
+  PackTexPixels(upload.map, upload.offset, base, layout, texel_w, texel_h,
+                copies);
+  EndRegion();
+  const VkAccessFlags source_access =
+      old_layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+          ? VK_ACCESS_SHADER_READ_BIT
+          : 0;
+  ImageBarrier(g_frame.cmd, img, old_layout,
+               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, source_access,
+               VK_ACCESS_TRANSFER_WRITE_BIT, layout.layers, layout.mip_levels);
+  vkCmdCopyBufferToImage(g_frame.cmd, upload.buffer, img,
+                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                         layout.mip_levels, copies);
+  ImageBarrier(g_frame.cmd, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+               VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+               layout.layers, layout.mip_levels);
+  const uint64_t elapsed = NowNs() - start;
+  g_ns_tex_up += elapsed;
+  g_fr_tex_up += elapsed;
+  g_tex_ups++;
+  return true;
 }
 
 void RetireTextureImage(const TexImageKey& key) {
@@ -625,12 +745,30 @@ void RetireTextureImage(const TexImageKey& key) {
   }
   auto image = g_tex_images.find(key);
   if (image != g_tex_images.end()) {
+    UnregisterTexturePages(key, image->second.footprint);
+    g_tex_image_bytes -= image->second.allocation_size;
     g_retired_tex_images.push_back(image->second);
     g_tex_images.erase(image);
     retired = true;
   }
   if (retired)
     ClearMultiTexCache();
+}
+
+bool EvictOldestTexture() {
+  auto oldest = g_tex_images.end();
+  for (auto it = g_tex_images.begin(); it != g_tex_images.end(); ++it) {
+    if (it->second.last_used_frame == g_frame.num)
+      continue;
+    if (oldest == g_tex_images.end() ||
+        it->second.last_used_frame < oldest->second.last_used_frame)
+      oldest = it;
+  }
+  if (oldest == g_tex_images.end())
+    return false;
+  const TexImageKey key = oldest->first;
+  RetireTextureImage(key);
+  return true;
 }
 
 // Upload a guest texture (linear 32bpp RGBA) and return a descriptor set bound
@@ -718,8 +856,6 @@ VkDescriptorSet GetTexture(uint64_t base,
     }
     return VK_NULL_HANDLE;
   }
-  if (!gpu::IsReadableRange(base, footprint))
-    return VK_NULL_HANDLE;
   TexKey key = TextureKey(base, w, h, dfmt, nfmt, tiling, pitch, layers,
                           base_array, view_layers, mip_levels, base_mip,
                           view_mips, min_lod, pow2_pad, sampler, sampler_valid,
@@ -729,6 +865,8 @@ VkDescriptorSet GetTexture(uint64_t base,
   // inspected (is it loaded/brown or black/zero?). Counts non-zero pixels too.
   static const bool kTexDump = std::getenv("DELTA_GPU_TEXDUMP") != nullptr;
   if (kTexDump && g_frame.num > 1200 && w >= 128 && h >= 128) {
+    if (!gpu::IsReadableRange(base, footprint))
+      return VK_NULL_HANDLE;
     static int tdn = 0;
     if (tdn < 16) {
       const uint32_t* px = reinterpret_cast<const uint32_t*>(base);
@@ -756,24 +894,35 @@ VkDescriptorSet GetTexture(uint64_t base,
       tdn++;
     }
   }
-  rhi::FlushCsWritesRange(rhi::DefaultRenderer(), base, footprint);
+  if (!rhi::FlushCsWritesRange(rhi::DefaultRenderer(), base, footprint))
+    return VK_NULL_HANDLE;
   auto image_it = g_tex_images.find(key.image);
   uint64_t hsh = 0;
   if (image_it == g_tex_images.end() ||
       image_it->second.last_checked_frame != g_frame.num) {
+    // Mapping probes are syscall-heavy. Perform one alongside the
+    // once-per-frame content validation rather than on every draw that reuses
+    // this image.
+    if (!gpu::IsReadableRange(base, footprint))
+      return VK_NULL_HANDLE;
     hsh = TexHash(base, footprint);
     if (image_it != g_tex_images.end() && image_it->second.hash != hsh) {
-      RetireTextureImage(key.image);
-      image_it = g_tex_images.end();
+      if (!RecordTexPixels(image_it->second.image,
+                           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, base,
+                           layout, w, h))
+        return VK_NULL_HANDLE;
+      image_it->second.hash = hsh;
     }
   }
   if (image_it == g_tex_images.end()) {
-    if (g_tex_images.size() >= 3000)
-      return VK_NULL_HANDLE;
+    while (g_tex_images.size() >= 3000)
+      if (!EvictOldestTexture())
+        return VK_NULL_HANDLE;
     TexImageEntry image_entry;
     image_entry.footprint = footprint;
     image_entry.hash = hsh;
     image_entry.last_checked_frame = g_frame.num;
+    image_entry.last_used_frame = g_frame.num;
     VkImageCreateInfo ii{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
     ii.imageType = VK_IMAGE_TYPE_2D;
     ii.format = format;
@@ -788,26 +937,34 @@ VkDescriptorSet GetTexture(uint64_t base,
       return VK_NULL_HANDLE;
     VkMemoryRequirements mr;
     vkGetImageMemoryRequirements(g_dev.device, image_entry.image, &mr);
-    VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-    ai.allocationSize = mr.size;
-    ai.memoryTypeIndex =
-        FindMemoryType(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-    if (vkAllocateMemory(g_dev.device, &ai, nullptr, &image_entry.mem) !=
-        VK_SUCCESS) {
+    static const uint64_t kTextureBudget = [] {
+      const char* value = std::getenv("DELTA_GPU_TEX_MB");
+      const uint64_t mb = value ? std::strtoull(value, nullptr, 10) : 1024;
+      return std::max<uint64_t>(mb, 64) * 1024 * 1024;
+    }();
+    while (g_tex_image_bytes + mr.size > kTextureBudget)
+      if (!EvictOldestTexture()) {
+        vkDestroyImage(g_dev.device, image_entry.image, nullptr);
+        return VK_NULL_HANDLE;
+      }
+    if (!AllocateImageMemory(image_entry.image, image_entry.allocation)) {
       vkDestroyImage(g_dev.device, image_entry.image, nullptr);
       return VK_NULL_HANDLE;
     }
-    if (vkBindImageMemory(g_dev.device, image_entry.image, image_entry.mem,
-                          0) != VK_SUCCESS) {
-      vkFreeMemory(g_dev.device, image_entry.mem, nullptr);
+    if (!RecordTexPixels(image_entry.image, VK_IMAGE_LAYOUT_UNDEFINED, base,
+                         layout, w, h)) {
       vkDestroyImage(g_dev.device, image_entry.image, nullptr);
+      FreeImageMemory(image_entry.allocation);
       return VK_NULL_HANDLE;
     }
-    UploadTexPixels(image_entry.image, base, layout, w, h);
+    image_entry.allocation_size = mr.size;
     image_it = g_tex_images.emplace(key.image, image_entry).first;
+    g_tex_image_bytes += mr.size;
+    RegisterTexturePages(key.image, footprint);
   } else {
     image_it->second.last_checked_frame = g_frame.num;
   }
+  image_it->second.last_used_frame = g_frame.num;
 
   auto it = g_tex_cache.find(key);
   if (it != g_tex_cache.end())
@@ -952,8 +1109,8 @@ void ReleaseRetiredTextures() {
   for (const TexImageEntry& e : aged_tex_images) {
     if (e.image)
       vkDestroyImage(g_dev.device, e.image, nullptr);
-    if (e.mem)
-      vkFreeMemory(g_dev.device, e.mem, nullptr);
+    ImageAllocation allocation = e.allocation;
+    FreeImageMemory(allocation);
   }
   aged_mtex = std::move(g_retired_mtex);
   aged_tex_sets = std::move(g_retired_tex_sets);
@@ -1053,21 +1210,29 @@ VkDescriptorSet GetMultiTexSet(const DrawInfo& d,
   return entry.set;
 }
 
-// Drop cached textures overlapping a written range so the graphics path
-// re-uploads the fresh compute output (the content hash would trigger this too,
-// but erasing is immediate and covers a size/format change).
+// Mark cached textures overlapping a written range for validation. Their next
+// use refreshes the existing compatible image in place.
 void InvalidateTexRange(uint64_t base, uint64_t size) {
   if (!size || base > UINT64_MAX - size)
     return;
   uint64_t end = base + size;
   std::vector<TexImageKey> overlap;
-  for (const auto& [key, image] : g_tex_images) {
-    uint64_t tex_end = key.base + image.footprint;
-    if (key.base < end && base < tex_end)
-      overlap.push_back(key);
+  for (uint64_t page = base >> kTexturePageShift;
+       page <= (end - 1) >> kTexturePageShift; page++) {
+    auto found = g_texture_pages.find(page);
+    if (found == g_texture_pages.end())
+      continue;
+    for (const TexImageKey& key : found->second) {
+      if (std::find(overlap.begin(), overlap.end(), key) == overlap.end())
+        overlap.push_back(key);
+    }
   }
-  for (const TexImageKey& key : overlap)
-    RetireTextureImage(key);
+  for (const TexImageKey& key : overlap) {
+    auto found = g_tex_images.find(key);
+    if (found != g_tex_images.end() && key.base < end &&
+        base < key.base + found->second.footprint)
+      found->second.last_checked_frame = -1;
+  }
 }
 
 }  // namespace gpu::vk

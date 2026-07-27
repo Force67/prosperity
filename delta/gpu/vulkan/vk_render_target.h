@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "gpu/rhi/command.h"
+#include "gpu/vulkan/vk_memory.h"
 
 namespace gpu::vk {
 
@@ -25,14 +26,14 @@ namespace gpu::vk {
 // work".
 struct RTarget {
   VkImage image = VK_NULL_HANDLE;
-  VkDeviceMemory mem = VK_NULL_HANDLE;
+  ImageAllocation allocation;
   VkImageView view = VK_NULL_HANDLE;
   VkDescriptorSet set = VK_NULL_HANDLE;  // for sampling this RT as a texture
   // Sampling an image while it is also a color attachment requires Vulkan's
   // attachment-feedback-loop extension. Keep a lazy copy instead so the shader
   // reads the attachment contents as they existed before the draw.
   VkImage feedback_image = VK_NULL_HANDLE;
-  VkDeviceMemory feedback_mem = VK_NULL_HANDLE;
+  ImageAllocation feedback_allocation;
   VkImageView feedback_view = VK_NULL_HANDLE;
   VkDescriptorSet feedback_set = VK_NULL_HANDLE;
   std::unordered_map<uint32_t, VkImageView> sampled_views;
@@ -64,7 +65,7 @@ extern std::unordered_map<uint64_t, RTarget>& g_rts;
 constexpr VkFormat kDepthFormat = VK_FORMAT_D32_SFLOAT;
 struct DepthTarget {
   VkImage image = VK_NULL_HANDLE;
-  VkDeviceMemory mem = VK_NULL_HANDLE;
+  ImageAllocation allocation;
   VkImageView view = VK_NULL_HANDLE;
   VkDescriptorSet set = VK_NULL_HANDLE;
   std::unordered_map<uint32_t, VkImageView> sampled_views;
@@ -119,7 +120,7 @@ struct RenderRegion {
 
 extern RenderRegion& g_region;
 
-void BeginRegion(const uint64_t* mrt_base,
+bool BeginRegion(const uint64_t* mrt_base,
                  const uint32_t* mrt_info,
                  uint32_t mrt_count,
                  uint32_t w,

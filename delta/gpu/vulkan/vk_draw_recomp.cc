@@ -10,6 +10,7 @@
 #include "gpu/vulkan/vk_device.h"
 #include "gpu/vulkan/vk_format.h"
 #include "gpu/vulkan/vk_frame.h"
+#include "gpu/vulkan/vk_index_upload.h"
 #include "gpu/vulkan/vk_pipeline_cache.h"
 #include "gpu/vulkan/vk_render_target.h"
 #include "gpu/vulkan/vk_texture_cache.h"
@@ -19,6 +20,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <unordered_map>
 
 namespace gpu::vk {
 
@@ -46,6 +48,32 @@ uint32_t g_decline[kMaxDeclineReason] = {0};
 inline bool Decline(DeclineReason r) {
   g_decline[r]++;
   return false;
+}
+
+struct ReadableRangeKey {
+  uint64_t base;
+  uint32_t size;
+  bool operator==(const ReadableRangeKey&) const = default;
+};
+
+struct ReadableRangeKeyHash {
+  size_t operator()(const ReadableRangeKey& key) const {
+    return static_cast<size_t>(key.base ^ (key.base >> 32) ^ key.size);
+  }
+};
+
+bool IsReadableThisFrame(uint64_t base, uint32_t size) {
+  static int frame = -1;
+  static std::unordered_map<ReadableRangeKey, bool, ReadableRangeKeyHash> cache;
+  if (frame != g_frame.num) {
+    frame = g_frame.num;
+    cache.clear();
+  }
+  const ReadableRangeKey key{base, size};
+  auto found = cache.find(key);
+  if (found != cache.end())
+    return found->second;
+  return cache.emplace(key, gpu::IsReadableRange(base, size)).first->second;
 }
 
 }  // namespace
@@ -132,23 +160,19 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
   }
   // Indexed draws derive the copied vertex range from their indices.
   // DRAW_INDEX_AUTO consumes the packet's sequential vertex count directly.
-  const uint16_t* i16 = nullptr;
-  const uint32_t* i32 = nullptr;
   uint32_t nv = d.vertex_count;
   if (indexed) {
-    uint32_t max_idx = 0;
-    if (d.index_type == 1) {
-      i32 = (const uint32_t*)d.index_data;
-      for (uint32_t i = 0; i < d.index_count; i++)
-        max_idx = i32[i] > max_idx ? i32[i] : max_idx;
-    } else {
-      i16 = (const uint16_t*)d.index_data;
-      for (uint32_t i = 0; i < d.index_count; i++)
-        max_idx = i16[i] > max_idx ? i16[i] : max_idx;
-    }
-    nv = max_idx + 1;
+    const uint32_t max_index =
+        MaxGuestIndex(d.index_data, d.index_count, d.index_type);
+    if (max_index >= 200000u)
+      return Decline(kNoRecomp);
+    nv = max_index + 1;
   }
   if (nv > 200000u || (d.num_vattrs && (!d.vertex_data || !d.vertex_stride)))
+    return Decline(kNoRecomp);
+  if (d.vertex_data && d.vertex_stride &&
+      !FlushCsWritesRange(renderer, reinterpret_cast<uint64_t>(d.vertex_data),
+                          static_cast<uint64_t>(nv) * d.vertex_stride))
     return Decline(kNoRecomp);
 
   // A fullscreen, untextured, near-black REPLACE draw is the game CLEARING an
@@ -288,8 +312,14 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
   }
   if (g_ring.vb_offset + vneed > g_ring.vb_end)
     return Decline(kRing);
-  if (indexed &&
-      g_ring.ib_offset + (VkDeviceSize)d.index_count * 4 > g_ring.ib_end)
+  const VkDeviceSize index_bytes =
+      indexed ? static_cast<VkDeviceSize>(d.index_count) *
+                    UploadedIndexElementBytes(d.index_type)
+              : 0;
+  const VkDeviceSize index_align = d.index_type == 1 ? 4 : 2;
+  const VkDeviceSize aligned_ioff =
+      (g_ring.ib_offset + index_align - 1) & ~(index_align - 1);
+  if (indexed && aligned_ioff + index_bytes > g_ring.ib_end)
     return Decline(kRing);
 
   RecompPipe* rp = GetRecompPipe(d);
@@ -433,25 +463,7 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
     }
   }
 
-  // Copy each vertex binding's source range into the ring and, for indexed
-  // draws, the indices.
-  VkDeviceSize voff = g_ring.vb_offset, ioff = g_ring.ib_offset;
-  for (uint32_t j = 0; j < nbind; j++) {
-    if (!bind_size[j])
-      continue;
-    FlushCsWritesRange(renderer, reinterpret_cast<uint64_t>(d.vbufs[j].data),
-                       bind_size[j]);
-    std::memcpy(g_ring.vb_map + voff + bind_off[j], d.vbufs[j].data,
-                (size_t)bind_size[j]);
-  }
-  if (indexed) {
-    auto* idst = reinterpret_cast<uint32_t*>(g_ring.ib_map + ioff);
-    if (i32)
-      std::memcpy(idst, i32, (size_t)d.index_count * 4);
-    else
-      for (uint32_t i = 0; i < d.index_count; i++)
-        idst[i] = i16[i];
-  }
+  VkDeviceSize voff = g_ring.vb_offset, ioff = aligned_ioff;
 
   // Switch render target. Re-begin when the primary target or the MRT count
   // changes (the open region's attachment count must match the pipeline's), or
@@ -482,8 +494,7 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
       if (src.layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
         ImageBarrier(g_frame.cmd, src.image, src.layout,
                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                     VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-                     VK_ACCESS_SHADER_READ_BIT);
+                     ColorImageAccess(src.layout), VK_ACCESS_SHADER_READ_BIT);
         src.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
       }
     }
@@ -523,12 +534,9 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
         } else if (multi_color[i]) {
           auto& src = g_rts[multi_color[i]];
           if (src.layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
-            VkAccessFlags src_access =
-                src.layout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
-                    ? VK_ACCESS_TRANSFER_READ_BIT
-                    : VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
             ImageBarrier(g_frame.cmd, src.image, src.layout,
-                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, src_access,
+                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                         ColorImageAccess(src.layout),
                          VK_ACCESS_SHADER_READ_BIT);
             src.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
           }
@@ -579,8 +587,9 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
                             : nullptr;
     if (d.rt_base && !rt)
       return true;  // RT cap hit: treat as handled (dropped)
-    BeginRegion(d.mrt_base, d.mrt_info, mrt_n, d.rt_w, d.rt_h, d.depth_base,
-                d.depth_clear);
+    if (!BeginRegion(d.mrt_base, d.mrt_info, mrt_n, d.rt_w, d.rt_h,
+                     d.depth_base, d.depth_clear))
+      return true;
   }
   if (rp->multi_tex) {
     if (!tex_set) {
@@ -648,8 +657,7 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
   // layout.
   VkDeviceSize cb_off = (g_ring.ubo_offset + g_ring.ubo_align - 1) &
                         ~(VkDeviceSize)(g_ring.ubo_align - 1);
-  VkDeviceSize cb_stride = (kCbufWindow + g_ring.ubo_align - 1) &
-                           ~(VkDeviceSize)(g_ring.ubo_align - 1);
+  VkDeviceSize cb_stride = g_ring.ubo_stride;
   if (cb_off + cb_stride * kCbufBindings > g_ring.ubo_end)
     return Decline(kRing);
   uint32_t dyn_off[kCbufBindings];
@@ -657,15 +665,15 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
   for (uint32_t i = 0; i < kCbufBindings; i++) {
     const auto& cb = d.cbufs[i];
     const uint32_t readable = std::min(cb.size, kCbufWindow);
-    const bool have_cbuf = readable && gpu::IsReadableRange(cb.base, readable);
+    const bool have_cbuf = readable && IsReadableThisFrame(cb.base, readable);
     if (!have_cbuf && i != 0) {
       dyn_off[i] = 0;  // shared zero window (see BeginFrame)
       continue;
     }
     uint8_t* cb_dst = g_ring.ubo_map + next;
     uint32_t n;
-    if (have_cbuf)
-      FlushCsWritesRange(renderer, cb.base, kCbufWindow);
+    if (have_cbuf && !FlushCsWritesRange(renderer, cb.base, kCbufWindow))
+      return Decline(kNoRecomp);
     if (have_cbuf) {
       // Upload as much of the window as the base's page holds, not just the
       // recompiler's planned size. A shader that indexes its constants
@@ -686,8 +694,13 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
       n = sizeof(d.mvp);
       std::memcpy(cb_dst, d.mvp, n);
     }
-    if (n < kCbufWindow)
-      std::memset(cb_dst + n, 0, kCbufWindow - n);
+    const size_t window = static_cast<size_t>(next / cb_stride);
+    if (window >= g_ring.ubo_written.size())
+      return Decline(kRing);
+    const uint32_t previous = g_ring.ubo_written[window];
+    if (n < previous)
+      std::memset(cb_dst + n, 0, previous - n);
+    g_ring.ubo_written[window] = n;
     dyn_off[i] = static_cast<uint32_t>(next);
     next += cb_stride;
   }
@@ -698,6 +711,22 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
   if (tex_set)
     vkCmdBindDescriptorSets(g_frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                             rp->layout, 0, 1, &tex_set, 0, nullptr);
+  // Commit ring uploads only after every fallible pipeline, texture, region and
+  // cbuffer decision has succeeded.
+  for (uint32_t j = 0; j < nbind; j++) {
+    if (!bind_size[j])
+      continue;
+    if (!FlushCsWritesRange(renderer,
+                            reinterpret_cast<uint64_t>(d.vbufs[j].data),
+                            bind_size[j]))
+      return Decline(kNoRecomp);
+    std::memcpy(g_ring.vb_map + voff + bind_off[j], d.vbufs[j].data,
+                (size_t)bind_size[j]);
+  }
+  if (indexed) {
+    CopyGuestIndices(g_ring.ib_map + ioff, d.index_data, d.index_count,
+                     d.index_type);
+  }
   if (nbind) {
     VkBuffer bufs[8];
     VkDeviceSize offs[8];
@@ -708,7 +737,9 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
     vkCmdBindVertexBuffers(g_frame.cmd, 0, nbind, bufs, offs);
   }
   if (indexed)
-    vkCmdBindIndexBuffer(g_frame.cmd, g_ring.ib, ioff, VK_INDEX_TYPE_UINT32);
+    vkCmdBindIndexBuffer(
+        g_frame.cmd, g_ring.ib, ioff,
+        d.index_type == 1 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16);
   if (kDrawTrace && draw_count >= 300) {
     static int n = 0;
     if (n++ < 40)
@@ -799,7 +830,7 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
   }
   g_ring.vb_offset += vneed;
   if (indexed)
-    g_ring.ib_offset += (VkDeviceSize)d.index_count * 4;
+    g_ring.ib_offset = ioff + index_bytes;
   g_frame.draws++;
   if (g_region.cur_rt) {
     auto& rt = g_rts[g_region.cur_rt];

@@ -99,7 +99,7 @@ RTarget* GetRT(uint64_t base, uint32_t w, uint32_t h, VkFormat fmt) {
     }
     return &it->second;
   }
-  if (g_rts.size() > 64 || !w || !h)
+  if (g_rts.size() >= 64 || !w || !h)
     return nullptr;
   // Robustness: reject render targets with implausible dimensions or an
   // undefined format. A garbage CB_COLOR base/scissor (e.g. a stray shader-pool
@@ -127,24 +127,21 @@ RTarget* GetRT(uint64_t base, uint32_t w, uint32_t h, VkFormat fmt) {
              VK_IMAGE_USAGE_TRANSFER_DST_BIT;
   if (vkCreateImage(g_dev.device, &ii, nullptr, &t.image) != VK_SUCCESS)
     return nullptr;
-  VkMemoryRequirements mr;
-  vkGetImageMemoryRequirements(g_dev.device, t.image, &mr);
-  VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-  ai.allocationSize = mr.size;
-  ai.memoryTypeIndex =
-      FindMemoryType(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-  if (vkAllocateMemory(g_dev.device, &ai, nullptr, &t.mem) != VK_SUCCESS) {
+  if (!AllocateImageMemory(t.image, t.allocation)) {
     vkDestroyImage(g_dev.device, t.image, nullptr);
     return nullptr;  // GPU OOM -> don't bind/view a memory-less image (driver
                      // crash)
   }
-  vkBindImageMemory(g_dev.device, t.image, t.mem, 0);
   VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
   vci.image = t.image;
   vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
   vci.format = fmt;
   vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-  vkCreateImageView(g_dev.device, &vci, nullptr, &t.view);
+  if (vkCreateImageView(g_dev.device, &vci, nullptr, &t.view) != VK_SUCCESS) {
+    vkDestroyImage(g_dev.device, t.image, nullptr);
+    FreeImageMemory(t.allocation);
+    return nullptr;
+  }
   // descriptor set so this RT can be sampled (render-to-texture).
   if (g_tex.ds_pool) {
     VkDescriptorPool owner;
@@ -183,23 +180,8 @@ VkDescriptorSet SnapshotRT(RTarget& rt) {
     if (vkCreateImage(g_dev.device, &ii, nullptr, &rt.feedback_image) !=
         VK_SUCCESS)
       return VK_NULL_HANDLE;
-    VkMemoryRequirements mr;
-    vkGetImageMemoryRequirements(g_dev.device, rt.feedback_image, &mr);
-    VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-    ai.allocationSize = mr.size;
-    ai.memoryTypeIndex =
-        FindMemoryType(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-    if (vkAllocateMemory(g_dev.device, &ai, nullptr, &rt.feedback_mem) !=
-        VK_SUCCESS) {
+    if (!AllocateImageMemory(rt.feedback_image, rt.feedback_allocation)) {
       vkDestroyImage(g_dev.device, rt.feedback_image, nullptr);
-      rt.feedback_image = VK_NULL_HANDLE;
-      return VK_NULL_HANDLE;
-    }
-    if (vkBindImageMemory(g_dev.device, rt.feedback_image, rt.feedback_mem,
-                          0) != VK_SUCCESS) {
-      vkFreeMemory(g_dev.device, rt.feedback_mem, nullptr);
-      vkDestroyImage(g_dev.device, rt.feedback_image, nullptr);
-      rt.feedback_mem = VK_NULL_HANDLE;
       rt.feedback_image = VK_NULL_HANDLE;
       return VK_NULL_HANDLE;
     }
@@ -209,12 +191,22 @@ VkDescriptorSet SnapshotRT(RTarget& rt) {
     vi.format = rt.fmt;
     vi.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
     if (vkCreateImageView(g_dev.device, &vi, nullptr, &rt.feedback_view) !=
-        VK_SUCCESS)
+        VK_SUCCESS) {
+      vkDestroyImage(g_dev.device, rt.feedback_image, nullptr);
+      FreeImageMemory(rt.feedback_allocation);
+      rt.feedback_image = VK_NULL_HANDLE;
       return VK_NULL_HANDLE;
+    }
     VkDescriptorPool owner;
     rt.feedback_set = AllocateSamplerSet(g_tex.ds_layout, false, owner);
-    if (!rt.feedback_set)
+    if (!rt.feedback_set) {
+      vkDestroyImageView(g_dev.device, rt.feedback_view, nullptr);
+      vkDestroyImage(g_dev.device, rt.feedback_image, nullptr);
+      FreeImageMemory(rt.feedback_allocation);
+      rt.feedback_view = VK_NULL_HANDLE;
+      rt.feedback_image = VK_NULL_HANDLE;
       return VK_NULL_HANDLE;
+    }
     VkDescriptorImageInfo dii{g_tex.sampler, rt.feedback_view,
                               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
     VkWriteDescriptorSet wr{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
@@ -225,17 +217,9 @@ VkDescriptorSet SnapshotRT(RTarget& rt) {
     vkUpdateDescriptorSets(g_dev.device, 1, &wr, 0, nullptr);
   }
 
-  VkAccessFlags src_access =
-      rt.layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
-          ? VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
-      : rt.layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
-          ? VK_ACCESS_SHADER_READ_BIT
-      : rt.layout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
-          ? VK_ACCESS_TRANSFER_READ_BIT
-          : 0;
   ImageBarrier(g_frame.cmd, rt.image, rt.layout,
-               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, src_access,
-               VK_ACCESS_TRANSFER_READ_BIT);
+               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+               ColorImageAccess(rt.layout), VK_ACCESS_TRANSFER_READ_BIT);
   rt.layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
   VkAccessFlags feedback_access =
       rt.feedback_layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
@@ -267,7 +251,7 @@ DepthTarget* GetDepthRT(uint64_t base, uint32_t w, uint32_t h) {
   auto it = g_depths.find(base);
   if (it != g_depths.end())
     return &it->second;
-  if (g_depths.size() > 32 || !w || !h)
+  if (g_depths.size() >= 32 || !w || !h)
     return nullptr;
   DepthTarget t;
   t.w = w;
@@ -284,20 +268,20 @@ DepthTarget* GetDepthRT(uint64_t base, uint32_t w, uint32_t h) {
       VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
   if (vkCreateImage(g_dev.device, &ii, nullptr, &t.image) != VK_SUCCESS)
     return nullptr;
-  VkMemoryRequirements mr;
-  vkGetImageMemoryRequirements(g_dev.device, t.image, &mr);
-  VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-  ai.allocationSize = mr.size;
-  ai.memoryTypeIndex =
-      FindMemoryType(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-  vkAllocateMemory(g_dev.device, &ai, nullptr, &t.mem);
-  vkBindImageMemory(g_dev.device, t.image, t.mem, 0);
+  if (!AllocateImageMemory(t.image, t.allocation)) {
+    vkDestroyImage(g_dev.device, t.image, nullptr);
+    return nullptr;
+  }
   VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
   vci.image = t.image;
   vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
   vci.format = kDepthFormat;
   vci.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
-  vkCreateImageView(g_dev.device, &vci, nullptr, &t.view);
+  if (vkCreateImageView(g_dev.device, &vci, nullptr, &t.view) != VK_SUCCESS) {
+    vkDestroyImage(g_dev.device, t.image, nullptr);
+    FreeImageMemory(t.allocation);
+    return nullptr;
+  }
   if (g_tex.ds_pool) {
     VkDescriptorPool owner;
     t.set = AllocateSamplerSet(g_tex.ds_layout, false, owner);
@@ -404,34 +388,13 @@ uint64_t ResolveSampledDepth(uint64_t addr, uint32_t w, uint32_t h) {
   return best;
 }
 
-// End the current dynamic-rendering region (if any), leaving its RTs readable.
+// End the current dynamic-rendering region. Attachments remain in attachment
+// layouts until an actual sampled/transfer consumer requests a transition.
 void EndRegion() {
   if (!g_region.open)
     return;
   g_cmd_end_rendering(g_frame.cmd);
   g_region.open = false;
-  for (uint32_t i = 0; i < g_region.cur_mrt_count; i++) {
-    auto it = g_rts.find(g_region.cur_mrt[i]);
-    if (it == g_rts.end())
-      continue;
-    auto& rt = it->second;
-    ImageBarrier(
-        g_frame.cmd, rt.image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
-    rt.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-  }
-  if (g_region.cur_depth) {
-    auto it = g_depths.find(g_region.cur_depth);
-    if (it != g_depths.end()) {
-      auto& depth = it->second;
-      DepthBarrier(g_frame.cmd, depth.image, depth.layout,
-                   VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL,
-                   VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-                   VK_ACCESS_SHADER_READ_BIT);
-      depth.layout = VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL;
-    }
-  }
   g_region.cur_rt = 0;
   g_region.cur_mrt_count = 0;
   g_region.cur_depth = 0;
@@ -460,7 +423,7 @@ void SetGuestViewport(const DrawInfo& d) {
 // attachment. depth_base != 0 additionally binds a depth attachment (cleared to
 // depth_clear on its first use each frame, loaded thereafter); depth_base == 0
 // leaves depth unbound (the 2D path).
-void BeginRegion(const uint64_t* mrt_base,
+bool BeginRegion(const uint64_t* mrt_base,
                  const uint32_t* mrt_info,
                  uint32_t mrt_count,
                  uint32_t w,
@@ -472,24 +435,24 @@ void BeginRegion(const uint64_t* mrt_base,
     return !e || std::strcmp(e, "0") != 0;
   }();
   VkRenderingAttachmentInfo colors[8]{};
+  RTarget* targets[8]{};
+  mrt_count = std::min(mrt_count, 8u);
+  for (uint32_t i = 0; i < mrt_count; i++) {
+    targets[i] = GetRT(mrt_base[i], w, h, ColorTargetFormat(mrt_info[i]));
+    if (!targets[i])
+      return false;
+  }
+  DepthTarget* dt = depth_base ? GetDepthRT(depth_base, w, h) : nullptr;
+  if (depth_base && !dt)
+    return false;
   g_region.cur_mrt_count = 0;
-  for (uint32_t i = 0; i < mrt_count && i < 8; i++) {
-    RTarget* rtp = GetRT(mrt_base[i], w, h, ColorTargetFormat(mrt_info[i]));
-    if (!rtp)
-      continue;
-    RTarget& rt = *rtp;
-    VkAccessFlags src_access =
-        rt.layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
-            ? VK_ACCESS_SHADER_READ_BIT
-        : rt.layout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
-            ? VK_ACCESS_TRANSFER_READ_BIT
-        : rt.layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
-            ? VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
-        : rt.layout == VK_IMAGE_LAYOUT_GENERAL ? VK_ACCESS_SHADER_WRITE_BIT
-                                               : 0;
+  for (uint32_t i = 0; i < mrt_count; i++) {
+    RTarget& rt = *targets[i];
     ImageBarrier(g_frame.cmd, rt.image, rt.layout,
-                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, src_access,
-                 VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
+                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                 ColorImageAccess(rt.layout),
+                 VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
+                     VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
     rt.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     auto& color = colors[i];
     color.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
@@ -542,21 +505,26 @@ void BeginRegion(const uint64_t* mrt_base,
     }
     rt.used_this_frame = true;
     rt.last_frame = g_frame.num;
-    g_region.cur_mrt[g_region.cur_mrt_count++] = mrt_base[i];
+    g_region.cur_mrt[i] = mrt_base[i];
   }
-  RTarget* primary =
-      mrt_count ? GetRT(mrt_base[0], w, h, ColorTargetFormat(mrt_info[0]))
-                : nullptr;
+  g_region.cur_mrt_count = mrt_count;
+  RTarget* primary = mrt_count ? targets[0] : nullptr;
   uint64_t base = primary ? mrt_base[0] : 0;
   // Depth attachment (3D). Cleared to the guest DB_DEPTH_CLEAR value on its
   // first use this frame, then loaded so multiple regions in a frame share one
   // Z buffer.
   VkRenderingAttachmentInfo depth_att{
       VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
-  DepthTarget* dt = depth_base ? GetDepthRT(depth_base, w, h) : nullptr;
   if (dt) {
+    const VkAccessFlags depth_source =
+        dt->layout == VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL
+            ? VK_ACCESS_SHADER_READ_BIT
+        : dt->layout == VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL
+            ? VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                  VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT
+            : 0;
     DepthBarrier(g_frame.cmd, dt->image, dt->layout,
-                 VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, 0,
+                 VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, depth_source,
                  VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT |
                      VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT);
     dt->layout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
@@ -605,6 +573,7 @@ void BeginRegion(const uint64_t* mrt_base,
                  g_frame.num, (unsigned long)base, w, h, g_region.cur_mrt_count,
                  g_region.cur_mrt_count &&
                      colors[0].loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR);
+  return true;
 }
 
 }  // namespace gpu::vk
