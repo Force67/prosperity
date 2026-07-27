@@ -621,20 +621,31 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
                 if (cb.binding >= 8)
                   continue;
                 gcn::VBuffer vb{};
-                auto rit = resolved.find(cb.ud_sgpr);
+                auto rit =
+                    resolved.find(cb.ud_sgpr | (cb.pointer ? 0x100u : 0u));
                 if (rit != resolved.end())
                   vb = rit->second;  // EUD-resolved V# (handles indirection)
-                else if (cb.ud_sgpr + 3 < 16)
+                else if (cb.pointer && cb.ud_sgpr + 1 < 16)
+                  vb.base = user_data[cb.ud_sgpr] |
+                            (uint64_t)(user_data[cb.ud_sgpr + 1] & 0xFFFF)
+                                << 32;  // flat pointer inline in user data
+                else if (!cb.pointer && cb.ud_sgpr + 3 < 16)
                   vb = gcn::DecodeVBuffer(&user_data[cb.ud_sgpr]);  // inline V#
+                // An s_load table carries no size; the shader's own highest
+                // read bounds the window.
                 uint64_t bytes = vb.stride
                                      ? (uint64_t)vb.stride * vb.num_records
                                      : vb.num_records;
+                if (cb.pointer)
+                  bytes = (uint64_t)cb.num_dwords * 4;
                 if (vb.base < 0x1000000000ull || vb.base >= 0x20000000000ull ||
                     !bytes || bytes > 0xFFFFFFFFull ||
                     vb.base + bytes > 0x20000000000ull)
                   continue;
                 d.cbufs[cb.binding] = {vb.base, static_cast<uint32_t>(bytes)};
                 d.num_cbufs = std::max(d.num_cbufs, cb.binding + 1);
+                if (cb.pointer)
+                  continue;  // an SRT root is not a transform buffer
                 if (vertex_stage && !resolved_vs_cbuf) {
                   resolved_vs_cbuf = true;
                   d.cbuf_base = vb.base;

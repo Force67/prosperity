@@ -5,6 +5,7 @@
 #include "gpu/vulkan/vk_frame.h"
 
 #include "gfx/gfx.h"
+#include "gpu/ps4/gcn/gcn_translate.h"
 #include "gpu/rhi/renderer.h"
 #include "gpu/vulkan/vk_backend.h"
 #include "gpu/vulkan/vk_capture.h"
@@ -20,6 +21,7 @@
 #include "gpu/vulkan/vk_upload_ring.h"
 
 #include <dlfcn.h>
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -230,7 +232,7 @@ bool ReportRtContents(FrameSlot& owner) {
     const uint32_t* px = static_cast<const uint32_t*>(g_frame.readback_map);
     const uint64_t n = static_cast<uint64_t>(rt.w) * rt.h;
     const uint64_t step = n > 16384 ? n / 16384 : 1;
-    uint64_t nz = 0, rgb_nz = 0, samples = 0, luma_sum = 0;
+    uint64_t nz = 0, rgb_nz = 0, samples = 0, luma_sum = 0, nan_half = 0;
     uint32_t distinct[4] = {};
     uint32_t num_distinct = 0;
     for (uint64_t i = 0; i < n; i += step, samples++) {
@@ -243,6 +245,15 @@ bool ReportRtContents(FrameSlot& owner) {
         nz++;
       if (v & 0x00FFFFFFu)
         rgb_nz++;  // ignores an opaque-black alpha channel
+      // A half-float target poisoned with NaN reads back as black through
+      // every later unorm pass, so count NaN halves separately from "bright".
+      if (rt.fmt == VK_FORMAT_R16G16B16A16_SFLOAT) {
+        for (uint32_t half = 0; half < 2; half++) {
+          const uint32_t h = (v >> (16 * half)) & 0xFFFFu;
+          if ((h & 0x7C00u) == 0x7C00u && (h & 0x03FFu))
+            nan_half++;
+        }
+      }
       bool seen = false;
       for (uint32_t k = 0; k < num_distinct; k++)
         seen |= distinct[k] == v;
@@ -251,12 +262,26 @@ bool ReportRtContents(FrameSlot& owner) {
     }
     std::fprintf(stderr,
                  "[rtstat] f%d RT %#lx %ux%u draws=%u nz=%lu rgbnz=%lu/%lu "
-                 "mean=%lu vals=%08x %08x %08x %08x\n",
+                 "mean=%lu nan=%lu vs=%#lx ps=%#lx cb=%#x "
+                 "vals=%08x %08x %08x %08x\n",
                  g_frame.num, (unsigned long)kv.first, rt.w, rt.h, rt.draws,
                  (unsigned long)nz, (unsigned long)rgb_nz,
                  (unsigned long)samples,
-                 (unsigned long)(samples ? luma_sum / samples : 0), distinct[0],
+                 (unsigned long)(samples ? luma_sum / samples : 0),
+                 (unsigned long)nan_half, (unsigned long)rt.last_vs,
+                 (unsigned long)rt.last_ps, rt.last_cbuf_mask, distinct[0],
                  distinct[1], distinct[2], distinct[3]);
+    // DELTA_GPU_RTSTAT_DIS: disassemble the pixel shader that produced a
+    // NaN-poisoned half-float target. Guest shader addresses differ from run to
+    // run, so the shader has to be named in the same run that observed the NaN.
+    static const bool kNanDis = std::getenv("DELTA_GPU_RTSTAT_DIS") != nullptr;
+    if (kNanDis && nan_half && rt.last_ps) {
+      static std::vector<uint64_t> seen;
+      if (std::find(seen.begin(), seen.end(), rt.last_ps) == seen.end()) {
+        seen.push_back(rt.last_ps);
+        gcn::DisassembleAt(rt.last_ps, "nan.PS");
+      }
+    }
     if (dump) {
       std::vector<uint8_t> bgra(n * 4);
       const auto* src = static_cast<const uint8_t*>(g_frame.readback_map);

@@ -662,13 +662,22 @@ std::unordered_map<uint32_t, VBuffer> ResolveCbuffers(
     if (inst.enc != Enc::kSmrd)
       continue;
     const Smrd s = DecodeSmrd(inst.raw[0]);
-    if (s.op < 0x08 || s.op > 0x0c)
-      continue;                         // s_buffer_load_dword{,x2..x16}
-    const uint32_t base = s.sbase * 2;  // 4-dword V# base SGPR
-    if (result.count(base) || !eval.AllKnown(base, 4))
+    if (s.op > 0x0c || (s.op > 0x04 && s.op < 0x08))
+      continue;  // s_load_dword{,x2..x16} / s_buffer_load_dword{,x2..x16}
+    // s_load addresses a raw 2-dword pointer, s_buffer_load a 4-dword V#.
+    const bool pointer = s.op <= 0x04;
+    const uint32_t base = s.sbase * 2;
+    // Keyed like the translator's bindings (see CbufBindKey): the same SGPR
+    // can serve as a pointer pair for one load and a V# for another.
+    const uint32_t key = base | (pointer ? 0x100u : 0u);
+    if (result.count(key) || !eval.AllKnown(base, pointer ? 2 : 4))
       continue;
-    const VBuffer v = DecodeVBuffer(&eval.sgpr[base]);
-    result.emplace(base, v);
+    VBuffer v{};
+    if (pointer)
+      v.base = eval.Ptr(base);  // size comes from the shader's plan
+    else
+      v = DecodeVBuffer(&eval.sgpr[base]);
+    result.emplace(key, v);
     if (eval.trace)
       std::fprintf(stderr, "[eud] cbuf s%u -> base=%#lx stride=%u nrec=%u\n",
                    base, static_cast<unsigned long>(v.base), v.stride,

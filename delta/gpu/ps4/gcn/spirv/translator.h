@@ -421,6 +421,7 @@ bool IsVop3b(uint32_t op);
 
 // ---- memory emitters (translate_mem.cc) -----------------------------------
 uint32_t SmrdLoadCount(uint32_t op);
+uint32_t SmrdDwordCount(uint32_t op);
 bool PlanCbufs(const Program& program,
                uint32_t first_binding,
                std::vector<ShaderCbuf>& cbufs,

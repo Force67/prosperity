@@ -659,11 +659,14 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
   if (cb_off + cb_stride * kCbufBindings > g_ring.ubo_end)
     return Decline(kRing);
   uint32_t dyn_off[kCbufBindings];
+  uint32_t cbuf_mask = 0;
   VkDeviceSize next = cb_off;
   for (uint32_t i = 0; i < kCbufBindings; i++) {
     const auto& cb = d.cbufs[i];
     const uint32_t readable = std::min(cb.size, kCbufWindow);
     const bool have_cbuf = readable && IsReadableThisFrame(cb.base, readable);
+    if (have_cbuf)
+      cbuf_mask |= 1u << i;
     if (!have_cbuf && i != 0) {
       dyn_off[i] = 0;  // shared zero window (see BeginFrame)
       continue;
@@ -834,6 +837,14 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
   if (indexed)
     g_ring.ib_offset = ioff + index_bytes;
   g_frame.draws++;
+  for (uint32_t i = 0; i < g_region.cur_mrt_count; i++) {
+    if (!g_region.cur_mrt[i])
+      continue;
+    auto& rt = g_rts[g_region.cur_mrt[i]];
+    rt.last_vs = d.vs_addr;
+    rt.last_ps = d.ps_addr;
+    rt.last_cbuf_mask = cbuf_mask;
+  }
   if (g_region.cur_rt) {
     auto& rt = g_rts[g_region.cur_rt];
     if (++rt.draws > g_region.busiest_rt_draws) {

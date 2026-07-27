@@ -135,13 +135,30 @@ uint32_t SmrdLoadCount(uint32_t op) {
   return op == 0x08 ? 1 : op == 0x09 ? 2 : op == 0x0a ? 4 : op == 0x0b ? 8 : 16;
 }
 
+// Dwords moved by any SMRD scalar load: s_load_dword{,x2,x4,x8,x16} (op
+// 0x00..0x04, addressed through a 2-dword flat pointer) as well as the
+// s_buffer_load family. Both feed the same UBO window; only the descriptor
+// they are addressed through differs.
+uint32_t SmrdDwordCount(uint32_t op) {
+  return op <= 0x04 ? (1u << op) : SmrdLoadCount(op);
+}
+
+// Cbuffer bindings are keyed by the SGPR the descriptor is read from. The same
+// SGPR can hold a flat pointer for one load and a V# for another (user data
+// s[0:1] as a table pointer, s[0:3] as a buffer), so the descriptor kind is
+// part of the key -- otherwise whichever load came first would capture the
+// other's window.
+uint32_t CbufBindKey(uint32_t base_sgpr, bool pointer) {
+  return base_sgpr | (pointer ? 0x100u : 0u);
+}
+
 void EmitCbufSmrd(Translator& t,
                   const Inst& inst,
                   const std::unordered_map<uint32_t, uint32_t>& bindings) {
-  const uint32_t w = inst.raw[0], n = SmrdLoadCount(inst.opcode);
+  const uint32_t w = inst.raw[0], n = SmrdDwordCount(inst.opcode);
   const uint32_t sdst = (w >> 15) & 0x7F, base_sgpr = ((w >> 9) & 0x3F) * 2;
   const bool imm = (w >> 8) & 1;
-  const auto it = bindings.find(base_sgpr);
+  const auto it = bindings.find(CbufBindKey(base_sgpr, inst.opcode <= 0x04));
   if (!n || it == bindings.end())
     return;
   const uint32_t off = w & 0xFF;
@@ -169,18 +186,26 @@ bool PlanCbufs(const Program& program,
     index++;
     if (inst.enc != Enc::kSmrd)
       continue;
-    const uint32_t n = SmrdLoadCount(inst.opcode);
+    const uint32_t n = SmrdDwordCount(inst.opcode);
     if (!n)
       continue;
     const uint32_t w = inst.raw[0], base_sgpr = ((w >> 9) & 0x3F) * 2;
-    if (base_sgpr + 3 >= 16)
+    // A V# must sit in user data to be decodable at draw time; a flat pointer
+    // may live in any SGPR pair, because draw-time scalar evaluation walks the
+    // s_load chain that produced it.
+    const bool pointer = inst.opcode <= 0x04;
+    if (!pointer && base_sgpr + 3 >= 16)
       continue;
-    const auto [it, inserted] =
-        bindings.emplace(base_sgpr, first_binding + cbufs.size());
+    const auto [it, inserted] = bindings.emplace(
+        CbufBindKey(base_sgpr, pointer), first_binding + cbufs.size());
     if (inserted) {
       if (it->second >= 8)
         return false;
-      cbufs.push_back({it->second, base_sgpr, 0});
+      ShaderCbuf cb{};
+      cb.binding = it->second;
+      cb.ud_sgpr = base_sgpr;
+      cb.pointer = pointer;
+      cbufs.push_back(cb);
     }
     const uint32_t off = w & 0xFF;
     const uint32_t end =

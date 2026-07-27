@@ -57,6 +57,13 @@ struct ShaderCbuf {
   uint32_t chain_len = 0;
   uint32_t chain_off[3] = {};
   uint32_t use_pc = ~0u;  // RDNA consumer used for draw-time scalar replay
+  // The descriptor is a 2-dword flat pointer read with s_load, not a 4-dword
+  // V# read with s_buffer_load. Engines that keep their constants in a shader
+  // resource table (Shadow of the Colossus loads every constant as
+  // s_load_dword from a table pointer chained off user data) produce these;
+  // ud_sgpr is then the SGPR pair holding the pointer, which draw-time scalar
+  // evaluation resolves, and num_dwords alone gives the window size.
+  bool pointer = false;
 };
 
 // A texture the PS references (MIMG). Bound as a combined image sampler at
@@ -128,5 +135,12 @@ RecompiledCs RecompileCompute(const uint32_t* cs_code,
                               uint32_t user_sgpr,
                               uint32_t tgid_enable,
                               uint32_t lds_dwords);
+
+// Print the instruction listing of the shader at a guest code address, tagged
+// with `tag`. Diagnostic only: a renderer that has caught a target in a bad
+// state (a NaN-poisoned attachment) knows the producing shader's address but
+// not how to decode it, and guest shader addresses move between runs, so the
+// listing has to be produced in the run that observed the problem.
+void DisassembleAt(uint64_t code_address, const char* tag);
 
 }  // namespace gpu::gcn

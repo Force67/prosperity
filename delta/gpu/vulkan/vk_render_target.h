@@ -54,6 +54,15 @@ struct RTarget {
   VkClearColorValue clear_value{{0.0f, 0.0f, 0.0f, 0.0f}};
   bool ever_rendered =
       false;  // false until first real render (then loadOp can LOAD)
+  // Guest code addresses of the last recompiled pair that rendered into this
+  // target. Render-target guest bases move between runs, so a poisoned target
+  // can only be traced back to its producer within the run that observed it;
+  // the reporting path (DELTA_GPU_RTSTAT) prints these.
+  uint64_t last_vs = 0, last_ps = 0;
+  // Bit i: cbuffer binding i of that draw resolved to readable guest memory.
+  // Bindings that do not resolve are bound to a zero window, which is what
+  // turns a tonemap's constants into 0 and its output into NaN.
+  uint32_t last_cbuf_mask = 0;
 };
 
 extern std::unordered_map<uint64_t, RTarget>& g_rts;

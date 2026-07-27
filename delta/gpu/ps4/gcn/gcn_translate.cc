@@ -8,6 +8,7 @@
 
 #include "gpu/ps4/gcn/gcn_translate.h"
 
+#include "gpu/ps4/gcn/gcn_decode.h"
 #include "gpu/ps4/gcn/spirv/gcn_spirv.h"
 
 namespace gpu::gcn {
@@ -36,6 +37,14 @@ RecompiledCs RecompileCompute(const uint32_t* cs_code,
   RecompileComputeSpirv(cs_code, num_thread_x, num_thread_y, num_thread_z,
                         user_sgpr, tgid_enable, lds_dwords, r);
   return r;
+}
+
+void DisassembleAt(uint64_t code_address, const char* tag) {
+  if (!code_address)
+    return;
+  const auto* code = reinterpret_cast<const uint32_t*>(code_address);
+  const uint32_t words = CodeLength(code, 4096);
+  Disassemble(code, words ? words : 512, tag);
 }
 
 }  // namespace gpu::gcn
