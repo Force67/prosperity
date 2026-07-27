@@ -518,17 +518,14 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
         if (multi_storage[i]) {
           auto& dst = g_rts[multi_storage[i]];
           if (dst.layout != VK_IMAGE_LAYOUT_GENERAL) {
-            VkAccessFlags src_access =
-                dst.layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
-                    ? VK_ACCESS_SHADER_READ_BIT
-                : dst.layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
-                    ? VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
-                : dst.layout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
-                    ? VK_ACCESS_TRANSFER_READ_BIT
-                    : 0;
+            // Storage images are read *and* written (imageLoad/imageStore), so
+            // the destination access needs both bits, and the source access
+            // must cover every layout an RT can arrive from (a hand-rolled
+            // subset missed TRANSFER_DST, leaving the transition unordered
+            // against the clear that put it there).
             ImageBarrier(g_frame.cmd, dst.image, dst.layout,
-                         VK_IMAGE_LAYOUT_GENERAL, src_access,
-                         VK_ACCESS_SHADER_WRITE_BIT);
+                         VK_IMAGE_LAYOUT_GENERAL, ColorImageAccess(dst.layout),
+                         VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
             dst.layout = VK_IMAGE_LAYOUT_GENERAL;
           }
         } else if (multi_color[i]) {
