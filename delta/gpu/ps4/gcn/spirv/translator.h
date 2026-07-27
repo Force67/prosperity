@@ -223,6 +223,7 @@ struct Translator {
                    spv::StorageClass::Uniform);
     m.Decorate(v, spv::Decoration::DescriptorSet, {1});
     m.Decorate(v, spv::Decoration::Binding, {binding});
+    m.Name(v, "cbuf" + std::to_string(binding));
     cbuf_vars[binding] = v;
     return v;
   }

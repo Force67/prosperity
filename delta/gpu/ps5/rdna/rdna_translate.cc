@@ -1438,6 +1438,7 @@ bool TranslateVs(const Program& program,
         t.m.Variable(t.m.TypePointer(spv::StorageClass::Input, comp_ty),
                      spv::StorageClass::Input);
     t.m.Decorate(in_var, spv::Decoration::Location, {a.semantic});
+    t.m.Name(in_var, "v_attr" + std::to_string(a.semantic));
     iface.push_back(in_var);
     const Id val = t.m.Load(comp_ty, in_var);
     for (uint32_t c = 0; c < a.num_comps; c++) {

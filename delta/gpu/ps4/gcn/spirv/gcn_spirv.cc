@@ -72,6 +72,7 @@ Id PsInputVar(Translator& t, StageContext& sc, uint32_t attr) {
   t.m.Decorate(v, spv::Decoration::Location, {attr});
   if (sc.flat_attrs && sc.flat_attrs->count(attr))
     t.m.Decorate(v, spv::Decoration::Flat);
+  t.m.Name(v, "in_attr" + std::to_string(attr));
   sc.iface->push_back(v);
   sc.in_vars[attr] = v;
   return v;
@@ -86,6 +87,7 @@ Id VsParamOut(Translator& t, StageContext& sc, uint32_t p) {
   t.m.Decorate(v, spv::Decoration::Location, {p});
   if (sc.flat_attrs && sc.flat_attrs->count(p))
     t.m.Decorate(v, spv::Decoration::Flat);
+  t.m.Name(v, "out_param" + std::to_string(p));
   sc.iface->push_back(v);
   sc.param_outs[p] = v;
   return v;
@@ -99,6 +101,7 @@ Id PsColorOut(Translator& t, StageContext& sc, uint32_t target) {
   const Id v = t.m.Variable(t.m.TypePointer(spv::StorageClass::Output, t.t_v4),
                             spv::StorageClass::Output);
   t.m.Decorate(v, spv::Decoration::Location, {target});
+  t.m.Name(v, "mrt" + std::to_string(target));
   sc.iface->push_back(v);
   sc.color_outs[target] = v;
   sc.r->ps_mrt_mask |= static_cast<uint8_t>(1u << target);
@@ -596,8 +599,11 @@ Id DeclareUserData(Translator& t) {
   const Id block = t.m.TypeStruct({words});
   t.m.Decorate(block, spv::Decoration::Block);
   t.m.MemberDecorate(block, 0, spv::Decoration::Offset, {0});
-  return t.m.Variable(t.m.TypePointer(spv::StorageClass::PushConstant, block),
-                      spv::StorageClass::PushConstant);
+  const Id v =
+      t.m.Variable(t.m.TypePointer(spv::StorageClass::PushConstant, block),
+                   spv::StorageClass::PushConstant);
+  t.m.Name(v, "user_data");
+  return v;
 }
 
 void SeedUserData(Translator& t, Id user_data) {
@@ -705,6 +711,7 @@ bool TranslateVs(const Program& program,
         t.m.Variable(t.m.TypePointer(spv::StorageClass::Input, comp_ty),
                      spv::StorageClass::Input);
     t.m.Decorate(in_var, spv::Decoration::Location, {a.semantic});
+    t.m.Name(in_var, "v_attr" + std::to_string(a.semantic));
     iface.push_back(in_var);
     const Id val = t.m.Load(comp_ty, in_var);
     // DELTA_GPU_VSFLIPZ: negate the z of the position attribute (semantic 0,
@@ -903,6 +910,7 @@ bool TranslateCs(const Program& program,
     const Id v = t.m.Variable(p_buf, spv::StorageClass::StorageBuffer);
     t.m.Decorate(v, spv::Decoration::DescriptorSet, {0});
     t.m.Decorate(v, spv::Decoration::Binding, {res.binding});
+    t.m.Name(v, "buf" + std::to_string(res.binding));
     sc.cs_ssbo[res.binding] = v;
   }
 
@@ -925,6 +933,7 @@ bool TranslateCs(const Program& program,
   const Id pc_var =
       t.m.Variable(t.m.TypePointer(spv::StorageClass::PushConstant, t_pc),
                    spv::StorageClass::PushConstant);
+  t.m.Name(pc_var, "user_data");
 
   // Builtins: gl_LocalInvocationID (-> v0..v2) and gl_WorkGroupID (-> the
   // SGPRs after the user data, per tgid_enable).
