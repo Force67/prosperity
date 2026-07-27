@@ -397,16 +397,25 @@ uint8_t *gcDevicePs5::map(void *addr, size_t len, uint32_t /*prot*/, uint32_t fl
       static_cast<uint64_t>(offset) + len > dmemBackingSize())
     return reinterpret_cast<uint8_t *>(-1);
   uint8_t *va = static_cast<uint8_t *>(addr);
-  bool fixed = (flags & mFlags::fixed) != 0;
-  if (!va) {
-    va = allocLowGuest(len);
-    if (!va)
-      return reinterpret_cast<uint8_t *>(-1);
-    fixed = true;
+  const bool fixed = (flags & mFlags::fixed) != 0;
+  void *p = MAP_FAILED;
+  // Same hint handling as dmaDevicePs5::map: never let the host kernel choose the
+  // address, or the guest gets a merely page-aligned ring buffer.
+  if (va && !fixed) {
+    p = ::mmap(va, len, PROT_READ | PROT_WRITE,
+               MAP_SHARED | MAP_FIXED_NOREPLACE, fd, static_cast<off_t>(offset));
+    if (p != MAP_FAILED && p != va) {
+      ::munmap(p, len);
+      p = MAP_FAILED;
+    }
   }
-  int mflags = MAP_SHARED | (fixed ? MAP_FIXED : 0);
-  void *p = ::mmap(va, len, PROT_READ | PROT_WRITE, mflags, fd,
-                   static_cast<off_t>(offset));
+  if (p == MAP_FAILED) {
+    uint8_t *base = (va && fixed) ? va : allocLowGuest(len);
+    if (!base)
+      return reinterpret_cast<uint8_t *>(-1);
+    p = ::mmap(base, len, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd,
+               static_cast<off_t>(offset));
+  }
   if (p == MAP_FAILED)
     return reinterpret_cast<uint8_t *>(-1);
   static const bool trace = std::getenv("DELTA_GC_TRACE") != nullptr ||
