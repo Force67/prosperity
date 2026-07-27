@@ -123,8 +123,20 @@ int PS4ABI sys_open(const char *path, uint32_t flags, uint32_t mode) {
   }
 
   // Directory: games open one (O_DIRECTORY) then getdents it to find assets.
-  // Gated on the flag so a normal file open doesn't pay the full listing scan.
-  if (flags & O_DIRECTORY) {
+  // BSD also allows a plain read-only open of a directory followed by getdents,
+  // and the flag the guest sets is FreeBSD's, not the host's, so the bit test
+  // alone misses those. Confirm with a stat when it is absent: a read open that
+  // turns out to be a directory still has to yield a dirDevice, else getdents
+  // reports ENOTDIR and a caller walking d_reclen never advances -- Dead Cells
+  // enumerates /savedata0 this way and spins forever on its loading screen.
+  // Write opens are never directories, so they skip the stat.
+  bool asDir = (flags & O_DIRECTORY) != 0;
+  if (!asDir && (flags & O_ACCMODE) == O_RDONLY && !(flags & O_CREAT)) {
+    int64_t dsize = 0;
+    bool isDir = false;
+    asDir = vfs::stat(path, dsize, isDir) && isDir;
+  }
+  if (asDir) {
     std::vector<vfs::DirEntry> entries;
     if (vfs::listDir(path, entries)) {
       auto *dir = new dirDevice(proc::getActive(), std::move(entries));
