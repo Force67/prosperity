@@ -584,6 +584,46 @@ void PackTexPixels(uint8_t* linear,
     }
     linear_offset += layer_bytes * layout.layers;
   }
+  // DELTA_GPU_TEXDUMP_UPLOAD: dump the post-detile pixels that Vulkan
+  // receives. This differs from DELTA_GPU_TEXDUMP, which inspects raw guest
+  // memory and is intentionally useful for spotting tiling rather than
+  // validating the detiler.
+  static const bool kDumpUpload =
+      std::getenv("DELTA_GPU_TEXDUMP_UPLOAD") != nullptr;
+  static int dump_upload_count = 0;
+  if (kDumpUpload && dump_upload_count < 32 && elem == 4 && texel_w >= 128 &&
+      texel_h >= 128) {
+    uint64_t rgb_nonzero = 0, alpha_nonzero = 0;
+    const uint64_t pixels = static_cast<uint64_t>(texel_w) * texel_h;
+    for (uint64_t i = 0; i < pixels; i++) {
+      const uint8_t* p = linear + i * 4;
+      if (p[0] || p[1] || p[2])
+        rgb_nonzero++;
+      if (p[3])
+        alpha_nonzero++;
+    }
+    char path[256];
+    std::snprintf(path, sizeof(path), "%s/tex_upload_%02d_%#lx_%ux%u.ppm",
+                  DumpDir(), dump_upload_count, (unsigned long)base, texel_w,
+                  texel_h);
+    FILE* file = std::fopen(path, "wb");
+    if (file) {
+      std::fprintf(file, "P6\n%u %u\n255\n", texel_w, texel_h);
+      for (uint64_t i = 0; i < pixels; i++) {
+        const uint8_t* p = linear + i * 4;
+        std::fputc(p[0], file);
+        std::fputc(p[1], file);
+        std::fputc(p[2], file);
+      }
+      std::fclose(file);
+    }
+    std::fprintf(stderr,
+                 "[texupload] %d base=%#lx %ux%u rgb=%lu alpha=%lu/%lu -> %s\n",
+                 dump_upload_count, (unsigned long)base, texel_w, texel_h,
+                 (unsigned long)rgb_nonzero, (unsigned long)alpha_nonzero,
+                 (unsigned long)pixels, path);
+    dump_upload_count++;
+  }
 }
 
 // One-time initialization upload used before frame recording starts.
@@ -972,8 +1012,8 @@ VkDescriptorSet GetTexture(uint64_t base,
     }
     image_entry.allocation_size = mr.size;
     NameObject(VK_OBJECT_TYPE_IMAGE, (uint64_t)image_entry.image,
-               "tex %#llx %ux%u mips=%u layers=%u",
-               (unsigned long long)base, w, h, mip_levels, layers);
+               "tex %#llx %ux%u mips=%u layers=%u", (unsigned long long)base, w,
+               h, mip_levels, layers);
     image_it = g_tex_images.emplace(key.image, image_entry).first;
     g_tex_image_bytes += mr.size;
     RegisterTexturePages(key.image, footprint);

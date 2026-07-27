@@ -330,7 +330,7 @@ struct ScalarEval {
 
 // Per-program analysis reused across draws: the MIMG binding plan plus the
 // subset of instructions the scalar walk actually consumes (descriptor-chain
-// s_movs, SMRD loads, MIMG uses). TrackTextures/ResolveCbuffers run once per
+// scalar ops, SMRD loads, MIMG/MUBUF uses). The resolvers run once per
 // draw on shaders that are mostly VALU code, so stepping only this subset --
 // and planning bindings once instead of per draw -- removes the bulk of the
 // per-draw analysis cost. Keyed by the Program object; the cached shared_ptr
@@ -361,9 +361,10 @@ const ScalarPassInfo& CachedScalarInfo(
   for (const Inst& inst : *program) {
     if (!reachable[index++])
       continue;
-    const bool scalar_move =
+    const bool scalar_op =
         inst.enc == Enc::kSop1 && (inst.opcode == 0x03 || inst.opcode == 0x04);
-    if (scalar_move || inst.enc == Enc::kSmrd || inst.enc == Enc::kMimg)
+    if (scalar_op || inst.enc == Enc::kSop2 || inst.enc == Enc::kSmrd ||
+        inst.enc == Enc::kMimg || inst.enc == Enc::kMubuf)
       e.info.insts.push_back(inst);
   }
   return cache.emplace(program.get(), std::move(e)).first->second.info;
@@ -672,6 +673,45 @@ std::unordered_map<uint32_t, VBuffer> ResolveCbuffers(
       std::fprintf(stderr, "[eud] cbuf s%u -> base=%#lx stride=%u nrec=%u\n",
                    base, static_cast<unsigned long>(v.base), v.stride,
                    v.num_records);
+  }
+  return result;
+}
+
+std::vector<VBuffer> ResolveDirectVertexBuffers(
+    const std::shared_ptr<const Program>& program,
+    const std::vector<ShaderAttr>& attrs,
+    const uint32_t* user_data) {
+  std::vector<VBuffer> result(attrs.size());
+  if (!program || !user_data || attrs.empty())
+    return result;
+
+  ScalarEval eval(user_data);
+  for (const Inst& inst : CachedScalarInfo(program).insts) {
+    eval.Step(inst);
+    if (inst.enc != Enc::kMubuf)
+      continue;
+    for (size_t i = 0; i < attrs.size(); i++) {
+      const ShaderAttr& attr = attrs[i];
+      if (!attr.direct_fetch || attr.use_pc != inst.pc ||
+          !eval.AllKnown(attr.table_sgpr, 4))
+        continue;
+      result[i] = DecodeVBuffer(&eval.sgpr[attr.table_sgpr]);
+      if (eval.trace) {
+        uint32_t data[3] = {};
+        if (GuestRange(result[i].base, sizeof(data)))
+          std::memcpy(data, reinterpret_cast<const void*>(result[i].base),
+                      sizeof(data));
+        std::fprintf(stderr,
+                     "[eud] vattr%zu pc=%#x s%u -> base=%#lx stride=%u "
+                     "nrec=%u V#=%08x/%08x/%08x/%08x data=%08x/%08x/%08x\n",
+                     i, inst.pc, attr.table_sgpr,
+                     static_cast<unsigned long>(result[i].base),
+                     result[i].stride, result[i].num_records,
+                     eval.sgpr[attr.table_sgpr], eval.sgpr[attr.table_sgpr + 1],
+                     eval.sgpr[attr.table_sgpr + 2],
+                     eval.sgpr[attr.table_sgpr + 3], data[0], data[1], data[2]);
+      }
+    }
   }
   return result;
 }

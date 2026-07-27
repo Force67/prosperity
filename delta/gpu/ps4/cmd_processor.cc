@@ -488,18 +488,21 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
       recomp_status = rc.ok ? "bad-attrs" : "rejected";
       if (rc.ok) {
         const uint32_t* vud2 = &g_regs[mmSPI_SHADER_USER_DATA_VS_0];
+        const auto vs_prog = gcn::CachedProgram(vs_a, 4096);
+        const auto direct_vbs =
+            gcn::ResolveDirectVertexBuffers(vs_prog, rc.attrs, vud2);
         gcn::VBuffer attr_vbs[8];
         uint32_t attr_count = 0;
         bool good = true;
         for (size_t i = 0; i < rc.attrs.size() && i < 8; i++) {
           auto& a = rc.attrs[i];
-          if (a.table_sgpr + (a.inline_descriptor ? 3 : 1) >= 16) {
+          if (!a.direct_fetch && a.table_sgpr + 1 >= 16) {
             good = false;
             break;
           }
           gcn::VBuffer vb;
-          if (a.inline_descriptor) {
-            vb = gcn::DecodeVBuffer(&vud2[a.table_sgpr]);
+          if (a.direct_fetch) {
+            vb = direct_vbs[i];
           } else {
             uint64_t tbl =
                 (static_cast<uint64_t>(vud2[a.table_sgpr + 1] & 0xFFFF) << 32) |
@@ -643,8 +646,7 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
               }
             };
         if (good) {
-          resolve_cbufs(rc.vs_cbufs, vud2, gcn::CachedProgram(vs_a, 4096),
-                        true);
+          resolve_cbufs(rc.vs_cbufs, vud2, vs_prog, true);
           if (ps_a >= 0x1000000000ull && ps_a < 0x20000000000ull)
             resolve_cbufs(rc.ps_cbufs, &g_regs[mmSPI_SHADER_USER_DATA_PS_0],
                           ps_prog ? ps_prog : gcn::CachedProgram(ps_a, 4096),
@@ -785,6 +787,9 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
     // pin why textured draws render black (degenerate MVP vs UV=0 vs blend).
     static const bool kSpriteDump =
         std::getenv("DELTA_GPU_SPRITEDUMP") != nullptr;
+    static const bool kSpriteDis =
+        std::getenv("DELTA_GPU_SPRITEDIS") != nullptr;
+    static bool sprite_dis_done = false;
     static int sd_n = 0;
     if (kSpriteDump && d.recomp && !d.recomp->ps_texs.empty() &&
         d.vertex_data && sd_n < 12) {
@@ -793,25 +798,85 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
       std::fprintf(
           stderr,
           "[sprite] tex=%#lx %ux%u tiling=%u stride=%u num_vattrs=%u rt=%#lx "
-          "%ux%u "
-          "blendCtl=%#x mvp=[%.3f %.3f %.3f %.3f / %.3f %.3f %.3f %.3f / ... / "
+          "%ux%u VS=%#lx PS=%#lx blendCtl=%#x depth=%#lx/%d/%d/%u "
+          "mvp=[%.3f %.3f %.3f %.3f / %.3f %.3f %.3f %.3f / ... / "
           "%.3f %.3f %.3f %.3f]\n",
           (unsigned long)d.tex_base, d.tex_w, d.tex_h, d.tex_tiling,
           d.vertex_stride, d.num_vattrs, (unsigned long)d.rt_base, d.rt_w,
-          d.rt_h, d.blend_control, m[0], m[1], m[2], m[3], m[4], m[5], m[6],
-          m[7], m[12], m[13], m[14], m[15]);
-      const auto* vb = static_cast<const uint8_t*>(d.vertex_data);
-      for (uint32_t a = 0; a < d.num_vattrs && a < 4; a++) {
-        const float* f =
-            reinterpret_cast<const float*>(vb + d.vattrs[a].offset);
+          d.rt_h, (unsigned long)d.vs_addr, (unsigned long)d.ps_addr,
+          d.blend_control, (unsigned long)d.depth_base, d.depth_test_enable,
+          d.depth_write_enable, d.depth_func, m[0], m[1], m[2], m[3], m[4],
+          m[5], m[6], m[7], m[12], m[13], m[14], m[15]);
+      if (kSpriteDis && !sprite_dis_done) {
+        sprite_dis_done = true;
+        const uint32_t* ps = reinterpret_cast<const uint32_t*>(d.ps_addr);
+        const uint32_t words = gcn::CodeLength(ps, 4096);
+        gcn::Disassemble(ps, words ? words : 512, "sprite.PS");
+        std::fprintf(stderr, "[sprite]   PS user data:");
+        for (uint32_t i = 0; i < 16; i++)
+          std::fprintf(stderr, " %08x", d.ps_user_data[i]);
+        std::fprintf(stderr, "\n");
+        for (uint32_t i = 0; i < d.num_texs; i++) {
+          const auto& tex = d.texs[i];
+          std::fprintf(stderr,
+                       "[sprite]   tex%u=%#lx %ux%u pitch=%u dfmt=%u nfmt=%u "
+                       "tiling=%u sampler=%08x/%08x/%08x/%08x\n",
+                       i, (unsigned long)tex.base, tex.w, tex.h, tex.pitch,
+                       tex.dfmt, tex.nfmt, tex.tiling, tex.sampler[0],
+                       tex.sampler[1], tex.sampler[2], tex.sampler[3]);
+        }
+        for (const auto& inst : *gcn::CachedProgram(d.ps_addr, 4096)) {
+          const uint32_t w = inst.raw[0], w1 = inst.raw[1];
+          if (inst.enc == gcn::Enc::kVintrp) {
+            std::fprintf(stderr,
+                         "[sprite]   interp pc=%#x op=%u attr=%u chan=%u v%u\n",
+                         inst.pc, (w >> 16) & 3, (w >> 10) & 0x3f, (w >> 8) & 3,
+                         (w >> 18) & 0xff);
+          } else if (inst.enc == gcn::Enc::kMimg) {
+            std::fprintf(stderr,
+                         "[sprite]   image pc=%#x op=%#x dmask=%#x vaddr=v%u "
+                         "vdata=v%u srsrc=s%u ssamp=s%u da=%u\n",
+                         inst.pc, inst.opcode, (w >> 8) & 0xf, w1 & 0xff,
+                         (w1 >> 8) & 0xff, ((w1 >> 16) & 0x1f) * 4,
+                         ((w1 >> 21) & 0x1f) * 4, (w >> 14) & 1);
+          } else if (inst.enc == gcn::Enc::kExp) {
+            std::fprintf(stderr,
+                         "[sprite]   export pc=%#x target=%u en=%#x compr=%u "
+                         "v=[%u %u %u %u]\n",
+                         inst.pc, (w >> 4) & 0x3f, w & 0xf, (w >> 10) & 1,
+                         w1 & 0xff, (w1 >> 8) & 0xff, (w1 >> 16) & 0xff,
+                         (w1 >> 24) & 0xff);
+          }
+        }
+      }
+      for (uint32_t a = 0; a < d.num_vattrs && a < 8; a++) {
+        const auto& attr = d.vattrs[a];
+        if (attr.binding >= d.num_vbufs || !d.vbufs[attr.binding].data)
+          continue;
+        const auto& binding = d.vbufs[attr.binding];
         std::fprintf(stderr,
-                     "[sprite]   attr%u loc=%u off=%u nc=%u dfmt=%u v0=[%.4f "
-                     "%.4f %.4f %.4f]\n",
-                     a, d.vattrs[a].location, d.vattrs[a].offset,
-                     d.vattrs[a].num_comps, d.vattrs[a].dfmt, f[0],
-                     d.vattrs[a].num_comps > 1 ? f[1] : 0.f,
-                     d.vattrs[a].num_comps > 2 ? f[2] : 0.f,
-                     d.vattrs[a].num_comps > 3 ? f[3] : 0.f);
+                     "[sprite]   attr%u loc=%u bind=%u off=%u stride=%u nc=%u "
+                     "dfmt=%u nfmt=%u",
+                     a, attr.location, attr.binding, attr.offset,
+                     binding.stride, attr.num_comps, attr.dfmt, attr.nfmt);
+        const uint32_t vertices = std::min(d.vertex_count, 3u);
+        for (uint32_t v = 0; v < vertices; v++) {
+          const uint8_t* raw = static_cast<const uint8_t*>(binding.data) +
+                               static_cast<size_t>(v) * binding.stride +
+                               attr.offset;
+          if (attr.dfmt == 10) {
+            std::fprintf(stderr, " v%u=[%.3f %.3f %.3f %.3f]", v,
+                         raw[0] / 255.f, raw[1] / 255.f, raw[2] / 255.f,
+                         raw[3] / 255.f);
+          } else {
+            const float* f = reinterpret_cast<const float*>(raw);
+            std::fprintf(stderr, " v%u=[%.4f %.4f %.4f %.4f]", v, f[0],
+                         attr.num_comps > 1 ? f[1] : 0.f,
+                         attr.num_comps > 2 ? f[2] : 0.f,
+                         attr.num_comps > 3 ? f[3] : 0.f);
+          }
+        }
+        std::fprintf(stderr, "\n");
       }
     }
     // DELTA_GPU_GEOMDUMP: dump the full state of high-index (3D level geometry)
@@ -1724,6 +1789,7 @@ void SubmitDcb(const void* dcb, uint32_t size_bytes) {
             auto mem_ok = [](uint64_t a) {
               return a >= 0x1000000ull && a < 0x20000000000ull;
             };
+            bool copied = false;
             if (!kNoCopy && src_mem && dst_mem && bytes &&
                 bytes <= 0x1000000u && src != dst && mem_ok(src) &&
                 mem_ok(src + bytes) && mem_ok(dst) && mem_ok(dst + bytes)) {
@@ -1733,16 +1799,23 @@ void SubmitDcb(const void* dcb, uint32_t size_bytes) {
               rhi::FlushCsWrites(rhi::DefaultRenderer());
               std::memcpy(reinterpret_cast<void*>(dst),
                           reinterpret_cast<const void*>(src), bytes);
+              copied = true;
             }
             if (std::getenv("DELTA_GPU_DMATRACE")) {
               static int dmn = 0;
-              if (dmn++ < 200)
+              // Shader-prefetch packets target a low register address and
+              // otherwise consume the trace cap before uploads begin. Keep
+              // only real guest destinations and immediate fills, and report
+              // what was actually done.
+              if (dmn < 200 && (src_sel == 2 || mem_ok(dst))) {
+                dmn++;
                 std::fprintf(stderr,
-                             "[dma] ctrl=%#x srcSel=%u dstSel=%u src=%#lx "
-                             "dst=%#lx bytes=%u%s\n",
-                             ctrl, src_sel, dst_sel, (unsigned long)src,
-                             (unsigned long)dst, bytes,
-                             (src_mem && dst_mem) ? " COPIED" : "");
+                             "[dma] ctrl=%#x cmd=%#x srcSel=%u dstSel=%u "
+                             "src/data=%#lx dst=%#lx bytes=%u %s\n",
+                             ctrl, body[5] & ~0x1fffffu, src_sel, dst_sel,
+                             (unsigned long)src, (unsigned long)dst, bytes,
+                             copied ? "copied" : "ignored");
+              }
             }
           }
           break;

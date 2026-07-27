@@ -26,14 +26,14 @@ inline constexpr uint32_t kMaxCsResources = 32;
 struct ShaderAttr {
   uint32_t location = 0;        // GLSL `in` location == semantic index
   uint32_t num_comps = 0;       // 1..4 (from the buffer_load_format opcode)
-  uint32_t table_sgpr = 0;      // VS user-data dword of the vertex-table ptr
+  uint32_t table_sgpr = 0;      // fetch-table pointer or direct V# base SGPR
   uint32_t vbuf_dword_off = 0;  // dword offset of this attr's V# in the table
-  bool inline_descriptor = false;  // V# lives directly in VS user data
+  bool direct_fetch = false;    // MUBUF is in the main VS, not a fetch shader
   // gfx10 unified buffer format carried by a TYPED fetch
   // (tbuffer_load_format_*), which overrides the V#'s own format. 0 = untyped
   // fetch, use the V#.
   uint32_t inst_format = 0;
-  uint32_t use_pc = ~0u;  // inline RDNA fetch consumer for scalar replay
+  uint32_t use_pc = ~0u;  // direct/inline fetch MUBUF pc for scalar replay
 };
 
 // Set-1 UBO bindings shared by VS + PS. A shader pair whose constant buffers

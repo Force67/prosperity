@@ -131,7 +131,7 @@ namespace {
 // semantic order.
 struct FetchAttr {
   uint32_t semantic, num_comps, dest_vgpr, table_sgpr, dword_off;
-  bool inline_descriptor = false;
+  bool direct_fetch = false;
   uint32_t pc = ~0u;
 };
 
@@ -631,7 +631,7 @@ bool TranslateVs(const Program& program,
     const bool offen = (w >> 12) & 1, idxen = (w >> 13) & 1;
     const uint32_t srsrc = ((w1 >> 16) & 0x1F) * 4;
     const uint32_t soffset = (w1 >> 24) & 0xFF;
-    if (!idxen || offen || soffset != 128 || srsrc + 3 >= 16)
+    if (!idxen || offen || soffset != 128)
       continue;
     direct_attrs.push_back({static_cast<uint32_t>(direct_attrs.size()),
                             inst.opcode + 1, (w1 >> 8) & 0xFF, srsrc, 0, true,
@@ -655,7 +655,7 @@ bool TranslateVs(const Program& program,
   sc.pos_out = pos_out;
   sc.flat_attrs = &flat_attrs;
   for (const FetchAttr& attr : attrs)
-    if (attr.inline_descriptor)
+    if (attr.direct_fetch)
       sc.direct_vfetch.insert(attr.pc);
   if (UsesDsSwizzle(program, reachable.data()))
     EnableDsSwizzle(t, sc, iface);
@@ -724,7 +724,7 @@ bool TranslateVs(const Program& program,
       t.SetVgF(a.dest_vgpr + c, comp);
     }
     r.attrs.push_back({a.semantic, a.num_comps, a.table_sgpr, a.dword_off,
-                       a.inline_descriptor});
+                       a.direct_fetch, 0, a.pc});
   }
 
   if (!PlanCbufs(program, 0, r.vs_cbufs, sc.cbuf_bind, reachable.data()))
