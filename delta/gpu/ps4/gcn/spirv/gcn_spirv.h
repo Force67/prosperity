@@ -5,7 +5,7 @@
  *
  * Direct GCN -> SPIR-V backend entry points. Emits SPIR-V via spv_emit and
  * cleans it up with a SPIRV-Tools optimize pass (spv_post). Only
- * gcn_translate.cpp calls these; everything else goes through the
+ * gcn_translate.cc calls these; everything else goes through the
  * gcn_translate.h facade.
  */
 

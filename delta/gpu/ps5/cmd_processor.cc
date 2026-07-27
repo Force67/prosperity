@@ -8,7 +8,7 @@
  * (agc_regs.h) and the RDNA2 shader ISA (gpu/ps5/rdna) -- both new; the Vulkan
  * renderer (gpu/rhi) and the DrawInfo contract are shared with the PS4 path.
  *
- * The register-latch model mirrors gpu/ps4/cmd_processor.cpp: SET_*_REG packets
+ * The register-latch model mirrors gpu/ps4/cmd_processor.cc: SET_*_REG packets
  * write into a flat gfx10.3 register file (masking the gfx10 selector bits), a
  * draw packet snapshots that state into gpu::rhi::DrawInfo, the VS(from the
  * merged ES/GS NGG block)/PS pair is recompiled (cached), and the shared
@@ -150,7 +150,7 @@ VBuffer DecodeVBuffer(const uint32_t* p) {
 // address with an implausible stride/record count (e.g. a depth-only pre-pass
 // with an inactive vertex slot decoded stride=14915 nrec=480622080, which then
 // segfaulted reading the vertex ring). Mirrors the PS4 fetch-shader sanity gate
-// (gpu/ps4/gcn/gcn_resource.cpp).
+// (gpu/ps4/gcn/gcn_resource.cc).
 bool PlausibleVb(const VBuffer& v) {
   return v.stride && v.stride <= 256 && v.num_records &&
          v.num_records <= 0x100000;
@@ -934,7 +934,7 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
   d.color_control = g_regs[mmCB_COLOR_CONTROL];
 
   // Depth/stencil (gfx10 Z base = (WRITE_BASE | WRITE_BASE_HI<<32) << 8).
-  // Mirrors the PS4 path (gpu/ps4/cmd_processor.cpp): DELTA_GPU_NODEPTH is the
+  // Mirrors the PS4 path (gpu/ps4/cmd_processor.cc): DELTA_GPU_NODEPTH is the
   // shared kill switch, otherwise the title's own DB_Z_INFO/DB_DEPTH_CONTROL
   // state decides. 2D titles (Isaac) leave DB_Z_INFO's format field invalid so
   // depth_valid stays false and no depth attachment binds (unchanged 2D path).

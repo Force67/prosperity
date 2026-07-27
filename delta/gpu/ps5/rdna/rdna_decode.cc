@@ -3,7 +3,7 @@
  *
  * RDNA2 (gfx10.3) instruction decoder. See rdna_decode.h. Produces the shared
  * gpu::gcn::Inst representation; the RDNA2-specific opcode semantics are
- * applied by the dispatch in rdna_translate.cpp.
+ * applied by the dispatch in rdna_translate.cc.
  */
 
 #include "gpu/ps5/rdna/rdna_decode.h"

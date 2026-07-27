@@ -10,7 +10,7 @@ for PS5, and lives here:
 | File | Role | Mirrors (PS4) |
 | --- | --- | --- |
 | `agc_regs.h` | gfx10.3 register file + offsets (context 0xA000 / sh 0x2C00 / uconfig 0xC000). | `gpu/ps4/liverpool.h` |
-| `cmd_processor.{h,cpp}` | AGC PM4 walk: `SET_*_REG` latch, draw/dispatch decode into `gpu::rhi::DrawInfo`, completion labels, flip. | `gpu/ps4/cmd_processor.cpp` |
+| `cmd_processor.{h,cpp}` | AGC PM4 walk: `SET_*_REG` latch, draw/dispatch decode into `gpu::rhi::DrawInfo`, completion labels, flip. | `gpu/ps4/cmd_processor.cc` |
 | `rdna/rdna_decode.{h,cpp}` | RDNA2 instruction decoder -> `gpu::gcn::Program` (shared `Inst` repr). Different encoding prefixes + opcode numbers than GFX7. | `gpu/ps4/gcn/gcn_decode.*` |
 | `rdna/rdna_resource.{h,cpp}` | gfx10 128-bit V#/T#/S# descriptor decode + fetch/texture tracking. | `gpu/ps4/gcn/gcn_resource.*` |
 | `rdna/rdna_translate.{h,cpp}` | RDNA2 -> SPIR-V: per-instruction dispatch that decodes RDNA2 fields, remaps opcodes to the GFX7-canonical numbers, and calls the **shared** `gpu::gcn` emitters (`EmitVop*`, `EmitSop*`, exports, cbuf). Recompile facade. | `gpu/ps4/gcn/spirv/*` |

@@ -12,7 +12,7 @@
  * model (gpu::gcn::Translator), the scalar/vector ALU emitters, exports, and
  * constant-buffer plumbing. Only the RDNA2-specific per-instruction dispatch
  * (field layouts + opcode remap) and the SMEM constant-buffer decode live in
- * rdna_translate.cpp; everything downstream is the GFX7 path's code.
+ * rdna_translate.cc; everything downstream is the GFX7 path's code.
  */
 
 #include <cstdint>

@@ -8,14 +8,16 @@ include_guard(GLOBAL)
 
 # add_delta_module(<name> [DEPS <libs...>])
 #
-# Globs the module's .cpp/.h (excluding tests/), builds delta_<name>, links the
-# shared delta_deps interface plus any extra DEPS, and pulls in tests/ when
-# DELTA_BUILD_TESTS is set.
+# Globs the module's .cpp/.cc/.h (excluding tests/), builds delta_<name>,
+# links the shared delta_deps interface plus any extra DEPS, and pulls in
+# tests/ when DELTA_BUILD_TESTS is set. (.cc is the delta/gpu convention,
+# .cpp everywhere else.)
 function(add_delta_module name)
   cmake_parse_arguments(MOD "" "" "DEPS" ${ARGN})
 
   file(GLOB_RECURSE _srcs CONFIGURE_DEPENDS
     ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/*.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/*.h)
   list(FILTER _srcs EXCLUDE REGEX "/tests/")
 

@@ -4,7 +4,7 @@
  * PS4Delta : PS4 emulation and research project
  *
  * Internal shared state of the GCN -> SPIR-V translator. Only the backend TUs
- * (gcn_spirv.cpp, translate_alu.cpp, translate_mem.cpp) include this; the
+ * (gcn_spirv.cc, translate_alu.cc, translate_mem.cc) include this; the
  * public surface is gcn_spirv.h / gcn_translate.h.
  *
  * The translator models the GCN register file as Private-storage arrays
@@ -375,13 +375,13 @@ struct StageContext {
   bool cs_unsupported = false;  // op the compute backend can't model
 };
 
-// ---- stage-io helpers (gcn_spirv.cpp) --------------------------------------
+// ---- stage-io helpers (gcn_spirv.cc) --------------------------------------
 Id PsInputVar(Translator& t, StageContext& sc, uint32_t attr);
 Id VsParamOut(Translator& t, StageContext& sc, uint32_t p);
 Id PsColorOut(Translator& t, StageContext& sc, uint32_t target);
 Id PsDepthOut(Translator& t, StageContext& sc);
 
-// ---- ALU emitters (translate_alu.cpp) --------------------------------------
+// ---- ALU emitters (translate_alu.cc) --------------------------------------
 void EmitSop1(Translator& t, const Inst& inst);
 void EmitSop2(Translator& t, const Inst& inst);
 void EmitSopc(Translator& t, const Inst& inst);
@@ -418,7 +418,7 @@ void EmitVopc(Translator& t,
               uint32_t dst = 106);
 bool IsVop3b(uint32_t op);
 
-// ---- memory emitters (translate_mem.cpp) -----------------------------------
+// ---- memory emitters (translate_mem.cc) -----------------------------------
 uint32_t SmrdLoadCount(uint32_t op);
 bool PlanCbufs(const Program& program,
                uint32_t first_binding,

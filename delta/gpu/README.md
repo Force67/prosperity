@@ -78,8 +78,8 @@ enforced by the local `.clang-format` / `.clang-tidy` (naming) and by
 
 Deliberate deviations from Chromium:
 
-- `.cpp` extension, not `.cc` (repo-wide convention; the shared
-  `add_delta_module` glob and every other delta module use `.cpp`).
+- (The module uses Chromium's `.cc` extension; the rest of the repo stays
+  `.cpp` — the shared `add_delta_module` glob accepts both.)
 - Unit tests live in `tests/`, not next to the code (repo-wide
   `add_delta_module`/CTest wiring).
 - Hardware mnemonics keep AMD's canonical spelling (`IT_DRAW_INDEX_2`,

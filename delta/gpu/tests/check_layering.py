@@ -52,7 +52,7 @@ for cur, _, names in os.walk(GPU):
                         f'add it to check_layering.py')
         continue
     for n in names:
-        if not n.endswith(('.cpp', '.h')):
+        if not n.endswith(('.cc', '.cpp', '.h')):
             continue
         path = os.path.join(cur, n)
         text = open(path, encoding='utf-8', errors='replace').read()
@@ -66,7 +66,7 @@ for cur, dirs, names in os.walk(DELTA):
         dirs[:] = []
         continue
     for n in names:
-        if not n.endswith(('.cpp', '.h')):
+        if not n.endswith(('.cc', '.cpp', '.h')):
             continue
         path = os.path.join(cur, n)
         text = open(path, encoding='utf-8', errors='replace').read()

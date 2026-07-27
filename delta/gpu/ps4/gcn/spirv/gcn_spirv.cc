@@ -3,7 +3,7 @@
  *
  * GCN -> SPIR-V translator: per-instruction dispatch, control-flow lowering,
  * and the per-stage (VS/PS/CS) drivers. The ALU and memory emitters live in
- * translate_alu.cpp / translate_mem.cpp; the shared context in translator.h.
+ * translate_alu.cc / translate_mem.cc; the shared context in translator.h.
  */
 
 #include "gpu/ps4/gcn/spirv/gcn_spirv.h"
