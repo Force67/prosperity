@@ -630,6 +630,52 @@ void spawnJobWatcher(uint64_t base) {
           // and job+0x9a0 = prio; the claim path tests 1<<worker-ordinal
           // against the affinity. A stuck finalize job shows up here with a
           // mask the 4 workers (0xF) cannot satisfy.
+          // Is there pending work at all? The claim loop (0x38f55..0x392cc)
+          // scans 8 priority levels of the queue array at [jobsys+0x1478],
+          // stride 0x2078. Per level it needs a non-zero level+0x2038, then
+          // per-ordinal slots at level+8+ord*8 / level+0x2040+ord*8, and
+          // finally a sub-queue whose head [q] != tail [q+8] (0x39139).
+          // Empty everywhere while the coordinator waits = the job was never
+          // ENQUEUED (producer-side bug); non-empty = the workers cannot claim
+          // what is there (consumer-side).
+          {
+            uint64_t qbase = *reinterpret_cast<volatile uint64_t *>(base + 0x1478);
+            if (qbase > 0x10000) {
+              for (int lvl = 0; lvl < 8; lvl++) {
+                uint64_t L = qbase + (uint64_t)lvl * 0x2078;
+                uint64_t gate = *reinterpret_cast<volatile uint64_t *>(L + 0x2038);
+                uint64_t any = gate;
+                uint64_t slot[8], alt[8];
+                for (int o = 0; o < 8; o++) {
+                  slot[o] = *reinterpret_cast<volatile uint64_t *>(L + 8 + (uint64_t)o * 8);
+                  alt[o] = *reinterpret_cast<volatile uint64_t *>(L + 0x2040 + (uint64_t)o * 8);
+                  any |= slot[o] | alt[o];
+                }
+                if (!any)
+                  continue;
+                std::fprintf(stderr,
+                             "[jobwatch] queue L%d gate=%#llx slots=%#llx %#llx %#llx %#llx "
+                             "alt=%#llx %#llx %#llx %#llx\n",
+                             lvl, (unsigned long long)gate,
+                             (unsigned long long)slot[0], (unsigned long long)slot[1],
+                             (unsigned long long)slot[2], (unsigned long long)slot[3],
+                             (unsigned long long)alt[0], (unsigned long long)alt[1],
+                             (unsigned long long)alt[2], (unsigned long long)alt[3]);
+                // Ring head/tail of each advertised sub-queue: head != tail is
+                // exactly what the claim path looks for.
+                for (int o = 0; o < 4; o++) {
+                  if (!slot[o] || slot[o] < 0x10000)
+                    continue;
+                  uint64_t head = *reinterpret_cast<volatile uint64_t *>(slot[o]);
+                  uint64_t tail = *reinterpret_cast<volatile uint64_t *>(slot[o] + 8);
+                  std::fprintf(stderr, "[jobwatch]   L%d q%d head=%#llx tail=%#llx %s\n",
+                               lvl, o, (unsigned long long)head,
+                               (unsigned long long)tail,
+                               head == tail ? "EMPTY" : "*** NON-EMPTY (claimable work) ***");
+                }
+              }
+            }
+          }
           // Which worker ordinals exist process-wide. The claim path tests
           // `job_affinity & (1 << ordinal)` with ordinal = [*(fsbase)-0x10]
           // (0x8000|core, bit 15 = valid; fn 0x33350). A job whose affinity
