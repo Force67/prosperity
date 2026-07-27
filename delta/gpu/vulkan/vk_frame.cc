@@ -8,6 +8,7 @@
 #include "gpu/rhi/renderer.h"
 #include "gpu/vulkan/vk_backend.h"
 #include "gpu/vulkan/vk_capture.h"
+#include "gpu/vulkan/vk_debug.h"
 #include "gpu/vulkan/vk_device.h"
 #include "gpu/vulkan/vk_draw_recomp.h"
 #include "gpu/vulkan/vk_format.h"
@@ -33,9 +34,15 @@ bool CreateFrameSlots() {
   ca.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
   ca.commandBufferCount = 1;
   VkFenceCreateInfo fc{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+  uint32_t slot_index = 0;
   for (auto& slot : g_frame.slots) {
     VKOK(vkAllocateCommandBuffers(g_dev.device, &ca, &slot.cmd));
     VKOK(vkCreateFence(g_dev.device, &fc, nullptr, &slot.fence));
+    NameObject(VK_OBJECT_TYPE_COMMAND_BUFFER, (uint64_t)slot.cmd,
+               "frame slot %u", slot_index);
+    NameObject(VK_OBJECT_TYPE_FENCE, (uint64_t)slot.fence, "frame fence %u",
+               slot_index);
+    slot_index++;
     if (g_dev.timestamp_valid_bits) {
       VkQueryPoolCreateInfo qi{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
       qi.queryType = VK_QUERY_TYPE_TIMESTAMP;
@@ -354,6 +361,7 @@ void BeginFrame(Renderer& renderer) {
   VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
   bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
   vkBeginCommandBuffer(g_frame.cmd, &bi);
+  CmdBeginLabel(g_frame.cmd, "frame %llu", (unsigned long long)g_frame.num);
   if (slot.timestamps) {
     vkCmdResetQueryPool(g_frame.cmd, slot.timestamps, 0, 2);
     vkCmdWriteTimestamp(g_frame.cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
@@ -475,6 +483,8 @@ void EndFrame(Renderer& renderer, uint64_t scanout_base) {
         : rt.layout == VK_IMAGE_LAYOUT_GENERAL
             ? VK_ACCESS_SHADER_WRITE_BIT
             : VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    CmdInsertLabel(g_frame.cmd, "present readback rt=%#llx %ux%u",
+                   (unsigned long long)present_base, rt.w, rt.h);
     ImageBarrier(g_frame.cmd, rt.image, rt.layout,
                  VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, present_src,
                  VK_ACCESS_TRANSFER_READ_BIT);
@@ -496,6 +506,7 @@ void EndFrame(Renderer& renderer, uint64_t scanout_base) {
     if (cur.timestamps)
       vkCmdWriteTimestamp(g_frame.cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
                           cur.timestamps, 1);
+    CmdEndLabel(g_frame.cmd);  // close the "frame N" scope
     const VkResult end_result = vkEndCommandBuffer(g_frame.cmd);
     VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     si.commandBufferCount = 1;

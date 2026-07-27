@@ -9,6 +9,7 @@
 #include "gpu/shaders/quad_vert_spv.h"
 #include "gpu/shaders/tex_frag_spv.h"
 #include "gpu/shaders/tex_vert_spv.h"
+#include "gpu/vulkan/vk_debug.h"
 #include "gpu/vulkan/vk_device.h"
 #include "gpu/vulkan/vk_format.h"
 #include "gpu/vulkan/vk_hash.h"
@@ -445,6 +446,9 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
     std::fprintf(stderr, "[gpuvk] recomp pipeline failed: %d\n", (int)r);
     return nullptr;
   }
+  NameObject(VK_OBJECT_TYPE_PIPELINE, (uint64_t)rp.pipe,
+             "recomp vs=%#llx ps=%#llx", (unsigned long long)d.vs_addr,
+             (unsigned long long)d.ps_addr);
   return g_recomp_cache.Store(key, std::move(rp));
 }
 

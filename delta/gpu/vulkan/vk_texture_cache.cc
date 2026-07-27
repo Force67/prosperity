@@ -10,6 +10,7 @@
 #include "gpu/ps4/gcn/gcn_translate.h"
 #include "gpu/rhi/renderer.h"
 #include "gpu/vulkan/vk_capture.h"
+#include "gpu/vulkan/vk_debug.h"
 #include "gpu/vulkan/vk_device.h"
 #include "gpu/vulkan/vk_format.h"
 #include "gpu/vulkan/vk_frame.h"
@@ -970,6 +971,9 @@ VkDescriptorSet GetTexture(uint64_t base,
       return VK_NULL_HANDLE;
     }
     image_entry.allocation_size = mr.size;
+    NameObject(VK_OBJECT_TYPE_IMAGE, (uint64_t)image_entry.image,
+               "tex %#llx %ux%u mips=%u layers=%u",
+               (unsigned long long)base, w, h, mip_levels, layers);
     image_it = g_tex_images.emplace(key.image, image_entry).first;
     g_tex_image_bytes += mr.size;
     RegisterTexturePages(key.image, footprint);

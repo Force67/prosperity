@@ -11,6 +11,7 @@
 
 #include "gpu/gpu_check.h"
 #include "gpu/ps4/gcn/gcn_detile.h"
+#include "gpu/vulkan/vk_debug.h"
 #include "gpu/ps4/gcn/gcn_translate.h"
 #include "gpu/vulkan/vk_capture.h"
 #include "gpu/vulkan/vk_compute_hazard.h"
@@ -123,6 +124,8 @@ CsPipe* GetCsPipe(const ComputeInfo& ci) {
     vkDestroyDescriptorSetLayout(g_dev.device, cp.set_layout, nullptr);
     return nullptr;
   }
+  NameObject(VK_OBJECT_TYPE_PIPELINE, (uint64_t)cp.pipe, "cs %#llx",
+             (unsigned long long)ci.cs_addr);
   g_cs_pipes[ci.cs_addr] = cp;
   return &g_cs_pipes[ci.cs_addr];
 }
@@ -563,6 +566,7 @@ bool CsBatchFlush() {
   if (!g_cs_batch_open)
     return !g_cs_failed;
   const uint64_t t0 = NowNs();
+  CmdEndLabel(g_cs_cmd);  // close the "cs batch" scope
   const VkResult end_result = vkEndCommandBuffer(g_cs_cmd);
   VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
   si.commandBufferCount = 1;
@@ -827,8 +831,13 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci) {
       renderer.state = nullptr;
       return false;  // growth would destroy a buffer the batch references
     }
+    const bool buffer_reused =
+        e.buf && e.cap >= static_cast<VkDeviceSize>(sz[i]);
     if (!CsRangeEnsureBuffer(e, sz[i]))
       return false;
+    if (!buffer_reused)
+      NameObject(VK_OBJECT_TYPE_BUFFER, (uint64_t)e.buf, "csbuf %#llx",
+                 (unsigned long long)base);
     bool valid =
         same_shape && (e.gpu_dirty || e.last_validated_frame == g_frame.num);
     if (!valid && same_shape) {
@@ -913,6 +922,8 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci) {
     VkCommandBufferBeginInfo cbi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     cbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(g_cs_cmd, &cbi);
+    CmdBeginLabel(g_cs_cmd, "cs batch (frame %llu)",
+                  (unsigned long long)g_frame.num);
     g_cs_batch_open = true;
   }
   VkBufferMemoryBarrier zero_before[ComputeInfo::kMaxResources];
@@ -997,6 +1008,9 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci) {
     vkCmdPipelineBarrier(g_cs_cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr,
                          barrier_count, barriers, 0, nullptr);
+  CmdInsertLabel(g_cs_cmd, "dispatch cs=%#llx %ux%ux%u res=%u",
+                 (unsigned long long)ci.cs_addr, ci.groups[0], ci.groups[1],
+                 ci.groups[2], ci.num_res);
   vkCmdDispatch(g_cs_cmd, ci.groups[0], ci.groups[1], ci.groups[2]);
   for (uint32_t i = 0; i < ci.num_res; i++) {
     if (ci.res[i].zero_fill) {

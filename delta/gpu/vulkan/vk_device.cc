@@ -7,6 +7,7 @@
 #include "gpu/ps4/gcn/gcn_translate.h"
 #include "gpu/rhi/renderer.h"
 #include "gpu/vulkan/vk_backend.h"
+#include "gpu/vulkan/vk_debug.h"
 #include "gpu/vulkan/vk_frame.h"
 #include "gpu/vulkan/vk_upload_ring.h"
 
@@ -172,7 +173,26 @@ bool CreateDevice() {
   app.pApplicationName = "prosperity-gpu";
   VkInstanceCreateInfo ic{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
   ic.pApplicationInfo = &app;
+  // Object names + command labels for capture tools (vk_debug). Gated on a
+  // consumer actually listening -- the loader always advertises the extension,
+  // but formatting labels for nobody costs real frame time.
+  bool debug_utils = false;
+  if (WantDebugUtils()) {
+    uint32_t ext_n = 0;
+    vkEnumerateInstanceExtensionProperties(nullptr, &ext_n, nullptr);
+    std::vector<VkExtensionProperties> exts(ext_n);
+    vkEnumerateInstanceExtensionProperties(nullptr, &ext_n, exts.data());
+    for (const auto& e : exts)
+      if (!std::strcmp(e.extensionName, VK_EXT_DEBUG_UTILS_EXTENSION_NAME))
+        debug_utils = true;
+  }
+  const char* instance_exts[] = {VK_EXT_DEBUG_UTILS_EXTENSION_NAME};
+  if (debug_utils) {
+    ic.enabledExtensionCount = 1;
+    ic.ppEnabledExtensionNames = instance_exts;
+  }
   VKOK(vkCreateInstance(&ic, nullptr, &g_dev.instance));
+  InitDebugUtils(g_dev.instance, debug_utils);
 
   uint32_t n = 0;
   vkEnumeratePhysicalDevices(g_dev.instance, &n, nullptr);

@@ -7,6 +7,7 @@
 #include "gpu/guest_memory.h"
 #include "gpu/ps4/gcn/gcn_translate.h"
 #include "gpu/rhi/renderer.h"
+#include "gpu/vulkan/vk_debug.h"
 #include "gpu/vulkan/vk_device.h"
 #include "gpu/vulkan/vk_format.h"
 #include "gpu/vulkan/vk_frame.h"
@@ -744,6 +745,10 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
                    "[dt] RECOMP DREW count=%u rt=%#lx nv=%u multi_tex=%d\n",
                    draw_count, (unsigned long)d.rt_base, nv, rp->multi_tex);
   }
+  CmdInsertLabel(g_frame.cmd, "recomp vs=%#llx ps=%#llx n=%u%s",
+                 (unsigned long long)d.vs_addr, (unsigned long long)d.ps_addr,
+                 indexed ? d.index_count : d.vertex_count,
+                 indexed ? " indexed" : "");
   if (indexed)
     vkCmdDrawIndexed(g_frame.cmd, d.index_count,
                      d.instance_count ? d.instance_count : 1, 0, 0, 0);

@@ -5,6 +5,7 @@
 #include "gpu/vulkan/vk_upload_ring.h"
 
 #include "gpu/gpu_check.h"
+#include "gpu/vulkan/vk_debug.h"
 #include "gpu/vulkan/vk_device.h"
 
 #include <algorithm>
@@ -31,6 +32,7 @@ bool CreateUploadRings(const VkPhysicalDeviceProperties& props) {
   VKOK(vkBindBufferMemory(g_dev.device, g_ring.vb, g_ring.vb_mem, 0));
   VKOK(vkMapMemory(g_dev.device, g_ring.vb_mem, 0, kVbRing, 0,
                    (void**)&g_ring.vb_map));
+  NameObject(VK_OBJECT_TYPE_BUFFER, (uint64_t)g_ring.vb, "vertex ring");
 
   // Index ring (host-visible, 32-bit indices).
   VkBufferCreateInfo ibi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
@@ -48,6 +50,7 @@ bool CreateUploadRings(const VkPhysicalDeviceProperties& props) {
   VKOK(vkBindBufferMemory(g_dev.device, g_ring.ib, g_ring.ib_mem, 0));
   VKOK(vkMapMemory(g_dev.device, g_ring.ib_mem, 0, kIbRing, 0,
                    (void**)&g_ring.ib_map));
+  NameObject(VK_OBJECT_TYPE_BUFFER, (uint64_t)g_ring.ib, "index ring");
   // Recomp cbuffer ring + dynamic-UBO descriptors (set 1) + empty set-0 layout.
   g_ring.ubo_align = (uint32_t)props.limits.minUniformBufferOffsetAlignment;
   if (g_ring.ubo_align < 1)
@@ -75,6 +78,7 @@ bool CreateUploadRings(const VkPhysicalDeviceProperties& props) {
     VKOK(vkMapMemory(g_dev.device, g_ring.ubo_mem, 0, kUboRing, 0,
                      (void**)&g_ring.ubo_map));
     std::memset(g_ring.ubo_map, 0, kUboRing);
+    NameObject(VK_OBJECT_TYPE_BUFFER, (uint64_t)g_ring.ubo_buf, "cbuffer ring");
     g_ring.ubo_stride = (kCbufWindow + g_ring.ubo_align - 1) &
                         ~(VkDeviceSize)(g_ring.ubo_align - 1);
     g_ring.ubo_written.resize(static_cast<size_t>(
@@ -193,6 +197,9 @@ bool AllocateTextureUpload(uint32_t slot,
   block.capacity = capacity;
   block.offset = bytes;
   slice = {block.buffer, 0, block.map};
+  NameObject(VK_OBJECT_TYPE_BUFFER, (uint64_t)block.buffer,
+             "texup slot %u block %zu (%llu MB)", slot, blocks.size(),
+             (unsigned long long)(capacity >> 20));
   blocks.push_back(block);
   return true;
 }

@@ -5,6 +5,7 @@
 #include "gpu/vulkan/vk_render_target.h"
 
 #include "gpu/rhi/renderer.h"
+#include "gpu/vulkan/vk_debug.h"
 #include "gpu/vulkan/vk_device.h"
 #include "gpu/vulkan/vk_format.h"
 #include "gpu/vulkan/vk_frame.h"
@@ -159,6 +160,8 @@ RTarget* GetRT(uint64_t base, uint32_t w, uint32_t h, VkFormat fmt) {
   }
   std::fprintf(stderr, "[gpuvk] new RT %#lx %ux%u fmt=%d\n",
                (unsigned long)base, w, h, (int)fmt);
+  NameObject(VK_OBJECT_TYPE_IMAGE, (uint64_t)t.image, "rt %#lx %ux%u fmt=%d",
+             (unsigned long)base, w, h, (int)fmt);
   g_rts[base] = t;
   if (!g_region.first_rt)
     g_region.first_rt = base;
@@ -191,6 +194,8 @@ VkDescriptorSet SnapshotRT(RTarget& rt) {
     vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
     vi.format = rt.fmt;
     vi.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    NameObject(VK_OBJECT_TYPE_IMAGE, (uint64_t)rt.feedback_image,
+               "rt feedback %ux%u", rt.w, rt.h);
     if (vkCreateImageView(g_dev.device, &vi, nullptr, &rt.feedback_view) !=
         VK_SUCCESS) {
       vkDestroyImage(g_dev.device, rt.feedback_image, nullptr);
@@ -299,6 +304,8 @@ DepthTarget* GetDepthRT(uint64_t base, uint32_t w, uint32_t h) {
   }
   std::fprintf(stderr, "[gpuvk] new depth %#lx %ux%u\n", (unsigned long)base, w,
                h);
+  NameObject(VK_OBJECT_TYPE_IMAGE, (uint64_t)t.image, "depth %#lx %ux%u",
+             (unsigned long)base, w, h);
   g_depths[base] = t;
   return &g_depths[base];
 }
@@ -395,6 +402,7 @@ void EndRegion() {
   if (!g_region.open)
     return;
   g_cmd_end_rendering(g_frame.cmd);
+  CmdEndLabel(g_frame.cmd);
   g_region.open = false;
   g_region.cur_rt = 0;
   g_region.cur_mrt_count = 0;
@@ -549,6 +557,9 @@ bool BeginRegion(const uint64_t* mrt_base,
   ri.pColorAttachments = colors;
   if (dt)
     ri.pDepthAttachment = &depth_att;
+  CmdBeginLabel(g_frame.cmd, "region rt=%#llx %ux%u mrt=%u depth=%#llx",
+                (unsigned long long)base, w, h, g_region.cur_mrt_count,
+                (unsigned long long)depth_base);
   g_cmd_begin_rendering(g_frame.cmd, &ri);
   g_region.open = true;
   // Negative-height (y-up) viewport: GCN/PS4 rasterises y-up, so we do too.

@@ -9,6 +9,7 @@
 
 #include "gpu/rhi/renderer.h"
 
+#include "gpu/vulkan/vk_debug.h"
 #include "gpu/vulkan/vk_device.h"
 #include "gpu/vulkan/vk_draw_recomp.h"
 #include "gpu/vulkan/vk_format.h"
@@ -286,6 +287,9 @@ void Draw(Renderer& renderer, const DrawInfo& d_in) {
                        0, 64, d.mvp);
   }
   vkCmdBindVertexBuffers(g_frame.cmd, 0, 1, &g_ring.vb, &off);
+  CmdInsertLabel(g_frame.cmd, "quad vs=%#llx ps=%#llx n=%u",
+                 (unsigned long long)d.vs_addr, (unsigned long long)d.ps_addr,
+                 indexed ? d.index_count : nv);
   if (indexed) {
     VkDeviceSize ioff = aligned_ioff;
     CopyGuestIndices(g_ring.ib_map + ioff, d.index_data, d.index_count,

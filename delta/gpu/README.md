@@ -77,6 +77,23 @@ The heuristic quad path in `vk_draw` predates the recompiler and is still the
 fallback for draws `vk_draw_recomp` declines; `DELTA_GPU_DECLINES=1` reports why
 draws are still landing there.
 
+## Debugging a frame in RenderDoc
+
+Launch the emulator under RenderDoc with `DELTA_RDOC_FRAME=N`: rendering is
+offscreen (no swapchain on this device), so vk_frame brackets guest frame N
+with an explicit capture instead of relying on a present boundary. With a
+capture tool attached `VK_EXT_debug_utils` lights up (`vk_debug`) and the
+capture is self-describing, everything keyed by guest addresses so it lines up
+with the `DELTA_GPU_*` logs:
+
+- The event browser nests `frame N` > `region rt=... / cs batch` >
+  `recomp vs=... ps=... / quad ... / dispatch cs=...` markers.
+- Resources are named after what they cache: `rt 0x... WxH`, `depth 0x...`,
+  `tex 0x...`, `csbuf 0x...`, the upload rings, pipelines by shader address.
+- The recompiled SPIR-V carries `OpName`s (`sgpr`/`vgpr`, `cbufN`, `texN`,
+  `bufN`, `user_data`, `v_attrN`, `in_attrN`/`out_paramN`, `mrtN`, `lds`), so
+  the shader viewer reads like the GCN it came from rather than anonymous ids.
+
 ## Conventions
 
 The module follows [Chromium C++ style](https://chromium.googlesource.com/chromium/src/+/main/styleguide/c++/c++.md),
