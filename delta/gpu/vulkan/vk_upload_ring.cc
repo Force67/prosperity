@@ -4,6 +4,7 @@
 
 #include "gpu/vulkan/vk_upload_ring.h"
 
+#include "gpu/gpu_check.h"
 #include "gpu/vulkan/vk_device.h"
 
 #include <algorithm>
@@ -138,9 +139,13 @@ bool AllocateTextureUpload(uint32_t slot,
                            VkDeviceSize bytes,
                            VkDeviceSize alignment,
                            TextureUploadSlice& slice) {
-  if (slot >= 2 || !bytes)
+  GPU_BUGCHECK(slot < 2, "slot %u is not a frame-ring slot", slot);
+  if (!bytes)
     return false;
   alignment = std::max<VkDeviceSize>(alignment, 4);
+  GPU_BUGCHECK((alignment & (alignment - 1)) == 0,
+               "alignment %llu is not a power of two",
+               (unsigned long long)alignment);
   auto& blocks = g_ring.texture_uploads[slot];
   for (auto& block : blocks) {
     const VkDeviceSize aligned =
@@ -193,10 +198,27 @@ bool AllocateTextureUpload(uint32_t slot,
 }
 
 void ResetTextureUploads(uint32_t slot) {
-  if (slot >= 2)
-    return;
-  for (auto& block : g_ring.texture_uploads[slot])
+  GPU_BUGCHECK(slot < 2, "slot %u is not a frame-ring slot", slot);
+  // Reset runs in BeginFrame after this slot's fence wait, so no in-flight
+  // transfer references these blocks -- the one point where destroying one is
+  // safe. Blocks grow on demand (a loading burst can leave hundreds of idle
+  // megabytes behind), so drop any block that has sat unused for ~10s of
+  // resets; the next burst simply recreates it.
+  constexpr uint64_t kIdleResetsBeforeTrim = 300;
+  auto& blocks = g_ring.texture_uploads[slot];
+  for (size_t i = 0; i < blocks.size();) {
+    TextureUploadBlock& block = blocks[i];
+    block.idle_resets = block.offset ? 0 : block.idle_resets + 1;
     block.offset = 0;
+    if (block.idle_resets < kIdleResetsBeforeTrim) {
+      ++i;
+      continue;
+    }
+    vkUnmapMemory(g_dev.device, block.memory);
+    vkDestroyBuffer(g_dev.device, block.buffer, nullptr);
+    vkFreeMemory(g_dev.device, block.memory, nullptr);
+    blocks.erase(blocks.begin() + i);
+  }
 }
 
 }  // namespace gpu::vk

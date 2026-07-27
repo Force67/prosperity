@@ -23,6 +23,9 @@ struct TextureUploadBlock {
   uint8_t* map = nullptr;
   VkDeviceSize capacity = 0;
   VkDeviceSize offset = 0;
+  // Consecutive ResetTextureUploads calls with no allocation from this block;
+  // long-idle blocks are destroyed at reset (see ResetTextureUploads).
+  uint64_t idle_resets = 0;
 };
 
 struct TextureUploadSlice {
