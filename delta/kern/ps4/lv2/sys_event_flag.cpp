@@ -128,10 +128,21 @@ static bool evfTraceOn(const eventFlag *ef, int id) {
     return false;
   if (!*filt || std::strcmp(filt, "1") == 0)
     return true;
-  // "id:<n>" filters by handle (names like PS4SyncEvent repeat dozens of
-  // times; the handle is the only unique identity).
-  if (std::strncmp(filt, "id:", 3) == 0)
-    return id == std::atoi(filt + 3);
+  // "id:<n>[,<n>...]" filters by handle (names like PS4SyncEvent repeat dozens
+  // of times; the handle is the only unique identity). A list is what a
+  // handshake needs: SotC's world-load coordinator clears one flag, sets three
+  // others, then waits on the first, and only seeing all of them together says
+  // which side of that exchange never happens. Values may be decimal or 0x hex.
+  if (std::strncmp(filt, "id:", 3) == 0) {
+    for (const char *p = filt + 3; *p;) {
+      const int want = (int)std::strtol(p, const_cast<char **>(&p), 0);
+      if (id == want)
+        return true;
+      while (*p == ',' || *p == ' ')
+        p++;
+    }
+    return false;
+  }
   return ef && std::strstr(ef->fname().c_str(), filt) != nullptr;
 }
 

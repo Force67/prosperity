@@ -709,6 +709,68 @@ void spawnJobWatcher(uint64_t base) {
                          "[jobwatch] threads=%zu withOrdinal=%d ordinals={ %s} claimable-mask=%#x\n",
                          fsb.size(), valid, list.c_str(), present);
           }
+          // The real claim gate is a DEPENDENCY, not affinity. Claim
+          // (0x39130..) walks a queue node, and after finding head != tail it
+          // tests: dep = [node+0x980]; if dep, compare *dep against
+          // threshold [node+0x988] under mode [node+0x990] (0 = equal,
+          // 1 = counter > threshold) and SKIP the node when it does not hold.
+          // That is precisely "work is visible but nobody can claim it": a job
+          // whose dependency counter never reaches its target stays queued
+          // forever while the workers spin. Dump every node with pending work
+          // so a stuck dependency shows its counter, target and mode.
+          {
+            uint64_t tbl = *reinterpret_cast<volatile uint64_t *>(base + 0xb60);
+            int shown = 0;
+            if (tbl > 0x10000) {
+              for (int j = 0; j < 1024 && shown < 10; j++) {
+                const uint64_t node = tbl + (uint64_t)j * 0x9b8;
+                const uint64_t head = *reinterpret_cast<volatile uint64_t *>(node);
+                const uint64_t tail = *reinterpret_cast<volatile uint64_t *>(node + 8);
+                if (!head || head == tail)
+                  continue;  // empty queue: nothing pending here
+                const uint64_t dep = *reinterpret_cast<volatile uint64_t *>(node + 0x980);
+                const uint64_t thresh = *reinterpret_cast<volatile uint64_t *>(node + 0x988);
+                const uint32_t mode = *reinterpret_cast<volatile uint32_t *>(node + 0x990);
+                const uint32_t aff = *reinterpret_cast<volatile uint32_t *>(node + 0x998);
+                long long depval = -1;
+                bool readable = false;
+                if (dep > 0x10000 && dep < (1ULL << 47)) {
+                  const uint64_t inner = *reinterpret_cast<volatile uint64_t *>(dep);
+                  depval = (long long)inner;
+                  readable = true;
+                }
+                const bool satisfied =
+                    !dep || (readable && (mode == 0 ? (uint64_t)depval == thresh
+                                                    : (long long)depval > (long long)thresh));
+                // The claim ALSO tests an affinity mask that lives behind an
+                // indirection: obj = [node+0x38]; mask = [obj+0xf0]; the worker
+                // needs `mask & (1 << its ordinal)` (claim 0x38fc0/0x38fc5).
+                // Our workers report ordinals 0..3, so a mask that misses 0xf
+                // is unclaimable by every worker we have -- which is what a
+                // livelock of "work advertised, nobody takes it" looks like.
+                const uint64_t obj = *reinterpret_cast<volatile uint64_t *>(node + 0x38);
+                uint32_t mask = 0;
+                bool mask_read = false;
+                if (obj > 0x10000 && obj < (1ULL << 47)) {
+                  mask = *reinterpret_cast<volatile uint32_t *>(obj + 0xf0);
+                  mask_read = true;
+                }
+                std::fprintf(stderr,
+                             "[jobwatch] node[%d] head=%#llx tail=%#llx dep=%#llx *dep=%lld "
+                             "thresh=%lld mode=%u aff=%#x obj=%#llx mask=%s%#x -> %s%s\n",
+                             j, (unsigned long long)head, (unsigned long long)tail,
+                             (unsigned long long)dep, depval, (long long)thresh, mode, aff,
+                             (unsigned long long)obj, mask_read ? "" : "?", mask,
+                             satisfied ? "dep-ok" : "*** BLOCKED ON DEPENDENCY ***",
+                             (mask_read && !(mask & 0xf))
+                                 ? " *** MASK EXCLUDES EVERY WORKER ***"
+                                 : "");
+                shown++;
+              }
+              if (!shown)
+                std::fprintf(stderr, "[jobwatch] no queue node has pending work\n");
+            }
+          }
           static int tableDumps = 0;
           uint64_t defAff = *reinterpret_cast<volatile uint32_t *>(base + 0x3c);
           uint64_t tab = *reinterpret_cast<volatile uint64_t *>(base + 0xb60);
