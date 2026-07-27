@@ -333,3 +333,4 @@ ps5run.sh
 /build-system/
 /code/
 /.claude_
+/docs/design
