@@ -365,12 +365,13 @@ void BeginFrame(Renderer& renderer) {
 void EndFrame(Renderer& renderer, uint64_t scanout_base) {
   if (!renderer.available() || !g_frame.recording)
     return;
-  if (!FlushCsWrites(renderer)) {
+  // Bound CS-write staleness for guest CPU readers. Only a device fault (the
+  // flush nulls renderer.state) is fatal; a range that could not be written
+  // back just stays stale, as it always did.
+  if (!FlushCsWrites(renderer) && !renderer.available()) {
     g_frame.recording = false;
-    renderer.state = nullptr;
     return;
   }
-  // Bound CS-write staleness for guest CPU readers.
   g_frame.recording = false;
   ReportFps();
   ScopeNs end_timer(&g_ns_end);

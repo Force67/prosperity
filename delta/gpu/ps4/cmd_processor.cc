@@ -1429,7 +1429,11 @@ void HandleDispatch(const uint32_t* body, uint32_t count) {
       if (r.binding >= resolved.size() || !resolved[r.binding].valid)
         any_unresolved = true;
     if (any_unresolved) {
-      if (!rhi::FlushCsWrites(rhi::DefaultRenderer()))
+      // Best-effort: a range that could not be written back leaves its chain
+      // stale, but the dummy fallback below still beats dropping the dispatch.
+      // Only a dead renderer (device fault) makes retrying pointless.
+      if (!rhi::FlushCsWrites(rhi::DefaultRenderer()) &&
+          !rhi::DefaultRenderer().available())
         return;
       resolved = gcn::ResolveCsResources(*cs_program, rc, ud);
     }
@@ -1723,11 +1727,12 @@ void SubmitDcb(const void* dcb, uint32_t size_bytes) {
             if (!kNoCopy && src_mem && dst_mem && bytes &&
                 bytes <= 0x1000000u && src != dst && mem_ok(src) &&
                 mem_ok(src + bytes) && mem_ok(dst) && mem_ok(dst + bytes)) {
-              const bool source_current = rhi::FlushCsWrites(
-                  rhi::DefaultRenderer());  // src may be CS-written
-              if (source_current)
-                std::memcpy(reinterpret_cast<void*>(dst),
-                            reinterpret_cast<const void*>(src), bytes);
+              // src may be CS-written; land pending writes first. Copy even
+              // if the flush fails: a possibly-stale source range beats
+              // silently dropping the whole guest->guest copy.
+              rhi::FlushCsWrites(rhi::DefaultRenderer());
+              std::memcpy(reinterpret_cast<void*>(dst),
+                          reinterpret_cast<const void*>(src), bytes);
             }
             if (std::getenv("DELTA_GPU_DMATRACE")) {
               static int dmn = 0;

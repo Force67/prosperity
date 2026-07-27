@@ -613,8 +613,15 @@ bool CsRangeFlushOne(uint64_t base, CsRange& e) {
     return false;
   g_cs_flush_n++;
   if (e.image_staging) {
-    if (!WritebackCsImage(e.res, e.map))
+    if (!WritebackCsImage(e.res, e.map)) {
+      static int logged = 0;
+      if (logged++ < 8)
+        std::fprintf(stderr,
+                     "[gpuvk] cs image writeback failed base=%#llx "
+                     "(range stays stale)\n",
+                     (unsigned long long)base);
       return false;
+    }
   } else {
     std::memcpy(reinterpret_cast<void*>(base), e.map, e.size);
   }
@@ -1042,11 +1049,16 @@ bool FlushCsWrites(Renderer& renderer) {
     return false;
   }
   const uint64_t _t0 = NowNs();
+  bool all_current = true;
   for (auto it = g_cs_ranges.begin(); it != g_cs_ranges.end();) {
     if (!CsRangeFlushOne(it->first, it->second)) {
-      if (g_cs_failed)
+      if (g_cs_failed) {
         renderer.state = nullptr;
-      return false;
+        return false;
+      }
+      // Writeback of this one range failed; it stays dirty. Keep flushing the
+      // rest so one bad range cannot hold every other range stale forever.
+      all_current = false;
     }
     if (g_cs_range_bytes > (1ull << 30) && !it->second.gpu_dirty &&
         !it->second.pending_batch &&
@@ -1058,7 +1070,7 @@ bool FlushCsWrites(Renderer& renderer) {
     }
   }
   g_ns_cs_out += NowNs() - _t0;
-  return true;
+  return all_current;
 }
 
 // Targeted variant: flush only dirty ranges overlapping [base, base+bytes).
@@ -1073,16 +1085,19 @@ bool FlushCsWritesRange(Renderer& renderer, uint64_t base, uint64_t bytes) {
   if (!base || !bytes || g_cs_ranges.empty())
     return true;
   const uint64_t _t0 = NowNs();
+  bool all_current = true;
   for (uint64_t dirty : DirtyRangesOverlapping(base, bytes)) {
     auto found = g_cs_ranges.find(dirty);
     if (found != g_cs_ranges.end() && !CsRangeFlushOne(dirty, found->second)) {
-      if (g_cs_failed)
+      if (g_cs_failed) {
         renderer.state = nullptr;
-      return false;
+        return false;
+      }
+      all_current = false;
     }
   }
   g_ns_cs_out += NowNs() - _t0;
-  return true;
+  return all_current;
 }
 
 }  // namespace gpu::rhi
