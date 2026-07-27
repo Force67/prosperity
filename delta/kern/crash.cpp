@@ -15,6 +15,7 @@
 #include <cstring>
 #include <fcntl.h>
 #include <ucontext.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 #include <sys/mman.h>
 #include <time.h>
@@ -733,33 +734,15 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
       return;
     }
   }
-#endif
 
-  // Async-signal-safe entry marker: proves the handler actually ran even if a
-  // later step (symbolize / backtrace) re-faults. Without it a re-fault inside
-  // the handler is indistinguishable from the handler never being entered.
-  { char m[48];
-    int n = std::snprintf(m, sizeof(m), "\n[crashHandler] entered sig=%d\n", sig);
-    if (n > 0) { ssize_t w = write(2, m, (size_t)n); (void)w; } }
-
-  // Only the first faulting thread prints. A second concurrent fault (common at
-  // teardown) would interleave the dump and can itself core-dump, truncating it.
-  static std::atomic<bool> s_dumping{false};
-  if (s_dumping.exchange(true)) {
-    for (;;) pause();  // park until the first thread's _Exit ends the process
-  }
-  utl::silenceLogging();  // stop the async log thread racing us on stderr
-
-  if (g_heapProfAddr)
-    heapProfDump();
-
-#if defined(__x86_64__)
   // Guest SDK assert/__debugbreak is a software interrupt (`int 0xNN`, cd NN);
   // in userspace it raises SIGSEGV (#GP). Real hardware with no kernel debugger
   // attached just steps over it and the assert handler's caller continues, so do
   // the same: skip the 2-byte instruction and resume. Otherwise every guest
   // assertion would kill the boot. PS4 uses int 0x41; PS5 (Prospero) also uses
   // int 0x44/0x45 (e.g. libkernel's `int 0x45; xor eax,eax; ret` assert stub).
+  // Must stay ahead of the dump latch below: a skipped assert is a resume path,
+  // and latching on it would make the next real fault park instead of dump.
   if (sig == SIGSEGV && ucv) {
     auto *uc = static_cast<ucontext_t *>(ucv);
     auto *ip = reinterpret_cast<const uint8_t *>(uc->uc_mcontext.gregs[REG_RIP]);
@@ -782,6 +765,35 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
     }
   }
 #endif
+
+  // Async-signal-safe entry marker: proves the handler actually ran even if a
+  // later step (symbolize / backtrace) re-faults. Without it a re-fault inside
+  // the handler is indistinguishable from the handler never being entered.
+  { char m[48];
+    int n = std::snprintf(m, sizeof(m), "\n[crashHandler] entered sig=%d\n", sig);
+    if (n > 0) { ssize_t w = write(2, m, (size_t)n); (void)w; } }
+
+  // Only the first faulting thread prints. A second concurrent fault (common at
+  // teardown) would interleave the dump and can itself core-dump, truncating it.
+  // The dumper re-entering is a different case: a step below re-faulted (e.g. the
+  // stack scan on a stack that overflowed into its guard page), and parking it
+  // would hang the process instead of ending it, so bail straight out.
+  static std::atomic<bool> s_dumping{false};
+  static std::atomic<pid_t> s_dumper{0};
+  const pid_t self = static_cast<pid_t>(syscall(SYS_gettid));
+  if (s_dumping.exchange(true)) {
+    if (s_dumper.load() == self) {
+      static const char m[] = "[crashHandler] re-faulted while dumping\n";
+      ssize_t w = write(2, m, sizeof(m) - 1); (void)w;
+      std::_Exit(128 + sig);
+    }
+    for (;;) pause();  // park until the first thread's _Exit ends the process
+  }
+  s_dumper.store(self);
+  utl::silenceLogging();  // stop the async log thread racing us on stderr
+
+  if (g_heapProfAddr)
+    heapProfDump();
 
   char fault[256];
   symbolize((uintptr_t)si->si_addr, fault, sizeof(fault));
