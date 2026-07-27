@@ -195,6 +195,39 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
     d.instance_count = g_num_instances;
     uint32_t auto_vertex_count =
         op == IT_DRAW_INDEX_AUTO && count >= 1 ? body[0] : 0;
+    // DELTA_GPU_DRAWPKT: which draw opcode each draw actually arrives as, with
+    // its raw body. A count that never leaves the packet (an opcode we do not
+    // decode, or an indirect draw whose count lives in guest memory) shows up
+    // downstream only as "too few vertices", which points at the wrong layer.
+    {
+      static const bool pkt_trace = std::getenv("DELTA_GPU_DRAWPKT") != nullptr;
+      if (pkt_trace) {
+        // A histogram over the WHOLE run, not the first N draws: the counts
+        // that decline downstream are not the ones a first-N sample catches.
+        struct Bucket {
+          uint32_t op, prim, auto_count, n;
+        };
+        static Bucket buckets[32];
+        static uint32_t nbuckets = 0, total = 0;
+        const uint32_t prim = g_regs[mmVGT_PRIMITIVE_TYPE];
+        uint32_t i = 0;
+        for (; i < nbuckets; i++)
+          if (buckets[i].op == op && buckets[i].prim == prim &&
+              buckets[i].auto_count == auto_vertex_count)
+            break;
+        if (i == nbuckets && nbuckets < 32)
+          buckets[nbuckets++] = {op, prim, auto_vertex_count, 0};
+        if (i < nbuckets)
+          buckets[i].n++;
+        if (++total % 2000 == 0) {
+          std::fprintf(stderr, "[drawpkt] %u draws:", total);
+          for (uint32_t j = 0; j < nbuckets; j++)
+            std::fprintf(stderr, " op=%#x/prim=%#x/auto=%u x%u", buckets[j].op,
+                         buckets[j].prim, buckets[j].auto_count, buckets[j].n);
+          std::fprintf(stderr, "\n");
+        }
+      }
+    }
     // Index buffer. DRAW_INDEX_2 (5 dwords): maxSize, baseLo, baseHi,
     // index_count, drawInitiator. The draws are indexed triangle lists; without
     // the index buffer (drawing raw vertices as a strip) batched sprites smear
@@ -203,11 +236,71 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
     if (op == IT_DRAW_INDEX_2 && count >= 4) {
       uint64_t ibase = (static_cast<uint64_t>(body[2] & 0xFF) << 32) | body[1];
       uint32_t icount = body[3];
-      if (ibase >= 0x1000000000ull && ibase < 0x20000000000ull && icount &&
-          icount <= 0x100000) {
+      const bool accepted = ibase >= 0x1000000000ull &&
+                            ibase < 0x20000000000ull && icount &&
+                            icount <= 0x100000;
+      // DELTA_GPU_DRAWPKT: the raw draw packet, before any of the acceptance
+      // rules below can silently drop it. A rejected index buffer leaves the
+      // draw non-indexed, which then declines for too few vertices -- the two
+      // symptoms look unrelated in the logs unless the packet is visible.
+      static const bool pkt_trace_i2 = std::getenv("DELTA_GPU_DRAWPKT") != nullptr;
+      if (pkt_trace_i2) {
+        static int n = 0;
+        if (n++ < 128)
+          std::fprintf(stderr,
+                       "[drawpkt] DRAW_INDEX_2 ibase=%#lx icount=%u itype=%u "
+                       "%s%s\n",
+                       (unsigned long)ibase, icount, g_index_type,
+                       accepted ? "accepted" : "REJECTED",
+                       accepted                    ? ""
+                       : icount > 0x100000         ? " (count cap)"
+                       : !icount                   ? " (zero count)"
+                                                   : " (base out of range)");
+      }
+      if (accepted) {
         d.index_data = reinterpret_cast<const void*>(ibase);
         d.index_count = icount;
         d.index_type = g_index_type;  // 0 = 16-bit, 1 = 32-bit
+      }
+    }
+    // DRAW_INDEX_OFFSET_2 (5 dwords: maxSize, indexOffset, indexCount,
+    // drawInitiator) draws from the index buffer IT_INDEX_BASE already set,
+    // starting indexOffset entries in -- unlike DRAW_INDEX_2, which carries its
+    // own base. Shadow of the Colossus submits ~47% of its draws this way, and
+    // leaving the packet undecoded left them with no index buffer at all: they
+    // fell back to the vertex count, which a hand-fetch V# reports as 1, and
+    // then declined for having fewer than 3 vertices.
+    if (op == IT_DRAW_INDEX_OFFSET_2 && count >= 3) {
+      const uint32_t index_offset = body[1], icount = body[2];
+      const uint32_t index_bytes = g_index_type == 1 ? 4 : 2;
+      const uint64_t ibase =
+          g_index_base + static_cast<uint64_t>(index_offset) * index_bytes;
+      const bool mapped =
+          g_index_base && icount && icount <= 0x100000 &&
+          utl::isMemoryRangeMapped(
+              reinterpret_cast<const void*>(ibase),
+              static_cast<uint64_t>(icount) * index_bytes);
+      static const bool off2_trace =
+          std::getenv("DELTA_GPU_DRAWPKT") != nullptr;
+      if (off2_trace) {
+        static int n = 0;
+        if (n++ < 32)
+          std::fprintf(stderr,
+                       "[drawpkt] OFFSET_2 maxsz=%u ioff=%u icount=%u "
+                       "g_index_base=%#lx -> ibase=%#lx itype=%u %s\n",
+                       body[0], index_offset, icount,
+                       (unsigned long)g_index_base, (unsigned long)ibase,
+                       g_index_type,
+                       mapped               ? "accepted"
+                       : !g_index_base      ? "REJECTED (no INDEX_BASE set)"
+                       : !icount            ? "REJECTED (zero count)"
+                       : icount > 0x100000  ? "REJECTED (count cap)"
+                                            : "REJECTED (unmapped)");
+      }
+      if (mapped) {
+        d.index_data = reinterpret_cast<const void*>(ibase);
+        d.index_count = icount;
+        d.index_type = g_index_type;
       }
     }
     d.rt_w = FbWidth();

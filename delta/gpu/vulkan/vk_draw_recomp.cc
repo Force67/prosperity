@@ -107,8 +107,26 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
                    (unsigned long)d.tex_base, d.num_texs, d.num_vattrs,
                    d.recomp ? d.recomp->ok : 0);
   }
-  if (!d.recomp || !d.recomp->ok || draw_count < 3)
+  if (!d.recomp || !d.recomp->ok || draw_count < 3) {
+    // DELTA_GPU_DECLTRACE: norecomp lumps together three unrelated causes --
+    // no recompiled program, a program that failed to translate, and a draw
+    // whose count never made it out of the packet. Separate them, because only
+    // the last one points upstream at the command processor.
+    static const bool trace = std::getenv("DELTA_GPU_DECLTRACE") != nullptr;
+    if (trace) {
+      static int n = 0;
+      if (n++ < 96)
+        std::fprintf(stderr,
+                     "[decl] norecomp why=%s vcount=%u icount=%u idx=%p "
+                     "vbufs=%u vattrs=%u prim=%#x rt=%#lx\n",
+                     !d.recomp              ? "no-program"
+                     : !d.recomp->ok        ? "translate-failed"
+                                            : "count<3",
+                     d.vertex_count, d.index_count, d.index_data, d.num_vbufs,
+                     d.num_vattrs, d.prim_type, (unsigned long)d.rt_base);
+    }
     return Decline(kNoRecomp);
+  }
   const bool has_storage_image =
       std::any_of(d.recomp->ps_texs.begin(), d.recomp->ps_texs.end(),
                   [](const gcn::ShaderTex& tex) { return tex.storage; });
