@@ -1,11 +1,14 @@
 # Prosperity <img src="https://i.imgur.com/zOaZAH2.png" width="40" height="40" />
 
-What comes after Delta? Prosperity.
+What comes after Delta? Prosperity. 
 
-An experimental PlayStation 4 emulator for Linux and Android. Guest x86-64 code
-runs directly on x86-64 hosts and through an embedded FEX JIT on aarch64 (arm64)
-hosts; everything else (loader, kernel HLE, devices) is host-native. Graphics are
-presented with Vulkan + SDL3.
+Propserity (formerly started as PS4Delta in 2019) is a dual PlayStation 4 and 5 emulator for Linux and Android (Windows support coming later).
+
+The CPU is not emulated for amd64 hosts, on ARM FEX is used to run.
+The GPU is entirely emulated, and recompiled to SPIRV.
+
+Everything else (loader, kernel HLE, devices) is as host-native as possible.
+Graphics are presented with Vulkan + SDL3.
 
 ## Documentation
 * [Building](docs/building.md)
@@ -31,7 +34,7 @@ available CMake options.
 ### On linux
 * __Processor__: x86-64 (made in the last 10 years) with AVX, SSE4.2 and BMI1, or an aarch64 host.
 * __RAM__: 16 GB of RAM (8 may work, depending on the type of game you want to run).
-* __Graphics__: a GPU with support for Vulkan 1.4+.
+* __Graphics__: a GPU with support for Vulkan 1.4+, and a minimum of 6-8 GB vram (the more, the better).
 
 ### On android
 * __Processor__: Preferably something new, like one of those fancy new Snapdragons.
