@@ -656,6 +656,52 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
                 }
               }
             };
+        // Resolve the live V# behind every raw buffer the emitted VS/PS reads
+        // with MUBUF. Same scalar replay as the cbuffers: the descriptor is
+        // read at the instruction that consumes it, so an SRT-chained V# lands
+        // here as well as an inline one.
+        static const bool kRawBufTrace =
+            std::getenv("DELTA_GPU_RAWBUF") != nullptr;
+        auto resolve_bufs = [&](const std::vector<gcn::ShaderBuffer>& bufs,
+                                const uint32_t* user_data,
+                                const std::shared_ptr<const gcn::Program>& prog,
+                                const char* stage) {
+          if (bufs.empty())
+            return;
+          const auto resolved =
+              gcn::ResolveShaderBuffers(prog, bufs, user_data);
+          for (size_t i = 0; i < bufs.size(); i++) {
+            const gcn::ShaderBuffer& sb = bufs[i];
+            if (sb.binding >= rhi::DrawInfo::kMaxBuffers)
+              continue;
+            gcn::VBuffer vb = resolved[i];
+            if (!vb.base && sb.srsrc_sgpr + 3 < 16)
+              vb = gcn::DecodeVBuffer(&user_data[sb.srsrc_sgpr]);
+            uint64_t bytes = vb.stride ? (uint64_t)vb.stride * vb.num_records
+                                       : vb.num_records;
+            const bool ok = vb.base >= 0x1000000000ull &&
+                            vb.base < 0x20000000000ull && bytes &&
+                            bytes <= 0xFFFFFFFFull &&
+                            vb.base + bytes <= 0x20000000000ull;
+            if (kRawBufTrace) {
+              static int n = 0;
+              if (n++ < 64)
+                std::fprintf(stderr,
+                             "[rawbuf] %s vs=%#lx bind=%u pc=%#x s%u "
+                             "base=%#lx stride=%u nrec=%u bytes=%lu "
+                             "vcount=%u icount=%u %s\n",
+                             stage, (unsigned long)vs_a, sb.binding, sb.use_pc,
+                             sb.srsrc_sgpr, (unsigned long)vb.base, vb.stride,
+                             vb.num_records, (unsigned long)bytes,
+                             d.vertex_count, d.index_count,
+                             ok ? "resolved" : "UNRESOLVED");
+            }
+            if (!ok)
+              continue;
+            d.bufs[sb.binding] = {vb.base, static_cast<uint32_t>(bytes)};
+            d.num_bufs = std::max(d.num_bufs, sb.binding + 1);
+          }
+        };
         if (good) {
           resolve_cbufs(rc.vs_cbufs, vud2, vs_prog, true);
           if (ps_a >= 0x1000000000ull && ps_a < 0x20000000000ull)
@@ -666,6 +712,11 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
             d.num_cbufs = std::max(d.num_cbufs, cb.binding + 1);
           for (const auto& cb : rc.ps_cbufs)
             d.num_cbufs = std::max(d.num_cbufs, cb.binding + 1);
+          resolve_bufs(rc.vs_bufs, vud2, vs_prog, "vs");
+          if (ps_a >= 0x1000000000ull && ps_a < 0x20000000000ull)
+            resolve_bufs(rc.ps_bufs, &g_regs[mmSPI_SHADER_USER_DATA_PS_0],
+                         ps_prog ? ps_prog : gcn::CachedProgram(ps_a, 4096),
+                         "ps");
         }
         if (good) {
           d.vs_addr = vs_a;

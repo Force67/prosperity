@@ -24,6 +24,7 @@ namespace gpu::gcn {
 
 struct RecompiledCs;
 struct ShaderAttr;
+struct ShaderBuffer;
 
 // A decoded vertex-buffer resource (GCN V#, 4 dwords).
 struct VBuffer {
@@ -121,6 +122,17 @@ std::unordered_map<uint32_t, VBuffer> ResolveCbuffers(
 std::vector<VBuffer> ResolveDirectVertexBuffers(
     const std::shared_ptr<const Program>& program,
     const std::vector<ShaderAttr>& attrs,
+    const uint32_t* user_data);
+
+// Resolve the live V# behind each raw buffer a graphics stage loads from with
+// MUBUF (see ShaderBuffer / PlanGfxBuffers). Same replay as
+// ResolveDirectVertexBuffers: the descriptor SGPRs may start as inline user
+// data or be overwritten by an SRT s_load, so each V# is captured from the
+// scalar state live at the instruction that consumes it. The result is
+// index-aligned with `buffers`; unresolved entries are zero-initialized.
+std::vector<VBuffer> ResolveShaderBuffers(
+    const std::shared_ptr<const Program>& program,
+    const std::vector<ShaderBuffer>& buffers,
     const uint32_t* user_data);
 
 // Replay a compute shader's uniform scalar descriptor loads and capture each

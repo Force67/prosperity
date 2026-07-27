@@ -136,6 +136,94 @@ bool CreateUploadRings(const VkPhysicalDeviceProperties& props) {
     }
     vkUpdateDescriptorSets(g_dev.device, kCbufBindings, uw, 0, nullptr);
   }
+
+  // Raw-buffer set layout (set 2). Every recompiled pipeline layout that has a
+  // shader reading buffers by hand names it, so it exists from the start; the
+  // ring behind it is allocated only if such a shader actually appears.
+  {
+    g_ring.sbo_align = (uint32_t)std::max<VkDeviceSize>(
+        props.limits.minStorageBufferOffsetAlignment, 4);
+    if (props.limits.maxDescriptorSetStorageBuffersDynamic < kRawBufBindings)
+      std::fprintf(stderr,
+                   "[gpuvk] only %u dynamic storage buffers available, need "
+                   "%u: shaders reading raw buffers will decline\n",
+                   props.limits.maxDescriptorSetStorageBuffersDynamic,
+                   kRawBufBindings);
+    g_ring.sbo_stride = (kRawBufWindow + g_ring.sbo_align - 1) &
+                        ~(VkDeviceSize)(g_ring.sbo_align - 1);
+    VkDescriptorSetLayoutBinding sbs[kRawBufBindings]{};
+    for (uint32_t i = 0; i < kRawBufBindings; i++) {
+      sbs[i].binding = i;
+      sbs[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC;
+      sbs[i].descriptorCount = 1;
+      sbs[i].stageFlags =
+          VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    }
+    VkDescriptorSetLayoutCreateInfo sl{
+        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    sl.bindingCount = kRawBufBindings;
+    sl.pBindings = sbs;
+    VKOK(vkCreateDescriptorSetLayout(g_dev.device, &sl, nullptr,
+                                     &g_ring.sbo_layout));
+  }
+  return true;
+}
+
+bool EnsureRawBufferRing() {
+  if (g_ring.sbo_map)
+    return true;
+  if (!g_ring.sbo_layout)
+    return false;
+  VkBufferCreateInfo sb{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+  sb.size = kSboRing;
+  sb.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+  VKOK(vkCreateBuffer(g_dev.device, &sb, nullptr, &g_ring.sbo_buf));
+  VkMemoryRequirements sr;
+  vkGetBufferMemoryRequirements(g_dev.device, g_ring.sbo_buf, &sr);
+  VkMemoryAllocateInfo sm{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+  sm.allocationSize = sr.size;
+  sm.memoryTypeIndex = FindMemoryType(sr.memoryTypeBits,
+                                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  VKOK(vkAllocateMemory(g_dev.device, &sm, nullptr, &g_ring.sbo_mem));
+  VKOK(vkBindBufferMemory(g_dev.device, g_ring.sbo_buf, g_ring.sbo_mem, 0));
+  VKOK(vkMapMemory(g_dev.device, g_ring.sbo_mem, 0, kSboRing, 0,
+                   (void**)&g_ring.sbo_map));
+  std::memset(g_ring.sbo_map, 0, kSboRing);
+  NameObject(VK_OBJECT_TYPE_BUFFER, (uint64_t)g_ring.sbo_buf,
+             "raw buffer ring");
+  g_ring.sbo_written.assign(
+      static_cast<size_t>((kSboRing + g_ring.sbo_stride - 1) /
+                          g_ring.sbo_stride),
+      0);
+
+  VkDescriptorPoolSize sps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC,
+                           kRawBufBindings};
+  VkDescriptorPoolCreateInfo spi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+  spi.maxSets = 1;
+  spi.poolSizeCount = 1;
+  spi.pPoolSizes = &sps;
+  VKOK(vkCreateDescriptorPool(g_dev.device, &spi, nullptr, &g_ring.sbo_pool));
+  VkDescriptorSetAllocateInfo sai{
+      VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+  sai.descriptorPool = g_ring.sbo_pool;
+  sai.descriptorSetCount = 1;
+  sai.pSetLayouts = &g_ring.sbo_layout;
+  VKOK(vkAllocateDescriptorSets(g_dev.device, &sai, &g_ring.sbo_set));
+  VkDescriptorBufferInfo sbinfo[kRawBufBindings];
+  VkWriteDescriptorSet sw[kRawBufBindings];
+  for (uint32_t i = 0; i < kRawBufBindings; i++) {
+    sbinfo[i] = {g_ring.sbo_buf, 0, kRawBufWindow};
+    sw[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    sw[i].dstSet = g_ring.sbo_set;
+    sw[i].dstBinding = i;
+    sw[i].descriptorCount = 1;
+    sw[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC;
+    sw[i].pBufferInfo = &sbinfo[i];
+  }
+  vkUpdateDescriptorSets(g_dev.device, kRawBufBindings, sw, 0, nullptr);
+  std::fprintf(stderr, "[gpuvk] raw-buffer ring: %llu MB, %u KB windows\n",
+               (unsigned long long)(kSboRing >> 20), kRawBufWindow >> 10);
   return true;
 }
 

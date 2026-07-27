@@ -79,6 +79,10 @@ bool IsReadableThisFrame(uint64_t base, uint32_t size) {
 
 }  // namespace
 
+static_assert(rhi::DrawInfo::kMaxBuffers == kRawBufBindings,
+              "the command processor and the raw-buffer ring must agree on "
+              "how many set-2 bindings exist");
+
 void ReportDeclines() {
   std::fprintf(stderr, "[gpuvk]   decline:");
   for (int i = 0; i < kMaxDeclineReason; i++)
@@ -709,6 +713,73 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
   vkCmdBindDescriptorSets(g_frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                           rp->layout, 1, 1, &g_ring.ubo_set, kCbufBindings,
                           dyn_off);
+  // Stage the raw buffers the shader indexes by hand (set 2). Only the leading
+  // window of each is copied -- a MUBUF address is a per-lane index with no
+  // static bound, so there is no "planned size" to copy exactly -- and the
+  // recompiled shader clamps into that window. Repeats within a frame (the
+  // same skinning palette across a character's draws) reuse one upload.
+  uint32_t rawbuf_mask = 0;
+  if (rp->raw_bufs) {
+    if (!EnsureRawBufferRing())
+      return Decline(kRing);
+    static int staged_frame = -1;
+    static std::unordered_map<ReadableRangeKey, uint32_t, ReadableRangeKeyHash>
+        staged;
+    if (staged_frame != g_frame.num) {
+      staged_frame = g_frame.num;
+      staged.clear();
+    }
+    uint32_t sbo_dyn[kRawBufBindings] = {};
+    for (uint32_t i = 0; i < kRawBufBindings; i++) {
+      const auto& rb = d.bufs[i];
+      const uint32_t want = std::min(rb.size, kRawBufWindow);
+      if (!want || !IsReadableThisFrame(rb.base, want))
+        continue;  // unresolved descriptor: the shared zero window at offset 0
+      const ReadableRangeKey key{rb.base, want};
+      const auto found = staged.find(key);
+      if (found != staged.end()) {
+        sbo_dyn[i] = found->second;
+        rawbuf_mask |= 1u << i;
+        continue;
+      }
+      const VkDeviceSize off = (g_ring.sbo_offset + g_ring.sbo_align - 1) &
+                               ~(VkDeviceSize)(g_ring.sbo_align - 1);
+      const size_t window = static_cast<size_t>(off / g_ring.sbo_stride);
+      if (off + g_ring.sbo_stride > g_ring.sbo_end ||
+          window >= g_ring.sbo_written.size())
+        return Decline(kRing);
+      if (!FlushCsWritesRange(renderer, rb.base, want))
+        return Decline(kNoRecomp);
+      uint8_t* dst = g_ring.sbo_map + off;
+      std::memcpy(dst, reinterpret_cast<const void*>(rb.base), want);
+      // Zero whatever an earlier draw left past this window's payload, so a
+      // read past the descriptor's own extent cannot pick up another buffer.
+      const uint32_t previous = g_ring.sbo_written[window];
+      if (want < previous)
+        std::memset(dst + want, 0, previous - want);
+      g_ring.sbo_written[window] = want;
+      g_ring.sbo_offset = off + g_ring.sbo_stride;
+      sbo_dyn[i] = static_cast<uint32_t>(off);
+      staged.emplace(key, sbo_dyn[i]);
+      rawbuf_mask |= 1u << i;
+    }
+    vkCmdBindDescriptorSets(g_frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            rp->layout, 2, 1, &g_ring.sbo_set, kRawBufBindings,
+                            sbo_dyn);
+    // DELTA_GPU_RAWBUF: which set-2 bindings a draw actually got, so a shader
+    // reading zeros can be told apart from one reading real guest data.
+    static const bool kRawBufTrace = std::getenv("DELTA_GPU_RAWBUF") != nullptr;
+    if (kRawBufTrace) {
+      static int n = 0;
+      if (n++ < 64)
+        std::fprintf(stderr,
+                     "[rawbuf] draw#%u vs=%#lx nbufs=%u staged=%#x "
+                     "sizes=%u/%u/%u/%u\n",
+                     g_frame.draws, (unsigned long)d.vs_addr, d.num_bufs,
+                     rawbuf_mask, d.bufs[0].size, d.bufs[1].size,
+                     d.bufs[2].size, d.bufs[3].size);
+    }
+  }
   if (tex_set)
     vkCmdBindDescriptorSets(g_frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                             rp->layout, 0, 1, &tex_set, 0, nullptr);
@@ -844,6 +915,7 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
     rt.last_vs = d.vs_addr;
     rt.last_ps = d.ps_addr;
     rt.last_cbuf_mask = cbuf_mask;
+    rt.last_rawbuf_mask = rawbuf_mask;
   }
   if (g_region.cur_rt) {
     auto& rt = g_rts[g_region.cur_rt];

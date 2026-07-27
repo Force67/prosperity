@@ -42,6 +42,10 @@ struct RecompPipe {
   VkDescriptorSetLayout tex_set_layout = VK_NULL_HANDLE;
   bool textured = false;
   bool multi_tex = false;  // custom set 0 for multiple and/or storage images
+  // The shader pair reads raw buffers with MUBUF, so the layout carries set 2
+  // (the raw-buffer ring). Shaders that do not are unaffected: their layout
+  // ends at set 1 exactly as before.
+  bool raw_bufs = false;
 };
 
 class RecompiledPipelineCache {

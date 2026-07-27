@@ -255,9 +255,9 @@ void EmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       if (sc.is_cs)
         EmitCsMubuf(t, inst, sc);
       else if (!sc.is_ps && sc.direct_vfetch.count(inst.pc))
-        break;
+        break;  // seeded from the vertex-input state instead
       else
-        WarnUnsupported(sc.is_ps ? "mubuf.ps" : "mubuf.vs", inst.opcode, w, w1);
+        EmitGfxMubuf(t, inst, sc);
       break;
     case Enc::kMtbuf:
       if (sc.is_cs)
@@ -729,6 +729,11 @@ bool TranslateVs(const Program& program,
 
   if (!PlanCbufs(program, 0, r.vs_cbufs, sc.cbuf_bind, reachable.data()))
     return false;
+  // Raw buffer reads left over once the vertex-input state has claimed the
+  // direct fetches: the shader indexes them itself, so they become storage
+  // buffers the renderer resolves per draw.
+  PlanGfxBuffers(program, 0, &sc.direct_vfetch, r.vs_bufs, sc.gfx_buf_bind,
+                 reachable.data());
 
   if (!force_fullscreen_vs)
     EmitBody(t, program, sc, reachable.data());
@@ -774,6 +779,9 @@ bool TranslatePs(const Program& program,
   if (!PlanCbufs(program, r.vs_cbufs.size(), r.ps_cbufs, sc.cbuf_bind,
                  reachable.data()))
     return false;
+  // Set 2 is shared with the VS, so PS bindings continue after the VS's.
+  PlanGfxBuffers(program, r.vs_bufs.size(), nullptr, r.ps_bufs, sc.gfx_buf_bind,
+                 reachable.data());
 
   // Sampler bindings: one per unique descriptor (shared plan with
   // TrackTextures). More unique samplers than the renderer's set-0 layout

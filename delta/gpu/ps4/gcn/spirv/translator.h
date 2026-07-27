@@ -61,6 +61,8 @@ struct Translator {
   Id state_var = 0;  // CFG block index for the while-switch dispatch
   Id cbuf_type = 0;  // shared CB { uvec4 data[64]; } type
   std::unordered_map<uint32_t, Id> cbuf_vars;  // binding -> cbuffer UBO var
+  Id gfx_buf_type = 0;  // shared Buf { uint data[]; } type (set 2)
+  std::unordered_map<uint32_t, Id> gfx_buf_vars;  // binding -> raw-buffer SSBO
   Id img_types[4] = {};          // sampled 2D / 2D-array, color / depth images
   Id sampled_types[4] = {};      // corresponding combined image-sampler types
   Id sampled_ptrs[4] = {};       // UniformConstant pointers to sampled_types
@@ -246,6 +248,31 @@ struct Translator {
     return m.Load(t_u, ch);
   }
 
+  // ---- raw buffers (graphics MUBUF model) ----
+  // Declared as Buf { uint data[]; } at set 2, one binding per distinct V# the
+  // stage loads through. Storage rather than uniform because the address is a
+  // per-lane index, not a constant offset.
+  Id EnsureGfxBuffer(uint32_t binding) {
+    auto it = gfx_buf_vars.find(binding);
+    if (it != gfx_buf_vars.end())
+      return it->second;
+    if (!gfx_buf_type) {
+      const Id run = m.TypeRuntimeArray(t_u);
+      m.Decorate(run, spv::Decoration::ArrayStride, {4});
+      gfx_buf_type = m.TypeStruct({run});
+      m.Decorate(gfx_buf_type, spv::Decoration::Block);
+      m.MemberDecorate(gfx_buf_type, 0, spv::Decoration::Offset, {0});
+    }
+    const Id v = m.Variable(
+        m.TypePointer(spv::StorageClass::StorageBuffer, gfx_buf_type),
+        spv::StorageClass::StorageBuffer);
+    m.Decorate(v, spv::Decoration::DescriptorSet, {2});
+    m.Decorate(v, spv::Decoration::Binding, {binding});
+    m.Name(v, "rawbuf" + std::to_string(binding));
+    gfx_buf_vars[binding] = v;
+    return v;
+  }
+
   // ---- operand sources ----
   // Raw uint of a source operand field (SSRC/VSRC encoding).
   Id SrcRaw(uint32_t field, uint32_t literal) {
@@ -356,6 +383,10 @@ struct StageContext {
 
   // shared graphics
   std::unordered_map<uint32_t, uint32_t> cbuf_bind;  // V# SGPR -> set-1 binding
+  // Raw MUBUF loads: instruction pc -> set-2 storage-buffer binding (see
+  // PlanGfxBuffers). Keyed per instruction, not per SGPR, because one SGPR quad
+  // can hold several descriptors over a shader's life.
+  std::unordered_map<uint32_t, uint32_t> gfx_buf_bind;
   // Per-instruction cbuf bindings for constant buffer_loads whose srsrc SGPRs
   // are reused (PS5 table-chained descriptors); takes precedence over
   // cbuf_bind.
@@ -431,6 +462,18 @@ void EmitCbufSmrd(Translator& t,
                   const Inst& inst,
                   const std::unordered_map<uint32_t, uint32_t>& bindings);
 void EmitMimg(Translator& t, const Inst& inst, StageContext& sc);
+// Assign a set-2 storage-buffer binding to every raw MUBUF in a graphics
+// stage, skipping the instructions `claimed` already serves as vertex inputs.
+// Instructions sharing one descriptor (same SGPR quad, same producing scalar
+// load) share a binding; anything past kMaxGfxBuffers is left unplanned and
+// warns at emit time, exactly as an unimplemented op would.
+void PlanGfxBuffers(const Program& program,
+                    uint32_t first_binding,
+                    const std::unordered_set<uint32_t>* claimed,
+                    std::vector<ShaderBuffer>& buffers,
+                    std::unordered_map<uint32_t, uint32_t>& bindings,
+                    const uint8_t* reachable = nullptr);
+void EmitGfxMubuf(Translator& t, const Inst& inst, StageContext& sc);
 bool PlanCsResources(const Program& program,
                      const uint8_t* reachable,
                      uint32_t lds_dwords,

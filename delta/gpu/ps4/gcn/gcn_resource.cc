@@ -437,11 +437,17 @@ MimgBindingPlan PlanMimgBindings(const Program& program,
 VBuffer DecodeVBuffer(const uint32_t* p) {
   // GCN V# (buffer resource descriptor), 4 dwords:
   //  [0]  base_address[31:0]
-  //  [1]  base_address[47:32] in [15:0]; stride[13:0] in [29:16]
+  //  [1]  base_address[43:32] in [11:0]; [15:12] reserved;
+  //       stride[13:0] in [29:16]
   //  [2]  num_records
   //  [3]  dst_sel/nfmt/dfmt/...: nfmt[14:12], dfmt[18:15]
+  // The base is 44 bits, not 48: the top nibble of word 1 is reserved, and
+  // Shadow of the Colossus leaves it non-zero on its per-object vertex pools.
+  // Reading it as address put them at 0x7080_xxxxxxxx -- 124 TB, far outside a
+  // PS4 process' ~1 TB address space -- so every descriptor carrying that
+  // nibble was rejected as out of range and read back as zero.
   return {
-      .base = (static_cast<uint64_t>(p[1] & 0xFFFF) << 32) | p[0],
+      .base = (static_cast<uint64_t>(p[1] & 0xFFF) << 32) | p[0],
       .stride = (p[1] >> 16) & 0x3FFF,
       .num_records = p[2],
       .dfmt = (p[3] >> 15) & 0xF,
@@ -720,6 +726,39 @@ std::vector<VBuffer> ResolveDirectVertexBuffers(
                      eval.sgpr[attr.table_sgpr + 2],
                      eval.sgpr[attr.table_sgpr + 3], data[0], data[1], data[2]);
       }
+    }
+  }
+  return result;
+}
+
+std::vector<VBuffer> ResolveShaderBuffers(
+    const std::shared_ptr<const Program>& program,
+    const std::vector<ShaderBuffer>& buffers,
+    const uint32_t* user_data) {
+  std::vector<VBuffer> result(buffers.size());
+  if (!program || !user_data || buffers.empty())
+    return result;
+
+  ScalarEval eval(user_data);
+  for (const Inst& inst : CachedScalarInfo(program).insts) {
+    eval.Step(inst);
+    if (inst.enc != Enc::kMubuf)
+      continue;
+    for (size_t i = 0; i < buffers.size(); i++) {
+      const ShaderBuffer& buffer = buffers[i];
+      if (buffer.use_pc != inst.pc || !eval.AllKnown(buffer.srsrc_sgpr, 4))
+        continue;
+      result[i] = DecodeVBuffer(&eval.sgpr[buffer.srsrc_sgpr]);
+      if (eval.trace)
+        std::fprintf(
+            stderr,
+            "[eud] rawbuf%zu pc=%#x s%u -> base=%#lx stride=%u "
+            "nrec=%u V#=%08x/%08x/%08x/%08x\n",
+            i, inst.pc, buffer.srsrc_sgpr,
+            static_cast<unsigned long>(result[i].base), result[i].stride,
+            result[i].num_records, eval.sgpr[buffer.srsrc_sgpr],
+            eval.sgpr[buffer.srsrc_sgpr + 1], eval.sgpr[buffer.srsrc_sgpr + 2],
+            eval.sgpr[buffer.srsrc_sgpr + 3]);
     }
   }
   return result;

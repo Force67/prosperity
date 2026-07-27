@@ -42,6 +42,16 @@ constexpr VkDeviceSize kUboRing =
 constexpr uint32_t kCbufWindow = gpu::gcn::kCbufDwords * 4;
 constexpr uint32_t kCbufBindings =
     gpu::gcn::kMaxCbufBindings;  // set-1 UBO bindings
+// Raw-buffer ring: the windows a recompiled shader's hand-written MUBUF loads
+// read from, at set-2 bindings 0..kRawBufBindings-1. Four dynamic storage
+// buffers is the Vulkan floor (maxDescriptorSetStorageBuffersDynamic), so the
+// recompiler's cap matches it exactly.
+// The window is a compromise the shader knows about: a MUBUF index has no
+// static bound, so a resource larger than this is staged only up to here and
+// the recompiled shader clamps, reading the window's last dword past it.
+constexpr VkDeviceSize kSboRing = 128ull * 1024 * 1024;
+constexpr uint32_t kRawBufWindow = gpu::gcn::kGfxBufferDwords * 4;
+constexpr uint32_t kRawBufBindings = gpu::gcn::kMaxGfxBuffers;
 
 struct UploadRings {
   // Vertex ring: interleaved pos+colour+uv for the heuristic path, the raw
@@ -73,6 +83,21 @@ struct UploadRings {
   VkDescriptorPool ubo_pool = VK_NULL_HANDLE;
   VkDescriptorSet ubo_set = VK_NULL_HANDLE;
 
+  // Raw-buffer ring: same shape as the cbuffer ring (fixed windows selected by
+  // a dynamic offset), but storage buffers, because a MUBUF address is a
+  // per-lane index rather than a uniform offset. Window 0 stays zero and is
+  // what an unresolved binding points at.
+  VkBuffer sbo_buf = VK_NULL_HANDLE;
+  VkDeviceMemory sbo_mem = VK_NULL_HANDLE;
+  uint8_t* sbo_map = nullptr;
+  VkDeviceSize sbo_offset = 0, sbo_end = kSboRing;
+  uint32_t sbo_align = 256;
+  VkDeviceSize sbo_stride = kRawBufWindow;
+  std::vector<uint32_t> sbo_written;
+  VkDescriptorSetLayout sbo_layout = VK_NULL_HANDLE;
+  VkDescriptorPool sbo_pool = VK_NULL_HANDLE;
+  VkDescriptorSet sbo_set = VK_NULL_HANDLE;
+
   // Texture uploads are recorded into the active frame command buffer. Each
   // frame slot owns its blocks so an in-flight transfer is never overwritten.
   std::vector<TextureUploadBlock> texture_uploads[2];
@@ -81,6 +106,11 @@ struct UploadRings {
 extern UploadRings& g_ring;
 
 bool CreateUploadRings(const VkPhysicalDeviceProperties& props);
+// Allocate the raw-buffer ring + its descriptor set. Deferred to the first
+// draw that needs one: the ring is large, and a title whose vertex fetches the
+// vertex-input state already covers never binds set 2 at all. The set layout
+// itself is created up front, because pipeline layouts name it.
+bool EnsureRawBufferRing();
 bool AllocateTextureUpload(uint32_t slot,
                            VkDeviceSize bytes,
                            VkDeviceSize alignment,

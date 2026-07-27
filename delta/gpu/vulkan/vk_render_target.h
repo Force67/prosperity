@@ -63,6 +63,11 @@ struct RTarget {
   // Bindings that do not resolve are bound to a zero window, which is what
   // turns a tonemap's constants into 0 and its output into NaN.
   uint32_t last_cbuf_mask = 0;
+  // Bit i: set-2 raw-buffer binding i of that draw resolved to readable guest
+  // memory and was staged. A shader that indexes a buffer by hand reads zeros
+  // for every bit that is clear, which is indistinguishable in the output from
+  // a buffer that is genuinely zero -- so it has to be reported.
+  uint32_t last_rawbuf_mask = 0;
 };
 
 extern std::unordered_map<uint64_t, RTarget>& g_rts;

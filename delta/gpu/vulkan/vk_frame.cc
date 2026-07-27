@@ -260,17 +260,17 @@ bool ReportRtContents(FrameSlot& owner) {
       if (!seen && num_distinct < 4)
         distinct[num_distinct++] = v;
     }
-    std::fprintf(stderr,
-                 "[rtstat] f%d RT %#lx %ux%u draws=%u nz=%lu rgbnz=%lu/%lu "
-                 "mean=%lu nan=%lu vs=%#lx ps=%#lx cb=%#x "
-                 "vals=%08x %08x %08x %08x\n",
-                 g_frame.num, (unsigned long)kv.first, rt.w, rt.h, rt.draws,
-                 (unsigned long)nz, (unsigned long)rgb_nz,
-                 (unsigned long)samples,
-                 (unsigned long)(samples ? luma_sum / samples : 0),
-                 (unsigned long)nan_half, (unsigned long)rt.last_vs,
-                 (unsigned long)rt.last_ps, rt.last_cbuf_mask, distinct[0],
-                 distinct[1], distinct[2], distinct[3]);
+    std::fprintf(
+        stderr,
+        "[rtstat] f%d RT %#lx %ux%u draws=%u nz=%lu rgbnz=%lu/%lu "
+        "mean=%lu nan=%lu vs=%#lx ps=%#lx cb=%#x rb=%#x "
+        "vals=%08x %08x %08x %08x\n",
+        g_frame.num, (unsigned long)kv.first, rt.w, rt.h, rt.draws,
+        (unsigned long)nz, (unsigned long)rgb_nz, (unsigned long)samples,
+        (unsigned long)(samples ? luma_sum / samples : 0),
+        (unsigned long)nan_half, (unsigned long)rt.last_vs,
+        (unsigned long)rt.last_ps, rt.last_cbuf_mask, rt.last_rawbuf_mask,
+        distinct[0], distinct[1], distinct[2], distinct[3]);
     // DELTA_GPU_RTSTAT_DIS: disassemble the pixel shader that produced a
     // NaN-poisoned half-float target. Guest shader addresses differ from run to
     // run, so the shader has to be named in the same run that observed the NaN.
@@ -364,6 +364,13 @@ void BeginFrame(Renderer& renderer) {
       g_ring.ubo_offset = (kCbufWindow + g_ring.ubo_align - 1) &
                           ~(VkDeviceSize)(g_ring.ubo_align - 1);
   }
+  // Raw-buffer ring: same slot split and same permanently-zero window 0, which
+  // is where a binding whose descriptor did not resolve points.
+  const VkDeviceSize sbo_base = g_frame.slot_idx * (kSboRing / 2);
+  g_ring.sbo_offset = sbo_base;
+  g_ring.sbo_end = sbo_base + kSboRing / 2;
+  if (g_frame.slot_idx == 0)
+    g_ring.sbo_offset = g_ring.sbo_stride;
   g_region.cur_rt = 0;
   g_region.cur_depth = 0;
   g_region.open = false;

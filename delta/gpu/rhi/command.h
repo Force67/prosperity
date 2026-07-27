@@ -74,6 +74,20 @@ struct DrawInfo {
   };
   DrawCbuf cbufs[16];
   uint32_t num_cbufs = 0;
+  // Raw (non-format) buffers the recompiled VS/PS read by hand with MUBUF: a
+  // skinning palette, an instance table, vertex data the shader indexes itself
+  // rather than receiving through the vertex-input state. Each is staged into
+  // a storage-buffer window and bound at set 2, binding == index here. Empty
+  // for shaders that read no such buffer, which is every title whose vertex
+  // fetches the vertex-input state already covers.
+  static constexpr uint32_t kMaxBuffers = 4;
+  struct DrawBuffer {
+    uint64_t base = 0;
+    uint32_t size =
+        0;  // bytes the descriptor describes (may exceed the window)
+  };
+  DrawBuffer bufs[kMaxBuffers];
+  uint32_t num_bufs = 0;
   uint64_t rt_base = 0;  // CB_COLOR0 address; the draw's render target
   uint32_t rt_w = 0,
            rt_h = 0;  // render-target dimensions (shared by all MRT targets)

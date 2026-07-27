@@ -22,13 +22,21 @@
 namespace gpu::gcn {
 namespace {
 
-// ---- compute SSBO access ----------------------------------------------------
-Id CsSsboPtr(Translator& t, StageContext& sc, uint32_t binding, Id dword_idx) {
+// ---- SSBO access ------------------------------------------------------------
+// Shared by the compute resource model and the graphics raw-buffer model: both
+// alias a guest range as Buf { uint data[]; } and address it by dword index.
+Id SsboPtr(Translator& t, Id var, Id dword_idx) {
   const Id p_u = t.m.TypePointer(spv::StorageClass::StorageBuffer, t.t_u);
-  return t.m.AccessChain(p_u, sc.cs_ssbo[binding], {t.U32(0), dword_idx});
+  return t.m.AccessChain(p_u, var, {t.U32(0), dword_idx});
+}
+Id SsboLoad(Translator& t, Id var, Id dword_idx) {
+  return t.m.Load(t.t_u, SsboPtr(t, var, dword_idx));
+}
+Id CsSsboPtr(Translator& t, StageContext& sc, uint32_t binding, Id dword_idx) {
+  return SsboPtr(t, sc.cs_ssbo[binding], dword_idx);
 }
 Id CsSsboLoad(Translator& t, StageContext& sc, uint32_t binding, Id dword_idx) {
-  return t.m.Load(t.t_u, CsSsboPtr(t, sc, binding, dword_idx));
+  return SsboLoad(t, sc.cs_ssbo[binding], dword_idx);
 }
 void CsSsboStore(Translator& t,
                  StageContext& sc,
@@ -96,12 +104,11 @@ Id BufferByteOffset(Translator& t,
 // Sub-dword read out of a dword-granular SSBO: value = bits [off*8 .. off*8+n)
 // of the containing dword. `byte_off` may be misaligned only within the dword.
 Id LoadSubDword(Translator& t,
-                StageContext& sc,
-                uint32_t binding,
+                Id var,
                 Id byte_off,
                 uint32_t bits,
                 bool sign_extend) {
-  const Id word = CsSsboLoad(t, sc, binding, t.Shr(byte_off, t.U32(2)));
+  const Id word = SsboLoad(t, var, t.Shr(byte_off, t.U32(2)));
   const Id shift = t.Shl(t.And(byte_off, t.U32(3)), t.U32(3));
   if (sign_extend)
     return t.m.Bitcast(
@@ -422,6 +429,140 @@ void EmitMimg(Translator& t, const Inst& inst, StageContext& sc) {
       t.SetVgF(vdata + out++, t.m.CompositeExtract(t.t_f, texel, i));
 }
 
+// ---- graphics: raw MUBUF -> storage buffer ----------------------------------
+// A MUBUF the vertex-input state does not already cover is a hand-written
+// buffer read: the shader computes a per-lane index (an s_load'd vertex id, a
+// bone index, an instance number) and pulls dwords out of a V#-described
+// resource. Model it exactly as the compute path models guest memory -- a
+// storage buffer aliasing [V#.base, ...) addressed by dword index -- rather
+// than as a constant window, because the address is not uniform.
+namespace {
+
+// Dwords a raw buffer load moves, or 0 for an op this path does not implement
+// (every store, atomic and format store).
+uint32_t GfxMubufLoadDwords(uint32_t op) {
+  if (op <= 0x03)
+    return op + 1;  // buffer_load_format_x..xyzw (raw dwords, no conversion)
+  if (op >= 0x08 && op <= 0x0b)
+    return 1;  // buffer_load_ubyte/sbyte/ushort/sshort
+  if (op == 0x0c)
+    return 1;
+  if (op == 0x0d)
+    return 2;
+  if (op == 0x0e)
+    return 4;
+  if (op == 0x0f)
+    return 3;
+  return 0;
+}
+
+}  // namespace
+
+void PlanGfxBuffers(const Program& program,
+                    uint32_t first_binding,
+                    const std::unordered_set<uint32_t>* claimed,
+                    std::vector<ShaderBuffer>& buffers,
+                    std::unordered_map<uint32_t, uint32_t>& bindings,
+                    const uint8_t* reachable) {
+  // Which scalar load last wrote each SGPR range, so a descriptor quad that is
+  // reloaded with a second V# gets a second binding instead of silently
+  // inheriting the first one's buffer (same reasoning as PlanCsResources).
+  struct ScalarLoad {
+    uint32_t sgpr;
+    uint32_t dwords;
+    uint32_t version;
+  };
+  std::vector<ScalarLoad> loads;
+  const auto descriptor_version = [&](uint32_t sgpr) {
+    for (auto it = loads.rbegin(); it != loads.rend(); ++it)
+      if (sgpr >= it->sgpr && sgpr + 4 <= it->sgpr + it->dwords)
+        return it->version;
+    return UINT32_MAX;  // inline user data
+  };
+
+  std::unordered_map<uint64_t, uint32_t> binding_by_descriptor;
+  uint32_t index = 0;
+  for (const Inst& inst : program) {
+    const uint32_t inst_idx = index++;
+    if (reachable && !reachable[inst_idx])
+      continue;
+    const uint32_t w = inst.raw[0];
+    if (inst.enc == Enc::kSmrd) {
+      const uint32_t n = SmrdDwordCount(inst.opcode);
+      if (!n)
+        continue;
+      const uint32_t sdst = (w >> 15) & 0x7F;
+      loads.erase(std::remove_if(loads.begin(), loads.end(),
+                                 [&](const ScalarLoad& ld) {
+                                   return sdst < ld.sgpr + ld.dwords &&
+                                          ld.sgpr < sdst + n;
+                                 }),
+                  loads.end());
+      loads.push_back({sdst, n, inst_idx});
+      continue;
+    }
+    if (inst.enc != Enc::kMubuf)
+      continue;
+    if (!GfxMubufLoadDwords((w >> 18) & 0x7F))
+      continue;  // store/atomic: not modelled, and must not spend a binding
+    if (claimed && claimed->count(inst.pc))
+      continue;  // already seeded as a vertex input (see direct_vfetch)
+    const uint32_t srsrc = ((inst.raw[1] >> 16) & 0x1F) * 4;
+    const uint64_t key =
+        static_cast<uint64_t>(srsrc) |
+        (static_cast<uint64_t>(descriptor_version(srsrc)) << 8);
+    const auto found = binding_by_descriptor.find(key);
+    if (found != binding_by_descriptor.end()) {
+      bindings[inst.pc] = found->second;
+      continue;
+    }
+    const uint32_t binding =
+        first_binding + static_cast<uint32_t>(buffers.size());
+    if (binding >= kMaxGfxBuffers) {
+      WarnUnsupported("mubuf.binding-count", binding + 1);
+      continue;  // over the cap: the emitter warns and leaves the VGPRs zero
+    }
+    binding_by_descriptor[key] = binding;
+    bindings[inst.pc] = binding;
+    buffers.push_back({binding, srsrc, inst.pc});
+  }
+}
+
+void EmitGfxMubuf(Translator& t, const Inst& inst, StageContext& sc) {
+  const uint32_t w = inst.raw[0], w1 = inst.raw[1];
+  const uint32_t op = (w >> 18) & 0x7F, inst_offset = w & 0xFFF;
+  const bool offen = (w >> 12) & 1, idxen = (w >> 13) & 1;
+  const uint32_t vaddr = w1 & 0xFF, vdata = (w1 >> 8) & 0xFF;
+  const uint32_t srsrc = ((w1 >> 16) & 0x1F) * 4, soffset = (w1 >> 24) & 0xFF;
+  const uint32_t n = GfxMubufLoadDwords(op);
+  const auto it = sc.gfx_buf_bind.find(inst.pc);
+  if (!n || it == sc.gfx_buf_bind.end()) {
+    WarnUnsupported(sc.is_ps ? "mubuf.ps" : "mubuf.vs", op, w, w1);
+    return;
+  }
+  const Id var = t.EnsureGfxBuffer(it->second);
+  // Clamp into the staged window. The index is whatever the shader computed,
+  // and the renderer stages only a fixed prefix of the resource, so an
+  // unclamped access could read outside the bound range. Hardware returns zero
+  // past NUM_RECORDS; pinning to the window's last dword keeps this in bounds
+  // without a per-load branch, and the stride/record fields needed for exact
+  // bounds are not reliably live in a graphics stage's SGPRs.
+  const Id byte_off = t.UMin(BufferByteOffset(t, inst, inst_offset, idxen,
+                                              offen, vaddr, srsrc, soffset),
+                             t.U32(kGfxBufferDwords * 4 - 4));
+  const Id dword_idx = t.Shr(byte_off, t.U32(2));
+  if (op >= 0x08 && op <= 0x0b) {
+    const bool sign_extend = op == 0x09 || op == 0x0b;
+    t.SetVg(vdata,
+            LoadSubDword(t, var, byte_off, op <= 0x09 ? 8 : 16, sign_extend));
+    return;
+  }
+  for (uint32_t i = 0; i < n; i++)
+    t.SetVg(vdata + i, SsboLoad(t, var,
+                                t.UMin(t.Add(dword_idx, t.U32(i)),
+                                       t.U32(kGfxBufferDwords - 1))));
+}
+
 // ---- compute: resource plan -------------------------------------------------
 bool PlanCsResources(const Program& program,
                      const uint8_t* reachable,
@@ -612,16 +753,16 @@ void EmitCsMubuf(Translator& t, const Inst& inst, StageContext& sc) {
       store_dwords(op - 3);
       break;
     case 0x08:  // buffer_load_ubyte
-      t.SetVg(vdata, LoadSubDword(t, sc, binding, byte_off, 8, false));
+      t.SetVg(vdata, LoadSubDword(t, sc.cs_ssbo[binding], byte_off, 8, false));
       break;
     case 0x09:  // buffer_load_sbyte
-      t.SetVg(vdata, LoadSubDword(t, sc, binding, byte_off, 8, true));
+      t.SetVg(vdata, LoadSubDword(t, sc.cs_ssbo[binding], byte_off, 8, true));
       break;
     case 0x0a:  // buffer_load_ushort
-      t.SetVg(vdata, LoadSubDword(t, sc, binding, byte_off, 16, false));
+      t.SetVg(vdata, LoadSubDword(t, sc.cs_ssbo[binding], byte_off, 16, false));
       break;
     case 0x0b:  // buffer_load_sshort
-      t.SetVg(vdata, LoadSubDword(t, sc, binding, byte_off, 16, true));
+      t.SetVg(vdata, LoadSubDword(t, sc.cs_ssbo[binding], byte_off, 16, true));
       break;
     case 0x0c:
       load_dwords(1);

@@ -275,11 +275,12 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
       return nullptr;
     set0 = rp.tex_set_layout;
   }
-  VkDescriptorSetLayout sls[2] = {set0, g_ring.ubo_layout};
+  rp.raw_bufs = !d.recomp->vs_bufs.empty() || !d.recomp->ps_bufs.empty();
+  VkDescriptorSetLayout sls[3] = {set0, g_ring.ubo_layout, g_ring.sbo_layout};
   VkPushConstantRange push{
       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 128};
   VkPipelineLayoutCreateInfo li{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-  li.setLayoutCount = 2;
+  li.setLayoutCount = rp.raw_bufs ? 3 : 2;
   li.pSetLayouts = sls;
   li.pushConstantRangeCount = 1;
   li.pPushConstantRanges = &push;

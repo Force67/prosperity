@@ -66,6 +66,26 @@ struct ShaderCbuf {
   bool pointer = false;
 };
 
+// Set-2 storage-buffer bindings shared by VS + PS, and the window of each one
+// the renderer stages. A raw MUBUF load addresses its resource with a per-lane
+// index, so unlike a constant buffer there is no static bound on what it
+// reads; the window is what the renderer can afford to copy per draw, and the
+// shader clamps into it.
+constexpr uint32_t kMaxGfxBuffers = 4;
+constexpr uint32_t kGfxBufferDwords = 262144;  // 1 MB
+
+// A raw (non-format) buffer a graphics stage reads with MUBUF: vertex data the
+// VS fetches by hand rather than through the vertex-input state, a skinning
+// palette, an instance table. Bound as a storage buffer at set 2, aliasing
+// [V#.base, V#.base + window). The V# lives in `srsrc_sgpr` at `use_pc`, where
+// draw-time scalar evaluation reads it -- it may have arrived there by s_load
+// through an SRT chain, so user data alone does not name it.
+struct ShaderBuffer {
+  uint32_t binding = 0;
+  uint32_t srsrc_sgpr = 0;
+  uint32_t use_pc = 0;
+};
+
 // A texture the PS references (MIMG). Bound as a combined image sampler at
 // set 0; binding order == MIMG order (matches TrackTextures).
 struct ShaderTex {
@@ -82,6 +102,8 @@ struct Recompiled {
   std::vector<ShaderAttr> attrs;     // vertex inputs
   std::vector<ShaderCbuf> vs_cbufs;  // VS UBOs (set 1, binding = .binding)
   std::vector<ShaderCbuf> ps_cbufs;  // PS UBOs (set 1, binding = .binding)
+  std::vector<ShaderBuffer> vs_bufs;  // VS raw buffers (set 2, = .binding)
+  std::vector<ShaderBuffer> ps_bufs;  // PS raw buffers (set 2, = .binding)
   std::vector<ShaderTex> ps_texs;    // PS samplers (set 0, binding = .binding)
   uint32_t num_params = 0;           // VS->PS interpolants (locations 0..n-1)
   uint8_t ps_mrt_mask = 0;           // bit n set = PS exports MRT color n
