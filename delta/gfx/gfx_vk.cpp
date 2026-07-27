@@ -17,6 +17,7 @@
 // (gfx_headless.cpp) and the GPU renderer dumps frames instead of presenting.
 #ifndef __ANDROID__
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstdint>
@@ -25,6 +26,14 @@
 #include <cstring>
 #include <utility>
 #include <vector>
+
+#if defined(__linux__)
+#define STBI_ONLY_PNG
+#define STB_IMAGE_IMPLEMENTATION
+#include <stb_image.h>
+
+#include "prosperity_logo.h"
+#endif
 
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
@@ -52,6 +61,7 @@ namespace {
 // videoout HLE race to bring the window up and each passes its own generic
 // title, so whoever wins uses this instead when it is set.
 std::string g_title;
+std::vector<uint8_t> g_iconPng;
 
 constexpr uint32_t kFrameSlotCount = 2;
 
@@ -106,6 +116,75 @@ struct State {
 State g;
 std::atomic_bool g_canPresent{true};
 constexpr uint64_t kPresentWaitSliceNs = 50'000'000;
+constexpr size_t kMaxIconSize = 16u << 20;
+constexpr int kMaxIconDimension = 4096;
+
+#if defined(__linux__)
+void drawBadge(uint8_t *pixels, int width, int height, const uint8_t *logo,
+               int logoWidth, int logoHeight) {
+  const int size = std::max(1, std::min(width, height) * 3 / 8);
+  const int left = width - size;
+  for (int y = 0; y < size; ++y) {
+    for (int x = 0; x < size; ++x) {
+      const int px = left + x;
+      uint8_t *rgba = pixels + (static_cast<size_t>(y) * width + px) * 4;
+      const uint8_t *badge =
+          logo + (static_cast<size_t>(y * logoHeight / size) * logoWidth +
+                  x * logoWidth / size) *
+                     4;
+      const uint32_t alpha = badge[3];
+      const uint32_t dstAlpha = rgba[3];
+      const uint32_t outAlpha = alpha * 255 + dstAlpha * (255 - alpha);
+      if (outAlpha) {
+        for (int channel = 0; channel < 3; ++channel)
+          rgba[channel] = static_cast<uint8_t>(
+              (badge[channel] * alpha * 255 +
+               rgba[channel] * dstAlpha * (255 - alpha) + outAlpha / 2) /
+              outAlpha);
+      }
+      rgba[3] = static_cast<uint8_t>((outAlpha + 127) / 255);
+    }
+  }
+}
+
+void applyWindowIcon() {
+  if (!g.window || g_iconPng.empty() || g_iconPng.size() > kMaxIconSize)
+    return;
+  int width = 0;
+  int height = 0;
+  int channels = 0;
+  if (!stbi_info_from_memory(g_iconPng.data(),
+                             static_cast<int>(g_iconPng.size()), &width,
+                             &height, &channels) ||
+      width > kMaxIconDimension || height > kMaxIconDimension)
+    return;
+  stbi_uc *pixels = stbi_load_from_memory(
+      g_iconPng.data(), static_cast<int>(g_iconPng.size()), &width, &height,
+      &channels, STBI_rgb_alpha);
+  if (!pixels) {
+    stbi_image_free(pixels);
+    return;
+  }
+  int logoWidth = 0;
+  int logoHeight = 0;
+  stbi_uc *logo =
+      stbi_load_from_memory(kProsperityLogoPng, sizeof(kProsperityLogoPng),
+                            &logoWidth, &logoHeight, nullptr, STBI_rgb_alpha);
+  if (!logo) {
+    stbi_image_free(pixels);
+    return;
+  }
+  drawBadge(pixels, width, height, logo, logoWidth, logoHeight);
+  SDL_Surface *surface = SDL_CreateSurfaceFrom(
+      width, height, SDL_PIXELFORMAT_RGBA32, pixels, width * STBI_rgb_alpha);
+  if (surface) {
+    SDL_SetWindowIcon(g.window, surface);
+    SDL_DestroySurface(surface);
+  }
+  stbi_image_free(logo);
+  stbi_image_free(pixels);
+}
+#endif
 
 void stopPresenting(const char *operation, VkResult result) {
   std::fprintf(stderr, "[gfx] %s failed: VkResult=%d\n", operation, result);
@@ -425,6 +504,9 @@ bool init(const char *title, uint32_t width, uint32_t height) {
     std::fprintf(stderr, "[gfx] SDL_CreateWindow failed: %s\n", SDL_GetError());
     return false;
   }
+#if defined(__linux__)
+  applyWindowIcon();
+#endif
 
   // Instance: SDL-required extensions + optional validation.
   uint32_t nExt = 0;
@@ -759,6 +841,18 @@ void setTitle(const char *title) {
   g_title = title ? title : "";
   if (g.window && !g_title.empty())
     SDL_SetWindowTitle(g.window, g_title.c_str());
+}
+
+void setIcon(const uint8_t *png, size_t size) {
+#if defined(__linux__)
+  if (size > kMaxIconSize)
+    return;
+  g_iconPng.assign(png, png + size);
+  applyWindowIcon();
+#else
+  (void)png;
+  (void)size;
+#endif
 }
 
 bool available() {
