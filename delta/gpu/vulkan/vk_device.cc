@@ -30,8 +30,15 @@ VkPipelineStageFlags StageForAccess(VkAccessFlags access, bool source) {
                 VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT))
     stages |= VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
               VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+  // Every stage that can express a shader access on this queue, not just
+  // fragment: image descriptors are fragment-only today, but a barrier helper
+  // that silently under-covers vertex fetch or compute the day one appears is
+  // exactly the class of bug that is unfindable later. The extra stage bits
+  // are free when no such access exists in the frame.
   if (access & (VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT))
-    stages |= VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    stages |= VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
+              VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+              VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
   return stages   ? stages
          : source ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT
                   : VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
