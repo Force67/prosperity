@@ -28,6 +28,7 @@ bool pumpEvents() { return true; }
 bool pollKeyboardPad(PadKeys &) { return false; }
 void setRumble(uint8_t, uint8_t) {}
 void shutdown() {}
+void queryVram(uint64_t &used, uint64_t &total) { used = total = 0; }
 
 } // namespace gfx
 

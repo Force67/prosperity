@@ -29,6 +29,10 @@ void setTitle(const char *title);
 // emulator badge before using it as the taskbar icon.
 void setIcon(const uint8_t *png, size_t size);
 
+// Device-local memory this process is using, and what it may use. Both 0 when
+// the driver has no VK_EXT_memory_budget (or there is no window at all).
+void queryVram(uint64_t &used, uint64_t &total);
+
 // Create the window, Vulkan device and swapchain. Returns false on failure.
 // Idempotent: returns true immediately if a window already exists.
 bool init(const char *title, uint32_t width, uint32_t height);

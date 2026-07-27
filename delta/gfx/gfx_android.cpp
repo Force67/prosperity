@@ -902,6 +902,8 @@ void setRumble(uint8_t, uint8_t) {}
 
 void shutdown() { teardown(); }
 
+void queryVram(uint64_t &used, uint64_t &total) { used = total = 0; }
+
 void setAndroidWindow(ANativeWindow *window) {
   std::lock_guard<std::mutex> lk(g_inMutex);
   g_pendingWindow = window;

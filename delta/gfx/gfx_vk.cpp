@@ -695,6 +695,10 @@ bool init(const char *title, uint32_t width, uint32_t height) {
 
 void queryVram(uint64_t &used, uint64_t &total) {
   used = total = 0;
+  // Callers outside the present path (the GPU perf overlay) can ask before the
+  // window exists, or in a headless run where it never will.
+  if (g.phys == VK_NULL_HANDLE)
+    return;
   VkPhysicalDeviceMemoryProperties2 mp2{
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2};
   VkPhysicalDeviceMemoryBudgetPropertiesEXT budget{

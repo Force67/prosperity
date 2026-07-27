@@ -4,10 +4,13 @@
 
 #include "gpu/vulkan/vk_perf.h"
 
+#include "gfx/gfx.h"
 #include "gfx/overlay.h"
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <unistd.h>
 
 namespace gpu::vk {
 
@@ -36,6 +39,60 @@ constexpr int kStageHistN = 240;
 StageSample g_stage_hist[kStageHistN];
 int g_stage_hist_pos = 0, g_stage_hist_count = 0;
 
+// This process only, not the machine: when tuning the emulator the useful
+// number is what it is itself using, and a system-wide gauge mostly reports
+// whatever else happens to be running. CPU is utime+stime from
+// /proc/self/stat, RSS the resident pages from /proc/self/statm.
+struct ProcStats {
+  float cpuPct = 0;  // whole process; exceeds 100 when several threads are busy
+  uint64_t rss = 0;  // bytes
+};
+ProcStats g_proc;
+
+void RefreshProcStats() {
+  static uint64_t last_ns = 0;
+  static uint64_t last_jiffies = 0;
+  const uint64_t now = NowNs();
+  if (last_ns && now - last_ns < 500000000ull)
+    return;
+
+  uint64_t jiffies = 0;
+  if (FILE* f = std::fopen("/proc/self/stat", "r")) {
+    char buf[1024];
+    const size_t n = std::fread(buf, 1, sizeof buf - 1, f);
+    std::fclose(f);
+    buf[n] = 0;
+    // comm (field 2) can contain spaces and parens, so start after the last ')'.
+    if (const char* p = std::strrchr(buf, ')')) {
+      unsigned long ut = 0, st = 0;
+      int field = 3;
+      p += 2;
+      while (*p && field < 14) {
+        if (*p == ' ')
+          field++;
+        p++;
+      }
+      if (std::sscanf(p, "%lu %lu", &ut, &st) == 2)
+        jiffies = ut + st;
+    }
+  }
+  const long hz = sysconf(_SC_CLK_TCK);
+  if (last_ns && hz > 0 && jiffies >= last_jiffies) {
+    const double dt = (now - last_ns) / 1e9;
+    const double busy = double(jiffies - last_jiffies) / hz;
+    g_proc.cpuPct = dt > 0 ? float(busy / dt * 100.0) : 0.0f;
+  }
+  last_jiffies = jiffies;
+  last_ns = now;
+
+  if (FILE* f = std::fopen("/proc/self/statm", "r")) {
+    unsigned long total = 0, resident = 0;
+    if (std::fscanf(f, "%lu %lu", &total, &resident) == 2)
+      g_proc.rss = uint64_t(resident) * uint64_t(sysconf(_SC_PAGESIZE));
+    std::fclose(f);
+  }
+}
+
 // 3x5 bitmap font (rows top-down, bit 2 = left pixel). Uppercase + digits only.
 const uint8_t* OvGlyph(char c) {
   struct Glyph {
@@ -46,7 +103,8 @@ const uint8_t* OvGlyph(char c) {
       {'0', {7, 5, 5, 5, 7}}, {'1', {2, 6, 2, 2, 7}}, {'2', {7, 1, 7, 4, 7}},
       {'3', {7, 1, 7, 1, 7}}, {'4', {5, 5, 7, 1, 1}}, {'5', {7, 4, 7, 1, 7}},
       {'6', {7, 4, 7, 5, 7}}, {'7', {7, 1, 1, 2, 2}}, {'8', {7, 5, 7, 5, 7}},
-      {'9', {7, 5, 7, 1, 7}}, {'.', {0, 0, 0, 0, 2}}, {'A', {7, 5, 7, 5, 5}},
+      {'9', {7, 5, 7, 1, 7}}, {'.', {0, 0, 0, 0, 2}}, {'%', {5, 1, 2, 4, 5}},
+      {'A', {7, 5, 7, 5, 5}},
       {'B', {6, 5, 6, 5, 6}}, {'C', {7, 4, 4, 4, 7}}, {'D', {6, 5, 5, 5, 6}},
       {'E', {7, 4, 7, 4, 7}}, {'F', {7, 4, 7, 4, 4}}, {'G', {7, 4, 5, 5, 7}},
       {'H', {5, 5, 7, 5, 5}}, {'I', {7, 2, 2, 2, 7}}, {'L', {4, 4, 4, 4, 7}},
@@ -94,6 +152,56 @@ void OvText(uint8_t* b,
       for (int rx = 0; rx < 3; rx++)
         if (rows[ry] & (4 >> rx))
           OvFill(b, w, h, x + rx * scale, y + ry * scale, scale, scale, bgra);
+  }
+}
+
+// What this process is using, top-right, in the same terse style as the stage
+// legend. Deliberately its own panel: these are resource levels, not a
+// breakdown of the frame, and reading them next to the graph invited the two to
+// be compared. gpuMs/wallMs is our own GPU time as a share of the frame; VRAM
+// is the driver's per-process estimate.
+void DrawResourcePanel(uint8_t* bgra,
+                       uint32_t w,
+                       uint32_t h,
+                       float gpuMs,
+                       float wallMs) {
+  RefreshProcStats();
+  uint64_t vramUsed = 0, vramTotal = 0;
+  gfx::queryVram(vramUsed, vramTotal);
+  constexpr double kGiB = 1024.0 * 1024.0 * 1024.0;
+  const float gpuPct =
+      wallMs > 0.01f ? (gpuMs / wallMs * 100.0f > 100.0f ? 100.0f
+                                                         : gpuMs / wallMs * 100.0f)
+                     : 0.0f;
+  const struct {
+    uint32_t col;
+    const char* fmt;
+    double val;
+  } kUse[4] = {
+      {0xFF5AC8B4, "CPU %5.0f%%", g_proc.cpuPct},
+      {0xFFE69632, "GPU %5.0f%%", gpuPct},
+      {0xFF5AA0E6, "RAM %5.2f GB", g_proc.rss / kGiB},
+      {0xFFD2A0F0, "VRAM %4.2f GB", vramUsed / kGiB},
+  };
+  constexpr int kRowH = 14, kSwatch = 8, kTextX = 14;
+  constexpr int kPanelW = 14 + 13 * 8 + 6;  // swatch + widest row + padding
+  const int x0 = (int)w - kPanelW - 10, y0 = 10;
+  const int panelH = kRowH * 4 + 4;
+  for (int yy = y0 - 4; yy < y0 + panelH && yy < (int)h; yy++) {
+    if (yy < 0)
+      continue;
+    uint32_t* row = reinterpret_cast<uint32_t*>(bgra + (size_t)yy * w * 4);
+    for (int xx = x0 - 4; xx < x0 + kPanelW && xx < (int)w; xx++)
+      if (xx >= 0)
+        row[xx] = (row[xx] >> 2) & 0x3F3F3F3F;
+  }
+  char buf[64];
+  int ty = y0;
+  for (const auto& u : kUse) {
+    OvFill(bgra, w, h, x0, ty + 1, kSwatch, kSwatch, u.col);
+    std::snprintf(buf, sizeof buf, u.fmt, u.val);
+    OvText(bgra, w, h, x0 + kTextX, ty, 2, 0xFFE6E6E6, buf);
+    ty += kRowH;
   }
 }
 
@@ -152,7 +260,7 @@ void DrawPerfOverlay(uint8_t* bgra, uint32_t w, uint32_t h) {
   constexpr float kPxPerMs = 2.0f;
   const int graph_w = kStageHistN * kColW;
   const int x0 = 10, y1 = (int)h - 10, y0 = y1 - kGraphH;
-  const int legend_h = 7 * 14 + 4;
+  const int legend_h = 7 * 14 + 4;  // fps + 6 stage rows
   const int panel_y0 = y0 - legend_h - 4;
   // Darken the panel background (keeps the game visible underneath).
   for (int yy = panel_y0 - 4; yy < y1 + 4 && yy < (int)h; yy++) {
@@ -216,6 +324,8 @@ void DrawPerfOverlay(uint8_t* bgra, uint32_t w, uint32_t h) {
     std::snprintf(buf, sizeof buf, "%s %5.1f", kLabel[st], avg[st]);
     OvText(bgra, w, h, x0 + 14, ty, 2, 0xFFE6E6E6, buf);
   }
+
+  DrawResourcePanel(bgra, w, h, avg[2], avg_wall);
 }
 
 // Wall-clock FPS report. Always on (cheap): every ~2s of presented frames, log
