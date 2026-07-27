@@ -121,71 +121,140 @@ bool g_windowChanged = false;
 constexpr int kMaxTouch = 8;
 Touch g_touches[kMaxTouch];
 int g_touchCount = 0;
-uint32_t g_surfaceW = 0, g_surfaceH = 0;
 
-// On-screen virtual gamepad, in normalised [0,1] surface coords. The present
-// blit stretches the whole game framebuffer across the whole surface, so a
-// point at (fx,fy) draws and hit-tests at the same place. Buttons use a square
-// zone of half-size `r` (in height units); sticks use a generous side region.
-struct Btn {
-  float cx, cy, r;
-};
-const Btn kCross{0.70f, 0.86f, 0.06f};   // use item / confirm
-const Btn kCircle{0.80f, 0.66f, 0.06f};  // cancel
-const Btn kBomb{0.70f, 0.62f, 0.06f};    // bomb (R1)
-const Btn kOptions{0.95f, 0.10f, 0.05f}; // pause / start
-struct Stick {
-  float cx, cy, r;
-};
-const Stick kLStick{0.12f, 0.70f, 0.14f}; // move
-const Stick kRStick{0.88f, 0.70f, 0.14f}; // aim / shoot
+// Rect the presented image occupies inside the surface (landscape px). The
+// frame is letterboxed rather than stretched, so this is what maps a touch to
+// a point in the image.
+float g_viewX = 0.0f, g_viewY = 0.0f, g_viewW = 0.0f, g_viewH = 0.0f;
 
-bool inBtn(float nx, float ny, const Btn &b, float aspect) {
-  // square zone; scale x by aspect so the zone is square on screen, not
-  // stretched
-  return std::fabs((nx - b.cx) * aspect) <= b.r && std::fabs(ny - b.cy) <= b.r;
+// On-screen virtual gamepad. Laid out in "height units": y runs 0..1 down the
+// presented image and x runs 0..aspect across it, so the pad keeps its
+// proportions on any panel and a circle stays a circle. Drawing and hit-testing
+// share the units, so a control is exactly where it looks.
+struct Pill {
+  float cx, cy; // centre
+  float r;      // half-height / corner radius
+  float hw;     // half-width between the caps; 0 => circle
+};
+
+enum class Mark { Cross, Circle, Square, Triangle, Bars, Pad, L1, L2, R1, R2 };
+
+struct Button {
+  Pill p;
+  bool PadKeys::*bit;
+  Mark mark;
+};
+
+constexpr float kStickR = 0.155f;
+
+struct Layout {
+  Button btns[11];
+  int n = 0;
+  Pill lstick, rstick;
+  float dpadCx, dpadCy, dpadArm;
+};
+
+// Thumbs sit at the bottom corners, so the sticks anchor there and the d-pad /
+// face diamond stack above them; shoulders run along the top edge.
+Layout buildLayout(float aspect) {
+  const float A = aspect;
+  Layout l;
+  auto add = [&](float cx, float cy, float r, float hw, bool PadKeys::*bit,
+                 Mark m) { l.btns[l.n++] = Button{{cx, cy, r, hw}, bit, m}; };
+
+  const float faceCx = A - 0.24f, faceCy = 0.30f;
+  const float spread = 0.105f, faceR = 0.058f;
+  add(faceCx, faceCy - spread, faceR, 0.0f, &PadKeys::triangle, Mark::Triangle);
+  add(faceCx + spread, faceCy, faceR, 0.0f, &PadKeys::circle, Mark::Circle);
+  add(faceCx, faceCy + spread, faceR, 0.0f, &PadKeys::cross, Mark::Cross);
+  add(faceCx - spread, faceCy, faceR, 0.0f, &PadKeys::square, Mark::Square);
+
+  const float shY = 0.075f, shR = 0.042f, shHw = 0.080f;
+  add(0.19f, shY, shR, shHw, &PadKeys::l1, Mark::L1);
+  add(0.40f, shY, shR, shHw, &PadKeys::l2, Mark::L2);
+  add(A - 0.19f, shY, shR, shHw, &PadKeys::r1, Mark::R1);
+  add(A - 0.40f, shY, shR, shHw, &PadKeys::r2, Mark::R2);
+
+  add(A * 0.5f, shY, shR, 0.130f, &PadKeys::touchpad, Mark::Pad);
+  add(A * 0.5f + 0.26f, shY, 0.038f, 0.060f, &PadKeys::options, Mark::Bars);
+
+  l.lstick = {0.26f, 0.74f, kStickR, 0.0f};
+  l.rstick = {A - 0.26f, 0.74f, kStickR, 0.0f};
+  l.dpadCx = 0.24f;
+  l.dpadCy = 0.30f;
+  l.dpadArm = 0.075f;
+  return l;
+}
+
+// Distance test against a pill (a circle when hw == 0), grown by `grow` so the
+// touch target is a little more forgiving than the drawn shape.
+bool inPill(float hx, float hy, const Pill &p, float grow) {
+  float dx = std::fabs(hx - p.cx) - p.hw;
+  if (dx < 0.0f)
+    dx = 0.0f;
+  const float dy = hy - p.cy;
+  const float r = p.r + grow;
+  return dx * dx + dy * dy <= r * r;
+}
+
+// Surface pixel -> height units inside the presented image. False when the
+// point falls in the letterbox margin.
+bool toUnits(float sx, float sy, float &hx, float &hy) {
+  hx = (sx - g_viewX) / g_viewH;
+  hy = (sy - g_viewY) / g_viewH;
+  return hx >= 0.0f && hy >= 0.0f && hx <= g_viewW / g_viewH && hy <= 1.0f;
 }
 
 // Map the down touches to a DS4 pad against the layout above.
 PadKeys computePad() {
   PadKeys k; // neutral (sticks centred at 128)
-  if (!g_surfaceW || !g_surfaceH)
+  if (g_viewW <= 0.0f || g_viewH <= 0.0f)
     return k;
-  float aspect = float(g_surfaceH) / float(g_surfaceW);
+  const float A = g_viewW / g_viewH;
+  const Layout l = buildLayout(A);
   for (int i = 0; i < g_touchCount; i++) {
-    float nx = g_touches[i].x / g_surfaceW;
-    float ny = g_touches[i].y / g_surfaceH;
-    if (inBtn(nx, ny, kOptions, aspect)) {
-      k.options = true;
+    float hx, hy;
+    if (!toUnits(g_touches[i].x, g_touches[i].y, hx, hy))
+      continue;
+
+    bool claimed = false;
+    for (int b = 0; b < l.n && !claimed; b++)
+      if (inPill(hx, hy, l.btns[b].p, 0.012f)) {
+        k.*(l.btns[b].bit) = true;
+        claimed = true;
+      }
+    if (claimed)
+      continue;
+
+    // D-pad: 8-way, from the offset within the cross.
+    const float ddx = hx - l.dpadCx, ddy = hy - l.dpadCy;
+    if (std::fabs(ddx) <= l.dpadArm * 1.5f && std::fabs(ddy) <= l.dpadArm * 1.5f) {
+      const float dz = l.dpadArm * 0.32f;
+      k.left = k.left || ddx < -dz;
+      k.right = k.right || ddx > dz;
+      k.up = k.up || ddy < -dz;
+      k.down = k.down || ddy > dz;
       continue;
     }
-    if (inBtn(nx, ny, kCross, aspect)) {
-      k.cross = true;
+
+    // Sticks: a generous zone around each ring, deflection from its centre.
+    const bool leftSide = hx < A * 0.5f;
+    const Pill &s = leftSide ? l.lstick : l.rstick;
+    float dx = (hx - s.cx) / kStickR, dy = (hy - s.cy) / kStickR;
+    if (std::fabs(dx) > 1.9f || std::fabs(dy) > 1.9f)
       continue;
-    }
-    if (inBtn(nx, ny, kCircle, aspect)) {
-      k.circle = true;
-      continue;
-    }
-    if (inBtn(nx, ny, kBomb, aspect)) {
-      k.r1 = true;
-      continue;
-    }
-    // Sticks: left half moves, right half aims. Deflection from the ring
-    // centre.
-    const Stick &s = (nx < 0.5f) ? kLStick : kRStick;
-    float dx = (nx - s.cx) / s.r, dy = (ny - s.cy) / s.r;
     dx = std::clamp(dx, -1.0f, 1.0f);
     dy = std::clamp(dy, -1.0f, 1.0f);
-    uint8_t vx = uint8_t(std::clamp(128.0f + dx * 127.0f, 0.0f, 255.0f));
-    uint8_t vy = uint8_t(std::clamp(128.0f + dy * 127.0f, 0.0f, 255.0f));
-    if (nx < 0.5f) {
+    const uint8_t vx = uint8_t(std::clamp(128.0f + dx * 127.0f, 0.0f, 255.0f));
+    const uint8_t vy = uint8_t(std::clamp(128.0f + dy * 127.0f, 0.0f, 255.0f));
+    if (leftSide) {
       k.lx = vx;
       k.ly = vy;
-      k.left = dx < -0.4f;
-      k.right = dx > 0.4f;
-      k.up = dy < -0.4f;
-      k.down = dy > 0.4f; // d-pad for menus
+      // Menus that only read the d-pad still follow the movement stick.
+      k.left = k.left || dx < -0.4f;
+      k.right = k.right || dx > 0.4f;
+      k.up = k.up || dy < -0.4f;
+      k.down = k.down || dy > 0.4f;
     } else {
       k.rx = vx;
       k.ry = vy;
@@ -194,10 +263,25 @@ PadKeys computePad() {
   return k;
 }
 
-// --- helper overlay (CPU alpha-blend into the present framebuffer) ----------
-// Drawn in the game framebuffer, which the present blit stretches across the
-// whole surface, so normalised (fx,fy) lands at the same on-screen spot. Radii
-// are corrected by the surface aspect so glyphs stay round on screen.
+// --- control overlay (CPU alpha-blend into the present framebuffer) --------
+// Everything is a signed distance field resolved with one pixel of coverage,
+// so the pad has soft edges instead of the stair-stepped discs a hard test
+// gives. Height units scale by the framebuffer height, which is exactly how
+// the letterboxed blit maps them to the panel.
+
+struct Paint {
+  uint8_t r, g, b;
+  float a;
+};
+
+constexpr Paint kNone{0, 0, 0, 0.0f};
+constexpr Paint kGlass{12, 14, 20, 0.30f};   // resting button body
+constexpr Paint kGlassOn{58, 66, 84, 0.58f}; // held
+constexpr Paint kRim{224, 231, 245, 0.26f};
+constexpr Paint kRimOn{255, 255, 255, 0.80f};
+constexpr Paint kShadow{0, 0, 0, 0.20f};
+
+inline float clamp01(float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); }
 
 inline void blendPx(uint8_t *buf, int w, int h, bool bgra, int x, int y,
                     uint8_t r, uint8_t g, uint8_t b, float a) {
@@ -210,86 +294,275 @@ inline void blendPx(uint8_t *buf, int w, int h, bool bgra, int x, int y,
   p[bi] = uint8_t(p[bi] * (1 - a) + b * a);
 }
 
-// Round-on-screen ellipse in the framebuffer. band<=0 => filled disc, else a
-// ring of that normalised-radius thickness.
-void glyph(uint8_t *buf, int w, int h, bool bgra, float xr, float yr, float fx,
-           float fy, float sr, float band, uint8_t r, uint8_t g, uint8_t b,
-           float a) {
-  float cx = fx * w, cy = fy * h;
-  float rx = sr * xr, ry = sr * yr; // px radii (round on screen)
-  int x0 = std::max(0, int(cx - rx - 1)),
-      x1 = std::min(w - 1, int(cx + rx + 1));
-  int y0 = std::max(0, int(cy - ry - 1)),
-      y1 = std::min(h - 1, int(cy + ry + 1));
+// Filled and/or stroked pill in framebuffer pixels. strokeW is the full width.
+void drawPill(uint8_t *buf, int w, int h, bool bgra, float cx, float cy,
+              float hw, float r, const Paint &fill, const Paint &stroke,
+              float strokeW) {
+  const float pad = r + strokeW + 2.0f;
+  const int x0 = std::max(0, int(cx - hw - pad));
+  const int x1 = std::min(w - 1, int(cx + hw + pad));
+  const int y0 = std::max(0, int(cy - pad));
+  const int y1 = std::min(h - 1, int(cy + pad));
   for (int y = y0; y <= y1; y++)
     for (int x = x0; x <= x1; x++) {
-      float ex = (x - cx) / rx, ey = (y - cy) / ry;
-      float d = std::sqrt(ex * ex + ey * ey);
-      if (band <= 0.0f ? (d <= 1.0f) : (d <= 1.0f && d >= 1.0f - band))
-        blendPx(buf, w, h, bgra, x, y, r, g, b, a);
+      float dx = std::fabs(x + 0.5f - cx) - hw;
+      if (dx < 0.0f)
+        dx = 0.0f;
+      const float dy = y + 0.5f - cy;
+      const float d = std::sqrt(dx * dx + dy * dy) - r;
+      if (fill.a > 0.0f) {
+        const float cov = clamp01(0.5f - d);
+        if (cov > 0.0f)
+          blendPx(buf, w, h, bgra, x, y, fill.r, fill.g, fill.b, fill.a * cov);
+      }
+      if (stroke.a > 0.0f && strokeW > 0.0f) {
+        const float cov = clamp01(strokeW * 0.5f - std::fabs(d) + 0.5f);
+        if (cov > 0.0f)
+          blendPx(buf, w, h, bgra, x, y, stroke.r, stroke.g, stroke.b,
+                  stroke.a * cov);
+      }
     }
+}
+
+// Capsule segment; the building block for the ✕ / □ / △ marks and the d-pad.
+void drawSeg(uint8_t *buf, int w, int h, bool bgra, float ax, float ay,
+             float bx, float by, float halfW, const Paint &p) {
+  const int x0 = std::max(0, int(std::min(ax, bx) - halfW - 2));
+  const int x1 = std::min(w - 1, int(std::max(ax, bx) + halfW + 2));
+  const int y0 = std::max(0, int(std::min(ay, by) - halfW - 2));
+  const int y1 = std::min(h - 1, int(std::max(ay, by) + halfW + 2));
+  const float vx = bx - ax, vy = by - ay;
+  const float len2 = vx * vx + vy * vy;
+  for (int y = y0; y <= y1; y++)
+    for (int x = x0; x <= x1; x++) {
+      const float px = x + 0.5f - ax, py = y + 0.5f - ay;
+      const float t =
+          len2 > 0.0f ? clamp01((px * vx + py * vy) / len2) : 0.0f;
+      const float dx = px - vx * t, dy = py - vy * t;
+      const float cov =
+          clamp01(halfW - std::sqrt(dx * dx + dy * dy) + 0.5f);
+      if (cov > 0.0f)
+        blendPx(buf, w, h, bgra, x, y, p.r, p.g, p.b, p.a * cov);
+    }
+}
+
+// 3x5 cells, MSB-first per row; just enough for the shoulder labels.
+const uint8_t kGlyphL[5] = {4, 4, 4, 4, 7};
+const uint8_t kGlyphR[5] = {6, 5, 6, 5, 5};
+const uint8_t kGlyph1[5] = {2, 6, 2, 2, 7};
+const uint8_t kGlyph2[5] = {7, 1, 7, 4, 7};
+
+void drawCell(uint8_t *buf, int w, int h, bool bgra, float x0, float y0,
+              float s, const Paint &p) {
+  for (int y = int(y0); y <= int(y0 + s); y++)
+    for (int x = int(x0); x <= int(x0 + s); x++) {
+      const float cx = clamp01(std::min(x0 + s, x + 1.0f) - std::max(x0, float(x)));
+      const float cy = clamp01(std::min(y0 + s, y + 1.0f) - std::max(y0, float(y)));
+      const float cov = cx * cy;
+      if (cov > 0.0f)
+        blendPx(buf, w, h, bgra, x, y, p.r, p.g, p.b, p.a * cov);
+    }
+}
+
+void drawChar(uint8_t *buf, int w, int h, bool bgra, const uint8_t rows[5],
+              float x, float y, float s, const Paint &p) {
+  for (int ry = 0; ry < 5; ry++)
+    for (int rx = 0; rx < 3; rx++)
+      if (rows[ry] & (4 >> rx))
+        drawCell(buf, w, h, bgra, x + rx * s, y + ry * s, s, p);
+}
+
+void drawLabel(uint8_t *buf, int w, int h, bool bgra, const uint8_t a[5],
+               const uint8_t b[5], float cx, float cy, float s,
+               const Paint &p) {
+  const float width = 7.0f * s; // 3 + gap + 3
+  drawChar(buf, w, h, bgra, a, cx - width * 0.5f, cy - 2.5f * s, s, p);
+  drawChar(buf, w, h, bgra, b, cx - width * 0.5f + 4.0f * s, cy - 2.5f * s, s,
+           p);
+}
+
+void drawMark(uint8_t *buf, int w, int h, bool bgra, Mark m, float cx,
+              float cy, float s, const Paint &p) {
+  const float t = std::max(1.2f, s * 0.17f);
+  switch (m) {
+  case Mark::Cross: {
+    const float d = s * 0.60f;
+    drawSeg(buf, w, h, bgra, cx - d, cy - d, cx + d, cy + d, t, p);
+    drawSeg(buf, w, h, bgra, cx - d, cy + d, cx + d, cy - d, t, p);
+    break;
+  }
+  case Mark::Circle:
+    drawPill(buf, w, h, bgra, cx, cy, 0.0f, s * 0.62f, kNone, p, t * 2.0f);
+    break;
+  case Mark::Square: {
+    const float d = s * 0.55f;
+    drawSeg(buf, w, h, bgra, cx - d, cy - d, cx + d, cy - d, t, p);
+    drawSeg(buf, w, h, bgra, cx + d, cy - d, cx + d, cy + d, t, p);
+    drawSeg(buf, w, h, bgra, cx + d, cy + d, cx - d, cy + d, t, p);
+    drawSeg(buf, w, h, bgra, cx - d, cy + d, cx - d, cy - d, t, p);
+    break;
+  }
+  case Mark::Triangle: {
+    const float d = s * 0.70f;
+    const float bx = d * 0.87f, by = d * 0.5f;
+    drawSeg(buf, w, h, bgra, cx, cy - d, cx + bx, cy + by, t, p);
+    drawSeg(buf, w, h, bgra, cx + bx, cy + by, cx - bx, cy + by, t, p);
+    drawSeg(buf, w, h, bgra, cx - bx, cy + by, cx, cy - d, t, p);
+    break;
+  }
+  case Mark::Bars:
+    for (int i = -1; i <= 1; i++)
+      drawSeg(buf, w, h, bgra, cx - s * 0.45f, cy + i * s * 0.42f,
+              cx + s * 0.45f, cy + i * s * 0.42f, t * 0.7f, p);
+    break;
+  case Mark::Pad:
+    drawPill(buf, w, h, bgra, cx, cy, s * 0.50f, s * 0.40f, kNone, p, t * 1.3f);
+    break;
+  case Mark::L1:
+    drawLabel(buf, w, h, bgra, kGlyphL, kGlyph1, cx, cy, s * 0.30f, p);
+    break;
+  case Mark::L2:
+    drawLabel(buf, w, h, bgra, kGlyphL, kGlyph2, cx, cy, s * 0.30f, p);
+    break;
+  case Mark::R1:
+    drawLabel(buf, w, h, bgra, kGlyphR, kGlyph1, cx, cy, s * 0.30f, p);
+    break;
+  case Mark::R2:
+    drawLabel(buf, w, h, bgra, kGlyphR, kGlyph2, cx, cy, s * 0.30f, p);
+    break;
+  }
+}
+
+Paint markPaint(Mark m, bool on) {
+  const float a = on ? 1.0f : 0.62f;
+  switch (m) {
+  case Mark::Cross:
+    return {108, 160, 255, a};
+  case Mark::Circle:
+    return {240, 106, 106, a};
+  case Mark::Square:
+    return {232, 130, 200, a};
+  case Mark::Triangle:
+    return {86, 210, 168, a};
+  default:
+    return {226, 232, 245, a};
+  }
 }
 
 void drawOverlay(uint8_t *buf, uint32_t w, uint32_t h, bool bgra) {
   Touch t[kMaxTouch];
   int n;
-  uint32_t sw, sh;
+  float vx, vy, vw, vh;
   {
     std::lock_guard<std::mutex> lk(g_inMutex);
     n = g_touchCount;
     std::memcpy(t, g_touches, sizeof(Touch) * (n < kMaxTouch ? n : kMaxTouch));
-    sw = g_surfaceW;
-    sh = g_surfaceH;
+    vx = g_viewX;
+    vy = g_viewY;
+    vw = g_viewW;
+    vh = g_viewH;
   }
-  if (!sw || !sh)
+  if (vw <= 0.0f || vh <= 0.0f)
     return;
-  // Per-unit px radii so a glyph stays round after the fb is stretched to the
-  // surface: screen radius sr*sh maps to sr*h px in y and sr*(sh*w/sw) px in x.
-  float yr = float(h);
-  float xr = float(sh) * float(w) / float(sw);
-  float aspect = float(sh) / float(sw);
 
-  auto pressed = [&](const Btn &btn) {
-    for (int i = 0; i < n; i++)
-      if (inBtn(t[i].x / sw, t[i].y / sh, btn, aspect))
+  const float A = vw / vh;
+  const Layout l = buildLayout(A);
+  const float U = float(h); // height unit -> framebuffer pixels
+
+  // Touches in height units, so press state is tested exactly as computePad
+  // resolves it.
+  float hx[kMaxTouch], hy[kMaxTouch];
+  int m = 0;
+  for (int i = 0; i < n; i++) {
+    const float ux = (t[i].x - vx) / vh, uy = (t[i].y - vy) / vh;
+    if (ux < 0.0f || uy < 0.0f || ux > A || uy > 1.0f)
+      continue;
+    hx[m] = ux;
+    hy[m] = uy;
+    m++;
+  }
+  auto held = [&](const Pill &p) {
+    for (int i = 0; i < m; i++)
+      if (inPill(hx[i], hy[i], p, 0.012f))
         return true;
     return false;
   };
 
-  // Face buttons: PS4 colours, brighter when held.
-  struct BC {
-    const Btn &b;
-    uint8_t r, g, bl;
-  } bcs[] = {{kCross, 70, 130, 255},
-             {kCircle, 240, 70, 70},
-             {kBomb, 220, 220, 220},
-             {kOptions, 200, 200, 200}};
-  for (auto &c : bcs) {
-    float a = pressed(c.b) ? 0.85f : 0.40f;
-    glyph(buf, w, h, bgra, xr, yr, c.b.cx, c.b.cy, c.b.r, 0.0f, c.r, c.g, c.bl,
-          a);
-    glyph(buf, w, h, bgra, xr, yr, c.b.cx, c.b.cy, c.b.r, 0.18f, 255, 255, 255,
-          0.6f);
+  for (int b = 0; b < l.n; b++) {
+    const Button &btn = l.btns[b];
+    const bool on = held(btn.p);
+    const float cx = btn.p.cx * U, cy = btn.p.cy * U;
+    const float r = btn.p.r * U, hwp = btn.p.hw * U;
+    drawPill(buf, w, h, bgra, cx, cy + r * 0.10f, hwp, r, kShadow, kNone, 0.0f);
+    drawPill(buf, w, h, bgra, cx, cy, hwp, r, on ? kGlassOn : kGlass,
+             on ? kRimOn : kRim, std::max(1.5f, r * 0.075f));
+    drawMark(buf, w, h, bgra, btn.mark, cx, cy, r * 0.60f,
+             markPaint(btn.mark, on));
   }
 
-  // Sticks: outer ring + a dot at the current deflection.
-  const Stick *sticks[] = {&kLStick, &kRStick};
-  for (auto *s : sticks) {
-    glyph(buf, w, h, bgra, xr, yr, s->cx, s->cy, s->r, 0.10f, 255, 255, 255,
-          0.5f);
-    float dotx = s->cx, doty = s->cy;
-    for (int i = 0; i < n; i++) {
-      float nx = t[i].x / sw, ny = t[i].y / sh;
-      bool mine = (s == &kLStick) ? (nx < 0.5f) : (nx >= 0.5f);
+  // D-pad: a plus of capsules, each arm lit by its own direction.
+  {
+    const float cx = l.dpadCx * U, cy = l.dpadCy * U, arm = l.dpadArm * U;
+    const float t2 = arm * 0.40f;
+    float ddx = 0.0f, ddy = 0.0f;
+    bool active = false;
+    for (int i = 0; i < m; i++) {
+      const float ax = hx[i] - l.dpadCx, ay = hy[i] - l.dpadCy;
+      if (std::fabs(ax) <= l.dpadArm * 1.5f && std::fabs(ay) <= l.dpadArm * 1.5f) {
+        ddx = ax;
+        ddy = ay;
+        active = true;
+      }
+    }
+    const float dz = l.dpadArm * 0.32f;
+    const bool left = active && ddx < -dz, right = active && ddx > dz;
+    const bool up = active && ddy < -dz, down = active && ddy > dz;
+    drawSeg(buf, w, h, bgra, cx - arm, cy, cx + arm, cy, t2, kShadow);
+    drawSeg(buf, w, h, bgra, cx, cy - arm, cx, cy + arm, t2, kShadow);
+    drawSeg(buf, w, h, bgra, cx - arm, cy, cx, cy, t2 * 0.92f,
+            left ? kGlassOn : kGlass);
+    drawSeg(buf, w, h, bgra, cx, cy, cx + arm, cy, t2 * 0.92f,
+            right ? kGlassOn : kGlass);
+    drawSeg(buf, w, h, bgra, cx, cy - arm, cx, cy, t2 * 0.92f,
+            up ? kGlassOn : kGlass);
+    drawSeg(buf, w, h, bgra, cx, cy, cx, cy + arm, t2 * 0.92f,
+            down ? kGlassOn : kGlass);
+    const Paint tip{226, 232, 245, 0.55f};
+    const float ts = arm * 0.16f;
+    drawSeg(buf, w, h, bgra, cx - arm * 0.70f, cy, cx - arm * 0.44f, cy, ts,
+            left ? kRimOn : tip);
+    drawSeg(buf, w, h, bgra, cx + arm * 0.44f, cy, cx + arm * 0.70f, cy, ts,
+            right ? kRimOn : tip);
+    drawSeg(buf, w, h, bgra, cx, cy - arm * 0.70f, cx, cy - arm * 0.44f, ts,
+            up ? kRimOn : tip);
+    drawSeg(buf, w, h, bgra, cx, cy + arm * 0.44f, cx, cy + arm * 0.70f, ts,
+            down ? kRimOn : tip);
+  }
+
+  // Sticks: a recessed well with a knob that follows the thumb.
+  const Pill *sticks[] = {&l.lstick, &l.rstick};
+  for (const Pill *s : sticks) {
+    const float cx = s->cx * U, cy = s->cy * U, r = s->r * U;
+    float kx = cx, ky = cy;
+    bool on = false;
+    for (int i = 0; i < m; i++) {
+      const float dx = (hx[i] - s->cx) / kStickR, dy = (hy[i] - s->cy) / kStickR;
+      if (std::fabs(dx) > 1.9f || std::fabs(dy) > 1.9f)
+        continue;
+      const bool mine = (s == &l.lstick) ? (hx[i] < A * 0.5f) : (hx[i] >= A * 0.5f);
       if (!mine)
         continue;
-      float dx = std::clamp((nx - s->cx) / s->r, -1.0f, 1.0f);
-      float dy = std::clamp((ny - s->cy) / s->r, -1.0f, 1.0f);
-      dotx = s->cx + dx * s->r;
-      doty = s->cy + dy * s->r;
+      kx = cx + std::clamp(dx, -1.0f, 1.0f) * r;
+      ky = cy + std::clamp(dy, -1.0f, 1.0f) * r;
+      on = true;
     }
-    glyph(buf, w, h, bgra, xr, yr, dotx, doty, s->r * 0.4f, 0.0f, 255, 255, 255,
-          0.8f);
+    drawPill(buf, w, h, bgra, cx, cy, 0.0f, r, Paint{8, 10, 14, 0.22f},
+             Paint{224, 231, 245, on ? 0.40f : 0.22f}, std::max(1.5f, r * 0.035f));
+    drawPill(buf, w, h, bgra, kx, ky + r * 0.05f, 0.0f, r * 0.42f, kShadow,
+             kNone, 0.0f);
+    drawPill(buf, w, h, bgra, kx, ky, 0.0f, r * 0.42f,
+             on ? kGlassOn : Paint{18, 21, 28, 0.42f}, on ? kRimOn : kRim,
+             std::max(1.5f, r * 0.05f));
   }
 }
 
@@ -396,13 +669,6 @@ bool createSwapchain() {
   if (ext.width == 0 || ext.height == 0)
     return false;
   g.swapExtent = ext;
-  {
-    // Input + overlay work in the on-screen (landscape) space, which may differ
-    // from the swapchain extent when the compositor is rotating for us.
-    std::lock_guard<std::mutex> lk(g_inMutex);
-    g_surfaceW = std::max(ext.width, ext.height);
-    g_surfaceH = std::min(ext.width, ext.height);
-  }
 
   uint32_t imgCount = caps.minImageCount + 1;
   if (caps.maxImageCount && imgCount > caps.maxImageCount)
@@ -768,6 +1034,34 @@ void present(const void *pixels, uint32_t w, uint32_t h, uint32_t srcPitch,
   if (!waitForPresentFence(slot.fence, "vkWaitForFences"))
     return;
 
+  // Fit the frame into the panel without distorting it: phones are far wider
+  // than 16:9, and stretching to fill made everything ~20% too wide.
+  //
+  // The swapchain image is portrait while the window is landscape (the
+  // compositor scales each axis on its own rather than rotating), so the fit
+  // has to be solved in the landscape space the player actually sees and the
+  // resulting rect mapped back into image space for the blit.
+  const int32_t iw = (int32_t)g.swapExtent.width;
+  const int32_t ih = (int32_t)g.swapExtent.height;
+  const int32_t scrW = std::max(iw, ih), scrH = std::min(iw, ih);
+  int32_t vw = scrW, vh = (int32_t)((int64_t)scrW * h / w);
+  if (vh > scrH) {
+    vh = scrH;
+    vw = (int32_t)((int64_t)scrH * w / h);
+  }
+  const int32_t vx = (scrW - vw) / 2, vy = (scrH - vh) / 2;
+  {
+    std::lock_guard<std::mutex> lk(g_inMutex);
+    g_viewX = float(vx);
+    g_viewY = float(vy);
+    g_viewW = float(vw);
+    g_viewH = float(vh);
+  }
+  const int32_t dx0 = (int32_t)((int64_t)vx * iw / scrW);
+  const int32_t dx1 = (int32_t)((int64_t)(vx + vw) * iw / scrW);
+  const int32_t dy0 = (int32_t)((int64_t)vy * ih / scrH);
+  const int32_t dy1 = (int32_t)((int64_t)(vy + vh) * ih / scrH);
+
   auto *dst = static_cast<uint8_t *>(slot.stagingMap);
   auto *src = static_cast<const uint8_t *>(pixels);
   for (uint32_t y = 0; y < h; y++)
@@ -834,12 +1128,19 @@ void present(const void *pixels, uint32_t w, uint32_t h, uint32_t srcPitch,
                VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                VK_PIPELINE_STAGE_TRANSFER_BIT);
 
+  if (dx0 > 0 || dy0 > 0 || dx1 < iw || dy1 < ih) {
+    const VkClearColorValue black{{0.0f, 0.0f, 0.0f, 1.0f}};
+    const VkImageSubresourceRange all{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    vkCmdClearColorImage(slot.cmd, g.swapImages[idx],
+                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &all);
+  }
+
   VkImageBlit blit{};
   blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
   blit.srcOffsets[1] = {(int32_t)w, (int32_t)h, 1};
   blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-  blit.dstOffsets[1] = {(int32_t)g.swapExtent.width,
-                        (int32_t)g.swapExtent.height, 1};
+  blit.dstOffsets[0] = {dx0, dy0, 0};
+  blit.dstOffsets[1] = {dx1, dy1, 1};
   vkCmdBlitImage(slot.cmd, slot.frameImg, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                  g.swapImages[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
                  &blit, VK_FILTER_LINEAR);
