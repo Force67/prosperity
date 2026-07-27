@@ -77,6 +77,11 @@ public:
     return std::fwrite(buf, size, 1, fptr);
   }
 
+  void Flush() override {
+    if (fptr)
+      std::fflush(fptr);
+  }
+
   uint64_t Seek(int64_t ofs, seekMode mode) override {
     // translate mode
     int32_t origin = 0;

@@ -39,6 +39,7 @@ public:
   virtual bool IsOpen() { return true; }
   virtual uint64_t Read(void *, size_t) = 0;
   virtual uint64_t Write(const void *, size_t) = 0;
+  virtual void Flush() {}
   virtual uint64_t Seek(int64_t, seekMode) = 0;
   virtual uint64_t Tell() = 0;
   virtual uint64_t GetSize() = 0;
@@ -70,6 +71,10 @@ public:
   inline uint64_t Read(void *ptr, size_t size) { return file->Read(ptr, size); }
   inline uint64_t Write(const void *ptr, size_t size) {
     return file->Write(ptr, size);
+  }
+  inline void Flush() {
+    if (file)
+      file->Flush();
   }
   inline uint64_t Seek(uint64_t ofs, seekMode mods) {
     return file->Seek(ofs, mods);

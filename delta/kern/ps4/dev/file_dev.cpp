@@ -66,7 +66,14 @@ int64_t fileDevice::write(const void *buf, size_t n) {
   if (!open_ || !writable_)
     return -SysError::eBADF;
   // PhysFile::Write returns 1 on a complete fwrite; report bytes written.
-  return file_.Write(buf, n) ? static_cast<int64_t>(n) : 0;
+  if (!file_.Write(buf, n))
+    return 0;
+  // Flush every guest write: the emulator is normally SIGKILLed, which discards
+  // whatever is still sitting in the stdio buffer. Without this a save only ever
+  // reached disk in whole 4 KiB buffer flushes -- every savedata file ended up
+  // 0 bytes or truncated mid-record at exactly 4096.
+  file_.Flush();
+  return static_cast<int64_t>(n);
 }
 
 bool fileDevice::adopt(utl::File &&file) {
