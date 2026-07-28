@@ -11,14 +11,16 @@
 
 #include "gpu/gpu_check.h"
 #include "gpu/ps4/gcn/gcn_detile.h"
-#include "gpu/vulkan/vk_debug.h"
 #include "gpu/ps4/gcn/gcn_translate.h"
 #include "gpu/vulkan/vk_capture.h"
 #include "gpu/vulkan/vk_compute_hazard.h"
+#include "gpu/vulkan/vk_debug.h"
 #include "gpu/vulkan/vk_device.h"
+#include "gpu/vulkan/vk_format.h"
 #include "gpu/vulkan/vk_frame.h"
 #include "gpu/vulkan/vk_hash.h"
 #include "gpu/vulkan/vk_perf.h"
+#include "gpu/vulkan/vk_render_target.h"
 #include "gpu/vulkan/vk_texture_cache.h"
 
 #include <algorithm>
@@ -396,6 +398,11 @@ struct CsRange {
   bool gpu_dirty = false;      // buffer newer than guest memory
   bool pending_batch = false;  // referenced by the open dispatch batch
   bool image_staging = false;
+  // Staged from a live render-target image rather than guest memory; content
+  // changes every frame regardless of the guest bytes, so validity is
+  // per-frame (last_rt_frame), never the guest content hash.
+  bool rt_sourced = false;
+  int last_rt_frame = -1;
   ComputeInfo::Res res;  // writeback needs the full layout description
 };
 
@@ -409,6 +416,265 @@ bool SameCsResourceShape(const ComputeInfo::Res& a, const ComputeInfo::Res& b) {
          a.tiling_idx == b.tiling_idx && a.elem_bytes == b.elem_bytes &&
          a.stage_elem_bytes == b.stage_elem_bytes && a.dfmt == b.dfmt &&
          a.pow2_pad == b.pow2_pad;
+}
+
+// A live image (color RT or depth target) aliasing a CS resource's guest
+// range. Both bridge directions (StageCsRangeFromRt / UploadCsRangeToRt) use
+// the same lookup, shape checks and barrier recipe.
+struct CsAliasedImage {
+  VkImage image = VK_NULL_HANDLE;
+  uint32_t w = 0, h = 0;
+  uint32_t elem_bytes = 0;
+  VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT;
+  VkImageLayout submitted_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+  bool is_depth = false;
+};
+
+// True when `base` names a live target the compute bridges apply to. The
+// UNDEFINED-submitted-layout case (target created this frame, no submission
+// yet) reports false: there is nothing real to copy either way yet.
+bool FindCsAliasedImage(uint64_t base, CsAliasedImage& out) {
+  auto rt_it = g_rts.find(base);
+  if (rt_it != g_rts.end()) {
+    RTarget& rt = rt_it->second;
+    if (!rt.image || rt.is_depth || !rt.ever_rendered)
+      return false;
+    out = {rt.image,
+           rt.w,
+           rt.h,
+           FormatBytes(rt.fmt),
+           VK_IMAGE_ASPECT_COLOR_BIT,
+           rt.submitted_layout,
+           false};
+    return out.submitted_layout != VK_IMAGE_LAYOUT_UNDEFINED;
+  }
+  auto depth_it = g_depths.find(base);
+  if (depth_it != g_depths.end()) {
+    DepthTarget& depth = depth_it->second;
+    if (!depth.image)
+      return false;
+    out = {depth.image,
+           depth.w,
+           depth.h,
+           4,  // kDepthFormat == D32_SFLOAT
+           VK_IMAGE_ASPECT_DEPTH_BIT,
+           depth.submitted_layout,
+           true};
+    return out.submitted_layout != VK_IMAGE_LAYOUT_UNDEFINED;
+  }
+  return false;
+}
+
+bool CsAliasedBase(uint64_t base) {
+  return g_rts.find(base) != g_rts.end() ||
+         g_depths.find(base) != g_depths.end();
+}
+
+VkAccessFlags AliasedImageAccess(const CsAliasedImage& img, VkImageLayout l) {
+  if (!img.is_depth)
+    return ColorImageAccess(l);
+  switch (l) {
+    case VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL:
+    case VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL:
+      return VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+             VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    case VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL:
+    case VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL:
+    case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+      return VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+             VK_ACCESS_SHADER_READ_BIT;
+    default:
+      return 0;
+  }
+}
+
+// Aspect-aware ImageBarrier for the bridge's one-shot transfer commands.
+// ALL_COMMANDS stages: these command buffers are submitted alone and
+// fence-waited, so precision buys nothing.
+void AliasedImageBarrier(VkCommandBuffer c,
+                         const CsAliasedImage& img,
+                         VkImageLayout from,
+                         VkImageLayout to,
+                         VkAccessFlags src_a,
+                         VkAccessFlags dst_a) {
+  VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+  b.oldLayout = from;
+  b.newLayout = to;
+  b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+  b.image = img.image;
+  b.subresourceRange = {img.aspect, 0, 1, 0, 1};
+  b.srcAccessMask = src_a;
+  b.dstAccessMask = dst_a;
+  vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                       VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0,
+                       nullptr, 1, &b);
+}
+
+// The CS side of an image<->buffer bridge copy expects the linear staged
+// layout; reject targets whose shape disagrees with the descriptor.
+bool AliasedShapeMatches(const CsAliasedImage& img,
+                         const ComputeInfo::Res& res,
+                         const char* dir) {
+  if (res.mip_levels == 1 && res.layers == 1 && img.w == res.width &&
+      img.h == res.height && img.elem_bytes == res.stage_elem_bytes)
+    return true;
+  static int warned = 0;
+  if (warned < 8) {
+    warned++;
+    std::fprintf(stderr,
+                 "[gpuvk] cs %s live %s target %#llx shape mismatch: image "
+                 "%ux%u %uB vs cs %ux%u mips=%u %uB -> falling back to guest "
+                 "memory\n",
+                 dir, img.is_depth ? "depth" : "color",
+                 (unsigned long long)res.base, img.w, img.h, img.elem_bytes,
+                 res.width, res.height, res.mip_levels, res.stage_elem_bytes);
+  }
+  return false;
+}
+
+// Record one bridge copy (image->buffer or buffer->image), submit and wait.
+bool RunAliasedCopy(const CsAliasedImage& img,
+                    const ComputeInfo::Res& res,
+                    CsRange& e,
+                    bool to_image) {
+  gcn::TextureLayout32 tiled, linear;
+  if (!BuildCsImageLayouts(res, tiled, linear))
+    return false;
+  const auto& level = linear.mips[0];
+  const uint64_t copy_bytes =
+      static_cast<uint64_t>(level.pitch) * img.h * res.stage_elem_bytes;
+  if (level.offset + copy_bytes > e.cap)
+    return false;
+  // Host-zero any padding an image->buffer copy does not cover (host writes
+  // are made available by the submission).
+  if (!to_image && (level.offset != 0 || copy_bytes < res.size))
+    std::memset(e.map, 0, res.size);
+
+  VkCommandBufferAllocateInfo ca{
+      VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+  ca.commandPool = g_dev.pool;
+  ca.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+  ca.commandBufferCount = 1;
+  VkCommandBuffer c = VK_NULL_HANDLE;
+  if (vkAllocateCommandBuffers(g_dev.device, &ca, &c) != VK_SUCCESS)
+    return false;
+  VkCommandBufferBeginInfo cbi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+  cbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+  if (vkBeginCommandBuffer(c, &cbi) != VK_SUCCESS) {
+    vkFreeCommandBuffers(g_dev.device, g_dev.pool, 1, &c);
+    return false;
+  }
+  // Chain from -- and restore -- the SUBMITTED layout: this copy executes
+  // before the current frame's still-recording barriers, whose oldLayout
+  // chain must stay intact.
+  const VkImageLayout transfer_layout =
+      to_image ? VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
+               : VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+  const VkAccessFlags transfer_access =
+      to_image ? VK_ACCESS_TRANSFER_WRITE_BIT : VK_ACCESS_TRANSFER_READ_BIT;
+  if (to_image) {
+    // The buffer was last written by the dispatch (already fence-waited) or
+    // the host; make those writes available to the transfer.
+    VkBufferMemoryBarrier bb{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+    bb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_HOST_WRITE_BIT;
+    bb.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    bb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    bb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    bb.buffer = e.buf;
+    bb.offset = 0;
+    bb.size = VK_WHOLE_SIZE;
+    vkCmdPipelineBarrier(
+        c, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_HOST_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 1, &bb, 0, nullptr);
+  }
+  AliasedImageBarrier(c, img, img.submitted_layout, transfer_layout,
+                      AliasedImageAccess(img, img.submitted_layout),
+                      transfer_access);
+  VkBufferImageCopy copy{};
+  copy.bufferOffset = level.offset;
+  copy.bufferRowLength = level.pitch;
+  copy.imageSubresource = {img.aspect, 0, 0, 1};
+  copy.imageExtent = {img.w, img.h, 1};
+  if (to_image)
+    vkCmdCopyBufferToImage(c, e.buf, img.image, transfer_layout, 1, &copy);
+  else
+    vkCmdCopyImageToBuffer(c, img.image, transfer_layout, e.buf, 1, &copy);
+  AliasedImageBarrier(c, img, transfer_layout, img.submitted_layout,
+                      transfer_access,
+                      AliasedImageAccess(img, img.submitted_layout));
+  if (!to_image) {
+    VkBufferMemoryBarrier bb{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+    bb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    bb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_HOST_READ_BIT;
+    bb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    bb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    bb.buffer = e.buf;
+    bb.offset = 0;
+    bb.size = VK_WHOLE_SIZE;
+    vkCmdPipelineBarrier(
+        c, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_HOST_BIT, 0, 0,
+        nullptr, 1, &bb, 0, nullptr);
+  }
+  const VkResult end_result = vkEndCommandBuffer(c);
+  VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+  si.commandBufferCount = 1;
+  si.pCommandBuffers = &c;
+  VkResult r = end_result;
+  if (r == VK_SUCCESS)
+    r = vkResetFences(g_dev.device, 1, &g_dev.fence);
+  if (r == VK_SUCCESS)
+    r = vkQueueSubmit(g_dev.queue, 1, &si, g_dev.fence);
+  if (r == VK_SUCCESS)
+    r = vkWaitForFences(g_dev.device, 1, &g_dev.fence, VK_TRUE, UINT64_MAX);
+  vkFreeCommandBuffers(g_dev.device, g_dev.pool, 1, &c);
+  if (r != VK_SUCCESS) {
+    std::fprintf(stderr, "[gpuvk] cs %s bridge copy failed: %d (base=%#llx)\n",
+                 to_image ? "upload" : "staging", (int)r,
+                 (unsigned long long)res.base);
+    return false;
+  }
+  return true;
+}
+
+// Stage a CS input whose descriptor points at a live render/depth target from
+// the VkImage instead of guest memory. Draws only ever render into the image
+// -- the guest bytes under a target stay stale (usually zero), so the
+// guest-memory path feeds a compute post chain black (SotC reads its HDR
+// scene target AND its 1080p depth buffer this way for the whole
+// downsample/tonemap/pyramid cascade). The copy is submitted on the queue and
+// waited: it executes after the last submitted frame and before the current
+// recording, so it sees the previous frame's completed content -- one frame
+// of latency in a post input, not black.
+// Returns false (caller falls back to guest staging) when the base is not a
+// live target or the shapes disagree.
+bool StageCsRangeFromRt(const ComputeInfo::Res& res, CsRange& e) {
+  CsAliasedImage img;
+  if (!FindCsAliasedImage(res.base, img))
+    return false;
+  if (!AliasedShapeMatches(img, res, "reads"))
+    return false;
+  return RunAliasedCopy(img, res, e, /*to_image=*/false);
+}
+
+// The reverse: a CS result written to a range that a live render/depth target
+// aliases must also land in the VkImage, because draws sample the image,
+// never guest memory (SotC's exposure/bloom compute writes the adapted scene
+// into an RT the tonemap then samples; its depth downsample writes the
+// half-res depth pyramid). e.buf already holds the linear pixel data the
+// dispatch produced, so upload straight from it. Guest memory was refreshed
+// by the caller either way; a shape mismatch just leaves the image stale.
+bool UploadCsRangeToRt(uint64_t base, CsRange& e) {
+  CsAliasedImage img;
+  if (!e.image_staging || !FindCsAliasedImage(base, img))
+    return true;  // nothing to refresh
+  if (!AliasedShapeMatches(img, e.res, "writes"))
+    return true;
+  if (!RunAliasedCopy(img, e.res, e, /*to_image=*/true))
+    return false;
+  if (!img.is_depth)
+    g_rts[base].ever_rendered = true;  // CS content is real content
+  return true;
 }
 
 std::unordered_map<uint64_t, CsRange> g_cs_ranges;
@@ -517,7 +783,10 @@ bool CsRangeEnsureBuffer(CsRange& e, VkDeviceSize size) {
   VkDeviceSize cap = (size + 0xFFFF) & ~VkDeviceSize(0xFFFF);
   VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
   bi.size = cap;
-  bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+  // TRANSFER_DST: RT-backed inputs are staged by an image->buffer copy on the
+  // queue (StageCsRangeFromRt) instead of a CPU memcpy from guest memory.
+  bi.usage =
+      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
   if (vkCreateBuffer(g_dev.device, &bi, nullptr, &e.buf) != VK_SUCCESS) {
     e.buf = VK_NULL_HANDLE;
     return false;
@@ -630,6 +899,7 @@ bool CsRangeFlushOne(uint64_t base, CsRange& e) {
   } else {
     std::memcpy(reinterpret_cast<void*>(base), e.map, e.size);
   }
+  UploadCsRangeToRt(base, e);  // refresh a live RT image aliasing the range
   InvalidateTexRange(base, e.guest_bytes);
   UnindexDirtyRange(base, e.guest_bytes);
   e.gpu_dirty = false;
@@ -640,8 +910,8 @@ bool CsRangeFlushOne(uint64_t base, CsRange& e) {
 
 // Ensure staging slot i can hold `size` bytes (grow-on-demand, kept mapped).
 bool CsEnsureStage(uint32_t i, VkDeviceSize size) {
-  GPU_BUGCHECK(i < ComputeInfo::kMaxResources,
-               "stage index %u out of bounds", i);
+  GPU_BUGCHECK(i < ComputeInfo::kMaxResources, "stage index %u out of bounds",
+               i);
   CsStage& s = g_cs_stage[i];
   if (s.buf && s.cap >= size)
     return true;
@@ -840,7 +1110,19 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci) {
                  (unsigned long long)base);
     bool valid =
         same_shape && (e.gpu_dirty || e.last_validated_frame == g_frame.num);
-    if (!valid && same_shape) {
+    // A read whose base is a live render target must be staged from the
+    // VkImage: the guest bytes under an RT are stale (draws never write them
+    // back), and the image content changes every frame regardless of the
+    // guest hash. Attempted at most once per frame per range; a CS-written
+    // buffer (gpu_dirty) stays authoritative.
+    const bool rt_backed = ci.res[i].image_staging && CsAliasedBase(base);
+    const bool rt_attempt = rt_backed && !e.gpu_dirty &&
+                            e.last_rt_frame != static_cast<int>(g_frame.num);
+    if (rt_attempt)
+      valid = false;
+    else if (rt_backed && !e.gpu_dirty && e.rt_sourced)
+      valid = same_shape;
+    if (!valid && same_shape && !rt_attempt) {
       const uint64_t h = RangeHash(base, guest_bytes);
       if (h == e.hash)
         valid = true;
@@ -854,14 +1136,36 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci) {
         renderer.state = nullptr;
         return false;
       }
-      if (ci.res[i].image_staging) {
-        if (!StageCsImage(ci.res[i], e.map))
-          return false;
-      } else {
-        std::memcpy(e.map, reinterpret_cast<const void*>(base), ci.res[i].size);
-        if (sz[i] > ci.res[i].size)
-          std::memset(static_cast<uint8_t*>(e.map) + ci.res[i].size, 0,
-                      sz[i] - ci.res[i].size);
+      if (rt_attempt) {
+        e.last_rt_frame = static_cast<int>(g_frame.num);
+        e.rt_sourced = StageCsRangeFromRt(ci.res[i], e);
+        // DELTA_GPU_CSRT: trace every RT-backed staging decision.
+        static const bool kCsRtTrace = std::getenv("DELTA_GPU_CSRT") != nullptr;
+        static int rt_trace_logged = 0;
+        if (kCsRtTrace && rt_trace_logged < 200) {
+          rt_trace_logged++;
+          std::fprintf(stderr, "[csrt] f%d base=%#lx %ux%u -> %s\n",
+                       (int)g_frame.num, (unsigned long)base, ci.res[i].width,
+                       ci.res[i].height,
+                       e.rt_sourced ? "staged-from-RT" : "guest-fallback");
+        }
+      }
+      if (!rt_attempt || !e.rt_sourced) {
+        if (ci.res[i].image_staging) {
+          if (!StageCsImage(ci.res[i], e.map))
+            return false;
+        } else {
+          std::memcpy(e.map, reinterpret_cast<const void*>(base),
+                      ci.res[i].size);
+          if (sz[i] > ci.res[i].size)
+            std::memset(static_cast<uint8_t*>(e.map) + ci.res[i].size, 0,
+                        sz[i] - ci.res[i].size);
+        }
+        e.rt_sourced = false;
+        if (rt_attempt) {  // fell back: keep guest-hash bookkeeping coherent
+          e.hash = RangeHash(base, guest_bytes);
+          e.last_validated_frame = g_frame.num;
+        }
       }
       if (!same_shape) {
         e.hash = RangeHash(base, guest_bytes);

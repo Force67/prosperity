@@ -557,6 +557,13 @@ void EndFrame(Renderer& renderer, uint64_t scanout_base) {
     renderer.state = nullptr;
     return;
   }
+  // Stamp the layout each color target will hold once this submission
+  // executes: the anchor a mid-frame readback (the compute path staging an
+  // RT-backed CS input) chains its barriers from.
+  for (auto& rt_entry : g_rts)
+    rt_entry.second.submitted_layout = rt_entry.second.layout;
+  for (auto& depth_entry : g_depths)
+    depth_entry.second.submitted_layout = depth_entry.second.layout;
   cur.frame_num = g_frame.num;
   cur.frame_draws = g_frame.draws;
   cur.frame_max_idx = g_frame.max_idx;

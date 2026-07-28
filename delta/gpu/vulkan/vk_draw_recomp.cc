@@ -119,9 +119,9 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
         std::fprintf(stderr,
                      "[decl] norecomp why=%s vcount=%u icount=%u idx=%p "
                      "vbufs=%u vattrs=%u prim=%#x rt=%#lx\n",
-                     !d.recomp              ? "no-program"
-                     : !d.recomp->ok        ? "translate-failed"
-                                            : "count<3",
+                     !d.recomp       ? "no-program"
+                     : !d.recomp->ok ? "translate-failed"
+                                     : "count<3",
                      d.vertex_count, d.index_count, d.index_data, d.num_vbufs,
                      d.num_vattrs, d.prim_type, (unsigned long)d.rt_base);
     }
@@ -416,6 +416,13 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
         if (resolved)
           base = resolved;
       }
+      // A pending CS write into an RT-resolved range must reach the image
+      // before this draw samples it (the flush uploads it -- see
+      // UploadCsRangeToRt); guest-upload textures already get this from the
+      // texture cache.
+      if (base && g_rts.count(base))
+        FlushCsWritesRange(renderer, base,
+                           uint64_t(g_rts[base].w) * g_rts[base].h * 8);
       if (base && !t.arrayed && is_bound_target(base) && g_rts.count(base) &&
           g_rts[base].ever_rendered) {
         multi_feedback[i] = base;
@@ -546,9 +553,10 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
             // must cover every layout an RT can arrive from (a hand-rolled
             // subset missed TRANSFER_DST, leaving the transition unordered
             // against the clear that put it there).
-            ImageBarrier(g_frame.cmd, dst.image, dst.layout,
-                         VK_IMAGE_LAYOUT_GENERAL, ColorImageAccess(dst.layout),
-                         VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+            ImageBarrier(
+                g_frame.cmd, dst.image, dst.layout, VK_IMAGE_LAYOUT_GENERAL,
+                ColorImageAccess(dst.layout),
+                VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
             dst.layout = VK_IMAGE_LAYOUT_GENERAL;
           }
         } else if (multi_color[i]) {

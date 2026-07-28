@@ -270,8 +270,11 @@ DepthTarget* GetDepthRT(uint64_t base, uint32_t w, uint32_t h) {
   ii.arrayLayers = 1;
   ii.samples = VK_SAMPLE_COUNT_1_BIT;
   ii.tiling = VK_IMAGE_TILING_OPTIMAL;
-  ii.usage =
-      VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+  // TRANSFER src/dst: the compute path bridges CS reads/writes of a live
+  // depth target through image<->buffer copies (see vk_compute.cc).
+  ii.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
+             VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+             VK_IMAGE_USAGE_TRANSFER_DST_BIT;
   if (vkCreateImage(g_dev.device, &ii, nullptr, &t.image) != VK_SUCCESS)
     return nullptr;
   if (!g_image_memory.Allocate(g_dev, t.image, t.allocation)) {
