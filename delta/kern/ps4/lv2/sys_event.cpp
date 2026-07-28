@@ -11,9 +11,17 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstdio>
+#include <algorithm>
+#include <mutex>
+#include <set>
 #include <thread>
+#include <utility>
+#include <vector>
+
+#include <sys/select.h>
 
 #include "kern/proc.h"
+#include "kern/ps4/dev/socket_dev.h"
 #include "sys_event.h"
 
 namespace krnl {
@@ -26,6 +34,10 @@ static base::Vector<equeue *> g_equeues;
 // real system modules for vblank/flip waits. A thread that waits on either
 // blocks in kevent until a display event arrives. With no real display hardware,
 // a synthetic 60 Hz tick keeps those waits from blocking forever.
+static constexpr int16_t kEVFILT_READ = -1;
+static constexpr int16_t kEVFILT_USER = -11;
+static constexpr uint32_t kNOTE_TRIGGER = 0x01000000;
+static void watchSocket(uint32_t fd);
 static constexpr int16_t kEVFILT_DISPLAY = -13;
 static constexpr int16_t kEVFILT_VIDEOOUT = -14;
 static std::atomic<bool> g_vblankStarted{false};
@@ -47,6 +59,53 @@ static uint64_t tscNonce() {
   return static_cast<uint64_t>(
       duration_cast<nanoseconds>(steady_clock::now().time_since_epoch()).count());
 #endif
+}
+
+// Guest fds with a live EVFILT_READ knote, and the one thread that selects on
+// their host sockets. A read knote's source is outside the guest, so nothing in
+// here would ever mark it active; without this a title that waits on socket
+// readability (Minecraft's rtc::PhysicalSocketServer) never wakes.
+static std::mutex g_watchM;
+static std::set<uint32_t> g_watched;
+static std::atomic<bool> g_watchStarted{false};
+
+static void watchSocket(uint32_t fd) {
+  if (!fdToSocket(fd))
+    return;
+  {
+    std::lock_guard<std::mutex> lk(g_watchM);
+    if (!g_watched.insert(fd).second)
+      return;
+  }
+  bool expected = false;
+  if (!g_watchStarted.compare_exchange_strong(expected, true))
+    return;
+  std::printf("[kevent] socket read-poll started\n");
+  std::thread([] {
+    for (;;) {
+      fd_set rd;
+      FD_ZERO(&rd);
+      int maxFd = -1;
+      std::vector<std::pair<uint32_t, int>> live;
+      {
+        std::lock_guard<std::mutex> lk(g_watchM);
+        for (uint32_t g : g_watched)
+          if (auto *s = fdToSocket(g)) {
+            live.emplace_back(g, s->hostFd());
+            FD_SET(s->hostFd(), &rd);
+            maxFd = std::max(maxFd, s->hostFd());
+          }
+      }
+      timeval tv{0, 20000};  // 20 ms; also the retry tick when nothing is live
+      if (maxFd < 0 || ::select(maxFd + 1, &rd, nullptr, nullptr, &tv) <= 0) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        continue;
+      }
+      for (auto &[guestFd, hostFd] : live)
+        if (FD_ISSET(hostFd, &rd))
+          triggerAllEqueues(guestFd, kEVFILT_READ, 1);
+    }
+  }).detach();
 }
 
 // Start the 60 Hz EVFILT_DISPLAY pump once, on the first vblank registration, so
@@ -142,6 +201,18 @@ int equeue::kevent(const kevent_t *changes, int nchanges, kevent_t *out,
         }
       continue;
     }
+    // EVFILT_USER + NOTE_TRIGGER is one thread poking another awake, not a
+    // registration: it must fire the existing knote, not replace and clear it.
+    // This is how WebRTC's SocketServer::WakeUp reaches a thread parked in
+    // kevent, so dropping it leaves every rtc::Thread::BlockingCall hung.
+    if (c.filter == kEVFILT_USER && (c.fflags & kNOTE_TRIGGER)) {
+      if (auto *k = find(c.ident, c.filter)) {
+        k->active = true;
+        k->ev.data = c.data;
+        cv.notify_all();
+      }
+      continue;
+    }
     // EV_ADD (and plain enable): register/replace.
     if (auto *k = find(c.ident, c.filter)) {
       k->ev = c;
@@ -152,6 +223,10 @@ int equeue::kevent(const kevent_t *changes, int nchanges, kevent_t *out,
     // First vblank registration kicks off the synthetic 60 Hz pump.
     if (c.filter == kEVFILT_DISPLAY || c.filter == kEVFILT_VIDEOOUT)
       startVblankPump();
+    // A read knote on a socket is the only knote whose source lives outside the
+    // guest, so nothing here can set it active. Watch the host fd instead.
+    if (c.filter == kEVFILT_READ)
+      watchSocket(static_cast<uint32_t>(c.ident));
   }
 
   // 2) collect ready events, waiting if asked.
