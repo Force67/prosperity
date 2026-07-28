@@ -52,6 +52,12 @@ available CMake options.
 * __RAM__: 12 GB of RAM (8 may work, depending on the type of game you want to run).
 * __Graphics__: a GPU with support for Vulkan 1.4+.
 
+## Thanks and credits
+- zecoaxco
+- anon (You know who you are)
+- GPCS4
+- idc/uplift (original inspiration for PS4Delta)
+
 ## Legal
 
 Prosperity ships no Sony code. You must supply your own decrypted system modules
