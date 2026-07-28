@@ -1244,7 +1244,7 @@ modulePtr proc::loadModule(base::StringRef name) {
     }
     if (!ok) {
       const char *roots[] = {"/app0/decrypted/sce_module/", "/app0/decrypted/",
-                             "/app0/sce_module/"};
+                             "/app0/sce_module/", "/app0/"};
       for (const char *root : roots) {
         base::String vp(root);
         vp += sname.c_str();

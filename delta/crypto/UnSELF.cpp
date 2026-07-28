@@ -21,7 +21,7 @@ base::Vector<uint8_t> self2elf(const uint8_t *data, size_t size) {
   if (size < sizeof(SELFHeader))
     return out;
   const auto *sh = reinterpret_cast<const SELFHeader *>(data);
-  if (sh->magic != SELF_MAGIC)
+  if (!isSelfMagic(sh->magic))
     return out;
 
   const size_t segTableOff = sizeof(SELFHeader);

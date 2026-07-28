@@ -33,6 +33,12 @@ enum SegFlags {
 };
 
 static constexpr uint32_t SELF_MAGIC = 0x1D3D154F;
+// PS5 titles wrap the same header layout in a different container magic.
+static constexpr uint32_t SELF_MAGIC_PS5 = 0xEEF51454;
+
+inline bool isSelfMagic(uint32_t magic) {
+  return magic == SELF_MAGIC || magic == SELF_MAGIC_PS5;
+}
 
 struct SELFHeader {
   uint32_t magic;
