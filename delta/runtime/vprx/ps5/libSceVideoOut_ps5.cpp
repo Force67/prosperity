@@ -25,6 +25,8 @@
 #include "gfx/gfx.h"
 #include "kern/proc.h"
 #include "kern/ps4/lv2/sys_event.h"
+#include <utl/mem.h>
+
 #include "kern/ps4/lv2/sys_mem.h"  // allocLowGuest
 
 // PS5 present bridge: forwards the flip to the AGC command processor's
@@ -152,14 +154,15 @@ void startFlipPump() {
     for (;;) {
       std::this_thread::sleep_for(std::chrono::microseconds(16667));
       uint64_t c = g_port.flipCount.fetch_add(1) + 1;
-      // DELTA_VO_NOSTOMP: leave the labels to the title's own GPU fence writes.
-      // The blanket stomp satisfies a ">= submitted id" poll, but a title whose
-      // protocol is "label == 0 means the buffer is free" reads it as every
-      // buffer permanently busy.
+      // The label is a flip-completion flag, not a counter: the title leaves it
+      // at 0 when it queues a flip and waits for the display controller to write
+      // 1, then clears it again. bgfx's AGC backend spins on `*label == 1`
+      // exactly, so an incrementing value satisfies it once and never again.
+      // DELTA_VO_NOSTOMP leaves the labels to the title's own GPU fence writes.
       static const bool noStomp = std::getenv("DELTA_VO_NOSTOMP") != nullptr;
       if (!noStomp) {
         uint64_t *labels = videoLabels();
-        for (int i = 0; i < 16; i++) labels[i] = c;
+        for (int i = 0; i < 16; i++) labels[i] = 1;
       }
       triggerAllEqueues(kEventFlip, kFilterFlip, static_cast<int64_t>(c));
     }
@@ -339,7 +342,13 @@ int PS4ABI vSubmitFlip(int, int bufferIndex, int, int64_t flipArg) {
   return 0;
 }
 
-int PS4ABI vSubmitFlipEop(int, int bufferIndex, int, int64_t flipArg, void *) {
+// The EOP variant the AGC path flips through. eopLabel is the GPU completion
+// label: the title queues the flip, then spins until the display controller
+// writes 1 there. Our present is synchronous, so the flip is already done by the
+// time we return -- write the label or the title waits on it forever (bgfx's
+// RendererContextAGC parks on `*label == 1` and never submits another frame).
+int PS4ABI vSubmitFlipEop(int, int bufferIndex, int, int64_t flipArg,
+                          void *eopLabel) {
   uint64_t scanout = 0;
   int eqHandle;
   {
@@ -355,6 +364,8 @@ int PS4ABI vSubmitFlipEop(int, int bufferIndex, int, int64_t flipArg, void *) {
   }
   // PS5 always presents through the AGC command processor's render target.
   prosperity_agc_flip(scanout);
+  if (utl::isMemoryRangeMapped(eopLabel, sizeof(uint64_t)))
+    *static_cast<volatile uint64_t *>(eopLabel) = 1;
   g_port.flipCount.fetch_add(1);
   if (eqHandle >= 0)
     if (auto *eq = findEqueue(eqHandle))
