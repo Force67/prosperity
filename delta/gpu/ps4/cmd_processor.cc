@@ -8,6 +8,7 @@
 #include <chrono>
 #include "gpu/ps4/gcn/gcn_decode.h"
 #include "gpu/ps4/gcn/gcn_detile.h"
+#include "gpu/ps4/gcn/gcn_disasm.h"
 #include "gpu/ps4/gcn/gcn_resource.h"
 #include "gpu/ps4/gcn/gcn_translate.h"
 #include "gpu/ps4/liverpool.h"

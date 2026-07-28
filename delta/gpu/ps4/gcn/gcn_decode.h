@@ -95,10 +95,6 @@ std::shared_ptr<const Program> CachedProgram(uint64_t addr,
 // picked up on the next frame's first use.
 void NextProgramCacheGeneration();
 
-// Human-readable mnemonic for an instruction (best-effort; "?" for unmapped).
-const char* Mnemonic(const Inst& inst);
-
-// Disassemble to stderr (debug aid).
-void Disassemble(const uint32_t* code, uint32_t max_dwords, const char* tag);
+// Mnemonics and full disassembly live in gcn_disasm.h.
 
 }  // namespace gpu::gcn
