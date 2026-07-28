@@ -344,10 +344,22 @@ int PS4ABI sys_sysctl(int *name, uint32_t namelen, void *oldp, size_t *oldlenp,
     return 0;
   }
 
+  // kern.rng_pseudo (synthetic {0x1337,12}): whether the kernel's pseudo RNG is
+  // available. libSceRandom polls this and only stops once it reads non-zero --
+  // answering 0 cost 30 million name2oid resolutions in 80 seconds and hung
+  // Minecraft's OpenSSL key generation behind it.
+  else if (name[0] == 0x1337 && name[1] == 12 && namelen == 2) {
+    if (oldp && oldlenp && *oldlenp >= sizeof(uint32_t)) {
+      *static_cast<uint32_t *>(oldp) = 1;
+      *oldlenp = sizeof(uint32_t);
+    }
+    return 0;
+  }
+
   // Benign zero-filled PS5 config oids (synthetic {0x1337,9}): kern.amm.param,
   // kern.app.memconf, machdep.auto_update_version, plus the obfuscated
-  // kern.gjevmtrb / kern.rng_pseudo newer firmware adds. Reporting one as missing
-  // is not survivable: libSceAgc reads kern.gjevmtrb via libkernel, which aborts
+  // kern.gjevmtrb newer firmware adds. Reporting one as missing is not
+  // survivable: libSceAgc reads kern.gjevmtrb via libkernel, which aborts
   // outright when the query errors.
   else if (name[0] == 0x1337 && name[1] == 9 && namelen == 2) {
     if (oldp && oldlenp) {
@@ -372,6 +384,9 @@ int PS4ABI sys_sysctl(int *name, uint32_t namelen, void *oldp, size_t *oldlenp,
 
   if (name[0] == 0 && name[1] == 3 && namelen == 2) {
     auto name = base::StringRef(static_cast<const char *>(newp), newlen);
+    if (std::getenv("DELTA_SYSCTL_CALLER"))
+      std::printf("[sysctl] name2oid '%.*s'\n", (int)newlen,
+                  static_cast<const char *>(newp));
 
     // PS5 system-info oids the network/system-service init resolves. Left
     // unhandled they returned ENOENT and the KAGE net thread spun (sizing its
@@ -394,7 +409,7 @@ int PS4ABI sys_sysctl(int *name, uint32_t namelen, void *oldp, size_t *oldlenp,
       return 0;
     } else if (name == "kern.amm.param" || name == "kern.app.memconf" ||
                name == "machdep.auto_update_version" ||
-               name == "kern.gjevmtrb" || name == "kern.rng_pseudo") {
+               name == "kern.gjevmtrb") {
       static_cast<uint32_t *>(oldp)[0] = 0x1337;
       static_cast<uint32_t *>(oldp)[1] = 9;
       *oldlenp = 8;
@@ -402,6 +417,11 @@ int PS4ABI sys_sysctl(int *name, uint32_t namelen, void *oldp, size_t *oldlenp,
     } else if (name == "kern.neomode") {
       static_cast<uint32_t *>(oldp)[0] = 0x1337;
       static_cast<uint32_t *>(oldp)[1] = 10;
+      *oldlenp = 8;
+      return 0;
+    } else if (name == "kern.rng_pseudo") {
+      static_cast<uint32_t *>(oldp)[0] = 0x1337;
+      static_cast<uint32_t *>(oldp)[1] = 12;
       *oldlenp = 8;
       return 0;
     } else if (name == "kern.ps4_sdk_version") {
