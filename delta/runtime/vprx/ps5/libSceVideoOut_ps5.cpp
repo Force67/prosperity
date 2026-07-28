@@ -152,8 +152,15 @@ void startFlipPump() {
     for (;;) {
       std::this_thread::sleep_for(std::chrono::microseconds(16667));
       uint64_t c = g_port.flipCount.fetch_add(1) + 1;
-      uint64_t *labels = videoLabels();
-      for (int i = 0; i < 16; i++) labels[i] = c;
+      // DELTA_VO_NOSTOMP: leave the labels to the title's own GPU fence writes.
+      // The blanket stomp satisfies a ">= submitted id" poll, but a title whose
+      // protocol is "label == 0 means the buffer is free" reads it as every
+      // buffer permanently busy.
+      static const bool noStomp = std::getenv("DELTA_VO_NOSTOMP") != nullptr;
+      if (!noStomp) {
+        uint64_t *labels = videoLabels();
+        for (int i = 0; i < 16; i++) labels[i] = c;
+      }
       triggerAllEqueues(kEventFlip, kFilterFlip, static_cast<int64_t>(c));
     }
   }).detach();
@@ -213,27 +220,43 @@ constexpr int kBufDescStride = 4;  // u64s per descriptor (0x20 bytes)
 int PS4ABI vRegisterBuffers(int, int startIndex, int option, void *const *buffers,
                             int bufferNum, const void *attribute) {
   (void)option;
-  std::lock_guard<std::mutex> lk(g_mtx);
-  if (attribute) {
-    auto *a = static_cast<const BufferAttribute *>(attribute);
-    g_port.width = a->width ? a->width : g_port.width;
-    g_port.height = a->height ? a->height : g_port.height;
-    g_port.pitch = a->pitchInPixel ? a->pitchInPixel : g_port.width;
-    g_port.pixelFormat = a->pixelFormat;
+  uint32_t w, h;
+  {
+    std::lock_guard<std::mutex> lk(g_mtx);
+    if (attribute) {
+      auto *a = static_cast<const BufferAttribute *>(attribute);
+      g_port.width = a->width ? a->width : g_port.width;
+      g_port.height = a->height ? a->height : g_port.height;
+      g_port.pitch = a->pitchInPixel ? a->pitchInPixel : g_port.width;
+      g_port.pixelFormat = a->pixelFormat;
+    }
+    const uint64_t *desc = reinterpret_cast<const uint64_t *>(buffers);
+    int n = 0;
+    for (int i = 0; i < bufferNum && (startIndex + i) < kMaxBuffers; i++) {
+      g_port.buffers[startIndex + i] =
+          desc ? reinterpret_cast<void *>(desc[i * kBufDescStride]) : nullptr;
+      n++;
+    }
+    g_port.bufferCount = startIndex + n;
+    w = g_port.width;
+    h = g_port.height;
+    std::printf("[videoout/ps5] registerBuffers start=%d num=%d -> %ux%u pitch=%u "
+                "fmt=%#x (buf0=%p buf1=%p)\n",
+                startIndex, bufferNum, g_port.width, g_port.height, g_port.pitch,
+                g_port.pixelFormat, g_port.buffers[startIndex],
+                bufferNum > 1 ? g_port.buffers[startIndex + 1] : nullptr);
+    // A title that flips through AGC never calls sceVideoOutSubmitFlip, so it
+    // never names a scanout buffer either. Default to the first one it just
+    // registered, or the AGC flip ioctls present a null address.
+    if (!g_currentScanout.load(std::memory_order_relaxed))
+      g_currentScanout.store(
+          reinterpret_cast<uint64_t>(g_port.buffers[startIndex]),
+          std::memory_order_relaxed);
   }
-  const uint64_t *desc = reinterpret_cast<const uint64_t *>(buffers);
-  int n = 0;
-  for (int i = 0; i < bufferNum && (startIndex + i) < kMaxBuffers; i++) {
-    g_port.buffers[startIndex + i] =
-        desc ? reinterpret_cast<void *>(desc[i * kBufDescStride]) : nullptr;
-    n++;
-  }
-  g_port.bufferCount = startIndex + n;
-  std::printf("[videoout/ps5] registerBuffers start=%d num=%d -> %ux%u pitch=%u "
-              "fmt=%#x (buf0=%p buf1=%p)\n",
-              startIndex, bufferNum, g_port.width, g_port.height, g_port.pitch,
-              g_port.pixelFormat, g_port.buffers[startIndex],
-              bufferNum > 1 ? g_port.buffers[startIndex + 1] : nullptr);
+  // Registering display buffers is the title committing to present, whichever
+  // flip path it uses. Bring the window up here rather than in submitFlip, which
+  // the AGC titles never reach: without it there is no swapchain to present to.
+  ensureGfx(w, h);
   return 0;
 }
 
