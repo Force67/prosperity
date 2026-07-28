@@ -139,9 +139,15 @@ int PS4ABI sys_open(const char *path, uint32_t flags, uint32_t mode) {
   if (asDir) {
     std::vector<vfs::DirEntry> entries;
     if (vfs::listDir(path, entries)) {
+      const size_t n = entries.size();
       auto *dir = new dirDevice(proc::getActive(), std::move(entries));
+      if (vtrace)
+        std::fprintf(stderr, "[open]   -> dir fd=%u entries=%zu %s\n",
+                     dir->handle(), n, path);
       return dir->handle();
     }
+    if (vtrace)
+      std::fprintf(stderr, "[open]   -> dir ENOENT %s\n", path);
     return -SysError::eNOENT;
   }
 

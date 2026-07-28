@@ -392,11 +392,18 @@ int PS4ABI sys_rename(const char *from, const char *to) {
 int64_t PS4ABI sys_getdirentries(uint32_t fd, void *buf, size_t nbytes,
                                  int64_t *basep) {
   auto *d = fdToDevice(fd);
-  if (!d)
+  if (!d) {
+    if (std::getenv("DELTA_VFS_TRACE"))
+      std::fprintf(stderr, "[getdirentries] fd=%u BADF\n", fd);
     return -SysError::eBADF;
+  }
   // basep is an in/out seek cookie; the dir device tracks its own cursor, so we
   // leave whatever the caller passed untouched.
-  return d->getdents(buf, nbytes);
+  int64_t r = d->getdents(buf, nbytes);
+  if (std::getenv("DELTA_VFS_TRACE"))
+    std::fprintf(stderr, "[getdirentries] fd=%u buf=%p n=%zu -> %lld\n", fd, buf,
+                 nbytes, (long long)r);
+  return r;
 }
 
 int PS4ABI sys_closefrom(uint32_t lowfd) { return 0; }

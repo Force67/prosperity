@@ -399,6 +399,30 @@ bool listDir(const char *path, std::vector<DirEntry> &out) {
 
   base::String norm = normalizePath(path);
   path = norm.c_str();
+
+  // The sandbox root is not backed by a host directory: it is the mount table.
+  // libkernel opens "/" and walks its entries by d_reclen looking for a name, so
+  // an empty/failed listing leaves it spinning on a zero-length record.
+  if (std::strcmp(path, "/") == 0) {
+    std::lock_guard<std::mutex> lock(g_mountsMutex);
+    for (auto &mp : g_mounts) {
+      const char *g = mp.guest.c_str();
+      if (*g != '/')
+        continue;
+      const char *end = std::strchr(g + 1, '/');
+      std::string top(g + 1, end ? end - (g + 1) : std::strlen(g + 1));
+      if (top.empty())
+        continue;
+      bool dup = false;
+      for (auto &e : out)
+        dup = dup || e.name == top;
+      if (!dup)
+        out.push_back({top, true});
+    }
+    out.push_back({"dev", true});
+    return true;
+  }
+
   size_t len = 0;
   mountPoint m;
   if (!findMount(path, false, m, len))
