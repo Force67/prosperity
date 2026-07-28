@@ -120,6 +120,7 @@ ICpuBackend &backend() {
 
 uint64_t currentGuestRip() { return 0; }
 uint64_t currentGuestFsBase() { return 0; }
+void guestThreadFsBases(std::vector<uint64_t> & /*out*/) {} // FEX only
 const uint64_t *currentGuestGregs() { return nullptr; }
 int faultingSyscall() { return -1; }
 uint64_t reconstructGuestRip(uint64_t) { return 0; }
