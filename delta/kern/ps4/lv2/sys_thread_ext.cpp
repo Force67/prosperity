@@ -12,6 +12,9 @@
 #include <cstdio>
 #include <cstring>
 #include <thread>
+#if defined(__linux__)
+#include <pthread.h>
+#endif
 
 #include "../../proc.h"
 #include "cpu/cpu_backend.h"
@@ -76,6 +79,17 @@ int PS4ABI sys_thr_wake(uint32_t tid) { return 0; }
 
 int PS4ABI sys_thr_set_name(uint32_t tid, const char *name) {
   std::printf("[thr_set_name] tid=%u name=%s\n", tid, name ? name : "(null)");
+  // Mirror the name onto the host thread so ps/gdb and the SIGUSR1 probe can tell
+  // a title's threads apart. This names the CALLER, not `tid`: we have no guest
+  // -> host thread map, and in practice threads name themselves. Linux caps comm
+  // at 15 characters and rejects anything longer outright, hence the truncation.
+#if defined(__linux__)
+  if (name) {
+    char comm[16];
+    std::snprintf(comm, sizeof(comm), "%s", name);
+    pthread_setname_np(pthread_self(), comm);
+  }
+#endif
   return 0;
 }
 

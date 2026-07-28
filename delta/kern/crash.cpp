@@ -225,6 +225,9 @@ static void probeHandler(int, siginfo_t *, void *ucv) {
                (unsigned long long)gr[REG_R8], (unsigned long long)gr[REG_R9],
                (unsigned long long)gr[REG_R12], (unsigned long long)gr[REG_R13],
                (unsigned long long)gr[REG_R14], (unsigned long long)gr[REG_R15]);
+  // The frame chain first: a stack scan finds stale return addresses too, which
+  // is misleading when the question is "what is this thread blocked in".
+  backtrace(gr[REG_RBP]);
   uintptr_t rsp = gr[REG_RSP];
   if (rsp >= 0x10000) {
     auto *sp = reinterpret_cast<uintptr_t *>(rsp);

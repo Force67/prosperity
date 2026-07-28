@@ -222,7 +222,7 @@ void dumpInvoke(uint32_t kid, const char *svc, const InvokeRequest *req) {
 
   auto *sp = reinterpret_cast<const uintptr_t *>(req);
   int shown = 0;
-  for (int i = 0; i < 768 && shown < 6; i++) {
+  for (int i = 0; i < 2048 && shown < 24; i++) {
     char sym[256];
     symbolize(sp[i], sym, sizeof(sym));
     if (std::strstr(sym, "(.text)")) {
