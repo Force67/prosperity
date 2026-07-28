@@ -292,6 +292,21 @@ bool ReportRtContents(FrameSlot& owner) {
       std::snprintf(path, sizeof(path), "%s/rt_f%d_%#lx_%ux%u.ppm", DumpDir(),
                     g_frame.num, (unsigned long)kv.first, rt.w, rt.h);
       WritePpm(path, bgra.data(), rt.w, rt.h);
+      // DELTA_GPU_RTDUMP_RAW: also write the untouched readback bytes. The
+      // PPM conversion clamps HDR targets to 8-bit (a 16F scene at
+      // luminance ~1500 dumps as solid white); the raw file keeps the halfs
+      // for offline exposure/tonemapping.
+      static const bool kDumpRaw =
+          std::getenv("DELTA_GPU_RTDUMP_RAW") != nullptr;
+      if (kDumpRaw) {
+        std::snprintf(path, sizeof(path), "%s/rt_f%d_%#lx_%ux%u_fmt%d.raw",
+                      DumpDir(), g_frame.num, (unsigned long)kv.first, rt.w,
+                      rt.h, (int)rt.fmt);
+        if (std::FILE* rf = std::fopen(path, "wb")) {
+          std::fwrite(src, src_bytes, n, rf);
+          std::fclose(rf);
+        }
+      }
     }
   }
   return true;
