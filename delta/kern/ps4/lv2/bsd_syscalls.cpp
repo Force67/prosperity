@@ -126,7 +126,10 @@ int PS4ABI sys_regmgr_call(uint32_t op, uint32_t id, void *result, void *value,
     // The remaining keys are Sony's obfuscated (checksummed) registry ids whose
     // plaintext we can't recover, so we can't know the correct value to return.
     // The guest tolerates the "key not available" error and uses its defaults,
-    // which is safer than inventing a value for an unidentified setting.
+    // which is safer than inventing a value for an unidentified setting. Clear
+    // the output anyway: a caller that reads it despite the error would
+    // otherwise get stack garbage.
+    int_value->value = 0;
     printf("[regmgr] op25 get-int unknown encoded_id=%#llx\n",
            (unsigned long long)int_value->encoded_id);
     return 0x800D0203;

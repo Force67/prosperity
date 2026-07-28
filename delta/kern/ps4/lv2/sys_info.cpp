@@ -327,7 +327,10 @@ int PS4ABI sys_sysctl(int *name, uint32_t namelen, void *oldp, size_t *oldlenp,
   }
 
   // Benign zero-filled PS5 config oids (synthetic {0x1337,9}): kern.amm.param,
-  // kern.app.memconf and machdep.auto_update_version.
+  // kern.app.memconf, machdep.auto_update_version, plus the obfuscated
+  // kern.gjevmtrb / kern.rng_pseudo newer firmware adds. Reporting one as missing
+  // is not survivable: libSceAgc reads kern.gjevmtrb via libkernel, which aborts
+  // outright when the query errors.
   else if (name[0] == 0x1337 && name[1] == 9 && namelen == 2) {
     if (oldp && oldlenp) {
       size_t n = *oldlenp;
@@ -372,7 +375,8 @@ int PS4ABI sys_sysctl(int *name, uint32_t namelen, void *oldp, size_t *oldlenp,
       *oldlenp = 8;
       return 0;
     } else if (name == "kern.amm.param" || name == "kern.app.memconf" ||
-               name == "machdep.auto_update_version") {
+               name == "machdep.auto_update_version" ||
+               name == "kern.gjevmtrb" || name == "kern.rng_pseudo") {
       static_cast<uint32_t *>(oldp)[0] = 0x1337;
       static_cast<uint32_t *>(oldp)[1] = 9;
       *oldlenp = 8;
