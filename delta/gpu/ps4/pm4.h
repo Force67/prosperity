@@ -46,6 +46,7 @@ inline uint32_t Pm4Type0Reg(uint32_t hdr) {
 // NOLINTBEGIN(readability-identifier-naming)
 enum Pm4It : uint32_t {
   IT_NOP = 0x10,
+  IT_SET_BASE = 0x11,
   IT_CLEAR_STATE = 0x12,
   IT_INDEX_BUFFER_SIZE = 0x13,
   IT_DISPATCH_DIRECT = 0x15,

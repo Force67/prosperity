@@ -57,6 +57,9 @@ uint32_t g_index_type =
     0;  // 0 = 16-bit, 1 = 32-bit (VGT_DMA_INDEX_TYPE bits[1:0])
 uint64_t g_index_base =
     0;  // from IT_INDEX_BASE (DRAW_INDEX_2 carries its own base)
+// From IT_SET_BASE with base_index 1: where DRAW_INDIRECT /
+// DRAW_INDEX_INDIRECT read their argument structs from.
+uint64_t g_indirect_base = 0;
 uint32_t g_num_instances =
     1;  // from IT_NUM_INSTANCES; applies to the next draw(s)
 
@@ -261,6 +264,58 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
         d.index_data = reinterpret_cast<const void*>(ibase);
         d.index_count = icount;
         d.index_type = g_index_type;  // 0 = 16-bit, 1 = 32-bit
+      }
+    }
+    // DRAW_INDIRECT / DRAW_INDEX_INDIRECT take their counts from a struct in
+    // guest memory at IT_SET_BASE(1) + dataOffset, not from the packet, so the
+    // counts never appeared in the command stream at all and the draws fell
+    // back to a vertex count of 1 and declined. The structs are
+    //   indirect:       vertexCount, instanceCount, startVertex, startInstance
+    //   index-indirect: indexCount,  instanceCount, startIndex, baseVertex, ...
+    // (Liverpool follows the same layout as the radeon docs' DRAW_*_INDIRECT.)
+    if ((op == IT_DRAW_INDIRECT || op == IT_DRAW_INDEX_INDIRECT) && count >= 1 &&
+        g_indirect_base) {
+      const uint64_t args = g_indirect_base + body[0];
+      const uint32_t need = op == IT_DRAW_INDIRECT ? 16u : 20u;
+      // The args are usually produced ON the GPU (a compute pass writes the
+      // counts a later draw consumes). Our compute working set keeps its
+      // results GPU-resident and writes them back lazily, so reading guest
+      // memory here without flushing that range first yields the stale zeros
+      // the buffer was allocated with.
+      rhi::FlushCsWritesRange(rhi::DefaultRenderer(), args, need);
+      const bool mapped = utl::isMemoryRangeMapped(
+          reinterpret_cast<const void*>(args), need);
+      uint32_t a[5] = {0, 0, 0, 0, 0};
+      if (mapped)
+        std::memcpy(a, reinterpret_cast<const void*>(args), need);
+      static const bool ind_trace = std::getenv("DELTA_GPU_DRAWPKT") != nullptr;
+      if (ind_trace) {
+        static int n = 0;
+        if (n++ < 24)
+          std::fprintf(stderr,
+                       "[drawpkt] %s args=%#lx (base=%#lx +%#x) %s "
+                       "count=%u inst=%u start=%u\n",
+                       op == IT_DRAW_INDIRECT ? "INDIRECT" : "INDEX_INDIRECT",
+                       (unsigned long)args, (unsigned long)g_indirect_base,
+                       body[0], mapped ? "mapped" : "UNMAPPED", a[0], a[1], a[2]);
+      }
+      if (mapped && a[0] && a[0] <= 0x100000) {
+        if (op == IT_DRAW_INDIRECT) {
+          d.vertex_count = a[0];
+        } else if (g_index_base) {
+          const uint32_t index_bytes = g_index_type == 1 ? 4 : 2;
+          const uint64_t ibase =
+              g_index_base + static_cast<uint64_t>(a[2]) * index_bytes;
+          if (utl::isMemoryRangeMapped(
+                  reinterpret_cast<const void*>(ibase),
+                  static_cast<uint64_t>(a[0]) * index_bytes)) {
+            d.index_data = reinterpret_cast<const void*>(ibase);
+            d.index_count = a[0];
+            d.index_type = g_index_type;
+          }
+        }
+        if (a[1])
+          d.instance_count = a[1];
       }
     }
     // DRAW_INDEX_OFFSET_2 (5 dwords: maxSize, indexOffset, indexCount,
@@ -1910,6 +1965,13 @@ void SubmitDcb(const void* dcb, uint32_t size_bytes) {
           if (count >= 2)
             g_index_base =
                 (static_cast<uint64_t>(body[1] & 0xFF) << 32) | body[0];
+          break;
+        case IT_SET_BASE:
+          // base_index 1 = DRAW_INDIRECT_BASE: where the indirect draws below
+          // read their argument structs from. body: baseIndex, addrLo, addrHi.
+          if (count >= 3 && (body[0] & 0xF) == 1)
+            g_indirect_base =
+                (static_cast<uint64_t>(body[2] & 0xFF) << 32) | (body[1] & ~0x3u);
           break;
         case IT_NUM_INSTANCES:  // instance count for the following draw(s)
           g_num_instances = (count >= 1 && body[0]) ? body[0] : 1;
