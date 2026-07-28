@@ -18,6 +18,8 @@
 #include "../hardware_mode.h"
 #include "error_table.h"
 #include "kern/crash.h"
+#include <sys/random.h>
+#include <cstring>
 #include <cstdio>
 
 #if defined(DELTA_BACKEND_NATIVE)
@@ -239,14 +241,18 @@ int PS4ABI sys_sysctl(int *name, uint32_t namelen, void *oldp, size_t *oldlenp,
     return 0;
   }
 
-  // kern.arnd (CTL_KERN.37): random bytes used by the C++ runtime / libc for
-  // cookies and ASLR. Zero is a benign, deterministic value; a non-zero fill
-  // (0x04) was being consumed as garbage allocation sizes downstream.
+  // kern.arnd (CTL_KERN.37): the kernel entropy source. This used to answer with
+  // zeros, which is fine for the stack cookies and ASLR that libc wants but not
+  // for a title that seeds a CSPRNG from it: Minecraft's OpenSSL sits in DTLS
+  // certificate/key generation on an all-zero pool. DELTA_ARND_ZERO restores the
+  // old deterministic fill.
   else if (name[0] == 1 && name[1] == 37 && namelen == 2) {
     auto length = *oldlenp;
     if (length > 256)
       length = 256;
-    memset(oldp, 0, length);
+    static const bool zero = std::getenv("DELTA_ARND_ZERO") != nullptr;
+    if (zero || getrandom(oldp, length, 0) != static_cast<ssize_t>(length))
+      std::memset(oldp, 0, length);
     *oldlenp = length;
     return 0;
   }
