@@ -280,7 +280,16 @@ int PS4ABI sys_kevent(int kq, const kevent_t *changelist, int nchanges,
     std::printf("[kevent] bad kq fd=%d\n", kq);
     return -SysError::eBADF;
   }
-  return static_cast<equeue *>(obj)->kevent(changelist, nchanges, eventlist,
-                                            nevents, to);
+  int r = static_cast<equeue *>(obj)->kevent(changelist, nchanges, eventlist,
+                                             nevents, to);
+  if (std::getenv("DELTA_KEVENT_TRACE")) {
+    std::printf("[kevent] kq=%d nchanges=%d -> %d", kq, nchanges, r);
+    for (int i = 0; i < nchanges && changelist && i < 4; i++)
+      std::printf(" chg[ident=%#llx filter=%d flags=%#x]",
+                  (unsigned long long)changelist[i].ident,
+                  (int)changelist[i].filter, (unsigned)changelist[i].flags);
+    std::printf("\n");
+  }
+  return r;
 }
 }  // namespace krnl

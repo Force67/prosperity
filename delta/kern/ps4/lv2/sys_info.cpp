@@ -17,6 +17,7 @@
 #include "../../proc.h"
 #include "../hardware_mode.h"
 #include "error_table.h"
+#include "kern/crash.h"
 #include <cstdio>
 
 #if defined(DELTA_BACKEND_NATIVE)
@@ -175,6 +176,17 @@ int PS4ABI sys_sysctl(int *name, uint32_t namelen, void *oldp, size_t *oldlenp,
     if (oldp && oldlenp) {
       std::memset(oldp, 0, *oldlenp);
     }
+    return 0;
+  }
+
+  // PS5 kern.61: a 24-byte status block a libkernel getter reads on behalf of
+  // the title. Minecraft's main loop calls it every tick and, while it errors,
+  // sits in that tick doing nothing else. The getter zeroes most of the struct
+  // itself on the success path, so an all-zero answer is in-band.
+  else if (name[0] == 1 && name[1] == 61 && namelen == 2 &&
+           proc::getActive()->getPlatform() == proc::platform::ps5) {
+    if (oldp && oldlenp)
+      std::memset(oldp, 0, *oldlenp);
     return 0;
   }
 
@@ -454,6 +466,20 @@ int PS4ABI sys_sysctl(int *name, uint32_t namelen, void *oldp, size_t *oldlenp,
   for (uint32_t i = 0; i < namelen && i < 8; i++)
     std::printf(" %d", name[i]);
   std::printf("\n");
+  // The out buffer is usually a caller stack local, so scanning up from it finds
+  // the guest frames that wanted this oid.
+  if (std::getenv("DELTA_SYSCTL_CALLER") && oldp) {
+    auto *sp = reinterpret_cast<const uintptr_t *>(oldp);
+    int shown = 0;
+    for (int i = 0; i < 512 && shown < 6; i++) {
+      char sym[256];
+      symbolize(sp[i], sym, sizeof(sym));
+      if (std::strstr(sym, "(.text)")) {
+        std::printf("[sysctl]   caller %s\n", sym);
+        shown++;
+      }
+    }
+  }
   return -SysError::eNOENT;
 }
 } // namespace krnl
