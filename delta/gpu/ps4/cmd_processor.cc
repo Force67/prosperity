@@ -247,7 +247,8 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
       // rules below can silently drop it. A rejected index buffer leaves the
       // draw non-indexed, which then declines for too few vertices -- the two
       // symptoms look unrelated in the logs unless the packet is visible.
-      static const bool pkt_trace_i2 = std::getenv("DELTA_GPU_DRAWPKT") != nullptr;
+      static const bool pkt_trace_i2 =
+          std::getenv("DELTA_GPU_DRAWPKT") != nullptr;
       if (pkt_trace_i2) {
         static int n = 0;
         if (n++ < 128)
@@ -256,10 +257,10 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
                        "%s%s\n",
                        (unsigned long)ibase, icount, g_index_type,
                        accepted ? "accepted" : "REJECTED",
-                       accepted                    ? ""
-                       : icount > 0x100000         ? " (count cap)"
-                       : !icount                   ? " (zero count)"
-                                                   : " (base out of range)");
+                       accepted            ? ""
+                       : icount > 0x100000 ? " (count cap)"
+                       : !icount           ? " (zero count)"
+                                           : " (base out of range)");
       }
       if (accepted) {
         d.index_data = reinterpret_cast<const void*>(ibase);
@@ -274,8 +275,8 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
     //   indirect:       vertexCount, instanceCount, startVertex, startInstance
     //   index-indirect: indexCount,  instanceCount, startIndex, baseVertex, ...
     // (Liverpool follows the same layout as the radeon docs' DRAW_*_INDIRECT.)
-    if ((op == IT_DRAW_INDIRECT || op == IT_DRAW_INDEX_INDIRECT) && count >= 1 &&
-        g_indirect_base) {
+    if ((op == IT_DRAW_INDIRECT || op == IT_DRAW_INDEX_INDIRECT) &&
+        count >= 1 && g_indirect_base) {
       const uint64_t args = g_indirect_base + body[0];
       const uint32_t need = op == IT_DRAW_INDIRECT ? 16u : 20u;
       // The args are usually produced ON the GPU (a compute pass writes the
@@ -284,8 +285,8 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
       // memory here without flushing that range first yields the stale zeros
       // the buffer was allocated with.
       rhi::FlushCsWritesRange(rhi::DefaultRenderer(), args, need);
-      const bool mapped = utl::isMemoryRangeMapped(
-          reinterpret_cast<const void*>(args), need);
+      const bool mapped =
+          utl::isMemoryRangeMapped(reinterpret_cast<const void*>(args), need);
       uint32_t a[5] = {0, 0, 0, 0, 0};
       if (mapped)
         std::memcpy(a, reinterpret_cast<const void*>(args), need);
@@ -298,7 +299,8 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
                        "count=%u inst=%u start=%u\n",
                        op == IT_DRAW_INDIRECT ? "INDIRECT" : "INDEX_INDIRECT",
                        (unsigned long)args, (unsigned long)g_indirect_base,
-                       body[0], mapped ? "mapped" : "UNMAPPED", a[0], a[1], a[2]);
+                       body[0], mapped ? "mapped" : "UNMAPPED", a[0], a[1],
+                       a[2]);
       }
       if (mapped && a[0] && a[0] <= 0x100000) {
         if (op == IT_DRAW_INDIRECT) {
@@ -333,9 +335,8 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
           g_index_base + static_cast<uint64_t>(index_offset) * index_bytes;
       const bool mapped =
           g_index_base && icount && icount <= 0x100000 &&
-          utl::isMemoryRangeMapped(
-              reinterpret_cast<const void*>(ibase),
-              static_cast<uint64_t>(icount) * index_bytes);
+          utl::isMemoryRangeMapped(reinterpret_cast<const void*>(ibase),
+                                   static_cast<uint64_t>(icount) * index_bytes);
       static const bool off2_trace =
           std::getenv("DELTA_GPU_DRAWPKT") != nullptr;
       if (off2_trace) {
@@ -347,11 +348,11 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
                        body[0], index_offset, icount,
                        (unsigned long)g_index_base, (unsigned long)ibase,
                        g_index_type,
-                       mapped               ? "accepted"
-                       : !g_index_base      ? "REJECTED (no INDEX_BASE set)"
-                       : !icount            ? "REJECTED (zero count)"
-                       : icount > 0x100000  ? "REJECTED (count cap)"
-                                            : "REJECTED (unmapped)");
+                       mapped              ? "accepted"
+                       : !g_index_base     ? "REJECTED (no INDEX_BASE set)"
+                       : !icount           ? "REJECTED (zero count)"
+                       : icount > 0x100000 ? "REJECTED (count cap)"
+                                           : "REJECTED (unmapped)");
       }
       if (mapped) {
         d.index_data = reinterpret_cast<const void*>(ibase);
@@ -1087,6 +1088,39 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
                          attr.num_comps > 3 ? f[3] : 0.f);
           }
         }
+        std::fprintf(stderr, "\n");
+      }
+    }
+    // DELTA_GPU_VATTRDUMP: raw first-vertex bytes per attribute for small
+    // multi-attribute draws (UI quads). A UI pixel shader multiplies its
+    // textures by interpolated vertex COLORS, so an all-black UI splits into
+    // "the color bytes in guest memory are zero" vs "the fetch path zeroes
+    // them" -- this prints the guest bytes.
+    static const bool kVattrDump =
+        std::getenv("DELTA_GPU_VATTRDUMP") != nullptr;
+    static int vattr_dumped = 0;
+    if (kVattrDump && d.num_vattrs >= 4 && d.vertex_data &&
+        d.vertex_count <= 8 && vattr_dumped < 24) {
+      vattr_dumped++;
+      std::fprintf(stderr,
+                   "[vattr] vcount=%u prim=%#x nattrs=%u nbufs=%u rt=%#lx\n",
+                   d.vertex_count, d.prim_type, d.num_vattrs, d.num_vbufs,
+                   (unsigned long)d.rt_base);
+      for (uint32_t a = 0; a < d.num_vattrs && a < 8; a++) {
+        const auto& attr = d.vattrs[a];
+        const auto& vb = d.vbufs[attr.binding < d.num_vbufs ? attr.binding : 0];
+        const auto* p = static_cast<const uint8_t*>(vb.data);
+        std::fprintf(stderr,
+                     "[vattr]  loc=%u bind=%u off=%u dfmt=%u nfmt=%u "
+                     "comps=%u stride=%u v0=",
+                     attr.location, attr.binding, attr.offset, attr.dfmt,
+                     attr.nfmt, attr.num_comps, vb.stride);
+        const uint32_t bytes = 8;  // covers every <=64-bit attribute format
+        if (p && utl::isMemoryRangeMapped(p + attr.offset, bytes))
+          for (uint32_t b = 0; b < bytes; b++)
+            std::fprintf(stderr, "%02x", p[attr.offset + b]);
+        else
+          std::fprintf(stderr, "(unmapped)");
         std::fprintf(stderr, "\n");
       }
     }
@@ -1971,8 +2005,8 @@ void SubmitDcb(const void* dcb, uint32_t size_bytes) {
           // base_index 1 = DRAW_INDIRECT_BASE: where the indirect draws below
           // read their argument structs from. body: baseIndex, addrLo, addrHi.
           if (count >= 3 && (body[0] & 0xF) == 1)
-            g_indirect_base =
-                (static_cast<uint64_t>(body[2] & 0xFF) << 32) | (body[1] & ~0x3u);
+            g_indirect_base = (static_cast<uint64_t>(body[2] & 0xFF) << 32) |
+                              (body[1] & ~0x3u);
           break;
         case IT_NUM_INSTANCES:  // instance count for the following draw(s)
           g_num_instances = (count >= 1 && body[0]) ? body[0] : 1;
