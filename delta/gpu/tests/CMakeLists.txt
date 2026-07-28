@@ -26,6 +26,14 @@ add_delta_test(gcn_disasm_test
     ../ps4/gcn/gcn_decode.cc
   DEPS delta_deps)
 
+add_delta_test(gcn_audit_test
+  SOURCES
+    gcn_audit_test.cc
+    ../ps4/gcn/gcn_audit.cc
+    ../ps4/gcn/gcn_disasm.cc
+    ../ps4/gcn/gcn_decode.cc
+  DEPS delta_deps)
+
 add_delta_test(vk_memory_span_test
   SOURCES
     vk_memory_span_test.cc

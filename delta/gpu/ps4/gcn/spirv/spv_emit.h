@@ -81,6 +81,17 @@ class Module {
   void Name(Id target, const std::string& n);
   void MemberName(Id struct_type, uint32_t member, const std::string& n);
 
+  // ---- debug info ----
+  // OpString (debug section); the id is what OpLine references as a file.
+  Id String(const std::string& s);
+  // OpLine marker in the function body: subsequent instructions carry
+  // (file, line) until the next marker. The GCN recompiler uses line == the
+  // instruction's dword pc, so spirv-dis output maps back to the guest code.
+  void Line(Id file, uint32_t line);
+  // Function-body words emitted so far; the delta across an emission tells a
+  // caller exactly how much SPIR-V one guest instruction produced.
+  size_t BodyWords() const { return fn_body_.size(); }
+
   // entry point + exec modes
   void EntryPoint(spv::ExecutionModel model,
                   Id fn,
@@ -172,7 +183,9 @@ class Module {
 
   std::vector<uint32_t> caps_, exts_, ext_imports_, mem_model_, entries_,
       exec_modes_;
-  std::vector<uint32_t> debug_, decos_, types_consts_, fn_body_;
+  // strings_ holds OpStrings, which the debug-section layout places before
+  // the OpNames in debug_.
+  std::vector<uint32_t> strings_, debug_, decos_, types_consts_, fn_body_;
   std::unordered_map<uint64_t, Id> cache_;
   std::map<std::vector<Id>, Id> struct_cache_;  // member-list keyed (exact)
   std::map<std::vector<Id>, Id> fn_type_cache_;

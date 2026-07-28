@@ -267,6 +267,18 @@ void Module::MemberName(Id struct_type, uint32_t member, const std::string& n) {
   Instr(debug_, spv::Op::OpMemberName, ops);
 }
 
+Id Module::String(const std::string& s) {
+  const Id id = Alloc();
+  std::vector<uint32_t> ops{id};
+  PutString(ops, s);
+  Instr(strings_, spv::Op::OpString, ops);
+  return id;
+}
+
+void Module::Line(Id file, uint32_t line) {
+  Instr(fn_body_, spv::Op::OpLine, {file, line, 0});
+}
+
 void Module::EntryPoint(spv::ExecutionModel model,
                         Id fn,
                         const std::string& n,
@@ -416,6 +428,7 @@ std::vector<uint32_t> Module::Assemble() const {
   append(mem_model_);
   append(entries_);
   append(exec_modes_);
+  append(strings_);
   append(debug_);
   append(decos_);
   append(types_consts_);

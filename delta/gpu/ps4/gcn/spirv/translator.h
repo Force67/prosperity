@@ -69,6 +69,7 @@ struct Translator {
   Id storage_img_types[2] = {};  // storage 2D / 2D-array images
   Id storage_img_ptrs[2] = {};   // UniformConstant pointers to storage images
   bool image_query = false;
+  Id dbg_file = 0;  // OpString for OpLine pc markers (DELTA_GPU_SHDUMP)
 
   void InitTypes() {
     t_void = m.TypeVoid();

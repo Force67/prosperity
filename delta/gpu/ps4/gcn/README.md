@@ -9,6 +9,8 @@ intermediate).
 | File | Role |
 | --- | --- |
 | `gcn_decode.{h,cpp}` | Instruction decoder: bytecode -> `Program` (flat `Inst` list). Footer-aware length recovery (`OrbShdr`), plus `CachedProgram()` — a hash-validated per-address cache so per-draw analysis never re-decodes. |
+| `gcn_disasm.{h,cpp}` | Full GFX7 disassembler (mnemonic tables for every encoding + operand rendering). Debug surface only. |
+| `gcn_audit.{h,cpp}` | Shader translation audit: per-instruction fates (translated / unsupported / silently-dropped / dead), run-wide ranked report (`DELTA_GPU_SHAUDIT`), per-shader dump files (`DELTA_GPU_SHDUMP`). |
 | `gcn_resource.{h,cpp}` | Descriptor ("sharp") decode: V#/T#/S#, and per-draw tracking of the resources a decoded shader references (`TrackTextures` / `TrackVertexBuffers`). Consumes a `Program`. |
 | `gcn_detile.{h,cpp}` | 32bpp texture de-tiling (AddrLib-faithful micro/macro swizzle, mips, arrays). |
 | `gcn_translate.{h,cpp}` | Public recompiler facade: `Recompile` (VS+PS) / `RecompileCompute` (CS) + the binding-plan structs the renderer consumes. |
@@ -74,3 +76,24 @@ shaders), `DELTA_GPU_SPIRV` (accept/decline tally), `DELTA_GPU_SPIRV_CFG`
 `DELTA_GPU_NOKILL` (disable the PS discard lowering), `DELTA_GPU_VSFLIPZ`
 (z-sign diagnostic), `DELTA_GPU_CSDUMP` (dump dispatches), `DELTA_GPU_NOCS`
 (skip compute), `DELTA_GPU_TRACE`, `DELTA_GPU_TILEHIST`.
+
+### Finding unimplemented / wrongly-implemented translations
+
+- `DELTA_GPU_SHAUDIT=1` (or `=<report-path>`): audits every translated
+  shader and prints, at exit, a ranked report: each unsupported/approximated
+  op with how many shaders it appears in (fix order = report order), every
+  instruction that **silently emitted no SPIR-V** (the "an ignored load is
+  silently wrong" class — a non-nop instruction with 0 emitted words and no
+  warning), and every declined shader, each with an example
+  `stage_hash pc=` to reproduce.
+- `DELTA_GPU_SHDUMP=<dir>`: per unique shader writes
+  `<stage>_<hash>.txt` (annotated disassembly: real mnemonics + operands,
+  per-instruction emitted-word counts, `!UNSUPPORTED` / `!SILENT` / `dead`
+  markers, binding plan header), `.gcn` (raw bytecode), and `.spv` (the
+  unoptimized module, where every op is preceded by an `OpLine` whose line
+  number is the GCN dword pc — `spirv-dis`/RenderDoc show exactly which
+  guest instruction produced which SPIR-V, for auditing suspected
+  mistranslations by eye).
+- SPIR-V validation failures of translator-emitted modules now always log
+  (a module we emitted that fails validation is a translator bug, never a
+  guest gap).

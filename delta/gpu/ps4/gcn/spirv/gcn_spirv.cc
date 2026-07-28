@@ -39,6 +39,8 @@ bool RecompileComputeSpirv(const uint32_t*,
 #include <string_view>
 #include <unordered_set>
 
+#include "gpu/ps4/gcn/gcn_audit.h"
+#include "gpu/ps4/gcn/gcn_disasm.h"
 #include "gpu/ps4/gcn/spirv/spv_post.h"
 #include "gpu/ps4/gcn/spirv/translator.h"
 
@@ -50,6 +52,9 @@ bool TraceEnabled() {
 }
 
 void WarnUnsupported(const char* enc, uint32_t op, uint32_t w0, uint32_t w1) {
+  // Every event feeds the audit (per-shader, per-pc attribution); the
+  // warn-once dedup below only limits the stderr flood.
+  AuditNote(enc, op);
   static std::unordered_set<uint64_t> seen;
   const uint64_t key =
       static_cast<uint64_t>(std::hash<std::string_view>{}(enc)) ^
@@ -252,12 +257,14 @@ void EmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       break;
     }
     case Enc::kMubuf:
-      if (sc.is_cs)
+      if (sc.is_cs) {
         EmitCsMubuf(t, inst, sc);
-      else if (!sc.is_ps && sc.direct_vfetch.count(inst.pc))
-        break;  // seeded from the vertex-input state instead
-      else
+      } else if (!sc.is_ps && sc.direct_vfetch.count(inst.pc)) {
+        // Seeded from the vertex-input state instead.
+        AuditInstTag("vertex-input");
+      } else {
         EmitGfxMubuf(t, inst, sc);
+      }
       break;
     case Enc::kMtbuf:
       if (sc.is_cs)
@@ -276,9 +283,14 @@ void EmitInst(Translator& t, const Inst& inst, StageContext& sc) {
         EmitCsMimg(t, inst, sc);
       else if (sc.is_ps)
         EmitMimg(t, inst, sc);
+      else
+        // A VS sampling a texture (displacement, per-vertex lookup) has no
+        // model in the graphics path; dropping it silently renders wrong.
+        WarnUnsupported("mimg.vs", inst.opcode, w, w1);
       break;
     case Enc::kExp: {
       if (sc.is_cs) {
+        WarnUnsupported("exp.cs", (w >> 4) & 0x3F, w, w1);
         sc.cs_unsupported = true;  // no exports in compute
         break;
       }
@@ -339,9 +351,35 @@ void EmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       }
       break;
     }
+    case Enc::kUnknown:
+      WarnUnsupported("encoding.unknown", 0, w, w1);
+      break;
     default:
       break;
   }
+}
+
+// EmitInst wrapper feeding the shader audit (gcn_audit.h): per-instruction
+// SPIR-V word counts expose instructions that silently emitted nothing, and
+// with DELTA_GPU_SHDUMP each instruction's ops are preceded by an OpLine
+// whose line number is the GCN pc (visible in spirv-dis / RenderDoc).
+void EmitInstAudited(Translator& t,
+                     const Inst& inst,
+                     uint32_t index,
+                     StageContext& sc) {
+  if (!ShaderDebugEnabled()) {
+    EmitInst(t, inst, sc);
+    return;
+  }
+  AuditInstBegin(index, inst.pc);
+  if (ShaderDumpEnabled()) {
+    if (!t.dbg_file)
+      t.dbg_file = t.m.String("gcn");
+    t.m.Line(t.dbg_file, inst.pc);
+  }
+  const size_t before = t.m.BodyWords();
+  EmitInst(t, inst, sc);
+  AuditInstEnd(index, static_cast<uint32_t>(t.m.BodyWords() - before));
 }
 
 // ---- control flow: while/switch lowering -----------------------------------
@@ -509,7 +547,7 @@ void EmitCfg(Translator& t,
         continue;  // dead block/padding
       const int k = BranchKind(inst);
       if (k == 0) {
-        EmitInst(t, inst, sc);
+        EmitInstAudited(t, inst, inst_idx, sc);
         continue;
       }
       // terminator
@@ -564,11 +602,12 @@ void EmitBody(Translator& t,
   }
   uint32_t index = 0;
   for (const Inst& inst : program) {
-    if (reachable && !reachable[index++])
+    const uint32_t inst_idx = index++;
+    if (reachable && !reachable[inst_idx])
       continue;
     if (inst.enc == Enc::kSopp && inst.opcode == 1)
       break;  // s_endpgm
-    EmitInst(t, inst, sc);
+    EmitInstAudited(t, inst, inst_idx, sc);
   }
 }
 
@@ -1003,17 +1042,9 @@ bool TranslateCs(const Program& program,
 }
 
 void DumpProgram(const char* tag, const Program& program) {
-  static const char* kEncNames[] = {"unk",  "sop1",   "sop2", "sopk",  "sopc",
-                                    "sopp", "smrd",   "vop1", "vop2",  "vop3",
-                                    "vopc", "vintrp", "ds",   "mubuf", "mtbuf",
-                                    "mimg", "exp"};
   std::fprintf(stderr, "[shdis] %s, %zu insts:\n", tag, program.size());
   for (const Inst& inst : program)
-    std::fprintf(
-        stderr, "[shdis]  pc=%u %s op=%#x w0=%#x w1=%#x\n", inst.pc,
-        kEncNames[static_cast<int>(inst.enc) <= 16 ? static_cast<int>(inst.enc)
-                                                   : 0],
-        inst.opcode, inst.raw[0], inst.raw[1]);
+    std::fprintf(stderr, "[shdis]  %s\n", DisasmLine(inst).c_str());
 }
 
 // One-shot disassembly (DELTA_GPU_SHDIS): for the first branchy shaders, list
@@ -1055,6 +1086,44 @@ bool NoOpt() {
   // mis-promotion.
   static const bool no_opt = std::getenv("DELTA_GPU_SPIRV_NOOPT") != nullptr;
   return no_opt;
+}
+
+// Dump-header summaries of the resource plan, so a shader dump is
+// self-contained (which user-data slot each cbuffer/texture came from).
+std::string PlanSummaryGfx(const Recompiled& r, bool ps) {
+  std::string s = ps ? "ps plan:" : "vs plan:";
+  if (!ps) {
+    s += " attrs=" + std::to_string(r.attrs.size());
+  }
+  const auto& cbufs = ps ? r.ps_cbufs : r.vs_cbufs;
+  const auto& bufs = ps ? r.ps_bufs : r.vs_bufs;
+  s += " cbufs:";
+  for (const ShaderCbuf& c : cbufs)
+    s += " [b" + std::to_string(c.binding) +
+         " ud=" + std::to_string(c.ud_sgpr) + (c.pointer ? " ptr" : "") + " " +
+         std::to_string(c.num_dwords) + "dw]";
+  s += " bufs:";
+  for (const ShaderBuffer& b : bufs)
+    s += " [b" + std::to_string(b.binding) + " srsrc=s" +
+         std::to_string(b.srsrc_sgpr) + " pc=" + std::to_string(b.use_pc) + "]";
+  if (ps) {
+    s += " texs:";
+    for (const ShaderTex& tex : r.ps_texs)
+      s += " [t" + std::to_string(tex.binding) +
+           " ud=" + std::to_string(tex.ud_sgpr) +
+           (tex.storage ? " storage" : "") + "]";
+  }
+  return s;
+}
+
+std::string PlanSummaryCs(const RecompiledCs& r) {
+  std::string s = "cs plan:";
+  for (const CsResource& res : r.resources)
+    s += " [b" + std::to_string(res.binding) + " s" +
+         std::to_string(res.base_sgpr) + " kind=" + std::to_string(res.kind) +
+         (res.written ? " w" : "") + " min=" + std::to_string(res.min_bytes) +
+         "]";
+  return s;
 }
 
 }  // namespace
@@ -1167,41 +1236,68 @@ bool RecompileSpirv(const uint32_t* vs_code,
       flat_attrs.insert((inst.raw[0] >> 10) & 0x3F);
 
   // VS and PS are separate SPIR-V modules.
+  const bool dbg = ShaderDebugEnabled();
   Translator tv;
-  if (!TranslateVs(vs_program, vs_user_data, flat_attrs, r, tv)) {
+  if (dbg)
+    AuditBegin("vs", vs_code, vs_program);
+  const bool vs_ok = TranslateVs(vs_program, vs_user_data, flat_attrs, r, tv);
+  std::vector<uint32_t> vs;
+  if (vs_ok)
+    vs = tv.m.Assemble();
+  if (dbg) {
+    if (vs_ok)
+      AuditPlan(PlanSummaryGfx(r, /*ps=*/false));
+    else
+      AuditDecline("vs translation rejected");
+    AuditEnd(vs_ok ? &vs : nullptr);
+  }
+  if (!vs_ok) {
     if (TraceEnabled())
       std::fprintf(stderr, "[gcnspv] VS translation rejected @%p\n",
                    static_cast<const void*>(vs_code));
     return false;
   }
+
   Translator tp;
   tp.InitTypes();
-  if (ps_code ? !TranslatePs(ps_program, flat_attrs, r, tp)
-              : !TranslateDepthOnlyPs(tp)) {
+  if (dbg && ps_code)
+    AuditBegin("ps", ps_code, ps_program);
+  const bool ps_ok = ps_code ? TranslatePs(ps_program, flat_attrs, r, tp)
+                             : TranslateDepthOnlyPs(tp);
+  std::vector<uint32_t> ps;
+  if (ps_ok)
+    ps = tp.m.Assemble();
+  if (dbg && ps_code) {
+    if (ps_ok)
+      AuditPlan(PlanSummaryGfx(r, /*ps=*/true));
+    else
+      AuditDecline("ps translation rejected");
+    AuditEnd(ps_ok ? &ps : nullptr);
+  }
+  if (!ps_ok) {
     if (TraceEnabled())
       std::fprintf(stderr, "[gcnspv] PS translation rejected @%p\n",
                    static_cast<const void*>(ps_code));
     return false;
   }
 
-  const std::vector<uint32_t> vs = tv.m.Assemble();
   const std::vector<uint32_t> gs =
       EmitRectListGeometry(r.num_params, flat_attrs);
-  const std::vector<uint32_t> ps = tp.m.Assemble();
+  // A module the translator emitted but the validator rejects is a translator
+  // bug (wrong codegen, not a guest gap): always loud.
   std::string err;
   if (!spirv::Validate(vs, &err)) {
-    if (TraceEnabled())
-      std::fprintf(stderr, "[gcnspv] VS invalid: %s\n", err.c_str());
+    std::fprintf(stderr, "[gcnspv] VS invalid @%p: %s\n",
+                 static_cast<const void*>(vs_code), err.c_str());
     return false;
   }
   if (!spirv::Validate(ps, &err)) {
-    if (TraceEnabled())
-      std::fprintf(stderr, "[gcnspv] PS invalid: %s\n", err.c_str());
+    std::fprintf(stderr, "[gcnspv] PS invalid @%p: %s\n",
+                 static_cast<const void*>(ps_code), err.c_str());
     return false;
   }
   if (!spirv::Validate(gs, &err)) {
-    if (TraceEnabled())
-      std::fprintf(stderr, "[gcnspv] RECTLIST GS invalid: %s\n", err.c_str());
+    std::fprintf(stderr, "[gcnspv] RECTLIST GS invalid: %s\n", err.c_str());
     return false;
   }
   r.vs_spirv = NoOpt() ? vs : spirv::Optimize(vs);
@@ -1240,16 +1336,30 @@ bool RecompileComputeSpirv(const uint32_t* cs_code,
     return false;
   const Program program = DecodeShader(cs_code, 2048);
   MaybeDumpByAddr("CS", cs_code, program);
+  const bool dbg = ShaderDebugEnabled();
   Translator t;
   RecompiledCs tmp;  // build into a temp so a mid-emit failure leaves r intact
-  if (!TranslateCs(program, num_thread_x, num_thread_y, num_thread_z, user_sgpr,
-                   tgid_enable, lds_dwords, tmp, t))
+  if (dbg)
+    AuditBegin("cs", cs_code, program);
+  const bool cs_ok =
+      TranslateCs(program, num_thread_x, num_thread_y, num_thread_z, user_sgpr,
+                  tgid_enable, lds_dwords, tmp, t);
+  std::vector<uint32_t> spv_bin;
+  if (cs_ok)
+    spv_bin = t.m.Assemble();
+  if (dbg) {
+    if (cs_ok)
+      AuditPlan(PlanSummaryCs(tmp));
+    else
+      AuditDecline("cs translation rejected (dispatch will be skipped)");
+    AuditEnd(cs_ok ? &spv_bin : nullptr);
+  }
+  if (!cs_ok)
     return false;
-  const std::vector<uint32_t> spv_bin = t.m.Assemble();
   std::string err;
   if (!spirv::Validate(spv_bin, &err)) {
-    if (TraceEnabled())
-      std::fprintf(stderr, "[gcnspv] CS invalid: %s\n", err.c_str());
+    std::fprintf(stderr, "[gcnspv] CS invalid @%p: %s\n",
+                 static_cast<const void*>(cs_code), err.c_str());
     return false;
   }
   tmp.spirv = NoOpt() ? spv_bin : spirv::Optimize(spv_bin);
