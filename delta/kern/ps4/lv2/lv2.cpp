@@ -164,7 +164,7 @@ static const syscall_Reg syscall_dpt[] = {
     {29, (void *)&sys_recvfrom},
     {30, (void *)&null_handler}, // sys_accept
     {31, (void *)&null_handler}, // sys_getpeername
-    {32, (void *)&null_handler}, // sys_getsockname
+    {32, (void *)&sys_getsockname},
     {33, (void *)&sys_access}, // sys_access
     {34, (void *)&null_handler}, // sys_chflags
     {35, (void *)&null_handler}, // sys_fchflags
@@ -236,7 +236,7 @@ static const syscall_Reg syscall_dpt[] = {
     {101, (void *)&null_handler}, // sys_netabort
     {102, (void *)&null_handler}, // sys_netgetsockinfo
     {103, (void *)&null_handler}, // sys_sigreturn
-    {104, (void *)&null_handler}, // sys_bind
+    {104, (void *)&sys_bind},
     {105, (void *)&sys_setsockopt}, // sys_setsockopt
     {106, (void *)&null_handler}, // sys_listen
     {107, (void *)&null_handler}, // sys_vtimes
@@ -246,7 +246,7 @@ static const syscall_Reg syscall_dpt[] = {
     {111, (void *)&sys_sigsuspend}, // sys_sigsuspend
     {112, (void *)&null_handler}, // sys_sigstack
     {113, (void *)&sys_socketex},
-    {114, (void *)&null_handler}, // sys_socketclose
+    {114, (void *)&sys_socketclose},
     {115, (void *)&null_handler}, // sys_vtrace
     {116, (void *)&sys_gettimeofday}, // sys_gettimeofday
     {117, (void *)&sys_getrusage}, // sys_getrusage
@@ -282,7 +282,7 @@ static const syscall_Reg syscall_dpt[] = {
     {147, (void *)&sys_setsid}, // sys_setsid
     {148, (void *)&null_handler}, // sys_quotactl
     {149, (void *)&null_handler}, // sys_quota
-    {150, (void *)&null_handler}, // sys_getsockname
+    {150, (void *)&sys_getsockname},
     {151, (void *)&null_handler}, // sys_sem_lock
     {152, (void *)&null_handler}, // sys_sem_wakeup
     {153, (void *)&null_handler}, // sys_asyncdaemon
