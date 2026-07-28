@@ -673,19 +673,20 @@ bool smodule::resolveObfSymbol(const char *name, uintptr_t &ptrOut) {
     // NIDs are globally unique, so probing each forced-HLE table by name is safe
     // (a userService NID only ever matches the userService table). Everything else
     // (incl. libSceGnmDriver/AGC, which run LLE fine) stays LLE.
-    //   - libkernel / libSceAgcDriver / libSceAgc / libSceNgs2: only the handful of
-    //     exports missing from firmware 01.14.00 that newer-SDK titles import (see
-    //     vprx/ps5/*_ps5.cpp); every other NID in those libraries misses the tables
-    //     and stays LLE.
+    //   - libSceIme / libSceSystemService: one export each (sceImeKeyboardOpen,
+    //     sceSystemServiceReportAbnormalTermination); the real ones abort or
+    //     fail in a way titles treat as fatal. Everything else stays LLE.
     static const char *const kPs5ForcedHle[] = {
-        "libSceVideoOut",   "libSceUserService", "libScePad",
-        "libSceSaveData",   "libkernel",         "libSceAgcDriver",
-        "libSceAgc",        "libSceNgs2"};
+        "libSceVideoOut", "libSceUserService",   "libScePad",
+        "libSceSaveData", "libSceSystemService", "libSceIme"};
+    auto bindHle = [&](const char *lib, uintptr_t hle) {
+      char tn[64];
+      std::snprintf(tn, sizeof(tn), "%s!%.11s", lib, name);
+      ptrOut = cpu::makeHostThunk(reinterpret_cast<void *>(hle), tn);
+    };
     for (const char *lib : kPs5ForcedHle) {
       if (uintptr_t hle = runtime::vprx_get_forced(lib, hid)) {
-        char tn[64];
-        std::snprintf(tn, sizeof(tn), "%s!%.11s", lib, name);
-        ptrOut = cpu::makeHostThunk(reinterpret_cast<void *>(hle), tn);
+        bindHle(lib, hle);
         return true;
       }
     }
@@ -713,6 +714,21 @@ bool smodule::resolveObfSymbol(const char *name, uintptr_t &ptrOut) {
         ptrOut = a;
         return true;
       }
+
+    // Shims for exports a given firmware doesn't have: newer-SDK titles import
+    // them and would otherwise land on the badcall stub (vprx/ps5/*_ps5.cpp says
+    // what each works around). Consulted only once no loaded module exports the
+    // NID, so the real function wins where it exists -- all seven AGC shims are
+    // real exports from firmware 13.60 on, and forcing them there would report
+    // "unsupported" over a working implementation.
+    static const char *const kPs5MissingExportShims[] = {
+        "libkernel", "libSceAgcDriver", "libSceAgc", "libSceNgs2"};
+    for (const char *lib : kPs5MissingExportShims) {
+      if (uintptr_t hle = runtime::vprx_get_forced(lib, hid)) {
+        bindHle(lib, hle);
+        return true;
+      }
+    }
     return false;
   }
 
