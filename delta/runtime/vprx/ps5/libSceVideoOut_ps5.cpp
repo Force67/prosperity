@@ -25,6 +25,7 @@
 #include "gfx/gfx.h"
 #include "kern/proc.h"
 #include "kern/ps4/lv2/sys_event.h"
+#include "kern/ps4/lv2/sys_mem.h"  // allocLowGuest
 
 // PS5 present bridge: forwards the flip to the AGC command processor's
 // vk::endFrame (gpu/ps5/cmd_processor.cpp).
@@ -96,11 +97,21 @@ struct VideoPort {
   void *flipUdata = nullptr;
   int vblankEqueue = -1;
   void *vblankUdata = nullptr;
-  uint64_t labels[16] = {};
 };
 
 std::mutex g_mtx;
 VideoPort g_port;  // dedicated PS5 port state
+
+// The 16 flip labels sceVideoOutGetBufferLabelAddress hands to the title. They
+// must live in GUEST-addressable memory: the title embeds the address in the PM4
+// it builds, and the command processor's label range check rightly refuses to
+// write host .bss.
+uint64_t *videoLabels() {
+  static uint64_t *labels =
+      reinterpret_cast<uint64_t *>(krnl::allocLowGuest(16 * sizeof(uint64_t)));
+  return labels;
+}
+
 std::atomic<int> g_gfxState{0};  // 0=untried, 1=up, 2=failed
 
 bool ensureGfx(uint32_t w, uint32_t h) {
@@ -141,7 +152,8 @@ void startFlipPump() {
     for (;;) {
       std::this_thread::sleep_for(std::chrono::microseconds(16667));
       uint64_t c = g_port.flipCount.fetch_add(1) + 1;
-      for (int i = 0; i < 16; i++) g_port.labels[i] = c;
+      uint64_t *labels = videoLabels();
+      for (int i = 0; i < 16; i++) labels[i] = c;
       triggerAllEqueues(kEventFlip, kFilterFlip, static_cast<int64_t>(c));
     }
   }).detach();
@@ -351,7 +363,12 @@ int PS4ABI vGetVblankStatus(int, void *status) {
 int PS4ABI vWaitVblank(int) { return 0; }
 
 int PS4ABI vGetBufferLabelAddress(int, uintptr_t *label) {
-  if (label) *label = reinterpret_cast<uintptr_t>(&g_port.labels[0]);
+  // Taking the label address means the title drives flips through AGC and waits
+  // on these labels rather than on the flip equeue, so it never calls
+  // sceVideoOutAddFlipEvent. Start the pump here too, or nothing advances the
+  // labels and the first frame waits forever (Minecraft, PPSA17221).
+  if (label) *label = reinterpret_cast<uintptr_t>(videoLabels());
+  startFlipPump();
   return 0;
 }
 

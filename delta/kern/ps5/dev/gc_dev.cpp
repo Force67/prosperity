@@ -144,8 +144,14 @@ int32_t gcDevicePs5::ioctl(uint32_t cmd, void *data) {
       uint32_t size = 0x8000;
       static const bool trace = std::getenv("DELTA_AGC_TRACE") != nullptr;
       static int dumps = 0;
-      if (trace && dumps < 4) {
+      static uint64_t calls = 0;
+      ++calls;
+      // The first few submits are engine init, where the ring legitimately holds
+      // nothing. Sample later ones too, or "the ring reads empty" only ever
+      // describes start-up.
+      if (trace && (dumps < 4 || (calls % 500 == 0 && dumps < 12))) {
         dumps++;
+        std::printf("[agc] --- submit #%llu ---\n", (unsigned long long)calls);
         auto *w = reinterpret_cast<uint32_t *>(a);
         std::printf("[agc] submit arg[0..15]:");
         for (int k = 0; k < 16; k++)
@@ -228,6 +234,11 @@ int32_t gcDevicePs5::ioctl(uint32_t cmd, void *data) {
     }
     return 0;
   }
+  // Firmware 13.60 issues the mode-1 family as INOUT and widens the 0x8132 arg
+  // from 16 to 24 bytes. Both payloads are otherwise unchanged (0x8132's two
+  // extra dwords sit past the descriptor fields read below), so the directions
+  // share a case.
+  case 0xC0488131:
   case 0x80488131: {  // AGC submit.mode=1 submit (IN, 72 bytes). The arg IS a small
                       // command buffer: leading filler then IT_INDIRECT_BUFFER
                       // packets pointing at the real per-frame PM4. Forward it to the
@@ -253,6 +264,7 @@ int32_t gcDevicePs5::ioctl(uint32_t cmd, void *data) {
     }
     return 0;
   }
+  case 0xC0188132:
   case 0x80108132: {  // AGC mode-1 secondary submit (IN, 16 bytes): arg = [_, count,
                       // ptrLo, ptrHi]; ptr -> array of `count` 16-byte descriptors
                       // [addrLo, addrHi, sizeDwords, flags]. THESE carry the real
