@@ -47,6 +47,8 @@ void WarnUnsupported(const char* enc,
                      uint32_t op,
                      uint32_t w0 = 0,
                      uint32_t w1 = 0);
+void ResetUnsupported();
+bool HadUnsupported();
 
 // DELTA_GPU_SHTRACE: translator debug logging.
 bool TraceEnabled();
@@ -57,6 +59,7 @@ struct Translator {
   Id t_void = 0, t_fn = 0, t_u = 0, t_i = 0, t_f = 0, t_bool = 0;
   Id t_v2 = 0, t_v3 = 0, t_v4 = 0;
   Id p_priv_u = 0, sgpr = 0, vgpr = 0;
+  bool predicate_vector = false;
   Id scc_var = 0;    // scalar condition code
   Id state_var = 0;  // CFG block index for the while-switch dispatch
   Id cbuf_type = 0;  // shared CB { uvec4 data[64]; } type
@@ -124,7 +127,11 @@ struct Translator {
   Id Sg(uint32_t i) { return m.Load(t_u, SgPtr(i)); }
   Id Vg(uint32_t i) { return m.Load(t_u, VgPtr(i)); }
   void SetSg(uint32_t i, Id v) { m.Store(SgPtr(i), v); }
-  void SetVg(uint32_t i, Id v) { m.Store(VgPtr(i), v); }
+  void SetVg(uint32_t i, Id v) {
+    if (predicate_vector)
+      v = SelectNz(Exec(), v, Vg(i));
+    m.Store(VgPtr(i), v);
+  }
   Id VgF(uint32_t i) { return m.Bitcast(t_f, Vg(i)); }
   void SetVgF(uint32_t i, Id f) { SetVg(i, m.Bitcast(t_u, f)); }
 
@@ -302,6 +309,14 @@ struct Translator {
         return U32(0x40800000u);
       case 247:
         return U32(0xc0800000u);
+      case 248:
+        return U32(0x3e22f983u);  // INV_2PI
+      case 251:
+        return SelectB(IsZero(Sg(106)), U32(1), U32(0));
+      case 252:
+        return SelectB(IsZero(Exec()), U32(1), U32(0));
+      case 253:
+        return Scc();
     }
     if (field == 255)
       return U32(literal);
@@ -423,14 +438,16 @@ void EmitVop1(Translator& t,
               uint32_t op,
               uint32_t vdst,
               Id s0,
-              bool clamp = false);
+              bool clamp = false,
+              uint32_t omod = 0);
 void EmitVop2(Translator& t,
               uint32_t op,
               uint32_t vdst,
               Id s0,
               Id s1,
               uint32_t literal = 0,
-              bool clamp = false);
+              bool clamp = false,
+              uint32_t omod = 0);
 void EmitVop3(Translator& t,
               uint32_t op,
               uint32_t vdst,
@@ -439,7 +456,8 @@ void EmitVop3(Translator& t,
               Id s2,
               Id s2_hi,
               uint32_t sdst,
-              bool clamp);
+              bool clamp,
+              uint32_t omod = 0);
 // Vector compare: writes the 0/1 predicate to sgpr[dst]; the cmpx forms also
 // replace EXEC.
 void EmitVopc(Translator& t,
@@ -450,6 +468,22 @@ void EmitVopc(Translator& t,
               Id s1u,
               uint32_t dst = 106);
 bool IsVop3b(uint32_t op);
+bool EmitNeoVop1(Translator& t, const Inst& inst);
+bool EmitNeoVop2(Translator& t, const Inst& inst);
+bool EmitNeoVopc(Translator& t,
+                 uint32_t op,
+                 uint32_t dst,
+                 uint32_t src0,
+                 uint32_t src1,
+                 uint32_t literal,
+                 bool src0_high = false,
+                 bool src1_high = false,
+                 bool src0_neg = false,
+                 bool src1_neg = false,
+                 bool src0_abs = false,
+                 bool src1_abs = false);
+bool EmitNeoVop3(Translator& t, const Inst& inst);
+bool EmitNeoVop3p(Translator& t, const Inst& inst);
 
 // ---- memory emitters (translate_mem.cc) -----------------------------------
 uint32_t SmrdLoadCount(uint32_t op);

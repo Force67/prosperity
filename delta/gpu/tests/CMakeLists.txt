@@ -34,6 +34,16 @@ add_delta_test(gcn_audit_test
     ../ps4/gcn/gcn_decode.cc
   DEPS delta_deps)
 
+add_delta_test(pm4_test
+  SOURCES pm4_test.cc
+  DEPS delta_deps)
+
+if(SPIRVTOOLS_FOUND AND SPIRVHEADERS_FOUND)
+  add_delta_test(gcn_spirv_test
+    SOURCES gcn_spirv_test.cc
+    DEPS delta_gpu)
+endif()
+
 add_delta_test(vk_memory_span_test
   SOURCES
     vk_memory_span_test.cc

@@ -52,6 +52,19 @@ Id SignedAddOverflow(Translator& t, Id a, Id b, Id r) {
       t.And(t.And(t.Xor(a, r), t.Xor(b, r)), t.U32(0x80000000u)));
 }
 
+Id ApplyOutputModifier(Translator& t, Id value, uint32_t omod) {
+  switch (omod) {
+    case 1:
+      return t.FMul(value, t.F32(2.0f));
+    case 2:
+      return t.FMul(value, t.F32(4.0f));
+    case 3:
+      return t.FMul(value, t.F32(0.5f));
+    default:
+      return value;
+  }
+}
+
 }  // namespace
 
 bool IsVop3b(uint32_t op) {
@@ -437,32 +450,30 @@ void EmitSop2(Translator& t, const Inst& inst) {
                                          {t.m.Bitcast(t.t_i, t.Sub(a, b))}));
       scc = true;
       break;
-    case 0x2f:
-    case 0x30:
-    case 0x31:
-    case 0x32: {  // s_lshl{1,2,3,4}_add_u32
-      const CarryResult c = AddCarry(t, t.Shl(a, t.U32(op - 0x2e)), b);
-      r = c.value;
-      t.SetSccBool(t.IsNonZero(c.flag));
-      break;
-    }
-    case 0x33:  // s_pack_ll_b32_b16: {b[15:0], a[15:0]}
+    case 0x32:  // s_pack_ll_b32_b16: {b[15:0], a[15:0]}
+      if (inst.isa != IsaMode::kNeo) {
+        WarnUnsupported("sop2", op);
+        r = a;
+        break;
+      }
       r = t.Or(t.And(a, t.U32(0xFFFF)),
                t.Shl(t.And(b, t.U32(0xFFFF)), t.U32(16)));
       break;
-    case 0x34:  // s_pack_lh_b32_b16: {b[31:16], a[15:0]}
+    case 0x33:  // s_pack_lh_b32_b16: {b[31:16], a[15:0]}
+      if (inst.isa != IsaMode::kNeo) {
+        WarnUnsupported("sop2", op);
+        r = a;
+        break;
+      }
       r = t.Or(t.And(a, t.U32(0xFFFF)), t.And(b, t.U32(0xFFFF0000u)));
       break;
-    case 0x35:  // s_pack_hh_b32_b16: {b[31:16], a[31:16]}
+    case 0x34:  // s_pack_hh_b32_b16: {b[31:16], a[31:16]}
+      if (inst.isa != IsaMode::kNeo) {
+        WarnUnsupported("sop2", op);
+        r = a;
+        break;
+      }
       r = t.Or(t.Shr(a, t.U32(16)), t.And(b, t.U32(0xFFFF0000u)));
-      break;
-    case 0x36:  // s_mul_hi_u32
-      r = t.m.CompositeExtract(
-          t.t_u, t.m.Emit(spv::Op::OpUMulExtended, t.PairType(), {a, b}), 1);
-      break;
-    case 0x37:  // s_mul_hi_i32
-      r = t.m.CompositeExtract(
-          t.t_u, t.m.Emit(spv::Op::OpSMulExtended, t.PairType(), {a, b}), 1);
       break;
     default:
       WarnUnsupported("sop2", op);
@@ -618,6 +629,7 @@ void EmitSopk(Translator& t, const Inst& inst) {
       WarnUnsupported("sopk", op);
       break;
     case 0x13:
+      WarnUnsupported("sopk", op);
       break;
     default:
       WarnUnsupported("sopk", op);
@@ -626,9 +638,21 @@ void EmitSopk(Translator& t, const Inst& inst) {
 }
 
 // ---- VOP1 -------------------------------------------------------------------
-void EmitVop1(Translator& t, uint32_t op, uint32_t vdst, Id s0, bool clamp) {
-  const auto set_f = [&](Id f) { t.SetVgF(vdst, clamp ? t.FClamp01(f) : f); };
-  const auto set_u = [&](Id u) { t.SetVg(vdst, u); };
+void EmitVop1(Translator& t,
+              uint32_t op,
+              uint32_t vdst,
+              Id s0,
+              bool clamp,
+              uint32_t omod) {
+  const auto set_f = [&](Id f) {
+    f = ApplyOutputModifier(t, f, omod);
+    t.SetVgF(vdst, clamp ? t.FClamp01(f) : f);
+  };
+  const auto set_u = [&](Id u) {
+    if (omod)
+      WarnUnsupported("vop1.integer-omod", op);
+    t.SetVg(vdst, u);
+  };
   const Id u0 = t.m.Bitcast(t.t_u, s0);
   switch (op) {
     case 0x00:
@@ -669,10 +693,15 @@ void EmitVop1(Translator& t, uint32_t op, uint32_t vdst, Id s0, bool clamp) {
     }
     // f16 <-> f32. cvt_f16_f32 packs the half into the low half-word (high
     // half zero); cvt_f32_f16 reads it back.
-    case 0x0a:
-      set_u(t.m.ExtInst(t.t_u, GLSLstd450PackHalf2x16,
-                        {t.m.CompositeConstruct(t.t_v2, {s0, t.F32(0.f)})}));
+    case 0x0a: {
+      Id value = ApplyOutputModifier(t, s0, omod);
+      if (clamp)
+        value = t.FClamp01(value);
+      t.SetVg(vdst, t.m.ExtInst(
+                        t.t_u, GLSLstd450PackHalf2x16,
+                        {t.m.CompositeConstruct(t.t_v2, {value, t.F32(0.f)})}));
       break;
+    }
     case 0x0b:
       set_f(t.m.CompositeExtract(
           t.t_f, t.m.ExtInst(t.t_v2, GLSLstd450UnpackHalf2x16, {u0}), 0));
@@ -763,9 +792,17 @@ void EmitVop2(Translator& t,
               Id s0,
               Id s1,
               uint32_t literal,
-              bool clamp) {
-  const auto set_f = [&](Id f) { t.SetVgF(vdst, clamp ? t.FClamp01(f) : f); };
-  const auto set_u = [&](Id u) { t.SetVg(vdst, u); };
+              bool clamp,
+              uint32_t omod) {
+  const auto set_f = [&](Id f) {
+    f = ApplyOutputModifier(t, f, omod);
+    t.SetVgF(vdst, clamp ? t.FClamp01(f) : f);
+  };
+  const auto set_u = [&](Id u) {
+    if (omod)
+      WarnUnsupported("vop2.integer-omod", op);
+    t.SetVg(vdst, u);
+  };
   const Id u0 = t.m.Bitcast(t.t_u, s0), u1 = t.m.Bitcast(t.t_u, s1);
   const Id i0 = t.m.Bitcast(t.t_i, s0), i1 = t.m.Bitcast(t.t_i, s1);
   const auto mul24_hi = [&](spv::Op wide_mul, Id a, Id b) {
@@ -921,8 +958,10 @@ void EmitVop2(Translator& t,
       set_f(t.m.ExtInst(t.t_f, GLSLstd450Ldexp, {s0, i1}));
       break;
     case 0x2f:  // v_cvt_pkrtz_f16_f32
-      set_u(t.m.ExtInst(t.t_u, GLSLstd450PackHalf2x16,
-                        {t.m.CompositeConstruct(t.t_v2, {s0, s1})}));
+      if (clamp || omod)
+        WarnUnsupported("vop2.cvt_pkrtz-output-modifier", op);
+      t.SetVg(vdst, t.m.ExtInst(t.t_u, GLSLstd450PackHalf2x16,
+                                {t.m.CompositeConstruct(t.t_v2, {s0, s1})}));
       break;
     default:
       WarnUnsupported("vop2", op);
@@ -1034,8 +1073,9 @@ void EmitVopc(Translator& t,
   } else {
     WarnUnsupported("vopc", op);
   }
-  const Id result =
+  const Id predicate =
       cond ? t.SelectB(cond, t.U32(1), t.U32(0)) : t.U32(0);  // F -> 0
+  const Id result = t.And(predicate, t.Exec());
   t.SetSg(dst, result);
   if (op & 0x10)
     t.SetSg(126, result);  // cmpx: replace EXEC
@@ -1050,15 +1090,27 @@ void EmitVop3(Translator& t,
               Id s2,
               Id s2_hi,
               uint32_t sdst,
-              bool clamp) {
+              bool clamp,
+              uint32_t omod) {
   // VOP3 reflects the VOPC (0x000-0x0FF), VOP2 (0x100-0x13F) and VOP1
   // (0x180-0x1FF) encodings; only 0x140-0x17F are VOP3-exclusive.
   const Id u0 = t.m.Bitcast(t.t_u, s0), u1 = t.m.Bitcast(t.t_u, s1),
            u2 = t.m.Bitcast(t.t_u, s2);
-  const auto set_f = [&](Id f) { t.SetVgF(vdst, clamp ? t.FClamp01(f) : f); };
-  const auto set_u = [&](Id u) { t.SetVg(vdst, u); };
+  const auto set_f = [&](Id f) {
+    f = ApplyOutputModifier(t, f, omod);
+    t.SetVgF(vdst, clamp ? t.FClamp01(f) : f);
+  };
+  const auto set_u = [&](Id u) {
+    if (omod)
+      WarnUnsupported("vop3.integer-omod", op);
+    t.SetVg(vdst, u);
+  };
 
   if (op < 0x100) {  // VOPC in VOP3 form: predicate written to sgpr[vdst]
+    if (omod) {
+      WarnUnsupported("vopc.omod", op);
+      return;
+    }
     EmitVopc(t, op, s0, s1, u0, u1, vdst);
     return;
   }
@@ -1085,11 +1137,15 @@ void EmitVop3(Translator& t,
     return;
   }
   if (op >= 0x100 && op < 0x140) {
-    EmitVop2(t, op - 0x100, vdst, s0, s1, 0, clamp);
+    EmitVop2(t, op - 0x100, vdst, s0, s1, 0, clamp, omod);
     return;
   }
   if (op >= 0x180 && op < 0x200) {
-    EmitVop1(t, op - 0x180, vdst, s0, clamp);
+    if (op == 0x18b) {
+      set_f(s0);
+      return;
+    }
+    EmitVop1(t, op - 0x180, vdst, s0, clamp, omod);
     return;
   }
 

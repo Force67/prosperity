@@ -77,6 +77,7 @@ enum Pm4It : uint32_t {
   IT_SET_CONTEXT_REG = 0x69,
   IT_SET_SH_REG = 0x76,
   IT_SET_UCONFIG_REG = 0x79,
+  IT_SET_SH_REG_INDEX = 0x9B,
   IT_WRITE_DATA = 0x37,
   // Constant Engine (processes the CCB; runs ahead of the draw engine). CE RAM
   // is on-chip scratch the CE fills (WRITE/LOAD) and dumps to memory (DUMP) as
@@ -100,5 +101,9 @@ enum Pm4RegBase : uint32_t {
   kContextRegBase = 0xA000,
   kUConfigRegBase = 0xC000,
 };
+
+constexpr uint32_t Pm4SetRegAddress(uint32_t base, uint32_t offset_and_index) {
+  return base + (offset_and_index & 0xffff);
+}
 
 }  // namespace gpu

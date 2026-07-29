@@ -9,8 +9,8 @@
  * buffers / textures from the guest at draw time. This is the only shader
  * execution path: VS+PS pairs become Vulkan graphics pipelines, compute
  * shaders become Vulkan compute pipelines. Branchy shaders are lowered to a
- * while/switch state machine over basic blocks; unhandled ops degrade
- * gracefully (graphics) or decline the recompile (compute).
+ * while/switch state machine over basic blocks; unhandled ops decline the
+ * recompile rather than silently emitting approximate shaders.
  */
 
 #include <cstdint>

@@ -12,6 +12,11 @@
 
 namespace gpu {
 
+// Select the PS4 shader hardware profile for subsequent submissions. The
+// composition root calls this after combining configured Neo hardware with the
+// title's param.sfo Neo-support bit.
+void SetPs4NeoMode(bool enabled);
+
 // Process one PM4 draw command buffer (guest GPU address, identity-mapped to a
 // host pointer; size in bytes). Walks the packet stream, updating register
 // state and issuing draws. Safe to call from the guest's GPU submit thread.

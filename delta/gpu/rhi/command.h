@@ -201,6 +201,7 @@ struct DrawInfo {
   // buffer, vattrs describe the inputs, mvp holds the constant buffer (pushed),
   // tex_base the sampler.
   uint64_t vs_addr = 0, ps_addr = 0;  // pipeline cache key
+  bool ps4_neo = false;
   uint32_t vs_user_data[32] = {};
   uint32_t ps_user_data[32] = {};
   const gcn::Recompiled* recomp = nullptr;

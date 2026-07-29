@@ -46,12 +46,25 @@ bool RecompileComputeSpirv(const uint32_t*,
 
 namespace gpu::gcn {
 
+namespace {
+thread_local bool g_had_unsupported = false;
+}
+
+void ResetUnsupported() {
+  g_had_unsupported = false;
+}
+
+bool HadUnsupported() {
+  return g_had_unsupported;
+}
+
 bool TraceEnabled() {
   static const bool enabled = std::getenv("DELTA_GPU_SHTRACE") != nullptr;
   return enabled;
 }
 
 void WarnUnsupported(const char* enc, uint32_t op, uint32_t w0, uint32_t w1) {
+  g_had_unsupported = true;
   // Every event feeds the audit (per-shader, per-pc attribution); the
   // warn-once dedup below only limits the stderr flood.
   AuditNote(enc, op);
@@ -61,10 +74,9 @@ void WarnUnsupported(const char* enc, uint32_t op, uint32_t w0, uint32_t w1) {
       (static_cast<uint64_t>(op) << 40);
   if (seen.size() > 512 || !seen.insert(key).second)
     return;
-  std::fprintf(
-      stderr,
-      "[gcnspv] UNSUPPORTED %s op=%#x (w0=%#x w1=%#x) -> approximated\n", enc,
-      op, w0, w1);
+  std::fprintf(stderr,
+               "[gcnspv] UNSUPPORTED %s op=%#x (w0=%#x w1=%#x) -> rejected\n",
+               enc, op, w0, w1);
 }
 
 // ---- stage-io helpers -------------------------------------------------------
@@ -179,6 +191,44 @@ std::vector<FetchAttr> ParseFetch(uint64_t fetch_addr) {
 // Emit one non-terminator instruction (branches are handled by the CFG driver).
 void EmitInst(Translator& t, const Inst& inst, StageContext& sc) {
   const uint32_t w = inst.raw[0], w1 = inst.raw[1];
+  if (inst.extension == InstExtension::kSdwa ||
+      inst.extension == InstExtension::kDpp) {
+    WarnUnsupported(inst.extension == InstExtension::kSdwa ? "sdwa" : "dpp",
+                    inst.opcode, w, w1);
+    return;
+  }
+  const bool uses_lds_direct =
+      ((inst.enc == Enc::kVop1 || inst.enc == Enc::kVop2 ||
+        inst.enc == Enc::kVopc) &&
+       (w & 0x1ff) == 254) ||
+      ((inst.enc == Enc::kVop3 || inst.enc == Enc::kVop3p) &&
+       ((w1 & 0x1ff) == 254 || ((w1 >> 9) & 0x1ff) == 254 ||
+        ((w1 >> 18) & 0x1ff) == 254));
+  if (uses_lds_direct) {
+    WarnUnsupported("lds_direct", inst.opcode, w, w1);
+    return;
+  }
+  const bool uses_neo_inline =
+      ((inst.enc == Enc::kVop1 || inst.enc == Enc::kVop2 ||
+        inst.enc == Enc::kVopc) &&
+       (w & 0x1ff) == 248) ||
+      ((inst.enc == Enc::kVop3 || inst.enc == Enc::kVop3p) &&
+       ((w1 & 0x1ff) == 248 || ((w1 >> 9) & 0x1ff) == 248 ||
+        ((w1 >> 18) & 0x1ff) == 248)) ||
+      ((inst.enc == Enc::kSop2 || inst.enc == Enc::kSopc) &&
+       ((w & 0xff) == 248 || ((w >> 8) & 0xff) == 248)) ||
+      (inst.enc == Enc::kSop1 && (w & 0xff) == 248) ||
+      (inst.enc == Enc::kSmrd && ((w >> 8) & 1) == 0 && (w & 0xff) == 248);
+  if (inst.isa == IsaMode::kBase && uses_neo_inline) {
+    WarnUnsupported("source.inv_2pi.neo", inst.opcode, w, w1);
+    return;
+  }
+  if (inst.isa == IsaMode::kBase && inst.enc == Enc::kVop3 &&
+      ((w1 & 0x1ff) == 255 || ((w1 >> 9) & 0x1ff) == 255 ||
+       ((w1 >> 18) & 0x1ff) == 255)) {
+    WarnUnsupported("vop3.literal.neo", inst.opcode, w, w1);
+    return;
+  }
   switch (inst.enc) {
     case Enc::kSop1:
       EmitSop1(t, inst);
@@ -197,6 +247,11 @@ void EmitInst(Translator& t, const Inst& inst, StageContext& sc) {
         // ControlBarrier(Workgroup, Workgroup, AcquireRelease|WorkgroupMemory)
         t.m.EmitVoid(spv::Op::OpControlBarrier,
                      {t.U32(2), t.U32(2), t.U32(0x108)});
+      } else if (inst.opcode != 0x00 && inst.opcode != 0x01 &&
+                 inst.opcode != 0x02 &&
+                 !(inst.opcode >= 0x04 && inst.opcode <= 0x0a) &&
+                 inst.opcode != 0x0c) {
+        WarnUnsupported("sopp", inst.opcode, w, w1);
       }
       break;  // s_nop / s_waitcnt / hints: no-ops in this model
     case Enc::kSmrd:
@@ -206,12 +261,16 @@ void EmitInst(Translator& t, const Inst& inst, StageContext& sc) {
         EmitCbufSmrd(t, inst, sc.cbuf_bind);
       break;
     case Enc::kVop1: {
+      if (inst.isa == IsaMode::kNeo && EmitNeoVop1(t, inst))
+        break;
       const uint32_t op = inst.opcode, vdst = (w >> 17) & 0xFF,
                      src0 = w & 0x1FF;
       EmitVop1(t, op, vdst, t.SrcF(src0, inst.literal));
       break;
     }
     case Enc::kVop2: {
+      if (inst.isa == IsaMode::kNeo && EmitNeoVop2(t, inst))
+        break;
       const uint32_t op = inst.opcode, vdst = (w >> 17) & 0xFF;
       const uint32_t vsrc1 = (w >> 9) & 0xFF, src0 = w & 0x1FF;
       EmitVop2(t, op, vdst, t.SrcF(src0, inst.literal),
@@ -219,6 +278,8 @@ void EmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       break;
     }
     case Enc::kVop3: {
+      if (inst.isa == IsaMode::kNeo && EmitNeoVop3(t, inst))
+        break;
       const uint32_t op = inst.opcode, vdst = w & 0xFF;
       const bool vop3b = IsVop3b(op);
       const uint32_t sdst = vop3b ? ((w >> 8) & 0x7F) : 106;
@@ -226,15 +287,34 @@ void EmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       const bool clamp = !vop3b && ((w >> 11) & 1);
       const uint32_t s0 = w1 & 0x1FF, s1 = (w1 >> 9) & 0x1FF;
       const uint32_t s2 = (w1 >> 18) & 0x1FF, neg = (w1 >> 29) & 7;
-      EmitVop3(t, op, vdst, t.SrcF(s0, inst.literal, neg & 1, abs & 1),
-               t.SrcF(s1, inst.literal, neg & 2, abs & 2),
+      const uint32_t omod = (w1 >> 27) & 3;
+      Id source0 = t.SrcF(s0, inst.literal, neg & 1, abs & 1);
+      if (op == 0x18b) {
+        source0 =
+            t.m.CompositeExtract(t.t_f,
+                                 t.m.ExtInst(t.t_v2, GLSLstd450UnpackHalf2x16,
+                                             {t.SrcRaw(s0, inst.literal)}),
+                                 0);
+        if (abs & 1)
+          source0 = t.Ext1(GLSLstd450FAbs, source0);
+        if (neg & 1)
+          source0 = t.FNeg(source0);
+      }
+      EmitVop3(t, op, vdst, source0, t.SrcF(s1, inst.literal, neg & 2, abs & 2),
                t.SrcF(s2, inst.literal, neg & 4, abs & 4),
-               t.SrcRawHi(s2, inst.literal, op == 0x177), sdst, clamp);
+               t.SrcRawHi(s2, inst.literal, op == 0x177), sdst, clamp, omod);
       break;
     }
+    case Enc::kVop3p:
+      if (!EmitNeoVop3p(t, inst))
+        WarnUnsupported("vop3p", inst.opcode, w, w1);
+      break;
     case Enc::kVopc: {
       const uint32_t op = inst.opcode;
       const uint32_t vsrc1 = (w >> 9) & 0xFF, src0 = w & 0x1FF;
+      if (inst.isa == IsaMode::kNeo &&
+          EmitNeoVopc(t, op, 106, src0, 256 + vsrc1, inst.literal))
+        break;
       EmitVopc(t, op, t.SrcF(src0, inst.literal),
                t.SrcF(256 + vsrc1, inst.literal), t.SrcRaw(src0, inst.literal),
                t.SrcRaw(256 + vsrc1, inst.literal));
@@ -596,6 +676,7 @@ void EmitBody(Translator& t,
               StageContext& sc,
               const uint8_t* reachable) {
   t.SeedExec();
+  t.predicate_vector = true;
   if (ForceCfg() || HasControlFlow(program)) {
     EmitCfg(t, program, sc, reachable);
     return;
@@ -1025,6 +1106,7 @@ bool TranslateCs(const Program& program,
   for (uint32_t c = 0; c < 3; c++)  // local invocation id (tidig) -> v0..v2
     t.SetVg(c, t.m.Load(t.t_u, t.m.AccessChain(p_in_u, local_id, {t.U32(c)})));
   t.SeedExec();
+  t.predicate_vector = true;
   EmitCfg(t, program, sc, reachable.data());
   if (sc.cs_unsupported)
     return false;
@@ -1238,9 +1320,11 @@ bool RecompileSpirv(const uint32_t* vs_code,
   // VS and PS are separate SPIR-V modules.
   const bool dbg = ShaderDebugEnabled();
   Translator tv;
+  ResetUnsupported();
   if (dbg)
     AuditBegin("vs", vs_code, vs_program);
-  const bool vs_ok = TranslateVs(vs_program, vs_user_data, flat_attrs, r, tv);
+  const bool vs_ok = TranslateVs(vs_program, vs_user_data, flat_attrs, r, tv) &&
+                     !HadUnsupported();
   std::vector<uint32_t> vs;
   if (vs_ok)
     vs = tv.m.Assemble();
@@ -1260,10 +1344,12 @@ bool RecompileSpirv(const uint32_t* vs_code,
 
   Translator tp;
   tp.InitTypes();
+  ResetUnsupported();
   if (dbg && ps_code)
     AuditBegin("ps", ps_code, ps_program);
-  const bool ps_ok = ps_code ? TranslatePs(ps_program, flat_attrs, r, tp)
-                             : TranslateDepthOnlyPs(tp);
+  const bool ps_ok = (ps_code ? TranslatePs(ps_program, flat_attrs, r, tp)
+                              : TranslateDepthOnlyPs(tp)) &&
+                     !HadUnsupported();
   std::vector<uint32_t> ps;
   if (ps_ok)
     ps = tp.m.Assemble();
@@ -1339,11 +1425,13 @@ bool RecompileComputeSpirv(const uint32_t* cs_code,
   const bool dbg = ShaderDebugEnabled();
   Translator t;
   RecompiledCs tmp;  // build into a temp so a mid-emit failure leaves r intact
+  ResetUnsupported();
   if (dbg)
     AuditBegin("cs", cs_code, program);
   const bool cs_ok =
       TranslateCs(program, num_thread_x, num_thread_y, num_thread_z, user_sgpr,
-                  tgid_enable, lds_dwords, tmp, t);
+                  tgid_enable, lds_dwords, tmp, t) &&
+      !HadUnsupported();
   std::vector<uint32_t> spv_bin;
   if (cs_ok)
     spv_bin = t.m.Assemble();

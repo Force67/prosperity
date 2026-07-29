@@ -80,7 +80,8 @@ uint32_t FindComputeMemoryType(uint32_t type_bits) {
 }
 
 CsPipe* GetCsPipe(const ComputeInfo& ci) {
-  auto it = g_cs_pipes.find(ci.cs_addr);
+  const uint64_t key = reinterpret_cast<uintptr_t>(ci.recomp);
+  auto it = g_cs_pipes.find(key);
   if (it != g_cs_pipes.end())
     return it->second.num_res == ci.num_res ? &it->second : nullptr;
   CsPipe cp;
@@ -128,8 +129,8 @@ CsPipe* GetCsPipe(const ComputeInfo& ci) {
   }
   NameObject(VK_OBJECT_TYPE_PIPELINE, (uint64_t)cp.pipe, "cs %#llx",
              (unsigned long long)ci.cs_addr);
-  g_cs_pipes[ci.cs_addr] = cp;
-  return &g_cs_pipes[ci.cs_addr];
+  g_cs_pipes[key] = cp;
+  return &g_cs_pipes[key];
 }
 
 // Persistent compute staging. Dispatches are serialized behind the fence, so

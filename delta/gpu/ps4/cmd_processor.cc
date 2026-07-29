@@ -40,8 +40,9 @@ bool g_frame_active = false;
 
 struct ShaderKey {
   uint64_t vs = 0, ps = 0, fetch = 0;
+  bool neo = false;
   bool operator==(const ShaderKey& o) const {
-    return vs == o.vs && ps == o.ps && fetch == o.fetch;
+    return vs == o.vs && ps == o.ps && fetch == o.fetch && neo == o.neo;
   }
 };
 struct ShaderKeyHash {
@@ -49,7 +50,35 @@ struct ShaderKeyHash {
     uint64_t h =
         (k.vs ^ (k.ps + 0x9e3779b97f4a7c15ull + (k.vs << 6) + (k.vs >> 2)));
     h ^= k.fetch + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
+    h ^= static_cast<uint64_t>(k.neo) << 63;
     return static_cast<size_t>(h);
+  }
+};
+
+struct ComputeShaderKey {
+  uint64_t address = 0;
+  uint32_t thread_x = 0, thread_y = 0, thread_z = 0;
+  uint32_t user_sgpr = 0, tgid_enable = 0, lds_dwords = 0;
+  bool neo = false;
+
+  bool operator==(const ComputeShaderKey& other) const = default;
+};
+
+struct ComputeShaderKeyHash {
+  size_t operator()(const ComputeShaderKey& key) const {
+    size_t hash = std::hash<uint64_t>{}(key.address);
+    const auto combine = [&](uint32_t value) {
+      hash ^= std::hash<uint32_t>{}(value) + 0x9e3779b9u + (hash << 6) +
+              (hash >> 2);
+    };
+    combine(key.thread_x);
+    combine(key.thread_y);
+    combine(key.thread_z);
+    combine(key.user_sgpr);
+    combine(key.tgid_enable);
+    combine(key.lds_dwords);
+    combine(key.neo ? 1 : 0);
+    return hash;
   }
 };
 
@@ -79,8 +108,10 @@ uint32_t FbHeight() {
 
 // Write a run of register values from a SET_*_REG packet body into the file.
 void SetRegs(uint32_t base, const uint32_t* body, uint32_t count) {
-  // body[0] = reg offset (relative to base); body[1..] = values.
-  uint32_t off = base + body[0];
+  // Indexed SET packets use bits 28..31 for the index; only the low 16 bits are
+  // the register offset. Treating the complete word as an offset drops Neo
+  // register writes such as 0x40000258.
+  uint32_t off = Pm4SetRegAddress(base, body[0]);
   for (uint32_t i = 1; i < count; i++) {
     uint32_t idx = off + (i - 1);
     if (idx < kRegFileSize)
@@ -624,7 +655,8 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
       // unrelated shader pairs.
       static std::unordered_map<ShaderKey, gcn::Recompiled, ShaderKeyHash>
           sh_cache;
-      ShaderKey key{vs_a, ps_a, fetch};
+      const bool neo = gcn::DefaultIsaMode() == gcn::IsaMode::kNeo;
+      ShaderKey key{vs_a, ps_a, fetch, neo};
       auto it = sh_cache.find(key);
       if (it == sh_cache.end())
         it = sh_cache
@@ -637,6 +669,7 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
       gcn::Recompiled& rc = it->second;
       recomp_status = rc.ok ? "bad-attrs" : "rejected";
       if (rc.ok) {
+        d.ps4_neo = neo;
         const uint32_t* vud2 = &g_regs[mmSPI_SHADER_USER_DATA_VS_0];
         const auto vs_prog = gcn::CachedProgram(vs_a, 4096);
         const auto direct_vbs =
@@ -1517,6 +1550,11 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
 
 }  // namespace
 
+void SetPs4NeoMode(bool enabled) {
+  std::lock_guard<std::mutex> lock(g_mtx);
+  gcn::SetDefaultIsaMode(enabled ? gcn::IsaMode::kNeo : gcn::IsaMode::kBase);
+}
+
 // Called by the Gnm HLE on submit-and-flip: finish the frame and present the
 // render target the flip displays.
 void EndFrame(uint64_t scanout_base) {
@@ -1681,13 +1719,14 @@ void HandleDispatch(const uint32_t* body, uint32_t count) {
   // The cache key covers everything baked into the module (workgroup shape +
   // RSRC2 state), not just the code address: the same CS can legally be
   // re-dispatched with a different workgroup size.
-  const uint64_t cs_key = cs_addr ^ (static_cast<uint64_t>(tgx) << 40) ^
-                          (static_cast<uint64_t>(tgy) << 48) ^
-                          (static_cast<uint64_t>(tgz) << 56) ^
-                          (static_cast<uint64_t>(user_sgpr) << 1) ^
-                          (static_cast<uint64_t>(tgid_enable) << 6) ^
-                          (static_cast<uint64_t>(lds_dwords) << 9);
-  static std::unordered_map<uint64_t, gcn::RecompiledCs> cs_cache;
+  const ComputeShaderKey cs_key{
+      cs_addr,    tgx,
+      tgy,        tgz,
+      user_sgpr,  tgid_enable,
+      lds_dwords, gcn::DefaultIsaMode() == gcn::IsaMode::kNeo};
+  static std::unordered_map<ComputeShaderKey, gcn::RecompiledCs,
+                            ComputeShaderKeyHash>
+      cs_cache;
   auto cit = cs_cache.find(cs_key);
   if (cit == cs_cache.end()) {
     cit = cs_cache
@@ -1719,7 +1758,7 @@ void HandleDispatch(const uint32_t* body, uint32_t count) {
       256ull * 1024 * 1024;  // sanity cap per storage buffer
   constexpr uint64_t kMaxUnboundedBuffer = 16ull * 1024 * 1024;
   rhi::ComputeInfo ci;
-  ci.cs_addr = cs_key;
+  ci.cs_addr = cs_addr;
   ci.groups[0] = dim_x;
   ci.groups[1] = dim_y;
   ci.groups[2] = dim_z;
@@ -1984,6 +2023,7 @@ void SubmitDcb(const void* dcb, uint32_t size_bytes) {
           SetRegs(kContextRegBase, body, count);
           break;
         case IT_SET_SH_REG:
+        case IT_SET_SH_REG_INDEX:
           SetRegs(kShRegBase, body, count);
           break;
         case IT_SET_UCONFIG_REG:

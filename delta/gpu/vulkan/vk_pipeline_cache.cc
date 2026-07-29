@@ -225,6 +225,7 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
       ((uint64_t)(d.blend_enable ? (d.blend_control & 0x7FFFFFFFu) : 0) << 1) ^
       ((uint64_t)d.vertex_stride << 33) ^ ((uint64_t)mrt_n << 60) ^
       ((uint64_t)dstate * 0x100000001b3ull);
+  key = HashWord(key, d.ps4_neo ? 1 : 0);
   key = HashWord(key, d.num_vattrs);
   for (uint32_t i = 0; i < mrt_n; i++)
     key = HashWord(key, ColorTargetFormat(d.mrt_info[i]));

@@ -6,6 +6,15 @@
 # On Android the NDK sysroot provides <vulkan/vulkan.h> and libvulkan.so on the
 # default include/link paths (CMake's FindVulkan doesn't locate them), so link
 # the plain `vulkan` library instead of going through find_package.
+
+# Discover the optional SPIR-V backend before add_delta_module enters tests/;
+# clean builds must register the backend's tests on their first configure.
+find_package(PkgConfig QUIET)
+if(PkgConfig_FOUND)
+  pkg_check_modules(SPIRVTOOLS QUIET SPIRV-Tools)
+  pkg_check_modules(SPIRVHEADERS QUIET SPIRV-Headers)
+endif()
+
 if(ANDROID)
   add_delta_module(gpu DEPS vulkan delta_gfx)
 else()
@@ -19,19 +28,12 @@ endif()
 # include inside the module is spelled from the delta root ("gpu/..."), which
 # the shared DELTA_ROOT include dir already resolves -- no extra include roots.
 
-# The recompiler emits SPIR-V directly (no GLSL/shaderc).
-find_package(PkgConfig QUIET)
-
 # Direct GCN->SPIR-V backend (gcn/spirv): emits SPIR-V from the GCN bytecode then
 # runs a SPIRV-Tools optimize/validate pass. Needs SPIRV-Headers (spirv.hpp11) and
 # SPIRV-Tools (static lib: the C++ Optimizer + the C validation API). When the
 # packages are unavailable the backend self-disables at build time (no shader
 # recompilation at all -- guest draws/dispatches are skipped) via the
 # DELTA_HAVE_SPIRV_BACKEND define.
-if(PkgConfig_FOUND)
-  pkg_check_modules(SPIRVTOOLS QUIET SPIRV-Tools)
-  pkg_check_modules(SPIRVHEADERS QUIET SPIRV-Headers)
-endif()
 if(SPIRVTOOLS_FOUND AND SPIRVHEADERS_FOUND)
   # PRIVATE: SPIRV-Tools is an implementation detail of the recompiler; no
   # header on the public surface needs it, and keeping it off dependents'
