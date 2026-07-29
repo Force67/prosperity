@@ -41,17 +41,25 @@ enum class Enc : uint8_t {
   kMtbuf,  // buffer load/store (vertex fetch via V#)
   kMimg,   // image sample/load/store (uses T#/S#)
   kExp,    // export (PS color / VS position out)
+  kFlat,   // RDNA flat/global/scratch memory
 };
 
-enum class InstExtension : uint8_t { kNone, kLiteral, kSdwa, kDpp };
+enum class InstExtension : uint8_t {
+  kNone,
+  kLiteral,
+  kSdwa,
+  kDpp,
+  kDpp8,
+  kDpp8Fi,
+};
 
 struct Inst {
   IsaMode isa = IsaMode::kBase;
   Enc enc = Enc::kUnknown;
-  uint32_t opcode = 0;       // encoding-relative opcode
-  uint32_t raw[2] = {0, 0};  // up to 2 dwords (some need a literal)
-  uint32_t size = 1;         // length in dwords (incl. literal)
-  uint32_t pc = 0;           // dword offset within the program
+  uint32_t opcode = 0;   // encoding-relative opcode
+  uint32_t raw[5] = {};  // largest base encoding: RDNA MIMG with NSA=3
+  uint32_t size = 1;     // length in dwords (incl. literal)
+  uint32_t pc = 0;       // dword offset within the program
   bool has_literal = false;
   uint32_t literal = 0;
   InstExtension extension = InstExtension::kNone;

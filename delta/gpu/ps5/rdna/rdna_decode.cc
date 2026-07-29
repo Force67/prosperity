@@ -33,15 +33,29 @@ bool Scalar2HasLit(uint32_t w) {
 bool Scalar1HasLit(uint32_t w) {
   return (w & 0xFF) == 255;
 }
-// VALU src0 (9-bit [8:0]) encodings that append an extra dword: 255 selects a
-// 32-bit literal, 249 selects an SDWA control word, 250 selects a DPP control
-// word. Missing the SDWA/DPP dword desyncs the decoder (the control word is
-// then read as the next instruction) -- 249/250 are reserved src0 values, never
-// real operands, so treating them as size-extending is always correct (matches
-// published gfx10.3 references, which decode SDWA/DPP as 2-word instructions).
-bool ValuSrc0Extra(uint32_t w) {
-  const uint32_t s = w & 0x1FF;
-  return s == 255 || s == 249 || s == 250;
+// VALU src0 (9-bit [8:0]) values that append an extension dword. DPP forms are
+// valid only for VOP1/VOP2; SDWA and literals are also valid for VOPC.
+gpu::gcn::InstExtension ValuExtension(Enc enc, uint32_t w) {
+  switch (w & 0x1FF) {
+    case 233:
+      return enc == Enc::kVop1 || enc == Enc::kVop2
+                 ? gpu::gcn::InstExtension::kDpp8
+                 : gpu::gcn::InstExtension::kNone;
+    case 234:
+      return enc == Enc::kVop1 || enc == Enc::kVop2
+                 ? gpu::gcn::InstExtension::kDpp8Fi
+                 : gpu::gcn::InstExtension::kNone;
+    case 249:
+      return gpu::gcn::InstExtension::kSdwa;
+    case 250:
+      return enc == Enc::kVop1 || enc == Enc::kVop2
+                 ? gpu::gcn::InstExtension::kDpp
+                 : gpu::gcn::InstExtension::kNone;
+    case 255:
+      return gpu::gcn::InstExtension::kLiteral;
+    default:
+      return gpu::gcn::InstExtension::kNone;
+  }
 }
 
 // Family classification, mirroring the gfx10.3 encoding-family dispatch. The
@@ -87,12 +101,13 @@ Enc Classify(uint32_t w, uint32_t& opcode) {
     case 0x32:
       opcode = (w >> 16) & 0x3;
       return Enc::kVintrp;
-    // VOP3P (packed 16-bit math) shares the 2-dword shape but has different
-    // semantics; tag it above the 10-bit VOP3 opcode space so the translator
-    // warns rather than misinterpreting it as a scalar VOP3 op.
     case 0x33:
-      opcode = ((w >> 16) & 0x7F) | 0x400;
-      return Enc::kVop3;
+      if ((w >> 24) != 0xCC) {
+        opcode = 0;
+        return Enc::kUnknown;
+      }
+      opcode = (w >> 16) & 0xFF;
+      return Enc::kVop3p;
     case 0x35:
       opcode = (w >> 16) & 0x3FF;
       return Enc::kVop3;  // 10-bit opcode
@@ -101,7 +116,7 @@ Enc Classify(uint32_t w, uint32_t& opcode) {
       return Enc::kDs;
     case 0x37:
       opcode = (w >> 18) & 0x7F;
-      return Enc::kMubuf;  // FLAT/GLOBAL/SCRATCH -> buffer slot
+      return Enc::kFlat;
     case 0x38:
       opcode = ((w >> 18) & 0x7F) | (((w >> 25) & 1) << 7);
       return Enc::kMubuf;
@@ -116,10 +131,17 @@ Enc Classify(uint32_t w, uint32_t& opcode) {
     case 0x3D:
       opcode = (w >> 18) & 0xFF;
       return Enc::kSmrd;  // SMEM (replaces GCN SMRD)
-    // RDNA2 EXP is 0b111110 (0xf8 prefix), same slot as GCN; target/en live in
-    // [9:4]/[3:0] (see EmitExport). NGG streams also emit a null export at
-    // 0b110001 (en=0, a no-op) -- route it here too so it is not "unsupported".
+    // Observed NGG streams use the reserved 0b110001 prefix only for null
+    // exports. Do not let non-null forms acquire ordinary EXP semantics.
     case 0x31:
+      if (w & 0xF) {
+        opcode = 0;
+        return Enc::kUnknown;
+      }
+      opcode = (w >> 4) & 0x3F;
+      return Enc::kExp;
+    // RDNA2 EXP is 0b111110 (0xf8 prefix), same slot as GCN; target/en live in
+    // [9:4]/[3:0] (see EmitExport).
     case 0x3E:
       opcode = (w >> 4) & 0x3F;
       return Enc::kExp;
@@ -132,10 +154,14 @@ Enc Classify(uint32_t w, uint32_t& opcode) {
 // Base dword count (excluding any trailing literal). RDNA2 two-dword encodings:
 // VOP3/VOP3P, SMEM, DS, MUBUF/MTBUF, FLAT, MIMG, EXP. MIMG adds NSA words.
 uint32_t BaseSize(Enc e, uint32_t w) {
+  if ((w >> 26) == 0x31)
+    return 2;  // reserved NGG export slot retains the EXP-shaped width
   switch (e) {
     case Enc::kVop3:
+    case Enc::kVop3p:
     case Enc::kSmrd:  // SMEM is 2 dwords on RDNA2 (was 1 on GCN SMRD)
     case Enc::kDs:
+    case Enc::kFlat:
     case Enc::kMubuf:
     case Enc::kMtbuf:
     case Enc::kExp:
@@ -181,8 +207,17 @@ Program Decode(const uint32_t* code, uint32_t max_dwords, bool stop_at_endpgm) {
     in.raw[0] = code[i];
     in.enc = Classify(code[i], in.opcode);
     in.size = BaseSize(in.enc, code[i]);
-    if (in.size >= 2 && i + 1 < max_dwords)
-      in.raw[1] = code[i + 1];
+    if (i + in.size > max_dwords) {
+      in.enc = Enc::kUnknown;
+      in.opcode = 0;
+      in.size = max_dwords - i;
+      for (uint32_t d = 1; d < in.size; d++)
+        in.raw[d] = code[i + d];
+      out.push_back(in);
+      break;
+    }
+    for (uint32_t d = 1; d < in.size; d++)
+      in.raw[d] = code[i + d];
     if (in.enc == Enc::kMtbuf)
       in.opcode |= ((in.raw[1] >> 21) & 1) << 3;
 
@@ -198,47 +233,57 @@ Program Decode(const uint32_t* code, uint32_t max_dwords, bool stop_at_endpgm) {
       case Enc::kSop1:
         lit = Scalar1HasLit(code[i]);
         break;
+      case Enc::kSopk:
+        lit = in.opcode == 0x15;  // s_setreg_imm32_b32
+        break;
       case Enc::kVop2:
-        lit = ValuSrc0Extra(code[i]) || in.opcode == 0x20 ||
-              in.opcode == 0x21 || in.opcode == 0x2C || in.opcode == 0x2D;
+        in.extension = ValuExtension(in.enc, code[i]);
+        lit = in.extension != gpu::gcn::InstExtension::kNone ||
+              in.opcode == 0x20 || in.opcode == 0x21 || in.opcode == 0x2C ||
+              in.opcode == 0x2D || in.opcode == 0x37 || in.opcode == 0x38;
         break;
       case Enc::kVop1:
       case Enc::kVopc:
-        lit = ValuSrc0Extra(code[i]);
+        in.extension = ValuExtension(in.enc, code[i]);
+        lit = in.extension != gpu::gcn::InstExtension::kNone;
         break;
       case Enc::kVop3:
+      case Enc::kVop3p:
         // A src field == 255 selects a literal after the two base words.
-        if (i + 1 < max_dwords) {
-          uint32_t w1 = code[i + 1];
-          lit = (w1 & 0x1FF) == 255 || ((w1 >> 9) & 0x1FF) == 255 ||
-                ((w1 >> 18) & 0x1FF) == 255;
-        }
-        break;
-      case Enc::kMimg:
-        // NSA: the address VGPRs after the first are listed a byte each in the
-        // extra dwords, not taken sequentially from vaddr. Keep the first extra
-        // dword (four components, enough for any 2D/3D sample) so the emitter
-        // can read the real coordinate registers.
-        if (((code[i] >> 1) & 0x3) && i + 2 < max_dwords)
-          in.literal = code[i + 2];
+        lit = (in.raw[1] & 0x1FF) == 255 || ((in.raw[1] >> 9) & 0x1FF) == 255 ||
+              ((in.raw[1] >> 18) & 0x1FF) == 255;
         break;
       default:
         break;
     }
     if (lit && i + in.size < max_dwords) {
-      in.has_literal = true;
-      in.literal = code[i + in.size];
+      const uint32_t extra = code[i + in.size];
+      if (in.extension != gpu::gcn::InstExtension::kNone &&
+          in.extension != gpu::gcn::InstExtension::kLiteral) {
+        in.raw[in.size] = extra;
+      } else {
+        in.has_literal = true;
+        in.literal = extra;
+        in.extension = gpu::gcn::InstExtension::kLiteral;
+      }
       in.size += 1;
+    } else if (lit) {
+      in.enc = Enc::kUnknown;
+      in.opcode = 0;
     }
     if (in.size == 0)
       in.size = 1;  // never stall
 
     out.push_back(in);
 
-    // s_endpgm (SOPP opcode 1) terminates the stream unless bounded by a real
-    // length (then a block after an early-out endpgm is still decoded).
-    if (stop_at_endpgm && in.enc == Enc::kSopp && in.opcode == 1)
-      break;
+    if (in.enc == Enc::kSopp) {
+      // s_code_end is a hard executable-code marker. Ordinary and ordered PS
+      // endpgm operations stop an unbounded scan, but a footer-bounded decode
+      // retains later branch targets.
+      if (in.opcode == 0x1F ||
+          (stop_at_endpgm && (in.opcode == 0x01 || in.opcode == 0x1E)))
+        break;
+    }
     i += in.size;
   }
   return out;
@@ -249,6 +294,16 @@ Program DecodeShader(const uint32_t* code, uint32_t max_dwords) {
   if (len && len <= max_dwords)
     return Decode(code, len, /*stop_at_endpgm=*/false);
   return Decode(code, max_dwords, /*stop_at_endpgm=*/true);
+}
+
+Program ReachableProgram(const Program& program) {
+  const std::vector<uint8_t> reachable = gpu::gcn::ComputeReachability(program);
+  Program out;
+  out.reserve(program.size());
+  for (uint32_t i = 0; i < program.size(); i++)
+    if (reachable[i])
+      out.push_back(program[i]);
+  return out;
 }
 
 }  // namespace gpu::rdna

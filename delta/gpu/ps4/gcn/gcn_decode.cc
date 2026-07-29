@@ -302,6 +302,8 @@ std::vector<uint8_t> ComputeReachability(const Program& program) {
       return 0;
     switch (inst.opcode) {
       case 0x01:
+      case 0x1E:
+      case 0x1F:
         return 8;  // endpgm
       case 0x02:
         return 1;  // unconditional

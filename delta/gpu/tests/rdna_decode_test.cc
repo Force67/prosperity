@@ -1,0 +1,166 @@
+#include <cstdint>
+
+#include <gtest/gtest.h>
+
+#include "gpu/ps5/rdna/rdna_decode.h"
+
+namespace {
+
+uint32_t Vop2(uint32_t op, uint32_t src0 = 256, uint32_t vsrc1 = 0) {
+  return (op << 25) | (vsrc1 << 9) | src0;
+}
+
+uint32_t Sopp(uint32_t op) {
+  return (0x17Fu << 23) | (op << 16);
+}
+
+uint32_t Sopk(uint32_t op) {
+  return (0xBu << 28) | (op << 23);
+}
+
+TEST(RdnaDecode, Dpp8AndDpp8FiConsumeControlDwords) {
+  const uint32_t code[] = {
+      Vop2(0x03, 233), 0x01234567, Vop2(0x03, 234), 0x89abcdef, Sopp(0x01),
+  };
+
+  const gpu::gcn::Program program = gpu::rdna::Decode(code, 5);
+
+  ASSERT_EQ(program.size(), 3u);
+  EXPECT_EQ(program[0].extension, gpu::gcn::InstExtension::kDpp8);
+  EXPECT_FALSE(program[0].has_literal);
+  EXPECT_EQ(program[0].raw[1], 0x01234567u);
+  EXPECT_EQ(program[0].size, 2u);
+  EXPECT_EQ(program[1].extension, gpu::gcn::InstExtension::kDpp8Fi);
+  EXPECT_FALSE(program[1].has_literal);
+  EXPECT_EQ(program[1].raw[1], 0x89abcdefu);
+  EXPECT_EQ(program[1].pc, 2u);
+  EXPECT_EQ(program[2].pc, 4u);
+}
+
+TEST(RdnaDecode, SdwaUsesExtensionMetadataInsteadOfLiteralMetadata) {
+  const uint32_t code[] = {Vop2(0x03, 249), 0x12345678, Sopp(0x01)};
+
+  const gpu::gcn::Program program = gpu::rdna::Decode(code, 3);
+
+  ASSERT_EQ(program.size(), 2u);
+  EXPECT_EQ(program[0].extension, gpu::gcn::InstExtension::kSdwa);
+  EXPECT_FALSE(program[0].has_literal);
+  EXPECT_EQ(program[0].raw[1], 0x12345678u);
+}
+
+TEST(RdnaDecode, Vop3pAndFlatHaveDistinctFamilies) {
+  const uint32_t code[] = {
+      (0x33u << 26) | (0x8Fu << 16) | (1u << 14),
+      3u << 27,
+      (0x37u << 26) | (0x12u << 18),
+      0,
+  };
+
+  const gpu::gcn::Program program = gpu::rdna::Decode(code, 4, false);
+
+  ASSERT_EQ(program.size(), 2u);
+  EXPECT_EQ(program[0].enc, gpu::gcn::Enc::kVop3p);
+  EXPECT_EQ(program[0].opcode, 0x8Fu);
+  EXPECT_EQ(program[1].enc, gpu::gcn::Enc::kFlat);
+  EXPECT_EQ(program[1].opcode, 0x12u);
+}
+
+TEST(RdnaDecode, ReservedVop3pPrefixesRemainUnknown) {
+  const uint32_t code[] = {0xCD000000u};
+
+  const gpu::gcn::Program program = gpu::rdna::Decode(code, 1, false);
+
+  ASSERT_EQ(program.size(), 1u);
+  EXPECT_EQ(program[0].enc, gpu::gcn::Enc::kUnknown);
+}
+
+TEST(RdnaDecode, MandatoryImmediateDwordsPreserveInstructionBoundaries) {
+  const uint32_t code[] = {
+      Sopk(0x15), 0x11111111,  // s_setreg_imm32_b32
+      Vop2(0x20), 0x22222222,  // v_madmk_f32
+      Vop2(0x21), 0x33333333,  // v_madak_f32
+      Vop2(0x2C), 0x44444444,  // v_fmamk_f32
+      Vop2(0x2D), 0x55555555,  // v_fmaak_f32
+      Vop2(0x37), 0x66666666,  // v_fmamk_f16
+      Vop2(0x38), 0x77777777,  // v_fmaak_f16
+      Vop2(0x1F),              // ordinary one-dword gfx10 VOP2
+      Sopp(0x01),
+  };
+
+  const gpu::gcn::Program program = gpu::rdna::Decode(code, 16, false);
+
+  ASSERT_EQ(program.size(), 9u);
+  for (uint32_t i = 0; i < 7; i++) {
+    EXPECT_EQ(program[i].pc, i * 2);
+    EXPECT_EQ(program[i].size, 2u);
+    EXPECT_TRUE(program[i].has_literal);
+  }
+  EXPECT_EQ(program[7].pc, 14u);
+  EXPECT_EQ(program[7].size, 1u);
+  EXPECT_EQ(program[8].pc, 15u);
+}
+
+TEST(RdnaDecode, ObservedNggExportPrefixOnlyAcceptsNullExports) {
+  const uint32_t code[] = {
+      0x31u << 26,
+      0,
+      (0x31u << 26) | 1u,
+      0,
+  };
+
+  const gpu::gcn::Program program = gpu::rdna::Decode(code, 4, false);
+
+  ASSERT_EQ(program.size(), 2u);
+  EXPECT_EQ(program[0].enc, gpu::gcn::Enc::kExp);
+  EXPECT_EQ(program[0].size, 2u);
+  EXPECT_EQ(program[1].enc, gpu::gcn::Enc::kUnknown);
+  EXPECT_EQ(program[1].size, 2u);
+}
+
+TEST(RdnaDecode, MimgNsa3PreservesAllFiveWords) {
+  const uint32_t code[] = {
+      (0x3Cu << 26) | (3u << 1), 0x11111111, 0x22222222, 0x33333333, 0x44444444,
+  };
+
+  const gpu::gcn::Program program = gpu::rdna::Decode(code, 5, false);
+
+  ASSERT_EQ(program.size(), 1u);
+  EXPECT_EQ(program[0].enc, gpu::gcn::Enc::kMimg);
+  EXPECT_EQ(program[0].size, 5u);
+  EXPECT_EQ(program[0].raw[0], code[0]);
+  EXPECT_EQ(program[0].raw[1], code[1]);
+  EXPECT_EQ(program[0].raw[2], code[2]);
+  EXPECT_EQ(program[0].raw[3], code[3]);
+  EXPECT_EQ(program[0].raw[4], code[4]);
+}
+
+TEST(RdnaDecode, TruncatedMultiwordInstructionsBecomeBoundedUnknowns) {
+  const uint32_t vop3[] = {(0x35u << 26) | (0x141u << 16)};
+  const uint32_t nsa3[] = {(0x3Cu << 26) | (3u << 1), 1, 2, 3};
+  const uint32_t dpp8[] = {Vop2(0x03, 233)};
+
+  const auto truncated_vop3 = gpu::rdna::Decode(vop3, 1, false);
+  const auto truncated_nsa = gpu::rdna::Decode(nsa3, 4, false);
+  const auto truncated_dpp = gpu::rdna::Decode(dpp8, 1, false);
+
+  ASSERT_EQ(truncated_vop3.size(), 1u);
+  EXPECT_EQ(truncated_vop3[0].enc, gpu::gcn::Enc::kUnknown);
+  EXPECT_EQ(truncated_vop3[0].size, 1u);
+  ASSERT_EQ(truncated_nsa.size(), 1u);
+  EXPECT_EQ(truncated_nsa[0].enc, gpu::gcn::Enc::kUnknown);
+  EXPECT_EQ(truncated_nsa[0].size, 4u);
+  ASSERT_EQ(truncated_dpp.size(), 1u);
+  EXPECT_EQ(truncated_dpp[0].enc, gpu::gcn::Enc::kUnknown);
+  EXPECT_EQ(truncated_dpp[0].size, 1u);
+}
+
+TEST(RdnaDecode, OrderedEndpgmAndCodeEndTerminateAppropriately) {
+  const uint32_t ordered[] = {Sopp(0x1E), Vop2(0x03), Sopp(0x01)};
+  const uint32_t code_end[] = {Sopp(0x1F), Vop2(0x03)};
+
+  EXPECT_EQ(gpu::rdna::Decode(ordered, 3).size(), 1u);
+  EXPECT_EQ(gpu::rdna::Decode(ordered, 3, false).size(), 3u);
+  EXPECT_EQ(gpu::rdna::Decode(code_end, 2, false).size(), 1u);
+}
+
+}  // namespace

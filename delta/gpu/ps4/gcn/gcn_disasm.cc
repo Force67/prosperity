@@ -1392,6 +1392,8 @@ std::string Mnemonic(const Inst& inst) {
       return MimgName(op);
     case Enc::kExp:
       return "exp";
+    case Enc::kFlat:
+      return Fallback("flat", op);
     default:
       return Fallback("unk", inst.raw[0]);
   }

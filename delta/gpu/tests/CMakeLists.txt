@@ -19,6 +19,13 @@ add_delta_test(gcn_decode_test
     ../ps4/gcn/gcn_decode.cc
   DEPS delta_deps)
 
+add_delta_test(rdna_decode_test
+  SOURCES
+    rdna_decode_test.cc
+    ../ps5/rdna/rdna_decode.cc
+    ../ps4/gcn/gcn_decode.cc
+  DEPS delta_deps)
+
 add_delta_test(gcn_disasm_test
   SOURCES
     gcn_disasm_test.cc
