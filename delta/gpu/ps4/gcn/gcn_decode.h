@@ -18,6 +18,8 @@
 
 namespace gpu::gcn {
 
+enum class IsaMode : uint8_t { kBase, kNeo };
+
 // Instruction encoding families (top-bit dispatch). Determines operand layout
 // and whether a 32-bit literal/inline constant dword follows.
 enum class Enc : uint8_t {
@@ -31,6 +33,7 @@ enum class Enc : uint8_t {
   kVop1,
   kVop2,
   kVop3,
+  kVop3p,
   kVopc,    // vector ALU
   kVintrp,  // interpolation
   kDs,      // LDS/GDS
@@ -40,7 +43,10 @@ enum class Enc : uint8_t {
   kExp,    // export (PS color / VS position out)
 };
 
+enum class InstExtension : uint8_t { kNone, kLiteral, kSdwa, kDpp };
+
 struct Inst {
+  IsaMode isa = IsaMode::kBase;
   Enc enc = Enc::kUnknown;
   uint32_t opcode = 0;       // encoding-relative opcode
   uint32_t raw[2] = {0, 0};  // up to 2 dwords (some need a literal)
@@ -48,6 +54,7 @@ struct Inst {
   uint32_t pc = 0;           // dword offset within the program
   bool has_literal = false;
   uint32_t literal = 0;
+  InstExtension extension = InstExtension::kNone;
 };
 
 // A decoded shader: the flat instruction list in program order.
@@ -59,9 +66,13 @@ using Program = std::vector<Inst>;
 // stop_at_endpgm=false the whole program is decoded so blocks reached only
 // after an early-out s_endpgm are still lifted. stop_at_endpgm=true stops at
 // the first s_endpgm for callers without a reliable length bound.
+IsaMode DefaultIsaMode();
+void SetDefaultIsaMode(IsaMode mode);
+
 Program Decode(const uint32_t* code,
                uint32_t max_dwords,
-               bool stop_at_endpgm = true);
+               bool stop_at_endpgm = true,
+               IsaMode mode = DefaultIsaMode());
 
 // Recover the real GCN code length (in dwords) from the trailing Gnm
 // ShaderBinaryInfo ("OrbShdr") footer that the Orbis toolchain appends after
@@ -72,7 +83,9 @@ uint32_t CodeLength(const uint32_t* code, uint32_t max_dwords);
 // an early-out s_endpgm does not truncate the stream. Falls back to the
 // stop-at-first-endpgm scan when no footer is present (e.g. a driver-generated
 // sub-shader), which never over-reads into the footer/padding.
-Program DecodeShader(const uint32_t* code, uint32_t max_dwords);
+Program DecodeShader(const uint32_t* code,
+                     uint32_t max_dwords,
+                     IsaMode mode = DefaultIsaMode());
 
 // Mark instructions reachable from the entry block. Shader binaries may
 // contain footer padding after an early s_endpgm; decoded dead data must not

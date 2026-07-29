@@ -7,6 +7,7 @@
 #include "gpu/ps4/gcn/gcn_decode.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 #include <unordered_map>
@@ -28,14 +29,23 @@ bool Sop2HasLiteral(uint32_t w) {
 bool Sop1HasLiteral(uint32_t w) {
   return (w & 0xFF) == 255;
 }
-// VOP src0 is 9 bits [8:0]; 255 selects a literal.
-bool VopHasLiteral(uint32_t w) {
-  return (w & 0x1FF) == 255;
+InstExtension VopExtension(uint32_t w, IsaMode mode) {
+  switch (w & 0x1ff) {
+    case 249:
+      return mode == IsaMode::kNeo ? InstExtension::kSdwa
+                                   : InstExtension::kNone;
+    case 250:
+      return mode == IsaMode::kNeo ? InstExtension::kDpp : InstExtension::kNone;
+    case 255:
+      return InstExtension::kLiteral;
+    default:
+      return InstExtension::kNone;
+  }
 }
 
 // Encoding classification by the fixed top bits. Returns the family and fills
 // the encoding-relative opcode.
-Enc Classify(uint32_t w, uint32_t& opcode) {
+Enc Classify(uint32_t w, IsaMode mode, uint32_t& opcode) {
   if ((w >> 30) == 0x2) {  // 10b => scalar
     const uint32_t top9 = w >> 23;
     if (top9 == 0x17F) {
@@ -63,7 +73,13 @@ Enc Classify(uint32_t w, uint32_t& opcode) {
   }
   if ((w >> 26) == 0x34) {
     opcode = (w >> 17) & 0x1FF;
+    if (mode == IsaMode::kNeo)
+      opcode |= ((w >> 16) & 1) << 9;
     return Enc::kVop3;
+  }
+  if (mode == IsaMode::kNeo && (w >> 26) == 0x33) {
+    opcode = (w >> 16) & 0x7f;
+    return Enc::kVop3p;
   }
   if ((w >> 26) == 0x32) {
     opcode = (w >> 16) & 0x3;
@@ -109,6 +125,7 @@ Enc Classify(uint32_t w, uint32_t& opcode) {
 uint32_t BaseSize(Enc e) {
   switch (e) {
     case Enc::kVop3:
+    case Enc::kVop3p:
     case Enc::kDs:
     case Enc::kMubuf:
     case Enc::kMtbuf:
@@ -127,6 +144,8 @@ bool HasTrailingLiteral(const Inst& inst, uint32_t w) {
       return Sop2HasLiteral(w);
     case Enc::kSop1:
       return Sop1HasLiteral(w);
+    case Enc::kSopk:
+      return inst.opcode == 0x15;  // s_setreg_imm32_b32
     case Enc::kSmrd:
       // With IMM=0, SOFFSET uses the scalar-source encoding; 255 selects a
       // trailing literal byte offset instead of an SGPR.
@@ -134,10 +153,21 @@ bool HasTrailingLiteral(const Inst& inst, uint32_t w) {
     case Enc::kVop2:
       // V_MADMK_F32 (0x20) and V_MADAK_F32 (0x21) always carry a trailing
       // 32-bit literal (the K constant), independent of src0=LITERAL_CONST.
-      return VopHasLiteral(w) || inst.opcode == 0x20 || inst.opcode == 0x21;
+      return VopExtension(w, inst.isa) == InstExtension::kLiteral ||
+             inst.opcode == 0x20 || inst.opcode == 0x21 ||
+             (inst.isa == IsaMode::kNeo &&
+              (inst.opcode == 0x37 || inst.opcode == 0x38));
     case Enc::kVop1:
     case Enc::kVopc:
-      return VopHasLiteral(w);
+      return VopExtension(w, inst.isa) == InstExtension::kLiteral;
+    case Enc::kVop3:
+    case Enc::kVop3p: {
+      if (inst.isa != IsaMode::kNeo)
+        return false;
+      const uint32_t w1 = inst.raw[1];
+      return (w1 & 0x1ff) == 255 || ((w1 >> 9) & 0x1ff) == 255 ||
+             ((w1 >> 18) & 0x1ff) == 255;
+    }
     default:
       return false;
   }
@@ -152,6 +182,19 @@ uint64_t HashCode(const uint32_t* code, uint32_t dwords) {
 }
 
 }  // namespace
+
+namespace {
+std::atomic<IsaMode> g_default_isa_mode{IsaMode::kBase};
+}
+
+IsaMode DefaultIsaMode() {
+  return g_default_isa_mode.load(std::memory_order_acquire);
+}
+
+void SetDefaultIsaMode(IsaMode mode) {
+  g_default_isa_mode.store(mode, std::memory_order_release);
+  NextProgramCacheGeneration();
+}
 
 uint32_t CodeLength(const uint32_t* code, uint32_t max_dwords) {
   if (!code || max_dwords < 2)
@@ -173,24 +216,59 @@ uint32_t CodeLength(const uint32_t* code, uint32_t max_dwords) {
   return 0;
 }
 
-Program Decode(const uint32_t* code, uint32_t max_dwords, bool stop_at_endpgm) {
+Program Decode(const uint32_t* code,
+               uint32_t max_dwords,
+               bool stop_at_endpgm,
+               IsaMode mode) {
   Program out;
   if (!code)
     return out;
   uint32_t i = 0;
   while (i < max_dwords) {
     Inst inst;
+    inst.isa = mode;
     inst.pc = i;
     inst.raw[0] = code[i];
-    inst.enc = Classify(code[i], inst.opcode);
+    inst.enc = Classify(code[i], mode, inst.opcode);
     inst.size = BaseSize(inst.enc);
-    if (inst.size == 2 && i + 1 < max_dwords)
-      inst.raw[1] = code[i + 1];
+    if (inst.size == 2) {
+      if (i + 1 >= max_dwords) {
+        inst.enc = Enc::kUnknown;
+        inst.opcode = 0;
+        inst.size = 1;
+      } else {
+        inst.raw[1] = code[i + 1];
+      }
+    }
 
-    if (HasTrailingLiteral(inst, code[i]) && i + inst.size < max_dwords) {
-      inst.has_literal = true;
-      inst.literal = code[i + inst.size];
-      inst.size += 1;
+    if (mode == IsaMode::kNeo && inst.enc == Enc::kMtbuf)
+      inst.opcode |= ((inst.raw[1] >> 21) & 1) << 3;
+
+    const InstExtension vop_extension = inst.enc == Enc::kVop1 ||
+                                                inst.enc == Enc::kVop2 ||
+                                                inst.enc == Enc::kVopc
+                                            ? VopExtension(code[i], mode)
+                                            : InstExtension::kNone;
+    if (vop_extension == InstExtension::kSdwa ||
+        vop_extension == InstExtension::kDpp) {
+      if (i + inst.size >= max_dwords) {
+        inst.enc = Enc::kUnknown;
+        inst.opcode = 0;
+      } else {
+        inst.extension = vop_extension;
+        inst.raw[1] = code[i + inst.size];
+        inst.size += 1;
+      }
+    } else if (HasTrailingLiteral(inst, code[i])) {
+      if (i + inst.size >= max_dwords) {
+        inst.enc = Enc::kUnknown;
+        inst.opcode = 0;
+      } else {
+        inst.has_literal = true;
+        inst.literal = code[i + inst.size];
+        inst.extension = InstExtension::kLiteral;
+        inst.size += 1;
+      }
     }
     if (inst.size == 0)
       inst.size = 1;  // safety: never stall
@@ -207,11 +285,11 @@ Program Decode(const uint32_t* code, uint32_t max_dwords, bool stop_at_endpgm) {
   return out;
 }
 
-Program DecodeShader(const uint32_t* code, uint32_t max_dwords) {
+Program DecodeShader(const uint32_t* code, uint32_t max_dwords, IsaMode mode) {
   const uint32_t len = CodeLength(code, max_dwords);
   if (len && len <= max_dwords)
-    return Decode(code, len, /*stop_at_endpgm=*/false);
-  return Decode(code, max_dwords, /*stop_at_endpgm=*/true);
+    return Decode(code, len, /*stop_at_endpgm=*/false, mode);
+  return Decode(code, max_dwords, /*stop_at_endpgm=*/true, mode);
 }
 
 std::vector<uint8_t> ComputeReachability(const Program& program) {
@@ -325,6 +403,7 @@ std::shared_ptr<const Program> CachedProgram(uint64_t addr,
     uint64_t hash = 0;
     uint32_t hashed_dwords = 0;
     uint64_t generation = 0;
+    IsaMode mode = IsaMode::kBase;
     std::shared_ptr<const Program> program;
   };
   static std::unordered_map<uint64_t, Entry> cache;
@@ -332,12 +411,14 @@ std::shared_ptr<const Program> CachedProgram(uint64_t addr,
   const auto* code = reinterpret_cast<const uint32_t*>(addr);
   if (!code)
     return std::make_shared<const Program>();
+  const IsaMode mode = DefaultIsaMode();
 
   // Fast path: already revalidated this generation (frame). A draw touches the
   // same shader several times (textures, cbuffers, attributes), so skipping the
   // footer scan + code hash on repeats is what keeps this per-draw-affordable.
   auto it = cache.find(addr);
-  if (it != cache.end() && it->second.generation == g_prog_cache_generation)
+  if (it != cache.end() && it->second.generation == g_prog_cache_generation &&
+      it->second.mode == mode)
     return it->second.program;
 
   // Hash the real code span (footer-bounded when available) so an in-place
@@ -346,7 +427,7 @@ std::shared_ptr<const Program> CachedProgram(uint64_t addr,
   const uint32_t hashed = len ? len : (max_dwords < 64 ? max_dwords : 64);
   const uint64_t hash = HashCode(code, hashed);
 
-  if (it != cache.end() && it->second.hash == hash &&
+  if (it != cache.end() && it->second.mode == mode && it->second.hash == hash &&
       it->second.hashed_dwords == hashed) {
     it->second.generation = g_prog_cache_generation;
     return it->second.program;
@@ -355,8 +436,8 @@ std::shared_ptr<const Program> CachedProgram(uint64_t addr,
   if (cache.size() > 512)
     cache.clear();  // unbounded-growth backstop
   auto program =
-      std::make_shared<const Program>(DecodeShader(code, max_dwords));
-  cache[addr] = {hash, hashed, g_prog_cache_generation, program};
+      std::make_shared<const Program>(DecodeShader(code, max_dwords, mode));
+  cache[addr] = {hash, hashed, g_prog_cache_generation, mode, program};
   return program;
 }
 

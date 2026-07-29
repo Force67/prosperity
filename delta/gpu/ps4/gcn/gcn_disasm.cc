@@ -99,6 +99,10 @@ std::string Src(uint32_t field, const Inst& inst, uint32_t count = 1) {
       return "4.0";
     case 247:
       return "-4.0";
+    case 248:
+      if (inst.isa == IsaMode::kNeo)
+        return "0.15915494";
+      break;
     case 251:
       return "vccz";
     case 252:
@@ -169,6 +173,19 @@ const char* const kSop2[] = {
     "s_cbranch_g_fork", "s_absdiff_i32",
     // clang-format on
 };
+
+const char* NeoSop2Name(uint32_t op) {
+  switch (op) {
+    case 0x32:
+      return "s_pack_ll_b32_b16";
+    case 0x33:
+      return "s_pack_lh_b32_b16";
+    case 0x34:
+      return "s_pack_hh_b32_b16";
+    default:
+      return nullptr;
+  }
+}
 
 const char* const kSopk[] = {
     // clang-format off
@@ -243,6 +260,22 @@ const char* const kVop1[] = {
     // clang-format on
 };
 
+const char* NeoVop1Name(uint32_t op) {
+  static const char* const kNeo[] = {
+      // clang-format off
+      "v_cvt_f16_u16", "v_cvt_f16_i16", "v_cvt_u16_f16",
+      "v_cvt_i16_f16", "v_rcp_f16", "v_sqrt_f16", "v_rsq_f16",
+      "v_log_f16", "v_exp_f16", "v_frexp_mant_f16",
+      "v_frexp_exp_i16_f16", "v_floor_f16", "v_ceil_f16", "v_trunc_f16",
+      "v_rndne_f16", "v_fract_f16", "v_sin_f16", "v_cos_f16",
+      "v_sat_pk_u8_i16", "v_cvt_norm_i16_f16", "v_cvt_norm_u16_f16",
+      "v_swap_b32",
+      // clang-format on
+  };
+  return op >= 0x50 ? Lookup(kNeo, sizeof(kNeo) / sizeof(kNeo[0]), op - 0x50)
+                    : nullptr;
+}
+
 const char* const kVop2[] = {
     // clang-format off
     "v_cndmask_b32", "v_readlane_b32", "v_writelane_b32",
@@ -262,6 +295,33 @@ const char* const kVop2[] = {
     "v_cvt_pk_u16_u32", "v_cvt_pk_i16_i32",
     // clang-format on
 };
+
+const char* NeoVop2Name(uint32_t op) {
+  switch (op) {
+    case 0x32:
+      return "v_add_f16";
+    case 0x33:
+      return "v_sub_f16";
+    case 0x34:
+      return "v_subrev_f16";
+    case 0x35:
+      return "v_mul_f16";
+    case 0x36:
+      return "v_mac_f16";
+    case 0x37:
+      return "v_madmk_f16";
+    case 0x38:
+      return "v_madak_f16";
+    case 0x39:
+      return "v_max_f16";
+    case 0x3a:
+      return "v_min_f16";
+    case 0x3b:
+      return "v_ldexp_f16";
+    default:
+      return nullptr;
+  }
+}
 
 // VOP3-only range (0x140..0x17f).
 const char* const kVop3Only[] = {
@@ -284,7 +344,34 @@ const char* const kVop3Only[] = {
     // clang-format on
 };
 
-std::string VopcName(uint32_t op) {
+std::string VopcName(uint32_t op, IsaMode isa) {
+  if (isa == IsaMode::kNeo) {
+    static const char* const kIntCond[6] = {"lt", "eq", "le", "gt", "ne", "ge"};
+    if ((op >= 0x89 && op <= 0x8e) || (op >= 0x99 && op <= 0x9e)) {
+      const bool cmpx = op >= 0x90;
+      return std::string(cmpx ? "v_cmpx_" : "v_cmp_") +
+             kIntCond[(op & 0xf) - 9] + "_i16";
+    }
+    if (op == 0x8f)
+      return "v_cmp_class_f16";
+    if (op == 0x9f)
+      return "v_cmpx_class_f16";
+    if ((op >= 0xa9 && op <= 0xae) || (op >= 0xb9 && op <= 0xbe)) {
+      const bool cmpx = op >= 0xb0;
+      return std::string(cmpx ? "v_cmpx_" : "v_cmp_") +
+             kIntCond[(op & 0xf) - 9] + "_u16";
+    }
+    if ((op >= 0xc8 && op <= 0xcf) || (op >= 0xd8 && op <= 0xdf) ||
+        (op >= 0xe8 && op <= 0xef) || (op >= 0xf8 && op <= 0xff)) {
+      static const char* const kFloatCond[16] = {
+          "f", "lt",  "eq",  "le",  "gt",  "lg",  "ge",  "o",
+          "u", "nge", "nlg", "ngt", "nle", "neq", "nlt", "tru"};
+      const bool cmpx = (op & 0x10) != 0;
+      const uint32_t cond = (op & 7) | ((op >= 0xe0) ? 8 : 0);
+      return std::string(cmpx ? "v_cmpx_" : "v_cmp_") + kFloatCond[cond] +
+             "_f16";
+    }
+  }
   switch (op) {
     case 0x88:
       return "v_cmp_class_f32";
@@ -324,10 +411,109 @@ std::string VopcName(uint32_t op) {
   return std::string(kRow[row].prefix) + c + kRow[row].type;
 }
 
-std::string Vop3Name(uint32_t op) {
+const char* NeoVop3Name(uint32_t op) {
+  switch (op) {
+    case 0x303:
+      return "v_add_u16";
+    case 0x304:
+      return "v_sub_u16";
+    case 0x305:
+      return "v_mul_lo_u16";
+    case 0x307:
+      return "v_lshrrev_b16";
+    case 0x308:
+      return "v_ashrrev_i16";
+    case 0x309:
+      return "v_max_u16";
+    case 0x30a:
+      return "v_max_i16";
+    case 0x30b:
+      return "v_min_u16";
+    case 0x30c:
+      return "v_min_i16";
+    case 0x30d:
+      return "v_add_i16";
+    case 0x30e:
+      return "v_sub_i16";
+    case 0x311:
+      return "v_pack_b32_f16";
+    case 0x312:
+      return "v_cvt_pknorm_i16_f16";
+    case 0x313:
+      return "v_cvt_pknorm_u16_f16";
+    case 0x314:
+      return "v_lshlrev_b16";
+    case 0x340:
+      return "v_mad_u16";
+    case 0x341:
+      return "v_mad_f16";
+    case 0x342:
+      return "v_interp_p1ll_f16";
+    case 0x344:
+      return "v_perm_b32";
+    case 0x345:
+      return "v_xad_u32";
+    case 0x346:
+      return "v_lshl_add_u32";
+    case 0x347:
+      return "v_add_lshl_u32";
+    case 0x34b:
+      return "v_fma_f16";
+    case 0x351:
+      return "v_min3_f16";
+    case 0x352:
+      return "v_min3_i16";
+    case 0x353:
+      return "v_min3_u16";
+    case 0x354:
+      return "v_max3_f16";
+    case 0x355:
+      return "v_max3_i16";
+    case 0x356:
+      return "v_max3_u16";
+    case 0x357:
+      return "v_med3_f16";
+    case 0x358:
+      return "v_med3_i16";
+    case 0x359:
+      return "v_med3_u16";
+    case 0x35a:
+      return "v_interp_p2_f16";
+    case 0x35e:
+      return "v_mad_i16";
+    case 0x35f:
+      return "v_div_fixup_f16";
+    case 0x36d:
+      return "v_add3_u32";
+    case 0x36f:
+      return "v_lshl_or_b32";
+    case 0x371:
+      return "v_and_or_b32";
+    case 0x372:
+      return "v_or3_b32";
+    case 0x373:
+      return "v_mad_u32_u16";
+    case 0x375:
+      return "v_mad_i32_i16";
+    default:
+      return nullptr;
+  }
+}
+
+std::string Vop3Name(uint32_t op, IsaMode isa) {
+  if (isa == IsaMode::kNeo) {
+    if (const char* n = NeoVop3Name(op))
+      return n;
+  }
   if (op < 0x100)
-    return VopcName(op);
+    return VopcName(op, isa);
   if (op >= 0x100 && op < 0x140) {
+    if (isa == IsaMode::kNeo) {
+      const uint32_t reflected = op - 0x100;
+      if (reflected != 0x37 && reflected != 0x38)
+        if (const char* n = NeoVop2Name(reflected))
+          return n;
+    }
     if (const char* n =
             Lookup(kVop2, sizeof(kVop2) / sizeof(kVop2[0]), op - 0x100))
       return n;
@@ -338,11 +524,39 @@ std::string Vop3Name(uint32_t op) {
       return n;
   }
   if (op >= 0x180) {
+    if (isa == IsaMode::kNeo) {
+      if (const char* n = NeoVop1Name(op - 0x180))
+        return n;
+    }
     if (const char* n =
             Lookup(kVop1, sizeof(kVop1) / sizeof(kVop1[0]), op - 0x180))
       return n;
   }
   return Fallback("vop3", op);
+}
+
+std::string Vop3pName(uint32_t op) {
+  static const char* const kLow[] = {
+      // clang-format off
+      "v_pk_mad_i16", "v_pk_mul_lo_u16", "v_pk_add_i16", "v_pk_sub_i16",
+      "v_pk_lshlrev_b16", "v_pk_lshrrev_b16", "v_pk_ashrrev_i16",
+      "v_pk_max_i16", "v_pk_min_i16", "v_pk_mad_u16", "v_pk_add_u16",
+      "v_pk_sub_u16", "v_pk_max_u16", "v_pk_min_u16", "v_pk_mad_f16",
+      "v_pk_add_f16", "v_pk_mul_f16", "v_pk_min_f16", "v_pk_max_f16",
+      // clang-format on
+  };
+  if (const char* n = Lookup(kLow, sizeof(kLow) / sizeof(kLow[0]), op))
+    return n;
+  switch (op) {
+    case 0x20:
+      return "v_mad_mix_f32";
+    case 0x21:
+      return "v_mad_mixlo_f16";
+    case 0x22:
+      return "v_mad_mixhi_f16";
+    default:
+      return Fallback("vop3p", op);
+  }
 }
 
 std::string DsName(uint32_t op) {
@@ -376,12 +590,114 @@ std::string DsName(uint32_t op) {
   if (const char* n = Lookup(kDs, sizeof(kDs) / sizeof(kDs[0]), op))
     return n;
   switch (op) {
+    case 0x60:
+      return "ds_add_rtn_u64";
+    case 0x61:
+      return "ds_sub_rtn_u64";
+    case 0x62:
+      return "ds_rsub_rtn_u64";
+    case 0x63:
+      return "ds_inc_rtn_u64";
+    case 0x64:
+      return "ds_dec_rtn_u64";
+    case 0x65:
+      return "ds_min_rtn_i64";
+    case 0x66:
+      return "ds_max_rtn_i64";
+    case 0x67:
+      return "ds_min_rtn_u64";
+    case 0x68:
+      return "ds_max_rtn_u64";
+    case 0x69:
+      return "ds_and_rtn_b64";
+    case 0x6a:
+      return "ds_or_rtn_b64";
+    case 0x6b:
+      return "ds_xor_rtn_b64";
+    case 0x6c:
+      return "ds_mskor_rtn_b64";
+    case 0x6d:
+      return "ds_wrxchg_rtn_b64";
+    case 0x6e:
+      return "ds_wrxchg2_rtn_b64";
+    case 0x6f:
+      return "ds_wrxchg2st64_rtn_b64";
+    case 0x70:
+      return "ds_cmpst_rtn_b64";
+    case 0x71:
+      return "ds_cmpst_rtn_f64";
+    case 0x72:
+      return "ds_min_rtn_f64";
+    case 0x73:
+      return "ds_max_rtn_f64";
     case 0x76:
       return "ds_read_b64";
     case 0x77:
       return "ds_read2_b64";
     case 0x78:
       return "ds_read2st64_b64";
+    case 0x7e:
+      return "ds_condxchg32_rtn_b64";
+    case 0x80:
+      return "ds_add_src2_u32";
+    case 0x81:
+      return "ds_sub_src2_u32";
+    case 0x82:
+      return "ds_rsub_src2_u32";
+    case 0x83:
+      return "ds_inc_src2_u32";
+    case 0x84:
+      return "ds_dec_src2_u32";
+    case 0x85:
+      return "ds_min_src2_i32";
+    case 0x86:
+      return "ds_max_src2_i32";
+    case 0x87:
+      return "ds_min_src2_u32";
+    case 0x88:
+      return "ds_max_src2_u32";
+    case 0x89:
+      return "ds_and_src2_b32";
+    case 0x8a:
+      return "ds_or_src2_b32";
+    case 0x8b:
+      return "ds_xor_src2_b32";
+    case 0x8d:
+      return "ds_write_src2_b32";
+    case 0x92:
+      return "ds_min_src2_f32";
+    case 0x93:
+      return "ds_max_src2_f32";
+    case 0xc0:
+      return "ds_add_src2_u64";
+    case 0xc1:
+      return "ds_sub_src2_u64";
+    case 0xc2:
+      return "ds_rsub_src2_u64";
+    case 0xc3:
+      return "ds_inc_src2_u64";
+    case 0xc4:
+      return "ds_dec_src2_u64";
+    case 0xc5:
+      return "ds_min_src2_i64";
+    case 0xc6:
+      return "ds_max_src2_i64";
+    case 0xc7:
+      return "ds_min_src2_u64";
+    case 0xc8:
+      return "ds_max_src2_u64";
+    case 0xc9:
+      return "ds_and_src2_b64";
+    case 0xca:
+      return "ds_or_src2_b64";
+    case 0xcb:
+      return "ds_xor_src2_b64";
+    case 0xcd:
+      return "ds_write_src2_b64";
+    case 0xd2:
+      return "ds_min_src2_f64";
+    case 0xd3:
+      return "ds_max_src2_f64";
     default:
       return Fallback("ds", op);
   }
@@ -423,9 +739,9 @@ std::string MubufName(uint32_t op) {
     case 0x1f:
       return "buffer_store_dwordx3";
     case 0x70:
-      return "buffer_wbinvl1";
+      return "buffer_wbinvl1_sc";
     case 0x71:
-      return "buffer_wbinvl1_vol";
+      return "buffer_wbinvl1";
     default:
       break;
   }
@@ -540,6 +856,131 @@ uint32_t PopCount4(uint32_t v) {
   return (v & 3) + ((v >> 2) & 3);
 }
 
+std::string SourceMods(std::string src, bool neg, bool abs) {
+  if (abs)
+    src = "|" + src + "|";
+  if (neg)
+    src = "-" + src;
+  return src;
+}
+
+const char* SdwaSelName(uint32_t sel) {
+  static const char* const kSel[] = {"BYTE_0", "BYTE_1", "BYTE_2", "BYTE_3",
+                                     "WORD_0", "WORD_1", "DWORD"};
+  return sel < sizeof(kSel) / sizeof(kSel[0]) ? kSel[sel] : "RESERVED";
+}
+
+const char* SdwaUnusedName(uint32_t value) {
+  static const char* const kUnused[] = {"UNUSED_PAD", "UNUSED_SEXT",
+                                        "UNUSED_PRESERVE", "RESERVED"};
+  return kUnused[value & 3];
+}
+
+std::string CompactSource(const Inst& inst,
+                          uint32_t index,
+                          uint32_t vsrc1,
+                          uint32_t count) {
+  const uint32_t m = inst.raw[1];
+  if (inst.extension == InstExtension::kSdwa) {
+    const bool scalar = index == 0 ? ((m >> 23) & 1) : ((m >> 31) & 1);
+    const uint32_t reg = index == 0 ? (m & 0xff) : vsrc1;
+    const uint32_t field = reg + (scalar ? 0 : 256);
+    const bool neg = (m >> (index == 0 ? 20 : 28)) & 1;
+    const bool abs = (m >> (index == 0 ? 21 : 29)) & 1;
+    return SourceMods(Src(field, inst, count), neg, abs);
+  }
+  if (inst.extension == InstExtension::kDpp) {
+    const uint32_t field = (index == 0 ? (m & 0xff) : vsrc1) + 256;
+    const bool neg = (m >> (index == 0 ? 20 : 22)) & 1;
+    const bool abs = (m >> (index == 0 ? 21 : 23)) & 1;
+    return SourceMods(Src(field, inst, count), neg, abs);
+  }
+  return index == 0 ? Src(inst.raw[0] & 0x1ff, inst, count)
+                    : VRange(vsrc1, count);
+}
+
+std::string SdwaControls(const Inst& inst, bool has_src1, bool is_vopc) {
+  const uint32_t m = inst.raw[1];
+  std::string s;
+  if (!is_vopc) {
+    s += " dst_sel:";
+    s += SdwaSelName((m >> 8) & 7);
+    s += " dst_unused:";
+    s += SdwaUnusedName((m >> 11) & 3);
+    if ((m >> 13) & 1)
+      s += " clamp";
+    const uint32_t omod = (m >> 14) & 3;
+    if (omod)
+      s += omod == 1 ? " mul:2" : omod == 2 ? " mul:4" : " div:2";
+  }
+  s += " src0_sel:";
+  s += SdwaSelName((m >> 16) & 7);
+  if ((m >> 19) & 1)
+    s += " src0_sext";
+  if (has_src1) {
+    s += " src1_sel:";
+    s += SdwaSelName((m >> 24) & 7);
+    if ((m >> 27) & 1)
+      s += " src1_sext";
+  }
+  return s;
+}
+
+std::string DppControlName(uint32_t ctrl) {
+  if (ctrl <= 0xff) {
+    return "quad_perm:[" + std::to_string(ctrl & 3) + "," +
+           std::to_string((ctrl >> 2) & 3) + "," +
+           std::to_string((ctrl >> 4) & 3) + "," +
+           std::to_string((ctrl >> 6) & 3) + "]";
+  }
+  if (ctrl >= 0x100 && ctrl <= 0x10f)
+    return "row_shl:" + std::to_string(ctrl & 0xf);
+  if (ctrl >= 0x110 && ctrl <= 0x11f)
+    return "row_shr:" + std::to_string(ctrl & 0xf);
+  if (ctrl >= 0x120 && ctrl <= 0x12f)
+    return "row_ror:" + std::to_string(ctrl & 0xf);
+  switch (ctrl) {
+    case 0x130:
+      return "wave_shl:1";
+    case 0x134:
+      return "wave_rol:1";
+    case 0x138:
+      return "wave_shr:1";
+    case 0x13c:
+      return "wave_ror:1";
+    case 0x140:
+      return "row_mirror";
+    case 0x141:
+      return "row_half_mirror";
+    case 0x142:
+      return "row_bcast:15";
+    case 0x143:
+      return "row_bcast:31";
+    default:
+      return "dpp_ctrl:" + Hex(ctrl);
+  }
+}
+
+std::string DppControls(const Inst& inst) {
+  const uint32_t m = inst.raw[1];
+  std::string s = " " + DppControlName((m >> 8) & 0x1ff) +
+                  " row_mask:" + Hex((m >> 28) & 0xf) +
+                  " bank_mask:" + Hex((m >> 24) & 0xf);
+  if ((m >> 19) & 1)
+    s += " bound_ctrl:1";
+  if ((m >> 18) & 1)
+    s += " fi:1";
+  return s;
+}
+
+std::string CompactControls(const Inst& inst, bool has_src1, bool is_vopc) {
+  if (inst.extension == InstExtension::kSdwa)
+    return SdwaControls(inst, has_src1, is_vopc);
+  if (inst.extension == InstExtension::kDpp)
+    return DppControls(inst);
+  return "";
+}
+
 // ---- per-encoding operand rendering
 // ------------------------------------------
 
@@ -620,23 +1061,45 @@ std::string OperandsSmrd(const Inst& inst) {
 std::string OperandsVop1(const Inst& inst, const std::string& name) {
   const uint32_t w = inst.raw[0];
   const uint32_t n = Is64(name) ? 2 : 1;
-  return VRange((w >> 17) & 0xFF, n) + ", " + Src(w & 0x1FF, inst, n);
+  return VRange((w >> 17) & 0xFF, n) + ", " + CompactSource(inst, 0, 0, n) +
+         CompactControls(inst, false, false);
 }
 
 std::string OperandsVop2(const Inst& inst) {
   const uint32_t w = inst.raw[0];
-  std::string s = VRange((w >> 17) & 0xFF, 1) + ", " + Src(w & 0x1FF, inst) +
-                  ", " + VRange((w >> 9) & 0xFF, 1);
+  const uint32_t vsrc1 = (w >> 9) & 0xff;
+  const std::string src0 = CompactSource(inst, 0, vsrc1, 1);
+  const std::string src1 = CompactSource(inst, 1, vsrc1, 1);
+  std::string s = VRange((w >> 17) & 0xFF, 1) + ", " + src0 + ", ";
+  if (inst.isa == IsaMode::kNeo && inst.opcode == 0x37)
+    s += Hex(inst.literal) + ", " + src1;
+  else
+    s += src1;
   // v_madmk/v_madak carry a mandatory literal K.
-  if (inst.opcode == 0x20 || inst.opcode == 0x21)
+  if (inst.opcode == 0x20 || inst.opcode == 0x21 ||
+      (inst.isa == IsaMode::kNeo && inst.opcode == 0x38))
     s += ", " + Hex(inst.literal);
+  s += CompactControls(inst, true, false);
   return s;
 }
 
 std::string OperandsVopc(const Inst& inst, const std::string& name) {
   const uint32_t w = inst.raw[0];
   const uint32_t n = Is64(name) ? 2 : 1;
-  return "vcc, " + Src(w & 0x1FF, inst, n) + ", " + VRange((w >> 9) & 0xFF, n);
+  const uint32_t vsrc1 = (w >> 9) & 0xff;
+  std::string dst = "vcc";
+  if (inst.extension == InstExtension::kSdwa && ((inst.raw[1] >> 15) & 1))
+    dst = SRange((inst.raw[1] >> 8) & 0x7f, 2);
+  return dst + ", " + CompactSource(inst, 0, vsrc1, n) + ", " +
+         CompactSource(inst, 1, vsrc1, n) + CompactControls(inst, true, true);
+}
+
+uint32_t Vop3NumSources(uint32_t op) {
+  if (op >= 0x300)
+    return op < 0x340 ? 2 : 3;
+  if (op >= 0x180 && op < 0x200)
+    return 1;
+  return op < 0x140 ? 2 : 3;
 }
 
 std::string OperandsVop3(const Inst& inst, const std::string& name) {
@@ -644,6 +1107,8 @@ std::string OperandsVop3(const Inst& inst, const std::string& name) {
   const uint32_t op = inst.opcode;
   const uint32_t n = Is64(name) ? 2 : 1;
   const uint32_t neg = (w1 >> 29) & 7;
+  const bool vop3b = (op >= 0x125 && op <= 0x12a) || op == 0x16d ||
+                     op == 0x16e || op == 0x176 || op == 0x177;
   std::string s;
   if (op < 0x100) {  // VOPC via VOP3: destination is an SGPR pair
     s = SRange(w & 0xFF, 2);
@@ -651,14 +1116,12 @@ std::string OperandsVop3(const Inst& inst, const std::string& name) {
     s = VRange(w & 0xFF, n);
     // VOP3b (carry ops, div_scale): explicit scalar carry destination.
     const uint32_t sdst = (w >> 8) & 0x7F;
-    if (op == 0x124 || op == 0x125 || op == 0x126 || op == 0x16d ||
-        op == 0x16e || op == 0x176 || op == 0x177)
+    if (vop3b)
       s += ", " + SRange(sdst, 2);
   }
   const uint32_t srcs[3] = {w1 & 0x1FF, (w1 >> 9) & 0x1FF, (w1 >> 18) & 0x1FF};
   const uint32_t abs = (w >> 8) & 7;
-  // Trailing-source count by range: VOP1-mapped 1, VOPC/VOP2-mapped 2, else 3.
-  const uint32_t num_srcs = op >= 0x180 ? 1 : (op < 0x140 ? 2 : 3);
+  const uint32_t num_srcs = Vop3NumSources(op);
   for (uint32_t i = 0; i < num_srcs; i++) {
     std::string v = Src(srcs[i], inst, n);
     if (abs & (1u << i))
@@ -667,11 +1130,76 @@ std::string OperandsVop3(const Inst& inst, const std::string& name) {
       v = "-" + v;
     s += ", " + v;
   }
+  if (inst.isa == IsaMode::kNeo && !vop3b) {
+    const uint32_t op_sel = (w >> 12) & 0xf;
+    if (op_sel) {
+      s += " op_sel:[";
+      for (uint32_t i = 0; i < num_srcs; i++) {
+        if (i)
+          s += ",";
+        s += std::to_string((op_sel >> i) & 1);
+      }
+      s += "," + std::to_string((op_sel >> 3) & 1) + "]";
+    }
+  }
   if ((w >> 11) & 1)
     s += " clamp";
   const uint32_t omod = (w1 >> 27) & 3;
   if (omod)
     s += omod == 1 ? " mul:2" : omod == 2 ? " mul:4" : " div:2";
+  return s;
+}
+
+uint32_t Vop3pNumSources(uint32_t op) {
+  switch (op) {
+    case 0x00:
+    case 0x09:
+    case 0x0e:
+    case 0x20:
+    case 0x21:
+    case 0x22:
+      return 3;
+    default:
+      return 2;
+  }
+}
+
+std::string PackedControl(const char* name, uint32_t value, uint32_t count) {
+  std::string s = " ";
+  s += name;
+  s += ":[";
+  for (uint32_t i = 0; i < count; i++) {
+    if (i)
+      s += ",";
+    s += std::to_string((value >> i) & 1);
+  }
+  return s + "]";
+}
+
+std::string OperandsVop3p(const Inst& inst) {
+  const uint32_t w = inst.raw[0], w1 = inst.raw[1];
+  const uint32_t num_srcs = Vop3pNumSources(inst.opcode);
+  const uint32_t srcs[3] = {w1 & 0x1ff, (w1 >> 9) & 0x1ff, (w1 >> 18) & 0x1ff};
+  std::string s = VRange(w & 0xff, 1);
+  for (uint32_t i = 0; i < num_srcs; i++)
+    s += ", " + Src(srcs[i], inst);
+
+  const uint32_t op_sel = (w >> 11) & 7;
+  const uint32_t op_sel_hi = ((w1 >> 27) & 3) | (((w >> 14) & 1) << 2);
+  const uint32_t neg_lo = (w1 >> 29) & 7;
+  const uint32_t neg_hi = (w >> 8) & 7;
+  const uint32_t mask = (1u << num_srcs) - 1;
+  if (op_sel & mask)
+    s += PackedControl("op_sel", op_sel, num_srcs);
+  const uint32_t default_hi = inst.opcode < 0x20 ? mask : 0;
+  if ((op_sel_hi & mask) != default_hi)
+    s += PackedControl("op_sel_hi", op_sel_hi, num_srcs);
+  if (neg_lo & mask)
+    s += PackedControl("neg_lo", neg_lo, num_srcs);
+  if (neg_hi & mask)
+    s += PackedControl("neg_hi", neg_hi, num_srcs);
+  if ((w >> 15) & 1)
+    s += " clamp";
   return s;
 }
 
@@ -729,7 +1257,10 @@ std::string OperandsMubuf(const Inst& inst, uint32_t count) {
 
 std::string OperandsMtbuf(const Inst& inst) {
   const uint32_t w = inst.raw[0];
-  std::string s = OperandsMubuf(inst, (inst.opcode & 3) + 1);
+  uint32_t count = (inst.opcode & 3) + 1;
+  if (inst.isa == IsaMode::kNeo && inst.opcode >= 8)
+    count = (count + 1) / 2;
+  std::string s = OperandsMubuf(inst, count);
   s += " dfmt:" + std::to_string((w >> 19) & 0xF) +
        " nfmt:" + std::to_string((w >> 23) & 0x7);
   return s;
@@ -786,6 +1317,10 @@ std::string Mnemonic(const Inst& inst) {
       n = Lookup(kSop1, sizeof(kSop1) / sizeof(kSop1[0]), op);
       return n ? n : Fallback("sop1", op);
     case Enc::kSop2:
+      if (inst.isa == IsaMode::kNeo)
+        n = NeoSop2Name(op);
+      if (n)
+        return n;
       n = Lookup(kSop2, sizeof(kSop2) / sizeof(kSop2[0]), op);
       return n ? n : Fallback("sop2", op);
     case Enc::kSopk:
@@ -801,15 +1336,25 @@ std::string Mnemonic(const Inst& inst) {
       n = Lookup(kSmrd, sizeof(kSmrd) / sizeof(kSmrd[0]), op);
       return n ? n : Fallback("smrd", op);
     case Enc::kVop1:
+      if (inst.isa == IsaMode::kNeo)
+        n = NeoVop1Name(op);
+      if (n)
+        return n;
       n = Lookup(kVop1, sizeof(kVop1) / sizeof(kVop1[0]), op);
       return n ? n : Fallback("vop1", op);
     case Enc::kVop2:
+      if (inst.isa == IsaMode::kNeo)
+        n = NeoVop2Name(op);
+      if (n)
+        return n;
       n = Lookup(kVop2, sizeof(kVop2) / sizeof(kVop2[0]), op);
       return n ? n : Fallback("vop2", op);
     case Enc::kVop3:
-      return Vop3Name(op);
+      return Vop3Name(op, inst.isa);
+    case Enc::kVop3p:
+      return Vop3pName(op);
     case Enc::kVopc:
-      return VopcName(op);
+      return VopcName(op, inst.isa);
     case Enc::kVintrp:
       switch (op) {
         case 0:
@@ -826,6 +1371,12 @@ std::string Mnemonic(const Inst& inst) {
     case Enc::kMubuf:
       return MubufName(op);
     case Enc::kMtbuf:
+      if (inst.isa == IsaMode::kNeo && op >= 8 && op < 16) {
+        static const char* const kD16Fmt[] = {"x", "xy", "xyz", "xyzw"};
+        return std::string(op < 12 ? "tbuffer_load_format_d16_"
+                                   : "tbuffer_store_format_d16_") +
+               kD16Fmt[op & 3];
+      }
       if (op < 4)
         return std::string("tbuffer_load_format_") + (op == 0   ? "x"
                                                       : op == 1 ? "xy"
@@ -879,6 +1430,9 @@ std::string DisasmInst(const Inst& inst) {
       break;
     case Enc::kVop3:
       ops = OperandsVop3(inst, name);
+      break;
+    case Enc::kVop3p:
+      ops = OperandsVop3p(inst);
       break;
     case Enc::kVintrp:
       ops = OperandsVintrp(inst);
