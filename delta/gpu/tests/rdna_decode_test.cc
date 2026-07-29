@@ -50,7 +50,7 @@ TEST(RdnaDecode, SdwaUsesExtensionMetadataInsteadOfLiteralMetadata) {
 
 TEST(RdnaDecode, Vop3pAndFlatHaveDistinctFamilies) {
   const uint32_t code[] = {
-      (0x33u << 26) | (0x8Fu << 16) | (1u << 14),
+      (0x33u << 26) | (0x0Fu << 16) | (1u << 14),
       3u << 27,
       (0x37u << 26) | (0x12u << 18),
       0,
@@ -60,25 +60,24 @@ TEST(RdnaDecode, Vop3pAndFlatHaveDistinctFamilies) {
 
   ASSERT_EQ(program.size(), 2u);
   EXPECT_EQ(program[0].enc, gpu::gcn::Enc::kVop3p);
-  EXPECT_EQ(program[0].opcode, 0x8Fu);
+  EXPECT_EQ(program[0].opcode, 0x0Fu);
   EXPECT_EQ(program[1].enc, gpu::gcn::Enc::kFlat);
   EXPECT_EQ(program[1].opcode, 0x12u);
 }
 
 TEST(RdnaDecode, ReservedVop3pPrefixesRemainUnknown) {
-  const uint32_t code[] = {0xCD000000u};
+  const uint32_t code[] = {0xCD000000u, (0x33u << 26) | (1u << 23), 0};
 
-  const gpu::gcn::Program program = gpu::rdna::Decode(code, 1, false);
+  const gpu::gcn::Program program = gpu::rdna::Decode(code, 3, false);
 
-  ASSERT_EQ(program.size(), 1u);
+  ASSERT_EQ(program.size(), 3u);
   EXPECT_EQ(program[0].enc, gpu::gcn::Enc::kUnknown);
+  EXPECT_EQ(program[1].enc, gpu::gcn::Enc::kUnknown);
 }
 
 TEST(RdnaDecode, MandatoryImmediateDwordsPreserveInstructionBoundaries) {
   const uint32_t code[] = {
       Sopk(0x15), 0x11111111,  // s_setreg_imm32_b32
-      Vop2(0x20), 0x22222222,  // v_madmk_f32
-      Vop2(0x21), 0x33333333,  // v_madak_f32
       Vop2(0x2C), 0x44444444,  // v_fmamk_f32
       Vop2(0x2D), 0x55555555,  // v_fmaak_f32
       Vop2(0x37), 0x66666666,  // v_fmamk_f16
@@ -87,17 +86,47 @@ TEST(RdnaDecode, MandatoryImmediateDwordsPreserveInstructionBoundaries) {
       Sopp(0x01),
   };
 
-  const gpu::gcn::Program program = gpu::rdna::Decode(code, 16, false);
+  const gpu::gcn::Program program = gpu::rdna::Decode(code, 12, false);
 
-  ASSERT_EQ(program.size(), 9u);
-  for (uint32_t i = 0; i < 7; i++) {
+  ASSERT_EQ(program.size(), 7u);
+  for (uint32_t i = 0; i < 5; i++) {
     EXPECT_EQ(program[i].pc, i * 2);
     EXPECT_EQ(program[i].size, 2u);
     EXPECT_TRUE(program[i].has_literal);
   }
-  EXPECT_EQ(program[7].pc, 14u);
-  EXPECT_EQ(program[7].size, 1u);
-  EXPECT_EQ(program[8].pc, 15u);
+  EXPECT_EQ(program[5].pc, 10u);
+  EXPECT_EQ(program[5].size, 1u);
+  EXPECT_EQ(program[6].pc, 11u);
+}
+
+TEST(RdnaDecode, ReservedGcnMadkSlotsDoNotConsumeFollowingInstructions) {
+  for (uint32_t op : {0x20u, 0x21u}) {
+    const uint32_t code[] = {Vop2(op), Sopp(0x01)};
+    const gpu::gcn::Program program = gpu::rdna::Decode(code, 2, false);
+    ASSERT_EQ(program.size(), 2u);
+    EXPECT_EQ(program[0].enc, gpu::gcn::Enc::kVop2);
+    EXPECT_EQ(program[0].size, 1u);
+    EXPECT_EQ(program[1].enc, gpu::gcn::Enc::kSopp);
+    EXPECT_EQ(program[1].pc, 1u);
+  }
+}
+
+TEST(RdnaDecode, DsOpcodeUsesBits24Through17) {
+  const uint32_t code[] = {(0x36u << 26) | (1u << 17), 0};
+  const gpu::gcn::Program program = gpu::rdna::Decode(code, 2, false);
+  ASSERT_EQ(program.size(), 1u);
+  EXPECT_EQ(program[0].enc, gpu::gcn::Enc::kDs);
+  EXPECT_EQ(program[0].opcode, 1u);
+}
+
+TEST(RdnaDecode, VopcDppFormsRetainTheirControlDword) {
+  for (uint32_t source : {233u, 234u, 250u}) {
+    const uint32_t code[] = {(0x3eu << 25) | source, 0x12345678};
+    const gpu::gcn::Program program = gpu::rdna::Decode(code, 2, false);
+    ASSERT_EQ(program.size(), 1u);
+    EXPECT_EQ(program[0].enc, gpu::gcn::Enc::kVopc);
+    EXPECT_EQ(program[0].size, 2u);
+  }
 }
 
 TEST(RdnaDecode, ObservedNggExportPrefixOnlyAcceptsNullExports) {
@@ -161,6 +190,23 @@ TEST(RdnaDecode, OrderedEndpgmAndCodeEndTerminateAppropriately) {
   EXPECT_EQ(gpu::rdna::Decode(ordered, 3).size(), 1u);
   EXPECT_EQ(gpu::rdna::Decode(ordered, 3, false).size(), 3u);
   EXPECT_EQ(gpu::rdna::Decode(code_end, 2, false).size(), 1u);
+}
+
+TEST(RdnaDecode, EndpgmSavedTerminatesAndCallTargetsRemainReachable) {
+  const uint32_t saved[] = {Sopp(0x1B), Vop2(0x03)};
+  EXPECT_EQ(gpu::rdna::Decode(saved, 2).size(), 1u);
+  EXPECT_EQ(gpu::rdna::Decode(saved, 2, false).size(), 2u);
+
+  const uint32_t call[] = {
+      Sopk(0x16) | 1u,  // target pc2; pc1 is the return address
+      Sopp(0x01),
+      Vop2(0x03),
+      Sopp(0x01),
+  };
+  const gpu::gcn::Program reachable =
+      gpu::rdna::ReachableProgram(gpu::rdna::Decode(call, 4, false));
+  ASSERT_EQ(reachable.size(), 4u);
+  EXPECT_EQ(reachable[2].pc, 2u);
 }
 
 }  // namespace

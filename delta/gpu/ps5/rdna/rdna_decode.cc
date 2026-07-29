@@ -8,6 +8,7 @@
 
 #include "gpu/ps5/rdna/rdna_decode.h"
 
+#include <algorithm>
 #include <cstdio>
 
 namespace gpu::rdna {
@@ -38,17 +39,17 @@ bool Scalar1HasLit(uint32_t w) {
 gpu::gcn::InstExtension ValuExtension(Enc enc, uint32_t w) {
   switch (w & 0x1FF) {
     case 233:
-      return enc == Enc::kVop1 || enc == Enc::kVop2
+      return enc == Enc::kVop1 || enc == Enc::kVop2 || enc == Enc::kVopc
                  ? gpu::gcn::InstExtension::kDpp8
                  : gpu::gcn::InstExtension::kNone;
     case 234:
-      return enc == Enc::kVop1 || enc == Enc::kVop2
+      return enc == Enc::kVop1 || enc == Enc::kVop2 || enc == Enc::kVopc
                  ? gpu::gcn::InstExtension::kDpp8Fi
                  : gpu::gcn::InstExtension::kNone;
     case 249:
       return gpu::gcn::InstExtension::kSdwa;
     case 250:
-      return enc == Enc::kVop1 || enc == Enc::kVop2
+      return enc == Enc::kVop1 || enc == Enc::kVop2 || enc == Enc::kVopc
                  ? gpu::gcn::InstExtension::kDpp
                  : gpu::gcn::InstExtension::kNone;
     case 255:
@@ -102,17 +103,17 @@ Enc Classify(uint32_t w, uint32_t& opcode) {
       opcode = (w >> 16) & 0x3;
       return Enc::kVintrp;
     case 0x33:
-      if ((w >> 24) != 0xCC) {
+      if ((w >> 24) != 0xCC || (w & (1u << 23))) {
         opcode = 0;
         return Enc::kUnknown;
       }
-      opcode = (w >> 16) & 0xFF;
+      opcode = (w >> 16) & 0x7F;
       return Enc::kVop3p;
     case 0x35:
       opcode = (w >> 16) & 0x3FF;
       return Enc::kVop3;  // 10-bit opcode
     case 0x36:
-      opcode = (w >> 18) & 0xFF;
+      opcode = (w >> 17) & 0xFF;
       return Enc::kDs;
     case 0x37:
       opcode = (w >> 18) & 0x7F;
@@ -174,6 +175,154 @@ uint32_t BaseSize(Enc e, uint32_t w) {
     default:
       return 1;
   }
+}
+
+uint32_t Vop3SourceCount(Enc enc, uint32_t op) {
+  if (enc == Enc::kVop3p) {
+    switch (op) {
+      case 0x00:
+      case 0x09:
+      case 0x0e:
+      case 0x13:
+      case 0x14:
+      case 0x15:
+      case 0x16:
+      case 0x17:
+      case 0x18:
+      case 0x19:
+      case 0x20:
+      case 0x21:
+      case 0x22:
+        return 3;
+      default:
+        return 2;
+    }
+  }
+  if (op < 0x100)
+    return 2;  // VOPC aliases
+  if (op == 0x101 || (op >= 0x128 && op <= 0x12b))
+    return 3;
+  if (op >= 0x100 && op < 0x140)
+    return 2;  // VOP2 aliases
+  if (op >= 0x180 && op < 0x200)
+    return 1;  // VOP1 aliases
+  if (op >= 0x270 && op <= 0x272)
+    return 2;  // VINTRP aliases
+  return 3;
+}
+
+std::vector<uint8_t> ComputeRdnaReachability(const Program& program) {
+  std::vector<uint8_t> reachable(program.size(), 0);
+  if (program.empty())
+    return reachable;
+
+  // 0=ordinary, 1=unconditional relative, 2=conditional/call relative,
+  // 3=program end, 4=indirect control flow.
+  const auto branch_kind = [](const Inst& inst) {
+    if (inst.enc == Enc::kSopk) {
+      if (inst.opcode == 0x16 || inst.opcode == 0x1b || inst.opcode == 0x1c)
+        return 2;  // s_call_b64 / subvector loops
+      return 0;
+    }
+    if (inst.enc == Enc::kSop1) {
+      if (inst.opcode >= 0x20 && inst.opcode <= 0x22)
+        return 4;  // setpc/swappc/rfe
+      return 0;
+    }
+    if (inst.enc != Enc::kSopp)
+      return 0;
+    switch (inst.opcode) {
+      case 0x01:
+      case 0x1b:
+      case 0x1e:
+      case 0x1f:
+        return 3;
+      case 0x02:
+        return 1;
+      case 0x04:
+      case 0x05:
+      case 0x06:
+      case 0x07:
+      case 0x08:
+      case 0x09:
+      case 0x17:
+      case 0x18:
+      case 0x19:
+      case 0x1a:
+        return 2;
+      default:
+        return 0;
+    }
+  };
+
+  const uint32_t max_pc = program.back().pc + program.back().size;
+  std::vector<uint32_t> starts{0};
+  for (const Inst& inst : program) {
+    const int kind = branch_kind(inst);
+    if (!kind)
+      continue;
+    starts.push_back(inst.pc + inst.size);
+    if (kind == 1 || kind == 2) {
+      const int32_t simm = static_cast<int16_t>(inst.raw[0] & 0xffff);
+      starts.push_back(static_cast<uint32_t>(static_cast<int32_t>(inst.pc) +
+                                             static_cast<int32_t>(inst.size) +
+                                             simm));
+    }
+  }
+  std::sort(starts.begin(), starts.end());
+  starts.erase(std::unique(starts.begin(), starts.end()), starts.end());
+  starts.erase(std::remove_if(starts.begin(), starts.end(),
+                              [max_pc](uint32_t pc) { return pc >= max_pc; }),
+               starts.end());
+  const auto block_of = [&](uint32_t pc) {
+    uint32_t block = 0;
+    for (uint32_t i = 0; i < starts.size() && starts[i] <= pc; i++)
+      block = i;
+    return block;
+  };
+
+  std::vector<uint8_t> block_reachable(starts.size(), 0);
+  std::vector<uint32_t> worklist{0};
+  while (!worklist.empty()) {
+    const uint32_t block = worklist.back();
+    worklist.pop_back();
+    if (block >= starts.size() || block_reachable[block])
+      continue;
+    block_reachable[block] = 1;
+    const uint32_t block_end =
+        block + 1 < starts.size() ? starts[block + 1] : max_pc;
+    bool terminated = false;
+    for (const Inst& inst : program) {
+      if (inst.pc < starts[block] || inst.pc >= block_end)
+        continue;
+      const int kind = branch_kind(inst);
+      if (!kind)
+        continue;
+      terminated = true;
+      if (kind == 3)
+        break;
+      if (kind == 4) {
+        std::fill(block_reachable.begin(), block_reachable.end(), 1);
+        worklist.clear();
+        break;
+      }
+      const int32_t simm = static_cast<int16_t>(inst.raw[0] & 0xffff);
+      const uint32_t target =
+          static_cast<uint32_t>(static_cast<int32_t>(inst.pc) +
+                                static_cast<int32_t>(inst.size) + simm);
+      if (target < max_pc)
+        worklist.push_back(block_of(target));
+      if (kind == 2)
+        worklist.push_back(block + 1);
+      break;
+    }
+    if (!terminated)
+      worklist.push_back(block + 1);
+  }
+
+  for (uint32_t i = 0; i < program.size(); i++)
+    reachable[i] = block_reachable[block_of(program[i].pc)];
+  return reachable;
 }
 
 }  // namespace
@@ -239,8 +388,8 @@ Program Decode(const uint32_t* code, uint32_t max_dwords, bool stop_at_endpgm) {
       case Enc::kVop2:
         in.extension = ValuExtension(in.enc, code[i]);
         lit = in.extension != gpu::gcn::InstExtension::kNone ||
-              in.opcode == 0x20 || in.opcode == 0x21 || in.opcode == 0x2C ||
-              in.opcode == 0x2D || in.opcode == 0x37 || in.opcode == 0x38;
+              in.opcode == 0x2C || in.opcode == 0x2D || in.opcode == 0x37 ||
+              in.opcode == 0x38;
         break;
       case Enc::kVop1:
       case Enc::kVopc:
@@ -249,9 +398,9 @@ Program Decode(const uint32_t* code, uint32_t max_dwords, bool stop_at_endpgm) {
         break;
       case Enc::kVop3:
       case Enc::kVop3p:
-        // A src field == 255 selects a literal after the two base words.
-        lit = (in.raw[1] & 0x1FF) == 255 || ((in.raw[1] >> 9) & 0x1FF) == 255 ||
-              ((in.raw[1] >> 18) & 0x1FF) == 255;
+        // Only architecturally used sources can select the shared literal.
+        for (uint32_t src = 0; src < Vop3SourceCount(in.enc, in.opcode); src++)
+          lit |= ((in.raw[1] >> (src * 9)) & 0x1ff) == 255;
         break;
       default:
         break;
@@ -281,7 +430,8 @@ Program Decode(const uint32_t* code, uint32_t max_dwords, bool stop_at_endpgm) {
       // endpgm operations stop an unbounded scan, but a footer-bounded decode
       // retains later branch targets.
       if (in.opcode == 0x1F ||
-          (stop_at_endpgm && (in.opcode == 0x01 || in.opcode == 0x1E)))
+          (stop_at_endpgm &&
+           (in.opcode == 0x01 || in.opcode == 0x1B || in.opcode == 0x1E)))
         break;
     }
     i += in.size;
@@ -297,7 +447,7 @@ Program DecodeShader(const uint32_t* code, uint32_t max_dwords) {
 }
 
 Program ReachableProgram(const Program& program) {
-  const std::vector<uint8_t> reachable = gpu::gcn::ComputeReachability(program);
+  const std::vector<uint8_t> reachable = ComputeRdnaReachability(program);
   Program out;
   out.reserve(program.size());
   for (uint32_t i = 0; i < program.size(); i++)
