@@ -11,9 +11,14 @@
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
+#include <chrono>
 #include <cstring>
+#include <map>
+#include <mutex>
 
 #include <sys/mman.h>
+
+#include <utl/mem.h>
 
 #include "gc_dev.h"
 #include "kern/ps4/dev/dma_dev.h"  // dmemBackingFd/Size (shared physical dmem store)
@@ -96,7 +101,28 @@ static inline bool gpuAddr(uint64_t a) {
   return a >= 0x1000000000ull && a < 0x8100000000ull;
 }
 
+// The trace probes below deref candidate pointers pulled out of a submit arg.
+// Plenty of those words look like GPU addresses without being mapped, so the
+// range check alone is not enough to read through one.
+static inline bool gpuReadable(uint64_t a, size_t n) {
+  return gpuAddr(a) && utl::isMemoryRangeMapped(reinterpret_cast<void *>(a), n);
+}
+
 int32_t gcDevicePs5::ioctl(uint32_t cmd, void *data) {
+  if (std::getenv("DELTA_GC_IOCTL_CENSUS")) {
+    static std::mutex mtx;
+    static std::map<uint32_t, uint64_t> hist;
+    static auto last = std::chrono::steady_clock::now();
+    std::lock_guard<std::mutex> lk(mtx);
+    hist[cmd]++;
+    auto now = std::chrono::steady_clock::now();
+    if (now - last > std::chrono::seconds(10)) {
+      last = now;
+      std::printf("[gcioctl] --- 10s census ---\n");
+      for (auto &[c, n] : hist)
+        std::printf("[gcioctl] %#x %llu\n", c, (unsigned long long)n);
+    }
+  }
   if (std::getenv("DELTA_GC_TRACE"))
     std::printf("[gc] ioctl(%x) data=%p\n", cmd, data);
   switch (cmd) {
@@ -149,7 +175,7 @@ int32_t gcDevicePs5::ioctl(uint32_t cmd, void *data) {
       // The first few submits are engine init, where the ring legitimately holds
       // nothing. Sample later ones too, or "the ring reads empty" only ever
       // describes start-up.
-      if (trace && (dumps < 4 || (calls % 500 == 0 && dumps < 12))) {
+      if (trace && (dumps < 4 || (calls % 200 == 0 && dumps < 12))) {
         dumps++;
         std::printf("[agc] --- submit #%llu ---\n", (unsigned long long)calls);
         auto *w = reinterpret_cast<uint32_t *>(a);
@@ -160,7 +186,7 @@ int32_t gcDevicePs5::ioctl(uint32_t cmd, void *data) {
                     (unsigned long)base2, size);
         for (int k = 0; k + 1 < 16; k++) {
           uint64_t p = (static_cast<uint64_t>(w[k + 1]) << 32) | w[k];
-          if (gpuAddr(p)) {
+          if (gpuReadable(p, 32)) {
             auto *pw = reinterpret_cast<const uint32_t *>(p);
             std::printf("[agc]   arg[%d] ptr=%#lx ->", k, (unsigned long)p);
             for (int j = 0; j < 8; j++) std::printf(" %08x", pw[j]);
@@ -187,7 +213,7 @@ int32_t gcDevicePs5::ioctl(uint32_t cmd, void *data) {
         for (int k = 0; k < 16; k++) std::printf(" %08x", w[k]);
         std::printf("\n");
         auto sniff = [](uint64_t p, const char *what) {
-          if (!gpuAddr(p)) return;
+          if (!gpuReadable(p, 1024)) return;
           const auto *q = reinterpret_cast<const uint32_t *>(p);
           uint32_t t3 = 0;
           for (int i = 0; i < 256; i++)
