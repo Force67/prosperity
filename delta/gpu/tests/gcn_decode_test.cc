@@ -182,6 +182,60 @@ TEST(GcnDecode, NeoMtbufReadsFourthOpcodeBitFromSecondWord) {
   EXPECT_EQ(program[0].opcode, 8u);
 }
 
+TEST(GcnDecode, FlatIsASeaIslands64BitEncoding) {
+  const uint32_t code[] = {
+      (0x37u << 26) | (0x0cu << 18),  // flat_load_dword
+      2u << 24,
+      0xbf810000,
+  };
+
+  const gpu::gcn::Program program = gpu::gcn::Decode(code, 3);
+
+  ASSERT_EQ(program.size(), 2u);
+  EXPECT_EQ(program[0].enc, gpu::gcn::Enc::kFlat);
+  EXPECT_EQ(program[0].opcode, 0x0cu);
+  EXPECT_EQ(program[0].size, 2u);
+  EXPECT_EQ(program[1].pc, 2u);
+}
+
+TEST(GcnDecode, ReachabilityIncludesDebugBranchTargetAndFallthrough) {
+  const uint32_t code[] = {
+      0xbf970002,  // s_cbranch_cdbgsys pc+3
+      0xbe800380,  // fallthrough
+      0xbf810000,
+      0xbe810380,  // target
+      0xbf810000,
+  };
+
+  const gpu::gcn::Program program =
+      gpu::gcn::Decode(code, 5, /*stop_at_endpgm=*/false);
+  const std::vector<uint8_t> reachable = gpu::gcn::ComputeReachability(program);
+
+  ASSERT_EQ(reachable.size(), 5u);
+  EXPECT_EQ(reachable[0], 1u);
+  EXPECT_EQ(reachable[1], 1u);
+  EXPECT_EQ(reachable[2], 1u);
+  EXPECT_EQ(reachable[3], 1u);
+  EXPECT_EQ(reachable[4], 1u);
+}
+
+TEST(GcnDecode, IndirectControlFlowDoesNotMarkPotentialTargetsDead) {
+  const uint32_t code[] = {
+      0xbe802002,  // s_setpc_b64 s[2:3]
+      0xbf810000,
+      0xbe800380,
+      0xbf810000,
+  };
+
+  const gpu::gcn::Program program =
+      gpu::gcn::Decode(code, 4, /*stop_at_endpgm=*/false);
+  const std::vector<uint8_t> reachable = gpu::gcn::ComputeReachability(program);
+
+  ASSERT_EQ(reachable.size(), 4u);
+  for (uint8_t value : reachable)
+    EXPECT_EQ(value, 1u);
+}
+
 TEST(GcnDecode, ReachabilityExcludesUnconditionalBranchFallthrough) {
   const uint32_t code[] = {
       0xbf820003,  // s_branch pc+4

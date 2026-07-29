@@ -68,8 +68,7 @@ Id ApplyOutputModifier(Translator& t, Id value, uint32_t omod) {
 }  // namespace
 
 bool IsVop3b(uint32_t op) {
-  return (op >= 0x125 && op <= 0x12a) || op == 0x16d || op == 0x16e ||
-         op == 0x176 || op == 0x177;
+  return (op >= 0x125 && op <= 0x12a) || op == 0x16d || op == 0x16e;
 }
 
 // ---- SOP1 -------------------------------------------------------------------
@@ -411,14 +410,16 @@ void EmitSop2(Translator& t, const Inst& inst) {
       break;      // s_mul_i32
     case 0x27: {  // s_bfe_u32: offset = b[4:0], width = b[22:16]
       const Id off = t.And(b, t.U32(31));
-      const Id width = t.And(t.Shr(b, t.U32(16)), t.U32(0x7F));
+      const Id width = t.UMin(t.And(t.Shr(b, t.U32(16)), t.U32(0x7F)),
+                              t.Sub(t.U32(32), off));
       r = t.m.Emit(spv::Op::OpBitFieldUExtract, t.t_u, {a, off, width});
       scc = true;
       break;
     }
     case 0x28: {  // s_bfe_i32: signed
       const Id off = t.And(b, t.U32(31));
-      const Id width = t.And(t.Shr(b, t.U32(16)), t.U32(0x7F));
+      const Id width = t.UMin(t.And(t.Shr(b, t.U32(16)), t.U32(0x7F)),
+                              t.Sub(t.U32(32), off));
       r = t.m.Bitcast(t.t_u, t.m.Emit(spv::Op::OpBitFieldSExtract, t.t_i,
                                       {t.m.Bitcast(t.t_i, a), off, width}));
       scc = true;
@@ -427,7 +428,8 @@ void EmitSop2(Translator& t, const Inst& inst) {
     case 0x29: {  // s_bfe_u64: 64-bit unsigned bitfield extract (off=b[5:0],
                   // width=b[22:16])
       const Id off = t.And(b, t.U32(63));
-      const Id width = t.And(t.Shr(b, t.U32(16)), t.U32(0x7F));
+      const Id width = t.UMin(t.And(t.Shr(b, t.U32(16)), t.U32(0x7F)),
+                              t.Sub(t.U32(64), off));
       // 64-bit logical shift-right of {a, a_hi} by off.
       const Id n_lo = t.And(off, t.U32(31));
       const Id ge32 = t.Uge(off, t.U32(32));
@@ -438,10 +440,15 @@ void EmitSop2(Translator& t, const Inst& inst) {
       const Id sh_hi = t.SelectB(ge32, t.U32(0), t.Shr(a_hi, n_lo));
       // Mask the low/high words to `width` bits.
       const Id wge32 = t.Uge(width, t.U32(32));
+      const Id wge64 = t.Uge(width, t.U32(64));
       const Id w_lo = t.And(width, t.U32(31));
-      const Id part = t.Sub(t.Shl(t.U32(1), w_lo), t.U32(1));
-      r = t.And(sh_lo, t.SelectB(wge32, t.U32(0xFFFFFFFFu), part));
-      r_hi = t.And(sh_hi, t.SelectB(wge32, part, t.U32(0)));
+      const Id low_part = t.Sub(t.Shl(t.U32(1), w_lo), t.U32(1));
+      const Id hi_width = t.SelectB(wge32, t.Sub(width, t.U32(32)), t.U32(0));
+      const Id hi_part =
+          t.Sub(t.Shl(t.U32(1), t.And(hi_width, t.U32(31))), t.U32(1));
+      r = t.And(sh_lo, t.SelectB(wge32, t.U32(0xFFFFFFFFu), low_part));
+      r_hi = t.And(sh_hi, t.SelectB(wge64, t.U32(0xFFFFFFFFu),
+                                    t.SelectB(wge32, hi_part, t.U32(0))));
       scc = wide_scc = true;
       break;
     }
@@ -619,9 +626,17 @@ void EmitSopk(Translator& t, const Inst& inst) {
       t.SetSccBool(SignedAddOverflow(t, s0, imm_i, r));
       break;
     }
-    case 0x10:  // s_mulk_i32
-      t.SetSg(sdst, t.Mul(t.Sg(sdst), imm_i));
+    case 0x10: {  // s_mulk_i32: SCC reports signed overflow
+      const Id lhs = t.Sg(sdst);
+      const Id product =
+          t.m.Emit(spv::Op::OpSMulExtended, t.PairType(), {lhs, imm_i});
+      const Id lo = t.m.CompositeExtract(t.t_u, product, 0);
+      const Id hi = t.m.CompositeExtract(t.t_u, product, 1);
+      t.SetSg(sdst, lo);
+      t.SetSccBool(
+          t.m.Emit(spv::Op::OpINotEqual, t.t_bool, {hi, t.Sar(lo, t.U32(31))}));
       break;
+    }
     // s_getreg/s_setreg touch hardware state registers (mode/trap) that have
     // no analogue here; reading returns 0.
     case 0x12:
@@ -661,7 +676,7 @@ void EmitVop1(Translator& t,
       set_u(u0);
       break;  // v_mov_b32
     case 0x02:
-      set_u(u0);
+      t.SetSg(vdst, u0);
       break;    // v_readfirstlane_b32 (single lane)
     case 0x05:  // v_cvt_f32_i32
       set_f(t.m.Emit(spv::Op::OpConvertSToF, t.t_f, {t.m.Bitcast(t.t_i, u0)}));
@@ -733,20 +748,35 @@ void EmitVop1(Translator& t,
       set_f(t.Ext1(GLSLstd450Exp2, s0));
       break;  // v_exp_f32
     case 0x26:
+      WarnUnsupported("vop1.log-clamp", op);
+      set_f(t.Ext1(GLSLstd450Log2, s0));
+      break;
     case 0x27:
       set_f(t.Ext1(GLSLstd450Log2, s0));
-      break;  // v_log[_clamp]_f32
+      break;  // v_log_f32
     case 0x28:
+      WarnUnsupported("vop1.rcp-clamp", op);
+      set_f(t.FDiv(t.F32(1.0f), s0));
+      break;
     case 0x29:
+      WarnUnsupported("vop1.rcp-legacy", op);
+      set_f(t.FDiv(t.F32(1.0f), s0));
+      break;
     case 0x2a:
     case 0x2b:
       set_f(t.FDiv(t.F32(1.0f), s0));
-      break;  // v_rcp[_clamp/legacy/iflag]_f32
+      break;  // v_rcp[_iflag]_f32
     case 0x2c:
+      WarnUnsupported("vop1.rsq-clamp", op);
+      set_f(t.Ext1(GLSLstd450InverseSqrt, s0));
+      break;
     case 0x2d:
+      WarnUnsupported("vop1.rsq-legacy", op);
+      set_f(t.Ext1(GLSLstd450InverseSqrt, s0));
+      break;
     case 0x2e:
       set_f(t.Ext1(GLSLstd450InverseSqrt, s0));
-      break;  // v_rsq[_clamp/legacy]_f32
+      break;  // v_rsq_f32
     case 0x33:
       set_f(t.Ext1(GLSLstd450Sqrt, s0));
       break;  // v_sqrt_f32
@@ -817,8 +847,12 @@ void EmitVop2(Translator& t,
     // v_readlane / v_writelane: pick/write a specific wave lane. Per-invocation
     // model (one lane): the value is just s0.
     case 0x01:
+      t.SetSg(vdst, u0);
+      break;
     case 0x02:
-      set_u(u0);
+      // Lane writes ignore EXEC. In the scalarized wave model this remains a
+      // selected-lane approximation, but it must not use SetVg predication.
+      t.m.Store(t.VgPtr(vdst), u0);
       break;
     case 0x03:
       set_f(t.FAdd(s0, s1));
@@ -830,12 +864,16 @@ void EmitVop2(Translator& t,
       set_f(t.FSub(s1, s0));
       break;  // v_subrev_f32
     case 0x06:
+      WarnUnsupported("vop2.mac-legacy", op);
       set_f(t.FAdd(t.FMul(s0, s1), t.VgF(vdst)));
-      break;  // v_mac_legacy_f32
+      break;
     case 0x07:
+      WarnUnsupported("vop2.mul-legacy", op);
+      set_f(t.FMul(s0, s1));
+      break;
     case 0x08:
       set_f(t.FMul(s0, s1));
-      break;  // v_mul[_legacy]_f32
+      break;  // v_mul_f32
     case 0x09:
       set_u(t.Mul(t.Sext24(u0), t.Sext24(u1)));
       break;    // v_mul_i32_i24
@@ -849,13 +887,19 @@ void EmitVop2(Translator& t,
       set_u(mul24_hi(spv::Op::OpUMulExtended, t.Low24(u0), t.Low24(u1)));
       break;
     case 0x0d:
+      WarnUnsupported("vop2.min-legacy", op);
+      set_f(t.Ext2(GLSLstd450FMin, s0, s1));
+      break;
     case 0x0f:
       set_f(t.Ext2(GLSLstd450FMin, s0, s1));
-      break;  // v_min[_legacy]_f32
+      break;  // v_min_f32
     case 0x0e:
+      WarnUnsupported("vop2.max-legacy", op);
+      set_f(t.Ext2(GLSLstd450FMax, s0, s1));
+      break;
     case 0x10:
       set_f(t.Ext2(GLSLstd450FMax, s0, s1));
-      break;  // v_max[_legacy]_f32
+      break;  // v_max_f32
     case 0x11:
       set_u(t.SMin(u0, u1));
       break;  // v_min_i32
@@ -1047,6 +1091,44 @@ Id IntPredicate(Translator& t, uint32_t lo, bool is_signed, Id a, Id b) {
   }
 }
 
+Id FloatClassPredicate(Translator& t, Id bits, Id mask) {
+  const Id sign = t.IsNonZero(t.And(bits, t.U32(0x80000000u)));
+  const Id exponent = t.And(bits, t.U32(0x7f800000u));
+  const Id mantissa = t.And(bits, t.U32(0x007fffffu));
+  const Id exp_zero = t.IsZero(exponent);
+  const Id exp_all_ones = t.Eq(exponent, t.U32(0x7f800000u));
+  const Id mantissa_zero = t.IsZero(mantissa);
+  const auto logical_not = [&](Id value) {
+    return t.m.Emit(spv::Op::OpLogicalNot, t.t_bool, {value});
+  };
+  const auto logical_or = [&](Id a, Id b) {
+    return t.m.Emit(spv::Op::OpLogicalOr, t.t_bool, {a, b});
+  };
+  const Id negative = sign, positive = logical_not(sign);
+  const Id nan = t.LAnd(exp_all_ones, logical_not(mantissa_zero));
+  const Id quiet = t.IsNonZero(t.And(mantissa, t.U32(0x00400000u)));
+  const Id infinity = t.LAnd(exp_all_ones, mantissa_zero);
+  const Id zero = t.LAnd(exp_zero, mantissa_zero);
+  const Id subnormal = t.LAnd(exp_zero, logical_not(mantissa_zero));
+  const Id normal = logical_not(logical_or(exp_zero, exp_all_ones));
+
+  Id classes = t.U32(0);
+  const auto add_class = [&](uint32_t bit, Id condition) {
+    classes = t.Or(classes, t.SelectB(condition, t.U32(1u << bit), t.U32(0)));
+  };
+  add_class(0, t.LAnd(nan, logical_not(quiet)));  // signaling NaN
+  add_class(1, t.LAnd(nan, quiet));               // quiet NaN
+  add_class(2, t.LAnd(infinity, negative));
+  add_class(3, t.LAnd(normal, negative));
+  add_class(4, t.LAnd(subnormal, negative));
+  add_class(5, t.LAnd(zero, negative));
+  add_class(6, t.LAnd(zero, positive));
+  add_class(7, t.LAnd(subnormal, positive));
+  add_class(8, t.LAnd(normal, positive));
+  add_class(9, t.LAnd(infinity, positive));
+  return t.IsNonZero(t.And(classes, mask));
+}
+
 }  // namespace
 
 void EmitVopc(Translator& t,
@@ -1061,7 +1143,9 @@ void EmitVopc(Translator& t,
   // EXEC-writing cmpx form. The 64-bit families are approximated on the low
   // dwords (loudly).
   Id cond = 0;
-  if (op <= 0x3F) {
+  if (op == 0x88 || op == 0x98) {
+    cond = FloatClassPredicate(t, s0u, s1u);
+  } else if (op <= 0x3F) {
     if (op >= 0x20)
       WarnUnsupported("vopc.f64", op);
     cond = FloatPredicate(t, op & 0xF, s0f, s1f);
@@ -1086,6 +1170,7 @@ void EmitVop3(Translator& t,
               uint32_t op,
               uint32_t vdst,
               Id s0,
+              Id s0_hi,
               Id s1,
               Id s2,
               Id s2_hi,
@@ -1160,9 +1245,14 @@ void EmitVop3(Translator& t,
   };
   switch (op) {
     case 0x140:
-    case 0x141:
-    case 0x14b:  // v_mad[_legacy]_f32 / v_fma_f32
+      WarnUnsupported("vop3.mad-legacy", op);
       set_f(t.FAdd(t.FMul(s0, s1), s2));
+      break;
+    case 0x141:
+      set_f(t.FAdd(t.FMul(s0, s1), s2));
+      break;
+    case 0x14b:  // v_fma_f32
+      set_f(t.m.ExtInst(t.t_f, GLSLstd450Fma, {s0, s1, s2}));
       break;
     case 0x142:  // v_mad_i32_i24
       set_u(t.Add(t.Mul(t.Sext24(u0), t.Sext24(u1)), u2));
@@ -1171,15 +1261,20 @@ void EmitVop3(Translator& t,
       set_u(t.Add(t.Mul(t.Low24(u0), t.Low24(u1)), u2));
       break;
     case 0x148:  // v_bfe_u32
-      set_u(t.m.Emit(spv::Op::OpBitFieldUExtract, t.t_u,
-                     {u0, t.And(u1, t.U32(31)), t.And(u2, t.U32(31))}));
+    {
+      const Id off = t.And(u1, t.U32(31));
+      const Id width = t.UMin(t.And(u2, t.U32(31)), t.Sub(t.U32(32), off));
+      set_u(t.m.Emit(spv::Op::OpBitFieldUExtract, t.t_u, {u0, off, width}));
       break;
+    }
     case 0x149:  // v_bfe_i32
-      set_u(t.m.Bitcast(t.t_u,
-                        t.m.Emit(spv::Op::OpBitFieldSExtract, t.t_i,
-                                 {t.m.Bitcast(t.t_i, u0), t.And(u1, t.U32(31)),
-                                  t.And(u2, t.U32(31))})));
+    {
+      const Id off = t.And(u1, t.U32(31));
+      const Id width = t.UMin(t.And(u2, t.U32(31)), t.Sub(t.U32(32), off));
+      set_u(t.m.Bitcast(t.t_u, t.m.Emit(spv::Op::OpBitFieldSExtract, t.t_i,
+                                        {t.m.Bitcast(t.t_i, u0), off, width})));
       break;
+    }
     case 0x14a:  // v_bfi_b32: (s0 & s1) | (~s0 & s2)
       set_u(t.Or(t.And(u0, u1), t.And(t.Not(u0), u2)));
       break;
@@ -1295,14 +1390,16 @@ void EmitVop3(Translator& t,
     // identity passthrough and div_fmas an FMA feeding the estimate the fixup
     // ignores.
     case 0x15f:
+      WarnUnsupported("vop3.div-fixup", op);
       set_f(t.FDiv(s2, s1));
       break;     // v_div_fixup_f32
     case 0x16d:  // v_div_scale_f32: identity
+      WarnUnsupported("vop3.div-scale", op);
       set_f(s0);
       t.SetSg(sdst, t.U32(0));
       break;
     case 0x16f:
-      set_f(t.FAdd(t.FMul(s0, s1), s2));
+      set_f(t.m.ExtInst(t.t_f, GLSLstd450Fma, {s0, s1, s2}));
       break;  // v_div_fmas_f32
     case 0x169:
     case 0x16b:
@@ -1318,11 +1415,11 @@ void EmitVop3(Translator& t,
     case 0x162:
     case 0x163: {  // v_lshl/lshr/ashr_b64 (low result)
       // 64-bit shifts on a VGPR pair; reuse the scalar shift64 shape.
-      const Id n = t.And(u2, t.U32(63)), n_lo = t.And(n, t.U32(31));
+      const Id n = t.And(u1, t.U32(63)), n_lo = t.And(n, t.U32(31));
       const Id ge32 = t.Uge(n, t.U32(32));
       const Id zero = t.IsZero(n);
       const Id inv = t.And(t.Sub(t.U32(32), n_lo), t.U32(31));
-      const Id lo_in = u0, hi_in = u1;
+      const Id lo_in = u0, hi_in = s0_hi;
       Id lo, hi;
       if (op == 0x161) {  // lshl
         const Id cross = t.SelectB(zero, t.U32(0), t.Shr(lo_in, inv));
@@ -1357,9 +1454,8 @@ void EmitVop3(Translator& t,
         t.SetVg(vdst + 1, hi.value);
       Id bit64 = hi.flag;
       if (sgn)
-        bit64 = t.Xor(
-            bit64, t.Xor(t.Xor(t.Shr(p_hi, t.U32(31)), t.Shr(s2_hi, t.U32(31))),
-                         t.Shr(hi.value, t.U32(31))));
+        bit64 = t.Xor(bit64,
+                      t.Xor(t.Shr(p_hi, t.U32(31)), t.Shr(s2_hi, t.U32(31))));
       t.SetSg(sdst, t.And(bit64, t.U32(1)));
       break;
     }

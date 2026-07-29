@@ -166,4 +166,30 @@ TEST(GcnSpirv, BaseVop3OutputModifiersAreNotIgnored) {
   EXPECT_FALSE(Recompile(std::move(integer)));
 }
 
+TEST(GcnSpirv, BaseSeaIslandsCorrectionsAreAcceptedOrRejectedExplicitly) {
+  const IsaScope base(gpu::gcn::IsaMode::kBase);
+
+  EXPECT_TRUE(Recompile({Vopc(0x88)}));                    // v_cmp_class_f32
+  EXPECT_TRUE(Recompile({(0xbu << 28) | (0x10u << 23)}));  // s_mulk_i32
+
+  std::vector<uint32_t> shift64;
+  AppendVop3(shift64, 0x161);
+  EXPECT_TRUE(Recompile(std::move(shift64)));
+
+  std::vector<uint32_t> mad64;
+  AppendVop3(mad64, 0x176);
+  EXPECT_TRUE(Recompile(std::move(mad64)));
+
+  EXPECT_FALSE(Recompile({Vop2(0x07)}));  // legacy multiply is not IEEE mul
+
+  std::vector<uint32_t> div_scale;
+  AppendVop3(div_scale, 0x16d);
+  EXPECT_FALSE(Recompile(std::move(div_scale)));
+
+  EXPECT_FALSE(Recompile({
+      (0x37u << 26) | (0x0cu << 18),  // recognized but untranslated FLAT
+      2u << 24,
+  }));
+}
+
 }  // namespace

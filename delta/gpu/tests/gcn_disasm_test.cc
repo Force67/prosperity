@@ -127,7 +127,7 @@ TEST(GcnDisasm, BaseDsInventoryNames) {
       {0x85, "ds_min_src2_i32"},       {0x86, "ds_max_src2_i32"},
       {0x87, "ds_min_src2_u32"},       {0x88, "ds_max_src2_u32"},
       {0x89, "ds_and_src2_b32"},       {0x8a, "ds_or_src2_b32"},
-      {0x8b, "ds_xor_src2_b32"},       {0x8d, "ds_write_src2_b32"},
+      {0x8b, "ds_xor_src2_b32"},       {0x8c, "ds_write_src2_b32"},
       {0x92, "ds_min_src2_f32"},       {0x93, "ds_max_src2_f32"},
       {0xc0, "ds_add_src2_u64"},       {0xc1, "ds_sub_src2_u64"},
       {0xc2, "ds_rsub_src2_u64"},      {0xc3, "ds_inc_src2_u64"},
@@ -135,8 +135,10 @@ TEST(GcnDisasm, BaseDsInventoryNames) {
       {0xc6, "ds_max_src2_i64"},       {0xc7, "ds_min_src2_u64"},
       {0xc8, "ds_max_src2_u64"},       {0xc9, "ds_and_src2_b64"},
       {0xca, "ds_or_src2_b64"},        {0xcb, "ds_xor_src2_b64"},
-      {0xcd, "ds_write_src2_b64"},     {0xd2, "ds_min_src2_f64"},
-      {0xd3, "ds_max_src2_f64"},
+      {0xcc, "ds_write_src2_b64"},     {0xd2, "ds_min_src2_f64"},
+      {0xd3, "ds_max_src2_f64"},       {0xde, "ds_write_b96"},
+      {0xdf, "ds_write_b128"},         {0xfd, "ds_condxchg32_rtn_b128"},
+      {0xfe, "ds_read_b96"},           {0xff, "ds_read_b128"},
   };
 
   for (const Case& c : cases)
@@ -144,8 +146,113 @@ TEST(GcnDisasm, BaseDsInventoryNames) {
 }
 
 TEST(GcnDisasm, BaseMubufCacheInvalidateNames) {
-  EXPECT_EQ(Name(gpu::gcn::Enc::kMubuf, 0x70), "buffer_wbinvl1_sc");
+  EXPECT_EQ(Name(gpu::gcn::Enc::kMubuf, 0x70), "buffer_wbinvl1_vol");
   EXPECT_EQ(Name(gpu::gcn::Enc::kMubuf, 0x71), "buffer_wbinvl1");
+}
+
+TEST(GcnDisasm, SeaIslandsSparseOpcodeNames) {
+  using gpu::gcn::Enc;
+  EXPECT_EQ(Name(Enc::kSopp, 0x0b), "s_setkill");
+  EXPECT_EQ(Name(Enc::kVop1, 0x45), "v_log_legacy_f32");
+  EXPECT_EQ(Name(Enc::kVop1, 0x46), "v_exp_legacy_f32");
+  EXPECT_EQ(Name(Enc::kVop3, 0x120), "vop3_op0x120");
+  EXPECT_EQ(Name(Enc::kVop3, 0x121), "vop3_op0x121");
+  EXPECT_EQ(Name(Enc::kDs, 0x8d), "ds_op0x8d");
+  EXPECT_EQ(Name(Enc::kDs, 0xcd), "ds_op0xcd");
+  EXPECT_EQ(Name(Enc::kMubuf, 0x34), "mubuf_op0x34");
+  EXPECT_EQ(Name(Enc::kMubuf, 0x54), "mubuf_op0x54");
+  EXPECT_EQ(Name(Enc::kMimg, 0x13), "mimg_op0x13");
+  EXPECT_EQ(Name(Enc::kMimg, 0x42), "image_gather4_l");
+  EXPECT_EQ(Name(Enc::kMimg, 0x44), "image_gather4_b_cl");
+  EXPECT_EQ(Name(Enc::kMimg, 0x48), "mimg_op0x48");
+  EXPECT_EQ(Name(Enc::kFlat, 0x0c), "flat_load_dword");
+  EXPECT_EQ(Name(Enc::kFlat, 0x31), "flat_atomic_cmpswap");
+}
+
+TEST(GcnDisasm, MixedScalarOperandWidthsAndSpecialForms) {
+  const uint32_t count64[] = {0xbe821004};
+  EXPECT_EQ(gpu::gcn::DisasmInst(DecodeOne(count64, 1)),
+            "s_bcnt1_i32_b64 s2, s[4:5]");
+
+  const uint32_t setpc[] = {0xbe802002};
+  EXPECT_EQ(gpu::gcn::DisasmInst(DecodeOne(setpc, 1)), "s_setpc_b64 s[2:3]");
+
+  const uint32_t setreg[] = {(0xbu << 28) | (0x15u << 23) | 0x1234u,
+                             0x89abcdef};
+  EXPECT_EQ(gpu::gcn::DisasmInst(DecodeOne(setreg, 2)),
+            "s_setreg_imm32_b32 0x1234, 0x89abcdef");
+
+  const uint32_t memtime[] = {(0x18u << 27) | (0x1eu << 22) | (2u << 15)};
+  EXPECT_EQ(gpu::gcn::DisasmInst(DecodeOne(memtime, 1)), "s_memtime s[2:3]");
+}
+
+TEST(GcnDisasm, VectorSpecialOperandsAndVop3Arities) {
+  const uint32_t nop[] = {(0x3fu << 25)};
+  EXPECT_EQ(gpu::gcn::DisasmInst(DecodeOne(nop, 1)), "v_nop");
+
+  const uint32_t readfirst[] = {(0x3fu << 25) | (2u << 17) | (2u << 9) | 260u};
+  EXPECT_EQ(gpu::gcn::DisasmInst(DecodeOne(readfirst, 1)),
+            "v_readfirstlane_b32 s2, v4");
+
+  const uint32_t readlane[] = {(1u << 25) | (2u << 17) | (3u << 9) | 260u};
+  EXPECT_EQ(gpu::gcn::DisasmInst(DecodeOne(readlane, 1)),
+            "v_readlane_b32 s2, v4, s3");
+
+  const uint32_t cndmask[] = {
+      (0x34u << 26) | (0x100u << 17),
+      257u | (258u << 9) | (259u << 18),
+  };
+  EXPECT_EQ(gpu::gcn::DisasmInst(DecodeOne(cndmask, 2)),
+            "v_cndmask_b32 v0, v1, v2, v3");
+
+  const uint32_t shift64[] = {
+      (0x34u << 26) | (0x161u << 17),
+      257u | (258u << 9) | (259u << 18),
+  };
+  EXPECT_EQ(gpu::gcn::DisasmInst(DecodeOne(shift64, 2)),
+            "v_lshl_b64 v[0:1], v[1:2], v2");
+
+  const uint32_t addc[] = {
+      (0x34u << 26) | (0x128u << 17) | (14u << 8),
+      257u | (258u << 9) | (259u << 18),
+  };
+  EXPECT_EQ(gpu::gcn::DisasmInst(DecodeOne(addc, 2)),
+            "v_addc_u32 v0, s[14:15], v1, v2, v3");
+
+  const uint32_t mad64[] = {
+      (0x34u << 26) | (0x176u << 17),
+      257u | (258u << 9) | (259u << 18),
+  };
+  EXPECT_EQ(gpu::gcn::DisasmInst(DecodeOne(mad64, 2)),
+            "v_mad_u64_u32 v[0:1], vcc, v1, v2, v[3:4]");
+}
+
+TEST(GcnDisasm, MemoryFieldsAndCompressedExport) {
+  const uint32_t mubuf[] = {
+      (0x38u << 26) | (0x0cu << 18) | (1u << 15),
+      (4u << 8) | (128u << 24),
+  };
+  EXPECT_EQ(gpu::gcn::DisasmInst(DecodeOne(mubuf, 2)),
+            "buffer_load_dword v4, v[0:1], s[0:3], 0 addr64");
+
+  const uint32_t mimg[] = {
+      (0x3cu << 26) | (0x20u << 18) | (0xfu << 8) | (1u << 15) | (1u << 16) |
+          (1u << 17) | (1u << 25),
+      (4u << 8) | (2u << 16) | (2u << 21),
+  };
+  EXPECT_EQ(gpu::gcn::DisasmInst(DecodeOne(mimg, 2)),
+            "image_sample v[4:8], v0, s[8:11], s[8:11] dmask:0xf r128 tfe "
+            "lwe slc");
+
+  const uint32_t exp[] = {0xf80004c5, 0x04030201};
+  EXPECT_EQ(gpu::gcn::DisasmInst(DecodeOne(exp, 2)), "exp pos0 v1, v2 compr");
+
+  const uint32_t flat[] = {
+      (0x37u << 26) | (0x0cu << 18),
+      2u << 24,
+  };
+  EXPECT_EQ(gpu::gcn::DisasmInst(DecodeOne(flat, 2)),
+            "flat_load_dword v2, v[0:1]");
 }
 
 TEST(GcnDisasm, NeoNamesAreModeDependent) {

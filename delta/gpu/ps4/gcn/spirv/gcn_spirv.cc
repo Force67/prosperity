@@ -273,8 +273,9 @@ void EmitInst(Translator& t, const Inst& inst, StageContext& sc) {
         break;
       const uint32_t op = inst.opcode, vdst = (w >> 17) & 0xFF;
       const uint32_t vsrc1 = (w >> 9) & 0xFF, src0 = w & 0x1FF;
+      const uint32_t src1 = op == 0x01 || op == 0x02 ? vsrc1 : 256 + vsrc1;
       EmitVop2(t, op, vdst, t.SrcF(src0, inst.literal),
-               t.SrcF(256 + vsrc1, inst.literal), inst.literal);
+               t.SrcF(src1, inst.literal), inst.literal);
       break;
     }
     case Enc::kVop3: {
@@ -300,7 +301,8 @@ void EmitInst(Translator& t, const Inst& inst, StageContext& sc) {
         if (neg & 1)
           source0 = t.FNeg(source0);
       }
-      EmitVop3(t, op, vdst, source0, t.SrcF(s1, inst.literal, neg & 2, abs & 2),
+      EmitVop3(t, op, vdst, source0, t.SrcRawHi(s0, inst.literal, op == 0x163),
+               t.SrcF(s1, inst.literal, neg & 2, abs & 2),
                t.SrcF(s2, inst.literal, neg & 4, abs & 4),
                t.SrcRawHi(s2, inst.literal, op == 0x177), sdst, clamp, omod);
       break;
@@ -431,6 +433,9 @@ void EmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       }
       break;
     }
+    case Enc::kFlat:
+      WarnUnsupported("flat", inst.opcode, w, w1);
+      break;
     case Enc::kUnknown:
       WarnUnsupported("encoding.unknown", 0, w, w1);
       break;

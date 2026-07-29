@@ -93,4 +93,19 @@ TEST_F(GcnAuditTest, ExpectedNoOpsAreNotSilent) {
   EXPECT_EQ(report.find("s_waitcnt"), std::string::npos) << report;
 }
 
+TEST_F(GcnAuditTest, VintrpP2IsNotHiddenAsAnExpectedNoOp) {
+  const uint32_t code[] = {
+      (0x32u << 26) | (1u << 16),  // v_interp_p2_f32
+      0xbf810000,
+  };
+  const gpu::gcn::Program program = gpu::gcn::Decode(code, 2);
+  gpu::gcn::AuditBegin("ps-vintrp", code, program);
+  gpu::gcn::AuditInstBegin(0, 0);
+  gpu::gcn::AuditInstEnd(0, 0);
+  gpu::gcn::AuditEnd(nullptr);
+
+  const std::string report = ReportString();
+  EXPECT_NE(report.find("v_interp_p2_f32"), std::string::npos) << report;
+}
+
 }  // namespace

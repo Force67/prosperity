@@ -1095,6 +1095,7 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       }
       gpu::gcn::EmitVop3(
           t, op, vdst, t.SrcF(s0, inst.literal, neg & 1, abs & 1),
+          t.SrcRawHi(s0, inst.literal, op == 0x163),
           t.SrcF(s1, inst.literal, neg & 2, abs & 2),
           t.SrcF(s2, inst.literal, neg & 4, abs & 4),
           t.SrcRawHi(s2, inst.literal, op == 0x177), sdst, clamp, omod);

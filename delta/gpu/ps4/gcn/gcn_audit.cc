@@ -43,7 +43,7 @@ bool ExpectedSilent(const Inst& inst) {
     case Enc::kSopp:
       return true;  // waitcnt/nop/hints; branches are CFG terminators
     case Enc::kVintrp:
-      return true;  // P1 is a no-op in the completed-interpolation model
+      return inst.opcode == 0;  // P1 is a no-op in the interpolation model
     case Enc::kExp:
       return (inst.raw[0] & 0xF) == 0;  // null export
     default:

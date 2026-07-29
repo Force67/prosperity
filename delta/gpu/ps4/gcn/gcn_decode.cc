@@ -89,6 +89,10 @@ Enc Classify(uint32_t w, IsaMode mode, uint32_t& opcode) {
     opcode = (w >> 18) & 0xFF;
     return Enc::kDs;
   }
+  if ((w >> 26) == 0x37) {
+    opcode = (w >> 18) & 0x7F;
+    return Enc::kFlat;
+  }
   if ((w >> 26) == 0x38) {
     opcode = (w >> 18) & 0x7F;
     return Enc::kMubuf;
@@ -131,6 +135,7 @@ uint32_t BaseSize(Enc e) {
     case Enc::kMtbuf:
     case Enc::kMimg:
     case Enc::kExp:
+    case Enc::kFlat:
       return 2;
     default:
       return 1;
@@ -297,28 +302,44 @@ std::vector<uint8_t> ComputeReachability(const Program& program) {
   if (program.empty())
     return reachable;
 
+  // 0=ordinary, 1=unconditional relative, 2=conditional relative, 3=end,
+  // 4=indirect control flow. Indirect targets cannot be recovered statically.
   const auto branch_kind = [](const Inst& inst) {
+    if (inst.enc == Enc::kSopk && inst.opcode == 0x11)
+      return 2;  // s_cbranch_i_fork
+    if (inst.enc == Enc::kSop2 && inst.opcode == 0x2b)
+      return 4;  // s_cbranch_g_fork
+    if (inst.enc == Enc::kSop1) {
+      switch (inst.opcode) {
+        case 0x20:  // s_setpc_b64
+        case 0x21:  // s_swappc_b64
+        case 0x22:  // s_rfe_b64
+        case 0x32:  // s_cbranch_join
+          return 4;
+        default:
+          return 0;
+      }
+    }
     if (inst.enc != Enc::kSopp)
       return 0;
     switch (inst.opcode) {
       case 0x01:
-      case 0x1E:
-      case 0x1F:
-        return 8;  // endpgm
+      case 0x1e:
+      case 0x1f:
+        return 3;
       case 0x02:
-        return 1;  // unconditional
+        return 1;
       case 0x04:
-        return 2;  // scc0
       case 0x05:
-        return 3;  // scc1
       case 0x06:
-        return 4;  // vccz
       case 0x07:
-        return 5;  // vccnz
       case 0x08:
-        return 6;  // execz
       case 0x09:
-        return 7;  // execnz
+      case 0x17:
+      case 0x18:
+      case 0x19:
+      case 0x1a:
+        return 2;
       default:
         return 0;
     }
@@ -330,7 +351,7 @@ std::vector<uint8_t> ComputeReachability(const Program& program) {
     if (!kind)
       continue;
     starts.push_back(inst.pc + inst.size);
-    if (kind >= 1 && kind <= 7) {
+    if (kind == 1 || kind == 2) {
       const int32_t simm = static_cast<int16_t>(inst.raw[0] & 0xFFFF);
       starts.push_back(static_cast<uint32_t>(static_cast<int32_t>(inst.pc) +
                                              static_cast<int32_t>(inst.size) +
@@ -370,15 +391,22 @@ std::vector<uint8_t> ComputeReachability(const Program& program) {
       if (!kind)
         continue;
       terminated = true;
-      if (kind == 8)
+      if (kind == 3)
         break;
+      if (kind == 4) {
+        // An indirect target may be any decoded block. Conservatively retain
+        // all blocks rather than misreporting valid code as dead.
+        std::fill(block_reachable.begin(), block_reachable.end(), 1);
+        worklist.clear();
+        break;
+      }
       const int32_t simm = static_cast<int16_t>(inst.raw[0] & 0xFFFF);
       const uint32_t target =
           static_cast<uint32_t>(static_cast<int32_t>(inst.pc) +
                                 static_cast<int32_t>(inst.size) + simm);
       if (target < max_pc)
         worklist.push_back(block_of(target));
-      if (kind != 1)
+      if (kind == 2)
         worklist.push_back(block + 1);
       break;
     }
