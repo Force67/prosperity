@@ -73,13 +73,19 @@ struct ScalarWrite {
 
 inline ScalarWrite DecodeScalarWrite(const gpu::gcn::Inst& inst) {
   using gpu::gcn::Enc;
-  if (inst.enc == Enc::kSmrd)
-    return {.first = DecodeSmem(inst).sdst,
-            .count = SmemLoadCount(inst.opcode)};
+  if (inst.enc == Enc::kSmrd) {
+    const uint32_t sdst = DecodeSmem(inst).sdst;
+    return sdst == 125 ? ScalarWrite{}
+                       : ScalarWrite{.first = sdst,
+                                     .count = SmemLoadCount(inst.opcode)};
+  }
   if (inst.enc == Enc::kSopk) {
+    const uint32_t sdst = (inst.raw[0] >> 16) & 0x7F;
+    if (sdst == 125)
+      return {};
     if (inst.opcode == 0x00 || inst.opcode == 0x02 ||
         (inst.opcode >= 0x0F && inst.opcode <= 0x10) || inst.opcode == 0x12)
-      return {.first = (inst.raw[0] >> 16) & 0x7F, .count = 1};
+      return {.first = sdst, .count = 1};
     return {};
   }
   if (inst.enc == Enc::kSop1) {
@@ -88,7 +94,9 @@ inline ScalarWrite DecodeScalarWrite(const gpu::gcn::Inst& inst) {
     const bool wide = inst.opcode == 0x04 || inst.opcode == 0x06 ||
                       inst.opcode == 0x08 || inst.opcode == 0x0A ||
                       (inst.opcode >= 0x24 && inst.opcode <= 0x2B);
-    return {.first = (inst.raw[0] >> 16) & 0x7F, .count = wide ? 2u : 1u};
+    const uint32_t sdst = (inst.raw[0] >> 16) & 0x7F;
+    return sdst == 125 ? ScalarWrite{}
+                       : ScalarWrite{.first = sdst, .count = wide ? 2u : 1u};
   }
   if (inst.enc == Enc::kSop2) {
     const bool wide =
@@ -97,7 +105,9 @@ inline ScalarWrite DecodeScalarWrite(const gpu::gcn::Inst& inst) {
         inst.opcode == 0x19 || inst.opcode == 0x1B || inst.opcode == 0x1D ||
         inst.opcode == 0x1F || inst.opcode == 0x21 || inst.opcode == 0x23 ||
         inst.opcode == 0x29;
-    return {.first = (inst.raw[0] >> 16) & 0x7F, .count = wide ? 2u : 1u};
+    const uint32_t sdst = (inst.raw[0] >> 16) & 0x7F;
+    return sdst == 125 ? ScalarWrite{}
+                       : ScalarWrite{.first = sdst, .count = wide ? 2u : 1u};
   }
   return {};
 }
@@ -108,10 +118,9 @@ inline ScalarWrite DecodeScalarWrite(const gpu::gcn::Inst& inst) {
 // samplers.
 gpu::gcn::MimgBindingPlan RdnaPlanMimg(const Program& program);
 
-// Decode a gfx10.3 256-bit T# (8 dwords). Only the geometric fields are
-// authoritative here; dfmt/nfmt default to RGBA8_UNORM (the gfx10.3 unified
-// 9-bit format enum is not recoverable from the ISA spec text).
-gpu::gcn::TImage DecodeTImage(const uint32_t* dwords);
+// Decode a gfx10.3 image resource. R128 selects the compact four-dword form;
+// ordinary resources contain eight dwords.
+gpu::gcn::TImage DecodeTImage(const uint32_t* dwords, bool r128 = false);
 
 // Resolve the live T#/S# each MIMG in a pixel shader samples, in binding order.
 // user_sgprs is how many user-data SGPRs the stage was launched with

@@ -112,8 +112,8 @@ void Gfx10VBufFormat(uint32_t gfmt, uint32_t& dfmt, uint32_t& nfmt) {
       {23, 7, 5, true},    // 16_16
       {30, 7, 7, true},    // 11_11_10
       {37, 7, 6, true},    // 10_11_11
-      {44, 6, 9, false},   // 2_10_10_10
-      {50, 6, 8, false},   // 10_10_10_2
+      {44, 6, 8, false},   // 10_10_10_2
+      {50, 6, 9, false},   // 2_10_10_10
       {56, 6, 10, false},  // 8_8_8_8
       {62, 3, 11, true},   // 32_32
       {65, 7, 12, true},   // 16_16_16_16
@@ -472,12 +472,13 @@ bool IsDraw(uint32_t op) {
 // program, not just the VS/PS code).
 struct ShaderKey {
   uint64_t vs, ps, fetch;
-  uint32_t gs_user_sgprs, ps_user_sgprs;
+  uint32_t gs_user_sgprs, ps_user_sgprs, ps_input_ena;
   bool gl_clip;  // clip convention is baked into the VS (see PA_CL_CLIP_CNTL)
   bool operator==(const ShaderKey& o) const {
     return vs == o.vs && ps == o.ps && fetch == o.fetch &&
            gs_user_sgprs == o.gs_user_sgprs &&
-           ps_user_sgprs == o.ps_user_sgprs && gl_clip == o.gl_clip;
+           ps_user_sgprs == o.ps_user_sgprs && ps_input_ena == o.ps_input_ena &&
+           gl_clip == o.gl_clip;
   }
 };
 struct ShaderKeyHash {
@@ -486,6 +487,7 @@ struct ShaderKeyHash {
            (std::hash<uint64_t>{}(k.fetch) << 2) ^
            (static_cast<size_t>(k.gs_user_sgprs) << 3) ^
            (static_cast<size_t>(k.ps_user_sgprs) << 9) ^
+           (static_cast<size_t>(k.ps_input_ena) << 15) ^
            (k.gl_clip ? 0x9e3779b9u : 0u);
   }
 };
@@ -1005,7 +1007,9 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
       return;
     // DX_CLIP_SPACE_DEF (bit 19) picks the guest's clip-z convention.
     const bool gl_clip = !((g_regs[mmPA_CL_CLIP_CNTL] >> 19) & 1);
-    ShaderKey key{vs_a, ps_a, fetch, gs_user_sgprs, ps_user_sgprs, gl_clip};
+    ShaderKey key{vs_a,          ps_a,          fetch,
+                  gs_user_sgprs, ps_user_sgprs, g_regs[mmSPI_PS_INPUT_ENA],
+                  gl_clip};
     auto it = g_sh_cache.find(key);
     if (it == g_sh_cache.end()) {
       if (dl) {

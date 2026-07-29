@@ -60,6 +60,7 @@ struct Translator {
   Id t_v2 = 0, t_v3 = 0, t_v4 = 0;
   Id p_priv_u = 0, sgpr = 0, vgpr = 0;
   bool predicate_vector = false;
+  bool rdna_sources = false;
   Id scc_var = 0;    // scalar condition code
   Id state_var = 0;  // CFG block index for the while-switch dispatch
   Id cbuf_type = 0;  // shared CB { uvec4 data[64]; } type
@@ -124,9 +125,21 @@ struct Translator {
   // ---- register file ----
   Id SgPtr(uint32_t i) { return m.AccessChain(p_priv_u, sgpr, {U32(i)}); }
   Id VgPtr(uint32_t i) { return m.AccessChain(p_priv_u, vgpr, {U32(i)}); }
-  Id Sg(uint32_t i) { return m.Load(t_u, SgPtr(i)); }
+  Id Sg(uint32_t i) {
+    return rdna_sources && i == 125 ? U32(0) : m.Load(t_u, SgPtr(i));
+  }
   Id Vg(uint32_t i) { return m.Load(t_u, VgPtr(i)); }
-  void SetSg(uint32_t i, Id v) { m.Store(SgPtr(i), v); }
+  void SetSg(uint32_t i, Id v) {
+    if (!rdna_sources || i != 125)
+      m.Store(SgPtr(i), v);
+  }
+  Id Sdst(uint32_t base, uint32_t offset = 0) {
+    return rdna_sources && base == 125 ? U32(0) : Sg(base + offset);
+  }
+  void SetSdst(uint32_t base, uint32_t offset, Id v) {
+    if (!rdna_sources || base != 125)
+      SetSg(base + offset, v);
+  }
   void SetVg(uint32_t i, Id v) {
     if (predicate_vector)
       v = SelectNz(Exec(), v, Vg(i));
@@ -327,6 +340,8 @@ struct Translator {
   // High dword of a 64-bit source. Register operands use the adjacent
   // SGPR/VGPR; inline and literal operands are extended from their low dword.
   Id SrcRawHi(uint32_t field, uint32_t literal, bool sign_extend) {
+    if (rdna_sources && field == 125)
+      return U32(0);
     if (field <= 126)
       return Sg(field + 1);
     if (field >= 256 && field <= 510)

@@ -13,8 +13,9 @@ This audit compares the PS5 shader implementation in:
 - the shared emitters under `delta/gpu/ps4/gcn/spirv/`
 - `tools/rdna_selftest.cpp`
 
-against the supplied SDK 6.00 PS5 documents:
+against the supplied generic RDNA2 ISA and SDK 6.00 PS5 documents:
 
+- `/home/captainspark/Downloads/rdna2-shader-instruction-set-architecture.pdf`
 - `/home/captainspark/Music/Spec/isaa5/shadercoreisaspec.md`
 - `/home/captainspark/Music/Spec/isaa5/shaderinsnref.md`
 
@@ -57,6 +58,40 @@ The largest coverage holes are:
 The major correctness blockers found during the initial review are recorded
 below with their remediation status. The remaining coverage gaps are explicit
 unsupported cases rather than claimed ISA support.
+
+The RDNA2 PDF follow-up resolved the previously uncertain SMEM size and signed
+offset rules and exposed additional gfx10 semantic collisions hidden by direct
+GFX7 emitter reuse. The audited path now:
+
+- decodes gfx10.3 DS, VOP3P, VOPC DPP, mandatory literal, ending, and
+  reachability rules without inheriting GFX7 lengths or opcode widths;
+- uses explicit supported VOP2/VOP3 mappings, including fused FMAC/FMA and
+  packed-f16 inline constants, and rejects unmodeled selectors and modifiers;
+- preserves NULL SGPR reads, discarded scalar destinations, and SCC/EXEC side
+  effects, including 64-bit NULL operands;
+- rejects unsupported signed SMEM windows, dynamic buffer offsets, MIMG status
+  controls, unsupported dimensions, and resource/binding overflows;
+- decodes gfx10.3 compact/full T# descriptors, R128 restrictions, packed
+  formats, reserved fields, and 256-byte linear pitch without GFX7 defaults.
+
+These corrections improve trustworthy rejection and the implemented graphics
+subset; they do not add DS/LDS, FLAT/GLOBAL/SCRATCH, compute, NGG, or complete
+wave semantics.
+
+## Preserved PS5 Behavior
+
+The generic RDNA2 PDF is not a complete PS5 AGC ABI specification. Existing
+platform behavior was retained where independently documented or required by
+observed PS5 shaders:
+
+- AGC/`OrbShdr` footer-bounded shader decoding and PS5 program-ending markers;
+- `S_CALL_B64`, subvector-loop, `S_ENDPGM_SAVED`, and related reachability
+  classification, while unsupported executable control flow still fails closed;
+- merged-wave/fetch-shader discovery, PS input VGPR seeding, direct vertex-fetch
+  planning, and the launch-state EXEC move workaround;
+- PS5 resource-table scalar replay and compact R128 image descriptors;
+- compatibility color conversion and fallback exports remain identified as
+  renderer policy rather than ISA semantics.
 
 ## Remediation Status
 
@@ -137,25 +172,19 @@ real PS5 compute execution.
 | Medium | Other executable end markers were not recognized. | Fixed. `s_endpgm_ordered_ps_done` and `s_code_end` terminate translation and the appropriate decode modes. |
 | Medium | Truncated multiword instructions were accepted. | Fixed. They become bounded `kUnknown` instructions and therefore reject if reachable. |
 | Medium | Mandatory SOPK and VOP2 payload dwords were not all consumed. | Fixed. `s_setreg_imm32_b32`, f32 MADK/FMAK, and f16 FMAK forms retain their second dword; ordinary one-dword VOP2 opcodes do not consume false payloads. |
+| Medium | DS used the GFX7 opcode bit range and VOP3P accepted an eighth opcode bit. | Fixed. DS reads bits 24:17, VOP3P enforces its seven-bit opcode plus reserved bit 23, and both have decoder regressions. |
+| Medium | VOPC DPP controls and several executable endings/calls were invisible to reachability. | Fixed structurally. DPP controls remain typed extensions and reject translation; calls, subvector loops, indirect flow, and all ending forms terminate or branch conservatively instead of exposing data as instructions. |
+| Medium | VOP3 literal detection examined unused fields. | Fixed. Literal consumption uses each opcode's architectural source count; the implicit VOP3 FMAC accumulator is not treated as encoded source 2. |
 | Low | An undocumented prefix is treated as EXP. | Constrained documented extension. Prefix `0x31` is accepted only for observed zero-EN NGG null exports; non-null forms remain bounded unknown instructions and reject if reachable. It is not counted as spec-derived coverage. |
 
-### Unresolved SMEM length contradiction
+### SMEM length and offsets
 
-The supplied specification says: "Scalar memory instructions always use the
-32-bit SMEM instruction encoding" at `shadercoreisaspec.md:18463-18469`.
-`BaseSize()` unconditionally consumes two dwords for SMEM at
-`rdna_decode.cc:134-142`, and `DecodeSmem()` reads a 21-bit offset plus SOFFSET
-from word 1 at `rdna_resource.h:35-42`.
-
-The same spec describes a register offset and 20/21-bit immediate offset at
-`shadercoreisaspec.md:35820-35826`, `36087-36098`, and `36144-36152`, which
-supports the implementation's wider field requirement. The referenced encoding
-image is absent from the supplied directory.
-
-This audit therefore records SMEM length as a blocking specification mismatch,
-not a confirmed one-dword decoder fix. It should be settled from an original
-encoding diagram or a known AGC binary before changing code. The current
-self-test only proves the implementation's two-dword assumption.
+The RDNA2 PDF confirms that SMEM uses a two-dword encoding and that the
+`S_LOAD_*` immediate is signed. The decoder retains the second dword. Static
+negative windows and dynamic SOFFSET forms that cannot be represented by the
+current UBO model are rejected instead of wrapping to the final cbuffer element.
+Observed descriptor-table SOFFSET selection remains supported by draw-time
+scalar replay; this is PS5 resource resolution, not general shader-side SMEM.
 
 ## Instruction Coverage
 
@@ -180,6 +209,11 @@ that encounter one on a reachable path.
 | Quad masks | Missing/approximate | `s_quadmask_b32/b64`, `s_bitreplicate_b64_b32` are missing; `s_wqm_b32/b64` is an identity approximation. |
 | 16-bit pack | Missing | All `s_pack_ll/lh/hh_b32_b16`. Shared cases are gated on `IsaMode::kNeo`, while RDNA instructions remain `kBase`. |
 
+RDNA NULL (`s125`) reads as zero and discards every dword of an encoded scalar
+destination while preserving SCC and explicit EXEC side effects. Reserved and
+unmodeled scalar source selectors reject translation rather than reading the
+zero-initialized private register file.
+
 ### Scalar flow and special operations
 
 | Status | Instructions |
@@ -198,7 +232,7 @@ floating-point instructions and cannot be treated as harmless scheduling hints.
 
 | Spec group | Status |
 | --- | --- |
-| `s_load_<dword>`, `s_buffer_load_<dword>` | Partial. Only planned constant-buffer/descriptor reads are lowered. This is not general scalar memory and does not implement all descriptor bounds/address behavior. |
+| `s_load_<dword>`, `s_buffer_load_<dword>` | Partial. Only planned constant-buffer/descriptor reads are lowered. Static bounds, binding limits, unsupported negative windows, and unrepresentable SOFFSET forms fail closed. This is not general scalar memory. |
 | `s_store_<dword>`, `s_buffer_store_<dword>` | Missing. |
 | `s_atomic_<op>`, `s_buffer_atomic_<op>` | Missing. |
 | `s_scratch_load_<dword>`, `s_scratch_store_<dword>` | Missing. |
@@ -210,12 +244,12 @@ floating-point instructions and cannot be treated as harmless scheduling hints.
 | Spec group | Status and principal gaps |
 | --- | --- |
 | Register moves | Only `v_mov_b32` is reliable. Relative moves and swaps are missing. |
-| Lane access | Incorrect. `v_readfirstlane_b32` writes the VGPR selected by VDST rather than the required SGPR and does not select the first active lane. Readlane/writelane handling is a single-lane copy approximation and gfx10 opcode overlap causes wrong dispatch for some compact forms. |
+| Lane access | Missing/fail-closed. `v_readfirstlane_b32` is explicitly rejected instead of writing a VGPR. Readlane/writelane handling remains a single-lane approximation only where a verified mapping reaches it. |
 | Lane permutation and DPP | Missing. `v_permlane16_b32`, `v_permlanex16_b32`, DPP8, DPP8FI, and DPP16 lane routing/masks/inactive-lane behavior are not implemented. |
 | Basic b32 logic | Partial. Basic AND/OR/XOR/NOT/XNOR and local `v_and_or_b32`/`v_or3_b32` paths exist. `v_xor3_b32`, `v_xad_u32`, and many gfx10 VOP3-numbered bitfield/permutation operations are absent or collide with GFX7 meanings. |
 | Shift/rotate/bitfield | Partial. Some compact reverse shifts and six local gfx10 three-input operations exist. `v_perm_b32` and much of align, BFE/BFI/BFM, 64-bit shift, and gfx10-exclusive opcode coverage is absent or unverified. |
 | Thread-mask operations | Partial. `v_cndmask_b32` now receives initialized EXEC/VCC state and CMPX leaves VCC unchanged while updating EXEC; `v_mbcnt_*` remains a pass-through single-lane approximation. |
-| f32 arithmetic/rounding/transcendental | Partial. Common add/sub/mul/min/max, rounding, reciprocal, rsqrt, sqrt, exp/log, sin/cos exist. FMA is emitted as separate multiply/add, divide sequences are simplified, and legacy/clamp/flag distinctions are collapsed. |
+| f32 arithmetic/rounding/transcendental | Partial. Common add/sub/mul/min/max, rounding, reciprocal, rsqrt, sqrt, exp/log, sin/cos exist. Supported FMA/FMAC forms emit fused `Fma`, including FMAC's implicit destination accumulator. Divide sequences remain simplified, and legacy/clamp/flag distinctions are rejected or incomplete. |
 | f64 | Mostly missing or low-dword approximation. Arithmetic, rounding, field access, transcendental, and compare semantics are not spec-complete. |
 | i32/u32 arithmetic | Partial. Compact no-carry u32, corrected carry/borrow VOP3 forms, actual signed no-carry mappings, and selected three-input operations exist. Many min3/max3/med3/multiply-high forms remain absent; known GFX7 numeric collisions are explicitly mapped or rejected. |
 | i64/u64 arithmetic | Partial at best. Only narrow shared cases for multiply-add exist; required pair and status behavior is not comprehensively mapped for gfx10. |
@@ -228,9 +262,10 @@ floating-point instructions and cannot be treated as harmless scheduling hints.
 | VOP3P packed integer/shift | Missing: all listed packed i16/u16 arithmetic and packed shift operations. |
 | Mixed precision | Missing: `v_fma_mix_f32`, `v_fma_mixhi_f16`, `v_fma_mixlo_f16`. |
 
-The direct reuse of GFX7 opcode numbers is the main risk in this table. The
-correct design boundary is an explicit gfx10-to-semantic operation table, not a
-small exception list around the GFX7 switch.
+Direct GFX7 opcode reuse remains a risk for scalar and VOP1 operations. VOP2 and
+VOP3 now use explicit supported mappings before entering shared emitters, with
+regressions for known collisions; future coverage should extend that boundary
+rather than broadening numeric fallthrough.
 
 ### Vector modifiers and operand modes
 
@@ -246,6 +281,7 @@ small exception list around the GFX7 switch.
 | VOP3 OP_SEL | Explicitly rejected when set. |
 | VOP3P OP_SEL/NEG/CLAMP | Canonical componentwise defaults are accepted; unsupported modifier combinations are rejected. |
 | LDS_DIRECT | Explicitly rejected through the unsupported-operand path. |
+| Reserved/special selectors | Reserved ranges, trap/system values not modeled by the recompiler, context-invalid SDWA operands, and LDS direct reject instead of becoming zero. Inline constants, NULL, VCCZ, EXECZ, SCC, literals, SGPRs, and VGPRs retain their defined handling. |
 | EXEC predication | Enabled for RDNA vector writes. The execution model is still scalarized rather than a complete wave implementation. |
 
 The spec explicitly identifies VOP3 neg/abs, OMOD/CLMP, and OP_SEL at
@@ -255,8 +291,8 @@ The spec explicitly identifies VOP3 neg/abs, OMOD/CLMP, and OP_SEL at
 
 | Spec family | Status |
 | --- | --- |
-| `buffer_load_format_<components>` | Partial. Four format-load opcodes can become vertex inputs or UBO reads. SOFFSET is ignored, descriptor stride is guessed as component-count times four, bounds and many formats are wrong, and dynamic vertex addressing/instancing can be lost. |
-| `tbuffer_load_format_<components>` | Partial with the same addressing issues. Narrow typed formats are not unpacked correctly. |
+| `buffer_load_format_<components>` | Partial. Four format-load opcodes can become vertex inputs or UBO reads. Unsupported dynamic SOFFSET, IDXEN, TFE/LDS, cache controls, and non-format opcodes reject. The supported direct-fetch path still does not model general descriptor stride or instancing. |
+| `tbuffer_load_format_<components>` | Partial with the same addressing restrictions. Supported formats are allowlisted; narrow typed formats are not unpacked completely. |
 | Raw `buffer_load_<dataType>` and d16 loads | Missing. |
 | Buffer/tbuffer stores and d16 stores | Missing. |
 | `buffer_atomic_<op>` | Missing. |
@@ -272,9 +308,11 @@ The spec explicitly identifies VOP3 neg/abs, OMOD/CLMP, and OP_SEL at
 | DS/LDS/GDS | Entire family missing. No DS case exists in `RdnaEmitInst()`. This includes all reads, writes, exchange, atomics, append/consume, swizzle/permute, GWS, and ordered-count operations listed at `shaderinsnref.md:1292-1488`. |
 | FLAT/GLOBAL/SCRATCH | Entire semantic family missing. The decoder now classifies it distinctly and the translator rejects it explicitly. The spec families are listed at `shaderinsnref.md:1512-1573`. |
 
-MIMG also ignores or incompletely handles A16, D16, R128, TFE, LWE, GLC, DLC,
-SLC, dimensionality beyond 2D/2D-array, and several format/depth/storage
-distinctions. Complete NSA words and explicit address VGPRs are now preserved.
+MIMG rejects A16, D16, TFE, LWE, UNRM, unsupported R128 array use, and dimensions
+beyond the implemented 2D/2D-array subset. R128 changes descriptor width and is
+limited to compact descriptor resource types. GLC, DLC, SLC, and several
+format/depth/storage distinctions still lack complete semantic modeling.
+Complete NSA words and explicit address VGPRs are preserved.
 
 ### Interpolation and export
 
@@ -313,15 +351,22 @@ opcode has an emitter:
   stale descriptor versions (`rdna_resource.h:74-102`).
 - Scalar replay has gfx10 opcode-table assumptions that do not consistently
   match the translator.
-- Texture format mapping is a subset, and linear pitch assumes four bytes for
-  most formats (`rdna_resource.cc:41-209`, `729-733`).
-- Only a small swizzle-mode subset is usable; unsupported modes fall back rather
-  than detile (`rdna_resource.cc:688-727`).
+- Texture format mapping remains a subset. Known linear formats derive pitch
+  from element size and align rows to 256 bytes, including non-power-of-two
+  RGB32 elements.
+- Compact R128 descriptors reject resource types requiring omitted array/depth
+  fields. Full descriptors reject reserved word4 bits while preserving the
+  gfx10.3 `PITCH_MSB` extension; DCC/write-compressed resources reject because
+  the upload path does not decode metadata.
+- Only a small swizzle-mode subset is usable; unsupported modes use an invalid
+  sentinel so layout construction rejects them instead of detiling as GFX7.
 - Tiled mip chains are reduced to mip zero (`rdna_resource.cc:754-768`).
 - Resource tracking recognizes only a subset of comparison/gather image
   operations, so bindings can differ from emitted operations.
 - Vertex and texture table traversal is bounded and heuristic rather than full
   SGPR dataflow.
+- PS shader cache identity includes `SPI_PS_INPUT_ENA`, which changes generated
+  fragment input declarations and VGPR seeding.
 
 ## Test Audit
 
@@ -330,16 +375,21 @@ complete include roots, and required shared sources. It runs successfully in
 the project development shell.
 
 `delta/gpu/tests/rdna_decode_test.cc` adds focused decoder coverage for DPP8 and
-DPP8FI extension consumption, SDWA metadata, distinct VOP3P/FLAT families, exact
-VOP3P prefix validation, full NSA=3 preservation, bounded truncation, and the
-additional end markers. It also verifies mandatory SOPK/VOP2 payload lengths and
-the null-only reserved NGG export prefix.
+DPP8FI extension consumption, SDWA metadata, distinct VOP3P/FLAT families, DS
+opcode bits, exact VOP3P prefix validation, full NSA=3 preservation, bounded
+truncation, and the additional end markers. It also verifies mandatory
+SOPK/VOP2 payload lengths, FMAC's implicit source count, and the null-only
+reserved NGG export prefix.
 
 The standalone self-test now covers fail-closed recompilation, unreachable
 unsupported instructions, corrected carry/no-carry mappings, CMPX instruction
-handling, exact fused packed FMA structure, modifier/PRIM/MIMG rejection,
-EXEC-guarded image stores, and reachable-only texture binding allocation. It
-still primarily validates generated SPIR-V structure and selected opcode
+handling, exact fused packed and scalar FMA structure, implicit FMAC
+accumulation, reserved source rejection, NULL scalar replay, negative SMEM and
+SOFFSET-selector rejection,
+modifier/PRIM/MIMG control rejection, EXEC-guarded image stores, compact/full
+T# validation including DCC rejection, format pitch, and reachable-only
+texture binding allocation. It still primarily validates generated SPIR-V
+structure and selected opcode
 patterns; it does not execute the module against a wave-level reference model.
 
 Missing semantic regression coverage remains for complete SDWA/DPP behavior,
@@ -350,13 +400,12 @@ interpolation modes, export controls, compute, and NGG behavior.
 Verification performed for this audit:
 
 ```text
-cmake --build build --target delta_gpu rdna_decode_test -j2
+nix develop -c cmake --build /tmp/opencode/prosperity-nix-build \
+  --target delta_gpu rdna_decode_test gcn_spirv_test -j2
   Passed.
 
-ctest --test-dir build --output-on-failure -R '^rdna_decode_test$'
-  Passed.
-
-ctest --test-dir build --output-on-failure -E '^code_lift_test$' -j2
+nix develop -c ctest --test-dir /tmp/opencode/prosperity-nix-build \
+  --output-on-failure -E '^code_lift_test$' -j2
   Passed all 18 buildable tests.
 
 nix develop -c bash tools/build_rdna_selftest.sh
@@ -364,24 +413,22 @@ nix develop -c bash tools/build_rdna_selftest.sh
 ```
 
 Full all-target verification is blocked by unrelated baseline issues: the
-AArch64 build reaches x86-only register fields in `tools/modexec`, and the
-registered `code_lift_test` has unresolved `runtime::codeLift` symbols.
+AArch64 build reaches x86-only `mcontext_t` register fields in `tools/modexec`,
+and the registered `code_lift_test` has unresolved `runtime::codeLift` symbols.
 
 ## Remaining Recommended Order
 
-1. Resolve the SMEM length contradiction from an original PS5 encoding diagram
-   or captured AGC binary before modifying that encoding.
-2. Continue replacing direct GFX7 opcode reuse with explicit gfx10 semantic
+1. Continue replacing direct GFX7 opcode reuse with explicit gfx10 semantic
    mappings, with a regression for every known numeric collision.
-3. Implement the graphics-critical subset based on real shader census: complete
+2. Implement the graphics-critical subset based on real shader census: complete
    scalar/VALU mappings, buffer addressing/formats, image variants, and export
    behavior.
-4. Implement DS/LDS/GDS and FLAT/GLOBAL/SCRATCH as dedicated memory-family
+3. Implement DS/LDS/GDS and FLAT/GLOBAL/SCRATCH as dedicated memory-family
    milestones; retain explicit rejection until their addressing and side
    effects are complete.
-5. Treat compute and NGG as separate backends/milestones; neither can be made
+4. Treat compute and NGG as separate backends/milestones; neither can be made
    correct by adding isolated opcode cases to the current VS/PS facade.
-6. Add execution-based wave semantics tests instead of relying only on SPIR-V
+5. Add execution-based wave semantics tests instead of relying only on SPIR-V
    validation and structural opcode inspection.
 
 ## Bottom Line

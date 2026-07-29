@@ -11,7 +11,7 @@
  * numbers are RDNA2-specific; see gpu/ps5/rdna/rdna_translate.cc for the
  * per-instruction dispatch that maps RDNA2 opcodes onto the shared emitters.
  *
- * Encoding-family dispatch and opcode tables verified against the a gfx10.3
+ * Encoding-family dispatch and opcode tables verified against a gfx10.3
  * reference gfx10.3 decoder (src/graphics/shader/recompiler/ShaderDecoder.cpp).
  */
 
@@ -28,6 +28,9 @@ namespace gpu::rdna {
 using gpu::gcn::Enc;
 using gpu::gcn::Inst;
 using gpu::gcn::Program;
+
+// Number of source fields architecturally read by a VOP3/VOP3P opcode.
+uint32_t Vop3SourceCount(Enc enc, uint32_t op);
 
 // Decode an RDNA2 program bounded by `max_dwords`. Without a reliable shader
 // length, stop_at_endpgm stops at the first program-ending instruction. Pass

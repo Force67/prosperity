@@ -177,7 +177,7 @@ uint32_t BaseSize(Enc e, uint32_t w) {
   }
 }
 
-uint32_t Vop3SourceCount(Enc enc, uint32_t op) {
+uint32_t Vop3SourceCountImpl(Enc enc, uint32_t op) {
   if (enc == Enc::kVop3p) {
     switch (op) {
       case 0x00:
@@ -200,7 +200,7 @@ uint32_t Vop3SourceCount(Enc enc, uint32_t op) {
   }
   if (op < 0x100)
     return 2;  // VOPC aliases
-  if (op == 0x101 || (op >= 0x128 && op <= 0x12b))
+  if (op == 0x101 || (op >= 0x128 && op <= 0x12a))
     return 3;
   if (op >= 0x100 && op < 0x140)
     return 2;  // VOP2 aliases
@@ -326,6 +326,10 @@ std::vector<uint8_t> ComputeRdnaReachability(const Program& program) {
 }
 
 }  // namespace
+
+uint32_t Vop3SourceCount(Enc enc, uint32_t op) {
+  return Vop3SourceCountImpl(enc, op);
+}
 
 uint32_t CodeLength(const uint32_t* code, uint32_t max_dwords) {
   if (!code || max_dwords < 2)

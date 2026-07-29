@@ -182,22 +182,23 @@ void mimg(std::vector<uint32_t> &out, uint32_t op, uint32_t dmask,
 
 void mubuf(std::vector<uint32_t> &out, uint32_t op, uint32_t srsrc) {
   out.push_back((0x38u << 26) | ((op & 0x7F) << 18) | (1u << 13));
-  out.push_back(((srsrc / 4) & 0x1F) << 16);
+  out.push_back((128u << 24) | (((srsrc / 4) & 0x1F) << 16));
 }
 
 void mtbuf(std::vector<uint32_t> &out, uint32_t op, uint32_t format,
            uint32_t vdata, uint32_t vaddr, uint32_t srsrc) {
   out.push_back((0x3Au << 26) | ((format & 0x7F) << 19) | ((op & 0x07) << 16) |
                 (1u << 13));
-  out.push_back((((op >> 3) & 1) << 21) | (((srsrc / 4) & 0x1F) << 16) |
-                ((vdata & 0xFF) << 8) | (vaddr & 0xFF));
+  out.push_back((128u << 24) | (((op >> 3) & 1) << 21) |
+                (((srsrc / 4) & 0x1F) << 16) | ((vdata & 0xFF) << 8) |
+                (vaddr & 0xFF));
 }
 
 // VOP3P with canonical componentwise selectors: low result uses low sources,
 // high result uses high sources.
 void vop3p(std::vector<uint32_t> &out, uint32_t op, uint32_t vdst, uint32_t s0,
            uint32_t s1, uint32_t s2) {
-  out.push_back((0x33u << 26) | ((op & 0xFF) << 16) | (1u << 14) |
+  out.push_back((0x33u << 26) | ((op & 0x7F) << 16) | (1u << 14) |
                 (vdst & 0xFF));
   out.push_back((3u << 27) | ((s2 & 0x1FF) << 18) | ((s1 & 0x1FF) << 9) |
                 (s0 & 0x1FF));
@@ -340,16 +341,16 @@ int main() {
 
   {
     // VS with a constant buffer + VOP3: load cbuffer[0..3] into s4.., move a
-    // cbuf dword into a VGPR, v_mad_f32 (VOP3 0x141), export POS0. Exercises
+    // cbuf dword into a VGPR, v_fma_f32 (VOP3 0x14b), export POS0. Exercises
     // RdnaPlanCbufs / RdnaEmitSmem and the VOP3 field decode.
     std::vector<uint32_t> vs;
-    smem(vs, /*s_buffer_load_dwordx4*/ 0x0A, /*sdst s4*/ 4, /*sbase sgpr2*/ 1,
-         0, /*dynamic soffset s20*/ 20);
+    smem(vs, /*s_buffer_load_dwordx4*/ 0x0A, /*sdst s4*/ 4,
+         /*sbase sgpr2*/ 1, 0);
     vs.push_back(vop1(0x01, 0, 4));         // v0 = s4 (cbuffer dword 0)
     vs.push_back(vop1(0x01, 1, kInline1f)); // v1 = 1.0
     vs.push_back(vop1(0x01, 2, kInline0));  // v2 = 0.0
     vs.push_back(vop1(0x01, 3, kInline1f)); // v3 = 1.0
-    vop3(vs, /*v_mad_f32*/ 0x141, 0, 256, 257, 258); // v0 = v0*v1 + v2
+    vop3(vs, /*v_fma_f32*/ 0x14b, 0, 256, 257, 258); // v0 = v0*v1 + v2
     exp(vs, /*POS0*/ 12, 0xF, true, 0, 1, 2, 3);
     vs.push_back(sopp(kEndpgm, 0));
 
@@ -363,12 +364,12 @@ int main() {
         gpu::rdna::Recompile(vs.data(), ps.data(), user_data, user_data);
     expect(r.ok, "VS(cbuf+VOP3)+PS recompiled ok");
     expect(r.vs_cbufs.size() == 1, "one VS constant buffer planned");
-    expect(r.vs_cbufs.size() == 1 &&
-               r.vs_cbufs[0].num_dwords == gpu::gcn::kCbufDwords,
-           "dynamic SMEM offsets retain the full cbuffer window");
+    expect(r.vs_cbufs.size() == 1 && r.vs_cbufs[0].num_dwords == 4,
+           "static SMEM offsets retain the required cbuffer window");
     std::string err;
     expect(gpu::gcn::spirv::Validate(r.vs_spirv, &err),
            "cbuf VS SPIR-V validates");
+    expect(hasExtInst(r.vs_spirv, 50), "VOP3 v_fma_f32 emits fused Fma");
     if (!err.empty())
       std::printf("      vs: %s\n", err.c_str());
   }
@@ -514,6 +515,27 @@ int main() {
         gpu::rdna::Recompile(vs.data(), ps.data(), user_data, user_data);
     expect(!r.ok, "unsupported RDNA instruction rejects recompilation");
 
+    for (const uint32_t op : {0x00u, 0x15u, 0x17u, 0x19u, 0x1fu, 0x20u, 0x21u,
+                              0x22u, 0x23u, 0x24u}) {
+      ps.clear();
+      ps.push_back(vop2(op, 0, 256, 0));
+      ps.push_back(sopp(kEndpgm, 0));
+      const gpu::gcn::Recompiled reserved =
+          gpu::rdna::Recompile(vs.data(), ps.data(), user_data, user_data);
+      expect(!reserved.ok, "reserved RDNA VOP2 opcode rejects recompilation");
+    }
+
+    for (const uint32_t op :
+         {0x100u, 0x115u, 0x117u, 0x119u, 0x11fu, 0x120u, 0x121u, 0x122u,
+          0x123u, 0x124u, 0x141u, 0x161u, 0x162u, 0x163u, 0x16bu}) {
+      ps.clear();
+      vop3(ps, op, 0, 256, 257, 258);
+      ps.push_back(sopp(kEndpgm, 0));
+      const gpu::gcn::Recompiled reserved =
+          gpu::rdna::Recompile(vs.data(), ps.data(), user_data, user_data);
+      expect(!reserved.ok, "reserved RDNA VOP3 opcode rejects recompilation");
+    }
+
     ps.clear();
     ps.push_back(sopp(/*s_branch*/ 0x02, 1));
     ps.push_back(vop2(/*unreachable v_add_f16*/ 0x32, 0, 256, 0));
@@ -534,6 +556,25 @@ int main() {
              "unsupported MIMG mip/clamp/bias semantics reject recompilation");
     }
 
+    for (const uint32_t control : {1u << 12, 1u << 16, 1u << 17}) {
+      ps.clear();
+      mimg(ps, 0x20, 0xF, 0, 0, 4, 8);
+      ps[0] |= control;
+      ps.push_back(sopp(kEndpgm, 0));
+      const gpu::gcn::Recompiled image =
+          gpu::rdna::Recompile(vs.data(), ps.data(), user_data, user_data);
+      expect(!image.ok, "unsupported MIMG word0 controls reject recompilation");
+    }
+    for (const uint32_t control : {1u << 30, 1u << 31}) {
+      ps.clear();
+      mimg(ps, 0x20, 0xF, 0, 0, 4, 8);
+      ps[1] |= control;
+      ps.push_back(sopp(kEndpgm, 0));
+      const gpu::gcn::Recompiled image =
+          gpu::rdna::Recompile(vs.data(), ps.data(), user_data, user_data);
+      expect(!image.ok, "unsupported MIMG word1 controls reject recompilation");
+    }
+
     ps.clear();
     ps.push_back(vop2(0x03, 0, 249, 1));
     ps.push_back((6u << 8) | (1u << 13) | (6u << 16) | (6u << 24));
@@ -543,6 +584,42 @@ int main() {
     expect(!sdwa.ok, "unsupported SDWA clamp rejects recompilation");
 
     ps.clear();
+    ps.push_back(vop2(0x03, 0, 249, 1));
+    ps.push_back(209u | (1u << 23) | (6u << 8) | (6u << 16) | (6u << 24));
+    ps.push_back(sopp(kEndpgm, 0));
+    const gpu::gcn::Recompiled sdwa_reserved =
+        gpu::rdna::Recompile(vs.data(), ps.data(), user_data, user_data);
+    expect(!sdwa_reserved.ok,
+           "reserved SDWA scalar source rejects recompilation");
+
+    for (const uint32_t source : {108u, 209u, 235u, 254u}) {
+      ps.clear();
+      ps.push_back(vop1(0x01, 0, source));
+      ps.push_back(sopp(kEndpgm, 0));
+      const gpu::gcn::Recompiled special =
+          gpu::rdna::Recompile(vs.data(), ps.data(), user_data, user_data);
+      expect(!special.ok,
+             "unmodeled RDNA source selector rejects recompilation");
+    }
+
+    ps.clear();
+    smem(ps, /*s_load_dword*/ 0x00, 4, /*sbase s0*/ 0, 0x1ffffc);
+    ps.push_back(sopp(kEndpgm, 0));
+    const gpu::gcn::Recompiled negative_smem =
+        gpu::rdna::Recompile(vs.data(), ps.data(), user_data, user_data);
+    expect(!negative_smem.ok,
+           "unsupported negative SMEM offset rejects recompilation");
+
+    ps.clear();
+    smem(ps, /*s_load_dwordx2*/ 0x01, 4, /*sbase s0*/ 0, 0, 108);
+    smem(ps, /*s_load_dword*/ 0x00, 8, /*sbase s4*/ 2, 0);
+    ps.push_back(sopp(kEndpgm, 0));
+    const gpu::gcn::Recompiled smem_selector =
+        gpu::rdna::Recompile(vs.data(), ps.data(), user_data, user_data);
+    expect(!smem_selector.ok,
+           "unmodeled SMEM SOFFSET selector rejects recompilation");
+
+    ps.clear();
     vop3p(ps, /*v_pk_add_f16*/ 0x0F, 0, 256, 257, 0);
     ps[0] |= 1u << 15; // CLAMP
     ps.push_back(sopp(kEndpgm, 0));
@@ -550,6 +627,17 @@ int main() {
         gpu::rdna::Recompile(vs.data(), ps.data(), user_data, user_data);
     expect(!vop3p_modifier.ok,
            "unsupported VOP3P modifiers reject recompilation");
+
+    ps.clear();
+    ps.push_back(vop1(0x01, 0, kInline1f));
+    ps.push_back(vop1(0x01, 1, kInline1f));
+    vop3(ps, /*v_fmac_f32*/ 0x12B, 0, 256, 257, 209);
+    exp(ps, 0, 0xF, true, 0, 0, 0, 0);
+    ps.push_back(sopp(kEndpgm, 0));
+    const gpu::gcn::Recompiled fmac =
+        gpu::rdna::Recompile(vs.data(), ps.data(), user_data, user_data);
+    expect(fmac.ok && hasExtInst(fmac.fs_spirv, 50),
+           "VOP3 FMAC uses its implicit destination accumulator");
 
     std::vector<uint32_t> prim_vs;
     prim_vs.push_back(vop1(0x01, 0, kInline0));
@@ -771,8 +859,43 @@ int main() {
     expect(t.mip_levels == 1 && t.tiling_idx == 8, "T# single mip, linear");
     expect(t.dfmt == 10 && t.nfmt == 0, "T# fmt 56 -> 8_8_8_8 UNORM");
     expect(t.pitch == 256, "T# linear pitch 256B-row-aligned");
+    d[1] = (255u & 0x3u) << 30 | (44u << 20);
+    t = gpu::rdna::DecodeTImage(d);
+    expect(t.dfmt == 8, "T# fmt 44 -> 10_10_10_2");
+    d[1] = (255u & 0x3u) << 30 | (50u << 20);
+    t = gpu::rdna::DecodeTImage(d);
+    expect(t.dfmt == 9, "T# fmt 50 -> 2_10_10_10");
+    d[3] = (12u << 28); // 2D array
+    d[4] = 1u << 13;    // Pitch[13], not Depth.
+    t = gpu::rdna::DecodeTImage(d);
+    expect(t.layers == 1, "T# pitch bit does not extend array depth");
+    d[4] = 1u << 14;
+    t = gpu::rdna::DecodeTImage(d);
+    expect(!t.valid, "T# reserved word4 bits invalidate the descriptor");
+    d[4] = 1u << 29;
+    t = gpu::rdna::DecodeTImage(d);
+    expect(!t.valid, "T# reserved base-array bits invalidate the descriptor");
+    d[4] = 0;
+    d[6] = 1u << 21;
+    t = gpu::rdna::DecodeTImage(d);
+    expect(!t.valid, "T# DCC compression rejects unsupported layout");
+    d[6] = 0;
+    d[3] = 9u << 28;
+    t = gpu::rdna::DecodeTImage(d, true);
+    expect(t.valid, "R128 accepts compact 2D texture descriptors");
+    d[3] = 10u << 28;
+    t = gpu::rdna::DecodeTImage(d, true);
+    expect(!t.valid, "R128 rejects compact 3D texture descriptors");
+
+    uint32_t rgb32[8] = {0};
+    rgb32[0] = 0x08000000;
+    rgb32[1] = 74u << 20;
+    rgb32[3] = 9u << 28;
+    t = gpu::rdna::DecodeTImage(rgb32);
+    expect(t.dfmt == 13 && t.pitch == 64,
+           "T# RGB32 pitch preserves 256-byte row alignment");
     d[1] = (255u & 0x3u) << 30 | (130u << 20); // fmt 8_8_8_8_SRGB
-    d[3] |= 25u << 20;                         // sw_mode 64KB_S_X (tiled)
+    d[3] = (9u << 28) | (25u << 20);           // sw_mode 64KB_S_X (tiled)
     t = gpu::rdna::DecodeTImage(d);
     expect(t.dfmt == 10 && t.nfmt == 9, "T# fmt 130 -> 8_8_8_8 SRGB");
     expect(t.tiling_idx > 0x40, "T# gfx10 tiled mode maps out of GCN range");
@@ -829,6 +952,17 @@ int main() {
       expect(dynamic_textures.size() == 1 && dynamic_textures[0].valid &&
                  dynamic_textures[0].base == texture_base,
              "dynamic SMEM SOFFSET resolves the selected T#");
+
+      std::vector<uint32_t> null_dest;
+      null_dest.push_back(sopk(0x00, 126, 16));
+      null_dest.push_back(sop1(/*s_mov_b64*/ 0x04, 125, 128));
+      smem(null_dest, 0x03, 0, 4, 0, 126);
+      mimg(null_dest, 0x00, 0xF, 0, 0, 0, 0);
+      null_dest.push_back(sopp(kEndpgm, 0));
+      const auto null_dest_textures =
+          gpu::rdna::TrackTextures(null_dest.data(), user_data, 16);
+      expect(null_dest_textures.size() == 1 && null_dest_textures[0].valid,
+             "NULL scalar destination preserves adjacent SGPR state");
 
       writeImage(&user_data[16]);
       std::vector<uint32_t> inline_image;

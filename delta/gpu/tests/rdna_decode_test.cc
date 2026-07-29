@@ -18,6 +18,15 @@ uint32_t Sopk(uint32_t op) {
   return (0xBu << 28) | (op << 23);
 }
 
+void Vop3(uint32_t* out,
+          uint32_t op,
+          uint32_t src0,
+          uint32_t src1,
+          uint32_t src2) {
+  out[0] = (0x35u << 26) | (op << 16);
+  out[1] = src0 | (src1 << 9) | (src2 << 18);
+}
+
 TEST(RdnaDecode, Dpp8AndDpp8FiConsumeControlDwords) {
   const uint32_t code[] = {
       Vop2(0x03, 233), 0x01234567, Vop2(0x03, 234), 0x89abcdef, Sopp(0x01),
@@ -109,6 +118,20 @@ TEST(RdnaDecode, ReservedGcnMadkSlotsDoNotConsumeFollowingInstructions) {
     EXPECT_EQ(program[1].enc, gpu::gcn::Enc::kSopp);
     EXPECT_EQ(program[1].pc, 1u);
   }
+}
+
+TEST(RdnaDecode, FmacImplicitAccumulatorDoesNotSelectLiteral) {
+  uint32_t code[3] = {};
+  Vop3(code, 0x12B, 256, 257, 255);
+  code[2] = Sopp(0x01);
+
+  const gpu::gcn::Program program = gpu::rdna::Decode(code, 3, false);
+
+  ASSERT_EQ(program.size(), 2u);
+  EXPECT_EQ(program[0].opcode, 0x12Bu);
+  EXPECT_FALSE(program[0].has_literal);
+  EXPECT_EQ(program[0].size, 2u);
+  EXPECT_EQ(program[1].pc, 2u);
 }
 
 TEST(RdnaDecode, DsOpcodeUsesBits24Through17) {
