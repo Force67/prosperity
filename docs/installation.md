@@ -39,6 +39,11 @@ modules bundled in the pkg.
 Set `DELTA_DATA_DIR=/some/dir` to look for `modules/` (and other host assets)
 under that directory instead of next to the binary.
 
+PS4 hardware mode defaults to Base. Set `DELTA_PS4_NEO=1` to emulate Neo-capable
+hardware. A title enters enhanced Neo mode only when its `param.sfo` also marks
+Neo support; that mode selects `modules/libSceGnmDriverForNeoMode.sprx` and the
+Neo shader ISA. Other titles continue to use the Base driver and ISA.
+
 ## Headless / no display
 
 When no display is available (no `DISPLAY` / `WAYLAND_DISPLAY`), run with SDL's

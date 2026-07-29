@@ -164,6 +164,12 @@ uintptr_t vprx_get_forced(const char *lib, uint64_t hid) {
 }
 
 uintptr_t vprx_get(const char *lib, uint64_t hid) {
+  // The Neo SPRX is a filename variant of the libSceGnmDriver ABI. Keep its
+  // imports on the same HLE/LLE policy and HLE export table as the Base module.
+  if (std::strcmp(lib, "libSceGnmDriver") == 0 ||
+      std::strcmp(lib, "libSceGnmDriverForNeoMode") == 0)
+    lib = "libSceGnmDriver";
+
   if (!useHleShim(lib, hid))
     return 0;
 

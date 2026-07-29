@@ -15,6 +15,7 @@
 #endif
 
 #include "../../proc.h"
+#include "../hardware_mode.h"
 #include "error_table.h"
 #include <cstdio>
 
@@ -216,13 +217,11 @@ int PS4ABI sys_sysctl(int *name, uint32_t namelen, void *oldp, size_t *oldlenp,
     return 0;
   }
 
-  // kern.cpumode (kern.14.42): the CPU mode, base PS4 (6/7-core "normal") vs
-  // Neo/Pro. Isaac is a base-PS4 title; report mode 0 (normal). Both the direct
-  // mib query and the sysctlbyname("kern.cpumode") name2oid path hit this; left
-  // unhandled the game spins re-resolving it (with an uninitialised oid buffer).
+  // kern.cpumode (kern.14.42) is selected by the title's PSF attributes, not by
+  // the Base/Neo GPU hardware profile.
   else if (name[0] == 1 && name[1] == 14 && name[2] == 42 && namelen == 3) {
     if (oldp && oldlenp && *oldlenp >= sizeof(uint32_t)) {
-      *reinterpret_cast<uint32_t *>(oldp) = 0;  // normal (non-Neo) mode
+      *reinterpret_cast<uint32_t *>(oldp) = ps4::cpuMode();
       *oldlenp = sizeof(uint32_t);
     }
     return 0;
@@ -284,7 +283,11 @@ int PS4ABI sys_sysctl(int *name, uint32_t namelen, void *oldp, size_t *oldlenp,
   // oid is PS5-only (the 0x1337 family is synthetic PS5 config), so PS4 is unaffected.
   else if (name[0] == 0x1337 && name[1] == 7 && namelen == 2) {
     if (oldp && oldlenp && *oldlenp >= sizeof(uint32_t)) {
-      *reinterpret_cast<uint32_t *>(oldp) = 0x840fc0;
+      const auto *active = proc::getActive();
+      *reinterpret_cast<uint32_t *>(oldp) =
+          active && active->getPlatform() == proc::platform::ps5
+              ? 0x840fc0
+              : ps4::hardwareModeProfile().mainSocId;
       *oldlenp = sizeof(uint32_t);
     }
     return 0;
@@ -304,8 +307,7 @@ int PS4ABI sys_sysctl(int *name, uint32_t namelen, void *oldp, size_t *oldlenp,
   }
 
   // Benign zero-filled PS5 config oids (synthetic {0x1337,9}): kern.amm.param,
-  // kern.app.memconf, machdep.auto_update_version, kern.neomode. Zero is the
-  // default/"non-Neo"/"no-override" answer for each.
+  // kern.app.memconf and machdep.auto_update_version.
   else if (name[0] == 0x1337 && name[1] == 9 && namelen == 2) {
     if (oldp && oldlenp) {
       size_t n = *oldlenp;
@@ -313,6 +315,16 @@ int PS4ABI sys_sysctl(int *name, uint32_t namelen, void *oldp, size_t *oldlenp,
         n = 256;
       std::memset(oldp, 0, n);
       *oldlenp = n;
+    }
+    return 0;
+  }
+
+  // kern.neomode (synthetic {0x1337,10}). It deliberately has its own oid so it
+  // cannot inherit the unrelated zero-filled PS5 config response above.
+  else if (name[0] == 0x1337 && name[1] == 10 && namelen == 2) {
+    if (oldp && oldlenp && *oldlenp >= sizeof(uint32_t)) {
+      *reinterpret_cast<uint32_t *>(oldp) = ps4::isNeoMode() ? 1 : 0;
+      *oldlenp = sizeof(uint32_t);
     }
     return 0;
   }
@@ -335,9 +347,14 @@ int PS4ABI sys_sysctl(int *name, uint32_t namelen, void *oldp, size_t *oldlenp,
       *oldlenp = 8;
       return 0;
     } else if (name == "kern.amm.param" || name == "kern.app.memconf" ||
-               name == "machdep.auto_update_version" || name == "kern.neomode") {
+               name == "machdep.auto_update_version") {
       static_cast<uint32_t *>(oldp)[0] = 0x1337;
       static_cast<uint32_t *>(oldp)[1] = 9;
+      *oldlenp = 8;
+      return 0;
+    } else if (name == "kern.neomode") {
+      static_cast<uint32_t *>(oldp)[0] = 0x1337;
+      static_cast<uint32_t *>(oldp)[1] = 10;
       *oldlenp = 8;
       return 0;
     } else if (name == "kern.ps4_sdk_version") {

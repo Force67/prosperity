@@ -21,6 +21,7 @@
 #include "ps5/lv2/initial_tcb.h"
 #include "vfs.h"
 #include "cpu/cpu_backend.h"
+#include "ps4/hardware_mode.h"
 #include "ps4/lv2/sys_dynlib.h"
 #include "ps4/lv2/sys_mem.h"
 #include "runtime/vprx/vprx.h"
@@ -1196,6 +1197,13 @@ static void patchVideoOutDiag(smodule &m) {
 }
 
 modulePtr proc::loadModule(base::StringRef name) {
+  const bool isPs4GnmDriver =
+      plat == platform::ps4 &&
+      (name == base::StringRef("libSceGnmDriver") ||
+       name == base::StringRef("libSceGnmDriverForNeoMode"));
+  if (isPs4GnmDriver)
+    name = base::StringRef("libSceGnmDriver");
+
   auto mod = getModule(name);
   if (mod)
     return mod;
@@ -1287,13 +1295,18 @@ modulePtr proc::loadModule(base::StringRef name) {
   // HLE/system modules ship with the emulator; prefer those for modules that
   // are not supplied by the application.
   base::String hostRel("modules/");
-  hostRel.append(name.data(), name.length());
+  if (isPs4GnmDriver)
+    hostRel += ps4::gnmDriverModule();
+  else
+    hostRel.append(name.data(), name.length());
   hostRel += ".sprx";
   base::String hostPath = utl::make_abs_path(hostRel);
   const bool isRebirth = name == base::StringRef("rebirth");
   const bool isVideoOut = name == base::StringRef("libSceVideoOut");
   if (utl::File(hostPath, utl::fileMode::read).IsOpen()) {
     if (lib->fromFile(hostPath)) {
+      if (isPs4GnmDriver)
+        lib->getInfo().name = sname;
       if (isRebirth)
         bringUpRebirthSurfaceRegistry(*lib);
       if (isVideoOut)

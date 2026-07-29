@@ -20,6 +20,8 @@
 #include <utl/file.h>
 
 #include <gfx/gfx.h>
+#include <gpu/ps4/cmd_processor.h>
+#include <kern/ps4/hardware_mode.h>
 #include <kern/vfs.h>
 
 #include "formats/pkg_object.h"
@@ -74,6 +76,36 @@ std::string sfoGet(const uint8_t *d, size_t n, const char *key) {
     return s;
   }
   return {};
+}
+
+uint32_t sfoGetU32(const uint8_t *d, size_t n, const char *key) {
+  if (n < 20)
+    return 0;
+  auto rd16 = [&](size_t o) -> uint16_t {
+    return o + 2 <= n ? uint16_t(d[o] | (d[o + 1] << 8)) : 0;
+  };
+  auto rd32 = [&](size_t o) -> uint32_t {
+    return o + 4 <= n ? uint32_t(d[o]) | (uint32_t(d[o + 1]) << 8) |
+                             (uint32_t(d[o + 2]) << 16) |
+                             (uint32_t(d[o + 3]) << 24)
+                       : 0;
+  };
+  if (rd32(0) != 0x46535000u)
+    return 0;
+  const uint32_t keyStart = rd32(8), dataStart = rd32(12), count = rd32(16);
+  const size_t keyLength = std::strlen(key);
+  for (uint32_t i = 0, index = 20; i < count; i++, index += 16) {
+    if (index + 16 > n)
+      break;
+    const size_t keyPosition = size_t(keyStart) + rd16(index);
+    if (keyPosition + keyLength + 1 > n ||
+        std::memcmp(d + keyPosition, key, keyLength) != 0 ||
+        d[keyPosition + keyLength] != '\0')
+      continue;
+    const size_t dataPosition = size_t(dataStart) + rd32(index + 12);
+    return dataPosition + sizeof(uint32_t) <= n ? rd32(dataPosition) : 0;
+  }
+  return 0;
 }
 
 // PS5 titles carry sce_sys/param.json instead of the PS4 param.sfo. Pull one
@@ -200,6 +232,13 @@ public:
     if (fs_.readPkgEntry(0x1000, sfo) > 0)
       return sfoGet(sfo.data(), sfo.size(), "TITLE");
     return {};
+  }
+
+  uint32_t attributes() {
+    std::vector<uint8_t> sfo;
+    if (fs_.readPkgEntry(0x1000, sfo) > 0)
+      return sfoGetU32(sfo.data(), sfo.size(), "ATTRIBUTE");
+    return 0;
   }
 
   std::vector<uint8_t> icon() {
@@ -450,6 +489,7 @@ void deltaCore::boot(const base::String &xdir) {
   const bool isAppDir = isPs4AppDir || isPs5AppDir;
   base::String mainModule = path;
   uint32_t sdkVersion = 0;
+  uint32_t ps4Attributes = 0;
   std::string gameTitle;
 #if defined(__linux__) && !defined(__ANDROID__)
   std::vector<uint8_t> gameIcon;
@@ -467,6 +507,7 @@ void deltaCore::boot(const base::String &xdir) {
     // root (else saves for different titles collide under one directory).
     krnl::vfs::setTitleId(provider->titleId());
     gameTitle = provider->title();
+    ps4Attributes = provider->attributes();
 #if defined(__linux__) && !defined(__ANDROID__)
     gameIcon = provider->icon();
 #endif
@@ -499,6 +540,7 @@ void deltaCore::boot(const base::String &xdir) {
       if (readHostFile(appSfo, kMaxSfoSize, sfo)) {
         krnl::vfs::setTitleId(sfoGet(sfo.data(), sfo.size(), "TITLE_ID"));
         gameTitle = sfoGet(sfo.data(), sfo.size(), "TITLE");
+        ps4Attributes = sfoGetU32(sfo.data(), sfo.size(), "ATTRIBUTE");
       }
 #if defined(__linux__) && !defined(__ANDROID__)
       if (!readHostFile(appRoot + "/sce_sys/icon0.png", kMaxIconSize, gameIcon))
@@ -527,6 +569,7 @@ void deltaCore::boot(const base::String &xdir) {
     if (!sfo.empty()) {
       krnl::vfs::setTitleId(sfoGet(sfo.data(), sfo.size(), "TITLE_ID"));
       gameTitle = sfoGet(sfo.data(), sfo.size(), "TITLE");
+      ps4Attributes = sfoGetU32(sfo.data(), sfo.size(), "ATTRIBUTE");
     }
 #if defined(__linux__) && !defined(__ANDROID__)
     if (!readHostFile(root + "/sce_sys/icon0.png", kMaxIconSize, gameIcon))
@@ -550,6 +593,8 @@ void deltaCore::boot(const base::String &xdir) {
   // These all boot from an /app0 mount rather than a bare host path.
   const bool mounted = isPkg || isFfpkg || isAppDir;
   const bool isPs5 = isFfpkg || isPs5AppDir;
+  krnl::ps4::setTitleAttributes(isPs5 ? 0 : ps4Attributes);
+  gpu::SetPs4NeoMode(!isPs5 && krnl::ps4::isNeoMode());
   // Name the window after the booted game, since the renderer and the videoout
   // HLE both bring it up with a generic title depending on who gets there first.
   {
