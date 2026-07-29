@@ -777,7 +777,7 @@ std::vector<TImage> TrackTextures(const uint32_t* ps_code,
   std::vector<TImage> out;
   if (!ps_code || !pud || !InGuest(reinterpret_cast<uint64_t>(ps_code)))
     return out;
-  const Program prog = DecodeShader(ps_code, 4096);
+  const Program prog = ReachableProgram(DecodeShader(ps_code, 4096));
   const MimgBindingPlan plan = RdnaPlanMimg(prog);
   out.resize(plan.binding_srsrc.size());
   std::vector<bool> filled(out.size(), false);
@@ -856,7 +856,7 @@ std::unordered_map<uint32_t, BufferResource> ResolveBuffers(
   if (!code || !user_data || !InGuest(reinterpret_cast<uint64_t>(code)))
     return out;
   ScalarEval eval(user_data, user_sgprs, user_sgpr_base);
-  for (const Inst& inst : DecodeShader(code, 4096)) {
+  for (const Inst& inst : ReachableProgram(DecodeShader(code, 4096))) {
     if (inst.enc == Enc::kSmrd && SmemLoadCount(inst.opcode)) {
       const Smem smem = DecodeSmem(inst);
       const bool buffer = smem.op >= 0x08;

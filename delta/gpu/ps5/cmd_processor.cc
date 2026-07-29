@@ -499,10 +499,10 @@ uint32_t UserSgprCount(uint32_t rsrc2) {
 // IT_DISPATCH_DIRECT: body = [dim_x, dim_y, dim_z, initiator] workgroup counts.
 // The CS program address, workgroup shape, RSRC and user data come from the
 // COMPUTE_* SH registers programmed before it.
-const char* const kEncName[17] = {"?",    "sop1", "sop2", "sopk",       "sopc",
-                                  "sopp", "smem", "vop1", "vop2",       "vop3",
-                                  "vopc", "vint", "ds",   "mubuf/flat", "mtbuf",
-                                  "mimg", "exp"};
+const char* const kEncName[19] = {"?",     "sop1", "sop2", "sopk", "sopc",
+                                  "sopp",  "smem", "vop1", "vop2", "vop3",
+                                  "vop3p", "vopc", "vint", "ds",   "mubuf",
+                                  "mtbuf", "mimg", "exp",  "flat"};
 
 void HandleDispatch(const uint32_t* body, uint32_t count) {
   const uint32_t dim_x = count >= 1 ? body[0] : 0;
@@ -572,7 +572,7 @@ void HandleDispatch(const uint32_t* body, uint32_t count) {
       const uint32_t e = static_cast<uint32_t>(in.enc);
       if (e < 24)
         hist[e]++;
-      if (in.enc == gcn::Enc::kMubuf && (in.raw[0] >> 26) == 0x37) {
+      if (in.enc == gcn::Enc::kFlat) {
         flat_seg[(in.raw[0] >> 14) & 3]++;
         flat_ops[(in.raw[0] >> 18) & 0x7F]++;
       }
@@ -588,6 +588,12 @@ void HandleDispatch(const uint32_t* body, uint32_t count) {
         std::fprintf(stderr, " %#x=%u", o, flat_ops[o]);
     std::fprintf(stderr, "\n");
   }
+  static std::unordered_set<uint64_t> warned_cs;
+  if (warned_cs.insert(cs_addr).second)
+    std::fprintf(stderr,
+                 "[csgpu] PS5 compute is not implemented; dispatch @%#lx "
+                 "groups=[%u %u %u] skipped\n",
+                 (unsigned long)cs_addr, dim_x, dim_y, dim_z);
 }
 
 // DELTA_AGC_DUMPSH=<hexaddr>: decode and print one shader by address, once.
@@ -610,7 +616,7 @@ void MaybeDumpShader(uint64_t addr) {
                prog.size());
   for (const auto& in : prog) {
     std::fprintf(stderr, "[agc]  pc=%04x %-6s op=%#05x %08x", in.pc,
-                 kEncName[static_cast<uint32_t>(in.enc) < 17
+                 kEncName[static_cast<uint32_t>(in.enc) < 19
                               ? static_cast<uint32_t>(in.enc)
                               : 0],
                  in.opcode, in.raw[0]);
@@ -1382,7 +1388,7 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
                      want_ps ? "PS" : "VS", (unsigned long)addr, prog.size());
         for (const auto& in : prog) {
           std::fprintf(stderr, "[agc]    pc=%04x %-6s op=%#05x %08x", in.pc,
-                       kEncName[static_cast<uint32_t>(in.enc) < 17
+                       kEncName[static_cast<uint32_t>(in.enc) < 19
                                     ? static_cast<uint32_t>(in.enc)
                                     : 0],
                        in.opcode, in.raw[0]);

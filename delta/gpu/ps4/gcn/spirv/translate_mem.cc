@@ -231,7 +231,10 @@ bool PlanCbufs(const Program& program,
 // from the shared MimgBindingPlan (one binding per unique descriptor, matching
 // TrackTextures); the variable is created on the binding's first use. MIMG DA
 // selects a 2D-array resource and appends the layer coordinate after x/y.
-void EmitMimg(Translator& t, const Inst& inst, StageContext& sc) {
+void EmitMimg(Translator& t,
+              const Inst& inst,
+              StageContext& sc,
+              const Id* address) {
   const uint32_t w0 = inst.raw[0], w1 = inst.raw[1], op = inst.opcode;
   const uint32_t dmask = (w0 >> 8) & 0xF, vaddr = w1 & 0xFF;
   const uint32_t vdata = (w1 >> 8) & 0xFF;
@@ -239,6 +242,12 @@ void EmitMimg(Translator& t, const Inst& inst, StageContext& sc) {
   const bool dref = op == 0x28 || op == 0x2f;
   const bool offset = op == 0x37;
   const bool gather = op == 0x47;
+  const auto addr_u = [&](uint32_t index) {
+    return address ? address[index] : t.Vg(vaddr + index);
+  };
+  const auto addr_f = [&](uint32_t index) {
+    return t.m.Bitcast(t.t_f, addr_u(index));
+  };
 
   uint32_t bind = StageContext::kMaxPsSamplers;
   if (sc.mimg_plan) {
@@ -270,13 +279,13 @@ void EmitMimg(Translator& t, const Inst& inst, StageContext& sc) {
       sc.tex_vars[bind] = var;
       sc.tex_types[bind] = type_idx;
     }
-    const Id ix = t.m.Bitcast(t.t_i, t.Vg(vaddr));
-    const Id iy = t.m.Bitcast(t.t_i, t.Vg(vaddr + 1));
+    const Id ix = t.m.Bitcast(t.t_i, addr_u(0));
+    const Id iy = t.m.Bitcast(t.t_i, addr_u(1));
     const Id coord =
-        arrayed ? t.m.CompositeConstruct(
-                      t.m.TypeVec(t.t_i, 3),
-                      {ix, iy, t.m.Bitcast(t.t_i, t.Vg(vaddr + 2))})
-                : t.m.CompositeConstruct(t.m.TypeVec(t.t_i, 2), {ix, iy});
+        arrayed
+            ? t.m.CompositeConstruct(t.m.TypeVec(t.t_i, 3),
+                                     {ix, iy, t.m.Bitcast(t.t_i, addr_u(2))})
+            : t.m.CompositeConstruct(t.m.TypeVec(t.t_i, 2), {ix, iy});
     Id components[4] = {t.F32(0.f), t.F32(0.f), t.F32(0.f), t.F32(1.f)};
     uint32_t source = 0;
     for (uint32_t channel = 0; channel < 4; channel++)
@@ -285,7 +294,18 @@ void EmitMimg(Translator& t, const Inst& inst, StageContext& sc) {
     const Id texel = t.m.CompositeConstruct(
         t.t_v4, {components[0], components[1], components[2], components[3]});
     const Id image = t.m.Load(t.storage_img_types[type_idx], sc.tex_vars[bind]);
+    if (!t.predicate_vector) {
+      t.m.EmitVoid(spv::Op::OpImageWrite, {image, coord, texel});
+      return;
+    }
+    const Id live = t.IsNonZero(t.Exec());
+    const Id write = t.m.NewBlock(), merge = t.m.NewBlock();
+    t.m.SelectionMerge(merge);
+    t.m.BranchConditional(live, write, merge);
+    t.m.OpenBlock(write);
     t.m.EmitVoid(spv::Op::OpImageWrite, {image, coord, texel});
+    t.m.Branch(merge);
+    t.m.OpenBlock(merge);
     return;
   }
 
@@ -315,8 +335,7 @@ void EmitMimg(Translator& t, const Inst& inst, StageContext& sc) {
     t.RequireImageQuery();
     const Id img = t.m.Emit(spv::Op::OpImage, img_ty, {si});
     const Id levels = t.m.Emit(spv::Op::OpImageQueryLevels, t.t_u, {img});
-    const Id lod =
-        t.UMin(t.Vg(vaddr), t.Sub(t.UMax(levels, t.U32(1)), t.U32(1)));
+    const Id lod = t.UMin(addr_u(0), t.Sub(t.UMax(levels, t.U32(1)), t.U32(1)));
     const Id size_ty = t.m.TypeVec(t.t_u, arrayed ? 3 : 2);
     const Id size = t.m.Emit(spv::Op::OpImageQuerySizeLod, size_ty, {img, lod});
     const Id comps[4] = {
@@ -333,13 +352,14 @@ void EmitMimg(Translator& t, const Inst& inst, StageContext& sc) {
   }
 
   const uint32_t body_addr = vaddr + (offset ? 1u : 0u) + (dref ? 1u : 0u);
-  Id x = t.VgF(body_addr), y = t.VgF(body_addr + 1);
+  const uint32_t body_index = body_addr - vaddr;
+  Id x = addr_f(body_index), y = addr_f(body_index + 1);
   if (offset) {
     // GFX7 packs signed six-bit X/Y texel offsets before the address body.
     // Vulkan 1.1 does not permit a dynamic Offset operand on OpImageSample*,
     // so apply the normalized-coordinate equivalent using the level-0 size.
     t.RequireImageQuery();
-    const Id packed = t.m.Bitcast(t.t_i, t.Vg(vaddr));
+    const Id packed = t.m.Bitcast(t.t_i, addr_u(0));
     const Id ox = t.m.Emit(spv::Op::OpBitFieldSExtract, t.t_i,
                            {packed, t.U32(0), t.U32(6)});
     const Id oy = t.m.Emit(spv::Op::OpBitFieldSExtract, t.t_i,
@@ -356,7 +376,7 @@ void EmitMimg(Translator& t, const Inst& inst, StageContext& sc) {
     y = t.FAdd(y, t.FDiv(t.m.Emit(spv::Op::OpConvertSToF, t.t_f, {oy}), sy));
   }
   const Id uv =
-      arrayed ? t.m.CompositeConstruct(t.t_v3, {x, y, t.VgF(body_addr + 2)})
+      arrayed ? t.m.CompositeConstruct(t.t_v3, {x, y, addr_f(body_index + 2)})
               : t.m.CompositeConstruct(t.t_v2, {x, y});
   const uint32_t lod_operand =
       static_cast<uint32_t>(spv::ImageOperandsMask::Lod);
@@ -368,31 +388,31 @@ void EmitMimg(Translator& t, const Inst& inst, StageContext& sc) {
 
   Id texel;
   if (op == 0x00 || op == 0x01) {  // image_load[_mip]: integer fetch
-    const Id ix = t.m.Bitcast(t.t_i, t.Vg(vaddr));
-    const Id iy = t.m.Bitcast(t.t_i, t.Vg(vaddr + 1));
-    const Id ic = arrayed
-                      ? t.m.CompositeConstruct(
-                            t.m.TypeVec(t.t_i, 3),
-                            {ix, iy, t.m.Bitcast(t.t_i, t.Vg(vaddr + 2))})
-                      : t.m.CompositeConstruct(t.m.TypeVec(t.t_i, 2), {ix, iy});
+    const Id ix = t.m.Bitcast(t.t_i, addr_u(0));
+    const Id iy = t.m.Bitcast(t.t_i, addr_u(1));
+    const Id ic =
+        arrayed
+            ? t.m.CompositeConstruct(t.m.TypeVec(t.t_i, 3),
+                                     {ix, iy, t.m.Bitcast(t.t_i, addr_u(2))})
+            : t.m.CompositeConstruct(t.m.TypeVec(t.t_i, 2), {ix, iy});
     const Id img = t.m.Emit(spv::Op::OpImage, img_ty, {si});
     Id lod = t.U32(0);
     if (op == 0x01) {
       t.RequireImageQuery();
       const Id levels = t.m.Emit(spv::Op::OpImageQueryLevels, t.t_u, {img});
-      lod = t.UMin(t.Vg(vaddr + (arrayed ? 3 : 2)), t.Sub(levels, t.U32(1)));
+      lod = t.UMin(addr_u(arrayed ? 3 : 2), t.Sub(levels, t.U32(1)));
     }
     texel =
         t.m.Emit(spv::Op::OpImageFetch, t.t_v4, {img, ic, lod_operand, lod});
   } else if (op == 0x24) {  // image_sample_l: explicit LOD after the body
     texel = t.m.Emit(spv::Op::OpImageSampleExplicitLod, t.t_v4,
-                     {si, uv, lod_operand, t.VgF(vaddr + (arrayed ? 3 : 2))});
+                     {si, uv, lod_operand, addr_f(arrayed ? 3 : 2)});
   } else if (op == 0x28) {  // image_sample_c: z-compare precedes the body
     texel = t.m.Emit(spv::Op::OpImageSampleDrefImplicitLod, t.t_f,
-                     {si, uv, t.VgF(vaddr)});
+                     {si, uv, addr_f(0)});
   } else if (op == 0x2f) {  // image_sample_c_lz: PCF forced to level zero
     texel = t.m.Emit(spv::Op::OpImageSampleDrefExplicitLod, t.t_f,
-                     {si, uv, t.VgF(vaddr), lod_operand, t.F32(0.0f)});
+                     {si, uv, addr_f(0), lod_operand, t.F32(0.0f)});
   } else if (op == 0x27 || op == 0x37) {  // image_sample_lz[_o]: forced LOD 0
     texel = t.m.Emit(spv::Op::OpImageSampleExplicitLod, t.t_v4,
                      {si, uv, lod_operand, t.F32(0.0f)});

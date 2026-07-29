@@ -496,7 +496,10 @@ bool PlanCbufs(const Program& program,
 void EmitCbufSmrd(Translator& t,
                   const Inst& inst,
                   const std::unordered_map<uint32_t, uint32_t>& bindings);
-void EmitMimg(Translator& t, const Inst& inst, StageContext& sc);
+void EmitMimg(Translator& t,
+              const Inst& inst,
+              StageContext& sc,
+              const Id* address = nullptr);
 // Assign a set-2 storage-buffer binding to every raw MUBUF in a graphics
 // stage, skipping the instructions `claimed` already serves as vertex inputs.
 // Instructions sharing one descriptor (same SGPR quad, same producing scalar

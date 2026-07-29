@@ -28,6 +28,7 @@ gpu::gcn::Recompiled Recompile(const uint32_t*,
 #else
 
 #include <algorithm>
+#include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -147,6 +148,8 @@ const char* EncName(Enc e) {
       return "vop2";
     case Enc::kVop3:
       return "vop3";
+    case Enc::kVop3p:
+      return "vop3p";
     case Enc::kVopc:
       return "vopc";
     case Enc::kVintrp:
@@ -161,6 +164,8 @@ const char* EncName(Enc e) {
       return "mimg";
     case Enc::kExp:
       return "exp";
+    case Enc::kFlat:
+      return "flat";
     default:
       return "UNKNOWN";
   }
@@ -206,24 +211,67 @@ uint32_t RemapVop2(uint32_t op) {
   }
 }
 
-// RDNA2 VOP3-only integer ops the GFX7 emitter doesn't number (3-input fused +
-// native add/sub_i32). Carry-out is dropped, like v_add_nc_u32.
+// RDNA2 VOP3 integer operations whose gfx10 opcodes or destination layouts do
+// not match the shared GFX7 emitter.
+bool RdnaVop3HasSdst(uint32_t op) {
+  return op == 0x128 || op == 0x129 || op == 0x12A || op == 0x30F ||
+         op == 0x310 || op == 0x319 || op == 0x16D || op == 0x16E ||
+         op == 0x176 || op == 0x177;
+}
+
 bool RdnaEmitVop3Int(Translator& t,
                      uint32_t op,
                      uint32_t vdst,
+                     uint32_t sdst,
                      Id s0,
                      Id s1,
                      Id s2) {
+  const auto carry = [&](spv::Op operation, Id a, Id b, Id carry_in = 0) {
+    Id pair = t.m.Emit(operation, t.PairType(), {a, b});
+    Id value = t.m.CompositeExtract(t.t_u, pair, 0);
+    Id flag = t.m.CompositeExtract(t.t_u, pair, 1);
+    if (carry_in) {
+      pair =
+          t.m.Emit(operation, t.PairType(), {value, t.And(carry_in, t.U32(1))});
+      value = t.m.CompositeExtract(t.t_u, pair, 0);
+      flag = t.Or(flag, t.m.CompositeExtract(t.t_u, pair, 1));
+    }
+    t.SetVg(vdst, value);
+    t.SetSg(sdst, t.And(flag, t.Exec()));
+  };
   switch (op) {
     case 0x30F:
-      t.SetVg(vdst, t.Add(s0, s1));
-      return true;  // v_add_nc_i32
+      carry(spv::Op::OpIAddCarry, s0, s1);
+      return true;  // v_add_co_u32
     case 0x310:
-      t.SetVg(vdst, t.Sub(s0, s1));
-      return true;  // v_sub_nc_i32
+      carry(spv::Op::OpISubBorrow, s0, s1);
+      return true;  // v_sub_co_u32
     case 0x319:
+      carry(spv::Op::OpISubBorrow, s1, s0);
+      return true;  // v_subrev_co_u32
+    case 0x128:
+      carry(spv::Op::OpIAddCarry, s0, s1, s2);
+      return true;  // v_add_co_ci_u32
+    case 0x129:
+      carry(spv::Op::OpISubBorrow, s0, s1, s2);
+      return true;  // v_sub_co_ci_u32
+    case 0x12A:
+      carry(spv::Op::OpISubBorrow, s1, s0, s2);
+      return true;  // v_subrev_co_ci_u32
+    case 0x125:
+    case 0x37F:
+      t.SetVg(vdst, t.Add(s0, s1));
+      return true;  // v_add_nc_{u,i}32
+    case 0x126:
+    case 0x376:
+      t.SetVg(vdst, t.Sub(s0, s1));
+      return true;  // v_sub_nc_{u,i}32
+    case 0x127:
       t.SetVg(vdst, t.Sub(s1, s0));
       return true;  // v_subrev_nc_u32
+    case 0x11E:
+      t.SetVg(vdst, t.Not(t.Xor(s0, s1)));
+      return true;  // VOP3-form v_xnor_b32
     case 0x346:
       t.SetVg(vdst, t.Add(t.Shl(s0, s1), s2));
       return true;  // v_lshl_add_u32
@@ -263,7 +311,7 @@ bool RdnaEmitVop3p(Translator& t,
     return t.m.ExtInst(t.t_u, GLSLstd450PackHalf2x16, {v2});
   };
   const Id a = unpack(s0), b = unpack(s1);
-  switch (op & 0x7F) {
+  switch (op) {
     case 0x0F:
       t.SetVg(vdst, pack(t.m.Emit(spv::Op::OpFAdd, t.t_v2, {a, b})));
       return true;  // v_pk_add_f16
@@ -277,8 +325,8 @@ bool RdnaEmitVop3p(Translator& t,
       t.SetVg(vdst, pack(t.m.ExtInst(t.t_v2, GLSLstd450FMax, {a, b})));
       return true;  // v_pk_max_f16
     case 0x0E: {    // v_pk_fma_f16
-      const Id mul = t.m.Emit(spv::Op::OpFMul, t.t_v2, {a, b});
-      t.SetVg(vdst, pack(t.m.Emit(spv::Op::OpFAdd, t.t_v2, {mul, unpack(s2)})));
+      t.SetVg(vdst,
+              pack(t.m.ExtInst(t.t_v2, GLSLstd450Fma, {a, b, unpack(s2)})));
       return true;
     }
     default:
@@ -591,6 +639,7 @@ void RdnaEmitSmem(Translator& t, const Inst& inst, StageContext& sc) {
       t.SetSg(smem.sdst + k, t.CbufDwordId(binding, t.Add(dword0, t.U32(k))));
     return;
   }
+  gpu::gcn::WarnUnsupported("smem.rdna", op, inst.raw[0], inst.raw[1]);
 }
 
 // Address of the shader being translated, for shader-specific debug output.
@@ -598,7 +647,7 @@ thread_local uint64_t g_ps_addr = 0;
 
 // ---- exports ----------------------------------------------------------------
 // gfx10.3 export targets: MRT0..7 = 0..7, MRTZ = 8, NULL = 9, POS0..4 = 12..16,
-// PRIM = 20 (NGG connectivity, ignored), PARAM0..31 = 32..63.
+// PRIM = 20 (NGG connectivity), PARAM0..31 = 32..63.
 void EmitExport(Translator& t, const Inst& inst, StageContext& sc) {
   const uint32_t w = inst.raw[0], w1 = inst.raw[1];
   const uint32_t en = w & 0xF, target = (w >> 4) & 0x3F, compr = (w >> 10) & 1;
@@ -608,6 +657,8 @@ void EmitExport(Translator& t, const Inst& inst, StageContext& sc) {
     std::fprintf(
         stderr, "[gcnspv] %s-exp target=%u en=%#x compr=%u done=%u vsrc=%08x\n",
         sc.is_ps ? "ps" : "vs", target, en, compr, (w >> 11) & 1, w1);
+  if (!en)
+    return;  // architecturally null export
   if (sc.is_ps) {
     // DELTA_GPU_EXPTRACE: the EN mask of each colour export. A component the
     // shader does not export gets a default here, and defaulting alpha to 1
@@ -619,7 +670,7 @@ void EmitExport(Translator& t, const Inst& inst, StageContext& sc) {
         std::fprintf(stderr, "[exp] ps %#lx mrt%u en=%#x compr=%u\n",
                      (unsigned long)g_ps_addr, target, en, compr);
     }
-    if (target <= 7 && en) {  // MRT0..7 (EN=0 is a null export)
+    if (target <= 7) {  // MRT0..7
       sc.wrote_color = true;
       Id col;
       if (compr) {
@@ -690,7 +741,9 @@ void EmitExport(Translator& t, const Inst& inst, StageContext& sc) {
       t.m.Store(gpu::gcn::PsColorOut(t, sc, target), col);
       if (sc.color_written_var)
         t.m.Store(sc.color_written_var, t.U32(1));
-    } else if (target == 8 && (en & 1)) {  // MRTZ: depth export
+      return;
+    }
+    if (target == 8 && (en & 1)) {  // MRTZ: depth export
       const Id depth =
           compr
               ? t.m.CompositeExtract(
@@ -699,7 +752,10 @@ void EmitExport(Translator& t, const Inst& inst, StageContext& sc) {
                     0)
               : t.VgF(v[0]);
       t.m.Store(gpu::gcn::PsDepthOut(t, sc), depth);
+      return;
     }
+    if (target != 9)
+      gpu::gcn::WarnUnsupported("exp.ps-target", target, w, w1);
     return;
   }
   if (target == 12) {  // POS0 -> gl_Position
@@ -756,13 +812,13 @@ void EmitExport(Translator& t, const Inst& inst, StageContext& sc) {
       c[i] = (en & (1 << i)) ? t.VgF(v[i]) : t.F32(0.f);
     t.m.Store(out_var,
               t.m.CompositeConstruct(t.t_v4, {c[0], c[1], c[2], c[3]}));
+  } else if (target != 9) {
+    gpu::gcn::WarnUnsupported("exp.vs-target", target, w, w1);
   }
-  // target == 20 (PRIM) / 9 (NULL): NGG bookkeeping, nothing to emit.
 }
 
-// SDWA (src0 field == 249) / DPP (== 250) put the real operands in the extra
-// control dword; the decoder already consumed it (see ValuSrc0Extra) and
-// stashed it in inst.literal.
+// SDWA (src0 field == 249) puts the real operands in the extension dword. DPP
+// extensions are rejected before reaching this partial SDWA implementation.
 struct SdwaMod {
   uint32_t src0 = 0, src1 = 0;          // resolved operand fields
   uint32_t src0_sel = 6, src1_sel = 6;  // 0-3 byte, 4-5 word, 6 whole dword
@@ -770,6 +826,8 @@ struct SdwaMod {
   bool src0_neg = false, src0_abs = false;
   bool src1_neg = false, src1_abs = false;
   uint32_t dst_sel = 6;
+  bool clamp = false;
+  uint32_t omod = 0;
 };
 
 // S0/S1 (bits 23/31) choose the SCALAR file for that operand. Reading them as
@@ -777,13 +835,15 @@ struct SdwaMod {
 // transform out of SGPRs, so the matrix comes back as zeros and every position
 // collapses. DPP has no scalar-source form (its src0 is always a VGPR).
 SdwaMod DecodeSdwa(const Inst& inst, uint32_t vsrc1, bool dpp) {
-  const uint32_t m = inst.literal;
+  const uint32_t m = inst.raw[1];
   SdwaMod s;
   s.src0 = (m & 0xFF) + ((!dpp && ((m >> 23) & 1)) ? 0u : 256u);
   s.src1 = vsrc1 + 256u;
   if (dpp)
     return s;
   s.dst_sel = (m >> 8) & 7;
+  s.clamp = (m >> 13) & 1;
+  s.omod = (m >> 14) & 3;
   s.src0_sel = (m >> 16) & 7;
   s.src0_sext = (m >> 19) & 1;
   s.src0_neg = (m >> 20) & 1;
@@ -814,8 +874,8 @@ void ResolveValuSrc0(const Inst& inst,
                      uint32_t src0,
                      uint32_t& field,
                      uint32_t& literal) {
-  if (src0 == 249 || src0 == 250) {
-    field = DecodeSdwa(inst, 0, src0 == 250).src0;
+  if (inst.extension == gpu::gcn::InstExtension::kSdwa) {
+    field = DecodeSdwa(inst, 0, false).src0;
     literal = 0;
   } else {
     field = src0;
@@ -830,10 +890,20 @@ void ResolveValuSrc0(const Inst& inst,
 // width and the CLAMP bit position (bit 15, not 11); SMEM replaces SMRD.
 void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
   const uint32_t w = inst.raw[0], w1 = inst.raw[1];
+  if (inst.extension == gpu::gcn::InstExtension::kDpp ||
+      inst.extension == gpu::gcn::InstExtension::kDpp8 ||
+      inst.extension == gpu::gcn::InstExtension::kDpp8Fi) {
+    gpu::gcn::WarnUnsupported("dpp.rdna", inst.opcode, w, w1);
+    return;
+  }
   switch (inst.enc) {
     case Enc::kSop1:
       if (sc.skip_launch_movs.count(inst.pc))
         break;
+      if (inst.opcode == 0x20 || inst.opcode == 0x21) {
+        gpu::gcn::WarnUnsupported("sop1.control-flow.rdna", inst.opcode, w, w1);
+        break;
+      }
       gpu::gcn::EmitSop1(t, inst);
       break;
     case Enc::kSop2:
@@ -843,13 +913,25 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       gpu::gcn::EmitSopc(t, inst);
       break;
     case Enc::kSopk:
+      if (inst.opcode >= 0x17 && inst.opcode <= 0x1A)
+        break;  // per-counter waits; translated memory operations are ordered
       gpu::gcn::EmitSopk(t, inst);
       break;
     case Enc::kSopp:
-      if (inst.opcode == 0x0A && sc.is_cs)  // s_barrier
+      if (inst.opcode == 0x0A && sc.is_cs) {  // s_barrier
         t.m.EmitVoid(spv::Op::OpControlBarrier,
                      {t.U32(2), t.U32(2), t.U32(0x108)});
-      break;  // s_nop / s_waitcnt / branches: no-op here (CFG handles branches)
+      } else if (inst.opcode != 0x00 && inst.opcode != 0x01 &&
+                 inst.opcode != 0x02 &&
+                 !(inst.opcode >= 0x04 && inst.opcode <= 0x09) &&
+                 inst.opcode != 0x0C && inst.opcode != 0x0E &&
+                 inst.opcode != 0x0F && inst.opcode != 0x1E &&
+                 inst.opcode != 0x1F && inst.opcode != 0x20 &&
+                 inst.opcode != 0x21 && inst.opcode != 0x22 &&
+                 inst.opcode != 0x23) {
+        gpu::gcn::WarnUnsupported("sopp.rdna", inst.opcode, w, w1);
+      }
+      break;  // branches are emitted by the CFG; waits/hints are synchronous
     case Enc::kSmrd:
       RdnaEmitSmem(t, inst, sc);
       break;
@@ -858,8 +940,15 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       const uint32_t raw0 = w & 0x1FF;
       uint32_t src0, lit;
       ResolveValuSrc0(inst, raw0, src0, lit);
+      if (op == 0x02) {
+        gpu::gcn::WarnUnsupported("v_readfirstlane_b32", op, w, w1);
+        break;
+      }
       if (raw0 == 249) {  // SDWA: apply the source's sub-dword selection
         const SdwaMod sd = DecodeSdwa(inst, 0, false);
+        if (sd.dst_sel != 6 || sd.src0_sel > 6 || sd.src0_neg || sd.src0_abs ||
+            sd.clamp || sd.omod)
+          gpu::gcn::WarnUnsupported("vop1.sdwa-mod", op, w, w1);
         gpu::gcn::EmitVop1(
             t, op, vdst,
             t.m.Bitcast(t.t_f, SdwaSelect(t, t.SrcRaw(src0, 0), sd.src0_sel,
@@ -879,6 +968,10 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       Id sdwa0 = 0, sdwa1 = 0;
       if (raw0 == 249) {
         const SdwaMod sd = DecodeSdwa(inst, vsrc1, false);
+        if (sd.dst_sel != 6 || sd.src0_sel > 6 || sd.src1_sel > 6 ||
+            sd.src0_neg || sd.src0_abs || sd.src1_neg || sd.src1_abs ||
+            sd.clamp || sd.omod)
+          gpu::gcn::WarnUnsupported("vop2.sdwa-mod", op, w, w1);
         src1 = sd.src1;
         sdwa0 = SdwaSelect(t, t.SrcRaw(sd.src0, 0), sd.src0_sel, sd.src0_sext);
         sdwa1 = SdwaSelect(t, t.SrcRaw(sd.src1, 0), sd.src1_sel, sd.src1_sext);
@@ -889,6 +982,10 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       // no-carry integer add/sub forms must NOT write VCC (a later v_cndmask
       // reads it), and v_xnor_b32 sits where GFX7 has v_bfm_b32.
       switch (op) {
+        case 0x02:  // v_dot2c_f32_f16, not GFX7 v_writelane
+        case 0x0D:  // v_dot4c_i32_i8, not GFX7 v_min_legacy_f32
+          gpu::gcn::WarnUnsupported("vop2.rdna", op, w, w1);
+          break;
         case 0x1E:
           t.SetVg(vdst, t.Not(t.Xor(s0u, s1u)));
           break;  // v_xnor_b32
@@ -901,6 +998,24 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
         case 0x27:
           t.SetVg(vdst, t.Sub(s1u, s0u));
           break;  // v_subrev_nc_u32
+        case 0x28:
+        case 0x29:
+        case 0x2A: {
+          const spv::Op operation =
+              op == 0x28 ? spv::Op::OpIAddCarry : spv::Op::OpISubBorrow;
+          const Id a = op == 0x2A ? s1u : s0u;
+          const Id b = op == 0x2A ? s0u : s1u;
+          Id pair = t.m.Emit(operation, t.PairType(), {a, b});
+          Id value = t.m.CompositeExtract(t.t_u, pair, 0);
+          Id flag = t.m.CompositeExtract(t.t_u, pair, 1);
+          pair = t.m.Emit(operation, t.PairType(),
+                          {value, t.And(t.Sg(106), t.U32(1))});
+          value = t.m.CompositeExtract(t.t_u, pair, 0);
+          flag = t.Or(flag, t.m.CompositeExtract(t.t_u, pair, 1));
+          t.SetVg(vdst, value);
+          t.SetSg(106, t.And(flag, t.Exec()));
+          break;
+        }
         default:
           gpu::gcn::EmitVop2(
               t, RemapVop2(op), vdst,
@@ -910,35 +1025,79 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       }
       break;
     }
+    case Enc::kVop3p: {
+      const uint32_t op = inst.opcode, vdst = w & 0xFF;
+      // Componentwise packed operations select each source's low half for the
+      // low result and high half for the high result.
+      if ((w & 0x0000FF00u) != 0x00004000u ||
+          (w1 & 0xF8000000u) != 0x18000000u) {
+        gpu::gcn::WarnUnsupported("vop3p.modifier", op, w, w1);
+        break;
+      }
+      const uint32_t p0 = w1 & 0x1FF, p1 = (w1 >> 9) & 0x1FF;
+      const uint32_t p2 = (w1 >> 18) & 0x1FF;
+      if (!RdnaEmitVop3p(t, op, vdst, p0, p1, p2, inst.literal))
+        gpu::gcn::WarnUnsupported("vop3p", op, w, w1);
+      break;
+    }
     case Enc::kVop3: {
       uint32_t op = inst.opcode;
       const uint32_t vdst = w & 0xFF;
-      if (op & 0x400) {  // VOP3P (packed 16-bit math)
-        const uint32_t p0 = w1 & 0x1FF, p1 = (w1 >> 9) & 0x1FF;
-        const uint32_t p2 = (w1 >> 18) & 0x1FF;
-        if (!RdnaEmitVop3p(t, op, vdst, p0, p1, p2, inst.literal))
-          gpu::gcn::WarnUnsupported("vop3p", op & 0x3FF, w, w1);
-        break;
-      }
       // VOP3-form v_cndmask is the VOP2 alias 0x101 on RDNA2 (0x01 renumber);
       // GFX7's explicit-S2 cndmask VOP3 op is 0x100.
       if (op == 0x101)
         op = 0x100;
       const uint32_t s0 = w1 & 0x1FF, s1 = (w1 >> 9) & 0x1FF;
       const uint32_t s2 = (w1 >> 18) & 0x1FF, neg = (w1 >> 29) & 7;
-      if (RdnaEmitVop3Int(t, op, vdst, t.SrcRaw(s0, inst.literal),
-                          t.SrcRaw(s1, inst.literal),
-                          t.SrcRaw(s2, inst.literal)))
-        break;
-      const bool vop3b = gpu::gcn::IsVop3b(op);
+      const bool vop3b = RdnaVop3HasSdst(op);
       const uint32_t sdst = vop3b ? ((w >> 8) & 0x7F) : 106;
       const uint32_t abs = vop3b ? 0 : ((w >> 8) & 7);
-      const bool clamp = !vop3b && ((w >> 15) & 1);  // RDNA2 CLAMP at bit 15
+      const uint32_t op_sel = vop3b ? 0 : ((w >> 11) & 0xF);
+      const bool clamp = (w >> 15) & 1;
+      const uint32_t omod = (w1 >> 27) & 3;
+      if (op == 0x102 || op == 0x10D) {
+        gpu::gcn::WarnUnsupported("vop3.dot.rdna", op, w, w1);
+        break;
+      }
+      if (op_sel)
+        gpu::gcn::WarnUnsupported("vop3.op-sel", op, w, w1);
+      if (RdnaEmitVop3Int(t, op, vdst, sdst, t.SrcRaw(s0, inst.literal),
+                          t.SrcRaw(s1, inst.literal),
+                          t.SrcRaw(s2, inst.literal))) {
+        if (neg || abs || clamp || omod || op_sel)
+          gpu::gcn::WarnUnsupported("vop3.integer-modifier", op, w, w1);
+        break;
+      }
+      if (op == 0x12B) {
+        gpu::gcn::EmitVop2(
+            t, 0x1F, vdst, t.SrcF(s0, inst.literal, neg & 1, abs & 1),
+            t.SrcF(s1, inst.literal, neg & 2, abs & 2), 0, clamp, omod);
+        break;
+      }
+      const bool supported_compare = op <= 0x1F || (op >= 0x80 && op <= 0x87) ||
+                                     (op >= 0x90 && op <= 0x97) ||
+                                     (op >= 0xC0 && op <= 0xC7) ||
+                                     (op >= 0xD0 && op <= 0xD7);
+      if (op < 0x100 && omod) {
+        gpu::gcn::WarnUnsupported("vopc.omod", op, w, w1);
+        break;
+      }
+      if (op < 0x100 && !supported_compare) {
+        gpu::gcn::WarnUnsupported("vop3.compare.rdna", op, w, w1);
+        break;
+      }
+      if (op < 0x100 && (op & 0x10)) {
+        gpu::gcn::EmitVopc(t, op, t.SrcF(s0, inst.literal, neg & 1, abs & 1),
+                           t.SrcF(s1, inst.literal, neg & 2, abs & 2),
+                           t.SrcRaw(s0, inst.literal),
+                           t.SrcRaw(s1, inst.literal), 126);
+        break;
+      }
       gpu::gcn::EmitVop3(
           t, op, vdst, t.SrcF(s0, inst.literal, neg & 1, abs & 1),
           t.SrcF(s1, inst.literal, neg & 2, abs & 2),
           t.SrcF(s2, inst.literal, neg & 4, abs & 4),
-          t.SrcRawHi(s2, inst.literal, op == 0x177), sdst, clamp);
+          t.SrcRawHi(s2, inst.literal, op == 0x177), sdst, clamp, omod);
       break;
     }
     case Enc::kVopc: {
@@ -947,6 +1106,10 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       const uint32_t raw0 = w & 0x1FF;
       uint32_t src0, lit;
       ResolveValuSrc0(inst, raw0, src0, lit);
+      if (inst.extension == gpu::gcn::InstExtension::kSdwa) {
+        gpu::gcn::WarnUnsupported("vopc.sdwa", op, w, w1);
+        break;
+      }
       uint32_t vopc_src1 = 256 + vsrc1;
       if (raw0 == 249)
         vopc_src1 = DecodeSdwa(inst, vsrc1, false).src1;
@@ -964,13 +1127,24 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
                            t.SrcRaw(src0, lit), t.SrcRaw(vopc_src1, lit));
         break;
       }
+      const bool supported = op <= 0x1F || (op >= 0x80 && op <= 0x87) ||
+                             (op >= 0x90 && op <= 0x97) ||
+                             (op >= 0xC0 && op <= 0xC7) ||
+                             (op >= 0xD0 && op <= 0xD7);
+      if (!supported) {
+        gpu::gcn::WarnUnsupported("vopc.rdna", op, w, w1);
+        break;
+      }
       gpu::gcn::EmitVopc(t, op, t.SrcF(src0, lit), t.SrcF(vopc_src1, lit),
-                         t.SrcRaw(src0, lit), t.SrcRaw(vopc_src1, lit));
+                         t.SrcRaw(src0, lit), t.SrcRaw(vopc_src1, lit),
+                         (op & 0x10) ? 126 : 106);
       break;
     }
     case Enc::kVintrp: {
-      if (!sc.is_ps)
+      if (!sc.is_ps) {
+        gpu::gcn::WarnUnsupported("vintrp.stage", inst.opcode, w, w1);
         break;
+      }
       const uint32_t chan = (w >> 8) & 3, attr = (w >> 10) & 0x3F;
       const uint32_t op = (w >> 16) & 3, vdst = (w >> 18) & 0xFF;
       if (op == 1 || (op == 2 && (w & 0xFF) == 2)) {
@@ -978,6 +1152,8 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
         const Id p_in_f = t.m.TypePointer(spv::StorageClass::Input, t.t_f);
         t.SetVgF(vdst,
                  t.m.Load(t.t_f, t.m.AccessChain(p_in_f, var, {t.U32(chan)})));
+      } else if (op != 0) {
+        gpu::gcn::WarnUnsupported("vintrp.rdna", op, w, w1);
       }
       break;
     }
@@ -1053,29 +1229,36 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       break;
     }
     case Enc::kMimg: {
+      if (inst.opcode == 0x09 || inst.opcode == 0x21 || inst.opcode == 0x25) {
+        gpu::gcn::WarnUnsupported("mimg.rdna-modifier", inst.opcode, w, w1);
+        break;
+      }
       Inst lowered = inst;
       const uint32_t dim = (w >> 3) & 0x7;
+      if (dim != 1 && dim != 5) {
+        gpu::gcn::WarnUnsupported("mimg.dim", dim, w, w1);
+        break;
+      }
       lowered.raw[0] = (w & ~0x4000u) | (dim == 5 ? 0x4000u : 0u);
-      // NSA (word0[2:1] != 0): the address components after the first are named
-      // one byte each in the extra dword rather than running sequentially from
-      // vaddr. The shared emitter reads them sequentially, so stage the real
-      // registers into a scratch run and point vaddr at it. Skyrim's grading
-      // pass samples this way; taking vaddr+1 instead gave a coordinate that
-      // never varied vertically, smearing the whole frame into vertical bands.
+      // NSA names every address component explicitly. Load them before emitting
+      // the image operation so aliases cannot overwrite a later source and no
+      // architectural VGPRs are used as scratch storage.
       const uint32_t nsa = (w >> 1) & 0x3;
       if (nsa) {
-        constexpr uint32_t kScratch =
-            240;  // above any register these shaders use
-        t.SetVg(kScratch, t.Vg(w1 & 0xFF));
-        for (uint32_t c = 0; c < 4; c++)
-          t.SetVg(kScratch + 1 + c, t.Vg((inst.literal >> (c * 8)) & 0xFF));
-        lowered.raw[1] = (inst.raw[1] & ~0xFFu) | kScratch;
-        gpu::gcn::EmitMimg(t, lowered, sc);
+        std::array<Id, 13> address{};
+        address[0] = t.Vg(w1 & 0xFF);
+        for (uint32_t d = 0; d < nsa; d++)
+          for (uint32_t c = 0; c < 4; c++)
+            address[1 + d * 4 + c] = t.Vg((inst.raw[2 + d] >> (c * 8)) & 0xFF);
+        gpu::gcn::EmitMimg(t, lowered, sc, address.data());
         break;
       }
       gpu::gcn::EmitMimg(t, lowered, sc);
       break;
     }
+    case Enc::kFlat:
+      gpu::gcn::WarnUnsupported("flat.rdna", inst.opcode, w, w1);
+      break;
     default:
       gpu::gcn::WarnUnsupported("rdna", inst.opcode, w, w1);
       break;
@@ -1090,6 +1273,8 @@ int BranchKind(const Inst& inst) {
     return 0;
   switch (inst.opcode) {
     case 0x01:
+    case 0x1E:  // s_endpgm_ordered_ps_done
+    case 0x1F:  // s_code_end
       return 8;
     case 0x02:
       return 1;
@@ -1248,14 +1433,16 @@ bool ForceCfg() {
 }
 
 void EmitBody(Translator& t, const Program& program, StageContext& sc) {
+  t.SeedExec();
+  t.predicate_vector = true;
   if (ForceCfg() || HasControlFlow(program)) {
-    t.SeedExec();
     EmitCfg(t, program, sc);
     return;
   }
   for (const Inst& inst : program) {
-    if (inst.enc == Enc::kSopp && inst.opcode == 1)
-      break;  // s_endpgm
+    if (inst.enc == Enc::kSopp &&
+        (inst.opcode == 0x01 || inst.opcode == 0x1E || inst.opcode == 0x1F))
+      break;
     RdnaEmitInst(t, inst, sc);
   }
 }
@@ -1797,8 +1984,9 @@ Recompiled Recompile(const uint32_t* vs_code,
       (ps_code && !gpu::IsReadableRange(ps_address, kMaxShaderBytes)))
     return r;
 
-  const Program vs_program = DecodeShader(vs_code, 4096);
-  const Program ps_program = ps_code ? DecodeShader(ps_code, 4096) : Program{};
+  const Program vs_program = ReachableProgram(DecodeShader(vs_code, 4096));
+  const Program ps_program =
+      ps_code ? ReachableProgram(DecodeShader(ps_code, 4096)) : Program{};
 
   // V_INTERP_MOV P0 reads a per-primitive (flat) parameter; represent those
   // locations as flat varyings in both stages.
@@ -1809,16 +1997,21 @@ Recompiled Recompile(const uint32_t* vs_code,
       flat_attrs.insert((inst.raw[0] >> 10) & 0x3F);
 
   Translator tv;
+  gpu::gcn::ResetUnsupported();
   g_vs_addr = reinterpret_cast<uintptr_t>(vs_code);
   if (!TranslateVs(vs_program, vs_user_data, flat_attrs, r, tv, gl_clip_space,
-                   vs_user_sgprs))
+                   vs_user_sgprs) ||
+      gpu::gcn::HadUnsupported())
     return r;
   Translator tp;
   g_ps_addr = reinterpret_cast<uintptr_t>(ps_code);
   tp.InitTypes();
+  gpu::gcn::ResetUnsupported();
   if (ps_code ? !TranslatePs(ps_program, flat_attrs, ps_input_ena, r, tp,
                              ps_user_sgprs)
               : !TranslateDepthOnlyPs(tp))
+    return r;
+  if (gpu::gcn::HadUnsupported())
     return r;
 
   const std::vector<uint32_t> vs = tv.m.Assemble();
