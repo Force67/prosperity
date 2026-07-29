@@ -199,6 +199,17 @@ int32_t gcDevicePs5::ioctl(uint32_t cmd, void *data) {
           if (!hits)
             std::printf("[agc]   no PM4 anywhere in the GPU aperture (empty ring?)\n");
         }
+        // Distinguish "the title wrote nothing" from "we are reading a mapping
+        // that does not see its writes": count non-zero dwords in the ring
+        // window, regardless of whether they look like PM4.
+        if (gpuReadable(base, 0x8000)) {
+          auto *rw = reinterpret_cast<const uint32_t *>(base);
+          uint32_t nz = 0, first = 0;
+          for (uint32_t k = 0; k < 0x8000 / 4; k++)
+            if (rw[k]) { if (!nz) first = k; nz++; }
+          std::printf("[agc]   ring %#lx: %u/%u dwords non-zero (first @dw %u)\n",
+                      (unsigned long)base, nz, 0x8000u / 4, first);
+        }
       }
       // DELTA_AGC_RINGDUMP: the submit arg in full plus the ring descriptor table
       // it references, with a PM4 sniff of each buffer. The per-pass register
