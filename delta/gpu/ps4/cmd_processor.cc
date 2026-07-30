@@ -1150,7 +1150,7 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
     static const bool kVattrDump =
         std::getenv("DELTA_GPU_VATTRDUMP") != nullptr;
     static int vattr_dumped = 0;
-    if (kVattrDump && d.num_vattrs >= 4 && d.vertex_data &&
+    if (kVattrDump && d.num_vattrs >= 2 && d.vertex_data &&
         d.vertex_count <= 8 && vattr_dumped < 24) {
       vattr_dumped++;
       std::fprintf(stderr,

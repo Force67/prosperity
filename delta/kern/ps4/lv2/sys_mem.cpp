@@ -21,6 +21,7 @@
 
 #include "../../proc.h"
 #include "../../crash.h"
+#include "../../thread_names.h"
 #include "error_table.h"
 #include "sys_mem.h"
 
@@ -464,6 +465,9 @@ int PS4ABI sys_mname(uint8_t *ptr, size_t len, const char *name, void *) {
 
   LOG_WARNING("tagged {} with name {}", fmt::ptr(ptr), name);
   info->name = name;
+  // Titles name their thread STACKS this way; carry the tag onto the host
+  // thread running on that stack (wait probe / gdb / perf attribution).
+  nameThreadsForRange(ptr, len, name);
   return 0;
 }
 

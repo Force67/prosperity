@@ -40,6 +40,21 @@ bool probeOn() {
   return on;
 }
 
+// The host thread's comm name (set from the guest's sys_mname stack tag, see
+// thread_names.cpp) read fresh at report time, so late renames still show.
+void threadComm(long tid, char *buf, size_t len) {
+  buf[0] = '\0';
+  char path[64];
+  std::snprintf(path, sizeof(path), "/proc/self/task/%ld/comm", tid);
+  if (std::FILE *f = std::fopen(path, "r")) {
+    if (std::fgets(buf, static_cast<int>(len), f)) {
+      if (char *nl = std::strchr(buf, '\n'))
+        *nl = '\0';
+    }
+    std::fclose(f);
+  }
+}
+
 void startReporter() {
   static const bool started = [] {
     std::thread([] {
@@ -58,8 +73,12 @@ void startReporter() {
             std::fprintf(stderr, "[waitprobe] threads parked > 2s:\n");
             any = true;
           }
-          std::fprintf(stderr, "[waitprobe]   tid=%ld %-16s %llds a0=%#lx a1=%#lx\n",
-                       tid, p.what, static_cast<long long>(secs), p.a0, p.a1);
+          char comm[32];
+          threadComm(tid, comm, sizeof(comm));
+          std::fprintf(stderr,
+                       "[waitprobe]   tid=%ld (%-15s) %-16s %llds a0=%#lx a1=%#lx\n",
+                       tid, comm, p.what, static_cast<long long>(secs), p.a0,
+                       p.a1);
         }
       }
     }).detach();

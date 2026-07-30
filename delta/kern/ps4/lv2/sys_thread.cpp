@@ -10,6 +10,8 @@
 #include <base.h>
 
 #include "wait_probe.h"
+#include "../../thread_names.h"
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -166,10 +168,14 @@ int PS4ABI sys_thr_new(thr_param *p, int size) {
   // (same root cause fex_backend.cpp ties to the SotC AllocationTracker crash).
   // DELTA_HOST_STACK_MB=<N> spawns guest workers with an N-MiB native stack to
   // test/mitigate the overflow; UNSET keeps the original std::thread behaviour.
+  // The worker registers the guest's thr_param stack range so the sys_mname
+  // tag titles put on it becomes the host thread's name (thread_names.cpp).
+  auto *gsb = p->stack_base;
+  const size_t gss = p->stack_size;
   const char *hsEnv = std::getenv("DELTA_HOST_STACK_MB");
   if (hsEnv) {
-    auto *ctx = new std::tuple<void *, uint32_t, std::shared_ptr<std::atomic<bool>>>(
-        gthread, tid, started);
+    auto *ctx = new std::tuple<void *, uint32_t, std::shared_ptr<std::atomic<bool>>,
+                               void *, size_t>(gthread, tid, started, gsb, gss);
     pthread_attr_t attr;
     pthread_attr_init(&attr);
     size_t hostStack = (size_t)std::strtoull(hsEnv, nullptr, 0) * 1024 * 1024;
@@ -177,30 +183,37 @@ int PS4ABI sys_thr_new(thr_param *p, int size) {
     pthread_attr_setstacksize(&attr, hostStack);
     pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
     auto trampoline = +[](void *pv) -> void * {
-      auto *c = static_cast<
-          std::tuple<void *, uint32_t, std::shared_ptr<std::atomic<bool>>> *>(pv);
+      auto *c = static_cast<std::tuple<void *, uint32_t,
+                                       std::shared_ptr<std::atomic<bool>>,
+                                       void *, size_t> *>(pv);
       t_tid = std::get<1>(*c);
       t_started = std::get<2>(*c).get();
       void *gt = std::get<0>(*c);
+      registerGuestThreadStack(std::get<3>(*c), std::get<4>(*c));
       delete c;
       cpu::backend().runGuestThread(gt);
+      unregisterGuestThreadStack();
       return nullptr;
     };
     pthread_t th;
     if (pthread_create(&th, &attr, trampoline, ctx) != 0) {
       delete ctx;
-      std::thread([gthread, tid, started] {
+      std::thread([gthread, tid, started, gsb, gss] {
         t_tid = tid;
         t_started = started.get();
+        registerGuestThreadStack(gsb, gss);
         cpu::backend().runGuestThread(gthread);
+        unregisterGuestThreadStack();
       }).detach();
     }
     pthread_attr_destroy(&attr);
   } else {
-    std::thread([gthread, tid, started] {
+    std::thread([gthread, tid, started, gsb, gss] {
       t_tid = tid;
       t_started = started.get();
+      registerGuestThreadStack(gsb, gss);
       cpu::backend().runGuestThread(gthread);
+      unregisterGuestThreadStack();
     }).detach();
   }
 
@@ -261,6 +274,10 @@ struct WaitChan {
   uint64_t gen = 0;      // broadcast generation for mutex/CV/semaphore waits
   uint64_t signals = 0;  // pending single-waiter releases (CV_SIGNAL)
   uint32_t waiters = 0;  // live CV_WAIT sleepers (drives ucond c_has_waiters)
+  // Live umutex sleepers (op 5 MUTEX_LOCK + op 17 MUTEX_WAIT). FreeBSD's
+  // umtxq_count() on the mutex's own queue decides whether a release leaves the
+  // word UNOWNED or CONTESTED, so the count has to be tracked, not guessed.
+  uint32_t mutexWaiters = 0;
   SimpleWaiter *simpleHead = nullptr;
   SimpleWaiter *simpleTail = nullptr;
 
@@ -372,7 +389,166 @@ std::optional<SteadyTp> cvDeadline(const void *ucond, uint64_t flags,
   return std::chrono::steady_clock::now() +
          std::chrono::duration_cast<std::chrono::steady_clock::duration>(rel);
 }
+
+void threadComm(char *out, size_t n) {
+  out[0] = '\0';
+  if (std::FILE *f = std::fopen("/proc/thread-self/comm", "r")) {
+    if (std::fgets(out, static_cast<int>(n), f))
+      if (char *nl = std::strchr(out, '\n'))
+        *nl = '\0';
+    std::fclose(f);
+  }
+}
+
+// DELTA_UMTX_ADDRWATCH=<hex addr>[:<hex window>][,<hex addr>[:<hex window>]]...
+// (or =1 for the built-in probe address): diagnostic-only address watch.
+// DELTA_UMTX_CVTRACE only sees ops 8/9/10 on one exact pointer, so a wake aimed
+// at the same object through a DIFFERENT op (WAKE, MUTEX_WAKE, NWAKE_PRIVATE)
+// or at a neighbouring field of the same struct is invisible to it. This
+// watches address windows instead, so "does the guest try to wake this thing at
+// ALL?" can be answered. Off unless the env var is set.
+constexpr uint64_t kAddrWatchWindow = 0x200;   // default +/- around each addr
+constexpr uint64_t kAddrWatchDefault = 0x2000040a4ull;
+constexpr size_t kAddrWatchMax = 8;
+
+struct AddrWatchSpec {
+  uint64_t lo, hi;
+};
+struct AddrWatchList {
+  AddrWatchSpec v[kAddrWatchMax];
+  size_t n = 0;
+};
+
+const AddrWatchList &addrWatchList() {
+  static const AddrWatchList list = [] {
+    AddrWatchList l;
+    const char *e = std::getenv("DELTA_UMTX_ADDRWATCH");
+    if (!e || !*e)
+      return l;
+    for (const char *p = e; *p && l.n < kAddrWatchMax;) {
+      char *end = nullptr;
+      uint64_t base = std::strtoull(p, &end, 16);
+      if (end == p)
+        break;
+      uint64_t win = kAddrWatchWindow;
+      if (*end == ':')
+        win = std::strtoull(end + 1, &end, 16);
+      if (base <= 1)                     // "=1" -> built-in probe address
+        base = kAddrWatchDefault;
+      l.v[l.n++] = {base - std::min(base, win), base + win};
+      while (*end && *end != ',')
+        ++end;
+      p = *end == ',' ? end + 1 : end;
+    }
+    return l;
+  }();
+  return list;
+}
+
+bool addrWatchEnabled() { return addrWatchList().n != 0; }
+
+// Line budget per log kind, so a wide window can't fill the disk. Raise with
+// DELTA_UMTX_ADDRWATCH_MAX when a hot address is inside the window -- a budget
+// that runs out mid-run makes "no wake ever arrived" unprovable.
+uint32_t addrWatchMax() {
+  static const uint32_t n = [] {
+    const char *e = std::getenv("DELTA_UMTX_ADDRWATCH_MAX");
+    return e ? static_cast<uint32_t>(std::strtoul(e, nullptr, 10)) : 200000u;
+  }();
+  return n;
+}
+
+bool addrWatched(const void *p) {
+  if (!p)
+    return false;
+  const auto &l = addrWatchList();
+  const uint64_t v = reinterpret_cast<uint64_t>(p);
+  for (size_t i = 0; i < l.n; ++i)
+    if (v >= l.v[i].lo && v <= l.v[i].hi)
+      return true;
+  return false;
+}
+
+// "aa bb cc dd  ee ff .." of n bytes read one at a time (the guest may be
+// racing us; we only care what the words look like, not about atomicity).
+void hexBytes(char *out, size_t outN, const void *p, size_t n) {
+  const auto *b = static_cast<const volatile uint8_t *>(p);
+  size_t w = 0;
+  for (size_t i = 0; i < n && w + 4 < outN; ++i)
+    w += static_cast<size_t>(
+        std::snprintf(out + w, outN - w, "%02x%s", b[i],
+                      (i % 8 == 7 && i + 1 < n) ? "  " : " "));
+  out[w < outN ? w : outN - 1] = '\0';
+}
 }  // namespace
+
+// DELTA_UMTX_CVTRACE=<hex ucond addr>: log every CV_WAIT / CV_SIGNAL /
+// CV_BROADCAST on one condvar, with the calling tid and the host thread name
+// (thread_names.cpp). A title that stalls waiting on a condvar nobody signals
+// looks identical to an idle one; naming both sides of the handshake -- and
+// showing that only the wait side ever appears -- is what identifies the
+// producer that stopped running.
+static void cvTrace(const char *what, const void *ucond, uint32_t self) {
+  static const uint64_t want = [] {
+    const char *e = std::getenv("DELTA_UMTX_CVTRACE");
+    return e ? std::strtoull(e, nullptr, 16) : 0ull;
+  }();
+  if (!want || reinterpret_cast<uint64_t>(ucond) != want)
+    return;
+  char comm[32] = "";
+  threadComm(comm, sizeof(comm));
+  std::fprintf(stderr, "[cv] %-12s ucond=%p tid=%u (%s)\n", what, ucond, self,
+               comm);
+  std::fflush(stderr);
+}
+
+// DELTA_UMTX_ADDRWATCH: one line per umtx op touching the watched window.
+static void addrWatchLog(int op, const void *ptr, const void *a, uint64_t val,
+                         uint32_t self) {
+  if (!addrWatchEnabled())
+    return;
+  const bool hitPtr = addrWatched(ptr);
+  const bool hitA = addrWatched(a);
+  bool hitBatch = false;
+  if (op == 21 && ptr) {  // NWAKE_PRIVATE: ptr is an array of val addresses
+    auto *const *addrs = static_cast<void *const *>(ptr);
+    for (uint64_t i = 0; i < val && i < 4096; ++i)
+      if (addrWatched(addrs[i])) {
+        hitBatch = true;
+        break;
+      }
+  }
+  if (!hitPtr && !hitA && !hitBatch)
+    return;
+  static std::atomic<uint32_t> n{0};
+  if (n.fetch_add(1) >= addrWatchMax())
+    return;
+  char comm[32] = "";
+  threadComm(comm, sizeof(comm));
+  std::fprintf(stderr,
+               "[umtxw] op=%-2d ptr=%p a=%p val=%#llx tid=%u%s%s%s (%s)\n", op,
+               ptr, a, static_cast<unsigned long long>(val), self,
+               hitPtr ? " HIT:ptr" : "", hitA ? " HIT:a" : "",
+               hitBatch ? " HIT:nwake-batch" : "", comm);
+  std::fflush(stderr);
+}
+
+// Raw guest bytes around a watched word: 16 before + 32 at, so struct ucond's
+// real layout (c_has_waiters / c_flags / c_clockid) can be checked against
+// where we store our has-waiters flag.
+static void addrWatchDump(const char *what, const void *p, uint32_t self) {
+  if (!addrWatched(p))
+    return;
+  static std::atomic<uint32_t> n{0};
+  if (n.fetch_add(1) >= addrWatchMax())
+    return;
+  char pre[80], at[160];
+  hexBytes(pre, sizeof(pre), static_cast<const uint8_t *>(p) - 16, 16);
+  hexBytes(at, sizeof(at), p, 32);
+  std::fprintf(stderr, "[umtxw] %-16s %p tid=%u\n  [-16] %s\n  [ +0] %s\n",
+               what, p, self, pre, at);
+  std::fflush(stderr);
+}
 
 static void umtxTrace(int op, void *ptr, uint32_t self, uint32_t owner) {
   static const bool tr = std::getenv("DELTA_UMTX_TRACE") != nullptr;
@@ -388,6 +564,7 @@ int PS4ABI sys_umtx_op(void *ptr, int op, uint64_t val, void *a, void *b) {
   WaitProbe _wp("umtx_op", (long)(long)ptr, (long)op);
   using namespace std::chrono_literals;
   markThreadStarted();  // first sync point => our init is done
+  addrWatchLog(op, ptr, a, val, t_tid);
   switch (op) {
   // WAIT registers before checking the value while holding the same bucket lock
   // as WAKE, so a wake can't slip between the check and sleep. A waiter leaves
@@ -418,34 +595,35 @@ int PS4ABI sys_umtx_op(void *ptr, int op, uint64_t val, void *a, void *b) {
   }
   case 17: { // UMTX_OP_MUTEX_WAIT: block while the umutex is owned
     auto &bk = umtxBucket(ptr);
-    auto *p = static_cast<volatile uint32_t *>(ptr);
+    auto *p = static_cast<std::atomic<uint32_t> *>(ptr);
     std::unique_lock<std::mutex> lk(bk.m);
     auto &ch = bk.chan[ptr];
-    // Ghost-owner unstick: a thread MUST NOT be waiting on a umutex whose owner
-    // word already names ITSELF -- libthr only issues MUTEX_WAIT after its
-    // CAS(0->tid) failed, and with word==tid that CAS can never succeed again, so
-    // the thread spins forever and everyone else queued behind it starves. This is
-    // exactly how SotC's JobSystem scheduler mutex (guest 0x200004140) wedges
-    // post-load: word==owner==the waiter's own tid, 4 workers livelocked, the
-    // world-container load job never claimed. Clear the stale self-ownership so the
-    // re-CAS acquires cleanly, and wake the other queued waiters. A correct thread
-    // never waits on a lock it holds, so this only ever fires on the wedged state.
-    if ((*p & ~UMUTEX_CONTESTED) == t_tid) {
-      static std::atomic<uint32_t> logged{0};
-      if (logged.fetch_add(1) < 8)
-        std::fprintf(stderr, "[umtx] self-owned MUTEX_WAIT unstick ptr=%p tid=%u word=%#x\n",
-                     ptr, t_tid, *p);
-      *p = 0;
-      ch.gen++;
-      bk.cv.notify_all();
+    uint32_t owner = p->load();
+    // FreeBSD _do_lock_normal (kern_umtx.c, _UMUTEX_WAIT mode): a word that is
+    // free -- UNOWNED, or CONTESTED with no owner tid -- returns immediately.
+    if ((owner & ~UMUTEX_CONTESTED) == 0)
       return 0;
-    }
     const uint64_t g0 = ch.gen;
+    // THE contested handshake. FreeBSD publishes the bit before sleeping:
+    //   old = casuword32(&m->m_owner, owner, owner | UMUTEX_CONTESTED);
+    // "Set the contested bit so that a release in user space knows to use the
+    // system call for unlock." Without it libthr's inline release
+    // (atomic_cmpset_rel_32(m_owner, id, UMUTEX_UNOWNED)) always succeeds, the
+    // owner never enters the kernel, no MUTEX_WAKE is ever issued, and every
+    // waiter here is released only by the safety re-poll below -- which turned
+    // SotC's JobSystem handoffs into a 2ms-per-acquire livelock (15708 failed
+    // re-acquires on one mutex) that stalled the whole FIOS streaming pipeline.
+    // CAS, not a store: if the word changed under us (a concurrent userland
+    // unlock freed it) re-evaluate instead of stamping a stale owner back.
+    if (!p->compare_exchange_strong(owner, owner | UMUTEX_CONTESTED))
+      return 0;  // raced; libthr re-runs its own CAS loop
+    ch.mutexWaiters++;
     // A spurious exit here is harmless (libthr re-runs its CAS loop), but
     // still leave only on "free" or an explicit MUTEX_WAKE so a heavily
     // contended mutex doesn't degrade into a 2ms spin per waiter.
-    while ((*p & ~UMUTEX_CONTESTED) != 0 && ch.gen == g0)
+    while ((p->load() & ~UMUTEX_CONTESTED) != 0 && ch.gen == g0)
       bk.cv.wait_for(lk, umtxTimeout());
+    ch.mutexWaiters--;
     return 0;
   }
   case 3:    // UMTX_OP_WAKE
@@ -460,11 +638,34 @@ int PS4ABI sys_umtx_op(void *ptr, int op, uint64_t val, void *a, void *b) {
       bk.cv.notify_all();
     return 0;
   }
+  // FreeBSD do_wake_umutex / do_wake2_umutex (kern_umtx.c). Both refuse to
+  // release anyone while the word still names an owner: waking then would send
+  // every sleeper into a failed re-CAS and straight back into MUTEX_WAIT, an
+  // N-way stampede on each handoff. When the queue drains to <=1 the kernel --
+  // not userland -- clears CONTESTED, because libthr's contested release
+  // deliberately leaves the word at CONTESTED and relies on this.
   case 18:   // UMTX_OP_MUTEX_WAKE
   case 22: { // UMTX_OP_MUTEX_WAKE2
     auto &bk = umtxBucket(ptr);
-    std::lock_guard<std::mutex> lk(bk.m);
-    bk.chan[ptr].gen++;
+    auto *p = static_cast<std::atomic<uint32_t> *>(ptr);
+    std::unique_lock<std::mutex> lk(bk.m);
+    auto &ch = bk.chan[ptr];
+    uint32_t owner = p->load();
+    if ((owner & ~UMUTEX_CONTESTED) != 0) {
+      // Still held. WAKE2 repairs the bit so the eventual release still traps;
+      // plain WAKE just leaves it alone.
+      if (op == 22 && ch.mutexWaiters > 0)
+        p->compare_exchange_strong(owner, owner | UMUTEX_CONTESTED);
+      return 0;
+    }
+    if (ch.mutexWaiters <= 1) {
+      uint32_t contested = UMUTEX_CONTESTED;
+      if (p->compare_exchange_strong(contested, 0u))
+        owner = 0u;
+    }
+    if (ch.mutexWaiters != 0)
+      ch.gen++;  // release the queued MUTEX_WAIT sleepers to re-CAS
+    lk.unlock();
     bk.cv.notify_all();
     return 0;
   }
@@ -481,6 +682,16 @@ int PS4ABI sys_umtx_op(void *ptr, int op, uint64_t val, void *a, void *b) {
     auto *p = static_cast<std::atomic<uint32_t> *>(ptr);
     const uint32_t self = t_tid;
     std::unique_lock<std::mutex> lk(bk.m);
+    auto &ch = bk.chan[ptr];
+    bool queued = false;
+    struct Dequeue {  // keep mutexWaiters exact on every exit path
+      WaitChan *c;
+      bool *q;
+      ~Dequeue() {
+        if (*q)
+          c->mutexWaiters--;
+      }
+    } dequeue{&ch, &queued};
     for (;;) {
       uint32_t owner = p->load();
       uint32_t held = owner & ~UMUTEX_CONTESTED;
@@ -505,6 +716,10 @@ int PS4ABI sys_umtx_op(void *ptr, int op, uint64_t val, void *a, void *b) {
       // stale owner|CONTESTED back over a now-free mutex.
       if (!p->compare_exchange_strong(owner, owner | UMUTEX_CONTESTED))
         continue;
+      if (!queued) {  // now visible to op 6 / op 18's count-based decisions
+        ch.mutexWaiters++;
+        queued = true;
+      }
       bk.cv.wait_for(lk, umtxTimeout());  // re-check on wake / safety timeout
     }
   }
@@ -518,9 +733,23 @@ int PS4ABI sys_umtx_op(void *ptr, int op, uint64_t val, void *a, void *b) {
     auto &bk = umtxBucket(ptr);
     auto *p = static_cast<std::atomic<uint32_t> *>(ptr);
     std::unique_lock<std::mutex> lk(bk.m);
-    umtxTrace(6, ptr, t_tid, p->load());
-    p->store(0);                       // release
-    bk.chan[ptr].gen++;                // releases MUTEX_WAIT sleepers
+    auto &ch = bk.chan[ptr];
+    uint32_t owner = p->load();
+    umtxTrace(6, ptr, t_tid, owner);
+    // FreeBSD do_unlock_normal (kern_umtx.c):
+    //   old = casuword32(&m->m_owner, owner,
+    //                    count <= 1 ? UMUTEX_UNOWNED : UMUTEX_CONTESTED);
+    // "When unlocking the umtx, it must be marked as unowned if there is zero
+    // or one thread only waiting for it. Otherwise, it must be marked as
+    // contested." Storing a blind 0 with 2+ waiters queued hands the next
+    // acquirer an UNCONTESTED word, so ITS release stays in userland and never
+    // wakes the rest -- the contested chain breaks at every handoff, not just
+    // the first.
+    p->compare_exchange_strong(owner, ch.mutexWaiters <= 1
+                                          ? 0u
+                                          : UMUTEX_CONTESTED);
+    ch.gen++;  // releases MUTEX_WAIT sleepers
+    lk.unlock();
     bk.cv.notify_all();
     return 0;
   }
@@ -537,13 +766,31 @@ int PS4ABI sys_umtx_op(void *ptr, int op, uint64_t val, void *a, void *b) {
   //    op as "signaled" to the app, and engines deref state the signaling
   //    thread has not published yet (SotC fiber/stream managers).
   case 8: { // UMTX_OP_CV_WAIT: ptr=ucond, a=umutex, b=timespec, val=flags
+    cvTrace("CV_WAIT", ptr, t_tid);
     auto &cbk = umtxBucket(ptr);
     auto &mbk = umtxBucket(a);
     const auto dl = cvDeadline(ptr, val, b);
     std::unique_lock<std::mutex> clk(cbk.m);
     auto &ch = cbk.chan[ptr];  // stable ref: unordered_map never moves nodes
     ch.waiters++;
+    addrWatchDump("cv-wait pre", ptr, t_tid);
     static_cast<std::atomic<uint32_t> *>(ptr)->store(1);  // c_has_waiters
+    addrWatchDump("cv-wait post", ptr, t_tid);
+    if (a)
+      addrWatchDump("cv-wait mutex", a, t_tid);
+    // Snapshot the ucond and its umutex so the poll loop below can report ANY
+    // guest write to them. A producer that publishes a wake with a plain store
+    // instead of a syscall leaves no other trace, and libthr's uncontended
+    // lock/unlock of the mutex is a userland CAS with no syscall either -- so
+    // an unchanging mutex word is the evidence that the producer side of the
+    // handshake never even runs, as opposed to running but never signalling.
+    const bool watch = addrWatched(ptr);
+    const bool watchM = a && addrWatched(a);
+    uint8_t snap[32], snapM[32];
+    if (watch)
+      __builtin_memcpy(snap, ptr, sizeof(snap));
+    if (watchM)
+      __builtin_memcpy(snapM, a, sizeof(snapM));
     // Snapshot the wake generation BEFORE releasing the guest mutex: any
     // signal that lands from here on bumps gen/signals under cbk.m and the
     // wait loop below will see it. That makes it safe to DROP the cond bucket
@@ -557,16 +804,24 @@ int PS4ABI sys_umtx_op(void *ptr, int op, uint64_t val, void *a, void *b) {
       umtxTrace(8, a, t_tid,
                 static_cast<std::atomic<uint32_t> *>(a)->load());
       auto *m = static_cast<std::atomic<uint32_t> *>(a);
+      // Same release rule as op 6 (FreeBSD do_cv_wait calls do_unlock_umutex,
+      // not a raw store): leave the word CONTESTED while 2+ waiters are queued,
+      // or the next acquirer's release stays in userland and strands them.
+      auto releaseMutex = [&](WaitChan &mch) {
+        uint32_t owner = m->load();
+        m->compare_exchange_strong(owner,
+                                   mch.mutexWaiters <= 1 ? 0u
+                                                         : UMUTEX_CONTESTED);
+        mch.gen++;
+      };
       if (&mbk == &cbk) {              // same bucket: already locked
-        m->store(0);
-        mbk.chan[a].gen++;
+        releaseMutex(mbk.chan[a]);
         mbk.cv.notify_all();
       } else {
         clk.unlock();
         {
           std::lock_guard<std::mutex> mlk(mbk.m);
-          m->store(0);
-          mbk.chan[a].gen++;
+          releaseMutex(mbk.chan[a]);
         }
         mbk.cv.notify_all();
         clk.lock();
@@ -585,7 +840,16 @@ int PS4ABI sys_umtx_op(void *ptr, int op, uint64_t val, void *a, void *b) {
         break;
       }
       cbk.cv.wait_for(clk, umtxTimeout());
+      if (watch && __builtin_memcmp(snap, ptr, sizeof(snap)) != 0) {
+        __builtin_memcpy(snap, ptr, sizeof(snap));
+        addrWatchDump("ucond changed", ptr, t_tid);
+      }
+      if (watchM && __builtin_memcmp(snapM, a, sizeof(snapM)) != 0) {
+        __builtin_memcpy(snapM, a, sizeof(snapM));
+        addrWatchDump("mutex changed", a, t_tid);
+      }
     }
+    addrWatchDump("cv-wait exit", ptr, t_tid);
     if (--ch.waiters == 0) {           // last one out lowers c_has_waiters
       ch.signals = 0;                  // unconsumed signals don't outlive waiters
       static_cast<std::atomic<uint32_t> *>(ptr)->store(0);
@@ -593,6 +857,7 @@ int PS4ABI sys_umtx_op(void *ptr, int op, uint64_t val, void *a, void *b) {
     return r;
   }
   case 9: {  // UMTX_OP_CV_SIGNAL: release one waiter
+    cvTrace("CV_SIGNAL", ptr, t_tid);
     auto &bk = umtxBucket(ptr);
     std::lock_guard<std::mutex> lk(bk.m);
     auto &ch = bk.chan[ptr];
@@ -602,6 +867,7 @@ int PS4ABI sys_umtx_op(void *ptr, int op, uint64_t val, void *a, void *b) {
     return 0;
   }
   case 10: { // UMTX_OP_CV_BROADCAST: release all waiters
+    cvTrace("CV_BROADCAST", ptr, t_tid);
     auto &bk = umtxBucket(ptr);
     std::lock_guard<std::mutex> lk(bk.m);
     bk.chan[ptr].gen++;
