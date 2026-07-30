@@ -49,6 +49,10 @@ uint64_t g_total_submits = 0;
 // state).
 Regs g_regs;
 uint32_t g_index_type = 0;  // 0=uint16, 1=uint32, 2=uint8 (VGT_INDEX_TYPE[1:0])
+// INDEX_BASE / INDEX_BUFFER_SIZE state. DRAW_INDEX_OFFSET_2 carries only an
+// offset and a count, so the buffer it indexes has to come from these.
+uint64_t g_index_base = 0;
+uint32_t g_index_max = 0;
 uint32_t g_num_instances = 1;  // from IT_NUM_INSTANCES
 bool g_frame_active = false;
 
@@ -938,35 +942,51 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
   uint32_t auto_vertex_count =
       op == IT_DRAW_INDEX_AUTO && count >= 1 ? body[0] : 0;
 
-  // Index buffer (DRAW_INDEX_2: maxSize, baseLo, baseHi, index_count,
-  // initiator).
+  // Index buffer. DRAW_INDEX_2 carries the base inline (maxSize, baseLo,
+  // baseHi, index_count, initiator); DRAW_INDEX_OFFSET_2 (maxSize,
+  // index_offset, index_count, initiator) indexes the buffer INDEX_BASE last
+  // set, starting index_offset indices in. Minecraft draws its world geometry
+  // almost entirely with the latter (291k packets a run against 33k AUTO), and
+  // leaving it undecoded left every one of those draws with no index buffer and
+  // a vertex count taken from the V#'s num_records -- a shared ~210k-record
+  // ring -- so they all tripped the vertex-count cap and were dropped.
+  const uint64_t index_size =
+      g_index_type == 1 ? 4 : g_index_type == 2 ? 1 : 2;
+  if (op == IT_DRAW_INDEX_OFFSET_2 && count >= 3 && g_index_base) {
+    const uint32_t ioff = body[1], icount = body[2];
+    const uint64_t ibase = g_index_base + static_cast<uint64_t>(ioff) * index_size;
+    if (InGuest(ibase) && icount && icount <= 0x100000 &&
+        (!g_index_max || static_cast<uint64_t>(ioff) + icount <= g_index_max) &&
+        gpu::IsReadableRange(ibase, icount * index_size)) {
+      d.index_data = reinterpret_cast<const void*>(ibase);
+      d.index_count = icount;
+      d.index_type = g_index_type;
+    }
+  }
   if (op == IT_DRAW_INDEX_2 && count >= 4) {
     uint64_t ibase = (static_cast<uint64_t>(body[2] & 0xFFFF) << 32) | body[1];
     uint32_t icount = body[3];
-    const uint64_t index_size = g_index_type == 1   ? 4
-                                : g_index_type == 2 ? 1
-                                                    : 2;
     if (InGuest(ibase) && icount && icount <= 0x100000 &&
         gpu::IsReadableRange(ibase, icount * index_size)) {
       d.index_data = reinterpret_cast<const void*>(ibase);
       d.index_count = icount;
       d.index_type = g_index_type;
-      static int s_idxdump = 0;
-      const uint64_t dump_bytes =
-          std::min<uint32_t>(icount, 8) * sizeof(uint32_t);
-      if (kTrace && s_idxdump < 8 && gpu::IsReadableRange(ibase, dump_bytes)) {
-        s_idxdump++;
-        const uint16_t* i16 = reinterpret_cast<const uint16_t*>(ibase);
-        const uint32_t* i32 = reinterpret_cast<const uint32_t*>(ibase);
-        std::fprintf(stderr, "[agc]   IDX ibase=%#lx count=%u type=%u  u16:",
-                     (unsigned long)ibase, icount, g_index_type);
-        for (uint32_t k = 0; k < icount && k < 8; k++)
-          std::fprintf(stderr, " %u", i16[k]);
-        std::fprintf(stderr, "  u32:");
-        for (uint32_t k = 0; k < icount && k < 8; k++)
-          std::fprintf(stderr, " %u", i32[k]);
-        std::fprintf(stderr, "\n");
-      }
+    }
+  }
+  if (kTrace && d.index_data) {
+    static int s_idxdump = 0;
+    const uint64_t ibase = reinterpret_cast<uint64_t>(d.index_data);
+    const uint64_t dump_bytes = std::min(d.index_count, 8u) * index_size;
+    if (s_idxdump < 12 && gpu::IsReadableRange(ibase, dump_bytes)) {
+      s_idxdump++;
+      const uint16_t* i16 = reinterpret_cast<const uint16_t*>(ibase);
+      const uint32_t* i32 = reinterpret_cast<const uint32_t*>(ibase);
+      std::fprintf(stderr, "[agc]   IDX op=%#x ibase=%#lx count=%u type=%u:", op,
+                   (unsigned long)ibase, d.index_count, g_index_type);
+      for (uint32_t k = 0; k < d.index_count && k < 8; k++)
+        std::fprintf(stderr, " %u",
+                     g_index_type == 1 ? i32[k] : (uint32_t)i16[k]);
+      std::fprintf(stderr, "\n");
     }
   }
 
@@ -1916,6 +1936,15 @@ void Walk(const uint32_t* p, uint32_t words, bool dump_this, int depth) {
         case IT_INDEX_TYPE:
           if (cnt >= 1)
             g_index_type = body[0] & 0x3;
+          break;
+        case IT_INDEX_BASE:  // baseLo, baseHi
+          if (cnt >= 2)
+            g_index_base =
+                (static_cast<uint64_t>(body[1] & 0xFFFF) << 32) | (body[0] & ~1u);
+          break;
+        case IT_INDEX_BUFFER_SIZE:
+          if (cnt >= 1)
+            g_index_max = body[0];
           break;
         case IT_NUM_INSTANCES:
           if (cnt >= 1)
