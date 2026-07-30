@@ -5,7 +5,7 @@
 
 #include <gtest/gtest.h>
 
-#include "gpu/ps4/gcn/gcn_detile.h"
+#include "gpu/gcn/gcn_detile.h"
 
 namespace {
 

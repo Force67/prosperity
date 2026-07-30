@@ -24,10 +24,10 @@
 
 #include <spirv/unified1/GLSL.std.450.h>
 
-#include "gpu/ps4/gcn/gcn_decode.h"
-#include "gpu/ps4/gcn/gcn_resource.h"
-#include "gpu/ps4/gcn/gcn_translate.h"
-#include "gpu/ps4/gcn/spirv/spv_emit.h"
+#include "gpu/gcn/gcn_decode.h"
+#include "gpu/gcn/gcn_resource.h"
+#include "gpu/gcn/gcn_translate.h"
+#include "gpu/gcn/spirv/spv_emit.h"
 
 namespace gpu::gcn {
 

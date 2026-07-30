@@ -6,7 +6,7 @@
 
 #ifdef DELTA_HAVE_SPIRV_BACKEND
 
-#include "gpu/ps4/gcn/spirv/spv_emit.h"
+#include "gpu/gcn/spirv/spv_emit.h"
 
 #include <cstring>
 

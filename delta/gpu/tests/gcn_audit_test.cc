@@ -5,7 +5,7 @@
 
 #include <gtest/gtest.h>
 
-#include "gpu/ps4/gcn/gcn_audit.h"
+#include "gpu/gcn/gcn_audit.h"
 
 namespace {
 

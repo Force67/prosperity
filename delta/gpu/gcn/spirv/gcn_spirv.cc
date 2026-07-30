@@ -6,7 +6,7 @@
  * translate_alu.cc / translate_mem.cc; the shared context in translator.h.
  */
 
-#include "gpu/ps4/gcn/spirv/gcn_spirv.h"
+#include "gpu/gcn/spirv/gcn_spirv.h"
 
 #ifndef DELTA_HAVE_SPIRV_BACKEND
 // Backend disabled at build time (SPIRV-Tools/Headers unavailable). There is
@@ -40,10 +40,10 @@ bool RecompileComputeSpirv(const uint32_t*,
 #include <string_view>
 #include <unordered_set>
 
-#include "gpu/ps4/gcn/gcn_audit.h"
-#include "gpu/ps4/gcn/gcn_disasm.h"
-#include "gpu/ps4/gcn/spirv/spv_post.h"
-#include "gpu/ps4/gcn/spirv/translator.h"
+#include "gpu/gcn/gcn_audit.h"
+#include "gpu/gcn/gcn_disasm.h"
+#include "gpu/gcn/spirv/spv_post.h"
+#include "gpu/gcn/spirv/translator.h"
 
 namespace gpu::gcn {
 

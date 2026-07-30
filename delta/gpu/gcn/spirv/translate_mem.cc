@@ -17,7 +17,7 @@
 
 #include <algorithm>
 
-#include "gpu/ps4/gcn/spirv/translator.h"
+#include "gpu/gcn/spirv/translator.h"
 
 namespace gpu::gcn {
 namespace {
@@ -32,6 +32,11 @@ Id SsboPtr(Translator& t, Id var, Id dword_idx) {
 Id SsboLoad(Translator& t, Id var, Id dword_idx) {
   return t.m.Load(t.t_u, SsboPtr(t, var, dword_idx));
 }
+}  // namespace
+
+// Exported: the compute resource model itself is ISA-neutral (a guest range
+// aliased as Buf { uint data[]; }, addressed by dword index). The RDNA2 path
+// binds the same buffers and only decodes its own scalar loads differently.
 Id CsSsboPtr(Translator& t, StageContext& sc, uint32_t binding, Id dword_idx) {
   return SsboPtr(t, sc.cs_ssbo[binding], dword_idx);
 }
@@ -49,6 +54,8 @@ int CsBindingFor(StageContext& sc, uint32_t pc) {
   auto it = sc.cs_bind.find(pc);
   return it != sc.cs_bind.end() ? static_cast<int>(it->second) : -1;
 }
+
+namespace {
 
 Id Max1(Translator& t, Id value) {
   return t.UMax(value, t.U32(1));

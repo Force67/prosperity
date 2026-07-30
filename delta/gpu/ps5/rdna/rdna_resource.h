@@ -13,7 +13,7 @@
 #include <unordered_map>
 #include <vector>
 
-#include "gpu/ps4/gcn/gcn_resource.h"
+#include "gpu/gcn/gcn_resource.h"
 #include "gpu/ps5/rdna/rdna_decode.h"
 
 namespace gpu::rdna {

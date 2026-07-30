@@ -6,8 +6,8 @@
 
 #include "gpu/gpu_check.h"
 #include "gpu/guest_memory.h"
-#include "gpu/ps4/gcn/gcn_detile.h"
-#include "gpu/ps4/gcn/gcn_translate.h"
+#include "gpu/gcn/gcn_detile.h"
+#include "gpu/gcn/gcn_translate.h"
 #include "gpu/rhi/renderer.h"
 #include "gpu/vulkan/vk_capture.h"
 #include "gpu/vulkan/vk_debug.h"

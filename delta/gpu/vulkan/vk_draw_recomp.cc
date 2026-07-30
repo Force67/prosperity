@@ -5,7 +5,7 @@
 #include "gpu/vulkan/vk_draw_recomp.h"
 
 #include "gpu/guest_memory.h"
-#include "gpu/ps4/gcn/gcn_translate.h"
+#include "gpu/gcn/gcn_translate.h"
 #include "gpu/rhi/renderer.h"
 #include "gpu/vulkan/vk_debug.h"
 #include "gpu/vulkan/vk_device.h"

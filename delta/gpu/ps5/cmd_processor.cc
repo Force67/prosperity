@@ -154,7 +154,7 @@ VBuffer DecodeVBuffer(const uint32_t* p) {
 // address with an implausible stride/record count (e.g. a depth-only pre-pass
 // with an inactive vertex slot decoded stride=14915 nrec=480622080, which then
 // segfaulted reading the vertex ring). Mirrors the PS4 fetch-shader sanity gate
-// (gpu/ps4/gcn/gcn_resource.cc).
+// (gpu/gcn/gcn_resource.cc).
 bool PlausibleVb(const VBuffer& v) {
   return v.stride && v.stride <= 256 && v.num_records &&
          v.num_records <= 0x100000;

@@ -6,11 +6,11 @@
 
 #include "gpu/ps4/cmd_processor.h"
 #include <chrono>
-#include "gpu/ps4/gcn/gcn_decode.h"
-#include "gpu/ps4/gcn/gcn_detile.h"
-#include "gpu/ps4/gcn/gcn_disasm.h"
-#include "gpu/ps4/gcn/gcn_resource.h"
-#include "gpu/ps4/gcn/gcn_translate.h"
+#include "gpu/gcn/gcn_decode.h"
+#include "gpu/gcn/gcn_detile.h"
+#include "gpu/gcn/gcn_disasm.h"
+#include "gpu/gcn/gcn_resource.h"
+#include "gpu/gcn/gcn_translate.h"
 #include "gpu/ps4/liverpool.h"
 #include "gpu/ps4/pm4.h"
 #include "gpu/rhi/renderer.h"

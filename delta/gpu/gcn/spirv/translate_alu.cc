@@ -10,7 +10,7 @@
 
 #ifdef DELTA_HAVE_SPIRV_BACKEND
 
-#include "gpu/ps4/gcn/spirv/translator.h"
+#include "gpu/gcn/spirv/translator.h"
 
 namespace gpu::gcn {
 namespace {

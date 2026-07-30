@@ -4,7 +4,7 @@
  * GCN GFX7 instruction decoder. See gcn_decode.h.
  */
 
-#include "gpu/ps4/gcn/gcn_decode.h"
+#include "gpu/gcn/gcn_decode.h"
 
 #include <algorithm>
 #include <atomic>

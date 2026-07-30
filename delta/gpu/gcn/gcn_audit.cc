@@ -4,7 +4,7 @@
  * Shader translation audit. See gcn_audit.h.
  */
 
-#include "gpu/ps4/gcn/gcn_audit.h"
+#include "gpu/gcn/gcn_audit.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -13,7 +13,7 @@
 #include <map>
 #include <unordered_map>
 
-#include "gpu/ps4/gcn/gcn_disasm.h"
+#include "gpu/gcn/gcn_disasm.h"
 
 namespace gpu::gcn {
 namespace {

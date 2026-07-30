@@ -10,35 +10,35 @@ endif()
 add_delta_test(gcn_detile_test
   SOURCES
     gcn_detile_test.cc
-    ../ps4/gcn/gcn_detile.cc
+    ../gcn/gcn_detile.cc
   DEPS delta_deps)
 
 add_delta_test(gcn_decode_test
   SOURCES
     gcn_decode_test.cc
-    ../ps4/gcn/gcn_decode.cc
+    ../gcn/gcn_decode.cc
   DEPS delta_deps)
 
 add_delta_test(rdna_decode_test
   SOURCES
     rdna_decode_test.cc
     ../ps5/rdna/rdna_decode.cc
-    ../ps4/gcn/gcn_decode.cc
+    ../gcn/gcn_decode.cc
   DEPS delta_deps)
 
 add_delta_test(gcn_disasm_test
   SOURCES
     gcn_disasm_test.cc
-    ../ps4/gcn/gcn_disasm.cc
-    ../ps4/gcn/gcn_decode.cc
+    ../gcn/gcn_disasm.cc
+    ../gcn/gcn_decode.cc
   DEPS delta_deps)
 
 add_delta_test(gcn_audit_test
   SOURCES
     gcn_audit_test.cc
-    ../ps4/gcn/gcn_audit.cc
-    ../ps4/gcn/gcn_disasm.cc
-    ../ps4/gcn/gcn_decode.cc
+    ../gcn/gcn_audit.cc
+    ../gcn/gcn_disasm.cc
+    ../gcn/gcn_decode.cc
   DEPS delta_deps)
 
 add_delta_test(pm4_test

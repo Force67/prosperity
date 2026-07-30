@@ -5,7 +5,7 @@
 #include "gpu/vulkan/vk_frame.h"
 
 #include "gfx/gfx.h"
-#include "gpu/ps4/gcn/gcn_translate.h"
+#include "gpu/gcn/gcn_translate.h"
 #include "gpu/rhi/renderer.h"
 #include "gpu/vulkan/vk_backend.h"
 #include "gpu/vulkan/vk_capture.h"

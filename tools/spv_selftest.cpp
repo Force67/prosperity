@@ -2,13 +2,13 @@
  * Standalone validation harness for the SPIR-V builder (spv_emit). Builds a
  * passthrough VS and FS and validates the emitted binary with SPIRV-Tools.
  * Not part of the emulator build; compiled directly (from repo root):
- *   D=delta/gpu/gcn/spirv; nix develop --command c++ -std=c++20 \
+ *   D=delta/gpu/gcn/spirv; nix develop --command c++ -std=c++20 -Idelta \
  *     $(pkg-config --cflags SPIRV-Headers SPIRV-Tools) tools/spv_selftest.cpp \
- *     $D/spv_emit.cpp $D/spv_post.cpp $(pkg-config --libs SPIRV-Tools) -o /tmp/t && /tmp/t
+ *     $D/spv_emit.cc $D/spv_post.cc $(pkg-config --libs SPIRV-Tools) -o /tmp/t && /tmp/t
  */
 
-#include "../delta/gpu/gcn/spirv/spv_emit.h"
-#include "../delta/gpu/gcn/spirv/spv_post.h"
+#include "gpu/gcn/spirv/spv_emit.h"
+#include "gpu/gcn/spirv/spv_post.h"
 
 #include <cstdio>
 #include <spirv-tools/libspirv.h>

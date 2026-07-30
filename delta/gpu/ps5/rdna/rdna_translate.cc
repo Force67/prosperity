@@ -38,8 +38,8 @@ gpu::gcn::Recompiled Recompile(const uint32_t*,
 #include <vector>
 
 #include "gpu/guest_memory.h"
-#include "gpu/ps4/gcn/spirv/spv_post.h"
-#include "gpu/ps4/gcn/spirv/translator.h"
+#include "gpu/gcn/spirv/spv_post.h"
+#include "gpu/gcn/spirv/translator.h"
 #include "gpu/ps5/rdna/rdna_decode.h"
 #include "gpu/ps5/rdna/rdna_resource.h"
 

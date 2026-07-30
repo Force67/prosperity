@@ -4,10 +4,10 @@
 Rules enforced (see delta/gpu/README.md):
   rhi/     may include only gpu/rhi/           (the backend-free seam)
   ps4/     may include gpu/ps4/, gpu/rhi/, gpu/guest_memory.h
-  ps5/     may include gpu/ps5/, gpu/ps4/gcn/, gpu/rhi/, gpu/guest_memory.h
+  ps5/     may include gpu/ps5/, gpu/gcn/, gpu/rhi/, gpu/guest_memory.h
            (the RDNA2 path reuses the GCN->SPIR-V translator infrastructure)
   vulkan/  may include gpu/vulkan/, gpu/rhi/, gpu/shaders/, gpu/guest_memory.h,
-           gpu/ps4/gcn/ (recompiled-program types only) -- never a command
+           gpu/gcn/ (recompiled-program types only) -- never a command
            processor or register file
   tests/   may include anything in gpu/
 Outside delta/gpu, only the public surface is reachable:
@@ -25,23 +25,32 @@ DELTA = os.path.join(ROOT, 'delta')
 
 ALLOWED = {
     'rhi': ('gpu/rhi/',),
-    'ps4': ('gpu/ps4/', 'gpu/rhi/', 'gpu/guest_memory.h'),
+    # The shared ISA decode + SPIR-V translator both consoles emit through. It
+    # is the bottom of the recompiler stack, so it may not reach back up into a
+    # console's command processor.
+    'gcn': ('gpu/gcn/', 'gpu/guest_memory.h', 'gpu/gpu_check.h'),
+    'ps4': ('gpu/ps4/', 'gpu/gcn/', 'gpu/rhi/', 'gpu/guest_memory.h'),
     # gpu/ps4/pm4.h: AGC command streams are PM4-framed, the packet framing
     # header is shared with the PS4 path.
-    'ps5': ('gpu/ps5/', 'gpu/ps4/gcn/', 'gpu/ps4/pm4.h', 'gpu/rhi/',
+    'ps5': ('gpu/ps5/', 'gpu/gcn/', 'gpu/ps4/pm4.h', 'gpu/rhi/',
             'gpu/guest_memory.h'),
     # The gcn allowance is the two headers the backend actually consumes (the
     # recompiled-program types and the detiler), not the directory: a backend
     # reaching into the decoder or spirv/ internals is a layering bug.
     'vulkan': ('gpu/vulkan/', 'gpu/rhi/', 'gpu/shaders/',
                'gpu/guest_memory.h', 'gpu/gpu_check.h',
-               'gpu/ps4/gcn/gcn_translate.h', 'gpu/ps4/gcn/gcn_detile.h'),
+               'gpu/gcn/gcn_translate.h', 'gpu/gcn/gcn_detile.h'),
     'tests': ('gpu/',),
     'shaders': (),
     '': (),  # module-root headers depend on nothing in the module
 }
 
 PUBLIC = ('gpu/rhi/', 'gpu/ps4/cmd_processor.h', 'gpu/ps5/cmd_processor.h')
+
+# Developer harnesses that test a gpu internal directly, the same role as
+# gpu/tests/. They are not emulator code and nothing links them, so the public
+# surface does not apply.
+INTERNAL_HARNESSES = (os.path.join('tools', 'spv_selftest.cpp'),)
 
 # Quoted or angle form: DELTA_ROOT is a plain -I directory, so both spellings
 # resolve and both must be policed.
@@ -101,6 +110,9 @@ for outside in (DELTA, os.path.join(ROOT, 'shared'), os.path.join(ROOT, 'tools')
             if not n.endswith(EXTS):
                 continue
             path = os.path.join(cur, n)
+            if any(os.path.normpath(path).endswith(h)
+                   for h in INTERNAL_HARNESSES):
+                continue
             text = open(path, encoding='utf-8', errors='replace').read()
             for inc in gpu_includes(path, text):
                 if not any(inc.startswith(p) for p in PUBLIC):

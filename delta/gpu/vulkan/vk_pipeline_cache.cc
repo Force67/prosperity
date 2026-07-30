@@ -4,7 +4,7 @@
 
 #include "gpu/vulkan/vk_pipeline_cache.h"
 
-#include "gpu/ps4/gcn/gcn_translate.h"
+#include "gpu/gcn/gcn_translate.h"
 #include "gpu/shaders/quad_frag_spv.h"
 #include "gpu/shaders/quad_vert_spv.h"
 #include "gpu/shaders/tex_frag_spv.h"

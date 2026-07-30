@@ -5,16 +5,17 @@ Turns guest GPU command streams into rendered frames.
 ```
 rhi/            the renderer as its callers see it (command.h, renderer.h)
 vulkan/         the only backend implementing it
-ps4/            PM4 / Liverpool command processor + the GCN -> SPIR-V recompiler
-ps5/            AGC / gfx10.3 command processor + the RDNA2 -> SPIR-V recompiler
+gcn/            shared ISA decode + the SPIR-V translator both consoles emit through
+ps4/            PM4 / Liverpool command processor + its GCN specifics
+ps5/            AGC / gfx10.3 command processor + the RDNA2 decoder/emitter
 shaders/        prebuilt SPIR-V for the heuristic quad path
 guest_memory.h  safe reads of guest memory shared by both command processors
 gpu_check.h     GPU_BUGCHECK: always-on fail-fast checks for module invariants
 tests/          unit tests + the layering check
 ```
 
-Dependencies run one way: `ps4/` and `ps5/` depend on `rhi/`, `vulkan/` depends
-on `rhi/` (plus the `ps4/gcn/` recompiled-program and detile types it consumes),
+Dependencies run one way: `ps4/` and `ps5/` depend on `gcn/` and `rhi/`, `vulkan/` depends
+on `rhi/` (plus the `gcn/` recompiled-program and detile types it consumes),
 and `rhi/` includes nothing in this module -- though `command.h` does
 forward-declare `gcn::Recompiled`/`gcn::RecompiledCs`, so the seam is
 backend-free, not recompiler-free. A command processor decodes guest packets

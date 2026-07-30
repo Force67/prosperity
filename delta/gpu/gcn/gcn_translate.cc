@@ -6,11 +6,11 @@
  * facade over that backend.
  */
 
-#include "gpu/ps4/gcn/gcn_translate.h"
+#include "gpu/gcn/gcn_translate.h"
 
-#include "gpu/ps4/gcn/gcn_decode.h"
-#include "gpu/ps4/gcn/gcn_disasm.h"
-#include "gpu/ps4/gcn/spirv/gcn_spirv.h"
+#include "gpu/gcn/gcn_decode.h"
+#include "gpu/gcn/gcn_disasm.h"
+#include "gpu/gcn/spirv/gcn_spirv.h"
 
 namespace gpu::gcn {
 

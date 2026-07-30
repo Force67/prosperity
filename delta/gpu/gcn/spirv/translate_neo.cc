@@ -2,7 +2,7 @@
  * PS4Delta : PS4 Pro/Neo shader instructions from the Sony Neo ISA delta.
  */
 
-#include "gpu/ps4/gcn/spirv/translator.h"
+#include "gpu/gcn/spirv/translator.h"
 
 #ifdef DELTA_HAVE_SPIRV_BACKEND
 

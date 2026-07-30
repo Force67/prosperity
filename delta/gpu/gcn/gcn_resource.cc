@@ -4,9 +4,9 @@
  * GCN resource tracking. See gcn_resource.h.
  */
 
-#include "gpu/ps4/gcn/gcn_resource.h"
+#include "gpu/gcn/gcn_resource.h"
 
-#include "gpu/ps4/gcn/gcn_translate.h"
+#include "gpu/gcn/gcn_translate.h"
 
 #include <algorithm>
 #include <cstdio>

@@ -21,7 +21,7 @@
  * value for these modes.
  */
 
-#include "gpu/ps4/gcn/gcn_detile.h"
+#include "gpu/gcn/gcn_detile.h"
 
 #include <algorithm>
 #include <atomic>

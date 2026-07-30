@@ -17,7 +17,7 @@
 
 #include <cstdint>
 
-#include "gpu/ps4/gcn/gcn_decode.h"
+#include "gpu/gcn/gcn_decode.h"
 
 namespace gpu::rdna {
 

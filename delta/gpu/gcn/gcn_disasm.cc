@@ -6,7 +6,7 @@
  * opcode is still uniquely identifiable in logs and audit reports.
  */
 
-#include "gpu/ps4/gcn/gcn_disasm.h"
+#include "gpu/gcn/gcn_disasm.h"
 
 #include <cstdio>
 
