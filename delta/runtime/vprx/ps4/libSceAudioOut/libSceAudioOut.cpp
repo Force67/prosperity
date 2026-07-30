@@ -11,6 +11,8 @@
 #include "gfx/gfx_audio.h"
 
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <vector>
@@ -89,6 +91,23 @@ struct OutputParam { int32_t handle; uint32_t pad; const void *ptr; };
 
 int PS4ABI sceAudioOutOutputs(void *params, uint32_t num) {
   if (!params) return -1;
+  // DELTA_AUDIO_TRACE: the raw param array next to how we parse it. The struct
+  // stride is the whole ballgame -- misread it and every handle/ptr past the
+  // first is garbage, which reads downstream as "one port, silent".
+  static const bool trace = std::getenv("DELTA_AUDIO_TRACE") != nullptr;
+  static int dumped = 0;
+  if (trace && dumped < 4) {
+    dumped++;
+    const auto *b = static_cast<const uint8_t *>(params);
+    std::fprintf(stderr, "[audioparam] num=%u raw:", num);
+    for (uint32_t i = 0; i < num * 16 && i < 96; i++)
+      std::fprintf(stderr, "%s%02x", (i % 16) ? "" : " ", b[i]);
+    std::fprintf(stderr, "\n");
+    const OutputParam *q = static_cast<const OutputParam *>(params);
+    for (uint32_t i = 0; i < num && i < 6; i++)
+      std::fprintf(stderr, "[audioparam]  [%u] handle=%d ptr=%p\n", i,
+                   q[i].handle, q[i].ptr);
+  }
   const OutputParam *pp = static_cast<const OutputParam *>(params);
   int last = 0;
   for (uint32_t i = 0; i < num; i++)
