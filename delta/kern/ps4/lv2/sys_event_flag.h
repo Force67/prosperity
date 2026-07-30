@@ -64,6 +64,12 @@ private:
   uint64_t sticky;
 };
 
+// Set `bits` on the first named event flag whose name contains `substr`.
+// Returns false if no such flag exists (yet). Unlike the syscalls this takes no
+// handle and touches no object table, so a HOST thread with no guest proc (the
+// audio daemon stand-in, kern/ps4/audio_daemon.cpp) can signal a guest flag.
+bool evfSetByNameSubstr(const char *substr, uint64_t bits);
+
 int PS4ABI sys_evf_create(const char *name, uint32_t attr, uint64_t initPattern);
 int PS4ABI sys_evf_delete(int id);
 int PS4ABI sys_evf_open(const char *name);

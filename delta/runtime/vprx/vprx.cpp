@@ -185,11 +185,12 @@ static bool libListed(const char *envName, const char *lib) {
 // MEASURED, so nobody repeats the mistake: "boots and does not crash under
 // DELTA_LLE=all" is NOT the same as "these modules work". Two known traps.
 //
-//  - libSceAudioOut LLE is SILENT. The host sink (prosperity_audio_output ->
-//    gfx_audio -> SDL) is reached only from the HLE shim, and there is no audio
-//    device under kern/ps4/dev, so the real module opens its port and writes
-//    into nothing. Nothing in a crash/fps check can see this. Hosting audio LLE
-//    needs a device, not a shim bypass.
+//  - libSceAudioOut LLE WAS silent, and the reason is the general shape of the
+//    trap: the real module needs no /dev node at all, it hands blocks to the
+//    system audio daemon over POSIX shm and waits on a named event flag, so with
+//    no daemon it wrote into nothing and no crash/fps check could see it. That
+//    daemon is now hosted (kern/ps4/audio_daemon.cpp) and LLE audio plays; the
+//    lesson stands for every other module whose LLE partner is a system service.
 //  - The common dialogs (libSceSaveDataDialog, libSceMsgDialog) LLE forward to
 //    a ShellUI daemon that kern/ipmi does not stand in for yet (it has PlayGo,
 //    NpManager, NpWeb and UserService), so their status never leaves RUNNING for

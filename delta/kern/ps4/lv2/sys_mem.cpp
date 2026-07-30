@@ -13,14 +13,21 @@
 #include <utl/mem.h>
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <mutex>
 #include <string>
 #include <sys/mman.h>
+#include <thread>
+#include <unistd.h>
 #include <unordered_map>
+#include <vector>
 
 #include "../../proc.h"
 #include "../../crash.h"
+#include "../audio_daemon.h"
 #include "../../guest_vaspace.h"
 #include "../../thread_names.h"
 #include "error_table.h"
@@ -102,6 +109,300 @@ struct shmBacking {
 std::mutex g_shmMutex;
 std::unordered_map<std::string, shmBacking> g_shmByName;
 
+// ---------------------------------------------------------------------------
+// RESEARCH INSTRUMENTATION (env-gated, default OFF, no effect on the normal
+// path). Used to reverse-engineer the shared-memory mixer protocol the REAL
+// libSceAudioOut speaks when it runs LLE: it creates per-port POSIX shm named
+// "/shm_<pid>_<n>[_A]" and mixes into it, expecting the system audio daemon to
+// consume. See the note at the head of runtime/vprx/ps4/libSceAudioOut.
+//
+//   DELTA_SHM_AUDIO_TRACE=1        log shm_open/ftruncate/mmap for matching names
+//   DELTA_SHM_AUDIO_FILTER=<sub>   name substring to match (default "shm_")
+//   DELTA_SHM_AUDIO_DUMP=<dir>     periodically snapshot every matching region
+//   DELTA_SHM_AUDIO_DUMP_MS=<n>    snapshot period, default 10 ms
+//   DELTA_SHM_AUDIO_DUMP_N=<n>     max snapshots per region, default 400
+//   DELTA_SHM_AUDIO_DUMP_MAX=<n>   cap bytes copied per region, default 1 MiB
+// Snapshots are appended to <dir>/<name>.bin and indexed in <dir>/index.txt as
+// "<seq> <t_us> <name> <off> <len>", so a grower/reallocation is visible.
+// ---------------------------------------------------------------------------
+const char *shmAudioFilter() {
+  static const char *f = [] {
+    const char *v = std::getenv("DELTA_SHM_AUDIO_FILTER");
+    return (v && *v) ? v : "shm_";
+  }();
+  return f;
+}
+
+bool shmAudioMatch(const std::string &n) {
+  return n.find(shmAudioFilter()) != std::string::npos;
+}
+
+bool shmAudioTraceOn() {
+  static const bool on = std::getenv("DELTA_SHM_AUDIO_TRACE") != nullptr;
+  return on;
+}
+
+uint64_t shmAudioNowUs() {
+  return (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
+
+void shmAudioTrace(const char *op, const std::string &name, const void *base,
+                   size_t size, size_t off) {
+  if (!shmAudioTraceOn() || !shmAudioMatch(name))
+    return;
+  std::fprintf(stderr,
+               "[shmaudio] t=%llu tid=%ld %-9s '%s' base=%p size=%#zx off=%#zx\n",
+               (unsigned long long)shmAudioNowUs(), (long)gettid(), op,
+               name.c_str(), base, size, off);
+}
+
+std::string shmAudioSanitize(const std::string &n) {
+  std::string s;
+  for (char c : n)
+    s += (c == '/' || c == '\\') ? '_' : c;
+  return s;
+}
+
+// DELTA_SHM_AUDIO_POISON=<byte>: fill a matching region with a poison byte when
+// it is first mapped. Without this a region the guest fills with SILENCE is
+// indistinguishable from one the guest never touches -- both read back as
+// zeros. Only regions matching DELTA_SHM_AUDIO_POISON_FILTER (default "_A", the
+// per-port sample regions) are poisoned, so the descriptor block stays clean.
+bool shmAudioPoisonQuiet(const std::string &name, uint8_t *base, size_t size) {
+  static const char *pv = std::getenv("DELTA_SHM_AUDIO_POISON");
+  if (!pv || !base || !size)
+    return false;
+  static const char *pf = [] {
+    const char *v = std::getenv("DELTA_SHM_AUDIO_POISON_FILTER");
+    return (v && *v) ? v : "_A";
+  }();
+  if (name.find(pf) == std::string::npos)
+    return false;
+  std::memset(base, (int)std::strtol(pv, nullptr, 0), size);
+  return true;
+}
+
+void shmAudioPoison(const std::string &name, uint8_t *base, size_t size) {
+  if (shmAudioPoisonQuiet(name, base, size))
+    std::fprintf(stderr, "[shmaudio] poisoned '%s' %p +%#zx\n", name.c_str(),
+                 base, size);
+}
+
+void shmAudioRepoison(const std::string &name, uint8_t *base, size_t size) {
+  static const char *on = std::getenv("DELTA_SHM_AUDIO_REPOISON");
+  if (!on)
+    return;
+  shmAudioPoisonQuiet(name, base, size);
+}
+
+std::atomic<bool> g_shmAudioDumper{false};
+
+void shmAudioDumperMain(std::string dir, unsigned periodMs, unsigned maxSnaps,
+                        size_t maxBytes, bool deltaOnly) {
+  std::unordered_map<std::string, FILE *> files;
+  std::unordered_map<std::string, std::vector<uint8_t>> prev;
+  FILE *idx = std::fopen((dir + "/index.txt").c_str(), "w");
+  struct reg { std::string n; uint8_t *b; size_t sz; };
+  std::vector<uint8_t> cur;
+  for (unsigned seq = 0; seq < maxSnaps; seq++) {
+    std::vector<reg> regs;
+    {
+      std::lock_guard<std::mutex> lk(g_shmMutex);
+      for (auto &kv : g_shmByName)
+        if (kv.second.base && kv.second.size && shmAudioMatch(kv.first))
+          regs.push_back({kv.first, kv.second.base, kv.second.size});
+    }
+    const uint64_t t = shmAudioNowUs();
+    for (auto &r : regs) {
+      FILE *&f = files[r.n];
+      if (!f)
+        f = std::fopen((dir + "/" + shmAudioSanitize(r.n) + ".bin").c_str(), "wb");
+      if (!f)
+        continue;
+      const size_t len = r.sz < maxBytes ? r.sz : maxBytes;
+      // Racy by construction: the guest mixes while we copy. Tearing shows up as
+      // a torn sample block, never as a wrong cursor VALUE, so cursor tracking
+      // stays sound; treat the sample area as "sampled", not "coherent".
+      cur.assign(r.b, r.b + len);
+      auto &p = prev[r.n];
+      const bool same = (p.size() == len) &&
+                        std::memcmp(p.data(), cur.data(), len) == 0;
+      // Cheap per-tick fingerprint so a 75 s run can be judged without keeping
+      // 75 s of bytes: how much of the region is non-zero, and an FNV-1a hash.
+      size_t nz = 0;
+      uint64_t h = 1469598103934665603ull;
+      for (size_t i = 0; i < len; i++) {
+        nz += cur[i] != 0;
+        h = (h ^ cur[i]) * 1099511628211ull;
+      }
+      long off = -1;
+      if (!deltaOnly || !same) {
+        off = std::ftell(f);
+        std::fwrite(cur.data(), 1, len, f);
+        p = cur;
+      }
+      // DELTA_SHM_AUDIO_REPOISON: refill with the poison byte after sampling, so
+      // the NEXT snapshot shows exactly the bytes written during this tick. A
+      // producer that rewrites the same block with silence every tick is
+      // otherwise invisible -- silence over silence is no change. Destroys the
+      // region's contents, so it is only valid while nothing consumes them.
+      shmAudioRepoison(r.n, r.b, len);
+      if (idx)
+        std::fprintf(idx, "%u %llu %s %ld %zu %zu %016llx\n", seq,
+                     (unsigned long long)t, r.n.c_str(), off, len, nz,
+                     (unsigned long long)h);
+    }
+    if (idx)
+      std::fflush(idx);
+    ::usleep(periodMs * 1000);
+  }
+  for (auto &kv : files)
+    if (kv.second) std::fclose(kv.second);
+  if (idx) std::fclose(idx);
+  std::fprintf(stderr, "[shmaudio] dumper finished\n");
+}
+
+// ---------------------------------------------------------------------------
+// DELTA_SHM_AUDIO_PROBE=<us>: SPEC VALIDATION HARNESS, default OFF. Performs
+// exactly the consumer half of the LLE libSceAudioOut handshake and reports what
+// it finds, WITHOUT playing anything -- the point is to prove the decode, not to
+// be the daemon (that is the next stage's job).
+//
+// Every <us> it walks the 26 port slots of "/shm_<pid>_C" and, for any slot
+// whose +0x00 token is non-zero, reads grain*bytesPerFrame bytes from the head
+// of "/shm_<pid>_<idx>_A", computes a peak level under the slot's declared
+// format, and then zeroes +0x00 to release the port. Pair it with
+// DELTA_AUDIOMIX_ACK so the guest's mixer wait also completes.
+//
+// If the layout below is right, Isaac's peak here must track the HLE reference
+// (climbing from ~0.03 to ~0.4); if it is wrong, the peak is garbage or zero.
+void shmAudioProbeMain(long periodUs) {
+  constexpr size_t kHdr = 0x20, kStride = 0x250, kSlots = 26;
+  uint64_t ticks = 0, blocks = 0;
+  float peakMax = 0.f;
+  auto last = shmAudioNowUs();
+  for (;;) {
+    ::usleep((useconds_t)periodUs);
+    ticks++;
+    uint8_t *ctlRaw = nullptr;
+    size_t ctlSize = 0;
+    struct areg { int idx; uint8_t *b; size_t sz; };
+    std::vector<areg> as;
+    {
+      std::lock_guard<std::mutex> lk(g_shmMutex);
+      for (auto &kv : g_shmByName) {
+        if (!kv.second.base) continue;
+        const std::string &n = kv.first;
+        if (n.size() > 2 && n.compare(n.size() - 2, 2, "_C") == 0 &&
+            n.compare(0, 5, "/shm_") == 0) {
+          ctlRaw = kv.second.base;
+          ctlSize = kv.second.size;
+        } else if (n.size() > 2 && n.compare(n.size() - 2, 2, "_A") == 0 &&
+                   n.compare(0, 5, "/shm_") == 0) {
+          // "/shm_<pid>_<idx>_A" -> idx
+          size_t e = n.size() - 2;            // at the '_' of "_A"
+          size_t s = n.rfind('_', e - 1);
+          if (s != std::string::npos)
+            as.push_back({std::atoi(n.c_str() + s + 1), kv.second.base,
+                          kv.second.size});
+        }
+      }
+    }
+    if (!ctlRaw || ctlSize < kHdr + kSlots * kStride)
+      continue;
+    for (size_t k = 0; k < kSlots; k++) {
+      uint8_t *slot = ctlRaw + kHdr + k * kStride;
+      auto u32 = [&](size_t o) { return *reinterpret_cast<volatile uint32_t *>(slot + o); };
+      const uint32_t bpf = u32(0x08), rate = u32(0x34), grain = u32(0x60);
+      const uint32_t stype = u32(0x2c), state = u32(0x90);
+      if (!bpf || !grain)
+        continue;                       // slot never opened
+      if (!u32(0x00))
+        continue;                       // no block pending
+      uint8_t *src = nullptr;
+      size_t srcSz = 0;
+      for (auto &a : as)
+        if (a.idx == (int)k) { src = a.b; srcSz = a.sz; }
+      const size_t need = (size_t)grain * bpf;
+      float peak = 0.f;
+      if (src && srcSz >= need) {
+        const uint32_t bps = (stype == 0) ? 2u : 4u;
+        const uint32_t n = need / bps;
+        if (stype == 1) {
+          const float *p = reinterpret_cast<const float *>(src);
+          for (uint32_t i = 0; i < n; i++) {
+            float a = p[i] < 0 ? -p[i] : p[i];
+            if (a > peak) peak = a;
+          }
+        } else if (stype == 0) {
+          const int16_t *p = reinterpret_cast<const int16_t *>(src);
+          for (uint32_t i = 0; i < n; i++) {
+            float a = (p[i] < 0 ? -p[i] : p[i]) / 32768.f;
+            if (a > peak) peak = a;
+          }
+        } else {
+          const int32_t *p = reinterpret_cast<const int32_t *>(src);
+          for (uint32_t i = 0; i < n; i++) {
+            float a = (p[i] < 0 ? -(float)p[i] : (float)p[i]) / 2147483648.f;
+            if (a > peak) peak = a;
+          }
+        }
+      }
+      blocks++;
+      if (peak > peakMax) peakMax = peak;
+      const uint64_t now = shmAudioNowUs();
+      if (now - last > 2000000) {
+        last = now;
+        std::fprintf(stderr,
+                     "[shmprobe] port=%zu bpf=%u type=%u ch=%u rate=%u grain=%u "
+                     "state=%u blocks=%llu peak=%.4f peakMax=%.4f\n",
+                     k, bpf, stype, bpf / (stype == 0 ? 2u : 4u), rate, grain,
+                     state, (unsigned long long)blocks, peak, peakMax);
+      }
+      // Release the port: the guest's next submit is gated on this being 0.
+      *reinterpret_cast<volatile uint64_t *>(slot + 0x00) = 0;
+    }
+    (void)ticks;
+  }
+}
+
+void shmAudioProbeMaybeStart() {
+  const char *v = std::getenv("DELTA_SHM_AUDIO_PROBE");
+  if (!v || !*v)
+    return;
+  static std::atomic<bool> started{false};
+  bool e = false;
+  if (!started.compare_exchange_strong(e, true))
+    return;
+  const long us = std::strtol(v, nullptr, 0);
+  std::fprintf(stderr, "[shmprobe] consumer probe every %ldus\n", us);
+  std::thread(shmAudioProbeMain, us > 0 ? us : 10667).detach();
+}
+
+// Start the periodic dumper once, on the first matching shm we see.
+void shmAudioDumpMaybeStart() {
+  const char *dir = std::getenv("DELTA_SHM_AUDIO_DUMP");
+  if (!dir || !*dir)
+    return;
+  bool expected = false;
+  if (!g_shmAudioDumper.compare_exchange_strong(expected, true))
+    return;
+  auto envU = [](const char *k, unsigned d) {
+    const char *v = std::getenv(k);
+    return (v && *v) ? (unsigned)std::strtoul(v, nullptr, 0) : d;
+  };
+  const unsigned ms = envU("DELTA_SHM_AUDIO_DUMP_MS", 10);
+  const unsigned n = envU("DELTA_SHM_AUDIO_DUMP_N", 400);
+  const size_t mx = (size_t)envU("DELTA_SHM_AUDIO_DUMP_MAX", 1u << 20);
+  const bool dOnly = std::getenv("DELTA_SHM_AUDIO_DUMP_DELTA") != nullptr;
+  std::fprintf(stderr,
+               "[shmaudio] dumper -> %s every %ums x%u (<=%#zx B)%s\n", dir, ms,
+               n, mx, dOnly ? " delta-only" : "");
+  std::thread(shmAudioDumperMain, std::string(dir), ms, n, mx, dOnly).detach();
+}
+
 class shmObject : public kObject {
 public:
   shmObject(proc *p, std::string nm)
@@ -124,6 +425,10 @@ uint8_t *shmMap(shmObject *shm, size_t size, size_t offset) {
   }
   if (!b.base || offset > b.size)
     return reinterpret_cast<uint8_t *>(-1);
+  shmAudioTrace("mmap", shm->shmName, b.base + offset, size, offset);
+  // Also announce here: a region mmap'd without a prior ftruncate gets its
+  // backing allocated above, and the audio daemon must not miss that case.
+  audioDaemonNoticeShm(shm->shmName.c_str(), b.base, b.size);
   return b.base + offset;
 }
 }  // namespace
@@ -403,6 +708,9 @@ int PS4ABI sys_shm_open(const char *path, uint32_t flags, uint16_t mode) {
   auto *obj = new shmObject(proc, std::move(name));
   std::fprintf(stderr, "[shm_open] '%s' flags=%#x -> fd=%u\n", path, flags,
                obj->handle());
+  shmAudioTrace("shm_open", obj->shmName, nullptr, 0, flags);
+  shmAudioDumpMaybeStart();
+  shmAudioProbeMaybeStart();
   return obj->handle();
 }
 
@@ -446,6 +754,9 @@ int PS4ABI sys_ftruncate(uint32_t fd, int64_t length) {
   size_t want = (static_cast<size_t>(length) + 0x3FFF) & ~size_t(0x3FFF);
   std::lock_guard<std::mutex> lk(g_shmMutex);
   auto &b = g_shmByName[shm->shmName];
+  // The RAW length matters for the protocol spec (the rounded `want` hides it).
+  shmAudioTrace("ftruncate", shm->shmName, b.base,
+                static_cast<size_t>(length), want);
   if (want == 0 || want <= b.size)
     return 0;
   uint8_t *nb = allocLowGuest(want);
@@ -456,6 +767,13 @@ int PS4ABI sys_ftruncate(uint32_t fd, int64_t length) {
   b.base = nb;
   b.size = want;
   proc->getVma().add(b.base, want, ppt::w);
+  shmAudioTrace("sized", shm->shmName, b.base, want, 0);
+  shmAudioPoison(shm->shmName, b.base, want);
+  // The LLE libSceAudioOut's regions become consumable here; audioDaemonNotice
+  // ignores every name that is not part of that protocol. Note the base can
+  // MOVE on a later grow, which is why the daemon is told the current one rather
+  // than caching a pointer.
+  audioDaemonNoticeShm(shm->shmName.c_str(), b.base, b.size);
   return 0;
 }
 

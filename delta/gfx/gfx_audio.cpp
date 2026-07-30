@@ -66,6 +66,31 @@ extern "C" int prosperity_audio_open(uint32_t freq, uint32_t channels, int isFlo
   return h;
 }
 
+// STAGE-3 VERIFICATION AID, default OFF. DELTA_AUDIO_PCM=<prefix> appends every
+// buffer handed to prosperity_audio_output to "<prefix>.h<handle>.raw", verbatim
+// and BEFORE any gain/backpressure/drop, so the HLE shim's stream and the LLE
+// daemon's stream can be compared byte-for-byte off-line.
+namespace {
+FILE *pcmFile(int handle, int channels, int bps) {
+  static const char *pfx = std::getenv("DELTA_AUDIO_PCM");
+  if (!pfx || !*pfx)
+    return nullptr;
+  static std::mutex m;
+  static std::vector<FILE *> fs;
+  std::lock_guard<std::mutex> lk(m);
+  if (handle < 0 || handle > 63)
+    return nullptr;
+  if ((int)fs.size() <= handle)
+    fs.resize(handle + 1, nullptr);
+  if (!fs[handle]) {
+    char path[512];
+    std::snprintf(path, sizeof(path), "%s.h%d.c%d.b%d.raw", pfx, handle, channels, bps);
+    fs[handle] = std::fopen(path, "wb");
+  }
+  return fs[handle];
+}
+}  // namespace
+
 extern "C" int prosperity_audio_output(int handle, const void *samples, uint32_t frames) {
   // Snapshot the port under the lock, then operate lock-free. The SDL stream is
   // owned by SDL (stable), and SDL_Get/PutAudioStreamData are thread-safe, so we
@@ -88,6 +113,10 @@ extern "C" int prosperity_audio_output(int handle, const void *samples, uint32_t
     gain = p.gain;
   }
   uint32_t bytes = frames * channels * static_cast<uint32_t>(bytesPerSample);
+  if (FILE *pf = pcmFile(handle, channels, bytesPerSample)) {
+    std::fwrite(samples, 1, bytes, pf);
+    std::fflush(pf);
+  }
   // Backpressure: the real sceAudioOutOutput blocks until the previous grain has
   // played, which is what paces a title's audio thread to real time. Our queue is
   // non-blocking, so an audio thread (e.g. FMOD's mixer/output threads) that loops

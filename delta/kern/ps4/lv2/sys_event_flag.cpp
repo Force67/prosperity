@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 #include <unistd.h>
 #include <unordered_map>
 
@@ -112,6 +113,24 @@ void eventFlag::clear(uint64_t b) {
   bits &= b;  // SCE clear keeps the bits set in b
 }
 
+// Name-keyed set for host-side subsystems that stand in for an absent system
+// service (see sys_event_flag.h). The registry lock is held across set() on
+// purpose: dropping it first would leave a window in which sys_evf_delete frees
+// the flag under us. Nothing takes g_efRegM while holding a flag's own mutex, so
+// this nesting cannot deadlock.
+bool evfSetByNameSubstr(const char *substr, uint64_t bits) {
+  if (!substr)
+    return false;
+  std::lock_guard<std::mutex> lk(g_efRegM);
+  for (auto &kv : g_efByName) {
+    if (kv.first.find(substr) == std::string::npos)
+      continue;
+    kv.second->set(bits);
+    return true;
+  }
+  return false;
+}
+
 static eventFlag *fromId(int id) {
   auto *obj = proc::getActive()->getObjTable().get(id);
   if (!obj || obj->type() != kObject::oType::eventflag)
@@ -150,8 +169,15 @@ static void evfTrace(const char *op, int id, const eventFlag *ef,
                      uint64_t pattern, uint32_t mode, int ret, uint64_t res) {
   if (!evfTraceOn(ef, id))
     return;
-  std::fprintf(stderr, "[evf] t=%ld %s id=%d '%s' pat=%#llx mode=%#x -> ret=%d res=%#llx\n",
-               (long)gettid(), op, id, ef ? ef->fname().c_str() : "?",
+  // us timestamp from the same steady_clock the shm-audio dumper stamps its
+  // snapshots with, so an evf signal can be placed against a cursor movement.
+  const auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+                      std::chrono::steady_clock::now().time_since_epoch())
+                      .count();
+  std::fprintf(stderr,
+               "[evf] us=%lld tid=%ld %s id=%d '%s' pat=%#llx mode=%#x -> ret=%d res=%#llx\n",
+               (long long)us, (long)gettid(), op, id,
+               ef ? ef->fname().c_str() : "?",
                (unsigned long long)pattern, mode, ret,
                (unsigned long long)res);
 }
@@ -222,6 +248,24 @@ int PS4ABI sys_evf_delete(int id) {
 
 int PS4ABI sys_evf_close(int id) { return sys_evf_delete(id); }
 
+// RESEARCH INSTRUMENTATION, default OFF.
+//   DELTA_AUDIOMIX_ACK=<us>
+// The LLE libSceAudioOut's per-port mixer thread submits a block into its
+// "/shm_<pid>_<port>_A" region and then waits on bit <port> of the named event
+// flag "sceAudioOutMix<pid>" for the console's audio daemon to say "block
+// taken". We host no daemon, so that wait never returns and the port produces
+// exactly one block, ever. Setting this makes any wait on that flag succeed
+// after <us> microseconds WITHOUT consuming anything -- just enough to keep the
+// mixer thread cycling so its ring can be observed. 0 = free-run. This is an
+// observation aid for reverse-engineering the ring, NOT a daemon.
+static long audioMixAckUs() {
+  static const long v = [] {
+    const char *s = std::getenv("DELTA_AUDIOMIX_ACK");
+    return s ? std::strtol(s, nullptr, 0) : -1L;
+  }();
+  return v;
+}
+
 int PS4ABI sys_evf_wait(int id, uint64_t pattern, uint32_t mode,
                         uint64_t *result, uint32_t *timeoutUs) {
   WaitProbe _wp("evf_wait", (long)id, (long)pattern);
@@ -231,6 +275,20 @@ int PS4ABI sys_evf_wait(int id, uint64_t pattern, uint32_t mode,
   // Trace the ENTRY too: a wait that never satisfies never reaches the exit
   // trace, which is exactly the wait one is usually hunting.
   evfTrace("waitE", id, ef, pattern, mode, 0, 0);
+  if (audioMixAckUs() >= 0 &&
+      ef->fname().find("sceAudioOutMix") != std::string::npos) {
+    uint32_t to = static_cast<uint32_t>(audioMixAckUs());
+    uint64_t ares = 0;
+    int ar = ef->wait(pattern, mode, &ares, &to);
+    if (ar == -SysError::eTIMEDOUT) {  // nobody signalled: fake the daemon's ack
+      ar = 0;
+      ares = pattern;
+    }
+    if (result)
+      *result = ares;
+    evfTrace("ackwait", id, ef, pattern, mode, ar, ares);
+    return ar;
+  }
   uint64_t res = 0;
   int r = ef->wait(pattern, mode, &res, timeoutUs);
   if (result)

@@ -10,23 +10,68 @@
  * 0.071 over a run). A title that comes out silent through here is submitting
  * silence -- SotC does, for the same upstream reason it submits a black frame.
  *
- * ---- what running this module LLE would take -------------------------------
- * The real libSceAudioOut does NOT use an ioctl device, so there is no /dev node
- * to write. Traced with DELTA_LLE=libSceAudioOut it instead:
- *   - opens a named event flag "sceAudioOutMix<pid>"  (pid is ours, 0x1337)
- *   - creates per-port POSIX shm: "/shm_<pid>_C", "/shm_<pid>_7_A",
- *     "/shm_<pid>_20_A" ... (flags 0x202 = O_RDWR|O_CREAT)
- * and then mixes into those regions and signals the flag, expecting the system
- * audio daemon to consume them. We host no such daemon, so the samples stop
- * there: with DELTA_LLE=libSceAudioOut the title runs normally (Isaac: 36 fps,
- * no crash) and our SDL sink is simply never opened.
+ * ---- the LLE shared-memory mixer protocol ----------------------------------
+ * The real libSceAudioOut does NOT use an ioctl device; there is no /dev node to
+ * write. It hands blocks to the system audio daemon through POSIX shm and is
+ * woken by a named event flag. Established by disassembling the 11.00 module
+ * (/system/common/lib/libSceAudioOut.sprx, a plain FreeBSD ELF -- the exported
+ * NIDs decode straight to sceAudioOut* names) and confirmed against a live Isaac
+ * run. There is NO ring and NO cursor: it is a one-block-deep handshake.
  *
- * Hosting it means standing in for that daemon: map the shm regions, decode the
- * ring (header layout, read/write cursors, per-port sample format -- none of
- * which is established yet) and push the frames to prosperity_audio_output on
- * the flag. Reverse-engineer the ring against Isaac, NOT against SotC: Isaac is
- * the only title here that currently produces a non-zero signal, so it is the
- * only one where a wrong decode is distinguishable from a correct one.
+ * Regions, all created O_RDWR|O_CREAT (0x202) by the module:
+ *   "/shm_<pid>_C"        control block. ftruncate'd to 0xf28, but the module
+ *                         WRITES up to 0x3c40 and relies on page rounding --
+ *                         map at least 0x4000. Do not size it from ftruncate.
+ *   "/shm_<pid>_<idx>_A"  one per open port, always 0x10000 bytes: the worst
+ *                         case single block (max grain 2048 * 8ch * 4B). The
+ *                         module memcpy's to OFFSET 0 every time.
+ * <idx> is the audio port index, 0..25, decimal, same number in the shm name,
+ * in the control block and in the event flag bit.
+ *
+ * Control block: 0x20 header, then 26 port slots of 0x250 (slot k is at
+ * 0x20 + k*0x250). Header: +0x00 float -70.0, +0x08 u32 0xffffffff, rest zero.
+ * Slot fields that matter to a consumer (offsets relative to the slot):
+ *   +0x00 u64  HANDSHAKE TOKEN. The module writes the slot's own guest address
+ *              here after filling the _A region, and refuses to fill it again
+ *              while it is non-zero (it tests only the low u32).
+ *   +0x08 u32  bytes per frame: 2/4/16 for S16 1/2/8ch, 4/8/32 for float, ...
+ *   +0x0c..0x2b  8 floats, per-channel gain (SCE volume / 32768, so 1.0 = 0 dB)
+ *   +0x2c u32  sample type: 0 = int16, 1 = float32, 2 = 32-bit
+ *   +0x34 u32  sample rate; the module only accepts 48000
+ *   +0x40 u64  sceKernelGetProcessTime of the last accepted block
+ *   +0x50 u32  port index (== <idx>)
+ *   +0x60 u32  grain, frames per block: multiple of 256, 256..2048
+ *   +0x90 u32  state; 3 once a block has been submitted
+ * channels = (+0x08) / (type 0 ? 2 : 4). Samples are the game's buffer verbatim,
+ * interleaved, memcpy'd -- no conversion, no header, grain*bytesPerFrame bytes.
+ *
+ * sceAudioOutOutput(handle, ptr) is, in the module:
+ *     submit();  if (!BUSY) return;          <- FIRST block needs no permission
+ *     for (;;) { sceKernelWaitEventFlag("sceAudioOutMix<pid>", 1<<idx,
+ *                                       AND|CLEARPAT, NULL, NULL);
+ *                if (submit() != BUSY) break; }
+ * where submit() returns BUSY (0x80260002) unless slot+0x00 is zero, and on
+ * success does memcpy(portShm, ptr, grain*bpf) then slot+0x00 = &slot.
+ *
+ * So the daemon's whole job per port is: see slot+0x00 non-zero, take
+ * grain*bpf bytes from the head of the _A region, write 0 to slot+0x00, then
+ * sceKernelSetEventFlag(mixEvf, 1<<idx). Pace it at grain/48000 s per block and
+ * the guest's Output blocks in the same way real hardware paces it.
+ *
+ * That daemon EXISTS: kern/ps4/audio_daemon.cpp, which consumes the regions and
+ * feeds the same gfx_audio sink this shim uses. It starts only when the real
+ * module creates the control block, so it can never double up with this file.
+ * Under DELTA_LLE=libSceAudioOut Isaac now streams both ports in real time with
+ * peaks in the same range as this shim's (see that file's header).
+ *
+ * Verified end to end against Isaac with the research harness in
+ * kern/ps4/lv2/sys_mem.cpp (DELTA_SHM_AUDIO_PROBE, plus DELTA_AUDIOMIX_ACK in
+ * sys_event_flag.cpp): performing exactly the above makes Isaac stream
+ * continuously on port 7 (bpf=4, type=0, 2ch, 48000, grain 512) with a live
+ * signal whose peak climbs like the HLE reference. Decoding the block as
+ * interleaved int16 is confirmed statistically, not assumed: per-channel lag-1
+ * autocorrelation 0.954 vs 0.523 at the wrong stride, and a float32 reading is
+ * 44% denormal garbage.
  */
 
 #include "libSceAudioOut.h"
@@ -87,6 +132,9 @@ int PS4ABI sceAudioOutOpen(int32_t /*userId*/, int32_t /*type*/, int32_t /*index
   int isFloat = 0;
   decodeFormat(param, channels, isFloat);
   if (!freq) freq = 48000;
+  if (std::getenv("DELTA_AUDIO_TRACE"))
+    std::fprintf(stderr, "[audioopen] len=%u freq=%u param=%#x -> %uch %s\n",
+                 length, freq, param, channels, isFloat ? "f32" : "s16");
   int bridge = prosperity_audio_open(freq, channels, isFloat);
   std::lock_guard<std::mutex> lk(g_mtx);
   Port p;
