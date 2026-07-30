@@ -449,6 +449,12 @@ VkDescriptorSet AllocateSamplerSet(VkDescriptorSetLayout layout,
 }
 
 VkSampler SamplerFor(const SamplerKey& key) {
+  // DELTA_GPU_DEFSAMPLER: ignore every guest S# and use the default sampler,
+  // to tell a mis-decoded sampler apart from a mis-bound image.
+  static const bool kDefaultSampler =
+      std::getenv("DELTA_GPU_DEFSAMPLER") != nullptr;
+  if (kDefaultSampler)
+    return g_tex.sampler;
   if (!key.valid && !key.force_lod_zero && !key.depth_compare)
     return g_tex.sampler;
   auto found = g_sampler_cache.find(key);

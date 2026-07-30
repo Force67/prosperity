@@ -994,6 +994,15 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
         if (!t.base)
           continue;
         std::fprintf(stderr,
+                     "[drawrt]  tex%u mips=%u basemip=%u viewmips=%u "
+                     "minlod=%u layers=%u arr=%d lod0=%d cmp=%d sto=%d "
+                     "swz=%#x smp=%d %08x %08x %08x %08x\n",
+                     i, t.mip_levels, t.base_mip, t.view_mips, t.min_lod,
+                     t.layers, (int)t.arrayed, (int)t.force_lod_zero,
+                     (int)t.depth_compare, (int)t.storage, t.swizzle,
+                     (int)t.sampler_valid, t.sampler[0], t.sampler[1],
+                     t.sampler[2], t.sampler[3]);
+        std::fprintf(stderr,
                      "[drawrt]  tex%u %#lx %ux%u dfmt=%u tiling=%u -> %s%#lx\n",
                      i, (unsigned long)t.base, t.w, t.h, t.dfmt, t.tiling,
                      multi_color[i]      ? "rt "

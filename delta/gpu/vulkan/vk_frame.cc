@@ -475,6 +475,19 @@ void EndFrame(Renderer& renderer, uint64_t scanout_base) {
   }();
   if (kWantAddr && g_rts.count(kWantAddr))
     present_base = kWantAddr;
+  // Debug: present the freshest offscreen target instead of the scanout, to see
+  // what a composite pass was actually given. Addresses move between runs, so
+  // PRESENT_ADDR cannot name it.
+  static const bool kWantOffscreen =
+      std::getenv("DELTA_GPU_PRESENT_OFFSCREEN") != nullptr;
+  if (kWantOffscreen) {
+    int best = -1000000;
+    for (auto& kv : g_rts)
+      if (kv.first != scanout_base && kv.second.last_frame > best) {
+        best = kv.second.last_frame;
+        present_base = kv.first;
+      }
+  }
   static const bool kPresentTrace =
       std::getenv("DELTA_PRESENT_TRACE") != nullptr;
   if (kPresentTrace)
