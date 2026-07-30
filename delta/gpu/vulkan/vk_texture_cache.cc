@@ -927,6 +927,24 @@ VkDescriptorSet GetTexture(uint64_t base,
                           base_array, view_layers, mip_levels, base_mip,
                           view_mips, min_lod, pow2_pad, sampler, sampler_valid,
                           arrayed, force_lod_zero, depth_compare, swizzle);
+  // DELTA_GPU_TEXRAW: write each large texture's raw tiled footprint, with its
+  // layout in the name, so a swizzle can be worked out offline.
+  static const bool kTexRaw = std::getenv("DELTA_GPU_TEXRAW") != nullptr;
+  if (kTexRaw && w >= 256 && h >= 128 && gpu::IsReadableRange(base, footprint)) {
+    static int rawn = 0;
+    if (rawn < 6) {
+      char p[320];
+      std::snprintf(p, sizeof(p), "%s/raw_%02d_%ux%u_pitch%u_sh%u_tile%u_e%u.bin",
+                    DumpDir(), rawn++, w, h, layout.mips[0].pitch,
+                    layout.mips[0].stored_height, tiling, elem_bytes);
+      if (FILE* f = std::fopen(p, "wb")) {
+        std::fwrite(reinterpret_cast<const void*>(base), 1, footprint, f);
+        std::fclose(f);
+        std::fprintf(stderr, "[texraw] %s (%llu bytes)\n", p,
+                     (unsigned long long)footprint);
+      }
+    }
+  }
   // Diagnostic (DELTA_GPU_TEXDUMP): in deep gameplay, dump the first few large
   // guest textures sampled, so a non-tutorial room's floor texture can be
   // inspected (is it loaded/brown or black/zero?). Counts non-zero pixels too.

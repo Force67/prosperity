@@ -959,20 +959,33 @@ void CopyGfx10StdMip(uint8_t* tiled,
   const uint64_t slice_bytes =
       static_cast<uint64_t>(level.pitch) * level.stored_height * Elem;
   uint8_t* slice = tiled + slice_bytes * layer;
+  // Within a block the standard swizzle is one interleave of the coordinate
+  // bits, Y FIRST, spilling whichever dimension still has bits left. The
+  // micro-tile is not a separate level of the address: for 32bpp this is a
+  // plain y0,x0,y1,x1,.. Morton over the whole 128x128 block. Verified against
+  // Minecraft's UI atlas, whose padding rows land exactly on the dead
+  // micro-rows only under this ordering.
+  uint32_t x_bits = 0, y_bits = 0;
+  while ((1u << x_bits) < bw)
+    x_bits++;
+  while ((1u << y_bits) < bh)
+    y_bits++;
   DetileParallelRows(level.height, [&](uint32_t y0, uint32_t y1) {
     for (uint32_t y = y0; y < y1; y++) {
       uint8_t* linear_row = linear + static_cast<size_t>(y) * linear_row_bytes;
-      const uint32_t by = y / bh, myt = (y % bh) / mh, iy = y % mh;
+      const uint32_t by = y / bh, iy = y % bh;
       for (uint32_t x = 0; x < level.width; x++) {
-        const uint32_t bx = x / bw, mxt = (x % bw) / mw, ix = x % mw;
-        uint32_t micro = 0;
-        for (uint32_t b = 0; (1u << b) < n; b++)
-          micro |=
-              (((mxt >> b) & 1) << (2 * b)) | (((myt >> b) & 1) << (2 * b + 1));
+        const uint32_t bx = x / bw, ix = x % bw;
+        uint32_t element = 0, bit = 0, xb = 0, yb = 0;
+        while (xb < x_bits || yb < y_bits) {
+          if (yb < y_bits)
+            element |= ((iy >> yb++) & 1) << bit++;
+          if (xb < x_bits)
+            element |= ((ix >> xb++) & 1) << bit++;
+        }
         const uint64_t off =
             (static_cast<uint64_t>(by) * blocks_per_row + bx) * block_bytes +
-            static_cast<uint64_t>(micro) * 256 +
-            (static_cast<uint64_t>(iy) * mw + ix) * Elem;
+            static_cast<uint64_t>(element) * Elem;
         uint8_t* t = slice + off;
         uint8_t* l = linear_row + static_cast<size_t>(x) * Elem;
         if (Detile)
