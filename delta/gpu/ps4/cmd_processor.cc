@@ -1112,7 +1112,9 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
                      "[mask] #%d rt=%#lx %ux%u mrt=%u TARGET_MASK=%#x "
                      "SHADER_MASK=%#x eff0=%#x COLOR_CONTROL=%#x mode=%u "
                      "rop=%#x BLEND0=%#x en=%u psMrtMask=%#x recomp=%s "
-                     "info0=%#x wr(sm/tm)=%u/%u PS=%#lx count=%u\n",
+                     "info0=%#x wr(sm/tm)=%u/%u PS=%#lx count=%u "
+                     "DEPTH_CTL=%#x stencil_en=%u gscissor=%#x..%#x "
+                     "zbase=%#lx zvalid=%u ztest=%u zwrite=%u zfunc=%u\n",
                      mt_n, (unsigned long)d.rt_base, d.rt_w, d.rt_h,
                      d.mrt_count, tm, sm, (tm & sm) & 0xF, cc, (cc >> 4) & 0x7,
                      (cc >> 16) & 0xFF, d.blend_control, d.blend_enable,
@@ -1120,7 +1122,13 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
                      recomp_status, d.mrt_info[0],
                      g_shader_mask_writes, g_target_mask_writes,
                      (unsigned long)ps_a,
-                     d.index_data ? d.index_count : d.vertex_count);
+                     d.index_data ? d.index_count : d.vertex_count,
+                     g_regs[mmDB_DEPTH_CONTROL], g_regs[mmDB_DEPTH_CONTROL] & 1,
+                     g_regs[mmPA_SC_GENERIC_SCISSOR_TL],
+                     g_regs[mmPA_SC_GENERIC_SCISSOR_BR],
+                     (unsigned long)d.depth_base, (unsigned)d.depth_valid,
+                     (unsigned)d.depth_test_enable,
+                     (unsigned)d.depth_write_enable, d.depth_func);
       }
     }
     // DELTA_GPU_SPRITEDUMP: for the first few TEXTURED draws, dump the resolved

@@ -18,6 +18,7 @@
 #include "gpu/vulkan/vk_upload_ring.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -237,6 +238,69 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
     }
     g_frame.draws++;
     return true;  // consumed: must not reach the rasteriser
+  }
+
+  // DELTA_GPU_SKIP_PS=<hex>: diagnostic only. Drop every draw using that guest
+  // pixel-shader address, to prove what a single pass contributes to the
+  // presented frame. Guest shader addresses are stable per build.
+  {
+    static const uint64_t kSkipPs = [] {
+      const char* e = std::getenv("DELTA_GPU_SKIP_PS");
+      return e ? std::strtoull(e, nullptr, 0) : 0ull;
+    }();
+    if (kSkipPs && d.ps_addr == kSkipPs) {
+      g_frame.draws++;
+      return true;
+    }
+  }
+
+  // DELTA_GPU_VTXTRACE_RT=<hex>: diagnostic only. For every draw into that
+  // colour target, report the vertex layout and the first vertex's raw
+  // attribute words. A pass whose pixel shader just interpolates a vertex
+  // colour (SotC's UI-layer fill) produces exactly that colour, so the
+  // recorded target content can be checked against the guest's own data
+  // instead of guessed at.
+  {
+    static const uint64_t kVtxRt = [] {
+      const char* e = std::getenv("DELTA_GPU_VTXTRACE_RT");
+      return e ? std::strtoull(e, nullptr, 0) : 0ull;
+    }();
+    // The menu floods the early run, so hold off until the level is up.
+    static const auto kVtxStart = std::chrono::steady_clock::now();
+    static const int kVtxAfter = [] {
+      const char* e = std::getenv("DELTA_GPU_VTXTRACE_AFTER");
+      return e ? std::atoi(e) : 0;
+    }();
+    static int vtx_n = 0;
+    if (kVtxRt && d.rt_base == kVtxRt && vtx_n < 40 &&
+        std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::steady_clock::now() - kVtxStart)
+                .count() >= kVtxAfter) {
+      vtx_n++;
+      std::fprintf(stderr, "[vtx] f%d draw#%u rt=%#lx nv=%u stride=%u attrs=%u",
+                   g_frame.num, g_frame.draws, (unsigned long)d.rt_base, nv,
+                   d.vertex_stride, d.num_vattrs);
+      for (uint32_t a = 0; a < d.num_vattrs && a < 8; a++) {
+        const auto& va = d.vattrs[a];
+        std::fprintf(stderr, " |loc=%u dfmt=%u nfmt=%u nc=%u off=%u bind=%u",
+                     va.location, va.dfmt, va.nfmt, va.num_comps, va.offset,
+                     va.binding);
+        const auto& vb = d.vbufs[va.binding];
+        const uint64_t avail =
+            static_cast<uint64_t>(vb.stride) * vb.num_records;
+        if (vb.data && avail >= va.offset + sizeof(uint32_t) * 4) {
+          const auto* p = static_cast<const uint8_t*>(vb.data) + va.offset;
+          uint32_t w[4] = {};
+          std::memcpy(w, p, sizeof(w));
+          std::fprintf(stderr, " raw=%08x %08x %08x %08x f=%g %g %g %g", w[0],
+                       w[1], w[2], w[3], *reinterpret_cast<const float*>(&w[0]),
+                       *reinterpret_cast<const float*>(&w[1]),
+                       *reinterpret_cast<const float*>(&w[2]),
+                       *reinterpret_cast<const float*>(&w[3]));
+        }
+      }
+      std::fprintf(stderr, "\n");
+    }
   }
 
   // A fullscreen, untextured, near-black REPLACE draw is the game CLEARING an
