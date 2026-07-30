@@ -229,6 +229,14 @@ struct ScalarEval {
       sgpr[3] = 0x0101;
       known[3] = true;
     }
+    // EXEC. The NGG prologue derives its lane masks from it and then feeds them
+    // through s_cselect into the very registers a vertex V# is patched in, so
+    // leaving EXEC unknown poisons the descriptor and the draw loses every
+    // attribute. Model the same one-vertex/one-primitive wave the translator
+    // does (sgpr[3] above): lane 0 active.
+    sgpr[126] = 1;
+    sgpr[127] = 0;
+    known[126] = known[127] = true;
   }
 
   bool AllKnown(uint32_t s, uint32_t n) const {
@@ -248,9 +256,13 @@ struct ScalarEval {
       known[s] = true;
     }
   }
+  uint32_t cur_pc = 0;
+  uint32_t clear_pc[kRegs] = {};
   void Clear(uint32_t s) {
-    if (s < kRegs)
+    if (s < kRegs) {
       known[s] = false;
+      clear_pc[s] = cur_pc;
+    }
   }
   void SetDest(uint32_t base, uint32_t offset, uint32_t value) {
     if (base != 125)
@@ -312,6 +324,7 @@ struct ScalarEval {
   }
 
   void Step(const Inst& inst) {
+    cur_pc = inst.pc;
     if (inst.enc == Enc::kSop1) {
       const uint32_t sdst = (inst.raw[0] >> 16) & 0x7F,
                      ssrc = inst.raw[0] & 0xFF;
@@ -342,6 +355,14 @@ struct ScalarEval {
       const uint32_t sdst = (inst.raw[0] >> 16) & 0x7F;
       if (inst.opcode == 0x0A || inst.opcode == 0x0B) {
         if (!scc_known) {
+          static const bool kDbg = std::getenv("DELTA_AGC_RESTRACE") != nullptr;
+          if (kDbg) {
+            static int n = 0;
+            if (n++ < 20)
+              std::fprintf(stderr,
+                           "[restrace] cselect pc=%#x clears s%u (scc unknown)\n",
+                           inst.pc, sdst);
+          }
           ClearDest(sdst, 0);
           if (inst.opcode == 0x0B)
             ClearDest(sdst, 1);
@@ -350,10 +371,20 @@ struct ScalarEval {
         const uint32_t source =
             scc ? inst.raw[0] & 0xFF : (inst.raw[0] >> 8) & 0xFF;
         uint32_t value;
-        if (Source(source, inst.literal, value))
+        if (Source(source, inst.literal, value)) {
           SetDest(sdst, 0, value);
-        else
+        } else {
+          static const bool kDbg = std::getenv("DELTA_AGC_RESTRACE") != nullptr;
+          if (kDbg) {
+            static int n = 0;
+            if (n++ < 20)
+              std::fprintf(stderr,
+                           "[restrace] cselect pc=%#x s%u <- src%u UNKNOWN "
+                           "(scc=%d)\n",
+                           inst.pc, sdst, source, (int)scc);
+          }
           ClearDest(sdst, 0);
+        }
         if (inst.opcode == 0x0B) {
           if (SourceHi(source, value))
             SetDest(sdst, 1, value);
@@ -369,6 +400,62 @@ struct ScalarEval {
         if (DecodeScalarWrite(inst).count == 2)
           ClearDest(sdst, 1);
         scc_known = false;
+        return;
+      }
+      // 64-bit shifts (s_lshl_b64 / s_lshr_b64 / s_ashr_i64). The NGG prologue
+      // narrows EXEC with `s_lshr_b64 exec, -1, vcc_lo`; without these the
+      // default case clears EXEC, and the s_cselect_b64 that patches the vertex
+      // V# from it then yields an unknown descriptor dword -- which drops every
+      // vertex attribute and leaves the draw with no geometry at all.
+      // s_bfe_u64 / s_bfe_i64: offset = S1[5:0], width = S1[22:16]. The vertex
+      // V#'s last dword is patched with `s_cselect_b32 sN+3, sN+3, vcc` and VCC
+      // is built through one of these, so leaving them to the default case
+      // clears VCC, then the cselect clears the descriptor dword and the whole
+      // attribute is dropped.
+      if (inst.opcode == 0x29 || inst.opcode == 0x2A) {
+        uint32_t a_hi;
+        if (!SourceHi(inst.raw[0] & 0xFF, a_hi)) {
+          ClearDest(sdst, 0);
+          ClearDest(sdst, 1);
+          scc_known = false;
+          return;
+        }
+        const uint64_t wide = a | (static_cast<uint64_t>(a_hi) << 32);
+        const uint32_t off = b & 0x3F, width = (b >> 16) & 0x7F;
+        uint64_t r = 0;
+        if (width) {
+          r = wide >> off;
+          if (width < 64)
+            r &= (uint64_t{1} << width) - 1;
+          if (inst.opcode == 0x2A && width < 64 &&
+              (r & (uint64_t{1} << (width - 1))))
+            r |= ~((uint64_t{1} << width) - 1);  // sign-extend
+        }
+        SetDest(sdst, 0, static_cast<uint32_t>(r));
+        SetDest(sdst, 1, static_cast<uint32_t>(r >> 32));
+        scc = r != 0;
+        scc_known = true;
+        return;
+      }
+      if (inst.opcode == 0x1F || inst.opcode == 0x21 || inst.opcode == 0x23) {
+        uint32_t a_hi;
+        if (!SourceHi(inst.raw[0] & 0xFF, a_hi)) {
+          ClearDest(sdst, 0);
+          ClearDest(sdst, 1);
+          scc_known = false;
+          return;
+        }
+        const uint64_t wide = a | (static_cast<uint64_t>(a_hi) << 32);
+        const uint32_t n = b & 63;
+        const uint64_t r =
+            inst.opcode == 0x1F  ? wide << n
+            : inst.opcode == 0x21
+                ? wide >> n
+                : static_cast<uint64_t>(static_cast<int64_t>(wide) >> n);
+        SetDest(sdst, 0, static_cast<uint32_t>(r));
+        SetDest(sdst, 1, static_cast<uint32_t>(r >> 32));
+        scc = r != 0;
+        scc_known = true;
         return;
       }
       uint32_t value;
@@ -901,6 +988,19 @@ std::unordered_map<uint32_t, BufferResource> ResolveBuffers(
     } else if ((inst.enc == Enc::kMubuf || inst.enc == Enc::kMtbuf) &&
                inst.opcode <= 0x03) {
       const uint32_t srsrc = ((inst.raw[1] >> 16) & 0x1F) * 4;
+      static const bool kDbg = std::getenv("DELTA_AGC_RESTRACE") != nullptr;
+      if (kDbg) {
+        static int n = 0;
+        if (n++ < 40)
+          std::fprintf(stderr,
+                       "[restrace] fetch pc=%#x srsrc=s%u known=%d%d%d%d "
+                       "clearedby=%#x/%#x/%#x/%#x\n",
+                       inst.pc, srsrc, (int)eval.known[srsrc],
+                       (int)eval.known[srsrc + 1], (int)eval.known[srsrc + 2],
+                       (int)eval.known[srsrc + 3], eval.clear_pc[srsrc],
+                       eval.clear_pc[srsrc + 1], eval.clear_pc[srsrc + 2],
+                       eval.clear_pc[srsrc + 3]);
+      }
       if (eval.AllKnown(srsrc, 4)) {
         BufferResource resource;
         resource.base = eval.Ptr(srsrc);
