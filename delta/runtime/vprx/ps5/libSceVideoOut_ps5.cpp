@@ -412,6 +412,21 @@ int PS4ABI vModeSetAny(int, void *) { return 0; }
 
 }  // namespace
 
+// Is this address one of the display buffers the title registered? The AGC
+// frame end uses it to tell "this frame rendered straight into a display
+// buffer" (present that one) from "it rendered an offscreen pass" (present
+// whatever the last flip named).
+extern "C" bool prosperity_ps5_is_display_buffer(uint64_t addr) {
+  if (!addr)
+    return false;
+  std::lock_guard<std::mutex> lk(g_mtx);
+  for (int i = 0; i < g_port.bufferCount && i < kMaxBuffers; i++)
+    if (reinterpret_cast<uint64_t>(g_port.buffers[i]) == addr)
+      return true;
+  return false;
+}
+
+
 static const runtime::funcInfo functions[] = {
     {0x529DFA3D393AF3B1, (void *)&vOpen},                  // Up36PTk687E
     {0xBAAB951F8FC3BBBF, (void *)&vClose},                 // uquVH4-Du78

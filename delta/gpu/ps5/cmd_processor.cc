@@ -206,6 +206,11 @@ static void NoteClipWrite(const char* how, uint32_t val) {
 // ends.
 static std::atomic<uint64_t> g_draws_seen{0}, g_draws_issued{0},
     g_drop_no_rt{0}, g_drop_no_shader{0};
+// The colour target of the last draw actually issued; EndFrame presents it when
+// it is a registered display buffer.
+static uint64_t g_last_draw_rt = 0;
+
+extern "C" bool prosperity_ps5_is_display_buffer(uint64_t addr);
 
 void SetRegs(uint32_t base, const uint32_t* body, uint32_t count) {
   if (count < 1)
@@ -458,23 +463,59 @@ void LoadRegPairs(uint32_t base, const uint32_t* body, uint32_t cnt) {
   // arrive as runs of entries whose offset dword repeats (0x1000_0000 with the
   // register index in the low half), which collapses onto one register instead
   // of the CB_COLORn block it means. That is why no colour target is ever bound.
+  // DELTA_AGC_REGSTAT_FROM=<draw>: skip the init blocks and dump the ones a
+  // steady-state frame submits, tagged with the draw they precede, so two
+  // consecutive draws' state can be diffed.
+  static const uint64_t kBlkFrom = [] {
+    const char* e = std::getenv("DELTA_AGC_REGSTAT_FROM");
+    return e ? std::strtoull(e, nullptr, 0) : 0ull;
+  }();
   if (kRegStat && std::atoi(std::getenv("DELTA_AGC_REGSTAT")) >= 2 &&
-      num_pairs >= 4) {
+      num_pairs >= 4 &&
+      g_draws_seen.load(std::memory_order_relaxed) >= kBlkFrom) {
+    // =3 trades the full dump for a compact non-zero digest of many more
+    // blocks, so a whole steady-state frame's state stream fits in one run.
+    const bool digest = std::atoi(std::getenv("DELTA_AGC_REGSTAT")) >= 3;
     static int full = 0;
-    if (full++ < 6) {
-      std::fprintf(stderr, "[regstat] %s block %#lx pairs=%u mode=%08x\n",
+    if (full++ < (digest ? 400 : 40)) {
+      std::fprintf(stderr,
+                   "[regstat] %s block %#lx pairs=%u mode=%08x draw=%lu\n",
                    base == kContextRegBase ? "ctx"
                    : base == kShRegBase    ? "sh"
                                            : "ucfg",
-                   (unsigned long)addr, num_pairs, body[2]);
+                   (unsigned long)addr, num_pairs, body[2],
+                   (unsigned long)g_draws_seen.load(std::memory_order_relaxed));
       const uint32_t* q = reinterpret_cast<const uint32_t*>(addr);
       for (uint32_t k = 0; k < num_pairs; k++)
-        std::fprintf(stderr, "[regstat]   %3u: %08x %08x\n", k, q[k * 2],
-                     q[k * 2 + 1]);
+        if (!digest || q[k * 2 + 1] || (q[k * 2] & (1u << 28)))
+          std::fprintf(stderr, "[regstat]   %3u: %08x %08x\n", k, q[k * 2],
+                       q[k * 2 + 1]);
     }
   }
   const uint32_t* p = reinterpret_cast<const uint32_t*>(addr);
   const uint32_t limit = RegSpaceLimit(base);
+  // Blend/write-mask tail. A type-1 block always ENDS with the blend object,
+  // and that object's fields sit at a constant distance from the block's end:
+  // over every shape this title submits (245/114/82/78 pairs, and a 21-entry
+  // partial) CB_TARGET_MASK is at pairs-23 and CB_BLEND0_CONTROL at pairs-24,
+  // followed by two spares, the per-target array (tags 1..0xF) and five more.
+  // The object is truncatable: a shorter tail simply stops before the mask
+  // field, which then means "writes nothing". That is how a clear quad says it
+  // must not touch colour -- Minecraft ends every frame with one, and taking it
+  // as a normal draw overwrote the composited UI with flat white.
+  static const bool kNoBlendState =
+      std::getenv("DELTA_AGC_NOBLENDSTATE") != nullptr;
+  const bool tail = !kNoBlendState && num_pairs >= 1 &&
+                    (p[(num_pairs - 1) * 2] & (1u << 28));
+  const bool tail_has_mask =
+      tail && num_pairs >= 23 && (p[(num_pairs - 23) * 2] & (1u << 28));
+  bool has_blend_tail = base == kContextRegBase && tail_has_mask;
+  if (has_blend_tail) {
+    g_regs[mmCB_BLEND0_CONTROL] = (p[(num_pairs - 24) * 2] & (1u << 28))
+                                      ? p[(num_pairs - 24) * 2 + 1]
+                                      : 0;
+    g_regs[mmCB_TARGET_MASK] = p[(num_pairs - 23) * 2 + 1];
+  }
   // Type-1 context entries (offset dword bit 28 set) are NOT (offset,value)
   // pairs: whole runs share one offset dword, so the flat reading collapses a
   // CB_COLORn block onto CB_COLOR0_BASE and every draw ends up with no target.
@@ -484,6 +525,7 @@ void LoadRegPairs(uint32_t base, const uint32_t* body, uint32_t cnt) {
   // pair+2 decodes as a CB_COLOR_INFO with a real FORMAT is a CB_COLOR0 bind.
   // Both fields must check out, so a wrong anchor is rejected rather than
   // binding garbage.
+  bool bound_rt = false;
   if (base == kContextRegBase && num_pairs >= 15 && (p[0] & (1u << 28))) {
     for (uint32_t k = 0; k + 14 < num_pairs; k++) {
       const uint64_t rt = static_cast<uint64_t>(p[k * 2 + 1]) << 8;
@@ -501,11 +543,12 @@ void LoadRegPairs(uint32_t base, const uint32_t* body, uint32_t cnt) {
       g_regs[mmCB_COLOR0_BASE] = p[k * 2 + 1];
       g_regs[mmCB_COLOR0_INFO] = info;
       g_regs[mmCB_COLOR0_ATTRIB2] = attrib2;
+      bound_rt = true;
       // A block carrying a base AND a valid colour format IS a colour-target
-      // bind, so slot 0 is written. CB_TARGET_MASK lives in a register this
-      // encoding never delivers, and its default 0 reads as "writes nothing",
+      // bind, so slot 0 is written. If the block brought no blend tail its
+      // write mask is unknown, and a default 0 reads as "writes nothing" --
       // which would drop the very draw this block set up.
-      if (!(g_regs[mmCB_TARGET_MASK] & 0xF))
+      if (!has_blend_tail && !(g_regs[mmCB_TARGET_MASK] & 0xF))
         g_regs[mmCB_TARGET_MASK] |= 0xF;
       static int shown = 0;
       if (kRegStat && shown++ < 8)
@@ -515,6 +558,13 @@ void LoadRegPairs(uint32_t base, const uint32_t* body, uint32_t cnt) {
             (unsigned long)rt, info, fmt, w, h);
       break;
     }
+  }
+  // Tail that stops before the mask field: the object says "no colour write".
+  // A block whose tail is only the colour-target object instead (it binds a
+  // base, so it is not a blend object at all) keeps the mask the anchor forced.
+  if (base == kContextRegBase && tail && !tail_has_mask && !bound_rt) {
+    g_regs[mmCB_BLEND0_CONTROL] = 0;
+    g_regs[mmCB_TARGET_MASK] = 0;
   }
   for (uint32_t i = 0; i < num_pairs; i++) {
     uint32_t off = p[i * 2] & ~kRegSelectorMask;  // strip gfx10 selector bits
@@ -1486,6 +1536,7 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
       for (size_t i = 0; i < rc.attrs.size() && i < 8; i++) {
         auto& a = rc.attrs[i];
         VBuffer vb{};
+        uint32_t fetch_soffset = 0;
         const char* how = "replay";
         if (a.use_pc != ~0u) {
           const auto resolved = vs_resources.find(a.use_pc);
@@ -1500,6 +1551,7 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
               !resolved->second.descriptor_valid)
             continue;
           vb = DecodeVBuffer(resolved->second.descriptor);
+          fetch_soffset = resolved->second.soffset;
         } else {
           const uint32_t ti = a.table_sgpr >= kUdBaseEnv
                                   ? a.table_sgpr - kUdBaseEnv
@@ -1521,13 +1573,22 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
         if (dl)
           std::fprintf(
               stderr,
-              "[agc]   attr%zu loc=%u nc=%u tbl_sgpr=%u off=%u (%s) -> "
-              "base=%#lx stride=%u nrec=%u gfmt=%u -> dfmt=%u nfmt=%u\n",
-              i, a.location, a.num_comps, a.table_sgpr, a.vbuf_dword_off, how,
-              (unsigned long)vb.base, vb.stride, vb.num_records, vb.gfmt,
-              vb.dfmt, vb.nfmt);
+              "[agc]   attr%zu loc=%u nc=%u tbl_sgpr=%u off=%u ioff=%u soff=%u "
+              "(%s) -> base=%#lx stride=%u nrec=%u gfmt=%u -> dfmt=%u "
+              "nfmt=%u\n",
+              i, a.location, a.num_comps, a.table_sgpr, a.vbuf_dword_off,
+              a.inst_offset, fetch_soffset, how, (unsigned long)vb.base,
+              vb.stride, vb.num_records, vb.gfmt, vb.dfmt, vb.nfmt);
         if (!InGuest(vb.base) || !PlausibleVb(vb))
           continue;  // unresolved: keep the rest
+        // Where this attribute sits inside the vertex. The V# only names the
+        // stream: the fetch adds its own byte offset, either as the immediate
+        // or (Sony's compiler) through the soffset scalar. Fold it into the
+        // base so the binding grouping below turns it back into a per-attribute
+        // offset.
+        const uint64_t field_off = a.inst_offset + fetch_soffset;
+        if (field_off < vb.stride)
+          vb.base += field_off;
         attr_vbs[attr_n] = vb;
         attr_res[attr_n++] = &a;
       }
@@ -1951,6 +2012,7 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
                    d.vbufs[i].num_records);
   }
   g_draws_issued.fetch_add(1, std::memory_order_relaxed);
+  g_last_draw_rt = d.rt_base;
   rhi::Draw(rhi::DefaultRenderer(), d);
   if (dl)
     std::fprintf(stderr, "[agc] DL draw#%lu done\n", (unsigned long)my_draw);
@@ -2387,6 +2449,14 @@ void SubmitCcb(const void* ccb, uint32_t size_bytes) {
 void EndFrame(uint64_t scanout_base) {
   std::lock_guard<std::mutex> lk(g_mtx);
   if (g_frame_active && rhi::DefaultRenderer().available()) {
+    // The trigger that ends a frame is often the NEXT frame's state submit,
+    // and the flip it reads still names the buffer before this one. When the
+    // frame composited straight into a registered display buffer, that buffer
+    // is what the title just finished, so present it instead -- otherwise
+    // every frame presents its neighbour, which the title has already cleared.
+    if (g_last_draw_rt && g_last_draw_rt != scanout_base &&
+        prosperity_ps5_is_display_buffer(g_last_draw_rt))
+      scanout_base = g_last_draw_rt;
     rhi::EndFrame(rhi::DefaultRenderer(), scanout_base);
     g_frame_active = false;
   }
