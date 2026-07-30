@@ -15,5 +15,6 @@ namespace krnl::ipmi {
 Service &playGoService();
 Service &npManagerService();
 Service &npWebService();
+Service &userService();
 
 } // namespace krnl::ipmi

@@ -32,6 +32,15 @@ enum {
   kInvokeSync = 800,     // sceIpmiClientInvokeSyncMethod
   kPollAsyncReply = 1168,// async-reply poll, paired with the invoke before it
   kConnect = 1024,       // sceIpmiClientConnect (carries the service name)
+  // NOT YET IMPLEMENTED, recorded so it is not rediscovered from scratch:
+  // op 594 is a client event-flag wait. libSceUserService creates
+  // "SceUserServiceClientEventFlag" and polls it from sceUserServiceGetEvent
+  // (callers libSceUserService+0x1c45 -> +0x1ded), request block insize 0x20:
+  //     +0x00 u32 flag index  +0x04 u32 pattern/mode (seen 0 then 2)
+  //     +0x08 ptr out         +0x10 ptr out          +0x18 u64 size (8)
+  // Answering it "empty success" makes the library spin. Zeroing both out
+  // buffers was tried and changed nothing, so the reply shape is still unknown;
+  // dump it with DELTA_IPMI_OPDUMP=594 before implementing.
 };
 
 // A guest descriptor that says "n bytes here" is not to be trusted: clamp what
@@ -73,7 +82,8 @@ std::atomic<uint32_t> g_nextKid{1};
 Service *findService(const char *name) {
   if (!name)
     return nullptr;
-  Service *all[] = {&playGoService(), &npManagerService(), &npWebService()};
+  Service *all[] = {&playGoService(), &npManagerService(), &npWebService(),
+                    &userService()};
   for (Service *s : all)
     if (std::strcmp(s->name(), name) == 0)
       return s;
@@ -225,6 +235,63 @@ void dumpInvoke(uint32_t kid, const char *svc, const InvokeRequest *req) {
     symbolize(sp[i], sym, sizeof(sym));
     if (std::strstr(sym, "(.text)")) {
       std::fprintf(stderr, "[ipmidump]   caller %s\n", sym);
+      shown++;
+    }
+  }
+}
+
+// DELTA_IPMI_OPDUMP=<op>: same idea as dumpInvoke, but for a MANAGER op the
+// decoder does not know. An unhandled op that a module spins on is answered
+// "empty success", which is a guess; dumping its request block and the guest
+// call chain shows what the caller actually reads back, so the op can be
+// implemented instead of guessed at.
+void dumpManagerOp(uint32_t op, uint32_t kid, void *out, void *in,
+                   uint64_t insize) {
+  static const uint32_t want = [] {
+    const char *e = std::getenv("DELTA_IPMI_OPDUMP");
+    return e ? static_cast<uint32_t>(std::strtoul(e, nullptr, 0)) : 0u;
+  }();
+  if (!want || op != want)
+    return;
+  static std::atomic<int> seen{0};
+  if (seen.fetch_add(1) >= 3)
+    return;
+
+  std::fprintf(stderr, "[ipmiop] op=%u kid=%u out=%p in=%p insize=%#llx\n", op,
+               kid, out, in, (unsigned long long)insize);
+  auto hexdump = [](const char *tag, const void *p, uint64_t n) {
+    if (!p || !readable(p, n))
+      return;
+    const auto *b = static_cast<const uint8_t *>(p);
+    std::fprintf(stderr, "[ipmiop]   %s:", tag);
+    for (uint64_t i = 0; i < n && i < 96; i++)
+      std::fprintf(stderr, " %02x", b[i]);
+    std::fprintf(stderr, "\n");
+    // Any 8-byte field that looks like a guest pointer is worth following:
+    // these blocks are mostly pointers to status words the caller polls.
+    for (uint64_t i = 0; i + 8 <= n && i < 96; i += 8) {
+      uint64_t v = 0;
+      std::memcpy(&v, b + i, sizeof(v));
+      const auto *t = reinterpret_cast<const uint8_t *>(v);
+      if (v >= 0x1000 && readable(t, 8)) {
+        std::fprintf(stderr, "[ipmiop]     +%#llx -> %#llx :",
+                     (unsigned long long)i, (unsigned long long)v);
+        for (int k = 0; k < 8; k++)
+          std::fprintf(stderr, " %02x", t[k]);
+        std::fprintf(stderr, "\n");
+      }
+    }
+  };
+  hexdump("in", in, insize ? insize : 64);
+  hexdump("out", out, 16);
+
+  auto *sp = reinterpret_cast<const uintptr_t *>(in ? in : out);
+  int shown = 0;
+  for (int i = 0; sp && i < 768 && shown < 6; i++) {
+    char sym[256];
+    symbolize(sp[i], sym, sizeof(sym));
+    if (std::strstr(sym, "(.text)")) {
+      std::fprintf(stderr, "[ipmiop]   caller %s\n", sym);
       shown++;
     }
   }
@@ -426,6 +493,7 @@ int managerCall(uint32_t op, uint32_t kid, void *out, void *in,
     if (traceOn())
       std::fprintf(stderr, "[ipmi] op=%u kid=%u (unhandled, empty success)\n",
                    op, kid);
+    dumpManagerOp(op, kid, out, in, insize);
     setResult(0);
     return 0;
   }
