@@ -333,8 +333,17 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
     }
     vneed += bind_size[j];
   }
-  if (g_ring.vb_offset + vneed > g_ring.vb_end)
+  if (g_ring.vb_offset + vneed > g_ring.vb_end) {
+    if (std::getenv("DELTA_GPU_DECLTRACE")) {
+      static int n = 0;
+      if (n++ < 32)
+        std::fprintf(stderr, "[decl] ring=VB need=%llu off=%llu end=%llu idx=%u\n",
+                     (unsigned long long)vneed,
+                     (unsigned long long)g_ring.vb_offset,
+                     (unsigned long long)g_ring.vb_end, d.index_count);
+    }
     return Decline(kRing);
+  }
   const VkDeviceSize index_bytes =
       indexed ? static_cast<VkDeviceSize>(d.index_count) *
                     UploadedIndexElementBytes(d.index_type)
@@ -342,8 +351,17 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
   const VkDeviceSize index_align = d.index_type == 1 ? 4 : 2;
   const VkDeviceSize aligned_ioff =
       (g_ring.ib_offset + index_align - 1) & ~(index_align - 1);
-  if (indexed && aligned_ioff + index_bytes > g_ring.ib_end)
+  if (indexed && aligned_ioff + index_bytes > g_ring.ib_end) {
+    if (std::getenv("DELTA_GPU_DECLTRACE")) {
+      static int n = 0;
+      if (n++ < 32)
+        std::fprintf(stderr, "[decl] ring=IB need=%llu off=%llu end=%llu idx=%u\n",
+                     (unsigned long long)index_bytes,
+                     (unsigned long long)aligned_ioff,
+                     (unsigned long long)g_ring.ib_end, d.index_count);
+    }
     return Decline(kRing);
+  }
 
   RecompPipe* rp = GetRecompPipe(d);
   if (!rp)
@@ -707,8 +725,16 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
   VkDeviceSize cb_off = (g_ring.ubo_offset + g_ring.ubo_align - 1) &
                         ~(VkDeviceSize)(g_ring.ubo_align - 1);
   VkDeviceSize cb_stride = g_ring.ubo_stride;
-  if (cb_off + cb_stride * kCbufBindings > g_ring.ubo_end)
+  if (cb_off + cb_stride * kCbufBindings > g_ring.ubo_end) {
+    if (std::getenv("DELTA_GPU_DECLTRACE")) {
+      static int n = 0;
+      if (n++ < 32)
+        std::fprintf(stderr, "[decl] ring=UBO off=%llu stride=%llu end=%llu\n",
+                     (unsigned long long)cb_off, (unsigned long long)cb_stride,
+                     (unsigned long long)g_ring.ubo_end);
+    }
     return Decline(kRing);
+  }
   uint32_t dyn_off[kCbufBindings];
   uint32_t cbuf_mask = 0;
   VkDeviceSize next = cb_off;

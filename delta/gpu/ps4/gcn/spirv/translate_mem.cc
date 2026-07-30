@@ -204,7 +204,7 @@ bool PlanCbufs(const Program& program,
     const auto [it, inserted] = bindings.emplace(
         CbufBindKey(base_sgpr, pointer), first_binding + cbufs.size());
     if (inserted) {
-      if (it->second >= 8)
+      if (it->second >= kMaxCbufBindings)
         return false;
       ShaderCbuf cb{};
       cb.binding = it->second;

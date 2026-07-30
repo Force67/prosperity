@@ -1387,6 +1387,16 @@ void EmitVop3(Translator& t,
     case 0x15d:  // v_sad_u32: |s0 - s1| + s2
       set_u(t.Add(t.Sub(t.UMax(u0, u1), t.UMin(u0, u1)), u2));
       break;
+    case 0x15e: {  // v_cvt_pk_u8_f32: insert cvt_u8(S0) into byte S1 of S2
+      const Id sat = t.m.ExtInst(t.t_f, GLSLstd450FClamp,
+                                 {s0, t.F32(0.0f), t.F32(255.0f)});
+      const Id byte =
+          t.And(t.m.Emit(spv::Op::OpConvertFToU, t.t_u, {sat}), t.U32(0xFF));
+      const Id shift = t.Mul(t.And(u1, t.U32(3)), t.U32(8));
+      const Id mask = t.Shl(t.U32(0xFF), shift);
+      set_u(t.Or(t.And(u2, t.Not(mask)), t.And(t.Shl(byte, shift), mask)));
+      break;
+    }
     // IEEE divide sequence (div_scale -> rcp -> div_fmas -> div_fixup),
     // shortened to an exact divide at the fixup (S2/S1): div_scale is an
     // identity passthrough and div_fmas an FMA feeding the estimate the fixup
