@@ -19,6 +19,7 @@
 #include <vector>
 
 #include <sys/select.h>
+#include <unistd.h>
 
 #include "kern/proc.h"
 #include "kern/ps4/dev/socket_dev.h"
@@ -209,6 +210,12 @@ int equeue::kevent(const kevent_t *changes, int nchanges, kevent_t *out,
       if (auto *k = find(c.ident, c.filter)) {
         k->active = true;
         k->ev.data = c.data;
+        // The trigger carries the udata, not the registration: sceKernelAddUserEvent
+        // registers with none and sceKernelTriggerUserEvent supplies it per poke.
+        // Keeping the registration's null made sceKernelGetEventUserData return
+        // null, and Minecraft's handler dereferences it straight into a vcall.
+        if (c.udata)
+          k->ev.udata = c.udata;
         cv.notify_all();
       }
       continue;
@@ -264,6 +271,16 @@ int equeue::kevent(const kevent_t *changes, int nchanges, kevent_t *out,
     return false;
   };
 
+  // An untimed wait on a queue with no knotes can never return: nothing has a
+  // source that could set one active. Report it once per queue -- it is always a
+  // missing registration on our side, and the symptom (a wedged render thread)
+  // otherwise looks like the title hanging on its own.
+  if (!to && notes.empty() && !warnedEmptyWait) {
+    warnedEmptyWait = true;
+    std::printf("[kevent] tid=%ld waits forever on '%s' (fd=%u): no knotes\n",
+                (long)gettid(), name.empty() ? "(unnamed)" : name.c_str(),
+                handle());
+  }
   if (!to) {
     cv.wait(lk, pred);
     ready = true;

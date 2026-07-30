@@ -80,6 +80,7 @@ private:
   std::mutex m;
   std::condition_variable cv;
   base::Vector<knote> notes;
+  bool warnedEmptyWait = false;
 };
 
 // Fan a (filter,data) trigger out to every live equeue. The vblank pump uses
