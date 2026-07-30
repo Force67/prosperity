@@ -35,8 +35,11 @@ bool GuestRange(uint64_t address, uint64_t bytes) {
          gpu::IsReadableRange(address, bytes);
 }
 
+// A cube sample reaches the hardware with the face already selected (the
+// shader ran v_cubeid/v_cubesc/v_cubetc), so its address is (s, t, faceId) --
+// exactly a 2D-array lookup with layer = faceId.
 bool MimgArrayed(uint32_t dim) {
-  return dim == 5;
+  return dim == 3 || dim == 5;
 }
 
 // gfx10.3 T#s carry a 9-bit unified format enum (word1 [28:20]). Values 1..77
@@ -781,9 +784,12 @@ TImage DecodeTImage(const uint32_t* d, bool r128) {
   const uint32_t max_mip = r128 ? last_level : (d[5] >> 4) & 0xf;
 
   t.pitch = t.width;
-  t.arrayed = t.type == 12 || t.type == 13;              // 1D/2D array
-  const bool volumetric = t.type == 10 || t.type == 11;  // 3D / cube
+  // Cube (type 11) is sampled as a 6-layer 2D array; see MimgArrayed.
+  t.arrayed = t.type == 11 || t.type == 12 || t.type == 13;
+  const bool volumetric = t.type == 10;  // 3D
   t.layers = (t.arrayed || volumetric) ? depth + 1 : 1;
+  if (t.type == 11)
+    t.layers = std::max<uint32_t>(t.layers, 6);
   t.view_layers =
       t.arrayed ? std::max<uint32_t>(depth + 1 - t.base_array, 1) : 1;
   t.mip_levels = max_mip + 1;

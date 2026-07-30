@@ -1701,10 +1701,38 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
               }
             }
           };
+      // Raw MUBUF buffers the shader indexes itself (set 2). Same per-pc
+      // descriptor replay as the cbuffers.
+      auto resolve_bufs =
+          [&](const std::vector<gcn::ShaderBuffer>& bufs,
+              const std::unordered_map<uint32_t, rdna::BufferResource>&
+                  resolved,
+              const uint32_t* ud, uint32_t nud) {
+            for (const gcn::ShaderBuffer& sb : bufs) {
+              if (sb.binding >= rhi::DrawInfo::kMaxBuffers)
+                continue;
+              VBuffer vb{};
+              const auto it = resolved.find(sb.use_pc);
+              if (it != resolved.end() && it->second.descriptor_valid)
+                vb = DecodeVBuffer(it->second.descriptor);
+              else if (sb.srsrc_sgpr + 3 < nud)
+                vb = DecodeVBuffer(&ud[sb.srsrc_sgpr]);
+              const uint64_t bytes =
+                  vb.stride ? static_cast<uint64_t>(vb.stride) * vb.num_records
+                            : vb.num_records;
+              if (!InGuest(vb.base) || !bytes || bytes > 0xFFFFFFFFull)
+                continue;
+              d.bufs[sb.binding] = {vb.base, static_cast<uint32_t>(bytes)};
+              d.num_bufs = std::max(d.num_bufs, sb.binding + 1);
+            }
+          };
       if (good) {
         resolve_cbufs(rc.vs_cbufs, vs_resources, true);
-        if (ps_a)
+        resolve_bufs(rc.vs_bufs, vs_resources, vud, gs_user_sgprs);
+        if (ps_a) {
           resolve_cbufs(rc.ps_cbufs, ps_resources, false);
+          resolve_bufs(rc.ps_bufs, ps_resources, pud, ps_user_sgprs);
+        }
         // Textures: resolve the live gfx10.3 T#/S# each PS sampler reads, in
         // the recompiler's set-0 binding order (rdna::TrackTextures re-derives
         // the same plan). texs[i] maps to PS sampler binding i.

@@ -613,6 +613,40 @@ bool RdnaPlanCbufs(const Program& program,
 // Each distinct srsrc V# gets one binding; the renderer resolves the live V#
 // from user data at draw time, exactly like the SMEM cbufs
 // (decodeVBuffer(&vud[srsrc])).
+// Raw MUBUF loads (buffer_load_dword{,x2,x3,x4} and the sub-dword forms) the
+// shader indexes itself. Each distinct descriptor SGPR quad becomes one set-2
+// storage buffer, which the command processor resolves per draw. The shared
+// PlanGfxBuffers cannot be reused: its descriptor-reload versioning reads the
+// SMEM sdst with GCN field positions.
+void RdnaPlanGfxBuffers(const Program& program,
+                        uint32_t first_binding,
+                        const std::unordered_set<uint32_t>* claimed,
+                        std::vector<gpu::gcn::ShaderBuffer>& buffers,
+                        std::unordered_map<uint32_t, uint32_t>& bindings) {
+  std::unordered_map<uint32_t, uint32_t> by_srsrc;
+  for (const Inst& inst : program) {
+    if (inst.enc != Enc::kMubuf || inst.opcode < 0x08 || inst.opcode > 0x0f)
+      continue;
+    if (claimed && claimed->count(inst.pc))
+      continue;
+    const uint32_t srsrc = ((inst.raw[1] >> 16) & 0x1F) * 4;
+    const auto found = by_srsrc.find(srsrc);
+    if (found != by_srsrc.end()) {
+      bindings[inst.pc] = found->second;
+      continue;
+    }
+    const uint32_t binding =
+        first_binding + static_cast<uint32_t>(buffers.size());
+    if (binding >= gpu::gcn::kMaxGfxBuffers) {
+      gpu::gcn::WarnUnsupported("mubuf.binding-count", binding + 1);
+      continue;
+    }
+    by_srsrc[srsrc] = binding;
+    bindings[inst.pc] = binding;
+    buffers.push_back({binding, srsrc, inst.pc});
+  }
+}
+
 void RdnaPlanBufLoadCbufs(const Program& program,
                           uint32_t first_binding,
                           std::vector<ShaderCbuf>& cbufs,
@@ -1440,8 +1474,14 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       break;
     case Enc::kMtbuf:
     case Enc::kMubuf: {
-      if (inst.opcode >
-          0x03) {  // stores / raw loads: not used by Isaac's VS/PS
+      // Raw loads the shader indexes itself go to the set-2 storage buffer the
+      // planner assigned; the MUBUF field layout is the same as GCN's.
+      if (inst.enc == Enc::kMubuf && inst.opcode >= 0x08 &&
+          inst.opcode <= 0x0f) {
+        gpu::gcn::EmitGfxMubuf(t, inst, sc);
+        break;
+      }
+      if (inst.opcode > 0x03) {  // stores / atomics
         gpu::gcn::WarnUnsupported(
             inst.enc == Enc::kMtbuf ? "mtbuf.rdna" : "mubuf.rdna", inst.opcode,
             w, w1);
@@ -1546,15 +1586,18 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       }
       Inst lowered = inst;
       const uint32_t dim = (w >> 3) & 0x7;
-      if (dim != 1 && dim != 5) {
+      // dim 3 (cube) arrives with the face already selected, so it is the
+      // same (s, t, layer) address the 2D-array path takes.
+      const bool arrayed_dim = dim == 3 || dim == 5;
+      if (dim != 1 && !arrayed_dim) {
         gpu::gcn::WarnUnsupported("mimg.dim", dim, w, w1);
         break;
       }
-      if (((w >> 15) & 1) && dim == 5) {
+      if (((w >> 15) & 1) && arrayed_dim) {
         gpu::gcn::WarnUnsupported("mimg.r128-array.rdna", inst.opcode, w, w1);
         break;
       }
-      lowered.raw[0] = (w & ~0x4000u) | (dim == 5 ? 0x4000u : 0u);
+      lowered.raw[0] = (w & ~0x4000u) | (arrayed_dim ? 0x4000u : 0u);
       // NSA names every address component explicitly. Load them before emitting
       // the image operation so aliases cannot overwrite a later source and no
       // architectural VGPRs are used as scratch storage.
@@ -1896,6 +1939,7 @@ bool TranslateVs(const Program& program,
   // reads) become additional set-1 UBOs after the SMEM cbufs.
   RdnaPlanBufLoadCbufs(program, 0, r.vs_cbufs, sc.cbuf_bind,
                        sc.mubuf_cbuf_by_pc);
+  RdnaPlanGfxBuffers(program, 0, nullptr, r.vs_bufs, sc.gfx_buf_bind);
   if (ShDbg())
     std::fprintf(stderr, "[gcnspv] vs planned %zu cbufs\n", r.vs_cbufs.size());
   // DELTA_GPU_DBGPOS=<vs address>[:<dword offset>]: recompute this one shader's
@@ -2042,6 +2086,8 @@ bool TranslatePs(const Program& program,
   if (!RdnaPlanCbufs(program, static_cast<uint32_t>(r.vs_cbufs.size()),
                      r.ps_cbufs, sc.cbuf_bind, sc.smem_cbuf_by_pc))
     return false;
+  RdnaPlanGfxBuffers(program, static_cast<uint32_t>(r.vs_bufs.size()),
+                     nullptr, r.ps_bufs, sc.gfx_buf_bind);
   const gpu::gcn::MimgBindingPlan mimg_plan = RdnaPlanMimg(program);
   if (mimg_plan.binding_srsrc.size() > StageContext::kMaxPsSamplers)
     return false;
