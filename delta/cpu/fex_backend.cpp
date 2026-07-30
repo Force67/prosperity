@@ -998,6 +998,25 @@ void exitGuestThread() {
 // Plant a guest x86 trampoline that bounces into the native HLE function `hostFn`
 // via the kHostThunkSyscallBase magic syscall. The trampoline preserves the 4th
 // arg (rcx) into r10 before `syscall` clobbers rcx, matching the dispatch above.
+// Attribute an address inside the host-thunk pool back to the HLE export whose
+// trampoline lives there. A guest fault in this pool means the guest called an
+// import slot we bound but cannot service -- knowing WHICH import turns an
+// unreadable "illegal instruction at 0x5000000004xx" into a name.
+const char *hostThunkNameForAddr(uintptr_t addr, uint32_t *idxOut) {
+  std::lock_guard lk(g_thunkMutex);
+  if (!g_thunkPool)
+    return nullptr;
+  const auto base = reinterpret_cast<uintptr_t>(g_thunkPool);
+  if (addr < base || addr >= base + g_thunkPoolUsed)
+    return nullptr;
+  const uint32_t idx = static_cast<uint32_t>((addr - base) / kThunkStride);
+  if (idxOut)
+    *idxOut = idx;
+  if (idx < g_thunkNames.size() && !g_thunkNames[idx].empty())
+    return g_thunkNames[idx].c_str();
+  return "";
+}
+
 uintptr_t makeHostThunk(void *hostFn, const char *name) {
   std::lock_guard lk(g_thunkMutex);
   g_thunkNames.resize(g_hostThunks.size() + 1);
@@ -1011,6 +1030,13 @@ uintptr_t makeHostThunk(void *hostFn, const char *name) {
       LOG_ERROR("fex: host-thunk pool mmap failed");
       return 0;
     }
+    // FEX hooks mmap, so this pool lands inside FEX's reserved internal heap
+    // rather than wherever the host kernel would have put it. Log the range: a
+    // guest fault that lands in it is a call through a bad HLE import slot, and
+    // without the base there is no way to tell that from random garbage.
+    LOG_INFO("fex: host-thunk pool {:#x}+{:#x}",
+             reinterpret_cast<uint64_t>(g_thunkPool),
+             (uint64_t)g_thunkPoolSize);
     // FEX won't JIT code outside a registered executable range.
     std::lock_guard rk(g_rangeMutex);
     g_ranges.push_back({reinterpret_cast<uint64_t>(g_thunkPool), g_thunkPoolSize});

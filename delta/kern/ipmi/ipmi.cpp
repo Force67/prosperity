@@ -32,15 +32,7 @@ enum {
   kInvokeSync = 800,     // sceIpmiClientInvokeSyncMethod
   kPollAsyncReply = 1168,// async-reply poll, paired with the invoke before it
   kConnect = 1024,       // sceIpmiClientConnect (carries the service name)
-  // NOT YET IMPLEMENTED, recorded so it is not rediscovered from scratch:
-  // op 594 is a client event-flag wait. libSceUserService creates
-  // "SceUserServiceClientEventFlag" and polls it from sceUserServiceGetEvent
-  // (callers libSceUserService+0x1c45 -> +0x1ded), request block insize 0x20:
-  //     +0x00 u32 flag index  +0x04 u32 pattern/mode (seen 0 then 2)
-  //     +0x08 ptr out         +0x10 ptr out          +0x18 u64 size (8)
-  // Answering it "empty success" makes the library spin. Zeroing both out
-  // buffers was tried and changed nothing, so the reply shape is still unknown;
-  // dump it with DELTA_IPMI_OPDUMP=594 before implementing.
+  kWaitEventFlag = 594,  // client event-flag wait (see the case below)
 };
 
 // A guest descriptor that says "n bytes here" is not to be trusted: clamp what
@@ -489,11 +481,44 @@ int managerCall(uint32_t op, uint32_t kid, void *out, void *in,
     setResult(0);
     return 0;
 
+  // Client event-flag wait. libSceUserService creates
+  // "SceUserServiceClientEventFlag" and waits on it from sceUserServiceGetEvent
+  // (callers libSceUserService+0x1c45 -> +0x1ded) for the daemon to publish a
+  // login/logout event. Request block insize 0x20: +0x00 flag index,
+  // +0x04 pattern, +0x08 and +0x10 out pointers, +0x18 size.
+  //
+  // There is one local user and it is permanently signed in, so no event is ever
+  // pending and the wait must report UNSATISFIED. That is not the same as the
+  // generic "empty success": answering success says an event arrived, so
+  // sceUserServiceGetEvent allocates an event record out of libkernel's 16 MiB
+  // SceKernelInternalMemory arena, finds nothing in it, and retries -- leaking
+  // per iteration until libkernel prints "Internal Memory is running out",
+  // throws std::bad_alloc, and std::terminate lands on a UD2 in
+  // libSceLibcInternal. Failing the wait is what makes GetEvent return
+  // "no event" and let the caller proceed.
+  case kWaitEventFlag:
+    dumpManagerOp(op, kid, out, in, insize);
+    // Leaves the wrapper's pre-set -1 result in place, which is what libSceIpmi
+    // reads back as the call's value.
+    return -1;
+
+  // DELTA_IPMI_FAILOP=<op>: answer one op as a hard failure instead of "empty
+  // success". Kept as a research knob -- it is what separated a caller that
+  // retries on failure from one that spins because we claimed success with no
+  // data, and the next unknown op will need the same distinction drawn.
   default:
     if (traceOn())
       std::fprintf(stderr, "[ipmi] op=%u kid=%u (unhandled, empty success)\n",
                    op, kid);
     dumpManagerOp(op, kid, out, in, insize);
+    {
+      static const uint32_t failOp = [] {
+        const char *e = std::getenv("DELTA_IPMI_FAILOP");
+        return e ? static_cast<uint32_t>(std::strtoul(e, nullptr, 0)) : 0u;
+      }();
+      if (failOp && op == failOp)
+        return -1;  // leaves the wrapper's pre-set -1 result in place
+    }
     setResult(0);
     return 0;
   }

@@ -98,6 +98,8 @@ void exitGuestThread() {
 
 // Native host is x86-64: the guest can call the host function directly.
 uintptr_t makeHostThunk(void *hostFn, const char * /*name*/) { return reinterpret_cast<uintptr_t>(hostFn); }
+// No trampoline pool on native: an HLE import IS the host function pointer.
+const char *hostThunkNameForAddr(uintptr_t, uint32_t *) { return nullptr; }
 
 // Native x86 host: int3 return hooks work directly, so guest-fn return hooking
 // isn't needed; hand back the real target unchanged (no wrap).

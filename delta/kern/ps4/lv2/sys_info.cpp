@@ -306,6 +306,26 @@ int PS4ABI sys_sysctl(int *name, uint32_t namelen, void *oldp, size_t *oldlenp,
     return 0;
   }
 
+  // vm.budgets.mlock_avail (synthetic {0x1337,11}): the wired-memory budget
+  // still AVAILABLE, the companion to mlock_total above. Left at ENOENT
+  // libkernel's internal-memory allocator takes its failure path and sizes the
+  // SceKernelInternalMemory arena minimally, then reports
+  // "[ScePthread/System] Internal Memory is running out." and throws
+  // std::bad_alloc -- which terminates the process via a UD2 in
+  // libSceLibcInternal. That only bites once a real firmware module allocates
+  // from the arena, which is why it stayed hidden while every service module ran
+  // as an HLE shim (see DELTA_LLE in runtime/vprx/vprx.cpp).
+  // Report the same 6 GiB as mlock_total: nothing has been wired yet.
+  else if (name[0] == 0x1337 && name[1] == 11 && namelen == 2) {
+    if (oldp && oldlenp) {
+      uint64_t v = 0x180000000ull;
+      size_t n = *oldlenp < sizeof(v) ? *oldlenp : sizeof(v);
+      std::memcpy(oldp, &v, n);
+      *oldlenp = n;
+    }
+    return 0;
+  }
+
   // Benign zero-filled PS5 config oids (synthetic {0x1337,9}): kern.amm.param,
   // kern.app.memconf and machdep.auto_update_version.
   else if (name[0] == 0x1337 && name[1] == 9 && namelen == 2) {
@@ -344,6 +364,11 @@ int PS4ABI sys_sysctl(int *name, uint32_t namelen, void *oldp, size_t *oldlenp,
     } else if (name == "vm.budgets.mlock_total") {
       static_cast<uint32_t *>(oldp)[0] = 0x1337;
       static_cast<uint32_t *>(oldp)[1] = 8;
+      *oldlenp = 8;
+      return 0;
+    } else if (name == "vm.budgets.mlock_avail") {
+      static_cast<uint32_t *>(oldp)[0] = 0x1337;
+      static_cast<uint32_t *>(oldp)[1] = 11;
       *oldlenp = 8;
       return 0;
     } else if (name == "kern.amm.param" || name == "kern.app.memconf" ||

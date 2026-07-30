@@ -100,6 +100,13 @@ void exitGuestThread();
 // vprx HLE exports (e.g. libSceVideoOut) into guest import slots. Thread-safe.
 uintptr_t makeHostThunk(void *hostFn, const char *name = nullptr);
 
+// If `addr` lands in the host-thunk pool, the "libname!NID" of the HLE export
+// whose trampoline lives there ("" if it was bound without a name), else null.
+// A guest fault inside the pool is a call through an import slot we bound but
+// cannot service, and this is what names it. FEX backend only; the native
+// backend has no trampolines and returns null.
+const char *hostThunkNameForAddr(uintptr_t addr, uint32_t *idxOut = nullptr);
+
 // Wrap an already-resolved guest function `realTarget` with a return-capturing
 // guest trampoline: it calls realTarget, then invokes native
 // `loggerFn(hookId, a0,a1,a2,a3, ret)` (a0..a3 = original rdi/rsi/rdx/rcx, ret =

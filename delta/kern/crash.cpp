@@ -825,6 +825,17 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
     std::fprintf(stderr, "  in syscall %d (%s)\n", sc, syscall_getname((uint32_t)sc));
   std::fprintf(stderr, "  fault = %016llx  %s\n",
                (unsigned long long)si->si_addr, fault);
+  // A fault inside the host-thunk pool is the guest calling an HLE import slot
+  // we bound but cannot actually service. Name it: the raw address is inside
+  // FEX's reserved heap and looks like unrelated garbage otherwise.
+  {
+    uint32_t ti = 0;
+    if (const char *tn =
+            cpu::hostThunkNameForAddr((uintptr_t)si->si_addr, &ti))
+      std::fprintf(stderr,
+                   "  ^ inside the HLE host-thunk pool: thunk #%u %s\n", ti,
+                   *tn ? tn : "(bound without a name)");
+  }
   // Show what the host VA space holds around the fault: which mapping it hit,
   // or which two mappings it fell between. Async-signal-safe (read+write only).
   if (si->si_addr) {

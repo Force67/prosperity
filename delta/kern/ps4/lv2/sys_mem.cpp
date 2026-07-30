@@ -463,7 +463,7 @@ int PS4ABI sys_mname(uint8_t *ptr, size_t len, const char *name, void *) {
     return -1;
   }
 
-  LOG_WARNING("tagged {} with name {}", fmt::ptr(ptr), name);
+  LOG_WARNING("tagged {}+{:#x} with name {}", fmt::ptr(ptr), len, name);
   info->name = name;
   // Titles name their thread STACKS this way; carry the tag onto the host
   // thread running on that stack (wait probe / gdb / perf attribution).
