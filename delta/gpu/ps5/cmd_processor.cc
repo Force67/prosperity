@@ -19,9 +19,11 @@
 
 #include "gpu/ps5/cmd_processor.h"
 
+#include "gpu/gcn/gcn_detile.h"
 #include "gpu/guest_memory.h"
 #include "gpu/ps4/pm4.h"
 #include "gpu/ps5/agc_regs.h"
+#include "gpu/ps5/rdna/rdna_compute.h"
 #include "gpu/ps5/rdna/rdna_resource.h"
 #include "gpu/ps5/rdna/rdna_translate.h"
 #include "gpu/rhi/renderer.h"
@@ -635,6 +637,43 @@ const char* const kEncName[19] = {"?",     "sop1", "sop2", "sopk", "sopc",
                                   "vop3p", "vopc", "vint", "ds",   "mubuf",
                                   "mtbuf", "mimg", "exp",  "flat"};
 
+// The workgroup shape and the RSRC2-derived launch state are baked into the
+// recompiled module, so the code address alone cannot key the cache: the same
+// CS can legally be re-dispatched with a different shape.
+struct ComputeShaderKey {
+  uint64_t address = 0;
+  uint32_t thread_x = 0, thread_y = 0, thread_z = 0;
+  uint32_t user_sgpr = 0, tgid_enable = 0, lds_dwords = 0;
+
+  bool operator==(const ComputeShaderKey& other) const = default;
+};
+
+struct ComputeShaderKeyHash {
+  size_t operator()(const ComputeShaderKey& key) const {
+    size_t hash = std::hash<uint64_t>{}(key.address);
+    const auto combine = [&](uint32_t value) {
+      hash ^= std::hash<uint32_t>{}(value) + 0x9e3779b9u + (hash << 6) +
+              (hash >> 2);
+    };
+    combine(key.thread_x);
+    combine(key.thread_y);
+    combine(key.thread_z);
+    combine(key.user_sgpr);
+    combine(key.tgid_enable);
+    combine(key.lds_dwords);
+    return hash;
+  }
+};
+
+// A dispatch dropped here is indistinguishable from one the title never issued
+// (its writes just never appear), so every skip is reported. Rate-limited
+// across all reasons: a title that dispatches every frame would otherwise
+// flood the log.
+bool CsReport() {
+  static int n = 0;
+  return n++ < 32;
+}
+
 void HandleDispatch(const uint32_t* body, uint32_t count) {
   const uint32_t dim_x = count >= 1 ? body[0] : 0;
   const uint32_t dim_y = count >= 2 ? body[1] : 0;
@@ -647,6 +686,9 @@ void HandleDispatch(const uint32_t* body, uint32_t count) {
   const uint32_t tgy = g_regs[mmCOMPUTE_NUM_THREAD_Y] & 0xFFFF;
   const uint32_t tgz = g_regs[mmCOMPUTE_NUM_THREAD_Z] & 0xFFFF;
   const uint32_t rsrc2 = g_regs[mmCOMPUTE_PGM_RSRC2];
+  const uint32_t user_sgpr = (rsrc2 >> 1) & 0x1F;
+  const uint32_t tgid_enable = (rsrc2 >> 7) & 0x7;
+  const uint32_t lds_dwords = (rsrc2 >> 15) & 0x1FF;
 
   static const bool kCsDump = std::getenv("DELTA_GPU_CSDUMP") != nullptr;
   static std::unordered_set<uint64_t> dumped_cs;
@@ -719,12 +761,213 @@ void HandleDispatch(const uint32_t* body, uint32_t count) {
         std::fprintf(stderr, " %#x=%u", o, flat_ops[o]);
     std::fprintf(stderr, "\n");
   }
-  static std::unordered_set<uint64_t> warned_cs;
-  if (warned_cs.insert(cs_addr).second)
-    std::fprintf(stderr,
-                 "[csgpu] PS5 compute is not implemented; dispatch @%#lx "
-                 "groups=[%u %u %u] skipped\n",
-                 (unsigned long)cs_addr, dim_x, dim_y, dim_z);
+  if (!InGuest(cs_addr) || !tgx || !tgy || !dim_x || !dim_y)
+    return;
+  static const bool kNoCs = std::getenv("DELTA_GPU_NOCS") != nullptr;
+  if (kNoCs || !rhi::DefaultRenderer().available() ||
+      !gpu::IsReadableRange(cs_addr, kMaxShaderBytes))
+    return;
+
+  // Recompile the CS to a Vulkan compute pipeline (cached), resolve the guest
+  // ranges its descriptors name, and run it on the shared compute backend.
+  // Minecraft builds its UI vertex buffers this way, so a skipped dispatch
+  // leaves the draws that read them fetching zeros.
+  const ComputeShaderKey key{cs_addr,   tgx,         tgy,       tgz,
+                             user_sgpr, tgid_enable, lds_dwords};
+  static std::unordered_map<ComputeShaderKey, gcn::RecompiledCs,
+                            ComputeShaderKeyHash>
+      cs_cache;
+  auto cached = cs_cache.find(key);
+  if (cached == cs_cache.end()) {
+    cached = cs_cache
+                 .emplace(key, rdna::RecompileCompute(
+                                   reinterpret_cast<const uint32_t*>(cs_addr),
+                                   tgx, tgy, tgz, user_sgpr, tgid_enable,
+                                   lds_dwords))
+                 .first;
+    if (!cached->second.ok && CsReport())
+      std::fprintf(stderr,
+                   "[csgpu] unsupported CS @%#lx groups=[%u %u %u] tg=[%u %u "
+                   "%u] usgpr=%u -- dispatch skipped\n",
+                   (unsigned long)cs_addr, dim_x, dim_y, dim_z, tgx, tgy, tgz,
+                   user_sgpr);
+  }
+  gcn::RecompiledCs& rc = cached->second;
+  if (!rc.ok)
+    return;
+
+  const uint32_t* ud = &g_regs[mmCOMPUTE_USER_DATA_0];
+  const uint32_t ud_dwords = std::min(user_sgpr, 16u);
+  rhi::ComputeInfo ci;
+  ci.cs_addr = cs_addr;
+  ci.groups[0] = dim_x;
+  ci.groups[1] = dim_y;
+  ci.groups[2] = dim_z;
+  ci.recomp = &rc;
+  for (int k = 0; k < 16; k++)
+    ci.user_data[k] = ud[k];
+
+  constexpr uint64_t kMaxRes = 256ull * 1024 * 1024;  // per storage buffer
+  static const bool kResTrace = std::getenv("DELTA_GPU_CSRES") != nullptr;
+  bool res_ok = true;
+  for (const gcn::CsResource& r : rc.resources) {
+    const uint32_t dwords = r.kind == 1 ? 8u : r.kind == 2 ? 2u : 4u;
+    // Compute seeds user data straight into s0.., so a plan naming an SGPR past
+    // the loaded window names one an SRT load produced, which nothing here
+    // replays.
+    if (r.base_sgpr + dwords > ud_dwords) {
+      if (CsReport())
+        std::fprintf(stderr,
+                     "[csgpu] CS @%#lx bind=%u kind=%u s%u pc=%#x is outside "
+                     "the %u-dword user data -- dispatch skipped\n",
+                     (unsigned long)cs_addr, r.binding, r.kind, r.base_sgpr,
+                     r.use_pc, ud_dwords);
+      res_ok = false;
+      break;
+    }
+    const uint32_t* desc = &ud[r.base_sgpr];
+
+    uint64_t base = 0, size = 0, guest_size = 0;
+    gcn::TImage image;
+    bool image_staging = false;
+    bool zero_fill = false;
+    uint32_t elem_bytes = 4, stage_elem_bytes = 4;
+    if (std::all_of(desc, desc + dwords, [](uint32_t w) { return w == 0; })) {
+      // A null descriptor is a real binding on a path this launch does not
+      // take; the translator guards it and reads zero.
+      zero_fill = true;
+      size = std::max<uint64_t>(r.min_bytes, 16);
+    } else if (r.kind == 1) {
+      const gcn::TImage t = rdna::DecodeTImage(desc);
+      const bool rgba8 = t.dfmt == 10 && (t.nfmt == 0 || t.nfmt == 4);
+      const bool r32 =
+          t.dfmt == 4 && (t.nfmt == 4 || t.nfmt == 5 || t.nfmt == 7);
+      const bool rg16f = t.dfmt == 5 && t.nfmt == 7;
+      const bool r16f = t.dfmt == 2 && t.nfmt == 7;
+      const bool rg8 = t.dfmt == 3 && t.nfmt == 0;
+      const bool rgba16f = t.dfmt == 12 && t.nfmt == 7;
+      const bool r11g11b10f = t.dfmt == 6 && t.nfmt == 7;
+      elem_bytes = rgba16f ? 8u : (r16f || rg8) ? 2u : 4u;
+      stage_elem_bytes = r11g11b10f ? 16u : std::max(elem_bytes, 4u);
+      // tiling_idx >= 0x100 is the T# decoder's "no detiler for this gfx10
+      // swizzle mode" marker; staging one would scramble the texels it copies
+      // back into guest memory.
+      gcn::TextureLayout32 layout;
+      if ((t.type != 9 && t.type != 13) ||
+          !(rgba8 || r32 || rg16f || r16f || rg8 || rgba16f || r11g11b10f) ||
+          t.tiling_idx >= 0x100 || !t.valid ||
+          !gcn::BuildTextureLayout32(layout, t.width, t.height, t.pitch,
+                                     t.layers, t.mip_levels, t.tiling_idx,
+                                     t.pow2_pad, elem_bytes)) {
+        if (CsReport())
+          std::fprintf(stderr,
+                       "[csgpu] CS @%#lx bind=%u unsupported image base=%#lx "
+                       "type=%u dfmt=%u nfmt=%u tiling=%#x %ux%u pitch=%u "
+                       "-- dispatch skipped\n",
+                       (unsigned long)cs_addr, r.binding, (unsigned long)t.base,
+                       t.type, t.dfmt, t.nfmt, t.tiling_idx, t.width, t.height,
+                       t.pitch);
+        res_ok = false;
+        break;
+      }
+      base = t.base;
+      guest_size = layout.size;
+      image_staging = !gcn::TilingIsLinear(t.tiling_idx) ||
+                      elem_bytes != stage_elem_bytes;
+      if (image_staging) {
+        gcn::TextureLayout32 linear;
+        if (!gcn::BuildTextureLayout32(linear, t.width, t.height, t.pitch,
+                                       t.layers, t.mip_levels, 8, t.pow2_pad,
+                                       stage_elem_bytes)) {
+          if (CsReport())
+            std::fprintf(stderr,
+                         "[csgpu] CS @%#lx bind=%u image %ux%u has no linear "
+                         "staging layout -- dispatch skipped\n",
+                         (unsigned long)cs_addr, r.binding, t.width, t.height);
+          res_ok = false;
+          break;
+        }
+        size = linear.size;
+        image = t;
+      } else {
+        size = guest_size;
+      }
+    } else if (r.kind == 2) {  // raw pointer into an SRT/descriptor table
+      base = (static_cast<uint64_t>(desc[1] & 0xFFFF) << 32) | desc[0];
+      size = r.min_bytes;
+    } else {  // buffer V#
+      const VBuffer v = DecodeVBuffer(desc);
+      base = v.base;
+      size = v.stride ? static_cast<uint64_t>(v.stride) * v.num_records
+                      : v.num_records;
+      size = std::max<uint64_t>(size, r.min_bytes);
+    }
+    if (!guest_size && !zero_fill)
+      guest_size = size;
+    if (kResTrace)
+      std::fprintf(stderr,
+                   "[csres] cs=%#lx bind=%u kind=%u s%u pc=%#x base=%#lx "
+                   "size=%#lx guest=%#lx written=%d zero=%d\n",
+                   (unsigned long)cs_addr, r.binding, r.kind, r.base_sgpr,
+                   r.use_pc, (unsigned long)base, (unsigned long)size,
+                   (unsigned long)guest_size, r.written ? 1 : 0,
+                   zero_fill ? 1 : 0);
+    // A dispatch writes guest memory, so a range that does not check out skips
+    // the whole dispatch rather than binding something wrong.
+    if (!zero_fill &&
+        (size < r.min_bytes || size > kMaxRes || guest_size > kMaxRes ||
+         !GpuAddr(base) || !gpu::IsReadableRange(base, guest_size))) {
+      if (CsReport())
+        std::fprintf(stderr,
+                     "[csgpu] CS @%#lx bind=%u kind=%u unusable range "
+                     "base=%#lx size=%#lx -- dispatch skipped\n",
+                     (unsigned long)cs_addr, r.binding, r.kind,
+                     (unsigned long)base, (unsigned long)guest_size);
+      res_ok = false;
+      break;
+    }
+    if (ci.num_res >= rhi::ComputeInfo::kMaxResources) {
+      if (CsReport())
+        std::fprintf(stderr,
+                     "[csgpu] CS @%#lx needs more than %u resources -- "
+                     "dispatch skipped\n",
+                     (unsigned long)cs_addr, rhi::ComputeInfo::kMaxResources);
+      res_ok = false;
+      break;
+    }
+    rhi::ComputeInfo::Res& out = ci.res[ci.num_res];
+    out.base = base;
+    out.size = size;
+    out.guest_size = guest_size;
+    out.binding = r.binding;
+    out.shader_writes = r.written;
+    out.written = r.written && !zero_fill;
+    out.zero_fill = zero_fill;
+    out.image_staging = image_staging;
+    if (image_staging) {
+      out.width = image.width;
+      out.height = image.height;
+      out.pitch = image.pitch;
+      out.layers = image.layers;
+      out.mip_levels = image.mip_levels;
+      out.tiling_idx = image.tiling_idx;
+      out.elem_bytes = elem_bytes;
+      out.stage_elem_bytes = stage_elem_bytes;
+      out.dfmt = image.dfmt;
+      out.pow2_pad = image.pow2_pad;
+    }
+    ci.num_res++;
+  }
+  if (!res_ok || !ci.num_res)
+    return;
+  const bool dispatched = rhi::Dispatch(rhi::DefaultRenderer(), ci);
+  if (!dispatched && CsReport())
+    std::fprintf(stderr, "[csgpu] CS @%#lx dispatch failed (%u resources)\n",
+                 (unsigned long)cs_addr, ci.num_res);
+  if (kResTrace)
+    std::fprintf(stderr, "[csres] cs=%#lx dispatch %s (%u resources)\n",
+                 (unsigned long)cs_addr, dispatched ? "executed" : "failed",
+                 ci.num_res);
 }
 
 // DELTA_AGC_DUMPSH=<hexaddr>: decode and print one shader by address, once.
