@@ -332,6 +332,25 @@ void EmitInst(Translator& t, const Inst& inst, StageContext& sc) {
         break;
       const uint32_t chan = (w >> 8) & 3, attr = (w >> 10) & 0x3F;
       const uint32_t op = (w >> 16) & 3, vdst = (w >> 18) & 0xFF;
+      // KNOWN SILENT DROP -- the largest one left in this translator.
+      // VSRC (bits [7:0]) selects which parameter v_interp_mov_f32 (op 2)
+      // reads: 0 = P10, 1 = P20, 2 = P0. Only P0 is handled; a P10 or P20 site
+      // falls straight through this `if`, emits ZERO body words, and leaves
+      // vdst at its zero initialiser -- with no WarnUnsupported, so the shader
+      // still reports verdict=ok with zero declines and zero unsupported ops
+      // while quietly computing from a zero. DELTA_GPU_SHAUDIT measures the
+      // blast radius on SotC: 356 sites across 33 of its 56 unique pixel
+      // shaders. That is the failure shape seen downstream -- pixel shaders
+      // that translate "fine" yet write constants or zero into their targets.
+      //
+      // Fixing it needs the per-vertex parameters, since P10 = P1 - P0 and
+      // P20 = P2 - P0 at the provoking triangle: declare the Location with
+      // PerVertexKHR (VK_KHR_fragment_shader_barycentric) and emit the
+      // subtraction. Until then the honest interim step is to route these
+      // through WarnUnsupported so HadUnsupported() declines the shader and the
+      // draw is skipped rather than drawn wrong. Left as-is here only because
+      // that flips ~33 shaders from "silently wrong" to "declined" and the
+      // consequences were not measurable within this session.
       if (op == 1 || (op == 2 && (w & 0xFF) == 2)) {
         // Vulkan provides the completed interpolation directly. P2 reads the
         // final value; MOV P0 reads the selected parameter input instead of
