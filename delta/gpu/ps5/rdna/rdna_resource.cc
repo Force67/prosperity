@@ -1007,6 +1007,16 @@ std::unordered_map<uint32_t, BufferResource> ResolveBuffers(
         std::memcpy(resource.descriptor, &eval.sgpr[srsrc],
                     sizeof(resource.descriptor));
         resource.descriptor_valid = true;
+        const uint32_t soff = (inst.raw[1] >> 24) & 0xFF;
+        if (soff == 128) {
+          resource.soffset_valid = true;
+        } else if (soff > 128 && soff <= 192) {
+          resource.soffset = soff - 128;
+          resource.soffset_valid = true;
+        } else if (soff < ScalarEval::kRegs && eval.known[soff]) {
+          resource.soffset = eval.sgpr[soff];
+          resource.soffset_valid = true;
+        }
         out.emplace(inst.pc, resource);
       }
     }

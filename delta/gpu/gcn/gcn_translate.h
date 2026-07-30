@@ -34,6 +34,11 @@ struct ShaderAttr {
   // fetch, use the V#.
   uint32_t inst_format = 0;
   uint32_t use_pc = ~0u;  // direct/inline fetch MUBUF pc for scalar replay
+  // Byte offset immediate on the fetch instruction. Sony's RDNA compiler packs
+  // every attribute into one V# and separates them with this, so without it all
+  // of them land on the first field. Only the RDNA parser fills it in; the PS4
+  // fetch shaders give each attribute its own V#.
+  uint32_t inst_offset = 0;
 };
 
 // Set-1 UBO bindings shared by VS + PS. A shader pair whose constant buffers

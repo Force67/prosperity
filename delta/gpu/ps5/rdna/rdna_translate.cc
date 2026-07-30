@@ -1673,6 +1673,7 @@ struct FetchAttr {
   uint32_t pc =
       ~0u;  // inline fetch MUBUF pc (~0 = standalone fetch sub-shader)
   uint32_t inst_format = 0;  // typed (MTBUF) fetch format; 0 = take the V#'s
+  uint32_t inst_offset = 0;  // byte offset immediate: this attr's field offset
 };
 
 // Scan an instruction stream for the s_load_dwordx4(V# table) +
@@ -1699,6 +1700,7 @@ std::vector<FetchAttr> ParseFetchInsts(const Program& insts) {
     const uint32_t srsrc = ((in.raw[1] >> 16) & 0x1F) * 4;
     const uint32_t nc = (in.opcode & 3) + 1;
     const bool idxen = (in.raw[0] >> 13) & 1, offen = (in.raw[0] >> 12) & 1;
+    const uint32_t inst_offset = in.raw[0] & 0xFFF;
     const uint32_t vaddr = in.raw[1] & 0xFF, soffset = (in.raw[1] >> 24) & 0xFF;
     // If srsrc's V# was loaded via s_load from a user_data pointer, this fetch
     // reads a TABLE of V#s at that pointer: table_sgpr = the s_load's sbase and
@@ -1713,15 +1715,15 @@ std::vector<FetchAttr> ParseFetchInsts(const Program& insts) {
       std::fprintf(
           stderr,
           "[gcnspv] buf_load nc=%u vdst=v%u srsrc=s%u idxen=%u offen=%u "
-          "vaddr=v%u soffset=s%u -> %s (table_sgpr=s%u doff=%u)\n",
-          nc, vdata, srsrc, idxen, offen, vaddr, soffset,
+          "vaddr=v%u soffset=s%u ioff=%u -> %s (table_sgpr=s%u doff=%u)\n",
+          nc, vdata, srsrc, idxen, offen, vaddr, soffset, inst_offset,
           vtx ? "vertex-attr" : "const-ubo", table_sgpr, dword_off);
     // Only a genuine per-vertex fetch becomes a vertex input. A constant load
     // is left for the UBO path (RdnaPlanBufLoadCbufs assigns the same table
     // slots).
     if (vtx) {
       out.push_back({sem, nc, vdata, table_sgpr, dword_off, in.pc,
-                     typed ? ((in.raw[0] >> 19) & 0x7F) : 0u});
+                     typed ? ((in.raw[0] >> 19) & 0x7F) : 0u, inst_offset});
       sem++;
     }
   }
@@ -1859,7 +1861,7 @@ bool TranslateVs(const Program& program,
       first_attr_comps = a.num_comps;
     }
     r.attrs.push_back({a.semantic, a.num_comps, a.table_sgpr, a.dword_off,
-                       false, a.inst_format, a.pc});
+                       false, a.inst_format, a.pc, a.inst_offset});
   }
 
   StageContext sc;

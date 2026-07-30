@@ -30,6 +30,12 @@ struct BufferResource {
   uint64_t base = 0;
   uint32_t descriptor[4] = {};
   bool descriptor_valid = false;
+  // Byte offset the fetch adds on top of the descriptor. For a structured V#
+  // the hardware computes base + soffset + index*stride, and Sony's compiler
+  // uses it to place each attribute inside the vertex: the three attributes of
+  // one stream share a base and differ only here.
+  uint32_t soffset = 0;
+  bool soffset_valid = false;
 };
 
 inline Smem DecodeSmem(const gpu::gcn::Inst& inst) {
