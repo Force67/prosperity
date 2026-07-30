@@ -37,12 +37,15 @@ std::atomic<uint64_t> g_total_submits{0};
 std::atomic<uint64_t> g_total_draws{0};
 bool g_vk_tried = false;
 bool g_frame_active = false;
+uint32_t g_presented_frames = 0;
 
 struct ShaderKey {
   uint64_t vs = 0, ps = 0, fetch = 0;
+  uint32_t ps_input_ena = 0;
   bool neo = false;
   bool operator==(const ShaderKey& o) const {
-    return vs == o.vs && ps == o.ps && fetch == o.fetch && neo == o.neo;
+    return vs == o.vs && ps == o.ps && fetch == o.fetch &&
+           ps_input_ena == o.ps_input_ena && neo == o.neo;
   }
 };
 struct ShaderKeyHash {
@@ -50,6 +53,7 @@ struct ShaderKeyHash {
     uint64_t h =
         (k.vs ^ (k.ps + 0x9e3779b97f4a7c15ull + (k.vs << 6) + (k.vs >> 2)));
     h ^= k.fetch + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
+    h ^= k.ps_input_ena + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
     h ^= static_cast<uint64_t>(k.neo) << 63;
     return static_cast<size_t>(h);
   }
@@ -543,8 +547,18 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
     std::shared_ptr<const gcn::Program> ps_prog;
     if (ps_a >= 0x1000000000ull && ps_a < 0x20000000000ull) {
       ps_prog = gcn::CachedProgram(ps_a, 4096);
-      auto texs =
-          gcn::TrackTextures(ps_prog, &g_regs[mmSPI_SHADER_USER_DATA_PS_0]);
+      static const int kTexTrackFrame = [] {
+        const char* e = std::getenv("DELTA_GPU_TEXTRACK_FRAME");
+        return e ? std::atoi(e) : -1;
+      }();
+      const uint32_t frame = g_presented_frames + 1;
+      const bool trace_tex =
+          kTexTrackFrame >= 0 && static_cast<int>(frame) == kTexTrackFrame;
+      if (trace_tex)
+        std::fprintf(stderr, "[textrack] f%u ps=%#lx\n", frame,
+                     (unsigned long)ps_a);
+      auto texs = gcn::TrackTextures(
+          ps_prog, &g_regs[mmSPI_SHADER_USER_DATA_PS_0], trace_tex);
       if (!texs.empty()) {
         // Preserve every valid GFX7 T# address. Format support is relevant only
         // when uploading guest memory; a T# with R32F/RG16F/RGBA16F semantics
@@ -570,6 +584,7 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
         d.tex_arrayed = texs[0].arrayed;
         d.tex_force_lod_zero = texs[0].force_lod_zero;
         d.tex_depth_compare = texs[0].depth_compare;
+        d.tex_null_descriptor = texs[0].null_descriptor;
         d.uv_data = d.vertex_data;
         d.uv_stride = d.vertex_stride;
         // All sampled textures (binding order), for multi-texture PS (Doom64
@@ -599,6 +614,7 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
           dt.force_lod_zero = t.force_lod_zero;
           dt.depth_compare = t.depth_compare;
           dt.storage = t.storage;
+          dt.null_descriptor = t.null_descriptor;
         }
         // d.uv_offset was derived from the fetch shader during vertex
         // extraction. DELTA_GPU_TEXFMT: dump sampled texture formats
@@ -656,15 +672,17 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
       static std::unordered_map<ShaderKey, gcn::Recompiled, ShaderKeyHash>
           sh_cache;
       const bool neo = gcn::DefaultIsaMode() == gcn::IsaMode::kNeo;
-      ShaderKey key{vs_a, ps_a, fetch, neo};
+      const uint32_t ps_input_ena = g_regs[mmSPI_PS_INPUT_ENA];
+      ShaderKey key{vs_a, ps_a, fetch, ps_input_ena, neo};
       auto it = sh_cache.find(key);
       if (it == sh_cache.end())
         it = sh_cache
                  .emplace(key, gcn::Recompile(
                                    reinterpret_cast<const uint32_t*>(vs_a),
-                                   reinterpret_cast<const uint32_t*>(ps_a),
-                                   &g_regs[mmSPI_SHADER_USER_DATA_VS_0],
-                                   &g_regs[mmSPI_SHADER_USER_DATA_PS_0]))
+                                    reinterpret_cast<const uint32_t*>(ps_a),
+                                    &g_regs[mmSPI_SHADER_USER_DATA_VS_0],
+                                    &g_regs[mmSPI_SHADER_USER_DATA_PS_0],
+                                    ps_input_ena))
                  .first;
       gcn::Recompiled& rc = it->second;
       recomp_status = rc.ok ? "bad-attrs" : "rejected";
@@ -1565,6 +1583,7 @@ void EndFrame(uint64_t scanout_base) {
   if (g_frame_active && rhi::DefaultRenderer().available()) {
     rhi::EndFrame(rhi::DefaultRenderer(), scanout_base);
     g_frame_active = false;
+    g_presented_frames++;
   }
 }
 

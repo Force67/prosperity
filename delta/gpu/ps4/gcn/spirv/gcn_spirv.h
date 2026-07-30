@@ -19,10 +19,11 @@ namespace gpu::gcn {
 // sets r.ok). Returns r.ok. When the backend is compiled out
 // (no SPIRV-Tools/Headers) this always declines.
 bool RecompileSpirv(const uint32_t* vs_code,
-                    const uint32_t* ps_code,
-                    const uint32_t* vs_user_data,
-                    const uint32_t* ps_user_data,
-                    Recompiled& r);
+                     const uint32_t* ps_code,
+                     const uint32_t* vs_user_data,
+                     const uint32_t* ps_user_data,
+                     uint32_t ps_input_ena,
+                     Recompiled& r);
 
 // Translate a compute shader into r (GLCompute SPIR-V + resource plan).
 // lds_dwords is the raw COMPUTE_PGM_RSRC2.LDS_SIZE field (128-dword granules).

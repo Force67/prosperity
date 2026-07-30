@@ -352,31 +352,45 @@ bool CreateTextureDescriptors() {
     wv.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
     VKOK(
         vkCreateImageView(g_dev.device, &wv, nullptr, &g_tex.white_array_view));
+    wv.components = {VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ZERO,
+                     VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ZERO};
+    wv.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    VKOK(vkCreateImageView(g_dev.device, &wv, nullptr, &g_tex.zero_view));
+    wv.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+    VKOK(
+        vkCreateImageView(g_dev.device, &wv, nullptr, &g_tex.zero_array_view));
 
-    VkDescriptorSetLayout layouts[2] = {g_tex.ds_layout, g_tex.ds_layout};
-    VkDescriptorSet sets[2];
+    VkDescriptorSetLayout layouts[4] = {g_tex.ds_layout, g_tex.ds_layout,
+                                        g_tex.ds_layout, g_tex.ds_layout};
+    VkDescriptorSet sets[4];
     VkDescriptorSetAllocateInfo wa{
         VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
     wa.descriptorPool = g_tex.ds_pool;
-    wa.descriptorSetCount = 2;
+    wa.descriptorSetCount = 4;
     wa.pSetLayouts = layouts;
     VKOK(vkAllocateDescriptorSets(g_dev.device, &wa, sets));
     g_tex.white_set = sets[0];
     g_tex.white_array_set = sets[1];
-    VkDescriptorImageInfo infos[2] = {
+    g_tex.zero_set = sets[2];
+    g_tex.zero_array_set = sets[3];
+    VkDescriptorImageInfo infos[4] = {
         {g_tex.sampler, g_tex.white_view,
          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
         {g_tex.sampler, g_tex.white_array_view,
+         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+        {g_tex.sampler, g_tex.zero_view,
+         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+        {g_tex.sampler, g_tex.zero_array_view,
          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}};
-    VkWriteDescriptorSet writes[2];
-    for (uint32_t i = 0; i < 2; i++) {
+    VkWriteDescriptorSet writes[4];
+    for (uint32_t i = 0; i < 4; i++) {
       writes[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
       writes[i].dstSet = sets[i];
       writes[i].descriptorCount = 1;
       writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
       writes[i].pImageInfo = &infos[i];
     }
-    vkUpdateDescriptorSets(g_dev.device, 2, writes, 0, nullptr);
+    vkUpdateDescriptorSets(g_dev.device, 4, writes, 0, nullptr);
   }
   g_tex.descriptors_ready = true;
   return true;

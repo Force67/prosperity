@@ -1267,6 +1267,7 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
             d.tex_arrayed = texs[0].arrayed;
             d.tex_force_lod_zero = texs[0].force_lod_zero;
             d.tex_depth_compare = texs[0].depth_compare;
+            d.tex_null_descriptor = texs[0].null_descriptor;
           }
           for (size_t i = 0; i < texs.size() && i < 16; i++) {
             const auto& s = texs[i];
@@ -1291,6 +1292,7 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
             dt.force_lod_zero = s.force_lod_zero;
             dt.depth_compare = s.depth_compare;
             dt.storage = s.storage;
+            dt.null_descriptor = s.null_descriptor;
             dt.swizzle = PackDstSel(s);
           }
           d.num_texs = static_cast<uint32_t>(std::min<size_t>(texs.size(), 16));

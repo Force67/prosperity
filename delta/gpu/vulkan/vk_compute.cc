@@ -524,11 +524,12 @@ bool AliasedShapeMatches(const CsAliasedImage& img,
     warned++;
     std::fprintf(stderr,
                  "[gpuvk] cs %s live %s target %#llx shape mismatch: image "
-                 "%ux%u %uB vs cs %ux%u mips=%u %uB -> falling back to guest "
-                 "memory\n",
+                 "%ux%u %uB vs cs %ux%u pitch=%u mips=%u dfmt=%u elem=%u/%uB "
+                 "tiling=%u -> falling back to guest memory\n",
                  dir, img.is_depth ? "depth" : "color",
                  (unsigned long long)res.base, img.w, img.h, img.elem_bytes,
-                 res.width, res.height, res.mip_levels, res.stage_elem_bytes);
+                 res.width, res.height, res.pitch, res.mip_levels, res.dfmt,
+                 res.elem_bytes, res.stage_elem_bytes, res.tiling_idx);
   }
   return false;
 }
@@ -669,8 +670,14 @@ bool UploadCsRangeToRt(uint64_t base, CsRange& e) {
   CsAliasedImage img;
   if (!e.image_staging || !FindCsAliasedImage(base, img))
     return true;  // nothing to refresh
-  if (!AliasedShapeMatches(img, e.res, "writes"))
+  if (!AliasedShapeMatches(img, e.res, "writes")) {
+    // The guest reused this address with an incompatible image layout. The
+    // compute result is current in guest memory, while the old VkImage can no
+    // longer represent it; stop resolving subsequent samples to that image.
+    if (!img.is_depth)
+      g_rts[base].ever_rendered = false;
     return true;
+  }
   if (!RunAliasedCopy(img, e.res, e, /*to_image=*/true))
     return false;
   if (!img.is_depth)

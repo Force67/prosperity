@@ -197,12 +197,10 @@ bool PlanCbufs(const Program& program,
     if (!n)
       continue;
     const uint32_t w = inst.raw[0], base_sgpr = ((w >> 9) & 0x3F) * 2;
-    // A V# must sit in user data to be decodable at draw time; a flat pointer
-    // may live in any SGPR pair, because draw-time scalar evaluation walks the
-    // s_load chain that produced it.
+    // The descriptor may live above user data when an earlier scalar load put
+    // it there. Draw-time scalar replay resolves both V#s and flat pointers at
+    // the consuming load, so do not discard those chained descriptors.
     const bool pointer = inst.opcode <= 0x04;
-    if (!pointer && base_sgpr + 3 >= 16)
-      continue;
     const auto [it, inserted] = bindings.emplace(
         CbufBindKey(base_sgpr, pointer), first_binding + cbufs.size());
     if (inserted) {

@@ -113,9 +113,10 @@ struct Recompiled {
 // the user-data arrays are the 16 user SGPRs for each stage (used only to read
 // the fetch-shader pointer during translation, not the live resources).
 Recompiled Recompile(const uint32_t* vs_code,
-                     const uint32_t* ps_code,
-                     const uint32_t* vs_user_data,
-                     const uint32_t* ps_user_data);
+                      const uint32_t* ps_code,
+                      const uint32_t* vs_user_data,
+                      const uint32_t* ps_user_data,
+                      uint32_t ps_input_ena = 0);
 
 // A memory resource a compute shader touches. The descriptor may be inline in
 // user data or loaded through an SRT chain; `base_sgpr` names its live location

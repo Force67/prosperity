@@ -465,6 +465,8 @@ TImage DecodeTImage(const uint32_t* p) {
   //  [4] depth[12:0]; pitch[26:13]
   //  [5] base_array[12:0]; last_array[25:13]
   TImage t;
+  t.null_descriptor =
+      std::all_of(p, p + 8, [](uint32_t word) { return word == 0; });
   t.base = ((static_cast<uint64_t>(p[1] & 0x3F) << 32) | p[0]) << 8;
   t.min_lod = (p[1] >> 8) & 0xFFF;
   t.dfmt = (p[1] >> 20) & 0x3F;
@@ -548,7 +550,8 @@ std::vector<VBuffer> TrackVertexBuffers(const Program& fetch_program,
 
 std::vector<TImage> TrackTextures(
     const std::shared_ptr<const Program>& ps_program,
-    const uint32_t* ps_user_data) {
+    const uint32_t* ps_user_data,
+    bool trace) {
   std::vector<TImage> result;
   if (!ps_program || !ps_user_data)
     return result;
@@ -562,6 +565,7 @@ std::vector<TImage> TrackTextures(
   // live T#/S# straight out of the resolved SGPRs. Inline user data, a single
   // indirect load, and nested EUD chains all land here identically.
   ScalarEval eval(ps_user_data);
+  eval.trace |= trace;
 
   for (const Inst& inst : cached.insts) {
     eval.Step(inst);
@@ -603,10 +607,18 @@ std::vector<TImage> TrackTextures(
     if (eval.trace)
       std::fprintf(stderr,
                    "[eud] MIMG pc=%#x bind=%u srsrc=s%u known=%d base=%#lx "
-                   "%ux%u valid=%d\n",
+                   "%ux%u valid=%d raw=%08x/%08x/%08x/%08x/%08x/%08x/"
+                   "%08x/%08x\n",
                    inst.pc, binding, srsrc, image_ok,
                    static_cast<unsigned long>(t.base), t.width, t.height,
-                   t.valid);
+                   t.valid, image_ok ? eval.sgpr[srsrc + 0] : 0,
+                   image_ok ? eval.sgpr[srsrc + 1] : 0,
+                   image_ok ? eval.sgpr[srsrc + 2] : 0,
+                   image_ok ? eval.sgpr[srsrc + 3] : 0,
+                   image_ok ? eval.sgpr[srsrc + 4] : 0,
+                   image_ok ? eval.sgpr[srsrc + 5] : 0,
+                   image_ok ? eval.sgpr[srsrc + 6] : 0,
+                   image_ok ? eval.sgpr[srsrc + 7] : 0);
     if (sampler_ok) {
       std::memcpy(t.sampler, sampler, sizeof(t.sampler));
       t.sampler_valid = true;

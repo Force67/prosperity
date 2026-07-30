@@ -50,6 +50,21 @@ void AppendVop3p(std::vector<uint32_t>& code, uint32_t op) {
   code.push_back(256u | (256u << 9) | (256u << 18));
 }
 
+bool HasBuiltin(const std::vector<uint32_t>& spirv, uint32_t builtin) {
+  for (size_t i = 5; i < spirv.size();) {
+    const uint32_t word_count = spirv[i] >> 16;
+    const uint32_t opcode = spirv[i] & 0xFFFF;
+    if (!word_count || i + word_count > spirv.size())
+      return false;
+    // OpDecorate target BuiltIn <builtin>.
+    if (opcode == 71 && word_count >= 4 && spirv[i + 2] == 11 &&
+        spirv[i + 3] == builtin)
+      return true;
+    i += word_count;
+  }
+  return false;
+}
+
 bool Recompile(std::vector<uint32_t> code) {
   code.push_back(kEndPgm);
   const uint32_t user_data[16] = {};
@@ -171,6 +186,8 @@ TEST(GcnSpirv, BaseSeaIslandsCorrectionsAreAcceptedOrRejectedExplicitly) {
 
   EXPECT_TRUE(Recompile({Vopc(0x88)}));                    // v_cmp_class_f32
   EXPECT_TRUE(Recompile({(0xbu << 28) | (0x10u << 23)}));  // s_mulk_i32
+  EXPECT_TRUE(Recompile({0xbf960000}));   // s_cbranch_cdbgsys to fallthrough
+  EXPECT_FALSE(Recompile({0xbf960001}));  // meaningful debug branch unsupported
 
   std::vector<uint32_t> shift64;
   AppendVop3(shift64, 0x161);
@@ -190,6 +207,47 @@ TEST(GcnSpirv, BaseSeaIslandsCorrectionsAreAcceptedOrRejectedExplicitly) {
       (0x37u << 26) | (0x0cu << 18),  // recognized but untranslated FLAT
       2u << 24,
   }));
+}
+
+TEST(GcnSpirv, PlansScalarLoadedCbufferDescriptor) {
+  const IsaScope base(gpu::gcn::IsaMode::kBase);
+  const uint32_t code[] = {
+      0xbeeb03ff, 0x00000002,  // Shader footer starts at dword 6.
+      0xc08e0104,  // s_load_dwordx4 s[28:31], s[0:1], 0x4
+      0xc28c1d08,  // s_buffer_load_dwordx4 s[24:27], s[28:31], 0x8
+      0xc2d41d00,  // s_buffer_load_dwordx8 s[40:47], s[28:31], 0x0
+      kEndPgm,
+      0x5362724f, 0x00726468,  // "OrbShdr"
+  };
+  const uint32_t user_data[16] = {};
+  const auto recompiled =
+      gpu::gcn::Recompile(code, nullptr, user_data, user_data);
+
+  ASSERT_TRUE(recompiled.ok);
+  ASSERT_EQ(recompiled.vs_cbufs.size(), 2u);
+  EXPECT_EQ(recompiled.vs_cbufs[1].ud_sgpr, 28u);
+  EXPECT_FALSE(recompiled.vs_cbufs[1].pointer);
+  EXPECT_EQ(recompiled.vs_cbufs[1].num_dwords, 12u);
+}
+
+TEST(GcnSpirv, SeedsPixelPositionFromFragCoord) {
+  const IsaScope base(gpu::gcn::IsaMode::kBase);
+  const uint32_t vs[] = {kEndPgm};
+  const uint32_t ps[] = {
+      0x7e080f02,           // v_cvt_u32_f32 v4, v2
+      0x7e0a0f03,           // v_cvt_u32_f32 v5, v3
+      0xf800000f, 0x07060504,  // exp mrt0 v4, v5, v6, v7
+      kEndPgm,
+  };
+  const uint32_t user_data[16] = {};
+  // PERSP_CENTER consumes v0:v1, placing POS_X/Y at v2:v3.
+  const uint32_t ps_input_ena = (1u << 1) | (1u << 8) | (1u << 9);
+
+  const auto recompiled =
+      gpu::gcn::Recompile(vs, ps, user_data, user_data, ps_input_ena);
+
+  ASSERT_TRUE(recompiled.ok);
+  EXPECT_TRUE(HasBuiltin(recompiled.fs_spirv, 15));  // FragCoord
 }
 
 }  // namespace

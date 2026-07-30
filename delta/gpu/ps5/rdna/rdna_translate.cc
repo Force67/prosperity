@@ -1959,50 +1959,6 @@ bool TranslateVs(const Program& program,
   return true;
 }
 
-// SPI_PS_INPUT_ENA lays the PS's system input VGPRs into v0.. in ascending bit
-// order (each set bit consumes the width below). The v_interp i/j barycentrics
-// come from the first pair, which the Vulkan-interpolated Location inputs
-// model, so those VGPRs need no value. But a shader that reads screen position
-// directly (a 2D clip such as frag.x*a + frag.y*b < c) reads the POS_{X,Y,Z,W}
-// VGPRs; unseeded they stay zero, collapsing the clip to "0 < c" and discarding
-// every fragment. Seed those from gl_FragCoord (and FRONT_FACE from
-// gl_FrontFacing).
-void SeedPsInputVgprs(Translator& t, uint32_t ena, std::vector<Id>& iface) {
-  if (!ena)
-    return;
-  static const uint8_t width[16] = {2, 2, 2, 3, 2, 2, 2, 1,
-                                    1, 1, 1, 1, 1, 1, 1, 1};
-  uint32_t vg[16] = {}, next = 0;
-  for (uint32_t b = 0; b < 16; b++)
-    if (ena & (1u << b)) {
-      vg[b] = next;
-      next += width[b];
-    }
-
-  if ((ena >> 8) & 0xF) {  // POS_X..W at bits 8..11 -> gl_FragCoord.xyzw
-    const Id fc =
-        t.m.Variable(t.m.TypePointer(spv::StorageClass::Input, t.t_v4),
-                     spv::StorageClass::Input);
-    t.m.Decorate(fc, spv::Decoration::BuiltIn,
-                 {static_cast<uint32_t>(spv::BuiltIn::FragCoord)});
-    iface.push_back(fc);
-    const Id v = t.m.Load(t.t_v4, fc);
-    for (uint32_t c = 0; c < 4; c++)
-      if (ena & (1u << (8 + c)))
-        t.SetVgF(vg[8 + c], t.m.CompositeExtract(t.t_f, v, c));
-  }
-  if (ena & (1u << 12)) {  // FRONT_FACE -> 0xffffffff front / 0 back
-    const Id ff =
-        t.m.Variable(t.m.TypePointer(spv::StorageClass::Input, t.t_bool),
-                     spv::StorageClass::Input);
-    t.m.Decorate(ff, spv::Decoration::BuiltIn,
-                 {static_cast<uint32_t>(spv::BuiltIn::FrontFacing)});
-    iface.push_back(ff);
-    t.SetVg(vg[12],
-            t.SelectB(t.m.Load(t.t_bool, ff), t.U32(0xFFFFFFFFu), t.U32(0)));
-  }
-}
-
 bool TranslatePs(const Program& program,
                  const std::unordered_set<uint32_t>& flat_attrs,
                  uint32_t ps_input_ena,
@@ -2032,7 +1988,7 @@ bool TranslatePs(const Program& program,
   const Id user_data = DeclareUserData(t);
   sc.main_fn = t.m.BeginFunction(t.t_void, t.t_fn);
   SeedUserData(t, user_data, 0, user_sgprs);
-  SeedPsInputVgprs(t, ps_input_ena, iface);
+  gpu::gcn::SeedPsInputVgprs(t, ps_input_ena, iface);
 
   const bool has_color_export =
       std::any_of(program.begin(), program.end(), [](const Inst& inst) {

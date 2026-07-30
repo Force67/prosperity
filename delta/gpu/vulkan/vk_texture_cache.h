@@ -42,8 +42,12 @@ struct TextureBindings {
   ImageAllocation white_allocation;
   VkImageView white_view = VK_NULL_HANDLE;
   VkImageView white_array_view = VK_NULL_HANDLE;
+  VkImageView zero_view = VK_NULL_HANDLE;
+  VkImageView zero_array_view = VK_NULL_HANDLE;
   VkDescriptorSet white_set = VK_NULL_HANDLE;
   VkDescriptorSet white_array_set = VK_NULL_HANDLE;
+  VkDescriptorSet zero_set = VK_NULL_HANDLE;
+  VkDescriptorSet zero_array_set = VK_NULL_HANDLE;
 };
 
 extern TextureBindings& g_tex;

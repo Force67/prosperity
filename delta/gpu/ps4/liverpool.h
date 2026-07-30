@@ -53,6 +53,8 @@ constexpr uint32_t mmCB_SHADER_MASK = 0xA08F;
 //  [29] separate_alpha_blend  [30] enable
 constexpr uint32_t mmCB_BLEND0_CONTROL = 0xA1E0;
 constexpr uint32_t kCbBlendStride = 0x1;
+// Pixel-shader system-value VGPR layout (barycentrics, position, face, etc.).
+constexpr uint32_t mmSPI_PS_INPUT_ENA = 0xA1B3;
 // Overall color-buffer mode (ROP3 / blend disable). MODE field is [4:6].
 constexpr uint32_t mmCB_COLOR_CONTROL = 0xA202;
 // Primitive type for the draw (VGT_PRIMITIVE_TYPE is a uconfig reg on gen2).

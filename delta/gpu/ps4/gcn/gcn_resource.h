@@ -64,6 +64,7 @@ struct TImage {
   bool force_lod_zero = false;  // gather4_lz: implicit gather clamped to mip 0
   bool depth_compare = false;   // MIMG _C uses the sampler's compare function
   bool storage = false;         // image_store target
+  bool null_descriptor = false; // all-zero T# samples transparent zero
   bool valid = false;
 };
 
@@ -99,7 +100,8 @@ MimgBindingPlan PlanMimgBindings(const Program& program,
 // subset, so per-draw calls skip re-planning and walking the VALU bulk.
 std::vector<TImage> TrackTextures(
     const std::shared_ptr<const Program>& ps_program,
-    const uint32_t* ps_user_data);
+    const uint32_t* ps_user_data,
+    bool trace = false);
 
 // Resolve the live descriptor behind each constant buffer a graphics stage
 // reads, following the same extended-user-data / SRT pointer chains as

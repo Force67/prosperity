@@ -675,6 +675,9 @@ MimgBindingPlan RdnaPlanMimg(const Program& program) {
 
 TImage DecodeTImage(const uint32_t* d, bool r128) {
   TImage t;
+  const uint32_t descriptor_dwords = r128 ? 4 : 8;
+  t.null_descriptor = std::all_of(
+      d, d + descriptor_dwords, [](uint32_t word) { return word == 0; });
   const uint64_t base_units = d[0] | (static_cast<uint64_t>(d[1] & 0xFF) << 32);
   t.base = base_units << 8;
   t.min_lod = (d[1] >> 8) & 0xFFF;

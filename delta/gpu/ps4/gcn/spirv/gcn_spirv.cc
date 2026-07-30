@@ -14,10 +14,11 @@
 // draws/dispatches are skipped.
 namespace gpu::gcn {
 bool RecompileSpirv(const uint32_t*,
-                    const uint32_t*,
-                    const uint32_t*,
-                    const uint32_t*,
-                    Recompiled&) {
+                     const uint32_t*,
+                     const uint32_t*,
+                     const uint32_t*,
+                     uint32_t,
+                     Recompiled&) {
   return false;
 }
 bool RecompileComputeSpirv(const uint32_t*,
@@ -247,6 +248,10 @@ void EmitInst(Translator& t, const Inst& inst, StageContext& sc) {
         // ControlBarrier(Workgroup, Workgroup, AcquireRelease|WorkgroupMemory)
         t.m.EmitVoid(spv::Op::OpControlBarrier,
                      {t.U32(2), t.U32(2), t.U32(0x108)});
+      } else if (inst.opcode >= 0x16 && inst.opcode <= 0x19 &&
+                 static_cast<int16_t>(w & 0xffff) == 0) {
+        // Debug-state branch to the next instruction: both outcomes fall
+        // through.
       } else if (inst.opcode != 0x00 && inst.opcode != 0x01 &&
                  inst.opcode != 0x02 &&
                  !(inst.opcode >= 0x04 && inst.opcode <= 0x0a) &&
@@ -889,9 +894,10 @@ bool TranslateVs(const Program& program,
 
 // ---- PS ---------------------------------------------------------------------
 bool TranslatePs(const Program& program,
-                 const std::unordered_set<uint32_t>& flat_attrs,
-                 Recompiled& r,
-                 Translator& t) {
+                  const std::unordered_set<uint32_t>& flat_attrs,
+                  uint32_t ps_input_ena,
+                  Recompiled& r,
+                  Translator& t) {
   // Color outputs (PsColorOut) are declared lazily per MRT target (location ==
   // target); PS inputs (PsInputVar) likewise as they are read.
   std::vector<Id> iface;
@@ -927,6 +933,7 @@ bool TranslatePs(const Program& program,
   const Id user_data = DeclareUserData(t);
   sc.main_fn = t.m.BeginFunction(t.t_void, t.t_fn);
   SeedUserData(t, user_data);
+  SeedPsInputVgprs(t, ps_input_ena, iface);
 
   // A PS with no color export writes nothing to the color targets (hardware
   // semantics: only exports write; e.g. depth-only or buffer-store passes).
@@ -1296,10 +1303,11 @@ std::vector<uint32_t> EmitRectListGeometry(
 
 // ---- entry points -----------------------------------------------------------
 bool RecompileSpirv(const uint32_t* vs_code,
-                    const uint32_t* ps_code,
-                    const uint32_t* vs_user_data,
-                    const uint32_t* ps_user_data,
-                    Recompiled& r) {
+                     const uint32_t* ps_code,
+                     const uint32_t* vs_user_data,
+                     const uint32_t* ps_user_data,
+                     uint32_t ps_input_ena,
+                     Recompiled& r) {
   if (!vs_code || !vs_user_data || !ps_user_data)
     return false;
 
@@ -1352,8 +1360,9 @@ bool RecompileSpirv(const uint32_t* vs_code,
   ResetUnsupported();
   if (dbg && ps_code)
     AuditBegin("ps", ps_code, ps_program);
-  const bool ps_ok = (ps_code ? TranslatePs(ps_program, flat_attrs, r, tp)
-                              : TranslateDepthOnlyPs(tp)) &&
+  const bool ps_ok = (ps_code ? TranslatePs(ps_program, flat_attrs,
+                                             ps_input_ena, r, tp)
+                               : TranslateDepthOnlyPs(tp)) &&
                      !HadUnsupported();
   std::vector<uint32_t> ps;
   if (ps_ok)

@@ -363,6 +363,50 @@ struct Translator {
   }
 };
 
+// SPI_PS_INPUT_ENA lays system inputs into initial VGPRs in ascending bit
+// order. Interpolated parameters are modeled as Vulkan Location inputs by the
+// instruction translator; seed the system values that shaders read directly.
+inline void SeedPsInputVgprs(Translator& t,
+                             uint32_t ena,
+                             std::vector<Id>& iface) {
+  if (!ena)
+    return;
+  static constexpr uint8_t width[16] = {2, 2, 2, 3, 2, 2, 2, 1,
+                                        1, 1, 1, 1, 1, 1, 1, 1};
+  uint32_t vg[16] = {}, next = 0;
+  for (uint32_t bit = 0; bit < 16; bit++)
+    if (ena & (1u << bit)) {
+      vg[bit] = next;
+      next += width[bit];
+    }
+
+  if ((ena >> 8) & 0xF) {
+    const Id frag_coord =
+        t.m.Variable(t.m.TypePointer(spv::StorageClass::Input, t.t_v4),
+                     spv::StorageClass::Input);
+    t.m.Decorate(frag_coord, spv::Decoration::BuiltIn,
+                 {static_cast<uint32_t>(spv::BuiltIn::FragCoord)});
+    iface.push_back(frag_coord);
+    const Id value = t.m.Load(t.t_v4, frag_coord);
+    for (uint32_t component = 0; component < 4; component++)
+      if (ena & (1u << (8 + component)))
+        t.SetVgF(vg[8 + component],
+                 t.m.CompositeExtract(t.t_f, value, component));
+  }
+
+  if (ena & (1u << 12)) {
+    const Id front_facing =
+        t.m.Variable(t.m.TypePointer(spv::StorageClass::Input, t.t_bool),
+                     spv::StorageClass::Input);
+    t.m.Decorate(front_facing, spv::Decoration::BuiltIn,
+                 {static_cast<uint32_t>(spv::BuiltIn::FrontFacing)});
+    iface.push_back(front_facing);
+    t.SetVg(vg[12],
+            t.SelectB(t.m.Load(t.t_bool, front_facing), t.U32(0xFFFFFFFFu),
+                      t.U32(0)));
+  }
+}
+
 // Per-stage state carried into the shared per-instruction emitter (EmitInst).
 struct StageContext {
   bool is_ps = false;

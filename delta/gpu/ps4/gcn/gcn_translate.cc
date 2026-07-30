@@ -15,13 +15,14 @@
 namespace gpu::gcn {
 
 Recompiled Recompile(const uint32_t* vs_code,
-                     const uint32_t* ps_code,
-                     const uint32_t* vs_user_data,
-                     const uint32_t* ps_user_data) {
+                      const uint32_t* ps_code,
+                      const uint32_t* vs_user_data,
+                      const uint32_t* ps_user_data,
+                      uint32_t ps_input_ena) {
   Recompiled r;
   if (!vs_code || !vs_user_data || !ps_user_data)
     return r;
-  RecompileSpirv(vs_code, ps_code, vs_user_data, ps_user_data, r);
+  RecompileSpirv(vs_code, ps_code, vs_user_data, ps_user_data, ps_input_ena, r);
   return r;
 }
 

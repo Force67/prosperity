@@ -361,7 +361,9 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
           d.tex_pow2_pad, d.tex_sampler, d.tex_sampler_valid, d.tex_arrayed,
           d.tex_force_lod_zero, d.tex_depth_compare, d.tex_swizzle);
     if (!tex_set)
-      tex_set = d.tex_arrayed ? g_tex.white_array_set : g_tex.white_set;
+      tex_set = d.tex_null_descriptor
+                    ? (d.tex_arrayed ? g_tex.zero_array_set : g_tex.zero_set)
+                    : (d.tex_arrayed ? g_tex.white_array_set : g_tex.white_set);
     if (!tex_set)
       return Decline(kGuestTex);
   }
@@ -438,8 +440,24 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
         multi_transition_source |=
             g_depths[base].layout != VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL;
       } else {
-        multi_views[i] = TexViewFor(t);
+        multi_views[i] = !t.storage && t.null_descriptor
+                             ? (t.arrayed ? g_tex.zero_array_view
+                                          : g_tex.zero_view)
+                             : TexViewFor(t);
+        if (multi_views[i] && t.null_descriptor)
+          multi_layouts[i] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
       }
+    }
+    // A shader may sample an image through one binding and write the same image
+    // through another storage binding. Both descriptors must use GENERAL.
+    for (uint32_t i = 0; i < multi_n; i++) {
+      if (!multi_color[i])
+        continue;
+      for (uint32_t j = 0; j < multi_n; j++)
+        if (multi_storage[j] == multi_color[i]) {
+          multi_layouts[i] = VK_IMAGE_LAYOUT_GENERAL;
+          break;
+        }
     }
   }
 
@@ -561,12 +579,15 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
           }
         } else if (multi_color[i]) {
           auto& src = g_rts[multi_color[i]];
-          if (src.layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
-            ImageBarrier(g_frame.cmd, src.image, src.layout,
-                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                         ColorImageAccess(src.layout),
-                         VK_ACCESS_SHADER_READ_BIT);
-            src.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+          const VkImageLayout desired = multi_layouts[i];
+          if (src.layout != desired) {
+            const VkAccessFlags access =
+                desired == VK_IMAGE_LAYOUT_GENERAL
+                    ? VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT
+                    : VK_ACCESS_SHADER_READ_BIT;
+            ImageBarrier(g_frame.cmd, src.image, src.layout, desired,
+                         ColorImageAccess(src.layout), access);
+            src.layout = desired;
           }
         } else if (multi_depth[i]) {
           auto& src = g_depths[multi_depth[i]];
@@ -871,7 +892,7 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
       const char* e = std::getenv("DELTA_GPU_DRAWRT_FRAME");
       return e ? std::atoi(e) : 0;
     }();
-    if (kWant && (all || g_region.cur_rt == kWant) && shown < (all ? 60 : 8) &&
+    if (kWant && (all || g_region.cur_rt == kWant) && shown < (all ? 140 : 8) &&
         (!kWantFrame || (int)g_frame.num == kWantFrame)) {
       shown++;
       std::fprintf(stderr,

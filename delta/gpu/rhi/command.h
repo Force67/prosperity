@@ -128,6 +128,7 @@ struct DrawInfo {
   bool tex_arrayed = false;  // MIMG DA: shader consumes a layer coordinate
   bool tex_force_lod_zero = false;
   bool tex_depth_compare = false;
+  bool tex_null_descriptor = false;
   uint32_t tex_swizzle = 0;  // packed T# DST_SEL for the legacy single texture
 
   // Multi-texture: a PS can sample several textures (Doom64's 3D walls/floors
@@ -148,6 +149,7 @@ struct DrawInfo {
     bool force_lod_zero = false;
     bool depth_compare = false;
     bool storage = false;
+    bool null_descriptor = false;
     uint32_t swizzle = 0;  // packed T# DST_SEL_X/Y/Z/W (0 = identity)
   };
   DrawTex texs[16];
