@@ -11,6 +11,8 @@
 #include "kern/proc.h"
 #include "util/object_table.h"
 
+#include <cstdlib>
+
 #include <logger/logger.h>
 
 namespace krnl {
@@ -18,10 +20,15 @@ kObject::kObject(proc *process, oType type) : otype(type), process(process) {
   uint32_t temp = 0;
   process->getObjTable().add(this, temp);
 
-  static const char *tn[] = {"file", "device", "equeue", "eventflag",
-                             "semaphore", "shm"};
-  LOG_INFO("assigned handle {} type={}", temp,
-           tn[static_cast<int>(type)]);
+  // DELTA_OBJ_TRACE: titles that poll a device re-create its object thousands
+  // of times a second (Minecraft: ~14k in 40s), which buried every other line
+  // in the log. Off unless asked for.
+  static const bool trace = std::getenv("DELTA_OBJ_TRACE") != nullptr;
+  if (trace) {
+    static const char *tn[] = {"file", "device", "equeue", "eventflag",
+                               "semaphore", "shm"};
+    LOG_INFO("assigned handle {} type={}", temp, tn[static_cast<int>(type)]);
+  }
 }
 
 void kObject::release() {

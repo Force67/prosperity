@@ -183,20 +183,37 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
   }
   // Indexed draws derive the copied vertex range from their indices.
   // DRAW_INDEX_AUTO consumes the packet's sequential vertex count directly.
+  // These three all report as "norecomp", which lumps a vertex-count cap in
+  // with a missing program; separate them, because only the cap is ours to
+  // move.
+  static const bool kVtxTrace = std::getenv("DELTA_GPU_DECLTRACE") != nullptr;
+  const auto vtx_decline = [&](const char* why, uint32_t n) {
+    if (kVtxTrace) {
+      static int t = 0;
+      if (t++ < 32)
+        std::fprintf(stderr,
+                     "[decl] vtx why=%s n=%u vcount=%u icount=%u itype=%u "
+                     "vattrs=%u vdata=%p vstride=%u rt=%#lx\n",
+                     why, n, d.vertex_count, d.index_count, d.index_type,
+                     d.num_vattrs, d.vertex_data, d.vertex_stride,
+                     (unsigned long)d.rt_base);
+    }
+    return Decline(kNoRecomp);
+  };
   uint32_t nv = d.vertex_count;
   if (indexed) {
     const uint32_t max_index =
         MaxGuestIndex(d.index_data, d.index_count, d.index_type);
     if (max_index >= 200000u)
-      return Decline(kNoRecomp);
+      return vtx_decline("max-index", max_index);
     nv = max_index + 1;
   }
   if (nv > 200000u || (d.num_vattrs && (!d.vertex_data || !d.vertex_stride)))
-    return Decline(kNoRecomp);
+    return vtx_decline(nv > 200000u ? "nv-cap" : "no-vertex-data", nv);
   if (d.vertex_data && d.vertex_stride &&
       !FlushCsWritesRange(renderer, reinterpret_cast<uint64_t>(d.vertex_data),
                           static_cast<uint64_t>(nv) * d.vertex_stride))
-    return Decline(kNoRecomp);
+    return vtx_decline("cs-flush", nv);
 
   // GNM's fast clear (see DrawInfo::is_clear_rect): a RECT_LIST draw with no
   // pixel shader whose colour lives in CB_COLORn_CLEAR_WORD0/1. Rasterising it
