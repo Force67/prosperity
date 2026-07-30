@@ -583,6 +583,19 @@ void EmitCsMtbuf(Translator& t, const Inst& inst, StageContext& sc);
 void EmitCsMimg(Translator& t, const Inst& inst, StageContext& sc);
 void EmitDs(Translator& t, const Inst& inst, StageContext& sc);
 
+// The compute resource model: a guest range aliased as Buf { uint data[]; },
+// addressed by dword index. ISA-neutral, so the RDNA2 path binds the same
+// buffers and only has to decode its own (differently encoded) scalar loads.
+Id CsSsboPtr(Translator& t, StageContext& sc, uint32_t binding, Id dword_idx);
+Id CsSsboLoad(Translator& t, StageContext& sc, uint32_t binding, Id dword_idx);
+void CsSsboStore(Translator& t,
+                 StageContext& sc,
+                 uint32_t binding,
+                 Id dword_idx,
+                 Id value);
+// Storage-buffer binding planned for the instruction at pc, or -1.
+int CsBindingFor(StageContext& sc, uint32_t pc);
+
 // RECTLIST expansion stage: three post-VS corners in, two triangles out. Shared
 // with the RDNA2 path, which reaches RECTLIST under a different primitive-type
 // number but needs the identical fixed-function expansion.
