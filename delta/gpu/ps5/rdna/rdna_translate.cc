@@ -1192,12 +1192,14 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
                                      {t.m.Bitcast(t.t_f, s0u),
                                       t.m.Bitcast(t.t_f, s1u), t.VgF(vdst)}));
           break;
+        case 0x20:  // v_madmk_f32 (gfx10 v_fmamk_f32): D = S0 * K + S1
         case 0x2C:
           t.SetVgF(vdst, t.m.ExtInst(t.t_f, GLSLstd450Fma,
                                      {t.m.Bitcast(t.t_f, s0u),
                                       t.m.Bitcast(t.t_f, t.U32(lit)),
                                       t.m.Bitcast(t.t_f, s1u)}));
           break;
+        case 0x21:  // v_madak_f32 (gfx10 v_fmaak_f32): D = S0 * S1 + K
         case 0x2D:
           t.SetVgF(vdst, t.m.ExtInst(
                              t.t_f, GLSLstd450Fma,
@@ -1366,7 +1368,23 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       uint32_t src0, lit;
       ResolveValuSrc0(inst, raw0, src0, lit);
       if (inst.extension == gpu::gcn::InstExtension::kSdwa) {
-        gpu::gcn::WarnUnsupported("vopc.sdwa", op, w, w1);
+        const SdwaMod sd = DecodeSdwa(inst, vsrc1, false);
+        if (sd.src0_sel > 6 || sd.src1_sel > 6) {
+          gpu::gcn::WarnUnsupported("vopc.sdwa-mod", op, w, w1);
+          break;
+        }
+        // A compare has no VGPR destination, so SDWA reuses those bits (which
+        // carry DST_SEL/CLAMP/OMOD elsewhere) for the scalar one: SD picks
+        // SDST over VCC.
+        const uint32_t dst = ((w1 >> 15) & 1) ? ((w1 >> 8) & 0x7F) : 106u;
+        const Id a = SdwaFloatMod(
+            t, SdwaSelect(t, t.SrcRaw(sd.src0, 0), sd.src0_sel, sd.src0_sext),
+            sd.src0_neg, sd.src0_abs);
+        const Id b = SdwaFloatMod(
+            t, SdwaSelect(t, t.SrcRaw(sd.src1, 0), sd.src1_sel, sd.src1_sext),
+            sd.src1_neg, sd.src1_abs);
+        gpu::gcn::EmitVopc(t, op, t.m.Bitcast(t.t_f, a), t.m.Bitcast(t.t_f, b),
+                           a, b, dst);
         break;
       }
       uint32_t vopc_src1 = 256 + vsrc1;
@@ -2260,8 +2278,13 @@ Recompiled Recompile(const uint32_t* vs_code,
   g_vs_addr = reinterpret_cast<uintptr_t>(vs_code);
   if (!TranslateVs(vs_program, vs_user_data, flat_attrs, r, tv, gl_clip_space,
                    vs_user_sgprs) ||
-      gpu::gcn::HadUnsupported())
+      gpu::gcn::HadUnsupported()) {
+    if (ShDbg() || std::getenv("DELTA_GPU_DRAWCENSUS"))
+      std::fprintf(stderr, "[gcnspv] vs %#lx rejected: %s\n",
+                   (unsigned long)reinterpret_cast<uintptr_t>(vs_code),
+                   gpu::gcn::UnsupportedOps().c_str());
     return r;
+  }
   Translator tp;
   tp.rdna_sources = true;
   g_ps_addr = reinterpret_cast<uintptr_t>(ps_code);
@@ -2271,8 +2294,13 @@ Recompiled Recompile(const uint32_t* vs_code,
                              ps_user_sgprs)
               : !TranslateDepthOnlyPs(tp))
     return r;
-  if (gpu::gcn::HadUnsupported())
+  if (gpu::gcn::HadUnsupported()) {
+    if (ShDbg() || std::getenv("DELTA_GPU_DRAWCENSUS"))
+      std::fprintf(stderr, "[gcnspv] ps %#lx rejected: %s\n",
+                   (unsigned long)reinterpret_cast<uintptr_t>(ps_code),
+                   gpu::gcn::UnsupportedOps().c_str());
     return r;
+  }
 
   const std::vector<uint32_t> vs = tv.m.Assemble();
   const std::vector<uint32_t> ps = tp.m.Assemble();

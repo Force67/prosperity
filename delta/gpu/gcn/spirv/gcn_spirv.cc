@@ -38,6 +38,7 @@ bool RecompileComputeSpirv(const uint32_t*,
 #include <cstdio>
 #include <cstdlib>
 #include <string_view>
+#include <string>
 #include <unordered_set>
 
 #include "gpu/gcn/gcn_audit.h"
@@ -49,14 +50,23 @@ namespace gpu::gcn {
 
 namespace {
 thread_local bool g_had_unsupported = false;
+thread_local std::string g_unsupported_ops;
 }
 
 void ResetUnsupported() {
   g_had_unsupported = false;
+  g_unsupported_ops.clear();
 }
 
 bool HadUnsupported() {
   return g_had_unsupported;
+}
+
+// Which ops made the shader currently being translated unsupported. The
+// warn-once dedup hides everything after the first shader that hit a given op,
+// so a later shader's rejection is otherwise unattributable.
+const std::string& UnsupportedOps() {
+  return g_unsupported_ops;
 }
 
 bool TraceEnabled() {
@@ -66,6 +76,15 @@ bool TraceEnabled() {
 
 void WarnUnsupported(const char* enc, uint32_t op, uint32_t w0, uint32_t w1) {
   g_had_unsupported = true;
+  {
+    char one[64];
+    std::snprintf(one, sizeof(one), "%s:%#x", enc, op);
+    if (g_unsupported_ops.find(one) == std::string::npos) {
+      if (!g_unsupported_ops.empty())
+        g_unsupported_ops += ' ';
+      g_unsupported_ops += one;
+    }
+  }
   // Every event feeds the audit (per-shader, per-pc attribution); the
   // warn-once dedup below only limits the stderr flood.
   AuditNote(enc, op);

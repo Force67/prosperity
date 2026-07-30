@@ -615,6 +615,22 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
     EndRegion();
     if (!rp->multi_tex && color_as_tex && transition_source) {
       auto& src = g_rts[tex_base];
+      // DELTA_GPU_RTTINT: overwrite the sampled source with solid blue just
+      // before the reader takes it, to tell "the reader is bound to this image"
+      // apart from "this image had no content".
+      static const bool kTint = std::getenv("DELTA_GPU_RTTINT") != nullptr;
+      if (kTint) {
+        ImageBarrier(g_frame.cmd, src.image, src.layout,
+                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                     ColorImageAccess(src.layout), VK_ACCESS_TRANSFER_WRITE_BIT);
+        const VkClearColorValue blue{{0.f, 0.f, 1.f, 1.f}};
+        const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0,
+                                            1};
+        vkCmdClearColorImage(g_frame.cmd, src.image,
+                             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &blue, 1,
+                             &range);
+        src.layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+      }
       if (src.layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
         ImageBarrier(g_frame.cmd, src.image, src.layout,
                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
@@ -960,6 +976,21 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
   else
     vkCmdDraw(g_frame.cmd, d.vertex_count,
               d.instance_count ? d.instance_count : 1, 0, 0);
+  // DELTA_GPU_DRAWSEQ=<n>: the first n draws of the run in record order, with
+  // the frame they belong to -- the per-frame filters cannot show that a pass
+  // and the pass that reads it landed in different frames.
+  {
+    static const int kSeqN = [] {
+      const char* e = std::getenv("DELTA_GPU_DRAWSEQ");
+      return e ? std::atoi(e) : 0;
+    }();
+    static int seq = 0;
+    if (seq < kSeqN) {
+      std::fprintf(stderr, "[seq] %d f%d draw#%u rt=%#lx tex=%#lx%s\n", seq++,
+                   g_frame.num, g_frame.draws, (unsigned long)d.rt_base,
+                   (unsigned long)tex_base, color_as_tex ? " RT-AS-TEX" : "");
+    }
+  }
   // DELTA_GPU_DRAWRT=<base>: report what was actually issued for one target.
   {
     static const uint64_t kWant = [] {

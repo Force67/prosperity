@@ -49,6 +49,7 @@ void WarnUnsupported(const char* enc,
                      uint32_t w1 = 0);
 void ResetUnsupported();
 bool HadUnsupported();
+const std::string& UnsupportedOps();
 
 // DELTA_GPU_SHTRACE: translator debug logging.
 bool TraceEnabled();

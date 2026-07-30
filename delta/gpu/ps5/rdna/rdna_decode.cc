@@ -394,8 +394,8 @@ Program Decode(const uint32_t* code, uint32_t max_dwords, bool stop_at_endpgm) {
       case Enc::kVop2:
         in.extension = ValuExtension(in.enc, code[i]);
         lit = in.extension != gpu::gcn::InstExtension::kNone ||
-              in.opcode == 0x2C || in.opcode == 0x2D || in.opcode == 0x37 ||
-              in.opcode == 0x38;
+              in.opcode == 0x20 || in.opcode == 0x21 || in.opcode == 0x2C ||
+              in.opcode == 0x2D || in.opcode == 0x37 || in.opcode == 0x38;
         break;
       case Enc::kVop1:
       case Enc::kVopc:
