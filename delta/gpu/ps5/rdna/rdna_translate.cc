@@ -41,6 +41,7 @@ gpu::gcn::Recompiled Recompile(const uint32_t*,
 #include "gpu/gcn/spirv/spv_post.h"
 #include "gpu/gcn/spirv/translator.h"
 #include "gpu/ps5/rdna/rdna_decode.h"
+#include "gpu/ps5/rdna/rdna_emit.h"
 #include "gpu/ps5/rdna/rdna_resource.h"
 
 namespace gpu::rdna {
@@ -1027,6 +1028,10 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
     gpu::gcn::WarnUnsupported("source.special.rdna", inst.opcode, w, w1);
     return;
   }
+  // Compute reaches guest memory through the shared CS resource model (set-0
+  // storage buffers), not through the graphics cbuf/vertex-fetch bindings.
+  if (sc.is_cs && EmitCsMemory(t, inst, sc))
+    return;
   switch (inst.enc) {
     case Enc::kSop1:
       if (sc.skip_launch_movs.count(inst.pc))
@@ -1637,89 +1642,6 @@ std::vector<uint32_t> BlockStarts(const Program& program, uint32_t max_pc) {
   return starts;
 }
 
-void EmitCfg(Translator& t, const Program& program, StageContext& sc) {
-  const uint32_t max_pc =
-      program.empty() ? 0 : program.back().pc + program.back().size;
-  const std::vector<uint32_t> starts = BlockStarts(program, max_pc);
-  const uint32_t num_blocks = static_cast<uint32_t>(starts.size());
-  const uint32_t kExit = num_blocks;
-  const auto block_of = [&](uint32_t pc) -> uint32_t {
-    if (pc >= max_pc)
-      return kExit;
-    uint32_t b = 0;
-    for (uint32_t i = 0; i < num_blocks; i++)
-      if (starts[i] <= pc)
-        b = i;
-      else
-        break;
-    return b;
-  };
-
-  const Id header = t.m.NewBlock(), dispatch = t.m.NewBlock();
-  const Id merge_sel = t.m.NewBlock();
-  const Id cont = t.m.NewBlock(), merge = t.m.NewBlock();
-  const Id exit_blk = t.m.NewBlock();
-  std::vector<Id> case_labels(num_blocks);
-  for (Id& l : case_labels)
-    l = t.m.NewBlock();
-
-  t.SetState(0);
-  t.m.Branch(header);
-  t.m.OpenBlock(header);
-  t.m.LoopMerge(merge, cont);
-  t.m.Branch(dispatch);
-  t.m.OpenBlock(dispatch);
-  const Id state = t.State();
-  t.m.SelectionMerge(merge_sel);
-  std::vector<std::pair<uint32_t, Id> > cases;
-  for (uint32_t i = 0; i < num_blocks; i++)
-    cases.push_back({i, case_labels[i]});
-  t.m.Switch(state, exit_blk, cases);
-
-  for (uint32_t bi = 0; bi < num_blocks; bi++) {
-    t.m.OpenBlock(case_labels[bi]);
-    const uint32_t blk_start = starts[bi];
-    const uint32_t blk_end = (bi + 1 < num_blocks) ? starts[bi + 1] : max_pc;
-    bool terminated = false;
-    for (const Inst& inst : program) {
-      if (inst.pc < blk_start || inst.pc >= blk_end)
-        continue;
-      const int k = BranchKind(inst);
-      if (k == 0) {
-        RdnaEmitInst(t, inst, sc);
-        continue;
-      }
-      const uint32_t fall = (bi + 1 < num_blocks) ? bi + 1 : kExit;
-      if (k == 8) {
-        t.SetState(kExit);
-      } else if (k == 1) {
-        const int32_t simm = static_cast<int16_t>(inst.raw[0] & 0xFFFF);
-        t.SetState(block_of(
-            static_cast<uint32_t>(static_cast<int32_t>(inst.pc) +
-                                  static_cast<int32_t>(inst.size) + simm)));
-      } else {
-        const int32_t simm = static_cast<int16_t>(inst.raw[0] & 0xFFFF);
-        const uint32_t target = block_of(
-            static_cast<uint32_t>(static_cast<int32_t>(inst.pc) +
-                                  static_cast<int32_t>(inst.size) + simm));
-        t.SetStateId(t.SelectB(BranchTaken(t, k), t.U32(target), t.U32(fall)));
-      }
-      terminated = true;
-      break;
-    }
-    if (!terminated)
-      t.SetState((bi + 1 < num_blocks) ? bi + 1 : kExit);
-    t.m.Branch(merge_sel);
-  }
-  t.m.OpenBlock(exit_blk);
-  t.m.Branch(merge);
-  t.m.OpenBlock(merge_sel);
-  t.m.Branch(cont);
-  t.m.OpenBlock(cont);
-  t.m.Branch(header);
-  t.m.OpenBlock(merge);
-}
-
 bool ForceCfg() {
   static const bool force = std::getenv("DELTA_GPU_SPIRV_CFG") != nullptr;
   return force;
@@ -2213,6 +2135,91 @@ bool TranslateDepthOnlyPs(Translator& t) {
 }
 
 }  // namespace
+
+// Shared with the compute stage (rdna_compute.cc), which lowers the same
+// branches through the same per-instruction dispatch.
+void EmitCfg(Translator& t, const Program& program, StageContext& sc) {
+  const uint32_t max_pc =
+      program.empty() ? 0 : program.back().pc + program.back().size;
+  const std::vector<uint32_t> starts = BlockStarts(program, max_pc);
+  const uint32_t num_blocks = static_cast<uint32_t>(starts.size());
+  const uint32_t kExit = num_blocks;
+  const auto block_of = [&](uint32_t pc) -> uint32_t {
+    if (pc >= max_pc)
+      return kExit;
+    uint32_t b = 0;
+    for (uint32_t i = 0; i < num_blocks; i++)
+      if (starts[i] <= pc)
+        b = i;
+      else
+        break;
+    return b;
+  };
+
+  const Id header = t.m.NewBlock(), dispatch = t.m.NewBlock();
+  const Id merge_sel = t.m.NewBlock();
+  const Id cont = t.m.NewBlock(), merge = t.m.NewBlock();
+  const Id exit_blk = t.m.NewBlock();
+  std::vector<Id> case_labels(num_blocks);
+  for (Id& l : case_labels)
+    l = t.m.NewBlock();
+
+  t.SetState(0);
+  t.m.Branch(header);
+  t.m.OpenBlock(header);
+  t.m.LoopMerge(merge, cont);
+  t.m.Branch(dispatch);
+  t.m.OpenBlock(dispatch);
+  const Id state = t.State();
+  t.m.SelectionMerge(merge_sel);
+  std::vector<std::pair<uint32_t, Id> > cases;
+  for (uint32_t i = 0; i < num_blocks; i++)
+    cases.push_back({i, case_labels[i]});
+  t.m.Switch(state, exit_blk, cases);
+
+  for (uint32_t bi = 0; bi < num_blocks; bi++) {
+    t.m.OpenBlock(case_labels[bi]);
+    const uint32_t blk_start = starts[bi];
+    const uint32_t blk_end = (bi + 1 < num_blocks) ? starts[bi + 1] : max_pc;
+    bool terminated = false;
+    for (const Inst& inst : program) {
+      if (inst.pc < blk_start || inst.pc >= blk_end)
+        continue;
+      const int k = BranchKind(inst);
+      if (k == 0) {
+        RdnaEmitInst(t, inst, sc);
+        continue;
+      }
+      const uint32_t fall = (bi + 1 < num_blocks) ? bi + 1 : kExit;
+      if (k == 8) {
+        t.SetState(kExit);
+      } else if (k == 1) {
+        const int32_t simm = static_cast<int16_t>(inst.raw[0] & 0xFFFF);
+        t.SetState(block_of(
+            static_cast<uint32_t>(static_cast<int32_t>(inst.pc) +
+                                  static_cast<int32_t>(inst.size) + simm)));
+      } else {
+        const int32_t simm = static_cast<int16_t>(inst.raw[0] & 0xFFFF);
+        const uint32_t target = block_of(
+            static_cast<uint32_t>(static_cast<int32_t>(inst.pc) +
+                                  static_cast<int32_t>(inst.size) + simm));
+        t.SetStateId(t.SelectB(BranchTaken(t, k), t.U32(target), t.U32(fall)));
+      }
+      terminated = true;
+      break;
+    }
+    if (!terminated)
+      t.SetState((bi + 1 < num_blocks) ? bi + 1 : kExit);
+    t.m.Branch(merge_sel);
+  }
+  t.m.OpenBlock(exit_blk);
+  t.m.Branch(merge);
+  t.m.OpenBlock(merge_sel);
+  t.m.Branch(cont);
+  t.m.OpenBlock(cont);
+  t.m.Branch(header);
+  t.m.OpenBlock(merge);
+}
 
 Recompiled Recompile(const uint32_t* vs_code,
                      const uint32_t* ps_code,
