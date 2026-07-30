@@ -474,6 +474,29 @@ uint32_t TraceCbufChain(uint32_t sbase,
   return cur;
 }
 
+// SGPRs a VMEM/MIMG op reads as its descriptor (srsrc V#/T#, ssamp S#). An
+// s_load writing one of these fetches a DESCRIPTOR, not constant data, so the
+// cbuf planner must leave it alone: ParseFetchInsts/RdnaPlanBufLoadCbufs and
+// RdnaPlanMimg resolve those at draw time from user data instead.
+static std::unordered_set<uint32_t> VmemDescriptorSgprs(const Program& program) {
+  std::unordered_set<uint32_t> regs;
+  for (const Inst& inst : program) {
+    const bool buf = inst.enc == Enc::kMubuf || inst.enc == Enc::kMtbuf;
+    const bool img = inst.enc == Enc::kMimg;
+    if (!buf && !img)
+      continue;
+    const uint32_t srsrc = ((inst.raw[1] >> 16) & 0x1F) * 4;
+    for (uint32_t i = 0; i < 8; i++)
+      regs.insert(srsrc + i);
+    if (img && inst.opcode >= 0x20) {
+      const uint32_t ssamp = ((inst.raw[1] >> 21) & 0x1F) * 4;
+      for (uint32_t i = 0; i < 4; i++)
+        regs.insert(ssamp + i);
+    }
+  }
+  return regs;
+}
+
 // Plan the set-1 UBO bindings a stage's SMEM loads reference. A leaf read is an
 // s_buffer_load* (op 0x08-0x0C, V# in the sbase quad) or an s_load* (op
 // 0x00-0x04, pointer in the sbase pair) whose result is used as data -- not as
@@ -494,6 +517,7 @@ bool RdnaPlanCbufs(const Program& program,
   std::unordered_map<uint32_t, CbufDef> loads;
   std::unordered_map<uint64_t, uint32_t> binding_by_producer;
   const auto version_keys = BufferVersionKeys(program);
+  const auto descriptor_sgprs = VmemDescriptorSgprs(program);
   uint32_t inst_index = 0;
   for (const Inst& inst : program) {
     const uint32_t producer = inst_index++;
@@ -510,8 +534,22 @@ bool RdnaPlanCbufs(const Program& program,
     const uint32_t load_count = SmemLoadCount(op);
     const int32_t off =
         sbufload ? static_cast<int32_t>(inst.raw[1] & 0xFFFFF) : smem.offset;
-    if (sload && smem.soffset == 125 && off < 0)
+    // A descriptor fetch (the V# a vertex fetch or texture op then reads). Its
+    // offset is often a runtime table index -- Minecraft's NGG VS computes one
+    // into vcc_hi -- which no cbuf binding can express, and treating it as a
+    // constant buffer failed the whole shader over a load the cbuf path never
+    // needed to see.
+    if (sload && descriptor_sgprs.count(sdst)) {
+      InvalidateCbufDefs(loads, {sdst, load_count});
+      continue;
+    }
+    if (sload && smem.soffset == 125 && off < 0) {
+      if (ShDbg())
+        std::fprintf(stderr,
+                     "[gcnspv] cbuf plan reject pc=%#x sload negative off=%d\n",
+                     inst.pc, off);
       return false;
+    }
     if (sload &&
         UsedAsBaseBeforeOverwrite(program, producer, sdst, load_count)) {
       InvalidateCbufDefs(loads, {sdst, load_count});
@@ -522,8 +560,15 @@ bool RdnaPlanCbufs(const Program& program,
         smem.soffset != 125
             ? gpu::gcn::kCbufDwords
             : static_cast<uint32_t>(off < 0 ? 0 : off) / 4 + SmemLoadCount(op);
-    if (smem.soffset != 125 || hi > gpu::gcn::kCbufDwords)
+    if (smem.soffset != 125 || hi > gpu::gcn::kCbufDwords) {
+      if (ShDbg())
+        std::fprintf(stderr,
+                     "[gcnspv] cbuf plan reject pc=%#x op=%#x soffset=%u off=%d "
+                     "hi=%u raw=%08x %08x sbase=%u sdst=%u\n",
+                     inst.pc, op, smem.soffset, off, hi, inst.raw[0],
+                     inst.raw[1], smem.sbase, smem.sdst);
       return false;
+    }
 
     uint32_t chain_off[3] = {}, chain_len = 0;
     const uint32_t root = TraceCbufChain(sbase, loads, chain_off, &chain_len);
@@ -533,8 +578,13 @@ bool RdnaPlanCbufs(const Program& program,
     if (it == binding_by_producer.end()) {
       const uint32_t binding =
           first_binding + static_cast<uint32_t>(cbufs.size());
-      if (binding >= kMaxCbufBindings)
+      if (binding >= kMaxCbufBindings) {
+        if (ShDbg())
+          std::fprintf(stderr, "[gcnspv] cbuf plan reject pc=%#x out of "
+                               "bindings (%u)\n",
+                       inst.pc, binding);
         return false;
+      }
       it = binding_by_producer.emplace(key, binding).first;
       bindings.emplace(sbase, binding);
       ShaderCbuf cb;
@@ -871,7 +921,11 @@ void EmitExport(Translator& t, const Inst& inst, StageContext& sc) {
       c[i] = (en & (1 << i)) ? t.VgF(v[i]) : t.F32(0.f);
     t.m.Store(out_var,
               t.m.CompositeConstruct(t.t_v4, {c[0], c[1], c[2], c[3]}));
-  } else if (target != 9) {
+  } else if (target != 9 && target != 20) {
+    // 20 = the NGG primitive export (connectivity + edge flags). The renderer
+    // draws from the index buffer the command stream binds, so the topology the
+    // shader would emit here is already known; only its position/param exports
+    // matter.
     gpu::gcn::WarnUnsupported("exp.vs-target", target, w, w1);
   }
 }
@@ -914,6 +968,20 @@ SdwaMod DecodeSdwa(const Inst& inst, uint32_t vsrc1, bool dpp) {
   if ((m >> 31) & 1)
     s.src1 = vsrc1;
   return s;
+}
+
+// SDWA's per-operand NEG/ABS act on the operand as a float, so they apply after
+// the sub-dword select and before the op sees it. Rejecting them outright cost
+// every shader that scales by a negated or absolute value.
+Id SdwaFloatMod(Translator& t, Id raw, bool neg, bool abs) {
+  if (!neg && !abs)
+    return raw;
+  Id f = t.m.Bitcast(t.t_f, raw);
+  if (abs)
+    f = t.m.ExtInst(t.t_f, GLSLstd450FAbs, {f});
+  if (neg)
+    f = t.m.Emit(spv::Op::OpFNegate, t.t_f, {f});
+  return t.m.Bitcast(t.t_u, f);
 }
 
 // Apply one operand's SDWA sub-dword selection to its raw 32-bit value.
@@ -995,12 +1063,16 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
                  inst.opcode != 0x02 &&
                  !(inst.opcode >= 0x04 && inst.opcode <= 0x09) &&
                  inst.opcode != 0x0C && inst.opcode != 0x0E &&
-                 inst.opcode != 0x0F && inst.opcode != 0x1E &&
+                 inst.opcode != 0x0F && inst.opcode != 0x10 &&
+                 inst.opcode != 0x1E &&
                  inst.opcode != 0x1F && inst.opcode != 0x20 &&
                  inst.opcode != 0x21 && inst.opcode != 0x23) {
         gpu::gcn::WarnUnsupported("sopp.rdna", inst.opcode, w, w1);
       }
-      break;  // branches are emitted by the CFG; waits/hints are synchronous
+      // Branches are emitted by the CFG; waits/hints are synchronous. 0x10 is
+      // s_sendmsg, whose only use in an NGG stage is GS_ALLOC_REQ (reserving
+      // vertex/primitive slots in the hardware's own export space).
+      break;
     case Enc::kSmrd:
       RdnaEmitSmem(t, inst, sc);
       break;
@@ -1015,13 +1087,15 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       }
       if (raw0 == 249) {  // SDWA: apply the source's sub-dword selection
         const SdwaMod sd = DecodeSdwa(inst, 0, false);
-        if (sd.dst_sel != 6 || sd.src0_sel > 6 || sd.src0_neg || sd.src0_abs ||
-            sd.clamp || sd.omod)
+        if (sd.dst_sel != 6 || sd.src0_sel > 6 || sd.clamp || sd.omod)
           gpu::gcn::WarnUnsupported("vop1.sdwa-mod", op, w, w1);
         gpu::gcn::EmitVop1(
             t, op, vdst,
-            t.m.Bitcast(t.t_f, SdwaSelect(t, t.SrcRaw(src0, 0), sd.src0_sel,
-                                          sd.src0_sext)));
+            t.m.Bitcast(t.t_f,
+                        SdwaFloatMod(t,
+                                     SdwaSelect(t, t.SrcRaw(src0, 0),
+                                                sd.src0_sel, sd.src0_sext),
+                                     sd.src0_neg, sd.src0_abs)));
         break;
       }
       if (op == 0x0b) {
@@ -1044,15 +1118,21 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       }
       uint32_t src1 = 256 + vsrc1;
       Id sdwa0 = 0, sdwa1 = 0;
+      bool sdwa_clamp = false;
       if (raw0 == 249) {
         const SdwaMod sd = DecodeSdwa(inst, vsrc1, false);
-        if (sd.dst_sel != 6 || sd.src0_sel > 6 || sd.src1_sel > 6 ||
-            sd.src0_neg || sd.src0_abs || sd.src1_neg || sd.src1_abs ||
-            sd.clamp || sd.omod)
+        if (sd.dst_sel != 6 || sd.src0_sel > 6 || sd.src1_sel > 6 || sd.omod)
           gpu::gcn::WarnUnsupported("vop2.sdwa-mod", op, w, w1);
+        // CLAMP is applied to the RESULT, so it needs no operand rewriting --
+        // the shared emitter writes vdst and we saturate it afterwards.
+        sdwa_clamp = sd.clamp;
         src1 = sd.src1;
-        sdwa0 = SdwaSelect(t, t.SrcRaw(sd.src0, 0), sd.src0_sel, sd.src0_sext);
-        sdwa1 = SdwaSelect(t, t.SrcRaw(sd.src1, 0), sd.src1_sel, sd.src1_sext);
+        sdwa0 = SdwaFloatMod(
+            t, SdwaSelect(t, t.SrcRaw(sd.src0, 0), sd.src0_sel, sd.src0_sext),
+            sd.src0_neg, sd.src0_abs);
+        sdwa1 = SdwaFloatMod(
+            t, SdwaSelect(t, t.SrcRaw(sd.src1, 0), sd.src1_sel, sd.src1_sext),
+            sd.src1_neg, sd.src1_abs);
       }
       const Id s0u = sdwa0 ? sdwa0 : t.SrcRaw(src0, lit);
       const Id s1u = sdwa1 ? sdwa1 : t.SrcRaw(src1, lit);
@@ -1067,6 +1147,14 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
         case 0x1E:
           t.SetVg(vdst, t.Not(t.Xor(s0u, s1u)));
           break;  // v_xnor_b32
+        case 0x1F:
+          // v_mac_f32 (D = S0*S1 + D). This slot is gfx1010 numbering, which
+          // gfx1030 dropped -- the PS5's ISA keeps some RDNA1 assignments, so
+          // decode it the way llvm-mc -mcpu=gfx1010 does, not gfx1030.
+          t.SetVgF(vdst, t.m.ExtInst(t.t_f, GLSLstd450Fma,
+                                     {t.m.Bitcast(t.t_f, s0u),
+                                      t.m.Bitcast(t.t_f, s1u), t.VgF(vdst)}));
+          break;
         case 0x25:
           t.SetVg(vdst, t.Add(s0u, s1u));
           break;  // v_add_nc_u32
@@ -1122,6 +1210,9 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
           }
           break;
       }
+      if (sdwa_clamp)
+        t.SetVgF(vdst, t.m.ExtInst(t.t_f, GLSLstd450FClamp,
+                                   {t.VgF(vdst), t.F32(0.f), t.F32(1.f)}));
       break;
     }
     case Enc::kVop3p: {
@@ -1179,12 +1270,35 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
                                     t.VgF(vdst)}));
         break;
       }
+      if (rdna_op == 0x11F) {
+        // VOP3 form of v_mac_f32 (D = S0*S1 + D), the alias of VOP2 0x1f.
+        Id r = t.m.ExtInst(t.t_f, GLSLstd450Fma,
+                           {t.SrcF(s0, inst.literal, neg & 1, abs & 1),
+                            t.SrcF(s1, inst.literal, neg & 2, abs & 2),
+                            t.VgF(vdst)});
+        if (clamp)
+          r = t.m.ExtInst(t.t_f, GLSLstd450FClamp, {r, t.F32(0.f), t.F32(1.f)});
+        t.SetVgF(vdst, r);
+        break;
+      }
       if (rdna_op >= 0x100 && rdna_op < 0x140 && rdna_op != 0x101 &&
           !RdnaSharedVop2(rdna_op - 0x100)) {
         gpu::gcn::WarnUnsupported("vop3.alias.rdna", rdna_op, w, w1);
         break;
       }
-      if (op == 0x141 || (op >= 0x161 && op <= 0x163) || op == 0x16b) {
+      if (op == 0x141) {
+        // v_mad_f32 (D = S0*S1 + S2), gfx1010 numbering -- see the VOP2 0x1f
+        // note. Minecraft's shaders use it for the classic *2-1 remap.
+        Id r = t.m.ExtInst(t.t_f, GLSLstd450Fma,
+                           {t.SrcF(s0, inst.literal, neg & 1, abs & 1),
+                            t.SrcF(s1, inst.literal, neg & 2, abs & 2),
+                            t.SrcF(s2, inst.literal, neg & 4, abs & 4)});
+        if (clamp)
+          r = t.m.ExtInst(t.t_f, GLSLstd450FClamp, {r, t.F32(0.f), t.F32(1.f)});
+        t.SetVgF(vdst, r);
+        break;
+      }
+      if ((op >= 0x161 && op <= 0x163) || op == 0x16b) {
         gpu::gcn::WarnUnsupported("vop3.opcode.rdna", op, w, w1);
         break;
       }
@@ -1313,7 +1427,7 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       const bool tfe = (w1 >> 23) & 1;
       const bool lds = inst.enc == Enc::kMubuf && ((w >> 16) & 1);
       const uint32_t soffset = (w1 >> 24) & 0xff;
-      if (tfe || lds || (soffset != 125 && soffset != 128)) {
+      if (tfe || lds) {
         gpu::gcn::WarnUnsupported("buffer.control.rdna", inst.opcode, w, w1);
         break;
       }
@@ -1336,6 +1450,15 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
           t.SetVgF(vs.dest_vgpr + c, vs.num_comps == 1
                                          ? val
                                          : t.m.CompositeExtract(t.t_f, val, c));
+        break;
+      }
+      // Past the fetch path the load really is emitted, so a scalar byte offset
+      // would move the read and is not expressible against a bound UBO. Sony's
+      // compiler parks a scratch SGPR (vcc_hi) in this field even when the
+      // offset is zero, so only a fetch -- replaced above by its vertex input --
+      // can ignore it.
+      if (soffset != 125 && soffset != 128) {
+        gpu::gcn::WarnUnsupported("buffer.control.rdna", inst.opcode, w, w1);
         break;
       }
       if (inst.enc == Enc::kMubuf) {
