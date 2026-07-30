@@ -10,15 +10,27 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 
 namespace gpu::vk {
 
+VkDeviceSize VbRingBytes() {
+  static const VkDeviceSize bytes = [] {
+    const char* e = std::getenv("DELTA_GPU_VBRING_MB");
+    const long mb = e ? std::atol(e) : 0;
+    if (mb <= 0)
+      return kVbRing;
+    return static_cast<VkDeviceSize>(mb) * 1024 * 1024;
+  }();
+  return bytes;
+}
+
 bool CreateUploadRings(const VkPhysicalDeviceProperties& props) {
   // Vertex ring.
   VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-  bi.size = kVbRing;
+  bi.size = VbRingBytes();
   bi.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
   VKOK(vkCreateBuffer(g_dev.device, &bi, nullptr, &g_ring.vb));
   VkMemoryRequirements vr;
@@ -30,7 +42,7 @@ bool CreateUploadRings(const VkPhysicalDeviceProperties& props) {
                                           VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
   VKOK(vkAllocateMemory(g_dev.device, &va, nullptr, &g_ring.vb_mem));
   VKOK(vkBindBufferMemory(g_dev.device, g_ring.vb, g_ring.vb_mem, 0));
-  VKOK(vkMapMemory(g_dev.device, g_ring.vb_mem, 0, kVbRing, 0,
+  VKOK(vkMapMemory(g_dev.device, g_ring.vb_mem, 0, VbRingBytes(), 0,
                    (void**)&g_ring.vb_map));
   NameObject(VK_OBJECT_TYPE_BUFFER, (uint64_t)g_ring.vb, "vertex ring");
 
