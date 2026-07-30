@@ -32,6 +32,12 @@ constexpr uint32_t mmCB_COLOR0_SLICE = 0xA31A;
 constexpr uint32_t mmCB_COLOR0_VIEW = 0xA31B;
 constexpr uint32_t mmCB_COLOR0_INFO = 0xA31C;    // format/number-type
 constexpr uint32_t mmCB_COLOR0_ATTRIB = 0xA31D;  // tiling/dims
+// Fast-clear colour, already encoded in the target's own format. GNM's clear
+// helper programs these and then issues a RECT_LIST draw with no pixel shader;
+// the colour is here, not in vertex data. See the clear-rect path in
+// vk_draw_recomp.cc.
+constexpr uint32_t mmCB_COLOR0_CLEAR_WORD0 = 0xA323;  // CB_COLOR0_BASE + 0xB
+constexpr uint32_t mmCB_COLOR0_CLEAR_WORD1 = 0xA324;
 constexpr uint32_t kCbColorStride = 0xF;
 // Screen scissor gives the render area (width/height).
 constexpr uint32_t mmPA_SC_SCREEN_SCISSOR_TL = 0xA00C;

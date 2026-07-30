@@ -198,6 +198,47 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
                           static_cast<uint64_t>(nv) * d.vertex_stride))
     return Decline(kNoRecomp);
 
+  // GNM's fast clear (see DrawInfo::is_clear_rect): a RECT_LIST draw with no
+  // pixel shader whose colour lives in CB_COLORn_CLEAR_WORD0/1. Rasterising it
+  // writes nothing, so leaving it to the normal path silently turns every clear
+  // into a no-op and each target keeps loading the previous frame -- SotC's
+  // world colour RT accumulated one fullscreen pass per frame until its value
+  // literally tracked the frame counter. Record the clear and consume the draw.
+  //
+  // The clear colour is encoded in each target's own format, so decoding it in
+  // general means a per-format unpack. Every clear observed so far is to zero,
+  // and NoteMemoryFill already takes the same shortcut for CP DMA fills, so use
+  // zero and report anything else under DELTA_GPU_CLEARTRACE rather than
+  // guessing a decode that nothing exercises yet.
+  if (d.is_clear_rect) {
+    static const bool kClearTrace = std::getenv("DELTA_GPU_CLEARTRACE") != nullptr;
+    for (uint32_t i = 0; i < d.mrt_count && i < 8; i++) {
+      auto it = g_rts.find(d.mrt_base[i]);
+      if (it == g_rts.end())
+        continue;
+      it->second.clear_pending = true;
+      it->second.clear_value = {};  // transparent black
+      if (kClearTrace && (d.mrt_clear_word[i][0] || d.mrt_clear_word[i][1])) {
+        static int n = 0;
+        if (n++ < 16)
+          std::fprintf(stderr,
+                       "[clear] rect RT %#lx non-zero CLEAR_WORD %08x %08x "
+                       "(cleared to zero anyway)\n",
+                       (unsigned long)d.mrt_base[i], d.mrt_clear_word[i][0],
+                       d.mrt_clear_word[i][1]);
+      }
+    }
+    if (d.depth_base) {
+      auto dt = g_depths.find(d.depth_base);
+      if (dt != g_depths.end()) {
+        dt->second.clear_pending = true;
+        dt->second.clear_value = d.depth_clear;
+      }
+    }
+    g_frame.draws++;
+    return true;  // consumed: must not reach the rasteriser
+  }
+
   // A fullscreen, untextured, near-black REPLACE draw is the game CLEARING an
   // RT. Don't render it (that wipes the RT immediately); record a LAZY clear
   // instead -- realised as loadOp=CLEAR only when content actually redraws this

@@ -187,6 +187,15 @@ struct DrawInfo {
       7;  // DB_DEPTH_CONTROL ZFUNC (maps 1:1 to the compare op)
   float depth_clear = 1.0f;  // DB_DEPTH_CLEAR (fast-clear value)
 
+  // GNM's fast clear: a RECT_LIST draw with no pixel shader and no vertex
+  // attributes, whose colour lives in CB_COLORn_CLEAR_WORD0/1 rather than in
+  // vertex data. Rasterising it writes nothing, so a backend that does not
+  // recognise it leaves the target holding the previous frame -- which is how
+  // SotC's world colour target accumulated one fullscreen pass per frame until
+  // its value tracked the frame counter.
+  bool is_clear_rect = false;
+  uint32_t mrt_clear_word[8][2] = {};
+
   // Primitive-setup: raster topology + face culling, from VGT_PRIMITIVE_TYPE
   // and PA_SU_SC_MODE_CNTL. 2D titles draw triangle lists with no culling
   // (unchanged).

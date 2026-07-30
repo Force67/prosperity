@@ -449,6 +449,21 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
     // Per-MRT channel write mask (MRT0 = bits[3:0]) and overall colour-control
     // mode.
     d.target_mask = g_regs[mmCB_TARGET_MASK];
+    // GNM fast clear: RECT_LIST (VGT prim 17), no pixel shader, no vertex
+    // attributes, at least one colour target bound. The clear colour is in
+    // CB_COLORn_CLEAR_WORD0/1, encoded in each target's own format. A
+    // depth-only pass looks similar but binds no colour target, so mrt_count
+    // keeps the two apart.
+    d.is_clear_rect =
+        d.prim_type == 17 && !ps_a && !d.num_vattrs && d.mrt_count != 0;
+    if (d.is_clear_rect) {
+      for (uint32_t rt = 0; rt < 8; rt++) {
+        d.mrt_clear_word[rt][0] =
+            g_regs[mmCB_COLOR0_CLEAR_WORD0 + rt * kCbColorStride];
+        d.mrt_clear_word[rt][1] =
+            g_regs[mmCB_COLOR0_CLEAR_WORD1 + rt * kCbColorStride];
+      }
+    }
     d.color_control = g_regs[mmCB_COLOR_CONTROL];
 
     // Depth/stencil state. A 3D title (Doom64, SOTTR) binds a Z buffer and
