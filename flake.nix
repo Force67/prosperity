@@ -11,6 +11,15 @@
       let
         pkgs = import nixpkgs { inherit system; };
 
+        renderdocPython = pkgs.renderdoc.overrideAttrs (old: {
+          cmakeFlags = (old.cmakeFlags or [ ]) ++ [
+            "-DENABLE_PYRENDERDOC=TRUE"
+          ];
+          postInstall = (old.postInstall or "") + ''
+            install -Dm755 lib/renderdoc.so $out/lib/renderdoc.so
+          '';
+        });
+
         ps4delta = pkgs.stdenv.mkDerivation {
           pname = "ps4delta";
           version = "0.0.0";
@@ -70,7 +79,7 @@
             mesa            # lavapipe: software Vulkan for headless testing
             sdl3
             shaderc         # runtime GLSL -> SPIR-V for the shader recompiler
-            renderdoc       # frame capture: qrenderdoc UI, renderdoccmd, python API
+            renderdocPython # frame capture: UI, CLI, and Python replay API
           ];
 
           shellHook = ''
@@ -79,7 +88,9 @@
             # this shell's XDG_DATA_DIRS. A stale renderdoc_capture.json in
             # ~/.local/share (pointing at a collected store path) shadows it and
             # makes capture silently fail, so pin the good one for capture runs.
-            export DELTA_RDOC_LAYER_PATH="${pkgs.renderdoc}/share/vulkan/implicit_layer.d"
+            export DELTA_RDOC_LAYER_PATH="${renderdocPython}/share/vulkan/implicit_layer.d"
+            export RENDERDOC_PYTHON_PATH="${renderdocPython}/lib"
+            export PYTHONPATH="$RENDERDOC_PYTHON_PATH''${PYTHONPATH:+:$PYTHONPATH}"
             # Vulkan ICD: prefer the system GPU driver. Hardware ICDs live under
             # /run/opengl-driver on NixOS and /usr/share/vulkan/icd.d (or
             # /etc/vulkan/icd.d) on FHS distros. When one exists, point

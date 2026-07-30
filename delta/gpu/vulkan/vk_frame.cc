@@ -108,13 +108,13 @@ void EnsureReadback(uint32_t w, uint32_t h, VkFormat fmt) {
 namespace {
 
 // DELTA_RDOC_FRAME=N: bracket frame N's guest rendering with a RenderDoc
-// capture. The guest draws run on this device, which owns no swapchain (the
-// compositor presents the read-back pixels from its own device), so a capture
-// taken at a present boundary only ever catches that final blit. The frame has
-// to be marked explicitly, and the instance named, or RenderDoc picks the wrong
-// device. RENDERDOC_API_1_0_0 is append-only, so these entry indices hold in
-// every version; the ones in between are options and keybind setters we do not
-// use.
+// capture. DELTA_RDOC_EXIT=1 exits once the capture has been written. The guest
+// draws run on this device, which owns no swapchain (the compositor presents the
+// read-back pixels from its own device), so a capture taken at a present
+// boundary only ever catches that final blit. The frame has to be marked
+// explicitly, and the instance named, or RenderDoc picks the wrong device.
+// RENDERDOC_API_1_0_0 is append-only, so these entry indices hold in every
+// version; the ones in between are options and keybind setters we do not use.
 struct RdocApi {
   void* entry0[19];
   void (*StartFrameCapture)(void* dev, void* wnd);
@@ -157,6 +157,7 @@ void* RdocDevice() {
 bool ReportRtContents(FrameSlot& owner) {
   static const bool enabled = std::getenv("DELTA_GPU_RTSTAT") != nullptr;
   static const bool dump = std::getenv("DELTA_GPU_RTDUMP") != nullptr;
+  static const bool all = std::getenv("DELTA_GPU_RTSTAT_ALL") != nullptr;
   static const int kReportFrame = [] {
     const char* e = std::getenv("DELTA_GPU_RTSTAT_FRAME");
     return e ? std::atoi(e) : 0;
@@ -173,7 +174,7 @@ bool ReportRtContents(FrameSlot& owner) {
   int reported = 0;
   for (auto& kv : g_rts) {
     RTarget& rt = kv.second;
-    if (!rt.used_this_frame || reported >= 32)
+    if ((!rt.used_this_frame && !(all && rt.ever_rendered)) || reported >= 32)
       continue;
     reported++;
     EnsureReadback(rt.w, rt.h, rt.fmt);
@@ -652,6 +653,10 @@ void EndFrame(Renderer& renderer, uint64_t scanout_base) {
     if (RdocFrame() && GetRdocApi() && GetRdocApi()->IsFrameCapturing()) {
       uint32_t ok = GetRdocApi()->EndFrameCapture(RdocDevice(), nullptr);
       std::fprintf(stderr, "[rdoc] capture %s\n", ok ? "written" : "FAILED");
+      if (ok && std::getenv("DELTA_RDOC_EXIT")) {
+        std::fflush(nullptr);
+        std::_Exit(0);
+      }
     }
     return;
   }
@@ -854,10 +859,18 @@ void EndFrame(Renderer& renderer, uint64_t scanout_base) {
     renderer.state = nullptr;
     return;
   }
+  if (snapped && std::getenv("DELTA_GPU_SNAP_EXIT")) {
+    std::fflush(nullptr);
+    std::_Exit(0);
+  }
 
   if (RdocFrame() && GetRdocApi() && GetRdocApi()->IsFrameCapturing()) {
     uint32_t ok = GetRdocApi()->EndFrameCapture(RdocDevice(), nullptr);
     std::fprintf(stderr, "[rdoc] capture %s\n", ok ? "written" : "FAILED");
+    if (ok && std::getenv("DELTA_RDOC_EXIT")) {
+      std::fflush(nullptr);
+      std::_Exit(0);
+    }
   }
 }
 
