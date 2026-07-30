@@ -215,12 +215,15 @@ void SetRegs(uint32_t base, const uint32_t* body, uint32_t count) {
   }
 }
 
-// A guest GPU address. Isaac's AGC pool sits in the 0x80_xx_xx_xx_xx band, but
-// a title that batch-maps its direct memory gets whatever the kernel handed it
-// -- Skyrim's command buffers and labels land around 0x10_00_00_00_00. Test the
-// whole range the guest allocator can hand out instead of one title's band.
+// A guest GPU address: anything the guest allocator can hand out, from the
+// lowest slot a title fixed-maps a pool at (64 GiB) up to the 2^40 user ceiling
+// allocLowGuest() bumps towards. Isaac's AGC pool sits in the 0x80_xx_xx_xx_xx
+// band and Skyrim's command buffers land around 0x10_00_00_00_00, but a title
+// that allocates more than a few GiB runs well past either: Minecraft's bgfx
+// command buffers are at 0x89_xx_xx_xx_xx, and the old 0x81_00_00_00_00 ceiling
+// silently dropped every submit pointing at one.
 inline bool GpuAddr(uint64_t a) {
-  return a >= 0x1000000000ull && a < 0x8100000000ull;
+  return a >= 0x1000000000ull && a < 0x10000000000ull;
 }
 
 // Latch a LOAD_*_REG packet: the register values live in a GPU-memory image at
@@ -381,12 +384,49 @@ void LoadRegs(uint32_t base, const uint32_t* body, uint32_t count) {
 // render target + shaders for this title (e.g. reg 0x318 CB_COLOR0_BASE, 0x8e
 // CB_TARGET_MASK), so without it draws hit no target and no shader.
 void LoadRegPairs(uint32_t base, const uint32_t* body, uint32_t cnt) {
-  if (cnt < 4)
+  // DELTA_AGC_REGSTAT: why an indirect register load carried nothing. Every one
+  // of these that bails is a whole draw's state (render target, shaders) left at
+  // whatever the shadow held, which downstream looks like "the title drew
+  // nothing" rather than "we dropped its state".
+  static const bool kRegStat = std::getenv("DELTA_AGC_REGSTAT") != nullptr;
+  struct Stat {
+    uint64_t calls, short_pkt, bad_addr, unreadable, no_pairs, applied;
+  };
+  static Stat s_stat[3] = {};
+  Stat& st = s_stat[base == kContextRegBase ? 0 : base == kShRegBase ? 1 : 2];
+  const auto report = [&] {
+    if (!kRegStat)
+      return;
+    static uint64_t n = 0;
+    if ((++n % 4000) != 1)
+      return;
+    for (int k = 0; k < 3; k++)
+      std::fprintf(stderr,
+                   "[regstat] %s calls=%llu short=%llu badaddr=%llu "
+                   "unreadable=%llu nopairs=%llu applied=%llu\n",
+                   k == 0 ? "context" : k == 1 ? "sh" : "uconfig",
+                   (unsigned long long)s_stat[k].calls,
+                   (unsigned long long)s_stat[k].short_pkt,
+                   (unsigned long long)s_stat[k].bad_addr,
+                   (unsigned long long)s_stat[k].unreadable,
+                   (unsigned long long)s_stat[k].no_pairs,
+                   (unsigned long long)s_stat[k].applied);
+  };
+  st.calls++;
+  report();
+  if (cnt < 4) {
+    st.short_pkt++;
     return;
+  }
   uint64_t addr =
       (static_cast<uint64_t>(body[1] & 0xFFFF) << 32) | (body[0] & 0xFFFFFFFCu);
-  if (!GpuAddr(addr))
+  if (!GpuAddr(addr)) {
+    st.bad_addr++;
+    if (kRegStat && st.bad_addr < 6)
+      std::fprintf(stderr, "[regstat] bad addr %#lx (body %08x %08x)\n",
+                   (unsigned long)addr, body[0], body[1]);
     return;
+  }
   // body[3] is the count of (reg_offset, value) register PAIRS, not dwords:
   // each iteration reads two dwords (the gfx10.3 SET_*_REG_INDIRECT handlers
   // loop `i < (buffer[3] & 0x3fff)` advancing the pointer by 2). The old
@@ -394,14 +434,86 @@ void LoadRegPairs(uint32_t base, const uint32_t* body, uint32_t cnt) {
   // 1), so VGT_PRIMITIVE_TYPE (set this way) never landed and prim assembly
   // died.
   uint32_t num_pairs = body[3] & 0x3FFF;
-  if (!num_pairs ||
-      !gpu::IsReadableRange(
-          addr, static_cast<uint64_t>(num_pairs) * 2 * sizeof(uint32_t)))
+  if (!num_pairs) {
+    st.no_pairs++;
     return;
+  }
+  if (!gpu::IsReadableRange(
+          addr, static_cast<uint64_t>(num_pairs) * 2 * sizeof(uint32_t))) {
+    st.unreadable++;
+    if (kRegStat && st.unreadable < 6)
+      std::fprintf(stderr, "[regstat] unreadable %#lx pairs=%u\n",
+                   (unsigned long)addr, num_pairs);
+    return;
+  }
+  st.applied++;
+  // DELTA_AGC_REGSTAT=2 dumps a whole state block. The (offset,value) reading
+  // below is NOT the real encoding for every block this title submits: some
+  // arrive as runs of entries whose offset dword repeats (0x1000_0000 with the
+  // register index in the low half), which collapses onto one register instead
+  // of the CB_COLORn block it means. That is why no colour target is ever bound.
+  if (kRegStat && std::atoi(std::getenv("DELTA_AGC_REGSTAT")) >= 2 &&
+      num_pairs >= 4) {
+    static int full = 0;
+    if (full++ < 6) {
+      std::fprintf(stderr, "[regstat] %s block %#lx pairs=%u mode=%08x\n",
+                   base == kContextRegBase ? "ctx"
+                   : base == kShRegBase    ? "sh"
+                                           : "ucfg",
+                   (unsigned long)addr, num_pairs, body[2]);
+      const uint32_t* q = reinterpret_cast<const uint32_t*>(addr);
+      for (uint32_t k = 0; k < num_pairs; k++)
+        std::fprintf(stderr, "[regstat]   %3u: %08x %08x\n", k, q[k * 2],
+                     q[k * 2 + 1]);
+    }
+  }
   const uint32_t* p = reinterpret_cast<const uint32_t*>(addr);
   const uint32_t limit = RegSpaceLimit(base);
+  // Type-1 context entries (offset dword bit 28 set) are NOT (offset,value)
+  // pairs: whole runs share one offset dword, so the flat reading collapses a
+  // CB_COLORn block onto CB_COLOR0_BASE and every draw ends up with no target.
+  // Both observed block shapes fit reg(pair) = B + 2*pair, differing only in B,
+  // and nothing in the packet or the tags carries B. Anchor it on evidence
+  // instead: a pair whose value is a mapped surface address (>>8) and whose
+  // pair+2 decodes as a CB_COLOR_INFO with a real FORMAT is a CB_COLOR0 bind.
+  // Both fields must check out, so a wrong anchor is rejected rather than
+  // binding garbage.
+  if (base == kContextRegBase && num_pairs >= 15 && (p[0] & (1u << 28))) {
+    for (uint32_t k = 0; k + 14 < num_pairs; k++) {
+      const uint64_t rt = static_cast<uint64_t>(p[k * 2 + 1]) << 8;
+      const uint32_t info = p[(k + 2) * 2 + 1];
+      const uint32_t fmt = (info >> 2) & 0x1F;
+      // ATTRIB2 holds MIP0_WIDTH-1 / MIP0_HEIGHT-1, so it doubles as the check
+      // that the anchor is real: a wrong k gives nonsense dimensions.
+      const uint32_t attrib2 = p[(k + 14) * 2 + 1];
+      const uint32_t w = ((attrib2 >> 14) & 0x3FFF) + 1;
+      const uint32_t h = (attrib2 & 0x3FFF) + 1;
+      if (!fmt || fmt > 22 || !GpuAddr(rt) ||
+          !gpu::IsReadableRange(rt, 0x1000) || w < 16 || h < 16 ||
+          w > 8192 || h > 8192)
+        continue;
+      g_regs[mmCB_COLOR0_BASE] = p[k * 2 + 1];
+      g_regs[mmCB_COLOR0_INFO] = info;
+      g_regs[mmCB_COLOR0_ATTRIB2] = attrib2;
+      // A block carrying a base AND a valid colour format IS a colour-target
+      // bind, so slot 0 is written. CB_TARGET_MASK lives in a register this
+      // encoding never delivers, and its default 0 reads as "writes nothing",
+      // which would drop the very draw this block set up.
+      if (!(g_regs[mmCB_TARGET_MASK] & 0xF))
+        g_regs[mmCB_TARGET_MASK] |= 0xF;
+      static int shown = 0;
+      if (kRegStat && shown++ < 8)
+        std::fprintf(
+            stderr,
+            "[regstat] ctx anchor pair=%u rt=%#lx info=%08x fmt=%u %ux%u\n", k,
+            (unsigned long)rt, info, fmt, w, h);
+      break;
+    }
+  }
   for (uint32_t i = 0; i < num_pairs; i++) {
     uint32_t off = p[i * 2] & ~kRegSelectorMask;  // strip gfx10 selector bits
+    if (base == kContextRegBase && (p[i * 2] & (1u << 28)))
+      continue;  // handled by the anchor above; a flat write would undo it
     if (base + off < limit)
       g_regs[base + off] = p[i * 2 + 1];
     if (base + off == mmPA_CL_CLIP_CNTL)
@@ -456,11 +568,24 @@ uint32_t FbDim(uint32_t scale_reg) {
     s = -s;
   return static_cast<uint32_t>(s * 2.0f + 0.5f);
 }
+// CB_COLOR0_ATTRIB2 carries the bound target's real size (MIP0_WIDTH-1 in
+// [27:14], MIP0_HEIGHT-1 in [13:0]). Titles whose context state arrives as AGC
+// state blocks never program the viewport registers, so the scale-derived size
+// reads 0 and every draw is skipped for a zero-sized target; the target's own
+// dimensions are the authority in that case.
+uint32_t FbAttrib2Dim(bool want_width) {
+  const uint32_t a2 = g_regs[mmCB_COLOR0_ATTRIB2];
+  if (!a2)
+    return 0;
+  return want_width ? ((a2 >> 14) & 0x3FFF) + 1 : (a2 & 0x3FFF) + 1;
+}
 uint32_t FbWidth() {
-  return FbDim(mmPA_CL_VPORT_XSCALE);
+  const uint32_t v = FbDim(mmPA_CL_VPORT_XSCALE);
+  return v ? v : FbAttrib2Dim(true);
 }
 uint32_t FbHeight() {
-  return FbDim(mmPA_CL_VPORT_YSCALE);
+  const uint32_t v = FbDim(mmPA_CL_VPORT_YSCALE);
+  return v ? v : FbAttrib2Dim(false);
 }
 
 bool IsDraw(uint32_t op) {
@@ -979,6 +1104,17 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
   std::memcpy(&d.viewport_x_offset, &g_regs[mmPA_CL_VPORT_XOFFSET], 4);
   std::memcpy(&d.viewport_y_scale, &g_regs[mmPA_CL_VPORT_YSCALE], 4);
   std::memcpy(&d.viewport_y_offset, &g_regs[mmPA_CL_VPORT_YOFFSET], 4);
+  // Titles whose context state arrives as AGC state blocks never program
+  // PA_CL_VPORT_*, and SetGuestViewport rejects a zero scale -- so no viewport
+  // is ever set and every draw rasterises nothing. Default to the bound
+  // target's full extent, y-up (negative height) like a programmed one, so
+  // RT-as-texture composites still sample aligned.
+  if (!(d.viewport_x_scale > 0.0f) && d.rt_w && d.rt_h) {
+    d.viewport_x_scale = d.rt_w * 0.5f;
+    d.viewport_x_offset = d.rt_w * 0.5f;
+    d.viewport_y_scale = d.rt_h * -0.5f;
+    d.viewport_y_offset = d.rt_h * 0.5f;
+  }
 
   const uint32_t gs_user_sgprs =
       UserSgprCount(g_regs[mmSPI_SHADER_PGM_RSRC2_GS]);
@@ -1079,16 +1215,24 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
                                gs_user_sgprs, kUdBaseEnv);
       if (dl)
         std::fprintf(stderr,
-                     "[agc] DL attrs=%zu vud[0..7]=%08x %08x %08x %08x %08x "
-                     "%08x %08x %08x\n",
-                     rc.attrs.size(), vud[0], vud[1], vud[2], vud[3], vud[4],
-                     vud[5], vud[6], vud[7]);
+                     "[agc] DL attrs=%zu gsUd=%u res=%zu vud[0..7]=%08x %08x "
+                     "%08x %08x %08x %08x %08x %08x\n",
+                     rc.attrs.size(), gs_user_sgprs, vs_resources.size(),
+                     vud[0], vud[1], vud[2], vud[3], vud[4], vud[5], vud[6],
+                     vud[7]);
       for (size_t i = 0; i < rc.attrs.size() && i < 8; i++) {
         auto& a = rc.attrs[i];
         VBuffer vb{};
         const char* how = "replay";
         if (a.use_pc != ~0u) {
           const auto resolved = vs_resources.find(a.use_pc);
+          if (dl)
+            std::fprintf(stderr,
+                         "[agc]   attr%zu use_pc=%#x found=%d valid=%d\n", i,
+                         a.use_pc, resolved != vs_resources.end(),
+                         resolved != vs_resources.end()
+                             ? (int)resolved->second.descriptor_valid
+                             : -1);
           if (resolved == vs_resources.end() ||
               !resolved->second.descriptor_valid)
             continue;
@@ -1587,6 +1731,23 @@ void Walk(const uint32_t* p, uint32_t words, bool dump_this, int depth) {
         continue;
       }
       g_op_hist[op & 0xFF]++;
+      // DELTA_AGC_OPDUMP=<hex op>: the first few bodies of ONE opcode, wherever
+      // it occurs. The submit-level trace only dumps early init submits, so a
+      // packet that only appears in steady-state frames is otherwise invisible.
+      {
+        static const uint32_t kOpDump = [] {
+          const char* e = std::getenv("DELTA_AGC_OPDUMP");
+          return e ? (uint32_t)std::strtoul(e, nullptr, 16) : 0xFFFFu;
+        }();
+        static int shown = 0;
+        if (op == kOpDump && shown < 12) {
+          shown++;
+          std::fprintf(stderr, "[opdump] op=%#04x cnt=%u body:", op, cnt);
+          for (uint32_t b = 0; b < cnt && b < 20; b++)
+            std::fprintf(stderr, " %08x", body[b]);
+          std::fprintf(stderr, "\n");
+        }
+      }
       // Who actually binds the render target: report the packet that first
       // makes CB_COLOR0_BASE non-zero, and every later change.
       if (kTrace) {
