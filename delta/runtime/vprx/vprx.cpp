@@ -181,6 +181,22 @@ static bool libListed(const char *envName, const char *lib) {
 // A library with no HLE table registered is LLE regardless; forcing LLE on one
 // that the guest then calls into an unhosted IPMI service will hang or fault,
 // which is exactly the information the switch is there to obtain.
+//
+// MEASURED, so nobody repeats the mistake: "boots and does not crash under
+// DELTA_LLE=all" is NOT the same as "these modules work". Two known traps.
+//
+//  - libSceAudioOut LLE is SILENT. The host sink (prosperity_audio_output ->
+//    gfx_audio -> SDL) is reached only from the HLE shim, and there is no audio
+//    device under kern/ps4/dev, so the real module opens its port and writes
+//    into nothing. Nothing in a crash/fps check can see this. Hosting audio LLE
+//    needs a device, not a shim bypass.
+//  - The common dialogs (libSceSaveDataDialog, libSceMsgDialog) LLE forward to
+//    a ShellUI daemon that kern/ipmi does not stand in for yet (it has PlayGo,
+//    NpManager, NpWeb and UserService), so their status never leaves RUNNING for
+//    a title that actually opens one.
+//
+// What IS verified: the switch itself is airtight -- under DELTA_LLE=all the HLE
+// trace records zero thunk calls, so every registered shim really is bypassed.
 static bool useHleShim(const char *lib, uint64_t hid) {
   if (libListed("DELTA_HLE", lib))
     return true;
