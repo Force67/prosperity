@@ -347,6 +347,12 @@ struct Translator {
     if (field >= 256 && field <= 510)
       return Vg(field - 255);
     const Id lo = SrcRaw(field, literal);
+    // An integer inline constant is a 64-bit value in a 64-bit operand, so
+    // -1..-16 fill the high dword too. Sign-extending 0..64 is a no-op, so this
+    // needs no per-op opt-in. Without it `s_lshr_b64 exec, -1, n` -- the NGG
+    // prologue's lane mask -- yields EXEC 0 and masks off the whole shader.
+    if (field >= 128 && field <= 208)
+      return Sar(lo, U32(31));
     return sign_extend ? Sar(lo, U32(31)) : U32(0);
   }
   // Float source with the VOP3 neg/abs input modifiers applied.
