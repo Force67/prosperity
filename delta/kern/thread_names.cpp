@@ -86,10 +86,16 @@ void nameThreadsForRange(const void *ptr, size_t len, const char *name) {
   const auto *lo = static_cast<const uint8_t *>(ptr);
   const auto *hi = lo + len;
   std::lock_guard<std::mutex> lk(g_mtx);
+  // CONTAINMENT, not overlap. A title tags a region that can span several
+  // guest stacks (SotC's "Resource Loading" tag covers a range overlapping the
+  // FIOS and job-worker stacks), and renaming on any overlap gave four
+  // unrelated threads the same name -- which is worse than no name, because it
+  // makes a wait-probe report look like one subsystem is wedged four times.
+  // Only rename a thread whose whole stack lies inside the tagged range.
   for (const auto &e : g_stacks) {
     const auto *slo = static_cast<const uint8_t *>(e.stack);
     const auto *shi = slo + e.size;
-    if (lo < shi && slo < hi)
+    if (slo >= lo && shi <= hi)
       setName(e.thread, name);
   }
 }

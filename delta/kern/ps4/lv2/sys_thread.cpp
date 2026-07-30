@@ -26,6 +26,7 @@
 #include <tuple>
 #include <pthread.h>
 #include <unordered_map>
+#include <vector>
 
 #include <utl/mem.h>
 
@@ -550,6 +551,131 @@ static void addrWatchDump(const char *what, const void *p, uint32_t self) {
   std::fflush(stderr);
 }
 
+// DELTA_UMTX_HIST: DELTA_SCHIST says which *syscall* a wedged title hammers, but
+// sys_umtx_op is a dozen different primitives behind one number, so a count of
+// 800k/s names nothing. Bucket every call by op and by object address (fixed
+// open-addressed table, claimed lock-free -- this runs on the hottest path in the
+// process, so no locks and no allocation), and dump the top offenders on a timer.
+namespace umtxhist {
+constexpr size_t kSlots = 1024;
+struct Slot {
+  std::atomic<uint64_t> key{0};  // hash of (op, addr, tid), 0 = empty
+  std::atomic<uint64_t> n{0};
+  std::atomic<uint64_t> addr{0};
+  std::atomic<uint32_t> op{0};
+  std::atomic<uint32_t> tid{0};
+};
+Slot g_slots[kSlots];
+std::atomic<uint64_t> g_op[64];
+std::atomic<uint64_t> g_total{0};
+std::atomic<uint64_t> g_dropped{0};
+
+bool enabled() {
+  static const bool e = std::getenv("DELTA_UMTX_HIST") != nullptr;
+  return e;
+}
+
+inline void count(int op, const void *ptr, uint32_t tid) {
+  const uint64_t a = reinterpret_cast<uint64_t>(ptr);
+  g_total.fetch_add(1, std::memory_order_relaxed);
+  g_op[op & 63].fetch_add(1, std::memory_order_relaxed);
+  uint64_t key = (static_cast<uint64_t>(op & 63) << 56) ^
+                 (static_cast<uint64_t>(tid) << 44) ^ a;
+  if (!key)
+    key = 1;
+  size_t h = static_cast<size_t>((key * 0x9E3779B97F4A7C15ull) >> 54) % kSlots;
+  for (size_t i = 0; i < 32; ++i) {
+    Slot &s = g_slots[(h + i) % kSlots];
+    uint64_t k = s.key.load(std::memory_order_relaxed);
+    if (k == key) {
+      s.n.fetch_add(1, std::memory_order_relaxed);
+      return;
+    }
+    if (k == 0) {
+      uint64_t expect = 0;
+      if (s.key.compare_exchange_strong(expect, key,
+                                        std::memory_order_relaxed)) {
+        s.addr.store(a, std::memory_order_relaxed);
+        s.op.store(static_cast<uint32_t>(op), std::memory_order_relaxed);
+        s.tid.store(tid, std::memory_order_relaxed);
+        s.n.fetch_add(1, std::memory_order_relaxed);
+        return;
+      }
+      if (s.key.load(std::memory_order_relaxed) == key) {
+        s.n.fetch_add(1, std::memory_order_relaxed);
+        return;
+      }
+    }
+  }
+  g_dropped.fetch_add(1, std::memory_order_relaxed);
+}
+
+const char *opName(uint32_t op) {
+  switch (op) {
+  case 0: return "LOCK";
+  case 1: return "UNLOCK";
+  case 2: return "WAIT";
+  case 3: return "WAKE";
+  case 4: return "MUTEX_TRYLOCK";
+  case 5: return "MUTEX_LOCK";
+  case 6: return "MUTEX_UNLOCK";
+  case 7: return "SET_CEILING";
+  case 8: return "CV_WAIT";
+  case 9: return "CV_SIGNAL";
+  case 10: return "CV_BROADCAST";
+  case 11: return "WAIT_UINT";
+  case 12: return "RW_RDLOCK";
+  case 13: return "RW_WRLOCK";
+  case 14: return "RW_UNLOCK";
+  case 15: return "WAIT_UINT_PRIVATE";
+  case 16: return "WAKE_PRIVATE";
+  case 17: return "MUTEX_WAIT";
+  case 18: return "MUTEX_WAKE";
+  case 19: return "SEM_WAIT";
+  case 20: return "SEM_WAKE";
+  case 21: return "NWAKE_PRIVATE";
+  case 22: return "MUTEX_WAKE2";
+  case 23: return "SEM2_WAIT";
+  case 24: return "SEM2_WAKE";
+  default: return "?";
+  }
+}
+
+void dump() {
+  std::fprintf(stderr, "[umtxhist] total=%llu dropped=%llu\n",
+               (unsigned long long)g_total.load(),
+               (unsigned long long)g_dropped.load());
+  for (uint32_t i = 0; i < 64; ++i)
+    if (uint64_t n = g_op[i].load())
+      std::fprintf(stderr, "[umtxhist]   op %-2u %-18s %llu\n", i, opName(i),
+                   (unsigned long long)n);
+  struct Row { uint64_t n, addr; uint32_t op, tid; };
+  std::vector<Row> rows;
+  for (auto &s : g_slots)
+    if (uint64_t n = s.n.load())
+      rows.push_back({n, s.addr.load(), s.op.load(), s.tid.load()});
+  std::sort(rows.begin(), rows.end(),
+            [](const Row &a, const Row &b) { return a.n > b.n; });
+  for (size_t i = 0; i < rows.size() && i < 28; ++i)
+    std::fprintf(stderr, "[umtxhist]   %-18s %#012llx gtid=%-3u %llu\n",
+                 opName(rows[i].op), (unsigned long long)rows[i].addr,
+                 rows[i].tid, (unsigned long long)rows[i].n);
+  std::fflush(stderr);
+}
+
+const bool g_timer = [] {
+  if (!enabled())
+    return false;
+  std::thread([] {
+    for (;;) {
+      std::this_thread::sleep_for(std::chrono::seconds(20));
+      dump();
+    }
+  }).detach();
+  return true;
+}();
+}  // namespace umtxhist
+
 static void umtxTrace(int op, void *ptr, uint32_t self, uint32_t owner) {
   static const bool tr = std::getenv("DELTA_UMTX_TRACE") != nullptr;
   if (!tr)
@@ -564,6 +690,8 @@ int PS4ABI sys_umtx_op(void *ptr, int op, uint64_t val, void *a, void *b) {
   WaitProbe _wp("umtx_op", (long)(long)ptr, (long)op);
   using namespace std::chrono_literals;
   markThreadStarted();  // first sync point => our init is done
+  if (umtxhist::enabled())
+    umtxhist::count(op, ptr, t_tid);
   addrWatchLog(op, ptr, a, val, t_tid);
   switch (op) {
   // WAIT registers before checking the value while holding the same bucket lock

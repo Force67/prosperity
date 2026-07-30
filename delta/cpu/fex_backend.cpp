@@ -57,7 +57,12 @@ extern "C" uint32_t krnl_syscall_errno(uint64_t raw);
 struct tls_index;
 void *PS4ABI guest_tls_get_addr(tls_index *ti); // HLE dynamic-TLS resolver
 const uint32_t *currentGuestTidPtr();           // this thread's guest tid TLS addr
+extern const bool g_scHist;                     // DELTA_SCHIST enabled
 }
+
+// Per-syscall call counter (lv2.cpp). Only the native x86 bsd trampoline
+// increments it, so this backend must do so itself or DELTA_SCHIST is all zeros.
+extern "C" uint64_t g_sysHist[1024];
 
 namespace cpu {
 
@@ -506,6 +511,10 @@ public:
     // returns to the BSD/PS4 carry + positive errno convention.
     using Fn = uint64_t(PS4ABI *)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
     auto fn = reinterpret_cast<Fn>(handler);
+    // DELTA_SCHIST: the histogram is incremented by the native x86 bsd trampoline,
+    // which this backend never emits, so count here too. Racy increments are fine.
+    if (krnl::g_scHist)
+      g_sysHist[num & 1023]++;
     t_lastSyscall = num;
     t_inSyscall = true;
     TraceEvt &ev = traceNext();

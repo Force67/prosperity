@@ -110,6 +110,13 @@ uint32_t FbHeight() {
   return h ? h : 1080;
 }
 
+// How many times the guest has programmed CB_SHADER_MASK / CB_TARGET_MASK.
+// Diagnostic only (reported by DELTA_GPU_MASKTRACE): the register file is
+// zero-initialised, so a value of 0 is ambiguous between "the driver cleared
+// it" and "never written" without a write count.
+uint32_t g_shader_mask_writes = 0;
+uint32_t g_target_mask_writes = 0;
+
 // Write a run of register values from a SET_*_REG packet body into the file.
 void SetRegs(uint32_t base, const uint32_t* body, uint32_t count) {
   // Indexed SET packets use bits 28..31 for the index; only the low 16 bits are
@@ -120,6 +127,10 @@ void SetRegs(uint32_t base, const uint32_t* body, uint32_t count) {
     uint32_t idx = off + (i - 1);
     if (idx < kRegFileSize)
       g_regs[idx] = body[i];
+    if (idx == mmCB_SHADER_MASK)
+      g_shader_mask_writes++;
+    else if (idx == mmCB_TARGET_MASK)
+      g_target_mask_writes++;
   }
 }
 
@@ -1044,6 +1055,58 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
           d.tex_w, d.tex_h, d.vertex_data ? 1 : 0, recomp_status, d.num_vattrs,
           g_regs[mmVGT_PRIMITIVE_TYPE], (unsigned long)vs_a,
           (unsigned long)ps_a, (unsigned long)fetch);
+    }
+    // DELTA_GPU_MASKTRACE: the raw colour-write state of a draw. On GCN the
+    // channels a draw writes to MRTn are (CB_TARGET_MASK & CB_SHADER_MASK)
+    // nibble n: TARGET_MASK is the app's setRenderTargetMask, SHADER_MASK is
+    // set by the driver from what the compiled PS actually exports. We read
+    // TARGET_MASK only to decide whether a target is bound and never read
+    // SHADER_MASK at all, so this dumps both next to CB_COLOR_CONTROL and the
+    // recompiler's own export mask to check they agree.
+    //   DELTA_GPU_MASKTRACE_AFTER=<sec>  delay before logging (default 0)
+    //   DELTA_GPU_MASKTRACE_MAX=<n>      max lines (default 200)
+    //   DELTA_GPU_MASKTRACE_RT=<hex>     only draws touching this CB base
+    static const bool kMaskTrace = std::getenv("DELTA_GPU_MASKTRACE") != nullptr;
+    if (kMaskTrace) {
+      static const auto kMtStart = std::chrono::steady_clock::now();
+      static const int kMtAfter = [] {
+        const char* e = std::getenv("DELTA_GPU_MASKTRACE_AFTER");
+        return e ? std::atoi(e) : 0;
+      }();
+      static const int kMtMax = [] {
+        const char* e = std::getenv("DELTA_GPU_MASKTRACE_MAX");
+        return e ? std::atoi(e) : 200;
+      }();
+      static const uint64_t kMtRt = [] {
+        const char* e = std::getenv("DELTA_GPU_MASKTRACE_RT");
+        return e ? std::strtoull(e, nullptr, 0) : 0ull;
+      }();
+      static int mt_n = 0;
+      bool rt_hit = !kMtRt || d.rt_base == kMtRt;
+      for (uint32_t i = 0; kMtRt && i < std::min(d.mrt_count, 8u); i++)
+        rt_hit |= d.mrt_base[i] == kMtRt;
+      if (rt_hit && mt_n < kMtMax &&
+          std::chrono::duration_cast<std::chrono::seconds>(
+              std::chrono::steady_clock::now() - kMtStart)
+                  .count() >= kMtAfter) {
+        mt_n++;
+        const uint32_t tm = g_regs[mmCB_TARGET_MASK];
+        const uint32_t sm = g_regs[mmCB_SHADER_MASK];
+        const uint32_t cc = g_regs[mmCB_COLOR_CONTROL];
+        std::fprintf(stderr,
+                     "[mask] #%d rt=%#lx %ux%u mrt=%u TARGET_MASK=%#x "
+                     "SHADER_MASK=%#x eff0=%#x COLOR_CONTROL=%#x mode=%u "
+                     "rop=%#x BLEND0=%#x en=%u psMrtMask=%#x recomp=%s "
+                     "info0=%#x wr(sm/tm)=%u/%u PS=%#lx count=%u\n",
+                     mt_n, (unsigned long)d.rt_base, d.rt_w, d.rt_h,
+                     d.mrt_count, tm, sm, (tm & sm) & 0xF, cc, (cc >> 4) & 0x7,
+                     (cc >> 16) & 0xFF, d.blend_control, d.blend_enable,
+                     d.recomp ? (unsigned)d.recomp->ps_mrt_mask : 0u,
+                     recomp_status, d.mrt_info[0],
+                     g_shader_mask_writes, g_target_mask_writes,
+                     (unsigned long)ps_a,
+                     d.index_data ? d.index_count : d.vertex_count);
+      }
     }
     // DELTA_GPU_SPRITEDUMP: for the first few TEXTURED draws, dump the resolved
     // transform + first vertex (pos/uv via the resolved attrs) + texture, to
@@ -2232,6 +2295,10 @@ void SubmitDcb(const void* dcb, uint32_t size_bytes) {
         uint32_t idx = base + k;
         if (idx < kRegFileSize)
           g_regs[idx] = p[i + 1 + k];
+        if (idx == mmCB_SHADER_MASK)
+          g_shader_mask_writes++;
+        else if (idx == mmCB_TARGET_MASK)
+          g_target_mask_writes++;
       }
       i += 1 + cnt;
     } else {

@@ -137,8 +137,55 @@ static bool nidForcedHle(const char *envName, uint64_t hid) {
   return false;
 }
 
+// Does `lib` appear in a comma/space separated env list? "all" matches every
+// library, so one variable can flip the whole default. Names match on a
+// substring so "SaveData" covers libSceSaveData and libSceSaveDataDialog.
+static bool libListed(const char *envName, const char *lib) {
+  const char *list = std::getenv(envName);
+  if (!list || !*list)
+    return false;
+  if (std::strcmp(list, "all") == 0 || std::strcmp(list, "1") == 0)
+    return true;
+  for (const char *p = list; *p;) {
+    while (*p == ',' || *p == ' ')
+      p++;
+    if (!*p)
+      break;
+    const char *end = p;
+    while (*end && *end != ',' && *end != ' ')
+      end++;
+    const size_t n = static_cast<size_t>(end - p);
+    if (n) {
+      // Substring match of the list entry against the library name.
+      for (const char *h = lib; *h; h++) {
+        if (std::strncmp(h, p, n) == 0)
+          return true;
+      }
+    }
+    p = end;
+  }
+  return false;
+}
+
 // Returns true when `lib`'s HLE shim should be used for this NID (skip = LLE).
+//
+// The HLE shims for the non-graphics service modules exist because their real
+// sprx forwards over IPMI to a system service we do not host (SceShellCore /
+// SceShellUI / SceSysCore), not because LLE was tried and rejected -- so which
+// of them could actually run LLE is an open question per module. Rather than
+// answer it by recompiling, make the policy switchable:
+//   DELTA_LLE=<list>  force LLE (ignore the HLE shim) for these libraries
+//   DELTA_HLE=<list>  force HLE, and it wins over DELTA_LLE
+// Both take a comma/space list of substrings, or "all". So a bisect looks like
+//   DELTA_LLE=all DELTA_HLE=libSceSaveDataDialog
+// A library with no HLE table registered is LLE regardless; forcing LLE on one
+// that the guest then calls into an unhosted IPMI service will hang or fault,
+// which is exactly the information the switch is there to obtain.
 static bool useHleShim(const char *lib, uint64_t hid) {
+  if (libListed("DELTA_HLE", lib))
+    return true;
+  if (libListed("DELTA_LLE", lib))
+    return false;
   if (std::strcmp(lib, "libSceGnmDriver") == 0)
     return std::getenv("DELTA_GNM_HLE") != nullptr ||
            nidForcedHle("DELTA_HLE_NIDS_GNM", hid);
