@@ -21,6 +21,7 @@
 
 #include "../../proc.h"
 #include "../../crash.h"
+#include "../../guest_vaspace.h"
 #include "../../thread_names.h"
 #include "error_table.h"
 #include "sys_mem.h"
@@ -192,6 +193,13 @@ uint8_t *PS4ABI sys_mmap(void *addr, size_t size, uint32_t prot, uint32_t flags,
     auto a = reinterpret_cast<uintptr_t>(addr);
     auto lo = reinterpret_cast<uintptr_t>(env.userStack);
     inUserStack = env.userStack && a >= lo && a + size <= lo + env.userStackSize;
+    // Same reasoning for the ranges reserveGuestVaSpace() claimed up front
+    // (libkernel's arena, the GNM areas, the title pool slots): the only thing
+    // occupying them is our own PROT_NONE placeholder, so a hint landing there
+    // is guest-owned address space and must be COMMITTED where the guest asked.
+    // Relocating instead is what makes libkernel fall back to its internal
+    // arena and exhaust it -- see guest_vaspace.cpp.
+    inUserStack = inUserStack || isGuestReservedVa(addr, size);
   }
 
   if (fd != -1) {

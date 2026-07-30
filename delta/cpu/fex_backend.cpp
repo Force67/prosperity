@@ -946,9 +946,15 @@ std::atomic<uintptr_t> g_fexHeapNext{0};
 uintptr_t g_fexHeapEnd = 0;
 
 void *fexInternalMmap(void *addr, size_t len, int prot, int flags, int fd, off_t off) {
-  // Honor explicit addresses (incl. MAP_FIXED); FEX knows what it's doing.
-  if (addr || !g_fexHeapEnd)
+  // MAP_FIXED means FEX requires that exact address; honour it.
+  if ((flags & MAP_FIXED) || !g_fexHeapEnd)
     return ::mmap(addr, len, prot, flags, fd, off);
+  // A bare hint is advisory, and the kernel is free to ignore it and place the
+  // mapping anywhere -- including a range the guest MAP_FIXEDs later, which is
+  // the collision this whole window exists to prevent. Keeping FEX's internals
+  // inside the window matters more than honouring a hint it cannot rely on, so
+  // fall through to the bump allocator below and drop the hint.
+  (void)addr;
   // Bump-allocate anonymous requests from the reserved window with MAP_FIXED so
   // they can never overlap guest memory.
   const size_t alen = (len + 0xFFFull) & ~0xFFFull;
