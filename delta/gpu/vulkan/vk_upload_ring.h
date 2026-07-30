@@ -35,6 +35,12 @@ struct TextureUploadSlice {
 };
 
 constexpr VkDeviceSize kVbRing = 16ull * 1024 * 1024;  // per-frame vertex ring
+// DELTA_GPU_VBRING_MB=<n>: override the vertex ring size (default kVbRing).
+// Halved per frame slot like every other ring, so the usable per-frame budget
+// is n/2 MB. Exists because the ring is a hard per-frame draw budget, not a
+// cache: a draw whose vertices do not fit is declined outright (kRing) and
+// simply never appears, which is invisible in a draw count. Read once.
+VkDeviceSize VbRingBytes();
 constexpr VkDeviceSize kIbRing =
     8ull * 1024 * 1024;  // per-frame index ring (32-bit)
 constexpr VkDeviceSize kUboRing =

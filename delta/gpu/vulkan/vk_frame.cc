@@ -369,11 +369,53 @@ void BeginFrame(Renderer& renderer) {
   g_frame.readback_map = slot.readback_map;
   g_frame.readback_size = slot.readback_size;
   ResetTextureUploads(g_frame.slot_idx);
-  const VkDeviceSize vb_base = g_frame.slot_idx * (kVbRing / 2);
+  // DELTA_GPU_RINGHWM: what the frame that just ended actually consumed from
+  // each per-frame upload ring half, against that half's capacity. A draw
+  // declined for ring space is invisible in a draw count, so the only way to
+  // tell "the ring is the limit" from "the ring is not the limit" is to see the
+  // high-water mark next to the cap. Printed before the reset below, so the
+  // offsets still hold the finished frame's totals.
+  static const bool kRingHwm = std::getenv("DELTA_GPU_RINGHWM") != nullptr;
+  if (kRingHwm) {
+    static VkDeviceSize prev_vb = 0, prev_ib = 0, prev_ubo = 0, prev_sbo = 0;
+    static VkDeviceSize peak_vb = 0, peak_ib = 0, peak_ubo = 0, peak_sbo = 0;
+    const VkDeviceSize used_vb = g_ring.vb_offset - prev_vb;
+    const VkDeviceSize used_ib = g_ring.ib_offset - prev_ib;
+    const VkDeviceSize used_ubo = g_ring.ubo_offset - prev_ubo;
+    const VkDeviceSize used_sbo =
+        g_ring.sbo_map ? g_ring.sbo_offset - prev_sbo : 0;
+    peak_vb = std::max(peak_vb, used_vb);
+    peak_ib = std::max(peak_ib, used_ib);
+    peak_ubo = std::max(peak_ubo, used_ubo);
+    peak_sbo = std::max(peak_sbo, used_sbo);
+    if (g_frame.num % 10 == 0)
+      std::fprintf(stderr,
+                   "[ringhwm] f%d draws=%u vb=%lluK/%lluK(peak %lluK) "
+                   "ib=%lluK/%lluK(peak %lluK) ubo=%lluK/%lluK(peak %lluK) "
+                   "sbo=%lluK/%lluK(peak %lluK)\n",
+                   g_frame.num, g_frame.draws,
+                   (unsigned long long)(used_vb >> 10),
+                   (unsigned long long)((VbRingBytes() / 2) >> 10),
+                   (unsigned long long)(peak_vb >> 10),
+                   (unsigned long long)(used_ib >> 10),
+                   (unsigned long long)((kIbRing / 2) >> 10),
+                   (unsigned long long)(peak_ib >> 10),
+                   (unsigned long long)(used_ubo >> 10),
+                   (unsigned long long)((kUboRing / 2) >> 10),
+                   (unsigned long long)(peak_ubo >> 10),
+                   (unsigned long long)(used_sbo >> 10),
+                   (unsigned long long)((kSboRing / 2) >> 10),
+                   (unsigned long long)(peak_sbo >> 10));
+    prev_vb = g_frame.slot_idx * (VbRingBytes() / 2);
+    prev_ib = g_frame.slot_idx * (kIbRing / 2);
+    prev_ubo = g_frame.slot_idx * (kUboRing / 2);
+    prev_sbo = g_frame.slot_idx * (kSboRing / 2);
+  }
+  const VkDeviceSize vb_base = g_frame.slot_idx * (VbRingBytes() / 2);
   const VkDeviceSize ib_base = g_frame.slot_idx * (kIbRing / 2);
   const VkDeviceSize ubo_base = g_frame.slot_idx * (kUboRing / 2);
   g_ring.vb_offset = vb_base;
-  g_ring.vb_end = vb_base + kVbRing / 2;
+  g_ring.vb_end = vb_base + VbRingBytes() / 2;
   g_ring.ib_offset = ib_base;
   g_ring.ib_end = ib_base + kIbRing / 2;
   g_ring.ubo_offset = ubo_base;
