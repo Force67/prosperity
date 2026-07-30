@@ -50,18 +50,6 @@ using gpu::gcn::RecompiledCs;
 using gpu::gcn::StageContext;
 using gpu::gcn::Translator;
 
-// gfx10.3 encodes the DS opcode at word0[25:18] with GDS at bit 17, which is
-// where GFX7 had them; rdna_decode records the gfx9 layout ([24:17], GDS at
-// 16), so its DS opcode reads as op*2 + gds. Checked with llvm-mc -mcpu=gfx1030
-// (ds_write_b32 = 0xd8340000, and 0xd86c0000 is not an instruction at all).
-uint32_t DsOpcode(const Inst& inst) {
-  return (inst.raw[0] >> 18) & 0xFF;
-}
-
-bool DsUsesGds(const Inst& inst) {
-  return (inst.raw[0] >> 17) & 1;
-}
-
 // One set-0 storage buffer per distinct descriptor, mirroring the GFX7 planner
 // (gpu/gcn PlanCsResources) with RDNA2's SMEM decode.
 //
@@ -155,7 +143,7 @@ bool PlanResources(const Program& program,
         // ds_swizzle is a cross-lane move rather than an LDS access, so it is
         // the one DS op that runs without an LDS allocation. GDS is not
         // modelled at all.
-        if (DsUsesGds(inst) || (!lds_dwords && DsOpcode(inst) != 0x35))
+        if (((w >> 17) & 1) || (!lds_dwords && inst.opcode != 0x35))
           return false;
         break;
       case Enc::kMimg:
@@ -240,7 +228,7 @@ bool TranslateCs(const Program& program,
 
   bool uses_ds_swizzle = false;
   for (const Inst& inst : program)
-    if (inst.enc == Enc::kDs && DsOpcode(inst) == 0x35) {
+    if (inst.enc == Enc::kDs && inst.opcode == 0x35) {
       uses_ds_swizzle = true;
       break;
     }
@@ -357,12 +345,9 @@ bool EmitCsMemory(Translator& t, const Inst& inst, StageContext& sc) {
     case Enc::kMtbuf:
       gpu::gcn::EmitCsMtbuf(t, inst, sc);
       return true;
-    case Enc::kDs: {
-      Inst lowered = inst;
-      lowered.opcode = DsOpcode(inst);
-      gpu::gcn::EmitDs(t, lowered, sc);
+    case Enc::kDs:
+      gpu::gcn::EmitDs(t, inst, sc);
       return true;
-    }
     case Enc::kMimg:
     case Enc::kFlat:
       sc.cs_unsupported = true;  // the plan already declined these

@@ -113,7 +113,9 @@ Enc Classify(uint32_t w, uint32_t& opcode) {
       opcode = (w >> 16) & 0x3FF;
       return Enc::kVop3;  // 10-bit opcode
     case 0x36:
-      opcode = (w >> 17) & 0xFF;
+      // gfx10 moved the DS opcode up a bit (GDS took bit 17), so the gfx9
+      // field reads as op*2 + gds here.
+      opcode = (w >> 18) & 0xFF;
       return Enc::kDs;
     case 0x37:
       opcode = (w >> 18) & 0x7F;

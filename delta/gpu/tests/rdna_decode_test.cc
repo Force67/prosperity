@@ -134,12 +134,23 @@ TEST(RdnaDecode, FmacImplicitAccumulatorDoesNotSelectLiteral) {
   EXPECT_EQ(program[1].pc, 2u);
 }
 
-TEST(RdnaDecode, DsOpcodeUsesBits24Through17) {
-  const uint32_t code[] = {(0x36u << 26) | (1u << 17), 0};
+// Anchored on a real gfx1030 encoding rather than on our own field choice:
+// `llvm-mc -arch=amdgcn -mcpu=gfx1030` assembles ds_write_b32 (opcode 13) to
+// 0xd8340000. Reading the gfx9 field [24:17] instead yields 26, i.e. op*2.
+TEST(RdnaDecode, DsOpcodeUsesBits25Through18) {
+  const uint32_t code[] = {0xd8340000u, 0};
   const gpu::gcn::Program program = gpu::rdna::Decode(code, 2, false);
   ASSERT_EQ(program.size(), 1u);
   EXPECT_EQ(program[0].enc, gpu::gcn::Enc::kDs);
-  EXPECT_EQ(program[0].opcode, 1u);
+  EXPECT_EQ(program[0].opcode, 13u);
+}
+
+// GDS moved to bit 17, so it must not bleed into the opcode.
+TEST(RdnaDecode, DsGdsBitIsNotPartOfTheOpcode) {
+  const uint32_t code[] = {0xd8340000u | (1u << 17), 0};
+  const gpu::gcn::Program program = gpu::rdna::Decode(code, 2, false);
+  ASSERT_EQ(program.size(), 1u);
+  EXPECT_EQ(program[0].opcode, 13u);
 }
 
 TEST(RdnaDecode, VopcDppFormsRetainTheirControlDword) {
