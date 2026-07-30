@@ -4,6 +4,29 @@
  * HLE libSceAudioOut. See libSceAudioOut.h. Bridges to the host SDL3 device via
  * delta_gfx's gfx_audio. Each open port records its grain/format so Output knows
  * how many interleaved frames the guest buffer holds.
+ *
+ * This path is verified working end to end: The Binding of Isaac opens two
+ * ports and its samples reach SDL with a live signal (peak climbing 0.037 ->
+ * 0.071 over a run). A title that comes out silent through here is submitting
+ * silence -- SotC does, for the same upstream reason it submits a black frame.
+ *
+ * ---- what running this module LLE would take -------------------------------
+ * The real libSceAudioOut does NOT use an ioctl device, so there is no /dev node
+ * to write. Traced with DELTA_LLE=libSceAudioOut it instead:
+ *   - opens a named event flag "sceAudioOutMix<pid>"  (pid is ours, 0x1337)
+ *   - creates per-port POSIX shm: "/shm_<pid>_C", "/shm_<pid>_7_A",
+ *     "/shm_<pid>_20_A" ... (flags 0x202 = O_RDWR|O_CREAT)
+ * and then mixes into those regions and signals the flag, expecting the system
+ * audio daemon to consume them. We host no such daemon, so the samples stop
+ * there: with DELTA_LLE=libSceAudioOut the title runs normally (Isaac: 36 fps,
+ * no crash) and our SDL sink is simply never opened.
+ *
+ * Hosting it means standing in for that daemon: map the shm regions, decode the
+ * ring (header layout, read/write cursors, per-port sample format -- none of
+ * which is established yet) and push the frames to prosperity_audio_output on
+ * the flag. Reverse-engineer the ring against Isaac, NOT against SotC: Isaac is
+ * the only title here that currently produces a non-zero signal, so it is the
+ * only one where a wrong decode is distinguishable from a correct one.
  */
 
 #include "libSceAudioOut.h"
