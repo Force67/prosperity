@@ -991,6 +991,20 @@ std::unordered_map<uint32_t, BufferResource> ResolveBuffers(
         resource.base = eval.Ptr(smem.sbase);
         out.emplace(inst.pc, resource);
       }
+    } else if (inst.enc == Enc::kMimg) {
+      // An image T# an SRT chain produced: the dispatch path needs its extents
+      // and format to stage the surface, and cannot read them out of user data.
+      const uint32_t srsrc = ((inst.raw[1] >> 16) & 0x1F) * 4;
+      const uint32_t dwords = ((inst.raw[0] >> 15) & 1) ? 4u : 8u;
+      if (eval.AllKnown(srsrc, dwords)) {
+        BufferResource resource;
+        resource.base = eval.Ptr(srsrc);
+        resource.descriptor_dwords = dwords;
+        std::memcpy(resource.descriptor, &eval.sgpr[srsrc],
+                    dwords * sizeof(uint32_t));
+        resource.descriptor_valid = true;
+        out.emplace(inst.pc, resource);
+      }
     } else if ((inst.enc == Enc::kMubuf || inst.enc == Enc::kMtbuf) &&
                inst.opcode <= 0x03) {
       const uint32_t srsrc = ((inst.raw[1] >> 16) & 0x1F) * 4;
@@ -1010,8 +1024,8 @@ std::unordered_map<uint32_t, BufferResource> ResolveBuffers(
       if (eval.AllKnown(srsrc, 4)) {
         BufferResource resource;
         resource.base = eval.Ptr(srsrc);
-        std::memcpy(resource.descriptor, &eval.sgpr[srsrc],
-                    sizeof(resource.descriptor));
+        resource.descriptor_dwords = 4;
+        std::memcpy(resource.descriptor, &eval.sgpr[srsrc], 4 * sizeof(uint32_t));
         resource.descriptor_valid = true;
         const uint32_t soff = (inst.raw[1] >> 24) & 0xFF;
         if (soff == 128) {

@@ -75,8 +75,13 @@ bool PlanResources(const Program& program,
 
   std::unordered_map<uint32_t, uint32_t> resource_by_descriptor;
   const auto resource = [&](uint32_t pc, uint32_t base_sgpr, uint32_t dwords,
-                            uint8_t kind, bool written, uint32_t min_bytes) {
-    if (!inline_user_data(base_sgpr, dwords)) {
+                            uint8_t kind, bool written, uint32_t min_bytes,
+                            bool replayable = false) {
+    // A descriptor an SRT chain produced is resolved at dispatch time by
+    // replaying the shader's scalar ops (rdna::ResolveBuffers), keyed on this
+    // pc. Only one that is neither inline nor replayable is declined, and the
+    // dispatch path does that check.
+    if (!inline_user_data(base_sgpr, dwords) && !replayable) {
       gpu::gcn::WarnUnsupported("cs.descriptor-not-inline.rdna", base_sgpr);
       return false;
     }
@@ -146,13 +151,24 @@ bool PlanResources(const Program& program,
         if (((w >> 17) & 1) || (!lds_dwords && inst.opcode != 0x35))
           return false;
         break;
-      case Enc::kMimg:
-        // The shared compute image emitter reads the T# out of the SGPRs with
-        // GFX7 field positions; a gfx10.3 T# lays its extents, format and
-        // swizzle mode out differently, so reusing it would address the staged
-        // image wrongly. Needs its own emitter before compute can touch images.
-        gpu::gcn::WarnUnsupported("mimg.cs.rdna", inst.opcode, w, w1);
-        return false;
+      case Enc::kMimg: {
+        // The shared emitter reads the T# with the gfx10.3 field positions when
+        // the translator is in RDNA mode, so the plan is the same as GCN's.
+        const uint32_t op = inst.opcode;
+        const uint32_t srsrc = ((w1 >> 16) & 0x1F) * 4;
+        if (op == 0x0e)
+          break;  // get_resinfo reads only descriptor SGPRs
+        const bool store = op == 0x08 || op == 0x09;
+        const bool load = op == 0x00 || op == 0x01;
+        const bool sample = op == 0x24 || op == 0x27;
+        if ((!store && !load && !sample) || ((w >> 15) & 1) || srsrc + 7 >= 136) {
+          gpu::gcn::WarnUnsupported("mimg.cs.rdna", inst.opcode, w, w1);
+          return false;
+        }
+        if (!resource(inst.pc, srsrc, 8, 1, store, 0, true))
+          return false;
+        break;
+      }
       case Enc::kFlat:
         // global_/scratch_ addressing is a raw 64-bit pointer, which the
         // descriptor-bound resource model cannot express.
@@ -349,6 +365,8 @@ bool EmitCsMemory(Translator& t, const Inst& inst, StageContext& sc) {
       gpu::gcn::EmitDs(t, inst, sc);
       return true;
     case Enc::kMimg:
+      gpu::gcn::EmitCsMimg(t, inst, sc);
+      return true;
     case Enc::kFlat:
       sc.cs_unsupported = true;  // the plan already declined these
       return true;

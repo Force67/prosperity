@@ -857,6 +857,12 @@ void HandleDispatch(const uint32_t* body, uint32_t count) {
   for (int k = 0; k < 16; k++)
     ci.user_data[k] = ud[k];
 
+  // Descriptors an SRT chain produced are not in the user-data window; replay
+  // the shader's scalar ops to recover the one each resource's instruction
+  // actually used.
+  const auto cs_resources = rdna::ResolveBuffers(
+      reinterpret_cast<const uint32_t*>(cs_addr), ud, ud_dwords, 0);
+
   constexpr uint64_t kMaxRes = 256ull * 1024 * 1024;  // per storage buffer
   static const bool kResTrace = std::getenv("DELTA_GPU_CSRES") != nullptr;
   bool res_ok = true;
@@ -865,17 +871,24 @@ void HandleDispatch(const uint32_t* body, uint32_t count) {
     // Compute seeds user data straight into s0.., so a plan naming an SGPR past
     // the loaded window names one an SRT load produced, which nothing here
     // replays.
-    if (r.base_sgpr + dwords > ud_dwords) {
+    const uint32_t* desc = nullptr;
+    if (r.base_sgpr + dwords <= ud_dwords) {
+      desc = &ud[r.base_sgpr];
+    } else if (const auto it = cs_resources.find(r.use_pc);
+               it != cs_resources.end() && it->second.descriptor_valid &&
+               it->second.descriptor_dwords >= dwords) {
+      desc = it->second.descriptor;
+    } else {
       if (CsReport())
         std::fprintf(stderr,
                      "[csgpu] CS @%#lx bind=%u kind=%u s%u pc=%#x is outside "
-                     "the %u-dword user data -- dispatch skipped\n",
+                     "the %u-dword user data and did not replay -- dispatch "
+                     "skipped\n",
                      (unsigned long)cs_addr, r.binding, r.kind, r.base_sgpr,
                      r.use_pc, ud_dwords);
       res_ok = false;
       break;
     }
-    const uint32_t* desc = &ud[r.base_sgpr];
 
     uint64_t base = 0, size = 0, guest_size = 0;
     gcn::TImage image;

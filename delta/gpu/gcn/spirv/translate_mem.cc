@@ -15,6 +15,7 @@
 
 #ifdef DELTA_HAVE_SPIRV_BACKEND
 
+#include <initializer_list>
 #include <algorithm>
 
 #include "gpu/gcn/spirv/translator.h"
@@ -881,7 +882,13 @@ void EmitCsMimg(Translator& t, const Inst& inst, StageContext& sc) {
   const auto field = [&](uint32_t dword, uint32_t shift, uint32_t mask) {
     return t.And(t.Shr(t.Sg(srsrc + dword), t.U32(shift)), t.U32(mask));
   };
-  const Id base_width = t.Add(field(2, 0, 0x3FFF), t.U32(1));
+  // gfx10.3 splits WIDTH's low two bits into dword 1 and drops the pitch and
+  // pow2-pad fields; everything else sits where GFX7 puts it.
+  const Id base_width =
+      t.rdna_sources
+          ? t.Add(t.Or(field(1, 30, 0x3), t.Shl(field(2, 0, 0xFFF), t.U32(2))),
+                  t.U32(1))
+          : t.Add(field(2, 0, 0x3FFF), t.U32(1));
   const Id base_height = t.Add(field(2, 14, 0x3FFF), t.U32(1));
   const Id base_mip = field(3, 12, 0xF);
   const Id last_mip = field(3, 16, 0xF);
@@ -916,20 +923,47 @@ void EmitCsMimg(Translator& t, const Inst& inst, StageContext& sc) {
   }
   const uint32_t binding = static_cast<uint32_t>(b);
 
-  const Id base_pitch = t.Add(field(4, 13, 0x3FFF), t.U32(1));
+  // A tiled gfx10.3 surface carries no pitch: the CPU-side layout uses the
+  // width, so the shader must index the staging image the same way.
+  const Id base_pitch =
+      t.rdna_sources ? base_width : t.Add(field(4, 13, 0x3FFF), t.U32(1));
+  // gfx10.3 replaces (dfmt, nfmt) with one 9-bit format enum.
+  const Id gfmt = field(1, 20, 0x1FF);
   const Id dfmt = field(1, 20, 0x3F), nfmt = field(1, 26, 0xF);
   const Id is_unorm = t.IsZero(nfmt);  // nfmt 0 = UNORM
+  const auto is_gfmt = [&](std::initializer_list<uint32_t> values) {
+    Id any = t.m.ConstBool(false);
+    for (uint32_t v : values)
+      any = logical_or(any, t.Eq(gfmt, t.U32(v)));
+    return any;
+  };
   const Id is_rgba8 =
-      t.LAnd(t.Eq(dfmt, t.U32(10)), logical_or(is_unorm, t.Eq(nfmt, t.U32(4))));
-  const Id is_r32 = t.LAnd(
-      t.Eq(dfmt, t.U32(4)),
-      logical_or(t.Eq(nfmt, t.U32(4)),
-                 logical_or(t.Eq(nfmt, t.U32(5)), t.Eq(nfmt, t.U32(7)))));
-  const Id is_rg16f = t.LAnd(t.Eq(dfmt, t.U32(5)), t.Eq(nfmt, t.U32(7)));
-  const Id is_r16f = t.LAnd(t.Eq(dfmt, t.U32(2)), t.Eq(nfmt, t.U32(7)));
-  const Id is_rg8 = t.LAnd(t.Eq(dfmt, t.U32(3)), is_unorm);
-  const Id is_rgba16f = t.LAnd(t.Eq(dfmt, t.U32(12)), t.Eq(nfmt, t.U32(7)));
-  const Id is_r11g11b10f = t.LAnd(t.Eq(dfmt, t.U32(6)), t.Eq(nfmt, t.U32(7)));
+      t.rdna_sources
+          ? is_gfmt({56, 60, 130})
+          : t.LAnd(t.Eq(dfmt, t.U32(10)),
+                   logical_or(is_unorm, t.Eq(nfmt, t.U32(4))));
+  const Id is_r32 =
+      t.rdna_sources
+          ? is_gfmt({20, 21, 22})
+          : t.LAnd(t.Eq(dfmt, t.U32(4)),
+                   logical_or(t.Eq(nfmt, t.U32(4)),
+                              logical_or(t.Eq(nfmt, t.U32(5)),
+                                         t.Eq(nfmt, t.U32(7)))));
+  const Id is_rg16f = t.rdna_sources
+                          ? is_gfmt({29})
+                          : t.LAnd(t.Eq(dfmt, t.U32(5)), t.Eq(nfmt, t.U32(7)));
+  const Id is_r16f = t.rdna_sources
+                         ? is_gfmt({13})
+                         : t.LAnd(t.Eq(dfmt, t.U32(2)), t.Eq(nfmt, t.U32(7)));
+  const Id is_rg8 =
+      t.rdna_sources ? is_gfmt({14}) : t.LAnd(t.Eq(dfmt, t.U32(3)), is_unorm);
+  const Id is_rgba16f = t.rdna_sources ? is_gfmt({71})
+                                       : t.LAnd(t.Eq(dfmt, t.U32(12)),
+                                                t.Eq(nfmt, t.U32(7)));
+  const Id is_r11g11b10f = t.rdna_sources
+                               ? is_gfmt({36})
+                               : t.LAnd(t.Eq(dfmt, t.U32(6)),
+                                        t.Eq(nfmt, t.U32(7)));
   Id supported_format = logical_or(is_rgba8, is_r32);
   supported_format = logical_or(supported_format, is_rg16f);
   supported_format = logical_or(supported_format, is_r16f);
@@ -969,13 +1003,17 @@ void EmitCsMimg(Translator& t, const Inst& inst, StageContext& sc) {
     y = t.UMin(t.m.Emit(spv::Op::OpConvertFToU, t.t_u, {fy0}),
                t.Sub(height, t.U32(1)));
   }
-  const Id linear_general = t.Eq(field(3, 20, 0x1F), t.U32(31));
-  const Id pow2_pad = t.IsNonZero(field(3, 25, 1));
+  // gfx10.3 swizzle mode 0 is the linear one, and it has no pow2-pad bit.
+  const Id linear_general = t.Eq(field(3, 20, 0x1F), t.U32(t.rdna_sources ? 0 : 31));
+  const Id pow2_pad =
+      t.rdna_sources ? t.m.ConstBool(false) : t.IsNonZero(field(3, 25, 1));
   const Id stored_height = t.SelectB(pow2_pad, BitCeil(t, height), height);
   const Id pitch = LinearMipPitch(t, base_pitch, stored_height, physical_mip,
                                   linear_general, pow2_pad);
-  const Id base_array = field(5, 0, 0x1FFF);
-  const Id last_array = field(5, 13, 0x1FFF);
+  const Id base_array =
+      t.rdna_sources ? field(4, 16, 0x1FFF) : field(5, 0, 0x1FFF);
+  const Id last_array = t.rdna_sources ? t.Add(descriptor_layers, t.U32(~0u))
+                                       : field(5, 13, 0x1FFF);
   const Id view_layer = da ? t.Vg(vaddr + 2) : t.U32(0);
   const Id physical_layer = t.Add(base_array, view_layer);
   const Id padded_layers =

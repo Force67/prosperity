@@ -28,7 +28,9 @@ struct Smem {
 
 struct BufferResource {
   uint64_t base = 0;
-  uint32_t descriptor[4] = {};
+  // 4 dwords for a V#, 8 for an image T#; descriptor_dwords says which.
+  uint32_t descriptor[8] = {};
+  uint32_t descriptor_dwords = 0;
   bool descriptor_valid = false;
   // Byte offset the fetch adds on top of the descriptor. For a structured V#
   // the hardware computes base + soffset + index*stride, and Sony's compiler
