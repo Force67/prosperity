@@ -77,6 +77,14 @@ void setRetTrace(uintptr_t addr, const char *label);
 void setFnWatch(uintptr_t addr, const char *label);
 void startFnWatchPrinter();
 
+// DELTA_FNARGS="off+o1+o2...:label,...": int3 at a guest function entry (push
+// rbp) that logs rdi and then walks the offset chain from it, printing every
+// intermediate pointer and the qword the last one lands on. Answers "which
+// address does this function poll/store", which a backtrace cannot: by the time
+// a wedged thread is inside the emulator its callee-saved registers are gone.
+void setFnArgs(uintptr_t addr, const char *label, const uint64_t *offsets,
+               int noffsets);
+
 // Give the calling thread a dedicated signal-handler stack (SA_ONSTACK). The
 // fatal handler then runs even when the guest's own RSP is corrupt or blown
 // (a stack-overflow fault would otherwise be undeliverable -> silent core).

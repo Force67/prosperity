@@ -425,6 +425,17 @@ static const char *g_fnWatchLabels[kFnWatchMax];
 static std::atomic<uint64_t> g_fnWatchHits[kFnWatchMax];
 static int g_fnWatchCount = 0;
 
+// DELTA_FNARGS pointer-chain probe (see crash.h).
+static constexpr int kFnArgsMax = 8;
+static constexpr int kFnArgsOffsMax = 6;
+static constexpr int kFnArgsLogs = 8;  // logs per site; these sites are hot
+static uintptr_t g_fnArgsAddrs[kFnArgsMax];
+static const char *g_fnArgsLabels[kFnArgsMax];
+static uint64_t g_fnArgsOffs[kFnArgsMax][kFnArgsOffsMax];
+static int g_fnArgsNoffs[kFnArgsMax];
+static std::atomic<uint64_t> g_fnArgsHits[kFnArgsMax];
+static int g_fnArgsCount = 0;
+
 static void crashHandler(int sig, siginfo_t *si, void *ucv) {
 #if defined(__x86_64__)
   if (sig == SIGTRAP && g_retCount && ucv) {
@@ -488,6 +499,50 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
       int n = std::snprintf(m, sizeof(m), "[order t=%ldms tid=%ld] %s  <- %s\n",
                             ms, (long)gettid(), g_orderLabels[i], csym);
       if (n > 0) { ssize_t w = write(2, m, (size_t)n); (void)w; }
+      gr[REG_RSP] -= 8;  // emulate the displaced `push rbp`
+      *reinterpret_cast<uint64_t *>(gr[REG_RSP]) = (uint64_t)gr[REG_RBP];
+      return;
+    }
+  }
+  if (sig == SIGTRAP && g_fnArgsCount && ucv) {
+    auto *uc = static_cast<ucontext_t *>(ucv);
+    auto *gr = uc->uc_mcontext.gregs;
+    for (int i = 0; i < g_fnArgsCount; i++) {
+      if ((uintptr_t)gr[REG_RIP] != g_fnArgsAddrs[i] + 1)
+        continue;
+      if (g_fnArgsHits[i].fetch_add(1, std::memory_order_relaxed) < kFnArgsLogs) {
+        char m[512];
+        int n = std::snprintf(m, sizeof(m),
+                              "[fnargs] %s rdi=%#lx rsi=%#lx rdx=%#lx rcx=%#lx",
+                              g_fnArgsLabels[i], (unsigned long)gr[REG_RDI],
+                              (unsigned long)gr[REG_RSI],
+                              (unsigned long)gr[REG_RDX],
+                              (unsigned long)gr[REG_RCX]);
+        uintptr_t p = (uintptr_t)gr[REG_RDI];
+        for (int o = 0; o < g_fnArgsNoffs[i] && n > 0; o++) {
+          uintptr_t at = p + g_fnArgsOffs[i][o];
+          if (!utl::isMemoryRangeMapped(reinterpret_cast<void *>(at), 8)) {
+            n += std::snprintf(m + n, sizeof(m) - n, " +%#lx=<unmapped>",
+                               (unsigned long)g_fnArgsOffs[i][o]);
+            p = 0;
+            break;
+          }
+          p = *reinterpret_cast<uintptr_t *>(at);
+          n += std::snprintf(m + n, sizeof(m) - n, " +%#lx->%#lx",
+                             (unsigned long)g_fnArgsOffs[i][o], (unsigned long)p);
+        }
+        if (n > 0 && p && utl::isMemoryRangeMapped(reinterpret_cast<void *>(p), 64)) {
+          n += std::snprintf(m + n, sizeof(m) - n, " *=");
+          const auto *w = reinterpret_cast<const uint32_t *>(p);
+          for (int j = 0; j < 12 && n > 0 && n < (int)sizeof(m) - 12; j++)
+            n += std::snprintf(m + n, sizeof(m) - n, " %08x", w[j]);
+        }
+        if (n > 0 && n < (int)sizeof(m) - 1) {
+          m[n++] = '\n';
+          ssize_t w = write(2, m, (size_t)n);
+          (void)w;
+        }
+      }
       gr[REG_RSP] -= 8;  // emulate the displaced `push rbp`
       *reinterpret_cast<uint64_t *>(gr[REG_RSP]) = (uint64_t)gr[REG_RBP];
       return;
@@ -1213,6 +1268,21 @@ void setFnWatch(uintptr_t addr, const char *label) {
   g_fnWatchLabels[g_fnWatchCount] = label;
   g_fnWatchHits[g_fnWatchCount].store(0, std::memory_order_relaxed);
   g_fnWatchCount++;
+}
+
+void setFnArgs(uintptr_t addr, const char *label, const uint64_t *offsets,
+               int noffsets) {
+  if (g_fnArgsCount >= kFnArgsMax)
+    return;
+  if (noffsets > kFnArgsOffsMax)
+    noffsets = kFnArgsOffsMax;
+  g_fnArgsAddrs[g_fnArgsCount] = addr;
+  g_fnArgsLabels[g_fnArgsCount] = label;
+  g_fnArgsNoffs[g_fnArgsCount] = noffsets;
+  for (int i = 0; i < noffsets; i++)
+    g_fnArgsOffs[g_fnArgsCount][i] = offsets[i];
+  g_fnArgsHits[g_fnArgsCount].store(0, std::memory_order_relaxed);
+  g_fnArgsCount++;
 }
 
 void startFnWatchPrinter() {

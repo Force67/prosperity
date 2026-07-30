@@ -50,6 +50,8 @@ proc *proc::getActive() { return g_activeProc; }
 static void bringUpRebirthEbootRegistry(smodule &m);
 static void investigateDcbGate(smodule &m);
 static void investigateFnWatch(smodule &m);
+static void investigateFnArgs(smodule &m);
+static void applyGuestPatches(smodule &m);
 static void forceSotcPayload(smodule &m);
 static void probeFiosPaths();
 static void installJobTrace(smodule &m);
@@ -139,6 +141,8 @@ bool proc::create(const base::String &path, bool fromVfs) {
   }
   // Generic guest-function hit counter (works for PS4 and PS5 eboots).
   investigateFnWatch(*first);
+  investigateFnArgs(*first);
+  applyGuestPatches(*first);
   forceSotcPayload(*first);
   installJobTrace(*first);
   // Note: DELTA_FIOS_PROBE runs lazily on the first FIOS2 call (see
@@ -192,6 +196,82 @@ static void investigateFnWatch(smodule &m) {
     }
   }
   startFnWatchPrinter();
+}
+
+// DELTA_GUEST_PATCH="hexoff=hexbytes,...": overwrite guest code/data at an eboot
+// offset. For bisecting a wedge: NOP out a poll and see whether the thread behind
+// it is the only thing blocked, without waiting for the real fix.
+static void applyGuestPatches(smodule &m) {
+  const char *e = std::getenv("DELTA_GUEST_PATCH");
+  if (!e)
+    return;
+  uint8_t *base = m.getInfo().base;
+  for (const char *p = e; *p;) {
+    while (*p == ',' || *p == ' ')
+      p++;
+    if (!*p)
+      break;
+    char *endp = nullptr;
+    uint64_t off = std::strtoull(p, &endp, 16);
+    if (!endp || *endp != '=')
+      break;
+    const char *h = endp + 1;
+    uint8_t bytes[32];
+    int n = 0;
+    while (n < 32 && std::isxdigit((unsigned char)h[0]) &&
+           std::isxdigit((unsigned char)h[1])) {
+      bytes[n++] = (uint8_t)std::strtoul(base::String(h, 2).c_str(), nullptr, 16);
+      h += 2;
+    }
+    p = h;
+    auto *c = base + off;
+    utl::protectMem(reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(c) & ~0xFFFull),
+                    0x2000, utl::pageProtection::rwx);
+    std::memcpy(c, bytes, (size_t)n);
+    LOG_INFO("guestpatch: {} byte(s) at eboot+{:#x}", n, off);
+  }
+}
+
+// DELTA_FNARGS="hexoff[+o1+o2...]:label,...": arm an int3 at each guest function
+// entry (first byte must be push rbp) that logs rdi and walks the offset chain
+// from it. See setFnArgs in crash.h.
+static void investigateFnArgs(smodule &m) {
+  const char *e = std::getenv("DELTA_FNARGS");
+  if (!e)
+    return;
+  uint8_t *base = m.getInfo().base;
+  for (const char *p = e; *p;) {
+    while (*p == ',' || *p == ' ')
+      p++;
+    if (!*p)
+      break;
+    char *endp = nullptr;
+    uint64_t off = std::strtoull(p, &endp, 16);
+    uint64_t offs[8];
+    int noffs = 0;
+    while (endp && *endp == '+' && noffs < 8)
+      offs[noffs++] = std::strtoull(endp + 1, &endp, 16);
+    const char *label = "fn";
+    if (endp && *endp == ':') {
+      const char *lb = endp + 1, *le = lb;
+      while (*le && *le != ',')
+        le++;
+      label = strndup(lb, (size_t)(le - lb));  // persists for setFnArgs
+      p = le;
+    } else {
+      p = endp;
+    }
+    auto *c = base + off;
+    utl::protectMem(reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(c) & ~0xFFFull),
+                    0x1000, utl::pageProtection::rwx);
+    if (c[0] == 0x55) {
+      c[0] = 0xCC;
+      setFnArgs(reinterpret_cast<uintptr_t>(c), label, offs, noffs);
+      LOG_INFO("fnargs: armed {} @ eboot+{:#x} ({} offsets)", label, off, noffs);
+    } else {
+      LOG_WARNING("fnargs: eboot+{:#x} first byte {:#x} != push rbp", off, c[0]);
+    }
+  }
 }
 
 // DELTA_SOTC_FORCE_PAYLOAD: experiment to get past LoadInitialWorld. The SotC
