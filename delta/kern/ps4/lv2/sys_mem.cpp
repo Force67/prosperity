@@ -576,8 +576,12 @@ uint8_t *PS4ABI sys_mmap(void *addr, size_t size, uint32_t prot, uint32_t flags,
   // would only risk spurious crashes, not faithful behaviour.
   auto gprot = static_cast<ppt>(prot & static_cast<uint32_t>(ppt::rwx));
 
-  if (flags & mFlags::anon)
-    std::memset(ptr, 0, size);
+  // No zero-fill for anonymous maps: every ptr above comes from an anonymous
+  // ::mmap (utl::allocMem or allocLowGuest), which the kernel already hands
+  // back zeroed. Writing it ourselves faulted in the whole mapping -- a title
+  // that maps multi-GiB pools (Minecraft maps 4 and 8 GiB ones) went to 43 GiB
+  // RSS at ~3 GB/s and took the host down. The shm and device-backed paths
+  // return before this point, so they are unaffected.
 
   // File-backed mmap: copy the file's content into the freshly-mapped pages so the
   // guest reads the file it mapped (Doom64 mmaps its asset/WAD files and samples
