@@ -459,6 +459,20 @@ void EmitSop2(Translator& t, const Inst& inst) {
                                          {t.m.Bitcast(t.t_i, t.Sub(a, b))}));
       scc = true;
       break;
+    case 0x2e:  // s_lshl1_add_u32 .. s_lshl4_add_u32: (a << n) + b. RDNA-only
+    case 0x2f:  // numbering -- these opcodes mean something else pre-gfx10, so
+    case 0x30:  // the PS4 decoder must not reach them.
+    case 0x31: {
+      if (!t.rdna_sources) {
+        WarnUnsupported("sop2", op);
+        r = a;
+        break;
+      }
+      const CarryResult c = AddCarry(t, t.Shl(a, t.U32(op - 0x2d)), b);
+      r = c.value;
+      t.SetSccBool(t.IsNonZero(c.flag));
+      break;
+    }
     case 0x32:  // s_pack_ll_b32_b16: {b[15:0], a[15:0]}
       if (inst.isa != IsaMode::kNeo) {
         WarnUnsupported("sop2", op);
