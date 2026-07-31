@@ -10,6 +10,7 @@
 #include "gpu/rhi/renderer.h"
 
 #include "gpu/gpu_check.h"
+#include "gpu/guest_memory.h"
 #include "gpu/gcn/gcn_detile.h"
 #include "gpu/gcn/gcn_translate.h"
 #include "gpu/vulkan/vk_capture.h"
@@ -909,7 +910,23 @@ bool CsRangeFlushOne(uint64_t base, CsRange& e) {
       return false;
     }
   } else {
-    std::memcpy(reinterpret_cast<void*>(base), e.map, e.size);
+    // Never write back more than the guest footprint the range was staged
+    // from, and never into memory that is not the guest's: the staged size is
+    // the shader's view of the resource and a descriptor with a bogus size
+    // would otherwise scribble compute results over whatever follows -- which
+    // reads as float data turning up in the title's allocator free lists.
+    const uint64_t n =
+        e.guest_bytes ? std::min<uint64_t>(e.size, e.guest_bytes) : e.size;
+    if (!gpu::IsReadableRange(base, n)) {
+      static int logged = 0;
+      if (logged++ < 8)
+        std::fprintf(stderr,
+                     "[gpuvk] cs writeback out of guest memory base=%#llx "
+                     "+%#llx (dropped)\n",
+                     (unsigned long long)base, (unsigned long long)n);
+      return false;
+    }
+    std::memcpy(reinterpret_cast<void*>(base), e.map, n);
   }
   UploadCsRangeToRt(base, e);  // refresh a live RT image aliasing the range
   InvalidateTexRange(base, e.guest_bytes);

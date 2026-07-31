@@ -12,6 +12,11 @@
 namespace krnl {
 class proc;
 
+// Forget the direct-memory mapping recorded at this VA range. sys_munmap calls
+// it so an explicit unmap-then-map reads as a fresh allocation, while a map
+// straight onto a live mapping's base stays a re-point and keeps its contents.
+void forgetDmemVa(uint8_t *ptr, size_t size);
+
 class dmaDevicePs5 : public dmaDevice {
 public:
   dmaDevicePs5(proc *p) : dmaDevice(p) {}

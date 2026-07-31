@@ -42,6 +42,19 @@ std::mutex g_dmemVaLock;
 std::unordered_map<uint64_t, size_t> g_dmemVaLen;
 }  // namespace
 
+void forgetDmemVa(uint8_t *ptr, size_t size) {
+  if (!ptr || !size)
+    return;
+  const uint64_t lo = reinterpret_cast<uint64_t>(ptr), hi = lo + size;
+  std::lock_guard<std::mutex> lk(g_dmemVaLock);
+  for (auto it = g_dmemVaLen.begin(); it != g_dmemVaLen.end();) {
+    if (it->first >= lo && it->first < hi)
+      it = g_dmemVaLen.erase(it);
+    else
+      ++it;
+  }
+}
+
 uint8_t *dmaDevicePs5::map(void *addr, size_t len, uint32_t /*prot*/, uint32_t flags,
                            size_t offset) {
   int fd = dmemBackingFd();

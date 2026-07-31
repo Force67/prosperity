@@ -21,6 +21,7 @@
 #include "../../proc.h"
 #include "../dev/dma_dev.h"  // dmemBackingFd/Size (shared physical dmem store)
 #include "error_table.h"
+#include "../../ps5/dev/dma_dev.h"
 #include "sys_mem.h"      // shared enums + sys_mmap (dmem maps delegate to it)
 #include "sys_mem_ext.h"
 #include <utl/options.h>
@@ -58,6 +59,7 @@ int PS4ABI sys_munmap(void *addr, size_t len) {
       ::munmap(addr, len);
     proc->getVma().remove(static_cast<uint8_t *>(addr), len);
     noteGuestReleased(static_cast<uint8_t *>(addr), len);
+    forgetDmemVa(static_cast<uint8_t *>(addr), len);
   }
   return 0;
 }
