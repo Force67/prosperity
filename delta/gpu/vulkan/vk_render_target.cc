@@ -472,6 +472,7 @@ bool BeginRegion(const uint64_t* mrt_base,
                  VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
                      VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
     rt.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    rt.dirty_for_read = true;
     auto& color = colors[i];
     color.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
     color.imageView = rt.view;

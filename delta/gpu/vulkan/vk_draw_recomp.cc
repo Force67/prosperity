@@ -557,7 +557,8 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
                  g_rts[base].ever_rendered) {
         multi_color[i] = base;
         multi_transition_source |=
-            g_rts[base].layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            g_rts[base].layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL ||
+            g_rts[base].dirty_for_read;
       } else if (base && !t.arrayed && base != d.depth_base &&
                  g_depths.count(base)) {
         multi_depth[i] = base;
@@ -733,8 +734,26 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
           }
         } else if (multi_color[i]) {
           auto& src = g_rts[multi_color[i]];
+          // DELTA_GPU_RTTINT, multi-binding path: paint the source solid blue
+          // right before the reader takes it. If the reader still comes out
+          // black, it is not sampling this image at all.
+          if (kTint) {
+            if (src.layout != VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
+              ImageBarrier(g_frame.cmd, src.image, src.layout,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                           ColorImageAccess(src.layout),
+                           VK_ACCESS_TRANSFER_WRITE_BIT);
+              src.layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            }
+            const VkClearColorValue blue{{0.f, 0.f, 1.f, 1.f}};
+            const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1,
+                                                0, 1};
+            vkCmdClearColorImage(g_frame.cmd, src.image,
+                                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &blue, 1,
+                                 &range);
+          }
           const VkImageLayout desired = multi_layouts[i];
-          if (src.layout != desired) {
+          if (src.layout != desired || src.dirty_for_read) {
             const VkAccessFlags access =
                 desired == VK_IMAGE_LAYOUT_GENERAL
                     ? VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT
@@ -742,6 +761,7 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
             ImageBarrier(g_frame.cmd, src.image, src.layout, desired,
                          ColorImageAccess(src.layout), access);
             src.layout = desired;
+            src.dirty_for_read = false;
           }
         } else if (multi_depth[i]) {
           auto& src = g_depths[multi_depth[i]];

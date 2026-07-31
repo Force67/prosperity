@@ -40,6 +40,7 @@ DELTA_OPTION(bool, kCsList, "DELTA_GPU_CSLIST", false);
 DELTA_OPTION(bool, kCsRtTrace, "DELTA_GPU_CSRT", false);
 DELTA_OPTION(bool, kCsRename, "DELTA_GPU_CSRENAME", false);
 DELTA_OPTION(bool, kCsImport, "DELTA_GPU_CSIMPORT", false);
+DELTA_OPTION(uint64_t, kCsFlushTrace, "DELTA_GPU_CSFLUSHTRACE", 0);
 DELTA_OPTION(bool, kGpuCsgpuVerbose, "DELTA_GPU_CSGPU_VERBOSE", false);
 }  // namespace
 
@@ -1593,6 +1594,34 @@ bool FlushCsWritesRange(Renderer& renderer, uint64_t base, uint64_t bytes) {
     return true;
   const uint64_t _t0 = NowNs();
   bool all_current = true;
+  // DELTA_GPU_CSFLUSHTRACE=<base>: what the dirty-range index finds for a
+  // target a draw is about to sample. A compute result that is not found here
+  // never reaches the target's image, and the draw samples black.
+  if (kCsFlushTrace && base == (uint64_t)kCsFlushTrace) {
+    static int n = 0;
+    if (n++ < 12) {
+      const auto ranges = DirtyRangesOverlapping(base, bytes);
+      std::fprintf(stderr, "[csflush] base=%#lx bytes=%#lx dirty=%zu",
+                   (unsigned long)base, (unsigned long)bytes, ranges.size());
+      for (uint64_t r : ranges) {
+        auto f = g_cs_ranges.find(r);
+        std::fprintf(stderr, " [%#lx img=%d gpu_dirty=%d sz=%#lx]",
+                     (unsigned long)r,
+                     f != g_cs_ranges.end() ? (int)f->second.image_staging : -1,
+                     f != g_cs_ranges.end() ? (int)f->second.gpu_dirty : -1,
+                     f != g_cs_ranges.end() ? (unsigned long)f->second.size : 0);
+      }
+      // ...and every CS range that overlaps the target at all, found or not.
+      for (auto& kv : g_cs_ranges) {
+        const uint64_t e0 = kv.first, e1 = e0 + kv.second.guest_bytes;
+        if (e0 < base + bytes && base < e1)
+          std::fprintf(stderr, " OVERLAP[%#lx+%#lx img=%d dirty=%d]",
+                       (unsigned long)e0, (unsigned long)kv.second.guest_bytes,
+                       (int)kv.second.image_staging, (int)kv.second.gpu_dirty);
+      }
+      std::fprintf(stderr, "\n");
+    }
+  }
   for (uint64_t dirty : DirtyRangesOverlapping(base, bytes)) {
     auto found = g_cs_ranges.find(dirty);
     if (found != g_cs_ranges.end() && !CsRangeFlushOne(dirty, found->second)) {

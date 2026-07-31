@@ -44,6 +44,11 @@ struct RTarget {
       VK_FORMAT_B8G8R8A8_UNORM;  // identity: addr alone doesn't pin format
   bool is_depth = false;         // depth/stencil attachment (MRT/depth task)
   VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
+  // Rendered into since the last barrier that made it readable. A later draw
+  // sampling this target needs an execution/memory dependency even when the
+  // layout already matches, or it reads what was there BEFORE those writes --
+  // which is how SotC's composite sampled its scene target and got black.
+  bool dirty_for_read = false;
   // Layout the image holds once the last SUBMITTED work executes (stamped at
   // EndFrame submit). `layout` tracks the recording timeline, which runs
   // ahead of the GPU: a mid-frame submission (the compute path staging an
@@ -92,6 +97,11 @@ struct DepthTarget {
   std::unordered_map<uint32_t, VkImageView> sampled_views;
   uint32_t w = 0, h = 0;
   VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
+  // Rendered into since the last barrier that made it readable. A later draw
+  // sampling this target needs an execution/memory dependency even when the
+  // layout already matches, or it reads what was there BEFORE those writes --
+  // which is how SotC's composite sampled its scene target and got black.
+  bool dirty_for_read = false;
   // See RTarget::submitted_layout: the anchor for mid-frame copies.
   VkImageLayout submitted_layout = VK_IMAGE_LAYOUT_UNDEFINED;
   int last_frame = -1000;
