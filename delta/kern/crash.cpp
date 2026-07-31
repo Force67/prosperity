@@ -438,6 +438,47 @@ static int g_fnArgsCount = 0;
 
 static void crashHandler(int sig, siginfo_t *si, void *ucv) {
 #if defined(__x86_64__)
+  // DELTA_GUEST_BRK_TRACE: a RESUMABLE planted breakpoint. The ud2 replaced the
+  // first bytes of a known instruction, so the handler emulates that
+  // instruction, logs what we came for, and returns -- turning a one-shot trap
+  // into a trace. Shaped for the V8 snapshot dispatch
+  // (libcohtml `mov %esi,%r12d`, 3 bytes): logs the bytecode in esi and the
+  // SnapshotByteSource position at rdi+0x3c, so each record says which bytecode
+  // ran and how many stream bytes the previous one consumed.
+  if (sig == SIGILL && ucv) {
+    static const uintptr_t site = [] {
+      const char *e = std::getenv("DELTA_GUEST_BRK_TRACE");
+      return e ? std::strtoull(e, nullptr, 16) : 0ull;
+    }();
+    if (site) {
+      auto *uc = static_cast<ucontext_t *>(ucv);
+      auto *gr = uc->uc_mcontext.gregs;
+      if ((uintptr_t)gr[REG_RIP] == site) {
+        const uint32_t code = (uint32_t)gr[REG_RSI] & 0xFF;
+        const uintptr_t self = (uintptr_t)gr[REG_RDI];
+        uint32_t pos = 0;
+        if (self > 0x10000)
+          pos = *reinterpret_cast<const uint32_t *>(self + 0x3c);
+        // One open() and one write() per record to a dedicated fd: fprintf to
+        // stderr loses most records here, because other threads interleave
+        // mid-line and the trace is the whole point.
+        static const int fd = ::open("/tmp/bc_trace.txt",
+                                     O_WRONLY | O_CREAT | O_TRUNC | O_APPEND,
+                                     0644);
+        static uint64_t n = 0;
+        if (fd >= 0) {
+          char buf[64];
+          const int len = std::snprintf(buf, sizeof(buf), "%llu %02x %u\n",
+                                        (unsigned long long)n++, code, pos);
+          ssize_t ignored = ::write(fd, buf, len);
+          (void)ignored;
+        }
+        gr[REG_R12] = (uint32_t)gr[REG_RSI];  // mov %esi,%r12d (zero-extends)
+        gr[REG_RIP] = site + 3;
+        return;
+      }
+    }
+  }
   if (sig == SIGTRAP && g_retCount && ucv) {
     auto *uc = static_cast<ucontext_t *>(ucv);
     auto *gr = uc->uc_mcontext.gregs;
