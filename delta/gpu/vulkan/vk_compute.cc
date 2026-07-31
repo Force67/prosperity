@@ -698,8 +698,16 @@ bool UploadCsRangeToRt(uint64_t base, CsRange& e) {
     // The guest reused this address with an incompatible image layout. The
     // compute result is current in guest memory, while the old VkImage can no
     // longer represent it; stop resolving subsequent samples to that image.
-    if (!img.is_depth)
+    if (!img.is_depth) {
+      // Losing this flag makes every later sample of that address fall back to
+      // guest memory, which draws never write -- i.e. the target silently reads
+      // black from then on. Worth seeing.
+      if (kCsRtTrace)
+        std::fprintf(stderr,
+                     "[csrt] shape mismatch on %#lx -> ever_rendered=false\n",
+                     (unsigned long)base);
       g_rts[base].ever_rendered = false;
+    }
     return true;
   }
   if (!RunAliasedCopy(img, e.res, e, /*to_image=*/true))

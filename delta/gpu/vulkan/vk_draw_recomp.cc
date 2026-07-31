@@ -36,6 +36,7 @@ DELTA_OPTION(bool, kClearTrace, "DELTA_GPU_CLEARTRACE", false);
 DELTA_OPTION(bool, kDrawTrace, "DELTA_GPU_DRAWTRACE", false);
 DELTA_OPTION(bool, kGpuDecltrace, "DELTA_GPU_DECLTRACE", false);
 DELTA_OPTION(uint64_t, kWhyDrop, "DELTA_GPU_WHYDROP", 0);
+DELTA_OPTION(uint64_t, kBindTrace, "DELTA_GPU_BINDTRACE", 0);
 DELTA_OPTION(bool, kRawBufTrace, "DELTA_GPU_RAWBUF", false);
 DELTA_OPTION(bool, kSelfTrace, "DELTA_GPU_SELFTRACE", false);
 DELTA_OPTION(bool, kTightCbuf, "DELTA_GPU_TIGHTCBUF", false);
@@ -569,6 +570,25 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
                              : TexViewFor(t);
         if (multi_views[i] && t.null_descriptor)
           multi_layouts[i] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+      }
+    }
+    // DELTA_GPU_BINDTRACE=<ps addr>: which bucket each sampler binding of a
+    // draw landed in. A binding that falls through to the guest-texture path
+    // reads memory that draws never write, i.e. black, and nothing else in the
+    // pipeline reports it.
+    if (kBindTrace && d.ps_addr == (uint64_t)kBindTrace) {
+      static int n = 0;
+      if (n++ < 24) {
+        for (uint32_t i = 0; i < multi_n; i++)
+          std::fprintf(stderr,
+                       "[bind] ps=%#lx b%u base=%#lx %ux%u -> %s\n",
+                       (unsigned long)d.ps_addr, i,
+                       (unsigned long)d.texs[i].base, d.texs[i].w, d.texs[i].h,
+                       multi_storage[i]  ? "storage"
+                       : multi_feedback[i] ? "feedback"
+                       : multi_color[i]  ? "rt-color"
+                       : multi_depth[i]  ? "rt-depth"
+                                         : "GUEST-TEXTURE");
       }
     }
     // A shader may sample an image through one binding and write the same image
