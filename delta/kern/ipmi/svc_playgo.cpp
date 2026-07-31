@@ -13,6 +13,11 @@
 
 #include "kern/vfs.h"
 #include "services.h"
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(uint32_t, kPlaygoChunks, "DELTA_PLAYGO_CHUNKS", 0);
+}  // namespace
 
 namespace krnl::ipmi {
 namespace {
@@ -38,9 +43,8 @@ uint32_t chunkCount() {
   static uint32_t cached = 0;
   if (cached)
     return cached;
-  if (const char *ov = std::getenv("DELTA_PLAYGO_CHUNKS")) {
-    int v = std::atoi(ov);
-    cached = v > 0 ? static_cast<uint32_t>(v) : 1;
+  if (kPlaygoChunks > 0) {
+    cached = kPlaygoChunks;
     return cached;
   }
   cached = 0x50;

@@ -20,6 +20,11 @@
 #include <logger/logger.h>
 
 #include "kern/proc.h"
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(bool, kSysliftTrace, "DELTA_SYSLIFT_TRACE", false);
+}  // namespace
 
 namespace krnl {
 uintptr_t lv2_get(uint32_t sysIndex);
@@ -174,7 +179,7 @@ void codeLift::emit_syscall(uint8_t *base, uint32_t idx) {
   auto *proc = krnl::proc::getActive();
   const bool ps5 = proc && proc->getPlatform() == krnl::proc::platform::ps5;
   auto address = ps5 ? krnl::lv2_get_ps5(idx) : krnl::lv2_get(idx);
-  if (std::getenv("DELTA_SYSLIFT_TRACE"))
+  if (kSysliftTrace)
     std::fprintf(stderr, "[syslift] site=%p idx=%u -> trampoline=%#lx\n",
                  (void *)base, idx, (unsigned long)address);
   if (address) {

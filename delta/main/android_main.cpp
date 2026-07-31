@@ -18,6 +18,7 @@
 #include <cstdlib>
 #include <cstring>
 
+#include <base/option_file.h>
 #include <base/strings/xstring.h>
 
 #include "cpu/cpu_backend.h"
@@ -25,6 +26,7 @@
 #include "gfx/gfx.h"
 #include "gfx/gfx_android.h"
 #include <logger/logger.h>
+#include <utl/options.h>
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "prosperity", __VA_ARGS__)
 
@@ -165,8 +167,15 @@ extern "C" void android_main(android_app *app) {
   AppState state;
   const char *ext = app->activity->externalDataPath;
   state.dataDir = base::String(ext ? ext : "/data/local/tmp/prosperity");
-  setenv("DELTA_DATA_DIR", state.dataDir.c_str(), 1);
   LOGI("data dir = %s", state.dataDir.c_str());
+
+  // The activity has no command line of its own, so the knobs come from the
+  // environment plus an options.txt pushed next to the modules and the game.
+  utl::initOptions();
+  base::SetOptionValue("DELTA_DATA_DIR", state.dataDir.c_str());
+  base::String optionFile = state.dataDir;
+  optionFile.append("/options.txt");
+  utl::loadOptionFile(optionFile.c_str(), /*optional=*/true);
 
   app->userData = &state;
   app->onAppCmd = onCmd;

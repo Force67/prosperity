@@ -22,6 +22,23 @@
 #include <cstdlib>
 #include <cstring>
 #include <unordered_map>
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(bool, kNoWipe, "DELTA_GPU_NOWIPE", true);
+DELTA_OPTION(bool, kLazyClear2, "DELTA_GPU_LAZYCLEAR", true);
+DELTA_OPTION(int, kTexBindFrame, "DELTA_GPU_TEXBIND", -1);
+DELTA_OPTION(int, kSeqN, "DELTA_GPU_DRAWSEQ", 0);
+DELTA_OPTION(uint64_t, kWant, "DELTA_GPU_DRAWRT", 0);
+DELTA_OPTION(int, kWantFrame, "DELTA_GPU_DRAWRT_FRAME", 0);
+DELTA_OPTION(bool, kClearTrace, "DELTA_GPU_CLEARTRACE", false);
+DELTA_OPTION(bool, kDrawTrace, "DELTA_GPU_DRAWTRACE", false);
+DELTA_OPTION(bool, kGpuDecltrace, "DELTA_GPU_DECLTRACE", false);
+DELTA_OPTION(bool, kRawBufTrace, "DELTA_GPU_RAWBUF", false);
+DELTA_OPTION(bool, kSelfTrace, "DELTA_GPU_SELFTRACE", false);
+DELTA_OPTION(bool, kTightCbuf, "DELTA_GPU_TIGHTCBUF", false);
+DELTA_OPTION(bool, kTint, "DELTA_GPU_RTTINT", false);
+}  // namespace
 
 namespace gpu::vk {
 
@@ -96,7 +113,6 @@ void ReportDeclines() {
 bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
   bool indexed = d.index_data && d.index_count >= 3;
   uint32_t draw_count = indexed ? d.index_count : d.vertex_count;
-  static const bool kDrawTrace = std::getenv("DELTA_GPU_DRAWTRACE") != nullptr;
   if (kDrawTrace && draw_count >= 300) {
     static int n = 0;
     if (n++ < 40)
@@ -112,8 +128,7 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
     // no recompiled program, a program that failed to translate, and a draw
     // whose count never made it out of the packet. Separate them, because only
     // the last one points upstream at the command processor.
-    static const bool trace = std::getenv("DELTA_GPU_DECLTRACE") != nullptr;
-    if (trace) {
+    if (kGpuDecltrace) {
       static int n = 0;
       if (n++ < 96)
         std::fprintf(stderr,
@@ -134,9 +149,8 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
     // DELTA_GPU_DECLTRACE: a draw with no target at all. Legitimate for a
     // colour-write-masked pass, but it also catches a mis-decoded write mask,
     // which silently deletes real geometry.
-    static const bool kNoRtTrace = std::getenv("DELTA_GPU_DECLTRACE") != nullptr;
     static int n = 0;
-    if (kNoRtTrace && n++ < 48)
+    if (kGpuDecltrace && n++ < 48)
       std::fprintf(stderr,
                    "[decl] no-target draw#%u vs=%#lx ps=%#lx tex=%#lx "
                    "icount=%u vcount=%u mask=%#x\n",
@@ -180,8 +194,6 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
     // DELTA_GPU_SELFTRACE: which pass reads the target it is drawing into. We
     // drop those, and dropping one every frame leaves whatever it was meant to
     // produce stale.
-    static const bool kSelfTrace =
-        std::getenv("DELTA_GPU_SELFTRACE") != nullptr;
     static int n = 0;
     if (kSelfTrace && n++ < 20)
       std::fprintf(
@@ -198,9 +210,8 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
   // These three all report as "norecomp", which lumps a vertex-count cap in
   // with a missing program; separate them, because only the cap is ours to
   // move.
-  static const bool kVtxTrace = std::getenv("DELTA_GPU_DECLTRACE") != nullptr;
   const auto vtx_decline = [&](const char* why, uint32_t n) {
-    if (kVtxTrace) {
+    if (kGpuDecltrace) {
       static int t = 0;
       if (t++ < 32)
         std::fprintf(stderr,
@@ -240,7 +251,6 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
   // zero and report anything else under DELTA_GPU_CLEARTRACE rather than
   // guessing a decode that nothing exercises yet.
   if (d.is_clear_rect) {
-    static const bool kClearTrace = std::getenv("DELTA_GPU_CLEARTRACE") != nullptr;
     for (uint32_t i = 0; i < d.mrt_count && i < 8; i++) {
       auto it = g_rts.find(d.mrt_base[i]);
       if (it == g_rts.end())
@@ -275,14 +285,6 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
   // clear and redraw land on different frames then survives. A COLOURED
   // fullscreen REPLACE is real content (e.g. the per-frame minimap redraw) and
   // must NOT be treated as a clear.
-  static const bool kNoWipe = [] {
-    const char* e = std::getenv("DELTA_GPU_NOWIPE");
-    return !e || std::strcmp(e, "0") != 0;
-  }();
-  static const bool kLazyClear2 = [] {
-    const char* e = std::getenv("DELTA_GPU_LAZYCLEAR");
-    return !e || std::strcmp(e, "0") != 0;
-  }();
   // The extent test below reads the position attribute as float32s. A title
   // whose positions are not floats (Skyrim's UI uses 16_16_SScaled) would have
   // its geometry read as garbage, land a bogus fullscreen extent, and get
@@ -404,7 +406,7 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
     vneed += bind_size[j];
   }
   if (g_ring.vb_offset + vneed > g_ring.vb_end) {
-    if (std::getenv("DELTA_GPU_DECLTRACE")) {
+    if (kGpuDecltrace) {
       static int n = 0;
       if (n++ < 32)
         std::fprintf(stderr, "[decl] ring=VB need=%llu off=%llu end=%llu idx=%u\n",
@@ -422,7 +424,7 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
   const VkDeviceSize aligned_ioff =
       (g_ring.ib_offset + index_align - 1) & ~(index_align - 1);
   if (indexed && aligned_ioff + index_bytes > g_ring.ib_end) {
-    if (std::getenv("DELTA_GPU_DECLTRACE")) {
+    if (kGpuDecltrace) {
       static int n = 0;
       if (n++ < 32)
         std::fprintf(stderr, "[decl] ring=IB need=%llu off=%llu end=%llu idx=%u\n",
@@ -554,10 +556,6 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
   // A post-processing chain that samples its own previous target reads zero the
   // moment one of those lands on guest memory.
   {
-    static const int kTexBindFrame = [] {
-      const char* e = std::getenv("DELTA_GPU_TEXBIND");
-      return e ? std::atoi(e) : -1;
-    }();
     if (kTexBindFrame >= 0 && (int)g_frame.num == kTexBindFrame)
       std::fprintf(stderr,
                    "[blend] draw#%u rt=%#lx blend=%u ctl=%#x mask=%#x mrt=%u\n",
@@ -630,7 +628,6 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
       // DELTA_GPU_RTTINT: overwrite the sampled source with solid blue just
       // before the reader takes it, to tell "the reader is bound to this image"
       // apart from "this image had no content".
-      static const bool kTint = std::getenv("DELTA_GPU_RTTINT") != nullptr;
       if (kTint) {
         ImageBarrier(g_frame.cmd, src.image, src.layout,
                      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
@@ -812,7 +809,7 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
                         ~(VkDeviceSize)(g_ring.ubo_align - 1);
   VkDeviceSize cb_stride = g_ring.ubo_stride;
   if (cb_off + cb_stride * kCbufBindings > g_ring.ubo_end) {
-    if (std::getenv("DELTA_GPU_DECLTRACE")) {
+    if (kGpuDecltrace) {
       static int n = 0;
       if (n++ < 32)
         std::fprintf(stderr, "[decl] ring=UBO off=%llu stride=%llu end=%llu\n",
@@ -846,8 +843,6 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
       // entries zero: Skyrim's menu drew its sprite atlas at screen size over
       // everything. Clamped to the page so a cbuffer at the end of a mapping
       // cannot fault.
-      static const bool kTightCbuf =
-          std::getenv("DELTA_GPU_TIGHTCBUF") != nullptr;
       const uint32_t planned = cb.size < kCbufWindow ? cb.size : kCbufWindow;
       const uint64_t page_end = (cb.base + 0x1000) & ~uint64_t{0xFFF};
       const uint32_t avail = static_cast<uint32_t>(
@@ -927,7 +922,6 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
                             sbo_dyn);
     // DELTA_GPU_RAWBUF: which set-2 bindings a draw actually got, so a shader
     // reading zeros can be told apart from one reading real guest data.
-    static const bool kRawBufTrace = std::getenv("DELTA_GPU_RAWBUF") != nullptr;
     if (kRawBufTrace) {
       static int n = 0;
       if (n++ < 64)
@@ -992,10 +986,6 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
   // the frame they belong to -- the per-frame filters cannot show that a pass
   // and the pass that reads it landed in different frames.
   {
-    static const int kSeqN = [] {
-      const char* e = std::getenv("DELTA_GPU_DRAWSEQ");
-      return e ? std::atoi(e) : 0;
-    }();
     static int seq = 0;
     if (seq < kSeqN) {
       std::fprintf(stderr, "[seq] %d f%d draw#%u rt=%#lx tex=%#lx%s\n", seq++,
@@ -1005,20 +995,12 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
   }
   // DELTA_GPU_DRAWRT=<base>: report what was actually issued for one target.
   {
-    static const uint64_t kWant = [] {
-      const char* e = std::getenv("DELTA_GPU_DRAWRT");
-      return e ? std::strtoull(e, nullptr, 0) : 0ull;
-    }();
     static int shown = 0;
     // DELTA_GPU_DRAWRT=1 logs EVERY draw (the whole frame graph) instead of one
     // target's draws, so a broken producer/consumer link is visible directly.
     const bool all = kWant == 1;
     // DELTA_GPU_DRAWRT_FRAME=N: only this frame, so the graph is a steady-state
     // frame rather than the opening composites.
-    static const int kWantFrame = [] {
-      const char* e = std::getenv("DELTA_GPU_DRAWRT_FRAME");
-      return e ? std::atoi(e) : 0;
-    }();
     if (kWant && (all || g_region.cur_rt == kWant) && shown < (all ? 140 : 8) &&
         (!kWantFrame || (int)g_frame.num == kWantFrame)) {
       shown++;

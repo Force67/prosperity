@@ -10,6 +10,12 @@
 #include <cstdlib>
 #include <cstring>
 #include "ajm_dev.h"
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(const char *, kAjmResult, "DELTA_AJM_RESULT", nullptr);
+DELTA_OPTION(bool, kAjmTrace, "DELTA_AJM_TRACE", false);
+}  // namespace
 
 namespace krnl {
 ajmDevice::ajmDevice(proc *p) : device(p) {}
@@ -19,8 +25,7 @@ ajmDevice::ajmDevice(proc *p) : device(p) {}
 // a benign non-zero context/instance id where the caller reads one back, so the
 // register/create steps don't look like failures.
 int32_t ajmDevice::ioctl(uint32_t cmd, void *data) {
-  static const bool trace = std::getenv("DELTA_AJM_TRACE") != nullptr;
-  if (trace) {
+  if (kAjmTrace) {
     // ioctl size is encoded in bits [29:16] of the command.
     uint32_t sz = (cmd >> 16) & 0x3FFF;
     std::fprintf(stderr, "[ajm] ioctl(%#x) sz=%u data=%p in:", cmd, sz, data);
@@ -44,7 +49,7 @@ int32_t ajmDevice::ioctl(uint32_t cmd, void *data) {
       uint64_t inPtr, outPtr;
     };
     auto *b = static_cast<AjmBatch *>(data);
-    if (trace) {
+    if (kAjmTrace) {
       std::fprintf(stderr,
                    "[ajm] batch ctx=%#x inSize=%u count=%u outSize=%u in=%#lx out=%#lx\n",
                    b->ctx, b->inSize, b->count, b->outSize,
@@ -67,7 +72,7 @@ int32_t ajmDevice::ioctl(uint32_t cmd, void *data) {
     // (or convincingly faked) ATRAC9/AJM descriptor -- see DELTA_AJM_RESULT probe.
     // EXPERIMENT (DELTA_AJM_RESULT=N): write a result pattern to the batch output
     // so FMOD's codec-register init accepts it. N selects the pattern.
-    if (const char *e = std::getenv("DELTA_AJM_RESULT");
+    if (const char *e = kAjmResult;
         e && b->outPtr && b->outSize && b->outSize <= 0x1000) {
       int n = std::atoi(e);
       auto *o32 = reinterpret_cast<uint32_t *>(b->outPtr);

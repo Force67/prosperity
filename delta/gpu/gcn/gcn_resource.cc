@@ -14,11 +14,18 @@
 #include <cstring>
 
 #include <utl/mem.h>
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(bool, kGpuEudfail, "DELTA_GPU_EUDFAIL", false);
+DELTA_OPTION(bool, kGpuEudtrace, "DELTA_GPU_EUDTRACE", false);
+DELTA_OPTION(bool, kGpuTilehist, "DELTA_GPU_TILEHIST", false);
+DELTA_OPTION(bool, kTrace, "DELTA_GPU_TRACE", false);
+}  // namespace
 
 namespace gpu::gcn {
 namespace {
 
-const bool kTrace = std::getenv("DELTA_GPU_TRACE") != nullptr;
 
 constexpr uint64_t kGuestLo = 0x1000000000ull;
 constexpr uint64_t kGuestHi = 0x20000000000ull;
@@ -103,8 +110,7 @@ struct ScalarEval {
       sgpr[i] = user_data[i];
       known[i] = true;
     }
-    static const bool eud_trace = std::getenv("DELTA_GPU_EUDTRACE") != nullptr;
-    trace = eud_trace;
+    trace = kGpuEudtrace;
   }
 
   uint64_t Ptr(uint32_t s) const {  // 48-bit descriptor-table pointer pair
@@ -295,9 +301,8 @@ struct ScalarEval {
     // snapshot its inputs before invalidating an overlapping destination.
     for (uint32_t i = 0; i < dwords; i++)
       Clear(s.sdst + i);
-    static const bool fail_trace = std::getenv("DELTA_GPU_EUDFAIL") != nullptr;
     if (!base_known || !offset_known) {
-      if (fail_trace)
+      if (kGpuEudfail)
         std::fprintf(
             stderr,
             "[eudfail] s_load x%u s%u <- s%u: base_known=%d off_known=%d\n",
@@ -308,7 +313,7 @@ struct ScalarEval {
       return;
     const uint64_t address = table + byte_off;
     if (!GuestRange(address, static_cast<uint64_t>(dwords) * 4)) {
-      if (fail_trace)
+      if (kGpuEudfail)
         std::fprintf(
             stderr,
             "[eudfail] s_load UNMAPPED x%u s%u <- [s%u=%#lx + %#lx] = %#lx\n",
@@ -630,9 +635,7 @@ std::vector<TImage> TrackTextures(
     if (t.valid) {
       // Empirical tiling census (DELTA_GPU_TILEHIST): tally tiling_idx of
       // every sampled texture to confirm which modes are linear vs tiled.
-      static const bool tile_hist =
-          std::getenv("DELTA_GPU_TILEHIST") != nullptr;
-      if (tile_hist) {
+      if (kGpuTilehist) {
         static uint32_t hist[32] = {0};
         static uint64_t n = 0, pitch_ne = 0;
         hist[t.tiling_idx & 31]++;

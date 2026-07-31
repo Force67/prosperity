@@ -7,6 +7,11 @@
 #include <cstdlib>
 #include "sys_generic.h"
 #include "kern/proc.h"
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(bool, kIoctlTrace, "DELTA_IOCTL_TRACE", false);
+}  // namespace
 
 namespace krnl {
 int PS4ABI sys_ioctl(uint32_t fd, uint32_t cmd, void *data) {
@@ -23,8 +28,7 @@ int PS4ABI sys_ioctl(uint32_t fd, uint32_t cmd, void *data) {
   // some middleware treats an ioctl error on its setup probe as fatal (DOOM's
   // bundled FMOD aborts audio init on the EBADF). Zero the IOC_OUT payload so
   // the caller reads a benign result instead of stack garbage.
-  static const bool trace = std::getenv("DELTA_IOCTL_TRACE") != nullptr;
-  if (trace)
+  if (kIoctlTrace)
     std::printf("[ioctl] soft-ok: fd=%u cmd=%#x\n", fd, cmd);
   if (data) {
     uint32_t sz = (cmd >> 16) & 0x1fff;

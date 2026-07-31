@@ -1,3 +1,4 @@
+#include <base/option_file.h>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -22,10 +23,12 @@ std::string ReportString() {
   return s;
 }
 
-// One process-wide fixture: the audit latches its env gates on first use.
+// One process-wide fixture: the audit latches its gates on first use.
 class GcnAuditTest : public ::testing::Test {
  protected:
-  static void SetUpTestSuite() { setenv("DELTA_GPU_SHAUDIT", "1", 1); }
+  static void SetUpTestSuite() {
+    base::SetOptionValue("DELTA_GPU_SHAUDIT", "1");
+  }
 };
 
 TEST_F(GcnAuditTest, ClassifiesSilentAndUnsupportedAndDeduplicates) {

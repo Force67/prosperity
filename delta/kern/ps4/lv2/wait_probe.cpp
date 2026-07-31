@@ -20,6 +20,11 @@
 
 #include <unistd.h>
 #include <sys/syscall.h>
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(bool, kWaitProbe, "DELTA_WAIT_PROBE", false);
+}  // namespace
 
 namespace krnl {
 namespace {
@@ -36,8 +41,7 @@ std::unordered_map<long, Parked> g_parked;
 long selfTid() { return static_cast<long>(::syscall(SYS_gettid)); }
 
 bool probeOn() {
-  static const bool on = std::getenv("DELTA_WAIT_PROBE") != nullptr;
-  return on;
+  return kWaitProbe;
 }
 
 // The host thread's comm name (set from the guest's sys_mname stack tag, see

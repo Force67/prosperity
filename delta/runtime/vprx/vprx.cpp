@@ -14,6 +14,17 @@
 #include <cstring>
 
 #include "kern/proc.h"
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(const char *, kHleLibs, "DELTA_HLE", nullptr);
+DELTA_OPTION(const char *, kLleLibs, "DELTA_LLE", nullptr);
+DELTA_OPTION(const char *, kHleNidsGnm, "DELTA_HLE_NIDS_GNM", nullptr);
+DELTA_OPTION(const char *, kHleNidsVo, "DELTA_HLE_NIDS_VO", nullptr);
+DELTA_OPTION(const char *, kNidTrace, "DELTA_NID_TRACE", nullptr);
+DELTA_OPTION(bool, kGnmHle, "DELTA_GNM_HLE", false);
+DELTA_OPTION(bool, kVoHle, "DELTA_VO_HLE", false);
+}  // namespace
 
 namespace runtime {
 static base::Vector<const modInfo *> vprxTable;
@@ -126,8 +137,7 @@ void vprx_reg_ps5(const modInfo *info) { vprxTablePs5.push_back(info); }
 //   DELTA_HLE_NIDS_VO=0x1234...,0xabcd...
 // Lets us binary-search which single videoout/gnm export's real behavior triggers
 // the both-LLE Isaac crash, without recompiling per test.
-static bool nidForcedHle(const char *envName, uint64_t hid) {
-  const char *list = std::getenv(envName);
+static bool nidForcedHle(const char *list, uint64_t hid) {
   if (!list)
     return false;
   for (const char *p = list; *p;) {
@@ -149,8 +159,7 @@ static bool nidForcedHle(const char *envName, uint64_t hid) {
 // Does `lib` appear in a comma/space separated env list? "all" matches every
 // library, so one variable can flip the whole default. Names match on a
 // substring so "SaveData" covers libSceSaveData and libSceSaveDataDialog.
-static bool libListed(const char *envName, const char *lib) {
-  const char *list = std::getenv(envName);
+static bool libListed(const char *list, const char *lib) {
   if (!list || !*list)
     return false;
   if (std::strcmp(list, "all") == 0 || std::strcmp(list, "1") == 0)
@@ -208,16 +217,16 @@ static bool libListed(const char *envName, const char *lib) {
 // What IS verified: the switch itself is airtight -- under DELTA_LLE=all the HLE
 // trace records zero thunk calls, so every registered shim really is bypassed.
 static bool useHleShim(const char *lib, uint64_t hid) {
-  if (libListed("DELTA_HLE", lib))
+  if (libListed(kHleLibs, lib))
     return true;
-  if (libListed("DELTA_LLE", lib))
+  if (libListed(kLleLibs, lib))
     return false;
   if (std::strcmp(lib, "libSceGnmDriver") == 0)
-    return std::getenv("DELTA_GNM_HLE") != nullptr ||
-           nidForcedHle("DELTA_HLE_NIDS_GNM", hid);
+    return kGnmHle ||
+           nidForcedHle(kHleNidsGnm, hid);
   if (std::strcmp(lib, "libSceVideoOut") == 0)
-    return std::getenv("DELTA_VO_HLE") != nullptr ||
-           nidForcedHle("DELTA_HLE_NIDS_VO", hid);
+    return kVoHle ||
+           nidForcedHle(kHleNidsVo, hid);
   return true;  // every other HLE module stays HLE
 }
 
@@ -269,7 +278,7 @@ uintptr_t vprx_get(const char *lib, uint64_t hid) {
   // DELTA_NID_TRACE: report imports with no HLE override (resolved to the LLE
   // module). Set it to a library-name substring to focus the dump, or "1" for
   // all. Fires once per import at load time, so it stays bounded.
-  if (const char *t = std::getenv("DELTA_NID_TRACE")) {
+  if (const char *t = kNidTrace) {
     if (t[0] == '1' || std::strstr(lib, t))
       std::fprintf(stderr, "[nid] %s hid=%#018llx -> LLE (no HLE)\n", lib,
                    (unsigned long long)hid);

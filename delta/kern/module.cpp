@@ -27,6 +27,16 @@
 #include "module.h"
 #include "proc.h"
 #include "vfs.h"
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(const char *, kDumpModule, "DELTA_DUMP_MODULE", nullptr);
+DELTA_OPTION(const char *, kGuestBrk, "DELTA_GUEST_BRK", nullptr);
+DELTA_OPTION(const char *, kModCheck, "DELTA_MODCHECK", nullptr);
+DELTA_OPTION(bool, kLibkDebug, "DELTA_LIBK_DEBUG", false);
+DELTA_OPTION(bool, kImplibTrace, "DELTA_IMPLIB_TRACE", false);
+DELTA_OPTION(bool, kRelocTrace, "DELTA_RELOC_TRACE", false);
+}  // namespace
 
 namespace krnl {
 smodule::smodule(proc *process) : process(process) {
@@ -102,7 +112,7 @@ bool smodule::fromVfs(const base::String &guestPath) {
     return false;
   }
 
-  if (const char *dd = std::getenv("DELTA_DUMP_MODULE")) {
+  if (const char *dd = kDumpModule) {
     if (guestPath.find(dd) != base::String::npos) {
       if (FILE *f = std::fopen("/tmp/dumped_module.elf", "wb")) {
         std::fwrite(src, 1, srcSize, f);
@@ -298,7 +308,7 @@ void smodule::digestDynamic() {
     }
   }
 
-  if (std::getenv("DELTA_IMPLIB_TRACE")) {
+  if (kImplibTrace) {
     for (auto &l : impLibs)
       std::printf("[implib] %s id=%u %s\n", info.name.c_str(), l.id,
                   l.name ? l.name : "?");
@@ -406,7 +416,7 @@ void smodule::digestDynamicPs5(const ELFPgHeader *dynS) {
   if (numSymbols == 0 && hashes)
     numSymbols = reinterpret_cast<uint32_t *>(hashes)[1];
 
-  if (std::getenv("DELTA_IMPLIB_TRACE"))
+  if (kImplibTrace)
     std::printf("[ps5dyn] %s strtab=%p sz=%llu syms=%u rela=%u jmp=%u needed=%llu\n",
                 info.name.c_str(), (void *)strtab.ptr,
                 (unsigned long long)strtab.size, numSymbols, numRela, numJmpSlots,
@@ -419,7 +429,7 @@ void smodule::digestDynamicPs5(const ELFPgHeader *dynS) {
 // which is the only way to see the state feeding a fault inside a stripped
 // third-party module. Diagnostic only.
 void smodule::plantGuestBreakpoints() {
-  const char *spec = std::getenv("DELTA_GUEST_BRK");
+  const char *spec = kGuestBrk;
   if (!spec)
     return;
   for (base::String rest(spec); !rest.empty();) {
@@ -451,7 +461,7 @@ void smodule::plantGuestBreakpoints() {
 // moves means something scribbled on the image -- which for a module carrying a
 // blob (libcohtml's V8 snapshot) shows up much later as unparseable data.
 void smodule::startModuleWatch() {
-  const char *want = std::getenv("DELTA_MODCHECK");
+  const char *want = kModCheck;
   if (!want || info.name.find(want) == base::String::npos)
     return;
   struct Range {
@@ -654,7 +664,7 @@ bool smodule::mapImage() {
   // handle==1 is only libkernel on a real boot; bounds-check so a smaller
   // handle-1 image can't get written out of range.
   constexpr uint32_t kLibkernelDbgOff = 0x68264;
-  if (std::getenv("DELTA_LIBK_DEBUG") && info.handle == 1 &&
+  if (kLibkDebug && info.handle == 1 &&
       kLibkernelDbgOff + sizeof(uint32_t) <= info.codeSize) {
     *getAddress<uint32_t>(kLibkernelDbgOff) = UINT32_MAX;
     LOG_WARNING("Enabling libkernel debug messages");
@@ -941,7 +951,7 @@ bool smodule::resolveImports() {
     // DELTA_RELOC_TRACE: dump every PLT import (module, GOT offset, obfuscated
     // NID#lib#mod). Lets us pin which symbol a given GOT slot resolves to when an
     // LLE module calls an import we mis-emulate.
-    if (std::getenv("DELTA_RELOC_TRACE"))
+    if (kRelocTrace)
       std::printf("[reloc] %s jmpslot@%#lx -> %s\n", info.name.c_str(),
                   (unsigned long)r->offset, name);
 
@@ -952,7 +962,7 @@ bool smodule::resolveImports() {
                   info.name.c_str(), r->offset);
     }
 
-    if (std::getenv("DELTA_RELOC_TRACE"))
+    if (kRelocTrace)
       std::printf("[reloc]   %s @%#lx resolved -> %#lx\n", name,
                   (unsigned long)r->offset, (unsigned long)addr);
 

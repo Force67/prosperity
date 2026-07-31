@@ -24,6 +24,12 @@
 #include "kern/proc.h"
 #include "kern/ps4/dev/socket_dev.h"
 #include "sys_event.h"
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(bool, kEventTrace, "DELTA_EVENT_TRACE", false);
+DELTA_OPTION(bool, kKeventTrace, "DELTA_KEVENT_TRACE", false);
+}  // namespace
 
 namespace krnl {
 // All live equeues, so the vblank pump can fan flip events to every one of them
@@ -184,7 +190,6 @@ equeue::knote *equeue::find(uint64_t ident, int16_t filter) {
 
 int equeue::kevent(const kevent_t *changes, int nchanges, kevent_t *out,
                    int nout, const ktimespec *to) {
-  static const bool traceReturns = std::getenv("DELTA_EVENT_TRACE") != nullptr;
   std::unique_lock<std::mutex> lk(m);
 
   // 1) apply the changelist.
@@ -256,7 +261,7 @@ int equeue::kevent(const kevent_t *changes, int nchanges, kevent_t *out,
 
   int got = collect();
   if (got > 0) {
-    if (traceReturns)
+    if (kEventTrace)
       std::printf("[kevent] return immediate n=%d filter=%d ident=%#llx data=%#llx\n",
                   got, out[0].filter, (unsigned long long)out[0].ident,
                   (unsigned long long)out[0].data);
@@ -290,12 +295,12 @@ int equeue::kevent(const kevent_t *changes, int nchanges, kevent_t *out,
     ready = cv.wait_for(lk, dur, pred);
   }
   if (!ready) {
-    if (traceReturns)
+    if (kEventTrace)
       std::printf("[kevent] timeout nout=%d\n", nout);
     return 0;
   }
   got = collect();
-  if (traceReturns && got > 0)
+  if (kEventTrace && got > 0)
     std::printf("[kevent] return wait n=%d filter=%d ident=%#llx data=%#llx\n",
                 got, out[0].filter, (unsigned long long)out[0].ident,
                 (unsigned long long)out[0].data);
@@ -374,7 +379,7 @@ int PS4ABI sys_kevent(int kq, const kevent_t *changelist, int nchanges,
   }
   int r = static_cast<equeue *>(obj)->kevent(changelist, nchanges, eventlist,
                                              nevents, to);
-  if (std::getenv("DELTA_KEVENT_TRACE")) {
+  if (kKeventTrace) {
     std::printf("[kevent] kq=%d nchanges=%d -> %d", kq, nchanges, r);
     for (int i = 0; i < nchanges && changelist && i < 4; i++)
       std::printf(" chg[ident=%#llx filter=%d flags=%#x]",

@@ -84,6 +84,11 @@
 #include <cstring>
 #include <mutex>
 #include <vector>
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(bool, kAudioTrace, "DELTA_AUDIO_TRACE", false);
+}  // namespace
 
 namespace {
 
@@ -132,7 +137,7 @@ int PS4ABI sceAudioOutOpen(int32_t /*userId*/, int32_t /*type*/, int32_t /*index
   int isFloat = 0;
   decodeFormat(param, channels, isFloat);
   if (!freq) freq = 48000;
-  if (std::getenv("DELTA_AUDIO_TRACE"))
+  if (kAudioTrace)
     std::fprintf(stderr, "[audioopen] len=%u freq=%u param=%#x -> %uch %s\n",
                  length, freq, param, channels, isFloat ? "f32" : "s16");
   int bridge = prosperity_audio_open(freq, channels, isFloat);
@@ -165,9 +170,8 @@ int PS4ABI sceAudioOutOutputs(void *params, uint32_t num) {
   // DELTA_AUDIO_TRACE: the raw param array next to how we parse it. The struct
   // stride is the whole ballgame -- misread it and every handle/ptr past the
   // first is garbage, which reads downstream as "one port, silent".
-  static const bool trace = std::getenv("DELTA_AUDIO_TRACE") != nullptr;
   static int dumped = 0;
-  if (trace && dumped < 4) {
+  if (kAudioTrace && dumped < 4) {
     dumped++;
     const auto *b = static_cast<const uint8_t *>(params);
     std::fprintf(stderr, "[audioparam] num=%u raw:", num);

@@ -26,13 +26,52 @@
 #include <unordered_set>
 
 #include <utl/mem.h>
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(uint64_t, kBlitRt, "DELTA_GPU_BLIT_RT", 0);
+DELTA_OPTION(bool, kCeOn, "DELTA_GPU_CE", true);
+DELTA_OPTION(int, kDlAfter, "DELTA_GPU_DRAWLIST_AFTER", 90);
+DELTA_OPTION(uint32_t, kGeomMin, "DELTA_GPU_GEOMMIN", 500);
+DELTA_OPTION(int, kMtAfter, "DELTA_GPU_MASKTRACE_AFTER", 0);
+DELTA_OPTION(int, kMtMax, "DELTA_GPU_MASKTRACE_MAX", 200);
+DELTA_OPTION(uint64_t, kMtRt, "DELTA_GPU_MASKTRACE_RT", 0);
+DELTA_OPTION(int, kOhAfter, "DELTA_GPU_OPHIST_AFTER", 100);
+DELTA_OPTION(bool, kRecompOn, "DELTA_GPU_RECOMP", true);
+DELTA_OPTION(const char *, kSkipShList, "DELTA_GPU_SKIPSH", nullptr);
+DELTA_OPTION(int, kTexTrackFrame, "DELTA_GPU_TEXTRACK_FRAME", -1);
+DELTA_OPTION(bool, kBlitDump, "DELTA_GPU_BLITDUMP", false);
+DELTA_OPTION(bool, kCcbHist, "DELTA_GPU_CCBHIST", false);
+DELTA_OPTION(bool, kCsDump, "DELTA_GPU_CSDUMP", false);
+DELTA_OPTION(bool, kCsResTrace, "DELTA_GPU_CSRES", false);
+DELTA_OPTION(bool, kDbTrace, "DELTA_GPU_DBTRACE", false);
+DELTA_OPTION(bool, kDesyncTrace, "DELTA_GPU_DESYNC", false);
+DELTA_OPTION(bool, kDrawList, "DELTA_GPU_DRAWLIST", false);
+DELTA_OPTION(bool, kEopTrace, "DELTA_GPU_EOPTRACE", false);
+DELTA_OPTION(bool, kEudFail, "DELTA_GPU_EUDFAIL", false);
+DELTA_OPTION(bool, kForceDepth, "DELTA_GPU_FORCEDEPTH", false);
+DELTA_OPTION(bool, kGeomDump, "DELTA_GPU_GEOMDUMP", false);
+DELTA_OPTION(bool, kGpuDmatrace, "DELTA_GPU_DMATRACE", false);
+DELTA_OPTION(bool, kGpuDrawpkt, "DELTA_GPU_DRAWPKT", false);
+DELTA_OPTION(bool, kMaskTrace, "DELTA_GPU_MASKTRACE", false);
+DELTA_OPTION(bool, kNoCopy, "DELTA_GPU_NODMACOPY", false);
+DELTA_OPTION(bool, kNoCs, "DELTA_GPU_NOCS", false);
+DELTA_OPTION(bool, kNoDepth, "DELTA_GPU_NODEPTH", false);
+DELTA_OPTION(bool, kOpHist, "DELTA_GPU_OPHIST", false);
+DELTA_OPTION(bool, kRawBufTrace, "DELTA_GPU_RAWBUF", false);
+DELTA_OPTION(bool, kSkipStale, "DELTA_GPU_SKIPSTALE", false);
+DELTA_OPTION(bool, kSpriteDis, "DELTA_GPU_SPRITEDIS", false);
+DELTA_OPTION(bool, kSpriteDump, "DELTA_GPU_SPRITEDUMP", false);
+DELTA_OPTION(bool, kTexfmt, "DELTA_GPU_TEXFMT", false);
+DELTA_OPTION(bool, kTrace, "DELTA_GPU_TRACE", false);
+DELTA_OPTION(bool, kVattrDump, "DELTA_GPU_VATTRDUMP", false);
+}  // namespace
 
 namespace gpu {
 namespace {
 
 std::mutex g_mtx;
 Regs g_regs;  // persistent register state across submits (Gnm relies on this)
-const bool kTrace = std::getenv("DELTA_GPU_TRACE") != nullptr;
 std::atomic<uint64_t> g_total_submits{0};
 std::atomic<uint64_t> g_total_draws{0};
 bool g_vk_tried = false;
@@ -147,7 +186,6 @@ bool IsDraw(uint32_t op) {
 // the flip-done / submit-done labels Gnm spins on between frames -- make
 // progress. Without it the title stalls after the few in-flight display buffers
 // drain (it never sees a flip "complete").
-const bool kEopTrace = std::getenv("DELTA_GPU_EOPTRACE") != nullptr;
 // Labels live in guest memory the game allocated (Garlic/Onion
 // 0x10_0000_0000+), in low guest heaps (0x2_0000_0000+), or in the GnmDriver
 // area (0xfe00_0000+). Accept any plausibly-mapped, non-low address; reject
@@ -250,8 +288,7 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
     // decode, or an indirect draw whose count lives in guest memory) shows up
     // downstream only as "too few vertices", which points at the wrong layer.
     {
-      static const bool pkt_trace = std::getenv("DELTA_GPU_DRAWPKT") != nullptr;
-      if (pkt_trace) {
+      if (kGpuDrawpkt) {
         // A histogram over the WHOLE run, not the first N draws: the counts
         // that decline downstream are not the ones a first-N sample catches.
         struct Bucket {
@@ -293,9 +330,7 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
       // rules below can silently drop it. A rejected index buffer leaves the
       // draw non-indexed, which then declines for too few vertices -- the two
       // symptoms look unrelated in the logs unless the packet is visible.
-      static const bool pkt_trace_i2 =
-          std::getenv("DELTA_GPU_DRAWPKT") != nullptr;
-      if (pkt_trace_i2) {
+      if (kGpuDrawpkt) {
         static int n = 0;
         if (n++ < 128)
           std::fprintf(stderr,
@@ -336,8 +371,7 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
       uint32_t a[5] = {0, 0, 0, 0, 0};
       if (mapped)
         std::memcpy(a, reinterpret_cast<const void*>(args), need);
-      static const bool ind_trace = std::getenv("DELTA_GPU_DRAWPKT") != nullptr;
-      if (ind_trace) {
+      if (kGpuDrawpkt) {
         static int n = 0;
         if (n++ < 24)
           std::fprintf(stderr,
@@ -383,9 +417,7 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
           g_index_base && icount && icount <= 0x100000 &&
           utl::isMemoryRangeMapped(reinterpret_cast<const void*>(ibase),
                                    static_cast<uint64_t>(icount) * index_bytes);
-      static const bool off2_trace =
-          std::getenv("DELTA_GPU_DRAWPKT") != nullptr;
-      if (off2_trace) {
+      if (kGpuDrawpkt) {
         static int n = 0;
         if (n++ < 32)
           std::fprintf(stderr,
@@ -472,12 +504,10 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
     // unchanged). We only render to the write base; internal format is always
     // D32F (never read back to the guest).
     {
-      static const bool kNoDepth = std::getenv("DELTA_GPU_NODEPTH") != nullptr;
       uint32_t dc = g_regs[mmDB_DEPTH_CONTROL];
       uint32_t zinfo = kNoDepth ? 0 : g_regs[mmDB_Z_INFO];
       uint64_t zread = static_cast<uint64_t>(g_regs[mmDB_Z_READ_BASE]) << 8;
       uint64_t zbase = static_cast<uint64_t>(g_regs[mmDB_Z_WRITE_BASE]) << 8;
-      static const bool kDbTrace = std::getenv("DELTA_GPU_DBTRACE") != nullptr;
       static int db_n = 0;
       if (kDbTrace && db_n < 24 && (zinfo || dc)) {
         db_n++;
@@ -505,8 +535,6 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
       // Z_INFO=0), to validate it end-to-end. func=ALWAYS so no fragment is
       // hidden (visible output unchanged); depth_base keys a synthetic depth
       // image off the RT.
-      static const bool kForceDepth =
-          std::getenv("DELTA_GPU_FORCEDEPTH") != nullptr;
       if (kForceDepth && !d.depth_base && d.rt_base) {
         d.depth_base = d.rt_base;
         d.depth_test_enable = true;
@@ -573,10 +601,6 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
     std::shared_ptr<const gcn::Program> ps_prog;
     if (ps_a >= 0x1000000000ull && ps_a < 0x20000000000ull) {
       ps_prog = gcn::CachedProgram(ps_a, 4096);
-      static const int kTexTrackFrame = [] {
-        const char* e = std::getenv("DELTA_GPU_TEXTRACK_FRAME");
-        return e ? std::atoi(e) : -1;
-      }();
       const uint32_t frame = g_presented_frames + 1;
       const bool trace_tex =
           kTexTrackFrame >= 0 && static_cast<int>(frame) == kTexTrackFrame;
@@ -646,7 +670,6 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
         // extraction. DELTA_GPU_TEXFMT: dump sampled texture formats
         // (dfmt/nfmt/tiling/dims) to pin a scrambled draw (e.g. Doom64's menu)
         // to a format/tiling we mishandle.
-        static const bool kTexfmt = std::getenv("DELTA_GPU_TEXFMT") != nullptr;
         static int tf_n = 0;
         if (kTexfmt && tf_n < 24) {
           tf_n++;
@@ -662,15 +685,11 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
     // Recompiled-shader path: Recompile the VS/PS pair (cached) and resolve the
     // live vertex-attribute buffers, so the renderer can run the game's actual
     // shaders. The heuristic fields above stay populated as the fallback.
-    static const bool kRecompOn = [] {
-      const char* e = std::getenv("DELTA_GPU_RECOMP");
-      return !e || std::strcmp(e, "0") != 0;
-    }();
     // DELTA_GPU_SKIPSH=addr[,addr...] (hex): refuse to recompile draws whose
     // VS or PS lives at one of these guest addresses — shader-hang bisection.
     static const std::vector<uint64_t> kSkipSh = [] {
       std::vector<uint64_t> v;
-      if (const char* e = std::getenv("DELTA_GPU_SKIPSH"))
+      if (const char* e = kSkipShList)
         for (const char* p = e; *p;) {
           char* end;
           const uint64_t a = std::strtoull(p, &end, 16);
@@ -887,8 +906,6 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
         // with MUBUF. Same scalar replay as the cbuffers: the descriptor is
         // read at the instruction that consumes it, so an SRT-chained V# lands
         // here as well as an inline one.
-        static const bool kRawBufTrace =
-            std::getenv("DELTA_GPU_RAWBUF") != nullptr;
         auto resolve_bufs = [&](const std::vector<gcn::ShaderBuffer>& bufs,
                                 const uint32_t* user_data,
                                 const std::shared_ptr<const gcn::Program>& prog,
@@ -967,11 +984,6 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
     // resolved. Pins why Undertale's surface->scanout blit renders untextured
     // (tex=0): is the PS doing an image_sample we miss, or is the T# pointing
     // outside the guest range?
-    static const bool kBlitDump = std::getenv("DELTA_GPU_BLITDUMP") != nullptr;
-    static const uint64_t kBlitRt = [] {
-      const char* e = std::getenv("DELTA_GPU_BLIT_RT");
-      return e ? std::strtoull(e, nullptr, 0) : 0ull;
-    }();
     static int bd_n = 0;
     bool blit_target_bound = !kBlitRt || d.rt_base == kBlitRt;
     for (uint32_t i = 0; kBlitRt && i < std::min(d.mrt_count, 8u); i++)
@@ -1045,17 +1057,12 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
     // draws dropped for null vertex_data/recomp (e.g. Doom64's 3D world
     // geometry) are visible -- distinguishes "world draws never submitted" from
     // "submitted but dropped because vertex/shader resolution failed".
-    static const bool kDrawList = std::getenv("DELTA_GPU_DRAWLIST") != nullptr;
     static int dl_n = 0;
     // Wall-clock gate: the title/menu floods the early run, so only start
     // logging after DELTA_GPU_DRAWLIST_AFTER seconds (default 90), by when the
     // level has loaded -- then log EVERY draw so the in-level pattern (incl.
     // world geometry, if any reaches us) is captured.
     static const auto kDlStart = std::chrono::steady_clock::now();
-    static const int kDlAfter = [] {
-      const char* e = std::getenv("DELTA_GPU_DRAWLIST_AFTER");
-      return e ? std::atoi(e) : 90;
-    }();
     if (kDrawList && dl_n < 400 &&
         std::chrono::duration_cast<std::chrono::seconds>(
             std::chrono::steady_clock::now() - kDlStart)
@@ -1081,21 +1088,8 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
     //   DELTA_GPU_MASKTRACE_AFTER=<sec>  delay before logging (default 0)
     //   DELTA_GPU_MASKTRACE_MAX=<n>      max lines (default 200)
     //   DELTA_GPU_MASKTRACE_RT=<hex>     only draws touching this CB base
-    static const bool kMaskTrace = std::getenv("DELTA_GPU_MASKTRACE") != nullptr;
     if (kMaskTrace) {
       static const auto kMtStart = std::chrono::steady_clock::now();
-      static const int kMtAfter = [] {
-        const char* e = std::getenv("DELTA_GPU_MASKTRACE_AFTER");
-        return e ? std::atoi(e) : 0;
-      }();
-      static const int kMtMax = [] {
-        const char* e = std::getenv("DELTA_GPU_MASKTRACE_MAX");
-        return e ? std::atoi(e) : 200;
-      }();
-      static const uint64_t kMtRt = [] {
-        const char* e = std::getenv("DELTA_GPU_MASKTRACE_RT");
-        return e ? std::strtoull(e, nullptr, 0) : 0ull;
-      }();
       static int mt_n = 0;
       bool rt_hit = !kMtRt || d.rt_base == kMtRt;
       for (uint32_t i = 0; kMtRt && i < std::min(d.mrt_count, 8u); i++)
@@ -1126,10 +1120,6 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
     // DELTA_GPU_SPRITEDUMP: for the first few TEXTURED draws, dump the resolved
     // transform + first vertex (pos/uv via the resolved attrs) + texture, to
     // pin why textured draws render black (degenerate MVP vs UV=0 vs blend).
-    static const bool kSpriteDump =
-        std::getenv("DELTA_GPU_SPRITEDUMP") != nullptr;
-    static const bool kSpriteDis =
-        std::getenv("DELTA_GPU_SPRITEDIS") != nullptr;
     static bool sprite_dis_done = false;
     static int sd_n = 0;
     if (kSpriteDump && d.recomp && !d.recomp->ps_texs.empty() &&
@@ -1225,8 +1215,6 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
     // textures by interpolated vertex COLORS, so an all-black UI splits into
     // "the color bytes in guest memory are zero" vs "the fetch path zeroes
     // them" -- this prints the guest bytes.
-    static const bool kVattrDump =
-        std::getenv("DELTA_GPU_VATTRDUMP") != nullptr;
     static int vattr_dumped = 0;
     if (kVattrDump && d.num_vattrs >= 2 && d.vertex_data &&
         d.vertex_count <= 8 && vattr_dumped < 24) {
@@ -1258,13 +1246,8 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
     // vertex-color, the texture format/tiling, the cbuffer transform, and a
     // vertex position (on-screen check). Gated on index_count>=500 so it only
     // fires in a 3D level.
-    static const bool kGeomDump = std::getenv("DELTA_GPU_GEOMDUMP") != nullptr;
     // DELTA_GPU_GEOMMIN overrides the index-count gate (default 500) so the
     // dump can also catch Doom64's lower-index level draws.
-    static const uint32_t kGeomMin = [] {
-      const char* e = std::getenv("DELTA_GPU_GEOMMIN");
-      return e ? (uint32_t)std::strtoul(e, nullptr, 10) : 500u;
-    }();
     static int gd_n = 0, gd_seen = 0;
     // Sample periodically across the WHOLE run (every 100th qualifying world
     // draw) so we can see whether the camera/view ever moves -- not just the
@@ -1483,8 +1466,6 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
     // used to hide a title's stale full-screen video-buffer blit (Doom64's
     // undecoded 4K menu bg = garbage) so the menu items drawn on top become
     // readable -> lets the correct menu input be derived instead of guessed.
-    static const bool kSkipStale =
-        std::getenv("DELTA_GPU_SKIPSTALE") != nullptr;
     if (kSkipStale && d.tex_base && d.tex_w >= 2048)
       ;  // skip the wide stale-buffer blit
     else if (d.vertex_data || (d.recomp && d.recomp->ok && d.num_vattrs == 0))
@@ -1680,11 +1661,6 @@ void SubmitCcb(const void* ccb, uint32_t size_bytes) {
   std::lock_guard<std::mutex> lk(g_mtx);
   const uint32_t* p = static_cast<const uint32_t*>(ccb);
   uint32_t words = size_bytes / 4, i = 0;
-  static const bool kCcbHist = std::getenv("DELTA_GPU_CCBHIST") != nullptr;
-  static const bool kCeOff = [] {
-    const char* e = std::getenv("DELTA_GPU_CE");
-    return e && e[0] == '0';
-  }();
   static uint32_t hist[256] = {};
   static int hist_dumps = 0;
   static uint64_t n_ccb = 0;
@@ -1701,7 +1677,7 @@ void SubmitCcb(const void* ccb, uint32_t size_bytes) {
       if (i + 1 + count > words)
         break;
       hist[op & 0xFF]++;
-      if (!kCeOff) {
+      if (kCeOn) {
         switch (op) {
           case IT_WRITE_CONST_RAM: {  // body[0]=byte offset; body[1..]=data
                                       // dwords
@@ -1783,7 +1759,6 @@ void HandleDispatch(const uint32_t* body, uint32_t count) {
   uint32_t tgid_enable = (rsrc2hi >> 7) & 0x7;  // tgid_enable (bits 41:39)
   uint32_t lds_dwords = (rsrc2hi >> 15) & 0x1FF;
 
-  static const bool kCsDump = std::getenv("DELTA_GPU_CSDUMP") != nullptr;
   static std::unordered_set<uint64_t> dumped_cs;
   if (kCsDump && dumped_cs.size() < 32 && cs_addr >= 0x1000000000ull &&
       cs_addr < 0x20000000000ull && dumped_cs.insert(cs_addr).second) {
@@ -1805,7 +1780,6 @@ void HandleDispatch(const uint32_t* body, uint32_t count) {
     return;
   const uint32_t* ud = &g_regs[mmCOMPUTE_USER_DATA_0];
 
-  static const bool kNoCs = std::getenv("DELTA_GPU_NOCS") != nullptr;
   if (kNoCs || !rhi::DefaultRenderer().available())
     return;
 
@@ -1884,7 +1858,6 @@ void HandleDispatch(const uint32_t* body, uint32_t count) {
       resolved = gcn::ResolveCsResources(*cs_program, rc, ud);
     }
   }
-  static const bool kCsResTrace = std::getenv("DELTA_GPU_CSRES") != nullptr;
   static std::unordered_set<uint64_t> traced_cs_resources;
   const bool trace_cs_resources = kCsResTrace &&
                                   traced_cs_resources.size() < 64 &&
@@ -1903,7 +1876,6 @@ void HandleDispatch(const uint32_t* body, uint32_t count) {
       }
       // DELTA_GPU_EUDFAIL: raw code dump of an unresolvable CS (once) so the
       // descriptor chain can be decoded offline against the eudfail trace.
-      static const bool kEudFail = std::getenv("DELTA_GPU_EUDFAIL") != nullptr;
       static std::unordered_set<uint64_t> dumped;
       if (kEudFail && dumped.insert(cs_addr).second) {
         const uint32_t* c = reinterpret_cast<const uint32_t*>(cs_addr);
@@ -2167,8 +2139,6 @@ void SubmitDcb(const void* dcb, uint32_t size_bytes) {
             uint32_t bytes = body[5] & 0x1FFFFF;
             bool src_mem = (src_sel == 0 || src_sel == 3);
             bool dst_mem = (dst_sel == 0 || dst_sel == 3);
-            static const bool kNoCopy =
-                std::getenv("DELTA_GPU_NODMACOPY") != nullptr;
             // Only copy between REAL guest memory: the sel bits report "memory"
             // even for GDS/register targets (e.g. dst=0x3022c), which aren't
             // mapped in our address space and segfault. Every real guest
@@ -2190,7 +2160,7 @@ void SubmitDcb(const void* dcb, uint32_t size_bytes) {
                           reinterpret_cast<const void*>(src), bytes);
               copied = true;
             }
-            if (std::getenv("DELTA_GPU_DMATRACE")) {
+            if (kGpuDmatrace) {
               static int dmn = 0;
               // Shader-prefetch packets target a low register address and
               // otherwise consume the trace cap before uploads begin. Keep
@@ -2318,8 +2288,6 @@ void SubmitDcb(const void* dcb, uint32_t size_bytes) {
       i += 1 + cnt;
     } else {
       // A type-1 header is a genuine desync; stop.
-      static const bool kDesyncTrace =
-          std::getenv("DELTA_GPU_DESYNC") != nullptr;
       if (dump_this || kDesyncTrace)
         std::fprintf(stderr, "[gpu]   @%-5u/%u STOP type%u hdr=%#x\n", i, words,
                      (uint32_t)type, hdr);
@@ -2360,15 +2328,10 @@ void SubmitDcb(const void* dcb, uint32_t size_bytes) {
   // (DELTA_GPU_OPHIST): reveals any draw/dispatch opcode the title uses that
   // IsDraw() doesn't handle (a silently-skipped draw -- e.g. the non-tutorial
   // room floor).
-  static const bool kOpHist = std::getenv("DELTA_GPU_OPHIST") != nullptr;
   static bool op_hist_dumped = false;
   // Time-gate (default 100s) so the cumulative histogram includes the in-level
   // command stream (level-load compute/copies), not just the title.
   static const auto kOhStart = std::chrono::steady_clock::now();
-  static const int kOhAfter = [] {
-    const char* e = std::getenv("DELTA_GPU_OPHIST_AFTER");
-    return e ? std::atoi(e) : 100;
-  }();
   if (kOpHist && !op_hist_dumped &&
       std::chrono::duration_cast<std::chrono::seconds>(
           std::chrono::steady_clock::now() - kOhStart)

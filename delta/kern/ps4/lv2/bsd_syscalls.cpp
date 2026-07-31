@@ -14,6 +14,11 @@
 #include <cstring>
 #include <cstdlib>
 #include <cstdio>
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(bool, kQuietGuest, "DELTA_QUIET_GUEST", false);
+}  // namespace
 
 namespace krnl {
 int PS4ABI sys_exit() {
@@ -184,8 +189,7 @@ int PS4ABI sys_write(uint32_t fd, const void *buf, size_t nbytes) {
     // DELTA_QUIET_GUEST: the game's debug prints (per-frame message-pump chatter)
     // flood stdout char-by-char and corrupt our diagnostic logs via interleaving.
     // Suppress guest fd1/2 output while diagnosing the host-side render path.
-    static const bool quiet = std::getenv("DELTA_QUIET_GUEST") != nullptr;
-    if (quiet)
+    if (kQuietGuest)
       return static_cast<int>(nbytes);
     fwrite(buf, 1, nbytes, stdout);
     return static_cast<int>(nbytes);

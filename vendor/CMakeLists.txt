@@ -60,13 +60,23 @@ target_include_directories(xbyak INTERFACE
 # We compile a minimal subset: the headers used by PS4Delta
 # (containers/vector.h, strings/xstring.h, memory/unique_pointer.h) plus
 # the runtime objects those headers transitively need (check / logging /
-# format). Everything else in equilibrium pulls in mimalloc / tracy /
-# googletest, which we do not need here.
+# format), and the filesystem layer base::Option's file loader reads through.
+# Everything else in equilibrium pulls in mimalloc / tracy / googletest, which
+# we do not need here.
 # --------------------------------------------------------------------------
 add_library(eq_base STATIC
   equilibrium/base/check.cc
+  equilibrium/base/environment_variables_posix.cc
   equilibrium/base/logging.cc
+  equilibrium/base/option_file.cc
   equilibrium/base/strings/format.cc
+  equilibrium/base/filesystem/file.cc
+  equilibrium/base/filesystem/path.cc
+  equilibrium/base/filesystem/scoped_file.cc
+  equilibrium/base/filesystem/posix/file_posix.cc
+  equilibrium/base/filesystem/posix/path_posix.cc
+  equilibrium/base/filesystem/linux/scoped_file_linux.cc
+  equilibrium/base/text/code_convert.cc
 )
 target_include_directories(eq_base PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/equilibrium
@@ -74,6 +84,10 @@ target_include_directories(eq_base PUBLIC
 target_compile_features(eq_base PUBLIC cxx_std_20)
 target_compile_definitions(eq_base PUBLIC
   BASE_STRIP_BUGCHECK     # don't pull in fancy backtrace machinery
+  # base/filesystem picks its char type and syscalls off these; they are what
+  # equilibrium's own build sets, not something build_config.h derives.
+  OS_LINUX
+  OS_POSIX
 )
 
 # --------------------------------------------------------------------------

@@ -16,6 +16,11 @@
 #include "dma_dev.h"
 #include "kern/proc.h"
 #include "kern/ps4/lv2/sys_mem.h"  // allocLowGuest, mFlags
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(bool, kDmemTrace, "DELTA_DMEM_TRACE", false);
+}  // namespace
 
 namespace krnl {
 
@@ -51,8 +56,7 @@ uint8_t *dmaDevicePs5::map(void *addr, size_t len, uint32_t /*prot*/, uint32_t f
   }
   if (p == MAP_FAILED)
     return reinterpret_cast<uint8_t *>(-1);
-  static const bool trace = std::getenv("DELTA_DMEM_TRACE") != nullptr;
-  if (trace)
+  if (kDmemTrace)
     std::fprintf(stderr, "[dmem] devmap off=%#zx len=%#zx -> %p (shared)\n", offset,
                  len, p);
   return reinterpret_cast<uint8_t *>(p);

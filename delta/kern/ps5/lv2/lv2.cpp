@@ -22,6 +22,11 @@
 
 #include "kern/ps4/lv2/error_table.h"
 #include "lv2.h"
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(bool, kPs5SysTrace, "DELTA_PS5_SYSTRACE", false);
+}  // namespace
 
 namespace krnl {
 const char *syscall_getname(uint32_t idx);
@@ -107,7 +112,7 @@ uintptr_t lv2_get_ps5(uint32_t sid) {
   const ps5Sys *ex = ps5Extra(sid);
 
   static std::set<uint32_t> seen;
-  if (std::getenv("DELTA_PS5_SYSTRACE") && seen.insert(sid).second) {
+  if (kPs5SysTrace && seen.insert(sid).second) {
     const char *name = ex ? ex->name : syscall_getname(sid);
     std::fprintf(stderr, "[ps5sys] %4u  %s\n", sid, name ? name : "?");
   }

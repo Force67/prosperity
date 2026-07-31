@@ -22,6 +22,13 @@
 #include <cstdlib>
 #include <utility>
 #include <vector>
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(bool, kDoCull, "DELTA_GPU_CULL", false);
+DELTA_OPTION(bool, kGpuPipetrace, "DELTA_GPU_PIPETRACE", false);
+DELTA_OPTION(bool, kNoMaskDiag, "DELTA_GPU_NOMASK", false);
+}  // namespace
 
 namespace gpu::vk {
 
@@ -353,7 +360,6 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
   // compute-built (unimplemented) so its geometry is not yet visible, and depth
   // already resolves occlusion, so the default stays cull-none to avoid
   // dropping correctly-drawn faces (some HUD draws set cull bits).
-  static const bool kDoCull = std::getenv("DELTA_GPU_CULL") != nullptr;
   rs.cullMode =
       kDoCull ? (VkCullModeFlags)(d.cull_mode & 0x3) : VK_CULL_MODE_NONE;
   rs.frontFace =
@@ -385,14 +391,13 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
     // Mask attachments the PS does not export to. A PS with no color export
     // at all (depth-only / buffer-store passes) writes nothing -- previously a
     // white fallback was painted, which poisoned multi-pass chains (PT).
-    static const bool kNoMaskDiag = std::getenv("DELTA_GPU_NOMASK") != nullptr;
     if (!kNoMaskDiag && !(d.recomp->ps_mrt_mask & (1u << i)))
       cb_att[i].colorWriteMask = 0;
   }
   // DELTA_GPU_PIPETRACE: the colour-blend state a pipeline is actually built
   // with, next to the PS's export mask -- the two have to agree or an
   // attachment is silently write-masked off (or written unblended).
-  if (std::getenv("DELTA_GPU_PIPETRACE")) {
+  if (kGpuPipetrace) {
     static int n = 0;
     if (n++ < 24)
       std::fprintf(

@@ -27,6 +27,13 @@
 
 #include <logger/logger.h>
 #include <utl/file.h>
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(const char *, kPfsDbg, "DELTA_PFS_DBG", nullptr);
+DELTA_OPTION(const char *, kQarSelftest, "DELTA_QAR_SELFTEST", nullptr);
+DELTA_OPTION(bool, kPkgReadTrace, "DELTA_PKGREAD_TRACE", false);
+}  // namespace
 
 namespace vfs {
 namespace {
@@ -251,7 +258,7 @@ public:
     bs_ = rd64(h + 0x10);
     uint64_t bo = rd64(h + 0x18);
     uint64_t dl = rd64(h + 0x28);
-    if (std::getenv("DELTA_PFS_DBG"))
+    if (kPfsDbg)
       std::fprintf(stderr,
                    "[pfsc] magic=%02x%02x%02x%02x bs=%llu bo=%llu dl=%llu\n",
                    h[0], h[1], h[2], h[3], (unsigned long long)bs_,
@@ -487,7 +494,7 @@ struct PkgImpl {
           std::string nm(reinterpret_cast<const char *>(d.data() + o + 16), nl);
           if (ty == 2 && ch < ino.size()) {
             files[pre + "/" + nm] = {ino[ch].size, ino[ch].start};
-            if (const char *dbg = std::getenv("DELTA_PFS_DBG"))
+            if (const char *dbg = kPfsDbg)
               if (nm.find(dbg) != std::string::npos)
                 std::fprintf(stderr,
                              "[pfs] %s/%s size=%llu start=%u blocks=%u "
@@ -547,7 +554,7 @@ struct PkgImpl {
         break;
       }
     }
-    if (std::getenv("DELTA_PFS_DBG"))
+    if (kPfsDbg)
       std::fprintf(stderr,
                    "[pkg] pfsOff=%llu outerBs=%u PFSC scan: found=%d "
                    "innerBlk=%llu maxBlk=%llu\n",
@@ -586,7 +593,7 @@ struct PkgImpl {
     // at a spread of offsets, so it can be diffed against an independent
     // ground-truth extraction (validates large-file decrypt/decompress). Reads
     // the file whose path contains the env value (default "texture.qar").
-    if (const char *st = std::getenv("DELTA_QAR_SELFTEST")) {
+    if (const char *st = kQarSelftest) {
       const char *want = *st ? st : "texture.qar";
       const PkgFilesystem::Node *node = nullptr;
       std::string nodePath;
@@ -635,7 +642,7 @@ struct PkgImpl {
     uint64_t innerOff =
         static_cast<uint64_t>(n.startBlock) * innerBs + static_cast<uint64_t>(off);
     inner->read(innerOff, take, static_cast<uint8_t *>(buf));
-    if (std::getenv("DELTA_PKGREAD_TRACE") && take >= 1) {
+    if (kPkgReadTrace && take >= 1) {
       auto *b = static_cast<const uint8_t *>(buf);
       uint32_t w = b[0] | (take > 1 ? b[1] << 8 : 0) | (take > 2 ? b[2] << 16 : 0) |
                    (take > 3 ? uint32_t(b[3]) << 24 : 0);

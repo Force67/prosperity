@@ -47,8 +47,17 @@
 
 #include "kern/module.h"
 #include "kern/proc.h"
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(bool, kScerrTrace, "DELTA_SCERR_TRACE", false);
+}  // namespace
 
 namespace krnl {
+
+// Read by null_handler and the trampoline alike, so it is a krnl symbol rather
+// than a file-local one.
+DELTA_OPTION(bool, g_scHist, "DELTA_SCHIST", false);
 const char *syscall_getname(uint32_t idx);
 
 int sys_write(uint32_t fd, const void *buf, size_t nbytes);
@@ -93,7 +102,6 @@ moduleInfo *called_in(void *addr) {
 }
 
 void dumpSyscallHist();
-extern const bool g_scHist;
 
 static int PS4ABI null_handler() {
 #ifdef _MSC_VER
@@ -855,8 +863,6 @@ static uintptr_t emit_calltrace(const char *name, uint32_t sid,
 // g_scHist/dumpSyscallHist unconditionally, so the FEX build must link them too
 // (only the trampoline that increments g_sysHist is native-only).
 extern "C" uint64_t g_sysHist[1024] = {};
-extern const bool g_scHist;
-const bool g_scHist = std::getenv("DELTA_SCHIST") != nullptr;
 
 // The histogram was only ever printed by the crash reporter, so a clean run
 // discarded it. "Which syscall is this title hammering" is the question it
@@ -953,18 +959,17 @@ uintptr_t lv2_get(uint32_t sid) {
   // (and the many duplicate sites in the guest) reuse a single stub. When
   // DELTA_SCERR_TRACE is set the stub also logs its errno on the error path, so
   // key the cache by sid instead (each id reports its own name).
-  static const bool traceErr = std::getenv("DELTA_SCERR_TRACE") != nullptr;
   static std::mutex trMutex;
   static std::unordered_map<uint64_t, uintptr_t> trCache;
   std::lock_guard<std::mutex> lk(trMutex);
   // Per-sid stub (not deduped by handler) when tracing errors OR counting, so
   // each id reports/counts under its own number.
-  uint64_t key = (traceErr || g_scHist) ? static_cast<uint64_t>(sid)
+  uint64_t key = (kScerrTrace || g_scHist) ? static_cast<uint64_t>(sid)
                                         : reinterpret_cast<uint64_t>(handler);
   auto it = trCache.find(key);
   if (it != trCache.end())
     return it->second;
-  uintptr_t tr = emit_bsd_trampoline(handler, sid, traceErr, g_scHist);
+  uintptr_t tr = emit_bsd_trampoline(handler, sid, kScerrTrace, g_scHist);
   trCache.emplace(key, tr);
   return tr;
 #else

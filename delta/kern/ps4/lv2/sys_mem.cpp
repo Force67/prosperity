@@ -32,6 +32,27 @@
 #include "../../thread_names.h"
 #include "error_table.h"
 #include "sys_mem.h"
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(const char *, kShmFilter, "DELTA_SHM_AUDIO_FILTER", nullptr);
+DELTA_OPTION(const char *, kShmPoison, "DELTA_SHM_AUDIO_POISON", nullptr);
+DELTA_OPTION(const char *, kShmPoisonFilter, "DELTA_SHM_AUDIO_POISON_FILTER", nullptr);
+DELTA_OPTION(bool, kShmRepoison, "DELTA_SHM_AUDIO_REPOISON", false);
+DELTA_OPTION(const char *, kShmProbe, "DELTA_SHM_AUDIO_PROBE", nullptr);
+DELTA_OPTION(const char *, kShmDump, "DELTA_SHM_AUDIO_DUMP", nullptr);
+DELTA_OPTION(unsigned, kShmDumpMs, "DELTA_SHM_AUDIO_DUMP_MS", 10);
+DELTA_OPTION(unsigned, kShmDumpN, "DELTA_SHM_AUDIO_DUMP_N", 400);
+DELTA_OPTION(size_t, kShmDumpMax, "DELTA_SHM_AUDIO_DUMP_MAX", 1u << 20);
+DELTA_OPTION(const char *, kMmapCaller, "DELTA_MMAP_CALLER", nullptr);
+DELTA_OPTION(bool, kShmNoAuto, "DELTA_SHM_NOAUTO", false);
+DELTA_OPTION(bool, kAllocTrace, "DELTA_ALLOC_TRACE", false);
+DELTA_OPTION(bool, kGnmapTrace, "DELTA_GNMAP_TRACE", false);
+DELTA_OPTION(bool, kMmapLog, "DELTA_MMAP_LOG", false);
+DELTA_OPTION(bool, kMmapfdTrace, "DELTA_MMAPFD_TRACE", false);
+DELTA_OPTION(bool, kShmAudioDumpDelta, "DELTA_SHM_AUDIO_DUMP_DELTA", false);
+DELTA_OPTION(bool, kShmAudioTrace, "DELTA_SHM_AUDIO_TRACE", false);
+}  // namespace
 
 namespace krnl {
 using ppt = utl::pageProtection;
@@ -84,7 +105,7 @@ uint8_t *allocLowGuest(size_t size, size_t align) {
     void *p = ::mmap(reinterpret_cast<void *>(base), size, PROT_READ | PROT_WRITE,
                      MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
     if (p == reinterpret_cast<void *>(base)) {
-      if (std::getenv("DELTA_ALLOC_TRACE"))
+      if (kAllocTrace)
         std::printf("[lowalloc] %#lx +%#lx\n", (unsigned long)base,
                     (unsigned long)size);
       return static_cast<uint8_t *>(p);
@@ -126,11 +147,8 @@ std::unordered_map<std::string, shmBacking> g_shmByName;
 // "<seq> <t_us> <name> <off> <len>", so a grower/reallocation is visible.
 // ---------------------------------------------------------------------------
 const char *shmAudioFilter() {
-  static const char *f = [] {
-    const char *v = std::getenv("DELTA_SHM_AUDIO_FILTER");
-    return (v && *v) ? v : "shm_";
-  }();
-  return f;
+  const char *v = kShmFilter;
+  return (v && *v) ? v : "shm_";
 }
 
 bool shmAudioMatch(const std::string &n) {
@@ -138,8 +156,7 @@ bool shmAudioMatch(const std::string &n) {
 }
 
 bool shmAudioTraceOn() {
-  static const bool on = std::getenv("DELTA_SHM_AUDIO_TRACE") != nullptr;
-  return on;
+  return kShmAudioTrace;
 }
 
 uint64_t shmAudioNowUs() {
@@ -171,13 +188,12 @@ std::string shmAudioSanitize(const std::string &n) {
 // zeros. Only regions matching DELTA_SHM_AUDIO_POISON_FILTER (default "_A", the
 // per-port sample regions) are poisoned, so the descriptor block stays clean.
 bool shmAudioPoisonQuiet(const std::string &name, uint8_t *base, size_t size) {
-  static const char *pv = std::getenv("DELTA_SHM_AUDIO_POISON");
+  const char *pv = kShmPoison;
   if (!pv || !base || !size)
     return false;
-  static const char *pf = [] {
-    const char *v = std::getenv("DELTA_SHM_AUDIO_POISON_FILTER");
-    return (v && *v) ? v : "_A";
-  }();
+  const char *pf = (kShmPoisonFilter && *kShmPoisonFilter.get())
+                       ? kShmPoisonFilter.get()
+                       : "_A";
   if (name.find(pf) == std::string::npos)
     return false;
   std::memset(base, (int)std::strtol(pv, nullptr, 0), size);
@@ -191,8 +207,7 @@ void shmAudioPoison(const std::string &name, uint8_t *base, size_t size) {
 }
 
 void shmAudioRepoison(const std::string &name, uint8_t *base, size_t size) {
-  static const char *on = std::getenv("DELTA_SHM_AUDIO_REPOISON");
-  if (!on)
+  if (!kShmRepoison)
     return;
   shmAudioPoisonQuiet(name, base, size);
 }
@@ -369,7 +384,7 @@ void shmAudioProbeMain(long periodUs) {
 }
 
 void shmAudioProbeMaybeStart() {
-  const char *v = std::getenv("DELTA_SHM_AUDIO_PROBE");
+  const char *v = kShmProbe;
   if (!v || !*v)
     return;
   static std::atomic<bool> started{false};
@@ -383,24 +398,20 @@ void shmAudioProbeMaybeStart() {
 
 // Start the periodic dumper once, on the first matching shm we see.
 void shmAudioDumpMaybeStart() {
-  const char *dir = std::getenv("DELTA_SHM_AUDIO_DUMP");
+  const char *dir = kShmDump;
   if (!dir || !*dir)
     return;
   bool expected = false;
   if (!g_shmAudioDumper.compare_exchange_strong(expected, true))
     return;
-  auto envU = [](const char *k, unsigned d) {
-    const char *v = std::getenv(k);
-    return (v && *v) ? (unsigned)std::strtoul(v, nullptr, 0) : d;
-  };
-  const unsigned ms = envU("DELTA_SHM_AUDIO_DUMP_MS", 10);
-  const unsigned n = envU("DELTA_SHM_AUDIO_DUMP_N", 400);
-  const size_t mx = (size_t)envU("DELTA_SHM_AUDIO_DUMP_MAX", 1u << 20);
-  const bool dOnly = std::getenv("DELTA_SHM_AUDIO_DUMP_DELTA") != nullptr;
+  const unsigned ms = kShmDumpMs;
+  const unsigned n = kShmDumpN;
+  const size_t mx = kShmDumpMax;
   std::fprintf(stderr,
                "[shmaudio] dumper -> %s every %ums x%u (<=%#zx B)%s\n", dir, ms,
-               n, mx, dOnly ? " delta-only" : "");
-  std::thread(shmAudioDumperMain, std::string(dir), ms, n, mx, dOnly).detach();
+               n, mx, kShmAudioDumpDelta ? " delta-only" : "");
+  std::thread(shmAudioDumperMain, std::string(dir), ms, n, mx,
+              kShmAudioDumpDelta.get()).detach();
 }
 
 class shmObject : public kObject {
@@ -456,7 +467,7 @@ uint8_t *PS4ABI sys_mmap(void *addr, size_t size, uint32_t prot, uint32_t flags,
   // SCOUT (DELTA_MMAP_CALLER=<minMB>): scan the guest stack for return addresses
   // in a loaded module's .text to pin which guest code requested a big map (e.g.
   // the libc heap). Handler runs on the guest stack on native.
-  if (const char *mc = std::getenv("DELTA_MMAP_CALLER")) {
+  if (const char *mc = kMmapCaller) {
     size_t minB = static_cast<size_t>(std::strtoull(mc, nullptr, 0)) * 1024 * 1024;
     if (minB == 0) minB = 64ull * 1024 * 1024;
     if (size >= minB) {
@@ -509,7 +520,7 @@ uint8_t *PS4ABI sys_mmap(void *addr, size_t size, uint32_t prot, uint32_t flags,
 
   if (fd != -1) {
     auto *obj = proc->getObjTable().get(fd);
-    if (std::getenv("DELTA_MMAPFD_TRACE"))
+    if (kMmapfdTrace)
       std::fprintf(stderr, "[mmapfd] fd=%u addr=%p size=%#zx off=%#zx objType=%d\n",
                    fd, addr, size, offset, obj ? (int)obj->type() : -1);
     if (obj && obj->type() == kObject::oType::shm) {
@@ -592,7 +603,7 @@ uint8_t *PS4ABI sys_mmap(void *addr, size_t size, uint32_t prot, uint32_t flags,
     if (auto *o = proc->getObjTable().get(fd))
       if (o->type() == kObject::oType::device) {
         int64_t got = static_cast<device *>(o)->readAt(ptr, size, offset);
-        if (got > 0 && std::getenv("DELTA_MMAPFD_TRACE"))
+        if (got > 0 && kMmapfdTrace)
           std::fprintf(stderr, "[mmapfd]   filled %p from fd=%u off=%#zx -> %lld bytes\n",
                        ptr, fd, offset, (long long)got);
       }
@@ -612,8 +623,7 @@ uint8_t *PS4ABI sys_mmap(void *addr, size_t size, uint32_t prot, uint32_t flags,
   // etc.) are mapped and by whom (return address). The AGC command ring is mapped
   // here as plain anon (fd=-1); its coherency with the guest's PM4 writes is an
   // open item (Onion/Garlic dual mapping -- see ps5-boot-progress memory).
-  static const bool gnmapTrace = std::getenv("DELTA_GNMAP_TRACE") != nullptr;
-  if (gnmapTrace) {
+  if (kGnmapTrace) {
     uint64_t r = reinterpret_cast<uint64_t>(ptr);
     if (r >= 0x8000000000ull && r < 0x8300000000ull) {
       // Walk the guest frame chain (libkernel keeps frame pointers) so we see the
@@ -635,8 +645,7 @@ uint8_t *PS4ABI sys_mmap(void *addr, size_t size, uint32_t prot, uint32_t flags,
     }
   }
 
-  static const bool mmapLog = std::getenv("DELTA_MMAP_LOG") != nullptr;
-  if (mmapLog)
+  if (kMmapLog)
     std::printf("mmap %p, %x, prot=%x flags=%x, %p -> %p\n", addr, size, prot,
                 flags, _ReturnAddress(), ptr);
 
@@ -675,7 +684,7 @@ int PS4ABI sys_shm_open(const char *path, uint32_t flags, uint16_t mode) {
     std::lock_guard<std::mutex> lk(g_shmMutex);
     auto it = g_shmByName.find(name);
     if (it == g_shmByName.end()) {
-      if (!(flags & kO_CREAT) && std::getenv("DELTA_SHM_NOAUTO")) {
+      if (!(flags & kO_CREAT) && kShmNoAuto) {
         // DIAGNOSTIC: restore the pre-LLE behaviour (fail an open of a system shm
         // the guest didn't create) to test whether auto-providing it makes a title
         // block waiting for a ShellCore handshake that never arrives (Doom64).

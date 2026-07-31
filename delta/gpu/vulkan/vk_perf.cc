@@ -11,6 +11,12 @@
 #include <cstdlib>
 #include <cstring>
 #include <unistd.h>
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(bool, kFpsReport, "DELTA_GPU_FPS", true);
+DELTA_OPTION(bool, kOverlay, "DELTA_GPU_OVERLAY", true);
+}  // namespace
 
 namespace gpu::vk {
 
@@ -240,11 +246,7 @@ void PushStageSample() {
 }
 
 void DrawPerfOverlay(uint8_t* bgra, uint32_t w, uint32_t h) {
-  static const bool off = [] {
-    const char* e = std::getenv("DELTA_GPU_OVERLAY");
-    return e && e[0] == '0';
-  }();
-  if (off || !g_stage_hist_count || w < 560 || h < 280)
+  if (!kOverlay || !g_stage_hist_count || w < 560 || h < 280)
     return;
   // BGRA little-endian constants (0xAARRGGBB written as a uint32).
   static constexpr uint32_t kCol[6] = {
@@ -332,11 +334,7 @@ void DrawPerfOverlay(uint8_t* bgra, uint32_t w, uint32_t h) {
 // the average FPS over that window so perf changes can be measured empirically
 // (DELTA_GPU_FPS=0 silences it).
 void ReportFps() {
-  static const bool off = [] {
-    const char* e = std::getenv("DELTA_GPU_FPS");
-    return e && e[0] == '0';
-  }();
-  if (off)
+  if (!kFpsReport)
     return;
   using clock = std::chrono::steady_clock;
   static auto last = clock::now();

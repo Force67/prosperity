@@ -23,6 +23,12 @@
 #include "error_table.h"
 #include "sys_mem.h"      // shared enums + sys_mmap (dmem maps delegate to it)
 #include "sys_mem_ext.h"
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(bool, kDmemTrace, "DELTA_DMEM_TRACE", false);
+DELTA_OPTION(bool, kVqTrace, "DELTA_VQ_TRACE", false);
+}  // namespace
 
 namespace krnl {
 
@@ -148,7 +154,7 @@ int PS4ABI sys_virtual_query(const void *addr, int /*flags*/, void *info,
     int memType = gpu ? 3 : 0;  // 3 = SCE_KERNEL_WC_GARLIC, 0 = WB_ONION
     std::memcpy(vq + 0x1C, &memType, sizeof(int));
   }
-  if (std::getenv("DELTA_VQ_TRACE"))
+  if (kVqTrace)
     std::printf("[vq] addr=%p region=[%p..%p) sceProt=%#x memType=%d rsv=%d\n",
                 addr, start, end, region->sceProt, gpu ? 3 : 0,
                 region->reserved ? 1 : 0);
@@ -193,12 +199,11 @@ int PS4ABI sys_batch_map(uint32_t /*handle*/, uint32_t /*flags*/,
   };
   static_assert(sizeof(BatchMapEntry) == 0x20, "batch-map entry is 32 bytes");
 
-  static const bool trace = std::getenv("DELTA_DMEM_TRACE") != nullptr;
   auto *e = static_cast<BatchMapEntry *>(entries);
   int done = 0;
   for (; e && done < count; done++) {
     const auto &op = e[done];
-    if (trace)
+    if (kDmemTrace)
       std::fprintf(stderr,
                    "[dmem] batch[%d/%d] op=%u start=%#llx off=%#llx len=%#llx "
                    "prot=%#x type=%u\n",
@@ -277,7 +282,7 @@ int64_t PS4ABI sys_mmap_dmem(void *addr, size_t len, int prot, int flags,
   auto *active = proc::getActive();
   const bool ps5 = active && active->getPlatform() == proc::platform::ps5;
   const int fd = ps5 ? dmemBackingFd() : -1;  // PS5-only shared store (WIP)
-  if (std::getenv("DELTA_DMEM_TRACE"))
+  if (kDmemTrace)
     std::fprintf(stderr,
                  "[dmem] map628 va=%p len=%#zx prot=%#x flags=%#x physOff=%#llx fixed=%d\n",
                  addr, len, prot, flags, (unsigned long long)physOffset, fixedReq ? 1 : 0);

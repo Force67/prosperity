@@ -44,6 +44,13 @@
 
 #include "overlay.h"
 #include "overlay_vk.h"
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(bool, kVkValidate, "DELTA_VK_VALIDATE", false);
+DELTA_OPTION(const char *, kVkGpu, "DELTA_VK_GPU", nullptr);
+DELTA_OPTION(const char *, kVsync, "DELTA_GPU_VSYNC", nullptr);
+}  // namespace
 
 namespace gfx {
 namespace {
@@ -345,7 +352,7 @@ bool createSwapchain() {
           return true;
       return false;
     };
-    const char *vs = std::getenv("DELTA_GPU_VSYNC");
+    const char *vs = kVsync;
     VkPresentModeKHR mode = VK_PRESENT_MODE_FIFO_KHR;
     if (vs && vs[0] == '0' && has(VK_PRESENT_MODE_IMMEDIATE_KHR))
       mode = VK_PRESENT_MODE_IMMEDIATE_KHR;
@@ -540,7 +547,7 @@ bool init(const char *title, uint32_t width, uint32_t height) {
   app.apiVersion = VK_API_VERSION_1_1;
 
   std::vector<const char *> layers;
-  if (SDL_getenv("DELTA_VK_VALIDATE")) {
+  if (kVkValidate) {
     uint32_t nl = 0;
     vkEnumerateInstanceLayerProperties(&nl, nullptr);
     std::vector<VkLayerProperties> lp(nl);
@@ -576,7 +583,7 @@ bool init(const char *title, uint32_t width, uint32_t height) {
   // Prefer a real GPU over the llvmpipe software rasteriser (type CPU) among
   // the devices that can both render and present; discrete > integrated >
   // virtual > CPU. DELTA_VK_GPU=<name-substring> forces a specific device.
-  const char *want = SDL_getenv("DELTA_VK_GPU");
+  const char *want = kVkGpu;
   bool found = false;
   int best = -1;
   for (auto pd : phs) {

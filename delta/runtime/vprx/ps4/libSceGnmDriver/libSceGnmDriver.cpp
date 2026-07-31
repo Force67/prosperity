@@ -26,6 +26,13 @@
 #include <cstdlib>
 
 #include "gpu/ps4/cmd_processor.h"
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(bool, kDingDong, "DELTA_GPU_DINGDONG", false);
+DELTA_OPTION(bool, kGcSubmit, "DELTA_GC_SUBMIT", false);
+DELTA_OPTION(bool, kPm4dump, "DELTA_PM4DUMP", false);
+}  // namespace
 
 // VideoOut HLE flip bridge (same delta_runtime library).
 extern "C" void prosperity_videoout_set_flip(int bufferIndex, int64_t flipArg);
@@ -69,9 +76,8 @@ extern "C" void prosperity_gc_submit(const void *descArray, uint32_t descCount) 
                    descArray, descCount);
     return;
   }
-  static const bool traceSubmit = std::getenv("DELTA_GC_SUBMIT") != nullptr;
   static int submitDumps = 0;
-  const bool dumpThis = traceSubmit && submitDumps++ < 12;
+  const bool dumpThis = kGcSubmit && submitDumps++ < 12;
   if (dumpThis)
     std::fprintf(stderr, "[gc] submit descArray=%p count=%u\n", descArray,
                  descCount);
@@ -131,7 +137,6 @@ namespace {
 // Env-gated PM4 dump (DELTA_PM4DUMP=1): walk the dcb type-3 packets and tally
 // the IT opcodes so we can see what the title actually submits. Guest GPU
 // addresses are identity-mapped, so the dcb is directly readable on the host.
-const bool g_pm4Dump = std::getenv("DELTA_PM4DUMP") != nullptr;
 int g_pm4Frames = 0;
 
 const char *itName(uint32_t op) {
@@ -161,7 +166,7 @@ const char *itName(uint32_t op) {
 }
 
 void dumpPm4(void **dcbGpuAddrs, uint32_t *dcbSizes, uint32_t count) {
-  if (!g_pm4Dump || g_pm4Frames > 3 || !dcbGpuAddrs || !dcbSizes)
+  if (!kPm4dump || g_pm4Frames > 3 || !dcbGpuAddrs || !dcbSizes)
     return;
   g_pm4Frames++;
   for (uint32_t b = 0; b < count; b++) {
@@ -251,7 +256,7 @@ int PS4ABI sceGnmAreSubmitsAllowed() { return 1; }
 
 int PS4ABI sceGnmDingDong(uint32_t ringId, uint32_t offset) {
   static int n = 0;
-  if (std::getenv("DELTA_GPU_DINGDONG") && n++ < 20)
+  if (kDingDong && n++ < 20)
     std::fprintf(stderr, "[gnm] sceGnmDingDong ring=%u offset=%#x\n", ringId, offset);
   return 0;
 }

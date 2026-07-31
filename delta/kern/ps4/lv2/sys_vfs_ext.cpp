@@ -24,6 +24,14 @@
 #include "kern/vfs.h"
 #include "sys_vfs.h" // sys_open (sys_openat delegates to it)
 #include "sys_vfs_ext.h"
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(bool, kQarBuf, "DELTA_QARBUF", false);
+DELTA_OPTION(bool, kIoprogress, "DELTA_IOPROGRESS", false);
+DELTA_OPTION(bool, kRdall, "DELTA_RDALL", false);
+DELTA_OPTION(bool, kVfsTrace, "DELTA_VFS_TRACE", false);
+}  // namespace
 
 namespace krnl {
 
@@ -142,7 +150,7 @@ void markQarFd(uint32_t fd, bool v) {
 int64_t PS4ABI sys_pread(uint32_t fd, void *buf, size_t nbytes, int64_t offset) {
   auto *d = fdToDevice(fd);
   if (!d) {
-    if (std::getenv("DELTA_RDALL"))
+    if (kRdall)
       std::fprintf(stderr, "[pread] fd=%u off=%lld -> EBADF (no device)\n", fd, (long long)offset);
     return -SysError::eBADF;
   }
@@ -151,7 +159,7 @@ int64_t PS4ABI sys_pread(uint32_t fd, void *buf, size_t nbytes, int64_t offset) 
   int64_t r = d->read(buf, nbytes);
   if (saved >= 0)
     d->lseek(saved, kSeekSet);
-  if (std::getenv("DELTA_RDALL")) {
+  if (kRdall) {
     uint32_t f4 = 0;
     if (buf && r >= 4) f4 = *reinterpret_cast<const uint32_t *>(buf);
     std::fprintf(stderr, "[pread] t=%ld fd=%u off=%lld nbytes=%#zx -> %lld buf=%p first4=%08x\n",
@@ -161,7 +169,7 @@ int64_t PS4ABI sys_pread(uint32_t fd, void *buf, size_t nbytes, int64_t offset) 
   // buffer for reads on a *.qar fd, so we can tell whether textures stream into
   // a GPU-mapped region (0x81xx, directly bindable) or a low staging buffer that
   // still needs a copy/commit step the engine never performs.
-  if (fd < 8192 && g_qarFd[fd] && std::getenv("DELTA_QARBUF")) {
+  if (fd < 8192 && g_qarFd[fd] && kQarBuf) {
     std::fprintf(stderr,
                  "[qarbuf] fd=%u off=%lld nbytes=%#zx -> %lld buf=%p\n", fd,
                  (long long)offset, (size_t)nbytes, (long long)r, buf);
@@ -171,7 +179,7 @@ int64_t PS4ABI sys_pread(uint32_t fd, void *buf, size_t nbytes, int64_t offset) 
   // (offset climbing) or has completed/stalled, without the DELTA_RDALL firehose.
   // At most one line per fd per ~2 s; prints the current + max offset and MB/s since
   // the last line so a long headless load can be tracked to completion.
-  if (std::getenv("DELTA_IOPROGRESS")) {
+  if (kIoprogress) {
     // maxOff/lastMax = streaming high-water. nNew/nReread since last line tell
     // whether the FIOS2 streamer is fetching NEW file bytes (nNew climbing,
     // offset+r > previous max) or RE-READING already-covered blocks (nReread) --
@@ -373,7 +381,7 @@ int PS4ABI sys_mkdir(const char *path, uint32_t mode) {
   // no-op success as before (the read-only host content the game expects to
   // exist already does).
   if (path && vfs::makeDir(path)) {
-    if (std::getenv("DELTA_VFS_TRACE"))
+    if (kVfsTrace)
       std::fprintf(stderr, "[vfs] mkdir('%s') -> host\n", path);
     return 0;
   }
@@ -393,14 +401,14 @@ int64_t PS4ABI sys_getdirentries(uint32_t fd, void *buf, size_t nbytes,
                                  int64_t *basep) {
   auto *d = fdToDevice(fd);
   if (!d) {
-    if (std::getenv("DELTA_VFS_TRACE"))
+    if (kVfsTrace)
       std::fprintf(stderr, "[getdirentries] fd=%u BADF\n", fd);
     return -SysError::eBADF;
   }
   // basep is an in/out seek cookie; the dir device tracks its own cursor, so we
   // leave whatever the caller passed untouched.
   int64_t r = d->getdents(buf, nbytes);
-  if (std::getenv("DELTA_VFS_TRACE"))
+  if (kVfsTrace)
     std::fprintf(stderr, "[getdirentries] fd=%u buf=%p n=%zu -> %lld\n", fd, buf,
                  nbytes, (long long)r);
   return r;

@@ -8,6 +8,11 @@
 
 #include "kern/proc.h"
 #include "kern/ps4/lv2/sys_mem.h"
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(const char *, kCtorPrepend, "DELTA_PS5_CTOR_PREPEND", nullptr);
+}  // namespace
 
 namespace krnl::ps5 {
 
@@ -18,7 +23,7 @@ namespace krnl::ps5 {
 // into). Point the lea one slot higher and park our function there: it then runs
 // first, before every real static initializer, and the list itself is untouched.
 void maybePrependCtor(proc &p) {
-  const char *e = std::getenv("DELTA_PS5_CTOR_PREPEND");
+  const char *e = kCtorPrepend;
   if (!e || p.getPlatform() != proc::platform::ps5)
     return;
   const uint64_t off = std::strtoull(e, nullptr, 16);

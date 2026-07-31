@@ -3,6 +3,7 @@
 #include <base.h>
 #include <logger/logger.h>
 #include <utl/mem.h>
+#include <utl/options.h>
 #include <utl/path.h>
 #if defined(DELTA_BACKEND_NATIVE)
 #include <xbyak_util.h>
@@ -127,6 +128,9 @@ static void win32PostInit() {
 
 EXPORT int dcoreMain(int argc, char **argv) {
   utl::createLogger(true);
+  // Before anything else: every subsystem below reads its knobs from here, and
+  // most latch the value the first time they run.
+  utl::initOptions(argc, argv);
   // Bring the render Vulkan device up NOW, before any guest memory is mapped:
   // initialized lazily (first Gnm submit), the NVIDIA driver fails its
   // in-process setup once the guest's huge MAP_FIXED mappings exist

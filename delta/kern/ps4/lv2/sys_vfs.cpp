@@ -39,14 +39,24 @@
 #include "sys_vfs.h"
 
 #include <utl/object_ref.h>
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(bool, kManifestSeq, "DELTA_MANIFEST_SEQ", false);
+DELTA_OPTION(bool, kFdStats, "DELTA_FD_STATS", false);
+DELTA_OPTION(bool, kFstatTrace, "DELTA_FSTAT_TRACE", false);
+DELTA_OPTION(bool, kOpenCaller, "DELTA_OPEN_CALLER", false);
+DELTA_OPTION(bool, kRdall, "DELTA_RDALL", false);
+DELTA_OPTION(bool, kReadTrace, "DELTA_READ_TRACE", false);
+DELTA_OPTION(bool, kVfsTrace, "DELTA_VFS_TRACE", false);
+}  // namespace
 
 namespace krnl {
 // Scan the (guest) stack for the first return address inside any guest module's
 // .text and print it as <module>+offset, to pin which guest code issued an open.
 // Native backend runs handlers on the guest stack. Gated; for tracing loops.
 static void printOpenCaller(const char *path) {
-  static const bool on = std::getenv("DELTA_OPEN_CALLER") != nullptr;
-  if (!on)
+  if (!kOpenCaller)
     return;
   auto *proc = proc::getActive();
   if (!proc)
@@ -102,8 +112,7 @@ int PS4ABI sys_open(const char *path, uint32_t flags, uint32_t mode) {
   if (!path)
     return -SysError::eINVAL;
 
-  static const bool vtrace = std::getenv("DELTA_VFS_TRACE") != nullptr;
-  if (vtrace)
+  if (kVfsTrace)
     std::fprintf(stderr, "[open] %s flags=%#x mode=%#x\n", path, flags, mode);
   if (std::strstr(path, ".psarc"))
     printOpenCaller(path);
@@ -144,12 +153,12 @@ int PS4ABI sys_open(const char *path, uint32_t flags, uint32_t mode) {
     if (vfs::listDir(path, entries)) {
       const size_t n = entries.size();
       auto *dir = new dirDevice(proc::getActive(), std::move(entries));
-      if (vtrace)
+      if (kVfsTrace)
         std::fprintf(stderr, "[open]   -> dir fd=%u entries=%zu %s\n",
                      dir->handle(), n, path);
       return dir->handle();
     }
-    if (vtrace)
+    if (kVfsTrace)
       std::fprintf(stderr, "[open]   -> dir ENOENT %s\n", path);
     return -SysError::eNOENT;
   }
@@ -166,7 +175,7 @@ int PS4ABI sys_open(const char *path, uint32_t flags, uint32_t mode) {
       auto *file = new fileDevice(proc::getActive());
       if (file->openWritable(host, (flags & O_CREAT) != 0,
                              (flags & O_TRUNC) != 0)) {
-        if (vtrace)
+        if (kVfsTrace)
           std::fprintf(stderr, "[open]   -> writable fd=%u %s\n",
                        file->handle(), host.c_str());
         return file->handle();
@@ -179,7 +188,7 @@ int PS4ABI sys_open(const char *path, uint32_t flags, uint32_t mode) {
   // Regular file: resolve through the VFS (host + virtual mounts).
   utl::File vf = vfs::openRead(path);
   if (!vf.Exists()) {
-    if (vtrace)
+    if (kVfsTrace)
       std::fprintf(stderr, "[open]   -> ENOENT %s\n", path);
     return -SysError::eNOENT;
   }
@@ -192,7 +201,7 @@ int PS4ABI sys_open(const char *path, uint32_t flags, uint32_t mode) {
   }
   // SOTTR's TAFS loader reads .manifest.bin with an uninitialised file offset;
   // serve those sequentially so the header (off 0) loads. See setSeqMode().
-  if (std::getenv("DELTA_MANIFEST_SEQ") && std::strstr(path, ".manifest.bin"))
+  if (kManifestSeq && std::strstr(path, ".manifest.bin"))
     file->setSeqMode();
   // Flag manifest fds so the read-request setter hook (DELTA_RDOFF_FIX) can
   // force their read offset to 0.
@@ -201,7 +210,7 @@ int PS4ABI sys_open(const char *path, uint32_t flags, uint32_t mode) {
   // Flag .qar archive fds for the DELTA_QARBUF read-destination trace.
   if (std::strstr(path, ".qar"))
     markQarFd(file->handle(), true);
-  if (vtrace)
+  if (kVfsTrace)
     std::fprintf(stderr, "[open]   -> fd=%u size=%lld %s\n", file->handle(),
                  (long long)fsize, path);
   return file->handle();
@@ -220,8 +229,7 @@ static device *fdToDevice(uint32_t fd) {
 // per-call firehose, and an opened-but-never-read asset is a strong signal that
 // whatever consumes it is stuck.
 void fdReadStat(uint32_t fd, int64_t n) {
-  static const bool on = std::getenv("DELTA_FD_STATS") != nullptr;
-  if (!on || n <= 0)
+  if (!kFdStats || n <= 0)
     return;
   static std::atomic<uint64_t> bytes[4096];
   static std::atomic<uint64_t> calls[4096];
@@ -255,7 +263,7 @@ int64_t PS4ABI sys_read(uint32_t fd, void *buf, size_t nbytes) {
     // an error return left it reading fd 2 forever at 100% CPU.
     if (fd <= 2)
       return 0;
-    if (std::getenv("DELTA_RDALL"))
+    if (kRdall)
       std::fprintf(stderr, "[rd] fd=%u -> EBADF (no device)\n", fd);
     return -SysError::eBADF;
   }
@@ -264,12 +272,10 @@ int64_t PS4ABI sys_read(uint32_t fd, void *buf, size_t nbytes) {
   // DELTA_READ_TRACE: log large reads (asset/texture loads) + their target buffer,
   // to see whether texture data lands in the GPU texture region (0x41x) directly or
   // a staging buffer the game later copies from.
-  static const bool rt = std::getenv("DELTA_READ_TRACE") != nullptr;
-  if (rt && nbytes >= 0x4000)
+  if (kReadTrace && nbytes >= 0x4000)
     std::fprintf(stderr, "[read] fd=%u buf=%p nbytes=%#zx -> %lld\n", fd, buf, nbytes,
                  (long long)r);
-  static const bool ra = std::getenv("DELTA_RDALL") != nullptr;
-  if (ra) {
+  if (kRdall) {
     uint32_t f4 = 0;
     if (buf && r >= 4) f4 = *reinterpret_cast<const uint32_t *>(buf);
     std::fprintf(stderr, "[rd] t=%ld fd=%u nbytes=%#zx -> %lld buf=%p first4=%08x\n", (long)gettid(), fd, nbytes,
@@ -327,7 +333,7 @@ static void fillStatfs(void *buf, const char *mount) {
 }
 
 int PS4ABI sys_statfs(const char *path, void *buf) {
-  if (std::getenv("DELTA_VFS_TRACE"))
+  if (kVfsTrace)
     std::fprintf(stderr, "[statfs] '%s'\n", path ? path : "(null)");
   if (!buf)
     return -SysError::eFAULT;
@@ -375,8 +381,7 @@ int PS4ABI sys_fstat(uint32_t fd, void *stat) {
       }
       return 0;
     }
-    static const bool trace = std::getenv("DELTA_FSTAT_TRACE") != nullptr;
-    if (trace) {
+    if (kFstatTrace) {
       static std::mutex m;
       static std::unordered_map<uint32_t, uint64_t> bad;
       std::lock_guard<std::mutex> lk(m);
@@ -386,7 +391,7 @@ int PS4ABI sys_fstat(uint32_t fd, void *stat) {
     return -SysError::eBADF;
   }
   int r = d->fstat(stat);
-  if (std::getenv("DELTA_RDALL") && stat)
+  if (kRdall && stat)
     std::fprintf(stderr, "[fstat] fd=%u -> st_size=%lld\n", fd,
                  (long long)static_cast<SceKernelStat *>(stat)->st_size);
   return r;
@@ -402,13 +407,13 @@ int PS4ABI sys_stat(const char *path, void *stat) {
   int64_t size = 0;
   bool isDir = false;
   if (!vfs::stat(path, size, isDir)) {
-    if (std::getenv("DELTA_RDALL"))
+    if (kRdall)
       std::fprintf(stderr, "[stat] %s -> ENOENT\n", path);
     return -SysError::eNOENT;
   }
   fillStat(*reinterpret_cast<SceKernelStat *>(stat),
            isDir ? kSceFileModeDir : kSceFileModeReg, size);
-  if (std::getenv("DELTA_RDALL"))
+  if (kRdall)
     std::fprintf(stderr, "[stat] %s -> size=%lld dir=%d\n", path,
                  (long long)size, (int)isDir);
   return 0;
@@ -438,7 +443,7 @@ int PS4ABI sys_close(uint32_t fd) {
   auto *proc = proc::getActive();
 
   if (proc && fd != -1) {
-    if (std::getenv("DELTA_RDALL"))
+    if (kRdall)
       std::fprintf(stderr, "[close] fd=%u\n", fd);
     auto *d = fdToDevice(fd);
     if (d && d->isRegularFile()) {

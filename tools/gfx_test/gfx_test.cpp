@@ -7,13 +7,17 @@
 #include <vector>
 
 #include "gfx/gfx.h"
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(uint32_t, kTestFrames, "DELTA_GFX_TEST_FRAMES", 0);
+}  // namespace
 
 int main() {
   const uint32_t W = 480, H = 270;  // a small framebuffer, scaled to the window
   // DELTA_GFX_TEST_FRAMES, if set, presents that many frames then exits;
   // otherwise runs until the window is closed.
-  const char *fenv = std::getenv("DELTA_GFX_TEST_FRAMES");
-  uint32_t maxFrames = fenv ? (uint32_t)std::atoi(fenv) : 0;
+  const uint32_t maxFrames = kTestFrames;
 
   if (!gfx::init("PS4Delta gfx test", 960, 540))
     return 1;

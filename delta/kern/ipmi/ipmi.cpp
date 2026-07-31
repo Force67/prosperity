@@ -20,6 +20,15 @@
 #include "ipmi.h"
 #include "kern/crash.h"
 #include "services.h"
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(uint32_t, kIpmiDump, "DELTA_IPMI_DUMP", 0);
+DELTA_OPTION(uint32_t, kIpmiOpDump, "DELTA_IPMI_OPDUMP", 0);
+DELTA_OPTION(uint32_t, kIpmiFailOp, "DELTA_IPMI_FAILOP", 0);
+DELTA_OPTION(bool, kIpmiHist, "DELTA_IPMI_HIST", false);
+DELTA_OPTION(bool, kIpmiTrace, "DELTA_IPMI_TRACE", false);
+}  // namespace
 
 namespace krnl::ipmi {
 namespace {
@@ -120,16 +129,14 @@ std::atomic<uint64_t> g_methodHist[64];
 std::atomic<uint32_t> g_methodId[64];
 
 bool traceOn() {
-  static const bool on = std::getenv("DELTA_IPMI_TRACE") != nullptr;
-  return on;
+  return kIpmiTrace;
 }
 
 // DELTA_IPMI_HIST: per-op and per-method call counts, dumped every 15s.
 // Deliberately lock-free: a mutex-guarded version throttled the very spin it was
 // meant to measure, so the numbers lied.
 void histogram(uint32_t op, const InvokeRequest *req) {
-  static const bool on = std::getenv("DELTA_IPMI_HIST") != nullptr;
-  if (!on)
+  if (!kIpmiHist)
     return;
   if (op < 2048)
     g_opHist[op].fetch_add(1, std::memory_order_relaxed);
@@ -183,11 +190,7 @@ void traceInvoke(uint32_t kid, const char *svc, const InvokeRequest *req,
 // request block sits on the guest stack, so scanning up from it finds the
 // callers. Bounded to a handful of hits; this is a research knob.
 void dumpInvoke(uint32_t kid, const char *svc, const InvokeRequest *req) {
-  static const uint32_t want = [] {
-    const char *e = std::getenv("DELTA_IPMI_DUMP");
-    return e ? static_cast<uint32_t>(std::strtoul(e, nullptr, 0)) : 0u;
-  }();
-  if (!want || req->methodId != want)
+  if (!kIpmiDump || req->methodId != kIpmiDump)
     return;
   static std::atomic<int> seen{0};
   if (seen.fetch_add(1) >= 2)
@@ -239,11 +242,7 @@ void dumpInvoke(uint32_t kid, const char *svc, const InvokeRequest *req) {
 // implemented instead of guessed at.
 void dumpManagerOp(uint32_t op, uint32_t kid, void *out, void *in,
                    uint64_t insize) {
-  static const uint32_t want = [] {
-    const char *e = std::getenv("DELTA_IPMI_OPDUMP");
-    return e ? static_cast<uint32_t>(std::strtoul(e, nullptr, 0)) : 0u;
-  }();
-  if (!want || op != want)
+  if (!kIpmiOpDump || op != kIpmiOpDump)
     return;
   static std::atomic<int> seen{0};
   if (seen.fetch_add(1) >= 3)
@@ -512,11 +511,7 @@ int managerCall(uint32_t op, uint32_t kid, void *out, void *in,
                    op, kid);
     dumpManagerOp(op, kid, out, in, insize);
     {
-      static const uint32_t failOp = [] {
-        const char *e = std::getenv("DELTA_IPMI_FAILOP");
-        return e ? static_cast<uint32_t>(std::strtoul(e, nullptr, 0)) : 0u;
-      }();
-      if (failOp && op == failOp)
+      if (kIpmiFailOp && op == kIpmiFailOp)
         return -1;  // leaves the wrapper's pre-set -1 result in place
     }
     setResult(0);

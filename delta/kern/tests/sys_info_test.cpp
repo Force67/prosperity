@@ -49,10 +49,8 @@ TEST(SysInfo, ReportsPs4PageSize) {
 
 TEST(SysInfo, ReportsConfiguredPs4HardwareMode) {
   const TitleAttributesScope restore_attributes;
-  const bool expect_neo_hardware = [] {
-    const char *value = std::getenv("DELTA_PS4_NEO");
-    return value && std::strtol(value, nullptr, 0) != 0;
-  }();
+  base::InitOptionsFromEnv();
+  const bool expect_neo_hardware = krnl::ps4::kNeoMode;
   const auto &profile = krnl::ps4::hardwareModeProfile();
 
   EXPECT_EQ(profile.mode, expect_neo_hardware ? krnl::ps4::HardwareMode::neo

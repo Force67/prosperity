@@ -22,6 +22,12 @@
 #include "dma_dev.h"
 #include "kern/ps4/lv2/sys_mem.h"
 #include "kern/proc.h"
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(bool, kDmemCaller, "DELTA_DMEM_CALLER", false);
+DELTA_OPTION(bool, kDmemTrace, "DELTA_DMEM_TRACE", false);
+}  // namespace
 
 namespace krnl {
 dmaDevice::dmaDevice(proc *p) : device(p) {}
@@ -180,8 +186,7 @@ uint64_t dmemBackingSize() { return kDmemTotal; }
 
 /* dmem_ioctl */
 int32_t dmaDevice::ioctl(uint32_t cmd, void *data) {
-  static const bool trace = std::getenv("DELTA_DMEM_TRACE") != nullptr;
-  if (trace) {
+  if (kDmemTrace) {
     auto *q = static_cast<uint64_t *>(data);
     std::fprintf(stderr,
                  "[dmem-ioctl] cmd=%#x data=%p [%#llx %#llx %#llx %#llx %#llx %#llx %#llx %#llx]\n",
@@ -213,7 +218,7 @@ int32_t dmaDevice::ioctl(uint32_t cmd, void *data) {
     // SCOUT (DELTA_DMEM_CALLER): on native the handler runs on the guest stack,
     // so scan it for return addresses in a loaded module's .text to pin which
     // guest code reserved this pool (e.g. the CPU heap's len constant).
-    if (std::getenv("DELTA_DMEM_CALLER")) {
+    if (kDmemCaller) {
       std::printf("[dmem-alloc] len=%#llx memType=%#llx align=%#llx caller-chain:\n",
                   (unsigned long long)len, (unsigned long long)a[4],
                   (unsigned long long)align);

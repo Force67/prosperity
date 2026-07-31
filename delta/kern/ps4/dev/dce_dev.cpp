@@ -17,6 +17,11 @@
 #include "kern/proc.h"
 #include "kern/ps4/lv2/sys_event.h"
 #include "kern/ps4/lv2/sys_mem.h"
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(bool, kDceTrace, "DELTA_DCE_TRACE", false);
+}  // namespace
 
 namespace krnl {
 dceDevice::dceDevice(proc *p) : device(p) {}
@@ -67,8 +72,7 @@ uint64_t dceScanoutBuffer(uint32_t index) {
 }
 
 static bool g_dceTrace() {
-  static const bool on = std::getenv("DELTA_DCE_TRACE") != nullptr;
-  return on;
+  return kDceTrace;
 }
 
 // The native backend runs syscall handlers on the guest stack, so the calling

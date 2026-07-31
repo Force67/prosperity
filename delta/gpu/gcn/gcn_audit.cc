@@ -14,18 +14,23 @@
 #include <unordered_map>
 
 #include "gpu/gcn/gcn_disasm.h"
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(const char*, kShAudit, "DELTA_GPU_SHAUDIT", nullptr);
+DELTA_OPTION(const char*, kShDump, "DELTA_GPU_SHDUMP", nullptr);
+}  // namespace
 
 namespace gpu::gcn {
 namespace {
 
 const char* DumpDir() {
-  static const char* dir = std::getenv("DELTA_GPU_SHDUMP");
+  const char* dir = kShDump;
   return dir && *dir ? dir : nullptr;
 }
 
 const char* AuditEnv() {
-  static const char* v = std::getenv("DELTA_GPU_SHAUDIT");
-  return v;
+  return kShAudit;
 }
 
 uint64_t Fnv1a(const void* data, size_t bytes) {

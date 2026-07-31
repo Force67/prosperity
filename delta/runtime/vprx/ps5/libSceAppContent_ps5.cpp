@@ -9,6 +9,7 @@
  * the rest of libSceAppContent stays LLE.
  */
 
+#include <base/environment_variables.h>
 #include "../vprx.h"  // PS4ABI (via <base.h>), MODULE_INIT_PS5
 
 #include <cstdint>
@@ -34,8 +35,11 @@ constexpr uint64_t kAvailableKb = 1024ull * 1024;
 constexpr char kTempPoint[] = "/temp0";
 
 std::string tempHostDir() {
-  const char *home = std::getenv("HOME");
-  std::string root = std::string(home ? home : ".") + "/.prosperity/appcontent";
+  base::StringU8 home;
+  base::GetEnvironmentVariable(u8"HOME", home);
+  std::string root =
+      std::string(home.empty() ? "." : (const char *)home.c_str()) +
+      "/.prosperity/appcontent";
   const std::string &title = krnl::vfs::titleId();
   return root + "/" + (title.empty() ? std::string("APPCONTENT") : title) +
          "/temp0";

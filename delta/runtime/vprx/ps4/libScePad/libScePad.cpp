@@ -15,6 +15,26 @@
 #include <vector>
 
 #include "gfx/gfx.h"
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(const char *, kMemWatch, "DELTA_MEMWATCH", nullptr);
+DELTA_OPTION(const char *, kMemPoke, "DELTA_MEMPOKE", nullptr);
+DELTA_OPTION(const char *, kPadScript, "DELTA_PAD_SCRIPT", nullptr);
+DELTA_OPTION(uint64_t, kAutoskipStop, "DELTA_PAD_AUTOSKIP_STOP", 0);
+DELTA_OPTION(uint64_t, kAutoskipStart, "DELTA_PAD_AUTOSKIP_START", 0);
+DELTA_OPTION(bool, kPadKeyboard, "DELTA_PAD_KEYBOARD", true);
+DELTA_OPTION(uint64_t, kExploreReads, "DELTA_PAD_EXPLORE_READS", 130);
+DELTA_OPTION(int, kExploreDir, "DELTA_PAD_EXPLORE_DIR", 0);
+DELTA_OPTION(bool, kPadAutoskip, "DELTA_PAD_AUTOSKIP", false);
+DELTA_OPTION(bool, kPadAutoskipDoom, "DELTA_PAD_AUTOSKIP_DOOM", false);
+DELTA_OPTION(bool, kPadAutoskipNav, "DELTA_PAD_AUTOSKIP_NAV", false);
+DELTA_OPTION(bool, kPadAutoskipNoopt, "DELTA_PAD_AUTOSKIP_NOOPT", false);
+DELTA_OPTION(bool, kPadAutoskipSweep, "DELTA_PAD_AUTOSKIP_SWEEP", false);
+DELTA_OPTION(bool, kPadExplore, "DELTA_PAD_EXPLORE", false);
+DELTA_OPTION(bool, kPadExploreCont, "DELTA_PAD_EXPLORE_CONT", false);
+DELTA_OPTION(bool, kPadTrace, "DELTA_PAD_TRACE", false);
+}  // namespace
 
 // HLE controller. We report a single connected DS4 on the open handle and feed
 // the game a neutral pad state (sticks centered, no buttons). With
@@ -86,7 +106,7 @@ uint64_t g_readSeq = 0;
 // guest memory is identity-mapped so a fixed VA reads as a host pointer. Started
 // once from the first pad read (guaranteed to run for any title that polls input).
 void startMemWatch() {
-  const char *e = std::getenv("DELTA_MEMWATCH");
+  const char *e = kMemWatch;
   if (!e) return;
   std::vector<uint64_t> addrs;
   for (const char *p = e; *p;) {
@@ -144,7 +164,7 @@ struct PokeSpec {
 };
 
 void startMemPoke() {
-  const char *e = std::getenv("DELTA_MEMPOKE");
+  const char *e = kMemPoke;
   if (!e) return;
   std::vector<PokeSpec> specs;
   const std::string in(e);
@@ -233,7 +253,7 @@ uint32_t scriptButtons(bool &active) {
   struct Step { uint32_t mask; uint64_t reads; };
   static const std::vector<Step> steps = [] {
     std::vector<Step> out;
-    const char *e = std::getenv("DELTA_PAD_SCRIPT");
+    const char *e = kPadScript;
     if (!e)
       return out;
     static const struct { const char *name; uint32_t mask; } kNames[] = {
@@ -304,11 +324,7 @@ uint32_t autoSkipButtons() {
   // titles (Doom64) need a few button presses to pass the login/title, but then an
   // idle-triggered attract DEMO only plays if input goes quiet -- continuous pulsing
   // suppresses it. Stop after N so login passes, then the title idles into the demo.
-  static const uint64_t stopAt = [] {
-    const char *e = std::getenv("DELTA_PAD_AUTOSKIP_STOP");
-    return e ? std::strtoull(e, nullptr, 10) : 0ull;
-  }();
-  if (stopAt && g_readSeq > stopAt)
+  if (kAutoskipStop && g_readSeq > kAutoskipStop)
     return 0;
   // DELTA_PAD_AUTOSKIP_START=N: hold neutral for the first N pad reads before any
   // pulsing. Some engines (FOX/PT) lazily construct subsystem singletons on a
@@ -317,28 +333,21 @@ uint32_t autoSkipButtons() {
   // component pointer. A warm-up delay lets init finish so the first triggered
   // transition finds a live object. Generic; the value is title/hardware-timing
   // dependent (PT: the renderer needs a few thousand reads to spin up).
-  static const uint64_t startAt = [] {
-    const char *e = std::getenv("DELTA_PAD_AUTOSKIP_START");
-    return e ? std::strtoull(e, nullptr, 10) : 0ull;
-  }();
-  if (g_readSeq < startAt)
+  if (g_readSeq < kAutoskipStart)
     return 0;
   // DELTA_PAD_AUTOSKIP_NOOPT: don't pulse Options, only Cross. The Options pulse is
   // for Isaac's "PRESS OPTIONS" title; in Undertale (and other Z-to-advance titles)
   // Options opens the config menu and derails progression, so Cross-only (= Z, the
   // confirm/advance button) drives the intro/title/dialogue straight into the game.
-  static const bool noOpt = std::getenv("DELTA_PAD_AUTOSKIP_NOOPT") != nullptr;
   // DELTA_PAD_AUTOSKIP_NAV: vertical menu navigation. Pulse Options (pass a title),
   // then Down (move the cursor down a list) interleaved with Cross (confirm). Needed
   // for titles whose default cursor is not on "New Game" (e.g. Doom64's KEX menu),
   // where Isaac's Cross-only never reaches the start entry.
-  static const bool nav = std::getenv("DELTA_PAD_AUTOSKIP_NAV") != nullptr;
   // DELTA_PAD_AUTOSKIP_SWEEP: cycle through every button (one at a time, ~40 reads
   // each with gaps for clean press edges) to discover which input advances a title
   // whose menu we cannot see. The [pad] log prints the current button so a draw-
   // count jump (level load) can be correlated to the button that caused it.
-  static const bool sweep = std::getenv("DELTA_PAD_AUTOSKIP_SWEEP") != nullptr;
-  if (sweep) {
+  if (kPadAutoskipSweep) {
     static const uint32_t btns[] = {kCross, kOptions, kCircle, kTriangle, kSquare,
                                     kDown, kUp, kLeft, kRight, kL1, kR1, kTouchPad};
     static const char *names[] = {"Cross", "Options", "Circle", "Triangle", "Square",
@@ -359,14 +368,13 @@ uint32_t autoSkipButtons() {
   // on. Crucially it must never re-press Options once in the menu (that backs
   // out, looping at the title) and never Down (the cursor defaults to "New
   // Game"). Drives title -> New Game -> skill -> level load.
-  static const bool doom = std::getenv("DELTA_PAD_AUTOSKIP_DOOM") != nullptr;
-  if (doom) {
+  if (kPadAutoskipDoom) {
     uint32_t ph = g_readSeq % 30;
     if (g_readSeq < 240) return (ph < 8) ? kOptions : 0;  // leave the title
     return (ph < 8) ? kCross : 0;                          // confirm down the menu
   }
   uint32_t phase = g_readSeq % 24;
-  if (nav) {
+  if (kPadAutoskipNav) {
     if (phase < 3) return kOptions;            // pass the "press start" title
     if (phase >= 6 && phase < 8) return kDown;  // move cursor down
     if (phase >= 11 && phase < 13) return kCross;
@@ -374,12 +382,11 @@ uint32_t autoSkipButtons() {
     if (phase >= 21 && phase < 23) return kCross;
     return 0;
   }
-  if (phase < 3) return noOpt ? kCross : kOptions;
+  if (phase < 3) return kPadAutoskipNoopt ? kCross : kOptions;
   if (phase >= 8 && phase < 11) return kCross;
   if (phase >= 16 && phase < 19) return kCross;
   return 0;
 }
-static const bool g_autoskip = std::getenv("DELTA_PAD_AUTOSKIP") != nullptr;
 
 // Adapter from the gfx pad (maps the SDL window keyboard; the Android app maps
 // the on-screen touch gamepad). On by default for interactive play; set
@@ -387,10 +394,6 @@ static const bool g_autoskip = std::getenv("DELTA_PAD_AUTOSKIP") != nullptr;
 #if defined(DELTA_ANDROID_APP)
 static const bool g_keyboard = true;
 #else
-static const bool g_keyboard = [] {
-  const char *e = std::getenv("DELTA_PAD_KEYBOARD");
-  return !e || std::strcmp(e, "0") != 0;
-}();
 #endif
 
 // Symbolic name <-> Orbis bitmask table, shared by the script parser and tracer.
@@ -461,9 +464,9 @@ void fillPadState(PadData *d) {
   uint32_t buttons = 0;
   uint8_t lx = 128, ly = 128, rx = 128, ry = 128;
   gfx::PadKeys k;
-  if (g_autoskip) {
+  if (kPadAutoskip) {
     buttons = autoSkipButtons();
-  } else if (g_keyboard && gfx::pollKeyboardPad(k)) {
+  } else if (kPadKeyboard && gfx::pollKeyboardPad(k)) {
     if (k.cross) buttons |= kCross;
     if (k.circle) buttons |= kCircle;
     if (k.square) buttons |= kSquare;
@@ -483,24 +486,20 @@ void fillPadState(PadData *d) {
   // Explore mode (DELTA_PAD_EXPLORE): once in gameplay, walk Isaac toward doors so a
   // headless run visits multiple rooms (to verify rendering beyond the start room).
   // Cycles direction every ~150 reads (up, right, down, left) on the left stick.
-  static const bool g_explore = std::getenv("DELTA_PAD_EXPLORE") != nullptr;
   static uint64_t g_firstGameplaySeq = 0;
-  if (g_explore && g_autoskip && gfx::inGameplay()) {
+  if (kPadExplore && kPadAutoskip && gfx::inGameplay()) {
     if (!g_firstGameplaySeq) g_firstGameplaySeq = g_readSeq;
     uint64_t since = g_readSeq - g_firstGameplaySeq;
     // Walk up into the adjacent room and stop near its centre (a short burst), then
     // settle (hold neutral) so a clean, non-transition frame of a non-start room can
     // be captured. Tunable via DELTA_PAD_EXPLORE_READS.
-    static const uint64_t walk = [] { const char *e = std::getenv("DELTA_PAD_EXPLORE_READS");
-      return e ? (uint64_t)std::atoll(e) : 130ull; }();
+    const uint64_t walk = kExploreReads;
     // Default walk right (the start room's exits are the side doors; up is the
     // hatch/wall). DELTA_PAD_EXPLORE_DIR: 0=right 1=left 2=up 3=down.
-    static const int dir = [] { const char *e = std::getenv("DELTA_PAD_EXPLORE_DIR");
-      return e ? std::atoi(e) : 0; }();
+    const int dir = kExploreDir;
     // Continuous mode (DELTA_PAD_EXPLORE_CONT): keep moving (circle) so Isaac dodges
     // and survives in a hostile room long enough to capture a settled non-start room.
-    static const bool cont = std::getenv("DELTA_PAD_EXPLORE_CONT") != nullptr;
-    if (cont) {
+    if (kPadExploreCont) {
       // Longer bursts (default 200 reads/dir) so Isaac actually crosses the room
       // and transits a door, not just jitter in place. Tunable via the same
       // DELTA_PAD_EXPLORE_READS knob.
@@ -511,10 +510,8 @@ void fillPadState(PadData *d) {
       if (dir==0) lx=255; else if (dir==1) lx=0; else if (dir==2) ly=0; else ly=255;
     }
   }
-  static const std::vector<ScriptStep> g_script = [] {
-    const char *e = std::getenv("DELTA_PAD_SCRIPT");
-    return e ? parseScript(e) : std::vector<ScriptStep>{};
-  }();
+  static const std::vector<ScriptStep> g_script =
+      kPadScript ? parseScript(kPadScript) : std::vector<ScriptStep>{};
   static const auto g_scriptT0 = std::chrono::steady_clock::now();
   if (!g_script.empty()) {
     double t = std::chrono::duration<double>(
@@ -523,8 +520,7 @@ void fillPadState(PadData *d) {
       if (t >= st.start && t < st.end) buttons |= st.buttons;
   }
 
-  static const bool g_trace = std::getenv("DELTA_PAD_TRACE") != nullptr;
-  if (g_trace) {
+  if (kPadTrace) {
     static uint32_t lastTraced = 0;
     static bool first = true;
     if (first || buttons != lastTraced) {
@@ -545,7 +541,7 @@ void fillPadState(PadData *d) {
   d->connected = true;
   d->connectedCount = 1;
   d->timestamp = ++g_readSeq;
-  if (g_autoskip && (g_readSeq % 600 == 1))
+  if (kPadAutoskip && (g_readSeq % 600 == 1))
     std::fprintf(stderr, "[pad] readSeq=%llu buttons=%#x\n",
                  (unsigned long long)g_readSeq, buttons);
 }

@@ -6,6 +6,11 @@
 
 #include "kern/proc.h"
 #include "kern/ps4/lv2/sys_mem.h"
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(bool, kProcparamTrace, "DELTA_PROCPARAM_TRACE", false);
+}  // namespace
 
 namespace krnl::ps5 {
 namespace {
@@ -66,7 +71,7 @@ uint64_t makeInitialTcb() {
         reinterpret_cast<uint64_t>(thread + q);
   }
 
-  if (std::getenv("DELTA_PROCPARAM_TRACE"))
+  if (kProcparamTrace)
     std::fprintf(stderr,
                  "[tcb] initial thread: tcb=%p thread=%p static-tls=%#zx\n",
                  static_cast<void *>(tcb), static_cast<void *>(thread), tls);

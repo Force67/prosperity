@@ -44,6 +44,35 @@ hardware. A title enters enhanced Neo mode only when its `param.sfo` also marks
 Neo support; that mode selects `modules/libSceGnmDriverForNeoMode.sprx` and the
 Neo shader ISA. Other titles continue to use the Base driver and ISA.
 
+## Options
+
+Every `DELTA_*` knob is a named option (`base::Option`), settable three ways.
+Later sources win:
+
+1. the environment: `DELTA_GPU_SNAP=120 ./ps4delta game.pkg`
+2. an options file: `./ps4delta game.pkg --options=minecraft.txt` (or
+   `DELTA_OPTIONS=minecraft.txt`, several files separated by commas)
+3. the command line: `./ps4delta game.pkg +DELTA_GPU_SNAP=120`
+
+An options file is one entry per line, which keeps a long debugging set in the
+repo instead of in shell history:
+
+```
+// Minecraft: what the renderer did on the way to the world screen.
++DELTA_GPU_SNAP=600          // set a value
++DELTA_GPU_SNAP_EXIT         // no value means 1 / on
+-DELTA_GPU_VSYNC             // back to the compiled-in default
++DELTA_GPU_DUMP_DIR="/tmp/mc shots"
+```
+
+Lines starting with `//` or `#` are comments, the leading `+` is optional on an
+assignment, and a name nothing recognises is reported at startup rather than
+ignored silently.
+
+`--dump-options=all.txt` writes every registered option with its current value
+and description in exactly that format, so a run can be captured as a file and
+edited from there. `--dump-options` alone logs the same to stdout.
+
 ## Headless / no display
 
 When no display is available (no `DISPLAY` / `WAYLAND_DISPLAY`), run with SDL's

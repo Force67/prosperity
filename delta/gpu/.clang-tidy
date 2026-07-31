@@ -38,7 +38,7 @@ CheckOptions:
   - key: readability-identifier-naming.ConstexprVariablePrefix
     value: 'k'
   # static-duration constants take k regardless of scope (Chromium), which
-  # covers the getenv-initialized `static const` diagnostic gates.
+  # covers the base::Option diagnostic gates.
   - key: readability-identifier-naming.StaticConstantCase
     value: CamelCase
   - key: readability-identifier-naming.StaticConstantPrefix

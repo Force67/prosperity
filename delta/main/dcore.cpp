@@ -6,6 +6,7 @@
  * in the root of the source tree.
  */
 
+#include <base/environment_variables.h>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -27,6 +28,13 @@
 #include "formats/pkg_object.h"
 #include "formats/pup_object.h"
 #include "formats/ufs2_object.h"
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(const char *, kPkgLs, "DELTA_PKG_LS", nullptr);
+DELTA_OPTION(const char *, kPkgDump, "DELTA_PKG_DUMP", nullptr);
+DELTA_OPTION(bool, kHdrFill, "DELTA_HDR_FILL", false);
+}  // namespace
 
 deltaCore::deltaCore() = default;
 deltaCore::~deltaCore() = default;
@@ -175,7 +183,7 @@ uint32_t parseSdkVersion(const std::string &s) {
 class PkgProvider : public krnl::vfs::VirtualProvider {
 public:
   explicit PkgProvider(const base::String &path) : fs_(path) {
-    if (const char *sub = std::getenv("DELTA_PKG_LS")) {
+    if (const char *sub = kPkgLs) {
       std::vector<std::string> all;
       fs_.paths(all);
       for (const auto &p : all)
@@ -185,7 +193,7 @@ public:
                        n ? (long long)n->size : -1LL, p.c_str());
         }
     }
-    if (const char *wantEnv = std::getenv("DELTA_PKG_DUMP")) {
+    if (const char *wantEnv = kPkgDump) {
       std::string list(wantEnv);
       size_t pos = 0;
       while (pos <= list.size()) {
@@ -251,7 +259,7 @@ public:
   // (e.g. "PRIORITY7_ENGLISH"), so the count-setter can fill the header buffer
   // with correct data (the engine's async manifest reader races on our threads).
   void cacheManifests() {
-    if (!std::getenv("DELTA_HDR_FILL"))
+    if (!kHdrFill)
       return;
     std::vector<std::string> all;
     fs_.paths(all);
@@ -283,7 +291,7 @@ public:
   }
   void maybeDump() {
     static bool done = false;
-    const char *want = std::getenv("DELTA_PKG_DUMP");
+    const char *want = kPkgDump;
     if (done || !want)
       return;
     done = true;
@@ -583,10 +591,13 @@ void deltaCore::boot(const base::String &xdir) {
   // plugin list into /download0/Plugins.txt, and with the write lost it boots
   // with no plugins, no archives and a null menu movie.
   if (isPkg || isFfpkg || isAppDir) {
-    const char *home = std::getenv("HOME");
+    base::StringU8 home;
+    base::GetEnvironmentVariable(u8"HOME", home);
     std::string tid = krnl::vfs::titleId();
-    std::string dl = std::string(home ? home : ".") + "/.prosperity/download/" +
-                     (tid.empty() ? std::string("UNKNOWN") : tid);
+    std::string dl =
+        std::string(home.empty() ? "." : (const char *)home.c_str()) +
+        "/.prosperity/download/" +
+        (tid.empty() ? std::string("UNKNOWN") : tid);
     krnl::vfs::mountWritable("/download0", dl.c_str());
   }
 

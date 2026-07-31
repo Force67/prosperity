@@ -20,6 +20,12 @@
 #include "kern/proc.h"
 #include "kern/ps4/lv2/sys_event.h"
 #include "kern/ps4/lv2/sys_mem.h"
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(const char *, kVoFail, "DELTA_VO_FAIL", nullptr);
+DELTA_OPTION(bool, kVoNostomp, "DELTA_VO_NOSTOMP", false);
+}  // namespace
 
 // PS5 present bridge: forwards the flip to the AGC command processor's
 // vk::endFrame (gpu/ps5/cmd_processor.cpp).
@@ -232,8 +238,7 @@ void startFlipPump() {
       // ">= submitted id" polls for HLE-only titles with no real GPU fences
       // (Isaac), but overwrites the EXACT flip-arg a real Gnm flip protocol
       // may compare against.
-      static const bool noStomp = std::getenv("DELTA_VO_NOSTOMP") != nullptr;
-      if (!noStomp)
+      if (!kVoNostomp)
         if (uint64_t *lb = videoLabels())
           for (int i = 0; i < 16; i++)
             lb[i] = c;
@@ -249,7 +254,7 @@ void startFlipPump() {
 // which real-videoout return value makes Isaac skip its command-buffer creation.
 // DELTA_VO_FAIL=open|regbuf|fliprate|addflip[:<hex retval>] (default retval -1).
 static int failInject(const char *name) {
-  const char *f = std::getenv("DELTA_VO_FAIL");
+  const char *f = kVoFail;
   if (!f || std::strncmp(f, name, std::strlen(name)) != 0)
     return 0;  // 0 = don't inject
   const char *c = std::strchr(f, ':');

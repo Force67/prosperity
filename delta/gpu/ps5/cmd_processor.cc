@@ -39,12 +39,45 @@
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(uint64_t, kBlkFrom, "DELTA_AGC_REGSTAT_FROM", 0);
+DELTA_OPTION(int, kCbTraceFrom, "DELTA_AGC_CBTRACE", -1);
+DELTA_OPTION(uint64_t, kDumpSh, "DELTA_AGC_DUMPSH", 0);
+DELTA_OPTION(uint64_t, kSkipVs, "DELTA_PS5_SKIPVS", 0);
+DELTA_OPTION(bool, kNoStickyRt, "DELTA_GPU_NOSTICKYRT", false);
+DELTA_OPTION(bool, kRecompOn, "DELTA_PS5_RECOMP", true);
+DELTA_OPTION(uint32_t, kUdBase, "DELTA_PS5_UDBASE", 8);
+DELTA_OPTION(int, kVdumpN, "DELTA_AGC_VDUMPN", 8);
+DELTA_OPTION(unsigned long, kVdumpFrom, "DELTA_AGC_VDUMPFROM", 0);
+DELTA_OPTION(uint64_t, kVdumpRt, "DELTA_AGC_VDUMPRT", 0);
+DELTA_OPTION(uint32_t, kVdumpIc, "DELTA_AGC_VDUMPIC", 0);
+DELTA_OPTION(bool, kVdumpProg, "DELTA_AGC_VDUMPPROG", false);
+DELTA_OPTION(const char*, kVdumpProj, "DELTA_AGC_VDUMPPROJ", nullptr);
+DELTA_OPTION(int, kCbFloats, "DELTA_AGC_VDUMPCB", 8);
+DELTA_OPTION(uint32_t, kOpDump, "DELTA_AGC_OPDUMP", 0xFFFF);
+DELTA_OPTION(int, kRegStat, "DELTA_AGC_REGSTAT", 0);
+DELTA_OPTION(bool, kAgcCliptrace, "DELTA_AGC_CLIPTRACE", false);
+DELTA_OPTION(bool, kAgcUdtrace, "DELTA_AGC_UDTRACE", false);
+DELTA_OPTION(bool, kAgcVdumpps, "DELTA_AGC_VDUMPPS", false);
+DELTA_OPTION(bool, kCsDump, "DELTA_GPU_CSDUMP", false);
+DELTA_OPTION(bool, kGpuDmatrace, "DELTA_GPU_DMATRACE", false);
+DELTA_OPTION(bool, kGpuDrawcensus, "DELTA_GPU_DRAWCENSUS", false);
+DELTA_OPTION(bool, kNoBlendState, "DELTA_AGC_NOBLENDSTATE", false);
+DELTA_OPTION(bool, kNoCopy, "DELTA_GPU_NODMACOPY", false);
+DELTA_OPTION(bool, kNoCs, "DELTA_GPU_NOCS", false);
+DELTA_OPTION(bool, kNoDepth, "DELTA_GPU_NODEPTH", false);
+DELTA_OPTION(bool, kResTrace, "DELTA_GPU_CSRES", false);
+DELTA_OPTION(bool, kRtProbe, "DELTA_AGC_RTPROBE", false);
+DELTA_OPTION(bool, kTrace, "DELTA_AGC_TRACE", false);
+DELTA_OPTION(bool, kWalkStat, "DELTA_AGC_WALKSTAT", false);
+}  // namespace
 
 namespace gpu::ps5 {
 namespace {
 
 std::mutex g_mtx;
-const bool kTrace = std::getenv("DELTA_AGC_TRACE") != nullptr;
 uint64_t g_total_submits = 0;
 
 // gfx10.3 register file (persists across submits -- AGC relies on sticky
@@ -180,9 +213,8 @@ inline uint32_t RegSpaceLimit(uint32_t base) {
 // grading pass reads a texture descriptor from s16..s23, and if nothing in the
 // command stream programs those the shader samples whatever was left there.
 static void NoteUdWrite(const char* how, uint32_t reg, uint32_t val) {
-  static const bool kOn = std::getenv("DELTA_AGC_UDTRACE") != nullptr;
   static int n = 0;
-  if (kOn && n < 40 && val && reg >= mmSPI_SHADER_USER_DATA_PS_0 + 16 &&
+  if (kAgcUdtrace && n < 40 && val && reg >= mmSPI_SHADER_USER_DATA_PS_0 + 16 &&
       reg < mmSPI_SHADER_USER_DATA_PS_0 + 32) {
     n++;
     std::fprintf(stderr, "[agc] PS ud%u <- %08x by %s\n",
@@ -194,9 +226,8 @@ static void NoteUdWrite(const char* how, uint32_t reg, uint32_t val) {
 // clip-space convention lives there, and a title whose writes never reach us
 // silently gets the reset value (OpenGL clip space).
 static void NoteClipWrite(const char* how, uint32_t val) {
-  static const bool kOn = std::getenv("DELTA_AGC_CLIPTRACE") != nullptr;
   static int n = 0;
-  if (kOn && n++ < 12)
+  if (kAgcCliptrace && n++ < 12)
     std::fprintf(stderr, "[agc] CLIP_CNTL <- %#x by %s\n", val, how);
 }
 
@@ -399,7 +430,6 @@ void LoadRegPairs(uint32_t base, const uint32_t* body, uint32_t cnt) {
   // of these that bails is a whole draw's state (render target, shaders) left at
   // whatever the shadow held, which downstream looks like "the title drew
   // nothing" rather than "we dropped its state".
-  static const bool kRegStat = std::getenv("DELTA_AGC_REGSTAT") != nullptr;
   struct Stat {
     uint64_t calls, short_pkt, bad_addr, unreadable, no_pairs, applied;
   };
@@ -466,16 +496,12 @@ void LoadRegPairs(uint32_t base, const uint32_t* body, uint32_t cnt) {
   // DELTA_AGC_REGSTAT_FROM=<draw>: skip the init blocks and dump the ones a
   // steady-state frame submits, tagged with the draw they precede, so two
   // consecutive draws' state can be diffed.
-  static const uint64_t kBlkFrom = [] {
-    const char* e = std::getenv("DELTA_AGC_REGSTAT_FROM");
-    return e ? std::strtoull(e, nullptr, 0) : 0ull;
-  }();
-  if (kRegStat && std::atoi(std::getenv("DELTA_AGC_REGSTAT")) >= 2 &&
+  if (kRegStat >= 2 &&
       num_pairs >= 4 &&
       g_draws_seen.load(std::memory_order_relaxed) >= kBlkFrom) {
     // =3 trades the full dump for a compact non-zero digest of many more
     // blocks, so a whole steady-state frame's state stream fits in one run.
-    const bool digest = std::atoi(std::getenv("DELTA_AGC_REGSTAT")) >= 3;
+    const bool digest = kRegStat >= 3;
     static int full = 0;
     if (full++ < (digest ? 400 : 40)) {
       std::fprintf(stderr,
@@ -507,8 +533,6 @@ void LoadRegPairs(uint32_t base, const uint32_t* body, uint32_t cnt) {
   // pairs-20..pairs-6 carry tags 1..0xF. Requiring that keeps a block which
   // merely ENDS in some OTHER type-1 object from being read as blend state --
   // doing so zeroed the write mask and silently deleted the draw.
-  static const bool kNoBlendState =
-      std::getenv("DELTA_AGC_NOBLENDSTATE") != nullptr;
   bool tail = !kNoBlendState && base == kContextRegBase && num_pairs >= 24;
   for (uint32_t k = 0; tail && k < 15; k++) {
     const uint32_t tag = p[(num_pairs - 20 + k) * 2];
@@ -584,10 +608,6 @@ void LoadRegPairs(uint32_t base, const uint32_t* body, uint32_t cnt) {
     NoteUdWrite("SET_REG_INDIRECT", base + off, p[i * 2 + 1]);
     // DELTA_AGC_CBTRACE: every write to the colour-target base/format, with the
     // packet's own bookkeeping, so a zero write can be traced to a mis-parse.
-    static const int kCbTraceFrom = [] {
-      const char* e = std::getenv("DELTA_AGC_CBTRACE");
-      return e ? std::atoi(e) : -1;
-    }();
     static int cb_n = 0;
     const bool cb_trace =
         kCbTraceFrom >= 0 &&
@@ -747,7 +767,6 @@ void HandleDispatch(const uint32_t* body, uint32_t count) {
   const uint32_t tgid_enable = (rsrc2 >> 7) & 0x7;
   const uint32_t lds_dwords = (rsrc2 >> 15) & 0x1FF;
 
-  static const bool kCsDump = std::getenv("DELTA_GPU_CSDUMP") != nullptr;
   static std::unordered_set<uint64_t> dumped_cs;
   if (kCsDump) {
     static uint64_t n_total = 0, n_valid = 0;
@@ -820,7 +839,6 @@ void HandleDispatch(const uint32_t* body, uint32_t count) {
   }
   if (!InGuest(cs_addr) || !tgx || !tgy || !dim_x || !dim_y)
     return;
-  static const bool kNoCs = std::getenv("DELTA_GPU_NOCS") != nullptr;
   if (kNoCs || !rhi::DefaultRenderer().available() ||
       !gpu::IsReadableRange(cs_addr, kMaxShaderBytes))
     return;
@@ -871,7 +889,6 @@ void HandleDispatch(const uint32_t* body, uint32_t count) {
       reinterpret_cast<const uint32_t*>(cs_addr), ud, ud_dwords, 0);
 
   constexpr uint64_t kMaxRes = 256ull * 1024 * 1024;  // per storage buffer
-  static const bool kResTrace = std::getenv("DELTA_GPU_CSRES") != nullptr;
   bool res_ok = true;
   for (const gcn::CsResource& r : rc.resources) {
     const uint32_t dwords = r.kind == 1 ? 8u : r.kind == 2 ? 2u : 4u;
@@ -1044,13 +1061,9 @@ void HandleDispatch(const uint32_t* body, uint32_t count) {
 // Shader dumps are otherwise tied to recompile time or to a draw index, neither
 // of which is reachable for a steady-state pass without a full trace.
 void MaybeDumpShader(uint64_t addr) {
-  static const uint64_t kWant = [] {
-    const char* e = std::getenv("DELTA_AGC_DUMPSH");
-    return e ? std::strtoull(e, nullptr, 0) : 0ull;
-  }();
   static bool done = false;
   constexpr uint64_t kMaxShaderBytes = 4096 * sizeof(uint32_t);
-  if (!kWant || done || addr != kWant || !InGuest(addr) ||
+  if (!kDumpSh || done || addr != kDumpSh || !InGuest(addr) ||
       !gpu::IsReadableRange(addr, kMaxShaderBytes))
     return;
   done = true;
@@ -1093,8 +1106,7 @@ static uint32_t g_cb0_op = 0, g_cb0_val = 0;
 static uint64_t g_cb0_draw = 0;
 
 static void DrawCensus() {
-  static const bool kOn = std::getenv("DELTA_GPU_DRAWCENSUS") != nullptr;
-  if (!kOn)
+  if (!kGpuDrawcensus)
     return;
   static const bool kStarted = [] {
     std::thread([] {
@@ -1133,10 +1145,6 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
   MaybeDumpShader(vs_a);
   MaybeDumpShader(ps_a);
   // DELTA_PS5_SKIPVS=hexaddr: drop draws using this VS (draw-isolation bisect).
-  static const uint64_t kSkipVs = [] {
-    const char* e = std::getenv("DELTA_PS5_SKIPVS");
-    return e ? std::strtoull(e, nullptr, 16) : 0ull;
-  }();
   if (kSkipVs && vs_a == kSkipVs)
     return;
   const uint32_t* vud = &g_regs[mmSPI_SHADER_USER_DATA_GS_0];
@@ -1327,8 +1335,6 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
     // block zeroes CB_COLOR0 and only some passes get a re-bind), and dropping
     // them entirely is certainly wrong where reusing the target is only maybe.
     // DELTA_GPU_NOSTICKYRT restores the drop.
-    static const bool kStickyRt =
-        std::getenv("DELTA_GPU_NOSTICKYRT") == nullptr;
     static uint64_t last_base = 0;
     static uint32_t last_info = 0, last_w = 0, last_h = 0;
     if (d.mrt_count) {
@@ -1336,7 +1342,7 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
       last_info = d.mrt_info[0];
       last_w = d.rt_w;
       last_h = d.rt_h;
-    } else if (kStickyRt && (g_regs[mmCB_TARGET_MASK] & 0xF) && last_base &&
+    } else if (!kNoStickyRt && (g_regs[mmCB_TARGET_MASK] & 0xF) && last_base &&
                d.rt_w == last_w && d.rt_h == last_h) {
       d.mrt_base[0] = last_base;
       d.mrt_info[0] = last_info;
@@ -1347,7 +1353,6 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
     // CB_COLOR0_BASE. A draw with no target and a stale "last write" points at
     // a bind we never executed; one whose last write zeroed the base points at
     // a packet we execute but should not.
-    static const bool kRtProbe = std::getenv("DELTA_AGC_RTPROBE") != nullptr;
     static int s_probe = 0;
     if (kRtProbe && s_probe < 200) {
       s_probe++;
@@ -1405,7 +1410,6 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
   // state decides. 2D titles (Isaac) leave DB_Z_INFO's format field invalid so
   // depth_valid stays false and no depth attachment binds (unchanged 2D path).
   {
-    static const bool kNoDepth = std::getenv("DELTA_GPU_NODEPTH") != nullptr;
     uint32_t dc = g_regs[mmDB_DEPTH_CONTROL];
     uint32_t zinfo = kNoDepth ? 0 : g_regs[mmDB_Z_INFO];
     uint64_t zbase =
@@ -1462,10 +1466,6 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
 
   // Recompile the VS/PS pair (cached) and resolve the live vertex-attribute
   // buffers + constant buffers from the RDNA2 descriptors in user data.
-  static const bool kRecompOn = [] {
-    const char* e = std::getenv("DELTA_PS5_RECOMP");
-    return !e || std::strcmp(e, "0") != 0;
-  }();
   static uint64_t s_dl_n = 0;
   uint64_t my_draw = s_dl_n++;
   bool dl = kTrace && s_dl_n < 5000;
@@ -1539,13 +1539,9 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
       // shader SGPR N -> user_data[N-udBase] for both attrs and cbufs. Defaults
       // to 8 (the observed merged-NGG layout); DELTA_PS5_UDBASE overrides.
       // TODO: derive from RSRC2.
-      static const uint32_t kUdBaseEnv = [] {
-        const char* e = std::getenv("DELTA_PS5_UDBASE");
-        return e ? static_cast<uint32_t>(std::atoi(e)) : 8u;
-      }();
       const auto vs_resources =
           rdna::ResolveBuffers(reinterpret_cast<const uint32_t*>(vs_a), vud,
-                               gs_user_sgprs, kUdBaseEnv);
+                               gs_user_sgprs, kUdBase);
       if (dl)
         std::fprintf(stderr,
                      "[agc] DL attrs=%zu gsUd=%u res=%zu vud[0..7]=%08x %08x "
@@ -1573,8 +1569,8 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
           vb = DecodeVBuffer(resolved->second.descriptor);
           fetch_soffset = resolved->second.soffset;
         } else {
-          const uint32_t ti = a.table_sgpr >= kUdBaseEnv
-                                  ? a.table_sgpr - kUdBaseEnv
+          const uint32_t ti = a.table_sgpr >= kUdBase
+                                  ? a.table_sgpr - kUdBase
                                   : a.table_sgpr;
           if (ti + 3 >= gs_user_sgprs)
             continue;
@@ -1837,7 +1833,7 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
     // gap is attributable.
     g_drop_no_shader.fetch_add(1, std::memory_order_relaxed);
     static int shown = 0;
-    if (shown < 16 && std::getenv("DELTA_GPU_DRAWCENSUS")) {
+    if (shown < 16 && kGpuDrawcensus) {
       shown++;
       std::fprintf(
           stderr,
@@ -1856,29 +1852,13 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
   // positions are garbage (wrong format), screen-space (missing projection), or
   // clip-space (a downstream/viewport issue).
   static int s_vdump = 0;
-  static const int kVdumpN = [] {
-    const char* e = std::getenv("DELTA_AGC_VDUMPN");
-    return e ? std::atoi(e) : 8;
-  }();
   // DELTA_AGC_VDUMPFROM=N: skip the opening blits and dump the draws that
   // actually shade the frame.
-  static const unsigned long kVdumpFrom = [] {
-    const char* e = std::getenv("DELTA_AGC_VDUMPFROM");
-    return e ? std::strtoul(e, nullptr, 0) : 0ul;
-  }();
   // DELTA_AGC_VDUMPRT=<base>: only dump draws that target this render target.
   // Draw indices shift between runs; the target does not.
-  static const uint64_t kVdumpRt = [] {
-    const char* e = std::getenv("DELTA_AGC_VDUMPRT");
-    return e ? std::strtoull(e, nullptr, 0) : 0ull;
-  }();
   // DELTA_AGC_VDUMPIC=<n>: only dump draws with this index count. Draw indices
   // and render-target addresses both move between runs; an index count picks a
   // specific pass out of a frame reliably.
-  static const uint32_t kVdumpIc = [] {
-    const char* e = std::getenv("DELTA_AGC_VDUMPIC");
-    return e ? static_cast<uint32_t>(std::strtoul(e, nullptr, 0)) : 0u;
-  }();
   const uint64_t vertex_bytes =
       std::min<uint64_t>(static_cast<uint64_t>(d.vertex_stride) *
                              (d.vertex_count ? d.vertex_count : 4),
@@ -1907,15 +1887,14 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
                    d.vattrs[a].num_comps, d.vattrs[a].dfmt, d.vattrs[a].nfmt);
     // DELTA_AGC_VDUMPPROG: the decoded VS for this exact draw (shader dumps are
     // otherwise emitted once at recompile time and cannot be tied to a draw).
-    if (std::getenv("DELTA_AGC_VDUMPPROG") && InGuest(vs_a)) {
-      const bool want_ps = std::getenv("DELTA_AGC_VDUMPPS") != nullptr;
-      const uint64_t addr = want_ps ? ps_a : vs_a;
+    if (kVdumpProg && InGuest(vs_a)) {
+      const uint64_t addr = kAgcVdumpps ? ps_a : vs_a;
       constexpr uint64_t kMaxShaderBytes = 4096 * sizeof(uint32_t);
       if (gpu::IsReadableRange(addr, kMaxShaderBytes)) {
         const auto prog =
             rdna::DecodeShader(reinterpret_cast<const uint32_t*>(addr), 4096);
         std::fprintf(stderr, "[agc]   %s %#lx: %zu insts\n",
-                     want_ps ? "PS" : "VS", (unsigned long)addr, prog.size());
+                     kAgcVdumpps ? "PS" : "VS", (unsigned long)addr, prog.size());
         for (const auto& in : prog) {
           std::fprintf(stderr, "[agc]    pc=%04x %-6s op=%#05x %08x", in.pc,
                        kEncName[static_cast<uint32_t>(in.enc) < 19
@@ -1975,7 +1954,7 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
     // DELTA_AGC_VDUMPPROJ=<world binding>:<vp binding>:<vp dword> names the
     // matrices, since a cbuffer window holds several and only the shader knows
     // which (read it off the SPIR-V's sgpr <- cbuf loads).
-    if (const char* proj_env = std::getenv("DELTA_AGC_VDUMPPROJ");
+    if (const char* proj_env = kVdumpProj;
         proj_env && d.num_vattrs && d.vertex_data) {
       uint32_t wb = 1, vb2 = 2, vdw = 32;
       std::sscanf(proj_env, "%u:%u:%u", &wb, &vb2, &vdw);
@@ -2014,10 +1993,6 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
     // DELTA_AGC_VDUMPCB=<n>: how many floats of each bound cbuffer to print.
     // The default shows the head; a transform hides further in (48-dword
     // windows hold several matrices).
-    static const int kCbFloats = [] {
-      const char* e = std::getenv("DELTA_AGC_VDUMPCB");
-      return e ? std::atoi(e) : 8;
-    }();
     for (uint32_t b = 0; b < d.num_cbufs; b++) {
       const int n = std::min<int>(kCbFloats, d.cbufs[b].size / 4);
       if (n <= 0 || !gpu::IsReadableRange(d.cbufs[b].base, n * sizeof(float)))
@@ -2100,8 +2075,6 @@ void Walk(const uint32_t* p, uint32_t words, bool dump_this, int depth) {
         // DELTA_AGC_WALKSTAT: a packet whose count runs past the buffer means
         // we mis-parsed something earlier; the walker resyncs a dword at a time
         // and every packet in between is lost.
-        static const bool kWalkStat =
-            std::getenv("DELTA_AGC_WALKSTAT") != nullptr;
         static uint64_t resyncs = 0;
         if (kWalkStat && (++resyncs % 500) == 1)
           std::fprintf(stderr,
@@ -2116,10 +2089,6 @@ void Walk(const uint32_t* p, uint32_t words, bool dump_this, int depth) {
       // it occurs. The submit-level trace only dumps early init submits, so a
       // packet that only appears in steady-state frames is otherwise invisible.
       {
-        static const uint32_t kOpDump = [] {
-          const char* e = std::getenv("DELTA_AGC_OPDUMP");
-          return e ? (uint32_t)std::strtoul(e, nullptr, 16) : 0xFFFFu;
-        }();
         static int shown = 0;
         if (op == kOpDump && shown < 12) {
           shown++;
@@ -2262,8 +2231,6 @@ void Walk(const uint32_t* p, uint32_t words, bool dump_this, int depth) {
             uint32_t bytes = body[5] & 0x1FFFFF;
             const bool src_mem = (src_sel == 0 || src_sel == 3);
             const bool dst_mem = (dst_sel == 0 || dst_sel == 3);
-            static const bool kNoCopy =
-                std::getenv("DELTA_GPU_NODMACOPY") != nullptr;
             auto mem_ok = [](uint64_t a) {
               return a >= 0x1000000ull && a < 0x20000000000ull;
             };
@@ -2284,7 +2251,7 @@ void Walk(const uint32_t* p, uint32_t words, bool dump_this, int depth) {
                 p32[k] = fill;
               rhi::NoteMemoryFill(rhi::DefaultRenderer(), dst, bytes, fill);
             }
-            if (std::getenv("DELTA_GPU_DMATRACE")) {
+            if (kGpuDmatrace) {
               static int dmn = 0;
               if (dmn++ < 60)
                 std::fprintf(stderr,

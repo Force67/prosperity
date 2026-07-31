@@ -19,12 +19,17 @@ constexpr int32_t kBsdSockDgram = 2;
 }  // namespace
 #include "kern/crash.h"
 #include <cstring>
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(bool, kNetTrace, "DELTA_NET_TRACE", false);
+}  // namespace
 
 namespace krnl {
 int PS4ABI sys_netcontrol(uint32_t fd, uint32_t op, void* buffer,
         uint32_t size) {
 
-    if (std::getenv("DELTA_NET_TRACE"))
+    if (kNetTrace)
       std::fprintf(stderr, "[netctl] fd=%d op=%#x buf=%p size=%u\n", (int)fd,
                    op, buffer, size);
 

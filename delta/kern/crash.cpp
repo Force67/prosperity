@@ -29,6 +29,19 @@
 #include "vfs.h"
 #include "cpu/cpu_backend.h"
 #include <logger/logger.h>
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(uintptr_t, kBrkTrace, "DELTA_GUEST_BRK_TRACE", 0);
+DELTA_OPTION(const char *, kBrkDump, "DELTA_GUEST_BRK_DUMP", nullptr);
+DELTA_OPTION(const char *, kCrashPeek, "DELTA_CRASH_PEEK", nullptr);
+DELTA_OPTION(bool, kCntClamp, "DELTA_CNT_CLAMP", false);
+DELTA_OPTION(bool, kHdrFill, "DELTA_HDR_FILL", false);
+DELTA_OPTION(bool, kHdrWait, "DELTA_HDR_WAIT", false);
+DELTA_OPTION(bool, kPs5Dcbforce, "DELTA_PS5_DCBFORCE", false);
+DELTA_OPTION(bool, kRdoffNofix, "DELTA_RDOFF_NOFIX", false);
+DELTA_OPTION(bool, kRdoffTrace, "DELTA_RDOFF_TRACE", false);
+}  // namespace
 
 namespace krnl {
 const char *syscall_getname(uint32_t idx); // name_table.cpp
@@ -446,10 +459,7 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
   // SnapshotByteSource position at rdi+0x3c, so each record says which bytecode
   // ran and how many stream bytes the previous one consumed.
   if (sig == SIGILL && ucv) {
-    static const uintptr_t site = [] {
-      const char *e = std::getenv("DELTA_GUEST_BRK_TRACE");
-      return e ? std::strtoull(e, nullptr, 16) : 0ull;
-    }();
+    const uintptr_t site = kBrkTrace;
     if (site) {
       auto *uc = static_cast<ucontext_t *>(ucv);
       auto *gr = uc->uc_mcontext.gregs;
@@ -490,7 +500,7 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
       // success (SCE_OK) so the run-once init 0x69e720 completes and the engine
       // creates its DrawCommandBuffer -- lets us measure how far the boot gets
       // when the (obfuscated) libSceAgc call is treated as succeeding.
-      static const int force = std::getenv("DELTA_PS5_DCBFORCE") != nullptr;
+      static const int force = kPs5Dcbforce;
       if (force && eax) {
         gr[REG_RAX] = 0;
         eax = 0;
@@ -621,7 +631,7 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
     if ((uintptr_t)gr[REG_RIP] == g_rdoffAddr + 1) {
       uint32_t fd = (uint32_t)gr[REG_RSI];
       bool mf = (fd < 8192 && g_manifestFd[fd]);
-      if (std::getenv("DELTA_RDOFF_TRACE")) {
+      if (kRdoffTrace) {
         char m[128];
         int n = std::snprintf(m, sizeof(m),
                               "[rdoff] fd=%u off=%lld nbytes=%lld buf=%llx manifest=%d\n",
@@ -631,8 +641,7 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
         if (n > 0) { ssize_t w = write(2, m, (size_t)n); (void)w; }
       }
       // DELTA_RDOFF_NOFIX: observe-only (log requests, don't rewrite offsets).
-      static const bool nofix = std::getenv("DELTA_RDOFF_NOFIX") != nullptr;
-      if (mf && !nofix)
+      if (mf && !kRdoffNofix)
         gr[REG_RDX] = 0;  // force manifest read offset to 0 (read from start)
       gr[REG_RSP] -= 8;   // emulate push rbp
       *reinterpret_cast<uint64_t *>(gr[REG_RSP]) = (uint64_t)gr[REG_RBP];
@@ -656,8 +665,7 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
         // DELTA_HDR_WAIT: test the producer-consumer-race hypothesis. If the
         // manifest header buffer isn't filled yet (magic != "TAFS"), block this
         // (consumer) thread to let the worker thread's read+copy complete.
-        static const bool waitMode = std::getenv("DELTA_HDR_WAIT") != nullptr;
-        if (waitMode && hdr >= 0x10000) {
+        if (kHdrWait && hdr >= 0x10000) {
           for (int i = 0; i < 2000; i++) {
             if (*reinterpret_cast<volatile uint32_t *>(hdr) == 0x53464154u)
               break;
@@ -677,8 +685,7 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
         // DELTA_HDR_FILL: bypass the racy async manifest reader by copying the
         // real (cached) manifest bytes straight into the header buffer, so the
         // count-setter reads the correct count + entry table for THIS archive.
-        static const bool fill = std::getenv("DELTA_HDR_FILL") != nullptr;
-        if (fill && hdr >= 0x10000 && nm[0]) {
+        if (kHdrFill && hdr >= 0x10000 && nm[0]) {
           auto *h = reinterpret_cast<uint8_t *>(hdr);
           // The header buffer [parent+0x8] is allocated filesize (at 0x605e30),
           // so fill the WHOLE manifest at every consumer hook -- both the header
@@ -774,8 +781,7 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
       // DELTA_CNT_CLAMP: experiment - if the entry count is absurd (uninitialised
       // garbage), force it to 0 so the entry-table alloc is tiny and the boot can
       // proceed past the OOM to reveal the next blocker.
-      static const bool clamp = std::getenv("DELTA_CNT_CLAMP") != nullptr;
-      if (clamp && obj >= 0x10000 && cnt > 0x100000)
+      if (kCntClamp && obj >= 0x10000 && cnt > 0x100000)
         *reinterpret_cast<uint32_t *>(obj + 0x30) = 0;
       gr[REG_RSP] -= 8;
       *reinterpret_cast<uint64_t *>(gr[REG_RSP]) = (uint64_t)gr[REG_RBP];
@@ -1006,7 +1012,7 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
   // planted breakpoint lands where some object is about to be used, and what
   // that object POINTS AT (a byte stream, a descriptor) is the whole question --
   // registers alone say which object, not what is in it.
-  if (const char *rn = std::getenv("DELTA_GUEST_BRK_DUMP")) {
+  if (const char *rn = kBrkDump) {
     static const struct {
       const char *name;
       int idx;
@@ -1200,7 +1206,7 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
     // into loaded-module space (>= 0x2000_0000_0000). An indirect call/jmp through
     // a garbage/null vtable slot is our most common late-boot fault; seeing the
     // object bytes + where the slot points identifies the uninitialised object.
-    if (const char *pk = std::getenv("DELTA_CRASH_PEEK")) {
+    if (const char *pk = kCrashPeek) {
       const uint64_t regs[] = {g[RAX], g[RBX], g[RDI], g[RSI], g[RCX], g[RDX]};
       const char *rn[] = {"rax", "rbx", "rdi", "rsi", "rcx", "rdx"};
       for (int r = 0; r < 6; r++) {
@@ -1251,7 +1257,7 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
     // inside a leaf helper (e.g. a lookup that returned null) the caller's
     // locals -- the key being freed, the object under operation -- are the
     // fastest route to "what data was this actually working on".
-    if (std::getenv("DELTA_CRASH_PEEK") && g[RSP] >= 0x10000) {
+    if (kCrashPeek && g[RSP] >= 0x10000) {
       long pg = sysconf(_SC_PAGESIZE);
       unsigned char vec[2] = {0, 0};
       void *pa = reinterpret_cast<void *>(g[RSP] & ~((uint64_t)pg - 1));
@@ -1269,7 +1275,7 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
     // planted breakpoint usually lands where some object is about to be used,
     // and what that object POINTS AT (a byte stream, a descriptor) is the whole
     // question -- registers alone only say which object, not what is in it.
-    if (const char *rn = std::getenv("DELTA_GUEST_BRK_DUMP")) {
+    if (const char *rn = kBrkDump) {
       static const struct {
         const char *name;
         int idx;

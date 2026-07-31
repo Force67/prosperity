@@ -28,6 +28,11 @@
 #include <utl/mem.h>
 
 #include "kern/ps4/lv2/sys_mem.h"  // allocLowGuest
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(bool, kVoNostomp, "DELTA_VO_NOSTOMP", false);
+}  // namespace
 
 // PS5 present bridge: forwards the flip to the AGC command processor's
 // vk::endFrame (gpu/ps5/cmd_processor.cpp).
@@ -159,8 +164,7 @@ void startFlipPump() {
       // 1, then clears it again. bgfx's AGC backend spins on `*label == 1`
       // exactly, so an incrementing value satisfies it once and never again.
       // DELTA_VO_NOSTOMP leaves the labels to the title's own GPU fence writes.
-      static const bool noStomp = std::getenv("DELTA_VO_NOSTOMP") != nullptr;
-      if (!noStomp) {
+      if (!kVoNostomp) {
         uint64_t *labels = videoLabels();
         for (int i = 0; i < 16; i++) labels[i] = 1;
       }

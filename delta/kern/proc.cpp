@@ -35,6 +35,41 @@
 #include <vector>
 #include <set>
 #include <atomic>
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(const char *, kPs5Modules, "DELTA_PS5_MODULES", nullptr);
+DELTA_OPTION(const char *, kFnWatch, "DELTA_FNWATCH", nullptr);
+DELTA_OPTION(const char *, kGuestPatch, "DELTA_GUEST_PATCH", nullptr);
+DELTA_OPTION(const char *, kFnArgs, "DELTA_FNARGS", nullptr);
+DELTA_OPTION(const char *, kFiosProbe, "DELTA_FIOS_PROBE", nullptr);
+DELTA_OPTION(bool, kVoForceConnect, "DELTA_VO_FORCE_CONNECT", false);
+DELTA_OPTION(const char *, kVoPatch, "DELTA_VO_PATCH", nullptr);
+DELTA_OPTION(const char *, kTrapVaddr, "DELTA_TRAP_VADDR", nullptr);
+DELTA_OPTION(const char *, kAllocTrace, "DELTA_ALLOC_TRACE", nullptr);
+DELTA_OPTION(const char *, kHeapProf, "DELTA_HEAP_PROF", nullptr);
+DELTA_OPTION(const char *, kCntTrace, "DELTA_CNT_TRACE", nullptr);
+DELTA_OPTION(const char *, kFatalTrace, "DELTA_FATAL_TRACE", nullptr);
+DELTA_OPTION(const char *, kHdrTrace, "DELTA_HDR_TRACE", nullptr);
+DELTA_OPTION(const char *, kRdoffFix, "DELTA_RDOFF_FIX", nullptr);
+DELTA_OPTION(const char *, kSkipFn, "DELTA_SKIP_FN", nullptr);
+DELTA_OPTION(bool, kFiosAllopen, "DELTA_FIOS_ALLOPEN", false);
+DELTA_OPTION(bool, kFiosTrace, "DELTA_FIOS_TRACE", false);
+DELTA_OPTION(bool, kGfxctxWatch, "DELTA_GFXCTX_WATCH", false);
+DELTA_OPTION(bool, kJobTrace, "DELTA_JOB_TRACE", false);
+DELTA_OPTION(bool, kJobTraceClaim, "DELTA_JOB_TRACE_CLAIM", false);
+DELTA_OPTION(bool, kPs5Dcbwatch, "DELTA_PS5_DCBWATCH", false);
+DELTA_OPTION(bool, kPs5Glyphguard, "DELTA_PS5_GLYPHGUARD", false);
+DELTA_OPTION(bool, kPs5Noforce, "DELTA_PS5_NOFORCE", false);
+DELTA_OPTION(bool, kSotcForcePayload, "DELTA_SOTC_FORCE_PAYLOAD", false);
+DELTA_OPTION(bool, kSotcForceWorlddone, "DELTA_SOTC_FORCE_WORLDDONE", false);
+DELTA_OPTION(bool, kSotcJobfix, "DELTA_SOTC_JOBFIX", false);
+DELTA_OPTION(bool, kSotcJobmove, "DELTA_SOTC_JOBMOVE", false);
+DELTA_OPTION(bool, kSotcSkipWorldwait, "DELTA_SOTC_SKIP_WORLDWAIT", false);
+DELTA_OPTION(bool, kVoOplog, "DELTA_VO_OPLOG", false);
+DELTA_OPTION(bool, kVoSkip580, "DELTA_VO_SKIP_580", false);
+DELTA_OPTION(bool, kVoWatch, "DELTA_VO_WATCH", false);
+}  // namespace
 
 namespace krnl {
 static proc *g_activeProc{nullptr};
@@ -70,7 +105,7 @@ bool proc::create(const base::String &path, bool fromVfs) {
   modules.emplace_back(first);
 
   const bool ps5 = plat == platform::ps5;
-  if (ps5 && !std::getenv("DELTA_PS5_MODULES"))
+  if (ps5 && !kPs5Modules)
     LOG_WARNING("PS5 title but DELTA_PS5_MODULES is unset; system modules "
                 "(libkernel etc.) won't be found");
 
@@ -105,7 +140,7 @@ bool proc::create(const base::String &path, bool fromVfs) {
     // DELTA_PS5_GLYPHGUARD: recover the first-frame unbound-font null derefs in
     // the UI/text renderer so the render reaches real draws (diagnostic; the real
     // fix binds the font before rendererFrame).
-    if (std::getenv("DELTA_PS5_GLYPHGUARD")) {
+    if (kPs5Glyphguard) {
       auto *base8 = first->getInfo().base;
       auto eb = reinterpret_cast<uintptr_t>(base8);
       // movzx esi,[rdi+rcx*2+0x2e] (glyph cmap count), rdi==0
@@ -125,7 +160,7 @@ bool proc::create(const base::String &path, bool fromVfs) {
       // (null pipelines / zero shader PGM). Test whether it succeeds naturally.
       struct { uint32_t off; uint8_t b1; } gates[] = {
           {0x553602, 0x59}, {0x553612, 0x49}, {0x553622, 0x39}};
-      bool noForce = std::getenv("DELTA_PS5_NOFORCE") != nullptr;
+      bool noForce = kPs5Noforce;
       for (auto &g : gates) {
         if (noForce) break;
         uint8_t *c = base8 + g.off;
@@ -162,7 +197,7 @@ bool proc::create(const base::String &path, bool fromVfs) {
 // eboot base. The crash-handler counts hits and a printer thread logs totals every
 // 2s (see crash.h). Generic; used to probe which functions in a stuck pipeline run.
 static void investigateFnWatch(smodule &m) {
-  const char *e = std::getenv("DELTA_FNWATCH");
+  const char *e = kFnWatch;
   if (!e)
     return;
   uint8_t *base = m.getInfo().base;
@@ -202,7 +237,7 @@ static void investigateFnWatch(smodule &m) {
 // offset. For bisecting a wedge: NOP out a poll and see whether the thread behind
 // it is the only thing blocked, without waiting for the real fix.
 static void applyGuestPatches(smodule &m) {
-  const char *e = std::getenv("DELTA_GUEST_PATCH");
+  const char *e = kGuestPatch;
   if (!e)
     return;
   uint8_t *base = m.getInfo().base;
@@ -236,7 +271,7 @@ static void applyGuestPatches(smodule &m) {
 // entry (first byte must be push rbp) that logs rdi and walks the offset chain
 // from it. See setFnArgs in crash.h.
 static void investigateFnArgs(smodule &m) {
-  const char *e = std::getenv("DELTA_FNARGS");
+  const char *e = kFnArgs;
   if (!e)
     return;
   uint8_t *base = m.getInfo().base;
@@ -290,7 +325,7 @@ static void forceSotcPayload(smodule &m) {
     utl::protectMem(reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(p) & ~0xFFFull),
                     0x1000, utl::pageProtection::rwx);
   };
-  if (std::getenv("DELTA_SOTC_FORCE_PAYLOAD")) {
+  if (kSotcForcePayload) {
     uint8_t *je = base + 0x14c00a;  // `74 07` je +9 (return null) in accessor 0x14c000
     rwx(je);
     if (je[0] == 0x74 && je[1] == 0x07) {
@@ -309,7 +344,7 @@ static void forceSotcPayload(smodule &m) {
   // result (`test rbx,rbx; je 0x25c253` skips world-registration). Lets boot
   // proceed past the wedge to the title/menu, skipping the (broken) precache.
   // Runtime patching EXPERIMENT (env-gated, off by default).
-  if (std::getenv("DELTA_SOTC_SKIP_WORLDWAIT")) {
+  if (kSotcSkipWorldwait) {
     uint8_t *je = base + 0x3c55fd;
     rwx(je);
     if (je[0] == 0x0f && je[1] == 0x84) {
@@ -343,7 +378,7 @@ static void forceSotcPayload(smodule &m) {
   // the game advances. Workers (0..3) and unbound threads (-1) are unchanged.
   // Patch the fn tail 0x3337f (`pop rbp; ret` + pad) in place:
   //   test eax,eax; js .r; cmp eax,4; jb .r; and eax,3; .r: pop rbp; ret
-  if (std::getenv("DELTA_SOTC_JOBFIX")) {
+  if (kSotcJobfix) {
     uint8_t *t = base + 0x3337f;
     rwx(t);
     if (t[0] == 0x5d && t[1] == 0xc3) {
@@ -361,7 +396,7 @@ static void forceSotcPayload(smodule &m) {
       LOG_WARNING("sotc jobfix: unexpected bytes at 0x3337f {:#x} {:#x}", t[0], t[1]);
     }
   }
-  if (std::getenv("DELTA_SOTC_FORCE_WORLDDONE")) {
+  if (kSotcForceWorlddone) {
     uint8_t *je = base + 0x14d768;   // 74 0d  je 0x14d777 (retry)
     uint8_t *sn = base + 0x14cf0e;   // 0f 95 c0  setne al
     rwx(je); rwx(sn);
@@ -449,11 +484,10 @@ void PS4ABI fiosTraceLogger(uint64_t hookId, uint64_t a0, uint64_t a1,
       std::call_once(probeOnce, [] { probeFiosPaths(); });
     }
     const char *path = guestStr(a2, pb, sizeof(pb));
-    static const bool allOpen = std::getenv("DELTA_FIOS_ALLOPEN") != nullptr;
     bool firstSeen = false;
     { std::lock_guard lk(g_fiosMx);
       if (g_fiosOpens.size() < 80000) g_fiosOpens.push_back({a1, std::string(path)});
-      if (allOpen) firstSeen = g_seenPaths.insert(std::string(path)).second; }
+      if (kFiosAllopen) firstSeen = g_seenPaths.insert(std::string(path)).second; }
     // DELTA_FIOS_ALLOPEN: log every DISTINCT path once (full file inventory, to
     // find whether the world-op file is ever even opened). Else sample first 40 +
     // container types.
@@ -479,7 +513,7 @@ void PS4ABI fiosTraceLogger(uint64_t hookId, uint64_t a0, uint64_t a1,
                      (unsigned long long)g_zeroSizeChurn.load());
         std::fflush(stderr);
       }
-    } else if (std::getenv("DELTA_FIOS_ALLOPEN") && (int64_t)ret > (4 << 20)) {
+    } else if (kFiosAllopen && (int64_t)ret > (4 << 20)) {
       // Large files (>4MB) are candidates for the world container; log once/fh.
       std::lock_guard lk(g_fiosMx);
       if (g_zeroSizeFh.insert(a0 ^ 0x5A5A5A5Aull).second)
@@ -528,8 +562,7 @@ void PS4ABI fiosTraceLogger(uint64_t hookId, uint64_t a0, uint64_t a1,
 // logs args+return; otherwise return realAddr unchanged. NID prefixes from the
 // SCE dynamic tables (report §10.2), cryptographically verified there.
 uintptr_t maybeWrapFiosImport(const char *nidName, uintptr_t realAddr) {
-  static const bool on = std::getenv("DELTA_FIOS_TRACE") != nullptr;
-  if (!on || !nidName || !realAddr)
+  if (!kFiosTrace || !nidName || !realAddr)
     return realAddr;
   struct { const char *nid; uint32_t hookId; const char *nm; } tbl[] = {
       {"er6TkQFUvp0", 1, "sceFiosFHOpen"},
@@ -562,7 +595,7 @@ uintptr_t maybeWrapFiosImport(const char *nidName, uintptr_t realAddr) {
 // schedule its (low-priority, retry-churning) load job. Paths are guest paths
 // like "/app0/misc/_cmn/mainmenuprecachelist.calt" (FIOS2 lowercases; $ -> /app0).
 static void probeFiosPaths() {
-  const char *e = std::getenv("DELTA_FIOS_PROBE");
+  const char *e = kFiosProbe;
   if (!e)
     return;
   std::string list(e);
@@ -675,7 +708,6 @@ void spawnJobWatcher(uint64_t base) {
   if (!once.compare_exchange_strong(expect, base))
     return;
   std::thread([base] {
-        const bool doMove = std::getenv("DELTA_SOTC_JOBMOVE") != nullptr;
         uint64_t prev[8] = {0};
         int persist = 0;
         for (;;) {
@@ -894,7 +926,7 @@ void spawnJobWatcher(uint64_t base) {
               slot[7] == prev[7];
           persist = stranded ? persist + 1 : 0;
           std::memcpy(prev, slot, sizeof(prev));
-          if (doMove && persist >= 2) {
+          if (kSotcJobmove && persist >= 2) {
             for (int i = 4; i < 8; i++) {
               if (!slot[i])
                 continue;
@@ -938,7 +970,7 @@ void installInternalHook(uint8_t *base, uint32_t off, uint32_t prologueLen,
 } // namespace
 
 static void installJobTrace(smodule &m) {
-  if (!std::getenv("DELTA_JOB_TRACE"))
+  if (!kJobTrace)
     return;
   uint8_t *base = m.getInfo().base;
   // prologue cut points (smallest instr boundary >= 14, verified by disasm):
@@ -951,12 +983,12 @@ static void installJobTrace(smodule &m) {
   // world-load drain rate -- opt in with DELTA_JOB_TRACE_CLAIM when the rates
   // are what you're after.
   installInternalHook(base, 0x36210, 15, 11, "JobSystemCtor(0x36210)");
-  if (std::getenv("DELTA_JOB_TRACE_CLAIM"))
+  if (kJobTraceClaim)
     installInternalHook(base, 0x38d40, 20, 12, "DoClaimJob(0x38d40)");
 }
 
 static void investigateDcbGate(smodule &m) {
-  if (!std::getenv("DELTA_PS5_DCBWATCH"))
+  if (!kPs5Dcbwatch)
     return;
   uint8_t *base = m.getInfo().base;
   struct { uint32_t off; const char *label; } pts[] = {
@@ -1103,7 +1135,7 @@ static void bringUpRebirthSurfaceRegistry(smodule &m) {
   // command-buffer pointer (rebirth+0x687b30, field +0x38). The both-LLE render
   // thread faults at rebirth+0x23f027 dereferencing this when it is null; this
   // shows whether/when it gets allocated. Logs every transition.
-  if (std::getenv("DELTA_GFXCTX_WATCH")) {
+  if (kGfxctxWatch) {
     auto *slot = reinterpret_cast<volatile uint64_t *>(base + 0x687b30 + 0x38);
     std::thread([slot] {
       uint64_t last = ~0ull;
@@ -1170,7 +1202,7 @@ static void bringUpRebirthEbootRegistry(smodule &m) {
 // how count[0x1cb30]/idx[0x1cb40]/cfg[*].f0[0x1cb50 stride 0x140] evolve, to pin
 // exactly what the driver fails to set (the display-connected state f0==4 Open needs).
 static void watchVideoOutState(smodule &m) {
-  if (!std::getenv("DELTA_VO_WATCH"))
+  if (!kVoWatch)
     return;
   uint8_t *base = m.getInfo().base;
   std::thread([base] {
@@ -1200,7 +1232,7 @@ static void watchVideoOutState(smodule &m) {
       // connected display: copy the populated cfg[0] slot into cfg[idx] and mark
       // it connected (f0=4). Proves the display-config mechanism end to end.
       static bool patched = false;
-      if (std::getenv("DELTA_VO_FORCE_CONNECT") && !patched && idx >= 1 &&
+      if (kVoForceConnect && !patched && idx >= 1 &&
           idx < 8 && f[0] == 0 && f[1] == 0xffffffff) {
         uint8_t *cfg0 = base + 0x1cb50;
         uint8_t *cfgi = base + 0x1cb50 + (size_t)idx * 0x140;
@@ -1233,7 +1265,7 @@ static uint64_t PS4ABI voOpMapLog(uint64_t a1, uint64_t userId, uint64_t busType
 
 static void patchVideoOutDiag(smodule &m) {
   watchVideoOutState(m);
-  if (std::getenv("DELTA_VO_OPLOG")) {
+  if (kVoOplog) {
     uintptr_t thunk = cpu::makeHostThunk(reinterpret_cast<void *>(&voOpMapLog));
     uint8_t *o = m.getInfo().base + 0x1020;
     utl::protectMem(reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(o) & ~0xFFFull),
@@ -1246,7 +1278,7 @@ static void patchVideoOutDiag(smodule &m) {
   }
   // TEST (DELTA_VO_SKIP_580): nop the `js error` after Open's `call op@0x580`
   // (config-validate op). If Open then progresses, op@0x580's return was a gate.
-  if (std::getenv("DELTA_VO_SKIP_580")) {
+  if (kVoSkip580) {
     uint8_t *c = m.getInfo().base + 0xaeb8;  // js 0xef09 after the op call
     utl::protectMem(reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(c) & ~0xFFFull),
                     0x2000, utl::pageProtection::rwx);
@@ -1257,7 +1289,7 @@ static void patchVideoOutDiag(smodule &m) {
       std::printf("[votest] op@0x580 js bytes mismatch: %#x %#x\n", c[0], c[1]);
     }
   }
-  const char *list = std::getenv("DELTA_VO_PATCH");
+  const char *list = kVoPatch;
   if (!list)
     return;
   uint8_t *base = m.getInfo().base;
@@ -1305,7 +1337,7 @@ modulePtr proc::loadModule(base::StringRef name) {
   if (plat == platform::ps5) {
     lib->getInfo().name = sname; // PS5 modules have no DT_SCE_MODULEINFO
     bool ok = false;
-    if (const char *env = std::getenv("DELTA_PS5_MODULES")) {
+    if (const char *env = kPs5Modules) {
       for (const char *p = env; *p && !ok;) {
         const char *sep = std::strchr(p, ':');
         size_t len = sep ? static_cast<size_t>(sep - p) : std::strlen(p);
@@ -1546,7 +1578,7 @@ static void applyBootPatches(proc &p) {
   // guest RIP/registers/backtrace + stack scan. Lets us capture the context of a
   // deterministic-but-hard-to-breakpoint site (e.g. a fatal-error spin) without
   // gdb, which is far too slow under the boot's threading.
-  if (const char *t = std::getenv("DELTA_TRAP_VADDR")) {
+  if (const char *t = kTrapVaddr) {
     base::String spec(t);
     char *cur = const_cast<char *>(spec.c_str());
     while (cur && *cur) {
@@ -1565,7 +1597,7 @@ static void applyBootPatches(proc &p) {
   // guest allocator whose entry (ADDR) begins with `push rbp`. Replace it with
   // int3; the fatal handler logs the size (rsi) and emulates the push. Lets us
   // see what fills a fixed heap (e.g. SOTTR's 1 GiB pool) without gdb.
-  if (const char *at = std::getenv("DELTA_ALLOC_TRACE")) {
+  if (const char *at = kAllocTrace) {
     char *end = nullptr;
     uint64_t addr = std::strtoull(at, &end, 0);
     uint64_t minB = 0x1000000;
@@ -1592,7 +1624,7 @@ static void applyBootPatches(proc &p) {
   }
   // DELTA_HEAP_PROF=0xADDR: plant int3 at an operator-new/malloc entry (push rbp,
   // size in rdi) and aggregate bytes+count by guest caller; SIGUSR1 dumps top sites.
-  if (const char *hp = std::getenv("DELTA_HEAP_PROF")) {
+  if (const char *hp = kHeapProf) {
     char *cur = const_cast<char *>(hp);
     while (cur && *cur) {
       uint64_t addr = std::strtoull(cur, &cur, 0);
@@ -1609,7 +1641,7 @@ static void applyBootPatches(proc &p) {
       while (*cur == ',' || *cur == ' ') cur++;
     }
   }
-  if (const char *ct = std::getenv("DELTA_CNT_TRACE")) {
+  if (const char *ct = kCntTrace) {
     uint64_t addr = std::strtoull(ct, nullptr, 0);
     if (addr) {
       auto *c = reinterpret_cast<uint8_t *>(addr);
@@ -1618,7 +1650,7 @@ static void applyBootPatches(proc &p) {
       if (c[0] == 0x55) { c[0] = 0xCC; setCntTrace(addr); }
     }
   }
-  if (const char *ft = std::getenv("DELTA_FATAL_TRACE")) {
+  if (const char *ft = kFatalTrace) {
     uint64_t addr = std::strtoull(ft, nullptr, 0);
     if (addr) {
       auto *c = reinterpret_cast<uint8_t *>(addr);
@@ -1627,7 +1659,7 @@ static void applyBootPatches(proc &p) {
       if (c[0] == 0x55) { c[0] = 0xCC; setFatalTrace(addr); }
     }
   }
-  if (const char *ht = std::getenv("DELTA_HDR_TRACE")) {
+  if (const char *ht = kHdrTrace) {
     // Comma-separated list of consumer entry vaddrs to hook (e.g. 0x606150,0x6063a0).
     const char *s = ht;
     while (*s) {
@@ -1643,7 +1675,7 @@ static void applyBootPatches(proc &p) {
       if (!*s || (end && *end != ',')) break;
     }
   }
-  if (const char *ro = std::getenv("DELTA_RDOFF_FIX")) {
+  if (const char *ro = kRdoffFix) {
     uint64_t addr = std::strtoull(ro, nullptr, 0);
     if (addr) {
       auto *c = reinterpret_cast<uint8_t *>(addr);
@@ -1652,7 +1684,7 @@ static void applyBootPatches(proc &p) {
       if (c[0] == 0x55) { c[0] = 0xCC; setRdoffFix(addr); }
     }
   }
-  if (const char *sf = std::getenv("DELTA_SKIP_FN")) {
+  if (const char *sf = kSkipFn) {
     const char *s2 = sf;
     while (*s2) {
       char *end = nullptr;

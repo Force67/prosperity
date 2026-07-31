@@ -11,6 +11,13 @@
 #include <cstring>
 
 #include "file_dev.h"
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(bool, kFileReadTrace, "DELTA_FILEREAD_TRACE", false);
+DELTA_OPTION(bool, kOpenTrace, "DELTA_OPEN_TRACE", false);
+DELTA_OPTION(bool, kRdall, "DELTA_RDALL", false);
+}  // namespace
 
 namespace krnl {
 void fillStat(SceKernelStat &out, uint16_t mode, int64_t size) {
@@ -92,7 +99,7 @@ int64_t fileDevice::read(void *buf, size_t n) {
   int64_t r = static_cast<int64_t>(file_.Read(buf, n));
   if (seq_ && r > 0)
     seqPos_ += static_cast<uint64_t>(r);
-  if (r >= 16 && std::getenv("DELTA_FILEREAD_TRACE")) {
+  if (r >= 16 && kFileReadTrace) {
     auto *b = static_cast<const uint8_t *>(buf);
     // TAFS manifest? dump the entry_count at +0x0c the game will read back.
     if (b[0] == 'T' && b[1] == 'A' && b[2] == 'F' && b[3] == 'S') {
@@ -122,14 +129,14 @@ int64_t fileDevice::lseek(int64_t off, int whence) {
   if (whence == 3 || whence == 4) {
     int64_t sz = static_cast<int64_t>(file_.GetSize());
     if (off < 0 || off > sz) {
-      if (std::getenv("DELTA_OPEN_TRACE"))
+      if (kOpenTrace)
         std::fprintf(stderr, "[lseek] whence=%d off=%lld sz=%lld -> ENXIO\n",
                      whence, (long long)off, (long long)sz);
       return -SysError::eNXIO;
     }
     int64_t r = (whence == 3) ? off : sz;  // SEEK_DATA: off; SEEK_HOLE: EOF
     file_.Seek(r, utl::seekMode::seek_set);
-    if (std::getenv("DELTA_OPEN_TRACE"))
+    if (kOpenTrace)
       std::fprintf(stderr, "[lseek] whence=%d off=%lld sz=%lld -> %lld\n", whence,
                    (long long)off, (long long)sz, (long long)r);
     return r;
@@ -141,7 +148,7 @@ int64_t fileDevice::lseek(int64_t off, int whence) {
     mode = utl::seekMode::seek_end;
   file_.Seek(off, mode);
   int64_t pos = static_cast<int64_t>(file_.Tell());
-  if (std::getenv("DELTA_RDALL")) {
+  if (kRdall) {
     std::fprintf(stderr, "[lseek] off=%lld whence=%d -> pos=%lld\n", (long long)off,
                  whence, (long long)pos);
     // Non-trivial seek: scan the host stack (guest runs natively) for TRAS .text
@@ -180,7 +187,7 @@ int64_t fileDevice::readAt(void *buf, size_t n, int64_t off) {
   file_.Seek(off, utl::seekMode::seek_set);
   int64_t r = static_cast<int64_t>(file_.Read(buf, n));
   file_.Seek(static_cast<int64_t>(saved), utl::seekMode::seek_set);
-  if (r >= 16 && std::getenv("DELTA_FILEREAD_TRACE")) {
+  if (r >= 16 && kFileReadTrace) {
     auto *b = static_cast<const uint8_t *>(buf);
     if (b[0] == 'T' && b[1] == 'A' && b[2] == 'F' && b[3] == 'S') {
       uint32_t cc = b[0x0c] | (b[0x0d] << 8) | (b[0x0e] << 16) | (b[0x0f] << 24);

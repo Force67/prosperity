@@ -20,6 +20,14 @@
 
 #include "kern/proc.h"
 #include "sys_event_flag.h"
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(const char *, kEvfTrace, "DELTA_EVF_TRACE", nullptr);
+DELTA_OPTION(long, kAudioMixAck, "DELTA_AUDIOMIX_ACK", -1);
+DELTA_OPTION(bool, kNoEvfGrace, "DELTA_NO_EVF_GRACE", false);
+DELTA_OPTION(bool, kWaitProbe, "DELTA_WAIT_PROBE", false);
+}  // namespace
 
 namespace krnl {
 // SCE_KERNEL_EVF_WAITMODE_*
@@ -142,7 +150,7 @@ static eventFlag *fromId(int id) {
 // name contains substr) with tid + bits, to reconstruct producer/consumer
 // interleavings (e.g. SOTTR's file-I/O channel handshake).
 static bool evfTraceOn(const eventFlag *ef, int id) {
-  static const char *filt = std::getenv("DELTA_EVF_TRACE");
+  const char *filt = kEvfTrace;
   if (!filt)
     return false;
   if (!*filt || std::strcmp(filt, "1") == 0)
@@ -259,11 +267,7 @@ int PS4ABI sys_evf_close(int id) { return sys_evf_delete(id); }
 // mixer thread cycling so its ring can be observed. 0 = free-run. This is an
 // observation aid for reverse-engineering the ring, NOT a daemon.
 static long audioMixAckUs() {
-  static const long v = [] {
-    const char *s = std::getenv("DELTA_AUDIOMIX_ACK");
-    return s ? std::strtol(s, nullptr, 0) : -1L;
-  }();
-  return v;
+  return kAudioMixAck;
 }
 
 int PS4ABI sys_evf_wait(int id, uint64_t pattern, uint32_t mode,
@@ -314,8 +318,7 @@ int PS4ABI sys_evf_trywait(int id, uint64_t pattern, uint32_t mode,
   // bounded wait for the response. Pure status pollers never set the flag
   // themselves, so they keep true poll semantics and pay nothing.
   // DELTA_NO_EVF_GRACE disables for A/B testing.
-  static const bool noGrace = std::getenv("DELTA_NO_EVF_GRACE") != nullptr;
-  if (r == -SysError::eBUSY && !noGrace &&
+  if (r == -SysError::eBUSY && !kNoEvfGrace &&
       ef->lastSetTid.load(std::memory_order_relaxed) == (long)gettid()) {
     uint32_t toUs = 250000;
     r = ef->wait(pattern, mode, &res, &toUs);
@@ -331,8 +334,7 @@ int PS4ABI sys_evf_trywait(int id, uint64_t pattern, uint32_t mode,
 // DELTA_WAIT_PROBE also tallies which flags are ever SET. A flag that threads
 // park on but nobody signals is the stall; comparing the two lists names it.
 static void evfSetTally(int id) {
-  static const bool on = std::getenv("DELTA_WAIT_PROBE") != nullptr;
-  if (!on)
+  if (!kWaitProbe)
     return;
   static std::mutex m;
   static std::unordered_map<int, uint64_t> hist;

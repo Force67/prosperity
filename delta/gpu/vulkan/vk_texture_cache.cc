@@ -26,6 +26,21 @@
 #include <cstring>
 #include <unordered_map>
 #include <unordered_set>
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(int, kForceTile, "DELTA_GPU_FORCETILE", -1);
+DELTA_OPTION(uint32_t, kDumpMin, "DELTA_GPU_TEXDUMP_MIN", 128);
+DELTA_OPTION(uint64_t, kTextureMb, "DELTA_GPU_TEX_MB", 1024);
+DELTA_OPTION(bool, kDefaultSampler, "DELTA_GPU_DEFSAMPLER", false);
+DELTA_OPTION(bool, kDumpUpload, "DELTA_GPU_TEXDUMP_UPLOAD", false);
+DELTA_OPTION(bool, kForceWhite, "DELTA_GPU_FORCEWHITE", false);
+DELTA_OPTION(bool, kNoDetile, "DELTA_GPU_NODETILE", false);
+DELTA_OPTION(bool, kTexDump, "DELTA_GPU_TEXDUMP", false);
+DELTA_OPTION(bool, kTexFail, "DELTA_GPU_TEXFAIL", false);
+DELTA_OPTION(bool, kTexMiss, "DELTA_GPU_TEXMISS", false);
+DELTA_OPTION(bool, kTexRaw, "DELTA_GPU_TEXRAW", false);
+}  // namespace
 
 namespace gpu::vk {
 
@@ -242,11 +257,7 @@ TexViewKey TextureViewKey(const TexKey& key) {
 }
 
 uint32_t TextureTiling(uint32_t tiling) {
-  static const int forced = [] {
-    const char* e = std::getenv("DELTA_GPU_FORCETILE");
-    return e ? std::atoi(e) : -1;
-  }();
-  return forced >= 0 ? static_cast<uint32_t>(forced) : tiling;
+  return kForceTile >= 0 ? static_cast<uint32_t>(kForceTile.get()) : tiling;
 }
 
 bool UploadTexPixelsImmediate(VkImage img,
@@ -452,8 +463,6 @@ VkDescriptorSet AllocateSamplerSet(VkDescriptorSetLayout layout,
 VkSampler SamplerFor(const SamplerKey& key) {
   // DELTA_GPU_DEFSAMPLER: ignore every guest S# and use the default sampler,
   // to tell a mis-decoded sampler apart from a mis-bound image.
-  static const bool kDefaultSampler =
-      std::getenv("DELTA_GPU_DEFSAMPLER") != nullptr;
   if (kDefaultSampler)
     return g_tex.sampler;
   if (!key.valid && !key.force_lod_zero && !key.depth_compare)
@@ -576,7 +585,6 @@ void PackTexPixels(uint8_t* linear,
                    uint32_t texel_w,
                    uint32_t texel_h,
                    VkBufferImageCopy* copies) {
-  static const bool kNoDetile = std::getenv("DELTA_GPU_NODETILE") != nullptr;
   const uint32_t elem = layout.elem_bytes;
   const uint8_t* src = reinterpret_cast<const uint8_t*>(base);
   uint64_t linear_offset = 0;
@@ -609,15 +617,9 @@ void PackTexPixels(uint8_t* linear,
   // receives. This differs from DELTA_GPU_TEXDUMP, which inspects raw guest
   // memory and is intentionally useful for spotting tiling rather than
   // validating the detiler.
-  static const bool kDumpUpload =
-      std::getenv("DELTA_GPU_TEXDUMP_UPLOAD") != nullptr;
   // DELTA_GPU_TEXDUMP_MIN: smallest edge to dump (default 128, i.e. content
   // atlases only). Lower it to reach the tiny nine-slice UI surfaces, which are
   // a handful of texels each and are best read as text.
-  static const uint32_t kDumpMin = [] {
-    const char* e = std::getenv("DELTA_GPU_TEXDUMP_MIN");
-    return e ? (uint32_t)std::atoi(e) : 128u;
-  }();
   static int dump_small_count = 0;
   if (kDumpUpload && dump_small_count < 24 && elem == 4 && texel_w <= 32 &&
       texel_h <= 32 && texel_w >= kDumpMin && texel_h >= kDumpMin) {
@@ -954,7 +956,6 @@ VkDescriptorSet GetTexture(uint64_t base,
   // DELTA_GPU_TEXFAIL: why a guest texture declines to upload. Skyrim's font
   // atlas fell out here and every glyph then sampled the white default, which
   // fills each glyph quad solid instead of masking it.
-  static const bool kTexFail = std::getenv("DELTA_GPU_TEXFAIL") != nullptr;
   if (!gcn::BuildTextureLayout32(layout, lw, lh, lpitch, layers, mip_levels,
                                  tiling, pow2_pad, elem_bytes)) {
     if (kTexFail) {
@@ -985,7 +986,6 @@ VkDescriptorSet GetTexture(uint64_t base,
                           arrayed, force_lod_zero, depth_compare, swizzle);
   // DELTA_GPU_TEXRAW: write each large texture's raw tiled footprint, with its
   // layout in the name, so a swizzle can be worked out offline.
-  static const bool kTexRaw = std::getenv("DELTA_GPU_TEXRAW") != nullptr;
   if (kTexRaw && w >= 256 && h >= 128 && gpu::IsReadableRange(base, footprint)) {
     static int rawn = 0;
     static std::unordered_set<uint64_t> raw_seen;
@@ -1005,7 +1005,6 @@ VkDescriptorSet GetTexture(uint64_t base,
   // Diagnostic (DELTA_GPU_TEXDUMP): in deep gameplay, dump the first few large
   // guest textures sampled, so a non-tutorial room's floor texture can be
   // inspected (is it loaded/brown or black/zero?). Counts non-zero pixels too.
-  static const bool kTexDump = std::getenv("DELTA_GPU_TEXDUMP") != nullptr;
   if (kTexDump && g_frame.num > 1200 && w >= 128 && h >= 128) {
     if (!gpu::IsReadableRange(base, footprint))
       return VK_NULL_HANDLE;
@@ -1084,11 +1083,8 @@ VkDescriptorSet GetTexture(uint64_t base,
     // can transiently exceed the budget by up to two frames of retirements;
     // capping allocated bytes instead would make creation fail outright at
     // the budget edge, since eviction cannot free memory mid-frame.
-    static const uint64_t kTextureBudget = [] {
-      const char* value = std::getenv("DELTA_GPU_TEX_MB");
-      const uint64_t mb = value ? std::strtoull(value, nullptr, 10) : 1024;
-      return std::max<uint64_t>(mb, 64) * 1024 * 1024;
-    }();
+    static const uint64_t kTextureBudget =
+        std::max<uint64_t>(kTextureMb, 64) * 1024 * 1024;
     while (g_tex_image_bytes + mr.size > kTextureBudget)
       if (!EvictOldestTexture()) {
         vkDestroyImage(g_dev.device, image_entry.image, nullptr);
@@ -1301,14 +1297,11 @@ VkDescriptorSet GetMultiTexSet(const DrawInfo& d,
   // samples transparent-black (= invisible). Forcing white makes the geometry
   // render opaque, proving the 3D transform/raster/depth path works and
   // isolating the blackness to the texture data.
-  static const bool kForceWhite =
-      std::getenv("DELTA_GPU_FORCEWHITE") != nullptr;
   VkImageView views[kMaxTex];
   VkImageLayout layouts[kMaxTex];
   // DELTA_GPU_TEXMISS: report every sampler binding that falls back to the 1x1
   // white default (the source of "everything renders white" chains) with the
   // descriptor state that failed to resolve.
-  static const bool kTexMiss = std::getenv("DELTA_GPU_TEXMISS") != nullptr;
   static int tex_miss_logged = 0;
   for (uint32_t i = 0; i < key.num_texs; i++) {
     VkImageView v =

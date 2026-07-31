@@ -34,6 +34,18 @@
 #include "../../proc.h"
 #include "cpu/cpu_backend.h"
 #include "sys_thread.h"
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(const char *, kHostStackMb, "DELTA_HOST_STACK_MB", nullptr);
+DELTA_OPTION(long, kUmtxTimeoutMs, "DELTA_UMTX_TIMEOUT_MS", 2);
+DELTA_OPTION(const char *, kAddrWatch, "DELTA_UMTX_ADDRWATCH", nullptr);
+DELTA_OPTION(uint32_t, kAddrWatchLimit, "DELTA_UMTX_ADDRWATCH_MAX", 200000);
+DELTA_OPTION(uint64_t, kCvTrace, "DELTA_UMTX_CVTRACE", 0);
+DELTA_OPTION(bool, kNoThrBarrier, "DELTA_NO_THR_BARRIER", false);
+DELTA_OPTION(bool, kUmtxHist, "DELTA_UMTX_HIST", false);
+DELTA_OPTION(bool, kUmtxTrace, "DELTA_UMTX_TRACE", false);
+}  // namespace
 
 namespace krnl {
 moduleInfo *called_in(void *addr);
@@ -173,7 +185,7 @@ int PS4ABI sys_thr_new(thr_param *p, int size) {
   // tag titles put on it becomes the host thread's name (thread_names.cpp).
   auto *gsb = p->stack_base;
   const size_t gss = p->stack_size;
-  const char *hsEnv = std::getenv("DELTA_HOST_STACK_MB");
+  const char *hsEnv = kHostStackMb;
   if (hsEnv) {
     auto *ctx = new std::tuple<void *, uint32_t, std::shared_ptr<std::atomic<bool>>,
                                void *, size_t>(gthread, tid, started, gsb, gss);
@@ -223,8 +235,7 @@ int PS4ABI sys_thr_new(thr_param *p, int size) {
   // syncs can't hang us. DELTA_NO_THR_BARRIER disables the wait so the spawner
   // runs ahead, for cases where the spawner is the producer the spawned thread
   // depends on.
-  static const bool noBarrier = std::getenv("DELTA_NO_THR_BARRIER") != nullptr;
-  if (!noBarrier) {
+  if (!kNoThrBarrier) {
     std::unique_lock<std::mutex> lk(g_startM);
     g_startCv.wait_for(lk, std::chrono::milliseconds(200),
                        [&] { return started->load(); });
@@ -344,11 +355,7 @@ constexpr uint32_t UMUTEX_CONTESTED = 0x80000000u;
 // job/stream managers crashed intermittently on null / -1 / partially-written
 // pointers exactly that way. DELTA_UMTX_TIMEOUT_MS overrides the tick.
 std::chrono::milliseconds umtxTimeout() {
-  static const long ms = [] {
-    const char *e = std::getenv("DELTA_UMTX_TIMEOUT_MS");
-    return e ? std::atol(e) : 2;
-  }();
-  return std::chrono::milliseconds(ms);
+  return std::chrono::milliseconds(kUmtxTimeoutMs);
 }
 
 // The WAIT-class ops take an optional timeout at uaddr2 (FreeBSD 9 passes a
@@ -423,7 +430,7 @@ struct AddrWatchList {
 const AddrWatchList &addrWatchList() {
   static const AddrWatchList list = [] {
     AddrWatchList l;
-    const char *e = std::getenv("DELTA_UMTX_ADDRWATCH");
+    const char *e = kAddrWatch;
     if (!e || !*e)
       return l;
     for (const char *p = e; *p && l.n < kAddrWatchMax;) {
@@ -452,11 +459,7 @@ bool addrWatchEnabled() { return addrWatchList().n != 0; }
 // DELTA_UMTX_ADDRWATCH_MAX when a hot address is inside the window -- a budget
 // that runs out mid-run makes "no wake ever arrived" unprovable.
 uint32_t addrWatchMax() {
-  static const uint32_t n = [] {
-    const char *e = std::getenv("DELTA_UMTX_ADDRWATCH_MAX");
-    return e ? static_cast<uint32_t>(std::strtoul(e, nullptr, 10)) : 200000u;
-  }();
-  return n;
+  return kAddrWatchLimit;
 }
 
 bool addrWatched(const void *p) {
@@ -490,11 +493,7 @@ void hexBytes(char *out, size_t outN, const void *p, size_t n) {
 // showing that only the wait side ever appears -- is what identifies the
 // producer that stopped running.
 static void cvTrace(const char *what, const void *ucond, uint32_t self) {
-  static const uint64_t want = [] {
-    const char *e = std::getenv("DELTA_UMTX_CVTRACE");
-    return e ? std::strtoull(e, nullptr, 16) : 0ull;
-  }();
-  if (!want || reinterpret_cast<uint64_t>(ucond) != want)
+  if (!kCvTrace || reinterpret_cast<uint64_t>(ucond) != kCvTrace)
     return;
   char comm[32] = "";
   threadComm(comm, sizeof(comm));
@@ -571,8 +570,7 @@ std::atomic<uint64_t> g_total{0};
 std::atomic<uint64_t> g_dropped{0};
 
 bool enabled() {
-  static const bool e = std::getenv("DELTA_UMTX_HIST") != nullptr;
-  return e;
+  return kUmtxHist;
 }
 
 inline void count(int op, const void *ptr, uint32_t tid) {
@@ -677,8 +675,7 @@ const bool g_timer = [] {
 }  // namespace umtxhist
 
 static void umtxTrace(int op, void *ptr, uint32_t self, uint32_t owner) {
-  static const bool tr = std::getenv("DELTA_UMTX_TRACE") != nullptr;
-  if (!tr)
+  if (!kUmtxTrace)
     return;
   static std::atomic<int> n{0};
   if (n.fetch_add(1) < 4000)

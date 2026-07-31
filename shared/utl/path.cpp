@@ -17,6 +17,11 @@
 #include <cstdlib>
 #include <cstring>
 #include <unistd.h>
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(const char*, kDataDir, "DELTA_DATA_DIR", nullptr);
+}  // namespace
 #ifndef PATH_MAX
 #define PATH_MAX 4096
 #endif
@@ -68,7 +73,7 @@ static const base::String& exe_dir() {
     // DELTA_DATA_DIR overrides where modules/ and host assets live. The Android
     // app sets it to the activity's external files dir; the binary itself sits
     // in a read-only lib/ dir, so /proc/self/exe is no use there.
-    if (const char* dd = ::getenv("DELTA_DATA_DIR"); dd && *dd) {
+    if (const char* dd = kDataDir; dd && *dd) {
       filePath = base::String(dd);
       if (filePath.back() != '/')
         filePath += "/";

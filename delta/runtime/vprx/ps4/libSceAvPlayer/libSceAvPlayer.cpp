@@ -3,6 +3,11 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(bool, kAvpTrace, "DELTA_AVP_TRACE", false);
+}  // namespace
 
 // A non-null sentinel handle. The title only ever passes it back to these stubs
 // (which ignore it), so any non-null/non-negative value reads as "valid".
@@ -14,8 +19,7 @@ constexpr int64_t kHandle = 1;
 // stub must signal "done" some way the title accepts; if it calls each once it
 // just skips the movie and the stub is fine.
 void avpTrace(const char *fn) {
-  static const bool on = std::getenv("DELTA_AVP_TRACE") != nullptr;
-  if (!on) return;
+  if (!kAvpTrace) return;
   static uint64_t n = 0;
   if ((n++ % 100000) == 0)
     std::fprintf(stderr, "[avp] %s (call #%llu)\n", fn, (unsigned long long)n);
@@ -26,8 +30,7 @@ void avpTrace(const char *fn) {
 // (a guest code pointer) and its offset can be identified -> lets us fire video
 // state events the title waits on (Doom64 stalls after Start with no IsActive poll).
 static void dumpInitData(const char *fn, const void *initData) {
-  static const bool on = std::getenv("DELTA_AVP_TRACE") != nullptr;
-  if (!on || !initData) return;
+  if (!kAvpTrace || !initData) return;
   auto *p = reinterpret_cast<const uint64_t *>(initData);
   for (int i = 0; i < 16; i++)
     std::fprintf(stderr, "[avp] %s initData[%#x]=%#llx\n", fn, i * 8,
@@ -51,8 +54,7 @@ int PS4ABI sceAvPlayerPostInit(int64_t /*handle*/, void * /*postInitData*/) {
 }
 
 int PS4ABI sceAvPlayerAddSource(int64_t /*handle*/, const char *filename) {
-  static const bool on = std::getenv("DELTA_AVP_TRACE") != nullptr;
-  if (on) std::fprintf(stderr, "[avp] AddSource '%s'\n", filename ? filename : "(null)");
+  if (kAvpTrace) std::fprintf(stderr, "[avp] AddSource '%s'\n", filename ? filename : "(null)");
   return 0;
 }
 

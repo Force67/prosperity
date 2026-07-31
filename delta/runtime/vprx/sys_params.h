@@ -14,6 +14,8 @@
 #include <cstdint>
 #include <cstdlib>
 #include <strings.h>
+#include <utl/options.h>
+
 
 namespace runtime::sysparam {
 
@@ -45,9 +47,12 @@ inline constexpr LangName kLangs[] = {
 // DELTA_SYS_LANG: the system language a title sees, as a code from the table
 // above ("en", "ja", "de", "pt-br", ...) or a raw SCE_SYSTEM_PARAM_LANG_ number.
 // Defaults to English (US), not the console's 0 (Japanese).
+DELTA_OPTION_INLINE(const char *, kSysLang, "DELTA_SYS_LANG", nullptr,
+                    "system language a title sees, as a code or a raw id");
+
 inline int32_t Language() {
   static const int32_t lang = [] {
-    const char *e = std::getenv("DELTA_SYS_LANG");
+    const char *e = kSysLang;
     if (!e || !*e)
       return 1;
     if (e[0] >= '0' && e[0] <= '9')

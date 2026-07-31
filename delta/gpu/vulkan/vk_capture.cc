@@ -6,11 +6,16 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(const char*, kDumpDir, "DELTA_GPU_DUMP_DIR", nullptr);
+}  // namespace
 
 namespace gpu::vk {
 
-extern const bool g_dump = std::getenv("DELTA_GPU_DUMP") != nullptr;
-extern const bool kDeclines = std::getenv("DELTA_GPU_DECLINES") != nullptr;
+DELTA_OPTION(bool, g_dump, "DELTA_GPU_DUMP", false);
+DELTA_OPTION(bool, kDeclines, "DELTA_GPU_DECLINES", false);
 
 namespace {
 int g_dumped_frames = 0;
@@ -20,7 +25,7 @@ int g_dumped_frames = 0;
 // runner sets DELTA_GPU_DUMP_DIR to a writable path (e.g. the cwd under
 // /data/local/tmp). Returned without a trailing slash.
 const char* DumpDir() {
-  const char* d = std::getenv("DELTA_GPU_DUMP_DIR");
+  const char* d = kDumpDir;
   return (d && *d) ? d : "/tmp";
 }
 

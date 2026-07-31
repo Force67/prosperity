@@ -15,6 +15,16 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(bool, kClearTrace, "DELTA_GPU_CLEARTRACE", false);
+DELTA_OPTION(bool, kLazyClear, "DELTA_GPU_LAZYCLEAR", true);
+DELTA_OPTION(bool, kClearRed, "DELTA_GPU_CLEARRED", false);
+DELTA_OPTION(bool, kForceClear, "DELTA_GPU_CLEARCOLOR", false);
+DELTA_OPTION(bool, kGpuFilltrace, "DELTA_GPU_FILLTRACE", false);
+DELTA_OPTION(bool, kRegTrace, "DELTA_GPU_REGTRACE", false);
+}  // namespace
 
 namespace gpu::vk {
 
@@ -442,10 +452,6 @@ bool BeginRegion(const uint64_t* mrt_base,
                  uint32_t h,
                  uint64_t depth_base,
                  float depth_clear) {
-  static const bool kLazyClear = [] {
-    const char* e = std::getenv("DELTA_GPU_LAZYCLEAR");
-    return !e || std::strcmp(e, "0") != 0;
-  }();
   VkRenderingAttachmentInfo colors[8]{};
   RTarget* targets[8]{};
   mrt_count = std::min(mrt_count, 8u);
@@ -478,7 +484,7 @@ bool BeginRegion(const uint64_t* mrt_base,
     if (kLazyClear) {
       // DELTA_GPU_CLEARTRACE: which draw opens a region with a clear, and to
       // what.
-      if (std::getenv("DELTA_GPU_CLEARTRACE") &&
+      if (kClearTrace &&
           (rt.clear_pending || !rt.ever_rendered)) {
         static int n = 0;
         if (n++ < 24)
@@ -504,9 +510,6 @@ bool BeginRegion(const uint64_t* mrt_base,
     // DELTA_GPU_CLEARCOLOR / DELTA_GPU_CLEARRED: diagnostic knobs that force
     // every bound RT to clear to a solid colour this frame, to verify which RTs
     // are bound.
-    static const bool kForceClear =
-        std::getenv("DELTA_GPU_CLEARCOLOR") != nullptr;
-    static const bool kClearRed = std::getenv("DELTA_GPU_CLEARRED") != nullptr;
     if (kForceClear) {
       color.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
       color.clearValue.color = {{0.f, 1.f, 0.f, 1.f}};
@@ -582,7 +585,6 @@ bool BeginRegion(const uint64_t* mrt_base,
     g_region.last_rt = base;
   }
   g_region.cur_rt = base;
-  static const bool kRegTrace = std::getenv("DELTA_GPU_REGTRACE") != nullptr;
   if (kRegTrace && w < 1280)
     std::fprintf(stderr, "[reg] f%d begin RT %#lx %ux%u mrt=%u clear=%d\n",
                  g_frame.num, (unsigned long)base, w, h, g_region.cur_mrt_count,
@@ -619,9 +621,8 @@ void NoteMemoryFill(Renderer& renderer,
     rt.clear_value.float32[1] = ((value >> 8) & 0xFF) * inv;
     rt.clear_value.float32[2] = ((value >> 16) & 0xFF) * inv;
     rt.clear_value.float32[3] = ((value >> 24) & 0xFF) * inv;
-    static const bool trace = std::getenv("DELTA_GPU_FILLTRACE") != nullptr;
     static int n = 0;
-    if (trace && n++ < 20)
+    if (kGpuFilltrace && n++ < 20)
       std::fprintf(stderr,
                    "[fill] RT %#lx cleared by CP DMA fill %08x (%lu bytes)\n",
                    (unsigned long)kv.first, value, (unsigned long)bytes);

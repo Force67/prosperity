@@ -37,6 +37,11 @@ gpu::gcn::RecompiledCs RecompileCompute(const uint32_t*,
 #include "gpu/ps5/rdna/rdna_decode.h"
 #include "gpu/ps5/rdna/rdna_emit.h"
 #include "gpu/ps5/rdna/rdna_resource.h"
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(bool, kGpuSpirvNoopt, "DELTA_GPU_SPIRV_NOOPT", false);
+}  // namespace
 
 namespace gpu::rdna {
 namespace {
@@ -209,8 +214,7 @@ void EmitSmem(Translator& t, const Inst& inst, StageContext& sc) {
 }
 
 bool NoOpt() {
-  static const bool no_opt = std::getenv("DELTA_GPU_SPIRV_NOOPT") != nullptr;
-  return no_opt;
+  return kGpuSpirvNoopt;
 }
 
 // A declined dispatch leaves the buffers it was meant to fill untouched, which

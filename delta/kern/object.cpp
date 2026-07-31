@@ -14,6 +14,11 @@
 #include <cstdlib>
 
 #include <logger/logger.h>
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(bool, kObjTrace, "DELTA_OBJ_TRACE", false);
+}  // namespace
 
 namespace krnl {
 kObject::kObject(proc *process, oType type) : otype(type), process(process) {
@@ -23,8 +28,7 @@ kObject::kObject(proc *process, oType type) : otype(type), process(process) {
   // DELTA_OBJ_TRACE: titles that poll a device re-create its object thousands
   // of times a second (Minecraft: ~14k in 40s), which buried every other line
   // in the log. Off unless asked for.
-  static const bool trace = std::getenv("DELTA_OBJ_TRACE") != nullptr;
-  if (trace) {
+  if (kObjTrace) {
     static const char *tn[] = {"file", "device", "equeue", "eventflag",
                                "semaphore", "shm"};
     LOG_INFO("assigned handle {} type={}", temp, tn[static_cast<int>(type)]);

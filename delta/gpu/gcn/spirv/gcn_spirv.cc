@@ -45,6 +45,21 @@ bool RecompileComputeSpirv(const uint32_t*,
 #include "gpu/gcn/gcn_disasm.h"
 #include "gpu/gcn/spirv/spv_post.h"
 #include "gpu/gcn/spirv/translator.h"
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(uint32_t, kCfgMaxIter, "DELTA_GPU_CFG_MAXITER", 16384);
+DELTA_OPTION(uint64_t, kShDisAddr, "DELTA_GPU_SHDIS_ADDR", 0);
+DELTA_OPTION(bool, kGpuNokill, "DELTA_GPU_NOKILL", false);
+DELTA_OPTION(bool, kGpuPswhite, "DELTA_GPU_PSWHITE", false);
+DELTA_OPTION(bool, kGpuShdis, "DELTA_GPU_SHDIS", false);
+DELTA_OPTION(bool, kGpuShtrace, "DELTA_GPU_SHTRACE", false);
+DELTA_OPTION(bool, kGpuSpirv, "DELTA_GPU_SPIRV", false);
+DELTA_OPTION(bool, kGpuSpirvCfg, "DELTA_GPU_SPIRV_CFG", false);
+DELTA_OPTION(bool, kGpuSpirvNoopt, "DELTA_GPU_SPIRV_NOOPT", false);
+DELTA_OPTION(bool, kGpuVsflipz, "DELTA_GPU_VSFLIPZ", false);
+DELTA_OPTION(bool, kGpuVsfull, "DELTA_GPU_VSFULL", false);
+}  // namespace
 
 namespace gpu::gcn {
 
@@ -70,8 +85,7 @@ const std::string& UnsupportedOps() {
 }
 
 bool TraceEnabled() {
-  static const bool enabled = std::getenv("DELTA_GPU_SHTRACE") != nullptr;
-  return enabled;
+  return kGpuShtrace;
 }
 
 void WarnUnsupported(const char* enc, uint32_t op, uint32_t w0, uint32_t w1) {
@@ -613,11 +627,7 @@ void EmitCfg(Translator& t,
   // VkDevice down (DEVICE_LOST). Cap block-steps per invocation; a capped
   // shader renders wrong, loudly bisectable, instead of killing the device.
   // DELTA_GPU_CFG_MAXITER overrides the cap (0 disables the guard).
-  static const uint32_t max_iter = [] {
-    const char* e = std::getenv("DELTA_GPU_CFG_MAXITER");
-    return e ? static_cast<uint32_t>(std::strtoul(e, nullptr, 0)) : 16384u;
-  }();
-  const Id iter_var = max_iter
+  const Id iter_var = kCfgMaxIter
                           ? t.m.Variable(t.p_priv_u, spv::StorageClass::Private,
                                          t.m.ConstNull(t.t_u))
                           : 0;
@@ -629,11 +639,11 @@ void EmitCfg(Translator& t,
   t.m.Branch(dispatch);
   t.m.OpenBlock(dispatch);
   Id state = t.State();
-  if (max_iter) {
+  if (kCfgMaxIter) {
     const Id it = t.m.Load(t.t_u, iter_var);
     t.m.Store(iter_var, t.m.Emit(spv::Op::OpIAdd, t.t_u, {it, t.U32(1)}));
     const Id over =
-        t.m.Emit(spv::Op::OpUGreaterThan, t.t_bool, {it, t.U32(max_iter)});
+        t.m.Emit(spv::Op::OpUGreaterThan, t.t_bool, {it, t.U32(kCfgMaxIter)});
     state = t.SelectB(over, t.U32(kExit), state);
   }
   t.m.SelectionMerge(merge_sel);
@@ -692,8 +702,7 @@ void EmitCfg(Translator& t,
 }
 
 bool ForceCfg() {
-  static const bool force = std::getenv("DELTA_GPU_SPIRV_CFG") != nullptr;
-  return force;
+  return kGpuSpirvCfg;
 }
 
 // Emit a stage body: branchy shaders take the CFG (while-switch) path so
@@ -814,10 +823,8 @@ bool TranslateVs(const Program& program,
   sc.main_fn = main_fn;
   SeedUserData(t, user_data);
 
-  static const bool force_fullscreen_vs =
-      std::getenv("DELTA_GPU_VSFULL") != nullptr;
   Id debug_vertex_index = 0;
-  if (force_fullscreen_vs) {
+  if (kGpuVsfull) {
     const Id p_in_u = t.m.TypePointer(spv::StorageClass::Input, t.t_u);
     debug_vertex_index = t.m.Variable(p_in_u, spv::StorageClass::Input);
     t.m.Decorate(debug_vertex_index, spv::Decoration::BuiltIn,
@@ -865,10 +872,9 @@ bool TranslateVs(const Program& program,
     const Id val = t.m.Load(comp_ty, in_var);
     // DELTA_GPU_VSFLIPZ: negate the z of the position attribute (semantic 0,
     // >= 3 comps) -- a projection-convention diagnostic. Default off.
-    static const bool flip_z = std::getenv("DELTA_GPU_VSFLIPZ") != nullptr;
     for (uint32_t c = 0; c < a.num_comps; c++) {
       Id comp = a.num_comps == 1 ? val : t.m.CompositeExtract(t.t_f, val, c);
-      if (flip_z && a.semantic == 0 && c == 2 && a.num_comps >= 3)
+      if (kGpuVsflipz && a.semantic == 0 && c == 2 && a.num_comps >= 3)
         comp = t.FNeg(comp);
       t.SetVgF(a.dest_vgpr + c, comp);
     }
@@ -884,7 +890,7 @@ bool TranslateVs(const Program& program,
   PlanGfxBuffers(program, 0, &sc.direct_vfetch, r.vs_bufs, sc.gfx_buf_bind,
                  reachable.data());
 
-  if (!force_fullscreen_vs)
+  if (!kGpuVsfull)
     EmitBody(t, program, sc, reachable.data());
   r.num_params = sc.max_param;
 
@@ -967,7 +973,6 @@ bool TranslatePs(const Program& program,
     }
   }
 
-  static const bool force_white = std::getenv("DELTA_GPU_PSWHITE") != nullptr;
   const bool cfg = ForceCfg() || HasControlFlow(program);
   if (cfg && has_color_export) {
     // Default MRT0 to transparent so a fragment that never reaches an export
@@ -978,7 +983,7 @@ bool TranslatePs(const Program& program,
     sc.color_written_var = t.m.Variable(t.p_priv_u, spv::StorageClass::Private,
                                         t.m.ConstNull(t.t_u));
   }
-  if (!force_white)
+  if (!kGpuPswhite)
     EmitBody(t, program, sc, reachable.data());
 
   if (sc.wrote_color && sc.color_written_var) {
@@ -986,8 +991,7 @@ bool TranslatePs(const Program& program,
     // color export for failing fragments (e.g. s_cmp + s_cbranch_scc0 ->
     // s_endpgm). Discard those (OpKill) instead of leaving the output
     // undefined. DELTA_GPU_NOKILL skips the discard as a diagnostic.
-    static const bool no_kill = std::getenv("DELTA_GPU_NOKILL") != nullptr;
-    if (!no_kill) {
+    if (!kGpuNokill) {
       const Id wrote = t.IsNonZero(t.m.Load(t.t_u, sc.color_written_var));
       const Id kill_blk = t.m.NewBlock(), after_kill = t.m.NewBlock();
       t.m.SelectionMerge(after_kill);
@@ -999,7 +1003,7 @@ bool TranslatePs(const Program& program,
   }
 
   // DELTA_GPU_PSWHITE: isolate VS/rasterization from fragment color math.
-  if (force_white && has_color_export)
+  if (kGpuPswhite && has_color_export)
     t.m.Store(PsColorOut(t, sc, 0),
               t.m.ConstComposite(
                   t.t_v4, {t.F32(1.f), t.F32(1.f), t.F32(1.f), t.F32(1.f)}));
@@ -1163,8 +1167,7 @@ void DumpProgram(const char* tag, const Program& program) {
 // One-shot disassembly (DELTA_GPU_SHDIS): for the first branchy shaders, list
 // each instruction's encoding + opcode.
 void MaybeDumpBranchy(const char* tag, const Program& program) {
-  static const bool enabled = std::getenv("DELTA_GPU_SHDIS") != nullptr;
-  if (!enabled)
+  if (!kGpuShdis)
     return;
   static int dumped = 0;
   if (!HasControlFlow(program) || dumped >= 2)
@@ -1179,11 +1182,7 @@ void MaybeDumpBranchy(const char* tag, const Program& program) {
 void MaybeDumpByAddr(const char* tag,
                      const void* code,
                      const Program& program) {
-  static const uint64_t want = [] {
-    const char* e = std::getenv("DELTA_GPU_SHDIS_ADDR");
-    return e ? std::strtoull(e, nullptr, 16) : 0ull;
-  }();
-  if (!want || reinterpret_cast<uint64_t>(code) != want)
+  if (!kShDisAddr || reinterpret_cast<uint64_t>(code) != kShDisAddr)
     return;
   static bool dumped = false;
   if (dumped)
@@ -1197,8 +1196,7 @@ bool NoOpt() {
   // DELTA_GPU_SPIRV_NOOPT: skip the optimize pass (keep the naive
   // memory-backed register SPIR-V). Isolates an emission bug from a spirv-opt
   // mis-promotion.
-  static const bool no_opt = std::getenv("DELTA_GPU_SPIRV_NOOPT") != nullptr;
-  return no_opt;
+  return kGpuSpirvNoopt;
 }
 
 // Dump-header summaries of the resource plan, so a shader dump is
@@ -1426,8 +1424,7 @@ bool RecompileSpirv(const uint32_t* vs_code,
 
   // Tally (DELTA_GPU_SPIRV): how many shaders the backend accepted vs had to
   // decline, and how many used the CFG path.
-  static const bool tally = std::getenv("DELTA_GPU_SPIRV") != nullptr;
-  if (tally) {
+  if (kGpuSpirv) {
     static int ok_count = 0, cfg_count = 0, logged = 0;
     if (r.ok)
       ok_count++;

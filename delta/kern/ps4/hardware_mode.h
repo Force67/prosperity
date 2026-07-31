@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cstdint>
+#include <utl/options.h>
+
 
 namespace krnl::ps4 {
 
@@ -13,6 +15,7 @@ struct HardwareModeProfile {
 
 // DELTA_PS4_NEO selects the emulated hardware. A title only enters enhanced
 // Neo mode when its param.sfo ATTRIBUTE also advertises Neo support.
+extern base::Option<bool> kNeoMode;
 const HardwareModeProfile &hardwareModeProfile();
 
 void setTitleAttributes(uint32_t attributes);

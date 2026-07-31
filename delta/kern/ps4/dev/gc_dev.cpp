@@ -13,6 +13,13 @@
 #include "kern/proc.h"
 #include "kern/ps4/lv2/sys_event.h"
 #include "kern/ps4/lv2/sys_mem.h"
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(bool, kGcCaller, "DELTA_GC_CALLER", false);
+DELTA_OPTION(bool, kGcFlip, "DELTA_GC_FLIP", false);
+DELTA_OPTION(bool, kGcTrace, "DELTA_GC_TRACE", false);
+}  // namespace
 
 // LLE GPU submit bridge (delta_runtime). The real libSceGnmDriver.sprx submits
 // PM4 through these ioctls; forward the descriptor array to the GPU command
@@ -52,8 +59,7 @@ static void completeFlipLabels(uint64_t flipPtr) {
       return;
     if (addr) {
       *reinterpret_cast<uint64_t *>(addr) = value;
-      static const bool trace = std::getenv("DELTA_GC_FLIP") != nullptr;
-      if (trace)
+      if (kGcFlip)
         std::printf("[gc]   flip label [%#lx] = %#lx\n",
                     static_cast<unsigned long>(addr),
                     static_cast<unsigned long>(value));
@@ -66,8 +72,7 @@ static void completeFlipLabels(uint64_t flipPtr) {
 // wrapper issued each gc ioctl (the native backend runs handlers on the guest
 // stack). Off by default: the submit ioctls fire 60+/frame and the scan is slow.
 static void printGuestCaller() {
-  static const bool on = std::getenv("DELTA_GC_CALLER") != nullptr;
-  if (!on)
+  if (!kGcCaller)
     return;
   auto *proc = proc::getActive();
   if (!proc)
@@ -140,9 +145,8 @@ int32_t gcDevice::ioctl(uint32_t cmd, void *data) {
     };
     auto *a = static_cast<argl *>(data);
     // SCOUT (DELTA_GC_FLIP): dump the raw args + first descriptor.
-    static const bool flipTrace = std::getenv("DELTA_GC_FLIP") != nullptr;
     static int flipDumps = 0;
-    if (flipTrace && flipDumps < 8) {
+    if (kGcFlip && flipDumps < 8) {
       flipDumps++;
       printf("[gc] flip pid=%x count=%u descPtr=%lx eopVal=%lx wait=%x\n",
              a->pid, a->count, (unsigned long)a->descPtr,
@@ -270,9 +274,8 @@ int32_t gcDevice::ioctl(uint32_t cmd, void *data) {
   // instead of trapping. Lets us discover the sequence GNM actually issues.
   // Rate-limited: an unknown ioctl in the per-submit hot path would otherwise
   // flood unbuffered stderr and stall the render loop.
-  static const bool gcTrace = std::getenv("DELTA_GC_TRACE") != nullptr;
   static int unhandledLogged = 0;
-  if (gcTrace || unhandledLogged < 32) {
+  if (kGcTrace || unhandledLogged < 32) {
     unhandledLogged++;
     printf("[gc] UNHANDLED ioctl(%x) data=%p\n", cmd, data);
   }

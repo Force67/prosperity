@@ -26,6 +26,43 @@
 #include <cstdlib>
 #include <cstring>
 #include <vector>
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(bool, kGpuSync, "DELTA_GPU_SYNC", false);
+DELTA_OPTION(int, kRdocFrame, "DELTA_RDOC_FRAME", 0);
+DELTA_OPTION(bool, kRdocExit, "DELTA_RDOC_EXIT", false);
+DELTA_OPTION(int, kReportFrame, "DELTA_GPU_RTSTAT_FRAME", 0);
+DELTA_OPTION(int, kRtStatEvery, "DELTA_GPU_RTSTAT_EVERY", 200);
+DELTA_OPTION(uint64_t, kForceClear, "DELTA_GPU_FORCECLEAR", 0);
+DELTA_OPTION(int, kWantW, "DELTA_GPU_PRESENT_RTW", 0);
+DELTA_OPTION(int, kWantH, "DELTA_GPU_PRESENT_RTH", 0);
+DELTA_OPTION(uint64_t, kWantAddr, "DELTA_GPU_PRESENT_ADDR", 0);
+DELTA_OPTION(int, kFlipMode, "DELTA_GPU_FLIP", 0);
+DELTA_OPTION(int, kSnapAt, "DELTA_GPU_SNAP", 0);
+DELTA_OPTION(int, kSnapMinDraws, "DELTA_GPU_SNAP_MINDRAWS", 0);
+DELTA_OPTION(int, kSnapMinIdx, "DELTA_GPU_SNAP_MININDICES", 0);
+DELTA_OPTION(int, kSnapSeqN, "DELTA_GPU_SNAPSEQ", 0);
+DELTA_OPTION(int, kSnapEvery, "DELTA_GPU_SNAPEVERY", 0);
+DELTA_OPTION(int, kSnapEveryMax, "DELTA_GPU_SNAPEVERY_MAX", 40);
+DELTA_OPTION(int, kLatestEvery, "DELTA_GPU_LATEST_EVERY", 300);
+DELTA_OPTION(bool, kSyncPresent, "DELTA_GPU_SYNCPRESENT", false);
+DELTA_OPTION(bool, kSnapExit, "DELTA_GPU_SNAP_EXIT", false);
+DELTA_OPTION(bool, kClearRedTransfer, "DELTA_GPU_CLEARRED", false);
+DELTA_OPTION(bool, kDumpRaw, "DELTA_GPU_RTDUMP_RAW", false);
+DELTA_OPTION(bool, kGpuRtdump, "DELTA_GPU_RTDUMP", false);
+DELTA_OPTION(bool, kGpuRtstat, "DELTA_GPU_RTSTAT", false);
+DELTA_OPTION(bool, kGpuRtstatAll, "DELTA_GPU_RTSTAT_ALL", false);
+DELTA_OPTION(bool, kNanDis, "DELTA_GPU_RTSTAT_DIS", false);
+DELTA_OPTION(bool, kNoPresent, "DELTA_GPU_NOPRESENT", false);
+DELTA_OPTION(bool, kOverlayDump, "DELTA_GPU_OVERLAY_DUMP", false);
+DELTA_OPTION(bool, kPresentFirst, "DELTA_GPU_PRESENT_FIRST_RT", false);
+DELTA_OPTION(bool, kPresentScene, "DELTA_GPU_PRESENT_SCENE", false);
+DELTA_OPTION(bool, kPresentTrace, "DELTA_PRESENT_TRACE", false);
+DELTA_OPTION(bool, kSnapBest, "DELTA_GPU_SNAP_BEST", false);
+DELTA_OPTION(bool, kSnapRoom, "DELTA_GPU_SNAP_ROOM", false);
+DELTA_OPTION(bool, kWantOffscreen, "DELTA_GPU_PRESENT_OFFSCREEN", false);
+}  // namespace
 
 namespace gpu::vk {
 
@@ -62,12 +99,7 @@ bool CreateFrameSlots() {
 // DELTA_GPU_RTSTAT also forces sync: its readback reuses the active slot's
 // buffer mid-flight, which pipelining would present a frame later.
 bool FramePipelined() {
-  static const bool sync = [] {
-    const char* e = std::getenv("DELTA_GPU_SYNC");
-    return (e && e[0] && e[0] != '0') ||
-           std::getenv("DELTA_GPU_RTSTAT") != nullptr;
-  }();
-  return !sync;
+  return !(kGpuSync || kGpuRtstat);
 }
 
 void EnsureReadback(uint32_t w, uint32_t h, VkFormat fmt) {
@@ -139,11 +171,7 @@ RdocApi* GetRdocApi() {
 }
 
 int RdocFrame() {
-  static const int f = [] {
-    const char* e = std::getenv("DELTA_RDOC_FRAME");
-    return e ? std::atoi(e) : 0;
-  }();
-  return f;
+  return kRdocFrame;
 }
 
 // RenderDoc identifies a Vulkan device by its instance's dispatch pointer.
@@ -155,26 +183,16 @@ void* RdocDevice() {
 // single early frame instead. DELTA_GPU_RTDUMP also writes the selected
 // targets.
 bool ReportRtContents(FrameSlot& owner) {
-  static const bool enabled = std::getenv("DELTA_GPU_RTSTAT") != nullptr;
-  static const bool dump = std::getenv("DELTA_GPU_RTDUMP") != nullptr;
-  static const bool all = std::getenv("DELTA_GPU_RTSTAT_ALL") != nullptr;
-  static const int kReportFrame = [] {
-    const char* e = std::getenv("DELTA_GPU_RTSTAT_FRAME");
-    return e ? std::atoi(e) : 0;
-  }();
   // DELTA_GPU_RTSTAT_EVERY=<n>: sample every n frames instead of every 200, so
   // a per-frame flicker can be told apart from a slow animation.
-  static const int every = [] {
-    const char* e = std::getenv("DELTA_GPU_RTSTAT_EVERY");
-    return e ? std::max(1, std::atoi(e)) : 200;
-  }();
-  if (!enabled ||
+  const int every = std::max(1, kRtStatEvery.get());
+  if (!kGpuRtstat ||
       (kReportFrame ? g_frame.num != kReportFrame : g_frame.num % every != 0))
     return true;
   int reported = 0;
   for (auto& kv : g_rts) {
     RTarget& rt = kv.second;
-    if ((!rt.used_this_frame && !(all && rt.ever_rendered)) || reported >= 32)
+    if ((!rt.used_this_frame && !(kGpuRtstatAll && rt.ever_rendered)) || reported >= 32)
       continue;
     reported++;
     EnsureReadback(rt.w, rt.h, rt.fmt);
@@ -275,7 +293,6 @@ bool ReportRtContents(FrameSlot& owner) {
     // DELTA_GPU_RTSTAT_DIS: disassemble the pixel shader that produced a
     // NaN-poisoned half-float target. Guest shader addresses differ from run to
     // run, so the shader has to be named in the same run that observed the NaN.
-    static const bool kNanDis = std::getenv("DELTA_GPU_RTSTAT_DIS") != nullptr;
     if (kNanDis && nan_half && rt.last_ps) {
       static std::vector<uint64_t> seen;
       if (std::find(seen.begin(), seen.end(), rt.last_ps) == seen.end()) {
@@ -283,7 +300,7 @@ bool ReportRtContents(FrameSlot& owner) {
         gcn::DisassembleAt(rt.last_ps, "nan.PS");
       }
     }
-    if (dump) {
+    if (kGpuRtdump) {
       std::vector<uint8_t> bgra(n * 4);
       const auto* src = static_cast<const uint8_t*>(g_frame.readback_map);
       const uint32_t src_bytes = FormatBytes(rt.fmt);
@@ -297,8 +314,6 @@ bool ReportRtContents(FrameSlot& owner) {
       // PPM conversion clamps HDR targets to 8-bit (a 16F scene at
       // luminance ~1500 dumps as solid white); the raw file keeps the halfs
       // for offline exposure/tonemapping.
-      static const bool kDumpRaw =
-          std::getenv("DELTA_GPU_RTDUMP_RAW") != nullptr;
       if (kDumpRaw) {
         std::snprintf(path, sizeof(path), "%s/rt_f%d_%#lx_%ux%u_fmt%d.raw",
                       DumpDir(), g_frame.num, (unsigned long)kv.first, rt.w,
@@ -335,10 +350,6 @@ void BeginFrame(Renderer& renderer) {
   // DELTA_GPU_FORCECLEAR=<rt address>: clear that target at the top of every
   // frame. Diagnostic for a target the title clears by a means we do not see --
   // additive passes into it otherwise accumulate frame over frame.
-  static const uint64_t kForceClear = [] {
-    const char* e = std::getenv("DELTA_GPU_FORCECLEAR");
-    return e ? std::strtoull(e, nullptr, 0) : 0ull;
-  }();
   if (kForceClear) {
     auto it = g_rts.find(kForceClear);
     if (it != g_rts.end())
@@ -439,24 +450,12 @@ void EndFrame(Renderer& renderer, uint64_t scanout_base) {
       g_rts.count(scanout_base) ? scanout_base : g_region.last_rt;
   // Debug: present the busiest RT (the scene) instead of the composited
   // scanout.
-  static const bool kPresentScene =
-      std::getenv("DELTA_GPU_PRESENT_SCENE") != nullptr;
   if (kPresentScene && g_region.busiest_rt)
     present_base = g_region.busiest_rt;
-  static const bool kPresentFirst =
-      std::getenv("DELTA_GPU_PRESENT_FIRST_RT") != nullptr;
   if (kPresentFirst && g_region.first_rt)
     present_base = g_region.first_rt;
   // Debug: present the first RT matching DELTA_GPU_PRESENT_RTW x RTH (inspect a
   // specific render target, e.g. the 832x512 room buffer).
-  static const int kWantW = [] {
-    const char* e = std::getenv("DELTA_GPU_PRESENT_RTW");
-    return e ? std::atoi(e) : 0;
-  }();
-  static const int kWantH = [] {
-    const char* e = std::getenv("DELTA_GPU_PRESENT_RTH");
-    return e ? std::atoi(e) : 0;
-  }();
   if (kWantW && kWantH) {
     int best =
         -1000000;  // pick the FRESHEST match (room buffers cycle addresses)
@@ -469,17 +468,11 @@ void EndFrame(Renderer& renderer, uint64_t scanout_base) {
   }
   // Debug: present a specific RT by guest address (addresses are stable per
   // build).
-  static const uint64_t kWantAddr = [] {
-    const char* e = std::getenv("DELTA_GPU_PRESENT_ADDR");
-    return e ? strtoull(e, nullptr, 0) : 0ull;
-  }();
   if (kWantAddr && g_rts.count(kWantAddr))
     present_base = kWantAddr;
   // Debug: present the freshest offscreen target instead of the scanout, to see
   // what a composite pass was actually given. Addresses move between runs, so
   // PRESENT_ADDR cannot name it.
-  static const bool kWantOffscreen =
-      std::getenv("DELTA_GPU_PRESENT_OFFSCREEN") != nullptr;
   if (kWantOffscreen) {
     int best = -1000000;
     for (auto& kv : g_rts)
@@ -488,8 +481,6 @@ void EndFrame(Renderer& renderer, uint64_t scanout_base) {
         present_base = kv.first;
       }
   }
-  static const bool kPresentTrace =
-      std::getenv("DELTA_PRESENT_TRACE") != nullptr;
   if (kPresentTrace)
     std::fprintf(
         stderr, "[present] f%d scanout=%#lx -> present=%#lx%s\n", g_frame.num,
@@ -505,20 +496,14 @@ void EndFrame(Renderer& renderer, uint64_t scanout_base) {
   // restores wait-here (FramePipelined()).
   FrameSlot& cur = g_frame.slots[g_frame.slot_idx];
   cur.presentable = false;
-  static const bool kNoPresent = std::getenv("DELTA_GPU_NOPRESENT") != nullptr;
-  static const bool kNeedsCpuCapture = [] {
-    return std::getenv("DELTA_GPU_SNAP") || std::getenv("DELTA_GPU_SNAPSEQ") ||
-           std::getenv("DELTA_GPU_SNAPEVERY") ||
-           std::getenv("DELTA_GPU_OVERLAY_DUMP");
-  }();
+  const bool kNeedsCpuCapture =
+      kSnapAt || kSnapSeqN || kSnapEvery || kOverlayDump;
   const bool present_to_window = !kNoPresent && gfx::canPresent();
   const bool need_scanout = present_to_window || g_dump || kNeedsCpuCapture;
   cur.present_to_window = present_to_window;
   if (it != g_rts.end() && need_scanout) {
     RTarget& rt = it->second;
     EnsureReadback(rt.w, rt.h, rt.fmt);
-    static const bool kClearRedTransfer =
-        std::getenv("DELTA_GPU_CLEARRED") != nullptr;
     if (kClearRedTransfer) {
       VkAccessFlags src_access =
           rt.layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
@@ -667,7 +652,7 @@ void EndFrame(Renderer& renderer, uint64_t scanout_base) {
     if (RdocFrame() && GetRdocApi() && GetRdocApi()->IsFrameCapturing()) {
       uint32_t ok = GetRdocApi()->EndFrameCapture(RdocDevice(), nullptr);
       std::fprintf(stderr, "[rdoc] capture %s\n", ok ? "written" : "FAILED");
-      if (ok && std::getenv("DELTA_RDOC_EXIT")) {
+      if (ok && kRdocExit) {
         std::fflush(nullptr);
         std::_Exit(0);
       }
@@ -681,10 +666,6 @@ void EndFrame(Renderer& renderer, uint64_t scanout_base) {
   // (which samples that upright content correctly), so the presented image
   // needs no flip. (The old default Y-flip existed only to undo the heuristic
   // composite's upside-down output.)
-  static const int kFlipMode = [] {
-    const char* e = std::getenv("DELTA_GPU_FLIP");
-    return e ? std::atoi(e) : 0;
-  }();
   static std::vector<uint8_t> flipped;
   auto* rb = static_cast<uint8_t*>(fin.readback_map);
   uint8_t* pixels;
@@ -715,32 +696,18 @@ void EndFrame(Renderer& renderer, uint64_t scanout_base) {
   // N, then never again. For verifying gfx without the rolling DELTA_GPU_DUMP
   // firehose (hundreds of MB per run). DELTA_GPU_SNAP_ROOM=1 waits for a
   // gameplay-room frame.
-  static const int kSnapAt = [] {
-    const char* e = std::getenv("DELTA_GPU_SNAP");
-    return e ? std::atoi(e) : 0;
-  }();
-  static const bool kSnapRoom = std::getenv("DELTA_GPU_SNAP_ROOM") != nullptr;
   // Wait for a frame with at least this many draws before capturing, so a busy
   // scene frame is grabbed instead of a sparse HUD/transition frame (e.g.
   // Doom64 gameplay where only some frames carry the full level geometry).
-  static const int kSnapMinDraws = [] {
-    const char* e = std::getenv("DELTA_GPU_SNAP_MINDRAWS");
-    return e ? std::atoi(e) : 0;
-  }();
   // DELTA_GPU_SNAP_MININDICES: require a frame to contain a draw with at least
   // this many indices (3D level geometry, e.g. Doom64 with ~2400-index draws)
   // instead of counting draws -- a level frame can have few draws but huge
   // index counts that a draw-count gate (kSnapMinDraws/kSnapBest) misses.
-  static const int kSnapMinIdx = [] {
-    const char* e = std::getenv("DELTA_GPU_SNAP_MININDICES");
-    return e ? std::atoi(e) : 0;
-  }();
   // DELTA_GPU_SNAP_BEST: instead of capturing the first qualifying frame, keep
   // re-capturing whenever this frame has more draws than any seen so far (after
   // kSnapAt). The final gpu_snap.ppm is then the busiest frame of the run -- a
   // real scene frame, not a sparse HUD/transition one, without guessing a frame
   // number.
-  static const bool kSnapBest = std::getenv("DELTA_GPU_SNAP_BEST") != nullptr;
   static int snap_best_draws = 0;
   static bool snapped = false;
   bool snap_now = kSnapAt && fin.frame_num >= kSnapAt && fin.frame_draws > 0 &&
@@ -771,10 +738,6 @@ void EndFrame(Renderer& renderer, uint64_t scanout_base) {
   // gameplay-room frames, one every ~250 frames, to seq_NN.ppm. Bounded (K*6MB,
   // cleaned up after); lets a long explore run be inspected for non-start rooms
   // without the firehose.
-  static const int kSnapSeqN = [] {
-    const char* e = std::getenv("DELTA_GPU_SNAPSEQ");
-    return e ? std::atoi(e) : 0;
-  }();
   static int seq_done = 0, seq_last_frame = -10000;
   if (kSnapSeqN && seq_done < kSnapSeqN && fin.frame_had_room &&
       fin.frame_draws > 20 && fin.frame_num - seq_last_frame >= 250) {
@@ -791,14 +754,6 @@ void EndFrame(Renderer& renderer, uint64_t scanout_base) {
   // unconditionally. A filmstrip of one run shows every screen the title passed
   // through (and every transition), which a single best-frame snap cannot.
   // DELTA_GPU_SNAPEVERY_MAX caps how many are written.
-  static const int kSnapEvery = [] {
-    const char* e = std::getenv("DELTA_GPU_SNAPEVERY");
-    return e ? std::atoi(e) : 0;
-  }();
-  static const int kSnapEveryMax = [] {
-    const char* e = std::getenv("DELTA_GPU_SNAPEVERY_MAX");
-    return e ? std::atoi(e) : 40;
-  }();
   static int every_done = 0, every_last = -1000000;
   if (kSnapEvery && every_done < kSnapEveryMax && fin.frame_draws > 0 &&
       fin.frame_num - every_last >= kSnapEvery) {
@@ -828,10 +783,6 @@ void EndFrame(Renderer& renderer, uint64_t scanout_base) {
     DumpPpm(pixels, fin.w, fin.h);
   // Rolling latest-frame capture (uncapped) so late transitions (menu/gameplay)
   // can be inspected from a long headless run without knowing the frame number.
-  static const int kLatestEvery = [] {
-    const char* e = std::getenv("DELTA_GPU_LATEST_EVERY");
-    return e ? std::atoi(e) : 300;
-  }();
   if (g_dump && fin.frame_num % kLatestEvery == 0 && fin.frame_draws > 0) {
     char latest[256];
     std::snprintf(latest, sizeof(latest), "%s/gpu_latest.ppm", DumpDir());
@@ -856,8 +807,6 @@ void EndFrame(Renderer& renderer, uint64_t scanout_base) {
   DrawPerfOverlay(pixels, fin.w, fin.h);
   // DELTA_GPU_OVERLAY_DUMP: one post-overlay ppm (visual check of the overlay
   // itself, which the clean capture paths above deliberately exclude).
-  static const bool kOverlayDump =
-      std::getenv("DELTA_GPU_OVERLAY_DUMP") != nullptr;
   static bool overlay_dumped = false;
   if (kOverlayDump && !overlay_dumped && fin.frame_num >= 600) {
     overlay_dumped = true;
@@ -877,10 +826,6 @@ void EndFrame(Renderer& renderer, uint64_t scanout_base) {
   if (fin.present_to_window) {
     ScopeNs present_timer(&g_ns_present);
     ScopeNs frame_present_timer(&g_fr_present);
-    static const bool kSyncPresent = [] {
-      const char* e = std::getenv("DELTA_GPU_SYNCPRESENT");
-      return e && e[0] && e[0] != '0';
-    }();
     if (kSyncPresent) {
       if (gfx::ensure("prosperity", fin.w, fin.h) && gfx::pumpEvents())
         gfx::present(pixels, fin.w, fin.h, fin.w * 4, gfx::PixelFormat::bgra8);
@@ -897,7 +842,7 @@ void EndFrame(Renderer& renderer, uint64_t scanout_base) {
     renderer.state = nullptr;
     return;
   }
-  if (snapped && std::getenv("DELTA_GPU_SNAP_EXIT")) {
+  if (snapped && kSnapExit) {
     std::fflush(nullptr);
     std::_Exit(0);
   }
@@ -905,7 +850,7 @@ void EndFrame(Renderer& renderer, uint64_t scanout_base) {
   if (RdocFrame() && GetRdocApi() && GetRdocApi()->IsFrameCapturing()) {
     uint32_t ok = GetRdocApi()->EndFrameCapture(RdocDevice(), nullptr);
     std::fprintf(stderr, "[rdoc] capture %s\n", ok ? "written" : "FAILED");
-    if (ok && std::getenv("DELTA_RDOC_EXIT")) {
+    if (ok && kRdocExit) {
       std::fflush(nullptr);
       std::_Exit(0);
     }

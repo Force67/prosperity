@@ -43,6 +43,25 @@ gpu::gcn::Recompiled Recompile(const uint32_t*,
 #include "gpu/ps5/rdna/rdna_decode.h"
 #include "gpu/ps5/rdna/rdna_emit.h"
 #include "gpu/ps5/rdna/rdna_resource.h"
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(bool, kExpTrace, "DELTA_GPU_EXPTRACE", false);
+DELTA_OPTION(bool, kAllowNan, "DELTA_GPU_ALLOWNAN", false);
+DELTA_OPTION(const char*, kDbgPos, "DELTA_GPU_DBGPOS", nullptr);
+DELTA_OPTION(float, kRawPos, "DELTA_GPU_RAWPOS", 0.f);
+DELTA_OPTION(bool, kDrawCensus, "DELTA_GPU_DRAWCENSUS", false);
+DELTA_OPTION(const char*, kSpvDump, "DELTA_GPU_SPVDUMP", nullptr);
+DELTA_OPTION(bool, kAgcTrace, "DELTA_AGC_TRACE", false);
+DELTA_OPTION(bool, kGpuDebugalpha, "DELTA_GPU_DEBUGALPHA", false);
+DELTA_OPTION(bool, kGpuForcecolor, "DELTA_GPU_FORCECOLOR", false);
+DELTA_OPTION(bool, kGpuForcequad, "DELTA_GPU_FORCEQUAD", false);
+DELTA_OPTION(bool, kGpuNokill, "DELTA_GPU_NOKILL", false);
+DELTA_OPTION(bool, kGpuPosprobe, "DELTA_GPU_POSPROBE", false);
+DELTA_OPTION(bool, kGpuPsuv, "DELTA_GPU_PSUV", false);
+DELTA_OPTION(bool, kGpuShtrace, "DELTA_GPU_SHTRACE", false);
+DELTA_OPTION(bool, kGpuSpirvCfg, "DELTA_GPU_SPIRV_CFG", false);
+}  // namespace
 
 namespace gpu::rdna {
 namespace {
@@ -62,8 +81,8 @@ using gpu::gcn::Translator;
 // trace knob (DELTA_GPU_SHTRACE) or the AGC command-stream trace
 // (DELTA_AGC_TRACE).
 bool ShDbg() {
-  static const bool on = std::getenv("DELTA_GPU_SHTRACE") != nullptr ||
-                         std::getenv("DELTA_AGC_TRACE") != nullptr;
+  static const bool on = kGpuShtrace ||
+                         kAgcTrace;
   return on;
 }
 
@@ -807,7 +826,7 @@ void EmitExport(Translator& t, const Inst& inst, StageContext& sc) {
     // DELTA_GPU_EXPTRACE: the EN mask of each colour export. A component the
     // shader does not export gets a default here, and defaulting alpha to 1
     // would make every SRC_ALPHA blend opaque.
-    if (std::getenv("DELTA_GPU_EXPTRACE") && target <= 7) {
+    if (kExpTrace && target <= 7) {
       static uint32_t seen[256] = {};
       const uint32_t k = ((target & 7) << 5) | ((en & 0xF) << 1) | compr;
       if (seen[k]++ == 0)
@@ -857,8 +876,7 @@ void EmitExport(Translator& t, const Inst& inst, StageContext& sc) {
       // and the frame swings between near-black and flat green. The NaNs come
       // from our own approximations, not from the title. DELTA_GPU_ALLOWNAN
       // keeps whatever the shader produced.
-      static const bool no_nan = std::getenv("DELTA_GPU_ALLOWNAN") == nullptr;
-      if (no_nan) {
+      if (!kAllowNan) {
         const Id v = col;
         Id comps[4];
         for (int i = 0; i < 4; i++) {
@@ -873,13 +891,11 @@ void EmitExport(Translator& t, const Inst& inst, StageContext& sc) {
                                      {comps[0], comps[1], comps[2], comps[3]});
       }
       // DELTA_GPU_DEBUGALPHA: show the alpha the blend will use as greyscale.
-      if (std::getenv("DELTA_GPU_DEBUGALPHA")) {
+      if (kGpuDebugalpha) {
         const Id a = t.m.CompositeExtract(t.t_f, col, 3);
         col = t.m.CompositeConstruct(t.t_v4, {a, a, a, t.F32(1.f)});
       }
-      static const bool force_col =
-          std::getenv("DELTA_GPU_FORCECOLOR") != nullptr;
-      if (force_col)
+      if (kGpuForcecolor)
         col = t.m.CompositeConstruct(
             t.t_v4, {t.F32(1.f), t.F32(0.f), t.F32(0.f), t.F32(1.f)});
       t.m.Store(gpu::gcn::PsColorOut(t, sc, target), col);
@@ -1720,8 +1736,7 @@ std::vector<uint32_t> BlockStarts(const Program& program, uint32_t max_pc) {
 }
 
 bool ForceCfg() {
-  static const bool force = std::getenv("DELTA_GPU_SPIRV_CFG") != nullptr;
-  return force;
+  return kGpuSpirvCfg;
 }
 
 void EmitBody(Translator& t, const Program& program, StageContext& sc) {
@@ -1961,20 +1976,16 @@ bool TranslateVs(const Program& program,
   // DELTA_GPU_DBGPOS=<vs address>[:<dword offset>]: recompute this one shader's
   // position export from its position input and a 4x4 transform in its cbuffer
   // (address 0 = every shader; the offset picks which matrix in the window).
-  static const uint64_t dbg_pos_vs = [] {
-    const char* e = std::getenv("DELTA_GPU_DBGPOS");
-    return e ? std::strtoull(e, nullptr, 0) : ~0ull;
-  }();
+  static const uint64_t dbg_pos_vs =
+      kDbgPos ? std::strtoull(kDbgPos, nullptr, 0) : ~0ull;
   static const uint32_t dbg_pos_off = [] {
-    const char* e = std::getenv("DELTA_GPU_DBGPOS");
-    const char* c = e ? std::strchr(e, ':') : nullptr;
+    const char* c = kDbgPos ? std::strchr(kDbgPos, ':') : nullptr;
     return c ? (uint32_t)std::strtoul(c + 1, nullptr, 0) : 0u;
   }();
   // ...:<world binding> applies a 4x3 world matrix from that binding first, so
   // the probe can reproduce a world-then-view-projection chain.
   static const int dbg_pos_world = [] {
-    const char* e = std::getenv("DELTA_GPU_DBGPOS");
-    const char* c = e ? std::strchr(e, ':') : nullptr;
+    const char* c = kDbgPos ? std::strchr(kDbgPos, ':') : nullptr;
     const char* c2 = c ? std::strchr(c + 1, ':') : nullptr;
     return c2 ? std::atoi(c2 + 1) : -1;
   }();
@@ -1997,8 +2008,7 @@ bool TranslateVs(const Program& program,
   // is sound and the real position math is the culprit (e.g. an unbound MVP ->
   // degenerate); if it still draws nothing the problem is downstream
   // (index/vertex_count/render target).
-  static const bool force_quad = std::getenv("DELTA_GPU_FORCEQUAD") != nullptr;
-  if (force_quad) {
+  if (kGpuForcequad) {
     // A fetch-path VS never created a VertexIndex input, and its v0 is
     // clobbered by the vertex fetch -- bind a real VertexIndex here so the quad
     // is valid either way.
@@ -2023,11 +2033,7 @@ bool TranslateVs(const Program& program,
   // location-0 vertex input scaled into NDC. Separates "the vertex inputs never
   // reach the shader" from "the transform math is wrong": FORCEQUAD proves the
   // raster path but uses no vertex data at all, this uses the real attribute.
-  static const float raw_pos = [] {
-    const char* e = std::getenv("DELTA_GPU_RAWPOS");
-    return e ? static_cast<float>(std::atof(e)) : 0.f;
-  }();
-  if (raw_pos != 0.f && first_attr_var && first_attr_comps >= 2) {
+  if (kRawPos != 0.f && first_attr_var && first_attr_comps >= 2) {
     const Id comp_ty = first_attr_comps == 2   ? t.t_v2
                        : first_attr_comps == 3 ? t.t_v3
                                                : t.t_v4;
@@ -2035,8 +2041,8 @@ bool TranslateVs(const Program& program,
     t.m.Store(pos_out,
               t.m.CompositeConstruct(
                   t.t_v4,
-                  {t.FMul(t.m.CompositeExtract(t.t_f, val, 0), t.F32(raw_pos)),
-                   t.FMul(t.m.CompositeExtract(t.t_f, val, 1), t.F32(raw_pos)),
+                  {t.FMul(t.m.CompositeExtract(t.t_f, val, 0), t.F32(kRawPos)),
+                   t.FMul(t.m.CompositeExtract(t.t_f, val, 1), t.F32(kRawPos)),
                    t.F32(0.f), t.F32(1.f)}));
   }
 
@@ -2044,8 +2050,7 @@ bool TranslateVs(const Program& program,
   // (x/(1+|x|) after the perspective divide). Any FINITE position then covers
   // pixels, so a still-black target means w is zero/NaN rather than the
   // geometry merely landing off-screen.
-  static const bool pos_probe = std::getenv("DELTA_GPU_POSPROBE") != nullptr;
-  if (pos_probe) {
+  if (kGpuPosprobe) {
     const Id p_out_f0 = t.m.TypePointer(spv::StorageClass::Output, t.t_f);
     const Id px =
         t.m.Load(t.t_f, t.m.AccessChain(p_out_f0, pos_out, {t.U32(0)}));
@@ -2135,9 +2140,7 @@ bool TranslatePs(const Program& program,
   // green at entry, before any exec-mask discard can suppress the export. This
   // separates "draw produced no fragments" from "all fragments were discarded"
   // (FORCECOLOR alone only recolors fragments that reach the export).
-  static const bool paint_raster =
-      std::getenv("DELTA_GPU_FORCECOLOR") && std::getenv("DELTA_GPU_NOKILL");
-  if (paint_raster)
+  if (kGpuForcecolor && kGpuNokill)
     t.m.Store(gpu::gcn::PsColorOut(t, sc, 0),
               t.m.ConstComposite(
                   t.t_v4, {t.F32(0.f), t.F32(1.f), t.F32(0.f), t.F32(1.f)}));
@@ -2160,7 +2163,7 @@ bool TranslatePs(const Program& program,
     // flow moves EXEC around, and our model is a single bit, so gating on it
     // discards Isaac's entire frame. Only the explicit compare-and-kill counts.
   }
-  if (sc.wrote_color && kills_lanes && !std::getenv("DELTA_GPU_NOKILL")) {
+  if (sc.wrote_color && kills_lanes && !kGpuNokill) {
     const Id live = t.IsNonZero(t.Exec());
     const Id kill_blk = t.m.NewBlock(), after_kill = t.m.NewBlock();
     t.m.SelectionMerge(after_kill);
@@ -2176,8 +2179,7 @@ bool TranslatePs(const Program& program,
               t.m.ConstComposite(
                   t.t_v4, {t.F32(1.f), t.F32(1.f), t.F32(1.f), t.F32(1.f)}));
   } else if (sc.color_written_var) {
-    static const bool no_kill = std::getenv("DELTA_GPU_NOKILL") != nullptr;
-    if (!no_kill) {
+    if (!kGpuNokill) {
       const Id wrote = t.IsNonZero(t.m.Load(t.t_u, sc.color_written_var));
       const Id kill_blk = t.m.NewBlock(), after_kill = t.m.NewBlock();
       t.m.SelectionMerge(after_kill);
@@ -2191,7 +2193,7 @@ bool TranslatePs(const Program& program,
   // DELTA_GPU_PSUV: replace MRT0 with the interpolated location-0 varying, to
   // see the coordinate field a pass actually receives (a pure horizontal ramp
   // means the vertical component never made it across the VS->PS link).
-  if (std::getenv("DELTA_GPU_PSUV")) {
+  if (kGpuPsuv) {
     const Id in0 = gpu::gcn::PsInputVar(t, sc, 0);
     const Id p_in_f = t.m.TypePointer(spv::StorageClass::Input, t.t_f);
     const Id u = t.m.Load(t.t_f, t.m.AccessChain(p_in_f, in0, {t.U32(0)}));
@@ -2341,7 +2343,7 @@ Recompiled Recompile(const uint32_t* vs_code,
   if (!TranslateVs(vs_program, vs_user_data, flat_attrs, r, tv, gl_clip_space,
                    vs_user_sgprs) ||
       gpu::gcn::HadUnsupported()) {
-    if (ShDbg() || std::getenv("DELTA_GPU_DRAWCENSUS"))
+    if (ShDbg() || kDrawCensus)
       std::fprintf(stderr, "[gcnspv] vs %#lx rejected: %s\n",
                    (unsigned long)reinterpret_cast<uintptr_t>(vs_code),
                    gpu::gcn::UnsupportedOps().c_str());
@@ -2357,7 +2359,7 @@ Recompiled Recompile(const uint32_t* vs_code,
               : !TranslateDepthOnlyPs(tp))
     return r;
   if (gpu::gcn::HadUnsupported()) {
-    if (ShDbg() || std::getenv("DELTA_GPU_DRAWCENSUS"))
+    if (ShDbg() || kDrawCensus)
       std::fprintf(stderr, "[gcnspv] ps %#lx rejected: %s\n",
                    (unsigned long)reinterpret_cast<uintptr_t>(ps_code),
                    gpu::gcn::UnsupportedOps().c_str());
@@ -2383,7 +2385,7 @@ Recompiled Recompile(const uint32_t* vs_code,
   }
   // DELTA_GPU_SPVDUMP=<dir>: write each recompiled stage's SPIR-V so it can be
   // read with spirv-dis (the only way to see what the position math became).
-  if (const char* dir = std::getenv("DELTA_GPU_SPVDUMP")) {
+  if (const char* dir = kSpvDump) {
     char path[512];
     std::snprintf(path, sizeof(path), "%s/vs_%lx.spv", dir,
                   (unsigned long)reinterpret_cast<uintptr_t>(vs_code));

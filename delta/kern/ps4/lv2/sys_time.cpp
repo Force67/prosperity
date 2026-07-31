@@ -12,6 +12,11 @@
 
 #include "error_table.h"
 #include "sys_time.h"
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(long, kTimeScale, "DELTA_TIMESCALE", 1);
+}  // namespace
 
 namespace krnl {
 // PS4 timespec is {int64 tv_sec; int64 tv_nsec}, same layout as the host's on
@@ -52,7 +57,7 @@ int PS4ABI sys_clock_gettime(uint32_t clock_id, sce_timespec *tp) {
   // (`while(now < target) yield`), this makes it exit Nx sooner (fps up); if it's
   // a work loop drowning in clock-syscall overhead, fps is unchanged. Classifies
   // the bottleneck. Realtime is left alone (only monotonic/uptime ids scale).
-  static const long scale = [] { const char *e = std::getenv("DELTA_TIMESCALE"); return e ? std::atol(e) : 1; }();
+  const long scale = kTimeScale;
   if (scale > 1 && host == CLOCK_MONOTONIC) {
     static const uint64_t base = (uint64_t)ts.tv_sec * 1000000000ull + ts.tv_nsec;
     uint64_t now = (uint64_t)ts.tv_sec * 1000000000ull + ts.tv_nsec;

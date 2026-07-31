@@ -2,8 +2,12 @@
 
 #include <atomic>
 #include <cstdlib>
+#include <utl/options.h>
 
 namespace krnl::ps4 {
+
+DELTA_OPTION(bool, kNeoMode, "DELTA_PS4_NEO", false);
+
 namespace {
 
 constexpr HardwareModeProfile kBaseProfile{HardwareMode::base, 0x710f10};
@@ -13,11 +17,8 @@ std::atomic<uint32_t> g_titleAttributes{0};
 } // namespace
 
 const HardwareModeProfile &hardwareModeProfile() {
-  static const HardwareModeProfile *const profile = [] {
-    const char *value = std::getenv("DELTA_PS4_NEO");
-    return value && std::strtol(value, nullptr, 0) != 0 ? &kNeoProfile
-                                                        : &kBaseProfile;
-  }();
+  static const HardwareModeProfile *const profile =
+      kNeoMode ? &kNeoProfile : &kBaseProfile;
   return *profile;
 }
 

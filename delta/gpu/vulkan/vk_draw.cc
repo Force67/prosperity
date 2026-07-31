@@ -25,6 +25,19 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(int, kMaxDraw, "DELTA_GPU_MAXDRAW", -1);
+DELTA_OPTION(int, kOnlyDraw, "DELTA_GPU_ONLYDRAW", -1);
+DELTA_OPTION(uint32_t, kOnlyIc, "DELTA_GPU_ONLYIC", 0);
+DELTA_OPTION(bool, kRecompPath, "DELTA_GPU_RECOMP", true);
+DELTA_OPTION(bool, kDrawTraceAll, "DELTA_GPU_DRAWTRACE", false);
+DELTA_OPTION(bool, kNoCull, "DELTA_GPU_NOCULL", false);
+DELTA_OPTION(bool, kNoDepth, "DELTA_GPU_NODEPTH", false);
+DELTA_OPTION(bool, kNoMask, "DELTA_GPU_NOMASK", false);
+DELTA_OPTION(bool, kSwapTex, "DELTA_GPU_SWAPTEX01", false);
+}  // namespace
 
 namespace gpu::rhi {
 using namespace gpu::vk;
@@ -34,7 +47,6 @@ void Draw(Renderer& renderer, const DrawInfo& d_in) {
     return;
   // DELTA_GPU_SWAPTEX01: bisect a suspected sampler-binding order mismatch by
   // exchanging the first two textures of every multi-texture draw.
-  static const bool kSwapTex = std::getenv("DELTA_GPU_SWAPTEX01") != nullptr;
   DrawInfo swapped;
   if (kSwapTex && d_in.num_texs >= 2) {
     swapped = d_in;
@@ -43,20 +55,8 @@ void Draw(Renderer& renderer, const DrawInfo& d_in) {
   const DrawInfo& d_sw = (kSwapTex && d_in.num_texs >= 2) ? swapped : d_in;
   // DELTA_GPU_MAXDRAW=<n> / DELTA_GPU_ONLYDRAW=<n>: build a frame up one draw
   // at a time, or isolate a single one, to see what each pass contributes.
-  static const int kMaxDraw = [] {
-    const char* e = std::getenv("DELTA_GPU_MAXDRAW");
-    return e ? std::atoi(e) : -1;
-  }();
-  static const int kOnlyDraw = [] {
-    const char* e = std::getenv("DELTA_GPU_ONLYDRAW");
-    return e ? std::atoi(e) : -1;
-  }();
   // DELTA_GPU_ONLYIC=<n>: render only draws with this index count. Draw indices
   // move between frames; an index count names one pass reliably.
-  static const uint32_t kOnlyIc = [] {
-    const char* e = std::getenv("DELTA_GPU_ONLYIC");
-    return e ? static_cast<uint32_t>(std::strtoul(e, nullptr, 0)) : 0u;
-  }();
   if (kOnlyIc && d_sw.index_count != kOnlyIc) {
     g_frame.draws++;
     return;
@@ -70,9 +70,6 @@ void Draw(Renderer& renderer, const DrawInfo& d_in) {
   // Diagnostic kill-switches for bisecting "renders nothing" chains:
   // DELTA_GPU_NODEPTH disables depth test/write, DELTA_GPU_NOCULL disables
   // face culling, DELTA_GPU_NOMASK forces full color write masks.
-  static const bool kNoDepth = std::getenv("DELTA_GPU_NODEPTH") != nullptr;
-  static const bool kNoCull = std::getenv("DELTA_GPU_NOCULL") != nullptr;
-  static const bool kNoMask = std::getenv("DELTA_GPU_NOMASK") != nullptr;
   // A pass that samples the depth buffer it also has bound is reading it as a
   // texture, which is legal while depth testing and writes are off. Detaching
   // the unused attachment lets the draw run instead of being declined as
@@ -122,15 +119,9 @@ void Draw(Renderer& renderer, const DrawInfo& d_in) {
   // heuristic quad path when the draw can't be handled. On by default now that
   // it renders gameplay correctly; DELTA_GPU_RECOMP=0 forces the old heuristic
   // path.
-  static const bool kRecompPath = [] {
-    const char* e = std::getenv("DELTA_GPU_RECOMP");
-    return !e || std::strcmp(e, "0") != 0;
-  }();
   const bool recompiled = kRecompPath && d.recomp && DrawRecomp(renderer, d);
   if (!renderer.available())
     return;
-  static const bool kDrawTraceAll =
-      std::getenv("DELTA_GPU_DRAWTRACE") != nullptr;
   if (kDrawTraceAll) {
     static uint32_t traced = 0;
     if (traced++ < 100)

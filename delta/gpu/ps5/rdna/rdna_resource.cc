@@ -16,6 +16,14 @@
 #include <numeric>
 #include <unordered_map>
 #include <utility>
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(bool, kAgcTrace, "DELTA_AGC_TRACE", false);
+DELTA_OPTION(bool, kDbg, "DELTA_AGC_RESTRACE", false);
+DELTA_OPTION(bool, kGpuSwcensus, "DELTA_GPU_SWCENSUS", false);
+DELTA_OPTION(bool, kGpuTexresolve, "DELTA_GPU_TEXRESOLVE", false);
+}  // namespace
 
 namespace gpu::rdna {
 namespace {
@@ -358,7 +366,6 @@ struct ScalarEval {
       const uint32_t sdst = (inst.raw[0] >> 16) & 0x7F;
       if (inst.opcode == 0x0A || inst.opcode == 0x0B) {
         if (!scc_known) {
-          static const bool kDbg = std::getenv("DELTA_AGC_RESTRACE") != nullptr;
           if (kDbg) {
             static int n = 0;
             if (n++ < 20)
@@ -377,7 +384,6 @@ struct ScalarEval {
         if (Source(source, inst.literal, value)) {
           SetDest(sdst, 0, value);
         } else {
-          static const bool kDbg = std::getenv("DELTA_AGC_RESTRACE") != nullptr;
           if (kDbg) {
             static int n = 0;
             if (n++ < 20)
@@ -808,7 +814,7 @@ TImage DecodeTImage(const uint32_t* d, bool r128) {
   // DELTA_GPU_SWCENSUS: which gfx10 swizzle modes this title's textures use --
   // the detiler only covers linear and the three "standard" modes, and anything
   // else is rejected into the white fallback (flat-coloured quads).
-  if (std::getenv("DELTA_GPU_SWCENSUS")) {
+  if (kGpuSwcensus) {
     static uint32_t seen[64] = {};
     if (sw_mode < 64 && seen[sw_mode]++ == 0)
       std::fprintf(stderr, "[swcensus] sw_mode=%u first seen (%ux%u gfmt=%u)\n",
@@ -852,8 +858,7 @@ TImage DecodeTImage(const uint32_t* d, bool r128) {
     const uint32_t pa = 256 / std::gcd(256u, eb);
     t.pitch = ((t.width + pa - 1) / pa) * pa;
   }
-  static const bool trace = std::getenv("DELTA_AGC_TRACE") != nullptr;
-  if (trace) {
+  if (kAgcTrace) {
     static uint32_t seen[32], n_seen = 0;
     const uint32_t key = (gfmt << 8) | sw_mode;
     bool is_new = true;
@@ -921,12 +926,10 @@ std::vector<TImage> TrackTextures(const uint32_t* ps_code,
     // DELTA_GPU_TEXRESOLVE: which SGPR quad each sampler's T# comes from, and
     // whether it resolved. A binding that reads back base 0 is either a null
     // descriptor or a chain we failed to walk.
-    static const bool tr_resolve =
-        std::getenv("DELTA_GPU_TEXRESOLVE") != nullptr;
     const uint32_t srsrc = ((w1 >> 16) & 0x1F) * 4;
     const bool r128 = (w0 >> 15) & 1;
     const uint32_t resource_dwords = r128 ? 4 : 8;
-    if (tr_resolve && !eval.AllKnown(srsrc, resource_dwords)) {
+    if (kGpuTexresolve && !eval.AllKnown(srsrc, resource_dwords)) {
       std::fprintf(stderr,
                    "[texres]   mimg pc=%04x w0=%08x w1=%08x op=%#x nsa=%u "
                    "srsrc_field=%u ssamp_field=%u vaddr=%u vdata=%u\n",
@@ -955,7 +958,7 @@ std::vector<TImage> TrackTextures(const uint32_t* ps_code,
             w.pc, (int)w.enc, w.opcode, d0, d0 + cnt - 1, w.raw[0], w.raw[1]);
       }
     }
-    if (tr_resolve)
+    if (kGpuTexresolve)
       std::fprintf(stderr, "[texres] binding=%u srsrc=s%u known=%d\n", b, srsrc,
                    eval.AllKnown(srsrc, resource_dwords));
     if (eval.AllKnown(srsrc, resource_dwords)) {
@@ -1010,7 +1013,6 @@ std::unordered_map<uint32_t, BufferResource> ResolveBuffers(
     } else if ((inst.enc == Enc::kMubuf || inst.enc == Enc::kMtbuf) &&
                inst.opcode <= 0x03) {
       const uint32_t srsrc = ((inst.raw[1] >> 16) & 0x1F) * 4;
-      static const bool kDbg = std::getenv("DELTA_AGC_RESTRACE") != nullptr;
       if (kDbg) {
         static int n = 0;
         if (n++ < 40)

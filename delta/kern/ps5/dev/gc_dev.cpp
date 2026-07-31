@@ -24,6 +24,17 @@
 #include "kern/ps4/dev/dma_dev.h"  // dmemBackingFd/Size (shared physical dmem store)
 #include "kern/proc.h"
 #include "kern/ps4/lv2/sys_mem.h"  // allocLowGuest, mFlags
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(bool, kAgcRingdump, "DELTA_AGC_RINGDUMP", false);
+DELTA_OPTION(bool, kAgcTrace, "DELTA_AGC_TRACE", false);
+DELTA_OPTION(bool, kDmemTrace, "DELTA_DMEM_TRACE", false);
+DELTA_OPTION(bool, kFlipTrace, "DELTA_FLIP_TRACE", false);
+DELTA_OPTION(bool, kGcCensus, "DELTA_GC_CENSUS", false);
+DELTA_OPTION(bool, kGcIoctlCensus, "DELTA_GC_IOCTL_CENSUS", false);
+DELTA_OPTION(bool, kGcTrace, "DELTA_GC_TRACE", false);
+}  // namespace
 
 // PS5 AGC submit bridge (delta_gpu, gpu/ps5): forward the DCB to the PS5 command
 // processor, which follows INDIRECT_BUFFER chains and decodes the draws.
@@ -44,8 +55,7 @@ extern "C" uint64_t prosperity_ps5_scanout_base();
 // DELTA_FLIP_TRACE: log the scanout base each AGC flip presents, so the derived
 // per-flip buffer can be checked against the registered display buffers.
 static void traceFlip(const char *site, uint64_t base) {
-  static const bool on = std::getenv("DELTA_FLIP_TRACE") != nullptr;
-  if (on)
+  if (kFlipTrace)
     std::printf("[flip] %s present=%#lx\n", site, (unsigned long)base);
 }
 
@@ -136,7 +146,7 @@ static void submitGnmDescArray(uint64_t descPtr, uint32_t count) {
 }
 
 int32_t gcDevicePs5::ioctl(uint32_t cmd, void *data) {
-  if (std::getenv("DELTA_GC_IOCTL_CENSUS")) {
+  if (kGcIoctlCensus) {
     static std::mutex mtx;
     static std::map<uint32_t, uint64_t> hist;
     static auto last = std::chrono::steady_clock::now();
@@ -150,7 +160,7 @@ int32_t gcDevicePs5::ioctl(uint32_t cmd, void *data) {
         std::printf("[gcioctl] %#x %llu\n", c, (unsigned long long)n);
     }
   }
-  if (std::getenv("DELTA_GC_TRACE"))
+  if (kGcTrace)
     std::printf("[gc] ioctl(%x) data=%p\n", cmd, data);
   switch (cmd) {
   case 0xC0108102: {  // GNM submit: {u32 a0, u32 count, u64 descPtr}
@@ -199,14 +209,13 @@ int32_t gcDevicePs5::ioctl(uint32_t cmd, void *data) {
         if (!g_acqRingLo || base < g_acqRingLo) g_acqRingLo = base;
         if (base + size > g_acqRingHi) g_acqRingHi = base + size;
       }
-      static const bool trace = std::getenv("DELTA_AGC_TRACE") != nullptr;
       static int dumps = 0;
       static uint64_t calls = 0;
       ++calls;
       // The first few submits are engine init, where the ring legitimately holds
       // nothing. Sample later ones too, or "the ring reads empty" only ever
       // describes start-up.
-      if (trace && (dumps < 8 || (calls % 200 == 0 && dumps < 12))) {
+      if (kAgcTrace && (dumps < 8 || (calls % 200 == 0 && dumps < 12))) {
         dumps++;
         std::printf("[agc] --- submit #%llu ---\n", (unsigned long long)calls);
         auto *w = reinterpret_cast<uint32_t *>(a);
@@ -247,7 +256,7 @@ int32_t gcDevicePs5::ioctl(uint32_t cmd, void *data) {
       // PREVIOUS submit's window here: if it has packets now, the ioctl is a
       // ring-window acquire and the submit boundary is the doorbell, not this.
       static uint64_t prevBase = 0;
-      if (trace && prevBase && prevBase != base && gpuReadable(prevBase, 0x8000)) {
+      if (kAgcTrace && prevBase && prevBase != base && gpuReadable(prevBase, 0x8000)) {
         auto *pw = reinterpret_cast<const uint32_t *>(prevBase);
         uint32_t nz = 0;
         for (uint32_t k = 0; k < 0x8000 / 4; k++)
@@ -264,9 +273,8 @@ int32_t gcDevicePs5::ioctl(uint32_t cmd, void *data) {
       // it references, with a PM4 sniff of each buffer. The per-pass register
       // state Skyrim never seems to program (a colour target for some passes, PS
       // user data above 15) has to come from one of these.
-      static const bool ringDump = std::getenv("DELTA_AGC_RINGDUMP") != nullptr;
       static int ringN = 0;
-      if (ringDump && ringN < 3) {
+      if (kAgcRingdump && ringN < 3) {
         ringN++;
         auto *w = reinterpret_cast<const uint32_t *>(a);
         std::printf("[ring] arg:");
@@ -345,9 +353,8 @@ int32_t gcDevicePs5::ioctl(uint32_t cmd, void *data) {
         traceFlip("0x80488131", scanout);
         prosperity_agc_flip(scanout);
       }
-      static const bool agcTrace1 = std::getenv("DELTA_AGC_TRACE") != nullptr;
       static int s_d131 = 0;
-      if (agcTrace1 && s_d131 < 6) {
+      if (kAgcTrace && s_d131 < 6) {
         s_d131++;
         auto *w = static_cast<const uint32_t *>(data);
         std::printf("[agc] 8131 arg(18 dwords):");
@@ -398,9 +405,8 @@ int32_t gcDevicePs5::ioctl(uint32_t cmd, void *data) {
       auto *w = static_cast<uint32_t *>(data);
       uint32_t count = w[1];
       uint64_t ptr = (static_cast<uint64_t>(w[3]) << 32) | w[2];
-      static const bool agcTrace2 = std::getenv("DELTA_AGC_TRACE") != nullptr;
       static int s_d132 = 0;
-      if (agcTrace2 && s_d132 < 8) {
+      if (kAgcTrace && s_d132 < 8) {
         s_d132++;
         std::printf("[agc] 8132 arg=[%08x %08x %08x %08x] ptr=%#lx count=%u\n",
                     w[0], w[1], w[2], w[3], (unsigned long)ptr, count);
@@ -418,7 +424,7 @@ int32_t gcDevicePs5::ioctl(uint32_t cmd, void *data) {
           nFwd{0}, nSkipAddr{0};
       nSubmits.fetch_add(1, std::memory_order_relaxed);
       if (count >= 64) nDropBatch.fetch_add(1, std::memory_order_relaxed);
-      if (std::getenv("DELTA_GC_CENSUS")) {
+      if (kGcCensus) {
         static std::atomic<uint64_t> last{0};
         uint64_t n = nSubmits.load();
         if (n - last.load() >= 2000) {
@@ -467,9 +473,8 @@ int32_t gcDevicePs5::ioctl(uint32_t cmd, void *data) {
   // still soft-ok.
   if (data) {
     uint32_t num = cmd & 0xff;
-    static const bool agcTrace = std::getenv("DELTA_AGC_TRACE") != nullptr;
     static int agcDumps = 0;
-    if (agcTrace && agcDumps < 24 &&
+    if (kAgcTrace && agcDumps < 24 &&
         (num == 0x31 || num == 0x32 || num == 0x33 || num == 0x23)) {
       agcDumps++;
       uint32_t len = (cmd >> 16) & 0x1fff;
@@ -508,9 +513,8 @@ int32_t gcDevicePs5::ioctl(uint32_t cmd, void *data) {
 
   // Unknown AGC ioctl: log (rate-limited) and soft-succeed, zeroing any OUT buffer
   // so the driver reads a benign result instead of stack garbage.
-  static const bool gcTrace = std::getenv("DELTA_GC_TRACE") != nullptr;
   static int unhandledLogged = 0;
-  if (gcTrace || unhandledLogged < 32) {
+  if (kGcTrace || unhandledLogged < 32) {
     unhandledLogged++;
     std::printf("[gc] UNHANDLED ioctl(%x) data=%p\n", cmd, data);
   }
@@ -555,8 +559,8 @@ uint8_t *gcDevicePs5::map(void *addr, size_t len, uint32_t /*prot*/, uint32_t fl
   }
   if (p == MAP_FAILED)
     return reinterpret_cast<uint8_t *>(-1);
-  static const bool trace = std::getenv("DELTA_GC_TRACE") != nullptr ||
-                            std::getenv("DELTA_DMEM_TRACE") != nullptr;
+  static const bool trace = kGcTrace ||
+                            kDmemTrace;
   if (trace)
     std::fprintf(stderr, "[gc] devmap off=%#zx len=%#zx -> %p (shared)\n", offset,
                  len, p);

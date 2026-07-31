@@ -5,6 +5,7 @@
  * for the client/server rationale and the Orbis struct layouts referenced here.
  */
 
+#include <base/environment_variables.h>
 #include "libSceSaveData.h"
 
 #include <algorithm>
@@ -20,6 +21,13 @@
 #include <vector>
 
 #include "kern/vfs.h"
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(const char *, kSavedataDir, "DELTA_SAVEDATA_DIR", nullptr);
+DELTA_OPTION(bool, kSaveTrace, "DELTA_SAVE_TRACE", false);
+DELTA_OPTION(bool, kSavedataTrace, "DELTA_SAVEDATA_TRACE", false);
+}  // namespace
 
 namespace {
 
@@ -27,8 +35,7 @@ namespace {
 // A menu that waits on save enumeration gives no other sign of it, so "was this
 // even called" is the first thing worth knowing.
 static void sdTrace(const char* fn) {
-  static const bool on = std::getenv("DELTA_SAVEDATA_TRACE") != nullptr;
-  if (on)
+  if (kSavedataTrace)
     std::fprintf(stderr, "[savedata] call %s\n", fn);
 }
 
@@ -80,8 +87,7 @@ struct Slot {
 std::vector<Slot> g_slots;  // guarded by g_mtx
 
 bool g_trace() {
-  static const bool on = std::getenv("DELTA_SAVE_TRACE") != nullptr;
-  return on;
+  return kSaveTrace;
 }
 
 bool hostDirExists(const std::string &path) {
@@ -125,10 +131,12 @@ void removeTree(const std::string &path) {
 // behaviour ($DELTA_SAVEDATA_DIR, else ~/.prosperity/savedata) so saves written
 // before this module gained per-title roots stay reachable.
 std::string saveRoot() {
-  if (const char *e = std::getenv("DELTA_SAVEDATA_DIR"))
+  if (const char *e = kSavedataDir)
     return e;
-  const char *home = std::getenv("HOME");
-  return std::string(home ? home : ".") + "/.prosperity/savedata";
+  base::StringU8 home;
+  base::GetEnvironmentVariable(u8"HOME", home);
+  return std::string(home.empty() ? "." : (const char *)home.c_str()) +
+         "/.prosperity/savedata";
 }
 
 // The booted title's tag for the save root. dcore parses TITLE_ID from the pkg's

@@ -31,6 +31,14 @@
 #include <limits>
 #include <unordered_map>
 #include <vector>
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(uint64_t, kDetileDump, "DELTA_GPU_DETILEDUMP", 0);
+DELTA_OPTION(bool, kCsList, "DELTA_GPU_CSLIST", false);
+DELTA_OPTION(bool, kCsRtTrace, "DELTA_GPU_CSRT", false);
+DELTA_OPTION(bool, kGpuCsgpuVerbose, "DELTA_GPU_CSGPU_VERBOSE", false);
+}  // namespace
 
 namespace gpu::vk {
 namespace {
@@ -252,10 +260,6 @@ bool StageCsImage(const ComputeInfo::Res& res, void* dst) {
   // DELTA_GPU_DETILEDUMP=<base>: write the de-tiled level-0 bytes of that guest
   // surface to <dumpdir>/detiled.bin once, so the swizzle can be checked
   // against an offline decode of the same texture.
-  static const uint64_t kDetileDump = [] {
-    const char* e = std::getenv("DELTA_GPU_DETILEDUMP");
-    return e ? std::strtoull(e, nullptr, 0) : 0ull;
-  }();
   static bool detile_dumped = false;
   for (uint32_t mip = 0; mip < tiled.mip_levels; mip++) {
     const auto& src_level = tiled.mips[mip];
@@ -1012,7 +1016,6 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci) {
   CsPipe* cp = GetCsPipe(ci);
   if (!cp)
     return false;
-  static const bool verbose = std::getenv("DELTA_GPU_CSGPU_VERBOSE") != nullptr;
 
   // Persistent command buffer + descriptor pool (created once, reused).
   if (g_cs_cmd == VK_NULL_HANDLE) {
@@ -1052,7 +1055,6 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci) {
 
   // DELTA_GPU_CSLIST: per-dispatch resource staging list for the first 200
   // dispatches — shows what the chain actually round-trips per frame.
-  static const bool kCsList = std::getenv("DELTA_GPU_CSLIST") != nullptr;
   static uint32_t cs_listed = 0;
   if (kCsList && g_frame.num > 25 && cs_listed < 200) {
     cs_listed++;
@@ -1148,7 +1150,6 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci) {
         e.last_rt_frame = static_cast<int>(g_frame.num);
         e.rt_sourced = StageCsRangeFromRt(ci.res[i], e);
         // DELTA_GPU_CSRT: trace every RT-backed staging decision.
-        static const bool kCsRtTrace = std::getenv("DELTA_GPU_CSRT") != nullptr;
         static int rt_trace_logged = 0;
         if (kCsRtTrace && rt_trace_logged < 200) {
           rt_trace_logged++;
@@ -1333,7 +1334,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci) {
         it->second.pending_batch = true;
     }
   }
-  if ((++g_cs_batch_count >= 128 || verbose) && !CsBatchFlush()) {
+  if ((++g_cs_batch_count >= 128 || kGpuCsgpuVerbose) && !CsBatchFlush()) {
     renderer.state = nullptr;
     return false;
   }
@@ -1351,7 +1352,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci) {
     if (!it->second.gpu_dirty)
       IndexDirtyRange(ci.res[i].base, it->second.guest_bytes);
     it->second.gpu_dirty = true;
-    if (verbose) {
+    if (kGpuCsgpuVerbose) {
       const uint8_t* b = static_cast<const uint8_t*>(it->second.map);
       uint64_t nz = 0,
                step = ci.res[i].size > 65536 ? ci.res[i].size / 65536 : 1;

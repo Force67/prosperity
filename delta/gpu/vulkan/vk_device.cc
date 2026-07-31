@@ -15,6 +15,11 @@
 #include <cstdlib>
 #include <cstring>
 #include <thread>
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(const char*, kVkGpu, "DELTA_VK_GPU", nullptr);
+}  // namespace
 
 namespace gpu::vk {
 
@@ -207,7 +212,7 @@ bool CreateDevice() {
   // CPU): discrete > integrated > virtual > CPU. The loader can enumerate both
   // a discrete GPU and llvmpipe on the same box, so picking devs[0] blindly may
   // land on software. DELTA_VK_GPU=<name-substring> forces a specific device.
-  const char* want = std::getenv("DELTA_VK_GPU");
+  const char* want = kVkGpu;
   int best = -1;
   g_dev.phys = VK_NULL_HANDLE;
   for (VkPhysicalDevice d : devs) {

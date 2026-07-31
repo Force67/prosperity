@@ -16,6 +16,11 @@
 #include "error_table.h"
 #include "sys_time.h"
 #include "sys_time_ext.h"
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(long, kTimeScaleRt, "DELTA_TIMESCALE_RT", 1);
+}  // namespace
 
 namespace krnl {
 // gettimeofday: wall-clock time as seconds + microseconds. We pull from
@@ -31,7 +36,7 @@ int PS4ABI sys_gettimeofday(sce_timeval *tv, sce_timezone *tz) {
     // (Doom64's ~1fps main loop hammers gettimeofday, not monotonic, so the old
     // DELTA_TIMESCALE which only scaled monotonic had no effect): if fps rises the
     // loop is timeout-bound (it gives up sooner); if unchanged it is work-bound.
-    static const long rtScale = [] { const char *e = std::getenv("DELTA_TIMESCALE_RT"); return e ? std::atol(e) : 1; }();
+    const long rtScale = kTimeScaleRt;
     if (rtScale > 1) {
       static const uint64_t base = now;
       now = base + (now - base) * static_cast<uint64_t>(rtScale);

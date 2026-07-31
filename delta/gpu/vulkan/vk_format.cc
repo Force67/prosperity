@@ -8,6 +8,12 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(bool, kNoBlend, "DELTA_GPU_NOBLEND", false);
+DELTA_OPTION(bool, kNoSwizzle, "DELTA_GPU_NOSWIZZLE", false);
+}  // namespace
 
 namespace gpu::vk {
 namespace {
@@ -211,7 +217,6 @@ VkFormat ColorTargetFormat(uint32_t info) {
 }
 
 VkComponentMapping TextureComponents(uint32_t swizzle) {
-  static const bool kNoSwizzle = std::getenv("DELTA_GPU_NOSWIZZLE") != nullptr;
   if (!swizzle || kNoSwizzle)
     return {};
   const auto comp = [](uint32_t sel) {
@@ -331,7 +336,6 @@ VkPipelineColorBlendAttachmentState BlendAttachment(uint32_t bc, bool en) {
   // DELTA_GPU_NOBLEND: force opaque (diagnostic) to test whether a draw
   // vanishes because its src-alpha blend multiplies by a zero texel alpha
   // (Doom64 3D walls).
-  static const bool kNoBlend = std::getenv("DELTA_GPU_NOBLEND") != nullptr;
   if (kNoBlend)
     en = false;
   if (!en) {

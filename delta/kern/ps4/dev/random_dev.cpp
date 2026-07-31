@@ -11,14 +11,18 @@
 
 #include "file_dev.h" // fillStat / kSceFileMode*
 #include "random_dev.h"
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(bool, kArndZero, "DELTA_ARND_ZERO", false);
+}  // namespace
 
 namespace krnl {
 namespace {
 // DELTA_ARND_ZERO already exists for the sysctl entropy path; honour it here too
 // so a run can be made deterministic end to end.
 bool zeroEntropy() {
-  static const bool on = std::getenv("DELTA_ARND_ZERO") != nullptr;
-  return on;
+  return kArndZero;
 }
 } // namespace
 

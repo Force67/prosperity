@@ -81,6 +81,13 @@
 
 #include "gfx/gfx_audio.h"
 #include "kern/ps4/lv2/sys_event_flag.h"
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(bool, kAudioDaemon, "DELTA_AUDIO_DAEMON", true);
+DELTA_OPTION(bool, kAudioTrace, "DELTA_AUDIO_TRACE", false);
+DELTA_OPTION(bool, kAudiomixAck, "DELTA_AUDIOMIX_ACK", false);
+}  // namespace
 
 namespace krnl {
 namespace {
@@ -130,22 +137,14 @@ std::unordered_map<int, Region> g_area;
 std::atomic<bool> g_started{false};
 
 bool traceOn() {
-  static const bool on = std::getenv("DELTA_AUDIO_TRACE") != nullptr;
-  return on;
+  return kAudioTrace;
 }
 
 // DELTA_AUDIO_DAEMON=0 turns the daemon off, leaving LLE libSceAudioOut silent
 // (the pre-daemon behaviour) -- useful when bisecting an LLE hang, since the
 // daemon is what unblocks the title's audio thread.
 bool enabled() {
-  static const bool on = [] {
-    const char *v = std::getenv("DELTA_AUDIO_DAEMON");
-    if (!v || !*v)
-      return true;
-    return std::strcmp(v, "0") != 0 && std::strcmp(v, "off") != 0 &&
-           std::strcmp(v, "false") != 0;
-  }();
-  return on;
+  return kAudioDaemon;
 }
 
 uint64_t nowUs() {
@@ -424,7 +423,7 @@ void audioDaemonNoticeShm(const char *name, uint8_t *base, size_t size) {
   std::fprintf(stderr,
                "[audiod] '%s' is an LLE libSceAudioOut control block; starting "
                "the system audio daemon stand-in\n", name);
-  if (std::getenv("DELTA_AUDIOMIX_ACK"))
+  if (kAudiomixAck)
     std::fprintf(stderr,
                  "[audiod] WARNING: DELTA_AUDIOMIX_ACK is set. That research "
                  "aid fakes the mix-flag grant on a timer, which races the "

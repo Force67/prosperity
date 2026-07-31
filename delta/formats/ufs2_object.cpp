@@ -18,6 +18,11 @@
 #include <unordered_map>
 
 #include <utl/file.h>
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(bool, kUfsDbg, "DELTA_UFS_DBG", false);
+}  // namespace
 
 namespace vfs {
 namespace {
@@ -44,8 +49,7 @@ template <typename T> T rdle(const uint8_t *p) {
 }
 
 bool dbg() {
-  static bool on = std::getenv("DELTA_UFS_DBG") != nullptr;
-  return on;
+  return kUfsDbg;
 }
 } // namespace
 

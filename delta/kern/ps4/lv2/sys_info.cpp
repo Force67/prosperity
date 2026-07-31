@@ -24,6 +24,13 @@
 
 #if defined(DELTA_BACKEND_NATIVE)
 #include <ctime>
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(bool, kArndZero, "DELTA_ARND_ZERO", false);
+DELTA_OPTION(bool, kSotc7core, "DELTA_SOTC_7CORE", false);
+DELTA_OPTION(bool, kSysctlCaller, "DELTA_SYSCTL_CALLER", false);
+}  // namespace
 #endif
 
 namespace krnl {
@@ -90,8 +97,7 @@ int PS4ABI sys_cpuset_getaffinity(int /*level*/, int /*which*/, int64_t /*id*/,
     // (loader parks on its evf "job done" flag, the game loops on the loading
     // screen). Granting core 6 spawns a 7th worker (ordinal 6, bit 0x40) so that
     // job becomes claimable. Off by default (Isaac/Doom64 keep 6 cores).
-    static const bool sevenCore = std::getenv("DELTA_SOTC_7CORE") != nullptr;
-    if (sevenCore)
+    if (kSotc7core)
       bits = 0x7F;  // cores 0..6
     std::memcpy(mask, &bits,
                 cpusetsize < sizeof(bits) ? cpusetsize : sizeof(bits));
@@ -250,8 +256,7 @@ int PS4ABI sys_sysctl(int *name, uint32_t namelen, void *oldp, size_t *oldlenp,
     auto length = *oldlenp;
     if (length > 256)
       length = 256;
-    static const bool zero = std::getenv("DELTA_ARND_ZERO") != nullptr;
-    if (zero || getrandom(oldp, length, 0) != static_cast<ssize_t>(length))
+    if (kArndZero || getrandom(oldp, length, 0) != static_cast<ssize_t>(length))
       std::memset(oldp, 0, length);
     *oldlenp = length;
     return 0;
@@ -385,7 +390,7 @@ int PS4ABI sys_sysctl(int *name, uint32_t namelen, void *oldp, size_t *oldlenp,
 
   if (name[0] == 0 && name[1] == 3 && namelen == 2) {
     auto name = base::StringRef(static_cast<const char *>(newp), newlen);
-    if (std::getenv("DELTA_SYSCTL_CALLER"))
+    if (kSysctlCaller)
       std::printf("[sysctl] name2oid '%.*s'\n", (int)newlen,
                   static_cast<const char *>(newp));
 
@@ -495,7 +500,7 @@ int PS4ABI sys_sysctl(int *name, uint32_t namelen, void *oldp, size_t *oldlenp,
   std::printf("\n");
   // The out buffer is usually a caller stack local, so scanning up from it finds
   // the guest frames that wanted this oid.
-  if (std::getenv("DELTA_SYSCTL_CALLER") && oldp) {
+  if (kSysctlCaller && oldp) {
     auto *sp = reinterpret_cast<const uintptr_t *>(oldp);
     int shown = 0;
     for (int i = 0; i < 512 && shown < 6; i++) {

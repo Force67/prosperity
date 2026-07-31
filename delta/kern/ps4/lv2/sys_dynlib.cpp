@@ -26,6 +26,14 @@
 
 #include "sys_mem.h"
 #include <runtime/vprx/vprx.h>
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(const char *, kVoInitOff, "DELTA_VO_INIT_OFF", nullptr);
+DELTA_OPTION(bool, kModinitTrace, "DELTA_MODINIT_TRACE", false);
+DELTA_OPTION(bool, kProcparamTrace, "DELTA_PROCPARAM_TRACE", false);
+DELTA_OPTION(bool, kVoLleFix, "DELTA_VO_LLE_FIX", false);
+}  // namespace
 
 namespace krnl {
 void ps5MaybeInterposePthreadAlloc();  // proc.cpp: libc-mutex bootstrap fix
@@ -169,7 +177,7 @@ int PS4ABI sys_dynlib_get_obj_member(uint32_t handle, uint8_t index,
   switch (index) {
   case 1:  // module init proc
     *value = info.initAddr;
-    if (std::getenv("DELTA_MODINIT_TRACE"))
+    if (kModinitTrace)
       std::fprintf(stderr, "[modinit] h=%u %s init=%p\n", handle,
                    info.name.c_str(), info.initAddr);
     return 0;
@@ -193,7 +201,7 @@ int PS4ABI sys_dynlib_get_proc_param(void **data, size_t *size) {
 
     *data = reinterpret_cast<void *>(info.procParam);
     *size = info.procParamSize;
-    if (std::getenv("DELTA_PROCPARAM_TRACE"))
+    if (kProcparamTrace)
       std::fprintf(stderr, "[procparam] get_proc_param -> data=%p size=%#zx\n",
                    *data, *size);
     return 0;
@@ -354,7 +362,7 @@ int PS4ABI sys_dynlib_load_prx(const char *path, uint64_t flags, int *pHandle,
       // PS4 PRX carry module_start separately from DT_INIT (which is often 0 with
       // an empty init_array). DELTA_VO_INIT_OFF lets us point at the entry(ies)
       // by module offset (comma-separated, run in order) while pinning them.
-      const char *list = std::getenv("DELTA_VO_INIT_OFF");
+      const char *list = kVoInitOff;
       base::String offs(list ? list : "");
       for (const char *p = offs.c_str(); *p;) {
         while (*p == ',' || *p == ' ') p++;
@@ -373,7 +381,7 @@ int PS4ABI sys_dynlib_load_prx(const char *path, uint64_t flags, int *pHandle,
       // emulate, so synthesize it: copy the registered cfg[0] slot into cfg[idx]
       // and set f0=4. Finally set the scePthreadOnce guard so the title's first
       // sceVideoOutOpen skips re-running the ctor and reads our connected slot.
-      if (std::getenv("DELTA_VO_LLE_FIX")) {
+      if (kVoLleFix) {
         uint8_t *base = mod->getInfo().base;
         std::printf("[volle] running libSceVideoOut ctor (+0xd530)\n");
         cpu::backend().runGuestFunction(baseAddr + 0xd530, 0, 0, 0);

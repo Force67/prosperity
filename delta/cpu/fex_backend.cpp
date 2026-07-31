@@ -49,6 +49,19 @@
 #include "kern/crash.h"
 #include "kern/module.h"
 #include "kern/proc.h"
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(int, kSampleMs, "DELTA_SAMPLE_MS", 0);
+DELTA_OPTION(int, kLoadWatch, "DELTA_LOADWATCH", 0);
+DELTA_OPTION(uint64_t, kLoadWatchBase, "DELTA_LOADWATCH_BASE", 0x201400000000ull);
+DELTA_OPTION(uint64_t, kLoadWatchGoff, "DELTA_LOADWATCH_GOFF", 0x2ee2d00ull);
+DELTA_OPTION(bool, kVectorTso, "DELTA_FEX_VECTOR_TSO", false);
+DELTA_OPTION(bool, kMemcpyTso, "DELTA_FEX_MEMCPY_TSO", false);
+DELTA_OPTION(bool, kFexSctrace, "FEX_SCTRACE", false);
+DELTA_OPTION(bool, kHleTrace, "DELTA_HLE_TRACE", false);
+DELTA_OPTION(bool, kWatchdog, "DELTA_WATCHDOG", false);
+}  // namespace
 
 namespace krnl {
 uintptr_t lv2_get(uint32_t sysIndex);
@@ -157,8 +170,8 @@ static void startWatchdog() {
     // RIP for every live guest thread every <ms> milliseconds. The last sample
     // before a hard crash (one that bypasses the signal handler) pins where each
     // thread was, with no dependence on signal delivery.
-    if (const char *s = std::getenv("DELTA_SAMPLE_MS")) {
-      int ms = std::atoi(s);
+    if (kSampleMs) {
+      int ms = kSampleMs;
       if (ms <= 0) ms = 50;
       std::thread([ms] {
         for (uint64_t tick = 0;; tick++) {
@@ -184,13 +197,11 @@ static void startWatchdog() {
     // ms so we can see whether the load DECREASES, PLATEAUS, or stops, and which
     // of the 10 category queues is stuck. Env overrides: DELTA_LOADWATCH_BASE,
     // DELTA_LOADWATCH_GOFF (global offset), all optional. See sotcdis notes.
-    if (const char *s = std::getenv("DELTA_LOADWATCH")) {
-      int ms = std::atoi(s);
+    if (kLoadWatch) {
+      int ms = kLoadWatch;
       if (ms <= 0) ms = 2000;
-      uint64_t base = 0x201400000000ull;
-      if (const char *b = std::getenv("DELTA_LOADWATCH_BASE")) base = strtoull(b, nullptr, 0);
-      uint64_t goff = 0x2ee2d00ull;
-      if (const char *g = std::getenv("DELTA_LOADWATCH_GOFF")) goff = strtoull(g, nullptr, 0);
+      const uint64_t base = kLoadWatchBase;
+      const uint64_t goff = kLoadWatchGoff;
       std::thread([ms, base, goff] {
         auto rd = [](uint64_t a, void *dst, size_t n) -> bool {
           long pg = sysconf(_SC_PAGESIZE);
@@ -243,13 +254,11 @@ static void startWatchdog() {
     // ms so we can see whether the load DECREASES, PLATEAUS, or stops, and which
     // of the 10 category queues is stuck. Env overrides: DELTA_LOADWATCH_BASE,
     // DELTA_LOADWATCH_GOFF (global offset), all optional. See sotcdis notes.
-    if (const char *s = std::getenv("DELTA_LOADWATCH")) {
-      int ms = std::atoi(s);
+    if (kLoadWatch) {
+      int ms = kLoadWatch;
       if (ms <= 0) ms = 2000;
-      uint64_t base = 0x201400000000ull;
-      if (const char *b = std::getenv("DELTA_LOADWATCH_BASE")) base = strtoull(b, nullptr, 0);
-      uint64_t goff = 0x2ee2d00ull;
-      if (const char *g = std::getenv("DELTA_LOADWATCH_GOFF")) goff = strtoull(g, nullptr, 0);
+      const uint64_t base = kLoadWatchBase;
+      const uint64_t goff = kLoadWatchGoff;
       std::thread([ms, base, goff] {
         auto rd = [](uint64_t a, void *dst, size_t n) -> bool {
           long pg = sysconf(_SC_PAGESIZE);
@@ -294,9 +303,8 @@ static void startWatchdog() {
         }
       }).detach();
     }
-    const char *e = std::getenv("DELTA_WATCHDOG");
-    if (!e) return;
-    int secs = std::atoi(e);
+    if (!kWatchdog) return;
+    int secs = kWatchdog;
     if (secs <= 0) secs = 20;
     std::thread([secs] {
       for (int round = 0;; round++) {
@@ -463,7 +471,6 @@ public:
                                       uint64_t, uint64_t, uint64_t, uint64_t,
                                       uint64_t, uint64_t, uint64_t, uint64_t,
                                       uint64_t, uint64_t);
-        static const bool hleTrace = std::getenv("DELTA_HLE_TRACE") != nullptr;
         uint64_t caller = (rsp) ? reinterpret_cast<uint64_t *>(rsp)[0] : 0;
         const char *evName = nullptr;
         { std::lock_guard lk(g_thunkMutex);
@@ -476,7 +483,7 @@ public:
             Args->Argument[4], Args->Argument[5], Args->Argument[6], s[0], s[1],
             s[2], s[3], s[4], s[5], s[6], s[7]);
         ev.ret = ret;
-        if (hleTrace) {
+        if (kHleTrace) {
           char cs[256]; symRange(caller, cs, sizeof(cs));
           const char *nm = "";
           { std::lock_guard lk(g_thunkMutex);
@@ -499,8 +506,7 @@ public:
       return 0;
 
     // Optional syscall trace: FEX_SCTRACE=1.
-    static const bool trace = std::getenv("FEX_SCTRACE") != nullptr;
-    if (trace)
+    if (kFexSctrace)
       std::fprintf(stderr, "[sc] %3u %-22s (%#lx, %#lx, %#lx, %#lx, %#lx, %#lx)\n",
                    num, krnl::syscall_getname(num), Args->Argument[1],
                    Args->Argument[2], Args->Argument[3], Args->Argument[4],
@@ -527,7 +533,7 @@ public:
       ret = error;
     ev.ret = ret;
     t_inSyscall = false;
-    if (trace)
+    if (kFexSctrace)
       std::fprintf(stderr, "    -> %#lx\n", ret);
 
     // CF isn't stored directly in flags[]; update it through FEX's compacted-
@@ -741,7 +747,7 @@ public:
     t_exitJmpValid = false;
     auto &endS = h->thread->CurrentFrame->State;
     LOG_INFO("fex: guest thread returned rip={:#x}", (unsigned long)endS.rip);
-    if (std::getenv("DELTA_WATCHDOG")) {
+    if (kWatchdog) {
       char es[256]; symRange(entryRip, es, sizeof(es));
       char rs[256]; symRange(endS.rip, rs, sizeof(rs));
       std::fprintf(stderr, "=== THREAD tid=%u RETURNED entry=%#llx (%s) ret=%#llx (%s) ===\n",
@@ -897,9 +903,9 @@ private:
       // (DELTA_FEX_VECTOR_TSO) is what the JobSystem descriptor publish needs,
       // while ordering REP MOVS/STOS (DELTA_FEX_MEMCPY_TSO) makes every guest
       // memcpy atomic and costs far more. Both default off; enable per run.
-      if (const char *v = std::getenv("DELTA_FEX_VECTOR_TSO"); v && v[0] != '0')
+      if (kVectorTso)
         FEXCore::Config::Set(FEXCore::Config::CONFIG_VECTORTSOENABLED, "1");
-      if (const char *m = std::getenv("DELTA_FEX_MEMCPY_TSO"); m && m[0] != '0')
+      if (kMemcpyTso)
         FEXCore::Config::Set(FEXCore::Config::CONFIG_MEMCPYSETTSOENABLED, "1");
 
       auto HostFeatures = FEX::FetchHostFeatures();

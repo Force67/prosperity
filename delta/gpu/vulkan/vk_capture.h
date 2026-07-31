@@ -7,6 +7,8 @@
 // SNAP / RTDUMP knobs, and the directory they land in.
 
 #include <cstdint>
+#include <utl/options.h>
+
 
 namespace gpu::vk {
 
@@ -19,7 +21,9 @@ void WritePpm(const char* path, const uint8_t* bgra, uint32_t w, uint32_t h);
 // Rolling numbered dump, capped at a handful of frames per run.
 void DumpPpm(const uint8_t* bgra, uint32_t w, uint32_t h);
 
-extern const bool g_dump;     // DELTA_GPU_DUMP
-extern const bool kDeclines;  // DELTA_GPU_DECLINES
+// Read by the frame path too, so these live here instead of being declared
+// once per translation unit.
+extern base::Option<bool> g_dump;     // DELTA_GPU_DUMP
+extern base::Option<bool> kDeclines;  // DELTA_GPU_DECLINES
 
 }  // namespace gpu::vk

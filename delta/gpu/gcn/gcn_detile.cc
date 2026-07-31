@@ -31,6 +31,12 @@
 #include <mutex>
 #include <thread>
 #include <vector>
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(bool, kDetileMt, "DELTA_GPU_DETILE_MT", true);
+DELTA_OPTION(const char*, kDetileThreads, "DELTA_GPU_DETILE_THREADS", nullptr);
+}  // namespace
 
 namespace gpu::gcn {
 namespace {
@@ -96,11 +102,10 @@ class RowPool {
   static constexpr uint64_t kItemsPerLane = 32 * 1024;
 
   RowPool() {
-    const char* mt = std::getenv("DELTA_GPU_DETILE_MT");
-    enabled_ = !(mt && mt[0] == '0');
+    enabled_ = kDetileMt;
     uint32_t hw = std::thread::hardware_concurrency();
     uint32_t n = std::min(8u, hw ? hw / 2u : 1u);
-    if (const char* configured = std::getenv("DELTA_GPU_DETILE_THREADS")) {
+    if (const char* configured = kDetileThreads) {
       char* end = nullptr;
       const unsigned long lanes = std::strtoul(configured, &end, 10);
       if (end != configured && !*end)

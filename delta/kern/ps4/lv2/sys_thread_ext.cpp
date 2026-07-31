@@ -20,6 +20,11 @@
 #include "cpu/cpu_backend.h"
 #include "error_table.h"
 #include "sys_thread_ext.h"
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(bool, kSchedYieldReal, "DELTA_SCHED_YIELD_REAL", false);
+}  // namespace
 
 namespace krnl {
 
@@ -130,8 +135,7 @@ int PS4ABI sys_sched_yield() {
   // lets that sibling run, throttling the load. DELTA_SCHED_YIELD_REAL=1 issues a
   // real host yield so the runnable sibling gets scheduled. Env-gated (default off)
   // so it can't regress the many-core pause path (Doom64's job manager).
-  static const bool real = std::getenv("DELTA_SCHED_YIELD_REAL") != nullptr;
-  if (real)
+  if (kSchedYieldReal)
     std::this_thread::yield();
   else
     cpuRelax();

@@ -10,6 +10,11 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(bool, kMarkers, "DELTA_GPU_MARKERS", false);
+}  // namespace
 
 namespace gpu::vk {
 
@@ -32,9 +37,8 @@ const char* Format(char (&buf)[192], const char* fmt, va_list args) {
 
 bool WantDebugUtils() {
   static const bool want = [] {
-    const char* e = std::getenv("DELTA_GPU_MARKERS");
-    if (e)
-      return e[0] && e[0] != '0';
+    if (kMarkers.overridden())
+      return kMarkers.get();
     return dlopen("librenderdoc.so", RTLD_NOW | RTLD_NOLOAD) != nullptr;
   }();
   return want;

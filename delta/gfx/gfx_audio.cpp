@@ -16,6 +16,12 @@
 #include <mutex>
 #include <thread>
 #include <vector>
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(const char *, kAudioPcm, "DELTA_AUDIO_PCM", nullptr);
+DELTA_OPTION(bool, kAudioTrace, "DELTA_AUDIO_TRACE", false);
+}  // namespace
 
 namespace {
 
@@ -29,7 +35,6 @@ struct Port {
 std::mutex g_mtx;
 std::vector<Port> g_ports;
 bool g_init = false;
-const bool g_trace = std::getenv("DELTA_AUDIO_TRACE") != nullptr;
 uint64_t g_framesOut = 0;
 
 }  // namespace
@@ -60,7 +65,7 @@ extern "C" int prosperity_audio_open(uint32_t freq, uint32_t channels, int isFlo
   p.bytesPerSample = isFloat ? 4 : 2;
   int h = static_cast<int>(g_ports.size());
   g_ports.push_back(p);
-  if (g_trace)
+  if (kAudioTrace)
     std::fprintf(stderr, "[audio] open h=%d %uHz %uch %s\n", h, freq, channels,
                  isFloat ? "f32" : "s16");
   return h;
@@ -72,7 +77,7 @@ extern "C" int prosperity_audio_open(uint32_t freq, uint32_t channels, int isFlo
 // daemon's stream can be compared byte-for-byte off-line.
 namespace {
 FILE *pcmFile(int handle, int channels, int bps) {
-  static const char *pfx = std::getenv("DELTA_AUDIO_PCM");
+  const char *pfx = kAudioPcm;
   if (!pfx || !*pfx)
     return nullptr;
   static std::mutex m;
@@ -163,7 +168,7 @@ extern "C" int prosperity_audio_output(int handle, const void *samples, uint32_t
       SDL_PutAudioStreamData(stream, scratch.data(), static_cast<int>(bytes));
     }
   }
-  if (g_trace && ((g_framesOut += frames) % (48000 * 2) < frames)) {
+  if (kAudioTrace && ((g_framesOut += frames) % (48000 * 2) < frames)) {
     // Peak level over this buffer (confirms real audio vs. silence -> tells PCM
     // working from a missing decode upstream).
     float peak = 0.f;

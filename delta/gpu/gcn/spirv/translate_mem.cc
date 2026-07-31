@@ -19,6 +19,11 @@
 #include <algorithm>
 
 #include "gpu/gcn/spirv/translator.h"
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(float, kDebugUv, "DELTA_GPU_DEBUGUV", 0.f);
+}  // namespace
 
 namespace gpu::gcn {
 namespace {
@@ -435,13 +440,9 @@ void EmitMimg(Translator& t,
   // DELTA_GPU_DEBUGUV: output the sample UV as R/G instead of the texel, to see
   // the coordinate distribution reaching the sampler (normalized 0..1 vs texel
   // units). Diagnostic only.
-  static const float dbg_uv = [] {
-    const char* e = std::getenv("DELTA_GPU_DEBUGUV");
-    return e ? static_cast<float>(std::atof(e)) : 0.f;
-  }();
-  if (dbg_uv != 0.f && !dref && !gather)
+  if (kDebugUv != 0.f && !dref && !gather)
     texel = t.m.CompositeConstruct(
-        t.t_v4, {t.FMul(x, t.F32(dbg_uv)), t.FMul(y, t.F32(dbg_uv)),
+        t.t_v4, {t.FMul(x, t.F32(kDebugUv)), t.FMul(y, t.F32(kDebugUv)),
                  t.F32(0.f), t.F32(1.f)});
 
   if (dref) {

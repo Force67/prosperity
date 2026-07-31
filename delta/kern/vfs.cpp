@@ -20,6 +20,14 @@
 #include <base/containers/vector.h>
 
 #include "vfs.h"
+#include <utl/options.h>
+
+namespace {
+DELTA_OPTION(bool, kShortRead, "DELTA_SHORTREAD", false);
+DELTA_OPTION(const char *, kVfsHide, "DELTA_VFS_HIDE", nullptr);
+DELTA_OPTION(bool, kOpenTrace, "DELTA_OPEN_TRACE", false);
+DELTA_OPTION(bool, kPreadZeropad, "DELTA_PREAD_ZEROPAD", false);
+}  // namespace
 
 namespace krnl::vfs {
 struct mountPoint {
@@ -152,15 +160,14 @@ struct PfsFileStream final : utl::fileBase {
     // ignores the read error) commits payload=0,err=0 and RETRIES FOREVER (the
     // post-LoadInitialWorld freeze). Reporting the full length lets that op
     // complete. Off by default so other titles keep true short-at-EOF semantics.
-    static const bool zeroPad = std::getenv("DELTA_PREAD_ZEROPAD") != nullptr;
     // DELTA_SHORTREAD: log every clamped-short provider read (raw n < requested),
     // which is exactly the FIOS2-op-failure trigger, regardless of zeroPad. Cheap:
     // only fires on the anomaly, not on full reads.
-    if (static_cast<uint64_t>(n) < size && std::getenv("DELTA_SHORTREAD"))
+    if (static_cast<uint64_t>(n) < size && kShortRead)
       std::fprintf(stderr, "[shortread] pos=%llu req=%zu got=%lld%s\n",
                    (unsigned long long)pos, size, (long long)n,
-                   zeroPad ? " (zeropadded->full)" : "");
-    uint64_t reported = zeroPad ? size : static_cast<uint64_t>(n);
+                   kPreadZeropad ? " (zeropadded->full)" : "");
+    uint64_t reported = kPreadZeropad ? size : static_cast<uint64_t>(n);
     pos += reported;
     return reported;
   }
@@ -257,13 +264,13 @@ utl::File openRead(const char *path) {
   if (!path)
     return utl::File();
 
-  if (std::getenv("DELTA_OPEN_TRACE"))
+  if (kOpenTrace)
     std::fprintf(stderr, "[open] %s\n", path);
 
   // DELTA_VFS_HIDE=<substr>[,<substr>]: report a matching path as missing, to
   // test whether an optional asset (an intro movie, a DLC list) is what a boot
   // path chokes on.
-  if (const char *hide = std::getenv("DELTA_VFS_HIDE")) {
+  if (const char *hide = kVfsHide) {
     for (const char *p = hide; *p;) {
       const char *sep = std::strchr(p, ',');
       std::string pat(p, sep ? size_t(sep - p) : std::strlen(p));
@@ -290,7 +297,7 @@ utl::File openRead(const char *path) {
     // DELTA_OPEN_TRACE: also report the size we hand back. A file that opens OK
     // but reports size 0 (e.g. a >4 GiB member whose size truncated) makes the
     // resource loader hang forever with {payload=0, err=0} (SotC world container).
-    if (std::getenv("DELTA_OPEN_TRACE"))
+    if (kOpenTrace)
       std::fprintf(stderr, "[opensz] %s -> size=%llu (provider)\n", path,
                    (unsigned long long)out.GetSize());
     return out;
@@ -307,7 +314,7 @@ utl::File openRead(const char *path) {
   utl::File f(host, utl::fileMode::read);
   if (!f.Exists() || !f.IsOpen())
     return utl::File();
-  if (std::getenv("DELTA_OPEN_TRACE"))
+  if (kOpenTrace)
     std::fprintf(stderr, "[opensz] %s -> size=%llu (host)\n", path,
                  (unsigned long long)f.GetSize());
   return f;
@@ -365,7 +372,7 @@ bool stat(const char *path, int64_t &size, bool &isDir) {
   const char *rest = path + len;
   if (m.provider) {
     bool ok = m.provider->stat(rest, size);
-    if (std::getenv("DELTA_OPEN_TRACE"))
+    if (kOpenTrace)
       std::fprintf(stderr, "[stat] %s -> %s size=%lld\n", path,
                    ok ? "ok" : "MISS", (long long)size);
     return ok;
