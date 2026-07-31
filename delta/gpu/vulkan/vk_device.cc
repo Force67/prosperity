@@ -302,16 +302,39 @@ bool CreateDevice() {
   // VK_EXT_device_fault: on DEVICE_LOST, vkGetDeviceFaultInfoEXT reports what
   // the GPU actually faulted on (page fault address etc.) — keep it enabled,
   // it costs nothing until a fault is queried.
-  const char* dev_exts[1] = {};
+  // VK_EXT_external_memory_host lets a buffer be backed by guest pages DIRECTLY,
+  // so a compute dispatch reading guest memory needs no staging copy in and no
+  // writeback out (see vk_compute.cc, DELTA_GPU_CSIMPORT).
+  const char* dev_exts[2] = {};
+  uint32_t dev_ext_count = 0;
   {
     uint32_t en = 0;
     vkEnumerateDeviceExtensionProperties(g_dev.phys, nullptr, &en, nullptr);
     std::vector<VkExtensionProperties> eprops(en);
     vkEnumerateDeviceExtensionProperties(g_dev.phys, nullptr, &en,
                                          eprops.data());
-    for (const auto& ep : eprops)
+    for (const auto& ep : eprops) {
       if (!std::strcmp(ep.extensionName, VK_EXT_DEVICE_FAULT_EXTENSION_NAME))
         g_dev.device_fault_available = true;
+      if (!std::strcmp(ep.extensionName,
+                       VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME))
+        g_dev.host_import_available = true;
+    }
+  }
+  if (g_dev.host_import_available) {
+    VkPhysicalDeviceExternalMemoryHostPropertiesEXT hp{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT};
+    VkPhysicalDeviceProperties2 p2{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+    p2.pNext = &hp;
+    vkGetPhysicalDeviceProperties2(g_dev.phys, &p2);
+    g_dev.host_import_align =
+        (size_t)hp.minImportedHostPointerAlignment;
+    g_dev.storage_buffer_offset_align =
+        (size_t)p2.properties.limits.minStorageBufferOffsetAlignment;
+    if (!g_dev.storage_buffer_offset_align)
+      g_dev.storage_buffer_offset_align = 1;
+    dev_exts[dev_ext_count++] = VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME;
   }
   VkPhysicalDeviceFaultFeaturesEXT fault_feat{
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT};
@@ -319,8 +342,10 @@ bool CreateDevice() {
     fault_feat.deviceFault = VK_TRUE;
     fault_feat.pNext = f13.pNext;
     f13.pNext = &fault_feat;
-    dev_exts[0] = VK_EXT_DEVICE_FAULT_EXTENSION_NAME;
-    dc.enabledExtensionCount = 1;
+    dev_exts[dev_ext_count++] = VK_EXT_DEVICE_FAULT_EXTENSION_NAME;
+  }
+  if (dev_ext_count) {
+    dc.enabledExtensionCount = dev_ext_count;
     dc.ppEnabledExtensionNames = dev_exts;
   }
   // robustBufferAccess makes out-of-bounds storage-buffer loads/stores safe

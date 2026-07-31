@@ -44,6 +44,9 @@ struct DeviceState {
   bool sampler_mirror_clamp = false;
   bool geometry_shader = false;
   bool storage_image_write_without_format = false;
+  bool host_import_available = false;
+  size_t host_import_align = 0;
+  size_t storage_buffer_offset_align = 16;
   bool device_fault_available = false;
   bool device_fault_reported = false;
 };

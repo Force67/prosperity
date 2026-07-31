@@ -39,6 +39,7 @@ DELTA_OPTION(uint64_t, kDetileDump, "DELTA_GPU_DETILEDUMP", 0);
 DELTA_OPTION(bool, kCsList, "DELTA_GPU_CSLIST", false);
 DELTA_OPTION(bool, kCsRtTrace, "DELTA_GPU_CSRT", false);
 DELTA_OPTION(bool, kCsRename, "DELTA_GPU_CSRENAME", false);
+DELTA_OPTION(bool, kCsImport, "DELTA_GPU_CSIMPORT", false);
 DELTA_OPTION(bool, kGpuCsgpuVerbose, "DELTA_GPU_CSGPU_VERBOSE", false);
 }  // namespace
 
@@ -81,6 +82,18 @@ uint32_t FindComputeMemoryType(uint32_t type_bits) {
       best = i;
       best_score = score;
     }
+  }
+  // Report the choice once: reading back from a write-combined heap is ~100
+  // MB/s, which is invisible in the code and obvious in the numbers.
+  static bool logged = false;
+  if (!logged && best != UINT32_MAX) {
+    logged = true;
+    const VkMemoryPropertyFlags f = properties.memoryTypes[best].propertyFlags;
+    std::fprintf(stderr, "[gpuvk] cs staging memory type %u:%s%s%s%s\n", best,
+                 (f & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) ? " DEVICE_LOCAL" : "",
+                 (f & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) ? " HOST_VISIBLE" : "",
+                 (f & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) ? " HOST_COHERENT" : "",
+                 (f & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) ? " HOST_CACHED" : "");
   }
   return best == UINT32_MAX
              ? FindMemoryType(type_bits,
@@ -405,6 +418,11 @@ struct CsRange {
   bool gpu_dirty = false;      // buffer newer than guest memory
   bool pending_batch = false;  // referenced by the open dispatch batch
   bool image_staging = false;
+  // Buffer memory IS the guest pages (VK_EXT_external_memory_host): no staging
+  // copy in, no writeback out. See CsRangeImportGuest.
+  bool imported = false;
+  uint64_t imported_base = 0;
+  VkDeviceSize imported_offset = 0;  // base - page-aligned import base
   // Staged from a live render-target image rather than guest memory; content
   // changes every frame regardless of the guest bytes, so validity is
   // per-frame (last_rt_frame), never the guest content hash.
@@ -777,13 +795,85 @@ uint64_t RangeHash(uint64_t base, uint64_t bytes) {
   return h;
 }
 
+// DELTA_GPU_CSIMPORT: back the range's buffer with the GUEST PAGES themselves
+// instead of a staging copy. Everything a compute dispatch reads then costs
+// nothing to get in, and anything it writes is already in guest memory when the
+// dispatch retires -- SotC spends ~550 ms of a 2 fps frame on that copy in and
+// back out. Needs the guest range page-aligned to the driver's import
+// granularity; callers fall back to staging when this returns false.
+bool CsRangeImportGuest(CsRange& e, uint64_t base, VkDeviceSize size) {
+  const size_t align = g_dev.host_import_align;
+  if (!g_dev.host_import_available || !align)
+    return false;
+  const uint64_t lo = base & ~(uint64_t)(align - 1);
+  const uint64_t hi = (base + size + align - 1) & ~(uint64_t)(align - 1);
+  // The shader indexes from the binding, so an unaligned base is fine as long
+  // as the descriptor can carry the difference.
+  const VkDeviceSize off = base - lo;
+  if (off % g_dev.storage_buffer_offset_align)
+    return false;
+  VkMemoryHostPointerPropertiesEXT hpp{
+      VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT};
+  auto fn = (PFN_vkGetMemoryHostPointerPropertiesEXT)vkGetDeviceProcAddr(
+      g_dev.device, "vkGetMemoryHostPointerPropertiesEXT");
+  if (!fn ||
+      fn(g_dev.device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
+         reinterpret_cast<void*>(lo), &hpp) != VK_SUCCESS ||
+      !hpp.memoryTypeBits)
+    return false;
+  VkExternalMemoryBufferCreateInfo ebi{
+      VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO};
+  ebi.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
+  VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+  bi.pNext = &ebi;
+  bi.size = hi - lo;
+  bi.usage =
+      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+  VkBuffer buf = VK_NULL_HANDLE;
+  if (vkCreateBuffer(g_dev.device, &bi, nullptr, &buf) != VK_SUCCESS)
+    return false;
+  VkMemoryRequirements mr;
+  vkGetBufferMemoryRequirements(g_dev.device, buf, &mr);
+  const uint32_t bits = mr.memoryTypeBits & hpp.memoryTypeBits;
+  if (!bits) {
+    vkDestroyBuffer(g_dev.device, buf, nullptr);
+    return false;
+  }
+  VkImportMemoryHostPointerInfoEXT ihp{
+      VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT};
+  ihp.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
+  ihp.pHostPointer = reinterpret_cast<void*>(lo);
+  VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+  ai.pNext = &ihp;
+  ai.allocationSize = hi - lo;
+  ai.memoryTypeIndex = (uint32_t)__builtin_ctz(bits);
+  VkDeviceMemory mem = VK_NULL_HANDLE;
+  if (vkAllocateMemory(g_dev.device, &ai, nullptr, &mem) != VK_SUCCESS) {
+    vkDestroyBuffer(g_dev.device, buf, nullptr);
+    return false;
+  }
+  if (vkBindBufferMemory(g_dev.device, buf, mem, 0) != VK_SUCCESS) {
+    vkFreeMemory(g_dev.device, mem, nullptr);
+    vkDestroyBuffer(g_dev.device, buf, nullptr);
+    return false;
+  }
+  e.buf = buf;
+  e.mem = mem;
+  e.map = reinterpret_cast<void*>(lo);  // already the guest pages
+  e.cap = hi - lo;
+  e.imported = true;
+  e.imported_base = lo;
+  e.imported_offset = off;
+  return true;
+}
+
 bool CsRangeEnsureBuffer(CsRange& e, VkDeviceSize size) {
   if (e.buf && e.cap >= size)
     return true;
-  if (e.map) {
+  if (e.map && !e.imported) {
     vkUnmapMemory(g_dev.device, e.mem);
-    e.map = nullptr;
   }
+  e.map = nullptr;
   if (e.buf) {
     vkDestroyBuffer(g_dev.device, e.buf, nullptr);
     e.buf = VK_NULL_HANDLE;
@@ -792,7 +882,9 @@ bool CsRangeEnsureBuffer(CsRange& e, VkDeviceSize size) {
     vkFreeMemory(g_dev.device, e.mem, nullptr);
     e.mem = VK_NULL_HANDLE;
   }
-  g_cs_range_bytes -= e.cap;
+  e.imported = false;
+  if (!e.imported)
+    g_cs_range_bytes -= e.cap;
   e.cap = 0;
   VkDeviceSize cap = (size + 0xFFFF) & ~VkDeviceSize(0xFFFF);
   VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
@@ -852,7 +944,7 @@ bool CsRangeRename(CsRange& e, VkDeviceSize size) {
 }
 
 void CsRangeDestroy(CsRange& e) {
-  if (e.map)
+  if (e.map && !e.imported)
     vkUnmapMemory(g_dev.device, e.mem);
   if (e.buf)
     vkDestroyBuffer(g_dev.device, e.buf, nullptr);
@@ -930,6 +1022,12 @@ bool CsBatchFlush() {
 bool CsRangeFlushOne(uint64_t base, CsRange& e) {
   if (!e.gpu_dirty)
     return true;
+  if (e.imported) {  // the dispatch wrote straight into guest memory
+    if (e.pending_batch && !CsBatchFlush())
+      return false;
+    e.gpu_dirty = false;
+    return true;
+  }
   if (e.pending_batch && !CsBatchFlush())
     return false;  // results must exist before readback
   if (g_cs_failed)
@@ -1164,6 +1262,10 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci) {
       renderer.state = nullptr;
       return false;  // growth would destroy a buffer the batch references
     }
+    // Guest-page import: valid only for plain (non-image) linear ranges, and
+    // only while the range is not already staged some other way.
+    if (kCsImport && !e.buf && !ci.res[i].image_staging && !ci.res[i].zero_fill)
+      CsRangeImportGuest(e, base, static_cast<VkDeviceSize>(sz[i]));
     const bool buffer_reused =
         e.buf && e.cap >= static_cast<VkDeviceSize>(sz[i]);
     if (!CsRangeEnsureBuffer(e, sz[i]))
@@ -1173,6 +1275,8 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci) {
                  (unsigned long long)base);
     bool valid =
         same_shape && (e.gpu_dirty || e.last_validated_frame == g_frame.num);
+    if (e.imported && same_shape)
+      valid = true;  // the buffer IS the guest pages; nothing to copy
     // A read whose base is a live render target must be staged from the
     // VkImage: the guest bytes under an RT are stale (draws never write them
     // back), and the image content changes every frame regardless of the
@@ -1256,6 +1360,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci) {
   for (uint32_t i = 0; i < ci.num_res; i++)
     if (!ci.res[i].zero_fill)
       bind_buf[i] = g_cs_ranges[ci.res[i].base].buf;
+  VkDeviceSize bind_off[ComputeInfo::kMaxResources] = {};
 
   g_ns_cs_in += NowNs() - _t_in0;
 
@@ -1277,8 +1382,12 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci) {
   }
   VkDescriptorBufferInfo dbi[ComputeInfo::kMaxResources];
   VkWriteDescriptorSet wr[ComputeInfo::kMaxResources];
+  for (uint32_t i = 0; i < ci.num_res; i++)
+    bind_off[i] = ci.res[i].zero_fill
+                      ? 0
+                      : g_cs_ranges[ci.res[i].base].imported_offset;
   for (uint32_t i = 0; i < ci.num_res; i++) {
-    dbi[i] = {bind_buf[i], 0, sz[i]};
+    dbi[i] = {bind_buf[i], bind_off[i], sz[i]};
     wr[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
     wr[i].dstSet = set;
     wr[i].dstBinding = ci.res[i].binding;
