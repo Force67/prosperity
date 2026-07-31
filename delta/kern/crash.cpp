@@ -1153,12 +1153,52 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
                      (unsigned long long)a, nz);
     }
     std::fflush(stderr);
+  // "find:<hex base>:<hex size>:<hex value>" reports every 8-byte slot in the
+  // range holding that value -- how you name the field a wild pointer came from.
+  } else if (const char *pk = kBrkPeek;
+             pk && std::strncmp(pk, "find:", 5) == 0) {
+    const uintptr_t base = std::strtoull(pk + 5, nullptr, 16);
+    const char *c2 = std::strchr(pk + 5, ':');
+    const uint64_t size = c2 ? std::strtoull(c2 + 1, nullptr, 16) : 0x100000;
+    const char *c3 = c2 ? std::strchr(c2 + 1, ':') : nullptr;
+    const uint64_t want = c3 ? std::strtoull(c3 + 1, nullptr, 16) : 0;
+    const long pgsz = sysconf(_SC_PAGESIZE);
+    int hits = 0;
+    for (uint64_t off = 0; off < size && hits < 32; off += pgsz) {
+      unsigned char vec = 0;
+      const uintptr_t a = base + off;
+      if (mincore(reinterpret_cast<void *>(a), 1, &vec) != 0)
+        continue;
+      const auto *q = reinterpret_cast<const uint64_t *>(a);
+      for (long i = 0; i < pgsz / 8 && hits < 32; i++)
+        if (q[i] == want) {
+          std::fprintf(stderr, "  find %#llx at %#llx\n",
+                       (unsigned long long)want,
+                       (unsigned long long)(a + i * 8));
+          hits++;
+        }
+    }
+    std::fprintf(stderr, "  find: %d hit(s)\n", hits);
+    std::fflush(stderr);
   } else if (const char *pk = kBrkPeek) {
-    const uintptr_t at = std::strtoull(pk, nullptr, 16);
+    // "deref:<hex addr>:<bytes>" dumps what the POINTER at addr points at, for
+    // a table the guest reaches through a field rather than a register.
+    const bool deref = std::strncmp(pk, "deref:", 6) == 0;
+    if (deref)
+      pk += 6;
+    uintptr_t at = std::strtoull(pk, nullptr, 16);
     const char *colon = std::strchr(pk, ':');
     const size_t n = colon ? std::strtoul(colon + 1, nullptr, 0) : 256;
     const long pgsz = sysconf(_SC_PAGESIZE);
     unsigned char vec = 0;
+    if (deref && at >= 0x10000 &&
+        mincore(reinterpret_cast<void *>(at & ~((uintptr_t)pgsz - 1)), 1,
+                &vec) == 0) {
+      const uintptr_t via = at;
+      at = *reinterpret_cast<const uintptr_t *>(via);
+      std::fprintf(stderr, "  peek deref %#llx -> %#llx\n",
+                   (unsigned long long)via, (unsigned long long)at);
+    }
     if (at >= 0x10000 &&
         mincore(reinterpret_cast<void *>(at & ~((uintptr_t)pgsz - 1)), 1,
                 &vec) == 0) {
@@ -1194,6 +1234,18 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
   // arena that hold a printable ASCII string (an asset filename / tag the
   // faulting code was handling). The arena (0x40_0000_0000..0x41_0000_0000) is
   // always mapped, so reading a string there can't fault.
+  // DELTA_CRASH_PEEK: the raw top of the stack. The symbolising scan below only
+  // prints values that land in a module's .text, which hides the operand a bad
+  // control transfer came through.
+  if (kCrashPeek && gr[REG_RSP] >= 0x10000) {
+    auto *q = reinterpret_cast<const uint64_t *>(gr[REG_RSP] & ~7ull);
+    for (int i = 0; i < 16; i++) {
+      if (i % 4 == 0)
+        std::fprintf(stderr, "\n  rsp+%02x:", i * 8);
+      std::fprintf(stderr, " %016llx", (unsigned long long)q[i]);
+    }
+    std::fprintf(stderr, "\n");
+  }
   std::fprintf(stderr, "  --- stack scan ---\n");
   if (uintptr_t rsp = gr[REG_RSP]; rsp >= 0x10000) {
     auto *sp = reinterpret_cast<uintptr_t *>(rsp);

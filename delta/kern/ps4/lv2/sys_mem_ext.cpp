@@ -46,6 +46,16 @@ int PS4ABI sys_munmap(void *addr, size_t len) {
                 "only the VMA bookkeeping is released",
                 fmt::ptr(addr), len);
   if (auto *proc = proc::getActive(); proc && addr && len) {
+    // One exception to "keep the host pages": a whole PROT_NONE reservation.
+    // Nothing has data in it by definition, and leaving it mapped makes the
+    // next reservation at that address get relocated -- V8 reserves a padded
+    // region, frees it and re-reserves an exact sub-range, and a stale pointer
+    // into the freed padding then reads memory that is still there instead of
+    // faulting where the mistake is.
+    auto *region = proc->getVma().get(static_cast<uint8_t *>(addr));
+    if (region && region->ptr == addr && region->size == len &&
+        region->sceProt == 0)
+      ::munmap(addr, len);
     proc->getVma().remove(static_cast<uint8_t *>(addr), len);
     noteGuestReleased(static_cast<uint8_t *>(addr), len);
   }
