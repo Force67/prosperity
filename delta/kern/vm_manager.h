@@ -35,6 +35,12 @@ struct pageInfo {
   // query must report it as NOT committed / NOT flexible, and a later
   // MAP_FIXED commit inside it splits it (add() punches the hole).
   bool reserved = false;
+  // Direct-memory physical offset this range maps, for a region that came from
+  // sceKernelMapDirectMemory. hasPhys says the field is real: sceKernelVirtual-
+  // Query reports it, and titles convert it into a block index in their own
+  // heap map, so a VA substituted here lands nowhere near the right block.
+  uint64_t physOffset = 0;
+  bool hasPhys = false;
 
   pageInfo(uint8_t *p, size_t s, mprot mp, uint32_t sp = 0, bool rsv = false)
       : ptr(p), size(s), prot(mp), sceProt(sp), reserved(rsv) {}
@@ -48,6 +54,9 @@ public:
   bool init();
   void add(uint8_t *ptr, size_t size, mprot, uint32_t sceProt = 0,
            bool reserved = false);
+  // Same, for a range backed by direct memory at `physOffset`.
+  void addDirect(uint8_t *ptr, size_t size, mprot, uint32_t sceProt,
+                 uint64_t physOffset);
   // Drop bookkeeping for [ptr, ptr+size): entries fully inside vanish,
   // straddling entries are truncated/split. Host pages are the caller's
   // business (sys_munmap keeps them mapped; stale guest pointers then read

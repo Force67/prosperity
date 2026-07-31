@@ -55,6 +55,8 @@ void vmManager::punchHoleLocked(uint8_t *p, size_t s) {
       pageInfo tail(end, static_cast<size_t>(eEnd - end), e.prot, e.sceProt,
                     e.reserved);
       tail.name = e.name;
+      tail.hasPhys = e.hasPhys;
+      tail.physOffset = e.physOffset + static_cast<size_t>(end - e.ptr);
       e.size = static_cast<size_t>(p - e.ptr);
       rtPages.emplace_back(tail);  // append; disjointness keeps get() correct
       ++i;
@@ -64,6 +66,7 @@ void vmManager::punchHoleLocked(uint8_t *p, size_t s) {
       e.size = static_cast<size_t>(p - e.ptr);
     } else {          // overlaps our tail from above: advance its head
       e.size = static_cast<size_t>(eEnd - end);
+      e.physOffset += static_cast<size_t>(end - e.ptr);
       e.ptr = end;
     }
     ++i;
@@ -75,6 +78,15 @@ void vmManager::add(uint8_t *ptr, size_t size, mprot prot, uint32_t sceProt,
   std::lock_guard lock(vmlock);
   punchHoleLocked(ptr, size);
   rtPages.emplace_back(ptr, size, prot, sceProt, reserved);
+}
+
+void vmManager::addDirect(uint8_t *ptr, size_t size, mprot prot,
+                          uint32_t sceProt, uint64_t physOffset) {
+  std::lock_guard lock(vmlock);
+  punchHoleLocked(ptr, size);
+  rtPages.emplace_back(ptr, size, prot, sceProt, false);
+  rtPages.back().physOffset = physOffset;
+  rtPages.back().hasPhys = true;
 }
 
 void vmManager::remove(uint8_t *ptr, size_t size) {

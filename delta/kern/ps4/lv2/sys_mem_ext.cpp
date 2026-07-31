@@ -141,20 +141,30 @@ int PS4ABI sys_virtual_query(const void *addr, int /*flags*/, void *info,
   std::memset(info, 0, infoSize);
   auto *region =
       proc->getVma().get(const_cast<uint8_t *>(static_cast<const uint8_t *>(addr)));
-  if (!region)
+  if (!region) {
+    // Worth seeing: a caller that walks its own heap this way reads the zeroed
+    // struct as "not committed" and silently skips the range.
+    if (kVqTrace)
+      std::printf("[vq] addr=%p NOT MAPPED\n", addr);
     return -SysError::eACCES;
+  }
 
   auto *vq = static_cast<uint8_t *>(info);
   void *start = region->ptr;
   void *end = region->ptr + region->size;
   std::memcpy(vq + 0x00, &start, sizeof(void *));
   std::memcpy(vq + 0x08, &end, sizeof(void *));
-  // +0x10 = the region's direct-memory offset. We don't model a separate dmem
-  // pool (guest addresses are identity-mapped), but libSceVideoOut's buffer
-  // registration rejects a scanout buffer unless the offset shares the virtual
-  // address's low 16 bits (a tiling-alignment check). Report the VA as the
-  // offset so that holds; left zero, every scanout register failed.
-  uint64_t offset = reinterpret_cast<uint64_t>(start);
+  // +0x10 = the region's direct-memory offset. For a range mapped through
+  // /dev/dmem that is the physical offset the guest asked for, and it must be
+  // exact: SotC turns (offset + addr - start) into a block index in its own
+  // 64 KiB heap map, and marks nothing when the index lands out of range.
+  // For everything else we have no dmem pool to point at (guest addresses are
+  // identity-mapped), and libSceVideoOut's buffer registration rejects a
+  // scanout buffer unless the offset shares the virtual address's low 16 bits
+  // (a tiling-alignment check), so report the VA there; left zero, every
+  // scanout register failed.
+  uint64_t offset = region->hasPhys ? region->physOffset
+                                    : reinterpret_cast<uint64_t>(start);
   std::memcpy(vq + 0x10, &offset, sizeof(uint64_t));
   // GPU-accessible memory (the guest asked for GPU read/write, bits 0x10/0x20)
   // is direct/physical memory in SCE terms: report it as WC_GARLIC (memType 3)
@@ -169,9 +179,11 @@ int PS4ABI sys_virtual_query(const void *addr, int /*flags*/, void *info,
     std::memcpy(vq + 0x1C, &memType, sizeof(int));
   }
   if (kVqTrace)
-    std::printf("[vq] addr=%p region=[%p..%p) sceProt=%#x memType=%d rsv=%d\n",
-                addr, start, end, region->sceProt, gpu ? 3 : 0,
-                region->reserved ? 1 : 0);
+    std::printf(
+        "[vq] addr=%p region=[%p..%p) sceProt=%#x memType=%d rsv=%d off=%#llx%s\n",
+        addr, start, end, region->sceProt, gpu ? 3 : 0,
+        region->reserved ? 1 : 0, (unsigned long long)offset,
+        region->hasPhys ? " (dmem)" : "");
   if (infoSize >= 0x21) {
     // flexible(0x01) | direct(0x02, GPU mem) | committed(0x10). A MAP_VOID
     // reservation is none of these -- titles branch on isCommitted to decide
@@ -306,8 +318,10 @@ int64_t PS4ABI sys_mmap_dmem(void *addr, size_t len, int prot, int flags,
     void *p = ::mmap(addr, len, PROT_READ | PROT_WRITE, mflags, fd,
                      static_cast<off_t>(physOffset));
     if (p != MAP_FAILED) {
-      proc::getActive()->getVma().add(reinterpret_cast<uint8_t *>(p), len,
-                                      utl::pageProtection::w);
+      proc::getActive()->getVma().addDirect(reinterpret_cast<uint8_t *>(p), len,
+                                            utl::pageProtection::w,
+                                            static_cast<uint32_t>(prot),
+                                            static_cast<uint64_t>(physOffset));
       return reinterpret_cast<int64_t>(p);
     }
   }
@@ -317,6 +331,12 @@ int64_t PS4ABI sys_mmap_dmem(void *addr, size_t len, int prot, int flags,
                         static_cast<uint32_t>(-1), 0);
   if (p == reinterpret_cast<uint8_t *>(-1))
     return -SysError::eNOMEM;
+  // Still direct memory as far as the guest is concerned: it keys its own heap
+  // map off the physical offset the query reports back.
+  if (physOffset >= 0)
+    proc::getActive()->getVma().addDirect(p, len, utl::pageProtection::w,
+                                          static_cast<uint32_t>(prot),
+                                          static_cast<uint64_t>(physOffset));
   return reinterpret_cast<int64_t>(p);
 }
 

@@ -21,6 +21,11 @@ void symbolize(uintptr_t addr, char *out, size_t n);
 // addresses inside a loaded module (see crash.cpp).
 void guestStackTrace(const char *tag, int maxFrames);
 
+// Where the guest's stack pointer was when this thread last entered a syscall
+// handler. The handler runs on its own stack (see krnl_kstack_top), so a scan
+// has to start from the guest side of the switch. 0 = no switch happened.
+void setGuestStackScanBase(uintptr_t sp);
+
 // Enable the DELTA_ALLOC_TRACE allocator-entry tracer: addr's first byte must be
 // `push rbp` (0x55); the caller plants an int3 there and this records addr so the
 // fatal handler logs each allocation (size in rsi) >= minSize and resumes.

@@ -16,6 +16,7 @@
 #include <chrono>
 #include <thread>
 #include <mutex>
+#include <sys/mman.h>
 #include <unordered_map>
 #ifdef _MSC_VER
 #include <intrin.h>
@@ -24,6 +25,7 @@
 #include <xbyak.h>
 #endif
 
+#include "../../crash.h"
 #include "error_table.h"
 #include "sys_debug.h"
 #include "sys_dynlib.h"
@@ -779,6 +781,39 @@ extern "C" uint32_t krnl_syscall_errno(uint64_t raw) {
 }
 
 #if defined(DELTA_BACKEND_NATIVE)
+// Per-thread stack for syscall handlers -- the emulator's equivalent of a
+// kernel stack. The native backend runs guest code on the host thread directly,
+// so a handler would otherwise execute on whatever stack the guest is using,
+// and a title that runs jobs on FIBERS gives those a stack of its own choosing:
+// SotC's are 16 KiB with the fiber's saved context sitting at the bottom, which
+// a handler's host frames (a std::mutex wait, a printf, an allocation) walk
+// straight through. The corruption showed up as a fiber resuming into the
+// middle of glibc's free().
+//
+// Returns 0 when no switch is wanted, which is also how nesting is handled: a
+// guest callback invoked from a handler makes its syscalls on the stack we
+// already switched to, and it just grows further down.
+extern "C" uint64_t krnl_kstack_top() {
+  constexpr size_t kSize = 1u << 20;  // 1 MiB, lazily backed
+  static thread_local uint8_t *base = nullptr;
+  const auto here = reinterpret_cast<uintptr_t>(__builtin_frame_address(0));
+  if (base) {
+    if (here > reinterpret_cast<uintptr_t>(base) &&
+        here < reinterpret_cast<uintptr_t>(base) + kSize)
+      return 0;  // already on it
+  } else {
+    void *p = ::mmap(nullptr, kSize, PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    if (p == MAP_FAILED)
+      return 0;
+    base = static_cast<uint8_t *>(p);
+  }
+  // Where the guest's own stack was, so a handler-side stack scan (see
+  // crash.cpp guestStackTrace) still finds the guest frames it is after.
+  setGuestStackScanBase(here);
+  return reinterpret_cast<uint64_t>(base + kSize);
+}
+
 static void PS4ABI trace_syscall(const char *name, int index, void *addr) {
   std::fprintf(stderr, "[syscall] %d %s\n", index, name);
 }
@@ -902,47 +937,69 @@ static const bool g_scHistDump = [] {
 // above. Replaces the bare `call handler` so the guest sees faithful errors.
 static uintptr_t emit_bsd_trampoline(const void *handler, uint32_t sid,
                                      bool trace, bool count) {
+  // The two handlers that never return -- they longjmp out of the guest call
+  // chain (cpu::exitGuestThread) -- must stay on the guest stack: glibc's
+  // longjmp check rejects a jump to a frame that is not on the current stack.
+  // Neither needs the room anyway.
+  const bool ownStack = sid != 1 /*exit*/ && sid != 431 /*thr_exit*/;
   struct bsdRet : Xbyak::CodeGenerator {
-    bsdRet(uintptr_t handler, uint32_t sid, bool trace, bool count) {
+    bsdRet(uintptr_t handler, uint32_t sid, bool trace, bool count,
+           bool ownStack) {
       if (count) {          // DELTA_SCHIST: ++g_sysHist[sid] (rax is caller-saved)
         mov(rax, reinterpret_cast<uintptr_t>(&g_sysHist[sid & 1023]));
         inc(qword[rax]);
       }
-      push(rbx);            // save guest rbx
-      sub(rsp, 8);          // the lifted site enters with `call`, so realign
+      // The lifted site enters with `call`, so rsp is 16-aligned here.
+      push(rbx);            // save guest rbx (callee-saved: survives the calls)
+      mov(rbx, rsp);        // remember the guest stack
+      if (ownStack) {
+        // Ask for this thread's handler stack without disturbing the args.
+        push(rdi); push(rsi); push(rdx); push(rcx); push(r8); push(r9);
+        sub(rsp, 8);
+        mov(rax, reinterpret_cast<uintptr_t>(&krnl_kstack_top));
+        call(rax);
+        add(rsp, 8);
+        mov(r11, rax);      // r11/rcx are scratch under the syscall convention
+        pop(r9); pop(r8); pop(rcx); pop(rdx); pop(rsi); pop(rdi);
+        Xbyak::Label keep;
+        test(r11, r11);
+        jz(keep);
+        mov(rsp, r11);      // run the handler on its own stack
+        L(keep);
+      }
+      and_(rsp, -16);       // the guest rsp is safe in rbx either way
       mov(rax, handler);
       call(rax);            // handler(rdi,rsi,rdx,rcx,r8,r9) -> rax (args intact)
-      mov(rbx, rax);        // stash the raw return across the helper call
+      mov(rsp, rbx);        // back onto the guest stack
+      push(rax);            // stash the raw return across the helper call
       mov(rdi, rax);
       mov(rax, reinterpret_cast<uintptr_t>(&krnl_syscall_errno));
       call(rax);            // eax = errno, or 0 when the return is a result
+      pop(r11);             // r11 = raw return
       test(eax, eax);
       Xbyak::Label ok;
       jz(ok);
-      // error path: eax = positive errno, rsp 16-aligned (after the call ret).
+      // error path: eax = positive errno, rsp 8 mod 16 (at the saved rbx).
       if (trace) {
-        push(rax);          // save errno (rsp now misaligned)
+        push(rax);          // save errno; rsp is now 16-aligned for the call
         mov(esi, eax);      // arg2 = errno
         mov(edi, sid);      // arg1 = syscall id
-        sub(rsp, 8);        // realign for the call
         mov(rax, reinterpret_cast<uintptr_t>(&trace_syscall_err));
         call(rax);
-        add(rsp, 8);
         pop(rax);           // restore errno
       }
-      add(rsp, 8);
       pop(rbx);
       stc();                // error: rax already = positive errno
       ret();
       L(ok);
-      mov(rax, rbx);        // success: restore the raw result
-      add(rsp, 8);
+      mov(rax, r11);        // success: restore the raw result
       pop(rbx);
       clc();
       ret();
     }
   };
-  auto *gen = new bsdRet(reinterpret_cast<uintptr_t>(handler), sid, trace, count);
+  auto *gen = new bsdRet(reinterpret_cast<uintptr_t>(handler), sid, trace,
+                         count, ownStack);
   return reinterpret_cast<uintptr_t>(gen->getCode());
 }
 #endif // DELTA_BACKEND_NATIVE

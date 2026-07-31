@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
+#include <dlfcn.h>
 #include <ucontext.h>
 #include <sys/syscall.h>
 #include <unistd.h>
@@ -1086,6 +1087,30 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
       std::fprintf(stderr, " %02x", b[i]);
     std::fprintf(stderr, "\n");
   }
+  // The host TLS base the faulting code was using. A fault in host library code
+  // reached from the guest is usually this: something left the host fs base
+  // wrong, so every `errno = x` writes near zero instead of into host TLS.
+  {
+    unsigned long fsb = 0;
+    if (::syscall(SYS_arch_prctl, 0x1003 /*ARCH_GET_FS*/, &fsb) == 0)
+      std::fprintf(stderr, "  host fs base = %#lx\n", fsb);
+  }
+  // A rip in HOST code symbolizes to nothing above; name the library and the
+  // nearest exported symbol so the handler that was running is identifiable.
+  {
+    char sym[256];
+    symbolize(gr[REG_RIP], sym, sizeof(sym));
+    if (std::strstr(sym, "(??)")) {
+      Dl_info di{};
+      if (dladdr(reinterpret_cast<void *>(gr[REG_RIP]), &di) && di.dli_fname)
+        std::fprintf(stderr, "  host rip = %s+%#lx  %s+%#lx\n", di.dli_fname,
+                     (unsigned long)(gr[REG_RIP] - (uintptr_t)di.dli_fbase),
+                     di.dli_sname ? di.dli_sname : "?",
+                     di.dli_saddr
+                         ? (unsigned long)(gr[REG_RIP] - (uintptr_t)di.dli_saddr)
+                         : 0ul);
+    }
+  }
   // DELTA_GUEST_BRK_DUMP=<reg>|all: follow an argument register one level. A
   // planted breakpoint lands where some object is about to be used, and what
   // that object POINTS AT (a byte stream, a descriptor) is the whole question --
@@ -1096,12 +1121,16 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
       int idx;
     } kRegs[] = {{"rdi", REG_RDI}, {"rsi", REG_RSI}, {"rdx", REG_RDX},
                  {"rcx", REG_RCX}, {"rbx", REG_RBX}, {"r14", REG_R14},
-                 {"r13", REG_R13}, {"r8", REG_R8}};
+                 {"r13", REG_R13}, {"r8", REG_R8},   {"r9", REG_R9},
+                 {"r11", REG_R11}, {"r12", REG_R12}, {"r15", REG_R15},
+                 {"rax", REG_RAX}};
     for (const auto &r : kRegs) {
       if (std::strcmp(rn, r.name) != 0 && std::strcmp(rn, "all") != 0)
         continue;
       const uintptr_t base = gr[r.idx];
-      if (base < 0x10000)
+      // A register holding a non-pointer must not take the handler down with
+      // it: "all" is the mode used when the interesting register is unknown.
+      if (base < 0x10000 || !trkMincore(base))
         continue;
       std::fprintf(stderr, "  --- %s = %#llx ---", r.name,
                    (unsigned long long)base);
@@ -1470,13 +1499,17 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
       static const struct {
         const char *name;
         int idx;
-      } kRegs[] = {{"rdi", RDI}, {"rsi", RSI}, {"rdx", RDX}, {"rcx", RCX},
-                   {"rbx", RBX}, {"r14", R14}, {"r13", R13}, {"r8", R8}};
+      } kRegs[] = {{"rdi", RDI}, {"rsi", RSI},   {"rdx", RDX}, {"rcx", RCX},
+                   {"rbx", RBX}, {"r14", R14},   {"r13", R13}, {"r8", R8},
+                   {"r9", R9},   {"r11", R11},   {"r12", R12}, {"r15", R15},
+                   {"rax", RAX}};
       for (const auto &r : kRegs) {
         if (std::strcmp(rn, r.name) != 0 && std::strcmp(rn, "all") != 0)
           continue;
         const uintptr_t base = g[r.idx];
-        if (base < 0x10000)
+        // A register holding a non-pointer must not take the handler down with
+        // it: "all" is the mode used when the interesting register is unknown.
+        if (base < 0x10000 || !trkMincore(base))
           continue;
         std::fprintf(stderr, "  --- %s = %#llx ---\n", r.name,
                      (unsigned long long)base);
@@ -1612,9 +1645,13 @@ void setRetTrace(uintptr_t addr, const char *label) {
 // trampoline does not switch), so this names the guest code that reached the
 // handler even when no frame pointer is available -- which is the only way to
 // see why a title's worker thread bailed out of its own loop.
+static thread_local uintptr_t t_guestSp = 0;
+void setGuestStackScanBase(uintptr_t sp) { t_guestSp = sp; }
+
 void guestStackTrace(const char *tag, int maxFrames) {
   uintptr_t here = 0;
-  auto *sp = reinterpret_cast<uintptr_t *>(&here);
+  auto *sp = t_guestSp ? reinterpret_cast<uintptr_t *>(t_guestSp)
+                       : reinterpret_cast<uintptr_t *>(&here);
   std::fprintf(stderr, "[%s] tid=%ld guest stack:\n", tag, (long)gettid());
   int printed = 0;
   for (int i = 0; i < 512 && printed < maxFrames; i++) {

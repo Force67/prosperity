@@ -29,6 +29,11 @@ public:
   // (and reused) slot and read another file's bytes. Overridden by fileDevice.
   virtual bool isRegularFile() const { return false; }
 
+  // True for /dev/dmem: an mmap through it maps direct memory at the physical
+  // offset in the mmap offset argument, which sceKernelVirtualQuery must report
+  // back (titles turn it into a block index in their own heap map).
+  virtual bool isDirectMemory() const { return false; }
+
   // Unknown map/ioctl on a device: soft-fail (and log) instead of trapping, so
   // the boot keeps advancing and we can see what the guest actually wanted.
   virtual uint8_t *map(void *, size_t, uint32_t, uint32_t, size_t) {

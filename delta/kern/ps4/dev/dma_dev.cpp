@@ -54,6 +54,13 @@ constexpr uint64_t kDmemTotal = 0x300000000ull;  // 12 GiB (SOTTR working set)
 // Floor for window-less requests so physical offset 0 stays invalid ("offset 0
 // means the allocation failed" checks in titles keep working).
 constexpr uint64_t kDmemBase = 0x10000000ull;
+// Band a window-less request is served from, below every window a title carves
+// for itself (those start at kDmemBase) and above offset 0 (which Skyrim
+// reserves, and which titles treat as "failed"). Placing these at the TOP of
+// the pool instead put them outside the largest free hole that
+// AvailableDirectMemorySize then reports, so a title sizing its own heap map
+// from that hole ended up with blocks whose index exceeded the map's capacity.
+constexpr uint64_t kDmemSysBase = 0x01000000ull;
 
 // Record of each direct-memory reservation so GetDirectMemoryType (ioctl
 // 0xC0208004) can answer "which region owns this physical offset, and of what
@@ -87,7 +94,11 @@ int dmemAllocate(uint64_t lo, uint64_t hi, uint64_t len, uint64_t align,
   // A caller that supplies its own search window means it, offset 0 included:
   // Skyrim reserves exactly [0, 0x200000) and falls back to carving its whole
   // heap out of 64 KiB mmaps when that fails.
-  const bool windowed = hi != 0 && hi < kDmemTotal;
+  // A non-zero searchStart is a window just as much as a searchEnd below the
+  // pool end: SotC asks for exactly the top 0x220000 with searchEnd == the pool
+  // size, and serving that from anywhere else moves a heap partition it
+  // identifies by physical range.
+  const bool windowed = lo != 0 || (hi != 0 && hi < kDmemTotal);
   if (hi == 0 || hi > kDmemTotal)
     hi = kDmemTotal;
   if (len == 0 || align == 0 || (align & (align - 1)) || lo >= hi)
@@ -107,10 +118,27 @@ int dmemAllocate(uint64_t lo, uint64_t hi, uint64_t len, uint64_t align,
     if (cand + len > hi)
       return -12 /*ENOMEM: window exhausted*/;
   } else {
-    // "Anywhere" (searchStart 0, whole pool): take the highest hole that fits.
-    // Titles carve their own windows upwards from offset 0 -- Skyrim walks the
-    // pool in 2 MiB steps -- so placing these at the bottom would have the two
-    // collide; kDmemBase then also keeps offset 0 out of a window-less answer.
+    // "Anywhere" (searchStart 0, whole pool): serve it from the system band,
+    // which is below every window a title carves for itself.
+    cand = (kDmemSysBase + align - 1) & ~(align - 1);
+    for (const auto &r : g_dmemRegions) {
+      if (r.end <= cand)
+        continue;
+      if (r.start >= cand + len)
+        break;
+      cand = ((r.end > cand ? r.end : cand) + align - 1) & ~(align - 1);
+    }
+    if (cand + len <= kDmemBase) {
+      auto it2 = g_dmemRegions.begin();
+      while (it2 != g_dmemRegions.end() && it2->start < cand)
+        ++it2;
+      g_dmemRegions.insert(it2, {cand, cand + len, memType});
+      *out = cand;
+      return 0;
+    }
+    // Band full (or the request is bigger than it): fall back to the highest
+    // hole that fits. Titles carve their own windows upwards from offset 0 --
+    // Skyrim walks the pool in 2 MiB steps -- so the bottom is not free either.
     uint64_t top = hi;
     cand = UINT64_MAX;
     for (auto it = g_dmemRegions.rbegin(); it != g_dmemRegions.rend(); ++it) {
@@ -186,6 +214,19 @@ uint64_t dmemBackingSize() { return kDmemTotal; }
 
 /* dmem_ioctl */
 int32_t dmaDevice::ioctl(uint32_t cmd, void *data) {
+  const int32_t r = ioctlImpl(cmd, data);
+  if (kDmemTrace) {
+    // The result too: an allocation whose window is exhausted is invisible in
+    // the arguments, and the title's own heap map is built from what it got.
+    auto *q = static_cast<uint64_t *>(data);
+    std::fprintf(stderr, "[dmem-ioctl]   -> ret=%d out=[%#llx %#llx]\n", r,
+                 q ? (unsigned long long)q[0] : 0ull,
+                 q ? (unsigned long long)q[1] : 0ull);
+  }
+  return r;
+}
+
+int32_t dmaDevice::ioctlImpl(uint32_t cmd, void *data) {
   if (kDmemTrace) {
     auto *q = static_cast<uint64_t *>(data);
     std::fprintf(stderr,

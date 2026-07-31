@@ -581,8 +581,14 @@ uint8_t *PS4ABI sys_mmap(void *addr, size_t size, uint32_t prot, uint32_t flags,
     inUserStack = inUserStack || isGuestReservedVa(addr, size);
   }
 
+  // An mmap through /dev/dmem carries the direct-memory physical offset in
+  // `offset`; remember it so sceKernelVirtualQuery can report it.
+  bool dmemMap = false;
   if (fd != -1) {
     auto *obj = proc->getObjTable().get(fd);
+    if (obj && obj->type() == kObject::oType::device &&
+        static_cast<device *>(obj)->isDirectMemory())
+      dmemMap = true;
     if (kMmapfdTrace)
       std::fprintf(stderr, "[mmapfd] fd=%u addr=%p size=%#zx off=%#zx objType=%d\n",
                    fd, addr, size, offset, obj ? (int)obj->type() : -1);
@@ -694,8 +700,12 @@ uint8_t *PS4ABI sys_mmap(void *addr, size_t size, uint32_t prot, uint32_t flags,
   // pieces inside with MAP_FIXED, which punches the reservation apart in the
   // VMA). Virtual query must see it as reserved, not committed memory.
   const bool voidReserve = (flags & 0x100) && prot == 0;
-  proc->getVma().add(static_cast<uint8_t *>(ptr), size, gprot, prot,
-                     voidReserve);
+  if (dmemMap)
+    proc->getVma().addDirect(static_cast<uint8_t *>(ptr), size, gprot, prot,
+                             offset);
+  else
+    proc->getVma().add(static_cast<uint8_t *>(ptr), size, gprot, prot,
+                       voidReserve);
 
   utl::protectMem(static_cast<void *>(ptr), size, ppt::rwx);
 
@@ -727,8 +737,9 @@ uint8_t *PS4ABI sys_mmap(void *addr, size_t size, uint32_t prot, uint32_t flags,
   }
 
   if (kMmapLog)
-    std::printf("mmap %p, %zx, prot=%x flags=%x, %p -> %p\n", addr, size, prot,
-                flags, _ReturnAddress(), ptr);
+    std::printf("mmap %p, %zx, prot=%x flags=%x fd=%d off=%#zx, %p -> %p\n",
+                addr, size, prot, flags, static_cast<int>(fd), offset,
+                _ReturnAddress(), ptr);
 
   if (flags & mFlags::stack)
     return &static_cast<uint8_t *>(ptr)[size];
