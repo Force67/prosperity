@@ -59,6 +59,7 @@ DELTA_OPTION(bool, kGfxctxWatch, "DELTA_GFXCTX_WATCH", false);
 DELTA_OPTION(bool, kJobTrace, "DELTA_JOB_TRACE", false);
 DELTA_OPTION(bool, kJobTraceClaim, "DELTA_JOB_TRACE_CLAIM", false);
 DELTA_OPTION(bool, kPs5Dcbwatch, "DELTA_PS5_DCBWATCH", false);
+DELTA_OPTION(const char *, kNullGuard, "DELTA_GUEST_NULLGUARD", nullptr);
 DELTA_OPTION(bool, kPs5Glyphguard, "DELTA_PS5_GLYPHGUARD", false);
 DELTA_OPTION(bool, kPs5Noforce, "DELTA_PS5_NOFORCE", false);
 DELTA_OPTION(bool, kSotcForcePayload, "DELTA_SOTC_FORCE_PAYLOAD", false);
@@ -136,6 +137,30 @@ bool proc::create(const base::String &path, bool fromVfs) {
 
   // Engine bring-up: give Isaac's surface-name registry valid empty storage so
   // main-init doesn't deref a null bucket array (self-gated by ctor signature).
+    // DELTA_GUEST_NULLGUARD="<hexoff>:<rax|rsi>:<len>[,...]": recover a guest
+  // deref of a bad pointer by zeroing the destination register and stepping
+  // over the instruction. For an allocator that faults instead of reporting
+  // "no space", this is how you find out whether the engine has an
+  // out-of-memory path at all.
+  if (const char *ng = kNullGuard) {
+    for (const char *p = ng; *p;) {
+      char *endp = nullptr;
+      const uint64_t off = std::strtoull(p, &endp, 16);
+      if (!endp || *endp != ':')
+        break;
+      const char *r = endp + 1;
+      const krnl::GuardReg reg =
+          (*r == 's') ? krnl::GuardReg::rsi : krnl::GuardReg::rax;
+      const char *c = std::strchr(r, ':');
+      if (!c)
+        break;
+      const int len = (int)std::strtol(c + 1, const_cast<char **>(&p), 10);
+      krnl::setNullGuard(reinterpret_cast<uintptr_t>(first->getInfo().base) + off, reg, len);
+      LOG_INFO("nullguard: armed eboot+{:#x} len={}", off, len);
+      while (*p == ',' || *p == ' ')
+        p++;
+    }
+  }
   if (ps5) {
     bringUpRebirthEbootRegistry(*first);
     investigateDcbGate(*first);
