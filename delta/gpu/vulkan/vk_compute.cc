@@ -38,6 +38,7 @@ namespace {
 DELTA_OPTION(uint64_t, kDetileDump, "DELTA_GPU_DETILEDUMP", 0);
 DELTA_OPTION(bool, kCsList, "DELTA_GPU_CSLIST", false);
 DELTA_OPTION(bool, kCsRtTrace, "DELTA_GPU_CSRT", false);
+DELTA_OPTION(bool, kCsRename, "DELTA_GPU_CSRENAME", false);
 DELTA_OPTION(bool, kGpuCsgpuVerbose, "DELTA_GPU_CSGPU_VERBOSE", false);
 }  // namespace
 
@@ -822,6 +823,34 @@ bool CsRangeEnsureBuffer(CsRange& e, VkDeviceSize size) {
   return true;
 }
 
+// Buffers still referenced by the open dispatch batch, freed once its fence
+// signals. See CsRangeRename.
+std::vector<std::pair<VkBuffer, VkDeviceMemory>> g_cs_retired;
+
+// DELTA_GPU_CSRENAME: a CPU write into a range the open batch already reads has
+// to flush that batch and wait on the GPU -- SotC's streaming does that 37 times
+// a frame, and staging then costs 272 ms of a 2 fps frame. Giving the range a
+// FRESH buffer and retiring the old one until the batch completes takes that to
+// 24 ms: the recorded descriptors keep reading the contents they were built
+// against, and this dispatch binds the new one. Only safe while nothing is
+// waiting to read results back OUT of the old buffer, hence the caller's
+// gpu_dirty/written check. Default OFF: it moves cost into the writeback rather
+// than removing it (SotC gains ~7% overall), and no title that currently
+// renders through the compute path could be used to gate the change.
+bool CsRangeRename(CsRange& e, VkDeviceSize size) {
+  if (e.map) {
+    vkUnmapMemory(g_dev.device, e.mem);
+    e.map = nullptr;
+  }
+  if (e.buf || e.mem)
+    g_cs_retired.emplace_back(e.buf, e.mem);
+  g_cs_range_bytes -= e.cap;
+  e.buf = VK_NULL_HANDLE;
+  e.mem = VK_NULL_HANDLE;
+  e.cap = 0;
+  return CsRangeEnsureBuffer(e, size);
+}
+
 void CsRangeDestroy(CsRange& e) {
   if (e.map)
     vkUnmapMemory(g_dev.device, e.mem);
@@ -881,6 +910,13 @@ bool CsBatchFlush() {
   }
   g_cs_batch_open = false;
   g_cs_batch_count = 0;
+  for (auto& [buf, mem] : g_cs_retired) {
+    if (buf)
+      vkDestroyBuffer(g_dev.device, buf, nullptr);
+    if (mem)
+      vkFreeMemory(g_dev.device, mem, nullptr);
+  }
+  g_cs_retired.clear();
   for (auto& kv : g_cs_ranges)
     kv.second.pending_batch = false;
   std::memset(g_cs_stage_pending, 0, sizeof g_cs_stage_pending);
@@ -1159,7 +1195,14 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci) {
     }
     if (!valid) {
       // CPU write into a buffer a pending batched dispatch reads/writes.
-      if (e.pending_batch && !CsBatchFlush()) {
+      // Renaming avoids the stall when the old contents are read-only.
+      if (kCsRename && e.pending_batch && !e.gpu_dirty && !e.res.written) {
+        if (!CsRangeRename(e, sz[i])) {
+          renderer.state = nullptr;
+          return false;
+        }
+        e.pending_batch = false;
+      } else if (e.pending_batch && !CsBatchFlush()) {
         renderer.state = nullptr;
         return false;
       }
