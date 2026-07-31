@@ -74,6 +74,9 @@ struct Translator {
   Id storage_img_types[2] = {};  // storage 2D / 2D-array images
   Id storage_img_ptrs[2] = {};   // UniformConstant pointers to storage images
   bool image_query = false;
+  // DELTA_GPU_PSTEX: the most recent image sample, so the PS epilogue can
+  // export it instead of the shader's own colour maths (see gcn_spirv.cc).
+  Id last_texel = 0;
   Id dbg_file = 0;  // OpString for OpLine pc markers (DELTA_GPU_SHDUMP)
 
   void InitTypes() {

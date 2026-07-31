@@ -25,6 +25,10 @@ namespace {
 DELTA_OPTION(float, kDebugUv, "DELTA_GPU_DEBUGUV", 0.f);
 }  // namespace
 
+namespace {
+DELTA_OPTION(int, kPsTexBind, "DELTA_GPU_PSTEX", 0);
+}  // namespace
+
 namespace gpu::gcn {
 namespace {
 
@@ -436,6 +440,12 @@ void EmitMimg(Translator& t,
   } else {  // image_sample / _cl / _b (bias/derivs ignored): implicit LOD
     texel = t.m.Emit(spv::Op::OpImageSampleImplicitLod, t.t_v4, {si, uv});
   }
+
+  // DELTA_GPU_PSTEX=<binding+1>: remember this binding's texel so the PS
+  // epilogue can export it (0 = the last sample, whatever it was).
+  if (!dref && !gather &&
+      (kPsTexBind == 0 || bind == (uint32_t)(kPsTexBind - 1)))
+    t.last_texel = texel;
 
   // DELTA_GPU_DEBUGUV: output the sample UV as R/G instead of the texel, to see
   // the coordinate distribution reaching the sampler (normalized 0..1 vs texel

@@ -35,6 +35,7 @@ DELTA_OPTION(int, kBusy, "DELTA_GPU_DRAWRT_BUSY", 0);
 DELTA_OPTION(bool, kClearTrace, "DELTA_GPU_CLEARTRACE", false);
 DELTA_OPTION(bool, kDrawTrace, "DELTA_GPU_DRAWTRACE", false);
 DELTA_OPTION(bool, kGpuDecltrace, "DELTA_GPU_DECLTRACE", false);
+DELTA_OPTION(uint64_t, kWhyDrop, "DELTA_GPU_WHYDROP", 0);
 DELTA_OPTION(bool, kRawBufTrace, "DELTA_GPU_RAWBUF", false);
 DELTA_OPTION(bool, kSelfTrace, "DELTA_GPU_SELFTRACE", false);
 DELTA_OPTION(bool, kTightCbuf, "DELTA_GPU_TIGHTCBUF", false);
@@ -101,6 +102,17 @@ static_assert(rhi::DrawInfo::kMaxBuffers == kRawBufBindings,
               "the command processor and the raw-buffer ring must agree on "
               "how many set-2 bindings exist");
 
+// DELTA_GPU_WHYDROP=<ps addr>: name the early exit that swallowed a draw. A
+// draw that never reaches vkCmdDraw is invisible in every other trace, and the
+// paths that consume one all `return true`.
+static void WhyDrop(const rhi::DrawInfo& d, const char* where) {
+  if (!kWhyDrop || d.ps_addr != (uint64_t)kWhyDrop)
+    return;
+  std::fprintf(stderr, "[whydrop] ps=%#lx exit=%s rt=%#lx mrt=%u depth=%#lx\n",
+               (unsigned long)d.ps_addr, where, (unsigned long)d.rt_base,
+               d.mrt_count, (unsigned long)d.depth_base);
+}
+
 void ReportDeclines() {
   std::fprintf(stderr, "[gpuvk]   decline:");
   for (int i = 0; i < kMaxDeclineReason; i++)
@@ -112,6 +124,16 @@ void ReportDeclines() {
 // Issue a draw running the game's recompiled VS/PS. Returns false if the draw
 // can't be handled (the caller falls back to the heuristic path).
 bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
+  // DELTA_GPU_WHYDROP=1: every draw as the renderer receives it, so a slot that
+  // never reaches the seq log can be identified.
+  if (kWhyDrop == 1)
+    std::fprintf(stderr,
+                 "[whydrop] draw#%u ps=%#lx vs=%#lx rt=%#lx mrt=%u tex=%#lx "
+                 "prim=%u cnt=%u\n",
+                 g_frame.draws, (unsigned long)d.ps_addr,
+                 (unsigned long)d.vs_addr, (unsigned long)d.rt_base,
+                 d.mrt_count, (unsigned long)d.tex_base, d.prim_type,
+                 d.index_data ? d.index_count : d.vertex_count);
   bool indexed = d.index_data && d.index_count >= 3;
   uint32_t draw_count = indexed ? d.index_count : d.vertex_count;
   if (kDrawTrace && draw_count >= 300) {
@@ -154,10 +176,17 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
     if (kGpuDecltrace && n++ < 48)
       std::fprintf(stderr,
                    "[decl] no-target draw#%u vs=%#lx ps=%#lx tex=%#lx "
-                   "icount=%u vcount=%u mask=%#x\n",
+                   "icount=%u vcount=%u mask=%#x pstex=%zu storage=%zu\n",
                    g_frame.draws, (unsigned long)d.vs_addr,
                    (unsigned long)d.ps_addr, (unsigned long)d.tex_base,
-                   d.index_count, d.vertex_count, d.target_mask);
+                   d.index_count, d.vertex_count, d.target_mask,
+                   d.recomp->ps_texs.size(),
+                   (size_t)std::count_if(d.recomp->ps_texs.begin(),
+                                         d.recomp->ps_texs.end(),
+                                         [](const gcn::ShaderTex& t) {
+                                           return t.storage;
+                                         }));
+    WhyDrop(d, "no-target");
     g_frame.draws++;
     return true;
   }
@@ -275,6 +304,7 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
         dt->second.clear_value = d.depth_clear;
       }
     }
+    WhyDrop(d, "clear-consumed");
     g_frame.draws++;
     return true;  // consumed: must not reach the rasteriser
   }
@@ -366,6 +396,7 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
             dt->clear_value = d.depth_clear;
           }
         }
+        WhyDrop(d, "lazyclear");
         g_frame.draws++;
         return true;  // suppressed; the clear is applied lazily on the next
                       // redraw
@@ -375,6 +406,7 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
       auto rit = g_rts.find(d.rt_base);
       if (fullscreen_black && rit != g_rts.end() && rit->second.draws > 0 &&
           rit->second.last_frame == g_frame.num) {
+        WhyDrop(d, "fullscreen-black");
         g_frame.draws++;
         return true;
       }
