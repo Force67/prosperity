@@ -38,6 +38,7 @@ extern "C" int vprx_anchor_ps5_libSceNgs2;
 // Forced-HLE sceImeKeyboardOpen: the LLE one needs the IME service daemon and
 // fails with a code titles don't expect from it (see ps5/libSceIme_ps5.cpp).
 extern "C" int vprx_anchor_ps5_libSceIme;
+extern "C" int vprx_anchor_ps5_libSceAppContent;
 // Same abnormal-termination reporter override the PS4 HLE has.
 extern "C" int vprx_anchor_ps5_libSceSystemService;
 extern "C" int vprx_anchor_libSceGnmDriver;
@@ -83,6 +84,7 @@ static volatile int *const vprx_anchors[] = {&vprx_anchor_libSceVideoOut,
                                              &vprx_anchor_ps5_libSceAgc,
                                              &vprx_anchor_ps5_libSceNgs2,
                                              &vprx_anchor_ps5_libSceIme,
+                                             &vprx_anchor_ps5_libSceAppContent,
                                              &vprx_anchor_ps5_libSceSystemService,
                                              &vprx_anchor_libSceSaveData,
                                              &vprx_anchor_libSceSaveDataDialog,

@@ -678,7 +678,8 @@ bool smodule::resolveObfSymbol(const char *name, uintptr_t &ptrOut) {
     //     fail in a way titles treat as fatal. Everything else stays LLE.
     static const char *const kPs5ForcedHle[] = {
         "libSceVideoOut", "libSceUserService",   "libScePad",
-        "libSceSaveData", "libSceSystemService", "libSceIme"};
+        "libSceSaveData", "libSceSystemService", "libSceIme",
+        "libSceAppContent"};
     auto bindHle = [&](const char *lib, uintptr_t hle) {
       char tn[64];
       std::snprintf(tn, sizeof(tn), "%s!%.11s", lib, name);
