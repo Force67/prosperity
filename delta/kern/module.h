@@ -118,6 +118,7 @@ private:
   void installEHFrame();
   bool setupTLS();
   bool mapImage();
+  void startModuleWatch();
 
   template <typename Type, typename TAdd> Type *getOffset(const TAdd dist) {
     return (Type *)(data.Get_UseOnlyIfYouKnowWhatYouareDoing() + dist);

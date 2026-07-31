@@ -8,6 +8,10 @@
  */
 
 #include <base.h>
+#include <chrono>
+#include <memory>
+#include <thread>
+#include <vector>
 #include <utl/file.h>
 #include <utl/mem.h>
 
@@ -148,6 +152,8 @@ bool smodule::fromMem(base::UniquePointer<uint8_t[]> data) {
   }
 
   installEHFrame();
+
+  startModuleWatch();
 
   if (elf->entry == 0)
     info.entry = nullptr;
@@ -403,6 +409,55 @@ void smodule::digestDynamicPs5(const ELFPgHeader *dynS) {
                 info.name.c_str(), (void *)strtab.ptr,
                 (unsigned long long)strtab.size, numSymbols, numRela, numJmpSlots,
                 (unsigned long long)sharedObjects.size());
+}
+
+// DELTA_MODCHECK=<name substring>: watch a module's NON-WRITABLE load segments
+// for corruption. Read-only data must never change after load, so a digest that
+// moves means something scribbled on the image -- which for a module carrying a
+// blob (libcohtml's V8 snapshot) shows up much later as unparseable data.
+void smodule::startModuleWatch() {
+  const char *want = std::getenv("DELTA_MODCHECK");
+  if (!want || info.name.find(want) == base::String::npos)
+    return;
+  struct Range {
+    const uint8_t *addr;
+    size_t size;
+  };
+  auto ranges = std::make_shared<std::vector<Range>>();
+  for (uint16_t i = 0; i < elf->phnum; ++i) {
+    const auto *p = &segments[i];
+    if (p->type != PT_LOAD || (p->flags & PF_W) || !p->filesz)
+      continue;
+    const uint8_t *a = elf->type == ET_SCE_EXEC
+                           ? reinterpret_cast<const uint8_t *>(p->vaddr)
+                           : getAddress<const uint8_t>(p->paddr);
+    ranges->push_back({a, static_cast<size_t>(p->filesz)});
+  }
+  if (ranges->empty())
+    return;
+  const base::String name = info.name;
+  std::thread([ranges, name] {
+    std::vector<uint64_t> last(ranges->size(), 0);
+    for (bool first = true;; first = false) {
+      for (size_t i = 0; i < ranges->size(); i++) {
+        uint64_t h = 1469598103934665603ull;
+        const auto &r = (*ranges)[i];
+        for (size_t k = 0; k < r.size; k += 64)
+          h = (h ^ r.addr[k]) * 1099511628211ull;
+        if (first) {
+          std::printf("[modcheck] %s seg%zu %p+%#zx digest=%#llx\n",
+                      name.c_str(), i, (const void *)r.addr, r.size,
+                      (unsigned long long)h);
+        } else if (h != last[i]) {
+          std::printf("[modcheck] %s seg%zu %p+%#zx CHANGED %#llx -> %#llx\n",
+                      name.c_str(), i, (const void *)r.addr, r.size,
+                      (unsigned long long)last[i], (unsigned long long)h);
+        }
+        last[i] = h;
+      }
+      std::this_thread::sleep_for(std::chrono::seconds(2));
+    }
+  }).detach();
 }
 
 bool smodule::mapImage() {
