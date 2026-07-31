@@ -25,6 +25,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace gpu::vk {
 
@@ -932,7 +933,8 @@ VkDescriptorSet GetTexture(uint64_t base,
   static const bool kTexRaw = std::getenv("DELTA_GPU_TEXRAW") != nullptr;
   if (kTexRaw && w >= 256 && h >= 128 && gpu::IsReadableRange(base, footprint)) {
     static int rawn = 0;
-    if (rawn < 6) {
+    static std::unordered_set<uint64_t> raw_seen;
+    if (rawn < 12 && raw_seen.insert(static_cast<uint64_t>(w) << 32 | h).second) {
       char p[320];
       std::snprintf(p, sizeof(p), "%s/raw_%02d_%ux%u_pitch%u_sh%u_tile%u_e%u.bin",
                     DumpDir(), rawn++, w, h, layout.mips[0].pitch,

@@ -791,7 +791,9 @@ TImage DecodeTImage(const uint32_t* d, bool r128) {
   if (t.type == 11)
     t.layers = std::max<uint32_t>(t.layers, 6);
   t.view_layers =
-      t.arrayed ? std::max<uint32_t>(depth + 1 - t.base_array, 1) : 1;
+      t.arrayed
+          ? std::max<uint32_t>(t.layers - std::min(t.base_array, t.layers), 1)
+          : 1;
   t.mip_levels = max_mip + 1;
   t.view_mips = std::max<uint32_t>(last_level + 1 - t.base_mip, 1);
   const bool valid_array = !t.arrayed || t.base_array <= depth;

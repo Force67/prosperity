@@ -131,6 +131,18 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
       std::any_of(d.recomp->ps_texs.begin(), d.recomp->ps_texs.end(),
                   [](const gcn::ShaderTex& tex) { return tex.storage; });
   if (!d.mrt_count && !d.depth_base && !has_storage_image) {
+    // DELTA_GPU_DECLTRACE: a draw with no target at all. Legitimate for a
+    // colour-write-masked pass, but it also catches a mis-decoded write mask,
+    // which silently deletes real geometry.
+    static const bool kNoRtTrace = std::getenv("DELTA_GPU_DECLTRACE") != nullptr;
+    static int n = 0;
+    if (kNoRtTrace && n++ < 48)
+      std::fprintf(stderr,
+                   "[decl] no-target draw#%u vs=%#lx ps=%#lx tex=%#lx "
+                   "icount=%u vcount=%u mask=%#x\n",
+                   g_frame.draws, (unsigned long)d.vs_addr,
+                   (unsigned long)d.ps_addr, (unsigned long)d.tex_base,
+                   d.index_count, d.vertex_count, d.target_mask);
     g_frame.draws++;
     return true;
   }
