@@ -2,6 +2,7 @@
 
 static const runtime::funcInfo functions[] = {
     {0xdecf1c1e20812811, (void *)&sceSystemServiceReportAbnormalTermination},  // 3s8cHiCBKBE
+    {0x7D9A38F2E9FB2CAE, (void *)&sceSystemServiceParamGetInt},                // fZo48un7LK4
 };
 
 MODULE_INIT(libSceSystemService);
