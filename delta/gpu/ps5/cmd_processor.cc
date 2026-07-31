@@ -503,13 +503,20 @@ void LoadRegPairs(uint32_t base, const uint32_t* body, uint32_t cnt) {
   // field, which then means "writes nothing". That is how a clear quad says it
   // must not touch colour -- Minecraft ends every frame with one, and taking it
   // as a normal draw overwrote the composited UI with flat white.
+  // The object is recognised by its per-target array: the 15 entries at
+  // pairs-20..pairs-6 carry tags 1..0xF. Requiring that keeps a block which
+  // merely ENDS in some OTHER type-1 object from being read as blend state --
+  // doing so zeroed the write mask and silently deleted the draw.
   static const bool kNoBlendState =
       std::getenv("DELTA_AGC_NOBLENDSTATE") != nullptr;
-  const bool tail = !kNoBlendState && num_pairs >= 1 &&
-                    (p[(num_pairs - 1) * 2] & (1u << 28));
-  const bool tail_has_mask =
-      tail && num_pairs >= 23 && (p[(num_pairs - 23) * 2] & (1u << 28));
-  bool has_blend_tail = base == kContextRegBase && tail_has_mask;
+  bool tail = !kNoBlendState && base == kContextRegBase && num_pairs >= 24;
+  for (uint32_t k = 0; tail && k < 15; k++) {
+    const uint32_t tag = p[(num_pairs - 20 + k) * 2];
+    if (!(tag & (1u << 28)) || (tag & ~kRegSelectorMask) != k + 1)
+      tail = false;
+  }
+  const bool tail_has_mask = tail && (p[(num_pairs - 23) * 2] & (1u << 28));
+  bool has_blend_tail = tail_has_mask;
   if (has_blend_tail) {
     g_regs[mmCB_BLEND0_CONTROL] = (p[(num_pairs - 24) * 2] & (1u << 28))
                                       ? p[(num_pairs - 24) * 2 + 1]
@@ -562,7 +569,7 @@ void LoadRegPairs(uint32_t base, const uint32_t* body, uint32_t cnt) {
   // Tail that stops before the mask field: the object says "no colour write".
   // A block whose tail is only the colour-target object instead (it binds a
   // base, so it is not a blend object at all) keeps the mask the anchor forced.
-  if (base == kContextRegBase && tail && !tail_has_mask && !bound_rt) {
+  if (tail && !tail_has_mask && !bound_rt) {
     g_regs[mmCB_BLEND0_CONTROL] = 0;
     g_regs[mmCB_TARGET_MASK] = 0;
   }
