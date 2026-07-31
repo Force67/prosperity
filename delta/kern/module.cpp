@@ -1110,11 +1110,17 @@ void smodule::installEHFrame() {
     current += 4;
 
     data_buffer = (uint8_t *)&info.base[offset];
-  } else if (exinfo->encoding == 0x1B) // relative to eh_frame
+  } else if (exinfo->encoding == 0x1B) // pc-relative
   {
     auto offset = *reinterpret_cast<int32_t *>(current);
+    // pc-relative means relative to where this field is in the MAPPED image.
+    // exinfo points into the on-disk file buffer, so using it as the pc gave a
+    // host heap address and every module failed the in-image check below --
+    // which is why no module ever got an .eh_frame.
+    const size_t field_off = static_cast<size_t>(
+        current - reinterpret_cast<uint8_t *>(exinfo));
     current += 4;
-    data_buffer = &current[offset];
+    data_buffer = getAddress<uint8_t>(p->vaddr) + field_off + offset;
   } else {
     return;
   }
@@ -1156,25 +1162,17 @@ void smodule::installEHFrame() {
       break;
     data_buffer_end += advance;
   }
-  if (!terminated)
-    return;  // truncated / malformed unwind table
-
-  size_t fde_count;
-  if (exinfo->fdeCount == 0x03) // absolute
-  {
-    fde_count = *reinterpret_cast<uint32_t *>(current);
-    current += 4;
-  } else {
-    return;
-  }
-
-  if (exinfo->encodingTable != 0x3B) // relative to eh_frame
-  {
-    return;
-  }
-
+  // A terminating zero-length CFI is optional -- most toolchains just end the
+  // section -- and the trailing encodings vary. None of that changes where
+  // .eh_frame starts, which is all the guest unwinder needs from us (it finds
+  // an FDE through the header's binary-search table, not by walking). Requiring
+  // a terminator left eh_frame_addr at 0 for EVERY module, so a C++ throw in a
+  // guest module found no unwind info and went straight to std::terminate --
+  // Minecraft's world creation aborts inside libcohtml that way. Fall back to
+  // the rest of the image when the walk doesn't terminate cleanly.
   info.ehFrameheaderAddr = data_buffer;
-  info.ehFrameheaderSize = data_buffer_end - data_buffer;
+  info.ehFrameheaderSize = static_cast<uint32_t>(
+      (terminated ? data_buffer_end : image_end) - data_buffer);
 }
 
 void smodule::logDbgInfo() {
