@@ -18,6 +18,7 @@
 #include <cstdlib>
 #include <condition_variable>
 #include <cstdio>
+#include <cstring>
 #include <ctime>
 #include <mutex>
 #include <optional>
@@ -30,6 +31,7 @@
 
 #include <utl/mem.h>
 
+#include "../../crash.h"
 #include "../../module.h"
 #include "../../proc.h"
 #include "cpu/cpu_backend.h"
@@ -110,9 +112,25 @@ int PS4ABI sys_thr_new(thr_param *p, int size) {
   // pthread-state allocator is interposed so the libc-mutex bootstrap can't recurse.
   ps5MaybeInterposePthreadAlloc();
   uint32_t tid = g_nextTid.fetch_add(1);
-  std::printf("[thr_new] tid=%u start=%p arg=%p stack=%p+%#zx tls=%p\n", tid,
-              (void *)p->start_func, p->arg, (void *)p->stack_base,
-              p->stack_size, (void *)p->tls_base);
+  // start_func is always libkernel's pthread trampoline; the routine the title
+  // actually runs is a field of the pthread object it passes as arg. Report the
+  // first text pointer in there, so a thread can be identified by the function
+  // it runs rather than only by whatever stack tag lands on it later.
+  char entry[256] = "?";
+  if (p->arg) {
+    auto *w = static_cast<const uintptr_t *>(p->arg);
+    for (int i = 0; i < 64; i++) {
+      char sym[256];
+      symbolize(w[i], sym, sizeof(sym));
+      if (std::strstr(sym, "(.text)")) {
+        std::snprintf(entry, sizeof(entry), "%s", sym);
+        break;
+      }
+    }
+  }
+  std::printf("[thr_new] tid=%u start=%p arg=%p stack=%p+%#zx tls=%p entry=%s\n",
+              tid, (void *)p->start_func, p->arg, (void *)p->stack_base,
+              p->stack_size, (void *)p->tls_base, entry);
 
   if (p->child_tid)
     *p->child_tid = tid;

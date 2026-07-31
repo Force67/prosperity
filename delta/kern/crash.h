@@ -17,6 +17,10 @@ void installCrashHandler();
 // module table (or "0x.. (??)" if unmapped). Exposed for targeted mmap/loop tracing.
 void symbolize(uintptr_t addr, char *out, size_t n);
 
+// Print the calling thread's guest call sites by scanning its stack for return
+// addresses inside a loaded module (see crash.cpp).
+void guestStackTrace(const char *tag, int maxFrames);
+
 // Enable the DELTA_ALLOC_TRACE allocator-entry tracer: addr's first byte must be
 // `push rbp` (0x55); the caller plants an int3 there and this records addr so the
 // fatal handler logs each allocation (size in rsi) >= minSize and resumes.

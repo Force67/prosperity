@@ -18,6 +18,7 @@
 #include <unistd.h>
 #include <unordered_map>
 
+#include "kern/crash.h"
 #include "kern/proc.h"
 #include "sys_event_flag.h"
 #include <utl/options.h>
@@ -27,6 +28,7 @@ DELTA_OPTION(const char *, kEvfTrace, "DELTA_EVF_TRACE", nullptr);
 DELTA_OPTION(long, kAudioMixAck, "DELTA_AUDIOMIX_ACK", -1);
 DELTA_OPTION(bool, kNoEvfGrace, "DELTA_NO_EVF_GRACE", false);
 DELTA_OPTION(bool, kWaitProbe, "DELTA_WAIT_PROBE", false);
+DELTA_OPTION(bool, kEvfStack, "DELTA_EVF_STACK", false);
 }  // namespace
 
 namespace krnl {
@@ -188,6 +190,10 @@ static void evfTrace(const char *op, int id, const eventFlag *ef,
                ef ? ef->fname().c_str() : "?",
                (unsigned long long)pattern, mode, ret,
                (unsigned long long)res);
+  // DELTA_EVF_STACK: name the guest code on both sides of a handshake. Which
+  // function waits or signals is what a trace of ids alone cannot say.
+  if (kEvfStack)
+    guestStackTrace("evfstk", 6);
 }
 
 int PS4ABI sys_evf_create(const char *name, uint32_t attr,

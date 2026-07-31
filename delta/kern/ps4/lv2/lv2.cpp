@@ -908,7 +908,8 @@ static uintptr_t emit_bsd_trampoline(const void *handler, uint32_t sid,
         mov(rax, reinterpret_cast<uintptr_t>(&g_sysHist[sid & 1023]));
         inc(qword[rax]);
       }
-      push(rbx);            // save guest rbx; rsp now 16-aligned for the calls
+      push(rbx);            // save guest rbx
+      sub(rsp, 8);          // the lifted site enters with `call`, so realign
       mov(rax, handler);
       call(rax);            // handler(rdi,rsi,rdx,rcx,r8,r9) -> rax (args intact)
       mov(rbx, rax);        // stash the raw return across the helper call
@@ -929,11 +930,13 @@ static uintptr_t emit_bsd_trampoline(const void *handler, uint32_t sid,
         add(rsp, 8);
         pop(rax);           // restore errno
       }
+      add(rsp, 8);
       pop(rbx);
       stc();                // error: rax already = positive errno
       ret();
       L(ok);
       mov(rax, rbx);        // success: restore the raw result
+      add(rsp, 8);
       pop(rbx);
       clc();
       ret();

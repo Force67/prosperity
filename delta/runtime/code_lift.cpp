@@ -183,10 +183,16 @@ void codeLift::emit_syscall(uint8_t *base, uint32_t idx) {
     std::fprintf(stderr, "[syslift] site=%p idx=%u -> trampoline=%#lx\n",
                  (void *)base, idx, (unsigned long)address);
   if (address) {
-    /*call to rax*/
+    // `mov rax, trampoline; call rax` over the stub's 12 bytes. It must be a
+    // CALL, not a JMP: the bytes right after the syscall are libkernel's own
+    // `jb cerror; ret`, which is what turns the BSD carry/errno return into the
+    // -1 + errno every sce* wrapper tests for. Jumping would return past that
+    // tail straight to the wrapper's caller, so a failing syscall arrived as
+    // rax = errno instead of -1 -- and a wrapper like sceKernelPollEventFlag
+    // (`mov ecx,eax; xor eax,eax; cmp ecx,-1`) then reported success.
     *(uint16_t *)base = 0xB848;
     *(uint64_t *)(base + 2) = address;
-    *(uint16_t *)(base + 10) = 0xE0FF;
+    *(uint16_t *)(base + 10) = 0xD0FF;
   }
 }
 

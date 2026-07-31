@@ -1607,6 +1607,27 @@ void setRetTrace(uintptr_t addr, const char *label) {
   }
 }
 
+// Scan the CALLING thread's stack for return addresses that land in a loaded
+// module and print them. A syscall handler runs on the guest stack (the native
+// trampoline does not switch), so this names the guest code that reached the
+// handler even when no frame pointer is available -- which is the only way to
+// see why a title's worker thread bailed out of its own loop.
+void guestStackTrace(const char *tag, int maxFrames) {
+  uintptr_t here = 0;
+  auto *sp = reinterpret_cast<uintptr_t *>(&here);
+  std::fprintf(stderr, "[%s] tid=%ld guest stack:\n", tag, (long)gettid());
+  int printed = 0;
+  for (int i = 0; i < 512 && printed < maxFrames; i++) {
+    char sym[256];
+    symbolize(sp[i], sym, sizeof(sym));
+    if (std::strstr(sym, "(.text)")) {
+      std::fprintf(stderr, "[%s]   sp+%-5x %016lx %s\n", tag, i * 8, sp[i], sym);
+      printed++;
+    }
+  }
+  std::fflush(stderr);
+}
+
 void setFnWatch(uintptr_t addr, const char *label) {
   if (g_fnWatchCount >= kFnWatchMax)
     return;

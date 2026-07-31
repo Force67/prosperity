@@ -16,6 +16,7 @@
 #include <pthread.h>
 #endif
 
+#include "../../crash.h"
 #include "../../proc.h"
 #include "cpu/cpu_backend.h"
 #include "error_table.h"
@@ -24,6 +25,7 @@
 
 namespace {
 DELTA_OPTION(bool, kSchedYieldReal, "DELTA_SCHED_YIELD_REAL", false);
+DELTA_OPTION(bool, kThrExitTrace, "DELTA_THREXIT_TRACE", false);
 }  // namespace
 
 namespace krnl {
@@ -46,6 +48,11 @@ int PS4ABI sys_thr_exit(int64_t *state) {
     *state = 1;
   std::printf("[thr_exit] state=%p -> terminating guest thread\n",
               (void *)state);
+  // DELTA_THREXIT_TRACE: a title whose worker thread dies silently leaves the
+  // rest of the engine parked on a handshake it will never get; the stack at
+  // exit names the loop that bailed.
+  if (kThrExitTrace)
+    guestStackTrace("thr_exit", 12);
   // thr_exit must never return to the caller: FreeBSD destroys the thread
   // in-kernel, and libkernel's pthread trampoline aborts ("thr_exit() returned")
   // if it does. Leave the JIT now (FEX longjmps out of ExecuteThread; native is
