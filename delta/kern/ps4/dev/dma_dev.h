@@ -33,5 +33,9 @@ private:
 // (syscall 628) commits VA -> backing_fd@physOffset via MAP_SHARED. Returns -1
 // if the backing could not be created. See ps5-boot-progress memory.
 int dmemBackingFd();
+
+// Memory type (SCE_KERNEL_WB_ONION / WC_GARLIC / ...) of the direct-memory
+// reservation covering a physical offset, or -1 when none does.
+int dmemTypeForOffset(uint64_t off);
 uint64_t dmemBackingSize();
 }

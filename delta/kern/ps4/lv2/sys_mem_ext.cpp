@@ -171,24 +171,33 @@ int PS4ABI sys_virtual_query(const void *addr, int /*flags*/, void *info,
   // with the direct bit set, which is what libSceVideoOut checks before it will
   // register a scanout buffer. Plain CPU memory stays flexible WB_ONION.
   bool gpu = (region->sceProt & 0x30) != 0;
+  // For direct memory the type the reservation was made with is the truth: a
+  // title routes an address to one of its heaps by it, and inferring GARLIC
+  // from the mapping's GPU protection bits made a CPU heap mapped GPU-visible
+  // look like the GPU one.
+  int memType = region->hasPhys ? dmemTypeForOffset(region->physOffset) : -1;
+  if (memType < 0)
+    memType = gpu ? 3 : 0;  // 3 = SCE_KERNEL_WC_GARLIC, 0 = WB_ONION
   if (infoSize >= 0x1C + sizeof(int)) {
     int prot = region->sceProt ? static_cast<int>(region->sceProt)
                                : static_cast<int>(region->prot);
     std::memcpy(vq + 0x18, &prot, sizeof(int));
-    int memType = gpu ? 3 : 0;  // 3 = SCE_KERNEL_WC_GARLIC, 0 = WB_ONION
     std::memcpy(vq + 0x1C, &memType, sizeof(int));
   }
   if (kVqTrace)
     std::printf(
         "[vq] addr=%p region=[%p..%p) sceProt=%#x memType=%d rsv=%d off=%#llx%s\n",
-        addr, start, end, region->sceProt, gpu ? 3 : 0,
+        addr, start, end, region->sceProt, memType,
         region->reserved ? 1 : 0, (unsigned long long)offset,
         region->hasPhys ? " (dmem)" : "");
   if (infoSize >= 0x21) {
     // flexible(0x01) | direct(0x02, GPU mem) | committed(0x10). A MAP_VOID
     // reservation is none of these -- titles branch on isCommitted to decide
     // whether a range still needs a real commit.
-    vq[0x20] = region->reserved ? 0x00 : (0x01 | 0x10 | (gpu ? 0x02 : 0x00));
+    vq[0x20] = region->reserved
+                   ? 0x00
+                   : (0x01 | 0x10 |
+                      ((gpu || region->hasPhys) ? 0x02 : 0x00));
     if (region->name) {
       size_t n = std::strlen(region->name);
       if (n > 31)

@@ -199,6 +199,18 @@ void dmemLargestHole(uint64_t lo, uint64_t hi, uint64_t align,
 }
 }  // namespace
 
+// Memory type of the reservation that owns `off`, or -1 if none does. The
+// direct-memory type is a title's ground truth for which of its heaps an address
+// belongs to; sceKernelVirtualQuery has to report the type the allocation was
+// made with, not one inferred from the mapping's protection.
+int dmemTypeForOffset(uint64_t off) {
+  std::lock_guard<std::mutex> lk(g_dmemMutex);
+  for (const auto &r : g_dmemRegions)
+    if (off >= r.start && off < r.end)
+      return static_cast<int>(r.memType);
+  return -1;
+}
+
 int dmemBackingFd() {
   std::call_once(g_dmemBackingOnce, [] {
     int fd = memfd_create("delta_dmem", 0);
