@@ -8,13 +8,17 @@
 // streaming behind the main loop burns the engine's whole 1 GiB CPU heap and it
 // then walks off its own "no free block" sentinel at eboot+0x1a371 (2026-08-01).
 
-// Show the target the game actually renders into, ahead of the dropped draw.
+// Show the target the game actually renders into.
 // +DELTA_GPU_PRESENT_ADDR=0x804e660000
 
-// The dropped draw: no target, valid cb0base, PS with a null colour export.
-// +DELTA_GPU_MASKTRACE=1 +DELTA_GPU_MASKTRACE_AFTER=4
-// +DELTA_GPU_SHDIS=1 +DELTA_GPU_SHDIS_ADDR=0x8048e16100
-// +DELTA_GPU_DRAWSEQ=260
+// The scanout composite binds that target and reads black from it. PSWHITE
+// paints the screen white (so geometry/target/blend/present are all fine) and
+// PSTEX exports a sampled texel instead of the shader's maths -- bindings 0
+// and 1 both come back black.
+// +DELTA_GPU_PSWHITE=1
+// +DELTA_GPU_PSTEX=2
+// +DELTA_GPU_TEXMISS=1  (41 unresolved T# bindings a run)
+// +DELTA_GPU_DRAWSEQ=260 +DELTA_GPU_DRAWRT=1 +DELTA_GPU_WHYDROP=1
 
 // The world-load spin hammers sched_yield (6.4M calls in 20 s), which our
 // default maps to a pause; a real host yield lets the load finish first.
