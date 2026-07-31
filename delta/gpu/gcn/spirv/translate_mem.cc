@@ -862,7 +862,10 @@ void EmitCsMtbuf(Translator& t, const Inst& inst, StageContext& sc) {
 // image_load/store[_mip] against staged linear RGBA8 images modelled as
 // storage buffers. Storage is mip-major; each level contains all physical
 // array layers and explicit LOD is view-relative.
-void EmitCsMimg(Translator& t, const Inst& inst, StageContext& sc) {
+void EmitCsMimg(Translator& t,
+                const Inst& inst,
+                StageContext& sc,
+                const Id* address) {
   const uint32_t w = inst.raw[0], w1 = inst.raw[1];
   const uint32_t op = (w >> 18) & 0x7F, dmask = (w >> 8) & 0xF;
   const uint32_t vaddr = w1 & 0xFF, vdata = (w1 >> 8) & 0xFF;
@@ -877,6 +880,16 @@ void EmitCsMimg(Translator& t, const Inst& inst, StageContext& sc) {
     return;
   }
   const bool da = (w & 0x4000) != 0;
+  // gfx10 NSA names every address component in its own VGPR; the caller hands
+  // them over already loaded. Without this a 2D load reads y from vaddr+1,
+  // which on an NSA instruction is some unrelated register -- the source image
+  // is then addressed by x alone and the result is vertical stripes.
+  const auto addr_vg = [&](uint32_t i) {
+    return address ? address[i] : t.Vg(vaddr + i);
+  };
+  const auto addr_vgf = [&](uint32_t i) {
+    return t.m.Bitcast(t.t_f, addr_vg(i));
+  };
 
   // T# field extraction (see DecodeTImage for the dword layout).
   const auto field = [&](uint32_t dword, uint32_t shift, uint32_t mask) {
@@ -901,7 +914,7 @@ void EmitCsMimg(Translator& t, const Inst& inst, StageContext& sc) {
   const Id descriptor_layers = t.Add(field(4, 0, 0x1FFF), t.U32(1));
 
   if (resinfo) {  // dimensions from the descriptor, no memory access
-    const Id mip = t.UMin(t.Vg(vaddr), t.Sub(safe_last_mip, base_mip));
+    const Id mip = t.UMin(addr_vg(0), t.Sub(safe_last_mip, base_mip));
     const Id physical = t.Add(base_mip, mip);
     const Id comps[4] = {
         Max1(t, t.Shr(base_width, physical)),
@@ -971,17 +984,17 @@ void EmitCsMimg(Translator& t, const Inst& inst, StageContext& sc) {
   supported_format = logical_or(supported_format, is_rgba16f);
   supported_format = logical_or(supported_format, is_r11g11b10f);
   const Id supported_type = logical_or(t.Eq(image_type, t.U32(9)), is_array);
-  Id requested_mip = mip_op ? t.Vg(vaddr + (da ? 3 : 2)) : t.U32(0);
+  Id requested_mip = mip_op ? addr_vg(da ? 3 : 2) : t.U32(0);
   if (op == 0x24) {
     const Id lod = t.m.ExtInst(t.t_f, GLSLstd450FMax,
-                               {t.VgF(vaddr + (da ? 3 : 2)), t.F32(0.f)});
+                               {addr_vgf(da ? 3 : 2), t.F32(0.f)});
     requested_mip = t.m.Emit(spv::Op::OpConvertFToU, t.t_u, {lod});
   }
   const Id view_mip = t.UMin(requested_mip, t.Sub(safe_last_mip, base_mip));
   const Id physical_mip = t.Add(base_mip, view_mip);
   const Id width = Max1(t, t.Shr(base_width, physical_mip));
   const Id height = Max1(t, t.Shr(base_height, physical_mip));
-  Id x = t.Vg(vaddr), y = t.Vg(vaddr + 1);
+  Id x = addr_vg(0), y = addr_vg(1);
   Id sample_fx = t.F32(0.f), sample_fy = t.F32(0.f);
   if (sample) {
     // Bilinear filter of the linear staging image with clamp addressing and
@@ -991,9 +1004,9 @@ void EmitCsMimg(Translator& t, const Inst& inst, StageContext& sc) {
     // weights are formed in the access block.
     const Id width_f = t.m.Emit(spv::Op::OpConvertUToF, t.t_f, {width});
     const Id height_f = t.m.Emit(spv::Op::OpConvertUToF, t.t_f, {height});
-    sample_fx = t.FSub(t.FMul(t.FClamp01(t.VgF(vaddr)), width_f), t.F32(0.5f));
+    sample_fx = t.FSub(t.FMul(t.FClamp01(addr_vgf(0)), width_f), t.F32(0.5f));
     sample_fy =
-        t.FSub(t.FMul(t.FClamp01(t.VgF(vaddr + 1)), height_f), t.F32(0.5f));
+        t.FSub(t.FMul(t.FClamp01(addr_vgf(1)), height_f), t.F32(0.5f));
     const Id fx0 =
         t.Ext1(GLSLstd450Floor, t.Ext2(GLSLstd450FMax, sample_fx, t.F32(0.f)));
     const Id fy0 =
@@ -1014,7 +1027,7 @@ void EmitCsMimg(Translator& t, const Inst& inst, StageContext& sc) {
       t.rdna_sources ? field(4, 16, 0x1FFF) : field(5, 0, 0x1FFF);
   const Id last_array = t.rdna_sources ? t.Add(descriptor_layers, t.U32(~0u))
                                        : field(5, 13, 0x1FFF);
-  const Id view_layer = da ? t.Vg(vaddr + 2) : t.U32(0);
+  const Id view_layer = da ? addr_vg(2) : t.U32(0);
   const Id physical_layer = t.Add(base_array, view_layer);
   const Id padded_layers =
       t.SelectB(pow2_pad, BitCeil(t, descriptor_layers), descriptor_layers);

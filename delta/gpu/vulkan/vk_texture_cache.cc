@@ -614,6 +614,24 @@ void PackTexPixels(uint8_t* linear,
   static int dump_upload_count = 0;
   if (kDumpUpload && dump_upload_count < 32 && elem == 4 && texel_w >= 128 &&
       texel_h >= 128) {
+    // Every layer, so an array/cube surface can be inspected face by face.
+    for (uint32_t l = 1; l < layout.layers && l < 8; l++) {
+      char lp[256];
+      std::snprintf(lp, sizeof(lp), "%s/tex_layer%u_%02d_%#lx_%ux%u.ppm",
+                    DumpDir(), l, dump_upload_count, (unsigned long)base,
+                    texel_w, texel_h);
+      if (FILE* lf = std::fopen(lp, "wb")) {
+        std::fprintf(lf, "P6\n%u %u\n255\n", texel_w, texel_h);
+        const uint8_t* lp8 =
+            linear + static_cast<uint64_t>(l) * texel_w * texel_h * 4;
+        for (uint64_t i = 0; i < static_cast<uint64_t>(texel_w) * texel_h; i++) {
+          std::fputc(lp8[i * 4], lf);
+          std::fputc(lp8[i * 4 + 1], lf);
+          std::fputc(lp8[i * 4 + 2], lf);
+        }
+        std::fclose(lf);
+      }
+    }
     uint64_t rgb_nonzero = 0, alpha_nonzero = 0;
     const uint64_t pixels = static_cast<uint64_t>(texel_w) * texel_h;
     for (uint64_t i = 0; i < pixels; i++) {

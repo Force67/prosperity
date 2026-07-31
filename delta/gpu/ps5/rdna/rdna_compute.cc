@@ -23,6 +23,7 @@ gpu::gcn::RecompiledCs RecompileCompute(const uint32_t*,
 #else
 
 #include <algorithm>
+#include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -364,9 +365,28 @@ bool EmitCsMemory(Translator& t, const Inst& inst, StageContext& sc) {
     case Enc::kDs:
       gpu::gcn::EmitDs(t, inst, sc);
       return true;
-    case Enc::kMimg:
-      gpu::gcn::EmitCsMimg(t, inst, sc);
+    case Enc::kMimg: {
+      // Same lowering as the graphics path: dim 3 (cube) and 5 (2D array)
+      // become the shared emitter's DA bit, and NSA names each address
+      // component in its own VGPR.
+      const uint32_t w = inst.raw[0];
+      const uint32_t dim = (w >> 3) & 0x7;
+      const bool arrayed_dim = dim == 3 || dim == 5;
+      Inst lowered = inst;
+      lowered.raw[0] = (w & ~0x4000u) | (arrayed_dim ? 0x4000u : 0u);
+      const uint32_t nsa = (w >> 1) & 0x3;
+      if (nsa) {
+        std::array<gpu::gcn::Id, 13> address{};
+        address[0] = t.Vg(inst.raw[1] & 0xFF);
+        for (uint32_t d = 0; d < nsa; d++)
+          for (uint32_t c = 0; c < 4; c++)
+            address[1 + d * 4 + c] = t.Vg((inst.raw[2 + d] >> (c * 8)) & 0xFF);
+        gpu::gcn::EmitCsMimg(t, lowered, sc, address.data());
+        return true;
+      }
+      gpu::gcn::EmitCsMimg(t, lowered, sc);
       return true;
+    }
     case Enc::kFlat:
       sc.cs_unsupported = true;  // the plan already declined these
       return true;
