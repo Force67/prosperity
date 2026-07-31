@@ -1,24 +1,13 @@
 // SHADOW OF THE COLOSSUS (CUSA08809, PS4)
 // Boots, loads its modules, returns from LoadInitialWorld and runs the main loop
-// with the renderer live, and it DOES render a real image -- see it with
-// +DELTA_GPU_PRESENT_ADDR=0x804e660000. The scanout is black because the draw
-// that carries that image forward writes through a UAV (its PS exports no
-// colour and ends in image_store), which the PS4 renderer does not implement,
-// so it is dropped for having no colour target. Separately, the world content
-// streaming behind the main loop burns the engine's whole 1 GiB CPU heap and it
-// then walks off its own "no free block" sentinel at eboot+0x1a371 (2026-08-01).
-
-// Show the target the game actually renders into.
-// +DELTA_GPU_PRESENT_ADDR=0x804e660000
-
-// The scanout composite binds that target and reads black from it. PSWHITE
-// paints the screen white (so geometry/target/blend/present are all fine) and
-// PSTEX exports a sampled texel instead of the shader's maths -- bindings 0
-// and 1 both come back black.
-// +DELTA_GPU_PSWHITE=1
-// +DELTA_GPU_PSTEX=2
-// +DELTA_GPU_TEXMISS=1  (41 unresolved T# bindings a run)
-// +DELTA_GPU_DRAWSEQ=260 +DELTA_GPU_DRAWRT=1 +DELTA_GPU_WHYDROP=1
+// with the renderer live. The screen is black because the title submits NO
+// world geometry: of 400 draws only 65 carry vertex data and every one of those
+// is a two-triangle HUD quad, the rest being fullscreen post passes. The render
+// path itself is verified correct (PSWHITE paints the screen white, RTTINT
+// turns it blue). The real blocker is memory: the world content streaming
+// behind the main loop burns the engine's whole 1 GiB CPU heap in a ~500 MiB
+// burst and it then walks off its own "no free block" sentinel at
+// eboot+0x1a371, about ten seconds in (2026-08-01).
 
 // The world-load spin hammers sched_yield (6.4M calls in 20 s), which our
 // default maps to a pause; a real host yield lets the load finish first.
@@ -29,6 +18,18 @@
 
 // Watch the CPU heap's free map drain (address from the crash's r9).
 // +DELTA_GUEST_POPCNT=8000940af8:5e00:1000
+
+// Watch the resource queues drain 16294 -> 0 (the load itself completes).
+// +DELTA_GUEST_SUMWATCH=201402ee2d00:110:28:10:1000
+
+// Render-path probes, all of which came back clean on this title.
+// +DELTA_GPU_PRESENT_ADDR=0x804e660000   the busiest offscreen target
+// +DELTA_GPU_PSWHITE=1                   force the fragment colour
+// +DELTA_GPU_PSTEX=2 +DELTA_GPU_PSTEXSCALE=50   export a sampled texel
+// +DELTA_GPU_RTTINT=1                    tint the sampled source
+// +DELTA_GPU_BINDTRACE=0x804390f000      per-binding bucket + read barrier
+// +DELTA_GPU_TEXMISS=1                   41 unresolved T# bindings a run
+// +DELTA_GPU_DRAWSEQ=260 +DELTA_GPU_DRAWRT=1 +DELTA_GPU_WHYDROP=1
 
 // Skip CGame::LoadInitialWorld's gate: no crash, but nothing to draw either.
 // +DELTA_SOTC_SKIP_WORLDWAIT=1
