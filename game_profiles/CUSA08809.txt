@@ -1,13 +1,21 @@
 // SHADOW OF THE COLOSSUS (CUSA08809, PS4)
-// Boots into the engine's streaming/job system; the world load is the frontier
-// (2026-07-31).
+// Boots, loads its modules, starts the world load and runs the main loop with
+// the renderer live (23-28 draws a frame, its full post-process chain). The
+// frame is still black: the world load never finishes because the engine
+// consumes its whole 1 GiB CPU heap and frees nothing, then walks off the
+// empty free map at eboot+0x1a371 (2026-07-31).
 
-// Job-system research knobs, off by default because each one changes engine
-// behaviour rather than fixing it. Enable one at a time.
+// Watch the CPU heap's free map drain (address from the crash's r9).
+// +DELTA_GUEST_POPCNT=8000940af8:5e00:1000
+
+// Skip CGame::LoadInitialWorld's gate: no crash, but nothing to draw either.
+// +DELTA_SOTC_SKIP_WORLDWAIT=1
+
+// Job-system research knobs from the pre-fix era, off by default. The loader
+// thread and job system work now, so these are unlikely to be what you want.
 // +DELTA_SOTC_7CORE=1
 // +DELTA_SOTC_JOBFIX=1
 // +DELTA_SOTC_JOBMOVE=1
-// +DELTA_SOTC_SKIP_WORLDWAIT=1
 // +DELTA_SOTC_FORCE_WORLDDONE=1
 // +DELTA_SOTC_FORCE_PAYLOAD=1
 // What the FIOS2 layer was asked for, when a load never completes.
