@@ -959,17 +959,28 @@ void CopyGfx10StdMip(uint8_t* tiled,
   const uint64_t slice_bytes =
       static_cast<uint64_t>(level.pitch) * level.stored_height * Elem;
   uint8_t* slice = tiled + slice_bytes * layer;
-  // Within a block the standard swizzle is one interleave of the coordinate
-  // bits, Y FIRST, spilling whichever dimension still has bits left. The
-  // micro-tile is not a separate level of the address: for 32bpp this is a
-  // plain y0,x0,y1,x1,.. Morton over the whole 128x128 block. Verified against
-  // Minecraft's UI atlas, whose padding rows land exactly on the dead
-  // micro-rows only under this ordering.
+  // Within a block: the 256 B micro-tile has its own bit pattern, and above it
+  // the micro-tiles interleave Y first. For 32bpp the micro-tile is 8x8 laid
+  // out x0,x1,y0,y1,y2,x2 -- a 4x4 row-major quadrant, quadrants ordered Y
+  // first. Solved from the surfaces themselves: a 64 KiB block only ever holds
+  // non-zero elements inside the WxH image, and over two dozen differently
+  // shaped Minecraft UI surfaces this is the only bit order that never places a
+  // non-zero element outside one.
   uint32_t x_bits = 0, y_bits = 0;
   while ((1u << x_bits) < bw)
     x_bits++;
   while ((1u << y_bits) < bh)
     y_bits++;
+  uint32_t micro_src[6] = {}, micro_is_x[6] = {}, micro_n = 0;
+  if constexpr (Elem == 4) {
+    const uint32_t sx[6] = {0, 1, 0, 1, 2, 2};
+    const uint32_t is_x[6] = {1, 1, 0, 0, 0, 1};
+    for (uint32_t i = 0; i < 6; i++) {
+      micro_src[i] = sx[i];
+      micro_is_x[i] = is_x[i];
+    }
+    micro_n = 6;
+  }
   DetileParallelRows(level.height, [&](uint32_t y0, uint32_t y1) {
     for (uint32_t y = y0; y < y1; y++) {
       uint8_t* linear_row = linear + static_cast<size_t>(y) * linear_row_bytes;
@@ -977,6 +988,11 @@ void CopyGfx10StdMip(uint8_t* tiled,
       for (uint32_t x = 0; x < level.width; x++) {
         const uint32_t bx = x / bw, ix = x % bw;
         uint32_t element = 0, bit = 0, xb = 0, yb = 0;
+        for (uint32_t i = 0; i < micro_n; i++) {
+          const uint32_t v = micro_is_x[i] ? ix : iy;
+          element |= ((v >> micro_src[i]) & 1) << bit++;
+          (micro_is_x[i] ? xb : yb)++;
+        }
         while (xb < x_bits || yb < y_bits) {
           if (yb < y_bits)
             element |= ((iy >> yb++) & 1) << bit++;
