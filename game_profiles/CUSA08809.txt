@@ -1,10 +1,20 @@
 // SHADOW OF THE COLOSSUS (CUSA08809, PS4)
 // Boots, loads its modules, returns from LoadInitialWorld and runs the main loop
-// with the renderer live (23-28 draws a frame, its full post-process chain).
-// The frame is still black: the world content streams in behind the main loop
-// and burns the engine's whole 1 GiB CPU heap in a burst faster than anything
-// consumes it, after which its own free-block search walks off the "none left"
-// sentinel at eboot+0x1a371 (2026-07-31).
+// with the renderer live, and it DOES render a real image -- see it with
+// +DELTA_GPU_PRESENT_ADDR=0x804e660000. The scanout is black because the draw
+// that carries that image forward writes through a UAV (its PS exports no
+// colour and ends in image_store), which the PS4 renderer does not implement,
+// so it is dropped for having no colour target. Separately, the world content
+// streaming behind the main loop burns the engine's whole 1 GiB CPU heap and it
+// then walks off its own "no free block" sentinel at eboot+0x1a371 (2026-08-01).
+
+// Show the target the game actually renders into, ahead of the dropped draw.
+// +DELTA_GPU_PRESENT_ADDR=0x804e660000
+
+// The dropped draw: no target, valid cb0base, PS with a null colour export.
+// +DELTA_GPU_MASKTRACE=1 +DELTA_GPU_MASKTRACE_AFTER=4
+// +DELTA_GPU_SHDIS=1 +DELTA_GPU_SHDIS_ADDR=0x8048e16100
+// +DELTA_GPU_DRAWSEQ=260
 
 // The world-load spin hammers sched_yield (6.4M calls in 20 s), which our
 // default maps to a pause; a real host yield lets the load finish first.
