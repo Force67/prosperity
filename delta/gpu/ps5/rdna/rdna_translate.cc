@@ -1142,7 +1142,7 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       }
       if (raw0 == 249) {  // SDWA: apply the source's sub-dword selection
         const SdwaMod sd = DecodeSdwa(inst, 0, false);
-        if (sd.dst_sel != 6 || sd.src0_sel > 6 || sd.clamp || sd.omod)
+        if (sd.dst_sel != 6 || sd.src0_sel > 6)
           gpu::gcn::WarnUnsupported("vop1.sdwa-mod", op, w, w1);
         gpu::gcn::EmitVop1(
             t, op, vdst,
@@ -1151,6 +1151,13 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
                                      SdwaSelect(t, t.SrcRaw(src0, 0),
                                                 sd.src0_sel, sd.src0_sext),
                                      sd.src0_neg, sd.src0_abs)));
+        if (sd.omod) {
+          const float k = sd.omod == 1 ? 2.f : sd.omod == 2 ? 4.f : 0.5f;
+          t.SetVgF(vdst, t.FMul(t.VgF(vdst), t.F32(k)));
+        }
+        if (sd.clamp)
+          t.SetVgF(vdst, t.m.ExtInst(t.t_f, GLSLstd450FClamp,
+                                     {t.VgF(vdst), t.F32(0.f), t.F32(1.f)}));
         break;
       }
       if (op == 0x0b) {
@@ -1174,13 +1181,18 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       uint32_t src1 = 256 + vsrc1;
       Id sdwa0 = 0, sdwa1 = 0;
       bool sdwa_clamp = false;
+      uint32_t sdwa_omod = 0;
       if (raw0 == 249) {
         const SdwaMod sd = DecodeSdwa(inst, vsrc1, false);
-        if (sd.dst_sel != 6 || sd.src0_sel > 6 || sd.src1_sel > 6 || sd.omod)
+        if (sd.dst_sel != 6 || sd.src0_sel > 6 || sd.src1_sel > 6)
           gpu::gcn::WarnUnsupported("vop2.sdwa-mod", op, w, w1);
-        // CLAMP is applied to the RESULT, so it needs no operand rewriting --
-        // the shared emitter writes vdst and we saturate it afterwards.
+        // CLAMP and OMOD are applied to the RESULT, so they need no operand
+        // rewriting -- the shared emitter writes vdst and we scale/saturate it
+        // afterwards. OMOD is a real gfx10 SDWA field: `v_mul_f32_sdwa ... mul:2`
+        // is what Minecraft's world shaders use, and rejecting it dropped the
+        // whole shader.
         sdwa_clamp = sd.clamp;
+        sdwa_omod = sd.omod;
         src1 = sd.src1;
         sdwa0 = SdwaFloatMod(
             t, SdwaSelect(t, t.SrcRaw(sd.src0, 0), sd.src0_sel, sd.src0_sext),
@@ -1266,6 +1278,11 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
             gpu::gcn::WarnUnsupported("vop2.opcode.rdna", op, w, w1);
           }
           break;
+      }
+      // OMOD scales the result (1 = x2, 2 = x4, 3 = /2) and runs before CLAMP.
+      if (sdwa_omod) {
+        const float k = sdwa_omod == 1 ? 2.f : sdwa_omod == 2 ? 4.f : 0.5f;
+        t.SetVgF(vdst, t.FMul(t.VgF(vdst), t.F32(k)));
       }
       if (sdwa_clamp)
         t.SetVgF(vdst, t.m.ExtInst(t.t_f, GLSLstd450FClamp,

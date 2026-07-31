@@ -13,6 +13,7 @@
 
 #include <mutex>
 #include <sys/mman.h>
+#include <algorithm>
 #include <cstring>
 #include <unordered_map>
 #include <vector>
@@ -24,16 +25,19 @@
 
 namespace {
 DELTA_OPTION(bool, kDmemTrace, "DELTA_DMEM_TRACE", false);
+DELTA_OPTION(bool, kNoCarry, "DELTA_DMEM_NOCARRY", false);
 }  // namespace
 
 namespace krnl {
 
 namespace {
-// What each VA currently maps, so a second map at the same base can be told
-// apart from a fresh one. V8 shrinks a heap page by allocating a smaller block
-// and mapping it over the head of the page it already has; re-pointing the VA at
-// fresh physical memory throws away the page's contents, which for its read-only
-// heap means every root in that page reads back empty.
+// What each VA currently maps, so a map that lands on direct memory the guest
+// already has can be told apart from a fresh one. Real direct memory is
+// recycled physical RAM: a title that maps a new block where an old one was
+// gets whatever was in those pages, NOT zeroes. Our backing store is a memfd,
+// so a fresh offset reads zero and every such remap silently wipes what was
+// there -- which is how V8 lost the read-only heap it had just deserialized
+// when it shrank the page holding it.
 std::mutex g_dmemVaLock;
 std::unordered_map<uint64_t, size_t> g_dmemVaLen;
 }  // namespace
@@ -46,15 +50,16 @@ uint8_t *dmaDevicePs5::map(void *addr, size_t len, uint32_t /*prot*/, uint32_t f
     return reinterpret_cast<uint8_t *>(-1);
   uint8_t *va = static_cast<uint8_t *>(addr);
   const bool fixed = (flags & mFlags::fixed) != 0;
-  // A fixed map that only shrinks a mapping already at this exact base is the
-  // caller trimming its own region, not asking for fresh memory: carry the
-  // contents over to the new physical block. Without this V8 loses its whole
-  // read-only heap the moment it shrinks the page it deserialized it into.
+  // A fixed map onto the exact base of one the guest already has is it
+  // re-pointing its own region, not asking for fresh memory: carry the contents
+  // over so the remap behaves like reusing the same physical pages. A map at a
+  // DIFFERENT base is a genuine new allocation (a piece committed inside a pool,
+  // say) and must still read as fresh memory.
   std::vector<uint8_t> carry;
-  if (va && fixed) {
+  if (va && fixed && !kNoCarry) {
     std::lock_guard<std::mutex> lk(g_dmemVaLock);
     auto it = g_dmemVaLen.find(reinterpret_cast<uint64_t>(va));
-    if (it != g_dmemVaLen.end() && len < it->second)
+    if (it != g_dmemVaLen.end() && len <= it->second)
       carry.assign(va, va + len);
   }
   void *p = MAP_FAILED;

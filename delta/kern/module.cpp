@@ -33,6 +33,7 @@ namespace {
 DELTA_OPTION(const char *, kDumpModule, "DELTA_DUMP_MODULE", nullptr);
 DELTA_OPTION(const char *, kGuestBrk, "DELTA_GUEST_BRK", nullptr);
 DELTA_OPTION(uint64_t, kBrkAfter, "DELTA_GUEST_BRK_AFTER", 0);
+DELTA_OPTION(const char *, kNoExec, "DELTA_GUEST_NOEXEC", nullptr);
 DELTA_OPTION(const char *, kModCheck, "DELTA_MODCHECK", nullptr);
 DELTA_OPTION(bool, kLibkDebug, "DELTA_LIBK_DEBUG", false);
 DELTA_OPTION(bool, kImplibTrace, "DELTA_IMPLIB_TRACE", false);
@@ -429,7 +430,33 @@ void smodule::digestDynamicPs5(const ELFPgHeader *dynS) {
 // AT that instruction instead of wherever the guest's own abort path ends up,
 // which is the only way to see the state feeding a fault inside a stripped
 // third-party module. Diagnostic only.
+// DELTA_GUEST_NOEXEC=<hex addr>:<hex size>:<seconds>: take execute permission
+// off a guest range once the title is up. Straight-line execution through data
+// faults only where the mapping ends, which says nothing about where control
+// left the code; dropping X makes the fault happen at the ENTRY instead.
+static void startNoExecWatch() {
+  const char *spec = kNoExec;
+  if (!spec)
+    return;
+  static std::once_flag once;
+  std::call_once(once, [spec] {
+    const uintptr_t addr = std::strtoull(spec, nullptr, 16);
+    const char *c1 = std::strchr(spec, ':');
+    const size_t size = c1 ? std::strtoull(c1 + 1, nullptr, 16) : 0x1000;
+    const char *c2 = c1 ? std::strchr(c1 + 1, ':') : nullptr;
+    const uint64_t delay = c2 ? std::strtoull(c2 + 1, nullptr, 10) : 60;
+    std::thread([addr, size, delay] {
+      std::this_thread::sleep_for(std::chrono::seconds(delay));
+      const int r = ::mprotect(reinterpret_cast<void *>(addr), size,
+                               PROT_READ | PROT_WRITE);
+      std::printf("[noexec] %#llx+%#zx -> rw (%d)\n", (unsigned long long)addr,
+                  size, r);
+    }).detach();
+  });
+}
+
 void smodule::plantGuestBreakpoints() {
+  startNoExecWatch();
   const char *spec = kGuestBrk;
   if (!spec)
     return;
