@@ -1,9 +1,10 @@
 // SHADOW OF THE COLOSSUS (CUSA08809, PS4)
-// Boots, loads its modules, starts the world load and runs the main loop with
-// the renderer live (23-28 draws a frame, its full post-process chain). The
-// frame is still black: the world load never finishes because the engine
-// consumes its whole 1 GiB CPU heap and frees nothing, then walks off the
-// empty free map at eboot+0x1a371 (2026-07-31).
+// Boots, loads its modules, returns from LoadInitialWorld and runs the main loop
+// with the renderer live (23-28 draws a frame, its full post-process chain).
+// The frame is still black: the world content streams in behind the main loop
+// and burns the engine's whole 1 GiB CPU heap in a burst faster than anything
+// consumes it, after which its own free-block search walks off the "none left"
+// sentinel at eboot+0x1a371 (2026-07-31).
 
 // The world-load spin hammers sched_yield (6.4M calls in 20 s), which our
 // default maps to a pause; a real host yield lets the load finish first.
