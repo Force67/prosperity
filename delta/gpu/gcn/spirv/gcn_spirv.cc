@@ -53,6 +53,7 @@ DELTA_OPTION(uint64_t, kShDisAddr, "DELTA_GPU_SHDIS_ADDR", 0);
 DELTA_OPTION(bool, kGpuNokill, "DELTA_GPU_NOKILL", false);
 DELTA_OPTION(bool, kGpuPswhite, "DELTA_GPU_PSWHITE", false);
 DELTA_OPTION(int, kGpuPstex, "DELTA_GPU_PSTEX", 0);
+DELTA_OPTION(float, kGpuPstexScale, "DELTA_GPU_PSTEXSCALE", 1.f);
 DELTA_OPTION(bool, kGpuShdis, "DELTA_GPU_SHDIS", false);
 DELTA_OPTION(bool, kGpuShtrace, "DELTA_GPU_SHTRACE", false);
 DELTA_OPTION(bool, kGpuSpirv, "DELTA_GPU_SPIRV", false);
@@ -1009,10 +1010,14 @@ bool TranslatePs(const Program& program,
   if (kGpuPstex != 0 && has_color_export && t.last_texel)
     t.m.Store(PsColorOut(t, sc, 0),
               t.m.CompositeConstruct(
-                  t.t_v4, {t.m.CompositeExtract(t.t_f, t.last_texel, 0),
-                           t.m.CompositeExtract(t.t_f, t.last_texel, 1),
-                           t.m.CompositeExtract(t.t_f, t.last_texel, 2),
-                           t.F32(1.f)}));
+                  t.t_v4,
+                  {t.FMul(t.m.CompositeExtract(t.t_f, t.last_texel, 0),
+                          t.F32(kGpuPstexScale)),
+                   t.FMul(t.m.CompositeExtract(t.t_f, t.last_texel, 1),
+                          t.F32(kGpuPstexScale)),
+                   t.FMul(t.m.CompositeExtract(t.t_f, t.last_texel, 2),
+                          t.F32(kGpuPstexScale)),
+                   t.F32(1.f)}));
 
   // DELTA_GPU_PSWHITE: isolate VS/rasterization from fragment color math.
   if (kGpuPswhite && has_color_export)

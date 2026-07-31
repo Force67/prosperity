@@ -753,6 +753,16 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
                                  &range);
           }
           const VkImageLayout desired = multi_layouts[i];
+          if (kBindTrace && d.ps_addr == (uint64_t)kBindTrace) {
+            static int bn = 0;
+            if (bn++ < 8)
+              std::fprintf(stderr,
+                           "[bindbar] b%u %#lx layout=%d desired=%d dirty=%d "
+                           "region_restarted=%d\n",
+                           i, (unsigned long)multi_color[i], (int)src.layout,
+                           (int)desired, (int)src.dirty_for_read,
+                           (int)restart_region);
+          }
           if (src.layout != desired || src.dirty_for_read) {
             const VkAccessFlags access =
                 desired == VK_IMAGE_LAYOUT_GENERAL
