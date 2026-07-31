@@ -1,20 +1,19 @@
 /*
  * PS4Delta : PS4/PS5 emulation and research project
  *
- * PS5-only HLE override for libSceAppContent. The real .sprx answers these
- * through a system service we don't host, so its calls fail: a title that reads
- * "cannot tell" as "no space" or "trial" locks the features neither gets.
- * Minecraft (PPSA17221) asks for the free space of its temporary-data and
- * download-data areas and, on failure, greys out "create new world" and puts up
- * an out-of-storage modal.
+ * PS5-only HLE override for libSceAppContent. The real .sprx answers through a
+ * system service we don't host, so every call fails and a title that reads
+ * "cannot tell" as "trial" or "no space" locks features neither state gets.
  *
- * These six entry points are exactly the ones Minecraft imports; the rest of
- * libSceAppContent stays LLE.
+ * These six entry points are exactly the ones Minecraft (PPSA17221) imports;
+ * the rest of libSceAppContent stays LLE.
  */
 
 #include "../vprx.h"  // PS4ABI (via <base.h>), MODULE_INIT_PS5
 
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <sys/stat.h>
@@ -25,8 +24,12 @@ namespace {
 // SCE_APP_CONTENT_APPPARAM_ID_SKU_FLAG == 0; 0 = full game, 1 = trial.
 constexpr uint32_t kSkuFlagFull = 0;
 
-// Free space reported for both areas, in KiB (32 GiB).
-constexpr uint64_t kAvailableKb = 32ull * 1024 * 1024;
+// Free space reported for both areas, in KiB. Deliberately 1 GiB and not
+// something larger: a caller that converts KiB to bytes in 32 bits wraps to
+// exactly 0 for any value that is a multiple of 4 GiB, which reads as "no
+// space". 1 GiB is 0x40000000 bytes -- positive even as a signed 32-bit count,
+// and far more than a new world needs.
+constexpr uint64_t kAvailableKb = 1024ull * 1024;
 
 constexpr char kTempPoint[] = "/temp0";
 
@@ -56,10 +59,35 @@ int PS4ABI appContentInitialize(const void *, uint32_t *bootParam) {
   return 0;
 }
 
-int PS4ABI appContentAppParamGetInt(uint32_t /*paramId*/, int32_t *value) {
+// paramId 1..4 are the title's own userDefinedParamN, which on Prospero live in
+// /app0/sce_sys/param.json. Scrape the one key rather than pulling in a JSON
+// parser: the file is a flat object of "key": value pairs.
+int32_t userDefinedParam(uint32_t n) {
+  static const std::string json = [] {
+    utl::File f = krnl::vfs::openRead("/app0/sce_sys/param.json");
+    if (!f.IsOpen())
+      return std::string();
+    std::string s(static_cast<size_t>(f.GetSize()), '\0');
+    f.Read(s.data(), s.size());
+    return s;
+  }();
+  char key[32];
+  std::snprintf(key, sizeof(key), "\"userDefinedParam%u\"", n);
+  const size_t at = json.find(key);
+  if (at == std::string::npos)
+    return 0;
+  const size_t colon = json.find(':', at);
+  return colon == std::string::npos
+             ? 0
+             : static_cast<int32_t>(std::strtol(json.c_str() + colon + 1,
+                                                nullptr, 10));
+}
+
+int PS4ABI appContentAppParamGetInt(uint32_t paramId, int32_t *value) {
   if (!value)
     return -1;
-  *value = static_cast<int32_t>(kSkuFlagFull);
+  *value = paramId == 0 ? static_cast<int32_t>(kSkuFlagFull)
+                        : userDefinedParam(paramId);
   return 0;
 }
 
@@ -83,6 +111,7 @@ int PS4ABI appContentGetAvailableSpaceKb(const void *, uint64_t *availableKb) {
   *availableKb = kAvailableKb;
   return 0;
 }
+
 }  // namespace
 
 static const runtime::funcInfo functions[] = {
