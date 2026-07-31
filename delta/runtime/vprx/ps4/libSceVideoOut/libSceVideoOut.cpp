@@ -117,6 +117,13 @@ struct VideoPort {
   std::atomic<uint64_t> submitCount{0};
   int64_t lastFlipArg = -1;
   int currentBuffer = -1;
+  // When the last flip was submitted and when it completed. Zero here is not
+  // harmless: a title that decides a per-frame resource is retired by comparing
+  // its own submit stamp against the flip's never sees one advance, so it
+  // allocates a fresh one every frame instead of recycling.
+  std::atomic<uint64_t> lastSubmitTsc{0};
+  std::atomic<uint64_t> lastFlipTsc{0};
+  std::atomic<uint64_t> lastProcessTime{0};
 
   // equeue (by handle) a flip/vblank event was registered on, so SubmitFlip can
   // wake exactly that queue. Isaac uses one display port + one equeue.
@@ -133,6 +140,14 @@ struct VideoPort {
   // stalled forever on the unset label.
   uint64_t *labels = nullptr;
 };
+
+// Monotonic nanoseconds, used for the flip/vblank timestamps the SCE structs
+// carry (processTime is documented as microseconds, tsc as a raw counter).
+static uint64_t nowNs() {
+  return (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
 
 uint64_t *videoLabels();  // fwd (needs g_mtx/g_port below)
 
@@ -425,6 +440,10 @@ int PS4ABI sceVideoOutSubmitFlip(int handle, int bufferIndex, int flipMode,
     fmt = g_port.pixelFormat;
     g_port.currentBuffer = bufferIndex;
     g_port.lastFlipArg = flipArg;
+    const uint64_t t = nowNs();
+    g_port.lastSubmitTsc.store(t);
+    g_port.lastFlipTsc.store(t);
+    g_port.lastProcessTime.store(t / 1000);
     g_port.submitCount.fetch_add(1);
   }
 
@@ -469,6 +488,10 @@ int PS4ABI sceVideoOutSubmitFlipEop(int handle, int bufferIndex, int flipMode,
     if (bufferIndex >= 0 && bufferIndex < kMaxBuffers) {
       scanout = reinterpret_cast<uint64_t>(g_port.buffers[bufferIndex]);
       g_port.currentBuffer = bufferIndex;
+      const uint64_t t = nowNs();
+      g_port.lastSubmitTsc.store(t);
+      g_port.lastFlipTsc.store(t);
+      g_port.lastProcessTime.store(t / 1000);
     }
     g_port.lastFlipArg = flipArg;
     g_port.submitCount.fetch_add(1);
@@ -506,6 +529,9 @@ int PS4ABI sceVideoOutGetFlipStatus(int handle, void *status) {
   s->gcQueueNum = 0;
   // pending = submitted but not yet "completed"; we complete synchronously.
   s->flipPendingNum = 0;
+  s->tsc = g_port.lastFlipTsc.load();
+  s->submitTsc = g_port.lastSubmitTsc.load();
+  s->processTime = g_port.lastProcessTime.load();
   return 0;
 }
 
@@ -520,6 +546,8 @@ int PS4ABI sceVideoOutGetVblankStatus(int handle, void *status) {
   std::memset(s, 0, sizeof(*s));
   s->count = g_port.flipCount.load();
   s->flags = 0;
+  s->tsc = g_port.lastFlipTsc.load();
+  s->processTime = g_port.lastProcessTime.load();
   return 0;
 }
 
