@@ -32,6 +32,10 @@ uint8_t *allocLowGuest(size_t size, size_t align = 0);
 // asks for an exact sub-range of it.
 void noteGuestReleased(uint8_t *ptr, size_t size);
 bool wasGuestReleased(uint8_t *ptr, size_t size);
+// ...and VA that has been handed out again since. Direct-memory maps bypass the
+// VMA (they mmap the shared store themselves), so without this a later hint
+// could be honoured straight over a live one.
+void noteGuestTaken(uint8_t *ptr, size_t size);
 
 uint8_t *PS4ABI sys_mmap(void *addr, size_t size, uint32_t prot, uint32_t flags,
                          uint32_t fd, size_t offset);

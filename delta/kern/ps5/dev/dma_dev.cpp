@@ -99,6 +99,7 @@ uint8_t *dmaDevicePs5::map(void *addr, size_t len, uint32_t /*prot*/, uint32_t f
   }
   if (p == MAP_FAILED)
     return reinterpret_cast<uint8_t *>(-1);
+  noteGuestTaken(static_cast<uint8_t *>(p), len);
   if (!carry.empty())
     std::memcpy(p, carry.data(), carry.size());
   {

@@ -99,6 +99,19 @@ void noteGuestReleased(uint8_t *ptr, size_t size) {
     g_released.push_back({base, base + size});
 }
 
+void noteGuestTaken(uint8_t *ptr, size_t size) {
+  if (!ptr || !size)
+    return;
+  const uintptr_t lo = reinterpret_cast<uintptr_t>(ptr), hi = lo + size;
+  std::lock_guard<std::mutex> lk(g_releasedLock);
+  for (auto it = g_released.begin(); it != g_released.end();) {
+    if (lo < it->end && it->base < hi)
+      it = g_released.erase(it);  // partially reused: no longer safe to reuse
+    else
+      ++it;
+  }
+}
+
 bool wasGuestReleased(uint8_t *ptr, size_t size) {
   const uintptr_t base = reinterpret_cast<uintptr_t>(ptr);
   std::lock_guard<std::mutex> lk(g_releasedLock);
