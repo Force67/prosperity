@@ -22,6 +22,7 @@
 #include "kern/ps4/dev/ajm_dev.h"
 #include "kern/ps4/dev/console_dev.h"
 #include "kern/ps4/dev/dipsw_dev.h"
+#include "kern/ps4/dev/random_dev.h"
 #include "kern/ps4/dev/dce_dev.h"
 #include "kern/ps4/dev/dir_dev.h"
 #include "kern/ps4/dev/dma_dev.h"
@@ -84,6 +85,8 @@ static device *make_device(const char *deviceName) {
     dev = new dceDevice(proc);
   if (xname == "dipsw")
     dev = new dipswDevice(proc);
+  if (xname == "random" || xname == "urandom")
+    dev = new randomDevice(proc);
   if (xname == "ajm")
     dev = new ajmDevice(proc);
   /*there are multiple of these*/
