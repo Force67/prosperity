@@ -30,6 +30,11 @@
 extern "C" void prosperity_agc_submit(uint64_t dcbBase, uint32_t sizeBytes);
 // PS5 present bridge: end the frame and present the rendered RT to the window.
 extern "C" void prosperity_agc_flip(uint64_t scanoutBase);
+
+// Set once the title issues the mode-1 end-of-frame ioctl. Until then the frame
+// has to be ended somewhere, and the start of a state submit is the only other
+// boundary available.
+static std::atomic<bool> g_sawEndOfFrame{false};
 // Guest address of the display buffer the game most recently flipped, resolved
 // from sceVideoOutSubmitFlip*'s bufferIndex via the registered-buffer table
 // (libSceVideoOut_ps5.cpp). The AGC flip ioctls below carry no buffer field, so
@@ -327,12 +332,19 @@ int32_t gcDevicePs5::ioctl(uint32_t cmd, void *data) {
                       // command processor, which follows the IBs and renders.
     if (data) {
       // Present the previous frame's accumulated draws at the start of each new
-      // frame's state submit, then submit this frame's register state. The
-      // display buffer to scan out is the one the game last flipped via the HLE
-      // videoout (bufferIndex -> registered address), not whichever RT drew last.
-      uint64_t scanout = prosperity_ps5_scanout_base();
-      traceFlip("0x80488131", scanout);
-      prosperity_agc_flip(scanout);
+      // frame's state submit -- but ONLY while the title has never signalled a
+      // real end of frame (0x80088133). A state submit happens several times a
+      // frame, so ending the frame here cuts the title's own passes in half:
+      // Minecraft's UI layer gets its clear in one of our frames and its
+      // content in the next, so the composite that samples it sees an empty
+      // target and the UI flickers. The display buffer to scan out is the one
+      // the game last flipped via the HLE videoout (bufferIndex -> registered
+      // address), not whichever RT drew last.
+      if (!g_sawEndOfFrame.load(std::memory_order_relaxed)) {
+        uint64_t scanout = prosperity_ps5_scanout_base();
+        traceFlip("0x80488131", scanout);
+        prosperity_agc_flip(scanout);
+      }
       static const bool agcTrace1 = std::getenv("DELTA_AGC_TRACE") != nullptr;
       static int s_d131 = 0;
       if (agcTrace1 && s_d131 < 6) {
@@ -442,6 +454,7 @@ int32_t gcDevicePs5::ioctl(uint32_t cmd, void *data) {
                     // once per frame after the 0x8131 state + 0x8132 draw submits.
                     // The 8-byte arg carries no buffer field (observed all-zero);
                     // present the buffer the game flipped via the HLE videoout.
+    g_sawEndOfFrame.store(true, std::memory_order_relaxed);
     uint64_t scanout = prosperity_ps5_scanout_base();
     traceFlip("0x80088133", scanout);
     prosperity_agc_flip(scanout);
