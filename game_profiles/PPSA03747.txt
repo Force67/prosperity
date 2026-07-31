@@ -1,0 +1,9 @@
+// The Elder Scrolls V: Skyrim (PPSA03747, PS5)
+// Boots fully, loads its data and renders at ~100 fps at 3840x2160. The frame
+// is still black: the AGC register-shadow images come through zeroed
+// (2026-07-31).
+
+// What the AGC command processor was handed.
+// +DELTA_AGC_TRACE=1
+// +DELTA_AGC_REGSTAT=2
+// +DELTA_GPU_RTSTAT=1

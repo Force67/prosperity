@@ -1,0 +1,7 @@
+// Uncharted 2: Among Thieves Remastered (CUSA03281, PS4)
+// Boots through libc, Fios2 and the engine's thread bring-up. The blocker is an
+// engine assert deep in GetRenderFrameParams (frame out of range), i.e. frame
+// pacing rather than any single syscall (2026-07-31).
+
+// +DELTA_SCERR_TRACE=1
+// +DELTA_UMTX_TRACE=1

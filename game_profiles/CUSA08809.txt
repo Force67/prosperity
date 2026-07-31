@@ -1,0 +1,14 @@
+// SHADOW OF THE COLOSSUS (CUSA08809, PS4)
+// Boots into the engine's streaming/job system; the world load is the frontier
+// (2026-07-31).
+
+// Job-system research knobs, off by default because each one changes engine
+// behaviour rather than fixing it. Enable one at a time.
+// +DELTA_SOTC_7CORE=1
+// +DELTA_SOTC_JOBFIX=1
+// +DELTA_SOTC_JOBMOVE=1
+// +DELTA_SOTC_SKIP_WORLDWAIT=1
+// +DELTA_SOTC_FORCE_WORLDDONE=1
+// +DELTA_SOTC_FORCE_PAYLOAD=1
+// What the FIOS2 layer was asked for, when a load never completes.
+// +DELTA_FIOS_TRACE=1

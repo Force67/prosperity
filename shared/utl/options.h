@@ -47,4 +47,11 @@ void initOptions();
 // than the ones someone asked for: a missing file then passes without a word.
 bool loadOptionFile(const char *path, bool optional = false);
 
+// Applies the settings shipped for a title: game_profiles/<title id>.txt next
+// to the binary (or under DELTA_DATA_DIR). Call it once the title id is known.
+// A profile only fills in options nothing else has set, so it never overrides
+// the environment, an options file or the command line. DELTA_PROFILE names a
+// file to use instead, or "off" to boot the title with no profile at all.
+void loadGameProfile(const char *titleId);
+
 } // namespace utl

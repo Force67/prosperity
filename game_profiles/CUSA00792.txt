@@ -1,0 +1,8 @@
+// The Binding of Isaac: Rebirth (CUSA00792, PS4)
+// Boots to gameplay and renders the room, HUD and sprites at 60 fps
+// (2026-07-31). Needs no settings of its own.
+
+// Headless capture: walk the intro into gameplay, then grab one frame.
+// +DELTA_PAD_AUTOSKIP=1
+// +DELTA_GPU_SNAP=600
+// +DELTA_GPU_SNAP_EXIT=1

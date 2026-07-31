@@ -1,0 +1,7 @@
+// The Binding of Isaac: Repentance (PPSA03311, PS5)
+// Renders and plays: intro cutscene, gameplay room and HUD, with pad input
+// (2026-07-31). Needs no settings of its own.
+
+// +DELTA_PAD_AUTOSKIP=1
+// +DELTA_GPU_SNAP=600
+// +DELTA_GPU_SNAP_EXIT=1

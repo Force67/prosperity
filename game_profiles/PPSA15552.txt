@@ -1,0 +1,6 @@
+// Dead Cells (PPSA15552, PS5)
+// Boots and presents at ~23 fps once the newer-SDK NIDs missing from firmware
+// 01.14.00 are shimmed; the frame is still black (2026-07-31).
+
+// +DELTA_AGC_TRACE=1
+// +DELTA_NID_TRACE=1

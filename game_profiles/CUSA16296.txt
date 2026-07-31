@@ -1,0 +1,11 @@
+// DOOM 64 (CUSA16296, PS4)
+// Runs the gameplay simulation at ~59.5 fps (attract demo, item pickups). Menu
+// text renders; the 3D scene and backgrounds still composite near-black, which
+// is where the work stands (2026-07-31).
+
+// Drive the attract demo / menus from the pad script.
+// +DELTA_PAD_AUTOSKIP=1
+// +DELTA_PAD_AUTOSKIP_DOOM=1
+// Scene compositing: what each draw wrote, and to which target.
+// +DELTA_GPU_DRAWLIST=1
+// +DELTA_GPU_RTSTAT=1

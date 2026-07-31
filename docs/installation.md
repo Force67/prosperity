@@ -73,6 +73,17 @@ ignored silently.
 and description in exactly that format, so a run can be captured as a file and
 edited from there. `--dump-options` alone logs the same to stdout.
 
+### Game profiles
+
+Settings a specific title wants ship in [`game_profiles/`](../game_profiles),
+one file per title id, and are picked up automatically once the game is mounted:
+booting `CUSA00109` reads `game_profiles/CUSA00109.txt` from next to the binary
+(the build links the source tree's copy there; `DELTA_DATA_DIR` moves the whole
+lookup). A profile only fills in options nothing else has set, so it never
+overrides the three sources above. `DELTA_PROFILE=<file>` uses another file and
+`DELTA_PROFILE=off` boots with none, which is how you tell a title's own
+settings apart from a regression.
+
 ## Headless / no display
 
 When no display is available (no `DISPLAY` / `WAYLAND_DISPLAY`), run with SDL's

@@ -1,0 +1,5 @@
+// Undertale (CUSA09415, PS4)
+// Runs at a stable 30 fps and flips continuously; the intro cutscene and the
+// config menu render (2026-07-31).
+
+// +DELTA_PAD_AUTOSKIP=1

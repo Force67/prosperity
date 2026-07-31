@@ -1,0 +1,8 @@
+// P.T. (CUSA01127, PS4)
+// FOX engine. The PFS mount is fine; the boot stops in the module loader
+// (mapImage) on the eighth module (2026-07-31).
+
+// The renderer needs a few thousand pad reads before the title's transition
+// handler exists, so hold neutral before pulsing anything.
+// +DELTA_PAD_AUTOSKIP=1
+// +DELTA_PAD_AUTOSKIP_START=4000

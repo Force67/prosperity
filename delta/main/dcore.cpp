@@ -601,6 +601,11 @@ void deltaCore::boot(const base::String &xdir) {
     krnl::vfs::mountWritable("/download0", dl.c_str());
   }
 
+  // The title is known now, so the settings we ship for it can fill in
+  // everything the environment / an options file / the command line didn't.
+  // Before the guest starts: the knobs below and in the boot thread latch.
+  utl::loadGameProfile(krnl::vfs::titleId().c_str());
+
   // These all boot from an /app0 mount rather than a bare host path.
   const bool mounted = isPkg || isFfpkg || isAppDir;
   const bool isPs5 = isFfpkg || isPs5AppDir;

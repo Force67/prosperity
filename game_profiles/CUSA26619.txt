@@ -1,0 +1,7 @@
+// Grand Theft Auto: San Andreas - The Definitive Edition (CUSA26619, PS4)
+// UE4 / Gameface. Gets deep into UE4 init; the blocker is UE4's own CPU pool
+// running out of budget (~6 GB) before it ever reaches sys_mmap (2026-07-31).
+
+// Where the memory goes.
+// +DELTA_MMAP_CALLER=64
+// +DELTA_ALLOC_TRACE=1

@@ -1,0 +1,6 @@
+// Minecraft (PPSA17221, PS5)
+// The UI is pixel-correct and Create New World opens; the blocker is a V8 fatal
+// inside Gameface (2026-07-31).
+
+// +DELTA_PS5_SYSTRACE=1
+// +DELTA_SAVEDATA_TRACE=1

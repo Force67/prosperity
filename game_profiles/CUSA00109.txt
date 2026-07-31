@@ -1,0 +1,12 @@
+// Tomb Raider: Definitive Edition (CUSA00109, PS4)
+// The TAFS loader reads every .manifest.bin through an async reader that races
+// our threads: served straight, an archive header comes back with another
+// archive's bytes and the engine follows it into a null deref. Caching each
+// manifest at mount and answering header reads from that cache is what gets the
+// title past its own asset bring-up (2026-07-31).
++DELTA_HDR_FILL=1
+
+// The read that went wrong, when it goes wrong again.
+// +DELTA_MANIFEST_SEQ=1
+// +DELTA_HDR_TRACE=1
+// +DELTA_FILEREAD_TRACE=1

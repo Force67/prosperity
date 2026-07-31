@@ -49,6 +49,20 @@ if(DELTA_BACKEND STREQUAL "NATIVE")
   target_link_libraries(ps4delta PRIVATE xbyak)
 endif()
 
+# The per-title settings are looked up next to the binary, so link the source
+# tree's copy there: editing a profile then takes effect without a rebuild.
+if(UNIX)
+  add_custom_command(TARGET ps4delta POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E create_symlink
+            ${CMAKE_SOURCE_DIR}/game_profiles
+            $<TARGET_FILE_DIR:ps4delta>/game_profiles)
+else()
+  add_custom_command(TARGET ps4delta POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+            ${CMAKE_SOURCE_DIR}/game_profiles
+            $<TARGET_FILE_DIR:ps4delta>/game_profiles)
+endif()
+
 # On linux the .ico is useless, so install the converted png plus a desktop
 # entry that points at it.
 if(UNIX AND NOT APPLE)
@@ -58,6 +72,8 @@ if(UNIX AND NOT APPLE)
           RENAME ps4delta.png)
   install(FILES _res/ps4delta.desktop
           DESTINATION share/applications)
+  install(DIRECTORY ${CMAKE_SOURCE_DIR}/game_profiles
+          DESTINATION bin)
   # Register the application/x-ps4-pkg MIME type so .pkg files open with us.
   install(FILES _res/ps4delta-pkg.xml
           DESTINATION share/mime/packages)
