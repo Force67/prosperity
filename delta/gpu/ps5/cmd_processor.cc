@@ -533,6 +533,21 @@ void LoadRegPairs(uint32_t base, const uint32_t* body, uint32_t cnt) {
   // pairs-20..pairs-6 carry tags 1..0xF. Requiring that keeps a block which
   // merely ENDS in some OTHER type-1 object from being read as blend state --
   // doing so zeroed the write mask and silently deleted the draw.
+  // The array can also arrive as a block of its OWN, the object's first four
+  // entries having gone out with the draw's state in the block before it (57
+  // pairs + 21, against 78 in one). The object is 25 entries either way, so
+  // joining the two puts the mask back 23 from the end -- in the earlier block.
+  // Read apart, the mask stays whatever the previous draw left, which is how the
+  // quad that ends Minecraft's loading screen painted flat white over it.
+  static uint64_t prev_addr = 0;
+  static uint32_t prev_pairs = 0;
+  bool array_only = !kNoBlendState && base == kContextRegBase &&
+                    num_pairs >= 21 && num_pairs < 24 && prev_pairs;
+  for (uint32_t k = 0; array_only && k < 15; k++) {
+    const uint32_t tag = p[(num_pairs - 20 + k) * 2];
+    if (!(tag & (1u << 28)) || (tag & ~kRegSelectorMask) != k + 1)
+      array_only = false;
+  }
   bool tail = !kNoBlendState && base == kContextRegBase && num_pairs >= 24;
   for (uint32_t k = 0; tail && k < 15; k++) {
     const uint32_t tag = p[(num_pairs - 20 + k) * 2];
@@ -546,6 +561,25 @@ void LoadRegPairs(uint32_t base, const uint32_t* body, uint32_t cnt) {
                                       ? p[(num_pairs - 24) * 2 + 1]
                                       : 0;
     g_regs[mmCB_TARGET_MASK] = p[(num_pairs - 23) * 2 + 1];
+  }
+  if (array_only) {
+    const uint32_t joined = prev_pairs + num_pairs;
+    const uint32_t* q = reinterpret_cast<const uint32_t*>(prev_addr);
+    if (joined >= 24 && joined - 24 < prev_pairs &&
+        gpu::IsReadableRange(prev_addr,
+                             static_cast<uint64_t>(prev_pairs) * 2 * 4)) {
+      has_blend_tail = (q[(joined - 23) * 2] & (1u << 28)) != 0;
+      if (has_blend_tail) {
+        g_regs[mmCB_BLEND0_CONTROL] = (q[(joined - 24) * 2] & (1u << 28))
+                                          ? q[(joined - 24) * 2 + 1]
+                                          : 0;
+        g_regs[mmCB_TARGET_MASK] = q[(joined - 23) * 2 + 1];
+      }
+    }
+  }
+  if (base == kContextRegBase) {
+    prev_addr = addr;
+    prev_pairs = num_pairs;
   }
   // Type-1 context entries (offset dword bit 28 set) are NOT (offset,value)
   // pairs: whole runs share one offset dword, so the flat reading collapses a

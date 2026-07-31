@@ -31,6 +31,7 @@ DELTA_OPTION(int, kTexBindFrame, "DELTA_GPU_TEXBIND", -1);
 DELTA_OPTION(int, kSeqN, "DELTA_GPU_DRAWSEQ", 0);
 DELTA_OPTION(uint64_t, kWant, "DELTA_GPU_DRAWRT", 0);
 DELTA_OPTION(int, kWantFrame, "DELTA_GPU_DRAWRT_FRAME", 0);
+DELTA_OPTION(int, kBusy, "DELTA_GPU_DRAWRT_BUSY", 0);
 DELTA_OPTION(bool, kClearTrace, "DELTA_GPU_CLEARTRACE", false);
 DELTA_OPTION(bool, kDrawTrace, "DELTA_GPU_DRAWTRACE", false);
 DELTA_OPTION(bool, kGpuDecltrace, "DELTA_GPU_DECLTRACE", false);
@@ -1001,8 +1002,11 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
     const bool all = kWant == 1;
     // DELTA_GPU_DRAWRT_FRAME=N: only this frame, so the graph is a steady-state
     // frame rather than the opening composites.
+    // DELTA_GPU_DRAWRT_BUSY=N: only frames that reach N draws, for screens whose
+    // frame number moves between runs.
     if (kWant && (all || g_region.cur_rt == kWant) && shown < (all ? 140 : 8) &&
-        (!kWantFrame || (int)g_frame.num == kWantFrame)) {
+        (!kWantFrame || (int)g_frame.num == kWantFrame) &&
+        (int)g_frame.draws >= kBusy) {
       shown++;
       std::fprintf(stderr,
                    "[drawrt] rt=%#lx %ux%u indexed=%d vcount=%u icount=%u "
