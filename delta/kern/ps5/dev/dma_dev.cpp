@@ -13,7 +13,9 @@
 
 #include <mutex>
 #include <sys/mman.h>
+#include <cstring>
 #include <unordered_map>
+#include <vector>
 
 #include "dma_dev.h"
 #include "kern/proc.h"
@@ -44,17 +46,16 @@ uint8_t *dmaDevicePs5::map(void *addr, size_t len, uint32_t /*prot*/, uint32_t f
     return reinterpret_cast<uint8_t *>(-1);
   uint8_t *va = static_cast<uint8_t *>(addr);
   const bool fixed = (flags & mFlags::fixed) != 0;
-  // A fixed map that only shrinks a mapping already at this exact base keeps the
-  // pages it has: the caller is trimming its own region, not asking for fresh
-  // memory, and re-pointing the head at another physical block would drop
-  // everything it had written there.
+  // A fixed map that only shrinks a mapping already at this exact base is the
+  // caller trimming its own region, not asking for fresh memory: carry the
+  // contents over to the new physical block. Without this V8 loses its whole
+  // read-only heap the moment it shrinks the page it deserialized it into.
+  std::vector<uint8_t> carry;
   if (va && fixed) {
     std::lock_guard<std::mutex> lk(g_dmemVaLock);
     auto it = g_dmemVaLen.find(reinterpret_cast<uint64_t>(va));
-    if (it != g_dmemVaLen.end() && len < it->second) {
-      it->second = len;
-      return va;
-    }
+    if (it != g_dmemVaLen.end() && len < it->second)
+      carry.assign(va, va + len);
   }
   void *p = MAP_FAILED;
   // A non-fixed hint is advisory: if the range is taken the host kernel picks an
@@ -80,6 +81,8 @@ uint8_t *dmaDevicePs5::map(void *addr, size_t len, uint32_t /*prot*/, uint32_t f
   }
   if (p == MAP_FAILED)
     return reinterpret_cast<uint8_t *>(-1);
+  if (!carry.empty())
+    std::memcpy(p, carry.data(), carry.size());
   {
     std::lock_guard<std::mutex> lk(g_dmemVaLock);
     g_dmemVaLen[reinterpret_cast<uint64_t>(p)] = len;

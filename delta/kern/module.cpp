@@ -32,6 +32,7 @@
 namespace {
 DELTA_OPTION(const char *, kDumpModule, "DELTA_DUMP_MODULE", nullptr);
 DELTA_OPTION(const char *, kGuestBrk, "DELTA_GUEST_BRK", nullptr);
+DELTA_OPTION(uint64_t, kBrkAfter, "DELTA_GUEST_BRK_AFTER", 0);
 DELTA_OPTION(const char *, kModCheck, "DELTA_MODCHECK", nullptr);
 DELTA_OPTION(bool, kLibkDebug, "DELTA_LIBK_DEBUG", false);
 DELTA_OPTION(bool, kImplibTrace, "DELTA_IMPLIB_TRACE", false);
@@ -449,6 +450,21 @@ void smodule::plantGuestBreakpoints() {
     const uintptr_t pg = reinterpret_cast<uintptr_t>(at) & ~uintptr_t(0x3FFF);
     ::mprotect(reinterpret_cast<void *>(pg), 0x8000,
                PROT_READ | PROT_WRITE | PROT_EXEC);
+    // DELTA_GUEST_BRK_AFTER=<seconds>: arm the trap later instead of at load.
+    // A site on a hot path traps on its first execution, which is rarely the
+    // one being investigated; delaying past the earlier ones reaches it.
+    if (const uint64_t delay = kBrkAfter) {
+      const base::String name = info.name;
+      std::thread([at, off, delay, name] {
+        std::this_thread::sleep_for(std::chrono::seconds(delay));
+        at[0] = 0x0F;
+        at[1] = 0x0B;  // ud2
+        std::printf("[guestbrk] %s +%#llx -> ud2 at %p (armed after %llus)\n",
+                    name.c_str(), (unsigned long long)off, (void *)at,
+                    (unsigned long long)delay);
+      }).detach();
+      continue;
+    }
     at[0] = 0x0F;
     at[1] = 0x0B;  // ud2
     std::printf("[guestbrk] %s +%#llx -> ud2 at %p\n", info.name.c_str(),

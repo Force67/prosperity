@@ -34,6 +34,10 @@
 namespace {
 DELTA_OPTION(uintptr_t, kBrkTrace, "DELTA_GUEST_BRK_TRACE", 0);
 DELTA_OPTION(const char *, kBrkDump, "DELTA_GUEST_BRK_DUMP", nullptr);
+DELTA_OPTION(uintptr_t, kBrkArm, "DELTA_GUEST_BRK_ARM", 0);
+DELTA_OPTION(uint32_t, kBrkArmPos, "DELTA_GUEST_BRK_ARM_POS", 0);
+DELTA_OPTION(const char *, kBrkPeek, "DELTA_GUEST_BRK_PEEK", nullptr);
+DELTA_OPTION(const char *, kBrkWprot, "DELTA_GUEST_BRK_WPROT", nullptr);
 DELTA_OPTION(const char *, kCrashPeek, "DELTA_CRASH_PEEK", nullptr);
 DELTA_OPTION(bool, kCntClamp, "DELTA_CNT_CLAMP", false);
 DELTA_OPTION(bool, kHdrFill, "DELTA_HDR_FILL", false);
@@ -451,6 +455,30 @@ static int g_fnArgsCount = 0;
 
 static void crashHandler(int sig, siginfo_t *si, void *ucv) {
 #if defined(__x86_64__)
+  // DELTA_GUEST_BRK_WPROT write watch: the range was made read-only, so a write
+  // faults here. Name the instruction, open that one page and resume, which
+  // turns the trap into a list of everything that writes the range rather than
+  // just the first thing.
+  if (sig == SIGSEGV && si && ucv && kBrkWprot) {
+    const char *wp = kBrkWprot;
+    const uintptr_t base = std::strtoull(wp, nullptr, 16);
+    const char *c = std::strchr(wp, ':');
+    const size_t len = c ? std::strtoull(c + 1, nullptr, 16) : 0x40000;
+    const uintptr_t at = reinterpret_cast<uintptr_t>(si->si_addr);
+    if (at >= base && at < base + len) {
+      auto *uc = static_cast<ucontext_t *>(ucv);
+      const uintptr_t rip = (uintptr_t)uc->uc_mcontext.gregs[REG_RIP];
+      char sym[192];
+      symbolize(rip, sym, sizeof(sym));
+      std::fprintf(stderr, "[wprot] write %#llx from %s\n",
+                   (unsigned long long)at, sym);
+      std::fflush(stderr);
+      const long pgsz = sysconf(_SC_PAGESIZE);
+      ::mprotect(reinterpret_cast<void *>(at & ~((uintptr_t)pgsz - 1)),
+                 (size_t)pgsz, PROT_READ | PROT_WRITE | PROT_EXEC);
+      return;
+    }
+  }
   // DELTA_GUEST_BRK_TRACE: a RESUMABLE planted breakpoint. The ud2 replaced the
   // first bytes of a known instruction, so the handler emulates that
   // instruction, logs what we came for, and returns -- turning a one-shot trap
@@ -483,6 +511,37 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
           ssize_t ignored = ::write(fd, buf, len);
           (void)ignored;
         }
+        // DELTA_GUEST_BRK_ARM=<addr>: plant a ud2 there the moment the traced
+        // stream RESTARTS. A site on a hot path traps on its first execution,
+        // which for two back-to-back deserializations is always the first one;
+        // this reaches the second.
+        // DELTA_GUEST_BRK_ARM_POS=<n>: wait until the restarted stream reaches
+        // this position, so the trap lands on one named record rather than the
+        // first of its kind.
+        static uint32_t last_pos = 0;
+        static bool armed = false, restarted = false;
+        if (pos < last_pos)
+          restarted = true;
+        if (kBrkArm && !armed && restarted && pos >= kBrkArmPos) {
+          auto *at = reinterpret_cast<uint8_t *>((uintptr_t)kBrkArm);
+          at[0] = 0x0F;
+          at[1] = 0x0B;
+          armed = true;
+        }
+        // DELTA_GUEST_BRK_WPROT=<hex addr>:<hex size>: write-protect a guest
+        // range at the same moment. Memory that holds live data in one pass and
+        // reads empty in the next has a writer; this makes the write fault, so
+        // the crash report names the instruction instead of the symptom.
+        static bool wprot_done = false;
+        if (const char *wp = kBrkWprot; wp && !wprot_done &&
+                                        pos >= kBrkArmPos) {
+          wprot_done = true;
+          const uintptr_t a = std::strtoull(wp, nullptr, 16);
+          const char *c = std::strchr(wp, ':');
+          const size_t n = c ? std::strtoull(c + 1, nullptr, 16) : 0x40000;
+          ::mprotect(reinterpret_cast<void *>(a), n, PROT_READ);
+        }
+        last_pos = pos;
         gr[REG_R12] = (uint32_t)gr[REG_RSI];  // mov %esi,%r12d (zero-extends)
         gr[REG_RIP] = site + 3;
         return;
@@ -873,6 +932,17 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
   if (sig == SIGSEGV && ucv) {
     auto *uc = static_cast<ucontext_t *>(ucv);
     auto *ip = reinterpret_cast<const uint8_t *>(uc->uc_mcontext.gregs[REG_RIP]);
+    // A jump into unmapped memory faults with rip THERE, so reading the opcode
+    // is itself a fault -- and the handler dying re-entrantly buries the real
+    // report. Check the page is there first.
+    if (ip) {
+      const long pgsz = sysconf(_SC_PAGESIZE);
+      unsigned char vec = 0;
+      if (mincore(reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(ip) &
+                                           ~((uintptr_t)pgsz - 1)),
+                  1, &vec) != 0)
+        ip = nullptr;
+    }
     if (ip && ip[0] == 0xcd &&
         (ip[1] == 0x41 || ip[1] == 0x44 || ip[1] == 0x45)) {
       static std::atomic<int> n{0};
@@ -1001,7 +1071,15 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
   std::fprintf(stderr, "  r12=%016llx r13=%016llx r14=%016llx r15=%016llx\n",
                (unsigned long long)gr[REG_R12], (unsigned long long)gr[REG_R13],
                (unsigned long long)gr[REG_R14], (unsigned long long)gr[REG_R15]);
-  if (gr[REG_RIP]) {
+  // A jump into unmapped memory faults with rip THERE, so the opcode dump would
+  // fault again and bury the report -- check the page first.
+  if (gr[REG_RIP] && [&] {
+        const long pgsz = sysconf(_SC_PAGESIZE);
+        unsigned char vec = 0;
+        return mincore(reinterpret_cast<void *>((uintptr_t)gr[REG_RIP] &
+                                                ~((uintptr_t)pgsz - 1)),
+                       1, &vec) == 0;
+      }()) {
     auto *b = reinterpret_cast<const uint8_t *>(gr[REG_RIP]);
     std::fprintf(stderr, "  insn bytes:");
     for (int i = 0; i < 16; i++)
@@ -1045,6 +1123,67 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
           std::fprintf(stderr, " %02x", b8[k]);
         std::fprintf(stderr, "\n");
       }
+    }
+    std::fflush(stderr);
+  }
+  // DELTA_GUEST_BRK_PEEK=<hex addr>[:<bytes>]: dump a fixed guest address. The
+  // register-following dump can only reach what a register points at, and the
+  // object in question is often one the guest reached by arithmetic (a
+  // compressed pointer, a heap offset) that no register holds.
+  // "scan:<hex base>:<hex size>" instead reports, per 4 KiB block, how many of
+  // its bytes are non-zero -- which is how a region that should hold a heap but
+  // reads empty shows where the real data went.
+  if (const char *pk = kBrkPeek; pk && std::strncmp(pk, "scan:", 5) == 0) {
+    const uintptr_t base = std::strtoull(pk + 5, nullptr, 16);
+    const char *c2 = std::strchr(pk + 5, ':');
+    const uint64_t size = c2 ? std::strtoull(c2 + 1, nullptr, 16) : 0x100000;
+    const long pgsz = sysconf(_SC_PAGESIZE);
+    for (uint64_t off = 0; off < size; off += 0x1000) {
+      unsigned char vec = 0;
+      const uintptr_t a = base + off;
+      if (mincore(reinterpret_cast<void *>(a & ~((uintptr_t)pgsz - 1)), 1,
+                  &vec) != 0)
+        continue;
+      const auto *b = reinterpret_cast<const uint8_t *>(a);
+      unsigned nz = 0;
+      for (int i = 0; i < 0x1000; i++)
+        nz += b[i] != 0;
+      if (nz)
+        std::fprintf(stderr, "  scan %#llx: %u/4096 non-zero\n",
+                     (unsigned long long)a, nz);
+    }
+    std::fflush(stderr);
+  } else if (const char *pk = kBrkPeek) {
+    const uintptr_t at = std::strtoull(pk, nullptr, 16);
+    const char *colon = std::strchr(pk, ':');
+    const size_t n = colon ? std::strtoul(colon + 1, nullptr, 0) : 256;
+    const long pgsz = sysconf(_SC_PAGESIZE);
+    unsigned char vec = 0;
+    if (at >= 0x10000 &&
+        mincore(reinterpret_cast<void *>(at & ~((uintptr_t)pgsz - 1)), 1,
+                &vec) == 0) {
+      if (FILE *m = std::fopen("/proc/self/maps", "r")) {
+        char line[512];
+        while (std::fgets(line, sizeof(line), m)) {
+          unsigned long lo = 0, hi = 0;
+          if (std::sscanf(line, "%lx-%lx", &lo, &hi) == 2 && at >= lo &&
+              at < hi) {
+            std::fprintf(stderr, "  peek maps: %s", line);
+            break;
+          }
+        }
+        std::fclose(m);
+      }
+      const auto *b = reinterpret_cast<const uint8_t *>(at);
+      for (size_t i = 0; i < n; i++) {
+        if (i % 32 == 0)
+          std::fprintf(stderr, "\n  peek %#llx:", (unsigned long long)(at + i));
+        std::fprintf(stderr, " %02x", b[i]);
+      }
+      std::fprintf(stderr, "\n");
+    } else {
+      std::fprintf(stderr, "  peek %#llx: not mapped\n",
+                   (unsigned long long)at);
     }
     std::fflush(stderr);
   }
@@ -1309,6 +1448,33 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
             std::fprintf(stderr, " %02x", b[k]);
           std::fprintf(stderr, "\n");
         }
+      }
+      std::fflush(stderr);
+    }
+    // DELTA_GUEST_BRK_PEEK=<hex addr>[:<bytes>]: dump a fixed guest address.
+    // The register-following dump can only reach what a register points at, and
+    // the object in question is often one the guest reached by arithmetic (a
+    // compressed pointer, a heap offset) that no register holds.
+    if (const char *pk = kBrkPeek) {
+      const uintptr_t at = std::strtoull(pk, nullptr, 16);
+      const char *colon = std::strchr(pk, ':');
+      const size_t n = colon ? std::strtoul(colon + 1, nullptr, 0) : 256;
+      long pgsz = sysconf(_SC_PAGESIZE);
+      unsigned char vec = 0;
+      if (at >= 0x10000 &&
+          mincore(reinterpret_cast<void *>(at & ~((uintptr_t)pgsz - 1)), 1,
+                  &vec) == 0) {
+        const auto *b = reinterpret_cast<const uint8_t *>(at);
+        for (size_t i = 0; i < n; i++) {
+          if (i % 32 == 0)
+            std::fprintf(stderr, "\n  peek %#llx:",
+                         (unsigned long long)(at + i));
+          std::fprintf(stderr, " %02x", b[i]);
+        }
+        std::fprintf(stderr, "\n");
+      } else {
+        std::fprintf(stderr, "  peek %#llx: not mapped\n",
+                     (unsigned long long)at);
       }
       std::fflush(stderr);
     }
