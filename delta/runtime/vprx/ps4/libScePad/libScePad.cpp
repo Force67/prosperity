@@ -224,7 +224,69 @@ void startMemPoke() {
 // Sequence: Options first (title "PRESS OPTIONS" -> main menu), then Cross to
 // confirm "New Run"/save-slot/character-select, with the occasional Down to move
 // the menu cursor. Buttons pulse with gaps so menus see clean press edges.
+// DELTA_PAD_SCRIPT="<name>:<reads>[,<name>:<reads>]...": replay one exact button
+// sequence, then hold neutral. The heuristic pulses below can only reach menus
+// whose default entry is the one we want; a scripted run drives an arbitrary
+// path (e.g. title -> Play -> world list -> load) for headless verification.
+// Names are the button constants below plus "none" for a gap.
+uint32_t scriptButtons(bool &active) {
+  struct Step { uint32_t mask; uint64_t reads; };
+  static const std::vector<Step> steps = [] {
+    std::vector<Step> out;
+    const char *e = std::getenv("DELTA_PAD_SCRIPT");
+    if (!e)
+      return out;
+    static const struct { const char *name; uint32_t mask; } kNames[] = {
+        {"none", 0},        {"cross", kCross},   {"circle", kCircle},
+        {"square", kSquare}, {"triangle", kTriangle}, {"up", kUp},
+        {"down", kDown},    {"left", kLeft},     {"right", kRight},
+        {"options", kOptions}, {"l1", kL1},      {"r1", kR1},
+        {"touchpad", kTouchPad},
+    };
+    for (std::string spec(e), tok; !spec.empty();) {
+      const size_t comma = spec.find(',');
+      tok = spec.substr(0, comma);
+      spec = comma == std::string::npos ? std::string() : spec.substr(comma + 1);
+      const size_t colon = tok.find(':');
+      const std::string name = tok.substr(0, colon);
+      const uint64_t reads =
+          colon == std::string::npos ? 30 : std::strtoull(tok.c_str() + colon + 1, nullptr, 10);
+      for (const auto &n : kNames)
+        if (name == n.name) {
+          out.push_back({n.mask, reads});
+          break;
+        }
+    }
+    if (!out.empty())
+      std::fprintf(stderr, "[pad] script: %zu steps\n", out.size());
+    return out;
+  }();
+  active = !steps.empty();
+  if (!active)
+    return 0;
+  uint64_t at = g_readSeq;
+  for (size_t i = 0; i < steps.size(); i++) {
+    if (at < steps[i].reads) {
+      static size_t last = ~size_t(0);
+      if (last != i) {
+        last = i;
+        std::fprintf(stderr, "[pad] script step %zu mask=%#x for %llu reads\n", i,
+                     steps[i].mask, (unsigned long long)steps[i].reads);
+      }
+      return steps[i].mask;
+    }
+    at -= steps[i].reads;
+  }
+  return 0;  // sequence done: hold neutral
+}
+
 uint32_t autoSkipButtons() {
+  {
+    bool scripted = false;
+    const uint32_t m = scriptButtons(scripted);
+    if (scripted)
+      return m;
+  }
   // Drive intro -> title -> menu -> a started run, then STOP opening menus so we
   // stay in gameplay (for headless verification). Options opens the menu from the
   // "PRESS OPTIONS" title; Cross confirms New Run / save-slot / character-select

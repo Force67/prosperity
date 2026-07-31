@@ -289,8 +289,8 @@ static const syscall_Reg syscall_dpt[] = {
     {154, (void *)&null_handler}, // sys_nlm_syscall
     {155, (void *)&null_handler}, // sys_nfssvc
     {156, (void *)&sys_getdirentries}, // sys_getdirentries
-    {157, (void *)&null_handler}, // sys_statfs
-    {158, (void *)&null_handler}, // sys_fstatfs
+    {157, (void *)&sys_statfs},
+    {158, (void *)&sys_fstatfs},
     {160, (void *)&null_handler}, // sys_lgetfh
     {161, (void *)&null_handler}, // sys_getfh
     {162, (void *)&null_handler}, // sys_getdomainname
@@ -478,8 +478,8 @@ static const syscall_Reg syscall_dpt[] = {
     {393, (void *)&null_handler}, // sys_sendfile
     {394, (void *)&null_handler}, // sys_mac_syscall
     {395, (void *)&null_handler}, // sys_getfsstat
-    {396, (void *)&null_handler}, // sys_statfs
-    {397, (void *)&null_handler}, // sys_fstatfs
+    {396, (void *)&sys_statfs},
+    {397, (void *)&sys_fstatfs},
     {398, (void *)&null_handler}, // sys_fhstatfs
     {400, (void *)&sys_ksem_close}, // sys_ksem_close
     {401, (void *)&sys_ksem_post}, // sys_ksem_post

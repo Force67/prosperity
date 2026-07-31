@@ -282,6 +282,61 @@ int64_t PS4ABI sys_lseek(uint32_t fd, int64_t offset, int whence) {
   return d->lseek(offset, whence);
 }
 
+// FreeBSD struct statfs. Only the capacity fields matter to a title: they are
+// how it decides whether it may write. Left unhandled the caller reads an
+// uninitialised buffer as "no space" -- Minecraft refuses to open a world with
+// "there is not enough free space" and never leaves its menu.
+struct BsdStatfs {
+  uint32_t f_version, f_type;
+  uint64_t f_flags, f_bsize, f_iosize;
+  uint64_t f_blocks, f_bfree;
+  int64_t f_bavail;
+  uint64_t f_files;
+  int64_t f_ffree;
+  uint64_t f_syncwrites, f_asyncwrites, f_syncreads, f_asyncreads;
+  uint64_t f_spare[10];
+  uint32_t f_namemax, f_owner;
+  int32_t f_fsid[2];
+  char f_charspare[80];
+  char f_fstypename[16];
+  char f_mntfromname[88];
+  char f_mntonname[88];
+};
+
+static void fillStatfs(void *buf, const char *mount) {
+  auto *sf = static_cast<BsdStatfs *>(buf);
+  std::memset(sf, 0, sizeof(*sf));
+  constexpr uint64_t kBlockSize = 0x8000;             // 32 KiB, as the PS5 fs
+  constexpr uint64_t kBlocks = 0x1000000ull;          // 512 GiB total
+  sf->f_version = 0x20140518;                         // STATFS_VERSION
+  sf->f_bsize = kBlockSize;
+  sf->f_iosize = kBlockSize;
+  sf->f_blocks = kBlocks;
+  sf->f_bfree = kBlocks / 2;
+  sf->f_bavail = static_cast<int64_t>(kBlocks / 2);   // 256 GiB free
+  sf->f_files = 0x100000;
+  sf->f_ffree = 0x100000 / 2;
+  sf->f_namemax = 255;
+  std::strncpy(sf->f_fstypename, "exfatfs", sizeof(sf->f_fstypename) - 1);
+  std::strncpy(sf->f_mntfromname, "/dev/da0", sizeof(sf->f_mntfromname) - 1);
+  std::strncpy(sf->f_mntonname, mount && *mount ? mount : "/",
+               sizeof(sf->f_mntonname) - 1);
+}
+
+int PS4ABI sys_statfs(const char *path, void *buf) {
+  if (!buf)
+    return -SysError::eFAULT;
+  fillStatfs(buf, path);
+  return 0;
+}
+
+int PS4ABI sys_fstatfs(uint32_t fd, void *buf) {
+  if (!buf)
+    return -SysError::eFAULT;
+  fillStatfs(buf, "/");
+  return 0;
+}
+
 int PS4ABI sys_fstat(uint32_t fd, void *stat) {
   // Zero first: a failed/unsupported fstat must not leave the caller's stat
   // buffer uninitialized. Games read st_size from it without checking the

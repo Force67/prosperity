@@ -35,5 +35,7 @@ void fdReadStat(uint32_t fd, int64_t n);
 int64_t PS4ABI sys_lseek(uint32_t fd, int64_t offset, int whence);
 int PS4ABI sys_fstat(uint32_t fd, void *stat);
 int PS4ABI sys_stat(const char *path, void *stat);
+int PS4ABI sys_statfs(const char *path, void *buf);
+int PS4ABI sys_fstatfs(uint32_t fd, void *buf);
 int64_t PS4ABI sys_getdents(uint32_t fd, void *buf, size_t nbytes);
 } // namespace krnl
