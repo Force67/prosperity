@@ -611,6 +611,43 @@ void PackTexPixels(uint8_t* linear,
   // validating the detiler.
   static const bool kDumpUpload =
       std::getenv("DELTA_GPU_TEXDUMP_UPLOAD") != nullptr;
+  // DELTA_GPU_TEXDUMP_MIN: smallest edge to dump (default 128, i.e. content
+  // atlases only). Lower it to reach the tiny nine-slice UI surfaces, which are
+  // a handful of texels each and are best read as text.
+  static const uint32_t kDumpMin = [] {
+    const char* e = std::getenv("DELTA_GPU_TEXDUMP_MIN");
+    return e ? (uint32_t)std::atoi(e) : 128u;
+  }();
+  static int dump_small_count = 0;
+  if (kDumpUpload && dump_small_count < 24 && elem == 4 && texel_w <= 32 &&
+      texel_h <= 32 && texel_w >= kDumpMin && texel_h >= kDumpMin) {
+    dump_small_count++;
+    std::fprintf(stderr,
+                 "[texsmall] base=%#lx %ux%u layers=%u tiling=%u pitch=%u "
+                 "stored_h=%u raw:",
+                 (unsigned long)base, texel_w, texel_h, layout.layers,
+                 layout.tiling_idx, layout.mips[0].pitch,
+                 layout.mips[0].stored_height);
+    std::fprintf(stderr, "\n");
+    char rp[256];
+    std::snprintf(rp, sizeof(rp), "%s/rawblk_%02d_%ux%u.bin", DumpDir(),
+                  dump_small_count - 1, texel_w, texel_h);
+    if (FILE* rf = std::fopen(rp, "wb")) {
+      std::fwrite(src, 1,
+                  static_cast<size_t>(layout.mips[0].pitch) *
+                      layout.mips[0].stored_height * elem,
+                  rf);
+      std::fclose(rf);
+    }
+    for (uint32_t y = 0; y < texel_h; y++) {
+      std::fprintf(stderr, "[texsmall]  ");
+      for (uint32_t x = 0; x < texel_w; x++) {
+        const uint8_t* p = linear + (static_cast<uint64_t>(y) * texel_w + x) * 4;
+        std::fprintf(stderr, "%02x%02x%02x%02x ", p[0], p[1], p[2], p[3]);
+      }
+      std::fprintf(stderr, "\n");
+    }
+  }
   static int dump_upload_count = 0;
   if (kDumpUpload && dump_upload_count < 32 && elem == 4 && texel_w >= 128 &&
       texel_h >= 128) {

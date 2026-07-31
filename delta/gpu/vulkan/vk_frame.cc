@@ -508,6 +508,7 @@ void EndFrame(Renderer& renderer, uint64_t scanout_base) {
   static const bool kNoPresent = std::getenv("DELTA_GPU_NOPRESENT") != nullptr;
   static const bool kNeedsCpuCapture = [] {
     return std::getenv("DELTA_GPU_SNAP") || std::getenv("DELTA_GPU_SNAPSEQ") ||
+           std::getenv("DELTA_GPU_SNAPEVERY") ||
            std::getenv("DELTA_GPU_OVERLAY_DUMP");
   }();
   const bool present_to_window = !kNoPresent && gfx::canPresent();
@@ -784,6 +785,30 @@ void EndFrame(Renderer& renderer, uint64_t scanout_base) {
                  fin.frame_num, fin.frame_draws);
     seq_done++;
     seq_last_frame = fin.frame_num;
+  }
+
+  // DELTA_GPU_SNAPEVERY=N: write a numbered ppm every N drawing frames,
+  // unconditionally. A filmstrip of one run shows every screen the title passed
+  // through (and every transition), which a single best-frame snap cannot.
+  // DELTA_GPU_SNAPEVERY_MAX caps how many are written.
+  static const int kSnapEvery = [] {
+    const char* e = std::getenv("DELTA_GPU_SNAPEVERY");
+    return e ? std::atoi(e) : 0;
+  }();
+  static const int kSnapEveryMax = [] {
+    const char* e = std::getenv("DELTA_GPU_SNAPEVERY_MAX");
+    return e ? std::atoi(e) : 40;
+  }();
+  static int every_done = 0, every_last = -1000000;
+  if (kSnapEvery && every_done < kSnapEveryMax && fin.frame_draws > 0 &&
+      fin.frame_num - every_last >= kSnapEvery) {
+    char p[256];
+    std::snprintf(p, sizeof(p), "%s/every_%03d.ppm", DumpDir(), every_done);
+    WritePpm(p, pixels, fin.w, fin.h);
+    std::fprintf(stderr, "[snapevery] %d -> f%d draws=%u\n", every_done,
+                 fin.frame_num, fin.frame_draws);
+    every_done++;
+    every_last = fin.frame_num;
   }
 
   // Deterministic room capture: whenever this frame sampled a room RT, roll the
