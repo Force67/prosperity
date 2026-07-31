@@ -1103,12 +1103,16 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
         const uint32_t sm = g_regs[mmCB_SHADER_MASK];
         const uint32_t cc = g_regs[mmCB_COLOR_CONTROL];
         std::fprintf(stderr,
-                     "[mask] #%d rt=%#lx %ux%u mrt=%u TARGET_MASK=%#x "
+                     "[mask] #%d rt=%#lx %ux%u mrt=%u cb0base=%#lx cb1base=%#lx "
+                     "info1=%#x TARGET_MASK=%#x "
                      "SHADER_MASK=%#x eff0=%#x COLOR_CONTROL=%#x mode=%u "
                      "rop=%#x BLEND0=%#x en=%u psMrtMask=%#x recomp=%s "
                      "info0=%#x wr(sm/tm)=%u/%u PS=%#lx count=%u\n",
                      mt_n, (unsigned long)d.rt_base, d.rt_w, d.rt_h,
-                     d.mrt_count, tm, sm, (tm & sm) & 0xF, cc, (cc >> 4) & 0x7,
+                     d.mrt_count, (unsigned long)g_regs.CbColorBase(0),
+                     (unsigned long)g_regs.CbColorBase(1),
+                     g_regs[mmCB_COLOR0_INFO + kCbColorStride],
+                     tm, sm, (tm & sm) & 0xF, cc, (cc >> 4) & 0x7,
                      (cc >> 16) & 0xFF, d.blend_control, d.blend_enable,
                      d.recomp ? (unsigned)d.recomp->ps_mrt_mask : 0u,
                      recomp_status, d.mrt_info[0],
@@ -2332,7 +2336,9 @@ void SubmitDcb(const void* dcb, uint32_t size_bytes) {
   // Time-gate (default 100s) so the cumulative histogram includes the in-level
   // command stream (level-load compute/copies), not just the title.
   static const auto kOhStart = std::chrono::steady_clock::now();
-  if (kOpHist && !op_hist_dumped &&
+  // ...and only once the walker has actually seen packets: the first buffer
+  // after the gate is often empty, which used to latch the dump on nothing.
+  if (kOpHist && !op_hist_dumped && i > 0 &&
       std::chrono::duration_cast<std::chrono::seconds>(
           std::chrono::steady_clock::now() - kOhStart)
               .count() >= kOhAfter) {
