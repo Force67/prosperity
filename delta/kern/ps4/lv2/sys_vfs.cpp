@@ -324,6 +324,8 @@ static void fillStatfs(void *buf, const char *mount) {
 }
 
 int PS4ABI sys_statfs(const char *path, void *buf) {
+  if (std::getenv("DELTA_VFS_TRACE"))
+    std::fprintf(stderr, "[statfs] '%s'\n", path ? path : "(null)");
   if (!buf)
     return -SysError::eFAULT;
   fillStatfs(buf, path);
