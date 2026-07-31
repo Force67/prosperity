@@ -119,6 +119,7 @@ private:
   bool setupTLS();
   bool mapImage();
   void startModuleWatch();
+  void plantGuestBreakpoints();
 
   template <typename Type, typename TAdd> Type *getOffset(const TAdd dist) {
     return (Type *)(data.Get_UseOnlyIfYouKnowWhatYouareDoing() + dist);

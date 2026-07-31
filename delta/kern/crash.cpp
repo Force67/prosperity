@@ -961,6 +961,46 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
       std::fprintf(stderr, " %02x", b[i]);
     std::fprintf(stderr, "\n");
   }
+  // DELTA_GUEST_BRK_DUMP=<reg>|all: follow an argument register one level. A
+  // planted breakpoint lands where some object is about to be used, and what
+  // that object POINTS AT (a byte stream, a descriptor) is the whole question --
+  // registers alone say which object, not what is in it.
+  if (const char *rn = std::getenv("DELTA_GUEST_BRK_DUMP")) {
+    static const struct {
+      const char *name;
+      int idx;
+    } kRegs[] = {{"rdi", REG_RDI}, {"rsi", REG_RSI}, {"rdx", REG_RDX},
+                 {"rcx", REG_RCX}, {"rbx", REG_RBX}, {"r14", REG_R14},
+                 {"r13", REG_R13}, {"r8", REG_R8}};
+    for (const auto &r : kRegs) {
+      if (std::strcmp(rn, r.name) != 0 && std::strcmp(rn, "all") != 0)
+        continue;
+      const uintptr_t base = gr[r.idx];
+      if (base < 0x10000)
+        continue;
+      std::fprintf(stderr, "  --- %s = %#llx ---", r.name,
+                   (unsigned long long)base);
+      const auto *q = reinterpret_cast<const uint64_t *>(base);
+      for (int i = 0; i < 16; i++) {
+        if (i % 4 == 0)
+          std::fprintf(stderr, "\n  %s+%03x:", r.name, i * 8);
+        std::fprintf(stderr, " %016llx", (unsigned long long)q[i]);
+      }
+      std::fprintf(stderr, "\n");
+      for (int i = 0; i < 16; i++) {
+        const uintptr_t p = q[i];
+        if (p < 0x8000000000ull || p >= 0x8100000000ull)
+          continue;
+        const auto *b8 = reinterpret_cast<const uint8_t *>(p);
+        std::fprintf(stderr, "  %s+%03x -> %#llx:", r.name, i * 8,
+                     (unsigned long long)p);
+        for (int k = 0; k < 48; k++)
+          std::fprintf(stderr, " %02x", b8[k]);
+        std::fprintf(stderr, "\n");
+      }
+    }
+    std::fflush(stderr);
+  }
   backtrace(gr[REG_RBP]);
   // Raw stack scan: optimised guest code omits frame pointers, so the rbp chain
   // above misses frames. Scan the guest stack for values that land in a loaded
@@ -1183,6 +1223,47 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
         }
         std::fprintf(stderr, "\n");
       }
+    }
+    // DELTA_GUEST_BRK_DUMP=<reg>: follow an argument register one level. A
+    // planted breakpoint usually lands where some object is about to be used,
+    // and what that object POINTS AT (a byte stream, a descriptor) is the whole
+    // question -- registers alone only say which object, not what is in it.
+    if (const char *rn = std::getenv("DELTA_GUEST_BRK_DUMP")) {
+      static const struct {
+        const char *name;
+        int idx;
+      } kRegs[] = {{"rdi", RDI}, {"rsi", RSI}, {"rdx", RDX}, {"rcx", RCX},
+                   {"rbx", RBX}, {"r14", R14}, {"r13", R13}, {"r8", R8}};
+      for (const auto &r : kRegs) {
+        if (std::strcmp(rn, r.name) != 0 && std::strcmp(rn, "all") != 0)
+          continue;
+        const uintptr_t base = g[r.idx];
+        if (base < 0x10000)
+          continue;
+        std::fprintf(stderr, "  --- %s = %#llx ---\n", r.name,
+                     (unsigned long long)base);
+        const auto *q = reinterpret_cast<const uint64_t *>(base);
+        for (int i = 0; i < 16; i++) {
+          if (i % 4 == 0)
+            std::fprintf(stderr, "\n  %s+%03x:", r.name, i * 8);
+          std::fprintf(stderr, " %016llx", (unsigned long long)q[i]);
+        }
+        std::fprintf(stderr, "\n");
+        // One level down: any field that looks like a guest pointer gets its
+        // first 64 bytes dumped, which is where a byte stream shows itself.
+        for (int i = 0; i < 16; i++) {
+          const uintptr_t p = q[i];
+          if (p < 0x8000000000ull || p >= 0x8100000000ull)
+            continue;
+          const auto *b = reinterpret_cast<const uint8_t *>(p);
+          std::fprintf(stderr, "  %s+%03x -> %#llx:", r.name, i * 8,
+                       (unsigned long long)p);
+          for (int k = 0; k < 48; k++)
+            std::fprintf(stderr, " %02x", b[k]);
+          std::fprintf(stderr, "\n");
+        }
+      }
+      std::fflush(stderr);
     }
     // Print the boundary-call trace before the (best-effort, occasionally
     // out-of-bounds) stack scan so it survives even if the scan faults.

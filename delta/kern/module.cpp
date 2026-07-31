@@ -12,6 +12,7 @@
 #include <memory>
 #include <thread>
 #include <vector>
+#include <sys/mman.h>
 #include <utl/file.h>
 #include <utl/mem.h>
 
@@ -153,6 +154,7 @@ bool smodule::fromMem(base::UniquePointer<uint8_t[]> data) {
 
   installEHFrame();
 
+  plantGuestBreakpoints();
   startModuleWatch();
 
   if (elf->entry == 0)
@@ -409,6 +411,39 @@ void smodule::digestDynamicPs5(const ELFPgHeader *dynS) {
                 info.name.c_str(), (void *)strtab.ptr,
                 (unsigned long long)strtab.size, numSymbols, numRela, numJmpSlots,
                 (unsigned long long)sharedObjects.size());
+}
+
+// DELTA_GUEST_BRK=<name substring>:<hex offset>[,...]: plant a ud2 at a guest
+// address once the module is mapped. The crash handler then reports registers
+// AT that instruction instead of wherever the guest's own abort path ends up,
+// which is the only way to see the state feeding a fault inside a stripped
+// third-party module. Diagnostic only.
+void smodule::plantGuestBreakpoints() {
+  const char *spec = std::getenv("DELTA_GUEST_BRK");
+  if (!spec)
+    return;
+  for (base::String rest(spec); !rest.empty();) {
+    const size_t comma = rest.find(',');
+    base::String tok = rest.substr(0, comma);
+    rest = comma == base::String::npos ? base::String() : rest.substr(comma + 1);
+    const size_t colon = tok.find(':');
+    if (colon == base::String::npos)
+      continue;
+    if (info.name.find(tok.substr(0, colon)) == base::String::npos)
+      continue;
+    const uint64_t off = std::strtoull(tok.c_str() + colon + 1, nullptr, 16);
+    if (off >= info.codeSize)
+      continue;
+    uint8_t *at = getAddress<uint8_t>(off);
+    // The segment is already protected by mapImage, so open the page first.
+    const uintptr_t pg = reinterpret_cast<uintptr_t>(at) & ~uintptr_t(0x3FFF);
+    ::mprotect(reinterpret_cast<void *>(pg), 0x8000,
+               PROT_READ | PROT_WRITE | PROT_EXEC);
+    at[0] = 0x0F;
+    at[1] = 0x0B;  // ud2
+    std::printf("[guestbrk] %s +%#llx -> ud2 at %p\n", info.name.c_str(),
+                (unsigned long long)off, (void *)at);
+  }
 }
 
 // DELTA_MODCHECK=<name substring>: watch a module's NON-WRITABLE load segments
