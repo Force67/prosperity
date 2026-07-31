@@ -147,6 +147,8 @@ void markQarFd(uint32_t fd, bool v) {
     g_qarFd[fd] = v;
 }
 
+void throttleIo(int64_t bytes);
+
 int64_t PS4ABI sys_pread(uint32_t fd, void *buf, size_t nbytes, int64_t offset) {
   auto *d = fdToDevice(fd);
   if (!d) {
@@ -159,6 +161,7 @@ int64_t PS4ABI sys_pread(uint32_t fd, void *buf, size_t nbytes, int64_t offset) 
   int64_t r = d->read(buf, nbytes);
   if (saved >= 0)
     d->lseek(saved, kSeekSet);
+  throttleIo(r);
   if (kRdall) {
     uint32_t f4 = 0;
     if (buf && r >= 4) f4 = *reinterpret_cast<const uint32_t *>(buf);

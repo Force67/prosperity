@@ -92,6 +92,11 @@ void startFnWatchPrinter();
 // at the crash cannot.
 void startPopcntPrinter(uintptr_t addr, size_t bytes, unsigned everyMs);
 
+// DELTA_GUEST_SUMWATCH=<slot>:<off>:<stride>:<count>[:<ms>]: watch a set of u32
+// counters behind a guest pointer slot (see crash.cpp).
+void startSumWatchPrinter(uintptr_t slot, size_t off, size_t stride, int count,
+                          unsigned everyMs);
+
 // DELTA_FNARGS="off+o1+o2...:label,...": int3 at a guest function entry (push
 // rbp) that logs rdi and then walks the offset chain from it, printing every
 // intermediate pointer and the qword the last one lands on. Answers "which

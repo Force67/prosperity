@@ -27,6 +27,7 @@ DELTA_OPTION(bool, kShortRead, "DELTA_SHORTREAD", false);
 DELTA_OPTION(const char *, kVfsHide, "DELTA_VFS_HIDE", nullptr);
 DELTA_OPTION(bool, kOpenTrace, "DELTA_OPEN_TRACE", false);
 DELTA_OPTION(bool, kPreadZeropad, "DELTA_PREAD_ZEROPAD", false);
+DELTA_OPTION(const char *, kVfsOverlay, "DELTA_VFS_OVERLAY", nullptr);
 }  // namespace
 
 namespace krnl::vfs {
@@ -260,6 +261,21 @@ base::String fixHostCase(const base::String &host) {
 }
 } // namespace
 
+// DELTA_VFS_OVERLAY=<hostdir>: a host tree searched before the real mounts, so
+// a single file can be substituted or supplied without repacking the pkg (the
+// title's own config hooks -- SotC reads /app0/savedcmdargs.txt at boot -- live
+// inside a read-only PFS image otherwise).
+static base::String overlayPath(const char *guestPath) {
+  const char *dir = kVfsOverlay;
+  if (!dir || !*dir || !guestPath || guestPath[0] != '/')
+    return base::String();
+  base::String p(dir);
+  if (!p.empty() && p[p.size() - 1] == '/')
+    p = p.substr(0, p.size() - 1);
+  p += guestPath;
+  return p;
+}
+
 utl::File openRead(const char *path) {
   if (!path)
     return utl::File();
@@ -282,6 +298,15 @@ utl::File openRead(const char *path) {
 
   base::String norm = normalizePath(path);
   path = norm.c_str();
+
+  if (base::String ov = overlayPath(path); !ov.empty()) {
+    utl::File f(ov);
+    if (f.IsOpen()) {
+      if (kOpenTrace)
+        std::fprintf(stderr, "[open]   -> overlay %s\n", ov.c_str());
+      return f;
+    }
+  }
 
   size_t len = 0;
   mountPoint m;
@@ -363,6 +388,14 @@ bool stat(const char *path, int64_t &size, bool &isDir) {
 
   base::String norm = normalizePath(path);
   path = norm.c_str();
+
+  if (base::String ov = overlayPath(path); !ov.empty()) {
+    utl::File f(ov);
+    if (f.IsOpen()) {
+      size = static_cast<int64_t>(f.GetSize());
+      return true;
+    }
+  }
 
   size_t len = 0;
   mountPoint m;

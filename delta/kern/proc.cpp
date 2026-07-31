@@ -65,6 +65,7 @@ DELTA_OPTION(bool, kSotcForcePayload, "DELTA_SOTC_FORCE_PAYLOAD", false);
 DELTA_OPTION(bool, kSotcForceWorlddone, "DELTA_SOTC_FORCE_WORLDDONE", false);
 DELTA_OPTION(bool, kSotcJobfix, "DELTA_SOTC_JOBFIX", false);
 DELTA_OPTION(const char *, kGuestPopcnt, "DELTA_GUEST_POPCNT", nullptr);
+DELTA_OPTION(const char *, kGuestSumwatch, "DELTA_GUEST_SUMWATCH", nullptr);
 DELTA_OPTION(bool, kSotcJobmove, "DELTA_SOTC_JOBMOVE", false);
 DELTA_OPTION(bool, kSotcSkipWorldwait, "DELTA_SOTC_SKIP_WORLDWAIT", false);
 DELTA_OPTION(bool, kVoOplog, "DELTA_VO_OPLOG", false);
@@ -198,9 +199,11 @@ bool proc::create(const base::String &path, bool fromVfs) {
 // eboot base. The crash-handler counts hits and a printer thread logs totals every
 // 2s (see crash.h). Generic; used to probe which functions in a stuck pipeline run.
 static void investigatePopcnt();
+static void investigateSumWatch();
 
 static void investigateFnWatch(smodule &m) {
   investigatePopcnt();
+  investigateSumWatch();
   const char *e = kFnWatch;
   if (!e)
     return;
@@ -251,6 +254,22 @@ static void investigatePopcnt() {
       ms = (unsigned)std::strtoul(c2 + 1, nullptr, 0);
   }
   startPopcntPrinter(at, bytes, ms);
+}
+
+static void investigateSumWatch() {
+  const char *sw = kGuestSumwatch;
+  if (!sw)
+    return;
+  uint64_t f[5] = {0, 0, 0, 0, 1000};
+  const char *p = sw;
+  for (int i = 0; i < 5 && p && *p; i++) {
+    f[i] = std::strtoull(p, nullptr, i == 3 ? 10 : 16);
+    p = std::strchr(p, ':');
+    if (p)
+      p++;
+  }
+  startSumWatchPrinter((uintptr_t)f[0], (size_t)f[1], (size_t)f[2], (int)f[3],
+                       (unsigned)f[4]);
 }
 
 // DELTA_GUEST_PATCH="hexoff=hexbytes,...": overwrite guest code/data at an eboot

@@ -1722,6 +1722,45 @@ void startPopcntPrinter(uintptr_t addr, size_t bytes, unsigned everyMs) {
   }).detach();
 }
 
+// DELTA_GUEST_SUMWATCH=<slot>:<off>:<stride>:<count>[:<ms>] (all hex but count):
+// dereference a guest pointer SLOT, then report the individual u32 counters at
+// obj+off+i*stride and their sum, on an interval. An engine's "work remaining"
+// is usually a set of per-queue counters behind a singleton pointer, and whether
+// it moves is the difference between "stalled" and "just slow".
+void startSumWatchPrinter(uintptr_t slot, size_t off, size_t stride, int count,
+                          unsigned everyMs) {
+  if (!slot || count <= 0 || count > 32)
+    return;
+  std::thread([slot, off, stride, count, everyMs] {
+    const long pgsz = sysconf(_SC_PAGESIZE);
+    auto readable = [pgsz](uintptr_t a) {
+      unsigned char v = 0;
+      return a >= 0x10000 &&
+             mincore(reinterpret_cast<void *>(a & ~((uintptr_t)pgsz - 1)), 1,
+                     &v) == 0;
+    };
+    for (;;) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(everyMs));
+      if (!readable(slot))
+        continue;
+      const uintptr_t obj = *reinterpret_cast<const uintptr_t *>(slot);
+      if (!readable(obj))
+        continue;
+      char line[512];
+      int n = std::snprintf(line, sizeof line, "[sumwatch] %#lx:",
+                            (unsigned long)obj);
+      uint64_t sum = 0;
+      for (int i = 0; i < count && n < (int)sizeof line; i++) {
+        const uint32_t v =
+            *reinterpret_cast<const uint32_t *>(obj + off + (size_t)i * stride);
+        sum += v;
+        n += std::snprintf(line + n, sizeof line - n, " %u", v);
+      }
+      std::fprintf(stderr, "%s = %llu\n", line, (unsigned long long)sum);
+    }
+  }).detach();
+}
+
 void startFnWatchPrinter() {
   static std::atomic<bool> started{false};
   bool exp = false;

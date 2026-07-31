@@ -48,6 +48,7 @@ DELTA_OPTION(bool, kFstatTrace, "DELTA_FSTAT_TRACE", false);
 DELTA_OPTION(bool, kOpenCaller, "DELTA_OPEN_CALLER", false);
 DELTA_OPTION(bool, kRdall, "DELTA_RDALL", false);
 DELTA_OPTION(bool, kReadTrace, "DELTA_READ_TRACE", false);
+DELTA_OPTION(unsigned, kIoMbps, "DELTA_IO_MBPS", 0);
 DELTA_OPTION(bool, kVfsTrace, "DELTA_VFS_TRACE", false);
 }  // namespace
 
@@ -254,6 +255,32 @@ void fdReadStat(uint32_t fd, int64_t n) {
   (void)started;
 }
 
+// DELTA_IO_MBPS=<MiB/s>: cap file-read throughput. A host SSD serves a title's
+// streaming loader orders of magnitude faster than the console drive it was
+// tuned for, so a pipeline that keeps loaded-but-not-yet-finalized data in a
+// fixed CPU budget can be outrun by its own loader and exhaust that budget --
+// SotC fills its 1 GiB onion heap this way and dies in its own allocator, and
+// the same run survives whenever the host happens to be busy. 0 = unlimited.
+void throttleIo(int64_t bytes) {
+  const unsigned mbps = kIoMbps;
+  if (!mbps || bytes <= 0)
+    return;
+  static std::mutex m;
+  static std::chrono::steady_clock::time_point next{};
+  const auto cost = std::chrono::nanoseconds(
+      (int64_t)((double)bytes * 1e9 / ((double)mbps * 1024.0 * 1024.0)));
+  std::chrono::steady_clock::time_point until;
+  {
+    std::lock_guard<std::mutex> lk(m);
+    const auto now = std::chrono::steady_clock::now();
+    if (next < now)
+      next = now;
+    next += cost;
+    until = next;
+  }
+  std::this_thread::sleep_until(until);
+}
+
 int64_t PS4ABI sys_read(uint32_t fd, void *buf, size_t nbytes) {
   auto *d = fdToDevice(fd);
   if (!d) {
@@ -268,6 +295,7 @@ int64_t PS4ABI sys_read(uint32_t fd, void *buf, size_t nbytes) {
     return -SysError::eBADF;
   }
   int64_t r = d->read(buf, nbytes);
+  throttleIo(r);
   fdReadStat(fd, r);
   // DELTA_READ_TRACE: log large reads (asset/texture loads) + their target buffer,
   // to see whether texture data lands in the GPU texture region (0x41x) directly or
