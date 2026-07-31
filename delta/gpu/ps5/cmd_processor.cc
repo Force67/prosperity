@@ -1872,11 +1872,19 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
     const char* e = std::getenv("DELTA_AGC_VDUMPRT");
     return e ? std::strtoull(e, nullptr, 0) : 0ull;
   }();
+  // DELTA_AGC_VDUMPIC=<n>: only dump draws with this index count. Draw indices
+  // and render-target addresses both move between runs; an index count picks a
+  // specific pass out of a frame reliably.
+  static const uint32_t kVdumpIc = [] {
+    const char* e = std::getenv("DELTA_AGC_VDUMPIC");
+    return e ? static_cast<uint32_t>(std::strtoul(e, nullptr, 0)) : 0u;
+  }();
   const uint64_t vertex_bytes =
       std::min<uint64_t>(static_cast<uint64_t>(d.vertex_stride) *
                              (d.vertex_count ? d.vertex_count : 4),
                          128);
   if (kTrace && my_draw >= kVdumpFrom && (!kVdumpRt || d.rt_base == kVdumpRt) &&
+      (!kVdumpIc || d.index_count == kVdumpIc) &&
       s_vdump < kVdumpN && d.num_vattrs && d.vertex_data &&
       InGuest(reinterpret_cast<uint64_t>(d.vertex_data)) && vertex_bytes &&
       gpu::IsReadableRange(reinterpret_cast<uint64_t>(d.vertex_data),

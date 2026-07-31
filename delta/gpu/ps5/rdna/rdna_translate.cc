@@ -1602,12 +1602,28 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       // the image operation so aliases cannot overwrite a later source and no
       // architectural VGPRs are used as scratch storage.
       const uint32_t nsa = (w >> 1) & 0x3;
-      if (nsa) {
+      // A cube sample's s/t reach the hardware biased by +1.5 (the compiler
+      // emits v_madak_f32 s, sc, rcp(|ma|), 1.5); gfx10's cube addressing
+      // consumes that range. The 2D-array lowering wants a plain [0,1], so
+      // take the bias back off. Without this every face samples its clamped
+      // edge texel and comes out one flat colour.
+      const bool cube = dim == 3;
+      if (nsa || cube) {
         std::array<Id, 13> address{};
-        address[0] = t.Vg(w1 & 0xFF);
-        for (uint32_t d = 0; d < nsa; d++)
-          for (uint32_t c = 0; c < 4; c++)
-            address[1 + d * 4 + c] = t.Vg((inst.raw[2 + d] >> (c * 8)) & 0xFF);
+        const uint32_t vaddr = w1 & 0xFF;
+        if (nsa) {
+          address[0] = t.Vg(vaddr);
+          for (uint32_t d = 0; d < nsa; d++)
+            for (uint32_t c = 0; c < 4; c++)
+              address[1 + d * 4 + c] = t.Vg((inst.raw[2 + d] >> (c * 8)) & 0xFF);
+        } else {
+          for (uint32_t c = 0; c < address.size(); c++)
+            address[c] = t.Vg(vaddr + c);
+        }
+        if (cube)
+          for (uint32_t c = 0; c < 2; c++)
+            address[c] = t.m.Bitcast(
+                t.t_u, t.FSub(t.m.Bitcast(t.t_f, address[c]), t.F32(1.0f)));
         gpu::gcn::EmitMimg(t, lowered, sc, address.data());
         break;
       }

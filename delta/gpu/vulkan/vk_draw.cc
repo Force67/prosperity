@@ -51,6 +51,16 @@ void Draw(Renderer& renderer, const DrawInfo& d_in) {
     const char* e = std::getenv("DELTA_GPU_ONLYDRAW");
     return e ? std::atoi(e) : -1;
   }();
+  // DELTA_GPU_ONLYIC=<n>: render only draws with this index count. Draw indices
+  // move between frames; an index count names one pass reliably.
+  static const uint32_t kOnlyIc = [] {
+    const char* e = std::getenv("DELTA_GPU_ONLYIC");
+    return e ? static_cast<uint32_t>(std::strtoul(e, nullptr, 0)) : 0u;
+  }();
+  if (kOnlyIc && d_sw.index_count != kOnlyIc) {
+    g_frame.draws++;
+    return;
+  }
   if (kMaxDraw >= 0 && (int)g_frame.draws >= kMaxDraw)
     return;
   if (kOnlyDraw >= 0 && (int)g_frame.draws != kOnlyDraw) {
