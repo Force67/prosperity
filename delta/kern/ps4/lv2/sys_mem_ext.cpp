@@ -45,8 +45,10 @@ int PS4ABI sys_munmap(void *addr, size_t len) {
     LOG_WARNING("sys_munmap: host pages are retained (first was {} +{:#x}); "
                 "only the VMA bookkeeping is released",
                 fmt::ptr(addr), len);
-  if (auto *proc = proc::getActive(); proc && addr && len)
+  if (auto *proc = proc::getActive(); proc && addr && len) {
     proc->getVma().remove(static_cast<uint8_t *>(addr), len);
+    noteGuestReleased(static_cast<uint8_t *>(addr), len);
+  }
   return 0;
 }
 

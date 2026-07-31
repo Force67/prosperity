@@ -55,8 +55,58 @@ DELTA_OPTION(bool, kShmAudioTrace, "DELTA_SHM_AUDIO_TRACE", false);
 }  // namespace
 
 namespace krnl {
+
 using ppt = utl::pageProtection;
 using alt = utl::allocationType;
+
+// Floor of the arena we hand out addresses from (see allocLowGuest). Below it is
+// the guest's own space, including the round 64 GiB slots titles MAP_FIXED their
+// direct/flexible pools into.
+#ifdef __ANDROID__
+constexpr uintptr_t kGuestArenaFloor = 0x4000000000ull;  // 256 GiB
+#else
+constexpr uintptr_t kGuestArenaFloor = 0x8000000000ull;  // 512 GiB
+#endif
+
+// Ranges the guest has unmapped. sys_munmap deliberately keeps the host pages
+// mapped, so the MAP_FIXED_NOREPLACE probe a hint goes through always fails
+// there and the mapping gets relocated. That is fatal to an allocator that
+// reserves a padded region, frees it, then re-reserves an exact aligned
+// sub-range of it: V8's pointer-compression cage does exactly that, and a
+// relocated cage leaves every compressed pointer resolving into memory nothing
+// lives in.
+namespace {
+struct ReleasedRange {
+  uintptr_t base, end;
+};
+std::mutex g_releasedLock;
+std::vector<ReleasedRange> g_released;
+}  // namespace
+
+void noteGuestReleased(uint8_t *ptr, size_t size) {
+  if (!ptr || !size)
+    return;
+  const uintptr_t base = reinterpret_cast<uintptr_t>(ptr);
+  std::lock_guard<std::mutex> lk(g_releasedLock);
+  for (auto &r : g_released) {
+    if (base <= r.end && base + size >= r.base) {  // merge touching ranges
+      r.base = std::min(r.base, base);
+      r.end = std::max(r.end, base + size);
+      return;
+    }
+  }
+  if (g_released.size() < 4096)
+    g_released.push_back({base, base + size});
+}
+
+bool wasGuestReleased(uint8_t *ptr, size_t size) {
+  const uintptr_t base = reinterpret_cast<uintptr_t>(ptr);
+  std::lock_guard<std::mutex> lk(g_releasedLock);
+  for (const auto &r : g_released)
+    if (base >= r.base && base + size <= r.end)
+      return true;
+  return false;
+}
 
 // PS4 user-space pointers must live below 2^40: libc's sceLibcMspaceCreate (and
 // other allocators) reject a base whose bits >= 40 are set. The host kernel
@@ -67,7 +117,7 @@ uint8_t *allocLowGuest(size_t size, size_t align) {
 #ifdef __ANDROID__
   // 39-bit user VA: keep the guest arena clear of the module region (32..~224
   // GiB) and the FEX heap / bionic up top, and still under the PS4 2^40 ceiling.
-  constexpr uintptr_t kFloor = 0x4000000000ull;   // 256 GiB
+  constexpr uintptr_t kFloor = kGuestArenaFloor;  // 256 GiB
   constexpr uintptr_t kCeil = 0x6000000000ull;    // 384 GiB
 #else
   // Start the arena at 512 GiB. Titles map their own fixed-address direct/flexible
@@ -78,7 +128,7 @@ uint8_t *allocLowGuest(size_t size, size_t align) {
   // primary TCB (fs:0x10 -> 0), which crashed the first scePthreadMutexLock. Our
   // bookkeeping must sit above every slot a title fixed-maps; 512 GiB clears all
   // observed pools while staying under the PS4 2^40 user ceiling.
-  constexpr uintptr_t kFloor = 0x8000000000ull;   // 512 GiB
+  constexpr uintptr_t kFloor = kGuestArenaFloor;  // 512 GiB
   constexpr uintptr_t kCeil = 0x10000000000ull;   // 2^40, the PS4 user ceiling
 #endif
   // Align bases to 64 KiB, not just the 16 KiB page: GNM tiled textures/render
@@ -554,6 +604,18 @@ uint8_t *PS4ABI sys_mmap(void *addr, size_t size, uint32_t prot, uint32_t flags,
       (reinterpret_cast<uintptr_t>(addr) & (mapAlign - 1)))
     addr = nullptr;  // misaligned hint: pick our own aligned base instead
 
+  // A pure address-space reservation (prot 0) must not be planted in the band
+  // titles MAP_FIXED their own direct/flexible pools into -- the round 64 GiB
+  // slots below our arena floor. The hint there is only advisory, but a later
+  // MAP_FIXED over it is not: Minecraft maps direct memory at 0x10_0000_0000,
+  // which is also the hint V8 uses for its pointer-compression cage, and the
+  // remap silently replaced the cage's first page (and with it V8's whole
+  // read-only heap) long after the cage was handed out.
+  if (addr && !(flags & mFlags::fixed) && prot == 0 &&
+      reinterpret_cast<uintptr_t>(addr) >= 0x1000000000ull &&
+      reinterpret_cast<uintptr_t>(addr) < kGuestArenaFloor)
+    addr = nullptr;
+
   void *ptr = nullptr;
   if (addr) {
     if (flags & mFlags::fixed) {
@@ -570,6 +632,12 @@ uint8_t *PS4ABI sys_mmap(void *addr, size_t size, uint32_t prot, uint32_t flags,
       // Without this a guest TLS/TCB hint lands on and destroys a loaded module
       // (seen on Android, where the guest hints into the low module region).
       ptr = utl::allocMem(addr, size, ppt::w, alt::commit);
+    } else if (wasGuestReleased(static_cast<uint8_t *>(addr), size) &&
+               !proc->getVma().overlaps(static_cast<uint8_t *>(addr), size)) {
+      // The probe can only fail here because we kept the host pages of a range
+      // the guest ITSELF unmapped, and nothing has been mapped there since. The
+      // address is free as far as the guest is concerned, so honour the hint.
+      ptr = utl::allocMem(addr, size, ppt::w, alt::reservecommit);
     }
   }
   // No usable hint (or it was taken): pick a low (<2^40) address the guest's
@@ -646,7 +714,7 @@ uint8_t *PS4ABI sys_mmap(void *addr, size_t size, uint32_t prot, uint32_t flags,
   }
 
   if (kMmapLog)
-    std::printf("mmap %p, %x, prot=%x flags=%x, %p -> %p\n", addr, size, prot,
+    std::printf("mmap %p, %zx, prot=%x flags=%x, %p -> %p\n", addr, size, prot,
                 flags, _ReturnAddress(), ptr);
 
   if (flags & mFlags::stack)
