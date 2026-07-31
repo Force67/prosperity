@@ -5,6 +5,13 @@
 // consumes its whole 1 GiB CPU heap and frees nothing, then walks off the
 // empty free map at eboot+0x1a371 (2026-07-31).
 
+// The world-load spin hammers sched_yield (6.4M calls in 20 s), which our
+// default maps to a pause; a real host yield lets the load finish first.
+// +DELTA_SCHED_YIELD_REAL=1
+
+// Cap read throughput so the streaming loader cannot outrun its own finalizer.
+// +DELTA_IO_MBPS=60
+
 // Watch the CPU heap's free map drain (address from the crash's r9).
 // +DELTA_GUEST_POPCNT=8000940af8:5e00:1000
 
