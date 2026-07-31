@@ -86,6 +86,12 @@ void setRetTrace(uintptr_t addr, const char *label);
 void setFnWatch(uintptr_t addr, const char *label);
 void startFnWatchPrinter();
 
+// DELTA_GUEST_POPCNT=<hex addr>:<hex bytes>[:<ms>]: report a guest bitmap's
+// population count, and its first/last set bit, on an interval (see crash.cpp).
+// Tells a map that drains from one that was never filled -- which a single dump
+// at the crash cannot.
+void startPopcntPrinter(uintptr_t addr, size_t bytes, unsigned everyMs);
+
 // DELTA_FNARGS="off+o1+o2...:label,...": int3 at a guest function entry (push
 // rbp) that logs rdi and then walks the offset chain from it, printing every
 // intermediate pointer and the qword the last one lands on. Answers "which

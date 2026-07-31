@@ -120,7 +120,7 @@ int dmemAllocate(uint64_t lo, uint64_t hi, uint64_t len, uint64_t align,
   } else {
     // "Anywhere" (searchStart 0, whole pool): serve it from the system band,
     // which is below every window a title carves for itself.
-    cand = (kDmemSysBase + align - 1) & ~(align - 1);
+    cand = (kDmemBase + align - 1) & ~(align - 1);
     for (const auto &r : g_dmemRegions) {
       if (r.end <= cand)
         continue;
@@ -128,7 +128,7 @@ int dmemAllocate(uint64_t lo, uint64_t hi, uint64_t len, uint64_t align,
         break;
       cand = ((r.end > cand ? r.end : cand) + align - 1) & ~(align - 1);
     }
-    if (cand + len <= kDmemBase) {
+    if (cand + len <= hi) {
       auto it2 = g_dmemRegions.begin();
       while (it2 != g_dmemRegions.end() && it2->start < cand)
         ++it2;

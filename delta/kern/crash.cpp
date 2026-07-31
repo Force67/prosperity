@@ -1689,6 +1689,39 @@ void setFnArgs(uintptr_t addr, const char *label, const uint64_t *offsets,
   g_fnArgsCount++;
 }
 
+// DELTA_GUEST_POPCNT=<hex addr>:<hex bytes>: report the population count of a
+// guest bitmap every 2s. A title's own allocator keeps its free/used map as a
+// bitmap, and "does it drain, or was it never filled" is the question a single
+// dump at the crash cannot answer.
+void startPopcntPrinter(uintptr_t addr, size_t bytes, unsigned everyMs) {
+  if (!addr || !bytes)
+    return;
+  std::thread([addr, bytes, everyMs] {
+    const long pgsz = sysconf(_SC_PAGESIZE);
+    for (;;) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(everyMs));
+      unsigned char vec = 0;
+      if (mincore(reinterpret_cast<void *>(addr & ~((uintptr_t)pgsz - 1)), 1,
+                  &vec) != 0)
+        continue;
+      const auto *w = reinterpret_cast<const uint64_t *>(addr);
+      uint64_t set = 0;
+      long first = -1, last = -1;
+      for (size_t i = 0; i < bytes / 8; i++) {
+        if (!w[i])
+          continue;
+        set += (uint64_t)__builtin_popcountll(w[i]);
+        if (first < 0)
+          first = (long)(i * 64 + __builtin_ctzll(w[i]));
+        last = (long)(i * 64 + 63 - __builtin_clzll(w[i]));
+      }
+      std::fprintf(stderr, "[popcnt] %#lx: %llu/%zu set, first=%ld last=%ld\n",
+                   (unsigned long)addr, (unsigned long long)set, bytes * 8,
+                   first, last);
+    }
+  }).detach();
+}
+
 void startFnWatchPrinter() {
   static std::atomic<bool> started{false};
   bool exp = false;

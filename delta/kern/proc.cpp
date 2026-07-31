@@ -64,6 +64,7 @@ DELTA_OPTION(bool, kPs5Noforce, "DELTA_PS5_NOFORCE", false);
 DELTA_OPTION(bool, kSotcForcePayload, "DELTA_SOTC_FORCE_PAYLOAD", false);
 DELTA_OPTION(bool, kSotcForceWorlddone, "DELTA_SOTC_FORCE_WORLDDONE", false);
 DELTA_OPTION(bool, kSotcJobfix, "DELTA_SOTC_JOBFIX", false);
+DELTA_OPTION(const char *, kGuestPopcnt, "DELTA_GUEST_POPCNT", nullptr);
 DELTA_OPTION(bool, kSotcJobmove, "DELTA_SOTC_JOBMOVE", false);
 DELTA_OPTION(bool, kSotcSkipWorldwait, "DELTA_SOTC_SKIP_WORLDWAIT", false);
 DELTA_OPTION(bool, kVoOplog, "DELTA_VO_OPLOG", false);
@@ -196,7 +197,10 @@ bool proc::create(const base::String &path, bool fromVfs) {
 // guest function entry (first byte must be push rbp). Offsets are relative to the
 // eboot base. The crash-handler counts hits and a printer thread logs totals every
 // 2s (see crash.h). Generic; used to probe which functions in a stuck pipeline run.
+static void investigatePopcnt();
+
 static void investigateFnWatch(smodule &m) {
+  investigatePopcnt();
   const char *e = kFnWatch;
   if (!e)
     return;
@@ -231,6 +235,22 @@ static void investigateFnWatch(smodule &m) {
     }
   }
   startFnWatchPrinter();
+}
+
+static void investigatePopcnt() {
+  const char *pc = kGuestPopcnt;
+  if (!pc)
+    return;
+  const uintptr_t at = std::strtoull(pc, nullptr, 16);
+  const char *colon = std::strchr(pc, ':');
+  size_t bytes = 0x1000;
+  unsigned ms = 2000;
+  if (colon) {
+    bytes = std::strtoull(colon + 1, nullptr, 16);
+    if (const char *c2 = std::strchr(colon + 1, ':'))
+      ms = (unsigned)std::strtoul(c2 + 1, nullptr, 0);
+  }
+  startPopcntPrinter(at, bytes, ms);
 }
 
 // DELTA_GUEST_PATCH="hexoff=hexbytes,...": overwrite guest code/data at an eboot
