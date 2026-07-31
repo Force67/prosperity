@@ -45,8 +45,12 @@ constexpr int kErrNotMounted = static_cast<int>(0x809F0004u);
 constexpr int kErrExists = static_cast<int>(0x809F0007u);
 constexpr int kErrNotFound = static_cast<int>(0x809F0008u);
 
-// 1 savedata block = 32 KiB; report ~32 GiB of free space to titles that ask.
-constexpr uint64_t kTotalBlocks = 1u << 20;
+// 1 savedata block = 32 KiB. Report a quota with room to spare, but NOT a round
+// power of two: a title that converts blocks to bytes in 32 bits wraps any
+// multiple of 4 GiB to exactly zero and reads that as "no free space".
+// Minecraft's world creation is gated on exactly that check.
+constexpr uint64_t kTotalBlocks = 60000;  // ~1.83 GiB
+constexpr uint64_t kFreeBlocks = 50000;   // ~1.53 GiB
 
 // OrbisSaveDataParam sidecar layout.
 constexpr size_t kParamSize = 1328;
@@ -390,7 +394,7 @@ int PS4ABI sceSaveDataGetMountInfo(const void *, void *info) {
     auto *i = static_cast<uint8_t *>(info);
     std::memset(i, 0, 48);
     std::memcpy(i + 0, &kTotalBlocks, 8);  // total blocks
-    std::memcpy(i + 8, &kTotalBlocks, 8);  // free blocks
+    std::memcpy(i + 8, &kFreeBlocks, 8);   // free blocks
   }
   return kOk;
 }
@@ -481,7 +485,7 @@ int PS4ABI sceSaveDataDirNameSearch(const void *cond, void *result) {
       uint8_t *islot = infos + i * 48;  // SearchInfo { u64 blocks; u64 free; }
       std::memset(islot, 0, 48);
       std::memcpy(islot + 0, &kTotalBlocks, 8);
-      std::memcpy(islot + 8, &kTotalBlocks, 8);
+      std::memcpy(islot + 8, &kFreeBlocks, 8);
     }
   }
   const uint32_t hitNum = static_cast<uint32_t>(hits.size());
