@@ -325,6 +325,11 @@ bool StageCsImage(const ComputeInfo::Res& res, void* dst) {
               std::memcpy(&packed, src_row + static_cast<size_t>(x) * 4, 4);
               UnpackR11G11B10(packed, dst_row + static_cast<size_t>(x) * 16);
             }
+          } else if (res.elem_bytes == 1) {
+            for (uint32_t x = 0; x < src_level.width; x++) {
+              const uint32_t expanded = src_row[x];
+              std::memcpy(dst_row + static_cast<size_t>(x) * 4, &expanded, 4);
+            }
           } else {
             for (uint32_t x = 0; x < src_level.width; x++) {
               uint16_t value;
@@ -377,6 +382,12 @@ bool WritebackCsImage(const ComputeInfo::Res& res, const void* src) {
               const uint32_t packed =
                   PackR11G11B10(src_row + static_cast<size_t>(x) * 16);
               std::memcpy(dst_row + static_cast<size_t>(x) * 4, &packed, 4);
+            }
+          } else if (res.elem_bytes == 1) {
+            for (uint32_t x = 0; x < dst_level.width; x++) {
+              uint32_t expanded;
+              std::memcpy(&expanded, src_row + static_cast<size_t>(x) * 4, 4);
+              dst_row[x] = static_cast<uint8_t>(expanded);
             }
           } else {
             for (uint32_t x = 0; x < dst_level.width; x++) {

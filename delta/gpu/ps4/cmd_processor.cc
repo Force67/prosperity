@@ -1926,6 +1926,7 @@ void HandleDispatch(const uint32_t* body, uint32_t count) {
     if (r.kind == 1) {
       gcn::TImage t = gcn::DecodeTImage(descriptor);
       gcn::TextureLayout32 layout;
+      const bool r8 = t.dfmt == 1 && (t.nfmt == 0 || t.nfmt == 4);
       const bool rgba8 = t.dfmt == 10 && (t.nfmt == 0 || t.nfmt == 4);
       const bool r32 =
           t.dfmt == 4 && (t.nfmt == 4 || t.nfmt == 5 || t.nfmt == 7);
@@ -1936,8 +1937,8 @@ void HandleDispatch(const uint32_t* body, uint32_t count) {
       const bool r11g11b10f = t.dfmt == 6 && t.nfmt == 7;
       const bool supported_type = t.type == 9 || t.type == 10 || t.type == 13;
       const bool supported_format =
-          rgba8 || r32 || rg16f || r16f || rg8 || rgba16f || r11g11b10f;
-      elem_bytes = rgba16f ? 8 : (r16f || rg8) ? 2 : 4;
+          r8 || rgba8 || r32 || rg16f || r16f || rg8 || rgba16f || r11g11b10f;
+      elem_bytes = rgba16f ? 8 : (r16f || rg8) ? 2 : r8 ? 1 : 4;
       stage_elem_bytes = r11g11b10f ? 16 : std::max(elem_bytes, 4u);
       if (!supported_type || !supported_format) {
         // Invalid/null T# values can be present on paths the guest shader does
