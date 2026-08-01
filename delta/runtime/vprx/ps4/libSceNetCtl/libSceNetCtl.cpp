@@ -94,3 +94,16 @@ int PS4ABI sceNetCtlRegisterCallback(void *func, void *arg, int32_t *cid) {
 
 int PS4ABI sceNetCtlUnregisterCallback(int32_t cid) { return 0; }
 int PS4ABI sceNetCtlCheckCallback() { return 0; }
+
+// The ForNpToolkit entry points differ only in taking the callback id back
+// through the return value rather than an out pointer; the link never changes
+// state either way, so nothing is ever queued for them to deliver.
+int PS4ABI sceNetCtlRegisterCallbackForNpToolkit(void *func, void *arg,
+                                                 int32_t *cid) {
+  if (cid)
+    *cid = 0;
+  return 0;
+}
+
+int PS4ABI sceNetCtlUnregisterCallbackForNpToolkit(int32_t cid) { return 0; }
+int PS4ABI sceNetCtlCheckCallbackForNpToolkit() { return 0; }

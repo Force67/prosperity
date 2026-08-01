@@ -252,6 +252,14 @@ uintptr_t vprx_get(const char *lib, uint64_t hid) {
       std::strcmp(lib, "libSceGnmDriverForNeoMode") == 0)
     lib = "libSceGnmDriver";
 
+  // Same idea for NpToolkit2's private entry points into libSceNetCtl: they
+  // live in the .sprx we already shim, so leaving them LLE means they read an
+  // "initialized" flag our HLE never sets.
+  if (std::strcmp(lib, "libSceNetCtlForNpToolkit") == 0)
+    lib = "libSceNetCtl";
+  if (std::strcmp(lib, "libSceUserServiceForNpToolkit") == 0)
+    lib = "libSceUserService";
+
   if (!useHleShim(lib, hid))
     return 0;
 

@@ -308,7 +308,7 @@ int PS4ABI sys_dynlib_load_prx(const char *path, uint64_t flags, int *pHandle,
   // (their module_start is unresolved, so we can't run it, e.g. libSceNet's init
   // faults on a __thread errno whose TLS isn't in the DTV). Report a genuine
   // "not found" so the preloader treats the sysmodule as absent and skips it.
-  static const char *kSkipNotFound[] = {"libSceNet", "libSceSsl2", "libSceHttp2",
+  static const char *kSkipNotFound[] = {"libSceSsl2", "libSceHttp2",
                                         "libSceNpManager", "libSceNpWebApi2"};
   bool skipInit = false;
   for (auto *s : kLoadOk) {

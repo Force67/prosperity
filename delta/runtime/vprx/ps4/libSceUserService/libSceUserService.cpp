@@ -71,3 +71,13 @@ int PS4ABI sceUserServiceGetUserName(int32_t userId, char *name, uint64_t size) 
   }
   return 0;
 }
+
+// The one local user is logged in before the title starts and never changes,
+// so a registered login/logout callback has nothing to deliver.
+int PS4ABI sceUserServiceRegisterCallbackForNpToolkit(void *func, void *arg) {
+  return 0;
+}
+
+int PS4ABI sceUserServiceUnregisterCallbackForNpToolkit(void *func) {
+  return 0;
+}

@@ -115,6 +115,13 @@ struct nonsys_int {
   uint32_t value;
 };
 
+struct nonsys_bin {
+  uint64_t encoded_id;
+  uint64_t unknown;
+  uint64_t size;
+  uint8_t data[];
+};
+
 /*TODO: clearly does not belong here*/
 int PS4ABI sys_regmgr_call(uint32_t op, uint32_t id, void *result, void *value,
                            uint64_t type) {
@@ -140,10 +147,27 @@ int PS4ABI sys_regmgr_call(uint32_t op, uint32_t id, void *result, void *value,
     return 0x800D0203;
   }
 
+  if (op == 27) // non-system get bin
+  {
+    // {u64 encoded_id, u64 unknown, u64 size, u8 data[size]}, with the blob
+    // returned in place -- `type` is the whole struct, 0x18 + size.
+    auto *bin = static_cast<nonsys_bin *>(value);
+    if (type < sizeof(nonsys_bin) || bin->size != type - sizeof(nonsys_bin))
+      return 0x800D0203;
+
+    // Every key here is one of Sony's obfuscated ids. Unlike get-int, failing
+    // is not an option: libSceNpCommon reads id 0x6b976df7f847ea43 (a 17-byte
+    // per-console blob) during NpAsm resource-context setup and treats any
+    // error as fatal, which aborts the whole NP bring-up. An all-zero blob is
+    // what an unprovisioned console has, and NP accepts it.
+    std::memset(bin->data, 0, bin->size);
+    return 0;
+  }
+
   // SCOUT: soft-fail unknown regmgr ops with the same "not available" error the
   // op-25 unknown-key path returns (the guest copes with it) instead of trapping.
-  printf("[regmgr] UNHANDLED op=%u id=%#x type=%#llx\n", op, id,
-         (unsigned long long)type);
+  printf("[regmgr] UNHANDLED op=%u id=%#x type=%#llx result=%p value=%p\n", op,
+         id, (unsigned long long)type, result, value);
   return 0x800D0203;
 }
 

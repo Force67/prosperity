@@ -15,3 +15,13 @@ int PS4ABI sceNetCtlGetInfo(int32_t code, void *info);
 int PS4ABI sceNetCtlRegisterCallback(void *func, void *arg, int32_t *cid);
 int PS4ABI sceNetCtlUnregisterCallback(int32_t cid);
 int PS4ABI sceNetCtlCheckCallback();
+
+// libSceNetCtlForNpToolkit is a second entry-point set into the same .sprx, so
+// it checks the same internal "initialized" flag -- which HLE-ing the plain
+// library leaves unset. NpToolkit2 registers a link-state callback through it
+// during initialize() and treats NOT_INITIALIZED as fatal, which is what takes
+// GTA:SA down. Answer it here rather than leaving half the library LLE.
+int PS4ABI sceNetCtlRegisterCallbackForNpToolkit(void *func, void *arg,
+                                                 int32_t *cid);
+int PS4ABI sceNetCtlUnregisterCallbackForNpToolkit(int32_t cid);
+int PS4ABI sceNetCtlCheckCallbackForNpToolkit();

@@ -8,6 +8,10 @@ static const runtime::funcInfo functions[] = {
     {0x509F99ED0FB8724D, (void *)&sceNetCtlRegisterCallback},   // UJ+Z7Q+4ck0
     {0x46A9B63A764C0B3D, (void *)&sceNetCtlUnregisterCallback}, // Rqm2OnZMCz0
     {0x890C378903E1BD44, (void *)&sceNetCtlCheckCallback},      // iQw3iQPhvUQ
+    // libSceNetCtlForNpToolkit, aliased onto this table in vprx_get.
+    {0xC08B0ACBE4DF78BB, (void *)&sceNetCtlRegisterCallbackForNpToolkit},   // wIsKy+TfeLs
+    {0xDA852A291E687467, (void *)&sceNetCtlUnregisterCallbackForNpToolkit}, // 2oUqKR5odGc
+    {0xBB9A2AB6520FF85C, (void *)&sceNetCtlCheckCallbackForNpToolkit},      // u5oqtlIP+Fw
 };
 
 MODULE_INIT(libSceNetCtl);

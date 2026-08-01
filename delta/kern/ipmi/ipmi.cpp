@@ -84,7 +84,7 @@ Service *findService(const char *name) {
   if (!name)
     return nullptr;
   Service *all[] = {&playGoService(), &npManagerService(), &npWebService(),
-                    &userService()};
+                    &userService(), &lncService()};
   for (Service *s : all)
     if (std::strcmp(s->name(), name) == 0)
       return s;

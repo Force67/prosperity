@@ -1,6 +1,40 @@
 // Grand Theft Auto: San Andreas - The Definitive Edition (CUSA26619, PS4)
-// UE4 / Gameface. Gets deep into UE4 init; the blocker is UE4's own CPU pool
-// running out of budget (~6 GB) before it ever reaches sys_mmap (2026-07-31).
+// UE4 / Gameface, native x86 backend.
+//
+// PSN BRING-UP DONE (2026-08-01). The title calls
+// sce::Toolkit::NP::V2::Interface::initialize during engine init and treats any
+// failure as LowLevelFatalError "PSN: Failed to initialize the np toolkit",
+// which aborts the boot. It now returns SCE_OK. Four things were in the way,
+// each of which only became visible once the one before it was fixed:
+//
+//   1. regmgr op 27 (non-system get-bin) was unimplemented, so libSceNpCommon
+//      could not read the 17-byte per-console blob it wants during NpAsm
+//      resource-context setup and the whole NP stack failed to start.
+//   2. sceSysmoduleLoadModule(0x19) is libSceNet, which we reported as absent.
+//      The title bails on a negative return here.
+//   3. libSceNpWebApi's initialize reads the LNC app state and refuses to come
+//      up unless it is 4 or 5; nothing answered "SceLncService".
+//   4. libSceNetCtlForNpToolkit / libSceUserServiceForNpToolkit are second
+//      entry-point sets into .sprx files we already HLE, so they were reading an
+//      "initialized" flag the HLE never sets and returning NOT_INITIALIZED.
+//
+// Boot now reaches video playback and faults in libSceAvPlayer+0x3913 (deref of
+// 1) right after an unimplemented syscall returns 0. Seven of the 22
+// libSceAvPlayer NIDs the eboot imports have no HLE override, so those calls run
+// the real .sprx, which needs libSceAvPlayerStreaming and the AJM decoders.
+//
+// The 2026-07-31 note about a UE4 CPU-pool OOM ("Failed to allocate virtual
+// address space (Type: CPU, Size: 2140667904)", ~6 GB budget) is from a run that
+// got past this gate a different way; expect it again once the movie player is
+// dealt with.
+
+// The stack-trace capture UE4 runs while building its fatal-error report walks
+// the frame-pointer chain and derefs a null saved-rbp. Guard it so the fatal
+// path reports instead of faulting first.
+// +DELTA_GUEST_NULLGUARD=1c7be95:rax:4
+
+// Which sub-call of the NP init chain returns the error the title bails on.
+// +DELTA_RETTRACE=eba364:NpToolkitInit,libSceNpToolkit2+3d2e9:t_3b2e0
 
 // Where the memory goes.
 // +DELTA_MMAP_CALLER=64
