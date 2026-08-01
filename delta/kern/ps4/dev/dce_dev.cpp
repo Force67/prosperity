@@ -16,6 +16,7 @@
 #include "dce_dev.h"
 #include "kern/proc.h"
 #include "kern/ps4/lv2/sys_event.h"
+#include "kern/ps4/lv2/error_table.h"
 #include "kern/ps4/lv2/sys_mem.h"
 #include <utl/options.h>
 
@@ -138,8 +139,8 @@ static void dumpStruct(const void *data, uint32_t len) {
 
 uint64_t dceDevice::poolAlloc(uint64_t bytes) {
   // The scanout/control pool. One big guest-addressable region, bump-allocated;
-  // every sub-op 9 / 0xc0588212 carves a slice and the module mmaps it back via
-  // map(offset). 512 MiB covers several 1080p buffer sets + control blocks.
+  // every sub-op 9 carve is mmap'd back via map(offset). 512 MiB covers several
+  // 1080p buffer sets + control blocks.
   constexpr uint64_t kPool = 512ull * 1024 * 1024;
   if (!poolBase) {
     poolBase = allocLowGuest(kPool);
@@ -156,16 +157,27 @@ uint64_t dceDevice::poolAlloc(uint64_t bytes) {
 }
 
 uint8_t *dceDevice::map(void *, size_t size, uint32_t, uint32_t, size_t offset) {
-  // The module mmaps the dce fd at an offset sub-op 9 handed back. Return the
-  // matching slice of the pool so it gets real, zeroed, shared memory (not the
-  // uninitialised anonymous fallback that made it size buffers from garbage).
+  // The kernel only maps /dev/dce at offsets < 0x8000: it returns the PHYSICAL
+  // address of the flip-target status page (offset/0x4000 picks the target,
+  // and offset 0x4000 is the data region the scanout-pool query sizes). Our
+  // libSceVideoOut maps the offset sub-op 9 hands back instead. Return the
+  // matching slice of the scanout pool so it gets real, zeroed, shared memory
+  // (not the uninitialised anonymous fallback that made it size buffers from
+  // garbage). Sub-op 9's pool offsets exceed the kernel's 0x8000 window, so
+  // this is a deliberate emulator substitution that keeps the shape (map
+  // fd@offset -> real backing) while giving titles CP-usable memory.
   if (poolBase && offset + size <= poolSize)
     return poolBase + offset;
   return reinterpret_cast<uint8_t *>(-1);
 }
 
-// 0xc0308203 sub-op handlers. The 48-byte arg is `s[0..5]` (u64s): s[0] = sub-op.
-// Layouts verified against the 11.00 libSceVideoOut.sprx callers.
+// Kernel (11.00) dce ioctl dispatch. The scanin ioctls are gated behind a
+// system-credential check, so a game issuing them gets EINVAL (22); the flip
+// ioctls route to the flip handler: 0xC0308203 -> flip control (sub-op switch,
+// valid 0..0x19), 0xC0308206 -> register buffer, 0xC0308207 -> register buffer
+// attribute, 0xC0488204 -> submit flip. 0xc0588212 is not in the dispatch at
+// all (EINVAL). Sub-op arg layouts below were verified against the 11.00
+// libSceVideoOut.sprx callers and the flip-control sub-op jump table.
 int32_t dceDevice::ioctl(uint32_t cmd, void *data) {
   if (g_dceTrace()) {
     uint32_t len = (cmd >> 16) & 0x1FFF;
@@ -177,6 +189,21 @@ int32_t dceDevice::ioctl(uint32_t cmd, void *data) {
 
   auto *s = static_cast<uint64_t *>(data);
 
+  // System-only capture ("scanin") ioctls + the non-existent 0xc0588212: the
+  // 11.00 kernel returns EINVAL for all of these from a game context (the
+  // scanin set fails the system-credential check; 0xc0588212 falls in the
+  // submit branch as an unknown cmd). A game's libSceVideoOut is built against
+  // that, so EINVAL is the faithful answer.
+  switch (cmd) {
+  case 0x80108210:  // start dual capture mode
+  case 0xC068820C:  // start capture buffer manager
+  case 0xC020820E:  // get capture buffer info
+  case 0xC020820F:  // execute capture command
+  case 0xC004820D:  // stop capture buffer manager
+  case 0xc0588212:  // was "cursor pool allocator"; not in the kernel dispatch
+    return -SysError::eINVAL;
+  }
+
   if (cmd == 0xc0308203 && data) {
     switch (s[0]) {
     case 0:
@@ -187,9 +214,12 @@ int32_t dceDevice::ioctl(uint32_t cmd, void *data) {
         *reinterpret_cast<uint64_t *>(s[4]) = nextHandle++;
       return 0;
     case 9: {
-      // Allocate scanout pool. arg[0x10]/arg[0x18] (s[2]/s[3]) point at the
-      // caller's offset/size out-slots; it then mmaps the dce fd at that offset
-      // for `size` bytes. Carve a real pool slice so the mmap maps live memory.
+      // Allocate scanout pool. Kernel sub-op 9 (scanout-pool offset query): it
+      // looks up the flip target, then writes offset=0x4000 and size=
+      // (bufferCount<<14) to s[2]/s[3]; the module mmaps the dce fd at that
+      // offset for that size. We substitute a bump-allocated pool slice (a
+      // guest-addressable region map() hands back as real memory) -- same
+      // shape, real backing.
       // s[3] is a pure OUT slot on some callers (libSceVideoOut's open path passes
       // it uninitialised) -- only treat *s[3] as a requested size when it's a
       // sane size (not stack garbage / a pointer), else use the default. Without
@@ -267,7 +297,7 @@ int32_t dceDevice::ioctl(uint32_t cmd, void *data) {
       return 0;
     }
     case 0xc: {
-      // fc_get_scaler_setup (videoout service thread). out[0x00] != 0 only when a
+      // scaler-setup query (videoout service thread). out[0x00] != 0 only when a
       // NEW scaler config is pending; the title never reconfigures the scaler after
       // boot, so report "none pending" (all zero) -- a non-zero handle here makes
       // the service spin posting bogus scaler events. (NOT the flip-done path; that
@@ -276,13 +306,12 @@ int32_t dceDevice::ioctl(uint32_t cmd, void *data) {
         std::memset(reinterpret_cast<void *>(s[2]), 0, 0x40);
       return 0;
     }
-    case 0x1f:
-      // Open-time capability/flip-control header: arg[0x10] (s[2]) = size (0xc),
-      // arg[0x18] (s[3]) = pointer into the pool the kernel writes 12 bytes to.
-      // Zero it (defined state); the capability predicates tolerate zeros.
-      if (plausiblePtr(s[3]))
-        std::memset(reinterpret_cast<void *>(s[3]), 0, 0xc);
-      return 0;
+    case 0x1f:  // NOT a valid kernel sub-op: the flip-control switch only
+                 // covers 0..0x19, and 0x1f (31) falls to the EINVAL default
+                 // (kernel jump table -> 0x826e9679). The "open-time capability
+                 // header" reading was a soft-success invention; the retail sprx
+                 // sees EINVAL here, so match it.
+      return -SysError::eINVAL;
     default:
       // Other query/config sub-ops (1, 6, 0xc, ...). Soft-succeed without
       // touching arg fields whose role (pointer vs scalar) we haven't pinned.
@@ -309,21 +338,8 @@ int32_t dceDevice::ioctl(uint32_t cmd, void *data) {
     return 0;
   }
 
-  if (cmd == 0xc0588212 && data) {
-    // Second scanout-memory allocator (cursor / close path), 88-byte arg. Same
-    // shape as sub-op 9: offset/size out-slots a few words in. Carve a slice.
-    uint64_t want = 0x100000;
-    uint64_t off = poolAlloc(want);
-    if (plausiblePtr(s[2]))
-      *reinterpret_cast<uint64_t *>(s[2]) = off;
-    if (plausiblePtr(s[3]))
-      *reinterpret_cast<uint64_t *>(s[3]) = want;
-    return 0;
-  }
-
   if (cmd == 0xc0488204 && data) {
-    // Submit flip (72-byte arg). s[1] = display buffer index, s[3] = flipArg
-    // (verified against the 11.00 sceVideoOutSubmitFlip caller). Our flip is
+    // Submit flip (72-byte arg). Our flip is
     // synchronous, so record it as immediately complete: GetFlipStatus then
     // reports currentBuffer == the index the title just flipped. This is exactly
     // Undertale's documented blocker (the flip path dropped bufferIndex/flipArg);
@@ -334,8 +350,9 @@ int32_t dceDevice::ioctl(uint32_t cmd, void *data) {
     if (g_dceTrace())
       std::printf("[dce] submitFlip buf=%d flipArg=%#llx\n", (int)s[1],
                   (unsigned long long)s[3]);
-    // Report success: arg[0x40] (s[8]) points at a status out-slot the caller
-    // checks for 0x58 = ok.
+    // Report success: arg[0x40] (s[8]) holds a pointer to the status out-slot
+    // the kernel copyouts 8 bytes to (0 on clean success, 88 when a flip is
+    // already pending). The caller checks it for 0x58 = ok.
     if (plausiblePtr(s[8]))
       *reinterpret_cast<uint64_t *>(s[8]) = 0x58;
     return 0;
