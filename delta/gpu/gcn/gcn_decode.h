@@ -109,6 +109,14 @@ std::vector<uint8_t> ComputeReachability(const Program& program);
 std::shared_ptr<const Program> CachedProgram(uint64_t addr,
                                              uint32_t max_dwords);
 
+// Content hash of the shader at `addr`, covering its instructions only: the
+// footer-bounded body, or, for a shader the guest generates at runtime and has
+// no footer, up to its terminator. Lets a cache key name the CODE rather than
+// the address it happens to sit at, which matters for shaders a title emits
+// into scratch memory per draw. Cached per address per generation, as
+// CachedProgram is.
+uint64_t CachedCodeHash(uint64_t addr, uint32_t max_dwords);
+
 // Advance the CachedProgram revalidation generation (call once per frame, from
 // the command processor's end-of-frame). Entries revalidate their code hash at
 // most once per generation; repeat lookups within a frame are pure map hits.

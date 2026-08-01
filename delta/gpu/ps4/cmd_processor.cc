@@ -79,7 +79,11 @@ bool g_frame_active = false;
 uint32_t g_presented_frames = 0;
 
 struct ShaderKey {
-  uint64_t vs = 0, ps = 0, fetch = 0;
+  uint64_t vs = 0, ps = 0;
+  // The fetch shader by CONTENT, not by address: titles that generate one per
+  // draw into scratch memory (Tomb Raider does) would otherwise miss the
+  // recompile cache on every single draw.
+  uint64_t fetch = 0;
   uint32_t ps_input_ena = 0;
   // Which PS samplers read a volume image. Unlike the 2D-array case, whose DA
   // bit lives in the instruction, a 3D descriptor is indistinguishable in the
@@ -736,7 +740,8 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
           sh_cache;
       const bool neo = gcn::DefaultIsaMode() == gcn::IsaMode::kNeo;
       const uint32_t ps_input_ena = g_regs[mmSPI_PS_INPUT_ENA];
-      ShaderKey key{vs_a, ps_a, fetch, ps_input_ena, tex_3d_mask, neo};
+      ShaderKey key{vs_a, ps_a, gcn::CachedCodeHash(fetch, 64), ps_input_ena,
+                    tex_3d_mask, neo};
       auto it = sh_cache.find(key);
       if (it == sh_cache.end())
         it = sh_cache
