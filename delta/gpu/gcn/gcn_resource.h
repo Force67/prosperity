@@ -70,6 +70,13 @@ struct TImage {
   bool valid = false;
 };
 
+// DST_SEL in the form the renderer's image views take it (x | y<<3 | z<<6 |
+// w<<9).
+inline uint32_t PackDstSel(const uint32_t dst_sel[4]) {
+  return (dst_sel[0] & 7) | ((dst_sel[1] & 7) << 3) | ((dst_sel[2] & 7) << 6) |
+         ((dst_sel[3] & 7) << 9);
+}
+
 // Decode a V# from 4 consecutive dwords.
 VBuffer DecodeVBuffer(const uint32_t* dwords);
 

@@ -647,6 +647,7 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
         d.tex_force_lod_zero = texs[0].force_lod_zero;
         d.tex_depth_compare = texs[0].depth_compare;
         d.tex_null_descriptor = texs[0].null_descriptor;
+        d.tex_swizzle = gcn::PackDstSel(texs[0].dst_sel);
         d.uv_data = d.vertex_data;
         d.uv_stride = d.vertex_stride;
         // All sampled textures (binding order), for multi-texture PS (Doom64
@@ -681,6 +682,7 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
           dt.depth_compare = t.depth_compare;
           dt.storage = t.storage;
           dt.null_descriptor = t.null_descriptor;
+          dt.swizzle = gcn::PackDstSel(t.dst_sel);
         }
         // d.uv_offset was derived from the fetch shader during vertex
         // extraction. DELTA_GPU_TEXFMT: dump sampled texture formats

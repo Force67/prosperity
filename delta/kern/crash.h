@@ -25,6 +25,13 @@ void guestStackTrace(const char *tag, int maxFrames);
 // handler. The handler runs on its own stack (see krnl_kstack_top), so a scan
 // has to start from the guest side of the switch. 0 = no switch happened.
 void setGuestStackScanBase(uintptr_t sp);
+uintptr_t guestStackScanBase();
+
+// The same scan as guestStackTrace, but from a base captured earlier and for a
+// thread other than the caller: a parked thread cannot report itself, so the
+// wait probe records its scan base on the way in and walks it from outside.
+void guestStackTraceFrom(uintptr_t base, const char *tag, int maxFrames,
+                         long tid);
 
 // Enable the DELTA_ALLOC_TRACE allocator-entry tracer: addr's first byte must be
 // `push rbp` (0x55); the caller plants an int3 there and this records addr so the

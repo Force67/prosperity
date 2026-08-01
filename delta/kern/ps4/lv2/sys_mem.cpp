@@ -824,6 +824,14 @@ int PS4ABI sys_mprotect(uint8_t *addr, size_t len, int prot) {
   return 0;
 }
 
+// Names we know are the client half of a live channel rather than a block of
+// settings. Nothing in shm_open's arguments tells the two apart -- both are
+// pre-created and both are opened without O_CREAT -- so this is a list, and it
+// grows one name at a time as a title walks into the next one.
+static bool isAbsentServiceChannel(const std::string &name) {
+  return name == "/SceNpTpip";
+}
+
 int PS4ABI sys_shm_open(const char *path, uint32_t flags, uint16_t mode) {
   auto *proc = proc::getActive();
   if (!proc || !path)
@@ -852,6 +860,17 @@ int PS4ABI sys_shm_open(const char *path, uint32_t flags, uint16_t mode) {
         // the guest didn't create) to test whether auto-providing it makes a title
         // block waiting for a ShellCore handshake that never arrives (Doom64).
         std::fprintf(stderr, "[shm_open] NOAUTO: '%s' -> ENOENT\n", name.c_str());
+        return -SysError::eNOENT;
+      }
+      if (!(flags & kO_CREAT) && isAbsentServiceChannel(name)) {
+        // Not every system shm is a settings block. Some are one half of a live
+        // channel: the client maps the region, then blocks on the service's
+        // named semaphore for the other half to answer. Handing it a zeroed
+        // region says "the service is here" and it waits forever -- Tomb
+        // Raider's sceNpCheckCallback parked on 'SceNpTpip 0' for the whole run.
+        // ENOENT is what a console without that service reports, and the
+        // libraries have a path for it (libSceNpManager logs
+        // "sceNpTpipInitialize() failed" and carries on offline).
         return -SysError::eNOENT;
       }
       if (!(flags & kO_CREAT)) {

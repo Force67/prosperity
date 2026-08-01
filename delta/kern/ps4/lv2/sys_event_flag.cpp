@@ -19,6 +19,7 @@
 #include <unordered_map>
 
 #include "kern/crash.h"
+#include "kern/ipmi/services.h"
 #include "kern/proc.h"
 #include "sys_event_flag.h"
 #include <utl/options.h>
@@ -255,11 +256,16 @@ static uint64_t systemFlagInit(const char *name) {
   if (!name)
     return 0;
   base::StringRef n(name);
+  // ShellCore keeps the focus flags' pattern equal to the appId of the app
+  // that holds focus; libSceSystemService's GetStatus compares it against the
+  // title's own appId (from SceLncService GetAppStatus) and any other value
+  // reads as backgrounded/overlaid. Same value also satisfies OR-waits.
   if (n.find("AppFocus", 0, 8) != base::StringRef::npos ||
-      n.find("CtrlFocus", 0, 9) != base::StringRef::npos ||
-      n.find("PowerControl", 0, 12) != base::StringRef::npos ||
+      n.find("CtrlFocus", 0, 9) != base::StringRef::npos)
+    return ipmi::kForegroundAppId;
+  if (n.find("PowerControl", 0, 12) != base::StringRef::npos ||
       n.find("SystemStateMgr", 0, 14) != base::StringRef::npos)
-    return 0x1;  // bit0 = focused / powered / running
+    return 0x1;  // bit0 = powered / running
   // ShellCore publishes boot progress here bit-by-bit (SotC waits for 0x400);
   // with no ShellCore, report every boot stage as already complete.
   if (n.find("BootStatus", 0, 10) != base::StringRef::npos)

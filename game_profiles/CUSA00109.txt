@@ -6,7 +6,23 @@
 // title past its own asset bring-up (2026-07-31).
 +DELTA_HDR_FILL=1
 
+// Status 2026-08-01: boots, runs its render loop at 59.8 fps, draws its
+// calibration and legal screens with readable text, and reaches the autosave
+// notice. Four fixes got it here, none of them title-specific: /SceNpTpip is no
+// longer invented as a shm (it parked sceNpCheckCallback forever), the launch
+// daemon and the focus event flags now name the same appId (disagreeing left
+// the title convinced it was backgrounded, so it never read the pad), the GCN
+// recompiler decodes an SMRD's source V# before stepping (its absence zeroed
+// every UI constant and blended the whole screen away), and a sampled image
+// honours its T# DST_SEL (its absence filled every glyph solid).
+// The frontier is the in-engine renderer: it falls to a few fps on compute
+// staging and the recompiler still declines a handful of ops.
+
 // The read that went wrong, when it goes wrong again.
 // +DELTA_MANIFEST_SEQ=1
 // +DELTA_HDR_TRACE=1
 // +DELTA_FILEREAD_TRACE=1
+
+// What showed each of the stalls above.
+// +DELTA_WAIT_PROBE=1   names the guest code a parked thread stopped in
+// +DELTA_PAD_TRACE=1    the pad open, and every button change once it is read

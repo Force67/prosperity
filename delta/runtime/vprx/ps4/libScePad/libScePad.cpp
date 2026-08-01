@@ -456,10 +456,17 @@ std::vector<ScriptStep> parseScript(const char *s) {
   return steps;
 }
 
+// The watch/poke experiments hang off the pad because that is where a title's
+// per-frame heartbeat is. A title that opens a pad and then never reads it is
+// exactly the case worth probing, so open counts as a start too.
+void startPadExperiments() {
+  static const bool started = [] { startMemWatch(); startMemPoke(); return true; }();
+  (void)started;
+}
+
 void fillPadState(PadData *d) {
   if (!d) return;
-  static const bool memwatchStarted = [] { startMemWatch(); startMemPoke(); return true; }();
-  (void)memwatchStarted;
+  startPadExperiments();
   std::memset(d, 0, sizeof(*d));
   uint32_t buttons = 0;
   uint8_t lx = 128, ly = 128, rx = 128, ry = 128;
@@ -656,6 +663,13 @@ int scePadMbusInit() {
 }
 
 int scePadOpen(int userId, int type, int index, const void *param) {
+  // Worth tracing on its own: a title that never opens the pad is stuck before
+  // its input path, which the read trace below cannot tell apart from a title
+  // that opened one and is ignoring it.
+  if (kPadTrace)
+    std::fprintf(stderr, "[padtrace] open user=%d type=%d index=%d\n", userId,
+                 type, index);
+  startPadExperiments();
   return 1;  // positive handle = success
 }
 

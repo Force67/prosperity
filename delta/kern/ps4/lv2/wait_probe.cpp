@@ -22,6 +22,8 @@
 #include <sys/syscall.h>
 #include <utl/options.h>
 
+#include "kern/crash.h"
+
 namespace {
 DELTA_OPTION(bool, kWaitProbe, "DELTA_WAIT_PROBE", false);
 }  // namespace
@@ -33,6 +35,8 @@ struct Parked {
   const char *what;
   long a0, a1;
   std::chrono::steady_clock::time_point since;
+  uintptr_t gsp;   // guest stack at the syscall, walked by the reporter
+  bool traced;     // this wait has had its guest stack reported
 };
 
 std::mutex g_mtx;
@@ -67,7 +71,7 @@ void startReporter() {
         const auto now = std::chrono::steady_clock::now();
         std::lock_guard<std::mutex> lk(g_mtx);
         bool any = false;
-        for (const auto &[tid, p] : g_parked) {
+        for (auto &[tid, p] : g_parked) {
           const auto secs =
               std::chrono::duration_cast<std::chrono::seconds>(now - p.since)
                   .count();
@@ -83,6 +87,12 @@ void startReporter() {
                        "[waitprobe]   tid=%ld (%-15s) %-16s %llds a0=%#lx a1=%#lx\n",
                        tid, comm, p.what, static_cast<long long>(secs), p.a0,
                        p.a1);
+          // Once per wait, not once per thread: a thread that gets past one
+          // wait and parks in the next one has a different story to tell.
+          if (!p.traced) {
+            p.traced = true;
+            guestStackTraceFrom(p.gsp, "waitprobe", 20, tid);
+          }
         }
       }
     }).detach();
@@ -99,7 +109,8 @@ void waitProbeEnter(const char *what, long a0, long a1) {
   startReporter();
   const long tid = selfTid();
   std::lock_guard<std::mutex> lk(g_mtx);
-  g_parked[tid] = {what, a0, a1, std::chrono::steady_clock::now()};
+  g_parked[tid] = {what, a0, a1, std::chrono::steady_clock::now(),
+                   guestStackScanBase(), false};
 }
 
 void waitProbeExit() {
