@@ -38,6 +38,14 @@
 //  dispatches, all in 0x80a6..), async compute queues (sceGnmDingDong is never
 //  called), a second mapping of the same physOffset (each physical offset is
 //  mapped exactly once), and a later MAP_FIXED over the pool (none).
+//  DELTA_MMAP_LOG settles the aliasing question: the working init texture and
+//  every empty streamed one live in the SAME single mapping (base 0x80a5100000,
+//  len 0xb0000000, fd=16 off=0x6c800000, mapped once). So this is not two views
+//  of one physical range failing to alias. The guest writes the low part of that
+//  mapping and reads from the high part, and DELTA_GUEST_WPROT sees no writes at
+//  all to the high part, so the decompress-into-video-memory step never runs for
+//  those assets. Next: find what that streaming step waits on (Fios2 completion,
+//  an event flag, a worker thread) rather than looking at memory mapping.
 //  Scale of it: one steady-state frame has 109 guest-texture bindings against
 //  74 render-target ones, and the single most used is guest@0x80c7d58000
 //  (2048x2048, bound by 29 draws) which is entirely zero. That atlas is the
