@@ -86,19 +86,23 @@ static void markThreadStarted() {
   }
 }
 
-// FreeBSD thr_param (the layout sys_thr_new receives in rdi).
+// FreeBSD thr_param (the layout sys_thr_new receives in rdi). 0x68 / 104 bytes.
+// Fields the kernel's kern_thr_new does not read (+40 tls_size, +64 flags) exist
+// for the user-mode libthr wrapper and are left untouched by the kernel path.
 struct thr_param {
-  void(PS4ABI *start_func)(void *);
-  void *arg;
-  uint8_t *stack_base;
-  size_t stack_size;
-  uint8_t *tls_base;
-  size_t tls_size;
-  int64_t *child_tid;
-  int64_t *parent_tid;
-  int32_t flags;
-  void *rtp;
-  void *spare[3];
+  void(PS4ABI *start_func)(void *);  // +0x00
+  void *arg;                          // +0x08
+  uint8_t *stack_base;                // +0x10
+  size_t stack_size;                  // +0x18
+  uint8_t *tls_base;                  // +0x20
+  size_t tls_size;                    // +0x28  (not read by kern_thr_new)
+  int64_t *child_tid;                 // +0x30
+  int64_t *parent_tid;                // +0x38
+  int32_t flags;                      // +0x40  (not read by kern_thr_new)
+  int32_t pad;
+  void *rtp;                          // +0x48  rtprio (4-byte struct copied in)
+  const char *name;                   // +0x50  thread name (max 32 chars)
+  void *spare[2];                     // +0x58
 };
 
 void ps5MaybeInterposePthreadAlloc();
@@ -650,9 +654,7 @@ const char *opName(uint32_t op) {
   case 19: return "SEM_WAIT";
   case 20: return "SEM_WAKE";
   case 21: return "NWAKE_PRIVATE";
-  case 22: return "MUTEX_WAKE2";
-  case 23: return "SEM2_WAIT";
-  case 24: return "SEM2_WAKE";
+  case 22: return "CV_SIGNALTO";
   default: return "?";
   }
 }
@@ -787,18 +789,15 @@ int PS4ABI sys_umtx_op(void *ptr, int op, uint64_t val, void *a, void *b) {
   // N-way stampede on each handoff. When the queue drains to <=1 the kernel --
   // not userland -- clears CONTESTED, because libthr's contested release
   // deliberately leaves the word at CONTESTED and relies on this.
-  case 18:   // UMTX_OP_MUTEX_WAKE
-  case 22: { // UMTX_OP_MUTEX_WAKE2
+  case 18: { // UMTX_OP_MUTEX_WAKE
     auto &bk = umtxBucket(ptr);
     auto *p = static_cast<std::atomic<uint32_t> *>(ptr);
     std::unique_lock<std::mutex> lk(bk.m);
     auto &ch = bk.chan[ptr];
     uint32_t owner = p->load();
     if ((owner & ~UMUTEX_CONTESTED) != 0) {
-      // Still held. WAKE2 repairs the bit so the eventual release still traps;
-      // plain WAKE just leaves it alone.
-      if (op == 22 && ch.mutexWaiters > 0)
-        p->compare_exchange_strong(owner, owner | UMUTEX_CONTESTED);
+      // Still held: leave the contested bit alone. The holder's unlock will
+      // clear it (or leave it contested if our mutexWaiters > 1).
       return 0;
     }
     if (ch.mutexWaiters <= 1) {
@@ -1152,7 +1151,25 @@ int PS4ABI sys_umtx_op(void *ptr, int op, uint64_t val, void *a, void *b) {
     }
     return 0;
   }
+  case 22: { // UMTX_OP_CV_SIGNALTO: signal one specific waiter on ucond `ptr`.
+    // val carries the target thread's guest tid. The kernel walks the umtx
+    // queue for the ucond and releases only the entry whose tid matches. We
+    // don't track per-waiter tids, so fall back to releasing one waiter (same
+    // observable effect for the target; a stray wake on a non-target is
+    // harmless because libthr re-checks the predicate under the mutex).
+    cvTrace("CV_SIGNALTO", ptr, t_tid);
+    auto &bk = umtxBucket(ptr);
+    std::lock_guard<std::mutex> lk(bk.m);
+    auto &ch = bk.chan[ptr];
+    if (ch.waiters > ch.signals)
+      ch.signals++;
+    bk.cv.notify_all();
+    return 0;
+  }
   default: {
+    // The kernel op_table has 23 entries (0..22); anything else is EINVAL.
+    if (op < 0 || op > 22)
+      return -SysError::eINVAL;
     static std::atomic<uint32_t> seen[32]{};
     if (op >= 0 && op < 32 && seen[op].fetch_add(1) == 0)
       std::printf("[umtx] unhandled op=%d\n", op);

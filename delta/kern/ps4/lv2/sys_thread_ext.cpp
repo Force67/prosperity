@@ -21,6 +21,7 @@
 #include "cpu/cpu_backend.h"
 #include "error_table.h"
 #include "sys_thread_ext.h"
+#include "sys_thread.h"
 #include <utl/options.h>
 
 namespace {
@@ -41,11 +42,17 @@ struct sched_param64 {
 
 // FreeBSD stores a nonzero value at *state and wakes the umtx waiter the joiner
 // spins on, then tears the thread down. We must not call exit(): that would kill
-// the whole emulated process. Publishing the state word and returning lets the
-// guest thread function return so cpu::runGuestThread unwinds the host thread.
+// the whole emulated process. Publishing the state word, waking the joiner, and
+// returning lets the guest thread function return so cpu::runGuestThread unwinds
+// the host thread.
 int PS4ABI sys_thr_exit(int64_t *state) {
   if (state)
     *state = 1;
+  // The kernel calls kern_umtx_wake(*a2, 0x7FFFFFFF) here so a pthread_join
+  // blocked in UMTX_OP_WAIT on the state word is released. Without it the
+  // joiner sleeps forever.
+  if (state)
+    sys_umtx_op(state, 3 /*UMTX_OP_WAKE*/, 0x7FFFFFFF, nullptr, nullptr);
   std::printf("[thr_exit] state=%p -> terminating guest thread\n",
               (void *)state);
   // DELTA_THREXIT_TRACE: a title whose worker thread dies silently leaves the
