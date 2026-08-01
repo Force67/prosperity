@@ -77,6 +77,11 @@ int PS4ABI sys_opmc_get_hw() { return 0; }
 // but the guest stores the id and passes it back, so hand out a fixed non-zero
 // id. Logged once: if a title's allocations are actually capped by a budget we
 // granted unconditionally, that overcommit shows up here first.
+//
+// Kernel budget_create args: {char* name@0; uint32 ptype@8 (0..3);
+// SceBudgetResource* res@16; uint32 nres@24 (0..10); SceBudgetResource* resOut@32}.
+// The budget object (64 bytes) holds the name, resource array, ptype, nres, and
+// an open-count. Only a system ucred may create one (returns 78 otherwise).
 int PS4ABI sys_budget_create() {
   static std::atomic<bool> once{false};
   logOnce(once, "budget_create granted unconditionally (no enforcement)");
@@ -109,6 +114,11 @@ int PS4ABI sys_sblock_xexit() { return 0; }
 // them, so return a fixed handle and swallow trigger/delete. Logged once: a
 // title waiting on an eport event we never deliver would stall, and this is the
 // trace that explains it.
+//
+// Kernel eport object (~0x60 bytes): name (32 bytes), mtx, cv, waiter list,
+// open-count, attr. eport_trigger sets the pattern and broadcasts cv; waiters
+// wake and read the triggered pattern. Like evf/osem, named eports can be
+// shared across processes via the global name table (attr bit 0x100).
 int PS4ABI sys_eport_create() {
   static std::atomic<bool> once{false};
   logOnce(once, "eport_create returns a fake handle; events are never delivered");
@@ -140,10 +150,11 @@ int PS4ABI sys_dl_get_metadata() { return 0; }
 // 0 == retail / not in development mode.
 int PS4ABI sys_is_development_mode() { return 0; }
 
-// Same SceSelfAuthInfo (136 bytes) shape as sys_get_authinfo in sys_info.cpp,
-// reporting a non-privileged application identity.
-int PS4ABI sys_get_self_auth_info(int pid, void *out) {
-  (void)pid;
+// Reads the SceSelfAuthInfo (0x88 / 136 bytes) from the calling process's SELF
+// and copies it to `out`. The first arg is the SELF path; we don't parse SELF
+// headers, so we synthesise a non-privileged application identity instead.
+int PS4ABI sys_get_self_auth_info(const char *path, void *out) {
+  (void)path;
   if (!out)
     return 0;
   std::memset(out, 0, 136);

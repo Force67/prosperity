@@ -24,28 +24,32 @@ struct segment_info {
   uint32_t flags;
 };
 
+// SceKernelModuleInfoEx (0x1A8 / 424 bytes). The guest passes size=424 in the
+// first field and the kernel fills the rest. Segment flags: R=1, W=2, X=4, so
+// text is 5 (R|X) and data is 3 (R|W). The kernel fills exactly two segments
+// and reports seg_count=2.
 struct dynlib_info_ex {
-  size_t size;
-  char name[256];
-  int32_t handle;
-  uint16_t tls_index;
-  uint16_t pad0;
-  uintptr_t tls_init_addr;
-  uint32_t tls_init_size;
-  uint32_t tls_size;
-  uint32_t tls_offset;
-  uint32_t tls_align;
-  uintptr_t init_proc_addr;
-  uintptr_t fini_proc_addr;
-  uint64_t reserved1;
-  uint64_t reserved2;
-  uintptr_t eh_frame_hdr_addr;
-  uintptr_t eh_frame_addr;
-  uint32_t eh_frame_hdr_size;
-  uint32_t eh_frame_size;
-  segment_info segs[4];
-  uint32_t seg_count;
-  uint32_t ref_count;
+  size_t size;            // +0x000
+  char name[256];         // +0x008  module basename
+  int32_t handle;         // +0x108
+  uint16_t tls_index;     // +0x10C
+  uint16_t pad0;          // +0x10E
+  uintptr_t tls_init_addr;// +0x110
+  uint32_t tls_init_size; // +0x118
+  uint32_t tls_size;      // +0x11C
+  uint32_t tls_offset;    // +0x120
+  uint32_t tls_align;     // +0x124
+  uintptr_t init_proc_addr;// +0x128
+  uintptr_t fini_proc_addr;// +0x130
+  uint64_t reserved1;     // +0x138
+  uint64_t reserved2;     // +0x140
+  uintptr_t eh_frame_hdr_addr; // +0x148
+  uintptr_t eh_frame_addr;     // +0x150
+  uint32_t eh_frame_hdr_size;  // +0x158
+  uint32_t eh_frame_size;      // +0x15C
+  segment_info segs[4];        // +0x160
+  uint32_t seg_count;          // +0x1A0
+  uint32_t ref_count;          // +0x1A4
 };
 
 struct dynlib_info {

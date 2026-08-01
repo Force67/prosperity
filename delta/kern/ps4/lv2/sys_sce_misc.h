@@ -56,7 +56,7 @@ int PS4ABI sys_sandbox_path(char *out, size_t *len, void *, void *);
 int PS4ABI sys_rdup();
 int PS4ABI sys_dl_get_metadata();
 int PS4ABI sys_is_development_mode();
-int PS4ABI sys_get_self_auth_info(int pid, void *out);
+int PS4ABI sys_get_self_auth_info(const char *path, void *out);
 int PS4ABI sys_get_paging_stats_of_all_threads();
 int PS4ABI sys_get_paging_stats_of_all_objects();
 int PS4ABI sys_get_resident_count();

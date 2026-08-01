@@ -58,11 +58,14 @@ int PS4ABI sys_sigaction(int sig, const void *act, void *oact) {
   return 0;
 }
 
-/*does not belong here*/
+// sys_namedobj_create (557): registers a name -> data-pointer pair in the
+// process's id table. The kernel allocates a 24-byte object {char* name@0;
+// void* data@8; uint32 flags@16}, copies the name (max 32 chars), and stores
+// the caller's data pointer. The flags field is ORed with 0x1000 (the
+// namedobj type tag for the id table). Returns the allocated id in rax.
+// We return 0 (success, id 0): the only known caller (debug instrumentation)
+// ignores the id.
 int PS4ABI sys_namedobj_create(const char *name, void *arg2, uint32_t arg3) {
-  // Registers a debug name for a kernel object. Success is 0 -- returning the
-  // old fake counter read back as an errno (EPERM on the 2nd call) and aborted
-  // libc init. The actual id is reported through other channels we don't model.
   (void)name;
   (void)arg2;
   (void)arg3;
@@ -171,12 +174,14 @@ int PS4ABI sys_regmgr_call(uint32_t op, uint32_t id, void *result, void *value,
   return 0x800D0203;
 }
 
-// sys_randomized_path (602): libkernel's sceKernelGetRandomizedPath. arg0 is an
-// optional path to *set* (NULL = query the current one); arg1 is the output
-// buffer and arg2 an in/out length. The kernel hands back the per-title
-// randomized sandbox component used under /system_data. We have no such mapping,
-// so report an empty path (len 0) with success; the guest treats that as "no
-// randomized prefix" and falls through to the plain sandbox path.
+// sys_randomized_path (602): libkernel's sceKernelGetRandomizedPath. Args are a
+// struct {char* set_path@0; char* out@8; size_t* out_len@16}. If set_path is
+// non-null the kernel stores it as the new randomized prefix (requires priv
+// 0x2AF); the current prefix (up to 256 bytes) is always copied to out/out_len.
+// The prefix is the per-title randomized sandbox component used under
+// /system_data. We have no such mapping, so report an empty path (len 0) with
+// success; the guest treats that as "no randomized prefix" and falls through to
+// the plain sandbox path.
 int PS4ABI sys_randomized_path(const char *set_path, char *out,
                                size_t *out_len) {
   (void)set_path;
@@ -188,9 +193,11 @@ int PS4ABI sys_randomized_path(const char *set_path, char *out,
   return 0;
 }
 
-// sys_workaround8849 (605): a Sony libkernel-internal no-op kept for an old
-// firmware errata (CXX runtime guard). The real kernel just validates its args
-// and returns success; nothing observable comes back.
+// sys_workaround8849 (605): a restricted registry-int getter. The kernel reads
+// a uint32 regmgr key from the args struct, validates it against a whitelist of
+// four fixed keys (0x19780100, 0x78026300, 0x78028300, 0x78028A00), calls
+// sceRegMgrGetInt, and returns the value. Anything else is EINVAL. We have no
+// registry, so return 0 (the value an unprovisioned console would have).
 int PS4ABI sys_workaround8849() { return 0; }
 
 // sys_blockpool_open (653): allocates a "block pool" used by the flexible-memory

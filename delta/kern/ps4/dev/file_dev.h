@@ -15,26 +15,29 @@
 #include "device.h"
 
 namespace krnl {
-// FreeBSD-style stat the PS4 returns (SceKernelStat, 0x78 bytes). We only fill
-// the fields games actually look at (mode + size); the rest stays zeroed.
+// FreeBSD-style stat the PS4 returns (SceKernelStat, 0x78 / 120 bytes).
+// The kernel fills this from vn_stat and copies it out. Without privilege 0x2AC
+// the kernel zeroes st_dev, st_ino, st_nlink, st_uid, st_gid, st_rdev, st_flags,
+// st_gen, st_lspare and st_birthtim. We zero the whole struct first, so every
+// non-filled field is always 0.
 struct SceKernelStat {
-  uint32_t st_dev;
-  uint32_t st_ino;
-  uint16_t st_mode;
-  uint16_t st_nlink;
-  uint32_t st_uid;
-  uint32_t st_gid;
-  uint32_t st_rdev;
-  int64_t st_atim[2];
-  int64_t st_mtim[2];
-  int64_t st_ctim[2];
-  int64_t st_size;
-  int64_t st_blocks;
-  uint32_t st_blksize;
-  uint32_t st_flags;
-  uint32_t st_gen;
-  int32_t st_lspare;
-  int64_t st_birthtim[2];
+  uint32_t st_dev;          // +0x00
+  uint32_t st_ino;          // +0x04
+  uint16_t st_mode;         // +0x08
+  uint16_t st_nlink;        // +0x0A
+  uint32_t st_uid;          // +0x0C
+  uint32_t st_gid;          // +0x10
+  uint32_t st_rdev;         // +0x14
+  int64_t st_atim[2];       // +0x18 atime sec/nsec
+  int64_t st_mtim[2];       // +0x28 mtime sec/nsec
+  int64_t st_ctim[2];       // +0x38 ctime sec/nsec
+  int64_t st_size;          // +0x48
+  int64_t st_blocks;        // +0x50
+  uint32_t st_blksize;      // +0x58
+  uint32_t st_flags;        // +0x5C
+  uint32_t st_gen;          // +0x60
+  int32_t st_lspare;        // +0x64
+  int64_t st_birthtim[2];   // +0x68 btime sec/nsec
 };
 static_assert(sizeof(SceKernelStat) == 0x78, "SceKernelStat layout");
 

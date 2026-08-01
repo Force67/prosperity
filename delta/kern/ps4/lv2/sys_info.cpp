@@ -106,9 +106,12 @@ int PS4ABI sys_cpuset_getaffinity(int /*level*/, int /*which*/, int64_t /*id*/,
 }
 
 int PS4ABI sys_get_authinfo(int pid, void *infoOut) {
-  // SceSelfAuthInfo (136 bytes). Hand back a plausible non-privileged game
-  // identity: auth_id of a normal application plus a permissive capability
-  // mask. Returning 1 here (the old behaviour) reads as EPERM and aborts libc.
+  // SceSelfAuthInfo is 0x88 (136) bytes, copied verbatim from the process
+  // ucred (+88). Without privilege 0x2AE the kernel masks the buffer to just
+  // the top three bits of qword[1]; a privileged caller gets the full block.
+  // We hand back a plausible non-privileged game identity: auth_id of a normal
+  // application plus a permissive capability mask. Returning 1 here (the old
+  // behaviour) reads as EPERM and aborts libc.
   std::memset(infoOut, 0, 136);
   auto *p = reinterpret_cast<uint64_t *>(infoOut);
   p[0] = 0x3100000000000001ull; // auth_id: regular application
@@ -119,16 +122,31 @@ int PS4ABI sys_get_authinfo(int pid, void *infoOut) {
 
 /*maybe should be moved to a proc file*/
 int PS4ABI sys_get_proc_type_info(void *oinfo) {
-  struct dargs {
-    size_t size;
-    uint32_t ptype;
-    uint32_t pflags;
+  // Kernel output is a fixed 16-byte block:
+  //   +0x00  uint64  reserved      (always zeroed)
+  //   +0x08  int32   ptype         (budget process type, 0..3)
+  //   +0x0c  uint8   cptype        (capability/process-class flags)
+  //   +0x0d  uint8[3] padding
+  // cptype bits:
+  //   0x01 JIT compiler, 0x02 JIT application, 0x04 video player,
+  //   0x08 disk-player UI, 0x10 use-video-service capability,
+  //   0x20 webcore, 0x40 has sce program attribute.
+  // A game SELF is a JIT application (0x02) carrying the sce program attribute
+  // (0x40), so cptype = 0x42. Without the JIT-app bit libkernel's process-init
+  // path skips the JIT shm setup it later expects to find.
+  struct procTypeInfo {
+    uint64_t reserved;
+    int32_t ptype;
+    uint8_t cptype;
+    uint8_t pad[3];
   };
+  static_assert(sizeof(procTypeInfo) == 16);
 
-  auto *args = reinterpret_cast<dargs *>(oinfo);
-  args->size = sizeof(dargs);
-  args->ptype = sys_budget_get_ptype();
-  args->pflags = 0; // TODO: handle flag 0x40 (sceprogramattr)
+  auto *out = reinterpret_cast<procTypeInfo *>(oinfo);
+  out->reserved = 0;
+  out->ptype = sys_budget_get_ptype();
+  out->cptype = 0x42;  // JIT application | sce program attribute
+  out->pad[0] = out->pad[1] = out->pad[2] = 0;
   return 0;
 }
 
