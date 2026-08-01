@@ -3,22 +3,30 @@
 // ~23fps, every shader translates, no draw declines. Assets stream fine
 // (/app0/texture.qar and /app0/chunk1.psarc read correctly through the PFS).
 //
-// Frame is still black (2026-08-01). What is known:
-//  - The G-buffer pass is bound and rasterises real geometry (3 MRTs at
-//    1920x1080, draws of a few thousand indices) yet every colour target reads
-//    back exactly zero, HDR ones included.
-//  - THE LEAD: its vertex buffer is all zeros. DELTA_GPU_EUDTRACE shows all
-//    twelve of the shader's MTBUF fetches resolving to ONE V# (inline user data
-//    s[4:7], base in the 0x814c1 pool, stride 16, 192 records) with a zero
-//    instruction offset, and that buffer's first bytes are 00. Degenerate
-//    geometry explains every empty colour target. Either the twelve fetches are
-//    not twelve attributes and the direct-fetch plan is wrong for this shader,
-//    or the game fills that buffer by a route we do not see. Note constant
-//    buffers in the SAME 0x814c1 pool hold correct view matrices, so it is not
-//    a whole-mapping failure.
+// THE SCENE RENDERS (2026-08-01). The hallway is present in the G-buffer once
+// the vertex layout comes from the fetch shader rather than from buffer loads
+// in the shader body. Present it with
+//   +DELTA_GPU_PRESENT_ADDR=0x8143800000
+// to see it. The exposure chain works off it too.
+//
+// The presented frame is still black, and exactly one thing causes that: the
+// 16x16x16 colour-grading LUT volume. A pass bakes it into a 256x16 strip and
+// the tonemap samples that strip, so the strip's contents ARE the screen: when
+// the volume bound a white fallback the screen was solid white, now that it
+// binds real memory the screen is solid black. That memory (16 KB, tiling 19)
+// is zero for the entire run: DELTA_GPU_TEXWATCH scans the whole surface and
+// reports first_nz=-1 every frame. Nothing we emulate writes it: no compute
+// resource, no CP DMA, no render target, and the title makes no direct-memory
+// mapping calls at all. Asset IO is fine, so this is about where that one
+// buffer's contents come from.
+//
+// Known gap found on the way, not yet fixed: a compute dispatch copies a
+// 2048x1024 R8 image and we have no 8-bit single-channel format in the compute
+// image list, so it zero-fills (DELTA_GPU_CSRES names it). Adding dfmt 1
+// naively crashes, so the staging path needs care.
+//
 //  - Not the cause: depth test, face culling, the colour write masks, the
-//    render-target size aliasing, MTBUF vs MUBUF direct-fetch selection
-//    (tested both ways), missing assets, or shader translation.
+//    render-target size aliasing, missing assets, or shader translation.
 //  - The colour-grading LUT (a 16x16x16 volume) gates everything downstream of
 //    the tonemap: whatever it samples becomes the whole screen. Its guest
 //    memory stays zero for the entire run, and nothing we emulate writes it.
