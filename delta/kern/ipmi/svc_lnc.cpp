@@ -35,9 +35,12 @@ struct Lnc : Service {
   void invoke(Invocation &inv) override {
     switch (inv.method()) {
     case kLncGetAppStatus: {
-      // No app id: nothing we emulate keys off it, and inventing one would give
-      // a caller a handle the daemon cannot honour later.
-      const uint32_t status[3] = {0, 0, kAppRunning};
+      // libSceSystemService caches the appId from this reply and compares it
+      // against the SceShellCoreUtilAppFocus/CtrlFocus flag patterns; a
+      // mismatch reads as "another app has focus" and GetStatus reports
+      // isInBackgroundExecution, which titles answer by dropping pad input
+      // (Tomb Raider: DE stops calling scePadReadState forever).
+      const uint32_t status[3] = {kForegroundAppId, 0, kAppRunning};
       inv.reply(0, status, sizeof(status));
       break;
     }
