@@ -70,6 +70,10 @@ DELTA_OPTION(bool, kVattrDump, "DELTA_GPU_VATTRDUMP", false);
 }  // namespace
 
 namespace gpu {
+namespace rhi {
+uint64_t g_ns_dcb = 0;
+uint32_t g_dcb_n = 0;
+}  // namespace rhi
 namespace {
 
 std::mutex g_mtx;
@@ -2157,9 +2161,6 @@ void HandleDispatch(const uint32_t* body, uint32_t count) {
                  ci.num_res);
 }
 
-uint64_t g_ns_dcb = 0;
-uint32_t g_dcb_n = 0;
-
 namespace {
 // Wall time of one command-buffer walk, including the wait for the lock: a
 // second submit thread blocked behind the first is time the guest is stalled on
@@ -2167,10 +2168,10 @@ namespace {
 struct ScopeDcb {
   std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
   ~ScopeDcb() {
-    g_ns_dcb += std::chrono::duration_cast<std::chrono::nanoseconds>(
+    rhi::g_ns_dcb += std::chrono::duration_cast<std::chrono::nanoseconds>(
                     std::chrono::steady_clock::now() - t0)
                     .count();
-    g_dcb_n++;
+    rhi::g_dcb_n++;
   }
 };
 }  // namespace

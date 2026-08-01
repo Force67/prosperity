@@ -268,4 +268,10 @@ struct ComputeInfo {
   uint32_t num_res = 0;
 };
 
+// How long a command processor spent walking a submitted command buffer, and
+// how many it walked. The console-specific processors write these and the
+// renderer's per-frame report reads them, so neither has to include the other.
+extern uint64_t g_ns_dcb;
+extern uint32_t g_dcb_n;
+
 }  // namespace gpu::rhi

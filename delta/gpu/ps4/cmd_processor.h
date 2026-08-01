@@ -16,8 +16,6 @@ namespace gpu {
 // parts the renderer times), and the number of submissions, since the last FPS
 // report reset them. Separates "the guest is busy" from "we are busy running
 // its command stream".
-extern uint64_t g_ns_dcb;
-extern uint32_t g_dcb_n;
 
 // Select the PS4 shader hardware profile for subsequent submissions. The
 // composition root calls this after combining configured Neo hardware with the

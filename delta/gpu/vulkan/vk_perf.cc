@@ -2,12 +2,12 @@
  * PS4Delta : PS4/PS5 emulation and research project
  */
 
+#include "gpu/rhi/command.h"
 #include "gpu/vulkan/vk_perf.h"
 
 #include "gfx/gfx.h"
 #include "gfx/overlay.h"
 #include "gpu/gcn/gcn_translate.h"
-#include "gpu/ps4/cmd_processor.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -361,7 +361,7 @@ void ReportFps() {
         g_ns_cs_gpu / f / 1e6, g_ns_cs_out / f / 1e6, g_cs_stage_n / f,
         g_cs_stage_bytes / f / 1e6, g_cs_flush_n / f,
         gcn::g_ns_recomp / f / 1e6, gcn::g_recomp_n / f,
-        g_ns_dcb / f / 1e6, g_dcb_n / f);
+        rhi::g_ns_dcb / f / 1e6, rhi::g_dcb_n / f);
     // Feed the on-screen overlay gauge (gpuMs = GPU end/present-dominated
     // cost).
     gfx::overlaySetPerf(float(frames / dt), float(g_ns_end / f / 1e6),
@@ -379,8 +379,8 @@ void ReportFps() {
     g_cs_stage_bytes = 0;
     gcn::g_ns_recomp = 0;
     gcn::g_recomp_n = 0;
-    g_ns_dcb = 0;
-    g_dcb_n = 0;
+    rhi::g_ns_dcb = 0;
+    rhi::g_dcb_n = 0;
   }
 }
 
