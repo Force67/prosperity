@@ -14,5 +14,10 @@ public:
   bool init(const char *, uint32_t, uint32_t) override;
   int32_t ioctl(uint32_t command, void *args) override;
   uint8_t *map(void *, size_t, uint32_t, uint32_t, size_t) override;
+
+  // Kernel /dev/gc maps GPU-visible memory at a fixed base+offset; mirror that
+  // with a lazily-allocated pool (identity range, CP-renderable).
+  uint8_t *poolBase = nullptr;
+  uint64_t poolSize = 0;
 };
 }

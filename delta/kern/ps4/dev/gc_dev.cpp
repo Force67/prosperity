@@ -2,6 +2,7 @@
 // Copyright (C) Force67 2019
 
 #include <base.h>
+#include <mutex>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -98,7 +99,7 @@ static void printGuestCaller() {
   }
 }
 
-/* gc_ioctl */
+/* ioctl dispatch */
 int32_t gcDevice::ioctl(uint32_t cmd, void *data) {
   // Graphics command submission (the LLE path: real libSceGnmDriver.sprx). The
   // arg's descriptor array is an array of 16-byte PM4 INDIRECT_BUFFER packets;
@@ -115,13 +116,15 @@ int32_t gcDevice::ioctl(uint32_t cmd, void *data) {
     prosperity_gc_submit(reinterpret_cast<const void *>(a->descPtr), a->count);
     return 0;
   }
-  case 0xC018810A: {  // gc submit (variant): {u32 a0, u32 count, u32 a2, _, u64 ptr}
+  case 0xC018810A: {  // gc submit (cross-process variant): {u32 pid, _, u32 count,
+                      // _, u64 descPtr}. Kernel (11.00): pfind(arg+0),
+                      // count at +0x08, descPtr at +0x10.
     struct argl {
-      uint32_t a0;
-      uint32_t count;
-      uint32_t a2;
-      uint32_t pad;
-      uint64_t descPtr;
+      uint32_t pid;  // +0x00: submitter pid (kernel pfind()s it)
+      uint32_t pad4;
+      uint32_t count;  // +0x08
+      uint32_t padC;
+      uint64_t descPtr;  // +0x10
     };
     auto *a = static_cast<argl *>(data);
     prosperity_gc_submit(reinterpret_cast<const void *>(a->descPtr), a->count);
@@ -164,26 +167,49 @@ int32_t gcDevice::ioctl(uint32_t cmd, void *data) {
     noteFlip();  // advance the flip count + post the display event for pacing
     return 0;
   }
-  case 0xC0088101:  // "switch buffer": ring double-buffer handoff. The driver
-                    // issues this per submit (60+/frame) and ignores the args;
-                    // our submit is synchronous so there is no ring to switch.
-                    // Handle it here, silently -- it was falling through to the
-                    // UNHANDLED logger below, and an unbuffered printf per submit
-                    // (stdbuf -e0) throttled the whole render loop to ~1 fps.
+  case 0xC0088101:  // kernel: wait-suspend-done. Suspend/resume handshake; our
+                    // GPU never suspends, so "done" is always true. (Was
+                    // mislabeled "switch buffer" -- gc_switch_buffer_internal is
+                    // unreachable in the 11.00 kernel's dispatch.)
+  case 0xC0048117:  // kernel: wait-suspend-done as well (same handler).
     return 0;
-  case 0xC0048116: {  // "submit done?" status word; hot (polled per submit).
+  case 0xC0048116: {  // kernel: submit-completion signal. Returns 0
+                      // when no submit is in flight, EBUSY (16) otherwise; hot
+                      // (polled per submit). Our submits are synchronous, so
+                      // "done" is always true; the kernel never touches the arg
+                      // slot, we zero it as the benign idle answer.
     if (data)
       *static_cast<uint32_t *>(data) = 0;
     return 0;
   }
-  case 0xC0048114: {  // GPU status poll. The GnmDriver wrapper (libSceGnmDriver
-                      // +0x5fd0) zeroes the 4-byte slot, issues this, and returns
-                      // (ret == 0) -- it never reads the output back, so only the
-                      // success return matters. A title's render thread polls it
-                      // in a tight loop; handle it here (return success, zero the
-                      // slot) so it stops falling through to the UNHANDLED logger.
+  case 0xC0048114: {  // kernel: GRBM poll -- spins on the busy regs (0x1413/0x1414)
+                      // and returns 0 WITHOUT writing the arg slot. The GnmDriver
+                      // wrapper (libSceGnmDriver +0x5fd0) zeroes the slot itself
+                      // and never reads it back, so only the success return
+                      // matters. A title's render thread polls it in a tight loop;
+                      // handle it here (return success, zero the slot) so it stops
+                      // falling through to the UNHANDLED logger.
     if (data)
       *static_cast<uint32_t *>(data) = 0;
+    return 0;
+  }
+  case 0xC0048113:  // kernel: query softc->submit_count into arg slot (returns 0).
+  case 0xC0048115:  // kernel: query softc->submit_idle into arg slot, then clears
+                    // it. Both are query hot-paths; no async submit state to
+                    // report, so the zeroed buffer is the "nothing pending" answer.
+    if (data)
+      *static_cast<uint32_t *>(data) = 0;
+    return 0;
+  case 0xC0088109: {  // kernel: register a suspend-done notify pointer: stores the
+                      // u64 in arg into cdevpriv and copyout's a 4-byte zero to
+                      // *arg (the "no suspend pending" flag). No suspend support,
+                      // so zero the pointed-to flag if it is a mapped guest VA.
+    uint64_t ptr = static_cast<uint64_t *>(data) ? *static_cast<uint64_t *>(data) : 0;
+    if (ptr) {
+      auto *pr = proc::getActive();
+      if (pr && pr->getVma().get(reinterpret_cast<uint8_t *>(ptr)))
+        *reinterpret_cast<uint32_t *>(ptr) = 0;
+    }
     return 0;
   }
   }
@@ -191,35 +217,34 @@ int32_t gcDevice::ioctl(uint32_t cmd, void *data) {
   printGuestCaller();
   switch (cmd) {
   case 0xC00C8110: {
-
+    // kernel: spins until the GRBM busy reg (0x2004) clears, then writes regs
+    // 0x2232/0x2233 from arg[0]/arg[1] (a compute kick). Our GPU is synchronous
+    // (never busy) and register writes are no-ops, so just accept.
     struct argl {
       uint32_t unknown_0;
       uint32_t unknown_4;
       uint32_t unknown_8;
     };
     auto args = reinterpret_cast<argl *>(data);
-    printf("gc ioctl(%x): %x, %x, %x\n", cmd, args->unknown_0, args->unknown_4,
-           args->unknown_8);
+    (void)args;
     return 0;
   }
   case 0xC010810B: {
+    // kernel: redundant-CU query -> {se0, se0, se1, se1}. The values come
+    // from a GPU PCI config read (reg 0xBC, low16>>6 and high16&0x3FF); real
+    // consoles report 0 redundant CUs. The old 1024 placeholder produced se0=16,
+    // which is impossible (an SE has 9 CUs) and would skew the driver's CU count.
     struct argl {
       uint32_t cumask0;
       uint32_t cumask1;
       uint32_t cumask2;
       uint32_t cumask3;
     };
-
-    /*idk what the proper value would be*/
-    auto se0 = (uint16_t)1024 >> 6;
-    auto se1 = (1024 >> 16) & 0x3FF;
-
     auto args = reinterpret_cast<argl *>(data);
-    args->cumask0 = se0;
-    args->cumask1 = se0;
-    args->cumask2 = se1;
-    args->cumask3 = se1;
-
+    args->cumask0 = 0;
+    args->cumask1 = 0;
+    args->cumask2 = 0;
+    args->cumask3 = 0;
     return 0;
   }
   case 0xC008811B: {
@@ -249,10 +274,29 @@ int32_t gcDevice::ioctl(uint32_t cmd, void *data) {
   }
   case 0xC00C810E: // sceGnmUnmapComputeQueue
     return 0;
+  case 0xC0108108: {
+    // kernel: VA->GPU-physical translate, arg[0] -> arg[1]. Used for GPU-visible buffers. Guest GPU space is identity-mapped to host,
+    // so the translation is the input VA itself.
+    struct argl {
+      uint64_t vaddr;
+      uint64_t phys;
+    };
+    auto args = static_cast<argl *>(data);
+    args->phys = args->vaddr;
+    return 0;
+  }
   case 0xC010811C: // sceGnmDingDong: kicks a mapped compute queue. No-op is
                    // safe for boot but drops async-compute work; wire into the
                    // CP if a title depends on compute results.
     return 0;
+  case 0xC0088111: {  // kernel: coredump dbg-reg dump. Reads arg[0] (u32 reason
+                      // tag), prints the SE/SH status regs (0x2002/0x2004/0x21a1/
+                      // 0x208e/0x208f) and dumps the user debug registers.
+                      // Debug-only, never writes back; log the tag and succeed.
+    if (kGcTrace && data)
+      printf("[gc] coredump reason=%#x\n", *static_cast<uint32_t *>(data));
+    return 0;
+  }
   case 0xC0848119: {
     struct argl {
       uint32_t unknown_00;
@@ -294,10 +338,31 @@ int32_t gcDevice::ioctl(uint32_t cmd, void *data) {
   return 0;
 }
 
-// PS4 /dev/gc has no device-backed mapping; fall back to the anonymous mmap path
-// in sys_mmap (returns -1). (The PS5 AGC ring/fifo memfd mapping lives in
-// kern/ps5/dev/gc_dev.cpp.)
-uint8_t *gcDevice::map(void *, size_t, uint32_t, uint32_t, size_t) {
+// Kernel (11.00) maps GPU-visible device memory at a fixed base + offset for
+// offsets under a size cap; on retail those fields are never initialized, so
+// every real mmap fails. Back the mapping with a lazily allocated GPU-visible
+// pool instead: allocLowGuest hands out [512 GiB, 2^40), inside the identity
+// range the CP renders into, so a title that maps /dev/gc gets real, CP-usable
+// memory. Out-of-range offsets fall back to the anonymous mmap path (-1).
+uint8_t *gcDevice::map(void *, size_t size, uint32_t, uint32_t, size_t offset) {
+  constexpr uint64_t kPoolSize = 256ull * 1024 * 1024;
+  // The pool belongs to the device, not to the descriptor: sys_open news a
+  // gcDevice per open, so a per-instance pool would hand two openers different
+  // memory for the same offset. sys_mmap holds no lock across device::map
+  // either, so the lazy creation needs its own.
+  static std::mutex poolLock;
+  static uint8_t *pool = nullptr;
+  std::lock_guard<std::mutex> lk(poolLock);
+  if (!pool) {
+    pool = allocLowGuest(kPoolSize);
+    if (!pool)
+      return reinterpret_cast<uint8_t *>(-1);
+  }
+  poolBase = pool;
+  poolSize = kPoolSize;
+  // The guest picks the offset, so bound each side: offset + size wraps.
+  if (offset < kPoolSize && size <= kPoolSize - offset)
+    return pool + offset;
   return reinterpret_cast<uint8_t *>(-1);
 }
 } // namespace krnl
