@@ -1,36 +1,55 @@
 // Grand Theft Auto: San Andreas - The Definitive Edition (CUSA26619, PS4)
 // UE4 / Gameface, native x86 backend.
 //
-// PSN BRING-UP DONE (2026-08-01). The title calls
-// sce::Toolkit::NP::V2::Interface::initialize during engine init and treats any
-// failure as LowLevelFatalError "PSN: Failed to initialize the np toolkit",
-// which aborts the boot. It now returns SCE_OK. Four things were in the way,
-// each of which only became visible once the one before it was fixed:
+// BOOTS INTO THE RENDER LOOP (2026-08-01). The title runs UE4 engine init to
+// completion, brings up its RHI, and presents: ~356 draws/frame into a 1680x948
+// colour target plus 10-24 compute dispatches. Four runs in a row fault-free.
 //
+// Two things are wrong and neither is a boot problem any more:
+//
+//  1. ~0.1-0.3 fps. Frame time is nearly all compute. The scene targets are
+//     R11G11B10F (dfmt=6 nfmt=7), which the CS path stages at 16 bytes/texel
+//     against a 4-byte image, so cs_alias_shape_matches rejects the live image
+//     and every dispatch round-trips ~13.6 MB through guest memory -- 9 to 24
+//     times a frame, ~95 ms of it. Using the live image needs a real format
+//     conversion on the bridge copy, not a relaxed match: a plain
+//     vkCmdCopyBufferToImage cannot repack RGBA32F into R11G11B10F. (The
+//     descriptor also runs a few rows taller than the image, 948 vs 945, which
+//     is just tile alignment and is harmless once the element sizes agree.)
+//  2. The presented frame is wrong: frame 0 is a full-screen debug gradient and
+//     later frames come out solid white, while the game's own targets are being
+//     drawn into. Same family as the black-frame work on other titles; start
+//     from +DELTA_GPU_PRESENT_ADDR=0x2012800000 (the 1680x945 main colour
+//     target) to see what the draws actually produced.
+//
+// PSN BRING-UP (done). The title calls
+// sce::Toolkit::NP::V2::Interface::initialize during engine init and treats any
+// failure as LowLevelFatalError "PSN: Failed to initialize the np toolkit".
+// Four gates, each only visible once the one before it cleared:
 //   1. regmgr op 27 (non-system get-bin) was unimplemented, so libSceNpCommon
 //      could not read the 17-byte per-console blob it wants during NpAsm
-//      resource-context setup and the whole NP stack failed to start.
-//   2. sceSysmoduleLoadModule(0x19) is libSceNet, which we reported as absent.
-//      The title bails on a negative return here.
+//      resource-context setup, and the NP stack never started.
+//   2. sceSysmoduleLoadModule(0x19) is libSceNet, which we reported absent.
 //   3. libSceNpWebApi's initialize reads the LNC app state and refuses to come
 //      up unless it is 4 or 5; nothing answered "SceLncService".
 //   4. libSceNetCtlForNpToolkit / libSceUserServiceForNpToolkit are second
-//      entry-point sets into .sprx files we already HLE, so they were reading an
-//      "initialized" flag the HLE never sets and returning NOT_INITIALIZED.
-//
-// Boot now reaches video playback and faults in libSceAvPlayer+0x3913 (deref of
-// 1) right after an unimplemented syscall returns 0. Seven of the 22
-// libSceAvPlayer NIDs the eboot imports have no HLE override, so those calls run
-// the real .sprx, which needs libSceAvPlayerStreaming and the AJM decoders.
+//      entry-point sets into .sprx files we already HLE, so they read an
+//      "initialized" flag the HLE never sets.
+// Then libSceAvPlayer: 7 of the 22 NIDs the eboot imports had no HLE override,
+// so those ran the real .sprx, which opens each with `mov rdi,[rdi]` on the
+// sentinel handle our Init hands out and faults.
 //
 // The 2026-07-31 note about a UE4 CPU-pool OOM ("Failed to allocate virtual
-// address space (Type: CPU, Size: 2140667904)", ~6 GB budget) is from a run that
-// got past this gate a different way; expect it again once the movie player is
-// dealt with.
+// address space (Type: CPU, Size: 2140667904)", ~6 GB budget) has NOT recurred
+// since; that run reached asset streaming down a different path.
+//
+// Still unhandled and worth a look if threading looks wrong: umtx op 23
+// (SEM2_WAIT) falls through to the "success" arm. Ops 12/13/14 (rwlocks) were
+// in the same state and were the cause of the intermittent null-deref crashes.
 
-// The stack-trace capture UE4 runs while building its fatal-error report walks
-// the frame-pointer chain and derefs a null saved-rbp. Guard it so the fatal
-// path reports instead of faulting first.
+// The stack-trace capture UE4 runs while building a fatal-error report walks the
+// frame-pointer chain and derefs a null saved-rbp, so the fatal path faults
+// before it can print. Guard it whenever you want to see the real error.
 // +DELTA_GUEST_NULLGUARD=1c7be95:rax:4
 
 // Which sub-call of the NP init chain returns the error the title bails on.
