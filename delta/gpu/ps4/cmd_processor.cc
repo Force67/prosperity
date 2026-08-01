@@ -81,7 +81,11 @@ bool g_frame_active = false;
 uint32_t g_presented_frames = 0;
 
 struct ShaderKey {
-  uint64_t vs = 0, ps = 0, fetch = 0;
+  uint64_t vs = 0, ps = 0;
+  // The fetch shader by CONTENT, not by address: titles that generate one per
+  // draw into scratch memory (Tomb Raider does) would otherwise miss the
+  // recompile cache on every single draw.
+  uint64_t fetch = 0;
   uint32_t ps_input_ena = 0;
   // Which PS samplers read a volume image. Unlike the 2D-array case, whose DA
   // bit lives in the instruction, a 3D descriptor is indistinguishable in the
@@ -747,7 +751,8 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
           sh_cache;
       const bool neo = gcn::DefaultIsaMode() == gcn::IsaMode::kNeo;
       const uint32_t ps_input_ena = g_regs[mmSPI_PS_INPUT_ENA];
-      ShaderKey key{vs_a, ps_a, fetch, ps_input_ena, tex_3d_mask, neo};
+      ShaderKey key{vs_a, ps_a, gcn::CachedCodeHash(fetch, 64), ps_input_ena,
+                    tex_3d_mask, neo};
       auto it = sh_cache.find(key);
       if (it == sh_cache.end())
         it = sh_cache
@@ -2152,6 +2157,24 @@ void HandleDispatch(const uint32_t* body, uint32_t count) {
                  ci.num_res);
 }
 
+uint64_t g_ns_dcb = 0;
+uint32_t g_dcb_n = 0;
+
+namespace {
+// Wall time of one command-buffer walk, including the wait for the lock: a
+// second submit thread blocked behind the first is time the guest is stalled on
+// us either way.
+struct ScopeDcb {
+  std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+  ~ScopeDcb() {
+    g_ns_dcb += std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - t0)
+                    .count();
+    g_dcb_n++;
+  }
+};
+}  // namespace
+
 // Walk one DCB (DE stream), issuing draws/dispatches and recursing into any
 // chained IT_INDIRECT_BUFFER at `depth`. Returns the walk position (dwords
 // consumed) so the top-level caller can report how far it got.
@@ -2444,6 +2467,7 @@ static uint32_t WalkDcb(const uint32_t* p, uint32_t words, uint32_t depth,
 void SubmitDcb(const void* dcb, uint32_t size_bytes) {
   if (!dcb || size_bytes < 4)
     return;
+  ScopeDcb _dcb;
   std::lock_guard<std::mutex> lk(g_mtx);
   if (!g_vk_tried) {
     g_vk_tried = true;

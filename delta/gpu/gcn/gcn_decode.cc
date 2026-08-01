@@ -471,4 +471,43 @@ std::shared_ptr<const Program> CachedProgram(uint64_t addr,
   return program;
 }
 
+uint64_t CachedCodeHash(uint64_t addr, uint32_t max_dwords) {
+  if (!addr)
+    return 0;
+  struct Entry {
+    uint64_t hash = 0;
+    uint64_t generation = 0;
+  };
+  static std::unordered_map<uint64_t, Entry> cache;
+
+  auto it = cache.find(addr);
+  if (it != cache.end() && it->second.generation == g_prog_cache_generation)
+    return it->second.hash;
+
+  const auto* code = reinterpret_cast<const uint32_t*>(addr);
+  uint32_t len = CodeLength(code, max_dwords);
+  if (!len) {
+    // No footer: hash up to the terminator instead of a fixed window, or the
+    // bytes that happen to follow the shader make every instance of the same
+    // code hash differently.
+    const auto program = CachedProgram(addr, max_dwords);
+    len = max_dwords;
+    for (const Inst& inst : *program) {
+      const bool ends =
+          (inst.enc == Enc::kSopp && inst.opcode == 0x01) ||  // s_endpgm
+          (inst.enc == Enc::kSop1 &&
+           (inst.opcode == 0x20 || inst.opcode == 0x21));  // s_setpc/s_swappc
+      if (ends) {
+        len = inst.pc + inst.size;
+        break;
+      }
+    }
+  }
+  const uint64_t hash = HashCode(code, len);
+  if (cache.size() > 4096)
+    cache.clear();  // unbounded-growth backstop
+  cache[addr] = {hash, g_prog_cache_generation};
+  return hash;
+}
+
 }  // namespace gpu::gcn

@@ -12,7 +12,20 @@
 #include "gpu/gcn/gcn_disasm.h"
 #include "gpu/gcn/spirv/gcn_spirv.h"
 
+#include <chrono>
+
 namespace gpu::gcn {
+
+uint64_t g_ns_recomp = 0;
+uint32_t g_recomp_n = 0;
+
+namespace {
+uint64_t NowNs() {
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
+}  // namespace
 
 Recompiled Recompile(const uint32_t* vs_code,
                       const uint32_t* ps_code,
@@ -23,8 +36,11 @@ Recompiled Recompile(const uint32_t* vs_code,
   Recompiled r;
   if (!vs_code || !vs_user_data || !ps_user_data)
     return r;
+  const uint64_t t0 = NowNs();
   RecompileSpirv(vs_code, ps_code, vs_user_data, ps_user_data, ps_input_ena,
                  tex_3d_mask, r);
+  g_ns_recomp += NowNs() - t0;
+  g_recomp_n++;
   return r;
 }
 
@@ -38,8 +54,11 @@ RecompiledCs RecompileCompute(const uint32_t* cs_code,
   RecompiledCs r;
   if (!cs_code)
     return r;
+  const uint64_t t0 = NowNs();
   RecompileComputeSpirv(cs_code, num_thread_x, num_thread_y, num_thread_z,
                         user_sgpr, tgid_enable, lds_dwords, r);
+  g_ns_recomp += NowNs() - t0;
+  g_recomp_n++;
   return r;
 }
 
