@@ -234,6 +234,15 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
       ((uint64_t)dstate * 0x100000001b3ull);
   key = HashWord(key, d.ps4_neo ? 1 : 0);
   key = HashWord(key, d.num_vattrs);
+  // A sampler reading a volume image translates the same PS address to a
+  // different module, whose image types the pipeline layout has to match.
+  uint32_t tex_3d_mask = 0;
+  for (uint32_t i = 0; i < d.num_texs && i < kMaxTex; i++)
+    if (d.texs[i].is_3d)
+      tex_3d_mask |= 1u << i;
+  key = HashWord(key, tex_3d_mask);
+  key = HashWord(key, d.target_mask);
+  key = HashWord(key, d.shader_mask);
   for (uint32_t i = 0; i < mrt_n; i++)
     key = HashWord(key, ColorTargetFormat(d.mrt_info[i]));
   // The vertex-input layout (binding count + per-binding strides + per-attr
@@ -393,6 +402,14 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
     // white fallback was painted, which poisoned multi-pass chains (PT).
     if (!kNoMaskDiag && !(d.recomp->ps_mrt_mask & (1u << i)))
       cb_att[i].colorWriteMask = 0;
+    // Per-channel mask. A channel the PS leaves out of its export keeps its
+    // previous contents on hardware, but the recompiler has to store a whole
+    // vec4, so without this the omitted channels are overwritten with zero. A
+    // zero CB_SHADER_MASK means the register was never programmed, not that
+    // the shader exports nothing; ps_mrt_mask above already covers that case.
+    if (!kNoMaskDiag && d.shader_mask)
+      cb_att[i].colorWriteMask &= VkColorComponentFlags(
+          (d.target_mask >> (4 * i)) & (d.shader_mask >> (4 * i)) & 0xF);
   }
   // DELTA_GPU_PIPETRACE: the colour-blend state a pipeline is actually built
   // with, next to the PS's export mask -- the two have to agree or an

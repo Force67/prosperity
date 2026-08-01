@@ -18,6 +18,7 @@ bool RecompileSpirv(const uint32_t*,
                      const uint32_t*,
                      const uint32_t*,
                      uint32_t,
+                     uint32_t,
                      Recompiled&) {
   return false;
 }
@@ -391,8 +392,10 @@ void EmitInst(Translator& t, const Inst& inst, StageContext& sc) {
     case Enc::kMtbuf:
       if (sc.is_cs)
         EmitCsMtbuf(t, inst, sc);
+      else if (!sc.is_ps && sc.direct_vfetch.count(inst.pc))
+        AuditInstTag("vertex-input");
       else
-        WarnUnsupported(sc.is_ps ? "mtbuf.ps" : "mtbuf.vs", inst.opcode, w, w1);
+        EmitGfxMtbuf(t, inst, sc);
       break;
     case Enc::kDs:
       if (sc.is_cs || inst.opcode == 0x35)
@@ -425,11 +428,21 @@ void EmitInst(Translator& t, const Inst& inst, StageContext& sc) {
           sc.wrote_color = true;
           Id col;
           if (compr) {
-            const Id c01 =
-                t.m.ExtInst(t.t_v2, GLSLstd450UnpackHalf2x16, {t.Vg(v[0])});
-            const Id c23 =
-                t.m.ExtInst(t.t_v2, GLSLstd450UnpackHalf2x16, {t.Vg(v[1])});
-            col = t.m.VectorShuffle(t.t_v4, c01, c23, {0, 1, 2, 3});
+            // EN pairs up under COMPR (as in the disassembler's OperandsExp):
+            // bits 0-1 gate the register with the packed x/y halves, bits 2-3
+            // the z/w pair. A disabled pair names no register, not VGPR 0.
+            Id c[4];
+            for (int i = 0; i < 4; i++)
+              c[i] = t.F32(i == 3 ? 1.f : 0.f);
+            for (uint32_t p = 0; p < 2; p++) {
+              if (!(en & (0x3u << (2 * p))))
+                continue;
+              const Id pair =
+                  t.m.ExtInst(t.t_v2, GLSLstd450UnpackHalf2x16, {t.Vg(v[p])});
+              c[2 * p] = t.m.CompositeExtract(t.t_f, pair, 0);
+              c[2 * p + 1] = t.m.CompositeExtract(t.t_f, pair, 1);
+            }
+            col = t.m.CompositeConstruct(t.t_v4, {c[0], c[1], c[2], c[3]});
           } else {
             Id c[4];
             for (int i = 0; i < 4; i++)
@@ -785,7 +798,12 @@ bool TranslateVs(const Program& program,
   std::vector<FetchAttr> direct_attrs;
   for (uint32_t i = 0; i < program.size(); i++) {
     const Inst& inst = program[i];
-    if (!reachable[i] || inst.enc != Enc::kMubuf || inst.opcode > 0x03)
+    // MTBUF carries its own dfmt/nfmt but addresses the buffer exactly as MUBUF
+    // does, and its load opcodes count components the same way, so a typed
+    // fetch of a vertex attribute reaches the vertex-input path unchanged.
+    if (!reachable[i] ||
+        (inst.enc != Enc::kMubuf && inst.enc != Enc::kMtbuf) ||
+        inst.opcode > 0x03)
       continue;
     const uint32_t w = inst.raw[0], w1 = inst.raw[1];
     const bool offen = (w >> 12) & 1, idxen = (w >> 13) & 1;
@@ -923,6 +941,7 @@ bool TranslateVs(const Program& program,
 bool TranslatePs(const Program& program,
                   const std::unordered_set<uint32_t>& flat_attrs,
                   uint32_t ps_input_ena,
+                  uint32_t tex_3d_mask,
                   Recompiled& r,
                   Translator& t) {
   // Color outputs (PsColorOut) are declared lazily per MRT target (location ==
@@ -951,9 +970,11 @@ bool TranslatePs(const Program& program,
     return false;
   }
   sc.mimg_plan = &mimg_plan;
+  sc.tex_3d_mask = tex_3d_mask;
   for (uint32_t i = 0; i < mimg_plan.binding_srsrc.size(); i++)
-    r.ps_texs.push_back(
-        {i, mimg_plan.binding_srsrc[i], mimg_plan.binding_storage[i]});
+    r.ps_texs.push_back({i, mimg_plan.binding_srsrc[i],
+                         mimg_plan.binding_storage[i],
+                         ((tex_3d_mask >> i) & 1u) != 0});
 
   if (UsesDsSwizzle(program, reachable.data()))
     EnableDsSwizzle(t, sc, iface);
@@ -1239,7 +1260,7 @@ std::string PlanSummaryGfx(const Recompiled& r, bool ps) {
     for (const ShaderTex& tex : r.ps_texs)
       s += " [t" + std::to_string(tex.binding) +
            " ud=" + std::to_string(tex.ud_sgpr) +
-           (tex.storage ? " storage" : "") + "]";
+           (tex.storage ? " storage" : "") + (tex.is_3d ? " 3d" : "") + "]";
   }
   return s;
 }
@@ -1341,6 +1362,7 @@ bool RecompileSpirv(const uint32_t* vs_code,
                      const uint32_t* vs_user_data,
                      const uint32_t* ps_user_data,
                      uint32_t ps_input_ena,
+                     uint32_t tex_3d_mask,
                      Recompiled& r) {
   if (!vs_code || !vs_user_data || !ps_user_data)
     return false;
@@ -1395,7 +1417,7 @@ bool RecompileSpirv(const uint32_t* vs_code,
   if (dbg && ps_code)
     AuditBegin("ps", ps_code, ps_program);
   const bool ps_ok = (ps_code ? TranslatePs(ps_program, flat_attrs,
-                                             ps_input_ena, r, tp)
+                                             ps_input_ena, tex_3d_mask, r, tp)
                                : TranslateDepthOnlyPs(tp)) &&
                      !HadUnsupported();
   std::vector<uint32_t> ps;

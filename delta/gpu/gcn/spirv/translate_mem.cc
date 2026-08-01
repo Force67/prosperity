@@ -18,6 +18,7 @@
 #include <initializer_list>
 #include <algorithm>
 
+#include "gpu/gcn/gcn_audit.h"
 #include "gpu/gcn/spirv/translator.h"
 #include <utl/options.h>
 
@@ -116,6 +117,31 @@ Id BufferByteOffset(Translator& t,
   if (offen)
     byte_off = t.Add(byte_off, t.Vg(va));
   return byte_off;
+}
+
+// A typed buffer op carries its own dfmt/nfmt, overriding the V#'s. Both buffer
+// models move the components as raw dwords, which is only exact when the format
+// really is one unconverted 32-bit dword per component; anything packed would
+// need real conversion, so those still warn.
+bool MtbufIsRawDwords(const Inst& inst, uint32_t n) {
+  const uint32_t w = inst.raw[0];
+  if (inst.opcode >= 8)  // d16 forms pack two components per dword
+    return false;
+  const uint32_t nfmt = (w >> 23) & 0x7;
+  if (nfmt != 4 && nfmt != 5 && nfmt != 7)  // uint / sint / float
+    return false;
+  switch ((w >> 19) & 0xF) {
+    case 4:
+      return n == 1;  // 32
+    case 11:
+      return n == 2;  // 32_32
+    case 13:
+      return n == 3;  // 32_32_32
+    case 14:
+      return n == 4;  // 32_32_32_32
+    default:
+      return false;
+  }
 }
 
 // Sub-dword read out of a dword-granular SSBO: value = bits [off*8 .. off*8+n)
@@ -245,7 +271,10 @@ bool PlanCbufs(const Program& program,
 // References the texture as a combined sampler at set 0. The binding comes
 // from the shared MimgBindingPlan (one binding per unique descriptor, matching
 // TrackTextures); the variable is created on the binding's first use. MIMG DA
-// selects a 2D-array resource and appends the layer coordinate after x/y.
+// selects a 2D-array resource and appends the layer coordinate after x/y. A 3D
+// resource also takes a third coordinate, but says so nowhere in the
+// instruction (its DA bit is 0): only the T# type distinguishes it, so it
+// reaches the translator out of band in StageContext::tex_3d_mask.
 void EmitMimg(Translator& t,
               const Inst& inst,
               StageContext& sc,
@@ -253,7 +282,6 @@ void EmitMimg(Translator& t,
   const uint32_t w0 = inst.raw[0], w1 = inst.raw[1], op = inst.opcode;
   const uint32_t dmask = (w0 >> 8) & 0xF, vaddr = w1 & 0xFF;
   const uint32_t vdata = (w1 >> 8) & 0xFF;
-  const bool arrayed = (w0 & 0x4000) != 0;
   const bool dref = op == 0x28 || op == 0x2f;
   const bool offset = op == 0x37;
   const bool gather = op == 0x47;
@@ -272,6 +300,17 @@ void EmitMimg(Translator& t,
   }
   if (bind >= StageContext::kMaxPsSamplers) {
     WarnUnsupported("mimg.unplanned", op, w0, w1);
+    return;
+  }
+
+  const bool is_3d = ((sc.tex_3d_mask >> bind) & 1u) != 0;
+  // An arrayed 3D sampled image is not a legal SPIR-V type; a 3D T# leaves DA
+  // clear anyway, so the descriptor wins over a stray DA bit.
+  const bool arrayed = (w0 & 0x4000) != 0 && !is_3d;
+  const uint32_t coord_components = arrayed || is_3d ? 3u : 2u;
+  // OpImageSampleDref* / OpImageGather are undefined on Dim3D.
+  if (is_3d && (dref || gather)) {
+    WarnUnsupported("mimg.3d-dref-gather", op, w0, w1);
     return;
   }
 
@@ -325,11 +364,12 @@ void EmitMimg(Translator& t,
   }
 
   if (!sc.tex_vars[bind]) {
-    const uint32_t type_idx = (arrayed ? 1u : 0u) | (dref ? 2u : 0u);
+    const uint32_t type_idx =
+        (arrayed ? 1u : 0u) | (dref ? 2u : 0u) | (is_3d ? 4u : 0u);
     if (!t.img_types[type_idx]) {
-      t.img_types[type_idx] =
-          t.m.TypeImage(t.t_f, spv::Dim::Dim2D, dref ? 1 : 0, arrayed ? 1 : 0,
-                        0, 1, spv::ImageFormat::Unknown);
+      t.img_types[type_idx] = t.m.TypeImage(
+          t.t_f, is_3d ? spv::Dim::Dim3D : spv::Dim::Dim2D, dref ? 1 : 0,
+          arrayed ? 1 : 0, 0, 1, spv::ImageFormat::Unknown);
       t.sampled_types[type_idx] = t.m.TypeSampledImage(t.img_types[type_idx]);
       t.sampled_ptrs[type_idx] = t.m.TypePointer(
           spv::StorageClass::UniformConstant, t.sampled_types[type_idx]);
@@ -351,13 +391,14 @@ void EmitMimg(Translator& t,
     const Id img = t.m.Emit(spv::Op::OpImage, img_ty, {si});
     const Id levels = t.m.Emit(spv::Op::OpImageQueryLevels, t.t_u, {img});
     const Id lod = t.UMin(addr_u(0), t.Sub(t.UMax(levels, t.U32(1)), t.U32(1)));
-    const Id size_ty = t.m.TypeVec(t.t_u, arrayed ? 3 : 2);
+    const Id size_ty = t.m.TypeVec(t.t_u, coord_components);
     const Id size = t.m.Emit(spv::Op::OpImageQuerySizeLod, size_ty, {img, lod});
     const Id comps[4] = {
-        t.m.CompositeExtract(t.t_u, size, 0),                       // width
-        t.m.CompositeExtract(t.t_u, size, 1),                       // height
-        arrayed ? t.m.CompositeExtract(t.t_u, size, 2) : t.U32(1),  // depth
-        levels,                                                     // mips
+        t.m.CompositeExtract(t.t_u, size, 0),  // width
+        t.m.CompositeExtract(t.t_u, size, 1),  // height
+        coord_components == 3 ? t.m.CompositeExtract(t.t_u, size, 2)
+                              : t.U32(1),  // depth / layers
+        levels,                            // mips
     };
     uint32_t out = 0;
     for (int i = 0; i < 4; i++)
@@ -380,7 +421,7 @@ void EmitMimg(Translator& t,
     const Id oy = t.m.Emit(spv::Op::OpBitFieldSExtract, t.t_i,
                            {packed, t.U32(8), t.U32(6)});
     const Id image = t.m.Emit(spv::Op::OpImage, img_ty, {si});
-    const Id size_ty = t.m.TypeVec(t.t_u, arrayed ? 3 : 2);
+    const Id size_ty = t.m.TypeVec(t.t_u, coord_components);
     const Id size =
         t.m.Emit(spv::Op::OpImageQuerySizeLod, size_ty, {image, t.U32(0)});
     const Id sx = t.m.Emit(spv::Op::OpConvertUToF, t.t_f,
@@ -391,8 +432,9 @@ void EmitMimg(Translator& t,
     y = t.FAdd(y, t.FDiv(t.m.Emit(spv::Op::OpConvertSToF, t.t_f, {oy}), sy));
   }
   const Id uv =
-      arrayed ? t.m.CompositeConstruct(t.t_v3, {x, y, addr_f(body_index + 2)})
-              : t.m.CompositeConstruct(t.t_v2, {x, y});
+      coord_components == 3
+          ? t.m.CompositeConstruct(t.t_v3, {x, y, addr_f(body_index + 2)})
+          : t.m.CompositeConstruct(t.t_v2, {x, y});
   const uint32_t lod_operand =
       static_cast<uint32_t>(spv::ImageOperandsMask::Lod);
   const bool known = op == 0x00 || op == 0x01 || op == 0x20 || op == 0x21 ||
@@ -406,7 +448,7 @@ void EmitMimg(Translator& t,
     const Id ix = t.m.Bitcast(t.t_i, addr_u(0));
     const Id iy = t.m.Bitcast(t.t_i, addr_u(1));
     const Id ic =
-        arrayed
+        coord_components == 3
             ? t.m.CompositeConstruct(t.m.TypeVec(t.t_i, 3),
                                      {ix, iy, t.m.Bitcast(t.t_i, addr_u(2))})
             : t.m.CompositeConstruct(t.m.TypeVec(t.t_i, 2), {ix, iy});
@@ -415,13 +457,13 @@ void EmitMimg(Translator& t,
     if (op == 0x01) {
       t.RequireImageQuery();
       const Id levels = t.m.Emit(spv::Op::OpImageQueryLevels, t.t_u, {img});
-      lod = t.UMin(addr_u(arrayed ? 3 : 2), t.Sub(levels, t.U32(1)));
+      lod = t.UMin(addr_u(coord_components), t.Sub(levels, t.U32(1)));
     }
     texel =
         t.m.Emit(spv::Op::OpImageFetch, t.t_v4, {img, ic, lod_operand, lod});
   } else if (op == 0x24) {  // image_sample_l: explicit LOD after the body
     texel = t.m.Emit(spv::Op::OpImageSampleExplicitLod, t.t_v4,
-                     {si, uv, lod_operand, addr_f(arrayed ? 3 : 2)});
+                     {si, uv, lod_operand, addr_f(coord_components)});
   } else if (op == 0x28) {  // image_sample_c: z-compare precedes the body
     texel = t.m.Emit(spv::Op::OpImageSampleDrefImplicitLod, t.t_f,
                      {si, uv, addr_f(0)});
@@ -471,8 +513,8 @@ void EmitMimg(Translator& t,
       t.SetVgF(vdata + out++, t.m.CompositeExtract(t.t_f, texel, i));
 }
 
-// ---- graphics: raw MUBUF -> storage buffer ----------------------------------
-// A MUBUF the vertex-input state does not already cover is a hand-written
+// ---- graphics: raw MUBUF/MTBUF -> storage buffer ----------------------------
+// A buffer op the vertex-input state does not already cover is a hand-written
 // buffer read: the shader computes a per-lane index (an s_load'd vertex id, a
 // bone index, an instance number) and pulls dwords out of a V#-described
 // resource. Model it exactly as the compute path models guest memory -- a
@@ -496,6 +538,12 @@ uint32_t GfxMubufLoadDwords(uint32_t op) {
   if (op == 0x0f)
     return 3;
   return 0;
+}
+
+// Same for a typed load. Takes Inst::opcode, which carries the Neo d16 bit at
+// bit 3 (see Decode), so anything above tbuffer_load_format_xyzw is excluded.
+uint32_t GfxMtbufLoadDwords(uint32_t opcode) {
+  return opcode <= 0x03 ? opcode + 1 : 0;
 }
 
 }  // namespace
@@ -543,9 +591,12 @@ void PlanGfxBuffers(const Program& program,
       loads.push_back({sdst, n, inst_idx});
       continue;
     }
-    if (inst.enc != Enc::kMubuf)
+    if (inst.enc != Enc::kMubuf && inst.enc != Enc::kMtbuf)
       continue;
-    if (!GfxMubufLoadDwords((w >> 18) & 0x7F))
+    const bool load = inst.enc == Enc::kMubuf
+                          ? GfxMubufLoadDwords((w >> 18) & 0x7F) != 0
+                          : GfxMtbufLoadDwords(inst.opcode) != 0;
+    if (!load)
       continue;  // store/atomic: not modelled, and must not spend a binding
     if (claimed && claimed->count(inst.pc))
       continue;  // already seeded as a vertex input (see direct_vfetch)
@@ -599,6 +650,39 @@ void EmitGfxMubuf(Translator& t, const Inst& inst, StageContext& sc) {
             LoadSubDword(t, var, byte_off, op <= 0x09 ? 8 : 16, sign_extend));
     return;
   }
+  for (uint32_t i = 0; i < n; i++)
+    t.SetVg(vdata + i, SsboLoad(t, var,
+                                t.UMin(t.Add(dword_idx, t.U32(i)),
+                                       t.U32(kGfxBufferDwords - 1))));
+}
+
+void EmitGfxMtbuf(Translator& t, const Inst& inst, StageContext& sc) {
+  const uint32_t w = inst.raw[0], w1 = inst.raw[1];
+  const uint32_t inst_offset = w & 0xFFF;
+  const bool offen = (w >> 12) & 1, idxen = (w >> 13) & 1;
+  const uint32_t vaddr = w1 & 0xFF, vdata = (w1 >> 8) & 0xFF;
+  const uint32_t srsrc = ((w1 >> 16) & 0x1F) * 4, soffset = (w1 >> 24) & 0xFF;
+  const uint32_t n = GfxMtbufLoadDwords(inst.opcode);
+  if (!n) {
+    // A store has nowhere to land: the set-2 window is a per-draw copy of guest
+    // memory that is never read back, and draws sharing a resource share one
+    // window, so writing into it would corrupt what the others read. Drop it
+    // rather than reject the shader, which would drop every draw using it.
+    AuditNote("mtbuf.store.gfx", inst.opcode);
+    return;
+  }
+  const auto it = sc.gfx_buf_bind.find(inst.pc);
+  if (it == sc.gfx_buf_bind.end()) {
+    WarnUnsupported(sc.is_ps ? "mtbuf.ps" : "mtbuf.vs", inst.opcode, w, w1);
+    return;
+  }
+  if (!MtbufIsRawDwords(inst, n))
+    WarnUnsupported("mtbuf.raw-format", inst.opcode, w, w1);
+  const Id var = t.EnsureGfxBuffer(it->second);
+  const Id byte_off = t.UMin(BufferByteOffset(t, inst, inst_offset, idxen,
+                                              offen, vaddr, srsrc, soffset),
+                             t.U32(kGfxBufferDwords * 4 - 4));
+  const Id dword_idx = t.Shr(byte_off, t.U32(2));
   for (uint32_t i = 0; i < n; i++)
     t.SetVg(vdata + i, SsboLoad(t, var,
                                 t.UMin(t.Add(dword_idx, t.U32(i)),
@@ -844,9 +928,6 @@ void EmitCsMubuf(Translator& t, const Inst& inst, StageContext& sc) {
 }
 
 // ---- compute: MTBUF ---------------------------------------------------------
-// Typed buffer ops carry an explicit dfmt/nfmt; the raw-dword model is exact
-// for the 32-bit formats and for matched load/store round trips. Mismatched
-// packed formats would need real conversion -- warn once so that shows up.
 void EmitCsMtbuf(Translator& t, const Inst& inst, StageContext& sc) {
   const uint32_t w = inst.raw[0], w1 = inst.raw[1];
   const uint32_t op = (w >> 16) & 0x7, inst_offset = w & 0xFFF;
@@ -858,12 +939,13 @@ void EmitCsMtbuf(Translator& t, const Inst& inst, StageContext& sc) {
     sc.cs_unsupported = true;
     return;
   }
-  WarnUnsupported("mtbuf.raw-format", op, w, w1);
+  const uint32_t n = (op & 3) + 1;
+  if (!MtbufIsRawDwords(inst, n))
+    WarnUnsupported("mtbuf.raw-format", op, w, w1);
   const uint32_t binding = static_cast<uint32_t>(b);
   const Id byte_off = BufferByteOffset(t, inst, inst_offset, idxen, offen,
                                        vaddr, srsrc, soffset);
   const Id dword_idx = t.Shr(byte_off, t.U32(2));
-  const uint32_t n = (op & 3) + 1;
   if (op < 4) {  // tbuffer_load_format_x..xyzw
     for (uint32_t i = 0; i < n; i++)
       t.SetVg(vdata + i,

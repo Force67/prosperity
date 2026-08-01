@@ -41,6 +41,7 @@ struct TImage {
   uint32_t width = 0;
   uint32_t height = 0;
   uint32_t pitch = 0;        // surface pitch in pixels (T#.pitch+1)
+  uint32_t depth = 1;        // slices of a volume image (T#.depth+1 for 3D)
   uint32_t layers = 1;       // physical array layers (T#.depth+1 for 2D arrays)
   uint32_t base_array = 0;   // first layer exposed by this descriptor view
   uint32_t view_layers = 1;  // number of layers exposed by this descriptor view
@@ -50,7 +51,7 @@ struct TImage {
   uint32_t min_lod = 0;      // T# MIN_LOD clamp in U4.8 fixed-point
   uint32_t dfmt = 0;
   uint32_t nfmt = 0;
-  uint32_t type = 0;        // SQ_RSRC_IMG_* (9 = 2D, 13 = 2D array)
+  uint32_t type = 0;        // SQ_RSRC_IMG_* (9 = 2D, 10 = 3D, 13 = 2D array)
   uint32_t tiling_idx = 0;  // 8/31 = linear; everything else is tiled
   // T# DST_SEL_X/Y/Z/W: which source channel (or constant) each sampled
   // component reads. 0=0, 1=1, 4=R, 5=G, 6=B, 7=A. A single-channel mask (a
@@ -60,6 +61,7 @@ struct TImage {
   uint32_t sampler[4] = {};  // S# used by the sampling MIMG instruction
   bool pow2_pad = false;     // pad physical mip dims/layers to powers of two
   bool sampler_valid = false;
+  bool is_3d = false;           // SQ_RSRC_IMG_3D: sampled with a w coordinate
   bool arrayed = false;         // MIMG DA bit: address carries an array layer
   bool force_lod_zero = false;  // gather4_lz: implicit gather clamped to mip 0
   bool depth_compare = false;   // MIMG _C uses the sampler's compare function
@@ -98,10 +100,14 @@ MimgBindingPlan PlanMimgBindings(const Program& program,
 // compacted. Pass a CachedProgram() of the PS code: the shared_ptr keys a
 // per-program cache of the binding plan + the scalar-relevant instruction
 // subset, so per-draw calls skip re-planning and walking the VALU bulk.
+// `code_base` is the guest address the program was decoded from; it lets the
+// scalar walk resolve s_getpc_b64, which shaders use to reach a descriptor
+// table embedded after their own code. Zero leaves the PC unknown.
 std::vector<TImage> TrackTextures(
     const std::shared_ptr<const Program>& ps_program,
     const uint32_t* ps_user_data,
-    bool trace = false);
+    bool trace = false,
+    uint64_t code_base = 0);
 
 // Resolve the live descriptor behind each constant buffer a graphics stage
 // reads, following the same extended-user-data / SRT pointer chains as

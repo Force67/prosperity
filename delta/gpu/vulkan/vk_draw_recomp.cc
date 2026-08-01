@@ -199,7 +199,11 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
   // live image for cycled/aliased RT addresses instead of stale guest memory.
   // Additive: an exact RT base resolves to itself.
   uint64_t tex_base = d.tex_base;
-  if (tex_base && !d.tex_arrayed && !g_rts.count(tex_base) &&
+  // Render targets are plain 2D images, so only a plain 2D binding may resolve
+  // to one. An array or volume binding declared a sampler type no render target
+  // can satisfy.
+  const bool tex_rt_eligible = !d.tex_arrayed && !d.tex_is_3d;
+  if (tex_base && tex_rt_eligible && !g_rts.count(tex_base) &&
       !g_depths.count(tex_base)) {
     bool depth_format = d.tex_dfmt == 4 && d.tex_nfmt == 7;
     uint64_t r =
@@ -211,12 +215,13 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
     if (r)
       tex_base = r;
   }
-  bool color_as_tex = !d.tex_arrayed && tex_base && tex_base != d.rt_base &&
+  bool color_as_tex = tex_rt_eligible && tex_base && tex_base != d.rt_base &&
                       g_rts.count(tex_base);
-  bool feedback_as_tex = !d.tex_arrayed && tex_base && tex_base == d.rt_base &&
-                         g_rts.count(tex_base) && g_rts[tex_base].ever_rendered;
-  bool depth_as_tex = !d.tex_arrayed && tex_base && tex_base != d.depth_base &&
-                      g_depths.count(tex_base);
+  bool feedback_as_tex = tex_rt_eligible && tex_base &&
+                         tex_base == d.rt_base && g_rts.count(tex_base) &&
+                         g_rts[tex_base].ever_rendered;
+  bool depth_as_tex = tex_rt_eligible && tex_base &&
+                      tex_base != d.depth_base && g_depths.count(tex_base);
   bool rt_as_tex = color_as_tex || feedback_as_tex || depth_as_tex;
   if (color_as_tex && g_rts[tex_base].w >= 700 && g_rts[tex_base].w <= 900)
     g_frame.had_room = true;
@@ -276,26 +281,29 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
   // world colour RT accumulated one fullscreen pass per frame until its value
   // literally tracked the frame counter. Record the clear and consume the draw.
   //
-  // The clear colour is encoded in each target's own format, so decoding it in
-  // general means a per-format unpack. Every clear observed so far is to zero,
-  // and NoteMemoryFill already takes the same shortcut for CP DMA fills, so use
-  // zero and report anything else under DELTA_GPU_CLEARTRACE rather than
-  // guessing a decode that nothing exercises yet.
+  // The clear colour is encoded in each target's own format, so it needs the
+  // per-format unpack in ColorTargetClearValue. Clearing to zero regardless
+  // turns P.T.'s opaque white and opaque black clears into transparent black,
+  // which is a hole in a deferred composite.
   if (d.is_clear_rect) {
     for (uint32_t i = 0; i < d.mrt_count && i < 8; i++) {
       auto it = g_rts.find(d.mrt_base[i]);
       if (it == g_rts.end())
         continue;
+      const VkClearColorValue clear = ColorTargetClearValue(
+          d.mrt_info[i], d.mrt_clear_word[i][0], d.mrt_clear_word[i][1]);
       it->second.clear_pending = true;
-      it->second.clear_value = {};  // transparent black
-      if (kClearTrace && (d.mrt_clear_word[i][0] || d.mrt_clear_word[i][1])) {
+      it->second.clear_value = clear;
+      if (kClearTrace) {
         static int n = 0;
         if (n++ < 16)
           std::fprintf(stderr,
-                       "[clear] rect RT %#lx non-zero CLEAR_WORD %08x %08x "
-                       "(cleared to zero anyway)\n",
-                       (unsigned long)d.mrt_base[i], d.mrt_clear_word[i][0],
-                       d.mrt_clear_word[i][1]);
+                       "[clear] rect RT %#lx info=%#x CLEAR_WORD %08x %08x -> "
+                       "(%g %g %g %g)\n",
+                       (unsigned long)d.mrt_base[i], d.mrt_info[i],
+                       d.mrt_clear_word[i][0], d.mrt_clear_word[i][1],
+                       clear.float32[0], clear.float32[1], clear.float32[2],
+                       clear.float32[3]);
       }
     }
     if (d.depth_base) {
@@ -483,11 +491,18 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
           d.tex_pitch, d.tex_layers, d.tex_base_array, d.tex_view_layers,
           d.tex_mip_levels, d.tex_base_mip, d.tex_view_mips, d.tex_min_lod,
           d.tex_pow2_pad, d.tex_sampler, d.tex_sampler_valid, d.tex_arrayed,
-          d.tex_force_lod_zero, d.tex_depth_compare, d.tex_swizzle);
+          d.tex_force_lod_zero, d.tex_depth_compare, d.tex_swizzle, d.tex_depth,
+          d.tex_is_3d);
+    // The fallback has to match the dimensionality the shader declared for this
+    // binding, or the descriptor write is a type mismatch.
     if (!tex_set)
       tex_set = d.tex_null_descriptor
-                    ? (d.tex_arrayed ? g_tex.zero_array_set : g_tex.zero_set)
-                    : (d.tex_arrayed ? g_tex.white_array_set : g_tex.white_set);
+                    ? (d.tex_is_3d      ? g_tex.zero_3d_set
+                       : d.tex_arrayed  ? g_tex.zero_array_set
+                                        : g_tex.zero_set)
+                    : (d.tex_is_3d     ? g_tex.white_3d_set
+                       : d.tex_arrayed ? g_tex.white_array_set
+                                       : g_tex.white_set);
     if (!tex_set)
       return Decline(kGuestTex);
   }
@@ -531,7 +546,11 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
         }
         continue;
       }
-      if (base && !t.arrayed && !g_rts.count(base) && !g_depths.count(base)) {
+      // Render targets are plain 2D images, so only a plain 2D binding may
+      // resolve to one. An array or volume binding declared a sampler type no
+      // render target can satisfy.
+      const bool rt_eligible = !t.arrayed && !t.is_3d;
+      if (base && rt_eligible && !g_rts.count(base) && !g_depths.count(base)) {
         bool depth_format = t.dfmt == 4 && t.nfmt == 7;
         uint64_t resolved =
             depth_format ? ResolveSampledDepth(base, t.w, t.h) : 0;
@@ -549,25 +568,26 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
       if (base && g_rts.count(base))
         FlushCsWritesRange(renderer, base,
                            uint64_t(g_rts[base].w) * g_rts[base].h * 8);
-      if (base && !t.arrayed && is_bound_target(base) && g_rts.count(base) &&
+      if (base && rt_eligible && is_bound_target(base) && g_rts.count(base) &&
           g_rts[base].ever_rendered) {
         multi_feedback[i] = base;
         multi_transition_source = true;
-      } else if (base && !t.arrayed && g_rts.count(base) &&
+      } else if (base && rt_eligible && g_rts.count(base) &&
                  g_rts[base].ever_rendered) {
         multi_color[i] = base;
         multi_transition_source |=
             g_rts[base].layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL ||
             g_rts[base].dirty_for_read;
-      } else if (base && !t.arrayed && base != d.depth_base &&
+      } else if (base && rt_eligible && base != d.depth_base &&
                  g_depths.count(base)) {
         multi_depth[i] = base;
         multi_transition_source |=
             g_depths[base].layout != VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL;
       } else {
         multi_views[i] = !t.storage && t.null_descriptor
-                             ? (t.arrayed ? g_tex.zero_array_view
-                                          : g_tex.zero_view)
+                             ? (t.is_3d      ? g_tex.zero_3d_view
+                                : t.arrayed  ? g_tex.zero_array_view
+                                             : g_tex.zero_view)
                              : TexViewFor(t);
         if (multi_views[i] && t.null_descriptor)
           multi_layouts[i] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;

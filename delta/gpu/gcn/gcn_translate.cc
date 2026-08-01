@@ -18,11 +18,13 @@ Recompiled Recompile(const uint32_t* vs_code,
                       const uint32_t* ps_code,
                       const uint32_t* vs_user_data,
                       const uint32_t* ps_user_data,
-                      uint32_t ps_input_ena) {
+                      uint32_t ps_input_ena,
+                      uint32_t tex_3d_mask) {
   Recompiled r;
   if (!vs_code || !vs_user_data || !ps_user_data)
     return r;
-  RecompileSpirv(vs_code, ps_code, vs_user_data, ps_user_data, ps_input_ena, r);
+  RecompileSpirv(vs_code, ps_code, vs_user_data, ps_user_data, ps_input_ena,
+                 tex_3d_mask, r);
   return r;
 }
 

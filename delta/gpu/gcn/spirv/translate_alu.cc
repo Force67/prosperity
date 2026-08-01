@@ -879,14 +879,15 @@ void EmitVop2(Translator& t,
     case 0x05:
       set_f(t.FSub(s1, s0));
       break;  // v_subrev_f32
+    // The legacy multiply forms differ from the IEEE ones only in returning
+    // zero when a multiplicand is zero and the other is inf or NaN. Nothing
+    // feeds those values here, so they lower the same way.
     case 0x06:
-      WarnUnsupported("vop2.mac-legacy", op);
       set_f(t.FAdd(t.FMul(s0, s1), t.VgF(vdst)));
-      break;
+      break;  // v_mac_legacy_f32
     case 0x07:
-      WarnUnsupported("vop2.mul-legacy", op);
       set_f(t.FMul(s0, s1));
-      break;
+      break;  // v_mul_legacy_f32
     case 0x08:
       set_f(t.FMul(s0, s1));
       break;  // v_mul_f32
@@ -1260,8 +1261,7 @@ void EmitVop3(Translator& t,
     return (t.*mx)((t.*mn)(u0, u1), (t.*mn)((t.*mx)(u0, u1), u2));
   };
   switch (op) {
-    case 0x140:
-      WarnUnsupported("vop3.mad-legacy", op);
+    case 0x140:  // v_mad_legacy_f32: legacy zero handling, see EmitVop2 0x06
       set_f(t.FAdd(t.FMul(s0, s1), s2));
       break;
     case 0x141:

@@ -40,14 +40,22 @@ struct TextureBindings {
   std::vector<VkDescriptorPool> mtex_pools;
   VkImage white_img = VK_NULL_HANDLE;
   ImageAllocation white_allocation;
+  // A binding a shader declares as Dim3D cannot be satisfied by a 2D view, so
+  // the default has a 1x1x1 volume twin.
+  VkImage white_3d_img = VK_NULL_HANDLE;
+  ImageAllocation white_3d_allocation;
   VkImageView white_view = VK_NULL_HANDLE;
   VkImageView white_array_view = VK_NULL_HANDLE;
+  VkImageView white_3d_view = VK_NULL_HANDLE;
   VkImageView zero_view = VK_NULL_HANDLE;
   VkImageView zero_array_view = VK_NULL_HANDLE;
+  VkImageView zero_3d_view = VK_NULL_HANDLE;
   VkDescriptorSet white_set = VK_NULL_HANDLE;
   VkDescriptorSet white_array_set = VK_NULL_HANDLE;
+  VkDescriptorSet white_3d_set = VK_NULL_HANDLE;
   VkDescriptorSet zero_set = VK_NULL_HANDLE;
   VkDescriptorSet zero_array_set = VK_NULL_HANDLE;
+  VkDescriptorSet zero_3d_set = VK_NULL_HANDLE;
 };
 
 extern TextureBindings& g_tex;
@@ -80,7 +88,9 @@ VkDescriptorSet GetTexture(uint64_t base,
                            bool arrayed = false,
                            bool force_lod_zero = false,
                            bool depth_compare = false,
-                           uint32_t swizzle = 0);
+                           uint32_t swizzle = 0,
+                           uint32_t depth = 1,
+                           bool is_3d = false);
 bool GuestTextureUploadSupported(uint32_t dfmt, uint32_t nfmt);
 VkImageView TexViewFor(const rhi::DrawInfo::DrawTex& t);
 

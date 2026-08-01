@@ -114,6 +114,7 @@ struct DrawInfo {
   uint32_t tex_dfmt = 0, tex_nfmt = 0;
   uint32_t tex_tiling = 8;       // T# tiling_index (8/31 = linear; else tiled)
   uint32_t tex_pitch = 0;        // T# surface pitch in pixels (0 = use tex_w)
+  uint32_t tex_depth = 1;        // slices of a volume image (1 = not 3D)
   uint32_t tex_layers = 1;       // physical layers in the image allocation
   uint32_t tex_base_array = 0;   // first layer exposed by the image view
   uint32_t tex_view_layers = 1;  // layers exposed by the image view
@@ -126,6 +127,7 @@ struct DrawInfo {
   bool tex_pow2_pad = false;  // physical mip dimensions/layers use POW2_PAD
   bool tex_sampler_valid = false;
   bool tex_arrayed = false;  // MIMG DA: shader consumes a layer coordinate
+  bool tex_is_3d = false;    // T# type 10: sampled with a w coordinate
   bool tex_force_lod_zero = false;
   bool tex_depth_compare = false;
   bool tex_null_descriptor = false;
@@ -139,6 +141,7 @@ struct DrawInfo {
     uint64_t base = 0;
     uint32_t w = 0, h = 0, tiling = 8, pitch = 0;
     uint32_t dfmt = 0, nfmt = 0;
+    uint32_t depth = 1;
     uint32_t layers = 1, base_array = 0, view_layers = 1;
     uint32_t mip_levels = 1, base_mip = 0, view_mips = 1;
     uint32_t min_lod = 0;
@@ -146,6 +149,7 @@ struct DrawInfo {
     bool pow2_pad = false;
     bool sampler_valid = false;
     bool arrayed = false;
+    bool is_3d = false;
     bool force_lod_zero = false;
     bool depth_compare = false;
     bool storage = false;
@@ -172,6 +176,10 @@ struct DrawInfo {
   // the colour write mask so a draw the game masks off (e.g. a fullscreen
   // "clear" it expects to write nothing) does not overwrite the target.
   uint32_t target_mask = 0xF;
+  // CB_SHADER_MASK: which channels of each target the PS actually exports. The
+  // hardware writes a channel only when this and target_mask both enable it,
+  // and leaves the rest of the target untouched.
+  uint32_t shader_mask = 0;
   uint32_t color_control = 0;
 
   // Depth/stencil (DB) state. When depth_base is a valid guest address and

@@ -82,6 +82,10 @@ struct RTarget {
   uint32_t last_rawbuf_mask = 0;
 };
 
+// The live target at each guest address. An address the guest renders to at
+// several geometries owns one image per geometry, of which this holds the one
+// the last draw rendered into; the others are parked in vk_render_target.cc, so
+// resolving a target by address alone keeps working.
 extern std::unordered_map<uint64_t, RTarget>& g_rts;
 
 // Depth/stencil attachment, keyed by its guest DB_Z_WRITE_BASE. Allocated on

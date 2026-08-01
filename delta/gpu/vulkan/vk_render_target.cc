@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <utility>
 #include <utl/options.h>
 
 namespace {
@@ -59,6 +60,12 @@ VkImageView SampledImageView(VkImage image,
 }
 
 VkImageView SampledView(RTarget& rt, uint32_t swizzle, bool feedback) {
+  // A target that became live at this address after the draw took its snapshot
+  // (an alias switch, see ActivateRtVariant) has no copy of its own yet.
+  // Sampling the attachment instead would be the feedback loop the copy exists
+  // to avoid, so leave the caller its default texture.
+  if (feedback && !rt.feedback_image)
+    return VK_NULL_HANDLE;
   return feedback ? SampledImageView(rt.feedback_image, rt.feedback_view,
                                      rt.fmt, VK_IMAGE_ASPECT_COLOR_BIT, swizzle,
                                      rt.feedback_sampled_views)
@@ -94,24 +101,16 @@ void RegisterRtPages(uint64_t base, uint32_t w, uint32_t h, VkFormat fmt) {
   }
 }
 
-// Find or create the render target at guest address `base` (dimensions w x h).
-RTarget* GetRT(uint64_t base, uint32_t w, uint32_t h, VkFormat fmt) {
-  auto it = g_rts.find(base);
-  if (it != g_rts.end()) {
-    static std::unordered_map<uint64_t, bool> alias_warned;
-    if ((it->second.w != w || it->second.h != h || it->second.fmt != fmt) &&
-        !alias_warned[base]) {
-      alias_warned[base] = true;
-      std::fprintf(stderr,
-                   "[gpuvk] RT alias mismatch %#lx: have %ux%u fmt=%d, "
-                   "requested %ux%u fmt=%d\n",
-                   (unsigned long)base, it->second.w, it->second.h,
-                   (int)it->second.fmt, w, h, (int)fmt);
-    }
-    return &it->second;
-  }
-  if (g_rts.size() >= 64 || !w || !h)
-    return nullptr;
+// Allocate the image, view and sampler descriptor backing one target. Split out
+// of GetRT because an address the guest renders to at two geometries needs a
+// second image (see ActivateRtVariant).
+bool CreateRtImage(RTarget& t,
+                   uint64_t base,
+                   uint32_t w,
+                   uint32_t h,
+                   VkFormat fmt) {
+  if (!w || !h)
+    return false;
   // Robustness: reject render targets with implausible dimensions or an
   // undefined format. A garbage CB_COLOR base/scissor (e.g. a stray shader-pool
   // RT address on the PS5 path) would otherwise feed the driver an invalid
@@ -119,9 +118,8 @@ RTarget* GetRT(uint64_t base, uint32_t w, uint32_t h, VkFormat fmt) {
   if (w > 8192 || h > 8192 || fmt == VK_FORMAT_UNDEFINED) {
     std::fprintf(stderr, "[gpuvk] skip bad RT %#lx %ux%u fmt=%d\n",
                  (unsigned long)base, w, h, (int)fmt);
-    return nullptr;
+    return false;
   }
-  RTarget t;
   t.w = w;
   t.h = h;
   t.fmt = fmt;
@@ -137,11 +135,12 @@ RTarget* GetRT(uint64_t base, uint32_t w, uint32_t h, VkFormat fmt) {
              VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
              VK_IMAGE_USAGE_TRANSFER_DST_BIT;
   if (vkCreateImage(g_dev.device, &ii, nullptr, &t.image) != VK_SUCCESS)
-    return nullptr;
+    return false;
   if (!g_image_memory.Allocate(g_dev, t.image, t.allocation)) {
     vkDestroyImage(g_dev.device, t.image, nullptr);
-    return nullptr;  // GPU OOM -> don't bind/view a memory-less image (driver
-                     // crash)
+    t.image = VK_NULL_HANDLE;
+    return false;  // GPU OOM -> don't bind/view a memory-less image (driver
+                   // crash)
   }
   VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
   vci.image = t.image;
@@ -151,7 +150,8 @@ RTarget* GetRT(uint64_t base, uint32_t w, uint32_t h, VkFormat fmt) {
   if (vkCreateImageView(g_dev.device, &vci, nullptr, &t.view) != VK_SUCCESS) {
     vkDestroyImage(g_dev.device, t.image, nullptr);
     g_image_memory.Free(g_dev, t.allocation);
-    return nullptr;
+    t.image = VK_NULL_HANDLE;
+    return false;
   }
   // descriptor set so this RT can be sampled (render-to-texture).
   if (g_tex.ds_pool) {
@@ -172,6 +172,77 @@ RTarget* GetRT(uint64_t base, uint32_t w, uint32_t h, VkFormat fmt) {
                (unsigned long)base, w, h, (int)fmt);
   NameObject(VK_OBJECT_TYPE_IMAGE, (uint64_t)t.image, "rt %#lx %ux%u fmt=%d",
              (unsigned long)base, w, h, (int)fmt);
+  return true;
+}
+
+// The images of a base the guest renders to at more than one geometry, minus
+// the one that is live in g_rts. P.T. renders a fullscreen pass and then a
+// 512x512 pass to the same address inside one frame; sharing one image lands
+// the small pass in a corner of the big one and every later sample of that
+// address reads mostly stale pixels. Every lookup in the backend names a target
+// by address alone, so g_rts keeps holding the live target and the other
+// geometries wait here until a draw asks for them again.
+std::unordered_map<uint64_t, std::vector<RTarget>> g_rt_variants;
+constexpr size_t kMaxRtVariants = 3;
+
+// Make the image of geometry (w, h, fmt) the live target at `base`, creating it
+// on first use.
+RTarget* ActivateRtVariant(RTarget& live,
+                           uint64_t base,
+                           uint32_t w,
+                           uint32_t h,
+                           VkFormat fmt) {
+  auto& parked = g_rt_variants[base];
+  RTarget* alt = nullptr;
+  for (RTarget& v : parked)
+    if (v.w == w && v.h == h && v.fmt == fmt) {
+      alt = &v;
+      break;
+    }
+  if (!alt) {
+    if (parked.size() >= kMaxRtVariants)
+      return &live;
+    RTarget t;
+    if (!CreateRtImage(t, base, w, h, fmt))
+      return nullptr;
+    std::fprintf(stderr,
+                 "[gpuvk] RT alias %#lx: have %ux%u fmt=%d, requested %ux%u "
+                 "fmt=%d -> own image\n",
+                 (unsigned long)base, live.w, live.h, (int)live.fmt, w, h,
+                 (int)fmt);
+    parked.push_back(t);
+    alt = &parked.back();
+    RegisterRtPages(base, w, h, fmt);
+  }
+  std::swap(live, *alt);
+  // BeginFrame's per-frame reset only walks the live targets, so one that slept
+  // through a frame boundary catches up here.
+  if (live.last_frame != g_frame.num) {
+    live.used_this_frame = false;
+    live.draws = 0;
+  }
+  // EndFrame's submitted-layout stamp skips a parked target too. Leaving a
+  // value that predates its last recorded transition would have the compute
+  // bridge barrier from the wrong layout; UNDEFINED means "nothing submitted
+  // yet", which that path already handles.
+  alt->submitted_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+  return &live;
+}
+
+// Find or create the render target at guest address `base` (dimensions w x h).
+RTarget* GetRT(uint64_t base, uint32_t w, uint32_t h, VkFormat fmt) {
+  auto it = g_rts.find(base);
+  if (it != g_rts.end()) {
+    RTarget& live = it->second;
+    if (live.w != w || live.h != h || live.fmt != fmt)
+      return ActivateRtVariant(live, base, w, h, fmt);
+    return &live;
+  }
+  if (g_rts.size() >= 64)
+    return nullptr;
+  RTarget t;
+  if (!CreateRtImage(t, base, w, h, fmt))
+    return nullptr;
   g_rts[base] = t;
   if (!g_region.first_rt)
     g_region.first_rt = base;
@@ -606,13 +677,12 @@ void NoteMemoryFill(Renderer& renderer,
   if (!renderer.available() || !bytes)
     return;
   const uint64_t end = base + bytes;
-  for (auto& kv : g_rts) {
-    RTarget& rt = kv.second;
-    const uint64_t rt_end = kv.first + RtByteSize(rt);
+  const auto note = [&](RTarget& rt, uint64_t rt_base) {
+    const uint64_t rt_end = rt_base + RtByteSize(rt);
     // Only a fill that covers the whole surface is a clear; a partial one is a
     // buffer update that happens to overlap.
-    if (base > kv.first || end < rt_end)
-      continue;
+    if (base > rt_base || end < rt_end)
+      return;
     rt.clear_pending = true;
     // The fill value is one dword of the target's own format. Unpacking every
     // format is not worth it: a clear is almost always zero (black), and a
@@ -626,7 +696,17 @@ void NoteMemoryFill(Renderer& renderer,
     if (kGpuFilltrace && n++ < 20)
       std::fprintf(stderr,
                    "[fill] RT %#lx cleared by CP DMA fill %08x (%lu bytes)\n",
-                   (unsigned long)kv.first, value, (unsigned long)bytes);
+                   (unsigned long)rt_base, value, (unsigned long)bytes);
+  };
+  for (auto& kv : g_rts) {
+    note(kv.second, kv.first);
+    // A parked alias variant occupies the same address, so a fill that covers
+    // it is its clear too.
+    auto v = g_rt_variants.find(kv.first);
+    if (v == g_rt_variants.end())
+      continue;
+    for (RTarget& alt : v->second)
+      note(alt, kv.first);
   }
 }
 

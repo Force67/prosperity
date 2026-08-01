@@ -40,6 +40,7 @@ DELTA_OPTION(bool, kTexDump, "DELTA_GPU_TEXDUMP", false);
 DELTA_OPTION(bool, kTexFail, "DELTA_GPU_TEXFAIL", false);
 DELTA_OPTION(bool, kTexMiss, "DELTA_GPU_TEXMISS", false);
 DELTA_OPTION(bool, kTexRaw, "DELTA_GPU_TEXRAW", false);
+DELTA_OPTION(uint64_t, kTexWatch, "DELTA_GPU_TEXWATCH", 0);
 }  // namespace
 
 namespace gpu::vk {
@@ -49,14 +50,18 @@ using rhi::DrawInfo;
 struct TexImageKey {
   uint64_t base = 0;
   uint32_t w = 0, h = 0, tiling = 8, pitch = 0, layers = 1;
+  uint32_t depth = 1;
   uint32_t mip_levels = 1;
   VkFormat format = VK_FORMAT_UNDEFINED;
   bool pow2_pad = false;
+  // A volume and a 2D surface at the same guest address are different VkImage
+  // types, so is_3d has to separate them here.
+  bool is_3d = false;
   bool operator==(const TexImageKey& o) const {
     return base == o.base && w == o.w && h == o.h && tiling == o.tiling &&
-           pitch == o.pitch && layers == o.layers &&
+           pitch == o.pitch && layers == o.layers && depth == o.depth &&
            mip_levels == o.mip_levels && format == o.format &&
-           pow2_pad == o.pow2_pad;
+           pow2_pad == o.pow2_pad && is_3d == o.is_3d;
   }
 };
 
@@ -69,8 +74,10 @@ struct TexImageKeyHash {
     h = HashWord(h, k.tiling);
     h = HashWord(h, k.pitch);
     h = HashWord(h, k.layers);
+    h = HashWord(h, k.depth);
     h = HashWord(h, k.mip_levels);
     h = HashWord(h, k.pow2_pad);
+    h = HashWord(h, k.is_3d);
     h = HashWord(h, k.format);
     return static_cast<size_t>(h);
   }
@@ -225,7 +232,13 @@ TexKey TextureKey(uint64_t base,
                   bool arrayed,
                   bool force_lod_zero,
                   bool depth_compare,
-                  uint32_t swizzle) {
+                  uint32_t swizzle,
+                  uint32_t depth,
+                  bool is_3d) {
+  if (is_3d)
+    layers = 1;
+  else
+    depth = 1;
   if (layers && base_array < layers)
     view_layers = std::min(view_layers, layers - base_array);
   if (!arrayed)
@@ -233,9 +246,10 @@ TexKey TextureKey(uint64_t base,
   if (mip_levels && base_mip < mip_levels)
     view_mips = std::min(view_mips, mip_levels - base_mip);
   TexKey key;
-  key.image = {base,    w,      h,          tiling,
-               pitch,   layers, mip_levels, GuestTextureFormat(dfmt, nfmt),
-               pow2_pad};
+  key.image = {base,   w,          h,
+               tiling, pitch,      layers,
+               depth,  mip_levels, GuestTextureFormat(dfmt, nfmt),
+               pow2_pad, is_3d};
   key.base_array = base_array;
   key.view_layers = view_layers;
   key.base_mip = base_mip;
@@ -264,7 +278,8 @@ bool UploadTexPixelsImmediate(VkImage img,
                               uint64_t base,
                               const gcn::TextureLayout32& layout,
                               uint32_t texel_w,
-                              uint32_t texel_h);  // defined below
+                              uint32_t texel_h,
+                              bool is_3d = false);  // defined below
 void ClearMultiTexCache();
 
 bool CreateTextureDescriptors() {
@@ -355,6 +370,24 @@ bool CreateTextureDescriptors() {
       g_tex.white_img = VK_NULL_HANDLE;
       return false;
     }
+    // Same default for a Dim3D binding, which cannot sample a 2D view.
+    VkImageCreateInfo wi3 = wi;
+    wi3.imageType = VK_IMAGE_TYPE_3D;
+    VKOK(vkCreateImage(g_dev.device, &wi3, nullptr, &g_tex.white_3d_img));
+    if (!g_image_memory.Allocate(g_dev, g_tex.white_3d_img,
+                                 g_tex.white_3d_allocation)) {
+      vkDestroyImage(g_dev.device, g_tex.white_3d_img, nullptr);
+      g_tex.white_3d_img = VK_NULL_HANDLE;
+      return false;
+    }
+    if (!UploadTexPixelsImmediate(g_tex.white_3d_img,
+                                  reinterpret_cast<uint64_t>(&white),
+                                  white_layout, 1, 1, true)) {
+      vkDestroyImage(g_dev.device, g_tex.white_3d_img, nullptr);
+      g_image_memory.Free(g_dev, g_tex.white_3d_allocation);
+      g_tex.white_3d_img = VK_NULL_HANDLE;
+      return false;
+    }
     VkImageViewCreateInfo wv{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
     wv.image = g_tex.white_img;
     wv.viewType = VK_IMAGE_VIEW_TYPE_2D;
@@ -371,21 +404,29 @@ bool CreateTextureDescriptors() {
     wv.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
     VKOK(
         vkCreateImageView(g_dev.device, &wv, nullptr, &g_tex.zero_array_view));
+    wv.image = g_tex.white_3d_img;
+    wv.viewType = VK_IMAGE_VIEW_TYPE_3D;
+    VKOK(vkCreateImageView(g_dev.device, &wv, nullptr, &g_tex.zero_3d_view));
+    wv.components = {};
+    VKOK(vkCreateImageView(g_dev.device, &wv, nullptr, &g_tex.white_3d_view));
 
-    VkDescriptorSetLayout layouts[4] = {g_tex.ds_layout, g_tex.ds_layout,
-                                        g_tex.ds_layout, g_tex.ds_layout};
-    VkDescriptorSet sets[4];
+    VkDescriptorSetLayout layouts[6] = {
+        g_tex.ds_layout, g_tex.ds_layout, g_tex.ds_layout,
+        g_tex.ds_layout, g_tex.ds_layout, g_tex.ds_layout};
+    VkDescriptorSet sets[6];
     VkDescriptorSetAllocateInfo wa{
         VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
     wa.descriptorPool = g_tex.ds_pool;
-    wa.descriptorSetCount = 4;
+    wa.descriptorSetCount = 6;
     wa.pSetLayouts = layouts;
     VKOK(vkAllocateDescriptorSets(g_dev.device, &wa, sets));
     g_tex.white_set = sets[0];
     g_tex.white_array_set = sets[1];
     g_tex.zero_set = sets[2];
     g_tex.zero_array_set = sets[3];
-    VkDescriptorImageInfo infos[4] = {
+    g_tex.white_3d_set = sets[4];
+    g_tex.zero_3d_set = sets[5];
+    VkDescriptorImageInfo infos[6] = {
         {g_tex.sampler, g_tex.white_view,
          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
         {g_tex.sampler, g_tex.white_array_view,
@@ -393,16 +434,20 @@ bool CreateTextureDescriptors() {
         {g_tex.sampler, g_tex.zero_view,
          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
         {g_tex.sampler, g_tex.zero_array_view,
+         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+        {g_tex.sampler, g_tex.white_3d_view,
+         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+        {g_tex.sampler, g_tex.zero_3d_view,
          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}};
-    VkWriteDescriptorSet writes[4];
-    for (uint32_t i = 0; i < 4; i++) {
+    VkWriteDescriptorSet writes[6];
+    for (uint32_t i = 0; i < 6; i++) {
       writes[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
       writes[i].dstSet = sets[i];
       writes[i].descriptorCount = 1;
       writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
       writes[i].pImageInfo = &infos[i];
     }
-    vkUpdateDescriptorSets(g_dev.device, 4, writes, 0, nullptr);
+    vkUpdateDescriptorSets(g_dev.device, 6, writes, 0, nullptr);
   }
   g_tex.descriptors_ready = true;
   return true;
@@ -584,17 +629,21 @@ void PackTexPixels(uint8_t* linear,
                    const gcn::TextureLayout32& layout,
                    uint32_t texel_w,
                    uint32_t texel_h,
-                   VkBufferImageCopy* copies) {
+                   VkBufferImageCopy* copies,
+                   bool is_3d) {
   const uint32_t elem = layout.elem_bytes;
   const uint8_t* src = reinterpret_cast<const uint8_t*>(base);
   uint64_t linear_offset = 0;
   for (uint32_t mip = 0; mip < layout.mip_levels; mip++) {
     const auto& level = layout.mips[mip];
     copies[mip].bufferOffset = buffer_offset + linear_offset;
+    // A volume's slices are the layout's layers, but Vulkan takes them as one
+    // copy of `depth` z-slices into a single-layer image.
     copies[mip].imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, mip, 0,
-                                    layout.layers};
+                                    is_3d ? 1u : layout.layers};
     copies[mip].imageExtent = {std::max(texel_w >> mip, 1u),
-                               std::max(texel_h >> mip, 1u), 1};
+                               std::max(texel_h >> mip, 1u),
+                               is_3d ? layout.layers : 1u};
     const uint64_t layer_bytes =
         static_cast<uint64_t>(level.width) * level.height * elem;
     for (uint32_t layer = 0; layer < layout.layers; layer++) {
@@ -709,8 +758,10 @@ bool UploadTexPixelsImmediate(VkImage img,
                               uint64_t base,
                               const gcn::TextureLayout32& layout,
                               uint32_t texel_w,
-                              uint32_t texel_h) {
+                              uint32_t texel_h,
+                              bool is_3d) {
   const VkDeviceSize sz = TextureLinearBytes(layout);
+  const uint32_t barrier_layers = is_3d ? 1 : layout.layers;
   VkBuffer stg = VK_NULL_HANDLE;
   VkDeviceMemory stg_mem = VK_NULL_HANDLE;
   VkCommandBuffer command = VK_NULL_HANDLE;
@@ -746,7 +797,7 @@ bool UploadTexPixelsImmediate(VkImage img,
 
   VkBufferImageCopy copies[16]{};
   PackTexPixels(static_cast<uint8_t*>(map), 0, base, layout, texel_w, texel_h,
-                copies);
+                copies, is_3d);
   vkUnmapMemory(g_dev.device, stg_mem);
   map = nullptr;
 
@@ -767,14 +818,15 @@ bool UploadTexPixelsImmediate(VkImage img,
   }
   ImageBarrier(command, img, VK_IMAGE_LAYOUT_UNDEFINED,
                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0,
-               VK_ACCESS_TRANSFER_WRITE_BIT, layout.layers, layout.mip_levels);
+               VK_ACCESS_TRANSFER_WRITE_BIT, barrier_layers,
+               layout.mip_levels);
   vkCmdCopyBufferToImage(command, stg, img,
                          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                          layout.mip_levels, copies);
   ImageBarrier(command, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
-               layout.layers, layout.mip_levels);
+               barrier_layers, layout.mip_levels);
   const VkResult end_result = vkEndCommandBuffer(command);
   VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
   si.commandBufferCount = 1;
@@ -812,8 +864,10 @@ bool RecordTexPixels(VkImage img,
                      uint64_t base,
                      const gcn::TextureLayout32& layout,
                      uint32_t texel_w,
-                     uint32_t texel_h) {
+                     uint32_t texel_h,
+                     bool is_3d) {
   const VkDeviceSize bytes = TextureLinearBytes(layout);
+  const uint32_t barrier_layers = is_3d ? 1 : layout.layers;
   TextureUploadSlice upload;
   if (!AllocateTextureUpload(g_frame.slot_idx, bytes,
                              std::max<uint32_t>(16, layout.elem_bytes), upload))
@@ -821,7 +875,7 @@ bool RecordTexPixels(VkImage img,
   const uint64_t start = NowNs();
   VkBufferImageCopy copies[16]{};
   PackTexPixels(upload.map, upload.offset, base, layout, texel_w, texel_h,
-                copies);
+                copies, is_3d);
   EndRegion();
   const VkAccessFlags source_access =
       old_layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
@@ -829,14 +883,15 @@ bool RecordTexPixels(VkImage img,
           : 0;
   ImageBarrier(g_frame.cmd, img, old_layout,
                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, source_access,
-               VK_ACCESS_TRANSFER_WRITE_BIT, layout.layers, layout.mip_levels);
+               VK_ACCESS_TRANSFER_WRITE_BIT, barrier_layers,
+               layout.mip_levels);
   vkCmdCopyBufferToImage(g_frame.cmd, upload.buffer, img,
                          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                          layout.mip_levels, copies);
   ImageBarrier(g_frame.cmd, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
-               layout.layers, layout.mip_levels);
+               barrier_layers, layout.mip_levels);
   const uint64_t elapsed = NowNs() - start;
   g_ns_tex_up += elapsed;
   g_fr_tex_up += elapsed;
@@ -920,13 +975,46 @@ VkDescriptorSet GetTexture(uint64_t base,
                            bool arrayed,
                            bool force_lod_zero,
                            bool depth_compare,
-                           uint32_t swizzle) {
+                           uint32_t swizzle,
+                           uint32_t depth,
+                           bool is_3d) {
   constexpr uint64_t kMaxTextureBytes = 256ull * 1024 * 1024;
+  // DELTA_GPU_TEXWATCH=<base>: the head of one texture's guest memory, once per
+  // frame it is bound. A surface the guest fills after our first upload reads
+  // as its initial contents forever, and no other trace distinguishes that from
+  // memory the guest never wrote.
+  if (kTexWatch && base == (uint64_t)kTexWatch) {
+    static int watched = -1;
+    if (watched != g_frame.num && gpu::IsReadableRange(base, 32)) {
+      watched = g_frame.num;
+      const uint8_t* p = reinterpret_cast<const uint8_t*>(base);
+      std::fprintf(stderr, "[texwatch] f%d %#lx %ux%ux%u:", g_frame.num,
+                   (unsigned long)base, w, h, depth);
+      for (uint32_t i = 0; i < 32; i++)
+        std::fprintf(stderr, " %02x", p[i]);
+      std::fprintf(stderr, "\n");
+    }
+  }
   if (!w || !h || w > 8192 || h > 8192)
     return VK_NULL_HANDLE;
   VkFormat format = GuestTextureFormat(dfmt, nfmt);
   if (format == VK_FORMAT_UNDEFINED)
     return VK_NULL_HANDLE;
+  if (is_3d) {
+    // maxImageDimension3D (commonly 2048) applies to every axis of a volume,
+    // well below the 2D limits checked above.
+    static uint32_t max_3d = 0;
+    if (!max_3d) {
+      VkPhysicalDeviceProperties props;
+      vkGetPhysicalDeviceProperties(g_dev.phys, &props);
+      max_3d = props.limits.maxImageDimension3D;
+    }
+    if (!depth || depth > max_3d || w > max_3d || h > max_3d)
+      return VK_NULL_HANDLE;
+    layers = 1;
+  } else {
+    depth = 1;
+  }
   if (!layers || base_array >= layers)
     return VK_NULL_HANDLE;
   view_layers = std::min(view_layers, layers - base_array);
@@ -948,6 +1036,10 @@ VkDescriptorSet GetTexture(uint64_t base,
   const uint32_t elem_bytes = GuestFormatElemBytes(dfmt);
   if (bc && mip_levels > 1 && ((w & (w - 1)) || (h & (h - 1))))
     return VK_NULL_HANDLE;
+  // BCn volume images are an optional Vulkan feature; decline rather than
+  // create an image the driver need not support.
+  if (bc && is_3d)
+    return VK_NULL_HANDLE;
   const uint32_t lw = bc ? (w + 3) / 4 : w;
   const uint32_t lh = bc ? (h + 3) / 4 : h;
   const uint32_t lpitch =
@@ -956,8 +1048,9 @@ VkDescriptorSet GetTexture(uint64_t base,
   // DELTA_GPU_TEXFAIL: why a guest texture declines to upload. Skyrim's font
   // atlas fell out here and every glyph then sampled the white default, which
   // fills each glyph quad solid instead of masking it.
-  if (!gcn::BuildTextureLayout32(layout, lw, lh, lpitch, layers, mip_levels,
-                                 tiling, pow2_pad, elem_bytes)) {
+  // The layout's layer axis is the volume's slice axis.
+  if (!gcn::BuildTextureLayout32(layout, lw, lh, lpitch, is_3d ? depth : layers,
+                                 mip_levels, tiling, pow2_pad, elem_bytes)) {
     if (kTexFail) {
       static int n = 0;
       if (n++ < 12)
@@ -983,7 +1076,8 @@ VkDescriptorSet GetTexture(uint64_t base,
   TexKey key = TextureKey(base, w, h, dfmt, nfmt, tiling, pitch, layers,
                           base_array, view_layers, mip_levels, base_mip,
                           view_mips, min_lod, pow2_pad, sampler, sampler_valid,
-                          arrayed, force_lod_zero, depth_compare, swizzle);
+                          arrayed, force_lod_zero, depth_compare, swizzle,
+                          depth, is_3d);
   // DELTA_GPU_TEXRAW: write each large texture's raw tiled footprint, with its
   // layout in the name, so a swizzle can be worked out offline.
   if (kTexRaw && w >= 256 && h >= 128 && gpu::IsReadableRange(base, footprint)) {
@@ -1050,7 +1144,7 @@ VkDescriptorSet GetTexture(uint64_t base,
     if (image_it != g_tex_images.end() && image_it->second.hash != hsh) {
       if (!RecordTexPixels(image_it->second.image,
                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, base,
-                           layout, w, h))
+                           layout, w, h, is_3d))
         return VK_NULL_HANDLE;
       image_it->second.hash = hsh;
     }
@@ -1065,9 +1159,9 @@ VkDescriptorSet GetTexture(uint64_t base,
     image_entry.last_checked_frame = g_frame.num;
     image_entry.last_used_frame = g_frame.num;
     VkImageCreateInfo ii{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
-    ii.imageType = VK_IMAGE_TYPE_2D;
+    ii.imageType = is_3d ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D;
     ii.format = format;
-    ii.extent = {w, h, 1};
+    ii.extent = {w, h, is_3d ? depth : 1};
     ii.mipLevels = mip_levels;
     ii.arrayLayers = layers;
     ii.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -1096,7 +1190,7 @@ VkDescriptorSet GetTexture(uint64_t base,
       return VK_NULL_HANDLE;
     }
     if (!RecordTexPixels(image_entry.image, VK_IMAGE_LAYOUT_UNDEFINED, base,
-                         layout, w, h)) {
+                         layout, w, h, is_3d)) {
       vkDestroyImage(g_dev.device, image_entry.image, nullptr);
       g_image_memory.Free(g_dev, image_entry.allocation);
       return VK_NULL_HANDLE;
@@ -1126,11 +1220,13 @@ VkDescriptorSet GetTexture(uint64_t base,
     TexViewEntry view_entry;
     VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
     vci.image = image_it->second.image;
-    vci.viewType =
-        arrayed ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
+    vci.viewType = is_3d      ? VK_IMAGE_VIEW_TYPE_3D
+                   : arrayed  ? VK_IMAGE_VIEW_TYPE_2D_ARRAY
+                              : VK_IMAGE_VIEW_TYPE_2D;
     vci.format = format;
     vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, base_mip, view_mips,
-                            base_array, arrayed ? view_layers : 1};
+                            is_3d ? 0u : base_array,
+                            (arrayed && !is_3d) ? view_layers : 1u};
     // T# DST_SEL: 0 = zero, 1 = one, 4..7 = R/G/B/A. A single-channel mask (a
     // font atlas) selects its coverage into the components the shader reads;
     // without this every glyph samples alpha = 1 and fills solid.
@@ -1172,14 +1268,14 @@ VkImageView TexViewFor(const DrawInfo::DrawTex& t) {
   if (GetTexture(t.base, t.w, t.h, t.dfmt, t.nfmt, t.tiling, t.pitch, t.layers,
                  t.base_array, t.view_layers, t.mip_levels, t.base_mip,
                  t.view_mips, t.min_lod, t.pow2_pad, t.sampler, t.sampler_valid,
-                 t.arrayed, t.force_lod_zero, t.depth_compare,
-                 t.swizzle) == VK_NULL_HANDLE)
+                 t.arrayed, t.force_lod_zero, t.depth_compare, t.swizzle,
+                 t.depth, t.is_3d) == VK_NULL_HANDLE)
     return VK_NULL_HANDLE;
   TexKey key = TextureKey(
       t.base, t.w, t.h, t.dfmt, t.nfmt, TextureTiling(t.tiling), t.pitch,
       t.layers, t.base_array, t.view_layers, t.mip_levels, t.base_mip,
       t.view_mips, t.min_lod, t.pow2_pad, t.sampler, t.sampler_valid, t.arrayed,
-      t.force_lod_zero, t.depth_compare, t.swizzle);
+      t.force_lod_zero, t.depth_compare, t.swizzle, t.depth, t.is_3d);
   auto it = g_tex_views.find(TextureViewKey(key));
   return it != g_tex_views.end() ? it->second.view : VK_NULL_HANDLE;
 }
@@ -1281,7 +1377,8 @@ VkDescriptorSet GetMultiTexSet(const DrawInfo& d,
         t.base, t.w, t.h, t.dfmt, t.nfmt, TextureTiling(t.tiling), t.pitch,
         t.layers, t.base_array, t.view_layers, t.mip_levels, t.base_mip,
         t.view_mips, t.min_lod, t.pow2_pad, t.sampler, t.sampler_valid,
-        t.arrayed, t.force_lod_zero, t.depth_compare, t.swizzle);
+        t.arrayed, t.force_lod_zero, t.depth_compare, t.swizzle, t.depth,
+        t.is_3d);
     key.view[i] = resolved_views[i];
     key.layout[i] = resolved_layouts[i];
     key.storage[i] = d.texs[i].storage;
@@ -1307,6 +1404,7 @@ VkDescriptorSet GetMultiTexSet(const DrawInfo& d,
     VkImageView v =
         (i < key.num_texs && !kForceWhite) ? resolved_views[i] : VK_NULL_HANDLE;
     bool arrayed = i < key.num_texs && d.texs[i].arrayed;
+    bool is_3d = i < key.num_texs && d.texs[i].is_3d;
     if (kTexMiss && !v && i < key.num_texs && tex_miss_logged < 64) {
       tex_miss_logged++;
       const auto& t = d.texs[i];
@@ -1319,7 +1417,10 @@ VkDescriptorSet GetMultiTexSet(const DrawInfo& d,
     }
     if (d.texs[i].storage && !v)
       return VK_NULL_HANDLE;
-    views[i] = v ? v : (arrayed ? g_tex.white_array_view : g_tex.white_view);
+    VkImageView fallback =
+        is_3d ? g_tex.white_3d_view
+              : (arrayed ? g_tex.white_array_view : g_tex.white_view);
+    views[i] = v ? v : fallback;
     layouts[i] =
         v ? resolved_layouts[i] : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
   }

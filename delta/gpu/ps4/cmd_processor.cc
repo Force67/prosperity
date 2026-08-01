@@ -81,10 +81,16 @@ uint32_t g_presented_frames = 0;
 struct ShaderKey {
   uint64_t vs = 0, ps = 0, fetch = 0;
   uint32_t ps_input_ena = 0;
+  // Which PS samplers read a volume image. Unlike the 2D-array case, whose DA
+  // bit lives in the instruction, a 3D descriptor is indistinguishable in the
+  // code: the same PS sampled with a 2D T# must translate to a different
+  // module, so the dimensionality belongs in the key.
+  uint32_t tex_3d_mask = 0;
   bool neo = false;
   bool operator==(const ShaderKey& o) const {
     return vs == o.vs && ps == o.ps && fetch == o.fetch &&
-           ps_input_ena == o.ps_input_ena && neo == o.neo;
+           ps_input_ena == o.ps_input_ena && tex_3d_mask == o.tex_3d_mask &&
+           neo == o.neo;
   }
 };
 struct ShaderKeyHash {
@@ -93,6 +99,7 @@ struct ShaderKeyHash {
         (k.vs ^ (k.ps + 0x9e3779b97f4a7c15ull + (k.vs << 6) + (k.vs >> 2)));
     h ^= k.fetch + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
     h ^= k.ps_input_ena + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
+    h ^= k.tex_3d_mask + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
     h ^= static_cast<uint64_t>(k.neo) << 63;
     return static_cast<size_t>(h);
   }
@@ -257,7 +264,8 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
       for (int k = 0; k < 16; k++)
         std::fprintf(stderr, " %08x", pud[k]);
       std::fprintf(stderr, "\n");
-      auto texs = gcn::TrackTextures(gcn::CachedProgram(ps_a, 4096), pud);
+      auto texs = gcn::TrackTextures(gcn::CachedProgram(ps_a, 4096), pud, false,
+                                     ps_a);
       std::fprintf(stderr, "[gpu]   TrackTextures -> %zu\n", texs.size());
       if (!texs.empty() && texs[0].valid) {
         auto& t = texs[0];
@@ -481,6 +489,7 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
     // Per-MRT channel write mask (MRT0 = bits[3:0]) and overall colour-control
     // mode.
     d.target_mask = g_regs[mmCB_TARGET_MASK];
+    d.shader_mask = g_regs[mmCB_SHADER_MASK];
     // GNM fast clear: RECT_LIST (VGT prim 17), no pixel shader, no vertex
     // attributes, at least one colour target bound. The clear colour is in
     // CB_COLORn_CLEAR_WORD0/1, encoded in each target's own format. A
@@ -599,6 +608,7 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
     // sprite vertex format is {pos.xyzw @0, color @0x10, uv.xy @0x1c} in a
     // 64-byte vertex, so the UV lives in the position buffer at offset 0x1c.
     std::shared_ptr<const gcn::Program> ps_prog;
+    uint32_t tex_3d_mask = 0;
     if (ps_a >= 0x1000000000ull && ps_a < 0x20000000000ull) {
       ps_prog = gcn::CachedProgram(ps_a, 4096);
       const uint32_t frame = g_presented_frames + 1;
@@ -608,7 +618,7 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
         std::fprintf(stderr, "[textrack] f%u ps=%#lx\n", frame,
                      (unsigned long)ps_a);
       auto texs = gcn::TrackTextures(
-          ps_prog, &g_regs[mmSPI_SHADER_USER_DATA_PS_0], trace_tex);
+          ps_prog, &g_regs[mmSPI_SHADER_USER_DATA_PS_0], trace_tex, ps_a);
       if (!texs.empty()) {
         // Preserve every valid GFX7 T# address. Format support is relevant only
         // when uploading guest memory; a T# with R32F/RG16F/RGBA16F semantics
@@ -621,6 +631,7 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
         d.tex_nfmt = texs[0].nfmt;
         d.tex_tiling = texs[0].tiling_idx;
         d.tex_pitch = texs[0].pitch;
+        d.tex_depth = texs[0].depth;
         d.tex_layers = texs[0].layers;
         d.tex_base_array = texs[0].base_array;
         d.tex_view_layers = texs[0].view_layers;
@@ -632,6 +643,7 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
         d.tex_pow2_pad = texs[0].pow2_pad;
         d.tex_sampler_valid = texs[0].sampler_valid;
         d.tex_arrayed = texs[0].arrayed;
+        d.tex_is_3d = texs[0].is_3d;
         d.tex_force_lod_zero = texs[0].force_lod_zero;
         d.tex_depth_compare = texs[0].depth_compare;
         d.tex_null_descriptor = texs[0].null_descriptor;
@@ -650,6 +662,7 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
           dt.nfmt = t.nfmt;
           dt.tiling = t.tiling_idx;
           dt.pitch = t.pitch;
+          dt.depth = t.depth;
           dt.layers = t.layers;
           dt.base_array = t.base_array;
           dt.view_layers = t.view_layers;
@@ -661,6 +674,9 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
           std::memcpy(dt.sampler, t.sampler, sizeof(dt.sampler));
           dt.sampler_valid = t.sampler_valid;
           dt.arrayed = t.arrayed;
+          dt.is_3d = t.is_3d;
+          if (t.is_3d)
+            tex_3d_mask |= 1u << i;
           dt.force_lod_zero = t.force_lod_zero;
           dt.depth_compare = t.depth_compare;
           dt.storage = t.storage;
@@ -718,7 +734,7 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
           sh_cache;
       const bool neo = gcn::DefaultIsaMode() == gcn::IsaMode::kNeo;
       const uint32_t ps_input_ena = g_regs[mmSPI_PS_INPUT_ENA];
-      ShaderKey key{vs_a, ps_a, fetch, ps_input_ena, neo};
+      ShaderKey key{vs_a, ps_a, fetch, ps_input_ena, tex_3d_mask, neo};
       auto it = sh_cache.find(key);
       if (it == sh_cache.end())
         it = sh_cache
@@ -727,7 +743,7 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
                                     reinterpret_cast<const uint32_t*>(ps_a),
                                     &g_regs[mmSPI_SHADER_USER_DATA_VS_0],
                                     &g_regs[mmSPI_SHADER_USER_DATA_PS_0],
-                                    ps_input_ena))
+                                    ps_input_ena, tex_3d_mask))
                  .first;
       gcn::Recompiled& rc = it->second;
       recomp_status = rc.ok ? "bad-attrs" : "rejected";
@@ -1009,7 +1025,8 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
                    g_regs[mmCB_COLOR0_INFO], g_regs[mmCB_COLOR0_ATTRIB]);
       if (ps_a >= 0x1000000000ull && ps_a < 0x20000000000ull) {
         auto texs = gcn::TrackTextures(gcn::CachedProgram(ps_a, 4096),
-                                       &g_regs[mmSPI_SHADER_USER_DATA_PS_0]);
+                                       &g_regs[mmSPI_SHADER_USER_DATA_PS_0],
+                                       false, ps_a);
         std::fprintf(stderr, "[blit]   TrackTextures -> %zu T#\n", texs.size());
         for (auto& t : texs)
           std::fprintf(stderr,

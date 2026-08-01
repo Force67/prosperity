@@ -68,9 +68,10 @@ struct Translator {
   std::unordered_map<uint32_t, Id> cbuf_vars;  // binding -> cbuffer UBO var
   Id gfx_buf_type = 0;  // shared Buf { uint data[]; } type (set 2)
   std::unordered_map<uint32_t, Id> gfx_buf_vars;  // binding -> raw-buffer SSBO
-  Id img_types[4] = {};          // sampled 2D / 2D-array, color / depth images
-  Id sampled_types[4] = {};      // corresponding combined image-sampler types
-  Id sampled_ptrs[4] = {};       // UniformConstant pointers to sampled_types
+  // Indexed by (arrayed ? 1 : 0) | (dref ? 2 : 0) | (3D ? 4 : 0).
+  Id img_types[8] = {};          // sampled 2D / 2D-array / 3D, color / depth
+  Id sampled_types[8] = {};      // corresponding combined image-sampler types
+  Id sampled_ptrs[8] = {};       // UniformConstant pointers to sampled_types
   Id storage_img_types[2] = {};  // storage 2D / 2D-array images
   Id storage_img_ptrs[2] = {};   // UniformConstant pointers to storage images
   bool image_query = false;
@@ -465,6 +466,10 @@ struct StageContext {
   static constexpr uint32_t kMaxPsSamplers = 16;  // == gpu::vk::kMaxTex
   Id tex_vars[kMaxPsSamplers] = {};
   uint32_t tex_types[kMaxPsSamplers] = {};
+  // Bit i set: binding i's T# is SQ_RSRC_IMG_3D. Nothing in the MIMG encoding
+  // says so (a 3D descriptor leaves DA 0), so the caller has to supply it from
+  // the decoded descriptors, and it belongs in the shader cache key.
+  uint32_t tex_3d_mask = 0;
 
   // shared graphics
   std::unordered_map<uint32_t, uint32_t> cbuf_bind;  // V# SGPR -> set-1 binding
@@ -570,11 +575,11 @@ void EmitMimg(Translator& t,
               const Inst& inst,
               StageContext& sc,
               const Id* address = nullptr);
-// Assign a set-2 storage-buffer binding to every raw MUBUF in a graphics
-// stage, skipping the instructions `claimed` already serves as vertex inputs.
-// Instructions sharing one descriptor (same SGPR quad, same producing scalar
-// load) share a binding; anything past kMaxGfxBuffers is left unplanned and
-// warns at emit time, exactly as an unimplemented op would.
+// Assign a set-2 storage-buffer binding to every raw MUBUF/MTBUF load in a
+// graphics stage, skipping the instructions `claimed` already serves as vertex
+// inputs. Instructions sharing one descriptor (same SGPR quad, same producing
+// scalar load) share a binding; anything past kMaxGfxBuffers is left unplanned
+// and warns at emit time, exactly as an unimplemented op would.
 void PlanGfxBuffers(const Program& program,
                     uint32_t first_binding,
                     const std::unordered_set<uint32_t>* claimed,
@@ -582,6 +587,9 @@ void PlanGfxBuffers(const Program& program,
                     std::unordered_map<uint32_t, uint32_t>& bindings,
                     const uint8_t* reachable = nullptr);
 void EmitGfxMubuf(Translator& t, const Inst& inst, StageContext& sc);
+// Typed buffer op in a graphics stage. Loads go through the same set-2 window
+// as EmitGfxMubuf; a store is dropped, because that window is not written back.
+void EmitGfxMtbuf(Translator& t, const Inst& inst, StageContext& sc);
 bool PlanCsResources(const Program& program,
                      const uint8_t* reachable,
                      uint32_t lds_dwords,

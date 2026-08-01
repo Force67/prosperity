@@ -21,6 +21,9 @@ VkFormat GuestTextureFormat(uint32_t dfmt, uint32_t nfmt);
 bool GuestFormatBlockCompressed(uint32_t dfmt);
 uint32_t GuestFormatElemBytes(uint32_t dfmt);
 VkFormat ColorTargetFormat(uint32_t info);
+VkClearColorValue ColorTargetClearValue(uint32_t info,
+                                        uint32_t word0,
+                                        uint32_t word1);
 VkComponentMapping TextureComponents(uint32_t swizzle);
 uint32_t FormatBytes(VkFormat fmt);
 

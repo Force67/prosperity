@@ -99,17 +99,72 @@ uint64_t MimgDescriptorKey(uint32_t srsrc,
 // Register file: 128 SGPRs; a T# SBASE (5 bits * 4) reaches s124, +8 = s132, so
 // size for the descriptor tail. `known` marks which dwords hold a resolved
 // value (seeded user data, or a value read from guest memory).
+// SOP1/SOP2 opcodes whose destination is an SGPR pair, so an unmodelled one
+// invalidates both halves (Sea Islands numbering, as in gcn_disasm's tables).
+bool Sop1DestIs64(uint32_t op) {
+  switch (op) {
+    case 0x04:  // s_mov_b64
+    case 0x06:  // s_cmov_b64
+    case 0x08:  // s_not_b64
+    case 0x0a:  // s_wqm_b64
+    case 0x0c:  // s_brev_b64
+    case 0x1c:  // s_bitset0_b64
+    case 0x1e:  // s_bitset1_b64
+    case 0x1f:  // s_getpc_b64
+    case 0x21:  // s_swappc_b64
+    case 0x24:  // s_*_saveexec_b64
+    case 0x25:
+    case 0x26:
+    case 0x27:
+    case 0x28:
+    case 0x29:
+    case 0x2a:
+    case 0x2b:
+    case 0x2d:  // s_quadmask_b64
+    case 0x2f:  // s_movrels_b64
+    case 0x31:  // s_movreld_b64
+      return true;
+    default:
+      return false;
+  }
+}
+
+bool Sop2DestIs64(uint32_t op) {
+  switch (op) {
+    case 0x0b:  // s_cselect_b64
+    case 0x0f:  // s_and_b64
+    case 0x11:  // s_or_b64
+    case 0x13:  // s_xor_b64
+    case 0x15:  // s_andn2_b64
+    case 0x17:  // s_orn2_b64
+    case 0x19:  // s_nand_b64
+    case 0x1b:  // s_nor_b64
+    case 0x1d:  // s_xnor_b64
+    case 0x1f:  // s_lshl_b64
+    case 0x21:  // s_lshr_b64
+    case 0x23:  // s_ashr_i64
+    case 0x25:  // s_bfm_b64
+    case 0x29:  // s_bfe_u64
+    case 0x2a:  // s_bfe_i64
+      return true;
+    default:
+      return false;
+  }
+}
+
 struct ScalarEval {
   static constexpr uint32_t kRegs = 136;
   uint32_t sgpr[kRegs] = {};
   bool known[kRegs] = {};
   bool trace = false;
+  uint64_t code_base = 0;  // guest address of the program, for s_getpc_b64
 
-  explicit ScalarEval(const uint32_t* user_data) {
+  explicit ScalarEval(const uint32_t* user_data, uint64_t base = 0) {
     for (uint32_t i = 0; i < 16; i++) {
       sgpr[i] = user_data[i];
       known[i] = true;
     }
+    code_base = base;
     trace = kGpuEudtrace;
   }
 
@@ -203,21 +258,101 @@ struct ScalarEval {
           Clear(sdst);
           Clear(sdst + 1);
         }
+      } else if (inst.opcode == 0x1f) {  // s_getpc_b64: address of the NEXT inst
+        if (code_base) {
+          const uint64_t pc =
+              code_base + static_cast<uint64_t>(inst.pc + inst.size) * 4;
+          Set(sdst, static_cast<uint32_t>(pc));
+          Set(sdst + 1, static_cast<uint32_t>(pc >> 32));
+        } else {
+          Clear(sdst);
+          Clear(sdst + 1);
+        }
+      } else {
+        // Everything else still WRITES sdst on hardware. Leaving our shadow
+        // untouched kept a stale value there, and a descriptor decoded from it
+        // is garbage that reads as a valid-looking T# -- worse than an
+        // unresolved one, which at least falls back cleanly.
+        Clear(sdst);
+        if (Sop1DestIs64(inst.opcode))
+          Clear(sdst + 1);
+      }
+      return;
+    }
+    if (inst.enc == Enc::kSopk) {
+      const uint32_t w = inst.raw[0];
+      const uint32_t sdst = (w >> 16) & 0x7F;
+      const uint32_t simm =
+          static_cast<uint32_t>(static_cast<int32_t>(static_cast<int16_t>(w)));
+      switch (inst.opcode) {
+        case 0x00:  // s_movk_i32
+          Set(sdst, simm);
+          break;
+        case 0x0f:  // s_addk_i32
+          if (known[sdst])
+            Set(sdst, sgpr[sdst] + simm);
+          break;
+        case 0x10:  // s_mulk_i32
+          if (known[sdst])
+            Set(sdst, sgpr[sdst] * simm);
+          break;
+        case 0x03:  // s_cmpk_*: SCC only, no SGPR destination
+        case 0x04:
+        case 0x05:
+        case 0x06:
+        case 0x07:
+        case 0x08:
+        case 0x09:
+        case 0x0a:
+        case 0x0b:
+        case 0x0c:
+        case 0x0d:
+        case 0x0e:
+        case 0x11:  // s_cbranch_i_fork
+        case 0x13:  // s_setreg_b32
+        case 0x15:  // s_setreg_imm32_b32
+          break;
+        default:
+          Clear(sdst);
+          break;
       }
       return;
     }
     if (inst.enc == Enc::kSop2) {
       const uint32_t w = inst.raw[0], op = inst.opcode;
       const uint32_t sdst = (w >> 16) & 0x7F;
+      const bool dest64 = Sop2DestIs64(op);
       uint32_t a, b;
       const bool inputs_known = Source(w & 0xFF, inst.literal, a) &&
                                 Source((w >> 8) & 0xFF, inst.literal, b);
       if (!inputs_known) {
         Clear(sdst);
+        if (dest64)
+          Clear(sdst + 1);
         return;
       }
       uint32_t value;
       switch (op) {
+        case 0x06:
+          value = static_cast<uint32_t>(
+              std::min(static_cast<int32_t>(a), static_cast<int32_t>(b)));
+          break;
+        case 0x07:
+          value = std::min(a, b);
+          break;
+        case 0x08:
+          value = static_cast<uint32_t>(
+              std::max(static_cast<int32_t>(a), static_cast<int32_t>(b)));
+          break;
+        case 0x09:
+          value = std::max(a, b);
+          break;
+        case 0x27: {  // s_bfe_u32: src1[4:0] offset, src1[22:16] width
+          const uint32_t width = (b >> 16) & 0x7F;
+          value = width >= 32 ? (a >> (b & 31))
+                              : ((a >> (b & 31)) & ((1u << width) - 1));
+          break;
+        }
         case 0x00:
         case 0x02:
           value = a + b;
@@ -264,6 +399,8 @@ struct ScalarEval {
           break;
         default:
           Clear(sdst);
+          if (dest64)
+            Clear(sdst + 1);
           return;
       }
       Set(sdst, value);
@@ -366,10 +503,13 @@ const ScalarPassInfo& CachedScalarInfo(
   for (const Inst& inst : *program) {
     if (!reachable[index++])
       continue;
-    const bool scalar_op =
-        inst.enc == Enc::kSop1 && (inst.opcode == 0x03 || inst.opcode == 0x04);
-    if (scalar_op || inst.enc == Enc::kSop2 || inst.enc == Enc::kSmrd ||
-        inst.enc == Enc::kMimg || inst.enc == Enc::kMubuf)
+    // Every SOP1/SOPK writes an SGPR, so all of them must reach the walk: the
+    // ones it models advance the state, the rest invalidate their destination
+    // instead of leaving a stale value for a later descriptor decode to read.
+    if (inst.enc == Enc::kSop1 || inst.enc == Enc::kSopk ||
+        inst.enc == Enc::kSop2 || inst.enc == Enc::kSmrd ||
+        inst.enc == Enc::kMimg || inst.enc == Enc::kMubuf ||
+        inst.enc == Enc::kMtbuf)
       e.info.insts.push_back(inst);
   }
   return cache.emplace(program.get(), std::move(e)).first->second.info;
@@ -498,16 +638,27 @@ TImage DecodeTImage(const uint32_t* p) {
     if (t.base_array < t.layers && last_array >= t.base_array)
       t.view_layers = std::min(last_array, t.layers - 1) - t.base_array + 1;
   }
+  if (t.type == 10) {  // SQ_RSRC_IMG_3D: dword 4 holds slices, not layers
+    t.is_3d = true;
+    t.depth = (p[4] & 0x1FFF) + 1;
+    if (t.pow2_pad)
+      t.depth = NextPow2(t.depth);
+  }
 
-  const bool supported_type = t.type == 9 || t.type == 13;
+  const bool supported_type = t.type == 9 || t.type == 10 || t.type == 13;
   const bool valid_view =
       t.type != 13 || (t.base_array < t.layers && t.view_layers > 0);
   uint32_t max_levels = 1;
   for (uint32_t extent = std::max(t.width, t.height); extent > 1; extent >>= 1)
     max_levels++;
   const bool valid_mips = t.view_mips && t.mip_levels <= max_levels;
+  // A volume image only halves width/height per mip in our layout builder, so
+  // the slice count of mip n would be wrong. Nothing observed ships a mipped
+  // 3D texture; take only the single-level case rather than guessing a layout.
+  const bool valid_3d = !t.is_3d || (t.depth <= 2048 && t.mip_levels == 1);
   t.valid = GuestRange(t.base, 1) && supported_type && t.width <= 8192 &&
-            t.height <= 8192 && t.layers <= 8192 && valid_view && valid_mips;
+            t.height <= 8192 && t.layers <= 8192 && valid_view && valid_mips &&
+            valid_3d;
   return t;
 }
 
@@ -556,7 +707,8 @@ std::vector<VBuffer> TrackVertexBuffers(const Program& fetch_program,
 std::vector<TImage> TrackTextures(
     const std::shared_ptr<const Program>& ps_program,
     const uint32_t* ps_user_data,
-    bool trace) {
+    bool trace,
+    uint64_t code_base) {
   std::vector<TImage> result;
   if (!ps_program || !ps_user_data)
     return result;
@@ -569,7 +721,7 @@ std::vector<TImage> TrackTextures(
   // Step the scalar register file across the program; at each MIMG read the
   // live T#/S# straight out of the resolved SGPRs. Inline user data, a single
   // indirect load, and nested EUD chains all land here identically.
-  ScalarEval eval(ps_user_data);
+  ScalarEval eval(ps_user_data, code_base);
   eval.trace |= trace;
 
   for (const Inst& inst : cached.insts) {
@@ -718,7 +870,7 @@ std::vector<VBuffer> ResolveDirectVertexBuffers(
   ScalarEval eval(user_data);
   for (const Inst& inst : CachedScalarInfo(program).insts) {
     eval.Step(inst);
-    if (inst.enc != Enc::kMubuf)
+    if (inst.enc != Enc::kMubuf && inst.enc != Enc::kMtbuf)
       continue;
     for (size_t i = 0; i < attrs.size(); i++) {
       const ShaderAttr& attr = attrs[i];
@@ -757,7 +909,7 @@ std::vector<VBuffer> ResolveShaderBuffers(
   ScalarEval eval(user_data);
   for (const Inst& inst : CachedScalarInfo(program).insts) {
     eval.Step(inst);
-    if (inst.enc != Enc::kMubuf)
+    if (inst.enc != Enc::kMubuf && inst.enc != Enc::kMtbuf)
       continue;
     for (size_t i = 0; i < buffers.size(); i++) {
       const ShaderBuffer& buffer = buffers[i];

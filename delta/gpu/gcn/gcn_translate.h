@@ -97,6 +97,7 @@ struct ShaderTex {
   uint32_t binding = 0;
   uint32_t ud_sgpr = 0;  // PS user-data dword index of the 8-dword T#
   bool storage = false;  // image_store binding rather than a sampled image
+  bool is_3d = false;    // volume image (T# type SQ_RSRC_IMG_3D)
 };
 
 struct Recompiled {
@@ -117,11 +118,16 @@ struct Recompiled {
 // Recompile a VS+PS pair. vs_code/ps_code are guest pointers to the GCN code;
 // the user-data arrays are the 16 user SGPRs for each stage (used only to read
 // the fetch-shader pointer during translation, not the live resources).
+// tex_3d_mask has bit i set when PS sampler binding i is a 3D image. A 3D
+// resource is invisible in the MIMG encoding (the DA bit stays 0), so it has to
+// come from the caller's decoded T#s, and it must be part of the cache key: the
+// same code sampled through a 2D and a 3D descriptor is two different modules.
 Recompiled Recompile(const uint32_t* vs_code,
                       const uint32_t* ps_code,
                       const uint32_t* vs_user_data,
                       const uint32_t* ps_user_data,
-                      uint32_t ps_input_ena = 0);
+                      uint32_t ps_input_ena = 0,
+                      uint32_t tex_3d_mask = 0);
 
 // A memory resource a compute shader touches. The descriptor may be inline in
 // user data or loaded through an SRT chain; `base_sgpr` names its live location

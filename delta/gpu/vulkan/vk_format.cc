@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <utl/options.h>
@@ -63,6 +64,10 @@ float PackedUfloat(uint32_t value, uint32_t mantissa_bits) {
     return mantissa ? NAN : INFINITY;
   return std::ldexp(1.0f + static_cast<float>(mantissa) / (1u << mantissa_bits),
                     static_cast<int>(exponent) - 15);
+}
+
+int32_t SignExtend(uint32_t value, uint32_t bits) {
+  return static_cast<int32_t>(value << (32 - bits)) >> (32 - bits);
 }
 
 }  // namespace
@@ -214,6 +219,118 @@ VkFormat ColorTargetFormat(uint32_t info) {
     }
   }
   return kDefaultRtFormat;
+}
+
+// CB_COLORn_CLEAR_WORD0/1 hold the fast-clear colour already encoded in the
+// target's own surface format, component 0 at bit 0. Vulkan takes a clear value
+// in R,G,B,A component order and applies the format's channel order itself, so
+// the guest components map straight across even though ColorTargetFormat picks
+// a BGRA host format for 8_8_8_8.
+VkClearColorValue ColorTargetClearValue(uint32_t info,
+                                        uint32_t word0,
+                                        uint32_t word1) {
+  const uint32_t dfmt = (info >> 2) & 0x1F;
+  const uint32_t nfmt = (info >> 8) & 0x7;
+  const auto unmapped = [&](const char* what) {
+    static int n = 0;
+    if (n++ < 8)
+      std::fprintf(stderr,
+                   "[gpuvk] clear word: unmapped %s (info=%#x dfmt=%u nfmt=%u "
+                   "words %08x %08x), clearing to opaque black\n",
+                   what, info, dfmt, nfmt, word0, word1);
+    return VkClearColorValue{{0.0f, 0.0f, 0.0f, 1.0f}};
+  };
+  uint32_t width[4] = {0, 0, 0, 0};
+  switch (dfmt) {
+    case 1:  // 8
+      width[0] = 8;
+      break;
+    case 2:  // 16
+      width[0] = 16;
+      break;
+    case 3:  // 8_8
+      width[0] = width[1] = 8;
+      break;
+    case 4:  // 32
+      width[0] = 32;
+      break;
+    case 5:  // 16_16
+      width[0] = width[1] = 16;
+      break;
+    case 6:  // 10_11_11
+      width[0] = width[1] = 11;
+      width[2] = 10;
+      break;
+    case 9:  // 2_10_10_10
+      width[0] = width[1] = width[2] = 10;
+      width[3] = 2;
+      break;
+    case 10:  // 8_8_8_8
+      width[0] = width[1] = width[2] = width[3] = 8;
+      break;
+    case 11:  // 32_32
+      width[0] = width[1] = 32;
+      break;
+    case 12:  // 16_16_16_16
+      width[0] = width[1] = width[2] = width[3] = 16;
+      break;
+    case 13:  // 32_32_32
+    case 14:  // 32_32_32_32
+      // The clear words are 64 bits, so only the low two components of a wider
+      // texel are representable at all.
+      width[0] = width[1] = 32;
+      break;
+    default:
+      return unmapped("colour format");
+  }
+  const uint64_t packed =
+      static_cast<uint64_t>(word0) | static_cast<uint64_t>(word1) << 32;
+  VkClearColorValue out{};
+  // Seed opaque: a format with fewer than four components never writes alpha,
+  // and a transparent target is a hole in a deferred composite.
+  if (nfmt == 4 || nfmt == 5)
+    out.uint32[3] = 1;
+  else
+    out.float32[3] = 1.0f;
+  uint32_t shift = 0;
+  for (uint32_t i = 0; i < 4 && width[i]; i++) {
+    const uint32_t bits = width[i];
+    const uint64_t mask = bits == 32 ? 0xFFFFFFFFull : (1ull << bits) - 1;
+    const uint32_t raw = static_cast<uint32_t>((packed >> shift) & mask);
+    shift += bits;
+    switch (nfmt) {
+      case 0:  // UNORM
+      case 6:  // SRGB: ColorTargetFormat gives it a UNORM host image, so the
+               // encoded value has to pass through unconverted
+        out.float32[i] = static_cast<float>(raw) / static_cast<float>(mask);
+        break;
+      case 1:  // SNORM
+        out.float32[i] =
+            std::max(static_cast<float>(SignExtend(raw, bits)) /
+                         static_cast<float>((1u << (bits - 1)) - 1),
+                     -1.0f);
+        break;
+      case 4:  // UINT
+        out.uint32[i] = raw;
+        break;
+      case 5:  // SINT
+        out.int32[i] = SignExtend(raw, bits);
+        break;
+      case 7:  // FLOAT
+        if (bits == 32)
+          std::memcpy(&out.float32[i], &raw, sizeof(raw));
+        else if (bits == 16)
+          out.float32[i] = HalfToFloat(static_cast<uint16_t>(raw));
+        else if (bits == 11 || bits == 10)
+          out.float32[i] = PackedUfloat(raw, bits - 5);
+        else
+          return unmapped("float width");
+        break;
+      default:
+        return unmapped("number type");
+    }
+  }
+  return out;
 }
 
 VkComponentMapping TextureComponents(uint32_t swizzle) {
