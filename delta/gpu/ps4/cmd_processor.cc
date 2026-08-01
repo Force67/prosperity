@@ -2196,12 +2196,21 @@ void SubmitDcb(const void* dcb, uint32_t size_bytes) {
               copied = true;
             }
             if (kGpuDmatrace) {
+              // Shader prefetches (src==dst) outnumber real transfers by
+              // thousands to one and used to eat the whole trace cap, which
+              // made "this title never CP-DMAs anything" unfalsifiable. Count
+              // every packet by class and spend the cap on transfers only.
+              static std::atomic<uint64_t> n_all{0}, n_prefetch{0}, n_copy{0},
+                  n_reject{0};
               static int dmn = 0;
-              // Shader-prefetch packets target a low register address and
-              // otherwise consume the trace cap before uploads begin. Keep
-              // only real guest destinations and immediate fills, and report
-              // what was actually done.
-              if (dmn < 200 && (src_sel == 2 || mem_ok(dst))) {
+              n_all.fetch_add(1);
+              if (src == dst)
+                n_prefetch.fetch_add(1);
+              else if (copied)
+                n_copy.fetch_add(1);
+              else
+                n_reject.fetch_add(1);
+              if (src != dst && dmn < 200) {
                 dmn++;
                 std::fprintf(stderr,
                              "[dma] ctrl=%#x cmd=%#x srcSel=%u dstSel=%u "
@@ -2210,6 +2219,14 @@ void SubmitDcb(const void* dcb, uint32_t size_bytes) {
                              (unsigned long)src, (unsigned long)dst, bytes,
                              copied ? "copied" : "ignored");
               }
+              if ((n_all.load() % 20000) == 0)
+                std::fprintf(stderr,
+                             "[dma] totals: %llu packets, %llu prefetch "
+                             "(src==dst), %llu copied, %llu rejected\n",
+                             (unsigned long long)n_all.load(),
+                             (unsigned long long)n_prefetch.load(),
+                             (unsigned long long)n_copy.load(),
+                             (unsigned long long)n_reject.load());
             }
           }
           break;

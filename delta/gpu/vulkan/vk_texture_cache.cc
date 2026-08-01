@@ -21,9 +21,12 @@
 #include "gpu/vulkan/vk_upload_ring.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
+#include <mutex>
 #include <unordered_map>
 #include <unordered_set>
 #include <utl/options.h>
@@ -41,6 +44,7 @@ DELTA_OPTION(bool, kTexFail, "DELTA_GPU_TEXFAIL", false);
 DELTA_OPTION(bool, kTexMiss, "DELTA_GPU_TEXMISS", false);
 DELTA_OPTION(bool, kTexRaw, "DELTA_GPU_TEXRAW", false);
 DELTA_OPTION(uint64_t, kTexWatch, "DELTA_GPU_TEXWATCH", 0);
+DELTA_OPTION(int, kTexCensus, "DELTA_GPU_TEXCENSUS", 0);
 }  // namespace
 
 namespace gpu::vk {
@@ -1085,6 +1089,45 @@ VkDescriptorSet GetTexture(uint64_t base,
                      (unsigned long)kMaxTextureBytes);
     }
     return VK_NULL_HANDLE;
+  }
+  // DELTA_GPU_TEXCENSUS=<seconds>: every distinct guest surface the GPU
+  // samples, with its real footprint and whether that footprint holds any
+  // non-zero byte. One watched address answers "is THIS texture empty"; the
+  // census answers "which of the title's surfaces are filled and which are
+  // not", which is what separates a broken upload from a broken descriptor.
+  if (kTexCensus && gpu::IsReadableRange(base, footprint)) {
+    struct Cell {
+      uint32_t w, h, dfmt, nfmt, tiling, mips;
+      uint64_t footprint, binds;
+    };
+    static std::mutex m;
+    static std::map<uint64_t, Cell> tbl;
+    static auto last = std::chrono::steady_clock::now();
+    std::lock_guard<std::mutex> lk(m);
+    Cell& c = tbl[base];
+    c = {w, h, dfmt, nfmt, tiling, mip_levels, footprint, c.binds + 1};
+    const auto now = std::chrono::steady_clock::now();
+    if (std::chrono::duration_cast<std::chrono::seconds>(now - last).count() >=
+        kTexCensus) {
+      last = now;
+      std::fprintf(stderr, "[texcensus] %zu surfaces\n", tbl.size());
+      for (const auto& kv : tbl) {
+        const auto* p = reinterpret_cast<const uint64_t*>(kv.first);
+        uint64_t nz = 0;
+        if (gpu::IsReadableRange(kv.first, kv.second.footprint))
+          for (uint64_t i = 0; i < kv.second.footprint / 8; i++)
+            if (p[i])
+              nz++;
+        std::fprintf(stderr,
+                     "[texcensus] %#lx %5ux%-5u dfmt=%2u nfmt=%u tile=%2u "
+                     "mips=%2u bytes=%-9lu nzq=%lu binds=%lu\n",
+                     (unsigned long)kv.first, kv.second.w, kv.second.h,
+                     kv.second.dfmt, kv.second.nfmt, kv.second.tiling,
+                     kv.second.mips, (unsigned long)kv.second.footprint,
+                     (unsigned long)nz, (unsigned long)kv.second.binds);
+      }
+      std::fflush(stderr);
+    }
   }
   TexKey key = TextureKey(base, w, h, dfmt, nfmt, tiling, pitch, layers,
                           base_array, view_layers, mip_levels, base_mip,
