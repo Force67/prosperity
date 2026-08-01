@@ -765,6 +765,12 @@ int PS4ABI sys_mprotect(uint8_t *addr, size_t len, int prot) {
   return 0;
 }
 
+// Regions that belong to a service process we do not run, rather than to a
+// block of settings the kernel publishes.
+static bool isServiceChannel(const std::string &name) {
+  return name == "/SceNpTpip";
+}
+
 int PS4ABI sys_shm_open(const char *path, uint32_t flags, uint16_t mode) {
   auto *proc = proc::getActive();
   if (!proc || !path)
@@ -781,6 +787,17 @@ int PS4ABI sys_shm_open(const char *path, uint32_t flags, uint16_t mode) {
         // the guest didn't create) to test whether auto-providing it makes a title
         // block waiting for a ShellCore handshake that never arrives (Doom64).
         std::fprintf(stderr, "[shm_open] NOAUTO: '%s' -> ENOENT\n", name.c_str());
+        return -SysError::eNOENT;
+      }
+      if (!(flags & kO_CREAT) && isServiceChannel(name)) {
+        // Not every system shm is a settings block. Some are one half of a live
+        // channel: the client maps the region, then blocks on the service's
+        // named semaphore for the other half to answer. Handing it a zeroed
+        // region says "the service is here" and it waits forever -- Tomb
+        // Raider's sceNpCheckCallback parked on 'SceNpTpip 0' for the whole run.
+        // ENOENT is what a console without that service reports, and the
+        // libraries have a path for it (libSceNpManager logs
+        // "sceNpTpipInitialize() failed" and carries on offline).
         return -SysError::eNOENT;
       }
       if (!(flags & kO_CREAT)) {

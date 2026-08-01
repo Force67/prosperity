@@ -1736,6 +1736,24 @@ void setRetTrace(uintptr_t addr, const char *label, bool isTest) {
 // see why a title's worker thread bailed out of its own loop.
 static thread_local uintptr_t t_guestSp = 0;
 void setGuestStackScanBase(uintptr_t sp) { t_guestSp = sp; }
+uintptr_t guestStackScanBase() { return t_guestSp; }
+
+void guestStackTraceFrom(uintptr_t base, const char *tag, int maxFrames,
+                         long tid) {
+  if (!base)
+    return;
+  auto *sp = reinterpret_cast<uintptr_t *>(base);
+  int printed = 0;
+  for (int i = 0; i < 512 && printed < maxFrames; i++) {
+    char sym[256];
+    symbolize(sp[i], sym, sizeof(sym));
+    if (std::strstr(sym, "(.text)")) {
+      std::fprintf(stderr, "[%s]     tid=%ld sp+%-5x %s\n", tag, tid, i * 8,
+                   sym);
+      printed++;
+    }
+  }
+}
 
 void guestStackTrace(const char *tag, int maxFrames) {
   uintptr_t here = 0;
