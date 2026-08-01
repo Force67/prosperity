@@ -38,6 +38,11 @@
 //  dispatches, all in 0x80a6..), async compute queues (sceGnmDingDong is never
 //  called), a second mapping of the same physOffset (each physical offset is
 //  mapped exactly once), and a later MAP_FIXED over the pool (none).
+//  Scale of it: one steady-state frame has 109 guest-texture bindings against
+//  74 render-target ones, and the single most used is guest@0x80c7d58000
+//  (2048x2048, bound by 29 draws) which is entirely zero. That atlas is the
+//  scene's material source, so the lighting pass resolves to black even though
+//  the G-buffer geometry is correct.
 //  Done with DELTA_GUEST_WPROT: the uploader is a plain libc memcpy
 //  (libc+0x45a3e), and it only ever fills the low ~104 MB of the pool.
 //  DELTA_GUEST_WPROT=811a300000:100000:4000 over 95 s of gameplay records ZERO
