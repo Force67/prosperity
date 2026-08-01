@@ -18,3 +18,7 @@ add_delta_test(vfs_test
 add_delta_test(umtx_op_test
   SOURCES umtx_op_test.cpp
   DEPS delta_kern)
+
+add_delta_test(console_dev_test
+  SOURCES console_dev_test.cpp
+  DEPS delta_kern)

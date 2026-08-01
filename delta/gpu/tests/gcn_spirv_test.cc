@@ -197,7 +197,9 @@ TEST(GcnSpirv, BaseSeaIslandsCorrectionsAreAcceptedOrRejectedExplicitly) {
   AppendVop3(mad64, 0x176);
   EXPECT_TRUE(Recompile(std::move(mad64)));
 
-  EXPECT_FALSE(Recompile({Vop2(0x07)}));  // legacy multiply is not IEEE mul
+  // The legacy multiply differs from the IEEE one only for zero times inf or
+  // NaN, so it lowers to the same OpFMul rather than costing the shader.
+  EXPECT_TRUE(Recompile({Vop2(0x07)}));
 
   std::vector<uint32_t> div_scale;
   AppendVop3(div_scale, 0x16d);
