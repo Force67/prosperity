@@ -156,11 +156,20 @@ int64_t PS4ABI sys_pread(uint32_t fd, void *buf, size_t nbytes, int64_t offset) 
       std::fprintf(stderr, "[pread] fd=%u off=%lld -> EBADF (no device)\n", fd, (long long)offset);
     return -SysError::eBADF;
   }
+  struct timespec t0;
+  if (kQarBuf)
+    clock_gettime(CLOCK_MONOTONIC, &t0);
   int64_t saved = d->lseek(0, kSeekCur);
   d->lseek(offset, kSeekSet);
   int64_t r = d->read(buf, nbytes);
   if (saved >= 0)
     d->lseek(saved, kSeekSet);
+  long readUs = 0;
+  if (kQarBuf) {
+    struct timespec t1;
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    readUs = (t1.tv_sec - t0.tv_sec) * 1000000 + (t1.tv_nsec - t0.tv_nsec) / 1000;
+  }
   throttleIo(r);
   if (kRdall) {
     uint32_t f4 = 0;
@@ -174,8 +183,9 @@ int64_t PS4ABI sys_pread(uint32_t fd, void *buf, size_t nbytes, int64_t offset) 
   // still needs a copy/commit step the engine never performs.
   if (fd < 8192 && g_qarFd[fd] && kQarBuf) {
     std::fprintf(stderr,
-                 "[qarbuf] fd=%u off=%lld nbytes=%#zx -> %lld buf=%p\n", fd,
-                 (long long)offset, (size_t)nbytes, (long long)r, buf);
+                 "[qarbuf] fd=%u off=%lld nbytes=%#zx -> %lld buf=%p %ldus\n",
+                 fd, (long long)offset, (size_t)nbytes, (long long)r, buf,
+                 readUs);
   }
   // DELTA_IOPROGRESS: throttled per-fd streaming high-water mark. FOX/FIOS2 streams
   // large world archives via pread; this shows whether that streaming is advancing

@@ -95,12 +95,29 @@ void startPopcntPrinter(uintptr_t addr, size_t bytes, unsigned everyMs);
 // DELTA_GUEST_WPROT=<hex addr>:<hex bytes>[:<ms>]: write-protect a guest range
 // once it is mapped and report the instruction behind every write to it (see
 // crash.cpp). The poll interval doubles as the wait for the range to appear.
-void startWriteWatch(uintptr_t addr, size_t bytes, unsigned everyMs);
+// DELTA_GUEST_RPROT has the same shape but traps reads too, which names the
+// consumer of a buffer rather than its producer.
+void startWriteWatch(uintptr_t addr, size_t bytes, unsigned everyMs,
+                     bool trapReads = false);
 
 // DELTA_GUEST_SUMWATCH=<slot>:<off>:<stride>:<count>[:<ms>]: watch a set of u32
 // counters behind a guest pointer slot (see crash.cpp).
 void startSumWatchPrinter(uintptr_t slot, size_t off, size_t stride, int count,
                           unsigned everyMs);
+
+// DELTA_POOLMAP=<hex addr>:<hex bytes>[:<ms>]: occupancy map of a large guest
+// pool, by resident page rather than by read, so a multi-GB video pool can be
+// surveyed without faulting it in (see crash.cpp).
+void startPoolMap(uintptr_t addr, size_t bytes, unsigned everyMs);
+
+// DELTA_POOLMAP=all[:<ms>]: the same survey over every guest mapping.
+void startPoolCensus(unsigned everyMs);
+
+// DELTA_MEMDUMP=<hex addr>:<hex bytes>:<ms>:<path>[,...]: write a guest range to
+// a host file once the title has settled, so its contents can be identified
+// offline (see crash.cpp).
+void startMemDump(uintptr_t addr, size_t bytes, unsigned afterMs,
+                  const char *path);
 
 // DELTA_FNARGS="off+o1+o2...:label,...": int3 at a guest function entry (push
 // rbp) that logs rdi and then walks the offset chain from it, printing every

@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <set>
 
 #include <utl/mem.h>
 #include <utl/options.h>
@@ -21,6 +22,7 @@ DELTA_OPTION(bool, kGpuEudfail, "DELTA_GPU_EUDFAIL", false);
 DELTA_OPTION(bool, kGpuEudtrace, "DELTA_GPU_EUDTRACE", false);
 DELTA_OPTION(bool, kGpuTilehist, "DELTA_GPU_TILEHIST", false);
 DELTA_OPTION(bool, kTrace, "DELTA_GPU_TRACE", false);
+DELTA_OPTION(uint64_t, kTexSrc, "DELTA_GPU_TEXSRC", 0);
 }  // namespace
 
 namespace gpu::gcn {
@@ -156,6 +158,7 @@ struct ScalarEval {
   static constexpr uint32_t kRegs = 136;
   uint32_t sgpr[kRegs] = {};
   bool known[kRegs] = {};
+  uint64_t src[kRegs] = {};  // guest address each dword was s_loaded from
   bool trace = false;
   uint64_t code_base = 0;  // guest address of the program, for s_getpc_b64
 
@@ -459,9 +462,12 @@ struct ScalarEval {
             static_cast<unsigned long>(address));
       return;
     }
-    const uint32_t* src = reinterpret_cast<const uint32_t*>(address);
-    for (uint32_t i = 0; i < dwords; i++)
-      Set(s.sdst + i, src[i]);
+    const uint32_t* mem = reinterpret_cast<const uint32_t*>(address);
+    for (uint32_t i = 0; i < dwords; i++) {
+      Set(s.sdst + i, mem[i]);
+      if (s.sdst + i < kRegs)
+        src[s.sdst + i] = address + i * 4;
+    }
     if (trace)
       std::fprintf(stderr, "[eud] s_load x%u s%u <- [s%u=%#lx + %#lx] = %#lx\n",
                    dwords, s.sdst, base, static_cast<unsigned long>(table),
@@ -776,6 +782,16 @@ std::vector<TImage> TrackTextures(
                    image_ok ? eval.sgpr[srsrc + 5] : 0,
                    image_ok ? eval.sgpr[srsrc + 6] : 0,
                    image_ok ? eval.sgpr[srsrc + 7] : 0);
+    // DELTA_GPU_TEXSRC=<base>: where in guest memory the T# for this surface
+    // lives. A surface the GPU samples but nothing ever fills is only
+    // explainable from the code that publishes its address.
+    if (kTexSrc && t.base >= (uint64_t)kTexSrc) {
+      static std::set<uint64_t> seen;
+      if (seen.size() < 64 && seen.insert(t.base).second)
+        std::fprintf(stderr, "[texsrc] base=%#lx T# at %#lx (sgpr%u)\n",
+                     static_cast<unsigned long>(t.base),
+                     static_cast<unsigned long>(eval.src[srsrc]), srsrc);
+    }
     if (sampler_ok) {
       std::memcpy(t.sampler, sampler, sizeof(t.sampler));
       t.sampler_valid = true;

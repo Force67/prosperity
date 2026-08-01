@@ -23,6 +23,8 @@
 #include <pthread.h>
 #include <thread>
 #include <chrono>
+#include <string>
+#include <vector>
 
 #include "crash.h"
 #include "module.h"
@@ -458,6 +460,7 @@ static int g_fnArgsCount = 0;
 // DELTA_GUEST_BRK_TRACE handler or standalone by DELTA_GUEST_WPROT.
 static std::atomic<uintptr_t> g_wprotBase{0};
 static std::atomic<size_t> g_wprotLen{0};
+static std::atomic<bool> g_wprotRegs{false};
 
 static void crashHandler(int sig, siginfo_t *si, void *ucv) {
 #if defined(__x86_64__)
@@ -473,8 +476,24 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
       const uintptr_t rip = (uintptr_t)uc->uc_mcontext.gregs[REG_RIP];
       char sym[192];
       symbolize(rip, sym, sizeof(sym));
-      std::fprintf(stderr, "[wprot] write %#llx from %s\n",
+      std::fprintf(stderr, "[wprot] %s %#llx from %s\n",
+                   (uc->uc_mcontext.gregs[REG_ERR] & 2) ? "write" : "read",
                    (unsigned long long)at, sym);
+      // A consumer's other pointer (where it puts what it just read) is only
+      // visible in its registers at the access.
+      if (g_wprotRegs.load()) {
+        auto *g = uc->uc_mcontext.gregs;
+        std::fprintf(stderr,
+                     "[wprot]  ax=%lx bx=%lx cx=%lx dx=%lx si=%lx di=%lx "
+                     "bp=%lx sp=%lx r8=%lx r9=%lx r10=%lx r11=%lx r12=%lx "
+                     "r13=%lx r14=%lx r15=%lx\n",
+                     (long)g[REG_RAX], (long)g[REG_RBX], (long)g[REG_RCX],
+                     (long)g[REG_RDX], (long)g[REG_RSI], (long)g[REG_RDI],
+                     (long)g[REG_RBP], (long)g[REG_RSP], (long)g[REG_R8],
+                     (long)g[REG_R9], (long)g[REG_R10], (long)g[REG_R11],
+                     (long)g[REG_R12], (long)g[REG_R13], (long)g[REG_R14],
+                     (long)g[REG_R15]);
+      }
       std::fflush(stderr);
       const long pgsz = sysconf(_SC_PAGESIZE);
       ::mprotect(reinterpret_cast<void *>(at & ~((uintptr_t)pgsz - 1)),
@@ -1700,10 +1719,11 @@ void setFnArgs(uintptr_t addr, const char *label, const uint64_t *offsets,
 // instruction and reopen that page. Memory that stays empty while the title
 // behaves as if it filled it either has no writer at all or one writing
 // elsewhere, and only the fault distinguishes those.
-void startWriteWatch(uintptr_t addr, size_t bytes, unsigned everyMs) {
+void startWriteWatch(uintptr_t addr, size_t bytes, unsigned everyMs,
+                     bool trapReads) {
   if (!addr || !bytes)
     return;
-  std::thread([addr, bytes, everyMs] {
+  std::thread([addr, bytes, everyMs, trapReads] {
     const long pgsz = sysconf(_SC_PAGESIZE);
     const uintptr_t base = addr & ~((uintptr_t)pgsz - 1);
     const size_t span =
@@ -1713,12 +1733,15 @@ void startWriteWatch(uintptr_t addr, size_t bytes, unsigned everyMs) {
       unsigned char vec = 0;
       if (mincore(reinterpret_cast<void *>(base), 1, &vec) != 0)
         continue;  // not mapped yet
-      if (::mprotect(reinterpret_cast<void *>(base), span, PROT_READ) != 0)
+      if (::mprotect(reinterpret_cast<void *>(base), span,
+                     trapReads ? PROT_NONE : PROT_READ) != 0)
         continue;
       g_wprotBase = base;
       g_wprotLen = span;
-      std::fprintf(stderr, "[wprot] watching %#lx+%#zx\n", (unsigned long)base,
-                   span);
+      g_wprotRegs = trapReads;
+      std::fprintf(stderr, "[wprot] watching %#lx+%#zx (%s)\n",
+                   (unsigned long)base, span, trapReads ? "reads+writes"
+                                                        : "writes");
       std::fflush(stderr);
       return;
     }
@@ -1794,6 +1817,138 @@ void startSumWatchPrinter(uintptr_t slot, size_t off, size_t stride, int count,
       }
       std::fprintf(stderr, "%s = %llu\n", line, (unsigned long long)sum);
     }
+  }).detach();
+}
+
+// DELTA_POOLMAP=<hex addr>:<hex bytes>[:<ms>]: survey a multi-GB guest pool
+// without touching it. mincore reports which pages the guest has actually
+// faulted in, so a region the title claims to have filled but never wrote is
+// visible as a hole; only resident pages are then read for a non-zero test.
+void startPoolMap(uintptr_t addr, size_t bytes, unsigned everyMs) {
+  if (!addr || !bytes)
+    return;
+  std::thread([addr, bytes, everyMs] {
+    const size_t pgsz = (size_t)sysconf(_SC_PAGESIZE);
+    const uintptr_t base = addr & ~(pgsz - 1);
+    const size_t span = (bytes + pgsz - 1) & ~(pgsz - 1);
+    const size_t npages = span / pgsz;
+    const size_t granule = 16u << 20;              // one report column
+    const size_t pagesPerGranule = granule / pgsz;
+    std::vector<unsigned char> vec(npages);
+    for (;;) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(everyMs));
+      if (mincore(reinterpret_cast<void *>(base), span, vec.data()) != 0)
+        continue;
+      size_t resident = 0, nonzero = 0;
+      std::string map;
+      for (size_t g = 0; g * pagesPerGranule < npages; g++) {
+        size_t res = 0, nz = 0;
+        for (size_t i = g * pagesPerGranule;
+             i < npages && i < (g + 1) * pagesPerGranule; i++) {
+          if (!(vec[i] & 1))
+            continue;
+          res++;
+          const auto *w = reinterpret_cast<const uint64_t *>(base + i * pgsz);
+          for (size_t j = 0; j < pgsz / 8; j++)
+            if (w[j]) { nz++; break; }
+        }
+        resident += res;
+        nonzero += nz;
+        map += nz ? '#' : res ? '.' : '_';
+      }
+      std::fprintf(stderr,
+                   "[poolmap] %#lx+%#zx resident=%zu/%zu pages nonzero=%zu\n"
+                   "[poolmap] %s\n",
+                   (unsigned long)base, span, resident, npages, nonzero,
+                   map.c_str());
+      std::fflush(stderr);
+    }
+  }).detach();
+}
+
+// DELTA_POOLMAP=all[:<ms>]: the same survey over every guest mapping, read out
+// of /proc/self/maps. "The title wrote a gigabyte somewhere, but not where the
+// GPU reads" is only answerable with the whole address space in one view.
+void startPoolCensus(unsigned everyMs) {
+  std::thread([everyMs] {
+    const size_t pgsz = (size_t)sysconf(_SC_PAGESIZE);
+    for (;;) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(everyMs));
+      FILE *f = std::fopen("/proc/self/maps", "r");
+      if (!f)
+        return;
+      char line[512];
+      std::vector<unsigned char> vec;
+      std::fprintf(stderr, "[census] ---- guest mappings ----\n");
+      while (std::fgets(line, sizeof line, f)) {
+        unsigned long lo = 0, hi = 0;
+        char perm[8] = {0};
+        if (std::sscanf(line, "%lx-%lx %4s", &lo, &hi, perm) != 3)
+          continue;
+        if (lo < 0x8000000000ull || perm[0] != 'r')
+          continue;
+        const size_t span = hi - lo;
+        if (span < (1u << 20))
+          continue;
+        vec.assign(span / pgsz, 0);
+        if (mincore(reinterpret_cast<void *>(lo), span, vec.data()) != 0)
+          continue;
+        size_t res = 0, nz = 0;
+        for (size_t i = 0; i < vec.size(); i++) {
+          if (!(vec[i] & 1))
+            continue;
+          res++;
+          const auto *w = reinterpret_cast<const uint64_t *>(lo + i * pgsz);
+          for (size_t j = 0; j < pgsz / 8; j++)
+            if (w[j]) { nz++; break; }
+        }
+        std::fprintf(stderr,
+                     "[census] %012lx+%09zx %8.1f MB resident=%7.1f MB "
+                     "nonzero=%7.1f MB\n",
+                     lo, span, span / 1048576.0, res * pgsz / 1048576.0,
+                     nz * pgsz / 1048576.0);
+      }
+      std::fclose(f);
+      std::fflush(stderr);
+    }
+  }).detach();
+}
+
+// DELTA_MEMDUMP=<hex addr>:<hex bytes>:<ms>:<path>[,...]: snapshot a guest range
+// to a file. Only resident pages are read, so dumping a sparse pool does not
+// commit it; the holes come out as zeros.
+void startMemDump(uintptr_t addr, size_t bytes, unsigned afterMs,
+                  const char *path) {
+  if (!addr || !bytes || !path)
+    return;
+  std::string out(path);
+  std::thread([addr, bytes, afterMs, out] {
+    std::this_thread::sleep_for(std::chrono::milliseconds(afterMs));
+    const size_t pgsz = (size_t)sysconf(_SC_PAGESIZE);
+    const uintptr_t base = addr & ~(pgsz - 1);
+    const size_t span = (bytes + pgsz - 1) & ~(pgsz - 1);
+    std::vector<unsigned char> vec(span / pgsz);
+    if (mincore(reinterpret_cast<void *>(base), span, vec.data()) != 0) {
+      std::fprintf(stderr, "[memdump] %#lx not mapped\n", (unsigned long)base);
+      return;
+    }
+    FILE *f = std::fopen(out.c_str(), "wb");
+    if (!f)
+      return;
+    std::vector<unsigned char> zero(pgsz, 0);
+    size_t resident = 0;
+    for (size_t i = 0; i < vec.size(); i++) {
+      if (vec[i] & 1) {
+        resident++;
+        std::fwrite(reinterpret_cast<const void *>(base + i * pgsz), 1, pgsz, f);
+      } else {
+        std::fwrite(zero.data(), 1, pgsz, f);
+      }
+    }
+    std::fclose(f);
+    std::fprintf(stderr, "[memdump] %#lx+%#zx -> %s (%zu/%zu resident pages)\n",
+                 (unsigned long)base, span, out.c_str(), resident, vec.size());
+    std::fflush(stderr);
   }).detach();
 }
 

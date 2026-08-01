@@ -67,7 +67,10 @@ DELTA_OPTION(bool, kSotcForceWorlddone, "DELTA_SOTC_FORCE_WORLDDONE", false);
 DELTA_OPTION(bool, kSotcJobfix, "DELTA_SOTC_JOBFIX", false);
 DELTA_OPTION(const char *, kGuestPopcnt, "DELTA_GUEST_POPCNT", nullptr);
 DELTA_OPTION(const char *, kGuestWprot, "DELTA_GUEST_WPROT", nullptr);
+DELTA_OPTION(const char *, kGuestRprot, "DELTA_GUEST_RPROT", nullptr);
 DELTA_OPTION(const char *, kGuestSumwatch, "DELTA_GUEST_SUMWATCH", nullptr);
+DELTA_OPTION(const char *, kPoolMap, "DELTA_POOLMAP", nullptr);
+DELTA_OPTION(const char *, kMemDump, "DELTA_MEMDUMP", nullptr);
 DELTA_OPTION(bool, kSotcJobmove, "DELTA_SOTC_JOBMOVE", false);
 DELTA_OPTION(bool, kSotcSkipWorldwait, "DELTA_SOTC_SKIP_WORLDWAIT", false);
 DELTA_OPTION(bool, kVoOplog, "DELTA_VO_OPLOG", false);
@@ -227,11 +230,15 @@ bool proc::create(const base::String &path, bool fromVfs) {
 static void investigatePopcnt();
 static void investigateSumWatch();
 static void investigateWriteWatch();
+static void investigatePoolMap();
+static void investigateMemDump();
 
 static void investigateFnWatch(smodule &m) {
   investigatePopcnt();
   investigateSumWatch();
   investigateWriteWatch();
+  investigatePoolMap();
+  investigateMemDump();
   const char *e = kFnWatch;
   if (!e)
     return;
@@ -285,7 +292,8 @@ static void investigatePopcnt() {
 }
 
 static void investigateWriteWatch() {
-  const char *wp = kGuestWprot;
+  const bool reads = kGuestRprot != nullptr;
+  const char *wp = reads ? kGuestRprot : kGuestWprot;
   if (!wp)
     return;
   const uintptr_t at = std::strtoull(wp, nullptr, 16);
@@ -297,7 +305,56 @@ static void investigateWriteWatch() {
     if (const char *c2 = std::strchr(colon + 1, ':'))
       ms = (unsigned)std::strtoul(c2 + 1, nullptr, 0);
   }
-  startWriteWatch(at, bytes, ms);
+  startWriteWatch(at, bytes, ms, reads);
+}
+
+static void investigatePoolMap() {
+  const char *pm = kPoolMap;
+  if (!pm)
+    return;
+  const char *colon = std::strchr(pm, ':');
+  if (std::strncmp(pm, "all", 3) == 0) {
+    startPoolCensus(colon ? (unsigned)std::strtoul(colon + 1, nullptr, 0)
+                          : 10000);
+    return;
+  }
+  const uintptr_t at = std::strtoull(pm, nullptr, 16);
+  size_t bytes = 0x1000000;
+  unsigned ms = 10000;
+  if (colon) {
+    bytes = std::strtoull(colon + 1, nullptr, 16);
+    if (const char *c2 = std::strchr(colon + 1, ':'))
+      ms = (unsigned)std::strtoul(c2 + 1, nullptr, 0);
+  }
+  startPoolMap(at, bytes, ms);
+}
+
+static void investigateMemDump() {
+  const char *e = kMemDump;
+  if (!e)
+    return;
+  std::string list(e);
+  size_t start = 0;
+  while (start < list.size()) {
+    size_t comma = list.find(',', start);
+    std::string spec = list.substr(start, comma == std::string::npos
+                                              ? std::string::npos
+                                              : comma - start);
+    uintptr_t at = 0;
+    size_t bytes = 0;
+    unsigned ms = 0;
+    size_t p1 = spec.find(':'), p2 = spec.find(':', p1 + 1),
+           p3 = spec.find(':', p2 + 1);
+    if (p3 != std::string::npos) {
+      at = std::strtoull(spec.c_str(), nullptr, 16);
+      bytes = std::strtoull(spec.c_str() + p1 + 1, nullptr, 16);
+      ms = (unsigned)std::strtoul(spec.c_str() + p2 + 1, nullptr, 0);
+      startMemDump(at, bytes, ms, spec.c_str() + p3 + 1);
+    }
+    if (comma == std::string::npos)
+      break;
+    start = comma + 1;
+  }
 }
 
 static void investigateSumWatch() {
