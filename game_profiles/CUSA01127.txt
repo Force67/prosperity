@@ -50,10 +50,9 @@
 //  something we report to the allocator (pool base, size query, or a physical
 //  offset) rather than anything in the GPU layer.
 //
-// Known gap found on the way, not yet fixed: a compute dispatch copies a
-// 2048x1024 R8 image and we have no 8-bit single-channel format in the compute
-// image list, so it zero-fills (DELTA_GPU_CSRES names it). Adding dfmt 1
-// naively crashes, so the staging path needs care.
+// Fixed on the way: a compute dispatch copies a 2048x1024 R8 image and the
+// compute image list had no dfmt 1, so it zero-filled. It resolves now, but it
+// lives in the already-written low pool and did not change the frame.
 //
 //  - Not the cause: depth test, face culling, the colour write masks, the
 //    render-target size aliasing, missing assets, or shader translation.
