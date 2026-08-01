@@ -7,11 +7,18 @@
 //  - The G-buffer pass is bound and rasterises real geometry (3 MRTs at
 //    1920x1080, draws of a few thousand indices) yet every colour target reads
 //    back exactly zero, HDR ones included.
-//  - Its vertex attributes are fetched with MTBUF, not MUBUF. MTBUF carries its
-//    own DFMT/NFMT which override the V#'s, so that is the first thing to
-//    suspect for degenerate geometry.
+//  - THE LEAD: its vertex buffer is all zeros. DELTA_GPU_EUDTRACE shows all
+//    twelve of the shader's MTBUF fetches resolving to ONE V# (inline user data
+//    s[4:7], base in the 0x814c1 pool, stride 16, 192 records) with a zero
+//    instruction offset, and that buffer's first bytes are 00. Degenerate
+//    geometry explains every empty colour target. Either the twelve fetches are
+//    not twelve attributes and the direct-fetch plan is wrong for this shader,
+//    or the game fills that buffer by a route we do not see. Note constant
+//    buffers in the SAME 0x814c1 pool hold correct view matrices, so it is not
+//    a whole-mapping failure.
 //  - Not the cause: depth test, face culling, the colour write masks, the
-//    render-target size aliasing.
+//    render-target size aliasing, MTBUF vs MUBUF direct-fetch selection
+//    (tested both ways), missing assets, or shader translation.
 //  - The colour-grading LUT (a 16x16x16 volume) gates everything downstream of
 //    the tonemap: whatever it samples becomes the whole screen. Its guest
 //    memory stays zero for the entire run, and nothing we emulate writes it.
