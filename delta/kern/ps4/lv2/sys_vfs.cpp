@@ -20,7 +20,16 @@
 #include <mutex>
 
 #include "kern/ps4/dev/ajm_dev.h"
+#include "kern/ps4/dev/authmgr_dev.h"
+#include "kern/ps4/dev/av_control_dev.h"
 #include "kern/ps4/dev/console_dev.h"
+#include "kern/ps4/dev/deci_stdin_dev.h"
+#include "kern/ps4/dev/hdmi_dev.h"
+#include "kern/ps4/dev/mdctl_dev.h"
+#include "kern/ps4/dev/npdrm_dev.h"
+#include "kern/ps4/dev/null_dev.h"
+#include "kern/ps4/dev/srtc_dev.h"
+#include "kern/ps4/dev/zero_dev.h"
 #include "kern/ps4/dev/dipsw_dev.h"
 #include "kern/ps4/dev/random_dev.h"
 #include "kern/ps4/dev/dce_dev.h"
@@ -28,9 +37,14 @@
 #include "kern/ps4/dev/dma_dev.h"
 #include "kern/ps4/dev/file_dev.h"
 #include "kern/ps4/dev/gc_dev.h"
+#include "kern/ps4/dev/hid_dev.h"
+#include "kern/ps4/dev/pfsctl_dev.h"
+#include "kern/ps4/dev/scegp_dev.h"
 #include "kern/ps5/dev/gc_dev.h"   // PS5 AGC /dev/gc device
 #include "kern/ps5/dev/dma_dev.h"  // PS5 /dev/dmem (shared-memfd mapping)
 #include "kern/ps4/dev/tty6_dev.h"
+#include "kern/ps4/dev/usbctl_dev.h"
+#include "kern/ps4/dev/vtrm_dev.h"
 #include "kern/proc.h"
 #include "kern/crash.h"
 #include "kern/vfs.h"
@@ -88,6 +102,34 @@ static device *make_device(const char *deviceName) {
     dev = new consoleDevice(proc);
   if (xname == "deci_tty6")
     dev = new tty6Device(proc);
+  if (xname == "deci_stdin")
+    dev = new deciStdinDevice(proc);
+  if (xname == "null")
+    dev = new nullDevice(proc);
+  if (xname == "zero")
+    dev = new zeroDevice(proc);
+  if (xname == "mdctl")
+    dev = new mdctlDevice(proc);
+  if (xname == "av_control")
+    dev = new avControlDevice(proc);
+  if (xname == "hdmi")
+    dev = new hdmiDevice(proc);
+  if (xname == "srtc")
+    dev = new srtcDevice(proc);
+  if (xname == "authmgr")
+    dev = new authmgrDevice(proc);
+  if (xname == "npdrm")
+    dev = new npdrmDevice(proc);
+  if (xname == "vtrm")
+    dev = new vtrmDevice(proc);
+  if (xname == "pfsctldev")
+    dev = new pfsctlDevice(proc);
+  if (xname == "usbctl")
+    dev = new usbctlDevice(proc);
+  if (xname == "hid")
+    dev = new hidDevice(proc);
+  if (xname == "sceGp")
+    dev = new sceGpDevice(proc);
   if (xname == "gc")
     dev = (proc && proc->getPlatform() == krnl::proc::platform::ps5)
               ? static_cast<device *>(new gcDevicePs5(proc))
