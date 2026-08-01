@@ -429,6 +429,7 @@ static int g_orderCount = 0;
 static timespec g_orderStart;
 static uintptr_t g_retAddrs[8];
 static const char *g_retLabels[8];
+static bool g_retIsTest[8];  // site was `test eax,eax`, not `mov ebx,eax`
 static int g_retCount = 0;
 
 // DELTA_PS5_GLYPHGUARD call-skip (see crash.h): int3 planted over a blocking
@@ -592,8 +593,17 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
       char m[128];
       int n = std::snprintf(m, sizeof(m), "[ret] %s eax=%#x\n", g_retLabels[i], eax);
       if (n > 0) { ssize_t w = write(2, m, (size_t)n); (void)w; }
-      gr[REG_RBX] = eax;                  // emulate `mov ebx,eax` (zero-extends)
-      gr[REG_RIP] = g_retAddrs[i] + 2;    // resume past the 2-byte `89 c3`
+      if (g_retIsTest[i]) {
+        // emulate `test eax,eax`: CF/OF cleared, ZF/SF/PF from the result
+        greg_t fl = gr[REG_EFL] & ~(greg_t)(0x8d5);  // CF PF AF ZF SF OF
+        if (eax == 0) fl |= 0x40;
+        if (eax & 0x80000000u) fl |= 0x80;
+        if (__builtin_parity(eax & 0xff) == 0) fl |= 0x4;
+        gr[REG_EFL] = fl;
+      } else {
+        gr[REG_RBX] = eax;                // emulate `mov ebx,eax` (zero-extends)
+      }
+      gr[REG_RIP] = g_retAddrs[i] + 2;    // resume past the 2-byte insn
       return;
     }
   }
@@ -1656,10 +1666,11 @@ void setOrderTrace(uintptr_t addr, const char *label) {
   g_orderLabels[g_orderCount] = label;
   g_orderCount++;
 }
-void setRetTrace(uintptr_t addr, const char *label) {
+void setRetTrace(uintptr_t addr, const char *label, bool isTest) {
   if (g_retCount < 8) {
     g_retAddrs[g_retCount] = addr;
     g_retLabels[g_retCount] = label;
+    g_retIsTest[g_retCount] = isTest;
     g_retCount++;
   }
 }

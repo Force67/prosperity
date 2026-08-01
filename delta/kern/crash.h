@@ -73,10 +73,11 @@ void setCallSkip(uintptr_t addr, long raxVal, int insnLen);
 // path (which functions run, in what order, before the null-DCB crash).
 void setOrderTrace(uintptr_t addr, const char *label);
 
-// Return-value trace: int3 at a `mov ebx,eax` (89 c3) site right after a call;
-// logs eax, emulates the mov (ebx=eax), and resumes. Pins which sub-call in a
-// run-once init returns the non-zero error that blocks the graphics bring-up.
-void setRetTrace(uintptr_t addr, const char *label);
+// Return-value trace: int3 at a `mov ebx,eax` (89 c3) or `test eax,eax` (85 c0)
+// site right after a call; logs eax, emulates the instruction, and resumes. Pins
+// which sub-call in a run-once init returns the non-zero error that blocks the
+// bring-up. DELTA_RETTRACE="hexoff:label,..." arms it by eboot offset.
+void setRetTrace(uintptr_t addr, const char *label, bool isTest = false);
 
 // DELTA_FNWATCH="off:label,...": int3 hit-COUNTER at guest function entries (push
 // rbp). Unlike setOrderTrace (per-hit log), this only counts hits per address and

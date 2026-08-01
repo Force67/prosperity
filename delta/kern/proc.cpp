@@ -40,6 +40,7 @@
 namespace {
 DELTA_OPTION(const char *, kPs5Modules, "DELTA_PS5_MODULES", nullptr);
 DELTA_OPTION(const char *, kFnWatch, "DELTA_FNWATCH", nullptr);
+DELTA_OPTION(const char *, kRetTrace, "DELTA_RETTRACE", nullptr);
 DELTA_OPTION(const char *, kGuestPatch, "DELTA_GUEST_PATCH", nullptr);
 DELTA_OPTION(const char *, kFnArgs, "DELTA_FNARGS", nullptr);
 DELTA_OPTION(const char *, kFiosProbe, "DELTA_FIOS_PROBE", nullptr);
@@ -232,6 +233,67 @@ static void investigateSumWatch();
 static void investigateWriteWatch();
 static void investigatePoolMap();
 static void investigateMemDump();
+static void investigateRetTrace(proc &);
+
+// DELTA_RETTRACE="[module+]hexoff:label,...": arm a return-value trace at each
+// `mov ebx,eax` / `test eax,eax` right after a call. Offsets are relative to the
+// eboot unless a module name is given, which is what lets a failure be followed
+// out of the title and into the system module that actually reports it.
+static void investigateRetTrace(proc &pr) {
+  const char *e = kRetTrace;
+  if (!e)
+    return;
+  for (const char *p = e; *p;) {
+    while (*p == ',' || *p == ' ')
+      p++;
+    if (!*p)
+      break;
+    base::String modName;
+    if (const char *plus = std::strchr(p, '+')) {
+      const char *comma = std::strchr(p, ',');
+      if (!comma || plus < comma) {
+        modName.append(p, (size_t)(plus - p));
+        p = plus + 1;
+      }
+    }
+    uint8_t *base = pr.getModuleList()[0]->getInfo().base;
+    if (!modName.empty()) {
+      auto mod = pr.getModule(base::StringRef(modName));
+      if (!mod) {
+        LOG_WARNING("rettrace: {} is not loaded", modName.c_str());
+        while (*p && *p != ',')
+          p++;
+        continue;
+      }
+      base = mod->getInfo().base;
+    }
+    const char *where = modName.empty() ? "eboot" : modName.c_str();
+    char *endp = nullptr;
+    uint64_t off = std::strtoull(p, &endp, 16);
+    const char *label = "ret";
+    if (endp && *endp == ':') {
+      const char *lb = endp + 1, *le = lb;
+      while (*le && *le != ',')
+        le++;
+      label = strndup(lb, (size_t)(le - lb));  // persists for setRetTrace
+      p = le;
+    } else {
+      p = endp;
+    }
+    auto *c = base + off;
+    utl::protectMem(reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(c) & ~0xFFFull),
+                    0x1000, utl::pageProtection::rwx);
+    const bool isTest = c[0] == 0x85 && c[1] == 0xc0;
+    if ((c[0] == 0x89 && c[1] == 0xc3) || isTest) {
+      c[0] = 0xCC;
+      setRetTrace(reinterpret_cast<uintptr_t>(c), label, isTest);
+      LOG_INFO("rettrace: armed {} @ {}+{:#x}", label, where, off);
+    } else {
+      LOG_WARNING("rettrace: {}+{:#x} bytes {:#x} {:#x} is neither "
+                  "mov ebx,eax nor test eax,eax", where, off, c[0], c[1]);
+    }
+  }
+}
 
 static void investigateFnWatch(smodule &m) {
   investigatePopcnt();
@@ -239,6 +301,7 @@ static void investigateFnWatch(smodule &m) {
   investigateWriteWatch();
   investigatePoolMap();
   investigateMemDump();
+  investigateRetTrace(*proc::getActive());
   const char *e = kFnWatch;
   if (!e)
     return;
