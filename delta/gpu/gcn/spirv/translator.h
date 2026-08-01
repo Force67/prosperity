@@ -465,7 +465,7 @@ struct StageContext {
   // descriptor share one set-0 binding; variables are created lazily per
   // binding. The plan is also what TrackTextures pairs against at draw time.
   const MimgBindingPlan* mimg_plan = nullptr;
-  static constexpr uint32_t kMaxPsSamplers = 16;  // == gpu::vk::kMaxTex
+  static constexpr uint32_t kMaxPsSamplers = 24;  // == gpu::vk::kMaxTex
   Id tex_vars[kMaxPsSamplers] = {};
   uint32_t tex_types[kMaxPsSamplers] = {};
   // Bit i set: binding i's T# is SQ_RSRC_IMG_3D. Nothing in the MIMG encoding

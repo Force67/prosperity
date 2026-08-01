@@ -156,7 +156,7 @@ struct DrawInfo {
     bool null_descriptor = false;
     uint32_t swizzle = 0;  // packed T# DST_SEL_X/Y/Z/W (0 = identity)
   };
-  DrawTex texs[16];
+  DrawTex texs[24];  // == gpu::vk::kMaxTex
   uint32_t num_texs = 0;
 
   // Per-draw blend state, decoded from CB_BLEND0_CONTROL (raw dword) + whether

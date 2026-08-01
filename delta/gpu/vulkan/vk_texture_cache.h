@@ -19,7 +19,12 @@
 namespace gpu::vk {
 
 // Sampler bindings a recompiled PS may consume in one draw.
-constexpr uint32_t kMaxTex = 16;
+// A pixel shader's sampler bindings. Tomb Raider's lighting pass declares 23,
+// and a shader that needs more than this is declined outright, so the limit is
+// a rendering cliff rather than a tuning knob. 24 stays far inside what every
+// desktop and mobile driver reports for maxPerStageDescriptorSampledImages,
+// which is well above the 16 Vulkan merely guarantees.
+constexpr uint32_t kMaxTex = 24;
 
 // Descriptor infrastructure shared by every sampled image (guest textures,
 // render targets sampled as textures, the 1x1 white fallback).
