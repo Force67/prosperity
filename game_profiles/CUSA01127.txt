@@ -38,9 +38,17 @@
 //  dispatches, all in 0x80a6..), async compute queues (sceGnmDingDong is never
 //  called), a second mapping of the same physOffset (each physical offset is
 //  mapped exactly once), and a later MAP_FIXED over the pool (none).
-//  Next step: build with DELTA_GUEST_WPROT and watch a low-pool texture that
-//  works (e.g. 0x80a6804000:4000) to name the guest function that uploads into
-//  Garlic, then find why it never runs for the streamed ones.
+//  Done with DELTA_GUEST_WPROT: the uploader is a plain libc memcpy
+//  (libc+0x45a3e), and it only ever fills the low ~104 MB of the pool.
+//  DELTA_GUEST_WPROT=811a300000:100000:4000 over 95 s of gameplay records ZERO
+//  writes, so the guest never writes the region its own descriptors point at.
+//  The title places its streamed texture heap ~1.8 GB into the video pool
+//  (0x811a398000 is pool offset 0x75298000) while its uploads stay in the first
+//  104 MB. Render targets at 0x8135..0x814b (~2.3 GB in) are fine because the
+//  GPU writes those. So the open question is why the guest allocator hands out
+//  surfaces at ~1.8 GB that its own upload path never targets: suspect
+//  something we report to the allocator (pool base, size query, or a physical
+//  offset) rather than anything in the GPU layer.
 //
 // Known gap found on the way, not yet fixed: a compute dispatch copies a
 // 2048x1024 R8 image and we have no 8-bit single-channel format in the compute
