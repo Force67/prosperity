@@ -8,6 +8,8 @@
  */
 
 #include <algorithm>
+#include <cstdlib>
+#include <cstring>
 
 #include <utl/mem.h>
 
@@ -117,6 +119,36 @@ bool vmManager::overlaps(uint8_t *ptr, size_t size) const {
       return true;
   }
   return false;
+}
+
+void vmManager::protectRange(uint8_t *ptr, size_t size, mprot prot,
+                             uint32_t sceProt) {
+  std::lock_guard lock(vmlock);
+  uint8_t *end = ptr + size;
+  for (auto &page : rtPages)
+    if (ptr < page.ptr + page.size && page.ptr < end) {
+      page.prot = prot;
+      page.sceProt = sceProt;
+    }
+}
+
+void vmManager::setRangeName(uint8_t *ptr, size_t size, const char *name) {
+  std::lock_guard lock(vmlock);
+  uint8_t *end = ptr + size;
+  // The kernel (vm_map_set_name) allocates the name storage per entry; mirror
+  // that with a strdup'd copy so the field outlives the caller's buffer. The
+  // VMA never frees entry names, so repeated naming leaks a small string each
+  // time -- names are handed out rarely (thread stacks), so that is fine.
+  if (!name)
+    return;
+  size_t n = strlen(name);
+  char *copy = static_cast<char *>(std::malloc(n + 1));
+  if (!copy)
+    return;
+  std::memcpy(copy, name, n + 1);
+  for (auto &page : rtPages)
+    if (ptr < page.ptr + page.size && page.ptr < end)
+      page.name = copy;
 }
 
 void vmManager::forEachGpuAperturePage(void (*fn)(void *, uint8_t *, size_t),

@@ -64,6 +64,15 @@ public:
   void remove(uint8_t *ptr, size_t size);
   pageInfo *get(uint8_t *ptr);
 
+  // Apply a protection to every tracked mapping intersecting [ptr, ptr+size)
+  // (kernel vm_map_protect: a range with no tracked mapping is fine, not an
+  // error). Updates both the host r/w/x prot and the full SCE prot so
+  // sceKernelVirtualQuery reports the mprotect result.
+  void protectRange(uint8_t *ptr, size_t size, mprot prot, uint32_t sceProt);
+  // Attach a name to every tracked mapping intersecting [ptr, ptr+size)
+  // (kernel vm_map_set_name). Takes a copy of the name.
+  void setRangeName(uint8_t *ptr, size_t size, const char *name);
+
   // true if [ptr, ptr+size) hits a tracked mapping
   bool overlaps(uint8_t *ptr, size_t size) const;
 

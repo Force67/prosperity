@@ -273,7 +273,7 @@ int PS4ABI sys_batch_map(uint32_t /*handle*/, uint32_t /*flags*/,
       uint8_t *p = sys_mmap(reinterpret_cast<void *>(op.start), op.length,
                             op.prot, mFlags::fixed | mFlags::anon,
                             static_cast<uint32_t>(-1), 0);
-      if (p == reinterpret_cast<uint8_t *>(-1)) {
+      if (isErrnoPtr(p)) {
         if (processed)
           *processed = done;
         return -SysError::eNOMEM;
@@ -298,7 +298,18 @@ int PS4ABI sys_batch_map(uint32_t /*handle*/, uint32_t /*flags*/,
   return 0;
 }
 
-int PS4ABI sys_set_vm_container(uint32_t) { return 0; }
+// sys_set_vm_container (559): arg == -1 returns the current vm container id;
+// arg 0 or 1 selects it (requires privilege). The kernel validates: unsigned
+// (arg+1) > 2 is EINVAL, and arg > 1 is EINVAL. We track the id (default 0).
+int PS4ABI sys_set_vm_container(uint32_t op) {
+  static std::atomic<uint32_t> current{0};
+  if (op == 0xFFFFFFFFu)
+    return static_cast<int>(current.load());
+  if (op > 1)
+    return -SysError::eINVAL;
+  current.store(op);
+  return 0;
+}
 
 // Map a direct-memory region (sceKernelMapDirectMemory, syscall 628). Real ABI
 // (verified from libkernel 01.14.00): rdi=VA hint, rsi=len, rdx=prot,
@@ -338,7 +349,7 @@ int64_t PS4ABI sys_mmap_dmem(void *addr, size_t len, int prot, int flags,
   uint8_t *p = sys_mmap(addr, len, PROT_READ | PROT_WRITE,
                         mFlags::anon | (fixedReq ? mFlags::fixed : 0),
                         static_cast<uint32_t>(-1), 0);
-  if (p == reinterpret_cast<uint8_t *>(-1))
+  if (isErrnoPtr(p))
     return -SysError::eNOMEM;
   // Still direct memory as far as the guest is concerned: it keys its own heap
   // map off the physical offset the query reports back.

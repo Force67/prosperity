@@ -26,6 +26,14 @@ enum mFlags : uint32_t {
 // must be guest-dereferenceable (identity-mapped) and pass PS4 pointer checks.
 uint8_t *allocLowGuest(size_t size, size_t align = 0);
 
+// mmap-family handlers return either a guest pointer or a negative errno
+// encoded as a pointer (e.g. -ENOMEM as 0xFFFF...FF4). Distinguishes the two:
+// every error pointer is negative when viewed as an integer, while guest
+// pointers always stay below the 2^40 user ceiling.
+inline bool isErrnoPtr(const uint8_t *p) {
+  return reinterpret_cast<intptr_t>(p) < 0;
+}
+
 // VA the guest itself unmapped. sys_munmap keeps the host pages (see there), so
 // a later mmap HINT at the same address would otherwise be refused and
 // relocated -- which breaks any allocator that frees a probe mapping and then

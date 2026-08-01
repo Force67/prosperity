@@ -190,8 +190,13 @@ struct shmBacking {
   uint8_t *base = nullptr;
   size_t size = 0;
 };
+using shmRef = std::shared_ptr<shmBacking>;
 std::mutex g_shmMutex;
-std::unordered_map<std::string, shmBacking> g_shmByName;
+// name -> shared backing. The backing outlives the name: shmObject holds a
+// shared ref, so a region that was shm_open'd then shm_unlink'd keeps working
+// through its fd -- the real kernel refcounts the shm object by file
+// descriptor the same way (unlink only drops the name).
+std::unordered_map<std::string, shmRef> g_shmByName;
 
 // ---------------------------------------------------------------------------
 // RESEARCH INSTRUMENTATION (env-gated, default OFF, no effect on the normal
@@ -289,8 +294,9 @@ void shmAudioDumperMain(std::string dir, unsigned periodMs, unsigned maxSnaps,
     {
       std::lock_guard<std::mutex> lk(g_shmMutex);
       for (auto &kv : g_shmByName)
-        if (kv.second.base && kv.second.size && shmAudioMatch(kv.first))
-          regs.push_back({kv.first, kv.second.base, kv.second.size});
+        if (kv.second && kv.second->base && kv.second->size &&
+            shmAudioMatch(kv.first))
+          regs.push_back({kv.first, kv.second->base, kv.second->size});
     }
     const uint64_t t = shmAudioNowUs();
     for (auto &r : regs) {
@@ -371,20 +377,20 @@ void shmAudioProbeMain(long periodUs) {
     {
       std::lock_guard<std::mutex> lk(g_shmMutex);
       for (auto &kv : g_shmByName) {
-        if (!kv.second.base) continue;
+        if (!kv.second || !kv.second->base) continue;
         const std::string &n = kv.first;
         if (n.size() > 2 && n.compare(n.size() - 2, 2, "_C") == 0 &&
             n.compare(0, 5, "/shm_") == 0) {
-          ctlRaw = kv.second.base;
-          ctlSize = kv.second.size;
+          ctlRaw = kv.second->base;
+          ctlSize = kv.second->size;
         } else if (n.size() > 2 && n.compare(n.size() - 2, 2, "_A") == 0 &&
                    n.compare(0, 5, "/shm_") == 0) {
           // "/shm_<pid>_<idx>_A" -> idx
           size_t e = n.size() - 2;            // at the '_' of "_A"
           size_t s = n.rfind('_', e - 1);
           if (s != std::string::npos)
-            as.push_back({std::atoi(n.c_str() + s + 1), kv.second.base,
-                          kv.second.size});
+            as.push_back({std::atoi(n.c_str() + s + 1), kv.second->base,
+                          kv.second->size});
         }
       }
     }
@@ -479,16 +485,18 @@ void shmAudioDumpMaybeStart() {
 
 class shmObject : public kObject {
 public:
-  shmObject(proc *p, std::string nm)
-      : kObject(p, kObject::oType::shm), shmName(std::move(nm)) {}
-  std::string shmName;  // key into g_shmByName
+  shmObject(proc *p, std::string nm, shmRef b)
+      : kObject(p, kObject::oType::shm), shmName(std::move(nm)),
+        backing(std::move(b)) {}
+  std::string shmName;  // diagnostics / audio protocol key
+  shmRef backing;       // keeps the backing alive while this fd is open
 };
 
 // Return the backing block for a shm, allocating/growing it to cover the
 // requested range. Caller must NOT hold g_shmMutex. -1 on failure.
 uint8_t *shmMap(shmObject *shm, size_t size, size_t offset) {
   std::lock_guard<std::mutex> lk(g_shmMutex);
-  auto &b = g_shmByName[shm->shmName];
+  auto &b = *shm->backing;
   size_t need = (offset + size + 0x3FFF) & ~size_t(0x3FFF);
   if (!b.base && need) {
     b.base = allocLowGuest(need);
@@ -552,6 +560,33 @@ uint8_t *PS4ABI sys_mmap(void *addr, size_t size, uint32_t prot, uint32_t flags,
         }
       }
     }
+  }
+
+  // Faithful validation, mirroring the kernel's sys_mmap arg handling:
+  //  - MAP_STACK (0x400): requires an anonymous fd and PROT_READ|PROT_WRITE;
+  //    the kernel ORs in MAP_ANON and drops the offset.
+  //  - MAP_VOID (0x100): an address-space reservation; the kernel forces prot 0
+  //    (nothing is committed until a MAP_FIXED punches in) and tracks the range
+  //    as reserved.
+  //  - MAP_FIXED (0x10): the address must be page-aligned and the range must not
+  //    wrap, else EINVAL. The kernel also bounds it by VM_MAXUSER_ADDRESS; we
+  //    cannot, because a guest thread runs on a HOST stack, and libkernel
+  //    MAP_FIXEDs the guard page of that stack far above the 2^40 guest ceiling.
+  if (flags & mFlags::stack) {
+    if (fd != static_cast<uint32_t>(-1) || (prot & 3) != 3)
+      return reinterpret_cast<uint8_t *>(-SysError::eINVAL);
+    offset = 0;
+  }
+  const bool voidReserve = (flags & 0x100) != 0;
+  if (voidReserve)
+    prot = 0;
+  if (flags & mFlags::fixed) {
+    const uintptr_t a = reinterpret_cast<uintptr_t>(addr);
+    if ((a & 0x3FFF) != 0)
+      return reinterpret_cast<uint8_t *>(-SysError::eINVAL);
+    uintptr_t aEnd;
+    if (__builtin_add_overflow(a, size, &aEnd))
+      return reinterpret_cast<uint8_t *>(-SysError::eINVAL);
   }
 
   // addr is a hint unless MAP_FIXED: relocate it rather than alias an existing map
@@ -639,9 +674,15 @@ uint8_t *PS4ABI sys_mmap(void *addr, size_t size, uint32_t prot, uint32_t flags,
   if (addr) {
     if (flags & mFlags::fixed) {
       // MAP_FIXED: the guest demands this exact address; overlay whatever's there.
-      ptr = utl::allocMem(addr, size, ppt::w, alt::reservecommit);
+      // For a MAP_FIXED stack the kernel maps the region BELOW the address and
+      // returns the address itself (vm_map_stack maps [start-size, start)), so
+      // plant the block below the hint instead of on top of it.
+      void *want = addr;
+      if (flags & mFlags::stack)
+        want = static_cast<uint8_t *>(addr) - size;
+      ptr = utl::allocMem(want, size, ppt::w, alt::reservecommit);
       if (!ptr)
-        ptr = utl::allocMem(addr, size, ppt::w, alt::commit);  // maybe pre-reserved
+        ptr = utl::allocMem(want, size, ppt::w, alt::commit);  // maybe pre-reserved
     } else if (inUserStack) {
       ptr = utl::allocMem(addr, size, ppt::w, alt::commit);
     } else if (utl::allocMem(addr, size, ppt::w, alt::reserve)) {
@@ -663,9 +704,8 @@ uint8_t *PS4ABI sys_mmap(void *addr, size_t size, uint32_t prot, uint32_t flags,
   // own allocators will accept, not whatever high address the host hands out.
   if (!ptr)
     ptr = allocLowGuest(size, mapAlign);
-  if (!ptr) {
-    return reinterpret_cast<uint8_t *>(-1);
-  }
+  if (!ptr)
+    return reinterpret_cast<uint8_t *>(-SysError::eNOMEM);
 
   // Track the prot the guest actually asked for (BSD r=1/w=2/x=4 maps 1:1 onto
   // pageProtection) so sceKernelVirtualQuery / QueryMemoryProtection report the
@@ -689,17 +729,22 @@ uint8_t *PS4ABI sys_mmap(void *addr, size_t size, uint32_t prot, uint32_t flags,
   if (fd != static_cast<uint32_t>(-1)) {
     if (auto *o = proc->getObjTable().get(fd))
       if (o->type() == kObject::oType::device) {
-        int64_t got = static_cast<device *>(o)->readAt(ptr, size, offset);
+        // The kernel maps the page-aligned file range and hands back
+        // base + (offset & 0x3FFF), so the guest's pointer lands on the file's
+        // byte at `offset`. The fill must therefore start at the page-aligned
+        // offset for that contract to hold.
+        const int64_t fileOff = static_cast<int64_t>(offset & ~size_t(0x3FFF));
+        int64_t got = static_cast<device *>(o)->readAt(ptr, size, fileOff);
         if (got > 0 && kMmapfdTrace)
-          std::fprintf(stderr, "[mmapfd]   filled %p from fd=%u off=%#zx -> %lld bytes\n",
-                       ptr, fd, offset, (long long)got);
+          std::fprintf(stderr, "[mmapfd]   filled %p from fd=%u off=%#llx -> %lld bytes\n",
+                       ptr, fd, (unsigned long long)fileOff, (long long)got);
       }
   }
 
-  // 0x100 = Sony MAP_VOID: an address-space reservation (titles later commit
-  // pieces inside with MAP_FIXED, which punches the reservation apart in the
-  // VMA). Virtual query must see it as reserved, not committed memory.
-  const bool voidReserve = (flags & 0x100) && prot == 0;
+  // MAP_VOID (0x100): an address-space reservation (titles later commit pieces
+  // inside with MAP_FIXED, which punches the reservation apart in the VMA).
+  // Virtual query must see it as reserved, not committed memory. `prot` was
+  // forced to 0 above, mirroring the kernel.
   if (dmemMap)
     proc->getVma().addDirect(static_cast<uint8_t *>(ptr), size, gprot, prot,
                              offset);
@@ -741,10 +786,14 @@ uint8_t *PS4ABI sys_mmap(void *addr, size_t size, uint32_t prot, uint32_t flags,
                 addr, size, prot, flags, static_cast<int>(fd), offset,
                 _ReturnAddress(), ptr);
 
+  // The kernel's returned address = page-aligned base + (offset & 0x3FFF), so a
+  // map with a non-page-aligned offset points at the file's byte at `offset`
+  // (FreeBSD mmap semantics). Anonymous maps carry offset 0 and return the base.
+  // MAP_STACK returns the top of the region, exactly like vm_map_stack.
   if (flags & mFlags::stack)
     return &static_cast<uint8_t *>(ptr)[size];
 
-  return static_cast<uint8_t *>(ptr);
+  return static_cast<uint8_t *>(ptr) + (offset & 0x3FFF);
 }
 
 int PS4ABI sys_mprotect(uint8_t *addr, size_t len, int prot) {
@@ -752,16 +801,26 @@ int PS4ABI sys_mprotect(uint8_t *addr, size_t len, int prot) {
   if (!proc)
     return -SysError::eINVAL;
 
-  // BSD prot bits (r=1/w=2/x=4) map 1:1 onto pageProtection. Reflect the change
-  // in the region we track so sceKernelVirtualQuery reports the new protection.
-  // We don't restrict the host pages (see sys_mmap) and we don't fail on an
-  // untracked range: the dynamic linker mprotects its own RELRO segments, which
-  // the module loader maps outside this table, and erroring there would break
-  // relocation finalisation. So update what we know and report success.
-  auto np = static_cast<ppt>(prot & static_cast<uint32_t>(ppt::rwx));
-  if (auto *region = proc->getVma().get(addr))
-    region->prot = np;
-  (void)len;
+  // Same range math as the kernel's sys_mprotect: round the base down and the
+  // span up, adding the page offset of `addr`; a wrapping range is EINVAL.
+  const uintptr_t a = reinterpret_cast<uintptr_t>(addr);
+  const uintptr_t base = a & ~uintptr_t(0x3FFF);
+  const size_t span = (len + (a & 0x3FFF) + 0x3FFF) & ~uintptr_t(0x3FFF);
+  uintptr_t end;
+  if (__builtin_add_overflow(base, span, &end))
+    return -SysError::eINVAL;
+
+  // The kernel masks the requested prot to 0x37 (r/w/x plus the GPU bits) and
+  // applies it to every entry in the range, so sceKernelVirtualQuery reports
+  // the mprotect result. We don't restrict the host pages (see sys_mmap) and we
+  // don't fail on an untracked range: the dynamic linker mprotects its own
+  // RELRO segments, which the module loader maps outside this table, and
+  // vm_map_protect succeeds over gaps too. So update what we know and succeed.
+  const uint32_t sceProt = static_cast<uint32_t>(prot) & 0x37;
+  proc->getVma().protectRange(reinterpret_cast<uint8_t *>(base), span,
+                              static_cast<ppt>(sceProt &
+                                               static_cast<uint32_t>(ppt::rwx)),
+                              sceProt);
   return 0;
 }
 
@@ -770,8 +829,20 @@ int PS4ABI sys_shm_open(const char *path, uint32_t flags, uint16_t mode) {
   if (!proc || !path)
     return -SysError::eINVAL;
 
-  constexpr uint32_t kO_CREAT = 0x0200, kO_EXCL = 0x0800;
+  // Argument validation from the kernel's sys_shm_open: O_WRONLY (0x1) is not a
+  // valid shm_open mode, and an unknown bit among {O_RDWR=0x2, O_CREAT=0x200,
+  // O_TRUNC=0x400, O_EXCL=0x800} is EINVAL. Only the low half is checked:
+  // libkernel passes descriptor flags above it (the common dialog opens its work
+  // area with 0x200000) that the FreeBSD mask does not name but the console
+  // accepts.
+  if ((flags & 1) != 0)
+    return -SysError::eINVAL;
+  if ((flags & 0xF1FC) != 0)
+    return -SysError::eINVAL;
+
+  constexpr uint32_t kO_CREAT = 0x0200, kO_EXCL = 0x0800, kO_TRUNC = 0x0400;
   std::string name(path);
+  shmRef backing;
   {
     std::lock_guard<std::mutex> lk(g_shmMutex);
     auto it = g_shmByName.find(name);
@@ -790,27 +861,40 @@ int PS4ABI sys_shm_open(const char *path, uint32_t flags, uint16_t mode) {
         // contents, so auto-provide a zeroed, pre-sized backing -- the title
         // then fstat()s a real size and mmaps it (reading defaults) instead of
         // failing init with a -ENOENT shm fd it tries to map anyway.
-        shmBacking b;
-        b.size = 0x10000;  // 64 KiB, ample for a settings block
-        b.base = allocLowGuest(b.size);
-        if (b.base) {
-          std::memset(b.base, 0, b.size);
-          proc->getVma().add(b.base, b.size, ppt::w);
+        backing = std::make_shared<shmBacking>();
+        backing->size = 0x10000;  // 64 KiB, ample for a settings block
+        backing->base = allocLowGuest(backing->size);
+        if (backing->base) {
+          std::memset(backing->base, 0, backing->size);
+          proc->getVma().add(backing->base, backing->size, ppt::w);
         }
         std::fprintf(stderr, "[shm_open] auto-provide system shm '%s' size=%#zx\n",
-                     name.c_str(), b.size);
-        g_shmByName.emplace(name, b);
+                     name.c_str(), backing->size);
+        g_shmByName.emplace(name, backing);
       } else {
-        g_shmByName.emplace(name, shmBacking{});  // empty; sized later by ftruncate
+        // O_CREAT: fresh, empty backing; sized later by ftruncate.
+        backing = std::make_shared<shmBacking>();
+        g_shmByName.emplace(name, backing);
       }
-    } else if ((flags & kO_CREAT) && (flags & kO_EXCL)) {
-      return -SysError::eEXIST;
+    } else {
+      if ((flags & kO_CREAT) && (flags & kO_EXCL))
+        return -SysError::eEXIST;
+      backing = it->second;
+      // O_TRUNC on an existing region: the kernel truncates it to zero
+      // (shm_dotruncate, only honoured for O_RDWR | O_TRUNC, 0x402). Existing
+      // fds keep mapping the (now empty) backing, exactly like the real object.
+      if ((flags & 0x403) == 0x402) {
+        shmAudioTrace("trunc", name, backing->base, 0, 0);
+        backing->size = 0;
+        if (backing->base)
+          audioDaemonNoticeShm(name.c_str(), backing->base, 0);
+      }
     }
   }
 
   // A fresh fd per open, all sharing the named backing (POSIX-ish for a single
   // guest process). The ctor registers it in the object table.
-  auto *obj = new shmObject(proc, std::move(name));
+  auto *obj = new shmObject(proc, std::move(name), std::move(backing));
   std::fprintf(stderr, "[shm_open] '%s' flags=%#x -> fd=%u\n", path, flags,
                obj->handle());
   shmAudioTrace("shm_open", obj->shmName, nullptr, 0, flags);
@@ -826,8 +910,9 @@ int PS4ABI sys_shm_unlink(const char *path) {
   auto it = g_shmByName.find(path);
   if (it == g_shmByName.end())
     return -SysError::eNOENT;
-  // Drop the name only. Any region already handed to mmap is a raw pointer that
-  // stays valid; we keep the host allocation (reclaimed at process exit).
+  // Drop the name only. Any fd that already opened this shm holds a shared ref
+  // to the backing, so its mmaps keep working; the backing goes away when the
+  // last fd closes (the kernel refcounts the shm object the same way).
   g_shmByName.erase(it);
   return 0;
 }
@@ -844,7 +929,7 @@ size_t shmFstatSize(uint32_t fd) {
     return SIZE_MAX;
   auto *shm = static_cast<shmObject *>(obj);
   std::lock_guard<std::mutex> lk(g_shmMutex);
-  return g_shmByName[shm->shmName].size;
+  return shm->backing->size;
 }
 
 int PS4ABI sys_ftruncate(uint32_t fd, int64_t length) {
@@ -852,17 +937,28 @@ int PS4ABI sys_ftruncate(uint32_t fd, int64_t length) {
   if (!proc || length < 0)
     return -SysError::eINVAL;
   auto *obj = proc->getObjTable().get(fd);
-  if (!obj || obj->type() != kObject::oType::shm)
+  if (!obj)
     return -SysError::eBADF;
+  // The kernel dispatches to the file type's truncate method; a type without
+  // one (e.g. a device) is EINVAL, not EBADF.
+  if (obj->type() != kObject::oType::shm)
+    return -SysError::eINVAL;
 
   auto *shm = static_cast<shmObject *>(obj);
-  size_t want = (static_cast<size_t>(length) + 0x3FFF) & ~size_t(0x3FFF);
+  const size_t raw = static_cast<size_t>(length);
+  const size_t want = (raw + 0x3FFF) & ~size_t(0x3FFF);
   std::lock_guard<std::mutex> lk(g_shmMutex);
-  auto &b = g_shmByName[shm->shmName];
+  auto &b = *shm->backing;
   // The RAW length matters for the protocol spec (the rounded `want` hides it).
-  shmAudioTrace("ftruncate", shm->shmName, b.base,
-                static_cast<size_t>(length), want);
-  if (want == 0 || want <= b.size)
+  shmAudioTrace("ftruncate", shm->shmName, b.base, raw, want);
+  if (want < b.size) {
+    // Shrink (kernel shm_dotruncate frees the tail pages). The host block
+    // stays put; a later grow reallocates and copies only `size` bytes.
+    b.size = want;
+    audioDaemonNoticeShm(shm->shmName.c_str(), b.base, b.size);
+    return 0;
+  }
+  if (want == b.size)
     return 0;
   uint8_t *nb = allocLowGuest(want);
   if (!nb)
@@ -885,20 +981,28 @@ int PS4ABI sys_ftruncate(uint32_t fd, int64_t length) {
 int PS4ABI sys_mname(uint8_t *ptr, size_t len, const char *name, void *) {
   auto *proc = proc::getActive();
   if (!proc)
-    return -1;
+    return -SysError::eINVAL;
 
-  auto *info = proc->getVma().get(ptr);
-  if (!info) {
-    LOG_WARNING("attempted to tag unknown memory ({}, {})", fmt::ptr(ptr),
-                name);
-    return -1;
-  }
+  // Same guards as the kernel's sys_mname: the range must live inside the
+  // user VA space (here the 2^40 allocLowGuest ceiling stands in for
+  // map->max_offset) and the name must fit the kernel's 32-byte tag buffer
+  // (vm_map_set_name copies into a fixed 32-byte region).
+  const uintptr_t a = reinterpret_cast<uintptr_t>(ptr);
+  if (a >= 0x10000000000ull || len > 0x10000000000ull - a)
+    return -SysError::eINVAL;
+  char tag[32];
+  const size_t n = strnlen(name, sizeof(tag));
+  if (n == sizeof(tag))
+    return -SysError::eNAMETOOLONG;
+  memcpy(tag, name, n);
+  tag[n] = '\0';
 
-  LOG_WARNING("tagged {}+{:#x} with name {}", fmt::ptr(ptr), len, name);
-  info->name = name;
+  // Tag every mapping entry in the page-rounded range, mirroring vm_map_set_name
+  // which walks and names each entry the range covers.
+  proc->getVma().setRangeName(ptr, len, tag);
   // Titles name their thread STACKS this way; carry the tag onto the host
   // thread running on that stack (wait probe / gdb / perf attribution).
-  nameThreadsForRange(ptr, len, name);
+  nameThreadsForRange(ptr, len, tag);
   return 0;
 }
 
@@ -914,28 +1018,80 @@ struct mdbg_property {
 
 static_assert(sizeof(mdbg_property) == 72);
 
-int PS4ABI sys_mdbg_service(uint32_t op, void *arg1, void *arg2, void *a3) {
-  switch (op) {
-  case 1: {
-    auto *info = static_cast<mdbg_property *>(arg1);
-    LOG_WARNING("set property {} for addr {} with size {}", info->name,
-                info->addr, info->areaSize);
-    /*TODO: create named object*/
+// Debug-raise state standing in for the kernel's per-process proc+2600 qword
+// (mdbg_service_raise sets bit 1; sys_mdbg_service case 0 reports the whole
+// word). No debugger is attached here, so a raise is recorded and reported as
+// delivered rather than suspending the process.
+static std::atomic<uint64_t> gMdbgFlags{0};
 
-    break;
-  }
-  }
-
+// Mirrors the kernel's mdbg_service_raise: the reason (<= 0x7E) is stored, the
+// debug-raise flag set, then the process is signalled. The suspend notification
+// callback is unregistered here, so report the raise as delivered.
+static int mdbgServiceRaise(uintptr_t reason) {
+  if (reason <= 0x7E)
+    gMdbgFlags.fetch_or(static_cast<uint64_t>(reason) << 32);
+  gMdbgFlags.fetch_or(2);
+  LOG_WARNING("mdbg raise: reason={} (no debugger attached, ignoring)", reason);
   return 0;
 }
 
-// sceKernelGet/SetDirectMemoryContainer: -1 queries the current container id,
-// any other value selects it and returns the previous one. We don't enforce
-// separate dmem pools, so just track the selected id (default 0) and never trap.
+int PS4ABI sys_mdbg_service(uint32_t op, void *arg1, void *arg2, void *a3) {
+  (void)arg2;
+  (void)a3;
+  switch (op) {
+  case 0:
+    // Kernel: copyout the proc's debug flags qword (proc+2600) to the caller.
+    *static_cast<uint64_t *>(arg1) = gMdbgFlags.load();
+    return 0;
+  case 1: {
+    // Kernel: copyin a 72-byte property {40 bytes of data + 32-byte name} and
+    // register a named object from it. Registration is a no-op on our side (see
+    // sys_namedobj_create), so surface the property and store the name as the
+    // per-process tag would.
+    auto *info = static_cast<mdbg_property *>(arg1);
+    char tag[32];
+    tag[31] = 0; // kernel zeroes the last name byte after copyin
+    memcpy(tag, info->name, sizeof(tag) - 1);
+    LOG_WARNING("mdbg property {} for addr {} size {}", tag, info->addr,
+                info->areaSize);
+    return 0;
+  }
+  case 3:
+    // Kernel: mdbg_service_raise with the raw second syscall argument as reason.
+    return mdbgServiceRaise(reinterpret_cast<uintptr_t>(arg1));
+  case 4:
+    // Kernel: raise only while debug mode is allowed (boot_parameter(0)==0 and
+    // the process debug flag at proc+900 set). Both hold for an emulated
+    // process, so raise directly.
+    return mdbgServiceRaise(reinterpret_cast<uintptr_t>(arg1));
+  case 7: {
+    // Kernel: copyinstr a message (up to 0x1000) and printf it; the mdbg text
+    // facility. Log it instead.
+    const char *msg = static_cast<const char *>(arg1);
+    if (!msg)
+      return -SysError::eINVAL;
+    std::string s(msg, strnlen(msg, 0x1000));
+    LOG_INFO("[mdbg-text] {}", s);
+    return 0;
+  }
+  default:
+    // The kernel returns 78 (eNOSYS in our table) for unknown ops.
+    return -SysError::eNOSYS;
+  }
+}
+
+// sys_dmem_container (586): sceKernelGet/SetDirectMemoryContainer.
+// arg == 0xFFFFFFFF: returns the current container id in rax.
+// arg == 0 or 1: requires privilege 0x2AD; sets the proc's dmem container.
+// Any other value is EINVAL. The kernel keeps the id at proc+2020. We don't
+// enforce separate dmem pools, so just track the selected id (default 0).
 int PS4ABI sys_dmem_container(uint32_t op) {
   static std::atomic<uint32_t> current{0};
   if (op == 0xFFFFFFFFu)
     return static_cast<int>(current.load());
-  return static_cast<int>(current.exchange(op));
+  if (op > 1)
+    return -SysError::eINVAL;
+  current.store(op);
+  return 0;
 }
 } // namespace krnl

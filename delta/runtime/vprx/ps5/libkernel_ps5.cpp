@@ -32,8 +32,7 @@ int PS4ABI kernelMapNamedFlexibleAligned(void **addrOut, size_t len, int prot,
 
   auto *base = krnl::sys_mmap(nullptr, len + align, static_cast<uint32_t>(prot),
                               krnl::mFlags::anon, static_cast<uint32_t>(-1), 0);
-  auto raw = reinterpret_cast<intptr_t>(base);
-  if (raw >= -4095 && raw < 0)
+  if (krnl::isErrnoPtr(base))
     return krnl::SysError::eNOMEM;
 
   auto addr = (reinterpret_cast<uintptr_t>(base) + align - 1) & ~(align - 1);
