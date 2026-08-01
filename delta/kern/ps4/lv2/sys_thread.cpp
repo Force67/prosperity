@@ -1023,6 +1023,93 @@ int PS4ABI sys_umtx_op(void *ptr, int op, uint64_t val, void *a, void *b) {
   // (the old default) turned sem_wait into a hot spin -- a savedata worker
   // (Shadow of the Tomb Raider) pegged a core re-issuing the syscall, starving
   // the threads it was waiting on. Block on _count like the other WAIT ops.
+  // Reader/writer lock (struct urwlock: {state, flags, blocked_readers,
+  // blocked_writers}). libthr CASes rw_state in userland and only enters the
+  // kernel when it has to block, so every state change here is a CAS too --
+  // a blind store would stomp a concurrent userland acquire. These fell through
+  // to the default "unhandled -> success" arm before, which granted the lock to
+  // every caller at once; a UE4 title then races on whatever it guards.
+  case 12:   // UMTX_OP_RW_RDLOCK
+  case 13: { // UMTX_OP_RW_WRLOCK
+    constexpr uint32_t kWriteOwner = 0x80000000u;
+    constexpr uint32_t kWriteWaiters = 0x40000000u;
+    constexpr uint32_t kReadWaiters = 0x20000000u;
+    constexpr uint32_t kMaxReaders = 0x1fffffffu;
+    constexpr uint32_t kPreferReader = 0x0002u;
+    const bool wr = op == 13;
+    auto &bk = umtxBucket(ptr);
+    auto *p = static_cast<std::atomic<uint32_t> *>(ptr);
+    auto *blocked = reinterpret_cast<volatile uint32_t *>(
+        static_cast<uint8_t *>(ptr) + (wr ? 12 : 8));
+    const uint32_t flags = reinterpret_cast<volatile uint32_t *>(
+        static_cast<uint8_t *>(ptr))[1];
+    std::unique_lock<std::mutex> lk(bk.m);
+    for (;;) {
+      uint32_t st = p->load();
+      if (wr) {
+        // A writer needs the lock completely idle.
+        if (!(st & kWriteOwner) && (st & kMaxReaders) == 0) {
+          if (p->compare_exchange_strong(st, st | kWriteOwner))
+            return 0;
+          continue;
+        }
+      } else {
+        // A reader yields to a queued writer unless the lock prefers readers or
+        // there is already a reader in (in which case the writer is blocked on
+        // them anyway and queueing behind it would deadlock).
+        const bool yield_to_writer = (st & kWriteWaiters) &&
+                                     !(flags & kPreferReader) &&
+                                     (st & kMaxReaders) == 0;
+        if (!(st & kWriteOwner) && !yield_to_writer) {
+          if ((st & kMaxReaders) == kMaxReaders)
+            return -SysError::eAGAIN;
+          if (p->compare_exchange_strong(st, st + 1))
+            return 0;
+          continue;
+        }
+      }
+      // Publish the waiter bit so a userland unlock knows to enter the kernel.
+      const uint32_t want = st | (wr ? kWriteWaiters : kReadWaiters);
+      if (st != want && !p->compare_exchange_strong(st, want))
+        continue;
+      (*blocked)++;
+      bk.cv.wait_for(lk, umtxTimeout());  // re-check on wake / safety timeout
+      (*blocked)--;
+    }
+  }
+  case 14: { // UMTX_OP_RW_UNLOCK
+    constexpr uint32_t kWriteOwner = 0x80000000u;
+    constexpr uint32_t kWriteWaiters = 0x40000000u;
+    constexpr uint32_t kReadWaiters = 0x20000000u;
+    constexpr uint32_t kMaxReaders = 0x1fffffffu;
+    auto &bk = umtxBucket(ptr);
+    auto *p = static_cast<std::atomic<uint32_t> *>(ptr);
+    auto *blocked = reinterpret_cast<volatile uint32_t *>(
+        static_cast<uint8_t *>(ptr));
+    std::unique_lock<std::mutex> lk(bk.m);
+    uint32_t st = p->load();
+    for (;;) {
+      uint32_t next;
+      if (st & kWriteOwner)
+        next = st & ~kWriteOwner;
+      else if ((st & kMaxReaders) != 0)
+        next = st - 1;
+      else
+        return -SysError::ePERM;
+      // Retire a waiter bit nobody is behind any more. Leaving a stale
+      // WRITE_WAITERS set starves readers permanently: they yield to a writer
+      // that no longer exists. The blocked counts only change under this lock.
+      if (blocked[3] == 0)
+        next &= ~kWriteWaiters;
+      if (blocked[2] == 0)
+        next &= ~kReadWaiters;
+      if (p->compare_exchange_strong(st, next))
+        break;
+    }
+    lk.unlock();
+    bk.cv.notify_all();
+    return 0;
+  }
   case 19: { // UMTX_OP_SEM_WAIT
     auto &bk = umtxBucket(ptr);
     auto *hasWaiters = static_cast<std::atomic<uint32_t> *>(ptr);
