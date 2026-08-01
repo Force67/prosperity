@@ -16,11 +16,21 @@
 //     vkCmdCopyBufferToImage cannot repack RGBA32F into R11G11B10F. (The
 //     descriptor also runs a few rows taller than the image, 948 vs 945, which
 //     is just tile alignment and is harmless once the element sizes agree.)
-//  2. The presented frame is wrong: frame 0 is a full-screen debug gradient and
-//     later frames come out solid white, while the game's own targets are being
-//     drawn into. Same family as the black-frame work on other titles; start
-//     from +DELTA_GPU_PRESENT_ADDR=0x2012800000 (the 1680x945 main colour
-//     target) to see what the draws actually produced.
+//  2. The presented frame is wrong: frame 0 is a full-screen debug gradient,
+//     later frames are solid white. This is NOT a composite/scanout bug --
+//     almost nothing is ever drawn. +DELTA_GPU_RTSTAT=1 +DELTA_GPU_RTSTAT_ALL=1
+//     +DELTA_GPU_RTSTAT_EVERY=12 at frame 24 says:
+//       - the five 1680x948 G-buffer targets (0x2010000000, 0x2010800000,
+//         0x2011000000, 0x2011800000, 0x2012000000) each report draws=1 with
+//         vs=0 ps=0 -- a clear and nothing else -- and are entirely zero.
+//       - 0x2018000000 (256x256) takes 160 draws and is still all zero.
+//       - the only targets with content are 0x200ec00000 840x473 (mean=20,
+//         half 1.0), 0x200e000000 1680x945 (4135/16538 non-zero) and the two
+//         1920x1080 buffers, which are solid white -- that white is what gets
+//         presented.
+//     So the ~356 draws a frame are not reaching the scene targets. Find where
+//     they go before touching the present path; the main colour target
+//     (+DELTA_GPU_PRESENT_ADDR=0x2012800000) is confirmed black.
 //
 // PSN BRING-UP (done). The title calls
 // sce::Toolkit::NP::V2::Interface::initialize during engine init and treats any
