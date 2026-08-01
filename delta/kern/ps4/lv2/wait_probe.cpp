@@ -17,7 +17,6 @@
 #include <mutex>
 #include <thread>
 #include <unordered_map>
-#include <unordered_set>
 
 #include <unistd.h>
 #include <sys/syscall.h>
@@ -36,7 +35,8 @@ struct Parked {
   const char *what;
   long a0, a1;
   std::chrono::steady_clock::time_point since;
-  uintptr_t gsp;  // guest stack at the syscall, walked by the reporter
+  uintptr_t gsp;   // guest stack at the syscall, walked by the reporter
+  bool traced;     // this wait has had its guest stack reported
 };
 
 std::mutex g_mtx;
@@ -66,13 +66,12 @@ void threadComm(long tid, char *buf, size_t len) {
 void startReporter() {
   static const bool started = [] {
     std::thread([] {
-      std::unordered_set<long> once;  // one guest trace per thread, not per tick
       for (;;) {
         std::this_thread::sleep_for(std::chrono::seconds(5));
         const auto now = std::chrono::steady_clock::now();
         std::lock_guard<std::mutex> lk(g_mtx);
         bool any = false;
-        for (const auto &[tid, p] : g_parked) {
+        for (auto &[tid, p] : g_parked) {
           const auto secs =
               std::chrono::duration_cast<std::chrono::seconds>(now - p.since)
                   .count();
@@ -88,8 +87,12 @@ void startReporter() {
                        "[waitprobe]   tid=%ld (%-15s) %-16s %llds a0=%#lx a1=%#lx\n",
                        tid, comm, p.what, static_cast<long long>(secs), p.a0,
                        p.a1);
-          if (once.insert(tid).second)
+          // Once per wait, not once per thread: a thread that gets past one
+          // wait and parks in the next one has a different story to tell.
+          if (!p.traced) {
+            p.traced = true;
             guestStackTraceFrom(p.gsp, "waitprobe", 20, tid);
+          }
         }
       }
     }).detach();
@@ -107,7 +110,7 @@ void waitProbeEnter(const char *what, long a0, long a1) {
   const long tid = selfTid();
   std::lock_guard<std::mutex> lk(g_mtx);
   g_parked[tid] = {what, a0, a1, std::chrono::steady_clock::now(),
-                   guestStackScanBase()};
+                   guestStackScanBase(), false};
 }
 
 void waitProbeExit() {

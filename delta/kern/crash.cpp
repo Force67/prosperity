@@ -19,6 +19,7 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 #include <sys/mman.h>
+#include <sys/uio.h>
 #include <time.h>
 #include <pthread.h>
 #include <thread>
@@ -1738,18 +1739,35 @@ static thread_local uintptr_t t_guestSp = 0;
 void setGuestStackScanBase(uintptr_t sp) { t_guestSp = sp; }
 uintptr_t guestStackScanBase() { return t_guestSp; }
 
+// A stack scan walks towards the top of the stack and runs into the guard page
+// at the end of it, so it cannot dereference the window directly: a diagnostic
+// must not be the thing that kills the process. Copy it out through
+// process_vm_readv, which reports an unmapped page instead of faulting on it.
+static size_t copyStackWindow(uintptr_t base, uintptr_t *out, size_t words) {
+  while (words) {
+    iovec local{out, words * sizeof(uintptr_t)};
+    iovec remote{reinterpret_cast<void *>(base), local.iov_len};
+    if (process_vm_readv(getpid(), &local, 1, &remote, 1, 0) ==
+        static_cast<ssize_t>(local.iov_len))
+      return words;
+    words /= 2;
+  }
+  return 0;
+}
+
 void guestStackTraceFrom(uintptr_t base, const char *tag, int maxFrames,
                          long tid) {
   if (!base)
     return;
-  auto *sp = reinterpret_cast<uintptr_t *>(base);
+  uintptr_t sp[512];
+  const size_t n = copyStackWindow(base, sp, 512);
   int printed = 0;
-  for (int i = 0; i < 512 && printed < maxFrames; i++) {
+  for (size_t i = 0; i < n && printed < maxFrames; i++) {
     char sym[256];
     symbolize(sp[i], sym, sizeof(sym));
     if (std::strstr(sym, "(.text)")) {
-      std::fprintf(stderr, "[%s]     tid=%ld sp+%-5x %s\n", tag, tid, i * 8,
-                   sym);
+      std::fprintf(stderr, "[%s]     tid=%ld sp+%-5x %s\n", tag, tid,
+                   (unsigned)(i * 8), sym);
       printed++;
     }
   }
@@ -1757,15 +1775,18 @@ void guestStackTraceFrom(uintptr_t base, const char *tag, int maxFrames,
 
 void guestStackTrace(const char *tag, int maxFrames) {
   uintptr_t here = 0;
-  auto *sp = t_guestSp ? reinterpret_cast<uintptr_t *>(t_guestSp)
-                       : reinterpret_cast<uintptr_t *>(&here);
+  const uintptr_t base =
+      t_guestSp ? t_guestSp : reinterpret_cast<uintptr_t>(&here);
+  uintptr_t sp[512];
+  const size_t n = copyStackWindow(base, sp, 512);
   std::fprintf(stderr, "[%s] tid=%ld guest stack:\n", tag, (long)gettid());
   int printed = 0;
-  for (int i = 0; i < 512 && printed < maxFrames; i++) {
+  for (size_t i = 0; i < n && printed < maxFrames; i++) {
     char sym[256];
     symbolize(sp[i], sym, sizeof(sym));
     if (std::strstr(sym, "(.text)")) {
-      std::fprintf(stderr, "[%s]   sp+%-5x %016lx %s\n", tag, i * 8, sp[i], sym);
+      std::fprintf(stderr, "[%s]   sp+%-5x %016lx %s\n", tag, (unsigned)(i * 8),
+                   sp[i], sym);
       printed++;
     }
   }

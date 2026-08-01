@@ -765,9 +765,11 @@ int PS4ABI sys_mprotect(uint8_t *addr, size_t len, int prot) {
   return 0;
 }
 
-// Regions that belong to a service process we do not run, rather than to a
-// block of settings the kernel publishes.
-static bool isServiceChannel(const std::string &name) {
+// Names we know are the client half of a live channel rather than a block of
+// settings. Nothing in shm_open's arguments tells the two apart -- both are
+// pre-created and both are opened without O_CREAT -- so this is a list, and it
+// grows one name at a time as a title walks into the next one.
+static bool isAbsentServiceChannel(const std::string &name) {
   return name == "/SceNpTpip";
 }
 
@@ -789,7 +791,7 @@ int PS4ABI sys_shm_open(const char *path, uint32_t flags, uint16_t mode) {
         std::fprintf(stderr, "[shm_open] NOAUTO: '%s' -> ENOENT\n", name.c_str());
         return -SysError::eNOENT;
       }
-      if (!(flags & kO_CREAT) && isServiceChannel(name)) {
+      if (!(flags & kO_CREAT) && isAbsentServiceChannel(name)) {
         // Not every system shm is a settings block. Some are one half of a live
         // channel: the client maps the region, then blocks on the service's
         // named semaphore for the other half to answer. Handing it a zeroed
