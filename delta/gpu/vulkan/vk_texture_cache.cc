@@ -988,8 +988,21 @@ VkDescriptorSet GetTexture(uint64_t base,
     if (watched != g_frame.num && gpu::IsReadableRange(base, 32)) {
       watched = g_frame.num;
       const uint8_t* p = reinterpret_cast<const uint8_t*>(base);
-      std::fprintf(stderr, "[texwatch] f%d %#lx %ux%ux%u:", g_frame.num,
-                   (unsigned long)base, w, h, depth);
+      // Scan the whole surface, not just its head: a grading LUT legitimately
+      // starts at black, so a zero prefix says nothing about whether the guest
+      // filled it.
+      const uint64_t span = uint64_t(w) * h * depth * 4;
+      uint64_t first_nz = span;
+      if (gpu::IsReadableRange(base, span))
+        for (uint64_t i = 0; i < span; i++)
+          if (p[i]) {
+            first_nz = i;
+            break;
+          }
+      std::fprintf(stderr, "[texwatch] f%d %#lx %ux%ux%u span=%lu first_nz=%ld:",
+                   g_frame.num, (unsigned long)base, w, h, depth,
+                   (unsigned long)span,
+                   first_nz == span ? -1L : (long)first_nz);
       for (uint32_t i = 0; i < 32; i++)
         std::fprintf(stderr, " %02x", p[i]);
       std::fprintf(stderr, "\n");
