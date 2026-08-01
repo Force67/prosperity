@@ -1,8 +1,24 @@
 // P.T. (CUSA01127, PS4)
-// FOX engine. The PFS mount is fine; the boot stops in the module loader
-// (mapImage) on the eighth module (2026-07-31).
+// FOX engine. Boots, loads and runs its full render graph: ~223 draws/frame at
+// ~23fps, every shader translates, no draw declines. Assets stream fine
+// (/app0/texture.qar and /app0/chunk1.psarc read correctly through the PFS).
+//
+// Frame is still black (2026-08-01). What is known:
+//  - The G-buffer pass is bound and rasterises real geometry (3 MRTs at
+//    1920x1080, draws of a few thousand indices) yet every colour target reads
+//    back exactly zero, HDR ones included.
+//  - Its vertex attributes are fetched with MTBUF, not MUBUF. MTBUF carries its
+//    own DFMT/NFMT which override the V#'s, so that is the first thing to
+//    suspect for degenerate geometry.
+//  - Not the cause: depth test, face culling, the colour write masks, the
+//    render-target size aliasing.
+//  - The colour-grading LUT (a 16x16x16 volume) gates everything downstream of
+//    the tonemap: whatever it samples becomes the whole screen. Its guest
+//    memory stays zero for the entire run, and nothing we emulate writes it.
+//    Investigate that only after the G-buffer produces pixels.
 
 // The renderer needs a few thousand pad reads before the title's transition
-// handler exists, so hold neutral before pulsing anything.
+// handler exists, so hold neutral before pulsing anything. Made no difference
+// to the black frame, left off.
 // +DELTA_PAD_AUTOSKIP=1
 // +DELTA_PAD_AUTOSKIP_START=4000
