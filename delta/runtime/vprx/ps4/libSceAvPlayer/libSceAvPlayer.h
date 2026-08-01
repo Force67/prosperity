@@ -33,4 +33,11 @@ int PS4ABI sceAvPlayerSetLooping(int64_t handle, bool loop);
 int PS4ABI sceAvPlayerStreamCount(int64_t handle);
 int PS4ABI sceAvPlayerGetStreamInfo(int64_t handle, uint32_t streamId,
                                     void *info);
+
+// The remaining entry points a title reaches (stream enable/disable, seek,
+// pause/resume, sync mode). Each is a thin `int f(handle, ...)` in the real
+// .sprx that opens with `mov rdi,[rdi]`, so leaving any of them LLE means the
+// module dereferences the sentinel handle above and faults. They only steer
+// playback that never happens, so they all report success.
+int PS4ABI sceAvPlayerControlOk();
 }  // extern "C"

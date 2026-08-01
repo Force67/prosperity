@@ -93,3 +93,5 @@ int PS4ABI sceAvPlayerGetStreamInfo(int64_t /*handle*/, uint32_t /*streamId*/,
                                     void * /*info*/) {
   return -1;
 }
+
+int PS4ABI sceAvPlayerControlOk() { avpTrace("ControlOk"); return 0; }

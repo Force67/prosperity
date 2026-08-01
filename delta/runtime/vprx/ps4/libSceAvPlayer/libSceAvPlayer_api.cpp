@@ -17,6 +17,14 @@ static const runtime::funcInfo functions[] = {
     {0x395B61B34C467E1A, (void *)&sceAvPlayerSetLooping},
     {0x85D4F247309741E4, (void *)&sceAvPlayerStreamCount},
     {0x77C15C6F37C0750C, (void *)&sceAvPlayerGetStreamInfo},
+    // Playback-control entry points; see sceAvPlayerControlOk.
+    {0x38324ADAC9FDC380, (void *)&sceAvPlayerControlOk}, // ODJK2sn9w4A
+    {0x04E54A033466B934, (void *)&sceAvPlayerControlOk}, // BOVKAzRmuTQ
+    {0xF72E6FF9F18DE169, (void *)&sceAvPlayerControlOk}, // 9y5v+fGN4Wk
+    {0xC399A80013709D16, (void *)&sceAvPlayerControlOk}, // w5moABNwnRY
+    {0x5C2F7033EC542F3F, (void *)&sceAvPlayerControlOk}, // XC9wM+xULz8
+    {0x6AFF19FBEF78AECD, (void *)&sceAvPlayerControlOk}, // av8Z++94rs0
+    {0x93FABEC4EC5D7371, (void *)&sceAvPlayerControlOk}, // k-q+xOxdc3E
 };
 
 MODULE_INIT(libSceAvPlayer);
