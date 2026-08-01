@@ -2085,9 +2085,28 @@ void HandleDispatch(const uint32_t* body, uint32_t count) {
                  ci.num_res);
 }
 
+uint64_t g_ns_dcb = 0;
+uint32_t g_dcb_n = 0;
+
+namespace {
+// Wall time of one command-buffer walk, including the wait for the lock: a
+// second submit thread blocked behind the first is time the guest is stalled on
+// us either way.
+struct ScopeDcb {
+  std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+  ~ScopeDcb() {
+    g_ns_dcb += std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - t0)
+                    .count();
+    g_dcb_n++;
+  }
+};
+}  // namespace
+
 void SubmitDcb(const void* dcb, uint32_t size_bytes) {
   if (!dcb || size_bytes < 4)
     return;
+  ScopeDcb _dcb;
   std::lock_guard<std::mutex> lk(g_mtx);
   if (!g_vk_tried) {
     g_vk_tried = true;

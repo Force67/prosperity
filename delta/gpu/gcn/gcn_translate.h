@@ -121,6 +121,13 @@ struct Recompiled {
   uint8_t ps_mrt_mask = 0;           // bit n set = PS exports MRT color n
 };
 
+// Time spent recompiling shaders (GCN -> SPIR-V + spirv-opt) and the number of
+// recompiles, both since the last FPS report reset them. A title that streams
+// its shader code re-recompiles the same shaders, and that cost shows up
+// nowhere else: it is not inside a draw.
+extern uint64_t g_ns_recomp;
+extern uint32_t g_recomp_n;
+
 // Recompile a VS+PS pair. vs_code/ps_code are guest pointers to the GCN code;
 // the user-data arrays are the 16 user SGPRs for each stage (used only to read
 // the fetch-shader pointer during translation, not the live resources).

@@ -6,6 +6,8 @@
 
 #include "gfx/gfx.h"
 #include "gfx/overlay.h"
+#include "gpu/gcn/gcn_translate.h"
+#include "gpu/ps4/cmd_processor.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -349,14 +351,17 @@ void ReportFps() {
         "[fps] %.1f fps | per-frame gpu-code: draw=%.2fms end=%.2fms "
         "(wait=%.2fms exec=%.2fms "
         "submit=%.2fms present=%.2fms) texup=%.2fms x%.1f cs=%.2fms x%.1f "
-        "(in=%.2f gpu=%.2f out=%.2f stage=%.1fx%.1fMB flush=%.1f)\n",
+        "(in=%.2f gpu=%.2f out=%.2f stage=%.1fx%.1fMB flush=%.1f) "
+        "sh=%.2fms x%.1f dcb=%.2fms x%.1f\n",
         frames / dt, g_ns_draw / f / 1e6, g_ns_end / f / 1e6,
         g_ns_readback / f / 1e6,
         g_gpu_exec_samples ? g_ns_gpu_exec / g_gpu_exec_samples / 1e6 : 0.0,
         g_ns_submit / f / 1e6, g_ns_present / f / 1e6, g_ns_tex_up / f / 1e6,
         g_tex_ups / f, g_ns_cs / f / 1e6, g_cs_count / f, g_ns_cs_in / f / 1e6,
         g_ns_cs_gpu / f / 1e6, g_ns_cs_out / f / 1e6, g_cs_stage_n / f,
-        g_cs_stage_bytes / f / 1e6, g_cs_flush_n / f);
+        g_cs_stage_bytes / f / 1e6, g_cs_flush_n / f,
+        gcn::g_ns_recomp / f / 1e6, gcn::g_recomp_n / f,
+        g_ns_dcb / f / 1e6, g_dcb_n / f);
     // Feed the on-screen overlay gauge (gpuMs = GPU end/present-dominated
     // cost).
     gfx::overlaySetPerf(float(frames / dt), float(g_ns_end / f / 1e6),
@@ -372,6 +377,10 @@ void ReportFps() {
     g_ns_cs_in = g_ns_cs_gpu = g_ns_cs_out = 0;
     g_cs_count = g_cs_stage_n = g_cs_flush_n = 0;
     g_cs_stage_bytes = 0;
+    gcn::g_ns_recomp = 0;
+    gcn::g_recomp_n = 0;
+    g_ns_dcb = 0;
+    g_dcb_n = 0;
   }
 }
 
