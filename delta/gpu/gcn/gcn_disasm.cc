@@ -1566,11 +1566,14 @@ std::string OperandsDs(const Inst& inst) {
   return s;
 }
 
-std::string OperandsMubuf(const Inst& inst, uint32_t count) {
+std::string OperandsMubuf(const Inst& inst, uint32_t count, bool typed) {
   const uint32_t w = inst.raw[0], w1 = inst.raw[1];
   const uint32_t offset = w & 0xFFF;
   const bool offen = (w >> 12) & 1, idxen = (w >> 13) & 1, glc = (w >> 14) & 1;
-  const bool addr64 = (w >> 15) & 1, lds = (w >> 16) & 1;
+  const bool addr64 = (w >> 15) & 1;
+  // Only MUBUF encodes an LDS destination at bit 16; in MTBUF that bit is
+  // OP[0], so reading it there hides the real destination register.
+  const bool lds = !typed && ((w >> 16) & 1);
   const uint32_t vaddr = w1 & 0xFF, vdata = (w1 >> 8) & 0xFF;
   const uint32_t srsrc = ((w1 >> 16) & 0x1F) * 4;
   const bool slc = (w1 >> 22) & 1, tfe = (w1 >> 23) & 1;
@@ -1614,7 +1617,7 @@ std::string OperandsMtbuf(const Inst& inst) {
   uint32_t count = (inst.opcode & 3) + 1;
   if (inst.isa == IsaMode::kNeo && inst.opcode >= 8)
     count = (count + 1) / 2;
-  std::string s = OperandsMubuf(inst, count);
+  std::string s = OperandsMubuf(inst, count, true);
   s += " dfmt:" + std::to_string((w >> 19) & 0xF) +
        " nfmt:" + std::to_string((w >> 23) & 0x7);
   return s;
@@ -1841,7 +1844,7 @@ std::string DisasmInst(const Inst& inst) {
       ops = OperandsDs(inst);
       break;
     case Enc::kMubuf:
-      ops = OperandsMubuf(inst, MubufCount(inst.opcode));
+      ops = OperandsMubuf(inst, MubufCount(inst.opcode), false);
       break;
     case Enc::kMtbuf:
       ops = OperandsMtbuf(inst);

@@ -821,8 +821,14 @@ bool TranslateVs(const Program& program,
                             inst.pc, typed ? (w >> 19) & 0xF : 0,
                             typed ? (w >> 23) & 0x7 : 0});
   }
-  std::vector<FetchAttr> attrs =
-      direct_attrs.empty() ? ParseFetch(fetch) : std::move(direct_attrs);
+  // A shader that calls a fetch shader states its real vertex layout there. A
+  // buffer load in the body can have exactly the same shape as an attribute
+  // fetch (indexed, no offset, zero soffset) and still be reading per-instance
+  // data: P.T. gathers three consecutive 16-byte rows per bone that way, which
+  // otherwise displaces every real attribute.
+  std::vector<FetchAttr> attrs = ParseFetch(fetch);
+  if (attrs.empty())
+    attrs = std::move(direct_attrs);
   t.InitTypes();
 
   std::vector<Id> iface;

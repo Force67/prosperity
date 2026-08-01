@@ -64,6 +64,10 @@ constexpr uint32_t mmSPI_PS_INPUT_ENA = 0xA1B3;
 // Overall color-buffer mode (ROP3 / blend disable). MODE field is [4:6].
 constexpr uint32_t mmCB_COLOR_CONTROL = 0xA202;
 // Primitive type for the draw (VGT_PRIMITIVE_TYPE is a uconfig reg on gen2).
+// Which shader stages the pipeline runs: bits [1:0] select the LS/HS
+// tessellation path, [3:2] the ES/GS path. Anything but 0 means the shader at
+// the VS slot is not the stage that exports vertices.
+constexpr uint32_t mmVGT_SHADER_STAGES_EN = 0xA2D5;
 constexpr uint32_t mmVGT_PRIMITIVE_TYPE = 0xC242;
 constexpr uint32_t mmVGT_NUM_INDICES = 0xC24C;
 
