@@ -15,10 +15,32 @@
 // the volume bound a white fallback the screen was solid white, now that it
 // binds real memory the screen is solid black. That memory (16 KB, tiling 19)
 // is zero for the entire run: DELTA_GPU_TEXWATCH scans the whole surface and
-// reports first_nz=-1 every frame. Nothing we emulate writes it: no compute
-// resource, no CP DMA, no render target, and the title makes no direct-memory
-// mapping calls at all. Asset IO is fine, so this is about where that one
-// buffer's contents come from.
+// reports first_nz=-1 every frame.
+//
+// The LUT is not special. EVERY streamed guest texture is zero, and the reason
+// is a missing staging->video-memory copy:
+//  - The title takes two direct-memory pools: 0x30000000 at physOffset
+//    0x3c800000 (memType 0, ONION) and 0xb0000000 at 0x6c800000 (memType 3,
+//    GARLIC, mapped at 0x80a5100000). Every sampled texture and render target
+//    lives in the Garlic pool.
+//  - DELTA_GUEST_POPCNT over that pool: written bytes stop at pool offset
+//    ~0x63c1bd9 (~100 MB). Everything the title samples from 0x811a.. upward
+//    (the LUT, and the 20 streamed textures in 0x811ce00000+0x300000) is zero
+//    for a 260 s run, so it is not a "still loading" race.
+//  - The textures that DO have content (e.g. 0x80a6804000, first_nz=2) sit in
+//    that low 100 MB and are uploaded during engine init.
+//  - DELTA_QARBUF: /app0/texture.qar payloads (689 reads >= 64 KB) are read into
+//    a ~1 MB ring in the ONION pool at 0x804fa24000. POPCNT there reports ~53%
+//    of bits set and moving, i.e. live packed asset bytes.
+//  So the chain is qar -> onion ring (full) -> MISSING -> garlic surface (zero).
+//  Ruled out as the missing step: CP DMA (all 200 traced DMA_DATA packets are
+//  src==dst shader prefetches, zero real copies), compute (CSRES lists only 3
+//  dispatches, all in 0x80a6..), async compute queues (sceGnmDingDong is never
+//  called), a second mapping of the same physOffset (each physical offset is
+//  mapped exactly once), and a later MAP_FIXED over the pool (none).
+//  Next step: build with DELTA_GUEST_WPROT and watch a low-pool texture that
+//  works (e.g. 0x80a6804000:4000) to name the guest function that uploads into
+//  Garlic, then find why it never runs for the streamed ones.
 //
 // Known gap found on the way, not yet fixed: a compute dispatch copies a
 // 2048x1024 R8 image and we have no 8-bit single-channel format in the compute

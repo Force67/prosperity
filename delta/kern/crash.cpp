@@ -454,17 +454,19 @@ static int g_fnArgsNoffs[kFnArgsMax];
 static std::atomic<uint64_t> g_fnArgsHits[kFnArgsMax];
 static int g_fnArgsCount = 0;
 
+// Range currently write-protected for the write watch, armed either from the
+// DELTA_GUEST_BRK_TRACE handler or standalone by DELTA_GUEST_WPROT.
+static std::atomic<uintptr_t> g_wprotBase{0};
+static std::atomic<size_t> g_wprotLen{0};
+
 static void crashHandler(int sig, siginfo_t *si, void *ucv) {
 #if defined(__x86_64__)
-  // DELTA_GUEST_BRK_WPROT write watch: the range was made read-only, so a write
-  // faults here. Name the instruction, open that one page and resume, which
-  // turns the trap into a list of everything that writes the range rather than
-  // just the first thing.
-  if (sig == SIGSEGV && si && ucv && kBrkWprot) {
-    const char *wp = kBrkWprot;
-    const uintptr_t base = std::strtoull(wp, nullptr, 16);
-    const char *c = std::strchr(wp, ':');
-    const size_t len = c ? std::strtoull(c + 1, nullptr, 16) : 0x40000;
+  // Write watch: the range was made read-only, so a write faults here. Name the
+  // instruction, open that one page and resume, which turns the trap into a
+  // list of everything that writes the range rather than just the first thing.
+  if (sig == SIGSEGV && si && ucv && g_wprotLen.load()) {
+    const uintptr_t base = g_wprotBase.load();
+    const size_t len = g_wprotLen.load();
     const uintptr_t at = reinterpret_cast<uintptr_t>(si->si_addr);
     if (at >= base && at < base + len) {
       auto *uc = static_cast<ucontext_t *>(ucv);
@@ -540,7 +542,10 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
           const uintptr_t a = std::strtoull(wp, nullptr, 16);
           const char *c = std::strchr(wp, ':');
           const size_t n = c ? std::strtoull(c + 1, nullptr, 16) : 0x40000;
-          ::mprotect(reinterpret_cast<void *>(a), n, PROT_READ);
+          if (::mprotect(reinterpret_cast<void *>(a), n, PROT_READ) == 0) {
+            g_wprotBase = a;
+            g_wprotLen = n;
+          }
         }
         last_pos = pos;
         gr[REG_R12] = (uint32_t)gr[REG_RSI];  // mov %esi,%r12d (zero-extends)
@@ -1687,6 +1692,37 @@ void setFnArgs(uintptr_t addr, const char *label, const uint64_t *offsets,
     g_fnArgsOffs[g_fnArgsCount][i] = offsets[i];
   g_fnArgsHits[g_fnArgsCount].store(0, std::memory_order_relaxed);
   g_fnArgsCount++;
+}
+
+// DELTA_GUEST_WPROT=<hex addr>:<hex bytes>[:<ms>]: name every writer of a guest
+// range. Waits until the range is mapped (a title allocates its pools well after
+// startup), makes it read-only, and lets the SIGSEGV path report the faulting
+// instruction and reopen that page. Memory that stays empty while the title
+// behaves as if it filled it either has no writer at all or one writing
+// elsewhere, and only the fault distinguishes those.
+void startWriteWatch(uintptr_t addr, size_t bytes, unsigned everyMs) {
+  if (!addr || !bytes)
+    return;
+  std::thread([addr, bytes, everyMs] {
+    const long pgsz = sysconf(_SC_PAGESIZE);
+    const uintptr_t base = addr & ~((uintptr_t)pgsz - 1);
+    const size_t span =
+        (addr + bytes - base + (size_t)pgsz - 1) & ~((size_t)pgsz - 1);
+    for (;;) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(everyMs));
+      unsigned char vec = 0;
+      if (mincore(reinterpret_cast<void *>(base), 1, &vec) != 0)
+        continue;  // not mapped yet
+      if (::mprotect(reinterpret_cast<void *>(base), span, PROT_READ) != 0)
+        continue;
+      g_wprotBase = base;
+      g_wprotLen = span;
+      std::fprintf(stderr, "[wprot] watching %#lx+%#zx\n", (unsigned long)base,
+                   span);
+      std::fflush(stderr);
+      return;
+    }
+  }).detach();
 }
 
 // DELTA_GUEST_POPCNT=<hex addr>:<hex bytes>: report the population count of a

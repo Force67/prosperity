@@ -66,6 +66,7 @@ DELTA_OPTION(bool, kSotcForcePayload, "DELTA_SOTC_FORCE_PAYLOAD", false);
 DELTA_OPTION(bool, kSotcForceWorlddone, "DELTA_SOTC_FORCE_WORLDDONE", false);
 DELTA_OPTION(bool, kSotcJobfix, "DELTA_SOTC_JOBFIX", false);
 DELTA_OPTION(const char *, kGuestPopcnt, "DELTA_GUEST_POPCNT", nullptr);
+DELTA_OPTION(const char *, kGuestWprot, "DELTA_GUEST_WPROT", nullptr);
 DELTA_OPTION(const char *, kGuestSumwatch, "DELTA_GUEST_SUMWATCH", nullptr);
 DELTA_OPTION(bool, kSotcJobmove, "DELTA_SOTC_JOBMOVE", false);
 DELTA_OPTION(bool, kSotcSkipWorldwait, "DELTA_SOTC_SKIP_WORLDWAIT", false);
@@ -225,10 +226,12 @@ bool proc::create(const base::String &path, bool fromVfs) {
 // 2s (see crash.h). Generic; used to probe which functions in a stuck pipeline run.
 static void investigatePopcnt();
 static void investigateSumWatch();
+static void investigateWriteWatch();
 
 static void investigateFnWatch(smodule &m) {
   investigatePopcnt();
   investigateSumWatch();
+  investigateWriteWatch();
   const char *e = kFnWatch;
   if (!e)
     return;
@@ -279,6 +282,22 @@ static void investigatePopcnt() {
       ms = (unsigned)std::strtoul(c2 + 1, nullptr, 0);
   }
   startPopcntPrinter(at, bytes, ms);
+}
+
+static void investigateWriteWatch() {
+  const char *wp = kGuestWprot;
+  if (!wp)
+    return;
+  const uintptr_t at = std::strtoull(wp, nullptr, 16);
+  const char *colon = std::strchr(wp, ':');
+  size_t bytes = 0x4000;
+  unsigned ms = 200;
+  if (colon) {
+    bytes = std::strtoull(colon + 1, nullptr, 16);
+    if (const char *c2 = std::strchr(colon + 1, ':'))
+      ms = (unsigned)std::strtoul(c2 + 1, nullptr, 0);
+  }
+  startWriteWatch(at, bytes, ms);
 }
 
 static void investigateSumWatch() {

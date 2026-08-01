@@ -92,6 +92,11 @@ void startFnWatchPrinter();
 // at the crash cannot.
 void startPopcntPrinter(uintptr_t addr, size_t bytes, unsigned everyMs);
 
+// DELTA_GUEST_WPROT=<hex addr>:<hex bytes>[:<ms>]: write-protect a guest range
+// once it is mapped and report the instruction behind every write to it (see
+// crash.cpp). The poll interval doubles as the wait for the range to appear.
+void startWriteWatch(uintptr_t addr, size_t bytes, unsigned everyMs);
+
 // DELTA_GUEST_SUMWATCH=<slot>:<off>:<stride>:<count>[:<ms>]: watch a set of u32
 // counters behind a guest pointer slot (see crash.cpp).
 void startSumWatchPrinter(uintptr_t slot, size_t off, size_t stride, int count,
