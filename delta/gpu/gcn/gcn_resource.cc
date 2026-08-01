@@ -847,25 +847,33 @@ std::unordered_map<uint32_t, VBuffer> ResolveCbuffers(
   // resolvable V# seen for it.
   ScalarEval eval(user_data);
   for (const Inst& inst : CachedScalarInfo(program).insts) {
-    eval.Step(inst);
-    if (inst.enc != Enc::kSmrd)
-      continue;
-    const Smrd s = DecodeSmrd(inst.raw[0]);
-    if (s.op > 0x0c || (s.op > 0x04 && s.op < 0x08))
-      continue;  // s_load_dword{,x2..x16} / s_buffer_load_dword{,x2..x16}
+    // Decode the pointer/V# from the PRE-step register state: an SMRD whose
+    // destination overlaps its own source (s_buffer_load_dword s4, s[4:7])
+    // clobbers the V#'s base dword in Step, and decoding afterwards turns the
+    // loaded constant into the address (Tomb Raider's UI globals cbuf decoded
+    // as base 0x803f800000 -- the 1.0f it had just loaded).
+    const bool smrd = inst.enc == Enc::kSmrd;
+    const Smrd s = smrd ? DecodeSmrd(inst.raw[0]) : Smrd{};
+    const bool candidate =
+        smrd && !(s.op > 0x0c || (s.op > 0x04 && s.op < 0x08));
+    // s_load_dword{,x2..x16} / s_buffer_load_dword{,x2..x16}.
     // s_load addresses a raw 2-dword pointer, s_buffer_load a 4-dword V#.
     const bool pointer = s.op <= 0x04;
     const uint32_t base = s.sbase * 2;
     // Keyed like the translator's bindings (see CbufBindKey): the same SGPR
     // can serve as a pointer pair for one load and a V# for another.
     const uint32_t key = base | (pointer ? 0x100u : 0u);
-    if (result.count(key) || !eval.AllKnown(base, pointer ? 2 : 4))
-      continue;
+    const bool known = candidate && eval.AllKnown(base, pointer ? 2 : 4);
     VBuffer v{};
-    if (pointer)
-      v.base = eval.Ptr(base);  // size comes from the shader's plan
-    else
-      v = DecodeVBuffer(&eval.sgpr[base]);
+    if (known) {
+      if (pointer)
+        v.base = eval.Ptr(base);  // size comes from the shader's plan
+      else
+        v = DecodeVBuffer(&eval.sgpr[base]);
+    }
+    eval.Step(inst);
+    if (!candidate || result.count(key) || !known)
+      continue;
     result.emplace(key, v);
     if (eval.trace)
       std::fprintf(stderr, "[eud] cbuf s%u -> base=%#lx stride=%u nrec=%u\n",
