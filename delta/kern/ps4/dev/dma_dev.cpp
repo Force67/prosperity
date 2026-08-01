@@ -168,6 +168,40 @@ int dmemAllocate(uint64_t lo, uint64_t hi, uint64_t len, uint64_t align,
   return 0;
 }
 
+// Give a physical range back (sceKernelReleaseDirectMemory). Titles carve an
+// aligned block by over-allocating and releasing the head and tail, so an
+// allocator that never frees marches the physical cursor past the end of a real
+// console's pool and hands the title offsets it could never see on hardware.
+// The VA stays mapped: our munmap keeps host pages too, and a title that has
+// already released a range does not read it back.
+void dmemFree(uint64_t start, uint64_t len) {
+  const uint64_t end = start + len;
+  std::lock_guard<std::mutex> lk(g_dmemMutex);
+  for (size_t i = 0; i < g_dmemRegions.size();) {
+    auto &r = g_dmemRegions[i];
+    if (r.end <= start || r.start >= end) {
+      i++;
+      continue;
+    }
+    const bool head = r.start < start, tail = r.end > end;
+    if (head && tail) {
+      const DmemRegion right{end, r.end, r.memType};
+      r.end = start;
+      g_dmemRegions.insert(g_dmemRegions.begin() + i + 1, right);
+      return;  // the release was interior to one region: nothing else overlaps
+    }
+    if (head) {
+      r.end = start;
+      i++;
+    } else if (tail) {
+      r.start = end;
+      i++;
+    } else {
+      g_dmemRegions.erase(g_dmemRegions.begin() + i);
+    }
+  }
+}
+
 // Largest free hole inside [lo, hi) (AvailableDirectMemorySize).
 void dmemLargestHole(uint64_t lo, uint64_t hi, uint64_t align,
                      uint64_t *holeBase, uint64_t *holeSize) {
@@ -367,24 +401,18 @@ int32_t dmaDevice::ioctlImpl(uint32_t cmd, void *data) {
     return 0;
   }
   case 0x80108002: {
-    // MapDirectMemory: struct = [virtualAddr, len, ...]. The title has already
-    // reserved the VA (it probes with mmap+munmap to find a free aligned hole),
-    // so it passes that VA in and expects the physical memory committed there.
-    // Our identity model backs the VA with anonymous GPU-visible memory. Without
-    // this, the region the title hands to the GPU stays unmapped.
+    // ReleaseDirectMemory: struct = [physOffset, len] (libkernel 11.00 passes
+    // its two arguments straight through). This was read as a VA-based
+    // MapDirectMemory, which MAP_FIXED'd anonymous memory at a host address
+    // equal to the physical offset and never gave the range back. P.T. carves
+    // every 4 MiB-aligned buffer by over-allocating and releasing the slop, so
+    // the leak walked its physical offsets a gigabyte past a real console's
+    // pool.
     auto *a = static_cast<uint64_t *>(data);
     if (!a)
       return -1;
-    void *va = reinterpret_cast<void *>(a[0]);
-    size_t len = a[1];
-    if (va && len) {
-      // prot 0x33 = read|write + GPU read|write, matching the title's probe map.
-      // It marks the region GPU-direct so sceKernelVirtualQuery agrees.
-      uint8_t *p = sys_mmap(va, len, 0x33, mFlags::fixed | mFlags::anon,
-                            static_cast<uint32_t>(-1), 0);
-      if (p == reinterpret_cast<uint8_t *>(-1))
-        return -1;
-    }
+    if (a[1])
+      dmemFree(a[0], a[1]);
     return 0;
   }
   }

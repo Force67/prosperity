@@ -1,6 +1,6 @@
 // P.T. (CUSA01127, PS4)
-// FOX engine. Boots, loads and runs its full render graph: ~223 draws/frame at
-// ~23fps, every shader translates, no draw declines. Assets stream fine
+// FOX engine. Boots, loads and runs its full render graph: ~220 draws/frame at
+// 20-30 fps, every shader translates, no draw declines. Assets stream fine
 // (/app0/texture.qar and /app0/chunk1.psarc read correctly through the PFS).
 //
 // THE SCENE RENDERS (2026-08-01). The hallway is present in the G-buffer once
@@ -9,70 +9,85 @@
 //   +DELTA_GPU_PRESENT_ADDR=0x8143800000
 // to see it. The exposure chain works off it too.
 //
-// The presented frame is still black, and exactly one thing causes that: the
-// 16x16x16 colour-grading LUT volume. A pass bakes it into a 256x16 strip and
-// the tonemap samples that strip, so the strip's contents ARE the screen: when
-// the volume bound a white fallback the screen was solid white, now that it
-// binds real memory the screen is solid black. That memory (16 KB, tiling 19)
-// is zero for the entire run: DELTA_GPU_TEXWATCH scans the whole surface and
-// reports first_nz=-1 every frame.
+// The presented frame is 100% black (every byte of gpu_snap.ppm is 0) because
+// every compressed guest texture the title samples is empty. DELTA_GPU_TEXCENSUS
+// over a 110 s run: 178 distinct sampled surfaces, of which six hold data -- two
+// 8x8 and two 4x4 defaults, a 64x64 and a 64x16, all in pool+3..27 MB and all
+// built at engine init -- plus the render targets, which the GPU writes itself.
+// The other ~170 are BC1 (dfmt 35) and BC3 (dfmt 37), 32x32 to 2048x2048, full
+// mip chains, tiling 13, and every one of them is zero for the whole run. The
+// 16x16x16 colour-grading LUT volume at 0x811a398000 that gates the tonemap (and
+// so decides the whole image) is one of them.
 //
-// The LUT is not special. EVERY streamed guest texture is zero, and the reason
-// is a missing staging->video-memory copy:
-//  - The title takes two direct-memory pools: 0x30000000 at physOffset
-//    0x3c800000 (memType 0, ONION) and 0xb0000000 at 0x6c800000 (memType 3,
-//    GARLIC, mapped at 0x80a5100000). Every sampled texture and render target
-//    lives in the Garlic pool.
-//  - DELTA_GUEST_POPCNT over that pool: written bytes stop at pool offset
-//    ~0x63c1bd9 (~100 MB). Everything the title samples from 0x811a.. upward
-//    (the LUT, and the 20 streamed textures in 0x811ce00000+0x300000) is zero
-//    for a 260 s run, so it is not a "still loading" race.
-//  - The textures that DO have content (e.g. 0x80a6804000, first_nz=2) sit in
-//    that low 100 MB and are uploaded during engine init.
-//  - DELTA_QARBUF: /app0/texture.qar payloads (689 reads >= 64 KB) are read into
-//    a ~1 MB ring in the ONION pool at 0x804fa24000. POPCNT there reports ~53%
-//    of bits set and moving, i.e. live packed asset bytes.
-//  So the chain is qar -> onion ring (full) -> MISSING -> garlic surface (zero).
-//  Ruled out as the missing step: CP DMA (all 200 traced DMA_DATA packets are
-//  src==dst shader prefetches, zero real copies), compute (CSRES lists only 3
-//  dispatches, all in 0x80a6..), async compute queues (sceGnmDingDong is never
-//  called), a second mapping of the same physOffset (each physical offset is
-//  mapped exactly once), and a later MAP_FIXED over the pool (none).
-//  DELTA_MMAP_LOG settles the aliasing question: the working init texture and
-//  every empty streamed one live in the SAME single mapping (base 0x80a5100000,
-//  len 0xb0000000, fd=16 off=0x6c800000, mapped once). So this is not two views
-//  of one physical range failing to alias. The guest writes the low part of that
-//  mapping and reads from the high part, and DELTA_GUEST_WPROT sees no writes at
-//  all to the high part, so the decompress-into-video-memory step never runs for
-//  those assets. Next: find what that streaming step waits on (Fios2 completion,
-//  an event flag, a worker thread) rather than looking at memory mapping.
-//  Scale of it: one steady-state frame has 109 guest-texture bindings against
-//  74 render-target ones, and the single most used is guest@0x80c7d58000
-//  (2048x2048, bound by 29 draws) which is entirely zero. That atlas is the
-//  scene's material source, so the lighting pass resolves to black even though
-//  the G-buffer geometry is correct.
-//  Done with DELTA_GUEST_WPROT: the uploader is a plain libc memcpy
-//  (libc+0x45a3e), and it only ever fills the low ~104 MB of the pool.
-//  DELTA_GUEST_WPROT=811a300000:100000:4000 over 95 s of gameplay records ZERO
-//  writes, so the guest never writes the region its own descriptors point at.
-//  The title places its streamed texture heap ~1.8 GB into the video pool
-//  (0x811a398000 is pool offset 0x75298000) while its uploads stay in the first
-//  104 MB. Render targets at 0x8135..0x814b (~2.3 GB in) are fine because the
-//  GPU writes those. So the open question is why the guest allocator hands out
-//  surfaces at ~1.8 GB that its own upload path never targets: suspect
-//  something we report to the allocator (pool base, size query, or a physical
-//  offset) rather than anything in the GPU layer.
+// NOTHING WRITES THEM. Four whole-run censuses, not samples:
+//  - DELTA_GUEST_WHIST=80a5100000:b0000000:500 (the whole 2816 MB Garlic pool,
+//    re-armed every 500 ms for 130 s): guest writes land only in pool+0..112 MB
+//    and pool+2496..2816 MB. Not one write in pool+112..2496 MB, where every
+//    streamed surface lives (pool+529..1900 MB).
+//  - DELTA_GPU_DMATRACE: 560000 CP DMA packets, every one a src==dst shader
+//    prefetch, zero real transfers. The old trace capped at 200 packets, which
+//    prefetches consumed before an upload could appear -- that is why this
+//    looked unfalsifiable; it now counts by class for the whole run.
+//  - DELTA_GPU_CSHIST: compute dispatches write 19 distinct guest ranges all
+//    run, all in pool+15..70 MB or the render targets.
+//  - DELTA_GPU_OPHIST: the PM4 stream contains no INDIRECT_BUFFER (0x3f), so no
+//    command buffer goes un-walked, and sceGnmDingDong is never called, so there
+//    is no async compute queue carrying uploads either.
 //
-// Fixed on the way: a compute dispatch copies a 2048x1024 R8 image and the
+// The decompressed pixels DO exist in video memory. DELTA_MEMDUMP of
+// pool+0..112 MB finds ~33 MB of live data: shaders (2228 OrbShdr blobs in
+// pool+3..16 MB and pool+51..60 MB) and, at pool+55 MB and pool+77..99 MB,
+// blocks whose bytes are unmistakably BC -- 0x80a9e00000 and 0x80aa400000 hold
+// byte-identical 0x166000 images, 0x80a8800000 is a near-uniform BC1 block
+// (c0>c1 in 100% of its blocks). The title inflates texture.qar at ~2.6 MB/s and
+// memcpys the result there. DELTA_GUEST_RPROT=80a9e00000:200000 over 110 s
+// catches no read and no write, so once that copy lands nothing ever touches the
+// data again.
+//
+// So the chain is: qar -> onion ring -> inflate -> memcpy into a Garlic staging
+// area at pool+55..99 MB -> MISSING -> the surface at pool+529..1900 MB the
+// engine has already allocated, described in a T# and bound to draws. The gap is
+// exactly one step and it is inside the engine: the copy/tile from staging into
+// the surface never runs. This is not a memory-mapping or a GPU-side problem.
+//
+// Next: name the guest routine that owns those staging blocks and see what it
+// does after the copy. DELTA_GUEST_WHIST=80a9000000:4000000 reports the writers
+// as libc memcpy (libc+0x45a3e) and Sh_main_ps4+0xc45a5e, and memcpy's caller is
+// not at [rsp] there, so the way in is a breakpoint on the FOX texture loader
+// itself. The engine names it: the TEXTURE_STREAMER_UPDATE / _DISPATCH profiler
+// markers are registered at 0xc8eb6c/0xc8eb84 and "@change mipmap level %d > %d"
+// sits at 0x148dc6f (vaddrs; the eboot's .text starts at 0x400000).
+//
+// Ruled out and not worth redoing: VA/physical aliasing (P.T. maps each dmem
+// physical offset exactly once, always with mmap on the /dev/dmem fd, never
+// batch-map and never syscall 628), a later MAP_FIXED over the pool, Fios2, job
+// core pinning, thread wedges (zero failing syscalls under DELTA_SCERR_TRACE),
+// and the read path (1633 preads, 261 MB, 1616 distinct offsets, no retry loop,
+// p50 699 us for ~160 KB).
+//
+// Fixed on the way (2026-08-01): /dev/dmem ioctl 0x80108002 is
+// sceKernelReleaseDirectMemory, not MapDirectMemory. libkernel 11.00 settles it:
+// NID MBuItvba6z8 at libkernel+0x17800 puts its two arguments straight into a
+// 2-qword ioctl struct on the dmem fd. P.T. calls it about 1.5 times per
+// allocation, because it carves every 4 MiB-aligned buffer by over-allocating
+// (len, then len+0x3f0000) and releasing the head and the tail. We read a[0] as
+// a virtual address and MAP_FIXED'd anonymous memory at that host address, and
+// never gave the physical range back, so P.T.'s physical offsets marched from
+// 0x10000000 to 0x161600000 -- a gigabyte past what a real console has. They now
+// stay under 0x128000000. It did not change the frame. Isaac, Undertale and
+// Doom64 never call the ioctl at all.
+//
+// Also fixed earlier: a compute dispatch copies a 2048x1024 R8 image and the
 // compute image list had no dfmt 1, so it zero-filled. It resolves now, but it
 // lives in the already-written low pool and did not change the frame.
 //
+// Still open, deliberately unchanged: we report 12 GiB from GetDirectMemorySize
+// vs a real PS4's ~4.5 GiB. P.T.'s own two pools end exactly at 0x11c800000, so
+// 0x11C000000 is too small and crashes it at Sh_main_ps4+0x137c; the low-memory
+// path is separately unimplemented.
+//
 //  - Not the cause: depth test, face culling, the colour write masks, the
 //    render-target size aliasing, missing assets, or shader translation.
-//  - The colour-grading LUT (a 16x16x16 volume) gates everything downstream of
-//    the tonemap: whatever it samples becomes the whole screen. Its guest
-//    memory stays zero for the entire run, and nothing we emulate writes it.
-//    Investigate that only after the G-buffer produces pixels.
 
 // The renderer needs a few thousand pad reads before the title's transition
 // handler exists, so hold neutral before pulsing anything. Made no difference

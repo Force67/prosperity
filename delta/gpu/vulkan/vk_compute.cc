@@ -25,11 +25,14 @@
 #include "gpu/vulkan/vk_texture_cache.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <map>
+#include <mutex>
 #include <unordered_map>
 #include <vector>
 #include <utl/options.h>
@@ -37,6 +40,7 @@
 namespace {
 DELTA_OPTION(uint64_t, kDetileDump, "DELTA_GPU_DETILEDUMP", 0);
 DELTA_OPTION(bool, kCsList, "DELTA_GPU_CSLIST", false);
+DELTA_OPTION(int, kCsHist, "DELTA_GPU_CSHIST", 0);
 DELTA_OPTION(bool, kCsRtTrace, "DELTA_GPU_CSRT", false);
 DELTA_OPTION(bool, kCsRename, "DELTA_GPU_CSRENAME", false);
 DELTA_OPTION(bool, kCsImport, "DELTA_GPU_CSIMPORT", false);
@@ -1226,6 +1230,33 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci) {
 
   // DELTA_GPU_CSLIST: per-dispatch resource staging list for the first 200
   // dispatches — shows what the chain actually round-trips per frame.
+  // DELTA_GPU_CSHIST=<seconds>: every distinct guest range a dispatch WRITES,
+  // for the whole run. The capped per-dispatch list above only ever showed the
+  // first few frames, which cannot answer "does the title ever compute-copy
+  // into its texture heap".
+  if (kCsHist) {
+    struct Cell { uint64_t size, n; };
+    static std::mutex m;
+    static std::map<uint64_t, Cell> tbl;
+    static auto last = std::chrono::steady_clock::now();
+    std::lock_guard<std::mutex> lk(m);
+    for (uint32_t i = 0; i < ci.num_res; i++)
+      if (ci.res[i].written && tbl.size() < 4096) {
+        Cell& c = tbl[ci.res[i].base];
+        c = {ci.res[i].size, c.n + 1};
+      }
+    const auto now = std::chrono::steady_clock::now();
+    if (std::chrono::duration_cast<std::chrono::seconds>(now - last).count() >=
+        kCsHist) {
+      last = now;
+      std::fprintf(stderr, "[cshist] %zu written ranges\n", tbl.size());
+      for (const auto& kv : tbl)
+        std::fprintf(stderr, "[cshist] %#lx size=%#lx x%lu\n",
+                     (unsigned long)kv.first, (unsigned long)kv.second.size,
+                     (unsigned long)kv.second.n);
+      std::fflush(stderr);
+    }
+  }
   static uint32_t cs_listed = 0;
   if (kCsList && g_frame.num > 25 && cs_listed < 200) {
     cs_listed++;

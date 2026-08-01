@@ -69,6 +69,7 @@ DELTA_OPTION(bool, kSotcJobfix, "DELTA_SOTC_JOBFIX", false);
 DELTA_OPTION(const char *, kGuestPopcnt, "DELTA_GUEST_POPCNT", nullptr);
 DELTA_OPTION(const char *, kGuestWprot, "DELTA_GUEST_WPROT", nullptr);
 DELTA_OPTION(const char *, kGuestRprot, "DELTA_GUEST_RPROT", nullptr);
+DELTA_OPTION(const char *, kGuestWhist, "DELTA_GUEST_WHIST", nullptr);
 DELTA_OPTION(const char *, kGuestSumwatch, "DELTA_GUEST_SUMWATCH", nullptr);
 DELTA_OPTION(const char *, kPoolMap, "DELTA_POOLMAP", nullptr);
 DELTA_OPTION(const char *, kMemDump, "DELTA_MEMDUMP", nullptr);
@@ -231,6 +232,7 @@ bool proc::create(const base::String &path, bool fromVfs) {
 static void investigatePopcnt();
 static void investigateSumWatch();
 static void investigateWriteWatch();
+static void investigateWriteHist();
 static void investigatePoolMap();
 static void investigateMemDump();
 static void investigateRetTrace(proc &);
@@ -299,6 +301,7 @@ static void investigateFnWatch(smodule &m) {
   investigatePopcnt();
   investigateSumWatch();
   investigateWriteWatch();
+  investigateWriteHist();
   investigatePoolMap();
   investigateMemDump();
   investigateRetTrace(*proc::getActive());
@@ -369,6 +372,22 @@ static void investigateWriteWatch() {
       ms = (unsigned)std::strtoul(c2 + 1, nullptr, 0);
   }
   startWriteWatch(at, bytes, ms, reads);
+}
+
+static void investigateWriteHist() {
+  const char *wh = kGuestWhist;
+  if (!wh)
+    return;
+  const uintptr_t at = std::strtoull(wh, nullptr, 16);
+  const char *colon = std::strchr(wh, ':');
+  size_t bytes = 0x1000000;
+  unsigned ms = 500;
+  if (colon) {
+    bytes = std::strtoull(colon + 1, nullptr, 16);
+    if (const char *c2 = std::strchr(colon + 1, ':'))
+      ms = (unsigned)std::strtoul(c2 + 1, nullptr, 0);
+  }
+  startWriteHist(at, bytes, ms);
 }
 
 static void investigatePoolMap() {
