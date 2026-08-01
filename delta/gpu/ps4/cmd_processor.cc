@@ -1934,7 +1934,7 @@ void HandleDispatch(const uint32_t* body, uint32_t count) {
       const bool rg8 = t.dfmt == 3 && t.nfmt == 0;
       const bool rgba16f = t.dfmt == 12 && t.nfmt == 7;
       const bool r11g11b10f = t.dfmt == 6 && t.nfmt == 7;
-      const bool supported_type = t.type == 9 || t.type == 13;
+      const bool supported_type = t.type == 9 || t.type == 10 || t.type == 13;
       const bool supported_format =
           rgba8 || r32 || rg16f || r16f || rg8 || rgba16f || r11g11b10f;
       elem_bytes = rgba16f ? 8 : (r16f || rg8) ? 2 : 4;
@@ -1942,12 +1942,20 @@ void HandleDispatch(const uint32_t* body, uint32_t count) {
       if (!supported_type || !supported_format) {
         // Invalid/null T# values can be present on paths the guest shader does
         // not take. The translator guards these descriptors and returns zero.
+        if (trace_cs_resources)
+          std::fprintf(stderr,
+                       "[csres] cs=%#lx bind=%u zero-fill type=%u dfmt=%u "
+                       "nfmt=%u words=[%08x %08x %08x %08x]\n",
+                       (unsigned long)cs_addr, r.binding, t.type, t.dfmt,
+                       t.nfmt, descriptor[0], descriptor[1], descriptor[2],
+                       descriptor[3]);
         zero_fill = true;
         size = 16;
       } else if (!t.valid ||
                  !gcn::BuildTextureLayout32(
-                     layout, t.width, t.height, t.pitch, t.layers, t.mip_levels,
-                     t.tiling_idx, t.pow2_pad, elem_bytes)) {
+                     layout, t.width, t.height, t.pitch,
+                     t.is_3d ? t.depth : t.layers, t.mip_levels, t.tiling_idx,
+                     t.pow2_pad, elem_bytes)) {
         if (trace_cs_resources)
           std::fprintf(stderr,
                        "[csres] cs=%#lx bind=%u unsupported image valid=%d "
@@ -1971,7 +1979,8 @@ void HandleDispatch(const uint32_t* body, uint32_t count) {
           gcn::TextureLayout32 linear;
           const uint32_t stage_tiling = t.tiling_idx == 31 ? 31 : 8;
           if (!gcn::BuildTextureLayout32(linear, t.width, t.height, t.pitch,
-                                         t.layers, t.mip_levels, stage_tiling,
+                                         t.is_3d ? t.depth : t.layers,
+                                         t.mip_levels, stage_tiling,
                                          t.pow2_pad, stage_elem_bytes)) {
             res_ok = false;
             break;
