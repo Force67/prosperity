@@ -395,7 +395,12 @@ int32_t dmaDevice::ioctlImpl(uint32_t cmd, void *data) {
 // PS4 /dev/dmem has no device-backed mapping: fall back to the anonymous path in
 // sys_mmap (returns -1). The PS5 shared-memfd coherency mapping lives in the
 // dmaDevicePs5 override (kern/ps5/dev/dma_dev.cpp).
-uint8_t *dmaDevice::map(void *, size_t, uint32_t, uint32_t, size_t) {
+uint8_t *dmaDevice::map(void *addr, size_t len, uint32_t, uint32_t flags,
+                        size_t offset) {
+  if (kDmemTrace)
+    std::fprintf(stderr,
+                 "[dmem] devmap off=%#zx len=%#zx want=%p fixed=%d -> anon\n",
+                 offset, len, addr, (flags & mFlags::fixed) ? 1 : 0);
   return reinterpret_cast<uint8_t *>(-1);
 }
 } // namespace krnl
