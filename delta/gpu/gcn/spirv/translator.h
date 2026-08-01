@@ -47,6 +47,8 @@ void WarnUnsupported(const char* enc,
                      uint32_t op,
                      uint32_t w0 = 0,
                      uint32_t w1 = 0);
+// Translated, but not to the letter of the spec: recorded, not rejected.
+void NoteApproximated(const char* enc, uint32_t op);
 void ResetUnsupported();
 bool HadUnsupported();
 const std::string& UnsupportedOps();

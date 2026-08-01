@@ -775,7 +775,7 @@ void EmitVop1(Translator& t,
       set_f(t.FDiv(t.F32(1.0f), s0));
       break;
     case 0x29:
-      WarnUnsupported("vop1.rcp-legacy", op);
+      NoteApproximated("vop1.rcp-legacy", op);
       set_f(t.FDiv(t.F32(1.0f), s0));
       break;
     case 0x2a:
@@ -787,7 +787,7 @@ void EmitVop1(Translator& t,
       set_f(t.Ext1(GLSLstd450InverseSqrt, s0));
       break;
     case 0x2d:
-      WarnUnsupported("vop1.rsq-legacy", op);
+      NoteApproximated("vop1.rsq-legacy", op);
       set_f(t.Ext1(GLSLstd450InverseSqrt, s0));
       break;
     case 0x2e:
@@ -904,14 +904,14 @@ void EmitVop2(Translator& t,
       set_u(mul24_hi(spv::Op::OpUMulExtended, t.Low24(u0), t.Low24(u1)));
       break;
     case 0x0d:
-      WarnUnsupported("vop2.min-legacy", op);
+      NoteApproximated("vop2.min-legacy", op);
       set_f(t.Ext2(GLSLstd450FMin, s0, s1));
       break;
     case 0x0f:
       set_f(t.Ext2(GLSLstd450FMin, s0, s1));
       break;  // v_min_f32
     case 0x0e:
-      WarnUnsupported("vop2.max-legacy", op);
+      NoteApproximated("vop2.max-legacy", op);
       set_f(t.Ext2(GLSLstd450FMax, s0, s1));
       break;
     case 0x10:

@@ -91,6 +91,21 @@ bool TraceEnabled() {
   return kGpuShtrace;
 }
 
+// An op we do translate, just not to the letter of its spec. The audit still
+// wants to know, but rejecting the shader over it throws away a whole draw to
+// avoid a NaN or a denorm: Tomb Raider's UI shaders use v_max_legacy_f32 and
+// were dropped entirely for it.
+void NoteApproximated(const char* enc, uint32_t op) {
+  AuditNote(enc, op);
+  static std::unordered_set<uint64_t> seen;
+  const uint64_t key =
+      static_cast<uint64_t>(std::hash<std::string_view>{}(enc)) ^
+      (static_cast<uint64_t>(op) << 40);
+  if (seen.size() > 512 || !seen.insert(key).second)
+    return;
+  std::fprintf(stderr, "[gcnspv] APPROXIMATED %s op=%#x\n", enc, op);
+}
+
 void WarnUnsupported(const char* enc, uint32_t op, uint32_t w0, uint32_t w1) {
   g_had_unsupported = true;
   {
