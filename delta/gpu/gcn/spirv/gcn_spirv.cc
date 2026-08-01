@@ -187,6 +187,7 @@ struct FetchAttr {
   uint32_t semantic, num_comps, dest_vgpr, table_sgpr, dword_off;
   bool direct_fetch = false;
   uint32_t pc = ~0u;
+  uint32_t dfmt = 0, nfmt = 0;  // MTBUF only: format from the instruction
 };
 
 std::vector<FetchAttr> ParseFetch(uint64_t fetch_addr) {
@@ -214,10 +215,12 @@ std::vector<FetchAttr> ParseFetch(uint64_t fetch_addr) {
       const uint32_t vdata = (w1 >> 8) & 0xFF;
       const uint32_t srsrc = ((w1 >> 16) & 0x1F) * 4;
       const uint32_t nc = (inst.opcode & 3) + 1;
+      const bool typed = inst.enc == Enc::kMtbuf;
       const auto it = loads.find(srsrc);
       const uint32_t tbl = it != loads.end() ? it->second.table_sgpr : 0;
       const uint32_t off = it != loads.end() ? it->second.dword_off : 0;
-      out.push_back({semantic, nc, vdata, tbl, off, false, ~0u});
+      out.push_back({semantic, nc, vdata, tbl, off, false, ~0u,
+                     typed ? (w >> 19) & 0xF : 0, typed ? (w >> 23) & 0x7 : 0});
       semantic++;
     }
   }
@@ -798,9 +801,10 @@ bool TranslateVs(const Program& program,
   std::vector<FetchAttr> direct_attrs;
   for (uint32_t i = 0; i < program.size(); i++) {
     const Inst& inst = program[i];
-    // MTBUF carries its own dfmt/nfmt but addresses the buffer exactly as MUBUF
-    // does, and its load opcodes count components the same way, so a typed
-    // fetch of a vertex attribute reaches the vertex-input path unchanged.
+    // MTBUF addresses the buffer exactly as MUBUF does and its load opcodes
+    // count components the same way, so a typed fetch of a vertex attribute
+    // reaches the vertex-input path unchanged except for its format, which the
+    // instruction carries and the attribute has to take along.
     if (!reachable[i] ||
         (inst.enc != Enc::kMubuf && inst.enc != Enc::kMtbuf) ||
         inst.opcode > 0x03)
@@ -811,9 +815,11 @@ bool TranslateVs(const Program& program,
     const uint32_t soffset = (w1 >> 24) & 0xFF;
     if (!idxen || offen || soffset != 128)
       continue;
+    const bool typed = inst.enc == Enc::kMtbuf;
     direct_attrs.push_back({static_cast<uint32_t>(direct_attrs.size()),
                             inst.opcode + 1, (w1 >> 8) & 0xFF, srsrc, 0, true,
-                            inst.pc});
+                            inst.pc, typed ? (w >> 19) & 0xF : 0,
+                            typed ? (w >> 23) & 0x7 : 0});
   }
   std::vector<FetchAttr> attrs =
       direct_attrs.empty() ? ParseFetch(fetch) : std::move(direct_attrs);
@@ -899,7 +905,7 @@ bool TranslateVs(const Program& program,
       t.SetVgF(a.dest_vgpr + c, comp);
     }
     r.attrs.push_back({a.semantic, a.num_comps, a.table_sgpr, a.dword_off,
-                       a.direct_fetch, 0, a.pc});
+                       a.direct_fetch, 0, a.pc, 0, a.dfmt, a.nfmt});
   }
 
   if (!PlanCbufs(program, 0, r.vs_cbufs, sc.cbuf_bind, reachable.data()))

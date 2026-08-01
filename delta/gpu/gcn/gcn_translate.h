@@ -39,6 +39,12 @@ struct ShaderAttr {
   // of them land on the first field. Only the RDNA parser fills it in; the PS4
   // fetch shaders give each attribute its own V#.
   uint32_t inst_offset = 0;
+  // The GCN spelling of the same thing: a typed fetch (MTBUF
+  // tbuffer_load_format_*) carries dfmt/nfmt in the instruction and the
+  // hardware ignores the V#'s. dfmt 0 is not a data format, so 0 means an
+  // untyped (MUBUF) fetch whose format comes from the V#.
+  uint32_t inst_dfmt = 0;
+  uint32_t inst_nfmt = 0;
 };
 
 // Set-1 UBO bindings shared by VS + PS. A shader pair whose constant buffers

@@ -842,9 +842,13 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
               recomp_status = "attr-offset";
               break;
             }
+            // A typed fetch (tbuffer_load_format_*) states its own format and
+            // the hardware ignores the V#'s; only untyped fetches read it.
+            const uint32_t dfmt = a.inst_dfmt ? a.inst_dfmt : vb.dfmt;
+            const uint32_t nfmt = a.inst_dfmt ? a.inst_nfmt : vb.nfmt;
             d.vattrs[d.num_vattrs++] = {
-                a.location,  b,       static_cast<uint32_t>(offset),
-                a.num_comps, vb.dfmt, vb.nfmt};
+                a.location,  b,    static_cast<uint32_t>(offset),
+                a.num_comps, dfmt, nfmt};
           }
           if (good) {
             // vertex_data/vertex_stride mirror the first per-vertex (strided)

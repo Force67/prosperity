@@ -885,11 +885,14 @@ std::vector<VBuffer> ResolveDirectVertexBuffers(
                       sizeof(data));
         std::fprintf(stderr,
                      "[eud] vattr%zu pc=%#x s%u -> base=%#lx stride=%u "
-                     "nrec=%u V#=%08x/%08x/%08x/%08x data=%08x/%08x/%08x\n",
+                     "nrec=%u fmt=%u/%u inst=%u/%u ioff=%u "
+                     "V#=%08x/%08x/%08x/%08x data=%08x/%08x/%08x\n",
                      i, inst.pc, attr.table_sgpr,
                      static_cast<unsigned long>(result[i].base),
-                     result[i].stride, result[i].num_records,
-                     eval.sgpr[attr.table_sgpr], eval.sgpr[attr.table_sgpr + 1],
+                     result[i].stride, result[i].num_records, result[i].dfmt,
+                     result[i].nfmt, attr.inst_dfmt, attr.inst_nfmt,
+                     inst.raw[0] & 0xFFF, eval.sgpr[attr.table_sgpr],
+                     eval.sgpr[attr.table_sgpr + 1],
                      eval.sgpr[attr.table_sgpr + 2],
                      eval.sgpr[attr.table_sgpr + 3], data[0], data[1], data[2]);
       }
