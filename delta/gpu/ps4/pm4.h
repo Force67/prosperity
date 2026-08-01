@@ -65,6 +65,9 @@ enum Pm4It : uint32_t {
   IT_DRAW_INDEX_INDIRECT = 0x25,
   IT_WAIT_REG_MEM = 0x3C,
   IT_INDIRECT_BUFFER = 0x3F,
+  // Const-buffer indirect (the CE stream variant of IT_INDIRECT_BUFFER). This is
+  // the opcode Gnm's CCB descriptors (header 0xC0023300) carry.
+  IT_INDIRECT_BUFFER_CNST = 0x33,
   IT_COPY_DATA = 0x40,
   IT_EVENT_WRITE = 0x46,
   IT_EVENT_WRITE_EOP = 0x47,
@@ -104,6 +107,15 @@ enum Pm4RegBase : uint32_t {
 
 constexpr uint32_t Pm4SetRegAddress(uint32_t base, uint32_t offset_and_index) {
   return base + (offset_and_index & 0xffff);
+}
+
+// Type-3 packet header for an INDIRECT_BUFFER (3 body dwords: baseLo, baseHi,
+// ibSizeDwords). The descriptor array a gc submit ioctl carries is exactly a
+// list of these packets. Both the DCB (0xC0023F00) and CNST (0xC0023300)
+// variants carry count-field 2 on the wire (kernel gc_insert_indirect_buffer
+// builds both as {hdr, base_lo, base_hi, vmid<<24|ib_size}).
+inline uint32_t Pm4IbHeader(uint32_t op) {
+  return (3u << 30) | (2u << 16) | (op << 8);
 }
 
 }  // namespace gpu

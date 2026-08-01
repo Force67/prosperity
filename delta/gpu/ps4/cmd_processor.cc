@@ -42,6 +42,7 @@ DELTA_OPTION(const char *, kSkipShList, "DELTA_GPU_SKIPSH", nullptr);
 DELTA_OPTION(int, kTexTrackFrame, "DELTA_GPU_TEXTRACK_FRAME", -1);
 DELTA_OPTION(bool, kBlitDump, "DELTA_GPU_BLITDUMP", false);
 DELTA_OPTION(bool, kCcbHist, "DELTA_GPU_CCBHIST", false);
+DELTA_OPTION(bool, kCounterTrace, "DELTA_GPU_COUNTERTRACE", false);
 DELTA_OPTION(bool, kCsDump, "DELTA_GPU_CSDUMP", false);
 DELTA_OPTION(bool, kCsResTrace, "DELTA_GPU_CSRES", false);
 DELTA_OPTION(bool, kDbTrace, "DELTA_GPU_DBTRACE", false);
@@ -53,6 +54,7 @@ DELTA_OPTION(bool, kForceDepth, "DELTA_GPU_FORCEDEPTH", false);
 DELTA_OPTION(bool, kGeomDump, "DELTA_GPU_GEOMDUMP", false);
 DELTA_OPTION(bool, kGpuDmatrace, "DELTA_GPU_DMATRACE", false);
 DELTA_OPTION(bool, kGpuDrawpkt, "DELTA_GPU_DRAWPKT", false);
+DELTA_OPTION(bool, kIbTrace, "DELTA_GPU_IBTRACE", false);
 DELTA_OPTION(bool, kMaskTrace, "DELTA_GPU_MASKTRACE", false);
 DELTA_OPTION(bool, kNoCopy, "DELTA_GPU_NODMACOPY", false);
 DELTA_OPTION(bool, kNoCs, "DELTA_GPU_NOCS", false);
@@ -142,6 +144,15 @@ uint64_t g_index_base =
 uint64_t g_indirect_base = 0;
 uint32_t g_num_instances =
     1;  // from IT_NUM_INSTANCES; applies to the next draw(s)
+
+// CE/DE synchronization counters (IT_INCREMENT_CE_COUNTER / IT_INCREMENT_DE_
+// COUNTER). On real hardware the DE waits on the CE's counter before a
+// dependent draw. Our submit is synchronous and the CCB (CE work) always runs
+// before the DCB (DE work), so WAIT_ON_CE_COUNTER is always already satisfied;
+// the counters are tracked so the stream state matches and the packets are
+// never mistaken for a desync.
+uint64_t g_ce_counter = 0;
+uint64_t g_de_counter = 0;
 
 // Current render-target / framebuffer geometry, derived from the screen scissor
 // (CB regs don't carry an explicit width/height).
@@ -1682,19 +1693,46 @@ inline bool CcbGuestRange(uint64_t a, uint64_t bytes) {
   return bytes > 0 && a >= 0x1000000000ull && a + bytes <= 0x20000000000ull;
 }
 
-void SubmitCcb(const void* ccb, uint32_t size_bytes) {
-  if (!ccb || size_bytes < 4)
-    return;
-  std::lock_guard<std::mutex> lk(g_mtx);
-  const uint32_t* p = static_cast<const uint32_t*>(ccb);
-  uint32_t words = size_bytes / 4, i = 0;
-  static uint32_t hist[256] = {};
-  static int hist_dumps = 0;
-  static uint64_t n_ccb = 0;
-  if (kCcbHist && n_ccb == 0)
-    std::fprintf(stderr, "[ccb] first ccb: %u bytes (%u words)\n", size_bytes,
-                 words);
-  n_ccb++;
+// Resolve an in-stream IT_INDIRECT_BUFFER body into a mapped host pointer and
+// dword count. Mirrors the kernel's gc_insert_indirect_buffer checks: a non-zero
+// ib_size whose GPU address sits in the guest range and is actually mapped. Any
+// failure returns false so the caller skips the chain instead of dereferencing
+// garbage.
+inline bool ResolveIb(const uint32_t* body, uint32_t count,
+                      const uint32_t*& out, uint32_t& out_dwords) {
+  out_dwords = 0;
+  if (count < 3)
+    return false;
+  const uint64_t addr = (static_cast<uint64_t>(body[1] & 0xFF) << 32) | body[0];
+  const uint32_t dw = body[2] & 0xFFFFF;
+  const uint64_t bytes = static_cast<uint64_t>(dw) * 4;
+  if (!dw || addr < 0x1000000000ull || addr + bytes > 0x20000000000ull)
+    return false;
+  const void* p = reinterpret_cast<const void*>(addr);
+  if (!utl::isMemoryRangeMapped(p, bytes))
+    return false;
+  out = static_cast<const uint32_t*>(p);
+  out_dwords = dw;
+  return true;
+}
+
+// Cap on nested IT_INDIRECT_BUFFER depth: a bound on unbounded recursion (a
+// cycle in the chain would otherwise overflow the stack). Real submissions are
+// flat or a couple levels deep.
+constexpr uint32_t kMaxIbDepth = 8;
+
+// CCB opcode histogram (DELTA_GPU_CCBHIST).
+static uint32_t g_ccb_hist[256] = {};
+static int g_ccb_hist_dumps = 0;
+static uint64_t g_n_ccb = 0;
+
+static uint32_t WalkDcb(const uint32_t* p, uint32_t words, uint32_t depth,
+                        bool dump_this);
+
+// Walk one CCB (CE stream), recursing into any chained indirect buffers at
+// `depth`.
+static void WalkCcb(const uint32_t* p, uint32_t words, uint32_t depth) {
+  uint32_t i = 0;
   while (i < words) {
     uint32_t hdr = p[i];
     Pm4Type type = Pm4TypeOf(hdr);
@@ -1703,46 +1741,67 @@ void SubmitCcb(const void* ccb, uint32_t size_bytes) {
       const uint32_t* body = &p[i + 1];
       if (i + 1 + count > words)
         break;
-      hist[op & 0xFF]++;
-      if (kCeOn) {
-        switch (op) {
-          case IT_WRITE_CONST_RAM: {  // body[0]=byte offset; body[1..]=data
-                                      // dwords
-            uint32_t off = body[0] & 0xFFFF;
-            uint32_t n = count > 1 ? count - 1 : 0;
-            if ((uint64_t)off + (uint64_t)n * 4 <= sizeof(g_ce_ram))
-              std::memcpy(g_ce_ram + off, &body[1], (size_t)n * 4);
+      g_ccb_hist[op & 0xFF]++;
+      switch (op) {
+        case IT_WRITE_CONST_RAM: {  // body[0]=byte offset; body[1..]=data
+                                    // dwords
+          if (!kCeOn)
             break;
-          }
-          case IT_LOAD_CONST_RAM: {  // addrLo, addrHi, num_dwords, byte offset
-            if (count >= 4) {
-              uint64_t addr =
-                  (static_cast<uint64_t>(body[1] & 0xFFFF) << 32) | body[0];
-              uint32_t num = body[2] & 0x7FFF, off = body[3] & 0xFFFF;
-              if (CcbGuestRange(addr, (uint64_t)num * 4) &&
-                  (uint64_t)off + (uint64_t)num * 4 <= sizeof(g_ce_ram))
-                std::memcpy(g_ce_ram + off, reinterpret_cast<const void*>(addr),
-                            (size_t)num * 4);
-            }
-            break;
-          }
-          case IT_DUMP_CONST_RAM:
-          case IT_DUMP_CONST_RAM_OFFSET: {  // byte offset, num_dwords, addrLo,
-                                            // addrHi
-            if (count >= 4) {
-              uint32_t off = body[0] & 0xFFFF, num = body[1] & 0x7FFF;
-              uint64_t addr =
-                  (static_cast<uint64_t>(body[3] & 0xFFFF) << 32) | body[2];
-              if (CcbGuestRange(addr, (uint64_t)num * 4) &&
-                  (uint64_t)off + (uint64_t)num * 4 <= sizeof(g_ce_ram))
-                std::memcpy(reinterpret_cast<void*>(addr), g_ce_ram + off,
-                            (size_t)num * 4);
-            }
-            break;
-          }
-          default:
-            break;
+          uint32_t off = body[0] & 0xFFFF;
+          uint32_t n = count > 1 ? count - 1 : 0;
+          if ((uint64_t)off + (uint64_t)n * 4 <= sizeof(g_ce_ram))
+            std::memcpy(g_ce_ram + off, &body[1], (size_t)n * 4);
+          break;
         }
+        case IT_LOAD_CONST_RAM: {  // addrLo, addrHi, num_dwords, byte offset
+          if (!kCeOn)
+            break;
+          if (count >= 4) {
+            uint64_t addr =
+                (static_cast<uint64_t>(body[1] & 0xFFFF) << 32) | body[0];
+            uint32_t num = body[2] & 0x7FFF, off = body[3] & 0xFFFF;
+            if (CcbGuestRange(addr, (uint64_t)num * 4) &&
+                (uint64_t)off + (uint64_t)num * 4 <= sizeof(g_ce_ram))
+              std::memcpy(g_ce_ram + off, reinterpret_cast<const void*>(addr),
+                          (size_t)num * 4);
+          }
+          break;
+        }
+        case IT_DUMP_CONST_RAM:
+        case IT_DUMP_CONST_RAM_OFFSET: {  // byte offset, num_dwords, addrLo,
+                                          // addrHi
+          if (!kCeOn)
+            break;
+          if (count >= 4) {
+            uint32_t off = body[0] & 0xFFFF, num = body[1] & 0x7FFF;
+            uint64_t addr =
+                (static_cast<uint64_t>(body[3] & 0xFFFF) << 32) | body[2];
+            if (CcbGuestRange(addr, (uint64_t)num * 4) &&
+                (uint64_t)off + (uint64_t)num * 4 <= sizeof(g_ce_ram))
+              std::memcpy(reinterpret_cast<void*>(addr), g_ce_ram + off,
+                          (size_t)num * 4);
+          }
+          break;
+        }
+        case IT_INCREMENT_CE_COUNTER:  // the DE later waits on this value
+          g_ce_counter++;
+          break;
+        case IT_INDIRECT_BUFFER_CNST:
+        case IT_INDIRECT_BUFFER: {
+          // The CE can chain further const buffers; follow them so chained
+          // WRITE/LOAD/DISPATCH work is not silently dropped.
+          const uint32_t* chain = nullptr;
+          uint32_t chain_dw = 0;
+          if (depth < kMaxIbDepth && ResolveIb(body, count, chain, chain_dw)) {
+            if (op == IT_INDIRECT_BUFFER_CNST)
+              WalkCcb(chain, chain_dw, depth + 1);
+            else
+              WalkDcb(chain, chain_dw, depth + 1, false);
+          }
+          break;
+        }
+        default:
+          break;
       }
       i += 1 + count;
     } else if (type == Pm4Type::kType2 || hdr == 0) {
@@ -1753,14 +1812,27 @@ void SubmitCcb(const void* ccb, uint32_t size_bytes) {
       break;  // type-1 desync
     }
   }
-  if (kCcbHist && hist_dumps < 3 && n_ccb >= 50) {
-    hist_dumps++;
+}
+
+void SubmitCcb(const void* ccb, uint32_t size_bytes) {
+  if (!ccb || size_bytes < 4)
+    return;
+  std::lock_guard<std::mutex> lk(g_mtx);
+  const uint32_t* p = static_cast<const uint32_t*>(ccb);
+  uint32_t words = size_bytes / 4;
+  if (kCcbHist && g_n_ccb == 0)
+    std::fprintf(stderr, "[ccb] first ccb: %u bytes (%u words)\n", size_bytes,
+                 words);
+  g_n_ccb++;
+  WalkCcb(p, words, 0);
+  if (kCcbHist && g_ccb_hist_dumps < 3 && g_n_ccb >= 50) {
+    g_ccb_hist_dumps++;
     std::fprintf(
         stderr, "[ccb] opcode histogram (after %lu ccbs, this one %u words):\n",
-        (unsigned long)n_ccb, words);
+        (unsigned long)g_n_ccb, words);
     for (int o = 0; o < 256; o++)
-      if (hist[o])
-        std::fprintf(stderr, "[ccb]   op %#04x x%u\n", o, hist[o]);
+      if (g_ccb_hist[o])
+        std::fprintf(stderr, "[ccb]   op %#04x x%u\n", o, g_ccb_hist[o]);
   }
 }
 
@@ -2080,33 +2152,11 @@ void HandleDispatch(const uint32_t* body, uint32_t count) {
                  ci.num_res);
 }
 
-void SubmitDcb(const void* dcb, uint32_t size_bytes) {
-  if (!dcb || size_bytes < 4)
-    return;
-  std::lock_guard<std::mutex> lk(g_mtx);
-  if (!g_vk_tried) {
-    g_vk_tried = true;
-    rhi::Init(rhi::DefaultRenderer());
-  }
-  auto* p = static_cast<const uint32_t*>(dcb);
-  uint32_t words = size_bytes / 4;
-  uint64_t sn = g_total_submits.fetch_add(1) + 1;
-  if (kTrace && (sn <= 8 || sn % 256 == 0))
-    std::fprintf(stderr, "[gpu] submit #%lu size=%u draws-so-far=%lu\n",
-                 (unsigned long)sn, size_bytes,
-                 (unsigned long)g_total_draws.load());
-  // Dump the full packet walk of the first large (real rendering) command
-  // buffer so we can see its opcodes / find the draw.
-  static bool dumped_big = false;
-  bool dump_this = kTrace && !dumped_big && size_bytes > 4000;
-  if (dump_this) {
-    dumped_big = true;
-    std::fprintf(stderr, "[gpu] === big dcb walk (size=%u) ===\n", size_bytes);
-  }
-  if (kTrace && g_dcb_seen < 6)
-    std::fprintf(stderr,
-                 "[gpu] SubmitDcb dcb=%p size_bytes=%u words=%u hdr0=%#x\n",
-                 dcb, size_bytes, words, p[0]);
+// Walk one DCB (DE stream), issuing draws/dispatches and recursing into any
+// chained IT_INDIRECT_BUFFER at `depth`. Returns the walk position (dwords
+// consumed) so the top-level caller can report how far it got.
+static uint32_t WalkDcb(const uint32_t* p, uint32_t words, uint32_t depth,
+                        bool dump_this) {
   uint32_t i = 0;
   while (i < words) {
     uint32_t hdr = p[i];
@@ -2309,6 +2359,46 @@ void SubmitDcb(const void* dcb, uint32_t size_bytes) {
           }
           break;
         }
+        case IT_INDIRECT_BUFFER:
+        case IT_INDIRECT_BUFFER_CNST: {  // chained buffer (nested CMDBUF)
+          const uint32_t* chain = nullptr;
+          uint32_t chain_dw = 0;
+          if (depth < kMaxIbDepth && ResolveIb(body, count, chain, chain_dw)) {
+            if (kIbTrace)
+              std::fprintf(stderr, "[ib] dcb chain @%u depth=%u words=%u\n", i,
+                           depth, chain_dw);
+            if (op == IT_INDIRECT_BUFFER_CNST)
+              WalkCcb(chain, chain_dw, depth + 1);
+            else
+              WalkDcb(chain, chain_dw, depth + 1, dump_this);
+          } else if (kIbTrace) {
+            std::fprintf(stderr, "[ib] dcb chain skipped @%u depth=%u\n", i,
+                         depth);
+          }
+          break;
+        }
+        case IT_INCREMENT_CE_COUNTER:
+          g_ce_counter = (g_ce_counter + 1) & 0xFFFFFF;
+          if (kCounterTrace)
+            std::fprintf(stderr, "[cnt] IT_INCREMENT_CE_COUNTER -> %llu\n",
+                         (unsigned long long)g_ce_counter);
+          break;
+        case IT_INCREMENT_DE_COUNTER:
+          g_de_counter = (g_de_counter + 1) & 0xFFFFFF;
+          if (kCounterTrace)
+            std::fprintf(stderr, "[cnt] IT_INCREMENT_DE_COUNTER -> %llu\n",
+                         (unsigned long long)g_de_counter);
+          break;
+        case IT_WAIT_ON_CE_COUNTER: {
+          // CE runs synchronously before the DCB, so the requested count is
+          // already satisfied; keep state (kCeOn drives CE RAM fenced) only.
+          uint32_t want = count >= 1 ? (body[0] & 0xFFFFFF) : 0;
+          if (kCounterTrace)
+            std::fprintf(stderr,
+                         "[cnt] WAIT_ON_CE_COUNTER want=%u (ce=%llu, always ok)\n",
+                         want, (unsigned long long)g_ce_counter);
+          break;
+        }
         default:
           if (IsDraw(op)) {
             g_total_draws.fetch_add(1);
@@ -2348,6 +2438,37 @@ void SubmitDcb(const void* dcb, uint32_t size_bytes) {
       break;
     }
   }
+  return i;
+}
+
+void SubmitDcb(const void* dcb, uint32_t size_bytes) {
+  if (!dcb || size_bytes < 4)
+    return;
+  std::lock_guard<std::mutex> lk(g_mtx);
+  if (!g_vk_tried) {
+    g_vk_tried = true;
+    rhi::Init(rhi::DefaultRenderer());
+  }
+  auto* p = static_cast<const uint32_t*>(dcb);
+  uint32_t words = size_bytes / 4;
+  uint64_t sn = g_total_submits.fetch_add(1) + 1;
+  if (kTrace && (sn <= 8 || sn % 256 == 0))
+    std::fprintf(stderr, "[gpu] submit #%lu size=%u draws-so-far=%lu\n",
+                 (unsigned long)sn, size_bytes,
+                 (unsigned long)g_total_draws.load());
+  // Dump the full packet walk of the first large (real rendering) command
+  // buffer so we can see its opcodes / find the draw.
+  static bool dumped_big = false;
+  bool dump_this = kTrace && !dumped_big && size_bytes > 4000;
+  if (dump_this) {
+    dumped_big = true;
+    std::fprintf(stderr, "[gpu] === big dcb walk (size=%u) ===\n", size_bytes);
+  }
+  if (kTrace && g_dcb_seen < 6)
+    std::fprintf(stderr,
+                 "[gpu] SubmitDcb dcb=%p size_bytes=%u words=%u hdr0=%#x\n",
+                 dcb, size_bytes, words, p[0]);
+  uint32_t i = WalkDcb(p, words, 0, dump_this);
   if (dump_this) {
     std::fprintf(stderr, "[gpu] === big dcb walk done: %u/%u words ===\n", i,
                  words);
