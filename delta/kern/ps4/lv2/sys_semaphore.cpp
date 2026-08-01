@@ -23,7 +23,7 @@ static std::mutex g_semRegM;
 static std::unordered_map<std::string, semaphore *> g_semByName;
 
 semaphore::semaphore(proc *p, const char *nm, int init, int max)
-    : kObject(p, oType::semaphore), count(init), maxCount(max) {
+    : kObject(p, oType::semaphore), count(init), maxCount(max), initCount(init) {
   if (nm && *nm) {
     name = nm;
     std::lock_guard<std::mutex> lk(g_semRegM);
@@ -35,6 +35,10 @@ int semaphore::wait(int need, uint32_t *timeoutUs) {
   if (need <= 0)
     return -SysError::eINVAL;
   std::unique_lock<std::mutex> lk(m);
+  // A request larger than the ceiling can never succeed: the kernel rejects it
+  // outright with EINVAL rather than parking the thread forever.
+  if (maxCount > 0 && need > maxCount)
+    return -SysError::eINVAL;
   auto enough = [&] { return count >= need; };
   if (!enough()) {
     waiters++;
@@ -55,8 +59,13 @@ int semaphore::trywait(int need) {
   if (need <= 0)
     return -SysError::eINVAL;
   std::unique_lock<std::mutex> lk(m);
-  if (count < need)
+  if (count < need) {
+    // Distinguish an impossible request (need > ceiling => EINVAL) from a
+    // momentarily-unavailable one (=> EBUSY).
+    if (maxCount > 0 && need > maxCount)
+      return -SysError::eINVAL;
     return -SysError::eBUSY;
+  }
   count -= need;
   return 0;
 }
@@ -65,20 +74,26 @@ int semaphore::post(int n) {
   if (n <= 0)
     return -SysError::eINVAL;
   std::lock_guard<std::mutex> lk(m);
-  // Cap at the declared maximum (SCE rejects an over-post; clamping is the safe
-  // approximation (never deadlock a waiter, never grow unbounded).
+  // The kernel rejects a post that would push the count past maxCount and leaves
+  // the count untouched (returns EINVAL).
+  if (maxCount > 0 && count + n > maxCount)
+    return -SysError::eINVAL;
   count += n;
-  if (maxCount > 0 && count > maxCount)
-    count = maxCount;
   cv.notify_all();
   return 0;
 }
 
 int semaphore::cancel(int setCount, int *numWaiters) {
   std::lock_guard<std::mutex> lk(m);
+  if (maxCount > 0 && setCount > maxCount)
+    return -SysError::eINVAL;
+  // Report the waiter count before waking: each woken thread will decrement it
+  // itself as it returns from cv.wait.
   if (numWaiters)
     *numWaiters = waiters;
-  if (setCount >= 0)
+  if (setCount < 0)
+    count = initCount;  // negative => reset to the create-time value
+  else
     count = setCount;
   cv.notify_all();
   return 0;

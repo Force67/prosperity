@@ -32,9 +32,6 @@ DELTA_OPTION(bool, kEvfStack, "DELTA_EVF_STACK", false);
 }  // namespace
 
 namespace krnl {
-// SCE_KERNEL_EVF_WAITMODE_*
-enum { kEvfAnd = 0x01, kEvfOr = 0x02, kEvfClearAll = 0x10, kEvfClearPat = 0x20 };
-
 // Named event flags, so evf_open(name) finds the one evf_create(name) made.
 static std::mutex g_efRegM;
 static std::unordered_map<std::string, eventFlag *> g_efByName;
@@ -81,15 +78,30 @@ int eventFlag::wait(uint64_t pattern, uint32_t mode, uint64_t *result,
   Waiter waiter{pattern, mode};
   waiters.push_back(&waiter);
   if (timeoutUs) {
+    // The timeout is an in/out parameter: the kernel writes back the remaining
+    // microseconds after the wait (zero on exhaustion).
+    auto start = std::chrono::steady_clock::now();
     if (!cv.wait_for(lk, std::chrono::microseconds(*timeoutUs),
                      [&] { return waiter.done; })) {
       removeWaiter(&waiter);
+      *timeoutUs = 0;
       return -SysError::eTIMEDOUT;
     }
+    auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - start);
+    *timeoutUs = elapsed.count() < *timeoutUs
+                     ? static_cast<uint32_t>(*timeoutUs - elapsed.count())
+                     : 0;
   } else {
     cv.wait(lk, [&] { return waiter.done; });
   }
   removeWaiter(&waiter);
+  // A cancelled waiter is woken by evf_cancel, not by a matching set(). The
+  // kernel marks the waiter's sleepq entry and cv_wait_sig returns a non-zero
+  // status; without mode flags 0x100/0x200 that surfaces as the raw cv result,
+  // with mode & 0x100 it is explicitly eCANCELED (85). We report eCANCELED.
+  if (waiter.cancelled)
+    return -SysError::eCANCELED;
   if (result)
     *result = waiter.result;
   return 0;
@@ -121,6 +133,24 @@ void eventFlag::set(uint64_t b) {
 void eventFlag::clear(uint64_t b) {
   std::lock_guard<std::mutex> lk(m);
   bits &= b;  // SCE clear keeps the bits set in b
+}
+
+int eventFlag::cancel(uint64_t pattern) {
+  std::lock_guard<std::mutex> lk(m);
+  // Mark all waiters as cancelled. They wake from the cv with done==true but a
+  // zero result, which the wait() loop turns into an error return (the kernel
+  // delivers ETIMEDOUT/EINTR to a cancelled waiter).
+  int n = 0;
+  for (auto *w : waiters) {
+    if (w->done)
+      continue;
+    w->result = pattern;
+    w->cancelled = true;
+    w->done = true;
+    ++n;
+  }
+  cv.notify_all();
+  return n;
 }
 
 // Name-keyed set for host-side subsystems that stand in for an absent system
@@ -197,7 +227,19 @@ static void evfTrace(const char *op, int id, const eventFlag *ef,
 }
 
 int PS4ABI sys_evf_create(const char *name, uint32_t attr,
-                          uint64_t initPattern) {
+                           uint64_t initPattern) {
+  // Kernel validation:
+  //   * name must be non-null (a zero name is EINVAL/22).
+  //   * attr may only carry bits in 0x133 (mask 0xFFFFFECC rejects the rest).
+  //   * AND+OR (attr & 3 == 3) and CLEAR_ALL+CLEAR_PAT (attr & 0x30 == 0x30) are
+  //     mutually exclusive. If neither wait type is set the kernel defaults to
+  //     AND (0x01); if neither clear mode is set it defaults to CLEAR_ALL (0x10).
+  // We don't enforce the name check strictly: some system libs pass an empty
+  // name for private flags, and our auto-naming path depends on it.
+  if (!name) {
+    std::printf("[evf] create rejected: null name (attr=%#x)\n", attr);
+    return -SysError::eINVAL;
+  }
   auto *ef = new eventFlag(proc::getActive(), name, initPattern);
   std::printf("[evf] create '%s' attr=%#x init=%#llx -> id=%u\n",
               name ? name : "", attr, (unsigned long long)initPattern,
@@ -277,7 +319,13 @@ static long audioMixAckUs() {
 }
 
 int PS4ABI sys_evf_wait(int id, uint64_t pattern, uint32_t mode,
-                        uint64_t *result, uint32_t *timeoutUs) {
+                         uint64_t *result, uint32_t *timeoutUs) {
+  // Kernel mode check: mode must name exactly one of {AND, OR} and at most one
+  // clear mode, and the wait pattern must be non-zero. Violations return EINVAL
+  // (22) without touching the object.
+  if (pattern == 0 || (mode & 3) == 0 || (mode & 3) == 3 ||
+      (mode & 0x30) == 0x30)
+    return -SysError::eINVAL;
   WaitProbe _wp("evf_wait", (long)id, (long)pattern);
   auto *ef = fromId(id);
   if (!ef)
@@ -308,7 +356,10 @@ int PS4ABI sys_evf_wait(int id, uint64_t pattern, uint32_t mode,
 }
 
 int PS4ABI sys_evf_trywait(int id, uint64_t pattern, uint32_t mode,
-                           uint64_t *result) {
+                            uint64_t *result) {
+  if (pattern == 0 || (mode & 3) == 0 || (mode & 3) == 3 ||
+      (mode & 0x30) == 0x30)
+    return -SysError::eINVAL;
   auto *ef = fromId(id);
   if (!ef)
     return -SysError::eSRCH;
@@ -377,12 +428,17 @@ int PS4ABI sys_evf_clear(int id, uint64_t bits) {
 }
 
 int PS4ABI sys_evf_cancel(int id, uint64_t pattern, int *numWaiters) {
+  // Kernel evf_cancel: wakes every thread parked in evf_wait on this flag and
+  // reports how many were released via numWaiters. The woken waiters see
+  // ETIMEDOUT (60) / EINTR (85) rather than a successful match, so a cancel is
+  // an abort, not a satisfy.
   auto *ef = fromId(id);
   if (!ef)
     return -SysError::eSRCH;
-  ef->set(pattern);  // wake waiters with the pattern (best-effort)
+  int woken = ef->cancel(pattern);
   if (numWaiters)
-    *numWaiters = 0;
+    *numWaiters = woken;
+  evfTrace("cancel", id, ef, pattern, 0, 0, 0);
   return 0;
 }
 }  // namespace krnl
