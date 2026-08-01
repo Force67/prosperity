@@ -462,8 +462,56 @@ static std::atomic<uintptr_t> g_wprotBase{0};
 static std::atomic<size_t> g_wprotLen{0};
 static std::atomic<bool> g_wprotRegs{false};
 
+// DELTA_GUEST_WHIST census state (see startWriteHist). A one-shot watch names
+// the first writer of a page and then goes quiet; this one re-arms, so a pool
+// too large to log per write still yields "which parts of it are written, by
+// whom, over the whole run".
+static constexpr size_t kWhistGranule = 16u << 20;
+static constexpr int kWhistBuckets = 512;
+static constexpr int kWhistSites = 32;
+static std::atomic<uintptr_t> g_whistBase{0};
+static std::atomic<size_t> g_whistLen{0};
+static std::atomic<uint32_t> g_whistBucket[kWhistBuckets];
+static std::atomic<uintptr_t> g_whistSite[kWhistSites];
+static std::atomic<uintptr_t> g_whistSiteCaller[kWhistSites];
+static std::atomic<uint32_t> g_whistSiteHits[kWhistSites];
+
 static void crashHandler(int sig, siginfo_t *si, void *ucv) {
 #if defined(__x86_64__)
+  // Write census: same trap as the write watch, but it only counts (per 16 MiB
+  // bucket and per faulting instruction) and reopens the page, so it survives a
+  // multi-GB range being re-armed for the length of a run.
+  if (sig == SIGSEGV && si && ucv && g_whistLen.load()) {
+    const uintptr_t base = g_whistBase.load();
+    const uintptr_t at = reinterpret_cast<uintptr_t>(si->si_addr);
+    if (at >= base && at < base + g_whistLen.load()) {
+      auto *uc = static_cast<ucontext_t *>(ucv);
+      const uintptr_t rip = (uintptr_t)uc->uc_mcontext.gregs[REG_RIP];
+      const size_t b = (at - base) / kWhistGranule;
+      if (b < kWhistBuckets)
+        g_whistBucket[b].fetch_add(1, std::memory_order_relaxed);
+      for (int i = 0; i < kWhistSites; i++) {
+        uintptr_t cur = g_whistSite[i].load(std::memory_order_relaxed);
+        if (cur == rip) {
+          g_whistSiteHits[i].fetch_add(1, std::memory_order_relaxed);
+          break;
+        }
+        if (!cur && g_whistSite[i].compare_exchange_strong(cur, rip)) {
+          // A leaf writer (libc memcpy) names no subsystem; keep one sample of
+          // its return address so the report can name the caller too.
+          g_whistSiteCaller[i].store(
+              *reinterpret_cast<const uintptr_t *>(uc->uc_mcontext.gregs[REG_RSP]),
+              std::memory_order_relaxed);
+          g_whistSiteHits[i].fetch_add(1, std::memory_order_relaxed);
+          break;
+        }
+      }
+      const long pgsz = sysconf(_SC_PAGESIZE);
+      ::mprotect(reinterpret_cast<void *>(at & ~((uintptr_t)pgsz - 1)),
+                 (size_t)pgsz, PROT_READ | PROT_WRITE | PROT_EXEC);
+      return;
+    }
+  }
   // Write watch: the range was made read-only, so a write faults here. Name the
   // instruction, open that one page and resume, which turns the trap into a
   // list of everything that writes the range rather than just the first thing.
@@ -493,6 +541,12 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
                      (long)g[REG_R9], (long)g[REG_R10], (long)g[REG_R11],
                      (long)g[REG_R12], (long)g[REG_R13], (long)g[REG_R14],
                      (long)g[REG_R15]);
+        // The writer is nearly always libc memcpy, which names no subsystem.
+        // memcpy is a leaf, so the qword at rsp is its caller.
+        const auto ret = *reinterpret_cast<const uintptr_t *>(g[REG_RSP]);
+        char csym[192];
+        symbolize(ret, csym, sizeof(csym));
+        std::fprintf(stderr, "[wprot]  caller %s\n", csym);
       }
       std::fflush(stderr);
       const long pgsz = sysconf(_SC_PAGESIZE);
@@ -1744,6 +1798,56 @@ void startWriteWatch(uintptr_t addr, size_t bytes, unsigned everyMs,
                                                         : "writes");
       std::fflush(stderr);
       return;
+    }
+  }).detach();
+}
+
+// DELTA_GUEST_WHIST=<hex addr>:<hex bytes>[:<ms>]: write census over a pool too
+// big to watch one write at a time. Re-arms the whole range read-only every
+// `ms`, so each report says which 16 MiB slices the guest wrote in that window
+// and which instructions wrote them. Answers "the title fills its video pool
+// somewhere, but where, and from what code" in one run.
+void startWriteHist(uintptr_t addr, size_t bytes, unsigned everyMs) {
+  if (!addr || !bytes)
+    return;
+  std::thread([addr, bytes, everyMs] {
+    const size_t pgsz = (size_t)sysconf(_SC_PAGESIZE);
+    const uintptr_t base = addr & ~(pgsz - 1);
+    const size_t span = (bytes + pgsz - 1) & ~(pgsz - 1);
+    for (;;) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(200));
+      unsigned char vec = 0;
+      if (mincore(reinterpret_cast<void *>(base), 1, &vec) == 0)
+        break;
+    }
+    g_whistBase = base;
+    g_whistLen = span;
+    std::fprintf(stderr, "[whist] census on %#lx+%#zx every %ums\n",
+                 (unsigned long)base, span, everyMs);
+    unsigned sinceReport = 0;
+    for (;;) {
+      ::mprotect(reinterpret_cast<void *>(base), span, PROT_READ);
+      std::this_thread::sleep_for(std::chrono::milliseconds(everyMs));
+      if ((sinceReport += everyMs) < 4000)
+        continue;
+      sinceReport = 0;
+      std::string map;
+      for (size_t off = 0; off < span; off += kWhistGranule) {
+        const uint32_t n = g_whistBucket[off / kWhistGranule].load();
+        map += n == 0 ? '_' : n < 10 ? '.' : n < 100 ? '+' : '#';
+      }
+      std::fprintf(stderr, "[whist] %s\n", map.c_str());
+      for (int i = 0; i < kWhistSites; i++) {
+        const uintptr_t rip = g_whistSite[i].load();
+        if (!rip)
+          break;
+        char sym[192], csym[192];
+        symbolize(rip, sym, sizeof(sym));
+        symbolize(g_whistSiteCaller[i].load(), csym, sizeof(csym));
+        std::fprintf(stderr, "[whist]   %8u %s <- %s\n",
+                     g_whistSiteHits[i].load(), sym, csym);
+      }
+      std::fflush(stderr);
     }
   }).detach();
 }

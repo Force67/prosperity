@@ -100,6 +100,11 @@ void startPopcntPrinter(uintptr_t addr, size_t bytes, unsigned everyMs);
 void startWriteWatch(uintptr_t addr, size_t bytes, unsigned everyMs,
                      bool trapReads = false);
 
+// DELTA_GUEST_WHIST=<hex addr>:<hex bytes>[:<ms>]: the same trap re-armed on an
+// interval and reduced to counts, so a multi-GB pool can be surveyed for the
+// length of a run: which 16 MiB slices the guest writes, and from where.
+void startWriteHist(uintptr_t addr, size_t bytes, unsigned everyMs);
+
 // DELTA_GUEST_SUMWATCH=<slot>:<off>:<stride>:<count>[:<ms>]: watch a set of u32
 // counters behind a guest pointer slot (see crash.cpp).
 void startSumWatchPrinter(uintptr_t slot, size_t off, size_t stride, int count,
