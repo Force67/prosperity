@@ -611,8 +611,8 @@ TImage DecodeTImage(const uint32_t* p) {
   //  [0] base[39:8] (base = [0] << 8 with high bits from [1])
   //  [1] base_hi[5:0]; mtype_l2[7:6]; min_lod[19:8]; formats
   //  [2] width[13:0]; height[27:14]
-  //  [3] base_level[15:12]; last_level[19:16]; tiling_index[24:20];
-  //      pow2_pad[25]; type[31:28]
+  //  [3] dst_sel_x/y/z/w[11:0], 3 bits each; base_level[15:12];
+  //      last_level[19:16]; tiling_index[24:20]; pow2_pad[25]; type[31:28]
   //  [4] depth[12:0]; pitch[26:13]
   //  [5] base_array[12:0]; last_array[25:13]
   TImage t;
@@ -624,6 +624,8 @@ TImage DecodeTImage(const uint32_t* p) {
   t.nfmt = (p[1] >> 26) & 0xF;
   t.width = (p[2] & 0x3FFF) + 1;
   t.height = ((p[2] >> 14) & 0x3FFF) + 1;
+  for (uint32_t i = 0; i < 4; i++)
+    t.dst_sel[i] = (p[3] >> (i * 3)) & 0x7;
   t.base_mip = (p[3] >> 12) & 0xF;
   const uint32_t last_mip = (p[3] >> 16) & 0xF;
   t.mip_levels = last_mip + 1;
