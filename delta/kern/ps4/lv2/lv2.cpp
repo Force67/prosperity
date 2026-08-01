@@ -583,14 +583,14 @@ static const syscall_Reg syscall_dpt[] = {
     {493, (void *)&sys_fstatat}, // sys_fstatat
     {494, (void *)&null_handler}, // sys_futimesat
     {495, (void *)&null_handler}, // sys_linkat
-    {496, (void *)&null_handler}, // sys_mkdirat
+    {496, (void *)&sys_mkdirat}, // sys_mkdirat
     {497, (void *)&null_handler}, // sys_mkfifoat
     {498, (void *)&null_handler}, // sys_mkdat
     {499, (void *)&sys_openat}, // sys_openat
     {500, (void *)&sys_readlinkat}, // sys_readlinkat
-    {501, (void *)&null_handler}, // sys_renameat
+    {501, (void *)&sys_renameat}, // sys_renameat
     {502, (void *)&null_handler}, // sys_symlinkat
-    {503, (void *)&null_handler}, // sys_unlinkat
+    {503, (void *)&sys_unlinkat}, // sys_unlinkat
     {504, (void *)&null_handler}, // sys_posix_openpt
     {505, (void *)&null_handler}, // sys_gssd_syscall
     {506, (void *)&null_handler}, // sys_jail_get

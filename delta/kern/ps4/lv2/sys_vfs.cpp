@@ -155,6 +155,15 @@ int PS4ABI sys_open(const char *path, uint32_t flags, uint32_t mode) {
   if (!path)
     return -SysError::eINVAL;
 
+  // Kernel open flag validation:
+  //   * accmode (flags & 3) > O_RDWR (2) without O_EXEC (0x40000) is EINVAL.
+  //   * O_EXEC with a non-zero accmode (not O_RDONLY) is EINVAL.
+  const uint32_t accmode = flags & O_ACCMODE;
+  if (accmode > O_RDWR && !(flags & O_EXEC))
+    return -SysError::eINVAL;
+  if ((flags & O_EXEC) && accmode != 0)
+    return -SysError::eINVAL;
+
   if (kVfsTrace)
     std::fprintf(stderr, "[open] %s flags=%#x mode=%#x\n", path, flags, mode);
   if (std::strstr(path, ".psarc"))
@@ -209,7 +218,6 @@ int PS4ABI sys_open(const char *path, uint32_t flags, uint32_t mode) {
   // Writable open (savedata): a create/write flag on a path under a writable
   // host mount goes to a writable fileDevice. Read-only titles never take this
   // (they open /app0, a read-only virtual mount), so it can't affect them.
-  const uint32_t accmode = flags & O_ACCMODE;
   const bool writeIntent =
       accmode == O_WRONLY || accmode == O_RDWR || (flags & O_CREAT);
   if (writeIntent) {
@@ -361,10 +369,11 @@ int64_t PS4ABI sys_lseek(uint32_t fd, int64_t offset, int whence) {
   return d->lseek(offset, whence);
 }
 
-// FreeBSD struct statfs. Only the capacity fields matter to a title: they are
-// how it decides whether it may write. Left unhandled the caller reads an
-// uninitialised buffer as "no space" -- Minecraft refuses to open a world with
-// "there is not enough free space" and never leaves its menu.
+// FreeBSD struct statfs (472 / 0x1D8 bytes, copies out to user). Only the
+// capacity fields matter to a title: they decide whether it may write. Left
+// unhandled the caller reads an uninitialised buffer as "no space" --
+// Minecraft refuses to open a world with "there is not enough free space"
+// and never leaves its menu. Requires privilege 0x2AC in the kernel.
 struct BsdStatfs {
   uint32_t f_version, f_type;
   uint64_t f_flags, f_bsize, f_iosize;

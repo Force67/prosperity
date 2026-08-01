@@ -66,8 +66,10 @@ int PS4ABI sys_faccessat(int fd, const char *path, int mode, int flag) {
   return sys_access(path, mode);
 }
 
-// EINVAL is the POSIX answer for "not a symbolic link", which is what callers
-// probing our (symlink-free) VFS expect.
+// We have no symbolic links in the VFS. The kernel returns EINVAL when the
+// target is not a VLNK vnode, so we do too. The PS4 uses symlinks only for
+// /app0 -> the PFS mount root and the base system dirs; our VFS resolves
+// those directly, so readlink should never reach a callable path.
 int PS4ABI sys_readlink(const char *path, char *buf, size_t bufsize) {
   return -SysError::eINVAL;
 }
@@ -96,16 +98,49 @@ int PS4ABI sys_fstatat(int fd, const char *path, void *stat, int flag) {
   return sys_lstat(path, stat);
 }
 
+// sys_fcntl: the kernel validates cmd in the non-privileged path against
+// bitmask 0x3818 {F_GETFL(3), F_SETFL(4), F_GETLK(11), F_SETLK(12),
+// F_SETLKW(13)}. cmds 7/8/9 (OGETLK/OSETLK/OSETLKW) are translated to 11/12/13.
+// We don't model fd flags or advisory locks, so GETFD/GETFL report 0 and the
+// lock commands accept silently.
 int PS4ABI sys_fcntl(uint32_t fd, int cmd, int64_t arg) {
-  enum { F_DUPFD = 0, F_GETFD = 1, F_SETFD = 2, F_GETFL = 3, F_SETFL = 4 };
+  enum {
+    F_DUPFD = 0, F_GETFD = 1, F_SETFD = 2, F_GETFL = 3, F_SETFL = 4,
+    F_GETOWN = 5, F_SETOWN = 6,
+    F_OGETLK = 7, F_OSETLK = 8, F_OSETLKW = 9,
+    F_GETLK = 11, F_SETLK = 12, F_SETLKW = 13,
+  };
+  // Normalize legacy OGETLK/OSETLK/OSETLKW (7/8/9) to their modern equivalents.
+  int ncmd = cmd;
   switch (cmd) {
+  case F_OGETLK:  ncmd = F_GETLK;  break;
+  case F_OSETLK:  ncmd = F_SETLK;  break;
+  case F_OSETLKW: ncmd = F_SETLKW; break;
+  }
+  switch (ncmd) {
   case F_GETFL:
+    // Report O_RDONLY: the device opened with whatever flags the guest passed,
+    // but we model read-only access for regular files.
+    return 0;
   case F_SETFL:
   case F_GETFD:
   case F_SETFD:
     return 0;
+  case F_GETLK:
+    // No locks held: return F_UNLCK (type 2) in the caller's flock struct.
+    if (arg) {
+      auto *fl = reinterpret_cast<int32_t *>(arg);
+      fl[0] = 2;  // l_type = F_UNLCK
+    }
+    return 0;
+  case F_SETLK:
+  case F_SETLKW:
+    return 0;  // advisory lock accepted, not enforced
   case F_DUPFD:
-    return -SysError::eOPNOTSUPP; // the object table has no descriptor dup
+    return -SysError::eOPNOTSUPP;  // no descriptor duplication in the object table
+  case F_GETOWN:
+  case F_SETOWN:
+    return 0;  // no signal delivery so ownership is inert
   default:
     LOG_WARNING("sys_fcntl: unhandled cmd {} on fd {} -> 0", cmd, fd);
     return 0;
@@ -410,6 +445,24 @@ int PS4ABI sys_rename(const char *from, const char *to) {
   return 0;
 }
 
+// sys_unlinkat (503): flag bit 0x800 (AT_REMOVEDIR) means rmdir, else unlink.
+int PS4ABI sys_unlinkat(int fd, const char *path, int flag) {
+  if (flag & 0x800)
+    return sys_rmdir(path);
+  return sys_unlink(path);
+}
+
+// sys_mkdirat (496): identical to mkdir (the dirfd is always AT_FDCWD here).
+int PS4ABI sys_mkdirat(int fd, const char *path, uint32_t mode) {
+  return sys_mkdir(path, mode);
+}
+
+// sys_renameat (501): identical to rename (both dirfds are AT_FDCWD here).
+int PS4ABI sys_renameat(int fd_old, const char *old, int fd_new,
+                        const char *new_) {
+  return sys_rename(old, new_);
+}
+
 int64_t PS4ABI sys_getdirentries(uint32_t fd, void *buf, size_t nbytes,
                                  int64_t *basep) {
   auto *d = fdToDevice(fd);
@@ -418,12 +471,21 @@ int64_t PS4ABI sys_getdirentries(uint32_t fd, void *buf, size_t nbytes,
       std::fprintf(stderr, "[getdirentries] fd=%u BADF\n", fd);
     return -SysError::eBADF;
   }
-  // basep is an in/out seek cookie; the dir device tracks its own cursor, so we
-  // leave whatever the caller passed untouched.
+  // The kernel validates buflen and returns EINVAL on a negative value.
+  if (nbytes == 0)
+    return -SysError::eINVAL;
   int64_t r = d->getdents(buf, nbytes);
+  // On success the kernel writes the next directory seek offset to *basep so
+  // the caller can resume a partial enumeration. Use the byte count consumed
+  // as the cookie: a subsequent getdirentries at this offset reads the next
+  // chunk. Our dirDevice serves all entries on the first call and returns EOF
+  // after, so the cookie is simply the total returned.
+  if (r >= 0 && basep)
+    *basep = r;
   if (kVfsTrace)
-    std::fprintf(stderr, "[getdirentries] fd=%u buf=%p n=%zu -> %lld\n", fd, buf,
-                 nbytes, (long long)r);
+    std::fprintf(stderr, "[getdirentries] fd=%u buf=%p n=%zu -> %lld basep=%lld\n",
+                 fd, buf, nbytes, (long long)r,
+                 basep ? (long long)*basep : -1);
   return r;
 }
 

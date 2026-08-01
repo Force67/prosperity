@@ -55,9 +55,13 @@ int PS4ABI sys_chdir(const char *path);
 int PS4ABI sys_fchdir(uint32_t fd);
 
 int PS4ABI sys_unlink(const char *path);
+int PS4ABI sys_unlinkat(int fd, const char *path, int flag);
 int PS4ABI sys_rmdir(const char *path);
 int PS4ABI sys_mkdir(const char *path, uint32_t mode);
+int PS4ABI sys_mkdirat(int fd, const char *path, uint32_t mode);
 int PS4ABI sys_rename(const char *from, const char *to);
+int PS4ABI sys_renameat(int fd_old, const char *old, int fd_new,
+                        const char *new_);
 
 int64_t PS4ABI sys_getdirentries(uint32_t fd, void *buf, size_t nbytes,
                                  int64_t *basep);
