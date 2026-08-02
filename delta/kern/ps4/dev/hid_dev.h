@@ -5,9 +5,10 @@
 namespace krnl {
 class proc;
 
-// /dev/hid: the human-interface-device (keyboard/mouse) channel. System-only;
-// games reach input through pad/libkernel. Registers so an open succeeds;
-// commands soft-succeed.
+// /dev/hid: the human-interface-device channel. The real device is system-only
+// and games reach input through pad/libkernel, so by default commands
+// soft-succeed. With DELTA_HID_PASSTHROUGH=1 the guest read commands pull the
+// host's evdev state and the write commands drive a uinput device instead.
 class hidDevice : public device {
 public:
   hidDevice(proc *p);

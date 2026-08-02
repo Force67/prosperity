@@ -22,3 +22,7 @@ add_delta_test(umtx_op_test
 add_delta_test(console_dev_test
   SOURCES console_dev_test.cpp
   DEPS delta_kern)
+
+add_delta_test(hid_dev_test
+  SOURCES hid_dev_test.cpp
+  DEPS delta_kern)
