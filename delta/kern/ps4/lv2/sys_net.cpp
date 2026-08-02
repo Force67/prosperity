@@ -44,10 +44,15 @@ int PS4ABI sys_netcontrol(uint32_t fd, uint32_t op, void* buffer,
     return -SysError::eINVAL;
 }
 
+// Same policy as sys_socket below. Returning a fake success here hands the
+// guest fd 0: Bloodborne's net thread then spins on sceNetGetsockname(0)
+// getting EBADF forever instead of taking its offline path.
 int PS4ABI sys_socketex(const char* name, int32_t domain, int32_t type,
     int32_t protocol) {
-    // TOO lazy for now
-  return 0;
+  if (kNetTrace)
+    std::fprintf(stderr, "[net] socketex name='%s' domain=%d type=%d proto=%d\n",
+                 name ? name : "", domain, type, protocol);
+  return sys_socket(domain, type, protocol);
 }
 
 // Datagram sockets get a real host socket: a title that uses one for LAN
