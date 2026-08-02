@@ -19,6 +19,7 @@ bool RecompileSpirv(const uint32_t*,
                      const uint32_t*,
                      uint32_t,
                      uint32_t,
+                     uint32_t,
                      Recompiled&) {
   return false;
 }
@@ -62,6 +63,7 @@ DELTA_OPTION(bool, kGpuSpirvCfg, "DELTA_GPU_SPIRV_CFG", false);
 DELTA_OPTION(bool, kGpuSpirvNoopt, "DELTA_GPU_SPIRV_NOOPT", false);
 DELTA_OPTION(bool, kGpuVsflipz, "DELTA_GPU_VSFLIPZ", false);
 DELTA_OPTION(bool, kGpuVsfull, "DELTA_GPU_VSFULL", false);
+DELTA_OPTION(bool, kGpuVsNoPred, "DELTA_GPU_VSNOPRED", false);
 }  // namespace
 
 namespace gpu::gcn {
@@ -747,7 +749,7 @@ void EmitBody(Translator& t,
               StageContext& sc,
               const uint8_t* reachable) {
   t.SeedExec();
-  t.predicate_vector = true;
+  t.predicate_vector = !(kGpuVsNoPred && !sc.is_ps && !sc.is_cs);
   if (ForceCfg() || HasControlFlow(program)) {
     EmitCfg(t, program, sc, reachable);
     return;
@@ -969,6 +971,7 @@ bool TranslatePs(const Program& program,
                   const std::unordered_set<uint32_t>& flat_attrs,
                   uint32_t ps_input_ena,
                   uint32_t tex_3d_mask,
+                  uint32_t tex_1d_mask,
                   Recompiled& r,
                   Translator& t) {
   // Color outputs (PsColorOut) are declared lazily per MRT target (location ==
@@ -998,10 +1001,12 @@ bool TranslatePs(const Program& program,
   }
   sc.mimg_plan = &mimg_plan;
   sc.tex_3d_mask = tex_3d_mask;
+  sc.tex_1d_mask = tex_1d_mask;
   for (uint32_t i = 0; i < mimg_plan.binding_srsrc.size(); i++)
     r.ps_texs.push_back({i, mimg_plan.binding_srsrc[i],
                          mimg_plan.binding_storage[i],
-                         ((tex_3d_mask >> i) & 1u) != 0});
+                         ((tex_3d_mask >> i) & 1u) != 0,
+                         ((tex_1d_mask >> i) & 1u) != 0});
 
   if (UsesDsSwizzle(program, reachable.data()))
     EnableDsSwizzle(t, sc, iface);
@@ -1287,7 +1292,8 @@ std::string PlanSummaryGfx(const Recompiled& r, bool ps) {
     for (const ShaderTex& tex : r.ps_texs)
       s += " [t" + std::to_string(tex.binding) +
            " ud=" + std::to_string(tex.ud_sgpr) +
-           (tex.storage ? " storage" : "") + (tex.is_3d ? " 3d" : "") + "]";
+           (tex.storage ? " storage" : "") + (tex.is_3d ? " 3d" : "") +
+           (tex.is_1d ? " 1d" : "") + "]";
   }
   return s;
 }
@@ -1390,6 +1396,7 @@ bool RecompileSpirv(const uint32_t* vs_code,
                      const uint32_t* ps_user_data,
                      uint32_t ps_input_ena,
                      uint32_t tex_3d_mask,
+                     uint32_t tex_1d_mask,
                      Recompiled& r) {
   if (!vs_code || !vs_user_data || !ps_user_data)
     return false;
@@ -1444,7 +1451,8 @@ bool RecompileSpirv(const uint32_t* vs_code,
   if (dbg && ps_code)
     AuditBegin("ps", ps_code, ps_program);
   const bool ps_ok = (ps_code ? TranslatePs(ps_program, flat_attrs,
-                                             ps_input_ena, tex_3d_mask, r, tp)
+                                             ps_input_ena, tex_3d_mask,
+                                             tex_1d_mask, r, tp)
                                : TranslateDepthOnlyPs(tp)) &&
                      !HadUnsupported();
   std::vector<uint32_t> ps;

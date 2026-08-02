@@ -51,7 +51,7 @@ struct TImage {
   uint32_t min_lod = 0;      // T# MIN_LOD clamp in U4.8 fixed-point
   uint32_t dfmt = 0;
   uint32_t nfmt = 0;
-  uint32_t type = 0;        // SQ_RSRC_IMG_* (9 = 2D, 10 = 3D, 13 = 2D array)
+  uint32_t type = 0;        // SQ_RSRC_IMG_* (8/12 = 1D, 9 = 2D, 10 = 3D, 13 = 2D array)
   uint32_t tiling_idx = 0;  // 8/31 = linear; everything else is tiled
   // T# DST_SEL_X/Y/Z/W: which source channel (or constant) each sampled
   // component reads. 0=0, 1=1, 4=R, 5=G, 6=B, 7=A. A single-channel mask (a
@@ -62,6 +62,7 @@ struct TImage {
   bool pow2_pad = false;     // pad physical mip dims/layers to powers of two
   bool sampler_valid = false;
   bool is_3d = false;           // SQ_RSRC_IMG_3D: sampled with a w coordinate
+  bool is_1d = false;           // SQ_RSRC_IMG_1D[_ARRAY]: x (+layer) only
   bool arrayed = false;         // MIMG DA bit: address carries an array layer
   bool force_lod_zero = false;  // gather4_lz: implicit gather clamped to mip 0
   bool depth_compare = false;   // MIMG _C uses the sampler's compare function

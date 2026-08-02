@@ -472,6 +472,11 @@ struct StageContext {
   // says so (a 3D descriptor leaves DA 0), so the caller has to supply it from
   // the decoded descriptors, and it belongs in the shader cache key.
   uint32_t tex_3d_mask = 0;
+  // Bit i set: binding i's T# is SQ_RSRC_IMG_1D[_ARRAY]. Same reasoning as
+  // tex_3d_mask: the instruction encodes only DA, not the dimensionality. The
+  // resource is bound as a height-1 2D image; the address body carries x
+  // (+layer) and y is fixed at the row centre.
+  uint32_t tex_1d_mask = 0;
 
   // shared graphics
   std::unordered_map<uint32_t, uint32_t> cbuf_bind;  // V# SGPR -> set-1 binding

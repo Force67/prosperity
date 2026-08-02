@@ -128,6 +128,7 @@ struct DrawInfo {
   bool tex_sampler_valid = false;
   bool tex_arrayed = false;  // MIMG DA: shader consumes a layer coordinate
   bool tex_is_3d = false;    // T# type 10: sampled with a w coordinate
+  bool tex_is_1d = false;    // T# type 8/12: height-1 image, x (+layer) only
   bool tex_force_lod_zero = false;
   bool tex_depth_compare = false;
   bool tex_null_descriptor = false;
@@ -150,6 +151,7 @@ struct DrawInfo {
     bool sampler_valid = false;
     bool arrayed = false;
     bool is_3d = false;
+    bool is_1d = false;
     bool force_lod_zero = false;
     bool depth_compare = false;
     bool storage = false;

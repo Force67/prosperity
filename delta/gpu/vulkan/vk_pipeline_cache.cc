@@ -28,6 +28,7 @@ namespace {
 DELTA_OPTION(bool, kDoCull, "DELTA_GPU_CULL", false);
 DELTA_OPTION(bool, kGpuPipetrace, "DELTA_GPU_PIPETRACE", false);
 DELTA_OPTION(bool, kNoMaskDiag, "DELTA_GPU_NOMASK", false);
+DELTA_OPTION(bool, kNoRectGs, "DELTA_GPU_NORECTGS", false);
 }  // namespace
 
 namespace gpu::vk {
@@ -236,11 +237,15 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
   key = HashWord(key, d.num_vattrs);
   // A sampler reading a volume image translates the same PS address to a
   // different module, whose image types the pipeline layout has to match.
-  uint32_t tex_3d_mask = 0;
-  for (uint32_t i = 0; i < d.num_texs && i < kMaxTex; i++)
+  uint32_t tex_3d_mask = 0, tex_1d_mask = 0;
+  for (uint32_t i = 0; i < d.num_texs && i < kMaxTex; i++) {
     if (d.texs[i].is_3d)
       tex_3d_mask |= 1u << i;
+    if (d.texs[i].is_1d)
+      tex_1d_mask |= 1u << i;
+  }
   key = HashWord(key, tex_3d_mask);
+  key = HashWord(key, tex_1d_mask);
   key = HashWord(key, d.target_mask);
   key = HashWord(key, d.shader_mask);
   for (uint32_t i = 0; i < mrt_n; i++)
@@ -312,7 +317,8 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
   // every PS5 fullscreen pass as a single triangle covering half the rect.
   const bool is_rect_list = d.prim_type == 17 || d.prim_type == 7;
   bool rect_list =
-      is_rect_list && g_dev.geometry_shader && !d.recomp->gs_spirv.empty();
+      is_rect_list && !kNoRectGs && g_dev.geometry_shader &&
+      !d.recomp->gs_spirv.empty();
   VkShaderModule gs =
       rect_list ? MakeModuleVec(d.recomp->gs_spirv) : VK_NULL_HANDLE;
   VkPipelineShaderStageCreateInfo stages[3]{};

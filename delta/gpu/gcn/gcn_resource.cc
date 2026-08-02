@@ -636,7 +636,7 @@ TImage DecodeTImage(const uint32_t* p) {
   t.pitch = ((p[4] >> 13) & 0x3FFF) + 1;
   if (t.pitch < t.width)
     t.pitch = t.width;  // fall back to width if unset
-  if (t.type == 13) {   // SQ_RSRC_IMG_2D_ARRAY
+  if (t.type == 13 || t.type == 12) {  // SQ_RSRC_IMG_2D_ARRAY / _1D_ARRAY
     t.layers = (p[4] & 0x1FFF) + 1;
     if (t.pow2_pad)
       t.layers = NextPow2(t.layers);
@@ -646,6 +646,12 @@ TImage DecodeTImage(const uint32_t* p) {
     if (t.base_array < t.layers && last_array >= t.base_array)
       t.view_layers = std::min(last_array, t.layers - 1) - t.base_array + 1;
   }
+  if (t.type == 8 || t.type == 12) {  // SQ_RSRC_IMG_1D[_ARRAY]
+    // Modelled as a height-1 2D image. Keep the descriptor's tiling mode so
+    // Display1DThin resources use the matching detiler path.
+    t.is_1d = true;
+    t.height = 1;
+  }
   if (t.type == 10) {  // SQ_RSRC_IMG_3D: dword 4 holds slices, not layers
     t.is_3d = true;
     t.depth = (p[4] & 0x1FFF) + 1;
@@ -653,9 +659,10 @@ TImage DecodeTImage(const uint32_t* p) {
       t.depth = NextPow2(t.depth);
   }
 
-  const bool supported_type = t.type == 9 || t.type == 10 || t.type == 13;
-  const bool valid_view =
-      t.type != 13 || (t.base_array < t.layers && t.view_layers > 0);
+  const bool supported_type = t.type == 8 || t.type == 9 || t.type == 10 ||
+                              t.type == 12 || t.type == 13;
+  const bool valid_view = (t.type != 13 && t.type != 12) ||
+                          (t.base_array < t.layers && t.view_layers > 0);
   uint32_t max_levels = 1;
   for (uint32_t extent = std::max(t.width, t.height); extent > 1; extent >>= 1)
     max_levels++;

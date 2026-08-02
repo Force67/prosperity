@@ -96,11 +96,13 @@ struct ShaderKey {
   // code: the same PS sampled with a 2D T# must translate to a different
   // module, so the dimensionality belongs in the key.
   uint32_t tex_3d_mask = 0;
+  // Same for 1D[_ARRAY] descriptors (one fewer address component).
+  uint32_t tex_1d_mask = 0;
   bool neo = false;
   bool operator==(const ShaderKey& o) const {
     return vs == o.vs && ps == o.ps && fetch == o.fetch &&
            ps_input_ena == o.ps_input_ena && tex_3d_mask == o.tex_3d_mask &&
-           neo == o.neo;
+           tex_1d_mask == o.tex_1d_mask && neo == o.neo;
   }
 };
 struct ShaderKeyHash {
@@ -110,6 +112,7 @@ struct ShaderKeyHash {
     h ^= k.fetch + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
     h ^= k.ps_input_ena + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
     h ^= k.tex_3d_mask + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
+    h ^= k.tex_1d_mask + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
     h ^= static_cast<uint64_t>(k.neo) << 63;
     return static_cast<size_t>(h);
   }
@@ -628,6 +631,7 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
     // 64-byte vertex, so the UV lives in the position buffer at offset 0x1c.
     std::shared_ptr<const gcn::Program> ps_prog;
     uint32_t tex_3d_mask = 0;
+    uint32_t tex_1d_mask = 0;
     if (ps_a >= 0x1000000000ull && ps_a < 0x20000000000ull) {
       ps_prog = gcn::CachedProgram(ps_a, 4096);
       const uint32_t frame = g_presented_frames + 1;
@@ -663,6 +667,7 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
         d.tex_sampler_valid = texs[0].sampler_valid;
         d.tex_arrayed = texs[0].arrayed;
         d.tex_is_3d = texs[0].is_3d;
+        d.tex_is_1d = texs[0].is_1d;
         d.tex_force_lod_zero = texs[0].force_lod_zero;
         d.tex_depth_compare = texs[0].depth_compare;
         d.tex_null_descriptor = texs[0].null_descriptor;
@@ -697,6 +702,9 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
           dt.is_3d = t.is_3d;
           if (t.is_3d)
             tex_3d_mask |= 1u << i;
+          dt.is_1d = t.is_1d;
+          if (t.is_1d)
+            tex_1d_mask |= 1u << i;
           dt.force_lod_zero = t.force_lod_zero;
           dt.depth_compare = t.depth_compare;
           dt.storage = t.storage;
@@ -756,7 +764,7 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
       const bool neo = gcn::DefaultIsaMode() == gcn::IsaMode::kNeo;
       const uint32_t ps_input_ena = g_regs[mmSPI_PS_INPUT_ENA];
       ShaderKey key{vs_a, ps_a, gcn::CachedCodeHash(fetch, 64), ps_input_ena,
-                    tex_3d_mask, neo};
+                    tex_3d_mask, tex_1d_mask, neo};
       auto it = sh_cache.find(key);
       if (it == sh_cache.end())
         it = sh_cache
@@ -765,7 +773,7 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
                                     reinterpret_cast<const uint32_t*>(ps_a),
                                     &g_regs[mmSPI_SHADER_USER_DATA_VS_0],
                                     &g_regs[mmSPI_SHADER_USER_DATA_PS_0],
-                                    ps_input_ena, tex_3d_mask))
+                                    ps_input_ena, tex_3d_mask, tex_1d_mask))
                  .first;
       gcn::Recompiled& rc = it->second;
       recomp_status = rc.ok ? "bad-attrs" : "rejected";
@@ -2018,7 +2026,8 @@ void HandleDispatch(const uint32_t* body, uint32_t count) {
       const bool rg8 = t.dfmt == 3 && t.nfmt == 0;
       const bool rgba16f = t.dfmt == 12 && t.nfmt == 7;
       const bool r11g11b10f = t.dfmt == 6 && t.nfmt == 7;
-      const bool supported_type = t.type == 9 || t.type == 10 || t.type == 13;
+      const bool supported_type = t.type == 8 || t.type == 9 || t.type == 10 ||
+                                  t.type == 12 || t.type == 13;
       const bool supported_format =
           r8 || rgba8 || r32 || rg16f || r16f || rg8 || rgba16f || r11g11b10f;
       elem_bytes = rgba16f ? 8 : (r16f || rg8) ? 2 : r8 ? 1 : 4;

@@ -308,6 +308,13 @@ void EmitMimg(Translator& t,
   // clear anyway, so the descriptor wins over a stray DA bit.
   const bool arrayed = (w0 & 0x4000) != 0 && !is_3d;
   const uint32_t coord_components = arrayed || is_3d ? 3u : 2u;
+  // A 1D T# is bound as a height-1 2D image: the address body carries x
+  // (+layer), and y is synthesized at the row centre. Bloodborne's gamma pass
+  // samples a 1025x1 R32F 1D-array LUT per channel; reading the body as 2D
+  // takes the layer index for y and samples nothing.
+  const bool is_1d = ((sc.tex_1d_mask >> bind) & 1u) != 0 && !is_3d;
+  const uint32_t addr_components =
+      is_1d ? (arrayed ? 2u : 1u) : coord_components;
   // OpImageSampleDref* / OpImageGather are undefined on Dim3D.
   if (is_3d && (dref || gather)) {
     WarnUnsupported("mimg.3d-dref-gather", op, w0, w1);
@@ -334,11 +341,13 @@ void EmitMimg(Translator& t,
       sc.tex_types[bind] = type_idx;
     }
     const Id ix = t.m.Bitcast(t.t_i, addr_u(0));
-    const Id iy = t.m.Bitcast(t.t_i, addr_u(1));
+    const Id iy =
+        is_1d ? t.m.Bitcast(t.t_i, t.U32(0)) : t.m.Bitcast(t.t_i, addr_u(1));
     const Id coord =
         arrayed
-            ? t.m.CompositeConstruct(t.m.TypeVec(t.t_i, 3),
-                                     {ix, iy, t.m.Bitcast(t.t_i, addr_u(2))})
+            ? t.m.CompositeConstruct(
+                  t.m.TypeVec(t.t_i, 3),
+                  {ix, iy, t.m.Bitcast(t.t_i, addr_u(is_1d ? 1 : 2))})
             : t.m.CompositeConstruct(t.m.TypeVec(t.t_i, 2), {ix, iy});
     Id components[4] = {t.F32(0.f), t.F32(0.f), t.F32(0.f), t.F32(1.f)};
     uint32_t source = 0;
@@ -409,7 +418,8 @@ void EmitMimg(Translator& t,
 
   const uint32_t body_addr = vaddr + (offset ? 1u : 0u) + (dref ? 1u : 0u);
   const uint32_t body_index = body_addr - vaddr;
-  Id x = addr_f(body_index), y = addr_f(body_index + 1);
+  Id x = addr_f(body_index);
+  Id y = is_1d ? t.F32(0.5f) : addr_f(body_index + 1);
   if (offset) {
     // GFX7 packs signed six-bit X/Y texel offsets before the address body.
     // Vulkan 1.1 does not permit a dynamic Offset operand on OpImageSample*,
@@ -429,11 +439,13 @@ void EmitMimg(Translator& t,
     const Id sy = t.m.Emit(spv::Op::OpConvertUToF, t.t_f,
                            {t.m.CompositeExtract(t.t_u, size, 1)});
     x = t.FAdd(x, t.FDiv(t.m.Emit(spv::Op::OpConvertSToF, t.t_f, {ox}), sx));
-    y = t.FAdd(y, t.FDiv(t.m.Emit(spv::Op::OpConvertSToF, t.t_f, {oy}), sy));
+    if (!is_1d)
+      y = t.FAdd(y, t.FDiv(t.m.Emit(spv::Op::OpConvertSToF, t.t_f, {oy}), sy));
   }
   const Id uv =
       coord_components == 3
-          ? t.m.CompositeConstruct(t.t_v3, {x, y, addr_f(body_index + 2)})
+          ? t.m.CompositeConstruct(
+                t.t_v3, {x, y, addr_f(body_index + (is_1d ? 1 : 2))})
           : t.m.CompositeConstruct(t.t_v2, {x, y});
   const uint32_t lod_operand =
       static_cast<uint32_t>(spv::ImageOperandsMask::Lod);
@@ -446,24 +458,28 @@ void EmitMimg(Translator& t,
   Id texel;
   if (op == 0x00 || op == 0x01) {  // image_load[_mip]: integer fetch
     const Id ix = t.m.Bitcast(t.t_i, addr_u(0));
-    const Id iy = t.m.Bitcast(t.t_i, addr_u(1));
+    const Id iy =
+        is_1d ? t.m.Bitcast(t.t_i, t.U32(0)) : t.m.Bitcast(t.t_i, addr_u(1));
     const Id ic =
         coord_components == 3
-            ? t.m.CompositeConstruct(t.m.TypeVec(t.t_i, 3),
-                                     {ix, iy, t.m.Bitcast(t.t_i, addr_u(2))})
+            ? t.m.CompositeConstruct(
+                  t.m.TypeVec(t.t_i, 3),
+                  {ix, iy, t.m.Bitcast(t.t_i, addr_u(is_1d ? 1 : 2))})
             : t.m.CompositeConstruct(t.m.TypeVec(t.t_i, 2), {ix, iy});
     const Id img = t.m.Emit(spv::Op::OpImage, img_ty, {si});
     Id lod = t.U32(0);
     if (op == 0x01) {
       t.RequireImageQuery();
       const Id levels = t.m.Emit(spv::Op::OpImageQueryLevels, t.t_u, {img});
-      lod = t.UMin(addr_u(coord_components), t.Sub(levels, t.U32(1)));
+      lod = t.UMin(addr_u(addr_components), t.Sub(levels, t.U32(1)));
     }
     texel =
         t.m.Emit(spv::Op::OpImageFetch, t.t_v4, {img, ic, lod_operand, lod});
   } else if (op == 0x24) {  // image_sample_l: explicit LOD after the body
-    texel = t.m.Emit(spv::Op::OpImageSampleExplicitLod, t.t_v4,
-                     {si, uv, lod_operand, addr_f(coord_components)});
+    texel = t.m.Emit(
+        spv::Op::OpImageSampleExplicitLod, t.t_v4,
+        {si, uv, lod_operand,
+         addr_f(is_1d ? body_index + addr_components : coord_components)});
   } else if (op == 0x28) {  // image_sample_c: z-compare precedes the body
     texel = t.m.Emit(spv::Op::OpImageSampleDrefImplicitLod, t.t_f,
                      {si, uv, addr_f(0)});
@@ -1008,7 +1024,12 @@ void EmitCsMimg(Translator& t,
     return t.m.Emit(spv::Op::OpLogicalOr, t.t_bool, {a, b});
   };
   const Id image_type = field(3, 28, 0xF);
-  const Id is_array = t.Eq(image_type, t.U32(13));  // SQ_RSRC_IMG_2D_ARRAY
+  // A 1D image (type 8/12) has a one-texel-high layout and drops the y
+  // address component: the layer of a 1D array rides where 2D's y sits.
+  const Id is_1d_img =
+      logical_or(t.Eq(image_type, t.U32(8)), t.Eq(image_type, t.U32(12)));
+  const Id is_array = logical_or(t.Eq(image_type, t.U32(13)),
+                                 t.Eq(image_type, t.U32(12)));
   const Id descriptor_layers = t.Add(field(4, 0, 0x1FFF), t.U32(1));
 
   if (resinfo) {  // dimensions from the descriptor, no memory access
@@ -1081,18 +1102,24 @@ void EmitCsMimg(Translator& t,
   supported_format = logical_or(supported_format, is_rg8);
   supported_format = logical_or(supported_format, is_rgba16f);
   supported_format = logical_or(supported_format, is_r11g11b10f);
-  const Id supported_type = logical_or(t.Eq(image_type, t.U32(9)), is_array);
-  Id requested_mip = mip_op ? addr_vg(da ? 3 : 2) : t.U32(0);
+  const Id supported_type = logical_or(
+      logical_or(t.Eq(image_type, t.U32(9)), t.Eq(image_type, t.U32(8))),
+      is_array);
+  Id requested_mip =
+      mip_op ? t.SelectB(is_1d_img, addr_vg(da ? 2 : 1), addr_vg(da ? 3 : 2))
+             : t.U32(0);
   if (op == 0x24) {
-    const Id lod = t.m.ExtInst(t.t_f, GLSLstd450FMax,
-                               {addr_vgf(da ? 3 : 2), t.F32(0.f)});
+    const Id lod_addr = t.SelectB(is_1d_img, addr_vgf(da ? 2 : 1),
+                                  addr_vgf(da ? 3 : 2));
+    const Id lod = t.m.ExtInst(t.t_f, GLSLstd450FMax, {lod_addr, t.F32(0.f)});
     requested_mip = t.m.Emit(spv::Op::OpConvertFToU, t.t_u, {lod});
   }
   const Id view_mip = t.UMin(requested_mip, t.Sub(safe_last_mip, base_mip));
   const Id physical_mip = t.Add(base_mip, view_mip);
   const Id width = Max1(t, t.Shr(base_width, physical_mip));
   const Id height = Max1(t, t.Shr(base_height, physical_mip));
-  Id x = addr_vg(0), y = addr_vg(1);
+  Id x = addr_vg(0);
+  Id y = t.SelectB(is_1d_img, t.U32(0), addr_vg(1));
   Id sample_fx = t.F32(0.f), sample_fy = t.F32(0.f);
   if (sample) {
     // Bilinear filter of the linear staging image with clamp addressing and
@@ -1113,6 +1140,7 @@ void EmitCsMimg(Translator& t,
                t.Sub(width, t.U32(1)));
     y = t.UMin(t.m.Emit(spv::Op::OpConvertFToU, t.t_u, {fy0}),
                t.Sub(height, t.U32(1)));
+    y = t.SelectB(is_1d_img, t.U32(0), y);
   }
   // gfx10.3 swizzle mode 0 is the linear one, and it has no pow2-pad bit.
   const Id linear_general = t.Eq(field(3, 20, 0x1F), t.U32(t.rdna_sources ? 0 : 31));
@@ -1125,7 +1153,8 @@ void EmitCsMimg(Translator& t,
       t.rdna_sources ? field(4, 16, 0x1FFF) : field(5, 0, 0x1FFF);
   const Id last_array = t.rdna_sources ? t.Add(descriptor_layers, t.U32(~0u))
                                        : field(5, 13, 0x1FFF);
-  const Id view_layer = da ? addr_vg(2) : t.U32(0);
+  const Id view_layer =
+      da ? t.SelectB(is_1d_img, addr_vg(1), addr_vg(2)) : t.U32(0);
   const Id physical_layer = t.Add(base_array, view_layer);
   const Id padded_layers =
       t.SelectB(pow2_pad, BitCeil(t, descriptor_layers), descriptor_layers);
