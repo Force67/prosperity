@@ -70,14 +70,15 @@
 //     It is a GPU-skinning VS: it calls a fetch shader (s_swappc_b64), takes
 //     bone indices and weights out of v16-v23, and pulls 4 bones x 3 rows of
 //     matrix with twelve tbuffer_load_format_xyzw ... idxen through a V# that
-//     s_load_dwordx8 brings in from s[6:7]. Two things go wrong together:
-//     the draw arrives with num_vattrs=0 -- ParseFetch gets nothing out of its
-//     fetch shader, so the indices and weights are all zero -- and because the
-//     attribute resolve then fails, the draw-time `good` gate never runs
-//     resolve_bufs, so the bone-matrix buffer is never staged either
-//     (+DELTA_GPU_RAWBUF=1 prints no line for VS=0x80e49e1400 at all, while the
-//     two UI shaders around it resolve fine). Fix the fetch-shader parse first;
-//     the buffer should follow.
+//     s_load_dwordx8 brings in from s[6:7]. 792 indices = 132 triangles = the
+//     8x16 icon grid, and what lands is that grid sheared: each row offset from
+//     the one above by a constant x as well as y.
+//     Ruled out: the draw is recomp=ok with num_vattrs=7 (it was rejected with
+//     num_vattrs=0 before the shader fixes above), so the fetch shader parses
+//     and the attributes resolve; ParseFetch never returns empty in a whole run
+//     (+DELTA_GPU_SHDIS=1 reports any that do). A constant per-row shear is a
+//     transform, not missing data -- suspect the bone-matrix rows the twelve
+//     typed loads bring in, or the order they are combined in.
 //     Note the wizard pages confirm on their last row, not the focused one:
 //     Controls has seven (Camera X-Axis, Camera Y-Axis, Camera Sensitivity,
 //     Auto Target Switch, Camera Auto Adjust, Controller Vibration, Next), so a

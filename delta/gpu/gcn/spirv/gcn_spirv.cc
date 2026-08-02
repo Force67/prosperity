@@ -241,6 +241,17 @@ std::vector<FetchAttr> ParseFetch(uint64_t fetch_addr) {
       semantic++;
     }
   }
+  // A fetch shader we read nothing out of leaves the VS with no vertex inputs,
+  // which turns a real mesh into whatever its uninitialised VGPRs describe.
+  // DELTA_GPU_SHDIS: show the code we could not read.
+  if (out.empty() && kGpuShdis) {
+    static int n = 0;
+    if (n++ < 8) {
+      std::fprintf(stderr, "[gcnspv] fetch shader parsed empty @%#lx\n",
+                   static_cast<unsigned long>(fetch_addr));
+      DisassembleAt(fetch_addr, "fetch");
+    }
+  }
   return out;
 }
 
