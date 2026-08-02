@@ -783,10 +783,11 @@ void EmitVop1(Translator& t,
     case 0x2b:
       set_f(t.FDiv(t.F32(1.0f), s0));
       break;  // v_rcp[_iflag]_f32
-    case 0x2c:
-      WarnUnsupported("vop1.rsq-clamp", op);
-      set_f(t.Ext1(GLSLstd450InverseSqrt, s0));
+    case 0x2c: {  // v_rsq_clamp_f32: rsq with infinities clamped to +/-FLT_MAX
+      const Id rsq = t.Ext1(GLSLstd450InverseSqrt, s0);
+      set_f(t.Ext2(GLSLstd450FMin, rsq, t.F32(3.402823466e+38f)));
       break;
+    }
     case 0x2d:
       NoteApproximated("vop1.rsq-legacy", op);
       set_f(t.Ext1(GLSLstd450InverseSqrt, s0));
@@ -1159,21 +1160,27 @@ void EmitVopc(Translator& t,
   // Opcode space: f32 0x00-0x1F, f64 0x20-0x3F, i32 0x80-0x9F, i64 0xA0-0xBF,
   // u32 0xC0-0xDF, u64 0xE0-0xFF. Bit 4 of each 32-op family selects the
   // EXEC-writing cmpx form. The 64-bit families are approximated on the low
-  // dwords (loudly).
+  // dwords: wrong for a real double, but rejecting the shader drops the whole
+  // draw, and these turn up on edge paths rather than in the shading maths.
   Id cond = 0;
   if (op == 0x88 || op == 0x98) {
     cond = FloatClassPredicate(t, s0u, s1u);
   } else if (op <= 0x3F) {
     if (op >= 0x20)
-      WarnUnsupported("vopc.f64", op);
+      NoteApproximated("vopc.f64", op);
     cond = FloatPredicate(t, op & 0xF, s0f, s1f);
-  } else if (op >= 0x80) {
+  } else if (op <= 0x7F) {
+    // 0x40-0x7F are V_CMPS[X]_*: the signalling forms of 0x00-0x3F. They differ
+    // only in raising an FP exception on a quiet NaN, which nothing here
+    // models, so they take the same predicate.
+    if (op >= 0x60)
+      NoteApproximated("vopc.f64", op);
+    cond = FloatPredicate(t, op & 0xF, s0f, s1f);
+  } else {
     const bool is_signed = op <= 0xBF;
     if ((op >= 0xA0 && op <= 0xBF) || op >= 0xE0)
-      WarnUnsupported("vopc.i64", op);
+      NoteApproximated("vopc.i64", op);
     cond = IntPredicate(t, op & 0x7, is_signed, s0u, s1u);
-  } else {
-    WarnUnsupported("vopc", op);
   }
   const Id predicate =
       cond ? t.SelectB(cond, t.U32(1), t.U32(0)) : t.U32(0);  // F -> 0
@@ -1210,10 +1217,8 @@ void EmitVop3(Translator& t,
   };
 
   if (op < 0x100) {  // VOPC in VOP3 form: predicate written to sgpr[vdst]
-    if (omod) {
-      WarnUnsupported("vopc.omod", op);
-      return;
-    }
+    if (omod)
+      NoteApproximated("vopc.omod", op);  // scales a lane mask: nothing to do
     EmitVopc(t, op, s0, s1, u0, u1, vdst);
     return;
   }
