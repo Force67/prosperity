@@ -28,6 +28,7 @@ DELTA_OPTION(float, kDebugUv, "DELTA_GPU_DEBUGUV", 0.f);
 
 namespace {
 DELTA_OPTION(int, kPsTexBind, "DELTA_GPU_PSTEX", 0);
+DELTA_OPTION(int, kIdxStride, "DELTA_GPU_IDXSTRIDE", 0);
 }  // namespace
 
 namespace gpu::gcn {
@@ -111,7 +112,13 @@ Id BufferByteOffset(Translator& t,
       t.Add(t.SrcRaw(soffset_field, inst.literal), t.U32(inst_offset));
   uint32_t va = vaddr;
   if (idxen) {
-    const Id stride = t.And(t.Shr(t.Sg(srsrc + 1), t.U32(16)), t.U32(0x3FFF));
+    // DELTA_GPU_IDXSTRIDE: force the indexed stride instead of reading it from
+    // the V#'s SGPR. A V# that arrives through s_load (an SRT chain) is never
+    // written into the SGPR file by the graphics path, so the stride there is
+    // whatever user data happened to sit in that slot -- diagnostic.
+    const Id stride =
+        kIdxStride ? t.U32(static_cast<uint32_t>(kIdxStride))
+                   : t.And(t.Shr(t.Sg(srsrc + 1), t.U32(16)), t.U32(0x3FFF));
     byte_off = t.Add(byte_off, t.Mul(t.Vg(va++), stride));
   }
   if (offen)

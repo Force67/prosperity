@@ -73,12 +73,23 @@
 //     s_load_dwordx8 brings in from s[6:7]. 792 indices = 132 triangles = the
 //     8x16 icon grid, and what lands is that grid sheared: each row offset from
 //     the one above by a constant x as well as y.
-//     Ruled out: the draw is recomp=ok with num_vattrs=7 (it was rejected with
-//     num_vattrs=0 before the shader fixes above), so the fetch shader parses
-//     and the attributes resolve; ParseFetch never returns empty in a whole run
-//     (+DELTA_GPU_SHDIS=1 reports any that do). A constant per-row shear is a
-//     transform, not missing data -- suspect the bone-matrix rows the twelve
-//     typed loads bring in, or the order they are combined in.
+//     CAUSE FOUND: the indexed (idxen) buffer stride. BufferByteOffset scales
+//     the index by the stride out of the descriptor's own SGPR, s[srsrc+1] --
+//     but this V# arrives through `s_load_dwordx8 s[12:19], s[6:7]`, and the
+//     graphics path never executes an s_load into the SGPR file (EmitCbufSmrd
+//     only writes SGPRs for a PLANNED cbuffer). The shader therefore scales by
+//     whatever user data happens to sit in that slot, and since each row's
+//     index differs by a constant the error is a constant per row: a shear.
+//     +DELTA_GPU_IDXSTRIDE=16 forces the stride and the sheet comes right --
+//     the panel frame, "Enter Name / Gender / Age / Origin / Appearance" and
+//     "Finish" all appear (only the icon grid, which has a different stride,
+//     stays sheared). That knob is the proof, not the fix.
+//     The fix has to publish the host-resolved stride where the shader reads
+//     it. Patching d.vs_user_data[srsrc+1] before the push does nothing here,
+//     so this V# lands above the 16 user-data slots the push constant carries
+//     (SeedUserData seeds s0..s15 only; anything higher reads zero). Either
+//     extend the push with a per-binding stride, or seed the SGPRs a planned
+//     buffer's V# occupies from the resolved descriptor.
 //     Note the wizard pages confirm on their last row, not the focused one:
 //     Controls has seven (Camera X-Axis, Camera Y-Axis, Camera Sensitivity,
 //     Auto Target Switch, Camera Auto Adjust, Controller Vibration, Next), so a
