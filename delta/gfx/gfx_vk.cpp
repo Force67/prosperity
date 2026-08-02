@@ -331,7 +331,13 @@ bool createSwapchain() {
   sc.imageColorSpace = chosen.colorSpace;
   sc.imageExtent = ext;
   sc.imageArrayLayers = 1;
+  // The frame arrives as a blit (TRANSFER_DST), but the overlay renders into
+  // the same images through a render pass, which needs COLOR_ATTACHMENT. Asking
+  // only for TRANSFER_DST left every overlay framebuffer and render-pass begin
+  // using an image without the usage its layout requires.
   sc.imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+  if (caps.supportedUsageFlags & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)
+    sc.imageUsage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
   sc.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
   sc.preTransform = caps.currentTransform;
   sc.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
