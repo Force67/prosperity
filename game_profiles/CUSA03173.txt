@@ -62,8 +62,11 @@
 //  3. THE CONTRACT SCREEN'S ROWS DRAW AS A DIAGONAL STAIRCASE of atlas tiles
 //     instead of a list, and the origin panel stays "Entry Incomplete", so the
 //     run cannot pick an origin and reach the opening. Each row is offset from
-//     the one above by a constant x and y -- an instanced or per-row-offset UI
-//     draw whose offset we apply cumulatively.
+//     the one above by a constant x and y. It is NOT the heuristic fallback:
+//     every shader on that screen translates now (no rejects, no unsupported
+//     ops), so the geometry the recompiled VS produces is itself wrong. The
+//     draw to look at is the 792-index one out of the 128x128 atlas
+//     (VS=0x80e49e1400 PS=0x80e49e9a00) into the 784x784 target.
 //     Note the wizard pages confirm on their last row, not the focused one:
 //     Controls has seven (Camera X-Axis, Camera Y-Axis, Camera Sensitivity,
 //     Auto Target Switch, Camera Auto Adjust, Controller Vibration, Next), so a
@@ -83,19 +86,26 @@
 // busiest render target of the frame is the one the UI is drawn into.
 +DELTA_GPU_PRESENT_SCENE=1
 
-// Drive the front end. Absolute times drift with boot time, so a fixed script
-// only lands sometimes; this self-correcting cycle -- eight downs then cross,
-// eight ups then cross, repeating every ~14 s -- confirms the last row on one
-// pass and the first row on the next, which is every screen the front end has.
-// With +DELTA_GPU_NOCS=1 it reaches the Contract (character creation) screen.
-// Generate with:
+// Drive the front end. DELTA_PAD_SCRIPT has two forms; the wall-clock one
+// ("<time>:<button>:<holdMs>") drifts with boot time and only lands sometimes.
+// The read-count form ("<button>:<reads>", enabled by DELTA_PAD_AUTOSKIP=1) is
+// anchored to the title's own pad polling -- one read per emulator frame -- and
+// reproduces. The menus WRAP, so a burst of eight downs lands mid-list; each
+// screen needs its exact row count. With +DELTA_GPU_NOCS=1 this reaches the
+// Contract (character creation) screen:
 //   python3 -c "
 //   s=[]
-//   def burst(t,b,n=8,gap=0.7,hold=400):
-//       for k in range(n): s.append('%.1f:%s:%d'%(t+k*gap,b,hold))
-//       return t+n*gap
-//   t=40.0
-//   for c in range(60):
-//       e=burst(t,'down' if c%2==0 else 'up'); s.append('%.1f:cross:900'%(e+1.5)); t=e+14
+//   def wait(n): s.append('none:%d'%n)
+//   def press(b,hold=25,gap=30): s.append('%s:%d'%(b,hold)); wait(gap)
+//   wait(900)
+//   press('down'); press('cross'); wait(300)   # Play Offline (2 rows)
+//   press('cross'); wait(350)                  # New Game (row 1)
+//   press('cross'); wait(350)                  # offline notice OK
+//   press('down'); press('cross'); wait(350)   # Brightness (2 rows)
+//   for _ in range(6): press('down',20,18)
+//   press('cross'); wait(700)                  # Controls (7 rows) -> Next
+//   for c in range(24):
+//       press('cross'); wait(200)
+//       if c%2==1: press('down',20,18)
 //   print(','.join(s))"
-// Four directions instead of two wanders off and never reaches Contract.
+// +DELTA_PAD_AUTOSKIP=1
