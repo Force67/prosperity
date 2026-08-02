@@ -901,10 +901,12 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
 
   SetGuestViewport(d);
   vkCmdBindPipeline(g_frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, rp->pipe);
-  vkCmdPushConstants(g_frame.cmd, rp->layout, VK_SHADER_STAGE_VERTEX_BIT, 0,
-                     sizeof(d.vs_user_data), d.vs_user_data);
-  vkCmdPushConstants(g_frame.cmd, rp->layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0,
-                     sizeof(d.ps_user_data), d.ps_user_data);
+  // 16 user-data dwords per stage, in its own half of the shared push range:
+  // both stages at offset 0 meant the second push overwrote the first.
+  vkCmdPushConstants(g_frame.cmd, rp->layout, VK_SHADER_STAGE_VERTEX_BIT, 0, 64,
+                     d.vs_user_data);
+  vkCmdPushConstants(g_frame.cmd, rp->layout, VK_SHADER_STAGE_FRAGMENT_BIT, 64,
+                     64, d.ps_user_data);
   // Copy each guest cbuffer window into the per-frame ring and bind set 1.
   // Vulkan requires one dynamic offset for every dynamic descriptor in the set
   // layout.

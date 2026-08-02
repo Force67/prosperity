@@ -308,13 +308,17 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
   }
   rp.raw_bufs = !d.recomp->vs_bufs.empty() || !d.recomp->ps_bufs.empty();
   VkDescriptorSetLayout sls[3] = {set0, g_ring.ubo_layout, g_ring.sbo_layout};
-  VkPushConstantRange push{
-      VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 128};
+  // One 64-byte window per stage: 16 user-data dwords each, 128 bytes total,
+  // which is the guaranteed minimum push-constant size.
+  const VkPushConstantRange push[2] = {
+      {VK_SHADER_STAGE_VERTEX_BIT, 0, 64},
+      {VK_SHADER_STAGE_FRAGMENT_BIT, 64, 64},
+  };
   VkPipelineLayoutCreateInfo li{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
   li.setLayoutCount = rp.raw_bufs ? 3 : 2;
   li.pSetLayouts = sls;
-  li.pushConstantRangeCount = 1;
-  li.pPushConstantRanges = &push;
+  li.pushConstantRangeCount = 2;
+  li.pPushConstantRanges = push;
   if (vkCreatePipelineLayout(g_dev.device, &li, nullptr, &rp.layout) !=
       VK_SUCCESS)
     return nullptr;

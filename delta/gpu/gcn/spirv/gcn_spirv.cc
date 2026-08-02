@@ -800,12 +800,18 @@ void EnableDsSwizzle(Translator& t, StageContext& sc, std::vector<Id>& iface) {
   iface.push_back(sc.subgroup_local_id);
 }
 
-Id DeclareUserData(Translator& t) {
+// The push range is shared by both stages, so each takes its own 64-byte half:
+// pushing both at offset 0 let the second stage's user data overwrite the
+// first's, and a shader that reads an SGPR directly (a buffer stride, say) then
+// saw the other stage's registers.
+constexpr uint32_t kPsUserDataOffset = 64;
+
+Id DeclareUserData(Translator& t, uint32_t byte_offset) {
   const Id words = t.m.TypeArray(t.t_u, 16);
   t.m.Decorate(words, spv::Decoration::ArrayStride, {4});
   const Id block = t.m.TypeStruct({words});
   t.m.Decorate(block, spv::Decoration::Block);
-  t.m.MemberDecorate(block, 0, spv::Decoration::Offset, {0});
+  t.m.MemberDecorate(block, 0, spv::Decoration::Offset, {byte_offset});
   const Id v =
       t.m.Variable(t.m.TypePointer(spv::StorageClass::PushConstant, block),
                    spv::StorageClass::PushConstant);
@@ -897,7 +903,7 @@ bool TranslateVs(const Program& program,
       sc.direct_vfetch.insert(attr.pc);
   if (UsesDsSwizzle(program, reachable.data()))
     EnableDsSwizzle(t, sc, iface);
-  const Id user_data = DeclareUserData(t);
+  const Id user_data = DeclareUserData(t, 0);
 
   const Id main_fn = t.m.BeginFunction(t.t_void, t.t_fn);
   sc.main_fn = main_fn;
@@ -1041,7 +1047,7 @@ bool TranslatePs(const Program& program,
 
   if (UsesDsSwizzle(program, reachable.data()))
     EnableDsSwizzle(t, sc, iface);
-  const Id user_data = DeclareUserData(t);
+  const Id user_data = DeclareUserData(t, kPsUserDataOffset);
   sc.main_fn = t.m.BeginFunction(t.t_void, t.t_fn);
   SeedUserData(t, user_data);
   SeedPsInputVgprs(t, ps_input_ena, iface);
