@@ -28,6 +28,7 @@ static int32_t hostTlsOffset(const void *address) {
 }
 
 int32_t hostGuestFsOffset() { return hostTlsOffset(&t_fsbase); }
+uint64_t threadFsBase() { return t_fsbase; }
 int32_t hostFsScratchOffset() { return hostTlsOffset(&t_fs_scratch); }
 void setThreadFsBase(uint64_t v) { t_fsbase = v; }
 
@@ -82,10 +83,10 @@ public:
   }
 
   uint64_t runGuestFunction(uintptr_t fn, uint64_t a0, uint64_t a1,
-                            uint64_t a2) override {
+                            uint64_t a2, uint64_t a3) override {
     // Guest code runs natively on x86-64: a direct function-pointer call.
-    return reinterpret_cast<uint64_t(PS4ABI *)(uint64_t, uint64_t, uint64_t)>(fn)(
-        a0, a1, a2);
+    return reinterpret_cast<uint64_t(PS4ABI *)(uint64_t, uint64_t, uint64_t,
+                                               uint64_t)>(fn)(a0, a1, a2, a3);
   }
 };
 
@@ -121,7 +122,9 @@ ICpuBackend &backend() {
 }
 
 uint64_t currentGuestRip() { return 0; }
-uint64_t currentGuestFsBase() { return 0; }
+// The guest fs base lives in host TLS on this backend (the lifter's fs stubs
+// read it from there), so it is available to host code without a segment read.
+uint64_t currentGuestFsBase() { return krnl::threadFsBase(); }
 void guestThreadFsBases(std::vector<uint64_t> & /*out*/) {} // FEX only
 const uint64_t *currentGuestGregs() { return nullptr; }
 int faultingSyscall() { return -1; }

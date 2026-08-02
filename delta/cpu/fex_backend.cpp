@@ -806,7 +806,7 @@ public:
   }
 
   uint64_t runGuestFunction(uintptr_t fn, uint64_t a0, uint64_t a1,
-                            uint64_t a2) override {
+                            uint64_t a2, uint64_t a3) override {
     // A guest function that returns must land somewhere; point its return address
     // at a host thunk that calls exitGuestThread, so the JIT unwinds cleanly.
     static uintptr_t exitThunk =
@@ -824,6 +824,7 @@ public:
     auto &S = h->thread->CurrentFrame->State;
     S.gregs[FEXCore::X86State::REG_RSI] = a1;
     S.gregs[FEXCore::X86State::REG_RDX] = a2;
+    S.gregs[FEXCore::X86State::REG_RCX] = a3;
     // Push the return address. After the implicit `call`, x86 wants rsp%16==8 at
     // the callee's first instruction, so 16-align then subtract 8.
     uint64_t rsp = S.gregs[FEXCore::X86State::REG_RSP] & ~0xFULL;
@@ -1321,6 +1322,9 @@ namespace krnl {
 void setThreadFsBase(uint64_t v) {
   if (cpu::t_curThread)
     cpu::t_curThread->CurrentFrame->State.fs_cached = v;
+}
+uint64_t threadFsBase() {
+  return cpu::t_curThread ? cpu::t_curThread->CurrentFrame->State.fs_cached : 0;
 }
 } // namespace krnl
 
