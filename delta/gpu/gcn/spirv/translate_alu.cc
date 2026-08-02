@@ -695,7 +695,8 @@ void EmitVop1(Translator& t,
       t.SetSg(vdst, u0);
       break;    // v_readfirstlane_b32 (single lane)
     case 0x05:  // v_cvt_f32_i32
-      set_f(t.m.Emit(spv::Op::OpConvertSToF, t.t_f, {t.m.Bitcast(t.t_i, u0)}));
+      set_f(t.m.Emit(spv::Op::OpConvertSToF, t.t_f,
+                     {t.m.Bitcast(t.t_i, s0)}));
       break;
     case 0x06:
       set_f(t.m.Emit(spv::Op::OpConvertUToF, t.t_f, {u0}));
@@ -981,7 +982,7 @@ void EmitVop2(Translator& t,
       break;
     case 0x25: {  // v_add_i32: carry-out -> VCC
       const CarryResult r = AddCarry(t, u0, u1);
-      set_u(r.value);
+      set_u(t.Add(u0, u1));
       t.SetSg(106, r.flag);
       break;
     }
