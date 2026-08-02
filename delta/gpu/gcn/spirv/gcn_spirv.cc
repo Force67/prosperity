@@ -428,9 +428,12 @@ void EmitInst(Translator& t, const Inst& inst, StageContext& sc) {
         EmitCsMimg(t, inst, sc);
       else if (sc.is_ps)
         EmitMimg(t, inst, sc);
+      else if (sc.mimg_plan && (inst.opcode == 0x00 || inst.opcode == 0x01 ||
+                                inst.opcode == 0x24 || inst.opcode == 0x27))
+        // Vertex texture fetch. Only the forms that name their own LOD:
+        // an implicit-LOD sample has no derivatives outside a fragment shader.
+        EmitMimg(t, inst, sc);
       else
-        // A VS sampling a texture (displacement, per-vertex lookup) has no
-        // model in the graphics path; dropping it silently renders wrong.
         WarnUnsupported("mimg.vs", inst.opcode, w, w1);
       break;
     case Enc::kExp: {
@@ -810,6 +813,7 @@ void SeedUserData(Translator& t, Id user_data) {
 bool TranslateVs(const Program& program,
                  const uint32_t* vs_user_data,
                  const std::unordered_set<uint32_t>& flat_attrs,
+                 uint32_t tex_binding_base,
                  Recompiled& r,
                  Translator& t) {
   const uint64_t fetch =
@@ -861,6 +865,22 @@ bool TranslateVs(const Program& program,
   sc.iface = &iface;
   sc.pos_out = pos_out;
   sc.flat_attrs = &flat_attrs;
+  // A VS that samples a texture gets its own set-0 bindings, after the PS's.
+  const MimgBindingPlan vs_mimg_plan =
+      PlanMimgBindings(program, reachable.data());
+  if (!vs_mimg_plan.binding_srsrc.empty()) {
+    if (vs_mimg_plan.binding_srsrc.size() + tex_binding_base >
+        StageContext::kMaxPsSamplers) {
+      WarnUnsupported("mimg.vs-binding-count",
+                      static_cast<uint32_t>(vs_mimg_plan.binding_srsrc.size()));
+      return false;
+    }
+    sc.mimg_plan = &vs_mimg_plan;
+    sc.tex_binding_base = tex_binding_base;
+    for (uint32_t i = 0; i < vs_mimg_plan.binding_srsrc.size(); i++)
+      r.vs_texs.push_back({i + tex_binding_base, vs_mimg_plan.binding_srsrc[i],
+                           vs_mimg_plan.binding_storage[i], false, false});
+  }
   for (const FetchAttr& attr : attrs)
     if (attr.direct_fetch)
       sc.direct_vfetch.insert(attr.pc);
@@ -1420,14 +1440,24 @@ bool RecompileSpirv(const uint32_t* vs_code,
         (inst.raw[0] & 0xFF) == 2)
       flat_attrs.insert((inst.raw[0] >> 10) & 0x3F);
 
+  // Set 0 is shared, so the VS's samplers are numbered after the PS's. Planning
+  // is a pure function of the code, so doing it here costs only the walk.
+  uint32_t vs_tex_base = 0;
+  if (!ps_program.empty()) {
+    const std::vector<uint8_t> ps_reachable = ComputeReachability(ps_program);
+    vs_tex_base = static_cast<uint32_t>(
+        PlanMimgBindings(ps_program, ps_reachable.data()).binding_srsrc.size());
+  }
+
   // VS and PS are separate SPIR-V modules.
   const bool dbg = ShaderDebugEnabled();
   Translator tv;
   ResetUnsupported();
   if (dbg)
     AuditBegin("vs", vs_code, vs_program);
-  const bool vs_ok = TranslateVs(vs_program, vs_user_data, flat_attrs, r, tv) &&
-                     !HadUnsupported();
+  const bool vs_ok =
+      TranslateVs(vs_program, vs_user_data, flat_attrs, vs_tex_base, r, tv) &&
+      !HadUnsupported();
   std::vector<uint32_t> vs;
   if (vs_ok)
     vs = tv.m.Assemble();

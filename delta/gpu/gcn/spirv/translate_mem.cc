@@ -386,8 +386,8 @@ void EmitMimg(Translator& t,
     const Id var = t.m.Variable(t.sampled_ptrs[type_idx],
                                 spv::StorageClass::UniformConstant);
     t.m.Decorate(var, spv::Decoration::DescriptorSet, {0});
-    t.m.Decorate(var, spv::Decoration::Binding, {bind});
-    t.m.Name(var, "tex" + std::to_string(bind));
+    t.m.Decorate(var, spv::Decoration::Binding, {bind + sc.tex_binding_base});
+    t.m.Name(var, "tex" + std::to_string(bind + sc.tex_binding_base));
     sc.tex_vars[bind] = var;
     sc.tex_types[bind] = type_idx;
   }

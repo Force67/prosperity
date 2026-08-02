@@ -268,11 +268,14 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
   if (RecompPipe* pipeline = g_recomp_cache.Find(key))
     return pipeline;
   RecompPipe rp;
-  rp.textured = !d.recomp->ps_texs.empty();
+  rp.textured = !d.recomp->ps_texs.empty() || !d.recomp->vs_texs.empty();
   const bool has_storage =
       std::any_of(d.recomp->ps_texs.begin(), d.recomp->ps_texs.end(),
                   [](const gcn::ShaderTex& tex) { return tex.storage; });
-  rp.multi_tex = d.recomp->ps_texs.size() > 1 || has_storage;
+  // A vertex texture fetch takes a binding of its own in set 0, so the exact
+  // per-binding layout below is the only one that can describe the draw.
+  const size_t n_tex = d.recomp->ps_texs.size() + d.recomp->vs_texs.size();
+  rp.multi_tex = n_tex > 1 || has_storage || !d.recomp->vs_texs.empty();
 
   // set 0 = texture(s) (or an empty layout when untextured), set 1 = cbuffer
   // UBO. Multi/storage shaders use an exact per-binding descriptor layout;
@@ -281,16 +284,22 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
       !rp.textured ? g_ring.empty_layout : g_tex.ds_layout;
   if (rp.multi_tex) {
     VkDescriptorSetLayoutBinding bindings[kMaxTex];
-    for (uint32_t i = 0; i < d.recomp->ps_texs.size(); i++) {
+    const uint32_t n_bind = static_cast<uint32_t>(std::min(n_tex, size_t(kMaxTex)));
+    for (uint32_t i = 0; i < n_bind; i++) {
+      const bool is_vs = i >= d.recomp->ps_texs.size();
+      const bool storage =
+          !is_vs && d.recomp->ps_texs[i].storage;
       bindings[i] = {i,
-                     d.recomp->ps_texs[i].storage
-                         ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE
-                         : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                     1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+                     storage ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE
+                             : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                     1,
+                     is_vs ? VK_SHADER_STAGE_VERTEX_BIT
+                           : VK_SHADER_STAGE_FRAGMENT_BIT,
+                     nullptr};
     }
     VkDescriptorSetLayoutCreateInfo sl{
         VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    sl.bindingCount = static_cast<uint32_t>(d.recomp->ps_texs.size());
+    sl.bindingCount = n_bind;
     sl.pBindings = bindings;
     if (vkCreateDescriptorSetLayout(g_dev.device, &sl, nullptr,
                                     &rp.tex_set_layout) != VK_SUCCESS)

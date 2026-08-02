@@ -118,6 +118,9 @@ struct Recompiled {
   std::vector<ShaderBuffer> vs_bufs;  // VS raw buffers (set 2, = .binding)
   std::vector<ShaderBuffer> ps_bufs;  // PS raw buffers (set 2, = .binding)
   std::vector<ShaderTex> ps_texs;    // PS samplers (set 0, binding = .binding)
+  // VS samplers (a vertex texture fetch: displacement, per-vertex lookup).
+  // Set 0 is shared, so these are numbered after ps_texs.
+  std::vector<ShaderTex> vs_texs;
   uint32_t num_params = 0;           // VS->PS interpolants (locations 0..n-1)
   uint8_t ps_mrt_mask = 0;           // bit n set = PS exports MRT color n
 };

@@ -727,6 +727,51 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
         }
       }
     }
+    // A vertex texture fetch takes its own set-0 bindings, numbered after the
+    // PS's, so its descriptors continue the same list. Bloodborne's character
+    // sheet draws that way; without it the draw is rejected and falls back to
+    // the heuristic quad renderer, which paints the atlas as a staircase.
+    if (vs_a >= 0x1000000000ull && vs_a < 0x20000000000ull) {
+      const auto vs_prog_tex = gcn::CachedProgram(vs_a, 4096);
+      auto vtexs = gcn::TrackTextures(
+          vs_prog_tex, &g_regs[mmSPI_SHADER_USER_DATA_VS_0], false, vs_a);
+      for (const auto& t : vtexs) {
+        if (d.num_texs >= 16)
+          break;
+        const uint32_t i = d.num_texs++;
+        auto& dt = d.texs[i];
+        dt.base = t.valid ? t.base : 0;
+        dt.w = t.width;
+        dt.h = t.height;
+        dt.dfmt = t.dfmt;
+        dt.nfmt = t.nfmt;
+        dt.tiling = t.tiling_idx;
+        dt.pitch = t.pitch;
+        dt.depth = t.depth;
+        dt.layers = t.layers;
+        dt.base_array = t.base_array;
+        dt.view_layers = t.view_layers;
+        dt.mip_levels = t.mip_levels;
+        dt.base_mip = t.base_mip;
+        dt.view_mips = t.view_mips;
+        dt.min_lod = t.min_lod;
+        dt.pow2_pad = t.pow2_pad;
+        std::memcpy(dt.sampler, t.sampler, sizeof(dt.sampler));
+        dt.sampler_valid = t.sampler_valid;
+        dt.arrayed = t.arrayed;
+        dt.is_3d = t.is_3d;
+        if (t.is_3d)
+          tex_3d_mask |= 1u << i;
+        dt.is_1d = t.is_1d;
+        if (t.is_1d)
+          tex_1d_mask |= 1u << i;
+        dt.force_lod_zero = t.force_lod_zero;
+        dt.depth_compare = t.depth_compare;
+        dt.storage = t.storage;
+        dt.null_descriptor = t.null_descriptor;
+        dt.swizzle = gcn::PackDstSel(t.dst_sel);
+      }
+    }
     // Recompiled-shader path: Recompile the VS/PS pair (cached) and resolve the
     // live vertex-attribute buffers, so the renderer can run the game's actual
     // shaders. The heuristic fields above stay populated as the fallback.

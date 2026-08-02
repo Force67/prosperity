@@ -465,6 +465,9 @@ struct StageContext {
   // descriptor share one set-0 binding; variables are created lazily per
   // binding. The plan is also what TrackTextures pairs against at draw time.
   const MimgBindingPlan* mimg_plan = nullptr;
+  // Set 0 is shared by both stages, so a VS's samplers are numbered after the
+  // PS's. tex_vars[] stays indexed by the stage-local binding.
+  uint32_t tex_binding_base = 0;
   static constexpr uint32_t kMaxPsSamplers = 24;  // == gpu::vk::kMaxTex
   Id tex_vars[kMaxPsSamplers] = {};
   uint32_t tex_types[kMaxPsSamplers] = {};

@@ -291,9 +291,11 @@ bool CreateTextureDescriptors() {
     return true;
   if (g_tex.ds_layout)
     return false;
-  // descriptor set layout: binding 0 = combined image sampler (fragment).
-  VkDescriptorSetLayoutBinding b{0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                                 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+  // descriptor set layout: binding 0 = combined image sampler. Both stages see
+  // it: a vertex texture fetch takes its own binding out of the same set.
+  VkDescriptorSetLayoutBinding b{
+      0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
+      VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_VERTEX_BIT, nullptr};
   VkDescriptorSetLayoutCreateInfo dl{
       VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
   dl.bindingCount = 1;
@@ -326,7 +328,8 @@ bool CreateTextureDescriptors() {
     VkDescriptorSetLayoutBinding mb[kMaxTex];
     for (uint32_t i = 0; i < kMaxTex; i++)
       mb[i] = {i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
-               VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+               VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_VERTEX_BIT,
+               nullptr};
     VkDescriptorSetLayoutCreateInfo ml{
         VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
     ml.bindingCount = kMaxTex;
