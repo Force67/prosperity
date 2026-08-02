@@ -40,18 +40,30 @@
 //     guest memory, not the image. That contradiction is where to pick this up.
 //     Until then, +DELTA_GPU_PRESENT_ADDR=0x805f238000 shows the real frame.
 //
-//  2. THE 3D RENDERER COMES UP BUT THE LOAD RUNS AT ~1.1 fps. Past the wizard
-//     the title opens /app0/dvdroot_ps4/movie/sprj_opening.mp4 and waits on the
-//     AvPlayer event callback; delivering SCE_AVPLAYER_STATE_READY (see the HLE)
-//     unblocks it, and the renderer then builds its real target set -- 36 render
-//     targets, 784x784 HDR colour (fmt 97/122), 512x512 shadow maps, a 784x784
-//     depth -- instead of the four videoout buffers it had before.
-//     The load never finishes because compute costs 1.5 s a frame:
+//  2. CHARACTER CREATION IS REACHED, AND COSTS 1.5 s A FRAME WITH COMPUTE ON.
+//     Past the wizard the title opens /app0/dvdroot_ps4/movie/sprj_opening.mp4
+//     and waits on the AvPlayer event callback; delivering
+//     SCE_AVPLAYER_STATE_READY (see the HLE) unblocks it, and the renderer then
+//     builds its real target set -- 34 render targets, 784x784 HDR colour
+//     (fmt 97/122), 512x512 shadow maps, a 784x784 depth -- instead of the four
+//     videoout buffers it had before. The "Contract" screen then renders with
+//     its artwork, stat rows (Vitality/Endurance/Strength/Skill/Bloodtinge/
+//     Arcane) and button prompts.
+//     With compute on that runs at ~1.1 fps:
 //       cs=668ms x80.7 (in=667 gpu=745 out=190 stage=109.0x221.2MB flush=62.7)
-//     i.e. 221 MB staged into compute buffers and 62 batch flushes -- 62 GPU
-//     round-trips -- every frame, for ~80 dispatches. Batching those dispatches
-//     (they serialise because each range readback flushes the pending batch) is
-//     what stands between here and character creation.
+//     221 MB staged into compute buffers and 62 batch flushes -- 62 GPU
+//     round-trips -- every frame, for ~80 dispatches. +DELTA_GPU_NOCS=1 skips
+//     all of it and the same screens run at 30 fps, which is how the Contract
+//     screen was reached; making those dispatches cheap (they serialise because
+//     each range readback flushes the pending batch) is the real fix.
+//     +DELTA_GPU_CSIMPORT=1 hangs the title a few seconds in; CSRENAME alone
+//     changes nothing.
+//
+//  3. THE CONTRACT SCREEN'S ROWS DRAW AS A DIAGONAL STAIRCASE of atlas tiles
+//     instead of a list, and the origin panel stays "Entry Incomplete", so the
+//     run cannot pick an origin and reach the opening. Each row is offset from
+//     the one above by a constant x and y -- an instanced or per-row-offset UI
+//     draw whose offset we apply cumulatively.
 //     Note the wizard pages confirm on their last row, not the focused one:
 //     Controls has seven (Camera X-Axis, Camera Y-Axis, Camera Sensitivity,
 //     Auto Target Switch, Camera Auto Adjust, Controller Vibration, Next), so a
@@ -71,5 +83,19 @@
 // busiest render target of the frame is the one the UI is drawn into.
 +DELTA_GPU_PRESENT_SCENE=1
 
-// Drive the front end: Play Offline, New Game, the offline notice, Brightness.
-// +DELTA_PAD_SCRIPT=40:down:600,44:cross:600,60:cross:600,76:cross:600,95:down:600,99:cross:600
+// Drive the front end. Absolute times drift with boot time, so a fixed script
+// only lands sometimes; this self-correcting cycle -- eight downs then cross,
+// eight ups then cross, repeating every ~14 s -- confirms the last row on one
+// pass and the first row on the next, which is every screen the front end has.
+// With +DELTA_GPU_NOCS=1 it reaches the Contract (character creation) screen.
+// Generate with:
+//   python3 -c "
+//   s=[]
+//   def burst(t,b,n=8,gap=0.7,hold=400):
+//       for k in range(n): s.append('%.1f:%s:%d'%(t+k*gap,b,hold))
+//       return t+n*gap
+//   t=40.0
+//   for c in range(60):
+//       e=burst(t,'down' if c%2==0 else 'up'); s.append('%.1f:cross:900'%(e+1.5)); t=e+14
+//   print(','.join(s))"
+// Four directions instead of two wanders off and never reaches Contract.
