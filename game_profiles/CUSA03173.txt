@@ -1,0 +1,75 @@
+// Bloodborne (CUSA03173, PS4)
+//
+// BOOTS AND DRIVES ITS FRONT-END (2026-08-02). The title reaches the Sony /
+// Japan Studio logos, the Play Online / Play Offline selector, the title menu
+// (New Game / System / Log In) and the first-run wizard (Brightness, Controls).
+// The UI renders correctly -- coloured logos, readable text, sliders, icons --
+// at a stable 30 fps, ~11-33 draws and 7 command buffers a frame. Nothing is
+// declined by the recompiler and no texture fails to upload.
+//
+// Two things stand between this and gameplay.
+//
+//  1. THE PRESENTED FRAME IS NOT THE RENDERED FRAME. The game renders its UI
+//     into 0x805f238000 and then runs one gamma pass (vs=0x80e2150d00
+//     ps=0x80e2150f00, a RECTLIST) that texel-fetches that target and looks
+//     each channel up in a 1025x1x3 R32F LUT at 0x80e2151000. The fetch does
+//     not read the target's image: it reads the guest MEMORY behind the
+//     address, which a compute shader (cs=0x80e2150500, one 0x7f8000-byte
+//     write a frame) fills with 1.0f/0.5f. Read as BGRA8 that is (0.5, 0, 0,
+//     0.247), which is exactly the dark red the flip presents.
+//     What has been ruled out, each with a run:
+//       - the recompiled SPIR-V (FragCoord -> floor -> OpImageFetch -> LUT
+//         sample -> compr export) is correct, and spirv-opt is not the cause
+//         (+DELTA_GPU_SPIRV_NOOPT=1 changes nothing);
+//       - FragCoord is correct: exporting it straight to MRT0 gives a clean
+//         x/y ramp over the whole target;
+//       - the binding resolves to the live target on 100% of the draws
+//         (+DELTA_GPU_BINDTRACE=0x80e2150f00 -> rt-color, 2001/2001), and the
+//         descriptor is honoured (binding the 1x1 white image instead makes
+//         the fetch return white at (0,0) and black everywhere else);
+//       - it is not the descriptor-set cache, the image-view cache, the T#
+//         DST_SEL swizzle, image memory suballocation (dedicated allocations
+//         behave the same), the depth target, or a sync hazard (the sync
+//         validation layer is clean on this read).
+//     Yet the same run's read-back of that image at EndFrame shows the UI, and
+//     clearing the image to blue immediately before the draw
+//     (+DELTA_GPU_RTTINT=1) does not change what the fetch returns. Binding the
+//     guest-texture view for that address instead (a one-line experiment)
+//     produces a bit-identical result, and +DELTA_GPU_NOCS=1 -- which leaves
+//     the guest memory zero -- makes the fetch return zero. The fetch tracks
+//     guest memory, not the image. That contradiction is where to pick this up.
+//     Until then, +DELTA_GPU_PRESENT_ADDR=0x805f238000 shows the real frame.
+//
+//  2. THE 3D RENDERER COMES UP BUT THE LOAD RUNS AT ~1.1 fps. Past the wizard
+//     the title opens /app0/dvdroot_ps4/movie/sprj_opening.mp4 and waits on the
+//     AvPlayer event callback; delivering SCE_AVPLAYER_STATE_READY (see the HLE)
+//     unblocks it, and the renderer then builds its real target set -- 36 render
+//     targets, 784x784 HDR colour (fmt 97/122), 512x512 shadow maps, a 784x784
+//     depth -- instead of the four videoout buffers it had before.
+//     The load never finishes because compute costs 1.5 s a frame:
+//       cs=668ms x80.7 (in=667 gpu=745 out=190 stage=109.0x221.2MB flush=62.7)
+//     i.e. 221 MB staged into compute buffers and 62 batch flushes -- 62 GPU
+//     round-trips -- every frame, for ~80 dispatches. Batching those dispatches
+//     (they serialise because each range readback flushes the pending batch) is
+//     what stands between here and character creation.
+//     Note the wizard pages confirm on their last row, not the focused one:
+//     Controls has seven (Camera X-Axis, Camera Y-Axis, Camera Sensitivity,
+//     Auto Target Switch, Camera Auto Adjust, Controller Vibration, Next), so a
+//     bare cross toggles a setting instead of advancing.
+//
+// Also seen: the title-menu backdrop and the Bloodborne logo are absent, and
+// that is not a shading bug -- +DELTA_GPU_DEBUGUV=1 shows the only textured
+// quads on that screen are the menu text, the trademark glyph and the
+// copyright line. Those draws never arrive.
+//
+// While the world loads the frame rate drops to ~1.2 fps: ~80 dispatches a
+// frame, ~670 ms of it in compute staging (one of them stages 8 MB, the whole
+// display buffer, per dispatch). It recovers to 30 fps afterwards.
+
+// Present the target the game rendered instead of the gamma pass's output, so
+// the title shows its real frame while (1) is open. Address-independent: the
+// busiest render target of the frame is the one the UI is drawn into.
++DELTA_GPU_PRESENT_SCENE=1
+
+// Drive the front end: Play Offline, New Game, the offline notice, Brightness.
+// +DELTA_PAD_SCRIPT=40:down:600,44:cross:600,60:cross:600,76:cross:600,95:down:600,99:cross:600
