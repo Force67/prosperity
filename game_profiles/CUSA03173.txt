@@ -67,6 +67,17 @@
 //     ops), so the geometry the recompiled VS produces is itself wrong. The
 //     draw to look at is the 792-index one out of the 128x128 atlas
 //     (VS=0x80e49e1400 PS=0x80e49e9a00) into the 784x784 target.
+//     It is a GPU-skinning VS: it calls a fetch shader (s_swappc_b64), takes
+//     bone indices and weights out of v16-v23, and pulls 4 bones x 3 rows of
+//     matrix with twelve tbuffer_load_format_xyzw ... idxen through a V# that
+//     s_load_dwordx8 brings in from s[6:7]. Two things go wrong together:
+//     the draw arrives with num_vattrs=0 -- ParseFetch gets nothing out of its
+//     fetch shader, so the indices and weights are all zero -- and because the
+//     attribute resolve then fails, the draw-time `good` gate never runs
+//     resolve_bufs, so the bone-matrix buffer is never staged either
+//     (+DELTA_GPU_RAWBUF=1 prints no line for VS=0x80e49e1400 at all, while the
+//     two UI shaders around it resolve fine). Fix the fetch-shader parse first;
+//     the buffer should follow.
 //     Note the wizard pages confirm on their last row, not the focused one:
 //     Controls has seven (Camera X-Axis, Camera Y-Axis, Camera Sensitivity,
 //     Auto Target Switch, Camera Auto Adjust, Controller Vibration, Next), so a
