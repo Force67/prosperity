@@ -937,17 +937,37 @@ void EnableDsSwizzle(Translator& t, StageContext& sc, std::vector<Id>& iface) {
 // first's, and a shader that reads an SGPR directly (a buffer stride, say) then
 // saw the other stage's registers.
 constexpr uint32_t kPsUserDataOffset = 64;
+// Past both stages' user data: each stage's own guest code address (VS lo/hi
+// at 128/132, PS at 136/140), pushed per draw for s_getpc_b64. Only declared
+// when the device budget covers the 144 bytes (PushCodeBase()); at the
+// 128-byte Vulkan floor the address stays baked in the module.
+constexpr uint32_t kPcBaseOffset = 128;
 
 Id DeclareUserData(Translator& t, uint32_t byte_offset) {
   const Id words = t.m.TypeArray(t.t_u, 16);
   t.m.Decorate(words, spv::Decoration::ArrayStride, {4});
-  const Id block = t.m.TypeStruct({words});
+  Id block;
+  if (PushCodeBase()) {
+    // Members 1/2: this stage's code address {lo, hi}. Read per draw so the
+    // module stays address-free and can be cached by code content while the
+    // title streams the same shader to fresh addresses.
+    block = t.m.TypeStruct({words, t.t_u, t.t_u});
+    const uint32_t base = kPcBaseOffset + (byte_offset ? 8u : 0u);
+    t.m.MemberDecorate(block, 1, spv::Decoration::Offset, {base});
+    t.m.MemberDecorate(block, 2, spv::Decoration::Offset, {base + 4});
+  } else {
+    block = t.m.TypeStruct({words});
+  }
   t.m.Decorate(block, spv::Decoration::Block);
   t.m.MemberDecorate(block, 0, spv::Decoration::Offset, {byte_offset});
   const Id v =
       t.m.Variable(t.m.TypePointer(spv::StorageClass::PushConstant, block),
                    spv::StorageClass::PushConstant);
   t.m.Name(v, "user_data");
+  if (PushCodeBase()) {
+    t.pc_base_var = v;
+    t.pc_base_member = 1;
+  }
   return v;
 }
 
@@ -996,7 +1016,13 @@ bool TranslateVs(const Program& program,
   // fetch (indexed, no offset, zero soffset) and still be reading per-instance
   // data: P.T. gathers three consecutive 16-byte rows per bone that way, which
   // otherwise displaces every real attribute.
-  std::vector<FetchAttr> attrs = ParseFetch(fetch);
+  // s0:s1 names a fetch shader only when the VS actually jumps to it;
+  // otherwise it is whatever user data the title parked there (SotC: its
+  // per-draw shader-resource-table pointer), and ParseFetch would read phantom
+  // vertex attributes out of live constant data.
+  std::vector<FetchAttr> attrs;
+  if (CallsFetchShader(program))
+    attrs = ParseFetch(fetch);
   if (attrs.empty())
     attrs = std::move(direct_attrs);
   t.InitTypes();

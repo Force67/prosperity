@@ -38,6 +38,7 @@ DELTA_OPTION(int, kMtMax, "DELTA_GPU_MASKTRACE_MAX", 200);
 DELTA_OPTION(uint64_t, kMtRt, "DELTA_GPU_MASKTRACE_RT", 0);
 DELTA_OPTION(int, kOhAfter, "DELTA_GPU_OPHIST_AFTER", 100);
 DELTA_OPTION(bool, kRecompOn, "DELTA_GPU_RECOMP", true);
+DELTA_OPTION(bool, kShReloc, "DELTA_GPU_SHRELOC", false);
 DELTA_OPTION(const char *, kSkipShList, "DELTA_GPU_SKIPSH", nullptr);
 DELTA_OPTION(int, kTexTrackFrame, "DELTA_GPU_TEXTRACK_FRAME", -1);
 DELTA_OPTION(bool, kBlitDump, "DELTA_GPU_BLITDUMP", false);
@@ -85,10 +86,17 @@ bool g_frame_active = false;
 uint32_t g_presented_frames = 0;
 
 struct ShaderKey {
+  // VS/PS by code CONTENT (CachedCodeHash), not by address: SotC streams its
+  // shaders to fresh guest addresses, so an address key misses forever. The
+  // one exception is a program containing s_getpc_b64 on a device at the
+  // 128-byte push floor, where the module bakes its own address and these
+  // fields hold the addresses instead (see PushCodeBase at the key site).
   uint64_t vs = 0, ps = 0;
   // The fetch shader by CONTENT, not by address: titles that generate one per
   // draw into scratch memory (Tomb Raider does) would otherwise miss the
-  // recompile cache on every single draw.
+  // recompile cache on every single draw. Zero when the VS calls no fetch
+  // shader -- s0:s1 then holds unrelated user data whose pointee must not
+  // reach the key (SotC: the per-draw constant table).
   uint64_t fetch = 0;
   uint32_t ps_input_ena = 0;
   // Which PS samplers read a volume image. Unlike the 2D-array case, whose DA
@@ -595,7 +603,16 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
     }
 
     // Vertex buffer: resource-track the fetch shader (VS sgpr[0..1] ptr).
+    // s0:s1 is only a fetch-shader pointer when the VS actually calls one
+    // (s_swappc_b64). SotC parks its per-draw shader-resource-table pointer
+    // there instead: treating THAT as a fetch shader tracked phantom vertex
+    // buffers out of live constant data, and hashing the pointee into the
+    // shader key below made a fresh key nearly every draw -- measured at 96%
+    // of all recompile-cache misses (4183 of 4352 over 210s).
     uint64_t fetch = (static_cast<uint64_t>(vud[1] & 0xFFFF) << 32) | vud[0];
+    if (vs_a < 0x1000000000ull || vs_a >= 0x20000000000ull ||
+        !gcn::CallsFetchShader(*gcn::CachedProgram(vs_a, 4096)))
+      fetch = 0;
     if (fetch >= 0x1000000000ull && fetch < 0x20000000000ull) {
       auto vbs = gcn::TrackVertexBuffers(*gcn::CachedProgram(fetch, 64), vud);
       if (!vbs.empty()) {
@@ -808,9 +825,103 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
           sh_cache;
       const bool neo = gcn::DefaultIsaMode() == gcn::IsaMode::kNeo;
       const uint32_t ps_input_ena = g_regs[mmSPI_PS_INPUT_ENA];
-      ShaderKey key{vs_a, ps_a, gcn::CachedCodeHash(fetch, 64), ps_input_ena,
+      // The VS/PS by CONTENT, like the fetch shader: SotC streams shader code
+      // to fresh guest addresses as the title progresses, so an address key
+      // misses forever and the frame drowns in recompiles. s_getpc_b64 stays
+      // sound because the module reads its own address from the push range per
+      // draw (PushCodeBase); at the 128-byte push floor, where the address is
+      // baked into the module instead, getpc programs keep the address key.
+      uint64_t vs_k = gcn::CachedCodeHash(vs_a, 4096);
+      uint64_t ps_k = ps_a ? gcn::CachedCodeHash(ps_a, 4096) : 0;
+      if (!gcn::PushCodeBase()) {
+        const auto uses_getpc = [](const gcn::Program& p) {
+          for (const gcn::Inst& i : p)
+            if (i.enc == gcn::Enc::kSop1 && i.opcode == 0x1f)
+              return true;
+          return false;
+        };
+        if (uses_getpc(*gcn::CachedProgram(vs_a, 4096)) ||
+            (ps_a && uses_getpc(*gcn::CachedProgram(ps_a, 4096)))) {
+          vs_k = vs_a;
+          ps_k = ps_a;
+        }
+      }
+      ShaderKey key{vs_k, ps_k, gcn::CachedCodeHash(fetch, 64), ps_input_ena,
                     tex_3d_mask, tex_1d_mask, neo};
       auto it = sh_cache.find(key);
+      if (it == sh_cache.end() && kShReloc) {
+        // DELTA_GPU_SHRELOC: attribute every recompile-cache miss to the key
+        // field that changed since this VS/PS content PAIR was last compiled.
+        // The distinct-value tallies say whether a churning field is bounded
+        // (converges against this never-evicting cache) or unbounded (misses
+        // forever). This is what convicted the fetch hash: 4183 of 4352
+        // misses over 210s changed only that field, with one pair alone
+        // cycling 482 distinct values, while address churn was 188 and the
+        // ena/mask states capped at five per pair.
+        struct Seen {
+          uint64_t addr_vs = 0, addr_ps = 0, fetch = 0;
+          uint32_t ena = 0, t3d = 0, t1d = 0;
+          std::unordered_set<uint64_t> fetches, states;
+        };
+        static std::unordered_map<uint64_t, Seen> seen;  // by content pair
+        static uint32_t n_new = 0, n_addr = 0, n_fetch = 0, n_ena = 0,
+                        n_3d = 0, n_1d = 0, n_none = 0, n_total = 0;
+        const uint64_t vs_h = gcn::CachedCodeHash(vs_a, 4096);
+        const uint64_t ps_h = ps_a ? gcn::CachedCodeHash(ps_a, 4096) : 0;
+        const uint64_t pair = vs_h ^ (ps_h * 0x9e3779b97f4a7c15ull);
+        n_total++;
+        auto si = seen.find(pair);
+        if (si == seen.end()) {
+          n_new++;
+          si = seen.emplace(pair, Seen{}).first;
+        } else {
+          const Seen& s = si->second;
+          uint32_t what = 0;
+          if (s.addr_vs != vs_a || s.addr_ps != ps_a) { n_addr++; what++; }
+          if (s.fetch != key.fetch) { n_fetch++; what++; }
+          if (s.ena != ps_input_ena) { n_ena++; what++; }
+          if (s.t3d != tex_3d_mask) { n_3d++; what++; }
+          if (s.t1d != tex_1d_mask) { n_1d++; what++; }
+          if (!what)
+            n_none++;
+          static int dumped = 0;
+          if (what && dumped < 12) {
+            dumped++;
+            std::fprintf(
+                stderr,
+                "[shreloc] miss vs=%#llx ps=%#llx fetch %#llx->%#llx ena "
+                "%#x->%#x 3d %#x->%#x 1d %#x->%#x addr %#llx/%#llx\n",
+                (unsigned long long)vs_h, (unsigned long long)ps_h,
+                (unsigned long long)s.fetch, (unsigned long long)key.fetch,
+                s.ena, ps_input_ena, s.t3d, tex_3d_mask, s.t1d, tex_1d_mask,
+                (unsigned long long)vs_a, (unsigned long long)ps_a);
+          }
+        }
+        Seen& s = si->second;
+        s.addr_vs = vs_a;
+        s.addr_ps = ps_a;
+        s.fetch = key.fetch;
+        s.ena = ps_input_ena;
+        s.t3d = tex_3d_mask;
+        s.t1d = tex_1d_mask;
+        s.fetches.insert(key.fetch);
+        s.states.insert((static_cast<uint64_t>(ps_input_ena) << 32) |
+                        (static_cast<uint64_t>(tex_3d_mask) << 16) |
+                        tex_1d_mask);
+        if ((n_total & 31) == 0) {
+          size_t max_fetch = 0, max_state = 0;
+          for (const auto& [k, v] : seen) {
+            max_fetch = std::max(max_fetch, v.fetches.size());
+            max_state = std::max(max_state, v.states.size());
+          }
+          std::fprintf(stderr,
+                       "[shreloc] miss fields: pair-new=%u addr=%u fetch=%u "
+                       "ena=%u 3d=%u 1d=%u none=%u total=%u pairs=%zu "
+                       "max-distinct fetch=%zu state=%zu\n",
+                       n_new, n_addr, n_fetch, n_ena, n_3d, n_1d, n_none,
+                       n_total, seen.size(), max_fetch, max_state);
+        }
+      }
       if (it == sh_cache.end())
         it = sh_cache
                  .emplace(key, gcn::Recompile(

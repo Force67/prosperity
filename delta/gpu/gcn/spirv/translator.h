@@ -69,6 +69,13 @@ struct Translator {
   // shaders form absolute addresses from their own PC to reach descriptors
   // stored alongside the code, and a PC of zero sends those loads to null.
   uint64_t program_base = 0;
+  // Graphics stages under PushCodeBase(): the {lo, hi} u32 members of the push
+  // block that carry the stage's code address per draw. s_getpc_b64 then reads
+  // the address at draw time instead of baking program_base into the module,
+  // so one content-keyed module serves every address the title streams the
+  // shader to. Zero = bake program_base (compute, or the 128-byte push floor).
+  Id pc_base_var = 0;
+  uint32_t pc_base_member = 0;
   Id scc_var = 0;    // scalar condition code
   Id state_var = 0;  // CFG block index for the while-switch dispatch
   Id cbuf_type = 0;  // shared CB { uvec4 data[64]; } type

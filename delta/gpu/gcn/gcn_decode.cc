@@ -510,4 +510,11 @@ uint64_t CachedCodeHash(uint64_t addr, uint32_t max_dwords) {
   return hash;
 }
 
+bool CallsFetchShader(const Program& program) {
+  for (const Inst& inst : program)
+    if (inst.enc == Enc::kSop1 && inst.opcode == 0x21)  // s_swappc_b64
+      return true;
+  return false;
+}
+
 }  // namespace gpu::gcn

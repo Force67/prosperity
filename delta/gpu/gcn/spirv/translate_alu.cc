@@ -217,9 +217,28 @@ void EmitSop1(Translator& t, const Inst& inst) {
       // reach a descriptor the toolchain stored next to the code. Guest memory
       // is identity-mapped, so the program's guest address is its code pointer,
       // and s_getpc is one dword wide.
-      const uint64_t next = t.program_base + (inst.pc + 1) * 4ull;
-      t.SetSdst(sdst, 0, t.U32(static_cast<uint32_t>(next)));
-      t.SetSdst(sdst, 1, t.U32(static_cast<uint32_t>(next >> 32)));
+      const uint32_t next_off = (inst.pc + 1) * 4u;
+      if (t.pc_base_var) {
+        // Graphics: the module is cached by code CONTENT and reused wherever
+        // the title streams this shader, so the address arrives per draw in
+        // the push range. 64-bit add from u32 halves (no Int64 capability);
+        // the carry is (lo + off) having wrapped below off.
+        const Id p_u = t.m.TypePointer(spv::StorageClass::PushConstant, t.t_u);
+        const auto half = [&](uint32_t i) {
+          return t.m.Load(t.t_u,
+                          t.m.AccessChain(p_u, t.pc_base_var,
+                                          {t.U32(t.pc_base_member + i)}));
+        };
+        const Id lo = t.Add(half(0), t.U32(next_off));
+        const Id carry =
+            t.SelectB(t.Ult(lo, t.U32(next_off)), t.U32(1), t.U32(0));
+        t.SetSdst(sdst, 0, lo);
+        t.SetSdst(sdst, 1, t.Add(half(1), carry));
+      } else {  // compute (address-keyed cache), or the 128-byte push floor
+        const uint64_t next = t.program_base + next_off;
+        t.SetSdst(sdst, 0, t.U32(static_cast<uint32_t>(next)));
+        t.SetSdst(sdst, 1, t.U32(static_cast<uint32_t>(next >> 32)));
+      }
       break;
     }
     default:

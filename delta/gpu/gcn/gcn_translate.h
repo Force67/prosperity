@@ -102,6 +102,17 @@ constexpr uint32_t kGfxBufferDwords = 262144;  // 1 MB
 uint32_t MaxGfxBuffers();
 void SetMaxGfxBuffers(uint32_t n);
 
+// True when the push-constant budget (>= 144 bytes) has room for each graphics
+// stage's own guest code address after the two 64-byte user-data halves. The
+// emitted module then reads the address for s_getpc_b64 from the push range
+// per draw instead of baking it in, which is what lets the recompile cache key
+// VS/PS by code CONTENT while a title streams the same shader to a fresh
+// address every use. At the 128-byte Vulkan floor the address stays baked and
+// programs containing s_getpc_b64 must be keyed by address. Defaults to the
+// floor until the renderer reports the device limit, like MaxGfxBuffers.
+bool PushCodeBase();
+void SetPushBudget(uint32_t bytes);
+
 // A raw (non-format) buffer a graphics stage reads with MUBUF: vertex data the
 // VS fetches by hand rather than through the vertex-input state, a skinning
 // palette, an instance table. Bound as a storage buffer at set 2, aliasing

@@ -172,6 +172,10 @@ bool CreateUploadRings(const VkPhysicalDeviceProperties& props) {
       g_ring.sbo_count = gpu::gcn::kMinGfxBuffers;
     }
     gpu::gcn::SetMaxGfxBuffers(g_ring.sbo_count);
+    // Whether the push range can also carry each stage's code address (2x8
+    // bytes after the 128 bytes of user data): with it, no graphics module
+    // ever bakes its own address and the shader cache keys by content.
+    gpu::gcn::SetPushBudget(props.limits.maxPushConstantsSize);
     g_ring.sbo_stride = (kRawBufWindow + g_ring.sbo_align - 1) &
                         ~(VkDeviceSize)(g_ring.sbo_align - 1);
     VkDescriptorSetLayoutBinding sbs[kRawBufBindings]{};

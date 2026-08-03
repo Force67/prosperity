@@ -309,10 +309,14 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
   rp.raw_bufs = !d.recomp->vs_bufs.empty() || !d.recomp->ps_bufs.empty();
   VkDescriptorSetLayout sls[3] = {set0, g_ring.ubo_layout, g_ring.sbo_layout};
   // One 64-byte window per stage: 16 user-data dwords each, 128 bytes total,
-  // which is the guaranteed minimum push-constant size.
+  // which is the guaranteed minimum push-constant size. With budget past the
+  // floor, each stage's range extends over its own code-address words (VS
+  // 128..135, PS 136..143) pushed per draw for s_getpc_b64 -- one range per
+  // stage, since Vulkan forbids two ranges naming the same stage.
+  const bool pc_base = gpu::gcn::PushCodeBase();
   const VkPushConstantRange push[2] = {
-      {VK_SHADER_STAGE_VERTEX_BIT, 0, 64},
-      {VK_SHADER_STAGE_FRAGMENT_BIT, 64, 64},
+      {VK_SHADER_STAGE_VERTEX_BIT, 0, pc_base ? 136u : 64u},
+      {VK_SHADER_STAGE_FRAGMENT_BIT, 64, pc_base ? 80u : 64u},
   };
   VkPipelineLayoutCreateInfo li{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
   li.setLayoutCount = rp.raw_bufs ? 3 : 2;

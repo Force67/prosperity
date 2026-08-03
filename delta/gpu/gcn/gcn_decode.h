@@ -117,6 +117,15 @@ std::shared_ptr<const Program> CachedProgram(uint64_t addr,
 // CachedProgram is.
 uint64_t CachedCodeHash(uint64_t addr, uint32_t max_dwords);
 
+// Does this program transfer to a fetch shader (s_swappc_b64)? The fetch
+// pointer convention parks the target in s[0:1], but s[0:1] holds SOMETHING in
+// every VS -- SotC keeps its per-draw shader-resource-table pointer there --
+// so the only ground truth for "s0:s1 is a fetch shader" is the call itself.
+// Treating the pointee as code without this check hashed live constant data
+// into the recompile-cache key (a fresh key nearly every draw, 95% of all
+// misses) and let ParseFetch read phantom vertex attributes out of it.
+bool CallsFetchShader(const Program& program);
+
 // Advance the CachedProgram revalidation generation (call once per frame, from
 // the command processor's end-of-frame). Entries revalidate their code hash at
 // most once per generation; repeat lookups within a frame are pure map hits.

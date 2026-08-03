@@ -32,6 +32,10 @@ uint64_t NowNs() {
 // before the command processor issues its first recompile.
 uint32_t g_max_gfx_buffers = kMinGfxBuffers;
 
+// Device push-constant budget. Written once at renderer init (before the
+// command processor issues any recompile), read on the recompile path.
+uint32_t g_push_budget = 128;  // the Vulkan floor: no room for code addresses
+
 }  // namespace
 
 uint32_t MaxGfxBuffers() {
@@ -40,6 +44,14 @@ uint32_t MaxGfxBuffers() {
 
 void SetMaxGfxBuffers(uint32_t n) {
   g_max_gfx_buffers = std::clamp(n, kMinGfxBuffers, kMaxGfxBuffers);
+}
+
+bool PushCodeBase() {
+  return g_push_budget >= 144;
+}
+
+void SetPushBudget(uint32_t bytes) {
+  g_push_budget = bytes;
 }
 
 Recompiled Recompile(const uint32_t* vs_code,

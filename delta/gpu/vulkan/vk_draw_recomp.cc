@@ -971,6 +971,20 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
                      d.vs_user_data);
   vkCmdPushConstants(g_frame.cmd, rp->layout, VK_SHADER_STAGE_FRAGMENT_BIT, 64,
                      64, d.ps_user_data);
+  if (gpu::gcn::PushCodeBase()) {
+    // Each stage's OWN code address, for s_getpc_b64: the modules are keyed by
+    // content, so the address cannot live in the SPIR-V, and VS and PS live at
+    // different addresses so each stage gets its own words (the shared-offset
+    // mistake the user-data pushes already made once).
+    const uint32_t vs_base[2] = {static_cast<uint32_t>(d.vs_addr),
+                                 static_cast<uint32_t>(d.vs_addr >> 32)};
+    const uint32_t ps_base[2] = {static_cast<uint32_t>(d.ps_addr),
+                                 static_cast<uint32_t>(d.ps_addr >> 32)};
+    vkCmdPushConstants(g_frame.cmd, rp->layout, VK_SHADER_STAGE_VERTEX_BIT, 128,
+                       8, vs_base);
+    vkCmdPushConstants(g_frame.cmd, rp->layout, VK_SHADER_STAGE_FRAGMENT_BIT,
+                       136, 8, ps_base);
+  }
   // Copy each guest cbuffer window into the per-frame ring and bind set 1.
   // Vulkan requires one dynamic offset for every dynamic descriptor in the set
   // layout.
