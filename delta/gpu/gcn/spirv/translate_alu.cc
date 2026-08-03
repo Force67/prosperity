@@ -721,6 +721,10 @@ Id ReadLane(Translator& t, Id value, Id lane) {
 // active, so the ballot has to be taken over our own bit rather than implied
 // by OpGroupNonUniformBroadcastFirst.
 Id ReadFirstLane(Translator& t, Id value) {
+  // Proven the same in every active lane: our own lane IS the first active
+  // one's, exactly, with no shuffle and no barrier.
+  if (t.readfirstlane_uniform)
+    return value;
   if (!t.xchg_lanes)
     return value;
   t.RequireSubgroup(spv::Capability::GroupNonUniformBallot);

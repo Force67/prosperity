@@ -673,6 +673,8 @@ void EmitInstAudited(Translator& t,
                      StageContext& sc) {
   // Whether a cross-lane op here can synchronise the group (see UniformPoints).
   t.uniform_here = index < sc.uniform_points.size() && sc.uniform_points[index];
+  t.readfirstlane_uniform = index < sc.uniform_readfirstlane.size() &&
+                            sc.uniform_readfirstlane[index];
   // A barrier the guest compiler was entitled to omit (see PlanLdsBarriers).
   if (!sc.lds_barrier_at.empty() &&
       std::binary_search(sc.lds_barrier_at.begin(), sc.lds_barrier_at.end(),
@@ -829,6 +831,259 @@ bool IsLdsWrite(const Inst& inst) {
   const uint32_t op = inst.opcode;
   return op == 0x20 /* rtn atomics read AND write */ ||
          (op >= 13 && op <= 15) || op == 77;
+}
+
+// ---- wave uniformity -------------------------------------------------------
+// v_readfirstlane_b32 moves a value the compiler KNOWS is wave-uniform into a
+// scalar register -- that is why it emits it. When the value really is uniform
+// every lowering agrees and reading our own lane is exact; only a genuinely
+// lane-varying source needs the wave's first active lane. Proving the common
+// case removes the whole class rather than papering over it.
+//
+// The proof is a monotone fixpoint over "this VGPR holds the same value in
+// every ACTIVE lane". It only ever goes true -> false, so loops converge, and
+// anything not modelled falls to false.
+
+// VCC carries values too, and its state decides two idioms below.
+enum class VccState : uint8_t {
+  kVaries,      // nothing known
+  kUniform,     // written from uniform operands
+  kExecOrZero,  // `s_cselect_b64 vcc, exec, 0` / `s_mov_b64 vcc, exec`
+};
+
+bool SourceUniform(uint32_t field, const bool* vgpr_uniform) {
+  // Below 256 is an SGPR or an inline constant: wave-wide either way.
+  return field < 256 || vgpr_uniform[field - 256];
+}
+
+// Which VGPRs a memory/interpolation instruction writes. Sizing this exactly
+// matters: over-clearing marks uniform values as varying and silently loses
+// every proof that depends on them.
+void VgprWrites(const Inst& in, uint32_t& first, uint32_t& count) {
+  const uint32_t w = in.raw[0], w1 = in.raw[1];
+  first = 0;
+  count = 0;
+  switch (in.enc) {
+    case Enc::kVintrp:
+      first = (w >> 18) & 0xFF;
+      count = 1;
+      break;
+    case Enc::kDs: {
+      const uint32_t op = in.opcode;
+      first = (w1 >> 24) & 0xFF;
+      if (op == 54 || op == 0x35 || op == 0x20)
+        count = 1;  // ds_read_b32 / swizzle / add_rtn
+      else if (op == 55 || op == 56 || op == 118)
+        count = 2;  // ds_read2_b32 / read2st64 / read_b64
+      else if (op == 119)
+        count = 4;  // ds_read2_b64
+      break;        // writes store nothing
+    }
+    case Enc::kMubuf: {
+      const uint32_t op = (w >> 18) & 0x7F;
+      first = (w1 >> 8) & 0xFF;
+      if (op <= 0x03)
+        count = op + 1;  // buffer_load_format_x..xyzw
+      else if (op >= 0x08 && op <= 0x0c)
+        count = 1;  // ubyte..sshort, dword
+      else if (op == 0x0d)
+        count = 2;
+      else if (op == 0x0e)
+        count = 4;
+      else if (op == 0x0f)
+        count = 3;
+      else if (((op >= 0x30 && op <= 0x3f) || (op >= 0x50 && op <= 0x5f)) &&
+               ((w >> 14) & 1))
+        count = 1;  // an atomic returns the old value only with GLC
+      break;
+    }
+    case Enc::kMtbuf: {
+      const uint32_t op = (w >> 16) & 0x7;
+      first = (w1 >> 8) & 0xFF;
+      if (op <= 0x03)
+        count = op + 1;  // tbuffer_load_format_x..xyzw
+      break;
+    }
+    case Enc::kMimg: {
+      const uint32_t op = (w >> 18) & 0x7F;
+      first = (w1 >> 8) & 0xFF;
+      if (op == 0x08 || op == 0x09)
+        break;  // image_store writes nothing
+      const uint32_t dmask = (w >> 8) & 0xF;
+      for (uint32_t b = 0; b < 4; b++)
+        count += (dmask >> b) & 1;
+      break;
+    }
+    case Enc::kFlat: {
+      const uint32_t op = (w >> 18) & 0x7F;
+      first = (w1 >> 24) & 0xFF;
+      if (op >= 0x10 && op <= 0x17)
+        count = op == 0x15 ? 2 : op == 0x16 ? 4 : op == 0x17 ? 3 : 1;
+      break;
+    }
+    default:
+      break;
+  }
+}
+
+std::vector<uint8_t> ProvenUniformReadFirstLane(const Program& program,
+                                                const uint8_t* reachable) {
+  std::vector<uint8_t> proven(program.size(), 0);
+  bool uni[256];
+  for (uint32_t i = 0; i < 256; i++)
+    uni[i] = true;
+  uni[0] = uni[1] = uni[2] = false;  // v0..v2 seed the thread id
+
+  for (bool changed = true; changed;) {
+    changed = false;
+    VccState vcc = VccState::kVaries;
+    uint32_t block_pc = 0;
+    for (uint32_t i = 0; i < program.size(); i++) {
+      const Inst& in = program[i];
+      if (reachable && !reachable[i])
+        continue;
+      // A fact only holds along the path it was established on; entering a new
+      // block from an unknown predecessor forgets it.
+      if (BranchKind(in) != 0) {
+        vcc = VccState::kVaries;
+        block_pc = in.pc;
+        continue;
+      }
+      (void)block_pc;
+      const uint32_t w = in.raw[0];
+      const auto clear = [&](uint32_t vdst) {
+        if (vdst < 256 && uni[vdst]) {
+          uni[vdst] = false;
+          changed = true;
+        }
+      };
+      const auto set_from = [&](uint32_t vdst, bool u) {
+        if (!u)
+          clear(vdst);
+      };
+
+      switch (in.enc) {
+        case Enc::kSop1: {  // s_mov_b64 vcc, exec
+          const uint32_t sdst = (w >> 16) & 0x7F, ssrc0 = w & 0xFF;
+          if (in.opcode == 0x04 && sdst == 106 && ssrc0 == 126)
+            vcc = VccState::kExecOrZero;
+          else if (sdst == 106 || sdst == 107)
+            vcc = VccState::kVaries;
+          break;
+        }
+        case Enc::kSop2: {  // s_cselect_b64 vcc, exec, 0
+          const uint32_t sdst = (w >> 16) & 0x7F;
+          const uint32_t a = w & 0xFF, b = (w >> 8) & 0xFF;
+          if (in.opcode == 0x0b && sdst == 106 && a == 126 && b == 128)
+            vcc = VccState::kExecOrZero;
+          else if (sdst == 106 || sdst == 107)
+            vcc = VccState::kVaries;
+          break;
+        }
+        case Enc::kVop1: {
+          const uint32_t vdst = (w >> 17) & 0xFF, src0 = w & 0x1FF;
+          if (in.opcode == 0x02)  // v_readfirstlane_b32: writes an SGPR
+            break;
+          set_from(vdst, SourceUniform(src0, uni));
+          break;
+        }
+        case Enc::kVop2: {
+          const uint32_t op = in.opcode, vdst = (w >> 17) & 0xFF;
+          const uint32_t src0 = w & 0x1FF, vsrc1 = 256 + ((w >> 9) & 0xFF);
+          if (op == 0x01) {  // v_readlane_b32 -> SGPR
+            break;
+          }
+          const bool src_u =
+              SourceUniform(src0, uni) && SourceUniform(vsrc1, uni);
+          switch (op) {
+            case 0x00:  // v_cndmask_b32: the choice is VCC's
+              // Uniform when VCC is, and equally when VCC is exec-or-zero:
+              // then every ACTIVE lane takes the same side.
+              set_from(vdst, src_u && vcc != VccState::kVaries);
+              break;
+            case 0x02:  // v_writelane_b32: one lane only
+              clear(vdst);
+              break;
+            case 0x23:
+            case 0x24:  // v_mbcnt_lo/hi: the lane's own index
+              clear(vdst);
+              break;
+            case 0x28:
+            case 0x29:
+            case 0x2a:  // v_addc/subb/subbrev: carry comes from VCC
+              set_from(vdst, src_u && vcc == VccState::kUniform);
+              vcc = src_u && vcc == VccState::kUniform ? VccState::kUniform
+                                                      : VccState::kVaries;
+              break;
+            case 0x25:
+            case 0x26:
+            case 0x27:  // v_add/sub/subrev_i32: carry OUT to VCC
+              set_from(vdst, src_u);
+              vcc = src_u ? VccState::kUniform : VccState::kVaries;
+              break;
+            default:
+              set_from(vdst, src_u);
+              break;
+          }
+          break;
+        }
+        case Enc::kVopc: {  // writes VCC (or an SGPR pair in VOP3 form)
+          const uint32_t src0 = w & 0x1FF, vsrc1 = 256 + ((w >> 9) & 0xFF);
+          vcc = SourceUniform(src0, uni) && SourceUniform(vsrc1, uni)
+                    ? VccState::kUniform
+                    : VccState::kVaries;
+          break;
+        }
+        case Enc::kVop3: {
+          const uint32_t vdst = w & 0xFF, w1 = in.raw[1];
+          const uint32_t s0 = w1 & 0x1FF, s1 = (w1 >> 9) & 0x1FF,
+                         s2 = (w1 >> 18) & 0x1FF;
+          const bool src_u = SourceUniform(s0, uni) &&
+                             SourceUniform(s1, uni) && SourceUniform(s2, uni);
+          // VOP3 v_cndmask names its selector explicitly, so a scalar selector
+          // makes the choice wave-wide.
+          set_from(vdst, src_u);
+          break;
+        }
+        case Enc::kVintrp:
+        case Enc::kDs:
+        case Enc::kMubuf:
+        case Enc::kMtbuf:
+        case Enc::kMimg:
+        case Enc::kFlat: {
+          // A memory or interpolated result is per-lane unless proven
+          // otherwise, which we do not attempt. Only the registers the op
+          // actually writes may be cleared: a STORE writes none, and clearing
+          // its data registers (or a load's neighbours) poisons values that
+          // are uniform and breaks proofs downstream.
+          uint32_t first = 0, count = 0;
+          VgprWrites(in, first, count);
+          for (uint32_t d = 0; d < count; d++)
+            clear(first + d);
+          break;
+        }
+        default:
+          break;
+      }
+    }
+  }
+
+  // Second walk: record which v_readfirstlane sources came out uniform.
+  VccState vcc = VccState::kVaries;
+  for (uint32_t i = 0; i < program.size(); i++) {
+    const Inst& in = program[i];
+    if (reachable && !reachable[i])
+      continue;
+    if (BranchKind(in) != 0) {
+      vcc = VccState::kVaries;
+      continue;
+    }
+    if (in.enc == Enc::kVop1 && in.opcode == 0x02) {
+      const uint32_t src0 = in.raw[0] & 0x1FF;
+      proven[i] = SourceUniform(src0, uni) ? 1 : 0;
+    }
+  }
+  return proven;
 }
 
 }  // namespace
@@ -1675,6 +1930,8 @@ bool TranslateCs(const Program& program,
   sc.uniform_points = sc.lockstep_loop
                           ? std::vector<uint8_t>(program.size(), 1)
                           : UniformPoints(program);
+  sc.uniform_readfirstlane =
+      ProvenUniformReadFirstLane(program, reachable.data());
   t.SeedExec();
   t.predicate_vector = true;
   EmitCfg(t, program, sc, reachable.data());
@@ -1764,7 +2021,12 @@ std::string PlanSummaryGfx(const Recompiled& r, bool ps) {
 }
 
 std::string PlanSummaryCs(const RecompiledCs& r) {
-  std::string s = "cs plan:";
+  // The threadgroup size decides whether the group is one wave, which is what
+  // lets the guest compiler omit LDS barriers and what gates our lock-step
+  // control flow -- so it belongs in the dump next to the bindings.
+  std::string s = "cs plan: tg=" + std::to_string(r.local_size[0]) + "x" +
+                  std::to_string(r.local_size[1]) + "x" +
+                  std::to_string(r.local_size[2]);
   for (const CsResource& res : r.resources)
     s += " [b" + std::to_string(res.binding) + " s" +
          std::to_string(res.base_sgpr) + " kind=" + std::to_string(res.kind) +

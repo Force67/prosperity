@@ -139,6 +139,8 @@ struct Translator {
   uint32_t xchg_lanes = 0;  // invocations per workgroup (0 = no channel)
   Id xchg_index = 0;        // LocalInvocationIndex
   bool uniform_here = false;
+  // This instruction's v_readfirstlane source is provably wave-uniform.
+  bool readfirstlane_uniform = false;
 
   bool CanExchange() const { return xchg_var && uniform_here; }
 
@@ -629,6 +631,9 @@ struct StageContext {
   // because the guest compiler omitted one it was entitled to omit on a
   // 64-lane wave. See PlanLdsBarriers.
   std::vector<uint32_t> lds_barrier_at;
+  // Per instruction: is this v_readfirstlane's source proven wave-uniform, so
+  // that every lowering of it agrees? See ProvenUniformReadFirstLane.
+  std::vector<uint8_t> uniform_readfirstlane;
   // Per instruction: may the group be synchronised there? See UniformPoints.
   std::vector<uint8_t> uniform_points;
   // Barrier once per dispatch-loop iteration (see LdsBarrierPlan).
