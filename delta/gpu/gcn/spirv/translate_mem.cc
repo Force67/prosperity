@@ -218,12 +218,12 @@ void EmitCbufSmrd(Translator& t,
   const auto it = bindings.find(CbufBindKey(base_sgpr, inst.opcode <= 0x04));
   if (!n || it == bindings.end())
     return;
-  const uint32_t off = w & 0xFF;
-  if (imm) {
+  const SmrdOffset so = DecodeSmrdOffset(inst);
+  if (!so.in_sgpr) {
     for (uint32_t i = 0; i < n; i++)
-      t.SetSg(sdst + i, t.CbufDword(it->second, off + i));
+      t.SetSg(sdst + i, t.CbufDword(it->second, so.dwords + i));
   } else {
-    const Id base = t.Shr(t.SrcRaw(off, inst.literal), t.U32(2));
+    const Id base = t.Shr(t.SrcRaw(so.sgpr, inst.literal), t.U32(2));
     for (uint32_t i = 0; i < n; i++)
       t.SetSg(sdst + i, t.CbufDwordId(it->second, t.Add(base, t.U32(i))));
   }
@@ -262,11 +262,8 @@ bool PlanCbufs(const Program& program,
       cb.pointer = pointer;
       cbufs.push_back(cb);
     }
-    const uint32_t off = w & 0xFF;
-    const uint32_t end =
-        ((w >> 8) & 1)
-            ? off + n
-            : (off == 0xFF && inst.has_literal ? inst.literal / 4 + n : 256);
+    const SmrdOffset so = DecodeSmrdOffset(inst);
+    const uint32_t end = so.in_sgpr ? 256 : so.dwords + n;
     for (ShaderCbuf& cb : cbufs)
       if (cb.binding == it->second)
         cb.num_dwords = std::max(cb.num_dwords, end);
@@ -805,16 +802,13 @@ bool PlanCsResources(const Program& program,
     switch (inst.enc) {
       case Enc::kSmrd: {
         const uint32_t op = inst.opcode, sbase = (w >> 9) & 0x3F;
-        const bool imm = (w >> 8) & 1;
-        const uint32_t off = w & 0xFF;
         if (op > 0x0c)
           return false;  // beyond s_buffer_load_dwordx16
         const uint32_t n = op < 0x08 ? (1u << op) : SmrdLoadCount(op);
         if (!n)
           return false;  // reserved scalar-load opcode
-        const uint32_t bytes =
-            imm ? (off + n) * 4
-                : (off == 0xFF && inst.has_literal ? inst.literal + n * 4 : 0);
+        const SmrdOffset so = DecodeSmrdOffset(inst);
+        const uint32_t bytes = so.in_sgpr ? 0 : (so.dwords + n) * 4;
         const uint32_t base_sgpr = sbase * 2;
         const uint8_t kind = op < 0x08 ? 2 : 0;
         if (!resource(inst.pc, base_sgpr, kind == 2 ? 2 : 4, kind, false,
@@ -883,17 +877,17 @@ bool PlanCsResources(const Program& program,
 void EmitCsSmrd(Translator& t, const Inst& inst, StageContext& sc) {
   const uint32_t w = inst.raw[0], op = inst.opcode;
   const uint32_t sdst = (w >> 15) & 0x7F, sbase = (w >> 9) & 0x3F;
-  const bool imm = (w >> 8) & 1;
-  const uint32_t off = w & 0xFF, base_sgpr = sbase * 2;
+  const uint32_t base_sgpr = sbase * 2;
   const int b = CsBindingFor(sc, inst.pc);
   if (b < 0) {
     sc.cs_unsupported = true;
     return;
   }
   const uint32_t n = op < 0x08 ? (1u << op) : SmrdLoadCount(op);
-  // Immediate offset is a dword index; a register offset is a byte offset.
+  const SmrdOffset so = DecodeSmrdOffset(inst);
   const Id dword_off =
-      imm ? t.U32(off) : t.Shr(t.SrcRaw(off, inst.literal), t.U32(2));
+      so.in_sgpr ? t.Shr(t.SrcRaw(so.sgpr, inst.literal), t.U32(2))
+                 : t.U32(so.dwords);
   for (uint32_t i = 0; i < n; i++)
     t.SetSg(sdst + i, CsSsboLoad(t, sc, static_cast<uint32_t>(b),
                                  t.Add(dword_off, t.U32(i))));

@@ -69,6 +69,7 @@ struct TImage {
   bool storage = false;         // image_store target
   bool null_descriptor = false; // all-zero T# samples transparent zero
   bool valid = false;
+  uint64_t src = 0;  // guest address dword 0 was s_loaded from (0 = user data)
 };
 
 // DST_SEL in the form the renderer's image views take it (x | y<<3 | z<<6 |

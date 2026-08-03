@@ -68,6 +68,34 @@ struct Inst {
 // A decoded shader: the flat instruction list in program order.
 using Program = std::vector<Inst>;
 
+// Where an SMRD scalar load takes its offset from, and in what units. The
+// three forms do NOT share units, and reading a descriptor table at the wrong
+// stride resolves a T#/V# out of whatever else the buffer holds:
+//   IMM=1               OFFSET is an 8-bit DWORD offset.
+//   IMM=0, OFFSET=0xFF  a trailing 32-bit literal, also a DWORD offset (the
+//                       Sea Islands wide-offset form; LLVM encodes it through
+//                       the same byte>>2 conversion as the 8-bit field).
+//   IMM=0 otherwise     OFFSET names an SGPR holding a BYTE offset.
+struct SmrdOffset {
+  uint32_t dwords = 0;    // resolved offset, when it is not in an SGPR
+  uint32_t sgpr = 0;      // SGPR index carrying a byte offset
+  bool in_sgpr = false;   // read `sgpr` instead of `dwords`
+};
+
+inline SmrdOffset DecodeSmrdOffset(const Inst& inst) {
+  const uint32_t w = inst.raw[0], field = w & 0xFF;
+  SmrdOffset o;
+  if ((w >> 8) & 1)
+    o.dwords = field;
+  else if (field == 0xFF && inst.has_literal)
+    o.dwords = inst.literal;
+  else {
+    o.in_sgpr = true;
+    o.sgpr = field;
+  }
+  return o;
+}
+
 // Decode a GCN program. `code` points at the bytecode (guest, host-readable),
 // `max_dwords` bounds the scan (use CodeLength() / the BinaryInfo length).
 // s_endpgm is a basic-block terminator, not an end-of-stream marker: with

@@ -727,6 +727,7 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
           dt.storage = t.storage;
           dt.null_descriptor = t.null_descriptor;
           dt.swizzle = gcn::PackDstSel(t.dst_sel);
+          dt.src = t.src;
         }
         // d.uv_offset was derived from the fetch shader during vertex
         // extraction. DELTA_GPU_TEXFMT: dump sampled texture formats
@@ -787,6 +788,7 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
         dt.storage = t.storage;
         dt.null_descriptor = t.null_descriptor;
         dt.swizzle = gcn::PackDstSel(t.dst_sel);
+        dt.src = t.src;
       }
     }
     // Recompiled-shader path: Recompile the VS/PS pair (cached) and resolve the

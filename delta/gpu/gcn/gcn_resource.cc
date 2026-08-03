@@ -428,12 +428,11 @@ struct ScalarEval {
                    : 0;
     bool offset_known = true;
     uint64_t byte_off = 0;
-    if (s.imm) {
-      byte_off = static_cast<uint64_t>(s.offset) * 4;  // dword offset field
-    } else if (s.offset == 0xFF && inst.has_literal) {
-      byte_off = inst.literal;
-    } else if (s.offset < kRegs && known[s.offset]) {
-      byte_off = sgpr[s.offset];  // SOFFSET SGPR carries a byte offset
+    const SmrdOffset so = DecodeSmrdOffset(inst);
+    if (!so.in_sgpr) {
+      byte_off = static_cast<uint64_t>(so.dwords) * 4;
+    } else if (so.sgpr < kRegs && known[so.sgpr]) {
+      byte_off = sgpr[so.sgpr];
     } else {
       offset_known = false;
     }
@@ -699,9 +698,10 @@ std::vector<VBuffer> TrackVertexBuffers(const Program& fetch_program,
     const uint64_t table = UserDataPointer(vs_user_data, base_sgpr);
     if (!GuestRange(table, 16))
       continue;
-    const uint32_t byte_off =
-        s.imm ? s.offset * 4
-              : (s.offset == 0xFF && inst.has_literal ? inst.literal : 0);
+    const SmrdOffset so = DecodeSmrdOffset(inst);
+    if (so.in_sgpr)
+      continue;  // a register offset needs the scalar walk, not this scan
+    const uint32_t byte_off = so.dwords * 4;
     const VBuffer v =
         DecodeVBuffer(reinterpret_cast<const uint32_t*>(table + byte_off));
     if (v.base >= kGuestLo && v.base < kGuestHi && v.stride &&
@@ -774,8 +774,10 @@ std::vector<TImage> TrackTextures(
 
     TImage t;
     const bool image_ok = eval.AllKnown(srsrc, 8);
-    if (image_ok)
+    if (image_ok) {
       t = DecodeTImage(&eval.sgpr[srsrc]);
+      t.src = eval.src[srsrc];
+    }
     if (eval.trace)
       std::fprintf(stderr,
                    "[eud] MIMG pc=%#x bind=%u srsrc=s%u known=%d base=%#lx "

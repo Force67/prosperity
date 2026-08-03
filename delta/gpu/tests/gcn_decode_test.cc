@@ -39,6 +39,33 @@ TEST(GcnDecode, SmrdImmediateOffsetDoesNotConsumeTrailingDword) {
   EXPECT_EQ(program[1].pc, 1u);
 }
 
+// All three SMRD offset forms, in the units the hardware uses. Reading the
+// literal as bytes put every descriptor a title loads with a wide offset a
+// quarter of the way into its table, so the T# resolved out of neighbouring
+// constant data (Shadow of the Colossus' menu textures).
+TEST(GcnDecode, SmrdOffsetFormsUseTheirOwnUnits) {
+  const uint32_t literal_form[] = {
+      0xc0c216ff,  // s_load_dwordx8 s[4:11], s[22:23], 0x1c14
+      0x00001c14,
+  };
+  const gpu::gcn::SmrdOffset wide =
+      gpu::gcn::DecodeSmrdOffset(gpu::gcn::Decode(literal_form, 2, false)[0]);
+  EXPECT_FALSE(wide.in_sgpr);
+  EXPECT_EQ(wide.dwords, 0x1c14u);
+
+  const uint32_t imm_form[] = {0xc0c217ff};  // ..., 0xff (dword offset)
+  const gpu::gcn::SmrdOffset imm =
+      gpu::gcn::DecodeSmrdOffset(gpu::gcn::Decode(imm_form, 1, false)[0]);
+  EXPECT_FALSE(imm.in_sgpr);
+  EXPECT_EQ(imm.dwords, 0xffu);
+
+  const uint32_t sgpr_form[] = {0xc0c21610};  // ..., s16 (byte offset)
+  const gpu::gcn::SmrdOffset reg =
+      gpu::gcn::DecodeSmrdOffset(gpu::gcn::Decode(sgpr_form, 1, false)[0]);
+  EXPECT_TRUE(reg.in_sgpr);
+  EXPECT_EQ(reg.sgpr, 0x10u);
+}
+
 TEST(GcnDecode, SopkSetregImmediateConsumesTrailingDword) {
   const uint32_t code[] = {
       (0xbu << 28) | (0x15u << 23) | 0x1234u,

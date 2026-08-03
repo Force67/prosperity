@@ -157,6 +157,10 @@ struct DrawInfo {
     bool storage = false;
     bool null_descriptor = false;
     uint32_t swizzle = 0;  // packed T# DST_SEL_X/Y/Z/W (0 = identity)
+    // Guest address the descriptor was s_loaded from (0 = inline user data).
+    // A binding that fails to resolve is only diagnosable from the memory
+    // behind it: whether the slot is zero, stale, or never the shader's.
+    uint64_t src = 0;
   };
   DrawTex texs[24];  // == gpu::vk::kMaxTex
   uint32_t num_texs = 0;

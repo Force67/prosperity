@@ -1467,12 +1467,23 @@ VkDescriptorSet GetMultiTexSet(const DrawInfo& d,
     if (kTexMiss && !v && i < key.num_texs && tex_miss_logged < 64) {
       tex_miss_logged++;
       const auto& t = d.texs[i];
+      // The descriptor's provenance decides what kind of failure this is: a
+      // slot that is zero now was never published, one holding a plausible T#
+      // means the resolver read the wrong place, and src=0 means the shader
+      // took it from inline user data.
+      char mem[96] = "";
+      if (t.src && gpu::IsReadableRange(t.src, 32)) {
+        const auto* w = reinterpret_cast<const uint32_t*>(t.src);
+        std::snprintf(mem, sizeof(mem), " [%08x %08x %08x %08x]", w[0], w[1],
+                      w[2], w[3]);
+      }
       std::fprintf(
           stderr,
           "[texmiss] ps=%#lx bind=%u base=%#lx %ux%u dfmt=%u nfmt=%u "
-          "tiling=%u layers=%u mips=%u arrayed=%d\n",
+          "tiling=%u layers=%u mips=%u arrayed=%d src=%#lx%s\n",
           (unsigned long)d.ps_addr, i, (unsigned long)t.base, t.w, t.h,
-          t.dfmt, t.nfmt, t.tiling, t.layers, t.mip_levels, t.arrayed);
+          t.dfmt, t.nfmt, t.tiling, t.layers, t.mip_levels, t.arrayed,
+          (unsigned long)t.src, mem);
     }
     if (d.texs[i].storage && !v)
       return VK_NULL_HANDLE;
