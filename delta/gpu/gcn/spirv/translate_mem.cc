@@ -1156,7 +1156,12 @@ void EmitCsMimg(Translator& t,
       mip_op ? t.SelectB(is_1d_img, addr_vg(da ? 2 : 1), addr_vg(da ? 3 : 2))
              : t.U32(0);
   if (op == 0x24) {
-    const Id lod_addr = t.SelectB(is_1d_img, addr_vgf(da ? 2 : 1),
+    // SelectF, not SelectB: the operands are the float LOD dwords, and a
+    // uint-typed OpSelect over float operands fails spirv-val ("Expected both
+    // objects to be of Result Type"), which DECLINED every CS containing
+    // image_sample_l. SotC issued three such dispatches, skipped on every
+    // frame since 4087a1a introduced the 1D select.
+    const Id lod_addr = t.SelectF(is_1d_img, addr_vgf(da ? 2 : 1),
                                   addr_vgf(da ? 3 : 2));
     const Id lod = t.m.ExtInst(t.t_f, GLSLstd450FMax, {lod_addr, t.F32(0.f)});
     requested_mip = t.m.Emit(spv::Op::OpConvertFToU, t.t_u, {lod});

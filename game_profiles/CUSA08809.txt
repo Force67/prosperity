@@ -22,13 +22,25 @@
 // Watch the resource queues drain 16294 -> 0 (the load itself completes).
 // +DELTA_GUEST_SUMWATCH=201402ee2d00:110:28:10:1000
 
-// Render-path probes, all of which came back clean on this title.
+// Render-path probes. Most came back clean on this title, but NOT TEXMISS:
+// the "41 unresolved T# bindings" it reported (that number is the LOG CAP,
+// not a count) are real missing textures -- the menu draws its chrome with no
+// glyphs/background. Diagnosis 2026-08-03 (TEXTRACK_FRAME end-to-end trace):
+// the resolver is NOT at fault. The scalar replay follows the SRT chain
+// correctly (s0=SRT -> +0x18 table pointer -> s_load x8 the T#) and reads a
+// descriptor slot that IS zero in guest memory at command-processing time;
+// several slots of the same table resolve fine. Fixing the every-
+// image_sample_l-CS decline (uint Select over float LOD, 4087a1a) made the
+// title's three such dispatches run again but did NOT fill these slots, so
+// whoever writes them is still unknown -- candidates: a GPU-side write our
+// CS stage-out misses, or content the title never loaded. TEXMISS prints
+// the owning PS since the same date.
 // +DELTA_GPU_PRESENT_ADDR=0x804e660000   the busiest offscreen target
 // +DELTA_GPU_PSWHITE=1                   force the fragment colour
 // +DELTA_GPU_PSTEX=2 +DELTA_GPU_PSTEXSCALE=50   export a sampled texel
 // +DELTA_GPU_RTTINT=1                    tint the sampled source
 // +DELTA_GPU_BINDTRACE=0x804390f000      per-binding bucket + read barrier
-// +DELTA_GPU_TEXMISS=1                   41 unresolved T# bindings a run
+// +DELTA_GPU_TEXMISS=1                   unresolved T# bindings, per PS
 // +DELTA_GPU_DRAWSEQ=260 +DELTA_GPU_DRAWRT=1 +DELTA_GPU_WHYDROP=1
 
 // Skip CGame::LoadInitialWorld's gate: no crash, but nothing to draw either.

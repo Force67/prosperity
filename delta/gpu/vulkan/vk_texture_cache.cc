@@ -1469,10 +1469,10 @@ VkDescriptorSet GetMultiTexSet(const DrawInfo& d,
       const auto& t = d.texs[i];
       std::fprintf(
           stderr,
-          "[texmiss] bind=%u base=%#lx %ux%u dfmt=%u nfmt=%u tiling=%u "
-          "layers=%u mips=%u arrayed=%d\n",
-          i, (unsigned long)t.base, t.w, t.h, t.dfmt, t.nfmt, t.tiling,
-          t.layers, t.mip_levels, t.arrayed);
+          "[texmiss] ps=%#lx bind=%u base=%#lx %ux%u dfmt=%u nfmt=%u "
+          "tiling=%u layers=%u mips=%u arrayed=%d\n",
+          (unsigned long)d.ps_addr, i, (unsigned long)t.base, t.w, t.h,
+          t.dfmt, t.nfmt, t.tiling, t.layers, t.mip_levels, t.arrayed);
     }
     if (d.texs[i].storage && !v)
       return VK_NULL_HANDLE;
