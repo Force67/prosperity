@@ -22,16 +22,19 @@
 #include <cstring>
 #include <cstdio>
 
-#if defined(DELTA_BACKEND_NATIVE)
 #include <ctime>
 #include <utl/options.h>
 
+// These three are read unconditionally below (sys_cpuset_getaffinity, the
+// sysctl handlers), so they must be DECLARED unconditionally too. They used to
+// sit behind `#if defined(DELTA_BACKEND_NATIVE)`, which left the FEX/ARM build
+// -- the only one SotC runs under -- with the uses but not the declarations, so
+// this file simply did not compile there.
 namespace {
 DELTA_OPTION(bool, kArndZero, "DELTA_ARND_ZERO", false);
 DELTA_OPTION(bool, kSotc7core, "DELTA_SOTC_7CORE", false);
 DELTA_OPTION(bool, kSysctlCaller, "DELTA_SYSCTL_CALLER", false);
 }  // namespace
-#endif
 
 namespace krnl {
 
