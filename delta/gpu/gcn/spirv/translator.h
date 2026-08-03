@@ -558,6 +558,10 @@ struct StageContext {
   // index), where lanes share and reuse slots over time.
   spv::StorageClass lds_storage = spv::StorageClass::Workgroup;
   Id subgroup_local_id = 0;     // SubgroupLocalInvocationId for DS swizzles
+  // Instruction indices (sorted) at which a workgroup barrier must be emitted
+  // because the guest compiler omitted one it was entitled to omit on a
+  // 64-lane wave. See PlanLdsBarriers.
+  std::vector<uint32_t> lds_barrier_at;
   bool cs_unsupported = false;  // op the compute backend can't model
 };
 

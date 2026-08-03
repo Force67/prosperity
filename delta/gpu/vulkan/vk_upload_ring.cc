@@ -176,6 +176,20 @@ bool CreateUploadRings(const VkPhysicalDeviceProperties& props) {
     // bytes after the 128 bytes of user data): with it, no graphics module
     // ever bakes its own address and the shader cache keys by content.
     gpu::gcn::SetPushBudget(props.limits.maxPushConstantsSize);
+    // A wave64 shader may rely on lockstep the host only gives us within one
+    // subgroup, so the recompiler has to know how wide this device's is.
+    {
+      VkPhysicalDeviceSubgroupProperties sub{
+          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES};
+      VkPhysicalDeviceProperties2 p2{
+          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &sub};
+      vkGetPhysicalDeviceProperties2(g_dev.phys, &p2);
+      gpu::gcn::SetHostSubgroupSize(sub.subgroupSize);
+      std::fprintf(stderr, "[gpuvk] subgroup: %u lanes%s\n", sub.subgroupSize,
+                   gpu::gcn::WaveSplitsAcrossSubgroups()
+                       ? " (a GCN wave spans several)"
+                       : "");
+    }
     g_ring.sbo_stride = (kRawBufWindow + g_ring.sbo_align - 1) &
                         ~(VkDeviceSize)(g_ring.sbo_align - 1);
     VkDescriptorSetLayoutBinding sbs[kRawBufBindings]{};

@@ -147,6 +147,74 @@ TEST(GcnSpirv, RejectsUnsupportedNeoForms) {
   EXPECT_FALSE(Recompile({Vop1(0x50, 254)}));  // LDS_DIRECT is not modeled.
 }
 
+// A wave64 guest compiler omits the s_barrier between an LDS write and an LDS
+// read when the threadgroup is one wave; on a 32-wide host those 64 lanes are
+// two subgroups and the read races the write.
+class WaveScope {
+ public:
+  explicit WaveScope(uint32_t lanes)
+      : old_(gpu::gcn::HostSubgroupSize()) {
+    gpu::gcn::SetHostSubgroupSize(lanes);
+  }
+  ~WaveScope() { gpu::gcn::SetHostSubgroupSize(old_); }
+
+ private:
+  uint32_t old_;
+};
+
+// ds_write_b32 v0, v0  /  ds_read_b32 v1, v0
+constexpr uint32_t kDsWrite0 = 0xd8340000, kDsWrite1 = 0x00000000;
+constexpr uint32_t kDsRead0 = 0xd8d80000, kDsRead1 = 0x01000000;
+
+std::vector<uint32_t> PlanBarriers(std::vector<uint32_t> code,
+                                   uint32_t threads) {
+  const gpu::gcn::Program p = gpu::gcn::Decode(code.data(),
+                                               (uint32_t)code.size(), false);
+  const std::vector<uint8_t> reach = gpu::gcn::ComputeReachability(p);
+  return gpu::gcn::PlanLdsBarriers(p, reach.data(), threads);
+}
+
+TEST(GcnSpirv, Wave64LdsBarriersAreReinsertedOnlyWhereNeeded) {
+  const WaveScope split(32);
+
+  // Straight-line write-then-read: one barrier, immediately before the read.
+  const std::vector<uint32_t> raw{kDsWrite0, kDsWrite1, kDsRead0, kDsRead1,
+                                  kEndPgm};
+  const std::vector<uint32_t> at = PlanBarriers(raw, 64);
+  ASSERT_EQ(at.size(), 1u);
+  EXPECT_EQ(at[0], 1u);  // instruction index of the ds_read
+
+  // More than one wave per group: the guest compiler had to emit its own.
+  EXPECT_TRUE(PlanBarriers(raw, 128).empty());
+  EXPECT_TRUE(PlanBarriers(raw, 256).empty());
+
+  // Reads only, or writes only: nothing to order.
+  EXPECT_TRUE(PlanBarriers({kDsRead0, kDsRead1, kEndPgm}, 64).empty());
+  EXPECT_TRUE(PlanBarriers({kDsWrite0, kDsWrite1, kEndPgm}, 64).empty());
+
+  // A host subgroup at least a wave wide keeps the guest's own guarantee.
+  const WaveScope whole(64);
+  EXPECT_TRUE(PlanBarriers(raw, 64).empty());
+}
+
+TEST(GcnSpirv, Wave64LdsBarrierLandsAfterAConditionalWrite) {
+  const WaveScope split(32);
+  // write ; if(execz) skip a second write ; read
+  //   0: ds_write         1: s_cbranch_execz +2   2: ds_write   3: ds_read
+  const std::vector<uint32_t> code{
+      kDsWrite0, kDsWrite1,
+      0xbf880002,  // s_cbranch_execz pc+2 -> the read
+      kDsWrite0,  kDsWrite1,
+      kDsRead0,   kDsRead1,
+      kEndPgm,
+  };
+  const std::vector<uint32_t> at = PlanBarriers(code, 64);
+  // The conditional block is not a legal barrier point; the merge block that
+  // holds the read is, so the barrier goes there -- after BOTH writes.
+  ASSERT_EQ(at.size(), 1u);
+  EXPECT_EQ(at[0], 3u);  // index of the ds_read, the first merge-block insn
+}
+
 TEST(GcnSpirv, RejectsNeoOnlyEncodingsInBaseMode) {
   const IsaScope base(gpu::gcn::IsaMode::kBase);
   const uint32_t sop2_pack = (2u << 30) | (0x32u << 23) | (128u << 8) | 128u;

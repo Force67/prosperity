@@ -671,6 +671,12 @@ void EmitInstAudited(Translator& t,
                      const Inst& inst,
                      uint32_t index,
                      StageContext& sc) {
+  // A barrier the guest compiler was entitled to omit (see PlanLdsBarriers).
+  if (!sc.lds_barrier_at.empty() &&
+      std::binary_search(sc.lds_barrier_at.begin(), sc.lds_barrier_at.end(),
+                         index))
+    t.m.EmitVoid(spv::Op::OpControlBarrier,
+                 {t.U32(2), t.U32(2), t.U32(0x108)});
   if (!ShaderDebugEnabled()) {
     EmitInst(t, inst, sc);
     return;
@@ -766,7 +772,192 @@ std::vector<uint32_t> BlockStarts(const Program& program, uint32_t max_pc) {
   return starts;
 }
 
+// ---- LDS barriers a wave64 guest compiler was entitled to omit ------------
+// A threadgroup of exactly 64 threads is ONE wave on GCN, so LDS written by
+// one lane is visible to the others with no s_barrier -- the wave is in
+// lockstep by construction, and the guest compiler legally emits none. One
+// lane per invocation puts those 64 lanes in two subgroups on a 32-wide host,
+// where the reads race the writes. The barriers have to be put back.
+//
+// A barrier is only legal where every invocation of the group reaches the same
+// dynamic instance of it. That is the blocks which post-dominate the entry
+// (everyone runs them) and lie outside every cycle (everyone runs them the
+// same number of times). In a straight-line shader that is all of them.
+
+bool IsLdsRead(const Inst& inst) {
+  if (inst.enc != Enc::kDs)
+    return false;
+  const uint32_t op = inst.opcode;
+  return op == 0x20 /* ds_add_rtn_u32 */ || (op >= 54 && op <= 56) ||
+         op == 118 || op == 119;
+}
+
+bool IsLdsWrite(const Inst& inst) {
+  if (inst.enc != Enc::kDs)
+    return false;
+  const uint32_t op = inst.opcode;
+  return op == 0x20 /* rtn atomics read AND write */ ||
+         (op >= 13 && op <= 15) || op == 77;
+}
+
+// Per-block: does every invocation execute this block exactly once?
+std::vector<uint8_t> UniformBlocks(const Program& program,
+                                   const std::vector<uint32_t>& starts,
+                                   uint32_t max_pc) {
+  const uint32_t n = static_cast<uint32_t>(starts.size());
+  const uint32_t exit = n;  // virtual exit block
+  const auto block_of = [&](uint32_t pc) -> uint32_t {
+    if (pc >= max_pc)
+      return exit;
+    uint32_t b = 0;
+    for (uint32_t i = 0; i < n; i++)
+      if (starts[i] <= pc)
+        b = i;
+      else
+        break;
+    return b;
+  };
+
+  std::vector<std::vector<uint32_t>> succ(n + 1);
+  for (uint32_t b = 0; b < n; b++) {
+    const uint32_t end = (b + 1 < n) ? starts[b + 1] : max_pc;
+    int kind = 0;
+    uint32_t target = 0;
+    for (const Inst& inst : program) {
+      if (inst.pc < starts[b] || inst.pc >= end)
+        continue;
+      const int k = BranchKind(inst);
+      if (!k)
+        continue;
+      kind = k;
+      const int32_t simm = static_cast<int16_t>(inst.raw[0] & 0xFFFF);
+      target = static_cast<uint32_t>(static_cast<int32_t>(inst.pc) +
+                                     static_cast<int32_t>(inst.size) + simm);
+    }
+    const uint32_t fall = (b + 1 < n) ? b + 1 : exit;
+    if (kind == 8)
+      succ[b].push_back(exit);  // s_endpgm
+    else if (kind == 1)
+      succ[b].push_back(block_of(target));
+    else if (kind >= 2 && kind <= 7) {
+      succ[b].push_back(block_of(target));
+      succ[b].push_back(fall);
+    } else
+      succ[b].push_back(fall);
+  }
+
+  // Post-dominators: pdom[b] = {b} + intersection over successors.
+  std::vector<std::vector<uint8_t>> pdom(n + 1,
+                                         std::vector<uint8_t>(n + 1, 1));
+  pdom[exit].assign(n + 1, 0);
+  pdom[exit][exit] = 1;
+  for (bool changed = true; changed;) {
+    changed = false;
+    for (uint32_t b = 0; b < n; b++) {
+      std::vector<uint8_t> next(n + 1, succ[b].empty() ? 0 : 1);
+      for (uint32_t s : succ[b])
+        for (uint32_t i = 0; i <= n; i++)
+          next[i] = next[i] && pdom[s][i];
+      next[b] = 1;
+      if (next != pdom[b]) {
+        pdom[b] = std::move(next);
+        changed = true;
+      }
+    }
+  }
+
+  // Cycle membership: a block that can reach itself may run a different number
+  // of times per invocation even when everyone runs it.
+  std::vector<std::vector<uint8_t>> reach(n + 1,
+                                          std::vector<uint8_t>(n + 1, 0));
+  for (uint32_t b = 0; b <= n; b++)
+    for (uint32_t s : succ[b])
+      reach[b][s] = 1;
+  for (uint32_t k = 0; k <= n; k++)
+    for (uint32_t i = 0; i <= n; i++)
+      if (reach[i][k])
+        for (uint32_t j = 0; j <= n; j++)
+          reach[i][j] = reach[i][j] || reach[k][j];
+
+  std::vector<uint8_t> uniform(n, 0);
+  for (uint32_t b = 0; b < n; b++)
+    uniform[b] = pdom[0][b] && !reach[b][b];
+  return uniform;
+}
+
 }  // namespace
+
+// Instruction indices before which the compute backend must emit a workgroup
+// barrier. Empty unless the shader is one that omitted them (see above).
+std::vector<uint32_t> PlanLdsBarriers(const Program& program,
+                                      const uint8_t* reachable,
+                                      uint32_t threads_per_group) {
+  std::vector<uint32_t> at;
+  if (!WaveSplitsAcrossSubgroups() || threads_per_group != kGcnWave)
+    return at;  // >1 wave: the guest compiler had to emit its own barriers
+  bool any_read = false, any_write = false, has_barrier = false;
+  for (uint32_t i = 0; i < program.size(); i++) {
+    if (reachable && !reachable[i])
+      continue;
+    any_read |= IsLdsRead(program[i]);
+    any_write |= IsLdsWrite(program[i]);
+    has_barrier |= program[i].enc == Enc::kSopp && program[i].opcode == 0x0a;
+  }
+  if (!any_read || !any_write || has_barrier)
+    return at;
+
+  const uint32_t max_pc =
+      program.empty() ? 0 : program.back().pc + program.back().size;
+  std::vector<uint8_t> uniform_at(program.size(), 1);
+  if (HasControlFlow(program)) {
+    const std::vector<uint32_t> starts = BlockStarts(program, max_pc);
+    const std::vector<uint8_t> uniform = UniformBlocks(program, starts, max_pc);
+    for (uint32_t i = 0; i < program.size(); i++) {
+      uint32_t b = 0;
+      for (uint32_t s = 0; s < starts.size(); s++)
+        if (starts[s] <= program[i].pc)
+          b = s;
+        else
+          break;
+      uniform_at[i] = b < uniform.size() ? uniform[b] : 0;
+    }
+  }
+
+  // Alternation walk: a read after writes, or a write after reads, needs the
+  // group synchronised in between. Place each barrier as late as it can go --
+  // at the access itself when that sits at a uniform point, else at the last
+  // uniform point after the previous access.
+  int action = 0;  // 1 = a following write needs one, 2 = a following read does
+  uint32_t prev = 0;
+  for (uint32_t i = 0; i < program.size(); i++) {
+    if (reachable && !reachable[i])
+      continue;
+    const bool r = IsLdsRead(program[i]), w = IsLdsWrite(program[i]);
+    if (!r && !w)
+      continue;
+    const bool conflict = (r && action == 2) || (w && action == 1);
+    if (conflict) {
+      uint32_t point = program.size();
+      for (uint32_t k = i; k > prev; k--)
+        if (uniform_at[k]) {
+          point = k;
+          break;
+        }
+      if (point < program.size()) {
+        if (at.empty() || at.back() != point)
+          at.push_back(point);
+      } else {
+        // Nowhere legal to synchronise: every candidate sits under a branch
+        // or inside a loop. Recorded, not declined -- a dispatch that races is
+        // still better than one that never runs, but it must not read as fine.
+        NoteApproximated("lds.wave64-barrier", program[i].opcode);
+      }
+    }
+    action = r ? 1 : 2;
+    prev = i;
+  }
+  return at;
+}
 
 namespace {
 
@@ -1331,6 +1522,10 @@ bool TranslateCs(const Program& program,
                        sc.cs_bind) ||
       r.resources.empty())
     return false;
+  sc.lds_barrier_at = PlanLdsBarriers(
+      program, reachable.data(),
+      (num_thread_x ? num_thread_x : 1) * (num_thread_y ? num_thread_y : 1) *
+          (num_thread_z ? num_thread_z : 1));
 
   bool uses_ds_swizzle = false;
   for (uint32_t i = 0; i < program.size(); i++)

@@ -16,6 +16,8 @@
 #include <cstdint>
 #include <vector>
 
+#include "gpu/gcn/gcn_decode.h"
+
 namespace gpu::gcn {
 
 // Upper bound used by the compute resource planner and Vulkan staging path.
@@ -112,6 +114,28 @@ void SetMaxGfxBuffers(uint32_t n);
 // floor until the renderer reports the device limit, like MaxGfxBuffers.
 bool PushCodeBase();
 void SetPushBudget(uint32_t bytes);
+
+// A GCN wave is 64 lanes. One lane maps to one invocation here, so a host
+// subgroup narrower than that splits a wave across several of them, and the
+// lockstep a wave64 shader is entitled to assume no longer holds. Reported by
+// the renderer at device init; 64 (assume no split) until then.
+constexpr uint32_t kGcnWave = 64;
+uint32_t HostSubgroupSize();
+void SetHostSubgroupSize(uint32_t lanes);
+inline bool WaveSplitsAcrossSubgroups() {
+  return HostSubgroupSize() < kGcnWave;
+}
+
+// Instruction indices before which a compute shader needs a workgroup barrier
+// that its guest compiler was entitled to omit: a 64-thread threadgroup is
+// exactly one wave on GCN, so LDS is coherent across it without an s_barrier,
+// and one-lane-per-invocation breaks that. Empty unless the shader is one of
+// those AND the host subgroup is narrower than a wave. Barriers are only
+// placed where every invocation reaches the same dynamic instance -- blocks
+// that post-dominate the entry and sit outside every cycle.
+std::vector<uint32_t> PlanLdsBarriers(const Program& program,
+                                      const uint8_t* reachable,
+                                      uint32_t threads_per_group);
 
 // A raw (non-format) buffer a graphics stage reads with MUBUF: vertex data the
 // VS fetches by hand rather than through the vertex-input state, a skinning

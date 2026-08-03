@@ -36,6 +36,11 @@ uint32_t g_max_gfx_buffers = kMinGfxBuffers;
 // command processor issues any recompile), read on the recompile path.
 uint32_t g_push_budget = 128;  // the Vulkan floor: no room for code addresses
 
+// Host subgroup width, same write-once-at-init discipline. Defaults to a full
+// GCN wave so a shader planned before the renderer reports it assumes the
+// lockstep the guest compiler assumed.
+uint32_t g_host_subgroup = kGcnWave;
+
 }  // namespace
 
 uint32_t MaxGfxBuffers() {
@@ -52,6 +57,14 @@ bool PushCodeBase() {
 
 void SetPushBudget(uint32_t bytes) {
   g_push_budget = bytes;
+}
+
+uint32_t HostSubgroupSize() {
+  return g_host_subgroup;
+}
+
+void SetHostSubgroupSize(uint32_t lanes) {
+  g_host_subgroup = lanes ? lanes : kGcnWave;
 }
 
 Recompiled Recompile(const uint32_t* vs_code,
