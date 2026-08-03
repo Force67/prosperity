@@ -120,14 +120,22 @@
               # every binary in the shell). Instead expose ONLY the driver libs
               # through a symlink dir: nix binaries never request these names,
               # and the driver's own libc/libX11 deps still resolve to nix libs.
+              # The farm is shared by every shell, so it must never be empty at
+              # any instant: entering a second `nix develop` while the emulator
+              # runs used to `rm -f` the farm out from under it, the ICD then
+              # failed to dlopen, and the renderer silently fell back to
+              # llvmpipe mid-session. Link in place (ln -sf overwrites one link
+              # at a time, so a concurrent reader always sees a usable farm) and
+              # prune only links whose target is gone -- never a resolving one.
               nvdir="/tmp/ps4delta-nvlibs-$(id -u)"
-              mkdir -p "$nvdir" && rm -f "$nvdir"/*.so* 2>/dev/null
+              mkdir -p "$nvdir"
               for l in /usr/lib/aarch64-linux-gnu/libGLX_nvidia.so* \
                        /usr/lib/aarch64-linux-gnu/libnvidia*.so* \
                        /usr/lib/x86_64-linux-gnu/libGLX_nvidia.so* \
                        /usr/lib/x86_64-linux-gnu/libnvidia*.so*; do
                 [ -e "$l" ] && ln -sf "$l" "$nvdir/"
               done
+              find "$nvdir" -maxdepth 1 -xtype l -delete 2>/dev/null
               if ls "$nvdir"/*.so* >/dev/null 2>&1; then
                 # The driver's DT_NEEDED includes X11 libs that nothing else has
                 # loaded yet when the renderer (windowless) dlopens the ICD, so
