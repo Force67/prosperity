@@ -50,7 +50,8 @@
  * NOT ESTABLISHED, deliberately not guessed here:
  *   - sample type has only ever been observed as 0 (both Isaac ports are S16).
  *     1/float32 is implemented from the module's own format table but has never
- *     run; 2/32-bit has no sink mapping at all, so such a port is drained (the
+ *     run; 2/32-bit is a real format (the kernel's PCM path supports 32-bit)
+ *     but the host sink has no mapping for it, so such a port is drained (the
  *     handshake is still completed, so the title cannot wedge) and not played.
  *   - whether the per-channel gains at +0x0c are the consumer's job. The samples
  *     are memcpy'd verbatim, so they almost certainly are; we apply them as one
@@ -164,12 +165,16 @@ bool plausibleSlot(uint32_t bpf, uint32_t type, uint32_t rate, uint32_t grain) {
     return false;
   if (type > 2)
     return false;
-  switch (bpf) {  // exactly the values the module's format jump table produces
-  case 2: case 4: case 8: case 16: case 32:
-    break;
-  default:
+  // The module's format jump table yields whole frames only: s16 at 2 bytes,
+  // f32 and 32-bit at 4 bytes, and the audio block tops out at 8 channels.
+  // Cross-checking the two rejects shapes the module cannot produce -- most
+  // importantly bpf=32 with s16 (16ch) and bpf=2 with f32 (0ch), either of
+  // which used to pass the old value list and open a nonsense sink channel
+  // count. The kernel's own PCM path (kernel_ps4.elf.c) exposes no wider
+  // combination either.
+  const uint32_t bps = type == 0 ? 2u : 4u;
+  if (bpf < bps || bpf % bps != 0 || bpf / bps > 8)
     return false;
-  }
   return true;
 }
 
@@ -302,9 +307,11 @@ void daemonMain() {
                          grain, bpf);
           } else {
             // Sample type 2 ("32-bit") exists in the module's format table but
-            // has never been observed, and the sink has no mapping for it.
-            // Drain the port rather than guess a conversion -- the title keeps
-            // running, just without this port's audio.
+            // has never been observed here. It is a real format: the kernel's
+            // PCM path (kernel_ps4.elf.c) supports 32-bit samples. Only the
+            // host sink lacks a mapping, so drain the port rather than guess a
+            // conversion -- the title keeps running, just without this port's
+            // audio.
             std::fprintf(stderr,
                          "[audiod] port %zu sample type %u is unverified; "
                          "draining without playback\n", k, type);

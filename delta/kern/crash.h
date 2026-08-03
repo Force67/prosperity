@@ -44,6 +44,13 @@ void setAllocTrace(uintptr_t addr, uint64_t minSize);
 // consumer/leaker without a per-call log flood.
 void setHeapProf(uintptr_t addr);
 
+// DELTA_HEAP_PROF_SCOPE=<tls-slot-global>:<depth-offset>: also record, per
+// site, whether the allocating thread had a scoped allocator live. Engines
+// route through a thread-local stack of scopes and fall back to the process
+// heap when it is empty; only the scoped memory comes back on a scope reset,
+// so "this thread had no scope" is a leak a caller-keyed profile cannot show.
+void setHeapProfScope(uintptr_t tlsSlotGlobal, uint64_t depthOffset);
+
 // DELTA_CNT_TRACE: like setAllocTrace but logs the archive entry-count [rdi+0x30]
 // and the inline name [rdi+0x5c] at the hooked entry (push rbp -> int3).
 void setCntTrace(uintptr_t addr);

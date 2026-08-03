@@ -302,40 +302,89 @@ struct HeapProfSlot {
   std::atomic<uintptr_t> caller{0};
   std::atomic<uint64_t> bytes{0};
   std::atomic<uint64_t> count{0};
+  std::atomic<uint64_t> unscoped{0};  // of `bytes`, taken with no scope live
 };
 HeapProfSlot g_heapProf[kHeapProfSlots];
 std::atomic<uint64_t> g_heapProfTotal{0};
-void heapProfRecord(uintptr_t caller, uint64_t size) {
+
+// DELTA_HEAP_PROF_SCOPE=<tls-slot-global>:<depth-offset>. Engines route an
+// allocation through a THREAD-LOCAL stack of scoped allocators and fall back
+// to the process heap when that stack is empty; memory taken from a scope is
+// released wholesale when the scope resets, memory from the fallback is not.
+// A leak that is really "this thread had no scope" is invisible in a profile
+// keyed by call site alone, so record the depth the guest would have read:
+//   slot  = fs_base + *(u64*)<tls-slot-global>   (the guest's own indirection)
+//   block = *(u64*)slot
+//   depth = block ? *(u32*)(block + <depth-offset>) : 0
+uintptr_t g_heapProfScopeSlot = 0;
+uint64_t g_heapProfScopeDepthOff = 0;
+std::atomic<uint64_t> g_heapProfScoped{0}, g_heapProfUnscoped{0};
+
+// Reads through process_vm_readv so a mis-specified address reports nothing
+// instead of taking the run down from inside the trap handler.
+bool heapProfPeek(uintptr_t addr, void *out, size_t n) {
+  if (addr < 0x10000)
+    return false;
+  iovec l{out, n}, r{reinterpret_cast<void *>(addr), n};
+  return ::process_vm_readv(::getpid(), &l, 1, &r, 1, 0) == (ssize_t)n;
+}
+
+uint32_t heapProfScopeDepth(uintptr_t fs_base) {
+  if (!g_heapProfScopeSlot || !fs_base)
+    return 0;
+  uint64_t off = 0, block = 0;
+  uint32_t depth = 0;
+  if (!heapProfPeek(g_heapProfScopeSlot, &off, sizeof(off)))
+    return 0;
+  if (!heapProfPeek(fs_base + off, &block, sizeof(block)))
+    return 0;
+  if (!heapProfPeek(block + g_heapProfScopeDepthOff, &depth, sizeof(depth)))
+    return 0;
+  return depth;
+}
+
+void heapProfRecord(uintptr_t caller, uint64_t size, bool unscoped) {
   uint32_t h = static_cast<uint32_t>((caller * 2654435761u) >> 13) & (kHeapProfSlots - 1);
+  const auto add = [&](uint32_t s) {
+    g_heapProf[s].bytes.fetch_add(size, std::memory_order_relaxed);
+    g_heapProf[s].count.fetch_add(1, std::memory_order_relaxed);
+    if (unscoped)
+      g_heapProf[s].unscoped.fetch_add(size, std::memory_order_relaxed);
+  };
   for (uint32_t i = 0; i < kHeapProfSlots; i++) {
     uint32_t s = (h + i) & (kHeapProfSlots - 1);
     uintptr_t c = g_heapProf[s].caller.load(std::memory_order_relaxed);
     if (c == caller) {
-      g_heapProf[s].bytes.fetch_add(size, std::memory_order_relaxed);
-      g_heapProf[s].count.fetch_add(1, std::memory_order_relaxed);
+      add(s);
       break;
     }
     if (c == 0) {
       uintptr_t expected = 0;
       if (g_heapProf[s].caller.compare_exchange_strong(expected, caller,
                                                        std::memory_order_relaxed)) {
-        g_heapProf[s].bytes.fetch_add(size, std::memory_order_relaxed);
-        g_heapProf[s].count.fetch_add(1, std::memory_order_relaxed);
+        add(s);
         break;
       }
       if (expected == caller) {
-        g_heapProf[s].bytes.fetch_add(size, std::memory_order_relaxed);
-        g_heapProf[s].count.fetch_add(1, std::memory_order_relaxed);
+        add(s);
         break;
       }
     }
   }
   g_heapProfTotal.fetch_add(size, std::memory_order_relaxed);
+  (unscoped ? g_heapProfUnscoped : g_heapProfScoped)
+      .fetch_add(size, std::memory_order_relaxed);
 }
 void heapProfDump() {
   std::fprintf(stderr, "[heapprof] total=%llu bytes (%.1f MB) across sites; top by bytes:\n",
                (unsigned long long)g_heapProfTotal.load(),
                g_heapProfTotal.load() / 1048576.0);
+  if (g_heapProfScopeSlot)
+    std::fprintf(stderr,
+                 "[heapprof] scoped=%.1f MB  unscoped=%.1f MB (no scoped "
+                 "allocator live on the calling thread)\n",
+                 g_heapProfScoped.load() / 1048576.0,
+                 g_heapProfUnscoped.load() / 1048576.0);
   for (int i = 0; i < g_heapProfHookCount; i++) {
     uint64_t b = g_heapProfHookBytes[i].load(std::memory_order_relaxed);
     std::fprintf(stderr, "[heapprof]  hook[%d] %#lx: %8.1f MB  %8llu calls\n", i,
@@ -357,15 +406,24 @@ void heapProfDump() {
     if (bestS == kHeapProfSlots) break;
     uintptr_t c = g_heapProf[bestS].caller.load(std::memory_order_relaxed);
     uint64_t cnt = g_heapProf[bestS].count.load(std::memory_order_relaxed);
+    uint64_t uns = g_heapProf[bestS].unscoped.load(std::memory_order_relaxed);
     char sym[200];
     symbolize(c, sym, sizeof(sym));
-    std::fprintf(stderr, "[heapprof]  %8.1f MB  %8llu calls  %s\n",
-                 bestB / 1048576.0, (unsigned long long)cnt, sym);
+    std::fprintf(stderr, "[heapprof]  %8.1f MB  %8llu calls  %s%s\n",
+                 bestB / 1048576.0, (unsigned long long)cnt, sym,
+                 g_heapProfScopeSlot
+                     ? (uns == bestB ? "  [all unscoped]"
+                                     : uns ? "  [part unscoped]" : "  [scoped]")
+                     : "");
     prevBytes = bestB; prevCaller = c;
   }
   std::fflush(stderr);
 }
 }  // namespace
+void setHeapProfScope(uintptr_t tlsSlotGlobal, uint64_t depthOffset) {
+  g_heapProfScopeSlot = tlsSlotGlobal;
+  g_heapProfScopeDepthOff = depthOffset;
+}
 void setHeapProf(uintptr_t addr) {
   if (g_heapProfHookCount < kHeapProfMaxHooks)
     g_heapProfHooks[g_heapProfHookCount++] = addr;
@@ -948,7 +1006,12 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
       uintptr_t rsp = (uintptr_t)gr[REG_RSP];
       uintptr_t caller = rsp >= 0x10000 ? *reinterpret_cast<uint64_t *>(rsp) : 0;
       uint64_t size = (uint64_t)gr[REG_RDI];
-      heapProfRecord(caller, size);
+      // The guest's fs base is NOT the thread's real fs (the lifter rewrites
+      // guest fs accesses and the host keeps its own TLS there), so ask the
+      // backend for the base the guest's own `fs:0` resolves to.
+      heapProfRecord(
+          caller, size,
+          g_heapProfScopeSlot && heapProfScopeDepth(threadFsBase()) == 0);
       g_heapProfHookBytes[i].fetch_add(size, std::memory_order_relaxed);
       g_heapProfHookCalls[i].fetch_add(1, std::memory_order_relaxed);
       gr[REG_RSP] -= 8;  // emulate the displaced `push rbp`

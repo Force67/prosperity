@@ -22,19 +22,15 @@
 // Watch the resource queues drain 16294 -> 0 (the load itself completes).
 // +DELTA_GUEST_SUMWATCH=201402ee2d00:110:28:10:1000
 
-// Render-path probes. Most came back clean on this title, but NOT TEXMISS:
-// the "41 unresolved T# bindings" it reported (that number is the LOG CAP,
-// not a count) are real missing textures -- the menu draws its chrome with no
-// glyphs/background. Diagnosis 2026-08-03 (TEXTRACK_FRAME end-to-end trace):
-// the resolver is NOT at fault. The scalar replay follows the SRT chain
-// correctly (s0=SRT -> +0x18 table pointer -> s_load x8 the T#) and reads a
-// descriptor slot that IS zero in guest memory at command-processing time;
-// several slots of the same table resolve fine. Fixing the every-
-// image_sample_l-CS decline (uint Select over float LOD, 4087a1a) made the
-// title's three such dispatches run again but did NOT fill these slots, so
-// whoever writes them is still unknown -- candidates: a GPU-side write our
-// CS stage-out misses, or content the title never loaded. TEXMISS prints
-// the owning PS since the same date.
+// The unresolved T# bindings are FIXED (2026-08-03, commit "an SMRD literal
+// offset counts dwords, not bytes"). Every binding that failed was loaded
+// with the wide `s_load_dwordx8 s[4:11], s[20:21], 0x218` form, and every one
+// that resolved used the 8-bit immediate form; we were reading the literal as
+// a BYTE offset, so each descriptor landed a quarter of the way into its
+// table and decoded out of the neighbouring constants (the giveaway: the
+// "descriptors" were 59.94, 0.0167, +/-1.0 -- a cbuffer). TEXMISS now prints
+// the descriptor's source address and the memory behind it, and reports 0
+// misses a run (was 64, the log cap).
 // +DELTA_GPU_PRESENT_ADDR=0x804e660000   the busiest offscreen target
 // +DELTA_GPU_PSWHITE=1                   force the fragment colour
 // +DELTA_GPU_PSTEX=2 +DELTA_GPU_PSTEXSCALE=50   export a sampled texel
@@ -43,6 +39,18 @@
 // +DELTA_GPU_TEXMISS=1                   unresolved T# bindings, per PS
 // +DELTA_GPU_DRAWSEQ=260 +DELTA_GPU_DRAWRT=1 +DELTA_GPU_WHYDROP=1
 
+// THE HEAP: the scoped-allocator routing is RULED OUT (2026-08-03). The 4.1 MB
+// per-frame render surfaces at eboot+0x91906 go through allocator class 1,
+// which 0x12820 takes from a thread-local stack of scopes pushed by 0x12300
+// and popped by 0x12350 (entry stride 0x20, depth at [block+0x400]), falling
+// back to the process heap when that stack is empty. Measured with
+//   +DELTA_HEAP_PROF=0x201400012820 +DELTA_HEAP_PROF_SCOPE=0x2014015fff98:0x400
+// (SIGUSR1 to dump): 0x91906 reports [scoped] for every one of its calls, so
+// those surfaces are NOT leaking through the unscoped fallback. Note the
+// probe must use the backend's guest fs base, not the thread's real one --
+// the lifter rewrites guest fs accesses, so ARCH_GET_FS reports the HOST base
+// and made an earlier run of this measurement read zeros everywhere.
+//
 // Skip CGame::LoadInitialWorld's gate: no crash, but nothing to draw either.
 // +DELTA_SOTC_SKIP_WORLDWAIT=1
 

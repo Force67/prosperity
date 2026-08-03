@@ -49,6 +49,7 @@ DELTA_OPTION(const char *, kVoPatch, "DELTA_VO_PATCH", nullptr);
 DELTA_OPTION(const char *, kTrapVaddr, "DELTA_TRAP_VADDR", nullptr);
 DELTA_OPTION(const char *, kAllocTrace, "DELTA_ALLOC_TRACE", nullptr);
 DELTA_OPTION(const char *, kHeapProf, "DELTA_HEAP_PROF", nullptr);
+DELTA_OPTION(const char *, kHeapProfScope, "DELTA_HEAP_PROF_SCOPE", nullptr);
 DELTA_OPTION(const char *, kCntTrace, "DELTA_CNT_TRACE", nullptr);
 DELTA_OPTION(const char *, kFatalTrace, "DELTA_FATAL_TRACE", nullptr);
 DELTA_OPTION(const char *, kHdrTrace, "DELTA_HDR_TRACE", nullptr);
@@ -1899,6 +1900,17 @@ static void applyBootPatches(proc &p) {
   }
   // DELTA_HEAP_PROF=0xADDR: plant int3 at an operator-new/malloc entry (push rbp,
   // size in rdi) and aggregate bytes+count by guest caller; SIGUSR1 dumps top sites.
+  // DELTA_HEAP_PROF_SCOPE=<tls-slot-global>:<depth-offset>: additionally split
+  // each site by whether the thread had a scoped allocator live (see crash.h).
+  if (const char *hs = kHeapProfScope) {
+    char *cur = const_cast<char *>(hs);
+    const uint64_t slot = std::strtoull(cur, &cur, 0);
+    const uint64_t depth = (*cur == ':') ? std::strtoull(cur + 1, nullptr, 0) : 0;
+    if (slot >= 0x10000) {
+      setHeapProfScope(slot, depth);
+      LOG_INFO("DELTA_HEAP_PROF_SCOPE: tls slot {:#x} depth +{:#x}", slot, depth);
+    }
+  }
   if (const char *hp = kHeapProf) {
     char *cur = const_cast<char *>(hp);
     while (cur && *cur) {
