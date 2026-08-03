@@ -461,8 +461,7 @@ void EmitInst(Translator& t, const Inst& inst, StageContext& sc) {
         EmitCsMimg(t, inst, sc);
       else if (sc.is_ps)
         EmitMimg(t, inst, sc);
-      else if (sc.mimg_plan && (inst.opcode == 0x00 || inst.opcode == 0x01 ||
-                                inst.opcode == 0x24 || inst.opcode == 0x27))
+      else if (sc.mimg_plan && MimgNamesItsLod(inst.opcode))
         // Vertex texture fetch. Only the forms that name their own LOD:
         // an implicit-LOD sample has no derivatives outside a fragment shader.
         EmitMimg(t, inst, sc);
@@ -1491,6 +1490,7 @@ bool RecompileSpirv(const uint32_t* vs_code,
   // VS and PS are separate SPIR-V modules.
   const bool dbg = ShaderDebugEnabled();
   Translator tv;
+  tv.program_base = reinterpret_cast<uint64_t>(vs_code);
   ResetUnsupported();
   if (dbg)
     AuditBegin("vs", vs_code, vs_program);
@@ -1515,6 +1515,7 @@ bool RecompileSpirv(const uint32_t* vs_code,
   }
 
   Translator tp;
+  tp.program_base = reinterpret_cast<uint64_t>(ps_code);
   tp.InitTypes();
   ResetUnsupported();
   if (dbg && ps_code)

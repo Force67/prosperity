@@ -80,7 +80,7 @@ struct DrawInfo {
   // a storage-buffer window and bound at set 2, binding == index here. Empty
   // for shaders that read no such buffer, which is every title whose vertex
   // fetches the vertex-input state already covers.
-  static constexpr uint32_t kMaxBuffers = 4;
+  static constexpr uint32_t kMaxBuffers = 16;
   struct DrawBuffer {
     uint64_t base = 0;
     uint32_t size =

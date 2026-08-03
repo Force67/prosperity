@@ -82,8 +82,25 @@ struct ShaderCbuf {
 // index, so unlike a constant buffer there is no static bound on what it
 // reads; the window is what the renderer can afford to copy per draw, and the
 // shader clamps into it.
-constexpr uint32_t kMaxGfxBuffers = 4;
+// kMaxGfxBuffers is the compile-time ceiling: it sizes the descriptor-layout
+// and per-draw arrays, and nothing may plan a binding at or above it. The
+// binding these live in is a DYNAMIC storage buffer, and
+// maxDescriptorSetStorageBuffersDynamic has a Vulkan floor of only 4 -- so the
+// count actually usable is a device property, not a constant. The renderer
+// calls SetMaxGfxBuffers() once it knows the limit; until then the planner
+// stays at the floor, which is valid everywhere.
+//
+// This matters because a shader is planned against the cap: SotC's deferred
+// pixel shaders reference 5+ distinct raw buffers, and at a cap of 4 every
+// load past the fourth was left unplanned, warned as "mubuf.ps", and took the
+// whole shader down with it.
+constexpr uint32_t kMaxGfxBuffers = 16;
+constexpr uint32_t kMinGfxBuffers = 4;  // the Vulkan floor
 constexpr uint32_t kGfxBufferDwords = 262144;  // 1 MB
+
+// Planner-visible cap, in [kMinGfxBuffers, kMaxGfxBuffers].
+uint32_t MaxGfxBuffers();
+void SetMaxGfxBuffers(uint32_t n);
 
 // A raw (non-format) buffer a graphics stage reads with MUBUF: vertex data the
 // VS fetches by hand rather than through the vertex-input state, a skinning

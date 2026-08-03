@@ -656,7 +656,7 @@ void RdnaPlanGfxBuffers(const Program& program,
     }
     const uint32_t binding =
         first_binding + static_cast<uint32_t>(buffers.size());
-    if (binding >= gpu::gcn::kMaxGfxBuffers) {
+    if (binding >= gpu::gcn::MaxGfxBuffers()) {
       gpu::gcn::WarnUnsupported("mubuf.binding-count", binding + 1);
       continue;
     }

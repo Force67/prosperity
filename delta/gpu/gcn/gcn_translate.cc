@@ -12,6 +12,7 @@
 #include "gpu/gcn/gcn_disasm.h"
 #include "gpu/gcn/spirv/gcn_spirv.h"
 
+#include <algorithm>
 #include <chrono>
 
 namespace gpu::gcn {
@@ -25,7 +26,21 @@ uint64_t NowNs() {
              std::chrono::steady_clock::now().time_since_epoch())
       .count();
 }
+// Set-2 raw-buffer bindings the planner may use. Starts at the Vulkan floor so
+// a shader planned before the renderer reports the device limit is still valid
+// everywhere; SetMaxGfxBuffers raises it once vk_upload_ring knows better.
+// Read on the recompile path only, which is already serialised per shader.
+uint32_t g_max_gfx_buffers = kMinGfxBuffers;
+
 }  // namespace
+
+uint32_t MaxGfxBuffers() {
+  return g_max_gfx_buffers;
+}
+
+void SetMaxGfxBuffers(uint32_t n) {
+  g_max_gfx_buffers = std::clamp(n, kMinGfxBuffers, kMaxGfxBuffers);
+}
 
 Recompiled Recompile(const uint32_t* vs_code,
                       const uint32_t* ps_code,

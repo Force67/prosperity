@@ -97,6 +97,10 @@ struct UploadRings {
   VkDeviceMemory sbo_mem = VK_NULL_HANDLE;
   uint8_t* sbo_map = nullptr;
   VkDeviceSize sbo_offset = 0, sbo_end = kSboRing;
+  // Bindings actually created, = min(device dynamic-SSBO limit, kRawBufBindings).
+  // The recompiler is told this via gcn::SetMaxGfxBuffers so it never plans a
+  // binding the layout does not have.
+  uint32_t sbo_count = gpu::gcn::kMinGfxBuffers;
   uint32_t sbo_align = 256;
   VkDeviceSize sbo_stride = kRawBufWindow;
   std::vector<uint32_t> sbo_written;

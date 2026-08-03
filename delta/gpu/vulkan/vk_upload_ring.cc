@@ -155,16 +155,27 @@ bool CreateUploadRings(const VkPhysicalDeviceProperties& props) {
   {
     g_ring.sbo_align = (uint32_t)std::max<VkDeviceSize>(
         props.limits.minStorageBufferOffsetAlignment, 4);
-    if (props.limits.maxDescriptorSetStorageBuffersDynamic < kRawBufBindings)
+    // These are DYNAMIC storage buffers, and maxDescriptorSetStorageBuffersDynamic
+    // has a Vulkan floor of 4 while real desktop parts report 16+. Take what the
+    // device offers (up to our compile-time ceiling) and tell the recompiler, so
+    // a shader referencing more raw buffers than 4 is planned rather than
+    // declined wherever the hardware can carry it.
+    g_ring.sbo_count =
+        std::min<uint32_t>(props.limits.maxDescriptorSetStorageBuffersDynamic,
+                           kRawBufBindings);
+    if (g_ring.sbo_count < gpu::gcn::kMinGfxBuffers) {
       std::fprintf(stderr,
-                   "[gpuvk] only %u dynamic storage buffers available, need "
-                   "%u: shaders reading raw buffers will decline\n",
-                   props.limits.maxDescriptorSetStorageBuffersDynamic,
-                   kRawBufBindings);
+                   "[gpuvk] only %u dynamic storage buffers available, below "
+                   "the %u Vulkan floor: shaders reading raw buffers will "
+                   "decline\n",
+                   g_ring.sbo_count, gpu::gcn::kMinGfxBuffers);
+      g_ring.sbo_count = gpu::gcn::kMinGfxBuffers;
+    }
+    gpu::gcn::SetMaxGfxBuffers(g_ring.sbo_count);
     g_ring.sbo_stride = (kRawBufWindow + g_ring.sbo_align - 1) &
                         ~(VkDeviceSize)(g_ring.sbo_align - 1);
     VkDescriptorSetLayoutBinding sbs[kRawBufBindings]{};
-    for (uint32_t i = 0; i < kRawBufBindings; i++) {
+    for (uint32_t i = 0; i < g_ring.sbo_count; i++) {
       sbs[i].binding = i;
       sbs[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC;
       sbs[i].descriptorCount = 1;
@@ -173,7 +184,7 @@ bool CreateUploadRings(const VkPhysicalDeviceProperties& props) {
     }
     VkDescriptorSetLayoutCreateInfo sl{
         VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    sl.bindingCount = kRawBufBindings;
+    sl.bindingCount = g_ring.sbo_count;
     sl.pBindings = sbs;
     VKOK(vkCreateDescriptorSetLayout(g_dev.device, &sl, nullptr,
                                      &g_ring.sbo_layout));
@@ -210,7 +221,7 @@ bool EnsureRawBufferRing() {
       0);
 
   VkDescriptorPoolSize sps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC,
-                           kRawBufBindings};
+                           g_ring.sbo_count};
   VkDescriptorPoolCreateInfo spi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
   spi.maxSets = 1;
   spi.poolSizeCount = 1;
@@ -224,7 +235,7 @@ bool EnsureRawBufferRing() {
   VKOK(vkAllocateDescriptorSets(g_dev.device, &sai, &g_ring.sbo_set));
   VkDescriptorBufferInfo sbinfo[kRawBufBindings];
   VkWriteDescriptorSet sw[kRawBufBindings];
-  for (uint32_t i = 0; i < kRawBufBindings; i++) {
+  for (uint32_t i = 0; i < g_ring.sbo_count; i++) {
     sbinfo[i] = {g_ring.sbo_buf, 0, kRawBufWindow};
     sw[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
     sw[i].dstSet = g_ring.sbo_set;
@@ -233,9 +244,11 @@ bool EnsureRawBufferRing() {
     sw[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC;
     sw[i].pBufferInfo = &sbinfo[i];
   }
-  vkUpdateDescriptorSets(g_dev.device, kRawBufBindings, sw, 0, nullptr);
-  std::fprintf(stderr, "[gpuvk] raw-buffer ring: %llu MB, %u KB windows\n",
-               (unsigned long long)(kSboRing >> 20), kRawBufWindow >> 10);
+  vkUpdateDescriptorSets(g_dev.device, g_ring.sbo_count, sw, 0, nullptr);
+  std::fprintf(stderr,
+               "[gpuvk] raw-buffer ring: %llu MB, %u KB windows, %u bindings\n",
+               (unsigned long long)(kSboRing >> 20), kRawBufWindow >> 10,
+               g_ring.sbo_count);
   return true;
 }
 

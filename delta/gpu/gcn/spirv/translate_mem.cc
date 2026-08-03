@@ -282,6 +282,20 @@ bool PlanCbufs(const Program& program,
 // resource also takes a third coordinate, but says so nowhere in the
 // instruction (its DA bit is 0): only the T# type distinguishes it, so it
 // reaches the translator out of band in StageContext::tex_3d_mask.
+// Does this MIMG op state its own LOD? Outside a fragment shader there are no
+// implicit derivatives, so only these may run in a VS. Within the sample block
+// (0x20-0x3f) the low three bits are the LOD mode: 4 = _l (explicit level),
+// 7 = _lz (level zero). The whole gather4 block (0x40-0x5f) samples level zero
+// by definition, and image_load[_mip] indexes a level directly.
+bool MimgNamesItsLod(uint32_t op) {
+  if (op == 0x00 || op == 0x01)
+    return true;
+  if (op >= 0x40 && op <= 0x5f)
+    return true;
+  const uint32_t lod_mode = op & 0x7;
+  return op >= 0x20 && op <= 0x3f && (lod_mode == 4 || lod_mode == 7);
+}
+
 void EmitMimg(Translator& t,
               const Inst& inst,
               StageContext& sc,
@@ -289,9 +303,13 @@ void EmitMimg(Translator& t,
   const uint32_t w0 = inst.raw[0], w1 = inst.raw[1], op = inst.opcode;
   const uint32_t dmask = (w0 >> 8) & 0xF, vaddr = w1 & 0xFF;
   const uint32_t vdata = (w1 >> 8) & 0xFF;
-  const bool dref = op == 0x28 || op == 0x2f;
-  const bool offset = op == 0x37;
-  const bool gather = op == 0x47;
+  // MIMG lays the sample block (0x20-0x3f) and the gather4 block (0x40-0x5f)
+  // out the same way: bit 3 adds the z-compare, bit 4 adds the texel offset,
+  // and the low three bits pick the LOD mode. Gather is always level zero in
+  // Vulkan, so the _lz in gather4_c_lz_o needs no operand of its own.
+  const bool gather = op >= 0x40 && op <= 0x5f;
+  const bool dref = op == 0x28 || op == 0x2f || (gather && (op & 0x08));
+  const bool offset = op == 0x37 || (gather && (op & 0x10));
   const auto addr_u = [&](uint32_t index) {
     return address ? address[index] : t.Vg(vaddr + index);
   };
@@ -423,6 +441,9 @@ void EmitMimg(Translator& t,
     return;
   }
 
+  // VADDR order is [offset][compare][coords], so a compared-and-offset form
+  // (image_gather4_c_lz_o) finds its z-compare at word 1, not word 0.
+  const uint32_t dref_index = offset ? 1u : 0u;
   const uint32_t body_addr = vaddr + (offset ? 1u : 0u) + (dref ? 1u : 0u);
   const uint32_t body_index = body_addr - vaddr;
   Id x = addr_f(body_index);
@@ -458,7 +479,7 @@ void EmitMimg(Translator& t,
       static_cast<uint32_t>(spv::ImageOperandsMask::Lod);
   const bool known = op == 0x00 || op == 0x01 || op == 0x20 || op == 0x21 ||
                      op == 0x24 || op == 0x25 || op == 0x27 || op == 0x28 ||
-                     op == 0x2f || op == 0x37 || op == 0x47;
+                     op == 0x2f || op == 0x37 || gather;
   if (!known)
     WarnUnsupported("mimg", op, w0, w1);
 
@@ -489,13 +510,19 @@ void EmitMimg(Translator& t,
          addr_f(is_1d ? body_index + addr_components : coord_components)});
   } else if (op == 0x28) {  // image_sample_c: z-compare precedes the body
     texel = t.m.Emit(spv::Op::OpImageSampleDrefImplicitLod, t.t_f,
-                     {si, uv, addr_f(0)});
+                     {si, uv, addr_f(dref_index)});
   } else if (op == 0x2f) {  // image_sample_c_lz: PCF forced to level zero
     texel = t.m.Emit(spv::Op::OpImageSampleDrefExplicitLod, t.t_f,
-                     {si, uv, addr_f(0), lod_operand, t.F32(0.0f)});
+                     {si, uv, addr_f(dref_index), lod_operand, t.F32(0.0f)});
   } else if (op == 0x27 || op == 0x37) {  // image_sample_lz[_o]: forced LOD 0
     texel = t.m.Emit(spv::Op::OpImageSampleExplicitLod, t.t_v4,
                      {si, uv, lod_operand, t.F32(0.0f)});
+  } else if (gather && dref) {
+    // image_gather4_c*: four PCF comparisons, one per texel of the footprint.
+    // OpImageDrefGather takes no component operand -- the compare result IS the
+    // gathered value -- and yields a vec4 like the uncompared gather.
+    texel = t.m.Emit(spv::Op::OpImageDrefGather, t.t_v4,
+                     {si, uv, addr_f(dref_index)});
   } else if (gather) {  // DMASK selects the gathered channel
     uint32_t component = 0;
     while (component < 3 && !(dmask & (1u << component)))
@@ -520,14 +547,16 @@ void EmitMimg(Translator& t,
         t.t_v4, {t.FMul(x, t.F32(kDebugUv)), t.FMul(y, t.F32(kDebugUv)),
                  t.F32(0.f), t.F32(1.f)});
 
-  if (dref) {
-    if (dmask)
-      t.SetVgF(vdata, texel);
-    return;
-  }
+  // Gather first: a COMPARED gather still returns four values, so testing dref
+  // ahead of it would store the vec4 into a single VGPR as if it were scalar.
   if (gather) {
     for (int i = 0; i < 4; i++)
       t.SetVgF(vdata + i, t.m.CompositeExtract(t.t_f, texel, i));
+    return;
+  }
+  if (dref) {
+    if (dmask)
+      t.SetVgF(vdata, texel);
     return;
   }
   uint32_t out = 0;
@@ -634,7 +663,7 @@ void PlanGfxBuffers(const Program& program,
     }
     const uint32_t binding =
         first_binding + static_cast<uint32_t>(buffers.size());
-    if (binding >= kMaxGfxBuffers) {
+    if (binding >= MaxGfxBuffers()) {
       WarnUnsupported("mubuf.binding-count", binding + 1);
       continue;  // over the cap: the emitter warns and leaves the VGPRs zero
     }

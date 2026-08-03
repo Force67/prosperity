@@ -64,6 +64,11 @@ struct Translator {
   Id p_priv_u = 0, sgpr = 0, vgpr = 0;
   bool predicate_vector = false;
   bool rdna_sources = false;
+  // Guest address of dword 0 of the program being translated. Guest memory is
+  // identity-mapped, so this is just the code pointer. s_getpc_b64 needs it:
+  // shaders form absolute addresses from their own PC to reach descriptors
+  // stored alongside the code, and a PC of zero sends those loads to null.
+  uint64_t program_base = 0;
   Id scc_var = 0;    // scalar condition code
   Id state_var = 0;  // CFG block index for the while-switch dispatch
   Id cbuf_type = 0;  // shared CB { uvec4 data[64]; } type
@@ -607,6 +612,9 @@ bool PlanCbufs(const Program& program,
 void EmitCbufSmrd(Translator& t,
                   const Inst& inst,
                   const std::unordered_map<uint32_t, uint32_t>& bindings);
+// True for the MIMG ops that state their own LOD, i.e. the ones legal outside a
+// fragment shader (see the definition for the opcode-bit reasoning).
+bool MimgNamesItsLod(uint32_t op);
 void EmitMimg(Translator& t,
               const Inst& inst,
               StageContext& sc,

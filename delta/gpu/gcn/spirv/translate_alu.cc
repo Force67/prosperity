@@ -211,6 +211,17 @@ void EmitSop1(Translator& t, const Inst& inst) {
       t.SetSccBool(t.IsNonZero(r));
       break;
     }
+    case 0x1f: {  // s_getpc_b64: sdst = PC + 4, i.e. the NEXT instruction
+      // Shaders use this to build an absolute address from their own location
+      // -- typically s_getpc_b64 / s_add_u32 / s_addc_u32 / s_load_dwordx*, to
+      // reach a descriptor the toolchain stored next to the code. Guest memory
+      // is identity-mapped, so the program's guest address is its code pointer,
+      // and s_getpc is one dword wide.
+      const uint64_t next = t.program_base + (inst.pc + 1) * 4ull;
+      t.SetSdst(sdst, 0, t.U32(static_cast<uint32_t>(next)));
+      t.SetSdst(sdst, 1, t.U32(static_cast<uint32_t>(next >> 32)));
+      break;
+    }
     default:
       WarnUnsupported("sop1", op);
       break;
