@@ -175,10 +175,13 @@ TEST(GcnSpirv, BaseVop3OutputModifiersAreNotIgnored) {
   cvt_f16.back() |= 1u << 27;
   EXPECT_TRUE(Recompile(std::move(cvt_f16)));
 
+  // An integer result IGNORES the output modifier on hardware ("Integer and
+  // non-specific instructions ignore output modifiers", Sea Islands ISA), so
+  // dropping it is exact. Declining the shader over it was the defect.
   std::vector<uint32_t> integer;
   AppendVop3(integer, 0x169);  // v_mul_lo_u32
   integer.back() |= 1u << 27;
-  EXPECT_FALSE(Recompile(std::move(integer)));
+  EXPECT_TRUE(Recompile(std::move(integer)));
 }
 
 TEST(GcnSpirv, BaseSeaIslandsCorrectionsAreAcceptedOrRejectedExplicitly) {

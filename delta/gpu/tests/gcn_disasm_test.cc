@@ -162,9 +162,14 @@ TEST(GcnDisasm, SeaIslandsSparseOpcodeNames) {
   EXPECT_EQ(Name(Enc::kMubuf, 0x34), "mubuf_op0x34");
   EXPECT_EQ(Name(Enc::kMubuf, 0x54), "mubuf_op0x54");
   EXPECT_EQ(Name(Enc::kMimg, 0x13), "mimg_op0x13");
-  EXPECT_EQ(Name(Enc::kMimg, 0x42), "image_gather4_l");
-  EXPECT_EQ(Name(Enc::kMimg, 0x44), "image_gather4_b_cl");
-  EXPECT_EQ(Name(Enc::kMimg, 0x48), "mimg_op0x48");
+  // gather4 has no derivative forms, so 0x42/0x43 and 0x4a/0x4b are holes and
+  // the entries after them are NOT shifted up.
+  EXPECT_EQ(Name(Enc::kMimg, 0x42), "mimg_op0x42");
+  EXPECT_EQ(Name(Enc::kMimg, 0x44), "image_gather4_l");
+  EXPECT_EQ(Name(Enc::kMimg, 0x47), "image_gather4_lz");
+  EXPECT_EQ(Name(Enc::kMimg, 0x48), "image_gather4_c");
+  EXPECT_EQ(Name(Enc::kMimg, 0x4b), "mimg_op0x4b");
+  EXPECT_EQ(Name(Enc::kMimg, 0x57), "image_gather4_lz_o");
   EXPECT_EQ(Name(Enc::kFlat, 0x0c), "flat_load_dword");
   EXPECT_EQ(Name(Enc::kFlat, 0x31), "flat_atomic_cmpswap");
 }
