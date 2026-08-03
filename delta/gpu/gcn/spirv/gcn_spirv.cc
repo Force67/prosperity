@@ -475,10 +475,19 @@ void EmitInst(Translator& t, const Inst& inst, StageContext& sc) {
         EmitGfxMtbuf(t, inst, sc);
       break;
     case Enc::kDs:
-      if (sc.is_cs || inst.opcode == 0x35)
+      if (sc.is_cs || inst.opcode == 0x35) {
         EmitDs(t, inst, sc);
-      else
+      } else if (sc.lds_var && DsGraphicsSupported(inst.opcode)) {
+        // Private-backed LDS: exact for the per-lane addressing a fragment
+        // shader can express, which is the whole of what these compilers emit
+        // (a spill). Recorded, not silently accepted, because the translator
+        // cannot prove the address is the lane's own slot -- see the note on
+        // StageContext::lds_storage for where that stops being true.
+        NoteApproximated("ds.private", inst.opcode);
+        EmitDs(t, inst, sc);
+      } else {
         WarnUnsupported("ds.graphics", inst.opcode, w, w1);
+      }
       break;
     case Enc::kMimg:
       if (sc.is_cs)
@@ -1071,6 +1080,20 @@ bool TranslatePs(const Program& program,
   // Set 2 is shared with the VS, so PS bindings continue after the VS's.
   PlanGfxBuffers(program, r.vs_bufs.size(), nullptr, r.ps_bufs, sc.gfx_buf_bind,
                  reachable.data());
+
+  // LDS, when the shader spills to it. Private (one array per invocation), not
+  // Workgroup, which SPIR-V forbids in a fragment shader. Zero-initialised:
+  // hardware returns garbage for a read-before-write and SPIR-V would leave it
+  // undefined, so pinning it keeps runs reproducible and stops uninitialised
+  // lanes poisoning the NaN audit.
+  if (const uint32_t lds_dwords = GraphicsLdsDwords(program, reachable.data())) {
+    const Id lds_arr = t.m.TypeArray(t.t_u, lds_dwords);
+    sc.lds_storage = spv::StorageClass::Private;
+    sc.lds_dwords = lds_dwords;
+    sc.lds_var = t.m.Variable(t.m.TypePointer(spv::StorageClass::Private, lds_arr),
+                              spv::StorageClass::Private, t.m.ConstNull(lds_arr));
+    t.m.Name(sc.lds_var, "lds");
+  }
 
   // Sampler bindings: one per unique descriptor (shared plan with
   // TrackTextures). More unique samplers than the renderer's set-0 layout

@@ -67,6 +67,16 @@ corrupting memory.
   `ClampInfToFltMax` / `ConvertInfToZero` touching only infinities.
 - Output modifiers (OMOD) on integer results and on VOPC lane masks are
   *ignored*, which is what the hardware does — not a gap.
+- LDS in a **graphics** stage is backed by `Private` storage, one array per
+  invocation, because SPIR-V allows `Workgroup` only in a compute (or task/mesh)
+  shader. This is exact for per-lane addressing — which is all a fragment shader
+  can legally express in Vulkan, and all the Orbis compiler emits here: a spill,
+  addressed by `v_mbcnt_{lo,hi}(-1)`, i.e. the lane's own slot. Genuine
+  cross-lane LDS in a graphics stage has no lowering and still declines by
+  construction, as do DS atomics (Vulkan forbids atomics on a `Private` pointer)
+  and any access to the **global** data share (DS word 0 bit 17). Recorded as
+  `ds.private` in the audit, since the translator cannot prove the addressing is
+  per-lane.
 - Buffer/image atomics, `s_getreg`/`s_setreg`: not modelled.
 - MTBUF moves raw dwords (exact for 32-bit formats and matched load/store
   round trips; packed-format conversion is not applied).

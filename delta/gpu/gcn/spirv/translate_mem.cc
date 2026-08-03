@@ -1479,6 +1479,61 @@ void EmitCsMimg(Translator& t,
 // LDS is a Workgroup uint array; addresses are byte-based. Single ops add the
 // 16-bit offset to the address; pair ops address elements at offset0/1 *
 // element size (x64 for the st64 forms). Indices clamp into the allocation.
+bool DsGraphicsSupported(uint32_t op) {
+  switch (op) {
+    case 13:   // ds_write_b32
+    case 14:   // ds_write2_b32
+    case 15:   // ds_write2st64_b32
+    case 54:   // ds_read_b32
+    case 55:   // ds_read2_b32
+    case 56:   // ds_read2st64_b32
+    case 77:   // ds_write_b64
+    case 118:  // ds_read_b64
+    case 119:  // ds_read2_b64
+      return true;
+    default:
+      return false;  // atomics and the rest: no Private lowering exists
+  }
+}
+
+uint32_t GraphicsLdsDwords(const Program& program, const uint8_t* reachable) {
+  uint32_t max_bytes = 0;
+  bool any = false;
+  for (size_t i = 0; i < program.size(); i++) {
+    const Inst& inst = program[i];
+    if (inst.enc != Enc::kDs || (reachable && !reachable[i]))
+      continue;
+    if (!DsGraphicsSupported(inst.opcode))
+      continue;
+    any = true;
+    const uint32_t w = inst.raw[0];
+    uint32_t reach = 0;
+    switch (inst.opcode) {
+      case 14:
+      case 55:  // pair forms: two byte offsets, each scaled by the element size
+      case 119:
+        reach = std::max(w & 0xFF, (w >> 8) & 0xFF) * 8u;
+        break;
+      case 15:
+      case 56:  // ...and the st64 forms stride 64 elements per unit
+        reach = std::max(w & 0xFF, (w >> 8) & 0xFF) * 8u * 64u;
+        break;
+      default:
+        reach = w & 0xFFFF;  // single form: one 16-bit byte offset
+        break;
+    }
+    max_bytes = std::max(max_bytes, reach);
+  }
+  // Keyed on whether any DS instruction exists, not on the largest offset: a
+  // shader whose accesses all sit at offset 0 still needs the array.
+  if (!any)
+    return 0;
+  // Plus the per-lane span the address itself can carry (a 64-lane wave, one
+  // dword each) and room for the widest element.
+  const uint32_t dwords = (max_bytes + 64u * 4u + 8u) / 4u;
+  return std::min(dwords, 4096u);
+}
+
 void EmitDs(Translator& t, const Inst& inst, StageContext& sc) {
   const uint32_t w = inst.raw[0], w1 = inst.raw[1], op = inst.opcode;
   if (op != 0x35 && (!sc.lds_var || !sc.lds_dwords)) {
@@ -1490,7 +1545,14 @@ void EmitDs(Translator& t, const Inst& inst, StageContext& sc) {
   const uint32_t addr_reg = w1 & 0xFF, data0 = (w1 >> 8) & 0xFF;
   const uint32_t data1 = (w1 >> 16) & 0xFF, vdst = (w1 >> 24) & 0xFF;
 
-  const Id p_lds = t.m.TypePointer(spv::StorageClass::Workgroup, t.t_u);
+  // DS word 0 bit 17 selects the GLOBAL data share, which is shared across
+  // wavefronts and thread groups. Private storage is maximally wrong for it,
+  // and the Workgroup array is not right either.
+  if ((w >> 17) & 1) {
+    WarnUnsupported("ds.gds", op, w, w1);
+    return;
+  }
+  const Id p_lds = t.m.TypePointer(sc.lds_storage, t.t_u);
   const auto lds_at = [&](Id byte_addr) {
     const Id idx = t.UMin(t.Shr(byte_addr, t.U32(2)), t.U32(sc.lds_dwords - 1));
     return t.m.AccessChain(p_lds, sc.lds_var, {idx});

@@ -527,8 +527,17 @@ struct StageContext {
   // Compute: storage buffers modelling the guest memory the CS reads/writes.
   std::unordered_map<uint32_t, uint32_t> cs_bind;  // instruction pc -> binding
   std::vector<Id> cs_ssbo;                         // binding -> SSBO variable
-  Id lds_var = 0;               // Workgroup-storage uint array (0 = no LDS)
-  uint32_t lds_dwords = 0;      // its length
+  Id lds_var = 0;           // uint array backing LDS (0 = no LDS)
+  uint32_t lds_dwords = 0;  // its length
+  // Workgroup in a CS. A fragment shader cannot declare Workgroup storage at
+  // all -- SPIR-V allows that class only in GLCompute/Kernel/Task/Mesh -- so a
+  // graphics stage backs LDS with Private, one copy per invocation. That is
+  // exact precisely when every address is the lane's OWN slot, which is what
+  // `v_mbcnt_{lo,hi}(-1)` computes: the ISA counts bits in the explicit vsrc
+  // mask, so an all-ones mask yields the raw thread id regardless of EXEC.
+  // The idiom that would break it is mbcnt applied to EXEC (a compaction
+  // index), where lanes share and reuse slots over time.
+  spv::StorageClass lds_storage = spv::StorageClass::Workgroup;
   Id subgroup_local_id = 0;     // SubgroupLocalInvocationId for DS swizzles
   bool cs_unsupported = false;  // op the compute backend can't model
 };
@@ -615,6 +624,15 @@ void EmitCbufSmrd(Translator& t,
 // True for the MIMG ops that state their own LOD, i.e. the ones legal outside a
 // fragment shader (see the definition for the opcode-bit reasoning).
 bool MimgNamesItsLod(uint32_t op);
+// DS ops a graphics stage may run against Private-backed LDS: the plain loads
+// and stores only. Atomics are excluded because Vulkan does not allow them on a
+// Private pointer, and everything else declines.
+bool DsGraphicsSupported(uint32_t op);
+// Dwords of Private LDS a graphics program needs, from the largest address its
+// DS instructions can reach. 0 if it has none. Sized statically rather than
+// from M0: these shaders set M0 to 0x10000, the whole 64 KB, which is an upper
+// bound meaning "unrestricted", not an allocation.
+uint32_t GraphicsLdsDwords(const Program& program, const uint8_t* reachable);
 void EmitMimg(Translator& t,
               const Inst& inst,
               StageContext& sc,
