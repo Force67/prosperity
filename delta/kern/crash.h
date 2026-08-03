@@ -42,7 +42,10 @@ void setAllocTrace(uintptr_t addr, uint64_t minSize);
 // in rdi (operator new / malloc). Each hit aggregates bytes+count keyed by the
 // guest caller ([rsp]); SIGUSR1 dumps the top sites. Finds the heap's dominant
 // consumer/leaker without a per-call log flood.
-void setHeapProf(uintptr_t addr);
+// `countOnly` for an entry whose first argument is not a size (a deallocator
+// takes a pointer): the site is then ranked and reported by call count, with
+// the byte column left at one per call rather than filled with pointer values.
+void setHeapProf(uintptr_t addr, bool countOnly = false);
 
 // DELTA_HEAP_PROF_SCOPE=<tls-slot-global>:<depth-offset>: also record, per
 // site, whether the allocating thread had a scoped allocator live. Engines

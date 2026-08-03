@@ -296,6 +296,7 @@ static uintptr_t g_heapProfHooks[kHeapProfMaxHooks];
 static int g_heapProfHookCount = 0;
 static std::atomic<uint64_t> g_heapProfHookBytes[kHeapProfMaxHooks];
 static std::atomic<uint64_t> g_heapProfHookCalls[kHeapProfMaxHooks];
+static bool g_heapProfCountOnly[kHeapProfMaxHooks];
 namespace {
 constexpr uint32_t kHeapProfSlots = 16384;
 struct HeapProfSlot {
@@ -424,9 +425,11 @@ void setHeapProfScope(uintptr_t tlsSlotGlobal, uint64_t depthOffset) {
   g_heapProfScopeSlot = tlsSlotGlobal;
   g_heapProfScopeDepthOff = depthOffset;
 }
-void setHeapProf(uintptr_t addr) {
-  if (g_heapProfHookCount < kHeapProfMaxHooks)
+void setHeapProf(uintptr_t addr, bool countOnly) {
+  if (g_heapProfHookCount < kHeapProfMaxHooks) {
+    g_heapProfCountOnly[g_heapProfHookCount] = countOnly;
     g_heapProfHooks[g_heapProfHookCount++] = addr;
+  }
   g_heapProfAddr = addr;  // any non-zero arms the SIGTRAP path
 }
 // Throttle to one dump per SIGUSR1 burst (every thread gets the signal).
@@ -1005,7 +1008,7 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
         continue;
       uintptr_t rsp = (uintptr_t)gr[REG_RSP];
       uintptr_t caller = rsp >= 0x10000 ? *reinterpret_cast<uint64_t *>(rsp) : 0;
-      uint64_t size = (uint64_t)gr[REG_RDI];
+      const uint64_t size = g_heapProfCountOnly[i] ? 1u : (uint64_t)gr[REG_RDI];
       // The guest's fs base is NOT the thread's real fs (the lifter rewrites
       // guest fs accesses and the host keeps its own TLS there), so ask the
       // backend for the base the guest's own `fs:0` resolves to.

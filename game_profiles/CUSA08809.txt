@@ -1,13 +1,14 @@
 // SHADOW OF THE COLOSSUS (CUSA08809, PS4)
-// Boots, loads its modules, returns from LoadInitialWorld and runs the main loop
-// with the renderer live. The screen is black because the title submits NO
-// world geometry: of 400 draws only 65 carry vertex data and every one of those
-// is a two-triangle HUD quad, the rest being fullscreen post passes. The render
-// path itself is verified correct (PSWHITE paints the screen white, RTTINT
-// turns it blue). The real blocker is memory: the world content streaming
-// behind the main loop burns the engine's whole 1 GiB CPU heap in a ~500 MiB
-// burst and it then walks off its own "no free block" sentinel at
-// eboot+0x1a371, about ten seconds in (2026-08-01).
+// Boots, loads its modules, returns from LoadInitialWorld and runs the main
+// loop with the renderer live, and RENDERS ITS INTRO: the "Sony Interactive
+// Entertainment presents" card and the JAPAN Studio logo both come up with
+// correct glyphs and colour (2026-08-03, after the SMRD literal-offset fix
+// below). 131-146 unique shaders recompile, none declined.
+// The blocker is memory: the world content streaming behind the main loop
+// burns the engine's whole 1 GiB CPU heap and it then walks off its own
+// "no free block" sentinel at eboot+0x1a371, about ten seconds in.
+// DELTA_GUEST_NULLGUARD=1a371:rax:4 makes that survivable (a diagnostic, not
+// a fix -- the memory it was denied is still denied).
 
 // The world-load spin hammers sched_yield (6.4M calls in 20 s), which our
 // default maps to a pause; a real host yield lets the load finish first.
@@ -39,6 +40,19 @@
 // +DELTA_GPU_TEXMISS=1                   unresolved T# bindings, per PS
 // +DELTA_GPU_DRAWSEQ=260 +DELTA_GPU_DRAWRT=1 +DELTA_GPU_WHYDROP=1
 
+// THE HEAP, measured (2026-08-03). Over 40 s the title makes 1,758,140
+// allocations and 1,229,146 frees, i.e. it really does retain a large share of
+// what it takes -- this is not "nothing is ever freed". The deallocator is
+// eboot+0x12af0 (rdi = pointer, dispatched through the allocator's vtable slot
+// +0xa8, falling back to 0x19a50 to find the owner); profile it with the `:c`
+// suffix, which ranks by call count instead of by a first argument that is not
+// a size:
+//   +DELTA_HEAP_PROF=0x201400012820,0x201400012af0:c
+// What that still cannot say is WHICH site's memory is retained, because a
+// free is called from a destructor rather than from the allocating code. The
+// tool that would settle it is live-bytes-per-site, which needs the allocation
+// pointer and so needs the allocator's RETURN hooked, not its entry.
+//
 // THE HEAP: the scoped-allocator routing is RULED OUT (2026-08-03). The 4.1 MB
 // per-frame render surfaces at eboot+0x91906 go through allocator class 1,
 // which 0x12820 takes from a thread-local stack of scopes pushed by 0x12300

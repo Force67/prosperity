@@ -1915,11 +1915,18 @@ static void applyBootPatches(proc &p) {
     char *cur = const_cast<char *>(hp);
     while (cur && *cur) {
       uint64_t addr = std::strtoull(cur, &cur, 0);
+      // "<addr>:c" marks a deallocator: its first argument is a pointer, so
+      // the site is reported by call count instead of by bytes.
+      bool countOnly = false;
+      if (*cur == ':' && (cur[1] == 'c' || cur[1] == 'C')) {
+        countOnly = true;
+        cur += 2;
+      }
       if (addr >= 0x10000) {
         auto *c = reinterpret_cast<uint8_t *>(addr);
         utl::protectMem(reinterpret_cast<void *>(addr & ~0xFFFull), 0x1000,
                         utl::pageProtection::rwx);
-        if (c[0] == 0x55) { c[0] = 0xCC; setHeapProf(addr);
+        if (c[0] == 0x55) { c[0] = 0xCC; setHeapProf(addr, countOnly);
           LOG_INFO("DELTA_HEAP_PROF: hooked alloc entry {:#x}", addr);
         } else {
           LOG_WARNING("DELTA_HEAP_PROF: {:#x} first byte {:#x} != push rbp", addr, c[0]);
