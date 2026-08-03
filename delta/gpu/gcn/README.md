@@ -53,9 +53,13 @@ corrupting memory.
   v0..) is not modelled; V_INTERP results are read directly from Vulkan
   inputs instead (correct for the interpolate-then-use pattern).
 - 64-bit float *arithmetic*: still evaluated on the low dwords. The 64-bit
-  **compares** (VOPC f64/i64/u64 and their VOP3 forms) are exact: they read the
-  register pair and are assembled from 32-bit halves, so the module needs
-  neither the `Int64`/`Float64` capability nor the device features behind them.
+  **compares** (VOPC f64/i64/u64 and their VOP3 forms) read the register pair
+  and are assembled from 32-bit halves, so the module needs neither the
+  `Int64`/`Float64` capability nor the device features behind them. Exact for
+  register operands; a 64-bit compare against a float inline constant or a
+  literal (the ISA gives both special 64-bit meanings — a float inline denotes
+  the *double*, a literal occupies bits [63:32]) or carrying a VOP3 neg/abs
+  modifier is declined rather than answered wrongly.
 - The `_clamp` and `_legacy` transcendentals (`v_log_clamp_f32`,
   `v_rcp_clamp_f32`, `v_rsq_clamp_f32`, `v_rcp_legacy_f32`, `v_rsq_legacy_f32`)
   and `v_min_legacy_f32` / `v_max_legacy_f32` follow the ISA exactly, including

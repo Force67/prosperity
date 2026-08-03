@@ -1086,9 +1086,13 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
       staged.emplace(key, sbo_dyn[i]);
       rawbuf_mask |= 1u << i;
     }
+    // One dynamic offset per dynamic descriptor the SET actually holds, which
+    // is the device-derived sbo_count, not the compile-time ceiling. Passing
+    // the ceiling is a spec violation on every device that reports fewer than
+    // 16 (the Vulkan floor is 4).
     vkCmdBindDescriptorSets(g_frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            rp->layout, 2, 1, &g_ring.sbo_set, kRawBufBindings,
-                            sbo_dyn);
+                            rp->layout, 2, 1, &g_ring.sbo_set,
+                            g_ring.sbo_count, sbo_dyn);
     // DELTA_GPU_RAWBUF: which set-2 bindings a draw actually got, so a shader
     // reading zeros can be told apart from one reading real guest data.
     if (kRawBufTrace) {

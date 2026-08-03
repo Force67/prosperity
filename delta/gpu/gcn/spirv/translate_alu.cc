@@ -1277,9 +1277,10 @@ void EmitVopc(Translator& t,
   // Opcode space: f32 0x00-0x1F, f64 0x20-0x3F, i32 0x80-0x9F, i64 0xA0-0xBF,
   // u32 0xC0-0xDF, u64 0xE0-0xFF. Bit 4 of each 32-op family selects the
   // EXEC-writing cmpx form. The 64-bit families read a register PAIR, so they
-  // are evaluated on both halves (see the Dword2 predicates above); a caller
-  // that cannot supply the high dword degrades to zero rather than silently
-  // comparing a truncated value.
+  // are evaluated on both halves (see the Dword2 predicates above). The only
+  // caller that omits the high dwords is translate_neo's f16 path, which maps
+  // onto the 32-bit families exclusively, so the zero default is dead there --
+  // it is not a safe fallback, since {lo, 0} reads as a denormal.
   const Dword2 a{s0u, s0_hi ? s0_hi : t.U32(0)};
   const Dword2 b{s1u, s1_hi ? s1_hi : t.U32(0)};
   Id cond = 0;

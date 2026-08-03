@@ -622,7 +622,7 @@ void EmitMimg(Translator& t,
 // Assign a set-2 storage-buffer binding to every raw MUBUF/MTBUF load in a
 // graphics stage, skipping the instructions `claimed` already serves as vertex
 // inputs. Instructions sharing one descriptor (same SGPR quad, same producing
-// scalar load) share a binding; anything past kMaxGfxBuffers is left unplanned
+// scalar load) share a binding; anything past MaxGfxBuffers() is left unplanned
 // and warns at emit time, exactly as an unimplemented op would.
 void PlanGfxBuffers(const Program& program,
                     uint32_t first_binding,

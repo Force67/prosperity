@@ -28,8 +28,8 @@ uint64_t NowNs() {
 }
 // Set-2 raw-buffer bindings the planner may use. Starts at the Vulkan floor so
 // a shader planned before the renderer reports the device limit is still valid
-// everywhere; SetMaxGfxBuffers raises it once vk_upload_ring knows better.
-// Read on the recompile path only, which is already serialised per shader.
+// everywhere. Written exactly once, by vk_upload_ring during device init,
+// before the command processor issues its first recompile.
 uint32_t g_max_gfx_buffers = kMinGfxBuffers;
 
 }  // namespace

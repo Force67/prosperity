@@ -283,16 +283,17 @@ bool PlanCbufs(const Program& program,
 // instruction (its DA bit is 0): only the T# type distinguishes it, so it
 // reaches the translator out of band in StageContext::tex_3d_mask.
 // Does this MIMG op state its own LOD? Outside a fragment shader there are no
-// implicit derivatives, so only these may run in a VS. Within the sample block
-// (0x20-0x3f) the low three bits are the LOD mode: 4 = _l (explicit level),
-// 7 = _lz (level zero). The whole gather4 block (0x40-0x5f) samples level zero
-// by definition, and image_load[_mip] indexes a level directly.
+// implicit derivatives, so only these may run in a VS. In both the sample block
+// (0x20-0x3f) and the gather4 block (0x40-0x5f) the low three bits are the LOD
+// mode: 4 = _l (explicit level), 7 = _lz (level zero). Gathers admit only _lz,
+// since EmitMimg translates no other gather form. image_load[_mip] indexes a
+// level directly.
 bool MimgNamesItsLod(uint32_t op) {
   if (op == 0x00 || op == 0x01)
     return true;
-  if (op >= 0x40 && op <= 0x5f)
-    return true;
   const uint32_t lod_mode = op & 0x7;
+  if (op >= 0x40 && op <= 0x5f)
+    return lod_mode == 7;
   return op >= 0x20 && op <= 0x3f && (lod_mode == 4 || lod_mode == 7);
 }
 
@@ -305,9 +306,17 @@ void EmitMimg(Translator& t,
   const uint32_t vdata = (w1 >> 8) & 0xFF;
   // MIMG lays the sample block (0x20-0x3f) and the gather4 block (0x40-0x5f)
   // out the same way: bit 3 adds the z-compare, bit 4 adds the texel offset,
-  // and the low three bits pick the LOD mode. Gather is always level zero in
-  // Vulkan, so the _lz in gather4_c_lz_o needs no operand of its own.
-  const bool gather = op >= 0x40 && op <= 0x5f;
+  // and the low three bits pick the LOD mode.
+  //
+  // Only the _lz forms (low three bits == 7) are translated. Two reasons, both
+  // load-bearing: OpImageGather is fixed at level zero, so a form naming a LOD
+  // or a bias cannot be honoured; and the ISA orders vaddr[] as
+  // "Offsets, bias, zpcf, then coordinates", so a _b form carries a bias word
+  // this emitter does not account for -- it would read the bias as the
+  // z-compare and every coordinate one word early. Gather is NOT inherently
+  // level zero (the ISA describes software trilinear via two gathers a LOD
+  // step apart); the rest fall through `known` below and decline loudly.
+  const bool gather = op >= 0x40 && op <= 0x5f && (op & 0x7) == 7;
   const bool dref = op == 0x28 || op == 0x2f || (gather && (op & 0x08));
   const bool offset = op == 0x37 || (gather && (op & 0x10));
   const auto addr_u = [&](uint32_t index) {
@@ -441,8 +450,10 @@ void EmitMimg(Translator& t,
     return;
   }
 
-  // VADDR order is [offset][compare][coords], so a compared-and-offset form
-  // (image_gather4_c_lz_o) finds its z-compare at word 1, not word 0.
+  // The ISA fixes the vaddr[] order as "Offsets, bias, zpcf, then coordinates",
+  // so a compared-and-offset form (image_gather4_c_lz_o) finds its z-compare at
+  // word 1, not word 0. Bias-carrying forms are rejected above rather than
+  // modelled, which is why no bias word is accounted for here.
   const uint32_t dref_index = offset ? 1u : 0u;
   const uint32_t body_addr = vaddr + (offset ? 1u : 0u) + (dref ? 1u : 0u);
   const uint32_t body_index = body_addr - vaddr;

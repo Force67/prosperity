@@ -847,9 +847,14 @@ std::string MimgName(uint32_t op) {
     return std::string("image_sample") + kSample[op - 0x20];
   if (op >= 0x30 && op <= 0x3f)
     return std::string("image_sample") + kSample[op - 0x30] + "_o";
+  // Same suffix layout as kSample -- low three bits are the LOD mode, bit 3
+  // adds the compare -- except that gather4 has no derivative forms, so the
+  // _d / _d_cl slots are holes. The old table omitted those holes and shifted
+  // every entry after them: 0x44 (_l) printed as "_b_cl", and 0x47 (_lz), the
+  // one gather the translator has always handled, printed as "_c_cl".
   static const char* const kGather[16] = {
-      "",      "_cl",   "_l",    "_b",    "_b_cl", "_lz",  "_c",      "_c_cl",
-      nullptr, nullptr, nullptr, nullptr, "_c_l",  "_c_b", "_c_b_cl", "_c_lz"};
+      "",   "_cl",   nullptr, nullptr, "_l",   "_b",   "_b_cl",   "_lz",
+      "_c", "_c_cl", nullptr, nullptr, "_c_l", "_c_b", "_c_b_cl", "_c_lz"};
   if (op >= 0x40 && op <= 0x5f) {
     const char* suffix = kGather[(op - 0x40) & 15];
     if (suffix)

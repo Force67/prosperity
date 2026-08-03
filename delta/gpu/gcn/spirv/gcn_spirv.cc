@@ -71,7 +71,15 @@ namespace gpu::gcn {
 namespace {
 thread_local bool g_had_unsupported = false;
 thread_local std::string g_unsupported_ops;
+
+// The VOPC opcode families whose operands are 64-bit register pairs: f64
+// (0x20-0x3f) and its signalling twin V_CMPS (0x60-0x7f), i64 (0xa0-0xbf),
+// u64 (0xe0-0xff).
+bool IsVopc64(uint32_t op) {
+  return (op >= 0x20 && op <= 0x3f) || (op >= 0x60 && op <= 0x7f) ||
+         (op >= 0xa0 && op <= 0xbf) || op >= 0xe0;
 }
+}  // namespace
 
 void ResetUnsupported() {
   g_had_unsupported = false;
@@ -373,6 +381,13 @@ void EmitInst(Translator& t, const Inst& inst, StageContext& sc) {
         if (neg & 1)
           source0 = t.FNeg(source0);
       }
+      // Same 64-bit operand caveat as the plain VOPC path above; additionally a
+      // VOP3 neg/abs on an f64 source must flip bit 63, while SrcF applies it to
+      // the low dword as if it were an f32 -- corrupting the mantissa and
+      // leaving the sign alone.
+      if (op < 0x100 && IsVopc64(op) &&
+          (s0 >= 128 || s1 >= 128 || ((neg | abs) & 3)))
+        WarnUnsupported("vopc64.vop3-operand", op, w, w1);
       EmitVop3(t, op, vdst, source0, t.SrcRawHi(s0, inst.literal, op == 0x163),
                t.SrcF(s1, inst.literal, neg & 2, abs & 2),
                t.SrcF(s2, inst.literal, neg & 4, abs & 4),
@@ -390,6 +405,15 @@ void EmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       if (inst.isa == IsaMode::kNeo &&
           EmitNeoVopc(t, op, 106, src0, 256 + vsrc1, inst.literal))
         break;
+      // A 64-bit compare reads register PAIRS. SrcRawHi reconstructs the high
+      // dword correctly for registers and for INTEGER inline constants, but not
+      // for the two forms the ISA gives special 64-bit meaning: a float inline
+      // constant denotes the DOUBLE of that value (so its high dword is not the
+      // f32 pattern), and a 32-bit literal occupies bits [63:32] with zeros
+      // below. Assembling either from the low dword compares against a
+      // denormal. Decline instead of answering wrongly.
+      if (IsVopc64(op) && src0 >= 128)
+        WarnUnsupported("vopc64.inline-or-literal-operand", op, w, inst.literal);
       EmitVopc(t, op, t.SrcF(src0, inst.literal),
                t.SrcF(256 + vsrc1, inst.literal), t.SrcRaw(src0, inst.literal),
                t.SrcRaw(256 + vsrc1, inst.literal), 106,
@@ -1598,6 +1622,7 @@ bool RecompileComputeSpirv(const uint32_t* cs_code,
   MaybeDumpByAddr("CS", cs_code, program);
   const bool dbg = ShaderDebugEnabled();
   Translator t;
+  t.program_base = reinterpret_cast<uint64_t>(cs_code);
   RecompiledCs tmp;  // build into a temp so a mid-emit failure leaves r intact
   ResetUnsupported();
   if (dbg)
