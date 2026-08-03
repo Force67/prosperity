@@ -52,7 +52,17 @@ corrupting memory.
 - `SPI_PS_INPUT_ENA` ABI VGPR seeding (frag-coord / face / barycentrics in
   v0..) is not modelled; V_INTERP results are read directly from Vulkan
   inputs instead (correct for the interpolate-then-use pattern).
-- 64-bit float ops and 64-bit compares: approximated on the low dwords.
+- 64-bit float *arithmetic*: still evaluated on the low dwords. The 64-bit
+  **compares** (VOPC f64/i64/u64 and their VOP3 forms) are exact: they read the
+  register pair and are assembled from 32-bit halves, so the module needs
+  neither the `Int64`/`Float64` capability nor the device features behind them.
+- The `_clamp` and `_legacy` transcendentals (`v_log_clamp_f32`,
+  `v_rcp_clamp_f32`, `v_rsq_clamp_f32`, `v_rcp_legacy_f32`, `v_rsq_legacy_f32`)
+  and `v_min_legacy_f32` / `v_max_legacy_f32` follow the ISA exactly, including
+  the DX9 NaN rule (min/max return vsrc1 when either input is NaN) and
+  `ClampInfToFltMax` / `ConvertInfToZero` touching only infinities.
+- Output modifiers (OMOD) on integer results and on VOPC lane masks are
+  *ignored*, which is what the hardware does — not a gap.
 - Buffer/image atomics, `s_getreg`/`s_setreg`: not modelled.
 - MTBUF moves raw dwords (exact for 32-bit formats and matched load/store
   round trips; packed-format conversion is not applied).

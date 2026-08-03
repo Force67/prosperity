@@ -376,7 +376,8 @@ void EmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       EmitVop3(t, op, vdst, source0, t.SrcRawHi(s0, inst.literal, op == 0x163),
                t.SrcF(s1, inst.literal, neg & 2, abs & 2),
                t.SrcF(s2, inst.literal, neg & 4, abs & 4),
-               t.SrcRawHi(s2, inst.literal, op == 0x177), sdst, clamp, omod);
+               t.SrcRawHi(s2, inst.literal, op == 0x177), sdst, clamp, omod,
+               t.SrcRawHi(s1, inst.literal, false));
       break;
     }
     case Enc::kVop3p:
@@ -391,7 +392,9 @@ void EmitInst(Translator& t, const Inst& inst, StageContext& sc) {
         break;
       EmitVopc(t, op, t.SrcF(src0, inst.literal),
                t.SrcF(256 + vsrc1, inst.literal), t.SrcRaw(src0, inst.literal),
-               t.SrcRaw(256 + vsrc1, inst.literal));
+               t.SrcRaw(256 + vsrc1, inst.literal), 106,
+               t.SrcRawHi(src0, inst.literal, false),
+               t.SrcRawHi(256 + vsrc1, inst.literal, false));
       break;
     }
     case Enc::kVintrp: {

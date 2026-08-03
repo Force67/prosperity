@@ -679,11 +679,12 @@ void EmitVop1(Translator& t,
     f = ApplyOutputModifier(t, f, omod);
     t.SetVgF(vdst, clamp ? t.FClamp01(f) : f);
   };
-  const auto set_u = [&](Id u) {
-    if (omod)
-      WarnUnsupported("vop1.integer-omod", op);
-    t.SetVg(vdst, u);
-  };
+  // OMOD on an integer result is IGNORED by the hardware, not unsupported:
+  // "Integer and non-specific instructions (such as moves) ignore output
+  // modifiers" (Sea Islands ISA, Output Modifier Options). Warning here set
+  // HadUnsupported() and DECLINED the whole shader over a modifier the GPU
+  // discards. Same reasoning at the vop2/vop3 set_u below.
+  const auto set_u = [&](Id u) { t.SetVg(vdst, u); };
   const Id u0 = t.m.Bitcast(t.t_u, s0);
   switch (op) {
     case 0x00:
@@ -764,33 +765,29 @@ void EmitVop1(Translator& t,
     case 0x25:
       set_f(t.Ext1(GLSLstd450Exp2, s0));
       break;  // v_exp_f32
-    case 0x26:
-      WarnUnsupported("vop1.log-clamp", op);
-      set_f(t.Ext1(GLSLstd450Log2, s0));
+    case 0x26:  // v_log_clamp_f32 = ClampInfToFltMax(Log2(x))
+      set_f(t.ClampInfToFltMax(t.Ext1(GLSLstd450Log2, s0)));
       break;
     case 0x27:
       set_f(t.Ext1(GLSLstd450Log2, s0));
       break;  // v_log_f32
-    case 0x28:
-      WarnUnsupported("vop1.rcp-clamp", op);
-      set_f(t.FDiv(t.F32(1.0f), s0));
+    case 0x28:  // v_rcp_clamp_f32 = ClampInfToFltMax(Rcp(x))
+      set_f(t.ClampInfToFltMax(t.FDiv(t.F32(1.0f), s0)));
       break;
-    case 0x29:
-      NoteApproximated("vop1.rcp-legacy", op);
-      set_f(t.FDiv(t.F32(1.0f), s0));
+    case 0x29:  // v_rcp_legacy_f32 = ConvertInfToZero(Rcp(x))
+      set_f(t.ConvertInfToZero(t.FDiv(t.F32(1.0f), s0)));
       break;
     case 0x2a:
     case 0x2b:
       set_f(t.FDiv(t.F32(1.0f), s0));
       break;  // v_rcp[_iflag]_f32
-    case 0x2c: {  // v_rsq_clamp_f32: rsq with infinities clamped to +/-FLT_MAX
-      const Id rsq = t.Ext1(GLSLstd450InverseSqrt, s0);
-      set_f(t.Ext2(GLSLstd450FMin, rsq, t.F32(3.402823466e+38f)));
+    case 0x2c:  // v_rsq_clamp_f32 = ClampInfToFltMax(Rsqrt(x)). The old FMin
+                // against FLT_MAX also turned a NaN result into +FLT_MAX, since
+                // GLSL FMin returns the non-NaN operand.
+      set_f(t.ClampInfToFltMax(t.Ext1(GLSLstd450InverseSqrt, s0)));
       break;
-    }
-    case 0x2d:
-      NoteApproximated("vop1.rsq-legacy", op);
-      set_f(t.Ext1(GLSLstd450InverseSqrt, s0));
+    case 0x2d:  // v_rsq_legacy_f32 = ConvertInfToZero(Rsqrt(x))
+      set_f(t.ConvertInfToZero(t.Ext1(GLSLstd450InverseSqrt, s0)));
       break;
     case 0x2e:
       set_f(t.Ext1(GLSLstd450InverseSqrt, s0));
@@ -846,11 +843,7 @@ void EmitVop2(Translator& t,
     f = ApplyOutputModifier(t, f, omod);
     t.SetVgF(vdst, clamp ? t.FClamp01(f) : f);
   };
-  const auto set_u = [&](Id u) {
-    if (omod)
-      WarnUnsupported("vop2.integer-omod", op);
-    t.SetVg(vdst, u);
-  };
+  const auto set_u = [&](Id u) { t.SetVg(vdst, u); };  // OMOD ignored: see EmitVop1
   const Id u0 = t.m.Bitcast(t.t_u, s0), u1 = t.m.Bitcast(t.t_u, s1);
   const Id i0 = t.m.Bitcast(t.t_i, s0), i1 = t.m.Bitcast(t.t_i, s1);
   const auto mul24_hi = [&](spv::Op wide_mul, Id a, Id b) {
@@ -905,16 +898,20 @@ void EmitVop2(Translator& t,
     case 0x0c:  // v_mul_hi_u32_u24
       set_u(mul24_hi(spv::Op::OpUMulExtended, t.Low24(u0), t.Low24(u1)));
       break;
+    // v_min_legacy_f32 / v_max_legacy_f32 = min_dx9 / max_dx9. The ISA is
+    // explicit: "If one or both inputs are NaN values then vsrc1 is always
+    // returned", and IEEE mode has no effect. An ordered compare is exactly
+    // that -- it is false whenever either operand is NaN, so the select falls
+    // to vsrc1. GLSL FMin/FMax return the *non-NaN* operand instead, which is
+    // the opposite answer when vsrc1 is the NaN.
     case 0x0d:
-      NoteApproximated("vop2.min-legacy", op);
-      set_f(t.Ext2(GLSLstd450FMin, s0, s1));
+      set_f(t.SelectF(t.FLt(s0, s1), s0, s1));
       break;
     case 0x0f:
       set_f(t.Ext2(GLSLstd450FMin, s0, s1));
       break;  // v_min_f32
     case 0x0e:
-      NoteApproximated("vop2.max-legacy", op);
-      set_f(t.Ext2(GLSLstd450FMax, s0, s1));
+      set_f(t.SelectF(t.FGt(s0, s1), s0, s1));
       break;
     case 0x10:
       set_f(t.Ext2(GLSLstd450FMax, s0, s1));
@@ -1110,6 +1107,113 @@ Id IntPredicate(Translator& t, uint32_t lo, bool is_signed, Id a, Id b) {
   }
 }
 
+// ---- exact 64-bit compares, assembled from dword pairs ----------------------
+// These families used to be evaluated on the low dword alone, which is simply a
+// different answer for any value whose halves disagree. Building them out of
+// 32-bit halves (rather than OpTypeInt 64 / OpTypeFloat 64) keeps the emitted
+// module free of the Int64 and Float64 capabilities, and so free of the
+// shaderInt64 / shaderFloat64 device features -- which the Android targets do
+// not all advertise.
+struct Dword2 {
+  Id lo, hi;
+};
+
+Id LOr(Translator& t, Id a, Id b) {
+  return t.m.Emit(spv::Op::OpLogicalOr, t.t_bool, {a, b});
+}
+Id LNot(Translator& t, Id a) {
+  return t.m.Emit(spv::Op::OpLogicalNot, t.t_bool, {a});
+}
+Id Slt32(Translator& t, Id a, Id b) {
+  return t.m.Emit(spv::Op::OpSLessThan, t.t_bool,
+                  {t.m.Bitcast(t.t_i, a), t.m.Bitcast(t.t_i, b)});
+}
+Id U64Eq(Translator& t, Dword2 a, Dword2 b) {
+  return t.LAnd(t.Eq(a.lo, b.lo), t.Eq(a.hi, b.hi));
+}
+// Lexicographic on (hi, lo); only the high half's comparison differs in sign.
+Id U64Lt(Translator& t, Dword2 a, Dword2 b) {
+  return LOr(t, t.Ult(a.hi, b.hi),
+             t.LAnd(t.Eq(a.hi, b.hi), t.Ult(a.lo, b.lo)));
+}
+Id I64Lt(Translator& t, Dword2 a, Dword2 b) {
+  return LOr(t, Slt32(t, a.hi, b.hi),
+             t.LAnd(t.Eq(a.hi, b.hi), t.Ult(a.lo, b.lo)));
+}
+
+Id Int64Predicate(Translator& t,
+                  uint32_t lo,
+                  bool is_signed,
+                  Dword2 a,
+                  Dword2 b) {
+  const auto lt = [&](Dword2 x, Dword2 y) {
+    return is_signed ? I64Lt(t, x, y) : U64Lt(t, x, y);
+  };
+  switch (lo) {
+    case 0: return t.m.ConstBool(false);
+    case 1: return lt(a, b);
+    case 2: return U64Eq(t, a, b);
+    case 3: return LOr(t, lt(a, b), U64Eq(t, a, b));
+    case 4: return lt(b, a);
+    case 5: return LNot(t, U64Eq(t, a, b));
+    case 6: return LNot(t, lt(a, b));
+    case 7: return t.m.ConstBool(true);
+    default: return 0;
+  }
+}
+
+// IEEE-754 binary64 predicates over the raw halves.
+Id F64IsNan(Translator& t, Dword2 x) {
+  return t.LAnd(
+      t.Eq(t.And(x.hi, t.U32(0x7ff00000u)), t.U32(0x7ff00000u)),
+      LOr(t, t.IsNonZero(t.And(x.hi, t.U32(0x000fffffu))), t.IsNonZero(x.lo)));
+}
+Id F64IsZero(Translator& t, Dword2 x) {  // +0.0 and -0.0 alike
+  return t.LAnd(t.IsZero(t.And(x.hi, t.U32(0x7fffffffu))), t.IsZero(x.lo));
+}
+// Monotonic unsigned key: ordering the key as a 64-bit unsigned reproduces the
+// ordering of the doubles (negatives invert, positives gain the sign bit).
+Dword2 F64OrderKey(Translator& t, Dword2 x) {
+  const Id neg = t.IsNonZero(t.And(x.hi, t.U32(0x80000000u)));
+  return {t.SelectB(neg, t.Not(x.lo), x.lo),
+          t.SelectB(neg, t.Not(x.hi), t.Xor(x.hi, t.U32(0x80000000u)))};
+}
+Id F64Eq(Translator& t, Dword2 a, Dword2 b) {
+  return t.LAnd(LNot(t, LOr(t, F64IsNan(t, a), F64IsNan(t, b))),
+                LOr(t, U64Eq(t, a, b),
+                    t.LAnd(F64IsZero(t, a), F64IsZero(t, b))));
+}
+// The order key would rank -0.0 below +0.0, so equal zeroes are excluded.
+Id F64Lt(Translator& t, Dword2 a, Dword2 b) {
+  return t.LAnd(
+      LNot(t, LOr(t, F64IsNan(t, a), F64IsNan(t, b))),
+      t.LAnd(U64Lt(t, F64OrderKey(t, a), F64OrderKey(t, b)),
+             LNot(t, t.LAnd(F64IsZero(t, a), F64IsZero(t, b)))));
+}
+
+Id Float64Predicate(Translator& t, uint32_t lo, Dword2 a, Dword2 b) {
+  const Id nan = LOr(t, F64IsNan(t, a), F64IsNan(t, b));
+  switch (lo) {
+    case 0: return t.m.ConstBool(false);                        // F
+    case 1: return F64Lt(t, a, b);                              // LT
+    case 2: return F64Eq(t, a, b);                              // EQ
+    case 3: return LOr(t, F64Lt(t, a, b), F64Eq(t, a, b));      // LE
+    case 4: return F64Lt(t, b, a);                              // GT
+    case 5: return t.LAnd(LNot(t, nan), LNot(t, F64Eq(t, a, b)));  // LG
+    case 6: return LOr(t, F64Lt(t, b, a), F64Eq(t, a, b));      // GE
+    case 7: return LNot(t, nan);                                // O
+    case 8: return nan;                                         // U
+    case 9: return LOr(t, nan, F64Lt(t, a, b));                 // NGE
+    case 10: return LOr(t, nan, F64Eq(t, a, b));                // NLG
+    case 11: return LOr(t, nan, LOr(t, F64Lt(t, a, b), F64Eq(t, a, b)));  // NGT
+    case 12: return LOr(t, nan, F64Lt(t, b, a));                // NLE
+    case 13: return LNot(t, F64Eq(t, a, b));                    // NEQ
+    case 14: return LOr(t, nan, LOr(t, F64Lt(t, b, a), F64Eq(t, a, b)));  // NLT
+    case 15: return t.m.ConstBool(true);                        // TRU
+    default: return 0;
+  }
+}
+
 Id FloatClassPredicate(Translator& t, Id bits, Id mask) {
   const Id sign = t.IsNonZero(t.And(bits, t.U32(0x80000000u)));
   const Id exponent = t.And(bits, t.U32(0x7f800000u));
@@ -1156,31 +1260,34 @@ void EmitVopc(Translator& t,
               Id s1f,
               Id s0u,
               Id s1u,
-              uint32_t dst) {
+              uint32_t dst,
+              Id s0_hi,
+              Id s1_hi) {
   // Opcode space: f32 0x00-0x1F, f64 0x20-0x3F, i32 0x80-0x9F, i64 0xA0-0xBF,
   // u32 0xC0-0xDF, u64 0xE0-0xFF. Bit 4 of each 32-op family selects the
-  // EXEC-writing cmpx form. The 64-bit families are approximated on the low
-  // dwords: wrong for a real double, but rejecting the shader drops the whole
-  // draw, and these turn up on edge paths rather than in the shading maths.
+  // EXEC-writing cmpx form. The 64-bit families read a register PAIR, so they
+  // are evaluated on both halves (see the Dword2 predicates above); a caller
+  // that cannot supply the high dword degrades to zero rather than silently
+  // comparing a truncated value.
+  const Dword2 a{s0u, s0_hi ? s0_hi : t.U32(0)};
+  const Dword2 b{s1u, s1_hi ? s1_hi : t.U32(0)};
   Id cond = 0;
   if (op == 0x88 || op == 0x98) {
     cond = FloatClassPredicate(t, s0u, s1u);
   } else if (op <= 0x3F) {
-    if (op >= 0x20)
-      NoteApproximated("vopc.f64", op);
-    cond = FloatPredicate(t, op & 0xF, s0f, s1f);
+    cond = op >= 0x20 ? Float64Predicate(t, op & 0xF, a, b)
+                      : FloatPredicate(t, op & 0xF, s0f, s1f);
   } else if (op <= 0x7F) {
     // 0x40-0x7F are V_CMPS[X]_*: the signalling forms of 0x00-0x3F. They differ
     // only in raising an FP exception on a quiet NaN, which nothing here
     // models, so they take the same predicate.
-    if (op >= 0x60)
-      NoteApproximated("vopc.f64", op);
-    cond = FloatPredicate(t, op & 0xF, s0f, s1f);
+    cond = op >= 0x60 ? Float64Predicate(t, op & 0xF, a, b)
+                      : FloatPredicate(t, op & 0xF, s0f, s1f);
   } else {
     const bool is_signed = op <= 0xBF;
-    if ((op >= 0xA0 && op <= 0xBF) || op >= 0xE0)
-      NoteApproximated("vopc.i64", op);
-    cond = IntPredicate(t, op & 0x7, is_signed, s0u, s1u);
+    const bool is_64 = (op >= 0xA0 && op <= 0xBF) || op >= 0xE0;
+    cond = is_64 ? Int64Predicate(t, op & 0x7, is_signed, a, b)
+                 : IntPredicate(t, op & 0x7, is_signed, s0u, s1u);
   }
   const Id predicate =
       cond ? t.SelectB(cond, t.U32(1), t.U32(0)) : t.U32(0);  // F -> 0
@@ -1201,7 +1308,8 @@ void EmitVop3(Translator& t,
               Id s2_hi,
               uint32_t sdst,
               bool clamp,
-              uint32_t omod) {
+              uint32_t omod,
+              Id s1_hi) {
   // VOP3 reflects the VOPC (0x000-0x0FF), VOP2 (0x100-0x13F) and VOP1
   // (0x180-0x1FF) encodings; only 0x140-0x17F are VOP3-exclusive.
   const Id u0 = t.m.Bitcast(t.t_u, s0), u1 = t.m.Bitcast(t.t_u, s1),
@@ -1210,16 +1318,13 @@ void EmitVop3(Translator& t,
     f = ApplyOutputModifier(t, f, omod);
     t.SetVgF(vdst, clamp ? t.FClamp01(f) : f);
   };
-  const auto set_u = [&](Id u) {
-    if (omod)
-      WarnUnsupported("vop3.integer-omod", op);
-    t.SetVg(vdst, u);
-  };
+  const auto set_u = [&](Id u) { t.SetVg(vdst, u); };  // OMOD ignored: see EmitVop1
 
   if (op < 0x100) {  // VOPC in VOP3 form: predicate written to sgpr[vdst]
-    if (omod)
-      NoteApproximated("vopc.omod", op);  // scales a lane mask: nothing to do
-    EmitVopc(t, op, s0, s1, u0, u1, vdst);
+    // OMOD applies only to instructions with a float OUTPUT; a VOPC writes a
+    // lane mask to an SGPR, so the hardware ignores the modifier. Dropping it
+    // is exact, not an approximation.
+    EmitVopc(t, op, s0, s1, u0, u1, vdst, s0_hi, s1_hi);
     return;
   }
   if (op == 0x100) {  // VOP3 cndmask uses explicit S2 instead of implicit VCC

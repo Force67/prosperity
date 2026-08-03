@@ -171,6 +171,27 @@ struct Translator {
     return m.ExtInst(t_f, GLSLstd450FClamp, {f, F32(0.0f), F32(1.0f)});
   }
 
+  // The two saturating primitives the Sea Islands ISA writes its `_clamp` and
+  // `_legacy` transcendentals in terms of (v_rcp_clamp_f32 =
+  // ClampInfToFltMax(Rcp(x)), v_rcp_legacy_f32 = ConvertInfToZero(Rcp(x)),
+  // and likewise for log/rsq). Both must touch ONLY infinities: a GLSL
+  // FMin/FMax/FClamp against +/-FLT_MAX would also fold a NaN into a finite
+  // bound, because GLSL's min/max return the non-NaN operand. Selecting on
+  // OpIsInf leaves NaN -- and every finite value -- exactly as produced.
+  Id IsInf(Id f) { return m.Emit(spv::Op::OpIsInf, t_bool, {f}); }
+  Id FLt(Id a, Id b) { return m.Emit(spv::Op::OpFOrdLessThan, t_bool, {a, b}); }
+  Id FGt(Id a, Id b) {
+    return m.Emit(spv::Op::OpFOrdGreaterThan, t_bool, {a, b});
+  }
+  static constexpr float kFltMax = 3.402823466e+38f;
+  Id ClampInfToFltMax(Id f) {  // +/-Inf -> +/-FLT_MAX
+    const Id lim = SelectF(FLt(f, F32(0.0f)), F32(-kFltMax), F32(kFltMax));
+    return SelectF(IsInf(f), lim, f);
+  }
+  Id ConvertInfToZero(Id f) {  // +/-Inf -> +0.0 (legacy DX9)
+    return SelectF(IsInf(f), F32(0.0f), f);
+  }
+
   // ---- integer ALU (uint domain; signed ops bitcast through t_i). Shifts
   // mask the amount to [4:0] as GCN does. ----
   Id Add(Id a, Id b) { return m.Emit(spv::Op::OpIAdd, t_u, {a, b}); }
@@ -542,16 +563,21 @@ void EmitVop3(Translator& t,
               Id s2_hi,
               uint32_t sdst,
               bool clamp,
-              uint32_t omod = 0);
+              uint32_t omod = 0,
+              Id s1_hi = 0);
 // Vector compare: writes the 0/1 predicate to sgpr[dst]; the cmpx forms also
 // replace EXEC.
+// s0_hi/s1_hi carry the high dword of a 64-bit operand pair; the f64/i64/u64
+// opcode families need both halves to compare a whole value.
 void EmitVopc(Translator& t,
               uint32_t op,
               Id s0f,
               Id s1f,
               Id s0u,
               Id s1u,
-              uint32_t dst = 106);
+              uint32_t dst = 106,
+              Id s0_hi = 0,
+              Id s1_hi = 0);
 bool IsVop3b(uint32_t op);
 bool EmitNeoVop1(Translator& t, const Inst& inst);
 bool EmitNeoVop2(Translator& t, const Inst& inst);
