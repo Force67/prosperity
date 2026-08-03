@@ -965,48 +965,102 @@ void spawnJobWatcher(uint64_t base) {
           // and job+0x9a0 = prio; the claim path tests 1<<worker-ordinal
           // against the affinity. A stuck finalize job shows up here with a
           // mask the 4 workers (0xF) cannot satisfy.
-          // Is there pending work at all? The claim loop (0x38f55..0x392cc)
-          // scans 8 priority levels of the queue array at [jobsys+0x1478],
-          // stride 0x2078. Per level it needs a non-zero level+0x2038, then
-          // per-ordinal slots at level+8+ord*8 / level+0x2040+ord*8, and
-          // finally a sub-queue whose head [q] != tail [q+8] (0x39139).
+          // Is there pending work at all, and can our workers claim it? The
+          // claim (0x38d40) scans 8 priority buckets at
+          // `[jobsys+0x1478] + lvl*0x2078` and has TWO consumer paths. An
+          // earlier version of this walk guessed the layout (per-ordinal words
+          // at bucket+8 / bucket+0x2040) and read zeros out of both, which is
+          // why "no queue node has pending work" was never trustworthy; both
+          // paths below are taken straight from the disassembly instead:
+          //
+          //   scan A (0x38fa7, taken when [bucket+0x2038] != 0): a slot array
+          //     at [bucket+0x2070], stride 0x120, affinity mask at slot+0xf0 --
+          //     `test [slots + i*0x120 + 0xf0], 1<<ord` at 0x38fc5.
+          //   scan B (0x39130, taken when [bucket+0x2038] == 0 && [bucket] != 0):
+          //     a NODE POINTER array at bucket+0x38 (8 bytes each, count in
+          //     [bucket+0]); a node is pending when head [n] != tail [n+8], then
+          //     the dependency triple +0x980/+0x988/+0x990 must be satisfied,
+          //     and finally `test [n+0x998], 1<<ord` (0x3919e) must pass.
+          //
           // Empty everywhere while the coordinator waits = the job was never
-          // ENQUEUED (producer-side bug); non-empty = the workers cannot claim
-          // what is there (consumer-side).
+          // ENQUEUED (producer-side bug); pending but unclaimable = the workers
+          // cannot take what is there (consumer-side). Our workers report
+          // ordinals 0..3, so a mask missing 0xf excludes every one of them.
           {
-            uint64_t qbase = *reinterpret_cast<volatile uint64_t *>(base + 0x1478);
-            if (qbase > 0x10000) {
+            const uint64_t qbase =
+                *reinterpret_cast<volatile uint64_t *>(base + 0x1478);
+            auto mapped = [](uint64_t a) {
+              return a > 0x10000 && a < (1ULL << 47);
+            };
+            if (mapped(qbase)) {
               for (int lvl = 0; lvl < 8; lvl++) {
-                uint64_t L = qbase + (uint64_t)lvl * 0x2078;
-                uint64_t gate = *reinterpret_cast<volatile uint64_t *>(L + 0x2038);
-                uint64_t any = gate;
-                uint64_t slot[8], alt[8];
-                for (int o = 0; o < 8; o++) {
-                  slot[o] = *reinterpret_cast<volatile uint64_t *>(L + 8 + (uint64_t)o * 8);
-                  alt[o] = *reinterpret_cast<volatile uint64_t *>(L + 0x2040 + (uint64_t)o * 8);
-                  any |= slot[o] | alt[o];
-                }
-                if (!any)
+                const uint64_t bucket = qbase + (uint64_t)lvl * 0x2078;
+                const uint64_t acount =
+                    *reinterpret_cast<volatile uint64_t *>(bucket + 0x2038);
+                const uint64_t nodes =
+                    *reinterpret_cast<volatile uint64_t *>(bucket);
+                if (!acount && !nodes)
                   continue;
-                std::fprintf(stderr,
-                             "[jobwatch] queue L%d gate=%#llx slots=%#llx %#llx %#llx %#llx "
-                             "alt=%#llx %#llx %#llx %#llx\n",
-                             lvl, (unsigned long long)gate,
-                             (unsigned long long)slot[0], (unsigned long long)slot[1],
-                             (unsigned long long)slot[2], (unsigned long long)slot[3],
-                             (unsigned long long)alt[0], (unsigned long long)alt[1],
-                             (unsigned long long)alt[2], (unsigned long long)alt[3]);
-                // Ring head/tail of each advertised sub-queue: head != tail is
-                // exactly what the claim path looks for.
-                for (int o = 0; o < 4; o++) {
-                  if (!slot[o] || slot[o] < 0x10000)
+                std::fprintf(
+                    stderr,
+                    "[jobwatch] bucket L%d scanA-slots=%llu scanB-nodes=%llu\n",
+                    lvl, (unsigned long long)acount, (unsigned long long)nodes);
+                const uint64_t slots =
+                    *reinterpret_cast<volatile uint64_t *>(bucket + 0x2070);
+                if (acount && mapped(slots)) {
+                  for (uint64_t i = 0; i < acount && i < 16; i++) {
+                    const uint32_t mask = *reinterpret_cast<volatile uint32_t *>(
+                        slots + i * 0x120 + 0xf0);
+                    std::fprintf(stderr,
+                                 "[jobwatch]   L%d slot%llu mask=%#x -> %s\n",
+                                 lvl, (unsigned long long)i, mask,
+                                 (mask & 0xf)
+                                     ? "claimable"
+                                     : "*** MASK EXCLUDES EVERY WORKER ***");
+                  }
+                }
+                for (uint64_t i = 0; i < nodes && i < 32; i++) {
+                  const uint64_t n = *reinterpret_cast<volatile uint64_t *>(
+                      bucket + 0x38 + i * 8);
+                  if (!mapped(n))
                     continue;
-                  uint64_t head = *reinterpret_cast<volatile uint64_t *>(slot[o]);
-                  uint64_t tail = *reinterpret_cast<volatile uint64_t *>(slot[o] + 8);
-                  std::fprintf(stderr, "[jobwatch]   L%d q%d head=%#llx tail=%#llx %s\n",
-                               lvl, o, (unsigned long long)head,
-                               (unsigned long long)tail,
-                               head == tail ? "EMPTY" : "*** NON-EMPTY (claimable work) ***");
+                  const uint64_t head = *reinterpret_cast<volatile uint64_t *>(n);
+                  const uint64_t tail =
+                      *reinterpret_cast<volatile uint64_t *>(n + 8);
+                  if (head == tail)
+                    continue;  // empty: the claim skips it at 0x3913e
+                  const uint64_t dep =
+                      *reinterpret_cast<volatile uint64_t *>(n + 0x980);
+                  const uint64_t thresh =
+                      *reinterpret_cast<volatile uint64_t *>(n + 0x988);
+                  const uint32_t mode =
+                      *reinterpret_cast<volatile uint32_t *>(n + 0x990);
+                  const uint32_t aff =
+                      *reinterpret_cast<volatile uint32_t *>(n + 0x998);
+                  const int32_t prio =
+                      *reinterpret_cast<volatile int32_t *>(n + 0x9a0);
+                  long long depval = 0;
+                  bool depread = false;
+                  if (mapped(dep)) {
+                    depval =
+                        (long long)*reinterpret_cast<volatile uint64_t *>(dep);
+                    depread = true;
+                  }
+                  const bool depok =
+                      !dep || (depread && (mode == 0
+                                               ? (uint64_t)depval == thresh
+                                               : depval > (long long)thresh));
+                  std::fprintf(
+                      stderr,
+                      "[jobwatch]   L%d node%llu @%#llx head=%#llx tail=%#llx "
+                      "dep=%#llx *dep=%lld thresh=%lld mode=%u aff=%#x prio=%d "
+                      "-> %s%s\n",
+                      lvl, (unsigned long long)i, (unsigned long long)n,
+                      (unsigned long long)head, (unsigned long long)tail,
+                      (unsigned long long)dep, depval, (long long)thresh, mode,
+                      aff, prio,
+                      depok ? "dep-ok" : "*** BLOCKED ON DEPENDENCY ***",
+                      (aff & 0xf) ? "" : " *** AFF EXCLUDES EVERY WORKER ***");
                 }
               }
             }
@@ -1077,19 +1131,18 @@ void spawnJobWatcher(uint64_t base) {
                 const bool satisfied =
                     !dep || (readable && (mode == 0 ? (uint64_t)depval == thresh
                                                     : (long long)depval > (long long)thresh));
-                // The claim ALSO tests an affinity mask that lives behind an
-                // indirection: obj = [node+0x38]; mask = [obj+0xf0]; the worker
-                // needs `mask & (1 << its ordinal)` (claim 0x38fc0/0x38fc5).
-                // Our workers report ordinals 0..3, so a mask that misses 0xf
-                // is unclaimable by every worker we have -- which is what a
-                // livelock of "work advertised, nobody takes it" looks like.
-                const uint64_t obj = *reinterpret_cast<volatile uint64_t *>(node + 0x38);
+                // NOTE: this walk covers the 1024-slot job TABLE, which is not
+                // what the claim scans -- so `aff` (+0x998) is the only gate
+                // reading meaningfully here. The old `obj = [node+0x38];
+                // mask = [obj+0xf0]` chase was wrong twice over: +0x38 is the
+                // node-pointer ARRAY inside a priority bucket (not a per-job
+                // object pointer), and the +0xf0 mask belongs to the scan-A
+                // slot array at [bucket+0x2070]. Both live in the bucket walk
+                // above; a table entry's +0x38 reads 0, which is exactly why
+                // that chase always reported nothing.
+                const uint64_t obj = 0;
                 uint32_t mask = 0;
                 bool mask_read = false;
-                if (obj > 0x10000 && obj < (1ULL << 47)) {
-                  mask = *reinterpret_cast<volatile uint32_t *>(obj + 0xf0);
-                  mask_read = true;
-                }
                 std::fprintf(stderr,
                              "[jobwatch] node[%d] head=%#llx tail=%#llx dep=%#llx *dep=%lld "
                              "thresh=%lld mode=%u aff=%#x obj=%#llx mask=%s%#x -> %s%s\n",
