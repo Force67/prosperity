@@ -52,6 +52,13 @@ Id SsboLoad(Translator& t, Id var, Id dword_idx) {
 Id CsSsboPtr(Translator& t, StageContext& sc, uint32_t binding, Id dword_idx) {
   return SsboPtr(t, sc.cs_ssbo[binding], dword_idx);
 }
+// MUBUF atomics (GFX7): 0x30..0x3f on 32-bit values, 0x50..0x5f on 64-bit
+// pairs. GLC returns the pre-op value into VDATA; without it the result is
+// discarded, which SPIR-V expresses the same way (the result id is unused).
+bool MubufAtomic(uint32_t op) {
+  return (op >= 0x30 && op <= 0x3f) || (op >= 0x50 && op <= 0x5f);
+}
+
 Id CsSsboLoad(Translator& t, StageContext& sc, uint32_t binding, Id dword_idx) {
   return SsboLoad(t, sc.cs_ssbo[binding], dword_idx);
 }
@@ -830,9 +837,12 @@ bool PlanCsResources(const Program& program,
         const bool load = op <= 0x03 || (op >= 0x08 && op <= 0x0f);
         const bool store = (op >= 0x04 && op <= 0x07) || op == 0x18 ||
                            op == 0x1a || (op >= 0x1c && op <= 0x1f);
-        if (!load && !store)
-          return false;  // atomics etc.
-        if (!resource(inst.pc, srsrc, 4, 0, store, 0))
+        // An atomic both reads and writes its buffer, so it is a resource like
+        // any other; leaving it unplanned declined the whole dispatch.
+        const bool atomic = MubufAtomic(op);
+        if (!load && !store && !atomic)
+          return false;
+        if (!resource(inst.pc, srsrc, 4, 0, store || atomic, 0))
           return false;
         break;
       }
@@ -921,6 +931,47 @@ void EmitCsMubuf(Translator& t, const Inst& inst, StageContext& sc) {
     for (uint32_t i = 0; i < n; i++)
       CsSsboStore(t, sc, binding, t.Add(dword_idx, t.U32(i)), t.Vg(vdata + i));
   };
+
+  if (MubufAtomic(op)) {
+    // GLC returns the pre-op value into VDATA; without it the result is
+    // simply unused. Device scope: these order against other workgroups.
+    const bool glc = (w >> 14) & 1;
+    const Id ptr = CsSsboPtr(t, sc, binding, dword_idx);
+    const Id scope = t.U32(static_cast<uint32_t>(spv::Scope::Device));
+    const Id relaxed = t.U32(0);
+    const Id src = t.Vg(vdata);
+    Id old_value = 0;
+    const auto rmw = [&](spv::Op a) {
+      old_value = t.m.Emit(a, t.t_u, {ptr, scope, relaxed, src});
+    };
+    switch (op) {
+      case 0x30: rmw(spv::Op::OpAtomicExchange); break;
+      case 0x31: {  // cmpswap: vdata = new value, vdata+1 = comparand
+        old_value = t.m.Emit(spv::Op::OpAtomicCompareExchange, t.t_u,
+                             {ptr, scope, relaxed, relaxed, src,
+                              t.Vg(vdata + 1)});
+        break;
+      }
+      case 0x32: rmw(spv::Op::OpAtomicIAdd); break;
+      case 0x33: rmw(spv::Op::OpAtomicISub); break;
+      case 0x35: rmw(spv::Op::OpAtomicSMin); break;
+      case 0x36: rmw(spv::Op::OpAtomicUMin); break;
+      case 0x37: rmw(spv::Op::OpAtomicSMax); break;
+      case 0x38: rmw(spv::Op::OpAtomicUMax); break;
+      case 0x39: rmw(spv::Op::OpAtomicAnd); break;
+      case 0x3a: rmw(spv::Op::OpAtomicOr); break;
+      case 0x3b: rmw(spv::Op::OpAtomicXor); break;
+      default:
+        // The wrapping inc/dec, the float forms and the 64-bit _x2 pairs have
+        // no single SPIR-V op over a uint buffer. Named rather than faked.
+        WarnUnsupported("mubuf.atomic", op, w, w1);
+        sc.cs_unsupported = true;
+        return;
+    }
+    if (glc && old_value)
+      t.SetVg(vdata, old_value);
+    return;
+  }
 
   switch (op) {
     case 0x00:

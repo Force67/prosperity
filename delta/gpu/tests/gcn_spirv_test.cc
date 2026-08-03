@@ -213,12 +213,12 @@ TEST(GcnSpirv, BranchyWave64LdsSyncsPerDispatchIteration) {
       kEndPgm,
   };
   const gpu::gcn::LdsBarrierPlan plan = PlanBarriers(code, 64);
-  // The write and the read are in different blocks, so they run on different
-  // dispatch-loop iterations and the per-iteration barrier separates them.
-  // Nothing may be emitted inline: two invocations reach the read's block on
-  // different iterations, and a barrier there would not be uniform.
+  // A branchy shader gets wave-uniform control flow, which puts every
+  // invocation in the same block on the same iteration; the barrier can then
+  // go inline at the read, after both writes.
   EXPECT_TRUE(plan.lockstep);
-  EXPECT_TRUE(plan.at.empty());
+  ASSERT_EQ(plan.at.size(), 1u);
+  EXPECT_EQ(plan.at[0], 3u);  // the ds_read
 }
 
 TEST(GcnSpirv, OnlyTheEntryBlockIsAUniformPointInABranchyShader) {

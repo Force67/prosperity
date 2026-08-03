@@ -749,6 +749,32 @@ Id BranchTaken(Translator& t, int kind) {
   }
 }
 
+// The raw per-lane bit a branch kind tests, before the wave-wide reduction.
+// Every GCN branch is wave-uniform on hardware: SCC is one scalar bit, and
+// VCCZ/EXECZ ask whether a 64-bit MASK is all-zero. A per-invocation model has
+// to OR the bit across the wave to get the same answer, so what each block
+// publishes is this bit, and whether the kind wants the reduction inverted.
+Id BranchRaw(Translator& t, int kind) {
+  switch (kind) {
+    case 2:
+    case 3:
+      return t.SelectB(t.IsNonZero(t.Scc()), t.U32(1), t.U32(0));
+    case 4:
+    case 5:
+      return t.SelectB(t.IsNonZero(t.Sg(106)), t.U32(1), t.U32(0));
+    case 6:
+    case 7:
+      return t.SelectB(t.IsNonZero(t.Exec()), t.U32(1), t.U32(0));
+    default:
+      return t.U32(0);
+  }
+}
+
+// The *z forms branch when NOTHING is set, i.e. on the negation of the OR.
+uint32_t BranchInverts(int kind) {
+  return (kind == 2 || kind == 4 || kind == 6) ? 1u : 0u;
+}
+
 // Block leaders under the same rule EmitCfg uses: entry, every branch target,
 // the slot after a branch.
 std::vector<uint32_t> BlockStarts(const Program& program, uint32_t max_pc) {
@@ -841,25 +867,11 @@ LdsBarrierPlan PlanLdsBarriers(const Program& program,
   if (!any_read || !any_write || has_barrier)
     return plan;
 
-  const uint32_t max_pc =
-      program.empty() ? 0 : program.back().pc + program.back().size;
   const bool branchy = HasControlFlow(program);
-  const std::vector<uint32_t> starts =
-      branchy ? BlockStarts(program, max_pc) : std::vector<uint32_t>{0};
-  const auto block_of = [&](uint32_t pc) {
-    uint32_t b = 0;
-    for (uint32_t i = 0; i < starts.size(); i++)
-      if (starts[i] <= pc)
-        b = i;
-      else
-        break;
-    return b;
-  };
 
   // Alternation walk: a read after writes, or a write after reads, needs the
   // group synchronised in between.
   int action = 0;  // 1 = a following write needs one, 2 = a following read does
-  uint32_t prev = 0;
   for (uint32_t i = 0; i < program.size(); i++) {
     if (reachable && !reachable[i])
       continue;
@@ -867,20 +879,14 @@ LdsBarrierPlan PlanLdsBarriers(const Program& program,
     if (!r && !w)
       continue;
     if ((r && action == 2) || (w && action == 1)) {
-      if (!branchy) {
-        if (plan.at.empty() || plan.at.back() != i)
-          plan.at.push_back(i);
-      } else if (block_of(program[prev].pc) != block_of(program[i].pc)) {
-        plan.lockstep = true;  // different blocks: different iterations
-      } else {
-        // One block, one iteration: nowhere in between that the whole group
-        // provably arrives together. Recorded, not declined -- a dispatch that
-        // races still beats one that never runs, but it must not read as fine.
-        NoteApproximated("lds.wave64-barrier", program[i].opcode);
-      }
+      // A branchy shader gets wave-uniform control flow (see EmitCfg), which
+      // puts every invocation in the same block on the same iteration and so
+      // makes every point a legal barrier -- inline is right in both cases.
+      plan.lockstep = branchy;
+      if (plan.at.empty() || plan.at.back() != i)
+        plan.at.push_back(i);
     }
     action = r ? 1 : 2;
-    prev = i;
   }
   return plan;
 }
@@ -916,7 +922,7 @@ void EmitCfg(Translator& t,
   const Id merge_sel = t.m.NewBlock();
   const Id cont = t.m.NewBlock(), merge = t.m.NewBlock();
   const Id exit_blk = t.m.NewBlock();
-  const Id lockstep = t.m.NewBlock();
+  const Id lockstep_blk = t.m.NewBlock();
   std::vector<Id> case_labels(num_blocks);
   for (Id& l : case_labels)
     l = t.m.NewBlock();
@@ -930,6 +936,46 @@ void EmitCfg(Translator& t,
                           ? t.m.Variable(t.p_priv_u, spv::StorageClass::Private,
                                          t.m.ConstNull(t.t_u))
                           : 0;
+
+  // Wave-uniform control flow. On hardware a wave has ONE program counter and
+  // every branch tests a wave-wide register, so all 64 lanes are always in the
+  // same block; a per-invocation `state` lets them drift apart, and then a lane
+  // that names another lane (v_readlane) or reads what another lane wrote to
+  // LDS can be reading a lane that is somewhere else entirely. Under the
+  // lock-step gate a block therefore does not resolve its own branch: it
+  // publishes the bit it tests, and the loop head ORs that across the group and
+  // decides once for everyone. The group is one wave there (the gate requires a
+  // 64-thread threadgroup), so group-uniform IS wave-uniform.
+  const bool lockstep = sc.lockstep_loop && t.xchg_var;
+  const auto priv = [&]() {
+    return t.m.Variable(t.p_priv_u, spv::StorageClass::Private,
+                        t.m.ConstNull(t.t_u));
+  };
+  const Id br_raw = lockstep ? priv() : 0;
+  const Id br_invert = lockstep ? priv() : 0;
+  const Id br_taken = lockstep ? priv() : 0;
+  const Id br_fall = lockstep ? priv() : 0;
+  // How a block hands its successor(s) on. Without lock-step this is the old
+  // per-lane select, which is what a graphics stage still wants.
+  const auto set_next = [&](uint32_t taken_state, uint32_t fall_state, Id raw,
+                            uint32_t invert) {
+    if (!lockstep) {
+      if (taken_state == fall_state) {
+        t.SetState(taken_state);
+      } else {
+        // Same condition the per-lane lowering always used: a *z form branches
+        // when the bit is clear, the others when it is set.
+        const Id cond = invert ? t.IsZero(raw) : t.IsNonZero(raw);
+        t.SetStateId(
+            t.SelectB(cond, t.U32(taken_state), t.U32(fall_state)));
+      }
+      return;
+    }
+    t.m.Store(br_raw, raw ? raw : t.U32(0));
+    t.m.Store(br_invert, t.U32(invert));
+    t.m.Store(br_taken, t.U32(taken_state));
+    t.m.Store(br_fall, t.U32(fall_state));
+  };
 
   t.SetState(0);
   t.m.Branch(header);
@@ -948,19 +994,28 @@ void EmitCfg(Translator& t,
   // "Is anyone still running" has to be a workgroup-wide OR, and it must be
   // computed without divergence: every invocation stores the zero (idempotent),
   // then every invocation contributes with an atomic, then everyone reads.
-  if (sc.lockstep_loop && t.xchg_var) {
-    t.m.Branch(lockstep);
-    t.m.OpenBlock(lockstep);
+  if (lockstep) {
+    t.m.Branch(lockstep_blk);
+    t.m.OpenBlock(lockstep_blk);
+    // OR the published bit across the group. The reset is written by EVERY
+    // invocation rather than by lane 0 under an `if`, so nothing here is
+    // divergent and both barriers are reached by everyone.
     const Id slot = t.XchgAt(t.U32(t.xchg_lanes * 2));
     t.m.Store(slot, t.U32(0));
     t.Barrier();
     t.m.Emit(spv::Op::OpAtomicOr, t.t_u,
-             {slot, t.U32(2), t.U32(0x108),
-              t.SelectB(t.m.Emit(spv::Op::OpINotEqual, t.t_bool,
-                                 {t.State(), t.U32(kExit)}),
-                        t.U32(1), t.U32(0))});
+             {slot, t.U32(2), t.U32(0x108), t.m.Load(t.t_u, br_raw)});
     t.Barrier();
-    t.m.BranchConditional(t.IsNonZero(t.m.Load(t.t_u, slot)), dispatch, merge);
+    const Id any = t.IsNonZero(t.m.Load(t.t_u, slot));
+    const Id inv = t.IsNonZero(t.m.Load(t.t_u, br_invert));
+    const Id taken = t.m.Emit(spv::Op::OpLogicalNotEqual, t.t_bool, {any, inv});
+    t.SetStateId(t.SelectB(taken, t.m.Load(t.t_u, br_taken),
+                           t.m.Load(t.t_u, br_fall)));
+    // Every invocation just computed the same state, so leaving the loop is
+    // uniform too and needs no second reduction.
+    t.m.BranchConditional(
+        t.m.Emit(spv::Op::OpINotEqual, t.t_bool, {t.State(), t.U32(kExit)}),
+        dispatch, merge);
   } else {
     t.m.Branch(dispatch);
   }
@@ -999,28 +1054,30 @@ void EmitCfg(Translator& t,
       // terminator
       const uint32_t fall = (bi + 1 < num_blocks) ? bi + 1 : kExit;
       if (k == 8) {  // endpgm
-        t.SetState(kExit);
+        set_next(kExit, kExit, 0, 0);
       } else if (k == 1) {  // unconditional
         const int32_t simm = static_cast<int16_t>(inst.raw[0] & 0xFFFF);
-        t.SetState(block_of(
+        const uint32_t target = block_of(
             static_cast<uint32_t>(static_cast<int32_t>(inst.pc) +
-                                  static_cast<int32_t>(inst.size) + simm)));
+                                  static_cast<int32_t>(inst.size) + simm));
+        set_next(target, target, 0, 0);
       } else {  // conditional
         const int32_t simm = static_cast<int16_t>(inst.raw[0] & 0xFFFF);
         const uint32_t target = block_of(
             static_cast<uint32_t>(static_cast<int32_t>(inst.pc) +
                                   static_cast<int32_t>(inst.size) + simm));
-        t.SetStateId(t.SelectB(BranchTaken(t, k), t.U32(target), t.U32(fall)));
+        set_next(target, fall, BranchRaw(t, k), BranchInverts(k));
       }
       terminated = true;
       break;
     }
     if (!terminated)
-      t.SetState((bi + 1 < num_blocks) ? bi + 1 : kExit);
+      set_next((bi + 1 < num_blocks) ? bi + 1 : kExit,
+               (bi + 1 < num_blocks) ? bi + 1 : kExit, 0, 0);
     t.m.Branch(merge_sel);
   }
   t.m.OpenBlock(exit_blk);
-  t.m.Branch(sc.lockstep_loop && t.xchg_var ? merge_sel : merge);
+  t.m.Branch(merge);
   t.m.OpenBlock(merge_sel);
   t.m.Branch(cont);
   t.m.OpenBlock(cont);
@@ -1477,10 +1534,11 @@ bool TranslateCs(const Program& program,
                        sc.cs_bind) ||
       r.resources.empty())
     return false;
-  const LdsBarrierPlan lds_bar = PlanLdsBarriers(
-      program, reachable.data(),
+  const uint32_t threads_per_group =
       (num_thread_x ? num_thread_x : 1) * (num_thread_y ? num_thread_y : 1) *
-          (num_thread_z ? num_thread_z : 1));
+      (num_thread_z ? num_thread_z : 1);
+  const LdsBarrierPlan lds_bar =
+      PlanLdsBarriers(program, reachable.data(), threads_per_group);
   sc.lds_barrier_at = lds_bar.at;
   sc.lockstep_loop = lds_bar.lockstep;
 
@@ -1553,10 +1611,14 @@ bool TranslateCs(const Program& program,
   // Cross-lane channel: LocalInvocationIndex is the order GCN packs threads
   // into waves, so lane = index % 64 and the wave's lanes are contiguous. Two
   // words per invocation, so one barrier pair can carry two published values.
-  const uint32_t threads = (num_thread_x ? num_thread_x : 1) *
-                           (num_thread_y ? num_thread_y : 1) *
-                           (num_thread_z ? num_thread_z : 1);
-  if ((uses_cross_lane || lds_bar.lockstep) && threads) {
+  const uint32_t threads = threads_per_group;
+  // Naming a lane only means anything if that lane is in the same block, so a
+  // branchy shader that does it needs the same wave-uniform control flow the
+  // LDS barriers need.
+  if (uses_cross_lane && HasControlFlow(program) &&
+      threads == kGcnWave && WaveSplitsAcrossSubgroups())
+    sc.lockstep_loop = true;
+  if ((uses_cross_lane || sc.lockstep_loop) && threads) {
     const Id lii = t.m.Variable(
         t.m.TypePointer(spv::StorageClass::Input, t.t_u),
         spv::StorageClass::Input);
@@ -1610,7 +1672,9 @@ bool TranslateCs(const Program& program,
     t.lane_id = t.And(index, t.U32(63));
     t.wave_base = t.And(index, t.U32(~63u));
   }
-  sc.uniform_points = UniformPoints(program);
+  sc.uniform_points = sc.lockstep_loop
+                          ? std::vector<uint8_t>(program.size(), 1)
+                          : UniformPoints(program);
   t.SeedExec();
   t.predicate_vector = true;
   EmitCfg(t, program, sc, reachable.data());
