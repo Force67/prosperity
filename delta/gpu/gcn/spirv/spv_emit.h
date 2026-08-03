@@ -101,6 +101,10 @@ class Module {
                 spv::ExecutionMode mode,
                 const std::vector<uint32_t>& operands = {});
   void Capability(spv::Capability cap);
+  // OpExtension: the SPIR-V extension string a capability belongs to. Emitted
+  // after the capabilities and before the ext-inst imports, per the module's
+  // required section order.
+  void Extension(const std::string& name);
 
   Id GlslExt() const { return glsl_ext_; }
 

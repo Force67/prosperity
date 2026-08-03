@@ -527,6 +527,18 @@ struct StageContext {
   // Compute: storage buffers modelling the guest memory the CS reads/writes.
   std::unordered_map<uint32_t, uint32_t> cs_bind;  // instruction pc -> binding
   std::vector<Id> cs_ssbo;                         // binding -> SSBO variable
+  // Attributes that v_interp_mov_f32 reads as P10 or P20. Those are the
+  // per-vertex DELTAS (P1-P0, P2-P0), which an interpolated fragment input
+  // cannot supply, so the whole Location is declared PerVertexKHR -- an
+  // array[3] of the triangle's vertex values. A Location cannot be both that
+  // and an ordinary interpolated input, and two variables cannot share one, so
+  // the choice is per attribute: everything here goes through the array (its
+  // interpolated value recomputed from BaryCoordKHR), everything else keeps
+  // the plain input.
+  std::unordered_set<uint32_t> pervertex_attrs;
+  std::unordered_map<uint32_t, Id> pervertex_vars;
+  Id bary_var = 0;  // BaryCoordKHR, declared on first use
+
   Id lds_var = 0;           // uint array backing LDS (0 = no LDS)
   uint32_t lds_dwords = 0;  // its length
   // Workgroup in a CS. A fragment shader cannot declare Workgroup storage at

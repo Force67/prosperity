@@ -157,6 +157,65 @@ Id PsInputVar(Translator& t, StageContext& sc, uint32_t attr) {
   return v;
 }
 
+// Attributes any reachable v_interp_mov_f32 reads as P10 (VSRC 0) or P20
+// (VSRC 1). Collected before emission because declaring the input decides its
+// storage shape, and that must be settled before the first read of it.
+std::unordered_set<uint32_t> PlanPerVertexAttrs(const Program& program,
+                                                const uint8_t* reachable) {
+  std::unordered_set<uint32_t> out;
+  for (size_t i = 0; i < program.size(); i++) {
+    const Inst& inst = program[i];
+    if (inst.enc != Enc::kVintrp || (reachable && !reachable[i]))
+      continue;
+    const uint32_t w = inst.raw[0];
+    if (((w >> 16) & 3) != 2)
+      continue;  // not v_interp_mov_f32
+    const uint32_t vsrc = w & 0xFF;
+    if (vsrc == 0 || vsrc == 1)
+      out.insert((w >> 10) & 0x3F);
+  }
+  return out;
+}
+
+// The triangle's three vertex values for one Location, as an array[3] decorated
+// PerVertexKHR. Index 0 is the provoking vertex, so P0 = [0], P10 = [1] - [0],
+// P20 = [2] - [0].
+Id PsPerVertexVar(Translator& t, StageContext& sc, uint32_t attr) {
+  auto it = sc.pervertex_vars.find(attr);
+  if (it != sc.pervertex_vars.end())
+    return it->second;
+  t.m.Capability(spv::Capability::FragmentBarycentricKHR);
+  t.m.Extension("SPV_KHR_fragment_shader_barycentric");
+  const Id arr = t.m.TypeArray(t.t_v4, 3);
+  const Id v = t.m.Variable(t.m.TypePointer(spv::StorageClass::Input, arr),
+                            spv::StorageClass::Input);
+  t.m.Decorate(v, spv::Decoration::Location, {attr});
+  t.m.Decorate(v, spv::Decoration::PerVertexKHR);
+  if (sc.flat_attrs && sc.flat_attrs->count(attr))
+    t.m.Decorate(v, spv::Decoration::Flat);
+  t.m.Name(v, "in_attr" + std::to_string(attr) + "_pv");
+  sc.iface->push_back(v);
+  sc.pervertex_vars[attr] = v;
+  return v;
+}
+
+// gl_BaryCoordKHR: perspective-correct weights of the three vertices, so an
+// interpolated value can be rebuilt as P0*x + P1*y + P2*z.
+Id PsBaryCoord(Translator& t, StageContext& sc) {
+  if (sc.bary_var)
+    return sc.bary_var;
+  t.m.Capability(spv::Capability::FragmentBarycentricKHR);
+  t.m.Extension("SPV_KHR_fragment_shader_barycentric");
+  const Id v = t.m.Variable(t.m.TypePointer(spv::StorageClass::Input, t.t_v3),
+                            spv::StorageClass::Input);
+  t.m.Decorate(v, spv::Decoration::BuiltIn,
+               {static_cast<uint32_t>(spv::BuiltIn::BaryCoordKHR)});
+  t.m.Name(v, "bary");
+  sc.iface->push_back(v);
+  sc.bary_var = v;
+  return v;
+}
+
 Id VsParamOut(Translator& t, StageContext& sc, uint32_t p) {
   auto it = sc.param_outs.find(p);
   if (it != sc.param_outs.end())
@@ -426,25 +485,44 @@ void EmitInst(Translator& t, const Inst& inst, StageContext& sc) {
         break;
       const uint32_t chan = (w >> 8) & 3, attr = (w >> 10) & 0x3F;
       const uint32_t op = (w >> 16) & 3, vdst = (w >> 18) & 0xFF;
-      // KNOWN SILENT DROP -- the largest one left in this translator.
-      // VSRC (bits [7:0]) selects which parameter v_interp_mov_f32 (op 2)
-      // reads: 0 = P10, 1 = P20, 2 = P0. Only P0 is handled; a P10 or P20 site
-      // falls straight through this `if`, emits ZERO body words, and leaves
-      // vdst at its zero initialiser -- with no WarnUnsupported, so the shader
-      // still reports verdict=ok with zero declines and zero unsupported ops
-      // while quietly computing from a zero. DELTA_GPU_SHAUDIT measures the
-      // blast radius on SotC: 356 sites across 33 of its 56 unique pixel
-      // shaders. That is the failure shape seen downstream -- pixel shaders
-      // that translate "fine" yet write constants or zero into their targets.
-      //
-      // Fixing it needs the per-vertex parameters, since P10 = P1 - P0 and
-      // P20 = P2 - P0 at the provoking triangle: declare the Location with
-      // PerVertexKHR (VK_KHR_fragment_shader_barycentric) and emit the
-      // subtraction. Until then the honest interim step is to route these
-      // through WarnUnsupported so HadUnsupported() declines the shader and the
-      // draw is skipped rather than drawn wrong. Left as-is here only because
-      // that flips ~33 shaders from "silently wrong" to "declined" and the
-      // consequences were not measurable within this session.
+      // Attributes read as P10/P20 come from the PerVertexKHR array, and every
+      // read of such an attribute must, since the Location no longer carries an
+      // interpolated value. VSRC selects the parameter: 0 = P10, 1 = P20,
+      // 2 = P0; P10 = P1 - P0 and P20 = P2 - P0 at the provoking vertex.
+      if (sc.pervertex_attrs.count(attr)) {
+        const Id var = PsPerVertexVar(t, sc, attr);
+        const Id p_in_f = t.m.TypePointer(spv::StorageClass::Input, t.t_f);
+        const auto vert = [&](uint32_t i) {
+          return t.m.Load(t.t_f,
+                          t.m.AccessChain(p_in_f, var, {t.U32(i), t.U32(chan)}));
+        };
+        if (op == 0)
+          break;  // p1 is a no-op; p2 below produces the value
+        if (op == 1) {
+          // Rebuild what interpolation would have produced.
+          const Id b = PsBaryCoord(t, sc);
+          const Id p_bary_f = t.m.TypePointer(spv::StorageClass::Input, t.t_f);
+          const auto weight = [&](uint32_t i) {
+            return t.m.Load(t.t_f, t.m.AccessChain(p_bary_f, b, {t.U32(i)}));
+          };
+          t.SetVgF(vdst, t.FAdd(t.FAdd(t.FMul(vert(0), weight(0)),
+                                       t.FMul(vert(1), weight(1))),
+                                t.FMul(vert(2), weight(2))));
+          break;
+        }
+        const uint32_t vsrc = w & 0xFF;
+        if (vsrc == 2)
+          t.SetVgF(vdst, vert(0));  // P0
+        else if (vsrc == 0)
+          t.SetVgF(vdst, t.FSub(vert(1), vert(0)));  // P10
+        else if (vsrc == 1)
+          t.SetVgF(vdst, t.FSub(vert(2), vert(0)));  // P20
+        break;
+      }
+      // Attributes nothing reads as P10/P20 keep the plain interpolated input:
+      // Vulkan hands back the completed interpolation, so p2 reads it directly
+      // and a mov of P0 reads the same Location rather than leaving vdst zero.
+      // (p1 is a no-op here.)
       if (op == 1 || (op == 2 && (w & 0xFF) == 2)) {
         // Vulkan provides the completed interpolation directly. P2 reads the
         // final value; MOV P0 reads the selected parameter input instead of
@@ -1074,6 +1152,7 @@ bool TranslatePs(const Program& program,
   sc.r = &r;
   sc.iface = &iface;
   sc.flat_attrs = &flat_attrs;
+  sc.pervertex_attrs = PlanPerVertexAttrs(program, reachable.data());
   if (!PlanCbufs(program, r.vs_cbufs.size(), r.ps_cbufs, sc.cbuf_bind,
                  reachable.data()))
     return false;

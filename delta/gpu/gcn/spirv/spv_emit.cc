@@ -299,6 +299,12 @@ void Module::Capability(spv::Capability cap) {
   Instr(caps_, spv::Op::OpCapability, {static_cast<uint32_t>(cap)});
 }
 
+void Module::Extension(const std::string& name) {
+  std::vector<uint32_t> ops;
+  PutString(ops, name);
+  Instr(exts_, spv::Op::OpExtension, ops);
+}
+
 // ---- function / block construction -----------------------------------------
 Id Module::BeginFunction(Id ret_type, Id fn_type) {
   const Id fn = Alloc();

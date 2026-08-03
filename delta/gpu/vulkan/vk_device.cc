@@ -305,7 +305,10 @@ bool CreateDevice() {
   // VK_EXT_external_memory_host lets a buffer be backed by guest pages DIRECTLY,
   // so a compute dispatch reading guest memory needs no staging copy in and no
   // writeback out (see vk_compute.cc, DELTA_GPU_CSIMPORT).
-  const char* dev_exts[2] = {};
+  // VK_KHR_fragment_shader_barycentric supplies the per-vertex attribute values
+  // a pixel shader needs for v_interp_mov_f32's P10/P20 parameters (the deltas
+  // P1-P0 and P2-P0), which an interpolated input cannot express.
+  const char* dev_exts[3] = {};
   uint32_t dev_ext_count = 0;
   {
     uint32_t en = 0;
@@ -319,6 +322,9 @@ bool CreateDevice() {
       if (!std::strcmp(ep.extensionName,
                        VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME))
         g_dev.host_import_available = true;
+      if (!std::strcmp(ep.extensionName,
+                       VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME))
+        g_dev.barycentric_available = true;
     }
   }
   if (g_dev.host_import_available) {
@@ -343,6 +349,14 @@ bool CreateDevice() {
     fault_feat.pNext = f13.pNext;
     f13.pNext = &fault_feat;
     dev_exts[dev_ext_count++] = VK_EXT_DEVICE_FAULT_EXTENSION_NAME;
+  }
+  VkPhysicalDeviceFragmentShaderBarycentricFeaturesKHR bary_feat{
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADER_BARYCENTRIC_FEATURES_KHR};
+  if (g_dev.barycentric_available) {
+    bary_feat.fragmentShaderBarycentric = VK_TRUE;
+    bary_feat.pNext = f13.pNext;
+    f13.pNext = &bary_feat;
+    dev_exts[dev_ext_count++] = VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME;
   }
   if (dev_ext_count) {
     dc.enabledExtensionCount = dev_ext_count;
