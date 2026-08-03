@@ -698,6 +698,61 @@ void EmitSopk(Translator& t, const Inst& inst) {
   }
 }
 
+// ---- cross-lane -------------------------------------------------------------
+// A GCN wave is 64 lanes; the host subgroup may be half that. Compute gets an
+// exact channel (a Workgroup array indexed the way GCN packs threads into
+// waves) wherever the group can legally be synchronised; elsewhere a subgroup
+// shuffle answers correctly within one subgroup and is recorded as short of
+// the ISA when the wave spans more than one. Graphics stages have no wave-lane
+// index at all, so they keep the single-lane reading.
+
+Id ReadLane(Translator& t, Id value, Id lane) {
+  if (!t.xchg_lanes)
+    return value;  // no wave-lane index exists here
+  if (t.CanExchange())
+    return t.WaveExchange(value, lane);
+  if (WaveSplitsAcrossSubgroups())
+    NoteApproximated("v_readlane.no-sync-point", 0x01);
+  return t.SubgroupShuffle(value, lane);
+}
+
+// The lowest EXEC-active lane's value, or lane 0's when EXEC is empty. EXEC is
+// per-invocation here and is NOT the set of invocations the host considers
+// active, so the ballot has to be taken over our own bit rather than implied
+// by OpGroupNonUniformBroadcastFirst.
+Id ReadFirstLane(Translator& t, Id value) {
+  if (!t.xchg_lanes)
+    return value;
+  t.RequireSubgroup(spv::Capability::GroupNonUniformBallot);
+  t.RequireSubgroup(spv::Capability::GroupNonUniformVote);
+  const Id scope = t.U32(3);  // Subgroup
+  const Id active = t.IsNonZero(t.Exec());
+  const Id ballot = t.m.Emit(spv::Op::OpGroupNonUniformBallot,
+                             t.m.TypeVec(t.t_u, 4), {scope, active});
+  const Id any = t.m.Emit(spv::Op::OpGroupNonUniformAny, t.t_bool,
+                          {scope, active});
+  const Id first = t.m.Emit(spv::Op::OpGroupNonUniformBallotFindLSB, t.t_u,
+                            {scope, ballot});
+  // Half-uniform: the first active lane of THIS subgroup, or lane 0.
+  const Id half = t.SubgroupShuffle(value, t.SelectB(any, first, t.U32(0)));
+  if (!WaveSplitsAcrossSubgroups())
+    return half;
+  if (!t.CanExchange()) {
+    NoteApproximated("v_readfirstlane.no-sync-point", 0x02);
+    return half;
+  }
+  // Cross the halves: the lower one wins whenever it has an active lane, and
+  // its value is also the ISA's EXEC-empty fallback.
+  t.WavePublish(half, 0);
+  t.WavePublish(t.SelectB(any, t.U32(1), t.U32(0)), 1);
+  t.Barrier();
+  const Id lo = t.WaveFetch(t.U32(0), 0);
+  const Id lo_any = t.WaveFetch(t.U32(0), 1);
+  const Id hi = t.WaveFetch(t.U32(32), 0);
+  t.Barrier();
+  return t.SelectB(t.IsNonZero(lo_any), lo, hi);
+}
+
 // ---- VOP1 -------------------------------------------------------------------
 void EmitVop1(Translator& t,
               uint32_t op,
@@ -723,8 +778,8 @@ void EmitVop1(Translator& t,
       set_u(u0);
       break;  // v_mov_b32
     case 0x02:
-      t.SetSg(vdst, u0);
-      break;    // v_readfirstlane_b32 (single lane)
+      t.SetSg(vdst, ReadFirstLane(t, u0));
+      break;  // v_readfirstlane_b32
     case 0x05:  // v_cvt_f32_i32
       set_f(t.m.Emit(spv::Op::OpConvertSToF, t.t_f,
                      {t.m.Bitcast(t.t_i, s0)}));
@@ -885,16 +940,20 @@ void EmitVop2(Translator& t,
       set_f(t.SelectF(t.IsNonZero(t.Sg(106)), s1, s0));
       break;
     }
-    // v_readlane / v_writelane: pick/write a specific wave lane. Per-invocation
-    // model (one lane): the value is just s0.
+    // v_readlane / v_writelane name one lane of the wave and both ignore EXEC.
     case 0x01:
-      t.SetSg(vdst, u0);
+      t.SetSg(vdst, ReadLane(t, u0, u1));
       break;
-    case 0x02:
-      // Lane writes ignore EXEC. In the scalarized wave model this remains a
-      // selected-lane approximation, but it must not use SetVg predication.
-      t.m.Store(t.VgPtr(vdst), u0);
+    case 0x02: {
+      // Only the named lane takes the value; the rest keep theirs. src0 is an
+      // SGPR, i.e. wave-uniform, so every invocation already holds what the
+      // write publishes and no cross-lane channel is needed. Not SetVg: a lane
+      // write is not EXEC-predicated.
+      const Id keep = t.m.Load(t.t_u, t.VgPtr(vdst));
+      t.m.Store(t.VgPtr(vdst),
+                t.SelectB(t.Eq(t.WaveLane(), t.And(u1, t.U32(63))), u0, keep));
       break;
+    }
     case 0x03:
       set_f(t.FAdd(s0, s1));
       break;  // v_add_f32
@@ -1002,12 +1061,24 @@ void EmitVop2(Translator& t,
     case 0x22:
       set_u(t.Add(t.PopCount(u0), u1));
       break;  // v_bcnt_u32_b32
-    // v_mbcnt_lo/hi: this lane's index within the wave. Single lane -> no
-    // prior lanes; the running accumulator s1 passes through.
+    // v_mbcnt_lo/hi: D = popcount(S0 & ThreadMask_half) + S1, where ThreadMask
+    // is (1 << lane) - 1 over the 64 lanes and the two opcodes take its low
+    // and high halves. The pair with S0 = -1 is the ISA's canonical lane-id
+    // sequence, and comes out exact.
     case 0x23:
-    case 0x24:
-      set_u(u1);
+    case 0x24: {
+      const Id lane = t.WaveLane();
+      const Id lo_half = t.Ult(lane, t.U32(32));
+      const Id mask =
+          op == 0x23
+              ? t.SelectB(lo_half, t.Sub(t.Shl(t.U32(1), lane), t.U32(1)),
+                          t.U32(0xFFFFFFFFu))
+              : t.SelectB(lo_half, t.U32(0),
+                          t.Sub(t.Shl(t.U32(1), t.Sub(lane, t.U32(32))),
+                                t.U32(1)));
+      set_u(t.Add(t.PopCount(t.And(u0, mask)), u1));
       break;
+    }
     case 0x25: {  // v_add_i32: carry-out -> VCC
       const CarryResult r = AddCarry(t, u0, u1);
       set_u(t.Add(u0, u1));

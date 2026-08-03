@@ -49,11 +49,30 @@ int64_t PS4ABI sys_jitshm_create(size_t len, uint32_t flags) {
 
 int PS4ABI sys_jitshm_alias() { return -SysError::eOPNOTSUPP; }
 
-int PS4ABI sys_dl_get_list() { return 0; }
-int PS4ABI sys_dl_get_info() { return 0; }
-int PS4ABI sys_dl_notify_event() { return 0; }
+// The kernel's sys_dl_get_list is gated on a debugger/coredump/syscore process;
+// anything else -- a retail game title -- gets 1 (EPERM). Same for get_info
+// below: the debugger (the system process running dbglogger) is the only caller
+// that may enumerate loaded modules. arg block is
+// {pid@0, ids[]@8, max@16, count@24} in the kernel.
+int PS4ABI sys_dl_get_list() { return -SysError::ePERM; }
 
-int PS4ABI sys_debug_init() { return 0; }
+// Kernel arg block: {pid@0, handle@8, info@16}; fills a 0xA50-byte module-info
+// struct. Same debugger gate, same EPERM for a title.
+int PS4ABI sys_dl_get_info() { return -SysError::ePERM; }
+
+// The kernel's sys_dl_notify_event returns ENOSYS unconditionally -- dynlib
+// event delivery to a debugger is not wired on the console either.
+int PS4ABI sys_dl_notify_event() { return -SysError::eNOSYS; }
+
+// The kernel stores the debugger protocol version once and answers EBUSY to any
+// repeat init, so a second sys_debug_init from the guest is already an error we
+// mirror rather than fake away.
+int PS4ABI sys_debug_init(const int *version) {
+  static std::atomic<bool> once{false};
+  if (!version || once.exchange(true))
+    return -SysError::eBUSY;
+  return 0;
+}
 
 // We run a single process and never freeze it.
 int PS4ABI sys_suspend_process() { return 0; }
@@ -96,6 +115,12 @@ int PS4ABI sys_budget_delete() { return 0; }
 // a negative return would drive the wrapper's errno path on a stale errno.
 int PS4ABI sys_budget_get() { return 0; }
 int PS4ABI sys_budget_set() { return 0; }
+// Kernel (sys_budget_getid): only a system-ucred process may ask -- it gets the
+// proc's own budget id, or 2/ENOENT when none is set -- and everyone else gets
+// 78 (ENOSYS). A game is the latter, but the game's libkernel wrapper takes the
+// id and passes it back to budget_get/delete, so keep the benign fixed id the
+// wrapper path expects rather than turning the call into an error the title was
+// never coded to handle.
 int PS4ABI sys_budget_getid() { return 0x2001; }
 int PS4ABI sys_budget_get_ptype_of_budget() { return sys_budget_get_ptype(); }
 
@@ -132,22 +157,25 @@ int PS4ABI sys_eport_close() { return 0; }
 int PS4ABI sys_dynlib_dlclose() { return 0; }
 int PS4ABI sys_dynlib_prepare_dlclose() { return 0; }
 
-// Query the per-title sandbox root. We have no per-title jail, so report "/".
-int PS4ABI sys_sandbox_path(char *out, size_t *len, void *, void *) {
-  if (out && len && *len >= 2) {
-    out[0] = '/';
-    out[1] = '\0';
-    *len = 1;
-  }
-  return 0;
+// The kernel's sys_sandbox_path is a SETTER, not a getter: the system process
+// hands the title's sandbox-root string in and the kernel stores it in the
+// proc. Only a system ucred may do that; a game gets 1 (EPERM). We have no
+// per-title jail (the mount table is the sandbox) and the game is not the
+// system, so deny exactly the way hardware would.
+int PS4ABI sys_sandbox_path(const char *path) {
+  (void)path;
+  return -SysError::ePERM;
 }
 
 // dup a descriptor into another process; no multi-proc, so deny.
 int PS4ABI sys_rdup() { return -SysError::eOPNOTSUPP; }
 
-int PS4ABI sys_dl_get_metadata() { return 0; }
+// Same debugger gate as sys_dl_get_list/get_info; arg block is
+// {pid@0, handle@8, meta@16, metasize@24, sizeOut@32}.
+int PS4ABI sys_dl_get_metadata() { return -SysError::ePERM; }
 
-// 0 == retail / not in development mode.
+// The kernel returns boot_parameter(0): 1 on dev/kit firmware, 0 on retail.
+// We run retail, so 0 is the accurate answer.
 int PS4ABI sys_is_development_mode() { return 0; }
 
 // Reads the SceSelfAuthInfo (0x88 / 136 bytes) from the calling process's SELF

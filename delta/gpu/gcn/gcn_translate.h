@@ -126,16 +126,29 @@ inline bool WaveSplitsAcrossSubgroups() {
   return HostSubgroupSize() < kGcnWave;
 }
 
-// Instruction indices before which a compute shader needs a workgroup barrier
-// that its guest compiler was entitled to omit: a 64-thread threadgroup is
-// exactly one wave on GCN, so LDS is coherent across it without an s_barrier,
-// and one-lane-per-invocation breaks that. Empty unless the shader is one of
-// those AND the host subgroup is narrower than a wave. Barriers are only
-// placed where every invocation reaches the same dynamic instance -- blocks
-// that post-dominate the entry and sit outside every cycle.
-std::vector<uint32_t> PlanLdsBarriers(const Program& program,
-                                      const uint8_t* reachable,
-                                      uint32_t threads_per_group);
+// Where a compute shader needs workgroup barriers its guest compiler was
+// entitled to omit: a 64-thread threadgroup is exactly one wave on GCN, so LDS
+// is coherent across it without an s_barrier, and one lane per invocation
+// breaks that. Empty unless the shader is one of those AND the host subgroup
+// is narrower than a wave.
+struct LdsBarrierPlan {
+  // Instruction indices to emit a barrier before (straight-line shaders, where
+  // every point is reached by every invocation exactly once).
+  std::vector<uint32_t> at;
+  // Branchy shaders instead barrier once per dispatch-loop iteration, which
+  // separates accesses in different blocks. Costs a workgroup-wide "is anyone
+  // still running" reduction, so it is only turned on where it is needed.
+  bool lockstep = false;
+};
+LdsBarrierPlan PlanLdsBarriers(const Program& program,
+                               const uint8_t* reachable,
+                               uint32_t threads_per_group);
+
+// Per instruction: is this a point every invocation of the group reaches on
+// the same dynamic iteration, so a barrier there is defined? Straight-line
+// shaders are uniform throughout; under the dispatch loop only the entry
+// block is, since a later block can be reached on differing iterations.
+std::vector<uint8_t> UniformPoints(const Program& program);
 
 // A raw (non-format) buffer a graphics stage reads with MUBUF: vertex data the
 // VS fetches by hand rather than through the vertex-input state, a skinning

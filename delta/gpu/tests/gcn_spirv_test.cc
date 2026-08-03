@@ -166,12 +166,16 @@ class WaveScope {
 constexpr uint32_t kDsWrite0 = 0xd8340000, kDsWrite1 = 0x00000000;
 constexpr uint32_t kDsRead0 = 0xd8d80000, kDsRead1 = 0x01000000;
 
-std::vector<uint32_t> PlanBarriers(std::vector<uint32_t> code,
-                                   uint32_t threads) {
+gpu::gcn::LdsBarrierPlan PlanBarriers(std::vector<uint32_t> code,
+                                      uint32_t threads) {
   const gpu::gcn::Program p = gpu::gcn::Decode(code.data(),
                                                (uint32_t)code.size(), false);
   const std::vector<uint8_t> reach = gpu::gcn::ComputeReachability(p);
   return gpu::gcn::PlanLdsBarriers(p, reach.data(), threads);
+}
+
+bool NoBarriers(const gpu::gcn::LdsBarrierPlan& p) {
+  return p.at.empty() && !p.lockstep;
 }
 
 TEST(GcnSpirv, Wave64LdsBarriersAreReinsertedOnlyWhereNeeded) {
@@ -180,27 +184,27 @@ TEST(GcnSpirv, Wave64LdsBarriersAreReinsertedOnlyWhereNeeded) {
   // Straight-line write-then-read: one barrier, immediately before the read.
   const std::vector<uint32_t> raw{kDsWrite0, kDsWrite1, kDsRead0, kDsRead1,
                                   kEndPgm};
-  const std::vector<uint32_t> at = PlanBarriers(raw, 64);
-  ASSERT_EQ(at.size(), 1u);
-  EXPECT_EQ(at[0], 1u);  // instruction index of the ds_read
+  const gpu::gcn::LdsBarrierPlan plan = PlanBarriers(raw, 64);
+  ASSERT_EQ(plan.at.size(), 1u);
+  EXPECT_EQ(plan.at[0], 1u);  // instruction index of the ds_read
+  EXPECT_FALSE(plan.lockstep);
 
   // More than one wave per group: the guest compiler had to emit its own.
-  EXPECT_TRUE(PlanBarriers(raw, 128).empty());
-  EXPECT_TRUE(PlanBarriers(raw, 256).empty());
+  EXPECT_TRUE(NoBarriers(PlanBarriers(raw, 128)));
+  EXPECT_TRUE(NoBarriers(PlanBarriers(raw, 256)));
 
   // Reads only, or writes only: nothing to order.
-  EXPECT_TRUE(PlanBarriers({kDsRead0, kDsRead1, kEndPgm}, 64).empty());
-  EXPECT_TRUE(PlanBarriers({kDsWrite0, kDsWrite1, kEndPgm}, 64).empty());
+  EXPECT_TRUE(NoBarriers(PlanBarriers({kDsRead0, kDsRead1, kEndPgm}, 64)));
+  EXPECT_TRUE(NoBarriers(PlanBarriers({kDsWrite0, kDsWrite1, kEndPgm}, 64)));
 
   // A host subgroup at least a wave wide keeps the guest's own guarantee.
   const WaveScope whole(64);
-  EXPECT_TRUE(PlanBarriers(raw, 64).empty());
+  EXPECT_TRUE(NoBarriers(PlanBarriers(raw, 64)));
 }
 
-TEST(GcnSpirv, Wave64LdsBarrierLandsAfterAConditionalWrite) {
+TEST(GcnSpirv, BranchyWave64LdsSyncsPerDispatchIteration) {
   const WaveScope split(32);
   // write ; if(execz) skip a second write ; read
-  //   0: ds_write         1: s_cbranch_execz +2   2: ds_write   3: ds_read
   const std::vector<uint32_t> code{
       kDsWrite0, kDsWrite1,
       0xbf880002,  // s_cbranch_execz pc+2 -> the read
@@ -208,11 +212,39 @@ TEST(GcnSpirv, Wave64LdsBarrierLandsAfterAConditionalWrite) {
       kDsRead0,   kDsRead1,
       kEndPgm,
   };
-  const std::vector<uint32_t> at = PlanBarriers(code, 64);
-  // The conditional block is not a legal barrier point; the merge block that
-  // holds the read is, so the barrier goes there -- after BOTH writes.
-  ASSERT_EQ(at.size(), 1u);
-  EXPECT_EQ(at[0], 3u);  // index of the ds_read, the first merge-block insn
+  const gpu::gcn::LdsBarrierPlan plan = PlanBarriers(code, 64);
+  // The write and the read are in different blocks, so they run on different
+  // dispatch-loop iterations and the per-iteration barrier separates them.
+  // Nothing may be emitted inline: two invocations reach the read's block on
+  // different iterations, and a barrier there would not be uniform.
+  EXPECT_TRUE(plan.lockstep);
+  EXPECT_TRUE(plan.at.empty());
+}
+
+TEST(GcnSpirv, OnlyTheEntryBlockIsAUniformPointInABranchyShader) {
+  std::vector<uint32_t> code{
+      kDsWrite0, kDsWrite1,
+      0xbf880002,  // s_cbranch_execz
+      kDsWrite0,  kDsWrite1,
+      kDsRead0,   kDsRead1,
+      kEndPgm,
+  };
+  const gpu::gcn::Program p =
+      gpu::gcn::Decode(code.data(), (uint32_t)code.size(), false);
+  const std::vector<uint8_t> at = gpu::gcn::UniformPoints(p);
+  ASSERT_GE(at.size(), 4u);
+  EXPECT_TRUE(at[0]);   // ds_write, entry block
+  EXPECT_TRUE(at[1]);   // the branch itself, still the entry block
+  EXPECT_FALSE(at[2]);  // conditional block
+  EXPECT_FALSE(at[3]);  // reached on differing iterations
+
+  // With no branches at all every point is uniform.
+  const std::vector<uint32_t> flat{kDsWrite0, kDsWrite1, kDsRead0, kDsRead1,
+                                   kEndPgm};
+  const gpu::gcn::Program fp =
+      gpu::gcn::Decode(flat.data(), (uint32_t)flat.size(), false);
+  for (uint8_t u : gpu::gcn::UniformPoints(fp))
+    EXPECT_TRUE(u);
 }
 
 TEST(GcnSpirv, RejectsNeoOnlyEncodingsInBaseMode) {

@@ -671,6 +671,8 @@ void EmitInstAudited(Translator& t,
                      const Inst& inst,
                      uint32_t index,
                      StageContext& sc) {
+  // Whether a cross-lane op here can synchronise the group (see UniformPoints).
+  t.uniform_here = index < sc.uniform_points.size() && sc.uniform_points[index];
   // A barrier the guest compiler was entitled to omit (see PlanLdsBarriers).
   if (!sc.lds_barrier_at.empty() &&
       std::binary_search(sc.lds_barrier_at.begin(), sc.lds_barrier_at.end(),
@@ -780,9 +782,12 @@ std::vector<uint32_t> BlockStarts(const Program& program, uint32_t max_pc) {
 // where the reads race the writes. The barriers have to be put back.
 //
 // A barrier is only legal where every invocation of the group reaches the same
-// dynamic instance of it. That is the blocks which post-dominate the entry
-// (everyone runs them) and lie outside every cycle (everyone runs them the
-// same number of times). In a straight-line shader that is all of them.
+// DYNAMIC instance of it. In a straight-line shader that is everywhere. Under
+// the while/switch lowering it is not "the same block": two invocations reach
+// one block on different iterations whenever their paths to it differ. What IS
+// true there is that each iteration runs exactly one block, so a barrier at the
+// top of the loop separates any two accesses in different blocks -- which is
+// every pair except a write and a read inside one block.
 
 bool IsLdsRead(const Inst& inst) {
   if (inst.enc != Enc::kDs)
@@ -800,101 +805,31 @@ bool IsLdsWrite(const Inst& inst) {
          (op >= 13 && op <= 15) || op == 77;
 }
 
-// Per-block: does every invocation execute this block exactly once?
-std::vector<uint8_t> UniformBlocks(const Program& program,
-                                   const std::vector<uint32_t>& starts,
-                                   uint32_t max_pc) {
-  const uint32_t n = static_cast<uint32_t>(starts.size());
-  const uint32_t exit = n;  // virtual exit block
-  const auto block_of = [&](uint32_t pc) -> uint32_t {
-    if (pc >= max_pc)
-      return exit;
-    uint32_t b = 0;
-    for (uint32_t i = 0; i < n; i++)
-      if (starts[i] <= pc)
-        b = i;
-      else
-        break;
-    return b;
-  };
-
-  std::vector<std::vector<uint32_t>> succ(n + 1);
-  for (uint32_t b = 0; b < n; b++) {
-    const uint32_t end = (b + 1 < n) ? starts[b + 1] : max_pc;
-    int kind = 0;
-    uint32_t target = 0;
-    for (const Inst& inst : program) {
-      if (inst.pc < starts[b] || inst.pc >= end)
-        continue;
-      const int k = BranchKind(inst);
-      if (!k)
-        continue;
-      kind = k;
-      const int32_t simm = static_cast<int16_t>(inst.raw[0] & 0xFFFF);
-      target = static_cast<uint32_t>(static_cast<int32_t>(inst.pc) +
-                                     static_cast<int32_t>(inst.size) + simm);
-    }
-    const uint32_t fall = (b + 1 < n) ? b + 1 : exit;
-    if (kind == 8)
-      succ[b].push_back(exit);  // s_endpgm
-    else if (kind == 1)
-      succ[b].push_back(block_of(target));
-    else if (kind >= 2 && kind <= 7) {
-      succ[b].push_back(block_of(target));
-      succ[b].push_back(fall);
-    } else
-      succ[b].push_back(fall);
-  }
-
-  // Post-dominators: pdom[b] = {b} + intersection over successors.
-  std::vector<std::vector<uint8_t>> pdom(n + 1,
-                                         std::vector<uint8_t>(n + 1, 1));
-  pdom[exit].assign(n + 1, 0);
-  pdom[exit][exit] = 1;
-  for (bool changed = true; changed;) {
-    changed = false;
-    for (uint32_t b = 0; b < n; b++) {
-      std::vector<uint8_t> next(n + 1, succ[b].empty() ? 0 : 1);
-      for (uint32_t s : succ[b])
-        for (uint32_t i = 0; i <= n; i++)
-          next[i] = next[i] && pdom[s][i];
-      next[b] = 1;
-      if (next != pdom[b]) {
-        pdom[b] = std::move(next);
-        changed = true;
-      }
-    }
-  }
-
-  // Cycle membership: a block that can reach itself may run a different number
-  // of times per invocation even when everyone runs it.
-  std::vector<std::vector<uint8_t>> reach(n + 1,
-                                          std::vector<uint8_t>(n + 1, 0));
-  for (uint32_t b = 0; b <= n; b++)
-    for (uint32_t s : succ[b])
-      reach[b][s] = 1;
-  for (uint32_t k = 0; k <= n; k++)
-    for (uint32_t i = 0; i <= n; i++)
-      if (reach[i][k])
-        for (uint32_t j = 0; j <= n; j++)
-          reach[i][j] = reach[i][j] || reach[k][j];
-
-  std::vector<uint8_t> uniform(n, 0);
-  for (uint32_t b = 0; b < n; b++)
-    uniform[b] = pdom[0][b] && !reach[b][b];
-  return uniform;
-}
-
 }  // namespace
 
-// Instruction indices before which the compute backend must emit a workgroup
-// barrier. Empty unless the shader is one that omitted them (see above).
-std::vector<uint32_t> PlanLdsBarriers(const Program& program,
-                                      const uint8_t* reachable,
-                                      uint32_t threads_per_group) {
-  std::vector<uint32_t> at;
+std::vector<uint8_t> UniformPoints(const Program& program) {
+  // Straight-line: one block, run once by everyone.
+  if (!HasControlFlow(program))
+    return std::vector<uint8_t>(program.size(), 1);
+  // Under the dispatch loop only the entry block has a fixed iteration (the
+  // first) for every invocation. Everything after it may be reached on
+  // different iterations by different invocations.
+  const uint32_t max_pc =
+      program.empty() ? 0 : program.back().pc + program.back().size;
+  const std::vector<uint32_t> starts = BlockStarts(program, max_pc);
+  const uint32_t first_end = starts.size() > 1 ? starts[1] : max_pc;
+  std::vector<uint8_t> at(program.size(), 0);
+  for (uint32_t i = 0; i < program.size(); i++)
+    at[i] = program[i].pc < first_end;
+  return at;
+}
+
+LdsBarrierPlan PlanLdsBarriers(const Program& program,
+                               const uint8_t* reachable,
+                               uint32_t threads_per_group) {
+  LdsBarrierPlan plan;
   if (!WaveSplitsAcrossSubgroups() || threads_per_group != kGcnWave)
-    return at;  // >1 wave: the guest compiler had to emit its own barriers
+    return plan;  // >1 wave: the guest compiler had to emit its own barriers
   bool any_read = false, any_write = false, has_barrier = false;
   for (uint32_t i = 0; i < program.size(); i++) {
     if (reachable && !reachable[i])
@@ -904,29 +839,25 @@ std::vector<uint32_t> PlanLdsBarriers(const Program& program,
     has_barrier |= program[i].enc == Enc::kSopp && program[i].opcode == 0x0a;
   }
   if (!any_read || !any_write || has_barrier)
-    return at;
+    return plan;
 
   const uint32_t max_pc =
       program.empty() ? 0 : program.back().pc + program.back().size;
-  std::vector<uint8_t> uniform_at(program.size(), 1);
-  if (HasControlFlow(program)) {
-    const std::vector<uint32_t> starts = BlockStarts(program, max_pc);
-    const std::vector<uint8_t> uniform = UniformBlocks(program, starts, max_pc);
-    for (uint32_t i = 0; i < program.size(); i++) {
-      uint32_t b = 0;
-      for (uint32_t s = 0; s < starts.size(); s++)
-        if (starts[s] <= program[i].pc)
-          b = s;
-        else
-          break;
-      uniform_at[i] = b < uniform.size() ? uniform[b] : 0;
-    }
-  }
+  const bool branchy = HasControlFlow(program);
+  const std::vector<uint32_t> starts =
+      branchy ? BlockStarts(program, max_pc) : std::vector<uint32_t>{0};
+  const auto block_of = [&](uint32_t pc) {
+    uint32_t b = 0;
+    for (uint32_t i = 0; i < starts.size(); i++)
+      if (starts[i] <= pc)
+        b = i;
+      else
+        break;
+    return b;
+  };
 
   // Alternation walk: a read after writes, or a write after reads, needs the
-  // group synchronised in between. Place each barrier as late as it can go --
-  // at the access itself when that sits at a uniform point, else at the last
-  // uniform point after the previous access.
+  // group synchronised in between.
   int action = 0;  // 1 = a following write needs one, 2 = a following read does
   uint32_t prev = 0;
   for (uint32_t i = 0; i < program.size(); i++) {
@@ -935,28 +866,23 @@ std::vector<uint32_t> PlanLdsBarriers(const Program& program,
     const bool r = IsLdsRead(program[i]), w = IsLdsWrite(program[i]);
     if (!r && !w)
       continue;
-    const bool conflict = (r && action == 2) || (w && action == 1);
-    if (conflict) {
-      uint32_t point = program.size();
-      for (uint32_t k = i; k > prev; k--)
-        if (uniform_at[k]) {
-          point = k;
-          break;
-        }
-      if (point < program.size()) {
-        if (at.empty() || at.back() != point)
-          at.push_back(point);
+    if ((r && action == 2) || (w && action == 1)) {
+      if (!branchy) {
+        if (plan.at.empty() || plan.at.back() != i)
+          plan.at.push_back(i);
+      } else if (block_of(program[prev].pc) != block_of(program[i].pc)) {
+        plan.lockstep = true;  // different blocks: different iterations
       } else {
-        // Nowhere legal to synchronise: every candidate sits under a branch
-        // or inside a loop. Recorded, not declined -- a dispatch that races is
-        // still better than one that never runs, but it must not read as fine.
+        // One block, one iteration: nowhere in between that the whole group
+        // provably arrives together. Recorded, not declined -- a dispatch that
+        // races still beats one that never runs, but it must not read as fine.
         NoteApproximated("lds.wave64-barrier", program[i].opcode);
       }
     }
     action = r ? 1 : 2;
     prev = i;
   }
-  return at;
+  return plan;
 }
 
 namespace {
@@ -990,6 +916,7 @@ void EmitCfg(Translator& t,
   const Id merge_sel = t.m.NewBlock();
   const Id cont = t.m.NewBlock(), merge = t.m.NewBlock();
   const Id exit_blk = t.m.NewBlock();
+  const Id lockstep = t.m.NewBlock();
   std::vector<Id> case_labels(num_blocks);
   for (Id& l : case_labels)
     l = t.m.NewBlock();
@@ -1008,7 +935,35 @@ void EmitCfg(Translator& t,
   t.m.Branch(header);
   t.m.OpenBlock(header);
   t.m.LoopMerge(merge, cont);
-  t.m.Branch(dispatch);
+  // Lock-step dispatch. A barrier inside a case is NOT uniform: two
+  // invocations reach the same block on different iterations of this loop
+  // whenever they took different-length paths to it, and a workgroup barrier
+  // they arrive at on different iterations is undefined. So when the shader
+  // needs barriers we (a) keep finished invocations looping instead of leaving
+  // the loop early, and (b) put the barrier here, in a block every invocation
+  // runs exactly once per iteration, before the switch. Two blocks then
+  // synchronise against each other whenever they are in different iterations,
+  // which is every cross-block pair.
+  //
+  // "Is anyone still running" has to be a workgroup-wide OR, and it must be
+  // computed without divergence: every invocation stores the zero (idempotent),
+  // then every invocation contributes with an atomic, then everyone reads.
+  if (sc.lockstep_loop && t.xchg_var) {
+    t.m.Branch(lockstep);
+    t.m.OpenBlock(lockstep);
+    const Id slot = t.XchgAt(t.U32(t.xchg_lanes * 2));
+    t.m.Store(slot, t.U32(0));
+    t.Barrier();
+    t.m.Emit(spv::Op::OpAtomicOr, t.t_u,
+             {slot, t.U32(2), t.U32(0x108),
+              t.SelectB(t.m.Emit(spv::Op::OpINotEqual, t.t_bool,
+                                 {t.State(), t.U32(kExit)}),
+                        t.U32(1), t.U32(0))});
+    t.Barrier();
+    t.m.BranchConditional(t.IsNonZero(t.m.Load(t.t_u, slot)), dispatch, merge);
+  } else {
+    t.m.Branch(dispatch);
+  }
   t.m.OpenBlock(dispatch);
   Id state = t.State();
   if (kCfgMaxIter) {
@@ -1065,7 +1020,7 @@ void EmitCfg(Translator& t,
     t.m.Branch(merge_sel);
   }
   t.m.OpenBlock(exit_blk);
-  t.m.Branch(merge);
+  t.m.Branch(sc.lockstep_loop && t.xchg_var ? merge_sel : merge);
   t.m.OpenBlock(merge_sel);
   t.m.Branch(cont);
   t.m.OpenBlock(cont);
@@ -1522,18 +1477,29 @@ bool TranslateCs(const Program& program,
                        sc.cs_bind) ||
       r.resources.empty())
     return false;
-  sc.lds_barrier_at = PlanLdsBarriers(
+  const LdsBarrierPlan lds_bar = PlanLdsBarriers(
       program, reachable.data(),
       (num_thread_x ? num_thread_x : 1) * (num_thread_y ? num_thread_y : 1) *
           (num_thread_z ? num_thread_z : 1));
+  sc.lds_barrier_at = lds_bar.at;
+  sc.lockstep_loop = lds_bar.lockstep;
 
-  bool uses_ds_swizzle = false;
-  for (uint32_t i = 0; i < program.size(); i++)
-    if (reachable[i] && program[i].enc == Enc::kDs &&
-        program[i].opcode == 0x35) {
+  bool uses_ds_swizzle = false, uses_cross_lane = false;
+  for (uint32_t i = 0; i < program.size(); i++) {
+    if (!reachable[i])
+      continue;
+    const Inst& in = program[i];
+    if (in.enc == Enc::kDs && in.opcode == 0x35)
       uses_ds_swizzle = true;
-      break;
-    }
+    // v_readlane / v_writelane / v_mbcnt_lo / v_mbcnt_hi, and VOP1
+    // v_readfirstlane: each names a lane of the wave.
+    if (in.enc == Enc::kVop2 &&
+        (in.opcode == 0x01 || in.opcode == 0x02 || in.opcode == 0x23 ||
+         in.opcode == 0x24))
+      uses_cross_lane = true;
+    if (in.enc == Enc::kVop1 && in.opcode == 0x02)
+      uses_cross_lane = true;
+  }
 
   t.InitTypes();
   // Storage buffers: Buf { uint data[]; } at set 0, binding = resource index.
@@ -1584,6 +1550,29 @@ bool TranslateCs(const Program& program,
   t.m.Decorate(group_id, spv::Decoration::BuiltIn,
                {static_cast<uint32_t>(spv::BuiltIn::WorkgroupId)});
   std::vector<Id> iface{local_id, group_id};
+  // Cross-lane channel: LocalInvocationIndex is the order GCN packs threads
+  // into waves, so lane = index % 64 and the wave's lanes are contiguous. Two
+  // words per invocation, so one barrier pair can carry two published values.
+  const uint32_t threads = (num_thread_x ? num_thread_x : 1) *
+                           (num_thread_y ? num_thread_y : 1) *
+                           (num_thread_z ? num_thread_z : 1);
+  if ((uses_cross_lane || lds_bar.lockstep) && threads) {
+    const Id lii = t.m.Variable(
+        t.m.TypePointer(spv::StorageClass::Input, t.t_u),
+        spv::StorageClass::Input);
+    t.m.Decorate(lii, spv::Decoration::BuiltIn,
+                 {static_cast<uint32_t>(spv::BuiltIn::LocalInvocationIndex)});
+    iface.push_back(lii);
+    // Two words per invocation, plus one for the lock-step loop's
+    // "is anyone still running" reduction.
+    const Id xchg_arr = t.m.TypeArray(t.t_u, threads * 2 + 1);
+    t.xchg_var =
+        t.m.Variable(t.m.TypePointer(spv::StorageClass::Workgroup, xchg_arr),
+                     spv::StorageClass::Workgroup);
+    t.m.Name(t.xchg_var, "wave_xchg");
+    t.xchg_lanes = threads;
+    t.xchg_index = lii;  // loaded once in the body prologue, below
+  }
   if (uses_ds_swizzle) {
     t.m.Capability(spv::Capability::GroupNonUniform);
     t.m.Capability(spv::Capability::GroupNonUniformShuffle);
@@ -1615,6 +1604,13 @@ bool TranslateCs(const Program& program,
     t.SetSg(sg++, group_comp(2));
   for (uint32_t c = 0; c < 3; c++)  // local invocation id (tidig) -> v0..v2
     t.SetVg(c, t.m.Load(t.t_u, t.m.AccessChain(p_in_u, local_id, {t.U32(c)})));
+  if (t.xchg_var) {  // wave lane / wave base, from LocalInvocationIndex
+    const Id index = t.m.Load(t.t_u, t.xchg_index);
+    t.xchg_index = index;
+    t.lane_id = t.And(index, t.U32(63));
+    t.wave_base = t.And(index, t.U32(~63u));
+  }
+  sc.uniform_points = UniformPoints(program);
   t.SeedExec();
   t.predicate_vector = true;
   EmitCfg(t, program, sc, reachable.data());

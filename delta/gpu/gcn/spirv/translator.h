@@ -125,6 +125,73 @@ struct Translator {
   // Must run after BeginFunction (emits an OpStore).
   void SeedExec() { SetSg(126, U32(1)); }
 
+  // ---- cross-lane ------------------------------------------------------
+  // A GCN wave is 64 lanes and a host subgroup may be narrower, so an
+  // instruction that names a lane cannot always be answered with a subgroup
+  // shuffle. Compute has a second channel: a Workgroup array indexed by
+  // LocalInvocationIndex, which is exactly the order GCN packs threads into
+  // waves. It costs two barriers, so it is only usable where every invocation
+  // reaches the same dynamic instance -- `uniform_here`, set per instruction
+  // from the same analysis that places the LDS barriers.
+  Id lane_id = 0;    // this invocation's lane within its wave (0..63)
+  Id wave_base = 0;  // LocalInvocationIndex of lane 0 of this wave
+  Id xchg_var = 0;   // the exchange array, 2 slots per invocation
+  uint32_t xchg_lanes = 0;  // invocations per workgroup (0 = no channel)
+  Id xchg_index = 0;        // LocalInvocationIndex
+  bool uniform_here = false;
+
+  bool CanExchange() const { return xchg_var && uniform_here; }
+
+  // This invocation's lane within its GCN wave. Zero where no such index
+  // exists (a fragment wave's lanes are pixels the rasteriser grouped, and
+  // Vulkan exposes no mapping), which keeps the graphics lowerings that
+  // assume a single lane exactly as they were.
+  Id WaveLane() { return lane_id ? lane_id : U32(0); }
+
+  // Publish/fetch across the whole wave through the Workgroup array. `slot`
+  // picks one of the two per-invocation words, so one barrier pair can carry
+  // two values. Callers bracket their publishes and fetches with Barrier().
+  void WavePublish(Id value, uint32_t slot = 0) {
+    m.Store(XchgAt(Add(U32(slot * xchg_lanes), xchg_index)), value);
+  }
+  Id WaveFetch(Id src_lane, uint32_t slot = 0) {
+    return m.Load(t_u, XchgAt(Add(U32(slot * xchg_lanes),
+                                  Add(wave_base, And(src_lane, U32(63))))));
+  }
+  Id XchgAt(Id index) {
+    return m.AccessChain(m.TypePointer(spv::StorageClass::Workgroup, t_u),
+                         xchg_var, {index});
+  }
+
+  // The value lane `src_lane` of this wave holds, exactly.
+  Id WaveExchange(Id value, Id src_lane) {
+    WavePublish(value);
+    Barrier();
+    const Id r = WaveFetch(src_lane);
+    Barrier();
+    return r;
+  }
+
+  void Barrier() {
+    m.EmitVoid(spv::Op::OpControlBarrier, {U32(2), U32(2), U32(0x108)});
+  }
+
+  // Subgroup helpers. Exact within one subgroup; a wave wider than the
+  // subgroup needs WaveExchange for anything crossing the boundary.
+  void RequireSubgroup(spv::Capability extra) {
+    m.Capability(spv::Capability::GroupNonUniform);
+    m.Capability(extra);
+  }
+  Id SubgroupShuffle(Id value, Id lane) {
+    RequireSubgroup(spv::Capability::GroupNonUniformShuffle);
+    // OpGroupNonUniformShuffle is POISON for an id at or past the subgroup
+    // width, so the index is masked into it rather than merely assumed to fit.
+    // The module is built for the device that reported the width, so it folds
+    // to a constant instead of a SubgroupSize load.
+    return m.Emit(spv::Op::OpGroupNonUniformShuffle, t_u,
+                  {U32(3), value, And(lane, U32(HostSubgroupSize() - 1))});
+  }
+
   void RequireImageQuery() {
     if (image_query)
       return;
@@ -562,6 +629,10 @@ struct StageContext {
   // because the guest compiler omitted one it was entitled to omit on a
   // 64-lane wave. See PlanLdsBarriers.
   std::vector<uint32_t> lds_barrier_at;
+  // Per instruction: may the group be synchronised there? See UniformPoints.
+  std::vector<uint8_t> uniform_points;
+  // Barrier once per dispatch-loop iteration (see LdsBarrierPlan).
+  bool lockstep_loop = false;
   bool cs_unsupported = false;  // op the compute backend can't model
 };
 
