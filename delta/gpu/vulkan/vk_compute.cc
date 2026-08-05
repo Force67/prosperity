@@ -1771,6 +1771,15 @@ bool FlushCsWrites(Renderer& renderer) {
 // this instead of the full flush — flushing every dirty range at every draw
 // re-tiled the whole post chain ~19x/frame.
 bool FlushCsWritesRange(Renderer& renderer, uint64_t base, uint64_t bytes) {
+  // Nothing dirty anywhere: answer without touching the page index, which
+  // otherwise allocates a vector, hashes a lookup per page, then sorts and
+  // dedups it. That is called once per guest read -- and SotC issues 1.2M
+  // DRAW_INDEX_INDIRECT packets a run, each flushing before it reads its
+  // argument struct, which measured 33 seconds of a 150 s run. The index is
+  // maintained on both edges (indexed when a range goes dirty, unindexed when
+  // it is flushed), so empty really does mean "no writeback outstanding".
+  if (g_cs_dirty_pages.empty())
+    return true;
   if (g_cs_failed) {
     renderer.state = nullptr;
     return false;

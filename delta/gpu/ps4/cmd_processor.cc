@@ -85,6 +85,7 @@ DELTA_OPTION(bool, kSpriteDis, "DELTA_GPU_SPRITEDIS", false);
 DELTA_OPTION(bool, kSpriteDump, "DELTA_GPU_SPRITEDUMP", false);
 DELTA_OPTION(bool, kTexfmt, "DELTA_GPU_TEXFMT", false);
 DELTA_OPTION(bool, kTrace, "DELTA_GPU_TRACE", false);
+DELTA_OPTION(bool, kDcbStat, "DELTA_GPU_DCBSTAT", false);
 DELTA_OPTION(bool, kVattrDump, "DELTA_GPU_VATTRDUMP", false);
 }  // namespace
 
@@ -313,6 +314,13 @@ uint64_t GpuClockTs() {
 // contains and whether the walker reaches a draw or desyncs.
 uint32_t g_op_hist[256] = {};
 int g_dcb_seen = 0;
+// DELTA_GPU_DCBSTAT=1: what the command stream is MADE OF, and which handler
+// owns the time. `dcb=` in the fps line covers everything the walk calls, so
+// the useful split is per opcode -- and it is not the numerous packets that
+// cost: on SotC's load phase, DISPATCH_DIRECT is half the walk's time and
+// DRAW_INDEX_INDIRECT (1.2M no-op draws whose args read zero) another quarter,
+// while NOP is 37% of the PACKETS and free.
+uint64_t g_dcb_words = 0, g_dcb_packets = 0, g_op_ns[256] = {};
 void DumpHist() {
   std::fprintf(stderr, "[gpu] dcb opcode histogram (after %d dcbs):\n",
                g_dcb_seen);
@@ -2601,6 +2609,9 @@ static uint32_t WalkDcb(const uint32_t* p, uint32_t words, uint32_t depth,
       uint32_t count = Pm4Count(hdr);  // body dword count
       const uint32_t* body = &p[i + 1];
       g_op_hist[op & 0xFF]++;
+      g_dcb_packets++;
+      const auto op_t0 = kDcbStat ? std::chrono::steady_clock::now()
+                                  : std::chrono::steady_clock::time_point{};
       if (kTrace && dump_this)
         std::fprintf(stderr, "[gpu]   @%-5u T3 op=%#04x count=%u\n", i, op,
                      count);
@@ -2841,6 +2852,11 @@ static uint32_t WalkDcb(const uint32_t* p, uint32_t words, uint32_t depth,
           }
           break;
       }
+      if (kDcbStat)
+        g_op_ns[op & 0xFF] +=
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - op_t0)
+                .count();
       i += 1 + count;
     } else if (type == Pm4Type::kType2 || hdr == 0) {
       // Single-dword filler: type-2 NOPs and zero-dword alignment padding that
@@ -2906,6 +2922,43 @@ void SubmitDcb(const void* dcb, uint32_t size_bytes) {
     std::fprintf(stderr,
                  "[gpu] SubmitDcb dcb=%p size_bytes=%u words=%u hdr0=%#x\n",
                  dcb, size_bytes, words, p[0]);
+  if (kDcbStat) {
+    g_dcb_words += words;
+    static auto last = std::chrono::steady_clock::now();
+    const auto now = std::chrono::steady_clock::now();
+    if (std::chrono::duration<double>(now - last).count() >= 2.0) {
+      last = now;
+      uint32_t top_op[5] = {}, top_n[5] = {}, slow_op[5] = {};
+      uint64_t slow_ns[5] = {};
+      for (uint32_t o = 0; o < 256; o++) {
+        uint32_t n = g_op_hist[o], op = o;
+        for (int k = 0; k < 5; k++)
+          if (n > top_n[k]) {
+            std::swap(n, top_n[k]);
+            std::swap(op, top_op[k]);
+          }
+        uint64_t ns = g_op_ns[o];
+        op = o;
+        for (int k = 0; k < 5; k++)
+          if (ns > slow_ns[k]) {
+            std::swap(ns, slow_ns[k]);
+            std::swap(op, slow_op[k]);
+          }
+      }
+      std::fprintf(stderr, "[dcbstat] %llu packets / %llu dwords; most:",
+                   (unsigned long long)g_dcb_packets,
+                   (unsigned long long)g_dcb_words);
+      for (int k = 0; k < 5; k++)
+        if (top_n[k])
+          std::fprintf(stderr, " %#04x x%u", top_op[k], top_n[k]);
+      std::fprintf(stderr, " | costliest:");
+      for (int k = 0; k < 5; k++)
+        if (slow_ns[k])
+          std::fprintf(stderr, " %#04x %.0fms", slow_op[k], slow_ns[k] / 1e6);
+      std::fprintf(stderr, "\n");
+      std::fflush(stderr);
+    }
+  }
   uint32_t i = WalkDcb(p, words, 0, dump_this);
   if (dump_this) {
     std::fprintf(stderr, "[gpu] === big dcb walk done: %u/%u words ===\n", i,
