@@ -230,6 +230,13 @@ struct CsResource {
   uint32_t binding = 0;    // storage-buffer binding (set 0)
   uint8_t kind = 0;        // 0 = buffer V#, 1 = image T#, 2 = scalar pointer
   bool written = false;    // dispatch writes it -> copy back to guest
+  // Does the dispatch READ it? A resource that is written and never read does
+  // not have to be staged in from guest memory before the dispatch -- and
+  // SotC's material fills are whole 4 MiB arenas of exactly that shape, so
+  // uploading them is pure cost. Tracked per access and OR'd, so a
+  // read-modify-write (an atomic, or a load and a store to the same buffer)
+  // still reports read.
+  bool read = false;
   uint32_t min_bytes = 0;  // lower bound on size from immediate offsets
 };
 

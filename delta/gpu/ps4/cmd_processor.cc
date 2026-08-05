@@ -2545,6 +2545,7 @@ void HandleDispatch(const uint32_t* body, uint32_t count) {
     out.guest_size = guest_size;
     out.binding = r.binding;
     out.shader_writes = r.written;
+    out.read = r.read;
     out.written = r.written && !zero_fill;
     out.zero_fill = zero_fill;
     out.image_staging = image_staging;

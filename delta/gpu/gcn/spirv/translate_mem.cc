@@ -806,7 +806,8 @@ bool PlanCsResources(const Program& program,
   };
   std::unordered_map<uint64_t, uint32_t> resource_by_version;
   const auto resource = [&](uint32_t pc, uint32_t base_sgpr, uint32_t dwords,
-                            uint8_t kind, bool written, uint32_t min_bytes) {
+                            uint8_t kind, bool written, uint32_t min_bytes,
+                            bool read = true) {
     const uint64_t key =
         static_cast<uint64_t>(kind) | (static_cast<uint64_t>(base_sgpr) << 8) |
         (static_cast<uint64_t>(descriptor_version(base_sgpr, dwords)) << 16);
@@ -814,6 +815,7 @@ bool PlanCsResources(const Program& program,
     if (it != resource_by_version.end()) {
       CsResource& res = r.resources[it->second];
       res.written = res.written || written;
+      res.read = res.read || read;
       if (min_bytes > res.min_bytes)
         res.min_bytes = min_bytes;
       bind[pc] = it->second;
@@ -826,7 +828,7 @@ bool PlanCsResources(const Program& program,
     }
     resource_by_version[key] = idx;
     bind[pc] = idx;
-    r.resources.push_back({base_sgpr, pc, idx, kind, written, min_bytes});
+    r.resources.push_back({base_sgpr, pc, idx, kind, written, read, min_bytes});
     return true;
   };
 
@@ -848,8 +850,8 @@ bool PlanCsResources(const Program& program,
         const uint32_t bytes = so.in_sgpr ? 0 : (so.dwords + n) * 4;
         const uint32_t base_sgpr = sbase * 2;
         const uint8_t kind = op < 0x08 ? 2 : 0;
-        if (!resource(inst.pc, base_sgpr, kind == 2 ? 2 : 4, kind, false,
-                      bytes))
+        if (!resource(inst.pc, base_sgpr, kind == 2 ? 2 : 4, kind, false, bytes,
+                      /*read=*/true))
           return false;
         const uint32_t sdst = (w >> 15) & 0x7F;
         loads.erase(std::remove_if(loads.begin(), loads.end(),
@@ -872,14 +874,15 @@ bool PlanCsResources(const Program& program,
         const bool atomic = MubufAtomic(op);
         if (!load && !store && !atomic)
           return false;
-        if (!resource(inst.pc, srsrc, 4, 0, store || atomic, 0))
+        if (!resource(inst.pc, srsrc, 4, 0, store || atomic, 0,
+                      /*read=*/load || atomic))
           return false;
         break;
       }
       case Enc::kMtbuf: {
         const uint32_t op = (w >> 16) & 0x7;
         const uint32_t srsrc = ((w1 >> 16) & 0x1F) * 4;
-        if (!resource(inst.pc, srsrc, 4, 0, op >= 4, 0))
+        if (!resource(inst.pc, srsrc, 4, 0, op >= 4, 0, /*read=*/op < 4))
           return false;
         break;
       }
@@ -894,7 +897,8 @@ bool PlanCsResources(const Program& program,
         const bool sample = op == 0x24 || op == 0x27;
         if ((!store && !load && !sample) || r128 || srsrc + 7 >= 136)
           return false;
-        if (!resource(inst.pc, srsrc, 8, 1, store, 0))
+        if (!resource(inst.pc, srsrc, 8, 1, store, 0,
+                      /*read=*/load || sample))
           return false;
         break;
       }

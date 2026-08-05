@@ -44,6 +44,9 @@ DELTA_OPTION(bool, kCsList, "DELTA_GPU_CSLIST", false);
 DELTA_OPTION(int, kCsHist, "DELTA_GPU_CSHIST", 0);
 DELTA_OPTION(bool, kCsRtTrace, "DELTA_GPU_CSRT", false);
 DELTA_OPTION(bool, kCsRename, "DELTA_GPU_CSRENAME", false);
+// Skip staging in a compute range the shader never reads (see the use below).
+DELTA_OPTION(bool, kCsSkipUpload, "DELTA_GPU_CS_SKIP_UPLOAD", false);
+uint64_t g_cs_skip_n = 0;
 DELTA_OPTION(bool, kCsImport, "DELTA_GPU_CSIMPORT", false);
 DELTA_OPTION(uint64_t, kCsFlushTrace, "DELTA_GPU_CSFLUSHTRACE", 0);
 DELTA_OPTION(bool, kGpuCsgpuVerbose, "DELTA_GPU_CSGPU_VERBOSE", false);
@@ -1472,6 +1475,18 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci) {
       else
         e.hash = h;
       e.last_validated_frame = g_frame.num;
+    }
+    // A range the shader only WRITES needs no content from guest memory: it
+    // supplies every byte it will write back. SotC's material fills are whole
+    // 4 MiB arenas of exactly that shape, and staging them in is ~60 ms a
+    // frame of pure waste (`in=` in the fps line). Opt-in because a shader
+    // that writes only PART of such a range would then write back whatever the
+    // buffer happened to hold -- the resource plan says "never read", not
+    // "writes all of it".
+    if (kCsSkipUpload && !valid && !ci.res[i].read && ci.res[i].written &&
+        !ci.res[i].image_staging && !ci.res[i].zero_fill && same_shape) {
+      valid = true;
+      g_cs_skip_n++;
     }
     if (!valid) {
       // CPU write into a buffer a pending batched dispatch reads/writes.

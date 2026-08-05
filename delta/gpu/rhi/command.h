@@ -274,6 +274,10 @@ struct ComputeInfo {
     uint32_t binding = 0;
     bool shader_writes = false;  // shader access, including dummy resources
     bool written = false;        // copy back to guest after the dispatch
+    // The dispatch reads it. A written-but-never-read range does not need
+    // staging in from guest memory: the shader supplies every byte it will
+    // then write back. See DELTA_GPU_CS_SKIP_UPLOAD.
+    bool read = true;
     bool zero_fill =
         false;  // inactive/null descriptor: bind zeroed dummy storage
     bool image_staging = false;  // detile and/or expand compact texels
