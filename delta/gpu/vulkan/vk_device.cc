@@ -9,6 +9,7 @@
 #include "gpu/vulkan/vk_backend.h"
 #include "gpu/vulkan/vk_debug.h"
 #include "gpu/vulkan/vk_frame.h"
+#include "gpu/vulkan/vk_trace.h"
 #include "gpu/vulkan/vk_upload_ring.h"
 
 #include <algorithm>
@@ -147,6 +148,8 @@ void ImageBarrier(VkCommandBuffer c,
   b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, mip_levels, 0, layers};
   b.srcAccessMask = src_a;
   b.dstAccessMask = dst_a;
+  if (trace::Recording())
+    trace::RecordBarrier("color", img, from, to, src_a, dst_a);
   vkCmdPipelineBarrier(c, StageForAccess(src_a, true),
                        StageForAccess(dst_a, false), 0, 0, nullptr, 0, nullptr,
                        1, &b);
@@ -167,6 +170,29 @@ void DepthBarrier(VkCommandBuffer c,
   b.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
   b.srcAccessMask = src_a;
   b.dstAccessMask = dst_a;
+  if (trace::Recording())
+    trace::RecordBarrier("depth", img, from, to, src_a, dst_a);
+  vkCmdPipelineBarrier(c, StageForAccess(src_a, true),
+                       StageForAccess(dst_a, false), 0, 0, nullptr, 0, nullptr,
+                       1, &b);
+}
+
+void StencilBarrier(VkCommandBuffer c,
+                    VkImage img,
+                    VkImageLayout from,
+                    VkImageLayout to,
+                    VkAccessFlags src_a,
+                    VkAccessFlags dst_a) {
+  VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+  b.oldLayout = from;
+  b.newLayout = to;
+  b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+  b.image = img;
+  b.subresourceRange = {VK_IMAGE_ASPECT_STENCIL_BIT, 0, 1, 0, 1};
+  b.srcAccessMask = src_a;
+  b.dstAccessMask = dst_a;
+  if (trace::Recording())
+    trace::RecordBarrier("stencil", img, from, to, src_a, dst_a);
   vkCmdPipelineBarrier(c, StageForAccess(src_a, true),
                        StageForAccess(dst_a, false), 0, 0, nullptr, 0, nullptr,
                        1, &b);
@@ -182,7 +208,7 @@ bool CreateDevice() {
   // consumer actually listening -- the loader always advertises the extension,
   // but formatting labels for nobody costs real frame time.
   bool debug_utils = false;
-  if (WantDebugUtils()) {
+  if (WantDebugUtils() || trace::WantValidation()) {
     uint32_t ext_n = 0;
     vkEnumerateInstanceExtensionProperties(nullptr, &ext_n, nullptr);
     std::vector<VkExtensionProperties> exts(ext_n);
@@ -196,8 +222,30 @@ bool CreateDevice() {
     ic.enabledExtensionCount = 1;
     ic.ppEnabledExtensionNames = instance_exts;
   }
+  // DELTA_GPU_VALIDATE=1: the Khronos validation layers, with their messages
+  // routed into the frame capture next to the draw that provoked them. Off by
+  // default -- the layers cost real frame time and the loader only finds them
+  // when the layer path is on the environment.
+  const char* validation_layer = trace::ValidationLayerName();
+  if (trace::WantValidation()) {
+    uint32_t layer_n = 0;
+    vkEnumerateInstanceLayerProperties(&layer_n, nullptr);
+    std::vector<VkLayerProperties> layers(layer_n);
+    vkEnumerateInstanceLayerProperties(&layer_n, layers.data());
+    bool found = false;
+    for (const auto& l : layers)
+      found |= !std::strcmp(l.layerName, validation_layer);
+    if (found) {
+      ic.enabledLayerCount = 1;
+      ic.ppEnabledLayerNames = &validation_layer;
+    } else {
+      std::fprintf(stderr, "[vkval] %s not available on this loader\n",
+                   validation_layer);
+    }
+  }
   VKOK(vkCreateInstance(&ic, nullptr, &g_dev.instance));
   InitDebugUtils(g_dev.instance, debug_utils);
+  trace::InstallValidationMessenger(g_dev.instance);
 
   uint32_t n = 0;
   vkEnumeratePhysicalDevices(g_dev.instance, &n, nullptr);
@@ -291,6 +339,7 @@ bool CreateDevice() {
   VkPhysicalDeviceVulkan12Features f12{
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
   f12.samplerMirrorClampToEdge = avail12.samplerMirrorClampToEdge;
+  f12.separateDepthStencilLayouts = avail12.separateDepthStencilLayouts;
   VkPhysicalDeviceVulkan13Features f13{
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
   f13.pNext = &f12;
@@ -372,9 +421,16 @@ bool CreateDevice() {
     want_feat.samplerAnisotropy = VK_TRUE;
   if (avail2.features.geometryShader)
     want_feat.geometryShader = VK_TRUE;
+  // Without independentBlend, "all elements of pAttachments must be identical"
+  // -- so a G-buffer pass that blends its targets differently (SotC disables
+  // blending on its integer planes and accumulates additively on the others)
+  // gets undefined behaviour across EVERY attachment, not just the odd one out.
+  if (avail2.features.independentBlend)
+    want_feat.independentBlend = VK_TRUE;
   if (avail2.features.shaderStorageImageWriteWithoutFormat)
     want_feat.shaderStorageImageWriteWithoutFormat = VK_TRUE;
   g_dev.sampler_anisotropy = want_feat.samplerAnisotropy;
+  g_dev.independent_blend = want_feat.independentBlend;
   g_dev.sampler_mirror_clamp = f12.samplerMirrorClampToEdge;
   g_dev.geometry_shader = want_feat.geometryShader;
   g_dev.storage_image_write_without_format =

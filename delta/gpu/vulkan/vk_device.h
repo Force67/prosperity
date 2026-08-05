@@ -41,6 +41,8 @@ struct DeviceState {
   float timestamp_period = 0.0f;
   uint32_t timestamp_valid_bits = 0;
   bool sampler_anisotropy = false;
+  // Per-attachment blend state is only legal with this enabled.
+  bool independent_blend = false;
   bool sampler_mirror_clamp = false;
   bool geometry_shader = false;
   bool storage_image_write_without_format = false;
@@ -83,6 +85,12 @@ void DepthBarrier(VkCommandBuffer c,
                   VkImageLayout to,
                   VkAccessFlags src_a,
                   VkAccessFlags dst_a);
+void StencilBarrier(VkCommandBuffer c,
+                    VkImage img,
+                    VkImageLayout from,
+                    VkImageLayout to,
+                    VkAccessFlags src_a,
+                    VkAccessFlags dst_a);
 
 VkShaderModule MakeModule(const uint32_t* spv, size_t bytes);
 VkShaderModule MakeModuleVec(const std::vector<uint32_t>& spv);
