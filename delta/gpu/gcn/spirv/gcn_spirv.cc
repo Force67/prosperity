@@ -236,8 +236,21 @@ Id VsParamOut(Translator& t, StageContext& sc, uint32_t p) {
 Id PsColorOut(Translator& t, StageContext& sc, uint32_t target) {
   if (sc.color_outs[target])
     return sc.color_outs[target];
-  const Id v = t.m.Variable(t.m.TypePointer(spv::StorageClass::Output, t.t_v4),
-                            spv::StorageClass::Output);
+  // An integer-format attachment needs an integer output: Vulkan requires the
+  // shader's component type to match the attachment's, and a float output on a
+  // UINT target writes nothing usable.
+  const bool integer = (sc.mrt_uint_mask >> target) & 1u;
+  const Id type = integer ? t.m.TypeVec(t.t_u, 4) : t.t_v4;
+  // Initialised, because a partial export now writes only its own components
+  // (see the exp handler): channels this shader never exports must still hold
+  // something defined rather than whatever the previous wave left.
+  const Id init =
+      integer ? t.m.ConstComposite(type, {t.U32(0), t.U32(0), t.U32(0),
+                                          t.U32(1)})
+              : t.m.ConstComposite(type, {t.F32(0.f), t.F32(0.f), t.F32(0.f),
+                                          t.F32(1.f)});
+  const Id v = t.m.Variable(t.m.TypePointer(spv::StorageClass::Output, type),
+                            spv::StorageClass::Output, init);
   t.m.Decorate(v, spv::Decoration::Location, {target});
   t.m.Name(v, "mrt" + std::to_string(target));
   sc.iface->push_back(v);
@@ -593,7 +606,22 @@ void EmitInst(Translator& t, const Inst& inst, StageContext& sc) {
         if (target <= 7 && en) {  // MRT0..7; EN=0 is a null export
           sc.wrote_color = true;
           Id col;
-          if (compr) {
+          const bool int_target = ((sc.mrt_uint_mask >> target) & 1u) != 0;
+          if (int_target) {
+            // An integer attachment stores the VGPR bits verbatim, compressed
+            // or not: under COMPR the register already holds the packed pair
+            // the target wants, so unpacking it to floats would be wrong.
+            Id c[4];
+            const uint32_t lanes = compr ? 2u : 4u;
+            for (uint32_t i = 0; i < 4; i++) {
+              const bool live =
+                  compr ? (i < lanes && (en & (0x3u << (2 * i))) != 0)
+                        : (en & (1u << i)) != 0;
+              c[i] = live ? t.Vg(v[i]) : t.U32(i == 3 ? 1u : 0u);
+            }
+            col = t.m.CompositeConstruct(t.m.TypeVec(t.t_u, 4),
+                                         {c[0], c[1], c[2], c[3]});
+          } else if (compr) {
             // EN pairs up under COMPR (as in the disassembler's OperandsExp):
             // bits 0-1 gate the register with the packed x/y halves, bits 2-3
             // the z/w pair. A disabled pair names no register, not VGPR 0.
@@ -615,7 +643,36 @@ void EmitInst(Translator& t, const Inst& inst, StageContext& sc) {
               c[i] = (en & (1 << i)) ? t.VgF(v[i]) : t.F32(i == 3 ? 1.f : 0.f);
             col = t.m.CompositeConstruct(t.t_v4, {c[0], c[1], c[2], c[3]});
           }
-          t.m.Store(PsColorOut(t, sc, target), col);
+          // The ISA is explicit that "pixel exports can be performed multiple
+          // times to any MRT in any order" and that "write-masks are
+          // accumulated separately for each MRT". Storing the whole vec4 made
+          // each export clobber the channels an earlier export to the same
+          // target had written -- SotC's lighting pass exports its MRT0 in two
+          // instructions and only the last one's channels survived, which is
+          // why that buffer came out blue-only. Write just the components this
+          // export enables.
+          const Id out_var = PsColorOut(t, sc, target);
+          const Id comp_ty = int_target ? t.t_u : t.t_f;
+          const Id comp_ptr_ty =
+              t.m.TypePointer(spv::StorageClass::Output, comp_ty);
+          bool all_channels = true;
+          for (uint32_t i = 0; i < 4; i++) {
+            const bool live = compr ? (en & (0x3u << (i & ~1u))) != 0
+                                    : (en & (1u << i)) != 0;
+            all_channels &= live;
+          }
+          if (all_channels) {
+            t.m.Store(out_var, col);
+          } else {
+            for (uint32_t i = 0; i < 4; i++) {
+              const bool live = compr ? (en & (0x3u << (i & ~1u))) != 0
+                                      : (en & (1u << i)) != 0;
+              if (!live)
+                continue;
+              t.m.Store(t.m.AccessChain(comp_ptr_ty, out_var, {t.U32(i)}),
+                        t.m.CompositeExtract(comp_ty, col, i));
+            }
+          }
           // Mark this fragment as having reached a color export, so the
           // discard idiom (control flow branching over the exp) can be
           // lowered to OpKill.
@@ -1625,6 +1682,8 @@ bool TranslatePs(const Program& program,
                   uint32_t ps_input_ena,
                   uint32_t tex_3d_mask,
                   uint32_t tex_1d_mask,
+                  uint32_t tex_uint_mask,
+                  uint32_t mrt_uint_mask,
                   Recompiled& r,
                   Translator& t) {
   // Color outputs (PsColorOut) are declared lazily per MRT target (location ==
@@ -1670,6 +1729,8 @@ bool TranslatePs(const Program& program,
   sc.mimg_plan = &mimg_plan;
   sc.tex_3d_mask = tex_3d_mask;
   sc.tex_1d_mask = tex_1d_mask;
+  sc.tex_uint_mask = tex_uint_mask;
+  sc.mrt_uint_mask = mrt_uint_mask;
   for (uint32_t i = 0; i < mimg_plan.binding_srsrc.size(); i++)
     r.ps_texs.push_back({i, mimg_plan.binding_srsrc[i],
                          mimg_plan.binding_storage[i],
@@ -1700,9 +1761,16 @@ bool TranslatePs(const Program& program,
   if (cfg && has_color_export) {
     // Default MRT0 to transparent so a fragment that never reaches an export
     // leaves a defined value even if the discard lowering is bypassed.
+    // The default has to match the output's declared type: an integer target
+    // declares uvec4, and storing a float vec4 into it is the one thing the
+    // SPIR-V validator rejects outright, which drops the whole shader.
+    const bool mrt0_int = (sc.mrt_uint_mask & 1u) != 0;
     t.m.Store(PsColorOut(t, sc, 0),
-              t.m.ConstComposite(
-                  t.t_v4, {t.F32(0.f), t.F32(0.f), t.F32(0.f), t.F32(0.f)}));
+              mrt0_int ? t.m.ConstComposite(t.m.TypeVec(t.t_u, 4),
+                                            {t.U32(0), t.U32(0), t.U32(0),
+                                             t.U32(0)})
+                       : t.m.ConstComposite(t.t_v4, {t.F32(0.f), t.F32(0.f),
+                                                     t.F32(0.f), t.F32(0.f)}));
     sc.color_written_var = t.m.Variable(t.p_priv_u, spv::StorageClass::Private,
                                         t.m.ConstNull(t.t_u));
   }
@@ -1728,7 +1796,8 @@ bool TranslatePs(const Program& program,
   // DELTA_GPU_PSTEX: export a sampled texel instead of the shader's own
   // colour maths. PSWHITE proves the geometry/target/blend path; this separates
   // "the sample reads zero" from "the maths after it is wrong".
-  if (kGpuPstex != 0 && has_color_export && t.last_texel)
+  if (kGpuPstex != 0 && has_color_export && t.last_texel &&
+      !(sc.mrt_uint_mask & 1u))  // an integer MRT0 cannot take a float export
     t.m.Store(PsColorOut(t, sc, 0),
               t.m.CompositeConstruct(
                   t.t_v4,
@@ -1741,7 +1810,7 @@ bool TranslatePs(const Program& program,
                    t.F32(1.f)}));
 
   // DELTA_GPU_PSWHITE: isolate VS/rasterization from fragment color math.
-  if (kGpuPswhite && has_color_export)
+  if (kGpuPswhite && has_color_export && !(sc.mrt_uint_mask & 1u))
     t.m.Store(PsColorOut(t, sc, 0),
               t.m.ConstComposite(
                   t.t_v4, {t.F32(1.f), t.F32(1.f), t.F32(1.f), t.F32(1.f)}));
@@ -2124,6 +2193,8 @@ bool RecompileSpirv(const uint32_t* vs_code,
                      uint32_t ps_input_ena,
                      uint32_t tex_3d_mask,
                      uint32_t tex_1d_mask,
+                     uint32_t tex_uint_mask,
+                     uint32_t mrt_uint_mask,
                      Recompiled& r) {
   if (!vs_code || !vs_user_data || !ps_user_data)
     return false;
@@ -2191,7 +2262,8 @@ bool RecompileSpirv(const uint32_t* vs_code,
     AuditBegin("ps", ps_code, ps_program);
   const bool ps_ok = (ps_code ? TranslatePs(ps_program, flat_attrs,
                                              ps_input_ena, tex_3d_mask,
-                                             tex_1d_mask, r, tp)
+                                             tex_1d_mask, tex_uint_mask,
+                                             mrt_uint_mask, r, tp)
                                : TranslateDepthOnlyPs(tp)) &&
                      !HadUnsupported();
   std::vector<uint32_t> ps;

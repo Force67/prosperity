@@ -42,6 +42,7 @@ DELTA_OPTION(bool, kNoDetile, "DELTA_GPU_NODETILE", false);
 DELTA_OPTION(bool, kTexDump, "DELTA_GPU_TEXDUMP", false);
 DELTA_OPTION(bool, kTexFail, "DELTA_GPU_TEXFAIL", false);
 DELTA_OPTION(bool, kTexMiss, "DELTA_GPU_TEXMISS", false);
+DELTA_OPTION(bool, kIntegerRt, "DELTA_GPU_INT_RT", true);
 DELTA_OPTION(bool, kTexRaw, "DELTA_GPU_TEXRAW", false);
 DELTA_OPTION(uint64_t, kTexWatch, "DELTA_GPU_TEXWATCH", 0);
 DELTA_OPTION(int, kTexCensus, "DELTA_GPU_TEXCENSUS", 0);
@@ -93,10 +94,12 @@ struct SamplerKey {
   bool valid = false;
   bool force_lod_zero = false;
   bool depth_compare = false;
+  // Vulkan permits only NEAREST filtering on an integer-format image.
+  bool integer = false;
   bool operator==(const SamplerKey& o) const {
     return valid == o.valid && image_min_lod == o.image_min_lod &&
            force_lod_zero == o.force_lod_zero &&
-           depth_compare == o.depth_compare &&
+           depth_compare == o.depth_compare && integer == o.integer &&
            std::memcmp(raw, o.raw, sizeof(raw)) == 0;
   }
 };
@@ -109,6 +112,7 @@ struct SamplerKeyHash {
     h = HashWord(h, k.image_min_lod);
     h = HashWord(h, k.force_lod_zero);
     h = HashWord(h, k.depth_compare);
+    h = HashWord(h, k.integer);
     return static_cast<size_t>(h);
   }
 };
@@ -265,6 +269,10 @@ TexKey TextureKey(uint64_t base,
   key.sampler.image_min_lod = min_lod;
   key.sampler.force_lod_zero = force_lod_zero;
   key.sampler.depth_compare = depth_compare;
+  // An integer-format view may only be sampled with NEAREST (no format feature
+  // for linear filtering); the multi-binding path already keys this, and the
+  // single-texture path has to agree or the same descriptor is rejected.
+  key.sampler.integer = kIntegerRt && (nfmt == 4 || nfmt == 5);
   key.arrayed = arrayed;
   return key;
 }
@@ -550,11 +558,14 @@ VkSampler SamplerFor(const SamplerKey& key) {
   ci.addressModeW = address_mode(key.raw[0] >> 6);
   uint32_t mag = (key.raw[2] >> 20) & 3;
   uint32_t min = (key.raw[2] >> 22) & 3;
-  ci.magFilter = (mag & 1) ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
-  ci.minFilter = (min & 1) ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
+  ci.magFilter = (mag & 1) && !key.integer ? VK_FILTER_LINEAR
+                                           : VK_FILTER_NEAREST;
+  ci.minFilter = (min & 1) && !key.integer ? VK_FILTER_LINEAR
+                                           : VK_FILTER_NEAREST;
   uint32_t mip_filter = (key.raw[2] >> 26) & 3;
-  ci.mipmapMode = mip_filter == 2 ? VK_SAMPLER_MIPMAP_MODE_LINEAR
-                                  : VK_SAMPLER_MIPMAP_MODE_NEAREST;
+  ci.mipmapMode = mip_filter == 2 && !key.integer
+                      ? VK_SAMPLER_MIPMAP_MODE_LINEAR
+                      : VK_SAMPLER_MIPMAP_MODE_NEAREST;
   if (mip_filter) {
     uint32_t min_lod = std::max(key.raw[1] & 0xFFF, key.image_min_lod);
     ci.minLod = static_cast<float>(min_lod) / 256.0f;
@@ -750,6 +761,18 @@ void PackTexPixels(uint8_t* linear,
         std::fputc(p[2], file);
       }
       std::fclose(file);
+    }
+    if (texel_w == 1024 && texel_h == 2048) {
+      char alpha_path[256];
+      std::snprintf(alpha_path, sizeof(alpha_path),
+                    "%s/tex_upload_alpha_%#lx.pgm", DumpDir(),
+                    (unsigned long)base);
+      if (FILE* alpha = std::fopen(alpha_path, "wb")) {
+        std::fprintf(alpha, "P5\n%u %u\n255\n", texel_w, texel_h);
+        for (uint64_t i = 0; i < pixels; i++)
+          std::fputc(linear[i * 4 + 3], alpha);
+        std::fclose(alpha);
+      }
     }
     std::fprintf(stderr,
                  "[texupload] %d base=%#lx %ux%u rgb=%lu alpha=%lu/%lu -> %s\n",
@@ -1508,6 +1531,8 @@ VkDescriptorSet GetMultiTexSet(const DrawInfo& d,
       sampler.image_min_lod = d.texs[i].min_lod;
       sampler.force_lod_zero = d.texs[i].force_lod_zero;
       sampler.depth_compare = d.texs[i].depth_compare;
+      sampler.integer = kIntegerRt && !d.texs[i].storage &&
+                        (d.texs[i].nfmt == 4 || d.texs[i].nfmt == 5);
     }
     dii[i] = {d.texs[i].storage ? VK_NULL_HANDLE : SamplerFor(sampler),
               views[i], layouts[i]};

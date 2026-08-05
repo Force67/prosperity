@@ -21,6 +21,11 @@ VkFormat GuestTextureFormat(uint32_t dfmt, uint32_t nfmt);
 bool GuestFormatBlockCompressed(uint32_t dfmt);
 uint32_t GuestFormatElemBytes(uint32_t dfmt);
 VkFormat ColorTargetFormat(uint32_t info);
+
+// A colour target whose texels are integers. The fragment shader must declare
+// an integer output for one, blending is not allowed on one, and a sampler
+// reading one may not filter -- three rules that all key off this.
+bool IsIntegerColorFormat(VkFormat format);
 VkClearColorValue ColorTargetClearValue(uint32_t info,
                                         uint32_t word0,
                                         uint32_t word1);

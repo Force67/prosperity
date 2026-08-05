@@ -83,9 +83,11 @@ struct Translator {
   Id gfx_buf_type = 0;  // shared Buf { uint data[]; } type (set 2)
   std::unordered_map<uint32_t, Id> gfx_buf_vars;  // binding -> raw-buffer SSBO
   // Indexed by (arrayed ? 1 : 0) | (dref ? 2 : 0) | (3D ? 4 : 0).
-  Id img_types[8] = {};          // sampled 2D / 2D-array / 3D, color / depth
-  Id sampled_types[8] = {};      // corresponding combined image-sampler types
-  Id sampled_ptrs[8] = {};       // UniformConstant pointers to sampled_types
+  // Index: arrayed | dref<<1 | 3d<<2 | integer<<3. An integer-format image
+  // needs its own OpTypeImage (sampled type uint) and yields a uvec4.
+  Id img_types[16] = {};      // sampled 2D / 2D-array / 3D, color / depth
+  Id sampled_types[16] = {};  // corresponding combined image-sampler types
+  Id sampled_ptrs[16] = {};   // UniformConstant pointers to sampled_types
   Id storage_img_types[2] = {};  // storage 2D / 2D-array images
   Id storage_img_ptrs[2] = {};   // UniformConstant pointers to storage images
   bool image_query = false;
@@ -558,6 +560,11 @@ struct StageContext {
 
   // PS
   Id color_outs[8] = {};  // lazily declared per MRT target (location == target)
+  // Bit n set = MRT n is an integer-format target, so its output is declared
+  // uvec4 and the export stores raw VGPR bits instead of reinterpreting them
+  // as floats. Bit n of tex_uint_mask says the same for sampler binding n.
+  uint32_t mrt_uint_mask = 0;
+  uint32_t tex_uint_mask = 0;
   Id depth_out = 0;       // MRTZ -> FragDepth (lazily declared)
   std::unordered_map<uint32_t, Id> in_vars;
   bool wrote_color = false;  // compile-time: shader has a color export

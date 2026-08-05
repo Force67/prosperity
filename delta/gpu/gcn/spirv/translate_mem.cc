@@ -411,12 +411,15 @@ void EmitMimg(Translator& t,
   }
 
   if (!sc.tex_vars[bind]) {
-    const uint32_t type_idx =
-        (arrayed ? 1u : 0u) | (dref ? 2u : 0u) | (is_3d ? 4u : 0u);
+    // A depth-compare read of an integer image is meaningless, so dref wins.
+    const bool int_img =
+        !dref && ((sc.tex_uint_mask >> bind) & 1u) != 0;
+    const uint32_t type_idx = (arrayed ? 1u : 0u) | (dref ? 2u : 0u) |
+                              (is_3d ? 4u : 0u) | (int_img ? 8u : 0u);
     if (!t.img_types[type_idx]) {
       t.img_types[type_idx] = t.m.TypeImage(
-          t.t_f, is_3d ? spv::Dim::Dim3D : spv::Dim::Dim2D, dref ? 1 : 0,
-          arrayed ? 1 : 0, 0, 1, spv::ImageFormat::Unknown);
+          int_img ? t.t_u : t.t_f, is_3d ? spv::Dim::Dim3D : spv::Dim::Dim2D,
+          dref ? 1 : 0, arrayed ? 1 : 0, 0, 1, spv::ImageFormat::Unknown);
       t.sampled_types[type_idx] = t.m.TypeSampledImage(t.img_types[type_idx]);
       t.sampled_ptrs[type_idx] = t.m.TypePointer(
           spv::StorageClass::UniformConstant, t.sampled_types[type_idx]);
@@ -432,6 +435,11 @@ void EmitMimg(Translator& t,
   const uint32_t type_idx = sc.tex_types[bind];
   const Id img_ty = t.img_types[type_idx];
   const Id si = t.m.Load(t.sampled_types[type_idx], sc.tex_vars[bind]);
+  // An integer image samples to a uvec4 and its texels go to the VGPRs as raw
+  // bits: the shader packed them, and reinterpreting them as floats is exactly
+  // the loss this path exists to avoid.
+  const bool int_img = (type_idx & 8u) != 0;
+  const Id texel_ty = int_img ? t.m.TypeVec(t.t_u, 4) : t.t_v4;
 
   if (op == 0x0e) {  // image_get_resinfo: dimensions/levels for mip v[vaddr]
     t.RequireImageQuery();
@@ -517,10 +525,10 @@ void EmitMimg(Translator& t,
       lod = t.UMin(addr_u(addr_components), t.Sub(levels, t.U32(1)));
     }
     texel =
-        t.m.Emit(spv::Op::OpImageFetch, t.t_v4, {img, ic, lod_operand, lod});
+        t.m.Emit(spv::Op::OpImageFetch, texel_ty, {img, ic, lod_operand, lod});
   } else if (op == 0x24) {  // image_sample_l: explicit LOD after the body
     texel = t.m.Emit(
-        spv::Op::OpImageSampleExplicitLod, t.t_v4,
+        spv::Op::OpImageSampleExplicitLod, texel_ty,
         {si, uv, lod_operand,
          addr_f(is_1d ? body_index + addr_components : coord_components)});
   } else if (op == 0x28) {  // image_sample_c: z-compare precedes the body
@@ -530,7 +538,7 @@ void EmitMimg(Translator& t,
     texel = t.m.Emit(spv::Op::OpImageSampleDrefExplicitLod, t.t_f,
                      {si, uv, addr_f(dref_index), lod_operand, t.F32(0.0f)});
   } else if (op == 0x27 || op == 0x37) {  // image_sample_lz[_o]: forced LOD 0
-    texel = t.m.Emit(spv::Op::OpImageSampleExplicitLod, t.t_v4,
+    texel = t.m.Emit(spv::Op::OpImageSampleExplicitLod, texel_ty,
                      {si, uv, lod_operand, t.F32(0.0f)});
   } else if (gather && dref) {
     // image_gather4_c*: four PCF comparisons, one per texel of the footprint.
@@ -543,21 +551,25 @@ void EmitMimg(Translator& t,
     while (component < 3 && !(dmask & (1u << component)))
       component++;
     texel =
-        t.m.Emit(spv::Op::OpImageGather, t.t_v4, {si, uv, t.U32(component)});
+        t.m.Emit(spv::Op::OpImageGather, texel_ty, {si, uv, t.U32(component)});
   } else {  // image_sample / _cl / _b (bias/derivs ignored): implicit LOD
-    texel = t.m.Emit(spv::Op::OpImageSampleImplicitLod, t.t_v4, {si, uv});
+    texel = t.m.Emit(spv::Op::OpImageSampleImplicitLod, texel_ty, {si, uv});
   }
 
   // DELTA_GPU_PSTEX=<binding+1>: remember this binding's texel so the PS
   // epilogue can export it (0 = the last sample, whatever it was).
-  if (!dref && !gather &&
+  // NOTE: an integer sample is deliberately NOT recorded here. Converting it
+  // for the float epilogue produces a value defined inside the sampling block
+  // that the epilogue does not dominate, and the module fails validation (26
+  // shaders, measured). DELTA_GPU_PSTEX therefore only reports float samplers.
+  if (!dref && !gather && !int_img &&
       (kPsTexBind == 0 || bind == (uint32_t)(kPsTexBind - 1)))
     t.last_texel = texel;
 
   // DELTA_GPU_DEBUGUV: output the sample UV as R/G instead of the texel, to see
   // the coordinate distribution reaching the sampler (normalized 0..1 vs texel
   // units). Diagnostic only.
-  if (kDebugUv != 0.f && !dref && !gather)
+  if (kDebugUv != 0.f && !dref && !gather && !int_img)
     texel = t.m.CompositeConstruct(
         t.t_v4, {t.FMul(x, t.F32(kDebugUv)), t.FMul(y, t.F32(kDebugUv)),
                  t.F32(0.f), t.F32(1.f)});
@@ -566,7 +578,10 @@ void EmitMimg(Translator& t,
   // ahead of it would store the vec4 into a single VGPR as if it were scalar.
   if (gather) {
     for (int i = 0; i < 4; i++)
-      t.SetVgF(vdata + i, t.m.CompositeExtract(t.t_f, texel, i));
+      if (int_img)
+        t.SetVg(vdata + i, t.m.CompositeExtract(t.t_u, texel, i));
+      else
+        t.SetVgF(vdata + i, t.m.CompositeExtract(t.t_f, texel, i));
     return;
   }
   if (dref) {
@@ -576,8 +591,12 @@ void EmitMimg(Translator& t,
   }
   uint32_t out = 0;
   for (int i = 0; i < 4; i++)
-    if (dmask & (1 << i))
-      t.SetVgF(vdata + out++, t.m.CompositeExtract(t.t_f, texel, i));
+    if (dmask & (1 << i)) {
+      if (int_img)
+        t.SetVg(vdata + out++, t.m.CompositeExtract(t.t_u, texel, i));
+      else
+        t.SetVgF(vdata + out++, t.m.CompositeExtract(t.t_f, texel, i));
+    }
 }
 
 // ---- graphics: raw MUBUF/MTBUF -> storage buffer ----------------------------

@@ -12,6 +12,11 @@
 #include <utl/options.h>
 
 namespace {
+// A colour target whose NUMBER_TYPE is UINT/SINT holds packed bits, not a
+// colour. Mapping one to UNORM clamps every export into [0,1] and the target
+// reads back black -- SotC lost two whole G-buffer planes that way. On by
+// default; DELTA_GPU_INT_RT=0 restores the old UNORM mapping.
+DELTA_OPTION(bool, kIntegerRt, "DELTA_GPU_INT_RT", true);
 DELTA_OPTION(bool, kNoBlend, "DELTA_GPU_NOBLEND", false);
 DELTA_OPTION(bool, kNoSwizzle, "DELTA_GPU_NOSWIZZLE", false);
 }  // namespace
@@ -175,6 +180,32 @@ uint32_t GuestFormatElemBytes(uint32_t dfmt) {
 // established BGRA8 host path for 8_8_8_8 targets; floating-point effect
 // buffers must retain their native precision or HDR/negative values clamp to
 // black.
+bool IsIntegerColorFormat(VkFormat format) {
+  switch (format) {
+    case VK_FORMAT_R8_UINT:
+    case VK_FORMAT_R8_SINT:
+    case VK_FORMAT_R16_UINT:
+    case VK_FORMAT_R16_SINT:
+    case VK_FORMAT_R8G8_UINT:
+    case VK_FORMAT_R8G8_SINT:
+    case VK_FORMAT_R32_UINT:
+    case VK_FORMAT_R32_SINT:
+    case VK_FORMAT_R16G16_UINT:
+    case VK_FORMAT_R16G16_SINT:
+    case VK_FORMAT_R8G8B8A8_UINT:
+    case VK_FORMAT_R8G8B8A8_SINT:
+    case VK_FORMAT_R32G32_UINT:
+    case VK_FORMAT_R32G32_SINT:
+    case VK_FORMAT_R16G16B16A16_UINT:
+    case VK_FORMAT_R16G16B16A16_SINT:
+    case VK_FORMAT_R32G32B32A32_UINT:
+    case VK_FORMAT_R32G32B32A32_SINT:
+      return true;
+    default:
+      return false;
+  }
+}
+
 VkFormat ColorTargetFormat(uint32_t info) {
   uint32_t dfmt = (info >> 2) & 0x1F;
   uint32_t nfmt = (info >> 8) & 0x7;
@@ -196,6 +227,31 @@ VkFormat ColorTargetFormat(uint32_t info) {
         return VK_FORMAT_R32G32B32_SFLOAT;
       case 14:
         return VK_FORMAT_R32G32B32A32_SFLOAT;
+      default:
+        break;
+    }
+  }
+  if (kIntegerRt && (nfmt == 4 || nfmt == 5)) {
+    const bool sint = nfmt == 5;
+    switch (dfmt) {
+      case 1:
+        return sint ? VK_FORMAT_R8_SINT : VK_FORMAT_R8_UINT;
+      case 2:
+        return sint ? VK_FORMAT_R16_SINT : VK_FORMAT_R16_UINT;
+      case 3:
+        return sint ? VK_FORMAT_R8G8_SINT : VK_FORMAT_R8G8_UINT;
+      case 4:
+        return sint ? VK_FORMAT_R32_SINT : VK_FORMAT_R32_UINT;
+      case 5:
+        return sint ? VK_FORMAT_R16G16_SINT : VK_FORMAT_R16G16_UINT;
+      case 10:
+        return sint ? VK_FORMAT_R8G8B8A8_SINT : VK_FORMAT_R8G8B8A8_UINT;
+      case 11:
+        return sint ? VK_FORMAT_R32G32_SINT : VK_FORMAT_R32G32_UINT;
+      case 12:
+        return sint ? VK_FORMAT_R16G16B16A16_SINT : VK_FORMAT_R16G16B16A16_UINT;
+      case 14:
+        return sint ? VK_FORMAT_R32G32B32A32_SINT : VK_FORMAT_R32G32B32A32_UINT;
       default:
         break;
     }
@@ -361,15 +417,28 @@ VkComponentMapping TextureComponents(uint32_t swizzle) {
 uint32_t FormatBytes(VkFormat fmt) {
   switch (fmt) {
     case VK_FORMAT_R8_UNORM:
+    case VK_FORMAT_R8_UINT:
+    case VK_FORMAT_R8_SINT:
       return 1;
     case VK_FORMAT_R16_UNORM:
     case VK_FORMAT_R16_SFLOAT:
     case VK_FORMAT_R8G8_UNORM:
+    case VK_FORMAT_R16_UINT:
+    case VK_FORMAT_R16_SINT:
+    case VK_FORMAT_R8G8_UINT:
+    case VK_FORMAT_R8G8_SINT:
       return 2;
     case VK_FORMAT_R16G16B16A16_SFLOAT:
     case VK_FORMAT_R16G16B16A16_UNORM:
     case VK_FORMAT_R32G32_SFLOAT:
+    case VK_FORMAT_R16G16B16A16_UINT:
+    case VK_FORMAT_R16G16B16A16_SINT:
+    case VK_FORMAT_R32G32_UINT:
+    case VK_FORMAT_R32G32_SINT:
       return 8;
+    case VK_FORMAT_R32G32B32A32_UINT:
+    case VK_FORMAT_R32G32B32A32_SINT:
+      return 16;
     case VK_FORMAT_R32G32B32_SFLOAT:
       return 12;
     case VK_FORMAT_R32G32B32A32_SFLOAT:

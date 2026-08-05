@@ -206,13 +206,18 @@ extern uint32_t g_recomp_n;
 // same code sampled through a 2D and a 3D descriptor is two different modules.
 // tex_1d_mask is the same for 1D[_ARRAY] descriptors, whose address body
 // carries one fewer coordinate than the 2D case the DA bit alone suggests.
+// tex_uint_mask / mrt_uint_mask mark integer-format sampled images and colour
+// targets: those change the SPIR-V types (uvec4 in and out), so like the two
+// above they are part of the module's identity, not per-draw state.
 Recompiled Recompile(const uint32_t* vs_code,
                       const uint32_t* ps_code,
                       const uint32_t* vs_user_data,
                       const uint32_t* ps_user_data,
                       uint32_t ps_input_ena = 0,
                       uint32_t tex_3d_mask = 0,
-                      uint32_t tex_1d_mask = 0);
+                      uint32_t tex_1d_mask = 0,
+                      uint32_t tex_uint_mask = 0,
+                      uint32_t mrt_uint_mask = 0);
 
 // A memory resource a compute shader touches. The descriptor may be inline in
 // user data or loaded through an SRT chain; `base_sgpr` names its live location
