@@ -23,6 +23,7 @@ DELTA_OPTION(bool, kGcCaller, "DELTA_GC_CALLER", false);
 DELTA_OPTION(bool, kGcAcb, "DELTA_GPU_ACB", false);
 DELTA_OPTION(bool, kGcFlip, "DELTA_GC_FLIP", false);
 DELTA_OPTION(bool, kGcTrace, "DELTA_GC_TRACE", false);
+DELTA_OPTION(uint32_t, kGcTraceMax, "DELTA_GC_TRACE_MAX", 0);
 }  // namespace
 
 // LLE GPU submit bridge (delta_runtime). The real libSceGnmDriver.sprx submits
@@ -382,8 +383,10 @@ int32_t gcDevice::ioctl(uint32_t cmd, void *data) {
             commands[i] = ring[(entry.readOffsetDw + i) &
                                (entry.ringSizeDw - 1)];
           if (kGcTrace) {
+            // The whole run, not a sample, when a comparison needs the full
+            // set of ring IBs (DELTA_GC_TRACE_MAX=0 keeps the old 100).
             static uint32_t traced_commands = 0;
-            if (traced_commands++ < 100) {
+            if (traced_commands++ < (kGcTraceMax ? kGcTraceMax : 100u)) {
               std::fprintf(stderr, "[gc] ACB %u/%u/%u %#x..%#x:", entry.me,
                            entry.pipe, entry.queue, entry.readOffsetDw, next);
               for (uint32_t word : commands)

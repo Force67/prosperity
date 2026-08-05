@@ -31,6 +31,7 @@
 namespace {
 DELTA_OPTION(bool, kDingDong, "DELTA_GPU_DINGDONG", false);
 DELTA_OPTION(bool, kGcSubmit, "DELTA_GC_SUBMIT", false);
+DELTA_OPTION(uint64_t, kGcSubmitMax, "DELTA_GC_SUBMIT_MAX", 0);
 DELTA_OPTION(bool, kPm4dump, "DELTA_PM4DUMP", false);
 }  // namespace
 
@@ -76,8 +77,13 @@ extern "C" void prosperity_gc_submit(const void *descArray, uint32_t descCount) 
                    descArray, descCount);
     return;
   }
+  // A dozen lines answers "what does a submit look like"; comparing the set of
+  // submitted buffers against something else (which command buffers a title
+  // BUILDS but never submits) needs the whole run.
   static int submitDumps = 0;
-  const bool dumpThis = kGcSubmit && submitDumps++ < 12;
+  const bool dumpThis =
+      kGcSubmit && (kGcSubmitMax == 0 ? submitDumps++ < 12
+                                      : submitDumps++ < (int)kGcSubmitMax);
   if (dumpThis)
     std::fprintf(stderr, "[gc] submit descArray=%p count=%u\n", descArray,
                  descCount);

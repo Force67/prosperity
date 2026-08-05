@@ -51,6 +51,15 @@ namespace {
 // title budget. Report a flat large pool and bump offsets from a non-zero base
 // so a test for "offset 0 means invalid" still holds.
 constexpr uint64_t kDmemTotal = 0x300000000ull;  // 12 GiB (SOTTR working set)
+// ...but a real PS4 hands a title 4.5-5 GiB, and a title that SIZES SOMETHING
+// from this number sees a pool three times too big. SotC maps the whole pool
+// once (11.9 GiB at 0x8050a00000) and sub-allocates 4 MiB arenas inside it, so
+// its arena arithmetic is downstream of this value. Overridable per run rather
+// than lowered outright: the 12 GiB figure is load-bearing for SOTTR.
+DELTA_OPTION(uint64_t, kDmemTotalOverride, "DELTA_DMEM_TOTAL", 0);
+uint64_t dmemTotal() {
+  return kDmemTotalOverride ? kDmemTotalOverride : kDmemTotal;
+}
 // Floor for window-less requests so physical offset 0 stays invalid ("offset 0
 // means the allocation failed" checks in titles keep working).
 constexpr uint64_t kDmemBase = 0x10000000ull;
@@ -98,9 +107,9 @@ int dmemAllocate(uint64_t lo, uint64_t hi, uint64_t len, uint64_t align,
   // pool end: SotC asks for exactly the top 0x220000 with searchEnd == the pool
   // size, and serving that from anywhere else moves a heap partition it
   // identifies by physical range.
-  const bool windowed = lo != 0 || (hi != 0 && hi < kDmemTotal);
-  if (hi == 0 || hi > kDmemTotal)
-    hi = kDmemTotal;
+  const bool windowed = lo != 0 || (hi != 0 && hi < dmemTotal());
+  if (hi == 0 || hi > dmemTotal())
+    hi = dmemTotal();
   if (len == 0 || align == 0 || (align & (align - 1)) || lo >= hi)
     return -22 /*EINVAL*/;
   std::lock_guard<std::mutex> lk(g_dmemMutex);
@@ -205,8 +214,8 @@ void dmemFree(uint64_t start, uint64_t len) {
 // Largest free hole inside [lo, hi) (AvailableDirectMemorySize).
 void dmemLargestHole(uint64_t lo, uint64_t hi, uint64_t align,
                      uint64_t *holeBase, uint64_t *holeSize) {
-  if (hi == 0 || hi > kDmemTotal)
-    hi = kDmemTotal;
+  if (hi == 0 || hi > dmemTotal())
+    hi = dmemTotal();
   if (lo == 0)
     lo = kDmemBase;
   if (align == 0)
@@ -289,7 +298,7 @@ int32_t dmaDevice::ioctlImpl(uint32_t cmd, void *data) {
   switch (cmd) {
   case 0x4008800A: {
     // GetDirectMemorySize: total physical pool available to the title.
-    *static_cast<uint64_t *>(data) = kDmemTotal;
+    *static_cast<uint64_t *>(data) = dmemTotal();
     return 0;
   }
   case 0xC0288001: {

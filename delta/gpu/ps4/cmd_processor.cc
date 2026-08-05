@@ -62,6 +62,9 @@ DELTA_OPTION(bool, kIbTrace, "DELTA_GPU_IBTRACE", false);
 DELTA_OPTION(bool, kMaskTrace, "DELTA_GPU_MASKTRACE", false);
 DELTA_OPTION(bool, kNoCopy, "DELTA_GPU_NODMACOPY", false);
 DELTA_OPTION(bool, kNoCs, "DELTA_GPU_NOCS", false);
+// Report every dispatch the command processor refuses before it can appear in
+// a capture; see HandleDispatch.
+DELTA_OPTION(bool, kCsDrops, "DELTA_GPU_CSDROPS", false);
 DELTA_OPTION(bool, kNoDepth, "DELTA_GPU_NODEPTH", false);
 DELTA_OPTION(bool, kOpHist, "DELTA_GPU_OPHIST", false);
 DELTA_OPTION(bool, kNoMrtTrace, "DELTA_GPU_NOMRT", false);
@@ -2265,9 +2268,31 @@ void HandleDispatch(const uint32_t* body, uint32_t count) {
     gcn::Disassemble(reinterpret_cast<const uint32_t*>(cs_addr), 1024, "cs");
   }
 
+  // Everything rejected here is invisible: it never reaches the frame capture,
+  // so a dispatch the guest issued and we dropped looks exactly like one the
+  // guest never issued. SotC issues thousands of whole-arena buffer fills
+  // ("Material Param Update", see DELTA_SOTC_MATTRACE) that no capture has
+  // ever contained, which is precisely the question this answers.
   if (cs_addr < 0x1000000000ull || cs_addr >= 0x20000000000ull || !tgx ||
-      !tgy || !dim_x || !dim_y)
+      !tgy || !dim_x || !dim_y) {
+    if (kCsDrops) {
+      static std::mutex m;
+      static uint64_t dropped = 0;
+      std::lock_guard lk(m);
+      if (dropped++ < 64 || (dropped % 512) == 0)
+        std::fprintf(stderr,
+                     "[csdrop] #%llu cs=%#lx groups=[%u %u %u] tg=[%u %u %u] "
+                     "(%s)\n",
+                     (unsigned long long)dropped, (unsigned long)cs_addr, dim_x,
+                     dim_y, dim_z, tgx, tgy, tgz,
+                     cs_addr < 0x1000000000ull || cs_addr >= 0x20000000000ull
+                         ? "program address out of guest range"
+                     : !tgx || !tgy ? "no threadgroup size"
+                                    : "zero group count");
+      std::fflush(stderr);
+    }
     return;
+  }
   const uint32_t* ud = &g_regs[mmCOMPUTE_USER_DATA_0];
 
   if (kNoCs || !rhi::DefaultRenderer().available())

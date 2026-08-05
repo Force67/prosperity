@@ -27,16 +27,17 @@
 #include "ps4/lv2/sys_mem.h"
 #include "runtime/vprx/vprx.h"
 
-#include <cstdlib>
-#include <cstring>
+#include <atomic>
 #include <cctype>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <mutex>
-#include <string>
-#include <vector>
 #include <set>
-#include <atomic>
+#include <string>
+#include <unordered_set>
 #include <utl/options.h>
+#include <vector>
 
 namespace {
 DELTA_OPTION(const char *, kPs5Modules, "DELTA_PS5_MODULES", nullptr);
@@ -60,6 +61,7 @@ DELTA_OPTION(bool, kFiosAllopen, "DELTA_FIOS_ALLOPEN", false);
 DELTA_OPTION(bool, kFiosTrace, "DELTA_FIOS_TRACE", false);
 DELTA_OPTION(bool, kGfxctxWatch, "DELTA_GFXCTX_WATCH", false);
 DELTA_OPTION(bool, kJobTrace, "DELTA_JOB_TRACE", false);
+DELTA_OPTION(bool, kSotcMatTrace, "DELTA_SOTC_MATTRACE", false);
 DELTA_OPTION(bool, kJobTraceClaim, "DELTA_JOB_TRACE_CLAIM", false);
 DELTA_OPTION(bool, kPs5Dcbwatch, "DELTA_PS5_DCBWATCH", false);
 DELTA_OPTION(const char *, kNullGuard, "DELTA_GUEST_NULLGUARD", nullptr);
@@ -101,6 +103,7 @@ static void applyGuestPatches(smodule &m);
 static void forceSotcPayload(smodule &m);
 static void probeFiosPaths();
 static void installJobTrace(smodule &m);
+static void installMatTrace(smodule &m);
 
 bool proc::create(const base::String &path, bool fromVfs) {
   gpu::SetWriteWatchCallback(&krnl::startWriteWatch);
@@ -217,6 +220,7 @@ bool proc::create(const base::String &path, bool fromVfs) {
   applyGuestPatches(*first);
   forceSotcPayload(*first);
   installJobTrace(*first);
+  installMatTrace(*first);
   // Note: DELTA_FIOS_PROBE runs lazily on the first FIOS2 call (see
   // fiosTraceLogger); at proc::create the /app0 PFS provider isn't mounted yet.
 
@@ -895,6 +899,58 @@ void PS4ABI jobTraceLogger(uint64_t hookId, uint64_t a0, uint64_t a1,
       spawnJobWatcher(a0);
     break;
   }
+  case 13: { // "Material Param Update" fills a block ON THE GPU (0x16eb90).
+    // SotC's material parameter blocks -- the constants AND the texture
+    // descriptors a draw reads through its SRT -- are not written by the CPU.
+    // `Shadow_Shipping+0x117930` (its timing print is "Material Param Update")
+    // allocates a block, memcpys a template into it, and calls this to build
+    // two buffer descriptors over it and dispatch (n+63)/64 threadgroups.
+    // Nothing on the CPU ever touches the blocks the failing draws read, so
+    // the question is which blocks this path actually targets: a3 = rcx = the
+    // block, a2 = rdx = its element count. One line per DISTINCT block, so a
+    // block updated every frame costs one line, not thousands.
+    static std::mutex m;
+    static std::unordered_set<uint64_t> seen;
+    static uint64_t calls = 0;
+    std::lock_guard lk(m);
+    calls++;
+    if (seen.insert(a3).second && seen.size() <= 256)
+      std::fprintf(stderr,
+                   "[mattrace] block=%#llx elems=%llu (distinct=%zu of %llu "
+                   "updates)\n",
+                   (unsigned long long)a3, (unsigned long long)a2, seen.size(),
+                   (unsigned long long)calls);
+    else if ((calls % 2000) == 0)
+      std::fprintf(stderr, "[mattrace] %llu updates over %zu distinct blocks\n",
+                   (unsigned long long)calls, seen.size());
+    std::fflush(stderr);
+    break;
+  }
+  case 14: { // the DISPATCH_DIRECT emitter (0x883870).
+    // The material fills are issued by the guest and never reach our PM4
+    // parser (DELTA_GPU_CSDROPS reports zero drops), so the question is which
+    // command buffer they are written into. a0 = rdi = the buffer object:
+    // [a0+0] .. [a0+8] is its extent and [a0+0x10] its write pointer, which is
+    // where this 9-dword packet lands. a1 = the X threadgroup count, so
+    // 16384 selects exactly the whole-arena (1048576-element) fills.
+    if (a1 != 16384)
+      break;
+    const auto *cb = reinterpret_cast<const uint64_t *>(a0);
+    const uint64_t wp = cb[2], end = cb[1];
+    static std::mutex m;
+    static std::unordered_set<uint64_t> seen;
+    static uint64_t n = 0;
+    std::lock_guard lk(m);
+    n++;
+    if (seen.insert(wp >> 20).second && seen.size() <= 64)
+      std::fprintf(stderr,
+                   "[matcb] fill dispatch -> cmdbuf write=%#llx end=%#llx "
+                   "(obj=%#llx, %zu regions of %llu fills)\n",
+                   (unsigned long long)wp, (unsigned long long)end,
+                   (unsigned long long)a0, seen.size(), (unsigned long long)n);
+    std::fflush(stderr);
+    break;
+  }
   case 11: { // CTOR 0x36210 -> a0 = rdi = the JobSystem object being built.
     // The zero-cost watcher bootstrap: this runs ONCE at init, returns
     // normally, and takes its argument in a register. Verified to be the same
@@ -1247,6 +1303,25 @@ void installInternalHook(uint8_t *base, uint32_t off, uint32_t prologueLen,
            (unsigned long)tramp, (unsigned long)wrap);
 }
 } // namespace
+
+// DELTA_SOTC_MATTRACE: name the blocks SotC's "Material Param Update" fills.
+// Hooks the dispatch builder rather than the update routine itself, because the
+// block is that call's 4th argument (rcx) and only a local inside the caller.
+// Prologue cut point 17 (push rbp / mov rbp,rsp / 5 pushes / sub rsp,0x58); the
+// function takes all five arguments in registers and reads nothing at a
+// positive rbp offset, which is the thing an entry detour would break.
+static void installMatTrace(smodule &m) {
+  if (!kSotcMatTrace)
+    return;
+  installInternalHook(m.getInfo().base, 0x16eb90, 17, 13,
+                      "MaterialParamDispatch(0x16eb90)");
+  // ...and the packet emitter it ends in, to name the command buffer the
+  // dispatch is written into. Prologue is exactly 14 (7 pushes after
+  // `mov rbp,rsp`) and position-independent; all five arguments are in
+  // registers.
+  installInternalHook(m.getInfo().base, 0x883870, 14, 14,
+                      "DispatchDirectEmit(0x883870)");
+}
 
 static void installJobTrace(smodule &m) {
   if (!kJobTrace)
