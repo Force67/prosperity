@@ -468,6 +468,12 @@ struct ScalarEval {
         src[s.sdst + i] = address + i * 4;
     }
     if (trace)
+      std::fprintf(stderr,
+                   "[eudenc] pc=%#x raw=%08x op=%#x sdst=s%u sbase=%u imm=%d "
+                   "offset=%#x lit=%d\n",
+                   inst.pc, inst.raw[0], s.op, s.sdst, s.sbase, s.imm ? 1 : 0,
+                   s.offset, inst.has_literal ? 1 : 0);
+    if (trace)
       std::fprintf(stderr, "[eud] s_load x%u s%u <- [s%u=%#lx + %#lx] = %#lx\n",
                    dwords, s.sdst, base, static_cast<unsigned long>(table),
                    static_cast<unsigned long>(byte_off),
@@ -780,10 +786,11 @@ std::vector<TImage> TrackTextures(
     }
     if (eval.trace)
       std::fprintf(stderr,
-                   "[eud] MIMG pc=%#x bind=%u srsrc=s%u known=%d base=%#lx "
-                   "%ux%u valid=%d raw=%08x/%08x/%08x/%08x/%08x/%08x/"
+                   "[eud] MIMG pc=%#x bind=%u srsrc=s%u known=%d at=%#lx "
+                   "base=%#lx %ux%u valid=%d raw=%08x/%08x/%08x/%08x/%08x/%08x/"
                    "%08x/%08x\n",
                    inst.pc, binding, srsrc, image_ok,
+                   static_cast<unsigned long>(eval.src[srsrc]),
                    static_cast<unsigned long>(t.base), t.width, t.height,
                    t.valid, image_ok ? eval.sgpr[srsrc + 0] : 0,
                    image_ok ? eval.sgpr[srsrc + 1] : 0,

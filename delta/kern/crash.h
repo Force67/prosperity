@@ -116,7 +116,7 @@ void startPopcntPrinter(uintptr_t addr, size_t bytes, unsigned everyMs);
 // DELTA_GUEST_RPROT has the same shape but traps reads too, which names the
 // consumer of a buffer rather than its producer.
 void startWriteWatch(uintptr_t addr, size_t bytes, unsigned everyMs,
-                     bool trapReads = false);
+                     bool trapReads = false, bool singleStep = false);
 
 // DELTA_GUEST_WHIST=<hex addr>:<hex bytes>[:<ms>]: the same trap re-armed on an
 // interval and reduced to counts, so a multi-GB pool can be surveyed for the

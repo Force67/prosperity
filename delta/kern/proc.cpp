@@ -21,6 +21,7 @@
 #include "ps5/lv2/initial_tcb.h"
 #include "vfs.h"
 #include "cpu/cpu_backend.h"
+#include "gpu/ps4/cmd_processor.h"
 #include "ps4/hardware_mode.h"
 #include "ps4/lv2/sys_dynlib.h"
 #include "ps4/lv2/sys_mem.h"
@@ -102,6 +103,8 @@ static void probeFiosPaths();
 static void installJobTrace(smodule &m);
 
 bool proc::create(const base::String &path, bool fromVfs) {
+  gpu::SetWriteWatchCallback(&krnl::startWriteWatch);
+
   /*register HLE prx overrides*/
   runtime::vprx_init();
 
@@ -372,7 +375,7 @@ static void investigateWriteWatch() {
     if (const char *c2 = std::strchr(colon + 1, ':'))
       ms = (unsigned)std::strtoul(c2 + 1, nullptr, 0);
   }
-  startWriteWatch(at, bytes, ms, reads);
+  startWriteWatch(at, bytes, ms, reads, false);
 }
 
 static void investigateWriteHist() {

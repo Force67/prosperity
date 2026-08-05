@@ -32,6 +32,14 @@
 // "descriptors" were 59.94, 0.0167, +/-1.0 -- a cbuffer). TEXMISS now prints
 // the descriptor's source address and the memory behind it, and reports 0
 // misses a run (was 64, the log cap).
+//
+// Separate real bug found the same day, NOT the menu's cause: all 48 of the
+// CE RAM loads above are dropped. CcbGuestRange floors at 0x1000000000, but
+// the source is 0xfe0000c00 -- inside the Gnm driver area (0xfc0000000+1GiB,
+// which the guest devmaps at 0xfe0000000). CE RAM is never initialised. Inert
+// for SotC (nothing ever dumps CE RAM back to memory here), latent for any
+// title that drives its CUE through the CE ring.
+// +DELTA_GPU_CETRACE=1 +DELTA_GPU_CETRACE_MAX=200   every CE RAM packet
 // +DELTA_GPU_PRESENT_ADDR=0x804e660000   the busiest offscreen target
 // +DELTA_GPU_PSWHITE=1                   force the fragment colour
 // +DELTA_GPU_PSTEX=2 +DELTA_GPU_PSTEXSCALE=50   export a sampled texel

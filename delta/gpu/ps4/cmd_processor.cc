@@ -43,6 +43,8 @@ DELTA_OPTION(const char *, kSkipShList, "DELTA_GPU_SKIPSH", nullptr);
 DELTA_OPTION(int, kTexTrackFrame, "DELTA_GPU_TEXTRACK_FRAME", -1);
 DELTA_OPTION(bool, kBlitDump, "DELTA_GPU_BLITDUMP", false);
 DELTA_OPTION(bool, kCcbHist, "DELTA_GPU_CCBHIST", false);
+DELTA_OPTION(bool, kCeTrace, "DELTA_GPU_CETRACE", false);
+DELTA_OPTION(int, kCeTraceMax, "DELTA_GPU_CETRACE_MAX", 200);
 DELTA_OPTION(bool, kCounterTrace, "DELTA_GPU_COUNTERTRACE", false);
 DELTA_OPTION(bool, kCsDump, "DELTA_GPU_CSDUMP", false);
 DELTA_OPTION(bool, kCsResTrace, "DELTA_GPU_CSRES", false);
@@ -62,6 +64,7 @@ DELTA_OPTION(bool, kNoCs, "DELTA_GPU_NOCS", false);
 DELTA_OPTION(bool, kNoDepth, "DELTA_GPU_NODEPTH", false);
 DELTA_OPTION(bool, kOpHist, "DELTA_GPU_OPHIST", false);
 DELTA_OPTION(bool, kRawBufTrace, "DELTA_GPU_RAWBUF", false);
+DELTA_OPTION(uint64_t, kRegSrcPs, "DELTA_GPU_REGSRC_PS", 0);
 DELTA_OPTION(bool, kSkipStale, "DELTA_GPU_SKIPSTALE", false);
 DELTA_OPTION(bool, kSpriteDis, "DELTA_GPU_SPRITEDIS", false);
 DELTA_OPTION(bool, kSpriteDump, "DELTA_GPU_SPRITEDUMP", false);
@@ -79,6 +82,7 @@ namespace {
 
 std::mutex g_mtx;
 Regs g_regs;  // persistent register state across submits (Gnm relies on this)
+const uint32_t* g_reg_sources[kRegFileSize] = {};
 std::atomic<uint64_t> g_total_submits{0};
 std::atomic<uint64_t> g_total_draws{0};
 bool g_vk_tried = false;
@@ -201,8 +205,10 @@ void SetRegs(uint32_t base, const uint32_t* body, uint32_t count) {
   uint32_t off = Pm4SetRegAddress(base, body[0]);
   for (uint32_t i = 1; i < count; i++) {
     uint32_t idx = off + (i - 1);
-    if (idx < kRegFileSize)
+    if (idx < kRegFileSize) {
       g_regs[idx] = body[i];
+      g_reg_sources[idx] = &body[i];
+    }
     if (idx == mmCB_SHADER_MASK)
       g_shader_mask_writes++;
     else if (idx == mmCB_TARGET_MASK)
@@ -271,6 +277,19 @@ void DumpHist() {
 void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
   uint64_t vs_a = g_regs.ShaderAddr(mmSPI_SHADER_PGM_LO_VS);
   uint64_t ps_a = g_regs.ShaderAddr(mmSPI_SHADER_PGM_LO_PS);
+  if (kRegSrcPs && ps_a == kRegSrcPs) {
+    static uint32_t reports = 0;
+    if (reports++ < 64) {
+      std::fprintf(stderr, "[regsrc] PS=%#lx user_data:",
+                   (unsigned long)ps_a);
+      for (uint32_t i = 0; i < 16; i++) {
+        const uint32_t reg = mmSPI_SHADER_USER_DATA_PS_0 + i;
+        std::fprintf(stderr, " s%u=%08x@%#lx", i, g_regs[reg],
+                     (unsigned long)g_reg_sources[reg]);
+      }
+      std::fprintf(stderr, "\n");
+    }
+  }
   // One-time: find the first PS that samples a texture (has an MIMG
   // instruction) and dump how it loads its resources, so we can wire texture
   // sampling.
@@ -1876,6 +1895,42 @@ inline bool CcbGuestRange(uint64_t a, uint64_t bytes) {
   return bytes > 0 && a >= 0x1000000000ull && a + bytes <= 0x20000000000ull;
 }
 
+// DELTA_GPU_CETRACE=1: every constant-engine RAM packet with its parsed fields
+// and whether it was applied. A descriptor table the CE publishes and we drop
+// reads back as zeros in the shader, which looks like a title that never wrote
+// its descriptors -- indistinguishable from a resolver bug without this.
+// DELTA_GPU_CETRACE_MAX caps the lines (default 200); the tail reports the
+// destination span every dump landed in, which is what names the ring.
+void CeTrace(const char* what,
+             uint32_t off,
+             uint32_t num_dw,
+             uint64_t addr,
+             const char* verdict,
+             uint32_t first_dword) {
+  if (!kCeTrace)
+    return;
+  static std::atomic<uint64_t> n{0};
+  static std::atomic<uint64_t> dst_lo{~0ull}, dst_hi{0};
+  if (addr) {
+    uint64_t lo = dst_lo.load();
+    while (addr < lo && !dst_lo.compare_exchange_weak(lo, addr)) {
+    }
+    uint64_t hi = dst_hi.load();
+    const uint64_t end = addr + (uint64_t)num_dw * 4;
+    while (end > hi && !dst_hi.compare_exchange_weak(hi, end)) {
+    }
+  }
+  const uint64_t seq = n.fetch_add(1);
+  if (seq < (uint64_t)kCeTraceMax.get())
+    std::fprintf(stderr,
+                 "[ce] %-8s ceoff=%#x ndw=%u addr=%#lx %s data0=%#x\n", what,
+                 off, num_dw, (unsigned long)addr, verdict, first_dword);
+  if (seq && (seq % 20000) == 0)
+    std::fprintf(stderr, "[ce] %llu packets; dump/load span %#lx..%#lx\n",
+                 (unsigned long long)seq, (unsigned long)dst_lo.load(),
+                 (unsigned long)dst_hi.load());
+}
+
 // Resolve an in-stream IT_INDIRECT_BUFFER body into a mapped host pointer and
 // dword count. Mirrors the kernel's gc_insert_indirect_buffer checks: a non-zero
 // ib_size whose GPU address sits in the guest range and is actually mapped. Any
@@ -1932,8 +1987,11 @@ static void WalkCcb(const uint32_t* p, uint32_t words, uint32_t depth) {
             break;
           uint32_t off = body[0] & 0xFFFF;
           uint32_t n = count > 1 ? count - 1 : 0;
-          if ((uint64_t)off + (uint64_t)n * 4 <= sizeof(g_ce_ram))
+          const bool fits = (uint64_t)off + (uint64_t)n * 4 <= sizeof(g_ce_ram);
+          if (fits)
             std::memcpy(g_ce_ram + off, &body[1], (size_t)n * 4);
+          CeTrace("write", off, n, 0, fits ? "ok" : "off+n>ceram",
+                  n ? body[1] : 0);
           break;
         }
         case IT_LOAD_CONST_RAM: {  // addrLo, addrHi, num_dwords, byte offset
@@ -1943,10 +2001,15 @@ static void WalkCcb(const uint32_t* p, uint32_t words, uint32_t depth) {
             uint64_t addr =
                 (static_cast<uint64_t>(body[1] & 0xFFFF) << 32) | body[0];
             uint32_t num = body[2] & 0x7FFF, off = body[3] & 0xFFFF;
-            if (CcbGuestRange(addr, (uint64_t)num * 4) &&
-                (uint64_t)off + (uint64_t)num * 4 <= sizeof(g_ce_ram))
+            const bool in_guest = CcbGuestRange(addr, (uint64_t)num * 4);
+            const bool fits =
+                (uint64_t)off + (uint64_t)num * 4 <= sizeof(g_ce_ram);
+            if (in_guest && fits)
               std::memcpy(g_ce_ram + off, reinterpret_cast<const void*>(addr),
                           (size_t)num * 4);
+            CeTrace("load", off, num, addr,
+                    !in_guest ? "addr-not-guest" : !fits ? "off+n>ceram" : "ok",
+                    in_guest ? *reinterpret_cast<const uint32_t*>(addr) : 0);
           }
           break;
         }
@@ -1959,10 +2022,17 @@ static void WalkCcb(const uint32_t* p, uint32_t words, uint32_t depth) {
             uint32_t off = body[0] & 0xFFFF, num = body[1] & 0x7FFF;
             uint64_t addr =
                 (static_cast<uint64_t>(body[3] & 0xFFFF) << 32) | body[2];
-            if (CcbGuestRange(addr, (uint64_t)num * 4) &&
-                (uint64_t)off + (uint64_t)num * 4 <= sizeof(g_ce_ram))
+            const bool in_guest = CcbGuestRange(addr, (uint64_t)num * 4);
+            const bool fits =
+                (uint64_t)off + (uint64_t)num * 4 <= sizeof(g_ce_ram);
+            if (in_guest && fits)
               std::memcpy(reinterpret_cast<void*>(addr), g_ce_ram + off,
                           (size_t)num * 4);
+            CeTrace(op == IT_DUMP_CONST_RAM ? "dump" : "dump.off", off, num,
+                    addr,
+                    !in_guest ? "addr-not-guest" : !fits ? "off+n>ceram" : "ok",
+                    fits ? *reinterpret_cast<const uint32_t*>(g_ce_ram + off)
+                         : 0);
           }
           break;
         }
@@ -2621,8 +2691,10 @@ static uint32_t WalkDcb(const uint32_t* p, uint32_t words, uint32_t depth,
       uint32_t base = Pm4Type0Reg(hdr);  // absolute register dword offset
       for (uint32_t k = 0; k < cnt && i + 1 + k < words; k++) {
         uint32_t idx = base + k;
-        if (idx < kRegFileSize)
+        if (idx < kRegFileSize) {
           g_regs[idx] = p[i + 1 + k];
+          g_reg_sources[idx] = &p[i + 1 + k];
+        }
         if (idx == mmCB_SHADER_MASK)
           g_shader_mask_writes++;
         else if (idx == mmCB_TARGET_MASK)

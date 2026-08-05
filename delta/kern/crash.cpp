@@ -524,6 +524,12 @@ static int g_fnArgsCount = 0;
 static std::atomic<uintptr_t> g_wprotBase{0};
 static std::atomic<size_t> g_wprotLen{0};
 static std::atomic<bool> g_wprotRegs{false};
+static std::atomic<bool> g_wprotStep{false};
+static std::atomic<uintptr_t> g_wprotReportBase{0};
+static std::atomic<size_t> g_wprotReportLen{0};
+#if defined(__x86_64__)
+static thread_local uintptr_t g_wprotStepPage = 0;
+#endif
 
 // DELTA_GUEST_WHIST census state (see startWriteHist). A one-shot watch names
 // the first writer of a page and then goes quiet; this one re-arms, so a pool
@@ -538,9 +544,106 @@ static std::atomic<uint32_t> g_whistBucket[kWhistBuckets];
 static std::atomic<uintptr_t> g_whistSite[kWhistSites];
 static std::atomic<uintptr_t> g_whistSiteCaller[kWhistSites];
 static std::atomic<uint32_t> g_whistSiteHits[kWhistSites];
+// Faults whose guest instruction could not be established (see
+// watchFaultGuestRip). Reported alongside the sites so a census can never read
+// as "these are all the writers" when some of them went unnamed.
+static std::atomic<uint64_t> g_whistUnattributed{0};
+
+// The guest instruction behind a memory-watch fault. Returns false when it
+// cannot be established, and then `rip` is 0.
+//
+// On an x86 host the signal context's RIP already IS the guest RIP. Under FEX on
+// ARM the fault is raised inside JIT'd code, so the host pc must be mapped back
+// through FEX. `cpu::currentGuestRip()` must NOT serve as a fallback here: it is
+// only block-accurate (see cpu_backend.h), so under multiblock compilation it
+// names some earlier instruction of whatever block is running. That reads as an
+// authoritative answer while being wrong -- it attributed a write to one of
+// SotC's descriptor pages to libc's memcpy, a store the title never made, and
+// sent a whole investigation down a dead end. An unattributable fault must SAY
+// it is unattributable.
+static bool watchFaultGuestRip(void *ucv, uintptr_t &rip) {
+  rip = 0;
+#if defined(__x86_64__)
+  rip = (uintptr_t)static_cast<ucontext_t *>(ucv)->uc_mcontext.gregs[REG_RIP];
+  return rip != 0;
+#elif defined(__aarch64__)
+  rip = (uintptr_t)cpu::reconstructGuestRip(
+      static_cast<ucontext_t *>(ucv)->uc_mcontext.pc);
+  return rip != 0;
+#else
+  (void)ucv;
+  return false;
+#endif
+}
+
+// Guest stack pointer at the fault, or 0. Lets a leaf writer (libc memcpy names
+// no subsystem) be attributed to its caller.
+static uintptr_t watchFaultGuestRsp(void *ucv) {
+#if defined(__x86_64__)
+  return (uintptr_t)static_cast<ucontext_t *>(ucv)->uc_mcontext.gregs[REG_RSP];
+#else
+  (void)ucv;
+  if (const uint64_t *g = cpu::currentGuestGregs()) {
+    enum { RAX, RCX, RDX, RBX, RSP };
+    return (uintptr_t)g[RSP];
+  }
+  return 0;
+#endif
+}
+
+#if defined(__aarch64__)
+static void probeHandler(int, siginfo_t *, void *ucv) {
+  uintptr_t rip = 0;
+  const bool attributed = watchFaultGuestRip(ucv, rip);
+  char sym[256];
+  if (attributed)
+    symbolize(rip, sym, sizeof(sym));
+  else
+    std::snprintf(sym, sizeof(sym), "<unattributed FEX host pc>");
+  const auto host_pc = static_cast<ucontext_t *>(ucv)->uc_mcontext.pc;
+  std::fprintf(stderr, "[probe] tid=%ld host_pc=%#llx guest_pc=%#lx %s\n",
+               (long)gettid(), (unsigned long long)host_pc,
+               (unsigned long)rip, sym);
+  if (const uintptr_t sp = watchFaultGuestRsp(ucv))
+    guestStackTraceFrom(sp, "probe", 8, (long)syscall(SYS_gettid));
+  std::fflush(stderr);
+}
+#endif
+
+// Reopen the one page a watch fault landed on so the guest can retry the access.
+// Arch-independent: returning from the handler re-executes the faulting
+// instruction, which is what turns a one-shot trap into a running trace. Without
+// this the watch is not merely blind, it is FATAL -- on ARM both watches used to
+// fall through to the crash reporter and kill the title.
+static void reopenWatchPage(uintptr_t at) {
+  const long pgsz = sysconf(_SC_PAGESIZE);
+  ::mprotect(reinterpret_cast<void *>(at & ~((uintptr_t)pgsz - 1)),
+             (size_t)pgsz, PROT_READ | PROT_WRITE | PROT_EXEC);
+}
+
+static void resumeWatchedWrite(uintptr_t at, void *ucv) {
+  reopenWatchPage(at);
+#if defined(__x86_64__)
+  if (g_wprotStep.load(std::memory_order_relaxed)) {
+    const uintptr_t pgsz = (uintptr_t)sysconf(_SC_PAGESIZE);
+    g_wprotStepPage = at & ~(pgsz - 1);
+    static_cast<ucontext_t *>(ucv)->uc_mcontext.gregs[REG_EFL] |= 0x100;
+  }
+#else
+  (void)ucv;
+#endif
+}
 
 static void crashHandler(int sig, siginfo_t *si, void *ucv) {
 #if defined(__x86_64__)
+  if (sig == SIGTRAP && ucv && g_wprotStepPage) {
+    const size_t pgsz = (size_t)sysconf(_SC_PAGESIZE);
+    ::mprotect(reinterpret_cast<void *>(g_wprotStepPage), pgsz, PROT_READ);
+    static_cast<ucontext_t *>(ucv)->uc_mcontext.gregs[REG_EFL] &= ~0x100;
+    g_wprotStepPage = 0;
+    return;
+  }
+#endif
   // Write census: same trap as the write watch, but it only counts (per 16 MiB
   // bucket and per faulting instruction) and reopens the page, so it survives a
   // multi-GB range being re-armed for the length of a run.
@@ -548,30 +651,36 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
     const uintptr_t base = g_whistBase.load();
     const uintptr_t at = reinterpret_cast<uintptr_t>(si->si_addr);
     if (at >= base && at < base + g_whistLen.load()) {
-      auto *uc = static_cast<ucontext_t *>(ucv);
-      const uintptr_t rip = (uintptr_t)uc->uc_mcontext.gregs[REG_RIP];
+      uintptr_t rip = 0;
+      const bool attributed = watchFaultGuestRip(ucv, rip);
       const size_t b = (at - base) / kWhistGranule;
       if (b < kWhistBuckets)
         g_whistBucket[b].fetch_add(1, std::memory_order_relaxed);
-      for (int i = 0; i < kWhistSites; i++) {
-        uintptr_t cur = g_whistSite[i].load(std::memory_order_relaxed);
-        if (cur == rip) {
-          g_whistSiteHits[i].fetch_add(1, std::memory_order_relaxed);
-          break;
-        }
-        if (!cur && g_whistSite[i].compare_exchange_strong(cur, rip)) {
-          // A leaf writer (libc memcpy) names no subsystem; keep one sample of
-          // its return address so the report can name the caller too.
-          g_whistSiteCaller[i].store(
-              *reinterpret_cast<const uintptr_t *>(uc->uc_mcontext.gregs[REG_RSP]),
-              std::memory_order_relaxed);
-          g_whistSiteHits[i].fetch_add(1, std::memory_order_relaxed);
-          break;
+      // Slot 0 doubles as "empty" in the site table, so an unattributable
+      // fault must not be filed as a writer at rip 0 -- it is counted apart and
+      // the report says how many there were.
+      if (!attributed) {
+        g_whistUnattributed.fetch_add(1, std::memory_order_relaxed);
+      } else {
+        for (int i = 0; i < kWhistSites; i++) {
+          uintptr_t cur = g_whistSite[i].load(std::memory_order_relaxed);
+          if (cur == rip) {
+            g_whistSiteHits[i].fetch_add(1, std::memory_order_relaxed);
+            break;
+          }
+          if (!cur && g_whistSite[i].compare_exchange_strong(cur, rip)) {
+            // A leaf writer (libc memcpy) names no subsystem; keep one sample
+            // of its return address so the report can name the caller too.
+            if (const uintptr_t sp = watchFaultGuestRsp(ucv))
+              g_whistSiteCaller[i].store(
+                  *reinterpret_cast<const uintptr_t *>(sp),
+                  std::memory_order_relaxed);
+            g_whistSiteHits[i].fetch_add(1, std::memory_order_relaxed);
+            break;
+          }
         }
       }
-      const long pgsz = sysconf(_SC_PAGESIZE);
-      ::mprotect(reinterpret_cast<void *>(at & ~((uintptr_t)pgsz - 1)),
-                 (size_t)pgsz, PROT_READ | PROT_WRITE | PROT_EXEC);
+      reopenWatchPage(at);
       return;
     }
   }
@@ -583,41 +692,91 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
     const size_t len = g_wprotLen.load();
     const uintptr_t at = reinterpret_cast<uintptr_t>(si->si_addr);
     if (at >= base && at < base + len) {
-      auto *uc = static_cast<ucontext_t *>(ucv);
-      const uintptr_t rip = (uintptr_t)uc->uc_mcontext.gregs[REG_RIP];
+      const uintptr_t report_base = g_wprotReportBase.load();
+      const size_t report_len = g_wprotReportLen.load();
+      const bool report = !g_wprotStep.load() ||
+                          (at >= report_base && at < report_base + report_len);
+      if (!report) {
+        resumeWatchedWrite(at, ucv);
+        return;
+      }
+      uintptr_t rip = 0;
+      const bool attributed = watchFaultGuestRip(ucv, rip);
       char sym[192];
-      symbolize(rip, sym, sizeof(sym));
-      std::fprintf(stderr, "[wprot] %s %#llx from %s\n",
-                   (uc->uc_mcontext.gregs[REG_ERR] & 2) ? "write" : "read",
+      if (attributed)
+        symbolize(rip, sym, sizeof(sym));
+      else
+        std::snprintf(sym, sizeof(sym),
+                      "<unattributed: host pc outside any FEX code buffer>");
+      // Only a write-only watch can name the access from the protection alone.
+      // A reads-too watch (PROT_NONE) cannot on ARM, where there is no x86
+      // page-fault error code -- so it says "access" rather than guessing.
+#if defined(__x86_64__)
+      const char *kind =
+          (static_cast<ucontext_t *>(ucv)->uc_mcontext.gregs[REG_ERR] & 2)
+              ? "write"
+              : "read";
+#else
+      const char *kind = g_wprotRegs.load() ? "access" : "write";
+#endif
+      std::fprintf(stderr, "[wprot] %s %#llx from %s\n", kind,
                    (unsigned long long)at, sym);
+      // The writer of a descriptor/command ring is nearly always libc memcpy,
+      // which names no subsystem -- so the CALLER is the whole point of the
+      // report, not an extra for the reads-too mode. Reading the single qword at
+      // the guest rsp does not find it: the leaf is mid-body by the time it
+      // faults (and on ARM the guest rsp snapshot can lag), which yields a stack
+      // address rather than a return address. Scan the stack window for values
+      // that land in a loaded module's .text, the same way the fatal reporter
+      // recovers a call chain the frame pointer misses.
+      if (attributed) {
+        if (const uintptr_t sp = watchFaultGuestRsp(ucv))
+          guestStackTraceFrom(sp, "wprot", 4, (long)syscall(SYS_gettid));
+      }
       // A consumer's other pointer (where it puts what it just read) is only
       // visible in its registers at the access.
       if (g_wprotRegs.load()) {
-        auto *g = uc->uc_mcontext.gregs;
-        std::fprintf(stderr,
-                     "[wprot]  ax=%lx bx=%lx cx=%lx dx=%lx si=%lx di=%lx "
-                     "bp=%lx sp=%lx r8=%lx r9=%lx r10=%lx r11=%lx r12=%lx "
-                     "r13=%lx r14=%lx r15=%lx\n",
-                     (long)g[REG_RAX], (long)g[REG_RBX], (long)g[REG_RCX],
-                     (long)g[REG_RDX], (long)g[REG_RSI], (long)g[REG_RDI],
-                     (long)g[REG_RBP], (long)g[REG_RSP], (long)g[REG_R8],
-                     (long)g[REG_R9], (long)g[REG_R10], (long)g[REG_R11],
-                     (long)g[REG_R12], (long)g[REG_R13], (long)g[REG_R14],
-                     (long)g[REG_R15]);
-        // The writer is nearly always libc memcpy, which names no subsystem.
-        // memcpy is a leaf, so the qword at rsp is its caller.
-        const auto ret = *reinterpret_cast<const uintptr_t *>(g[REG_RSP]);
-        char csym[192];
-        symbolize(ret, csym, sizeof(csym));
-        std::fprintf(stderr, "[wprot]  caller %s\n", csym);
+        const uint64_t *g = nullptr;
+#if defined(__x86_64__)
+        uint64_t xg[16];
+        auto *hg = static_cast<ucontext_t *>(ucv)->uc_mcontext.gregs;
+        const int kOrder[16] = {REG_RAX, REG_RCX, REG_RDX, REG_RBX,
+                                REG_RSP, REG_RBP, REG_RSI, REG_RDI,
+                                REG_R8,  REG_R9,  REG_R10, REG_R11,
+                                REG_R12, REG_R13, REG_R14, REG_R15};
+        for (int i = 0; i < 16; i++)
+          xg[i] = (uint64_t)hg[kOrder[i]];
+        g = xg;
+#else
+        // FEX keeps guest GPRs in host registers between block boundaries, so
+        // this snapshot can lag the faulting instruction. Say so rather than
+        // presenting it as the state at the access.
+        g = cpu::currentGuestGregs();
+#endif
+        if (g) {
+          enum { RAX, RCX, RDX, RBX, RSP, RBP, RSI, RDI,
+                 R8, R9, R10, R11, R12, R13, R14, R15 };
+          std::fprintf(stderr,
+                       "[wprot]  ax=%lx bx=%lx cx=%lx dx=%lx si=%lx di=%lx "
+                       "bp=%lx sp=%lx r8=%lx r9=%lx r10=%lx r11=%lx r12=%lx "
+                       "r13=%lx r14=%lx r15=%lx%s\n",
+                       (long)g[RAX], (long)g[RBX], (long)g[RCX], (long)g[RDX],
+                       (long)g[RSI], (long)g[RDI], (long)g[RBP], (long)g[RSP],
+                       (long)g[R8], (long)g[R9], (long)g[R10], (long)g[R11],
+                       (long)g[R12], (long)g[R13], (long)g[R14], (long)g[R15],
+#if defined(__x86_64__)
+                       "");
+#else
+                       "  (guest regs may lag the faulting insn)");
+#endif
+        }
       }
       std::fflush(stderr);
-      const long pgsz = sysconf(_SC_PAGESIZE);
-      ::mprotect(reinterpret_cast<void *>(at & ~((uintptr_t)pgsz - 1)),
-                 (size_t)pgsz, PROT_READ | PROT_WRITE | PROT_EXEC);
+      resumeWatchedWrite(at, ucv);
       return;
     }
   }
+#if defined(__x86_64__)
   // DELTA_GUEST_BRK_TRACE: a RESUMABLE planted breakpoint. The ud2 replaced the
   // first bytes of a known instruction, so the handler emulates that
   // instruction, logs what we came for, and returns -- turning a one-shot trap
@@ -1889,15 +2048,45 @@ void setFnArgs(uintptr_t addr, const char *label, const uint64_t *offsets,
 // instruction and reopen that page. Memory that stays empty while the title
 // behaves as if it filled it either has no writer at all or one writing
 // elsewhere, and only the fault distinguishes those.
+//
+// The trap RE-ARMS every `ms` instead of firing once. Each fault reopens its own
+// page so the guest makes progress, which used to end the watch after a single
+// report for a range the title writes continuously -- one sample cannot tell a
+// one-time initialiser from a per-frame producer, and it certainly cannot follow
+// a value from one buffer to the next. Re-arming keeps the cost at roughly one
+// fault per page per interval while turning the watch into a stream.
 void startWriteWatch(uintptr_t addr, size_t bytes, unsigned everyMs,
-                     bool trapReads) {
+                     bool trapReads, bool singleStep) {
   if (!addr || !bytes)
     return;
+#if !defined(__x86_64__)
+  singleStep = false;
+#endif
+  const size_t pgsz = (size_t)sysconf(_SC_PAGESIZE);
+  const uintptr_t base = addr & ~((uintptr_t)pgsz - 1);
+  const size_t span = (addr + bytes - base + pgsz - 1) & ~(pgsz - 1);
+  if (singleStep) {
+    g_wprotBase = base;
+    g_wprotLen = span;
+    g_wprotRegs = trapReads;
+    g_wprotStep = true;
+    g_wprotReportBase = addr;
+    g_wprotReportLen = bytes;
+    if (::mprotect(reinterpret_cast<void *>(base), span,
+                   trapReads ? PROT_NONE : PROT_READ) == 0) {
+      std::fprintf(stderr, "[wprot] single-stepping %#lx+%#zx, reporting %#lx+%#zx (%s)\n",
+                   (unsigned long)base, span, (unsigned long)addr, bytes,
+                   trapReads ? "reads+writes" : "writes");
+      std::fflush(stderr);
+    }
+    return;
+  }
   std::thread([addr, bytes, everyMs, trapReads] {
     const long pgsz = sysconf(_SC_PAGESIZE);
     const uintptr_t base = addr & ~((uintptr_t)pgsz - 1);
     const size_t span =
         (addr + bytes - base + (size_t)pgsz - 1) & ~((size_t)pgsz - 1);
+    bool announced = false;
     for (;;) {
       std::this_thread::sleep_for(std::chrono::milliseconds(everyMs));
       unsigned char vec = 0;
@@ -1909,11 +2098,16 @@ void startWriteWatch(uintptr_t addr, size_t bytes, unsigned everyMs,
       g_wprotBase = base;
       g_wprotLen = span;
       g_wprotRegs = trapReads;
-      std::fprintf(stderr, "[wprot] watching %#lx+%#zx (%s)\n",
-                   (unsigned long)base, span, trapReads ? "reads+writes"
-                                                        : "writes");
-      std::fflush(stderr);
-      return;
+      g_wprotStep = false;
+      g_wprotReportBase = base;
+      g_wprotReportLen = span;
+      if (!announced) {
+        announced = true;
+        std::fprintf(stderr, "[wprot] watching %#lx+%#zx (%s), re-armed every %ums\n",
+                     (unsigned long)base, span,
+                     trapReads ? "reads+writes" : "writes", everyMs);
+        std::fflush(stderr);
+      }
     }
   }).detach();
 }
@@ -1963,6 +2157,11 @@ void startWriteHist(uintptr_t addr, size_t bytes, unsigned everyMs) {
         std::fprintf(stderr, "[whist]   %8u %s <- %s\n",
                      g_whistSiteHits[i].load(), sym, csym);
       }
+      // Never let the site list read as the complete set of writers when some
+      // faults could not be attributed to a guest instruction.
+      if (const uint64_t unattributed = g_whistUnattributed.load())
+        std::fprintf(stderr, "[whist]   %8llu <unattributed>\n",
+                     (unsigned long long)unattributed);
       std::fflush(stderr);
     }
   }).detach();
@@ -2245,7 +2444,7 @@ void installCrashHandler() {
   sigaction(SIGFPE, &sa, nullptr);
   sigaction(SIGBUS, &sa, nullptr);
   sigaction(SIGABRT, &sa, nullptr);  // guest/runtime std::abort, assert, libc
-#if defined(__x86_64__)
+#if defined(__x86_64__) || defined(__aarch64__)
   struct sigaction pa = {};
   pa.sa_sigaction = probeHandler;
   pa.sa_flags = SA_SIGINFO | SA_RESTART;  // don't abort the thread's blocking call
