@@ -85,3 +85,45 @@
 // +DELTA_SOTC_FORCE_PAYLOAD=1
 // What the FIOS2 layer was asked for, when a load never completes.
 // +DELTA_FIOS_TRACE=1
+
+// THE FRAME, MAPPED (2026-08-04, with tools/gpu_capture.py -- see
+// delta/gpu/DEBUGGER.md). SotC is a deferred renderer: shadow cascades ->
+// main-view Z-prepass (reverse-Z, clear 0, ZFUNC=GEQUAL) -> 7-MRT G-buffer
+// re-drawing the same geometry with ZFUNC=EQUAL -> deferred lighting (samples
+// the G-buffer AND the depth buffer it has bound) -> a full-screen compute
+// resolve that publishes the scene colour -> half-res post -> tonemap -> UI
+// layer -> composite. Three defects were deleting most of that and are fixed:
+// the 16 MiB vertex ring declined 83 draws a frame (now 512 MiB), the EQUAL
+// depth test rejected the scene because our two vertex shaders are not
+// bit-identical (DELTA_GPU_RELAX_ZEQUAL, on by default), and the lighting pass
+// was declined as self-sampling (now bound DEPTH_READ_ONLY).
+//
+// The integer G-buffer is now implemented (DELTA_GPU_INT_RT=1, opt-in): all
+// seven targets carry real world geometry, where two of them used to read
+// exactly zero. The next break is one stage on -- the deferred lighting pass
+// discards nearly every pixel because it samples its material/stencil ID from
+// the draw's own stencil surface (0x805fe50000, R8_UINT), and we have no
+// stencil-aspect sampled view, so that binding resolves to an unrelated colour
+// RT. Needs ResolveSampledStencil + a VK_IMAGE_ASPECT_STENCIL_BIT view.
+//
+// WHY IT WAS BLACK BEFORE THAT: the G-buffer is an INTEGER buffer.
+// CB_COLORn_INFO says FORMAT=COLOR_32 / COLOR_32_32 with NUMBER_TYPE=UINT for
+// 6 of the 7 targets, and CB_SHADER_MASK=0x1331111 agrees (one component per
+// 32-bit target). We create them B8G8R8A8_UNORM, so two read back exactly
+// zero and the scene the compute resolve publishes is black. The integer path
+// is implemented but gated off -- with it on the title stops issuing the
+// G-buffer pass altogether, which is not yet understood.
+// +DELTA_GPU_INT_RT=1                    integer colour targets (UNVALIDATED)
+// +DELTA_GPU_RELAX_ZEQUAL=0              restore the strict EQUAL depth test
+// +DELTA_GPU_VBRING_MB=<n>               override the vertex ring
+// +DELTA_GPU_CAPTURE_AFTER=150 +DELTA_GPU_CAPTURE_DIR=/tmp/cap   frame capture
+// +DELTA_GPU_TSCAN=<surface> +DELTA_GPU_TWATCH=1   descriptor archaeology
+// +DELTA_GPU_NOMRT=1 +DELTA_GPU_CBINFO=1  colour-target binding
+
+// ROOT CAUSE LEAD (2026-08-04): the descriptor pool at 0x8052xxxxxx is the
+// TITLE'S OWN HEAP -- DELTA_GUEST_WHIST=8052000000:1000000:400 names the writer
+// as Shadow_Shipping+0x48f07 (from +0x48ec5), which disassembles as malloc
+// chunk bookkeeping. The SRT points at a descriptor table the title has already
+// freed, while a fresh copy sits ~6 MiB away. That is a guest lifetime bug, and
+// one that reproduces every frame is usually something the emulator caused.
+// Next step is the allocator hook, not the renderer.
