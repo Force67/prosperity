@@ -2484,23 +2484,44 @@ bool RecompileSpirv(const uint32_t* vs_code,
   // A module the translator emitted but the validator rejects is a translator
   // bug (wrong codegen, not a guest gap): always loud.
   std::string err;
-  if (!spirv::Validate(vs, &err)) {
-    std::fprintf(stderr, "[gcnspv] VS invalid @%p: %s\n",
-                 static_cast<const void*>(vs_code), err.c_str());
-    return false;
+  // Validate + optimize through the disk cache (spv_post::Finalize): the
+  // optimizer is ~65% of recompile time and its output is a pure function of
+  // its input, so a hit is only faster, never different. NoOpt keeps the
+  // uncached diagnostic path, which is the point of that switch.
+  if (NoOpt()) {
+    if (!spirv::Validate(vs, &err)) {
+      std::fprintf(stderr, "[gcnspv] VS invalid @%p: %s\n",
+                   static_cast<const void*>(vs_code), err.c_str());
+      return false;
+    }
+    if (!spirv::Validate(ps, &err)) {
+      std::fprintf(stderr, "[gcnspv] PS invalid @%p: %s\n",
+                   static_cast<const void*>(ps_code), err.c_str());
+      return false;
+    }
+    if (!spirv::Validate(gs, &err)) {
+      std::fprintf(stderr, "[gcnspv] RECTLIST GS invalid: %s\n", err.c_str());
+      return false;
+    }
+    r.vs_spirv = vs;
+    r.gs_spirv = gs;
+    r.fs_spirv = ps;
+  } else {
+    if (!spirv::Finalize(vs, &r.vs_spirv, &err)) {
+      std::fprintf(stderr, "[gcnspv] VS invalid @%p: %s\n",
+                   static_cast<const void*>(vs_code), err.c_str());
+      return false;
+    }
+    if (!spirv::Finalize(ps, &r.fs_spirv, &err)) {
+      std::fprintf(stderr, "[gcnspv] PS invalid @%p: %s\n",
+                   static_cast<const void*>(ps_code), err.c_str());
+      return false;
+    }
+    if (!spirv::Finalize(gs, &r.gs_spirv, &err)) {
+      std::fprintf(stderr, "[gcnspv] RECTLIST GS invalid: %s\n", err.c_str());
+      return false;
+    }
   }
-  if (!spirv::Validate(ps, &err)) {
-    std::fprintf(stderr, "[gcnspv] PS invalid @%p: %s\n",
-                 static_cast<const void*>(ps_code), err.c_str());
-    return false;
-  }
-  if (!spirv::Validate(gs, &err)) {
-    std::fprintf(stderr, "[gcnspv] RECTLIST GS invalid: %s\n", err.c_str());
-    return false;
-  }
-  r.vs_spirv = NoOpt() ? vs : spirv::Optimize(vs);
-  r.gs_spirv = NoOpt() ? gs : spirv::Optimize(gs);
-  r.fs_spirv = NoOpt() ? ps : spirv::Optimize(ps);
   r.ok = !r.vs_spirv.empty() && !r.gs_spirv.empty() && !r.fs_spirv.empty();
 
   // Tally (DELTA_GPU_SPIRV): how many shaders the backend accepted vs had to
@@ -2557,12 +2578,18 @@ bool RecompileComputeSpirv(const uint32_t* cs_code,
   if (!cs_ok)
     return false;
   std::string err;
-  if (!spirv::Validate(spv_bin, &err)) {
+  if (NoOpt()) {
+    if (!spirv::Validate(spv_bin, &err)) {
+      std::fprintf(stderr, "[gcnspv] CS invalid @%p: %s\n",
+                   static_cast<const void*>(cs_code), err.c_str());
+      return false;
+    }
+    tmp.spirv = spv_bin;
+  } else if (!spirv::Finalize(spv_bin, &tmp.spirv, &err)) {
     std::fprintf(stderr, "[gcnspv] CS invalid @%p: %s\n",
                  static_cast<const void*>(cs_code), err.c_str());
     return false;
   }
-  tmp.spirv = NoOpt() ? spv_bin : spirv::Optimize(spv_bin);
   if (tmp.spirv.empty())
     return false;
   tmp.ok = true;

@@ -40,6 +40,7 @@ DELTA_OPTION(int, kWantW, "DELTA_GPU_PRESENT_RTW", 0);
 DELTA_OPTION(int, kWantH, "DELTA_GPU_PRESENT_RTH", 0);
 DELTA_OPTION(uint64_t, kWantAddr, "DELTA_GPU_PRESENT_ADDR", 0);
 DELTA_OPTION(int, kFlipMode, "DELTA_GPU_FLIP", 0);
+DELTA_OPTION(bool, kCsLazyFlush, "DELTA_GPU_CS_LAZY_FLUSH", false);
 DELTA_OPTION(int, kSnapAt, "DELTA_GPU_SNAP", 0);
 DELTA_OPTION(int, kSnapMinDraws, "DELTA_GPU_SNAP_MINDRAWS", 0);
 DELTA_OPTION(int, kSnapMinIdx, "DELTA_GPU_SNAP_MININDICES", 0);
@@ -484,7 +485,15 @@ void EndFrame(Renderer& renderer, uint64_t scanout_base) {
   // Bound CS-write staleness for guest CPU readers. Only a device fault (the
   // flush nulls renderer.state) is fatal; a range that could not be written
   // back just stays stale, as it always did.
-  if (!FlushCsWrites(renderer) && !renderer.available()) {
+  //
+  // DELTA_GPU_CS_LAZY_FLUSH=1 drops this blanket flush and leaves the writeback
+  // to the targeted FlushCsWritesRange calls the guest readers already make
+  // (textures, vertex/index data, constant buffers, CP DMA sources). It exists
+  // because executing SotC's async compute means whole 4 MiB material arenas
+  // are written back EVERY frame whether anything reads them or not -- 80 ms a
+  // frame of memcpy in a 1.3 fps frame. The risk it takes is a guest CPU read
+  // that goes through none of those hooks seeing a stale range.
+  if (!kCsLazyFlush && !FlushCsWrites(renderer) && !renderer.available()) {
     g_frame.recording = false;
     return;
   }

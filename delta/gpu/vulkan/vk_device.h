@@ -98,4 +98,10 @@ VkShaderModule MakeModuleVec(const std::vector<uint32_t>& spv);
 // Ask the driver what the GPU actually faulted on (VK_EXT_device_fault).
 void ReportDeviceFault(DeviceState& device);
 
+// Persist the driver's pipeline cache. Called after a pipeline is created
+// rather than at exit: the runner SIGKILLs the emulator, so an atexit hook
+// would never fire on the runs that matter. Cheap and self-throttling -- it
+// only writes when new pipelines have appeared since the last write.
+void SavePipelineCache(bool force = false);
+
 }  // namespace gpu::vk

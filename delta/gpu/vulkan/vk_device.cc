@@ -4,6 +4,14 @@
 
 #include "gpu/vulkan/vk_device.h"
 
+#include <cstdio>
+#include <cstdlib>
+#include <string>
+#include <vector>
+
+#include <sys/stat.h>
+#include <unistd.h>
+
 #include "gpu/gcn/gcn_translate.h"
 #include "gpu/rhi/renderer.h"
 #include "gpu/vulkan/vk_backend.h"
@@ -23,6 +31,89 @@ DELTA_OPTION(const char*, kVkGpu, "DELTA_VK_GPU", nullptr);
 }  // namespace
 
 namespace gpu::vk {
+
+namespace {
+DELTA_OPTION(bool, kShaderCacheOn, "DELTA_GPU_SHADER_CACHE", true);
+DELTA_OPTION(const char*,
+             kShaderCacheDirOpt,
+             "DELTA_GPU_SHADER_CACHE_DIR",
+             nullptr);
+
+// Where the driver's pipeline cache blob lives. Same convention as the SPIR-V
+// cache (DELTA_GPU_SHADER_CACHE_DIR, else $XDG_CACHE_HOME/ps4delta, else
+// ~/.cache/ps4delta), and disabled by the same DELTA_GPU_SHADER_CACHE=0.
+std::string PipelineCachePath() {
+  static const std::string path = [] {
+    if (!kShaderCacheOn)
+      return std::string();
+    std::string d;
+    if (kShaderCacheDirOpt && *kShaderCacheDirOpt)
+      d = kShaderCacheDirOpt;
+    else if (const char* xdg = std::getenv("XDG_CACHE_HOME"); xdg && *xdg)
+      d = std::string(xdg) + "/ps4delta";
+    else if (const char* home = std::getenv("HOME"); home && *home)
+      d = std::string(home) + "/.cache/ps4delta";
+    else
+      return std::string();
+    for (size_t i = 1; i <= d.size(); i++)
+      if (i == d.size() || d[i] == '/')
+        ::mkdir(d.substr(0, i).c_str(), 0755);
+    return d + "/pipeline.bin";
+  }();
+  return path;
+}
+
+std::vector<uint8_t> ReadPipelineCacheBlob() {
+  std::vector<uint8_t> out;
+  const std::string p = PipelineCachePath();
+  if (p.empty())
+    return out;
+  FILE* f = std::fopen(p.c_str(), "rb");
+  if (!f)
+    return out;
+  std::fseek(f, 0, SEEK_END);
+  const long n = std::ftell(f);
+  std::fseek(f, 0, SEEK_SET);
+  if (n > 0) {
+    out.resize(static_cast<size_t>(n));
+    if (std::fread(out.data(), 1, out.size(), f) != out.size())
+      out.clear();
+  }
+  std::fclose(f);
+  return out;
+}
+}  // namespace
+
+void SavePipelineCache(bool force) {
+  static size_t last_size = 0;
+  const std::string p = PipelineCachePath();
+  if (p.empty() || g_dev.pipeline_cache == VK_NULL_HANDLE)
+    return;
+  size_t size = 0;
+  if (vkGetPipelineCacheData(g_dev.device, g_dev.pipeline_cache, &size,
+                             nullptr) != VK_SUCCESS ||
+      !size)
+    return;
+  // Only write when the driver has actually added something.
+  if (!force && size == last_size)
+    return;
+  std::vector<uint8_t> blob(size);
+  if (vkGetPipelineCacheData(g_dev.device, g_dev.pipeline_cache, &size,
+                             blob.data()) != VK_SUCCESS)
+    return;
+  last_size = size;
+  char tmp[512];
+  std::snprintf(tmp, sizeof(tmp), "%s.%d.tmp", p.c_str(), (int)::getpid());
+  FILE* f = std::fopen(tmp, "wb");
+  if (!f)
+    return;
+  const bool ok = std::fwrite(blob.data(), 1, size, f) == size;
+  std::fclose(f);
+  if (ok)
+    ::rename(tmp, p.c_str());
+  else
+    ::unlink(tmp);
+}
 
 namespace {
 
@@ -438,8 +529,16 @@ bool CreateDevice() {
   dc.pEnabledFeatures = &want_feat;
   VKOK(vkCreateDevice(g_dev.phys, &dc, nullptr, &g_dev.device));
   vkGetDeviceQueue(g_dev.device, g_dev.qfam, 0, &g_dev.queue);
+  // Seed the driver's pipeline cache from disk. Without this every run
+  // recompiles every pipeline from scratch, which on SotC is several hundred.
+  // A blob from another driver/device is rejected by the driver itself (it
+  // checks its own header), so a stale file costs nothing but the read.
+  std::vector<uint8_t> cache_blob = ReadPipelineCacheBlob();
   VkPipelineCacheCreateInfo pipeline_cache_info{
       VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
+  pipeline_cache_info.initialDataSize = cache_blob.size();
+  pipeline_cache_info.pInitialData =
+      cache_blob.empty() ? nullptr : cache_blob.data();
   if (vkCreatePipelineCache(g_dev.device, &pipeline_cache_info, nullptr,
                             &g_dev.pipeline_cache) != VK_SUCCESS)
     g_dev.pipeline_cache = VK_NULL_HANDLE;

@@ -152,6 +152,7 @@ CsPipe* GetCsPipe(const ComputeInfo& ci) {
   pi.layout = cp.layout;
   VkResult r = vkCreateComputePipelines(g_dev.device, g_dev.pipeline_cache, 1,
                                         &pi, nullptr, &cp.pipe);
+  SavePipelineCache();  // persist the driver's compiled pipeline
   vkDestroyShaderModule(g_dev.device, cs, nullptr);
   if (r != VK_SUCCESS) {
     std::fprintf(stderr, "[gpuvk] compute pipeline failed: %d\n", (int)r);

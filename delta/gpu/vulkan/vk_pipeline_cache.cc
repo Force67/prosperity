@@ -172,6 +172,8 @@ VkPipeline BuildPipeline(bool textured,
   VkPipeline p = VK_NULL_HANDLE;
   vkCreateGraphicsPipelines(g_dev.device, g_dev.pipeline_cache, 1, &pi, nullptr,
                             &p);
+  // New pipeline compiled: fold it into the on-disk cache (throttled).
+  SavePipelineCache();
   vkDestroyShaderModule(g_dev.device, vs, nullptr);
   vkDestroyShaderModule(g_dev.device, fs, nullptr);
   return p;
