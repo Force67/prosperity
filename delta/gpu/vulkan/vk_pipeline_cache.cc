@@ -29,11 +29,53 @@ DELTA_OPTION(bool, kDoCull, "DELTA_GPU_CULL", false);
 DELTA_OPTION(bool, kGpuPipetrace, "DELTA_GPU_PIPETRACE", false);
 DELTA_OPTION(bool, kNoMaskDiag, "DELTA_GPU_NOMASK", false);
 DELTA_OPTION(bool, kNoRectGs, "DELTA_GPU_NORECTGS", false);
+// A depth prepass leaves the shaded pass testing ZFUNC=EQUAL against depth we
+// cannot reproduce bit-exactly; on by default because rejecting the whole scene
+// is never the better failure. DELTA_GPU_ZEQUAL=strict restores the raw op.
+DELTA_OPTION(bool, kRelaxDepthEqual, "DELTA_GPU_RELAX_ZEQUAL", true);
 }  // namespace
 
 namespace gpu::vk {
 
 using rhi::DrawInfo;
+
+VkStencilOp StencilOp(uint32_t op) {
+  switch (op & 0xF) {
+    case 1:
+      return VK_STENCIL_OP_ZERO;
+    case 2:
+    case 3:
+    case 4:
+      return VK_STENCIL_OP_REPLACE;
+    case 5:
+      return VK_STENCIL_OP_INCREMENT_AND_CLAMP;
+    case 6:
+      return VK_STENCIL_OP_DECREMENT_AND_CLAMP;
+    case 7:
+      return VK_STENCIL_OP_INVERT;
+    case 8:
+      return VK_STENCIL_OP_INCREMENT_AND_WRAP;
+    case 9:
+      return VK_STENCIL_OP_DECREMENT_AND_WRAP;
+    default:
+      return VK_STENCIL_OP_KEEP;
+  }
+}
+
+VkStencilOpState StencilState(const DrawInfo& d, bool back) {
+  const uint32_t shift = back ? 12 : 0;
+  const uint32_t refmask = back ? d.stencil_refmask_bf : d.stencil_refmask;
+  VkStencilOpState state{};
+  state.failOp = StencilOp(d.stencil_control >> shift);
+  state.passOp = StencilOp(d.stencil_control >> (shift + 4));
+  state.depthFailOp = StencilOp(d.stencil_control >> (shift + 8));
+  state.compareOp = static_cast<VkCompareOp>(
+      (d.depth_control >> (back ? 20 : 8)) & 0x7);
+  state.compareMask = (refmask >> 8) & 0xFF;
+  state.writeMask = (refmask >> 16) & 0xFF;
+  state.reference = refmask & 0xFF;
+  return state;
+}
 
 RecompPipe* RecompiledPipelineCache::Find(uint64_t key) {
   const auto it = pipelines_.find(key);
@@ -234,6 +276,12 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
       ((uint64_t)d.vertex_stride << 33) ^ ((uint64_t)mrt_n << 60) ^
       ((uint64_t)dstate * 0x100000001b3ull);
   key = HashWord(key, d.ps4_neo ? 1 : 0);
+  key = HashWord(key, d.stencil_enable ? d.depth_control : 0);
+  key = HashWord(key, d.stencil_enable ? d.stencil_control : 0);
+  key = HashWord(key, d.stencil_enable ? d.stencil_refmask : 0);
+  key = HashWord(key, d.stencil_enable && d.stencil_backface_enable
+                          ? d.stencil_refmask_bf
+                          : 0);
   key = HashWord(key, d.num_vattrs);
   // A sampler reading a volume image translates the same PS address to a
   // different module, whose image types the pipeline layout has to match.
@@ -409,6 +457,25 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
     dss.depthTestEnable = d.depth_test_enable ? VK_TRUE : VK_FALSE;
     dss.depthWriteEnable = d.depth_write_enable ? VK_TRUE : VK_FALSE;
     dss.depthCompareOp = (VkCompareOp)(d.depth_func & 0x7);  // ZFUNC maps 1:1
+    // A depth-prepass title re-draws its geometry with ZFUNC=EQUAL against the
+    // depth the prepass laid down. That only works when both passes compute
+    // gl_Position bit-identically, which a hardware driver guarantees for one
+    // shader but we cannot: the title uses a position-only VS for the prepass
+    // and the full VS for the shaded pass, and our two SPIR-V modules are
+    // optimised independently, so the interpolated depth differs by an ULP and
+    // EQUAL rejects the whole scene. Widen EQUAL to the direction the prepass
+    // wrote, which admits exactly the surface the prepass kept -- nothing can
+    // be nearer than the nearest surface -- so the visible result matches.
+    if (kRelaxDepthEqual && dss.depthCompareOp == VK_COMPARE_OP_EQUAL &&
+        !d.depth_write_enable)
+      dss.depthCompareOp = d.depth_clear <= 0.5f
+                               ? VK_COMPARE_OP_GREATER_OR_EQUAL
+                               : VK_COMPARE_OP_LESS_OR_EQUAL;
+    if (d.stencil_enable) {
+      dss.stencilTestEnable = VK_TRUE;
+      dss.front = StencilState(d, false);
+      dss.back = d.stencil_backface_enable ? StencilState(d, true) : dss.front;
+    }
   }
   // One blend attachment per bound MRT target, each from its own
   // CB_BLENDn_CONTROL (mrt_blend[i] / mrt_blend_mask bit i); target 0 mirrors
@@ -419,6 +486,10 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
   for (uint32_t i = 0; i < mrt_n; i++) {
     uint32_t bc = i == 0 ? d.blend_control : d.mrt_blend[i];
     bool en = i == 0 ? d.blend_enable : ((d.mrt_blend_mask >> i) & 1u);
+    // Vulkan forbids blending on an integer attachment, and the hardware
+    // agrees: CB_COLORn_INFO sets BLEND_BYPASS on exactly these targets.
+    if (IsIntegerColorFormat(ColorTargetFormat(d.mrt_info[i])))
+      en = false;
     cb_att[i] = BlendAttachment(bc, en);
     // Mask attachments the PS does not export to. A PS with no color export
     // at all (depth-only / buffer-store passes) writes nothing -- previously a
@@ -469,6 +540,8 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
   rci.pColorAttachmentFormats = fmts;
   if (d.depth_base)
     rci.depthAttachmentFormat = kDepthFormat;
+  if (d.stencil_enable)
+    rci.stencilAttachmentFormat = kDepthFormat;
   VkGraphicsPipelineCreateInfo pi{
       VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
   pi.pNext = &rci;
