@@ -28,6 +28,8 @@
 #include <vector>
 
 #include "crash.h"
+
+#include <utl/mem.h>
 #include "module.h"
 #include "proc.h"
 #include "vfs.h"
@@ -705,9 +707,34 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
       char sym[192];
       if (attributed)
         symbolize(rip, sym, sizeof(sym));
-      else
-        std::snprintf(sym, sizeof(sym),
-                      "<unattributed: host pc outside any FEX code buffer>");
+      else {
+        // Not guest code, so it is OUR code writing into the guest's memory
+        // (an HLE call, the kernel, a GPU readback). Naming the host module is
+        // the point: "unattributed" alone reads as noise when it may be the
+        // emulator scribbling on the title's heap. Only the leaf is named --
+        // backtrace() cannot unwind past the signal trampoline, and a hand
+        // walk of the interrupted frame chain yields addresses dladdr cannot
+        // symbolise in our own binary, so resolving our own frames would need
+        // the project's symbolize() driven from uc_mcontext.
+        const uintptr_t host_pc =
+            static_cast<ucontext_t *>(ucv)->uc_mcontext.pc;
+        Dl_info di{};
+        const char *base = nullptr;
+        if (dladdr(reinterpret_cast<void *>(host_pc), &di) && di.dli_fname)
+          base = std::strrchr(di.dli_fname, '/');
+        if (di.dli_sname)
+          std::snprintf(sym, sizeof(sym), "HOST %s+%#lx", di.dli_sname,
+                        (unsigned long)(host_pc -
+                                        reinterpret_cast<uintptr_t>(di.dli_saddr)));
+        else if (di.dli_fname)
+          std::snprintf(sym, sizeof(sym), "HOST %s+%#lx",
+                        base ? base + 1 : di.dli_fname,
+                        (unsigned long)(host_pc -
+                                        reinterpret_cast<uintptr_t>(di.dli_fbase)));
+        else
+          std::snprintf(sym, sizeof(sym), "HOST pc=%#lx (no symbol)",
+                        (unsigned long)host_pc);
+      }
       // Only a write-only watch can name the access from the protection alone.
       // A reads-too watch (PROT_NONE) cannot on ARM, where there is no x86
       // page-fault error code -- so it says "access" rather than guessing.
@@ -719,8 +746,15 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
 #else
       const char *kind = g_wprotRegs.load() ? "access" : "write";
 #endif
-      std::fprintf(stderr, "[wprot] %s %#llx from %s\n", kind,
-                   (unsigned long long)at, sym);
+      if (const uintptr_t probe = utl::writeWatchValueProbe();
+          probe && utl::isMemoryRangeMapped(reinterpret_cast<void *>(probe), 8))
+        std::fprintf(stderr, "[wprot] %s %#llx from %s | probe %#lx = %#llx\n",
+                     kind, (unsigned long long)at, sym,
+                     (unsigned long)probe,
+                     (unsigned long long)*reinterpret_cast<uint64_t *>(probe));
+      else
+        std::fprintf(stderr, "[wprot] %s %#llx from %s\n", kind,
+                     (unsigned long long)at, sym);
       // The writer of a descriptor/command ring is nearly always libc memcpy,
       // which names no subsystem -- so the CALLER is the whole point of the
       // report, not an extra for the reads-too mode. Reading the single qword at
@@ -734,8 +768,10 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
           guestStackTraceFrom(sp, "wprot", 4, (long)syscall(SYS_gettid));
       }
       // A consumer's other pointer (where it puts what it just read) is only
-      // visible in its registers at the access.
-      if (g_wprotRegs.load()) {
+      // visible in its registers at the access. A value probe is an explicit
+      // request to follow one word, and the word's SOURCE (a memcpy's rsi) is
+      // the next hop, so dump registers for that case too.
+      if (g_wprotRegs.load() || utl::writeWatchValueProbe()) {
         const uint64_t *g = nullptr;
 #if defined(__x86_64__)
         uint64_t xg[16];
@@ -748,10 +784,13 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
           xg[i] = (uint64_t)hg[kOrder[i]];
         g = xg;
 #else
-        // FEX keeps guest GPRs in host registers between block boundaries, so
-        // this snapshot can lag the faulting instruction. Say so rather than
-        // presenting it as the state at the access.
-        g = cpu::currentGuestGregs();
+        // FEX pins every guest GPR to a fixed host register, so the signal
+        // context holds the exact values at the faulting instruction. Only fall
+        // back to the in-memory thread state -- which is written back at block
+        // boundaries and therefore lags -- when the fault was not in JIT code.
+        uint64_t sig_gregs[16];
+        bool exact = cpu::guestGregsFromSignal(ucv, sig_gregs);
+        g = exact ? sig_gregs : cpu::currentGuestGregs();
 #endif
         if (g) {
           enum { RAX, RCX, RDX, RBX, RSP, RBP, RSI, RDI,
@@ -767,7 +806,34 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
 #if defined(__x86_64__)
                        "");
 #else
-                       "  (guest regs may lag the faulting insn)");
+                       exact ? "" : "  (guest regs may lag the faulting insn)");
+#endif
+#if !defined(__x86_64__)
+          // Chase the probed word upstream. With exact registers a block copy
+          // reads as rdi=dest, rsi=source, rcx=length; the word we are watching
+          // sits at (probe - rdi) into the destination, so the same word in the
+          // SOURCE is rsi + that delta. Re-aim there and watch it: that is one
+          // hop back towards wherever the value was first produced.
+          enum { C_RCX = 1, C_RSI = 6, C_RDI = 7 };
+          const uintptr_t probe = utl::writeWatchValueProbe();
+          if (exact && probe && utl::writeWatchChaseLeft()) {
+            const uint64_t rdi = g[C_RDI], rsi = g[C_RSI], rcx = g[C_RCX];
+            const bool looks_like_copy =
+                rdi && rsi && rcx && probe >= rdi && probe - rdi < rcx;
+            const uintptr_t src = rsi + (probe - rdi);
+            if (looks_like_copy &&
+                utl::isMemoryRangeMapped(reinterpret_cast<void *>(src), 8)) {
+              utl::writeWatchChaseTook();
+              std::fprintf(stderr,
+                           "[wprot] chase: probe %#lx came from %#lx "
+                           "(copy %#lx <- %#lx len %#lx); watching the source\n",
+                           (unsigned long)probe, (unsigned long)src,
+                           (unsigned long)rdi, (unsigned long)rsi,
+                           (unsigned long)rcx);
+              utl::setWriteWatchValueProbe(src);
+              utl::armWriteWatch(src, 8, 200);
+            }
+          }
 #endif
         }
       }
@@ -2426,6 +2492,12 @@ void installSigAltStack() {
 }
 
 void installCrashHandler() {
+  // Let layers that cannot reach the kernel arm a watch (see utl::armWriteWatch):
+  // the GPU only learns the address worth watching -- the descriptor pointer a
+  // shader actually read -- while a draw is being processed.
+  utl::setWriteWatchArmer([](uintptr_t addr, size_t bytes, unsigned everyMs) {
+    startWriteWatch(addr, bytes, everyMs);
+  });
   struct sigaction sa = {};
   sa.sa_sigaction = crashHandler;
   // SA_NODEFER: don't auto-mask the signal during the handler, so a re-fault

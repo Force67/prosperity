@@ -29,6 +29,7 @@ DELTA_OPTION(uint64_t, kTscan, "DELTA_GPU_TSCAN", 0);
 DELTA_OPTION(int, kTscanAfter, "DELTA_GPU_TSCAN_AFTER", 0);
 DELTA_OPTION(bool, kTwatch, "DELTA_GPU_TWATCH", false);
 DELTA_OPTION(bool, kNullDis, "DELTA_GPU_NULLDIS", false);
+DELTA_OPTION(bool, kNullWatch, "DELTA_GPU_NULLWATCH", false);
 // DELTA_GPU_ARENA_PROBE=<n>: when a descriptor reads all-zero, look for the one
 // the shader wanted in the neighbouring 2 MiB resource arenas and use it.
 // SotC's descriptor tables sit at a constant -3 arenas from where its own SRT
@@ -987,7 +988,10 @@ std::vector<TImage> TrackTextures(
       const uint64_t at = eval.src[srsrc];
       if (at && probes < 24) {
         probes++;
-        for (int slot = -4; slot <= 4; slot++) {
+        // Widened to +-16: the registers at the write say the arena stride is
+        // 0x400000 and the bad pointer is base + 8 strides, i.e. 32 MiB out,
+        // which a +-4 window stepping 2 MiB could never reach.
+        for (int slot = -16; slot <= 16; slot++) {
           if (!slot)
             continue;
           const uint64_t probe = at + static_cast<int64_t>(slot) * 0x200000;
@@ -1013,6 +1017,28 @@ std::vector<TImage> TrackTextures(
     // gets a deterministically wrong address -- which is what a constant
     // offset between where the title wrote its table and where we looked
     // would look like.
+    // DELTA_GPU_NULLWATCH=1: watch the SRT slot whose pointer led to a null
+    // descriptor, so the guest instruction that wrote that pointer names
+    // itself. This is the one address worth watching and it is not knowable
+    // until a draw is processed -- it moves every run -- which is why the arm
+    // goes through utl rather than an env var parsed at startup.
+    if (kNullWatch && t.null_descriptor) {
+      static bool armed = false;
+      const uint64_t root = UserDataPointer(ps_user_data, 0);
+      if (!armed && root && GuestRange(root, 64)) {
+        armed = true;
+        std::fprintf(stderr,
+                     "[nullwatch] arming on SRT %#lx (+0x18 held the pointer "
+                     "into the empty arena; T# read at %#lx)\n",
+                     static_cast<unsigned long>(root),
+                     static_cast<unsigned long>(eval.src[srsrc]));
+        // +0x18 is the slot the chain read the table pointer from.
+        utl::setWriteWatchValueProbe(static_cast<uintptr_t>(root) + 0x18);
+        utl::setWriteWatchChase(4);  // follow it back up to four copies
+        if (!utl::armWriteWatch(static_cast<uintptr_t>(root), 64, 200))
+          std::fprintf(stderr, "[nullwatch] no armer registered\n");
+      }
+    }
     if (kNullDis && t.null_descriptor) {
       static bool dumped = false;
       if (!dumped) {

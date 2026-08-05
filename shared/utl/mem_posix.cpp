@@ -107,3 +107,30 @@ size_t getAvailableMem() {
 }
 
 }  // namespace utl
+
+namespace utl {
+namespace {
+WriteWatchArmer g_write_watch_armer = nullptr;
+uintptr_t g_write_watch_probe = 0;
+unsigned g_write_watch_chase = 0;
+}  // namespace
+
+void setWriteWatchChase(unsigned hops) { g_write_watch_chase = hops; }
+unsigned writeWatchChaseLeft() { return g_write_watch_chase; }
+void writeWatchChaseTook() {
+  if (g_write_watch_chase)
+    g_write_watch_chase--;
+}
+
+void setWriteWatchValueProbe(uintptr_t addr) { g_write_watch_probe = addr; }
+uintptr_t writeWatchValueProbe() { return g_write_watch_probe; }
+
+void setWriteWatchArmer(WriteWatchArmer fn) { g_write_watch_armer = fn; }
+
+bool armWriteWatch(uintptr_t addr, size_t bytes, unsigned everyMs) {
+  if (!g_write_watch_armer || !addr || !bytes)
+    return false;
+  g_write_watch_armer(addr, bytes, everyMs);
+  return true;
+}
+}  // namespace utl

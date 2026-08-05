@@ -1208,6 +1208,34 @@ const uint64_t *currentGuestGregs() {
   return t_curThread ? t_curThread->CurrentFrame->State.gregs : nullptr;
 }
 
+bool guestGregsFromSignal(const void *ucontext, uint64_t out[16]) {
+#if defined(__aarch64__)
+  if (!ucontext || !t_curThread)
+    return false;
+  const auto *uc = static_cast<const ucontext_t *>(ucontext);
+  // Only meaningful inside JIT'd code: elsewhere these host registers belong to
+  // the host, not the guest. Reuse the same test the RIP reconstruction uses.
+  if (!reconstructGuestRip(uc->uc_mcontext.pc))
+    return false;
+  // FEX's arm64 backend gives every guest GPR a FIXED host register (its
+  // static register allocation, x64::SRA in Arm64Emitter.cpp), so at any point
+  // in JIT code the live guest value is in a known host register -- exact at
+  // the faulting instruction, unlike CPUState.gregs which is only written back
+  // at block boundaries. Indices are FEXCore::X86State::REG_* order
+  // (RAX,RCX,RDX,RBX,RSP,RBP,RSI,RDI,R8..R15); the host register numbers below
+  // mirror x64::SRA element for element and must be kept in step with it.
+  static constexpr int kSra[16] = {4,  7,  5,  6,  8,  9,  10, 11,
+                                   12, 13, 14, 15, 16, 17, 19, 29};
+  for (int i = 0; i < 16; i++)
+    out[i] = uc->uc_mcontext.regs[kSra[i]];
+  return true;
+#else
+  (void)ucontext;
+  (void)out;
+  return false;
+#endif
+}
+
 int faultingSyscall() { return t_inSyscall ? static_cast<int>(t_lastSyscall) : -1; }
 
 void dumpThreadTrace(void *fileStar) {

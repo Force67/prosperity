@@ -154,6 +154,15 @@ void guestThreadFsBases(std::vector<uint64_t> &out);
 // walk the guest rbp chain. Native reads regs from the host signal context, so 0.
 const uint64_t *currentGuestGregs();
 
+// The 16 guest GPRs read out of a SIGNAL CONTEXT taken inside JIT'd code, in
+// FEXCore::X86State::REG_* order. Unlike currentGuestGregs() -- which reads the
+// in-memory thread state and is therefore only accurate at block boundaries --
+// this is exact at the faulting instruction, because FEX's arm64 backend pins
+// every guest GPR to a fixed host register (its static register allocation).
+// Returns false when the host PC is not in a JIT code buffer, or on a backend
+// or architecture without such a mapping.
+bool guestGregsFromSignal(const void *ucontext, uint64_t out[16]);
+
 // If this host thread faulted while inside a guest syscall handler, the syscall
 // number; otherwise -1. Lets the crash handler name the culprit HLE call.
 int faultingSyscall();

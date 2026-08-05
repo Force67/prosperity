@@ -127,6 +127,8 @@ uint64_t currentGuestRip() { return 0; }
 uint64_t currentGuestFsBase() { return krnl::threadFsBase(); }
 void guestThreadFsBases(std::vector<uint64_t> & /*out*/) {} // FEX only
 const uint64_t *currentGuestGregs() { return nullptr; }
+
+bool guestGregsFromSignal(const void *, uint64_t[16]) { return false; }
 int faultingSyscall() { return -1; }
 uint64_t reconstructGuestRip(uint64_t) { return 0; }
 bool tryHandleJitSignal(int, void *, void *) { return false; }
