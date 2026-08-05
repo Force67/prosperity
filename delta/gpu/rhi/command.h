@@ -216,6 +216,12 @@ struct DrawInfo {
   // SotC's world colour target accumulated one fullscreen pass per frame until
   // its value tracked the frame counter.
   bool is_clear_rect = false;
+  // The rectangle a fast clear covers, from the generic scissor (x in the low
+  // half, y in the high half of each word). A GNM fast clear carries no vertex
+  // attributes, so this is the ONLY thing that says how much of the target it
+  // touches -- treating a partial clear as a whole-attachment one erases
+  // everything else that is in there.
+  uint32_t clear_tl = 0, clear_br = 0;
   uint32_t mrt_clear_word[8][2] = {};
 
   // Primitive-setup: raster topology + face culling, from VGT_PRIMITIVE_TYPE

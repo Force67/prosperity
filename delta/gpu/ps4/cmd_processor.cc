@@ -658,6 +658,8 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
     d.is_clear_rect =
         d.prim_type == 17 && !ps_a && !d.num_vattrs && d.mrt_count != 0;
     if (d.is_clear_rect) {
+      d.clear_tl = g_regs[mmPA_SC_GENERIC_SCISSOR_TL];
+      d.clear_br = g_regs[mmPA_SC_GENERIC_SCISSOR_BR];
       for (uint32_t rt = 0; rt < 8; rt++) {
         d.mrt_clear_word[rt][0] =
             g_regs[mmCB_COLOR0_CLEAR_WORD0 + rt * kCbColorStride];

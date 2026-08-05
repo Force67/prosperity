@@ -23,8 +23,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <unordered_map>
+
+#include <utl/mem.h>
 #include <utl/options.h>
+#include <unordered_map>
 
 namespace {
 DELTA_OPTION(bool, kNoWipe, "DELTA_GPU_NOWIPE", true);
@@ -35,6 +37,10 @@ DELTA_OPTION(uint64_t, kWant, "DELTA_GPU_DRAWRT", 0);
 DELTA_OPTION(int, kWantFrame, "DELTA_GPU_DRAWRT_FRAME", 0);
 DELTA_OPTION(int, kBusy, "DELTA_GPU_DRAWRT_BUSY", 0);
 DELTA_OPTION(bool, kClearTrace, "DELTA_GPU_CLEARTRACE", false);
+// Name the guest writer of a faded-out UI vertex colour; see the arm below.
+DELTA_OPTION(bool, kUiWatch, "DELTA_GPU_UIWATCH", false);
+// Honour the scissor of a GNM fast clear instead of clearing the whole target.
+DELTA_OPTION(bool, kClearRectScissor, "DELTA_GPU_CLEARRECT_SCISSOR", false);
 DELTA_OPTION(bool, kDrawTrace, "DELTA_GPU_DRAWTRACE", false);
 DELTA_OPTION(bool, kGpuDecltrace, "DELTA_GPU_DECLTRACE", false);
 DELTA_OPTION(uint64_t, kWhyDrop, "DELTA_GPU_WHYDROP", 0);
@@ -300,6 +306,32 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
   // turns P.T.'s opaque white and opaque black clears into transparent black,
   // which is a hole in a deferred composite.
   if (d.is_clear_rect) {
+    // A fast clear covers the generic scissor, not necessarily the whole
+    // target, and we have no way to express a partial one here -- a pending
+    // clear is realised as loadOp=CLEAR over the entire attachment. SotC
+    // issues twelve of these a frame against the buffer its compute resolve
+    // reads, so taking each of them as "clear everything" erases the deferred
+    // lighting that was rendered into it. Skip the ones that do not cover the
+    // target; leaving old content is recoverable, erasing live content is not.
+    const uint32_t cx0 = d.clear_tl & 0x7FFF, cy0 = (d.clear_tl >> 16) & 0x7FFF;
+    const uint32_t cx1 = d.clear_br & 0x7FFF, cy1 = (d.clear_br >> 16) & 0x7FFF;
+    const bool covers_target =
+        !kClearRectScissor ||
+        (cx0 == 0 && cy0 == 0 && cx1 >= d.rt_w && cy1 >= d.rt_h);
+    if (!covers_target) {
+      if (kClearTrace) {
+        static int n = 0;
+        if (n++ < 16)
+          std::fprintf(stderr,
+                       "[clear] rect SKIPPED rt=%#lx scissor=(%u,%u)-(%u,%u) "
+                       "target=%ux%u\n",
+                       (unsigned long)d.rt_base, cx0, cy0, cx1, cy1, d.rt_w,
+                       d.rt_h);
+      }
+      WhyDrop(d, "clear-partial");
+      g_frame.draws++;
+      return true;
+    }
     for (uint32_t i = 0; i < d.mrt_count && i < 8; i++) {
       auto it = g_rts.find(d.mrt_base[i]);
       if (it == g_rts.end())
@@ -330,6 +362,46 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
     WhyDrop(d, "clear-consumed");
     g_frame.draws++;
     return true;  // consumed: must not reach the rasteriser
+  }
+
+  // DELTA_GPU_UIWATCH=1: name the guest code that writes SotC's UI vertex
+  // COLOURS. Its title screen composites an opaque black plate over the scene
+  // and draws every UI element with an RGBA8 colour attribute of 00000000 --
+  // faded out -- so nothing reaches the screen however well the scene renders.
+  // The buffer holding those colours is only knowable while a draw is
+  // processed and moves every run, which is why the watch is armed from here
+  // (the same route DELTA_GPU_NULLWATCH uses for a descriptor pointer).
+  if (kUiWatch) {
+    static bool armed = false;
+    if (!armed) {
+      for (uint32_t a = 0; a < d.num_vattrs && a < 8; a++) {
+        const auto& attr = d.vattrs[a];
+        if (attr.dfmt != 10 || attr.nfmt != 0 || attr.num_comps != 4)
+          continue;  // not an RGBA8 colour
+        if (attr.binding >= d.num_vbufs)
+          continue;
+        const auto& vb = d.vbufs[attr.binding];
+        const auto* p = static_cast<const uint8_t*>(vb.data);
+        if (!p || !utl::isMemoryRangeMapped(p + attr.offset, 4))
+          continue;
+        uint32_t c0 = 0;
+        std::memcpy(&c0, p + attr.offset, 4);
+        if (c0 != 0)
+          continue;  // only the faded-out ones are interesting
+        armed = true;
+        const uintptr_t at = reinterpret_cast<uintptr_t>(p) + attr.offset;
+        std::fprintf(stderr,
+                     "[uiwatch] arming on UI colour %#lx (rt=%#lx, %u verts, "
+                     "stride %u) -- it currently reads 00000000\n",
+                     (unsigned long)at, (unsigned long)d.rt_base,
+                     d.vertex_count, vb.stride);
+        utl::setWriteWatchValueProbe(at);
+        utl::setWriteWatchChase(4);
+        if (!utl::armWriteWatch(at & ~0xFFFull, 0x1000, 200))
+          std::fprintf(stderr, "[uiwatch] no armer registered\n");
+        break;
+      }
+    }
   }
 
   // DELTA_GPU_SKIP_PS=<hex>: diagnostic only. Drop every draw using that guest
