@@ -23,7 +23,12 @@ public:
   uint8_t *poolBase = nullptr;
   uint64_t poolSize = 0;
 
-private:
+  // Execute the complete indirect-buffer packets sitting in every mapped
+  // compute queue, up to `budget_dw` dwords per queue. Static because the
+  // queues are hardware state and the per-frame drain runs outside any ioctl.
+  // The CALLER must hold computeMutex (the doorbell handler already does).
+  static void drainQueues(uint32_t budget_dw);
+
   struct ComputeQueue {
     uint32_t me = 0;
     uint32_t pipe = 0;
@@ -37,7 +42,12 @@ private:
     bool mapped = false;
   };
 
-  std::array<ComputeQueue, 64> computeQueues{};
-  std::mutex computeMutex;
+  // The mapped compute queues are hardware, not per-descriptor state: sys_open
+  // news a gcDevice per open, and a queue mapped through one fd has to be
+  // visible to anything that drains it (including the per-frame drain, which
+  // runs outside any ioctl). Shared for the same reason the /dev/gc mapping
+  // pool is.
+  static std::array<ComputeQueue, 64> computeQueues;
+  static std::mutex computeMutex;
 };
 }

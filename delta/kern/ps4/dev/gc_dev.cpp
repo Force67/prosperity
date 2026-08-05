@@ -21,6 +21,9 @@
 namespace {
 DELTA_OPTION(bool, kGcCaller, "DELTA_GC_CALLER", false);
 DELTA_OPTION(bool, kGcAcb, "DELTA_GPU_ACB", false);
+// Drain mapped compute rings by their contents rather than by a matching
+// doorbell; see the walk in the DingDong handler.
+DELTA_OPTION(uint32_t, kGcAcbScan, "DELTA_GPU_ACB_SCAN", 0);
 DELTA_OPTION(bool, kGcFlip, "DELTA_GC_FLIP", false);
 DELTA_OPTION(bool, kGcTrace, "DELTA_GC_TRACE", false);
 DELTA_OPTION(uint32_t, kGcTraceMax, "DELTA_GC_TRACE_MAX", 0);
@@ -31,6 +34,7 @@ DELTA_OPTION(uint32_t, kGcTraceMax, "DELTA_GC_TRACE_MAX", 0);
 // processor. See prosperity_gc_submit in libSceGnmDriver.cpp.
 extern "C" void prosperity_gc_submit(const void *descArray, uint32_t descCount);
 extern "C" void prosperity_gc_submit_acb(const void *commands, uint32_t bytes);
+
 extern "C" void prosperity_gc_flip(uint64_t scanoutBase, int displayBufferIndex,
                                     int64_t flipArg);
 
@@ -367,6 +371,33 @@ int32_t gcDevice::ioctl(uint32_t cmd, void *data) {
     if (kGcAcb && data) {
       const auto* args = static_cast<const uint32_t*>(data);
       std::lock_guard lock(computeMutex);
+      // Periodic census of EVERY mapped queue, not just the kicked one. SotC
+      // maps seven and only 1/0/0 ever arrives here, which leaves two very
+      // different possibilities: the other six are genuinely empty, or they
+      // hold work whose doorbell we never see (the driver can ring one by
+      // writing to its /dev/gc mapping instead of calling this ioctl). Reading
+      // the first packet of each ring separates them.
+      if (kGcTrace) {
+        static uint32_t kicks = 0;
+        if ((kicks++ % 500) == 0) {
+          for (const ComputeQueue &q : computeQueues) {
+            if (!q.mapped)
+              continue;
+            const auto *ring = reinterpret_cast<const uint32_t *>(q.ringBase);
+            const bool readable = utl::isMemoryRangeMapped(ring, 16);
+            std::fprintf(stderr,
+                         "[acbcensus] %u/%u/%u read=%#x ring=%08x %08x %08x "
+                         "%08x%s\n",
+                         q.me, q.pipe, q.queue, q.readOffsetDw,
+                         readable ? ring[0] : 0, readable ? ring[1] : 0,
+                         readable ? ring[2] : 0, readable ? ring[3] : 0,
+                         readable ? "" : " (ring unmapped)");
+          }
+          std::fflush(stderr);
+        }
+      }
+      if (kGcAcbScan)
+        drainQueues(kGcAcbScan);
       for (ComputeQueue& entry : computeQueues) {
         if (!entry.mapped || entry.me != args[0] || entry.pipe != args[1] ||
             entry.queue != args[2])
@@ -459,6 +490,56 @@ int32_t gcDevice::ioctl(uint32_t cmd, void *data) {
 // pool instead: allocLowGuest hands out [512 GiB, 2^40), inside the identity
 // range the CP renders into, so a title that maps /dev/gc gets real, CP-usable
 // memory. Out-of-range offsets fall back to the anonymous mmap path (-1).
+std::array<gcDevice::ComputeQueue, 64> gcDevice::computeQueues{};
+std::mutex gcDevice::computeMutex;
+
+// SotC spreads its async compute over seven queues and only 1/0/0 ever arrives
+// as a DingDong ioctl; the other six hold real work and sit at read=0 for the
+// whole run, so their doorbell reaches the hardware some other way (the driver
+// can ring one by writing to its /dev/gc mapping). Consume a ring entry only
+// when it is a complete IB packet whose target resolves, advance readOffsetDw
+// past it so nothing executes twice, and stop at the first word that is not
+// one -- a half-written entry or the end of what the guest wrote.
+// NOTE: the caller must already hold computeMutex. The doorbell handler runs
+// this from inside its own lock scope, and std::mutex is not recursive --
+// locking here as well deadlocked the title the instant it rang a doorbell.
+void gcDevice::drainQueues(uint32_t budget_dw) {
+  for (ComputeQueue &q : computeQueues) {
+    if (!q.mapped || !q.ringSizeDw ||
+        !utl::isMemoryRangeMapped(reinterpret_cast<const void *>(q.ringBase),
+                                  static_cast<uint64_t>(q.ringSizeDw) * 4))
+      continue;
+    const auto *ring = reinterpret_cast<const uint32_t *>(q.ringBase);
+    const uint32_t mask = q.ringSizeDw - 1;
+    const uint32_t budget = std::min<uint32_t>(budget_dw, q.ringSizeDw);
+    uint32_t off = q.readOffsetDw, consumed = 0;
+    while (consumed < budget) {
+      uint32_t w[4];
+      for (uint32_t i = 0; i < 4; i++)
+        w[i] = ring[(off + i) & mask];
+      if ((w[0] & 0xFFFFFF00u) != 0xC0023F00u)
+        break;
+      const uint64_t addr = (static_cast<uint64_t>(w[2] & 0xFF) << 32) | w[1];
+      const uint32_t dw = w[3] & 0xFFFFF;
+      if (!dw || !utl::isMemoryRangeMapped(reinterpret_cast<const void *>(addr),
+                                           static_cast<uint64_t>(dw) * 4))
+        break;
+      prosperity_gc_submit_acb(w, sizeof(w));
+      off = (off + 4) & mask;
+      consumed += 4;
+    }
+    if (consumed) {
+      q.readOffsetDw = off;
+      if (utl::isMemoryRangeMapped(reinterpret_cast<const void *>(q.readPtr),
+                                   sizeof(uint32_t)))
+        *reinterpret_cast<uint32_t *>(q.readPtr) = off;
+      if (kGcTrace)
+        std::fprintf(stderr, "[acbscan] %u/%u/%u drained %u dwords -> %#x\n",
+                     q.me, q.pipe, q.queue, consumed, off);
+    }
+  }
+}
+
 uint8_t *gcDevice::map(void *, size_t size, uint32_t, uint32_t, size_t offset) {
   constexpr uint64_t kPoolSize = 256ull * 1024 * 1024;
   // The pool belongs to the device, not to the descriptor: sys_open news a
@@ -481,3 +562,12 @@ uint8_t *gcDevice::map(void *, size_t size, uint32_t, uint32_t, size_t offset) {
   return reinterpret_cast<uint8_t *>(-1);
 }
 } // namespace krnl
+
+// Called once per flip: draining inside the doorbell handler charges the whole
+// backlog to whichever frame happened to ring it.
+extern "C" void prosperity_gc_drain_acb(uint32_t budget_dw) {
+  if (!budget_dw)
+    return;
+  std::lock_guard lock(krnl::gcDevice::computeMutex);
+  krnl::gcDevice::drainQueues(budget_dw);
+}
