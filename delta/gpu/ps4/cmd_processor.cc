@@ -33,6 +33,7 @@ DELTA_OPTION(uint64_t, kBlitRt, "DELTA_GPU_BLIT_RT", 0);
 DELTA_OPTION(bool, kCeOn, "DELTA_GPU_CE", true);
 DELTA_OPTION(int, kDlAfter, "DELTA_GPU_DRAWLIST_AFTER", 90);
 DELTA_OPTION(uint32_t, kGeomMin, "DELTA_GPU_GEOMMIN", 500);
+DELTA_OPTION(bool, kPreflushResources, "DELTA_GPU_PREFLUSHRES", false);
 DELTA_OPTION(int, kMtAfter, "DELTA_GPU_MASKTRACE_AFTER", 0);
 DELTA_OPTION(int, kMtMax, "DELTA_GPU_MASKTRACE_MAX", 200);
 DELTA_OPTION(uint64_t, kMtRt, "DELTA_GPU_MASKTRACE_RT", 0);
@@ -63,8 +64,19 @@ DELTA_OPTION(bool, kNoCopy, "DELTA_GPU_NODMACOPY", false);
 DELTA_OPTION(bool, kNoCs, "DELTA_GPU_NOCS", false);
 DELTA_OPTION(bool, kNoDepth, "DELTA_GPU_NODEPTH", false);
 DELTA_OPTION(bool, kOpHist, "DELTA_GPU_OPHIST", false);
+DELTA_OPTION(bool, kNoMrtTrace, "DELTA_GPU_NOMRT", false);
+DELTA_OPTION(bool, kCbInfoTrace, "DELTA_GPU_CBINFO", false);
+DELTA_OPTION(bool, kNoStencil, "DELTA_GPU_NOSTENCIL", false);
+// Mirrors vk_format.cc's DELTA_GPU_INT_RT: the masks must agree with the
+// formats the backend picks, or a shader is built for the wrong attachment.
+DELTA_OPTION(bool, kIntegerRt, "DELTA_GPU_INT_RT", true);
 DELTA_OPTION(bool, kRawBufTrace, "DELTA_GPU_RAWBUF", false);
+DELTA_OPTION(int, kRegSrcFrame, "DELTA_GPU_REGSRC_FRAME", -1);
 DELTA_OPTION(uint64_t, kRegSrcPs, "DELTA_GPU_REGSRC_PS", 0);
+DELTA_OPTION(uint64_t, kRootWprotHash, "DELTA_GPU_ROOT_WPROT_HASH", 0);
+DELTA_OPTION(uint64_t, kRootWprotPs, "DELTA_GPU_ROOT_WPROT_PS", 0);
+DELTA_OPTION(int, kRootWprotMs, "DELTA_GPU_ROOT_WPROT_MS", 1);
+DELTA_OPTION(bool, kRootWprotStep, "DELTA_GPU_ROOT_WPROT_STEP", false);
 DELTA_OPTION(bool, kSkipStale, "DELTA_GPU_SKIPSTALE", false);
 DELTA_OPTION(bool, kSpriteDis, "DELTA_GPU_SPRITEDIS", false);
 DELTA_OPTION(bool, kSpriteDump, "DELTA_GPU_SPRITEDUMP", false);
@@ -88,6 +100,7 @@ std::atomic<uint64_t> g_total_draws{0};
 bool g_vk_tried = false;
 bool g_frame_active = false;
 uint32_t g_presented_frames = 0;
+WriteWatchCallback g_write_watch = nullptr;
 
 struct ShaderKey {
   // VS/PS by code CONTENT (CachedCodeHash), not by address: SotC streams its
@@ -110,11 +123,17 @@ struct ShaderKey {
   uint32_t tex_3d_mask = 0;
   // Same for 1D[_ARRAY] descriptors (one fewer address component).
   uint32_t tex_1d_mask = 0;
+  // Integer-format sampled images and colour targets: both change the SPIR-V
+  // types the module is built with (uvec4 rather than vec4), so the same code
+  // read through an integer descriptor is a different module.
+  uint32_t tex_uint_mask = 0;
+  uint32_t mrt_uint_mask = 0;
   bool neo = false;
   bool operator==(const ShaderKey& o) const {
     return vs == o.vs && ps == o.ps && fetch == o.fetch &&
            ps_input_ena == o.ps_input_ena && tex_3d_mask == o.tex_3d_mask &&
-           tex_1d_mask == o.tex_1d_mask && neo == o.neo;
+           tex_1d_mask == o.tex_1d_mask && tex_uint_mask == o.tex_uint_mask &&
+           mrt_uint_mask == o.mrt_uint_mask && neo == o.neo;
   }
 };
 struct ShaderKeyHash {
@@ -125,6 +144,8 @@ struct ShaderKeyHash {
     h ^= k.ps_input_ena + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
     h ^= k.tex_3d_mask + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
     h ^= k.tex_1d_mask + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
+    h ^= k.tex_uint_mask + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
+    h ^= k.mrt_uint_mask + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
     h ^= static_cast<uint64_t>(k.neo) << 63;
     return static_cast<size_t>(h);
   }
@@ -213,6 +234,31 @@ void SetRegs(uint32_t base, const uint32_t* body, uint32_t count) {
       g_shader_mask_writes++;
     else if (idx == mmCB_TARGET_MASK)
       g_target_mask_writes++;
+    // DELTA_GPU_CBINFO=1: every write of a CB_COLORn_INFO, with the packet that
+    // carried it. A colour target whose INFO stays zero is never bound, so a
+    // whole pass renders into nothing; this says whether the title wrote a zero
+    // or we never saw the write at all.
+    if (kCbInfoTrace) {
+      for (int rt = 0; rt < 8; rt++) {
+        if (idx != mmCB_COLOR0_INFO + rt * kCbColorStride)
+          continue;
+        static std::atomic<uint64_t> nonzero{0}, zero{0};
+        static int shown = 0;
+        (body[i] ? nonzero : zero).fetch_add(1);
+        if (shown < 24) {
+          shown++;
+          std::fprintf(stderr,
+                       "[cbinfo] cb%d = %#x (packet base=%#x off=%#x count=%u "
+                       "word=%u)\n",
+                       rt, body[i], base, off, count, i);
+        }
+        const uint64_t total = nonzero.load() + zero.load();
+        if ((total % 20000) == 0)
+          std::fprintf(stderr, "[cbinfo] %llu non-zero, %llu zero\n",
+                       (unsigned long long)nonzero.load(),
+                       (unsigned long long)zero.load());
+      }
+    }
   }
 }
 
@@ -277,10 +323,45 @@ void DumpHist() {
 void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
   uint64_t vs_a = g_regs.ShaderAddr(mmSPI_SHADER_PGM_LO_VS);
   uint64_t ps_a = g_regs.ShaderAddr(mmSPI_SHADER_PGM_LO_PS);
-  if (kRegSrcPs && ps_a == kRegSrcPs) {
+  const uint32_t frame = g_presented_frames + 1;
+  static bool root_watch_armed = false;
+  uint64_t root_watch_hash = 0;
+  const bool valid_ps =
+      ps_a >= 0x1000000000ull && ps_a < 0x20000000000ull;
+  if (!root_watch_armed && g_write_watch && kRootWprotHash && valid_ps)
+    root_watch_hash = gcn::CachedCodeHash(ps_a, 4096);
+  const bool root_watch_match =
+      (kRootWprotPs && kRootWprotPs == ps_a) ||
+      (kRootWprotHash && kRootWprotHash == root_watch_hash);
+  if (!root_watch_armed && g_write_watch && root_watch_match) {
+    const uint32_t* user_data = &g_regs[mmSPI_SHADER_USER_DATA_PS_0];
+    const uint64_t root =
+        (static_cast<uint64_t>(user_data[1] & 0xFFFF) << 32) | user_data[0];
+    if (root >= 0x1000000000ull && root < 0x20000000000ull &&
+        utl::isMemoryRangeMapped(reinterpret_cast<const void*>(root), 64)) {
+      root_watch_armed = true;
+      constexpr size_t kRootSize = 64;
+      constexpr size_t kRootPoolSpan = 64 * 1024;
+      const size_t watch_size = kRootWprotStep ? kRootSize : kRootPoolSpan;
+      const unsigned interval =
+          static_cast<unsigned>(std::max(0, kRootWprotMs.get()));
+      std::fprintf(stderr,
+                   "[root-wprot] f%u PS=%#lx hash=%#lx root=%#lx "
+                   "watching-forward=%#zx every=%ums%s\n",
+                   frame, static_cast<unsigned long>(ps_a),
+                   static_cast<unsigned long>(root_watch_hash),
+                   static_cast<unsigned long>(root), watch_size, interval,
+                   kRootWprotStep ? " single-step" : "");
+      g_write_watch(root, watch_size, interval, false, kRootWprotStep);
+    }
+  }
+  const bool trace_reg_sources =
+      kRegSrcPs && ps_a == kRegSrcPs &&
+      (kRegSrcFrame < 0 || static_cast<uint32_t>(kRegSrcFrame) == frame);
+  if (trace_reg_sources) {
     static uint32_t reports = 0;
     if (reports++ < 64) {
-      std::fprintf(stderr, "[regsrc] PS=%#lx user_data:",
+      std::fprintf(stderr, "[regsrc] f%u PS=%#lx user_data:", frame,
                    (unsigned long)ps_a);
       for (uint32_t i = 0; i < 16; i++) {
         const uint32_t reg = mmSPI_SHADER_USER_DATA_PS_0 + i;
@@ -500,6 +581,11 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
     // A stale CB_COLORn_BASE remains programmed during depth-only passes. Bind
     // a color attachment only when both its write mask and CB_COLORn_INFO
     // format are valid.
+    // Bit n set = MRT n has an integer texel format (CB_COLORn_INFO
+    // NUMBER_TYPE 4/5). The PS must declare an integer output for one, so this
+    // belongs to the module's identity; kept as raw register bits here rather
+    // than a VkFormat because this layer must not depend on the backend.
+    uint32_t mrt_uint_mask = 0;
     {
       uint32_t tmask = g_regs[mmCB_TARGET_MASK];
       for (int rt = 0; rt < 8; rt++) {
@@ -510,9 +596,31 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
           d.mrt_base[rt] = base;
           d.mrt_info[rt] = info;
           d.mrt_count = rt + 1;
+          const uint32_t nfmt = (info >> 8) & 0x7;
+          if (kIntegerRt && (nfmt == 4 || nfmt == 5))
+            mrt_uint_mask |= 1u << rt;
         }
       }
       d.rt_base = d.mrt_count ? d.mrt_base[0] : 0;
+      // DELTA_GPU_NOMRT=1: a draw whose write mask enables a target but whose
+      // CB registers name none. Every such draw renders into nothing, so a
+      // whole pass can vanish with no other symptom than a black target.
+      if (kNoMrtTrace && tmask && !d.mrt_count) {
+        static int n = 0;
+        if (n < 24) {
+          n++;
+          std::fprintf(stderr, "[nomrt] tmask=%#x count=%u vs=%#lx ps=%#lx\n",
+                       tmask, d.index_data ? d.index_count : d.vertex_count,
+                       (unsigned long)vs_a, (unsigned long)ps_a);
+          for (int rt = 0; rt < 8; rt++)
+            std::fprintf(
+                stderr, "[nomrt]   cb%d base=%#lx info=%#x pitch=%#x slice=%#x\n",
+                rt, (unsigned long)g_regs.CbColorBase(rt),
+                g_regs[mmCB_COLOR0_INFO + rt * kCbColorStride],
+                g_regs[mmCB_COLOR0_PITCH + rt * kCbColorStride],
+                g_regs[mmCB_COLOR0_SLICE + rt * kCbColorStride]);
+        }
+      }
     }
 
     // Per-draw blend state from CB_BLEND0_CONTROL. Bit 30 is the per-target
@@ -559,13 +667,18 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
     // Depth/stencil state. A 3D title (Doom64, SOTTR) binds a Z buffer and
     // Z-tests the world; 2D titles leave DB_Z_INFO format invalid so
     // depth_valid stays false and no depth attachment is bound (the 2D path is
-    // unchanged). We only render to the write base; internal format is always
-    // D32F (never read back to the guest).
+    // unchanged). We render Z and stencil into one Vulkan depth/stencil image;
+    // compute bridges expose their separate guest bases when later shaders
+    // consume either plane.
     {
       uint32_t dc = g_regs[mmDB_DEPTH_CONTROL];
+      d.depth_control = dc;
       uint32_t zinfo = kNoDepth ? 0 : g_regs[mmDB_Z_INFO];
+      uint32_t sinfo = kNoDepth ? 0 : g_regs[mmDB_STENCIL_INFO];
       uint64_t zread = static_cast<uint64_t>(g_regs[mmDB_Z_READ_BASE]) << 8;
       uint64_t zbase = static_cast<uint64_t>(g_regs[mmDB_Z_WRITE_BASE]) << 8;
+      uint64_t sbase =
+          static_cast<uint64_t>(g_regs[mmDB_STENCIL_WRITE_BASE]) << 8;
       static int db_n = 0;
       if (kDbTrace && db_n < 24 && (zinfo || dc)) {
         db_n++;
@@ -577,7 +690,8 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
       }
       d.depth_valid = (zinfo & 0x3) != 0;
       if (d.depth_valid && zbase >= 0x1000000000ull &&
-          zbase < 0x20000000000ull && ((dc >> 1) & 1u || (dc >> 2) & 1u)) {
+          zbase < 0x20000000000ull &&
+          ((dc >> 1) & 1u || (dc >> 2) & 1u || (dc & 1u))) {
         d.depth_base = zbase;
         d.depth_test_enable = (dc >> 1) & 1u;
         d.depth_write_enable = (dc >> 2) & 1u;
@@ -585,6 +699,17 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
         std::memcpy(&d.depth_clear, &g_regs[mmDB_DEPTH_CLEAR], 4);
         if (!(d.depth_clear >= 0.0f && d.depth_clear <= 1.0f))
           d.depth_clear = 1.0f;
+        d.stencil_enable = !kNoStencil && (dc & 1u) && (sinfo & 1u) &&
+                           sbase >= 0x1000000000ull &&
+                           sbase < 0x20000000000ull;
+        if (d.stencil_enable) {
+          d.stencil_base = sbase;
+          d.stencil_backface_enable = (dc >> 7) & 1u;
+          d.stencil_clear = g_regs[mmDB_STENCIL_CLEAR] & 0xFF;
+          d.stencil_control = g_regs[mmDB_STENCIL_CONTROL];
+          d.stencil_refmask = g_regs[mmDB_STENCILREFMASK];
+          d.stencil_refmask_bf = g_regs[mmDB_STENCILREFMASK_BF];
+        }
       } else {
         d.depth_valid = false;
       }
@@ -668,7 +793,10 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
     std::shared_ptr<const gcn::Program> ps_prog;
     uint32_t tex_3d_mask = 0;
     uint32_t tex_1d_mask = 0;
+    uint32_t tex_uint_mask = 0;
     if (ps_a >= 0x1000000000ull && ps_a < 0x20000000000ull) {
+      if (kPreflushResources)
+        rhi::FlushCsWrites(rhi::DefaultRenderer());
       ps_prog = gcn::CachedProgram(ps_a, 4096);
       const uint32_t frame = g_presented_frames + 1;
       const bool trace_tex =
@@ -741,6 +869,10 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
           dt.is_1d = t.is_1d;
           if (t.is_1d)
             tex_1d_mask |= 1u << i;
+          // T# NUM_FORMAT 4/5 are UINT/SINT: the texels are packed bits, not a
+          // colour, and must reach the shader unconverted.
+          if (kIntegerRt && !t.storage && (t.nfmt == 4 || t.nfmt == 5))
+            tex_uint_mask |= 1u << i;
           dt.force_lod_zero = t.force_lod_zero;
           dt.depth_compare = t.depth_compare;
           dt.storage = t.storage;
@@ -868,7 +1000,8 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
         }
       }
       ShaderKey key{vs_k, ps_k, gcn::CachedCodeHash(fetch, 64), ps_input_ena,
-                    tex_3d_mask, tex_1d_mask, neo};
+                    tex_3d_mask, tex_1d_mask, tex_uint_mask,
+                    mrt_uint_mask,  neo};
       auto it = sh_cache.find(key);
       if (it == sh_cache.end() && kShReloc) {
         // DELTA_GPU_SHRELOC: attribute every recompile-cache miss to the key
@@ -950,7 +1083,8 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
                                     reinterpret_cast<const uint32_t*>(ps_a),
                                     &g_regs[mmSPI_SHADER_USER_DATA_VS_0],
                                     &g_regs[mmSPI_SHADER_USER_DATA_PS_0],
-                                    ps_input_ena, tex_3d_mask, tex_1d_mask))
+                                    ps_input_ena, tex_3d_mask, tex_1d_mask,
+                                    tex_uint_mask, mrt_uint_mask))
                  .first;
       gcn::Recompiled& rc = it->second;
       recomp_status = rc.ok ? "bad-attrs" : "rejected";
@@ -1866,6 +2000,10 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
 }
 
 }  // namespace
+
+void SetWriteWatchCallback(WriteWatchCallback callback) {
+  g_write_watch = callback;
+}
 
 void SetPs4NeoMode(bool enabled) {
   std::lock_guard<std::mutex> lock(g_mtx);

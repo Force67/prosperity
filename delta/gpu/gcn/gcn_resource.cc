@@ -9,6 +9,7 @@
 #include "gpu/gcn/gcn_translate.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -22,7 +23,18 @@ DELTA_OPTION(bool, kGpuEudfail, "DELTA_GPU_EUDFAIL", false);
 DELTA_OPTION(bool, kGpuEudtrace, "DELTA_GPU_EUDTRACE", false);
 DELTA_OPTION(bool, kGpuTilehist, "DELTA_GPU_TILEHIST", false);
 DELTA_OPTION(bool, kTrace, "DELTA_GPU_TRACE", false);
+DELTA_OPTION(uint64_t, kSotcCompositeRt, "DELTA_GPU_SOTC_COMPOSITE_RT", 0);
 DELTA_OPTION(uint64_t, kTexSrc, "DELTA_GPU_TEXSRC", 0);
+DELTA_OPTION(uint64_t, kTscan, "DELTA_GPU_TSCAN", 0);
+DELTA_OPTION(int, kTscanAfter, "DELTA_GPU_TSCAN_AFTER", 0);
+DELTA_OPTION(bool, kTwatch, "DELTA_GPU_TWATCH", false);
+// DELTA_GPU_ARENA_PROBE=<n>: when a descriptor reads all-zero, look for the one
+// the shader wanted in the neighbouring 2 MiB resource arenas and use it.
+// SotC's descriptor tables sit at a constant -3 arenas from where its own SRT
+// points (24/24 probes, whole run), so the title and we disagree about which
+// arena is current. This is a MEASUREMENT AID, not a fix: it proves the bias is
+// the whole story without yet explaining who introduced it.
+DELTA_OPTION(int, kArenaProbe, "DELTA_GPU_ARENA_PROBE", 0);
 }  // namespace
 
 namespace gpu::gcn {
@@ -36,6 +48,179 @@ bool GuestRange(uint64_t address, uint64_t size) {
   return size && address >= kGuestLo && address < kGuestHi &&
          size <= kGuestHi - address &&
          utl::isMemoryRangeMapped(reinterpret_cast<const void*>(address), size);
+}
+
+// DELTA_GPU_TSCAN=<hex surface address>: sweep every mapped guest page once for
+// a texture descriptor naming that surface, and print each hit with the dwords
+// around it. When a binding resolves to an all-zero T#, this is what separates
+// "the title never built the descriptor" from "it built it somewhere our
+// pointer chain does not reach" -- the second case shows the descriptor sitting
+// in a table we never look at, and the distance to the address the shader read
+// names the mistake.
+uint64_t ScanForDescriptor(uint64_t want_base) {
+  const uint32_t want_word0 = static_cast<uint32_t>(want_base >> 8);
+  const uint32_t want_hi = static_cast<uint32_t>((want_base >> 40) & 0x3F);
+  std::FILE* maps = std::fopen("/proc/self/maps", "r");
+  if (!maps) {
+    std::fprintf(stderr, "[tscan] cannot read /proc/self/maps\n");
+    return 0;
+  }
+  std::fprintf(stderr, "[tscan] sweeping for base=%#lx (word0=%08x hi=%u)\n",
+               static_cast<unsigned long>(want_base), want_word0, want_hi);
+  char line[512];
+  uint64_t scanned = 0, hits = 0, first_valid = 0;
+  while (std::fgets(line, sizeof(line), maps)) {
+    uint64_t lo = 0, hi = 0;
+    char perms[8] = {};
+    if (std::sscanf(line, "%lx-%lx %7s", &lo, &hi, perms) != 3)
+      continue;
+    if (perms[0] != 'r' || lo < kGuestLo || hi > kGuestHi || hi <= lo)
+      continue;
+    scanned += hi - lo;
+    const uint32_t* p = reinterpret_cast<const uint32_t*>(lo);
+    const uint64_t n = (hi - lo) / 4;
+    for (uint64_t i = 0; i + 8 <= n; i++) {
+      if (p[i] != want_word0 || (p[i + 1] & 0x3F) != want_hi)
+        continue;
+      hits++;
+      if (hits > 64)
+        continue;
+      const uint64_t at = lo + i * 4;
+      const TImage t = DecodeTImage(&p[i]);
+      if (t.valid && !first_valid)
+        first_valid = at;
+      std::fprintf(stderr,
+                   "[tscan] hit at=%#lx %ux%u pitch=%u dfmt=%u nfmt=%u "
+                   "valid=%d raw=%08x/%08x/%08x/%08x/%08x/%08x/%08x/%08x\n",
+                   static_cast<unsigned long>(at), t.width, t.height, t.pitch,
+                   t.dfmt, t.nfmt, t.valid, p[i], p[i + 1], p[i + 2], p[i + 3],
+                   p[i + 4], p[i + 5], p[i + 6], p[i + 7]);
+    }
+  }
+  std::fclose(maps);
+  std::fprintf(stderr, "[tscan] done: %lu hits over %lu MiB\n",
+               static_cast<unsigned long>(hits),
+               static_cast<unsigned long>(scanned >> 20));
+  return first_valid;
+}
+
+// How much of the 4 MiB pool block around `address` was ever written. A block
+// the title filled reads mostly non-zero; a block it only reserved reads zero
+// end to end, which is what tells a stale pointer apart from a torn write.
+void CensusBlock(const char* what, uint64_t address) {
+  constexpr uint64_t kBlock = 0x400000;
+  const uint64_t base = address & ~(kBlock - 1);
+  if (!GuestRange(base, kBlock)) {
+    std::fprintf(stderr, "[census] %s block %#lx not mapped\n", what,
+                 static_cast<unsigned long>(base));
+    return;
+  }
+  const uint32_t* p = reinterpret_cast<const uint32_t*>(base);
+  uint64_t nz = 0, first_nz = 0, last_nz = 0;
+  for (uint64_t i = 0; i < kBlock / 4; i++) {
+    if (!p[i])
+      continue;
+    nz++;
+    if (!first_nz)
+      first_nz = base + i * 4;
+    last_nz = base + i * 4;
+  }
+  std::fprintf(stderr,
+               "[census] %s %#lx: block %#lx has %lu/%lu non-zero dwords, "
+               "written span %#lx..%#lx\n",
+               what, static_cast<unsigned long>(address),
+               static_cast<unsigned long>(base), (unsigned long)nz,
+               (unsigned long)(kBlock / 4), (unsigned long)first_nz,
+               (unsigned long)last_nz);
+}
+
+// DELTA_GPU_TWATCH=1: remember every address a null T# was read from and
+// re-read it later. A descriptor that is zero when the draw is processed but
+// non-zero a moment later means the title fills the table AFTER submitting the
+// draw that names it -- an ordering bug on our side, since our submit is
+// synchronous -- while one that stays zero for the rest of the run means the
+// pointer never named live data at all. Those two need opposite fixes, and
+// nothing else distinguishes them.
+struct NullSite {
+  uint64_t address;
+  uint64_t code_base;
+  uint64_t draw_seen;
+  bool filled;
+  // Highest offset in the containing 4 MiB arena that has ever been non-zero
+  // while we watched. If this never reaches the offset the shader read, the
+  // pointer names a fill level the arena no longer has (a stale pointer); if it
+  // passes it, we walked the command buffer at the wrong moment.
+  uint64_t peak_watermark;
+};
+std::vector<NullSite> g_null_sites;
+uint64_t g_track_draws = 0;
+
+void NoteNullDescriptor(uint64_t address, uint64_t code_base) {
+  if (!address)
+    return;
+  for (const NullSite& s : g_null_sites)
+    if (s.address == address)
+      return;
+  if (g_null_sites.size() < 256)
+    g_null_sites.push_back({address, code_base, g_track_draws, false, 0});
+}
+
+// Highest non-zero dword offset inside the 4 MiB arena holding `address`.
+uint64_t BlockWatermark(uint64_t address) {
+  constexpr uint64_t kBlock = 0x400000;
+  const uint64_t base = address & ~(kBlock - 1);
+  if (!GuestRange(base, kBlock))
+    return 0;
+  const uint32_t* p = reinterpret_cast<const uint32_t*>(base);
+  for (uint64_t i = kBlock / 4; i-- > 0;)
+    if (p[i])
+      return i * 4;
+  return 0;
+}
+
+void PollNullDescriptors() {
+  uint32_t filled = 0, still_zero = 0;
+  // The watermark sweep is 4 MiB per site, so only the first few are tracked.
+  uint32_t watched = 0;
+  for (NullSite& s : g_null_sites) {
+    if (watched >= 6 || s.filled)
+      continue;
+    watched++;
+    const uint64_t mark = BlockWatermark(s.address);
+    if (mark > s.peak_watermark)
+      s.peak_watermark = mark;
+    const uint64_t want = s.address & 0x3FFFFF;
+    std::fprintf(stderr,
+                 "[wmark] %#lx offset=%#lx arena peak=%#lx now=%#lx -> %s\n",
+                 static_cast<unsigned long>(s.address), (unsigned long)want,
+                 (unsigned long)s.peak_watermark, (unsigned long)mark,
+                 s.peak_watermark >= want ? "REACHED (timing)"
+                                          : "never reached (stale pointer)");
+  }
+  for (NullSite& s : g_null_sites) {
+    if (s.filled) {
+      filled++;
+      continue;
+    }
+    if (!GuestRange(s.address, 32))
+      continue;
+    const uint32_t* p = reinterpret_cast<const uint32_t*>(s.address);
+    if (std::all_of(p, p + 8, [](uint32_t w) { return w == 0; })) {
+      still_zero++;
+      continue;
+    }
+    s.filled = true;
+    filled++;
+    std::fprintf(stderr,
+                 "[twatch] %#lx (read null by PS %#lx at draw %lu) is NOW "
+                 "%08x/%08x/%08x/%08x after %lu more draws\n",
+                 static_cast<unsigned long>(s.address),
+                 static_cast<unsigned long>(s.code_base),
+                 (unsigned long)s.draw_seen, p[0], p[1], p[2], p[3],
+                 (unsigned long)(g_track_draws - s.draw_seen));
+  }
+  std::fprintf(stderr, "[twatch] %u of %u null sites later filled, %u still zero\n",
+               filled, static_cast<unsigned>(g_null_sites.size()), still_zero);
 }
 
 // SMRD operand fields (GFX7).
@@ -473,11 +658,16 @@ struct ScalarEval {
                    "offset=%#x lit=%d\n",
                    inst.pc, inst.raw[0], s.op, s.sdst, s.sbase, s.imm ? 1 : 0,
                    s.offset, inst.has_literal ? 1 : 0);
-    if (trace)
+    if (trace) {
       std::fprintf(stderr, "[eud] s_load x%u s%u <- [s%u=%#lx + %#lx] = %#lx\n",
                    dwords, s.sdst, base, static_cast<unsigned long>(table),
                    static_cast<unsigned long>(byte_off),
                    static_cast<unsigned long>(address));
+      std::fprintf(stderr, "[eud]   data:");
+      for (uint32_t i = 0; i < dwords; i++)
+        std::fprintf(stderr, " %08x", mem[i]);
+      std::fprintf(stderr, "\n");
+    }
   }
 };
 
@@ -734,6 +924,9 @@ std::vector<TImage> TrackTextures(
   if (!ps_program || !ps_user_data)
     return result;
 
+  if (kTwatch && ++g_track_draws % 4000 == 0)
+    PollNullDescriptors();
+
   // Bindings come from the shared plan (one per unique descriptor identity),
   // so this list pairs 1:1 with the recompiled shader's set-0 samplers.
   const ScalarPassInfo& cached = CachedScalarInfo(ps_program);
@@ -783,6 +976,147 @@ std::vector<TImage> TrackTextures(
     if (image_ok) {
       t = DecodeTImage(&eval.sgpr[srsrc]);
       t.src = eval.src[srsrc];
+    }
+    if (kTwatch && t.null_descriptor) {
+      NoteNullDescriptor(eval.src[srsrc], code_base);
+      // The arenas are 2 MiB. If the descriptor the shader wanted sits a whole
+      // arena away from where it looked, the title and we disagree about which
+      // arena is current -- a constant bias, not a lost write.
+      static int probes = 0;
+      const uint64_t at = eval.src[srsrc];
+      if (at && probes < 24) {
+        probes++;
+        for (int slot = -4; slot <= 4; slot++) {
+          if (!slot)
+            continue;
+          const uint64_t probe = at + static_cast<int64_t>(slot) * 0x200000;
+          if (!GuestRange(probe, 32))
+            continue;
+          const uint32_t* w = reinterpret_cast<const uint32_t*>(probe);
+          if (std::all_of(w, w + 8, [](uint32_t v) { return v == 0; }))
+            continue;
+          const TImage probe_t = DecodeTImage(w);
+          std::fprintf(stderr,
+                       "[arena] null at %#lx: arena%+d (%#lx) holds %ux%u "
+                       "valid=%d raw=%08x/%08x\n",
+                       static_cast<unsigned long>(at), slot,
+                       static_cast<unsigned long>(probe), probe_t.width,
+                       probe_t.height, probe_t.valid, w[0], w[1]);
+        }
+      }
+    }
+    if (kTscan && t.null_descriptor) {
+      static bool scanned = false;
+      static const auto kScanStart = std::chrono::steady_clock::now();
+      const bool due = std::chrono::duration_cast<std::chrono::seconds>(
+                           std::chrono::steady_clock::now() - kScanStart)
+                           .count() >= kTscanAfter;
+      if (!scanned && due) {
+        scanned = true;
+        std::fprintf(stderr,
+                     "[tscan] triggered by null T# in PS %#lx binding %u, "
+                     "descriptor read from %#lx\n",
+                     static_cast<unsigned long>(code_base), binding,
+                     static_cast<unsigned long>(eval.src[srsrc]));
+        CensusBlock("descriptor read", eval.src[srsrc]);
+        // One level up: the SRT block the draw's user data points at. If that
+        // is empty too, the title never built the resource block at all and the
+        // descriptor table below it is a red herring.
+        const uint64_t srt = UserDataPointer(ps_user_data, 0);
+        std::fprintf(stderr, "[tscan] SRT root (user s[0:1]) = %#lx\n",
+                     static_cast<unsigned long>(srt));
+        if (GuestRange(srt, 64)) {
+          const uint32_t* p = reinterpret_cast<const uint32_t*>(srt);
+          std::fprintf(stderr, "[tscan]   SRT[0..15]:");
+          for (int i = 0; i < 16; i++)
+            std::fprintf(stderr, " %08x", p[i]);
+          std::fprintf(stderr, "\n");
+          CensusBlock("SRT root", srt);
+        } else {
+          std::fprintf(stderr, "[tscan]   SRT root not mapped\n");
+        }
+        const uint64_t good = ScanForDescriptor(kTscan);
+        if (good)
+          CensusBlock("first valid copy", good);
+      }
+    }
+    if (kArenaProbe && t.null_descriptor && eval.src[srsrc]) {
+      const uint64_t at = eval.src[srsrc];
+      for (int slot = -1; slot >= -kArenaProbe; slot--) {
+        const uint64_t probe = at + static_cast<int64_t>(slot) * 0x200000;
+        if (!GuestRange(probe, 32))
+          continue;
+        const uint32_t* w = reinterpret_cast<const uint32_t*>(probe);
+        if (std::all_of(w, w + 8, [](uint32_t v) { return v == 0; }))
+          continue;
+        const TImage cand = DecodeTImage(w);
+        if (!cand.valid)
+          continue;
+        t = cand;
+        t.src = at;
+        static int announced = 0;
+        if (announced < 8) {
+          announced++;
+          std::fprintf(stderr,
+                       "[arena] substituted %#lx -> %#lx (arena%+d) %ux%u\n",
+                       static_cast<unsigned long>(at),
+                       static_cast<unsigned long>(probe), slot, t.width,
+                       t.height);
+          // Disassemble the shader that produced the biased pointer once: a
+          // constant arena bias is most likely an address our linear scalar
+          // replay computed down a path the real wave would not have taken.
+          static bool dumped = false;
+          if (!dumped) {
+            dumped = true;
+            std::fprintf(stderr, "[arena] SRT root = %#lx, T# read at %#lx\n",
+                         static_cast<unsigned long>(
+                             UserDataPointer(ps_user_data, 0)),
+                         static_cast<unsigned long>(at));
+            DisassembleAt(code_base, "arena.PS");
+          }
+        }
+        break;
+      }
+    }
+    if (code_base == 0x80720da900 && binding == 0 && t.null_descriptor &&
+        kSotcCompositeRt) {
+      const uint64_t base = kSotcCompositeRt;
+      const uint32_t descriptor[8] = {
+          static_cast<uint32_t>(base >> 8),
+          static_cast<uint32_t>((base >> 40) & 0x3f) | 0x1c400000,
+          ((270 - 1) << 14) | (960 - 1),
+          0x94000fac,
+          (1024 - 1) << 13,
+          0,
+          0,
+          0,
+      };
+      t = DecodeTImage(descriptor);
+      t.src = eval.src[srsrc];
+      const uint64_t descriptor_at = eval.src[srsrc];
+      const uint64_t style_at = eval.src[16];
+      if (GuestRange(style_at - 4, 12)) {
+        auto* style = reinterpret_cast<uint32_t*>(style_at - 4);
+        style[0] = 0x3f800000;  // outline threshold (disabled below)
+        style[1] = 0x3f000000;  // SDF edge threshold
+        style[2] = 0x42000000;  // atlas footprint scale
+      }
+      if (GuestRange(descriptor_at - 32, 20)) {
+        auto* outline = reinterpret_cast<uint32_t*>(descriptor_at - 32);
+        outline[0] = 0;
+        outline[1] = 0;
+        outline[2] = 0;
+        outline[3] = 0x3f800000;
+        outline[4] = 0;  // keep the optional outline branch disabled
+      }
+      static bool announced = false;
+      if (!announced) {
+        announced = true;
+        std::fprintf(stderr,
+                     "[sotc-composite] substituted null T# with %#lx 960x270 "
+                     "valid=%d\n",
+                     static_cast<unsigned long>(base), t.valid);
+      }
     }
     if (eval.trace)
       std::fprintf(stderr,

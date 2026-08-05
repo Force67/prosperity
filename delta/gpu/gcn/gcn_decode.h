@@ -75,6 +75,16 @@ using Program = std::vector<Inst>;
 //   IMM=0, OFFSET=0xFF  a trailing 32-bit literal, also a DWORD offset (the
 //                       Sea Islands wide-offset form; LLVM encodes it through
 //                       the same byte>>2 conversion as the 8-bit field).
+//                       CHALLENGED AND LEFT ALONE 2026-08-05. The ISA prose
+//                       for IMM=0 ("the index of an SGPR soffset", and soffset
+//                       is a BYTE offset) reads as though the literal were
+//                       bytes; implementing that and measuring found NO
+//                       difference -- SotC reports 64 unresolved bindings
+//                       either way in its in-game state -- so the metric does
+//                       not discriminate and the dword reading stays as the
+//                       validated status quo (it took the MENU's misses 64->0).
+//                       If you revisit this, find a case that separates them
+//                       first; the texmiss count alone will not.
 //   IMM=0 otherwise     OFFSET names an SGPR holding a BYTE offset.
 struct SmrdOffset {
   uint32_t dwords = 0;    // resolved offset, when it is not in an SGPR
