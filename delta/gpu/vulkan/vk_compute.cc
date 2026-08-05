@@ -23,6 +23,7 @@
 #include "gpu/vulkan/vk_perf.h"
 #include "gpu/vulkan/vk_render_target.h"
 #include "gpu/vulkan/vk_texture_cache.h"
+#include "gpu/vulkan/vk_trace.h"
 
 #include <algorithm>
 #include <chrono>
@@ -469,6 +470,7 @@ struct CsAliasedImage {
   VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT;
   VkImageLayout submitted_layout = VK_IMAGE_LAYOUT_UNDEFINED;
   bool is_depth = false;
+  bool is_stencil = false;
 };
 
 // True when `base` names a live target the compute bridges apply to. The
@@ -486,7 +488,8 @@ bool FindCsAliasedImage(uint64_t base, CsAliasedImage& out) {
            FormatBytes(rt.fmt),
            VK_IMAGE_ASPECT_COLOR_BIT,
            rt.submitted_layout,
-           false};
+            false,
+            false};
     return out.submitted_layout != VK_IMAGE_LAYOUT_UNDEFINED;
   }
   auto depth_it = g_depths.find(base);
@@ -500,6 +503,21 @@ bool FindCsAliasedImage(uint64_t base, CsAliasedImage& out) {
            4,  // kDepthFormat == D32_SFLOAT
            VK_IMAGE_ASPECT_DEPTH_BIT,
            depth.submitted_layout,
+            true,
+            false};
+    return out.submitted_layout != VK_IMAGE_LAYOUT_UNDEFINED;
+  }
+  for (auto& [depth_base, depth] : g_depths) {
+    (void)depth_base;
+    if (depth.stencil_base != base || !depth.image)
+      continue;
+    out = {depth.image,
+           depth.w,
+           depth.h,
+           1,
+           VK_IMAGE_ASPECT_STENCIL_BIT,
+           depth.submitted_stencil_layout,
+           false,
            true};
     return out.submitted_layout != VK_IMAGE_LAYOUT_UNDEFINED;
   }
@@ -507,20 +525,26 @@ bool FindCsAliasedImage(uint64_t base, CsAliasedImage& out) {
 }
 
 bool CsAliasedBase(uint64_t base) {
-  return g_rts.find(base) != g_rts.end() ||
-         g_depths.find(base) != g_depths.end();
+  if (g_rts.find(base) != g_rts.end() || g_depths.find(base) != g_depths.end())
+    return true;
+  return std::any_of(g_depths.begin(), g_depths.end(),
+                     [base](const auto& entry) {
+                       return entry.second.stencil_base == base;
+                     });
 }
 
 VkAccessFlags AliasedImageAccess(const CsAliasedImage& img, VkImageLayout l) {
-  if (!img.is_depth)
+  if (!img.is_depth && !img.is_stencil)
     return ColorImageAccess(l);
   switch (l) {
     case VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL:
     case VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL:
+    case VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL:
       return VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
              VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
     case VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL:
     case VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL:
+    case VK_IMAGE_LAYOUT_STENCIL_READ_ONLY_OPTIMAL:
     case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
       return VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
              VK_ACCESS_SHADER_READ_BIT;
@@ -557,7 +581,9 @@ bool AliasedShapeMatches(const CsAliasedImage& img,
                          const ComputeInfo::Res& res,
                          const char* dir) {
   if (res.mip_levels == 1 && res.layers == 1 && img.w == res.width &&
-      img.h == res.height && img.elem_bytes == res.stage_elem_bytes)
+      img.h == res.height &&
+      img.elem_bytes ==
+          (img.is_stencil ? res.elem_bytes : res.stage_elem_bytes))
     return true;
   static int warned = 0;
   if (warned < 8) {
@@ -566,7 +592,8 @@ bool AliasedShapeMatches(const CsAliasedImage& img,
                  "[gpuvk] cs %s live %s target %#llx shape mismatch: image "
                  "%ux%u %uB vs cs %ux%u pitch=%u mips=%u dfmt=%u elem=%u/%uB "
                  "tiling=%u -> falling back to guest memory\n",
-                 dir, img.is_depth ? "depth" : "color",
+                  dir, img.is_depth ? "depth" : img.is_stencil ? "stencil"
+                                                              : "color",
                  (unsigned long long)res.base, img.w, img.h, img.elem_bytes,
                  res.width, res.height, res.pitch, res.mip_levels, res.dfmt,
                  res.elem_bytes, res.stage_elem_bytes, res.tiling_idx);
@@ -583,14 +610,26 @@ bool RunAliasedCopy(const CsAliasedImage& img,
   if (!BuildCsImageLayouts(res, tiled, linear))
     return false;
   const auto& level = linear.mips[0];
-  const uint64_t copy_bytes =
-      static_cast<uint64_t>(level.pitch) * img.h * res.stage_elem_bytes;
+  const uint64_t texels = static_cast<uint64_t>(level.pitch) * img.h;
+  const uint64_t copy_bytes = texels * res.stage_elem_bytes;
   if (level.offset + copy_bytes > e.cap)
     return false;
   // Host-zero any padding an image->buffer copy does not cover (host writes
   // are made available by the submission).
   if (!to_image && (level.offset != 0 || copy_bytes < res.size))
     std::memset(e.map, 0, res.size);
+  if (img.is_stencil) {
+    if (level.offset || texels > e.cap)
+      return false;
+    if (!to_image)
+      std::memset(e.map, 0, res.size);
+    else {
+      auto* packed = static_cast<uint8_t*>(e.map);
+      auto* expanded = static_cast<uint32_t*>(e.map);
+      for (uint64_t i = 0; i < texels; i++)
+        packed[i] = static_cast<uint8_t>(expanded[i]);
+    }
+  }
 
   VkCommandBufferAllocateInfo ca{
       VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
@@ -633,7 +672,7 @@ bool RunAliasedCopy(const CsAliasedImage& img,
                       AliasedImageAccess(img, img.submitted_layout),
                       transfer_access);
   VkBufferImageCopy copy{};
-  copy.bufferOffset = level.offset;
+  copy.bufferOffset = img.is_stencil ? 0 : level.offset;
   copy.bufferRowLength = level.pitch;
   copy.imageSubresource = {img.aspect, 0, 0, 1};
   copy.imageExtent = {img.w, img.h, 1};
@@ -675,6 +714,12 @@ bool RunAliasedCopy(const CsAliasedImage& img,
                  to_image ? "upload" : "staging", (int)r,
                  (unsigned long long)res.base);
     return false;
+  }
+  if (img.is_stencil) {
+    auto* packed = static_cast<uint8_t*>(e.map);
+    auto* expanded = static_cast<uint32_t*>(e.map);
+    for (uint64_t i = texels; i-- > 0;)
+      expanded[i] = packed[i];
   }
   return true;
 }
@@ -1150,6 +1195,86 @@ struct ScopeCs {
 };
 
 }  // namespace
+
+bool PreserveCsDepthBeforeClear(uint64_t base) {
+  auto depth_it = g_depths.find(base);
+  auto range_it = g_cs_ranges.find(base);
+  if (!g_frame.recording || depth_it == g_depths.end() ||
+      range_it == g_cs_ranges.end())
+    return false;
+
+  DepthTarget& depth = depth_it->second;
+  CsRange& range = range_it->second;
+  if (!depth.image || depth.layout == VK_IMAGE_LAYOUT_UNDEFINED || !range.buf ||
+      range.pending_batch || range.gpu_dirty || !range.image_staging)
+    return false;
+
+  CsAliasedImage image{depth.image,
+                       depth.w,
+                       depth.h,
+                       4,
+                       VK_IMAGE_ASPECT_DEPTH_BIT,
+                       depth.layout,
+                       true};
+  if (!AliasedShapeMatches(image, range.res, "preserves"))
+    return false;
+
+  gcn::TextureLayout32 tiled, linear;
+  if (!BuildCsImageLayouts(range.res, tiled, linear))
+    return false;
+  const auto& level = linear.mips[0];
+  const uint64_t copy_bytes = static_cast<uint64_t>(level.pitch) * depth.h *
+                              range.res.stage_elem_bytes;
+  if (level.offset + copy_bytes > range.cap)
+    return false;
+
+  const VkImageLayout old_layout = depth.layout;
+  AliasedImageBarrier(g_frame.cmd, image, old_layout,
+                      VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                      AliasedImageAccess(image, old_layout),
+                      VK_ACCESS_TRANSFER_READ_BIT);
+  VkBufferImageCopy copy{};
+  copy.bufferOffset = level.offset;
+  copy.bufferRowLength = level.pitch;
+  copy.imageSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1};
+  copy.imageExtent = {depth.w, depth.h, 1};
+  vkCmdCopyImageToBuffer(g_frame.cmd, depth.image,
+                         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, range.buf, 1,
+                         &copy);
+
+  VkBufferMemoryBarrier buffer_barrier{
+      VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+  buffer_barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+  buffer_barrier.dstAccessMask =
+      VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_HOST_READ_BIT;
+  buffer_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+  buffer_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+  buffer_barrier.buffer = range.buf;
+  buffer_barrier.offset = 0;
+  buffer_barrier.size = VK_WHOLE_SIZE;
+  vkCmdPipelineBarrier(
+      g_frame.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_HOST_BIT, 0, 0,
+      nullptr, 1, &buffer_barrier, 0, nullptr);
+  AliasedImageBarrier(g_frame.cmd, image,
+                      VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, old_layout,
+                      VK_ACCESS_TRANSFER_READ_BIT,
+                      AliasedImageAccess(image, old_layout));
+
+  // Compute for frame N runs before graphics N. This graphics-side snapshot
+  // is therefore the input for compute N+1, and must suppress that frame's
+  // usual copy from the now-cleared depth image.
+  range.rt_sourced = true;
+  range.last_rt_frame = static_cast<int>(g_frame.num) + 1;
+  if (kCsRtTrace) {
+    static int logged = 0;
+    if (logged++ < 16)
+      std::fprintf(stderr, "[csrt] f%d preserved depth %#lx before clear\n",
+                   g_frame.num, (unsigned long)base);
+  }
+  return true;
+}
+
 }  // namespace gpu::vk
 
 namespace gpu::rhi {
@@ -1545,6 +1670,8 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci) {
                  (unsigned long long)ci.cs_addr, ci.groups[0], ci.groups[1],
                  ci.groups[2], ci.num_res);
   vkCmdDispatch(g_cs_cmd, ci.groups[0], ci.groups[1], ci.groups[2]);
+  if (trace::Recording())
+    trace::RecordDispatch(ci);
   for (uint32_t i = 0; i < ci.num_res; i++) {
     if (ci.res[i].zero_fill) {
       g_cs_stage_pending[i] = true;

@@ -200,6 +200,14 @@ struct DrawInfo {
   uint32_t depth_func =
       7;  // DB_DEPTH_CONTROL ZFUNC (maps 1:1 to the compare op)
   float depth_clear = 1.0f;  // DB_DEPTH_CLEAR (fast-clear value)
+  uint64_t stencil_base = 0;
+  bool stencil_enable = false;
+  bool stencil_backface_enable = false;
+  uint32_t depth_control = 0;
+  uint8_t stencil_clear = 0;
+  uint32_t stencil_control = 0;
+  uint32_t stencil_refmask = 0;
+  uint32_t stencil_refmask_bf = 0;
 
   // GNM's fast clear: a RECT_LIST draw with no pixel shader and no vertex
   // attributes, whose colour lives in CB_COLORn_CLEAR_WORD0/1 rather than in

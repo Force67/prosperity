@@ -76,13 +76,20 @@ constexpr uint32_t mmVGT_NUM_INDICES = 0xC24C;
 constexpr uint32_t mmDB_DEPTH_CONTROL = 0xA200;
 // DB_Z_INFO: FORMAT[1:0] (0=invalid/off, 1=Z16, 3=Z32_FLOAT).
 constexpr uint32_t mmDB_Z_INFO = 0xA010;
+constexpr uint32_t mmDB_STENCIL_INFO = 0xA011;
 // Depth surface base (byte addr = value << 8). Z_WRITE is what the draw renders
 // to.
 constexpr uint32_t mmDB_Z_READ_BASE = 0xA012;
+constexpr uint32_t mmDB_STENCIL_READ_BASE = 0xA013;
 constexpr uint32_t mmDB_Z_WRITE_BASE = 0xA014;
+constexpr uint32_t mmDB_STENCIL_WRITE_BASE = 0xA015;
 // Fast-clear depth value (float) used when the buffer is bound with
 // loadOp=CLEAR.
 constexpr uint32_t mmDB_DEPTH_CLEAR = 0xA00B;
+constexpr uint32_t mmDB_STENCIL_CLEAR = 0xA00A;
+constexpr uint32_t mmDB_STENCIL_CONTROL = 0xA10B;
+constexpr uint32_t mmDB_STENCILREFMASK = 0xA10C;
+constexpr uint32_t mmDB_STENCILREFMASK_BF = 0xA10D;
 // Primitive-setup: cull + winding. CULL_FRONT[0] CULL_BACK[1] FACE[2] (0=CCW
 // front).
 constexpr uint32_t mmPA_SU_SC_MODE_CNTL = 0xA205;

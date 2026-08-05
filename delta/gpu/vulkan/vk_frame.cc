@@ -18,6 +18,7 @@
 #include "gpu/vulkan/vk_present.h"
 #include "gpu/vulkan/vk_render_target.h"
 #include "gpu/vulkan/vk_texture_cache.h"
+#include "gpu/vulkan/vk_trace.h"
 #include "gpu/vulkan/vk_upload_ring.h"
 
 #include <dlfcn.h>
@@ -343,6 +344,9 @@ void BeginFrame(Renderer& renderer) {
   if (!CreatePipeline())
     return;
   CreateTexPipeline();  // best-effort; colored path still works without it
+  // Frame debugger (DELTA_GPU_CAPTURE*): armed before the counters reset, so
+  // the busy trigger can still see the frame that just ended.
+  trace::FrameBegin(g_frame.num + 1);
   g_frame.draws = 0;
   g_frame.heuristic = 0;
   g_frame.max_idx = 0;
@@ -442,6 +446,7 @@ void BeginFrame(Renderer& renderer) {
     g_ring.sbo_offset = g_ring.sbo_stride;
   g_region.cur_rt = 0;
   g_region.cur_depth = 0;
+  g_region.cur_stencil = 0;
   g_region.open = false;
   g_region.last_rt = 0;
   g_region.busiest_rt = 0;
@@ -455,8 +460,10 @@ void BeginFrame(Renderer& renderer) {
     // incremental draw touches this RT in a later frame.
     kv.second.clear_pending = false;
   }
-  for (auto& kv : g_depths)
+  for (auto& kv : g_depths) {
     kv.second.used_this_frame = false;
+    kv.second.stencil_used_this_frame = false;
+  }
 
   vkResetCommandBuffer(g_frame.cmd, 0);
   VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
@@ -619,8 +626,11 @@ void EndFrame(Renderer& renderer, uint64_t scanout_base) {
   // RT-backed CS input) chains its barriers from.
   for (auto& rt_entry : g_rts)
     rt_entry.second.submitted_layout = rt_entry.second.layout;
-  for (auto& depth_entry : g_depths)
+  for (auto& depth_entry : g_depths) {
     depth_entry.second.submitted_layout = depth_entry.second.layout;
+    depth_entry.second.submitted_stencil_layout =
+        depth_entry.second.stencil_layout;
+  }
   cur.frame_num = g_frame.num;
   cur.frame_draws = g_frame.draws;
   cur.frame_max_idx = g_frame.max_idx;
@@ -632,6 +642,10 @@ void EndFrame(Renderer& renderer, uint64_t scanout_base) {
   cur.readback_mem = g_frame.readback_mem;
   cur.readback_map = g_frame.readback_map;
   cur.readback_size = g_frame.readback_size;
+
+  // Close an armed capture: this frame is submitted, so its mid-frame
+  // snapshots and its final targets can be read back and written out.
+  trace::FrameEnd(scanout_base);
 
   // Gameplay latches judge the just-recorded frame's command stream (no pixels
   // involved): sustained room frames with real draw counts, or a huge-index 3D
@@ -770,6 +784,12 @@ void EndFrame(Renderer& renderer, uint64_t scanout_base) {
     char p[256];
     std::snprintf(p, sizeof p, "%s/gpu_snap.ppm", DumpDir());
     WritePpm(p, pixels, fin.w, fin.h);
+    if (FILE* alpha = std::fopen("/tmp/gpu_snap_alpha.pgm", "wb")) {
+      std::fprintf(alpha, "P5\n%u %u\n255\n", fin.w, fin.h);
+      for (uint64_t i = 0; i < static_cast<uint64_t>(fin.w) * fin.h; i++)
+        std::fputc(pixels[i * 4 + 3], alpha);
+      std::fclose(alpha);
+    }
     std::fprintf(
         stderr, "[snap] wrote %s (f%d %ux%u draws=%u rt=%#lx scanout=%#lx)\n",
         p, fin.frame_num, fin.w, fin.h, fin.frame_draws,

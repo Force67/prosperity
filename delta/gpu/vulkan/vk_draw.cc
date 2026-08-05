@@ -19,6 +19,7 @@
 #include "gpu/vulkan/vk_pipeline_cache.h"
 #include "gpu/vulkan/vk_render_target.h"
 #include "gpu/vulkan/vk_texture_cache.h"
+#include "gpu/vulkan/vk_trace.h"
 #include "gpu/vulkan/vk_upload_ring.h"
 
 #include <algorithm>
@@ -313,6 +314,8 @@ void Draw(Renderer& renderer, const DrawInfo& d_in) {
       g_region.busiest_rt = g_region.cur_rt;
     }
   }
+  if (vk::trace::Recording())
+    vk::trace::RecordDraw(d, "quad", nullptr);
 }
 
 }  // namespace gpu::rhi

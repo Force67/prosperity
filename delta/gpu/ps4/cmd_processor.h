@@ -8,6 +8,7 @@
  * point for the Gnm HLE submit path.
  */
 
+#include <cstddef>
 #include <cstdint>
 
 namespace gpu {
@@ -21,6 +22,12 @@ namespace gpu {
 // composition root calls this after combining configured Neo hardware with the
 // title's param.sfo Neo-support bit.
 void SetPs4NeoMode(bool enabled);
+
+// Register the kernel's resumable guest-memory write watch without making the
+// GPU module depend on the kernel. Used by the DELTA_GPU_ROOT_WPROT_* probes to
+// follow a dynamically allocated shader root when its command pool is reused.
+using WriteWatchCallback = void (*)(uintptr_t, size_t, unsigned, bool, bool);
+void SetWriteWatchCallback(WriteWatchCallback callback);
 
 // Process one PM4 draw command buffer (guest GPU address, identity-mapped to a
 // host pointer; size in bytes). Walks the packet stream, updating register
