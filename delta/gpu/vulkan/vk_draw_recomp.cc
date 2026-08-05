@@ -15,6 +15,7 @@
 #include "gpu/vulkan/vk_pipeline_cache.h"
 #include "gpu/vulkan/vk_render_target.h"
 #include "gpu/vulkan/vk_texture_cache.h"
+#include "gpu/vulkan/vk_trace.h"
 #include "gpu/vulkan/vk_upload_ring.h"
 
 #include <algorithm>
@@ -69,6 +70,8 @@ static const char* kDeclineName[kMaxDeclineReason] = {
 uint32_t g_decline[kMaxDeclineReason] = {0};
 inline bool Decline(DeclineReason r) {
   g_decline[r]++;
+  if (trace::Recording())
+    trace::RecordDecline(kDeclineName[r]);
   return false;
 }
 
@@ -221,13 +224,23 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
   bool feedback_as_tex = tex_rt_eligible && tex_base &&
                          tex_base == d.rt_base && g_rts.count(tex_base) &&
                          g_rts[tex_base].ever_rendered;
+  // A deferred-lighting pass binds the scene depth buffer AND samples it to
+  // rebuild world position. That is legal in Vulkan whenever the pass cannot
+  // write depth: the image sits in DEPTH_READ_ONLY_OPTIMAL and serves as both
+  // attachment and sampled image. Declining it instead sent SotC's whole
+  // lighting pass down the heuristic quad path, which produced nothing.
+  const bool depth_self_read = tex_rt_eligible && tex_base &&
+                               tex_base == d.depth_base &&
+                               !d.depth_write_enable && g_depths.count(tex_base);
   bool depth_as_tex = tex_rt_eligible && tex_base &&
-                      tex_base != d.depth_base && g_depths.count(tex_base);
+                      (tex_base != d.depth_base || depth_self_read) &&
+                      g_depths.count(tex_base);
   bool rt_as_tex = color_as_tex || feedback_as_tex || depth_as_tex;
   if (color_as_tex && g_rts[tex_base].w >= 700 && g_rts[tex_base].w <= 900)
     g_frame.had_room = true;
-  if (tex_base && (tex_base == d.depth_base ||
-                   (tex_base == d.rt_base && !feedback_as_tex))) {
+  if (tex_base && !depth_self_read &&
+      (tex_base == d.depth_base ||
+       (tex_base == d.rt_base && !feedback_as_tex))) {
     // DELTA_GPU_SELFTRACE: which pass reads the target it is drawing into. We
     // drop those, and dropping one every frame leaves whatever it was meant to
     // produce stale.
@@ -573,6 +586,9 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
 
   uint64_t multi_color[kMaxTex] = {};
   uint64_t multi_depth[kMaxTex] = {};
+  // The depth target whose STENCIL plane a binding names (see
+  // ResolveSampledStencil): a separate guest surface sharing one host image.
+  uint64_t multi_stencil_src[kMaxTex] = {};
   uint64_t multi_feedback[kMaxTex] = {};
   uint64_t multi_storage[kMaxTex] = {};
   VkImageView multi_views[kMaxTex] = {};
@@ -642,11 +658,20 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
         multi_transition_source |=
             g_rts[base].layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL ||
             g_rts[base].dirty_for_read;
-      } else if (base && rt_eligible && base != d.depth_base &&
-                 g_depths.count(base)) {
+      } else if (base && rt_eligible && g_depths.count(base) &&
+                 (base != d.depth_base || !d.depth_write_enable)) {
         multi_depth[i] = base;
         multi_transition_source |=
             g_depths[base].layout != VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL;
+      } else if (base && rt_eligible && ResolveSampledStencil(base)) {
+        // A deferred lighting pass reads the material id it stencilled during
+        // the G-buffer pass. That plane lives in the depth image, not in any
+        // colour target, so without this the address resolved to whatever RT
+        // overlapped it and the shader discarded every pixel.
+        multi_stencil_src[i] = ResolveSampledStencil(base);
+        multi_transition_source |=
+            g_depths[multi_stencil_src[i]].stencil_layout !=
+            VK_IMAGE_LAYOUT_STENCIL_READ_ONLY_OPTIMAL;
       } else {
         multi_views[i] = !t.storage && t.null_descriptor
                              ? (t.is_3d      ? g_tex.zero_3d_view
@@ -755,10 +780,18 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
                                      VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL);
   bool pending_depth_clear = d.depth_base && g_depths.count(d.depth_base) &&
                              g_depths[d.depth_base].clear_pending;
+  // Any binding of this draw that names the bound depth buffer forces the depth
+  // attachment read-only for the whole region, so the sampled view and the
+  // attachment agree on one layout.
+  bool samples_bound_depth = depth_self_read;
+  for (uint32_t i = 0; i < multi_n && !samples_bound_depth; i++)
+    samples_bound_depth = multi_depth[i] && multi_depth[i] == d.depth_base;
   bool restart_region = g_region.cur_rt != d.rt_base ||
-                        g_region.cur_mrt_count != mrt_n ||
-                        g_region.cur_depth != d.depth_base ||
-                        transition_source || pending_depth_clear;
+                         g_region.cur_mrt_count != mrt_n ||
+                         g_region.cur_depth != d.depth_base ||
+                         g_region.cur_stencil != d.stencil_base ||
+                         g_region.depth_read_only != samples_bound_depth ||
+                         transition_source || pending_depth_clear;
   if (restart_region) {
     EndRegion();
     if (!rp->multi_tex && color_as_tex && transition_source) {
@@ -857,6 +890,15 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
             src.layout = desired;
             src.dirty_for_read = false;
           }
+        } else if (multi_stencil_src[i]) {
+          auto& src = g_depths[multi_stencil_src[i]];
+          if (src.stencil_layout != VK_IMAGE_LAYOUT_STENCIL_READ_ONLY_OPTIMAL) {
+            StencilBarrier(g_frame.cmd, src.image, src.stencil_layout,
+                           VK_IMAGE_LAYOUT_STENCIL_READ_ONLY_OPTIMAL,
+                           VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                           VK_ACCESS_SHADER_READ_BIT);
+            src.stencil_layout = VK_IMAGE_LAYOUT_STENCIL_READ_ONLY_OPTIMAL;
+          }
         } else if (multi_depth[i]) {
           auto& src = g_depths[multi_depth[i]];
           if (src.layout != VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL) {
@@ -885,9 +927,18 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
           multi_views[i] = SampledView(src, d.texs[i].swizzle, true);
           multi_layouts[i] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         } else if (multi_color[i]) {
-          multi_views[i] =
-              SampledView(g_rts[multi_color[i]], d.texs[i].swizzle);
+          // Use the numeric type the T# names, not the one the attachment was
+          // created with: Vulkan requires the view's numeric type to match the
+          // shader's sampled type, and the two disagree whenever a pass renders
+          // a plane as UNORM that a later shader reads as UINT (or vice versa).
+          multi_views[i] = SampledViewAs(
+              g_rts[multi_color[i]], d.texs[i].swizzle,
+              GuestTextureFormat(d.texs[i].dfmt, d.texs[i].nfmt));
           multi_layouts[i] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        } else if (multi_stencil_src[i]) {
+          multi_views[i] =
+              StencilSampledView(g_depths[multi_stencil_src[i]]);
+          multi_layouts[i] = VK_IMAGE_LAYOUT_STENCIL_READ_ONLY_OPTIMAL;
         } else if (multi_depth[i]) {
           multi_views[i] =
               SampledView(g_depths[multi_depth[i]], d.texs[i].swizzle);
@@ -905,7 +956,8 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
     if (d.rt_base && !rt)
       return true;  // RT cap hit: treat as handled (dropped)
     if (!BeginRegion(d.mrt_base, d.mrt_info, mrt_n, d.rt_w, d.rt_h,
-                     d.depth_base, d.depth_clear))
+                      d.depth_base, d.depth_clear, d.stencil_base,
+                      d.stencil_clear, samples_bound_depth))
       return true;
   }
   if (rp->multi_tex) {
@@ -918,8 +970,13 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
           multi_views[i] =
               SampledView(g_rts[multi_feedback[i]], d.texs[i].swizzle, true);
         } else if (multi_color[i]) {
+          multi_views[i] = SampledViewAs(
+              g_rts[multi_color[i]], d.texs[i].swizzle,
+              GuestTextureFormat(d.texs[i].dfmt, d.texs[i].nfmt));
+        } else if (multi_stencil_src[i]) {
           multi_views[i] =
-              SampledView(g_rts[multi_color[i]], d.texs[i].swizzle);
+              StencilSampledView(g_depths[multi_stencil_src[i]]);
+          multi_layouts[i] = VK_IMAGE_LAYOUT_STENCIL_READ_ONLY_OPTIMAL;
         } else if (multi_depth[i]) {
           multi_views[i] =
               SampledView(g_depths[multi_depth[i]], d.texs[i].swizzle);
@@ -1278,6 +1335,39 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
       g_region.busiest_rt_draws = rt.draws;
       g_region.busiest_rt = g_region.cur_rt;
     }
+  }
+  // Frame debugger: the complete draw, including how every sampler binding
+  // resolved -- which only this function knows. Runs last so a mid-frame
+  // snapshot (which must close the open region) cannot disturb the accounting
+  // above.
+  if (trace::Recording()) {
+    // The legacy single-texture path resolves its one binding through its own
+    // variables; express it in the same shape so a capture reads the same
+    // either way. A `tex_set` that is one of the 1x1 defaults resolved to
+    // nothing, which is the case worth naming.
+    const bool legacy_default =
+        !tex_set || tex_set == g_tex.white_set ||
+        tex_set == g_tex.white_array_set || tex_set == g_tex.white_3d_set ||
+        tex_set == g_tex.zero_set || tex_set == g_tex.zero_array_set ||
+        tex_set == g_tex.zero_3d_set;
+    const uint64_t legacy_color = color_as_tex ? tex_base : 0;
+    const uint64_t legacy_feedback = feedback_as_tex ? tex_base : 0;
+    const uint64_t legacy_depth = depth_as_tex ? tex_base : 0;
+    const uint64_t legacy_storage = 0;
+    const void* legacy_view =
+        (!rt_as_tex && !legacy_default) ? tex_set : nullptr;
+    trace::DrawBindings bindings;
+    bindings.tex_color = rp->multi_tex ? multi_color : &legacy_color;
+    bindings.tex_feedback = rp->multi_tex ? multi_feedback : &legacy_feedback;
+    bindings.tex_depth = rp->multi_tex ? multi_depth : &legacy_depth;
+    bindings.tex_storage = rp->multi_tex ? multi_storage : &legacy_storage;
+    bindings.tex_guest = rp->multi_tex
+                             ? reinterpret_cast<const void* const*>(multi_views)
+                             : &legacy_view;
+    bindings.tex_count = rp->multi_tex ? multi_n : (d.num_texs ? 1u : 0u);
+    bindings.cbuf_mask = cbuf_mask;
+    bindings.rawbuf_mask = rawbuf_mask;
+    trace::RecordDraw(d, "recomp", &bindings);
   }
   return true;
 }

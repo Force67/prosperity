@@ -10,6 +10,7 @@
 #include "gpu/vulkan/vk_format.h"
 #include "gpu/vulkan/vk_frame.h"
 #include "gpu/vulkan/vk_texture_cache.h"
+#include "gpu/vulkan/vk_trace.h"
 
 #include <cmath>
 #include <cstdio>
@@ -57,6 +58,30 @@ VkImageView SampledImageView(VkImage image,
     return VK_NULL_HANDLE;
   views.emplace(swizzle, view);
   return view;
+}
+
+// Sampled view of a colour target in `want` rather than the target's own
+// format, when the two are the same size (so the reinterpretation is legal and
+// the bytes line up). Falls back to the target's format when they are not.
+VkImageView SampledViewAs(RTarget& rt, uint32_t swizzle, VkFormat want) {
+  if (want == VK_FORMAT_UNDEFINED || want == rt.fmt ||
+      FormatBytes(want) != FormatBytes(rt.fmt))
+    return SampledView(rt, swizzle);
+  const uint32_t key = swizzle | (static_cast<uint32_t>(want) << 16);
+  const auto it = rt.alias_views.find(key);
+  if (it != rt.alias_views.end())
+    return it->second;
+  VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+  vci.image = rt.image;
+  vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+  vci.format = want;
+  vci.components = TextureComponents(swizzle);
+  vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+  VkImageView v = VK_NULL_HANDLE;
+  if (vkCreateImageView(g_dev.device, &vci, nullptr, &v) != VK_SUCCESS)
+    return SampledView(rt, swizzle);
+  rt.alias_views[key] = v;
+  return v;
 }
 
 VkImageView SampledView(RTarget& rt, uint32_t swizzle, bool feedback) {
@@ -134,6 +159,13 @@ bool CreateRtImage(RTarget& t,
   ii.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
              VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
              VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+  // The colour format a pass RENDERS with and the format a later shader SAMPLES
+  // the same memory with are independent on PS4 -- a G-buffer plane written as
+  // UINT is read back through a T# that may name a different numeric type, and
+  // Vulkan requires the view's numeric type to match the shader's sampled type.
+  // Mutable format lets SampledViewAs() hand out a view in the format the
+  // descriptor asked for instead of the one the attachment was created with.
+  ii.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
   if (vkCreateImage(g_dev.device, &ii, nullptr, &t.image) != VK_SUCCESS)
     return false;
   if (!g_image_memory.Allocate(g_dev, t.image, t.allocation)) {
@@ -238,11 +270,23 @@ RTarget* GetRT(uint64_t base, uint32_t w, uint32_t h, VkFormat fmt) {
       return ActivateRtVariant(live, base, w, h, fmt);
     return &live;
   }
-  if (g_rts.size() >= 64)
+  if (g_rts.size() >= 64) {
+    static int n = 0;
+    if (n++ < 4)
+      std::fprintf(stderr,
+                   "[gpuvk] RT table full (64) -- dropping %#lx %ux%u fmt=%d "
+                   "and every draw that targets it\n",
+                   (unsigned long)base, w, h, (int)fmt);
     return nullptr;
+  }
   RTarget t;
-  if (!CreateRtImage(t, base, w, h, fmt))
+  if (!CreateRtImage(t, base, w, h, fmt)) {
+    static int n = 0;
+    if (n++ < 8)
+      std::fprintf(stderr, "[gpuvk] RT image create FAILED %#lx %ux%u fmt=%d\n",
+                   (unsigned long)base, w, h, (int)fmt);
     return nullptr;
+  }
   g_rts[base] = t;
   if (!g_region.first_rt)
     g_region.first_rt = base;
@@ -334,15 +378,22 @@ uint64_t RtByteSize(const RTarget& rt) {
   return RtByteSizeWH(rt.w, rt.h, rt.fmt);
 }
 // Find or create the depth target at guest address `base` (dimensions w x h).
-DepthTarget* GetDepthRT(uint64_t base, uint32_t w, uint32_t h) {
+DepthTarget* GetDepthRT(uint64_t base,
+                        uint32_t w,
+                        uint32_t h,
+                        uint64_t stencil_base) {
   auto it = g_depths.find(base);
-  if (it != g_depths.end())
+  if (it != g_depths.end()) {
+    if (stencil_base)
+      it->second.stencil_base = stencil_base;
     return &it->second;
+  }
   if (g_depths.size() >= 32 || !w || !h)
     return nullptr;
   DepthTarget t;
   t.w = w;
   t.h = h;
+  t.stencil_base = stencil_base;
   VkImageCreateInfo ii{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
   ii.imageType = VK_IMAGE_TYPE_2D;
   ii.format = kDepthFormat;
@@ -368,6 +419,15 @@ DepthTarget* GetDepthRT(uint64_t base, uint32_t w, uint32_t h) {
   vci.format = kDepthFormat;
   vci.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
   if (vkCreateImageView(g_dev.device, &vci, nullptr, &t.view) != VK_SUCCESS) {
+    vkDestroyImage(g_dev.device, t.image, nullptr);
+    g_image_memory.Free(g_dev, t.allocation);
+    return nullptr;
+  }
+  vci.subresourceRange.aspectMask =
+      VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
+  if (vkCreateImageView(g_dev.device, &vci, nullptr, &t.attachment_view) !=
+      VK_SUCCESS) {
+    vkDestroyImageView(g_dev.device, t.view, nullptr);
     vkDestroyImage(g_dev.device, t.image, nullptr);
     g_image_memory.Free(g_dev, t.allocation);
     return nullptr;
@@ -453,6 +513,29 @@ uint64_t ResolveSampledRT(uint64_t addr, uint32_t w, uint32_t h) {
 // be sampled through an R32_FLOAT descriptor whose base denotes an overlapping
 // view rather than DB_Z_WRITE_BASE, so resolve typed depth aliases by footprint
 // too.
+uint64_t ResolveSampledStencil(uint64_t addr) {
+  if (!addr)
+    return 0;
+  for (const auto& [base, depth] : g_depths)
+    if (depth.stencil_base == addr && depth.last_frame > -1000)
+      return base;
+  return 0;
+}
+
+VkImageView StencilSampledView(DepthTarget& depth) {
+  if (depth.stencil_view)
+    return depth.stencil_view;
+  VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+  vci.image = depth.image;
+  vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+  vci.format = kDepthFormat;
+  vci.subresourceRange = {VK_IMAGE_ASPECT_STENCIL_BIT, 0, 1, 0, 1};
+  if (vkCreateImageView(g_dev.device, &vci, nullptr, &depth.stencil_view) !=
+      VK_SUCCESS)
+    depth.stencil_view = VK_NULL_HANDLE;
+  return depth.stencil_view;
+}
+
 uint64_t ResolveSampledDepth(uint64_t addr, uint32_t w, uint32_t h) {
   if (!addr)
     return 0;
@@ -487,10 +570,13 @@ void EndRegion() {
     return;
   g_cmd_end_rendering(g_frame.cmd);
   CmdEndLabel(g_frame.cmd);
+  if (trace::Recording())
+    trace::RegionEnd();
   g_region.open = false;
   g_region.cur_rt = 0;
   g_region.cur_mrt_count = 0;
   g_region.cur_depth = 0;
+  g_region.cur_stencil = 0;
 }
 
 void SetGuestViewport(const DrawInfo& d) {
@@ -520,9 +606,12 @@ bool BeginRegion(const uint64_t* mrt_base,
                  const uint32_t* mrt_info,
                  uint32_t mrt_count,
                  uint32_t w,
-                 uint32_t h,
-                 uint64_t depth_base,
-                 float depth_clear) {
+                  uint32_t h,
+                  uint64_t depth_base,
+                  float depth_clear,
+                  uint64_t stencil_base,
+                  uint8_t stencil_clear,
+                  bool depth_read_only) {
   VkRenderingAttachmentInfo colors[8]{};
   RTarget* targets[8]{};
   mrt_count = std::min(mrt_count, 8u);
@@ -531,7 +620,8 @@ bool BeginRegion(const uint64_t* mrt_base,
     if (!targets[i])
       return false;
   }
-  DepthTarget* dt = depth_base ? GetDepthRT(depth_base, w, h) : nullptr;
+  DepthTarget* dt =
+      depth_base ? GetDepthRT(depth_base, w, h, stencil_base) : nullptr;
   if (depth_base && !dt)
     return false;
   g_region.cur_mrt_count = 0;
@@ -602,7 +692,15 @@ bool BeginRegion(const uint64_t* mrt_base,
   // Z buffer.
   VkRenderingAttachmentInfo depth_att{
       VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+  VkRenderingAttachmentInfo stencil_att{
+      VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
   if (dt) {
+    const bool clear_depth = dt->clear_pending || !dt->used_this_frame;
+    // Async compute is currently serialized ahead of the next graphics frame.
+    // Keep this frame's scene depth in its persistent CS range before a later
+    // pass clears the shared depth image, or next frame's compute sees zero.
+    if (clear_depth && dt->used_this_frame)
+      PreserveCsDepthBeforeClear(depth_base);
     const VkAccessFlags depth_source =
         dt->layout == VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL
             ? VK_ACCESS_SHADER_READ_BIT
@@ -610,23 +708,56 @@ bool BeginRegion(const uint64_t* mrt_base,
             ? VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
                   VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT
             : 0;
-    DepthBarrier(g_frame.cmd, dt->image, dt->layout,
-                 VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, depth_source,
-                 VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT |
-                     VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT);
-    dt->layout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
-    depth_att.imageView = dt->view;
-    depth_att.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
-    bool clear_depth = dt->clear_pending || !dt->used_this_frame;
+    // A pass that samples the depth it tests against keeps the image in the
+    // read-only layout, which is what makes attachment and sampled view legal
+    // at the same time. A clear still needs write access, so never both.
+    const bool read_only = depth_read_only && !clear_depth;
+    const VkImageLayout depth_layout =
+        read_only ? VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL
+                  : VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+    DepthBarrier(g_frame.cmd, dt->image, dt->layout, depth_layout, depth_source,
+                 read_only ? VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                                 VK_ACCESS_SHADER_READ_BIT
+                           : VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT |
+                                 VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT);
+    dt->layout = depth_layout;
+    depth_att.imageView = dt->attachment_view;
+    depth_att.imageLayout = depth_layout;
     depth_att.loadOp =
         clear_depth ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
-    depth_att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    depth_att.storeOp = read_only ? VK_ATTACHMENT_STORE_OP_NONE
+                                  : VK_ATTACHMENT_STORE_OP_STORE;
     depth_att.clearValue.depthStencil = {
         dt->clear_pending ? dt->clear_value : depth_clear, 0};
     dt->clear_pending = false;
     dt->used_this_frame = true;
     dt->last_frame = g_frame.num;
     g_region.cur_depth = depth_base;
+    if (stencil_base) {
+      const bool clear_stencil = !dt->stencil_used_this_frame;
+      const VkAccessFlags stencil_source =
+          dt->stencil_layout == VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL
+              ? VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                    VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT
+          : dt->stencil_layout == VK_IMAGE_LAYOUT_STENCIL_READ_ONLY_OPTIMAL
+              ? VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                    VK_ACCESS_SHADER_READ_BIT
+              : 0;
+      StencilBarrier(g_frame.cmd, dt->image, dt->stencil_layout,
+                     VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL,
+                     stencil_source,
+                     VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                         VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
+      dt->stencil_layout = VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL;
+      stencil_att.imageView = dt->attachment_view;
+      stencil_att.imageLayout = VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL;
+      stencil_att.loadOp = clear_stencil ? VK_ATTACHMENT_LOAD_OP_CLEAR
+                                         : VK_ATTACHMENT_LOAD_OP_LOAD;
+      stencil_att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+      stencil_att.clearValue.depthStencil = {depth_clear, stencil_clear};
+      dt->stencil_used_this_frame = true;
+      g_region.cur_stencil = stencil_base;
+    }
   }
   VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
   ri.renderArea = {{0, 0}, {w, h}};
@@ -635,11 +766,30 @@ bool BeginRegion(const uint64_t* mrt_base,
   ri.pColorAttachments = colors;
   if (dt)
     ri.pDepthAttachment = &depth_att;
+  if (dt && stencil_base)
+    ri.pStencilAttachment = &stencil_att;
+  if (trace::Recording()) {
+    trace::RegionInfo info;
+    info.mrt_base = mrt_base;
+    info.mrt_info = mrt_info;
+    info.mrt_count = g_region.cur_mrt_count;
+    info.width = w;
+    info.height = h;
+    info.depth_base = depth_base;
+    info.stencil_base = stencil_base;
+    for (uint32_t i = 0; i < g_region.cur_mrt_count; i++)
+      if (colors[i].loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR)
+        info.color_clear_mask |= 1u << i;
+    info.depth_clear = dt && depth_att.loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR;
+    info.depth_clear_value = depth_att.clearValue.depthStencil.depth;
+    trace::RegionBegin(info);
+  }
   CmdBeginLabel(g_frame.cmd, "region rt=%#llx %ux%u mrt=%u depth=%#llx",
                 (unsigned long long)base, w, h, g_region.cur_mrt_count,
                 (unsigned long long)depth_base);
   g_cmd_begin_rendering(g_frame.cmd, &ri);
   g_region.open = true;
+  g_region.depth_read_only = depth_base && depth_read_only;
   // Negative-height (y-up) viewport: GCN/PS4 rasterises y-up, so we do too.
   // This stores render-target content upright, so render-to-texture composites
   // (the scene->scanout copy, effect overlays) sample it with aligned UVs when
@@ -676,6 +826,8 @@ void NoteMemoryFill(Renderer& renderer,
                     uint32_t value) {
   if (!renderer.available() || !bytes)
     return;
+  if (trace::Recording())
+    trace::RecordMemoryFill(base, bytes, value);
   const uint64_t end = base + bytes;
   const auto note = [&](RTarget& rt, uint64_t rt_base) {
     const uint64_t rt_end = rt_base + RtByteSize(rt);
