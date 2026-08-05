@@ -177,6 +177,181 @@ std::unordered_set<uint32_t> PlanPerVertexAttrs(const Program& program,
   return out;
 }
 
+// ---- proving a graphics-stage LDS access is the lane's OWN slot -----------
+// A fragment shader cannot declare Workgroup storage, so a graphics stage
+// backs LDS with Private -- one array per invocation. That is EXACT precisely
+// when every address is the lane's own slot, and a spill is the only thing
+// these compilers use graphics LDS for:
+//
+//     v_mbcnt_hi_u32_b32 v44, -1, 0     ; the raw thread id: mbcnt counts bits
+//     v_mbcnt_lo_u32_b32 v44, -1, v44   ; of the EXPLICIT mask, so -1 is exec-
+//     v_lshlrev_b32      v44, 2, v44    ; independent. Times 4 = a dword slot.
+//     ds_write_b32       v44, v12 offset:0x200
+//
+// with the 256-byte offsets naming successive spill slots (64 lanes x 4B).
+// shadPS4 asserts exactly this shape and lowers the same accesses to dedicated
+// scratch registers. Proving it here is what lets the audit stop calling a
+// correct lowering "approximated" -- while still flagging any shader whose
+// LDS address is something else, which Private storage really would get wrong.
+//
+// The proof is over the WHOLE reachable program, not the nearest producer: an
+// address register is only own-lane if nothing else ever writes it. Any
+// instruction whose VGPR destination this cannot name gives up on the whole
+// program rather than assume it wrote nothing.
+struct VgprWrite {
+  bool known = true;  // false: this instruction's destination is unknown
+  uint32_t dst = 0;
+  uint32_t count = 0;  // 0 = writes no VGPR
+};
+
+VgprWrite VgprDestOf(const Inst& inst) {
+  const uint32_t w = inst.raw[0], w1 = inst.raw[1];
+  switch (inst.enc) {
+    case Enc::kSop1:
+    case Enc::kSop2:
+    case Enc::kSopk:
+    case Enc::kSopc:
+    case Enc::kSopp:
+    case Enc::kSmrd:
+    case Enc::kVopc:  // scalar destinations only
+    case Enc::kExp:
+      return {};
+    case Enc::kVop1:
+      // v_readfirstlane_b32 writes an SGPR; every other VOP1 writes vdst.
+      return inst.opcode == 0x02 ? VgprWrite{}
+                                 : VgprWrite{true, (w >> 17) & 0xFF, 1};
+    case Enc::kVop2:
+      return inst.opcode == 0x01 ? VgprWrite{}  // v_readlane_b32 -> SGPR
+                                 : VgprWrite{true, (w >> 17) & 0xFF, 1};
+    case Enc::kVop3:
+      if (inst.opcode < 0x100 || inst.opcode == 0x101)
+        return {};  // a compare's predicate, or v_readlane_b32
+      // The 64-bit and division forms write a pair; count two to be safe.
+      return {true, w & 0xFF, 2};
+    case Enc::kVop3p:
+      return {true, w & 0xFF, 1};
+    case Enc::kVintrp:
+      return {true, (w >> 18) & 0xFF, 1};
+    case Enc::kDs:
+      return {true, (w1 >> 24) & 0xFF, 2};  // vdst of a read; stores write none
+    case Enc::kMubuf:
+    case Enc::kMtbuf:
+    case Enc::kMimg:
+      return {true, (w1 >> 8) & 0xFF, 4};  // vdata: up to four for a load
+    default:
+      return {false, 0, 0};  // kFlat, kUnknown: not modelled
+  }
+}
+
+// Every pc a branch can land on. A nearest-preceding-definition argument is
+// only sound when no other path can reach the use, so the chain below refuses
+// to look across a label -- or across an indirect branch, which has no
+// statically known target at all.
+bool CollectLabels(const Program& program,
+                   const uint8_t* reachable,
+                   std::unordered_set<uint32_t>& labels) {
+  for (size_t i = 0; i < program.size(); i++) {
+    const Inst& inst = program[i];
+    if (reachable && !reachable[i])
+      continue;
+    if (inst.enc == Enc::kSop1 && (inst.opcode == 0x20 || inst.opcode == 0x21))
+      return false;  // s_setpc / s_swappc: target unknown
+    if (inst.enc != Enc::kSopp)
+      continue;
+    const bool branch =
+        inst.opcode == 0x02 || (inst.opcode >= 0x04 && inst.opcode <= 0x0b);
+    if (!branch)
+      continue;
+    const int32_t simm = static_cast<int16_t>(inst.raw[0] & 0xFFFF);
+    labels.insert(static_cast<uint32_t>(static_cast<int64_t>(inst.pc) +
+                                        inst.size + simm));
+  }
+  return true;
+}
+
+// The instruction that last wrote `reg` before `use`, or -1. Returns -2 when
+// the walk crossed something it cannot account for: an unknown destination, or
+// a label (some other path could reach `use` with a different value).
+int NearestVgprDef(const Program& program,
+                   const uint8_t* reachable,
+                   const std::unordered_set<uint32_t>& labels,
+                   size_t use,
+                   uint32_t reg) {
+  for (size_t i = use; i-- > 0;) {
+    const Inst& inst = program[i];
+    if (reachable && !reachable[i])
+      continue;
+    if (labels.count(inst.pc))
+      return -2;
+    const VgprWrite d = VgprDestOf(inst);
+    if (!d.known)
+      return -2;
+    if (d.count && reg >= d.dst && reg < d.dst + d.count)
+      return static_cast<int>(i);
+  }
+  return -1;
+}
+
+// `def` is `op vdst, src0, src1` in either the VOP2 or the VOP3 spelling, with
+// src0 equal to `want_src0`. src1 is returned when it names a VGPR.
+bool IsLaneChainStep(const Inst& inst,
+                     uint32_t want_op,
+                     uint32_t want_src0,
+                     int want_src1,
+                     uint32_t* src1_reg) {
+  const bool vop2 = inst.enc == Enc::kVop2 && inst.opcode == want_op;
+  const bool vop3 = inst.enc == Enc::kVop3 && inst.opcode == 0x100 + want_op;
+  if (!vop2 && !vop3)
+    return false;
+  const uint32_t src0 = vop3 ? (inst.raw[1] & 0x1FF) : (inst.raw[0] & 0x1FF);
+  const uint32_t src1 =
+      vop3 ? ((inst.raw[1] >> 9) & 0x1FF) : (256 + ((inst.raw[0] >> 9) & 0xFF));
+  if (src0 != want_src0)
+    return false;
+  if (want_src1 >= 0)
+    return src1 == static_cast<uint32_t>(want_src1);
+  if (src1 < 256)
+    return false;
+  if (src1_reg)
+    *src1_reg = src1 - 256;
+  return true;
+}
+
+// The pcs of the DS instructions whose address is provably the lane's own
+// slot, i.e. `v_mbcnt_{hi,lo}(-1) << 2`. Operand fields: 193 = the inline
+// constant -1, 130 = 2, 128 = 0.
+std::unordered_set<uint32_t> PlanDsOwnLane(const Program& program,
+                                           const uint8_t* reachable) {
+  std::unordered_set<uint32_t> out;
+  std::unordered_set<uint32_t> labels;
+  if (!CollectLabels(program, reachable, labels))
+    return out;
+  for (size_t i = 0; i < program.size(); i++) {
+    const Inst& inst = program[i];
+    if (inst.enc != Enc::kDs || (reachable && !reachable[i]))
+      continue;
+    uint32_t reg = inst.raw[1] & 0xFF;
+    // addr <- lshlrev(2, lane) <- mbcnt_lo(-1, hi) <- mbcnt_hi(-1, 0)
+    static constexpr uint32_t kOps[3] = {0x1a, 0x23, 0x24};
+    static constexpr uint32_t kSrc0[3] = {130, 193, 193};
+    static constexpr int kSrc1[3] = {-1, -1, 128};
+    size_t at = i;
+    bool ok = true;
+    for (uint32_t step = 0; step < 3 && ok; step++) {
+      const int def = NearestVgprDef(program, reachable, labels, at, reg);
+      if (def < 0 || !IsLaneChainStep(program[def], kOps[step], kSrc0[step],
+                                      kSrc1[step], &reg)) {
+        ok = false;
+        break;
+      }
+      at = static_cast<size_t>(def);
+    }
+    if (ok)
+      out.insert(inst.pc);
+  }
+  return out;
+}
+
 // The triangle's three vertex values for one Location, as an array[3] decorated
 // PerVertexKHR. Index 0 is the provoking vertex, so P0 = [0], P10 = [1] - [0],
 // P20 = [2] - [0].
@@ -576,12 +751,13 @@ void EmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       if (sc.is_cs || inst.opcode == 0x35) {
         EmitDs(t, inst, sc);
       } else if (sc.lds_var && DsGraphicsSupported(inst.opcode)) {
-        // Private-backed LDS: exact for the per-lane addressing a fragment
-        // shader can express, which is the whole of what these compilers emit
-        // (a spill). Recorded, not silently accepted, because the translator
-        // cannot prove the address is the lane's own slot -- see the note on
-        // StageContext::lds_storage for where that stops being true.
-        NoteApproximated("ds.private", inst.opcode);
+        // Private-backed LDS. Exact when the address is the lane's own slot,
+        // which PlanDsOwnLane proves from the mbcnt/shift chain the compilers
+        // emit for a spill; anything else is recorded, because Private storage
+        // cannot carry a value between lanes -- see the note on
+        // StageContext::lds_storage.
+        if (!sc.ds_own_lane.count(inst.pc))
+          NoteApproximated("ds.private", inst.opcode);
         EmitDs(t, inst, sc);
       } else {
         WarnUnsupported("ds.graphics", inst.opcode, w, w1);
@@ -1717,6 +1893,7 @@ bool TranslatePs(const Program& program,
   // hardware returns garbage for a read-before-write and SPIR-V would leave it
   // undefined, so pinning it keeps runs reproducible and stops uninitialised
   // lanes poisoning the NaN audit.
+  sc.ds_own_lane = PlanDsOwnLane(program, reachable.data());
   if (const uint32_t lds_dwords = GraphicsLdsDwords(program, reachable.data())) {
     const Id lds_arr = t.m.TypeArray(t.t_u, lds_dwords);
     sc.lds_storage = spv::StorageClass::Private;

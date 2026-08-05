@@ -664,6 +664,9 @@ struct StageContext {
   // The idiom that would break it is mbcnt applied to EXEC (a compaction
   // index), where lanes share and reuse slots over time.
   spv::StorageClass lds_storage = spv::StorageClass::Workgroup;
+  // pcs of the DS instructions whose address is proven to be the lane's own
+  // slot, so Private storage answers them exactly (PlanDsOwnLane).
+  std::unordered_set<uint32_t> ds_own_lane;
   Id subgroup_local_id = 0;     // SubgroupLocalInvocationId for DS swizzles
   // Instruction indices (sorted) at which a workgroup barrier must be emitted
   // because the guest compiler omitted one it was entitled to omit on a
