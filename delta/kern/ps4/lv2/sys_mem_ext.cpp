@@ -258,6 +258,13 @@ int PS4ABI sys_batch_map(uint32_t /*handle*/, uint32_t /*flags*/,
         return -SysError::eINVAL;
       }
       auto *pr = proc::getActive();
+      // Sharing the dmem backing is NOT safe for PS4 as things stand. SotC
+      // maps one physical offset at 1664 successive VAs and never releases
+      // them, so a shared store aliases every historical mapping at once and
+      // the title's memory dissolves -- measured twice, once as-is and once
+      // with sys_munmap dropping the alias on release: both times SotC stopped
+      // rendering even its intro (0 lit frames). Whatever the guest is doing
+      // with that offset has to be understood before this can be turned on.
       const bool ps5 = pr && pr->getPlatform() == proc::platform::ps5;
       const int fd = (op.operation == 0 && ps5) ? dmemBackingFd() : -1;
       if (fd >= 0 && op.offset + op.length <= dmemBackingSize()) {
@@ -327,7 +334,7 @@ int64_t PS4ABI sys_mmap_dmem(void *addr, size_t len, int prot, int flags,
   const bool fixedReq = (flags & 0x10) != 0;
   auto *active = proc::getActive();
   const bool ps5 = active && active->getPlatform() == proc::platform::ps5;
-  const int fd = ps5 ? dmemBackingFd() : -1;  // PS5-only shared store (WIP)
+  const int fd = ps5 ? dmemBackingFd() : -1;  // see the batch-map note above
   if (kDmemTrace)
     std::fprintf(stderr,
                  "[dmem] map628 va=%p len=%#zx prot=%#x flags=%#x physOff=%#llx fixed=%d\n",

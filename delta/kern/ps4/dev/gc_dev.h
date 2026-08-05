@@ -4,6 +4,9 @@
 
 #include "device.h"
 
+#include <array>
+#include <mutex>
+
 namespace krnl {
 class proc;
 
@@ -19,5 +22,22 @@ public:
   // with a lazily-allocated pool (identity range, CP-renderable).
   uint8_t *poolBase = nullptr;
   uint64_t poolSize = 0;
+
+private:
+  struct ComputeQueue {
+    uint32_t me = 0;
+    uint32_t pipe = 0;
+    uint32_t queue = 0;
+    uint32_t vqueue = 0;
+    uint64_t ringBase = 0;
+    uint64_t readPtr = 0;
+    uint64_t state = 0;
+    uint32_t ringSizeDw = 0;
+    uint32_t readOffsetDw = 0;
+    bool mapped = false;
+  };
+
+  std::array<ComputeQueue, 64> computeQueues{};
+  std::mutex computeMutex;
 };
 }

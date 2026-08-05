@@ -107,6 +107,10 @@ extern "C" void prosperity_gc_submit(const void *descArray, uint32_t descCount) 
   }
 }
 
+extern "C" void prosperity_gc_submit_acb(const void *commands, uint32_t bytes) {
+  gpu::SubmitDcb(commands, bytes);
+}
+
 // LLE flip bridge: /dev/dce owns display-buffer registration and supplies the
 // selected scanout address to /dev/gc when the real GnmDriver submits the frame.
 // endFrame falls back to the last RT if the address was not registered.
