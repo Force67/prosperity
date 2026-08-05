@@ -698,6 +698,48 @@ void EmitSopk(Translator& t, const Inst& inst) {
   }
 }
 
+// ---- SGPR spills parked in a VGPR's lanes -----------------------------------
+std::unordered_set<uint32_t> PlanLaneSpills(const Program& program,
+                                            const uint8_t* reachable) {
+  std::unordered_set<uint32_t> spills;
+  uint32_t index = 0;
+  for (const Inst& inst : program) {
+    const uint32_t i = index++;
+    if (reachable && !reachable[i])
+      continue;
+    if (inst.enc == Enc::kVop2 && inst.opcode == 0x02)
+      spills.insert((inst.raw[0] >> 17) & 0xFF);
+    else if (inst.enc == Enc::kVop3 && inst.opcode == 0x102)
+      spills.insert(inst.raw[0] & 0xFF);
+  }
+  return spills;
+}
+
+bool EmitLaneSpill(Translator& t,
+                   uint32_t op,
+                   uint32_t dst,
+                   uint32_t src0,
+                   uint32_t src1,
+                   uint32_t literal) {
+  if (op == 0x01) {  // v_readlane_b32 sdst, vsrc, lane
+    if (src0 < 256 || !t.IsSpillVgpr(src0 - 256))
+      return false;
+    t.SetSg(dst,
+            t.m.Load(t.t_u, t.SpillAt(src0 - 256, t.SrcRaw(src1, literal))));
+    return true;
+  }
+  if (op == 0x02) {  // v_writelane_b32 vdst, ssrc, lane
+    if (!t.IsSpillVgpr(dst))
+      return false;
+    // Publish into the slot array, then report NOT consumed so the general
+    // lowering still updates the VGPR itself: a stage that has a lane index
+    // keeps exactly the behaviour it had, and this is purely additive.
+    t.m.Store(t.SpillAt(dst, t.SrcRaw(src1, literal)), t.SrcRaw(src0, literal));
+    return false;
+  }
+  return false;
+}
+
 // ---- cross-lane -------------------------------------------------------------
 // A GCN wave is 64 lanes; the host subgroup may be half that. Compute gets an
 // exact channel (a Workgroup array indexed the way GCN packs threads into

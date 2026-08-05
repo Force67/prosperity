@@ -1240,8 +1240,11 @@ std::string OperandsVop2(const Inst& inst) {
   const uint32_t w = inst.raw[0];
   const uint32_t vsrc1 = (w >> 9) & 0xff;
   const std::string src0 = CompactSource(inst, 0, vsrc1, 1);
+  // The lane operand of the read/writelane pair is an 8-bit SSRC field, so it
+  // takes inline constants too: printing it as a register name turns "lane 4"
+  // into "s132" and reads as a live scalar the shader never had.
   const std::string src1 = inst.opcode == 0x01 || inst.opcode == 0x02
-                               ? SName(vsrc1)
+                               ? Src(vsrc1, inst, 1)
                                : CompactSource(inst, 1, vsrc1, 1);
   const uint32_t vdst = (w >> 17) & 0xff;
   std::string s = (inst.opcode == 0x01 ? SName(vdst) : VRange(vdst, 1)) + ", ";

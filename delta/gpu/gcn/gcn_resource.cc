@@ -341,6 +341,27 @@ bool Sop2DestIs64(uint32_t op) {
   }
 }
 
+// VOP3b: the forms that carry a second, SCALAR destination (a carry-out or a
+// division-scale flag) in bits 14:8 of the first dword, where a plain VOP3a
+// keeps its abs/clamp bits.
+bool Vop3bWritesSdst(uint32_t op) {
+  switch (op) {
+    case 0x125:  // v_add_i32
+    case 0x126:  // v_sub_i32
+    case 0x127:  // v_subrev_i32
+    case 0x128:  // v_addc_u32
+    case 0x129:  // v_subb_u32
+    case 0x12a:  // v_subbrev_u32
+    case 0x16d:  // v_div_scale_f32
+    case 0x16e:  // v_div_scale_f64
+    case 0x176:  // v_mad_u64_u32
+    case 0x177:  // v_mad_i64_i32
+      return true;
+    default:
+      return false;
+  }
+}
+
 struct ScalarEval {
   static constexpr uint32_t kRegs = 136;
   uint32_t sgpr[kRegs] = {};
@@ -348,6 +369,19 @@ struct ScalarEval {
   uint64_t src[kRegs] = {};  // guest address each dword was s_loaded from
   bool trace = false;
   uint64_t code_base = 0;  // guest address of the program, for s_getpc_b64
+
+  // A shader that runs out of SGPRs parks scalars in the LANES of a VGPR with
+  // v_writelane_b32 and reads them back with v_readlane_b32. Both of that
+  // pair's scalar operands are wave-uniform by encoding -- the value must come
+  // from an SGPR or an inline constant, never a VGPR, and so must the lane --
+  // so the value a lane holds is exactly the scalar that was written, and the
+  // walk can replay it. SotC restores descriptor-table POINTERS this way
+  // (`v_readlane_b32 s82, v47, 11` then `s_load_dwordx4 s[8:11], s[82:83], 8`),
+  // so a walk that skips the pair reads whatever those SGPRs held earlier and
+  // decodes a descriptor from the wrong address. Keyed vgpr*64 + lane; a slot
+  // that is absent is unknown and invalidates its destination.
+  std::unordered_map<uint32_t, uint32_t> lane_spill;
+  std::unordered_map<uint32_t, uint64_t> lane_spill_src;
 
   explicit ScalarEval(const uint32_t* user_data, uint64_t base = 0) {
     for (uint32_t i = 0; i < 16; i++) {
@@ -419,6 +453,74 @@ struct ScalarEval {
       return Source(field + 1, 0, value);
     value = 0;
     return true;
+  }
+
+  // The vector encodings that move data between the scalar file and a VGPR's
+  // lanes, plus the ones that write an SGPR the walk cannot model. Returns
+  // true when the instruction was consumed here.
+  bool StepLaneOp(const Inst& inst) {
+    const bool vop1 = inst.enc == Enc::kVop1, vop2 = inst.enc == Enc::kVop2;
+    const bool vop3 = inst.enc == Enc::kVop3;
+    if (!vop1 && !vop2 && !vop3)
+      return false;
+    const uint32_t w = inst.raw[0], w1 = inst.raw[1], op = inst.opcode;
+    // VOP3 re-encodes the VOP1 (0x180+) and VOP2 (0x100+) opcodes and moves
+    // the operands into the second dword.
+    const bool readlane = (vop2 && op == 0x01) || (vop3 && op == 0x101);
+    const bool writelane = (vop2 && op == 0x02) || (vop3 && op == 0x102);
+    const bool readfirstlane = (vop1 && op == 0x02) || (vop3 && op == 0x182);
+    const uint32_t dst = vop3 ? (w & 0xFF) : ((w >> 17) & 0xFF);
+    const uint32_t src0 = vop3 ? (w1 & 0x1FF) : (w & 0x1FF);
+    const uint32_t src1 = vop3 ? ((w1 >> 9) & 0x1FF) : ((w >> 9) & 0xFF);
+    const auto forget = [&](uint32_t slot) {
+      lane_spill.erase(slot);
+      lane_spill_src.erase(slot);
+    };
+    if (writelane) {
+      uint32_t value = 0, lane = 0;
+      const bool lane_known = Source(src1, inst.literal, lane);
+      const bool value_known = Source(src0, inst.literal, value);
+      if (!lane_known) {
+        for (uint32_t i = 0; i < 64; i++)  // could have landed anywhere
+          forget(dst * 64 + i);
+      } else if (!value_known) {
+        forget(dst * 64 + (lane & 63));
+      } else {
+        lane_spill[dst * 64 + (lane & 63)] = value;
+        lane_spill_src[dst * 64 + (lane & 63)] = src0 <= 127 ? src[src0] : 0;
+      }
+      return true;
+    }
+    if (readlane || readfirstlane) {
+      // readfirstlane names the lowest EXEC-active lane. The walk does not
+      // model EXEC, so it can only answer when the shader spilled to lane 0 --
+      // which is what a spill/reload pair does when it uses one slot.
+      uint32_t lane = 0;
+      const bool lane_known = readfirstlane || Source(src1, inst.literal, lane);
+      const uint32_t slot = (src0 - 256) * 64 + (lane & 63);
+      const auto it = lane_known && src0 >= 256 && src0 < 512
+                          ? lane_spill.find(slot)
+                          : lane_spill.end();
+      if (it == lane_spill.end()) {
+        Clear(dst);
+      } else {
+        Set(dst, it->second);
+        const auto at = lane_spill_src.find(slot);
+        src[dst] = at == lane_spill_src.end() ? 0 : at->second;
+      }
+      return true;
+    }
+    // A VOP3-form compare writes its predicate to an SGPR PAIR, and a VOP3b
+    // writes a carry-out there. Same rule as SOP1: an unmodelled SGPR write
+    // must invalidate its destination rather than leave a stale pointer for a
+    // later descriptor decode to read.
+    if (vop3 && (op < 0x100 || Vop3bWritesSdst(op))) {
+      const uint32_t sdst = op < 0x100 ? dst : ((w >> 8) & 0x7F);
+      Clear(sdst);
+      Clear(sdst + 1);
+      return true;
+    }
+    return false;
   }
 
   // Advance the register file across one instruction. Only scalar moves and
@@ -508,6 +610,8 @@ struct ScalarEval {
       }
       return;
     }
+    if (StepLaneOp(inst))
+      return;
     if (inst.enc == Enc::kSop2) {
       const uint32_t w = inst.raw[0], op = inst.opcode;
       const uint32_t sdst = (w >> 16) & 0x7F;
@@ -686,6 +790,26 @@ struct ScalarPassInfo {
   std::vector<Inst> insts;  // program-order subset relevant to ScalarEval users
 };
 
+// The vector instructions the walk has to see: the lane-spill pair that moves
+// pointers between the scalar file and a VGPR's lanes, and the forms whose
+// second destination is an SGPR the walk cannot model and must invalidate.
+// Everything else in the vector encodings leaves the scalar file alone, and
+// keeping it out of the subset is what makes the per-draw walk cheap.
+bool VectorTouchesScalarFile(const Inst& inst) {
+  switch (inst.enc) {
+    case Enc::kVop1:
+      return inst.opcode == 0x02;  // v_readfirstlane_b32
+    case Enc::kVop2:
+      return inst.opcode == 0x01 || inst.opcode == 0x02;  // read/writelane
+    case Enc::kVop3:
+      return inst.opcode < 0x100 ||  // a compare's SGPR-pair predicate
+             inst.opcode == 0x101 || inst.opcode == 0x102 ||
+             inst.opcode == 0x182 || Vop3bWritesSdst(inst.opcode);
+    default:
+      return false;
+  }
+}
+
 const ScalarPassInfo& CachedScalarInfo(
     const std::shared_ptr<const Program>& program) {
   struct Entry {
@@ -712,7 +836,7 @@ const ScalarPassInfo& CachedScalarInfo(
     if (inst.enc == Enc::kSop1 || inst.enc == Enc::kSopk ||
         inst.enc == Enc::kSop2 || inst.enc == Enc::kSmrd ||
         inst.enc == Enc::kMimg || inst.enc == Enc::kMubuf ||
-        inst.enc == Enc::kMtbuf)
+        inst.enc == Enc::kMtbuf || VectorTouchesScalarFile(inst))
       e.info.insts.push_back(inst);
   }
   return cache.emplace(program.get(), std::move(e)).first->second.info;

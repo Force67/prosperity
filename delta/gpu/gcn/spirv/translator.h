@@ -242,6 +242,33 @@ struct Translator {
   Id VgF(uint32_t i) { return m.Bitcast(t_f, Vg(i)); }
   void SetVgF(uint32_t i, Id f) { SetVg(i, m.Bitcast(t_u, f)); }
 
+  // ---- SGPR spill slots ------------------------------------------------
+  // A shader out of scalar registers parks scalars in the LANES of a VGPR with
+  // v_writelane_b32 and reloads them with v_readlane_b32. Both scalar operands
+  // of that pair are wave-uniform by encoding -- neither the value nor the
+  // lane may be a VGPR -- so every invocation writes and reads exactly the
+  // same thing, and a Private array per spilled VGPR reproduces the wave's
+  // lane file exactly, with no cross-lane channel and no lane index. That
+  // matters most in a graphics stage, where no lane index exists at all: the
+  // old lowering dropped every write whose lane was not 0 and answered every
+  // read with the invocation's own value, and SotC restores descriptor-table
+  // pointers this way.
+  // Populated by PlanLaneSpills before the body is translated, so a reload
+  // that textually precedes its spill still resolves here.
+  std::unordered_set<uint32_t> spill_vgprs;
+  std::unordered_map<uint32_t, Id> spill_vars;
+  bool IsSpillVgpr(uint32_t v) const { return spill_vgprs.count(v) != 0; }
+  Id SpillAt(uint32_t vgpr, Id lane) {
+    Id& var = spill_vars[vgpr];
+    if (!var) {
+      const Id arr = m.TypeArray(t_u, 64);
+      var = m.Variable(m.TypePointer(spv::StorageClass::Private, arr),
+                       spv::StorageClass::Private, m.ConstNull(arr));
+      m.Name(var, "lane_spill");
+    }
+    return m.AccessChain(p_priv_u, var, {And(lane, U32(63))});
+  }
+
   // ---- constants ----
   Id U32(uint32_t v) { return m.ConstU32(v); }
   Id F32(float v) { return m.ConstF32(v); }
@@ -703,6 +730,19 @@ void EmitVopc(Translator& t,
               Id s0_hi = 0,
               Id s1_hi = 0);
 bool IsVop3b(uint32_t op);
+// The VGPRs a shader uses as SGPR spill areas: every v_writelane_b32
+// destination, including the VOP3 form. See Translator::spill_vgprs.
+std::unordered_set<uint32_t> PlanLaneSpills(const Program& program,
+                                            const uint8_t* reachable = nullptr);
+// v_readlane_b32 / v_writelane_b32 against such a VGPR, which is exact in
+// every stage. False when the VGPR is not a spill area, leaving the general
+// cross-lane lowering to answer the instruction.
+bool EmitLaneSpill(Translator& t,
+                   uint32_t op,
+                   uint32_t dst,
+                   uint32_t src0,
+                   uint32_t src1,
+                   uint32_t literal);
 bool EmitNeoVop1(Translator& t, const Inst& inst);
 bool EmitNeoVop2(Translator& t, const Inst& inst);
 bool EmitNeoVopc(Translator& t,

@@ -426,6 +426,8 @@ void EmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       const uint32_t op = inst.opcode, vdst = (w >> 17) & 0xFF;
       const uint32_t vsrc1 = (w >> 9) & 0xFF, src0 = w & 0x1FF;
       const uint32_t src1 = op == 0x01 || op == 0x02 ? vsrc1 : 256 + vsrc1;
+      if (EmitLaneSpill(t, op, vdst, src0, src1, inst.literal))
+        break;
       EmitVop2(t, op, vdst, t.SrcF(src0, inst.literal),
                t.SrcF(src1, inst.literal), inst.literal);
       break;
@@ -441,6 +443,11 @@ void EmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       const uint32_t s0 = w1 & 0x1FF, s1 = (w1 >> 9) & 0x1FF;
       const uint32_t s2 = (w1 >> 18) & 0x1FF, neg = (w1 >> 29) & 7;
       const uint32_t omod = (w1 >> 27) & 3;
+      // The VOP3 spellings of the lane pair, which name their operands in the
+      // second dword; EmitVop3 sees Ids, not register fields.
+      if ((op == 0x101 || op == 0x102) &&
+          EmitLaneSpill(t, op - 0x100, vdst, s0, s1, inst.literal))
+        break;
       Id source0 = t.SrcF(s0, inst.literal, neg & 1, abs & 1);
       if (op == 0x18b) {
         source0 =
@@ -1503,6 +1510,7 @@ bool TranslateVs(const Program& program,
   const uint64_t fetch =
       (static_cast<uint64_t>(vs_user_data[1] & 0xFFFF) << 32) | vs_user_data[0];
   const std::vector<uint8_t> reachable = ComputeReachability(program);
+  t.spill_vgprs = PlanLaneSpills(program, reachable.data());
   std::vector<FetchAttr> direct_attrs;
   for (uint32_t i = 0; i < program.size(); i++) {
     const Inst& inst = program[i];
@@ -1690,6 +1698,7 @@ bool TranslatePs(const Program& program,
   // target); PS inputs (PsInputVar) likewise as they are read.
   std::vector<Id> iface;
   const std::vector<uint8_t> reachable = ComputeReachability(program);
+  t.spill_vgprs = PlanLaneSpills(program, reachable.data());
   StageContext sc;
   sc.is_ps = true;
   sc.r = &r;
@@ -1863,6 +1872,7 @@ bool TranslateCs(const Program& program,
   // s_endpgm, but also picks up dead padding between the real code and the
   // OrbShdr footer -- only reachable instructions may influence translation.
   const std::vector<uint8_t> reachable = ComputeReachability(program);
+  t.spill_vgprs = PlanLaneSpills(program, reachable.data());
   if (!PlanCsResources(program, reachable.data(), sc.lds_dwords, r,
                        sc.cs_bind) ||
       r.resources.empty())
