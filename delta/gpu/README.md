@@ -78,6 +78,14 @@ The heuristic quad path in `vk_draw` predates the recompiler and is still the
 fallback for draws `vk_draw_recomp` declines; `DELTA_GPU_DECLINES=1` reports why
 draws are still landing there.
 
+## Debugging a frame
+
+`DEBUGGER.md` documents the built-in frame debugger: `DELTA_GPU_CAPTURE=<frame>`
+records one complete guest frame (every region, draw, dispatch, barrier and
+resolved descriptor) as JSONL plus PNG resource dumps, and
+`tools/gpu_capture.py` queries it. It needs no capture layer and no GUI, which
+is what the `DELTA_GPU_*` printf switches were standing in for.
+
 ## Debugging a frame in RenderDoc
 
 Launch the emulator under RenderDoc with `DELTA_RDOC_FRAME=N`: rendering is

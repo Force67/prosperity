@@ -5,6 +5,7 @@
 #include "gpu/vulkan/vk_debug.h"
 
 #include "gpu/vulkan/vk_device.h"
+#include "gpu/vulkan/vk_trace.h"
 
 #include <dlfcn.h>
 #include <cstdarg>
@@ -39,6 +40,10 @@ bool WantDebugUtils() {
   static const bool want = [] {
     if (kMarkers.overridden())
       return kMarkers.get();
+    // The validation layer consumes labels too: they are what names the guest
+    // draw in a validation message.
+    if (trace::WantValidation())
+      return true;
     return dlopen("librenderdoc.so", RTLD_NOW | RTLD_NOLOAD) != nullptr;
   }();
   return want;
@@ -64,7 +69,11 @@ bool DebugUtilsActive() {
 }
 
 void NameObject(VkObjectType type, uint64_t handle, const char* fmt, ...) {
-  if (!g_set_name || !handle)
+  // The name is worth formatting when a capture tool will show it OR when the
+  // frame debugger will record it: a barrier that only says "image 0x55..." is
+  // unreadable, and the guest name is only known here.
+  const bool to_trace = trace::NamesWanted();
+  if ((!g_set_name && !to_trace) || !handle)
     return;
   char buf[192];
   va_list args;
@@ -75,7 +84,10 @@ void NameObject(VkObjectType type, uint64_t handle, const char* fmt, ...) {
   info.objectHandle = handle;
   info.pObjectName = Format(buf, fmt, args);
   va_end(args);
-  g_set_name(g_dev.device, &info);
+  if (to_trace)
+    trace::RegisterObjectName(type, handle, info.pObjectName);
+  if (g_set_name)
+    g_set_name(g_dev.device, &info);
 }
 
 void CmdBeginLabel(VkCommandBuffer cmd, const char* fmt, ...) {
