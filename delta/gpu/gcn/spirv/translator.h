@@ -94,6 +94,10 @@ struct Translator {
   // DELTA_GPU_PSTEX: the most recent image sample, so the PS epilogue can
   // export it instead of the shader's own colour maths (see gcn_spirv.cc).
   Id last_texel = 0;
+  // DELTA_GPU_PSTEX keeps the sampled texel in a Private variable rather than
+  // an SSA value: a sample taken inside a branch does not dominate the shader
+  // epilogue, and using the value directly made the module fail validation.
+  Id last_texel_var = 0;
   Id dbg_file = 0;  // OpString for OpLine pc markers (DELTA_GPU_SHDUMP)
 
   void InitTypes() {

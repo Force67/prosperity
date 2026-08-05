@@ -362,6 +362,10 @@ void WriteAuditReport(std::FILE* f) {
   struct Agg {
     uint32_t shaders = 0, sites = 0;
     std::string example;
+    // Every shader carrying this op, not just the first. One example is enough
+    // to know an op is unhandled, but not to answer "is the pass I am chasing
+    // one of them", which is the question that actually comes up.
+    std::vector<std::string> all;
   };
   const auto example_of = [](const ShaderRecord& r, const EventStat& st) {
     char buf[96];
@@ -381,6 +385,8 @@ void WriteAuditReport(std::FILE* f) {
       agg.sites += e.second.sites;
       if (agg.example.empty())
         agg.example = example_of(r, e.second);
+      if (agg.all.size() < 64)
+        agg.all.push_back(example_of(r, e.second));
     }
     for (const auto& e : r.silent) {
       Agg& agg = silents[e.first];
@@ -403,10 +409,13 @@ void WriteAuditReport(std::FILE* f) {
         return x->second.shaders > y->second.shaders;
       return x->second.sites > y->second.sites;
     });
-    for (const auto* row : rows)
+    for (const auto* row : rows) {
       std::fprintf(f, "[shaudit]   %3u shaders / %4u sites  %-40s e.g. %s\n",
                    row->second.shaders, row->second.sites, row->first.c_str(),
                    row->second.example.c_str());
+      for (const std::string& who : row->second.all)
+        std::fprintf(f, "[shaudit]        %s\n", who.c_str());
+    }
   };
   print_ranked("unsupported / approximated ops (fix these first)", events);
   print_ranked("silently dropped (0 SPIR-V ops, no warning)", silents);

@@ -558,13 +558,24 @@ void EmitMimg(Translator& t,
 
   // DELTA_GPU_PSTEX=<binding+1>: remember this binding's texel so the PS
   // epilogue can export it (0 = the last sample, whatever it was).
-  // NOTE: an integer sample is deliberately NOT recorded here. Converting it
-  // for the float epilogue produces a value defined inside the sampling block
-  // that the epilogue does not dominate, and the module fails validation (26
-  // shaders, measured). DELTA_GPU_PSTEX therefore only reports float samplers.
-  if (!dref && !gather && !int_img &&
-      (kPsTexBind == 0 || bind == (uint32_t)(kPsTexBind - 1)))
-    t.last_texel = texel;
+  // Recorded through a Private variable so a sample taken inside a branch
+  // still reaches the epilogue (the SSA value would not dominate it). An
+  // integer sample is converted, because the point of the diagnostic is the
+  // magnitude the shader received, not its bit pattern.
+  if (!dref && !gather &&
+      (kPsTexBind == 0 || bind == (uint32_t)(kPsTexBind - 1)) &&
+      t.last_texel_var) {
+    Id v = texel;
+    if (int_img) {
+      Id c[4];
+      for (uint32_t i = 0; i < 4; i++)
+        c[i] = t.m.Emit(spv::Op::OpConvertUToF, t.t_f,
+                        {t.m.CompositeExtract(t.t_u, texel, i)});
+      v = t.m.CompositeConstruct(t.t_v4, {c[0], c[1], c[2], c[3]});
+    }
+    t.m.Store(t.last_texel_var, v);
+    t.last_texel = t.last_texel_var;  // marks "a sample happened"
+  }
 
   // DELTA_GPU_DEBUGUV: output the sample UV as R/G instead of the texel, to see
   // the coordinate distribution reaching the sampler (normalized 0..1 vs texel

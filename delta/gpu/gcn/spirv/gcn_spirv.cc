@@ -1774,6 +1774,12 @@ bool TranslatePs(const Program& program,
     sc.color_written_var = t.m.Variable(t.p_priv_u, spv::StorageClass::Private,
                                         t.m.ConstNull(t.t_u));
   }
+  // DELTA_GPU_PSTEX's destination, declared before the body so every sample
+  // site can store into it regardless of the control flow it sits in.
+  if (kGpuPstex != 0)
+    t.last_texel_var = t.m.Variable(
+        t.m.TypePointer(spv::StorageClass::Private, t.t_v4),
+        spv::StorageClass::Private, t.m.ConstNull(t.t_v4));
   if (!kGpuPswhite)
     EmitBody(t, program, sc, reachable.data());
 
@@ -1796,16 +1802,19 @@ bool TranslatePs(const Program& program,
   // DELTA_GPU_PSTEX: export a sampled texel instead of the shader's own
   // colour maths. PSWHITE proves the geometry/target/blend path; this separates
   // "the sample reads zero" from "the maths after it is wrong".
-  if (kGpuPstex != 0 && has_color_export && t.last_texel &&
+  const Id pstex = t.last_texel_var && t.last_texel
+                       ? t.m.Load(t.t_v4, t.last_texel_var)
+                       : 0;
+  if (kGpuPstex != 0 && has_color_export && pstex &&
       !(sc.mrt_uint_mask & 1u))  // an integer MRT0 cannot take a float export
     t.m.Store(PsColorOut(t, sc, 0),
               t.m.CompositeConstruct(
                   t.t_v4,
-                  {t.FMul(t.m.CompositeExtract(t.t_f, t.last_texel, 0),
+                  {t.FMul(t.m.CompositeExtract(t.t_f, pstex, 0),
                           t.F32(kGpuPstexScale)),
-                   t.FMul(t.m.CompositeExtract(t.t_f, t.last_texel, 1),
+                   t.FMul(t.m.CompositeExtract(t.t_f, pstex, 1),
                           t.F32(kGpuPstexScale)),
-                   t.FMul(t.m.CompositeExtract(t.t_f, t.last_texel, 2),
+                   t.FMul(t.m.CompositeExtract(t.t_f, pstex, 2),
                           t.F32(kGpuPstexScale)),
                    t.F32(1.f)}));
 

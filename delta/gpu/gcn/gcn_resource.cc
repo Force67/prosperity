@@ -28,6 +28,7 @@ DELTA_OPTION(uint64_t, kTexSrc, "DELTA_GPU_TEXSRC", 0);
 DELTA_OPTION(uint64_t, kTscan, "DELTA_GPU_TSCAN", 0);
 DELTA_OPTION(int, kTscanAfter, "DELTA_GPU_TSCAN_AFTER", 0);
 DELTA_OPTION(bool, kTwatch, "DELTA_GPU_TWATCH", false);
+DELTA_OPTION(bool, kNullDis, "DELTA_GPU_NULLDIS", false);
 // DELTA_GPU_ARENA_PROBE=<n>: when a descriptor reads all-zero, look for the one
 // the shader wanted in the neighbouring 2 MiB resource arenas and use it.
 // SotC's descriptor tables sit at a constant -3 arenas from where its own SRT
@@ -1003,6 +1004,27 @@ std::vector<TImage> TrackTextures(
                        static_cast<unsigned long>(probe), probe_t.width,
                        probe_t.height, probe_t.valid, w[0], w[1]);
         }
+      }
+    }
+    // DELTA_GPU_NULLDIS=1: disassemble the first shader that resolves a null
+    // descriptor while sampling through a chain of more than one hop. Our
+    // scalar walk steps the program in ORDER and ignores branches, so a shader
+    // that selects its table behind a branch (or by an index we cannot fold)
+    // gets a deterministically wrong address -- which is what a constant
+    // offset between where the title wrote its table and where we looked
+    // would look like.
+    if (kNullDis && t.null_descriptor) {
+      static bool dumped = false;
+      if (!dumped) {
+        dumped = true;
+        std::fprintf(stderr,
+                     "[nulldis] PS %#lx binding %u read a null T# from %#lx "
+                     "(SRT root %#lx)\n",
+                     static_cast<unsigned long>(code_base), binding,
+                     static_cast<unsigned long>(eval.src[srsrc]),
+                     static_cast<unsigned long>(
+                         UserDataPointer(ps_user_data, 0)));
+        DisassembleAt(code_base, "nulldis.PS");
       }
     }
     if (kTscan && t.null_descriptor) {
