@@ -34,7 +34,12 @@ struct TextureUploadSlice {
   uint8_t* map = nullptr;
 };
 
-constexpr VkDeviceSize kVbRing = 16ull * 1024 * 1024;  // per-frame vertex ring
+// Per-frame vertex ring. A 1080p title that re-draws its whole scene for a
+// depth prepass and again for the G-buffer needs far more than a token
+// allocation: SotC declined 83 draws a frame -- its entire world -- against a
+// 16 MiB ring, and 1 against 384 MiB. Sized for that, since the failure mode is
+// silent deletion of geometry rather than a stall.
+constexpr VkDeviceSize kVbRing = 512ull * 1024 * 1024;
 // DELTA_GPU_VBRING_MB=<n>: override the vertex ring size (default kVbRing).
 // Halved per frame slot like every other ring, so the usable per-frame budget
 // is n/2 MB. Exists because the ring is a hard per-frame draw budget, not a
@@ -42,7 +47,7 @@ constexpr VkDeviceSize kVbRing = 16ull * 1024 * 1024;  // per-frame vertex ring
 // simply never appears, which is invisible in a draw count. Read once.
 VkDeviceSize VbRingBytes();
 constexpr VkDeviceSize kIbRing =
-    8ull * 1024 * 1024;  // per-frame index ring (32-bit)
+    64ull * 1024 * 1024;  // per-frame index ring (32-bit), see kVbRing
 constexpr VkDeviceSize kUboRing =
     64ull * 1024 * 1024;  // per-frame recomp cbuffer ring
 constexpr uint32_t kCbufWindow = gpu::gcn::kCbufDwords * 4;
