@@ -550,3 +550,31 @@
 // on a null deref where a 300 s baseline covering MORE frames does not, so the
 // crash is the import, not the extra progress. Not a placement problem -- the
 // guest pages it maps outlive the mapping only by luck.
+
+// WHERE IT IS BOUND NOW (2026-08-06, after the VRAM staging fix). The GPU is
+// NO LONGER THE LIMIT: utilisation fell 85% -> ~18%, power 163 W -> 85 W, and
+// the card DOWNCLOCKS to 555-1500 MHz because it keeps running dry. This is a
+// CPU-bound frame now, and the old "the compute shaders must be slow" theory
+// is dead -- check nvidia-smi before believing a fence wait is GPU work.
+//
+// Ruled out, do not redo:
+//   - submit-lock contention: SubmitDcb holds one global mutex for the whole
+//     DCB walk, and the measured wait is 0.00 ms a frame. The guest submits one
+//     at a time regardless, so making the renderer concurrent buys nothing.
+//   - Resizable BAR (host-visible VRAM) for compute staging: built as its own
+//     path and measured at 0.4 fps, because staging-in goes 76 ms -> 2193 ms.
+//     Image detiling writes tile-by-tile, not linearly, which is the worst case
+//     for write-combined memory, and the one shape that WOULD suit it
+//     (read-only plain buffers) is 0.1 MB of the 128 MB a frame. The code was
+//     removed; only the measurement was worth keeping.
+//
+// The profile is FLAT -- nothing above 2.3%. Grouped, per unit of CPU:
+//   ~18%  guest thread sync through our emulation (sys_umtx_op, the WaitChan
+//         map, pthread mutex/cond, and the futex syscalls under them)
+//   ~8%   compute staging + writeback (CopyMacroTiledMip is the single biggest
+//         userspace symbol at 2.3%, then CsBatchFlush, FlushCsWritesRange)
+//   rest  lifted guest code
+// There is no next 2x here. The 34 MB a frame that still reaches the CPU
+// detiler could be GPU-copied when the texture cache already holds the image
+// (the RT bridge already does exactly this for the other 92 MB), but that is
+// worth a couple of percent, not a step change.
