@@ -64,6 +64,15 @@ bool FlushCsWrites(Renderer& renderer);
 // contract as FlushCsWrites.
 bool FlushCsWritesRange(Renderer& renderer, uint64_t base, uint64_t bytes);
 
+// Monotonic count of compute-results-became-visible-in-guest-memory events
+// (a range writeback, or an executed batch of dispatches that write guest
+// memory directly). A cached copy of guest bytes taken at generation G is
+// current iff the generation still reads G and no dirty range overlaps it.
+uint64_t CsWritebackGeneration();
+// Whether any GPU-dirty compute range overlaps [base, base+bytes). O(1) when
+// nothing is dirty anywhere (the common case on the draw path).
+bool CsRangeDirtyOverlapping(uint64_t base, uint64_t bytes);
+
 // A CP DMA immediate fill over guest memory. When the range covers a live
 // render target that is how the title clears it -- there is no clear packet on
 // this hardware -- so the target takes a pending clear with the filled value.

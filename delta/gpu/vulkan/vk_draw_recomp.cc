@@ -93,6 +93,73 @@ struct ReadableRangeKeyHash {
   }
 };
 
+// Per-frame staging dedupe. SotC redraws its whole world for the depth
+// prepass, the G-buffer and the shadow cascades, and every one of those draws
+// staged its vertex records, indices and cbuffer windows into the upload rings
+// again -- RINGHWM showed the VB ring's whole 256 MiB frame half consumed by
+// ~250 draws and the UBO ring full at ~130, after which every further draw was
+// declined to the heuristic path (drawn with a guessed transform, which is
+// where the exploded geometry came from). A window of guest bytes already
+// staged this frame is byte-identical on repeat, so stage it once.
+//
+// A cached copy is current iff nothing has made its guest range stale since
+// the copy: entries are stamped with rhi::CsWritebackGeneration() (compute
+// results landing in guest memory bump it) and refused when a GPU-dirty
+// compute range overlaps the key (dirty now means a writeback -- and a content
+// change -- is still owed). CPU rewrites of the same address within one frame
+// have no announcement to hook; titles ring-allocate their dynamic data so a
+// rewritten buffer arrives at a new address, and the raw-buffer path has
+// shipped this exact assumption since it grew its own `staged` map.
+// DELTA_GPU_RING_DEDUP=0 restores the copy-per-draw behaviour for A/B.
+struct StageCacheKey {
+  uint64_t base;
+  uint64_t bytes;
+  uint32_t salt;  // index type for the IB cache, 0 elsewhere
+  bool operator==(const StageCacheKey&) const = default;
+};
+
+struct StageCacheKeyHash {
+  size_t operator()(const StageCacheKey& key) const {
+    return static_cast<size_t>(key.base ^ (key.base >> 32) ^
+                               (key.bytes << 7) ^ key.salt);
+  }
+};
+
+struct StageCache {
+  struct Entry {
+    VkDeviceSize off;
+    uint64_t gen;
+  };
+  std::unordered_map<StageCacheKey, Entry, StageCacheKeyHash> map;
+  int frame = -1;
+
+  void RollFrame() {
+    if (frame != g_frame.num) {
+      frame = g_frame.num;
+      map.clear();
+    }
+  }
+  // Returns the cached ring offset, or -1 when absent/stale.
+  VkDeviceSize Find(uint64_t base, uint64_t bytes, uint32_t salt = 0) {
+    RollFrame();
+    const auto it = map.find({base, bytes, salt});
+    if (it == map.end() || it->second.gen != rhi::CsWritebackGeneration() ||
+        rhi::CsRangeDirtyOverlapping(base, bytes))
+      return VkDeviceSize(-1);
+    return it->second.off;
+  }
+  // Record a copy made at the CURRENT generation -- call after the range was
+  // flushed (or was never compute-written), never before.
+  void Insert(uint64_t base, uint64_t bytes, uint32_t salt, VkDeviceSize off) {
+    RollFrame();
+    map[{base, bytes, salt}] = {off, rhi::CsWritebackGeneration()};
+  }
+};
+
+StageCache g_vb_staged, g_ib_staged, g_ubo_staged, g_sbo_staged;
+
+DELTA_OPTION(bool, kRingDedup, "DELTA_GPU_RING_DEDUP", true);
+
 bool IsReadableThisFrame(uint64_t base, uint32_t size) {
   static int frame = -1;
   static std::unordered_map<ReadableRangeKey, bool, ReadableRangeKeyHash> cache;
@@ -574,13 +641,13 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
   // Lay out one contiguous ring range per vertex binding. Binding 0 sits at the
   // ring offset (single-stream draws are byte-identical to before); additional
   // bindings are 16-byte aligned so no attribute straddles a coarse boundary.
+  // A binding whose guest range is already staged this frame reuses that copy
+  // (vb_cached[j]) and takes no ring space at all.
   const uint32_t nbind = d.num_vattrs ? std::min(d.num_vbufs, 8u) : 0;
   VkDeviceSize bind_off[8] = {}, bind_size[8] = {};
+  VkDeviceSize vb_cached[8] = {};
   VkDeviceSize vneed = 0;
   for (uint32_t j = 0; j < nbind; j++) {
-    if (j)
-      vneed = (vneed + 15) & ~VkDeviceSize(15);
-    bind_off[j] = vneed;
     if (d.vbufs[j].stride) {
       bind_size[j] = (VkDeviceSize)nv * d.vbufs[j].stride;
     } else {
@@ -594,6 +661,16 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
               rec, d.vattrs[a].offset + VertexFormatBytes(d.vattrs[a].dfmt));
       bind_size[j] = rec;
     }
+    vb_cached[j] =
+        kRingDedup && bind_size[j]
+            ? g_vb_staged.Find(reinterpret_cast<uint64_t>(d.vbufs[j].data),
+                               bind_size[j])
+            : VkDeviceSize(-1);
+    if (vb_cached[j] != VkDeviceSize(-1))
+      continue;
+    if (vneed)
+      vneed = (vneed + 15) & ~VkDeviceSize(15);
+    bind_off[j] = vneed;
     vneed += bind_size[j];
   }
   if (g_ring.vb_offset + vneed > g_ring.vb_end) {
@@ -611,10 +688,18 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
       indexed ? static_cast<VkDeviceSize>(d.index_count) *
                     UploadedIndexElementBytes(d.index_type)
               : 0;
+  // The IB cache key carries the index type: CopyGuestIndices widens 16-bit
+  // sources, so the same guest bytes at two types are two different uploads.
+  const VkDeviceSize ib_cached =
+      kRingDedup && indexed
+          ? g_ib_staged.Find(reinterpret_cast<uint64_t>(d.index_data),
+                             index_bytes, 1u + d.index_type)
+          : VkDeviceSize(-1);
   const VkDeviceSize index_align = d.index_type == 1 ? 4 : 2;
   const VkDeviceSize aligned_ioff =
       (g_ring.ib_offset + index_align - 1) & ~(index_align - 1);
-  if (indexed && aligned_ioff + index_bytes > g_ring.ib_end) {
+  if (indexed && ib_cached == VkDeviceSize(-1) &&
+      aligned_ioff + index_bytes > g_ring.ib_end) {
     if (kGpuDecltrace) {
       static int n = 0;
       if (n++ < 32)
@@ -1143,23 +1228,38 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
       dyn_off[i] = 0;  // shared zero window (see BeginFrame)
       continue;
     }
+    // The copied length is a pure function of the binding (planned size,
+    // widened to the page unless DELTA_GPU_TIGHTCBUF), so it doubles as the
+    // cache key: a window of the same guest bytes at the same length staged
+    // earlier this frame is byte-identical, and the draw just rebinds it.
+    uint32_t cache_n = 0;
+    if (have_cbuf) {
+      const uint32_t planned = cb.size < kCbufWindow ? cb.size : kCbufWindow;
+      const uint64_t page_end = (cb.base + 0x1000) & ~uint64_t{0xFFF};
+      const uint32_t avail = static_cast<uint32_t>(
+          std::min<uint64_t>(kCbufWindow, page_end - cb.base));
+      cache_n = kTightCbuf ? planned : std::max(planned, avail);
+      if (kRingDedup) {
+        const VkDeviceSize cached = g_ubo_staged.Find(cb.base, cache_n);
+        if (cached != VkDeviceSize(-1)) {
+          dyn_off[i] = static_cast<uint32_t>(cached);
+          continue;
+        }
+      }
+    }
     uint8_t* cb_dst = g_ring.ubo_map + next;
     uint32_t n;
     if (have_cbuf && !FlushCsWritesRange(renderer, cb.base, kCbufWindow))
       return Decline(kNoRecomp);
     if (have_cbuf) {
       // Upload as much of the window as the base's page holds, not just the
-      // recompiler's planned size. A shader that indexes its constants
-      // dynamically -- a UI batch picking a per-quad transform out of an array
-      // -- reads past the planned size, and the truncated copy left those
-      // entries zero: Skyrim's menu drew its sprite atlas at screen size over
-      // everything. Clamped to the page so a cbuffer at the end of a mapping
-      // cannot fault.
-      const uint32_t planned = cb.size < kCbufWindow ? cb.size : kCbufWindow;
-      const uint64_t page_end = (cb.base + 0x1000) & ~uint64_t{0xFFF};
-      const uint32_t avail = static_cast<uint32_t>(
-          std::min<uint64_t>(kCbufWindow, page_end - cb.base));
-      n = kTightCbuf ? planned : std::max(planned, avail);
+      // recompiler's planned size (computed above as cache_n). A shader that
+      // indexes its constants dynamically -- a UI batch picking a per-quad
+      // transform out of an array -- reads past the planned size, and the
+      // truncated copy left those entries zero: Skyrim's menu drew its sprite
+      // atlas at screen size over everything. Clamped to the page so a cbuffer
+      // at the end of a mapping cannot fault.
+      n = cache_n;
       std::memcpy(cb_dst, reinterpret_cast<const void*>(cb.base), n);
     } else {  // binding 0 without a resolved cbuffer: the heuristic MVP
       n = sizeof(d.mvp);
@@ -1172,6 +1272,8 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
     if (n < previous)
       std::memset(cb_dst + n, 0, previous - n);
     g_ring.ubo_written[window] = n;
+    if (have_cbuf && kRingDedup)
+      g_ubo_staged.Insert(cb.base, cache_n, 0, next);
     dyn_off[i] = static_cast<uint32_t>(next);
     next += cb_stride;
   }
@@ -1188,23 +1290,19 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
   if (rp->raw_bufs) {
     if (!EnsureRawBufferRing())
       return Decline(kRing);
-    static int staged_frame = -1;
-    static std::unordered_map<ReadableRangeKey, uint32_t, ReadableRangeKeyHash>
-        staged;
-    if (staged_frame != g_frame.num) {
-      staged_frame = g_frame.num;
-      staged.clear();
-    }
     uint32_t sbo_dyn[kRawBufBindings] = {};
     for (uint32_t i = 0; i < kRawBufBindings; i++) {
       const auto& rb = d.bufs[i];
       const uint32_t want = std::min(rb.size, kRawBufWindow);
       if (!want || !IsReadableThisFrame(rb.base, want))
         continue;  // unresolved descriptor: the shared zero window at offset 0
-      const ReadableRangeKey key{rb.base, want};
-      const auto found = staged.find(key);
-      if (found != staged.end()) {
-        sbo_dyn[i] = found->second;
+      // Same per-frame cache as the vertex/index/cbuffer rings -- and unlike
+      // the plain map this replaced, a window whose range a dispatch has
+      // rewritten since it was staged (generation moved, or dirty right now)
+      // is re-copied instead of served stale.
+      const VkDeviceSize cached = g_sbo_staged.Find(rb.base, want);
+      if (cached != VkDeviceSize(-1)) {
+        sbo_dyn[i] = static_cast<uint32_t>(cached);
         rawbuf_mask |= 1u << i;
         continue;
       }
@@ -1226,7 +1324,7 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
       g_ring.sbo_written[window] = want;
       g_ring.sbo_offset = off + g_ring.sbo_stride;
       sbo_dyn[i] = static_cast<uint32_t>(off);
-      staged.emplace(key, sbo_dyn[i]);
+      g_sbo_staged.Insert(rb.base, want, 0, off);
       rawbuf_mask |= 1u << i;
     }
     // One dynamic offset per dynamic descriptor the SET actually holds, which
@@ -1253,9 +1351,10 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
     vkCmdBindDescriptorSets(g_frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                             rp->layout, 0, 1, &tex_set, 0, nullptr);
   // Commit ring uploads only after every fallible pipeline, texture, region and
-  // cbuffer decision has succeeded.
+  // cbuffer decision has succeeded. Bindings served by the per-frame cache
+  // were copied by an earlier draw and only rebind.
   for (uint32_t j = 0; j < nbind; j++) {
-    if (!bind_size[j])
+    if (!bind_size[j] || vb_cached[j] != VkDeviceSize(-1))
       continue;
     if (!FlushCsWritesRange(renderer,
                             reinterpret_cast<uint64_t>(d.vbufs[j].data),
@@ -1263,23 +1362,31 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
       return Decline(kNoRecomp);
     std::memcpy(g_ring.vb_map + voff + bind_off[j], d.vbufs[j].data,
                 (size_t)bind_size[j]);
+    if (kRingDedup)
+      g_vb_staged.Insert(reinterpret_cast<uint64_t>(d.vbufs[j].data),
+                         bind_size[j], 0, voff + bind_off[j]);
   }
-  if (indexed) {
+  if (indexed && ib_cached == VkDeviceSize(-1)) {
     CopyGuestIndices(g_ring.ib_map + ioff, d.index_data, d.index_count,
                      d.index_type);
+    if (kRingDedup)
+      g_ib_staged.Insert(reinterpret_cast<uint64_t>(d.index_data), index_bytes,
+                         1u + d.index_type, ioff);
   }
   if (nbind) {
     VkBuffer bufs[8];
     VkDeviceSize offs[8];
     for (uint32_t j = 0; j < nbind; j++) {
       bufs[j] = g_ring.vb;
-      offs[j] = voff + bind_off[j];
+      offs[j] = vb_cached[j] != VkDeviceSize(-1) ? vb_cached[j]
+                                                 : voff + bind_off[j];
     }
     vkCmdBindVertexBuffers(g_frame.cmd, 0, nbind, bufs, offs);
   }
   if (indexed)
     vkCmdBindIndexBuffer(
-        g_frame.cmd, g_ring.ib, ioff,
+        g_frame.cmd, g_ring.ib,
+        ib_cached != VkDeviceSize(-1) ? ib_cached : ioff,
         d.index_type == 1 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16);
   if (kDrawTrace && draw_count >= 300) {
     static int n = 0;
@@ -1389,7 +1496,7 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
     target.last_frame = g_frame.num;
   }
   g_ring.vb_offset += vneed;
-  if (indexed)
+  if (indexed && ib_cached == VkDeviceSize(-1))
     g_ring.ib_offset = ioff + index_bytes;
   g_frame.draws++;
   for (uint32_t i = 0; i < g_region.cur_mrt_count; i++) {

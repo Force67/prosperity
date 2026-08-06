@@ -127,3 +127,41 @@
 // freed, while a fresh copy sits ~6 MiB away. That is a guest lifetime bug, and
 // one that reproduces every frame is usually something the emulator caused.
 // Next step is the allocator hook, not the renderer.
+
+// THE ARENA BIAS, CLOSED (2026-08-06): it was the drain budget. With
+// DELTA_GPU_ACB_FRAME=65536 the async-compute material fills keep up and the
+// "-3 arena" bias does not exist -- DELTA_GPU_ARENA_PROBE=4 makes ZERO
+// substitutions over a 20-minute run and TEXMISS reports 64 misses of one
+// 16x16 LUT (vs 27% null descriptors at small budgets). The historic constant
+// bias was the fill backlog sitting exactly N arenas behind the SRTs. The
+// heap sentinel walk-off is also gone in this configuration: NULLGUARD armed
+// but never fired over multiple long runs (keep it armed anyway).
+// +DELTA_GPU_ACB=1 +DELTA_GPU_ACB_FRAME=65536
+
+// THE UI / FADE, CLOSED (2026-08-06): the "template nothing ever writes" is
+// filled by the same async compute as the material arenas. With the 65536
+// budget the Bluepoint logo, the JAPAN Studio card and the full title screen
+// ("SHADOW OF THE COLOSSUS -- Press Any Button") all render correctly on the
+// scanout. No CPU writer exists to find.
+//
+// BOOT TIMELINE at ~4-6 fps (LATEST_EVERY snapshots): logos to ~frame 450,
+// world load done by ~frame 700 (SUMWATCH 16k -> 0), attract demo ~700-2800
+// (cuts of 2.5k-11.6k draws a frame), title screen ~frame 2900+, i.e. ~20 min
+// wall. OPEN QUESTION: during the demo the SCANOUT stays black while the cuts
+// render into offscreen targets (light/tonemap buffers show real scenes) --
+// either the demo's composite is masked by the fade layer, or the cuts are
+// the title-screen backdrop warming up. Visible content on the scanout:
+// logos, then black through the demo, then the title screen.
+//
+// THE RING EXHAUSTION, FIXED IN CODE (2026-08-06): the per-frame upload rings
+// were the "flat colours + exploded geometry" -- every draw staged its vertex
+// records, indices and 16 KiB cbuffer windows again (world drawn 3x a frame:
+// prepass + G-buffer + shadows), RINGHWM showed VB/UBO/SBO pegged at their
+// caps from ~130-250 draws, and each further draw fell to the HEURISTIC path
+// (guessed transform = the spikes; guessed colour = the flat panels) or was
+// dropped: 3.5M ring declines and 9135 heuristic draws in one frame at the
+// worst. vk_draw_recomp now dedupes staging per frame (DELTA_GPU_RING_DEDUP=0
+// reverts) and the rings grew to measured need; same phase after: declines
+// 3.6x down, heuristic 50x down, UBO peak 95 of 128 MiB.
+// +DELTA_PAD_AUTOSKIP=1 +DELTA_PAD_AUTOSKIP_START=2000 +DELTA_PAD_AUTOSKIP_NOOPT=1
+//   drives title -> menu -> gameplay blind (pad reads track guest frames ~1:1).

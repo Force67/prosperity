@@ -786,6 +786,11 @@ std::unordered_map<uint64_t, CsRange> g_cs_ranges;
 uint64_t g_cs_range_bytes = 0;
 constexpr uint32_t kCsDirtyPageShift = 16;
 std::unordered_map<uint64_t, std::vector<uint64_t>> g_cs_dirty_pages;
+// Bumped whenever compute results land in guest memory (writeback or an
+// executed batch of importing dispatches). The draw path's per-frame staging
+// caches stamp entries with this and re-copy when it has moved -- a cached
+// window of guest bytes is only as fresh as the last compute visibility point.
+uint64_t g_cs_writeback_gen = 1;
 
 uint64_t RangeEnd(uint64_t base, uint64_t bytes) {
   return bytes > UINT64_MAX - base ? UINT64_MAX : base + bytes;
@@ -1086,6 +1091,10 @@ bool CsBatchFlush() {
     kv.second.pending_batch = false;
   std::memset(g_cs_stage_pending, 0, sizeof g_cs_stage_pending);
   g_cs_batch_access.clear();
+  // Imported ranges are written by the dispatches this submit just executed,
+  // straight into guest memory -- no writeback step will announce them, so the
+  // batch itself is the visibility point for the staging caches.
+  g_cs_writeback_gen++;
   g_ns_cs_gpu += NowNs() - t0;
   return true;
 }
@@ -1138,6 +1147,9 @@ bool CsRangeFlushOne(uint64_t base, CsRange& e) {
   UploadCsRangeToRt(base, e);  // refresh a live RT image aliasing the range
   InvalidateTexRange(base, e.guest_bytes);
   UnindexDirtyRange(base, e.guest_bytes);
+  // Guest memory just changed under any staged copy of it: retire the draw
+  // path's per-frame staging cache entries (they validate against this).
+  g_cs_writeback_gen++;
   e.gpu_dirty = false;
   e.hash = RangeHash(base, e.guest_bytes);
   e.last_validated_frame = g_frame.num;
@@ -1828,6 +1840,32 @@ bool FlushCsWritesRange(Renderer& renderer, uint64_t base, uint64_t bytes) {
   }
   g_ns_cs_out += NowNs() - _t0;
   return all_current;
+}
+
+uint64_t CsWritebackGeneration() {
+  return g_cs_writeback_gen;
+}
+
+bool CsRangeDirtyOverlapping(uint64_t base, uint64_t bytes) {
+  if (g_cs_dirty_pages.empty() || !bytes)
+    return false;
+  // Boolean early-out, not DirtyRangesOverlapping: this runs per staging-cache
+  // lookup on the draw path, and building/sorting the candidate vector there
+  // costs more than the memcpy the cache hit saves for small windows.
+  const uint64_t end = RangeEnd(base, bytes);
+  for (uint64_t page = base >> kCsDirtyPageShift;
+       page <= (end - 1) >> kCsDirtyPageShift; page++) {
+    auto found = g_cs_dirty_pages.find(page);
+    if (found == g_cs_dirty_pages.end())
+      continue;
+    for (uint64_t other : found->second) {
+      auto range = g_cs_ranges.find(other);
+      if (range != g_cs_ranges.end() && range->second.gpu_dirty &&
+          other < end && base < RangeEnd(other, range->second.guest_bytes))
+        return true;
+    }
+  }
+  return false;
 }
 
 }  // namespace gpu::rhi

@@ -39,17 +39,26 @@ struct TextureUploadSlice {
 // allocation: SotC declined 83 draws a frame -- its entire world -- against a
 // 16 MiB ring, and 1 against 384 MiB. Sized for that, since the failure mode is
 // silent deletion of geometry rather than a stall.
-constexpr VkDeviceSize kVbRing = 512ull * 1024 * 1024;
+// 512 MiB carried SotC's title screen; its attract demo's heaviest cuts issue
+// 11.6k draws a frame and still hit the 256 MiB half with the per-frame dedupe
+// active (RINGHWM peak == cap, i.e. clamped, true need unknown). Doubled so
+// the demo's worst frame fits; the failure mode remains silent deletion.
+constexpr VkDeviceSize kVbRing = 1024ull * 1024 * 1024;
 // DELTA_GPU_VBRING_MB=<n>: override the vertex ring size (default kVbRing).
 // Halved per frame slot like every other ring, so the usable per-frame budget
 // is n/2 MB. Exists because the ring is a hard per-frame draw budget, not a
 // cache: a draw whose vertices do not fit is declined outright (kRing) and
 // simply never appears, which is invisible in a draw count. Read once.
 VkDeviceSize VbRingBytes();
+// IB and UBO sized from SotC's attract demo (RINGHWM): the IB half peaked at
+// 19.7 of 32 MiB before the per-frame staging dedupe, and the UBO half was
+// FULL at ~130 draws (16 KiB window x 16 bindings per draw) in frames that
+// wanted 2500+. Dedupe removes the repeats; the raised caps buy headroom for
+// what remains unique, at host-visible memory cost only.
 constexpr VkDeviceSize kIbRing =
-    64ull * 1024 * 1024;  // per-frame index ring (32-bit), see kVbRing
+    128ull * 1024 * 1024;  // per-frame index ring (32-bit), see kVbRing
 constexpr VkDeviceSize kUboRing =
-    64ull * 1024 * 1024;  // per-frame recomp cbuffer ring
+    256ull * 1024 * 1024;  // per-frame recomp cbuffer ring
 constexpr uint32_t kCbufWindow = gpu::gcn::kCbufDwords * 4;
 constexpr uint32_t kCbufBindings =
     gpu::gcn::kMaxCbufBindings;  // set-1 UBO bindings
@@ -60,7 +69,10 @@ constexpr uint32_t kCbufBindings =
 // The window is a compromise the shader knows about: a MUBUF index has no
 // static bound, so a resource larger than this is staged only up to here and
 // the recompiled shader clamps, reading the window's last dword past it.
-constexpr VkDeviceSize kSboRing = 128ull * 1024 * 1024;
+// 128 MiB is 64 one-MiB windows a frame, and SotC's demo pegged it (RINGHWM
+// 65536K/65536K) -- a heavy cut binds more unique raw buffers (skinning
+// palettes, instance tables) than that even deduped. 512 MiB = 256 windows.
+constexpr VkDeviceSize kSboRing = 512ull * 1024 * 1024;
 constexpr uint32_t kRawBufWindow = gpu::gcn::kGfxBufferDwords * 4;
 constexpr uint32_t kRawBufBindings = gpu::gcn::kMaxGfxBuffers;
 
