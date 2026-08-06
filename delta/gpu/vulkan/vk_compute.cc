@@ -1496,8 +1496,18 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci) {
     // that writes only PART of such a range would then write back whatever the
     // buffer happened to hold -- the resource plan says "never read", not
     // "writes all of it".
-    if (kCsSkipUpload && !valid && !ci.res[i].read && ci.res[i].written &&
-        !ci.res[i].image_staging && !ci.res[i].zero_fill && same_shape) {
+    //
+    // Direct-memory arenas only. A compute range that aliases module .data
+    // (modules sit at 0x2xxxxxxxxxxx, the dmem arena at 0x80xxxxxxxx) gets a
+    // partial write + writeback of stale staging over live globals when the
+    // plan's "written" bit is wrong or the write is partial -- SotC's menu
+    // transition died exactly that way, float garbage across the allocator's
+    // static bin array (SIGSEGV in malloc, Shadow_Shipping+0xfacff0).
+    const bool dmem_arena =
+        base >= 0x8000000000ull && base < 0x9000000000ull;
+    if (kCsSkipUpload && !valid && dmem_arena && !ci.res[i].read &&
+        ci.res[i].written && !ci.res[i].image_staging && !ci.res[i].zero_fill &&
+        same_shape) {
       valid = true;
       g_cs_skip_n++;
     }

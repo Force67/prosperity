@@ -163,5 +163,40 @@
 // worst. vk_draw_recomp now dedupes staging per frame (DELTA_GPU_RING_DEDUP=0
 // reverts) and the rings grew to measured need; same phase after: declines
 // 3.6x down, heuristic 50x down, UBO peak 95 of 128 MiB.
-// +DELTA_PAD_AUTOSKIP=1 +DELTA_PAD_AUTOSKIP_START=2000 +DELTA_PAD_AUTOSKIP_NOOPT=1
-//   drives title -> menu -> gameplay blind (pad reads track guest frames ~1:1).
+// AUTOSKIP is silenced here: gfx::inGameplay() latches during the heavy
+// title-backdrop frames and zeroes the pulses. DELTA_PAD_SCRIPT bypasses the
+// latch (checked first). Working recipe -- quiet through boot, then Cross:
+//   DELTA_PAD_SCRIPT="none:4500,cross:3,none:40,cross:3,none:40,..." (env var)
+// Pad reads run ~2 per guest frame in the title phase.
+//
+// THE MENU CRASH (2026-08-06): the heap-corruption SIGSEGV in the title's
+// malloc at Shadow_Shipping+0x48ac5 is DELTA_GPU_CS_SKIP_UPLOAD writing stale
+// staging back over CPU-owned guest memory. First seen over the allocator's
+// static bin array in module .data (float garbage at module+0xfacff0); the
+// dmem-only restriction (commit "the upload skip must not cover module
+// .data") moved the corruption, not removed it -- next crash was the same
+// malloc walk over a FIBER STACK in dmem (rax=0x830a79fbd0, libSceFiber in
+// the backtrace). The plan's "written, never read" does NOT imply "writes
+// every byte", and the title keeps fiber stacks and heaps in the same dmem
+// the material arenas live in. LEAVE THE KNOB OFF for this title until a
+// write-coverage-tracking version exists; without it a full hour scripted
+// through the menu runs crash-free (costs ~45-60 ms/frame of staging-in).
+//
+// PAST THE TITLE (2026-08-06): the menu opens and renders readable entries
+// (New Game / Settings / Image Gallery, difficulty select) on current
+// builds; the earlier "solid glyph blocks" existed only pre-dedupe.
+//
+// THE NEW-GAME CRASH, DIAGNOSED (2026-08-06): confirming New Game dies
+// deterministically -- SIGSEGV at Shadow_Shipping+0x48ac5, same registers
+// every run, with AND without the upload skip (the knob A/B above was a red
+// herring: the surviving run had merely never confirmed the menu). The
+// faulting function (prologue 0x48a70) INSERTS a block into a size-ordered
+// free list whose nodes live INSIDE the freed blocks, and the pool's blocks
+// are FIBER STACKS: the crashing thread's own rsp sits on the block whose
+// node it is walking. A fiber returns its stack to the pool and KEEPS
+// RUNNING on it; its calls trash the in-block node; the next insert walks
+// garbage. DELTA_GUEST_WHIST=830a79f000:1000:200 census: the page's top
+// writer is libSceFiber+0x381 (fiber context saves). Suspect: the shipped
+// libSceFiber.sprx's exit/switch ordering (stack release before the actual
+// context switch). No in-repo source -- next step is disassembling the sprx
+// and comparing sceFiberReturnToThread/Finalize semantics against retail.
