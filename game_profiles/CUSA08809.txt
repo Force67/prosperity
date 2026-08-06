@@ -12,9 +12,13 @@
 
 // The world-load spin hammers sched_yield (6.4M calls in 20 s), which our
 // default maps to a pause; a real host yield lets the load finish first.
+// COSTS ~10% IN STEADY STATE though (3.75 -> 3.40 fps, and it stages MORE per
+// frame without it, so that is not less content being drawn): 6.4M real yield
+// syscalls are not free. Turn it on to get through a load, not to run.
 // +DELTA_SCHED_YIELD_REAL=1
 
 // Cap read throughput so the streaming loader cannot outrun its own finalizer.
+// Measured no steady-state fps effect either way (3.40 with and without).
 // +DELTA_IO_MBPS=60
 
 // Watch the CPU heap's free map drain (address from the crash's r9).
