@@ -56,7 +56,13 @@ DELTA_OPTION(bool, kCsWbFull, "DELTA_GPU_CS_WB_FULL", false);
 // Report every writeback whose dispatch did not write the whole range: the
 // difference is guest memory we would have reverted.
 DELTA_OPTION(bool, kCsWbAudit, "DELTA_GPU_CS_WB_AUDIT", false);
+// Put compute range buffers in VRAM rather than system RAM, with a host-cached
+// mirror for the staging edges. The GPU reads and writes these every dispatch,
+// and doing that across PCIe was 282 ms of a 457 ms SotC frame. No-op on a UMA
+// part, where one buffer is already both (see FindDeviceMemoryType).
+DELTA_OPTION(bool, kCsVram, "DELTA_GPU_CSVRAM", true);
 DELTA_OPTION(uint64_t, kCsFlushTrace, "DELTA_GPU_CSFLUSHTRACE", 0);
+DELTA_OPTION(bool, kCsSyncReport, "DELTA_GPU_CSSYNC", false);
 DELTA_OPTION(bool, kGpuCsgpuVerbose, "DELTA_GPU_CSGPU_VERBOSE", false);
 uint64_t g_cs_image_staged = 0;
 }  // namespace
@@ -79,6 +85,28 @@ struct CsPipe {
 };
 
 std::unordered_map<uint64_t, CsPipe> g_cs_pipes;
+
+// Memory for a buffer the GPU alone touches: VRAM, host visibility irrelevant.
+// Only worth splitting off a host mirror when the device heap is NOT already
+// cheap for the CPU to read -- on a UMA part the one buffer serves both sides
+// and FindComputeMemoryType already returns it, so report none here.
+uint32_t FindDeviceMemoryType(uint32_t type_bits) {
+  VkPhysicalDeviceMemoryProperties properties;
+  vkGetPhysicalDeviceMemoryProperties(g_dev.phys, &properties);
+  constexpr VkMemoryPropertyFlags kUnified =
+      VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+      VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+  for (uint32_t i = 0; i < properties.memoryTypeCount; i++)
+    if ((type_bits & (1u << i)) &&
+        (properties.memoryTypes[i].propertyFlags & kUnified) == kUnified)
+      return UINT32_MAX;
+  for (uint32_t i = 0; i < properties.memoryTypeCount; i++)
+    if ((type_bits & (1u << i)) &&
+        (properties.memoryTypes[i].propertyFlags &
+         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
+      return i;
+  return UINT32_MAX;
+}
 
 uint32_t FindComputeMemoryType(uint32_t type_bits) {
   VkPhysicalDeviceMemoryProperties properties;
@@ -478,6 +506,16 @@ struct CsRange {
   VkDeviceMemory mem = VK_NULL_HANDLE;
   void* map = nullptr;
   VkDeviceSize cap = 0;
+  // DELTA_GPU_CSVRAM: `buf` is in VRAM (what the shaders bind) and `map` is a
+  // separate host-cached mirror, moved across by DMA at the staging edges. The
+  // shaders then read and write at VRAM bandwidth instead of over PCIe, which
+  // is worth ~6x of the GPU time in a SotC frame; the CPU keeps a cached
+  // pointer, which the mapped-VRAM alternative does not.
+  VkBuffer host_buf = VK_NULL_HANDLE;
+  VkDeviceMemory host_mem = VK_NULL_HANDLE;
+  bool device_local = false;
+  bool readback_pending = false;  // copy recorded, not yet waited on
+  bool mirror_current = false;    // map holds the buffer's contents
   uint64_t size = 0;         // active staged (linear) byte size
   uint64_t guest_bytes = 0;  // guest footprint (hash + overlap checks)
   uint64_t hash = 0;         // TexHash of guest content when last in sync
@@ -505,6 +543,46 @@ struct CsRange {
   std::vector<uint8_t> shadow;
   bool shadow_valid = false;
 };
+
+// Move a split range between its host mirror and its VRAM buffer, bracketed by
+// barriers against the dispatches on either side. Recorded rather than
+// submitted, so the caller decides which command buffer carries it.
+void RecordStagingCopy(VkCommandBuffer c,
+                       CsRange& e,
+                       VkDeviceSize bytes,
+                       bool to_device) {
+  if (!e.device_local || !e.host_buf || !e.buf || !bytes)
+    return;
+  if (bytes > e.cap)
+    bytes = e.cap;
+  VkBufferMemoryBarrier b{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+  b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+  b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+  b.buffer = e.buf;
+  b.offset = 0;
+  b.size = VK_WHOLE_SIZE;
+  b.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
+                    VK_ACCESS_HOST_WRITE_BIT;
+  b.dstAccessMask =
+      to_device ? VK_ACCESS_TRANSFER_WRITE_BIT : VK_ACCESS_TRANSFER_READ_BIT;
+  vkCmdPipelineBarrier(
+      c, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_HOST_BIT,
+      VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 1, &b, 0, nullptr);
+  const VkBufferCopy region{0, 0, bytes};
+  if (to_device)
+    vkCmdCopyBuffer(c, e.host_buf, e.buf, 1, &region);
+  else
+    vkCmdCopyBuffer(c, e.buf, e.host_buf, 1, &region);
+  b.srcAccessMask =
+      to_device ? VK_ACCESS_TRANSFER_WRITE_BIT : VK_ACCESS_TRANSFER_WRITE_BIT;
+  b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
+                    VK_ACCESS_HOST_READ_BIT;
+  b.buffer = to_device ? e.buf : e.host_buf;
+  vkCmdPipelineBarrier(
+      c, VK_PIPELINE_STAGE_TRANSFER_BIT,
+      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_HOST_BIT, 0, 0,
+      nullptr, 1, &b, 0, nullptr);
+}
 
 bool SameCsResourceShape(const ComputeInfo::Res& a, const ComputeInfo::Res& b) {
   if (a.image_staging != b.image_staging)
@@ -703,6 +781,11 @@ bool RunAliasedCopy(const CsAliasedImage& img,
     vkFreeCommandBuffers(g_dev.device, g_dev.pool, 1, &c);
     return false;
   }
+  // Everything above prepared the HOST mirror (padding zeroed, stencil packed).
+  // A split range has to carry that to VRAM before the image copy reads it, and
+  // ahead of an image->buffer copy so the padding it does not cover is zeroed
+  // there too.
+  RecordStagingCopy(c, e, e.cap, /*to_device=*/true);
   // Chain from -- and restore -- the SUBMITTED layout: this copy executes
   // before the current frame's still-recording barriers, whose oldLayout
   // chain must stay intact.
@@ -1003,7 +1086,7 @@ bool CsRangeEnsureBuffer(CsRange& e, VkDeviceSize size) {
   if (e.buf && e.cap >= size)
     return true;
   if (e.map && !e.imported) {
-    vkUnmapMemory(g_dev.device, e.mem);
+    vkUnmapMemory(g_dev.device, e.device_local ? e.host_mem : e.mem);
   }
   e.map = nullptr;
   if (e.buf) {
@@ -1014,6 +1097,15 @@ bool CsRangeEnsureBuffer(CsRange& e, VkDeviceSize size) {
     vkFreeMemory(g_dev.device, e.mem, nullptr);
     e.mem = VK_NULL_HANDLE;
   }
+  if (e.host_buf) {
+    vkDestroyBuffer(g_dev.device, e.host_buf, nullptr);
+    e.host_buf = VK_NULL_HANDLE;
+  }
+  if (e.host_mem) {
+    vkFreeMemory(g_dev.device, e.host_mem, nullptr);
+    e.host_mem = VK_NULL_HANDLE;
+  }
+  e.device_local = false;
   e.imported = false;
   if (!e.imported)
     g_cs_range_bytes -= e.cap;
@@ -1025,6 +1117,8 @@ bool CsRangeEnsureBuffer(CsRange& e, VkDeviceSize size) {
   // queue (StageCsRangeFromRt) instead of a CPU memcpy from guest memory.
   bi.usage =
       VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+  if (kCsVram)
+    bi.usage |= VK_BUFFER_USAGE_TRANSFER_SRC_BIT;  // readback of results
   if (vkCreateBuffer(g_dev.device, &bi, nullptr, &e.buf) != VK_SUCCESS) {
     e.buf = VK_NULL_HANDLE;
     return false;
@@ -1033,7 +1127,11 @@ bool CsRangeEnsureBuffer(CsRange& e, VkDeviceSize size) {
   vkGetBufferMemoryRequirements(g_dev.device, e.buf, &mr);
   VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
   ai.allocationSize = mr.size;
-  ai.memoryTypeIndex = FindComputeMemoryType(mr.memoryTypeBits);
+  const uint32_t device_type =
+      kCsVram ? FindDeviceMemoryType(mr.memoryTypeBits) : UINT32_MAX;
+  ai.memoryTypeIndex = device_type != UINT32_MAX
+                           ? device_type
+                           : FindComputeMemoryType(mr.memoryTypeBits);
   if (vkAllocateMemory(g_dev.device, &ai, nullptr, &e.mem) != VK_SUCCESS) {
     vkDestroyBuffer(g_dev.device, e.buf, nullptr);
     e.buf = VK_NULL_HANDLE;
@@ -1041,7 +1139,35 @@ bool CsRangeEnsureBuffer(CsRange& e, VkDeviceSize size) {
     return false;
   }
   vkBindBufferMemory(g_dev.device, e.buf, e.mem, 0);
-  vkMapMemory(g_dev.device, e.mem, 0, cap, 0, &e.map);
+  // VRAM cannot be mapped usefully (uncached reads are ~100 MB/s), so the CPU
+  // side gets its own host-cached buffer and the two are joined by DMA.
+  if (device_type != UINT32_MAX) {
+    VkBufferCreateInfo hi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    hi.size = cap;
+    hi.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+               VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    VkMemoryRequirements hmr;
+    if (vkCreateBuffer(g_dev.device, &hi, nullptr, &e.host_buf) != VK_SUCCESS) {
+      e.host_buf = VK_NULL_HANDLE;
+      return false;
+    }
+    vkGetBufferMemoryRequirements(g_dev.device, e.host_buf, &hmr);
+    VkMemoryAllocateInfo hai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    hai.allocationSize = hmr.size;
+    hai.memoryTypeIndex = FindComputeMemoryType(hmr.memoryTypeBits);
+    if (vkAllocateMemory(g_dev.device, &hai, nullptr, &e.host_mem) !=
+        VK_SUCCESS) {
+      vkDestroyBuffer(g_dev.device, e.host_buf, nullptr);
+      e.host_buf = VK_NULL_HANDLE;
+      e.host_mem = VK_NULL_HANDLE;
+      return false;
+    }
+    vkBindBufferMemory(g_dev.device, e.host_buf, e.host_mem, 0);
+    vkMapMemory(g_dev.device, e.host_mem, 0, cap, 0, &e.map);
+    e.device_local = true;
+  } else {
+    vkMapMemory(g_dev.device, e.mem, 0, cap, 0, &e.map);
+  }
   e.cap = cap;
   g_cs_range_bytes += cap;
   return true;
@@ -1063,25 +1189,34 @@ std::vector<std::pair<VkBuffer, VkDeviceMemory>> g_cs_retired;
 // renders through the compute path could be used to gate the change.
 bool CsRangeRename(CsRange& e, VkDeviceSize size) {
   if (e.map) {
-    vkUnmapMemory(g_dev.device, e.mem);
+    vkUnmapMemory(g_dev.device, e.device_local ? e.host_mem : e.mem);
     e.map = nullptr;
   }
   if (e.buf || e.mem)
     g_cs_retired.emplace_back(e.buf, e.mem);
+  if (e.host_buf || e.host_mem)
+    g_cs_retired.emplace_back(e.host_buf, e.host_mem);
   g_cs_range_bytes -= e.cap;
   e.buf = VK_NULL_HANDLE;
   e.mem = VK_NULL_HANDLE;
+  e.host_buf = VK_NULL_HANDLE;
+  e.host_mem = VK_NULL_HANDLE;
+  e.device_local = false;
   e.cap = 0;
   return CsRangeEnsureBuffer(e, size);
 }
 
 void CsRangeDestroy(CsRange& e) {
   if (e.map && !e.imported)
-    vkUnmapMemory(g_dev.device, e.mem);
+    vkUnmapMemory(g_dev.device, e.device_local ? e.host_mem : e.mem);
   if (e.buf)
     vkDestroyBuffer(g_dev.device, e.buf, nullptr);
   if (e.mem)
     vkFreeMemory(g_dev.device, e.mem, nullptr);
+  if (e.host_buf)
+    vkDestroyBuffer(g_dev.device, e.host_buf, nullptr);
+  if (e.host_mem)
+    vkFreeMemory(g_dev.device, e.host_mem, nullptr);
   g_cs_range_bytes -= e.cap;
   e = CsRange{};
 }
@@ -1097,7 +1232,55 @@ VkFence g_cs_batch_fence = VK_NULL_HANDLE;
 bool g_cs_stage_pending[ComputeInfo::kMaxResources] = {};
 std::unordered_map<VkBuffer, ComputeBufferAccess> g_cs_batch_access;
 
-bool CsBatchFlush() {
+// DELTA_GPU_CSSYNC=1: how many submit+wait round trips a frame, and what asked
+// for each. The wait itself is the single biggest term in a SotC frame, so the
+// question that matters is which call site is forcing it.
+enum CsSyncWhy {
+  kSyncImported,
+  kSyncWriteback,
+  kSyncScratchGrow,
+  kSyncRangeGrow,
+  kSyncStageHazard,
+  kSyncDescPool,
+  kSyncBatchCap,
+  kSyncCount
+};
+const char* const kCsSyncName[kSyncCount] = {
+    "imported", "writeback", "scratch-grow", "range-grow",
+    "stage-hazard", "desc-pool", "batch-cap"};
+uint64_t g_cs_sync_n[kSyncCount] = {};
+uint64_t g_cs_sync_ns[kSyncCount] = {};
+
+// Open the batch command buffer. Staging copies are recorded into the same
+// buffer as the dispatches, so this has to be callable before the first one.
+void CsBatchBeginImpl() {
+  if (g_cs_batch_open)
+    return;
+  vkResetCommandBuffer(g_cs_cmd, 0);
+  VkCommandBufferBeginInfo cbi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+  cbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+  vkBeginCommandBuffer(g_cs_cmd, &cbi);
+  CmdBeginLabel(g_cs_cmd, "cs batch (frame %llu)",
+                (unsigned long long)g_frame.num);
+  g_cs_batch_open = true;
+}
+
+// Record the staging move into the batch, and mark the range as referenced by
+// it so a later grow/rename does not pull the buffer out from under the copy.
+void CsCopyStaging(CsRange& e, VkDeviceSize bytes, bool to_device) {
+  if (!e.device_local || !e.host_buf || !e.buf || !bytes)
+    return;
+  CsBatchBeginImpl();
+  RecordStagingCopy(g_cs_cmd, e, bytes, to_device);
+  g_cs_batch_access.erase(e.buf);
+  e.pending_batch = true;
+  if (to_device)
+    e.mirror_current = true;  // both sides now hold what the CPU just wrote
+  else
+    e.readback_pending = true;
+}
+
+bool CsBatchFlush(CsSyncWhy why = kSyncWriteback) {
   if (!g_cs_batch_open)
     return !g_cs_failed;
   const uint64_t t0 = NowNs();
@@ -1141,8 +1324,15 @@ bool CsBatchFlush() {
       vkFreeMemory(g_dev.device, mem, nullptr);
   }
   g_cs_retired.clear();
-  for (auto& kv : g_cs_ranges)
+  for (auto& kv : g_cs_ranges) {
     kv.second.pending_batch = false;
+    // The wait covers every readback recorded into this batch, so their host
+    // mirrors are now readable.
+    if (kv.second.readback_pending) {
+      kv.second.readback_pending = false;
+      kv.second.mirror_current = true;
+    }
+  }
   std::memset(g_cs_stage_pending, 0, sizeof g_cs_stage_pending);
   g_cs_batch_access.clear();
   // Imported ranges are written by the dispatches this submit just executed,
@@ -1150,7 +1340,20 @@ bool CsBatchFlush() {
   // batch itself is the visibility point for the staging caches.
   g_cs_writeback_gen++;
   g_ns_cs_gpu += NowNs() - t0;
+  g_cs_sync_n[why]++;
+  g_cs_sync_ns[why] += NowNs() - t0;
   return true;
+}
+
+// Record the VRAM->host readback for every dirty range in [first, last), so
+// the single flush that follows covers all of them.
+template <typename It>
+void CsStageReadbacks(It first, It last) {
+  for (It it = first; it != last; ++it) {
+    CsRange& e = it->second;
+    if (e.gpu_dirty && e.device_local && !e.mirror_current && !e.imported)
+      CsCopyStaging(e, e.size ? e.size : e.cap, /*to_device=*/false);
+  }
 }
 
 // Write one dirty range back to guest memory (retile for images) and re-stamp
@@ -1177,12 +1380,17 @@ bool CsRangeFlushOne(uint64_t base, CsRange& e) {
   if (!e.gpu_dirty)
     return true;
   if (e.imported) {  // the dispatch wrote straight into guest memory
-    if (e.pending_batch && !CsBatchFlush())
+    if (e.pending_batch && !CsBatchFlush(kSyncImported))
       return false;
     e.gpu_dirty = false;
     return true;
   }
-  if (e.pending_batch && !CsBatchFlush())
+  // Results live in VRAM: pull them into the host mirror on the same batch that
+  // produced them, so the one fence wait covers the dispatch and the copy.
+  // Already-recorded readbacks (CsStageReadbacks) skip this.
+  if (e.device_local && !e.mirror_current)
+    CsCopyStaging(e, e.size ? e.size : e.cap, /*to_device=*/false);
+  if (e.pending_batch && !CsBatchFlush(kSyncWriteback))
     return false;  // results must exist before readback
   if (g_cs_failed)
     return false;
@@ -1379,7 +1587,13 @@ bool CsEnsureStage(uint32_t i, VkDeviceSize size) {
   vkGetBufferMemoryRequirements(g_dev.device, s.buf, &mr);
   VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
   ai.allocationSize = mr.size;
-  ai.memoryTypeIndex = FindComputeMemoryType(mr.memoryTypeBits);
+  // Scratch is zeroed by vkCmdFillBuffer and only ever touched by shaders, so
+  // it wants VRAM and no mapping at all.
+  const uint32_t scratch_device =
+      kCsVram ? FindDeviceMemoryType(mr.memoryTypeBits) : UINT32_MAX;
+  ai.memoryTypeIndex = scratch_device != UINT32_MAX
+                           ? scratch_device
+                           : FindComputeMemoryType(mr.memoryTypeBits);
   if (vkAllocateMemory(g_dev.device, &ai, nullptr, &s.mem) != VK_SUCCESS) {
     vkDestroyBuffer(g_dev.device, s.buf, nullptr);
     s.buf = VK_NULL_HANDLE;
@@ -1387,7 +1601,8 @@ bool CsEnsureStage(uint32_t i, VkDeviceSize size) {
     return false;
   }
   vkBindBufferMemory(g_dev.device, s.buf, s.mem, 0);
-  vkMapMemory(g_dev.device, s.mem, 0, cap, 0, &s.map);
+  if (scratch_device == UINT32_MAX)
+    vkMapMemory(g_dev.device, s.mem, 0, cap, 0, &s.map);
   s.cap = cap;
   return true;
 }
@@ -1401,6 +1616,27 @@ struct ScopeCs {
 };
 
 }  // namespace
+
+void CsSyncReport(double frames) {
+  uint64_t total = 0;
+  for (int i = 0; i < kSyncCount; i++)
+    total += g_cs_sync_n[i];
+  if (!kCsSyncReport || !total) {
+    for (int i = 0; i < kSyncCount; i++)
+      g_cs_sync_n[i] = g_cs_sync_ns[i] = 0;
+    return;
+  }
+  std::fprintf(stderr, "[cssync] %.1f syncs/frame:", total / frames);
+  for (int i = 0; i < kSyncCount; i++) {
+    if (!g_cs_sync_n[i])
+      continue;
+    std::fprintf(stderr, " %s=%.1f(%.1fms)", kCsSyncName[i],
+                 g_cs_sync_n[i] / frames, g_cs_sync_ns[i] / frames / 1e6);
+    g_cs_sync_n[i] = 0;
+    g_cs_sync_ns[i] = 0;
+  }
+  std::fprintf(stderr, "\n");
+}
 
 bool PreserveCsDepthBeforeClear(uint64_t base) {
   auto depth_it = g_depths.find(base);
@@ -1639,7 +1875,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci) {
       // Growing the scratch slot recreates its buffer; a pending batched
       // dispatch still references the old handle.
       if (g_cs_stage_pending[i] && g_cs_stage[i].cap < sz[i] &&
-          !CsBatchFlush()) {
+          !CsBatchFlush(kSyncScratchGrow)) {
         renderer.state = nullptr;
         return false;
       }
@@ -1665,7 +1901,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci) {
     if (!same_shape && e.gpu_dirty)
       if (!CsRangeFlushOne(base, e))
         return false;  // reshaped: keep its data
-    if (e.pending_batch && (!e.buf || e.cap < sz[i]) && !CsBatchFlush()) {
+    if (e.pending_batch && (!e.buf || e.cap < sz[i]) && !CsBatchFlush(kSyncRangeGrow)) {
       renderer.state = nullptr;
       return false;  // growth would destroy a buffer the batch references
     }
@@ -1735,7 +1971,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci) {
           return false;
         }
         e.pending_batch = false;
-      } else if (e.pending_batch && !CsBatchFlush()) {
+      } else if (e.pending_batch && !CsBatchFlush(kSyncStageHazard)) {
         renderer.state = nullptr;
         return false;
       }
@@ -1768,6 +2004,8 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci) {
           e.hash = RangeHash(base, guest_bytes);
           e.last_validated_frame = g_frame.num;
         }
+        // The CPU wrote the host mirror; the shaders bind the VRAM copy.
+        CsCopyStaging(e, sz[i], /*to_device=*/true);
       }
       if (!same_shape) {
         e.hash = RangeHash(base, guest_bytes);
@@ -1816,7 +2054,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci) {
   da.descriptorSetCount = 1;
   da.pSetLayouts = &cp->set_layout;
   if (vkAllocateDescriptorSets(g_dev.device, &da, &set) != VK_SUCCESS) {
-    if (!CsBatchFlush()) {
+    if (!CsBatchFlush(kSyncDescPool)) {
       renderer.state = nullptr;
       return false;
     }
@@ -1842,15 +2080,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci) {
 
   // Record the dispatch into the open batch. Submission + the fence wait
   // happen at the next flush point, not here.
-  if (!g_cs_batch_open) {
-    vkResetCommandBuffer(g_cs_cmd, 0);
-    VkCommandBufferBeginInfo cbi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-    cbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(g_cs_cmd, &cbi);
-    CmdBeginLabel(g_cs_cmd, "cs batch (frame %llu)",
-                  (unsigned long long)g_frame.num);
-    g_cs_batch_open = true;
-  }
+  CsBatchBeginImpl();
   VkBufferMemoryBarrier zero_before[ComputeInfo::kMaxResources];
   VkBufferMemoryBarrier zero_after[ComputeInfo::kMaxResources];
   uint32_t zero_count = 0;
@@ -1948,7 +2178,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci) {
         it->second.pending_batch = true;
     }
   }
-  if ((++g_cs_batch_count >= 128 || kGpuCsgpuVerbose) && !CsBatchFlush()) {
+  if ((++g_cs_batch_count >= 128 || kGpuCsgpuVerbose) && !CsBatchFlush(kSyncBatchCap)) {
     renderer.state = nullptr;
     return false;
   }
@@ -1966,6 +2196,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci) {
     if (!it->second.gpu_dirty)
       IndexDirtyRange(ci.res[i].base, it->second.guest_bytes);
     it->second.gpu_dirty = true;
+    it->second.mirror_current = false;  // the dispatch outran the host mirror
     if (kGpuCsgpuVerbose) {
       const uint8_t* b = static_cast<const uint8_t*>(it->second.map);
       uint64_t nz = 0,
@@ -1994,6 +2225,9 @@ bool FlushCsWrites(Renderer& renderer) {
   }
   const uint64_t _t0 = NowNs();
   bool all_current = true;
+  // Record every readback first: one fence wait then covers all of them,
+  // instead of one submit+wait per dirty range.
+  CsStageReadbacks(g_cs_ranges.begin(), g_cs_ranges.end());
   for (auto it = g_cs_ranges.begin(); it != g_cs_ranges.end();) {
     if (!CsRangeFlushOne(it->first, it->second)) {
       if (g_cs_failed) {
@@ -2067,7 +2301,17 @@ bool FlushCsWritesRange(Renderer& renderer, uint64_t base, uint64_t bytes) {
       std::fprintf(stderr, "\n");
     }
   }
-  for (uint64_t dirty : DirtyRangesOverlapping(base, bytes)) {
+  const auto overlapping = DirtyRangesOverlapping(base, bytes);
+  for (uint64_t dirty : overlapping) {
+    auto found = g_cs_ranges.find(dirty);
+    if (found != g_cs_ranges.end() && found->second.gpu_dirty &&
+        found->second.device_local && !found->second.mirror_current &&
+        !found->second.imported)
+      CsCopyStaging(found->second,
+                    found->second.size ? found->second.size : found->second.cap,
+                    /*to_device=*/false);
+  }
+  for (uint64_t dirty : overlapping) {
     auto found = g_cs_ranges.find(dirty);
     if (found != g_cs_ranges.end() && !CsRangeFlushOne(dirty, found->second)) {
       if (g_cs_failed) {

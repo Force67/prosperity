@@ -366,6 +366,7 @@ void ReportFps() {
         g_cs_wb_bytes_total ? 100.0 * double(g_cs_wb_bytes_written) /
                                   double(g_cs_wb_bytes_total)
                             : 0.0);
+    CsSyncReport(f);
     // Feed the on-screen overlay gauge (gpuMs = GPU end/present-dominated
     // cost).
     gfx::overlaySetPerf(float(frames / dt), float(g_ns_end / f / 1e6),

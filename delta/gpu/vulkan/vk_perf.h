@@ -30,6 +30,9 @@ extern uint64_t g_cs_stage_bytes;
 // reverting -- see CsRangeFlushOne.
 extern uint64_t g_cs_wb_bytes_written, g_cs_wb_bytes_total;
 
+// Submit+wait round trips a frame, broken down by what asked for each.
+void CsSyncReport(double frames);
+
 // Per-frame accumulators (ns), reset when a frame's sample is pushed.
 extern uint64_t g_fr_draw, g_fr_submit, g_fr_wait, g_fr_present, g_fr_tex_up;
 
