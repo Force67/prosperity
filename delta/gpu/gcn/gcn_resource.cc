@@ -7,6 +7,7 @@
 #include "gpu/gcn/gcn_resource.h"
 
 #include "gpu/gcn/gcn_translate.h"
+#include "gpu/rhi/renderer.h"
 
 #include <algorithm>
 #include <chrono>
@@ -752,6 +753,15 @@ struct ScalarEval {
             static_cast<unsigned long>(address));
       return;
     }
+    // The table this chain reads may have been filled by a compute dispatch
+    // this frame -- SotC's material arenas hold the very T#s its draws reach
+    // through their SRTs -- and those results sit in the CS buffer until they
+    // are written back. Reading around the writeback resolves the descriptor
+    // to zeros while the slot visibly holds a plausible T# a moment later
+    // (TEXMISS's "src holds a valid descriptor" signature). One branch when
+    // nothing is dirty anywhere; one page probe when something is.
+    rhi::FlushCsWritesRange(rhi::DefaultRenderer(), address,
+                            static_cast<uint64_t>(dwords) * 4);
     const uint32_t* mem = reinterpret_cast<const uint32_t*>(address);
     for (uint32_t i = 0; i < dwords; i++) {
       Set(s.sdst + i, mem[i]);

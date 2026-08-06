@@ -182,6 +182,19 @@
 // write-coverage-tracking version exists; without it a full hour scripted
 // through the menu runs crash-free (costs ~45-60 ms/frame of staging-in).
 //
+// THE 16x16 SRGB TEXMISS, CHARACTERIZED (2026-08-06): the one persistent
+// texture miss (dfmt=10 nfmt=9, arena slots 0x809xxxxxxx, ~58/run around the
+// title backdrop) is a PUBLISH-ORDER RACE, not staleness: at resolve time the
+// T#'s word0 (base) is zero while words 1-3 are valid; the miss report
+// re-reading the same slot microseconds later sees the full descriptor. The
+// title patches the base in last (streaming residency); real hardware reads
+// descriptors at wave launch, long after. The writeback-flush fix (commit
+// "flush pending compute writebacks before the replay reads a descriptor")
+// closes the adjacent staleness class but not this. Impact: one LUT samples
+// white. Candidate fix: defer/retry resolution for base==0-but-plausible T#s
+// at the NEXT draw using the same slot, or resolve against the slot at
+// submit-end rather than record time.
+//
 // PAST THE TITLE (2026-08-06): the menu opens and renders readable entries
 // (New Game / Settings / Image Gallery, difficulty select) on current
 // builds; the earlier "solid glyph blocks" existed only pre-dedupe.
