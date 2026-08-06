@@ -69,6 +69,10 @@ uint64_t g_cs_image_staged = 0;
 
 namespace gpu::vk {
 namespace {
+// Writeback-half accounting (DELTA_GPU_CSSYNC); defined here because the
+// aliased-image bridge below is the thing being counted.
+uint64_t g_out_retile_ns = 0, g_out_rt_ns = 0, g_out_tail_ns = 0;
+uint64_t g_out_retile_n = 0, g_out_rt_submits = 0;
 
 using rhi::ComputeInfo;
 
@@ -849,6 +853,7 @@ bool RunAliasedCopy(const CsAliasedImage& img,
     r = vkQueueSubmit(g_dev.queue, 1, &si, g_dev.fence);
   if (r == VK_SUCCESS)
     r = vkWaitForFences(g_dev.device, 1, &g_dev.fence, VK_TRUE, UINT64_MAX);
+  g_out_rt_submits++;
   vkFreeCommandBuffers(g_dev.device, g_dev.pool, 1, &c);
   if (r != VK_SUCCESS) {
     std::fprintf(stderr, "[gpuvk] cs %s bridge copy failed: %d (base=%#llx)\n",
@@ -1417,6 +1422,7 @@ bool CsRangeFlushOne(uint64_t base, CsRange& e) {
                    e.res.layers, e.res.tiling_idx, (unsigned long long)nz,
                    (unsigned long long)e.res.size);
   }
+  const uint64_t _t_wb = NowNs();
   if (e.image_staging) {
     if (!WritebackCsImage(e.res, e.map)) {
       // Count as well as sample: a flat cap of 8 lines cannot tell one
@@ -1542,7 +1548,12 @@ bool CsRangeFlushOne(uint64_t base, CsRange& e) {
       g_cs_wb_bytes_total += n;
     }
   }
+  const uint64_t _t_rt = NowNs();
+  g_out_retile_ns += _t_rt - _t_wb;
+  g_out_retile_n += e.image_staging;
   UploadCsRangeToRt(base, e);  // refresh a live RT image aliasing the range
+  const uint64_t _t_inv = NowNs();
+  g_out_rt_ns += _t_inv - _t_rt;
   InvalidateTexRange(base, e.guest_bytes);
   UnindexDirtyRange(base, e.guest_bytes);
   // Guest memory just changed under any staged copy of it: retire the draw
@@ -1551,6 +1562,7 @@ bool CsRangeFlushOne(uint64_t base, CsRange& e) {
   e.gpu_dirty = false;
   e.hash = RangeHash(base, e.guest_bytes);
   e.last_validated_frame = g_frame.num;
+  g_out_tail_ns += NowNs() - _t_inv;
   return true;
 }
 
@@ -1626,6 +1638,14 @@ void CsSyncReport(double frames) {
       g_cs_sync_n[i] = g_cs_sync_ns[i] = 0;
     return;
   }
+  std::fprintf(stderr,
+               "[csout] retile=%.1fms x%.1f rt-upload=%.1fms x%.1f "
+               "tail=%.1fms\n",
+               g_out_retile_ns / frames / 1e6, g_out_retile_n / frames,
+               g_out_rt_ns / frames / 1e6, g_out_rt_submits / frames,
+               g_out_tail_ns / frames / 1e6);
+  g_out_retile_ns = g_out_rt_ns = g_out_tail_ns = 0;
+  g_out_retile_n = g_out_rt_submits = 0;
   std::fprintf(stderr, "[cssync] %.1f syncs/frame:", total / frames);
   for (int i = 0; i < kSyncCount; i++) {
     if (!g_cs_sync_n[i])
@@ -2302,15 +2322,14 @@ bool FlushCsWritesRange(Renderer& renderer, uint64_t base, uint64_t bytes) {
     }
   }
   const auto overlapping = DirtyRangesOverlapping(base, bytes);
-  for (uint64_t dirty : overlapping) {
-    auto found = g_cs_ranges.find(dirty);
-    if (found != g_cs_ranges.end() && found->second.gpu_dirty &&
-        found->second.device_local && !found->second.mirror_current &&
-        !found->second.imported)
-      CsCopyStaging(found->second,
-                    found->second.size ? found->second.size : found->second.cap,
-                    /*to_device=*/false);
-  }
+  // This read is about to cost a fence wait, so pull EVERY dirty range's
+  // results across on it rather than only the ones it asked for. The waits are
+  // the expensive part and one covers them all; the ranges this draw does not
+  // want stay dirty, but their mirrors are now current, so the flush that
+  // eventually wants them needs no wait at all. Draw-at-a-time flushing was
+  // ~25 waits a frame where a frame needs 2 or 3.
+  if (!overlapping.empty())
+    CsStageReadbacks(g_cs_ranges.begin(), g_cs_ranges.end());
   for (uint64_t dirty : overlapping) {
     auto found = g_cs_ranges.find(dirty);
     if (found != g_cs_ranges.end() && !CsRangeFlushOne(dirty, found->second)) {
