@@ -47,6 +47,11 @@ DELTA_OPTION(uint64_t, kCvTrace, "DELTA_UMTX_CVTRACE", 0);
 DELTA_OPTION(bool, kNoThrBarrier, "DELTA_NO_THR_BARRIER", false);
 DELTA_OPTION(bool, kUmtxHist, "DELTA_UMTX_HIST", false);
 DELTA_OPTION(bool, kUmtxTrace, "DELTA_UMTX_TRACE", false);
+// DELTA_UMTX_INJECT_NS: burn N ns inside MUTEX_WAIT. Not a tuning knob -- it
+// answers "is this op on the critical path at all". If fps falls in proportion
+// to the injected cost, shaving nanoseconds off it pays; if fps does not move,
+// the threads are polling around something else and the op is a symptom.
+DELTA_OPTION(long, kUmtxInjectNs, "DELTA_UMTX_INJECT_NS", 0);
 }  // namespace
 
 namespace krnl {
@@ -841,6 +846,12 @@ int PS4ABI sys_umtx_op(void *ptr, int op, uint64_t val, void *a, void *b) {
   }
   case 17: { // UMTX_OP_MUTEX_WAIT: block while the umutex is owned
     auto *p = static_cast<std::atomic<uint32_t> *>(ptr);
+    if (kUmtxInjectNs) {
+      const auto until = std::chrono::steady_clock::now() +
+                         std::chrono::nanoseconds(kUmtxInjectNs);
+      while (std::chrono::steady_clock::now() < until)
+        __builtin_ia32_pause();
+    }
     // The word is usually already free by the time we get here: libthr only
     // calls this after its userland CAS lost, and the winner often releases in
     // the window before the syscall lands. That outcome needs no bucket lock
