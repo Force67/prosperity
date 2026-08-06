@@ -703,7 +703,108 @@ static void umtxTrace(int op, void *ptr, uint32_t self, uint32_t owner) {
                  self, owner);
 }
 
+// DELTA_UMTX_PROF=1: WALL time each thread spends inside sys_umtx_op, as a
+// share of elapsed time. A CPU profile cannot answer this -- a thread blocked
+// in futex_wait burns no cycles and simply vanishes from the samples -- so it
+// is the only way to tell "the guest's locks are the critical path" from "some
+// worker is parked on a condvar and nobody is waiting for it".
+namespace umtxwall {
+struct Acc {
+  uint32_t tid = 0;
+  std::atomic<uint64_t> ns{0};
+  std::atomic<uint64_t> calls{0};
+};
+std::mutex g_mtx;
+std::vector<Acc *> g_accs;
+DELTA_TLS_IE thread_local Acc *t_acc = nullptr;
+// Which op is being hammered, and how long each spends. Same window.
+std::atomic<uint64_t> g_op_n[64];
+std::atomic<uint64_t> g_op_ns[64];
+// How often the unlocked owner-word check answers the whole call.
+std::atomic<uint64_t> g_fast[64];
+
+bool enabled() {
+  static const bool on = [] {
+    const char *e = std::getenv("DELTA_UMTX_PROF");
+    return e && *e && *e != '0';
+  }();
+  return on;
+}
+
+Acc &acc() {
+  if (!t_acc) {
+    t_acc = new Acc{t_tid};
+    std::lock_guard<std::mutex> lk(g_mtx);
+    g_accs.push_back(t_acc);
+  }
+  return *t_acc;
+}
+
+// Report every ~2s from whichever thread notices, so this needs no hook in the
+// renderer's frame loop.
+void maybeReport() {
+  static std::atomic<uint64_t> last{0};
+  const auto now = std::chrono::steady_clock::now().time_since_epoch();
+  const uint64_t now_ns =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(now).count();
+  uint64_t prev = last.load(std::memory_order_relaxed);
+  if (!prev) {
+    last.compare_exchange_strong(prev, now_ns);
+    return;
+  }
+  if (now_ns - prev < 2000000000ull)
+    return;
+  if (!last.compare_exchange_strong(prev, now_ns))
+    return;
+  const double window = double(now_ns - prev);
+  std::lock_guard<std::mutex> lk(g_mtx);
+  std::fprintf(stderr, "[umtxwall] over %.1fs:", window / 1e9);
+  for (Acc *a : g_accs) {
+    const uint64_t ns = a->ns.exchange(0);
+    const uint64_t n = a->calls.exchange(0);
+    if (ns * 100.0 / window < 5.0)
+      continue;  // only threads it actually holds up
+    std::fprintf(stderr, " tid%u=%.0f%%(x%llu)", a->tid, ns * 100.0 / window,
+                 (unsigned long long)n);
+  }
+  std::fprintf(stderr, "\n[umtxwall]   ops:");
+  for (uint32_t i = 0; i < 64; ++i) {
+    const uint64_t n = g_op_n[i].exchange(0);
+    const uint64_t ns = g_op_ns[i].exchange(0);
+    if (n)
+      std::fprintf(stderr, " %s=%llu(%.0fns,fast=%.0f%%)", umtxhist::opName(i),
+                   (unsigned long long)n, n ? double(ns) / n : 0.0,
+                   n ? g_fast[i].exchange(0) * 100.0 / n : 0.0);
+  }
+  std::fprintf(stderr, "\n");
+}
+}  // namespace umtxwall
+
+struct UmtxWallScope {
+  std::chrono::steady_clock::time_point t0;
+  int op = -1;
+  bool on = umtxwall::enabled();
+  explicit UmtxWallScope(int o) : op(o) {
+    if (on)
+      t0 = std::chrono::steady_clock::now();
+  }
+  ~UmtxWallScope() {
+    if (!on)
+      return;
+    const uint64_t d = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                           std::chrono::steady_clock::now() - t0)
+                           .count();
+    auto &a = umtxwall::acc();
+    a.ns.fetch_add(d, std::memory_order_relaxed);
+    a.calls.fetch_add(1, std::memory_order_relaxed);
+    umtxwall::g_op_n[op & 63].fetch_add(1, std::memory_order_relaxed);
+    umtxwall::g_op_ns[op & 63].fetch_add(d, std::memory_order_relaxed);
+    umtxwall::maybeReport();
+  }
+};
+
 int PS4ABI sys_umtx_op(void *ptr, int op, uint64_t val, void *a, void *b) {
+  UmtxWallScope _uw(op);
   WaitProbe _wp("umtx_op", (long)(long)ptr, (long)op);
   using namespace std::chrono_literals;
   markThreadStarted();  // first sync point => our init is done
@@ -739,8 +840,20 @@ int PS4ABI sys_umtx_op(void *ptr, int op, uint64_t val, void *a, void *b) {
     return 0;
   }
   case 17: { // UMTX_OP_MUTEX_WAIT: block while the umutex is owned
-    auto &bk = umtxBucket(ptr);
     auto *p = static_cast<std::atomic<uint32_t> *>(ptr);
+    // The word is usually already free by the time we get here: libthr only
+    // calls this after its userland CAS lost, and the winner often releases in
+    // the window before the syscall lands. That outcome needs no bucket lock
+    // and no channel lookup, and taking them anyway is what made this op cost
+    // ~1us across 2.9M calls a second in SotC -- half the wall time of every
+    // thread that submits our command buffers. Reading unlocked is no weaker
+    // than reading under the lock: the value can change either way, and a
+    // spurious 0 return just sends libthr around its own CAS loop.
+    if ((p->load() & ~UMUTEX_CONTESTED) == 0) {
+      umtxwall::g_fast[17].fetch_add(1, std::memory_order_relaxed);
+      return 0;
+    }
+    auto &bk = umtxBucket(ptr);
     std::unique_lock<std::mutex> lk(bk.m);
     auto &ch = bk.chan[ptr];
     uint32_t owner = p->load();
@@ -790,8 +903,17 @@ int PS4ABI sys_umtx_op(void *ptr, int op, uint64_t val, void *a, void *b) {
   // not userland -- clears CONTESTED, because libthr's contested release
   // deliberately leaves the word at CONTESTED and relies on this.
   case 18: { // UMTX_OP_MUTEX_WAKE
-    auto &bk = umtxBucket(ptr);
     auto *p = static_cast<std::atomic<uint32_t> *>(ptr);
+    // Same shape as op 17: "still held, so wake nobody" is decided by the owner
+    // word alone. Losing this race only means the release that just happened
+    // does the waking instead, and it must enter the kernel to do it -- the
+    // word is CONTESTED while waiters are queued, which is exactly what stops
+    // libthr releasing in userland.
+    if ((p->load() & ~UMUTEX_CONTESTED) != 0) {
+      umtxwall::g_fast[18].fetch_add(1, std::memory_order_relaxed);
+      return 0;
+    }
+    auto &bk = umtxBucket(ptr);
     std::unique_lock<std::mutex> lk(bk.m);
     auto &ch = bk.chan[ptr];
     uint32_t owner = p->load();
