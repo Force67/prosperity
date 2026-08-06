@@ -517,3 +517,32 @@
 // 8192-entry ring was enlarged for. If they do appear, find the lock that should have
 // excluded them by dumping every guest lock word the call path touches, not just
 // 0x200003420.
+
+// PERFORMANCE (2026-08-06). 2.4 -> 3.4 fps by moving the compute range buffers
+// into VRAM (commit "compute buffers the GPU hammers do not belong in system
+// RAM"). They were HOST_CACHED and never DEVICE_LOCAL, so every dispatch read
+// and wrote its storage over PCIe: 282 ms of a 457 ms frame, disguised as GPU
+// time because it surfaced as fence waits. nvidia-smi told the story -- 85%
+// utilisation at 163 W of a 350 W part is a memory-stalled GPU, not a busy one.
+// Mapping VRAM directly is much worse (uncached CPU reads ~100 MB/s -> 0.2 fps);
+// the host-cached mirror plus DMA at the staging edges is the shape that works.
+//
+// WHAT THE FRAME LOOKS LIKE NOW (per frame, at ~3.4 fps): out=163ms (writeback:
+// image retile, the memcpy to guest memory, and UploadCsRangeToRt's submit+wait
+// PER aliased image), gpu=92ms, draw=83ms, in=59ms. `out` is the next target,
+// and RunAliasedCopy's one-round-trip-per-image is the first thing to look at.
+// +DELTA_GPU_CSSYNC=1     submit+wait round trips a frame, by call site
+// +DELTA_GPU_CSVRAM=0     restore the old system-RAM placement
+// +DELTA_GPU_CSRENAME=1   removes the remaining stage-hazard syncs; measured
+//                         within run-to-run noise, so left off
+//
+// MEASUREMENT GOTCHA: scene weight drifts as the world streams in, so fps from
+// a 130 s run is not comparable to fps from a 300 s one, and the last-8-samples
+// window lands wherever the run happened to be. Compare same-length runs on the
+// same binary with the knob flipped (scratchpad/sotc/bench.sh does this: median
+// over all samples after the first 20). Run-to-run spread is ~15%.
+//
+// CSIMPORT (DELTA_GPU_CSIMPORT=1) is faster still but FAULTS: it dies in libc
+// on a null deref where a 300 s baseline covering MORE frames does not, so the
+// crash is the import, not the extra progress. Not a placement problem -- the
+// guest pages it maps outlive the mapping only by luck.
