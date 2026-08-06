@@ -843,8 +843,15 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
         // walk of the interrupted frame chain yields addresses dladdr cannot
         // symbolise in our own binary, so resolving our own frames would need
         // the project's symbolize() driven from uc_mcontext.
+#if defined(__x86_64__)
+        const uintptr_t host_pc = (uintptr_t)static_cast<ucontext_t *>(ucv)
+                                      ->uc_mcontext.gregs[REG_RIP];
+#elif defined(__aarch64__)
         const uintptr_t host_pc =
-            static_cast<ucontext_t *>(ucv)->uc_mcontext.pc;
+            (uintptr_t)static_cast<ucontext_t *>(ucv)->uc_mcontext.pc;
+#else
+        const uintptr_t host_pc = 0;
+#endif
         Dl_info di{};
         const char *base = nullptr;
         if (dladdr(reinterpret_cast<void *>(host_pc), &di) && di.dli_fname)
