@@ -53,6 +53,7 @@
 
 namespace {
 DELTA_OPTION(int, kSampleMs, "DELTA_SAMPLE_MS", 0);
+DELTA_OPTION(const char *, kRipRace, "DELTA_RIPRACE", nullptr);
 DELTA_OPTION(int, kLoadWatch, "DELTA_LOADWATCH", 0);
 DELTA_OPTION(uint64_t, kLoadWatchBase, "DELTA_LOADWATCH_BASE", 0x201400000000ull);
 DELTA_OPTION(uint64_t, kLoadWatchGoff, "DELTA_LOADWATCH_GOFF", 0x2ee2d00ull);
@@ -150,6 +151,17 @@ static void symRange(uint64_t a, char *out, size_t n) {
 // Live guest threads, for the DELTA_WATCHDOG=secs deadlock dump: after N seconds
 // it prints every live thread's current guest RIP so a stalled boot's blocking
 // site can be symbolized to a module+offset without a debugger.
+// DELTA_RIPRACE sample slots. The signalled thread reconstructs its own guest
+// rip (exact, from the host PC in its signal context) and stamps the round it is
+// answering; the collector only counts slots stamped with the round it asked for.
+static std::atomic<uint64_t> g_sampleGen{0};
+static thread_local std::atomic<uint64_t> t_sampleGen{0};
+static thread_local std::atomic<uint64_t> t_sampleRip{0};
+// When the sample was taken. Signal delivery across threads is not simultaneous,
+// so without this a "co-occurrence" could be one thread leaving and another
+// entering hundreds of microseconds apart -- which is not the question.
+static thread_local std::atomic<uint64_t> t_sampleNs{0};
+
 struct LiveThread {
   FEXCore::Core::InternalThreadState *thread;
   uint32_t id;
@@ -159,6 +171,19 @@ struct LiveThread {
   const TraceEvt *trace = nullptr;
   const uint32_t *tracePos = nullptr;
   const uint32_t *gtid = nullptr;  // this thread's guest tid (umutex owner space)
+  // Whether this thread is parked in a syscall. A sampler reading State.rip
+  // cannot tell "executing here" from "blocked in a wait it entered from here":
+  // rip is only written back at block boundaries, so a thread asleep in
+  // sys_umtx_op keeps whatever rip it last published. DELTA_RIPRACE needs the
+  // difference, because a thread WAITING for a lock sits at a rip inside the
+  // very function whose concurrent execution it is trying to detect.
+  const bool *inSyscall = nullptr;
+  // Where DELTA_RIPRACE leaves this thread's sampled guest rip, and the host tid
+  // to signal to ask for one.
+  std::atomic<uint64_t> *sampleGen = nullptr;
+  std::atomic<uint64_t> *sampleRip = nullptr;
+  std::atomic<uint64_t> *sampleNs = nullptr;
+  pid_t hostTid = 0;
 };
 std::mutex g_liveMutex;
 std::vector<LiveThread> g_live;
@@ -188,6 +213,156 @@ static void startWatchdog() {
           std::fflush(stderr);
         }
       }).detach();
+    }
+    // DELTA_RIPRACE=<ms>:<lo>-<hi>[,<lo>-<hi>...]  (absolute guest VAs, hex)
+    // Answer "do two guest threads ever EXECUTE inside these code ranges at the
+    // same time?" -- i.e. is a critical section actually mutually excluded. Give
+    // it the ranges that may only run under a lock (SotC's allocator: the
+    // free-tree insert 201400048a70-201400048b64 and the rebalance
+    // 20140004a040-20140004a205).
+    //
+    // It must NOT read CurrentFrame->State.rip to do this. That field is only
+    // written when a thread leaves a block or enters a syscall, so for a thread
+    // running in the JIT it names wherever it last did so -- the same staleness
+    // that once made the crash dump report a syscall's registers as the fault's.
+    // A first version of this sampler read it, skipped threads parked in a
+    // syscall to avoid counting lock waiters, and consequently measured NOTHING:
+    // 280k samples, never one thread inside, because the only threads whose rip
+    // was meaningful were exactly the ones it excluded.
+    //
+    // So sample a real PC: signal each guest thread and let it reconstruct its
+    // own guest rip from the host PC in its signal context, which is exact
+    // inside JIT code. The sample is stamped with a generation so the collector
+    // only counts answers from the round it asked for. Signal delivery is not
+    // simultaneous, so two threads counted in one round can be tens of
+    // microseconds apart: a ZERO result is therefore strong (no skew invents an
+    // absence) while a nonzero one is suggestive and wants a second look.
+    if (kRipRace) {
+      std::string spec(kRipRace);
+      int ms = 1;
+      std::vector<std::pair<uint64_t, uint64_t>> ranges;
+      const size_t colon = spec.find(':');
+      if (colon != std::string::npos) {
+        ms = std::atoi(spec.substr(0, colon).c_str());
+        if (ms <= 0) ms = 1;
+        const std::string rest = spec.substr(colon + 1);
+        size_t i = 0;
+        while (i < rest.size()) {
+          const size_t comma = rest.find(',', i);
+          const std::string one =
+              rest.substr(i, comma == std::string::npos ? comma : comma - i);
+          i = comma == std::string::npos ? rest.size() : comma + 1;
+          const size_t dash = one.find('-');
+          if (dash == std::string::npos)
+            continue;
+          const uint64_t lo = std::strtoull(one.c_str(), nullptr, 16);
+          const uint64_t hi = std::strtoull(one.c_str() + dash + 1, nullptr, 16);
+          if (lo && hi > lo)
+            ranges.push_back({lo, hi});
+        }
+      }
+      if (!ranges.empty()) {
+        struct sigaction sa {};
+        sa.sa_flags = SA_SIGINFO | SA_RESTART | SA_ONSTACK;
+        sigemptyset(&sa.sa_mask);
+        sa.sa_sigaction = [](int, siginfo_t *, void *ucv) {
+          auto *uc = static_cast<ucontext_t *>(ucv);
+          const uint64_t rip = reconstructGuestRip(uc->uc_mcontext.pc);
+          struct timespec ts {};
+          clock_gettime(CLOCK_MONOTONIC, &ts);
+          t_sampleNs.store((uint64_t)ts.tv_sec * 1000000000ull + ts.tv_nsec,
+                           std::memory_order_relaxed);
+          t_sampleRip.store(rip, std::memory_order_relaxed);
+          t_sampleGen.store(g_sampleGen.load(std::memory_order_relaxed),
+                            std::memory_order_release);
+        };
+        sigaction(SIGPROF, &sa, nullptr);
+        std::thread([ms, ranges] {
+          uint64_t rounds = 0, withOne = 0, withTwo = 0, maxSeen = 0, reported = 0,
+                   answered = 0, withTwoTight = 0;
+          for (;;) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+            const uint64_t gen =
+                g_sampleGen.fetch_add(1, std::memory_order_relaxed) + 1;
+            struct Slot { uint32_t id; pid_t tid;
+                          std::atomic<uint64_t> *gp, *rp, *np; };
+            Slot slots[64];
+            unsigned ns = 0;
+            {
+              std::lock_guard lk(g_liveMutex);
+              for (auto &t : g_live) {
+                if (ns >= 64 || !t.sampleGen || !t.sampleRip || !t.hostTid)
+                  continue;
+                slots[ns++] = {t.id, t.hostTid, t.sampleGen, t.sampleRip,
+                               t.sampleNs};
+              }
+            }
+            for (unsigned k = 0; k < ns; k++)
+              ::syscall(SYS_tgkill, ::getpid(), slots[k].tid, SIGPROF);
+            std::this_thread::sleep_for(std::chrono::microseconds(300));
+            struct Hit { uint32_t id; uint64_t rip; uint64_t ns; };
+            Hit hits[64];
+            unsigned n = 0;
+            for (unsigned k = 0; k < ns; k++) {
+              if (slots[k].gp->load(std::memory_order_acquire) != gen)
+                continue;  // did not answer this round
+              answered++;
+              const uint64_t rip = slots[k].rp->load(std::memory_order_relaxed);
+              for (auto &r : ranges)
+                if (rip >= r.first && rip < r.second) {
+                  hits[n++] = {slots[k].id, rip,
+                               slots[k].np ? slots[k].np->load(
+                                                 std::memory_order_relaxed)
+                                           : 0};
+                  break;
+                }
+            }
+            rounds++;
+            if (n > maxSeen) maxSeen = n;
+            if (n == 1) withOne++;
+            if (n >= 2) {
+              withTwo++;
+              // How far apart the two samples actually were. Only a spread well
+              // under a microsecond means "both were inside at the same time";
+              // anything larger is one thread leaving as another arrives, which
+              // no lock forbids.
+              uint64_t lo = hits[0].ns, hi = hits[0].ns;
+              for (unsigned k = 1; k < n; k++) {
+                lo = std::min(lo, hits[k].ns);
+                hi = std::max(hi, hits[k].ns);
+              }
+              const uint64_t spreadNs = hi - lo;
+              if (spreadNs <= 1000)
+                withTwoTight++;
+              if (reported++ < 40) {
+                std::fprintf(stderr,
+                             "[riprace] %u threads inside, samples spread %llu ns%s:",
+                             n, (unsigned long long)spreadNs,
+                             spreadNs <= 1000 ? "  <== SIMULTANEOUS" : "");
+                for (unsigned k = 0; k < n; k++) {
+                  char sym[160];
+                  symRange(hits[k].rip, sym, sizeof(sym));
+                  std::fprintf(stderr, "  tid=%u rip=%#llx %s", hits[k].id,
+                               (unsigned long long)hits[k].rip, sym);
+                }
+                std::fprintf(stderr, "\n");
+              }
+            }
+            if ((rounds % 5000) == 0)
+              std::fprintf(stderr,
+                           "[riprace] %llu rounds (%llu thread-answers): %llu with "
+                           "one inside, %llu with TWO OR MORE (%llu of them within "
+                           "1us), max %llu\n",
+                           (unsigned long long)rounds,
+                           (unsigned long long)answered,
+                           (unsigned long long)withOne,
+                           (unsigned long long)withTwo,
+                           (unsigned long long)withTwoTight,
+                           (unsigned long long)maxSeen);
+            std::fflush(stderr);
+          }
+        }).detach();
+      }
     }
     // DELTA_LOADWATCH=<ms>: SotC world-load counter poller. The eboot's
     // "[MSG-Init] LoadInitialWorld() Remaining Resources To Load: N" line is
@@ -732,7 +907,10 @@ public:
                    (unsigned long long)entryRip, h->stack, h->stackSize, hsp, hsz);
     }
     { std::lock_guard lk(g_liveMutex);
-      g_live.push_back({h->thread, myId, t_trace, &t_tracePos, krnl::currentGuestTidPtr()}); }
+      g_live.push_back({h->thread, myId, t_trace, &t_tracePos,
+                        krnl::currentGuestTidPtr(), &t_inSyscall,
+                        &t_sampleGen, &t_sampleRip, &t_sampleNs,
+                        static_cast<pid_t>(::syscall(SYS_gettid))}); }
     LOG_INFO("fex: running guest thread rip={:#x} (watchdog tid={})",
              h->thread->CurrentFrame->State.rip, myId);
     // thr_exit (cpu::exitGuestThread) longjmps here to leave the JIT without

@@ -272,7 +272,44 @@
 // right). The crashing thread runs on a fiber (backtrace ends at
 // libSceFiber+0x2f6, through the job system at 0x39ab6/0x38ad2) and its syscall
 // history is almost entirely MUTEX_WAIT/MUTEX_WAKE on one lock, 0x200003420,
-// which is the contention this allocator is under. NEXT STEP: prove or refute
-// (b) -- instrument entry/exit of the allocator's critical section per thread
-// and assert a single owner; that is a guest-side patch at 0x12820/0x12af0 via
-// the proc.cpp patch machinery, or an HLE counter hung off the umtx path.
+// which is the contention this allocator is under.
+//
+// (b) CANNOT BE SETTLED BY SAMPLING -- priced, not guessed (2026-08-07).
+// DELTA_RIPRACE (see the diag commit) signals every guest thread and has it
+// reconstruct its own guest rip from its signal context, so it reports where
+// threads REALLY are, and counts rounds with two or more inside a range.
+// Measured over 410k rounds / 8.1M thread-answers on the allocator core
+// 201400047000-20140004b000: 199 rounds caught ONE thread inside, two rounds
+// caught two (0x48f07 `mov [r13+r15+0x10],r13` and neighbours -- chunk
+// bookkeeping, not a lock spin), and the two samples in those rounds were 2832 ns
+// and 5760 ns apart. ZERO pairs within a microsecond, i.e. nothing that shows
+// simultaneity rather than adjacent serialised access.
+// The duty cycle is what kills the method: p(a thread-sample lands inside) =
+// 2.4e-5, so with NO exclusion at all the expected number of simultaneous pairs
+// in 410k rounds is 0.046. Observing zero is exactly what an unlocked section
+// produces. One expected detection needs 8.9e6 rounds (2.5 h at 1 ms); a
+// decisive ten needs a day. Narrowed to the insert + rebalance alone,
+// p = 2.6e-6 and it needs 7.6e8 rounds. Do not re-run this hoping for an answer.
+//   +DELTA_RIPRACE=1:201400047000-20140004b000        (allocator core)
+//   +DELTA_RIPRACE=1:201400048a70-201400048b64,20140004a040-20140004a205
+//
+// NEXT STEP, and it has to be DETERMINISTIC: hook entry and exit of the
+// tree-mutating code and record the owner tid, so every single execution is
+// observed instead of one in 40000. Groundwork already done:
+//  - The insert is eboot+0x48a70; int3/DELTA_FNWATCH hooks are #if __x86_64__ and
+//    inert under FEX, so this needs the guest trampoline route --
+//    cpu::makeGuestReturnHook (fex_backend.cpp) emits into FEX's registered RWX
+//    thunk pool and already has the "call the real target, then syscall a native
+//    logger" shape; see scratchpad/sotc_fios_trace_report.md.
+//  - These are eboot-INTERNAL functions, so there is no import to wrap: patch the
+//    prologue the way patchVideoOutDiag does (`mov rax,imm64; jmp rax`, 12 bytes).
+//    Byte budget checked: the insert's prologue is pushes, so displacing through
+//    0x48a7c and resuming at 0x48a7d works (0x48a7a's `mov r15,rdi` is 3 bytes and
+//    must not be split); the epilogue at 0x48b59 has 11 bytes to its `ret` plus 12
+//    trailing nops, ample for a second detour that logs the exit. rax is dead at
+//    the epilogue (callers ignore the return), so the logger may clobber it.
+//  - Cheaper alternative worth trying first: have the wrapper hold a HOST mutex
+//    across the real call. That both tests (b) and mitigates it -- if the crash
+//    stops when the insert is serialised emulator-side, the guest's own exclusion
+//    is not working. Remember the removal path mutates the tree too (0x497f0 /
+//    0x49200), so a serialising mitigation must cover it to be sound.
