@@ -34,6 +34,7 @@
 #include "proc.h"
 #include "vfs.h"
 #include "cpu/cpu_backend.h"
+#include "gpu/ps4/cmd_processor.h"
 #include <logger/logger.h>
 #include <utl/options.h>
 
@@ -135,6 +136,129 @@ inline bool trkRd64(uint64_t va, uint64_t &out) {
   out = *reinterpret_cast<const uint64_t *>(va);
   return true;
 }
+// Re-walk the title's size-ordered free tree the way the faulting insert does,
+// and name the FIELD that holds the bad pointer. The insert loop only ever has
+// the bad VALUE in a register (rax) -- the address it was loaded FROM is the one
+// thing needed to arm a write census, and it is gone by the time we fault.
+//
+// The walk (eboot+0x48a70, a dlmalloc-shaped allocator): `state+0x80` is the
+// tree head and doubles as the loop's sentinel; a node points at chunk+0x10, so
+// its size word is at node-8; children are node[0] and node[1]; the branch taken
+// is `newsz < cursz ? 0 : 1`, and an exact size match ends the walk.
+void sotcWalkFreeTree(uint64_t state, uint64_t newsz) {
+  const uint64_t sentinel = state + 0x80;
+  std::fprintf(stderr,
+               "  [freetree] state=%#llx sentinel=%#llx newsz=%#llx\n",
+               (unsigned long long)state, (unsigned long long)sentinel,
+               (unsigned long long)newsz);
+  uint64_t cur = 0;
+  if (!trkRd64(sentinel, cur)) {
+    std::fprintf(stderr, "  [freetree] head not mapped -- nothing to walk\n");
+    return;
+  }
+  uint64_t field = sentinel;  // where `cur` was loaded from
+  for (int step = 0; step < 64; step++) {
+    if (cur == sentinel) {
+      std::fprintf(stderr, "  [freetree] step %d: back at the sentinel, the "
+                          "tree is intact -- the bad pointer is NOT here\n", step);
+      return;
+    }
+    uint64_t sz = 0;
+    if (!trkRd64(cur - 8, sz)) {
+      std::fprintf(stderr,
+                   "  [freetree] step %d: node %#llx is UNMAPPED (its size word "
+                   "at %#llx cannot be read) -- THIS IS THE FAULT\n",
+                   step, (unsigned long long)cur, (unsigned long long)(cur - 8));
+      std::fprintf(stderr,
+                   "  [freetree] the bad pointer was loaded FROM %#llx  <== arm "
+                   "the write census here (DELTA_GUEST_WHIST=%llx:8:8)\n",
+                   (unsigned long long)field, (unsigned long long)field);
+      // What surrounds the corrupt field: its neighbours often show the intact
+      // originals, which says whether the whole node or just one word was hit.
+      const uint64_t win = field & ~0x3full;
+      for (int i = 0; i < 8; i++) {
+        uint64_t v = 0;
+        if ((i % 4) == 0)
+          std::fprintf(stderr, "\n  [freetree] %#llx:",
+                       (unsigned long long)(win + i * 8));
+        std::fprintf(stderr, " %016llx",
+                     (unsigned long long)(trkRd64(win + i * 8, v) ? v : 0));
+      }
+      // Split the value: SotC's stale links read as a valid 40-bit guest
+      // pointer with rubbish above it, because the word is not a pointer at all
+      // -- it is whatever the new owner of the reused chunk stored there, and
+      // the arrays in question hold packed descriptors.
+      std::fprintf(stderr, "\n  [freetree] bad value %#llx: low40=%#llx, "
+                          "bits40+=%#llx (so probably not a pointer)\n",
+                   (unsigned long long)cur,
+                   (unsigned long long)(cur & 0xffffffffffull),
+                   (unsigned long long)(cur >> 40));
+      // Is the corrupt word inside guest memory the GPU module snapshots and
+      // copies back? If it is, the compute writeback is reverting the
+      // allocator's own stores and this is our corruption, not the title's.
+      char csr[256];
+      if (gpu::DescribeCsRangeCovering(field, csr, sizeof(csr)))
+        std::fprintf(stderr, "  [freetree] the field IS inside a compute "
+                            "staging range: %s\n", csr);
+      else
+        std::fprintf(stderr, "  [freetree] no compute staging range covers the "
+                            "field\n");
+      return;
+    }
+    sz &= ~7ull;
+    const int idx = (newsz < sz) ? 0 : 1;
+    // A free chunk's size is small, non-zero and 16-byte aligned. The walk
+    // running off the tree shows up HERE, one step before it dereferences
+    // something unmapped: the node is memory that has been handed back out and
+    // refilled, so its "size" is whatever the new owner stored there. Reporting
+    // only the unmapped dereference blames the wrong field -- by then the walk
+    // has been reading live application data as nodes for several steps.
+    const bool plausible = sz && sz < 0x8000000ull && (sz & 15) == 0;
+    std::fprintf(stderr,
+                 "  [freetree] step %d: node=%#llx size=%#llx -> child[%d]%s\n",
+                 step, (unsigned long long)cur, (unsigned long long)sz, idx,
+                 plausible ? "" : "   <== NOT A FREE CHUNK ANY MORE");
+    if (!plausible) {
+      std::fprintf(stderr,
+                   "  [freetree] the tree left itself here: the link at %#llx "
+                   "still points at %#llx, which is no longer a free chunk\n",
+                   (unsigned long long)field, (unsigned long long)cur);
+      char csr1[256];
+      if (gpu::DescribeCsRangeCovering(field, csr1, sizeof(csr1)))
+        std::fprintf(stderr, "  [freetree]   the STALE LINK is inside a compute "
+                            "staging range: %s\n", csr1);
+      else
+        std::fprintf(stderr, "  [freetree]   no compute staging range covers "
+                            "the stale link at %#llx\n",
+                     (unsigned long long)field);
+      if (gpu::DescribeCsRangeCovering(cur, csr1, sizeof(csr1)))
+        std::fprintf(stderr, "  [freetree]   the reused CHUNK is inside a "
+                            "compute staging range: %s\n", csr1);
+      const uint64_t win2 = (field & ~0x1full) - 0x20;
+      for (int i = 0; i < 12; i++) {
+        uint64_t v = 0;
+        if ((i % 4) == 0)
+          std::fprintf(stderr, "\n  [freetree] %#llx:",
+                       (unsigned long long)(win2 + i * 8));
+        std::fprintf(stderr, " %016llx",
+                     (unsigned long long)(trkRd64(win2 + i * 8, v) ? v : 0));
+      }
+      std::fprintf(stderr, "\n");
+    }
+    if (newsz == sz) {
+      std::fprintf(stderr, "  [freetree] exact size match, walk ends here\n");
+      return;
+    }
+    field = cur + (uint64_t)idx * 8;
+    if (!trkRd64(field, cur)) {
+      std::fprintf(stderr, "  [freetree] child field %#llx unmapped -- stop\n",
+                   (unsigned long long)field);
+      return;
+    }
+  }
+  std::fprintf(stderr, "  [freetree] 64 steps without terminating (a cycle?)\n");
+}
+
 // Walk one tracker's circular record list; report count/bytes, whether `key`
 // is covered by a record, and the 8 records nearest to `key` by |base-key|.
 // Returns true if `key` fell inside some record's [base,base+size).
@@ -1398,38 +1522,73 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
     const uint64_t fa = (uint64_t)si->si_addr;
     int mf = open("/proc/self/maps", O_RDONLY);
     if (mf >= 0) {
-      static char mbuf[1 << 20];
-      ssize_t n = 0, off = 0, r;
-      while ((r = read(mf, mbuf + off, sizeof(mbuf) - 1 - off)) > 0)
-        off += r;
-      n = off;
-      close(mf);
-      mbuf[n] = 0;
-      char *prev = nullptr, *line = mbuf;
-      while (line && *line) {
-        char *nl = strchr(line, '\n');
-        if (nl) *nl = 0;
-        uint64_t lo = strtoull(line, nullptr, 16);
-        const char *dash = strchr(line, '-');
-        uint64_t hi = dash ? strtoull(dash + 1, nullptr, 16) : 0;
-        if (fa < hi || !nl) {
-          if (prev)
-            std::fprintf(stderr, "  maps prev: %s\n", prev);
-          std::fprintf(stderr, "  maps %s : %s\n",
-                       (fa >= lo && fa < hi) ? "HIT " : "next", line);
-          // A couple of following lines: what the faulting pointer sits under.
-          char *after = nl ? nl + 1 : nullptr;
-          for (int k = 0; k < 3 && after && *after; k++) {
-            char *anl = strchr(after, '\n');
-            if (anl) *anl = 0;
-            std::fprintf(stderr, "  maps  +%d : %s\n", k + 1, after);
-            after = anl ? anl + 1 : nullptr;
+      // Stream the file a line at a time. Slurping it into one fixed buffer
+      // silently truncated instead: a guest process has tens of thousands of
+      // mappings, /proc/self/maps runs past a megabyte, the fill loop's count
+      // went to zero at the brim, and the walk then fell off the end and
+      // reported the LAST (half-read) line as the neighbour of the fault. Every
+      // SotC fault dump so far "landed next to /dev/nvidiactl" for that reason
+      // alone -- the one fact the block exists to establish, whether the
+      // faulting page was mapped at all, was the fact it destroyed.
+      static char buf[65536];
+      static char prev[512];
+      size_t held = 0;      // bytes of a partial line kept at buf's front
+      bool havePrev = false, found = false, eof = false;
+      int after = -1;       // counts the trailing lines once the hit is printed
+      while (!found || after >= 0) {
+        if (!eof) {
+          ssize_t r = read(mf, buf + held, sizeof(buf) - held);
+          if (r > 0)
+            held += (size_t)r;
+          else
+            eof = true;
+        }
+        size_t start = 0;
+        for (;;) {
+          char *nl = static_cast<char *>(
+              memchr(buf + start, '\n', held - start));
+          if (!nl)
+            break;
+          *nl = 0;
+          char *line = buf + start;
+          start = (size_t)(nl - buf) + 1;
+          if (after >= 0) {  // trailing context after the hit
+            std::fprintf(stderr, "  maps  +%d : %s\n", after + 1, line);
+            if (++after >= 3) { after = -1; found = true; }
+            continue;
           }
+          const uint64_t lo = strtoull(line, nullptr, 16);
+          const char *dash = strchr(line, '-');
+          const uint64_t hi = dash ? strtoull(dash + 1, nullptr, 16) : 0;
+          if (fa < hi) {
+            if (havePrev)
+              std::fprintf(stderr, "  maps prev: %s\n", prev);
+            std::fprintf(stderr, "  maps %s : %s\n",
+                         (fa >= lo && fa < hi) ? "HIT " : "next (fault is in a "
+                                                         "GAP -- unmapped)",
+                         line);
+            after = 0;
+            continue;
+          }
+          size_t len = (size_t)(nl - line);
+          if (len >= sizeof(prev)) len = sizeof(prev) - 1;
+          memcpy(prev, line, len);
+          prev[len] = 0;
+          havePrev = true;
+        }
+        held -= start;
+        memmove(buf, buf + start, held);
+        if (held == sizeof(buf))  // a single line longer than the buffer
+          held = 0;
+        if (eof && held == 0) {
+          if (!found && after < 0)
+            std::fprintf(stderr,
+                         "  maps: fault is above every mapping (last was %s)\n",
+                         havePrev ? prev : "(none)");
           break;
         }
-        prev = line;
-        line = nl ? nl + 1 : nullptr;
       }
+      close(mf);
     }
   }
 #if defined(__x86_64__)
@@ -1700,7 +1859,24 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
   // Guest GPR dump + rbp backtrace (parity with the native x86 dump above).
   // gregs order is FEXCore::X86State::REG_* (RAX,RCX,RDX,RBX,RSP,RBP,RSI,RDI,
   // R8..R15); mirror it locally so this TU needs no FEXCore headers.
-  if (const uint64_t *g = cpu::currentGuestGregs()) {
+  //
+  // Take the registers from the SIGNAL CONTEXT, not from the in-memory CPUState.
+  // FEX pins every guest GPR to a fixed host register, so the host context holds
+  // the values AT the faulting instruction; CPUState.gregs is only written back
+  // when the JIT leaves a block, and FEX's syscall op spills just the subset the
+  // syscall ABI reads. Reading it here reports whichever registers the thread's
+  // last syscall happened to publish, dressed up as the fault state -- which is
+  // exactly how SotC's New-Game crash got diagnosed as a fiber running on a
+  // freed stack: rdi/rsi were verbatim the last sys_umtx_op's arguments, and the
+  // "faulting" rax-8 disagreed with si_addr in every log. Label the fallback so
+  // a stale dump can never again be mistaken for a precise one.
+  uint64_t sig_gregs[16];
+  const bool gexact = cpu::guestGregsFromSignal(ucv, sig_gregs);
+  if (!gexact)
+    std::fprintf(stderr,
+                 "  [regs] NOT from the fault: host pc is outside the JIT, so "
+                 "these are the last spilled CPUState values (STALE)\n");
+  if (const uint64_t *g = gexact ? sig_gregs : cpu::currentGuestGregs()) {
     enum { RAX, RCX, RDX, RBX, RSP, RBP, RSI, RDI, R8, R9, R10, R11, R12, R13, R14, R15 };
     std::fprintf(stderr, "  rax=%016llx rbx=%016llx rcx=%016llx rdx=%016llx\n",
                  (unsigned long long)g[RAX], (unsigned long long)g[RBX],
@@ -1714,6 +1890,54 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
     std::fprintf(stderr, "  r12=%016llx r13=%016llx r14=%016llx r15=%016llx\n",
                  (unsigned long long)g[R12], (unsigned long long)g[R13],
                  (unsigned long long)g[R14], (unsigned long long)g[R15]);
+
+    // Corroborate the recovery against si_addr: a faulting memory operand is
+    // built out of a base register, so SOME GPR should sit within a small
+    // displacement of the address that faulted. If none does, the recovery is
+    // wrong (vendored FEX's x64::SRA moved under us) and every conclusion drawn
+    // from the dump is worthless -- say so instead of printing plausible lies.
+    if (gexact && si && si->si_addr) {
+      static const char *kN[16] = {"rax", "rcx", "rdx", "rbx", "rsp", "rbp",
+                                   "rsi", "rdi", "r8",  "r9",  "r10", "r11",
+                                   "r12", "r13", "r14", "r15"};
+      const uint64_t fa = (uint64_t)si->si_addr;
+      bool any = false;
+      for (int i = 0; i < 16; i++) {
+        const int64_t d = (int64_t)fa - (int64_t)g[i];
+        if (d >= -0x2000 && d <= 0x2000) {
+          std::fprintf(stderr, "  [regs] fault = %s%+lld  (exact, from the JIT "
+                              "signal context)\n", kN[i], (long long)d);
+          any = true;
+        }
+      }
+      if (!any)
+        std::fprintf(stderr,
+                     "  [regs] WARNING no GPR is within 0x2000 of the fault "
+                     "address -- the SRA recovery is suspect, do not trust "
+                     "these values\n");
+    }
+
+    // ---- SOTC free-tree walk (diagnostic; see helper above) ----
+    // Fire when the fault is inside the eboot's size-ordered free-tree insert
+    // (+0x48a70..+0x48b64), which is where every heap-corruption fault in this
+    // title lands. r15 is arg0 (the allocator state) and rdx the size being
+    // inserted; both are live for the whole loop, so the walk can be replayed.
+    {
+      uint64_t ebase2 = 0;
+      if (auto *proc = proc::getActive()) {
+        for (auto &mod : proc->getModuleList()) {
+          auto &mi = mod->getInfo();
+          auto *t = mi.textSeg.addr;
+          if (t && grip >= (uintptr_t)t && grip < (uintptr_t)t + mi.textSeg.size) {
+            ebase2 = (uint64_t)t;
+            break;
+          }
+        }
+      }
+      const uint64_t off2 = ebase2 ? grip - ebase2 : 0;
+      if (gexact && ebase2 && off2 >= 0x48a70 && off2 < 0x48b64)
+        sotcWalkFreeTree(g[R15], g[RDX] & ~7ull);
+    }
 
     // ---- SOTC AllocationTracker walk (diagnostic; see helper above) ----
     // Fire only when the fault is inside the eboot's slot-21 untrack-on-free

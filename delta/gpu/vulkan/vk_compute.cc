@@ -1293,6 +1293,31 @@ bool PreserveCsDepthBeforeClear(uint64_t base) {
 
 }  // namespace gpu::vk
 
+namespace gpu {
+// Declared in ps4/cmd_processor.h for the kernel's crash handler.
+bool DescribeCsRangeCovering(uint64_t addr, char* out, size_t out_size) {
+  using namespace gpu::vk;
+  for (const auto& kv : g_cs_ranges) {
+    const uint64_t base = kv.first;
+    const CsRange& e = kv.second;
+    const uint64_t n = e.guest_bytes ? e.guest_bytes : e.size;
+    if (!n || addr < base || addr >= base + n)
+      continue;
+    std::snprintf(out, out_size,
+                  "base=%#llx +%#llx (addr is base+%#llx) staged=%#llx "
+                  "gpu_dirty=%d imported=%d rt_sourced=%d image=%d "
+                  "last_used_frame=%d",
+                  (unsigned long long)base, (unsigned long long)n,
+                  (unsigned long long)(addr - base),
+                  (unsigned long long)e.size, (int)e.gpu_dirty,
+                  (int)e.imported, (int)e.rt_sourced, (int)e.image_staging,
+                  e.last_used_frame);
+    return true;
+  }
+  return false;
+}
+}  // namespace gpu
+
 namespace gpu::rhi {
 using namespace gpu::vk;
 

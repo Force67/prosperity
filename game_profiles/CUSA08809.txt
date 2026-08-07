@@ -195,21 +195,84 @@
 // at the NEXT draw using the same slot, or resolve against the slot at
 // submit-end rather than record time.
 //
+// THE COMPUTE WRITEBACK REVERTS THE CPU, MEASURED (2026-08-07). Separate from
+// the New Game crash (it is NOT its cause -- see the ruled-out list below), but
+// the same shape as the two upload-skip corruptions above and real: the compute
+// writeback copied the WHOLE staged range back to guest memory, and only 4% of
+// those bytes had been written by the dispatch (+DELTA_GPU_CS_WB_AUDIT=1; the
+// perf line now carries wb=%). Ranges up to 8 MiB were written back with the
+// shader having written ZERO bytes -- e.g. base=0x8068838000 +0x7f8000. Every
+// CPU write sharing such a range was reverted to the stage-in snapshot, and this
+// title keeps its heap in the same direct memory as the buffers it hands to
+// compute. The writeback now publishes only the words the dispatch changed
+// (compared against a shadow of the staged bytes) and adopts the CPU's word
+// otherwise, so staging, shadow and guest all agree again when it returns.
+// +DELTA_GPU_CS_WB_FULL=1   restore the copy-everything behaviour (A/B)
+// +DELTA_GPU_CS_WB_AUDIT=1  report every writeback the shader did not fill
+
 // PAST THE TITLE (2026-08-06): the menu opens and renders readable entries
 // (New Game / Settings / Image Gallery, difficulty select) on current
 // builds; the earlier "solid glyph blocks" existed only pre-dedupe.
 //
-// THE NEW-GAME CRASH, DIAGNOSED (2026-08-06): confirming New Game dies
-// deterministically -- SIGSEGV at Shadow_Shipping+0x48ac5, same registers
-// every run, with AND without the upload skip (the knob A/B above was a red
-// herring: the surviving run had merely never confirmed the menu). The
-// faulting function (prologue 0x48a70) INSERTS a block into a size-ordered
-// free list whose nodes live INSIDE the freed blocks, and the pool's blocks
-// are FIBER STACKS: the crashing thread's own rsp sits on the block whose
-// node it is walking. A fiber returns its stack to the pool and KEEPS
-// RUNNING on it; its calls trash the in-block node; the next insert walks
-// garbage. DELTA_GUEST_WHIST=830a79f000:1000:200 census: the page's top
-// writer is libSceFiber+0x381 (fiber context saves). Suspect: the shipped
-// libSceFiber.sprx's exit/switch ordering (stack release before the actual
-// context switch). No in-repo source -- next step is disassembling the sprx
-// and comparing sceFiberReturnToThread/Finalize semantics against retail.
+// THE NEW-GAME CRASH: THE 2026-08-06 DIAGNOSIS WAS BUILT ON STALE REGISTERS
+// AND IS WITHDRAWN (2026-08-07). It read "a fiber returned its stack to the
+// pool and kept running on it" out of rax=0x830a79fbd0 / rsp=0x830a79fb10,
+// registers that were never the fault's. On aarch64 the dump printed FEX's
+// in-memory CPUState, which the JIT only spills at block boundaries and which
+// FEX's syscall op fills with just the subset the syscall ABI reads. Two facts
+// settle it: rdi/rsi in all four historic dumps are VERBATIM the thread's last
+// syscall arguments (sys_umtx_op(0x200003420,0x12) -> rdi=0x200003420,rsi=0x12;
+// sys_batch_map(0x10,0x10) -> rdi=0x10,rsi=0x10), and si_addr never equalled
+// rax-8 as `mov rcx,[rax-8]` requires. The dump now reads the JIT signal
+// context (guestGregsFromSignal) and prints a corroboration line -- every new
+// dump says "fault = rax-8". The maps block lied too: it slurped
+// /proc/self/maps into 1 MiB and silently truncated, so all four dumps reported
+// /dev/nvidiactl as the fault's neighbour. It streams now and says GAP.
+// libSceFiber is NOT implicated: that census page was picked from the stale rax.
+//
+// WHAT THE CRASH ACTUALLY IS (measured 2026-08-07, three crashes):
+// the faulting function (prologue 0x48a70) inserts a chunk into the allocator's
+// SIZE-ORDERED FREE TREE (dlmalloc-shaped: state+0x80 is the head and the loop
+// sentinel, a node is chunk+0x10, its size is at node-8, children at node+0x00
+// and node+0x08, dup-list at +0x10/+0x18, parent|colour at +0x20). The tree
+// holds STALE CHILD LINKS pointing at chunks that have been handed back out and
+// refilled with live data (recognisable 40-byte and 32-byte record arrays of
+// packed descriptors -- 0x00XX7080deYYYYYY / 0x180272040000YYYY). The walk then
+// reads that data as nodes and dies a few steps later on an unmapped "node".
+// The victim is the SAME node every run: 0x8052e00020, size 0xd0, and the split
+// inside it is exact -- +0x10/+0x18/+0x20 (dup list and parent, written by
+// SCALAR stores) are correct, while +0x00/+0x08 (the two children) are stale.
+// Crash timing is NOT deterministic (script step 86 / 48 / 8), so it is a race
+// and single-run A/B proves nothing; one run corrupted into a 4-thread
+// sched_yield livelock instead of a fault.
+// The walk is now a crash-time diagnostic: it replays the insert, flags the
+// first node that is no longer a free chunk, names the field holding the stale
+// link and prints the census command for it.
+//
+// RULED OUT BY MEASUREMENT, not by argument:
+//  - Compute staging writeback: "no compute staging range covers the stale
+//    link" for every stale link in two independent crashes (the crash handler
+//    asks gpu::DescribeCsRangeCovering directly).
+//  - FEX vector TSO (+DELTA_FEX_VECTOR_TSO=1): reproduces with an identical
+//    signature (same node, children stale, parent intact). Worth knowing the
+//    insert publishes both children with ONE `vmovups [rsi],xmm0` at 0x48b46,
+//    which made this the best-looking theory; it is still wrong.
+//  - Unaligned-atomic backpatching: 0 of the 1264 eboot backpatch sites fall in
+//    the allocator (0x47000-0x4b000), its entry (0x12000-0x13000), its caller
+//    at 0x16ac3e, or the job system (0x38000-0x3a000).
+//  - Any non-guest writer: a from-boot census of the page,
+//    +DELTA_GUEST_WHIST=8052e00000:1000:200, names nine writers over 120
+//    reports and every one is guest allocator code (0x48b3a, 0x48dfb, 0x499cc,
+//    0x4a0b7, 0x4a16e, 0x4a1bf, 0x4a1f5, 0x4a358, 0x4a388 -- insert plus the
+//    rebalance at 0x4a040). ZERO unattributed (emulator-side) writes.
+// So the corrupted words are written only by the title's own allocator. What is
+// left is (a) our JIT mis-executing one of those nine sites, or (b) two guest
+// threads inside the allocator at once -- a half-finished red-black rebalance
+// seen by a second walker has exactly this shape (children wrong, parent
+// right). The crashing thread runs on a fiber (backtrace ends at
+// libSceFiber+0x2f6, through the job system at 0x39ab6/0x38ad2) and its syscall
+// history is almost entirely MUTEX_WAIT/MUTEX_WAKE on one lock, 0x200003420,
+// which is the contention this allocator is under. NEXT STEP: prove or refute
+// (b) -- instrument entry/exit of the allocator's critical section per thread
+// and assert a single owner; that is a guest-side patch at 0x12820/0x12af0 via
+// the proc.cpp patch machinery, or an HLE counter hung off the umtx path.
