@@ -293,23 +293,48 @@
 //   +DELTA_RIPRACE=1:201400047000-20140004b000        (allocator core)
 //   +DELTA_RIPRACE=1:201400048a70-201400048b64,20140004a040-20140004a205
 //
-// NEXT STEP, and it has to be DETERMINISTIC: hook entry and exit of the
-// tree-mutating code and record the owner tid, so every single execution is
-// observed instead of one in 40000. Groundwork already done:
-//  - The insert is eboot+0x48a70; int3/DELTA_FNWATCH hooks are #if __x86_64__ and
-//    inert under FEX, so this needs the guest trampoline route --
-//    cpu::makeGuestReturnHook (fex_backend.cpp) emits into FEX's registered RWX
-//    thunk pool and already has the "call the real target, then syscall a native
-//    logger" shape; see scratchpad/sotc_fios_trace_report.md.
-//  - These are eboot-INTERNAL functions, so there is no import to wrap: patch the
-//    prologue the way patchVideoOutDiag does (`mov rax,imm64; jmp rax`, 12 bytes).
-//    Byte budget checked: the insert's prologue is pushes, so displacing through
-//    0x48a7c and resuming at 0x48a7d works (0x48a7a's `mov r15,rdi` is 3 bytes and
-//    must not be split); the epilogue at 0x48b59 has 11 bytes to its `ret` plus 12
-//    trailing nops, ample for a second detour that logs the exit. rax is dead at
-//    the epilogue (callers ignore the return), so the logger may clobber it.
-//  - Cheaper alternative worth trying first: have the wrapper hold a HOST mutex
-//    across the real call. That both tests (b) and mitigates it -- if the crash
-//    stops when the insert is serialised emulator-side, the guest's own exclusion
-//    is not working. Remember the removal path mutates the tree too (0x497f0 /
-//    0x49200), so a serialising mitigation must cover it to be sound.
+// THE DETERMINISTIC TEST, RUN (2026-08-07): CONCURRENCY IS REAL BUT IS NOT THE
+// CAUSE. DELTA_SOTC_ALLOCLOCK detours the allocator entries (0x12820 alloc,
+// 0x12af0 free, 0x48a70 free-tree insert) and holds a native mutex across each
+// call, so every call is observed instead of one in 40000, and a failed try_lock
+// names a second thread already inside.
+//   +DELTA_SOTC_ALLOCLOCK=2   one mutex PER SITE -- the measurement
+//   +DELTA_SOTC_ALLOCLOCK=1   one SHARED mutex   -- the mitigation (~3x slower)
+// Mode 2, one boot into the menu:
+//   alloc(0x12820)          4809876 calls,  366064 contended
+//   free(0x12af0)           1505986 calls,    7103 contended
+//   freeTreeInsert(0x48a70)  184030 calls,       5 contended   <-- a violation
+// Five is real: 0x48a70 mutates the tree, takes no lock itself and makes exactly
+// one call (the rebalance at 0x4a040), so it must be entered with exclusion
+// already held. Two threads inside it is the exclusion failing, not contention.
+// Mode 1 then drives that to 0 over 194503 inserts -- and THE CRASH STILL HAPPENS,
+// same rip, same node 0x8052e00020, same stale child[0] into 0x80577xxxxx.
+// (A first mitigation attempt used mode 2 by mistake and proved nothing: per-site
+// locks let a thread in 0x12820 meet a thread in 0x12af0 over the same tree.)
+//
+// WHERE THAT LEAVES IT: the corrupted node is the SAME in all five crashes,
+// always child[0], always a stale pointer into the same narrow region, with the
+// parent and dup-list words intact -- while only the moment the walk trips over
+// it moves (script step 8/40/48/86). A deterministic corruption with a
+// nondeterministic discovery is the shape of a MISCOMPILED STORE, not a race.
+// The census already showed nothing outside the allocator's own nine sites writes
+// that page, and the allocator core contains no atomic RMW at all.
+// Gap, stated honestly: the shared lock covers three entries, so a tree-mutating
+// path that bypasses all of them -- a scope pop at 0x12350 bulk-freeing is the
+// candidate -- would still run unserialised. Concurrency is strongly disfavoured,
+// not eliminated.
+//
+// NEXT STEP: bisect the store. The publication of the two child words is the
+// suspect -- the insert writes child[0]/child[1] with scalar movs at 0x48af5 and
+// 0x48afd on one path and zeroes BOTH with a single `vmovups [rsi],xmm0` at
+// 0x48b46 on the other, and the rebalance at 0x4a040 rewrites them again.
+// (DELTA_FEX_VECTOR_TSO=1 does not help, but that knob changes ordering, not
+// whether the store itself is generated correctly.) Two things to do first:
+//  - Catch the corruption at its BIRTH instead of at the walk that trips on it.
+//    The free-tree walker in crash.cpp is already a standalone function, so run it
+//    periodically against state 0x8309e0fd20 and report the first moment
+//    0x8052e00020's child[0] stops being a free chunk. That turns a 25-minute
+//    repro into a short one and says which site wrote it last.
+//  - Then compare that block's FEX JIT output against the interpreter for the same
+//    guest addresses (FEX has an interpreter fallback), which is what the
+//    "miscompiled store" claim needs in order to become a fix.

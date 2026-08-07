@@ -1323,6 +1323,77 @@ uintptr_t makeGuestReturnHook(void *realTarget, uint32_t hookId, void *loggerFn,
   return reinterpret_cast<uintptr_t>(t);
 }
 
+// Wrap an already-callable guest function so a NATIVE lock is held across it:
+// emit [save args] syscall(lockFn) [restore args] call realTarget syscall(unlockFn)
+// ret. Unlike makeGuestReturnHook this fires BEFORE the call as well as after,
+// which is what serialising a guest critical section from the host needs.
+//
+// Why this exists: SotC's allocator free tree ends up holding stale child links,
+// and the two surviving explanations are "two guest threads mutate it at once"
+// and "we miscompile one of the stores". Holding a host mutex across the whole
+// allocator call decides it -- and the lock is itself the measurement, because a
+// try_lock that FAILS is deterministic proof that another thread was inside. The
+// sampling approach could not reach that conclusion at any affordable cost (see
+// DELTA_RIPRACE), while this observes every single call.
+uintptr_t makeGuestLockWrapper(void *realTarget, void *lockFn, void *unlockFn,
+                               const char *name) {
+  std::lock_guard lk(g_thunkMutex);
+  if (!g_thunkPool) {
+    g_thunkPool = static_cast<uint8_t *>(
+        mmap(nullptr, g_thunkPoolSize, PROT_READ | PROT_WRITE | PROT_EXEC,
+             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+    if (g_thunkPool == MAP_FAILED) { g_thunkPool = nullptr; return 0; }
+    std::lock_guard rk(g_rangeMutex);
+    g_ranges.push_back({reinterpret_cast<uint64_t>(g_thunkPool), g_thunkPoolSize});
+  }
+  const uint32_t lockIdx = static_cast<uint32_t>(g_hostThunks.size());
+  g_hostThunks.push_back(lockFn);
+  g_thunkNames.resize(g_hostThunks.size());
+  g_thunkNames[lockIdx] = name ? name : "guestlock";
+  const uint32_t unlockIdx = static_cast<uint32_t>(g_hostThunks.size());
+  g_hostThunks.push_back(unlockFn);
+  g_thunkNames.resize(g_hostThunks.size());
+  g_thunkNames[unlockIdx] = name ? name : "guestunlock";
+
+  constexpr size_t kStride = 64;  // emitted body is 46 bytes
+  if (g_thunkPoolUsed + kStride > g_thunkPoolSize) return 0;
+  uint8_t *t = g_thunkPool + g_thunkPoolUsed;
+  g_thunkPoolUsed += kStride;
+  uint8_t *p = t;
+  auto emit = [&](std::initializer_list<uint8_t> b) { for (uint8_t x : b) *p++ = x; };
+  auto emit32 = [&](uint32_t v) { std::memcpy(p, &v, 4); p += 4; };
+  auto emit64 = [&](uint64_t v) { std::memcpy(p, &v, 8); p += 8; };
+  // Reached by `jmp` from the patched entry, so rsp%16==8 and [rsp] is still the
+  // ORIGINAL caller's return address -- the final `ret` therefore returns to it.
+  // The syscall handler calls a C function, which may clobber every SysV
+  // caller-saved register, so the argument registers are saved around it. The
+  // pushes come in pairs so rsp%16 is 8 again before `sub rsp,8; call`, which
+  // hands realTarget the same alignment an ordinary `call` would.
+  emit({0x57});                    // push rdi        ; save a0
+  emit({0x56});                    // push rsi        ; save a1
+  emit({0x52});                    // push rdx        ; save a2
+  emit({0x51});                    // push rcx        ; save a3
+  emit({0xB8});                    // mov eax, imm32
+  emit32(kHostThunkSyscallBase | lockIdx);
+  emit({0x0F, 0x05});              // syscall         ; -> lockFn()
+  emit({0x59});                    // pop rcx
+  emit({0x5A});                    // pop rdx
+  emit({0x5E});                    // pop rsi
+  emit({0x5F});                    // pop rdi
+  emit({0x48, 0x83, 0xEC, 0x08});  // sub rsp, 8      ; realign for the call
+  emit({0x49, 0xBB});              // movabs r11, realTarget
+  emit64(reinterpret_cast<uint64_t>(realTarget));
+  emit({0x41, 0xFF, 0xD3});        // call r11        ; the real function
+  emit({0x48, 0x83, 0xC4, 0x08});  // add rsp, 8
+  emit({0x50});                    // push rax        ; preserve the return value
+  emit({0xB8});                    // mov eax, imm32
+  emit32(kHostThunkSyscallBase | unlockIdx);
+  emit({0x0F, 0x05});              // syscall         ; -> unlockFn()
+  emit({0x58});                    // pop rax
+  emit({0xC3});                    // ret
+  return reinterpret_cast<uintptr_t>(t);
+}
+
 // Build a callable copy of an internal guest function whose first `prologueLen`
 // bytes are about to be overwritten by an entry detour. Emits [the prologueLen
 // original bytes] + [abs jmp to continueAt] into the thunk pool and returns its

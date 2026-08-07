@@ -109,6 +109,8 @@ uintptr_t makeGuestReturnHook(void *realTarget, uint32_t /*hookId*/,
   return reinterpret_cast<uintptr_t>(realTarget);
 }
 
+uintptr_t makeGuestLockWrapper(void *, void *, void *, const char *) { return 0; }
+
 uintptr_t makeGuestTrampoline(const void *fnBytes, uint32_t /*prologueLen*/,
                               const void * /*continueAt*/) {
   return reinterpret_cast<uintptr_t>(const_cast<void *>(fnBytes));

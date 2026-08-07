@@ -70,6 +70,7 @@ DELTA_OPTION(bool, kPs5Noforce, "DELTA_PS5_NOFORCE", false);
 DELTA_OPTION(bool, kSotcForcePayload, "DELTA_SOTC_FORCE_PAYLOAD", false);
 DELTA_OPTION(bool, kSotcForceWorlddone, "DELTA_SOTC_FORCE_WORLDDONE", false);
 DELTA_OPTION(bool, kSotcJobfix, "DELTA_SOTC_JOBFIX", false);
+DELTA_OPTION(int, kSotcAllocLock, "DELTA_SOTC_ALLOCLOCK", 0);
 DELTA_OPTION(const char *, kGuestPopcnt, "DELTA_GUEST_POPCNT", nullptr);
 DELTA_OPTION(const char *, kGuestWprot, "DELTA_GUEST_WPROT", nullptr);
 DELTA_OPTION(const char *, kGuestRprot, "DELTA_GUEST_RPROT", nullptr);
@@ -104,6 +105,7 @@ static void forceSotcPayload(smodule &m);
 static void probeFiosPaths();
 static void installJobTrace(smodule &m);
 static void installMatTrace(smodule &m);
+static void installAllocLock(smodule &m);
 
 bool proc::create(const base::String &path, bool fromVfs) {
   gpu::SetWriteWatchCallback(&krnl::startWriteWatch);
@@ -221,6 +223,7 @@ bool proc::create(const base::String &path, bool fromVfs) {
   forceSotcPayload(*first);
   installJobTrace(*first);
   installMatTrace(*first);
+  installAllocLock(*first);
   // Note: DELTA_FIOS_PROBE runs lazily on the first FIOS2 call (see
   // fiosTraceLogger); at proc::create the /app0 PFS provider isn't mounted yet.
 
@@ -1281,6 +1284,74 @@ void spawnJobWatcher(uint64_t base) {
   }).detach();
 }
 
+// DELTA_SOTC_ALLOCLOCK: hold ONE host mutex across every call into the title's
+// allocator, and count how often a thread had to wait for it.
+//
+// This is the deterministic form of the question DELTA_RIPRACE could not afford
+// to answer. The free tree ends up holding stale child links; only two
+// explanations survived the census (which showed the corrupted words are written
+// exclusively by the allocator's own nine sites): two guest threads inside at
+// once, or a miscompiled store. Every call is observed here, not one in 40000 --
+// so `contended` is a decisive count, whatever happens to the crash:
+//   contended == 0  -> no two threads were EVER inside together. Concurrency is
+//                      eliminated and the remaining suspect is our codegen.
+//   contended >  0  -> they were, and the title's own exclusion is not doing what
+//                      it does on hardware.
+// The mutex is recursive because these entries nest (the allocator frees while
+// allocating, and the tracker reenters), and because a fiber switch on the same
+// host thread must not deadlock against itself.
+// One lock PER SITE, because a shared lock cannot tell the two cases apart.
+// Several threads inside malloc at once is normal for a shared heap and proves
+// nothing. Several threads inside the FREE-TREE INSERT at once is a violation:
+// that function mutates the tree whose child links come out stale. So each hook
+// gets its own mutex and its own contention count, and the insert's count is the
+// answer.
+struct AllocLockSite {
+  std::recursive_mutex m;
+  std::atomic<uint64_t> calls{0};
+  std::atomic<uint64_t> contended{0};
+  std::atomic<uint64_t> maxWaitNs{0};
+  const char *name = "";
+};
+constexpr int kAllocLockSites = 3;
+AllocLockSite g_allocSites[kAllocLockSites];
+
+// DELTA_SOTC_ALLOCLOCK=2 gives every site its own mutex, which is what MEASURES
+// the violation: a failed try_lock at the insert names a second thread inside the
+// insert itself. DELTA_SOTC_ALLOCLOCK=1 makes them share one mutex, which is what
+// MITIGATES it -- per-site locks cannot, because a thread inside 0x12820 and a
+// thread inside 0x12af0 hold different locks and still meet over the same tree.
+// (Learned the hard way: the first mitigation run still crashed, with the per-site
+// counters proving the exclusion it needed was never in place.)
+std::recursive_mutex g_allocSharedM;
+
+static std::recursive_mutex &allocMutexFor(int i) {
+  return kSotcAllocLock == 2 ? g_allocSites[i].m : g_allocSharedM;
+}
+
+static void allocLockEnterAt(int i) {
+  AllocLockSite &s = g_allocSites[i];
+  std::recursive_mutex &mx = allocMutexFor(i);
+  s.calls.fetch_add(1, std::memory_order_relaxed);
+  if (mx.try_lock())
+    return;
+  // The try_lock failed, so another thread is inside this very function right
+  // now. That is the measurement; the blocking acquire below is the mitigation.
+  s.contended.fetch_add(1, std::memory_order_relaxed);
+  const auto t0 = std::chrono::steady_clock::now();
+  mx.lock();
+  const uint64_t ns = (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
+      std::chrono::steady_clock::now() - t0).count();
+  uint64_t prev = s.maxWaitNs.load(std::memory_order_relaxed);
+  while (ns > prev &&
+         !s.maxWaitNs.compare_exchange_weak(prev, ns, std::memory_order_relaxed)) {}
+}
+
+static void allocLockLeaveAt(int i) { allocMutexFor(i).unlock(); }
+
+template <int N> static void PS4ABI allocLockEnterT() { allocLockEnterAt(N); }
+template <int N> static void PS4ABI allocLockLeaveT() { allocLockLeaveAt(N); }
+
 // Install an entry detour on an eboot-internal function. prologueLen must be the
 // smallest instruction boundary >= 14 in the prologue (position-independent).
 void installInternalHook(uint8_t *base, uint32_t off, uint32_t prologueLen,
@@ -1302,7 +1373,66 @@ void installInternalHook(uint8_t *base, uint32_t off, uint32_t prologueLen,
   LOG_INFO("jobtrace: hooked {} eboot+{:#x} tramp={:#x} wrapper={:#x}", name, off,
            (unsigned long)tramp, (unsigned long)wrap);
 }
+
+// Same detour, but the wrapper takes the host allocator mutex across the call.
+static void installAllocLockHook(uint8_t *base, uint32_t off, uint32_t prologueLen,
+                                 const char *name, void *enterFn, void *leaveFn) {
+  uint8_t *target = base + off;
+  utl::protectMem(reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(target) & ~0xFFFull),
+                  0x2000, utl::pageProtection::rwx);
+  uintptr_t tramp = cpu::makeGuestTrampoline(target, prologueLen, target + prologueLen);
+  if (!tramp) { LOG_WARNING("alloclock: trampoline failed for {}", name); return; }
+  uintptr_t wrap = cpu::makeGuestLockWrapper(reinterpret_cast<void *>(tramp),
+                                             enterFn, leaveFn, name);
+  if (!wrap) { LOG_WARNING("alloclock: wrapper failed for {}", name); return; }
+  uint8_t patch[32];
+  patch[0] = 0xFF; patch[1] = 0x25;
+  patch[2] = patch[3] = patch[4] = patch[5] = 0x00;   // jmp qword [rip+0]
+  uint64_t w = wrap; std::memcpy(patch + 6, &w, 8);
+  for (uint32_t i = 14; i < prologueLen; i++) patch[i] = 0x90;
+  std::memcpy(target, patch, prologueLen);
+  LOG_INFO("alloclock: serialising {} eboot+{:#x} tramp={:#x} wrapper={:#x}", name,
+           off, (unsigned long)tramp, (unsigned long)wrap);
+}
+
 } // namespace
+
+// Prologue cut points are the smallest instruction boundary >= 14 that stays
+// position-independent; each stops before the function's first rip-relative load:
+//   0x12820 alloc: pushes + `sub rsp,0x28` end at 17, then `mov r14,[rip+..]`
+//   0x12af0 free : pushes + `sub rsp,0x30` end at 15, then `mov r15,[rip+..]`
+//   0x48a70 free-tree insert: pushes + `mov r15,rdi` + `mov r14,rsi` end at 16
+static void installAllocLock(smodule &m) {
+  if (!kSotcAllocLock)
+    return;
+  uint8_t *base = m.getInfo().base;
+  g_allocSites[0].name = "alloc(0x12820)";
+  g_allocSites[1].name = "free(0x12af0)";
+  g_allocSites[2].name = "freeTreeInsert(0x48a70)";
+  installAllocLockHook(base, 0x12820, 17, g_allocSites[0].name,
+                       reinterpret_cast<void *>(&allocLockEnterT<0>),
+                       reinterpret_cast<void *>(&allocLockLeaveT<0>));
+  installAllocLockHook(base, 0x12af0, 15, g_allocSites[1].name,
+                       reinterpret_cast<void *>(&allocLockEnterT<1>),
+                       reinterpret_cast<void *>(&allocLockLeaveT<1>));
+  installAllocLockHook(base, 0x48a70, 16, g_allocSites[2].name,
+                       reinterpret_cast<void *>(&allocLockEnterT<2>),
+                       reinterpret_cast<void *>(&allocLockLeaveT<2>));
+  std::thread([] {
+    for (;;) {
+      std::this_thread::sleep_for(std::chrono::seconds(10));
+      for (int i = 0; i < kAllocLockSites; i++)
+        std::fprintf(stderr,
+                     "[alloclock] %-24s %llu calls, %llu CONTENDED (another "
+                     "thread was inside), max wait %llu ns\n",
+                     g_allocSites[i].name,
+                     (unsigned long long)g_allocSites[i].calls.load(),
+                     (unsigned long long)g_allocSites[i].contended.load(),
+                     (unsigned long long)g_allocSites[i].maxWaitNs.load());
+      std::fflush(stderr);
+    }
+  }).detach();
+}
 
 // DELTA_SOTC_MATTRACE: name the blocks SotC's "Material Param Update" fills.
 // Hooks the dispatch builder rather than the update routine itself, because the

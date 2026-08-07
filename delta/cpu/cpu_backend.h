@@ -123,6 +123,13 @@ uintptr_t makeGuestReturnHook(void *realTarget, uint32_t hookId, void *loggerFn,
 // into its body; pass it as `realTarget` to makeGuestReturnHook to wrap an
 // eboot-internal (non-import) function. Native backend: returns the original
 // entry unchanged. See makeGuestTrampoline in fex_backend.cpp for constraints.
+// Wrap a callable guest function so a native lock is held across the whole call
+// (lockFn before, unlockFn after). Lets the host serialise a guest critical
+// section, and -- because a failed try_lock inside lockFn names a second thread
+// already inside -- measure deterministically whether one was ever needed.
+uintptr_t makeGuestLockWrapper(void *realTarget, void *lockFn, void *unlockFn,
+                               const char *name);
+
 uintptr_t makeGuestTrampoline(const void *fnBytes, uint32_t prologueLen,
                               const void *continueAt);
 
