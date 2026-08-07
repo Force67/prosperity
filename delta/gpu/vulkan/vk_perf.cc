@@ -33,6 +33,7 @@ uint64_t g_ns_submit = 0, g_ns_present = 0;
 uint32_t g_tex_ups = 0;
 uint32_t g_cs_stage_n = 0, g_cs_flush_n = 0;
 uint64_t g_cs_stage_bytes = 0;
+uint64_t g_cs_wb_bytes_written = 0, g_cs_wb_bytes_total = 0;
 uint64_t g_fr_draw = 0, g_fr_submit = 0, g_fr_wait = 0, g_fr_present = 0,
          g_fr_tex_up = 0;
 
@@ -352,7 +353,7 @@ void ReportFps() {
         "(wait=%.2fms exec=%.2fms "
         "submit=%.2fms present=%.2fms) texup=%.2fms x%.1f cs=%.2fms x%.1f "
         "(in=%.2f gpu=%.2f out=%.2f stage=%.1fx%.1fMB flush=%.1f) "
-        "sh=%.2fms x%.1f dcb=%.2fms x%.1f\n",
+        "sh=%.2fms x%.1f dcb=%.2fms x%.1f wb=%.0f%%\n",
         frames / dt, g_ns_draw / f / 1e6, g_ns_end / f / 1e6,
         g_ns_readback / f / 1e6,
         g_gpu_exec_samples ? g_ns_gpu_exec / g_gpu_exec_samples / 1e6 : 0.0,
@@ -361,7 +362,10 @@ void ReportFps() {
         g_ns_cs_gpu / f / 1e6, g_ns_cs_out / f / 1e6, g_cs_stage_n / f,
         g_cs_stage_bytes / f / 1e6, g_cs_flush_n / f,
         gcn::g_ns_recomp / f / 1e6, gcn::g_recomp_n / f,
-        rhi::g_ns_dcb / f / 1e6, rhi::g_dcb_n / f);
+        rhi::g_ns_dcb / f / 1e6, rhi::g_dcb_n / f,
+        g_cs_wb_bytes_total ? 100.0 * double(g_cs_wb_bytes_written) /
+                                  double(g_cs_wb_bytes_total)
+                            : 0.0);
     // Feed the on-screen overlay gauge (gpuMs = GPU end/present-dominated
     // cost).
     gfx::overlaySetPerf(float(frames / dt), float(g_ns_end / f / 1e6),
@@ -377,6 +381,7 @@ void ReportFps() {
     g_ns_cs_in = g_ns_cs_gpu = g_ns_cs_out = 0;
     g_cs_count = g_cs_stage_n = g_cs_flush_n = 0;
     g_cs_stage_bytes = 0;
+    g_cs_wb_bytes_written = g_cs_wb_bytes_total = 0;
     gcn::g_ns_recomp = 0;
     gcn::g_recomp_n = 0;
     rhi::g_ns_dcb = 0;

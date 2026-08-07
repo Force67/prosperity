@@ -48,6 +48,13 @@ DELTA_OPTION(bool, kCsRename, "DELTA_GPU_CSRENAME", false);
 DELTA_OPTION(bool, kCsSkipUpload, "DELTA_GPU_CS_SKIP_UPLOAD", false);
 uint64_t g_cs_skip_n = 0;
 DELTA_OPTION(bool, kCsImport, "DELTA_GPU_CSIMPORT", false);
+// Revert to copying every staged byte back to guest memory, shader-written or
+// not (the behaviour before the write-coverage merge). Kept for A/B only: it
+// reverts CPU writes that share a staged range and corrupts SotC's heap.
+DELTA_OPTION(bool, kCsWbFull, "DELTA_GPU_CS_WB_FULL", false);
+// Report every writeback whose dispatch did not write the whole range: the
+// difference is guest memory we would have reverted.
+DELTA_OPTION(bool, kCsWbAudit, "DELTA_GPU_CS_WB_AUDIT", false);
 DELTA_OPTION(uint64_t, kCsFlushTrace, "DELTA_GPU_CSFLUSHTRACE", 0);
 DELTA_OPTION(bool, kGpuCsgpuVerbose, "DELTA_GPU_CSGPU_VERBOSE", false);
 }  // namespace
@@ -450,6 +457,13 @@ struct CsRange {
   bool rt_sourced = false;
   int last_rt_frame = -1;
   ComputeInfo::Res res;  // writeback needs the full layout description
+  // A copy of the guest bytes as they were staged IN, kept so the writeback can
+  // tell "the shader wrote this word" from "the shader never touched it".
+  // Without it the writeback has to assume the whole range is GPU output and
+  // copies the stale snapshot back over anything the CPU changed meanwhile --
+  // see CsRangeFlushOne.
+  std::vector<uint8_t> shadow;
+  bool shadow_valid = false;
 };
 
 bool SameCsResourceShape(const ComputeInfo::Res& a, const ComputeInfo::Res& b) {
@@ -1142,7 +1156,96 @@ bool CsRangeFlushOne(uint64_t base, CsRange& e) {
                      (unsigned long long)base, (unsigned long long)n);
       return false;
     }
-    std::memcpy(reinterpret_cast<void*>(base), e.map, n);
+    // Write back only what the DISPATCH changed. A staged range is the shader's
+    // whole view of a resource, but a shader writes a part of it -- and this
+    // title puts its CPU heap in the same direct memory as the buffers it hands
+    // to compute, so the bytes in between belong to the allocator. Copying the
+    // full range back therefore reverts every CPU write made since stage-in,
+    // and a word the CPU was writing WHILE we snapshotted comes back half
+    // updated: that is the 5-valid-bytes-plus-3-stale-bytes free-tree pointer
+    // SotC dies on at eboot+0x48ac5 when New Game is confirmed.
+    // The shadow copy taken at stage-in says which words the shader touched;
+    // untouched words are left alone. (A shader that rewrites a word with the
+    // value it already had is skipped too, which is a no-op by definition.)
+    // The merge is symmetric, so that staging, shadow and guest all agree again
+    // when it returns -- the bookkeeping below this point promises exactly that:
+    //   the shader wrote the block  -> guest   <- staging  (publish the result)
+    //   the shader left it alone    -> staging <- guest    (adopt the CPU's word)
+    // Skipping the second half would leave a dispatch reading stale values for
+    // whatever the CPU changed, which is the same defect pointed the other way.
+    // Guest-sourced linear ranges only. A range staged from a live render
+    // target exists precisely so the writeback can publish that image into
+    // guest memory, so "the dispatch did not write it" must not stop it there.
+    if (!kCsWbFull && !e.rt_sourced && e.shadow_valid && e.shadow.size() >= n) {
+      auto* src = static_cast<uint8_t*>(e.map);
+      uint8_t* shd = e.shadow.data();
+      auto* dst = reinterpret_cast<uint8_t*>(base);
+      uint64_t off = 0, wrote = 0;
+      // 64-byte blocks: a block the shader left alone costs one compare, which
+      // keeps "the shader wrote a little of a big range" -- the common case --
+      // no more expensive than the unconditional copy this replaces.
+      for (; off + 64 <= n; off += 64) {
+        if (std::memcmp(src + off, shd + off, 64) != 0) {
+          std::memcpy(dst + off, src + off, 64);
+          std::memcpy(shd + off, src + off, 64);
+          wrote += 64;
+        } else {
+          std::memcpy(src + off, dst + off, 64);
+          std::memcpy(shd + off, dst + off, 64);
+        }
+      }
+      for (; off < n; off++) {
+        if (src[off] != shd[off]) {
+          dst[off] = src[off];
+          shd[off] = src[off];
+          wrote++;
+        } else {
+          src[off] = dst[off];
+          shd[off] = dst[off];
+        }
+      }
+      g_cs_wb_bytes_written += wrote;
+      g_cs_wb_bytes_total += n;
+      if (kCsWbAudit && wrote != n) {
+        static int logged = 0;
+        if (logged++ < 32)
+          std::fprintf(stderr,
+                       "[cswb] base=%#llx +%#llx: shader wrote %llu of %llu "
+                       "bytes; the other %llu would have been reverted\n",
+                       (unsigned long long)base, (unsigned long long)n,
+                       (unsigned long long)wrote, (unsigned long long)n,
+                       (unsigned long long)(n - wrote));
+      }
+    } else {
+      // Full-range writeback (the pre-merge behaviour, kept for A/B). Still
+      // measure how much of it the dispatch actually wrote when a shadow is
+      // available, so the two modes report the same number and the A/B is a
+      // comparison rather than a guess.
+      uint64_t wrote = n;
+      if (e.shadow_valid && e.shadow.size() >= n) {
+        wrote = 0;
+        const auto* src = static_cast<const uint8_t*>(e.map);
+        const uint8_t* shd = e.shadow.data();
+        for (uint64_t off = 0; off < n; off += 64) {
+          const uint64_t blk = std::min<uint64_t>(64, n - off);
+          if (std::memcmp(src + off, shd + off, blk) != 0)
+            wrote += blk;
+        }
+        if (kCsWbAudit && wrote != n) {
+          static int logged = 0;
+          if (logged++ < 32)
+            std::fprintf(stderr,
+                         "[cswb] base=%#llx +%#llx: shader wrote %llu of %llu "
+                         "bytes; the other %llu ARE being reverted\n",
+                         (unsigned long long)base, (unsigned long long)n,
+                         (unsigned long long)wrote, (unsigned long long)n,
+                         (unsigned long long)(n - wrote));
+        }
+      }
+      std::memcpy(reinterpret_cast<void*>(base), e.map, n);
+      g_cs_wb_bytes_written += wrote;
+      g_cs_wb_bytes_total += n;
+    }
   }
   UploadCsRangeToRt(base, e);  // refresh a live RT image aliasing the range
   InvalidateTexRange(base, e.guest_bytes);
@@ -1306,12 +1409,12 @@ bool DescribeCsRangeCovering(uint64_t addr, char* out, size_t out_size) {
     std::snprintf(out, out_size,
                   "base=%#llx +%#llx (addr is base+%#llx) staged=%#llx "
                   "gpu_dirty=%d imported=%d rt_sourced=%d image=%d "
-                  "last_used_frame=%d",
+                  "shadow=%d last_used_frame=%d",
                   (unsigned long long)base, (unsigned long long)n,
                   (unsigned long long)(addr - base),
                   (unsigned long long)e.size, (int)e.gpu_dirty,
                   (int)e.imported, (int)e.rt_sourced, (int)e.image_staging,
-                  e.last_used_frame);
+                  (int)e.shadow_valid, e.last_used_frame);
     return true;
   }
   return false;
@@ -1582,6 +1685,18 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci) {
       if (!same_shape) {
         e.hash = RangeHash(base, guest_bytes);
         e.last_validated_frame = g_frame.num;
+      }
+      // Baseline for the writeback's write-coverage merge: the staging buffer as
+      // it stands BEFORE any dispatch runs. Comparing against it is the only way
+      // the writeback can tell a shader's output from a byte it merely staged in
+      // and would otherwise copy back over the CPU's newer value. Imported
+      // ranges never write back, and images retile through WritebackCsImage.
+      if (!ci.res[i].image_staging && !e.imported) {
+        e.shadow.resize(sz[i]);
+        std::memcpy(e.shadow.data(), e.map, sz[i]);
+        e.shadow_valid = true;
+      } else {
+        e.shadow_valid = false;
       }
       e.gpu_dirty = false;
       g_cs_stage_n++;

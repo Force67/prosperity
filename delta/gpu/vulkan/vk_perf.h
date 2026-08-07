@@ -25,6 +25,10 @@ extern uint32_t g_cs_count, g_tex_ups;
 extern uint32_t g_gpu_exec_samples;
 extern uint32_t g_cs_stage_n, g_cs_flush_n;
 extern uint64_t g_cs_stage_bytes;
+// Compute writeback coverage: how much of what we copy back to guest memory the
+// dispatch actually changed. The gap is memory the CPU owns and we were
+// reverting -- see CsRangeFlushOne.
+extern uint64_t g_cs_wb_bytes_written, g_cs_wb_bytes_total;
 
 // Per-frame accumulators (ns), reset when a frame's sample is pushed.
 extern uint64_t g_fr_draw, g_fr_submit, g_fr_wait, g_fr_present, g_fr_tex_up;
