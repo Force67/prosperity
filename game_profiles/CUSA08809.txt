@@ -402,8 +402,47 @@
 // getting handed the chunk. The ring was 64 entries then, far under the 4096
 // cadence, so it showed only allocs and no mutator; it is 8192 now.
 //
+// THE CONFIRMATION RUNS COULD NOT BE COMPLETED (2026-08-07), and the reason is
+// itself the finding. Serialising the coalescer 0x48c80 STALLS THE TITLE: seven
+// hooks installed but unlocked runs 174093 inserts and 3.3 fps in five minutes; the
+// same seven with the coalescer locked manages 129 inserts and never renders a
+// frame. Per-state locks do not help, so it is not false sharing -- the coalescer is
+// reached with guest locks already held and the sched_yield spin convoys behind it.
+// It is observed but NOT locked now (flip its flag in the site table to reproduce).
+// So there is no two-clean-run result; the step-92 survival above stands alone, on
+// four mutators, and must not be read as a confirmed mechanism.
+//
+// WHAT THE CONTENTION FORENSICS SETTLED (+DELTA_SOTC_ALLOCLOCK=1 reports it):
+// when the host try_lock fails, both threads are dumped with their guest tid, site,
+// allocator state and the owner word of the guest mutex at 0x200003420.
+//  - THE 351 CONTENTIONS FROM THE PREVIOUS ROUND WERE MOSTLY FALSE. 22 of the first
+//    24 were between DIFFERENT allocator instances. This title runs THREE: two
+//    static in module .data (0x201402dfc700, 0x201402dfc780) and one in direct
+//    memory (0x8309e0fd20, the one whose tree crashes). They share no tree, and a
+//    single global lock was serialising independent heaps against each other.
+//    arg0 is the state at insert, remove and coalesce (all reach it at arg0+0x70);
+//    rebalance and fixup take node pointers, which is why they always showed 0.
+//  - WITH PER-STATE LOCKING the count means something, and same-tree collisions ARE
+//    real: two guest threads inside the tree mutators of state 0x201402dfc700 at
+//    once, repeatedly.
+//  - AND THE GUEST MUTEX AT 0x200003420 IS UNOWNED IN EVERY ONE OF THEM (word=0).
+//    So it is NOT the lock protecting that allocator. The belief that it was came
+//    from the crashing thread's syscall history and does not survive contact.
+//  - Note the collisions seen were on 0x201402dfc700, NOT on 0x8309e0fd20, whose
+//    tree is the one that crashes. No same-tree collision on the crashing state has
+//    been observed yet.
+//
+// NEXT STEP: find what actually serialises the static allocator at 0x201402dfc700 --
+// it is a shared global heap, not a per-thread scope, so something must. Candidates:
+// a different umutex (dump the guest lock words the call path touches, not just
+// 0x200003420), a spinlock in a caller, or nothing at all because the title reaches
+// it only from one thread on hardware and our thread/affinity mapping breaks that.
+// Only once the real lock is named does "the exclusion fails under FEX" become a
+// testable claim. And the crashing state 0x8309e0fd20 needs the same treatment: get
+// a same-tree collision on IT before assuming its corruption is concurrency at all.
+//
 // STILL OPEN. What is excluded by measurement: the compute writeback, FEX vector
-// TSO, unaligned-atomic backpatching inside the allocator, any emulator-side
-// writer to the pages, and API-level concurrent entry. What is NOT excluded, and is
-// now the leading candidate again: unserialised concurrent TREE MUTATION, with
-// insert-versus-remove the specific pairing to chase.
+// TSO, unaligned-atomic backpatching inside the allocator, any emulator-side writer
+// to the pages, and API-level concurrent entry. What is NOT excluded: concurrent
+// tree mutation, now demonstrated on one allocator state but not on the crashing
+// one, and not yet tied to any named lock.

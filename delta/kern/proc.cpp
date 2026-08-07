@@ -74,6 +74,7 @@ DELTA_OPTION(bool, kSotcJobfix, "DELTA_SOTC_JOBFIX", false);
 DELTA_OPTION(int, kSotcAllocLock, "DELTA_SOTC_ALLOCLOCK", 0);
 DELTA_OPTION(bool, kSotcTreeWatch, "DELTA_SOTC_TREEWATCH", false);
 DELTA_OPTION(uint64_t, kSotcTreeWalk, "DELTA_SOTC_TREEWALK", 0);
+DELTA_OPTION(uint64_t, kSotcUmtxAddr, "DELTA_SOTC_UMTX_ADDR", 0x200003420ull);
 DELTA_OPTION(uint64_t, kSotcTreeNode, "DELTA_SOTC_TREEWATCH_NODE", 0x8052e00020ull);
 DELTA_OPTION(uint64_t, kSotcTreeState, "DELTA_SOTC_TREEWATCH_STATE", 0x8309e0fd20ull);
 DELTA_OPTION(const char *, kGuestPopcnt, "DELTA_GUEST_POPCNT", nullptr);
@@ -91,6 +92,8 @@ DELTA_OPTION(bool, kVoWatch, "DELTA_VO_WATCH", false);
 }  // namespace
 
 namespace krnl {
+const uint32_t *currentGuestTidPtr();  // sys_thread.cpp: this thread's guest tid
+
 static proc *g_activeProc{nullptr};
 
 // The guest fs base (TLS) and how the guest entry is run are backend-specific
@@ -1331,13 +1334,108 @@ AllocLockSite g_allocSites[kAllocLockSites];
 // counters proving the exclusion it needed was never in place.)
 std::recursive_mutex g_allocSharedM;
 
-static std::recursive_mutex &allocMutexFor(int i) {
-  return kSotcAllocLock == 2 ? g_allocSites[i].m : g_allocSharedM;
+// ONE LOCK PER ALLOCATOR STATE, not one lock overall. The contention forensics
+// showed 22 of 24 collisions were between DIFFERENT allocator instances -- this
+// title runs three (two static in module .data, one in direct memory) and they
+// share no tree, so serialising them against each other is pure false sharing. It
+// also made the experiment unrunnable: locking the hot coalescer across all three
+// heaps ran ~20x slower than locking four sites across one, and the repro never
+// reached the crash window.
+//
+// Keyed on arg0, which is the state pointer at the three sites that take one
+// (insert, remove, coalesce all use arg0+0x70). Rebalance and fixup are called
+// from inside those and take node pointers rather than a state, so they are
+// observed and not locked -- their callers already hold the right lock, which is
+// why their contention counts were 0 all along.
+//
+// The payoff is that contention now MEANS something: with per-state locking, a
+// failed try_lock is two threads inside the tree mutators of the SAME tree.
+constexpr int kAllocStates = 16;
+struct StateLock {
+  std::atomic<uint64_t> state{0};
+  std::recursive_mutex m;
+};
+StateLock g_stateLocks[kAllocStates];
+std::atomic<uint64_t> g_stateLockOverflow{0};
+
+static std::recursive_mutex &allocMutexFor(int i, uint64_t a0) {
+  if (kSotcAllocLock == 2)
+    return g_allocSites[i].m;
+  if (!a0)
+    return g_allocSharedM;
+  for (int k = 0; k < kAllocStates; k++) {
+    uint64_t cur = g_stateLocks[k].state.load(std::memory_order_acquire);
+    if (cur == a0)
+      return g_stateLocks[k].m;
+    if (cur == 0) {
+      uint64_t expect = 0;
+      if (g_stateLocks[k].state.compare_exchange_strong(expect, a0))
+        return g_stateLocks[k].m;
+      if (g_stateLocks[k].state.load(std::memory_order_acquire) == a0)
+        return g_stateLocks[k].m;
+    }
+  }
+  g_stateLockOverflow.fetch_add(1, std::memory_order_relaxed);
+  return g_allocSharedM;  // more states than slots: fall back to one lock
 }
 
 // Ring of the most recent allocator calls, so that when the periodic walk trips
 // there is a story for the window it brackets instead of only a verdict: which
 // sites ran, with what argument, on which thread. Read back on the first trip.
+// Who is inside the shared lock right now, so a thread that contends can say what
+// it collided with. Set on acquire, cleared on release.
+struct LockHolder {
+  std::atomic<uint32_t> gtid{0};
+  std::atomic<uint32_t> site{0};
+  std::atomic<uint64_t> a0{0};
+};
+LockHolder g_lockHolder;
+std::atomic<int> g_contendReported{0};
+
+// The guest pthread mutex the allocator's shared heap is locked with -- the one the
+// crashing thread spins on with MUTEX_WAIT/MUTEX_WAKE. FreeBSD's umutex keeps the
+// owner tid in the low bits of its first word with UMUTEX_CONTESTED (0x80000000)
+// on top, which is how sys_umtx_op reads it.
+static uint32_t umtxOwnerWord() {
+  const uint64_t a = kSotcUmtxAddr;
+  if (a < 0x200000000ull || a >= 0x201000000ull)
+    return 0xFFFFFFFFu;
+  return *reinterpret_cast<const volatile uint32_t *>(a);
+}
+
+// The discriminating report. Two threads inside the tree mutators at once is only a
+// race on the SAME tree if they are working on the same allocator state -- this
+// title hands out per-scope allocators, so a0 (the state pointer for insert and
+// remove) has to match before the collision means anything. And if it does match,
+// the owner word says whether the guest's own mutex thought it was excluding them.
+static void reportContention(int site, uint64_t a0) {
+  if (g_contendReported.fetch_add(1) >= 24)
+    return;
+  const uint32_t myGtid = *currentGuestTidPtr();
+  const uint32_t hg = g_lockHolder.gtid.load();
+  const uint32_t hs = g_lockHolder.site.load();
+  const uint64_t ha = g_lockHolder.a0.load();
+  const uint32_t ow = umtxOwnerWord();
+  const uint32_t owner = ow & ~0x80000000u;
+  const char *verdict =
+      (ha && a0 && ha != a0)
+          ? "DIFFERENT allocator states -- not one tree, not a race"
+          : (owner == myGtid || owner == hg)
+                ? "SAME state, and the guest mutex names one of them as owner -- "
+                  "the other entered without it"
+                : (owner == 0)
+                      ? "SAME state, guest mutex UNOWNED -- neither holds it"
+                      : "SAME state, guest mutex owned by a THIRD thread";
+  std::fprintf(stderr,
+               "[contend] me: gtid=%u site=%s a0=%#llx | holder: gtid=%u site=%s "
+               "a0=%#llx | umtx@%#llx word=%#x owner=%u contested=%d -> %s\n",
+               myGtid, g_allocSites[site].name, (unsigned long long)a0, hg,
+               hs < kAllocLockSites ? g_allocSites[hs].name : "?",
+               (unsigned long long)ha, (unsigned long long)kSotcUmtxAddr, ow, owner,
+               (ow & 0x80000000u) ? 1 : 0, verdict);
+  std::fflush(stderr);
+}
+
 struct AllocEvt { uint32_t site; uint32_t tid; uint64_t a0, a1; };
 // Big enough to cover the walk cadence: the walk only looks every N calls, so a
 // 64-entry ring showed nothing but the allocs immediately before the check and
@@ -1346,6 +1444,11 @@ constexpr int kAllocRing = 8192;
 AllocEvt g_allocRing[kAllocRing];
 std::atomic<uint64_t> g_allocRingPos{0};
 std::atomic<uint64_t> g_allocCallSeq{0};
+
+// Which allocator state this thread locked, per nesting level: the leave hook has
+// no argument to re-derive it from.
+static thread_local uint64_t t_lockedState[8];
+static thread_local int t_lockDepth = 0;
 
 static void treeWatchAt(int site, bool onExit);
 static void treeWalkPeriodic();
@@ -1366,14 +1469,24 @@ static void allocLockEnterAt(int i, uint64_t a0, uint64_t a1) {
     treeWatchAt(i, false);
   if (!kSotcAllocLock || !s.serialise)
     return;  // observation-only site, or watch-only run: do not serialise
-  std::recursive_mutex &mx = allocMutexFor(i);
-  if (mx.try_lock())
+  std::recursive_mutex &mx = allocMutexFor(i, a0);
+  if (mx.try_lock()) {
+    if (t_lockDepth < 8) t_lockedState[t_lockDepth++] = a0;
+    g_lockHolder.gtid.store(*currentGuestTidPtr());
+    g_lockHolder.site.store((uint32_t)i);
+    g_lockHolder.a0.store(a0);
     return;
+  }
   // The try_lock failed, so another thread is inside this very function right
   // now. That is the measurement; the blocking acquire below is the mitigation.
   s.contended.fetch_add(1, std::memory_order_relaxed);
+  reportContention(i, a0);
   const auto t0 = std::chrono::steady_clock::now();
   mx.lock();
+  if (t_lockDepth < 8) t_lockedState[t_lockDepth++] = a0;
+  g_lockHolder.gtid.store(*currentGuestTidPtr());
+  g_lockHolder.site.store((uint32_t)i);
+  g_lockHolder.a0.store(a0);
   const uint64_t ns = (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
       std::chrono::steady_clock::now() - t0).count();
   uint64_t prev = s.maxWaitNs.load(std::memory_order_relaxed);
@@ -1567,8 +1680,12 @@ static void treeWalkPeriodic() {
 }
 
 static void allocLockLeaveAt(int i) {
-  if (kSotcAllocLock && g_allocSites[i].serialise)
-    allocMutexFor(i).unlock();
+  if (kSotcAllocLock && g_allocSites[i].serialise) {
+    // Unlock the same mutex the entry took: arg0 is not available here, so the
+    // entry records which state it locked on a small per-thread stack.
+    const uint64_t a0 = t_lockDepth > 0 ? t_lockedState[--t_lockDepth] : 0;
+    allocMutexFor(i, a0).unlock();
+  }
   if (kSotcTreeWatch)
     treeWatchAt(i, true);
   if (kSotcTreeWalk)
@@ -1652,13 +1769,21 @@ static void installAllocLock(smodule &m) {
       {0x12af0, 15, "free(0x12af0)",           false},
       {0x48a70, 16, "treeInsert(0x48a70)",     true},
       {0x497f0, 16, "treeRemove(0x497f0)",     true},
-      {0x4a040, 14, "treeRebalance(0x4a040)",  true},
-      {0x4a210, 15, "treeFixup(0x4a210)",      true},
+      {0x4a040, 14, "treeRebalance(0x4a040)",  false},
+      {0x4a210, 15, "treeFixup(0x4a210)",      false},
       // The census site 0x48dfb lives here. An earlier pass mis-attributed it to
       // 0x48c70 because that address is a 9-byte leaf whose `ret` is followed by
       // seven nops, one short of the eight the function-boundary scan wanted --
       // so this mutator went unserialised through the whole first experiment.
-      {0x48c80, 17, "treeCoalesce(0x48c80)",   true},
+      // Observed, NOT locked. Serialising this one stalls the title outright:
+      // hooked-but-unlocked runs 174093 inserts and 3.3 fps in five minutes, and
+      // hooked-and-locked manages 129 inserts and never renders a frame -- with
+      // per-state locks too, so it is not false sharing across heaps. The
+      // coalescer evidently must not be held across by a foreign lock (it is
+      // reached with guest locks already held, and the title's sched_yield spin
+      // convoys behind it). Left in the table because its contention count is the
+      // measurement; flipping this to true is how the stall reproduces.
+      {0x48c80, 17, "treeCoalesce(0x48c80)",   false},
   };
   static void *const kEnter[kAllocLockSites] = {
       reinterpret_cast<void *>(&allocLockEnterT<0>),
