@@ -213,7 +213,10 @@ void sotcWalkFreeTree(uint64_t state, uint64_t newsz) {
     // refilled, so its "size" is whatever the new owner stored there. Reporting
     // only the unmapped dereference blames the wrong field -- by then the walk
     // has been reading live application data as nodes for several steps.
-    const bool plausible = sz && sz < 0x8000000ull && (sz & 15) == 0;
+    // 8-granular, not 16: the allocator masks the size word with ~7 and a real
+    // free chunk of 0x158 turned up in a later crash, which a 16-alignment test
+    // flagged as "no longer a free chunk" and blamed the wrong link for.
+    const bool plausible = sz && sz < 0x8000000ull && (sz & 7) == 0;
     std::fprintf(stderr,
                  "  [freetree] step %d: node=%#llx size=%#llx -> child[%d]%s\n",
                  step, (unsigned long long)cur, (unsigned long long)sz, idx,

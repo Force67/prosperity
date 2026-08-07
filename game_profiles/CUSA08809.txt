@@ -312,29 +312,52 @@
 // (A first mitigation attempt used mode 2 by mistake and proved nothing: per-site
 // locks let a thread in 0x12820 meet a thread in 0x12af0 over the same tree.)
 //
-// WHERE THAT LEAVES IT: the corrupted node is the SAME in all five crashes,
-// always child[0], always a stale pointer into the same narrow region, with the
-// parent and dup-list words intact -- while only the moment the walk trips over
-// it moves (script step 8/40/48/86). A deterministic corruption with a
-// nondeterministic discovery is the shape of a MISCOMPILED STORE, not a race.
-// The census already showed nothing outside the allocator's own nine sites writes
-// that page, and the allocator core contains no atomic RMW at all.
-// Gap, stated honestly: the shared lock covers three entries, so a tree-mutating
-// path that bypasses all of them -- a scope pop at 0x12350 bulk-freeing is the
-// candidate -- would still run unserialised. Concurrency is strongly disfavoured,
-// not eliminated.
+// WHERE THAT LEAVES IT (corrected 2026-08-07 -- see the withdrawal below):
+// concurrency is real but disfavoured as the cause, and no emulator-side writer
+// touches the pages. The cause is still open.
 //
-// NEXT STEP: bisect the store. The publication of the two child words is the
-// suspect -- the insert writes child[0]/child[1] with scalar movs at 0x48af5 and
-// 0x48afd on one path and zeroes BOTH with a single `vmovups [rsi],xmm0` at
-// 0x48b46 on the other, and the rebalance at 0x4a040 rewrites them again.
-// (DELTA_FEX_VECTOR_TSO=1 does not help, but that knob changes ordering, not
-// whether the store itself is generated correctly.) Two things to do first:
-//  - Catch the corruption at its BIRTH instead of at the walk that trips on it.
-//    The free-tree walker in crash.cpp is already a standalone function, so run it
-//    periodically against state 0x8309e0fd20 and report the first moment
-//    0x8052e00020's child[0] stops being a free chunk. That turns a 25-minute
-//    repro into a short one and says which site wrote it last.
-//  - Then compare that block's FEX JIT output against the interpreter for the same
-//    guest addresses (FEX has an interpreter fallback), which is what the
-//    "miscompiled store" claim needs in order to become a fix.
+// WITHDRAWN: "the corrupted node is the SAME every crash, so this is a
+// deterministic miscompile". That was true of five crashes and false of the
+// sixth. Runs 1-5 all tripped on node 0x8052e00020's child[0]; run 6 tripped on
+// node 0x807bbe6f90's child[1], pointing at 0x8052ec4170, with 0x8052e00020 not
+// even on the walk. Node identity was a small-sample artifact and the
+// determinism argument built on it does not stand. The victim varies; what is
+// stable is only the shape (a link that still points at a chunk which has been
+// handed back out and refilled).
+//
+// DELTA_SOTC_TREEWATCH=1 validates one node's child[0] on both sides of every
+// allocator call (entry clean + exit dirty names the call containing the store).
+// It reported 16070962 checks, 2 bad-on-entry, 0 transitions -- which says
+// nothing, because it was aimed at 0x8052e00020 and that run's victim was a
+// different node. A single-field watch is the wrong instrument once the victim
+// moves. Two lessons are baked into the code and worth keeping:
+//   - the node does not exist at boot, so the watch must stay disarmed until its
+//     page is mapped, or the first allocator call kills the process (it did);
+//   - it must only judge the field while the node is ITSELF a live free chunk,
+//     otherwise pre-membership junk reads as corruption (124 phantom hits).
+//
+// ALSO FIXED: chunk sizes are 8-GRANULAR, not 16. The allocator masks its size
+// word with ~7, and run 6 contained a real free chunk of 0x158, which the
+// crash-time walker's 16-alignment test flagged as "no longer a free chunk" --
+// blaming the wrong link. Both the walker and the watch now test 8-granularity.
+// Any earlier walk output that broke at a non-16-aligned size should be re-read.
+//
+// LATENT, NOT THIS CRASH (for whoever wants it): the guest pthread mutex at
+// 0x200003420 failed to exclude 5 times in 184030 free-tree inserts under
+// contention (DELTA_SOTC_ALLOCLOCK=2). Serialising it away does not fix the New
+// Game crash, so it is not the cause here -- but a userland-CAS or umtx wake that
+// leaks mutual exclusion is a latent bug for every title on this backend and
+// deserves its own chase. Start at the 27 unaligned-atomic backpatch sites
+// clustered in 0x270db-0x2719b of the module at 0x200200000000, since FEX
+// documents that backpatching makes even ALIGNED accesses through that site
+// non-atomic (HalfBarrierTSOEnabled).
+//
+// NEXT STEP, corrected: walk the WHOLE tree periodically rather than watching one
+// field, and report the first walk that finds any link pointing at a non-free
+// chunk, with the allocator call count at that moment. The walker in crash.cpp is
+// already standalone and 8-granular now; hang it off the DELTA_SOTC_ALLOCLOCK
+// trampolines every N calls (N ~ 4096 keeps it cheap) so the report brackets a
+// small window of calls instead of a whole run. Only once a specific call is
+// bracketed does the miscompiled-store question become answerable -- and note
+// that FEX vector TSO, the compute writeback, unaligned-atomic backpatching in
+// the allocator, and concurrent API entry are all already excluded by measurement.

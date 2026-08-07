@@ -6,6 +6,7 @@
  * in the root of the source tree.
  */
 
+#include <sys/mman.h>
 #include <thread>
 #include <chrono>
 #include <base.h>
@@ -71,6 +72,9 @@ DELTA_OPTION(bool, kSotcForcePayload, "DELTA_SOTC_FORCE_PAYLOAD", false);
 DELTA_OPTION(bool, kSotcForceWorlddone, "DELTA_SOTC_FORCE_WORLDDONE", false);
 DELTA_OPTION(bool, kSotcJobfix, "DELTA_SOTC_JOBFIX", false);
 DELTA_OPTION(int, kSotcAllocLock, "DELTA_SOTC_ALLOCLOCK", 0);
+DELTA_OPTION(bool, kSotcTreeWatch, "DELTA_SOTC_TREEWATCH", false);
+DELTA_OPTION(uint64_t, kSotcTreeNode, "DELTA_SOTC_TREEWATCH_NODE", 0x8052e00020ull);
+DELTA_OPTION(uint64_t, kSotcTreeState, "DELTA_SOTC_TREEWATCH_STATE", 0x8309e0fd20ull);
 DELTA_OPTION(const char *, kGuestPopcnt, "DELTA_GUEST_POPCNT", nullptr);
 DELTA_OPTION(const char *, kGuestWprot, "DELTA_GUEST_WPROT", nullptr);
 DELTA_OPTION(const char *, kGuestRprot, "DELTA_GUEST_RPROT", nullptr);
@@ -1329,10 +1333,16 @@ static std::recursive_mutex &allocMutexFor(int i) {
   return kSotcAllocLock == 2 ? g_allocSites[i].m : g_allocSharedM;
 }
 
+static void treeWatchAt(int site, bool onExit);
+
 static void allocLockEnterAt(int i) {
   AllocLockSite &s = g_allocSites[i];
-  std::recursive_mutex &mx = allocMutexFor(i);
   s.calls.fetch_add(1, std::memory_order_relaxed);
+  if (kSotcTreeWatch)
+    treeWatchAt(i, false);
+  if (!kSotcAllocLock)
+    return;  // watch-only: do not serialise, so the run behaves like the repro
+  std::recursive_mutex &mx = allocMutexFor(i);
   if (mx.try_lock())
     return;
   // The try_lock failed, so another thread is inside this very function right
@@ -1347,7 +1357,114 @@ static void allocLockEnterAt(int i) {
          !s.maxWaitNs.compare_exchange_weak(prev, ns, std::memory_order_relaxed)) {}
 }
 
-static void allocLockLeaveAt(int i) { allocMutexFor(i).unlock(); }
+// DELTA_SOTC_TREEWATCH: catch the free tree going bad AT ITS BIRTH.
+//
+// Five crashes all corrupt the same field -- node 0x8052e00020's child[0] -- so
+// there is no need to walk the tree: check that one word, on both sides of every
+// allocator call. Entry clean and exit dirty names the call that CONTAINED the
+// corrupting store, which is what a "miscompiled store" claim needs and what the
+// crash-time walk can never give (by then the store is millions of calls old).
+// Two loads and a few compares per call, against ~6M calls a run.
+//
+// A healthy child[0] is either the tree's sentinel or a pointer to a free chunk,
+// whose size word sits at child-8 and is small, non-zero and 16-byte aligned --
+// the same plausibility test the crash-time walker uses. Every bad value observed
+// so far is a mapped pointer into reused live data, so reading it is safe; a value
+// outside guest direct memory is reported without being dereferenced.
+static thread_local bool t_treeOkAtEntry = true;
+std::atomic<uint64_t> g_treeChecks{0};
+std::atomic<uint64_t> g_treeBadAtEntry{0};
+std::atomic<uint64_t> g_treeWentBad{0};
+std::atomic<int> g_treeReported{0};
+
+// The watched node does not exist at boot -- the heap has not grown into it yet --
+// so the check has to stay disarmed until its page is mapped, or the very first
+// allocator call dereferences nothing and takes the process down. (It did.) Poll
+// for the page the way the write census does, then confirm the address really
+// looks like a free-tree node before trusting anything it says.
+std::atomic<bool> g_treeArmed{false};
+
+static void treeWatchArm() {
+  std::thread([] {
+    const long pg = sysconf(_SC_PAGESIZE);
+    void *page = reinterpret_cast<void *>(kSotcTreeNode & ~(uint64_t)(pg - 1));
+    for (;;) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(200));
+      unsigned char vec = 0;
+      if (mincore(page, 1, &vec) != 0)
+        continue;
+      const uint64_t own = *reinterpret_cast<const uint64_t *>(kSotcTreeNode - 8) & ~7ull;
+      std::fprintf(stderr,
+                   "[treewatch] armed on node %#llx (its own size word reads "
+                   "%#llx) state %#llx sentinel %#llx\n",
+                   (unsigned long long)kSotcTreeNode, (unsigned long long)own,
+                   (unsigned long long)kSotcTreeState,
+                   (unsigned long long)(kSotcTreeState + 0x80));
+      std::fflush(stderr);
+      g_treeArmed.store(true, std::memory_order_release);
+      return;
+    }
+  }).detach();
+}
+
+static bool treeFieldOk(uint64_t &valOut, uint64_t &szOut) {
+  const uint64_t node = kSotcTreeNode;
+  const uint64_t sentinel = kSotcTreeState + 0x80;
+  valOut = szOut = 0;
+  if (node < 0x8000000000ull || node >= 0x8700000000ull)
+    return true;  // not the layout this watch was aimed at; stay quiet
+  // Only judge the field while the node is ITSELF a live free chunk. Before the
+  // tree grows into this address its words are whatever the previous owner left,
+  // and calling that "bad" buries the real signal: the first run of this watch
+  // reported 124 bad-on-entry hits with 0 transitions, which is what pre-
+  // membership noise looks like.
+  const uint64_t own = *reinterpret_cast<const uint64_t *>(node - 8) & ~7ull;
+  if (!own || own >= 0x8000000ull)
+    return true;  // 8-granular sizes: masking with ~7 is the only test available
+  const uint64_t c = *reinterpret_cast<const uint64_t *>(node);
+  valOut = c;
+  if (c == sentinel)
+    return true;
+  if (c < 0x8000000000ull || c >= 0x8700000000ull)
+    return false;  // not a guest pointer at all -- do not dereference it
+  const uint64_t sz = *reinterpret_cast<const uint64_t *>(c - 8) & ~7ull;
+  szOut = sz;
+  return sz && sz < 0x8000000ull;
+}
+
+static void treeWatchAt(int site, bool onExit) {
+  if (!g_treeArmed.load(std::memory_order_acquire))
+    return;
+  uint64_t val = 0, sz = 0;
+  const bool ok = treeFieldOk(val, sz);
+  g_treeChecks.fetch_add(1, std::memory_order_relaxed);
+  if (!onExit) {
+    t_treeOkAtEntry = ok;
+    if (!ok)
+      g_treeBadAtEntry.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
+  if (ok || !t_treeOkAtEntry)
+    return;  // already bad on the way in: some earlier call did it
+  g_treeWentBad.fetch_add(1, std::memory_order_relaxed);
+  if (g_treeReported.fetch_add(1) < 8) {
+    std::fprintf(stderr,
+                 "[treewatch] node %#llx child[0] WENT BAD inside %s (tid %ld): "
+                 "now %#llx, its size word reads %#llx -- this call contained the "
+                 "corrupting store\n",
+                 (unsigned long long)kSotcTreeNode, g_allocSites[site].name,
+                 (long)syscall(SYS_gettid), (unsigned long long)val,
+                 (unsigned long long)sz);
+    std::fflush(stderr);
+  }
+}
+
+static void allocLockLeaveAt(int i) {
+  if (kSotcAllocLock)
+    allocMutexFor(i).unlock();
+  if (kSotcTreeWatch)
+    treeWatchAt(i, true);
+}
 
 template <int N> static void PS4ABI allocLockEnterT() { allocLockEnterAt(N); }
 template <int N> static void PS4ABI allocLockLeaveT() { allocLockLeaveAt(N); }
@@ -1403,7 +1520,7 @@ static void installAllocLockHook(uint8_t *base, uint32_t off, uint32_t prologueL
 //   0x12af0 free : pushes + `sub rsp,0x30` end at 15, then `mov r15,[rip+..]`
 //   0x48a70 free-tree insert: pushes + `mov r15,rdi` + `mov r14,rsi` end at 16
 static void installAllocLock(smodule &m) {
-  if (!kSotcAllocLock)
+  if (!kSotcAllocLock && !kSotcTreeWatch)
     return;
   uint8_t *base = m.getInfo().base;
   g_allocSites[0].name = "alloc(0x12820)";
@@ -1418,9 +1535,18 @@ static void installAllocLock(smodule &m) {
   installAllocLockHook(base, 0x48a70, 16, g_allocSites[2].name,
                        reinterpret_cast<void *>(&allocLockEnterT<2>),
                        reinterpret_cast<void *>(&allocLockLeaveT<2>));
+  if (kSotcTreeWatch)
+    treeWatchArm();
   std::thread([] {
     for (;;) {
       std::this_thread::sleep_for(std::chrono::seconds(10));
+      if (kSotcTreeWatch)
+        std::fprintf(stderr,
+                     "[treewatch] %llu checks, %llu found it already bad on "
+                     "entry, %llu caught it GOING bad\n",
+                     (unsigned long long)g_treeChecks.load(),
+                     (unsigned long long)g_treeBadAtEntry.load(),
+                     (unsigned long long)g_treeWentBad.load());
       for (int i = 0; i < kAllocLockSites; i++)
         std::fprintf(stderr,
                      "[alloclock] %-24s %llu calls, %llu CONTENDED (another "
