@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "gfx/gfx.h"
+#include <cctype>
 #include <utl/options.h>
 
 namespace {
@@ -431,6 +432,21 @@ struct ScriptStep { double start, end; uint32_t buttons; };
 std::vector<ScriptStep> parseScript(const char *s) {
   std::vector<ScriptStep> steps;
   const std::string in(s);
+  // DELTA_PAD_SCRIPT drives TWO different replayers: this one is keyed on
+  // seconds ("12:cross"), scriptButtons() above is keyed on pad-read counts
+  // ("none:4500,cross:3"). Tell them apart by what precedes the first colon --
+  // a number here, a button name there -- and leave the other format alone.
+  // Without this every read-count script was also fed through this parser,
+  // which turned each "none:40" into a "[padscript] unknown button '40'"
+  // complaint: harmless, since the steps it built had no buttons and were
+  // dropped, but it made every working repro run look like it had failed.
+  size_t colon = in.find(':');
+  if (colon == std::string::npos)
+    return steps;
+  for (size_t k = 0; k < colon; k++)
+    if (!std::isdigit(static_cast<unsigned char>(in[k])) && in[k] != '.' &&
+        in[k] != ' ')
+      return steps;  // a name, not a time: this is the read-count format
   size_t i = 0;
   while (i < in.size()) {
     size_t comma = in.find(',', i);
