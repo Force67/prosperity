@@ -441,8 +441,79 @@
 // testable claim. And the crashing state 0x8309e0fd20 needs the same treatment: get
 // a same-tree collision on IT before assuming its corruption is concurrency at all.
 //
-// STILL OPEN. What is excluded by measurement: the compute writeback, FEX vector
-// TSO, unaligned-atomic backpatching inside the allocator, any emulator-side writer
-// to the pages, and API-level concurrent entry. What is NOT excluded: concurrent
-// tree mutation, now demonstrated on one allocator state but not on the crashing
-// one, and not yet tied to any named lock.
+// CROSS-HEAP ROUTING: RULED OUT (2026-08-07, +DELTA_SOTC_HEAPROUTE=1). The idea was
+// that the corruption needs no concurrency if a chunk is freed into one heap's tree
+// while its memory belongs to another heap's arena that is later recycled wholesale.
+// The insert takes the state in rdi and inserts the chunk cached at state+0xc0, so
+// both sides are readable at the trampoline; bucketing chunk addresses by 256 MiB per
+// state over seven minutes of world load:
+//   state 0x8309e0fd20    23609 inserts  0x8052e00010..0x81120ae100  buckets 805..810
+//   state 0x201402dfc700  60074 inserts  0x83008a1190..0x8604780120  buckets 830,850..860
+//   state 0x201402ed3260     25 inserts  0x830fb72d50..0x830fc8f310  bucket  830
+// The crashing heap shares no bucket with either static heap, and ALL five dead links
+// so far (0x8052ec4170, 0x805776d090, 0x8057766c90, 0x8052ec2870, 0x8057763990) lie
+// inside the crashing heap's own range. The chunk was freed into this tree, its memory
+// belongs to this heap, and it was handed out again while the tree kept the link.
+// Two leads fall out: the two STATIC heaps do share bucket 0x830 (38695 vs 25), an
+// overlap between those two that nobody has looked at; and the corruption concentrates
+// where insertion is rarest -- bucket 0x805 takes 1.3% of the crashing heap's inserts
+// (313 of 23609) yet hosts four of the five dead links, and 0x8052e00010 is that
+// heap's lowest chunk address, i.e. its oldest arena.
+//
+// ===================== CASE FILE, AS IT STANDS (2026-08-07) =====================
+// THE DEFECT: confirming New Game corrupts the title's size-ordered free tree on the
+// direct-memory heap (state 0x8309e0fd20). A link keeps pointing at a chunk that has
+// been handed back out and refilled -- always a live record array, whose targets carry
+// a recognisable 0x2710/0x270f (10000/9999) plus incrementing 0x0154xxxx-0x015dxxxx
+// pattern. The insert at eboot+0x48a70 later walks that link and dies at +0x48ac5.
+// The victim node and field VARY between runs (an early claim that they were constant
+// was a five-sample artifact and is withdrawn). Crash timing varies too: script step
+// 8, 40, 40, 48, 86, and one run corrupted into a four-thread sched_yield livelock
+// instead of faulting.
+//
+// EXCLUDED BY MEASUREMENT, each with its instrument:
+//  - the compute writeback: no staged range covers any stale link (crash handler asks
+//    gpu::DescribeCsRangeCovering directly), in two independent crashes;
+//  - FEX vector TSO: +DELTA_FEX_VECTOR_TSO=1 reproduces with an identical signature;
+//  - unaligned-atomic backpatching in the allocator: 0 of 1264 eboot backpatch sites
+//    fall in the allocator, its entry, its caller, or the job system;
+//  - any emulator-side writer: a from-boot census of the page names nine writers over
+//    120 reports, every one guest allocator code, ZERO unattributed writes;
+//  - API-level concurrent entry: serialised, crash unchanged (but see the caveat --
+//    that lock only covered 3 of the core's 22 external entry points);
+//  - cross-heap routing: the heaps are address-disjoint, above.
+//
+// DEMONSTRATED BUT NOT TIED TO THE CRASH: concurrent tree mutation. With one lock per
+// allocator state, genuine same-tree collisions occur repeatedly on the STATIC heap
+// 0x201402dfc700 -- and in every one the guest mutex at 0x200003420 reads UNOWNED, so
+// that mutex is not what protects it (the belief that it was came from the crashing
+// thread's syscall history). No same-tree collision has ever been observed on
+// 0x8309e0fd20, the heap that crashes.
+//
+// INSTRUMENTS NOW AVAILABLE (all off by default):
+//  +DELTA_SOTC_ALLOCLOCK=1  per-allocator-state lock over the tree mutators; =2 gives
+//      one mutex per site instead, which is the contention MEASUREMENT mode. Prints
+//      per-site call/contention counts and, on each collision, both threads' guest
+//      tid, site, allocator state and the guest mutex owner word.
+//      Serialising the coalescer 0x48c80 STALLS the title (174093 inserts and 3.3 fps
+//      unlocked, 129 inserts and no frame locked) so it is observed, not locked.
+//  +DELTA_SOTC_TREEWALK=<N>  whole-tree integrity walk every N allocator calls, with a
+//      ring of the last 8192 calls for the window it brackets.
+//  +DELTA_SOTC_TREEWATCH=1   one node's child[0] checked on both sides of every call
+//      (needs DELTA_SOTC_TREEWATCH_NODE; only useful once a victim is known to recur).
+//  +DELTA_SOTC_HEAPROUTE=1   per-state chunk-address buckets.
+//  +DELTA_RIPRACE=<ms>:<lo>-<hi>  signal-sampled guest rips; do NOT use it to prove
+//      absence of concurrency, the duty cycle makes that unaffordable (0.046 expected
+//      detections even with no exclusion at all).
+//  The crash dump itself now replays the insert, names the first link that left the
+//  tree, prints the census command for it and asks whether a compute range covers it.
+//
+// RECOMMENDED OPENING MOVE NEXT SESSION: get a same-tree collision on 0x8309e0fd20, or
+// prove there is none. Run +DELTA_SOTC_ALLOCLOCK=2 (per-site, so nothing is serialised
+// and timing is untouched) for a full repro and grep the [contend] lines for
+// a0=0x8309e0fd20 on both sides. If none appear, concurrency is dead for this heap and
+// the remaining suspect is the allocator's own logic executing wrongly -- at which
+// point bracket it with +DELTA_SOTC_TREEWALK=512 and read the ring, which is what the
+// 8192-entry ring was enlarged for. If they do appear, find the lock that should have
+// excluded them by dumping every guest lock word the call path touches, not just
+// 0x200003420.

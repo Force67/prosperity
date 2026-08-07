@@ -75,6 +75,7 @@ DELTA_OPTION(int, kSotcAllocLock, "DELTA_SOTC_ALLOCLOCK", 0);
 DELTA_OPTION(bool, kSotcTreeWatch, "DELTA_SOTC_TREEWATCH", false);
 DELTA_OPTION(uint64_t, kSotcTreeWalk, "DELTA_SOTC_TREEWALK", 0);
 DELTA_OPTION(uint64_t, kSotcUmtxAddr, "DELTA_SOTC_UMTX_ADDR", 0x200003420ull);
+DELTA_OPTION(bool, kSotcHeapRoute, "DELTA_SOTC_HEAPROUTE", false);
 DELTA_OPTION(uint64_t, kSotcTreeNode, "DELTA_SOTC_TREEWATCH_NODE", 0x8052e00020ull);
 DELTA_OPTION(uint64_t, kSotcTreeState, "DELTA_SOTC_TREEWATCH_STATE", 0x8309e0fd20ull);
 DELTA_OPTION(const char *, kGuestPopcnt, "DELTA_GUEST_POPCNT", nullptr);
@@ -1384,6 +1385,70 @@ static std::recursive_mutex &allocMutexFor(int i, uint64_t a0) {
 // sites ran, with what argument, on which thread. Read back on the first trip.
 // Who is inside the shared lock right now, so a thread that contends can say what
 // it collided with. Set on acquire, cleared on release.
+// DELTA_SOTC_HEAPROUTE: do the title's three heaps share address space?
+//
+// The corruption on the crashing heap needs no concurrency if a chunk is freed into
+// one state's tree while its backing memory belongs to another state's arena that
+// later gets recycled wholesale -- the tree would keep a link to memory handed out
+// again elsewhere, which is exactly the observed shape (a live record array holding
+// memory the tree still thinks is free), and it would explain why no same-tree
+// collision has ever been seen on that heap.
+//
+// The insert takes the state in rdi and inserts the chunk cached at state+0xc0 (its
+// designated victim), so both sides are readable at the hook with no pointer map:
+// bucket the chunk address by 256 MiB per state and print the table. Disjoint
+// buckets per state means chunks never cross heaps and the idea is dead; a bucket
+// shared by two states is where to look next.
+struct RouteBucket { uint64_t prefix; uint64_t count; };
+struct RouteTab {
+  std::atomic<uint64_t> state{0};
+  uint64_t inserts = 0;
+  uint64_t lo = ~0ull, hi = 0;
+  RouteBucket b[12] {};
+};
+constexpr int kRouteTabs = 8;
+RouteTab g_routeTabs[kRouteTabs];
+std::mutex g_routeM;
+
+static void heapRouteNote(uint64_t state, uint64_t chunk) {
+  if (!state || !chunk || chunk < 0x8000000000ull || chunk >= 0x8700000000ull)
+    return;
+  std::lock_guard<std::mutex> lk(g_routeM);
+  RouteTab *t = nullptr;
+  for (int i = 0; i < kRouteTabs; i++) {
+    const uint64_t cur = g_routeTabs[i].state.load(std::memory_order_relaxed);
+    if (cur == state) { t = &g_routeTabs[i]; break; }
+    if (cur == 0) { g_routeTabs[i].state.store(state); t = &g_routeTabs[i]; break; }
+  }
+  if (!t)
+    return;
+  t->inserts++;
+  if (chunk < t->lo) t->lo = chunk;
+  if (chunk > t->hi) t->hi = chunk;
+  const uint64_t pref = chunk >> 28;
+  for (auto &e : t->b) {
+    if (e.count && e.prefix == pref) { e.count++; return; }
+    if (!e.count) { e.prefix = pref; e.count = 1; return; }
+  }
+}
+
+static void heapRouteReport() {
+  std::lock_guard<std::mutex> lk(g_routeM);
+  for (auto &t : g_routeTabs) {
+    const uint64_t st = t.state.load(std::memory_order_relaxed);
+    if (!st) continue;
+    std::fprintf(stderr, "[heaproute] state %#llx: %llu inserts, chunks %#llx..%#llx, 256MB buckets:",
+                 (unsigned long long)st, (unsigned long long)t.inserts,
+                 (unsigned long long)t.lo, (unsigned long long)t.hi);
+    for (auto &e : t.b)
+      if (e.count)
+        std::fprintf(stderr, " %#llx0000000(x%llu)",
+                     (unsigned long long)e.prefix, (unsigned long long)e.count);
+    std::fprintf(stderr, "\n");
+  }
+  std::fflush(stderr);
+}
+
 struct LockHolder {
   std::atomic<uint32_t> gtid{0};
   std::atomic<uint32_t> site{0};
@@ -1464,6 +1529,12 @@ static void allocLockEnterAt(int i, uint64_t a0, uint64_t a1) {
     e.tid = (uint32_t)syscall(SYS_gettid);
     e.a0 = a0;
     e.a1 = a1;
+  }
+  if (kSotcHeapRoute && i == 2 && a0 >= 0x200000000ull) {
+    // site 2 is treeInsert: rdi is the state, and the chunk it will insert is the
+    // designated victim cached at state+0xc0.
+    const uint64_t chunk = *reinterpret_cast<const volatile uint64_t *>(a0 + 0xc0);
+    heapRouteNote(a0, chunk);
   }
   if (kSotcTreeWatch)
     treeWatchAt(i, false);
@@ -1749,7 +1820,7 @@ static void installAllocLockHook(uint8_t *base, uint32_t off, uint32_t prologueL
 //   0x12af0 free : pushes + `sub rsp,0x30` end at 15, then `mov r15,[rip+..]`
 //   0x48a70 free-tree insert: pushes + `mov r15,rdi` + `mov r14,rsi` end at 16
 static void installAllocLock(smodule &m) {
-  if (!kSotcAllocLock && !kSotcTreeWatch && !kSotcTreeWalk)
+  if (!kSotcAllocLock && !kSotcTreeWatch && !kSotcTreeWalk && !kSotcHeapRoute)
     return;
   uint8_t *base = m.getInfo().base;
   struct Site { uint32_t off; uint32_t cut; const char *name; bool lock; };
@@ -1812,6 +1883,8 @@ static void installAllocLock(smodule &m) {
   std::thread([] {
     for (;;) {
       std::this_thread::sleep_for(std::chrono::seconds(10));
+      if (kSotcHeapRoute)
+        heapRouteReport();
       if (kSotcTreeWatch)
         std::fprintf(stderr,
                      "[treewatch] %llu checks, %llu found it already bad on "
