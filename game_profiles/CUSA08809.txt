@@ -352,12 +352,58 @@
 // documents that backpatching makes even ALIGNED accesses through that site
 // non-atomic (HalfBarrierTSOEnabled).
 //
-// NEXT STEP, corrected: walk the WHOLE tree periodically rather than watching one
-// field, and report the first walk that finds any link pointing at a non-free
-// chunk, with the allocator call count at that moment. The walker in crash.cpp is
-// already standalone and 8-granular now; hang it off the DELTA_SOTC_ALLOCLOCK
-// trampolines every N calls (N ~ 4096 keeps it cheap) so the report brackets a
-// small window of calls instead of a whole run. Only once a specific call is
-// bracketed does the miscompiled-store question become answerable -- and note
-// that FEX vector TSO, the compute writeback, unaligned-atomic backpatching in
-// the allocator, and concurrent API entry are all already excluded by measurement.
+// THE HOST-MUTEX EXPERIMENT WAS NEVER SERIALISING THE ALLOCATOR (2026-08-07).
+// A scan of every direct call in the eboot targeting the allocator core
+// (0x47000-0x4b000) finds 22 EXTERNAL entry points, called from all over the
+// image -- 0x8c536, 0x33710, 0x25707b, 0xa4675c, 0x443d8, 0x4bdea and more. So
+// locking 0x12820 + 0x12af0 covered 3 doors of 22+, and the earlier conclusion
+// "serialising the allocator does not stop the corruption, so it is not a race"
+// IS WITHDRAWN. The gap recorded at the time was wrong too: 0x12350 is 31 bytes
+// that decrement a scope depth counter (`dec dword [rax+0x400]`) and free nothing,
+// so there is no bulk-free path there, and its PIC prologue is 13 bytes -- not
+// detourable anyway.
+//
+// LOCK THE MUTATORS INSTEAD. All 11 call sites of the tree-mutating functions live
+// inside the core, so serialising those covers every door at once, and it is
+// narrower and cheaper than the API lock (2 fps against 1.3). The five mutators:
+//   0x48a70 treeInsert     cut 16      0x497f0 treeRemove    cut 16
+//   0x4a040 treeRebalance  cut 14      0x4a210 treeFixup     cut 15
+//   0x48c80 treeCoalesce   cut 17
+// 0x48c80 was missed by every earlier experiment: census site 0x48dfb lives there,
+// and it was mis-attributed to 0x48c70, a 9-byte leaf whose `ret` is followed by
+// SEVEN nops -- one short of the eight the function-boundary scan wanted. It is the
+// most contended site of all (6 contentions in its first 152 calls).
+// 0x4a040 uses rbp as a NODE pointer (loaded from rdx at 0x4a075), so its
+// [rbp+0x20] accesses are node fields, not stack args, and a detour is safe.
+//
+// MEASURED (+DELTA_SOTC_ALLOCLOCK=1 +DELTA_SOTC_TREEWALK=4096):
+//   treeInsert     290885 calls, 309 CONTENDED     treeRemove   103024 calls, 42
+//   treeRebalance   70316 calls,   0               treeFixup     29217 calls,  0
+// 351 events, against 5 for the old three-site configuration. Rebalance and fixup
+// show 0 because they are called from inside insert/remove, which already hold the
+// shared lock. Insert-versus-remove concurrency was invisible to the old setup by
+// construction, and it is exactly the shape the corruption has: a live parent link
+// into a chunk that has been handed back out and refilled.
+//
+// AND IT GETS FURTHER THAN ANY OTHER RUN: script step 92 with no fault, past all
+// five previously observed crash points (8, 40, 40, 48, 86). NOT a fix -- the
+// periodic walk still tripped once during that run, so the tree does still go bad,
+// and the fifth mutator was not yet covered when it ran. But "not a race" is off
+// the table, and the next run to make is simply this one with all five mutators
+// locked, twice, before anyone declares anything.
+//
+// THE BRACKETING WALK (+DELTA_SOTC_TREEWALK=<N>) walks the whole tree every N
+// allocator calls and reports the first link pointing at a non-free chunk, with a
+// ring of the last 8192 calls (site, tid, args) for the window. Its first trip:
+// "after 11591691 allocator calls, 181 nodes visited: the link at 0x8052ec2870
+// points at 0x271001541bad, size word 0". Note 0x2710 -- the values these dead
+// links point at are consistently 0x2710/0x270f (10000/9999) paired with an
+// incrementing 0x0154xxxx-0x015dxxxx, i.e. one live record array that keeps
+// getting handed the chunk. The ring was 64 entries then, far under the 4096
+// cadence, so it showed only allocs and no mutator; it is 8192 now.
+//
+// STILL OPEN. What is excluded by measurement: the compute writeback, FEX vector
+// TSO, unaligned-atomic backpatching inside the allocator, any emulator-side
+// writer to the pages, and API-level concurrent entry. What is NOT excluded, and is
+// now the leading candidate again: unserialised concurrent TREE MUTATION, with
+// insert-versus-remove the specific pairing to chase.
