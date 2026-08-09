@@ -277,6 +277,16 @@ struct Translator {
   Id Ext1(uint32_t op, Id a) { return m.ExtInst(t_f, op, {a}); }
   Id Ext2(uint32_t op, Id a, Id b) { return m.ExtInst(t_f, op, {a, b}); }
   Id FMul(Id a, Id b) { return m.Emit(spv::Op::OpFMul, t_f, {a, b}); }
+  // GCN's V_*_LEGACY_F32 multiply: zero times anything is zero, including
+  // inf and NaN, where IEEE gives NaN. Shaders rely on it to kill a term
+  // guarded by a reciprocal that may have divided by zero.
+  Id LegacyMul(Id a, Id b) {
+    const Id zero = F32(0.f);
+    const Id any_zero = m.Emit(spv::Op::OpLogicalOr, t_bool,
+                               {m.Emit(spv::Op::OpFOrdEqual, t_bool, {a, zero}),
+                                m.Emit(spv::Op::OpFOrdEqual, t_bool, {b, zero})});
+    return SelectF(any_zero, zero, FMul(a, b));
+  }
   Id FAdd(Id a, Id b) { return m.Emit(spv::Op::OpFAdd, t_f, {a, b}); }
   Id FSub(Id a, Id b) { return m.Emit(spv::Op::OpFSub, t_f, {a, b}); }
   Id FDiv(Id a, Id b) { return m.Emit(spv::Op::OpFDiv, t_f, {a, b}); }
@@ -558,6 +568,20 @@ inline void SeedPsInputVgprs(Translator& t,
 // Per-stage state carried into the shared per-instruction emitter (EmitInst).
 struct StageContext {
   bool is_ps = false;
+  // SPI_PS_INPUT_CNTL_0..31: which VS PARAMETER EXPORT each PS input attribute
+  // slot reads (OFFSET, bits [5:0]). The mapping is NOT the identity -- a VS
+  // commonly exports the clip position as param0 and the real texture
+  // coordinate as param1, and points the PS's attr0 at param1. Null means no
+  // mapping was supplied and attr_i falls back to param_i.
+  const uint32_t* ps_in_cntl = nullptr;
+  // SPI_PS_IN_CONTROL.NUM_INTERP: how many of those 32 slots are MEANINGFUL.
+  // Slots at or above it are don't-care and read 0, which is not a mapping --
+  // honouring them would send every such attribute to Location 0.
+  uint32_t ps_num_interp = 0;
+  // The VS parameter exports that actually EXIST, ascending. OFFSET indexes the
+  // parameter CACHE, which packs exports densely in export order, so OFFSET is
+  // the param NUMBER only when the exports happen to be dense.
+  const std::vector<uint32_t>* vs_exported_params = nullptr;
   bool is_cs = false;
   Recompiled* r = nullptr;
   std::vector<Id>* iface = nullptr;

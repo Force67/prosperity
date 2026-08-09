@@ -1154,8 +1154,22 @@ void EmitCsMimg(Translator& t,
   // address component: the layer of a 1D array rides where 2D's y sits.
   const Id is_1d_img =
       logical_or(t.Eq(image_type, t.U32(8)), t.Eq(image_type, t.U32(12)));
-  const Id is_array = logical_or(t.Eq(image_type, t.U32(13)),
-                                 t.Eq(image_type, t.U32(12)));
+  // A cube (type 11) addresses like a 2D array whose layer is the face: the
+  // MIMG address already carries the face index, so the layout and the
+  // addressing below are the array ones.
+  const Id is_array = logical_or(
+      logical_or(t.Eq(image_type, t.U32(13)), t.Eq(image_type, t.U32(12))),
+      t.Eq(image_type, t.U32(11)));
+  // A volume (type 10) stages slice by slice exactly as an array does, and its
+  // slice count sits in the same descriptor field as an array's layer count --
+  // so everything below can address it as an array. The one difference is
+  // where the slice index comes from: a 3D MIMG leaves DA clear and carries z
+  // as its third address component, so it must be read whether or not DA is
+  // set. Without this the type fell outside supported_type, every store was
+  // predicated off, and P.T.'s colour-grading LUT -- its only volume upload --
+  // stayed zero, which graded the finished frame to black.
+  const Id is_3d_img = t.Eq(image_type, t.U32(10));
+  const Id has_slices = logical_or(is_array, is_3d_img);
   const Id descriptor_layers = t.Add(field(4, 0, 0x1FFF), t.U32(1));
 
   if (resinfo) {  // dimensions from the descriptor, no memory access
@@ -1164,7 +1178,7 @@ void EmitCsMimg(Translator& t,
     const Id comps[4] = {
         Max1(t, t.Shr(base_width, physical)),
         Max1(t, t.Shr(base_height, physical)),
-        t.SelectB(is_array, descriptor_layers, t.U32(1)),
+        t.SelectB(has_slices, descriptor_layers, t.U32(1)),
         t.Add(t.Sub(safe_last_mip, base_mip), t.U32(1)),
     };
     uint32_t out = 0;
@@ -1222,15 +1236,36 @@ void EmitCsMimg(Translator& t,
                                ? is_gfmt({36})
                                : t.LAnd(t.Eq(dfmt, t.U32(6)),
                                         t.Eq(nfmt, t.U32(7)));
+  // A block-compressed surface a shader writes is described as an
+  // uncompressed integer image whose texel is one BC block: 64 bpp (32_32 or
+  // 16_16_16_16) for BC1/BC4, 128 bpp (32_32_32_32) for BC2/BC3/BC5. The
+  // components are raw bits -- no normalisation, no float conversion -- so
+  // they pass through the staging buffer unchanged. P.T.'s texture streamer
+  // uploads every streamed surface this way; without these the access was
+  // gated off and the copy stored nothing.
+  const Id is_int = logical_or(t.Eq(nfmt, t.U32(4)), t.Eq(nfmt, t.U32(5)));
+  const Id false_id = t.m.ConstBool(false);
+  const Id is_rgba16u = t.rdna_sources
+                            ? false_id
+                            : t.LAnd(t.Eq(dfmt, t.U32(12)), is_int);
+  const Id is_rg32u =
+      t.rdna_sources ? false_id : t.LAnd(t.Eq(dfmt, t.U32(11)), is_int);
+  const Id is_rgba32u =
+      t.rdna_sources ? false_id : t.LAnd(t.Eq(dfmt, t.U32(14)), is_int);
+  // Two dwords per texel (16_16_16_16 packs two components each, 32_32 is one
+  // per dword), four for 32_32_32_32.
+  const Id is_block2 = logical_or(is_rgba16u, is_rg32u);
+  const Id is_block_int = logical_or(is_block2, is_rgba32u);
   Id supported_format = logical_or(is_rgba8, is_r32);
   supported_format = logical_or(supported_format, is_rg16f);
   supported_format = logical_or(supported_format, is_r16f);
   supported_format = logical_or(supported_format, is_rg8);
   supported_format = logical_or(supported_format, is_rgba16f);
   supported_format = logical_or(supported_format, is_r11g11b10f);
+  supported_format = logical_or(supported_format, is_block_int);
   const Id supported_type = logical_or(
       logical_or(t.Eq(image_type, t.U32(9)), t.Eq(image_type, t.U32(8))),
-      is_array);
+      has_slices);
   Id requested_mip =
       mip_op ? t.SelectB(is_1d_img, addr_vg(da ? 2 : 1), addr_vg(da ? 3 : 2))
              : t.U32(0);
@@ -1280,22 +1315,29 @@ void EmitCsMimg(Translator& t,
   const Id stored_height = t.SelectB(pow2_pad, BitCeil(t, height), height);
   const Id pitch = LinearMipPitch(t, base_pitch, stored_height, physical_mip,
                                   linear_general, pow2_pad);
-  const Id base_array =
+  // A volume has no base-slice/last-slice pair: word 5 belongs to the array
+  // view, so it addresses from slice 0 through depth - 1.
+  const Id raw_base_array =
       t.rdna_sources ? field(4, 16, 0x1FFF) : field(5, 0, 0x1FFF);
-  const Id last_array = t.rdna_sources ? t.Add(descriptor_layers, t.U32(~0u))
-                                       : field(5, 13, 0x1FFF);
+  const Id raw_last_array = t.rdna_sources
+                                ? t.Add(descriptor_layers, t.U32(~0u))
+                                : field(5, 13, 0x1FFF);
+  const Id base_array = t.SelectB(is_3d_img, t.U32(0), raw_base_array);
+  const Id last_array = t.SelectB(
+      is_3d_img, t.Add(descriptor_layers, t.U32(~0u)), raw_last_array);
+  const Id addr_slice = t.SelectB(is_1d_img, addr_vg(1), addr_vg(2));
   const Id view_layer =
-      da ? t.SelectB(is_1d_img, addr_vg(1), addr_vg(2)) : t.U32(0);
+      da ? addr_slice : t.SelectB(is_3d_img, addr_slice, t.U32(0));
   const Id physical_layer = t.Add(base_array, view_layer);
   const Id padded_layers =
       t.SelectB(pow2_pad, BitCeil(t, descriptor_layers), descriptor_layers);
-  const Id layers = t.SelectB(is_array, padded_layers, t.U32(1));
+  const Id layers = t.SelectB(has_slices, padded_layers, t.U32(1));
   Id array_ok =
       t.LAnd(t.Ult(base_array, layers), t.Uge(last_array, base_array));
   array_ok = t.LAnd(array_ok, t.Ule(view_layer, t.Sub(last_array, base_array)));
   array_ok = t.LAnd(array_ok, t.Ult(physical_layer, layers));
   const Id layer_ok = t.m.Emit(spv::Op::OpSelect, t.t_bool,
-                               {is_array, array_ok, t.m.ConstBool(true)});
+                               {has_slices, array_ok, t.m.ConstBool(true)});
   Id valid = t.LAnd(t.Ult(x, width), t.Ult(y, height));
   valid = t.LAnd(valid, layer_ok);
   valid = t.LAnd(valid, t.Uge(last_mip, base_mip));
@@ -1313,7 +1355,7 @@ void EmitCsMimg(Translator& t,
   t.m.BranchConditional(valid, access_blk, merge_blk);
   t.m.OpenBlock(access_blk);
 
-  const Id layer = t.SelectB(is_array, physical_layer, t.U32(0));
+  const Id layer = t.SelectB(has_slices, physical_layer, t.U32(0));
   Id mip_off = t.U32(0);
   for (uint32_t mip = 0; mip < 16; mip++) {
     const Id level = t.U32(mip);
@@ -1331,20 +1373,24 @@ void EmitCsMimg(Translator& t,
       t.Add(mip_off, t.Add(layer_off, t.Add(t.Mul(y, pitch), x)));
   Id dword_idx = t.SelectB(is_rgba16f, t.Mul(texel_idx, t.U32(2)), texel_idx);
   dword_idx = t.SelectB(is_r11g11b10f, t.Mul(texel_idx, t.U32(4)), dword_idx);
+  dword_idx = t.SelectB(is_block2, t.Mul(texel_idx, t.U32(2)), dword_idx);
+  dword_idx = t.SelectB(is_rgba32u, t.Mul(texel_idx, t.U32(4)), dword_idx);
+  const Id wide2 = logical_or(logical_or(is_rgba16f, is_r11g11b10f),
+                              logical_or(is_block2, is_rgba32u));
+  const Id wide4 = logical_or(is_r11g11b10f, is_rgba32u);
 
   if (load) {
     const Id raw = CsSsboLoad(t, sc, binding, dword_idx);
-    const Id has_second =
-        t.m.Emit(spv::Op::OpLogicalOr, t.t_bool, {is_rgba16f, is_r11g11b10f});
+    const Id has_second = wide2;
     const Id raw_hi = CsSsboLoad(
         t, sc, binding,
         t.SelectB(has_second, t.Add(dword_idx, t.U32(1)), dword_idx));
     const Id raw_2 = CsSsboLoad(
         t, sc, binding,
-        t.SelectB(is_r11g11b10f, t.Add(dword_idx, t.U32(2)), dword_idx));
+        t.SelectB(wide4, t.Add(dword_idx, t.U32(2)), dword_idx));
     const Id raw_3 = CsSsboLoad(
         t, sc, binding,
-        t.SelectB(is_r11g11b10f, t.Add(dword_idx, t.U32(3)), dword_idx));
+        t.SelectB(wide4, t.Add(dword_idx, t.U32(3)), dword_idx));
     const Id halfs = t.m.ExtInst(t.t_v2, GLSLstd450UnpackHalf2x16, {raw});
     const Id halfs_hi = t.m.ExtInst(t.t_v2, GLSLstd450UnpackHalf2x16, {raw_hi});
     const Id float_component[4] = {raw, raw_hi, raw_2, raw_3};
@@ -1369,6 +1415,16 @@ void EmitCsMimg(Translator& t,
       value = t.SelectB(is_rgba16f, wide_half, value);
       value = t.SelectB(is_r11g11b10f, float_component[i], value);
       value = t.SelectB(is_r32, i == 0 ? raw : t.U32(0), value);
+      // Raw block bits: 16_16_16_16 puts two components in each dword, the
+      // 32-bit forms one per dword.
+      value = t.SelectB(
+          is_rgba16u,
+          t.And(t.Shr(i < 2 ? raw : raw_hi, t.U32((i & 1) * 16u)),
+                t.U32(0xFFFF)),
+          value);
+      value = t.SelectB(is_rg32u,
+                        i == 0 ? raw : (i == 1 ? raw_hi : t.U32(0)), value);
+      value = t.SelectB(is_rgba32u, float_component[i], value);
       t.SetVg(vdata + out++, value);
     }
   } else if (sample) {
@@ -1380,6 +1436,8 @@ void EmitCsMimg(Translator& t,
       Id ti = t.Add(mip_off, t.Add(layer_off, t.Add(t.Mul(yy, pitch), xx)));
       ti = t.SelectB(is_rgba16f, t.Mul(ti, t.U32(2)), ti);
       ti = t.SelectB(is_r11g11b10f, t.Mul(ti, t.U32(4)), ti);
+      ti = t.SelectB(is_block2, t.Mul(ti, t.U32(2)), ti);
+      ti = t.SelectB(is_rgba32u, t.Mul(ti, t.U32(4)), ti);
       return ti;
     };
     // Decode one texel to float RGBA, honouring the storage format. Sampling
@@ -1450,17 +1508,16 @@ void EmitCsMimg(Translator& t,
       return t.And(t.SelectB(is_unorm, unorm, value), t.U32(0xFF));
     };
     const Id old_raw = CsSsboLoad(t, sc, binding, dword_idx);
-    const Id has_second =
-        t.m.Emit(spv::Op::OpLogicalOr, t.t_bool, {is_rgba16f, is_r11g11b10f});
+    const Id has_second = wide2;
     const Id old_raw_hi = CsSsboLoad(
         t, sc, binding,
         t.SelectB(has_second, t.Add(dword_idx, t.U32(1)), dword_idx));
     const Id old_raw_2 = CsSsboLoad(
         t, sc, binding,
-        t.SelectB(is_r11g11b10f, t.Add(dword_idx, t.U32(2)), dword_idx));
+        t.SelectB(wide4, t.Add(dword_idx, t.U32(2)), dword_idx));
     const Id old_raw_3 = CsSsboLoad(
         t, sc, binding,
-        t.SelectB(is_r11g11b10f, t.Add(dword_idx, t.U32(3)), dword_idx));
+        t.SelectB(wide4, t.Add(dword_idx, t.U32(3)), dword_idx));
     Id packed;
     if (dmask == 0xF) {
       packed = store_byte(vdata);
@@ -1532,26 +1589,51 @@ void EmitCsMimg(Translator& t,
       }
       rg8_reg++;
     }
+    // Raw block bits, straight from the VGPRs: 16_16_16_16 packs two
+    // components per dword, the 32-bit forms are one per dword. Components the
+    // dmask leaves out keep what memory already held.
+    Id blk[4] = {old_raw, old_raw_hi, old_raw_2, old_raw_3};
+    {
+      Id comp[4] = {t.U32(0), t.U32(0), t.U32(0), t.U32(0)};
+      uint32_t reg = 0;
+      for (uint32_t i = 0; i < 4; i++)
+        if (dmask & (1u << i))
+          comp[i] = t.Vg(vdata + reg++);
+      const Id lo16 = t.Or(t.And(comp[0], t.U32(0xFFFF)),
+                           t.Shl(t.And(comp[1], t.U32(0xFFFF)), t.U32(16)));
+      const Id hi16 = t.Or(t.And(comp[2], t.U32(0xFFFF)),
+                           t.Shl(t.And(comp[3], t.U32(0xFFFF)), t.U32(16)));
+      blk[0] = t.SelectB(is_rgba16u, lo16, comp[0]);
+      blk[1] = t.SelectB(is_rgba16u, hi16, comp[1]);
+      blk[2] = comp[2];
+      blk[3] = comp[3];
+    }
     packed = t.SelectB(is_rg16f, packed_rg16f, packed);
     packed = t.SelectB(is_r16f, packed_r16f, packed);
     packed = t.SelectB(is_rg8, packed_rg8, packed);
     packed = t.SelectB(is_rgba16f, packed_rgba16f_lo, packed);
     packed = t.SelectB(is_r11g11b10f, packed_float[0], packed);
+    packed = t.SelectB(is_block_int, blk[0], packed);
     CsSsboStore(t, sc, binding, dword_idx,
                 t.SelectB(is_r32, t.Vg(vdata), packed));
+    // Both operands of the branch must exist before OpSelectionMerge: nothing
+    // may sit between the merge and its OpBranchConditional.
+    const Id store_second = logical_or(is_rgba16f, is_block2);
     const Id wide_store = t.m.NewBlock(), store_done = t.m.NewBlock();
     t.m.SelectionMerge(store_done);
-    t.m.BranchConditional(is_rgba16f, wide_store, store_done);
+    t.m.BranchConditional(store_second, wide_store, store_done);
     t.m.OpenBlock(wide_store);
-    CsSsboStore(t, sc, binding, t.Add(dword_idx, t.U32(1)), packed_rgba16f_hi);
+    CsSsboStore(t, sc, binding, t.Add(dword_idx, t.U32(1)),
+                t.SelectB(is_rgba16f, packed_rgba16f_hi, blk[1]));
     t.m.Branch(store_done);
     t.m.OpenBlock(store_done);
     const Id packed_store = t.m.NewBlock(), packed_done = t.m.NewBlock();
     t.m.SelectionMerge(packed_done);
-    t.m.BranchConditional(is_r11g11b10f, packed_store, packed_done);
+    t.m.BranchConditional(wide4, packed_store, packed_done);
     t.m.OpenBlock(packed_store);
     for (uint32_t i = 1; i < 4; i++)
-      CsSsboStore(t, sc, binding, t.Add(dword_idx, t.U32(i)), packed_float[i]);
+      CsSsboStore(t, sc, binding, t.Add(dword_idx, t.U32(i)),
+                  t.SelectB(is_r11g11b10f, packed_float[i], blk[i]));
     t.m.Branch(packed_done);
     t.m.OpenBlock(packed_done);
   }

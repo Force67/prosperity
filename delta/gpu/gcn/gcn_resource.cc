@@ -967,10 +967,17 @@ TImage DecodeTImage(const uint32_t* p) {
   t.pitch = ((p[4] >> 13) & 0x3FFF) + 1;
   if (t.pitch < t.width)
     t.pitch = t.width;  // fall back to width if unset
-  if (t.type == 13 || t.type == 12) {  // SQ_RSRC_IMG_2D_ARRAY / _1D_ARRAY
+  // SQ_RSRC_IMG_2D_ARRAY / _1D_ARRAY, and CUBE. A cube is stored and sampled
+  // as a 2D array whose layers are its faces -- the gfx10 decoder models it the
+  // same way, and the MIMG path has already selected the face by the time the
+  // address reaches the hardware. Leaving type 11 out made every PS4 cubemap
+  // descriptor invalid, so the sample fell back to the 1x1 white default.
+  if (t.type == 13 || t.type == 12 || t.type == 11) {
     t.layers = (p[4] & 0x1FFF) + 1;
     if (t.pow2_pad)
       t.layers = NextPow2(t.layers);
+    if (t.type == 11)
+      t.layers = std::max<uint32_t>(t.layers, 6);
     t.base_array = p[5] & 0x1FFF;
     t.view_layers = 0;
     const uint32_t last_array = (p[5] >> 13) & 0x1FFF;
@@ -991,8 +998,8 @@ TImage DecodeTImage(const uint32_t* p) {
   }
 
   const bool supported_type = t.type == 8 || t.type == 9 || t.type == 10 ||
-                              t.type == 12 || t.type == 13;
-  const bool valid_view = (t.type != 13 && t.type != 12) ||
+                              t.type == 11 || t.type == 12 || t.type == 13;
+  const bool valid_view = (t.type != 13 && t.type != 12 && t.type != 11) ||
                           (t.base_array < t.layers && t.view_layers > 0);
   uint32_t max_levels = 1;
   for (uint32_t extent = std::max(t.width, t.height); extent > 1; extent >>= 1)

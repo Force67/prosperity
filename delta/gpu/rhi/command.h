@@ -200,6 +200,17 @@ struct DrawInfo {
   uint32_t depth_func =
       7;  // DB_DEPTH_CONTROL ZFUNC (maps 1:1 to the compare op)
   float depth_clear = 1.0f;  // DB_DEPTH_CLEAR (fast-clear value)
+  // DB_RENDER_CONTROL clear bits: this "draw" is a hardware fill of the
+  // depth/stencil plane with the clear value, not geometry.
+  bool depth_clear_draw = false;
+  bool stencil_clear_draw = false;
+  uint32_t render_control = 0;  // raw DB_RENDER_CONTROL, for diagnosis
+  // The Z surface's OWN padded geometry, from DB_DEPTH_SIZE -- not the colour
+  // target's. A title routinely binds a half-resolution depth buffer to a
+  // full-resolution pass, and sizing the depth image from the colour target
+  // makes its guest footprint several times too large, which swallows
+  // unrelated addresses in the sampled-address page table.
+  uint32_t depth_w = 0, depth_h = 0;
   uint64_t stencil_base = 0;
   bool stencil_enable = false;
   bool stencil_backface_enable = false;
@@ -221,7 +232,22 @@ struct DrawInfo {
   // attributes, so this is the ONLY thing that says how much of the target it
   // touches -- treating a partial clear as a whole-attachment one erases
   // everything else that is in there.
+  // MRT0's real surface geometry, from CB_COLOR0_PITCH.TILE_MAX and
+  // CB_COLOR0_SLICE.TILE_MAX (the colour-target analogue of DB_DEPTH_SIZE).
+  // rt_w/rt_h come from the screen scissor, which is the DRAWN region and can
+  // be a fraction of the surface -- a pass that fills a strip a slice at a time
+  // shrinks it on every draw.
+  uint32_t rt_surf_w = 0, rt_surf_h = 0;
+  // Per-viewport scissor 0 (PA_SC_VPORT_SCISSOR_0_TL/BR), x in the low half
+  // and y in the high half of each word. This is the per-DRAW scissor.
+  uint32_t scissor_tl = 0, scissor_br = 0;
   uint32_t clear_tl = 0, clear_br = 0;
+  // The other two scissors in force for the same draw. The generic scissor is
+  // one of three the hardware intersects, and a title that leaves it at its
+  // reset value (P.T. does -- it reads (0,0)-(0,0) on every fast clear) pins
+  // the rectangle with the window or screen scissor instead.
+  uint32_t clear_window_tl = 0, clear_window_br = 0;
+  uint32_t clear_screen_tl = 0, clear_screen_br = 0;
   uint32_t mrt_clear_word[8][2] = {};
 
   // Primitive-setup: raster topology + face culling, from VGT_PRIMITIVE_TYPE
@@ -233,6 +259,11 @@ struct DrawInfo {
   // XY viewport transform from PA_CL_VPORT_0_*.
   float viewport_x_scale = 0, viewport_x_offset = 0;
   float viewport_y_scale = 0, viewport_y_offset = 0;
+  // Depth range, same registers: window_z = ndc_z * z_scale + z_offset. A
+  // title that does not use the whole [0,1] range writes depth a shader later
+  // reads back, so ignoring this does not merely shift the depth test -- it
+  // hands every depth-sampling pass the wrong numbers.
+  float viewport_z_scale = 1.0f, viewport_z_offset = 0.0f;
 
   // Recompiled-shader path. When recomp != null the renderer runs the game's
   // actual VS/PS instead of the heuristic quad; procedural VS programs may have

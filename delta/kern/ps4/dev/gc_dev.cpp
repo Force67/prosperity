@@ -20,7 +20,13 @@
 
 namespace {
 DELTA_OPTION(bool, kGcCaller, "DELTA_GC_CALLER", false);
-DELTA_OPTION(bool, kGcAcb, "DELTA_GPU_ACB", false);
+// Execute the async-compute rings a title maps and rings doorbells on. A
+// title that uploads through them (P.T. streams every texture as a compute
+// copy on ring 1/0/0) renders nothing at all without this, and the work is
+// invisible: no draw is declined, no dispatch is dropped, the packets are
+// simply never walked. Off is the old boot-safe behaviour, not a default
+// worth keeping; DELTA_GPU_ACB=0 still turns it back off.
+DELTA_OPTION(bool, kGcAcb, "DELTA_GPU_ACB", true);
 // Drain mapped compute rings by their contents rather than by a matching
 // doorbell; see the walk in the DingDong handler.
 DELTA_OPTION(uint32_t, kGcAcbScan, "DELTA_GPU_ACB_SCAN", 0);

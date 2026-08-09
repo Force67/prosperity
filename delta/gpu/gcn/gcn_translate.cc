@@ -72,16 +72,21 @@ Recompiled Recompile(const uint32_t* vs_code,
                       const uint32_t* vs_user_data,
                       const uint32_t* ps_user_data,
                       uint32_t ps_input_ena,
+                      const uint32_t* ps_in_cntl,
+                      uint32_t ps_num_interp,
                       uint32_t tex_3d_mask,
                       uint32_t tex_1d_mask,
                       uint32_t tex_uint_mask,
-                      uint32_t mrt_uint_mask) {
+                      uint32_t mrt_uint_mask,
+                      bool gl_clip_space) {
   Recompiled r;
   if (!vs_code || !vs_user_data || !ps_user_data)
     return r;
   const uint64_t t0 = NowNs();
   RecompileSpirv(vs_code, ps_code, vs_user_data, ps_user_data, ps_input_ena,
-                 tex_3d_mask, tex_1d_mask, tex_uint_mask, mrt_uint_mask, r);
+                 ps_in_cntl, ps_num_interp,
+                 tex_3d_mask, tex_1d_mask, tex_uint_mask, mrt_uint_mask,
+                 gl_clip_space, r);
   g_ns_recomp += NowNs() - t0;
   g_recomp_n++;
   return r;

@@ -23,10 +23,13 @@ bool RecompileSpirv(const uint32_t* vs_code,
                      const uint32_t* vs_user_data,
                      const uint32_t* ps_user_data,
                      uint32_t ps_input_ena,
+                     const uint32_t* ps_in_cntl,
+                     uint32_t ps_num_interp,
                      uint32_t tex_3d_mask,
                      uint32_t tex_1d_mask,
                      uint32_t tex_uint_mask,
                      uint32_t mrt_uint_mask,
+                     bool gl_clip_space,
                      Recompiled& r);
 
 // Translate a compute shader into r (GLCompute SPIR-V + resource plan).

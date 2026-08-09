@@ -1009,14 +1009,20 @@ void EmitVop2(Translator& t,
     case 0x05:
       set_f(t.FSub(s1, s0));
       break;  // v_subrev_f32
-    // The legacy multiply forms differ from the IEEE ones only in returning
-    // zero when a multiplicand is zero and the other is inf or NaN. Nothing
-    // feeds those values here, so they lower the same way.
+    // The legacy multiply forms differ from the IEEE ones in returning ZERO
+    // when a multiplicand is zero, whatever the other one is -- including inf
+    // and NaN, where IEEE gives NaN. Shaders use exactly that to kill a term
+    // guarded by a reciprocal: mul_legacy(guard, 1/d) is 0 when the guard is 0,
+    // even where d was 0 and the reciprocal is inf. Lowering it as a plain
+    // multiply produces NaN there, and a later clamp turns NaN or inf into 1.0
+    // -- a saturated pixel, with nothing left in the buffer to show it was ever
+    // either. That is why nan and inf counts can read zero on a target full of
+    // blown highlights.
     case 0x06:
-      set_f(t.FAdd(t.FMul(s0, s1), t.VgF(vdst)));
+      set_f(t.FAdd(t.LegacyMul(s0, s1), t.VgF(vdst)));
       break;  // v_mac_legacy_f32
     case 0x07:
-      set_f(t.FMul(s0, s1));
+      set_f(t.LegacyMul(s0, s1));
       break;  // v_mul_legacy_f32
     case 0x08:
       set_f(t.FMul(s0, s1));
@@ -1521,7 +1527,7 @@ void EmitVop3(Translator& t,
   };
   switch (op) {
     case 0x140:  // v_mad_legacy_f32: legacy zero handling, see EmitVop2 0x06
-      set_f(t.FAdd(t.FMul(s0, s1), s2));
+      set_f(t.FAdd(t.LegacyMul(s0, s1), s2));
       break;
     case 0x141:
       set_f(t.FAdd(t.FMul(s0, s1), s2));

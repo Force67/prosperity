@@ -52,7 +52,12 @@ struct ShaderAttr {
 // Set-1 UBO bindings shared by VS + PS. A shader pair whose constant buffers
 // exceed this gets planned only up to the cap, and every s_buffer_load from a
 // dropped base then emits nothing, leaving its destination SGPRs zero.
-constexpr uint32_t kMaxCbufBindings = 16;
+// Bounded by maxDescriptorSetUniformBuffersDynamic, not by what the ISA can
+// address: set 1 binds every cbuffer as a dynamic UBO, and declaring more of
+// those than the device allows is an out-of-spec layout the driver is free to
+// mishandle silently. 15 is what current NVIDIA parts report; the check in
+// vk_upload_ring.cc still reports a device below that rather than assuming.
+constexpr uint32_t kMaxCbufBindings = 15;
 constexpr uint32_t kCbufDwords = 4096;
 
 // A constant buffer a shader stage reads (s_buffer_load). Bound as a UBO.
@@ -214,10 +219,13 @@ Recompiled Recompile(const uint32_t* vs_code,
                       const uint32_t* vs_user_data,
                       const uint32_t* ps_user_data,
                       uint32_t ps_input_ena = 0,
+                      const uint32_t* ps_in_cntl = nullptr,
+                      uint32_t ps_num_interp = 0,
                       uint32_t tex_3d_mask = 0,
                       uint32_t tex_1d_mask = 0,
                       uint32_t tex_uint_mask = 0,
-                      uint32_t mrt_uint_mask = 0);
+                      uint32_t mrt_uint_mask = 0,
+                      bool gl_clip_space = false);
 
 // A memory resource a compute shader touches. The descriptor may be inline in
 // user data or loaded through an SRT chain; `base_sgpr` names its live location

@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <thread>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -48,7 +49,21 @@ DELTA_OPTION(bool, kCeTrace, "DELTA_GPU_CETRACE", false);
 DELTA_OPTION(int, kCeTraceMax, "DELTA_GPU_CETRACE_MAX", 200);
 DELTA_OPTION(bool, kCounterTrace, "DELTA_GPU_COUNTERTRACE", false);
 DELTA_OPTION(bool, kCsDump, "DELTA_GPU_CSDUMP", false);
-DELTA_OPTION(bool, kCsResTrace, "DELTA_GPU_CSRES", false);
+// DELTA_GPU_CSRES=1: the first dispatch of each distinct shader (up to 64).
+// =<cs addr>: every dispatch of that one shader, uncapped -- a streaming copy
+// runs thousands of times with a different source and destination each time,
+// and the first of them says nothing about the rest.
+DELTA_OPTION(uint64_t, kCsResTrace, "DELTA_GPU_CSRES", 0);
+// DELTA_GPU_CSWATCH=<guest addr>: report every compute resource whose range
+// covers that address. CSRES only shows the FIRST dispatch of each distinct
+// shader, so a streaming copy that runs thousands of times with a different
+// destination each time is represented by exactly one of them -- which makes
+// "nothing writes this surface" unfalsifiable from that trace alone.
+DELTA_OPTION(uint64_t, kCsWatch, "DELTA_GPU_CSWATCH", 0);
+DELTA_OPTION(uint64_t, kPsInCntl, "DELTA_GPU_PSINCNTL", 0);
+DELTA_OPTION(bool, kOpTrace, "DELTA_GPU_OPTRACE", false);
+DELTA_OPTION(uint64_t, kDbWatch, "DELTA_GPU_DBWATCH", 0);
+DELTA_OPTION(uint64_t, kCntlApply, "DELTA_GPU_PSCNTL_APPLY", 0);
 DELTA_OPTION(bool, kDbTrace, "DELTA_GPU_DBTRACE", false);
 DELTA_OPTION(bool, kDesyncTrace, "DELTA_GPU_DESYNC", false);
 DELTA_OPTION(bool, kDrawList, "DELTA_GPU_DRAWLIST", false);
@@ -67,6 +82,14 @@ DELTA_OPTION(bool, kNoCs, "DELTA_GPU_NOCS", false);
 DELTA_OPTION(bool, kCsDrops, "DELTA_GPU_CSDROPS", false);
 DELTA_OPTION(bool, kNoDepth, "DELTA_GPU_NODEPTH", false);
 DELTA_OPTION(bool, kOpHist, "DELTA_GPU_OPHIST", false);
+// DELTA_GPU_WAITTRACE=1: how many WAIT_REG_MEM polls were satisfied and how
+// many timed out. A timeout means the word being polled is one we write but
+// had not yet.
+DELTA_OPTION(bool, kWaitTrace, "DELTA_GPU_WAITTRACE", false);
+// DELTA_GPU_ADDRWATCH=<guest addr>: name the PM4 packet that writes it.
+// "Nothing writes this surface" is only ever a statement about the places
+// already looked, and the packet stream is the last one.
+DELTA_OPTION(uint64_t, kAddrWatch, "DELTA_GPU_ADDRWATCH", 0);
 DELTA_OPTION(bool, kNoMrtTrace, "DELTA_GPU_NOMRT", false);
 DELTA_OPTION(bool, kCbInfoTrace, "DELTA_GPU_CBINFO", false);
 DELTA_OPTION(bool, kNoStencil, "DELTA_GPU_NOSTENCIL", false);
@@ -120,6 +143,10 @@ struct ShaderKey {
   // reach the key (SotC: the per-draw constant table).
   uint64_t fetch = 0;
   uint32_t ps_input_ena = 0;
+  // Hash of SPI_PS_INPUT_CNTL_0..31's OFFSET fields: which VS parameter export
+  // each PS input slot reads. The module bakes the mapping into its input
+  // Locations, so the same code under a different mapping is another module.
+  uint32_t ps_in_cntl_hash = 0;
   // Which PS samplers read a volume image. Unlike the 2D-array case, whose DA
   // bit lives in the instruction, a 3D descriptor is indistinguishable in the
   // code: the same PS sampled with a 2D T# must translate to a different
@@ -132,12 +159,16 @@ struct ShaderKey {
   // read through an integer descriptor is a different module.
   uint32_t tex_uint_mask = 0;
   uint32_t mrt_uint_mask = 0;
+  // Clip convention (PA_CL_CLIP_CNTL.DX_CLIP_SPACE_DEF == 0). The VS bakes the
+  // z remap in, so the same code under the other convention is another module.
+  bool gl_clip = false;
   bool neo = false;
   bool operator==(const ShaderKey& o) const {
     return vs == o.vs && ps == o.ps && fetch == o.fetch &&
            ps_input_ena == o.ps_input_ena && tex_3d_mask == o.tex_3d_mask &&
            tex_1d_mask == o.tex_1d_mask && tex_uint_mask == o.tex_uint_mask &&
-           mrt_uint_mask == o.mrt_uint_mask && neo == o.neo;
+           mrt_uint_mask == o.mrt_uint_mask && gl_clip == o.gl_clip &&
+           neo == o.neo;
   }
 };
 struct ShaderKeyHash {
@@ -146,10 +177,12 @@ struct ShaderKeyHash {
         (k.vs ^ (k.ps + 0x9e3779b97f4a7c15ull + (k.vs << 6) + (k.vs >> 2)));
     h ^= k.fetch + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
     h ^= k.ps_input_ena + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
+    h ^= k.ps_in_cntl_hash + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
     h ^= k.tex_3d_mask + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
     h ^= k.tex_1d_mask + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
     h ^= k.tex_uint_mask + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
     h ^= k.mrt_uint_mask + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
+    h ^= k.gl_clip ? 0x9e3779b9ull : 0ull;
     h ^= static_cast<uint64_t>(k.neo) << 63;
     return static_cast<size_t>(h);
   }
@@ -286,7 +319,27 @@ bool IsDraw(uint32_t op) {
 inline bool LabelAddrOk(uint64_t a) {
   return a >= 0x10000ull && a < 0x20000000000ull;
 }
+// Guest words this command processor writes (EOP / EOS / RELEASE_MEM /
+// WRITE_DATA fence labels). WAIT_REG_MEM polls one of these to order itself
+// after another engine. A poll on anything else is waiting for a producer we
+// do not run, and spinning on that buys nothing.
+std::mutex g_fence_mtx;
+std::unordered_set<uint64_t> g_fence_addrs;
+void NoteFenceWrite(uint64_t addr) {
+  if (!addr)
+    return;
+  std::lock_guard<std::mutex> lk(g_fence_mtx);
+  if (g_fence_addrs.size() < 4096)
+    g_fence_addrs.insert(addr & ~3ull);
+}
+bool IsFenceWrite(uint64_t addr) {
+  std::lock_guard<std::mutex> lk(g_fence_mtx);
+  return g_fence_addrs.count(addr & ~3ull) != 0;
+}
+
 void WriteLabel(uint64_t addr, uint64_t value, bool is64) {
+  // Every label this CP writes is a word another ring may be polling on.
+  NoteFenceWrite(addr);
   if (!LabelAddrOk(addr))
     return;
   if (is64)
@@ -589,6 +642,19 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
     }
     d.rt_w = FbWidth();
     d.rt_h = FbHeight();
+    d.scissor_tl = g_regs[mmPA_SC_VPORT_SCISSOR_0_TL];
+    d.scissor_br = g_regs[mmPA_SC_VPORT_SCISSOR_0_BR];
+    {
+      // Surface geometry of MRT0, independent of how much of it this draw
+      // touches. PITCH_TILE_MAX counts 8-texel tiles minus one; SLICE_TILE_MAX
+      // counts 64-texel tiles of the whole slice, so height = slice / pitch.
+      const uint32_t cp = g_regs[mmCB_COLOR0_PITCH] & 0x7FFu;
+      const uint32_t cs = g_regs[mmCB_COLOR0_SLICE] & 0x3FFFFFu;
+      const uint32_t pitch = (cp + 1u) * 8u;
+      const uint64_t slice = (uint64_t)(cs + 1u) * 64u;
+      d.rt_surf_w = pitch;
+      d.rt_surf_h = pitch ? (uint32_t)(slice / pitch) : 0u;
+    }
     // A stale CB_COLORn_BASE remains programmed during depth-only passes. Bind
     // a color attachment only when both its write mask and CB_COLORn_INFO
     // format are valid.
@@ -613,6 +679,26 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
         }
       }
       d.rt_base = d.mrt_count ? d.mrt_base[0] : 0;
+      // A gap in the bound targets: slot 0 masked off (or unprogrammed) while a
+      // higher slot is live. mrt_count counts up to the highest live slot, so
+      // the primary comes out null and the whole draw is dropped downstream --
+      // taking with it a pass that renders only into MRT1.
+      if (kNoMrtTrace && d.mrt_count && !d.mrt_base[0]) {
+        static std::atomic<uint64_t> n{0};
+        if ((n.fetch_add(1) % 200) == 0)
+          std::fprintf(stderr,
+                       "[nomrt] SLOT-0 GAP #%llu tmask=%#x count=%u vs=%#lx "
+                       "ps=%#lx live:",
+                       (unsigned long long)n.load(), tmask, d.mrt_count,
+                       (unsigned long)vs_a, (unsigned long)ps_a);
+        if ((n.load() % 200) == 1 || n.load() == 1) {
+          for (int rt = 0; rt < 8; rt++)
+            if (d.mrt_base[rt])
+              std::fprintf(stderr, " cb%d=%#lx", rt,
+                           (unsigned long)d.mrt_base[rt]);
+          std::fprintf(stderr, "\n");
+        }
+      }
       // DELTA_GPU_NOMRT=1: a draw whose write mask enables a target but whose
       // CB registers name none. Every such draw renders into nothing, so a
       // whole pass can vanish with no other symptom than a black target.
@@ -668,6 +754,10 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
     if (d.is_clear_rect) {
       d.clear_tl = g_regs[mmPA_SC_GENERIC_SCISSOR_TL];
       d.clear_br = g_regs[mmPA_SC_GENERIC_SCISSOR_BR];
+      d.clear_window_tl = g_regs[mmPA_SC_WINDOW_SCISSOR_TL];
+      d.clear_window_br = g_regs[mmPA_SC_WINDOW_SCISSOR_BR];
+      d.clear_screen_tl = g_regs[mmPA_SC_SCREEN_SCISSOR_TL];
+      d.clear_screen_br = g_regs[mmPA_SC_SCREEN_SCISSOR_BR];
       for (uint32_t rt = 0; rt < 8; rt++) {
         d.mrt_clear_word[rt][0] =
             g_regs[mmCB_COLOR0_CLEAR_WORD0 + rt * kCbColorStride];
@@ -693,14 +783,22 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
       uint64_t sbase =
           static_cast<uint64_t>(g_regs[mmDB_STENCIL_WRITE_BASE]) << 8;
       static int db_n = 0;
-      if (kDbTrace && db_n < 24 && (zinfo || dc)) {
+      if (kDbTrace && db_n < 20000 && (zinfo || dc)) {
         db_n++;
         std::fprintf(stderr,
                      "[db] DEPTH_CONTROL=%#x Z_INFO=%#x Zread=%#lx Zwrite=%#lx "
-                     "clear=%#x prim=%u\n",
+                     "clear=%#x prim=%u size=%#x slice=%#x\n",
                      dc, zinfo, (unsigned long)zread, (unsigned long)zbase,
-                     g_regs[mmDB_DEPTH_CLEAR], g_regs[mmVGT_PRIMITIVE_TYPE]);
+                     g_regs[mmDB_DEPTH_CLEAR], g_regs[mmVGT_PRIMITIVE_TYPE],
+                     g_regs[mmDB_DEPTH_SIZE], g_regs[mmDB_DEPTH_SLICE]);
       }
+      const uint32_t rc = g_regs[mmDB_RENDER_CONTROL];
+      d.render_control = rc;
+      const uint32_t dsz = g_regs[mmDB_DEPTH_SIZE];
+      d.depth_w = ((dsz & 0x7FFu) + 1u) * 8u;          // PITCH_TILE_MAX
+      d.depth_h = (((dsz >> 11) & 0x7FFu) + 1u) * 8u;  // HEIGHT_TILE_MAX
+      d.depth_clear_draw = (rc & 1u) != 0;
+      d.stencil_clear_draw = ((rc >> 1) & 1u) != 0;
       d.depth_valid = (zinfo & 0x3) != 0;
       if (d.depth_valid && zbase >= 0x1000000000ull &&
           zbase < 0x20000000000ull &&
@@ -749,6 +847,8 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
     std::memcpy(&d.viewport_x_offset, &g_regs[mmPA_CL_VPORT_XOFFSET], 4);
     std::memcpy(&d.viewport_y_scale, &g_regs[mmPA_CL_VPORT_YSCALE], 4);
     std::memcpy(&d.viewport_y_offset, &g_regs[mmPA_CL_VPORT_YOFFSET], 4);
+    std::memcpy(&d.viewport_z_scale, &g_regs[mmPA_CL_VPORT_ZSCALE], 4);
+    std::memcpy(&d.viewport_z_offset, &g_regs[mmPA_CL_VPORT_ZOFFSET], 4);
 
     // Constant buffer (transform): default to the sgpr[4..7] V# (the common VS
     // cbuffer slot); the recompiled-shader path below re-resolves it from the
@@ -991,6 +1091,48 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
           sh_cache;
       const bool neo = gcn::DefaultIsaMode() == gcn::IsaMode::kNeo;
       const uint32_t ps_input_ena = g_regs[mmSPI_PS_INPUT_ENA];
+      // SPI_PS_INPUT_CNTL_0..31 (0xA191..0xA1B0): the VS parameter export each
+      // PS input slot reads. Nothing consumed these, so attr_i was assumed to
+      // read param_i -- see PsInputVar.
+      uint32_t ps_in_cntl[32];
+      uint32_t ps_in_cntl_hash = 2166136261u;
+      for (uint32_t i = 0; i < 32; i++) {
+        ps_in_cntl[i] = g_regs[mmSPI_PS_INPUT_CNTL_0 + i];
+        ps_in_cntl_hash =
+            (ps_in_cntl_hash ^ (ps_in_cntl[i] & 0x3F)) * 16777619u;
+      }
+      {
+        ps_in_cntl_hash = (ps_in_cntl_hash ^ (g_regs[0xA1B6] & 0x3F)) *
+                          16777619u;
+      }
+      // SPI_PS_INPUT_CNTL_0..31 map each PS input attribute SLOT to the VS
+      // parameter export it reads (OFFSET, bits [5:0]). Nothing consumed these
+      // registers, so attr_i was assumed to read param_i.
+      // Filtered by PS address: an unfiltered cap is spent entirely on startup
+      // draws, where ena and every cntl read zero and look like the very
+      // corruption being hunted.
+      // With kPsInCntl == 1, report only shaders whose mapping is NOT the
+      // identity: an identity mapping is a no-op by construction, so those are
+      // the only ones honouring these registers can change.
+      bool cntl_nonid = false;
+      for (uint32_t i = 0; i < 16; i++)
+        cntl_nonid |= (ps_in_cntl[i] & 0x1F) != i;
+      if (kPsInCntl && ps_input_ena &&
+          (kPsInCntl == 1 ? cntl_nonid : ps_a == (uint64_t)kPsInCntl)) {
+        static int n = 0;
+        if (n++ < 30) {
+          // NUM_INTERP says how many of the 32 slots are meaningful; slots at
+          // or above it are don't-care and their zero is not evidence of
+          // anything.
+          std::fprintf(stderr, "[psincntl] ps=%#lx ena=%#x numinterp=%u cntl:",
+                       (unsigned long)ps_a, ps_input_ena,
+                       g_regs[0xA1B6] & 0x3F);
+          for (uint32_t i = 0; i < 8; i++)
+            std::fprintf(stderr, " %u:off=%u(raw=%#x)", i,
+                         g_regs[0xA191 + i] & 0x3F, g_regs[0xA191 + i]);
+          std::fprintf(stderr, "\n");
+        }
+      }
       // The VS/PS by CONTENT, like the fetch shader: SotC streams shader code
       // to fresh guest addresses as the title progresses, so an address key
       // misses forever and the frame drowns in recompiles. s_getpc_b64 stays
@@ -1012,9 +1154,42 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
           ps_k = ps_a;
         }
       }
-      ShaderKey key{vs_k, ps_k, gcn::CachedCodeHash(fetch, 64), ps_input_ena,
-                    tex_3d_mask, tex_1d_mask, tex_uint_mask,
-                    mrt_uint_mask,  neo};
+      // DELTA_GPU_PSCNTL_APPLY=<ps addr>: honour SPI_PS_INPUT_CNTL for ONE
+      // shader. Applying it everywhere is measurably far worse (see the P.T.
+      // profile), so this isolates whether the mapping is the right idea at all
+      // from whatever else breaks under it.
+      // DELTA_GPU_DBWATCH=<addr>: does this address ever appear in a DB base
+      // register? A surface read as depth that no draw, dispatch, DMA or event
+      // ever writes is either CPU-filled or a DB plane the depth path never
+      // registers, and only the registers can tell those apart.
+      if (kDbWatch) {
+        static int n = 0;
+        const uint32_t want = (uint32_t)((uint64_t)kDbWatch >> 8);
+        const uint32_t dbregs[] = {mmDB_Z_READ_BASE,    mmDB_STENCIL_READ_BASE,
+                                   mmDB_Z_WRITE_BASE,   mmDB_STENCIL_WRITE_BASE,
+                                   mmDB_HTILE_DATA_BASE};
+        for (uint32_t r : dbregs)
+          if (g_regs[r] == want && n++ < 8)
+            std::fprintf(stderr, "[dbwatch] reg %#x == %#lx (shifted %#x)\n", r,
+                         (unsigned long)kDbWatch, want);
+      }
+      const uint32_t ps_num_interp = g_regs[0xA1B6] & 0x3F;
+      // DELTA_GPU_PSCNTL_APPLY=<ps addr>, or 1 for every shader. OFF by
+      // default: honouring SPI_PS_INPUT_CNTL removes the 2x2 tiling from P.T.'s
+      // light buffer (a genuine fix -- quadrant self-similarity 3.8/5.5 -> 46/74)
+      // but makes the PRESENTED FRAME clearly worse, mean 21.5 -> 33.9 and
+      // pixels over 200 from 3.3% to 9.4%, with large areas blown to white.
+      // That is not a trade worth shipping, and it says the model is still
+      // incomplete rather than merely exposing a second defect.
+      const uint32_t* cntl_arg =
+          (kCntlApply == 1 || (kCntlApply && ps_a == (uint64_t)kCntlApply))
+              ? ps_in_cntl
+              : nullptr;
+      const bool gl_clip = !((g_regs[mmPA_CL_CLIP_CNTL] >> 19) & 1);
+      ShaderKey key{vs_k,          ps_k,          gcn::CachedCodeHash(fetch, 64),
+                    ps_input_ena,  ps_in_cntl_hash, tex_3d_mask,
+                    tex_1d_mask,
+                    tex_uint_mask, mrt_uint_mask, gl_clip, neo};
       auto it = sh_cache.find(key);
       if (it == sh_cache.end() && kShReloc) {
         // DELTA_GPU_SHRELOC: attribute every recompile-cache miss to the key
@@ -1096,8 +1271,9 @@ void HandleDraw(uint32_t op, const uint32_t* body, uint32_t count) {
                                     reinterpret_cast<const uint32_t*>(ps_a),
                                     &g_regs[mmSPI_SHADER_USER_DATA_VS_0],
                                     &g_regs[mmSPI_SHADER_USER_DATA_PS_0],
-                                    ps_input_ena, tex_3d_mask, tex_1d_mask,
-                                    tex_uint_mask, mrt_uint_mask))
+                                    ps_input_ena, cntl_arg, ps_num_interp, tex_3d_mask,
+                                    tex_1d_mask,
+                                    tex_uint_mask, mrt_uint_mask, gl_clip))
                  .first;
       gcn::Recompiled& rc = it->second;
       recomp_status = rc.ok ? "bad-attrs" : "rejected";
@@ -2384,9 +2560,11 @@ void HandleDispatch(const uint32_t* body, uint32_t count) {
     }
   }
   static std::unordered_set<uint64_t> traced_cs_resources;
-  const bool trace_cs_resources = kCsResTrace &&
-                                  traced_cs_resources.size() < 64 &&
-                                  traced_cs_resources.insert(cs_addr).second;
+  const bool trace_cs_resources =
+      kCsResTrace > 1
+          ? cs_addr == (uint64_t)kCsResTrace
+          : (kCsResTrace && traced_cs_resources.size() < 64 &&
+             traced_cs_resources.insert(cs_addr).second);
   bool res_ok = true;
   for (auto& r : rc.resources) {
     const bool resource_resolved =
@@ -2435,11 +2613,27 @@ void HandleDispatch(const uint32_t* body, uint32_t count) {
       const bool rg8 = t.dfmt == 3 && t.nfmt == 0;
       const bool rgba16f = t.dfmt == 12 && t.nfmt == 7;
       const bool r11g11b10f = t.dfmt == 6 && t.nfmt == 7;
+      // A block-compressed surface written by a shader is described as an
+      // uncompressed integer image whose texel is one BC block: 64 bpp
+      // (32_32 / 16_16_16_16) for BC1/BC4, 128 bpp (32_32_32_32) for
+      // BC2/BC3/BC5. P.T.'s texture streamer uploads every streamed surface
+      // this way -- a compute copy from the linear staging area it inflated
+      // texture.qar into to the tiled surface the draws sample. Rejecting the
+      // alias zero-filled both bindings, so the copy wrote a 16-byte dummy and
+      // every streamed texture stayed empty (a black frame).
+      const bool block64 =
+          (t.dfmt == 11 || t.dfmt == 12) && (t.nfmt == 4 || t.nfmt == 5);
+      const bool block128 = t.dfmt == 14 && (t.nfmt == 4 || t.nfmt == 5);
       const bool supported_type = t.type == 8 || t.type == 9 || t.type == 10 ||
-                                  t.type == 12 || t.type == 13;
-      const bool supported_format =
-          r8 || rgba8 || r32 || rg16f || r16f || rg8 || rgba16f || r11g11b10f;
-      elem_bytes = rgba16f ? 8 : (r16f || rg8) ? 2 : r8 ? 1 : 4;
+                                  t.type == 11 || t.type == 12 || t.type == 13;
+      const bool supported_format = r8 || rgba8 || r32 || rg16f || r16f ||
+                                    rg8 || rgba16f || r11g11b10f || block64 ||
+                                    block128;
+      elem_bytes = (rgba16f || block64) ? 8
+                   : block128           ? 16
+                   : (r16f || rg8)      ? 2
+                   : r8                 ? 1
+                                        : 4;
       stage_elem_bytes = r11g11b10f ? 16 : std::max(elem_bytes, 4u);
       if (!supported_type || !supported_format) {
         // Invalid/null T# values can be present on paths the guest shader does
@@ -2527,13 +2721,28 @@ void HandleDispatch(const uint32_t* body, uint32_t count) {
     }
     if (!guest_size && !zero_fill)
       guest_size = size;
-    if (trace_cs_resources) {
+    const bool watch_hit = kCsWatch && base <= (uint64_t)kCsWatch &&
+                           (uint64_t)kCsWatch < base + std::max<uint64_t>(size, 1);
+    if (trace_cs_resources || watch_hit) {
+      // Non-zero bytes currently in the guest range. A copy whose SOURCE is
+      // empty and one whose destination never receives the write look the same
+      // from the descriptor alone.
+      uint64_t nz = 0;
+      if (!zero_fill && guest_size && guest_size <= (1u << 24) &&
+          guest_range(base, guest_size)) {
+        const uint8_t* p = reinterpret_cast<const uint8_t*>(base);
+        for (uint64_t i = 0; i < guest_size; i++)
+          nz += p[i] != 0;
+      }
       std::fprintf(stderr,
                    "[csres] cs=%#lx bind=%u kind=%u s%u pc=%#x base=%#lx "
-                   "size=%#lx written=%d\n",
+                   "size=%#lx guest=%#lx written=%d img=%d tile=%u elem=%u/%u "
+                   "nz=%lu\n",
                    (unsigned long)cs_addr, r.binding, r.kind, r.base_sgpr,
                    r.use_pc, (unsigned long)base, (unsigned long)size,
-                   r.written ? 1 : 0);
+                   (unsigned long)guest_size, r.written ? 1 : 0,
+                   image_staging ? 1 : 0, image.tiling_idx, elem_bytes,
+                   stage_elem_bytes, (unsigned long)nz);
     }
     if (size < r.min_bytes || size > kMaxRes || guest_size > kMaxRes ||
         (!zero_fill && !guest_range(base, guest_size)) ||
@@ -2561,7 +2770,14 @@ void HandleDispatch(const uint32_t* body, uint32_t count) {
       out.width = image.width;
       out.height = image.height;
       out.pitch = image.pitch;
-      out.layers = image.layers;
+      // A volume's slice count lives in `depth`, not `layers` (which stays 1).
+      // The size and validity checks above already use the slice axis; handing
+      // the renderer the raw layer count made it rebuild the staging layout at
+      // 1/depth of the real size, and the dispatch then failed outright. Both
+      // of P.T.'s volume uploads are its colour-grading LUT, so its tonemap
+      // graded every frame through an all-zero table -- a black screen from a
+      // 16 KiB texture.
+      out.layers = image.is_3d ? image.depth : image.layers;
       out.mip_levels = image.mip_levels;
       out.tiling_idx = image.tiling_idx;
       out.elem_bytes = elem_bytes;
@@ -2653,6 +2869,75 @@ static uint32_t WalkDcb(const uint32_t* p, uint32_t words, uint32_t depth,
         case IT_NUM_INSTANCES:  // instance count for the following draw(s)
           g_num_instances = (count >= 1 && body[0]) ? body[0] : 1;
           break;
+        case IT_WAIT_REG_MEM: {
+          // The guest's only way to make this ring wait for another engine:
+          // poll a word (or a register) until it satisfies a comparison. P.T.
+          // issues 86,611 of them a run and every one was ignored, so with the
+          // async compute rings walked on their own thread a draw could run
+          // before the dispatch that produced what it samples.
+          //
+          // body: [0] function/space, [1] addr lo or reg offset, [2] addr hi,
+          // [3] reference, [4] mask, [5] poll interval.
+          if (count < 5)
+            break;
+          const uint32_t func = body[0] & 0x7;
+          const bool mem_space = ((body[0] >> 4) & 1) != 0;
+          const uint32_t ref = body[3], mask = body[4];
+          const auto passes = [&](uint32_t v) {
+            const uint32_t a = v & mask, b = ref & mask;
+            switch (func) {
+              case 1: return a < b;
+              case 2: return a <= b;
+              case 3: return a == b;
+              case 4: return a != b;
+              case 5: return a >= b;
+              case 6: return a > b;
+              default: return true;  // 0 = always, 7 = reserved
+            }
+          };
+          const volatile uint32_t* poll = nullptr;
+          if (mem_space) {
+            const uint64_t addr =
+                ((static_cast<uint64_t>(body[2] & 0xFFFF) << 32) | body[1]) &
+                ~3ull;
+            // Only where we are the producer. A poll on a word nothing of ours
+            // writes can never be satisfied, and waiting out its timeout is
+            // pure loss.
+            if (addr >= 0x1000000000ull && addr < 0x20000000000ull &&
+                IsFenceWrite(addr) &&
+                utl::isMemoryRangeMapped(reinterpret_cast<const void*>(addr), 4))
+              poll = reinterpret_cast<const volatile uint32_t*>(addr);
+          } else if ((body[1] & 0xFFFF) < kRegFileSize) {
+            poll = &g_regs[body[1] & 0xFFFF];
+          }
+          if (!poll)
+            break;
+          // Bounded, because a producer can still be one we dropped and an
+          // unbounded poll would hang the title outright. Yield rather than
+          // spin: the thread that will satisfy this needs the core.
+          const auto deadline =
+              std::chrono::steady_clock::now() + std::chrono::microseconds(200);
+          bool timed_out = false;
+          while (!passes(*poll)) {
+            if (std::chrono::steady_clock::now() >= deadline) {
+              timed_out = true;
+              break;
+            }
+            std::this_thread::yield();
+          }
+          if (kWaitTrace) {
+            static std::atomic<uint64_t> waits{0}, expired{0};
+            waits.fetch_add(1);
+            if (timed_out)
+              expired.fetch_add(1);
+            if ((waits.load() % 20000) == 0)
+              std::fprintf(stderr,
+                           "[wait] WAIT_REG_MEM: %llu waited, %llu timed out\n",
+                           (unsigned long long)waits.load(),
+                           (unsigned long long)expired.load());
+          }
+          break;
+        }
         case IT_DMA_DATA:  // CP DMA. body: ctrl, srcLo/Hi, dstLo/Hi,
                            // command(byteCount).
           // Actually PERFORM the memory->memory copy (it was a no-op). Doom64
@@ -2729,6 +3014,21 @@ static uint32_t WalkDcb(const uint32_t* p, uint32_t words, uint32_t depth,
           }
           break;
         case IT_WRITE_DATA: {  // body: control, dstLo, dstHi, data...
+          if (kAddrWatch && count >= 3) {
+            const uint64_t wd_dst =
+                (static_cast<uint64_t>(body[2] & 0xFFFF) << 32) | body[1];
+            const uint64_t n = (count - 3) * 4u;
+            if (wd_dst <= (uint64_t)kAddrWatch &&
+                (uint64_t)kAddrWatch < wd_dst + (n ? n : 4)) {
+              static int hit = 0;
+              if (hit++ < 12)
+                std::fprintf(stderr,
+                             "[addrwatch] WRITE_DATA dst=%#lx bytes=%lu "
+                             "data0=%08x\n",
+                             (unsigned long)wd_dst, (unsigned long)n,
+                             count >= 4 ? body[3] : 0);
+            }
+          }
           // Gnm writes its 32/64-bit submit/flip fence labels with WRITE_DATA.
           // The control field's dst_sel encoding varies (the flip-label packet
           // built by sceGnmInsertFlip uses control=5, not the [11:8]=memory
@@ -2740,9 +3040,11 @@ static uint32_t WalkDcb(const uint32_t* p, uint32_t words, uint32_t depth,
             uint64_t addr = (static_cast<uint64_t>(body[2] & 0xFFFF) << 32) |
                             (body[1] & ~0x3u);
             uint32_t ndw = count - 3;
-            if (LabelAddrOk(addr) && LabelAddrOk(addr + (uint64_t)ndw * 4))
+            if (LabelAddrOk(addr) && LabelAddrOk(addr + (uint64_t)ndw * 4)) {
               std::memcpy(reinterpret_cast<void*>(addr), &body[3],
                           (size_t)ndw * 4);
+              NoteFenceWrite(addr);
+            }
             if (kEopTrace)
               std::fprintf(stderr, "[eop] WRITE_DATA dst=%#lx ndw=%u v0=%#x\n",
                            (unsigned long)addr, ndw, ndw ? body[3] : 0);
@@ -2750,6 +3052,16 @@ static uint32_t WalkDcb(const uint32_t* p, uint32_t words, uint32_t depth,
           break;
         }
         case IT_EVENT_WRITE_EOP: {  // body: eventCtrl, addrLo, addrHi+sel,
+          if (kAddrWatch && count >= 3) {
+            const uint64_t a =
+                (static_cast<uint64_t>(body[2] & 0xFFFF) << 32) | body[1];
+            if (a <= (uint64_t)kAddrWatch && (uint64_t)kAddrWatch < a + 8) {
+              static int hit = 0;
+              if (hit++ < 8)
+                std::fprintf(stderr, "[addrwatch] EVENT_WRITE_EOP dst=%#lx\n",
+                             (unsigned long)a);
+            }
+          }
                                     // dataLo, dataHi
           if (count >= 4) {
             uint64_t addr = (static_cast<uint64_t>(body[2] & 0xFFFF) << 32) |
@@ -2772,6 +3084,16 @@ static uint32_t WalkDcb(const uint32_t* p, uint32_t words, uint32_t depth,
           break;
         }
         case IT_RELEASE_MEM: {  // body: eventCtrl, selBits, addrLo, addrHi,
+          if (kAddrWatch && count >= 4) {
+            const uint64_t a =
+                (static_cast<uint64_t>(body[3] & 0xFFFF) << 32) | body[2];
+            if (a <= (uint64_t)kAddrWatch && (uint64_t)kAddrWatch < a + 8) {
+              static int hit = 0;
+              if (hit++ < 8)
+                std::fprintf(stderr, "[addrwatch] RELEASE_MEM dst=%#lx\n",
+                             (unsigned long)a);
+            }
+          }
                                 // dataLo, dataHi
           if (count >= 5) {
             uint32_t data_sel =
@@ -2795,6 +3117,16 @@ static uint32_t WalkDcb(const uint32_t* p, uint32_t words, uint32_t depth,
           break;
         }
         case IT_EVENT_WRITE_EOS: {  // body: eventCtrl, addrLo, addrHi+cmd, data
+          if (kAddrWatch && count >= 3) {
+            const uint64_t a =
+                (static_cast<uint64_t>(body[2] & 0xFFFF) << 32) | body[1];
+            if (a <= (uint64_t)kAddrWatch && (uint64_t)kAddrWatch < a + 8) {
+              static int hit = 0;
+              if (hit++ < 8)
+                std::fprintf(stderr, "[addrwatch] EVENT_WRITE_EOS dst=%#lx\n",
+                             (unsigned long)a);
+            }
+          }
           if (count >= 4) {
             uint64_t addr = (static_cast<uint64_t>(body[2] & 0xFFFF) << 32) |
                             (body[1] & ~0x3u);
@@ -2849,6 +3181,17 @@ static uint32_t WalkDcb(const uint32_t* p, uint32_t words, uint32_t depth,
           if (IsDraw(op)) {
             g_total_draws.fetch_add(1);
             HandleDraw(op, body, count);
+          } else if (kOpTrace) {
+            // DELTA_GPU_OPTRACE: every PM4 opcode nothing handles, by opcode.
+            // A title that sets register state through a packet we ignore --
+            // LOAD_CONTEXT_REG restores whole blocks from memory -- leaves
+            // every register that packet covers reading zero, which is
+            // indistinguishable from the guest never setting it.
+            static std::atomic<uint64_t> seen[256];
+            const uint64_t n = seen[op & 0xFF].fetch_add(1);
+            if (n == 0 || n == 4096)
+              std::fprintf(stderr, "[pm4] unhandled op=%#x count=%u seen=%llu\n",
+                           op, count, (unsigned long long)(n + 1));
           }
           break;
       }
@@ -2858,10 +3201,15 @@ static uint32_t WalkDcb(const uint32_t* p, uint32_t words, uint32_t depth,
                 std::chrono::steady_clock::now() - op_t0)
                 .count();
       i += 1 + count;
-    } else if (type == Pm4Type::kType2 || hdr == 0) {
-      // Single-dword filler: type-2 NOPs and zero-dword alignment padding that
-      // Gnm sprinkles between packets. Skip and keep walking (these are NOT the
-      // end of the buffer (real packets resume after the padding).
+    } else if (type == Pm4Type::kType2 || hdr == 0 || hdr == 0xFFFFFFFFu) {
+      // Single-dword filler: type-2 NOPs, zero-dword alignment padding that
+      // Gnm sprinkles between packets, and the all-ones filler an async
+      // compute ring is initialised with. That last one decodes as a type-3
+      // packet with opcode 0xff and count 16384, so walking it as a packet
+      // swallowed the remaining 16 KiB of the ring -- every dispatch after the
+      // first stretch of untouched ring silently vanished. Skip and keep
+      // walking (these are NOT the end of the buffer; real packets resume
+      // after the padding).
       i += 1;
     } else if (type == Pm4Type::kType0) {
       // Type-0 writes a run of consecutive registers (base in hdr[15:0], count

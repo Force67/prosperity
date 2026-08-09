@@ -20,6 +20,7 @@ bool RecompileSpirv(const uint32_t*,
                      uint32_t,
                      uint32_t,
                      uint32_t,
+                     bool,
                      Recompiled&) {
   return false;
 }
@@ -54,14 +55,27 @@ DELTA_OPTION(uint32_t, kCfgMaxIter, "DELTA_GPU_CFG_MAXITER", 16384);
 DELTA_OPTION(uint64_t, kShDisAddr, "DELTA_GPU_SHDIS_ADDR", 0);
 DELTA_OPTION(bool, kGpuNokill, "DELTA_GPU_NOKILL", false);
 DELTA_OPTION(bool, kGpuPswhite, "DELTA_GPU_PSWHITE", false);
+DELTA_OPTION(bool, kProbeAlpha, "DELTA_GPU_PSPROBE_A", false);
 DELTA_OPTION(int, kGpuPstex, "DELTA_GPU_PSTEX", 0);
 DELTA_OPTION(float, kGpuPstexScale, "DELTA_GPU_PSTEXSCALE", 1.f);
 DELTA_OPTION(bool, kGpuShdis, "DELTA_GPU_SHDIS", false);
 DELTA_OPTION(bool, kGpuShtrace, "DELTA_GPU_SHTRACE", false);
 DELTA_OPTION(bool, kGpuSpirv, "DELTA_GPU_SPIRV", false);
+DELTA_OPTION(uint64_t, kSpvDumpAddr, "DELTA_GPU_SPVDUMP_ADDR", 0);
 DELTA_OPTION(bool, kGpuSpirvCfg, "DELTA_GPU_SPIRV_CFG", false);
 DELTA_OPTION(bool, kGpuSpirvNoopt, "DELTA_GPU_SPIRV_NOOPT", false);
 DELTA_OPTION(bool, kGpuVsflipz, "DELTA_GPU_VSFLIPZ", false);
+DELTA_OPTION(bool, kGpuNoZRemap, "DELTA_GPU_NOZREMAP", false);
+// DELTA_GPU_VSFORCEZ=<0..1>: make every vertex leave clip z = value * w, so
+// the depth buffer should read back exactly `value`. Splits "the shader
+// computed no depth" from "the depth never reached the attachment", which no
+// amount of reading either side can separate on its own.
+DELTA_OPTION(float, kGpuVsForceZ, "DELTA_GPU_VSFORCEZ", 0.0f);
+// DELTA_GPU_VSPROBEW=<scale>: store z = w*w*scale, so after the perspective
+// divide the depth buffer reads w*scale -- i.e. it VISUALISES the clip w
+// (view-space depth) the shader computed. Reading an intermediate out of a
+// vertex shader is otherwise not observable at all.
+DELTA_OPTION(float, kGpuVsProbeW, "DELTA_GPU_VSPROBEW", 0.0f);
 DELTA_OPTION(bool, kGpuVsfull, "DELTA_GPU_VSFULL", false);
 DELTA_OPTION(bool, kGpuVsNoPred, "DELTA_GPU_VSNOPRED", false);
 }  // namespace
@@ -142,18 +156,47 @@ void WarnUnsupported(const char* enc, uint32_t op, uint32_t w0, uint32_t w1) {
 }
 
 // ---- stage-io helpers -------------------------------------------------------
+// PS input SLOT -> the VS parameter export it reads (SPI_PS_INPUT_CNTL.OFFSET,
+// bits [4:0]). The VS decorates param p as Location p, so this is the Location
+// the PS must declare for that slot. Identity when no mapping was supplied.
+uint32_t PsAttrLocation(const StageContext& sc, uint32_t attr) {
+  // SPI_PS_INPUT_CNTL_<slot>.OFFSET names the VS parameter export this slot
+  // reads. It is only DEFINED for slot < NUM_INTERP; above that the registers
+  // are don't-care and read 0, and treating that as "reads param0" collapses
+  // every such attribute onto Location 0.
+  if (!sc.ps_in_cntl || attr >= sc.ps_num_interp)
+    return attr;
+  const uint32_t off = sc.ps_in_cntl[attr & 31] & 0x1F;
+  // OFFSET indexes the parameter CACHE (dense, in export order), not the param
+  // number. Resolve it against the exports the VS actually makes; fall back to
+  // treating it as a param number when that list is unavailable.
+  if (sc.vs_exported_params && off < sc.vs_exported_params->size())
+    return (*sc.vs_exported_params)[off];
+  return off;
+}
+
 Id PsInputVar(Translator& t, StageContext& sc, uint32_t attr) {
-  auto it = sc.in_vars.find(attr);
+  // Cached by resolved LOCATION, not by slot. Two slots may name the SAME
+  // parameter export -- P.T.'s ps=0x80b54b4000 has cntl_0.OFFSET =
+  // cntl_1.OFFSET = 1 -- and keying by slot then declares two Input variables
+  // decorated with the same Location, which is invalid.
+  const uint32_t loc0 = PsAttrLocation(sc, attr);
+  auto it = sc.in_vars.find(loc0);
   if (it != sc.in_vars.end())
     return it->second;
+  // The PS names an input SLOT; SPI_PS_INPUT_CNTL_<slot>.OFFSET names the VS
+  // parameter export that slot reads, and it is NOT the identity -- P.T.'s
+  // ps=0x80b54b4000 has cntl_0.OFFSET = 1, so its attr0 wants param1 (the
+  // texture coordinate) rather than param0 (the clip position it was getting).
+  const uint32_t loc = loc0;
   const Id v = t.m.Variable(t.m.TypePointer(spv::StorageClass::Input, t.t_v4),
                             spv::StorageClass::Input);
-  t.m.Decorate(v, spv::Decoration::Location, {attr});
+  t.m.Decorate(v, spv::Decoration::Location, {loc});
   if (sc.flat_attrs && sc.flat_attrs->count(attr))
     t.m.Decorate(v, spv::Decoration::Flat);
   t.m.Name(v, "in_attr" + std::to_string(attr));
   sc.iface->push_back(v);
-  sc.in_vars[attr] = v;
+  sc.in_vars[loc] = v;
   return v;
 }
 
@@ -356,7 +399,9 @@ std::unordered_set<uint32_t> PlanDsOwnLane(const Program& program,
 // PerVertexKHR. Index 0 is the provoking vertex, so P0 = [0], P10 = [1] - [0],
 // P20 = [2] - [0].
 Id PsPerVertexVar(Translator& t, StageContext& sc, uint32_t attr) {
-  auto it = sc.pervertex_vars.find(attr);
+  // Keyed by resolved Location for the same reason as PsInputVar.
+  const uint32_t loc0 = PsAttrLocation(sc, attr);
+  auto it = sc.pervertex_vars.find(loc0);
   if (it != sc.pervertex_vars.end())
     return it->second;
   t.m.Capability(spv::Capability::FragmentBarycentricKHR);
@@ -364,13 +409,14 @@ Id PsPerVertexVar(Translator& t, StageContext& sc, uint32_t attr) {
   const Id arr = t.m.TypeArray(t.t_v4, 3);
   const Id v = t.m.Variable(t.m.TypePointer(spv::StorageClass::Input, arr),
                             spv::StorageClass::Input);
-  t.m.Decorate(v, spv::Decoration::Location, {attr});
+  const uint32_t loc = loc0;
+  t.m.Decorate(v, spv::Decoration::Location, {loc});
   t.m.Decorate(v, spv::Decoration::PerVertexKHR);
   if (sc.flat_attrs && sc.flat_attrs->count(attr))
     t.m.Decorate(v, spv::Decoration::Flat);
   t.m.Name(v, "in_attr" + std::to_string(attr) + "_pv");
   sc.iface->push_back(v);
-  sc.pervertex_vars[attr] = v;
+  sc.pervertex_vars[loc] = v;
   return v;
 }
 
@@ -844,8 +890,22 @@ void EmitInst(Translator& t, const Inst& inst, StageContext& sc) {
                                     : (en & (1u << i)) != 0;
             all_channels &= live;
           }
+          // DELTA_GPU_PSPROBE_A=1: diagnostic only. Export a colour target's
+          // own ALPHA broadcast across RGB, so a term that is only ever written
+          // to the alpha channel can be SEEN. Every value in P.T.'s src.a has
+          // been verified from constants and disassembly and each is right,
+          // while their product measures ~1.3% high; the product itself has
+          // never been observed as the shader computes it.
+          Id col2 = col;
+          if (kProbeAlpha && !int_target) {
+            const Id a = t.m.CompositeExtract(t.t_f, col, 3);
+            col2 = t.m.CompositeConstruct(t.t_v4, {a, a, a,
+                                                   t.m.CompositeExtract(
+                                                       t.t_f, col, 3)});
+          }
+          const Id col_out = col2;
           if (all_channels) {
-            t.m.Store(out_var, col);
+            t.m.Store(out_var, col_out);
           } else {
             for (uint32_t i = 0; i < 4; i++) {
               const bool live = compr ? (en & (0x3u << (i & ~1u))) != 0
@@ -853,7 +913,7 @@ void EmitInst(Translator& t, const Inst& inst, StageContext& sc) {
               if (!live)
                 continue;
               t.m.Store(t.m.AccessChain(comp_ptr_ty, out_var, {t.U32(i)}),
-                        t.m.CompositeExtract(comp_ty, col, i));
+                        t.m.CompositeExtract(comp_ty, col_out, i));
             }
           }
           // Mark this fragment as having reached a color export, so the
@@ -1681,6 +1741,7 @@ bool TranslateVs(const Program& program,
                  const uint32_t* vs_user_data,
                  const std::unordered_set<uint32_t>& flat_attrs,
                  uint32_t tex_binding_base,
+                 bool gl_clip_space,
                  Recompiled& r,
                  Translator& t) {
   const uint64_t fetch =
@@ -1847,12 +1908,34 @@ bool TranslateVs(const Program& program,
               t.m.CompositeConstruct(t.t_v4, {x, y, t.F32(0.f), t.F32(1.f)}));
   }
 
-  // GL clip space (z in [-w,w]) -> Vulkan (z in [0,w]): z = (z + w) * 0.5.
-  const Id p_out_f = t.m.TypePointer(spv::StorageClass::Output, t.t_f);
-  const Id z_ptr = t.m.AccessChain(p_out_f, pos_out, {t.U32(2)});
-  const Id w_ptr = t.m.AccessChain(p_out_f, pos_out, {t.U32(3)});
-  const Id z = t.m.Load(t.t_f, z_ptr), wv = t.m.Load(t.t_f, w_ptr);
-  t.m.Store(z_ptr, t.FMul(t.FAdd(z, wv), t.F32(0.5f)));
+  // Clip-space convention, from PA_CL_CLIP_CNTL.DX_CLIP_SPACE_DEF. In DX mode
+  // the shader already exports z in [0,w], which is exactly what Vulkan wants;
+  // remapping there squeezes depth into the far half of the range, and a
+  // reversed-Z title then fails its own depth test against it -- P.T. lost 99%
+  // of its deferred lights that way, and with them the whole lit scene. In GL
+  // mode z spans [-w,w] and has to be remapped or everything is clipped away.
+  // This mirrors what the PS5/RDNA path already does; the PS4 path used to
+  // remap unconditionally. DELTA_GPU_NOZREMAP=1 forces DX mode for both.
+  if (gl_clip_space && !kGpuNoZRemap) {
+    const Id p_out_f = t.m.TypePointer(spv::StorageClass::Output, t.t_f);
+    const Id z_ptr = t.m.AccessChain(p_out_f, pos_out, {t.U32(2)});
+    const Id w_ptr = t.m.AccessChain(p_out_f, pos_out, {t.U32(3)});
+    const Id z = t.m.Load(t.t_f, z_ptr), wv = t.m.Load(t.t_f, w_ptr);
+    t.m.Store(z_ptr, t.FMul(t.FAdd(z, wv), t.F32(0.5f)));
+  }
+  if (kGpuVsProbeW > 0.0f) {
+    const Id p_out_f3 = t.m.TypePointer(spv::StorageClass::Output, t.t_f);
+    const Id zp = t.m.AccessChain(p_out_f3, pos_out, {t.U32(2)});
+    const Id wp = t.m.AccessChain(p_out_f3, pos_out, {t.U32(3)});
+    const Id wv2 = t.m.Load(t.t_f, wp);
+    t.m.Store(zp, t.FMul(t.FMul(wv2, wv2), t.F32(kGpuVsProbeW)));
+  }
+  if (kGpuVsForceZ > 0.0f) {
+    const Id p_out_f2 = t.m.TypePointer(spv::StorageClass::Output, t.t_f);
+    const Id zp = t.m.AccessChain(p_out_f2, pos_out, {t.U32(2)});
+    const Id wp = t.m.AccessChain(p_out_f2, pos_out, {t.U32(3)});
+    t.m.Store(zp, t.FMul(t.m.Load(t.t_f, wp), t.F32(kGpuVsForceZ)));
+  }
 
   t.m.ReturnVoid();
   t.m.EndFunction();
@@ -1864,6 +1947,9 @@ bool TranslateVs(const Program& program,
 bool TranslatePs(const Program& program,
                   const std::unordered_set<uint32_t>& flat_attrs,
                   uint32_t ps_input_ena,
+                  const uint32_t* ps_in_cntl,
+                  uint32_t ps_num_interp,
+                  const std::vector<uint32_t>* vs_exported_params,
                   uint32_t tex_3d_mask,
                   uint32_t tex_1d_mask,
                   uint32_t tex_uint_mask,
@@ -1928,6 +2014,9 @@ bool TranslatePs(const Program& program,
   const Id user_data = DeclareUserData(t, kPsUserDataOffset);
   sc.main_fn = t.m.BeginFunction(t.t_void, t.t_fn);
   SeedUserData(t, user_data);
+  sc.ps_in_cntl = ps_in_cntl;
+  sc.ps_num_interp = ps_num_interp;
+  sc.vs_exported_params = vs_exported_params;
   SeedPsInputVgprs(t, ps_input_ena, iface);
 
   // A PS with no color export writes nothing to the color targets (hardware
@@ -2375,6 +2464,12 @@ std::vector<uint32_t> EmitRectListGeometry(
   m.ReturnVoid();
   m.EndFunction();
   m.EntryPoint(spv::ExecutionModel::Geometry, main_fn, "main", iface);
+  // A geometry entry point must declare its invocation count -- the spec
+  // requires it (VUID-VkPipelineShaderStageCreateInfo-stage-00715), and without
+  // it the module is invalid and the pipeline it belongs to is built from
+  // undefined state. One invocation is what this pass wants: it expands each
+  // RECT_LIST primitive exactly once.
+  m.ExecMode(main_fn, spv::ExecutionMode::Invocations, {1});
   m.ExecMode(main_fn, spv::ExecutionMode::Triangles);
   m.ExecMode(main_fn, spv::ExecutionMode::OutputTriangleStrip);
   m.ExecMode(main_fn, spv::ExecutionMode::OutputVertices, {4});
@@ -2387,10 +2482,13 @@ bool RecompileSpirv(const uint32_t* vs_code,
                      const uint32_t* vs_user_data,
                      const uint32_t* ps_user_data,
                      uint32_t ps_input_ena,
+                     const uint32_t* ps_in_cntl,
+                     uint32_t ps_num_interp,
                      uint32_t tex_3d_mask,
                      uint32_t tex_1d_mask,
                      uint32_t tex_uint_mask,
                      uint32_t mrt_uint_mask,
+                     bool gl_clip_space,
                      Recompiled& r) {
   if (!vs_code || !vs_user_data || !ps_user_data)
     return false;
@@ -2414,6 +2512,36 @@ bool RecompileSpirv(const uint32_t* vs_code,
         (inst.raw[0] & 0xFF) == 2)
       flat_attrs.insert((inst.raw[0] >> 10) & 0x3F);
 
+  // The VS's parameter exports, ascending and deduplicated: the parameter cache
+  // packs them densely in export order, which is what SPI_PS_INPUT_CNTL.OFFSET
+  // indexes.
+  std::vector<uint32_t> vs_exported_params;
+  {
+    for (const Inst& inst : vs_program)
+      if (inst.enc == Enc::kExp) {
+        const uint32_t tgt = (inst.raw[0] >> 4) & 0x3F;
+        if (tgt >= 32 && tgt <= 63)
+          vs_exported_params.push_back(tgt - 32);
+      }
+    std::sort(vs_exported_params.begin(), vs_exported_params.end());
+    vs_exported_params.erase(
+        std::unique(vs_exported_params.begin(), vs_exported_params.end()),
+        vs_exported_params.end());
+  }
+
+  // flat_attrs is keyed by PS input SLOT (that is what v_interp_mov names), but
+  // the VS and the rect-list GS decorate their PARAMETER EXPORTS, which are a
+  // different index space once SPI_PS_INPUT_CNTL is not the identity. Translate
+  // the set through the mapping for the producer side. Getting this wrong
+  // leaves a Flat decoration on one side of the interface and not the other,
+  // which is undefined -- it is what made the first attempt at honouring these
+  // registers far worse than ignoring them.
+  std::unordered_set<uint32_t> flat_params;
+  for (uint32_t slot : flat_attrs)
+    flat_params.insert((ps_in_cntl && slot < ps_num_interp)
+                           ? (ps_in_cntl[slot & 31] & 0x1F)
+                           : slot);
+
   // Set 0 is shared, so the VS's samplers are numbered after the PS's. Planning
   // is a pure function of the code, so doing it here costs only the walk.
   uint32_t vs_tex_base = 0;
@@ -2431,7 +2559,8 @@ bool RecompileSpirv(const uint32_t* vs_code,
   if (dbg)
     AuditBegin("vs", vs_code, vs_program);
   const bool vs_ok =
-      TranslateVs(vs_program, vs_user_data, flat_attrs, vs_tex_base, r, tv) &&
+      TranslateVs(vs_program, vs_user_data, flat_params, vs_tex_base,
+                  gl_clip_space, r, tv) &&
       !HadUnsupported();
   std::vector<uint32_t> vs;
   if (vs_ok)
@@ -2457,7 +2586,8 @@ bool RecompileSpirv(const uint32_t* vs_code,
   if (dbg && ps_code)
     AuditBegin("ps", ps_code, ps_program);
   const bool ps_ok = (ps_code ? TranslatePs(ps_program, flat_attrs,
-                                             ps_input_ena, tex_3d_mask,
+                                             ps_input_ena, ps_in_cntl, ps_num_interp, &vs_exported_params,
+                      tex_3d_mask,
                                              tex_1d_mask, tex_uint_mask,
                                              mrt_uint_mask, r, tp)
                                : TranslateDepthOnlyPs(tp)) &&
@@ -2480,7 +2610,7 @@ bool RecompileSpirv(const uint32_t* vs_code,
   }
 
   const std::vector<uint32_t> gs =
-      EmitRectListGeometry(r.num_params, flat_attrs);
+      EmitRectListGeometry(r.num_params, flat_params);
   // A module the translator emitted but the validator rejects is a translator
   // bug (wrong codegen, not a guest gap): always loud.
   std::string err;
@@ -2524,6 +2654,29 @@ bool RecompileSpirv(const uint32_t* vs_code,
   }
   r.ok = !r.vs_spirv.empty() && !r.gs_spirv.empty() && !r.fs_spirv.empty();
 
+  // DELTA_GPU_SPVDUMP_ADDR=<ps guest addr>: write that shader's emitted
+  // fragment SPIR-V to /tmp/delta_ps_<addr>.spv. Reading the GCN with
+  // DELTA_GPU_SHDIS_ADDR says what the title asked for; only the module says
+  // what we built from it, which is the difference that matters once every
+  // constant feeding a shader has been shown correct at the UBO.
+  if (kSpvDumpAddr && ps_code &&
+      reinterpret_cast<uint64_t>(ps_code) == kSpvDumpAddr.get() &&
+      !r.fs_spirv.empty()) {
+    static bool once = false;
+    if (!once) {
+      once = true;
+      char path[128];
+      std::snprintf(path, sizeof(path), "/tmp/delta_ps_%lx.spv",
+                    (unsigned long)kSpvDumpAddr.get());
+      if (FILE* f = std::fopen(path, "wb")) {
+        std::fwrite(r.fs_spirv.data(), 4, r.fs_spirv.size(), f);
+        std::fclose(f);
+        std::fprintf(stderr, "[spvdump] ps %#lx -> %s (%zu words)\n",
+                     (unsigned long)kSpvDumpAddr.get(), path,
+                     r.fs_spirv.size());
+      }
+    }
+  }
   // Tally (DELTA_GPU_SPIRV): how many shaders the backend accepted vs had to
   // decline, and how many used the CFG path.
   if (kGpuSpirv) {

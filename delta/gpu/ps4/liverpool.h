@@ -42,13 +42,31 @@ constexpr uint32_t kCbColorStride = 0xF;
 // Screen scissor gives the render area (width/height).
 constexpr uint32_t mmPA_SC_SCREEN_SCISSOR_TL = 0xA00C;
 constexpr uint32_t mmPA_SC_SCREEN_SCISSOR_BR = 0xA00D;
+// Clip control. DX_CLIP_SPACE_DEF[19]: 1 = clip z in [0,w] (Vulkan/D3D
+// convention, what GNM sets for a normal projection), 0 = z in [-w,w] (GL).
+constexpr uint32_t mmPA_CL_CLIP_CNTL = 0xA204;
+// Per-viewport scissor (viewport 0). The hardware intersects this with the
+// screen/window/generic scissors; it is the one a deferred renderer moves
+// per draw to bound each light volume.
+constexpr uint32_t mmPA_SC_VPORT_SCISSOR_0_TL = 0xA094;
+constexpr uint32_t mmPA_SC_VPORT_SCISSOR_0_BR = 0xA095;
+constexpr uint32_t mmPA_SC_WINDOW_SCISSOR_TL = 0xA081;
+constexpr uint32_t mmPA_SC_WINDOW_SCISSOR_BR = 0xA082;
 constexpr uint32_t mmPA_SC_GENERIC_SCISSOR_TL = 0xA090;
 constexpr uint32_t mmPA_SC_GENERIC_SCISSOR_BR = 0xA091;
 // Viewport 0 scale/offset (float).
+// DB_RENDER_CONTROL: DEPTH_CLEAR_ENABLE[0], STENCIL_CLEAR_ENABLE[1],
+// DEPTH_COPY[2], STENCIL_COPY[3], RESUMMARIZE_ENABLE[4]. A draw issued with a
+// clear bit set is not a draw: the hardware fills the depth/stencil plane with
+// DB_DEPTH_CLEAR / DB_STENCIL_CLEAR over the drawn rect and ignores the
+// shader's output.
+constexpr uint32_t mmDB_RENDER_CONTROL = 0xA000;
 constexpr uint32_t mmPA_CL_VPORT_XSCALE = 0xA10F;
 constexpr uint32_t mmPA_CL_VPORT_XOFFSET = 0xA110;
 constexpr uint32_t mmPA_CL_VPORT_YSCALE = 0xA111;
 constexpr uint32_t mmPA_CL_VPORT_YOFFSET = 0xA112;
+constexpr uint32_t mmPA_CL_VPORT_ZSCALE = 0xA113;
+constexpr uint32_t mmPA_CL_VPORT_ZOFFSET = 0xA114;
 // Render-target mask (which CB targets are written).
 constexpr uint32_t mmCB_TARGET_MASK = 0xA08E;
 constexpr uint32_t mmCB_SHADER_MASK = 0xA08F;
@@ -60,6 +78,7 @@ constexpr uint32_t mmCB_SHADER_MASK = 0xA08F;
 constexpr uint32_t mmCB_BLEND0_CONTROL = 0xA1E0;
 constexpr uint32_t kCbBlendStride = 0x1;
 // Pixel-shader system-value VGPR layout (barycentrics, position, face, etc.).
+constexpr uint32_t mmSPI_PS_INPUT_CNTL_0 = 0xA191;  // ..._31 at 0xA1B0
 constexpr uint32_t mmSPI_PS_INPUT_ENA = 0xA1B3;
 // Overall color-buffer mode (ROP3 / blend disable). MODE field is [4:6].
 constexpr uint32_t mmCB_COLOR_CONTROL = 0xA202;
@@ -83,6 +102,12 @@ constexpr uint32_t mmDB_Z_READ_BASE = 0xA012;
 constexpr uint32_t mmDB_STENCIL_READ_BASE = 0xA013;
 constexpr uint32_t mmDB_Z_WRITE_BASE = 0xA014;
 constexpr uint32_t mmDB_STENCIL_WRITE_BASE = 0xA015;
+// DB_DEPTH_SIZE: PITCH_TILE_MAX[10:0], HEIGHT_TILE_MAX[21:11] (both in 8-texel
+// tiles, minus one). DB_DEPTH_SLICE: SLICE_TILE_MAX[21:0], the tiles in one
+// slice minus one -- which is what says whether a Z surface has more than one.
+constexpr uint32_t mmDB_HTILE_DATA_BASE = 0xA005;
+constexpr uint32_t mmDB_DEPTH_SIZE = 0xA016;
+constexpr uint32_t mmDB_DEPTH_SLICE = 0xA017;
 // Fast-clear depth value (float) used when the buffer is bound with
 // loadOp=CLEAR.
 constexpr uint32_t mmDB_DEPTH_CLEAR = 0xA00B;
