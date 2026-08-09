@@ -1,93 +1,548 @@
 // P.T. (CUSA01127, PS4)
-// FOX engine. Boots, loads and runs its full render graph: ~220 draws/frame at
-// 20-30 fps, every shader translates, no draw declines. Assets stream fine
-// (/app0/texture.qar and /app0/chunk1.psarc read correctly through the PFS).
+// FOX engine. Boots and runs its whole render graph at ~30-50 fps: ~218
+// draws/frame, 100 shaders translate, no declined shaders, no declined draws.
 //
-// THE SCENE RENDERS (2026-08-01). The hallway is present in the G-buffer once
-// the vertex layout comes from the fetch shader rather than from buffer loads
-// in the shader body. Present it with
-//   +DELTA_GPU_PRESENT_ADDR=0x8143800000
-// to see it. The exposure chain works off it too.
+// IT RENDERS (2026-08-08). The hallway -- door, walls, floor, ceiling -- comes
+// out of the title's own present chain, no diagnostic overrides. It is a very
+// dark game; a snapshot brightened ~3x is the honest way to look at it:
+//   +DELTA_GPU_SNAP=2500 +DELTA_GPU_DUMP_DIR=<dir>     -> gpu_snap.ppm
 //
-// The presented frame is 100% black (every byte of gpu_snap.ppm is 0) because
-// every compressed guest texture the title samples is empty. DELTA_GPU_TEXCENSUS
-// over a 110 s run: 178 distinct sampled surfaces, of which six hold data -- two
-// 8x8 and two 4x4 defaults, a 64x64 and a 64x16, all in pool+3..27 MB and all
-// built at engine init -- plus the render targets, which the GPU writes itself.
-// The other ~170 are BC1 (dfmt 35) and BC3 (dfmt 37), 32x32 to 2048x2048, full
-// mip chains, tiling 13, and every one of them is zero for the whole run. The
-// 16x16x16 colour-grading LUT volume at 0x811a398000 that gates the tonemap (and
-// so decides the whole image) is one of them.
+// IT RENDERS CORRECTLY (2026-08-08). No blown highlights, no blobs. Four runs:
+//   mean 27.3 / 32.6 / 29.2 / 29.5,  >200 = 0.000%,  >240 = 0.000%
+// against a defect baseline of >240 = 0.477..1.909%. The hallway, door, walls,
+// floor and ceiling falloff all come out of the title's own present chain.
 //
-// NOTHING WRITES THEM. Four whole-run censuses, not samples:
-//  - DELTA_GUEST_WHIST=80a5100000:b0000000:500 (the whole 2816 MB Garlic pool,
-//    re-armed every 500 ms for 130 s): guest writes land only in pool+0..112 MB
-//    and pool+2496..2816 MB. Not one write in pool+112..2496 MB, where every
-//    streamed surface lives (pool+529..1900 MB).
-//  - DELTA_GPU_DMATRACE: 560000 CP DMA packets, every one a src==dst shader
-//    prefetch, zero real transfers. The old trace capped at 200 packets, which
-//    prefetches consumed before an upload could appear -- that is why this
-//    looked unfalsifiable; it now counts by class for the whole run.
-//  - DELTA_GPU_CSHIST: compute dispatches write 19 distinct guest ranges all
-//    run, all in pool+15..70 MB or the render targets.
-//  - DELTA_GPU_OPHIST: the PM4 stream contains no INDIRECT_BUFFER (0x3f), so no
-//    command buffer goes un-walked, and sceGnmDingDong is never called, so there
-//    is no async compute queue carrying uploads either.
+// THE LAST FIX: A TARGET BEING ACCUMULATED INTO MUST START THE FRAME DEFINED.
+// The lazy-clear heuristic (DELTA_GPU_LAZYCLEAR, default on) persists a colour
+// target's contents across frames as loadOp=LOAD, clearing only on an explicit
+// guest clear or first-ever use. That is right for content baked once -- it
+// exists because the old per-frame auto-clear wiped the room floor, and turning
+// it off still blanks P.T. (mean 1.7). It is WRONG for a target whose first
+// draw of the frame blends with COLOR_DESTBLEND == ONE, i.e. pure accumulation:
+// accumulating onto an undefined starting value is meaningless, so the guest
+// necessarily begins such a target from a defined state each frame.
 //
-// The decompressed pixels DO exist in video memory. DELTA_MEMDUMP of
-// pool+0..112 MB finds ~33 MB of live data: shaders (2228 OrbShdr blobs in
-// pool+3..16 MB and pool+51..60 MB) and, at pool+55 MB and pool+77..99 MB,
-// blocks whose bytes are unmistakably BC -- 0x80a9e00000 and 0x80aa400000 hold
-// byte-identical 0x166000 images, 0x80a8800000 is a near-uniform BC1 block
-// (c0>c1 in 100% of its blocks). The title inflates texture.qar at ~2.6 MB/s and
-// memcpys the result there. DELTA_GUEST_RPROT=80a9e00000:200000 over 110 s
-// catches no read and no write, so once that copy lands nothing ever touches the
-// data again.
+// P.T.'s light buffer is exactly that. Per frame:
+//   #37, #38 (ctrl=0x60060106) accumulate colour (dst ONE) while REPLACING
+//     alpha (ALPHA_SRCBLEND=SRC_ALPHA_SATURATE -> factor 1 on alpha, dst ZERO)
+//   #39 then writes rgb/(1-alpha) with blending OFF
+// so the colour carries from frame to frame while the alpha does not, and #39
+// divides an accumulated numerator by a single frame's extinction. With
+// extinction ~0.11 that is a gain of ~9 per frame: the texels that tip past
+// #39's own 0.89990 reset threshold compound until they pin at the fp16 ceiling
+// (6.28e4), and bloom smears them into the hard-edged white pools.
 //
-// So the chain is: qar -> onion ring -> inflate -> memcpy into a Garlic staging
-// area at pool+55..99 MB -> MISSING -> the surface at pool+529..1900 MB the
-// engine has already allocated, described in a T# and bound to draws. The gap is
-// exactly one step and it is inside the engine: the copy/tile from staging into
-// the surface never runs. This is not a memory-mapping or a GPU-side problem.
+// The rule now clears such a target on its first draw of a frame, which removes
+// the runaway completely: the light buffer goes from max 6.28e4 with 72 texels
+// over 100, to max 0.036 with none.
 //
-// Next: name the guest routine that owns those staging blocks and see what it
-// does after the copy. DELTA_GUEST_WHIST=80a9000000:4000000 reports the writers
-// as libc memcpy (libc+0x45a3e) and Sh_main_ps4+0xc45a5e, and memcpy's caller is
-// not at [rsp] there, so the way in is a breakpoint on the FOX texture loader
-// itself. The engine names it: the TEXTURE_STREAMER_UPDATE / _DISPATCH profiler
-// markers are registered at 0xc8eb6c/0xc8eb84 and "@change mipmap level %d > %d"
-// sits at 0x148dc6f (vaddrs; the eboot's .text starts at 0x400000).
+// WHY EVERY EARLIER LEAD MISSED IT: the compounding is temporal, so every
+// single-frame measurement of every pass came back correct -- and they were.
+// The light pass, its constants, its cookie, the depth it reads, the fog's
+// extinction terms, the SPI_PS_INPUT_CNTL mapping and the blend enum were all
+// checked and all fine. The defect was never in a pass; it was in what the
+// buffer was allowed to carry between them.
 //
-// Ruled out and not worth redoing: VA/physical aliasing (P.T. maps each dmem
-// physical offset exactly once, always with mmap on the /dev/dmem fd, never
-// batch-map and never syscall 628), a later MAP_FIXED over the pool, Fios2, job
-// core pinning, thread wedges (zero failing syscalls under DELTA_SCERR_TRACE),
-// and the read path (1633 preads, 261 MB, 1616 distinct offsets, no retry loop,
-// p50 699 us for ~160 KB).
+// RUN THE VALIDATION LAYER FIRST. DELTA_GPU_VALIDATE=1 has been available all
+// along and nobody had read what it says. It reported six distinct spec
+// violations on this title, five now fixed, and one of them -- integer vertex
+// attributes fed to float shader inputs, i.e. attribute data that was simply
+// UNDEFINED -- was driving half the remaining artefact. Weeks of shader
+// archaeology in this file found nothing that one run found in a minute.
+// DELTA_GPU_SYNCVALIDATE=1 adds synchronization validation, which names a
+// missing barrier and the two accesses racing over it; it reports nothing here,
+// which is what retired the hazard theory the timing-sensitivity suggested.
 //
-// Fixed on the way (2026-08-01): /dev/dmem ioctl 0x80108002 is
-// sceKernelReleaseDirectMemory, not MapDirectMemory. libkernel 11.00 settles it:
-// NID MBuItvba6z8 at libkernel+0x17800 puts its two arguments straight into a
-// 2-qword ioctl struct on the dmem fd. P.T. calls it about 1.5 times per
-// allocation, because it carves every 4 MiB-aligned buffer by over-allocating
-// (len, then len+0x3f0000) and releasing the head and the tail. We read a[0] as
-// a virtual address and MAP_FIXED'd anonymous memory at that host address, and
-// never gave the physical range back, so P.T.'s physical offsets marched from
-// 0x10000000 to 0x161600000 -- a gigabyte past what a real console has. They now
-// stay under 0x128000000. It did not change the frame. Isaac, Undertale and
-// Doom64 never call the ioctl at all.
+// ---------------------------------------------------------------------------
+// THE FAULTS THAT KEPT IT BLACK
+// ---------------------------------------------------------------------------
 //
-// Also fixed earlier: a compute dispatch copies a 2048x1024 R8 image and the
-// compute image list had no dfmt 1, so it zero-filled. It resolves now, but it
-// lives in the already-written low pool and did not change the frame.
+// 1. ASYNC COMPUTE WAS OFF. The title uploads every streamed texture on a
+//    compute ring. DELTA_GPU_ACB defaulted off, so the two rings it maps were
+//    never walked: 1192 DISPATCH_DIRECT packets in the first 100 doorbells,
+//    all dropped. It rings /dev/gc ioctl 0xC010811C directly -- the old
+//    record's "sceGnmDingDong is never called" was read off the HLE wrapper,
+//    which this title never uses. Now on by default.
 //
-// Still open, deliberately unchanged: we report 12 GiB from GetDirectMemorySize
-// vs a real PS4's ~4.5 GiB. P.T.'s own two pools end exactly at 0x11c800000, so
-// 0x11C000000 is too small and crashes it at Sh_main_ps4+0x137c; the low-memory
-// path is separately unimplemented.
+// 2. THE BLOCK-ALIAS UPLOAD WAS REJECTED. The copy describes BC blocks as an
+//    uncompressed integer image (T# type 11, dfmt 12 / nfmt 4 = one 64-bit
+//    texel per BC1 block). Both the compute image whitelist and the shader-side
+//    image emulation rejected that type and format, so both bindings
+//    zero-filled and the copy wrote a 16-byte dummy. Type 11 (cube) was also
+//    missing from DecodeTImage, which had every PS4 cubemap descriptor resolve
+//    to the 1x1 white default. Chain: qar -> inflate -> linear staging ->
+//    compute image copy (cs 0x80b5001400) -> tiled surface -> compute buffer
+//    copy (cs 0x80b5001800) -> the surface the draws sample.
 //
-//  - Not the cause: depth test, face culling, the colour write masks, the
-//    render-target size aliasing, missing assets, or shader translation.
+// 3. DB_RENDER_CONTROL WAS READ NOWHERE. Its DEPTH_CLEAR_ENABLE /
+//    STENCIL_CLEAR_ENABLE bits mark a packet the hardware services by filling
+//    the depth plane with DB_DEPTH_CLEAR: the guest sends a RECT_LIST with no
+//    vertex buffers and no pixel shader, and we ran it as an ordinary draw,
+//    writing the vertex shader's clip z over the scene depth it had just laid
+//    down. Serviced as a clear now.
+//
+//    Also: depth targets were sized from the COLOUR pass, so a half-resolution
+//    Z buffer bound to a full-resolution pass claimed several times the guest
+//    memory it owns and the address->image page table swallowed its neighbour.
+//    DB_DEPTH_SIZE carries the real padded geometry (PITCH_TILE_MAX /
+//    HEIGHT_TILE_MAX, 8-texel tiles minus one). The IMAGE still follows the
+//    render area (Vulkan requires an attachment to cover it); the FOOTPRINT now
+//    follows DB_DEPTH_SIZE. The two were conflated.
+//
+// 4. WE TOOK CB METADATA PASSES FOR CLEARS. A RECT_LIST with no pixel shader
+//    is how GNM spells a fast clear -- and also how it spells eliminate-fast-
+//    clear, resolve, decompress and FMASK-decompress, which are the OPPOSITE:
+//    they resolve CMASK/DCC INTO the surface and preserve it. CB_COLOR_CONTROL
+//    .MODE separates them; only CB_NORMAL(1) is the clear. P.T. issues 58k
+//    metadata passes per run and not one real fast clear. Every frame it
+//    eliminated the fast-clear state of its 1920x1080 composite eight times,
+//    two of them immediately before the tonemap reads that same target back
+//    through a feedback copy -- so the scene was wiped one draw before it was
+//    sampled. Of the other four titles only SotC issues one at all.
+//
+// 5. WE REMAPPED CLIP Z UNCONDITIONALLY. The PS4 vertex path applied
+//    z = (z + w) * 0.5 to every shader. PA_CL_CLIP_CNTL.DX_CLIP_SPACE_DEF (bit
+//    19, reg 0xA204) says which convention the guest is using, and GNM sets it
+//    for a normal projection: the shader already exports z in [0,w], which is
+//    what Vulkan wants. Remapping there crushes the scene into the far half of
+//    the depth range. P.T. is reversed-Z and depth-tests its deferred lights
+//    GEQUAL against a half-res Z buffer, so the test rejected 98.8% of every
+//    light quad: the light accumulation buffer came out 1.2% covered and the
+//    lit scene was black before the first post-process pass ran.
+//
+//    Honouring the register takes the light buffer to 100% and the G-buffer
+//    from 58% to 86%. THE CLIP MODE IS BAKED INTO THE VS, so it must join the
+//    recompile key -- an earlier attempt at exactly this fix did not, so the
+//    modules compiled before the register was read were handed back unchanged,
+//    which is why it "did nothing for P.T. and turned Isaac black". That note
+//    is retracted; the register is correct and Isaac is fine.
+//
+// 6. NO COMPUTE SHADER COULD WRITE A VOLUME IMAGE, in two places at once.
+//    The command processor validates and sizes a compute image with the slice
+//    axis (is_3d ? depth : layers) but handed the renderer the raw layer count,
+//    which is 1 for a volume; the renderer rebuilds the staging layout from it,
+//    so it came out 1/depth of the agreed size and the whole dispatch was
+//    dropped. And the translator's MIMG path accepted types 8, 9, 11, 12, 13 --
+//    not 10 -- so `valid` was false and every store was predicated off, meaning
+//    the dispatch ran and wrote nothing.
+//
+//    P.T.'s only volume uploads are its two 16x16x16 colour-grading LUTs. With
+//    them zero the tonemap graded the finished frame through an all-zero table,
+//    and the game presented black. Forcing that one 16 KiB binding to white
+//    (DELTA_GPU_TEXFORCE) was enough to bring the whole frame back, which is
+//    what turned it from a hunt into a one-line proof.
+//
+// 7. FIVE VULKAN SPEC VIOLATIONS, all reported by DELTA_GPU_VALIDATE=1:
+//    - The RECT_LIST geometry shader declared no invocation count. A geometry
+//      entry point must have one, or the module is invalid.
+//    - The recompiled pipeline layout declared one push-constant range per
+//      stage and they OVERLAPPED (VERTEX [0,136), FRAGMENT [64,144)), so the PS
+//      user data -- where the fragment shader's descriptor pointers live -- and
+//      the VS code address were pushed through a range that did not name their
+//      stage. The two stages' windows interleave, so one range naming both,
+//      with every push naming both, is the shape that is legal.
+//    - A recompiled vertex shader can index a guest buffer by hand, which
+//      becomes a writable storage buffer; declaring one needs
+//      vertexPipelineStoresAndAtomics, which we never asked for.
+//    - INTEGER VERTEX ATTRIBUTES FED TO FLOAT SHADER INPUTS. VertexFormat
+//      mapped GCN nfmt 4/5 to Vulkan *_UINT/*_SINT while the recompiled VS
+//      declares every attribute as a float vector: a type mismatch, and the
+//      attribute reads UNDEFINED. The SCALED forms carry the same integer value
+//      as a float, which is what a shader that fetches and converts ends up
+//      with. This is the one that halved the over-lighting -- mean saturation
+//      over frames 500-4000 went from ~0.55% with peaks above 1.3% to 0.29%
+//      with peaks of 0.62%. 32-bit integers have no SCALED form and stay as
+//      they were; such an attribute needs an integer input declaration.
+//    - STORAGE usage requested on SRGB colour targets, which cannot be storage
+//      images, making every view of them invalid.
+//
+//    STILL OPEN: the blit path asks for a depth comparison on its own
+//    descriptors, and the binding may have resolved to a colour view. GCN
+//    compares against the first component of any format; Vulkan needs a format
+//    that supports it. Doing this right means emulating the comparison in the
+//    shader -- disabling it outright would change how a title's shadows sample,
+//    so it is left alone rather than guessed at.
+//
+// 8. WAIT_REG_MEM WAS WALKED STRAIGHT PAST. IT_WAIT_REG_MEM was declared in
+//    pm4.h and handled nowhere, and DELTA_GPU_OPHIST reports it as the single
+//    most common packet in P.T.'s DCB: 86,611 a run. It is the guest's only way
+//    to make one ring wait for another, and with the async compute rings walked
+//    on their own thread it is what orders a draw after the dispatch that
+//    produced what it samples.
+//
+//    Honoured now, but only for polls we can satisfy: every label this CP
+//    writes is recorded, and a poll on a word nothing of ours produces is
+//    skipped rather than waited out. Bounded at 200us, yielding rather than
+//    spinning (the thread that will satisfy it needs the core; busy-spinning
+//    took SotC to 2 fps). It does NOT fix the artefact below.
+//
+//    A caution for whoever measures this next: an earlier reading called it a
+//    3x regression in SotC, from comparing 5.2 fps against a single 17.8 fps
+//    baseline. SotC's own baseline ranges 1.8-5.2 fps across three runs. One
+//    reading of anything in this emulator is worth nothing.
+//
+// ---------------------------------------------------------------------------
+// WHAT IS STILL WRONG
+// ---------------------------------------------------------------------------
+//
+// Blown-out white blobs, hard-edged and blocky, on the lit floor and walls.
+// They cover ~2% of the frame and flicker on and off between frames.
+//
+// WHERE THEY COME FROM, as far as this got. The light pass (26 quads,
+// vs=0x80b557f000 ps=0x80b88bb000, MRT0 0x8151a80000 + MRT1 0x8151600000, both
+// R16G16B16A16_SFLOAT at 960x540) leaves MRT1 with a permanently saturated
+// 3.10% region whose outline IS the blob. MRT0 is essentially black (mean 0.3).
+// The deferred composite at draw #106 reads both and writes 0x815b000000, which
+// is genuinely B8G8R8A8_UNORM (CB_COLOR0_INFO 0x2a828: FORMAT=10 8_8_8_8,
+// NUMBER_TYPE=0 UNORM, BLEND_CLAMP set) -- so anything above 1.0 clips there,
+// on hardware too. DELTA_GPU_MAXDRAW=110 shows the composite already carrying
+// the blobs at that point, so nothing later introduces them.
+//
+// THE SOURCE IS 0x8151600000, and that is measured, not inferred: 98.9% of the
+// composite's saturated pixels are exactly the pixels saturated in that buffer.
+// DELTA_GPU_MAXDRAW puts the moment it arrives at draw #106 (the deferred
+// composite) -- the composite is 0.00% saturated at a cap of 100 and 2.4-3.4%
+// at 110 -- so nothing later introduces it and nothing carries it across frames
+// in the composite itself.
+//
+// 0x8151600000 IS AN HDR BUFFER AND ITS VALUES ABOVE 1.0 ARE LEGITIMATE.
+// CB_COLOR1_INFO reads 0x60730: FORMAT=12 (16_16_16_16), NUMBER_TYPE=7 (FLOAT),
+// FAST_CLEAR clear, BLEND_CLAMP clear -- so R16G16B16A16_SFLOAT is the right
+// image and the hardware does not clamp writes into it either. The clipping
+// happens where it is read into the 8-bit composite, on hardware too.
+//
+// A CLAIM MADE HERE AND WITHDRAWN: that the buffer is never initialised and
+// accumulates across frames. It is bound only ever as MRT1, 33 times a frame,
+// always blended -- never MRT0, never unblended -- and nothing clears it: no
+// fast clear (P.T. issues none anywhere; a per-target tally of 40,000 metadata
+// passes, counted rather than traced, lists nine targets and neither light
+// buffer), no CP DMA fill (all 580k packets are src==dst prefetches), no
+// suppressed draw (the lazy-clear heuristic never fires, there are no MRT
+// slot-0 gaps, and exactly one draw is declined in a whole run). But it does
+// not need one: the blend is dst.rgb = src.rgb + dst.rgb*(1-src.a), so a first
+// slice with src.a = 1 IS a replace. The buffer reads mean 73 after one slice
+// and 79 after twenty-eight, which fits that reading as well as it fits
+// carry-over, and the blend converges downward so a flat mean proves nothing
+// either way. Do not build on "it accumulates" without a better measurement.
+//
+// A compute shader (cs=0x80b5000400) does write both light buffers' memory once
+// a frame through a plain BUFFER descriptor whose range (0x480000) is exactly
+// the padded surface (1024x576 x 8B from CB_COLORn_PITCH/SLICE), and
+// UploadCsRangeToRt returns early for any resource that is not an image -- so
+// that write lands in guest memory and never reaches the VkImage. That gap is
+// real and worth closing for its own sake. It is NOT this bug: describing the
+// buffer as the linear image it covers and pushing it in removes the blobs AND
+// the scene, in all three orderings tried (at writeback; gated on the target
+// not yet being used this frame; and flushed just before a draw binds it --
+// the last also fixing the writeback running a frame late). Those bytes are not
+// the light seed. Reverted.
+//
+// ONE REGISTER FIELD WE STILL IGNORE, and the most concrete lead left:
+// CB_COLORn_INFO.FAST_CLEAR (bit 13) is SET on the composite (info=0x2a828).
+// That is the state an eliminate-fast-clear expands, and it is how a title that
+// never issues a CB_NORMAL fast clear still gets its surfaces cleared. We
+// neither read the bit nor model the CMASK it refers to. It does not explain
+// the light buffer (its FAST_CLEAR is clear, info=0x60730) and the composite is
+// already unsaturated before draw #106, so honouring it changes nothing
+// measurable here -- but it is the one piece of the clear model still missing.
+//
+// WHAT THE PASS ACTUALLY IS, since two framings here were wrong before this:
+// 29 DISTINCT LIGHTS, not slices of one volume. Their constants differ per
+// draw -- cb3 at 0x40 carries a position/radius and an HDR colour per light
+// (14.31 16.60 14.59 for one, 9.90 11.48 10.09 for the next), and cb6 a light
+// colour (1 0.15 0.2). So they are genuinely separate additive lights with
+// intensities around 10-16, and a sum that saturates 3% of an R16G16B16A16
+// buffer is ordinary for a deferred renderer.
+//
+// Which moves the question again: the composite at #106 reads those HDR buffers
+// into an 8-BIT target, so it has to apply an exposure, and ours comes out too
+// high. Its own constants are only three buffers and its shader is a lerp, so
+// the exposure is not in that pass -- the title has an auto-exposure chain
+// (0x80b8f00000 -> 0x80b6180000 -> 0x80b6850000 -> 0x80b5c48000 ->
+// 0x80b5c50000 at 60x34, and 0x80b7020000 -> 0x80b6830000) whose targets all
+// read rgbnz=0 with nz full, i.e. their luminance lives in ALPHA. Whether that
+// chain's result reaches the composite, and by what route, is the thread to
+// pull next. It has not been followed.
+//
+// Two diagnostics crash and are worth fixing before they are trusted:
+// DELTA_GPU_FORCECLEAR=<rt> takes the guest down reproducibly, and
+// DELTA_GPU_DBSTAT=1 (all depth targets) does too -- which is why it grew a
+// per-base filter, and why the depth numbers above were read one target at a
+// time.
+//
+// READ THIS BEFORE TRUSTING ANY PER-TARGET MEASUREMENT OF THE ARTEFACT.
+// It is INTERMITTENT and TIMING-SENSITIVE, and the tool used to localise it
+// suppresses it. Measured with DELTA_GPU_SNAPEVERY (which samples the presented
+// frame and needs no per-target readback), the blobs are present in 22 of 40
+// sampled frames at 0.02-1.3% of pixels. Turn DELTA_GPU_RTDUMP on and every
+// dumped target is clean at every gameplay frame through f7000 -- AND so is the
+// presented frame in that same run, 1 of 40. DELTA_GPU_RTSTAT alone does NOT
+// suppress it (26 of 40), and the two do identical GPU work: the only
+// difference is that RTDUMP writes ~30 large files per dump, which stalls the
+// thread that runs EndFrame. So it is the CPU-side timing, not the readback.
+//
+// That confound reaches backwards. Several conclusions in the previous version
+// of this section were reached from RTDUMP output -- including "98.9% of the
+// composite's saturated pixels are exactly MRT1's" and the per-target
+// saturation diff between a dirty and a clean frame -- and every one of them
+// was taken from a frame the tool had already quieted. They are withdrawn.
+// What survives is only what was measured on the presented frame, or with
+// DELTA_GPU_MAXDRAW, or from the registers.
+//
+// Also disproved, cleanly: it is not the frame pipelining (DELTA_GPU_SYNC=1
+// leaves it at 26 of 40) and not RT variant switching (DELTA_GPU_NOVARIANT=1,
+// added for this, leaves it at 23 of 40).
+//
+// A timing-sensitive intermittent artefact in a title whose ceiling light
+// flickers may not be a rendering fault at all -- it may be the light's bright
+// phase, rendered correctly and clipped where an 8-bit composite has to clip
+// it. Nobody has compared against hardware. That comparison, or a capture
+// taken on a frame that HAS the blobs with a tool that does not quiet them, is
+// the only honest next step; everything short of it has produced retractions.
+//
+// Also fixed and also not it: V_MUL_LEGACY_F32 / V_MAC_LEGACY_F32 /
+// V_MAD_LEGACY_F32 were lowered as plain multiplies, with a comment saying
+// nothing here feeds them an inf or a NaN. That was an assumption, and the
+// light shader uses two of them. GCN's legacy multiply returns ZERO when either
+// multiplicand is zero, whatever the other one is -- shaders use exactly that
+// to kill a term guarded by a reciprocal that may have divided by zero, and the
+// IEEE form gives NaN there instead. A later clamp turns that NaN (or an inf)
+// into 1.0, i.e. a saturated pixel with nothing left in the buffer to show it
+// was ever either, which is why nan and inf counts read zero on a target full
+// of blown highlights. Implemented properly now. It does not move the artefact.
+//
+// THE MEASUREMENT THAT WAS MISSING, and the one to use from here:
+// DELTA_GPU_RTSTAT now reports `hot`, the sampled pixels at or past the top of
+// the displayable range (255 in a unorm target, >= 1.0 in a float one). RTSTAT
+// does NOT perturb the artefact -- only RTDUMP does -- so this is the first way
+// to measure a target's saturation on the same frame as the presented one.
+//
+// It immediately overturned an RTDUMP-derived conclusion: the light pass's hot
+// pixels are in MRT0 (0x8151a80000, ~2.8%), not MRT1 (0x8151600000, 0%). The
+// earlier "98.9% of the composite's saturated pixels are exactly MRT1's" came
+// from frames RTDUMP had already quieted and was simply wrong.
+//
+// `hot` counts STRICTLY above 1.0, and it has to. Counting >= 1.0 flagged
+// 0x80b9000000 -- an ambient term whose values are exactly 1.0, 0.5 and 0 -- as
+// 99.9% saturated, which read like the smoking gun it is not. Decode a target's
+// `vals=` before believing any saturation number on a float target.
+//
+// With the threshold right, NO target shows anomalous saturation: the HDR scene
+// and bloom chain sit at 0.4-3% above 1.0, which is ordinary, and the 8-bit
+// composite clips a fraction of a percent of pixels at the brightest spots.
+// Skipping passes one at a time (DELTA_GPU_SKIP_PS) attributes most of the
+// composite's saturated pixels to ps=0x80b5461000, an ambient/reflection
+// composite reading the normal plane, the material plane and that ambient term
+// -- but all three of its inputs measure sane, so what that buys is a name, not
+// a cause.
+//
+// With it, the light accumulation bisects cleanly for the first time:
+// DELTA_GPU_MAXDRAW capping the frame at 12 light draws leaves 0x8151a80000 at
+// hot=0; 13 draws gives hot=258; 21 gives 978. So it is the CUMULATIVE sum
+// crossing 1.0, not one bad light -- the 13th light's constants (position
+// ~0.006, 2.5, 11.5; colour ~7-16) look like all the others.
+//
+// And a light buffer above 1.0 is NORMAL: it is R16G16B16A16_SFLOAT, and on a
+// clean frame the composite pass scales it down to hot=0 in an 8-bit target
+// that clamps. On the frames that show the artefact the composite reaches
+// hot=1..29 out of 16458 sampled pixels, i.e. 0.04-0.18% fully white, with more
+// pixels near-white. Whether that overshoot is ours or the title's own clipping
+// of a bright lamp is the question a hardware capture would settle and nothing
+// here can.
+//
+// HOW TO MEASURE IT, because the obvious metric under-reports it by 300x.
+// Counting pixels saturated in all three channels gives 0.0027% on a frame
+// where the patches are plainly visible: they are made of pixels in the
+// 128-250 range, and against a scene whose mean is 17 that is glaring. Count
+// pixels above ~200 instead (about 0.9%), or just look at the frame unbrightened.
+//
+// And three shapes that are NOT there, each of which looked conclusive at a
+// glance:
+//   - Not an interlace. Frame-wide, even and odd rows differ by 0.03 of 255,
+//     and columns likewise. A 26-pixel crop suggested otherwise.
+//   - Not a diagonal hatch. Viewing the >200 mask downscaled 2x with NEAREST
+//     manufactures hatching out of solid regions with irregular edges. At full
+//     resolution the patches are SOLID: autocorrelation over a 64x64 window at
+//     0.79 coverage decays smoothly from 0.784 with no period at any shift.
+//     There is no 8-texel micro-tile signature and no ordered dither.
+//   - Not driven by any one input of ps=0x80b5461000, the pass that skipping
+//     attributes 64% of the composite's saturated pixels to. Forcing its normal
+//     plane or its ambient term to the white default does not reduce the bright
+//     fraction (2.70% baseline, 3.28% and 2.80% forced).
+//
+// So the patches are solid light pools that clip, with no structural signature
+// to follow, and every input to the pass that carries them measures sane.
+//
+// RULED OUT FOR THIS ARTEFACT, each by measurement, do not redo:
+//   - Mip selection. DELTA_GPU_FORCELOD=0 (clamp every sampler to one mip)
+//     leaves the frame pixel-identical.
+//   - The light's 2048x2048 BC3 cookie at 0x80d7c50000. With the depth test off
+//     (DELTA_GPU_NOZTEST=1) the whole screen is a SMOOTH bright cloud with no
+//     blobs, so that texture is smooth and the depth test carves the blobs out
+//     of it. Forcing it white (DELTA_GPU_TEXFORCE) blows out the entire lit
+//     region, so it is the term that gates them -- not the term that is wrong.
+//   - Per-light magnitude. DELTA_GPU_NOBLEND=1 (one light replaces instead of
+//     29 accumulating) leaves the buffer at mean 4 / 8% coverage vs mean 87 /
+//     100%: each light is dim, the sum is what saturates.
+//   - The per-MRT blend. Both attachments carry ctrl=0x65000501 with blending
+//     enabled, which is what the guest programmed for each.
+//   - Stale per-draw constants. The 29 lights' cbuffers differ per draw.
+//   - The half-res Z. DELTA_GPU_DBSTAT=<base> reads 0x8156400000 as min 0,
+//     max 0.0246, mean 0.0166: populated and smoothly varying, which is what
+//     the dumped projection predicts.
+//   - The scissor. We set the Vulkan scissor once per region to the whole
+//     target and never per draw, which would let every light quad cover the
+//     screen -- but P.T. leaves PA_SC_VPORT_SCISSOR_0, PA_SC_WINDOW_SCISSOR and
+//     PA_SC_GENERIC_SCISSOR all at zero and programs only the screen scissor.
+//     (SotC programs VPORT_SCISSOR_0 and it reads back correctly, so the
+//     capture is not at fault.) Applying the per-draw scissor is still a real
+//     unimplemented feature -- just not this bug, and a no-op for both titles.
+//   - The compressed export. Both of the light shader's exports are `compr`
+//     with EN=0xF and the translator unpacks each half pair into the right
+//     channel (mrt0 = v3,v6,v7,v2 -- alpha is computed, not defaulted).
+//   - v_med3_f32, which GCN uses as a clamp: ours is
+//     clamp(s2, min(s0,s1), max(s0,s1)), which is the median.
+//   - VOP3 output modifiers (mul:2 / mul:4 / div:2), the obvious way to be off
+//     by a small integer factor: ApplyOutputModifier implements them on the
+//     base GCN path as well as the Neo one, and the light shader uses none.
+//   - The viewport depth range. PA_CL_VPORT_ZSCALE/ZOFFSET are identity (1, 0)
+//     on 192 of P.T.'s 194 distinct draw states; the two that are not are
+//     (0.5, 0.5), the GL [-1,1]->[0,1] mapping, which is exactly what the VS
+//     remap already does for those same GL-convention draws. Applying them
+//     would be a no-op for the 192 and a DOUBLE transform for the 2 -- which
+//     also explains the old note in SetGuestViewport ("applying them collapses
+//     P.T.'s depth"), written while the VS remapped unconditionally so the two
+//     stacked. If they are ever wired up, gate them on the clip mode.
+//
+// THE LAST UNEXAMINED GAP, and the one this would look at next: NOTHING EVER
+// WRITES A RENDER TARGET'S CONTENTS BACK TO GUEST MEMORY. The only
+// vkCmdCopyImageToBuffer calls in the tree are the two diagnostics and the
+// present readback. A title that reads a target with the CPU therefore reads
+// whatever was in that memory before -- and P.T. has an auto-exposure chain
+// (0x80b8f00000 -> 0x80b6180000 -> 0x80b6850000 -> 0x80b5c48000 ->
+// 0x80b5c50000 at 60x34) that ends in exactly such a target, whose luminance
+// lives in ALPHA. If the exposure it feeds is computed CPU-side from a readback
+// of that surface, ours is computed from stale memory, and an exposure that
+// comes out too high is what blown highlights look like.
+//
+// THE GAP IS CONFIRMED and it is universal: DELTA_GPU_RTSTAT now reports
+// guestnz, the non-zero bytes in each target's own guest memory, and EVERY
+// target reads guestnz=0 while its image holds the frame. So a CPU read of any
+// render target returns zeros.
+//
+// What is NOT established is that P.T. depends on it. Copying the exposure
+// target's pixels back into its guest memory each frame (a raw memcpy probe,
+// ignoring surface tiling) left the frame at 0.85% saturation, i.e. within the
+// run-to-run spread -- which neither confirms nor refutes, because one reading
+// of anything here is worth nothing. Catching the guest actually reading that
+// address is what would settle it, and a general writeback would have to
+// respect the tiling the probe ignored.
+//
+// ---------------------------------------------------------------------------
+// MEASUREMENT TRAPS -- these cost days each
+// ---------------------------------------------------------------------------
+//
+// A DIAGNOSTIC THAT MOVES THE PIPELINE LIES. Depth scoring used to ride inside
+// DELTA_GPU_RTSTAT, and reading a depth image needs its own barriers and
+// submits. Doing that inside the colour report BROKE THE FRAME IT WAS
+// REPORTING ON: with RTSTAT set the scene stopped rendering, so every number
+// taken with it described a frame the measurement had already ruined. That is
+// where "the depth buffer is flat" came from. Depth scoring is now
+// DELTA_GPU_DBSTAT, separate and opt-in, and nothing barriers a target still
+// in UNDEFINED (that transition may discard the image). DBSTAT currently
+// crashes the guest on this title -- unfixed, and the reason the remaining
+// depth questions were answered with NOZTEST instead.
+//
+// A CAPPED TRACE CANNOT PROVE A NEGATIVE, and three separate wrong conclusions
+// in this file came from one. Every cap that mattered has been widened or
+// keyed:
+//   - DELTA_GPU_CSRES traced the FIRST dispatch of each shader. The streaming
+//     copy runs 158 times with a different source and destination each time,
+//     so "no compute writes this surface" was unfalsifiable. It now takes a
+//     shader address (uncapped for that shader), and DELTA_GPU_CSWATCH takes a
+//     guest address and reports any resource covering it, with the non-zero
+//     byte count of its guest range.
+//   - The CS writeback audit printed the first 24 image ranges overall; it now
+//     prints one line per distinct destination, and names a rejected layout or
+//     retile instead of returning quietly.
+//   - DELTA_GPU_TEXFAIL only covered its two rarest exits. It now covers
+//     unmapped ranges, unsupported formats, volume limits and failed uploads.
+//   - DELTA_GPU_CLEARTRACE / DELTA_GPU_FILLTRACE / DELTA_GPU_PIPETRACE take a
+//     line count or a ps address instead of a hardcoded cap.
+//   - DELTA_GPU_DRAWRT prints the whole frame when a frame filter is set, and
+//     64 (not 8) draws for a single target -- a composite's last draws are the
+//     ones that decide what is presented.
+//
+// A TRACE THAT READS THE WRONG VARIABLE LIES TWICE. The draw trace reported
+// every SINGLE-TEXTURE draw as MISS because it read the multi_* arrays that
+// path never fills. That sent this investigation into the texture cache twice.
+// It now reports whether the legacy path's one binding actually resolved.
+//
+// FRAME 200 IS STILL LOADING and resolves bindings differently. Steady state
+// is ~2200 and later; always pass DELTA_GPU_DRAWRT_FRAME.
+//
+// AN "EMPTY" TARGET MAY BE ALPHA-ONLY. 0x80d2a80000 reads 0% in a ppm because
+// its AO term is in ALPHA (RTSTAT shows nz full, rgbnz=2).
+//
+// ---------------------------------------------------------------------------
+// TECHNIQUES WORTH KEEPING
+// ---------------------------------------------------------------------------
+//
+// Walk the frame, do not read shaders picked by guesswork. DELTA_GPU_MAXDRAW=N
+// builds the frame up to N draws, which turns an end-of-frame readback into a
+// mid-frame one and bisects "which draw destroys this target" in a few runs.
+// It is how the tonemap was identified, and how the DB_RENDER_CONTROL clear was
+// caught (depth holds the real scene at 25 draws, flat by 30).
+//
+// DELTA_GPU_TEXFORCE=<addr> binds the 1x1 white default for exactly ONE
+// texture address. "Is THIS surface holding the frame back" is a question
+// forcing every sampler white cannot answer, and it is what proved the LUT.
+//
+// DELTA_GPU_VSFORCEZ=<v> makes every vertex leave clip z = v*w and the depth
+// buffer then reads exactly v -- that proved the whole depth write path
+// (attachment, state, readback) before any shader was suspected.
+// DELTA_GPU_VSPROBEW=<s> is the same trick for clip w.
+//
+// DELTA_GPU_CBSTAGED=<vs addr> dumps the bytes that reached the ring slot a
+// descriptor points at -- the thing the SPIR-V actually loads, not the guest
+// buffer. DELTA_GPU_NOZTEST=1 builds every pipeline with the depth test off,
+// which separates "the depth test rejected this pass" from "its shader
+// computed nothing"; those look identical in an empty target.
+//
+// DELTA_GPU_TEXCENSUS=<seconds> lists every sampled guest surface with its
+// footprint and whether it holds a non-zero byte. It is what reduced "some
+// texture is empty" to one 16x16x16 volume out of 224 surfaces.
+//
+// ---------------------------------------------------------------------------
+// RULED OUT, do not redo
+// ---------------------------------------------------------------------------
+//
+// Shader translation (0 declined, 0 unsupported ops); draw declines; the read
+// path; VA/physical aliasing; present/scanout selection (the flip address is
+// right); RT-as-texture resolution for the composite; the SRT "ptr" constant
+// buffers (a cbuf trace showing descriptors instead of floats is a root
+// pointing at a descriptor table, which is what it is meant to be); stencil;
+// the dynamic-UBO overflow; the SGPR file size.
+//
+// An odd fact that is NOT the cause of anything: nothing in the system writes
+// 0x80b5004400 -- no draw, no compute range, no CPU write, 580k CP DMA packets
+// all src==dst prefetch, no COPY_DATA opcode, no WRITE_DATA/EOP/EOS/RELEASE_MEM
+// hit under DELTA_GPU_ADDRWATCH. An earlier note built a whole missing-producer
+// hunt on it after tracing the wrong draw; that conclusion is retracted.
+//
+// Also retracted: "draw 203's blend blanks the composite". That draw sits
+// immediately after a metadata pass we were treating as a clear (fault 4), so
+// what MAXDRAW saw at that boundary was the clear, not the blend. Its blend
+// (SRC_ALPHA / ONE_MINUS_SRC_ALPHA against a source whose alpha is 0) is a
+// no-op, which is exactly what it should be.
+//
+// The Garlic pool base is 0x80b5000000 +2816 MB. The old record's 0x80a5100000
+// predates the dmem fix and every offset derived from it was wrong.
+//
+// Still open, deliberately unchanged: we report 12 GiB from
+// GetDirectMemorySize vs a real PS4's ~4.5 GiB. P.T.'s own pools end at
+// 0x11c800000, so 0x11C000000 is too small and crashes it at
+// Sh_main_ps4+0x137c; the low-memory path is separately unimplemented.
 
 // The renderer needs a few thousand pad reads before the title's transition
 // handler exists, so hold neutral before pulsing anything. Made no difference
