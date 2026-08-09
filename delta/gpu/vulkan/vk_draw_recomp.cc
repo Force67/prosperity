@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -36,7 +37,10 @@ DELTA_OPTION(int, kSeqN, "DELTA_GPU_DRAWSEQ", 0);
 DELTA_OPTION(uint64_t, kWant, "DELTA_GPU_DRAWRT", 0);
 DELTA_OPTION(int, kWantFrame, "DELTA_GPU_DRAWRT_FRAME", 0);
 DELTA_OPTION(int, kBusy, "DELTA_GPU_DRAWRT_BUSY", 0);
-DELTA_OPTION(bool, kClearTrace, "DELTA_GPU_CLEARTRACE", false);
+// A COUNT, not a flag: as a bool this capped the trace at ONE line, so a
+// target whose clears are all being dropped looked identical to a target
+// with no clears at all.
+DELTA_OPTION(int, kClearTrace, "DELTA_GPU_CLEARTRACE", 0);
 // Name the guest writer of a faded-out UI vertex colour; see the arm below.
 DELTA_OPTION(bool, kUiWatch, "DELTA_GPU_UIWATCH", false);
 // Honour the scissor of a GNM fast clear instead of clearing the whole target.
@@ -48,6 +52,15 @@ DELTA_OPTION(uint64_t, kBindTrace, "DELTA_GPU_BINDTRACE", 0);
 DELTA_OPTION(bool, kRawBufTrace, "DELTA_GPU_RAWBUF", false);
 DELTA_OPTION(bool, kSelfTrace, "DELTA_GPU_SELFTRACE", false);
 DELTA_OPTION(bool, kTightCbuf, "DELTA_GPU_TIGHTCBUF", false);
+// DELTA_GPU_CBSTAGED=<vs addr> (or 1 for every draw): the bytes that reached
+// the ring slot the descriptor points at -- what the SPIR-V actually loads,
+// as opposed to the guest buffer the CPU-side trace prints.
+DELTA_OPTION(uint64_t, kCbInfo, "DELTA_GPU_CBSTAGED", 0);
+// DELTA_GPU_TEXFORCE=<guest addr>: bind the 1x1 white default for exactly
+// this texture address. A diagnostic, not a setting -- it answers "is THIS
+// surface the one holding the frame back", which forcing every sampler
+// white cannot.
+DELTA_OPTION(uint64_t, kTexForce, "DELTA_GPU_TEXFORCE", 0);
 DELTA_OPTION(bool, kTint, "DELTA_GPU_RTTINT", false);
 }  // namespace
 
@@ -55,6 +68,11 @@ namespace gpu::vk {
 
 using rhi::DrawInfo;
 using rhi::FlushCsWritesRange;
+
+// The recompiled layout declares one push-constant range naming both stages
+// (see GetRecompPipe), so every push has to name both.
+constexpr VkShaderStageFlags kPcStages =
+    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
 
 namespace {
 
@@ -276,6 +294,13 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
   // live image for cycled/aliased RT addresses instead of stale guest memory.
   // Additive: an exact RT base resolves to itself.
   uint64_t tex_base = d.tex_base;
+  // DELTA_GPU_TEXFORCE also has to cover the single-texture path, or it
+  // silently does nothing for exactly the blit-shaped draws that path exists
+  // for -- and a diagnostic that quietly no-ops reads as a negative result.
+  const bool force_white_tex =
+      kTexForce && tex_base == (uint64_t)kTexForce;
+  if (force_white_tex)
+    tex_base = 0;
   // Render targets are plain 2D images, so only a plain 2D binding may resolve
   // to one. An array or volume binding declared a sampler type no render target
   // can satisfy.
@@ -373,6 +398,36 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
   // turns P.T.'s opaque white and opaque black clears into transparent black,
   // which is a hole in a deferred composite.
   if (d.is_clear_rect) {
+    // ...but a RECT_LIST with no pixel shader is ALSO the shape of the CB
+    // metadata passes, and those are the opposite of a clear: they preserve
+    // the surface. CB_COLOR_CONTROL.MODE tells them apart --
+    // CB_NORMAL(1) is the clear; CB_ELIMINATE_FAST_CLEAR(2),
+    // CB_RESOLVE(3), CB_DECOMPRESS(4) and CB_FMASK_DECOMPRESS(5) resolve
+    // CMASK/FMASK/DCC into the surface. We never compress a target, so for us
+    // those are no-ops -- but they still have to be consumed, because with no
+    // pixel shader they would otherwise rasterise nothing and drop through as
+    // a normal draw.
+    //
+    // P.T. issues 58k of these and not one real fast clear: every frame it
+    // eliminated the fast-clear state of its composite eight times, twice
+    // right before the tonemap pass samples that same target through a
+    // feedback copy. Taking them for clears wiped the scene a draw before it
+    // was read, which is why the game presented black.
+    const uint32_t cb_mode = (d.color_control >> 4) & 7u;
+    if (cb_mode != 1) {
+      if (kClearTrace) {
+        static int n = 0;
+        if (n++ < kClearTrace)
+          std::fprintf(stderr,
+                       "[clear] f%d draw#%u rect RT %#lx cc=%#x mode=%u "
+                       "NOT-A-CLEAR (CB metadata pass, content preserved)\n",
+                       g_frame.num, g_frame.draws, (unsigned long)d.rt_base,
+                       d.color_control, cb_mode);
+      }
+      WhyDrop(d, "cb-metadata-pass");
+      g_frame.draws++;
+      return true;
+    }
     // A fast clear covers the generic scissor, not necessarily the whole
     // target, and we have no way to express a partial one here -- a pending
     // clear is realised as loadOp=CLEAR over the entire attachment. SotC
@@ -406,14 +461,20 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
       const VkClearColorValue clear = ColorTargetClearValue(
           d.mrt_info[i], d.mrt_clear_word[i][0], d.mrt_clear_word[i][1]);
       it->second.clear_pending = true;
+      it->second.clear_src = "clear-rect";
       it->second.clear_value = clear;
       if (kClearTrace) {
         static int n = 0;
-        if (n++ < 16)
+        if (n++ < kClearTrace)
           std::fprintf(stderr,
-                       "[clear] rect RT %#lx info=%#x CLEAR_WORD %08x %08x -> "
-                       "(%g %g %g %g)\n",
+                       "[clear] f%d draw#%u rect RT %#lx info=%#x cc=%#x mode=%u gen="
+                       "(%u,%u)-(%u,%u) win=%#x/%#x scr=%#x/%#x target=%ux%u "
+                       "CLEAR_WORD %08x %08x -> (%g %g %g %g)\n",
+                       g_frame.num, g_frame.draws,
                        (unsigned long)d.mrt_base[i], d.mrt_info[i],
+                       d.color_control, (d.color_control >> 4) & 7u, cx0, cy0,
+                       cx1, cy1, d.clear_window_tl, d.clear_window_br,
+                       d.clear_screen_tl, d.clear_screen_br, d.rt_w, d.rt_h,
                        d.mrt_clear_word[i][0], d.mrt_clear_word[i][1],
                        clear.float32[0], clear.float32[1], clear.float32[2],
                        clear.float32[3]);
@@ -471,7 +532,26 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
     }
   }
 
+  // A target whose FIRST draw of a frame blends with COLOR_DESTBLEND == ONE is
+  // being ACCUMULATED into, and accumulation from an unknown starting value is
+  // meaningless -- the guest necessarily begins it from a defined state. The
+  // lazy-clear heuristic (persist RT content across frames as LOAD) is right
+  // for content baked once and wrong here: without a reset the accumulation
+  // compounds every frame. P.T.'s light buffer is accumulated by two draws and
+  // then DIVIDED by its own alpha by a third, which turns the compounding into
+  // a gain of ~8 per frame and pins texels at the fp16 ceiling.
+  if (kLazyClear2 && d.rt_base && d.blend_enable &&
+      ((d.blend_control >> 8) & 0x1F) == 1u) {
+    auto it = g_rts.find(d.rt_base);
+    if (it != g_rts.end() && it->second.last_frame != g_frame.num &&
+        it->second.ever_rendered) {
+      it->second.clear_pending = true;
+      it->second.clear_src = "accumulate-needs-reset";
+      it->second.clear_value = VkClearColorValue{{0.f, 0.f, 0.f, 0.f}};
+    }
+  }
   // DELTA_GPU_SKIP_PS=<hex>: diagnostic only. Drop every draw using that guest
+
   // pixel-shader address, to prove what a single pass contributes to the
   // presented frame. Guest shader addresses are stable per build.
   {
@@ -606,9 +686,37 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
                                         ColorTargetFormat(d.mrt_info[0]))
                                 : nullptr;
         if (rt) {
+          // Counted, not sampled.
+          if (kClearTrace) {
+            static std::atomic<uint64_t> n{0};
+            if ((n.fetch_add(1) % 500) == 0)
+              std::fprintf(stderr,
+                           "[clear] lazyclear-heuristic #%llu rt=%#lx mrt=%u "
+                           "mrt1=%#lx\n",
+                           (unsigned long long)n.load(),
+                           (unsigned long)d.rt_base, d.mrt_count,
+                           (unsigned long)(d.mrt_count > 1 ? d.mrt_base[1] : 0));
+          }
           rt->clear_pending = true;
+          rt->clear_src = "lazyclear-heuristic";
           std::memcpy(rt->clear_value.float32, clear_color,
                       sizeof(clear_color));
+          // Which draws this heuristic decided were clears. It reclassifies a
+          // fullscreen near-black draw as a clear and suppresses it, so a
+          // legitimate dark fullscreen layer disappears AND takes the target's
+          // previous contents with it.
+          if (kClearTrace) {
+            static int n = 0;
+            if (n++ < kClearTrace)
+              std::fprintf(stderr,
+                           "[clear] f%d draw#%u LAZYCLEAR-HEURISTIC RT %#lx "
+                           "vs=%#lx ps=%#lx color=(%g %g %g %g) blend=%d/%#x\n",
+                           g_frame.num, g_frame.draws,
+                           (unsigned long)d.rt_base, (unsigned long)d.vs_addr,
+                           (unsigned long)d.ps_addr, clear_color[0],
+                           clear_color[1], clear_color[2], clear_color[3],
+                           (int)d.blend_enable, d.blend_control);
+          }
         }
         // This draw also performs the guest's reverse-Z clear (depth write
         // enabled, ZFUNC=ALWAYS). Suppressing its color write must not discard
@@ -719,7 +827,7 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
   // region).
   VkDescriptorSet tex_set = VK_NULL_HANDLE;
   if (rp->textured && !rp->multi_tex && !rt_as_tex) {
-    if (GuestTextureUploadSupported(d.tex_dfmt, d.tex_nfmt))
+    if (!force_white_tex && GuestTextureUploadSupported(d.tex_dfmt, d.tex_nfmt))
       tex_set = GetTexture(
           d.tex_base, d.tex_w, d.tex_h, d.tex_dfmt, d.tex_nfmt, d.tex_tiling,
           d.tex_pitch, d.tex_layers, d.tex_base_array, d.tex_view_layers,
@@ -787,6 +895,18 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
       // resolve to one. An array or volume binding declared a sampler type no
       // render target can satisfy.
       const bool rt_eligible = !t.arrayed && !t.is_3d;
+      // One base can hold several render-target geometries, and only the live
+      // one answers to the address. Pick the variant this sample is asking for
+      // before deciding what the binding resolves to -- but never while the
+      // base is a target of this same draw, where the feedback path below owns
+      // the image.
+      if (base && rt_eligible && !is_bound_target(base)) {
+        ActivateSampledRtVariant(base, t.w, t.h);
+        // Same for depth, but never for the target this draw is testing
+        // against: that one has to stay the attachment.
+        if (base != d.depth_base)
+          ActivateSampledDepthVariant(base, t.w, t.h);
+      }
       if (base && rt_eligible && !g_rts.count(base) && !g_depths.count(base)) {
         bool depth_format = t.dfmt == 4 && t.nfmt == 7;
         uint64_t resolved =
@@ -795,8 +915,25 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
           resolved = ResolveSampledRT(base, t.w, t.h);
         if (!resolved && !depth_format)
           resolved = ResolveSampledDepth(base, t.w, t.h);
-        if (resolved)
+        if (resolved) {
           base = resolved;
+          // Now that the address has resolved to a target, make the variant
+          // this sample asked for the live one.
+          if (base != d.depth_base)
+            ActivateSampledDepthVariant(base, t.w, t.h);
+        }
+      }
+      if (kTexForce && t.base == (uint64_t)kTexForce) {
+        static int forced = 0;
+        if (forced++ < 6)
+          std::fprintf(stderr, "[texforce] ps=%#lx bind=%u base=%#lx -> white\n",
+                       (unsigned long)d.ps_addr, i, (unsigned long)t.base);
+        base = 0;  // resolves to nothing -> the white fallback is bound
+        multi_color[i] = 0;
+        multi_feedback[i] = 0;
+        multi_depth[i] = 0;
+        multi_views[i] = VK_NULL_HANDLE;
+        continue;
       }
       // A pending CS write into an RT-resolved range must reach the image
       // before this draw samples it (the flush uploads it -- see
@@ -1103,7 +1240,8 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
         }
       }
       tex_set =
-          GetMultiTexSet(d, rp->tex_set_layout, multi_views, multi_layouts);
+          GetMultiTexSet(d, rp->tex_set_layout, multi_views, multi_layouts,
+                         multi_depth);
       if (!tex_set)
         return Decline(kGuestTex);
     }
@@ -1114,8 +1252,32 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
       return true;  // RT cap hit: treat as handled (dropped)
     if (!BeginRegion(d.mrt_base, d.mrt_info, mrt_n, d.rt_w, d.rt_h,
                       d.depth_base, d.depth_clear, d.stencil_base,
-                      d.stencil_clear, samples_bound_depth))
+                      d.stencil_clear, samples_bound_depth, DepthW(d),
+                      DepthH(d)))
       return true;
+  }
+  // DB_RENDER_CONTROL clear. The guest issues a RECT_LIST with no vertex
+  // buffers and no pixel shader, and the hardware fills the depth/stencil
+  // plane with DB_DEPTH_CLEAR / DB_STENCIL_CLEAR over it -- the shader's
+  // output is not used. Running it as an ordinary draw wrote the vertex
+  // shader's z instead, which for P.T. is one packet that flattened the whole
+  // scene depth it had just rendered, and every pass that samples that depth
+  // (its SSAO first) then had nothing to read.
+  if ((d.depth_clear_draw || d.stencil_clear_draw) && d.depth_base &&
+      g_depths.count(d.depth_base)) {
+    VkClearAttachment ca{};
+    ca.aspectMask =
+        (d.depth_clear_draw ? VK_IMAGE_ASPECT_DEPTH_BIT : 0u) |
+        (d.stencil_clear_draw ? VK_IMAGE_ASPECT_STENCIL_BIT : 0u);
+    ca.clearValue.depthStencil = {d.depth_clear, d.stencil_clear};
+    VkClearRect cr{};
+    cr.rect = {{0, 0}, {d.rt_w, d.rt_h}};
+    cr.baseArrayLayer = 0;
+    cr.layerCount = 1;
+    vkCmdClearAttachments(g_frame.cmd, 1, &ca, 1, &cr);
+    g_depths[d.depth_base].dirty_for_read = true;
+    g_frame.draws++;
+    return true;
   }
   if (rp->multi_tex) {
     if (!tex_set) {
@@ -1141,7 +1303,8 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
         }
       }
       tex_set =
-          GetMultiTexSet(d, rp->tex_set_layout, multi_views, multi_layouts);
+          GetMultiTexSet(d, rp->tex_set_layout, multi_views, multi_layouts,
+                         multi_depth);
     }
     if (!tex_set)
       return Decline(kGuestTex);
@@ -1150,7 +1313,7 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
     VkImageLayout layouts[kMaxTex] = {};
     views[0] = SampledView(g_rts[tex_base], d.tex_swizzle, true);
     layouts[0] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    tex_set = GetMultiTexSet(d, g_tex.ds_layout, views, layouts);
+    tex_set = GetMultiTexSet(d, g_tex.ds_layout, views, layouts, nullptr);
     if (!tex_set)
       return Decline(kMidRegion);
   } else if (color_as_tex) {
@@ -1161,7 +1324,7 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
     VkImageLayout layouts[kMaxTex] = {};
     views[0] = SampledView(src, d.tex_swizzle);
     layouts[0] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    tex_set = GetMultiTexSet(d, g_tex.ds_layout, views, layouts);
+    tex_set = GetMultiTexSet(d, g_tex.ds_layout, views, layouts, nullptr);
     if (!tex_set)
       return Decline(kMidRegion);
   } else if (depth_as_tex) {
@@ -1172,7 +1335,8 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
     VkImageLayout layouts[kMaxTex] = {};
     views[0] = SampledView(src, d.tex_swizzle);
     layouts[0] = VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL;
-    tex_set = GetMultiTexSet(d, g_tex.ds_layout, views, layouts);
+    const uint64_t depth_only[kMaxTex] = {tex_base};
+    tex_set = GetMultiTexSet(d, g_tex.ds_layout, views, layouts, depth_only);
     if (!tex_set)
       return Decline(kMidRegion);
   }
@@ -1181,10 +1345,10 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
   vkCmdBindPipeline(g_frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, rp->pipe);
   // 16 user-data dwords per stage, in its own half of the shared push range:
   // both stages at offset 0 meant the second push overwrote the first.
-  vkCmdPushConstants(g_frame.cmd, rp->layout, VK_SHADER_STAGE_VERTEX_BIT, 0, 64,
+  vkCmdPushConstants(g_frame.cmd, rp->layout, kPcStages, 0, 64,
                      d.vs_user_data);
-  vkCmdPushConstants(g_frame.cmd, rp->layout, VK_SHADER_STAGE_FRAGMENT_BIT, 64,
-                     64, d.ps_user_data);
+  vkCmdPushConstants(g_frame.cmd, rp->layout, kPcStages, 64, 64,
+                     d.ps_user_data);
   if (gpu::gcn::PushCodeBase()) {
     // Each stage's OWN code address, for s_getpc_b64: the modules are keyed by
     // content, so the address cannot live in the SPIR-V, and VS and PS live at
@@ -1194,10 +1358,10 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
                                  static_cast<uint32_t>(d.vs_addr >> 32)};
     const uint32_t ps_base[2] = {static_cast<uint32_t>(d.ps_addr),
                                  static_cast<uint32_t>(d.ps_addr >> 32)};
-    vkCmdPushConstants(g_frame.cmd, rp->layout, VK_SHADER_STAGE_VERTEX_BIT, 128,
+    vkCmdPushConstants(g_frame.cmd, rp->layout, kPcStages, 128,
                        8, vs_base);
-    vkCmdPushConstants(g_frame.cmd, rp->layout, VK_SHADER_STAGE_FRAGMENT_BIT,
-                       136, 8, ps_base);
+    vkCmdPushConstants(g_frame.cmd, rp->layout, kPcStages, 136, 8,
+                       ps_base);
   }
   // Copy each guest cbuffer window into the per-frame ring and bind set 1.
   // Vulkan requires one dynamic offset for every dynamic descriptor in the set
@@ -1264,6 +1428,36 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
     } else {  // binding 0 without a resolved cbuffer: the heuristic MVP
       n = sizeof(d.mvp);
       std::memcpy(cb_dst, d.mvp, n);
+    }
+    // DELTA_GPU_CBINFO: what the shader will actually read. The CPU-side
+    // trace prints the guest buffer; this prints the bytes that reached the
+    // ring slot the descriptor points at, which is what the SPIR-V loads.
+    // DELTA_GPU_DRAWRT_FRAME also gates this: unfiltered, the 40-line cap is
+    // spent on startup frames, where a light buffer is legitimately all zero
+    // and reads as the very corruption being looked for.
+    if (kCbInfo && have_cbuf && n >= 16 &&
+        (!kWantFrame || g_frame.num == kWantFrame) &&
+        (kCbInfo == 1 || d.vs_addr == (uint64_t)kCbInfo)) {
+      static int shown = 0;
+      if (shown++ < 40) {
+        const float* f = reinterpret_cast<const float*>(cb_dst);
+        std::fprintf(stderr,
+                     "[cbinfo] vs=%#lx bind=%u base=%#lx n=%u @0:", 
+                     (unsigned long)d.vs_addr, i, (unsigned long)cb.base, n);
+        // Sixteen, for the same reason as the drawrt dump: the window walk
+        // below starts at 0x40, so eight left bytes 32..63 unprintable.
+        for (uint32_t k = 0; k < 16 && k * 4 < n; k++)
+          std::fprintf(stderr, " %g", f[k]);
+        // Every 0x40 window, not a chosen few: the value a shader actually
+        // multiplies by is as likely to sit at byte 376 (P.T.'s light pass
+        // scales every light colour by a scalar there) as at 0x40 or 0xc0.
+        for (uint32_t off = 0x40u; off + 4 <= n; off += 0x40u) {
+          std::fprintf(stderr, " | @%#x:", off);
+          for (uint32_t k = off / 4; k < off / 4 + 16 && k * 4 + 4 <= n; k++)
+            std::fprintf(stderr, " %g", f[k]);
+        }
+        std::fprintf(stderr, "\n");
+      }
     }
     const size_t window = static_cast<size_t>(next / cb_stride);
     if (window >= g_ring.ubo_written.size())
@@ -1426,21 +1620,89 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
     // frame rather than the opening composites.
     // DELTA_GPU_DRAWRT_BUSY=N: only frames that reach N draws, for screens whose
     // frame number moves between runs.
-    if (kWant && (all || g_region.cur_rt == kWant) && shown < (all ? 140 : 8) &&
+    // A composite target takes tens of draws per frame and the ones that
+    // decide its final content are the LAST few, so a cap of 8 shows only the
+    // ones that get overwritten.
+    // With a frame filter the output is bounded by that frame's draw count, so
+    // the whole graph can be printed; without one, cap it. The end of the graph
+    // is the part that decides what is presented, and a low cap never reaches
+    // it.
+    const int cap = all ? (kWantFrame ? 100000 : 140) : 64;
+    if (kWant && (all || g_region.cur_rt == kWant) && shown < cap &&
         (!kWantFrame || (int)g_frame.num == kWantFrame) &&
         (int)g_frame.draws >= kBusy) {
       shown++;
       std::fprintf(stderr,
-                   "[drawrt] rt=%#lx %ux%u indexed=%d vcount=%u icount=%u "
-                   "prim=%u tmask=%#x num_vbufs=%u stride=%u mrt=%u "
+                   "[drawrt] f%d #%u rt=%#lx %ux%u indexed=%d vcount=%u "
+                   "icount=%u prim=%u tmask=%#x num_vbufs=%u stride=%u mrt=%u "
                    "vp=%g,%g scale %g,%g off vs=%#lx ps=%#lx\n",
+                   g_frame.num, g_frame.draws,
                    (unsigned long)g_region.cur_rt, d.rt_w, d.rt_h, (int)indexed,
                    d.vertex_count, d.index_count, d.prim_type, d.target_mask,
                    d.num_vbufs, d.vertex_stride, d.mrt_count,
                    d.viewport_x_scale, d.viewport_y_scale, d.viewport_x_offset,
                    d.viewport_y_offset, (unsigned long)d.vs_addr,
                    (unsigned long)d.ps_addr);
-      for (uint32_t i = 0; i < multi_n; i++) {
+      std::fprintf(stderr,
+                   "[drawrt]  blend en=%d ctrl=%#x tmask=%#x surf=%ux%u "
+                   "zscale=%g zoff=%g scissor=(%u,%u)-(%u,%u)\n",
+                   (int)d.blend_enable, d.blend_control, d.target_mask,
+                   d.rt_surf_w, d.rt_surf_h, d.viewport_z_scale,
+                   d.viewport_z_offset, d.scissor_tl & 0x7FFF,
+                   (d.scissor_tl >> 16) & 0x7FFF, d.scissor_br & 0x7FFF,
+                   (d.scissor_br >> 16) & 0x7FFF);
+      // Every bound target's own CB_COLORn_INFO. The colour FORMAT and
+      // NUMBER_TYPE decide whether the hardware clamps a write at 1.0 or keeps
+      // it, which is the difference between a highlight and a blown one.
+      for (uint32_t m = 0; m < d.mrt_count && m < 8; m++)
+        std::fprintf(stderr,
+                     "[drawrt]  mrt%u base=%#lx info=%#x fmt=%u ntype=%u\n", m,
+                     (unsigned long)d.mrt_base[m], d.mrt_info[m],
+                     (d.mrt_info[m] >> 2) & 0x1F, (d.mrt_info[m] >> 8) & 0x7);
+      // Every bound target's own CB_BLENDn_CONTROL. An MRT pass whose second
+      // attachment blends differently from its first is invisible in the
+      // single-target line above, and a wrong enable there accumulates over a
+      // pass that draws the same target dozens of times.
+      for (uint32_t m = 1; m < d.mrt_count && m < 8; m++)
+        std::fprintf(stderr, "[drawrt]  blend%u en=%d ctrl=%#x base=%#lx\n", m,
+                     (int)((d.mrt_blend_mask >> m) & 1u), d.mrt_blend[m],
+                     (unsigned long)d.mrt_base[m]);
+      // Whether this pass writes depth, and into what, decides whether a later
+      // depth-sampling pass has anything to read.
+      std::fprintf(stderr,
+                   "[drawrt]  depth base=%#lx valid=%d test=%d write=%d "
+                   "func=%u clear=%g stencil=%d cleardraw=%d/%d rc=%#x sbase=%#lx\n",
+                   (unsigned long)d.depth_base, (int)d.depth_valid,
+                   (int)d.depth_test_enable, (int)d.depth_write_enable,
+                   d.depth_func, d.depth_clear, (int)d.stencil_enable,
+                   (int)d.depth_clear_draw, (int)d.stencil_clear_draw,
+                   d.render_control, (unsigned long)d.stencil_base);
+      // A single-texture pipeline never fills the multi_* arrays -- it binds
+      // through color_as_tex/depth_as_tex below -- so reading them here would
+      // report every such draw as a MISS that resolved fine.
+      // Whether the legacy path's one binding resolved to a real guest
+      // texture or fell back to a 1x1 default -- without this every
+      // single-texture draw reported MISS even when its upload was fine, which
+      // is a false lead pointing straight at the texture cache.
+      const bool legacy_resolved =
+          tex_set && tex_set != g_tex.white_set &&
+          tex_set != g_tex.white_array_set && tex_set != g_tex.white_3d_set &&
+          tex_set != g_tex.zero_set && tex_set != g_tex.zero_array_set &&
+          tex_set != g_tex.zero_3d_set;
+      const uint64_t shown_color[1] = {color_as_tex ? tex_base : 0};
+      const uint64_t shown_feedback[1] = {feedback_as_tex ? tex_base : 0};
+      const uint64_t shown_depth[1] = {depth_as_tex ? tex_base : 0};
+      const uint64_t* rc = rp->multi_tex ? multi_color : shown_color;
+      const uint64_t* rf = rp->multi_tex ? multi_feedback : shown_feedback;
+      const uint64_t* rd = rp->multi_tex ? multi_depth : shown_depth;
+      const uint32_t shown_n = rp->multi_tex ? multi_n : std::min(multi_n, 1u);
+      // How many textures the recompiler found vs how many are being reported:
+      // a shader with several image_samples that took the single-texture path
+      // reads only the first, and the trace would look identical to a genuine
+      // one-texture blit.
+      std::fprintf(stderr, "[drawrt]  texs=%zu multi=%d n=%u\n",
+                   d.recomp->ps_texs.size(), (int)rp->multi_tex, multi_n);
+      for (uint32_t i = 0; i < shown_n; i++) {
         const auto& t = d.texs[i];
         if (!t.base)
           continue;
@@ -1453,34 +1715,97 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
                      (int)t.depth_compare, (int)t.storage, t.swizzle,
                      (int)t.sampler_valid, t.sampler[0], t.sampler[1],
                      t.sampler[2], t.sampler[3]);
+        if (t.src && gpu::IsReadableRange(t.src, 32)) {
+          const uint32_t* tw = reinterpret_cast<const uint32_t*>(t.src);
+          std::fprintf(stderr,
+                       "[drawrt]  tex%u T# src=%#lx [%08x %08x %08x %08x "
+                       "%08x %08x %08x %08x]\n",
+                       i, (unsigned long)t.src, tw[0], tw[1], tw[2], tw[3],
+                       tw[4], tw[5], tw[6], tw[7]);
+        }
+        const bool resolved_guest =
+            rp->multi_tex ? multi_views[i] != VK_NULL_HANDLE : legacy_resolved;
         std::fprintf(stderr,
                      "[drawrt]  tex%u %#lx %ux%u dfmt=%u tiling=%u -> %s%#lx\n",
                      i, (unsigned long)t.base, t.w, t.h, t.dfmt, t.tiling,
-                     multi_color[i]      ? "rt "
-                     : multi_feedback[i] ? "fb "
-                     : multi_depth[i]    ? "depth "
-                     : multi_views[i]    ? "guest "
-                                         : "MISS ",
-                     (unsigned long)(multi_color[i]      ? multi_color[i]
-                                     : multi_feedback[i] ? multi_feedback[i]
-                                     : multi_depth[i]    ? multi_depth[i]
-                                                         : 0));
+                     rc[i]           ? "rt "
+                     : rf[i]         ? "fb "
+                     : rd[i]         ? "depth "
+                     : resolved_guest ? "guest "
+                                      : "MISS ",
+                     (unsigned long)(rc[i]   ? rc[i]
+                                     : rf[i] ? rf[i]
+                                     : rd[i] ? rd[i]
+                                             : 0));
+        // A MISS is the interesting case and says nothing on its own: name the
+        // render-target state the binding was matched against.
+        // Also report a binding that fell through to guest memory while its
+        // address IS a live render target: that is a resolution failure with a
+        // plausible-looking result, which is worse than a MISS because the
+        // draw silently samples stale bytes instead of the image.
+        if (resolved_guest && !rc[i] && !rf[i] && !rd[i] &&
+            g_rts.count(t.base)) {
+          const auto& rt = g_rts[t.base];
+          std::fprintf(stderr,
+                       "[drawrt]  tex%u GUEST-OVER-RT: live=%ux%u "
+                       "ever_rendered=%d variants=%zu\n",
+                       i, rt.w, rt.h, (int)rt.ever_rendered,
+                       g_rt_variants.count(t.base)
+                           ? g_rt_variants[t.base].size()
+                           : 0);
+        }
+        if (!rc[i] && !rf[i] && !rd[i] && !resolved_guest) {
+          auto rt = g_rts.find(t.base);
+          std::fprintf(stderr,
+                       "[drawrt]  tex%u MISS why: in_rts=%d live=%ux%u "
+                       "ever_rendered=%d depth=%d arrayed=%d is_3d=%d "
+                       "resolved=%#lx\n",
+                       i, rt != g_rts.end() ? 1 : 0,
+                       rt != g_rts.end() ? rt->second.w : 0,
+                       rt != g_rts.end() ? rt->second.h : 0,
+                       rt != g_rts.end() ? (int)rt->second.ever_rendered : -1,
+                       g_depths.count(t.base) ? 1 : 0, (int)t.arrayed,
+                       (int)t.is_3d,
+                       (unsigned long)ResolveSampledRT(t.base, t.w, t.h));
+        }
       }
-      for (uint32_t c = 0; c < kCbufBindings; c++) {
+      // Only the slots this draw actually declared: the rest are unused
+      // array entries, and reporting them buries the one that matters.
+      for (uint32_t c = 0; c < std::min<uint32_t>(d.num_cbufs, kCbufBindings);
+           c++) {
         const auto& cb = d.cbufs[c];
-        if (!gpu::IsReadableRange(cb.base, std::min(cb.size, 192u)))
+        if (!gpu::IsReadableRange(cb.base, std::min(cb.size, 192u))) {
+          // Say so rather than skipping: a silently absent binding reads as a
+          // pass with fewer constant buffers than it has, and a shader whose
+          // transform lives in the missing one draws with a zero matrix.
+          if (cb.base || cb.size)
+            std::fprintf(stderr, "[drawrt]  cb%u %#lx sz=%u UNREADABLE\n", c,
+                         (unsigned long)cb.base, cb.size);
+          else
+            std::fprintf(stderr, "[drawrt]  cb%u UNBOUND\n", c);
           continue;
+        }
         const uint32_t* w = reinterpret_cast<const uint32_t*>(cb.base);
         std::fprintf(stderr, "[drawrt]  cb%u %#lx sz=%u:", c,
                      (unsigned long)cb.base, cb.size);
-        for (uint32_t k = 0; k < 8 && k * 4 < cb.size; k++)
+        // Sixteen, not eight: with the window walk below starting at 0x40,
+        // eight left bytes 32..63 unprintable -- and P.T.'s draw #38 scales its
+        // whole extinction by a scalar at byte 44.
+        for (uint32_t k = 0; k < 16 && k * 4 < cb.size; k++)
           std::fprintf(stderr, " %g", *reinterpret_cast<const float*>(&w[k]));
-        // The 3D VS loads its transform with s_buffer_load_dwordx16 at byte
-        // offset 0x80; show that window when the binding is big enough to hold
-        // it.
-        if (cb.size >= 192) {
-          std::fprintf(stderr, "\n[drawrt]   @0x80:");
-          for (uint32_t k = 32; k < 48; k++)
+        // A shader loads its constants with s_buffer_load at whatever offset
+        // the compiler chose, so show EVERY 4x4-sized window the binding is big
+        // enough to hold. Showing only 0x40 and 0x80 printed a plausible matrix
+        // while the value the shader actually multiplies by sat unexamined:
+        // P.T.'s light pass scales every light colour by a scalar at byte 376
+        // of a 464-byte buffer, past the last window this used to print.
+        // Including the final PARTIAL window: P.T.'s light pass decides whether
+        // to alpha-test its cookie on a scalar at byte 200 of a 208-byte
+        // buffer, which every whole-window walk stops just short of.
+        for (uint32_t off = 0x40u; off + 4 <= cb.size; off += 0x40u) {
+          std::fprintf(stderr, "\n[drawrt]   @%#x:", off);
+          for (uint32_t k = off / 4; k < off / 4 + 16 && k * 4 + 4 <= cb.size;
+               k++)
             std::fprintf(stderr, " %g", *reinterpret_cast<const float*>(&w[k]));
         }
         std::fprintf(stderr, "\n");

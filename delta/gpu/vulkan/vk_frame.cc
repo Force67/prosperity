@@ -6,6 +6,7 @@
 
 #include "gfx/gfx.h"
 #include "gpu/gcn/gcn_translate.h"
+#include "gpu/guest_memory.h"
 #include "gpu/rhi/renderer.h"
 #include "gpu/vulkan/vk_backend.h"
 #include "gpu/vulkan/vk_capture.h"
@@ -23,15 +24,19 @@
 
 #include <dlfcn.h>
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <vector>
 #include <utl/options.h>
 
 namespace {
 DELTA_OPTION(bool, kGpuSync, "DELTA_GPU_SYNC", false);
 DELTA_OPTION(int, kRdocFrame, "DELTA_RDOC_FRAME", 0);
+DELTA_OPTION(bool, kFbDump, "DELTA_GPU_FBDUMP", false);
+DELTA_OPTION(uint64_t, kMemWatch, "DELTA_GPU_MEMWATCH", 0);
 DELTA_OPTION(bool, kRdocExit, "DELTA_RDOC_EXIT", false);
 DELTA_OPTION(int, kReportFrame, "DELTA_GPU_RTSTAT_FRAME", 0);
 DELTA_OPTION(int, kRtStatEvery, "DELTA_GPU_RTSTAT_EVERY", 200);
@@ -54,6 +59,17 @@ DELTA_OPTION(bool, kClearRedTransfer, "DELTA_GPU_CLEARRED", false);
 DELTA_OPTION(bool, kDumpRaw, "DELTA_GPU_RTDUMP_RAW", false);
 DELTA_OPTION(bool, kGpuRtdump, "DELTA_GPU_RTDUMP", false);
 DELTA_OPTION(bool, kGpuRtstat, "DELTA_GPU_RTSTAT", false);
+// Depth scoring is a SEPARATE knob from RTSTAT on purpose: reading a depth
+// image needs its own barriers and submits, and doing that inside the colour
+// report perturbed the frame it was reporting on -- the scene stopped
+// rendering whenever RTSTAT was on, which silently invalidated every colour
+// measurement taken alongside it. Opt in when you want depth, and know that
+// the numbers you get come at that cost.
+// DELTA_GPU_DBSTAT=1 scores every depth target; =<base> scores only that one.
+// Each score costs a synchronous submit and a full-image readback, and this
+// runs with the frame already submitted -- doing it for a 2048x2048 shadow
+// map alongside everything else is enough to take the guest down with it.
+DELTA_OPTION(uint64_t, kGpuDbStat, "DELTA_GPU_DBSTAT", 0);
 DELTA_OPTION(bool, kGpuRtstatAll, "DELTA_GPU_RTSTAT_ALL", false);
 DELTA_OPTION(bool, kNanDis, "DELTA_GPU_RTSTAT_DIS", false);
 DELTA_OPTION(bool, kNoPresent, "DELTA_GPU_NOPRESENT", false);
@@ -250,30 +266,140 @@ bool ReportRtContents(FrameSlot& owner) {
       return false;
     }
     vkFreeCommandBuffers(g_dev.device, g_dev.pool, 1, &c);
-    const uint32_t* px = static_cast<const uint32_t*>(g_frame.readback_map);
+    // One texel is FormatBytes(fmt) wide, which is 8 for the RGBA16F targets
+    // P.T. lights into. Indexing a uint32_t* by TEXEL walked half a texel at a
+    // time, so every other sample read (B,A) where it meant (R,G). Alpha on a
+    // light volume is its coverage term and sits at 1.0 wherever the volume
+    // covers; counting that as luminance is what produced the "P.T. has no
+    // midtones" reading -- a 50% pile-up just under 1.0 with an empty midrange,
+    // in a buffer that had neither.
+    const auto* px8 = static_cast<const uint8_t*>(g_frame.readback_map);
+    const uint32_t bpp = std::max(1u, (uint32_t)FormatBytes(rt.fmt));
+    const bool is_h4 = rt.fmt == VK_FORMAT_R16G16B16A16_SFLOAT;
+    const bool is_h2 = rt.fmt == VK_FORMAT_R16G16_SFLOAT;
+    const bool is_half = is_h4 || is_h2;
+    const uint32_t chans = is_h4 ? 4u : (is_h2 ? 2u : (bpp >= 4 ? 4u : bpp));
     const uint64_t n = static_cast<uint64_t>(rt.w) * rt.h;
     const uint64_t step = n > 16384 ? n / 16384 : 1;
-    uint64_t nz = 0, rgb_nz = 0, samples = 0, luma_sum = 0, nan_half = 0;
+    uint64_t nz = 0, rgb_nz = 0, samples = 0, nan_half = 0, inf_half = 0,
+             hot = 0;
+    double luma_sum = 0.0;
+    // The HDR magnitude, which the buckets cannot show: they all collapse into
+    // ">=1" and a target peaking at 1.5 reads identically to one peaking at
+    // 1000. That difference is exactly "this pass is too bright" vs "something
+    // downstream amplifies a correct pass".
+    float lum_max = 0.f;
+    uint32_t max_x = 0, max_y = 0;
+    uint64_t hi = 0;  // samples far above any displayable value
+    // Where the runaway texels SIT. A contiguous block means a pass is not
+    // covering that region and it keeps stale content; scattered means the
+    // values are being computed. The two need completely different fixes and
+    // no aggregate can tell them apart.
+    uint32_t hx0 = 0xffffffffu, hy0 = 0xffffffffu, hx1 = 0, hy1 = 0;
+    // Alpha AT the runaway texels. P.T.'s feedback pass divides by (1-alpha),
+    // so which band alpha sits in decides whether a texel resets or compounds;
+    // a whole-buffer alpha average cannot answer that, only alpha conditioned
+    // on the texels that ran away.
+    float a_at_max = -1.f;
+    double hi_a_sum = 0.0;
+    float hi_a_min = 1e30f, hi_a_max = -1e30f;
+    std::vector<float> lums;
+    uint64_t tone[8] = {};
     uint32_t distinct[4] = {};
     uint32_t num_distinct = 0;
+    const auto half_val = [](uint32_t h) -> float {
+      const uint32_t e = (h >> 10) & 0x1F, mn = h & 0x3FF;
+      float f;
+      if (e == 0)
+        f = std::ldexp((float)mn, -24);
+      else if (e != 0x1F)
+        f = std::ldexp(1.f + (float)mn / 1024.f, (int)e - 15);
+      else
+        f = mn ? std::numeric_limits<float>::quiet_NaN()
+               : std::numeric_limits<float>::infinity();
+      return (h & 0x8000u) ? -f : f;
+    };
     for (uint64_t i = 0; i < n; i += step, samples++) {
-      const uint32_t v = px[i];
-      // Mean brightness of the sampled grid: a count of non-zero pixels cannot
-      // show a target drifting brighter frame over frame, which is what a
-      // runaway exposure or an accumulating pass looks like.
-      luma_sum += ((v & 0xFF) + ((v >> 8) & 0xFF) + ((v >> 16) & 0xFF)) / 3;
-      if (v)
-        nz++;
-      if (v & 0x00FFFFFFu)
-        rgb_nz++;  // ignores an opaque-black alpha channel
-      // A half-float target poisoned with NaN reads back as black through
-      // every later unorm pass, so count NaN halves separately from "bright".
-      if (rt.fmt == VK_FORMAT_R16G16B16A16_SFLOAT) {
-        for (uint32_t half = 0; half < 2; half++) {
-          const uint32_t h = (v >> (16 * half)) & 0xFFFFu;
-          if ((h & 0x7C00u) == 0x7C00u && (h & 0x03FFu))
-            nan_half++;
+      const uint8_t* t = px8 + i * bpp;
+      uint32_t v = 0;
+      std::memcpy(&v, t, std::min<uint32_t>(bpp, 4));
+      // Channel values in display units: [0,1] is the displayable range for a
+      // unorm target and for a float one alike.
+      float ch[4] = {0.f, 0.f, 0.f, 1.f};
+      bool finite = true;
+      for (uint32_t c = 0; c < chans; c++) {
+        if (is_half) {
+          const uint32_t h =
+              (uint32_t)t[2 * c] | ((uint32_t)t[2 * c + 1] << 8);
+          // Inf and NaN share the exponent; only the mantissa tells them apart,
+          // so counting NaN alone reports nothing for a buffer full of Inf --
+          // and an Inf in an HDR target reads downstream as a clipped
+          // highlight, not as an error.
+          if ((h & 0x7C00u) == 0x7C00u) {
+            ((h & 0x03FFu) ? nan_half : inf_half)++;
+            finite = false;
+          }
+          ch[c] = half_val(h);
+        } else {
+          ch[c] = (float)t[c] / 255.f;
         }
+      }
+      bool any = false, any_rgb = false;
+      for (uint32_t c = 0; c < chans; c++) {
+        any |= ch[c] != 0.f;
+        any_rgb |= c < 3 && ch[c] != 0.f;
+      }
+      nz += any;
+      rgb_nz += any_rgb;  // ignores an opaque-black alpha channel
+      // Luminance is RGB only. Alpha is a coverage or fade term on most of
+      // these targets and says nothing about how bright the frame looks.
+      const float lum = std::max({ch[0], ch[1], ch[2]});
+      if (finite) {
+        luma_sum += std::min(1.f, std::max(0.f, lum));
+        if (lum > lum_max) {
+          lum_max = lum;
+          max_x = (uint32_t)(i % rt.w);
+          max_y = (uint32_t)(i / rt.w);
+          a_at_max = ch[3];
+        }
+        if (lum > 100.f) {
+          hi++;
+          const uint32_t hx = (uint32_t)(i % rt.w), hy = (uint32_t)(i / rt.w);
+          hx0 = std::min(hx0, hx);
+          hy0 = std::min(hy0, hy);
+          hx1 = std::max(hx1, hx);
+          hy1 = std::max(hy1, hy);
+          hi_a_sum += ch[3];
+          hi_a_min = std::min(hi_a_min, ch[3]);
+          hi_a_max = std::max(hi_a_max, ch[3]);
+        }
+        lums.push_back(lum);
+        // Eight buckets, not four: the coarse form showed a "gap" that four
+        // buckets cannot distinguish from a lit region that simply sits high.
+        int b = 7;
+        if (lum < 0.0625f)
+          b = 0;
+        else if (lum < 0.125f)
+          b = 1;
+        else if (lum < 0.25f)
+          b = 2;
+        else if (lum < 0.375f)
+          b = 3;
+        else if (lum < 0.5f)
+          b = 4;
+        else if (lum < 0.75f)
+          b = 5;
+        else if (lum < 1.0f)
+          b = 6;
+        tone[b]++;
+        // Clipped at the top of the displayable range. On a FLOAT target that
+        // means strictly above 1.0: a buffer of exact 1.0s is a mask or a
+        // normalised term, not a blown highlight, and counting those made an
+        // ordinary ambient buffer read as 99.9% saturated. On a UNORM target
+        // 1.0 IS the clip -- nothing can exceed it -- so the same test there
+        // would report zero however blown the frame is.
+        if (is_half ? lum > 1.f : lum >= 1.f)
+          hot++;
       }
       bool seen = false;
       for (uint32_t k = 0; k < num_distinct; k++)
@@ -281,15 +407,197 @@ bool ReportRtContents(FrameSlot& owner) {
       if (!seen && num_distinct < 4)
         distinct[num_distinct++] = v;
     }
+    // Same picture for the TARGET itself, from the readback the stats above
+    // already made -- so the feedback copy and the image it was copied from can
+    // be compared directly, and a defect in one told apart from a defect in the
+    // other.
+    if (kFbDump && is_h4) {
+      char rp2[256];
+      std::snprintf(rp2, sizeof(rp2), "%s/rt_%lx.ppm", DumpDir(),
+                    (unsigned long)kv.first);
+      if (FILE* rf2 = std::fopen(rp2, "wb")) {
+        std::fprintf(rf2, "P6\n%u %u\n255\n", rt.w, rt.h);
+        for (uint64_t q = 0; q < (uint64_t)rt.w * rt.h; q++) {
+          const uint8_t* t8 = px8 + q * bpp;
+          float c4[4];
+          for (uint32_t k = 0; k < 4; k++)
+            c4[k] = half_val((uint32_t)t8[2 * k] |
+                             ((uint32_t)t8[2 * k + 1] << 8));
+          const float l = std::max({c4[0], c4[1], c4[2]});
+          uint8_t px3[3];
+          if (l > 100.f) {
+            px3[0] = 255; px3[1] = 0; px3[2] = 0;
+          } else {
+            const float g = l <= 0.f ? 0.f : std::log10(1.f + l * 9.f);
+            const int v8 = (int)(std::min(1.f, g) * 255.f);
+            px3[0] = px3[1] = px3[2] = (uint8_t)v8;
+          }
+          std::fwrite(px3, 1, 3, rf2);
+        }
+        std::fclose(rf2);
+      }
+    }
+    // The FEEDBACK image holds exactly what a self-sampling pass read this
+    // frame, mid-frame -- not the end-of-frame state every other number here
+    // reports. For P.T.'s un-premultiply pass (ps=0x80b54b4000, out.rgb =
+    // rgb/(1-alpha)) that mid-frame alpha is the number that decides whether a
+    // texel resets or amplifies, and end-of-frame alpha cannot stand in for it:
+    // the 33 light draws run in between and only ever lower it.
+    if (rt.feedback_image && is_h4) {
+      VkCommandBuffer fc = VK_NULL_HANDLE;
+      VkCommandBufferAllocateInfo fa{
+          VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+      fa.commandPool = g_dev.pool;
+      fa.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+      fa.commandBufferCount = 1;
+      if (vkAllocateCommandBuffers(g_dev.device, &fa, &fc) == VK_SUCCESS) {
+        VkCommandBufferBeginInfo fbi{
+            VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+        fbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        vkBeginCommandBuffer(fc, &fbi);
+        const VkImageLayout fold = rt.feedback_layout;
+        ImageBarrier(fc, rt.feedback_image, fold,
+                     VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                     VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+        VkBufferImageCopy fcp{};
+        fcp.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        fcp.imageExtent = {rt.w, rt.h, 1};
+        vkCmdCopyImageToBuffer(fc, rt.feedback_image,
+                               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                               g_frame.readback, 1, &fcp);
+        ImageBarrier(fc, rt.feedback_image,
+                     VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, fold,
+                     VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_READ_BIT);
+        if (vkEndCommandBuffer(fc) == VK_SUCCESS) {
+          VkSubmitInfo fsi{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+          fsi.commandBufferCount = 1;
+          fsi.pCommandBuffers = &fc;
+          if (vkResetFences(g_dev.device, 1, &g_dev.fence) == VK_SUCCESS &&
+              vkQueueSubmit(g_dev.queue, 1, &fsi, g_dev.fence) == VK_SUCCESS) {
+            vkWaitForFences(g_dev.device, 1, &g_dev.fence, VK_TRUE, UINT64_MAX);
+            uint64_t fhi = 0, below = 0;
+            float fa_min = 1e30f, fa_max = -1e30f, fmax = 0.f;
+            double fa_sum = 0.0;
+            for (uint64_t i = 0; i < n; i += step) {
+              const uint8_t* t8 = px8 + i * bpp;
+              float c4[4];
+              for (uint32_t k = 0; k < 4; k++)
+                c4[k] = half_val((uint32_t)t8[2 * k] |
+                                 ((uint32_t)t8[2 * k + 1] << 8));
+              const float l = std::max({c4[0], c4[1], c4[2]});
+              fmax = std::max(fmax, l);
+              if (l > 100.f) {
+                fhi++;
+                fa_sum += c4[3];
+                fa_min = std::min(fa_min, c4[3]);
+                fa_max = std::max(fa_max, c4[3]);
+                if (c4[3] < 0.89990f)
+                  below++;
+              }
+            }
+            // AT the texel that ran away in the target. The aggregate above
+            // is conditioned on feedback texels over 100, and there are none,
+            // so it says nothing about the one texel that matters. This is the
+            // number that decides reset (alpha >= 0.89990) vs amplify.
+            float at[4] = {0, 0, 0, 0};
+            {
+              const uint64_t idx =
+                  (uint64_t)max_y * rt.w + (uint64_t)max_x;
+              if (idx < n) {
+                const uint8_t* t8 = px8 + idx * bpp;
+                for (uint32_t k = 0; k < 4; k++)
+                  at[k] = half_val((uint32_t)t8[2 * k] |
+                                   ((uint32_t)t8[2 * k + 1] << 8));
+              }
+            }
+            // A PICTURE of where the runaway texels are. Every aggregate so
+            // far (count, bounding box, percentiles) is compatible with several
+            // different mechanisms; the arrangement usually is not. Written
+            // from the feedback readback, which is already non-perturbing --
+            // DELTA_GPU_RTDUMP is not (see the profile).
+            if (kFbDump) {
+              char fp[256];
+              std::snprintf(fp, sizeof(fp), "%s/fb_%lx.ppm", DumpDir(),
+                            (unsigned long)kv.first);
+              if (FILE* pf = std::fopen(fp, "wb")) {
+                std::fprintf(pf, "P6\n%u %u\n255\n", rt.w, rt.h);
+                for (uint64_t q = 0; q < (uint64_t)rt.w * rt.h; q++) {
+                  const uint8_t* t8 = px8 + q * bpp;
+                  float c4[4];
+                  for (uint32_t k = 0; k < 4; k++)
+                    c4[k] = half_val((uint32_t)t8[2 * k] |
+                                     ((uint32_t)t8[2 * k + 1] << 8));
+                  const float l = std::max({c4[0], c4[1], c4[2]});
+                  uint8_t px3[3];
+                  if (l > 100.f) {  // runaway: flag red
+                    px3[0] = 255; px3[1] = 0; px3[2] = 0;
+                  } else {  // else log-scaled grey so structure is visible
+                    const float g = l <= 0.f ? 0.f
+                                             : std::log10(1.f + l * 9.f);
+                    const int v8 = (int)(std::min(1.f, g) * 255.f);
+                    px3[0] = px3[1] = px3[2] = (uint8_t)v8;
+                  }
+                  std::fwrite(px3, 1, 3, pf);
+                }
+                std::fclose(pf);
+                std::fprintf(stderr, "[rtstat-fb] wrote %s\n", fp);
+              }
+            }
+            std::fprintf(stderr,
+                         "[rtstat-fb] %#lx max=%.4g hi100=%lu "
+                         "fbA=%.4g/%.4g/%.4g below0.8999=%lu "
+                         "at(%u,%u)=%.4g,%.4g,%.4g a=%.4g %s\n",
+                         (unsigned long)kv.first, fmax, (unsigned long)fhi,
+                         fhi ? fa_min : 0.f,
+                         fhi ? fa_sum / (double)fhi : 0.0, fhi ? fa_max : 0.f,
+                         (unsigned long)below, max_x, max_y, at[0], at[1],
+                         at[2], at[3],
+                         at[3] >= 0.89990f ? "RESET" : "AMPLIFY");
+          }
+        }
+        vkFreeCommandBuffers(g_dev.device, g_dev.pool, 1, &fc);
+      }
+    }
+    // Non-zero bytes in the target's GUEST memory, sampled. A render target's
+    // contents live in its VkImage and nothing ever publishes them back, so a
+    // title that reads one with the CPU reads whatever was there before. This
+    // says whether there is anything there at all.
+    uint64_t guest_nz = 0, guest_bytes = 0;
+    {
+      const uint64_t fp = RtByteSize(rt);
+      if (fp && fp <= (64u << 20) && gpu::IsReadableRange(kv.first, fp)) {
+        const auto* gp = reinterpret_cast<const uint8_t*>(kv.first);
+        const uint64_t gstep = fp > 65536 ? fp / 65536 : 1;
+        for (uint64_t k = 0; k < fp; k += gstep, guest_bytes++)
+          guest_nz += gp[k] != 0;
+      }
+    }
+    std::sort(lums.begin(), lums.end());
+    const auto pct = [&](double q) -> float {
+      if (lums.empty())
+        return 0.f;
+      size_t i = (size_t)(q * (double)(lums.size() - 1));
+      return lums[i];
+    };
     std::fprintf(
         stderr,
         "[rtstat] f%d RT %#lx %ux%u draws=%u nz=%lu rgbnz=%lu/%lu "
-        "mean=%lu nan=%lu vs=%#lx ps=%#lx cb=%#x rb=%#x "
-        "vals=%08x %08x %08x %08x\n",
+        "mean=%lu tone=%lu/%lu/%lu/%lu/%lu/%lu/%lu/%lu hot=%lu nan=%lu inf=%lu "
+        "max=%.4g@%u,%u(a=%.4g) hi100=%lu hibox=%u,%u-%u,%u hiA=%.4g/%.4g/%.4g p99=%.4g p999=%.4g guestnz=%lu/%lu vs=%#lx ps=%#lx "
+        "cb=%#x rb=%#x vals=%08x %08x %08x %08x\n",
         g_frame.num, (unsigned long)kv.first, rt.w, rt.h, rt.draws,
         (unsigned long)nz, (unsigned long)rgb_nz, (unsigned long)samples,
-        (unsigned long)(samples ? luma_sum / samples : 0),
-        (unsigned long)nan_half, (unsigned long)rt.last_vs,
+        (unsigned long)(samples ? luma_sum / (double)samples * 255.0 : 0.0),
+        (unsigned long)tone[0], (unsigned long)tone[1], (unsigned long)tone[2],
+        (unsigned long)tone[3], (unsigned long)tone[4], (unsigned long)tone[5],
+        (unsigned long)tone[6], (unsigned long)tone[7], (unsigned long)hot,
+        (unsigned long)nan_half,
+        (unsigned long)inf_half, lum_max, max_x, max_y, a_at_max, (unsigned long)hi,
+        hi ? hx0 : 0, hi ? hy0 : 0, hx1, hy1,
+        hi ? hi_a_min : 0.f, hi ? hi_a_sum / (double)hi : 0.0,
+        hi ? hi_a_max : 0.f, pct(0.99), pct(0.999),
+        (unsigned long)guest_nz, (unsigned long)guest_bytes,
+        (unsigned long)rt.last_vs,
         (unsigned long)rt.last_ps, rt.last_cbuf_mask, rt.last_rawbuf_mask,
         distinct[0], distinct[1], distinct[2], distinct[3]);
     // DELTA_GPU_RTSTAT_DIS: disassemble the pixel shader that produced a
@@ -327,6 +635,142 @@ bool ReportRtContents(FrameSlot& owner) {
       }
     }
   }
+  // Depth targets were never scored, only colour ones -- so "does the pass
+  // that samples the depth read anything?" had no answer at all, and a whole
+  // chain of black post-process targets could not be told apart from a black
+  // depth buffer. Read the Z plane back the same way.
+  // Score parked variants too: the live one at a base is whichever geometry
+  // ran last, which is routinely the small post-process pass rather than the
+  // full-resolution one the scene was drawn into.
+  std::vector<std::pair<uint64_t, DepthTarget*>> depth_list;
+  for (auto& kv : g_depths)
+    depth_list.emplace_back(kv.first, &kv.second);
+  for (auto& kv : g_depth_variants)
+    for (DepthTarget& v : kv.second)
+      depth_list.emplace_back(kv.first, &v);
+  if (!kGpuDbStat)
+    depth_list.clear();
+  else if (kGpuDbStat != 1)
+    depth_list.erase(
+        std::remove_if(depth_list.begin(), depth_list.end(),
+                       [](const std::pair<uint64_t, DepthTarget*>& e) {
+                         return e.first != (uint64_t)kGpuDbStat;
+                       }),
+        depth_list.end());
+  for (auto& entry : depth_list) {
+    DepthTarget& d = *entry.second;
+    // Never touch a target still in UNDEFINED: a barrier out of that layout
+    // is allowed to DISCARD the image, so reading one to report on it would
+    // destroy the very thing being measured -- and it did, every RTSTAT run,
+    // which quietly invalidated depth readings taken with it.
+    if (!d.image || !d.w || !d.h || d.layout == VK_IMAGE_LAYOUT_UNDEFINED ||
+        (!d.used_this_frame && !kGpuRtstatAll))
+      continue;
+    EnsureReadback(d.w, d.h, VK_FORMAT_R32_SFLOAT);
+    VkCommandBufferAllocateInfo ca{
+        VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+    ca.commandPool = g_dev.pool;
+    ca.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    ca.commandBufferCount = 1;
+    VkCommandBuffer c = VK_NULL_HANDLE;
+    if (vkAllocateCommandBuffers(g_dev.device, &ca, &c) != VK_SUCCESS)
+      continue;
+    VkCommandBufferBeginInfo cbi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    cbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    if (vkBeginCommandBuffer(c, &cbi) != VK_SUCCESS) {
+      vkFreeCommandBuffers(g_dev.device, g_dev.pool, 1, &c);
+      continue;
+    }
+    const VkImageLayout old_layout = d.layout;
+    DepthBarrier(c, d.image, d.layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                 VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                 VK_ACCESS_TRANSFER_READ_BIT);
+    d.layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    VkBufferImageCopy copy{};
+    copy.imageSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1};
+    copy.imageExtent = {d.w, d.h, 1};
+    vkCmdCopyImageToBuffer(c, d.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           g_frame.readback, 1, &copy);
+    VkSubmitInfo dsi{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    dsi.commandBufferCount = 1;
+    dsi.pCommandBuffers = &c;
+    if (vkEndCommandBuffer(c) != VK_SUCCESS ||
+        vkResetFences(g_dev.device, 1, &g_dev.fence) != VK_SUCCESS ||
+        vkQueueSubmit(g_dev.queue, 1, &dsi, g_dev.fence) != VK_SUCCESS ||
+        vkWaitForFences(g_dev.device, 1, &g_dev.fence, VK_TRUE, UINT64_MAX) !=
+            VK_SUCCESS) {
+      vkFreeCommandBuffers(g_dev.device, g_dev.pool, 1, &c);
+      d.layout = old_layout;
+      continue;
+    }
+    vkFreeCommandBuffers(g_dev.device, g_dev.pool, 1, &c);
+    // Put it back where the frame left it: this is a diagnostic, and a
+    // diagnostic that moves the pipeline's state is a diagnostic that lies.
+    {
+      VkCommandBuffer rc2 = VK_NULL_HANDLE;
+      if (vkAllocateCommandBuffers(g_dev.device, &ca, &rc2) == VK_SUCCESS) {
+        VkCommandBufferBeginInfo rbi{
+            VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+        rbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        if (vkBeginCommandBuffer(rc2, &rbi) == VK_SUCCESS) {
+          DepthBarrier(rc2, d.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                       old_layout, VK_ACCESS_TRANSFER_READ_BIT,
+                       VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
+          if (vkEndCommandBuffer(rc2) == VK_SUCCESS) {
+            VkSubmitInfo rsi{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+            rsi.commandBufferCount = 1;
+            rsi.pCommandBuffers = &rc2;
+            if (vkResetFences(g_dev.device, 1, &g_dev.fence) == VK_SUCCESS &&
+                vkQueueSubmit(g_dev.queue, 1, &rsi, g_dev.fence) == VK_SUCCESS)
+              vkWaitForFences(g_dev.device, 1, &g_dev.fence, VK_TRUE,
+                              UINT64_MAX);
+          }
+        }
+        vkFreeCommandBuffers(g_dev.device, g_dev.pool, 1, &rc2);
+      }
+      d.layout = old_layout;
+    }
+    const float* z = static_cast<const float*>(g_frame.readback_map);
+    const uint64_t n = static_cast<uint64_t>(d.w) * d.h;
+    const uint64_t step = n > 16384 ? n / 16384 : 1;
+    uint64_t samples = 0, zero = 0, one = 0;
+    float lo = 1e30f, hi = -1e30f;
+    double sum = 0;
+    for (uint64_t i = 0; i < n; i += step, samples++) {
+      const float v = z[i];
+      zero += v == 0.f;
+      one += v == 1.f;
+      lo = std::min(lo, v);
+      hi = std::max(hi, v);
+      sum += v;
+    }
+    std::fprintf(stderr,
+                 "[dbstat] f%d DEPTH %#lx %ux%u min=%g max=%g mean=%g "
+                 "zero=%lu/%lu one=%lu\n",
+                 g_frame.num, (unsigned long)entry.first, d.w, d.h, lo, hi,
+                 samples ? sum / samples : 0.0, (unsigned long)zero,
+                 (unsigned long)samples, (unsigned long)one);
+    // Under RTDUMP, write the Z plane too: "75% of it is exactly zero" is a
+    // number that fits several very different pictures, and which one it is
+    // decides where to look next.
+    if (kGpuRtdump && hi > lo) {
+      std::vector<uint8_t> bgra(n * 4);
+      for (uint64_t i = 0; i < n; i++) {
+        const float t = (z[i] - lo) / (hi - lo);
+        const uint8_t g = static_cast<uint8_t>(
+            std::min(255.f, std::max(0.f, t * 255.f)));
+        bgra[i * 4 + 0] = g;
+        bgra[i * 4 + 1] = g;
+        bgra[i * 4 + 2] = g;
+        bgra[i * 4 + 3] = 255;
+      }
+      char path[256];
+      std::snprintf(path, sizeof(path), "%s/depth_f%d_%#lx_%ux%u.ppm",
+                    DumpDir(), g_frame.num, (unsigned long)entry.first, d.w,
+                    d.h);
+      WritePpm(path, bgra.data(), d.w, d.h);
+    }
+  }
   return true;
 }
 
@@ -359,6 +803,7 @@ void BeginFrame(Renderer& renderer) {
     auto it = g_rts.find(kForceClear);
     if (it != g_rts.end())
       it->second.clear_pending = true;
+      it->second.clear_src = "forceclear-knob";
   }
   if (RdocFrame() && g_frame.num == RdocFrame() && GetRdocApi()) {
     GetRdocApi()->StartFrameCapture(RdocDevice(), nullptr);
@@ -460,6 +905,7 @@ void BeginFrame(Renderer& renderer) {
     // An orphaned lazy clear must not wipe persistent content when an unrelated
     // incremental draw touches this RT in a later frame.
     kv.second.clear_pending = false;
+    kv.second.clear_src = "none";
   }
   for (auto& kv : g_depths) {
     kv.second.used_this_frame = false;
@@ -479,7 +925,37 @@ void BeginFrame(Renderer& renderer) {
   g_frame.recording = true;
 }
 
+// DELTA_GPU_MEMWATCH=<guest addr>: scan a page there every frame and report the
+// first frame it is ever non-zero. A surface that ten passes sample but nothing
+// in the command stream writes is either never written at all or written
+// through a path the PM4 traces cannot see; only watching the MEMORY over time
+// separates those, and a per-frame scan does it without touching the guest's
+// mappings.
+void WatchGuestMem() {
+  if (!kMemWatch)
+    return;
+  const uint64_t a = kMemWatch.get();
+  if (!gpu::IsReadableRange(a, 4096))
+    return;
+  const auto* p = reinterpret_cast<const uint8_t*>(a);
+  uint64_t nz = 0;
+  for (uint32_t i = 0; i < 4096; i++)
+    nz += p[i] != 0;
+  static uint64_t seen_nz = 0;
+  static int reported = 0;
+  if (nz)
+    seen_nz++;
+  if (reported < 6 && (nz || (g_frame.num % 500) == 0)) {
+    reported++;
+    std::fprintf(stderr,
+                 "[memwatch] f%d %#lx nonzero=%lu/4096 (frames-nonzero=%lu)\n",
+                 g_frame.num, (unsigned long)a, (unsigned long)nz,
+                 (unsigned long)seen_nz);
+  }
+}
+
 void EndFrame(Renderer& renderer, uint64_t scanout_base) {
+  WatchGuestMem();
   if (!renderer.available() || !g_frame.recording)
     return;
   // Bound CS-write staleness for guest CPU readers. Only a device fault (the

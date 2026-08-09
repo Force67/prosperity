@@ -69,7 +69,10 @@ bool CreateUploadRings(const VkPhysicalDeviceProperties& props) {
     g_ring.ubo_align = 1;
   if (props.limits.maxDescriptorSetUniformBuffersDynamic < kCbufBindings ||
       props.limits.maxPerStageDescriptorUniformBuffers < kCbufBindings)
-    std::fprintf(stderr, "[gpuvk] only %u/%u dynamic UBOs available, need %u\n",
+    std::fprintf(stderr,
+                 "[gpuvk] only %u/%u dynamic UBOs available, need %u -- set 1 "
+                 "is an out-of-spec layout on this device and a cbuffer may "
+                 "silently read zero\n",
                  props.limits.maxDescriptorSetUniformBuffersDynamic,
                  props.limits.maxPerStageDescriptorUniformBuffers,
                  kCbufBindings);

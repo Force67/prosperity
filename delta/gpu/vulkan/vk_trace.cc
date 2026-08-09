@@ -48,6 +48,12 @@ DELTA_OPTION(int, kCaptureCbufBytes, "DELTA_GPU_CAPTURE_CBUF_BYTES", 256);
 // Also write the untouched readback bytes next to each PNG.
 DELTA_OPTION(bool, kCaptureRaw, "DELTA_GPU_CAPTURE_RAW", false);
 DELTA_OPTION(bool, kValidate, "DELTA_GPU_VALIDATE", false);
+// DELTA_GPU_SYNCVALIDATE=1: add the layer's synchronization validation, which
+// names a missing barrier and the two accesses that race over it. Separate
+// from DELTA_GPU_VALIDATE because it costs several times more frame time, and
+// because a hazard is the one class of bug that a diagnostic doing its own
+// submits will hide rather than report.
+DELTA_OPTION(bool, kSyncValidate, "DELTA_GPU_SYNCVALIDATE", false);
 DELTA_OPTION(bool, kExitAfter, "DELTA_GPU_CAPTURE_EXIT", false);
 }  // namespace
 
@@ -1519,7 +1525,12 @@ ValidationCallback(VkDebugUtilsMessageSeverityFlagBitsEXT severity,
 // --- public ----------------------------------------------------------------
 
 bool WantValidation() {
-  static const bool want = kValidate.get();
+  static const bool want = kValidate.get() || kSyncValidate.get();
+  return want;
+}
+
+bool WantSyncValidation() {
+  static const bool want = kSyncValidate.get();
   return want;
 }
 

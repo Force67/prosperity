@@ -26,13 +26,21 @@
 
 namespace {
 DELTA_OPTION(bool, kDoCull, "DELTA_GPU_CULL", false);
-DELTA_OPTION(bool, kGpuPipetrace, "DELTA_GPU_PIPETRACE", false);
+// DELTA_GPU_PIPETRACE=1 traces the first pipelines built; =<ps addr> traces
+// only that shader's. Pipelines are built in load order, so a flat cap only
+// ever shows the loading screens -- a negative from it says nothing about the
+// draw you care about.
+DELTA_OPTION(uint64_t, kGpuPipetrace, "DELTA_GPU_PIPETRACE", 0);
 DELTA_OPTION(bool, kNoMaskDiag, "DELTA_GPU_NOMASK", false);
 DELTA_OPTION(bool, kNoRectGs, "DELTA_GPU_NORECTGS", false);
 // A depth prepass leaves the shaded pass testing ZFUNC=EQUAL against depth we
 // cannot reproduce bit-exactly; on by default because rejecting the whole scene
 // is never the better failure. DELTA_GPU_ZEQUAL=strict restores the raw op.
 DELTA_OPTION(bool, kRelaxDepthEqual, "DELTA_GPU_RELAX_ZEQUAL", true);
+// DELTA_GPU_NOZTEST=1: build every pipeline with the depth test off. Tells
+// "this pass produced nothing because the depth test rejected it" apart from
+// "its shader computed nothing", which look identical in an empty target.
+DELTA_OPTION(bool, kNoZTest, "DELTA_GPU_NOZTEST", false);
 }  // namespace
 
 namespace gpu::vk {
@@ -359,19 +367,29 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
   rp.raw_bufs = !d.recomp->vs_bufs.empty() || !d.recomp->ps_bufs.empty();
   VkDescriptorSetLayout sls[3] = {set0, g_ring.ubo_layout, g_ring.sbo_layout};
   // One 64-byte window per stage: 16 user-data dwords each, 128 bytes total,
-  // which is the guaranteed minimum push-constant size. With budget past the
-  // floor, each stage's range extends over its own code-address words (VS
-  // 128..135, PS 136..143) pushed per draw for s_getpc_b64 -- one range per
-  // stage, since Vulkan forbids two ranges naming the same stage.
+  // which is the guaranteed minimum push-constant size, plus each stage's own
+  // code-address words (VS 128..135, PS 136..143) pushed per draw for
+  // s_getpc_b64.
+  //
+  // ONE range naming both stages, not one range per stage. The two stages'
+  // windows interleave -- VS owns [0,64) and [128,136), PS [64,128) and
+  // [136,144) -- so no pair of per-stage ranges can cover that without
+  // overlapping, and Vulkan requires a push to name every stage of every range
+  // it overlaps (VUID-vkCmdPushConstants-offset-01796). The per-stage form
+  // declared VERTEX over [0,136) and FRAGMENT over [64,144), so the PS user
+  // data and the VS code address were both being pushed through a range that
+  // did not name their stage: undefined, and the PS user data is where the
+  // shader's descriptor pointers live. Every push below names both stages to
+  // match; the bytes written are unchanged.
   const bool pc_base = gpu::gcn::PushCodeBase();
-  const VkPushConstantRange push[2] = {
-      {VK_SHADER_STAGE_VERTEX_BIT, 0, pc_base ? 136u : 64u},
-      {VK_SHADER_STAGE_FRAGMENT_BIT, 64, pc_base ? 80u : 64u},
+  const VkPushConstantRange push[1] = {
+      {VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+       pc_base ? 144u : 128u},
   };
   VkPipelineLayoutCreateInfo li{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
   li.setLayoutCount = rp.raw_bufs ? 3 : 2;
   li.pSetLayouts = sls;
-  li.pushConstantRangeCount = 2;
+  li.pushConstantRangeCount = 1;
   li.pPushConstantRanges = push;
   if (vkCreatePipelineLayout(g_dev.device, &li, nullptr, &rp.layout) !=
       VK_SUCCESS)
@@ -456,7 +474,8 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
   VkPipelineDepthStencilStateCreateInfo dss{
       VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
   if (d.depth_base) {
-    dss.depthTestEnable = d.depth_test_enable ? VK_TRUE : VK_FALSE;
+    dss.depthTestEnable =
+        (d.depth_test_enable && !kNoZTest) ? VK_TRUE : VK_FALSE;
     dss.depthWriteEnable = d.depth_write_enable ? VK_TRUE : VK_FALSE;
     dss.depthCompareOp = (VkCompareOp)(d.depth_func & 0x7);  // ZFUNC maps 1:1
     // A depth-prepass title re-draws its geometry with ZFUNC=EQUAL against the
@@ -510,14 +529,16 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
   // DELTA_GPU_PIPETRACE: the colour-blend state a pipeline is actually built
   // with, next to the PS's export mask -- the two have to agree or an
   // attachment is silently write-masked off (or written unblended).
-  if (kGpuPipetrace) {
+  if (kGpuPipetrace &&
+      (kGpuPipetrace == 1 || d.ps_addr == kGpuPipetrace)) {
     static int n = 0;
     if (n++ < 24)
       std::fprintf(
           stderr,
-          "[pipe] ps=%#lx mrtN=%u psMrtMask=%#x att0: en=%u src=%d dst=%d "
-          "src_a=%d dst_a=%d writeMask=%#x\n",
-          (unsigned long)d.ps_addr, mrt_n, d.recomp->ps_mrt_mask,
+          "[pipe] ps=%#lx mrtN=%u psMrtMask=%#x tmask=%#x smask=%#x att0: "
+          "en=%u src=%d dst=%d src_a=%d dst_a=%d writeMask=%#x\n",
+          (unsigned long)d.ps_addr, mrt_n, d.recomp->ps_mrt_mask, d.target_mask,
+          d.shader_mask,
           cb_att[0].blendEnable, (int)cb_att[0].srcColorBlendFactor,
           (int)cb_att[0].dstColorBlendFactor,
           (int)cb_att[0].srcAlphaBlendFactor,

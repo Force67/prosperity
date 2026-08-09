@@ -99,6 +99,8 @@ void RecordMemoryFill(uint64_t base, uint64_t bytes, uint32_t value);
 // messages into the capture (and stderr) alongside the draw that provoked
 // them. Read once, before instance creation.
 bool WantValidation();
+// Whether to ask the layer for synchronization validation as well.
+bool WantSyncValidation();
 const char* ValidationLayerName();
 void InstallValidationMessenger(VkInstance instance);
 void DestroyValidationMessenger(VkInstance instance);

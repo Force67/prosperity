@@ -329,6 +329,16 @@ bool CreateDevice() {
     if (found) {
       ic.enabledLayerCount = 1;
       ic.ppEnabledLayerNames = &validation_layer;
+      if (trace::WantSyncValidation()) {
+        static const VkValidationFeatureEnableEXT sync_feat[1] = {
+            VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT};
+        static VkValidationFeaturesEXT vf{
+            VK_STRUCTURE_TYPE_VALIDATION_FEATURES_EXT};
+        vf.enabledValidationFeatureCount = 1;
+        vf.pEnabledValidationFeatures = sync_feat;
+        vf.pNext = ic.pNext;
+        ic.pNext = &vf;
+      }
     } else {
       std::fprintf(stderr, "[vkval] %s not available on this loader\n",
                    validation_layer);
@@ -520,6 +530,14 @@ bool CreateDevice() {
     want_feat.independentBlend = VK_TRUE;
   if (avail2.features.shaderStorageImageWriteWithoutFormat)
     want_feat.shaderStorageImageWriteWithoutFormat = VK_TRUE;
+  // A recompiled VERTEX shader can index a guest buffer by hand, which becomes
+  // a storage buffer SPIR-V considers writable. Declaring one is only legal
+  // with this feature on; without it the module was used anyway and the access
+  // is undefined (VUID-RuntimeSpirv-NonWritable-06341).
+  if (avail2.features.vertexPipelineStoresAndAtomics)
+    want_feat.vertexPipelineStoresAndAtomics = VK_TRUE;
+  if (avail2.features.fragmentStoresAndAtomics)
+    want_feat.fragmentStoresAndAtomics = VK_TRUE;
   g_dev.sampler_anisotropy = want_feat.samplerAnisotropy;
   g_dev.independent_blend = want_feat.independentBlend;
   g_dev.sampler_mirror_clamp = f12.samplerMirrorClampToEdge;

@@ -35,6 +35,7 @@
 #include <map>
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <utl/options.h>
 
@@ -57,6 +58,7 @@ DELTA_OPTION(bool, kCsWbFull, "DELTA_GPU_CS_WB_FULL", false);
 DELTA_OPTION(bool, kCsWbAudit, "DELTA_GPU_CS_WB_AUDIT", false);
 DELTA_OPTION(uint64_t, kCsFlushTrace, "DELTA_GPU_CSFLUSHTRACE", 0);
 DELTA_OPTION(bool, kGpuCsgpuVerbose, "DELTA_GPU_CSGPU_VERBOSE", false);
+uint64_t g_cs_image_staged = 0;
 }  // namespace
 
 namespace gpu::vk {
@@ -363,8 +365,36 @@ bool StageCsImage(const ComputeInfo::Res& res, void* dst) {
 
 bool WritebackCsImage(const ComputeInfo::Res& res, const void* src) {
   gcn::TextureLayout32 tiled, linear;
-  if (!BuildCsImageLayouts(res, tiled, linear))
+  // A bail here leaves the destination holding whatever it held before the
+  // dispatch, which for a first upload is zeros -- indistinguishable from a
+  // dispatch that never ran unless it says so (DELTA_GPU_CS_WB_AUDIT).
+  if (!BuildCsImageLayouts(res, tiled, linear)) {
+    if (kCsWbAudit) {
+      static int n = 0;
+      if (n++ < 16) {
+        gcn::TextureLayout32 t2, l2;
+        const uint32_t stage_tiling = res.tiling_idx == 31 ? 31 : 8;
+        const bool tok = gcn::BuildTextureLayout32(
+            t2, res.width, res.height, res.pitch, res.layers, res.mip_levels,
+            res.tiling_idx, res.pow2_pad, res.elem_bytes);
+        const bool lok = gcn::BuildTextureLayout32(
+            l2, res.width, res.height, res.pitch, res.layers, res.mip_levels,
+            stage_tiling, res.pow2_pad, res.stage_elem_bytes);
+        std::fprintf(stderr,
+                     "[cswb] image layout REJECT base=%#llx %ux%u layers=%u "
+                     "mips=%u tiling=%u elem=%u/%u tiledOk=%d(%llu vs guest "
+                     "%llu) linearOk=%d(%llu vs size %llu)\n",
+                     (unsigned long long)res.base, res.width, res.height,
+                     res.layers, res.mip_levels, res.tiling_idx, res.elem_bytes,
+                     res.stage_elem_bytes, (int)tok,
+                     (unsigned long long)(tok ? t2.size : 0),
+                     (unsigned long long)res.guest_size, (int)lok,
+                     (unsigned long long)(lok ? l2.size : 0),
+                     (unsigned long long)res.size);
+      }
+    }
     return false;
+  }
   const bool direct = res.elem_bytes == res.stage_elem_bytes;
   std::vector<uint8_t> tight;
   if (!direct)
@@ -381,8 +411,18 @@ bool WritebackCsImage(const ComputeInfo::Res& res, const void* src) {
         if (!gcn::RetileTextureMip32Pitched(
                 level_src,
                 static_cast<size_t>(src_level.pitch) * res.stage_elem_bytes,
-                reinterpret_cast<void*>(res.base), tiled, mip, layer))
+                reinterpret_cast<void*>(res.base), tiled, mip, layer)) {
+          if (kCsWbAudit) {
+            static int n = 0;
+            if (n++ < 16)
+              std::fprintf(stderr,
+                           "[cswb] image retile REJECT base=%#llx mip=%u "
+                           "layer=%u tiling=%u\n",
+                           (unsigned long long)res.base, mip, layer,
+                           res.tiling_idx);
+          }
           return false;
+        }
         continue;
       }
       gcn::DetileParallelRows(dst_level.height, [&](uint32_t y0, uint32_t y1) {
@@ -1116,6 +1156,24 @@ bool CsBatchFlush() {
 // Write one dirty range back to guest memory (retile for images) and re-stamp
 // its hash so the next validation sees guest == buffer.
 bool CsRangeFlushOne(uint64_t base, CsRange& e) {
+  if (kCsWbAudit) {
+    // Counters, not a sample: the first N flushes are all startup, and the
+    // question ("does a tiled-image range ever reach the retile?") is about
+    // the steady state.
+    static uint64_t n = 0, dirty_n = 0, img_n = 0, img_dirty_n = 0;
+    n++;
+    dirty_n += e.gpu_dirty;
+    img_n += e.image_staging;
+    img_dirty_n += e.gpu_dirty && e.image_staging;
+    if ((n % 20000) == 0)
+      std::fprintf(stderr,
+                   "[cswb] flushes=%llu dirty=%llu image=%llu image+dirty=%llu "
+                   "staged_as_image=%llu\n",
+                   (unsigned long long)n, (unsigned long long)dirty_n,
+                   (unsigned long long)img_n,
+                   (unsigned long long)img_dirty_n,
+                   (unsigned long long)g_cs_image_staged);
+  }
   if (!e.gpu_dirty)
     return true;
   if (e.imported) {  // the dispatch wrote straight into guest memory
@@ -1129,14 +1187,43 @@ bool CsRangeFlushOne(uint64_t base, CsRange& e) {
   if (g_cs_failed)
     return false;
   g_cs_flush_n++;
+  if (e.image_staging && kCsWbAudit) {
+    // An image range always retiles, with no write-coverage test to report, so
+    // "the writeback ran" says nothing about whether the dispatch produced
+    // anything. Count what the staging actually holds: all-zero here means the
+    // shader stored nothing, which is a different bug from a failed retile.
+    const auto* p = static_cast<const uint8_t*>(e.map);
+    uint64_t nz = 0;
+    for (uint64_t i = 0; i < e.res.size; i++)
+      if (p[i])
+        nz++;
+    // Once per destination, not the first 24 overall: a title that uploads
+    // hundreds of surfaces spends a flat cap entirely on the first few, and
+    // the one surface that stays empty is never among them.
+    static std::unordered_set<uint64_t> seen;
+    if (seen.size() < 4096 && seen.insert(base).second)
+      std::fprintf(stderr,
+                   "[cswb] image base=%#llx %ux%u layers=%u tiling=%u staged "
+                   "%llu/%llu non-zero\n",
+                   (unsigned long long)base, e.res.width, e.res.height,
+                   e.res.layers, e.res.tiling_idx, (unsigned long long)nz,
+                   (unsigned long long)e.res.size);
+  }
   if (e.image_staging) {
     if (!WritebackCsImage(e.res, e.map)) {
-      static int logged = 0;
-      if (logged++ < 8)
+      // Count as well as sample: a flat cap of 8 lines cannot tell one
+      // recurring bad descriptor apart from every upload in the title failing,
+      // and those need opposite responses.
+      static uint64_t failed = 0;
+      if (failed++ < 8 || (failed % 4096) == 0)
         std::fprintf(stderr,
-                     "[gpuvk] cs image writeback failed base=%#llx "
+                     "[gpuvk] cs image writeback #%llu failed base=%#llx "
+                     "%ux%u mips=%u layers=%u tiling=%u elem=%u/%u "
                      "(range stays stale)\n",
-                     (unsigned long long)base);
+                     (unsigned long long)failed, (unsigned long long)base,
+                     e.res.width, e.res.height, e.res.mip_levels, e.res.layers,
+                     e.res.tiling_idx, e.res.elem_bytes,
+                     e.res.stage_elem_bytes);
       return false;
     }
   } else {
@@ -1704,6 +1791,8 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci) {
     }
     e.size = sz[i];
     e.guest_bytes = guest_bytes;
+    if (ci.res[i].image_staging)
+      g_cs_image_staged++;
     e.image_staging = ci.res[i].image_staging;
     e.res = ci.res[i];
     e.last_used_frame = g_frame.num;

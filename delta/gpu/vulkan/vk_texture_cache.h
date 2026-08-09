@@ -55,6 +55,15 @@ struct TextureBindings {
   VkImageView zero_view = VK_NULL_HANDLE;
   VkImageView zero_array_view = VK_NULL_HANDLE;
   VkImageView zero_3d_view = VK_NULL_HANDLE;
+  // A shader that does image_sample_c compares against the sampled value, and
+  // Vulkan only defines that on a format supporting depth comparison. When such
+  // a binding resolves to a colour surface -- which every guest texture and
+  // every colour target is -- there is nothing valid to bind, so bind this: a
+  // 1x1 D32 image holding the far plane, which reads as "nothing occludes this"
+  // rather than as undefined.
+  VkImage depth_default_img = VK_NULL_HANDLE;
+  ImageAllocation depth_default_allocation;
+  VkImageView depth_default_view = VK_NULL_HANDLE;
   VkDescriptorSet white_set = VK_NULL_HANDLE;
   VkDescriptorSet white_array_set = VK_NULL_HANDLE;
   VkDescriptorSet white_3d_set = VK_NULL_HANDLE;
@@ -103,7 +112,12 @@ VkImageView TexViewFor(const rhi::DrawInfo::DrawTex& t);
 VkDescriptorSet GetMultiTexSet(const rhi::DrawInfo& d,
                                VkDescriptorSetLayout set_layout,
                                const VkImageView* resolved_views,
-                               const VkImageLayout* resolved_layouts);
+                               const VkImageLayout* resolved_layouts,
+                               // Per binding: the depth target it
+                               // resolved to, or 0. A depth
+                               // comparison is only defined on a
+                               // view whose format supports it.
+                               const uint64_t* depth_src = nullptr);
 
 // Drop cached textures overlapping a range a compute dispatch wrote.
 void InvalidateTexRange(uint64_t base, uint64_t size);

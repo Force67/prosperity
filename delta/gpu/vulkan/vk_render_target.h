@@ -67,6 +67,10 @@ struct RTarget {
               // (as loadOp=CLEAR) only when later content redraws this RT
               // in the same frame.
   VkClearColorValue clear_value{{0.0f, 0.0f, 0.0f, 0.0f}};
+  // Which mechanism asked for that clear (static string, DELTA_GPU_CLEARTRACE
+  // prints it). A clear that wipes live content is only fixable once you know
+  // whether the guest asked for it or one of our heuristics did.
+  const char* clear_src = "none";
   bool ever_rendered =
       false;  // false until first real render (then loadOp can LOAD)
   // Guest code addresses of the last recompiled pair that rendered into this
@@ -107,6 +111,10 @@ struct DepthTarget {
   VkDescriptorSet set = VK_NULL_HANDLE;
   std::unordered_map<uint32_t, VkImageView> sampled_views;
   uint32_t w = 0, h = 0;
+  // DB_DEPTH_SIZE's padded geometry: how much guest memory this Z surface
+  // actually owns, which is not the image size when the guest binds a
+  // half-resolution depth buffer to a full-resolution pass.
+  uint32_t guest_w = 0, guest_h = 0;
   VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
   VkImageLayout stencil_layout = VK_IMAGE_LAYOUT_UNDEFINED;
   uint64_t stencil_base = 0;
@@ -126,6 +134,12 @@ struct DepthTarget {
 };
 
 extern std::unordered_map<uint64_t, DepthTarget>& g_depths;
+// Depth images of a base rendered at more than one geometry; only the one in
+// g_depths answers to the address (see ActivateDepthVariant).
+extern std::unordered_map<uint64_t, std::vector<DepthTarget>> g_depth_variants;
+// Colour images of a base rendered at more than one geometry (see
+// ActivateRtVariant); only the one in g_rts answers to the address.
+extern std::unordered_map<uint64_t, std::vector<RTarget>> g_rt_variants;
 
 // Address -> image page table (the resource model's core). Maps a 64 KiB guest
 // page to the RT bases whose memory footprint covers it, so a sampled address
@@ -156,6 +170,13 @@ VkImageView SampledViewAs(RTarget& rt, uint32_t swizzle, VkFormat want);
 VkImageView SampledView(DepthTarget& depth, uint32_t swizzle);
 
 // Resolve a sampled guest address to the live image backing it (0 = none).
+// A sample names a render target by address alone, but one base can hold
+// several geometries (see ActivateRtVariant). Make the variant matching the
+// sampled geometry the live one when the live target cannot serve the sample.
+// Returns true if a usable target is live at `base` afterwards.
+bool ActivateSampledRtVariant(uint64_t base, uint32_t w, uint32_t h);
+bool ActivateSampledDepthVariant(uint64_t base, uint32_t w, uint32_t h);
+
 uint64_t ResolveSampledRT(uint64_t addr, uint32_t w, uint32_t h);
 uint64_t ResolveSampledDepth(uint64_t addr, uint32_t w, uint32_t h);
 // The depth target whose STENCIL plane lives at `addr` (DB_STENCIL_WRITE_BASE),
@@ -196,7 +217,19 @@ bool BeginRegion(const uint64_t* mrt_base,
                   float depth_clear = 1.0f,
                   uint64_t stencil_base = 0,
                   uint8_t stencil_clear = 0,
-                  bool depth_read_only = false);
+                  bool depth_read_only = false,
+                  uint32_t depth_w = 0,
+                  uint32_t depth_h = 0);
+
+// The Z surface's own geometry when DB_DEPTH_SIZE gave one, else the colour
+// target's. Sizing a depth image from the colour pass is wrong whenever the
+// two differ, and the error shows up as a footprint that swallows neighbours.
+inline uint32_t DepthW(const rhi::DrawInfo& d) {
+  return d.depth_w ? d.depth_w : d.rt_w;
+}
+inline uint32_t DepthH(const rhi::DrawInfo& d) {
+  return d.depth_h ? d.depth_h : d.rt_h;
+}
 void EndRegion();
 void SetGuestViewport(const rhi::DrawInfo& d);
 

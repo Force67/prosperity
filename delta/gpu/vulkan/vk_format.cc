@@ -463,16 +463,22 @@ VkBlendFactor BlendFactor(uint32_t f) {
       return VK_BLEND_FACTOR_SRC_ALPHA;
     case 5:
       return VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    // 6..10 are NOT the D3D order. GCN's CB_BLEND_CONTROL enum puts
+    // SRC_ALPHA_SATURATE at 6 and pushes DST_COLOR/DST_ALPHA up behind it
+    // (V_028780_BLEND_*), so reading this block as D3D silently substitutes a
+    // different factor for five of the commonest values -- turning
+    // SRC_ALPHA_SATURATE into DST_ALPHA, which on the ALPHA channel is the
+    // difference between dst.a = src.a and dst.a = src.a * dst.a.
     case 6:
-      return VK_BLEND_FACTOR_DST_ALPHA;
-    case 7:
-      return VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA;
-    case 8:
-      return VK_BLEND_FACTOR_DST_COLOR;
-    case 9:
-      return VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR;
-    case 10:
       return VK_BLEND_FACTOR_SRC_ALPHA_SATURATE;
+    case 7:
+      return VK_BLEND_FACTOR_DST_COLOR;
+    case 8:
+      return VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR;
+    case 9:
+      return VK_BLEND_FACTOR_DST_ALPHA;
+    case 10:
+      return VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA;
     case 11:
       return VK_BLEND_FACTOR_CONSTANT_COLOR;
     case 12:
@@ -545,6 +551,14 @@ VkPipelineColorBlendAttachmentState BlendAttachment(uint32_t bc, bool en) {
 
 // GCN data format -> Vulkan vertex format.
 VkFormat VertexFormat(uint32_t dfmt, uint32_t nfmt) {
+  // The recompiled vertex shader declares every attribute as a float vector,
+  // so an integer attribute format is a type mismatch and the attribute reads
+  // undefined (VUID-VkGraphicsPipelineCreateInfo-Input-08733). The SCALED
+  // forms deliver the same integer VALUE as a float, which is what a shader
+  // that fetches an integer attribute and converts it ends up with. 32-bit
+  // integers have no SCALED form and converting one would lose precision, so
+  // they stay -- such an attribute needs an integer input declaration, which
+  // no title tested here asks for.
   // GCN number formats: 0 UNORM, 1 SNORM, 2 USCALED, 3 SSCALED, 4 UINT,
   // 5 SINT, 7 FLOAT. The scaled forms deliver the integer value as a float,
   // which is what Vulkan's *_SSCALED/_USCALED do.
@@ -558,9 +572,9 @@ VkFormat VertexFormat(uint32_t dfmt, uint32_t nfmt) {
         case 3:
           return VK_FORMAT_R8_SSCALED;
         case 4:
-          return VK_FORMAT_R8_UINT;
+          return VK_FORMAT_R8_USCALED;
         case 5:
-          return VK_FORMAT_R8_SINT;
+          return VK_FORMAT_R8_SSCALED;
         default:
           return VK_FORMAT_R8_UNORM;
       }
@@ -573,9 +587,9 @@ VkFormat VertexFormat(uint32_t dfmt, uint32_t nfmt) {
         case 3:
           return VK_FORMAT_R16_SSCALED;
         case 4:
-          return VK_FORMAT_R16_UINT;
+          return VK_FORMAT_R16_USCALED;
         case 5:
-          return VK_FORMAT_R16_SINT;
+          return VK_FORMAT_R16_SSCALED;
         case 7:
           return VK_FORMAT_R16_SFLOAT;
         default:
@@ -590,9 +604,9 @@ VkFormat VertexFormat(uint32_t dfmt, uint32_t nfmt) {
         case 3:
           return VK_FORMAT_R8G8_SSCALED;
         case 4:
-          return VK_FORMAT_R8G8_UINT;
+          return VK_FORMAT_R8G8_USCALED;
         case 5:
-          return VK_FORMAT_R8G8_SINT;
+          return VK_FORMAT_R8G8_SSCALED;
         default:
           return VK_FORMAT_R8G8_UNORM;
       }
@@ -611,9 +625,9 @@ VkFormat VertexFormat(uint32_t dfmt, uint32_t nfmt) {
         case 3:
           return VK_FORMAT_R16G16_SSCALED;
         case 4:
-          return VK_FORMAT_R16G16_UINT;
+          return VK_FORMAT_R16G16_USCALED;
         case 5:
-          return VK_FORMAT_R16G16_SINT;
+          return VK_FORMAT_R16G16_SSCALED;
         default:
           return VK_FORMAT_R16G16_SFLOAT;
       }
@@ -630,9 +644,9 @@ VkFormat VertexFormat(uint32_t dfmt, uint32_t nfmt) {
         case 3:
           return VK_FORMAT_R8G8B8A8_SSCALED;
         case 4:
-          return VK_FORMAT_R8G8B8A8_UINT;
+          return VK_FORMAT_R8G8B8A8_USCALED;
         case 5:
-          return VK_FORMAT_R8G8B8A8_SINT;
+          return VK_FORMAT_R8G8B8A8_SSCALED;
         default:
           return VK_FORMAT_R8G8B8A8_UNORM;
       }
@@ -651,9 +665,9 @@ VkFormat VertexFormat(uint32_t dfmt, uint32_t nfmt) {
         case 3:
           return VK_FORMAT_R16G16B16A16_SSCALED;
         case 4:
-          return VK_FORMAT_R16G16B16A16_UINT;
+          return VK_FORMAT_R16G16B16A16_USCALED;
         case 5:
-          return VK_FORMAT_R16G16B16A16_SINT;
+          return VK_FORMAT_R16G16B16A16_SSCALED;
         default:
           return VK_FORMAT_R16G16B16A16_SFLOAT;
       }
