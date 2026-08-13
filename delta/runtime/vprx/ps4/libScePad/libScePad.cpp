@@ -408,9 +408,31 @@ constexpr BtnName kBtnNames[] = {
     {kTouchPad, "touchpad"},
 };
 
+// Symbolic analog-stick deflections, for the same script table. A first-person
+// title cannot be driven past its first door by buttons alone -- walking is the
+// left stick -- and 0/255 are the extremes of the same uint8 the read path fills
+// with 128 for neutral. `up` is 0 on the PS4's y axis (see the explore path).
+struct AxisName {
+  const char *name;
+  int lx, ly, rx, ry;  // -1: this step leaves that axis alone
+};
+constexpr AxisName kAxisNames[] = {
+    {"lsup", -1, 0, -1, -1},    {"lsdown", -1, 255, -1, -1},
+    {"lsleft", 0, -1, -1, -1},  {"lsright", 255, -1, -1, -1},
+    {"rsup", -1, -1, -1, 0},    {"rsdown", -1, -1, -1, 255},
+    {"rsleft", -1, -1, 0, -1},  {"rsright", -1, -1, 255, -1},
+};
+
+const AxisName *axisByName(const std::string &name) {
+  for (const auto &a : kAxisNames)
+    if (name == a.name) return &a;
+  return nullptr;
+}
+
 uint32_t buttonMask(const std::string &name) {
   for (const auto &b : kBtnNames)
     if (name == b.name) return b.mask;
+  if (axisByName(name)) return 0;  // an axis, reported by the caller instead
   std::fprintf(stderr, "[padscript] unknown button '%s'\n", name.c_str());
   return 0;
 }
@@ -427,7 +449,18 @@ std::string buttonNames(uint32_t buttons) {
 // intros/menus into gameplay. Buttons are symbolic (see kBtnNames) and combine
 // with '+', e.g. "12:cross,15:down+cross:200". holdMs defaults to 150. The
 // scripted buttons are OR'd into whatever state the read path produced.
-struct ScriptStep { double start, end; uint32_t buttons; };
+//
+// Stick deflections (kAxisNames) use the same syntax and the same '+', so
+// "20:lsup:3000" walks forward for three seconds and "24:lsup+lsright:800"
+// walks diagonally. holdMs is how far you travel or turn, since the deflection
+// itself is always full. An axis a step does not name is left at whatever the
+// rest of the read path produced, so two overlapping steps can drive one stick
+// each.
+struct ScriptStep {
+  double start, end;
+  uint32_t buttons;
+  int lx, ly, rx, ry;  // -1: leave alone
+};
 
 std::vector<ScriptStep> parseScript(const char *s) {
   std::vector<ScriptStep> steps;
@@ -460,14 +493,26 @@ std::vector<ScriptStep> parseScript(const char *s) {
         e.substr(c1 + 1, c2 == std::string::npos ? c2 : c2 - c1 - 1);
     double holdMs = c2 == std::string::npos ? 150.0 : std::atof(e.c_str() + c2 + 1);
     uint32_t mask = 0;
+    int lx = -1, ly = -1, rx = -1, ry = -1;
     size_t j = 0;
     while (j < btns.size()) {
       size_t plus = btns.find('+', j);
-      mask |= buttonMask(
-          btns.substr(j, plus == std::string::npos ? plus : plus - j));
+      const std::string tok =
+          btns.substr(j, plus == std::string::npos ? plus : plus - j);
+      if (const AxisName *a = axisByName(tok)) {
+        if (a->lx >= 0) lx = a->lx;
+        if (a->ly >= 0) ly = a->ly;
+        if (a->rx >= 0) rx = a->rx;
+        if (a->ry >= 0) ry = a->ry;
+      } else {
+        mask |= buttonMask(tok);
+      }
       j = plus == std::string::npos ? btns.size() : plus + 1;
     }
-    if (mask) steps.push_back({t, t + holdMs / 1000.0, mask});
+    // A stick-only step carries no button bits, so testing the mask alone would
+    // silently drop every movement instruction.
+    if (mask || lx >= 0 || ly >= 0 || rx >= 0 || ry >= 0)
+      steps.push_back({t, t + holdMs / 1000.0, mask, lx, ly, rx, ry});
   }
   return steps;
 }
@@ -540,18 +585,32 @@ void fillPadState(PadData *d) {
     double t = std::chrono::duration<double>(
                    std::chrono::steady_clock::now() - g_scriptT0).count();
     for (const auto &st : g_script)
-      if (t >= st.start && t < st.end) buttons |= st.buttons;
+      if (t >= st.start && t < st.end) {
+        buttons |= st.buttons;
+        // A named axis REPLACES the neutral the read path filled in; OR-ing
+        // would be meaningless on a 0..255 deflection where 128 is centre.
+        if (st.lx >= 0) lx = static_cast<uint8_t>(st.lx);
+        if (st.ly >= 0) ly = static_cast<uint8_t>(st.ly);
+        if (st.rx >= 0) rx = static_cast<uint8_t>(st.rx);
+        if (st.ry >= 0) ry = static_cast<uint8_t>(st.ry);
+      }
   }
 
   if (kPadTrace) {
     static uint32_t lastTraced = 0;
+    static uint32_t lastSticks = ~0u;
+    const uint32_t sticks = uint32_t(lx) | uint32_t(ly) << 8 |
+                            uint32_t(rx) << 16 | uint32_t(ry) << 24;
     static bool first = true;
-    if (first || buttons != lastTraced) {
+    if (first || buttons != lastTraced || sticks != lastSticks) {
       first = false;
       lastTraced = buttons;
-      std::fprintf(stderr, "[padtrace] readSeq=%llu buttons=%#x %s\n",
+      lastSticks = sticks;
+      std::fprintf(stderr,
+                   "[padtrace] readSeq=%llu buttons=%#x %s ls=(%u,%u) "
+                   "rs=(%u,%u)\n",
                    (unsigned long long)g_readSeq, buttons,
-                   buttonNames(buttons).c_str());
+                   buttonNames(buttons).c_str(), lx, ly, rx, ry);
     }
   }
 
