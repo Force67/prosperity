@@ -12,6 +12,20 @@
 // against a defect baseline of >240 = 0.477..1.909%. The hallway, door, walls,
 // floor and ceiling falloff all come out of the title's own present chain.
 //
+// READ "COMPARED AGAINST HARDWARE AT LAST" BELOW BEFORE TRUSTING THE TWO
+// PARAGRAPHS ABOVE (2026-08-13). Both were verified against our own dumps, with
+// no hardware reference and without looking at the WINDOW. Against real PS4
+// captures the light DISTRIBUTION is wrong (walls 15-90x too bright, floor 2.4x
+// too dark, no falloff), the walls carry a hatch lattice that is ours, and the
+// presented window is frequently BLACK -- the scene reaches the scanout image,
+// which is what those snapshots measured, while the composite intermittently
+// collapses to exactly zero. The colour, though, is right; do not "fix" it.
+//
+// IT GOES INGAME (2026-08-13). The player walks. Two things were needed: stick
+// deflections in DELTA_PAD_SCRIPT (it could only press buttons, and this is a
+// first-person walker), and the depth-attachment fix below -- movement triggers
+// an environment-probe bake that lost the Vulkan device in 4/4 runs.
+//
 // THE LAST FIX: A TARGET BEING ACCUMULATED INTO MUST START THE FRAME DEFINED.
 // The lazy-clear heuristic (DELTA_GPU_LAZYCLEAR, default on) persists a colour
 // target's contents across frames as loadOp=LOAD, clearing only on an explicit
@@ -543,6 +557,304 @@
 // GetDirectMemorySize vs a real PS4's ~4.5 GiB. P.T.'s own pools end at
 // 0x11c800000, so 0x11C000000 is too small and crashes it at
 // Sh_main_ps4+0x137c; the low-memory path is separately unimplemented.
+
+// ---------------------------------------------------------------------------
+// COMPARED AGAINST HARDWARE AT LAST (2026-08-13)
+// ---------------------------------------------------------------------------
+//
+// The previous version of this file ended by saying a hardware comparison "is
+// the only honest next step; everything short of it has produced retractions".
+// That comparison has now been made, against launch-era PS4 1080p captures of
+// the opening concrete room and the first hallway
+// (silenthillmemories.net/silent_hills/screens/, frames pt_01/02/07/23).
+// Two of this file's standing beliefs change as a result.
+//
+// 1. THE COLOUR IS RIGHT, AND THE WARM COMPOSITE IS A TRAP.
+//    The opening concrete room is genuinely COOL -- desaturated teal/grey-green,
+//    R/B ~= 0.75 on hardware, never warm. Ours presents R/B ~= 0.65. Correct.
+//    The trap: the tonemapped composite 0x815b000000 dumps WARM (R/B 1.54) and
+//    the scanout 0x8146400000 dumps COOL, exactly reciprocal, because the title's
+//    own final copy (draws 192/193, vs=0x80b546b800 ps=0x80b546c000) carries a
+//    T# with DST_SEL packed 0xf2e = (X<-Z, Y<-Y, Z<-X, W<-W), i.e. an explicit
+//    red/blue exchange on read. That copy is the guest converting into its
+//    display byte order, and it is CORRECT.
+//
+//    Do not "fix" it. ColorTargetFormat gives an 8_8_8_8 attachment
+//    B8G8R8A8, so a shader export component 0 lands in byte 2 -- mirrored versus
+//    hardware, but consistently: sampling the target through its OWN format
+//    un-mirrors it, so TextureComponents(DST_SEL) lands each selector on the
+//    right component. Routing the single-texture and feedback RT-as-texture
+//    paths through SampledViewAs(GuestTextureFormat(...)) the way the
+//    multi-texture path does was tried and is WRONG: it flipped the composite
+//    to cool AND darkened the scanout 11x (mean 0.071 -> 0.0064) because the
+//    T# on draw 193 is nfmt 9 (SRGB), so the alias adds an sRGB decode. The
+//    hue on screen did not change either way. Reverted.
+//
+//    Only the HLE videoout path (libSceVideoOut.cpp, presenting from GUEST
+//    memory, which is not mirrored) should honour the video-out pixel format;
+//    the GPU present path's hardcoded PixelFormat::bgra8 is right for the
+//    mirrored readback. P.T. never calls sceVideoOutSetBufferAttribute anyway.
+//
+// 2. "IT RENDERS CORRECTLY" WAS TOO STRONG. THE LIGHT DISTRIBUTION IS WRONG.
+//    Region means, 0-255, our presented frame against pt_01:
+//                          real            ours
+//      floor, bottom     (36.6,46.0,44.4) (12.6,19.6,20.5)   2.4x too DARK
+//      wall left, mid    ( 0.8, 2.8, 1.9) (24.7,35.0,37.7)  ~15x too BRIGHT
+//      wall right, mid   ( 0.1, 0.3, 0.2) (14.1,21.3,22.6)  ~90x too BRIGHT
+//      whole frame       (12.1,17.0,16.2) (20.2,28.8,31.1)   1.7x brighter
+//    On hardware the room is lit by ONE fluorescent tube directly above the
+//    door: it pools on the floor and the side walls fall off to essentially
+//    black. Ours spreads light flatly over the whole room, and the floor/wall
+//    brightness relationship is INVERTED -- on hardware the floor is the
+//    brightest large surface, in ours the walls are.
+//
+//    The camera positions differ (pt_01 is straight-on, ours is off-centre), so
+//    the exact ratios are approximate. The structural claim is not: 15-90x on
+//    the walls is far outside what framing can explain.
+//
+//    Note the tension any explanation must resolve: too much uniform ambient
+//    explains the walls but NOT a floor that is too dark. Either two faults, or
+//    something redistributes light away from the floor.
+//
+// 3. THE DIAGONAL HATCHING IS OURS, NOT THE TITLE'S.
+//    Fine diagonal weave over the walls, ceiling and door, visible at full
+//    resolution in the ordinary presented image. Hardware crops at 3x show
+//    smooth matte plaster and concrete with low-contrast blotchy mottle plus
+//    ISOTROPIC film grain -- no repeating diagonal lattice anywhere.
+//    What IS authentic in this room: clusters of scratched tally marks (four
+//    strokes crossed by a diagonal) as decals on the wall beside the door, and
+//    strong chromatic aberration (~2px at 1080p even near screen centre).
+//    Note this does NOT contradict the older "not a diagonal hatch" entry: that
+//    one was about a >200 threshold mask viewed downscaled 2x with NEAREST,
+//    which manufactures hatching. This is in the unprocessed image.
+//
+// 4. WHAT IS LEGITIMATELY CLIPPED. The hallway pendant core really does hard-
+//    clip to (255,255,255) over ~32% of the globe with a smooth bloom rolloff.
+//    The opening concrete room, by contrast, has NO clipped whites in its
+//    standard framing. So a blown-highlight hunt should be graded per area.
+//
+// ---------------------------------------------------------------------------
+// IT GOES INGAME, AND THEN IT STOPS (2026-08-13)
+// ---------------------------------------------------------------------------
+//
+// THE PAD SCRIPT COULD NOT WALK. DELTA_PAD_SCRIPT's time-keyed replayer only
+// ever set a button mask, and P.T. is a first-person walker -- so no scripted
+// run could move the player at all, which is why the title had never been
+// driven past its first room. The script now takes symbolic stick deflections
+// (lsup/lsdown/lsleft/lsright, rsup/rsdown/rsleft/rsright), combining with '+'
+// and with buttons, e.g. "25:lsup:30000" or "24:lsup+lsright:800". holdMs is
+// how far you travel or turn, since the deflection itself is full.
+//
+// With that, the title responds: the camera walks through the concrete room.
+// DELTA_PAD_TRACE=1 now prints the sticks alongside the buttons, and confirms
+// the guest reads ls=(128,0) when the script deflects forward.
+//
+// THE FIX, and it is verified with a clean before/after. A depth attachment
+// must COVER the render area -- Vulkan permits it to be larger, never smaller
+// (VUID-VkRenderingInfo-pNext-06079/06080). ActivateDepthVariant had THREE
+// fallback paths that returned the live target whatever its geometry (variants
+// disabled, the three-variant cap reached, image creation failed), and
+// BeginRegion then bound it. P.T.'s probe bake requests ONE depth base
+// (0x8156400000) at five geometries -- 960x540, 512x512, 256x256, 128x128,
+// 64x64 -- so the cap fires and it began a 512x512 region with a 64x64 depth
+// view. DELTA_GPU_VALIDATE=1 names it exactly:
+//   error f646 draw#464 [region rt=0 512x512 mrt=0 depth=0x8156400000]
+//   VUID-VkRenderingInfo-pNext-06079: pDepthAttachment->imageView width (64) is
+//   less than renderArea.offset.x (0) + renderArea.extent.width (512)
+// Those three paths now return nullptr unless the live target actually covers
+// the area, so BeginRegion declines the pass. A dropped pass costs one draw; a
+// lost device costs the run.
+//   before: DEVICE FAULT 1/1 run, 10-14 [fps] reports, dead after ~1s of input
+//   after:  DEVICE FAULT 0, 62 [fps] reports, 0 render-area errors, and the
+//           frame goes from ~220 draws to a sustained 410-425 -- the hallway
+//           geometry beyond the door. The albedo plane confirms the player
+//           crossing the room and ending up against the door.
+// This is the ONE run of the day where DELTA_GPU_VALIDATE paid for itself
+// twice: the same lesson as fault 7, learned again.
+//
+// THE STALL IS A LOST VULKAN DEVICE, and that is measured, not inferred.
+// Every movement run logs, once, from CsBatchFlush (vk_compute.cc:1121):
+//   [gpuvk] cs batch DEVICE FAULT: end=0 submit=-4 wait=-4 n=9   (or n=10)
+// -4 is VK_ERROR_DEVICE_LOST. The correlation is exact over nine runs:
+//   movement  (walk, walk2, stall, novariant):  4/4 fault,  10-14 [fps] reports
+//   no input  (baseline, noinput, ptrace, rb, contra): 0/5 fault, 43-71 reports
+// end=0 means vkEndCommandBuffer SUCCEEDED and the submit itself returned
+// DEVICE_LOST -- so the GPU died in work submitted EARLIER, and this compute
+// batch is merely the first call to notice. The probe bake in the same instant
+// is the prime suspect. Once the device is lost nothing renders again, which is
+// the whole of the "stall": no EndFrame, no [fps], no present. Pad reads keep
+// advancing because they are pure CPU.
+//
+// So do NOT look for a guest-side wait here. Note also that [fps], the
+// snapshots and the frame counter are all produced ONLY inside rhi::EndFrame,
+// reached only from a guest flip that had at least one draw
+// (ps4/cmd_processor.cc:2204-2214, gated on g_frame_active set at :1528-1531) --
+// a flip with zero draws is a silent no-op, so those instruments cannot by
+// themselves tell "guest stopped flipping" from "renderer stopped working".
+// Here it is the renderer: the device is gone.
+//
+// EXONERATED, with the measurement:
+//   - The RT variant machinery. DELTA_GPU_NOVARIANT=1 still faults and still
+//     stalls. Parked variants are re-activated by a render OR a multi-tex
+//     sample (vk_render_target.cc:373-379, vk_draw_recomp.cc:903-908), and
+//     re-activation logs nothing -- so "requested 1920x1080 never appears
+//     again" is expected silence, not evidence.
+//   - `decline: self=1`. That is ONE cumulative declined draw reported at each
+//     30-frame boundary, not one per line, and the no-input control reports it
+//     105 times too. Background noise here.
+//
+// THE STALL, and it is reproducible three runs out of three:
+//   - No input, 150s: 71 [fps] reports, 6 alias lines, main view presents for
+//     the whole run.
+//   - Left stick forward from 20s / 25s / 30s: 10-14 [fps] reports, then the
+//     main view stops presenting PERMANENTLY, within ~1s of the input starting.
+// At the moment it stops the log shows three `decline: self=1` and then a burst
+// in which the title renders its ENTIRE G-buffer/lighting chain into the same
+// guest bases at tiny geometries -- 9x 128x128, 9x 512x512, 5x 64x64, 1x
+// 256x256 (the light buffer 0x8151a80000 at 64x64 and 256x256, normally
+// 960x540). Nine targets at each size, i.e. the whole chain once per size, not
+// six cube faces.
+//
+// AFTER THAT BURST `requested 1920x1080` NEVER APPEARS AGAIN -- zero times over
+// the remaining ~170s. The process does not crash: pad reads keep advancing
+// (readSeq 9547). EndFrame stops running, which is why DELTA_GPU_CAPTURE_AFTER
+// cannot capture the stalled state -- arm the capture ON the transition
+// instead (script at 25s, CAPTURE_AFTER=26, CAPTURE_COUNT=4).
+//
+// DELTA_GPU_NOVARIANT=1 shrinks the burst (2x 128x128, 1x 512x512 -- it stops
+// creating the per-geometry images) but does NOT restore the main view.
+//
+// A trap for whoever measures this next: DELTA_GPU_SNAPEVERY writes nothing
+// unless DELTA_GPU_DUMP=1 is also set. A run that looks like it stalled at
+// frame 601 may just be missing that.
+
+// ---------------------------------------------------------------------------
+// THE HATCHING IS A TILING PERMUTATION, AND THE SURFACE IS NAMED
+// ---------------------------------------------------------------------------
+//
+// At 4x the "weave" resolves to a staggered lattice of screen-axis-aligned
+// 8x2-pixel slivers. Autocorrelation peaks at lag (+64, 0) = 0.474 and
+// (+16, -8) = 0.460 -- exactly GCN 2D-tiling geometry for a pitch-2048 32bpp
+// surface: 8x8 micro tiles, 8-pixel pipe stagger, 64-row bank repeat for the
+// 16-bank / bank_height-4 macro mode. That is a memory-layout permutation. It
+// is not lighting, not banding, not dither, and not art.
+//
+// EVERY artefact-carrying pass, and only those, samples 0x8156b80000
+// (1920x1080 R32_SFLOAT, tiling=0 Depth2DThin_64, pitch 2048,
+// resolved=guest): the litA/litB writers, and composite draws 51 (T#0) and 88
+// (T#1). It is produced by guest CS 0x80b5001000, a per-pixel depth resolve of
+// 0x8159f00000, and it is the ONLY screen-sized surface that round-trips
+// through guest memory: image -> CS staging -> retile to guest -> detile at
+// texture upload. Passes that read the live depth image instead are clean.
+//
+// So one side of that round trip applies the tiling-0 permutation an odd number
+// of times. NOT a whole-surface layout mismatch -- simulating that displaces
+// data ~600px and the observed displacement is intra-tile. The detiler does
+// implement tiling 0 (gcn_detile.cc:286-296, kMmDepth; the mode table covers
+// 0-26 and 31), so this is not a silent linear fallthrough of the descriptor.
+// The asymmetry is in the CS bridge.
+//
+// The G-buffer planes, both light buffers and the half-res depth are CLEAN at
+// the same screen windows (band-pass std 0.01-0.16 against 2.9 in the
+// composite), which is what localises it to the composite's inputs.
+//
+// Two more real defects found while doing this, neither of them the hatch:
+//   - The CS depth input is bridged with ONE FRAME OF LATENCY
+//     (vk_compute.cc:785-793), which matches litA's ghost shards.
+//   - PA_SU_POLY_OFFSET / depth bias is unimplemented everywhere (zero grep
+//     hits in the tree).
+//   - litA 0x8152f00000 is FROZEN JUNK: mean identical across frames
+//     (8084, 392.5, 0.1848), 99.65% of pixels byte-identical, and its
+//     CB_COLOR1_INFO has bit 13 (FAST_CLEAR) set -- the one register field this
+//     file already records as unmodelled. Sampled by draw 51 every frame.
+//
+// ---------------------------------------------------------------------------
+// THE LIGHTING IS WRONG IN TWO SEPARATE WAYS -- KEEP THEM APART
+// ---------------------------------------------------------------------------
+//
+// (A) DISTRIBUTION, on a healthy frame: flat, walls 15-90x too bright, floor
+// 2.4x too dark (numbers above). The best-supported account is that the light
+// accumulation buffer 0x8151600000 never starts a frame from zero. The guest
+// zero-fills BOTH light buffers by compute (cs 0x80b5000400, over each buffer's
+// exact 0x480000 footprint) immediately before the 33-draw light pass, and
+// UploadCsRangeToRt returns early on !e.image_staging
+// (vk_compute.cc:812-815), so a buffer-descriptor fill of an RT-aliased range
+// never reaches the VkImage. MRT1 is bound only as slot 1, in one region per
+// frame, loadOp=LOAD, blend src ONE + dst (1-src.a) -- iterated across frames
+// that converges to dst* = src/src.a, which CANCELS the spatial structure of a
+// volumetric term. The capture agrees: MRT1 is flat (linear 0.094-0.234, a 2.5x
+// range where a one-lamp room needs ~100x) and 12x brighter than its
+// per-frame-cleared sibling MRT0 fed by the same draws.
+//
+// This also explains the floor, which no "too much ambient" story can: draw 88
+// applies out = src*ONE + dst*src.a, so the polluted buffer both washes the
+// walls AND modulates the albedo base by a src.a computed from it. The
+// inversion is measurable INSIDE the light buffers (MRT0 walls 37 vs floor 22),
+// which excludes the exposure/tonemap chain as its cause -- that only scales.
+//
+// The accumulate-needs-reset rule (vk_draw_recomp.cc:543-552) misses this
+// target twice: it requires COLOR_DESTBLEND == ONE, and it checks only MRT slot
+// 0. The light MRT1 is dst=INV_SRC_ALPHA and always slot 1.
+//
+// NOT YET CONFIRMED, and one attempt already failed:
+// DELTA_GPU_FRAMECLEAR=0x8151600000 left the frame black and the buffer at
+// 0.00029 -- but that run was already in state (B) below, so it shows only that
+// forcing the clear does not RECOVER a collapsed run. Re-run it on a healthy
+// run before believing either way. Note also this file's older entry that these
+// bytes "are not the light seed" and was reverted: that was judged against the
+// blob artefact with no hardware reference. It is not evidence about
+// distribution.
+//
+// Secondary contributors, measured but not sufficient:
+//   - The 512x512 ambient input 0x80b9000000 is 60-74% exactly-1.0 white, and
+//     that white is draw 89's own output, not stale memory. Plausible for the
+//     walls, explains nothing about the floor.
+//   - AO is absent: 0x80d2a80000 is alpha min=max=1.0 over all 2,073,600
+//     texels with RGB 0, i.e. the SSAO chain produces literally no
+//     information, consumed by composite draw 51 binding 5. Real, but SSAO
+//     darkens creases, not mid-walls by 15-90x.
+//   - The light pass cbufs are FINE: per-draw positions, radii and HDR colours
+//     all vary sensibly, and `zero` reports no defaulted samplers and no
+//     unstaged cbufs. The silent-white-default and unstaged-scalar theories are
+//     refuted for that capture.
+//
+// (B) COLLAPSE, and this is the one that blacks out the window. Partway through
+// a run the light buffers fall ~47x and the composite goes EXACTLY zero:
+//    healthy f1324: 0x8151a80000 0.01315, 0x8151600000 0.156,
+//                   composite 0.1215/0.1129/0.0790, nonzero 2073600/2073600
+//    collapsed f1506: 0x8151a80000 0.00028, 0x8151600000 0.00309,
+//                   composite (0,0,0,0), nonzero 0/2073600
+// The G-buffer is FINE in the collapsed frame (albedo 0.4395/0.4166/0.3782,
+// alpha 1), the light passes still RUN with the same draw counts (33 and 29),
+// the frame is otherwise healthy (201 draws, 136 regions, 19 dispatches, 333
+// barriers), and draw 200 does execute the final copy into the scanout.
+// So geometry and material are right and the lighting contributes nothing.
+//
+// IT IS INTERMITTENT RUN TO RUN, not a function of frame number: f1324, f1380
+// and f1675 are healthy, f1506 and a ~f1400 are collapsed, and f1324 vs f1506
+// were armed at the same wall-clock point (45 s) in two runs of the same
+// binary. That the composite lands EXACTLY zero while its inputs are merely
+// tiny is the discriminating clue -- something multiplies to zero rather than
+// the frame simply being dim. Diff the healthy and collapsed captures with
+// `gpu_capture.py diff` and `zero` before theorising.
+//
+// ---------------------------------------------------------------------------
+// A GAP WORTH CLOSING, MEASURED BUT NOT A COLOUR BUG TODAY
+// ---------------------------------------------------------------------------
+//
+// The title's scanout pixel format reaches us and we throw it away. Every PS4
+// title runs the real libSceVideoOut.sprx (LLE by default, vprx.cpp:224-229),
+// which forwards the buffer attribute to /dev/dce as ioctl 0xc0308207; the
+// handler at kern/ps4/dev/dce_dev.cpp:334-339 accepts it and discards it. The
+// flip submit 0xc0488204 carries no format, and both present sites hardcode
+// bgra8 (vk_frame.cc:1378, vk_present.cc:45). DELTA_DCE_TRACE=1 already dumps
+// the 48-byte arg as six qwords, so recovering it is cheap.
+//
+// Do NOT "fix" the present order on the strength of that. bgra8 is right here:
+// the reference says this room is cool and ours is cool, and SotC
+// (CUSA08809.txt:4-5, :141-145), Bloodborne (CUSA03173.txt:6-7) and Minecraft
+// PS5 (PPSA17221.txt:2) all have dated evidence of CORRECT colour through the
+// same hardcoded path.
 
 // The renderer needs a few thousand pad reads before the title's transition
 // handler exists, so hold neutral before pulsing anything. Made no difference
