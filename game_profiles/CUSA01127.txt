@@ -889,6 +889,52 @@
 // plainly just resolution constants at shifted offsets. See the older note in
 // this file about the SRT "ptr" constant buffers.
 //
+// ###########################################################################
+// RETRACTED, SAME DAY: "THE CS DEPTH RESOLVE CONTAINS GARBAGE" WAS MY OWN
+// INSTRUMENT LYING. 0x8156b80000 IS CORRECT.
+// ###########################################################################
+//
+// The claim was that 0x8156b80000 -- the depth the light shader samples to
+// reconstruct world position -- held a flat gradient with no scene structure,
+// against a depth image that clearly showed the room, and that this was the
+// fade. It is wrong, and the way it went wrong is worth more than the claim was.
+//
+// The texture dump decodes a single-channel 32-bit float with a FIXED display
+// scale. A reversed-Z resolve lives in 0.013..0.025, so at x8 the whole surface
+// lands in bytes 92..122 -- 31 low-contrast levels, which read by eye as a flat
+// grey gradient. The DEPTH dumps, which I was comparing against, normalise
+// against their own extent and so show the room in full contrast. The two images
+// were never comparable, and I compared them anyway.
+//
+// Measured properly:
+//   - decoded byte range 92..122, which back through the x8 scale is
+//     0.0136..0.0244 -- the depth buffer's own 0.0134..0.0247.
+//   - re-dumped at DELTA_GPU_CAPTURE_R32_SCALE=60 the DOOR OUTLINE and the
+//     room's rectangular structure are plainly visible.
+// So the surface holds the right values in the right range with the right
+// structure. It is not the fade. What anomaly it does carry is tile-level, which
+// is consistent with the hatch analysis and nothing more.
+//
+// Two guards added so this cannot recur: the display scale is now
+// DELTA_GPU_CAPTURE_R32_SCALE and the value used is written into the dump's
+// FILE NAME (..._d4_n7_x60.png), because such an image is meaningless without
+// it. Never judge "flat vs structured" on one scale; sweep it.
+//
+// AND THE CS BRIDGE IS FINE, which the same investigation established and which
+// is worth keeping: DELTA_GPU_CSRT=1 prints
+//   [csrt] f2 base=0x8159f00000 1920x1080 -> staged-from-RT
+// every frame after the first, so the depth image IS bridged into the compute
+// dispatch rather than read from the stale guest bytes. Only f1 falls back. The
+// dispatch itself runs at groups [240,135,1] over the full 1920x1080 with an
+// output range of 0x870000 (a pitch-2048 surface). Do not re-audit that path on
+// the strength of the retracted claim above. NOTE that a resource record's
+// guest.nonzero for such an input reads 0/65536 and that is EXPECTED, not a
+// fault: the bytes under a live target are stale by design and the bridge is
+// what feeds the dispatch instead.
+//
+// So the fade's cause is STILL OPEN, and what is known about it is below.
+//
+// *** SUPERSEDED HEADING, KEPT FOR ITS MEASUREMENTS ***
 // *** THE FADE IS A DEPTH PROBLEM, BUT NOT THE LIGHT PASS'S DEPTH TEST. ***
 // (2026-08-13) Read this whole block before acting; the first result here was
 // over-read and the correction matters.

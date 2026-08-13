@@ -38,6 +38,11 @@ DELTA_OPTION(const char*, kCaptureDir, "DELTA_GPU_CAPTURE_DIR", nullptr);
 // What to read back and write as PNG when the frame closes: any of
 // rt, depth, tex, all, none (comma separated).
 DELTA_OPTION(const char*, kCaptureDump, "DELTA_GPU_CAPTURE_DUMP", "rt,depth");
+// Display scale for single-channel 32-bit float guest textures (a resolved
+// depth plane). See DecodeGuestTexel case 4: the values are tiny, a fixed scale
+// invents "flat" surfaces out of correct ones, so this is adjustable and the
+// value used is recorded next to the dump.
+DELTA_OPTION(float, kR32Scale, "DELTA_GPU_CAPTURE_R32_SCALE", 8.f);
 // Mid-frame snapshots: a comma list of draw indices, "every:N", or "all".
 DELTA_OPTION(const char*, kCaptureAt, "DELTA_GPU_CAPTURE_AT", nullptr);
 DELTA_OPTION(float, kCaptureExposure, "DELTA_GPU_CAPTURE_EXPOSURE", 1.f);
@@ -1054,6 +1059,30 @@ bool DecodeGuestTexel(uint32_t dfmt,
       out[dfmt == 8 ? 0 : 2] = uint8_t((((packed >> 20) & 0x3FF) * 255) / 1023);
       out[3] = uint8_t(((packed >> 30) & 3) * 85);
       return true;
+    case 4: {  // 32 -- a single-channel 32-bit texel, which is how a title
+               // hands a resolved DEPTH plane to a later pass. Without this the
+               // dump reported `skipped: format` and the one surface a deferred
+               // renderer reconstructs world position from stayed invisible.
+      if (nfmt == 7) {
+        float f;
+        std::memcpy(&f, src, 4);
+        // A reversed-Z depth resolve lives in a narrow band near zero (P.T.'s
+        // is 0.013..0.025), so a 1:1 decode is a black frame. Scaling makes it
+        // visible -- but a FIXED scale is a trap: at x8 that band lands in
+        // bytes 92..122, and 31 low-contrast levels read as a flat gradient
+        // even when every value is correct. That cost a wrong root-cause
+        // claim. The depth dumps normalise against their own extent; this path
+        // cannot (it decodes one texel at a time), so the scale is a knob and
+        // the number is printed with the file name. Sweep it, and never judge
+        // "flat vs structured" from one scale.
+        out[0] = out[1] = out[2] = ToByte(f * kR32Scale, true);
+      } else {
+        std::memcpy(&packed, src, 4);
+        out[0] = out[1] = out[2] = uint8_t(packed >> 24);
+      }
+      out[3] = 255;
+      return true;
+    }
     case 5:  // 16_16
       if (nfmt == 7) {
         const auto* h = reinterpret_cast<const uint16_t*>(src);
@@ -1458,6 +1487,14 @@ void DumpFrameResources() {
   if (DumpWanted("tex")) {
     for (const TexKey& t : g_frame_texs) {
       char name[256];
+      // dfmt 4 float carries its display scale in the name: the image is
+      // meaningless without it (see DecodeGuestTexel case 4).
+      if (t.dfmt == 4 && t.nfmt == 7) {
+        std::snprintf(name, sizeof name,
+                      "%s_tex_%#llx_%ux%u_d%u_n%u_x%g.png", g_prefix.c_str(),
+                      (unsigned long long)t.base, t.w, t.h, t.dfmt, t.nfmt,
+                      (double)kR32Scale);
+      } else
       std::snprintf(name, sizeof name, "%s_tex_%#llx_%ux%u_d%u_n%u.png",
                     g_prefix.c_str(), (unsigned long long)t.base, t.w, t.h,
                     t.dfmt, t.nfmt);
