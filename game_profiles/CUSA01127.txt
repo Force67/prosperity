@@ -1072,6 +1072,60 @@
 // the same transient-to-equilibrium already established -- the ~2 s "hold" is the
 // saturated headroom, not a delay before something happens.
 //
+// THE BISECT, RUN (2026-08-13). ONLY_PS keeping the light pass plus the frame's
+// other 58 shaders minus one quarter at a time, judged on 0x8151a80000's settled
+// equilibrium (7 = light survives, 0 = suppressed):
+//   all 58                       -> 0
+//   all minus shaders  1-15      -> 7
+//   all minus shaders 16-29      -> 7
+//   all minus shaders 30-44      -> 7
+//   all minus shaders 45-58      -> 0
+// (draw-order list of distinct pixel shaders; the light pass excluded.)
+//
+// So the necessary set lies entirely within shaders 1-44, and ALL THREE of those
+// groups contain something required -- removing any one of them restores the
+// light, while the last 14 shaders are irrelevant. That is not the signature of a
+// single guilty pass; it is the signature of the suppression needing the SCENE
+// GEOMETRY SUBSTANTIALLY COMPLETE. Which fits the depth results (the G-buffer
+// group's test or write both restore it) and fits "either half alone gives 7":
+// any missing chunk of geometry leaves holes in the depth plane where the light
+// quads still pass.
+//
+// TWO MORE CLEAN NEGATIVES on the anomaly, so the next person does not spend runs
+// on them:
+//   - THE DIVIDER IS NOT ZEROING IT IN THE FULL FRAME EITHER.
+//     DELTA_GPU_SKIP_PS=0x80b55a0000 (drop the blending-off rgb/(1-alpha) pass
+//     that REPLACES the light buffer) leaves the full frame at mean 30 through
+//     f360 and 0 by f480 -- identical to baseline. The earlier ONLY_PS test showed
+//     it harmless in isolation; this shows it harmless with the whole frame
+//     present, which was the loophole worth closing.
+//   - THE UPLOAD RINGS ARE NOT OVERFLOWING, so the light pass is not reading
+//     clobbered constants. DELTA_GPU_RINGHWM=1 on a full run: vb 1661K/524288K,
+//     ib 187K/65536K, ubo 9968K/131072K (7.6%), sbo 13312K/262144K, and no
+//     "decline: ring" anywhere. That kills the one mechanism by which a pass whose
+//     output depends ONLY on constants could produce a different value in a busy
+//     frame than in an isolated one.
+//
+// Which sharpens the anomaly rather than resolving it: the light pass samples no
+// textures, its constants are not being clobbered, nothing overwrites its target,
+// and its own depth test is off -- and it still settles at 0 in the full frame and
+// 7 in isolation. Every local explanation is now excluded, so the difference has
+// to come from something the full frame changes about the pass's INPUTS that is
+// neither a texture nor a constant: the descriptor tables its user data points at
+// (this title's cbuffers are SRT roots pointing at descriptor tables, see the
+// older cbuf note), or the per-draw user data itself. That is where to look, and
+// DELTA_GPU_CBSTAGED=<vs addr> dumps the bytes that actually reached the ring slot
+// a descriptor points at -- which is the one instrument here that inspects what
+// the SPIR-V really loads rather than what the guest buffer holds.
+//
+// THE ONE THING THAT STILL DOES NOT FIT, and it has survived every round, so
+// treat it as the key rather than an annoyance: disabling the LIGHT PASS'S OWN
+// depth test should let its quads through everywhere and give 7, and it gives 0
+// (knob verified fired, target read directly, mean 30 held to f360 then 0 by
+// f480). Any account of this defect has to explain that, and no account here does.
+// The next person should start there, not from the bisect -- the bisect is
+// consistent with several stories, that anomaly is consistent with very few.
+//
 // SO DO NOT LOOK FOR A TRIGGER. The whole of the defect is a STEADY-STATE
 // difference, and it is already isolated to one number:
 //     light pass alone, or with either half of the frame  -> equilibrium 7
