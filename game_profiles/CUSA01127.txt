@@ -818,7 +818,156 @@
 //     unstaged cbufs. The silent-white-default and unstaged-scalar theories are
 //     refuted for that capture.
 //
-// (B) COLLAPSE, and this is the one that blacks out the window. Partway through
+// (B) THE BLACK WINDOW IS A DETERMINISTIC 5-SECOND FADE, and it is the single
+// most important open defect. Characterised with DELTA_GPU_RBTRACE=1, which
+// prints per present the non-zero byte count of the bytes about to be shown:
+//
+//   f377  content appears (nz 0 -> 1518 of 2024 samples)
+//   f420  1517      f480   174      f540    12
+//   f440   938      f500    73      f560     0  and zero for the rest of the run
+//   f460   400      f520    39
+//
+// That is a geometric decay of x0.43 per 20 frames = x0.959 PER FRAME, i.e. a
+// temporal feedback multiply, not a state flip. Onset f377 and completion ~f560
+// reproduce across six runs to within a few frames.
+//
+// FIRST: LOOK AT THE WINDOW, NOT THE DUMPS. This is why the 2026-08-08 "it
+// renders correctly" verification missed it entirely: the scene DOES reach the
+// scanout image, which is what DELTA_GPU_SNAP and the RT dumps read, and the
+// frame debugger confirms the image holds the room. The WINDOW is black. An
+// xwd of the window shows the perf overlay and the controls help rendering
+// normally over a pure black frame at 28.9 fps. Screenshot the window.
+//
+// WHAT IS ESTABLISHED, all by measurement:
+//   - The guest is NOT dimming its own lights. The per-light HDR colours in cb3
+//     are BYTE-IDENTICAL between a healthy frame (f420) and a deep-fade frame
+//     (f520): 31.49/36.52/32.10, 25.14/29.15/25.62, 19.80/22.96/20.18, ...
+//     So this is ours, not a scripted fade.
+//   - Per-draw state is identical too. `gpu_capture.py diff` over the two
+//     frames reports NO change to any blend word, depth state, viewport,
+//     target mask, cull or primitive type. The only structural difference is
+//     the light pass going 33 -> 29 draws. Everything else that differs is
+//     streamed texture addresses.
+//   - The G-buffer is intact while the frame fades: albedo 0x8155700000 ratio
+//     0.954, normals 0x8154700000 1.016, the ambient 0x80b9000000 1.003.
+//   - The decay is banded. Light buffer 0x8151600000 and the whole bloom /
+//     downsample chain (0x80b9500000, 0x80b6200000, 0x80b6240000, 0x80b8d00000,
+//     0x8146e80000, 0x8147100000, 0x8147380000) all land on x0.029-0.032. The
+//     composite 0x815b000000 and its scanout copies (0x80d4c00000,
+//     0x8146400000, 0x8145c00000) land on x0.0006.
+//   - THE EXPOSURE METERING CHAIN GROWS WHILE THE IMAGE FADES, which is
+//     positive feedback and the strongest remaining lead. Mapped end to end:
+//       0x8153700000 (lit HDR scene, B10G11R11)
+//         -> draw 97  (ps=0x80b546c000)  -> 0x80b7e00000 480x270 RGBA16F
+//         -> draw 98  (ps=0x80b542d000)  -> 0x80b7020000 128x128
+//         -> draw 99  (ps=0x80b5427000)  -> 0x80b6830000 32x32
+//     Values, f420 -> f520: lit scene (0.000233, 0.4247, 548.9) ->
+//     (0.000272, 0.4462, 576.8); 0x80b7e00000 blue 603.8 -> 644.9;
+//     0x80b7020000 54.2 -> 57.98; 0x80b6830000 60.46 -> 64.71. A metering
+//     target reading luminance ~54-65 where a room this dark should meter ~0.1,
+//     and RISING as the frame darkens, is a loop with the wrong sign or the
+//     wrong input.
+//
+// REFUTED, each by one run, do not redo:
+//   - DELTA_GPU_FRAMECLEAR=0x8151600000 (per-frame clear of the light
+//     accumulator, i.e. exactly where the guest's dropped compute zero-fill
+//     lands). Fade unchanged.
+//   - DELTA_GPU_TEXFORCE=0x8156b80000 (the mis-permuted depth resolve that
+//     carries the hatch, sampled by every pass that writes the lit scene).
+//     Fade unchanged -- so the hatch carrier and the fade are separate bugs.
+//   - DELTA_GPU_FRAMECLEAR=0x8153700000 (the lit scene is written by five
+//     blended draws a frame and never reset, and it grows, so it looked like
+//     the profile's own LAST FIX again). Fade unchanged.
+// The fade is frame-identical under all three, which is itself evidence: a
+// content-dependent feedback loop would have shifted its timing.
+//
+// A DEAD END WORTH NAMING: diffing every cbuf float between the two frames
+// looking for a fade multiplier does not work. Most of those slots hold
+// DESCRIPTORS, which decode as absurd floats (3.8e22, 5.1e19), and the buffers
+// stage at different layouts between frames, so element-wise comparison
+// manufactures 133 "dropping" values including 960 -> 0 and 540 -> 0 that are
+// plainly just resolution constants at shifted offsets. See the older note in
+// this file about the SRT "ptr" constant buffers.
+//
+// THE FADE ORIGINATES IN THE LIGHT BUFFERS, AND THE TRIGGER IS ALPHA == 1.
+// DELTA_GPU_RTSTAT=1 with DELTA_GPU_RTSTAT_EVERY=60 gives every target's mean
+// per frame in ONE run, which is what finally separated cause from consequence.
+// Use it before any two-frame diff. Means below are the 0-255 scaled ones:
+//
+//   frame   albedo  MRT1     MRT0  litscene  composite
+//   f240-360   124  246-255    30        87          0   (not presenting yet)
+//   f420       111      70      1       144         58   (content on screen)
+//   f480       111       4      0       111          0   (faded)
+//   f540+      112       0      0      ~110          0
+//
+// The albedo and the lit scene 0x8153700000 stay HEALTHY for the whole run and
+// never decay. Only the two light accumulation buffers collapse, and the
+// composite follows them. So the fade is not exposure, not the composite's
+// history, and not the scene -- it is the light accumulation dying.
+//
+// The trigger, from the same run, on MRT0 0x8151a80000:
+//   f240  max 0.17       alpha@max 0.9272   nan 0
+//   f300  max 1.229e+04  alpha@max 1        nan 2      <-- blows up
+//   f420  max 13.5       alpha@max 1        nan 0
+//   f480  max 0.001162   alpha@max 0.8574   nan 0      <-- dead, and stays dead
+// This is #39's rgb/(1-alpha) meeting alpha EXACTLY 1: the reciprocal goes to
+// infinity, the buffer spikes to 1.2e4 and takes two NaN texels with it, and
+// afterwards the accumulation never recovers -- MRT1 goes 255 -> 70 -> 4 -> 0
+// behind it. Note alpha keeps touching 1 intermittently afterwards (0.8545, 1,
+// 0.853 at f440/f480/f520 with draws=37 and cb=0xff, so the pass runs and its
+// constants stage fine).
+//
+// There is already instrumentation for exactly this and nobody had read it:
+//   [rtstat-fb] 0x8151a80000 max=0 ... below0.8999=0 at(0,0)=0,0,0 a=1 RESET
+// `below0.8999` is #39's own 0.89990 reset threshold, and `a=1 RESET` is the
+// condition firing. That line is the cheapest way to watch this.
+//
+// SECOND, SEPARATE NaN PATHOLOGY, in the exposure metering input. At f225:
+//   RT 0x80b7e00000 480x270  mean=215 hot=15117 nan=539 inf=0
+//   max=6.451e+04@133,0(a=1) hiA=1/1/1  vs=0x80b546b800 ps=0x80b546c000
+// 539 NaNs and 15117 pixels at the ceiling in a 480x270 downsample, written by
+// the PLAIN COPY shader from the B10G11R11 lit scene. 6.451e4 is exactly the
+// B10G11R11_UFLOAT maximum, so the source is pinned at saturation and the copy
+// into RGBA16F manufactures NaNs. The other B10G11R11 target, 0x8152f00000,
+// reads mean (8084, 392.5, 0.185) and is frozen. Two saturated/frozen
+// B10G11R11 targets and NaNs on copying them is reason to audit that format's
+// export and sampling path, independently of the fade -- the metering values
+// barely move (alpha 0.4999 -> 0.4994 along the 0x80b8f00000 chain,
+// 0x80b6830000 only +6% over 100 frames), so this is NOT what fades the frame.
+//
+// REFUTED for the fade, five knobs, one run each -- do not redo:
+//   DELTA_GPU_FRAMECLEAR on 0x8151600000 (light MRT1), on 0x8153700000 (lit
+//   scene) and on 0x815b000000 (composite); DELTA_GPU_TEXFORCE=0x8156b80000;
+//   and the composite-history story. The fade is frame-identical under all of
+//   them, and with the composite cleared every frame it STILL fades, which is
+//   what proves each frame genuinely produces a dimmer image than the last.
+//
+// NEXT: the pass is ps=0x80b55a0000 (vs=0x80b559f800), the dominant writer of
+// MRT0 (30 of 40 sampled frames). Read its reciprocal and how it guards
+// alpha == 1. DELTA_GPU_SHDUMP takes a DIRECTORY (not an address) and names
+// files by shader hash, so it cannot be correlated to a guest address as
+// shipped -- adding the address to that filename or the log line is the one
+// small change that unblocks this. GCN's V_RCP_F32(0) is +inf on hardware too,
+// so the guest must be killing the term with a legacy multiply or a clamp; the
+// legacy multiplies are implemented (see above), so check V_RCP/V_DIV_SCALE,
+// V_MED3 and the fp16 export path for where our result diverges.
+//
+// WHERE TO GO NEXT: find what consumes 0x80b6830000 (32x32) and how the
+// exposure reaches the composite. If it is a guest cbuf value the guest
+// computes from a READBACK of that chain, then the confirmed universal
+// writeback gap (every render target reads guestnz=0, so a CPU read returns
+// zeros) is the mechanism, and this is the same root cause as the profile's
+// LAST UNEXAMINED GAP -- now with a concrete symptom to verify a fix against.
+// Note the light buffers ALSO decay, which a purely post-hoc exposure multiply
+// would not explain, so either the exposure is applied upstream of them too or
+// there is a second mechanism.
+//
+// AND IT DOES NOT ALWAYS HAPPEN: three captures (f1324, f1380, f1675) show a
+// populated composite well past f560. What makes a run immune is unknown and is
+// a SECONDARY question -- the fade mechanism above is the primary one.
+//
+// The older account of this, kept because its numbers are still valid:
+// (B-old) COLLAPSE, and this is the one that blacks out the window. Partway through
 // a run the light buffers fall ~47x and the composite goes EXACTLY zero:
 //    healthy f1324: 0x8151a80000 0.01315, 0x8151600000 0.156,
 //                   composite 0.1215/0.1129/0.0790, nonzero 2073600/2073600
