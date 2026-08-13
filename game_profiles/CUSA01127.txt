@@ -758,6 +758,22 @@
 // the same screen windows (band-pass std 0.01-0.16 against 2.9 in the
 // composite), which is what localises it to the composite's inputs.
 //
+// AN ATTEMPT ON THE HATCH THAT DID NOT SETTLE IT, recorded so the measurement
+// is not repeated in the same broken form. DELTA_GPU_TEXFORCE=0x8156b80000
+// (bind the 1x1 white default for the suspected carrier) against a baseline,
+// scoring diagonal high-frequency energy in a wall region (|pixel - mean of the
+// four diagonal neighbours at distance 4|):
+//   baseline: wall mean 208.9, energy 0.197
+//   forced:   wall mean 125.9, energy 0.568
+// Forcing it does NOT remove the pattern -- but the two frames differ by 40% in
+// brightness, and this metric scales with contrast, so the comparison is
+// CONFOUNDED and neither direction can be claimed. Whoever retries this must
+// match the frames for brightness first (or normalise per-region), and should
+// align the probe to the measured lattice (8x2 slivers, autocorrelation peaks at
+// lag (+64,0) and (+16,-8)) rather than a symmetric distance-4 diagonal, which
+// need not sample that period at all. Both energies are also tiny in absolute
+// terms, which may simply mean these particular frames carry little of it.
+//
 // Two more real defects found while doing this, neither of them the hatch:
 //   - The CS depth input is bridged with ONE FRAME OF LATENCY
 //     (vk_compute.cc:785-793), which matches litA's ghost shards.
@@ -933,6 +949,136 @@
 // what feeds the dispatch instead.
 //
 // So the fade's cause is STILL OPEN, and what is known about it is below.
+//
+// THE FADE BISECTED TO THE G-BUFFER'S OWN DEPTH TEST (2026-08-13).
+// DELTA_GPU_NOZTEST_PS now takes a COMMA LIST, which is what made this
+// tractable: 22 pixel shaders in the frame are depth-tested, and the answer is
+// not any single one of them. Every row below is one run, judged on the presented
+// frame's non-zero count at ~f900 (1518 = the frame is still there, 0 = faded):
+//
+//   shaders with the depth test disabled                    result
+//   -------------------------------------------------------  ------
+//   none (baseline)                                          fades
+//   ALL (DELTA_GPU_NOZTEST=1)                                FIXED, 6x too bright
+//   0x80b88bb000 (the light pass) alone                      fades
+//   0x80b55a0000 / 0x80b54b4000                              fades -- and these
+//     two are NOT depth-tested at all (depth_base == 0), so their null result
+//     means nothing; the knob's per-shader log is what revealed that
+//   ranks 1-11                                               FIXED
+//   ranks 2-6                                                fades
+//   ranks 7-11                                               fades
+//   light + ranks 2-6                                        fades
+//   light + ranks 7-11                                       fades
+//   ranks 2-11 (no light pass)                               FIXED
+//   ranks 2-8                                                FIXED
+//   ranks 2-7                                                FIXED
+//   0x80b5864000 alone                                       fades
+//
+// So: the LIGHT PASS IS NOT INVOLVED (2-11 fixes it without them), and the fix
+// needs 0x80b5864000 TOGETHER WITH one or more of ranks 2-6. No single shader
+// does it.
+//
+// AND 0x80b5864000 IS A G-BUFFER PASS: draws 3, 5 and 6 write the albedo
+// 0x8155700000 at 1920x1080, testing GEQUAL (func 6) against 0x8159f00000 with
+// DEPTH WRITE ENABLED. Ranks 2-6 are the same family (0x80b54f2800,
+// 0x80b8042000, 0x80b54f4000, 0x80b5825000, 0x80b54f0800).
+//
+// So the responsible tests are the ones that LAY DOWN THE SCENE DEPTH, not the
+// ones that consume it. Reading: our GEQUAL-tested, depth-writing G-buffer draws
+// reject geometry they should keep, the depth plane ends up incompletely laid
+// down, and the volumetric light pass -- which bounds its accumulation along the
+// view ray against that plane -- accumulates almost nothing. Turning those tests
+// off lets the full scene into the depth plane and the light comes back.
+//
+// THE DEPTH PLANE'S CONTENT IS WHAT KILLS THE LIGHT, and both halves of the
+// G-buffer's depth state control it. DELTA_GPU_NOZWRITE_PS (added as the twin of
+// NOZTEST_PS) disables the depth WRITE for named shaders. On the same G-buffer
+// group (ranks 2-7):
+//   disable their depth TEST  -> FIXED (nz 1518 held to f1080)
+//   disable their depth WRITE -> FIXED (nz 1518 held to f1080)
+// Both, and either alone. That rules out "one comparison is inverted" as the
+// framing: what the two have in common is that each leaves the depth plane NOT
+// OCCLUDING -- the write-disabled case leaves it at the frame's CLEAR value 0
+// (reversed-Z far, nothing in front of anything), and the test-disabled case lets
+// every fragment write rather than only those passing GEQUAL.
+//
+// So the fade is the volumetric light being OCCLUDED by the scene depth, and the
+// useful form of the remaining question is quantitative, not directional:
+//   the light accumulates when the plane reads 0
+//   the light dies when the plane reads its normal 0.0134..0.0247
+// i.e. the light geometry's own z sits BELOW 0.0134, so GEQUAL rejects it
+// wherever the room has been drawn. In reversed-Z with a 0.1 near plane that
+// puts the light volumes beyond ~7.5 m while the room's surfaces are 4..7.5 m,
+// and cb3's per-light position carries z = 11.48, which is consistent with the
+// volumes genuinely being further out than the walls.
+//
+// AND IT IS NOT FACE SELECTION: DELTA_GPU_NOCULL=1 (draw both faces of
+// everything, so a volume's near face rasterises even if winding picked the far
+// one) leaves the fade untouched -- MRT1 still 246 -> 255 -> 56 -> 4 -> 1 -> 0
+// and nz 8 -> 0. So the cull_mode 2 -> 0 seen in the healthy/faded diff is
+// incidental, and of the two candidates named below only the TRANSFORM is left.
+//
+// WHICH LEAVES ONE QUESTION, and it is the right one to start from: hardware runs
+// this same GEQUAL against the same plane and lights the room, so either the
+// light volumes should not be at 11.48 in view terms (the transform is wrong), or
+// the pass should not be drawing the face it is drawing (a cull/winding
+// difference would flip which face of the volume rasterises, and the diff between
+// a healthy and a faded frame did show one draw's cull_mode changing 2 -> 0).
+// Those two are cheap to separate and neither has been tried.
+//
+// AN INCONSISTENCY TO RESOLVE FIRST, honestly flagged rather than smoothed over:
+// if the light quads simply fail GEQUAL, then disabling the LIGHT pass's own test
+// should restore them, and it measurably does not (verified fired). Any mechanism
+// proposed here has to account for that, or explain why the light pass has a
+// second dependency on the plane -- which cannot be a texture fetch, since its
+// disassembly contains none.
+//
+// THE CLEAR ORDERING IS CORRECT -- third candidate eliminated. The timeline for
+// depth 0x8159f00000 in one frame, by capture seq:
+//   seq  3  region_begin color=[] depth=0x8159f00000 loadOp=CLEAR clear=0
+//   seq 4-8 five dispatches (compute; they do not use the region)
+//   seq  9  region_end
+//   seq 10-14 barriers
+//   seq 15  region_begin  MRT 0x8155700000/0x8154f00000/0x8154700000, depth
+//           0x8159f00000 loadOp=LOAD
+//   seq 16+ draws 0..11, all func=6 (GEQUAL) with depth WRITE
+// So the plane is cleared to 0 (reversed-Z far) BEFORE any G-buffer draw, and the
+// G-buffer region then correctly LOADs the cleared plane. The first depth write
+// of the frame therefore meets z >= 0, which passes. No stale previous-frame
+// depth is involved, and the "the clear lands after the draws" theory is dead.
+// (Worth knowing anyway: the CLEAR region contains only DISPATCHES, no draws --
+// so if anything ever starts deferring empty regions, this clear is what breaks.)
+//
+// ALL THREE CANDIDATES NAMED FOR THE G-BUFFER TEST ARE NOW ELIMINATED:
+// clear timing (above), a shared depth plane at a second geometry (0x8156400000
+// is the one used at two geometries, not 0x8159f00000), and the prepass ULP
+// mismatch that RELAX_ZEQUAL exists for -- that one does not fit either, because
+// GEQUAL is ALREADY the permissive direction in reversed-Z, so an ULP difference
+// would scatter per pixel rather than remove light systematically.
+//
+// So the bisect stands and the mechanism does not. Whoever picks this up should
+// start from the bisect table rather than from any mechanism in this file, and
+// the cheapest unexplored instrument is a per-pass depth-WRITE override (the
+// twin of DELTA_GPU_NOZTEST_PS, which only controls the test): if disabling the
+// WRITE on those same G-buffer passes also removes the fade, the defect is in
+// what they write into the plane; if only disabling the TEST does, it is in what
+// they read from it. That single bit of information halves the remaining search
+// and nothing in the tree can currently produce it.
+//
+// That is a localisation, NOT a mechanism: what remains is why a GEQUAL depth
+// write rejects geometry when the plane is cleared to 0 (reversed-Z far), where
+// anything should pass on first write. Candidates worth checking in order: the
+// clear's TIMING relative to those draws (the plane takes loadOp=CLEAR once and
+// LOAD ten times per frame), whether those draws share a depth plane with a pass
+// at a different geometry, and whether two of them disagree on z for the same
+// surface the way the RELAX_ZEQUAL comment describes for a prepass.
+//
+// One thing the light pass's disassembly settles, so nobody re-derives it:
+// ps=0x80b88bb000 contains NO image fetches at all -- only s_buffer_load of
+// constants (326 insts, 10 dead, 0 unsupported, 0 silent). It is an ANALYTIC
+// volumetric accumulation, not a G-buffer-sampling deferred light, so "the light
+// shader reconstructs world position from a sampled depth" is wrong and any
+// reasoning built on it should be discarded.
 //
 // *** SUPERSEDED HEADING, KEPT FOR ITS MEASUREMENTS ***
 // *** THE FADE IS A DEPTH PROBLEM, BUT NOT THE LIGHT PASS'S DEPTH TEST. ***

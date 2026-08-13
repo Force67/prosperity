@@ -47,7 +47,57 @@ DELTA_OPTION(bool, kNoZTest, "DELTA_GPU_NOZTEST", false);
 // and every other pass is now drawing over everything at the same time. Naming
 // one shader answers the question the blunt version cannot: whether THIS pass is
 // being rejected by the comparison, or is computing nothing to begin with.
-DELTA_OPTION(uint64_t, kNoZTestPs, "DELTA_GPU_NOZTEST_PS", 0);
+DELTA_OPTION(const char*, kNoZTestPs, "DELTA_GPU_NOZTEST_PS", nullptr);
+// DELTA_GPU_NOZWRITE_PS=<list>: the twin of the above for depth WRITES. The pair
+// separates the two things a depth-tested, depth-writing pass can get wrong:
+// disabling the TEST asks whether the pass is being rejected by what it reads
+// from the plane; disabling the WRITE asks whether what it puts INTO the plane
+// is what breaks a later pass. Neither question is answerable from the other.
+DELTA_OPTION(const char*, kNoZWritePs, "DELTA_GPU_NOZWRITE_PS", nullptr);
+
+// Comma-separated list, because a target is routinely written by more than one
+// pass: P.T.'s light buffers take 34 draws from one shader and 28 from another,
+// and disabling the depth test on either alone proves nothing about the pair.
+std::vector<uint64_t> ParsePsList(const char* e, const char* tag) {
+  std::vector<uint64_t> out;
+  if (e)
+    for (const char* p = e; *p;) {
+      while (*p == ',' || *p == ' ')
+        p++;
+      if (!*p)
+        break;
+      out.push_back(std::strtoull(p, nullptr, 0));
+      while (*p && *p != ',')
+        p++;
+    }
+  if (!out.empty()) {
+    std::fprintf(stderr, "[%s] armed for %zu shader(s):", tag, out.size());
+    for (uint64_t v : out)
+      std::fprintf(stderr, " %#llx", (unsigned long long)v);
+    std::fprintf(stderr, "\n");
+  }
+  return out;
+}
+
+bool NoZTestForPs(uint64_t ps) {
+  static const std::vector<uint64_t> list = ParsePsList(kNoZTestPs, "nozps");
+  if (list.empty() || !ps)
+    return false;
+  for (uint64_t v : list)
+    if (v == ps)
+      return true;
+  return false;
+}
+
+bool NoZWriteForPs(uint64_t ps) {
+  static const std::vector<uint64_t> list = ParsePsList(kNoZWritePs, "nozwps");
+  if (list.empty() || !ps)
+    return false;
+  for (uint64_t v : list)
+    if (v == ps)
+      return true;
+  return false;
+}
 }  // namespace
 
 namespace gpu::vk {
@@ -481,30 +531,37 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
   VkPipelineDepthStencilStateCreateInfo dss{
       VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
   if (d.depth_base) {
-    const bool per_ps = kNoZTestPs && d.ps_addr == kNoZTestPs;
+    const bool per_ps = NoZTestForPs(d.ps_addr);
     const bool skip_ztest = kNoZTest || per_ps;
-    // Say so, once. A knob that silently does not match its target produces a
-    // null result indistinguishable from a real one, and this title's record is
-    // full of exactly that mistake.
-    if (kNoZTestPs) {
-      static bool announced = false, matched = false;
-      if (per_ps && !matched) {
-        matched = true;
+    // Say so, once per shader. A knob that silently does not match its target
+    // produces a null result indistinguishable from a real one, and this
+    // title's record is full of exactly that mistake.
+    if (per_ps) {
+      static std::vector<uint64_t> said;
+      if (std::find(said.begin(), said.end(), d.ps_addr) == said.end()) {
+        said.push_back(d.ps_addr);
         std::fprintf(stderr,
                      "[nozps] depth test disabled for ps=%#llx (test_enable was "
                      "%d, func %u)\n",
                      (unsigned long long)d.ps_addr, (int)d.depth_test_enable,
                      d.depth_func & 0x7);
       }
-      if (!announced) {
-        announced = true;
-        std::fprintf(stderr, "[nozps] armed for ps=%#llx\n",
-                     (unsigned long long)kNoZTestPs);
-      }
     }
     dss.depthTestEnable =
         (d.depth_test_enable && !skip_ztest) ? VK_TRUE : VK_FALSE;
-    dss.depthWriteEnable = d.depth_write_enable ? VK_TRUE : VK_FALSE;
+    const bool no_write = NoZWriteForPs(d.ps_addr);
+    if (no_write) {
+      static std::vector<uint64_t> said;
+      if (std::find(said.begin(), said.end(), d.ps_addr) == said.end()) {
+        said.push_back(d.ps_addr);
+        std::fprintf(stderr,
+                     "[nozwps] depth write disabled for ps=%#llx (was %d)\n",
+                     (unsigned long long)d.ps_addr,
+                     (int)d.depth_write_enable);
+      }
+    }
+    dss.depthWriteEnable =
+        (d.depth_write_enable && !no_write) ? VK_TRUE : VK_FALSE;
     dss.depthCompareOp = (VkCompareOp)(d.depth_func & 0x7);  // ZFUNC maps 1:1
     // A depth-prepass title re-draws its geometry with ZFUNC=EQUAL against the
     // depth the prepass laid down. That only works when both passes compute
