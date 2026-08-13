@@ -1834,6 +1834,14 @@ void RecordDraw(const rhi::DrawInfo& d,
   viewport.Num("vk_y", d.viewport_y_offset - d.viewport_y_scale);
   viewport.Num("vk_w", d.viewport_x_scale * 2.0f);
   viewport.Num("vk_h", d.viewport_y_scale * 2.0f);
+  // PA_CL_VPORT_ZSCALE/ZOFFSET. The backend deliberately does not apply these
+  // (see SetGuestViewport), so a pass whose depth comes out wrong is only
+  // diagnosable if the capture says what the guest asked for: (1, 0) is
+  // identity, (0.5, 0.5) is the GL [-1,1]->[0,1] mapping that the VS z remap
+  // handles instead -- and which of the two a draw uses has to be readable per
+  // draw, not per title.
+  viewport.Num("z_scale", d.viewport_z_scale);
+  viewport.Num("z_offset", d.viewport_z_offset);
 
   Arr vs_ud, ps_ud;
   for (uint32_t i = 0; i < 16; i++) {

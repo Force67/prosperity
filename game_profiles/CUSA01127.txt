@@ -889,6 +889,179 @@
 // plainly just resolution constants at shifted offsets. See the older note in
 // this file about the SRT "ptr" constant buffers.
 //
+// *** THE FADE IS A DEPTH PROBLEM, BUT NOT THE LIGHT PASS'S DEPTH TEST. ***
+// (2026-08-13) Read this whole block before acting; the first result here was
+// over-read and the correction matters.
+//
+// What DELTA_GPU_NOZTEST=1 (all pipelines) does: removes the fade completely.
+//   on:  nz 1518 at f420 -> 0 by f560, black for the rest of the run
+//   off: nz 1518 at f420 and STILL 1518 at f2060; MRT1 settles at 85 and holds
+//        from f480 to f2040, a real equilibrium
+//
+// What DELTA_GPU_NOZTEST_PS=<the light ps> does (added for this, disables the
+// depth test for ONE shader): NOTHING. The fade is unchanged and MRT1 still
+// reaches 0. Verified fired, not assumed -- the knob logs
+//   [nozps] depth test disabled for ps=0x80b88bb000 (test_enable was 1, func 6)
+// so this is a trustworthy negative.
+//
+// THEREFORE THE LIGHT QUADS ARE NOT BEING REJECTED BY THEIR OWN DEPTH TEST, and
+// the earlier claim in this file that they were is RETRACTED. What global
+// NOZTEST changes that the per-pass version does not is the CONTENT of the depth
+// buffer -- with every test off, every fragment writes depth. The light shader
+// SAMPLES depth (draw 64 binds 0x8156b80000, 1920x1080 R32_SFLOAT,
+// resolved=guest) to reconstruct world position for its attenuation. So the
+// reading that survives both experiments is:
+//
+//   the light pass computes NO LIGHT because the depth it READS is wrong,
+//   and global NOZTEST accidentally changes that depth into something that
+//   produces light again.
+//
+// Which puts 0x8156b80000 back at the centre -- the same surface the hatch
+// analysis measured as carrying a GCN 2D-tiling permutation, and the only
+// screen-sized surface that round-trips through guest memory (image -> CS
+// staging -> retile -> detile at upload). One broken surface would then explain
+// BOTH the hatch and the fade.
+//
+// Note DELTA_GPU_TEXFORCE=0x8156b80000 not helping is NOT evidence against this:
+// forcing that binding to the 1x1 white default makes the sampled depth 1.0
+// everywhere, which reconstructs a wrong position just as surely as a permuted
+// depth does. Do not count it as a refutation, as an earlier entry here did.
+//
+// NEXT, and this is a real measurement rather than another knob: dump
+// 0x8156b80000 as the draws see it and compare against the depth image it is
+// resolved from (0x8159f00000, min 0.0134 max 0.0247). CAPTURE_DUMP=tex with
+// CAPTURE_RAW=1 writes both the detiled decode and the untouched guest bytes, so
+// it separates "the CS wrote permuted bytes" from "our detile permutes on read".
+// If its VALUES (not just their arrangement) are wrong, that is the fade.
+//
+//   depth test ON  (default): nz 1518 at f420 -> 163 -> 15 -> 0 by f560, black
+//                             for the rest of the run, every run.
+//   depth test OFF (NOZTEST): nz 1518 at f420 and STILL 1518 at f2060.
+//                             MRT1 holds 112/87 instead of collapsing to 0.
+//
+// So P.T.'s 29 deferred light quads are being progressively rejected by the
+// depth test until none of them contribute, and the frame decays to black
+// behind them. This is the SAME CLASS as fault 5 in this file -- reversed-Z
+// lights depth-testing GEQUAL against a half-resolution Z buffer, which once
+// rejected 98.8% of every light quad and was fixed by honouring
+// PA_CL_CLIP_CNTL.DX_CLIP_SPACE_DEF. Either that regressed or there is a second
+// instance of it. Start there.
+//
+// THE FADE IS A TRANSIENT, NOT A RUNAWAY -- the cleanest way to state it.
+// The light buffer's blend is dst = src + dst*(1-src.a), which converges to
+// dst* = src/src.a. Two measurements pin it:
+//   - DELTA_GPU_FRAMECLEAR=0x8151600000 (clear every frame, so the buffer holds
+//     ONE frame of light): mean 0.0003 of 1.0. The light pass contributes
+//     essentially NOTHING per frame.
+//   - DELTA_GPU_NOZTEST=1: MRT1 settles at 85 and holds there from f480 to
+//     f2040 -- a real equilibrium, so NOZTEST is not merely delaying a decay.
+// So the buffer starts SATURATED (mean 246-255 through f240-f360, while nothing
+// is being presented yet) and what looks like a 5-second fade is that stale
+// content draining to an equilibrium that is near zero. The equilibrium is near
+// zero because the per-frame light contribution is near zero. That is the
+// defect; the "fade" is only how it becomes visible.
+//
+// So: the light quads are rejected almost everywhere, all the time -- not
+// progressively. This is fault 5's symptom ("the test rejected 98.8% of every
+// light quad") with the same shape and a different cause, since fault 5's own
+// fix is verifiably still in place (see below).
+//
+// ELIMINATED, so do not re-check these:
+//   - The clip mode IS still in the recompile key: gl_clip is compared in
+//     operator== and hashed (ps4/cmd_processor.cc:170,185) and read from
+//     PA_CL_CLIP_CNTL bit 19 (:1188). Fault 5's fix is intact.
+//   - The light pass's viewport Z is IDENTITY (z_scale 1, z_offset 0), so the
+//     unapplied PA_CL_VPORT_ZSCALE/ZOFFSET cannot be it. Only 2 draws in the
+//     frame use (0.5, 0.5) and they are ps=0x80b5401800 / 0x80b5402800, neither
+//     of them the light pass. The capture now records these per draw.
+//   - The light VS (0x80b557f000) exports a plain MVP transform:
+//     `exp pos0 v6, v7, v14, v3` with z=v14 and w=v3 each built by three
+//     v_mac_f32 row products. Nothing exotic to mis-translate.
+//   - The VS matrices barely move across the fade (translation -4.372 ->
+//     -4.377, rotation in the 6th decimal) -- that is P.T.'s idle camera sway,
+//     not a drift, and far too small to flip a depth test.
+//
+// WHAT IS LEFT, stated precisely: our scene depth is min 0.0134 max 0.0247
+// (reversed-Z, cleared to 0 = far), i.e. a very narrow band corresponding to
+// roughly 4-7.5 m at a 0.1 near plane. For GEQUAL to pass, a light quad needs
+// z >= ~0.0134. The open question is whether the LIGHT QUADS' z or the SCENE
+// depth is on the wrong scale -- one of the two must be, since hardware runs the
+// same comparison and lights the room.
+//
+// AND THE SCENE DEPTH IS PROBABLY RIGHT: a reversed-Z projection with a 0.1 near
+// plane gives z = near/dist, so 0.0134..0.0247 is geometry at 4..7.5 m, which is
+// what this room is. Do NOT "fix" it to ~0.98 on the theory that reversed-Z
+// means near-1 everywhere; that is only true within a metre of the near plane.
+//
+// DELTA_GPU_VSFORCEZ IS THE WRONG PROBE HERE and would waste a run: it forces
+// EVERY vertex to clip z = v*w, so the scene depth and the light quads both
+// become v and GEQUAL passes trivially for any v. It cannot separate the two
+// sides. What is needed is the light quads' z ALONE, which means either
+// temporarily enabling depth write on that pass and reading the buffer back, or
+// forcing the compare op for that one pass to ALWAYS and confirming the lights
+// come back (which would also distinguish "rejected by the comparison" from
+// "computing no light"). Neither knob exists yet; the compare-op override is the
+// smaller of the two to add, and it is the natural next step.
+//
+// One caution on the arithmetic before anyone leans on it: cb3's per-light entry
+// at 0x50 reads (0.00625, 2.503, 11.48, 0.0018), and treating 11.48 as a
+// distance from the camera (hence depth 0.0087, hence rejected) is an ASSUMPTION
+// -- it is a world position, and the camera's own position is in the VS matrices.
+// Do the transform properly rather than eyeballing it, as this file has been
+// burned by exactly that kind of shortcut before.
+//
+// WHAT IS STABLE ACROSS THE FADE, so the drift is NOT in any of these:
+//   - The half-res Z's CONTENT. Captured with CAPTURE_DUMP=depth at f420 and
+//     f520: 0x8156400000 mean 0.016780 -> 0.016809, min 0.013433 -> 0.013388,
+//     max 0.024658 -> 0.024716. The full-res 0x8159f00000 likewise. Stable.
+//   - The depth CLEARS. 0x8156400000 gets loadOp=CLEAR twice and LOAD six times
+//     per frame, clear value 0 (reversed-Z far), IDENTICALLY in both frames. So
+//     it is not an uncleared buffer drifting monotonically nearer.
+//   - The light pass's depth STATE: base 0x8156400000, test=true, write=false,
+//     func=6 (GEQUAL), control 0x7007e2, viewport 960x540 with the y-flip. All
+//     correct and unchanged.
+//   - The per-light constants, the G-buffer and the albedo (see above).
+//
+// So every input to the comparison is stable except the light quads' OWN
+// transformed z, which is what remains to measure. DELTA_GPU_VSFORCEZ=<v> makes
+// every vertex leave clip z = v*w and is the existing probe for exactly this,
+// though it is global and will wreck the scene depth at the same time. A
+// per-frame jitter in the view-projection that we fail to reset (the VS
+// constants were NOT compared between the two frames -- only the per-light cb3
+// was) is the obvious candidate and is unexamined.
+//
+// AND BE PRECISE ABOUT WHAT NOZTEST PROVED: it disables the depth test on EVERY
+// pipeline, not just the light pass. So it establishes that A depth test causes
+// the fade, and the light buffers are where the decay starts -- but the fog and
+// lit-scene passes (draws 32-51 into 0x8153700000) are depth-tested too and are
+// not yet excluded.
+//
+// NOZTEST IS NOT A FIX and must not be shipped as one: with it the light quads
+// each cover the whole screen, and the frame comes out at mean (72.5, 90.5,
+// 99.0) against hardware's (12.1, 17.0, 16.2) -- six times too bright, the
+// "smooth bright cloud" this file already describes. What it proves is the
+// mechanism. The correct behaviour is in between: reject a light quad only
+// where geometry actually occludes it. Note the hue is right either way
+// (R/B 0.73 ours against 0.74 on hardware).
+//
+// WHY IT LOOKS LIKE A TIMED FADE rather than an abrupt failure: the light
+// buffers are SATURATED (MRT1 mean 246-255) through f240-f360 while nothing is
+// being presented yet, and MRT1 starts falling at exactly the frame the title
+// begins presenting (f377). The most economical reading is that the depth test
+// passes everything while the Z buffer is still empty, and starts rejecting as
+// real scene depth arrives -- progressively, as more of the room gets depth,
+// which is what makes the decay smooth instead of a step. That reading is
+// INFERRED; the NOZTEST result above is measured.
+//
+// WHAT THIS DEMOTES. The alpha == 1 spike, the two NaN texels, the 539 NaNs in
+// the exposure input and the metering values climbing are all still real
+// measurements, but none of them is the fade: the fade is gone with the depth
+// test off, and none of those go away when their own targets are cleared. Treat
+// them as separate defects, and do not spend another day on the exposure chain.
+//
+// The supporting measurements, kept because they are valid and they bound the
+// problem:
+//
 // THE FADE ORIGINATES IN THE LIGHT BUFFERS, AND THE TRIGGER IS ALPHA == 1.
 // DELTA_GPU_RTSTAT=1 with DELTA_GPU_RTSTAT_EVERY=60 gives every target's mean
 // per frame in ONE run, which is what finally separated cause from consequence.

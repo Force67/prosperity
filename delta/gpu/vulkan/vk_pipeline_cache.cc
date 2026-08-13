@@ -41,6 +41,13 @@ DELTA_OPTION(bool, kRelaxDepthEqual, "DELTA_GPU_RELAX_ZEQUAL", true);
 // "this pass produced nothing because the depth test rejected it" apart from
 // "its shader computed nothing", which look identical in an empty target.
 DELTA_OPTION(bool, kNoZTest, "DELTA_GPU_NOZTEST", false);
+// DELTA_GPU_NOZTEST_PS=<ps guest addr>: the same, for ONE pass. NOZTEST is a
+// blunt instrument -- it disables the depth test on every pipeline, so a frame
+// that improves under it has told you only that SOME depth test was responsible,
+// and every other pass is now drawing over everything at the same time. Naming
+// one shader answers the question the blunt version cannot: whether THIS pass is
+// being rejected by the comparison, or is computing nothing to begin with.
+DELTA_OPTION(uint64_t, kNoZTestPs, "DELTA_GPU_NOZTEST_PS", 0);
 }  // namespace
 
 namespace gpu::vk {
@@ -474,8 +481,29 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
   VkPipelineDepthStencilStateCreateInfo dss{
       VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
   if (d.depth_base) {
+    const bool per_ps = kNoZTestPs && d.ps_addr == kNoZTestPs;
+    const bool skip_ztest = kNoZTest || per_ps;
+    // Say so, once. A knob that silently does not match its target produces a
+    // null result indistinguishable from a real one, and this title's record is
+    // full of exactly that mistake.
+    if (kNoZTestPs) {
+      static bool announced = false, matched = false;
+      if (per_ps && !matched) {
+        matched = true;
+        std::fprintf(stderr,
+                     "[nozps] depth test disabled for ps=%#llx (test_enable was "
+                     "%d, func %u)\n",
+                     (unsigned long long)d.ps_addr, (int)d.depth_test_enable,
+                     d.depth_func & 0x7);
+      }
+      if (!announced) {
+        announced = true;
+        std::fprintf(stderr, "[nozps] armed for ps=%#llx\n",
+                     (unsigned long long)kNoZTestPs);
+      }
+    }
     dss.depthTestEnable =
-        (d.depth_test_enable && !kNoZTest) ? VK_TRUE : VK_FALSE;
+        (d.depth_test_enable && !skip_ztest) ? VK_TRUE : VK_FALSE;
     dss.depthWriteEnable = d.depth_write_enable ? VK_TRUE : VK_FALSE;
     dss.depthCompareOp = (VkCompareOp)(d.depth_func & 0x7);  // ZFUNC maps 1:1
     // A depth-prepass title re-draws its geometry with ZFUNC=EQUAL against the
