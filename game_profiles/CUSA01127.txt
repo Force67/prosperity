@@ -1034,6 +1034,66 @@
 //       and the pass produces no light for reasons that have nothing to do with
 //       depth.
 //
+// THE COLLAPSE COINCIDES WITH THE TITLE'S OWN STATE CHANGE AT f377, and it is
+// NOT the light pass's depth test. Full frame, light pass's own test disabled,
+// reading its target 0x8151a80000 directly rather than the presented frame:
+//   f240  36 draws  mean 30  max 0.1704
+//   f360  36 draws  mean 30  max 0.1694
+//   f480  37 draws  mean  0  max 0.0012      <- collapsed anyway
+// The light pass is holding a perfectly good mean 30 for hundreds of frames and
+// then loses it, with its depth test OFF. So the depth-test trail in this section
+// is finished: it cannot be the cause, however many depth knobs move the frame.
+//
+// CORRECTION, and it invalidates the "coincides with f377" claim this entry
+// originally made: that came from sampling nz every 20 frames. PER FRAME, the
+// presented non-zero count actually runs
+//   f370-377  0            nothing presented yet
+//   f378-433  ~1518        pinned (with brief dips at f387-390)
+//   f434-550  monotonic decline: 862 938 689 611 477 400 300 203 174 109 73 39
+//                                12 3 1
+//   f551+     0
+// So presenting begins at f378 and the decline begins around f434 -- about 56
+// frames, roughly TWO SECONDS, later. The two events are NOT coincident and no
+// mechanism should be built on their being so. What is real is that the frame
+// holds saturated for ~2 s of gameplay and then decays smoothly over ~4 s.
+//
+// A 20-frame sampling interval is enough to hide a 56-frame offset AND to make a
+// noisy decline look clean; use DELTA_GPU_RBTRACE=1 and read every frame.
+//
+// AND THERE IS NO DISCRETE ONSET TO FIND -- second correction to this entry. A
+// capture of ten consecutive frames across the "onset" shows draw counts simply
+// alternating 205/201, which is the DOUBLE-BUFFERED SCANOUT and not a state
+// change, and in that run the decline began around f438 rather than f434. The
+// onset frame is not stable between runs, so it is not an event.
+//
+// What it is: the buffer starts SATURATED, so the presented non-zero count sits
+// pinned at its ceiling (~1518 of 2024 samples) while the value drains, and the
+// apparent onset is just the moment the decay crosses below saturation. That is
+// the same transient-to-equilibrium already established -- the ~2 s "hold" is the
+// saturated headroom, not a delay before something happens.
+//
+// SO DO NOT LOOK FOR A TRIGGER. The whole of the defect is a STEADY-STATE
+// difference, and it is already isolated to one number:
+//     light pass alone, or with either half of the frame  -> equilibrium 7
+//     light pass with the whole frame                     -> equilibrium 0
+// Superadditive: no single pass and no half does it. That is the entire remaining
+// question, it is a steady-state measurement (so run long enough to settle and
+// compare equilibria, never onsets), and ONLY_PS makes adding passes back in
+// groups mechanical.
+//
+// And it needs the whole frame to happen: with ONLY_PS keeping the light pass plus
+// either HALF of the frame's other 58 shaders, the buffer holds mean 7 well past
+// f377; with all 58 it collapses (mean 29 at f360, 0 by f480). So no single pass
+// suppresses it -- which is why 22 depth-state runs and a half-frame bisect all
+// came back ambiguous.
+//
+// WHERE TO GO, and it is a different question from the one this file has been
+// asking all day: find what the GUEST starts doing at f377. The draw count moves
+// 36 -> 37, so a pass appears. Capture f376 and f378 and DIFF them
+// (gpu_capture.py diff) -- one new draw, or one changed state, between a frame
+// that has light and the next that does not. That is a two-run answer and it does
+// not depend on any of the depth reasoning above.
+//
 // COVERAGE-VERSUS-MAGNITUDE, SETTLED (2026-08-13). DELTA_GPU_ONLY_PS=<hex list>
 // was added for this: the inverse of SKIP_PS, it drops every draw EXCEPT the named
 // shaders, so a pass can be put on an otherwise empty frame. It is shader-keyed,
