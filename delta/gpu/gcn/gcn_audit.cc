@@ -135,8 +135,15 @@ void WriteDumpFiles(const ShaderRecord& rec,
   std::error_code ec;
   std::filesystem::create_directories(dir, ec);  // best effort
 
+  // The guest address goes in the name, not just the hash. Every other
+  // diagnostic in the tree names a shader by the address the guest set it from
+  // (RTSTAT's last_ps, the draw trace, the capture), so a dump keyed only by
+  // content hash could not be tied back to any of them -- which is what stopped
+  // an investigation dead once already. Address first so the files sort by it.
   char stem[256];
-  std::snprintf(stem, sizeof(stem), "%s/%s_%016llx", dir, rec.stage.c_str(),
+  std::snprintf(stem, sizeof(stem), "%s/%s_%llx_%016llx", dir,
+                rec.stage.c_str(),
+                static_cast<unsigned long long>(rec.guest),
                 static_cast<unsigned long long>(rec.hash));
 
   // Raw bytecode.

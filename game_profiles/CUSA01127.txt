@@ -942,6 +942,23 @@
 //   them, and with the composite cleared every frame it STILL fades, which is
 //   what proves each frame genuinely produces a dimmer image than the last.
 //
+// THE DIVIDE IS NOT UNGUARDED -- ruling out the obvious reading of the above.
+// ps=0x80b55a0000 is now dumpable by address (see the SHDUMP change) and reads:
+//   003e: v_rcp_f32   v3, v3
+//   0046: v_med3_f32  v3, v3, s1, v5          <- the guard, after EVERY rcp
+//   0043/0048, 004a/004e, 0052/0056: same rcp -> med3 pairing, four times
+//   005a: v_mul_legacy_f32 v3, v3, v5 clamp   (and 005c, 0060)
+//   0067: v_mad_f32   v2, -v2, s0, 1.0        <- the 1-alpha term
+//   007d: exp mrt0 v2, v0 compr done vm
+// So the guest clamps every reciprocal with v_med3, and our v_med3 is the
+// correct median (clamp(s2, min(s0,s1), max(s0,s1))), which handles +inf
+// properly: median(inf, s1, v5) = max(s1, v5). The multiplies that consume it
+// are v_mul_legacy with the clamp modifier, which return 0 on a zero operand.
+// A plain rcp(0) -> inf -> NaN story therefore does NOT hold for this shader.
+// Look instead at the COMPRESSED fp16 export on the last line (two halves per
+// dword) and at whether the accumulated alpha can leave fp16 range before it
+// gets there -- that is the remaining path by which this pass can write a NaN.
+//
 // NEXT: the pass is ps=0x80b55a0000 (vs=0x80b559f800), the dominant writer of
 // MRT0 (30 of 40 sampled frames). Read its reciprocal and how it guards
 // alpha == 1. DELTA_GPU_SHDUMP takes a DIRECTORY (not an address) and names
