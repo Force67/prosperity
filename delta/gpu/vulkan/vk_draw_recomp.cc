@@ -564,6 +564,53 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
       return true;
     }
   }
+  // DELTA_GPU_ONLY_PS=<hex>[,<hex>...]: the inverse -- drop every draw EXCEPT
+  // those shaders. DELTA_GPU_ONLYDRAW does something that looks equivalent and
+  // is not: it is keyed on the draw INDEX, and a title whose draw count moves
+  // between runs (P.T.'s light pass alone varies 29..34 draws) will hand you a
+  // different shader than the index had in the capture you read it from -- a
+  // clean, wrong answer. Shader addresses are stable; indices are not. Isolating
+  // one pass onto an otherwise empty frame is how "does this pass cover any
+  // pixels at all" gets separated from "it covers them and contributes nothing",
+  // which no amount of reading an accumulation buffer can do.
+  {
+    static const std::vector<uint64_t> kOnlyPs = [] {
+      std::vector<uint64_t> out;
+      if (const char* e = std::getenv("DELTA_GPU_ONLY_PS"))
+        for (const char* p = e; *p;) {
+          while (*p == ',' || *p == ' ')
+            p++;
+          if (!*p)
+            break;
+          out.push_back(std::strtoull(p, nullptr, 0));
+          while (*p && *p != ',')
+            p++;
+        }
+      if (!out.empty()) {
+        std::fprintf(stderr, "[onlyps] keeping only %zu shader(s):", out.size());
+        for (uint64_t v : out)
+          std::fprintf(stderr, " %#llx", (unsigned long long)v);
+        std::fprintf(stderr, "\n");
+      }
+      return out;
+    }();
+    if (!kOnlyPs.empty()) {
+      bool keep = false;
+      for (uint64_t v : kOnlyPs)
+        keep |= (v == d.ps_addr);
+      if (!keep) {
+        g_frame.draws++;
+        return true;
+      }
+      static std::vector<uint64_t> said;
+      if (std::find(said.begin(), said.end(), d.ps_addr) == said.end()) {
+        said.push_back(d.ps_addr);
+        std::fprintf(stderr, "[onlyps] keeping ps=%#llx rt=%#llx %ux%u\n",
+                     (unsigned long long)d.ps_addr,
+                     (unsigned long long)d.rt_base, d.rt_w, d.rt_h);
+      }
+    }
+  }
 
   // DELTA_GPU_VTXTRACE_RT=<hex>: diagnostic only. For every draw into that
   // colour target, report the vertex layout and the first vertex's raw

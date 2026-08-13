@@ -54,6 +54,14 @@ DELTA_OPTION(const char*, kNoZTestPs, "DELTA_GPU_NOZTEST_PS", nullptr);
 // from the plane; disabling the WRITE asks whether what it puts INTO the plane
 // is what breaks a later pass. Neither question is answerable from the other.
 DELTA_OPTION(const char*, kNoZWritePs, "DELTA_GPU_NOZWRITE_PS", nullptr);
+// DELTA_GPU_ZWRITE_PS=<list>: force depth WRITE ON for named shaders. The point
+// is measurement, not correctness: a pass that only ever READS the depth plane
+// leaves no trace of the z it computed, so there is no way to find out where its
+// geometry actually lands. Force its write, turn its test off with
+// DELTA_GPU_NOZTEST_PS so every fragment gets through, and the depth plane then
+// holds that pass's own z for you to read back. It corrupts the plane for
+// everything downstream, so it is a probe and nothing else.
+DELTA_OPTION(const char*, kZWritePs, "DELTA_GPU_ZWRITE_PS", nullptr);
 
 // Comma-separated list, because a target is routinely written by more than one
 // pass: P.T.'s light buffers take 34 draws from one shader and 28 from another,
@@ -91,6 +99,16 @@ bool NoZTestForPs(uint64_t ps) {
 
 bool NoZWriteForPs(uint64_t ps) {
   static const std::vector<uint64_t> list = ParsePsList(kNoZWritePs, "nozwps");
+  if (list.empty() || !ps)
+    return false;
+  for (uint64_t v : list)
+    if (v == ps)
+      return true;
+  return false;
+}
+
+bool ForceZWriteForPs(uint64_t ps) {
+  static const std::vector<uint64_t> list = ParsePsList(kZWritePs, "zwps");
   if (list.empty() || !ps)
     return false;
   for (uint64_t v : list)
@@ -560,8 +578,20 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
                      (int)d.depth_write_enable);
       }
     }
+    const bool force_write = ForceZWriteForPs(d.ps_addr);
+    if (force_write) {
+      static std::vector<uint64_t> said;
+      if (std::find(said.begin(), said.end(), d.ps_addr) == said.end()) {
+        said.push_back(d.ps_addr);
+        std::fprintf(stderr,
+                     "[zwps] depth write FORCED for ps=%#llx (was %d)\n",
+                     (unsigned long long)d.ps_addr,
+                     (int)d.depth_write_enable);
+      }
+    }
     dss.depthWriteEnable =
-        (d.depth_write_enable && !no_write) ? VK_TRUE : VK_FALSE;
+        ((d.depth_write_enable || force_write) && !no_write) ? VK_TRUE
+                                                            : VK_FALSE;
     dss.depthCompareOp = (VkCompareOp)(d.depth_func & 0x7);  // ZFUNC maps 1:1
     // A depth-prepass title re-draws its geometry with ZFUNC=EQUAL against the
     // depth the prepass laid down. That only works when both passes compute

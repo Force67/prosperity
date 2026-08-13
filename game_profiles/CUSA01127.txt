@@ -1012,6 +1012,103 @@
 // and cb3's per-light position carries z = 11.48, which is consistent with the
 // volumes genuinely being further out than the walls.
 //
+// THE LIGHT QUADS' OWN z, MEASURED -- and it moves the question to COVERAGE.
+// DELTA_GPU_ZWRITE_PS=<list> (added for this) force-enables depth write for named
+// shaders. A pass that only READS the plane leaves no trace of the z it computed;
+// force its write, disable its test with DELTA_GPU_NOZTEST_PS so every fragment
+// gets through, and the plane then holds that pass's own z. Both probes logged
+// that they fired ("depth write FORCED for ps=0x80b88bb000 (was 0)").
+//
+// Result, on the half-res plane the light pass is bound to:
+//   forced light-pass write:  min 0.013426  max 0.024776  mean 0.016860
+//   untouched scene depth:    min 0.013446  max 0.024656  mean 0.016825
+// Identical to within the camera's idle sway.
+//
+// With the test off every rasterised light fragment must write, so the plane
+// should be DOMINATED by the quads' z. It is not. Two readings survive and this
+// probe cannot separate them:
+//   (a) the quads' z coincides with the scene depth -- in which case GEQUAL
+//       passes at equality and the lights are NOT being rejected by depth at all,
+//       which would finally explain why disabling their test changes nothing;
+//   (b) the quads RASTERISE ALMOST NOTHING -- no coverage, so nothing to write,
+//       and the pass produces no light for reasons that have nothing to do with
+//       depth.
+//
+// COVERAGE-VERSUS-MAGNITUDE, SETTLED (2026-08-13). DELTA_GPU_ONLY_PS=<hex list>
+// was added for this: the inverse of SKIP_PS, it drops every draw EXCEPT the named
+// shaders, so a pass can be put on an otherwise empty frame. It is shader-keyed,
+// which ONLYDRAW is not (see below). It logs what it keeps.
+//
+// THE LIGHT PASS ALONE (ps=0x80b88bb000, nothing else in the frame, its buffer
+// cleared per frame), on 0x8151a80000 960x540:
+//   f360  33 draws  rgbnz 16723/16723 (100%)  mean 30  max 0.1705
+//   f480  33 draws  100%                      mean  7  max 0.0688
+//   f600+ 33 draws  100%                      mean  7  max 0.0697
+// So the pass COVERS THE WHOLE BUFFER and PRODUCES REAL LIGHT. Both branches of
+// the old question are dead: it is not zero-coverage and it is not computing zero.
+// In the full frame the same target ends at mean 0, so something in the full frame
+// SUPPRESSES it. (Note it still settles 30 -> 7 in isolation; that is the
+// accumulation reaching its own equilibrium, and 7 is the honest single-pass
+// value.)
+//
+// AND IT IS NOT THE OVERWRITER. ps=0x80b55a0000 writes the same target with
+// blending OFF and is not depth-tested, which made it the obvious suppressor.
+// ONLY_PS with both shaders: mean 30 -> 7, max 0.069, identical to the light pass
+// alone. It does not zero the buffer.
+//
+// SO THE SUPPRESSOR IS ONE OF THE REMAINING PASSES, and finding it is now
+// MECHANICAL rather than speculative: SKIP_PS one shader at a time out of the full
+// frame (or ONLY_PS to add them back in groups) and watch 0x8151a80000's mean. The
+// depth-state results already narrow where to start -- disabling the G-buffer
+// group's depth TEST or WRITE both restore the frame -- but note the standing
+// anomaly that disabling the LIGHT pass's own test does NOT, which any candidate
+// has to survive. With ONLY_PS in place that bisect is a handful of runs and needs
+// no new reasoning.
+//
+// A THIRD INSTRUMENT THAT CANNOT DO IT, and it nearly produced a false result:
+// DELTA_GPU_ONLYDRAW=<n> is keyed on the DRAW INDEX, and this title's draw
+// indices SHIFT BETWEEN RUNS -- the light pass alone varies 29 to 34 draws, and
+// the frame total moves 190..205. Isolating "the light draw" by index therefore
+// targets a different shader from the one the index had in the capture you read
+// it from. Concretely: ONLYDRAW=64 with the light buffer cleared produced a
+// beautifully clean nz=0 / mean=0 on 0x8151a80000, which reads as "one light quad
+// contributes literally nothing" -- and draw 64 in that run was ps=0x80b54b0000,
+// not the light pass at all. Shader ADDRESSES are stable across runs here; draw
+// indices are not. Always confirm with the ps= that RTSTAT prints on the target
+// before believing an ONLYDRAW result.
+//
+// What is missing is therefore shader-keyed ISOLATION (the inverse of
+// DELTA_GPU_SKIP_PS) as well as the per-draw fragment count -- two small knobs,
+// and between them they answer the coverage-versus-magnitude question in one run
+// each. Building them is smaller and far safer than another round of inference
+// through index-keyed tools.
+//
+// AND DO NOT TRY TO ANSWER COVERAGE WITH THE INSTRUMENTS ALREADY HERE. Two look
+// like they answer it and neither does:
+//   - RTSTAT's rgbnz on the light buffer reads 16723/16723 ("100%"), but it counts
+//     non-zero samples in a buffer that CARRIES ACROSS FRAMES, so it reports the
+//     accumulated history, not the pixels this frame's draws touched. It reads
+//     100% while the mean is 0.
+//   - This file's older DELTA_GPU_NOBLEND datum ("mean 4 / 8% coverage vs mean 87
+//     / 100%") was taken when the title was in a different state and conflates
+//     one light's coverage with the accumulation's; it is not a measurement of
+//     what the 29 draws rasterise now.
+// What is needed is a per-draw WRITTEN-PIXEL COUNT, which nothing in the tree
+// produces. That is the instrument to build next, and it is small: count
+// fragments per draw (an occlusion query, or a debug counter in the recompiled
+// PS) and print it per shader. Until it exists, "the quads cover nothing" and
+// "the quads cover everything but contribute nothing" cannot be told apart, and
+// every mechanism in this section rests on that distinction.
+//
+// So the next measurement is COVERAGE, not depth: how many pixels the light pass
+// actually rasterises. Cheapest form is a forced write to a SCRATCH plane (or a
+// colour target with blending off and a constant export) so the written area can
+// be counted directly, since the light buffers' own blend hides zero-coverage and
+// near-zero-contribution as the same near-black result. If (b) holds, everything
+// in this file about the depth comparison is a red herring and the question
+// becomes why 29 quads with sane per-light constants cover no pixels -- start
+// from the vertex path and the index/vertex counts, not the depth state.
+//
 // AND IT IS NOT FACE SELECTION: DELTA_GPU_NOCULL=1 (draw both faces of
 // everything, so a volume's near face rasterises even if winding picked the far
 // one) leaves the fade untouched -- MRT1 still 246 -> 255 -> 56 -> 4 -> 1 -> 0
