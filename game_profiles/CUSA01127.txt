@@ -1091,6 +1091,62 @@
 // any missing chunk of geometry leaves holes in the depth plane where the light
 // quads still pass.
 //
+// *** THE DESTABILISING PASS IS ps=0x80b54b4000, AND THE OLD RUNAWAY IS BACK. ***
+// ONLY_PS with the light pass plus that one shader (3 draws, the feedback pass on
+// 0x8151a80000) on 0x8151a80000:
+//   f240  30 draws  mean 30  max 0.1715
+//   f480  30 draws  mean 45  max 6.278e+04      <- the fp16 CEILING
+//   f720  30 draws  mean 46  max 6.278e+04
+// 6.278e4 is exactly the ceiling this file's LAST FIX section describes texels
+// pinning at. So with that pass present and most of the frame absent, the light
+// buffer RUNS AWAY; with it absent the buffer settles at a sane 7; with the whole
+// frame it collapses to 0. Three configurations, three different equilibria:
+//   light alone                      -> 7          (sane)
+//   light + 0x80b54b4000             -> 45, pinned at 6.278e4 (runaway)
+//   light + the whole frame          -> 0          (collapse)
+//
+// So the collapse and the runaway are TWO ENDS OF ONE INSTABILITY in the same
+// feedback loop, not two bugs -- which is why every attempt to explain the
+// collapse on its own (depth, exposure, coverage, the divider, the rings) came
+// back negative. The LAST FIX capped the runaway end by clearing an accumulation
+// target on its first draw of a frame; it did not make the loop stable, and the
+// other end of it is what blacks out the window today.
+//
+// THE OBVIOUS FIX WAS TRIED AND DOES NOT WORK. DELTA_GPU_CLEARTRACE=40 shows the
+// light buffer taking exactly ONE loadOp=CLEAR in a whole run -- at its first-ever
+// use (f1, draw#21, ever=0, pending=0(none)) -- and never an
+// accumulate-needs-reset after that. So the LAST FIX's rule does not fire for this
+// target at all, and the buffer accumulates across every frame unreset.
+//
+// The reason is a real oversight, and it is worth knowing even though fixing it
+// does not help: the rule tests d.rt_base and d.blend_control, which are MRT SLOT
+// 0's, so a target accumulated in slot 1 can never be reset -- and this pass binds
+// two, 0x8151a80000 in slot 0 and 0x8151600000 in slot 1, in one region
+// (vk_draw_recomp.cc, the "accumulate-needs-reset" block).
+//
+// Extending it to every bound slot (iterate mrt_count, test mrt_blend[i] and
+// mrt_blend_mask bit i with the same COLOR_DESTBLEND == ONE condition) was
+// implemented and measured: the light buffer still runs mean 30 at f240/f360 and 0
+// by f480, and the presented frame still fades. REVERTED -- an unverified
+// behaviour change for every other title that accumulates into a non-zero slot,
+// which did not fix what it was aimed at, is not worth carrying. Anyone who wants
+// it back should treat it as its own change with its own regression pass over
+// SotC, Bloodborne, Isaac and Minecraft, not as part of this fix.
+//
+// So the buffer being unreset is NOT sufficient to explain the collapse, which
+// also means the runaway and the collapse are not simply "missing clear" at two
+// gains. Whatever closes the loop survives a per-frame reset of its accumulator.
+//
+// WHERE TO START, and this supersedes the depth trail entirely: read
+// ps=0x80b54b4000 (3 draws, feedback binding on its own target, now dumpable by
+// address via SHDUMP) together with the blend the guest programs for it, and work
+// out the fixed point of the loop it closes with the light pass. The numbers above
+// give three points on that curve to check any model against. Note it is the pass
+// this file already flags as reading the target it writes -- and that our feedback
+// path serves such a read from a COPY taken before the draw, which is not what the
+// hardware does mid-primitive; if the loop's stability depends on that timing,
+// that is the defect.
+//
 // TWO MORE CLEAN NEGATIVES on the anomaly, so the next person does not spend runs
 // on them:
 //   - THE DIVIDER IS NOT ZEROING IT IN THE FULL FRAME EITHER.
