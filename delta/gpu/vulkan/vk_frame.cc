@@ -124,6 +124,18 @@ void EnsureReadback(uint32_t w, uint32_t h, VkFormat fmt) {
   VkDeviceSize need = (VkDeviceSize)w * h * FormatBytes(fmt);
   if (g_frame.readback && need <= g_frame.readback_size)
     return;
+  // DELTA_GPU_RBTRACE: every (re)allocation of the readback buffer, with the
+  // map it is replacing. This buffer is per-frame-slot, but EnsureReadback only
+  // ever updates the CURRENTLY bound slot's copy of the handles -- so a growth
+  // here unmaps a pointer the other slot is still holding.
+  static const bool kRbTrace = std::getenv("DELTA_GPU_RBTRACE") != nullptr;
+  if (kRbTrace)
+    std::fprintf(stderr,
+                 "[rb] realloc for %ux%u fmt=%d need=%llu have=%llu "
+                 "old_map=%p old_buf=%p\n",
+                 w, h, (int)fmt, (unsigned long long)need,
+                 (unsigned long long)g_frame.readback_size,
+                 g_frame.readback_map, (void*)g_frame.readback);
   vkDeviceWaitIdle(g_dev.device);
   if (g_frame.readback_map)
     vkUnmapMemory(g_dev.device, g_frame.readback_mem);
@@ -1209,6 +1221,28 @@ void EndFrame(Renderer& renderer, uint64_t scanout_base) {
   // composite's upside-down output.)
   static std::vector<uint8_t> flipped;
   auto* rb = static_cast<uint8_t*>(fin.readback_map);
+  // DELTA_GPU_RBTRACE: whether the bytes this present is about to show are
+  // actually non-zero, and which slot's mapping they came from. "A black window"
+  // has two very different causes that look identical downstream -- the readback
+  // failing, or the target genuinely being black -- and every consumer below
+  // (present, WritePpm, SNAP) inherits the answer silently. `nz` separates them
+  // in one line. The presented slot's map differing from the currently bound
+  // one is NORMAL: presentation runs one frame behind recording.
+  static const bool kRbTrace2 = std::getenv("DELTA_GPU_RBTRACE") != nullptr;
+  if (kRbTrace2) {
+    uint64_t nz = 0, sampled = 0;
+    const size_t n = (size_t)fin.w * fin.h * 4;
+    // Stride is deliberately not a multiple of 4, so the sample walks all four
+    // channels rather than reporting on one of them.
+    for (size_t i = 0; rb && i < n; i += 4099, sampled++)
+      nz += rb[i] != 0;
+    std::fprintf(stderr,
+                 "[rb] present f%d nz=%llu/%llu rt=%#lx %ux%u map=%p%s\n",
+                 fin.frame_num, (unsigned long long)nz,
+                 (unsigned long long)sampled, (unsigned long)fin.present_base,
+                 fin.w, fin.h, fin.readback_map,
+                 fin.readback_map == g_frame.readback_map ? " (bound)" : "");
+  }
   uint8_t* pixels;
   if (kFlipMode == 0 && fin.fmt == VK_FORMAT_B8G8R8A8_UNORM) {
     // Common case: the readback is already BGRA8 in presentation order; the

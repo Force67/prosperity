@@ -574,8 +574,22 @@ DepthTarget* ActivateDepthVariant(DepthTarget& live,
                                   uint32_t w,
                                   uint32_t h,
                                   uint64_t stencil_base) {
+  // A depth attachment must COVER the render area: Vulkan lets it be larger,
+  // never smaller (VUID-VkRenderingInfo-pNext-06079/06080). Every fallback
+  // below used to hand the live target back whatever its geometry, and
+  // BeginRegion then bound it -- which is how P.T. began a 512x512 region with
+  // a 64x64 depth view and LOST THE DEVICE. Its environment-probe bake requests
+  // one depth base at five geometries (960x540, 512x512, 256x256, 128x128,
+  // 64x64), so the three-variant cap is reached and the cap path fires. The
+  // guest walks away with the device gone: no EndFrame, no present, black
+  // window, while its own threads keep running. Declining the draw (nullptr ->
+  // BeginRegion false) is the only safe fallback -- a dropped draw costs one
+  // pass, a lost device costs the run.
+  const auto covers = [&](DepthTarget* t) -> DepthTarget* {
+    return (t && t->w >= w && t->h >= h) ? t : nullptr;
+  };
   if (!kDepthVariants)
-    return &live;
+    return covers(&live);
   auto& parked = g_depth_variants[base];
   DepthTarget* alt = nullptr;
   for (DepthTarget& v : parked)
@@ -585,10 +599,10 @@ DepthTarget* ActivateDepthVariant(DepthTarget& live,
     }
   if (!alt) {
     if (parked.size() >= kMaxDepthVariants)
-      return &live;
+      return covers(&live);
     DepthTarget t;
     if (!CreateDepthImage(t, base, w, h, stencil_base))
-      return &live;
+      return covers(&live);
     std::fprintf(stderr,
                  "[gpuvk] depth alias %#lx: have %ux%u, requested %ux%u -> "
                  "own image\n",
