@@ -578,3 +578,35 @@
 // detiler could be GPU-copied when the texture cache already holds the image
 // (the RT bridge already does exactly this for the other 92 MB), but that is
 // worth a couple of percent, not a step change.
+
+// UMTX: 44-67% OF WALL TIME AND WORTH NOTHING (2026-08-06). The four threads
+// that submit our command buffers spend 44-67% of their WALL time inside
+// sys_umtx_op, and making it faster gains zero fps. Recorded because a huge
+// wall share reads like a bottleneck and this one is not. A CPU profile cannot
+// show it either -- a thread blocked in futex_wait burns no cycles and
+// vanishes from the samples -- so measure it with:
+// +DELTA_UMTX_PROF=1   per-thread wall share, per-op cost, fast-path hit rate
+//
+// Per 2 s window: MUTEX_WAIT 3.4M calls @ ~850ns, MUTEX_WAKE 2.1M @ ~500ns,
+// everything else single digits. Both used to take the bucket mutex and look
+// the address up in the channel map BEFORE reading the owner word that decides
+// the call; reading it first took WAIT to 850ns and answers 22% of WAITs and
+// 9% of WAKEs outright. The other 78% are real contention -- the title's job
+// system acquires one shared mutex 3.4M times a second, and we charge ~850ns
+// where hardware charges 20-100ns.
+//
+// THE TEST THAT SETTLES IT. Make MUTEX_WAIT cost 10us instead of 850ns
+// (+DELTA_UMTX_INJECT_NS=10000, 12x its natural cost at 3.4M calls/s) and fps
+// does not move at all: 3.30 median either way. The op is NOT on the critical
+// path -- those threads spin while nobody waits for them. 3.4M/s is 450K per
+// FRAME, which no job system does for real; the rate is a symptom of a slow
+// frame, not its cause (the same loop DELTA_SCHED_YIELD_REAL sits in).
+//
+// Injecting cost is the oracle for "is X on the critical path": a wall-time
+// measurement says where threads ARE, not whether anything waits on them.
+// Copy the trick before optimising anything else.
+//
+// The thundering-herd theory (one condvar per bucket, notify_all on every wake)
+// was refuted by the 850ns mean itself: one cv.wait_for tick is 2ms, so if even
+// 1% of calls slept the mean would be ~20us. Nothing blocks, so there is no
+// herd. Do not re-derive this.
