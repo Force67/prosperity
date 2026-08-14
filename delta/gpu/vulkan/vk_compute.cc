@@ -72,6 +72,12 @@ namespace {
 // Writeback-half accounting (DELTA_GPU_CSSYNC); defined here because the
 // aliased-image bridge below is the thing being counted.
 uint64_t g_out_retile_ns = 0, g_out_rt_ns = 0, g_out_tail_ns = 0;
+uint64_t g_stage_ro_bytes = 0, g_stage_rw_bytes = 0, g_stage_img_bytes = 0;
+uint64_t g_stage_cpu_detile_bytes = 0, g_stage_cpu_detile_n = 0;
+// Staging-in halves: hashing guest memory to decide validity, CPU detiling,
+// the render-target bridge (its own submit+wait), and the plain copy.
+uint64_t g_in_hash_ns = 0, g_in_detile_ns = 0, g_in_rt_ns = 0, g_in_copy_ns = 0;
+uint64_t g_in_hash_n = 0, g_in_rt_n = 0;
 uint64_t g_out_retile_n = 0, g_out_rt_submits = 0;
 
 using rhi::ComputeInfo;
@@ -1639,6 +1645,23 @@ void CsSyncReport(double frames) {
     return;
   }
   std::fprintf(stderr,
+               "[csin] hash=%.1fms x%.1f detile=%.1fms rt-bridge=%.1fms x%.1f "
+               "copy=%.1fms\n",
+               g_in_hash_ns / frames / 1e6, g_in_hash_n / frames,
+               g_in_detile_ns / frames / 1e6, g_in_rt_ns / frames / 1e6,
+               g_in_rt_n / frames, g_in_copy_ns / frames / 1e6);
+  g_in_hash_ns = g_in_detile_ns = g_in_rt_ns = g_in_copy_ns = 0;
+  g_in_hash_n = g_in_rt_n = 0;
+  std::fprintf(stderr,
+               "[csstage] per frame ro=%.1fMB rw=%.1fMB img=%.1fMB "
+               "(cpu-detile %.1fMB x%.1f)\n",
+               g_stage_ro_bytes / frames / 1e6, g_stage_rw_bytes / frames / 1e6,
+               g_stage_img_bytes / frames / 1e6,
+               g_stage_cpu_detile_bytes / frames / 1e6,
+               g_stage_cpu_detile_n / frames);
+  g_stage_ro_bytes = g_stage_rw_bytes = g_stage_img_bytes = 0;
+  g_stage_cpu_detile_bytes = g_stage_cpu_detile_n = 0;
+  std::fprintf(stderr,
                "[csout] retile=%.1fms x%.1f rt-upload=%.1fms x%.1f "
                "tail=%.1fms\n",
                g_out_retile_ns / frames / 1e6, g_out_retile_n / frames,
@@ -1838,6 +1861,32 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci) {
       g_cs_batch_fence = VK_NULL_HANDLE;
       return false;
     }
+    // What an EMPTY submit+wait costs here. SotC spends over half its frame in
+    // fence waits while the GPU sits at 18% utilisation, so the question is
+    // whether a round trip is inherently expensive on this system or whether
+    // the GPU is really doing that work. Measured once, at init.
+    if (kCsSyncReport) {
+      double total = 0;
+      for (int i = 0; i < 100; i++) {
+        vkResetCommandBuffer(g_cs_cmd, 0);
+        VkCommandBufferBeginInfo bi{
+            VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+        bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        vkBeginCommandBuffer(g_cs_cmd, &bi);
+        vkEndCommandBuffer(g_cs_cmd);
+        VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+        si.commandBufferCount = 1;
+        si.pCommandBuffers = &g_cs_cmd;
+        const uint64_t t0 = NowNs();
+        vkResetFences(g_dev.device, 1, &g_cs_batch_fence);
+        vkQueueSubmit(g_dev.queue, 1, &si, g_cs_batch_fence);
+        vkWaitForFences(g_dev.device, 1, &g_cs_batch_fence, VK_TRUE,
+                        UINT64_MAX);
+        total += (NowNs() - t0) / 1e6;
+      }
+      std::fprintf(stderr, "[csbench] empty submit+wait: %.3f ms\n",
+                   total / 100.0);
+    }
   }
 
   // DELTA_GPU_CSLIST: per-dispatch resource staging list for the first 200
@@ -1921,7 +1970,8 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci) {
     if (!same_shape && e.gpu_dirty)
       if (!CsRangeFlushOne(base, e))
         return false;  // reshaped: keep its data
-    if (e.pending_batch && (!e.buf || e.cap < sz[i]) && !CsBatchFlush(kSyncRangeGrow)) {
+    if (e.pending_batch && (!e.buf || e.cap < sz[i]) &&
+        !CsBatchFlush(kSyncRangeGrow)) {
       renderer.state = nullptr;
       return false;  // growth would destroy a buffer the batch references
     }
@@ -1955,7 +2005,10 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci) {
     else if (rt_backed && !e.gpu_dirty && e.rt_sourced)
       valid = same_shape;
     if (!valid && same_shape && !rt_attempt) {
+      const uint64_t _th = NowNs();
       const uint64_t h = RangeHash(base, guest_bytes);
+      g_in_hash_ns += NowNs() - _th;
+      g_in_hash_n++;
       if (h == e.hash)
         valid = true;
       else
@@ -1999,7 +2052,10 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci) {
       }
       if (rt_attempt) {
         e.last_rt_frame = static_cast<int>(g_frame.num);
+        const uint64_t _tr = NowNs();
         e.rt_sourced = StageCsRangeFromRt(ci.res[i], e);
+        g_in_rt_ns += NowNs() - _tr;
+        g_in_rt_n++;
         // DELTA_GPU_CSRT: trace every RT-backed staging decision.
         static int rt_trace_logged = 0;
         if (kCsRtTrace && rt_trace_logged < 200) {
@@ -2012,7 +2068,12 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci) {
       }
       if (!rt_attempt || !e.rt_sourced) {
         if (ci.res[i].image_staging) {
-          if (!StageCsImage(ci.res[i], e.map))
+          g_stage_cpu_detile_bytes += sz[i];
+          g_stage_cpu_detile_n++;
+          const uint64_t _td = NowNs();
+          const bool ok = StageCsImage(ci.res[i], e.map);
+          g_in_detile_ns += NowNs() - _td;
+          if (!ok)
             return false;
         } else {
           std::memcpy(e.map, reinterpret_cast<const void*>(base),
@@ -2027,7 +2088,9 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci) {
           e.last_validated_frame = g_frame.num;
         }
         // The CPU wrote the host mirror; the shaders bind the VRAM copy.
+        const uint64_t _tc = NowNs();
         CsCopyStaging(e, sz[i], /*to_device=*/true);
+        g_in_copy_ns += NowNs() - _tc;
       }
       if (!same_shape) {
         e.hash = RangeHash(base, guest_bytes);
@@ -2048,6 +2111,15 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci) {
       e.gpu_dirty = false;
       g_cs_stage_n++;
       g_cs_stage_bytes += sz[i];
+      // Which staged bytes the CPU only ever WRITES: those could live straight
+      // in host-visible VRAM (ReBAR) with no mirror and no copy, because
+      // nothing ever reads them back across the bus.
+      if (ci.res[i].image_staging)
+        g_stage_img_bytes += sz[i];
+      else if (ci.res[i].shader_writes || ci.res[i].written)
+        g_stage_rw_bytes += sz[i];
+      else
+        g_stage_ro_bytes += sz[i];
     }
     e.size = sz[i];
     e.guest_bytes = guest_bytes;

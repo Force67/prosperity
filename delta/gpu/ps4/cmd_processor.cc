@@ -115,6 +115,7 @@ DELTA_OPTION(bool, kVattrDump, "DELTA_GPU_VATTRDUMP", false);
 namespace gpu {
 namespace rhi {
 uint64_t g_ns_dcb = 0;
+uint64_t g_ns_dcb_lock = 0;
 uint32_t g_dcb_n = 0;
 }  // namespace rhi
 namespace {
@@ -3246,7 +3247,14 @@ void SubmitDcb(const void* dcb, uint32_t size_bytes) {
   if (!dcb || size_bytes < 4)
     return;
   ScopeDcb _dcb;
+  // Every guest submit thread walks its DCB under one lock. Time the wait
+  // apart from the walk: they mean opposite things, one says "make the walk
+  // faster", the other says "stop serialising the threads".
+  const auto _lk0 = std::chrono::steady_clock::now();
   std::lock_guard<std::mutex> lk(g_mtx);
+  rhi::g_ns_dcb_lock += std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now() - _lk0)
+                            .count();
   if (!g_vk_tried) {
     g_vk_tried = true;
     rhi::Init(rhi::DefaultRenderer());
