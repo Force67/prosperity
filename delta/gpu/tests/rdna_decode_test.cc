@@ -108,15 +108,23 @@ TEST(RdnaDecode, MandatoryImmediateDwordsPreserveInstructionBoundaries) {
   EXPECT_EQ(program[6].pc, 11u);
 }
 
-TEST(RdnaDecode, ReservedGcnMadkSlotsDoNotConsumeFollowingInstructions) {
+// This asserted the opposite until 2026-08-14, on the reading that gfx10 left
+// the GCN madmk/madak slots reserved. Real PS5 shaders disagree: attaching the
+// literal to 0x20/0x21 is what took Minecraft from 37% to 85% of its draws
+// issued and put its title screen on the display, which it could not have done
+// had those slots been unused. 0x2C/0x2D/0x37/0x38 already carried theirs at
+// the time, so the whole of that change is attributable to these two.
+TEST(RdnaDecode, GcnMadkSlotsCarryTheirLiteral) {
   for (uint32_t op : {0x20u, 0x21u}) {
-    const uint32_t code[] = {Vop2(op), Sopp(0x01)};
-    const gpu::gcn::Program program = gpu::rdna::Decode(code, 2, false);
+    const uint32_t code[] = {Vop2(op), 0x12345678u, Sopp(0x01)};
+    const gpu::gcn::Program program = gpu::rdna::Decode(code, 3, false);
     ASSERT_EQ(program.size(), 2u);
     EXPECT_EQ(program[0].enc, gpu::gcn::Enc::kVop2);
-    EXPECT_EQ(program[0].size, 1u);
+    EXPECT_EQ(program[0].size, 2u);
+    EXPECT_TRUE(program[0].has_literal);
+    EXPECT_EQ(program[0].literal, 0x12345678u);
     EXPECT_EQ(program[1].enc, gpu::gcn::Enc::kSopp);
-    EXPECT_EQ(program[1].pc, 1u);
+    EXPECT_EQ(program[1].pc, 2u);
   }
 }
 
