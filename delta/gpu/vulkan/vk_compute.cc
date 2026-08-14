@@ -1936,8 +1936,10 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci) {
     if (!buffer_reused)
       NameObject(VK_OBJECT_TYPE_BUFFER, (uint64_t)e.buf, "csbuf %#llx",
                  (unsigned long long)base);
-    bool valid =
-        same_shape && (e.gpu_dirty || e.last_validated_frame == g_frame.num);
+    // A buffer that was just rebuilt holds nothing, whatever the shape
+    // bookkeeping says about it.
+    bool valid = buffer_reused && same_shape &&
+                 (e.gpu_dirty || e.last_validated_frame == g_frame.num);
     if (e.imported && same_shape)
       valid = true;  // the buffer IS the guest pages; nothing to copy
     // A read whose base is a live render target must be staged from the
