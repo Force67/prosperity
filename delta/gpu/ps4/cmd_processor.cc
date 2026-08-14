@@ -3258,6 +3258,9 @@ void SubmitDcb(const void* dcb, uint32_t size_bytes) {
   if (!g_vk_tried) {
     g_vk_tried = true;
     rhi::Init(rhi::DefaultRenderer());
+    gcn::g_flush_guest_range = [](uint64_t address, uint64_t bytes) {
+      rhi::FlushCsWritesRange(rhi::DefaultRenderer(), address, bytes);
+    };
   }
   auto* p = static_cast<const uint32_t*>(dcb);
   uint32_t words = size_bytes / 4;

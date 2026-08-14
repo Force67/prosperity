@@ -171,4 +171,10 @@ std::vector<ResolvedCsResource> ResolveCsResources(const Program& program,
 std::vector<VBuffer> TrackVertexBuffers(const Program& fetch_program,
                                         const uint32_t* vs_user_data);
 
+// A descriptor table the replay is about to read may still be sitting in a
+// compute buffer, unwritten-back. The recompiler cannot ask a renderer that
+// itself (it is the bottom of the stack), so whoever owns both installs this;
+// left null, the replay just reads guest memory as it finds it.
+extern void (*g_flush_guest_range)(uint64_t address, uint64_t bytes);
+
 }  // namespace gpu::gcn

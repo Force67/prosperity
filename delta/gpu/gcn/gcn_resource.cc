@@ -7,7 +7,6 @@
 #include "gpu/gcn/gcn_resource.h"
 
 #include "gpu/gcn/gcn_translate.h"
-#include "gpu/rhi/renderer.h"
 
 #include <algorithm>
 #include <chrono>
@@ -41,6 +40,9 @@ DELTA_OPTION(int, kArenaProbe, "DELTA_GPU_ARENA_PROBE", 0);
 }  // namespace
 
 namespace gpu::gcn {
+
+void (*g_flush_guest_range)(uint64_t address, uint64_t bytes) = nullptr;
+
 namespace {
 
 
@@ -760,8 +762,8 @@ struct ScalarEval {
     // to zeros while the slot visibly holds a plausible T# a moment later
     // (TEXMISS's "src holds a valid descriptor" signature). One branch when
     // nothing is dirty anywhere; one page probe when something is.
-    rhi::FlushCsWritesRange(rhi::DefaultRenderer(), address,
-                            static_cast<uint64_t>(dwords) * 4);
+    if (g_flush_guest_range)
+      g_flush_guest_range(address, static_cast<uint64_t>(dwords) * 4);
     const uint32_t* mem = reinterpret_cast<const uint32_t*>(address);
     for (uint32_t i = 0; i < dwords; i++) {
       Set(s.sdst + i, mem[i]);
