@@ -2346,9 +2346,31 @@ void Walk(const u32* p, u32 words, bool dump_this, int depth) {
           break;
         case IT_WRITE_DATA: {  // control, dstLo, dstHi, data...
           if (cnt >= 4) {
+            // DST_SEL (control[11:8]) picks the destination space. 0 is the
+            // memory-mapped REGISTER file, where dstLo is a register offset and
+            // not an address at all; treating it as one sent the write to a
+            // pointer far below the guest and silently dropped it. This title
+            // streams state through these, so the registers they carry were
+            // simply missing. WR_ONE_ADDR (control[16]) repeats one register
+            // instead of walking a range.
+            const u32 dst_sel = (body[0] >> 8) & 0xF;
+            const u32 ndw = cnt - 3;
+            if (dst_sel == 0) {
+              const u32 off = body[1] & ~kRegSelectorMask;
+              const bool one_addr = (body[0] >> 16) & 1;
+              for (u32 i = 0; i < ndw; i++) {
+                const u32 reg = one_addr ? off : off + i;
+                if (reg < kRegFileSize) {
+                  g_regs[reg] = body[3 + i];
+                  if (reg == mmPA_CL_CLIP_CNTL)
+                    NoteClipWrite("WRITE_DATA", body[3 + i]);
+                  NoteUdWrite("WRITE_DATA", reg, body[3 + i]);
+                }
+              }
+              break;
+            }
             u64 addr = (static_cast<u64>(body[2] & 0xFFFF) << 32) |
                             (body[1] & ~0x3u);
-            u32 ndw = cnt - 3;
             if (LabelAddrOk(addr) &&
                 LabelAddrOk(addr + static_cast<u64>(ndw) * 4))
               std::memcpy(reinterpret_cast<void*>(addr), &body[3],
