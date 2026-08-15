@@ -84,11 +84,24 @@ std::mutex g_clientsMtx;
 std::unordered_map<u32, Client> g_clients;
 std::atomic<u32> g_nextKid{1};
 
+// Previous manager op per client. A repeated consecutive async-reply poll is a
+// client waiting on something (libSceIpmi runs event-flag waits as a 1168 poll
+// loop), not collecting an invoke's reply; see kPollAsyncReply.
+std::unordered_map<u32, u32> g_lastOp;
+
+bool isRepeatPoll(u32 op, u32 kid) {
+  std::lock_guard<std::mutex> lk(g_clientsMtx);
+  u32 &last = g_lastOp[kid];
+  const bool repeat = op == kPollAsyncReply && last == kPollAsyncReply;
+  last = op;
+  return repeat;
+}
+
 Service *findService(const char *name) {
   if (!name)
     return nullptr;
   Service *all[] = {&playGoService(), &npManagerService(), &npWebService(),
-                    &userService(), &lncService()};
+                    &userService(), &lncService(), &arbitratorIpcService()};
   for (Service *s : all)
     if (std::strcmp(s->name(), name) == 0)
       return s;
@@ -387,6 +400,7 @@ int managerCall(u32 op, u32 kid, void *out, void *in,
                   ? static_cast<InvokeRequest *>(in)
                   : nullptr;
   histogram(op, req);
+  const bool repeatPoll = isRepeatPoll(op, kid);
 
   auto setResult = [&](u32 v) {
     if (out)
@@ -454,7 +468,12 @@ int managerCall(u32 op, u32 kid, void *out, void *in,
     // Paired 1:1 with the invoke before it. With no daemon the request block
     // keeps its pre-call sentinel (0xFFFFFFFF at +8) and the client spins on it,
     // measured at ~30M calls/s. Report the same empty, successful reply the
-    // synchronous path gives.
+    // synchronous path gives. A REPEAT poll (no invoke in between) is a
+    // wait loop that nothing we do will satisfy; park it to a poll cadence
+    // (the resource-arbitrator worker measured ~150k polls/s otherwise).
+    dumpManagerOp(op, kid, out, in, insize);
+    if (repeatPoll)
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
     if (in && insize >= 40) {
       auto *b = static_cast<u8 *>(in);
       u32 status = 0;

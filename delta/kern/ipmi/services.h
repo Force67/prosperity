@@ -25,5 +25,6 @@ Service &npManagerService();
 Service &npWebService();
 Service &userService();
 Service &lncService();
+Service &arbitratorIpcService();
 
 } // namespace krnl::ipmi
