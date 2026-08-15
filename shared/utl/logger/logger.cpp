@@ -4,6 +4,7 @@
 #include <iterator>
 #include <mutex>
 #include <thread>
+#include <unistd.h>
 
 #include <base/containers/vector.h>
 #include <base/logging.h>
@@ -16,7 +17,11 @@
 namespace utl {
 
 static std::atomic<bool> g_logSilenced{false};
-void silenceLogging() { g_logSilenced.store(true, std::memory_order_relaxed); }
+static std::atomic<std::thread::id> g_dumpingThread{};
+void silenceLogging() {
+  g_dumpingThread.store(std::this_thread::get_id(), std::memory_order_relaxed);
+  g_logSilenced.store(true, std::memory_order_relaxed);
+}
 
 class LogRegistry {
   std::mutex writing_lock;
@@ -73,8 +78,6 @@ public:
 
   void AddEntry(logLevel lvl, u32 line, const char *func,
                 base::String msg) {
-    if (g_logSilenced.load(std::memory_order_relaxed))
-      return;  // crash handler is dumping; don't race it on stderr
     using std::chrono::duration_cast;
     using std::chrono::steady_clock;
 
@@ -85,6 +88,20 @@ public:
     entry.line_num = line;
     entry.function = base::String(func);
     entry.message = std::move(msg);
+
+    if (g_logSilenced.load(std::memory_order_relaxed)) {
+      // The crash handler stopped the backend thread so nothing races its
+      // report on stderr -- but the report itself comes through here, so the
+      // dumping thread has to write its own lines, synchronously.
+      if (g_dumpingThread.load(std::memory_order_relaxed) !=
+          std::this_thread::get_id())
+        return;
+      base::String out = formatLogEntry(entry);
+      ssize_t w = ::write(2, out.c_str(), out.size());
+      w = ::write(2, "\n", 1);
+      (void)w;
+      return;
+    }
 
     pending.Push(entry);
   }
