@@ -54,6 +54,9 @@ extern "C" int vprx_anchor_ps5_libSceIme;
 extern "C" int vprx_anchor_ps5_libSceAppContent;
 // Same abnormal-termination reporter override the PS4 HLE has.
 extern "C" int vprx_anchor_ps5_libSceSystemService;
+// No-op sanitizer fiber hooks; retail fw ships no TSan/ASan runtime for
+// libSceFiber to import them from (see ps5/libSceFiber_ps5.cpp).
+extern "C" int vprx_anchor_ps5_libSceFiber;
 extern "C" int vprx_anchor_libSceGnmDriver;
 extern "C" int vprx_anchor_libSceMsgDialog;
 // Pad + userService HLE: a connected controller + one logged-in user lets the
@@ -99,6 +102,7 @@ static volatile int *const vprx_anchors[] = {&vprx_anchor_libSceVideoOut,
                                              &vprx_anchor_ps5_libSceIme,
                                              &vprx_anchor_ps5_libSceAppContent,
                                              &vprx_anchor_ps5_libSceSystemService,
+                                             &vprx_anchor_ps5_libSceFiber,
                                              &vprx_anchor_libSceSaveData,
                                              &vprx_anchor_libSceSaveDataDialog,
                                              &vprx_anchor_libfmod,

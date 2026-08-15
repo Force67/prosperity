@@ -869,7 +869,8 @@ bool smodule::resolveObfSymbol(const char *name, uintptr_t &ptrOut) {
     // real exports from firmware 13.60 on, and forcing them there would report
     // "unsupported" over a working implementation.
     static const char *const kPs5MissingExportShims[] = {
-        "libkernel", "libSceAgcDriver", "libSceAgc", "libSceNgs2"};
+        "libkernel", "libSceAgcDriver", "libSceAgc", "libSceNgs2",
+        "libSceFiber"};
     for (const char *lib : kPs5MissingExportShims) {
       if (uintptr_t hle = runtime::vprx_get_forced(lib, hid)) {
         bindHle(lib, hle);
