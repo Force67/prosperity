@@ -19,6 +19,7 @@
 #include <cstring>
 #include <map>
 #include <mutex>
+#include <thread>
 
 #include <sys/mman.h>
 
@@ -115,6 +116,94 @@ static inline bool gpuReadable(u64 a, size_t n) {
 // ioctls have stopped.
 static u64 g_acqRingLo = 0, g_acqRingHi = 0;
 
+// One ACQ ring the title created through sceAgcDriverCreateQueue (ioctl
+// 0xC0408121). Steady-state submits never reach the kernel at all: the title
+// writes its ring write-pointer to the queue's doorbell slot and the hardware
+// command processor picks the work up from there. Recording what each create
+// named is the only chance we get to learn where a queue's ring lives.
+struct AcqQueue {
+  u64 dcb = 0;       // command ring
+  u64 ccb = 0;       // constant ring, always dcb + ringBytes
+  u64 doorbell = 0;  // 8-byte write-pointer slot in the DingDong page
+  u32 ringBytes = 0;
+  u64 lastDoorbell = 0;
+  u32 readDw = 0;  // how far we have walked, in dwords
+};
+
+static std::mutex g_queueLock;
+static std::map<u32, AcqQueue> g_queues;  // by 1-based queue id
+
+// The doorbell value is the ring write pointer. Advance our own read pointer to
+// it and hand the command processor the dwords in between, unwrapping the ring.
+static void drainQueue(AcqQueue &q, u64 doorbell) {
+  const u32 ringDw = q.ringBytes / 4;
+  if (!ringDw)
+    return;
+  const u32 write = static_cast<u32>(doorbell % ringDw);
+  if (write == q.readDw)
+    return;
+  auto forward = [&](u32 firstDw, u32 dwords) {
+    const u64 at = q.dcb + static_cast<u64>(firstDw) * 4;
+    if (dwords && gpuReadable(at, static_cast<size_t>(dwords) * 4))
+      prosperity_agc_submit(at, dwords * 4);
+  };
+  if (write > q.readDw) {
+    forward(q.readDw, write - q.readDw);
+  } else {  // wrapped
+    forward(q.readDw, ringDw - q.readDw);
+    forward(0, write);
+  }
+  q.readDw = write;
+}
+
+// Poll every registered doorbell. A real command processor is woken by the
+// doorbell write; we have no way to trap it cheaply, and the page is a handful
+// of cache lines, so a poll costs nothing next to a frame.
+static void doorbellPoller() {
+  for (;;) {
+    std::this_thread::sleep_for(std::chrono::microseconds(500));
+    std::lock_guard<std::mutex> lk(g_queueLock);
+    for (auto &[qid, q] : g_queues) {
+      if (!gpuReadable(q.doorbell, sizeof(u64)))
+        continue;
+      const u64 now =
+          *reinterpret_cast<volatile const u64 *>(q.doorbell);
+      if (now == q.lastDoorbell)
+        continue;
+      static int rung = 0;
+      if (kAgcTrace && rung < 32) {
+        rung++;
+        BASE_LOGI("agc", "doorbell q{} {:#x} -> {:#x} (ring {:#x} +{:#x})", qid,
+                  (unsigned long)q.lastDoorbell, (unsigned long)now,
+                  (unsigned long)q.dcb, q.ringBytes);
+      }
+      q.lastDoorbell = now;
+      drainQueue(q, now);
+    }
+  }
+}
+
+static void registerAcqQueue(u32 qid, u64 dcb, u64 ccb, u64 doorbellBase,
+                             u32 ringLog2Dw) {
+  if (!qid || !gpuAddr(dcb) || ringLog2Dw > 24)
+    return;
+  std::lock_guard<std::mutex> lk(g_queueLock);
+  AcqQueue &q = g_queues[qid];
+  q.dcb = dcb;
+  q.ccb = ccb;
+  q.doorbell = doorbellBase + static_cast<u64>(qid - 1) * 8;
+  q.ringBytes = 4u << ringLog2Dw;
+  q.lastDoorbell = gpuReadable(q.doorbell, sizeof(u64))
+                       ? *reinterpret_cast<volatile const u64 *>(q.doorbell)
+                       : 0;
+  q.readDw = static_cast<u32>(q.lastDoorbell % (q.ringBytes / 4));
+  static bool polling = false;
+  if (!polling) {
+    polling = true;
+    std::thread(doorbellPoller).detach();
+  }
+}
+
 // The mode-1 submit ioctls are INOUT on firmware 13.60: libSceAgcDriver presets a
 // status dword in the arg and, on return, treats the submit as FAILED unless the
 // kernel has cleared it. A failed state submit makes the driver skip the 0x8132
@@ -188,6 +277,38 @@ i32 gcDevicePs5::ioctl(u32 cmd, void *data) {
     prosperity_agc_flip(scanout);  // present the flipped display buffer
     return 0;
   }
+  case 0xC008811B: {
+    // GNM submit-state pointer. libSceGnmDriver stores the returned address in a
+    // global and reads through it on every submit path
+    // (sceGnmAreSubmitsAllowed is `*p == 0`, sceGnmSubmitDone tests it, so do
+    // SubmitCommandBuffers/SubmitAndFlip/DingDong). The soft-succeed default
+    // zeroes the OUT slot, so the driver cached a null pointer and every submit
+    // after the first one read through it. Hand back a real zeroed page:
+    // [+0] == 0 means "submits allowed".
+    static u8 *submitState = nullptr;
+    if (!submitState)
+      submitState = allocLowGuest(0x100);
+    if (data)
+      *static_cast<u64 *>(data) = reinterpret_cast<u64>(submitState);
+    BASE_LOGI("gc", "ioctl({:x}): submit-state -> {:p}", cmd, submitState);
+    return 0;
+  }
+  case 0xC0108139: {
+    // AGC suspend-point submit, issued at the tail of every submit. The driver
+    // fails the submit with 0x8A6D0107 ("checkSuspend failure") unless this
+    // succeeds; its two out words are a suspend sequence number, so advance
+    // them rather than reporting the same value forever.
+    static std::atomic<u64> suspendSeq{0};
+    if (data) {
+      const u64 seq = ++suspendSeq;
+      auto *a = static_cast<u8 *>(data);
+      std::memset(a, 0, 0x10);
+      const u32 lo = static_cast<u32>(seq);
+      std::memcpy(a, &lo, 4);
+      std::memcpy(a + 8, &seq, 8);
+    }
+    return 0;
+  }
   case 0x40048135:  // AGC query: OUT dword (submit/queue id). The driver stores
                     // it; 0 is accepted.
     if (data)
@@ -198,16 +319,27 @@ i32 gcDevicePs5::ioctl(u32 cmd, void *data) {
     if (data)
       *static_cast<u32 *>(data) = 0;
     return 0;
-  case 0xC0408121: {  // AGC submit (INOUT, 64 bytes). The DCB ring window is at
-                      // arg+0x10 (= ACQRB + submitIdx*0x8000, 0x4000 bytes) with a
-                      // secondary at arg+0x18 (+0x4000). Forward it, then zero the
-                      // arg per the OUT convention. (This title uses the mode-1
-                      // 0x80488131 path instead; this ring reads empty for it.)
+  case 0xC0408121: {  // sceAgcDriverCreateQueue (IN, 64 bytes):
+                      //   +0x00 me  +0x04 pipe  +0x08 queue  +0x0c 1-based qid
+                      //   +0x10 dcb  +0x18 ccb (= dcb + ring)  +0x20 doorbell page
+                      //   +0x28 log2(ring dwords)  +0x2c flags
+                      //   +0x30 mqd  +0x38 mqd size
+                      // NOT a submit: it hands the title a ring plus a doorbell
+                      // slot, and every later submit is a store of the ring
+                      // write pointer to that slot with no ioctl at all. Record
+                      // the queue so the poller can drain it; the ring is empty
+                      // now, by construction.
     if (data) {
       auto *a = static_cast<u8 *>(data);
-      u64 base = 0, base2 = 0;
+      u64 base = 0, base2 = 0, doorbellBase = 0;
+      u32 qid = 0, ringLog2Dw = 0;
       std::memcpy(&base, a + 0x10, 8);
       std::memcpy(&base2, a + 0x18, 8);
+      std::memcpy(&doorbellBase, a + 0x20, 8);
+      std::memcpy(&qid, a + 0x0c, 4);
+      std::memcpy(&ringLog2Dw, a + 0x28, 4);
+      if (gpuAddr(doorbellBase))
+        registerAcqQueue(qid, base, base2, doorbellBase, ringLog2Dw);
       u32 size = 0x8000;
       if (gpuAddr(base)) {
         if (!g_acqRingLo || base < g_acqRingLo) g_acqRingLo = base;
@@ -312,19 +444,12 @@ i32 gcDevicePs5::ioctl(u32 cmd, void *data) {
             sniff((static_cast<u64>(t[k + 1] & 0xFFFF) << 32) | t[k], "tblptr");
         }
       }
-      // NOTE: the arg window reads empty for this title (mode-1 path is used); the
-      // real per-frame PM4 (with the SET_SH_REG shader setup) lives in surrounding
-      // ring windows listed by a descriptor table @0x80014981d8 -> 0x8002670000..
-      // 0x8002698000. Forwarding that band naively CRASHES the walker (those buffers
-      // chain via INDIRECT_BUFFER to sizes/addrs that need the descriptor's real
-      // size, not a fixed 0x8000). NEXT: parse the descriptor table for each buffer's
-      // exact addr+size and forward those. See ps5-boot-progress.
-      if (gpuReadable(base, size))
+      // A ring that already holds packets belongs to a title that filled it
+      // before asking for the queue; the poller would still catch it, but only
+      // once its doorbell moves again.
+      if (gpuReadable(base, size) &&
+          *reinterpret_cast<const u32 *>(base) != 0)
         prosperity_agc_submit(base, size);
-      // NOTE: forwarding the adjacent ring window (base-0x10000, which has real PM4)
-      // still faults -- the window isn't fully mapped and the walker reads unmapped
-      // bytes within it. NEXT: get each buffer's EXACT size from the descriptor table
-      // (@0x80014981d8) and bounds-check the whole walk against forEachGpuAperturePage.
       std::memset(a, 0, 64);
     }
     return 0;
