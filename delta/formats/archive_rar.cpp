@@ -52,13 +52,33 @@ struct RarSession {
   std::mutex readLock; // serialises consumers of this session
   std::thread worker;
 
-  ~RarSession() {
+  // Abort the decode and wait for the worker to notice. Safe to call twice.
+  void retire() {
     {
       std::lock_guard<std::mutex> lk(m);
       stop = true;
     }
     canProduce.notify_all();
     if (worker.joinable())
+      worker.join();
+  }
+
+  ~RarSession() {
+    {
+      std::lock_guard<std::mutex> lk(m);
+      stop = true;
+    }
+    canProduce.notify_all();
+    if (!worker.joinable())
+      return;
+    // decodeEntry holds a shared_ptr to this session, so when a decode outlives
+    // every consumer the last reference dies on the worker itself as that
+    // parameter is destroyed. Joining there is joining ourselves, which throws
+    // std::system_error(EDEADLK) out of a thread with no handler and aborts the
+    // emulator. The worker is returning anyway, so let it go.
+    if (worker.get_id() == std::this_thread::get_id())
+      worker.detach();
+    else
       worker.join();
   }
 
@@ -248,6 +268,7 @@ bool RarBackend::index(std::vector<ArchiveEntry> &out) {
 std::shared_ptr<RarSession> RarBackend::acquireSession(const ArchiveEntry &entry,
                                                        u64 off) {
   std::shared_ptr<RarSession> evicted, best;
+  bool evictedIdle = false;
   {
     std::lock_guard<std::mutex> lk(cacheMutex_);
     u64 bestPos = 0;
@@ -279,9 +300,19 @@ std::shared_ptr<RarSession> RarBackend::acquireSession(const ArchiveEntry &entry
     if (sessions_.size() > kMaxSessions) {
       evicted = sessions_.back();
       sessions_.pop_back();
+      // Once it is out of the list nobody new can find it, so the only refs
+      // left are this local and the worker's own parameter. Anything more means
+      // a consumer is still draining it, and stopping the decode would fail
+      // that read.
+      evictedIdle = evicted.use_count() <= 2;
     }
   }
-  // `evicted` aborts and joins its worker here, outside the cache lock.
+  // An evicted session with no consumer left would otherwise sit in push()
+  // waiting on a ring nobody drains, holding its worker thread forever: with
+  // one worker per streamed asset the title runs out of threads and its loader
+  // never completes. Retire it here, outside the cache lock.
+  if (evicted && evictedIdle)
+    evicted->retire();
   return best;
 }
 
@@ -323,12 +354,18 @@ i64 RarBackend::extractRange(const ArchiveEntry &entry, void *buf, i64 off,
   std::lock_guard<std::mutex> rl(s->readLock);
   {
     std::shared_ptr<RarSession> evicted;
-    std::lock_guard<std::mutex> lk(cacheMutex_);
-    sessions_.push_front(s);
-    if (sessions_.size() > kMaxSessions) {
-      evicted = sessions_.back();
-      sessions_.pop_back();
+    bool evictedIdle = false;
+    {
+      std::lock_guard<std::mutex> lk(cacheMutex_);
+      sessions_.push_front(s);
+      if (sessions_.size() > kMaxSessions) {
+        evicted = sessions_.back();
+        sessions_.pop_back();
+        evictedIdle = evicted.use_count() <= 2;
+      }
     }
+    if (evicted && evictedIdle)
+      evicted->retire();
   }
   return s->consume(u64(off), static_cast<u8 *>(buf), u64(len));
 }
