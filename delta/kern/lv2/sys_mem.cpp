@@ -868,7 +868,12 @@ int PS4ABI sys_shm_open(const char *path, u32 flags, u16 mode) {
         BASE_LOGI("shm_open", "NOAUTO: '{}' -> ENOENT", name.c_str());
         return -SysError::eNOENT;
       }
-      if (!(flags & kO_CREAT) && isAbsentServiceChannel(name)) {
+      // PS4 only: a PS5 title's libSceNpManager hard-fails its module_start
+      // when sceNpTpipInitialize can't map the shm (Demon's Souls then panics
+      // "Required cell system module(s) could not be loaded"), so PS5 falls
+      // through to the auto-provided zeroed region instead.
+      if (!(flags & kO_CREAT) && isAbsentServiceChannel(name) &&
+          proc->getPlatform() == proc::platform::ps4) {
         // Not every system shm is a settings block. Some are one half of a live
         // channel: the client maps the region, then blocks on the service's
         // named semaphore for the other half to answer. Handing it a zeroed

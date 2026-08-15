@@ -312,6 +312,14 @@ int PS4ABI sys_dynlib_load_prx(const char *path, u64 flags, int *pHandle,
   // "not found" so the preloader treats the sysmodule as absent and skips it.
   static const char *kSkipNotFound[] = {"libSceSsl2", "libSceHttp2",
                                         "libSceNpManager", "libSceNpWebApi2"};
+  // The skip list is PS4-only. On PS5 the net stack is up and these DT_INITs
+  // run fine in the preload-init phase; Demon's Souls' Crossgen init asserts
+  // sceSysmoduleLoadModule(0x0112) succeeds, which load-starts libSceHttp2,
+  // libSceNpManager and libSceNpWebApi2 in turn before it feeds the
+  // sceHttp2Init context to sceNpWebApi2Initialize. (libSceSsl2 has no PS5
+  // firmware module at all, so it degrades to a genuine not-found.)
+  auto *proc = proc::getActive();
+  const bool isPs5 = proc->getPlatform() == krnl::proc::platform::ps5;
   bool skipInit = false;
   for (auto *s : kLoadOk) {
     if (std::strcmp(name.c_str(), s) == 0) {
@@ -320,14 +328,14 @@ int PS4ABI sys_dynlib_load_prx(const char *path, u64 flags, int *pHandle,
       break;
     }
   }
-  for (auto *s : kSkipNotFound) {
-    if (std::strcmp(name.c_str(), s) == 0) {
-      BASE_LOGI("load_prx", "{}: reporting not-found (init unsupported)", s);
-      return -SysError::eNOENT;
+  if (!isPs5) {
+    for (auto *s : kSkipNotFound) {
+      if (std::strcmp(name.c_str(), s) == 0) {
+        BASE_LOGI("load_prx", "{}: reporting not-found (init unsupported)", s);
+        return -SysError::eNOENT;
+      }
     }
   }
-
-  auto *proc = proc::getActive();
 
   // already loaded (we preload the system module tree): hand back its handle.
   auto mod = proc->getModule(base::StringRef(name));

@@ -18,6 +18,7 @@ namespace {
 constexpr i32 kBsdAfInet = 2;
 constexpr i32 kBsdAfInet6 = 28;
 constexpr i32 kBsdSockDgram = 2;
+constexpr i32 kSceSockDgramP2p = 6;
 }  // namespace
 #include "kern/crash.h"
 #include <cstring>
@@ -67,7 +68,10 @@ int PS4ABI sys_socket(i32 domain, i32 type, i32 protocol) {
   const int hostDomain = domain == kBsdAfInet    ? AF_INET
                          : domain == kBsdAfInet6 ? AF_INET6
                                                  : -1;
-  if (hostDomain != -1 && type == kBsdSockDgram) {
+  // SOCK_DGRAM_P2P counts as a datagram: libSceNet's module_start opens one
+  // ("SceNetInit") and treats a failure as init failure, after which every net
+  // API returns 0x804101c8 and the PS5 Np stack can't start.
+  if (hostDomain != -1 && (type == kBsdSockDgram || type == kSceSockDgramP2p)) {
     int fd = ::socket(hostDomain, SOCK_DGRAM, 0);
     if (fd >= 0) {
       auto *dev = new socketDevice(proc::getActive(), fd, domain);
