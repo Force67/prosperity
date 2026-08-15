@@ -19,7 +19,7 @@
 #include <vector>
 
 #include "guest_memory.h"
-#include "ps4/gcn/spirv/spv_post.h"
+#include "gcn/spirv/spv_post.h"
 #include "ps5/rdna/rdna_decode.h"
 #include "ps5/rdna/rdna_resource.h"
 #include "ps5/rdna/rdna_translate.h"
@@ -372,6 +372,94 @@ int main() {
     expect(hasExtInst(r.vs_spirv, 50), "VOP3 v_fma_f32 emits fused Fma");
     if (!err.empty())
       std::printf("      vs: %s\n", err.c_str());
+  }
+
+  {
+    // buffer_load_format converts through the FORMAT in the V#, so the emitter
+    // needs the descriptor resolved: here an inline one in user data at s8.
+    u32 user_data[32] = {};
+    const u64 vertex_base = 0x1000300000ull;  // deliberately unmapped
+    user_data[0] = static_cast<u32>(vertex_base);
+    user_data[1] = static_cast<u32>(vertex_base >> 32) | (16u << 16);
+    user_data[2] = 64;
+    user_data[3] = 56u << 12;  // 8_8_8_8 UNORM
+
+    std::vector<u32> ps;
+    ps.push_back(vop1(0x01, 0, kInline1f));
+    exp(ps, /*MRT0*/ 0, 0xF, true, 0, 0, 0, 0);
+    ps.push_back(sopp(kEndpgm, 0));
+
+    std::vector<u32> vs;
+    mubuf(vs, /*buffer_load_format_xyzw*/ 0x03, /*srsrc s8*/ 8);
+    exp(vs, /*POS0*/ 12, 0xF, true, 0, 1, 2, 3);
+    vs.push_back(sopp(kEndpgm, 0));
+    const gpu::gcn::Recompiled loaded =
+        gpu::rdna::Recompile(vs.data(), ps.data(), user_data, user_data);
+    expect(loaded.ok, "buffer_load_format VS recompiled ok");
+    expect(loaded.vs_bufs.size() == 1,
+           "buffer_load_format binds one raw buffer");
+    expect(hasOpcode(loaded.vs_spirv, /*OpBitFieldUExtract*/ 203),
+           "8_8_8_8 load extracts its channels");
+    expect(hasOpcode(loaded.vs_spirv, /*OpConvertUToF*/ 112),
+           "UNORM channels are normalized");
+
+    u32 float_ud[32] = {};
+    std::memcpy(float_ud, user_data, sizeof(user_data));
+    float_ud[3] = 75u << 12;  // 32_32_32_32 UInt: raw dwords, no conversion
+    const gpu::gcn::Recompiled raw =
+        gpu::rdna::Recompile(vs.data(), ps.data(), float_ud, float_ud);
+    expect(raw.ok && !hasOpcode(raw.vs_spirv, 112),
+           "32-bit channels pass through unconverted");
+
+    u32 bad_ud[32] = {};
+    std::memcpy(bad_ud, user_data, sizeof(user_data));
+    bad_ud[3] = 0;  // no format at all
+    const gpu::gcn::Recompiled unknown =
+        gpu::rdna::Recompile(vs.data(), ps.data(), bad_ud, bad_ud);
+    expect(!unknown.ok,
+           "an unresolvable buffer format declines instead of guessing");
+
+    // A store has nowhere to land (the set-2 window is never read back), but
+    // dropping it keeps the draw that a rejected shader would have lost.
+    std::vector<u32> store_vs;
+    mubuf(store_vs, /*buffer_store_format_x*/ 0x04, 8);
+    exp(store_vs, 12, 0xF, true, 0, 1, 2, 3);
+    store_vs.push_back(sopp(kEndpgm, 0));
+    const gpu::gcn::Recompiled stored =
+        gpu::rdna::Recompile(store_vs.data(), ps.data(), user_data, user_data);
+    expect(stored.ok, "buffer_store_format is dropped, not rejected");
+    expect(stored.vs_bufs.empty(), "a dropped store spends no binding");
+  }
+
+  {
+    // v_readfirstlane_b32 and the SOP2 slots gfx10 added above GFX7's.
+    std::vector<u32> vs;
+    vs.push_back(vop1(0x01, 0, kInline1f));
+    vs.push_back(vop1(/*v_readfirstlane_b32*/ 0x02, /*s20*/ 20, /*v0*/ 256));
+    sop2(vs, /*s_mul_hi_u32*/ 0x35, 21, 8, 9);
+    sop2(vs, /*s_pack_ll_b32_b16*/ 0x32, 22, 8, 9);
+    vs.push_back(vop1(0x01, 1, 20));
+    vs.push_back(vop1(0x01, 2, 21));
+    vs.push_back(vop1(0x01, 3, 22));
+    exp(vs, /*POS0*/ 12, 0xF, true, 0, 1, 2, 3);
+    vs.push_back(sopp(kEndpgm, 0));
+
+    std::vector<u32> ps;
+    ps.push_back(vop1(0x01, 0, kInline1f));
+    exp(ps, /*MRT0*/ 0, 0xF, true, 0, 0, 0, 0);
+    ps.push_back(sopp(kEndpgm, 0));
+
+    u32 user_data[32] = {};
+    const gpu::gcn::Recompiled r =
+        gpu::rdna::Recompile(vs.data(), ps.data(), user_data, user_data);
+    expect(r.ok, "v_readfirstlane + gfx10 SOP2 VS recompiled ok");
+    expect(hasOpcode(r.vs_spirv, /*OpUMulExtended*/ 151),
+           "s_mul_hi_u32 emits the wide multiply");
+    std::string sop_err;
+    expect(gpu::gcn::spirv::Validate(r.vs_spirv, &sop_err),
+           "gfx10 SOP2 VS SPIR-V validates");
+    if (!sop_err.empty())
+      std::printf("      vs: %s\n", sop_err.c_str());
   }
 
   {
@@ -856,7 +944,9 @@ int main() {
     expect(t.base == 0x800000000ull, "T# base decodes (256-byte units << 8)");
     expect(t.width == 256 && t.height == 128, "T# 256x128 dimensions decode");
     expect(t.type == 9 && !t.arrayed, "T# type 2D, non-arrayed");
-    expect(t.mip_levels == 1 && t.tiling_idx == 8, "T# single mip, linear");
+    expect(t.mip_levels == 1 &&
+               t.tiling_idx == gpu::gcn::kGfx10TilingBase,
+           "T# single mip, linear");
     expect(t.dfmt == 10 && t.nfmt == 0, "T# fmt 56 -> 8_8_8_8 UNORM");
     expect(t.pitch == 256, "T# linear pitch 256B-row-aligned");
     d[1] = (255u & 0x3u) << 30 | (44u << 20);
@@ -892,8 +982,10 @@ int main() {
     rgb32[1] = 74u << 20;
     rgb32[3] = 9u << 28;
     t = gpu::rdna::DecodeTImage(rgb32);
-    expect(t.dfmt == 13 && t.pitch == 64,
-           "T# RGB32 pitch preserves 256-byte row alignment");
+    // The 256-byte linear row alignment now belongs to BuildTextureLayout32,
+    // which knows the element size the staging path actually chose.
+    expect(t.dfmt == 13 && t.pitch == t.width,
+           "T# RGB32 leaves row alignment to the layout");
     d[1] = (255u & 0x3u) << 30 | (130u << 20); // fmt 8_8_8_8_SRGB
     d[3] = (9u << 28) | (25u << 20);           // sw_mode 64KB_S_X (tiled)
     t = gpu::rdna::DecodeTImage(d);

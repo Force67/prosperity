@@ -457,7 +457,85 @@ u32 Gfx10BlockTiles(u32 idx) {
   }
 }
 
+// --- gfx10.3 (RDNA2 / Prospero) swizzle modes. -----------------------------
+// A PS5 T# names a 5-bit gfx10 swizzle mode; it reaches this module as
+// kGfx10TilingBase + sw_mode. Each mode maps to one address equation family
+// ("pattern set"); the modes with no 2D equation are refused outright so a
+// surface is never addressed with a neighbouring mode's pattern.
+constexpr u32 kGfx10Modes = 32;
+
+enum Gfx10Set : u8 {
+  kG10_256S,
+  kG10_256D,
+  kG10_4kS,
+  kG10_4kD,
+  kG10_4kSX,
+  kG10_4kDX,
+  kG10_64kS,
+  kG10_64kD,
+  kG10_64kST,
+  kG10_64kDT,
+  kG10_64kSX,
+  kG10_64kDX,
+  kG10_64kZX,
+  kG10_64kRX,
+  kG10_SetCount,
+  kG10_Linear = 0xfe,
+  kG10_None = 0xff,
+};
+
+struct Gfx10ModeInfo {
+  u8 set;
+  u8 blk_log2;
+};
+
+bool TilingIsGfx10(u32 idx) {
+  return idx >= kGfx10TilingBase && idx < kGfx10TilingBase + kGfx10Modes;
+}
+
+Gfx10ModeInfo Gfx10ModeOf(u32 sw_mode) {
+  switch (sw_mode) {
+    case 0:   // LINEAR
+    case 31:  // LINEAR_GENERAL
+      return {kG10_Linear, 0};
+    case 1:
+      return {kG10_256S, 8};
+    case 2:
+      return {kG10_256D, 8};
+    case 5:
+      return {kG10_4kS, 12};
+    case 6:
+      return {kG10_4kD, 12};
+    case 9:
+      return {kG10_64kS, 16};
+    case 10:
+      return {kG10_64kD, 16};
+    case 17:
+      return {kG10_64kST, 16};
+    case 18:
+      return {kG10_64kDT, 16};
+    case 21:
+      return {kG10_4kSX, 12};
+    case 22:
+      return {kG10_4kDX, 12};
+    case 24:
+      return {kG10_64kZX, 16};
+    case 25:
+      return {kG10_64kSX, 16};
+    case 26:
+      return {kG10_64kDX, 16};
+    case 27:
+      return {kG10_64kRX, 16};
+    // The sub-64-KiB _R variants, the block-variable modes and the reserved
+    // encodings are not part of the gfx10 2D swizzle set and have no equation.
+    default:
+      return {kG10_None, 0};
+  }
+}
+
 bool ValidTileMode(u32 idx) {
+  if (TilingIsGfx10(idx))
+    return Gfx10ModeOf(idx - kGfx10TilingBase).set != kG10_None;
   return idx <= 26 || idx == 31 || TilingIsGfx10Std(idx);
 }
 
@@ -742,6 +820,361 @@ u32 BitCeil(u32 value) {
   return value + 1;
 }
 
+// gfx10 address equations, one row per (pattern set, bytes-per-element). Bit b
+// of the byte offset inside a block is the XOR of every coordinate bit selected
+// by entry b: lane 0 (bits 0..15) picks x bits, lane 1 (16..31) y bits and
+// lane 2 (32..47) array-slice bits. Only the low blk_log2 entries of a row are
+// used, so the shorter rows simply end early.
+//
+// This is the AMD address-library gfx10 swizzle pattern data for a 16-pipe,
+// non-RB+ configuration. That is the PS5's: its render-target and depth
+// layouts, read back from the console, reproduce exactly this pipe count and
+// pattern family across all five element sizes, and no other entry in the
+// library's table set matches them. The non-XOR (_S/_D without _X/_T) rows are
+// pipe count independent, so only the XOR rows depend on that choice.
+const u64 kGfx10Patterns[kG10_SetCount][5][16] = {
+    // 256B_S: 1/2/4/8/16 bytes per element
+    {
+        {0x1, 0x2, 0x4, 0x8, 0x10000, 0x20000, 0x40000, 0x80000},
+        {0, 0x1, 0x2, 0x4, 0x10000, 0x20000, 0x40000, 0x8},
+        {0, 0, 0x1, 0x2, 0x10000, 0x20000, 0x40000, 0x4},
+        {0, 0, 0, 0x1, 0x10000, 0x20000, 0x2, 0x4},
+        {0, 0, 0, 0, 0x10000, 0x20000, 0x1, 0x2},
+    },
+    // 256B_D: 1/2/4/8/16 bytes per element
+    {
+        {0x1, 0x2, 0x4, 0x20000, 0x10000, 0x40000, 0x8, 0x80000},
+        {0, 0x1, 0x2, 0x4, 0x10000, 0x20000, 0x40000, 0x8},
+        {0, 0, 0x1, 0x2, 0x10000, 0x20000, 0x40000, 0x4},
+        {0, 0, 0, 0x1, 0x10000, 0x2, 0x4, 0x20000},
+        {0, 0, 0, 0, 0x1, 0x10000, 0x2, 0x20000},
+    },
+    // 4KB_S: 1/2/4/8/16 bytes per element
+    {
+        {0x1, 0x2, 0x4, 0x8, 0x10000, 0x20000, 0x40000, 0x80000, 0x100000, 0x10,
+         0x200000, 0x20},
+        {0, 0x1, 0x2, 0x4, 0x10000, 0x20000, 0x40000, 0x8, 0x80000, 0x10,
+         0x100000, 0x20},
+        {0, 0, 0x1, 0x2, 0x10000, 0x20000, 0x40000, 0x4, 0x80000, 0x8, 0x100000,
+         0x10},
+        {0, 0, 0, 0x1, 0x10000, 0x20000, 0x2, 0x4, 0x40000, 0x8, 0x80000, 0x10},
+        {0, 0, 0, 0, 0x10000, 0x20000, 0x1, 0x2, 0x40000, 0x4, 0x80000, 0x8},
+    },
+    // 4KB_D: 1/2/4/8/16 bytes per element
+    {
+        {0x1, 0x2, 0x4, 0x20000, 0x10000, 0x40000, 0x8, 0x80000, 0x100000, 0x10,
+         0x200000, 0x20},
+        {0, 0x1, 0x2, 0x4, 0x10000, 0x20000, 0x40000, 0x8, 0x80000, 0x10,
+         0x100000, 0x20},
+        {0, 0, 0x1, 0x2, 0x10000, 0x20000, 0x40000, 0x4, 0x80000, 0x8, 0x100000,
+         0x10},
+        {0, 0, 0, 0x1, 0x10000, 0x2, 0x4, 0x20000, 0x40000, 0x8, 0x80000, 0x10},
+        {0, 0, 0, 0, 0x1, 0x10000, 0x2, 0x20000, 0x40000, 0x4, 0x80000, 0x8},
+    },
+    // 4KB_S_X: 1/2/4/8/16 bytes per element
+    {
+        {0x1, 0x2, 0x4, 0x8, 0x10000, 0x20000, 0x40000, 0x80000, 0x800100080,
+         0x400800010, 0x200200040, 0x100400020},
+        {0, 0x1, 0x2, 0x4, 0x10000, 0x20000, 0x40000, 0x8, 0x800080080,
+         0x400400010, 0x200100040, 0x100200020},
+        {0, 0, 0x1, 0x2, 0x10000, 0x20000, 0x40000, 0x4, 0x800080040,
+         0x400400008, 0x200100020, 0x100200010},
+        {0, 0, 0, 0x1, 0x10000, 0x20000, 0x2, 0x4, 0x800040040, 0x400200008,
+         0x200080020, 0x100100010},
+        {0, 0, 0, 0, 0x10000, 0x20000, 0x1, 0x2, 0x800040020, 0x400200004,
+         0x200080010, 0x100100008},
+    },
+    // 4KB_D_X: 1/2/4/8/16 bytes per element
+    {
+        {0x1, 0x2, 0x4, 0x20000, 0x10000, 0x40000, 0x8, 0x80000, 0x800100080,
+         0x400800010, 0x200200040, 0x100400020},
+        {0, 0x1, 0x2, 0x4, 0x10000, 0x20000, 0x40000, 0x8, 0x800080080,
+         0x400400010, 0x200100040, 0x100200020},
+        {0, 0, 0x1, 0x2, 0x10000, 0x20000, 0x40000, 0x4, 0x800080040,
+         0x400400008, 0x200100020, 0x100200010},
+        {0, 0, 0, 0x1, 0x10000, 0x2, 0x4, 0x20000, 0x800040040, 0x400200008,
+         0x200080020, 0x100100010},
+        {0, 0, 0, 0, 0x1, 0x10000, 0x2, 0x20000, 0x800040020, 0x400200004,
+         0x200080010, 0x100100008},
+    },
+    // 64KB_S: 1/2/4/8/16 bytes per element
+    {
+        {0x1, 0x2, 0x4, 0x8, 0x10000, 0x20000, 0x40000, 0x80000, 0x100000, 0x10,
+         0x200000, 0x20, 0x400000, 0x40, 0x800000, 0x80},
+        {0, 0x1, 0x2, 0x4, 0x10000, 0x20000, 0x40000, 0x8, 0x80000, 0x10,
+         0x100000, 0x20, 0x200000, 0x40, 0x400000, 0x80},
+        {0, 0, 0x1, 0x2, 0x10000, 0x20000, 0x40000, 0x4, 0x80000, 0x8, 0x100000,
+         0x10, 0x200000, 0x20, 0x400000, 0x40},
+        {0, 0, 0, 0x1, 0x10000, 0x20000, 0x2, 0x4, 0x40000, 0x8, 0x80000, 0x10,
+         0x100000, 0x20, 0x200000, 0x40},
+        {0, 0, 0, 0, 0x10000, 0x20000, 0x1, 0x2, 0x40000, 0x4, 0x80000, 0x8,
+         0x100000, 0x10, 0x200000, 0x20},
+    },
+    // 64KB_D: 1/2/4/8/16 bytes per element
+    {
+        {0x1, 0x2, 0x4, 0x20000, 0x10000, 0x40000, 0x8, 0x80000, 0x100000, 0x10,
+         0x200000, 0x20, 0x400000, 0x40, 0x800000, 0x80},
+        {0, 0x1, 0x2, 0x4, 0x10000, 0x20000, 0x40000, 0x8, 0x80000, 0x10,
+         0x100000, 0x20, 0x200000, 0x40, 0x400000, 0x80},
+        {0, 0, 0x1, 0x2, 0x10000, 0x20000, 0x40000, 0x4, 0x80000, 0x8, 0x100000,
+         0x10, 0x200000, 0x20, 0x400000, 0x40},
+        {0, 0, 0, 0x1, 0x10000, 0x2, 0x4, 0x20000, 0x40000, 0x8, 0x80000, 0x10,
+         0x100000, 0x20, 0x200000, 0x40},
+        {0, 0, 0, 0, 0x1, 0x10000, 0x2, 0x20000, 0x40000, 0x4, 0x80000, 0x8,
+         0x100000, 0x10, 0x200000, 0x20},
+    },
+    // 64KB_S_T: 1/2/4/8/16 bytes per element
+    {
+        {0x1, 0x2, 0x4, 0x8, 0x10000, 0x20000, 0x40000, 0x80000, 0x100080,
+         0x800010, 0x200040, 0x400020, 0x400000, 0x40, 0x800000, 0x80},
+        {0, 0x1, 0x2, 0x4, 0x10000, 0x20000, 0x40000, 0x8, 0x80080, 0x400010,
+         0x100040, 0x200020, 0x200000, 0x40, 0x400000, 0x80},
+        {0, 0, 0x1, 0x2, 0x10000, 0x20000, 0x40000, 0x4, 0x80040, 0x400008,
+         0x100020, 0x200010, 0x200000, 0x20, 0x400000, 0x40},
+        {0, 0, 0, 0x1, 0x10000, 0x20000, 0x2, 0x4, 0x40040, 0x200008, 0x80020,
+         0x100010, 0x100000, 0x20, 0x200000, 0x40},
+        {0, 0, 0, 0, 0x10000, 0x20000, 0x1, 0x2, 0x40020, 0x200004, 0x80010,
+         0x100008, 0x100000, 0x10, 0x200000, 0x20},
+    },
+    // 64KB_D_T: 1/2/4/8/16 bytes per element
+    {
+        {0x1, 0x2, 0x4, 0x20000, 0x10000, 0x40000, 0x8, 0x80000, 0x100080,
+         0x800010, 0x200040, 0x400020, 0x400000, 0x40, 0x800000, 0x80},
+        {0, 0x1, 0x2, 0x4, 0x10000, 0x20000, 0x40000, 0x8, 0x80080, 0x400010,
+         0x100040, 0x200020, 0x200000, 0x40, 0x400000, 0x80},
+        {0, 0, 0x1, 0x2, 0x10000, 0x20000, 0x40000, 0x4, 0x80040, 0x400008,
+         0x100020, 0x200010, 0x200000, 0x20, 0x400000, 0x40},
+        {0, 0, 0, 0x1, 0x10000, 0x2, 0x4, 0x20000, 0x40040, 0x200008, 0x80020,
+         0x100010, 0x100000, 0x20, 0x200000, 0x40},
+        {0, 0, 0, 0, 0x1, 0x10000, 0x2, 0x20000, 0x40020, 0x200004, 0x80010,
+         0x100008, 0x100000, 0x10, 0x200000, 0x20},
+    },
+    // 64KB_S_X: 1/2/4/8/16 bytes per element
+    {
+        {0x1, 0x2, 0x4, 0x8, 0x10000, 0x20000, 0x40000, 0x80000, 0x800100080,
+         0x400800010, 0x200200040, 0x100400020, 0x400000, 0x40, 0x800000, 0x80},
+        {0, 0x1, 0x2, 0x4, 0x10000, 0x20000, 0x40000, 0x8, 0x800080080,
+         0x400400010, 0x200100040, 0x100200020, 0x200000, 0x40, 0x400000, 0x80},
+        {0, 0, 0x1, 0x2, 0x10000, 0x20000, 0x40000, 0x4, 0x800080040,
+         0x400400008, 0x200100020, 0x100200010, 0x200000, 0x20, 0x400000, 0x40},
+        {0, 0, 0, 0x1, 0x10000, 0x20000, 0x2, 0x4, 0x800040040, 0x400200008,
+         0x200080020, 0x100100010, 0x100000, 0x20, 0x200000, 0x40},
+        {0, 0, 0, 0, 0x10000, 0x20000, 0x1, 0x2, 0x800040020, 0x400200004,
+         0x200080010, 0x100100008, 0x100000, 0x10, 0x200000, 0x20},
+    },
+    // 64KB_D_X: 1/2/4/8/16 bytes per element
+    {
+        {0x1, 0x2, 0x4, 0x20000, 0x10000, 0x40000, 0x8, 0x80000, 0x800100080,
+         0x400800010, 0x200200040, 0x100400020, 0x400000, 0x40, 0x800000, 0x80},
+        {0, 0x1, 0x2, 0x4, 0x10000, 0x20000, 0x40000, 0x8, 0x800080080,
+         0x400400010, 0x200100040, 0x100200020, 0x200000, 0x40, 0x400000, 0x80},
+        {0, 0, 0x1, 0x2, 0x10000, 0x20000, 0x40000, 0x4, 0x800080040,
+         0x400400008, 0x200100020, 0x100200010, 0x200000, 0x20, 0x400000, 0x40},
+        {0, 0, 0, 0x1, 0x10000, 0x2, 0x4, 0x20000, 0x800040040, 0x400200008,
+         0x200080020, 0x100100010, 0x100000, 0x20, 0x200000, 0x40},
+        {0, 0, 0, 0, 0x1, 0x10000, 0x2, 0x20000, 0x800040020, 0x400200004,
+         0x200080010, 0x100100008, 0x100000, 0x10, 0x200000, 0x20},
+    },
+    // 64KB_Z_X: 1/2/4/8/16 bytes per element
+    {
+        {0x1, 0x10000, 0x2, 0x20000, 0x4, 0x40000, 0x8, 0x100000, 0x800080008,
+         0x400100010, 0x200200040, 0x100400020, 0x400000, 0x40, 0x800000, 0x80},
+        {0, 0x1, 0x10000, 0x2, 0x20000, 0x4, 0x40000, 0x8, 0x800080008,
+         0x400100010, 0x200200040, 0x100400020, 0x100000, 0x40, 0x400000, 0x80},
+        {0, 0, 0x1, 0x10000, 0x2, 0x20000, 0x4, 0x40000, 0x800080008,
+         0x400100010, 0x200200040, 0x100400020, 0x80000, 0x10, 0x400000, 0x40},
+        {0, 0, 0, 0x1, 0x10000, 0x2, 0x20000, 0x4, 0x800080008, 0x400100010,
+         0x200200040, 0x100400020, 0x40000, 0x8, 0x100000, 0x40},
+        {0, 0, 0, 0, 0x1, 0x10000, 0x2, 0x20000, 0x800080008, 0x400100010,
+         0x200200040, 0x100400020, 0x40000, 0x4, 0x80000, 0x10},
+    },
+    // 64KB_R_X: 1/2/4/8/16 bytes per element
+    {
+        {0x1, 0x2, 0x4, 0x20000, 0x10000, 0x40000, 0x8, 0x100000, 0x800080008,
+         0x400100010, 0x200200040, 0x100400020, 0x400000, 0x40, 0x800000, 0x80},
+        {0, 0x1, 0x2, 0x4, 0x10000, 0x20000, 0x40000, 0x8, 0x800080008,
+         0x400100010, 0x200200040, 0x100400020, 0x100000, 0x40, 0x400000, 0x80},
+        {0, 0, 0x1, 0x2, 0x10000, 0x20000, 0x40000, 0x4, 0x800080008,
+         0x400100010, 0x200200040, 0x100400020, 0x80000, 0x10, 0x400000, 0x40},
+        {0, 0, 0, 0x1, 0x10000, 0x2, 0x4, 0x20000, 0x800080008, 0x400100010,
+         0x200200040, 0x100400020, 0x40000, 0x8, 0x100000, 0x40},
+        {0, 0, 0, 0, 0x1, 0x10000, 0x2, 0x20000, 0x800080008, 0x400100010,
+         0x200200040, 0x100400020, 0x40000, 0x4, 0x80000, 0x10},
+    },
+};
+
+u32 Gfx10ElemLog2(u32 elem_bytes) {
+  switch (elem_bytes) {
+    case 1:
+      return 0;
+    case 2:
+      return 1;
+    case 4:
+      return 2;
+    case 8:
+      return 3;
+    default:
+      return 4;  // 16
+  }
+}
+
+// A block always holds 2^blk_log2 bytes; its element extent is square, or twice
+// as wide as it is tall when the element count is an odd power of two.
+void Gfx10BlockDim(u32 blk_log2, u32 elem_log2, u32& w, u32& h) {
+  const u32 elems_log2 = blk_log2 - elem_log2;
+  const u32 w_log2 = (elems_log2 + 1) / 2;
+  w = 1u << w_log2;
+  h = 1u << (elems_log2 - w_log2);
+}
+
+u32 ShiftCeil(u32 value, u32 shift) {
+  return (value >> shift) + ((value & ((1u << shift) - 1)) ? 1u : 0u);
+}
+
+// The equation XORs independent contributions from x, y and the array slice,
+// so the whole thing collapses to one table lookup per axis.
+class Gfx10Addresser {
+ public:
+  bool Init(u32 sw_mode, u32 elem_bytes) {
+    const Gfx10ModeInfo mode = Gfx10ModeOf(sw_mode);
+    if (mode.set >= kG10_SetCount)
+      return false;
+    blk_log2_ = mode.blk_log2;
+    const u32 elem_log2 = Gfx10ElemLog2(elem_bytes);
+    Gfx10BlockDim(blk_log2_, elem_log2, block_w_, block_h_);
+    const u64* pattern = kGfx10Patterns[mode.set][elem_log2];
+    for (u32 bit = 0; bit < blk_log2_; bit++)
+      for (u32 axis = 0; axis < 3; axis++)
+        for (u32 i = 0; i < 16; i++)
+          if ((pattern[bit] >> (axis * 16 + i)) & 1)
+            contrib_[axis][i] |= 1u << bit;
+    return true;
+  }
+
+  u32 Offset(u32 axis, u32 coord) const {
+    u32 offset = 0;
+    for (u32 i = 0; coord; coord >>= 1, i++)
+      if (coord & 1)
+        offset ^= contrib_[axis][i];
+    return offset;
+  }
+
+  u32 block_w() const { return block_w_; }
+  u32 block_h() const { return block_h_; }
+  u64 block_bytes() const { return 1ull << blk_log2_; }
+
+ private:
+  u32 contrib_[3][16] = {};
+  u32 blk_log2_ = 0;
+  u32 block_w_ = 0;
+  u32 block_h_ = 0;
+};
+
+// gfx10 stores a mip chain smallest-level-first and packs every level that fits
+// into one shared "mip tail" block, where a level is placed by an x/y offset
+// fed into the swizzle rather than by a byte offset. Array slices repeat the
+// whole chain, so a layer is one constant stride away at every level.
+bool BuildGfx10Layout(TextureLayout32& out,
+                      u32 width,
+                      u32 height,
+                      u32 pitch,
+                      u32 layers,
+                      u32 mip_levels,
+                      u32 sw_mode,
+                      u32 elem) {
+  const Gfx10ModeInfo mode = Gfx10ModeOf(sw_mode);
+  if (mode.set == kG10_None)
+    return false;
+
+  for (u32 mip = 0; mip < mip_levels; mip++) {
+    out.mips[mip].width = std::max(width >> mip, 1u);
+    out.mips[mip].height = std::max(height >> mip, 1u);
+  }
+
+  if (mode.set == kG10_Linear) {
+    // LINEAR pads every row to 256 bytes; LINEAR_GENERAL pads nothing. Only a
+    // single-level surface may carry a caller-supplied pitch.
+    const u32 pitch_align = sw_mode == 0 ? 256 / elem : 1;
+    u64 chain = 0;
+    for (u32 mip = mip_levels; mip-- > 0;) {
+      TextureMipLayout32& level = out.mips[mip];
+      const u32 raw_pitch =
+          mip_levels > 1 ? ShiftCeil(width, mip) : std::max(width, pitch);
+      level.pitch = AlignUp(raw_pitch, pitch_align);
+      level.stored_height =
+          mip_levels > 1 ? ShiftCeil(height, mip) : level.height;
+      level.offset = chain;
+      level.size =
+          static_cast<u64>(level.pitch) * level.stored_height * elem;
+      chain += level.size;
+    }
+    out.layer_stride = chain;
+    out.size = chain * layers;
+    return out.size != 0;
+  }
+
+  u32 block_w = 0, block_h = 0;
+  const u32 elem_log2 = Gfx10ElemLog2(elem);
+  Gfx10BlockDim(mode.blk_log2, elem_log2, block_w, block_h);
+  const u64 block_bytes = 1ull << mode.blk_log2;
+
+  // 256 B blocks are addressed without a mip tail; the macro block sizes hold
+  // 8 (4 KiB) and 12 (64 KiB) levels in theirs.
+  const u32 max_in_tail = mode.blk_log2 > 8 ? mode.blk_log2 - 4 : 0;
+  u32 first_tail = mip_levels;
+  if (mode.blk_log2 > 8) {
+    for (u32 mip = 0; mip < mip_levels; mip++) {
+      if (ShiftCeil(width, mip) <= block_w / 2 &&
+          ShiftCeil(height, mip) <= block_h &&
+          mip_levels - mip <= max_in_tail) {
+        first_tail = mip;
+        break;
+      }
+    }
+  }
+
+  for (u32 mip = 0; mip < first_tail; mip++) {
+    TextureMipLayout32& level = out.mips[mip];
+    level.pitch = AlignUp(ShiftCeil(width, mip), block_w);
+    level.stored_height = AlignUp(ShiftCeil(height, mip), block_h);
+    level.size = static_cast<u64>(level.pitch) * level.stored_height * elem;
+  }
+  u64 chain = first_tail < mip_levels ? block_bytes : 0;
+  for (u32 mip = first_tail; mip-- > 0;) {
+    out.mips[mip].offset = chain;
+    chain += out.mips[mip].size;
+  }
+
+  u32 micro_w = 0, micro_h = 0;
+  Gfx10MicroShape(elem, micro_w, micro_h);
+  u32 tail_w = block_w / 2, tail_h = block_h;
+  for (u32 mip = first_tail; mip < mip_levels; mip++) {
+    TextureMipLayout32& level = out.mips[mip];
+    const u32 order = max_in_tail - 1 - (mip - first_tail);
+    const u32 tail_offset = order > 6 ? (16u << order) : (order << 8);
+    level.pitch = tail_w;
+    level.stored_height = tail_h;
+    level.size = static_cast<u64>(tail_w) * tail_h * elem;
+    // Every tail level shares one block at the start of the chain; its
+    // position inside that block is a coordinate bias, interleaved x/y in the
+    // level's own offset. Both supported block sizes are an even power of two,
+    // so the odd-block-size axis swap never applies.
+    u32 tail_x = 0, tail_y = 0;
+    for (u32 i = 0; i < 6; i++) {
+      tail_x |= ((tail_offset >> (9 + 2 * i)) & 1) << i;
+      tail_y |= ((tail_offset >> (8 + 2 * i)) & 1) << i;
+    }
+    level.mip_tail_x = tail_x * micro_w;
+    level.mip_tail_y = tail_y * micro_h;
+    tail_w = std::max(tail_w >> 1, micro_w);
+    tail_h = std::max(tail_h >> 1, micro_h);
+  }
+
+  out.layer_stride = chain;
+  out.size = chain * layers;
+  return out.size != 0;
+}
+
 template <u32 Elem, bool Detile>
 inline void CopyElement(u8* tiled, u8* linear) {
   if constexpr (Detile)
@@ -754,10 +1187,9 @@ template <u32 Elem, bool Detile>
 void CopyLinearMip(u8* tiled,
                    u8* linear,
                    const TextureMipLayout32& level,
-                   u32 layer,
+                   u64 layer_offset,
                    size_t linear_row_bytes) {
-  tiled +=
-      static_cast<u64>(layer) * level.pitch * level.stored_height * Elem;
+  tiled += layer_offset;
   const size_t logical_row_bytes = static_cast<size_t>(level.width) * Elem;
   if (level.pitch == level.width && linear_row_bytes == logical_row_bytes) {
     const size_t bytes = logical_row_bytes * level.height;
@@ -1019,6 +1451,47 @@ void CopyGfx10StdMip(u8* tiled,
   });
 }
 
+// gfx10 element address: the block index picks the block, the equation picks
+// the byte inside it. Both are separable in x and y, so the per-row and
+// per-column terms are tabulated once and the inner loop is an XOR and an add.
+template <u32 Elem, bool Detile>
+void CopyGfx10Mip(u8* tiled,
+                  u8* linear,
+                  const TextureLayout32& layout,
+                  u32 mip,
+                  u32 layer,
+                  size_t linear_row_bytes,
+                  const Gfx10Addresser& addr) {
+  const TextureMipLayout32& level = layout.mips[mip];
+  const u32 block_w = addr.block_w(), block_h = addr.block_h();
+  const u64 block_bytes = addr.block_bytes();
+  const u32 blocks_per_row = level.pitch / block_w;
+  const u32 slice_offset = addr.Offset(2, layer);
+
+  std::vector<u32> x_offsets(level.width), y_offsets(level.height);
+  std::vector<u64> x_blocks(level.width);
+  for (u32 x = 0; x < level.width; x++) {
+    x_offsets[x] = addr.Offset(0, x + level.mip_tail_x);
+    x_blocks[x] = static_cast<u64>(x / block_w) * block_bytes;
+  }
+  for (u32 y = 0; y < level.height; y++)
+    y_offsets[y] = addr.Offset(1, y + level.mip_tail_y) ^ slice_offset;
+
+  u8* slice = tiled + layout.layer_stride * layer;
+  DetileParallelRows(level.height, [&](u32 y0, u32 y1) {
+    for (u32 y = y0; y < y1; y++) {
+      u8* linear_row = linear + static_cast<size_t>(y) * linear_row_bytes;
+      const u64 row_base =
+          static_cast<u64>(y / block_h) * blocks_per_row * block_bytes;
+      const u32 y_offset = y_offsets[y];
+      for (u32 x = 0; x < level.width; x++)
+        CopyElement<Elem, Detile>(
+            slice + row_base + x_blocks[x] + (x_offsets[x] ^ y_offset),
+            linear_row + static_cast<size_t>(x) * Elem);
+    }
+  });
+}
+
 template <u32 Elem, bool Detile>
 bool CopyTextureMip(u8* tiled_image,
                     u8* linear,
@@ -1029,7 +1502,21 @@ bool CopyTextureMip(u8* tiled_image,
   const TextureMipLayout32& level = layout.mips[mip];
   u8* tiled = tiled_image + level.offset;
   if (TilingIsLinear(layout.tiling_idx)) {
-    CopyLinearMip<Elem, Detile>(tiled, linear, level, layer, linear_row_bytes);
+    const u64 layer_offset =
+        layout.layer_stride ? layout.layer_stride * layer
+                            : static_cast<u64>(layer) * level.pitch *
+                                  level.stored_height * Elem;
+    CopyLinearMip<Elem, Detile>(tiled, linear, level, layer_offset,
+                                linear_row_bytes);
+    return true;
+  }
+
+  if (TilingIsGfx10(layout.tiling_idx)) {
+    Gfx10Addresser addr;
+    if (!addr.Init(layout.tiling_idx - kGfx10TilingBase, Elem))
+      return false;
+    CopyGfx10Mip<Elem, Detile>(tiled, linear, layout, mip, layer,
+                               linear_row_bytes, addr);
     return true;
   }
 
@@ -1072,7 +1559,13 @@ bool TilingIsLinear(u32 tiling_idx) {
   // DisplayLinearGeneral(31) are genuinely linear (ArrayLinearAligned/General).
   // Keep the same set the previous code used so Isaac's linear surfaces and
   // small UI textures are still straight-copied.
+  if (TilingIsGfx10(tiling_idx))
+    return Gfx10ModeOf(tiling_idx - kGfx10TilingBase).set == kG10_Linear;
   return tiling_idx == 8 || tiling_idx == 31;
+}
+
+bool TilingSupported(u32 tiling_idx) {
+  return ValidTileMode(EffectiveTileMode(tiling_idx));
 }
 
 bool BuildTextureLayout32(TextureLayout32& out,
@@ -1098,6 +1591,9 @@ bool BuildTextureLayout32(TextureLayout32& out,
   out.layers = layers;
   out.tiling_idx = tiling_idx;
   out.elem_bytes = elem_bytes;
+  if (TilingIsGfx10(tiling_idx))
+    return BuildGfx10Layout(out, width, height, pitch, layers, mip_levels,
+                            tiling_idx - kGfx10TilingBase, elem_bytes);
   const ArrayMode am = ArrayModeOf(tiling_idx);
   const MicroMode mm = MicroModeOf(tiling_idx);
   const u32 thickness = TileThickness(am);

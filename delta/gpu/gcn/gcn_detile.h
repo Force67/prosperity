@@ -10,6 +10,11 @@
  *
  * Faithful (32bpp) implementation of the AMD AddrLib address swizzle
  * (video_core/host_shaders/tiling.comp + video_core/amdgpu/tiling.cpp).
+ *
+ * PS5 (gfx10.3 / RDNA2) surfaces are described by a 5-bit swizzle mode rather
+ * than a GB_TILE_MODE index, so they enter the same API as
+ * kGfx10TilingBase + sw_mode. Those ids take a separate address equation and
+ * layout path; nothing in the Liverpool range can reach it.
  */
 
 #include <array>
@@ -32,9 +37,19 @@ namespace gpu::gcn {
 void DetileParallelRows(u32 rows,
                         const std::function<void(u32, u32)>& fn);
 
+// A PS5 gfx10.3 swizzle mode enters the tiling_idx parameter as
+// kGfx10TilingBase + sw_mode, keeping it disjoint from the Liverpool indices
+// (0..31) and from the older gfx10 "standard" ids the Minecraft path uses.
+constexpr u32 kGfx10TilingBase = 0x100;
+
 // True if tiling_idx denotes a linear surface (no de-tile needed): only
-// DisplayLinearAligned(8) and DisplayLinearGeneral(31) are linear on Liverpool.
+// DisplayLinearAligned(8) and DisplayLinearGeneral(31) are linear on Liverpool,
+// and LINEAR(0) / LINEAR_GENERAL(31) in the gfx10 range.
 bool TilingIsLinear(u32 tiling_idx);
+
+// True if a layout can be built for tiling_idx at all. Callers use it to reject
+// a surface before staging it; BuildTextureLayout32 refuses the same set.
+bool TilingSupported(u32 tiling_idx);
 
 struct TextureMipLayout32 {
   u64 offset = 0;  // byte offset of this complete mip level
@@ -45,6 +60,10 @@ struct TextureMipLayout32 {
   u32 stored_height = 0;
   u32 thickness = 1;    // slices interleaved in each thick microtile
   bool macro_tiled = false;  // false for linear and mip-downgraded 1D tiling
+  // gfx10 packs its small mips into one shared block; these place this level
+  // inside it. Zero for level 0 and for every Liverpool surface.
+  u32 mip_tail_x = 0;
+  u32 mip_tail_y = 0;
 };
 
 struct TextureLayout32 {
@@ -54,6 +73,10 @@ struct TextureLayout32 {
   u32 layers = 0;
   u32 tiling_idx = 0;
   u32 elem_bytes = 4;  // bytes per element (2/4 = pixel, 8/16 = BCn block)
+  // gfx10 stores the whole mip chain per array slice, so a layer is one stride
+  // apart at every level. Zero means the Liverpool layout (mip-major, layers
+  // interleaved inside each level).
+  u64 layer_stride = 0;
 };
 
 // Compute the complete physical layout of a one-sample 2D/2D-array image whose

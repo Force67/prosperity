@@ -39,6 +39,7 @@ gpu::gcn::Recompiled Recompile(const u32*,
 #include <vector>
 
 #include "gpu/guest_memory.h"
+#include "gpu/gcn/gcn_audit.h"
 #include "gpu/gcn/spirv/spv_post.h"
 #include "gpu/gcn/spirv/translator.h"
 #include "gpu/ps5/rdna/rdna_decode.h"
@@ -88,6 +89,30 @@ bool ShDbg() {
   static const bool on = kGpuShtrace ||
                          kAgcTrace;
   return on;
+}
+
+// MUBUF opcode numbering. gfx10.3 REVERTED to the gfx6/gfx7 assignment, so the
+// GFX7 ranges are correct here and must not be "corrected" to gfx8/gfx9's
+// (verified against LLVM BUFInstructions.td, where every raw form is defined by
+// MUBUF_Real_AllAddr_gfx6_gfx7_gfx10, and gfx8/gfx9 alone use the shifted
+// MUBUF_Real_AllAddr_vi table):
+//   0x00-0x03 buffer_load_format_x/xy/xyz/xyzw
+//   0x04-0x07 buffer_store_format_*
+//   0x08-0x0b buffer_load_ubyte/sbyte/ushort/sshort
+//   0x0c-0x0f buffer_load_dword/x2/x4/x3   (x4 before x3, as on gfx6/gfx7)
+//   0x18/0x1a buffer_store_byte/short   0x1c-0x1f store_dword/x2/x4/x3
+//   0x30-0x60 atomics                   0x80-0x87 the d16 format forms
+// The d16 forms only fit because the gfx10 opcode field is 8 bits ([25:18], vs
+// GFX7's 7); rdna_decode's Classify reads all 8, so they never alias 0x00-0x07.
+bool RdnaMubufStore(u32 op) {
+  return (op >= 0x04 && op <= 0x07) || (op >= 0x84 && op <= 0x87) ||
+         (op >= 0x18 && op <= 0x1f);
+}
+
+// MTBUF: 0x00-0x03 load, 0x04-0x07 store, 0x08-0x0f the d16 pair (opcode bit 3
+// comes from word1[21], which rdna_decode folds in).
+bool RdnaMtbufStore(u32 op) {
+  return (op >= 0x04 && op <= 0x07) || (op >= 0x0c && op <= 0x0f);
 }
 
 // A buffer_load_format is a real PER-VERTEX fetch when it is IDXEN and its
@@ -413,6 +438,47 @@ bool RdnaEmitVop3p(Translator& t,
   }
 }
 
+// SOP2 slots gfx10 added above the GFX7 numbering the shared emitter speaks.
+// 0x00-0x2c are identical on both (LLVM SOP2_Real_gfx6_gfx7_gfx10); 0x2b
+// (s_cbranch_g_fork) and 0x2d are gfx6/gfx7-only, and 0x2e-0x36 are new. None of
+// these writes SCC. s_pack_* reach the shared emitter too, but it gates them on
+// the PS4's Neo ISA flag, which an RDNA2 Inst never carries.
+bool RdnaEmitSop2(Translator& t, const Inst& inst) {
+  const u32 w = inst.raw[0], op = inst.opcode;
+  if (op < 0x32 || op > 0x36)
+    return false;
+  const u32 sdst = (w >> 16) & 0x7F;
+  const Id a = t.SrcRaw(w & 0xFF, inst.literal);
+  const Id b = t.SrcRaw((w >> 8) & 0xFF, inst.literal);
+  const auto mul_hi = [&](spv::Op wide) {
+    return t.m.CompositeExtract(t.t_u,
+                                t.m.Emit(wide, t.PairType(), {a, b}), 1);
+  };
+  switch (op) {
+    case 0x32:  // s_pack_ll_b32_b16: {b[15:0], a[15:0]}
+      t.SetSdst(sdst, 0,
+                t.Or(t.And(a, t.U32(0xFFFF)),
+                     t.Shl(t.And(b, t.U32(0xFFFF)), t.U32(16))));
+      return true;
+    case 0x33:  // s_pack_lh_b32_b16: {b[31:16], a[15:0]}
+      t.SetSdst(sdst, 0,
+                t.Or(t.And(a, t.U32(0xFFFF)), t.And(b, t.U32(0xFFFF0000u))));
+      return true;
+    case 0x34:  // s_pack_hh_b32_b16: {b[31:16], a[31:16]}
+      t.SetSdst(sdst, 0,
+                t.Or(t.Shr(a, t.U32(16)), t.And(b, t.U32(0xFFFF0000u))));
+      return true;
+    case 0x35:
+      t.SetSdst(sdst, 0, mul_hi(spv::Op::OpUMulExtended));
+      return true;  // s_mul_hi_u32
+    case 0x36:
+      t.SetSdst(sdst, 0, mul_hi(spv::Op::OpSMulExtended));
+      return true;  // s_mul_hi_i32
+    default:
+      return false;
+  }
+}
+
 // ---- SMEM (constant buffers) ------------------------------------------------
 // Walk the s_load pointer chain feeding a descriptor base SGPR back to a
 // user-data root. `loads` maps an s_load's destination SGPR to its {source base
@@ -636,10 +702,12 @@ bool RdnaPlanCbufs(const Program& program,
 // from user data at draw time, exactly like the SMEM cbufs
 // (decodeVBuffer(&vud[srsrc])).
 // Raw MUBUF loads (buffer_load_dword{,x2,x3,x4} and the sub-dword forms) the
-// shader indexes itself. Each distinct descriptor SGPR quad becomes one set-2
-// storage buffer, which the command processor resolves per draw. The shared
-// PlanGfxBuffers cannot be reused: its descriptor-reload versioning reads the
-// SMEM sdst with GCN field positions.
+// shader indexes itself, plus every buffer_load_format the vertex-input path did
+// not lift (`claimed`). Each distinct descriptor SGPR quad becomes one set-2
+// storage buffer, which the command processor resolves per draw -- a format load
+// belongs here rather than in a 64-byte UBO because its index is per-lane and
+// reaches the whole resource. The shared PlanGfxBuffers cannot be reused: its
+// descriptor-reload versioning reads the SMEM sdst with GCN field positions.
 void RdnaPlanGfxBuffers(const Program& program,
                         u32 first_binding,
                         const std::unordered_set<u32>* claimed,
@@ -647,7 +715,9 @@ void RdnaPlanGfxBuffers(const Program& program,
                         std::unordered_map<u32, u32>& bindings) {
   std::unordered_map<u32, u32> by_srsrc;
   for (const Inst& inst : program) {
-    if (inst.enc != Enc::kMubuf || inst.opcode < 0x08 || inst.opcode > 0x0f)
+    const bool raw = inst.opcode >= 0x08 && inst.opcode <= 0x0f;
+    const bool format = inst.opcode <= 0x03;
+    if (inst.enc != Enc::kMubuf || (!raw && !format))
       continue;
     if (claimed && claimed->count(inst.pc))
       continue;
@@ -681,14 +751,15 @@ void RdnaPlanBufLoadCbufs(const Program& program,
   // renderer derefs the table pointer at draw time. srsrc-keyed bindings
   // collide when the shader reuses an SGPR quad (s[8:11] = MVP V# then vertex
   // V#), so constant loads are bound per-instruction (by_pc) instead.
+  // MUBUF format loads are NOT bound here: their format lives in the V#, so they
+  // go through RdnaPlanGfxBuffers/RdnaEmitBufFormatLoad instead.
   const auto chained_loads = MapTableChainedLoads(program);
   for (const Inst& inst : program) {
     if (inst.enc == Enc::kSop1 && inst.opcode == 0x20)
       break;  // s_setpc_b64
     if (inst.enc == Enc::kSopp && inst.opcode == 1)
       break;  // s_endpgm
-    if ((inst.enc != Enc::kMubuf && inst.enc != Enc::kMtbuf) ||
-        inst.opcode > 0x03)
+    if (inst.enc != Enc::kMtbuf || inst.opcode > 0x03)
       continue;
     const u32 srsrc = ((inst.raw[1] >> 16) & 0x1F) * 4;
     const auto chain = chained_loads.find(inst.pc);
@@ -809,6 +880,192 @@ void RdnaEmitSmem(Translator& t, const Inst& inst, StageContext& sc) {
 
 // Address of the shader being translated, for shader-specific debug output.
 thread_local u64 g_ps_addr = 0;
+
+// ---- MUBUF buffer_load_format ----------------------------------------------
+// buffer_load_format converts through the FORMAT in the V#, which the
+// instruction does not carry. The V#s the stage's buffer ops read, resolved by
+// replaying the stage's scalar code against the live user data -- the same
+// resolution the command processor performs when it binds those buffers. The
+// format is then baked into the module, so a later draw binding a
+// differently-formatted V# to the same shader would be wrong; that is the
+// assumption the lifted vertex-fetch path already makes about r.attrs.
+thread_local std::unordered_map<u32, BufferResource> g_stage_bufs;
+
+// One dropped-store report per translated stage.
+thread_local bool g_warned_store = false;
+
+// One channel layout of the gfx10.3 unified buffer format (V# word3[18:12]).
+// The enum runs one layout at a time in the order UNorm, SNorm, UScaled,
+// SScaled, UInt, SInt [, Float]. Names are most-significant channel first, so
+// channel x takes the LAST number's bits at bit offset 0.
+enum class BufNum : u8 {
+  kUnorm,
+  kSnorm,
+  kUscaled,
+  kSscaled,
+  kUint,
+  kSint,
+  kFloat
+};
+
+struct BufFormat {
+  u32 comps = 0;
+  u32 bits[4] = {};
+  BufNum num = BufNum::kUnorm;
+};
+
+bool DecodeBufFormat(u32 gfmt, BufFormat& out) {
+  struct Run {
+    u8 first, count, comps, bits[4];
+  };
+  static constexpr Run kRuns[] = {
+      {1, 6, 1, {8}},
+      {7, 7, 1, {16}},
+      {14, 6, 2, {8, 8}},
+      {20, 3, 1, {32}},
+      {23, 7, 2, {16, 16}},
+      {30, 7, 3, {10, 11, 11}},      // 11_11_10
+      {37, 7, 3, {11, 11, 10}},      // 10_11_11
+      {44, 6, 4, {10, 10, 10, 2}},   // 2_10_10_10
+      {50, 6, 4, {2, 10, 10, 10}},   // 10_10_10_2
+      {56, 6, 4, {8, 8, 8, 8}},
+      {62, 3, 2, {32, 32}},
+      {65, 7, 4, {16, 16, 16, 16}},
+      {72, 3, 3, {32, 32, 32}},
+      {75, 3, 4, {32, 32, 32, 32}},
+  };
+  for (const Run& r : kRuns) {
+    if (gfmt < r.first || gfmt >= u32{r.first} + r.count)
+      continue;
+    const u32 i = gfmt - r.first;
+    out.comps = r.comps;
+    for (u32 c = 0; c < 4; c++)
+      out.bits[c] = r.bits[c];
+    // A 3-wide run is UInt, SInt, Float; a wider one appends Float last.
+    out.num = r.count == 3 ? (i == 0   ? BufNum::kUint
+                              : i == 1 ? BufNum::kSint
+                                       : BufNum::kFloat)
+              : i == 6     ? BufNum::kFloat
+                           : static_cast<BufNum>(i);
+    return true;
+  }
+  return false;
+}
+
+// One channel's stored bits -> the dword the hardware leaves in the VGPR.
+Id ConvertBufChannel(Translator& t, Id raw, u32 bits, BufNum num) {
+  const bool is_signed = num == BufNum::kSnorm || num == BufNum::kSscaled ||
+                         num == BufNum::kSint;
+  Id value = raw;
+  if (is_signed && bits < 32)
+    value = t.m.Bitcast(t.t_u,
+                        t.m.Emit(spv::Op::OpBitFieldSExtract, t.t_i,
+                                 {t.m.Bitcast(t.t_i, raw), t.U32(0),
+                                  t.U32(bits)}));
+  const auto as_float = [&](Id f) { return t.m.Bitcast(t.t_u, f); };
+  const auto to_f = [&](bool sgn) {
+    return sgn ? t.m.Emit(spv::Op::OpConvertSToF, t.t_f,
+                          {t.m.Bitcast(t.t_i, value)})
+               : t.m.Emit(spv::Op::OpConvertUToF, t.t_f, {value});
+  };
+  switch (num) {
+    case BufNum::kUint:
+    case BufNum::kSint:
+      return value;
+    case BufNum::kFloat:
+      if (bits == 32)
+        return value;
+      return as_float(t.m.CompositeExtract(
+          t.t_f,
+          t.m.ExtInst(t.t_v2, GLSLstd450UnpackHalf2x16, {value}), 0));
+    case BufNum::kUscaled:
+      return as_float(to_f(false));
+    case BufNum::kSscaled:
+      return as_float(to_f(true));
+    case BufNum::kUnorm:
+      return as_float(t.FMul(
+          to_f(false), t.F32(1.f / static_cast<float>((1ull << bits) - 1))));
+    case BufNum::kSnorm:
+      // The most negative code maps below -1 and the hardware clamps it.
+      return as_float(t.Ext2(
+          GLSLstd450FMax,
+          t.FMul(to_f(true),
+                 t.F32(1.f / static_cast<float>((1ull << (bits - 1)) - 1))),
+          t.F32(-1.f)));
+  }
+  return value;
+}
+
+// buffer_load_format_x/xy/xyz/xyzw against the set-2 window the planner bound.
+// Returns false when the V# (and with it the format, stride and any scalar
+// byte offset) could not be resolved, leaving the caller to decline.
+bool RdnaEmitBufFormatLoad(Translator& t,
+                           const Inst& inst,
+                           StageContext& sc) {
+  const u32 w = inst.raw[0], w1 = inst.raw[1];
+  const auto bind = sc.gfx_buf_bind.find(inst.pc);
+  const auto res = g_stage_bufs.find(inst.pc);
+  if (bind == sc.gfx_buf_bind.end() || res == g_stage_bufs.end() ||
+      !res->second.descriptor_valid)
+    return false;
+  BufFormat fmt;
+  if (!DecodeBufFormat((res->second.descriptor[3] >> 12) & 0x7F, fmt))
+    return false;
+  // 11-bit and 10-bit packed floats need their own exponent/mantissa unpack.
+  if (fmt.num == BufNum::kFloat && fmt.bits[0] != 16 && fmt.bits[0] != 32)
+    return false;
+
+  const u32 soffset_field = (w1 >> 24) & 0xFF;
+  u32 soffset = 0;
+  if (soffset_field != 125 && soffset_field != 128) {
+    if (!res->second.soffset_valid)
+      return false;
+    soffset = res->second.soffset;
+  }
+  const u32 stride = (res->second.descriptor[1] >> 16) & 0x3FFF;
+  const u32 vdata = (w1 >> 8) & 0xFF, vaddr = w1 & 0xFF;
+  const bool offen = (w >> 12) & 1, idxen = (w >> 13) & 1;
+  Id byte_off = t.U32((w & 0xFFF) + soffset);
+  u32 va = vaddr;
+  if (idxen)
+    byte_off = t.Add(byte_off, t.Mul(t.Vg(va++), t.U32(stride)));
+  if (offen)
+    byte_off = t.Add(byte_off, t.Vg(va));
+
+  const Id var = t.EnsureGfxBuffer(bind->second);
+  const Id p_u = t.m.TypePointer(spv::StorageClass::StorageBuffer, t.t_u);
+  const auto dword = [&](Id index) {
+    return t.m.Load(
+        t.t_u,
+        t.m.AccessChain(
+            p_u, var,
+            {t.U32(0),
+             t.UMin(index, t.U32(gpu::gcn::kGfxBufferDwords - 1))}));
+  };
+  const Id first_bit = t.Shl(byte_off, t.U32(3));
+  const u32 requested = (inst.opcode & 3) + 1;
+  u32 channel_bit = 0;
+  for (u32 c = 0; c < requested; c++) {
+    if (c >= fmt.comps) {
+      // A channel the format does not store reads 0, and alpha reads one.
+      const bool integer =
+          fmt.num == BufNum::kUint || fmt.num == BufNum::kSint;
+      t.SetVg(vdata + c,
+              t.U32(c != 3 ? 0u : (integer ? 1u : 0x3F800000u)));
+      continue;
+    }
+    const u32 bits = fmt.bits[c];
+    const Id bit = t.Add(first_bit, t.U32(channel_bit));
+    const Id word = dword(t.Shr(bit, t.U32(5)));
+    const Id raw =
+        bits == 32 ? word
+                   : t.m.Emit(spv::Op::OpBitFieldUExtract, t.t_u,
+                              {word, t.And(bit, t.U32(31)), t.U32(bits)});
+    t.SetVg(vdata + c, ConvertBufChannel(t, raw, bits, fmt.num));
+    channel_bit += bits;
+  }
+  return true;
+}
 
 // ---- exports ----------------------------------------------------------------
 // gfx10.3 export targets: MRT0..7 = 0..7, MRTZ = 8, NULL = 9, POS0..4 = 12..16,
@@ -1095,7 +1352,8 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       gpu::gcn::EmitSop1(t, inst);
       break;
     case Enc::kSop2:
-      gpu::gcn::EmitSop2(t, inst);
+      if (!RdnaEmitSop2(t, inst))
+        gpu::gcn::EmitSop2(t, inst);
       break;
     case Enc::kSopc:
       gpu::gcn::EmitSopc(t, inst);
@@ -1138,10 +1396,6 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       const u32 raw0 = w & 0x1FF;
       u32 src0, lit;
       ResolveValuSrc0(inst, raw0, src0, lit);
-      if (op == 0x02) {
-        gpu::gcn::WarnUnsupported("v_readfirstlane_b32", op, w, w1);
-        break;
-      }
       if (raw0 == 249) {  // SDWA: apply the source's sub-dword selection
         const SdwaMod sd = DecodeSdwa(inst, 0, false);
         if (sd.dst_sel != 6 || sd.src0_sel > 6)
@@ -1516,7 +1770,23 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
         gpu::gcn::EmitGfxMubuf(t, inst, sc);
         break;
       }
-      if (inst.opcode > 0x03) {  // stores / atomics
+      // A store has nowhere to land: the set-2 window is a per-draw staging copy
+      // that is never read back, and draws sharing a resource share one window.
+      // Drop it and keep going -- a rejected shader drops the whole draw, while
+      // a draw missing a side-effect write still rasterizes its geometry.
+      if (inst.enc == Enc::kMubuf ? RdnaMubufStore(inst.opcode)
+                                  : RdnaMtbufStore(inst.opcode)) {
+        gpu::gcn::AuditNote(
+            inst.enc == Enc::kMtbuf ? "mtbuf.store.rdna" : "mubuf.store.rdna",
+            inst.opcode);
+        if (ShDbg() && !g_warned_store) {
+          g_warned_store = true;
+          BASE_LOGI("gcnspv", "dropped buffer store op={:#x} @pc={:04x}",
+                    inst.opcode, inst.pc);
+        }
+        break;
+      }
+      if (inst.opcode > 0x03) {  // atomics and the d16 forms
         gpu::gcn::WarnUnsupported(
             inst.enc == Enc::kMtbuf ? "mtbuf.rdna" : "mubuf.rdna", inst.opcode,
             w, w1);
@@ -1550,6 +1820,15 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
                                          : t.m.CompositeExtract(t.t_f, val, c));
         break;
       }
+      // An untyped format load converts through the V#'s format, which only the
+      // resolved descriptor knows; it reads the set-2 window (its index is
+      // per-lane) rather than a UBO.
+      if (inst.enc == Enc::kMubuf) {
+        if (!RdnaEmitBufFormatLoad(t, inst, sc))
+          gpu::gcn::WarnUnsupported("mubuf.format-conversion.rdna",
+                                    inst.opcode, w, w1);
+        break;
+      }
       // Past the fetch path the load really is emitted, so a scalar byte offset
       // would move the read and is not expressible against a bound UBO. Sony's
       // compiler parks a scratch SGPR (vcc_hi) in this field even when the
@@ -1557,11 +1836,6 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       // can ignore it.
       if (soffset != 125 && soffset != 128) {
         gpu::gcn::WarnUnsupported("buffer.control.rdna", inst.opcode, w, w1);
-        break;
-      }
-      if (inst.enc == Enc::kMubuf) {
-        gpu::gcn::WarnUnsupported("mubuf.format-conversion.rdna", inst.opcode,
-                                  w, w1);
         break;
       }
       const u32 srsrc = ((w1 >> 16) & 0x1F) * 4;
@@ -1988,7 +2262,12 @@ bool TranslateVs(const Program& program,
   // reads) become additional set-1 UBOs after the SMEM cbufs.
   RdnaPlanBufLoadCbufs(program, 0, r.vs_cbufs, sc.cbuf_bind,
                        sc.mubuf_cbuf_by_pc);
-  RdnaPlanGfxBuffers(program, 0, nullptr, r.vs_bufs, sc.gfx_buf_bind);
+  // A fetch already lifted to a vertex input needs no buffer of its own.
+  std::unordered_set<u32> lifted;
+  for (const FetchAttr& a : attrs)
+    if (a.pc != ~0u)
+      lifted.insert(a.pc);
+  RdnaPlanGfxBuffers(program, 0, &lifted, r.vs_bufs, sc.gfx_buf_bind);
   if (ShDbg())
     BASE_LOGI("gcnspv", "vs planned {} cbufs", r.vs_cbufs.size());
   // DELTA_GPU_DBGPOS=<vs address>[:<dword offset>]: recompute this one shader's
@@ -2358,6 +2637,10 @@ Recompiled Recompile(const u32* vs_code,
   tv.rdna_sources = true;
   gpu::gcn::ResetUnsupported();
   g_vs_addr = reinterpret_cast<uintptr_t>(vs_code);
+  // The merged NGG stage is launched with its user data at s8 (kUdBase in the
+  // command processor, and what SeedUserData assumes here); a PS gets it at s0.
+  g_stage_bufs = ResolveBuffers(vs_code, vs_user_data, vs_user_sgprs, 8);
+  g_warned_store = false;
   if (!TranslateVs(vs_program, vs_user_data, flat_attrs, r, tv, gl_clip_space,
                    vs_user_sgprs) ||
       gpu::gcn::HadUnsupported()) {
@@ -2370,6 +2653,8 @@ Recompiled Recompile(const u32* vs_code,
   Translator tp;
   tp.rdna_sources = true;
   g_ps_addr = reinterpret_cast<uintptr_t>(ps_code);
+  g_stage_bufs = ResolveBuffers(ps_code, ps_user_data, ps_user_sgprs, 0);
+  g_warned_store = false;
   tp.InitTypes();
   gpu::gcn::ResetUnsupported();
   if (ps_code ? !TranslatePs(ps_program, flat_attrs, ps_input_ena, r, tp,

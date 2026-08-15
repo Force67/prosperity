@@ -120,6 +120,47 @@ inline ScalarWrite DecodeScalarWrite(const gpu::gcn::Inst& inst) {
   return {};
 }
 
+// Every SGPR an instruction may write, over-approximated, with `exact` set when
+// the dispatch-time replay (ScalarEval) either reproduces the value or clears
+// the register. DecodeScalarWrite above reports only the scalar ALU's exact
+// destinations; this one also reports the vector ops that land in an SGPR and
+// the wider forms, which is what stops a register the shader clobbered from
+// passing for user data. scc_trusted says whether SCC itself is still faithful,
+// which is what makes s_cselect exact.
+struct ScalarWrites {
+  struct Range {
+    u32 first = 0;
+    u32 count = 0;
+    bool exact = false;
+  };
+  Range range[2];
+};
+ScalarWrites PossibleScalarWrites(const gpu::gcn::Inst& inst,
+                                  bool scc_trusted = false);
+
+// SGPRs whose live value ResolveBuffers reproduces faithfully. The replay walks
+// the instruction list once and in order, so it only tells the truth about the
+// shader's unconditional prologue: a register written under a branch or inside
+// a loop body keeps whatever value that single walk left behind, and one a
+// vector op (or a scalar op ScalarEval does not model) wrote keeps a stale
+// value instead of reading back as unknown. A compute dispatch writes guest
+// memory, so a descriptor built out of an untrusted register is declined rather
+// than guessed.
+struct ScalarReplayPlan {
+  static constexpr u32 kRegs = 136;
+  static constexpr u32 kNever = 0xFFFFFFFFu;
+  // Instruction index of the first write to each SGPR the replay loses, and
+  // where its single linear walk stops matching execution (the first branch, or
+  // the first instruction a back edge repeats).
+  u32 first_lost[kRegs];
+  u32 prefix_end = 0;
+  // Does the replay hold the live value of sgpr[dwords] at instruction
+  // use_index?
+  bool Covers(u32 sgpr, u32 dwords, u32 use_index) const;
+};
+
+ScalarReplayPlan PlanScalarReplay(const Program& program);
+
 // MIMGs reading the same T#/S# descriptor share one set-0 binding, in first-use
 // order. Both the recompiler (EmitMimg declarations) and TrackTextures pair
 // against this, so the resolved textures line up 1:1 with the shader's

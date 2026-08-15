@@ -27,6 +27,7 @@ gpu::gcn::RecompiledCs RecompileCompute(const u32*,
 #include <array>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -61,45 +62,74 @@ using gpu::gcn::Translator;
 // One set-0 storage buffer per distinct descriptor, mirroring the GFX7 planner
 // (gpu/gcn PlanCsResources) with RDNA2's SMEM decode.
 //
-// Every descriptor must sit INLINE in the COMPUTE_USER_DATA window: the PS5
-// dispatch path resolves a resource by reading base_sgpr straight out of that
-// window, so a descriptor an s_load produced (an SRT chain) or one a scalar op
-// moved into place would resolve to whatever those registers happen to hold. A
-// compute dispatch writes guest memory, so that is declined, not guessed.
+// A descriptor either sits INLINE in the COMPUTE_USER_DATA window, where the
+// dispatch path reads it straight out of base_sgpr, or an SRT chain produced it
+// (the shader s_loads a table pointer out of user data and the real V# out of
+// that table). The dispatch path recovers the second kind by replaying the
+// shader's scalar ops (rdna::ResolveBuffers), keyed on use_pc. What the replay
+// cannot follow faithfully is declined, not guessed: a compute dispatch writes
+// guest memory.
 bool PlanResources(const Program& program,
                    u32 lds_dwords,
                    u32 user_sgpr,
                    RecompiledCs& r,
                    std::unordered_map<u32, u32>& bind) {
+  const ScalarReplayPlan replay = PlanScalarReplay(program);
+  // COMPUTE_USER_DATA is 16 dwords wide; the dispatch path reads no further.
+  const u32 ud_dwords = std::min(user_sgpr, 16u);
   bool scalar_written[136] = {};
-  const auto inline_user_data = [&](u32 sgpr, u32 dwords) {
-    if (sgpr + dwords > user_sgpr || sgpr + dwords > 136)
-      return false;
-    for (u32 k = 0; k < dwords; k++)
-      if (scalar_written[sgpr + k])
-        return false;
-    return true;
-  };
+  u32 version[136] = {};  // instruction index of the last write
 
-  std::unordered_map<u32, u32> resource_by_descriptor;
+  // Uses of the same registers with no write in between are the same
+  // descriptor and share a binding. A reloaded quad gets its own, or the
+  // second buffer would silently inherit the first one's range.
+  struct BindingKey {
+    u32 base_sgpr;
+    u32 kind;
+    u32 versions[8];
+  };
+  std::vector<BindingKey> keys;
+  u32 index = 0;  // instruction index of the use being planned
   const auto resource = [&](u32 pc, u32 base_sgpr, u32 dwords,
-                            u8 kind, bool written, u32 min_bytes,
-                            bool replayable = false) {
-    // A descriptor an SRT chain produced is resolved at dispatch time by
-    // replaying the shader's scalar ops (rdna::ResolveBuffers), keyed on this
-    // pc. Only one that is neither inline nor replayable is declined, and the
-    // dispatch path does that check.
-    if (!inline_user_data(base_sgpr, dwords) && !replayable) {
-      gpu::gcn::WarnUnsupported("cs.descriptor-not-inline.rdna", base_sgpr);
+                            u8 kind, bool written, u32 min_bytes) {
+    if (base_sgpr + dwords > 136) {
+      gpu::gcn::WarnUnsupported("cs.descriptor-range.rdna", base_sgpr);
       return false;
     }
-    const u32 key = (base_sgpr << 8) | kind;
-    const auto it = resource_by_descriptor.find(key);
-    if (it != resource_by_descriptor.end()) {
-      CsResource& res = r.resources[it->second];
+    bool untouched = true;
+    for (u32 k = 0; k < dwords; k++)
+      untouched = untouched && !scalar_written[base_sgpr + k];
+    const bool in_window = base_sgpr + dwords <= ud_dwords;
+    if (in_window && !untouched) {
+      // The shader loaded a descriptor over its own user data. The replay has
+      // the loaded value, but the dispatch path prefers the user-data window
+      // for any SGPR inside it and would bind what the CPU left there.
+      gpu::gcn::WarnUnsupported("cs.descriptor-shadows-user-data.rdna",
+                                base_sgpr);
+      return false;
+    }
+    if (!in_window && !replay.Covers(base_sgpr, dwords, index)) {
+      // The chain runs through a vector op, a loop-carried scalar or a branch,
+      // so the replay would hand the dispatch a descriptor the wave never had.
+      // A read only stages a copy of guest memory and can at worst come out as
+      // wrong pixels; a write would land in the wrong place.
+      if (written) {
+        gpu::gcn::WarnUnsupported("cs.descriptor-not-replayable.rdna",
+                                  base_sgpr);
+        return false;
+      }
+      gpu::gcn::NoteApproximated("cs.descriptor-unproven-read.rdna", base_sgpr);
+    }
+    BindingKey key{.base_sgpr = base_sgpr, .kind = kind};
+    for (u32 k = 0; k < dwords && k < 8; k++)
+      key.versions[k] = version[base_sgpr + k];
+    for (u32 i = 0; i < keys.size(); i++) {
+      if (std::memcmp(&keys[i], &key, sizeof(key)) != 0)
+        continue;
+      CsResource& res = r.resources[i];
       res.written = res.written || written;
       res.min_bytes = std::max(res.min_bytes, min_bytes);
-      bind[pc] = it->second;
+      bind[pc] = i;
       return true;
     }
     const u32 idx = static_cast<u32>(r.resources.size());
@@ -107,9 +137,10 @@ bool PlanResources(const Program& program,
       gpu::gcn::WarnUnsupported("cs.resource-count", idx + 1);
       return false;
     }
-    resource_by_descriptor[key] = idx;
+    keys.push_back(key);
     bind[pc] = idx;
-    r.resources.push_back({base_sgpr, pc, idx, kind, written, min_bytes});
+    r.resources.push_back(
+        {base_sgpr, pc, idx, kind, written, /*read=*/true, min_bytes});
     return true;
   };
 
@@ -121,8 +152,10 @@ bool PlanResources(const Program& program,
         const u32 n = SmemLoadCount(smem.op);
         // A negative immediate reads below the descriptor's base, which the
         // staged range cannot cover.
-        if (!n || smem.offset < 0)
+        if (!n || smem.offset < 0) {
+          gpu::gcn::WarnUnsupported("smem.cs.rdna", smem.op, w, w1);
           return false;
+        }
         const bool buffer = smem.op >= 0x08;  // s_buffer_load_* takes a V#
         // The immediate is a BYTE offset on RDNA2 (a dword index on GFX7).
         if (!resource(inst.pc, smem.sbase, buffer ? 4 : 2, buffer ? 0 : 2,
@@ -138,16 +171,20 @@ bool PlanResources(const Program& program,
         // Anything else is an atomic or a d16 form, and the shared emitter
         // masks the opcode to 7 bits, so the 0x80+ format variants would alias
         // a plain load. LDS and TFE add a destination it has no model for.
-        if ((!load && !store) || ((w >> 16) & 1) || ((w1 >> 23) & 1))
+        if ((!load && !store) || ((w >> 16) & 1) || ((w1 >> 23) & 1)) {
+          gpu::gcn::WarnUnsupported("mubuf.cs.rdna", op, w, w1);
           return false;
+        }
         if (!resource(inst.pc, ((w1 >> 16) & 0x1F) * 4, 4, 0, store, 0))
           return false;
         break;
       }
       case Enc::kMtbuf: {
         const u32 op = inst.opcode;
-        if (op > 0x07 || ((w1 >> 23) & 1))
-          return false;  // op[3] selects the d16 forms
+        if (op > 0x07 || ((w1 >> 23) & 1)) {  // op[3] selects the d16 forms
+          gpu::gcn::WarnUnsupported("mtbuf.cs.rdna", op, w, w1);
+          return false;
+        }
         if (!resource(inst.pc, ((w1 >> 16) & 0x1F) * 4, 4, 0, op >= 4, 0))
           return false;
         break;
@@ -156,8 +193,10 @@ bool PlanResources(const Program& program,
         // ds_swizzle is a cross-lane move rather than an LDS access, so it is
         // the one DS op that runs without an LDS allocation. GDS is not
         // modelled at all.
-        if (((w >> 17) & 1) || (!lds_dwords && inst.opcode != 0x35))
+        if (((w >> 17) & 1) || (!lds_dwords && inst.opcode != 0x35)) {
+          gpu::gcn::WarnUnsupported("ds.cs.rdna", inst.opcode, w, w1);
           return false;
+        }
         break;
       case Enc::kMimg: {
         // The shared emitter reads the T# with the gfx10.3 field positions when
@@ -173,7 +212,7 @@ bool PlanResources(const Program& program,
           gpu::gcn::WarnUnsupported("mimg.cs.rdna", inst.opcode, w, w1);
           return false;
         }
-        if (!resource(inst.pc, srsrc, 8, 1, store, 0, true))
+        if (!resource(inst.pc, srsrc, 8, 1, store, 0))
           return false;
         break;
       }
@@ -185,9 +224,14 @@ bool PlanResources(const Program& program,
       default:
         break;
     }
-    const ScalarWrite sw = DecodeScalarWrite(inst);
-    for (u32 k = 0; k < sw.count && sw.first + k < 136; k++)
-      scalar_written[sw.first + k] = true;
+    // Bookkeeping runs after the use: an s_load may take its pointer from the
+    // same SGPRs it lands the descriptor in.
+    for (const ScalarWrites::Range& range : PossibleScalarWrites(inst).range)
+      for (u32 k = 0; k < range.count && range.first + k < 136; k++) {
+        scalar_written[range.first + k] = true;
+        version[range.first + k] = index + 1;
+      }
+    index++;
   }
   return true;
 }

@@ -37,6 +37,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <set>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
@@ -927,13 +928,16 @@ void HandleDispatch(const u32* body, u32 count) {
     // Compute seeds user data straight into s0.., so a plan naming an SGPR past
     // the loaded window names one an SRT load produced, which nothing here
     // replays.
+    // The replay seeds from this same user data, so what it recovered is at
+    // least as good: preferring the window would bind whatever the CPU left
+    // there for a shader that loaded a descriptor over its own user data.
     const u32* desc = nullptr;
-    if (r.base_sgpr + dwords <= ud_dwords) {
-      desc = &ud[r.base_sgpr];
-    } else if (const auto it = cs_resources.find(r.use_pc);
-               it != cs_resources.end() && it->second.descriptor_valid &&
-               it->second.descriptor_dwords >= dwords) {
+    if (const auto it = cs_resources.find(r.use_pc);
+        it != cs_resources.end() && it->second.descriptor_valid &&
+        it->second.descriptor_dwords >= dwords) {
       desc = it->second.descriptor;
+    } else if (r.base_sgpr + dwords <= ud_dwords) {
+      desc = &ud[r.base_sgpr];
     } else {
       if (CsReport())
         BASE_LOGI(
@@ -967,13 +971,12 @@ void HandleDispatch(const u32* body, u32 count) {
       const bool r11g11b10f = t.dfmt == 6 && t.nfmt == 7;
       elem_bytes = rgba16f ? 8u : (r16f || rg8) ? 2u : 4u;
       stage_elem_bytes = r11g11b10f ? 16u : std::max(elem_bytes, 4u);
-      // tiling_idx >= 0x100 is the T# decoder's "no detiler for this gfx10
-      // swizzle mode" marker; staging one would scramble the texels it copies
-      // back into guest memory.
+      // A swizzle mode with no address equation would scramble the texels the
+      // staging copy writes back into guest memory.
       gcn::TextureLayout32 layout;
       if ((t.type != 9 && t.type != 13) ||
           !(rgba8 || r32 || rg16f || r16f || rg8 || rgba16f || r11g11b10f) ||
-          t.tiling_idx >= 0x100 || !t.valid ||
+          !gcn::TilingSupported(t.tiling_idx) || !t.valid ||
           !gcn::BuildTextureLayout32(layout, t.width, t.height, t.pitch,
                                      t.layers, t.mip_levels, t.tiling_idx,
                                      t.pow2_pad, elem_bytes)) {
@@ -2049,6 +2052,20 @@ void HandleDraw(u32 op, const u32* body, u32 count) {
                 d.vbufs[i].num_records);
   }
   g_draws_issued.fetch_add(1, std::memory_order_relaxed);
+  // Which targets the frame actually renders into, once each. A frame that
+  // presents black while thousands of draws issue means none of them landed in
+  // a registered display buffer, and this is the only way to see that.
+  if (kGpuDrawcensus) {
+    static std::set<u64> rts;
+    static std::mutex rt_lock;
+    std::lock_guard<std::mutex> lock(rt_lock);
+    if (rts.size() < 64 && rts.insert(d.rt_base).second)
+      BASE_LOGI("drawcensus",
+                "rt {:#x} {}x{} display={} mrt={} depth={} prim={} vcount={}",
+                d.rt_base, d.rt_w, d.rt_h,
+                prosperity_ps5_is_display_buffer(d.rt_base), d.mrt_count,
+                d.depth_valid, d.prim_type, d.vertex_count);
+  }
   g_last_draw_rt = d.rt_base;
   rhi::Draw(rhi::DefaultRenderer(), d);
   if (dl)
@@ -2399,6 +2416,12 @@ void SubmitDcb(const void* dcb, u32 size_bytes) {
   if (!s_vk_tried) {
     s_vk_tried = true;
     rhi::Init(rhi::DefaultRenderer());
+    // The descriptor replay reads SRT tables out of guest memory a previous
+    // dispatch may still own, and it sits below the renderer, so it cannot ask
+    // for the flush itself.
+    gcn::g_flush_guest_range = [](u64 address, u64 bytes) {
+      rhi::FlushCsWritesRange(rhi::DefaultRenderer(), address, bytes);
+    };
   }
   // ONE-SHOT: after some frames, scan the 2MB SceAgcRegShadow (0x8002860000)
   // for non-zero content -- if setShader wrote the shader state to a DIFFERENT

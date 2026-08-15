@@ -8,6 +8,7 @@
 #include "gpu/ps5/rdna/rdna_resource.h"
 #include "base/arch.h"
 
+#include "gpu/gcn/gcn_detile.h"
 #include "gpu/guest_memory.h"
 
 #include <algorithm>
@@ -707,13 +708,276 @@ struct ScalarEval {
     const u64 address = base + static_cast<u64>(byte_offset);
     if (!GuestRange(address, static_cast<u64>(dwords) * 4))
       return;
+    // The table this chain reads may still be sitting in a compute dispatch's
+    // buffer, written this frame but not yet copied back; reading around that
+    // resolves the descriptor to whatever the slot held before.
+    if (gpu::gcn::g_flush_guest_range)
+      gpu::gcn::g_flush_guest_range(address, static_cast<u64>(dwords) * 4);
     const auto* src = reinterpret_cast<const u32*>(address);
     for (u32 i = 0; i < dwords; i++)
       SetDest(smem.sdst, i, src[i]);
   }
 };
 
+// The branch classification ComputeRdnaReachability uses: 0 = falls through,
+// 1 = unconditional relative, 2 = conditional/call relative, 3 = program end,
+// 4 = indirect.
+int BranchKind(const Inst& inst) {
+  if (inst.enc == Enc::kSopk)
+    return inst.opcode == 0x16 || inst.opcode == 0x1b || inst.opcode == 0x1c
+               ? 2
+               : 0;
+  if (inst.enc == Enc::kSop1)
+    return inst.opcode >= 0x20 && inst.opcode <= 0x22 ? 4 : 0;
+  if (inst.enc != Enc::kSopp)
+    return 0;
+  switch (inst.opcode) {
+    case 0x01:
+    case 0x1b:
+    case 0x1e:
+    case 0x1f:
+      return 3;
+    case 0x02:
+      return 1;
+    case 0x04:
+    case 0x05:
+    case 0x06:
+    case 0x07:
+    case 0x08:
+    case 0x09:
+    case 0x17:
+    case 0x18:
+    case 0x19:
+    case 0x1a:
+      return 2;
+    default:
+      return 0;
+  }
+}
+
+// How far into the program the replay's single linear walk matches execution:
+// up to the first branch (after it, whether an instruction ran at all depends
+// on the wave) and up to the target of any back edge (from there on it runs
+// more than once).
+u32 ReplayPrefixEnd(const Program& program) {
+  u32 end = static_cast<u32>(program.size());
+  for (u32 i = 0; i < program.size(); i++) {
+    const int kind = BranchKind(program[i]);
+    if (!kind)
+      continue;
+    end = std::min(end, i);
+    if (kind != 1 && kind != 2)
+      continue;
+    const i32 simm = static_cast<i16>(program[i].raw[0] & 0xFFFF);
+    const i64 target = static_cast<i64>(program[i].pc) +
+                       static_cast<i64>(program[i].size) + simm;
+    if (target >= static_cast<i64>(program[i].pc))
+      continue;
+    for (u32 j = 0; j < i; j++)
+      if (static_cast<i64>(program[j].pc) >= target) {
+        end = std::min(end, j);
+        break;
+      }
+  }
+  return end;
+}
+
+// SGPRs an SOP1 writes. The 32-bit forms of the gfx10 block are listed; every
+// other opcode (including the unassigned slots) counts as an SGPR pair, since
+// leaving the second dword looking untouched is what would let a stale value
+// pass for a descriptor.
+u32 Sop1WriteDwords(u32 op) {
+  switch (op) {
+    case 0x03:
+    case 0x05:
+    case 0x07:
+    case 0x09:
+    case 0x0b:
+    case 0x0d:
+    case 0x0f:
+    case 0x11:
+    case 0x13:
+    case 0x15:
+    case 0x17:
+    case 0x19:
+    case 0x1a:
+    case 0x1b:
+    case 0x1d:
+    case 0x2c:
+    case 0x2e:
+    case 0x30:
+    case 0x34:
+      return 1;
+    default:
+      return 2;
+  }
+}
+
+// Same for SOP2: the logical/shift block alternates 32-bit (even) and 64-bit
+// (odd) forms, and anything unrecognised counts as a pair.
+u32 Sop2WriteDwords(u32 op) {
+  if (op <= 0x0A || op == 0x26 || op == 0x27 || op == 0x28 || op == 0x2c ||
+      (op >= 0x2f && op <= 0x37))
+    return 1;
+  if (op >= 0x0e && op <= 0x28)
+    return (op & 1) ? 2u : 1u;
+  return 2;
+}
+
+// SOP2 operations ScalarEval evaluates. The rest it clears, which reads back as
+// unknown rather than as a wrong value.
+bool Sop2Exact(u32 op, bool scc_trusted) {
+  if (op == 0x0A || op == 0x0B)
+    return scc_trusted;  // s_cselect_b32/b64
+  switch (op) {
+    case 0x00:
+    case 0x01:
+    case 0x02:
+    case 0x03:
+    case 0x0E:
+    case 0x10:
+    case 0x12:
+    case 0x14:
+    case 0x16:
+    case 0x18:
+    case 0x1A:
+    case 0x1C:
+    case 0x1E:
+    case 0x1F:
+    case 0x20:
+    case 0x21:
+    case 0x22:
+    case 0x23:
+    case 0x26:
+    case 0x27:
+    case 0x29:
+    case 0x2A:
+    case 0x2F:
+    case 0x30:
+    case 0x31:
+    case 0x32:
+      return true;
+    default:
+      return false;
+  }
+}
+
+// VOP3B: the carry-out and 64-bit-multiply forms put a scalar destination where
+// VOP3A holds abs/op_sel (mirrors the translator's own RdnaVop3HasSdst).
+bool Vop3HasSdst(u32 op) {
+  return op == 0x128 || op == 0x129 || op == 0x12A || op == 0x30F ||
+         op == 0x310 || op == 0x319 || op == 0x16D || op == 0x16E ||
+         op == 0x176 || op == 0x177;
+}
+
+// SOP1 sets SCC on most of its operations and ScalarEval never models that, so
+// a later s_cselect would pick its branch from a stale flag.
+bool WritesSccUnmodelled(const Inst& inst) {
+  return inst.enc == Enc::kSop1 && inst.opcode != 0x03 && inst.opcode != 0x04;
+}
+
 }  // namespace
+
+ScalarWrites PossibleScalarWrites(const Inst& inst, bool scc_trusted) {
+  const u32 w = inst.raw[0], w1 = inst.raw[1];
+  switch (inst.enc) {
+    case Enc::kSmrd: {
+      const Smem smem = DecodeSmem(inst);
+      const u32 n = SmemLoadCount(smem.op);
+      // s_memtime/s_memrealtime land two dwords in SDATA; a store writes none.
+      return {{{smem.sdst, n ? n : 2u, n != 0}}};
+    }
+    case Enc::kSop1:
+      return {{{(w >> 16) & 0x7F, Sop1WriteDwords(inst.opcode),
+                inst.opcode == 0x03 || inst.opcode == 0x04}}};
+    case Enc::kSop2:
+      return {{{(w >> 16) & 0x7F, Sop2WriteDwords(inst.opcode),
+                Sop2Exact(inst.opcode, scc_trusted)}}};
+    case Enc::kSopk: {
+      const u32 sdst = (w >> 16) & 0x7F;
+      if (inst.opcode == 0x16)  // s_call_b64 stashes the return address
+        return {{{sdst, 2, false}}};
+      const bool exact = inst.opcode == 0x00 || inst.opcode == 0x0F ||
+                         inst.opcode == 0x10 ||
+                         (inst.opcode == 0x02 && scc_trusted);
+      // 0x12 is s_getreg_b32, which ScalarEval answers with a flat zero.
+      if (exact || inst.opcode == 0x02 || inst.opcode == 0x12)
+        return {{{sdst, 1, exact}}};
+      return {};
+    }
+    case Enc::kVop1:
+      if (inst.opcode == 0x02)  // v_readfirstlane_b32
+        return {{{(w >> 17) & 0xFF, 1, false}}};
+      return {};
+    case Enc::kVop2:
+      // v_add_co_ci_u32 and its sub forms write VCC.
+      if (inst.opcode >= 0x28 && inst.opcode <= 0x2A)
+        return {{{106, 2, false}}};
+      return {};
+    case Enc::kVopc:
+      // SDWA's SD bit picks an explicit SDST over VCC.
+      if (inst.extension == gpu::gcn::InstExtension::kSdwa)
+        return {{{106, 2, false}, {(w1 >> 8) & 0x7F, 2, false}}};
+      return {{{106, 2, false}}};
+    case Enc::kVop3: {
+      ScalarWrites out;
+      if (inst.opcode < 0x100)
+        out.range[0] = {w & 0xFF, 2, false};  // VOPC alias: mask lands in VDST
+      else if (inst.opcode == 0x182 || inst.opcode == 0x360)
+        out.range[0] = {w & 0xFF, 1, false};  // v_readfirstlane / v_readlane
+      if (Vop3HasSdst(inst.opcode))
+        out.range[1] = {(w >> 8) & 0x7F, 2, false};
+      return out;
+    }
+    default:
+      return {};
+  }
+}
+
+bool ScalarReplayPlan::Covers(u32 sgpr, u32 dwords, u32 use_index) const {
+  if (sgpr + dwords > kRegs)
+    return false;
+  for (u32 i = 0; i < dwords; i++) {
+    const u32 lost = first_lost[sgpr + i];
+    if (lost == kNever)
+      continue;
+    // Inside the prologue the consuming instruction itself runs exactly once,
+    // so only a write the replay already got wrong before it can have reached
+    // it. Past that, a write anywhere in the program may run first.
+    if (use_index < prefix_end && lost > use_index)
+      continue;
+    return false;
+  }
+  return true;
+}
+
+ScalarReplayPlan PlanScalarReplay(const Program& program) {
+  ScalarReplayPlan plan;
+  std::fill(std::begin(plan.first_lost), std::end(plan.first_lost),
+            ScalarReplayPlan::kNever);
+  // EXEC is seeded with a fictional one-lane mask, not read from the dispatch.
+  plan.first_lost[126] = plan.first_lost[127] = 0;
+  plan.prefix_end = ReplayPrefixEnd(program);
+
+  bool scc_trusted = true;
+  u32 index = 0;
+  for (const Inst& inst : program) {
+    const bool linear = index < plan.prefix_end;
+    for (const ScalarWrites::Range& range :
+         PossibleScalarWrites(inst, scc_trusted).range) {
+      if (linear && range.exact)
+        continue;
+      for (u32 k = 0;
+           k < range.count && range.first + k < ScalarReplayPlan::kRegs; k++)
+        plan.first_lost[range.first + k] =
+            std::min(plan.first_lost[range.first + k], index);
+    }
+    if (WritesSccUnmodelled(inst))
+      scc_trusted = false;
+    index++;
+  }
+  return plan;
+}
 
 MimgBindingPlan RdnaPlanMimg(const Program& program) {
   MimgBindingPlan plan;
@@ -832,35 +1096,10 @@ TImage DecodeTImage(const u32* d, bool r128) {
           t.dst_sel[0], t.dst_sel[1], t.dst_sel[2], t.dst_sel[3], d[3], t.width,
           t.height, gfmt);
   }
-  switch (sw_mode) {
-    case 0:
-      t.tiling_idx = 8;
-      break;
-    case 1:
-      t.tiling_idx = 0x50;
-      break;
-    case 5:
-      t.tiling_idx = 0x51;
-      break;
-    case 9:
-      t.tiling_idx = 0x52;
-      break;
-    default:
-      t.tiling_idx = 0x100 + sw_mode;
-      break;
-  }
-  if (sw_mode == 0 && t.dfmt && t.dfmt < 35) {
-    // gfx10 linear surfaces align each row to 256 bytes.
-    static constexpr u8 kElementBytes[] = {
-        0, 1, 2, 2, 4, 4, 4, 4, 4, 4, 4, 8, 8, 12, 16,
-    };
-    const u32 eb =
-        t.dfmt < sizeof(kElementBytes) ? kElementBytes[t.dfmt] : 0;
-    if (!eb)
-      return t;
-    const u32 pa = 256 / std::gcd(256u, eb);
-    t.pitch = ((t.width + pa - 1) / pa) * pa;
-  }
+  // gfx10 swizzle modes have their own address equations rather than the
+  // Liverpool ones; BuildTextureLayout32 applies the 256-byte linear row
+  // alignment itself, from the element size the staging path picked.
+  t.tiling_idx = gcn::kGfx10TilingBase + sw_mode;
   if (kAgcTrace) {
     static u32 seen[32], n_seen = 0;
     const u32 key = (gfmt << 8) | sw_mode;
@@ -879,21 +1118,11 @@ TImage DecodeTImage(const u32* d, bool r128) {
                 t.type, t.mip_levels, t.dfmt, t.nfmt, t.tiling_idx, t.pitch);
     }
   }
-  // gfx10 mip chains pack their small levels into a shared "mip tail" block
-  // whose layout the detiler does not model; only level 0 is addressed
-  // correctly, so sample that one rather than reading a wrong offset.
   u32 max_levels = 1;
   for (u32 extent = std::max(t.width, t.height); extent > 1; extent >>= 1)
     max_levels++;
   const bool valid_mips = t.base_mip <= last_level && last_level < max_levels &&
                           t.base_mip + t.view_mips <= t.mip_levels;
-  if (t.tiling_idx >= 0x50 && t.tiling_idx < 0x53 && t.mip_levels > 1) {
-    t.mip_levels = 1;
-    t.view_mips = 1;
-    t.base_mip = 0;
-    t.min_lod = 0;
-    t.force_lod_zero = true;
-  }
   const bool valid_word4 = r128 || !(d[4] & 0xe000c000u);
   const bool valid_compression = r128 || !(d[6] & 0x00300000u);
   const bool valid_compact_type =
@@ -993,10 +1222,18 @@ std::unordered_map<u32, BufferResource> ResolveBuffers(
   for (const Inst& inst : ReachableProgram(DecodeShader(code, 4096))) {
     if (inst.enc == Enc::kSmrd && SmemLoadCount(inst.opcode)) {
       const Smem smem = DecodeSmem(inst);
-      const bool buffer = smem.op >= 0x08;
-      if (eval.AllKnown(smem.sbase, buffer ? 4 : 2)) {
+      // s_buffer_load reads through a V#, s_load through a bare 64-bit pointer.
+      // A compute dispatch binds the range either names as a storage buffer, so
+      // the descriptor travels with the base, not just the address it decodes
+      // to (a graphics cbuffer only wants the latter).
+      const u32 dwords = smem.op >= 0x08 ? 4u : 2u;
+      if (eval.AllKnown(smem.sbase, dwords)) {
         BufferResource resource;
         resource.base = eval.Ptr(smem.sbase);
+        resource.descriptor_dwords = dwords;
+        std::memcpy(resource.descriptor, &eval.sgpr[smem.sbase],
+                    dwords * sizeof(u32));
+        resource.descriptor_valid = true;
         out.emplace(inst.pc, resource);
       }
     } else if (inst.enc == Enc::kMimg) {
@@ -1013,8 +1250,9 @@ std::unordered_map<u32, BufferResource> ResolveBuffers(
         resource.descriptor_valid = true;
         out.emplace(inst.pc, resource);
       }
-    } else if ((inst.enc == Enc::kMubuf || inst.enc == Enc::kMtbuf) &&
-               inst.opcode <= 0x03) {
+    } else if (inst.enc == Enc::kMubuf || inst.enc == Enc::kMtbuf) {
+      // Stores too, not just the loads a graphics stage fetches with: a compute
+      // dispatch's output buffer reaches it through the same V#.
       const u32 srsrc = ((inst.raw[1] >> 16) & 0x1F) * 4;
       if (kDbg) {
         static int n = 0;
