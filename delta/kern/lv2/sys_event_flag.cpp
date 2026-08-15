@@ -274,6 +274,13 @@ static u64 systemFlagInit(const char *name) {
   // with no ShellCore, report every boot stage as already complete.
   if (n.find("BootStatus", 0, 10) != base::StringRef::npos)
     return ~0ull;
+  // The PS5 AudioOut2 daemon acks container/port/bed/master deletion by
+  // setting the requester's bit on these flags after processing the delete
+  // command. The IPMI side already answers those commands as done, so keep
+  // every deletion ack pre-granted or LLE libSceAudioOut waits forever.
+  if (n.find("SceAuOut2", 0, 9) != base::StringRef::npos &&
+      n.find("DelEvf", 0, 6) != base::StringRef::npos)
+    return ~0ull;
   // The settings service raises bit 32 after publishing /SceAvSetting. We
   // provide that shared-memory block in sys_shm_open, so publish its matching
   // ready state as well; otherwise the real libSceVideoOut blocks during open.
