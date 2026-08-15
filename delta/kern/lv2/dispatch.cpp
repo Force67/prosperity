@@ -284,10 +284,25 @@ uintptr_t lv2_trampoline(const void *handler, u32 sid) {
 #endif
 }
 
+// APR (0x2bc..0x2c0, the PS5 async-package-read interface) must FAIL, not
+// empty-succeed: the Prospero table stubs it as success without filling any
+// output, and a title that routes its /app0 asset opens through
+// sceKernelAprResolve then trusts garbage resolve results instead of taking
+// its plain-open fallback (Demon's Souls reported every asset as FileNotFound
+// this way). ENOSYS makes the libkernel wrapper return a negative SCE error
+// and the engine falls back to open/read, which the VFS serves fine.
+// TODO: fold into lv2/ps5/table.cpp once that file is free to edit.
+static int PS4ABI sys_apr_unavailable() { return -SysError::eNOSYS; }
+
 uintptr_t lv2_lookup(u32 sid) {
   // PS5 titles route to the Prospero table (FreeBSD 11 ABI); never the Orbis one.
   auto *pr = proc::getActive();
-  return pr && pr->getPlatform() == proc::platform::ps5 ? lv2_get_ps5(sid)
-                                                        : lv2_get(sid);
+  if (pr && pr->getPlatform() == proc::platform::ps5) {
+    if (sid >= 0x2bc && sid <= 0x2c0) // apr_submit..apr_ctrl
+      return lv2_trampoline(reinterpret_cast<const void *>(&sys_apr_unavailable),
+                            sid);
+    return lv2_get_ps5(sid);
+  }
+  return lv2_get(sid);
 }
 } // namespace krnl
