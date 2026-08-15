@@ -2291,14 +2291,23 @@ modulePtr proc::loadModule(base::StringRef name) {
         const char *sep = std::strchr(p, ':');
         size_t len = sep ? static_cast<size_t>(sep - p) : std::strlen(p);
         if (len) {
-          base::String hp;
-          hp.append(p, len);
-          if (hp.back() != '/')
-            hp += "/";
-          hp += sname.c_str();
-          hp += ".sprx";
-          if (utl::File(hp, utl::fileMode::read).IsOpen() && lib->fromFile(hp))
-            ok = true;
+          base::String dir;
+          dir.append(p, len);
+          if (dir.back() != '/')
+            dir += "/";
+          // Some sysmodules only ship as <name>.native.sprx (fw 08.40 has
+          // libSceShare.native.sprx but no libSceShare.sprx), so a title's
+          // plain DT_NEEDED name misses without the fallback.
+          for (const char *ext : {".sprx", ".native.sprx"}) {
+            base::String hp(dir);
+            hp += sname.c_str();
+            hp += ext;
+            if (utl::File(hp, utl::fileMode::read).IsOpen() &&
+                lib->fromFile(hp)) {
+              ok = true;
+              break;
+            }
+          }
         }
         p = sep ? sep + 1 : p + len;
       }
