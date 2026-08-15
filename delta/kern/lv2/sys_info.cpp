@@ -358,12 +358,22 @@ int PS4ABI sys_sysctl(int *name, u32 namelen, void *oldp, size_t *oldlenp,
     return 0;
   }
 
-  // answer kern.sdk_version (synthetic oid {0x1337,6}): the *system* firmware
-  // SDK version, encoded as 0x0MMMmmpp (major/minor/patch). 5.05 (0x05050001)
-  // is broadly compatible and matches what most retail titles tolerate.
+  // answer kern.sdk_version (synthetic oid {0x1337,6}), encoded 0x0MMMmmpp.
+  // The real kernel reports the CALLING PROCESS's SDK version here, and PS5
+  // libkernel's checkSdkVersionForLoadStartModule compares every module's
+  // param SDK stamp against it: report less than the firmware the modules come
+  // from and every fresh sceKernelLoadStartModule is unloaded again with
+  // 0x8002002d "Invalid SDK version" (Demon's Souls: libSceMouse/libSceRudp
+  // rejected -> Dantelion2 "Required cell system module(s) could not be
+  // loaded" panic). PS4 keeps the proven 5.05 constant.
   else if (name[0] == 0x1337 && name[1] == 6 && namelen == 2) {
     if (oldp && oldlenp && *oldlenp >= sizeof(u32)) {
-      *reinterpret_cast<u32 *>(oldp) = 0x05050001;
+      u32 v = 0x05050001;
+      if (const auto *active = proc::getActive();
+          active && active->getPlatform() == proc::platform::ps5 &&
+          active->getSdkVersion())
+        v = active->getSdkVersion();
+      *reinterpret_cast<u32 *>(oldp) = v;
       *oldlenp = sizeof(u32);
     }
     return 0;

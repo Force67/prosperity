@@ -21,6 +21,9 @@
 
 #include "kern/lv2/dispatch.h"
 #include "kern/lv2/error_table.h"
+#include "kern/lv2/sys_dynlib.h"
+#include "kern/module.h"
+#include "kern/proc.h"
 #include <utl/options.h>
 
 namespace {
@@ -96,6 +99,28 @@ static const ps5Sys kPs5Extra[] = {
     {"workspace_ctrl", PK_OK},            // 0x2d2
 };
 
+// dynlib_get_obj_member index 8 (module param): the PS5 kernel reports the
+// param with the SDK dword at +0x10 rewritten to the process' compiled SDK
+// version. libSceSysmodule's load probe XOR-compares that dword against
+// sceKernelGetCompiledSdkVersion (top 16 bits must match) and unloads the
+// module with 0x80020063 on mismatch, so handing out the raw firmware value
+// (0x11090001 on 08.40) fails every probe: Demon's Souls then panics with
+// "Required cell system module(s) could not be loaded".
+static int PS4ABI ps5_dynlib_get_obj_member(u32 handle, u8 index,
+                                            void **value) {
+  if (index != 8)
+    return sys_dynlib_get_obj_member(handle, index, value);
+  auto *proc = proc::getActive();
+  auto mod = proc->getModule(handle);
+  if (!mod)
+    return -SysError::eSRCH;
+  auto &info = mod->getInfo();
+  if (info.moduleParam && info.moduleParamSize >= 0x14)
+    *reinterpret_cast<u32 *>(info.moduleParam + 0x10) = proc->getSdkVersion();
+  *value = info.moduleParam;
+  return 0;
+}
+
 static const ps5Sys *ps5Extra(u32 sid) {
   if (sid < kPs5Base)
     return nullptr;
@@ -124,6 +149,11 @@ uintptr_t lv2_get_ps5(u32 sid) {
   // Beyond the mapped range (newer firmware additions): succeed silently.
   if (sid > kPs5Base + sizeof(kPs5Extra) / sizeof(kPs5Extra[0]))
     return lv2_trampoline(reinterpret_cast<const void *>(&ps5_ok), sid);
+
+  // dynlib_get_obj_member: PS5 virtualizes the module param (see handler).
+  if (sid == 649)
+    return lv2_trampoline(
+        reinterpret_cast<const void *>(&ps5_dynlib_get_obj_member), sid);
 
   // Base FreeBSD/Orbis syscall: reuse the shared handler + trampoline.
   return lv2_get(sid);
