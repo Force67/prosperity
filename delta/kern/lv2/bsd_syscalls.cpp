@@ -13,6 +13,7 @@
 #include <base.h>
 #include <base/logging.h>
 #include <logger/logger.h>
+#include <atomic>
 #include <cstring>
 #include <cstdlib>
 #include <cstdio>
@@ -191,6 +192,28 @@ int PS4ABI sys_randomized_path(const char *set_path, char *out,
     if (*out_len >= 1)
       out[0] = '\0';
     *out_len = 0;
+  }
+  return 0;
+}
+
+// sys_uuidgen (392): fill `store` with `count` version-4 UUIDs (FreeBSD's
+// struct uuid is 16 bytes). Demon's Souls generates one while bringing up its
+// resource system; the old stub returned success without writing the buffer,
+// and the engine's I/O layer crashed on the uninitialised id.
+int PS4ABI sys_uuidgen(u8 *store, int count) {
+  if (!store)
+    return -SysError::eFAULT;
+  if (count < 1 || count > 2048)
+    return -SysError::eINVAL;
+  static std::atomic<u64> seq{1};
+  for (int i = 0; i < count; i++) {
+    u8 *p = store + i * 16;
+    u64 a = seq.fetch_add(1) * 0x9E3779B97F4A7C15ull;
+    u64 b = a * 0xBF58476D1CE4E5B9ull ^ (a >> 31);
+    std::memcpy(p, &a, 8);
+    std::memcpy(p + 8, &b, 8);
+    p[7] = (p[7] & 0x0F) | 0x40;  // version 4
+    p[8] = (p[8] & 0x3F) | 0x80;  // variant 10x
   }
   return 0;
 }

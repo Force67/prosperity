@@ -46,6 +46,7 @@ int PS4ABI sys_ipmimgr_call(u32 op, u32 kid, void *out, void *in,
                             u64 insize, u64 arg6);
 
 int sys_randomized_path(const char *set_path, char *out, size_t *out_len);
+int PS4ABI sys_uuidgen(u8 *store, int count);
 int sys_workaround8849();
 int sys_blockpool_open();
 int sys_dynlib_do_copy_relocations();
@@ -410,7 +411,7 @@ static const syscall_Reg syscall_dpt[] = {
     {389, (void *)&lv2_stub_syscall}, // sys_mac_set_file
     {390, (void *)&lv2_stub_syscall}, // sys_kenv
     {391, (void *)&lv2_stub_syscall}, // sys_lchflags
-    {392, (void *)&lv2_stub_syscall}, // sys_uuidgen
+    {392, (void *)&sys_uuidgen},
     {393, (void *)&lv2_stub_syscall}, // sys_sendfile
     {394, (void *)&lv2_stub_syscall}, // sys_mac_syscall
     {395, (void *)&lv2_stub_syscall}, // sys_getfsstat
