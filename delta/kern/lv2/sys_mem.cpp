@@ -1104,6 +1104,16 @@ int PS4ABI sys_mdbg_service(u32 op, void *arg1, void *arg2, void *a3) {
     LOG_INFO("[mdbg-text] {}", s);
     return 0;
   }
+  case 8:
+    // Wait for a debug event (0x28-byte record out). libkernel's debug-service
+    // thread loops on this and only treats EINTR as "no event": any other error
+    // falls through as if an event arrived and it runs the title's registered
+    // coredump callback on an UNINITIALIZED event buffer (Demon's Souls then
+    // faults inside its callback at boot). No debugger ever posts an event
+    // here, so park the caller the way the real kernel would.
+    LOG_INFO("mdbg wait-event: parking caller (no debugger attached)");
+    for (;;)
+      ::pause();
   default:
     // The kernel returns 78 (eNOSYS in our table) for unknown ops.
     return -SysError::eNOSYS;
