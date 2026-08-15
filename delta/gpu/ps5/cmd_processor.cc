@@ -37,6 +37,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <map>
+#include <utility>
 #include <set>
 #include <thread>
 #include <unordered_map>
@@ -66,6 +68,7 @@ DELTA_OPTION(u32, kOpDump, "DELTA_AGC_OPDUMP", 0xFFFF);
 DELTA_OPTION(int, kRegStat, "DELTA_AGC_REGSTAT", 0);
 DELTA_OPTION(bool, kAgcCliptrace, "DELTA_AGC_CLIPTRACE", false);
 DELTA_OPTION(bool, kAgcUdtrace, "DELTA_AGC_UDTRACE", false);
+DELTA_OPTION(bool, kAgcShcensus, "DELTA_AGC_SHCENSUS", false);
 DELTA_OPTION(bool, kAgcVdumpps, "DELTA_AGC_VDUMPPS", false);
 DELTA_OPTION(bool, kCsDump, "DELTA_GPU_CSDUMP", false);
 DELTA_OPTION(bool, kGpuDmatrace, "DELTA_GPU_DMATRACE", false);
@@ -225,6 +228,26 @@ static void NoteUdWrite(const char* how, u32 reg, u32 val) {
     n++;
     BASE_LOGI("agc", "PS ud{} <- {:08x} by {}", reg - mmSPI_SHADER_USER_DATA_PS_0,
               val, how);
+  }
+  // DELTA_AGC_SHCENSUS: which SH registers this title writes at all. A title
+  // that programs its shader state at offsets we do not read leaves the ones
+  // we do read at zero, and then every descriptor the vertex stage names
+  // resolves against nothing.
+  if (kAgcShcensus && val && reg >= kShRegBase && reg < kShRegBase + 0x300) {
+    static std::map<u32, std::pair<u64, u32>> hist;  // offset -> {count, last}
+    static std::mutex lock;
+    static u64 dumps = 0;
+    std::lock_guard<std::mutex> lk(lock);
+    auto& e = hist[reg - kShRegBase];
+    e.first++;
+    e.second = val;
+    if (++dumps % 20000 == 0) {
+      BASE_LOGI("shcensus", "--- SH offsets written ({} distinct) ---",
+                hist.size());
+      for (const auto& [off, v] : hist)
+        BASE_LOGI("shcensus", "  sh+{:#05x} x{} last={:08x}", off, v.first,
+                  v.second);
+    }
   }
 }
 
