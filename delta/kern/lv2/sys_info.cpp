@@ -28,6 +28,9 @@
 #include <cstdio>
 
 #include <ctime>
+#include <mutex>
+#include <set>
+#include <string>
 #include <utl/options.h>
 
 // These three are read unconditionally below (sys_cpuset_getaffinity, the
@@ -81,6 +84,14 @@ static u64 guestTscFreq() {
 int sys_budget_get_ptype();
 
 moduleInfo *called_in(void *addr);
+
+// The oid names we have already reported as unhandled, so a polling caller
+// cannot flood the log. Guarded because sysctl runs on any guest thread.
+static std::set<std::string> &loggedOidNames() {
+  static std::set<std::string> names;
+  return names;
+}
+static std::mutex g_loggedOidLock;
 
 int PS4ABI sys_is_in_sandbox() { return 0; }
 
@@ -497,7 +508,12 @@ int PS4ABI sys_sysctl(int *name, u32 namelen, void *oldp, size_t *oldlenp,
       return 0;
     } else if (name == "kern.amm.param" || name == "kern.app.memconf" ||
                name == "machdep.auto_update_version" ||
-               name == "kern.gjevmtrb") {
+               name == "kern.gjevmtrb" || name == "kern.nfxtmeqp" ||
+               name == "kern.vegccsjk") {
+      // The obfuscated names rotate per SDK release: gjevmtrb belongs to a
+      // newer firmware, nfxtmeqp/vegccsjk to 08.40's libkernel. Its reader
+      // discards the value, and zero is what the wrapper yields when its
+      // hw.sce_main_socid gate is closed.
       static_cast<u32 *>(oldp)[0] = 0x1337;
       static_cast<u32 *>(oldp)[1] = 9;
       *oldlenp = 8;
@@ -565,8 +581,16 @@ int PS4ABI sys_sysctl(int *name, u32 namelen, void *oldp, size_t *oldlenp,
       return 0;
     }
 
-    BASE_LOGI("sysctl", "UNHANDLED name2oid: '{}'",
-              base::String(static_cast<const char *>(newp), newlen).c_str());
+    // A name we answer with ENOENT is often polled from a retry loop (Demon's
+    // Souls asks for kern.nfxtmeqp ~9000 times a second), so log each distinct
+    // one once. Unbounded, the log alone costs tens of megabytes and most of
+    // the boot time.
+    {
+      std::string key(static_cast<const char *>(newp), newlen);
+      std::lock_guard<std::mutex> lock(g_loggedOidLock);
+      if (loggedOidNames().insert(key).second)
+        BASE_LOGI("sysctl", "UNHANDLED name2oid: '{}'", key.c_str());
+    }
     return -SysError::eNOENT;
   }
 

@@ -10,8 +10,10 @@
 #include <base.h>
 #include "base/arch.h"
 #include <base/logging.h>
+#include <base/strings/format.h>
 #include <cstdio>
 #include <cstring>
+#include <string>
 #include <ctime>
 #include <mutex>
 #include <unistd.h>
@@ -282,13 +284,20 @@ i64 PS4ABI sys_writev(u32 fd, const void *iov, int iovcnt) {
     return -SysError::eINVAL;
 
   if (fd == 1 || fd == 2) { // stdout / stderr, like sys_write
+    // Through the logger rather than printf: a title's own diagnostics are the
+    // most direct account of what it is doing, and interleaving them with ours
+    // by timestamp is what makes them usable.
     i64 total = 0;
+    std::string out;
     for (int i = 0; i < iovcnt; ++i) {
-      auto *b = static_cast<const char *>(segs[i].iov_base);
-      for (size_t j = 0; j < segs[i].iov_len; ++j)
-        std::printf("%c", b[j]);
+      out.append(static_cast<const char *>(segs[i].iov_base),
+                 segs[i].iov_len);
       total += static_cast<i64>(segs[i].iov_len);
     }
+    while (!out.empty() && (out.back() == '\n' || out.back() == '\r'))
+      out.pop_back();
+    if (!out.empty())
+      BASE_LOGI("guest", "{}", out.c_str());
     return total;
   }
 
