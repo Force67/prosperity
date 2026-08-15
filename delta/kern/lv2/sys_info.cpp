@@ -23,6 +23,7 @@
 #include "error_table.h"
 #include "kern/crash.h"
 #include <sys/random.h>
+#include <algorithm>
 #include <cstring>
 #include <cstdio>
 
@@ -194,6 +195,51 @@ int PS4ABI sys_sysctl(int *name, u32 namelen, void *oldp, size_t *oldlenp,
       if (*oldlenp >= 2 * sizeof(u32))
         static_cast<u32 *>(oldp)[0] = 1;
     }
+    return 0;
+  }
+
+  // PS5 kern.proc.69: the geometry of the per-thread TLS/TCB arena. libkernel
+  // reserves count * pages * 16 KiB of address space ending at 0x9_0000_0000 and
+  // hands each thread one block, indexing it by (block - base) / blocksize.
+  // The reply must be exactly this 24-byte struct: a mismatched size or version
+  // makes libkernel zero the whole thing, reserve nothing, and abort the first
+  // thread with 'Invalid TCB initialization'. A block holds the static TLS plus
+  // the TCB; the third count reserves a second arena below 0xf_c2000000, which
+  // 0 skips. Both fw 01.14.00 and 13.60 query this before any thread exists.
+  else if (name[0] == 1 && name[1] == 14 && name[2] == 69 && namelen >= 3 &&
+           proc::getActive()->getPlatform() == proc::platform::ps5) {
+    struct tlsArenaInfo {
+      u64 size;
+      u32 version;
+      u32 blocks;
+      u32 blockPages;
+      u32 secondaryPages;
+    };
+    static_assert(sizeof(tlsArenaInfo) == 0x18);
+
+    if (!oldp || !oldlenp || *oldlenp < sizeof(tlsArenaInfo))
+      return -SysError::eINVAL;
+
+    // The secondary block holds the thread's copy of the static TLS image, so
+    // it has to fit every loaded module's PT_TLS at once.
+    size_t tls = 0;
+    for (auto &m : proc::getActive()->getModuleList())
+      tls += m->getInfo().tlsSizeMem + m->getInfo().tlsalign;
+    constexpr size_t kPage = 0x4000;
+    size_t tlsPages = (tls + 0xFFFF + kPage - 1) / kPage;
+    tlsPages = std::clamp<size_t>(tlsPages, 16, 1024);
+
+    auto *out = static_cast<tlsArenaInfo *>(oldp);
+    out->size = sizeof(tlsArenaInfo);
+    out->version = 1;
+    // 64 blocks: libkernel's free-slot bitmap is a fixed BSS array of one qword
+    // per block, and its scan walks every one of them.
+    out->blocks = 64;
+    out->blockPages = 16;  // the TCB and the thread's own bookkeeping
+    // Never 0: that means "no secondary arena", and libkernel then derives the
+    // thread's TLS pointer from the null block address and memsets through it.
+    out->secondaryPages = static_cast<u32>(tlsPages);
+    *oldlenp = sizeof(tlsArenaInfo);
     return 0;
   }
 
