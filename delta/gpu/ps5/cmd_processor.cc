@@ -1172,7 +1172,17 @@ void HandleDraw(u32 op, const u32* body, u32 count) {
   // DELTA_PS5_SKIPVS=hexaddr: drop draws using this VS (draw-isolation bisect).
   if (kSkipVs && vs_a == kSkipVs)
     return;
+  // A pipeline that only populates the ES half leaves the GS user-data window
+  // empty, and then every cbuffer and texture the vertex stage names resolves
+  // against zeros. Take the half that actually holds something.
   const u32* vud = &g_regs[mmSPI_SHADER_USER_DATA_GS_0];
+  {
+    bool gs_ud = false;
+    for (u32 i = 0; i < 16 && !gs_ud; i++)
+      gs_ud = vud[i] != 0;
+    if (!gs_ud)
+      vud = &g_regs[mmSPI_SHADER_USER_DATA_ES_0];
+  }
   const u32* pud = &g_regs[mmSPI_SHADER_USER_DATA_PS_0];
 
   static int s_uddump = 0;
@@ -1471,8 +1481,15 @@ void HandleDraw(u32 op, const u32* body, u32 count) {
     d.viewport_y_offset = d.rt_h * 0.5f;
   }
 
-  const u32 gs_user_sgprs =
-      UserSgprCount(g_regs[mmSPI_SHADER_PGM_RSRC2_GS]);
+  // An unprogrammed RSRC2 reports no user SGPRs at all, which makes every
+  // cbuffer and vertex descriptor unreachable; the window we picked above is
+  // the better evidence that they exist.
+  u32 gs_user_sgprs = UserSgprCount(g_regs[mmSPI_SHADER_PGM_RSRC2_GS]);
+  if (!gs_user_sgprs) {
+    for (u32 i = 0; i < 16; i++)
+      if (vud[i])
+        gs_user_sgprs = 16;
+  }
   const u32 ps_user_sgprs =
       UserSgprCount(g_regs[mmSPI_SHADER_PGM_RSRC2_PS]);
   // Fetch-shader pointer (a heuristic default: GS user data[0..1]; the AGC
