@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "dma_dev.h"
+#include "kern/guest_vaspace.h"  // isGuestReservedVa
 #include "kern/proc.h"
 #include "kern/lv2/sys_mem.h"  // allocLowGuest, mFlags
 #include <utl/options.h>
@@ -78,13 +79,34 @@ u8 *dmaDevicePs5::map(void *addr, size_t len, u32 /*prot*/, u32 flags,
       carry.assign(va, va + len);
   }
   void *p = MAP_FAILED;
+  // libSceAgcDriver's init maps a 2 MiB system block with a plain hint at
+  // 0xfe0000000, and libSceAgc treats the placement as ABI: it reads its fetch
+  // shader table at base+0x40000 and compares that against a hardcoded
+  // 0xfe0040000, printing "[Agc] FS Table offset has shifted" and failing
+  // sce::Agc::init with 0x8a6c002f when the block moved. The band is guest-owned
+  // address space that only our own PROT_NONE placeholder (guest_vaspace)
+  // occupies, and the NOREPLACE probe below reads that as taken. Commit the
+  // block over the placeholder, and keep every other hint out of its range --
+  // libSceGnmDriver's PS4-compat init hints the same base earlier in module
+  // order and has to lose it.
+  constexpr uintptr_t kAgcSystemBase = 0xfe0000000ull;
+  constexpr size_t kAgcSystemSize = 0x200000;
+  const uintptr_t hint = reinterpret_cast<uintptr_t>(va);
+  const bool agcSystemBlock =
+      !fixed && hint == kAgcSystemBase && len == kAgcSystemSize;
+  const bool otherHintIntoAgcBlock =
+      !fixed && !agcSystemBlock && hint < kAgcSystemBase + kAgcSystemSize &&
+      hint + len > kAgcSystemBase;
   // A non-fixed hint is advisory: if the range is taken the host kernel picks an
   // address of its own, which is only page-aligned. Direct memory is 64 KiB
   // aligned on real hardware and titles rely on it -- Dead Cells' HashLink GC
   // fatals ("Page memory is not correctly aligned") on a 4 KiB-aligned page. So
   // probe the hint, and on a miss fall back to our own aperture rather than
   // whatever the kernel hands back.
-  if (va && !fixed) {
+  if (agcSystemBlock && isGuestReservedVa(va, len)) {
+    p = ::mmap(va, len, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd,
+               static_cast<off_t>(offset));
+  } else if (va && !fixed && !otherHintIntoAgcBlock) {
     p = ::mmap(va, len, PROT_READ | PROT_WRITE,
                MAP_SHARED | MAP_FIXED_NOREPLACE, fd, static_cast<off_t>(offset));
     if (p != MAP_FAILED && p != va) {
