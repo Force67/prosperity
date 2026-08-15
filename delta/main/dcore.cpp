@@ -27,6 +27,7 @@
 #include <kern/ps4/hardware_mode.h>
 #include <kern/vfs.h>
 
+#include "formats/archive_object.h"
 #include "formats/pkg_object.h"
 #include "formats/pup_object.h"
 #include "formats/ufs2_object.h"
@@ -455,6 +456,99 @@ private:
   vfs::Ufs2Filesystem fs_;
 };
 
+// Bridges a plain .rar/.zip of a game dump into the kernel VFS. Same shape as
+// the pkg and ufs2 providers, but the archive holds an ordinary extracted app
+// tree, so the only work beyond decompression is reading the metadata out of it
+// to tell a PS4 title from a PS5 one.
+class ArchiveProvider : public krnl::vfs::VirtualProvider {
+public:
+  explicit ArchiveProvider(const base::String &path) : fs_(path) {}
+  bool valid() const { return fs_.valid(); }
+
+  std::unique_ptr<krnl::vfs::VirtualFile> open(const char *rel) override {
+    const auto *node = fs_.find(rel);
+    if (!node)
+      return nullptr;
+    return std::make_unique<ArchiveFile>(&fs_, *node);
+  }
+  bool stat(const char *rel, i64 &size) override {
+    const auto *node = fs_.find(rel);
+    if (!node)
+      return false;
+    size = static_cast<i64>(node->size);
+    return true;
+  }
+  bool list(const char *rel, std::vector<krnl::vfs::DirEntry> &out) override {
+    std::vector<vfs::ArchiveFilesystem::Child> children;
+    if (!fs_.list(rel, children))
+      return false;
+    for (auto &c : children)
+      out.push_back({std::move(c.name), c.isDir});
+    return true;
+  }
+
+  // A PS5 dump carries sce_sys/param.json, a PS4 one sce_sys/param.sfo.
+  bool isPs5() { return fs_.find("/sce_sys/param.json") != nullptr; }
+  bool hasDecrypted() { return fs_.find("/decrypted/eboot.bin") != nullptr; }
+
+  std::string titleId() {
+    if (isPs5())
+      return jsonGetString(paramJson(), "titleId");
+    std::vector<u8> sfo = readWhole("/sce_sys/param.sfo", kMaxSfoSize);
+    return sfoGet(sfo.data(), sfo.size(), "TITLE_ID");
+  }
+
+  std::string title() {
+    if (isPs5())
+      return jsonGetTitleName(paramJson());
+    std::vector<u8> sfo = readWhole("/sce_sys/param.sfo", kMaxSfoSize);
+    return sfoGet(sfo.data(), sfo.size(), "TITLE");
+  }
+
+  u32 attributes() {
+    std::vector<u8> sfo = readWhole("/sce_sys/param.sfo", kMaxSfoSize);
+    return sfoGetU32(sfo.data(), sfo.size(), "ATTRIBUTE");
+  }
+
+  u32 sdkVersion() {
+    return parseSdkVersion(jsonGetString(paramJson(), "sdkVersion"));
+  }
+
+  std::vector<u8> icon() { return readWhole("/sce_sys/icon0.png", kMaxIconSize); }
+
+private:
+  std::vector<u8> readWhole(const char *rel, u64 maxSize) {
+    const auto *node = fs_.find(rel);
+    if (!node || node->size == 0 || node->size > maxSize)
+      return {};
+    std::vector<u8> buf(node->size);
+    const i64 read = fs_.read(*node, buf.data(), 0, static_cast<i64>(buf.size()));
+    if (read <= 0)
+      return {};
+    buf.resize(static_cast<size_t>(read));
+    return buf;
+  }
+
+  std::string paramJson() {
+    const std::vector<u8> js = readWhole("/sce_sys/param.json", kMaxSfoSize);
+    return std::string(js.begin(), js.end());
+  }
+
+  struct ArchiveFile : krnl::vfs::VirtualFile {
+    vfs::ArchiveFilesystem *fs;
+    vfs::ArchiveFilesystem::Node node;
+    ArchiveFile(vfs::ArchiveFilesystem *f,
+                const vfs::ArchiveFilesystem::Node &n)
+        : fs(f), node(n) {}
+    i64 read(void *buf, i64 off, i64 len) override {
+      return fs->read(node, buf, off, len);
+    }
+    i64 size() override { return static_cast<i64>(node.size); }
+  };
+
+  vfs::ArchiveFilesystem fs_;
+};
+
 bool endsWithIgnoreCase(const base::String &s, const char *ext) {
   size_t n = s.length(), e = std::strlen(ext);
   if (n < e)
@@ -482,6 +576,10 @@ void deltaCore::boot(const base::String &xdir) {
 
   const bool isPkg = endsWithIgnoreCase(xdir, ".pkg");
   const bool isFfpkg = endsWithIgnoreCase(xdir, ".ffpkg");
+  // A game left inside the container it was distributed in (.rar, .zip). The
+  // tree inside is an ordinary app dump; we just decompress it on demand rather
+  // than making the host find room for the extracted copy.
+  const bool isArchive = !isPkg && !isFfpkg && vfs::isArchivePath(xdir.c_str());
   // A raw app dump: the extracted /app0 tree itself, identified by its console
   // metadata. Host-mounted rather than read through an image reader.
   const std::string appRoot(path.c_str());
@@ -491,12 +589,13 @@ void deltaCore::boot(const base::String &xdir) {
   // Exists() is true even for a missing path. A PS5 dump has no param.sfo, and
   // treating it as a PS4 app dir loses both the title id and the platform.
   const bool isPs4AppDir =
-      !isPkg && !isFfpkg &&
+      !isPkg && !isFfpkg && !isArchive &&
       utl::File(base::String(appSfo.c_str()), utl::fileMode::read).IsOpen();
   const bool isPs5AppDir =
-      !isPkg && !isFfpkg && !isPs4AppDir &&
+      !isPkg && !isFfpkg && !isArchive && !isPs4AppDir &&
       utl::File(base::String(appJson.c_str()), utl::fileMode::read).IsOpen();
   const bool isAppDir = isPs4AppDir || isPs5AppDir;
+  bool isPs5Archive = false;
   base::String mainModule = path;
   u32 sdkVersion = 0;
   u32 ps4Attributes = 0;
@@ -542,6 +641,28 @@ void deltaCore::boot(const base::String &xdir) {
     mainModule = base::String(decrypted ? "/app0/decrypted/eboot.bin"
                                         : "/app0/eboot.bin");
     LOG_INFO("mounted ffpkg at /app0 ({}), boot module {}",
+             krnl::vfs::titleId().c_str(), mainModule.c_str());
+  } else if (isArchive) {
+    auto provider = std::make_shared<ArchiveProvider>(path);
+    if (!provider->valid()) {
+      LOG_ERROR("failed to load archive {}", path.c_str());
+      return;
+    }
+    isPs5Archive = provider->isPs5();
+    const bool decrypted = provider->hasDecrypted();
+    krnl::vfs::setTitleId(provider->titleId());
+    gameTitle = provider->title();
+    if (isPs5Archive)
+      sdkVersion = provider->sdkVersion();
+    else
+      ps4Attributes = provider->attributes();
+#if defined(__linux__) && !defined(__ANDROID__)
+    gameIcon = provider->icon();
+#endif
+    krnl::vfs::mountVirtual("/app0", provider);
+    mainModule = base::String(decrypted ? "/app0/decrypted/eboot.bin"
+                                        : "/app0/eboot.bin");
+    LOG_INFO("mounted archive at /app0 ({}), boot module {}",
              krnl::vfs::titleId().c_str(), mainModule.c_str());
   } else if (isAppDir) {
     krnl::vfs::mount("/app0", path.c_str());
@@ -592,7 +713,7 @@ void deltaCore::boot(const base::String &xdir) {
   // writes there and reads back fails hard when it doesn't: Skyrim rebuilds its
   // plugin list into /download0/Plugins.txt, and with the write lost it boots
   // with no plugins, no archives and a null menu movie.
-  if (isPkg || isFfpkg || isAppDir) {
+  if (isPkg || isFfpkg || isAppDir || isArchive) {
     base::StringU8 home;
     base::GetEnvironmentVariable(u8"HOME", home);
     std::string tid = krnl::vfs::titleId();
@@ -609,8 +730,8 @@ void deltaCore::boot(const base::String &xdir) {
   utl::loadGameProfile(krnl::vfs::titleId().c_str());
 
   // These all boot from an /app0 mount rather than a bare host path.
-  const bool mounted = isPkg || isFfpkg || isAppDir;
-  const bool isPs5 = isFfpkg || isPs5AppDir;
+  const bool mounted = isPkg || isFfpkg || isAppDir || isArchive;
+  const bool isPs5 = isFfpkg || isPs5AppDir || isPs5Archive;
   krnl::ps4::setTitleAttributes(isPs5 ? 0 : ps4Attributes);
   gpu::ps4::SetPs4NeoMode(!isPs5 && krnl::ps4::isNeoMode());
   // Name the window after the booted game, since the renderer and the videoout
