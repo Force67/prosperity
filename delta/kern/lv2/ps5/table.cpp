@@ -17,11 +17,13 @@
 #include <base.h>
 #include "base/arch.h"
 #include <base/logging.h>
+#include <cstring>
 #include <set>
 
 #include "kern/lv2/dispatch.h"
 #include "kern/lv2/error_table.h"
 #include "kern/lv2/sys_dynlib.h"
+#include "kern/lv2/sys_info.h"
 #include "kern/module.h"
 #include "kern/proc.h"
 #include <utl/options.h>
@@ -121,6 +123,24 @@ static int PS4ABI ps5_dynlib_get_obj_member(u32 handle, u8 index,
   return 0;
 }
 
+// kern.proc.35 is sceKernelGetAppInfo. PS5 libkernel asks for 0x58 bytes, 16
+// more than the PS4 struct the shared handler zeroes, so the tail stays caller
+// stack garbage. libSceAgcDriver and libSceGnmDriver read the app mode from
+// +0x48 -- the first byte past the PS4 struct -- and anything above 2 leaves
+// the GPU trap handler unregistered ("Failed to get trap hanlder code", and on
+// older firmware "No trap hanlder for mode 224"). Zero what the caller asked
+// for; the PS4 path keeps the shorter fill.
+static int PS4ABI ps5_sysctl(int *name, u32 namelen, void *oldp,
+                             size_t *oldlenp, const void *newp, size_t newlen) {
+  if (name && namelen == 4 && name[0] == 1 && name[1] == 14 && name[2] == 35) {
+    if (!oldp || !oldlenp)
+      return -SysError::eINVAL;
+    std::memset(oldp, 0, *oldlenp);
+    return 0;
+  }
+  return sys_sysctl(name, namelen, oldp, oldlenp, newp, newlen);
+}
+
 static const ps5Sys *ps5Extra(u32 sid) {
   if (sid < kPs5Base)
     return nullptr;
@@ -149,6 +169,10 @@ uintptr_t lv2_get_ps5(u32 sid) {
   // Beyond the mapped range (newer firmware additions): succeed silently.
   if (sid > kPs5Base + sizeof(kPs5Extra) / sizeof(kPs5Extra[0]))
     return lv2_trampoline(reinterpret_cast<const void *>(&ps5_ok), sid);
+
+  // sysctl: PS5 widens the kern.proc.35 reply (see handler).
+  if (sid == 202)
+    return lv2_trampoline(reinterpret_cast<const void *>(&ps5_sysctl), sid);
 
   // dynlib_get_obj_member: PS5 virtualizes the module param (see handler).
   if (sid == 649)
