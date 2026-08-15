@@ -36,9 +36,14 @@ public:
     ElementPtr *new_ptr = new ElementPtr();
     write_ptr->next.store(new_ptr, std::memory_order_release);
     write_ptr = new_ptr;
-    cv.notify_one();
-
+    // publish size before notifying, under cv_mutex, or PopWait can check its
+    // predicate, miss this element, and sleep through the wakeup (which hung
+    // process exit when the lost entry was the logger's final one)
     ++size;
+    {
+      std::lock_guard lock{cv_mutex};
+    }
+    cv.notify_one();
   }
 
   void Pop() {
