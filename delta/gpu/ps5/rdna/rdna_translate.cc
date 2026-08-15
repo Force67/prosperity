@@ -2209,10 +2209,17 @@ bool TranslateVs(const Program& program,
                  {static_cast<u32>(spv::BuiltIn::InstanceIndex)});
     iface.push_back(vertex_index);
     iface.push_back(instance_index);
-    t.SetVg(0, t.m.Load(t.t_u, vertex_index));
+    const Id vertex = t.m.Load(t.t_u, vertex_index);
+    t.SetVg(0, vertex);
     const Id instance = t.m.Load(t.t_u, instance_index);
     t.SetVg(1, instance);
     t.SetVg(3, instance);
+    // An NGG merged shader takes its vertex index in v5, not v0: v0..v4 carry
+    // the GS half's packed vertex offsets, primitive id and invocation id, all
+    // of which a shader with no attributes overwrites before reading. Demon's
+    // Souls builds every fullscreen pass out of v5 alone, so leaving it zero
+    // collapsed each quad to a point and nothing rasterised.
+    t.SetVg(5, vertex);
   }
 
   Id first_attr_var = 0;
