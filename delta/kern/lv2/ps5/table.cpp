@@ -23,6 +23,7 @@
 #include "kern/lv2/dispatch.h"
 #include "kern/lv2/error_table.h"
 #include "kern/lv2/sys_dynlib.h"
+#include "kern/lv2/ps5/sys_info.h"
 #include "kern/lv2/sys_info.h"
 #include "kern/module.h"
 #include "kern/proc.h"
@@ -130,17 +131,6 @@ static int PS4ABI ps5_dynlib_get_obj_member(u32 handle, u8 index,
 // the GPU trap handler unregistered ("Failed to get trap hanlder code", and on
 // older firmware "No trap hanlder for mode 224"). Zero what the caller asked
 // for; the PS4 path keeps the shorter fill.
-static int PS4ABI ps5_sysctl(int *name, u32 namelen, void *oldp,
-                             size_t *oldlenp, const void *newp, size_t newlen) {
-  if (name && namelen == 4 && name[0] == 1 && name[1] == 14 && name[2] == 35) {
-    if (!oldp || !oldlenp)
-      return -SysError::eINVAL;
-    std::memset(oldp, 0, *oldlenp);
-    return 0;
-  }
-  return sys_sysctl(name, namelen, oldp, oldlenp, newp, newlen);
-}
-
 static const ps5Sys *ps5Extra(u32 sid) {
   if (sid < kPs5Base)
     return nullptr;
@@ -173,6 +163,11 @@ uintptr_t lv2_get_ps5(u32 sid) {
   // sysctl: PS5 widens the kern.proc.35 reply (see handler).
   if (sid == 202)
     return lv2_trampoline(reinterpret_cast<const void *>(&ps5_sysctl), sid);
+
+  // cpuset_getaffinity: a PS5 grants seven cores, not the PS4's six.
+  if (sid == 487)
+    return lv2_trampoline(
+        reinterpret_cast<const void *>(&ps5_cpuset_getaffinity), sid);
 
   // dynlib_get_obj_member: PS5 virtualizes the module param (see handler).
   if (sid == 649)
