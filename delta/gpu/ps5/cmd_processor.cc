@@ -69,6 +69,7 @@ DELTA_OPTION(int, kRegStat, "DELTA_AGC_REGSTAT", 0);
 DELTA_OPTION(bool, kAgcCliptrace, "DELTA_AGC_CLIPTRACE", false);
 DELTA_OPTION(bool, kAgcUdtrace, "DELTA_AGC_UDTRACE", false);
 DELTA_OPTION(bool, kAgcShcensus, "DELTA_AGC_SHCENSUS", false);
+DELTA_OPTION(bool, kTexValid, "DELTA_GPU_TEXVALID", false);
 DELTA_OPTION(bool, kAgcVdumpps, "DELTA_AGC_VDUMPPS", false);
 DELTA_OPTION(bool, kCsDump, "DELTA_GPU_CSDUMP", false);
 DELTA_OPTION(bool, kGpuDmatrace, "DELTA_GPU_DMATRACE", false);
@@ -992,13 +993,18 @@ void HandleDispatch(const u32* body, u32 count) {
       const bool rg8 = t.dfmt == 3 && t.nfmt == 0;
       const bool rgba16f = t.dfmt == 12 && t.nfmt == 7;
       const bool r11g11b10f = t.dfmt == 6 && t.nfmt == 7;
-      elem_bytes = rgba16f ? 8u : (r16f || rg8) ? 2u : 4u;
+      // 32_32: two full dwords per texel, so it stages unchanged like the other
+      // 32-bit-per-channel forms, just twice as wide.
+      const bool rg32 =
+          t.dfmt == 11 && (t.nfmt == 4 || t.nfmt == 5 || t.nfmt == 7);
+      elem_bytes = (rgba16f || rg32) ? 8u : (r16f || rg8) ? 2u : 4u;
       stage_elem_bytes = r11g11b10f ? 16u : std::max(elem_bytes, 4u);
       // A swizzle mode with no address equation would scramble the texels the
       // staging copy writes back into guest memory.
       gcn::TextureLayout32 layout;
       if ((t.type != 9 && t.type != 13) ||
-          !(rgba8 || r32 || rg16f || r16f || rg8 || rgba16f || r11g11b10f) ||
+          !(rgba8 || r32 || rg16f || r16f || rg8 || rgba16f || r11g11b10f ||
+            rg32) ||
           !gcn::TilingSupported(t.tiling_idx) || !t.valid ||
           !gcn::BuildTextureLayout32(layout, t.width, t.height, t.pitch,
                                      t.layers, t.mip_levels, t.tiling_idx,
@@ -1835,6 +1841,18 @@ void HandleDraw(u32 op, const u32* body, u32 count) {
           for (size_t i = 0; i < texs.size() && i < 16; i++) {
             const auto& s = texs[i];
             auto& dt = d.texs[i];
+            // DELTA_GPU_TEXVALID: a rejected T# has its base erased here, so
+            // downstream it is indistinguishable from a descriptor that was
+            // never written. Report the two apart before that happens.
+            if (kTexValid && !s.valid && s.base && s.width && s.height) {
+              static int n = 0;
+              if (n++ < 16)
+                BASE_LOGI("texvalid",
+                          "bind={} REJECTED but base={:#x} {}x{} dfmt={} "
+                          "nfmt={} tiling={} layers={} mips={}",
+                          i, s.base, s.width, s.height, s.dfmt, s.nfmt,
+                          s.tiling_idx, s.layers, s.mip_levels);
+            }
             dt.base = s.valid ? s.base : 0;
             dt.w = s.width;
             dt.h = s.height;

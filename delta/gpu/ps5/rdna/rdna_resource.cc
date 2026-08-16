@@ -16,6 +16,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <numeric>
+#include <string>
 #include <unordered_map>
 #include <utility>
 
@@ -269,14 +270,20 @@ struct ScalarEval {
     if (s < kRegs) {
       sgpr[s] = value;
       known[s] = true;
+      src_addr[s] = 0;
     }
   }
   u32 cur_pc = 0;
   u32 clear_pc[kRegs] = {};
+  // Guest address an SMEM load took each dword from, 0 when it came from user
+  // data or the ALU. Only a diagnostic: it is what lets a resolved descriptor
+  // be compared against the memory it claims to have come from.
+  u64 src_addr[kRegs] = {};
   void Clear(u32 s) {
     if (s < kRegs) {
       known[s] = false;
       clear_pc[s] = cur_pc;
+      src_addr[s] = 0;
     }
   }
   void SetDest(u32 base, u32 offset, u32 value) {
@@ -714,8 +721,11 @@ struct ScalarEval {
     if (gpu::gcn::g_flush_guest_range)
       gpu::gcn::g_flush_guest_range(address, static_cast<u64>(dwords) * 4);
     const auto* src = reinterpret_cast<const u32*>(address);
-    for (u32 i = 0; i < dwords; i++)
+    for (u32 i = 0; i < dwords; i++) {
       SetDest(smem.sdst, i, src[i]);
+      if (smem.sdst != 125 && smem.sdst + i < kRegs)
+        src_addr[smem.sdst + i] = address + i * 4;
+    }
   }
 };
 
@@ -1124,7 +1134,13 @@ TImage DecodeTImage(const u32* d, bool r128) {
   const bool valid_mips = t.base_mip <= last_level && last_level < max_levels &&
                           t.base_mip + t.view_mips <= t.mip_levels;
   const bool valid_word4 = r128 || !(d[4] & 0xe000c000u);
-  const bool valid_compression = r128 || !(d[6] & 0x00300000u);
+  // Word 6's compression fields describe DCC/metadata the hardware would use to
+  // read the surface. We never compress a render target, and one sampled back
+  // resolves through the address page table to the image we rendered into, so
+  // those bits say nothing about whether the descriptor is well formed. Taking
+  // them as invalid rejected every G-buffer Demon's Souls sampled, and a
+  // rejected T# loses its base, which then reads as "never written".
+  const bool valid_compression = true;
   const bool valid_compact_type =
       !r128 || t.type == 8 || t.type == 9 || t.type == 14;
   t.valid = InGuest(t.base) && t.dfmt && t.width <= 16384 &&
@@ -1195,6 +1211,33 @@ std::vector<TImage> TrackTextures(const u32* ps_code,
                 eval.AllKnown(srsrc, resource_dwords));
     if (eval.AllKnown(srsrc, resource_dwords)) {
       out[b] = DecodeTImage(&eval.sgpr[srsrc], r128);
+      // A descriptor that decodes with sane extents but a zero base is either
+      // genuinely unpatched in guest memory or read from the wrong place. Print
+      // both sides of that comparison: what the replay produced, and what the
+      // address it loaded from holds right now.
+      if (kGpuTexresolve && !out[b].base && out[b].width > 1 &&
+          out[b].height > 1) {
+        static u32 printed = 0;
+        if (printed++ < 6) {
+          std::string replayed, in_memory;
+          const u64 from = eval.src_addr[srsrc];
+          const bool mapped = from && GuestRange(from, resource_dwords * 4);
+          const auto* mem = reinterpret_cast<const u32*>(from);
+          char word[16];
+          for (u32 i = 0; i < resource_dwords; i++) {
+            std::snprintf(word, sizeof(word), "%08x ", eval.sgpr[srsrc + i]);
+            replayed += word;
+            std::snprintf(word, sizeof(word), "%08x ", mapped ? mem[i] : 0u);
+            in_memory += word;
+          }
+          BASE_LOGI("texres",
+                    "zero-base binding={} srsrc=s{} {}x{} replayed=[ {}] "
+                    "from={:#x} mapped={:d} memory=[ {}]",
+                    b, srsrc, out[b].width, out[b].height, replayed.c_str(),
+                    static_cast<unsigned long>(from), mapped ? 1 : 0,
+                    mapped ? in_memory.c_str() : "unreadable ");
+        }
+      }
       out[b].arrayed = MimgArrayed((w0 >> 3) & 0x7);
       out[b].depth_compare = op == 0x28 || op == 0x2f;
       out[b].force_lod_zero = op == 0x47;
