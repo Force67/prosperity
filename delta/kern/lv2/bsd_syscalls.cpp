@@ -9,10 +9,16 @@
 
 #include "kern/proc.h"
 #include <utl/mem.h>
+#include <cstdint>
+
+namespace krnl {
+void symbolize(uintptr_t addr, char *out, size_t n);
+}
 #include "base/arch.h"
 #include "error_table.h"
 #include <base.h>
 #include <base/logging.h>
+#include <base/strings/format.h>
 #include <logger/logger.h>
 #include <atomic>
 #include <cstring>
@@ -132,7 +138,7 @@ struct nonsys_bin {
 /*TODO: clearly does not belong here*/
 int PS4ABI sys_regmgr_call(u32 op, u32 id, void *result, void *value,
                            u64 type) {
-  if (op == 25) // non-system get int
+  if (op == 0x19)  // non-system get int
   {
     auto int_value = static_cast<nonsys_int *>(value);
 
@@ -149,25 +155,38 @@ int PS4ABI sys_regmgr_call(u32 op, u32 id, void *result, void *value,
     // the output anyway: a caller that reads it despite the error would
     // otherwise get stack garbage.
     int_value->value = 0;
-    BASE_LOGI("regmgr", "op25 get-int unknown encoded_id={:#x}",
+    BASE_LOGI("regmgr", "get-int unknown encoded_id={:#x}",
               (unsigned long long)int_value->encoded_id);
     return 0x800D0203;
   }
 
-  if (op == 27) // non-system get bin
+  // The non-system registry family, read out of libSceRegMgr (every export is a
+  // thin wrapper around syscall 532 with the op in rdi):
+  //   0x18/0x19 Set/GetInt   0x1a/0x1b Set/GetStr   0x1c/0x1d Set/GetBin
+  //   0x1e takes a bare u32
+  // Get-str and get-bin share one struct and differ only in how the caller
+  // reads the payload back, so they are served together here.
+  if (op == 0x1b || op == 0x1d)  // non-system get str / get bin
   {
-    // {u64 encoded_id, u64 unknown, u64 size, u8 data[size]}, with the blob
-    // returned in place -- `type` is the whole struct, 0x18 + size.
+    // {u64 encoded_id, u32 index, u32 pad, u64 size, u8 data[size]}, with the
+    // payload returned in place -- `type` is the whole struct, 0x18 + size.
     auto *bin = static_cast<nonsys_bin *>(value);
     if (type < sizeof(nonsys_bin) || bin->size != type - sizeof(nonsys_bin))
       return 0x800D0203;
 
     // Every key here is one of Sony's obfuscated ids. Unlike get-int, failing
-    // is not an option: libSceNpCommon reads id 0x6b976df7f847ea43 (a 17-byte
-    // per-console blob) during NpAsm resource-context setup and treats any
-    // error as fatal, which aborts the whole NP bring-up. An all-zero blob is
-    // what an unprovisioned console has, and NP accepts it.
+    // is not an option for get-str: libSceNpCommon reads id
+    // 0x6b976df7f847ea43 (a 17-byte per-console blob) during NpAsm
+    // resource-context setup and treats any error as fatal, which aborts the
+    // whole NP bring-up. An all-zero payload is what an unprovisioned console
+    // has, and NP accepts it. Get-bin is more forgiving (libkernel's accessor
+    // for key 0x44746d9c58675bee defaults to 0 on any error and never reads
+    // the buffer), but answering it the same way keeps the reply honest rather
+    // than leaving the caller's blob at whatever it held.
     std::memset(bin->data, 0, bin->size);
+    // The wrapper returns this int32 to its caller when the syscall succeeds.
+    if (result && utl::isMemoryRangeMapped(result, sizeof(u32)))
+      *static_cast<u32 *>(result) = 0;
     return 0;
   }
 
@@ -175,6 +194,20 @@ int PS4ABI sys_regmgr_call(u32 op, u32 id, void *result, void *value,
   // op-25 unknown-key path returns (the guest copes with it) instead of trapping.
   BASE_LOGI("regmgr", "UNHANDLED op={} id={:#x} type={:#x} result={:p} value={:p}",
             op, id, (unsigned long long)type, result, value);
+  // Name the guest module and offset that asked, so the op can be read out of
+  // that library rather than guessed from the op number.
+  {
+    char sym[256];
+    symbolize(reinterpret_cast<uintptr_t>(_ReturnAddress()), sym, sizeof(sym));
+    BASE_LOGI("regmgr", "  called from {}", sym);
+    if (value && utl::isMemoryRangeMapped(value, type < 64 ? type : 64)) {
+      base::String words;
+      const auto *w = static_cast<const u32 *>(value);
+      for (u64 i = 0; i * 4 < type && i < 16; i++)
+        base::FormatTo(words, " {:08x}", w[i]);
+      BASE_LOGI("regmgr", "  value[]:{}", words.c_str());
+    }
+  }
   // Same reasoning as the op-25 unknown-key path: a caller that reads the
   // result despite the error should see zero rather than stack garbage.
   if (result && utl::isMemoryRangeMapped(result, sizeof(u32)))
