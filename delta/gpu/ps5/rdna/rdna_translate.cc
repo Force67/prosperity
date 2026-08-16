@@ -213,6 +213,20 @@ constexpr u32 kFlatBaseTag = 0x100;
 // an inline user-data descriptor (e.g. a 2D VS's ortho matrix): that is a
 // CONSTANT bound as a UBO and read in the shader body, NOT lifted to a vertex
 // input.
+// KNOWN WRONG for at least one title, and not yet fixable without a better
+// discriminator: this asks whether the V# came out of a user-data table, but
+// what it means to ask (see RdnaPlanBufLoadCbufs) is whether the load's index
+// is the vertex index. Demon's Souls' vertex programs load position and colour
+// from V#s sitting INLINE in user data at s8/s12, indexed by v5, so the chain
+// test reads a genuine per-vertex fetch as a uniform: every vertex gets dword 0
+// of a UBO, each pass exports one constant position and one constant colour,
+// and the scene composites to flat alpha with no RGB.
+//
+// Accepting an inline load indexed by v5 (the merged NGG vertex index) fixes
+// that reading, but moves 17.8% of PS5 Isaac's pixels -- Isaac renders
+// correctly either way, so the difference is a pacing shift rather than
+// corruption, but it is not neutral and it did not make Demon's Souls render.
+// Left as-is until the index can be identified rather than guessed at.
 bool BufLoadIsVertexFetch(const Inst& in, bool chained) {
   const bool idxen = (in.raw[0] >> 13) & 1;
   return idxen && chained;

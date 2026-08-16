@@ -608,9 +608,25 @@ void TraceCbufBinding(bool vertex_stage,
                       u32 use_pc,
                       u64 base,
                       u32 num_dwords) {
-  if (Detail())
-    BASE_LOGI("agc", "  cbuf {} bind={} use_pc={:#x} base={:#x} dwords={}",
-              vertex_stage ? "vs" : "ps", binding, use_pc, base, num_dwords);
+  if (!Detail())
+    return;
+  // With the head of the window, as hex and as the float it usually is. A
+  // resolved binding says only that the shader has something to read; what it
+  // reads is what decides the pixel, and a scale factor sitting at zero looks
+  // exactly like a shader that never ran.
+  base::String head;
+  const u32 shown = std::min(num_dwords, 4u);
+  if (gpu::IsReadableRange(base, static_cast<u64>(shown) * 4)) {
+    const u32* w = reinterpret_cast<const u32*>(base);
+    for (u32 i = 0; i < shown; i++) {
+      float f;
+      std::memcpy(&f, &w[i], 4);
+      base::FormatTo(head, " {:08x}({})", w[i], f);
+    }
+  }
+  BASE_LOGI("agc", "  cbuf {} bind={} use_pc={:#x} base={:#x} dwords={}:{}",
+            vertex_stage ? "vs" : "ps", binding, use_pc, base, num_dwords,
+            head.c_str());
 }
 
 void TraceRejectedTexture(u32 binding, const gcn::TImage& tex) {
