@@ -244,6 +244,34 @@ gpu::gcn::MimgBindingPlan RdnaPlanMimg(const Program& program);
 // ordinary resources contain eight dwords.
 gpu::gcn::TImage DecodeTImage(const u32* dwords, bool r128 = false);
 
+// A decoded gfx10.3 buffer resource (V#, four dwords): base48 = w0 |
+// (w1[15:0] << 32), stride w1[29:16], num_records w2, format w3[18:12].
+struct VBuffer {
+  u64 base = 0;
+  u32 stride = 0;
+  u32 num_records = 0;
+  // The GCN (data, number) format pair the shared renderer speaks, mapped from
+  // `gfmt` -- which is what the descriptor actually encodes.
+  u32 dfmt = 0;
+  u32 nfmt = 0;
+  u32 gfmt = 0;
+};
+
+// gfx10.3 buffer V#s carry a UNIFIED 7-bit format enum where GCN has separate
+// data and number formats, so every descriptor and every typed fetch that
+// reaches the shared renderer has to be mapped back onto the GCN pair. Only the
+// vertex-attribute formats are covered; unknowns yield (0, 0), which is
+// harmless for descriptors that never reach VertexFormat().
+void DecodeBufferFormat(u32 gfmt, u32& dfmt, u32& nfmt);
+
+VBuffer DecodeVBuffer(const u32* dwords);
+
+// A V# read from an unbound or stale SGPR slot decodes to an in-range but bogus
+// buffer: a depth-only pre-pass with an inactive vertex slot yielded stride
+// 14915 over 480622080 records, which then segfaulted reading the vertex ring.
+// Mirrors the PS4 fetch-shader sanity gate (gpu/gcn/gcn_resource.cc).
+bool PlausibleVBuffer(const VBuffer& v);
+
 // Resolve the live T#/S# each MIMG in a pixel shader samples, in binding order.
 // user_sgprs is how many user-data SGPRs the stage was launched with
 // (SPI_SHADER_PGM_RSRC2_*.USER_SGPR): a descriptor inline beyond that window is

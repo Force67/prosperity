@@ -10,10 +10,18 @@ for PS5, and lives here:
 | File | Role | Mirrors (PS4) |
 | --- | --- | --- |
 | `agc_regs.h` | gfx10.3 register file + offsets (context 0xA000 / sh 0x2C00 / uconfig 0xC000). | `gpu/ps4/liverpool.h` |
-| `cmd_processor.{h,cpp}` | AGC PM4 walk: `SET_*_REG` latch, draw/dispatch decode into `gpu::rhi::DrawInfo`, completion labels, flip. | `gpu/ps4/cmd_processor.cc` |
-| `rdna/rdna_decode.{h,cpp}` | RDNA2 instruction decoder -> `gpu::gcn::Program` (shared `Inst` repr). Different encoding prefixes + opcode numbers than GFX7. | `gpu/gcn/gcn_decode.*` |
-| `rdna/rdna_resource.{h,cpp}` | gfx10 128-bit V#/T#/S# descriptor decode + fetch/texture tracking. | `gpu/gcn/gcn_resource.*` |
-| `rdna/rdna_translate.{h,cpp}` | RDNA2 -> SPIR-V: per-instruction dispatch that decodes RDNA2 fields, remaps opcodes to the GFX7-canonical numbers, and calls the **shared** `gpu::gcn` emitters (`EmitVop*`, `EmitSop*`, exports, cbuf). Recompile facade. | `gpu/gcn/spirv/*` |
+| `guest_address.h` | the guest window and the GPU aperture a packet field is checked against. | `gpu/ps4/guest_address.h` |
+| `cmd_processor.{h,cc}` | the AGC packet walk, the index/instance state it latches, CP DMA, completion labels, flip. | `gpu/ps4/cmd_processor.cc` |
+| `reg_state.{h,cc}` | the four ways AGC programs a register, including the shadow images and (offset, value) state blocks. | *(none: Gnm puts values in the packet)* |
+| `draw_state.{h,cc}` | register state + tracked shader resources -> one `gpu::rhi::DrawInfo`. | `gpu/ps4/draw_state.*` |
+| `compute_dispatch.{h,cc}` | COMPUTE_* registers + a CS's descriptors -> one `gpu::rhi::ComputeInfo`. | `gpu/ps4/compute_dispatch.*` |
+| `shader_cache.{h,cc}` | which recompiled module a given piece of guest state needs. | `gpu/ps4/shader_cache.*` |
+| `cmd_trace.{h,cc}` | the `DELTA_AGC_*` / `DELTA_GPU_*` instrumentation of the command stream. | `gpu/ps4/cmd_trace.*` |
+| `rdna/rdna_decode.{h,cc}` | RDNA2 instruction decoder -> `gpu::gcn::Program` (shared `Inst` repr). Different encoding prefixes + opcode numbers than GFX7. | `gpu/gcn/gcn_decode.*` |
+| `rdna/rdna_resource.{h,cc}` | gfx10 128-bit V#/T#/S# descriptor decode + fetch/texture tracking. | `gpu/gcn/gcn_resource.*` |
+| `rdna/rdna_translate.{h,cc}` | RDNA2 -> SPIR-V: per-instruction dispatch that decodes RDNA2 fields, remaps opcodes to the GFX7-canonical numbers, and calls the **shared** `gpu::gcn` emitters (`EmitVop*`, `EmitSop*`, exports, cbuf). Recompile facade. | `gpu/gcn/spirv/*` |
+
+`cmd_processor.h` is the only header here the rest of the emulator may include.
 
 ## Reuse seam
 
@@ -35,10 +43,9 @@ encoding, and the gfx10 128-bit descriptor layouts.
 
 ## Status
 
-Milestone-0 target: a bound render target + a first triangle / clear color
-through the renderer. The guest (Isaac, PPSA03311) does not yet submit AGC DCBs
-(libSceAgc never registers its GPU context), so the stack is validated in
-isolation via `tools/rdna_selftest.cpp` until submission is unblocked.
+Titles submit and render: Isaac (PPSA03311) plays with its UI pixel-correct, and
+the doorbell submit path, the state blocks, the recompiler and the flip are all
+exercised by a real guest rather than by a harness.
 
 ## Implemented (verified via `tools/rdna_selftest.cpp`)
 
@@ -53,10 +60,6 @@ isolation via `tools/rdna_selftest.cpp` until submission is unblocked.
 
 ## Known gaps (loud degradation until implemented)
 
-- Texture resolution only follows inline user data and a single table-pointer
-  indirection; deeper SGPR dataflow (the PS4 `ScalarEval`) is not modelled.
-- gfx10.3 T# format: only the geometric fields decode; the 9-bit unified format
-  defaults to RGBA8_UNORM, and tiled surfaces are not de-tiled.
 - MIMG `arrayed`/DIM detection and NSA (non-sequential address) sampling.
 - VOP3P op_sel/neg/clamp modifiers and packed integer ops.
 - f16 VOPC cmpx (EXEC-writing) forms and the unordered predicates above 0xCF.

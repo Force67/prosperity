@@ -3,27 +3,41 @@
 /*
  * PS4Delta : PS4/PS5 emulation and research project
  *
- * PS5 GPU command processor (scaffold). The PS5 uses an RDNA2 GPU driven by the
- * AGC command format, which is unrelated to the PS4's PM4/GCN path in gpu/ps4/.
- * This is greenfield: it will host an AGC packet parser plus an RDNA2->SPIR-V
- * recompiler, and must expose the same submit API as the PS4 path so the
- * runtime can dispatch on the guest platform. Currently unimplemented stubs.
+ * The PS5 GPU command processor: consumes the AGC command buffers libSceAgc
+ * submits (through the kernel's /dev/gc doorbell ring), tracks the gfx10.3
+ * register state they program, and drives the renderer. This header is its
+ * whole surface; the decode itself is split by decision across ps5/ (reg_state,
+ * draw_state, compute_dispatch, shader_cache, cmd_trace), none of which is
+ * reachable from outside gpu/.
  *
- * Runtime platform dispatch (ps4 vs ps5 submit) will be wired up when the PS5
- * GPU path is actually built; for now this only compiles as scaffolding.
+ * An AGC command buffer is a PM4 type-3 stream using the SAME IT_ opcode table
+ * as the PS4, so the packet framing is shared (gpu/ps4/pm4.h) and the walk
+ * looks like the PS4's. What differs is the gfx10.3 register file
+ * (agc_regs.h), the RDNA2 shader ISA (ps5/rdna) and, above all, that AGC
+ * programs most of its state out of guest memory rather than inline
+ * (reg_state.h). The renderer (gpu/rhi) and the DrawInfo contract are shared
+ * with the PS4 path.
+ *
+ * Submission is synchronous: a submit returns once the whole buffer has been
+ * walked, so every fence label the packets ask the GPU to write is complete by
+ * the time the walk passes it.
  */
 
 #include "base/arch.h"
 
 namespace gpu::ps5 {
 
-// Process one AGC draw command buffer (guest GPU address, size in bytes).
+// Process one AGC draw command buffer (guest GPU address, identity-mapped to a
+// host pointer; size in bytes). Walks the packet stream, updating register
+// state and issuing draws.
 void SubmitDcb(const void* dcb, u32 size_bytes);
 
-// Process one AGC constant command buffer.
+// Process one AGC constant command buffer. Framed identically, so it is the
+// same walk; AGC has no separate constant engine to model.
 void SubmitCcb(const void* ccb, u32 size_bytes);
 
-// End the current frame and present the render target at `scanout_base`.
+// End the current frame and present the render target at `scanout_base` (the
+// videoout flip buffer).
 void EndFrame(u64 scanout_base);
 
 }  // namespace gpu::ps5

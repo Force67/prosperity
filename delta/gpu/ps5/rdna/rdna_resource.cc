@@ -1051,6 +1051,66 @@ MimgBindingPlan RdnaPlanMimg(const Program& program) {
   return plan;
 }
 
+void DecodeBufferFormat(u32 gfmt, u32& dfmt, u32& nfmt) {
+  // The gfx10.3 unified buffer-format enum (ISA spec "Buffer Format
+  // Conversions") is consecutive runs of one channel layout, each in the order
+  // UNorm, SNorm, UScaled, SScaled, UInt, SInt [, Float]. Map each run onto the
+  // GCN (dfmt, nfmt) pair. Listing only the float formats and splitting the
+  // rest as GCN bitfields turned Skyrim's 16_16_SScaled UI positions (26) into
+  // 8_8_8_8_SNorm and collapsed every glyph quad to a degenerate triangle.
+  struct Run {
+    u8 first, count, dfmt;
+    bool has_float;
+  };
+  static constexpr Run kRuns[] = {
+      {1, 6, 1, false},    // 8
+      {7, 7, 2, true},     // 16
+      {14, 6, 3, false},   // 8_8
+      {20, 3, 4, true},    // 32 (UInt, SInt, Float)
+      {23, 7, 5, true},    // 16_16
+      {30, 7, 7, true},    // 11_11_10
+      {37, 7, 6, true},    // 10_11_11
+      {44, 6, 8, false},   // 10_10_10_2
+      {50, 6, 9, false},   // 2_10_10_10
+      {56, 6, 10, false},  // 8_8_8_8
+      {62, 3, 11, true},   // 32_32
+      {65, 7, 12, true},   // 16_16_16_16
+      {72, 3, 13, true},   // 32_32_32
+      {75, 3, 14, true},   // 32_32_32_32
+  };
+  static constexpr u8 kNfmt[6] = {0, 1, 2, 3, 4, 5};
+  for (const Run& r : kRuns) {
+    if (gfmt < r.first || gfmt >= r.first + r.count)
+      continue;
+    const u32 i = gfmt - r.first;
+    dfmt = r.dfmt;
+    if (r.count == 3)  // UInt, SInt, Float
+      nfmt = i == 0 ? 4u : i == 1 ? 5u : 7u;
+    else if (r.has_float && i == 6)  // trailing Float of a 7-wide run
+      nfmt = 7;
+    else
+      nfmt = kNfmt[i];
+    return;
+  }
+  dfmt = 0;
+  nfmt = 0;
+}
+
+VBuffer DecodeVBuffer(const u32* d) {
+  VBuffer v;
+  v.base = (static_cast<u64>(d[1] & 0xFFFF) << 32) | d[0];
+  v.stride = (d[1] >> 16) & 0x3FFF;
+  v.num_records = d[2];
+  v.gfmt = (d[3] >> 12) & 0x7F;
+  DecodeBufferFormat(v.gfmt, v.dfmt, v.nfmt);
+  return v;
+}
+
+bool PlausibleVBuffer(const VBuffer& v) {
+  return v.stride && v.stride <= 256 && v.num_records &&
+         v.num_records <= 0x100000;
+}
+
 TImage DecodeTImage(const u32* d, bool r128) {
   TImage t;
   const u32 descriptor_dwords = r128 ? 4 : 8;

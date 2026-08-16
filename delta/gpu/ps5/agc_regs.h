@@ -158,6 +158,11 @@ struct Regs {
     return off < kRegFileSize ? data[off] : 0;
   }
 
+  // A run of registers as a pointer: the user-data windows a shader stage is
+  // launched with are read that way, and the file is flat, so they are
+  // contiguous.
+  const u32* At(u32 off) const { return &data[off]; }
+
   // 48-bit GPU shader address from a PGM_LO/HI register pair:
   // addr = (LO << 8) | ((HI & 0xFF) << 40)  (LO holds bits [39:8], HI [47:40]).
   u64 ShaderAddr(u32 lo_reg) const {

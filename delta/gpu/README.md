@@ -109,6 +109,30 @@ has always printed (`[drawpkt]`, `[csres]`), so lines grep as before,
 sink `utl::routeBaseLogging` installs at startup. Tracing on the submit thread
 with `fprintf` distorted the frame timings the traces exist to explain.
 
+## ps5/
+
+The same split, one unit per decision. AGC command buffers are PM4-framed with
+the PS4's `IT_` opcode table, so `pm4` is shared and the walk is the PS4 walk;
+everything below it is gfx10.3 and RDNA2:
+
+| unit | hides |
+|---|---|
+| `agc_regs` | the gfx10.3 register file and the offsets worth naming |
+| `guest_address` | the two address windows a packet field may be believed in |
+| `cmd_processor` | the AGC walk, the state it latches, the fence labels it writes |
+| `reg_state` | what a register write arriving through guest memory means |
+| `draw_state` | how register state plus tracked shader resources become one `rhi::DrawInfo` |
+| `compute_dispatch` | how COMPUTE_* registers plus a CS's descriptors become one `rhi::ComputeInfo` |
+| `shader_cache` | which recompiled module a given piece of guest state needs |
+| `cmd_trace` | the `DELTA_AGC_*` / `DELTA_GPU_*` instrumentation of the command stream |
+| `rdna/` | the RDNA2 decoder, descriptor decode and SPIR-V translator (see `ps5/README.md`) |
+
+`reg_state` has no PS4 counterpart because the PS4 has nothing to hide there:
+Gnm puts register values in the packet. AGC mostly does not -- it restores
+shadow images and submits blocks of (offset, value) entries whose layout is not
+documented anywhere and was read back out of the command stream -- so that
+guesswork is one unit rather than a third of the walk.
+
 ## Debugging a frame
 
 `DEBUGGER.md` documents the built-in frame debugger: `DELTA_GPU_CAPTURE=<frame>`
