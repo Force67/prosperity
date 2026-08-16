@@ -53,6 +53,145 @@ Id SignedAddOverflow(Translator& t, Id a, Id b, Id r) {
       t.And(t.And(t.Xor(a, r), t.Xor(b, r)), t.U32(0x80000000u)));
 }
 
+// EXEC combiners the saveexec/wrexec families share, in the order both ISAs
+// number them. andn1/orn1 exist only from gfx10 on.
+enum class ExecOp {
+  kAnd,
+  kOr,
+  kXor,
+  kAndn2,
+  kOrn2,
+  kNand,
+  kNor,
+  kXnor,
+  kAndn1,
+  kOrn1,
+};
+
+Id CombineExec(Translator& t, ExecOp kind, Id exec, Id src) {
+  switch (kind) {
+    case ExecOp::kOr:
+      return t.Or(src, exec);
+    case ExecOp::kXor:
+      return t.Xor(src, exec);
+    case ExecOp::kAndn2:
+      return t.And(src, t.Not(exec));
+    case ExecOp::kOrn2:
+      return t.Or(src, t.Not(exec));
+    case ExecOp::kNand:
+      return t.Not(t.And(src, exec));
+    case ExecOp::kNor:
+      return t.Not(t.Or(src, exec));
+    case ExecOp::kXnor:
+      return t.Not(t.Xor(src, exec));
+    case ExecOp::kAndn1:
+      return t.And(t.Not(src), exec);
+    case ExecOp::kOrn1:
+      return t.Or(t.Not(src), exec);
+    default:
+      return t.And(src, exec);
+  }
+}
+
+// EXEC = combine(EXEC, ssrc); sdst takes the SAVED mask, or the modified one
+// for the wrexec forms. SCC = (new EXEC != 0). One lane lives in bit 0 here, so
+// the whole family is one bit wide and the wave32/wave64 forms differ only in
+// how many dwords of sdst they write.
+void SaveExec(Translator& t,
+              ExecOp kind,
+              u32 sdst,
+              Id src,
+              bool wide,
+              bool write_modified) {
+  const Id old_exec = t.Exec();
+  const Id new_exec = t.And(CombineExec(t, kind, old_exec, src), t.U32(1));
+  t.SetSdst(sdst, 0, write_modified ? new_exec : old_exec);
+  if (wide)
+    t.SetSdst(sdst, 1, t.U32(0));
+  t.SetSg(126, new_exec);
+  t.SetSccBool(t.IsNonZero(new_exec));
+}
+
+// Lowest set bit of the {lo, hi} pair, or -1 when neither half has one. GLSL's
+// FindILsb already answers -1 for a zero input, which is the ISA's result too.
+Id FirstSet64(Translator& t, Id lo, Id hi) {
+  const Id none = t.U32(0xFFFFFFFFu);
+  const Id l = t.m.ExtInst(t.t_u, GLSLstd450FindILsb, {lo});
+  const Id h = t.m.ExtInst(t.t_u, GLSLstd450FindILsb, {hi});
+  const Id upper = t.SelectB(t.Eq(h, none), none, t.Add(h, t.U32(32)));
+  return t.SelectB(t.Eq(l, none), upper, l);
+}
+
+// Bits from the MSB of the 64-bit pair down to its highest set bit; -1 when the
+// whole pair is zero.
+Id LeadingZeros64(Translator& t, Id lo, Id hi) {
+  const Id l = t.m.ExtInst(t.t_u, GLSLstd450FindUMsb, {lo});
+  const Id h = t.m.ExtInst(t.t_u, GLSLstd450FindUMsb, {hi});
+  const Id from_lo =
+      t.SelectB(t.IsZero(lo), t.U32(0xFFFFFFFFu), t.Sub(t.U32(63), l));
+  return t.SelectB(t.IsZero(hi), from_lo, t.Sub(t.U32(31), h));
+}
+
+// The SOP1 opcodes gfx10 added above GFX7's last one (s_abs_i32, 0x34): the
+// andn1/orn1 EXEC combiners, the wrexec family and the wave32 32-bit saveexec
+// set. Numbering per LLVM's gfx10 SOP1 tables. Returns false for the slots that
+// stay refused.
+bool EmitGfx10Sop1(Translator& t, u32 op, u32 sdst, Id a) {
+  switch (op) {
+    case 0x37:
+      SaveExec(t, ExecOp::kAndn1, sdst, a, true, false);
+      return true;  // s_andn1_saveexec_b64
+    case 0x38:
+      SaveExec(t, ExecOp::kOrn1, sdst, a, true, false);
+      return true;  // s_orn1_saveexec_b64
+    case 0x39:
+      SaveExec(t, ExecOp::kAndn1, sdst, a, true, true);
+      return true;  // s_andn1_wrexec_b64
+    case 0x3a:
+      SaveExec(t, ExecOp::kAndn2, sdst, a, true, true);
+      return true;  // s_andn2_wrexec_b64
+    case 0x3b: {    // s_bitreplicate_b64_b32: every source bit doubled
+      const auto spread = [&](Id half) {
+        Id x = half;
+        x = t.And(t.Or(x, t.Shl(x, t.U32(8))), t.U32(0x00FF00FFu));
+        x = t.And(t.Or(x, t.Shl(x, t.U32(4))), t.U32(0x0F0F0F0Fu));
+        x = t.And(t.Or(x, t.Shl(x, t.U32(2))), t.U32(0x33333333u));
+        x = t.And(t.Or(x, t.Shl(x, t.U32(1))), t.U32(0x55555555u));
+        return t.Or(x, t.Shl(x, t.U32(1)));
+      };
+      t.SetSdst(sdst, 0, spread(t.And(a, t.U32(0xFFFF))));
+      t.SetSdst(sdst, 1, spread(t.Shr(a, t.U32(16))));
+      return true;
+    }
+    case 0x3c:
+    case 0x3d:
+    case 0x3e:
+    case 0x3f:
+    case 0x40:
+    case 0x41:
+    case 0x42:
+    case 0x43:
+      // s_{and,or,xor,andn2,orn2,nand,nor,xnor}_saveexec_b32, in the same
+      // order as the b64 block at 0x24.
+      SaveExec(t, static_cast<ExecOp>(op - 0x3c), sdst, a, false, false);
+      return true;
+    case 0x44:
+      SaveExec(t, ExecOp::kAndn1, sdst, a, false, false);
+      return true;  // s_andn1_saveexec_b32
+    case 0x45:
+      SaveExec(t, ExecOp::kOrn1, sdst, a, false, false);
+      return true;  // s_orn1_saveexec_b32
+    case 0x46:
+      SaveExec(t, ExecOp::kAndn1, sdst, a, false, true);
+      return true;  // s_andn1_wrexec_b32
+    case 0x47:
+      SaveExec(t, ExecOp::kAndn2, sdst, a, false, true);
+      return true;  // s_andn2_wrexec_b32
+    default:
+      return false;
+  }
+}
+
 Id ApplyOutputModifier(Translator& t, Id value, u32 omod) {
   switch (omod) {
     case 1:
@@ -147,8 +286,14 @@ void EmitSop1(Translator& t, const Inst& inst) {
     case 0x11:  // s_ff0_i32_b32
       t.SetSdst(sdst, 0, t.m.ExtInst(t.t_u, GLSLstd450FindILsb, {t.Not(a)}));
       break;
+    case 0x12:  // s_ff0_i32_b64
+      t.SetSdst(sdst, 0, FirstSet64(t, t.Not(a), t.Not(a_hi)));
+      break;
     case 0x13:  // s_ff1_i32_b32
       t.SetSdst(sdst, 0, t.m.ExtInst(t.t_u, GLSLstd450FindILsb, {a}));
+      break;
+    case 0x14:  // s_ff1_i32_b64
+      t.SetSdst(sdst, 0, FirstSet64(t, a, a_hi));
       break;
     case 0x15: {  // s_flbit_i32_b32: count from the MSB; -1 if src == 0
       const Id msb = t.m.ExtInst(t.t_u, GLSLstd450FindUMsb, {a});
@@ -157,12 +302,46 @@ void EmitSop1(Translator& t, const Inst& inst) {
           t.SelectB(t.IsZero(a), t.U32(0xFFFFFFFFu), t.Sub(t.U32(31), msb)));
       break;
     }
+    case 0x16:  // s_flbit_i32_b64
+      t.SetSdst(sdst, 0, LeadingZeros64(t, a, a_hi));
+      break;
     case 0x17: {  // s_flbit_i32: leading-sign-bit count; -1 if src is 0 or -1
       const Id smsb = t.m.Bitcast(t.t_u, t.m.ExtInst(t.t_i, GLSLstd450FindSMsb,
                                                      {t.m.Bitcast(t.t_i, a)}));
       t.SetSdst(sdst, 0,
                 t.SelectB(t.Eq(smsb, t.U32(0xFFFFFFFFu)), t.U32(0xFFFFFFFFu),
                           t.Sub(t.U32(31), smsb)));
+      break;
+    }
+    case 0x19:  // s_sext_i32_i8
+    case 0x1a:  // s_sext_i32_i16
+      t.SetSdst(sdst, 0,
+                t.m.Emit(spv::Op::OpBitFieldSExtract, t.t_u,
+                         {a, t.U32(0), t.U32(op == 0x19 ? 8 : 16)}));
+      break;
+    // s_bitset0/1: read-modify-write of sdst, with ssrc0 naming the bit.
+    case 0x1b:
+    case 0x1d: {
+      const Id bit = t.Shl(t.U32(1), t.And(a, t.U32(31)));
+      t.SetSdst(sdst, 0,
+                op == 0x1b ? t.And(t.Sdst(sdst), t.Not(bit))
+                           : t.Or(t.Sdst(sdst), bit));
+      break;
+    }
+    case 0x1c:
+    case 0x1e: {
+      const Id n = t.And(a, t.U32(63));
+      const Id bit = t.Shl(t.U32(1), t.And(n, t.U32(31)));
+      const Id upper = t.Uge(n, t.U32(32));
+      const Id lo_bit = t.SelectB(upper, t.U32(0), bit);
+      const Id hi_bit = t.SelectB(upper, bit, t.U32(0));
+      const bool clear = op == 0x1c;
+      t.SetSdst(sdst, 0,
+                clear ? t.And(t.Sdst(sdst, 0), t.Not(lo_bit))
+                      : t.Or(t.Sdst(sdst, 0), lo_bit));
+      t.SetSdst(sdst, 1,
+                clear ? t.And(t.Sdst(sdst, 1), t.Not(hi_bit))
+                      : t.Or(t.Sdst(sdst, 1), hi_bit));
       break;
     }
     // The main VS uses these to call/return from its fetch shader. Vertex
@@ -178,33 +357,10 @@ void EmitSop1(Translator& t, const Inst& inst) {
     case 0x28:
     case 0x29:
     case 0x2a:
-    case 0x2b: {
+    case 0x2b:
       // s_{and,or,xor,andn2,orn2,nand,nor,xnor}_saveexec_b64
-      const Id old_exec = t.Exec();
-      Id new_exec;
-      if (op == 0x24)
-        new_exec = t.And(old_exec, a);
-      else if (op == 0x25)
-        new_exec = t.Or(old_exec, a);
-      else if (op == 0x26)
-        new_exec = t.Xor(old_exec, a);
-      else if (op == 0x27)
-        new_exec = t.And(a, t.Not(old_exec));
-      else if (op == 0x28)
-        new_exec = t.Or(a, t.Not(old_exec));
-      else if (op == 0x29)
-        new_exec = t.Not(t.And(a, old_exec));
-      else if (op == 0x2a)
-        new_exec = t.Not(t.Or(a, old_exec));
-      else
-        new_exec = t.Not(t.Xor(a, old_exec));
-      new_exec = t.And(new_exec, t.U32(1));
-      t.SetSdst(sdst, 0, old_exec);
-      t.SetSdst(sdst, 1, t.U32(0));
-      t.SetSg(126, new_exec);
-      t.SetSccBool(t.IsNonZero(new_exec));
+      SaveExec(t, static_cast<ExecOp>(op - 0x24), sdst, a, true, false);
       break;
-    }
     case 0x34: {  // s_abs_i32
       const Id r = t.m.Bitcast(
           t.t_u, t.m.ExtInst(t.t_i, GLSLstd450SAbs, {t.m.Bitcast(t.t_i, a)}));
@@ -243,7 +399,10 @@ void EmitSop1(Translator& t, const Inst& inst) {
       break;
     }
     default:
-      WarnUnsupported("sop1", op);
+      // gfx10 keeps GFX7's numbering right through s_abs_i32 and appends its
+      // own block above it, so only an RDNA program can mean anything there.
+      if (!t.rdna_sources || !EmitGfx10Sop1(t, op, sdst, a))
+        WarnUnsupported("sop1", op);
       break;
   }
 }
@@ -436,6 +595,26 @@ void EmitSop2(Translator& t, const Inst& inst) {
     case 0x24: {  // s_bfm_b32: mask = ((1 << width) - 1) << offset
       const Id width = t.And(a, t.U32(31)), off = t.And(b, t.U32(31));
       r = t.Shl(t.Sub(t.Shl(t.U32(1), width), t.U32(1)), off);
+      break;
+    }
+    case 0x25: {  // s_bfm_b64: ((1 << width) - 1) << offset, 64 bits wide
+      const Id width = t.And(a, t.U32(63)), off = t.And(b, t.U32(63));
+      const Id w_wide = t.Uge(width, t.U32(32));
+      const Id lo_ones = t.SelectB(
+          w_wide, t.U32(0xFFFFFFFFu),
+          t.Sub(t.Shl(t.U32(1), t.And(width, t.U32(31))), t.U32(1)));
+      const Id hi_ones =
+          t.SelectB(w_wide,
+                    t.Sub(t.Shl(t.U32(1), t.And(t.Sub(width, t.U32(32)),
+                                                t.U32(31))),
+                          t.U32(1)),
+                    t.U32(0));
+      const Id n_lo = t.And(off, t.U32(31)), o_wide = t.Uge(off, t.U32(32));
+      const Id inv = t.And(t.Sub(t.U32(32), n_lo), t.U32(31));
+      const Id cross = t.SelectB(t.IsZero(off), t.U32(0), t.Shr(lo_ones, inv));
+      r = t.SelectB(o_wide, t.U32(0), t.Shl(lo_ones, n_lo));
+      r_hi = t.SelectB(o_wide, t.Shl(lo_ones, n_lo),
+                       t.Or(t.Shl(hi_ones, n_lo), cross));
       break;
     }
     case 0x26:
@@ -1751,6 +1930,18 @@ void EmitVop3(Translator& t,
       t.SetSdst(sdst, 0, t.And(bit64, t.U32(1)));
       break;
     }
+    // gfx10 gave v_readlane/v_writelane their own VOP3 opcodes; GFX7 kept them
+    // in the VOP2 slots that hold v_cndmask and v_add there, so the VOP3
+    // numbering below 0x200 could not carry them.
+    case 0x360:
+    case 0x361:
+      if (!t.rdna_sources) {
+        WarnUnsupported("vop3", op);
+        set_f(s0);
+        break;
+      }
+      EmitVop2(t, op == 0x360 ? 0x01 : 0x02, vdst, s0, s1, 0, false, 0);
+      break;
     default:
       WarnUnsupported("vop3", op);
       set_f(s0);

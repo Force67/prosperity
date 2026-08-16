@@ -79,6 +79,63 @@ struct ScalarWrite {
   u32 count = 0;
 };
 
+// SGPRs an SOP1 writes, from the gfx10 opcode table (LLVM SOPInstructions.td
+// SOP1_Real_gfx10). RDNA renumbered the whole block: the 64-bit saveexec family
+// GFX7 puts at 0x24-0x2b is still there, but gfx10 added the wave32 (b32) forms
+// at 0x3c-0x47 and four more 64-bit ones at 0x37-0x3b -- including
+// s_andn1_saveexec_b64, which Demon's Souls' G-buffer shaders use. Reading one
+// of those as a single-dword write leaves the second SGPR looking like live
+// user data, which is exactly how a stale value reaches a descriptor.
+// Everything unrecognised counts as a pair for the same reason.
+inline u32 Sop1WriteDwords(u32 op) {
+  switch (op) {
+    case 0x03:  // s_mov_b32
+    case 0x05:  // s_cmov_b32
+    case 0x07:  // s_not_b32
+    case 0x09:  // s_wqm_b32
+    case 0x0b:  // s_brev_b32
+    case 0x0d:  // s_bcnt0_i32_b32
+    case 0x0e:  // s_bcnt0_i32_b64   (64-bit source, 32-bit result)
+    case 0x0f:  // s_bcnt1_i32_b32
+    case 0x10:  // s_bcnt1_i32_b64
+    case 0x11:  // s_ff0_i32_b32
+    case 0x12:  // s_ff0_i32_b64
+    case 0x13:  // s_ff1_i32_b32
+    case 0x14:  // s_ff1_i32_b64
+    case 0x15:  // s_flbit_i32_b32
+    case 0x16:  // s_flbit_i32_b64
+    case 0x17:  // s_flbit_i32
+    case 0x18:  // s_flbit_i32_i64
+    case 0x19:  // s_sext_i32_i8
+    case 0x1a:  // s_sext_i32_i16
+    case 0x1b:  // s_bitset0_b32
+    case 0x1d:  // s_bitset1_b32
+    case 0x2c:  // s_quadmask_b32
+    case 0x2e:  // s_movrels_b32
+    case 0x30:  // s_movreld_b32
+    case 0x34:  // s_abs_i32
+    case 0x3c:  // s_and_saveexec_b32 .. s_andn2_wrexec_b32
+    case 0x3d:
+    case 0x3e:
+    case 0x3f:
+    case 0x40:
+    case 0x41:
+    case 0x42:
+    case 0x43:
+    case 0x44:
+    case 0x45:
+    case 0x46:
+    case 0x47:
+    case 0x49:  // s_movrelsd_2_b32
+      return 1;
+    case 0x20:  // s_setpc_b64 writes no SGPR at all
+    case 0x22:  // s_rfe_b64
+      return 0;
+    default:
+      return 2;
+  }
+}
+
 inline ScalarWrite DecodeScalarWrite(const gpu::gcn::Inst& inst) {
   using gpu::gcn::Enc;
   if (inst.enc == Enc::kSmrd) {
@@ -97,14 +154,11 @@ inline ScalarWrite DecodeScalarWrite(const gpu::gcn::Inst& inst) {
     return {};
   }
   if (inst.enc == Enc::kSop1) {
-    if (inst.opcode == 0x20 || inst.opcode == 0x21)
-      return {};
-    const bool wide = inst.opcode == 0x04 || inst.opcode == 0x06 ||
-                      inst.opcode == 0x08 || inst.opcode == 0x0A ||
-                      (inst.opcode >= 0x24 && inst.opcode <= 0x2B);
+    const u32 count = Sop1WriteDwords(inst.opcode);
     const u32 sdst = (inst.raw[0] >> 16) & 0x7F;
-    return sdst == 125 ? ScalarWrite{}
-                       : ScalarWrite{.first = sdst, .count = wide ? 2u : 1u};
+    return sdst == 125 || !count
+               ? ScalarWrite{}
+               : ScalarWrite{.first = sdst, .count = count};
   }
   if (inst.enc == Enc::kSop2) {
     const bool wide =
@@ -139,24 +193,43 @@ ScalarWrites PossibleScalarWrites(const gpu::gcn::Inst& inst,
                                   bool scc_trusted = false);
 
 // SGPRs whose live value ResolveBuffers reproduces faithfully. The replay walks
-// the instruction list once and in order, so it only tells the truth about the
-// shader's unconditional prologue: a register written under a branch or inside
-// a loop body keeps whatever value that single walk left behind, and one a
-// vector op (or a scalar op ScalarEval does not model) wrote keeps a stale
-// value instead of reading back as unknown. A compute dispatch writes guest
-// memory, so a descriptor built out of an untrusted register is declined rather
-// than guessed.
+// the instruction list once and in order, so what it holds at a use is what the
+// LAST write before that use left behind. That is the wave's value only when
+// that write ran on every path to the use, ran exactly once, and is an
+// operation ScalarEval models. A compute dispatch writes guest memory, so a
+// descriptor built out of a register that fails any of the three is declined
+// rather than guessed -- and which one it failed is reported, so the gap is
+// visible rather than just a count.
 struct ScalarReplayPlan {
   static constexpr u32 kRegs = 136;
-  static constexpr u32 kNever = 0xFFFFFFFFu;
-  // Instruction index of the first write to each SGPR the replay loses, and
-  // where its single linear walk stops matching execution (the first branch, or
-  // the first instruction a back edge repeats).
-  u32 first_lost[kRegs];
-  u32 prefix_end = 0;
+  enum Loss : u8 {
+    kCovered = 0,
+    kUnmodelled,   // written by an op ScalarEval does not evaluate
+    kConditional,  // written under a branch, or inside a loop body
+    kLoopCarried,  // a later write a back edge can run before the use
+  };
+  struct Write {
+    u32 index;
+    u32 first;
+    u32 count;
+    bool exact;
+  };
+  // Instruction indices. A back edge is a branch whose target precedes it.
+  struct BackEdge {
+    u32 target;
+    u32 source;
+  };
+  std::vector<Write> writes;
+  std::vector<BackEdge> back_edges;
+  std::vector<u32> targets;
+  bool indirect = false;  // s_setpc: control may reach anywhere from anywhere
+
   // Does the replay hold the live value of sgpr[dwords] at instruction
-  // use_index?
-  bool Covers(u32 sgpr, u32 dwords, u32 use_index) const;
+  // use_index, and if not, why not?
+  Loss LossAt(u32 sgpr, u32 dwords, u32 use_index) const;
+  bool Covers(u32 sgpr, u32 dwords, u32 use_index) const {
+    return LossAt(sgpr, dwords, use_index) == kCovered;
+  }
 };
 
 ScalarReplayPlan PlanScalarReplay(const Program& program);

@@ -365,11 +365,13 @@ struct ScalarEval {
           ClearDest(sdst, 0);
           ClearDest(sdst, 1);
         }
-      } else if (inst.opcode != 0x20) {
-        ClearDest(sdst, 0);
-        if (inst.opcode == 0x06 || inst.opcode == 0x08 || inst.opcode == 0x0A ||
-            inst.opcode == 0x21 || (inst.opcode >= 0x24 && inst.opcode <= 0x2B))
-          ClearDest(sdst, 1);
+      } else {
+        // The gfx10 SOP1 table decides how wide the destination is; a 64-bit
+        // form whose second dword stayed "known" would hand a descriptor half
+        // a stale user-data pair.
+        const u32 dwords = Sop1WriteDwords(inst.opcode);
+        for (u32 i = 0; i < dwords; i++)
+          ClearDest(sdst, i);
       }
       return;
     }
@@ -765,65 +767,19 @@ int BranchKind(const Inst& inst) {
   }
 }
 
-// How far into the program the replay's single linear walk matches execution:
-// up to the first branch (after it, whether an instruction ran at all depends
-// on the wave) and up to the target of any back edge (from there on it runs
-// more than once).
-u32 ReplayPrefixEnd(const Program& program) {
-  u32 end = static_cast<u32>(program.size());
-  for (u32 i = 0; i < program.size(); i++) {
-    const int kind = BranchKind(program[i]);
-    if (!kind)
-      continue;
-    end = std::min(end, i);
-    if (kind != 1 && kind != 2)
-      continue;
-    const i32 simm = static_cast<i16>(program[i].raw[0] & 0xFFFF);
-    const i64 target = static_cast<i64>(program[i].pc) +
-                       static_cast<i64>(program[i].size) + simm;
-    if (target >= static_cast<i64>(program[i].pc))
-      continue;
-    for (u32 j = 0; j < i; j++)
-      if (static_cast<i64>(program[j].pc) >= target) {
-        end = std::min(end, j);
-        break;
-      }
-  }
-  return end;
+// Instruction index a relative branch lands on. Targets outside the decoded
+// program read as one past the end, which no interval test can match.
+u32 BranchTargetIndex(const Program& program, u32 i) {
+  const i32 simm = static_cast<i16>(program[i].raw[0] & 0xFFFF);
+  const i64 target = static_cast<i64>(program[i].pc) +
+                     static_cast<i64>(program[i].size) + simm;
+  for (u32 j = 0; j < program.size(); j++)
+    if (static_cast<i64>(program[j].pc) >= target)
+      return j;
+  return static_cast<u32>(program.size());
 }
 
-// SGPRs an SOP1 writes. The 32-bit forms of the gfx10 block are listed; every
-// other opcode (including the unassigned slots) counts as an SGPR pair, since
-// leaving the second dword looking untouched is what would let a stale value
-// pass for a descriptor.
-u32 Sop1WriteDwords(u32 op) {
-  switch (op) {
-    case 0x03:
-    case 0x05:
-    case 0x07:
-    case 0x09:
-    case 0x0b:
-    case 0x0d:
-    case 0x0f:
-    case 0x11:
-    case 0x13:
-    case 0x15:
-    case 0x17:
-    case 0x19:
-    case 0x1a:
-    case 0x1b:
-    case 0x1d:
-    case 0x2c:
-    case 0x2e:
-    case 0x30:
-    case 0x34:
-      return 1;
-    default:
-      return 2;
-  }
-}
-
-// Same for SOP2: the logical/shift block alternates 32-bit (even) and 64-bit
+// SOP2: the logical/shift block alternates 32-bit (even) and 64-bit
 // (odd) forms, and anything unrecognised counts as a pair.
 u32 Sop2WriteDwords(u32 op) {
   if (op <= 0x0A || op == 0x26 || op == 0x27 || op == 0x28 || op == 0x2c ||
@@ -886,6 +842,22 @@ bool WritesSccUnmodelled(const Inst& inst) {
   return inst.enc == Enc::kSop1 && inst.opcode != 0x03 && inst.opcode != 0x04;
 }
 
+// ...and which instructions make it faithful again. SOP1 is the only writer
+// ScalarEval leaves alone: every SOPC, every SOP2 bar s_cselect (which reads
+// SCC without writing it) and the SOPK compares either compute SCC or mark it
+// unknown, and an unknown SCC only clears a later s_cselect's destination. So
+// the distrust an SOP1 earns lasts until the next real SCC write, not to the
+// end of the shader.
+bool RestoresScc(const Inst& inst) {
+  if (inst.enc == Enc::kSopc)
+    return true;
+  if (inst.enc == Enc::kSop2)
+    return inst.opcode != 0x0A && inst.opcode != 0x0B;
+  if (inst.enc == Enc::kSopk)
+    return inst.opcode >= 0x03 && inst.opcode <= 0x0F;
+  return false;
+}
+
 }  // namespace
 
 ScalarWrites PossibleScalarWrites(const Inst& inst, bool scc_trusted) {
@@ -944,46 +916,79 @@ ScalarWrites PossibleScalarWrites(const Inst& inst, bool scc_trusted) {
   }
 }
 
-bool ScalarReplayPlan::Covers(u32 sgpr, u32 dwords, u32 use_index) const {
+ScalarReplayPlan::Loss ScalarReplayPlan::LossAt(u32 sgpr,
+                                               u32 dwords,
+                                               u32 use_index) const {
   if (sgpr + dwords > kRegs)
+    return kUnmodelled;
+  // EXEC is seeded with a fictional one-lane mask, not read from the dispatch.
+  if (sgpr < 128 && sgpr + dwords > 126)
+    return kUnmodelled;
+  // A branch target inside (write, use] means some path reaches the use
+  // without the write; a back edge spanning the write means the wave ran it
+  // more often than the replay's single walk did.
+  const auto skippable = [&](u32 write) {
+    for (u32 target : targets)
+      if (target > write && target <= use_index)
+        return true;
+    for (const BackEdge& edge : back_edges)
+      if (edge.target <= write && write <= edge.source)
+        return true;
     return false;
-  for (u32 i = 0; i < dwords; i++) {
-    const u32 lost = first_lost[sgpr + i];
-    if (lost == kNever)
-      continue;
-    // Inside the prologue the consuming instruction itself runs exactly once,
-    // so only a write the replay already got wrong before it can have reached
-    // it. Past that, a write anywhere in the program may run first.
-    if (use_index < prefix_end && lost > use_index)
-      continue;
+  };
+  // A write the program places after the use still runs before it if a back
+  // edge carries execution from the write back to the use.
+  const auto carried = [&](u32 write) {
+    for (const BackEdge& edge : back_edges)
+      if (edge.target <= use_index && edge.source >= write)
+        return true;
     return false;
+  };
+
+  Loss worst = kCovered;
+  const auto note = [&](Loss loss) { worst = std::max(worst, loss); };
+  for (u32 reg = sgpr; reg < sgpr + dwords; reg++) {
+    const Write* last = nullptr;
+    for (const Write& write : writes) {
+      if (reg < write.first || reg >= write.first + write.count)
+        continue;
+      if (write.index < use_index)
+        last = &write;  // writes are recorded in program order
+      else if (indirect || carried(write.index))
+        note(kLoopCarried);
+    }
+    if (!last)
+      continue;  // never written: still the user data the dispatch seeded
+    if (!last->exact)
+      note(kUnmodelled);
+    else if (indirect || skippable(last->index))
+      note(kConditional);
   }
-  return true;
+  return worst;
 }
 
 ScalarReplayPlan PlanScalarReplay(const Program& program) {
   ScalarReplayPlan plan;
-  std::fill(std::begin(plan.first_lost), std::end(plan.first_lost),
-            ScalarReplayPlan::kNever);
-  // EXEC is seeded with a fictional one-lane mask, not read from the dispatch.
-  plan.first_lost[126] = plan.first_lost[127] = 0;
-  plan.prefix_end = ReplayPrefixEnd(program);
-
   bool scc_trusted = true;
   u32 index = 0;
   for (const Inst& inst : program) {
-    const bool linear = index < plan.prefix_end;
-    for (const ScalarWrites::Range& range :
-         PossibleScalarWrites(inst, scc_trusted).range) {
-      if (linear && range.exact)
-        continue;
-      for (u32 k = 0;
-           k < range.count && range.first + k < ScalarReplayPlan::kRegs; k++)
-        plan.first_lost[range.first + k] =
-            std::min(plan.first_lost[range.first + k], index);
+    const int kind = BranchKind(inst);
+    if (kind == 4)
+      plan.indirect = true;
+    if (kind == 1 || kind == 2) {
+      const u32 target = BranchTargetIndex(program, index);
+      plan.targets.push_back(target);
+      if (target <= index)
+        plan.back_edges.push_back({target, index});
     }
+    for (const ScalarWrites::Range& range :
+         PossibleScalarWrites(inst, scc_trusted).range)
+      if (range.count)
+        plan.writes.push_back({index, range.first, range.count, range.exact});
     if (WritesSccUnmodelled(inst))
       scc_trusted = false;
+    else if (RestoresScc(inst))
+      scc_trusted = true;
     index++;
   }
   return plan;
@@ -1290,6 +1295,24 @@ std::unordered_map<u32, BufferResource> ResolveBuffers(
         resource.descriptor_dwords = dwords;
         std::memcpy(resource.descriptor, &eval.sgpr[srsrc],
                     dwords * sizeof(u32));
+        resource.descriptor_valid = true;
+        out.emplace(inst.pc, resource);
+      }
+    } else if (inst.enc == Enc::kFlat) {
+      // A global_ access addresses s[SADDR:SADDR+1] + v[ADDR] + offset, so the
+      // scalar pair is the resource and the VGPR is a byte offset into it.
+      // gfx10.3 FLAT: w0[15:14] SEG (2 = global), w1[22:16] SADDR, with 0x7d
+      // (and gfx9's 0x7f) reading as NULL. That pair sits well past the
+      // user-data window -- s[48:49] in this title -- so the replay is the only
+      // thing that can recover it.
+      const u32 seg = (inst.raw[0] >> 14) & 0x3;
+      const u32 saddr = (inst.raw[1] >> 16) & 0x7F;
+      if (seg == 2 && saddr != 0x7D && saddr != 0x7F &&
+          eval.AllKnown(saddr, 2)) {
+        BufferResource resource;
+        resource.base = eval.Ptr(saddr);
+        resource.descriptor_dwords = 2;
+        std::memcpy(resource.descriptor, &eval.sgpr[saddr], 2 * sizeof(u32));
         resource.descriptor_valid = true;
         out.emplace(inst.pc, resource);
       }

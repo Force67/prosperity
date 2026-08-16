@@ -115,6 +115,95 @@ bool RdnaMtbufStore(u32 op) {
   return (op >= 0x04 && op <= 0x07) || (op >= 0x0c && op <= 0x0f);
 }
 
+// gfx10.3 FLAT/GLOBAL/SCRATCH field layout, from LLVM FLATInstructions.td
+// (class FLAT_Real plus the gfx10 overrides in FLAT_Real_gfx10):
+//   w0[11:0] OFFSET   w0[12] DLC   w0[13] LDS   w0[15:14] SEG
+//   w0[16] GLC        w0[17] SLC   w0[24:18] OP
+//   w1[7:0] ADDR      w1[15:8] DATA  w1[22:16] SADDR  w1[31:24] VDST
+// SEG selects the addressing mode: 0 flat (generic), 1 scratch, 2 global.
+// SADDR reads NULL as 0x7d on gfx10 (0x7f on gfx9; accept both). The immediate
+// is 11-bit UNSIGNED for flat and 12-bit SIGNED for global/scratch.
+struct Flat {
+  u32 op;
+  u32 seg;
+  u32 addr;
+  u32 data;
+  u32 saddr;
+  u32 vdst;
+  i32 offset;
+  bool dlc;
+  bool lds;
+  bool glc;
+  bool slc;
+  bool saddr_null;
+};
+
+Flat DecodeFlat(const Inst& inst) {
+  const u32 w = inst.raw[0], w1 = inst.raw[1];
+  const u32 seg = (w >> 14) & 0x3, off = w & 0xFFF;
+  const u32 saddr = (w1 >> 16) & 0x7F;
+  return {
+      .op = (w >> 18) & 0x7F,
+      .seg = seg,
+      .addr = w1 & 0xFF,
+      .data = (w1 >> 8) & 0xFF,
+      .saddr = saddr,
+      .vdst = (w1 >> 24) & 0xFF,
+      .offset = seg == 0 ? static_cast<i32>(off & 0x7FF)
+                         : (static_cast<i32>(off << 20) >> 20),
+      .dlc = ((w >> 12) & 1) != 0,
+      .lds = ((w >> 13) & 1) != 0,
+      .glc = ((w >> 16) & 1) != 0,
+      .slc = ((w >> 17) & 1) != 0,
+      .saddr_null = saddr == 0x7D || saddr == 0x7F,
+  };
+}
+
+// Dwords a FLAT-family load moves; 0 = not a load. The opcode numbers are the
+// same in all three segments (LLVM's ENC_FLAT / ENC_FLAT_GLBL / ENC_FLAT_SCRATCH
+// tables agree), and x4 precedes x3 exactly as in MUBUF.
+u32 FlatLoadDwords(u32 op) {
+  switch (op) {
+    case 0x08:  // ubyte
+    case 0x09:  // sbyte
+    case 0x0a:  // ushort
+    case 0x0b:  // sshort
+    case 0x0c:  // dword
+      return 1;
+    case 0x0d:
+      return 2;
+    case 0x0e:
+      return 4;
+    case 0x0f:
+      return 3;
+    default:
+      return 0;
+  }
+}
+
+bool FlatIsStore(u32 op) {
+  return op >= 0x18 && op <= 0x1f;
+}
+
+// The one FLAT-family form the graphics resource model can express: a GLOBAL
+// load whose base is a scalar register pair. Its address is
+// s[SADDR:SADDR+1] + zext(v[ADDR]) + sext(OFFSET), so the pair names a
+// resource and the VGPR is a byte offset into it -- the shape a set-2 window
+// already has. A negative immediate would read below that base with nothing to
+// clamp into, so it stays out.
+bool FlatServableLoad(const Flat& f) {
+  return f.seg == 2 && !f.saddr_null && !f.lds && FlatLoadDwords(f.op) &&
+         f.offset >= 0;
+}
+
+// ShaderBuffer::srsrc_sgpr for such a load. The descriptor is a 2-dword raw
+// pointer, not a 4-dword V#, so it is tagged out of the SGPR number space: the
+// command processor's V#-decoding fallback indexes user data with this field
+// and its bound check (srsrc_sgpr + 3 < user_sgprs) can never let a tagged
+// entry through, which makes an unresolved base read as zeros instead of as a
+// V# decoded out of an address.
+constexpr u32 kFlatBaseTag = 0x100;
+
 // A buffer_load_format is a real PER-VERTEX fetch when it is IDXEN and its
 // srsrc V# is TABLE-CHAINED (loaded from a user-data descriptor table,
 // `chained`) -- regardless of which VGPR indexes it. NGG streams index
@@ -708,6 +797,8 @@ bool RdnaPlanCbufs(const Program& program,
 // belongs here rather than in a 64-byte UBO because its index is per-lane and
 // reaches the whole resource. The shared PlanGfxBuffers cannot be reused: its
 // descriptor-reload versioning reads the SMEM sdst with GCN field positions.
+// global_load through a scalar base pair shares this window model (see
+// FlatServableLoad), keyed by that pair rather than by a V# quad.
 void RdnaPlanGfxBuffers(const Program& program,
                         u32 first_binding,
                         const std::unordered_set<u32>* claimed,
@@ -715,13 +806,23 @@ void RdnaPlanGfxBuffers(const Program& program,
                         std::unordered_map<u32, u32>& bindings) {
   std::unordered_map<u32, u32> by_srsrc;
   for (const Inst& inst : program) {
-    const bool raw = inst.opcode >= 0x08 && inst.opcode <= 0x0f;
-    const bool format = inst.opcode <= 0x03;
-    if (inst.enc != Enc::kMubuf || (!raw && !format))
-      continue;
-    if (claimed && claimed->count(inst.pc))
-      continue;
-    const u32 srsrc = ((inst.raw[1] >> 16) & 0x1F) * 4;
+    u32 srsrc;
+    if (inst.enc == Enc::kFlat) {
+      // A servable global_load takes the same window treatment; RdnaEmitFlat
+      // reports every other FLAT form at emit time, each with its own tag.
+      const Flat f = DecodeFlat(inst);
+      if (!FlatServableLoad(f))
+        continue;
+      srsrc = kFlatBaseTag + f.saddr;
+    } else {
+      const bool raw = inst.opcode >= 0x08 && inst.opcode <= 0x0f;
+      const bool format = inst.opcode <= 0x03;
+      if (inst.enc != Enc::kMubuf || (!raw && !format))
+        continue;
+      if (claimed && claimed->count(inst.pc))
+        continue;
+      srsrc = ((inst.raw[1] >> 16) & 0x1F) * 4;
+    }
     const auto found = by_srsrc.find(srsrc);
     if (found != by_srsrc.end()) {
       bindings[inst.pc] = found->second;
@@ -1065,6 +1166,92 @@ bool RdnaEmitBufFormatLoad(Translator& t,
     channel_bit += bits;
   }
   return true;
+}
+
+// ---- FLAT / GLOBAL / SCRATCH ------------------------------------------------
+// Only global_load through a scalar base pair is expressible against a bound
+// resource (FlatServableLoad): the scalar pair is the window the planner bound
+// and the VGPR is a byte offset into it. Every other form carries the whole
+// 64-bit pointer per lane -- a generic FLAT access, a SADDR-NULL global, or
+// per-thread SCRATCH -- with nothing naming a resource, so each keeps its own
+// reject tag rather than reading somewhere plausible. GLC/SLC/DLC only pick
+// which caches a load bypasses, never the data it returns, so they are ignored.
+void RdnaEmitFlat(Translator& t, const Inst& inst, StageContext& sc) {
+  const u32 w = inst.raw[0], w1 = inst.raw[1];
+  const Flat f = DecodeFlat(inst);
+  if (FlatIsStore(f.op)) {
+    // Same reasoning as the buffer stores: the set-2 window is a per-draw
+    // staging copy nothing reads back, and dropping the write keeps the draw a
+    // rejected shader would have lost.
+    gpu::gcn::AuditNote("flat.store.rdna", f.op);
+    if (ShDbg() && !g_warned_store) {
+      g_warned_store = true;
+      BASE_LOGI("gcnspv", "dropped flat store op={:#x} @pc={:04x}", f.op,
+                inst.pc);
+    }
+    return;
+  }
+  if (f.lds) {
+    gpu::gcn::WarnUnsupported("flat.lds-dma.rdna", f.op, w, w1);
+    return;
+  }
+  if (f.seg == 1) {
+    gpu::gcn::WarnUnsupported("flat.scratch.rdna", f.op, w, w1);
+    return;
+  }
+  if (f.seg != 2 || f.saddr_null) {
+    gpu::gcn::WarnUnsupported("flat.vgpr-address.rdna", f.op, w, w1);
+    return;
+  }
+  const u32 n = FlatLoadDwords(f.op);
+  if (!n) {  // atomics and the d16 forms
+    gpu::gcn::WarnUnsupported("flat.rdna", f.op, w, w1);
+    return;
+  }
+  if (f.offset < 0) {
+    gpu::gcn::WarnUnsupported("flat.negative-offset.rdna", f.op, w, w1);
+    return;
+  }
+  const auto bind = sc.gfx_buf_bind.find(inst.pc);
+  if (bind == sc.gfx_buf_bind.end()) {  // over the binding cap
+    gpu::gcn::WarnUnsupported("flat.unplanned.rdna", f.op, w, w1);
+    return;
+  }
+  const Id var = t.EnsureGfxBuffer(bind->second);
+  const Id p_u = t.m.TypePointer(spv::StorageClass::StorageBuffer, t.t_u);
+  const auto dword = [&](Id index) {
+    return t.m.Load(
+        t.t_u,
+        t.m.AccessChain(
+            p_u, var,
+            {t.U32(0),
+             t.UMin(index, t.U32(gpu::gcn::kGfxBufferDwords - 1))}));
+  };
+  // The VGPR offset is a 32-bit UNSIGNED byte offset from the scalar base
+  // (LLVM's SelectGlobalSAddr matches "64-bit SGPR base + zext vgpr offset +
+  // sext imm offset"). Clamping mirrors EmitGfxMubuf: only a prefix of the
+  // resource is staged, and hardware reads past a resource return zero, which
+  // the ring's zeroed tail also gives.
+  const Id byte_off =
+      t.UMin(t.Add(t.Vg(f.addr), t.U32(static_cast<u32>(f.offset))),
+             t.U32(gpu::gcn::kGfxBufferDwords * 4 - 4));
+  if (f.op >= 0x08 && f.op <= 0x0b) {
+    const u32 bits = f.op <= 0x09 ? 8u : 16u;
+    const bool sext = f.op == 0x09 || f.op == 0x0b;
+    const Id word = dword(t.Shr(byte_off, t.U32(2)));
+    const Id shift = t.Shl(t.And(byte_off, t.U32(3)), t.U32(3));
+    t.SetVg(f.vdst,
+            sext ? t.m.Bitcast(t.t_u,
+                               t.m.Emit(spv::Op::OpBitFieldSExtract, t.t_i,
+                                        {t.m.Bitcast(t.t_i, word), shift,
+                                         t.U32(bits)}))
+                 : t.m.Emit(spv::Op::OpBitFieldUExtract, t.t_u,
+                            {word, shift, t.U32(bits)}));
+    return;
+  }
+  const Id dword0 = t.Shr(byte_off, t.U32(2));
+  for (u32 k = 0; k < n; k++)
+    t.SetVg(f.vdst + k, dword(t.Add(dword0, t.U32(k))));
 }
 
 // ---- exports ----------------------------------------------------------------
@@ -1568,6 +1755,11 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       // GFX7's explicit-S2 cndmask VOP3 op is 0x100.
       if (op == 0x101)
         op = 0x100;
+      // gfx10 dropped v_readlane_b32 from VOP2 and gave it the VOP3-only slot
+      // 0x360; the shared emitter knows it as GFX7's VOP2 alias 0x101, the slot
+      // RDNA2 handed to v_cndmask above.
+      if (rdna_op == 0x360)
+        op = 0x101;
       const u32 s0 = w1 & 0x1FF, s1 = (w1 >> 9) & 0x1FF;
       const u32 s2 = (w1 >> 18) & 0x1FF, neg = (w1 >> 29) & 7;
       const bool vop3b = RdnaVop3HasSdst(op);
@@ -1940,7 +2132,7 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       break;
     }
     case Enc::kFlat:
-      gpu::gcn::WarnUnsupported("flat.rdna", inst.opcode, w, w1);
+      RdnaEmitFlat(t, inst, sc);
       break;
     default:
       gpu::gcn::WarnUnsupported("rdna", inst.opcode, w, w1);

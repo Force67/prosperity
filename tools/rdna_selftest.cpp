@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "guest_memory.h"
+#include "gcn/gcn_detile.h"
 #include "gcn/spirv/spv_post.h"
 #include "ps5/rdna/rdna_decode.h"
 #include "ps5/rdna/rdna_resource.h"
@@ -178,6 +179,18 @@ void mimg(std::vector<u32> &out, u32 op, u32 dmask,
                 ((dim & 0x7) << 3) | ((op >> 7) & 1));
   out.push_back(((ssamp & 0x1F) << 21) | ((srsrc & 0x1F) << 16) |
                 ((vdata & 0xFF) << 8) | (vaddr & 0xFF));
+}
+
+// FLAT/GLOBAL/SCRATCH: word0 [31:26]=0x37, op[24:18], slc[17], glc[16],
+// seg[15:14], lds[13], dlc[12], offset[11:0]; word1 vdst[31:24], saddr[22:16],
+// data[15:8], addr[7:0]. seg 0 = flat, 1 = scratch, 2 = global; saddr 0x7d is
+// NULL (no scalar base).
+void flat(std::vector<u32> &out, u32 op, u32 seg, u32 vdst,
+          u32 addr, u32 data, u32 saddr, u32 offset = 0) {
+  out.push_back((0x37u << 26) | ((op & 0x7F) << 18) | ((seg & 0x3) << 14) |
+                (offset & 0xFFF));
+  out.push_back(((vdst & 0xFF) << 24) | ((saddr & 0x7F) << 16) |
+                ((data & 0xFF) << 8) | (addr & 0xFF));
 }
 
 void mubuf(std::vector<u32> &out, u32 op, u32 srsrc) {
@@ -429,6 +442,137 @@ int main() {
         gpu::rdna::Recompile(store_vs.data(), ps.data(), user_data, user_data);
     expect(stored.ok, "buffer_store_format is dropped, not rejected");
     expect(stored.vs_bufs.empty(), "a dropped store spends no binding");
+  }
+
+  {
+    // FLAT family. The first three dwords pairs are the real gfx10.3
+    // instructions Demon's Souls' G-buffer PS uses (from an emulator run):
+    //   global_load_dword   v1,     v1, s[48:49] offset:12
+    //   global_load_dwordx3 v[4:6], v4, s[48:49]
+    //   global_load_dwordx4 v[4:7], v4, s[48:49] offset:16
+    std::vector<u32> real{0xdc30800cu, 0x01300001u, 0xdc3c8000u, 0x04300004u,
+                          0xdc388010u, 0x04300004u, sopp(kEndpgm, 0)};
+    const gpu::gcn::Program prog =
+        gpu::rdna::Decode(real.data(), (u32)real.size());
+    expect(prog.size() == 4, "three FLAT instructions decode as 2 dwords each");
+    expect(prog.size() >= 3 && prog[0].enc == Enc::kFlat &&
+               prog[0].opcode == 0x0c && prog[1].opcode == 0x0f &&
+               prog[2].opcode == 0x0e,
+           "gfx10 FLAT opcodes: dword, dwordx3, dwordx4 (x4 before x3)");
+
+    std::vector<u32> vs;
+    vs.push_back(vop1(0x01, 0, kInline0));
+    vs.push_back(vop1(0x01, 3, kInline1f));
+    exp(vs, /*POS0*/ 12, 0xF, true, 0, 0, 0, 3);
+    vs.push_back(sopp(kEndpgm, 0));
+
+    std::vector<u32> ps(real.begin(), real.end() - 1);
+    exp(ps, /*MRT0*/ 0, 0xF, true, 4, 5, 6, 7);
+    ps.push_back(sopp(kEndpgm, 0));
+    u32 ud[32] = {};
+    gpu::gcn::Recompiled g =
+        gpu::rdna::Recompile(vs.data(), ps.data(), ud, ud);
+    expect(g.ok, "global_load through a scalar base recompiles");
+    expect(g.ps_bufs.size() == 1,
+           "loads sharing one scalar base share one set-2 binding");
+    expect(!g.ps_bufs.empty() && g.ps_bufs[0].srsrc_sgpr == 0x100 + 48,
+           "the base pair is tagged out of the V# SGPR space");
+    expect(hasVariableStorage(g.fs_spirv, /*StorageBuffer*/ 12),
+           "the global loads really read a set-2 storage buffer");
+
+    // A generic FLAT access (SEG 0) carries the whole 64-bit pointer in a VGPR
+    // pair, so nothing names a resource to bind.
+    std::vector<u32> generic;
+    flat(generic, /*flat_load_dword*/ 0x0c, /*seg flat*/ 0, 4, 4, 0, 0x7d);
+    exp(generic, 0, 0xF, true, 4, 4, 4, 4);
+    generic.push_back(sopp(kEndpgm, 0));
+    expect(!gpu::rdna::Recompile(vs.data(), generic.data(), ud, ud).ok,
+           "generic FLAT addressing is refused, not guessed");
+
+    std::vector<u32> null_saddr;
+    flat(null_saddr, 0x0c, /*seg global*/ 2, 4, 4, 0, 0x7d);
+    exp(null_saddr, 0, 0xF, true, 4, 4, 4, 4);
+    null_saddr.push_back(sopp(kEndpgm, 0));
+    expect(!gpu::rdna::Recompile(vs.data(), null_saddr.data(), ud, ud).ok,
+           "SADDR-NULL global addressing is refused");
+
+    std::vector<u32> scratch;
+    flat(scratch, 0x0c, /*seg scratch*/ 1, 4, 4, 0, 48);
+    exp(scratch, 0, 0xF, true, 4, 4, 4, 4);
+    scratch.push_back(sopp(kEndpgm, 0));
+    expect(!gpu::rdna::Recompile(vs.data(), scratch.data(), ud, ud).ok,
+           "SCRATCH addressing is refused");
+
+    // A negative immediate reads below the staged window's base.
+    std::vector<u32> negative;
+    flat(negative, 0x0c, 2, 4, 4, 0, 48, /*offset -4*/ 0xFFC);
+    exp(negative, 0, 0xF, true, 4, 4, 4, 4);
+    negative.push_back(sopp(kEndpgm, 0));
+    expect(!gpu::rdna::Recompile(vs.data(), negative.data(), ud, ud).ok,
+           "a negative FLAT offset is refused");
+
+    std::vector<u32> store;
+    flat(store, /*global_store_dword*/ 0x1c, 2, 0, 4, 5, 48);
+    exp(store, 0, 0xF, true, 4, 4, 4, 4);
+    store.push_back(sopp(kEndpgm, 0));
+    const gpu::gcn::Recompiled stored_flat =
+        gpu::rdna::Recompile(vs.data(), store.data(), ud, ud);
+    expect(stored_flat.ok, "global_store is dropped, not rejected");
+    expect(stored_flat.ps_bufs.empty(),
+           "a dropped flat store spends no binding");
+
+    std::vector<u32> sub;
+    flat(sub, /*global_load_ubyte*/ 0x08, 2, 4, 4, 0, 48, 3);
+    exp(sub, 0, 0xF, true, 4, 4, 4, 4);
+    sub.push_back(sopp(kEndpgm, 0));
+    const gpu::gcn::Recompiled subdword =
+        gpu::rdna::Recompile(vs.data(), sub.data(), ud, ud);
+    expect(subdword.ok && hasOpcode(subdword.fs_spirv,
+                                    /*OpBitFieldUExtract*/ 203),
+           "global_load_ubyte extracts its byte from the containing dword");
+
+    std::vector<u32> sbyte;
+    flat(sbyte, /*global_load_sbyte*/ 0x09, 2, 4, 4, 0, 48);
+    exp(sbyte, 0, 0xF, true, 4, 4, 4, 4);
+    sbyte.push_back(sopp(kEndpgm, 0));
+    const gpu::gcn::Recompiled signed_byte =
+        gpu::rdna::Recompile(vs.data(), sbyte.data(), ud, ud);
+    expect(signed_byte.ok && hasOpcode(signed_byte.fs_spirv,
+                                       /*OpBitFieldSExtract*/ 202),
+           "global_load_sbyte sign-extends");
+  }
+
+  {
+    // gfx10 SOP1 slots above the GFX7 range: the wave32 saveexec forms and the
+    // ANDN1/ORN1 pair, plus VOP3-only v_readlane_b32 (0x360).
+    std::vector<u32> vs;
+    vs.push_back(vop1(0x01, 0, kInline0));
+    vs.push_back(vop1(0x01, 3, kInline1f));
+    exp(vs, 12, 0xF, true, 0, 0, 0, 3);
+    vs.push_back(sopp(kEndpgm, 0));
+    u32 ud[32] = {};
+
+    for (const u32 op : {/*andn1_saveexec_b64*/ 0x37u, /*orn1_b64*/ 0x38u,
+                         /*andn1_wrexec_b64*/ 0x39u, /*andn2_wrexec_b64*/ 0x3au,
+                         /*and_saveexec_b32*/ 0x3cu, /*xnor_saveexec_b32*/ 0x43u,
+                         /*andn1_saveexec_b32*/ 0x44u,
+                         /*andn2_wrexec_b32*/ 0x47u}) {
+      std::vector<u32> ps;
+      ps.push_back(sop1(op, /*s20*/ 20, /*s8*/ 8));
+      ps.push_back(vop1(0x01, 0, 20));
+      exp(ps, 0, 0xF, true, 0, 0, 0, 0);
+      ps.push_back(sopp(kEndpgm, 0));
+      expect(gpu::rdna::Recompile(vs.data(), ps.data(), ud, ud).ok,
+             "gfx10 SOP1 saveexec/wrexec slot recompiles");
+    }
+    std::vector<u32> readlane;
+    vop3(readlane, /*v_readlane_b32*/ 0x360, /*sdst s20*/ 20, /*v0*/ 256,
+         /*lane*/ kInline0, 0);
+    readlane.push_back(vop1(0x01, 0, 20));
+    exp(readlane, 0, 0xF, true, 0, 0, 0, 0);
+    readlane.push_back(sopp(kEndpgm, 0));
+    expect(gpu::rdna::Recompile(vs.data(), readlane.data(), ud, ud).ok,
+           "VOP3-only v_readlane_b32 recompiles");
   }
 
   {
@@ -968,7 +1112,12 @@ int main() {
     d[4] = 0;
     d[6] = 1u << 21;
     t = gpu::rdna::DecodeTImage(d);
-    expect(!t.valid, "T# DCC compression rejects unsupported layout");
+    // Word 6's DCC/metadata bits describe how the hardware would read the
+    // surface, not whether the descriptor is well formed: a render target we
+    // never compressed resolves through the address page table to the image we
+    // rendered into. Rejecting them lost the base of every G-buffer Demon's
+    // Souls samples back.
+    expect(t.valid, "T# DCC compression bits do not invalidate a descriptor");
     d[6] = 0;
     d[3] = 9u << 28;
     t = gpu::rdna::DecodeTImage(d, true);
@@ -1168,6 +1317,36 @@ int main() {
           gpu::rdna::ResolveBuffers(wide_unknown.data(), gs_user_data, 2, 8);
       expect(wide_unknown_resources.empty(),
              "unknown wide writes clear both descriptor SGPRs");
+
+      // s_andn1_saveexec_b64 is one of the four 64-bit SOP1 forms gfx10 added
+      // past the GFX7 saveexec block; reading it as a 32-bit write would leave
+      // s13 looking like the user data it no longer holds.
+      std::vector<u32> saveexec;
+      saveexec.push_back(sop1(/*s_mov_b64*/ 0x04, 12, 8));
+      saveexec.push_back(sop1(/*s_andn1_saveexec_b64*/ 0x37, 12, 126));
+      smem(saveexec, 0x00, 0, /*s12*/ 6, 0);
+      saveexec.push_back(sopp(kEndpgm, 0));
+      expect(gpu::rdna::ResolveBuffers(saveexec.data(), gs_user_data, 2, 8)
+                 .empty(),
+             "the gfx10 saveexec forms clear both destination SGPRs");
+
+      // global_load_dword v1, v1, s[8:9]: the scalar pair is the resource, and
+      // only the replay can produce it.
+      std::vector<u32> global_load;
+      flat(global_load, /*load_dword*/ 0x0c, /*global*/ 2, 1, 1, 0, 8);
+      global_load.push_back(sopp(kEndpgm, 0));
+      const auto global_resources =
+          gpu::rdna::ResolveBuffers(global_load.data(), gs_user_data, 2, 8);
+      expect(global_resources.count(0) &&
+                 global_resources.at(0).descriptor_dwords == 2 &&
+                 global_resources.at(0).base == vertex_table_address,
+             "a global_load resolves its scalar base pair");
+      std::vector<u32> flat_seg;
+      flat(flat_seg, 0x0c, /*flat*/ 0, 1, 1, 0, 8);
+      flat_seg.push_back(sopp(kEndpgm, 0));
+      expect(gpu::rdna::ResolveBuffers(flat_seg.data(), gs_user_data, 2, 8)
+                 .empty(),
+             "a generic flat_load names no scalar resource");
 
       u32 stale_scc_user_data[8] = {};
       std::memcpy(stale_scc_user_data + 4, selected_vb, 4 * sizeof(u32));

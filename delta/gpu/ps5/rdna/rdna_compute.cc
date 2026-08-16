@@ -59,6 +59,42 @@ using gpu::gcn::RecompiledCs;
 using gpu::gcn::StageContext;
 using gpu::gcn::Translator;
 
+// Why a descriptor the replay could not follow was declined, as its own tag:
+// the three have very different fixes, and one line per shader is all the
+// visibility a skipped pass gets.
+const char* LossTag(ScalarReplayPlan::Loss loss) {
+  switch (loss) {
+    case ScalarReplayPlan::kUnmodelled:
+      return "cs.descriptor-unmodelled-write.rdna";
+    case ScalarReplayPlan::kConditional:
+      return "cs.descriptor-conditional-write.rdna";
+    default:
+      return "cs.descriptor-loop-carried.rdna";
+  }
+}
+
+// MIMG forms the compute path serves: the shared emitter's own set, plus the
+// ones EmitCsMemory lowers onto it (see EmitLoweredMimg).
+bool CsMimgSupported(u32 op) {
+  switch (op) {
+    case 0x00:  // image_load
+    case 0x01:  // image_load_mip
+    case 0x08:  // image_store
+    case 0x09:  // image_store_mip
+    case 0x24:  // image_sample_l
+    case 0x27:  // image_sample_lz
+    case 0x2c:  // image_sample_c_l
+    case 0x2f:  // image_sample_c_lz
+    case 0x34:  // image_sample_l_o
+    case 0x37:  // image_sample_lz_o
+    case 0x44:  // image_gather4_l
+    case 0x47:  // image_gather4_lz
+      return true;
+    default:
+      return false;
+  }
+}
+
 // One set-0 storage buffer per distinct descriptor, mirroring the GFX7 planner
 // (gpu/gcn PlanCsResources) with RDNA2's SMEM decode.
 //
@@ -99,26 +135,26 @@ bool PlanResources(const Program& program,
     bool untouched = true;
     for (u32 k = 0; k < dwords; k++)
       untouched = untouched && !scalar_written[base_sgpr + k];
-    const bool in_window = base_sgpr + dwords <= ud_dwords;
-    if (in_window && !untouched) {
-      // The shader loaded a descriptor over its own user data. The replay has
-      // the loaded value, but the dispatch path prefers the user-data window
-      // for any SGPR inside it and would bind what the CPU left there.
-      gpu::gcn::WarnUnsupported("cs.descriptor-shadows-user-data.rdna",
-                                base_sgpr);
-      return false;
-    }
-    if (!in_window && !replay.Covers(base_sgpr, dwords, index)) {
-      // The chain runs through a vector op, a loop-carried scalar or a branch,
-      // so the replay would hand the dispatch a descriptor the wave never had.
-      // A read only stages a copy of guest memory and can at worst come out as
-      // wrong pixels; a write would land in the wrong place.
-      if (written) {
-        gpu::gcn::WarnUnsupported("cs.descriptor-not-replayable.rdna",
-                                  base_sgpr);
-        return false;
+    // A descriptor the shader never wrote and that fits the COMPUTE_USER_DATA
+    // window is that window's, verbatim. Anything else -- an SRT chain, or a
+    // load over the shader's own user data -- reaches the dispatch through the
+    // replay, which prefers its own result over the window for exactly this
+    // reason, so it is only as good as the replay is.
+    const bool inline_user_data = base_sgpr + dwords <= ud_dwords && untouched;
+    if (!inline_user_data) {
+      const ScalarReplayPlan::Loss loss =
+          replay.LossAt(base_sgpr, dwords, index);
+      if (loss != ScalarReplayPlan::kCovered) {
+        // The replay would hand the dispatch a descriptor the wave never had.
+        // A read only stages a copy of guest memory and can at worst come out
+        // as wrong pixels; a write would land in the wrong place.
+        if (written) {
+          gpu::gcn::WarnUnsupported(LossTag(loss), base_sgpr);
+          return false;
+        }
+        gpu::gcn::NoteApproximated("cs.descriptor-unproven-read.rdna",
+                                   base_sgpr);
       }
-      gpu::gcn::NoteApproximated("cs.descriptor-unproven-read.rdna", base_sgpr);
     }
     BindingKey key{.base_sgpr = base_sgpr, .kind = kind};
     for (u32 k = 0; k < dwords && k < 8; k++)
@@ -168,14 +204,20 @@ bool PlanResources(const Program& program,
         const bool load = op <= 0x03 || (op >= 0x08 && op <= 0x0f);
         const bool store = (op >= 0x04 && op <= 0x07) || op == 0x18 ||
                            op == 0x1a || (op >= 0x1c && op <= 0x1f);
-        // Anything else is an atomic or a d16 form, and the shared emitter
-        // masks the opcode to 7 bits, so the 0x80+ format variants would alias
-        // a plain load. LDS and TFE add a destination it has no model for.
-        if ((!load && !store) || ((w >> 16) & 1) || ((w1 >> 23) & 1)) {
+        // The atomics read-modify-write the same storage buffer a store lands
+        // in; the emitter names the handful with no single SPIR-V op itself.
+        const bool atomic =
+            (op >= 0x30 && op <= 0x3f) || (op >= 0x50 && op <= 0x5f);
+        // Anything else is a d16 form, and the shared emitter masks the opcode
+        // to 7 bits, so the 0x80+ format variants would alias a plain load.
+        // LDS and TFE add a destination it has no model for.
+        if ((!load && !store && !atomic) || ((w >> 16) & 1) ||
+            ((w1 >> 23) & 1)) {
           gpu::gcn::WarnUnsupported("mubuf.cs.rdna", op, w, w1);
           return false;
         }
-        if (!resource(inst.pc, ((w1 >> 16) & 0x1F) * 4, 4, 0, store, 0))
+        if (!resource(inst.pc, ((w1 >> 16) & 0x1F) * 4, 4, 0, store || atomic,
+                      0))
           return false;
         break;
       }
@@ -206,9 +248,7 @@ bool PlanResources(const Program& program,
         if (op == 0x0e)
           break;  // get_resinfo reads only descriptor SGPRs
         const bool store = op == 0x08 || op == 0x09;
-        const bool load = op == 0x00 || op == 0x01;
-        const bool sample = op == 0x24 || op == 0x27;
-        if ((!store && !load && !sample) || ((w >> 15) & 1) || srsrc + 7 >= 136) {
+        if (!CsMimgSupported(op) || ((w >> 15) & 1) || srsrc + 7 >= 136) {
           gpu::gcn::WarnUnsupported("mimg.cs.rdna", inst.opcode, w, w1);
           return false;
         }
@@ -257,6 +297,158 @@ void EmitSmem(Translator& t, const Inst& inst, StageContext& sc) {
     t.SetSdst(smem.sdst, k,
               gpu::gcn::CsSsboLoad(t, sc, static_cast<u32>(b),
                                    t.Add(dword0, t.U32(k))));
+}
+
+// MIMG address components in VGPR order: NSA names each in its own register,
+// the sequential form numbers them up from VADDR. Slots past the ones an
+// instruction actually uses still have to hold a valid id, because the shared
+// emitter indexes a fixed few of them whatever the image type turns out to be.
+std::array<Id, 8> MimgAddress(Translator& t, const Inst& inst) {
+  const u32 nsa = (inst.raw[0] >> 1) & 0x3;
+  const u32 vaddr = inst.raw[1] & 0xFF;
+  std::array<u32, 8> reg;
+  for (u32 i = 0; i < reg.size(); i++)
+    reg[i] = std::min(vaddr + i, 255u);
+  for (u32 d = 0; d < nsa; d++)
+    for (u32 c = 0; c < 4 && 1 + d * 4 + c < reg.size(); c++)
+      reg[1 + d * 4 + c] = (inst.raw[2 + d] >> (c * 8)) & 0xFF;
+  std::array<Id, 8> address;
+  for (u32 i = 0; i < address.size(); i++)
+    address[i] = t.Vg(reg[i]);
+  return address;
+}
+
+// Width and height of the level a sample reads, derived from the gfx10.3 T#
+// exactly as the shared emitter derives them: a lowering that steps by whole
+// texels has to agree with it or it lands in a different one.
+struct LevelExtent {
+  Id width;
+  Id height;
+};
+
+LevelExtent MimgLevelExtent(Translator& t, u32 srsrc, Id lod) {
+  const auto field = [&](u32 dword, u32 shift, u32 mask) {
+    return t.And(t.Shr(t.Sg(srsrc + dword), t.U32(shift)), t.U32(mask));
+  };
+  const Id base_width = t.Add(
+      t.Or(field(1, 30, 0x3), t.Shl(field(2, 0, 0xFFF), t.U32(2))), t.U32(1));
+  const Id base_height = t.Add(field(2, 14, 0x3FFF), t.U32(1));
+  const Id base_mip = field(3, 12, 0xF);
+  const Id last_mip = t.UMax(base_mip, field(3, 16, 0xF));
+  const Id mip = t.Add(base_mip, t.UMin(lod, t.Sub(last_mip, base_mip)));
+  return {t.UMax(t.Shr(base_width, mip), t.U32(1)),
+          t.UMax(t.Shr(base_height, mip), t.U32(1))};
+}
+
+Id ToFloat(Translator& t, Id u) {
+  return t.m.Emit(spv::Op::OpConvertUToF, t.t_f, {u});
+}
+
+// Move a normalised coordinate by whole texels of the sampled level.
+Id StepTexels(Translator& t, Id coord, Id texels, Id extent) {
+  return t.m.Bitcast(t.t_u,
+                     t.FAdd(t.m.Bitcast(t.t_f, coord),
+                            t.FDiv(texels, ToFloat(t, extent))));
+}
+
+// The gfx10.3 sample forms the shared emitter has no model for, expressed with
+// the two it does (explicit-LOD and LOD-zero fetches of the staged image):
+//   _c       the leading address dword is the depth reference, so fetch the
+//            texel and then compare against it the way the S# asks.
+//   _o       the leading address dword packs a signed per-axis texel offset,
+//            and one texel is 1/extent of the normalised coordinate.
+//   gather4  returns one component of the 2x2 footprint: four fetches, each
+//            stepped onto its own texel.
+// Declining one of these drops the whole dispatch, and with it every render
+// target the pass was meant to fill.
+void EmitLoweredMimg(Translator& t, const Inst& inst, StageContext& sc) {
+  const u32 w = inst.raw[0], w1 = inst.raw[1], op = inst.opcode;
+  const bool explicit_lod = op == 0x2c || op == 0x34 || op == 0x44;
+  const bool compare = op == 0x2c || op == 0x2f;
+  const bool offset = op == 0x34 || op == 0x37;
+  const bool gather = op == 0x44 || op == 0x47;
+  const bool da = (w & 0x4000) != 0;
+  const u32 dmask = (w >> 8) & 0xF;
+  const u32 vdata = (w1 >> 8) & 0xFF;
+  const u32 srsrc = ((w1 >> 16) & 0x1F) * 4;
+  const u32 ssamp = ((w1 >> 21) & 0x1F) * 4;
+
+  std::array<Id, 8> address = MimgAddress(t, inst);
+  const Id lead = address[0];
+  if (compare || offset)  // the modifier rides in the first address dword
+    for (u32 i = 0; i + 1 < address.size(); i++)
+      address[i] = address[i + 1];
+  // The 1D forms park the LOD one component earlier; they do not reach a
+  // compute sampler in practice, so the extents follow the 2D placement.
+  const Id lod =
+      explicit_lod
+          ? t.m.Emit(spv::Op::OpConvertFToU, t.t_u,
+                     {t.Ext2(GLSLstd450FMax,
+                             t.m.Bitcast(t.t_f, address[da ? 3 : 2]),
+                             t.F32(0.f))})
+          : t.U32(0);
+
+  Inst plain = inst;
+  plain.opcode = explicit_lod ? 0x24u : 0x27u;
+  plain.raw[0] = (w & ~((0x7Fu << 18) | 1u)) | (plain.opcode << 18);
+
+  if (offset) {
+    const LevelExtent extent = MimgLevelExtent(t, srsrc, lod);
+    // Six signed bits per axis: [5:0] x, [13:8] y. A z offset would need the
+    // volume's depth, which only a 3D sample carries.
+    const auto texels = [&](u32 shift) {
+      const Id raw = t.And(t.Shr(lead, t.U32(shift)), t.U32(0x3F));
+      const Id value = ToFloat(t, raw);
+      return t.SelectF(t.Uge(raw, t.U32(0x20)), t.FSub(value, t.F32(64.f)),
+                       value);
+    };
+    address[0] = StepTexels(t, address[0], texels(0), extent.width);
+    address[1] = StepTexels(t, address[1], texels(8), extent.height);
+  }
+
+  if (gather) {
+    const LevelExtent extent = MimgLevelExtent(t, srsrc, lod);
+    // One component only, so each tap lands in its own destination register.
+    const u32 component = dmask & (~dmask + 1u);
+    // gather4 reports the footprint counter-clockwise from its lower left:
+    // (x0,y1) (x1,y1) (x1,y0) (x0,y0).
+    static const float step[4][2] = {{0, 1}, {1, 1}, {1, 0}, {0, 0}};
+    for (u32 tap = 0; tap < 4; tap++) {
+      std::array<Id, 8> tapped = address;
+      tapped[0] = StepTexels(t, tapped[0], t.F32(step[tap][0]), extent.width);
+      tapped[1] = StepTexels(t, tapped[1], t.F32(step[tap][1]), extent.height);
+      Inst one = plain;
+      one.raw[0] = (plain.raw[0] & ~(0xFu << 8)) | (component << 8);
+      one.raw[1] = (w1 & ~0xFF00u) | (((vdata + tap) & 0xFF) << 8);
+      gpu::gcn::EmitCsMimg(t, one, sc, tapped.data());
+    }
+    return;
+  }
+
+  gpu::gcn::EmitCsMimg(t, plain, sc, address.data());
+  if (!compare)
+    return;
+  // S# word 0 [15:13] names the comparison; the fetch left the depth in the
+  // first destination register.
+  const Id depth = t.m.Bitcast(t.t_f, t.Vg(vdata));
+  const Id reference = t.m.Bitcast(t.t_f, lead);
+  const Id func = t.And(t.Shr(t.Sg(ssamp), t.U32(13)), t.U32(0x7));
+  static const spv::Op kCompare[8] = {
+      spv::Op::OpFOrdEqual,        // 0 never, selected away below
+      spv::Op::OpFOrdLessThan,     spv::Op::OpFOrdEqual,
+      spv::Op::OpFOrdLessThanEqual, spv::Op::OpFOrdGreaterThan,
+      spv::Op::OpFOrdNotEqual,     spv::Op::OpFOrdGreaterThanEqual,
+      spv::Op::OpFOrdEqual,        // 7 always, selected away below
+  };
+  Id pass = t.m.ConstBool(false);
+  for (u32 f = 1; f < 8; f++) {
+    const Id value = f == 7 ? t.m.ConstBool(true)
+                            : t.m.Emit(kCompare[f], t.t_bool,
+                                       {reference, depth});
+    pass = t.m.Emit(spv::Op::OpSelect, t.t_bool,
+                    {t.Eq(func, t.U32(f)), value, pass});
+  }
+  t.SetVgF(vdata, t.SelectF(pass, t.F32(1.f), t.F32(0.f)));
 }
 
 bool NoOpt() {
@@ -423,6 +615,18 @@ bool EmitCsMemory(Translator& t, const Inst& inst, StageContext& sc) {
       const bool arrayed_dim = dim == 3 || dim == 5;
       Inst lowered = inst;
       lowered.raw[0] = (w & ~0x4000u) | (arrayed_dim ? 0x4000u : 0u);
+      switch (inst.opcode) {  // the depth-compare, offset and gather forms
+        case 0x2c:
+        case 0x2f:
+        case 0x34:
+        case 0x37:
+        case 0x44:
+        case 0x47:
+          EmitLoweredMimg(t, lowered, sc);
+          return true;
+        default:
+          break;
+      }
       const u32 nsa = (w >> 1) & 0x3;
       if (nsa) {
         std::array<gpu::gcn::Id, 13> address{};

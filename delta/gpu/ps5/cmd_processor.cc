@@ -1002,7 +1002,10 @@ void HandleDispatch(const u32* body, u32 count) {
       // A swizzle mode with no address equation would scramble the texels the
       // staging copy writes back into guest memory.
       gcn::TextureLayout32 layout;
-      if ((t.type != 9 && t.type != 13) ||
+      // type 10 is a volume: DecodeTImage already reports its depth as layers
+      // and the shared emitter addresses 3D slice-major, so it stages like the
+      // 2D forms.
+      if ((t.type != 9 && t.type != 13 && t.type != 10) ||
           !(rgba8 || r32 || rg16f || r16f || rg8 || rgba16f || r11g11b10f ||
             rg32) ||
           !gcn::TilingSupported(t.tiling_idx) || !t.valid ||
@@ -1013,9 +1016,11 @@ void HandleDispatch(const u32* body, u32 count) {
           BASE_LOGI(
               "csgpu",
               "CS @{:#x} bind={} unsupported image base={:#x} type={} dfmt={} "
-              "nfmt={} tiling={:#x} {}x{} pitch={} -- dispatch skipped",
+              "nfmt={} tiling={:#x} {}x{} pitch={} valid={} tiling_ok={} "
+              "-- dispatch skipped",
               cs_addr, r.binding, t.base, t.type, t.dfmt, t.nfmt, t.tiling_idx,
-              t.width, t.height, t.pitch);
+              t.width, t.height, t.pitch, t.valid,
+              gcn::TilingSupported(t.tiling_idx));
         res_ok = false;
         break;
       }
@@ -1784,8 +1789,33 @@ void HandleDraw(u32 op, const u32* body, u32 count) {
             for (const gcn::ShaderBuffer& sb : bufs) {
               if (sb.binding >= rhi::DrawInfo::kMaxBuffers)
                 continue;
-              VBuffer vb{};
               const auto it = resolved.find(sb.use_pc);
+              // A global_load names its window with a raw 64-bit pointer pair
+              // rather than a V#, tagged srsrc_sgpr >= 0x100 so it can never be
+              // V#-decoded by accident. Its length is not expressed anywhere,
+              // so bind a fixed window and let the mapping check below drop it
+              // if the guest does not actually own that much.
+              // rdna_translate.cc kFlatBaseTag.
+              constexpr u32 kRawBufTag = 0x100;
+              if (sb.srsrc_sgpr >= kRawBufTag) {
+                constexpr u32 kRawBufWindow = 1u << 20;
+                u64 base = 0;
+                if (it != resolved.end() && it->second.descriptor_valid &&
+                    it->second.descriptor_dwords >= 2)
+                  base = it->second.descriptor[0] |
+                         (static_cast<u64>(it->second.descriptor[1] & 0xFFFF)
+                          << 32);
+                else if (const u32 s = sb.srsrc_sgpr - kRawBufTag;
+                         s + 1 < nud)
+                  base = ud[s] | (static_cast<u64>(ud[s + 1] & 0xFFFF) << 32);
+                if (!InGuest(base) ||
+                    !gpu::IsReadableRange(base, kRawBufWindow))
+                  continue;
+                d.bufs[sb.binding] = {base, kRawBufWindow};
+                d.num_bufs = std::max(d.num_bufs, sb.binding + 1);
+                continue;
+              }
+              VBuffer vb{};
               if (it != resolved.end() && it->second.descriptor_valid)
                 vb = DecodeVBuffer(it->second.descriptor);
               else if (sb.srsrc_sgpr + 3 < nud)
