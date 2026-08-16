@@ -254,7 +254,16 @@ void LoadRegBlock(Regs& regs, u32 base, const u32* body, u32 count) {
   }
   const u64 address =
       (static_cast<u64>(body[1] & 0xFFFF) << 32) | (body[0] & 0xFFFFFFFCu);
-  if (!IsGpuAddress(address)) {
+  // The whole guest map, not just the GPU aperture: a state block is CPU-built
+  // data the GPU only reads, so a title is free to put it wherever it built it.
+  // Demon's Souls submits 23% of its context blocks out of two places the
+  // aperture test rejected -- the AGC system block at 0xfe0_xxxxxxx, which sits
+  // just under the 64 GiB floor, and its own eboot data at 0x2014_xxxxxxxx,
+  // far over the 1 TiB ceiling. Each one rejected is a whole draw's state
+  // (render target, blend, write mask) left at whatever the last draw set. The
+  // readability check below is the guard that matters; this one only rejects
+  // null and the low pages.
+  if (!IsGuestAddress(address)) {
     NoteRegBlock(base, RegBlockOutcome::kBadAddress, address, 0);
     return;
   }

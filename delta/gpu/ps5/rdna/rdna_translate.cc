@@ -1418,6 +1418,15 @@ void EmitExport(Translator& t, const Inst& inst, StageContext& sc) {
       c[i] = (en & (1 << i)) ? t.VgF(v[i]) : t.F32(0.f);
     t.m.Store(out_var,
               t.m.CompositeConstruct(t.t_v4, {c[0], c[1], c[2], c[3]}));
+  } else if (target >= 13 && target <= 15) {
+    // POS1..POS3 carry the clip/cull distances and the point-size / edge-flag /
+    // layer / viewport-index quad. The renderer has no user clip planes and no
+    // layered rendering, so there is nothing to store -- but rejecting the
+    // shader over it throws the whole draw away. Demon's Souls binds one
+    // fullscreen RECTLIST vertex program that exports POS1 with EN=0x4 (the
+    // render-target array index) and nothing else we cannot translate;
+    // rasterising it into slice 0 beats not rasterising it at all.
+    gpu::gcn::NoteApproximated("exp.vs-pos-extra", target);
   } else if (target != 9 && target != 20) {
     // 20 = the NGG primitive export (connectivity + edge flags). The renderer
     // draws from the index buffer the command stream binds, so the topology the
