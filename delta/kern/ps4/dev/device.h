@@ -3,6 +3,7 @@
 #include <base.h>
 #include "base/arch.h"
 #include <base/logging.h>
+#include <cstring>
 #include <cstdio>
 
 /*
@@ -43,8 +44,22 @@ public:
     return reinterpret_cast<u8 *>(-1);
   }
   virtual i32 ioctl(u32 command, void *args) {
-    BASE_LOGI("dev", "UNHANDLED ioctl({:#x}) on {} -> 0", command,
-              name.c_str());
+    // Decode the BSD encoding into the log: a bare number tells the next
+    // person nothing, and the group/number pair is what identifies which
+    // driver's command set an unknown ioctl belongs to.
+    BASE_LOGI("dev",
+              "UNHANDLED ioctl({:#x}) on '{}' -> 0 (dir={}{} len={:#x} "
+              "group={:#x} num={:#x})",
+              command, name.c_str(), (command & 0x80000000u) ? "I" : "",
+              (command & 0x40000000u) ? "O" : "", (command >> 16) & 0x1fff,
+              (command >> 8) & 0xff, command & 0xff);
+    // An OUT buffer the guest reads after a soft-succeed would otherwise hold
+    // whatever was on its stack.
+    if (args && (command & 0x40000000u)) {
+      const u32 len = (command >> 16) & 0x1fff;
+      if (len)
+        std::memset(args, 0, len);
+    }
     return 0;
   }
 

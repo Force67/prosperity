@@ -11,6 +11,7 @@
 #include <map>
 #include <mutex>
 #include <string>
+#include <base/strings/string_ref.h>
 #include <utl/options.h>
 
 #include "kern/lv2/error_table.h"
@@ -78,11 +79,33 @@ void censusSysctl(int *name, u32 namelen, const void *newp, size_t newlen) {
 int PS4ABI ps5_sysctl(int *name, u32 namelen, void *oldp, size_t *oldlenp,
                       const void *newp, size_t newlen) {
   censusSysctl(name, namelen, newp, newlen);
-  if (name && namelen == 4 && name[0] == 1 && name[1] == 14 && name[2] == 35) {
+  // kern.proc.35 and kern.proc.55 are both wider on Prospero than the Orbis
+  // replies the shared handler builds, and a title reads each as a fixed-size
+  // struct, so hand back a zeroed block of exactly the length asked for rather
+  // than a short one.
+  if (name && namelen >= 3 && name[0] == 1 && name[1] == 14 &&
+      (name[2] == 35 || name[2] == 55)) {
     if (!oldp || !oldlenp)
       return -SysError::eINVAL;
     std::memset(oldp, 0, *oldlenp);
     return 0;
+  }
+  // Prospero libkernel resolves a handful of oids Orbis never had. None of them
+  // gates anything we have seen, but leaving them at ENOENT is what put a title
+  // into a 9000-a-second retry loop once already, so answer them with the
+  // shared zero-filled synthetic oid rather than finding out again.
+  if (name && namelen == 2 && name[0] == 0 && name[1] == 3 && newp && newlen &&
+      oldp && oldlenp && *oldlenp >= 8) {
+    const base::StringRef want(static_cast<const char *>(newp), newlen);
+    if (want == "kern.kern_type" || want == "kern.universal_mode" ||
+        want == "kern.backup_restore_mode" || want == "kern.rtld_control" ||
+        want == "kern.fsst_param" || want == "kern.geom.updtfmt" ||
+        want == "hw.availpages" || want == "machdep.openpsid") {
+      static_cast<u32 *>(oldp)[0] = 0x1337;
+      static_cast<u32 *>(oldp)[1] = 9;  // the zero-filled PS5 config group
+      *oldlenp = 8;
+      return 0;
+    }
   }
   return sys_sysctl(name, namelen, oldp, oldlenp, newp, newlen);
 }

@@ -34,6 +34,8 @@ public:
   i64 read(void *buf, size_t len) override { return recvfrom(buf, len, 0, nullptr, nullptr); }
   i64 write(const void *buf, size_t len) override { return sendto(buf, len, 0, nullptr, 0); }
 
+  i32 ioctl(u32 command, void *args) override;
+
 private:
   int fd_ = -1;
   int family_ = 0;  // the guest's AF_*, needed to rebuild replies

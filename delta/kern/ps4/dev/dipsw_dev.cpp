@@ -23,6 +23,10 @@ i32 dipswDevice::ioctl(u32 cmd, void *data) {
   case 0x40048806: /*sceKernelCheckDipsw*/
     *static_cast<u32 *>(data) = 1;
     break;
+  case 0x8010880a:
+    // A 16-byte IOC_IN pair the PS5 libkernel writes while it caches the dip
+    // switches; there is no reply and nothing of ours reads them back.
+    break;
   /* dont seem to be implemented ? */
   case 0x40048807:
   case 0x40088808:

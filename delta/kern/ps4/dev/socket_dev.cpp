@@ -150,6 +150,21 @@ i64 socketDevice::recvfrom(void *buf, size_t len, int flags,
   return r;
 }
 
+// Sony's own socket controls, in the 'P' ioctl group rather than BSD's. Both
+// are 36-byte IOC_IN blocks with no reply, issued once each by libSceNet while
+// it configures the socket it opens for its own bring-up. Accepting them is the
+// whole contract: there is nothing for us to hand back, and refusing one made
+// libSceNet treat its init as failed.
+i32 socketDevice::ioctl(u32 command, void *args) {
+  switch (command) {
+    case 0x802450c8:
+    case 0x802450c9:
+      return 0;
+    default:
+      return device::ioctl(command, args);
+  }
+}
+
 socketDevice *fdToSocket(u32 fd) {
   auto *p = proc::getActive();
   if (!p)

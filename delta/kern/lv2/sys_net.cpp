@@ -75,6 +75,7 @@ int PS4ABI sys_socket(i32 domain, i32 type, i32 protocol) {
     int fd = ::socket(hostDomain, SOCK_DGRAM, 0);
     if (fd >= 0) {
       auto *dev = new socketDevice(proc::getActive(), fd, domain);
+      dev->setName("socket");  // so a diagnostic can say what it landed on
       BASE_LOGI("net", "socket(domain={} type={}) -> fd={} (host {})", domain,
                 type, dev->handle(), fd);
       return static_cast<int>(dev->handle());

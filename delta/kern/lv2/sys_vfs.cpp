@@ -176,6 +176,10 @@ int PS4ABI sys_open(const char *path, u32 flags, u32 mode) {
 
     auto dev = make_device(name);
     if (dev) {
+      // kObject::name is what every device diagnostic prints, and nothing had
+      // ever set it, so an unknown ioctl reported the device it arrived on as
+      // an empty string.
+      dev->setName(name);
 
       if (!dev->init(name, flags, mode)) {
         dev->releaseHandle();

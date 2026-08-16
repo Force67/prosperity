@@ -14,6 +14,7 @@
 #include <utl/object_ref.h>
 
 #include <base/containers/vector.h>
+#include <base/strings/string_ref.h>
 #include <base/strings/xstring.h>
 
 namespace krnl {
@@ -49,6 +50,11 @@ public:
   handleList &handles() { return handleCollection; }
 
   u32 handle() const { return handleCollection[0]; }
+
+  // What diagnostics call this object. Devices are opened by name, so the
+  // opener is the only place that knows it.
+  void setName(base::StringRef n) { name = base::String(n.data(), n.size()); }
+  const base::String &getName() const { return name; }
 
 protected:
   oType otype;

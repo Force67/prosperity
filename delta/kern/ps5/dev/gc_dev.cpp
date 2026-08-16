@@ -596,14 +596,51 @@ i32 gcDevicePs5::ioctl(u32 cmd, void *data) {
     }
     return 0;
   }
-  case 0x80088133: {  // AGC mode-1 end-of-frame / flip signal (IN, 8 bytes), issued
-                    // once per frame after the 0x8131 state + 0x8132 draw submits.
-                    // The 8-byte arg carries no buffer field (observed all-zero);
+  case 0xC0088133:
+  case 0x80088133: {  // AGC mode-1 end-of-frame / flip signal, issued once per
+                    // frame after the 0x8131 state + 0x8132 draw submits. The
+                    // 8-byte arg carries no buffer field (observed all-zero);
                     // present the buffer the game flipped via the HLE videoout.
+                    // Both directions occur, like 0x8131 and 0x8132: newer
+                    // firmware presets a status word the driver expects cleared,
+                    // and only the IN form was handled, so every frame this
+                    // title ends went unpresented.
     g_sawEndOfFrame.store(true, std::memory_order_relaxed);
     u64 scanout = prosperity_ps5_scanout_base();
-    traceFlip("0x80088133", scanout);
+    traceFlip("0x8133", scanout);
     prosperity_agc_flip(scanout);
+    clearSubmitStatus(cmd, data, 0);
+    return 0;
+  }
+
+  // The init-time family, each issued once while libSceAgcDriver and
+  // libSceGnmDriver come up. Named from the drivers' own error strings; the
+  // soft-succeed default already answered them, but leaving them unnamed made
+  // every boot log eight UNHANDLED lines that read like gaps.
+  case 0xC00C8110:  // sceGnmSetGsRingSizes {esgsRingSize, gsvsRingSize, _}: our
+                    // rings are implicit in the walker.
+  case 0xC0848119:  // MIP-stats report setup/reset (132-byte command block).
+  case 0x80888123:  // set trap-handler resources; failing it aborts AGC init
+                    // with "Can't set trap handler resources".
+  case 0x80048126:  // set submit mode (1 = the AGC mode-1 path this title uses).
+  case 0x80048134:  // init flag cleared immediately before the 8126 above.
+    return 0;
+
+  case 0xC010810B: {  // Get CU Mask. The driver presets four dwords to
+                      // 0xFFFFFFFF and reads back the low 16 bits of each as a
+                      // per-shader-engine REDUNDANT-CU mask; a real console
+                      // reports none, and a non-zero answer would skew its CU
+                      // count. Failing it aborts with "Get CU Mask Fails".
+    if (data)
+      std::memset(data, 0, 0x10);
+    return 0;
+  }
+  case 0xC010813B: {  // GPU info query at the tail of sce_agc_initialize; the
+                      // reply is memcpy'd into a SceGnmGpuInfo block the driver
+                      // first fills with 0xFF, so zeros read as "nothing to
+                      // override".
+    if (data)
+      std::memset(data, 0, 0x10);
     return 0;
   }
   }

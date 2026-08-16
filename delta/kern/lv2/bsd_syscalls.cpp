@@ -8,6 +8,7 @@
  */
 
 #include "kern/proc.h"
+#include <utl/mem.h>
 #include "base/arch.h"
 #include "error_table.h"
 #include <base.h>
@@ -174,6 +175,10 @@ int PS4ABI sys_regmgr_call(u32 op, u32 id, void *result, void *value,
   // op-25 unknown-key path returns (the guest copes with it) instead of trapping.
   BASE_LOGI("regmgr", "UNHANDLED op={} id={:#x} type={:#x} result={:p} value={:p}",
             op, id, (unsigned long long)type, result, value);
+  // Same reasoning as the op-25 unknown-key path: a caller that reads the
+  // result despite the error should see zero rather than stack garbage.
+  if (result && utl::isMemoryRangeMapped(result, sizeof(u32)))
+    *static_cast<u32 *>(result) = 0;
   return 0x800D0203;
 }
 
