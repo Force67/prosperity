@@ -8,9 +8,17 @@
 
 #include <base/logging.h>
 #include <cstring>
+#include <map>
+#include <mutex>
+#include <string>
+#include <utl/options.h>
 
 #include "kern/lv2/error_table.h"
 #include "kern/lv2/sys_info.h"
+
+namespace {
+DELTA_OPTION(u64, kPs5Cores, "DELTA_PS5_CORES", 0);
+}  // namespace
 
 namespace krnl {
 
@@ -27,17 +35,49 @@ int PS4ABI ps5_cpuset_getaffinity(int /*level*/, int /*which*/, i64 /*id*/,
   if (!mask || !cpusetsize)
     return 0;
   std::memset(mask, 0, cpusetsize);
-  const u64 bits = 0x7F;  // cores 0..6
+  // DELTA_PS5_CORES overrides the mask so a title whose job system derives
+  // worker ordinals from it can be swept without a rebuild.
+  const u64 bits = kPs5Cores ? kPs5Cores : 0x7Full;  // cores 0..6
   std::memcpy(mask, &bits,
               cpusetsize < sizeof(bits) ? cpusetsize : sizeof(bits));
   return 0;
 }
+
+namespace {
+// DELTA_SYSCTL_CENSUS: which oid a title is actually asking for. Demon's Souls
+// makes 2.2 million sysctl calls while otherwise idle, and a poll that hot is
+// never the point of the call: it is a loop somewhere above it.
+DELTA_OPTION(bool, kSysctlCensus, "DELTA_SYSCTL_CENSUS", false);
+
+void censusSysctl(int *name, u32 namelen, const void *newp, size_t newlen) {
+  if (!kSysctlCensus)
+    return;
+  static std::map<std::string, u64> hist;
+  static std::mutex lock;
+  static u64 calls = 0;
+  std::string key;
+  if (name && namelen == 2 && name[0] == 0 && name[1] == 3 && newp && newlen)
+    key.assign(static_cast<const char *>(newp), newlen);  // name2oid
+  else if (name)
+    for (u32 i = 0; i < namelen && i < 6; i++)
+      key += (i ? "." : "") + std::to_string(name[i]);
+  std::lock_guard<std::mutex> lk(lock);
+  hist[key]++;
+  if (++calls % 200000)
+    return;
+  BASE_LOGI("sysctlcensus", "--- after {} calls ---", calls);
+  for (const auto &[oid, n] : hist)
+    if (n > 1000)
+      BASE_LOGI("sysctlcensus", "  {:<28} {}", oid.c_str(), n);
+}
+}  // namespace
 
 // kern.proc.35 is wider on Prospero than the Orbis reply the shared handler
 // builds, and a title reads it as a fixed-size struct, so hand back a zeroed
 // block of exactly the length asked for rather than a short one.
 int PS4ABI ps5_sysctl(int *name, u32 namelen, void *oldp, size_t *oldlenp,
                       const void *newp, size_t newlen) {
+  censusSysctl(name, namelen, newp, newlen);
   if (name && namelen == 4 && name[0] == 1 && name[1] == 14 && name[2] == 35) {
     if (!oldp || !oldlenp)
       return -SysError::eINVAL;
