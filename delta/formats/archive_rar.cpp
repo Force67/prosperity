@@ -20,9 +20,12 @@
 #include <condition_variable>
 #include <cstring>
 #include <list>
+#include <atomic>
+#include <memory>
 #include <mutex>
 #include <thread>
 
+#include <base/logging.h>
 #include <utl/file.h>
 
 #include <unrar/rar.hpp>
@@ -34,6 +37,39 @@ namespace {
 // UnpWrite burst, which is bounded by the dictionary flush granularity.
 constexpr size_t kRingSize = 8 << 20;
 constexpr size_t kMaxSessions = 4;
+
+// DELTA_RAR_STAT: a decode always starts at entry byte 0, so every session the
+// cache could not reuse re-inflates everything before the range asked for. The
+// ratio of bytes inflated to bytes delivered is what says whether a slow boot
+// is the archive thrashing or the title genuinely reading that much.
+struct RarStats {
+  std::atomic<u64> sessions{0};   // decodes started
+  std::atomic<u64> reused{0};     // reads served by an existing session
+  std::atomic<u64> evicted{0};    // sessions dropped while still useful
+  std::atomic<u64> inflated{0};   // bytes the decoder produced
+  std::atomic<u64> delivered{0};  // bytes handed to the guest
+  std::atomic<u64> discarded{0};  // bytes skipped to reach the wanted offset
+  std::atomic<u64> whole{0};      // entries decoded in one shot, no session
+};
+RarStats &stats() {
+  static RarStats s;
+  return s;
+}
+void reportStats() {
+  static std::atomic<u64> last{0};
+  const u64 n = stats().delivered.load() >> 24;  // every 16 MiB delivered
+  u64 prev = last.load();
+  if (n == prev || !last.compare_exchange_strong(prev, n))
+    return;
+  const auto &st = stats();
+  BASE_LOGI("rarstat",
+            "sessions={} reused={} evicted={} whole={} inflated={} MiB "
+            "delivered={} MiB discarded={} MiB",
+            st.sessions.load(), st.reused.load(), st.evicted.load(),
+            st.whole.load(),
+            st.inflated.load() >> 20, st.delivered.load() >> 20,
+            st.discarded.load() >> 20);
+}
 
 // One in-flight decode of one entry: a worker thread unpacking from entry
 // byte 0, and a cursor of how far the consumer has drained it.
@@ -125,7 +161,9 @@ struct RarSession {
       if (done && !ok)
         return -1; // full decode finished but the checksum failed
       if (consumed < off) {
-        consumed += std::min(avail, off - consumed);
+        const u64 skip = std::min(avail, off - consumed);
+        stats().discarded.fetch_add(skip, std::memory_order_relaxed);
+        consumed += skip;
         canProduce.notify_all();
         continue;
       }
@@ -143,69 +181,124 @@ extern "C" int rarSessionCallback(UINT msg, LPARAM userData, LPARAM p1, LPARAM p
   if (msg != UCM_PROCESSDATA)
     return 0;
   auto *s = reinterpret_cast<RarSession *>(userData);
+  stats().inflated.fetch_add(size_t(p2), std::memory_order_relaxed);
   return s->push(reinterpret_cast<const u8 *>(p1), size_t(p2)) ? 1 : -1;
 }
 
-// Mirrors CmdExtract::ExtractCurrentFile's DataIO/Unpack setup for one
-// non-solid entry whose header sits at headerOff. Runs on the worker thread;
-// UnRAR reports fatal errors by throwing RAR_EXIT.
-void decodeEntry(std::shared_ptr<RarSession> s, std::wstring arcPath, u64 headerOff) {
-  bool success = false;
-  try {
-    CommandData cmd;
-    cmd.DllOpMode = RAR_TEST; // route UnpWrite into the callback
-    cmd.Callback = rarSessionCallback;
-    cmd.UserData = reinterpret_cast<LPARAM>(s.get());
+// Everything a decode needs that is worth keeping between entries. Unpack owns
+// the LZ dictionary window, which for RAR5 is tens of megabytes, and
+// Unpack::Init reuses it whenever the next entry's window is no larger
+// (`WinSize <= AllocWinSize`). Constructing a fresh Unpack per entry threw that
+// away and allocated + first-touched the whole window again: the average entry
+// in a game archive is ~130 KB, so decoding it paid for a 32 MB window. Keeping
+// the Archive open across entries saves re-opening and re-validating the
+// container as well.
+struct RarDecoder {
+  CommandData cmd;
+  Archive arc{&cmd};
+  ComprDataIO dataIO;
+  Unpack unp{&dataIO};
+  bool opened = false;
+
+  explicit RarDecoder(const std::wstring &arcPath) {
+    cmd.DllOpMode = RAR_TEST;  // route UnpWrite into the callback
     cmd.FileArgs.AddString(L"*");
-
-    Archive arc(&cmd);
-    if (arc.Open(arcPath) && arc.IsArchive(false)) {
-      arc.Seek(headerOff, SEEK_SET);
-      if (arc.ReadHeader() > 0 && arc.GetHeaderType() == HEAD_FILE &&
-          !arc.FileHead.Encrypted && !arc.FileHead.Solid &&
-          !arc.FileHead.SplitBefore && !arc.FileHead.SplitAfter) {
-        FileHeader &hd = arc.FileHead;
-        ComprDataIO dataIO;
-        dataIO.SetEncryption(false, CRYPT_NONE, nullptr, nullptr, nullptr, 0,
-                             nullptr, nullptr);
-        dataIO.CurUnpRead = 0;
-        dataIO.CurUnpWrite = 0;
-        dataIO.UnpHash.Init(hd.FileHash.Type, 1);
-        dataIO.PackedDataHash.Init(hd.FileHash.Type, 1);
-        dataIO.SetPackedSizeToRead(hd.PackSize);
-        dataIO.SetFiles(&arc, nullptr);
-        dataIO.SetTestMode(true);
-        dataIO.SetSkipUnpCRC(false);
-
-        if (hd.Method == 0) {
-          std::vector<byte> buf(0x40000);
-          int64 left = hd.UnpSize;
-          while (left > 0) {
-            int r = dataIO.UnpRead(buf.data(), buf.size());
-            if (r <= 0)
-              break;
-            int w = int(std::min(int64(r), left));
-            dataIO.UnpWrite(buf.data(), w);
-            left -= w;
-          }
-        } else {
-          Unpack unp(&dataIO);
-          unp.Init(hd.WinSize, false);
-          unp.SetDestSize(hd.UnpSize);
-          if (arc.Format != RARFMT50 && hd.UnpVer <= 15)
-            unp.DoUnpack(15, false);
-          else
-            unp.DoUnpack(hd.UnpVer, false);
-        }
-        success = dataIO.CurUnpWrite == hd.UnpSize &&
-                  dataIO.UnpHash.Cmp(&hd.FileHash,
-                                     hd.UseHashKey ? hd.HashKey : nullptr);
-      }
+    try {
+      opened = arc.Open(arcPath) && arc.IsArchive(false);
+    } catch (RAR_EXIT) {
+    } catch (std::bad_alloc &) {
     }
-  } catch (RAR_EXIT) {
-  } catch (std::bad_alloc &) {
   }
-  s->finish(success);
+
+  // Decode one non-solid entry whose header sits at headerOff, delivering its
+  // bytes through cmd.Callback with `user` as the callback's userData.
+  bool decode(u64 headerOff, UNRARCALLBACK cb, LPARAM user) {
+    if (!opened)
+      return false;
+    cmd.Callback = cb;
+    cmd.UserData = user;
+    try {
+      arc.Seek(headerOff, SEEK_SET);
+      if (arc.ReadHeader() <= 0 || arc.GetHeaderType() != HEAD_FILE ||
+          arc.FileHead.Encrypted || arc.FileHead.Solid ||
+          arc.FileHead.SplitBefore || arc.FileHead.SplitAfter)
+        return false;
+      FileHeader &hd = arc.FileHead;
+      dataIO.SetEncryption(false, CRYPT_NONE, nullptr, nullptr, nullptr, 0,
+                           nullptr, nullptr);
+      dataIO.CurUnpRead = 0;
+      dataIO.CurUnpWrite = 0;
+      dataIO.UnpHash.Init(hd.FileHash.Type, 1);
+      dataIO.PackedDataHash.Init(hd.FileHash.Type, 1);
+      dataIO.SetPackedSizeToRead(hd.PackSize);
+      dataIO.SetFiles(&arc, nullptr);
+      dataIO.SetTestMode(true);
+      dataIO.SetSkipUnpCRC(false);
+
+      if (hd.Method == 0) {
+        std::vector<byte> buf(0x40000);
+        int64 left = hd.UnpSize;
+        while (left > 0) {
+          int r = dataIO.UnpRead(buf.data(), buf.size());
+          if (r <= 0)
+            break;
+          int w = int(std::min(int64(r), left));
+          dataIO.UnpWrite(buf.data(), w);
+          left -= w;
+        }
+      } else {
+        unp.Init(hd.WinSize, false);
+        unp.SetDestSize(hd.UnpSize);
+        if (arc.Format != RARFMT50 && hd.UnpVer <= 15)
+          unp.DoUnpack(15, false);
+        else
+          unp.DoUnpack(hd.UnpVer, false);
+      }
+      return dataIO.CurUnpWrite == hd.UnpSize &&
+             dataIO.UnpHash.Cmp(&hd.FileHash,
+                                hd.UseHashKey ? hd.HashKey : nullptr);
+    } catch (RAR_EXIT) {
+    } catch (std::bad_alloc &) {
+    }
+    return false;
+  }
+};
+
+// One decoder per decoding thread. A decode is single-threaded and a session's
+// worker outlives none of its state, so thread-local ownership needs no lock
+// and keeps each thread's window hot.
+RarDecoder &threadDecoder(const std::wstring &arcPath) {
+  static thread_local std::unique_ptr<RarDecoder> d;
+  if (!d)
+    d = std::make_unique<RarDecoder>(arcPath);
+  return *d;
+}
+
+// Whole-entry decode straight into a caller-owned buffer. No ring, no worker:
+// the guest's own thread does the inflate, so the thread-local decoder (and its
+// LZ window) is reused across every entry that thread reads instead of being
+// built and thrown away per file.
+struct WholeSink {
+  std::vector<u8> *out;
+};
+
+extern "C" int rarWholeCallback(UINT msg, LPARAM userData, LPARAM p1, LPARAM p2) {
+  if (msg != UCM_PROCESSDATA)
+    return 0;
+  auto *w = reinterpret_cast<WholeSink *>(userData);
+  const auto *src = reinterpret_cast<const u8 *>(p1);
+  w->out->insert(w->out->end(), src, src + size_t(p2));
+  stats().inflated.fetch_add(size_t(p2), std::memory_order_relaxed);
+  return 1;
+}
+
+// Entries at or below this decode in one shot. Bigger ones keep the streaming
+// session so a multi-GB read is not held in memory.
+constexpr u64 kWholeEntryMax = 16u << 20;
+
+void decodeEntry(std::shared_ptr<RarSession> s, std::wstring arcPath, u64 headerOff) {
+  s->finish(threadDecoder(arcPath).decode(
+      headerOff, rarSessionCallback, reinterpret_cast<LPARAM>(s.get())));
 }
 
 class RarBackend final : public ArchiveBackend {
@@ -290,7 +383,9 @@ std::shared_ptr<RarSession> RarBackend::acquireSession(const ArchiveEntry &entry
     }
     if (best) {
       sessions_.erase(bestIt);
+      stats().reused.fetch_add(1, std::memory_order_relaxed);
     } else {
+      stats().sessions.fetch_add(1, std::memory_order_relaxed);
       best = std::make_shared<RarSession>();
       best->headerOff = entry.extra;
       best->ring.resize(kRingSize);
@@ -300,6 +395,7 @@ std::shared_ptr<RarSession> RarBackend::acquireSession(const ArchiveEntry &entry
     if (sessions_.size() > kMaxSessions) {
       evicted = sessions_.back();
       sessions_.pop_back();
+      stats().evicted.fetch_add(1, std::memory_order_relaxed);
       // Once it is out of the list nobody new can find it, so the only refs
       // left are this local and the worker's own parameter. Anything more means
       // a consumer is still draining it, and stopping the decode would fail
@@ -334,6 +430,24 @@ i64 RarBackend::extractRange(const ArchiveEntry &entry, void *buf, i64 off,
     return rawFile_.Read(buf, size_t(len)) == u64(len) ? len : -1;
   }
 
+  if (entry.size <= kWholeEntryMax) {
+    // Reused per thread so a run of reads does not reallocate; cleared, not
+    // freed, so the capacity survives.
+    static thread_local std::vector<u8> whole;
+    whole.clear();
+    whole.reserve(size_t(entry.size));
+    WholeSink sink{&whole};
+    if (!threadDecoder(pathW_).decode(entry.extra, rarWholeCallback,
+                                      reinterpret_cast<LPARAM>(&sink)) ||
+        whole.size() < u64(off) + u64(len))
+      return -1;
+    std::memcpy(buf, whole.data() + off, size_t(len));
+    stats().delivered.fetch_add(u64(len), std::memory_order_relaxed);
+    stats().whole.fetch_add(1, std::memory_order_relaxed);
+    reportStats();
+    return len;
+  }
+
   for (int attempt = 0; attempt < 4; attempt++) {
     auto s = acquireSession(entry, u64(off));
     std::lock_guard<std::mutex> rl(s->readLock);
@@ -342,7 +456,12 @@ i64 RarBackend::extractRange(const ArchiveEntry &entry, void *buf, i64 off,
       if (s->consumed > u64(off))
         continue; // a concurrent reader advanced past us; retry fresh
     }
-    return s->consume(u64(off), static_cast<u8 *>(buf), u64(len));
+    const i64 got = s->consume(u64(off), static_cast<u8 *>(buf), u64(len));
+    if (got > 0) {
+      stats().delivered.fetch_add(u64(got), std::memory_order_relaxed);
+      reportStats();
+    }
+    return got;
   }
 
   // Contended fallback: start a decode and take its read lock before other
