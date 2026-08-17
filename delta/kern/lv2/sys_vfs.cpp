@@ -142,6 +142,14 @@ static device *make_device(const char *deviceName) {
     dev = new dipswDevice(proc);
   if (xname == "random" || xname == "urandom")
     dev = new randomDevice(proc);
+  // PS5 only, for now. Answering /dev/rng lets libSceSsl's DT_INIT seed itself,
+  // which carries libSceNpManager's module start further than it used to get --
+  // far enough on Prospero, but on Orbis it then reaches libSceNpMatching2's
+  // init, which dereferences an NpManager context we still leave null (Tomb
+  // Raider faults there). Widen this once the PS4 Np bring-up follows.
+  if (xname == "rng" && proc &&
+      proc->getPlatform() == krnl::proc::platform::ps5)
+    dev = new randomDevice(proc);
   if (xname == "ajm")
     dev = new ajmDevice(proc);
   /*there are multiple of these*/

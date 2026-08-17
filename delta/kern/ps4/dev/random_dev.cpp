@@ -48,6 +48,20 @@ i64 randomDevice::read(void *buf, size_t len) {
   return static_cast<i64>(len);
 }
 
+// /dev/rng hands out entropy through IOR('S', 2, 0x44) instead of read(): the
+// reply is a leading status word followed by the bytes, and the caller copies
+// from offset 4. Everything else falls through to the device default.
+i32 randomDevice::ioctl(u32 command, void *args) {
+  const u32 group = (command >> 8) & 0xff, num = command & 0xff;
+  const u32 len = (command >> 16) & 0x1fff;
+  if (group != 'S' || num != 2 || !args || len <= 4)
+    return device::ioctl(command, args);
+  auto *out = static_cast<u8 *>(args);
+  std::memset(out, 0, 4);
+  read(out + 4, len - 4);
+  return 0;
+}
+
 // A character device has no position; seeks succeed and stay at 0 so a caller
 // that rewinds before reading doesn't error out.
 i64 randomDevice::lseek(i64, int) { return 0; }
