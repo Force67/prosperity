@@ -269,7 +269,14 @@ VkFormat ColorTargetFormat(u32 info) {
       case 5:
         return VK_FORMAT_R16G16_UNORM;
       case 10:
-        return VK_FORMAT_B8G8R8A8_UNORM;
+        // COMP_SWAP (bits 12:11) names the order the hardware writes the four
+        // components in: STD puts red in the first byte, ALT puts blue there.
+        // Answering BGRA for both is invisible on screen -- the present path
+        // swaps back -- but a pass that SAMPLES the target aliases the image in
+        // the T#'s own format, and there an STD target comes back with red and
+        // blue exchanged (Dead Cells' scene composite renders purple).
+        return ((info >> 11) & 3) == 1 ? VK_FORMAT_B8G8R8A8_UNORM
+                                       : VK_FORMAT_R8G8B8A8_UNORM;
       case 12:
         return VK_FORMAT_R16G16B16A16_UNORM;
       default:
@@ -742,6 +749,13 @@ void ReadbackPixelBgra(const u8* src, VkFormat fmt, u8* dst) {
   switch (fmt) {
     case VK_FORMAT_B8G8R8A8_UNORM:
       std::memcpy(dst, src, 4);
+      return;
+    case VK_FORMAT_R8G8B8A8_UNORM:
+    case VK_FORMAT_R8G8B8A8_SRGB:
+      dst[0] = src[2];
+      dst[1] = src[1];
+      dst[2] = src[0];
+      dst[3] = src[3];
       return;
     case VK_FORMAT_R8_UNORM:
       rgba[0] = src[0] / 255.0f;
