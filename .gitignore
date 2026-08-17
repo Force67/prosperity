@@ -326,8 +326,9 @@ build-apk.sh
 # local agent scratch
 .claude/
 
-# local PS5 boot helper (dev only)
+# local PS5 boot helpers (dev only)
 ps5run.sh
+dcrun.sh
 
 # stray local CMake build tree + vendor-lib copy (compile artifacts, not source)
 /build-system/

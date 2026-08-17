@@ -1,6 +1,9 @@
 // Dead Cells (PPSA15552, PS5)
-// Boots and presents at ~23 fps once the newer-SDK NIDs missing from firmware
-// 01.14.00 are shimmed; the frame is still black (2026-07-31).
+// Menu and gameplay render in their own colours at ~17 fps: the Prisoners'
+// Quarters is dark blue-teal stone with a warm light shaft through the gate.
+// Took libSceSsl seeding from /dev/rng, colour targets following their
+// COMP_SWAP, constant buffers indexable at run time, and pixel-shader inputs
+// resolved through SPI_PS_INPUT_CNTL (2026-08-17).
 
 // +DELTA_AGC_TRACE=1
 // +DELTA_NID_TRACE=1
