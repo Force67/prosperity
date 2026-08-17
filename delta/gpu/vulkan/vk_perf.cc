@@ -130,6 +130,11 @@ const u8* OvGlyph(char c) {
   return nullptr;  // unknown/space -> blank
 }
 
+// The overlay is written into the presented buffer, which carries the scanout's
+// own component order. Its colours are authored BGRA, so a COMP_SWAP=STD frame
+// wants them the other way round; every colour reaches the buffer through here.
+bool g_overlay_rgba = false;
+
 inline void OvFill(u8* b,
                    u32 w,
                    u32 h,
@@ -140,10 +145,14 @@ inline void OvFill(u8* b,
                    u32 bgra) {
   if (x < 0 || y < 0)
     return;
+  const u32 col = g_overlay_rgba ? ((bgra & 0xFF00FF00u) |
+                                    ((bgra & 0xFFu) << 16) |
+                                    ((bgra >> 16) & 0xFFu))
+                                 : bgra;
   for (int yy = y; yy < y + fh && yy < (int)h; yy++) {
     u32* row = reinterpret_cast<u32*>(b + (size_t)yy * w * 4);
     for (int xx = x; xx < x + fw && xx < (int)w; xx++)
-      row[xx] = bgra;
+      row[xx] = col;
   }
 }
 
@@ -250,9 +259,11 @@ void PushStageSample() {
     g_stage_hist_count++;
 }
 
-void DrawPerfOverlay(u8* bgra, u32 w, u32 h) {
+void DrawPerfOverlay(u8* pixels, u32 w, u32 h, bool rgba) {
   if (!kOverlay || !g_stage_hist_count || w < 560 || h < 280)
     return;
+  g_overlay_rgba = rgba;
+  u8* const bgra = pixels;
   // BGRA little-endian constants (0xAARRGGBB written as a uint32).
   static constexpr u32 kCol[6] = {
       0xFF32C832,  // REC green

@@ -51,7 +51,9 @@ struct ScopeNs {
 
 // Close out this frame's stage sample and start the next.
 void PushStageSample();
-void DrawPerfOverlay(u8* bgra, u32 w, u32 h);
+// `rgba` when the buffer is in R,G,B,A byte order rather than the scanout
+// default B,G,R,A.
+void DrawPerfOverlay(u8* pixels, u32 w, u32 h, bool rgba = false);
 void ReportFps();
 
 }  // namespace gpu::vk

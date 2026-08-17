@@ -40,17 +40,19 @@ void LatestFramePresenter::Run() {
     local.swap(pending_pixels_);
     const u32 w = width_;
     const u32 h = height_;
+    const gfx::PixelFormat fmt = pending_fmt_;
     pending_ = false;
     lock.unlock();
     if (gfx::ensure("prosperity", w, h) && gfx::pumpEvents())
-      gfx::present(local.data(), w, h, w * 4, gfx::PixelFormat::bgra8);
+      gfx::present(local.data(), w, h, w * 4, fmt);
     lock.lock();
   }
 }
 
 void LatestFramePresenter::Present(const u8* pixels,
                                    u32 w,
-                                   u32 h) {
+                                   u32 h,
+                                   gfx::PixelFormat fmt) {
   std::lock_guard<std::mutex> lock(mutex_);
   if (stopping_)
     return;
@@ -58,13 +60,15 @@ void LatestFramePresenter::Present(const u8* pixels,
   pending_pixels_.assign(pixels, pixels + static_cast<size_t>(w) * h * 4);
   width_ = w;
   height_ = h;
+  pending_fmt_ = fmt;
   pending_ = true;
   ready_.notify_one();
 }
 
 void LatestFramePresenter::Present(std::vector<u8>&& pixels,
                                    u32 w,
-                                   u32 h) {
+                                   u32 h,
+                                   gfx::PixelFormat fmt) {
   std::lock_guard<std::mutex> lock(mutex_);
   if (stopping_)
     return;
@@ -72,6 +76,7 @@ void LatestFramePresenter::Present(std::vector<u8>&& pixels,
   pending_pixels_.swap(pixels);
   width_ = w;
   height_ = h;
+  pending_fmt_ = fmt;
   pending_ = true;
   ready_.notify_one();
 }

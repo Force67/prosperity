@@ -1245,12 +1245,21 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
               fin.readback_map == g_frame.readback_map ? " (bound)" : "");
   }
   u8* pixels;
+  // What `pixels` holds. The swapchain takes either order, so a readback that
+  // is already one of them is presented without being touched.
+  gfx::PixelFormat pixel_fmt = gfx::PixelFormat::bgra8;
   if (kFlipMode == 0 && fin.fmt == VK_FORMAT_B8G8R8A8_UNORM) {
     // Common case: the readback is already BGRA8 in presentation order; the
     // consumers below (WritePpm/present) read it in place, so skip the 8 MB
     // per-pixel convert-and-copy entirely. ReportRtContents (the only other
     // readback-buffer user) runs after the last consumer.
     pixels = rb;
+  } else if (kFlipMode == 0 && fin.fmt == VK_FORMAT_R8G8B8A8_UNORM) {
+    // A COMP_SWAP=STD scanout differs from presentation order only in red and
+    // blue, which the swapchain upload does for free. Converting here instead
+    // cost Skyrim 40% of its frame rate at 3840x2160.
+    pixels = rb;
+    pixel_fmt = gfx::PixelFormat::rgba8;
   } else {
     flipped.resize(static_cast<size_t>(fin.w) * fin.h * 4);
     const u32 src_bytes = FormatBytes(fin.fmt);
@@ -1267,6 +1276,23 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
     }
     pixels = flipped.data();
   }
+  // The dump writers below read BGRA, and the perf overlay draws BGRA into the
+  // buffer it is given. Both are off by default, so an RGBA readback is
+  // converted here only when one of them is actually about to run.
+  const auto toBgra = [&]() {
+    if (pixel_fmt == gfx::PixelFormat::bgra8)
+      return;
+    flipped.resize(static_cast<size_t>(fin.w) * fin.h * 4);
+    const size_t texels = static_cast<size_t>(fin.w) * fin.h;
+    for (size_t i = 0; i < texels; i++) {
+      flipped[i * 4 + 0] = pixels[i * 4 + 2];
+      flipped[i * 4 + 1] = pixels[i * 4 + 1];
+      flipped[i * 4 + 2] = pixels[i * 4 + 0];
+      flipped[i * 4 + 3] = pixels[i * 4 + 3];
+    }
+    pixels = flipped.data();
+    pixel_fmt = gfx::PixelFormat::bgra8;
+  };
   // Minimal single-shot capture (DELTA_GPU_SNAP=N): write ONE ppm of the
   // presented scanout to <dumpdir>/gpu_snap.ppm at the first drawing frame >=
   // N, then never again. For verifying gfx without the rolling DELTA_GPU_DUMP
@@ -1303,6 +1329,7 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
         kSnapMinIdx ? (int)fin.frame_max_idx : (int)fin.frame_draws;
     char p[256];
     std::snprintf(p, sizeof p, "%s/gpu_snap.ppm", DumpDir());
+    toBgra();
     WritePpm(p, pixels, fin.w, fin.h);
     if (FILE* alpha = std::fopen("/tmp/gpu_snap_alpha.pgm", "wb")) {
       std::fprintf(alpha, "P5\n%u %u\n255\n", fin.w, fin.h);
@@ -1325,6 +1352,7 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
       fin.frame_draws > 20 && fin.frame_num - seq_last_frame >= 250) {
     char p[256];
     std::snprintf(p, sizeof p, "%s/seq_%02d.ppm", DumpDir(), seq_done);
+    toBgra();
     WritePpm(p, pixels, fin.w, fin.h);
     BASE_LOGI("snapseq", "{} -> f{} draws={}", seq_done, fin.frame_num,
               fin.frame_draws);
@@ -1341,6 +1369,7 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
       fin.frame_num - every_last >= kSnapEvery) {
     char p[256];
     std::snprintf(p, sizeof(p), "%s/every_%03d.ppm", DumpDir(), every_done);
+    toBgra();
     WritePpm(p, pixels, fin.w, fin.h);
     BASE_LOGI("snapevery", "{} -> f{} draws={}", every_done, fin.frame_num,
               fin.frame_draws);
@@ -1357,17 +1386,21 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
     char p[256], tmp[256];
     std::snprintf(p, sizeof(p), "%s/gpu_room.ppm", DumpDir());
     std::snprintf(tmp, sizeof(tmp), "%s/gpu_room.tmp", DumpDir());
+    toBgra();
     WritePpm(tmp, pixels, fin.w, fin.h);
     std::rename(tmp, p);
   }
   if (g_dump && fin.frame_num >= 1000 && fin.frame_num % 2000 == 0 &&
-      fin.frame_draws > 0)
+      fin.frame_draws > 0) {
+    toBgra();
     DumpPpm(pixels, fin.w, fin.h);
+  }
   // Rolling latest-frame capture (uncapped) so late transitions (menu/gameplay)
   // can be inspected from a long headless run without knowing the frame number.
   if (g_dump && fin.frame_num % kLatestEvery == 0 && fin.frame_draws > 0) {
     char latest[256];
     std::snprintf(latest, sizeof(latest), "%s/gpu_latest.ppm", DumpDir());
+    toBgra();
     WritePpm(latest, pixels, fin.w, fin.h);
   }
   if (g_dump && fin.frame_num % 200 == 0) {
@@ -1386,7 +1419,8 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
   }
   // Perf overlay, drawn into the presented buffer only -- the PPM capture
   // paths above already consumed `pixels`, so dumps stay clean.
-  DrawPerfOverlay(pixels, fin.w, fin.h);
+  DrawPerfOverlay(pixels, fin.w, fin.h,
+                  pixel_fmt == gfx::PixelFormat::rgba8);
   // DELTA_GPU_OVERLAY_DUMP: one post-overlay ppm (visual check of the overlay
   // itself, which the clean capture paths above deliberately exclude).
   static bool overlay_dumped = false;
@@ -1394,6 +1428,7 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
     overlay_dumped = true;
     char p[256];
     std::snprintf(p, sizeof p, "%s/gpu_overlay.ppm", DumpDir());
+    toBgra();
     WritePpm(p, pixels, fin.w, fin.h);
     BASE_LOGI("overlay", "wrote {}", p);
   }
@@ -1410,11 +1445,12 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
     ScopeNs frame_present_timer(&g_fr_present);
     if (kSyncPresent) {
       if (gfx::ensure("prosperity", fin.w, fin.h) && gfx::pumpEvents())
-        gfx::present(pixels, fin.w, fin.h, fin.w * 4, gfx::PixelFormat::bgra8);
+        gfx::present(pixels, fin.w, fin.h, fin.w * 4, pixel_fmt);
     } else if (pixels == flipped.data()) {
-      renderer.state->presenter.Present(std::move(flipped), fin.w, fin.h);
+      renderer.state->presenter.Present(std::move(flipped), fin.w, fin.h,
+                                        pixel_fmt);
     } else {
-      renderer.state->presenter.Present(pixels, fin.w, fin.h);
+      renderer.state->presenter.Present(pixels, fin.w, fin.h, pixel_fmt);
     }
   }
 

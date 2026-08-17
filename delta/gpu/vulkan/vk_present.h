@@ -13,6 +13,8 @@
 #include <thread>
 #include <vector>
 
+#include "gfx/gfx.h"
+
 namespace gpu::vk {
 
 class LatestFramePresenter {
@@ -23,8 +25,10 @@ class LatestFramePresenter {
   LatestFramePresenter(const LatestFramePresenter&) = delete;
   LatestFramePresenter& operator=(const LatestFramePresenter&) = delete;
 
-  void Present(const u8* pixels, u32 w, u32 h);
-  void Present(std::vector<u8>&& pixels, u32 w, u32 h);
+  void Present(const u8* pixels, u32 w, u32 h,
+               gfx::PixelFormat fmt = gfx::PixelFormat::bgra8);
+  void Present(std::vector<u8>&& pixels, u32 w, u32 h,
+               gfx::PixelFormat fmt = gfx::PixelFormat::bgra8);
   void Stop();
 
  private:
@@ -34,7 +38,8 @@ class LatestFramePresenter {
   std::thread thread_;
   std::mutex mutex_;
   std::condition_variable ready_;
-  std::vector<u8> pending_pixels_;  // BGRA, tight pitch; latest wins
+  std::vector<u8> pending_pixels_;  // tight pitch, pending_fmt_; latest wins
+  gfx::PixelFormat pending_fmt_ = gfx::PixelFormat::bgra8;
   u32 width_ = 0;
   u32 height_ = 0;
   bool pending_ = false;
