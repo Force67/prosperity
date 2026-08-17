@@ -64,6 +64,7 @@ DELTA_OPTION(bool, kGpuForcequad, "DELTA_GPU_FORCEQUAD", false);
 DELTA_OPTION(bool, kGpuNokill, "DELTA_GPU_NOKILL", false);
 DELTA_OPTION(bool, kGpuPosprobe, "DELTA_GPU_POSPROBE", false);
 DELTA_OPTION(bool, kGpuPsuv, "DELTA_GPU_PSUV", false);
+DELTA_OPTION(u32, kGpuPsuvAttr, "DELTA_GPU_PSUV_ATTR", 0);
 DELTA_OPTION(bool, kGpuShtrace, "DELTA_GPU_SHTRACE", false);
 DELTA_OPTION(bool, kGpuSpirvCfg, "DELTA_GPU_SPIRV_CFG", false);
 }  // namespace
@@ -2720,7 +2721,7 @@ bool TranslatePs(const Program& program,
   // see the coordinate field a pass actually receives (a pure horizontal ramp
   // means the vertical component never made it across the VS->PS link).
   if (kGpuPsuv) {
-    const Id in0 = gpu::gcn::PsInputVar(t, sc, 0);
+    const Id in0 = gpu::gcn::PsInputVar(t, sc, kGpuPsuvAttr);
     const Id p_in_f = t.m.TypePointer(spv::StorageClass::Input, t.t_f);
     const Id u = t.m.Load(t.t_f, t.m.AccessChain(p_in_f, in0, {t.U32(0)}));
     const Id v = t.m.Load(t.t_f, t.m.AccessChain(p_in_f, in0, {t.U32(1)}));
