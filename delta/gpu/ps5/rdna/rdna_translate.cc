@@ -748,11 +748,18 @@ bool RdnaPlanCbufs(const Program& program,
       loads[sdst] = {sbase, static_cast<u32>(off), load_count};
       continue;
     }
+    // soffset naming an SGPR instead of the inline zero is a byte offset the
+    // shader computes: how one constant buffer holding an array is indexed at
+    // run time. Nothing static bounds what it reads, so the binding takes the
+    // whole window -- RdnaEmitSmem already adds that offset to the immediate
+    // and CbufDwordId clamps the result into the declared UBO. Rejecting it
+    // dropped every draw that used one, which for Dead Cells is the shaders
+    // that light the scene.
     const u32 hi =
         smem.soffset != 125
             ? gpu::gcn::kCbufDwords
             : static_cast<u32>(off < 0 ? 0 : off) / 4 + SmemLoadCount(op);
-    if (smem.soffset != 125 || hi > gpu::gcn::kCbufDwords) {
+    if (hi > gpu::gcn::kCbufDwords) {
       if (ShDbg())
         BASE_LOGI("gcnspv",
                   "cbuf plan reject pc={:#x} op={:#x} soffset={} off={} "
