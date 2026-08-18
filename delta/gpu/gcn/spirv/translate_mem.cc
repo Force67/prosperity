@@ -105,6 +105,55 @@ Id LinearMipPitch(Translator& t,
   return t.SelectB(linear_general, raw, aligned);
 }
 
+// Byte offset of mip `physical_mip`'s first texel: the sizes of every level
+// below it, summed.
+//
+// Emitted as a real loop, not unrolled over all 16 possible levels. Each
+// iteration costs ~55 SPIR-V instructions (two BitCeils and a three-round
+// 64-byte alignment search), so the unrolled form was ~880 per image access --
+// which is what made Shadow of the Colossus's pixel shaders 190K words apiece
+// and cost half a second each in spirv-opt and the same again in the driver.
+// The accumulator is a Private variable, like the dispatch loop's state, so
+// legalization turns it back into a phi.
+Id MipChainOffset(Translator& t,
+                  Id base_pitch,
+                  Id base_height,
+                  Id layers,
+                  Id physical_mip,
+                  Id linear_general,
+                  Id pow2_pad) {
+  const Id acc = t.m.Variable(t.p_priv_u, spv::StorageClass::Private,
+                              t.m.ConstNull(t.t_u));
+  const Id level_var = t.m.Variable(t.p_priv_u, spv::StorageClass::Private,
+                                    t.m.ConstNull(t.t_u));
+  t.m.Store(acc, t.U32(0));
+  t.m.Store(level_var, t.U32(0));
+  const Id levels = t.UMin(physical_mip, t.U32(16));
+  const Id head = t.m.NewBlock(), body = t.m.NewBlock(),
+           cont = t.m.NewBlock(), merge = t.m.NewBlock();
+  t.m.Branch(head);
+  t.m.OpenBlock(head);
+  const Id level = t.m.Load(t.t_u, level_var);
+  const Id more = t.Ult(level, levels);
+  t.m.LoopMerge(merge, cont);
+  t.m.BranchConditional(more, body, merge);
+  t.m.OpenBlock(body);
+  const Id level_height = Max1(t, t.Shr(base_height, level));
+  const Id level_stored =
+      t.SelectB(pow2_pad, BitCeil(t, level_height), level_height);
+  const Id level_pitch =
+      LinearMipPitch(t, base_pitch, level_stored, level, linear_general,
+                     pow2_pad);
+  t.m.Store(acc, t.Add(t.m.Load(t.t_u, acc),
+                       t.Mul(t.Mul(level_pitch, level_stored), layers)));
+  t.m.Branch(cont);
+  t.m.OpenBlock(cont);
+  t.m.Store(level_var, t.Add(level, t.U32(1)));
+  t.m.Branch(head);
+  t.m.OpenBlock(merge);
+  return t.m.Load(t.t_u, acc);
+}
+
 // MUBUF/MTBUF shared addressing: byte offset within the bound resource.
 // soffset + instruction offset, plus the vaddr index/offset registers per the
 // IDXEN/OFFEN bits (both set: vaddr = index, vaddr+1 = offset).
@@ -1357,18 +1406,8 @@ void EmitCsMimg(Translator& t,
   t.m.OpenBlock(access_blk);
 
   const Id layer = t.SelectB(has_slices, physical_layer, t.U32(0));
-  Id mip_off = t.U32(0);
-  for (u32 mip = 0; mip < 16; mip++) {
-    const Id level = t.U32(mip);
-    const Id level_height = Max1(t, t.Shr(base_height, level));
-    const Id level_stored =
-        t.SelectB(pow2_pad, BitCeil(t, level_height), level_height);
-    const Id level_pitch = LinearMipPitch(t, base_pitch, level_stored, level,
-                                          linear_general, pow2_pad);
-    const Id level_size = t.Mul(t.Mul(level_pitch, level_stored), layers);
-    mip_off = t.Add(
-        mip_off, t.SelectB(t.Ult(level, physical_mip), level_size, t.U32(0)));
-  }
+  const Id mip_off = MipChainOffset(t, base_pitch, base_height, layers,
+                                    physical_mip, linear_general, pow2_pad);
   const Id layer_off = t.Mul(layer, t.Mul(pitch, stored_height));
   const Id texel_idx =
       t.Add(mip_off, t.Add(layer_off, t.Add(t.Mul(y, pitch), x)));
