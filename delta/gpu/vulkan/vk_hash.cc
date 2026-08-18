@@ -38,4 +38,19 @@ u64 TexHash(u64 base, u64 bytes) {
   return h ^ (bytes << 1);
 }
 
+u64 TexSampleHash(u64 base, u64 bytes) {
+  constexpr u64 kPrime = 1099511628211ull;
+  if (bytes <= 16384)
+    return TexHash(base, bytes);
+  u64 h = 1469598103934665603ull ^ (bytes * kPrime);
+  const u64 step = (bytes - 64) / 255;
+  for (u32 i = 0; i < 256; i++) {
+    u64 w[8];
+    std::memcpy(w, reinterpret_cast<const void*>(base + i * step), 64);
+    for (int j = 0; j < 8; j++)
+      h = (h ^ w[j]) * kPrime;
+  }
+  return h;
+}
+
 }  // namespace gpu::vk

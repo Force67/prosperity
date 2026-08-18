@@ -57,6 +57,9 @@ DELTA_OPTION(int, kTexCensus, "DELTA_GPU_TEXCENSUS", 0);
 // uploads its mip chain progressively, so "this surface is fine" from a
 // close-up view says nothing about the levels a minified one samples.
 DELTA_OPTION(int, kForceLod, "DELTA_GPU_FORCELOD", -1);
+// How far the content re-check of a texture that keeps holding still may back
+// off. 1 restores the old every-frame validation.
+DELTA_OPTION(u32, kMaxCheckInterval, "DELTA_GPU_TEXRECHECK", 32);
 }  // namespace
 
 namespace gpu::vk {
@@ -187,9 +190,15 @@ struct TexImageEntry {
   ImageAllocation allocation;
   u64 footprint = 0;
   VkDeviceSize allocation_size = 0;
-  u64 hash = 0;
+  u64 hash = 0;         // whole-content, from the periodic sweep
+  u64 sample_hash = 0;  // 16 KB of windows, checked every frame
   int last_checked_frame = -1;
+  int last_full_frame = -1;
   int last_used_frame = -1;
+  // Frames between full sweeps. Doubles while the content holds still and snaps
+  // back to 1 the moment it moves: reading every bound texture in full every
+  // frame was 269 MB and 12 ms of a Dead Cells frame, and none of it changed.
+  u32 check_interval = 1;
 };
 
 struct TexViewEntry {
@@ -1135,6 +1144,8 @@ VkDescriptorSet GetTexture(u64 base,
                            u32 swizzle,
                            u32 depth,
                            bool is_3d) {
+  ScopeNs _lookup_timer(&g_ns_tex_lookup);
+  g_tex_lookup_n++;
   constexpr u64 kMaxTextureBytes = 256ull * 1024 * 1024;
   // DELTA_GPU_TEXWATCH=<base>: the head of one texture's guest memory, once per
   // frame it is bound. A surface the guest fills after our first upload reads
@@ -1361,7 +1372,11 @@ VkDescriptorSet GetTexture(u64 base,
     // Mapping probes are syscall-heavy. Perform one alongside the
     // once-per-frame content validation rather than on every draw that reuses
     // this image.
-    if (!gpu::IsReadableRange(base, footprint)) {
+    const u64 _t_probe = NowNs();
+    const bool _readable = gpu::IsReadableRange(base, footprint);
+    g_ns_tex_probe += NowNs() - _t_probe;
+    g_tex_probe_n++;
+    if (!_readable) {
       // The commonest way a binding ends up on the white fallback, and until
       // now the only silent one: the descriptor is fine, the memory behind it
       // just is not mapped (yet).
@@ -1376,22 +1391,50 @@ VkDescriptorSet GetTexture(u64 base,
       }
       return VK_NULL_HANDLE;
     }
-    hsh = TexHash(base, footprint);
-    if (image_it != g_tex_images.end() && image_it->second.hash != hsh) {
-      if (!RecordTexPixels(image_it->second.image,
-                           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, base,
-                           layout, w, h, is_3d)) {
-        if (kTexFail) {
-          static int n = 0;
-          if (n++ < 12)
-            BASE_LOGI("texfail", "refresh {:#x} {}x{}x{} tiling={}",
-                      (unsigned long)base, w, h, is_3d ? depth : layers,
-                      tiling);
-        }
-        return VK_NULL_HANDLE;
+    const u64 _t_hash = NowNs();
+    if (image_it == g_tex_images.end()) {
+      hsh = TexHash(base, footprint);
+      g_tex_hash_bytes += footprint;
+    } else {
+      TexImageEntry& e = image_it->second;
+      e.last_checked_frame = g_frame.num;
+      // Cheap windowed check every frame, whole-content sweep on the backoff.
+      // The sweep alone would let a guest CPU write sit unnoticed for as long
+      // as the interval (nothing calls InvalidateTexRange for those -- only
+      // compute writeback does), and the windows alone can miss a small one.
+      const u64 sample = TexSampleHash(base, footprint);
+      g_tex_hash_bytes += std::min<u64>(footprint, 16384);
+      bool changed = sample != e.sample_hash;
+      if (!changed &&
+          g_frame.num - e.last_full_frame >= static_cast<int>(e.check_interval)) {
+        hsh = TexHash(base, footprint);
+        g_tex_hash_bytes += footprint;
+        changed = hsh != e.hash;
+        e.last_full_frame = g_frame.num;
+        if (!changed && e.check_interval < kMaxCheckInterval)
+          e.check_interval *= 2;
       }
-      image_it->second.hash = hsh;
+      if (changed) {
+        if (!RecordTexPixels(e.image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                             base, layout, w, h, is_3d)) {
+          if (kTexFail) {
+            static int n = 0;
+            if (n++ < 12)
+              BASE_LOGI("texfail", "refresh {:#x} {}x{}x{} tiling={}",
+                        (unsigned long)base, w, h, is_3d ? depth : layers,
+                        tiling);
+          }
+          g_ns_tex_hash += NowNs() - _t_hash;
+          return VK_NULL_HANDLE;
+        }
+        e.hash = TexHash(base, footprint);
+        e.sample_hash = sample;
+        e.last_full_frame = g_frame.num;
+        e.check_interval = 1;
+      }
     }
+    g_ns_tex_hash += NowNs() - _t_hash;
+    g_tex_hash_n++;
   }
   if (image_it == g_tex_images.end()) {
     while (g_tex_images.size() >= 3000)
@@ -1400,7 +1443,9 @@ VkDescriptorSet GetTexture(u64 base,
     TexImageEntry image_entry;
     image_entry.footprint = footprint;
     image_entry.hash = hsh;
+    image_entry.sample_hash = TexSampleHash(base, footprint);
     image_entry.last_checked_frame = g_frame.num;
+    image_entry.last_full_frame = g_frame.num;
     image_entry.last_used_frame = g_frame.num;
     VkImageCreateInfo ii{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
     ii.imageType = is_3d ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D;
@@ -1453,8 +1498,6 @@ VkDescriptorSet GetTexture(u64 base,
     image_it = g_tex_images.emplace(key.image, image_entry).first;
     g_tex_image_bytes += mr.size;
     RegisterTexturePages(key.image, footprint);
-  } else {
-    image_it->second.last_checked_frame = g_frame.num;
   }
   image_it->second.last_used_frame = g_frame.num;
 
@@ -1648,6 +1691,8 @@ VkDescriptorSet GetMultiTexSet(const DrawInfo& d,
                                const VkImageView* resolved_views,
                                const VkImageLayout* resolved_layouts,
                                const u64* depth_src) {
+  ScopeNs _set_timer(&g_ns_tex_set);
+  g_tex_set_n++;
   MultiTexKey key;
   key.num_texs = std::min(d.num_texs, kMaxTex);
   for (u32 i = 0; i < key.num_texs; i++) {
@@ -1786,8 +1831,11 @@ void InvalidateTexRange(u64 base, u64 size) {
   for (const TexImageKey& key : overlap) {
     auto found = g_tex_images.find(key);
     if (found != g_tex_images.end() && key.base < end &&
-        base < key.base + found->second.footprint)
+        base < key.base + found->second.footprint) {
       found->second.last_checked_frame = -1;
+      found->second.last_full_frame = -1;
+      found->second.check_interval = 1;
+    }
   }
 }
 
