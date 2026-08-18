@@ -39,6 +39,11 @@ struct GraphicsShaderState {
   u32 vs_user_sgprs = 0;
   u32 ps_user_sgprs = 0;
   u32 ps_input_ena = 0;
+  // SPI_PS_INPUT_CNTL_0..31 and SPI_PS_IN_CONTROL.NUM_INTERP. Which VS export
+  // each PS input slot reads is register state the code does not carry, so it
+  // is part of the module's identity like ps_input_ena is.
+  const u32* ps_in_cntl = nullptr;
+  u32 ps_num_interp = 0;
   // PA_CL_CLIP_CNTL.DX_CLIP_SPACE_DEF == 0: the VS bakes the z remap in.
   bool gl_clip = false;
   const u32* vs_user_data = nullptr;

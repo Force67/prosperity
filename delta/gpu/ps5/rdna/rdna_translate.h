@@ -37,6 +37,10 @@ gpu::gcn::Recompiled Recompile(const u32* vs_code,
                                u32 ps_input_ena = 0,
                                bool gl_clip_space = false,
                                u32 vs_user_sgprs = 32,
-                               u32 ps_user_sgprs = 32);
+                               u32 ps_user_sgprs = 32,
+                               // SPI_PS_INPUT_CNTL_0..31 and NUM_INTERP: which
+                               // VS parameter export each PS input slot reads.
+                               const u32* ps_in_cntl = nullptr,
+                               u32 ps_num_interp = 0);
 
 }  // namespace gpu::rdna

@@ -622,6 +622,8 @@ void ResolveRecompiledShaders(const Regs& regs,
        .vs_user_sgprs = vs_user_sgprs,
        .ps_user_sgprs = ps_user_sgprs,
        .ps_input_ena = regs[mmSPI_PS_INPUT_ENA],
+       .ps_in_cntl = regs.At(mmSPI_PS_INPUT_CNTL_0),
+       .ps_num_interp = regs[mmSPI_PS_IN_CONTROL] & 0x3F,
        // DX_CLIP_SPACE_DEF (bit 19) picks the guest's clip-z convention.
        .gl_clip = !((regs[mmPA_CL_CLIP_CNTL] >> 19) & 1),
        .vs_user_data = binding.vs_user_data,

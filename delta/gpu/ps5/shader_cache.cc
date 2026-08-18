@@ -9,6 +9,7 @@
 #include "base/arch.h"
 
 #include <functional>
+#include <array>
 #include <unordered_map>
 
 #include "gpu/ps5/cmd_trace.h"
@@ -31,6 +32,9 @@ struct GraphicsKey {
   u32 vs_user_sgprs = 0;
   u32 ps_user_sgprs = 0;
   u32 ps_input_ena = 0;
+  u32 ps_num_interp = 0;
+  // The OFFSET fields that are defined for this draw, in slot order.
+  std::array<u8, 32> ps_param_slot{};
   bool gl_clip = false;
 
   bool operator==(const GraphicsKey& other) const = default;
@@ -43,6 +47,9 @@ struct GraphicsKeyHash {
     MixHash(h, k.vs_user_sgprs);
     MixHash(h, k.ps_user_sgprs);
     MixHash(h, k.ps_input_ena);
+    MixHash(h, k.ps_num_interp);
+    for (u8 slot : k.ps_param_slot)
+      MixHash(h, slot);
     h ^= k.gl_clip ? kGoldenRatio64 : 0ull;
     return static_cast<size_t>(h);
   }
@@ -74,10 +81,14 @@ struct ComputeKeyHash {
 const gcn::Recompiled& GetGraphicsShader(const GraphicsShaderState& state) {
   static std::unordered_map<GraphicsKey, gcn::Recompiled, GraphicsKeyHash>
       cache;
-  const GraphicsKey key{state.vs_addr,       state.ps_addr,
-                        state.fetch_addr,    state.vs_user_sgprs,
-                        state.ps_user_sgprs, state.ps_input_ena,
-                        state.gl_clip};
+  GraphicsKey key{state.vs_addr,       state.ps_addr,
+                  state.fetch_addr,    state.vs_user_sgprs,
+                  state.ps_user_sgprs, state.ps_input_ena,
+                  state.ps_num_interp};
+  key.gl_clip = state.gl_clip;
+  if (state.ps_in_cntl)
+    for (u32 i = 0; i < state.ps_num_interp && i < 32; i++)
+      key.ps_param_slot[i] = static_cast<u8>(state.ps_in_cntl[i] & 0x1F);
   auto it = cache.find(key);
   if (it != cache.end())
     return it->second;
@@ -93,7 +104,8 @@ const gcn::Recompiled& GetGraphicsShader(const GraphicsShaderState& state) {
                            : nullptr,
                        state.vs_user_data, state.ps_user_data,
                        state.ps_input_ena, state.gl_clip, state.vs_user_sgprs,
-                       state.ps_user_sgprs))
+                       state.ps_user_sgprs, state.ps_in_cntl,
+                       state.ps_num_interp))
           .first->second;
   TraceRecompileDone(rc.ok);
   // A shader we cannot recompile drops its draw entirely, which is

@@ -98,6 +98,9 @@ constexpr u32 mmPA_CL_CLIP_CNTL = 0xA204;
 
 // --- SPI shader-interface (context) ---
 constexpr u32 mmSPI_VS_OUT_CONFIG = 0xA1B1;  // # of VS output params
+// SPI_PS_INPUT_CNTL_0..31: OFFSET[4:0] names which VS parameter export each PS
+// input slot reads. Only defined below NUM_INTERP.
+constexpr u32 mmSPI_PS_INPUT_CNTL_0 = 0xA191;
 constexpr u32 mmSPI_PS_INPUT_ENA = 0xA1B3;   // interpolants the PS reads
 constexpr u32 mmSPI_PS_INPUT_ADDR = 0xA1B4;
 constexpr u32 mmSPI_PS_IN_CONTROL = 0xA1B6;  // NUM_INTERP

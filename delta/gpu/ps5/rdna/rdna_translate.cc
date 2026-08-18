@@ -22,6 +22,8 @@ gpu::gcn::Recompiled Recompile(const u32*,
                                u32,
                                bool,
                                u32,
+                               u32,
+                               const u32*,
                                u32) {
   return {};
 }
@@ -2621,7 +2623,10 @@ bool TranslatePs(const Program& program,
                  u32 ps_input_ena,
                  Recompiled& r,
                  Translator& t,
-                 u32 user_sgprs) {
+                 u32 user_sgprs,
+                 const u32* ps_in_cntl,
+                 u32 ps_num_interp,
+                 const std::vector<u32>* vs_exported_params) {
   if (ShDbg())
     DumpProgram(program, "ps");
   std::vector<Id> iface;
@@ -2630,6 +2635,14 @@ bool TranslatePs(const Program& program,
   sc.r = &r;
   sc.iface = &iface;
   sc.flat_attrs = &flat_attrs;
+  // A PS names an input SLOT; SPI_PS_INPUT_CNTL_<slot>.OFFSET names which of the
+  // VS's parameter exports that slot reads, and it is not the identity. Dead
+  // Cells' light shaders map slot 3 onto param 4, so reading param 3 handed them
+  // the raw light-space position where the falloff coordinate belongs and every
+  // light came out flat.
+  sc.ps_in_cntl = ps_in_cntl;
+  sc.ps_num_interp = ps_num_interp;
+  sc.vs_exported_params = vs_exported_params;
   sc.skip_launch_movs = LaunchExecMovPcs(program);
   if (!RdnaPlanCbufs(program, static_cast<u32>(r.vs_cbufs.size()),
                      r.ps_cbufs, sc.cbuf_bind, sc.smem_cbuf_by_pc))
@@ -2839,7 +2852,9 @@ Recompiled Recompile(const u32* vs_code,
                      u32 ps_input_ena,
                      bool gl_clip_space,
                      u32 vs_user_sgprs,
-                     u32 ps_user_sgprs) {
+                     u32 ps_user_sgprs,
+                     const u32* ps_in_cntl,
+                     u32 ps_num_interp) {
   Recompiled r;
   if (!vs_code || !vs_user_data || !ps_user_data)
     return r;
@@ -2862,6 +2877,20 @@ Recompiled Recompile(const u32* vs_code,
     if (inst.enc == Enc::kVintrp && inst.opcode == 2 &&
         (inst.raw[0] & 0xFF) == 2)
       flat_attrs.insert((inst.raw[0] >> 10) & 0x3F);
+
+  // The parameter cache packs the VS's exports densely in export order, and
+  // SPI_PS_INPUT_CNTL.OFFSET indexes THAT, not the param number.
+  std::vector<u32> vs_exported_params;
+  for (const Inst& inst : vs_program)
+    if (inst.enc == Enc::kExp) {
+      const u32 tgt = (inst.raw[0] >> 4) & 0x3F;
+      if (tgt >= 32 && tgt <= 63)
+        vs_exported_params.push_back(tgt - 32);
+    }
+  std::sort(vs_exported_params.begin(), vs_exported_params.end());
+  vs_exported_params.erase(
+      std::unique(vs_exported_params.begin(), vs_exported_params.end()),
+      vs_exported_params.end());
 
   Translator tv;
   tv.rdna_sources = true;
@@ -2888,7 +2917,8 @@ Recompiled Recompile(const u32* vs_code,
   tp.InitTypes();
   gpu::gcn::ResetUnsupported();
   if (ps_code ? !TranslatePs(ps_program, flat_attrs, ps_input_ena, r, tp,
-                             ps_user_sgprs)
+                             ps_user_sgprs, ps_in_cntl, ps_num_interp,
+                             &vs_exported_params)
               : !TranslateDepthOnlyPs(tp))
     return r;
   if (gpu::gcn::HadUnsupported()) {
