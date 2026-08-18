@@ -979,12 +979,22 @@ std::vector<u64> DirtyRangesOverlapping(u64 base,
   if (!bytes)
     return candidates;
   const u64 end = RangeEnd(base, bytes);
-  for (u64 page = base >> kCsDirtyPageShift;
-       page <= (end - 1) >> kCsDirtyPageShift; page++) {
-    auto found = g_cs_dirty_pages.find(page);
-    if (found != g_cs_dirty_pages.end())
-      candidates.insert(candidates.end(), found->second.begin(),
-                        found->second.end());
+  // Walking the QUERY's pages costs a lookup per 64 KB of it, and a texture is
+  // hundreds of pages while the whole dirty index is a handful of entries.
+  // Whichever side is smaller gives the same answer, because the filter below
+  // rechecks every candidate's overlap exactly -- a superset is safe here.
+  const u64 first_page = base >> kCsDirtyPageShift;
+  const u64 last_page = (end - 1) >> kCsDirtyPageShift;
+  if (last_page - first_page + 1 > g_cs_dirty_pages.size()) {
+    for (const auto& [page, bases] : g_cs_dirty_pages)
+      candidates.insert(candidates.end(), bases.begin(), bases.end());
+  } else {
+    for (u64 page = first_page; page <= last_page; page++) {
+      auto found = g_cs_dirty_pages.find(page);
+      if (found != g_cs_dirty_pages.end())
+        candidates.insert(candidates.end(), found->second.begin(),
+                          found->second.end());
+    }
   }
   std::sort(candidates.begin(), candidates.end());
   candidates.erase(std::unique(candidates.begin(), candidates.end()),
@@ -2345,6 +2355,7 @@ bool FlushCsWrites(Renderer& renderer) {
 // this instead of the full flush — flushing every dirty range at every draw
 // re-tiled the whole post chain ~19x/frame.
 bool FlushCsWritesRange(Renderer& renderer, u64 base, u64 bytes) {
+  ScopeNs _flush_timer(&g_ns_cs_flush);
   // Nothing dirty anywhere: answer without touching the page index, which
   // otherwise allocates a vector, hashes a lookup per page, then sorts and
   // dedups it. That is called once per guest read -- and SotC issues 1.2M
@@ -2427,17 +2438,29 @@ bool CsRangeDirtyOverlapping(u64 base, u64 bytes) {
   // lookup on the draw path, and building/sorting the candidate vector there
   // costs more than the memcpy the cache hit saves for small windows.
   const u64 end = RangeEnd(base, bytes);
-  for (u64 page = base >> kCsDirtyPageShift;
-       page <= (end - 1) >> kCsDirtyPageShift; page++) {
+  const auto hits = [&](u64 other) {
+    auto range = g_cs_ranges.find(other);
+    return range != g_cs_ranges.end() && range->second.gpu_dirty &&
+           other < end && base < RangeEnd(other, range->second.guest_bytes);
+  };
+  // Same smaller-side walk as DirtyRangesOverlapping, and safe for the same
+  // reason: every candidate's overlap is rechecked exactly.
+  const u64 first_page = base >> kCsDirtyPageShift;
+  const u64 last_page = (end - 1) >> kCsDirtyPageShift;
+  if (last_page - first_page + 1 > g_cs_dirty_pages.size()) {
+    for (const auto& [page, bases] : g_cs_dirty_pages)
+      for (u64 other : bases)
+        if (hits(other))
+          return true;
+    return false;
+  }
+  for (u64 page = first_page; page <= last_page; page++) {
     auto found = g_cs_dirty_pages.find(page);
     if (found == g_cs_dirty_pages.end())
       continue;
-    for (u64 other : found->second) {
-      auto range = g_cs_ranges.find(other);
-      if (range != g_cs_ranges.end() && range->second.gpu_dirty &&
-          other < end && base < RangeEnd(other, range->second.guest_bytes))
+    for (u64 other : found->second)
+      if (hits(other))
         return true;
-    }
   }
   return false;
 }
