@@ -66,6 +66,14 @@ Program ReachableProgram(const Program& program);
 std::shared_ptr<const Program> CachedReachableProgram(const u32* code,
                                                       u32 max_dwords);
 
+// A hash of the shader's code, spanning the footer-declared length when there
+// is one and otherwise up to the first program-ending instruction. This is what
+// identifies a shader for the module cache: AGC titles hand the same program
+// out of a rotating pool, so an address names a different shader from frame to
+// frame and a cache keyed on one recompiles forever. Cached per address and
+// revalidated at most once a generation, like CachedReachableProgram.
+u64 CachedCodeHash(const u32* code, u32 max_dwords);
+
 // Advance the revalidation generation; called once per frame. Repeat lookups
 // within a frame are then pure map hits.
 void NextProgramGeneration();

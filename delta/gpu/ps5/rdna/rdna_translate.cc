@@ -27,6 +27,9 @@ gpu::gcn::Recompiled Recompile(const u32*,
                                u32) {
   return {};
 }
+u64 FetchPlanHash(u64) {
+  return 0;
+}
 }  // namespace gpu::rdna
 #else
 
@@ -2350,6 +2353,22 @@ std::vector<FetchAttr> ParseFetch(u64 fetch_addr) {
     attr.pc = ~0u;
   return attrs;
 }
+
+}  // namespace
+
+u64 FetchPlanHash(u64 fetch_addr) {
+  const std::vector<FetchAttr> attrs = ParseFetch(fetch_addr);
+  if (attrs.empty())
+    return 0;
+  u64 h = 1469598103934665603ull;
+  for (const FetchAttr& a : attrs)
+    for (u32 field : {a.semantic, a.num_comps, a.dest_vgpr, a.table_sgpr,
+                      a.dword_off, a.inst_format, a.inst_offset})
+      h = (h ^ field) * 1099511628211ull;
+  return h;
+}
+
+namespace {
 
 // Address of the VS being translated, for shader-specific debug knobs.
 thread_local u64 g_vs_addr = 0;

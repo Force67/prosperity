@@ -12,10 +12,9 @@
  * fetch program it calls, which is a separate address. Everything that decides
  * that lives here, behind two lookups.
  *
- * Keyed by address, unlike the PS4 path's content hashes: AGC hands its shaders
- * out of a pool the title fills once, so an address is stable for a run. If a
- * title turns up that streams code to fresh addresses, this is where that is
- * fixed.
+ * Keyed by code CONTENT, like the PS4 path: AGC hands its shaders out of a pool
+ * the title refills, so the same program arrives at a fresh address constantly
+ * and an address key misses forever.
  *
  * Modules are cached for the life of the process. Recompiling costs
  * milliseconds and the working set is bounded by the title's shader count.

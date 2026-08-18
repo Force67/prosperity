@@ -43,4 +43,12 @@ gpu::gcn::Recompiled Recompile(const u32* vs_code,
                                const u32* ps_in_cntl = nullptr,
                                u32 ps_num_interp = 0);
 
+// What the fetch pointer contributes to a module's identity: a hash of the
+// attribute plan Recompile would parse out of it, and 0 when it parses to no
+// attributes at all. Not a hash of the code -- the two user-data dwords the fetch pointer
+// is read from hold a plain per-draw constant buffer in some titles (Dead Cells
+// puts a fading alpha there), so hashing the bytes makes every draw a fresh
+// module and the title recompiles the same shader forever.
+u64 FetchPlanHash(u64 fetch_addr);
+
 }  // namespace gpu::rdna

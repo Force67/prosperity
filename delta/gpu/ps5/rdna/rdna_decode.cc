@@ -521,4 +521,39 @@ std::shared_ptr<const Program> CachedReachableProgram(const u32* code,
   return program;
 }
 
+u64 CachedCodeHash(const u32* code, u32 max_dwords) {
+  struct Entry {
+    u64 hash = 0;
+    u64 generation = 0;
+  };
+  static std::unordered_map<u64, Entry> cache;
+
+  if (!code)
+    return 0;
+  const u64 addr = reinterpret_cast<u64>(code);
+  auto it = cache.find(addr);
+  if (it != cache.end() && it->second.generation == g_generation)
+    return it->second.hash;
+
+  u32 len = CodeLength(code, max_dwords);
+  if (!len) {
+    // No footer: hash up to the terminator rather than a fixed window, or the
+    // unrelated bytes that follow give two copies of one shader two hashes --
+    // which is the miss this cache exists to avoid.
+    len = max_dwords;
+    for (const Inst& inst : Decode(code, max_dwords, /*stop_at_endpgm=*/true)) {
+      const bool ends = inst.enc == Enc::kSopp && inst.opcode == 0x01;
+      if (ends) {
+        len = inst.pc + inst.size;
+        break;
+      }
+    }
+  }
+  const u64 hash = HashCode(code, len);
+  if (cache.size() > 4096)
+    cache.clear();  // unbounded-growth backstop
+  cache[addr] = {hash, g_generation};
+  return hash;
+}
+
 }  // namespace gpu::rdna
