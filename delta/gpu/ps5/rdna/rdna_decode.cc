@@ -11,6 +11,8 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <memory>
+#include <unordered_map>
 
 namespace gpu::rdna {
 namespace {
@@ -461,6 +463,62 @@ Program ReachableProgram(const Program& program) {
     if (reachable[i])
       out.push_back(program[i]);
   return out;
+}
+
+namespace {
+
+u64 g_generation = 1;
+
+u64 HashCode(const u32* code, u32 dwords) {
+  u64 h = 1469598103934665603ull;
+  for (u32 i = 0; i < dwords; i++)
+    h = (h ^ code[i]) * 1099511628211ull;
+  return h;
+}
+
+}  // namespace
+
+void NextProgramGeneration() {
+  g_generation++;
+}
+
+std::shared_ptr<const Program> CachedReachableProgram(const u32* code,
+                                                      u32 max_dwords) {
+  struct Entry {
+    u64 hash = 0;
+    u32 hashed_dwords = 0;
+    u64 generation = 0;
+    std::shared_ptr<const Program> program;
+  };
+  static std::unordered_map<u64, Entry> cache;
+
+  if (!code)
+    return std::make_shared<const Program>();
+  const u64 addr = reinterpret_cast<u64>(code);
+
+  // Already revalidated this frame: the three per-draw walks that share a
+  // shader hit this and do no work at all.
+  auto it = cache.find(addr);
+  if (it != cache.end() && it->second.generation == g_generation)
+    return it->second.program;
+
+  // Hash the real code span (footer-bounded when there is one) so a shader
+  // rewritten in place at the same address invalidates the entry.
+  const u32 len = CodeLength(code, max_dwords);
+  const u32 hashed = len ? len : (max_dwords < 64 ? max_dwords : 64);
+  const u64 hash = HashCode(code, hashed);
+  if (it != cache.end() && it->second.hash == hash &&
+      it->second.hashed_dwords == hashed) {
+    it->second.generation = g_generation;
+    return it->second.program;
+  }
+
+  if (cache.size() > 512)
+    cache.clear();  // unbounded-growth backstop
+  auto program = std::make_shared<const Program>(
+      ReachableProgram(DecodeShader(code, max_dwords)));
+  cache[addr] = {hash, hashed, g_generation, program};
+  return program;
 }
 
 }  // namespace gpu::rdna

@@ -17,6 +17,8 @@
 
 #include "base/arch.h"
 
+#include <memory>
+
 #include "gpu/gcn/gcn_decode.h"
 
 namespace gpu::rdna {
@@ -53,5 +55,19 @@ Program DecodeShader(const u32* code, u32 max_dwords);
 // Remove instructions in statically unreachable basic blocks while preserving
 // original PCs for branch and resource-plan lookup.
 Program ReachableProgram(const Program& program);
+
+// Shared, cached ReachableProgram(DecodeShader(...)) for the per-draw resource
+// walks. TrackTextures and ResolveBuffers each decoded the same shader, so one
+// draw decoded up to 16 KB of ISA three times over -- 5.4 ms a frame in Dead
+// Cells. Keyed by address; entries revalidate against a hash of the code, at
+// most once per generation, so an in-place rewrite is still picked up. Returns
+// a shared_ptr so an entry stays alive across an eviction. Not thread-safe:
+// callers already serialize on the command-processor lock.
+std::shared_ptr<const Program> CachedReachableProgram(const u32* code,
+                                                      u32 max_dwords);
+
+// Advance the revalidation generation; called once per frame. Repeat lookups
+// within a frame are then pure map hits.
+void NextProgramGeneration();
 
 }  // namespace gpu::rdna

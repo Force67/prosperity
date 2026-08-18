@@ -22,6 +22,7 @@
 #include "gpu/ps5/compute_dispatch.h"
 #include "gpu/ps5/draw_state.h"
 #include "gpu/ps5/guest_address.h"
+#include "gpu/ps5/rdna/rdna_decode.h"
 #include "gpu/ps5/reg_state.h"
 #include "gpu/rhi/command.h"
 #include "gpu/rhi/renderer.h"
@@ -439,6 +440,11 @@ void SubmitCcb(const void* ccb, u32 size_bytes) {
 
 void EndFrame(u64 scanout_base) {
   std::lock_guard<std::mutex> lock(g_mutex);
+  // New frame -> shader code may have been rewritten; let the cached programs
+  // revalidate each address once next frame instead of once per draw. Before
+  // the early return, or a frame that ends with nothing active never advances
+  // it and the cache stops revalidating at all.
+  rdna::NextProgramGeneration();
   rhi::Renderer& renderer = rhi::DefaultRenderer();
   if (!g_frame_active || !renderer.available())
     return;

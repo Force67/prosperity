@@ -1221,8 +1221,24 @@ std::vector<TImage> TrackTextures(const u32* ps_code,
   std::vector<TImage> out;
   if (!ps_code || !pud || !InGuest(reinterpret_cast<u64>(ps_code)))
     return out;
-  const Program prog = ReachableProgram(DecodeShader(ps_code, 4096));
-  const MimgBindingPlan plan = RdnaPlanMimg(prog);
+  const auto prog_ref = CachedReachableProgram(ps_code, 4096);
+  const Program& prog = *prog_ref;
+  // The plan is a pure function of the program, so the cached program's own
+  // identity says whether a cached plan still describes it.
+  static std::unordered_map<u64, std::pair<std::shared_ptr<const Program>,
+                                           MimgBindingPlan>>
+      plan_cache;
+  const u64 code_addr = reinterpret_cast<u64>(ps_code);
+  auto plan_it = plan_cache.find(code_addr);
+  if (plan_it == plan_cache.end() || plan_it->second.first != prog_ref) {
+    if (plan_cache.size() > 512)
+      plan_cache.clear();
+    plan_it = plan_cache.insert_or_assign(code_addr,
+                                          std::make_pair(prog_ref,
+                                                         RdnaPlanMimg(prog)))
+                  .first;
+  }
+  const MimgBindingPlan& plan = plan_it->second.second;
   out.resize(plan.binding_srsrc.size());
   std::vector<bool> filled(out.size(), false);
   ScalarEval eval(pud, user_sgprs, 0);
@@ -1327,7 +1343,7 @@ std::unordered_map<u32, BufferResource> ResolveBuffers(
   if (!code || !user_data || !InGuest(reinterpret_cast<u64>(code)))
     return out;
   ScalarEval eval(user_data, user_sgprs, user_sgpr_base);
-  for (const Inst& inst : ReachableProgram(DecodeShader(code, 4096))) {
+  for (const Inst& inst : *CachedReachableProgram(code, 4096)) {
     if (inst.enc == Enc::kSmrd && SmemLoadCount(inst.opcode)) {
       const Smem smem = DecodeSmem(inst);
       // s_buffer_load reads through a V#, s_load through a bare 64-bit pointer.
