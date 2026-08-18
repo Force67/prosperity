@@ -29,6 +29,9 @@ class LatestFramePresenter {
                gfx::PixelFormat fmt = gfx::PixelFormat::bgra8);
   void Present(std::vector<u8>&& pixels, u32 w, u32 h,
                gfx::PixelFormat fmt = gfx::PixelFormat::bgra8);
+  // Block until a lent buffer has been copied out, for a caller that is about
+  // to write over the one it lent.
+  void WaitForBorrowed();
   void Stop();
 
  private:
@@ -38,7 +41,11 @@ class LatestFramePresenter {
   std::thread thread_;
   std::mutex mutex_;
   std::condition_variable ready_;
+  std::condition_variable released_;  // a lent buffer has been copied out
   std::vector<u8> pending_pixels_;  // tight pitch, pending_fmt_; latest wins
+  // Set instead of pending_pixels_ when the caller lends us its buffer: the
+  // presenter thread copies out of it, under the lock, before releasing it.
+  const u8* pending_src_ = nullptr;
   gfx::PixelFormat pending_fmt_ = gfx::PixelFormat::bgra8;
   u32 width_ = 0;
   u32 height_ = 0;

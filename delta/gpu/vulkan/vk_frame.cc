@@ -830,6 +830,12 @@ void BeginFrame(Renderer& renderer) {
   // half of each host-visible ring (the other half may still be read by the
   // in-flight previous frame).
   FrameSlot& slot = g_frame.slots[g_frame.slot_idx];
+  // This slot's readback buffer is the one lent to the presenter two frames
+  // ago, and this frame is about to have the GPU write over it. The copy is
+  // long finished by now in the steady state, so this waits for nothing -- but
+  // it is what makes lending the buffer instead of copying it safe.
+  if (renderer.state)
+    renderer.state->presenter.WaitForBorrowed();
   g_frame.cmd = slot.cmd;
   g_frame.readback = slot.readback;
   g_frame.readback_mem = slot.readback_mem;
@@ -1455,7 +1461,10 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
   }
 
   // Runs last: reuses (and clobbers) the readback buffer the present path
-  // above already consumed.
+  // above already consumed -- so the presenter has to be done reading it. It
+  // normally does nothing, and the wait costs nothing when nothing was lent.
+  if (kGpuRtstat && renderer.state)
+    renderer.state->presenter.WaitForBorrowed();
   if (!ReportRtContents(cur)) {
     renderer.state = nullptr;
     return;
