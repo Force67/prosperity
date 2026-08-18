@@ -45,7 +45,7 @@ bool InGuest(u64 a) {
 
 bool GuestRange(u64 address, u64 bytes) {
   return bytes && InGuest(address) && bytes <= 0x1000000000000ull - address &&
-         gpu::IsReadableRange(address, bytes);
+         gpu::IsReadableRangeCached(address, bytes);
 }
 
 // A cube sample reaches the hardware with the face already selected (the

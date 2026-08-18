@@ -2345,7 +2345,7 @@ std::vector<FetchAttr> ParseFetchInsts(const Program& insts) {
 std::vector<FetchAttr> ParseFetch(u64 fetch_addr) {
   constexpr u64 kMaxFetchBytes = 256 * sizeof(u32);
   if (!gpu::gcn::InGuest(fetch_addr) ||
-      !gpu::IsReadableRange(fetch_addr, kMaxFetchBytes))
+      !gpu::IsReadableRangeCached(fetch_addr, kMaxFetchBytes))
     return {};
   const auto* code = reinterpret_cast<const u32*>(fetch_addr);
   std::vector<FetchAttr> attrs = ParseFetchInsts(Decode(code, 256));
