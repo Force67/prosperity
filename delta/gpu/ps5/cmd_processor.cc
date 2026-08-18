@@ -445,6 +445,7 @@ void EndFrame(u64 scanout_base) {
   // the early return, or a frame that ends with nothing active never advances
   // it and the cache stops revalidating at all.
   rdna::NextProgramGeneration();
+  gpu::NextMemoryGeneration();
   rhi::Renderer& renderer = rhi::DefaultRenderer();
   if (!g_frame_active || !renderer.available())
     return;

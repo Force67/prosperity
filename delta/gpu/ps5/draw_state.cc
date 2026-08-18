@@ -116,7 +116,7 @@ void RecoverShaderAddresses(const Regs& regs, ShaderBinding& binding) {
   u32 nf = 0;
   const auto try_addr = [&](u32 off, u64 a) {
     if (nf >= 16 || !IsGpuAddress(a) || (a & 0xFF) ||
-        !gpu::IsReadableRange(a, sizeof(u32)))
+        !gpu::IsReadableRangeCached(a, sizeof(u32)))
       return;
     const u32 word0 = *reinterpret_cast<const u32*>(a);
     if ((word0 >> 24) < 0x7e || word0 == 0xffffffffu)
@@ -189,7 +189,7 @@ void ResolveIndexBuffer(const DrawPacket& packet, rhi::DrawInfo& d) {
     if (IsGuestAddress(base) && count && count <= 0x100000 &&
         (!packet.index_max ||
          static_cast<u64>(offset) + count <= packet.index_max) &&
-        gpu::IsReadableRange(base, count * index_size)) {
+        gpu::IsReadableRangeCached(base, count * index_size)) {
       d.index_data = reinterpret_cast<const void*>(base);
       d.index_count = count;
       d.index_type = packet.index_type;
@@ -199,7 +199,7 @@ void ResolveIndexBuffer(const DrawPacket& packet, rhi::DrawInfo& d) {
     const u64 base = (static_cast<u64>(body[2] & 0xFFFF) << 32) | body[1];
     const u32 count = body[3];
     if (IsGuestAddress(base) && count && count <= 0x100000 &&
-        gpu::IsReadableRange(base, count * index_size)) {
+        gpu::IsReadableRangeCached(base, count * index_size)) {
       d.index_data = reinterpret_cast<const void*>(base);
       d.index_count = count;
       d.index_type = packet.index_type;
@@ -359,7 +359,7 @@ void BindVertexAttributes(const gcn::Recompiled& rc,
             (static_cast<u64>(vs_user_data[slot + 1] & 0xFFFF) << 32) |
             vs_user_data[slot];
         const u64 entry = table + a.vbuf_dword_off * 4;
-        if (IsGuestAddress(table) && gpu::IsReadableRange(entry, 16)) {
+        if (IsGuestAddress(table) && gpu::IsReadableRangeCached(entry, 16)) {
           vb = rdna::DecodeVBuffer(reinterpret_cast<const u32*>(entry));
           how = "table";
         }
@@ -453,7 +453,7 @@ void ResolveCbufferBindings(const std::vector<gcn::ShaderCbuf>& cbufs,
     const u64 base = it->second.base & ~u64{3};
     const u64 bytes = static_cast<u64>(cb.num_dwords) * 4;
     TraceCbufBinding(vertex_stage, cb.binding, cb.use_pc, base, cb.num_dwords);
-    if (!IsGuestAddress(base) || !gpu::IsReadableRange(base, bytes))
+    if (!IsGuestAddress(base) || !gpu::IsReadableRangeCached(base, bytes))
       continue;
     d.cbufs[cb.binding] = {base, static_cast<u32>(bytes)};
     d.num_cbufs = std::max(d.num_cbufs, cb.binding + 1);
@@ -493,7 +493,7 @@ void ResolveRawBuffers(const std::vector<gcn::ShaderBuffer>& buffers,
         base = user_data[s] |
                (static_cast<u64>(user_data[s + 1] & 0xFFFF) << 32);
       if (!IsGuestAddress(base) ||
-          !gpu::IsReadableRange(base, kRawBufWindow))
+          !gpu::IsReadableRangeCached(base, kRawBufWindow))
         continue;
       d.bufs[sb.binding] = {base, kRawBufWindow};
       d.num_bufs = std::max(d.num_bufs, sb.binding + 1);
@@ -611,9 +611,9 @@ void ResolveRecompiledShaders(const Regs& regs,
   if (!kRecompOn || !IsGuestAddress(binding.vs_addr) ||
       (binding.ps_addr && !IsGuestAddress(binding.ps_addr)))
     return;
-  if (!gpu::IsReadableRange(binding.vs_addr, kMaxShaderBytes) ||
+  if (!gpu::IsReadableRangeCached(binding.vs_addr, kMaxShaderBytes) ||
       (binding.ps_addr &&
-       !gpu::IsReadableRange(binding.ps_addr, kMaxShaderBytes)))
+       !gpu::IsReadableRangeCached(binding.ps_addr, kMaxShaderBytes)))
     return;
 
   const gcn::Recompiled& rc = GetGraphicsShader(
