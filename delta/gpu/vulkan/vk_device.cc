@@ -19,6 +19,7 @@
 #include "gpu/rhi/renderer.h"
 #include "gpu/vulkan/vk_backend.h"
 #include "gpu/vulkan/vk_debug.h"
+#include "gpu/vulkan/vk_perf.h"
 #include "gpu/vulkan/vk_frame.h"
 #include "gpu/vulkan/vk_trace.h"
 #include "gpu/vulkan/vk_upload_ring.h"
@@ -89,8 +90,17 @@ std::vector<u8> ReadPipelineCacheBlob() {
 
 void SavePipelineCache(bool force) {
   static size_t last_size = 0;
+  static u64 last_write_ns = 0;
   const std::string p = PipelineCachePath();
   if (p.empty() || g_dev.pipeline_cache == VK_NULL_HANDLE)
+    return;
+  // A level's worth of pipelines is built in one burst, and every one of them
+  // would otherwise re-serialize and rewrite the WHOLE blob on the submit
+  // thread -- turning the save into a second source of the hitch it exists to
+  // remove. One write a second keeps the burst cheap; what it drops is rebuilt
+  // and saved on the next run.
+  const u64 now = NowNs();
+  if (!force && last_write_ns && now - last_write_ns < 1000000000ull)
     return;
   size_t size = 0;
   if (vkGetPipelineCacheData(g_dev.device, g_dev.pipeline_cache, &size,
@@ -105,6 +115,7 @@ void SavePipelineCache(bool force) {
                              blob.data()) != VK_SUCCESS)
     return;
   last_size = size;
+  last_write_ns = now;
   char tmp[512];
   std::snprintf(tmp, sizeof(tmp), "%s.%d.tmp", p.c_str(), (int)::getpid());
   FILE* f = std::fopen(tmp, "wb");

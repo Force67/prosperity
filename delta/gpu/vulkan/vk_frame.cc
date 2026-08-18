@@ -1460,6 +1460,12 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
     }
   }
 
+  // The throttle inside means the burst of pipelines a level built does not
+  // each rewrite the blob, but also that the last of them is still unsaved
+  // when the burst ends. Asking once a frame costs a clock read and catches
+  // that tail within the second.
+  SavePipelineCache();
+
   // Runs last: reuses (and clobbers) the readback buffer the present path
   // above already consumed -- so the presenter has to be done reading it. It
   // normally does nothing, and the wait costs nothing when nothing was lent.
