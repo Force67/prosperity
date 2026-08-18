@@ -20,6 +20,8 @@ namespace gpu::gcn {
 
 u64 g_ns_recomp = 0;
 u32 g_recomp_n = 0;
+u64 g_ns_spv_val = 0, g_ns_spv_opt = 0;
+u32 g_spv_hit_n = 0, g_spv_miss_n = 0;
 
 namespace {
 u64 NowNs() {

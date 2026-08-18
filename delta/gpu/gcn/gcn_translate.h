@@ -202,6 +202,13 @@ struct Recompiled {
 extern u64 g_ns_recomp;
 extern u32 g_recomp_n;
 
+// The same window, split by what inside a recompile spent it: SPIRV-Tools
+// validation, SPIRV-Tools optimization, and how often the on-disk cache of
+// optimizer output answered instead. Everything not named here is our own
+// decode + emit.
+extern u64 g_ns_spv_val, g_ns_spv_opt;
+extern u32 g_spv_hit_n, g_spv_miss_n;
+
 // Recompile a VS+PS pair. vs_code/ps_code are guest pointers to the GCN code;
 // the user-data arrays are the 16 user SGPRs for each stage (used only to read
 // the fetch-shader pointer during translation, not the live resources).

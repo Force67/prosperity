@@ -8,6 +8,8 @@
 
 #include "gpu/gcn/spirv/spv_post.h"
 #include "base/arch.h"
+#include "gpu/gcn/gcn_translate.h"
+#include "gpu/vulkan/vk_perf.h"
 
 #include <base/logging.h>
 
@@ -26,18 +28,31 @@
 
 namespace gpu::gcn::spirv {
 
+using gpu::vk::NowNs;
+
+namespace {
+// DELTA_GPU_SPIRV_OPT: 2 = legalize + performance passes, 1 = legalize only,
+// 0 = neither. Legalization (mem2reg over the Private-storage register file) is
+// not a speed choice: without it the module is a load/store stream over 512
+// variables, and whoever compiles it pays -- turning it off moved 22.6 s of
+// Shadow of the Colossus's first minute out of spirv-opt and straight into the
+// driver, at 626 ms a pipeline. The performance passes on top are the part that
+// is optional.
+DELTA_OPTION(u32, kOptLevel, "DELTA_GPU_SPIRV_OPT", 2);
+}  // namespace
+
 std::vector<u32> Optimize(const std::vector<u32>& spv) {
+  if (kOptLevel == 0)
+    return spv;
   spvtools::Optimizer opt(SPV_ENV_VULKAN_1_1);
   opt.SetMessageConsumer([](spv_message_level_t lvl, const char*,
                             const spv_position_t&, const char* msg) {
     if (lvl <= SPV_MSG_WARNING)
       BASE_LOGI("spv-opt", "{}", msg);
   });
-  // Legalization first: promotes the Private register-file variables to SSA
-  // (mem2reg) so the performance passes can actually fold the naive load/store
-  // stream the translator emits.
   opt.RegisterLegalizationPasses();
-  opt.RegisterPerformancePasses();
+  if (kOptLevel >= 2)
+    opt.RegisterPerformancePasses();
   std::vector<u32> out;
   if (!opt.Run(spv.data(), spv.size(), &out) || out.empty())
     return spv;  // keep the valid-but-unoptimized binary on failure
@@ -76,6 +91,11 @@ u64 HashWords(const std::vector<u32>& w) {
     h *= 1099511628211ull;
   }
   h ^= kCacheGeneration;
+  h *= 1099511628211ull;
+  // The pass set is part of what produced the entry, so it is part of the key:
+  // otherwise a run at one DELTA_GPU_SPIRV_OPT level silently serves modules
+  // built at another.
+  h ^= kOptLevel.get();
   h *= 1099511628211ull;
   return h;
 }
@@ -157,11 +177,19 @@ bool Finalize(const std::vector<u32>& spv,
               std::vector<u32>* out,
               std::string* err) {
   const u64 key = HashWords(spv);
-  if (ReadEntry(key, out))
+  if (ReadEntry(key, out)) {
+    g_spv_hit_n++;
     return true;
-  if (!Validate(spv, err))
+  }
+  g_spv_miss_n++;
+  u64 t0 = NowNs();
+  const bool valid = Validate(spv, err);
+  g_ns_spv_val += NowNs() - t0;
+  if (!valid)
     return false;
+  t0 = NowNs();
   *out = Optimize(spv);
+  g_ns_spv_opt += NowNs() - t0;
   WriteEntry(key, *out);
   return true;
 }

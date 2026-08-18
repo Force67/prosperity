@@ -405,10 +405,11 @@ void ReportFps() {
     if (g_frame_hitch_n || g_pipe_build_n)
       BASE_LOGI("hitch",
                 "worst={:.0f}ms over{}ms={} | pipe={:.0f}ms x{} recomp={:.0f}ms "
-                "x{}",
+                "x{} (val={:.0f}ms opt={:.0f}ms spv {}hit/{}miss)",
                 g_frame_worst_ms, (u32)kHitchMs, g_frame_hitch_n,
                 g_ns_pipe_build / 1e6, g_pipe_build_n, gcn::g_ns_recomp / 1e6,
-                gcn::g_recomp_n);
+                gcn::g_recomp_n, gcn::g_ns_spv_val / 1e6,
+                gcn::g_ns_spv_opt / 1e6, gcn::g_spv_hit_n, gcn::g_spv_miss_n);
     if (kDrawProf)
       BASE_LOGI("drawprof",
                 "per-frame pre={:.2f}ms pipe={:.2f}ms tex={:.2f}ms "
@@ -458,6 +459,8 @@ void ReportFps() {
     g_cs_wb_bytes_written = g_cs_wb_bytes_total = 0;
     gcn::g_ns_recomp = 0;
     gcn::g_recomp_n = 0;
+    gcn::g_ns_spv_val = gcn::g_ns_spv_opt = 0;
+    gcn::g_spv_hit_n = gcn::g_spv_miss_n = 0;
     rhi::g_ns_dcb = 0;
     rhi::g_ns_dcb_lock = 0;
     rhi::g_dcb_n = 0;
