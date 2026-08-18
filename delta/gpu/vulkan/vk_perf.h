@@ -35,6 +35,9 @@ extern u64 g_tex_hash_n, g_tex_probe_n, g_ns_tex_lookup, g_tex_lookup_n;
 extern u64 g_ns_tex_set, g_tex_set_n, g_ns_region, g_ns_cs_flush;
 // Turning a draw packet's registers into a DrawInfo.
 extern u64 g_ns_build_draw, g_build_draw_n;
+// Driver pipeline compiles: the vkCreate*Pipelines calls themselves, which are
+// where a first-time shader costs tens of milliseconds inside one draw.
+extern u64 g_ns_pipe_build, g_pipe_build_n;
 // The present path: the presenter thread's own time, and what the frame loop
 // waits for it before reusing the scanout buffer it lent.
 extern u64 g_ns_gfx_present, g_ns_borrow_wait;
@@ -51,6 +54,12 @@ void CsSyncReport(double frames);
 
 // Per-frame accumulators (ns), reset when a frame's sample is pushed.
 extern u64 g_fr_draw, g_fr_submit, g_fr_wait, g_fr_present, g_fr_tex_up;
+
+// Hitch census over the report window: the longest presented frame and how
+// many were long enough to be seen as a stutter. An average frame time hides
+// exactly the event this is about -- one 400 ms frame vanishes into a 2 s mean.
+extern float g_frame_worst_ms;
+extern u32 g_frame_hitch_n;
 
 inline u64 NowNs() {
   return std::chrono::duration_cast<std::chrono::nanoseconds>(

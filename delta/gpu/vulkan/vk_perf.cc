@@ -21,6 +21,8 @@ namespace {
 DELTA_OPTION(bool, kFpsReport, "DELTA_GPU_FPS", true);
 DELTA_OPTION(bool, kOverlay, "DELTA_GPU_OVERLAY", true);
 DELTA_OPTION(bool, kDrawProf, "DELTA_GPU_DRAWPROF", false);
+// A frame longer than this counts as a stutter rather than a slow frame.
+DELTA_OPTION(u32, kHitchMs, "DELTA_GPU_HITCH_MS", 40);
 }  // namespace
 
 namespace gpu::vk {
@@ -38,6 +40,9 @@ u64 g_ns_tex_hash = 0, g_tex_hash_bytes = 0, g_ns_tex_probe = 0;
 u64 g_tex_hash_n = 0, g_tex_probe_n = 0, g_ns_tex_lookup = 0, g_tex_lookup_n = 0;
 u64 g_ns_tex_set = 0, g_tex_set_n = 0, g_ns_region = 0, g_ns_cs_flush = 0;
 u64 g_ns_build_draw = 0, g_build_draw_n = 0;
+u64 g_ns_pipe_build = 0, g_pipe_build_n = 0;
+float g_frame_worst_ms = 0;
+u32 g_frame_hitch_n = 0;
 u64 g_ns_gfx_present = 0, g_ns_borrow_wait = 0;
 u64 g_ns_submit = 0, g_ns_present = 0;
 u32 g_tex_ups = 0;
@@ -260,6 +265,10 @@ void PushStageSample() {
   const float known = s.rec + s.sub + s.gpu + s.prs + s.tex;
   s.oth = wall > known ? wall - known : 0.0f;
   s.wall = wall;
+  if (wall > g_frame_worst_ms)
+    g_frame_worst_ms = wall;
+  if (wall > kHitchMs)
+    g_frame_hitch_n++;
   g_fr_draw = g_fr_submit = g_fr_wait = g_fr_present = g_fr_tex_up = 0;
   g_stage_hist[g_stage_hist_pos] = s;
   g_stage_hist_pos = (g_stage_hist_pos + 1) % kStageHistN;
@@ -390,6 +399,16 @@ void ReportFps() {
                                         double(g_cs_wb_bytes_total)
                                   : 0.0,
               g_win_draws / f, g_win_declines / f);
+    // Stutter, said out loud. Always on when it happens: the average above
+    // reports a window that contained a 400 ms frame as merely slow, and the
+    // whole point of the shader work is the frames this line counts.
+    if (g_frame_hitch_n || g_pipe_build_n)
+      BASE_LOGI("hitch",
+                "worst={:.0f}ms over{}ms={} | pipe={:.0f}ms x{} recomp={:.0f}ms "
+                "x{}",
+                g_frame_worst_ms, (u32)kHitchMs, g_frame_hitch_n,
+                g_ns_pipe_build / 1e6, g_pipe_build_n, gcn::g_ns_recomp / 1e6,
+                gcn::g_recomp_n);
     if (kDrawProf)
       BASE_LOGI("drawprof",
                 "per-frame pre={:.2f}ms pipe={:.2f}ms tex={:.2f}ms "
@@ -431,6 +450,9 @@ void ReportFps() {
     g_tex_hash_n = g_tex_probe_n = g_ns_tex_lookup = g_tex_lookup_n = 0;
     g_ns_tex_set = g_tex_set_n = g_ns_region = g_ns_cs_flush = 0;
     g_ns_build_draw = g_build_draw_n = 0;
+    g_ns_pipe_build = g_pipe_build_n = 0;
+    g_frame_worst_ms = 0;
+    g_frame_hitch_n = 0;
     g_ns_gfx_present = g_ns_borrow_wait = 0;
     g_cs_stage_bytes = 0;
     g_cs_wb_bytes_written = g_cs_wb_bytes_total = 0;

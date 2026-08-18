@@ -202,8 +202,13 @@ CsPipe* GetCsPipe(const ComputeInfo& ci) {
   pi.stage.module = cs;
   pi.stage.pName = "main";
   pi.layout = cp.layout;
-  VkResult r = vkCreateComputePipelines(g_dev.device, g_dev.pipeline_cache, 1,
-                                        &pi, nullptr, &cp.pipe);
+  VkResult r;
+  {
+    ScopeNs t(&g_ns_pipe_build);
+    r = vkCreateComputePipelines(g_dev.device, g_dev.pipeline_cache, 1, &pi,
+                                 nullptr, &cp.pipe);
+  }
+  g_pipe_build_n++;
   SavePipelineCache();  // persist the driver's compiled pipeline
   vkDestroyShaderModule(g_dev.device, cs, nullptr);
   if (r != VK_SUCCESS) {

@@ -14,6 +14,7 @@
 #include "gpu/vulkan/vk_device.h"
 #include "gpu/vulkan/vk_format.h"
 #include "gpu/vulkan/vk_hash.h"
+#include "gpu/vulkan/vk_perf.h"
 #include "gpu/vulkan/vk_render_target.h"
 #include "gpu/vulkan/vk_texture_cache.h"
 #include "gpu/vulkan/vk_upload_ring.h"
@@ -259,8 +260,12 @@ VkPipeline BuildPipeline(bool textured,
   pi.pDynamicState = &dy;
   pi.layout = textured ? g_quad.tex_layout : g_quad.layout;
   VkPipeline p = VK_NULL_HANDLE;
-  vkCreateGraphicsPipelines(g_dev.device, g_dev.pipeline_cache, 1, &pi, nullptr,
-                            &p);
+  {
+    ScopeNs t(&g_ns_pipe_build);
+    vkCreateGraphicsPipelines(g_dev.device, g_dev.pipeline_cache, 1, &pi,
+                              nullptr, &p);
+  }
+  g_pipe_build_n++;
   // New pipeline compiled: fold it into the on-disk cache (throttled).
   SavePipelineCache();
   vkDestroyShaderModule(g_dev.device, vs, nullptr);
@@ -694,8 +699,13 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
   pi.pColorBlendState = &cb;
   pi.pDynamicState = &dy;
   pi.layout = rp.layout;
-  VkResult r = vkCreateGraphicsPipelines(g_dev.device, g_dev.pipeline_cache, 1,
-                                         &pi, nullptr, &rp.pipe);
+  VkResult r;
+  {
+    ScopeNs t(&g_ns_pipe_build);
+    r = vkCreateGraphicsPipelines(g_dev.device, g_dev.pipeline_cache, 1, &pi,
+                                  nullptr, &rp.pipe);
+  }
+  g_pipe_build_n++;
   vkDestroyShaderModule(g_dev.device, vs, nullptr);
   if (gs)
     vkDestroyShaderModule(g_dev.device, gs, nullptr);
