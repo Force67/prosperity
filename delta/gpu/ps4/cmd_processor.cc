@@ -20,6 +20,7 @@
 #include <utl/options.h>
 
 #include "gpu/gcn/gcn_decode.h"
+#include "gpu/guest_memory.h"
 #include "gpu/gcn/gcn_resource.h"
 #include "gpu/ps4/cmd_trace.h"
 #include "gpu/ps4/compute_dispatch.h"
@@ -762,6 +763,7 @@ void EndFrame(u64 scanout_base) {
   // New frame -> shader code may have been rewritten; let CachedProgram
   // revalidate each address once next frame instead of once per draw.
   gcn::NextProgramCacheGeneration();
+  gpu::NextMemoryGeneration();
   rhi::Renderer& renderer = rhi::DefaultRenderer();
   if (!g_frame_active || !renderer.available())
     return;
