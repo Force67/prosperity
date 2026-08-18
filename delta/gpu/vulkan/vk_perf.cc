@@ -20,6 +20,7 @@
 namespace {
 DELTA_OPTION(bool, kFpsReport, "DELTA_GPU_FPS", true);
 DELTA_OPTION(bool, kOverlay, "DELTA_GPU_OVERLAY", true);
+DELTA_OPTION(bool, kDrawProf, "DELTA_GPU_DRAWPROF", false);
 }  // namespace
 
 namespace gpu::vk {
@@ -31,6 +32,13 @@ u64 g_ns_draw = 0, g_ns_end = 0, g_ns_readback = 0, g_ns_tex_up = 0;
 u64 g_ns_cs = 0, g_cs_bytes = 0;
 u64 g_ns_cs_in = 0, g_ns_cs_gpu = 0, g_ns_cs_out = 0;
 u32 g_cs_count = 0;
+u64 g_win_draws = 0, g_win_declines = 0;
+u64 g_ns_dr_pre = 0, g_ns_dr_pipe = 0, g_ns_dr_tex = 0, g_ns_dr_bind = 0;
+u64 g_ns_tex_hash = 0, g_tex_hash_bytes = 0, g_ns_tex_probe = 0;
+u64 g_tex_hash_n = 0, g_tex_probe_n = 0, g_ns_tex_lookup = 0, g_tex_lookup_n = 0;
+u64 g_ns_tex_set = 0, g_tex_set_n = 0, g_ns_region = 0, g_ns_cs_flush = 0;
+u64 g_ns_build_draw = 0, g_build_draw_n = 0;
+u64 g_ns_gfx_present = 0, g_ns_borrow_wait = 0;
 u64 g_ns_submit = 0, g_ns_present = 0;
 u32 g_tex_ups = 0;
 u32 g_cs_stage_n = 0, g_cs_flush_n = 0;
@@ -367,7 +375,7 @@ void ReportFps() {
                      "(in={:.2f} gpu={:.2f} out={:.2f} stage={:.1f}x{:.1f}MB "
                      "flush={:.1f}) "
                      "sh={:.2f}ms x{:.1f} dcb={:.2f}ms x{:.1f} (lock={:.2f}ms) "
-                     "wb={:.0f}%",
+                     "wb={:.0f}% draws={:.0f} (decl={:.0f})",
               frames / dt, g_ns_draw / f / 1e6, g_ns_end / f / 1e6,
               g_ns_readback / f / 1e6,
               g_gpu_exec_samples ? g_ns_gpu_exec / g_gpu_exec_samples / 1e6 : 0.0,
@@ -380,7 +388,28 @@ void ReportFps() {
               rhi::g_ns_dcb_lock / f / 1e6,
               g_cs_wb_bytes_total ? 100.0 * double(g_cs_wb_bytes_written) /
                                         double(g_cs_wb_bytes_total)
-                                  : 0.0);
+                                  : 0.0,
+              g_win_draws / f, g_win_declines / f);
+    if (kDrawProf)
+      BASE_LOGI("drawprof",
+                "per-frame pre={:.2f}ms pipe={:.2f}ms tex={:.2f}ms "
+                "bind={:.2f}ms | hash={:.2f}ms x{:.0f} {:.1f}MB "
+                "probe={:.2f}ms x{:.0f} lookup={:.2f}ms x{:.0f}",
+                g_ns_dr_pre / f / 1e6, g_ns_dr_pipe / f / 1e6,
+                g_ns_dr_tex / f / 1e6, g_ns_dr_bind / f / 1e6,
+                g_ns_tex_hash / f / 1e6, g_tex_hash_n / f,
+                g_tex_hash_bytes / f / 1e6, g_ns_tex_probe / f / 1e6,
+                g_tex_probe_n / f, g_ns_tex_lookup / f / 1e6,
+                g_tex_lookup_n / f);
+    if (kDrawProf)
+      BASE_LOGI("drawprof2",
+                "per-frame texset={:.2f}ms x{:.0f} region={:.2f}ms "
+                "csflush={:.2f}ms builddraw={:.2f}ms x{:.0f} "
+                "gfxpres={:.2f}ms borrowwait={:.2f}ms",
+                g_ns_tex_set / f / 1e6, g_tex_set_n / f, g_ns_region / f / 1e6,
+                g_ns_cs_flush / f / 1e6, g_ns_build_draw / f / 1e6,
+                g_build_draw_n / f, g_ns_gfx_present / f / 1e6,
+                g_ns_borrow_wait / f / 1e6);
     CsSyncReport(f);
     // Feed the on-screen overlay gauge (gpuMs = GPU end/present-dominated
     // cost).
@@ -396,6 +425,13 @@ void ReportFps() {
     g_ns_cs = g_cs_bytes = 0;
     g_ns_cs_in = g_ns_cs_gpu = g_ns_cs_out = 0;
     g_cs_count = g_cs_stage_n = g_cs_flush_n = 0;
+    g_win_draws = g_win_declines = 0;
+    g_ns_dr_pre = g_ns_dr_pipe = g_ns_dr_tex = g_ns_dr_bind = 0;
+    g_ns_tex_hash = g_tex_hash_bytes = g_ns_tex_probe = 0;
+    g_tex_hash_n = g_tex_probe_n = g_ns_tex_lookup = g_tex_lookup_n = 0;
+    g_ns_tex_set = g_tex_set_n = g_ns_region = g_ns_cs_flush = 0;
+    g_ns_build_draw = g_build_draw_n = 0;
+    g_ns_gfx_present = g_ns_borrow_wait = 0;
     g_cs_stage_bytes = 0;
     g_cs_wb_bytes_written = g_cs_wb_bytes_total = 0;
     gcn::g_ns_recomp = 0;

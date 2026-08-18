@@ -3,6 +3,7 @@
  */
 
 #include "gpu/vulkan/vk_render_target.h"
+#include "gpu/vulkan/vk_perf.h"
 #include "base/arch.h"
 
 #include "gpu/rhi/renderer.h"
@@ -930,6 +931,7 @@ bool BeginRegion(const u64* mrt_base,
                   bool depth_read_only,
                  u32 depth_w,
                  u32 depth_h) {
+  ScopeNs _region_timer(&g_ns_region);
   VkRenderingAttachmentInfo colors[8]{};
   RTarget* targets[8]{};
   mrt_count = std::min(mrt_count, 8u);

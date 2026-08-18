@@ -12,6 +12,7 @@
 #include "gpu/vulkan/vk_device.h"
 #include "gpu/vulkan/vk_format.h"
 #include "gpu/vulkan/vk_frame.h"
+#include "gpu/vulkan/vk_perf.h"
 #include "gpu/vulkan/vk_index_upload.h"
 #include "gpu/vulkan/vk_pipeline_cache.h"
 #include "gpu/vulkan/vk_render_target.h"
@@ -98,6 +99,7 @@ static const char* kDeclineName[kMaxDeclineReason] = {
 u32 g_decline[kMaxDeclineReason] = {0};
 inline bool Decline(DeclineReason r) {
   g_decline[r]++;
+  g_win_declines++;
   if (trace::Recording())
     trace::RecordDecline(kDeclineName[r]);
   return false;
@@ -225,6 +227,7 @@ void ReportDeclines() {
 // Issue a draw running the game's recompiled VS/PS. Returns false if the draw
 // can't be handled (the caller falls back to the heuristic path).
 bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
+  const u64 t_draw_start = NowNs();
   // DELTA_GPU_WHYDROP=1: every draw as the renderer receives it, so a slot that
   // never reaches the seq log can be identified.
   if (kWhyDrop == 1)
@@ -874,9 +877,13 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
     return Decline(kRing);
   }
 
+  g_ns_dr_pre += NowNs() - t_draw_start;
+  const u64 t_pipe = NowNs();
   RecompPipe* rp = GetRecompPipe(d);
+  g_ns_dr_pipe += NowNs() - t_pipe;
   if (!rp)
     return Decline(kNoPipe);
+  const u64 t_tex = NowNs();
   // Guest-texture source resolved up front; an RT-as-texture source is resolved
   // after the region switch (transitioning it to readable must happen outside a
   // region).
@@ -1396,6 +1403,10 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
       return Decline(kMidRegion);
   }
 
+  g_ns_dr_tex += NowNs() - t_tex;
+  const u64 t_bind = NowNs();
+  ScopeNs bind_timer(&g_ns_dr_bind);
+  (void)t_bind;
   SetGuestViewport(d);
   vkCmdBindPipeline(g_frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, rp->pipe);
   // 16 user-data dwords per stage, in its own half of the shared push range:

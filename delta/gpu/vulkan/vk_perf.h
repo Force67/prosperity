@@ -22,6 +22,22 @@ extern u64 g_ns_cs_in, g_ns_cs_gpu, g_ns_cs_out;
 extern u64 g_ns_submit, g_ns_present;
 extern u64 g_ns_gpu_exec;
 extern u32 g_cs_count, g_tex_ups;
+// Draws the renderer was handed this window, and how many it declined. A
+// per-frame cost only means something next to the count it is spread over.
+extern u64 g_win_draws, g_win_declines;
+// DrawRecomp split into the four decisions it makes per draw, so the one that
+// costs is named rather than guessed at. DELTA_GPU_DRAWPROF=1 reports them.
+extern u64 g_ns_dr_pre, g_ns_dr_pipe, g_ns_dr_tex, g_ns_dr_bind;
+// The two candidates inside the texture bind: re-hashing guest content to see
+// whether it changed, and probing that the range is mapped.
+extern u64 g_ns_tex_hash, g_tex_hash_bytes, g_ns_tex_probe;
+extern u64 g_tex_hash_n, g_tex_probe_n, g_ns_tex_lookup, g_tex_lookup_n;
+extern u64 g_ns_tex_set, g_tex_set_n, g_ns_region, g_ns_cs_flush;
+// Turning a draw packet's registers into a DrawInfo.
+extern u64 g_ns_build_draw, g_build_draw_n;
+// The present path: the presenter thread's own time, and what the frame loop
+// waits for it before reusing the scanout buffer it lent.
+extern u64 g_ns_gfx_present, g_ns_borrow_wait;
 extern u32 g_gpu_exec_samples;
 extern u32 g_cs_stage_n, g_cs_flush_n;
 extern u64 g_cs_stage_bytes;

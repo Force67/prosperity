@@ -23,7 +23,9 @@
 #include "gpu/ps5/draw_state.h"
 #include "gpu/ps5/guest_address.h"
 #include "gpu/ps5/reg_state.h"
+#include "gpu/rhi/command.h"
 #include "gpu/rhi/renderer.h"
+#include "gpu/vulkan/vk_perf.h"
 
 namespace {
 DELTA_OPTION(bool, kNoCopy, "DELTA_GPU_NODMACOPY", false);
@@ -408,7 +410,10 @@ void StartRendererOnce(rhi::Renderer& renderer) {
 void SubmitDcb(const void* dcb, u32 size_bytes) {
   if (!dcb || size_bytes < 4)
     return;
+  const u64 t_enter = vk::NowNs();
   std::lock_guard<std::mutex> lock(g_mutex);
+  const u64 t_held = vk::NowNs();
+  rhi::g_ns_dcb_lock += t_held - t_enter;
   rhi::Renderer& renderer = rhi::DefaultRenderer();
   StartRendererOnce(renderer);
   TraceRegShadowScan();
@@ -420,6 +425,8 @@ void SubmitDcb(const void* dcb, u32 size_bytes) {
   TraceOpcodeCensus(dcb, words, submission);
   if (dump)
     TraceWalkDone();
+  rhi::g_ns_dcb += vk::NowNs() - t_held;
+  rhi::g_dcb_n++;
 }
 
 void SubmitCcb(const void* ccb, u32 size_bytes) {

@@ -111,6 +111,7 @@ void Draw(Renderer& renderer, const DrawInfo& d_in) {
     g_frame.max_idx = d.index_count;
   ScopeNs draw_timer(&g_ns_draw);
   ScopeNs frame_draw_timer(&g_fr_draw);
+  g_win_draws++;
   if (d.index_data && d.index_count) {
     const u64 index_bytes = static_cast<u64>(d.index_count) *
                                  GuestIndexElementBytes(d.index_type);
