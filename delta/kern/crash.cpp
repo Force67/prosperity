@@ -1839,6 +1839,25 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
     }
     base::FormatTo(rspwords, "\n");
     BASE_LOGI("crashHandler", "{}", rspwords.c_str());
+    // ...and the objects rbx/r12 point at. A guest breakpoint's registers name
+    // a `this`, and the fields behind it are the whole reason for stopping
+    // there: without them a dump says which code ran, never what it was
+    // looking at. Guest heap only, and only when the range reads.
+    const struct { const char *name; u64 v; } objs[] = {
+        {"rbx", (u64)gr[REG_RBX]}, {"r12", (u64)gr[REG_R12]}};
+    for (const auto &o : objs) {
+      if (o.v < 0x1000000000ull || o.v >= 0x20000000000ull ||
+          !utl::isMemoryRangeMapped(reinterpret_cast<const void *>(o.v), 128))
+        continue;
+      const auto *q = reinterpret_cast<const u64 *>(o.v);
+      base::String words;
+      for (int i = 0; i < 16; i++) {
+        if (i % 4 == 0)
+          base::FormatTo(words, "\n  [{}+{:02x}]:", o.name, i * 8);
+        base::FormatTo(words, " {:016x}", (unsigned long long)q[i]);
+      }
+      BASE_LOGI("crashHandler", "{}", words.c_str());
+    }
   }
   BASE_LOGI("crashHandler", "  --- stack scan ---");
   if (uintptr_t rsp = gr[REG_RSP]; rsp >= 0x10000) {
