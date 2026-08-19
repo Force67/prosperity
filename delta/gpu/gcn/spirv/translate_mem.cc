@@ -1163,7 +1163,12 @@ void EmitCsMimg(Translator& t,
   const bool mip_op = op == 0x01 || op == 0x09;
   const bool store = op == 0x08 || op == 0x09;
   const bool load = op == 0x00 || op == 0x01;
-  const bool sample = op == 0x24 || op == 0x27;
+  // image_sample_lz_o: sample_lz plus a constant texel offset. The ISA orders
+  // vaddr as "offsets, bias, zpcf, then coordinates", and _lz_o carries neither
+  // a bias nor a z-compare, so word 0 is the packed offset and the coordinates
+  // start one word later -- which is what addr_shift below is for.
+  const bool offset = op == 0x37;
+  const bool sample = op == 0x24 || op == 0x27 || offset;
   // image_gather4_lz: the same 2x2 footprint the bilinear path already fetches,
   // returned as four texels instead of blended. Only the plain form -- the
   // z-compare (bit 3) and offset (bit 4) variants carry extra address words
@@ -1184,8 +1189,9 @@ void EmitCsMimg(Translator& t,
   // them over already loaded. Without this a 2D load reads y from vaddr+1,
   // which on an NSA instruction is some unrelated register -- the source image
   // is then addressed by x alone and the result is vertical stripes.
+  const u32 addr_shift = offset ? 1u : 0u;
   const auto addr_vg = [&](u32 i) {
-    return address ? address[i] : t.Vg(vaddr + i);
+    return address ? address[i + addr_shift] : t.Vg(vaddr + i + addr_shift);
   };
   const auto addr_vgf = [&](u32 i) {
     return t.m.Bitcast(t.t_f, addr_vg(i));
@@ -1366,6 +1372,21 @@ void EmitCsMimg(Translator& t,
                t.Sub(width, t.U32(1)));
     y = t.UMin(t.m.Emit(spv::Op::OpConvertFToU, t.t_u, {fy0}),
                t.Sub(height, t.U32(1)));
+    if (offset) {
+      // Six signed bits per component, x at [5:0] and y at [13:8]. The add
+      // wraps when the offset is negative and larger than the coordinate, so
+      // clamp that back to zero rather than to the far edge.
+      const Id packed = address ? address[0] : t.Vg(vaddr);
+      const auto shifted = [&](Id c, u32 bit, Id limit) {
+        const Id raw = t.And(t.Shr(packed, t.U32(bit)), t.U32(0x3F));
+        const Id signed_off = t.Sub(t.Xor(raw, t.U32(0x20)), t.U32(0x20));
+        const Id sum = t.Add(c, signed_off);
+        return t.SelectB(t.Uge(sum, t.U32(0x80000000u)), t.U32(0),
+                         t.UMin(sum, t.Sub(limit, t.U32(1))));
+      };
+      x = shifted(x, 0, width);
+      y = shifted(y, 8, height);
+    }
     y = t.SelectB(is_1d_img, t.U32(0), y);
   }
   // gfx10.3 swizzle mode 0 is the linear one, and it has no pow2-pad bit.
@@ -1728,6 +1749,7 @@ bool DsGraphicsSupported(u32 op) {
     case 55:   // ds_read2_b32
     case 56:   // ds_read2st64_b32
     case 77:   // ds_write_b64
+    case 78:   // ds_write2_b64
     case 118:  // ds_read_b64
     case 119:  // ds_read2_b64
       return true;
@@ -1751,6 +1773,7 @@ u32 GraphicsLdsDwords(const Program& program, const u8* reachable) {
     switch (inst.opcode) {
       case 14:
       case 55:  // pair forms: two byte offsets, each scaled by the element size
+      case 78:
       case 119:
         reach = std::max(w & 0xFF, (w >> 8) & 0xFF) * 8u;
         break;
@@ -1879,6 +1902,15 @@ void EmitDs(Translator& t, const Inst& inst, StageContext& sc) {
       const Id a = single_addr();
       t.SetVg(vdst, t.m.Load(t.t_u, lds_at(a)));
       t.SetVg(vdst + 1, t.m.Load(t.t_u, lds_at(t.Add(a, t.U32(4)))));
+      break;
+    }
+    case 78: {  // ds_write2_b64, the store half of case 119
+      const u32 src[2] = {data0, data1};
+      for (u32 i = 0; i < 2; i++) {
+        const Id a = t.And(pair_addr(i, 8, false), t.U32(~7u));
+        t.m.Store(lds_at(a), t.Vg(src[i]));
+        t.m.Store(lds_at(t.Add(a, t.U32(4))), t.Vg(src[i] + 1));
+      }
       break;
     }
     case 119: {  // ds_read2_b64
