@@ -1163,13 +1163,16 @@ void EmitCsMimg(Translator& t,
   const bool mip_op = op == 0x01 || op == 0x09;
   const bool store = op == 0x08 || op == 0x09;
   const bool load = op == 0x00 || op == 0x01;
-  // Not MimgNamesItsLod: this emitter reaches a sampled image by integer texel
-  // fetch, so it serves the plain sample forms but not a gather's 2x2
-  // footprint. GTA:SA's depth-pyramid dispatch is image_gather4_lz and lands
-  // here; the planner accepts it, so the gap is one emitter away.
   const bool sample = op == 0x24 || op == 0x27;
+  // image_gather4_lz: the same 2x2 footprint the bilinear path already fetches,
+  // returned as four texels instead of blended. Only the plain form -- the
+  // z-compare (bit 3) and offset (bit 4) variants carry extra address words
+  // this emitter does not read, so they would take the coordinates one word
+  // early. GTA:SA's depth pyramid, the HZB every occlusion test reads, is this
+  // instruction.
+  const bool gather = op == 0x47;
   const bool resinfo = op == 0x0e;
-  if (!store && !load && !sample && !resinfo) {
+  if (!store && !load && !sample && !gather && !resinfo) {
     // Silently setting the flag made the whole dispatch vanish with an empty
     // op list in the audit -- the one report that was supposed to say why.
     WarnUnsupported("mimg.cs", op, w, w1);
@@ -1344,7 +1347,7 @@ void EmitCsMimg(Translator& t,
   Id x = addr_vg(0);
   Id y = t.SelectB(is_1d_img, t.U32(0), addr_vg(1));
   Id sample_fx = t.F32(0.f), sample_fy = t.F32(0.f);
-  if (sample) {
+  if (sample || gather) {
     // Bilinear filter of the linear staging image with clamp addressing and
     // texel-centre coordinates. image_sample_l (0x24) takes an explicit LOD in
     // the address; _lz (0x27) forces LOD 0 -- both already folded into the mip
@@ -1400,11 +1403,18 @@ void EmitCsMimg(Translator& t,
   valid = t.LAnd(valid, t.Uge(last_mip, base_mip));
   valid = t.LAnd(valid, supported_type);
   valid = t.LAnd(valid, supported_format);
-  if (load || sample) {  // default loaded components to 0 for invalid accesses
-    u32 out = 0;
-    for (int i = 0; i < 4; i++)
-      if (dmask & (1 << i))
-        t.SetVg(vdata + out++, t.U32(0));
+  if (load || sample || gather) {  // zero the destination for an invalid access
+    if (gather) {
+      // DMASK picks the component to gather, not how many registers come back:
+      // a gather4 always returns one texel per destination register.
+      for (u32 i = 0; i < 4; i++)
+        t.SetVg(vdata + i, t.U32(0));
+    } else {
+      u32 out = 0;
+      for (int i = 0; i < 4; i++)
+        if (dmask & (1 << i))
+          t.SetVg(vdata + out++, t.U32(0));
+    }
   }
 
   const Id access_blk = t.m.NewBlock(), merge_blk = t.m.NewBlock();
@@ -1474,7 +1484,7 @@ void EmitCsMimg(Translator& t,
       value = t.SelectB(is_rgba32u, float_component[i], value);
       t.SetVg(vdata + out++, value);
     }
-  } else if (sample) {
+  } else if (sample || gather) {
     const Id has_second =
         t.m.Emit(spv::Op::OpLogicalOr, t.t_bool, {is_rgba16f, is_r11g11b10f});
     // Storage-buffer index of texel (xx,yy) in the current mip/layer, scaled
@@ -1534,16 +1544,33 @@ void EmitCsMimg(Translator& t,
     decode(texel_at(x1, y), c10);
     decode(texel_at(x, y1), c01);
     decode(texel_at(x1, y1), c11);
-    const auto mix = [&](Id a, Id b, Id w) {
-      return t.FAdd(a, t.FMul(t.FSub(b, a), w));
-    };
-    u32 out = 0;
-    for (int i = 0; i < 4; i++) {
-      if (!(dmask & (1 << i)))
-        continue;
-      const Id top = mix(c00[i], c10[i], wx);
-      const Id bot = mix(c01[i], c11[i], wx);
-      t.SetVgF(vdata + out++, mix(top, bot, wy));
+    if (gather) {
+      // The gathered component is the one DMASK names; the four destination
+      // registers are the footprint counter-clockwise from the lower left,
+      // (x,y+1) (x+1,y+1) (x+1,y) (x,y) -- the order both the GCN ISA and
+      // OpImageGather use.
+      u32 comp = 0;
+      for (u32 i = 0; i < 4; i++)
+        if (dmask & (1u << i)) {
+          comp = i;
+          break;
+        }
+      t.SetVgF(vdata + 0, c01[comp]);
+      t.SetVgF(vdata + 1, c11[comp]);
+      t.SetVgF(vdata + 2, c10[comp]);
+      t.SetVgF(vdata + 3, c00[comp]);
+    } else {
+      const auto mix = [&](Id a, Id b, Id w) {
+        return t.FAdd(a, t.FMul(t.FSub(b, a), w));
+      };
+      u32 out = 0;
+      for (int i = 0; i < 4; i++) {
+        if (!(dmask & (1 << i)))
+          continue;
+        const Id top = mix(c00[i], c10[i], wx);
+        const Id bot = mix(c01[i], c11[i], wx);
+        t.SetVgF(vdata + out++, mix(top, bot, wy));
+      }
     }
   } else {
     const auto store_byte = [&](u32 reg) {
