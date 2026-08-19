@@ -22,10 +22,41 @@ constexpr i32 kSceSockDgramP2p = 6;
 }  // namespace
 #include "kern/crash.h"
 #include <cstring>
+#include <utl/mem.h>
 #include <utl/options.h>
 
 namespace {
 DELTA_OPTION(bool, kNetTrace, "DELTA_NET_TRACE", false);
+
+// The reply layout of sceNetGetSockInfo, and the FreeBSD sockaddr_in the guest
+// hands back from getsockname (a leading length byte, then the family).
+struct sceNetSockaddrIn {
+  u8 len, family;
+  u16 port;
+  u32 addr;
+  u8 zero[8];
+};
+
+struct sceNetSockInfo {
+  char name[32];
+  i32 pid;
+  i32 s;
+  i8 socketType;
+  i8 policy;
+  i16 localPort;
+  u32 localAddr;
+  i16 foreignPort;
+  u32 foreignAddr;
+  u32 recvQueueLength;
+  u32 sendQueueLength;
+  u8 boundInterface;
+  u64 options;
+  i32 flags;
+  i32 sendBufferSize;
+  i32 recvBufferSize;
+  i32 error;
+  i32 state;
+};
 }  // namespace
 
 namespace krnl {
@@ -84,6 +115,44 @@ int PS4ABI sys_socket(i32 domain, i32 type, i32 protocol) {
   BASE_LOGI("net", "socket(domain={} type={} proto={}) -> EAFNOSUPPORT", domain,
             type, protocol);
   return -SysError::eAFNOSUPPORT;
+}
+
+// sceNetGetSockInfo(s, info, n, flags): report the kernel's view of a socket.
+// The reply is a count of filled entries, so zero entries is a legitimate
+// answer; what is not legitimate is the old stub, which returned "0 entries"
+// without touching the buffer. libSceNet reads the first entry regardless of
+// the count and calls through a pointer it finds there, so GTA:SA's net thread
+// jumped into stack garbage the moment it asked.
+int PS4ABI sys_netgetsockinfo(i32 fd, void *info, i32 n, i32 flags) {
+  if (kNetTrace)
+    BASE_LOGI("net", "getsockinfo fd={} info={:p} n={} flags={:#x}", fd, info, n,
+              flags);
+  if (!info || n <= 0)
+    return -SysError::eINVAL;
+
+  const size_t span = sizeof(sceNetSockInfo) * static_cast<size_t>(n);
+  if (!utl::isMemoryRangeMapped(info, span))
+    return -SysError::eFAULT;
+  std::memset(info, 0, span);
+
+  auto *s = fdToSocket(fd);
+  if (!s)
+    return -SysError::eBADF;
+
+  auto *out = static_cast<sceNetSockInfo *>(info);
+  std::snprintf(out->name, sizeof(out->name), "%s", "socket");
+  out->pid = 0x1337;  // the pid sys_getpid reports
+  out->s = fd;
+  out->socketType = 2;  // SOCK_DGRAM: the only kind sys_socket hands out
+  out->state = 1;       // bound/open, the only state we model
+
+  u32 addrLen = sizeof(sceNetSockaddrIn);
+  sceNetSockaddrIn local{};
+  if (s->getsockname(&local, &addrLen) == 0) {
+    out->localPort = local.port;
+    out->localAddr = local.addr;
+  }
+  return 1;
 }
 
 int PS4ABI sys_bind(i32 fd, const void *addr, u32 addrlen) {

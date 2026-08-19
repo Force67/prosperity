@@ -11,6 +11,7 @@ int PS4ABI sys_netcontrol(u32 fd, u32 op, void *buffer,
 int PS4ABI sys_socketex(const char *name, i32 domain, i32 type,
                         i32 protocol);
 int PS4ABI sys_socket(i32 domain, i32 type, i32 protocol);
+int PS4ABI sys_netgetsockinfo(i32 fd, void *info, i32 n, i32 flags);
 int PS4ABI sys_bind(i32 fd, const void *addr, u32 addrlen);
 int PS4ABI sys_getsockname(i32 fd, void *addr, u32 *addrlen);
 int PS4ABI sys_socketclose(i32 fd);

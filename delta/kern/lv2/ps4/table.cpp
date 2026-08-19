@@ -171,7 +171,7 @@ static const syscall_Reg syscall_dpt[] = {
     {99, (void *)&sys_netcontrol},
     {100, (void *)&sys_getpriority}, // sys_getpriority
     {101, (void *)&lv2_stub_syscall}, // sys_netabort
-    {102, (void *)&lv2_stub_syscall}, // sys_netgetsockinfo
+    {102, (void *)&sys_netgetsockinfo},
     {103, (void *)&lv2_stub_syscall}, // sys_sigreturn
     {104, (void *)&sys_bind},
     {105, (void *)&sys_setsockopt}, // sys_setsockopt
