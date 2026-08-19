@@ -944,7 +944,7 @@ bool PlanCsResources(const Program& program,
           break;  // get_resinfo reads only descriptor SGPRs
         const bool store = op == 0x08 || op == 0x09;
         const bool load = op == 0x00 || op == 0x01;
-        const bool sample = op == 0x24 || op == 0x27;
+        const bool sample = op >= 0x20 && MimgNamesItsLod(op);
         if ((!store && !load && !sample) || r128 || srsrc + 7 >= 136)
           return false;
         if (!resource(inst.pc, srsrc, 8, 1, store, 0,
@@ -1163,9 +1163,16 @@ void EmitCsMimg(Translator& t,
   const bool mip_op = op == 0x01 || op == 0x09;
   const bool store = op == 0x08 || op == 0x09;
   const bool load = op == 0x00 || op == 0x01;
+  // Not MimgNamesItsLod: this emitter reaches a sampled image by integer texel
+  // fetch, so it serves the plain sample forms but not a gather's 2x2
+  // footprint. GTA:SA's depth-pyramid dispatch is image_gather4_lz and lands
+  // here; the planner accepts it, so the gap is one emitter away.
   const bool sample = op == 0x24 || op == 0x27;
   const bool resinfo = op == 0x0e;
   if (!store && !load && !sample && !resinfo) {
+    // Silently setting the flag made the whole dispatch vanish with an empty
+    // op list in the audit -- the one report that was supposed to say why.
+    WarnUnsupported("mimg.cs", op, w, w1);
     sc.cs_unsupported = true;
     return;
   }
