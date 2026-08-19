@@ -92,12 +92,18 @@ void avpTrace(const char *fn) {
 // DELTA_AVP_TRACE: dump the init-data block as 16 pointers so the event-callback
 // (a guest code pointer) and its offset can be identified -> lets us fire video
 // state events the title waits on (Doom64 stalls after Start with no IsActive poll).
-static void takeInitData(const char *fn, const void *initData) {
+//
+// `eventOff` is where the SceAvPlayerEventReplacement block starts. The Ex form
+// of the struct leads with a thisSize field, so its blocks all sit 8 bytes
+// later; reading the plain offsets out of it lands on the file replacement's
+// size() and on the event object, and calling the latter as the callback jumps
+// into a heap object (GTA:SA faults there the moment the movie opens).
+static void takeInitData(const char *fn, const void *initData, u32 eventOff) {
   if (!initData)
     return;
   auto *p = reinterpret_cast<const u64 *>(initData);
-  g_eventObject = p[0x50 / 8];
-  g_eventCallback = p[0x58 / 8];
+  g_eventObject = p[eventOff / 8];
+  g_eventCallback = p[eventOff / 8 + 1];
   if (!kAvpTrace) return;
   for (int i = 0; i < 16; i++)
     BASE_LOGI("avp", "{} initData[{:#x}]={:#x}", fn, i * 8,
@@ -105,12 +111,12 @@ static void takeInitData(const char *fn, const void *initData) {
 }
 
 i64 PS4ABI sceAvPlayerInit(void *initData) {
-  takeInitData("Init", initData);
+  takeInitData("Init", initData, 0x50);
   return kHandle;
 }
 
 i64 PS4ABI sceAvPlayerInitEx(const void *initData, i64 *handleOut) {
-  takeInitData("InitEx", initData);
+  takeInitData("InitEx", initData, 0x58);
   if (handleOut)
     *handleOut = kHandle;
   return 0;
