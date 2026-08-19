@@ -1,61 +1,860 @@
 // Grand Theft Auto: San Andreas - The Definitive Edition (CUSA26619, PS4)
 // UE4 / Gameface, native x86 backend.
 //
-// BOOTS INTO THE RENDER LOOP (2026-08-01). The title runs UE4 engine init to
-// completion, brings up its RHI, and presents: ~356 draws/frame into a 1680x948
-// colour target plus 10-24 compute dispatches. Four runs in a row fault-free.
+// IN GAME (2026-08-21). The main menu is pixel-correct at 24 fps -- logo, Los
+// Santos artwork, START / GAME / OPTIONS / SOCIAL CLUB -- Cross on START is
+// accepted, the title cycles its loading screens, streams the level and runs
+// its opening cutscene with subtitles.
 //
-// Two things are wrong and neither is a boot problem any more:
+// THE WORLD IS DRAWN. Dump the base pass mid-cutscene and it is a real scene:
+// at f750 GBufferC (0x2011000000) is a bus and a road with its lane markings,
+// from a low camera. Two things are between that and the screen:
+//   - the deferred lighting still accumulates to ZERO (the red a full frame
+//     shows in the scene target is the base pass's MRT0, not the lights, and
+//     the flat blue an older note describes was the heuristic quad renderer);
+//   - the tonemapper is gated by a colour-grading LUT that never gets drawn,
+//     and its output IS that lookup, so the presented frame is black. Forcing
+//     the LUT white presents a picture (see below), which is the proof that
+//     everything downstream of it works.
+// Beware a single frame: the cutscene camera passes through geometry, and
+// frames like f900 are legitimately a wall filling the screen. Compare two or
+// three before believing a G-buffer looks broken.
 //
-//  1. ~0.1-0.3 fps. Frame time is nearly all compute. The scene targets are
-//     R11G11B10F (dfmt=6 nfmt=7), which the CS path stages at 16 bytes/texel
-//     against a 4-byte image, so cs_alias_shape_matches rejects the live image
-//     and every dispatch round-trips ~13.6 MB through guest memory -- 9 to 24
-//     times a frame, ~95 ms of it. Using the live image needs a real format
-//     conversion on the bridge copy, not a relaxed match: a plain
-//     vkCmdCopyBufferToImage cannot repack RGBA32F into R11G11B10F. (The
-//     descriptor also runs a few rows taller than the image, 948 vs 945, which
-//     is just tile alignment and is harmless once the element sizes agree.)
-//  2. The presented frame is wrong: frame 0 is a full-screen debug gradient,
-//     later frames are solid white. This is NOT a composite/scanout bug --
-//     almost nothing is ever drawn. +DELTA_GPU_RTSTAT=1 +DELTA_GPU_RTSTAT_ALL=1
-//     +DELTA_GPU_RTSTAT_EVERY=12 at frame 24 says:
-//       - the five 1680x948 G-buffer targets (0x2010000000, 0x2010800000,
-//         0x2011000000, 0x2011800000, 0x2012000000) each report draws=1 with
-//         vs=0 ps=0 -- a clear and nothing else -- and are entirely zero.
-//       - 0x2018000000 (256x256) takes 160 draws and is still all zero.
-//       - the only targets with content are 0x200ec00000 840x473 (mean=20,
-//         half 1.0), 0x200e000000 1680x945 (4135/16538 non-zero) and the two
-//         1920x1080 buffers, which are solid white -- that white is what gets
-//         presented.
-//     So the ~356 draws a frame are not reaching the scene targets. Find where
-//     they go before touching the present path; the main colour target
-//     (+DELTA_GPU_PRESENT_ADDR=0x2012800000) is confirmed black.
+// FEED IT INPUT. Until the title has taken a button the menu sits behind an
+// opaque black curtain (the last two UI draws of every frame, see below), and
+// nothing moves. The read-count form of DELTA_PAD_SCRIPT only runs under
+// DELTA_PAD_AUTOSKIP; the seconds form works on its own:
+//   +DELTA_PAD_SCRIPT=22:cross:400,26:cross:400,34:cross:400
 //
-// PSN BRING-UP (done). The title calls
-// sce::Toolkit::NP::V2::Interface::initialize during engine init and treats any
-// failure as LowLevelFatalError "PSN: Failed to initialize the np toolkit".
-// Four gates, each only visible once the one before it cleared:
-//   1. regmgr op 27 (non-system get-bin) was unimplemented, so libSceNpCommon
-//      could not read the 17-byte per-console blob it wants during NpAsm
-//      resource-context setup, and the NP stack never started.
-//   2. sceSysmoduleLoadModule(0x19) is libSceNet, which we reported absent.
-//   3. libSceNpWebApi's initialize reads the LNC app state and refuses to come
-//      up unless it is 4 or 5; nothing answered "SceLncService".
-//   4. libSceNetCtlForNpToolkit / libSceUserServiceForNpToolkit are second
-//      entry-point sets into .sprx files we already HLE, so they read an
-//      "initialized" flag the HLE never sets.
-// Then libSceAvPlayer: 7 of the 22 NIDs the eboot imports had no HLE override,
-// so those ran the real .sprx, which opens each with `mov rdi,[rdi]` on the
-// sentinel handle our Init hands out and faults.
+// ---------------------------------------------------------------------------
+// SOLVED: THE BLACK SCREEN WAS SPI_PS_INPUT_CNTL
+// ---------------------------------------------------------------------------
+// A PS names an input SLOT; SPI_PS_INPUT_CNTL_<slot>.OFFSET names which VS
+// parameter export that slot reads, and it is NOT the identity. The UI shader
+// ps=0x2000873c00 reports numinterp=2 with slot0 -> param0, slot1 -> param3.
+// We assumed the identity, so slot1 read param1 -- the clip position -- as a
+// texture coordinate and the vertex colour as its scale. Every UI quad sampled
+// texel (0,0) and multiplied it by zero.
 //
-// The 2026-07-31 note about a UE4 CPU-pool OOM ("Failed to allocate virtual
-// address space (Type: CPU, Size: 2140667904)", ~6 GB budget) has NOT recurred
-// since; that run reached asset streaming down a different path.
+// Honouring the register is now the default (DELTA_GPU_PSCNTL_APPLY=0 goes
+// back). Isaac, Undertale and Doom64 present the same frame either way; the old
+// "it makes P.T. worse" note no longer reproduces -- P.T. presents black at
+// frames 200 and 900 with the mapping on or off.
 //
+// PROBES ADDED THIS SESSION. +DELTA_GPU_DRAWRT takes a PIXEL SHADER address as
+// well as a target (a deferred light lands on the same address as the base
+// pass, and only the shader separates them); with DRAWRT=1 a DRAWRT_BUSY
+// threshold latches onto the first frame that reaches it and prints the whole
+// graph, so no frame number has to be guessed. Each draw now reports its
+// instance count and the CONTENTS of every raw buffer it reads, which is the
+// only way to see a shader that fetches its own vertices.
+// +DELTA_GPU_RTSTAT_MAX raises the 32-target scoring cap (this title has 44).
+// +DELTA_GPU_PROBE_PS=<hex ps address> restricts PSWHITE/PSTEX/PSATTR/PSVGPR/
+// PSREACH to ONE shader, so a probe finally runs inside a complete frame.
+// Every one of them used to rewrite every shader's colour, which left
+// isolation (ONLY_PS) as the only way to read a single pass -- and isolating a
+// DEFERRED pass drops the G-buffer it samples, so it answers a different
+// question than the one being asked. This is the tool the light shader needs:
+// +DELTA_GPU_PROBE_PS=0x20010c4000 +DELTA_GPU_PSTEX=13 exports binding 12's
+// texel (the IES profile the final multiply uses) from the light draws alone,
+// with the rest of the frame intact.
+//
+// How it was found, because the sequence generalises:
+//   +DELTA_GPU_PSWHITE=1     -> whole screen white: geometry and raster are fine
+//   +DELTA_GPU_PSTEX=1       -> black: the sample reads zero
+//   +DELTA_GPU_FORCEWHITE=1 with PSTEX -> still black: not the texture DATA
+//   +DELTA_GPU_DEBUGUV=1     -> black: the COORDINATE is zero, so the varying is
+//   +DELTA_GPU_PSINCNTL=1    -> names the shaders whose mapping is not identity
+//   +DELTA_GPU_PSREACH=1     -> white where a fragment reached no colour export
+// and +DELTA_GPU_ONLYDRAW=<n> isolates one draw while all of those are on.
+//
+// ---------------------------------------------------------------------------
+// WHAT COVERS THE MENU BEFORE THE FIRST BUTTON
+// ---------------------------------------------------------------------------
+// The frame is 341 draws: 164 depth-prepass (rt=0, tmask=0), 164 base-pass into
+// a six-target MRT at 0x2018000000, one 256x256 pass, then ten into the
+// scanout. The last ten are the Gameface UI and they are, in order:
+//   #329 full-screen quad, no texture, cb {0,0,0,1}   -- clears to black
+//   #330 full-screen, tex 0x2004400000 1024x1024      -- the menu artwork
+//   #331..#336 the logo, the four menu entries, two text batches
+//   #337 full-screen, tex = a 1x1 WHITE texel, vertex colour (0,0,0,255),
+//        blended src-alpha -- an opaque black curtain over everything
+//   #338 full-screen, blend OFF, tex = a 2x2 whose texels are three zeros and
+//        one 0xaaaaaaaa
+// Both wipes are the guest's own geometry: +DELTA_GPU_DRAWRT now prints each
+// binding's first vertex, and the 40-byte Gameface vertex reads
+//   d0..d3 uv+scale, d4..d7 offsets, d8 RGBA8 vertex colour, d9 two u16 extent
+// so #337 is 1920x1080 with colour 00 00 00 ff. The colour byte order is
+// confirmed by the menu highlight, which is 42 89 58 ff and renders green.
+//
+// RULED OUT for the curtain (all measured):
+//   - Blending. +DELTA_GPU_NOBLEND=1 changes nothing.
+//   - The intro movie. The AvPlayer stub now reports a stream, so the title
+//     enables it, calls Start and takes PLAY/STOP; and +DELTA_AVP_NOMOVIE=1
+//     (AddSource fails outright) leaves the curtain exactly where it is.
+//   - An animation that has not run yet: the curtain is opaque from frame 6 on,
+//     with the same vertex colour every frame.
+//   - Draw ORDER. The Gameface vertex and index buffers are consumed strictly
+//     forward (0x2013200000, +0xa0, +0x140 ... +0x2120), so the curtain really
+//     is the last element, not a reordered background.
+// The curtain is the title's own picture of "no input yet": feed it a button
+// and it lifts, the menu is presented, and START loads the game. So it is a
+// state, not a rendering defect -- but nothing here explains why the state
+// needs a press to leave, and a real console would not.
+//
+// ---------------------------------------------------------------------------
+// IT LOADS, AND IT IS IN THE OPENING CUTSCENE
+// ---------------------------------------------------------------------------
+// Cross on START is taken (the title reads the pad ~67 times a second and the
+// press shows up in +DELTA_PAD_TRACE). It cycles its loading screens, streams
+// the level and reaches the intro: the subtitle "Nothing. I live in Liberty
+// City now. I'm clean. Legit." renders over a black scene at ~1.5 fps with
+// ~5000 draws a frame.
+//
+// Three things had to go first:
+//   - A DEVICE FAULT, every time, ~35 s in. The heuristic path bound a colour
+//     attachment unconditionally, so a depth-only pass opened a region on an RT
+//     keyed at address 0 whose geometry followed whichever draw touched it
+//     last, and a 1020x1020 shadow pass then rendered into a 1470x827
+//     attachment. Validation named it: VUID-VkRenderingInfo-pNext-06079/06080.
+//     A draw with no colour target now takes no colour region.
+//   - THE RAW-BUFFER RING. Each staged resource reserved a whole 1 MiB window
+//     whatever its size; the world binds three a draw totalling ~50 KB, so a
+//     frame ran out after ~85 draws of several thousand and the rest were
+//     declined -- silently, because a declined draw simply never appears.
+//   - THE STAGE CACHE keyed on the exact length, so the shared 200k-vertex
+//     buffer each draw reaches a little further into missed every time and
+//     re-copied ~2.4 MB per draw.
+// Together: 3016 declines a frame -> 5, ring declines 251255 -> 0, the
+// raw-buffer ring from pegged at 256 MiB to 84 MiB, and no device fault in
+// 300 s with validation on.
+//
+// ---------------------------------------------------------------------------
+// THE POST CHAIN WAS BEING FED ZEROS -- FIXED
+// ---------------------------------------------------------------------------
+// UE4 does its post-processing in COMPUTE, and a compute shader reads guest
+// memory. Draws only ever render into a VkImage, so the guest bytes under a
+// render target stay stale -- the bridge (StageCsRangeFromRt) exists to copy
+// the image into the staged range instead. It refused this title's scene
+// target on both of its checks:
+//   image 1680x945 4B vs cs 1680x948 pitch=1792 dfmt=6 elem=4/16B
+// -- the extent because a target's IMAGE is sized from CB_COLOR's pitch/slice
+// while the CS descriptor carries the surface's own height, and the element
+// because StageCsImage unpacks R11G11B10F into four floats a texel and no
+// image<->buffer copy converts. So every dispatch fell back to guest memory,
+// read zeros, and the whole chain after the base pass was black. The bridge
+// now copies the overlap and converts through a host scratch.
+// Measured over the same cutscene: 0x2013800000 (scene colour after AA)
+// nz 174 -> 11531 of 16384, the 840x474 bloom 0 -> 11178, and the frame graph
+// downstream carries real content for the first time.
+//
+// ---------------------------------------------------------------------------
+// AND THE DEPTH BUFFER WAS 256x256 -- FIXED
+// ---------------------------------------------------------------------------
+// Colour targets have been sized from CB_COLORn_PITCH rather than the screen
+// scissor since the 164-draws-into-256x256 bug; DEPTH never got the same
+// treatment. This title opens a 256x256 screen scissor over its 1792x960 Z
+// surface, so the depth image was built 256x256 while every colour attachment
+// beside it was 1792x960 -- and everything downstream that reads scene depth
+// read a corner of the frame. The compute bridge said so on every frame:
+//   cs reads live depth target 0x200b800000 shape mismatch:
+//     image 256x256 4B vs cs 1680x948 ... -> falling back to guest memory
+// i.e. every compute pass that samples scene depth or stencil (SSAO, fog,
+// reflections) was reading the zeroed guest bytes, and the deferred lights
+// reconstructed world position from a 256x256 Z. GetDepthRT now takes
+// RtSurfaceExtent(depth_w/h, ...) exactly as the colour path does -- which
+// only ever GROWS the image to the surface, so a genuinely half-resolution Z
+// bound to a full-resolution pass still keeps the drawn extent. Measured over
+// the same cutscene: scene depth and stencil go from guest-fallback on every
+// frame to 198 staged-from-RT against 2 (the two before the target exists),
+// and the lit scene stops being flat per-polygon slabs and starts varying per
+// pixel. Isaac and Doom64 unchanged.
+//
+// ---------------------------------------------------------------------------
+// WHAT IS LEFT: THE COLOUR-GRADING LUT
+// ---------------------------------------------------------------------------
+// The tonemap draw is the last one before the scanout: rt=0x2017000000,
+// ps=0x2001308000, 145 instructions, and its output IS a LUT lookup --
+//   008a  image_sample v[0:2], v0, s[8:15], s[40:43]   ; the volume LUT
+//   0091  v_madmk_f32 v0, v0, v20, 0x3f866666          ; and that is the colour
+// so a zero LUT is a black frame no matter what the scene holds. PROVEN with
+// +DELTA_GPU_TEXFORCE=0x200e680000 (bind the 1x1 white default for exactly
+// that address): 0x2017000000 nz 0 -> 11578 mean 180, and the scanout
+// 0x4000800000 nz 0 -> 15294 mean 235. Everything downstream of the LUT works.
+//
+// The LUT is drawn once a frame and comes out empty:
+//   #3090 rt=0x200e680000 32x32 vcount=4 inst=32 prim=6 vs=0x200084ac00
+//         ps=0x20013e8000, no textures, cb1 = 576 bytes of grading parameters
+// and the tonemapper samples that address as a 32x32x32 VOLUME (T# type 3D,
+// depth 32). Two separate things are wrong with it:
+//
+//   - IT RASTERIZES NOTHING. Its vertex data is not a vertex binding but a raw
+//     buffer the VS fetches itself, and that buffer is EMPTY. The V# resolves
+//     (00400000/00003020/00400000/00027204 -> base 0x2000400000, stride 0,
+//     4 MiB) and the first 64 KiB read nz=0/65536, so every fetch returns 0
+//     and every vertex is (0,0,0,0). The VS reads x/y/z/w/layer/u/v from fixed
+//     offsets 0x180/0x240/0x300/0x3c0/0x480/0x0/0xc0 of it. Not the pixel
+//     shader: +DELTA_GPU_PSWHITE=1 leaves the target at nz=0 as well, and
+//     +DELTA_GPU_NOCULL=1 changes nothing. Reading that V#'s base as the full
+//     48 bits the ISA specifies gives 0x302000400000, which is NOT mapped, so
+//     the 44-bit mask in DecodeVBuffer is not what loses it (0x302000400000 is
+//     absent from /proc/<pid>/maps, not merely over the kGuestHi ceiling).
+//     THE WHOLE ARENA IS DEAD, not just those offsets: the DRAWRT buffer dump
+//     samples all 4 MiB and reports nz=0 of 65536 samples, against nz=255/576
+//     for the pixel shader's grading block in the same draw, and
+//     +DELTA_GPU_MEMWATCH=0x2000400000 reports frames-nonzero=0 over a
+//     thousand frames. So the ADDRESS is wrong, not the offsets. The one clue
+//     left: this V#'s base-high field reads 0x3020 where every other buffer in
+//     the title reads 0x0020 -- the only descriptor in the frame with those
+//     bits set, and dropping them is exactly what lands it in a dead arena.
+//     THE BLOCK IS NOT ANYWHERE IN GUEST MEMORY. +DELTA_GPU_SOASCAN=0xc0 sweeps
+//     every mapped guest page for a screen quad stored as parallel columns at
+//     that stride: z column all 0.0, w column all 1.0, and x and y columns
+//     each holding exactly two values twice over -- a rectangle's left/right
+//     and top/bottom edges. That is the shape this VS reads and it does NOT
+//     assume the unit quad, so a pass rasterizing a sub-box would still match.
+//     Over ~24 GiB the only persistent hits are UI corner tables in module
+//     memory; nothing in the GPU arenas, run after run. So the guest never
+//     writes those vertices AT ALL: this is not a descriptor pointing at the
+//     wrong arena, it is a block that is never produced, and the cause is
+//     upstream of the graphics layer.
+//     (The sweep would miss a block whose z is not 0 or whose w is not 1, and
+//     one whose columns are not 0xc0 apart -- pass the stride the shader's own
+//     soffsets show. An earlier, stricter version demanding exactly +/-1
+//     found nothing either, and a looser one demanding only "finite" drowns in
+//     module data: those two bracket the answer.)
+//     (Searching from OUTSIDE the process is not an option -- ptrace_scope=1
+//     denies /proc/<pid>/mem to a non-parent -- hence the in-process sweep,
+//     the way TSCAN works for T#s. +DELTA_GPU_MEMFIND=<hex dwords> is the
+//     plain-sequence version; "bf800000,bf800000,3f800000,3f800000" alone is
+//     useless, it hits every static corner table in the modules.)
+//
+//     BUT GDB AS THE PARENT WORKS -- ptrace_scope=1 blocks attaching, not
+//     tracing a child, so the guest-side trace this needs IS available:
+//       gdb -batch -x wp.gdb --args ./ps4delta <pkg> +DELTA_PAD_SCRIPT=...
+//     with wp.gdb doing
+//       handle SIGSEGV nostop noprint pass   (the lifter's int 0x41 path)
+//       break gpu::rhi::Draw
+//       run
+//       delete breakpoints
+//       watch *(unsigned int *) 0x2000400180
+//       continue
+//       bt 25
+//     That arms cleanly ("Hardware watchpoint 2") and the emulator keeps
+//     running at about half speed (13 fps against 24 on the menu). Armed at
+//     the first draw it never fired through the menu -- but a global vertex
+//     buffer is filled at ENGINE INIT, which is before that anchor, so the
+//     run needs an earlier break and long enough to reach the world (the pad
+//     script's seconds are wall-clock and gdb halves the rate, so widen it).
+//     ANCHOR IT ON `break krnl::sys_mmap_dmem` -- the syscall-628 handler, so
+//     the arena is mapped by the time it returns. The bare `sys_mmap_dmem`
+//     does not resolve (`info functions mmap_dmem` gives the qualified name;
+//     it is a non-debugging symbol at 0x118d10). With the right name the
+//     breakpoint sets at 0x118d1c -- but it never stops, at `ignore 1 24` OR
+//     at `ignore 1 5`. This title barely calls syscall 628 at all: it maps its
+//     GPU memory through the DCE path instead (kern/ps4/dev/dma_dev.cpp does
+//     sceKernelMapDirectMemory as ioctl 0x80108002).
+//
+//     THE WORKING RECIPE: `break krnl::dmaDevice::ioctl`, which is hit exactly
+//     FIVE times in a run, so four `continue`s put you at the last one -- early
+//     device init, long before the engine builds any render resource. Arm
+//     there:
+//       break krnl::dmaDevice::ioctl
+//       run
+//       continue        (x4)
+//       delete breakpoints
+//       watch *(unsigned int *) 0x2000400180
+//       continue
+//     It arms ("Hardware watchpoint 2") and then NEVER FIRES for the rest of
+//     the run. So a hardware watchpoint, armed at device-init time and
+//     independent of every polling probe above, agrees: nothing writes that
+//     address, ever. The buffer is not written and lost, it is never written.
+//     The remaining question is which engine path was supposed to write it and
+//     why that path does not run -- which needs the guest's own code traced,
+//     not its memory watched.
+//     Getting the guest PC that writes -- or proving none does, from a
+//     mechanism independent of the polling above -- is the next step.
+//
+//     The EUD is worth reading before the next attempt. +DELTA_GPU_DRAWRT now
+//     prints the vertex stage's user data and a window around the pointer in
+//     its first pair, and for this draw that pointer is real -- an extended
+//     user-data block inline in the command buffer, holding a table of V#s:
+//       eud+32   00000000 80003020 00400000 00ea7204   00000000 00003020 ...
+//       eud+64   00400000 80603020 00000040 00aa7204   00401800 80003020 ...
+//       eud+128  00400000 00003020 00400000 00027204   <- the one the VS loads
+//     EVERY V# in it carries base-high 0x3020, i.e. bits [45:44] of the base
+//     set, where the same title's working buffers read 0x0020 and 0x0030.
+//     Masking those bits off (what DecodeVBuffer does) lands in 0x2000400000,
+//     which is mapped and dead; keeping them lands at 0x302000400000, which is
+//     not mapped at all. Both readings name memory nothing ever writes, which
+//     agrees with the sweep: whatever fills this table's buffers never runs.
+//
+//   - IT NEEDS LAYERED RENDERING. 32 instances, one per slice, and the VS ends
+//         001e  exp pos1 off, off, v4, off done
+//     which is POS1.z = the render-target array index. The translator emits
+//     NOTHING for a POS1 export (that is the shader audit's "94 shaders / 94
+//     sites  exp"), RTarget has no layer count, and a 3D T# cannot resolve to
+//     a 2D image -- the tonemapper's LUT binding reports GUEST-OVER-RT for
+//     exactly that reason. P.T. is blocked on the same LUT, so this is worth
+//     doing properly: a 3D image with 2D_ARRAY_COMPATIBLE, an array attachment
+//     view, VkRenderingInfo.layerCount, and gl_Layer out of the vertex stage.
+//
+// THE EUD TABLE IS DEAD ALL THE WAY THROUGH, not just in the slot the LUT's VS
+// reads. DRAWRT decodes every 4-dword pair in the window as a V# and censuses
+// what it names:
+//   eud+32   V#[0] 0x2000000000 n=4194304 nz=0 | V#[1] 0x2000000000 n=4194304 nz=0
+//   eud+64   V#[0] 0x2000400000 n=6144    nz=0 | V#[1] 0x2000401800 n=64      nz=0
+//   eud+96   V#[0] 0x2000401800 n=64      nz=0 | V#[1] 0x2000401800 n=64      nz=0
+//   eud+128  V#[0] 0x2000400000 n=4194304 nz=0
+// Every one of them lands in 0x2000000000..0x2000402000 and every one reads
+// zero, while the title's live buffers all sit from 0x2000840000 upward. So
+// this is not one stale descriptor: the whole table names the first ~8 MiB of
+// the arena, which nothing ever fills.
+//
+// AND IT IS NOT A CONSTANT ARENA BIAS. The census also probes each dead base
+// at +/-16 arenas of 2 MiB and reports the first that holds anything: +4 from
+// 0x2000000000 and +2 from 0x2000400000 -- i.e. always the same absolute
+// 0x2000800000, which is just where used memory begins, not a fixed offset
+// from each descriptor. So the SotC-style "descriptors sit N arenas from where
+// the data is" explanation (DELTA_GPU_ARENA_PROBE) does not apply here.
+//
+// AND NOTHING ON THE GPU SIDE WRITES THAT ARENA EITHER. +DELTA_GPU_DMATRACE=1
+// shows every IT_DMA_DATA in the run is a 108-276 byte copy from 0x20008xxxxx
+// to dst=0x3022c, all reported `ignored` -- correctly, because the COMMAND
+// dword carries DAS=1, i.e. the destination is GDS, not memory. There is not
+// one memory-to-memory DMA in a frame. So the fill is not CP DMA, it is not
+// the CE (no DUMP_CONST_RAM packets at all), it is not a compute writeback
+// (that would show in the memory), and it is not the CPU (likewise). Nothing
+// we can see writes the first 8 MiB of that arena, which puts the next step
+// on the guest side: find the engine path that should build this table's
+// buffers and see why it never runs.
+//
+// SEPARATELY, THE CONSTANT ENGINE NEVER LOADS. +DELTA_GPU_CETRACE=1 shows 48
+// IT_LOAD_CONST_RAM packets -- the whole 48 KiB of CE RAM in 256-dword chunks
+// -- every one refused with `addr-not-guest`. The raw bodies read
+//   e0000c00 0000000f 00000100 <ce offset stepping 0x400>
+// so the SOURCE never moves while the destination walks the whole CE RAM:
+// the field order is right (it is the same blob 48 times, which is how GNM
+// initialises CE RAM), and the address 0xfe0000c00 is simply not mapped --
+// it sits just under GuestRange's 0x1000000000 floor and is absent from
+// /proc/<pid>/maps either way. The title issues no IT_DUMP_CONST_RAM at all,
+// so the CE cannot be what patches the EUD table, but a CE that loads nothing
+// is a gap of its own.
+//
+// ---------------------------------------------------------------------------
+// THE LIGHTS: THE GATE IS BACK IN PLAY, AND PSREACH CANNOT SEE IT
+// ---------------------------------------------------------------------------
+// ps=0x20010c4000 is 2843 instructions and opens with a gate:
+//   0019  image_sample_lz v[0:3], v10, s[12:19], s[32:35]  ; GBufferB
+//   001f  image_load      v14,   v4,  s[20:27] dmask:0x1   ; lighting channels
+//   002b  v_and_b32 v42, 15, v3          ; v42 = the SHADING MODEL id
+//   002c  v_cmp_lt_u32 s[12:13], 0, v42  ; shading model > 0 ?
+//   002f  v_and_b32 v14, s38, v14        ; s38 = the light's channel mask
+//   0031  s_and_b64 vcc, s[12:13], vcc   ; BOTH
+//   0033  s_cbranch_execz pc+3678 -> 0e92
+// The earlier reading of this -- "PSREACH says no fragment misses its export,
+// so the gate is taken by nobody" -- is WRONG BY CONSTRUCTION. 0e92 is not
+// s_endpgm: it falls through to the export at 0e9d, and v7/v8/v9/v13 are
+// zeroed at 0002/0023/0024/0025 precisely so a rejected lane exports zero. A
+// gate-failing lane still reaches a colour export, so PSREACH is blind to this
+// branch. Read the gate's inputs directly instead.
+//
+// And the binding map used to read it was wrong too. The recompiler numbers a
+// shader's textures in PROGRAM order, not by their slot in the T# table, so
+// for this shader:
+//   t0  = 0x2010800000  GBufferB      (the gate's shading-model input)
+//   t1  = 0x202b800000  dfmt=2 nfmt=4, i.e. R16_UINT -- the LIGHTING CHANNELS
+//                       surface the gate masks, NOT 0x200e000000 and not a
+//                       "shadow buffer"
+//   t12 = 0x2001c80000  256x256 RGBA16 -- the IES profile, sampled last at
+//                       0e84 with spherical coordinates, and the final
+//                       multiply: exp = cb[0x21d] * IES * (diffuse+specular).
+// A single zero in t1 or t12 blacks the whole light out.
+//
+// THE LIGHTS STILL EXPORT ZERO. The "flat uniform blue over the road-and-bus
+// silhouette" that a full frame shows in 0x2012800000 is NOT the lighting: it
+// is the heuristic quad renderer. With the shader filter fixed (below) so that
+// only the light shader's own draws survive, its target reads nz=0.
+//
+// **DELTA_GPU_ONLY_PS USED NOT TO ISOLATE A PASS -- FIXED.** The filter lived
+// inside DrawRecomp, and the caller only gets there when `d.recomp` exists
+// (vk_draw.cc: `kRecompPath && d.recomp && DrawRecomp(...)`). A draw whose
+// shader never recompiled has no `d.recomp`, skipped the filter entirely and
+// was drawn by the HEURISTIC quad renderer, which no SPIR-V probe can touch.
+// The tell was two probes that change different things
+// (+DELTA_GPU_DEBUGUV=1 and +DELTA_GPU_PSATTR=1) agreeing to the BYTE --
+// exactly (128,128,255) at every covered pixel from both. It is asked at the
+// renderer's entry point now, before either path.
+// Note what isolation costs for a DEFERRED pass, though: dropping every other
+// draw also drops the G-buffer the light samples, so "isolated and black" says
+// the shader exports zero, not why.
+//
+// So the multiply chain is where to look next, and its last two terms are the
+// cheap ones: the export is
+//   0e96  v_mul_f32 v0, s0, v7      ; s0 = View cbuffer dword 0x21d, a SCALAR
+//   0e8e  v_mul_f32 v7, v0, v2      ; v0 = the t12 IES sample at 0e84
+// NEITHER IS THE ZERO, and the probe that says so is the one worth reusing:
+// +DELTA_GPU_PROBE_PS=0x20010c4000 aims a probe at that shader alone and
+// leaves the rest of the frame intact, which is what makes a DEFERRED pass
+// readable at all.
+//   - s0: +DELTA_GPU_CBSTAGED=0x2000e65800 dumps the staged View block
+//     (bind=1, 4192 bytes) and dword 0x21d reads 1.0.
+//   - the IES sample: PROBE_PS with +DELTA_GPU_PSTEX=13 exports binding 12's
+//     texel from the light draws only, and it comes back BRIGHT over large
+//     areas. So the light volumes rasterize plenty of pixels and the final
+//     multiplier is not zero either.
+//   - PROBE_PS with +DELTA_GPU_PSVGPR=8 exports v7/v8/v9 -- the product just
+//     before the s0 scale -- and the target comes back INDISTINGUISHABLE from
+//     the unprobed one: mean R=83.4 G=0.1 B=0.0 over 65% coverage against
+//     R=83.5 G=0.0 B=0.0 for the same shader unprobed. The probe changes
+//     nothing, so v7/v8/v9 are ~zero: the accumulated lighting IS the zero.
+//     DO NOT READ THESE IMAGES BY EYE. The red they are full of is the BASE
+//     PASS's MRT0, not the light draws, and it looks identical either way --
+//     comparing channel MEANS against an unprobed run of the same shader is
+//     what separates them, and it overturned a "the lights are red-dominant"
+//     reading taken from the pictures alone. The PSTEX probe is the control:
+//     it moves the means a long way (R=119/G=1.4/B=0, R=0.7/G=0.9/B=12.2 on
+//     other frames), which is how you know a probe reached the pixels.
+// So of
+//   0df3-0df8  v29=v4*v10  v31=v42*v6  v30=v44*v7
+//              v16=v11*v10 v28=v12*v6  v15=v13*v7
+//   0e79-0e88  R=v29+v16   G=v31+v28   B=v30+v15
+// all three terms come back at zero, with the gate, the IES sample, the light
+// colour and s0 all measured live -- so the fault is between the gate at 0x33
+// and the combine at 0e79, in the accumulation itself.
+//
+// AND 0x2012800000 IS NOT HOLDING A COLOUR AT ALL. Read the RAW texels
+// (+DELTA_GPU_RTDUMP_RAW=1) rather than the PPM and the picture changes
+// completely:
+//   row 500, x=100.. : 00000387 00000381 00000378 0000036d 00000362 00000356
+//                      0000034b 00000340 00000329 00000327 00000340 0000034e
+// Only the LOW 11 BITS are ever set -- 192 of 32459 sampled texels have
+// anything above bit 10 -- and the values walk smoothly. In B10G11R11 that is
+// R sweeping 0.25..0.6 with G and B exactly zero: a smooth SINGLE-CHANNEL
+// GRADIENT, which is the shape of a depth/AO/luminance buffer, not of UE4
+// SceneColor. It is there at frame end AND with the frame cut off at draw 2500
+// (+DELTA_GPU_MAXDRAW=2500, i.e. after the base pass and the lights but before
+// the whole post chain), so it is not a later pass reusing the address.
+//
+// The address IS SceneColor, though -- that part of the old map is right. The
+// main base pass is 634 draws of `rt=0x2012800000 1470x827 mrt=6`, and its six
+// attachments are
+//   mrt0 0x2012800000 fmt=6  ntype=7  (B10G11R11)  SceneColor
+//   mrt1 0x2010000000 fmt=9  ntype=0  (2_10_10_10) GBufferA, normals
+//   mrt2 0x2010800000 fmt=10 ntype=0  (8888)       GBufferB
+//   mrt3 0x2011000000 fmt=10 ntype=6  (8888 SRGB)  GBufferC, base colour
+//   mrt4 0x2011800000 / mrt5 0x2012000000          GBufferD/E
+// (the six-target pass at 0x2018000000 is a separate 256x256 capture, RGBA16F).
+//
+// AND IT IS NOT A WRITE-MASK DEFECT. +DELTA_GPU_MASKTRACE=1 with
+// MASKTRACE_RT=0x2012800000 reports the same thing on every base-pass draw:
+//   TARGET_MASK=0xffffff SHADER_MASK=0xffffff eff0=0xf COLOR_CONTROL=0xcc0010
+//   mode=1 BLEND0=0x0 en=0 psMrtMask=0x3f recomp=ok
+// -- a full RGBA mask on attachment 0, no blending, and the recompiler
+// emitting all six outputs. So whatever leaves G and B at zero is upstream of
+// the attachment state.
+//
+// AND THE WRITE PATH IS NOT AT FAULT -- settled by the one test with no
+// coverage question in it. +DELTA_GPU_PSWHITE=1 with no PROBE_PS forces EVERY
+// shader white; the raw texels then read
+//   84210420  (22938 of 32459 samples carry bits above bit 10)
+// i.e. all three channels populated, at the magnitude repeated additive white
+// writes should give. So our B10G11R11 export and attachment path writes RGB
+// correctly, and the single-channel gradient the target normally holds is what
+// the title's own shaders put there. That closes the renderer as a suspect and
+// sends the question back to what the base pass computes.
+//
+// A CAUTION FOR THE NEXT ATTEMPT, learned twice over. Sampling every 37th
+// pixel of the PPM made this gradient read as red NOISE, and a PROBE_PS run
+// covering only 245 of the pass's 634 draws made a minority value look like
+// the whole target's. READ THE RAW TEXELS, and check what share of a pass a
+// probe actually covers before attributing the target's content to it -- or
+// use a probe with no coverage question at all, as above.
+//
+// THE LIGHT COLOUR IS NOT THE ZERO EITHER. v10/v6/v7 are that colour:
+//   0dd3  s_buffer_load_dwordx4 s[12:15], s[4:7], 0x10   ; b5 dwords 16..19
+//   0dd8  v2=s12*v21  v0=s13*v21  v1=s14*v21
+//   0ddb  v10=v23*v2  v6=v23*v0   v7=v23*v1
+// and +DELTA_GPU_CBSTAGED=0x2000e65800 shows bind=5 (0x2024d72c00, 1024 bytes)
+// reading `@0x40: 4.43962 3.01914 2.06271 8` -- a real warm-white RGB, all
+// three channels live. s4 = b5 dword 0x17 = 1.0, so v11/v12/v13 are just
+// v5/v24/v41.
+//
+// THE LIGHT MASK IS NOT THE BLOCKER (measured properly -- see the end of this
+// section). What follows maps the gate, which is still the right code to know.
+// The real gate is not the one at 0x33. At 0x00c6 the shader builds UE4's
+// light attenuation mask and skips the ENTIRE lighting body if it is zero:
+//   00bc  v5 = clamp(1.0 - v6)          ; v6 = d^2/r^2
+//   00c0  v5 = log2(v5)
+//   00c3  v5 = s28 * v5                 ; FalloffExponent
+//   00c5  v5 = exp2(v5)                 ; radial falloff
+//   00bf  v4 = v17 - s63                ; cos(spot) - SpotAngles.x
+//   00c1  v4 = clamp(s64 * v4)          ; * SpotAngles.y, saturate
+//   00c4  v4 = v4 * v4
+//   00c6  v21 = v4 * v5                 ; LightMask
+//   00c7  v_cmp_lt_f32 vcc, 0, v21
+//   00c9  s_cbranch_execz pc+3399 -> 0e11   <-- skips 0xca..0e10 entirely
+// and v21 is also the common multiplier on all three light-colour channels at
+// 0dd8-0dda, so a zero there blacks the light twice over.
+//
+// THIS SHADER'S OWN CONSTANTS ARE FINE. +DELTA_GPU_DRAWRT=0x20010c4000 filters
+// by PIXEL shader (CBSTAGED filters by the vertex one, which every light draw
+// shares) and prints its b5:
+//   @0x40: 54.5606 52.7761 43.8372 3 | 1.5e-07 -1.3e-07 1 1
+//          | -0.951057 0.309017 -3.3e-07 0 | -2 1 0 0
+//   dw16-18 colour (bright)   dw24-26 a unit direction   dw28/29 = -2, 1
+// so s63 = -2 and s64 = 1.0, UE4's point-light SpotAngles sentinel, on the
+// draws that actually run this shader.
+//
+// AND THAT RETRACTS THE "s64 <= 0" BISECTION. It read the R FIELD of the scene
+// target -- which is exactly the field the base pass writes -- so its 163157
+// "nonzero" texels at AT=0xc0 were the base pass, not the probe, and the two
+// captures landed on frames with completely different base-pass content
+// (AT=0xc0 gave R/G/B 163157/680/680, AT=0xc6 gave 0/1815/0). Neither the
+// comparison nor the conclusion drawn from it is sound.
+//
+// HOW TO TAKE IT PROPERLY: the base pass writes the R field ONLY (raw texels,
+// above). So choose the PSVGPR base register so the value of interest lands in
+// G or B, which nothing else touches. For v4 at 0xc6 that is PSVGPR=3
+// (first=2): out.r=v2, out.g=v3, out.b=v4, and the B field is then the probe's
+// alone. Same trick for any other term.
+//
+// TAKEN THAT WAY, THE MASK IS ALIVE. PSVGPR=3 + PSVGPR_AT=0xc6 reports
+//   B field = v4 (the spot factor)  nonzero in 78323 of 245760 texels
+// with G and R at 78324 -- the probe covering ~32% of the frame, the light
+// volumes' footprint, and every field it wrote coming back non-zero. So v4 is
+// NOT zero, the gate at 0x00c7 is NOT masking the lights off, and the whole
+// "one constant kills the lighting" line is dead.
+//
+// WHICH MEANS EVERY EARLIER READING OF THIS SHADER TAKEN THROUGH THE R FIELD
+// IS SUSPECT. Retake them with the value in B. The instrument is sound now;
+// the readings taken before it was are not.
+//
+// RETAKEN, AND THIS IS WHERE THE LIGHT GOES. PSVGPR=8 + PSVGPR_AT=0xe91 -- the
+// four lighting products, just after 0e8e-0e91 build them -- puts v8 in G and
+// v9 in B, both clean:
+//   mask, v4 @0xc6 : 78323 texels    <- the light's whole footprint
+//   green, v8 @0xe91:  8268 texels   <- ~10% of it
+//   blue,  v9 @0xe91:   342 texels   <- ~0.4% of it
+// So the lights DO pass their attenuation gate and then produce nothing on all
+// but a few percent of that footprint. The collapse is between 0xc6 and 0xe91
+// -- inside the lighting body itself, not in the gate, not in the constants,
+// not in the final multiplies. That is the range to bisect, with the value in
+// G or B every time.
+//
+// BOTH MASK TERMS ARE ALIVE, measured together in ONE frame so the counts are
+// comparable (PSVGPR=4 @0xc6 puts v4 in G and v5 in B, both clean):
+//   G = v4, spot factor     3852 texels
+//   B = v5, radial falloff  2921 texels   -- 76% of the same footprint
+// so v21 = v4*v5 is non-zero over three quarters of where the lights land.
+// COMPARE COUNTS ONLY WITHIN A FRAME: the footprint itself swings by an order
+// of magnitude between frames of this cutscene (78323 in one, 3852 in
+// another), so a count from one run means nothing against a count from
+// another. Every cross-run comparison this file used to make was wrong for
+// exactly that reason.
+//
+// FIRST BISECTION STEP INTO THE BODY. 0cea is `v_mov_b32 v51, 4` -- a known
+// constant, so capturing it is a pure REACHABILITY test: PSVGPR=50 @0xcea puts
+// v51 in B, and a non-zero B means that pc executed for that pixel.
+//   B = v51  115 texels
+// Small, but taken on a frame whose footprint was not measured in the same
+// capture, so it bounds nothing on its own. Take it again PAIRED with a
+// footprint in another clean field (there is no free register adjacent to v51,
+// so either move the probe to a pc where one is, or accept two captures at the
+// same PSVGPR_AT on the same frame index and compare only their B fields).
+// The reachability idea is the right one: bisect 0xc6..0xe91 by capturing a
+// known constant at each candidate pc and asking which of them execute.
+//
+//   0081  s_buffer_load_dword s63, s[4:7], 0x1c   ; b5 dword 28
+//   0082  s_buffer_load_dword s64, s[4:7], 0x1d   ; b5 dword 29
+// and the STAGED b5 (+DELTA_GPU_CBSTAGED=0x2000e65800, bind=5, 1024 bytes)
+// holds exactly what UE4 writes for a point light:
+//   @0x40: 4.43962 3.01914 2.06271 8 ... 50 -2 1 0 0
+//          ^dw16 colour RGB              ^dw27 ^dw28=-2 ^dw29=1
+// SpotAngles = (-2, 1) is UE4's point-light sentinel, chosen so that
+// saturate((cos + 2) * 1) is 1 for every direction. With s64 = 1 confirmed for
+// this shader's own draws, a zero mask needs v17 <= -2 -- a dot product out of
+// range, i.e. the light vector or the reconstructed world position, not the
+// constants. That is the thread to pull, with the clean B-field readout.
+//
+// THE MODULE IS RIGHT TOO. +DELTA_GPU_SPVDUMP_ADDR=0x20010c4000 emits it, and
+// spirv-dis shows exactly the right slots:
+//   %1903 = OpAccessChain %_ptr_Uniform_uint %cbuf5 %uint_0 %uint_7 %uint_0
+//           -> sgpr[63]        ; b5 dword 28
+//   %1907 = OpAccessChain %_ptr_Uniform_uint %cbuf5 %uint_0 %uint_7 %uint_1
+//           -> sgpr[64]        ; b5 dword 29
+// So the decode, the plan, the lowering and the descriptor all agree.
+//
+// WHICH LEAVES A QUESTION ABOUT THE READING ITSELF. The "-2, 1" above came
+// from +DELTA_GPU_CBSTAGED=0x2000e65800, which filters on the VERTEX shader --
+// and that VS is shared by every light draw in the frame, whose b5 buffers are
+// NOT the same: the dumps show bind=5 at 0x2024d72c00 with 1024 bytes on one
+// draw and at 0x2024cfe700 with 144 bytes on another. The staged bytes read as
+// SpotAngles=(-2,1) belong to whichever draw that line came from, which is not
+// necessarily one running ps=0x20010c4000. So s64 <= 0 is measured and solid;
+// "the guest staged 1.0 there" is NOT, until CBSTAGED is filtered by the PIXEL
+// shader (or the draw index is matched) and dwords 28/29 of THIS draw's b5 are
+// read. Do that first: it decides whether this is our defect or the title
+// legitimately masking those lights off, and the two lead in opposite
+// directions.
+//
+// Everything else obvious has been checked and is fine:
+//   - s[4:7] is not reused. It is written only at 0dfc and 0e66, both AFTER
+//     the loads at 0081/0082, so the "same SGPR, two descriptors" hazard
+//     PlanCbufs keys around does not apply here.
+//   - the two instructions are the same form. c21f851c (s63, offset 0x1c) and
+//     c220051d (s64, offset 0x1d) both decode IMM=1, SBASE=2 -> s[4:7].
+//   - the ring slot holds the bytes: CBSTAGED prints -2 and 1 at dwords 28/29.
+//   - the descriptor range is kCbufWindow for every binding and the copy is
+//     min(cb.size, kCbufWindow) with cb.size 144..1024, so byte 116 is inside.
+//   - CbufDword(29) lowers to AccessChain(vec4 7, component 1), which is right.
+// So dump the module (+DELTA_GPU_SPVDUMP_ADDR=0x20010c4000, spirv-dis it) and
+// compare what it emits for offset 0x1d against 0x10 -- the colour load from
+// the same buffer works, so the two differ somewhere between the decode and
+// the AccessChain. Worth checking DecodeSmrdOffset on an ODD dword offset
+// specifically: 0x1c works into s63 and 0x1d does not, and they are adjacent.
+//
+// Behind the mask, the per-channel accumulation is R = v10*(v4+v5),
+// G = v6*(v42+v24), B = v7*(v44+v41).
+//
+// +DELTA_GPU_PSVGPR_AT=<pc> is the tool for walking it. PSVGPR alone reads the
+// registers as they stand AT THE EXPORT, and a 2843-instruction shader has
+// reused nearly all of them by then -- every term this combine takes is dead
+// before its own export, so the plain probe reads something else and says so
+// confidently. PSVGPR_AT freezes the three registers the moment the
+// instruction at that pc has run, into the same Private slot PSTEX uses, so a
+// capture inside a branch still reaches the epilogue. Read the pc off a
+// DELTA_GPU_SHDUMP listing.
+//
+// AND THE MEASUREMENT IS THE HARD PART, not the probe. The light draws add
+// into a target the base pass has already written, and this is a CUTSCENE: the
+// scene target's own nz swings 122 -> 10328 between frames of one run, which
+// is far larger than anything a light contributes. Comparing a probe run
+// against a baseline run therefore compares two different pictures, and it
+// produced a confident wrong answer twice (a "channel asymmetry" and a
+// "red-dominant" reading, both retracted). +DELTA_GPU_PSTEXSCALE now scales
+// what PSVGPR exports as well as PSTEX, so a probe can be made to saturate its
+// target and be read as present/absent rather than as a small perturbation --
+// but the next attempt needs one of:
+//   - a STATIC scene to probe (the cutscene never repeats a frame), or
+//   - matched frame numbers between probe and baseline runs, or
+//   - a readout that cannot be confused with the base pass at all.
+// Do not read a single frame's picture and conclude anything.
+//
+// First reading, and it is a READING not a conclusion:
+//   +DELTA_GPU_PROBE_PS=0x20010c4000 +DELTA_GPU_PSVGPR=30
+//   +DELTA_GPU_PSVGPR_AT=0xdf8
+// exports (v29, v30, v31) = the R, B and G products, captured after all six
+// multiplies at 0df3-0df8. On a frame where the base pass wrote almost nothing
+// (f650: 31973 of 32459 sampled texels zero, so the target is essentially only
+// the probe's output) the 486 texels that ARE set all carry bits above bit 10
+// -- values like 00233800, i.e. the middle field populated with R and B at
+// zero. That is v30, the blue channel's product, alive while the other two are
+// not. 1.5% coverage on one frame is not enough to build on; take it again on
+// a frame where the lights cover more, and compare against an unprobed run.
+//
+// ---------------------------------------------------------------------------
+// 59 VERTEX SHADERS WERE BEING THROWN AWAY
+// ---------------------------------------------------------------------------
+// +DELTA_GPU_SHAUDIT during the CUTSCENE (the old "compute is complete" reading
+// was taken on the MENU frame) reported 65 of 318 shaders declined, 59 of them
+// vertex shaders, all for ops clustered in their last few dwords:
+// tbuffer_store_format_xy, v_cmps_u_f64, unk_op0xcd7d0000, unk_op0xcd01e8cd.
+// 0xcd is padding. +DELTA_GPU_SHDUMP=<dir> writes a .txt per shader with a
+// per-instruction "; dead" / "!UNSUPPORTED" column, and the header line of a
+// rejected one read "344 insts, 0 dead" -- nothing dead in a shader whose real
+// code ends at 0x194 and whose file runs to 0x1ad.
+//
+// The cause: reachability classed s_swappc_b64 as indirect control flow and
+// retained EVERY block when it saw one. It is a call (return address into the
+// pair it jumps through, callee returns with s_setpc_b64), and every VS that
+// reaches its fetch shader opens with one. Now 19 of 460 declined and no vertex
+// shader is rejected. It is not the black scene, but it was 46% of the title's
+// vertex shaders. What is left: 15 pixel shaders on smrd.cbuf-binding-count
+// (they want more than kMaxCbufBindings), one on ds.private, one on
+// mtbuf.raw-format, two on mimg.binding-count (31 and 32 samplers against
+// kMaxTex=24), one compute shader on cs.resource-count (33 against 32).
+//
+// ---------------------------------------------------------------------------
+// A DEVICE FAULT, RECURRING
+// ---------------------------------------------------------------------------
+// VK_ERROR_DEVICE_LOST in roughly half the runs, at 55-71 s, and every time on
+// a frame of 266-267 draws (frames 565, 789, 832; once from the compute batch
+// wait instead of the frame fence). +DELTA_GPU_VALIDATE=1 reports NOTHING at
+// the fault, and VK_EXT_device_fault returns no address. +DELTA_GPU_SYNC-style
+// serialisation (RTSTAT forces it) does not prevent it.
+//
+// One measurement moves it: +DELTA_GPU_CFG_MAXITER=64 ran 300 s with no fault.
+// That points at the while/switch lowering spinning, and the default cap of
+// 16384 block-steps per invocation is no protection at full-screen pixel counts
+// -- 16384 x 1.2M lanes is a TDR whatever it eventually returns. It is not a
+// PIXEL shader: an invocation that leaves via the cap goes straight to kExit
+// and so reaches no colour export, which PSREACH would paint white, and nothing
+// in the frame is white. Look at the vertex and compute stages. Finding the
+// shader is the next step; lowering the cap only hides it.
+//
+// ---------------------------------------------------------------------------
+// WHAT THE VALIDATION LAYER SAYS
+// ---------------------------------------------------------------------------
+// +DELTA_GPU_VALIDATE=1 (add +DELTA_GPU_SYNCVALIDATE=1 for the hazard pass).
+// Every one of these is undefined behaviour on a value some shader reads, which
+// is the shape of the black scene.
+//
+// RAISE THE LAYER'S MESSAGE LIMIT BEFORE READING ANY COUNT. It reports each
+// message ten times and then stops, so every class saturates at the same
+// number and a fix looks like no change:
+//   printf 'khronos_validation.duplicate_message_limit = 100000\n' > s.txt
+//   VK_LAYER_SETTINGS_PATH=s.txt ./run.sh ... -- +DELTA_GPU_VALIDATE=1
+//
+// FIXED here, with the counts a 200 s cutscene run gives:
+//   - magFilter-04553, 200000 -> 0. SamplerFor short-circuited to the LINEAR
+//     default whenever the guest S# had not resolved, ignoring `integer`; and
+//     the flag came only from the T# NUM_FORMAT, which says nothing about a
+//     binding that resolved to an integer-format render target.
+//   - viewType-07752, 1710 -> 0. TranslateVs declared every vertex sampler 2D
+//     (the masks the pixel stage takes were never passed to it), and separately
+//     the draw side tracked only 16 textures where the module and the layout
+//     both go to 24, which shifted every vertex binding down.
+//   - None-08114 "tex16 has never been updated" -> 0. The set was written for
+//     as many bindings as the DRAW resolved, the layout has as many as the
+//     SHADER declares.
+//   - image-01761, a BC1/BC5 view over a B8G8R8A8 target -> 0.
+//   - format-07753, 10946 -> 0. THE PIPELINE CACHE KEY. A pipeline embeds the
+//     modules it was created with, and the recompiler builds a different module
+//     whenever a descriptor-derived mask differs (tex_3d, tex_1d, tex_uint,
+//     mrt_uint, the PS input mapping); the key carried the code ADDRESSES and
+//     only two of those masks, so a draw could bind a pipeline holding another
+//     draw's module while its descriptor set was built from this one's. Every
+//     probe that compares against d.recomp is blind to it by construction --
+//     which is why three of them found nothing. The Recompiled is cached per
+//     (code, every mask) and never evicted, so its address IS that identity;
+//     key on it. 585 -> 1621 pipelines, steady-state frame rate unchanged.
+//   - Input-07904, 4554 -> 0. A VS declares an input for every attribute its
+//     fetch shader reads, and the draw stopped collecting at 8.
+//   - Input-08733, 370 -> 0. A 32-bit integer attribute now takes its SFLOAT
+//     twin: the module BITCASTS each component into its VGPR rather than
+//     converting it, so the same 32 bits arrive and the types agree.
+//   - VkRenderingInfo-pNext-06079/06080, ~80/~52 -> 0. THE RT ALIAS CAP. A base
+//     rendered to at several geometries owns one image each, capped at three --
+//     generous at 1920x1080, hopeless for Gameface, which renders every glyph
+//     into the same scratch address at the glyph's own size (the four glyph
+//     targets want 160-242 geometries apiece, 201 KiB in total). Past the cap
+//     the code returned the LIVE target at ITS size while the caller opened a
+//     render area of the REQUESTED size over it: an 8x7 image under a 39x47
+//     region. Budget by BYTES (32 MiB), keep a count only as a backstop, and
+//     decline rather than render into an attachment of the wrong size.
+//
+//   - SYNC-HAZARD-WRITE-AFTER-WRITE, 40474 -> 0. The barriers bracketing a
+//     compute staging copy named COMPUTE and HOST outside and TRANSFER inside,
+//     so they ordered a dispatch against a copy but never a COPY AGAINST A
+//     COPY. A batch stages the same range repeatedly -- some buffers ~170 times
+//     in one cs batch -- and two unordered copies to one buffer may land in
+//     either order, leaving the dispatch reading the older guest snapshot.
+//
+//   - Undefined-Value-ShaderOutputNotConsumed, ~100k -> 0. A shader routinely
+//     exports targets the pass does not bind: a depth prepass binds none, and a
+//     single-target pass still meets exports to MRT1. The module now drops
+//     those outputs while keeping what the export MEANS -- reaching it is what
+//     tells the discard lowering the fragment survived its alpha test. The
+//     bound set is a MASK, not a count (a pass may leave a lower slot masked
+//     off while a higher one is live), and it joins the module's identity.
+//
+// A cutscene run at 4000 draws a frame now reports NOTHING AT ALL under
+// +DELTA_GPU_VALIDATE=1 and +DELTA_GPU_SYNCVALIDATE=1 together: not one error,
+// warning or hazard. Keep it there.
+//
+// Careful reading the result of a validation run: if the frame count sits at
+// ~340 draws the title never left the MENU (the pad press missed) and the run
+// says nothing about the world. Check draws/frame before believing a clean log.
+//
+// What else the load still reports, none of it fatal now:
+//   - A shadow atlas at depth 0x2028000000 whose width DOUBLES per bind
+//     (2044, 4092, 6140, 8188), each allocating its own image.
+//   - "RT table full (64) -- dropping <base> and every draw that targets it".
+//     A hard cap with no eviction.
+//   - norecomp ~900 a frame: mostly the max_index >= 200000 cap in
+//     vk_draw_recomp, which the world's shared vertex buffer exceeds (208k).
+//   - Three rejected shader ops: mimg 0x68, vop2 0x30, ds 0xa, and two compute
+//     shaders skipped outright.
+//
+// Fixed on the way here (neither was the gate, both were real):
+//   - Async IO. sceKernelAio* answered ENOTSUP; the title submits 24 commands
+//     during engine start-up (one read, 23 writes of ~2.7 KB each), takes the
+//     error and never issues another. Now served synchronously inside submit.
+//   - libSceAvPlayer reported zero streams, so the title enumerated an empty
+//     movie and never called Start.
+//
+// ---------------------------------------------------------------------------
+// EARLIER, STILL TRUE
+// ---------------------------------------------------------------------------
+// THE 0.1 FPS WAS AN UNIMPLEMENTED OPCODE. IT_EVENT_WRITE (0x46) with an
+// address is an occlusion/statistics query: EVENT_INDEX 1/2/3 sample a counter
+// and write it as a 64-bit value whose TOP BIT is the done flag, and the CP
+// fans one packet out to one qword PER RENDER BACKEND at a 16-byte stride -- a
+// begin packet at `base` fills base + i*16, its end at base+8 fills
+// base + i*16 + 8. That is the pair stride the title's poll walks. It emits 289
+// a frame and will not render until all sixteen slots carry the bit; it got
+// none, so a worker burned 21 half-second timeouts a frame. 0.1 -> 24 fps.
+// Gate on EVENT_INDEX (the other forms carry no address and storing through
+// their DW2/DW3 crashes) and write a MONOTONIC counter (the slots are
+// begin/end pairs read as end - begin).
+//
+// The poll itself is at eboot+0x1b2f870..0x1b2fa19 and is still the busiest
+// thread in the run -- 137 million sched_yields in 47 s. That is not a wedge
+// any more, it is waiting for our own command-buffer walk, which costs 37 ms a
+// frame. +DELTA_YIELD_CALLER=<period> names it.
+//
+// The old +DELTA_GUEST_PATCH fence NOP is OBSOLETE. It was never a render
+// harness either: with it the title runs at 30 fps but issues 31 draws and
+// skips the G-buffer pass entirely.
+//
+// The compute side is clean ON THE MENU FRAME: +DELTA_GPU_SHAUDIT=<file> there
+// reports 62 unique shaders (14 cs, 31 ps, 17 vs), 0 declined. That reading
+// says nothing about the world -- see the cutscene audit above.
+//
+// The base pass still exports zero. Its 164 draws all bind the same three
+// surfaces -- two 1x1 and one 32x32 -- which are UE4's defaults, so no material
+// has ever been streamed in. That is downstream of the load, not a GPU defect.
+//
+// RTSTAT SCORES 32 TARGETS AND THE CUTSCENE HAS 40-60. It used to take them in
+// hash order, so the scene-colour target was reported in one run and absent
+// from the next with nothing said; it is address-ordered now and names what it
+// dropped. The frame's shape at f900: 0x2012800000 is the base pass MRT0 AND
+// the light target (fmt=6 ntype=7), MRT1..5 are 0x2010000000, 0x2010800000,
+// 0x2011000000, 0x2011800000, 0x2012000000, and the six-target pass at
+// 0x2018000000 is a separate 256x256 capture. Beware: rtstat's own channel
+// decode treats anything that is not a half format as RGBA8, so mean/amean are
+// meaningless on the R11G11B10F scene target and on 1-channel targets (whose
+// alpha defaults to 1). nz is still exact. The .ppm from +DELTA_GPU_RTDUMP=1
+// converts properly and is the thing to look at.
+//
+// Render-target extents come from each target's CB_COLORn_PITCH/SLICE, not from
+// PA_SC_SCREEN_SCISSOR: the title binds a 1792x960 G-buffer under a 256x256
+// screen scissor, and sizing from the scissor put 164 draws a frame into a
+// 256x256 image.
+//
+// The R11G11B10F compute staging is still there: the CS path stages the scene
+// targets at 16 bytes/texel against a 4-byte image, so every dispatch
+// round-trips ~13.6 MB through guest memory. Fixing it needs a real format
+// conversion on the bridge copy, not a relaxed shape match.
+//
+// PSN bring-up (all fixed, each gate only visible once the one before cleared):
+// regmgr op 27; sceSysmoduleLoadModule(0x19) reporting libSceNet absent; no
+// "SceLncService" IPMI handler; libSceNetCtlForNpToolkit /
+// libSceUserServiceForNpToolkit second entry-point sets; 7 of libSceAvPlayer's
+// 22 imported NIDs running the real .sprx against our sentinel handle; and the
+// /SceNpTpip shm, whose absence turned sceNpTpipInitialize into the same fatal
+// "PSN: Failed to initialize the np toolkit".
+//
+// AvPlayer InitEx: SceAvPlayerInitDataEx leads with a thisSize field, so its
+// event-callback block sits 8 bytes later than the plain struct's.
+//
+// select(): the stub returned "zero ready" without waiting or clearing the
+// caller's sets, and a Gameface thread span 1.8 BILLION calls in 78 seconds.
+//
+// ---------------------------------------------------------------------------
 // Still unhandled and worth a look if threading looks wrong: umtx op 23
-// (SEM2_WAIT) falls through to the "success" arm. Ops 12/13/14 (rwlocks) were
-// in the same state and were the cause of the intermittent null-deref crashes.
+// (SEM2_WAIT) falls through to the "success" arm.
 
 // The stack-trace capture UE4 runs while building a fatal-error report walks the
 // frame-pointer chain and derefs a null saved-rbp, so the fatal path faults
