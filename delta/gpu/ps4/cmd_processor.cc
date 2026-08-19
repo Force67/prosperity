@@ -380,6 +380,55 @@ void HandleReleaseMem(const u32* body, u32 count) {
                   (body[1] >> 24) & 0x7);
 }
 
+// EVENT_WRITE with an address is an occlusion/statistics query: the CP samples
+// a counter and writes it as a 64 bit value whose TOP BIT is the done flag.
+// body: eventCtrl (EVENT_TYPE[5:0], EVENT_INDEX[11:8]), addrLo, addrHi.
+//
+// GTA:SA polls exactly that bit -- 16 query slots ANDed against
+// 0x8000000000000000 -- before it will render anything, and never got it: the
+// opcode was unhandled, so 289 of these packets a frame wrote nothing and the
+// title sat waiting on queries the GPU had already "run".
+//
+// The value is a monotonically increasing counter, not a constant. These slots
+// come in begin/end pairs eight bytes apart and the caller reads end - begin as
+// "samples that passed"; writing the same number to both would answer "nothing
+// was visible" and cull the frame just as thoroughly as never writing at all.
+// Rendering everything is the honest answer for a backend that does not track
+// occlusion.
+void HandleEventWrite(const u32* body, u32 count) {
+  if (count < 3)
+    return;  // no address: a plain pipeline event (cache flush and friends)
+  // Only EVENT_INDEX 1 (ZPASS_DONE), 2 (SAMPLE_PIPELINESTAT) and 3
+  // (SAMPLE_STREAMOUTSTATS) carry a destination. The rest reuse the same
+  // opcode for events that write nothing, and taking their DW2/DW3 as an
+  // address stores through whatever those words happen to hold.
+  const u32 event_index = (body[0] >> 8) & 0xF;
+  if (event_index < 1 || event_index > 3)
+    return;
+  const u64 address =
+      (static_cast<u64>(body[2] & 0xFFFF) << 32) | (body[1] & ~0x7u);
+  TraceAddrWatch("EVENT_WRITE", address, 8, body[0], /*max_lines=*/8);
+  if (!IsLabelAddress(address) || !IsLabelAddress(address + 8))
+    return;
+  // ZPASS_DONE does not write ONE counter: the CP fans it out to one qword per
+  // render backend, at a 16 byte stride, and the caller sums them. Liverpool
+  // has 8 RBs, so a begin packet at `base` fills base + i*16 and the matching
+  // end packet at base+8 fills base + i*16 + 8 -- which is exactly the pair
+  // stride GTA:SA's poll walks. Writing a single qword leaves fourteen of its
+  // sixteen slots at zero and the poll never completes.
+  constexpr u32 kRenderBackends = 8;
+  const u64 span = static_cast<u64>(kRenderBackends) * 16;
+  if (!IsGuestRange(address, span) ||
+      !utl::isMemoryRangeMapped(reinterpret_cast<const void*>(address), span))
+    return;
+  static std::atomic<u64> samples{0};
+  const u64 value = (1ull << 63) | (samples.fetch_add(1) + 1);
+  for (u32 rb = 0; rb < kRenderBackends; rb++)
+    WriteLabel(address + rb * 16, value, true);
+  g_fence_labels.Note(address);
+  TraceLabelWrite("EVENT_WRITE", address, 2, value);
+}
+
 // body: eventCtrl, addrLo, addrHi+cmd, data
 void HandleEventWriteEos(const u32* body, u32 count) {
   if (count >= 3)
@@ -681,6 +730,9 @@ u32 WalkDcb(rhi::Renderer& renderer,
         break;
       case IT_RELEASE_MEM:
         HandleReleaseMem(body, count);
+        break;
+      case IT_EVENT_WRITE:
+        HandleEventWrite(body, count);
         break;
       case IT_EVENT_WRITE_EOS:
         HandleEventWriteEos(body, count);
