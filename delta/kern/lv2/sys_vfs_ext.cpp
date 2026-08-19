@@ -17,6 +17,7 @@
 #include <ctime>
 #include <mutex>
 #include <unistd.h>
+#include <sys/select.h>
 #include <unordered_map>
 
 #include <logger/logger.h>
@@ -24,6 +25,7 @@
 #include "error_table.h"
 #include "kern/ps4/dev/device.h"
 #include "kern/ps4/dev/file_dev.h" // SceKernelStat, fillStat, kSceFileMode*
+#include "kern/ps4/dev/socket_dev.h" // fdToSocket, for select over real sockets
 #include "kern/proc.h"
 #include "kern/vfs.h"
 #include "sys_vfs.h" // sys_open (sys_openat delegates to it)
@@ -403,9 +405,102 @@ int PS4ABI sys_poll(void *fds, u32 nfds, int timeout) {
   return 0;
 }
 
+// FreeBSD and Linux lay an fd_set out the same way: a bitmap of 64-bit words,
+// bit n for fd n. nfds bounds it, so only ceil(nfds/64) words are ours to read.
+namespace {
+constexpr int kFdSetWords = (1024 + 63) / 64;
+
+struct GuestTimeval {
+  i64 sec, usec;
+};
+
+bool fdIsSet(const void *set, int fd) {
+  if (!set || fd < 0 || fd >= kFdSetWords * 64)
+    return false;
+  return (static_cast<const u64 *>(set)[fd / 64] >> (fd % 64)) & 1;
+}
+
+void fdSet(void *set, int fd) {
+  if (set && fd >= 0 && fd < kFdSetWords * 64)
+    static_cast<u64 *>(set)[fd / 64] |= 1ull << (fd % 64);
+}
+}  // namespace
+
+// select() answers for the fds we model: a socket is asked of the host, and
+// anything else (a file, a device) is a regular file as far as select is
+// concerned -- always ready, never blocking. The old stub returned "nothing
+// ready" without waiting or clearing the sets, so a title that selects with a
+// timeout spun instead of sleeping: GTA:SA's Gameface thread got through 1.8
+// billion calls in 78 seconds and left the render loop 0.1 fps.
 int PS4ABI sys_select(int nfds, void *readfds, void *writefds, void *exceptfds,
                       void *timeout) {
-  return 0; // zero ready descriptors
+  if (nfds < 0)
+    return -SysError::eINVAL;
+  if (nfds > kFdSetWords * 64)
+    nfds = kFdSetWords * 64;
+
+  fd_set hostRead, hostWrite, hostExcept;
+  FD_ZERO(&hostRead);
+  FD_ZERO(&hostWrite);
+  FD_ZERO(&hostExcept);
+  int hostMax = -1, ready = 0;
+  // The always-ready fds, collected before the wait: with one of them in the
+  // set there is nothing to wait for.
+  u64 alwaysRead[kFdSetWords] = {}, alwaysWrite[kFdSetWords] = {};
+
+  for (int fd = 0; fd < nfds; fd++) {
+    const bool r = fdIsSet(readfds, fd), w = fdIsSet(writefds, fd),
+               e = fdIsSet(exceptfds, fd);
+    if (!r && !w && !e)
+      continue;
+    auto *s = fdToSocket(static_cast<u32>(fd));
+    if (!s) {
+      if (r) { fdSet(alwaysRead, fd); ready++; }
+      if (w) { fdSet(alwaysWrite, fd); ready++; }
+      continue;
+    }
+    const int h = s->hostFd();
+    if (r) FD_SET(h, &hostRead);
+    if (w) FD_SET(h, &hostWrite);
+    if (e) FD_SET(h, &hostExcept);
+    if (h > hostMax)
+      hostMax = h;
+  }
+
+  // A null timeout means "wait forever". We cap it (as sys_poll does) so a
+  // title that parks a thread there stays interruptible.
+  timeval tv{0, 50 * 1000};
+  if (auto *gt = static_cast<const GuestTimeval *>(timeout)) {
+    if (gt->sec > 0 || gt->usec >= 50 * 1000)
+      tv = {0, 50 * 1000};
+    else
+      tv = {0, static_cast<suseconds_t>(gt->usec)};
+  }
+  if (ready)
+    tv = {0, 0};
+
+  if (hostMax >= 0) {
+    const int n = ::select(hostMax + 1, &hostRead, &hostWrite, &hostExcept, &tv);
+    if (n > 0) {
+      for (int fd = 0; fd < nfds; fd++) {
+        auto *s = fdToSocket(static_cast<u32>(fd));
+        if (!s)
+          continue;
+        const int h = s->hostFd();
+        if (fdIsSet(readfds, fd) && FD_ISSET(h, &hostRead)) { fdSet(alwaysRead, fd); ready++; }
+        if (fdIsSet(writefds, fd) && FD_ISSET(h, &hostWrite)) { fdSet(alwaysWrite, fd); ready++; }
+      }
+    }
+  } else if (!ready && (tv.tv_sec || tv.tv_usec)) {
+    ::usleep(static_cast<useconds_t>(tv.tv_sec) * 1000000 + tv.tv_usec);
+  }
+
+  // select reports its answer by rewriting the sets, so the ones it was given
+  // have to be cleared even when nothing is ready.
+  if (readfds) std::memcpy(readfds, alwaysRead, sizeof(alwaysRead));
+  if (writefds) std::memcpy(writefds, alwaysWrite, sizeof(alwaysWrite));
+  if (exceptfds) std::memset(exceptfds, 0, sizeof(alwaysRead));
+  return ready;
 }
 
 int PS4ABI sys_openat(int fd, const char *path, u32 flags, u32 mode) {
