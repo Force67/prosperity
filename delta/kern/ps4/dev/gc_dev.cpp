@@ -518,6 +518,24 @@ std::mutex gcDevice::computeMutex;
 // NOTE: the caller must already hold computeMutex. The doorbell handler runs
 // this from inside its own lock scope, and std::mutex is not recursive --
 // locking here as well deadlocked the title the instant it rang a doorbell.
+// The ring id a doorbell names is the queue's VQUEUE field, the one the map
+// ioctl carried at +0x0c -- GTA:SA maps vqueue 0x29 and rings 41. (Not
+// pipe + me*8: that is the driver's index into its own doorbell table, which is
+// a different number.) A doorbell for a ring we never saw mapped is not ours to
+// guess at. NOTE: the caller must already hold computeMutex.
+void gcDevice::ringDoorbell(u32 ringId, u32 writeOffsetDw) {
+  for (ComputeQueue &q : computeQueues) {
+    if (!q.mapped || q.vqueue != ringId)
+      continue;
+    if (!q.ringSizeDw || writeOffsetDw >= q.ringSizeDw)
+      return;
+    const u32 pending = (writeOffsetDw - q.readOffsetDw) & (q.ringSizeDw - 1);
+    if (pending)
+      drainQueues(pending);
+    return;
+  }
+}
+
 void gcDevice::drainQueues(u32 budget_dw) {
   for (ComputeQueue &q : computeQueues) {
     if (!q.mapped || !q.ringSizeDw ||
@@ -580,6 +598,17 @@ u8 *gcDevice::map(void *, size_t size, u32, u32, size_t offset) {
 
 // Called once per flip: draining inside the doorbell handler charges the whole
 // backlog to whichever frame happened to ring it.
+// sceGnmDingDong(ringId, offset) publishes a queue's write pointer. The real
+// driver writes it straight into its /dev/gc mapping, so no ioctl announces it
+// and the work would otherwise only be noticed at the next flip -- by which
+// time the guest has recycled the buffers those packets point at (draining a
+// ring at flip time SIGSEGVs Tomb Raider). The doorbell is the only moment the
+// ring's contents are known good, so run them here.
+extern "C" void prosperity_gc_dingdong(u32 ringId, u32 offsetDw) {
+  std::lock_guard lock(krnl::gcDevice::computeMutex);
+  krnl::gcDevice::ringDoorbell(ringId, offsetDw);
+}
+
 extern "C" void prosperity_gc_drain_acb(u32 budget_dw) {
   if (!budget_dw)
     return;

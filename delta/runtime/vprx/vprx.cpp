@@ -228,7 +228,14 @@ static bool useHleShim(const char *lib, u64 hid) {
   if (libListed(kLleLibs, lib))
     return false;
   if (std::strcmp(lib, "libSceGnmDriver") == 0)
-    return kGnmHle ||
+    // sceGnmDingDong is the exception to keeping this module LLE. It is the
+    // doorbell: the real driver stores the ring's write pointer into its own
+    // /dev/gc mapping, which announces nothing to us, so the async-compute work
+    // a title queues there is either never run (the flip-time drain budget
+    // defaults off) or run at the next flip, by which time the guest has
+    // recycled the buffers those packets point at. Taking the call gives us the
+    // one moment the ring is known good.
+    return kGnmHle || hid == 0x6D7E486D1BC40979ull ||
            nidForcedHle(kHleNidsGnm, hid);
   if (std::strcmp(lib, "libSceVideoOut") == 0)
     return kVoHle ||

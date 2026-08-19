@@ -29,6 +29,9 @@ public:
   // queues are hardware state and the per-frame drain runs outside any ioctl.
   // The CALLER must hold computeMutex (the doorbell handler already does).
   static void drainQueues(u32 budget_dw);
+  // A doorbell ring: execute queue `ringId` up to the write pointer the guest
+  // just published. See prosperity_gc_dingdong.
+  static void ringDoorbell(u32 ringId, u32 writeOffsetDw);
 
   struct ComputeQueue {
     u32 me = 0;

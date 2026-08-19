@@ -124,6 +124,7 @@ extern "C" void prosperity_gc_submit_acb(const void *commands, u32 bytes) {
 // selected scanout address to /dev/gc when the real GnmDriver submits the frame.
 // endFrame falls back to the last RT if the address was not registered.
 extern "C" void prosperity_gc_drain_acb(u32 budget_dw);
+extern "C" void prosperity_gc_dingdong(u32 ringId, u32 offsetDw);
 
 extern "C" void prosperity_gc_flip(u64 scanoutBase, int displayBufferIndex,
                                     i64 flipArg) {
@@ -273,10 +274,15 @@ int PS4ABI sceGnmSubmitDone() { return 0; }
 
 int PS4ABI sceGnmAreSubmitsAllowed() { return 1; }
 
+// The doorbell. Under LLE this is the real driver storing `offset` into its
+// /dev/gc mapping, which tells us nothing -- force this ONE nid onto the shim
+// (DELTA_HLE_NIDS_GNM) and the ring runs at the only moment its contents are
+// known good. See prosperity_gc_dingdong.
 int PS4ABI sceGnmDingDong(u32 ringId, u32 offset) {
   static int n = 0;
   if (kDingDong && n++ < 20)
     BASE_LOGI("gnm", "sceGnmDingDong ring={} offset={:#x}", ringId, offset);
+  prosperity_gc_dingdong(ringId, offset);
   return 0;
 }
 
