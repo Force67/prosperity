@@ -63,6 +63,7 @@ public:
   // Mark every knote matching (ident,filter) ready and wake waiters. ident<0
   // matches any ident. Called by the vblank pump / dce on flip.
   void trigger(i64 ident, i16 filter, i64 data);
+  void triggerGnm(i64 data);
 
   // Register a knote directly (no kevent syscall). Used by the HLE VideoOut
   // flip/vblank-event APIs, which add the equeue entry on the game's behalf.
@@ -95,6 +96,8 @@ void triggerAllEqueues(i64 ident, i16 filter, i64 data);
 // races ahead while the title is still loading -> GetRenderFrameParams asks for
 // a frame far beyond the last produced -> "frame number out of range" halt).
 void noteFlip();
+// A GPU end-of-pipe interrupt reached the CP: wake the graphics-core events.
+void noteGpuEndOfPipe();
 u64 flipCount();
 
 int PS4ABI sys_kqueue();

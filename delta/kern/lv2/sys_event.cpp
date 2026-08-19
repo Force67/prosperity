@@ -51,6 +51,11 @@ static constexpr u32 kNOTE_TRIGGER = 0x01000000;
 static void watchSocket(u32 fd);
 static constexpr i16 kEVFILT_DISPLAY = -13;
 static constexpr i16 kEVFILT_VIDEOOUT = -14;
+// Filter -14 carries two unrelated things. libSceVideoOut's vblank waiters put
+// their event id in the HIGH bits of ident (0x6 << 48 and up); sceGnmAddEqEvent
+// registers the GPU's graphics-core events under the bare id. This is where the
+// two are told apart.
+static constexpr u64 kGnmIdentMax = 0x10000;
 static std::atomic<bool> g_vblankStarted{false};
 
 // Flips the title has actually submitted. The display event's data>>16 carries
@@ -154,6 +159,32 @@ static void startVblankPump() {
       }
     }
   }).detach();
+}
+
+// A GPU end-of-pipe interrupt. RELEASE_MEM/EVENT_WRITE_EOP carry an INT_SEL
+// field asking the CP to raise one once the label write lands, and
+// libSceGnmDriver turns that interrupt into an event on whatever equeue
+// sceGnmAddEqEvent registered -- filter -14, under the small ident the caller
+// chose (GTA:SA asks for 0x5 and 0x40). We used to write the label and drop the
+// interrupt, so a title driving its fences off the event never saw one.
+//
+// Deliberately NOT the 60 Hz pump's business: that tick exists for the videoout
+// vblank waiters that share this filter, and firing a Gnm event on it says "the
+// GPU finished" at moments when it did not. Small idents are the Gnm
+// registrations (videoout puts its event id in the high bits of ident), so the
+// pump leaves those alone and they arrive from here instead.
+void noteGpuEndOfPipe() {
+  static std::atomic<u64> seq{0};
+  const u64 n = seq.fetch_add(1) + 1;
+  if (kEventTrace && (n == 1 || (n % 2000) == 0))
+    BASE_LOGI("gpueop", "end-of-pipe interrupt #{}", (unsigned long long)n);
+  // Same packing as the display events: the counter above bit 16, a 1..14
+  // sequence so a poller can tell a new event from a repeat, a TSC nonce below.
+  const i64 data =
+      static_cast<i64>((n << 16) | (((n - 1) % 14 + 1) << 12) | (tscNonce() & 0xFFF));
+  std::lock_guard<std::mutex> lk(g_eqRegM);
+  for (auto *eq : g_equeues)
+    eq->triggerGnm(data);
 }
 
 void noteFlip() {
@@ -340,6 +371,24 @@ bool equeue::removeEvent(u64 ident, i16 filter) {
   return false;
 }
 
+// The Gnm half of filter -14: every knote registered under a small ident, each
+// one told its own event id. sceGnmGetEqEventType reads the delivered data
+// whole and sceGnmGetEqTimeStamp reads data >> 16, so the id has to survive in
+// the low bits or the title cannot tell which of its events arrived.
+void equeue::triggerGnm(i64 data) {
+  std::lock_guard<std::mutex> lk(m);
+  bool any = false;
+  for (auto &k : notes) {
+    if (k.ev.filter != kEVFILT_VIDEOOUT || k.ev.ident >= kGnmIdentMax)
+      continue;
+    k.active = true;
+    k.ev.data = (data & ~static_cast<i64>(0xFFF)) | static_cast<i64>(k.ev.ident);
+    any = true;
+  }
+  if (any)
+    cv.notify_all();
+}
+
 void equeue::trigger(i64 ident, i16 filter, i64 data) {
   std::lock_guard<std::mutex> lk(m);
   bool any = false;
@@ -348,6 +397,10 @@ void equeue::trigger(i64 ident, i16 filter, i64 data) {
     if (filter != 0 && k.ev.filter != filter)
       continue;
     if (ident >= 0 && k.ev.ident != static_cast<u64>(ident))
+      continue;
+    // See triggerGnm: a Gnm graphics-core registration is not a vblank waiter
+    // and must not be told the GPU finished on a timer.
+    if (filter == kEVFILT_VIDEOOUT && k.ev.ident < kGnmIdentMax)
       continue;
     k.active = true;
     k.ev.data = data;

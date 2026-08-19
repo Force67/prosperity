@@ -142,12 +142,20 @@ u64 GpuClockTimestamp() {
           .count());
 }
 
+// INT_SEL asks the CP to raise an end-of-pipe interrupt once the write lands
+// (1 = on write confirm, 2/3 = with the data). libSceGnmDriver turns that into
+// the graphics-core equeue event a title's fence bookkeeping runs off, so the
+// label write alone is only half the packet. GTA:SA's async-compute ring is
+// RELEASE_MEM with INT_SEL=3 throughout.
+extern "C" void prosperity_gpu_end_of_pipe();
+
 // The label write shared by EOP and RELEASE_MEM, which encode DATA_SEL the same
 // way: 1 = 32-bit immediate, 2 = 64-bit immediate, 3/4 = a clock counter.
 void WriteEventLabel(const char* packet,
                      u64 address,
                      u32 data_sel,
-                     u64 value) {
+                     u64 value,
+                     u32 int_sel = 0) {
   if (data_sel == 1)
     WriteLabel(address, value, false);
   else if (data_sel == 2)
@@ -155,6 +163,8 @@ void WriteEventLabel(const char* packet,
   else if (data_sel >= 3)
     WriteLabel(address, GpuClockTimestamp(), true);
   TraceLabelWrite(packet, address, data_sel, value);
+  if (int_sel)
+    prosperity_gpu_end_of_pipe();
 }
 
 // --- constant engine RAM ---------------------------------------------------
@@ -349,7 +359,8 @@ void HandleEventWriteEop(const u32* body, u32 count) {
   const u64 value =
       static_cast<u64>(body[3]) |
       (static_cast<u64>(count >= 5 ? body[4] : 0) << 32);
-  WriteEventLabel("EOP", address, (body[2] >> 29) & 0x7, value);
+  WriteEventLabel("EOP", address, (body[2] >> 29) & 0x7, value,
+                  (body[2] >> 24) & 0x3);
 }
 
 // body: eventCtrl, selBits, addrLo, addrHi, dataLo, dataHi
@@ -365,7 +376,8 @@ void HandleReleaseMem(const u32* body, u32 count) {
   const u64 value =
       static_cast<u64>(body[4]) |
       (static_cast<u64>(count >= 6 ? body[5] : 0) << 32);
-  WriteEventLabel("RELEASE_MEM", address, (body[1] >> 29) & 0x7, value);
+  WriteEventLabel("RELEASE_MEM", address, (body[1] >> 29) & 0x7, value,
+                  (body[1] >> 24) & 0x7);
 }
 
 // body: eventCtrl, addrLo, addrHi+cmd, data

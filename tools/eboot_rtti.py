@@ -26,7 +26,13 @@ while True:
 def v2f(va):
     for t,off,v,fsz in segs:
         if t in (1,0x61000002) and v<=va<v+fsz: return off+(va-v)
-RELA=v2f(tags[7][0]); n=tags[8][0]//24
+# A PS4 eboot carries the SCE relocation tags instead of DT_RELA/DT_RELASZ, and
+# its RELA lives in the PT_SCE_DYNLIBDATA segment rather than a PT_LOAD.
+if 7 in tags:
+    RELA = v2f(tags[7][0]); n = tags[8][0] // 24
+else:
+    dld = [s for s in segs if s[0] == 0x61000000][0][1]
+    RELA = dld + tags[0x6100002f][0]; n = tags[0x61000031][0] // 24
 rel={}
 byadd={}
 for i in range(n):
