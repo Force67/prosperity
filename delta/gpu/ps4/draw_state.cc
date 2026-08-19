@@ -245,6 +245,16 @@ u32 ResolveRenderTargets(const Regs& regs,
     d.mrt_base[rt] = base;
     d.mrt_info[rt] = info;
     d.mrt_count = rt + 1;
+    // Each target carries its own geometry; the screen scissor is one global
+    // that says how much of them this pass draws into.
+    const u32 rt_pitch =
+        ((regs[mmCB_COLOR0_PITCH + rt * kCbColorStride] & 0x7FFu) + 1u) * 8u;
+    const u64 rt_slice =
+        static_cast<u64>(
+            (regs[mmCB_COLOR0_SLICE + rt * kCbColorStride] & 0x3FFFFFu) + 1u) *
+        64u;
+    d.mrt_surf_w[rt] = rt_pitch;
+    d.mrt_surf_h[rt] = rt_pitch ? static_cast<u32>(rt_slice / rt_pitch) : 0u;
     const u32 nfmt = (info >> 8) & 0x7;
     if (kIntegerRt && (nfmt == 4 || nfmt == 5))
       mrt_uint_mask |= 1u << rt;

@@ -375,6 +375,21 @@ RTarget* ActivateRtVariant(RTarget& live,
   return &live;
 }
 
+// The extent an attachment's IMAGE needs, given the target's own surface
+// geometry (CB_COLORn_PITCH/SLICE) and the region this pass draws into.
+//
+// The drawn region normally IS the target, padded: a 1920x1080 surface reports
+// 1920x1088 because the slice is tile-aligned, and sizing the image from that
+// would make every scanout eight rows taller than the display. So the surface
+// only wins when the drawn region cannot be it even after rounding up a full
+// tile -- which is the case the screen scissor gets wrong, GTA:SA binding its
+// 1792x960 G-buffer under a 256x256 scissor and losing 164 draws a frame into a
+// 256x256 image.
+u32 RtSurfaceExtent(u32 surface, u32 drawn, u32 tile) {
+  const u32 padded = (drawn + tile - 1) & ~(tile - 1);
+  return (surface > padded && surface <= 8192) ? surface : drawn;
+}
+
 // Find or create the render target at guest address `base` (dimensions w x h).
 RTarget* GetRT(u64 base, u32 w, u32 h, VkFormat fmt) {
   auto it = g_rts.find(base);
@@ -930,13 +945,17 @@ bool BeginRegion(const u64* mrt_base,
                   u8 stencil_clear,
                   bool depth_read_only,
                  u32 depth_w,
-                 u32 depth_h) {
+                 u32 depth_h,
+                 const u32* mrt_surf_w,
+                 const u32* mrt_surf_h) {
   ScopeNs _region_timer(&g_ns_region);
   VkRenderingAttachmentInfo colors[8]{};
   RTarget* targets[8]{};
   mrt_count = std::min(mrt_count, 8u);
   for (u32 i = 0; i < mrt_count; i++) {
-    targets[i] = GetRT(mrt_base[i], w, h, ColorTargetFormat(mrt_info[i]));
+    const u32 iw = RtSurfaceExtent(mrt_surf_w ? mrt_surf_w[i] : 0, w, 256);
+    const u32 ih = RtSurfaceExtent(mrt_surf_h ? mrt_surf_h[i] : 0, h, 64);
+    targets[i] = GetRT(mrt_base[i], iw, ih, ColorTargetFormat(mrt_info[i]));
     if (!targets[i])
       return false;
   }

@@ -740,9 +740,11 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
       bool fullscreen_black =
           near_black && (nx1 - nx0) >= 1.8f && (ny1 - ny0) >= 1.8f;
       if (fullscreen_black && kLazyClear2) {
-        RTarget* rt = d.rt_base ? GetRT(d.rt_base, d.rt_w, d.rt_h,
-                                        ColorTargetFormat(d.mrt_info[0]))
-                                : nullptr;
+        RTarget* rt =
+            d.rt_base ? GetRT(d.rt_base, RtSurfaceExtent(d.mrt_surf_w[0], d.rt_w, 256),
+                              RtSurfaceExtent(d.mrt_surf_h[0], d.rt_h, 64),
+                              ColorTargetFormat(d.mrt_info[0]))
+                      : nullptr;
         if (rt) {
           // Counted, not sampled.
           if (kClearTrace) {
@@ -1307,15 +1309,17 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
       if (!tex_set)
         return Decline(kGuestTex);
     }
-    RTarget* rt = d.rt_base ? GetRT(d.rt_base, d.rt_w, d.rt_h,
-                                    ColorTargetFormat(d.mrt_info[0]))
-                            : nullptr;
+    RTarget* rt =
+        d.rt_base ? GetRT(d.rt_base, RtSurfaceExtent(d.mrt_surf_w[0], d.rt_w, 256),
+                          RtSurfaceExtent(d.mrt_surf_h[0], d.rt_h, 64),
+                          ColorTargetFormat(d.mrt_info[0]))
+                  : nullptr;
     if (d.rt_base && !rt)
       return true;  // RT cap hit: treat as handled (dropped)
     if (!BeginRegion(d.mrt_base, d.mrt_info, mrt_n, d.rt_w, d.rt_h,
                       d.depth_base, d.depth_clear, d.stencil_base,
                       d.stencil_clear, samples_bound_depth, DepthW(d),
-                      DepthH(d)))
+                      DepthH(d), d.mrt_surf_w, d.mrt_surf_h))
       return true;
   }
   // DB_RENDER_CONTROL clear. The guest issues a RECT_LIST with no vertex

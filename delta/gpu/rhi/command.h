@@ -238,6 +238,9 @@ struct DrawInfo {
   // be a fraction of the surface -- a pass that fills a strip a slice at a time
   // shrinks it on every draw.
   u32 rt_surf_w = 0, rt_surf_h = 0;
+  // The same, per bound target. MRT slots can have different geometries, and
+  // the image each one needs is its own surface, not the drawn region.
+  u32 mrt_surf_w[8] = {}, mrt_surf_h[8] = {};
   // Per-viewport scissor 0 (PA_SC_VPORT_SCISSOR_0_TL/BR), x in the low half
   // and y in the high half of each word. This is the per-DRAW scissor.
   u32 scissor_tl = 0, scissor_br = 0;

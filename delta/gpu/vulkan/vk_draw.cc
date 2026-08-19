@@ -253,12 +253,14 @@ void Draw(Renderer& renderer, const DrawInfo& d_in) {
       }
     }
     VkFormat rt_format = ColorTargetFormat(d.mrt_info[0]);
-    RTarget* rt = GetRT(d.rt_base, d.rt_w, d.rt_h, rt_format);
+    RTarget* rt = GetRT(d.rt_base, RtSurfaceExtent(d.mrt_surf_w[0], d.rt_w, 256),
+                        RtSurfaceExtent(d.mrt_surf_h[0], d.rt_h, 64), rt_format);
     if (!rt) {
       g_frame.draws++;
       return;
     }
-    if (!BeginRegion(d.mrt_base, d.mrt_info, 1, d.rt_w, d.rt_h)) {
+    if (!BeginRegion(d.mrt_base, d.mrt_info, 1, d.rt_w, d.rt_h, 0, 1.0f, 0, 0,
+                     false, 0, 0, d.mrt_surf_w, d.mrt_surf_h)) {
       g_frame.draws++;
       return;
     }

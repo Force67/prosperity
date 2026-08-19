@@ -219,7 +219,15 @@ bool BeginRegion(const u64* mrt_base,
                   u8 stencil_clear = 0,
                   bool depth_read_only = false,
                   u32 depth_w = 0,
-                  u32 depth_h = 0);
+                  u32 depth_h = 0,
+                  const u32* mrt_surf_w = nullptr,
+                  const u32* mrt_surf_h = nullptr);
+
+// The extent an attachment's image needs: its own surface geometry when that is
+// believable, else the region the pass draws into.
+// `tile` is the alignment the drawn region is allowed to be padded to: 256
+// pixels of pitch for width, 64 rows of slice for height.
+u32 RtSurfaceExtent(u32 surface, u32 drawn, u32 tile);
 
 // The Z surface's own geometry when DB_DEPTH_SIZE gave one, else the colour
 // target's. Sizing a depth image from the colour pass is wrong whenever the
