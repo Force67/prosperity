@@ -52,6 +52,9 @@ int PS4ABI sys_mname(u8 *, size_t len, const char *name, void *);
 int PS4ABI sys_mprotect(u8 *, size_t len, int prot);
 int PS4ABI sys_mdbg_service(u32 op, void *, void *, void *);
 
+// True for the shm or the named semaphore of a system service we do not host.
+bool isAbsentServiceChannel(const char *name);
+
 /*POSIX shared memory*/
 int PS4ABI sys_shm_open(const char *path, u32 flags, u16 mode);
 int PS4ABI sys_shm_unlink(const char *path);

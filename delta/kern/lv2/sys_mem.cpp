@@ -830,12 +830,21 @@ int PS4ABI sys_mprotect(u8 *addr, size_t len, int prot) {
   return 0;
 }
 
-// Names we know are the client half of a live channel rather than a block of
-// settings. Nothing in shm_open's arguments tells the two apart -- both are
-// pre-created and both are opened without O_CREAT -- so this is a list, and it
-// grows one name at a time as a title walks into the next one.
-static bool isAbsentServiceChannel(const std::string &name) {
-  return name == "/SceNpTpip";
+// System services we do not host. A title reaches one through two objects that
+// share the service's name: a shm ("/SceNpTpip") it maps, and a named semaphore
+// ("SceNpTpip 0") the service would ring when it has something to say. This is
+// a list, and it grows one name at a time as a title walks into the next one.
+bool isAbsentServiceChannel(const char *name) {
+  static constexpr const char *kServices[] = {"SceNpTpip"};
+  if (!name)
+    return false;
+  if (*name == '/')
+    name++;
+  const size_t n = std::strcspn(name, " ");  // the semaphore half is "<svc> <n>"
+  for (const char *svc : kServices)
+    if (std::strlen(svc) == n && std::strncmp(name, svc, n) == 0)
+      return true;
+  return false;
 }
 
 int PS4ABI sys_shm_open(const char *path, u32 flags, u16 mode) {
@@ -866,22 +875,6 @@ int PS4ABI sys_shm_open(const char *path, u32 flags, u16 mode) {
         // the guest didn't create) to test whether auto-providing it makes a title
         // block waiting for a ShellCore handshake that never arrives (Doom64).
         BASE_LOGI("shm_open", "NOAUTO: '{}' -> ENOENT", name.c_str());
-        return -SysError::eNOENT;
-      }
-      // PS4 only: a PS5 title's libSceNpManager hard-fails its module_start
-      // when sceNpTpipInitialize can't map the shm (Demon's Souls then panics
-      // "Required cell system module(s) could not be loaded"), so PS5 falls
-      // through to the auto-provided zeroed region instead.
-      if (!(flags & kO_CREAT) && isAbsentServiceChannel(name) &&
-          proc->getPlatform() == proc::platform::ps4) {
-        // Not every system shm is a settings block. Some are one half of a live
-        // channel: the client maps the region, then blocks on the service's
-        // named semaphore for the other half to answer. Handing it a zeroed
-        // region says "the service is here" and it waits forever -- Tomb
-        // Raider's sceNpCheckCallback parked on 'SceNpTpip 0' for the whole run.
-        // ENOENT is what a console without that service reports, and the
-        // libraries have a path for it (libSceNpManager logs
-        // "sceNpTpipInitialize() failed" and carries on offline).
         return -SysError::eNOENT;
       }
       if (!(flags & kO_CREAT)) {

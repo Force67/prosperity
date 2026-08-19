@@ -17,6 +17,7 @@
 
 #include "error_table.h"
 #include "kern/proc.h"
+#include "sys_mem.h"
 #include "sys_semaphore.h"
 
 namespace krnl {
@@ -150,6 +151,18 @@ int PS4ABI sys_osem_wait(int id, int need, u32 *timeoutUs) {
   auto *s = fromId(id);
   if (!s)
     return -SysError::eSRCH;
+  // The doorbell of a service we do not host: nothing in this process will ever
+  // ring it, so an untimed wait parks the caller for the rest of the run (Tomb
+  // Raider's sceNpCheckCallback sat on 'SceNpTpip 0' forever). Give it the
+  // answer an idle channel gives -- wait a beat, then time out -- so the caller
+  // polls on instead of blocking, without spinning a core.
+  if (isAbsentServiceChannel(s->fname().c_str())) {
+    u32 idleUs = 100 * 1000;
+    if (timeoutUs && *timeoutUs < idleUs)
+      idleUs = *timeoutUs;
+    const int r = s->wait(need, &idleUs);
+    return r == 0 ? 0 : -SysError::eTIMEDOUT;
+  }
   return s->wait(need, timeoutUs);
 }
 
