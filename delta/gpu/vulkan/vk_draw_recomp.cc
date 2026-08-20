@@ -137,21 +137,20 @@ struct ReadableRangeKeyHash {
 // DELTA_GPU_RING_DEDUP=0 restores the copy-per-draw behaviour for A/B.
 struct StageCacheKey {
   u64 base;
-  u64 bytes;
   u32 salt;  // index type for the IB cache, 0 elsewhere
   bool operator==(const StageCacheKey&) const = default;
 };
 
 struct StageCacheKeyHash {
   size_t operator()(const StageCacheKey& key) const {
-    return static_cast<size_t>(key.base ^ (key.base >> 32) ^
-                               (key.bytes << 7) ^ key.salt);
+    return static_cast<size_t>(key.base ^ (key.base >> 32) ^ key.salt);
   }
 };
 
 struct StageCache {
   struct Entry {
     VkDeviceSize off;
+    u64 bytes;
     u64 gen;
   };
   std::unordered_map<StageCacheKey, Entry, StageCacheKeyHash> map;
@@ -163,20 +162,31 @@ struct StageCache {
       map.clear();
     }
   }
-  // Returns the cached ring offset, or -1 when absent/stale.
+  // Returns the cached ring offset, or -1 when absent/stale. A COPY THAT
+  // COVERS the request answers it: same base, and every byte asked for is
+  // already in the ring at the same offset, so the indices still land. Keying
+  // on the exact length instead made a shared vertex buffer miss on every
+  // draw -- GTA:SA indexes one 200k-vertex buffer, each draw reaching a few
+  // hundred vertices further than the last, and re-copied ~2.4 MB per draw
+  // until the per-frame ring ran out and the rest of the world was declined.
   VkDeviceSize Find(u64 base, u64 bytes, u32 salt = 0) {
     RollFrame();
-    const auto it = map.find({base, bytes, salt});
-    if (it == map.end() || it->second.gen != rhi::CsWritebackGeneration() ||
+    const auto it = map.find({base, salt});
+    if (it == map.end() || it->second.bytes < bytes ||
+        it->second.gen != rhi::CsWritebackGeneration() ||
         rhi::CsRangeDirtyOverlapping(base, bytes))
       return VkDeviceSize(-1);
     return it->second.off;
   }
   // Record a copy made at the CURRENT generation -- call after the range was
-  // flushed (or was never compute-written), never before.
+  // flushed (or was never compute-written), never before. A shorter copy never
+  // replaces a longer live one: it would answer requests it does not cover.
   void Insert(u64 base, u64 bytes, u32 salt, VkDeviceSize off) {
     RollFrame();
-    map[{base, bytes, salt}] = {off, rhi::CsWritebackGeneration()};
+    auto& e = map[{base, salt}];
+    if (e.gen == rhi::CsWritebackGeneration() && e.bytes >= bytes)
+      return;
+    e = {off, bytes, rhi::CsWritebackGeneration()};
   }
 };
 
@@ -1572,21 +1582,34 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
       }
       const VkDeviceSize off = (g_ring.sbo_offset + g_ring.sbo_align - 1) &
                                ~(VkDeviceSize)(g_ring.sbo_align - 1);
-      const size_t window = static_cast<size_t>(off / g_ring.sbo_stride);
-      if (off + g_ring.sbo_stride > g_ring.sbo_end ||
-          window >= g_ring.sbo_written.size())
+      // A resource SMALLER than the window takes only what it needs. Reserving
+      // a whole window for each turned GTA:SA's world -- three buffers a draw,
+      // ~50 KB between them -- into 3 MiB of ring per draw, so the frame ran
+      // out after ~85 draws of several thousand and the rest was silently
+      // dropped. A resource the window TRUNCATES keeps the full reservation:
+      // there the shader's clamp really can land past the payload, and the
+      // zero-fill below is what makes that read as zero rather than as the
+      // next resource.
+      const bool truncated = rb.size > kRawBufWindow;
+      const VkDeviceSize reserve =
+          truncated ? g_ring.sbo_stride
+                    : ((want + g_ring.sbo_align - 1) &
+                       ~(VkDeviceSize)(g_ring.sbo_align - 1));
+      // The descriptor's range is a whole window wherever the dynamic offset
+      // lands, so the window must fit in the BUFFER even when the reservation
+      // is short and even in the second frame slot.
+      if (off + reserve > g_ring.sbo_end || off + kRawBufWindow > kSboRing)
         return Decline(kRing);
       if (!FlushCsWritesRange(renderer, rb.base, want))
         return Decline(kNoRecomp);
       u8* dst = g_ring.sbo_map + off;
       std::memcpy(dst, reinterpret_cast<const void*>(rb.base), want);
-      // Zero whatever an earlier draw left past this window's payload, so a
-      // read past the descriptor's own extent cannot pick up another buffer.
-      const u32 previous = g_ring.sbo_written[window];
-      if (want < previous)
-        std::memset(dst + want, 0, previous - want);
-      g_ring.sbo_written[window] = want;
-      g_ring.sbo_offset = off + g_ring.sbo_stride;
+      // Zero the reservation's tail so a read just past the payload is zero,
+      // as it is past NUM_RECORDS on hardware. A truncated resource fills its
+      // whole window, so this costs nothing there.
+      if (want < reserve)
+        std::memset(dst + want, 0, static_cast<size_t>(reserve - want));
+      g_ring.sbo_offset = off + reserve;
       sbo_dyn[i] = static_cast<u32>(off);
       g_sbo_staged.Insert(rb.base, want, 0, off);
       rawbuf_mask |= 1u << i;
