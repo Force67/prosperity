@@ -311,8 +311,12 @@ bool PlanCbufs(const Program& program,
     const auto [it, inserted] = bindings.emplace(
         CbufBindKey(base_sgpr, pointer), first_binding + cbufs.size());
     if (inserted) {
-      if (it->second >= kMaxCbufBindings)
+      if (it->second >= kMaxCbufBindings) {
+        // Say so: a shader declined here has no unsupported instruction, so an
+        // audit that only lists ops reports it as rejected for no reason.
+        WarnUnsupported("smrd.cbuf-binding-count", it->second, w, inst.raw[1]);
         return false;
+      }
       ShaderCbuf cb{};
       cb.binding = it->second;
       cb.ud_sgpr = base_sgpr;
@@ -517,7 +521,17 @@ void EmitMimg(Translator& t,
   // word 1, not word 0. Bias-carrying forms are rejected above rather than
   // modelled, which is why no bias word is accounted for here.
   const u32 dref_index = offset ? 1u : 0u;
-  const u32 body_addr = vaddr + (offset ? 1u : 0u) + (dref ? 1u : 0u);
+  // _D / _CD carry user derivatives between the z-compare and the coordinates:
+  // two words per sampled dimension. A compute stage has no implicit
+  // derivatives, so these are the only sample forms it can use -- GTA:SA's
+  // deferred lighting dispatch is written entirely in them, and reading its
+  // derivative words as coordinates is how the whole pass came out black.
+  const bool derivs = op == 0x22 || op == 0x2a || op == 0x68 || op == 0x6a;
+  const u32 deriv_dims = is_1d ? 1u : (is_3d ? 3u : 2u);
+  const u32 deriv_words = derivs ? deriv_dims * 2u : 0u;
+  const u32 deriv_index = (offset ? 1u : 0u) + (dref ? 1u : 0u);
+  const u32 body_addr =
+      vaddr + (offset ? 1u : 0u) + (dref ? 1u : 0u) + deriv_words;
   const u32 body_index = body_addr - vaddr;
   Id x = addr_f(body_index);
   Id y = is_1d ? t.F32(0.5f) : addr_f(body_index + 1);
@@ -552,9 +566,23 @@ void EmitMimg(Translator& t,
       static_cast<u32>(spv::ImageOperandsMask::Lod);
   const bool known = op == 0x00 || op == 0x01 || op == 0x20 || op == 0x21 ||
                      op == 0x24 || op == 0x25 || op == 0x27 || op == 0x28 ||
-                     op == 0x2f || op == 0x37 || gather;
+                     op == 0x2f || op == 0x37 || gather || derivs;
   if (!known)
     WarnUnsupported("mimg", op, w0, w1);
+  // The Grad operand takes one vector per axis, sized like the sampled
+  // dimension -- an array layer is a coordinate but not a derivative.
+  const u32 grad_operand = static_cast<u32>(spv::ImageOperandsMask::Grad);
+  const auto deriv_vec = [&](u32 first) {
+    if (deriv_dims == 1)
+      return addr_f(deriv_index + first);
+    Id c[3];
+    for (u32 i = 0; i < deriv_dims; i++)
+      c[i] = addr_f(deriv_index + first + i);
+    return t.m.CompositeConstruct(
+        t.m.TypeVec(t.t_f, deriv_dims),
+        deriv_dims == 2 ? std::vector<Id>{c[0], c[1]}
+                        : std::vector<Id>{c[0], c[1], c[2]});
+  };
 
   Id texel;
   if (op == 0x00 || op == 0x01) {  // image_load[_mip]: integer fetch
@@ -581,6 +609,14 @@ void EmitMimg(Translator& t,
         spv::Op::OpImageSampleExplicitLod, texel_ty,
         {si, uv, lod_operand,
          addr_f(is_1d ? body_index + addr_components : coord_components)});
+  } else if (derivs && dref) {  // image_sample_c_[c]d
+    texel = t.m.Emit(spv::Op::OpImageSampleDrefExplicitLod, t.t_f,
+                     {si, uv, addr_f(dref_index), grad_operand,
+                      deriv_vec(0), deriv_vec(deriv_dims)});
+  } else if (derivs) {  // image_sample_[c]d
+    texel = t.m.Emit(
+        spv::Op::OpImageSampleExplicitLod, texel_ty,
+        {si, uv, grad_operand, deriv_vec(0), deriv_vec(deriv_dims)});
   } else if (op == 0x28) {  // image_sample_c: z-compare precedes the body
     texel = t.m.Emit(spv::Op::OpImageSampleDrefImplicitLod, t.t_f,
                      {si, uv, addr_f(dref_index)});
@@ -1828,20 +1864,57 @@ void EmitDs(Translator& t, const Inst& inst, StageContext& sc) {
     return t.Add(addr, t.U32(off));
   };
 
-  switch (op) {
-    case 32: {  // ds_add_rtn_u32
-      const Id old = t.m.Emit(
-          spv::Op::OpAtomicIAdd, t.t_u,
-          {lds_at(single_addr()),
-           t.U32(static_cast<u32>(spv::Scope::Workgroup)),
-           t.U32(
-               static_cast<u32>(spv::MemorySemanticsMask::AcquireRelease) |
-               static_cast<u32>(
-                   spv::MemorySemanticsMask::WorkgroupMemory)),
-           t.Vg(data0)});
+  // The LDS atomics, no-return at 0..11 and returning the old value at 32..43.
+  // One shape covers both: the opcode picks the SPIR-V atomic, the base picks
+  // whether the old value lands in vdst.
+  const auto lds_atomic = [&](spv::Op atomic) {
+    const Id old = t.m.Emit(
+        atomic, t.t_u,
+        {lds_at(single_addr()),
+         t.U32(static_cast<u32>(spv::Scope::Workgroup)),
+         t.U32(static_cast<u32>(spv::MemorySemanticsMask::AcquireRelease) |
+               static_cast<u32>(spv::MemorySemanticsMask::WorkgroupMemory)),
+         t.Vg(data0)});
+    if (op >= 32)
       t.SetVg(vdst, old);
+  };
+  switch (op) {
+    case 0:
+    case 32:
+      lds_atomic(spv::Op::OpAtomicIAdd);  // ds_add[_rtn]_u32
       break;
-    }
+    case 1:
+    case 33:
+      lds_atomic(spv::Op::OpAtomicISub);  // ds_sub[_rtn]_u32
+      break;
+    case 5:
+    case 37:
+      lds_atomic(spv::Op::OpAtomicSMin);  // ds_min[_rtn]_i32
+      break;
+    case 6:
+    case 38:
+      lds_atomic(spv::Op::OpAtomicSMax);  // ds_max[_rtn]_i32
+      break;
+    case 7:
+    case 39:
+      lds_atomic(spv::Op::OpAtomicUMin);  // ds_min[_rtn]_u32
+      break;
+    case 8:
+    case 40:
+      lds_atomic(spv::Op::OpAtomicUMax);  // ds_max[_rtn]_u32
+      break;
+    case 9:
+    case 41:
+      lds_atomic(spv::Op::OpAtomicAnd);  // ds_and[_rtn]_b32
+      break;
+    case 10:
+    case 42:
+      lds_atomic(spv::Op::OpAtomicOr);  // ds_or[_rtn]_b32
+      break;
+    case 11:
+    case 43:
+      lds_atomic(spv::Op::OpAtomicXor);  // ds_xor[_rtn]_b32
+      break;
     case 53: {  // ds_swizzle_b32
       if (!sc.subgroup_local_id) {
         if (sc.is_cs)

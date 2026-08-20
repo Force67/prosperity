@@ -1350,12 +1350,36 @@ void EmitVop2(Translator& t,
     case 0x2b:  // v_ldexp_f32
       set_f(t.m.ExtInst(t.t_f, GLSLstd450Ldexp, {s0, i1}));
       break;
+    case 0x2d:  // v_cvt_pknorm_i16_f32
+      set_u(t.m.ExtInst(t.t_u, GLSLstd450PackSnorm2x16,
+                        {t.m.CompositeConstruct(t.t_v2, {s0, s1})}));
+      break;
+    case 0x2e:  // v_cvt_pknorm_u16_f32
+      set_u(t.m.ExtInst(t.t_u, GLSLstd450PackUnorm2x16,
+                        {t.m.CompositeConstruct(t.t_v2, {s0, s1})}));
+      break;
     case 0x2f:  // v_cvt_pkrtz_f16_f32
       if (clamp || omod)
         WarnUnsupported("vop2.cvt_pkrtz-output-modifier", op);
       t.SetVg(vdst, t.m.ExtInst(t.t_u, GLSLstd450PackHalf2x16,
                                 {t.m.CompositeConstruct(t.t_v2, {s0, s1})}));
       break;
+    case 0x30: {  // v_cvt_pk_u16_u32: {u16(S1), u16(S0)}, unsigned-saturating
+      const Id lo = t.m.ExtInst(t.t_u, GLSLstd450UMin, {u0, t.U32(0xFFFFu)});
+      const Id hi = t.m.ExtInst(t.t_u, GLSLstd450UMin, {u1, t.U32(0xFFFFu)});
+      set_u(t.Or(lo, t.Shl(hi, t.U32(16))));
+      break;
+    }
+    case 0x31: {  // v_cvt_pk_i16_i32: {i16(S1), i16(S0)}, signed-saturating
+      const auto sat = [&](Id v) {
+        const Id c = t.m.ExtInst(
+            t.t_i, GLSLstd450SClamp,
+            {v, t.m.ConstI32(-32768), t.m.ConstI32(32767)});
+        return t.And(t.m.Bitcast(t.t_u, c), t.U32(0xFFFFu));
+      };
+      set_u(t.Or(sat(i0), t.Shl(sat(i1), t.U32(16))));
+      break;
+    }
     default:
       WarnUnsupported("vop2", op);
       set_f(t.FMul(s0, s1));
