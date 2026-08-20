@@ -26,7 +26,7 @@
 
 namespace {
 
-DELTA_OPTION(u64, kCntlApply, "DELTA_GPU_PSCNTL_APPLY", 0);
+DELTA_OPTION(u64, kCntlApply, "DELTA_GPU_PSCNTL_APPLY", 1);
 DELTA_OPTION(bool, kForceDepth, "DELTA_GPU_FORCEDEPTH", false);
 DELTA_OPTION(bool, kIntegerRt, "DELTA_GPU_INT_RT", true);
 DELTA_OPTION(bool, kNoDepth, "DELTA_GPU_NODEPTH", false);
@@ -730,15 +730,16 @@ RecompStatus ResolveRecompiledShaders(
   state.fetch_addr = fetch_addr;
   state.ps_input_ena = ps_input_ena;
   state.ps_in_cntl = ps_in_cntl;
-  // DELTA_GPU_PSCNTL_APPLY=<ps addr>, or 1 for every shader. OFF by default:
-  // honouring SPI_PS_INPUT_CNTL removes the 2x2 tiling from P.T.'s light buffer
-  // (quadrant self-similarity 3.8/5.5 -> 46/74) but makes the PRESENTED FRAME
-  // clearly worse, mean 21.5 -> 33.9 and pixels over 200 from 3.3% to 9.4%,
-  // with large areas blown to white. That is not a trade worth shipping, and it
-  // says the model is still incomplete rather than merely exposing a second
-  // defect.
-  state.honour_ps_in_cntl =
-      kCntlApply == 1 || (kCntlApply && ps_addr == (u64)kCntlApply);
+  // A PS names an input SLOT; SPI_PS_INPUT_CNTL_<slot>.OFFSET names the VS
+  // parameter export that slot reads, and it is routinely not the identity.
+  // GTA:SA's UI shader has slot 1 -> param 3: assuming identity handed it the
+  // clip position as a texture coordinate and the vertex colour as a scale, so
+  // every UI quad sampled texel (0,0) and multiplied it by zero -- a black
+  // screen over a main menu that was otherwise drawing correctly.
+  // DELTA_GPU_PSCNTL_APPLY=0 goes back to the identity, =<ps addr> applies the
+  // mapping to one shader (Isaac/Undertale/Doom64 are unchanged either way).
+  state.honour_ps_in_cntl = kCntlApply != 0 && (kCntlApply == 1 ||
+                                                ps_addr == (u64)kCntlApply);
   state.ps_num_interp = regs[mmSPI_PS_IN_CONTROL] & 0x3F;
   state.tex_3d_mask = masks.tex_3d;
   state.tex_1d_mask = masks.tex_1d;
