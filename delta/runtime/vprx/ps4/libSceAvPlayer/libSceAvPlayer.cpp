@@ -3,8 +3,10 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <utl/options.h>
 
+#include <atomic>
 #include <chrono>
 #include <thread>
 
@@ -14,6 +16,10 @@
 
 namespace {
 DELTA_OPTION(bool, kAvpTrace, "DELTA_AVP_TRACE", false);
+// DELTA_AVP_NOMOVIE=1: fail every AddSource, so the title behaves as if the
+// file were unplayable. Separates "the title is stuck on the movie" from "the
+// movie is irrelevant and the stall is elsewhere".
+DELTA_OPTION(bool, kAvpNoMovie, "DELTA_AVP_NOMOVIE", false);
 }  // namespace
 
 // A non-null sentinel handle. The title only ever passes it back to these stubs
@@ -35,6 +41,20 @@ enum : i32 {
   kStateReady = 0x02,
   kStatePlay = 0x03,
 };
+
+// How long the stub pretends the (never decoded) movie runs. Long enough that a
+// title polling IsActive sees a play->stop transition rather than a movie that
+// was over before it asked, short enough that nobody waits on it.
+constexpr u64 kMovieMs = 200;
+
+// Set by Start; IsActive and CurrentTime answer against it so the three agree.
+std::atomic<i64> g_startMs{0};
+
+i64 nowMs() {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
 
 struct PendingEvent {
   i32 event;
@@ -87,6 +107,14 @@ void avpTrace(const char *fn) {
   if ((n++ % 100000) == 0)
     BASE_LOGI("avp", "{} (call #{})", fn, (unsigned long long)n);
 }
+
+// The cold entry points: the ORDER a title walks them in is what matters (does
+// it enumerate streams? does it ever reach Start?), so log the first few of each
+// rather than a sampled count.
+void avpStep(const char *fn) {
+  if (!kAvpTrace) return;
+  BASE_LOGI("avp", "-> {}", fn);
+}
 }
 
 // DELTA_AVP_TRACE: dump the init-data block as 16 pointers so the event-callback
@@ -123,17 +151,21 @@ i64 PS4ABI sceAvPlayerInitEx(const void *initData, i64 *handleOut) {
 }
 
 int PS4ABI sceAvPlayerPostInit(i64 /*handle*/, void * /*postInitData*/) {
+  avpStep("PostInit");
   return 0;
 }
 
 int PS4ABI sceAvPlayerAddSource(i64 /*handle*/, const char *filename) {
   if (kAvpTrace) BASE_LOGI("avp", "AddSource '{}'", filename ? filename : "(null)");
+  if (kAvpNoMovie)
+    return -1;
   postEvent(kStateReady, 50);  // the source is open, as far as the title cares
   return 0;
 }
 
 int PS4ABI sceAvPlayerAddSourceEx(i64 /*handle*/, u32 /*type*/,
                                   void * /*source*/) {
+  avpStep("AddSourceEx");
   postEvent(kStateReady, 50);
   return 0;
 }
@@ -141,22 +173,33 @@ int PS4ABI sceAvPlayerAddSourceEx(i64 /*handle*/, u32 /*type*/,
 // A zero-length movie: it starts and ends in the same call, which is what the
 // polling contract below (IsActive == false) already tells the title.
 int PS4ABI sceAvPlayerStart(i64 /*handle*/) {
-  postEvent(kStatePlay, 50);
-  postEvent(kStateStop, 150);
+  avpStep("Start");
+  g_startMs.store(nowMs());
+  postEvent(kStatePlay, 10);
+  postEvent(kStateStop, static_cast<u32>(kMovieMs));
   return 0;
 }
 int PS4ABI sceAvPlayerStop(i64 /*handle*/) {
+  avpStep("Stop");
+  g_startMs.store(0);
   postEvent(kStateStop, 20);
   return 0;
 }
 int PS4ABI sceAvPlayerClose(i64 /*handle*/) {
+  avpStep("Close");
+  g_startMs.store(0);
   g_eventCallback = 0;
   g_eventObject = 0;
   return 0;
 }
 
-// The key stub: report no active playback so the title's frame loop is skipped.
-bool PS4ABI sceAvPlayerIsActive(i64 /*handle*/) { avpTrace("IsActive"); return false; }
+// Active only for the stub movie's length after Start, so a title that gates on
+// this sees playback end instead of a player that was never running.
+bool PS4ABI sceAvPlayerIsActive(i64 /*handle*/) {
+  avpTrace("IsActive");
+  const i64 start = g_startMs.load();
+  return start != 0 && (u64)(nowMs() - start) < kMovieMs;
+}
 
 // No frames are ever produced. The bool contract is "false -> no data this
 // call", so callers must not read frameInfo; leave it untouched.
@@ -171,15 +214,67 @@ bool PS4ABI sceAvPlayerGetAudioData(i64 /*handle*/, void * /*frameInfo*/) {
   return false;
 }
 
-u64 PS4ABI sceAvPlayerCurrentTime(i64 /*handle*/) { return 0; }
-int PS4ABI sceAvPlayerSetLooping(i64 /*handle*/, bool /*loop*/) { return 0; }
-
-// No streams in the (absent) movie. With a zero count the title skips its
-// per-stream enable/info enumeration.
-int PS4ABI sceAvPlayerStreamCount(i64 /*handle*/) { return 0; }
-int PS4ABI sceAvPlayerGetStreamInfo(i64 /*handle*/, u32 /*streamId*/,
-                                    void * /*info*/) {
-  return -1;
+u64 PS4ABI sceAvPlayerCurrentTime(i64 /*handle*/) {
+  const i64 start = g_startMs.load();
+  if (!start)
+    return 0;
+  const u64 t = static_cast<u64>(nowMs() - start);
+  return t < kMovieMs ? t : kMovieMs;
+}
+int PS4ABI sceAvPlayerSetLooping(i64 /*handle*/, bool /*loop*/) {
+  avpStep("SetLooping");
+  return 0;
 }
 
-int PS4ABI sceAvPlayerControlOk() { avpTrace("ControlOk"); return 0; }
+// One video stream. A count of zero looks like "this file has nothing in it"
+// and a title that picks a video stream before starting playback then never
+// calls Start: GTA:SA opens its intro movie, takes READY, enumerates zero
+// streams and leaves the movie layer up -- an opaque black rect over the main
+// menu, forever. Reporting a stream lets the title enable it, Start, and take
+// the end-of-playback that tears the layer down.
+int PS4ABI sceAvPlayerStreamCount(i64 /*handle*/) {
+  avpStep("StreamCount");
+  return 1;
+}
+
+// SceAvPlayerStreamInfo: type, pad, 16 bytes of per-type details, duration and
+// startTime in milliseconds. The video details are width/height/aspect and a
+// language code.
+int PS4ABI sceAvPlayerGetStreamInfo(i64 /*handle*/, u32 streamId,
+                                    void *info) {
+  if (kAvpTrace) BASE_LOGI("avp", "-> GetStreamInfo({})", streamId);
+  if (!info || streamId != 0)
+    return -1;
+  auto *u32s = static_cast<u32 *>(info);
+  std::memset(info, 0, 40);
+  u32s[0] = 0;     // SCE_AVPLAYER_VIDEO
+  u32s[2] = 1920;  // details.video.width
+  u32s[3] = 1080;  // details.video.height
+  float aspect = 16.f / 9.f;
+  std::memcpy(&u32s[4], &aspect, sizeof(aspect));
+  std::memcpy(&u32s[5], "eng", 4);
+  auto *u64s = static_cast<u64 *>(info);
+  u64s[3] = kMovieMs;  // duration
+  u64s[4] = 0;         // startTime
+  return 0;
+}
+
+int PS4ABI sceAvPlayerEnableStream(i64, u32 id) {
+  if (kAvpTrace) BASE_LOGI("avp", "-> EnableStream({})", id);
+  return 0;
+}
+int PS4ABI sceAvPlayerDisableStream(i64, u32 id) {
+  if (kAvpTrace) BASE_LOGI("avp", "-> DisableStream({})", id);
+  return 0;
+}
+int PS4ABI sceAvPlayerPause(i64) { avpStep("Pause"); return 0; }
+int PS4ABI sceAvPlayerResume(i64) { avpStep("Resume"); return 0; }
+int PS4ABI sceAvPlayerJumpToTime(i64, u64) { avpStep("JumpToTime"); return 0; }
+int PS4ABI sceAvPlayerSetAvSyncMode(i64, u32) {
+  avpStep("SetAvSyncMode");
+  return 0;
+}
+int PS4ABI sceAvPlayerSetTrickSpeed(i64, int) {
+  avpStep("SetTrickSpeed");
+  return 0;
+}

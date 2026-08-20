@@ -39,5 +39,11 @@ int PS4ABI sceAvPlayerGetStreamInfo(i64 handle, u32 streamId,
 // .sprx that opens with `mov rdi,[rdi]`, so leaving any of them LLE means the
 // module dereferences the sentinel handle above and faults. They only steer
 // playback that never happens, so they all report success.
-int PS4ABI sceAvPlayerControlOk();
+int PS4ABI sceAvPlayerEnableStream(i64 handle, u32 streamId);
+int PS4ABI sceAvPlayerDisableStream(i64 handle, u32 streamId);
+int PS4ABI sceAvPlayerPause(i64 handle);
+int PS4ABI sceAvPlayerResume(i64 handle);
+int PS4ABI sceAvPlayerJumpToTime(i64 handle, u64 offsetMs);
+int PS4ABI sceAvPlayerSetAvSyncMode(i64 handle, u32 mode);
+int PS4ABI sceAvPlayerSetTrickSpeed(i64 handle, int speed);
 }  // extern "C"
