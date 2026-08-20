@@ -61,6 +61,11 @@ DELTA_OPTION(bool, kGpuPswhite, "DELTA_GPU_PSWHITE", false);
 DELTA_OPTION(bool, kProbeAlpha, "DELTA_GPU_PSPROBE_A", false);
 DELTA_OPTION(int, kGpuPstex, "DELTA_GPU_PSTEX", 0);
 DELTA_OPTION(float, kGpuPstexScale, "DELTA_GPU_PSTEXSCALE", 1.f);
+// DELTA_GPU_PSATTR=<slot+1>: export the interpolated PS input slot instead of
+// the shader's colour. PSWHITE proves the geometry, PSTEX proves the sample;
+// this proves the varyings, which is where a wrong SPI_PS_INPUT_CNTL mapping
+// shows up (a UI quad whose vertex colour reads as black paints black).
+DELTA_OPTION(int, kGpuPsattr, "DELTA_GPU_PSATTR", 0);
 DELTA_OPTION(bool, kGpuShdis, "DELTA_GPU_SHDIS", false);
 DELTA_OPTION(bool, kGpuShtrace, "DELTA_GPU_SHTRACE", false);
 DELTA_OPTION(bool, kGpuSpirv, "DELTA_GPU_SPIRV", false);
@@ -2093,6 +2098,12 @@ bool TranslatePs(const Program& program,
                    t.FMul(t.m.CompositeExtract(t.t_f, pstex, 2),
                           t.F32(kGpuPstexScale)),
                    t.F32(1.f)}));
+
+  // DELTA_GPU_PSATTR=<slot+1>: export that input slot's interpolated value.
+  if (kGpuPsattr > 0 && has_color_export && !(sc.mrt_uint_mask & 1u)) {
+    const Id in = PsInputVar(t, sc, static_cast<u32>(kGpuPsattr - 1));
+    t.m.Store(PsColorOut(t, sc, 0), t.m.Load(t.t_v4, in));
+  }
 
   // DELTA_GPU_PSWHITE: isolate VS/rasterization from fragment color math.
   if (kGpuPswhite && has_color_export && !(sc.mrt_uint_mask & 1u))

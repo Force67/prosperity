@@ -399,7 +399,16 @@ static void probeHandler(int, siginfo_t *, void *ucv) {
   // DELTA_SCHIST syscall histogram (lv2.cpp counts each syscall in its trampoline).
   // Dump the non-zero counts so a slow/wedged title's hammered syscalls are visible
   // -- the only profiler available (perf/strace/proc-mem are yama-blocked here).
-  // Signal ONE thread to avoid interleaved output from concurrent handlers.
+  // The probe is sent to every thread, so only the first responder of a burst
+  // prints it: forty copies interleaved with forty stack dumps is unreadable,
+  // and the stacks are the reason for the burst.
+  static std::atomic<u64> lastHist{0};
+  const u64 nowS = (u64)::time(nullptr);
+  u64 prev = lastHist.load();
+  if (nowS - prev < 2 || !lastHist.compare_exchange_strong(prev, nowS)) {
+    std::fflush(stderr);
+    return;
+  }
   bool any = false;
   for (int i = 0; i < 1024; i++) {
     if (g_sysHist[i] > 100) {  // skip noise

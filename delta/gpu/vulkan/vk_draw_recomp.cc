@@ -1839,6 +1839,32 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
                     (unsigned long)ResolveSampledRT(t.base, t.w, t.h));
         }
       }
+      // The first vertex each binding delivers, and the indices that select it.
+      // A pass that covers the screen with the wrong colour is either drawing
+      // the wrong geometry or reading the wrong attributes, and only the bytes
+      // behind the attribute say which.
+      for (u32 j = 0; j < std::min(d.num_vbufs, 4u); j++) {
+        const auto& vb = d.vbufs[j];
+        if (!vb.data || !gpu::IsReadableRange((u64)(uintptr_t)vb.data, 64))
+          continue;
+        base::String bytes;
+        const auto* p = static_cast<const u8*>(vb.data);
+        for (u32 b = 0; b < std::min<u32>(vb.stride ? vb.stride : 16, 48); b++)
+          base::FormatTo(bytes, "{:02x}", p[b]);
+        BASE_LOGI("drawrt", " vb{} @{:#x} stride={} v0={}", j,
+                  (unsigned long)(uintptr_t)vb.data, vb.stride, bytes.c_str());
+      }
+      if (d.index_data &&
+          gpu::IsReadableRange((u64)(uintptr_t)d.index_data, 16)) {
+        base::String idx;
+        const auto* p16 = static_cast<const u16*>(d.index_data);
+        const auto* p32 = static_cast<const u32*>(d.index_data);
+        for (u32 k = 0; k < std::min(d.index_count, 8u); k++)
+          base::FormatTo(idx, " {}", d.index_type == 1 ? p32[k] : p16[k]);
+        BASE_LOGI("drawrt", " idx @{:#x} type={} :{}",
+                  (unsigned long)(uintptr_t)d.index_data, d.index_type,
+                  idx.c_str());
+      }
       // Only the slots this draw actually declared: the rest are unused
       // array entries, and reporting them buries the one that matters.
       for (u32 c = 0; c < std::min<u32>(d.num_cbufs, kCbufBindings);

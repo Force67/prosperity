@@ -10,6 +10,8 @@
 #include <base.h>
 #include "base/arch.h"
 #include <base/logging.h>
+#include <base/strings/format.h>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -29,6 +31,7 @@
 namespace {
 DELTA_OPTION(bool, kSchedYieldReal, "DELTA_SCHED_YIELD_REAL", false);
 DELTA_OPTION(bool, kThrExitTrace, "DELTA_THREXIT_TRACE", false);
+DELTA_OPTION(u32, kYieldCaller, "DELTA_YIELD_CALLER", 0);
 }  // namespace
 
 namespace krnl {
@@ -142,7 +145,19 @@ int PS4ABI sys_yield() {
   cpuRelax();
   return 0;
 }
+// SCOUT (DELTA_YIELD_CALLER=<period>): every Nth sched_yield, scan the guest
+// stack for return addresses in a module's .text. A title that spins here is
+// waiting for something; this names the loop doing the waiting.
+static void yieldCallerScout() {
+  static std::atomic<u64> n{0};
+  if ((++n % kYieldCaller) != 0)
+    return;
+  guestStackTrace("yield-caller", 8);
+}
+
 int PS4ABI sys_sched_yield() {
+  if (kYieldCaller)
+    yieldCallerScout();
   // Default: a `pause` hint (see cpuRelax above) — correct + fast when guest
   // workers each own a host core. But FOX/FIOS2 asset streaming spins one thread
   // on sched_yield (~40% of all syscalls) while a sibling must run to advance the
