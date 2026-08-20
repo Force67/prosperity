@@ -30,6 +30,7 @@ namespace {
 // DELTA_GPU_CLEARTRACE=<n>: print up to n clear-opening lines. A small cap only
 // ever shows the loading screens; a lazy clear that lands on the wrong draw in
 // a steady-state frame needs a cap large enough to reach that frame.
+DELTA_OPTION(u32, kMaxRenderTargets, "DELTA_GPU_RT_MAX", 256);
 DELTA_OPTION(int, kClearTrace, "DELTA_GPU_CLEARTRACE", 0);
 DELTA_OPTION(bool, kLazyClear, "DELTA_GPU_LAZYCLEAR", true);
 DELTA_OPTION(bool, kClearRed, "DELTA_GPU_CLEARRED", false);
@@ -399,13 +400,20 @@ RTarget* GetRT(u64 base, u32 w, u32 h, VkFormat fmt) {
       return ActivateRtVariant(live, base, w, h, fmt);
     return &live;
   }
-  if (g_rts.size() >= 64) {
+  // A cap that a title exceeds does not degrade, it deletes: the target is
+  // never created, every draw into it is dropped, and a later pass that SAMPLES
+  // it resolves by overlap to whatever else happens to cover the address.
+  // GTA:SA's world hit 64 during its level load, lost the shadow buffer at
+  // 0x202b800000, and its lighting then sampled a shadow atlas that merely
+  // overlapped -- which is what made the scene black. Kept as a backstop
+  // against a title that cycles addresses forever, not as a budget.
+  if (g_rts.size() >= kMaxRenderTargets) {
     static int n = 0;
     if (n++ < 4)
       BASE_LOGI("gpuvk",
-                "RT table full (64) -- dropping {:#x} {}x{} fmt={} and every "
+                "RT table full ({}) -- dropping {:#x} {}x{} fmt={} and every "
                 "draw that targets it",
-                (unsigned long)base, w, h, (int)fmt);
+                (u32)kMaxRenderTargets, (unsigned long)base, w, h, (int)fmt);
     return nullptr;
   }
   RTarget t;
