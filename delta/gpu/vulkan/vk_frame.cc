@@ -45,6 +45,7 @@ DELTA_OPTION(u64, kMemWatch, "DELTA_GPU_MEMWATCH", 0);
 DELTA_OPTION(bool, kRdocExit, "DELTA_RDOC_EXIT", false);
 DELTA_OPTION(int, kReportFrame, "DELTA_GPU_RTSTAT_FRAME", 0);
 DELTA_OPTION(int, kRtStatEvery, "DELTA_GPU_RTSTAT_EVERY", 200);
+DELTA_OPTION(int, kRtStatMax, "DELTA_GPU_RTSTAT_MAX", 32);
 DELTA_OPTION(u64, kForceClear, "DELTA_GPU_FORCECLEAR", 0);
 DELTA_OPTION(int, kWantW, "DELTA_GPU_PRESENT_RTW", 0);
 DELTA_OPTION(int, kWantH, "DELTA_GPU_PRESENT_RTH", 0);
@@ -224,12 +225,31 @@ bool ReportRtContents(FrameSlot& owner) {
   if (!kGpuRtstat ||
       (kReportFrame ? g_frame.num != kReportFrame : g_frame.num % every != 0))
     return true;
-  int reported = 0;
-  for (auto& kv : g_rts) {
-    RTarget& rt = kv.second;
-    if ((!rt.used_this_frame && !(kGpuRtstatAll && rt.ever_rendered)) || reported >= 32)
-      continue;
-    reported++;
+  // Address order, not hash order. Each readback costs a synchronous submit so
+  // only the first kRtStatMax targets are scored, and taking them in an
+  // unordered_map's order made that a lottery: the scene-colour target was
+  // reported in one run and absent from the next, with nothing to say it had
+  // been dropped.
+  const size_t max_scored = std::max(1, kRtStatMax.get());
+  std::vector<std::pair<u64, RTarget*> > order;
+  for (auto& kv : g_rts)
+    if (kv.second.used_this_frame || (kGpuRtstatAll && kv.second.ever_rendered))
+      order.emplace_back(kv.first, &kv.second);
+  std::sort(order.begin(), order.end());
+  if (order.size() > max_scored) {
+    char dropped[512] = {};
+    int at = 0;
+    for (size_t i = max_scored;
+         i < order.size() && at < (int)sizeof(dropped) - 16; i++)
+      at += std::snprintf(dropped + at, sizeof(dropped) - at, " %#lx",
+                          (unsigned long)order[i].first);
+    BASE_LOGI("rtstat", "f{} {} targets, scoring {} -- not scored:{}",
+              g_frame.num, (unsigned)order.size(), (unsigned)max_scored,
+              dropped);
+    order.resize(max_scored);
+  }
+  for (auto& kv : order) {
+    RTarget& rt = *kv.second;
     EnsureReadback(rt.w, rt.h, rt.fmt);
     owner.readback = g_frame.readback;
     owner.readback_mem = g_frame.readback_mem;
@@ -298,7 +318,8 @@ bool ReportRtContents(FrameSlot& owner) {
     const u64 n = static_cast<u64>(rt.w) * rt.h;
     const u64 step = n > 16384 ? n / 16384 : 1;
     u64 nz = 0, rgb_nz = 0, samples = 0, nan_half = 0, inf_half = 0,
-             hot = 0;
+             hot = 0, a_nz = 0;
+    double a_sum = 0.0;
     double luma_sum = 0.0;
     // The HDR magnitude, which the buckets cannot show: they all collapse into
     // ">=1" and a target peaking at 1.5 reads identically to one peaking at
@@ -367,6 +388,12 @@ bool ReportRtContents(FrameSlot& owner) {
       }
       nz += any;
       rgb_nz += any_rgb;  // ignores an opaque-black alpha channel
+      // Alpha ON ITS OWN. On a G-buffer it is not coverage: UE4 packs the
+      // SHADING MODEL there, and a deferred light gates every lane on it being
+      // non-zero. Folded into nz/mean it is invisible -- a target with correct
+      // colour and dead alpha reads as a healthy target.
+      a_nz += ch[3] != 0.f;
+      a_sum += ch[3];
       // Luminance is RGB only. Alpha is a coverage or fade term on most of
       // these targets and says nothing about how bright the frame looks.
       const float lum = std::max({ch[0], ch[1], ch[2]});
@@ -595,7 +622,8 @@ bool ReportRtContents(FrameSlot& owner) {
       return lums[i];
     };
     BASE_LOGI("rtstat",
-              "f{} RT {:#x} {}x{} draws={} nz={} rgbnz={}/{} mean={} "
+              "f{} RT {:#x} {}x{} draws={} nz={} rgbnz={}/{} anz={} amean={:.4g} "
+              "mean={} "
               "tone={}/{}/{}/{}/{}/{}/{}/{} hot={} nan={} inf={} "
               "max={:.4g}@{},{}(a={:.4g}) hi100={} hibox={},{}-{},{} "
               "hiA={:.4g}/{:.4g}/{:.4g} p99={:.4g} p999={:.4g} guestnz={}/{} "
@@ -603,6 +631,7 @@ bool ReportRtContents(FrameSlot& owner) {
               "{:08x}",
               g_frame.num, (unsigned long)kv.first, rt.w, rt.h, rt.draws,
               (unsigned long)nz, (unsigned long)rgb_nz, (unsigned long)samples,
+              (unsigned long)a_nz, samples ? a_sum / (double)samples : 0.0,
               (unsigned long)(samples ? luma_sum / (double)samples * 255.0
                                       : 0.0),
               (unsigned long)tone[0], (unsigned long)tone[1],
@@ -818,9 +847,10 @@ void BeginFrame(Renderer& renderer) {
   // additive passes into it otherwise accumulate frame over frame.
   if (kForceClear) {
     auto it = g_rts.find(kForceClear);
-    if (it != g_rts.end())
+    if (it != g_rts.end()) {
       it->second.clear_pending = true;
       it->second.clear_src = "forceclear-knob";
+    }
   }
   if (RdocFrame() && g_frame.num == RdocFrame() && GetRdocApi()) {
     GetRdocApi()->StartFrameCapture(RdocDevice(), nullptr);

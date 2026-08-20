@@ -1745,18 +1745,31 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
     // the whole graph can be printed; without one, cap it. The end of the graph
     // is the part that decides what is presented, and a low cap never reaches
     // it.
-    const int cap = all ? (kWantFrame ? 100000 : 140) : 64;
-    if (kWant && (all || g_region.cur_rt == kWant) && shown < cap &&
-        (!kWantFrame || (int)g_frame.num == kWantFrame) &&
-        (int)g_frame.draws >= kBusy) {
+    // Printing the whole graph needs ONE frame, and a frame number is not
+    // reproducible across runs while a draw count is: with DRAWRT=1 and a busy
+    // threshold, latch onto the first frame that reaches it and print all of
+    // that frame, from its first draw.
+    static int latched = 0;
+    if (all && kBusy && !kWantFrame && !latched && (int)g_frame.draws >= kBusy)
+      latched = g_frame.num + 1;  // this one is already half gone
+    const int want_frame = kWantFrame ? kWantFrame : latched;
+    const int cap = all ? (want_frame ? 100000 : 140) : 64;
+    // A pass is often easier to name by the SHADER it runs than by the target
+    // it writes: a deferred light draw lands on the same address as the base
+    // pass, and the target filter cannot separate them.
+    if (kWant && (all || g_region.cur_rt == kWant || d.ps_addr == kWant) &&
+        shown < cap &&
+        (!want_frame || (int)g_frame.num == want_frame) &&
+        (latched || (int)g_frame.draws >= kBusy)) {
       shown++;
       BASE_LOGI("drawrt",
                 "f{} #{} rt={:#x} {}x{} indexed={} vcount={} "
-                "icount={} prim={} tmask={:#x} num_vbufs={} stride={} mrt={} "
-                "vp={:g},{:g} scale {:g},{:g} off vs={:#x} ps={:#x}",
+                "icount={} inst={} prim={} tmask={:#x} num_vbufs={} stride={} "
+                "mrt={} vp={:g},{:g} scale {:g},{:g} off vs={:#x} ps={:#x}",
                 g_frame.num, g_frame.draws,
                 (unsigned long)g_region.cur_rt, d.rt_w, d.rt_h, (int)indexed,
-                d.vertex_count, d.index_count, d.prim_type, d.target_mask,
+                d.vertex_count, d.index_count, d.instance_count,
+                d.prim_type, d.target_mask,
                 d.num_vbufs, d.vertex_stride, d.mrt_count,
                 d.viewport_x_scale, d.viewport_y_scale, d.viewport_x_offset,
                 d.viewport_y_offset, (unsigned long)d.vs_addr,
@@ -1822,8 +1835,13 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
                 d.recomp->ps_texs.size(), (int)rp->multi_tex, multi_n);
       for (u32 i = 0; i < shown_n; i++) {
         const auto& t = d.texs[i];
-        if (!t.base)
+        if (!t.base) {
+          // An UNRESOLVED binding is the interesting one: the shader samples
+          // it and reads the default, and skipping it here made a shader with
+          // thirteen samplers look like one with five.
+          BASE_LOGI("drawrt", " tex{} UNRESOLVED (samples the default)", i);
           continue;
+        }
         BASE_LOGI("drawrt",
                   " tex{} mips={} basemip={} viewmips={} "
                   "minlod={} layers={} arr={} lod0={} cmp={} sto={} "
@@ -1901,6 +1919,39 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
           base::FormatTo(bytes, "{:02x}", p[b]);
         BASE_LOGI("drawrt", " vb{} @{:#x} stride={} v0={}", j,
                   (unsigned long)(uintptr_t)vb.data, vb.stride, bytes.c_str());
+      }
+      // A shader that fetches its own vertices reads a raw buffer instead of a
+      // vertex binding, so vb0 above says nothing about the geometry it draws.
+      for (u32 j = 0; j < std::min(d.num_bufs, kRawBufBindings); j++) {
+        const auto& rb = d.bufs[j];
+        if (!rb.base || !gpu::IsReadableRange(rb.base, 16))
+          continue;
+        // Sampled at several offsets, not just the head: such a buffer is
+        // laid out as parallel per-component arrays, so the first floats are
+        // one attribute and say nothing about the positions.
+        base::String head;
+        for (u32 off = 0; off < 0x600 && off + 16 <= rb.size; off += 0x180) {
+          const auto* f =
+              reinterpret_cast<const float*>(rb.base + off);
+          base::FormatTo(head, " +{:#x}={:g},{:g},{:g},{:g}", off, f[0], f[1],
+                         f[2], f[3]);
+        }
+        // A binding that resolves to an empty range is the interesting case:
+        // it looks identical in every other trace to one carrying real data.
+        u32 nz = 0;
+        // The WHOLE resource, sampled: "the head is zero" and "the buffer is
+        // dead" are different answers, and only the second means the address
+        // is wrong rather than the offsets.
+        const u32 scan = rb.size;
+        const u32 step = scan > (64u << 10) ? scan / (64u << 10) : 1;
+        if (gpu::IsReadableRange(rb.base, scan)) {
+          const auto* p = reinterpret_cast<const u8*>(rb.base);
+          for (u32 b = 0; b < scan; b += step)
+            nz += p[b] != 0;
+        }
+        BASE_LOGI("drawrt", " buf{} @{:#x} size={} nz={} of {} sampled{}", j,
+                  (unsigned long)rb.base, rb.size, nz, scan / step,
+                  head.c_str());
       }
       if (d.index_data &&
           gpu::IsReadableRange((u64)(uintptr_t)d.index_data, 16)) {

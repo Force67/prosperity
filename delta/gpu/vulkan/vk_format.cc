@@ -837,6 +837,24 @@ void ReadbackPixelBgra(const u8* src, VkFormat fmt, u8* dst) {
     case VK_FORMAT_R32G32B32A32_SFLOAT:
       std::memcpy(rgba, src, sizeof(rgba));
       break;
+    case VK_FORMAT_A2B10G10R10_UNORM_PACK32: {
+      u32 packed;
+      std::memcpy(&packed, src, sizeof(packed));
+      rgba[0] = (packed & 0x3FF) / 1023.0f;
+      rgba[1] = ((packed >> 10) & 0x3FF) / 1023.0f;
+      rgba[2] = ((packed >> 20) & 0x3FF) / 1023.0f;
+      rgba[3] = (packed >> 30) / 3.0f;
+      break;
+    }
+    case VK_FORMAT_A2R10G10B10_UNORM_PACK32: {
+      u32 packed;
+      std::memcpy(&packed, src, sizeof(packed));
+      rgba[2] = (packed & 0x3FF) / 1023.0f;
+      rgba[1] = ((packed >> 10) & 0x3FF) / 1023.0f;
+      rgba[0] = ((packed >> 20) & 0x3FF) / 1023.0f;
+      rgba[3] = (packed >> 30) / 3.0f;
+      break;
+    }
     case VK_FORMAT_B10G11R11_UFLOAT_PACK32: {
       u32 packed;
       std::memcpy(&packed, src, sizeof(packed));
