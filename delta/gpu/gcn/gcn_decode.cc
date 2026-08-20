@@ -6,6 +6,7 @@
 
 #include "gpu/gcn/gcn_decode.h"
 #include "base/arch.h"
+#include "gpu/guest_memory.h"
 
 #include <algorithm>
 #include <atomic>
@@ -202,15 +203,26 @@ void SetDefaultIsaMode(IsaMode mode) {
   NextProgramCacheGeneration();
 }
 
+// A hard ceiling on a shader the footer hint claims. 256 KiB of GCN is far
+// past anything a compiler emits; beyond it the hint is not a length.
+constexpr u32 kMaxShaderDwords = 64 * 1024;
+
 u32 CodeLength(const u32* code, u32 max_dwords) {
   if (!code || max_dwords < 2)
     return 0;
   // Fast path: the toolchain emits "s_mov_b32 vcc_hi, #imm" (0xBEEB03FF) as the
   // first instruction, where the ShaderBinaryInfo footer sits at
   // code[(imm+1)*2].
+  // The hint is authoritative, so honour it even past the caller's window: a
+  // shader LONGER than the window is exactly the case worth getting right.
+  // Decoding a prefix stops at the first s_endpgm, which in a shader with an
+  // early-out is not the end, and every branch past that point then lands on
+  // whatever follows the code -- 0xd0d0d0d0 fill, in GTA:SA's deferred
+  // lighting dispatch, which the translator rejected as an unknown encoding.
   if (code[0] == 0xBEEB03FFu) {
     const u64 d = (static_cast<u64>(code[1]) + 1) * 2;
-    if (d >= 2 && d + 2 <= max_dwords &&
+    if (d >= 2 && d + 2 <= kMaxShaderDwords &&
+        IsReadableRange(reinterpret_cast<u64>(code), (d + 2) * 4) &&
         OrbShdrAt(code, static_cast<u32>(d) * 4))
       return static_cast<u32>(d);
   }
@@ -293,7 +305,7 @@ Program Decode(const u32* code,
 
 Program DecodeShader(const u32* code, u32 max_dwords, IsaMode mode) {
   const u32 len = CodeLength(code, max_dwords);
-  if (len && len <= max_dwords)
+  if (len)
     return Decode(code, len, /*stop_at_endpgm=*/false, mode);
   return Decode(code, max_dwords, /*stop_at_endpgm=*/true, mode);
 }
