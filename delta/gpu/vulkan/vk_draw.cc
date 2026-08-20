@@ -143,6 +143,14 @@ void Draw(Renderer& renderer, const DrawInfo& d_in) {
     return;
   if (!d.vertex_data || !d.vertex_stride)
     return;
+  // No colour target: this path renders ONE colour attachment and nothing else,
+  // so a depth-only pass has nothing it can contribute here. It used to open a
+  // region on an RT keyed at address 0 whose geometry followed whichever draw
+  // touched it last, and then render a 1020x1020 shadow pass into a 1470x827
+  // attachment -- rendering outside the attachment, which is undefined and
+  // takes the device down during GTA:SA's level load.
+  if (!d.rt_base)
+    return;
   if (!FlushCsWritesRange(renderer, reinterpret_cast<u64>(d.vertex_data),
                           static_cast<u64>(d.vertex_stride) *
                               (d.vertex_count ? d.vertex_count : 1)))

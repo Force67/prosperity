@@ -1257,6 +1257,19 @@ void CsRangeDestroy(CsRange& e) {
 bool g_cs_batch_open = false;
 bool g_cs_failed = false;
 u32 g_cs_batch_count = 0;
+// What the open batch contains. A device loss names no dispatch on its own, and
+// a batch is up to 128 of them, so the shader that killed the queue is
+// otherwise unattributable.
+struct BatchedDispatch {
+  u64 cs_addr;
+  u32 groups[3];
+  u32 num_res;
+  u64 res_base[4];
+  u64 res_size[4];
+  u8 res_img;    // bit i: resource i is an image
+  u8 res_write;  // bit i: resource i is written
+};
+std::vector<BatchedDispatch> g_cs_batch_log;
 VkFence g_cs_batch_fence = VK_NULL_HANDLE;
 bool g_cs_stage_pending[ComputeInfo::kMaxResources] = {};
 std::unordered_map<VkBuffer, ComputeBufferAccess> g_cs_batch_access;
@@ -1333,6 +1346,18 @@ bool CsBatchFlush(CsSyncWhy why = kSyncWriteback) {
               "cs batch DEVICE FAULT: end={} submit={} wait={} n={}",
               (int)end_result, (int)submit_result, (int)wait_result,
               g_cs_batch_count);
+    for (const auto& d : g_cs_batch_log) {
+      base::String res;
+      for (u32 i = 0; i < d.num_res && i < 4; i++)
+        base::FormatTo(res, " [{}]{:#x}+{:#x}{}{}", i,
+                       (unsigned long)d.res_base[i],
+                       (unsigned long)d.res_size[i],
+                       (d.res_img >> i) & 1 ? " img" : " buf",
+                       (d.res_write >> i) & 1 ? " w" : "");
+      BASE_LOGI("gpuvk", "  batched cs={:#x} groups=[{} {} {}] res={}{}",
+                (unsigned long)d.cs_addr, d.groups[0], d.groups[1], d.groups[2],
+                d.num_res, res.c_str());
+    }
     ReportDeviceFault(g_dev);
     g_cs_failed = true;
     g_ns_cs_gpu += NowNs() - t0;
@@ -1345,6 +1370,7 @@ bool CsBatchFlush(CsSyncWhy why = kSyncWriteback) {
   }
   g_cs_batch_open = false;
   g_cs_batch_count = 0;
+  g_cs_batch_log.clear();
   for (auto& [buf, mem] : g_cs_retired) {
     if (buf)
       vkDestroyBuffer(g_dev.device, buf, nullptr);
@@ -2272,6 +2298,24 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci) {
                  (unsigned long long)ci.cs_addr, ci.groups[0], ci.groups[1],
                  ci.groups[2], ci.num_res);
   vkCmdDispatch(g_cs_cmd, ci.groups[0], ci.groups[1], ci.groups[2]);
+  {
+    BatchedDispatch bd{ci.cs_addr,
+                       {ci.groups[0], ci.groups[1], ci.groups[2]},
+                       ci.num_res,
+                       {},
+                       {},
+                       0,
+                       0};
+    for (u32 i = 0; i < ci.num_res && i < 4; i++) {
+      bd.res_base[i] = ci.res[i].base;
+      bd.res_size[i] = ci.res[i].size;
+      if (ci.res[i].image_staging)
+        bd.res_img |= static_cast<u8>(1u << i);
+      if (ci.res[i].written)
+        bd.res_write |= static_cast<u8>(1u << i);
+    }
+    g_cs_batch_log.push_back(bd);
+  }
   if (trace::Recording())
     trace::RecordDispatch(ci);
   for (u32 i = 0; i < ci.num_res; i++) {
