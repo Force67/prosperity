@@ -14,6 +14,7 @@
 #include "base/arch.h"
 
 #include "kern/lv2/dispatch.h"
+#include "kern/lv2/sys_aio.h"
 #include "kern/lv2/sys_debug.h"
 #include "kern/lv2/sys_dynlib.h"
 #include "kern/lv2/sys_event.h"
@@ -675,15 +676,15 @@ static const syscall_Reg syscall_dpt[] = {
     {658, (void *)&sys_fdatasync}, // sys_fdatasync
     {659, (void *)&sys_dynlib_get_list2}, // sys_dynlib_get_list2
     {660, (void *)&sys_dynlib_get_info2}, // sys_dynlib_get_info2
-    {661, (void *)&sys_aio_unsupported}, // sys_aio_submit
-    {662, (void *)&sys_aio_unsupported}, // sys_aio_multi_delete
-    {663, (void *)&sys_aio_unsupported}, // sys_aio_multi_wait
-    {664, (void *)&sys_aio_unsupported}, // sys_aio_multi_poll
+    {661, (void *)&sys_aio_submit}, // sys_aio_submit
+    {662, (void *)&sys_aio_multi_delete}, // sys_aio_multi_delete
+    {663, (void *)&sys_aio_multi_wait}, // sys_aio_multi_wait
+    {664, (void *)&sys_aio_multi_poll}, // sys_aio_multi_poll
     {665, (void *)&sys_aio_unsupported}, // sys_aio_get_data
-    {666, (void *)&sys_aio_unsupported}, // sys_aio_multi_cancel
+    {666, (void *)&sys_aio_multi_cancel}, // sys_aio_multi_cancel
     {667, (void *)&sys_get_bio_usage_all}, // sys_get_bio_usage_all
     {668, (void *)&sys_aio_unsupported}, // sys_aio_create
-    {669, (void *)&sys_aio_unsupported}, // sys_aio_submit_cmd
+    {669, (void *)&sys_aio_submit_cmd}, // sys_aio_submit_cmd
     {670, (void *)&sys_aio_init}, // sys_aio_init
     {671, (void *)&sys_get_page_table_stats}, // sys_get_page_table_stats
     {672, (void *)&sys_dynlib_get_list_for_libdbg}, // sys_dynlib_get_list_for_libdbg
