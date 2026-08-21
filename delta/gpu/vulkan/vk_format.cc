@@ -586,9 +586,12 @@ VkFormat VertexFormat(u32 dfmt, u32 nfmt) {
   // undefined (VUID-VkGraphicsPipelineCreateInfo-Input-08733). The SCALED
   // forms deliver the same integer VALUE as a float, which is what a shader
   // that fetches an integer attribute and converts it ends up with. 32-bit
-  // integers have no SCALED form and converting one would lose precision, so
-  // they stay -- such an attribute needs an integer input declaration, which
-  // no title tested here asks for.
+  // 32-bit integers have no SCALED form, but they do not need one: the module
+  // BITCASTS every attribute component into its VGPR rather than converting it,
+  // which is what the hardware does for an integer number format, and a 32-bit
+  // SFLOAT attribute delivers those same 32 bits to a float input. So the
+  // SFLOAT twin is both bit-exact and correctly typed. GTA:SA fetches 185
+  // R32_UINT attributes a run.
   // GCN number formats: 0 UNORM, 1 SNORM, 2 USCALED, 3 SSCALED, 4 UINT,
   // 5 SINT, 7 FLOAT. The scaled forms deliver the integer value as a float,
   // which is what Vulkan's *_SSCALED/_USCALED do.
@@ -641,9 +644,7 @@ VkFormat VertexFormat(u32 dfmt, u32 nfmt) {
           return VK_FORMAT_R8G8_UNORM;
       }
     case 4:  // 32
-      return nfmt == 4   ? VK_FORMAT_R32_UINT
-             : nfmt == 5 ? VK_FORMAT_R32_SINT
-                         : VK_FORMAT_R32_SFLOAT;
+      return VK_FORMAT_R32_SFLOAT;
     case 5:  // 16_16
       switch (nfmt) {
         case 0:
@@ -681,9 +682,7 @@ VkFormat VertexFormat(u32 dfmt, u32 nfmt) {
           return VK_FORMAT_R8G8B8A8_UNORM;
       }
     case 11:
-      return nfmt == 4   ? VK_FORMAT_R32G32_UINT
-             : nfmt == 5 ? VK_FORMAT_R32G32_SINT
-                         : VK_FORMAT_R32G32_SFLOAT;
+      return VK_FORMAT_R32G32_SFLOAT;
     case 12:  // 16_16_16_16
       switch (nfmt) {
         case 0:
