@@ -1006,8 +1006,19 @@ bool BeginRegion(const u64* mrt_base,
     if (!targets[i])
       return false;
   }
+  // Depth gets the same surface-vs-drawn sizing as colour. A pass whose
+  // screen scissor is smaller than the surface it binds (GTA:SA opens a
+  // 256x256 scissor over a 1792x960 Z buffer) otherwise builds a 256x256 depth
+  // image, and everything that reads scene depth afterwards -- the deferred
+  // lights' world-position reconstruction, and every compute post pass, which
+  // then falls back to the zeroed guest bytes -- reads a corner of the frame
+  // and garbage elsewhere. RtSurfaceExtent only ever grows the image to the
+  // surface, so a genuinely half-resolution Z bound to a full-resolution pass
+  // still keeps the drawn extent.
+  const u32 dw = RtSurfaceExtent(depth_w, w, 256);
+  const u32 dh = RtSurfaceExtent(depth_h, h, 64);
   DepthTarget* dt =
-      depth_base ? GetDepthRT(depth_base, w, h, stencil_base) : nullptr;
+      depth_base ? GetDepthRT(depth_base, dw, dh, stencil_base) : nullptr;
   if (depth_base && !dt)
     return false;
   g_region.cur_mrt_count = 0;
