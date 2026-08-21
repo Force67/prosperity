@@ -1688,24 +1688,33 @@ void ReleaseRetiredTextures() {
 
 VkDescriptorSet GetMultiTexSet(const DrawInfo& d,
                                VkDescriptorSetLayout set_layout,
+                               u32 num_bindings,
                                const VkImageView* resolved_views,
                                const VkImageLayout* resolved_layouts,
                                const u64* depth_src) {
   ScopeNs _set_timer(&g_ns_tex_set);
   g_tex_set_n++;
+  // What the draw resolved, and what the layout declares. A shader may declare
+  // more samplers than the draw tracked textures for, and a binding left
+  // unwritten is read as an undefined descriptor -- validation names it
+  // (VUID-vkCmdDrawIndexed-None-08114) and a driver may fault on it. Cover
+  // every declared binding; the ones past what resolved take the default.
+  const u32 resolved = std::min(d.num_texs, kMaxTex);
   MultiTexKey key;
-  key.num_texs = std::min(d.num_texs, kMaxTex);
+  key.num_texs = std::min(std::max(resolved, num_bindings), kMaxTex);
   for (u32 i = 0; i < key.num_texs; i++) {
-    const auto& t = d.texs[i];
-    key.tex[i] = TextureKey(
-        t.base, t.w, t.h, t.dfmt, t.nfmt, TextureTiling(t.tiling), t.pitch,
-        t.layers, t.base_array, t.view_layers, t.mip_levels, t.base_mip,
-        t.view_mips, t.min_lod, t.pow2_pad, t.sampler, t.sampler_valid,
-        t.arrayed, t.force_lod_zero, t.depth_compare, t.swizzle, t.depth,
-        t.is_3d);
-    key.view[i] = resolved_views[i];
-    key.layout[i] = resolved_layouts[i];
-    key.storage[i] = d.texs[i].storage;
+    if (i < resolved) {
+      const auto& t = d.texs[i];
+      key.tex[i] = TextureKey(
+          t.base, t.w, t.h, t.dfmt, t.nfmt, TextureTiling(t.tiling), t.pitch,
+          t.layers, t.base_array, t.view_layers, t.mip_levels, t.base_mip,
+          t.view_mips, t.min_lod, t.pow2_pad, t.sampler, t.sampler_valid,
+          t.arrayed, t.force_lod_zero, t.depth_compare, t.swizzle, t.depth,
+          t.is_3d);
+      key.view[i] = resolved_views[i];
+      key.layout[i] = resolved_layouts[i];
+      key.storage[i] = d.texs[i].storage;
+    }
   }
   auto ci = g_mtex_cache.find(key);
   if (ci != g_mtex_cache.end())
@@ -1724,12 +1733,24 @@ VkDescriptorSet GetMultiTexSet(const DrawInfo& d,
   // white default (the source of "everything renders white" chains) with the
   // descriptor state that failed to resolve.
   static int tex_miss_logged = 0;
+  // A binding past what the draw resolved has no T# to describe it, so the
+  // default it takes has to match what the SHADER declared: a 2D default in a
+  // binding the module built as a volume is the same undefined read by another
+  // name.
+  const auto declared = [&](u32 i) -> const gcn::ShaderTex* {
+    if (!d.recomp || i >= d.recomp->ps_texs.size())
+      return nullptr;
+    return &d.recomp->ps_texs[i];
+  };
   for (u32 i = 0; i < key.num_texs; i++) {
     VkImageView v =
-        (i < key.num_texs && !kForceWhite) ? resolved_views[i] : VK_NULL_HANDLE;
-    bool arrayed = i < key.num_texs && d.texs[i].arrayed;
-    bool is_3d = i < key.num_texs && d.texs[i].is_3d;
-    if (kTexMiss && !v && i < key.num_texs && tex_miss_logged < 64) {
+        (i < resolved && !kForceWhite) ? resolved_views[i] : VK_NULL_HANDLE;
+    bool arrayed = i < resolved && d.texs[i].arrayed;
+    bool is_3d = i < resolved ? d.texs[i].is_3d
+                              : (declared(i) && declared(i)->is_3d);
+    if (i >= resolved && declared(i) && declared(i)->storage)
+      return VK_NULL_HANDLE;  // as for an unresolved storage binding below
+    if (kTexMiss && !v && i < resolved && tex_miss_logged < 64) {
       tex_miss_logged++;
       const auto& t = d.texs[i];
       // The descriptor's provenance decides what kind of failure this is: a
@@ -1766,8 +1787,13 @@ VkDescriptorSet GetMultiTexSet(const DrawInfo& d,
   VkDescriptorImageInfo dii[kMaxTex];
   VkWriteDescriptorSet wr[kMaxTex];
   for (u32 i = 0; i < key.num_texs; i++) {
+    // Past `resolved` there is no T#: d.texs[i] holds whatever the previous
+    // draw left there, so nothing about it may be read. Those bindings take a
+    // default sampler over the default view.
+    const bool have_tex = i < resolved;
+    const bool storage_i = have_tex && d.texs[i].storage;
     SamplerKey sampler;
-    if (i < key.num_texs) {
+    if (have_tex) {
       sampler.valid = d.texs[i].sampler_valid;
       std::memcpy(sampler.raw, d.texs[i].sampler, sizeof(sampler.raw));
       sampler.image_min_lod = d.texs[i].min_lod;
@@ -1789,19 +1815,19 @@ VkDescriptorSet GetMultiTexSet(const DrawInfo& d,
     // as "nothing occludes this" instead of as undefined.
     VkImageView view_i = views[i];
     VkImageLayout layout_i = layouts[i];
-    if (i < key.num_texs && d.texs[i].depth_compare && !d.texs[i].storage &&
+    if (have_tex && d.texs[i].depth_compare && !storage_i &&
         !(depth_src && depth_src[i]) && g_tex.depth_default_view) {
       view_i = g_tex.depth_default_view;
       layout_i = VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL;
       sampler.depth_compare = true;
     }
-    dii[i] = {d.texs[i].storage ? VK_NULL_HANDLE : SamplerFor(sampler), view_i,
+    dii[i] = {storage_i ? VK_NULL_HANDLE : SamplerFor(sampler), view_i,
               layout_i};
     wr[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
     wr[i].dstSet = entry.set;
     wr[i].dstBinding = i;
     wr[i].descriptorCount = 1;
-    wr[i].descriptorType = d.texs[i].storage
+    wr[i].descriptorType = storage_i
                                ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE
                                : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     wr[i].pImageInfo = &dii[i];

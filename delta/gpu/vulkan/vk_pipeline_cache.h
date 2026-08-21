@@ -40,6 +40,10 @@ struct RecompPipe {
   VkPipeline pipe = VK_NULL_HANDLE;
   VkPipelineLayout layout = VK_NULL_HANDLE;
   VkDescriptorSetLayout tex_set_layout = VK_NULL_HANDLE;
+  // Bindings tex_set_layout declares. The shader may declare more samplers than
+  // the draw resolved textures for, and every declared binding has to be
+  // written or the draw reads a descriptor that was never updated.
+  u32 tex_bindings = 0;
   bool textured = false;
   bool multi_tex = false;  // custom set 0 for multiple and/or storage images
   // The shader pair reads raw buffers with MUBUF, so the layout carries set 2

@@ -1314,7 +1314,8 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
         }
       }
       tex_set =
-          GetMultiTexSet(d, rp->tex_set_layout, multi_views, multi_layouts,
+          GetMultiTexSet(d, rp->tex_set_layout, rp->tex_bindings, multi_views,
+                         multi_layouts,
                          multi_depth);
       if (!tex_set)
         return Decline(kGuestTex);
@@ -1379,7 +1380,8 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
         }
       }
       tex_set =
-          GetMultiTexSet(d, rp->tex_set_layout, multi_views, multi_layouts,
+          GetMultiTexSet(d, rp->tex_set_layout, rp->tex_bindings, multi_views,
+                         multi_layouts,
                          multi_depth);
     }
     if (!tex_set)
@@ -1389,7 +1391,7 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
     VkImageLayout layouts[kMaxTex] = {};
     views[0] = SampledView(g_rts[tex_base], d.tex_swizzle, true);
     layouts[0] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    tex_set = GetMultiTexSet(d, g_tex.ds_layout, views, layouts, nullptr);
+    tex_set = GetMultiTexSet(d, g_tex.ds_layout, 1, views, layouts, nullptr);
     if (!tex_set)
       return Decline(kMidRegion);
   } else if (color_as_tex) {
@@ -1400,7 +1402,7 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
     VkImageLayout layouts[kMaxTex] = {};
     views[0] = SampledView(src, d.tex_swizzle);
     layouts[0] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    tex_set = GetMultiTexSet(d, g_tex.ds_layout, views, layouts, nullptr);
+    tex_set = GetMultiTexSet(d, g_tex.ds_layout, 1, views, layouts, nullptr);
     if (!tex_set)
       return Decline(kMidRegion);
   } else if (depth_as_tex) {
@@ -1412,7 +1414,7 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
     views[0] = SampledView(src, d.tex_swizzle);
     layouts[0] = VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL;
     const u64 depth_only[kMaxTex] = {tex_base};
-    tex_set = GetMultiTexSet(d, g_tex.ds_layout, views, layouts, depth_only);
+    tex_set = GetMultiTexSet(d, g_tex.ds_layout, 1, views, layouts, depth_only);
     if (!tex_set)
       return Decline(kMidRegion);
   }

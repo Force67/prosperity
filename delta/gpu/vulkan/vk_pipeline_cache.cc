@@ -448,6 +448,7 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
     if (vkCreateDescriptorSetLayout(g_dev.device, &sl, nullptr,
                                     &rp.tex_set_layout) != VK_SUCCESS)
       return nullptr;
+    rp.tex_bindings = n_bind;
     set0 = rp.tex_set_layout;
   }
   rp.raw_bufs = !d.recomp->vs_bufs.empty() || !d.recomp->ps_bufs.empty();
