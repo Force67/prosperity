@@ -394,6 +394,8 @@ bool CreateTextureDescriptors() {
   sc.addressModeU = sc.addressModeV = sc.addressModeW =
       VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
   VKOK(vkCreateSampler(g_dev.device, &sc, nullptr, &g_tex.sampler));
+  sc.magFilter = sc.minFilter = VK_FILTER_NEAREST;
+  VKOK(vkCreateSampler(g_dev.device, &sc, nullptr, &g_tex.sampler_nearest));
 
   // Multi-texture path: a 16-binding set-0 layout + a pool, used only by recomp
   // PS that sample >1 texture (single-texture draws keep the 1-binding
@@ -433,6 +435,11 @@ bool CreateTextureDescriptors() {
     wi.samples = VK_SAMPLE_COUNT_1_BIT;
     wi.tiling = VK_IMAGE_TILING_OPTIMAL;
     wi.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    // Mutable so the same texel can also be viewed as R8G8B8A8_UINT: a binding
+    // the module declared as an integer sampler may not take a UNORM view
+    // (VUID-vkCmdDrawIndexed-format-07753), and an unresolved one still has to
+    // get a default.
+    wi.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
     VKOK(vkCreateImage(g_dev.device, &wi, nullptr, &g_tex.white_img));
     if (!g_image_memory.Allocate(g_dev, g_tex.white_img,
                                  g_tex.white_allocation)) {
@@ -452,7 +459,7 @@ bool CreateTextureDescriptors() {
       return false;
     }
     // Same default for a Dim3D binding, which cannot sample a 2D view.
-    VkImageCreateInfo wi3 = wi;
+    VkImageCreateInfo wi3 = wi;  // mutable too, for the integer twin
     wi3.imageType = VK_IMAGE_TYPE_3D;
     VKOK(vkCreateImage(g_dev.device, &wi3, nullptr, &g_tex.white_3d_img));
     if (!g_image_memory.Allocate(g_dev, g_tex.white_3d_img,
@@ -506,6 +513,12 @@ bool CreateTextureDescriptors() {
     wv.format = VK_FORMAT_R8G8B8A8_UNORM;
     wv.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
     VKOK(vkCreateImageView(g_dev.device, &wv, nullptr, &g_tex.white_view));
+    wv.format = VK_FORMAT_R8G8B8A8_UINT;
+    VKOK(vkCreateImageView(g_dev.device, &wv, nullptr, &g_tex.white_uint_view));
+    wv.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+    VKOK(vkCreateImageView(g_dev.device, &wv, nullptr,
+                           &g_tex.white_uint_array_view));
+    wv.format = VK_FORMAT_R8G8B8A8_UNORM;
     wv.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
     VKOK(
         vkCreateImageView(g_dev.device, &wv, nullptr, &g_tex.white_array_view));
@@ -521,6 +534,10 @@ bool CreateTextureDescriptors() {
     VKOK(vkCreateImageView(g_dev.device, &wv, nullptr, &g_tex.zero_3d_view));
     wv.components = {};
     VKOK(vkCreateImageView(g_dev.device, &wv, nullptr, &g_tex.white_3d_view));
+    wv.format = VK_FORMAT_R8G8B8A8_UINT;
+    VKOK(vkCreateImageView(g_dev.device, &wv, nullptr,
+                           &g_tex.white_uint_3d_view));
+    wv.format = VK_FORMAT_R8G8B8A8_UNORM;
 
     VkDescriptorSetLayout layouts[6] = {
         g_tex.ds_layout, g_tex.ds_layout, g_tex.ds_layout,
@@ -620,15 +637,23 @@ VkDescriptorSet AllocateSamplerSet(VkDescriptorSetLayout layout,
 VkSampler SamplerFor(const SamplerKey& key) {
   // DELTA_GPU_DEFSAMPLER: ignore every guest S# and use the default sampler,
   // to tell a mis-decoded sampler apart from a mis-bound image.
+  // The default sampler is LINEAR, and an integer-format view may not be
+  // filtered at all -- so every exit that hands out a default has to hand out
+  // the NEAREST one for those. An unresolved S# over an integer view taking the
+  // LINEAR default was the overwhelming majority of GTA:SA's magFilter-04553,
+  // 200k messages in a 200 s run.
+  const auto fallback = [&] {
+    return key.integer ? g_tex.sampler_nearest : g_tex.sampler;
+  };
   if (kDefaultSampler)
-    return g_tex.sampler;
+    return fallback();
   if (!key.valid && !key.force_lod_zero && !key.depth_compare)
-    return g_tex.sampler;
+    return fallback();
   auto found = g_sampler_cache.find(key);
   if (found != g_sampler_cache.end())
     return found->second;
   if (g_sampler_cache.size() >= 4096)
-    return g_tex.sampler;
+    return fallback();
 
   auto address_mode = [](u32 mode) {
     switch (mode & 7) {
@@ -722,7 +747,9 @@ VkSampler SamplerFor(const SamplerKey& key) {
       ci.compareOp = VK_COMPARE_OP_ALWAYS;
       break;
   }
-  if (g_dev.sampler_anisotropy && (mag >= 2 || min >= 2)) {
+  // Anisotropy requires LINEAR on both filters, which an integer format has
+  // just been denied.
+  if (g_dev.sampler_anisotropy && !key.integer && (mag >= 2 || min >= 2)) {
     VkPhysicalDeviceProperties props;
     vkGetPhysicalDeviceProperties(g_dev.phys, &props);
     ci.anisotropyEnable = VK_TRUE;
@@ -732,7 +759,7 @@ VkSampler SamplerFor(const SamplerKey& key) {
   }
   VkSampler sampler = VK_NULL_HANDLE;
   if (vkCreateSampler(g_dev.device, &ci, nullptr, &sampler) != VK_SUCCESS)
-    return g_tex.sampler;
+    return fallback();
   g_sampler_cache.emplace(key, sampler);
   return sampler;
 }
@@ -1613,12 +1640,19 @@ struct MultiTexSet {
 
 struct MultiTexKey {
   u32 num_texs = 0;
+  // What the MODULE declared each binding as, which decides the default a
+  // binding takes when nothing resolves -- and is not a function of the
+  // textures. Two shaders sampling the same list share a set otherwise, so one
+  // declaring binding 3 as an integer sampler was handed the UNORM default the
+  // other's set was built with (VUID-vkCmdDrawIndexed-format-07753).
+  u32 decl_uint = 0, decl_3d = 0;
   TexKey tex[kMaxTex];
   VkImageView view[kMaxTex] = {};
   VkImageLayout layout[kMaxTex] = {};
   bool storage[kMaxTex] = {};
   bool operator==(const MultiTexKey& o) const {
-    if (num_texs != o.num_texs)
+    if (num_texs != o.num_texs || decl_uint != o.decl_uint ||
+        decl_3d != o.decl_3d)
       return false;
     for (u32 i = 0; i < num_texs; i++)
       if (!(tex[i] == o.tex[i]) || view[i] != o.view[i] ||
@@ -1631,6 +1665,8 @@ struct MultiTexKey {
 struct MultiTexKeyHash {
   size_t operator()(const MultiTexKey& k) const {
     u64 h = HashWord(1469598103934665603ull, k.num_texs);
+    h = HashWord(h, k.decl_uint);
+    h = HashWord(h, k.decl_3d);
     for (u32 i = 0; i < k.num_texs; i++) {
       h = HashWord(h, TexKeyHash{}(k.tex[i]));
       h = HashWord(h, std::hash<VkImageView>{}(k.view[i]));
@@ -1691,6 +1727,7 @@ VkDescriptorSet GetMultiTexSet(const DrawInfo& d,
                                u32 num_bindings,
                                const VkImageView* resolved_views,
                                const VkImageLayout* resolved_layouts,
+                               const VkFormat* resolved_formats,
                                const u64* depth_src) {
   ScopeNs _set_timer(&g_ns_tex_set);
   g_tex_set_n++;
@@ -1700,9 +1737,25 @@ VkDescriptorSet GetMultiTexSet(const DrawInfo& d,
   // (VUID-vkCmdDrawIndexed-None-08114) and a driver may fault on it. Cover
   // every declared binding; the ones past what resolved take the default.
   const u32 resolved = std::min(d.num_texs, kMaxTex);
+  // A binding past what the draw resolved has no T# to describe it, so the
+  // default it takes has to match what the SHADER declared: a 2D default in a
+  // binding the module built as a volume is the same undefined read by another
+  // name, and so is a UNORM one under an integer sampler.
+  const auto declared = [&](u32 i) -> const gcn::ShaderTex* {
+    if (!d.recomp)
+      return nullptr;
+    if (i < d.recomp->ps_texs.size())
+      return &d.recomp->ps_texs[i];
+    const size_t vs_i = i - d.recomp->ps_texs.size();
+    return vs_i < d.recomp->vs_texs.size() ? &d.recomp->vs_texs[vs_i] : nullptr;
+  };
   MultiTexKey key;
   key.num_texs = std::min(std::max(resolved, num_bindings), kMaxTex);
   for (u32 i = 0; i < key.num_texs; i++) {
+    if (const gcn::ShaderTex* t = declared(i)) {
+      key.decl_uint |= static_cast<u32>(t->is_uint) << i;
+      key.decl_3d |= static_cast<u32>(t->is_3d) << i;
+    }
     if (i < resolved) {
       const auto& t = d.texs[i];
       key.tex[i] = TextureKey(
@@ -1733,15 +1786,6 @@ VkDescriptorSet GetMultiTexSet(const DrawInfo& d,
   // white default (the source of "everything renders white" chains) with the
   // descriptor state that failed to resolve.
   static int tex_miss_logged = 0;
-  // A binding past what the draw resolved has no T# to describe it, so the
-  // default it takes has to match what the SHADER declared: a 2D default in a
-  // binding the module built as a volume is the same undefined read by another
-  // name.
-  const auto declared = [&](u32 i) -> const gcn::ShaderTex* {
-    if (!d.recomp || i >= d.recomp->ps_texs.size())
-      return nullptr;
-    return &d.recomp->ps_texs[i];
-  };
   for (u32 i = 0; i < key.num_texs; i++) {
     VkImageView v =
         (i < resolved && !kForceWhite) ? resolved_views[i] : VK_NULL_HANDLE;
@@ -1766,16 +1810,27 @@ VkDescriptorSet GetMultiTexSet(const DrawInfo& d,
       BASE_LOGI(
           "texmiss",
           "ps={:#x} bind={} base={:#x} {}x{} dfmt={} nfmt={} "
-          "tiling={} layers={} mips={} arrayed={} src={:#x}{}",
+          "tiling={} layers={} mips={} arrayed={} 3d={} decl={} uint={} "
+          "src={:#x}{}",
           (unsigned long)d.ps_addr, i, (unsigned long)t.base, t.w, t.h,
           t.dfmt, t.nfmt, t.tiling, t.layers, t.mip_levels, (int)t.arrayed,
+          (int)t.is_3d, (int)(declared(i) != nullptr),
+          (int)(declared(i) && declared(i)->is_uint),
           (unsigned long)t.src, mem);
     }
     if (d.texs[i].storage && !v)
       return VK_NULL_HANDLE;
+    // A binding the module declared with an integer sampled type cannot take
+    // the UNORM default: the numeric types have to match
+    // (VUID-vkCmdDrawIndexed-format-07753).
+    const bool want_uint = declared(i) && declared(i)->is_uint;
+    // Shape AND numeric type: a default that matches one but not the other is
+    // the same undefined read the resolved case would have been.
     VkImageView fallback =
-        is_3d ? g_tex.white_3d_view
-              : (arrayed ? g_tex.white_array_view : g_tex.white_view);
+        is_3d ? (want_uint ? g_tex.white_uint_3d_view : g_tex.white_3d_view)
+        : arrayed
+            ? (want_uint ? g_tex.white_uint_array_view : g_tex.white_array_view)
+            : (want_uint ? g_tex.white_uint_view : g_tex.white_view);
     views[i] = v ? v : fallback;
     layouts[i] =
         v ? resolved_layouts[i] : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
@@ -1805,8 +1860,15 @@ VkDescriptorSet GetMultiTexSet(const DrawInfo& d,
       // the first component of any format, Vulkan does not. Sample it plainly.
       sampler.depth_compare =
           d.texs[i].depth_compare && depth_src && depth_src[i];
-      sampler.integer = kIntegerRt && !d.texs[i].storage &&
-                        (d.texs[i].nfmt == 4 || d.texs[i].nfmt == 5);
+      // The T# says how the SHADER reads the texels; the view says what the
+      // hardware may do with them. A binding that resolved to a render target
+      // takes that target's format, and an integer one is not filterable at
+      // all -- VK_FILTER_LINEAR on it is undefined
+      // (VUID-vkCmdDrawIndexed-magFilter-04553), whatever the T# asked for.
+      sampler.integer =
+          !d.texs[i].storage &&
+          ((kIntegerRt && (d.texs[i].nfmt == 4 || d.texs[i].nfmt == 5)) ||
+           (resolved_formats && IsIntegerColorFormat(resolved_formats[i])));
     }
     // A compare sample that did not resolve to a depth surface has nothing
     // valid to read: Vulkan defines the comparison only on a format that

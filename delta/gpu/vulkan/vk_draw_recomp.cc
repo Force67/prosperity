@@ -1286,14 +1286,22 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
       }
     }
     if (rp->multi_tex) {
+      // The format each binding's view ended up with. A render target the T#
+      // does not describe hands over its OWN format, and if that is an integer
+      // one the binding may not be filtered -- the sampler is otherwise built
+      // from the T#, which says nothing about it
+      // (VUID-vkCmdDrawIndexed-magFilter-04553).
+      VkFormat multi_formats[kMaxTex] = {};
       for (u32 i = 0; i < multi_n; i++) {
         if (multi_storage[i]) {
           multi_views[i] = g_rts[multi_storage[i]].view;
           multi_layouts[i] = VK_IMAGE_LAYOUT_GENERAL;
+          multi_formats[i] = g_rts[multi_storage[i]].fmt;
         } else if (multi_feedback[i]) {
           auto& src = g_rts[multi_feedback[i]];
           multi_views[i] = SampledView(src, d.texs[i].swizzle, true);
           multi_layouts[i] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+          multi_formats[i] = src.fmt;
         } else if (multi_color[i]) {
           // Use the numeric type the T# names, not the one the attachment was
           // created with: Vulkan requires the view's numeric type to match the
@@ -1301,12 +1309,14 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
           // a plane as UNORM that a later shader reads as UINT (or vice versa).
           multi_views[i] = SampledViewAs(
               g_rts[multi_color[i]], d.texs[i].swizzle,
-              GuestTextureFormat(d.texs[i].dfmt, d.texs[i].nfmt));
+              GuestTextureFormat(d.texs[i].dfmt, d.texs[i].nfmt),
+              &multi_formats[i]);
           multi_layouts[i] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         } else if (multi_stencil_src[i]) {
           multi_views[i] =
               StencilSampledView(g_depths[multi_stencil_src[i]]);
           multi_layouts[i] = VK_IMAGE_LAYOUT_STENCIL_READ_ONLY_OPTIMAL;
+          multi_formats[i] = VK_FORMAT_S8_UINT;
         } else if (multi_depth[i]) {
           multi_views[i] =
               SampledView(g_depths[multi_depth[i]], d.texs[i].swizzle);
@@ -1315,7 +1325,7 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
       }
       tex_set =
           GetMultiTexSet(d, rp->tex_set_layout, rp->tex_bindings, multi_views,
-                         multi_layouts,
+                         multi_layouts, multi_formats,
                          multi_depth);
       if (!tex_set)
         return Decline(kGuestTex);
@@ -1358,21 +1368,26 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
   }
   if (rp->multi_tex) {
     if (!tex_set) {
+      VkFormat multi_formats[kMaxTex] = {};
       for (u32 i = 0; i < multi_n; i++) {
         if (multi_storage[i]) {
           multi_views[i] = g_rts[multi_storage[i]].view;
           multi_layouts[i] = VK_IMAGE_LAYOUT_GENERAL;
+          multi_formats[i] = g_rts[multi_storage[i]].fmt;
         } else if (multi_feedback[i]) {
           multi_views[i] =
               SampledView(g_rts[multi_feedback[i]], d.texs[i].swizzle, true);
+          multi_formats[i] = g_rts[multi_feedback[i]].fmt;
         } else if (multi_color[i]) {
           multi_views[i] = SampledViewAs(
               g_rts[multi_color[i]], d.texs[i].swizzle,
-              GuestTextureFormat(d.texs[i].dfmt, d.texs[i].nfmt));
+              GuestTextureFormat(d.texs[i].dfmt, d.texs[i].nfmt),
+              &multi_formats[i]);
         } else if (multi_stencil_src[i]) {
           multi_views[i] =
               StencilSampledView(g_depths[multi_stencil_src[i]]);
           multi_layouts[i] = VK_IMAGE_LAYOUT_STENCIL_READ_ONLY_OPTIMAL;
+          multi_formats[i] = VK_FORMAT_S8_UINT;
         } else if (multi_depth[i]) {
           multi_views[i] =
               SampledView(g_depths[multi_depth[i]], d.texs[i].swizzle);
@@ -1381,7 +1396,7 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
       }
       tex_set =
           GetMultiTexSet(d, rp->tex_set_layout, rp->tex_bindings, multi_views,
-                         multi_layouts,
+                         multi_layouts, multi_formats,
                          multi_depth);
     }
     if (!tex_set)
@@ -1389,9 +1404,12 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
   } else if (feedback_as_tex) {
     VkImageView views[kMaxTex] = {};
     VkImageLayout layouts[kMaxTex] = {};
+    VkFormat formats[kMaxTex] = {};
     views[0] = SampledView(g_rts[tex_base], d.tex_swizzle, true);
     layouts[0] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    tex_set = GetMultiTexSet(d, g_tex.ds_layout, 1, views, layouts, nullptr);
+    formats[0] = g_rts[tex_base].fmt;
+    tex_set =
+        GetMultiTexSet(d, g_tex.ds_layout, 1, views, layouts, formats, nullptr);
     if (!tex_set)
       return Decline(kMidRegion);
   } else if (color_as_tex) {
@@ -1400,9 +1418,12 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
       return Decline(kMidRegion);
     VkImageView views[kMaxTex] = {};
     VkImageLayout layouts[kMaxTex] = {};
+    VkFormat formats[kMaxTex] = {};
     views[0] = SampledView(src, d.tex_swizzle);
     layouts[0] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    tex_set = GetMultiTexSet(d, g_tex.ds_layout, 1, views, layouts, nullptr);
+    formats[0] = src.fmt;
+    tex_set =
+        GetMultiTexSet(d, g_tex.ds_layout, 1, views, layouts, formats, nullptr);
     if (!tex_set)
       return Decline(kMidRegion);
   } else if (depth_as_tex) {
@@ -1414,7 +1435,9 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
     views[0] = SampledView(src, d.tex_swizzle);
     layouts[0] = VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL;
     const u64 depth_only[kMaxTex] = {tex_base};
-    tex_set = GetMultiTexSet(d, g_tex.ds_layout, 1, views, layouts, depth_only);
+    VkFormat formats[kMaxTex] = {};
+    tex_set = GetMultiTexSet(d, g_tex.ds_layout, 1, views, layouts, formats,
+                             depth_only);
     if (!tex_set)
       return Decline(kMidRegion);
   }

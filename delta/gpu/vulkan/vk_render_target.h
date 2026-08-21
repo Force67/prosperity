@@ -166,7 +166,11 @@ VkDescriptorSet SnapshotRT(RTarget& rt);
 VkImageView SampledView(RTarget& rt, u32 swizzle, bool feedback = false);
 // Sampled view reinterpreted into `want` (same texel size) so the view's
 // numeric type matches the shader's OpTypeImage sampled type.
-VkImageView SampledViewAs(RTarget& rt, u32 swizzle, VkFormat want);
+// `used` takes the format the view was actually created with, which is not
+// always `want`: the caller needs it to decide whether the binding may be
+// filtered.
+VkImageView SampledViewAs(RTarget& rt, u32 swizzle, VkFormat want,
+                          VkFormat* used = nullptr);
 VkImageView SampledView(DepthTarget& depth, u32 swizzle);
 
 // Resolve a sampled guest address to the live image backing it (0 = none).

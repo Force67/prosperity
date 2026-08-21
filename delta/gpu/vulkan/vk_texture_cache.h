@@ -35,6 +35,9 @@ struct TextureBindings {
   VkDescriptorPool ds_pool = VK_NULL_HANDLE;
   std::vector<VkDescriptorPool> ds_pools;
   VkSampler sampler = VK_NULL_HANDLE;  // default, for an unresolved guest S#
+  // The same default for a binding whose view is an integer format, which
+  // Vulkan does not allow to be filtered at all.
+  VkSampler sampler_nearest = VK_NULL_HANDLE;
 
   // Multi-texture (a recomp PS sampling >1 texture, e.g. Doom64's 3D walls): a
   // kMaxTex-binding set-0 layout and its pools, plus a 1x1 white default for
@@ -50,6 +53,11 @@ struct TextureBindings {
   VkImage white_3d_img = VK_NULL_HANDLE;
   ImageAllocation white_3d_allocation;
   VkImageView white_view = VK_NULL_HANDLE;
+  // The same texel through an integer view, for a binding the module declared
+  // as an integer sampler.
+  VkImageView white_uint_view = VK_NULL_HANDLE;
+  VkImageView white_uint_array_view = VK_NULL_HANDLE;
+  VkImageView white_uint_3d_view = VK_NULL_HANDLE;
   VkImageView white_array_view = VK_NULL_HANDLE;
   VkImageView white_3d_view = VK_NULL_HANDLE;
   VkImageView zero_view = VK_NULL_HANDLE;
@@ -115,6 +123,10 @@ VkDescriptorSet GetMultiTexSet(const rhi::DrawInfo& d,
                                u32 num_bindings,
                                const VkImageView* resolved_views,
                                const VkImageLayout* resolved_layouts,
+                               // Per binding: the format its view was created
+                               // with, or VK_FORMAT_UNDEFINED where the T#
+                               // describes it. An integer one may not filter.
+                               const VkFormat* resolved_formats,
                                // Per binding: the depth target it
                                // resolved to, or 0. A depth
                                // comparison is only defined on a

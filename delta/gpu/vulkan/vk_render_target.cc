@@ -96,7 +96,13 @@ VkImageView SampledImageView(VkImage image,
 // Sampled view of a colour target in `want` rather than the target's own
 // format, when the two are the same size (so the reinterpretation is legal and
 // the bytes line up). Falls back to the target's format when they are not.
-VkImageView SampledViewAs(RTarget& rt, u32 swizzle, VkFormat want) {
+VkImageView SampledViewAs(RTarget& rt, u32 swizzle, VkFormat want,
+                          VkFormat* used) {
+  const auto own = [&](VkImageView v) {
+    if (used)
+      *used = rt.fmt;
+    return v;
+  };
   // Equal size is not the whole rule: a mutable-format view may only take
   // another format of the same COMPATIBILITY CLASS, and a block-compressed one
   // shares no class with the uncompressed format every render target has. A
@@ -105,7 +111,9 @@ VkImageView SampledViewAs(RTarget& rt, u32 swizzle, VkFormat want) {
   // the binding on the white default instead of the target's own content.
   if (want == VK_FORMAT_UNDEFINED || want == rt.fmt ||
       FormatBytes(want) != FormatBytes(rt.fmt) || FormatBlockCompressed(want))
-    return SampledView(rt, swizzle);
+    return own(SampledView(rt, swizzle));
+  if (used)
+    *used = want;
   const u32 key = swizzle | (static_cast<u32>(want) << 16);
   const auto it = rt.alias_views.find(key);
   if (it != rt.alias_views.end())
@@ -121,7 +129,7 @@ VkImageView SampledViewAs(RTarget& rt, u32 swizzle, VkFormat want) {
   vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
   VkImageView v = VK_NULL_HANDLE;
   if (vkCreateImageView(g_dev.device, &vci, nullptr, &v) != VK_SUCCESS)
-    return SampledView(rt, swizzle);
+    return own(SampledView(rt, swizzle));
   rt.alias_views[key] = v;
   return v;
 }
