@@ -562,7 +562,7 @@ RecompStatus BindVertexAttributes(const gcn::Recompiled& rc,
                                   const gcn::VBuffer* attr_vbs,
                                   u32 attr_count,
                                   rhi::DrawInfo& d) {
-  u32 attr_binding[8] = {};
+  u32 attr_binding[rhi::DrawInfo::kMaxVertexAttrs] = {};
   for (u32 i = 0; i < attr_count; i++) {
     const gcn::VBuffer& vb = attr_vbs[i];
     int sel = -1;
@@ -763,9 +763,10 @@ RecompStatus ResolveRecompiledShaders(
   const auto direct_vbs =
       gcn::ResolveDirectVertexBuffers(vs_prog, rc.attrs, vud);
 
-  gcn::VBuffer attr_vbs[8];
+  gcn::VBuffer attr_vbs[rhi::DrawInfo::kMaxVertexAttrs];
   u32 attr_count = 0;
-  for (size_t i = 0; i < rc.attrs.size() && i < 8; i++) {
+  for (size_t i = 0;
+       i < rc.attrs.size() && i < rhi::DrawInfo::kMaxVertexAttrs; i++) {
     const gcn::ShaderAttr& a = rc.attrs[i];
     if (!a.direct_fetch && a.table_sgpr + 1 >= 16)
       return RecompStatus::kBadAttrs;

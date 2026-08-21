@@ -279,7 +279,14 @@ struct DrawInfo {
   u32 vs_user_data[32] = {};
   u32 ps_user_data[32] = {};
   const gcn::Recompiled* recomp = nullptr;
-  VertexAttr vattrs[8];
+  // Vulkan guarantees 16 vertex input attributes and every desktop driver
+  // reports far more. A shader declares an input for every attribute its fetch
+  // shader reads, and stopping at 8 left the ones past it with no attribute
+  // description at all -- the pipeline then has no Location 8/9/10 for inputs
+  // the module does have (VUID-VkGraphicsPipelineCreateInfo-Input-07904) and
+  // those vertex inputs read undefined.
+  static constexpr u32 kMaxVertexAttrs = 16;
+  VertexAttr vattrs[kMaxVertexAttrs];
   u32 num_vattrs = 0;
   // Vertex buffer bindings the attributes read from. vbufs[0] mirrors
   // vertex_data/vertex_stride so the single-binding fast path and the heuristic
