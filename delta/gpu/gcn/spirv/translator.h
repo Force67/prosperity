@@ -98,6 +98,11 @@ struct Translator {
   // an SSA value: a sample taken inside a branch does not dominate the shader
   // epilogue, and using the value directly made the module fail validation.
   Id last_texel_var = 0;
+  // DELTA_GPU_PSVGPR_AT's destination: three VGPRs captured the moment one
+  // instruction has executed, so a register the shader later reuses can still
+  // be read. Private, like last_texel_var, so a capture inside a branch still
+  // reaches the epilogue.
+  Id probe_var = 0;
   Id dbg_file = 0;  // OpString for OpLine pc markers (DELTA_GPU_SHDUMP)
 
   void InitTypes() {

@@ -123,6 +123,10 @@ void Draw(Renderer& renderer, const DrawInfo& d_in) {
   // heuristic quad path when the draw can't be handled. On by default now that
   // it renders gameplay correctly; DELTA_GPU_RECOMP=0 forces the old heuristic
   // path.
+  if (ShaderFilterDrops(d.ps_addr)) {
+    g_frame.draws++;
+    return;
+  }
   const bool recompiled = kRecompPath && d.recomp && DrawRecomp(renderer, d);
   if (!renderer.available())
     return;

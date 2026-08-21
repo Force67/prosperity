@@ -57,15 +57,48 @@ namespace {
 DELTA_OPTION(u32, kCfgMaxIter, "DELTA_GPU_CFG_MAXITER", 16384);
 DELTA_OPTION(u64, kShDisAddr, "DELTA_GPU_SHDIS_ADDR", 0);
 DELTA_OPTION(bool, kGpuNokill, "DELTA_GPU_NOKILL", false);
+// DELTA_GPU_PROBE_PS=<hex ps guest address>: restrict every pixel-shader
+// probe below to that one shader. Without it PSWHITE/PSTEX/PSATTR/PSVGPR/
+// PSREACH rewrite EVERY shader's colour, so the only way to read one pass was
+// to isolate it with ONLY_PS -- and isolating a DEFERRED pass drops the
+// G-buffer it samples, which answers a different question. With this the
+// probe runs inside a complete, correct frame.
+DELTA_OPTION(u64, kProbePs, "DELTA_GPU_PROBE_PS", 0);
 DELTA_OPTION(bool, kGpuPswhite, "DELTA_GPU_PSWHITE", false);
 DELTA_OPTION(bool, kProbeAlpha, "DELTA_GPU_PSPROBE_A", false);
 DELTA_OPTION(int, kGpuPstex, "DELTA_GPU_PSTEX", 0);
+// Scales what a probe EXPORTS, whether that is PSTEX's texel or PSVGPR's
+// registers. The targets these land in are shared -- a deferred light adds
+// into the same buffer the base pass has already written -- so an unscaled
+// probe value is read as a small perturbation of somebody else's content and
+// the answer drowns. Scale it until the probe's own contribution dominates.
 DELTA_OPTION(float, kGpuPstexScale, "DELTA_GPU_PSTEXSCALE", 1.f);
 // DELTA_GPU_PSATTR=<slot+1>: export the interpolated PS input slot instead of
 // the shader's colour. PSWHITE proves the geometry, PSTEX proves the sample;
 // this proves the varyings, which is where a wrong SPI_PS_INPUT_CNTL mapping
 // shows up (a UI quad whose vertex colour reads as black paints black).
 DELTA_OPTION(int, kGpuPsattr, "DELTA_GPU_PSATTR", 0);
+// DELTA_GPU_PSREACH=1: paint a fragment WHITE when it reached no colour export
+// at all, black when it did -- so a target that lights up under this is one
+// whose shader branches over its own export. The white probes cannot answer
+// that: a shader that gates on what it sampled passes its own gate by
+// construction once the sample is forced to white, so they cannot separate
+// "the gate rejected the lane" from "the maths after it read a zero". Implies
+// NOKILL, since the discard lowering exists precisely to drop the fragments
+// this is asking about.
+DELTA_OPTION(bool, kGpuPsreach, "DELTA_GPU_PSREACH", false);
+// DELTA_GPU_PSVGPR=<n+1>: export v[n], v[n+1], v[n+2] instead of the shader's
+// colour. Once PSREACH says a fragment DID export and the target is still
+// black, the question is which term went to zero, and the exported registers
+// are the one end of that chain a probe can see. Read the shader's tail
+// (DELTA_GPU_SHDUMP) to pick n, then walk back register by register.
+DELTA_OPTION(int, kGpuPsvgpr, "DELTA_GPU_PSVGPR", 0);
+// DELTA_GPU_PSVGPR_AT=<pc>: capture those VGPRs the moment the instruction at
+// that pc has executed, instead of at the end of the shader. Without it only
+// registers still live at the export can be read, and a long shader reuses
+// nearly all of them -- the terms a deferred light combines are all dead by
+// its export. Read the pc off DELTA_GPU_SHDUMP's listing.
+DELTA_OPTION(u32, kGpuPsvgprAt, "DELTA_GPU_PSVGPR_AT", 0);
 DELTA_OPTION(bool, kGpuShdis, "DELTA_GPU_SHDIS", false);
 DELTA_OPTION(bool, kGpuShtrace, "DELTA_GPU_SHTRACE", false);
 DELTA_OPTION(bool, kGpuSpirv, "DELTA_GPU_SPIRV", false);
@@ -91,6 +124,11 @@ DELTA_OPTION(bool, kGpuVsNoPred, "DELTA_GPU_VSNOPRED", false);
 namespace gpu::gcn {
 
 namespace {
+// Whether the pixel-shader probes apply to the shader being translated.
+bool ProbeThisPs(const Translator& t) {
+  return !kProbePs || t.program_base == kProbePs.get();
+}
+
 thread_local bool g_had_unsupported = false;
 thread_local std::string g_unsupported_ops;
 
@@ -979,6 +1017,17 @@ void EmitInst(Translator& t, const Inst& inst, StageContext& sc) {
   }
 }
 
+// DELTA_GPU_PSVGPR_AT: freeze the probed registers here, after this
+// instruction has run. The epilogue exports the frozen copy.
+void CapturePsVgprs(Translator& t, const Inst& inst) {
+  if (!t.probe_var || inst.pc != kGpuPsvgprAt.get())
+    return;
+  const u32 first = static_cast<u32>(kGpuPsvgpr - 1);
+  t.m.Store(t.probe_var,
+            t.m.CompositeConstruct(t.t_v4, {t.VgF(first), t.VgF(first + 1),
+                                            t.VgF(first + 2), t.F32(1.f)}));
+}
+
 // EmitInst wrapper feeding the shader audit (gcn_audit.h): per-instruction
 // SPIR-V word counts expose instructions that silently emitted nothing, and
 // with DELTA_GPU_SHDUMP each instruction's ops are preceded by an OpLine
@@ -999,6 +1048,7 @@ void EmitInstAudited(Translator& t,
                  {t.U32(2), t.U32(2), t.U32(0x108)});
   if (!ShaderDebugEnabled()) {
     EmitInst(t, inst, sc);
+    CapturePsVgprs(t, inst);
     return;
   }
   AuditInstBegin(index, inst.pc);
@@ -1009,6 +1059,7 @@ void EmitInstAudited(Translator& t,
   }
   const size_t before = t.m.BodyWords();
   EmitInst(t, inst, sc);
+  CapturePsVgprs(t, inst);
   AuditInstEnd(index, static_cast<u32>(t.m.BodyWords() - before));
 }
 
@@ -2086,11 +2137,16 @@ bool TranslatePs(const Program& program,
   }
   // DELTA_GPU_PSTEX's destination, declared before the body so every sample
   // site can store into it regardless of the control flow it sits in.
-  if (kGpuPstex != 0)
+  const bool probe = ProbeThisPs(t);
+  if (kGpuPsvgpr > 0 && kGpuPsvgprAt && probe)
+    t.probe_var = t.m.Variable(
+        t.m.TypePointer(spv::StorageClass::Private, t.t_v4),
+        spv::StorageClass::Private, t.m.ConstNull(t.t_v4));
+  if (kGpuPstex != 0 && probe)
     t.last_texel_var = t.m.Variable(
         t.m.TypePointer(spv::StorageClass::Private, t.t_v4),
         spv::StorageClass::Private, t.m.ConstNull(t.t_v4));
-  if (!kGpuPswhite)
+  if (!(kGpuPswhite && probe))
     EmitBody(t, program, sc, reachable.data());
 
   if (sc.wrote_color && sc.color_written_var) {
@@ -2098,7 +2154,7 @@ bool TranslatePs(const Program& program,
     // color export for failing fragments (e.g. s_cmp + s_cbranch_scc0 ->
     // s_endpgm). Discard those (OpKill) instead of leaving the output
     // undefined. DELTA_GPU_NOKILL skips the discard as a diagnostic.
-    if (!kGpuNokill) {
+    if (!kGpuNokill && !(kGpuPsreach && probe)) {
       const Id wrote = t.IsNonZero(t.m.Load(t.t_u, sc.color_written_var));
       const Id kill_blk = t.m.NewBlock(), after_kill = t.m.NewBlock();
       t.m.SelectionMerge(after_kill);
@@ -2115,7 +2171,8 @@ bool TranslatePs(const Program& program,
   const Id pstex = t.last_texel_var && t.last_texel
                        ? t.m.Load(t.t_v4, t.last_texel_var)
                        : 0;
-  if (kGpuPstex != 0 && has_color_export && (sc.mrt_bound_mask & 1u) && pstex &&
+  if (kGpuPstex != 0 && probe && has_color_export &&
+      (sc.mrt_bound_mask & 1u) && pstex &&
       !(sc.mrt_uint_mask & 1u))  // an integer MRT0 cannot take a float export
     t.m.Store(PsColorOut(t, sc, 0),
               t.m.CompositeConstruct(
@@ -2129,13 +2186,49 @@ bool TranslatePs(const Program& program,
                    t.F32(1.f)}));
 
   // DELTA_GPU_PSATTR=<slot+1>: export that input slot's interpolated value.
-  if (kGpuPsattr > 0 && has_color_export && (sc.mrt_bound_mask & 1u) && !(sc.mrt_uint_mask & 1u)) {
+  if (kGpuPsattr > 0 && probe && has_color_export &&
+      (sc.mrt_bound_mask & 1u) && !(sc.mrt_uint_mask & 1u)) {
     const Id in = PsInputVar(t, sc, static_cast<u32>(kGpuPsattr - 1));
     t.m.Store(PsColorOut(t, sc, 0), t.m.Load(t.t_v4, in));
   }
 
+  // DELTA_GPU_PSVGPR=<n+1>: export three consecutive VGPRs as the colour,
+  // either as they stand at the export or as DELTA_GPU_PSVGPR_AT captured them.
+  if (kGpuPsvgpr > 0 && probe && has_color_export &&
+      (sc.mrt_bound_mask & 1u) && !(sc.mrt_uint_mask & 1u)) {
+    const u32 first = static_cast<u32>(kGpuPsvgpr - 1);
+    const Id v = t.probe_var
+                     ? t.m.Load(t.t_v4, t.probe_var)
+                     : t.m.CompositeConstruct(
+                           t.t_v4, {t.VgF(first), t.VgF(first + 1),
+                                    t.VgF(first + 2), t.F32(1.f)});
+    t.m.Store(PsColorOut(t, sc, 0),
+              t.m.CompositeConstruct(
+                  t.t_v4,
+                  {t.FMul(t.m.CompositeExtract(t.t_f, v, 0),
+                          t.F32(kGpuPstexScale)),
+                   t.FMul(t.m.CompositeExtract(t.t_f, v, 1),
+                          t.F32(kGpuPstexScale)),
+                   t.FMul(t.m.CompositeExtract(t.t_f, v, 2),
+                          t.F32(kGpuPstexScale)),
+                   t.F32(1.f)}));
+  }
+
+  // DELTA_GPU_PSREACH: white where the fragment reached no colour export. A
+  // straight-line shader always reaches one, so it stays black.
+  if (kGpuPsreach && probe && has_color_export &&
+      (sc.mrt_bound_mask & 1u) && !(sc.mrt_uint_mask & 1u)) {
+    const Id missed =
+        sc.color_written_var ? t.IsZero(t.m.Load(t.t_u, sc.color_written_var))
+                             : t.m.ConstBool(false);
+    const Id v = t.SelectF(missed, t.F32(1.f), t.F32(0.f));
+    t.m.Store(PsColorOut(t, sc, 0),
+              t.m.CompositeConstruct(t.t_v4, {v, v, v, t.F32(1.f)}));
+  }
+
   // DELTA_GPU_PSWHITE: isolate VS/rasterization from fragment color math.
-  if (kGpuPswhite && has_color_export && (sc.mrt_bound_mask & 1u) && !(sc.mrt_uint_mask & 1u))
+  if (kGpuPswhite && probe && has_color_export && (sc.mrt_bound_mask & 1u) &&
+      !(sc.mrt_uint_mask & 1u))
     t.m.Store(PsColorOut(t, sc, 0),
               t.m.ConstComposite(
                   t.t_v4, {t.F32(1.f), t.F32(1.f), t.F32(1.f), t.F32(1.f)}));

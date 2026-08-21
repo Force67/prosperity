@@ -237,6 +237,53 @@ void ReportDeclines() {
 
 // Issue a draw running the game's recompiled VS/PS. Returns false if the draw
 // can't be handled (the caller falls back to the heuristic path).
+// DELTA_GPU_SKIP_PS=<hex> / DELTA_GPU_ONLY_PS=<hex>[,<hex>...]: drop every
+// draw using that guest pixel shader, or every draw except those. Guest shader
+// addresses are stable per build, which draw INDICES are not -- DELTA_GPU_
+// ONLYDRAW looks equivalent and hands you a different pass whenever the draw
+// count moves (P.T.'s light pass alone varies 29..34 draws).
+//
+// Answered from the RENDERER's entry point, not from the recompiled path: a
+// draw whose shader never recompiled has no `d.recomp`, never reaches
+// DrawRecomp at all, and would sail past the filter into the heuristic quad
+// renderer -- so "isolate one pass" quietly left every un-recompiled pass in
+// the frame, painting flat quads that no SPIR-V probe can touch.
+bool ShaderFilterDrops(u64 ps_addr) {
+  static const u64 kSkipPs = [] {
+    const char* e = std::getenv("DELTA_GPU_SKIP_PS");
+    return e ? std::strtoull(e, nullptr, 0) : 0ull;
+  }();
+  if (kSkipPs && ps_addr == kSkipPs)
+    return true;
+  static const std::vector<u64> kOnlyPs = [] {
+    std::vector<u64> out;
+    if (const char* e = std::getenv("DELTA_GPU_ONLY_PS"))
+      for (const char* p = e; *p;) {
+        while (*p == ',' || *p == ' ')
+          p++;
+        if (!*p)
+          break;
+        out.push_back(std::strtoull(p, nullptr, 0));
+        while (*p && *p != ',')
+          p++;
+      }
+    if (!out.empty()) {
+      base::String list;
+      base::FormatTo(list, "keeping only {} shader(s):", out.size());
+      for (u64 v : out)
+        base::FormatTo(list, " {:#x}", (unsigned long long)v);
+      BASE_LOGI("onlyps", "{}", list.c_str());
+    }
+    return out;
+  }();
+  if (kOnlyPs.empty())
+    return false;
+  for (u64 v : kOnlyPs)
+    if (v == ps_addr)
+      return false;
+  return true;
+}
+
 bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
   const u64 t_draw_start = NowNs();
   // DELTA_GPU_WHYDROP=1: every draw as the renderer receives it, so a slot that
@@ -569,69 +616,6 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
       it->second.clear_value = VkClearColorValue{{0.f, 0.f, 0.f, 0.f}};
     }
   }
-  // DELTA_GPU_SKIP_PS=<hex>: diagnostic only. Drop every draw using that guest
-
-  // pixel-shader address, to prove what a single pass contributes to the
-  // presented frame. Guest shader addresses are stable per build.
-  {
-    static const u64 kSkipPs = [] {
-      const char* e = std::getenv("DELTA_GPU_SKIP_PS");
-      return e ? std::strtoull(e, nullptr, 0) : 0ull;
-    }();
-    if (kSkipPs && d.ps_addr == kSkipPs) {
-      g_frame.draws++;
-      return true;
-    }
-  }
-  // DELTA_GPU_ONLY_PS=<hex>[,<hex>...]: the inverse -- drop every draw EXCEPT
-  // those shaders. DELTA_GPU_ONLYDRAW does something that looks equivalent and
-  // is not: it is keyed on the draw INDEX, and a title whose draw count moves
-  // between runs (P.T.'s light pass alone varies 29..34 draws) will hand you a
-  // different shader than the index had in the capture you read it from -- a
-  // clean, wrong answer. Shader addresses are stable; indices are not. Isolating
-  // one pass onto an otherwise empty frame is how "does this pass cover any
-  // pixels at all" gets separated from "it covers them and contributes nothing",
-  // which no amount of reading an accumulation buffer can do.
-  {
-    static const std::vector<u64> kOnlyPs = [] {
-      std::vector<u64> out;
-      if (const char* e = std::getenv("DELTA_GPU_ONLY_PS"))
-        for (const char* p = e; *p;) {
-          while (*p == ',' || *p == ' ')
-            p++;
-          if (!*p)
-            break;
-          out.push_back(std::strtoull(p, nullptr, 0));
-          while (*p && *p != ',')
-            p++;
-        }
-      if (!out.empty()) {
-        base::String list;
-        base::FormatTo(list, "keeping only {} shader(s):", out.size());
-        for (u64 v : out)
-          base::FormatTo(list, " {:#x}", (unsigned long long)v);
-        BASE_LOGI("onlyps", "{}", list.c_str());
-      }
-      return out;
-    }();
-    if (!kOnlyPs.empty()) {
-      bool keep = false;
-      for (u64 v : kOnlyPs)
-        keep |= (v == d.ps_addr);
-      if (!keep) {
-        g_frame.draws++;
-        return true;
-      }
-      static std::vector<u64> said;
-      if (std::find(said.begin(), said.end(), d.ps_addr) == said.end()) {
-        said.push_back(d.ps_addr);
-        BASE_LOGI("onlyps", "keeping ps={:#x} rt={:#x} {}x{}",
-                  (unsigned long long)d.ps_addr,
-                  (unsigned long long)d.rt_base, d.rt_w, d.rt_h);
-      }
-    }
-  }
-
   // DELTA_GPU_VTXTRACE_RT=<hex>: diagnostic only. For every draw into that
   // colour target, report the vertex layout and the first vertex's raw
   // attribute words. A pass whose pixel shader just interpolates a vertex

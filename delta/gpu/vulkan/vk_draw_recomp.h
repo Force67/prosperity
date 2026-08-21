@@ -16,6 +16,11 @@ namespace gpu::vk {
 // heuristic quad path.
 bool DrawRecomp(rhi::Renderer& renderer, const rhi::DrawInfo& d);
 
+// DELTA_GPU_SKIP_PS / DELTA_GPU_ONLY_PS: whether this draw is filtered out.
+// Asked before either draw path, so a shader that never recompiled is dropped
+// too instead of reaching the heuristic renderer.
+bool ShaderFilterDrops(u64 ps_addr);
+
 // Log the tally of why draws declined the recompiled path.
 void ReportDeclines();
 
