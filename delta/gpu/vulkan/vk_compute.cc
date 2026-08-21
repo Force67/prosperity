@@ -741,19 +741,47 @@ void AliasedImageBarrier(VkCommandBuffer c,
                        nullptr, 1, &b);
 }
 
-// The CS side of an image<->buffer bridge copy expects the linear staged
-// layout; reject targets whose shape disagrees with the descriptor.
-bool AliasedShapeMatches(const CsAliasedImage& img,
-                         const ComputeInfo::Res& res,
-                         const char* dir) {
-  if (res.mip_levels == 1 && res.layers == 1 && img.w == res.width &&
-      img.h == res.height &&
-      img.elem_bytes ==
-          (img.is_stencil ? res.elem_bytes : res.stage_elem_bytes))
+// How a bridge copy moves texels between a live image and the CS staging
+// buffer. The two descriptions of one surface disagree routinely and for
+// reasons that are not defects: the IMAGE is sized from CB_COLOR's
+// pitch/slice while the CS descriptor carries the surface's own width and
+// height, and a target the shader reads as R11G11B10F is staged as four
+// floats per texel because that is what StageCsImage produces on the
+// guest-memory path. Demanding exact agreement rejected GTA:SA's scene
+// target on both counts, so its whole compute post chain read the guest
+// bytes under the target -- which draws never write, i.e. black.
+struct AliasedCopyPlan {
+  u32 w = 0;
+  u32 h = 0;
+  bool unpack = false;  // image holds packed 11/11/10, staging holds float4
+};
+
+bool PlanAliasedCopy(const CsAliasedImage& img,
+                     const ComputeInfo::Res& res,
+                     const char* dir,
+                     AliasedCopyPlan& plan) {
+  const u32 want_elem =
+      img.is_stencil ? res.elem_bytes : res.stage_elem_bytes;
+  const bool unpack = res.dfmt == 6 && !img.is_depth && !img.is_stencil &&
+                      img.elem_bytes == 4 && want_elem == 16;
+  // A tile row of slack in either direction: an image padded up to its tile
+  // height and a descriptor rounded to the surface's own are the same
+  // surface, and the copy takes the overlap.
+  constexpr u32 kExtentSlack = 8;
+  if (res.mip_levels == 1 && res.layers == 1 &&
+      img.w + kExtentSlack >= res.width &&
+      img.h + kExtentSlack >= res.height &&
+      (img.elem_bytes == want_elem || unpack)) {
+    plan.w = std::min(img.w, res.width);
+    plan.h = std::min(img.h, res.height);
+    plan.unpack = unpack;
     return true;
-  static int warned = 0;
-  if (warned < 8) {
-    warned++;
+  }
+  // One line per address and direction. A flat cap spends itself on the level
+  // load and then says nothing at all about the steady state.
+  static std::unordered_set<u64> warned;
+  const u64 key = (res.base << 1) | (dir[0] == 'r' ? 1u : 0u);
+  if (warned.size() < 256 && warned.insert(key).second)
     BASE_LOGI("gpuvk",
               "cs {} live {} target {:#x} shape mismatch: image {}x{} {}B vs "
               "cs {}x{} pitch={} mips={} dfmt={} elem={}/{}B tiling={} -> "
@@ -763,26 +791,94 @@ bool AliasedShapeMatches(const CsAliasedImage& img,
               (unsigned long long)res.base, img.w, img.h, img.elem_bytes,
               res.width, res.height, res.pitch, res.mip_levels, res.dfmt,
               res.elem_bytes, res.stage_elem_bytes, res.tiling_idx);
-  }
   return false;
 }
+
+// A host-visible scratch the format-converting bridge copies through: the
+// image side is packed at the image's own element size, the staging side
+// holds the unpacked floats, and no image<->buffer copy converts between the
+// two in one step.
+struct CsBridgeScratch {
+  VkBuffer buf = VK_NULL_HANDLE;
+  VkDeviceMemory mem = VK_NULL_HANDLE;
+  void* map = nullptr;
+  VkDeviceSize cap = 0;
+};
+CsBridgeScratch g_bridge;
+
+bool EnsureBridgeScratch(VkDeviceSize bytes) {
+  if (g_bridge.cap >= bytes)
+    return true;
+  if (g_bridge.map)
+    vkUnmapMemory(g_dev.device, g_bridge.mem);
+  if (g_bridge.buf)
+    vkDestroyBuffer(g_dev.device, g_bridge.buf, nullptr);
+  if (g_bridge.mem)
+    vkFreeMemory(g_dev.device, g_bridge.mem, nullptr);
+  g_bridge = CsBridgeScratch{};
+  const VkDeviceSize cap = (bytes + 0xFFFF) & ~VkDeviceSize(0xFFFF);
+  VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+  bi.size = cap;
+  bi.usage =
+      VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+  if (vkCreateBuffer(g_dev.device, &bi, nullptr, &g_bridge.buf) != VK_SUCCESS) {
+    g_bridge.buf = VK_NULL_HANDLE;
+    return false;
+  }
+  VkMemoryRequirements mr;
+  vkGetBufferMemoryRequirements(g_dev.device, g_bridge.buf, &mr);
+  VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+  ai.allocationSize = mr.size;
+  ai.memoryTypeIndex = FindComputeMemoryType(mr.memoryTypeBits);
+  if (ai.memoryTypeIndex == UINT32_MAX ||
+      vkAllocateMemory(g_dev.device, &ai, nullptr, &g_bridge.mem) !=
+          VK_SUCCESS) {
+    vkDestroyBuffer(g_dev.device, g_bridge.buf, nullptr);
+    g_bridge = CsBridgeScratch{};
+    return false;
+  }
+  vkBindBufferMemory(g_dev.device, g_bridge.buf, g_bridge.mem, 0);
+  vkMapMemory(g_dev.device, g_bridge.mem, 0, cap, 0, &g_bridge.map);
+  g_bridge.cap = cap;
+  return true;
+}
+
+void CsCopyStaging(CsRange& e, VkDeviceSize bytes, bool to_device);
 
 // Record one bridge copy (image->buffer or buffer->image), submit and wait.
 bool RunAliasedCopy(const CsAliasedImage& img,
                     const ComputeInfo::Res& res,
                     CsRange& e,
-                    bool to_image) {
+                    bool to_image,
+                    const AliasedCopyPlan& plan) {
   gcn::TextureLayout32 tiled, linear;
   if (!BuildCsImageLayouts(res, tiled, linear))
     return false;
   const auto& level = linear.mips[0];
-  const u64 texels = static_cast<u64>(level.pitch) * img.h;
+  const u64 texels = static_cast<u64>(level.pitch) * plan.h;
   const u64 copy_bytes = texels * res.stage_elem_bytes;
   if (level.offset + copy_bytes > e.cap)
     return false;
+  // The converting path copies at the IMAGE's element size, through a scratch
+  // the CPU then unpacks into (or packs out of) the staged layout.
+  const u64 packed_bytes = texels * img.elem_bytes;
+  if (plan.unpack && !EnsureBridgeScratch(packed_bytes))
+    return false;
+  const VkBuffer copy_buf = plan.unpack ? g_bridge.buf : e.buf;
+  auto* scratch = static_cast<u32*>(g_bridge.map);
+  if (plan.unpack && to_image) {
+    for (u32 y = 0; y < plan.h; y++) {
+      const u8* row = static_cast<const u8*>(e.map) + level.offset +
+                      static_cast<u64>(y) * level.pitch * res.stage_elem_bytes;
+      for (u32 x = 0; x < plan.w; x++)
+        scratch[static_cast<u64>(y) * level.pitch + x] =
+            PackR11G11B10(row + static_cast<u64>(x) * res.stage_elem_bytes);
+    }
+  }
   // Host-zero any padding an image->buffer copy does not cover (host writes
   // are made available by the submission).
-  if (!to_image && (level.offset != 0 || copy_bytes < res.size))
+  if (!to_image &&
+      (plan.unpack || level.offset != 0 || copy_bytes < res.size))
     std::memset(e.map, 0, res.size);
   if (img.is_stencil) {
     if (level.offset || texels > e.cap)
@@ -814,8 +910,10 @@ bool RunAliasedCopy(const CsAliasedImage& img,
   // Everything above prepared the HOST mirror (padding zeroed, stencil packed).
   // A split range has to carry that to VRAM before the image copy reads it, and
   // ahead of an image->buffer copy so the padding it does not cover is zeroed
-  // there too.
-  RecordStagingCopy(c, e, e.cap, /*to_device=*/true);
+  // there too. The converting path copies through the scratch instead, and
+  // carries the host mirror over after it has been unpacked.
+  if (!plan.unpack)
+    RecordStagingCopy(c, e, e.cap, /*to_device=*/true);
   // Chain from -- and restore -- the SUBMITTED layout: this copy executes
   // before the current frame's still-recording barriers, whose oldLayout
   // chain must stay intact.
@@ -832,7 +930,7 @@ bool RunAliasedCopy(const CsAliasedImage& img,
     bb.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
     bb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     bb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    bb.buffer = e.buf;
+    bb.buffer = copy_buf;
     bb.offset = 0;
     bb.size = VK_WHOLE_SIZE;
     vkCmdPipelineBarrier(
@@ -843,14 +941,14 @@ bool RunAliasedCopy(const CsAliasedImage& img,
                       AliasedImageAccess(img, img.submitted_layout),
                       transfer_access);
   VkBufferImageCopy copy{};
-  copy.bufferOffset = img.is_stencil ? 0 : level.offset;
+  copy.bufferOffset = (img.is_stencil || plan.unpack) ? 0 : level.offset;
   copy.bufferRowLength = level.pitch;
   copy.imageSubresource = {img.aspect, 0, 0, 1};
-  copy.imageExtent = {img.w, img.h, 1};
+  copy.imageExtent = {plan.w, plan.h, 1};
   if (to_image)
-    vkCmdCopyBufferToImage(c, e.buf, img.image, transfer_layout, 1, &copy);
+    vkCmdCopyBufferToImage(c, copy_buf, img.image, transfer_layout, 1, &copy);
   else
-    vkCmdCopyImageToBuffer(c, img.image, transfer_layout, e.buf, 1, &copy);
+    vkCmdCopyImageToBuffer(c, img.image, transfer_layout, copy_buf, 1, &copy);
   AliasedImageBarrier(c, img, transfer_layout, img.submitted_layout,
                       transfer_access,
                       AliasedImageAccess(img, img.submitted_layout));
@@ -860,7 +958,7 @@ bool RunAliasedCopy(const CsAliasedImage& img,
     bb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_HOST_READ_BIT;
     bb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     bb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    bb.buffer = e.buf;
+    bb.buffer = copy_buf;
     bb.offset = 0;
     bb.size = VK_WHOLE_SIZE;
     vkCmdPipelineBarrier(
@@ -893,6 +991,18 @@ bool RunAliasedCopy(const CsAliasedImage& img,
     for (u64 i = texels; i-- > 0;)
       expanded[i] = packed[i];
   }
+  if (plan.unpack && !to_image) {
+    gcn::DetileParallelRows(plan.h, [&](u32 y0, u32 y1) {
+      for (u32 y = y0; y < y1; y++) {
+        u8* row = static_cast<u8*>(e.map) + level.offset +
+                  static_cast<u64>(y) * level.pitch * res.stage_elem_bytes;
+        for (u32 x = 0; x < plan.w; x++)
+          UnpackR11G11B10(scratch[static_cast<u64>(y) * level.pitch + x],
+                          row + static_cast<u64>(x) * res.stage_elem_bytes);
+      }
+    });
+    CsCopyStaging(e, e.cap, /*to_device=*/true);
+  }
   return true;
 }
 
@@ -911,9 +1021,10 @@ bool StageCsRangeFromRt(const ComputeInfo::Res& res, CsRange& e) {
   CsAliasedImage img;
   if (!FindCsAliasedImage(res.base, img))
     return false;
-  if (!AliasedShapeMatches(img, res, "reads"))
+  AliasedCopyPlan plan;
+  if (!PlanAliasedCopy(img, res, "reads", plan))
     return false;
-  return RunAliasedCopy(img, res, e, /*to_image=*/false);
+  return RunAliasedCopy(img, res, e, /*to_image=*/false, plan);
 }
 
 // The reverse: a CS result written to a range that a live render/depth target
@@ -927,7 +1038,8 @@ bool UploadCsRangeToRt(u64 base, CsRange& e) {
   CsAliasedImage img;
   if (!e.image_staging || !FindCsAliasedImage(base, img))
     return true;  // nothing to refresh
-  if (!AliasedShapeMatches(img, e.res, "writes")) {
+  AliasedCopyPlan plan;
+  if (!PlanAliasedCopy(img, e.res, "writes", plan)) {
     // The guest reused this address with an incompatible image layout. The
     // compute result is current in guest memory, while the old VkImage can no
     // longer represent it; stop resolving subsequent samples to that image.
@@ -942,7 +1054,7 @@ bool UploadCsRangeToRt(u64 base, CsRange& e) {
     }
     return true;
   }
-  if (!RunAliasedCopy(img, e.res, e, /*to_image=*/true))
+  if (!RunAliasedCopy(img, e.res, e, /*to_image=*/true, plan))
     return false;
   if (!img.is_depth)
     g_rts[base].ever_rendered = true;  // CS content is real content
@@ -1753,14 +1865,15 @@ bool PreserveCsDepthBeforeClear(u64 base) {
                        VK_IMAGE_ASPECT_DEPTH_BIT,
                        depth.layout,
                        true};
-  if (!AliasedShapeMatches(image, range.res, "preserves"))
+  AliasedCopyPlan plan;
+  if (!PlanAliasedCopy(image, range.res, "preserves", plan) || plan.unpack)
     return false;
 
   gcn::TextureLayout32 tiled, linear;
   if (!BuildCsImageLayouts(range.res, tiled, linear))
     return false;
   const auto& level = linear.mips[0];
-  const u64 copy_bytes = static_cast<u64>(level.pitch) * depth.h *
+  const u64 copy_bytes = static_cast<u64>(level.pitch) * plan.h *
                               range.res.stage_elem_bytes;
   if (level.offset + copy_bytes > range.cap)
     return false;
@@ -1774,7 +1887,7 @@ bool PreserveCsDepthBeforeClear(u64 base) {
   copy.bufferOffset = level.offset;
   copy.bufferRowLength = level.pitch;
   copy.imageSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1};
-  copy.imageExtent = {depth.w, depth.h, 1};
+  copy.imageExtent = {plan.w, plan.h, 1};
   vkCmdCopyImageToBuffer(g_frame.cmd, depth.image,
                          VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, range.buf, 1,
                          &copy);
