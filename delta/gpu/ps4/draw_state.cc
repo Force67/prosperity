@@ -41,9 +41,14 @@ DELTA_OPTION(const char*, kSkipShList, "DELTA_GPU_SKIPSH", nullptr);
 namespace gpu::ps4 {
 namespace {
 
-// Sampler bindings tracked per draw. The renderer takes more, but a shader
-// reading past this many distinct images is one we have never seen.
-constexpr u32 kMaxTrackedTextures = 16;
+// Sampler bindings tracked per draw. This has to be the number the recompiler
+// and the descriptor set layout use, not a smaller one of its own: texs[i] IS
+// the module's set-0 binding i, and a vertex texture is numbered after the last
+// pixel one. Truncating the pixel list here left every vertex binding one short
+// per dropped entry, so a shader with 17+ samplers had a volume view land on a
+// binding its module had declared 2D, and its last bindings written by nothing
+// at all (VUID-vkCmdDrawIndexed-viewType-07752 / -None-08114).
+constexpr u32 kMaxTrackedTextures = rhi::DrawInfo::kMaxDrawTextures;
 // An index or vertex count beyond this is a decode error, not a draw.
 constexpr u32 kMaxElementCount = 0x100000;
 

@@ -162,7 +162,8 @@ struct DrawInfo {
     // behind it: whether the slot is zero, stale, or never the shader's.
     u64 src = 0;
   };
-  DrawTex texs[24];  // == gpu::vk::kMaxTex
+  static constexpr u32 kMaxDrawTextures = 24;  // == gpu::vk::kMaxTex
+  DrawTex texs[kMaxDrawTextures];
   u32 num_texs = 0;
 
   // Per-draw blend state, decoded from CB_BLEND0_CONTROL (raw dword) + whether
