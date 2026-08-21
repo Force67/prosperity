@@ -155,6 +155,28 @@ bool GuestFormatBlockCompressed(u32 dfmt) {
   return dfmt >= 35 && dfmt <= 41;
 }
 
+// The host side of the same question: a block-compressed VkFormat shares no
+// view-compatibility class with any uncompressed one.
+bool FormatBlockCompressed(VkFormat format) {
+  switch (format) {
+    case VK_FORMAT_BC1_RGBA_UNORM_BLOCK:
+    case VK_FORMAT_BC1_RGBA_SRGB_BLOCK:
+    case VK_FORMAT_BC2_UNORM_BLOCK:
+    case VK_FORMAT_BC2_SRGB_BLOCK:
+    case VK_FORMAT_BC3_UNORM_BLOCK:
+    case VK_FORMAT_BC3_SRGB_BLOCK:
+    case VK_FORMAT_BC4_UNORM_BLOCK:
+    case VK_FORMAT_BC4_SNORM_BLOCK:
+    case VK_FORMAT_BC5_UNORM_BLOCK:
+    case VK_FORMAT_BC5_SNORM_BLOCK:
+    case VK_FORMAT_BC7_UNORM_BLOCK:
+    case VK_FORMAT_BC7_SRGB_BLOCK:
+      return true;
+    default:
+      return false;
+  }
+}
+
 u32 GuestFormatElemBytes(u32 dfmt) {
   switch (dfmt) {
     case 1:

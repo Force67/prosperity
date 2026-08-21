@@ -97,8 +97,14 @@ VkImageView SampledImageView(VkImage image,
 // format, when the two are the same size (so the reinterpretation is legal and
 // the bytes line up). Falls back to the target's format when they are not.
 VkImageView SampledViewAs(RTarget& rt, u32 swizzle, VkFormat want) {
+  // Equal size is not the whole rule: a mutable-format view may only take
+  // another format of the same COMPATIBILITY CLASS, and a block-compressed one
+  // shares no class with the uncompressed format every render target has. A
+  // T# naming BC1/BC5 over a target is a resolution accident, and asking for
+  // that view fails outright (VUID-VkImageViewCreateInfo-image-01761), leaving
+  // the binding on the white default instead of the target's own content.
   if (want == VK_FORMAT_UNDEFINED || want == rt.fmt ||
-      FormatBytes(want) != FormatBytes(rt.fmt))
+      FormatBytes(want) != FormatBytes(rt.fmt) || FormatBlockCompressed(want))
     return SampledView(rt, swizzle);
   const u32 key = swizzle | (static_cast<u32>(want) << 16);
   const auto it = rt.alias_views.find(key);

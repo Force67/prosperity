@@ -19,6 +19,7 @@ constexpr VkFormat kDefaultRtFormat = VK_FORMAT_B8G8R8A8_UNORM;
 
 VkFormat GuestTextureFormat(u32 dfmt, u32 nfmt);
 bool GuestFormatBlockCompressed(u32 dfmt);
+bool FormatBlockCompressed(VkFormat format);
 u32 GuestFormatElemBytes(u32 dfmt);
 VkFormat ColorTargetFormat(u32 info);
 
