@@ -1747,6 +1747,10 @@ bool TranslateVs(const Program& program,
                  const u32* vs_user_data,
                  const std::unordered_set<u32>& flat_attrs,
                  u32 tex_binding_base,
+                 // Already shifted down by tex_binding_base: the plan this
+                 // stage walks numbers its bindings from zero.
+                 u32 tex_3d_mask,
+                 u32 tex_1d_mask,
                  bool gl_clip_space,
                  Recompiled& r,
                  Translator& t) {
@@ -1818,9 +1822,17 @@ bool TranslateVs(const Program& program,
     }
     sc.mimg_plan = &vs_mimg_plan;
     sc.tex_binding_base = tex_binding_base;
+    // A vertex texture can be a volume too. Declaring every one of them 2D
+    // built a module that disagreed with the view the renderer went on to bind
+    // from the same T# (VUID-vkCmdDrawIndexed-viewType-07752), and a sample
+    // through a mismatched view reads nothing defined.
+    sc.tex_3d_mask = tex_3d_mask;
+    sc.tex_1d_mask = tex_1d_mask;
     for (u32 i = 0; i < vs_mimg_plan.binding_srsrc.size(); i++)
       r.vs_texs.push_back({i + tex_binding_base, vs_mimg_plan.binding_srsrc[i],
-                           vs_mimg_plan.binding_storage[i], false, false});
+                           vs_mimg_plan.binding_storage[i],
+                           ((tex_3d_mask >> i) & 1u) != 0,
+                           ((tex_1d_mask >> i) & 1u) != 0, false});
   }
   for (const FetchAttr& attr : attrs)
     if (attr.direct_fetch)
@@ -2013,7 +2025,8 @@ bool TranslatePs(const Program& program,
     r.ps_texs.push_back({i, mimg_plan.binding_srsrc[i],
                          mimg_plan.binding_storage[i],
                          ((tex_3d_mask >> i) & 1u) != 0,
-                         ((tex_1d_mask >> i) & 1u) != 0});
+                         ((tex_1d_mask >> i) & 1u) != 0,
+                         ((tex_uint_mask >> i) & 1u) != 0});
 
   if (UsesDsSwizzle(program, reachable.data()))
     EnableDsSwizzle(t, sc, iface);
@@ -2572,6 +2585,7 @@ bool RecompileSpirv(const u32* vs_code,
     AuditBegin("vs", vs_code, vs_program);
   const bool vs_ok =
       TranslateVs(vs_program, vs_user_data, flat_params, vs_tex_base,
+                  tex_3d_mask >> vs_tex_base, tex_1d_mask >> vs_tex_base,
                   gl_clip_space, r, tv) &&
       !HadUnsupported();
   std::vector<u32> vs;

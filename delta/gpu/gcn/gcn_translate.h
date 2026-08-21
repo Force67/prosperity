@@ -175,6 +175,9 @@ struct ShaderTex {
   bool storage = false;  // image_store binding rather than a sampled image
   bool is_3d = false;    // volume image (T# type SQ_RSRC_IMG_3D)
   bool is_1d = false;    // 1D image (T# type SQ_RSRC_IMG_1D[_ARRAY])
+  // Declared with an integer sampled type. A UNORM view cannot satisfy one, so
+  // even the fallback a binding takes when nothing resolves has to match.
+  bool is_uint = false;
 };
 
 struct Recompiled {
