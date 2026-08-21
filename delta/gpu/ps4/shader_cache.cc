@@ -33,6 +33,7 @@ struct GraphicsKey {
   u32 tex_1d_mask = 0;
   u32 tex_uint_mask = 0;
   u32 mrt_uint_mask = 0;
+  u32 mrt_bound_mask = 0xFF;
   bool gl_clip = false;
   bool neo = false;
 
@@ -49,6 +50,7 @@ struct GraphicsKeyHash {
     MixHash(h, k.tex_1d_mask);
     MixHash(h, k.tex_uint_mask);
     MixHash(h, k.mrt_uint_mask);
+    MixHash(h, k.mrt_bound_mask);
     h ^= k.gl_clip ? kGoldenRatio64 : 0ull;
     h ^= static_cast<u64>(k.neo) << 63;
     return static_cast<size_t>(h);
@@ -121,6 +123,7 @@ GraphicsKey GraphicsKeyOf(const GraphicsShaderState& state) {
   key.tex_1d_mask = state.tex_1d_mask;
   key.tex_uint_mask = state.tex_uint_mask;
   key.mrt_uint_mask = state.mrt_uint_mask;
+  key.mrt_bound_mask = state.mrt_bound_mask;
   key.gl_clip = state.gl_clip;
   key.neo = gcn::DefaultIsaMode() == gcn::IsaMode::kNeo;
   return key;
@@ -150,7 +153,8 @@ const gcn::Recompiled& GetGraphicsShader(const Regs& regs,
                    regs.At(mmSPI_SHADER_USER_DATA_PS_0), state.ps_input_ena,
                    state.honour_ps_in_cntl ? state.ps_in_cntl : nullptr,
                    state.ps_num_interp, state.tex_3d_mask, state.tex_1d_mask,
-                   state.tex_uint_mask, state.mrt_uint_mask, state.gl_clip))
+                   state.tex_uint_mask, state.mrt_uint_mask,
+                   state.mrt_bound_mask, state.gl_clip))
       .first->second;
 }
 

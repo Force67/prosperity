@@ -250,6 +250,7 @@ u32 ResolveRenderTargets(const Regs& regs,
     d.mrt_base[rt] = base;
     d.mrt_info[rt] = info;
     d.mrt_count = rt + 1;
+    d.mrt_bound_mask |= 1u << rt;
     // Each target carries its own geometry; the screen scissor is one global
     // that says how much of them this pass draws into.
     const u32 rt_pitch =
@@ -714,6 +715,7 @@ RecompStatus ResolveRecompiledShaders(
     const std::shared_ptr<const gcn::Program>& ps_prog,
     const TextureMasks& masks,
     u32 mrt_uint_mask,
+    u32 mrt_bound_mask,
     rhi::DrawInfo& d) {
   if (ShaderSkipped(vs_addr, ps_addr))
     return RecompStatus::kSkipped;
@@ -750,6 +752,7 @@ RecompStatus ResolveRecompiledShaders(
   state.tex_1d_mask = masks.tex_1d;
   state.tex_uint_mask = masks.tex_uint;
   state.mrt_uint_mask = mrt_uint_mask;
+  state.mrt_bound_mask = mrt_bound_mask;
   state.gl_clip = !((regs[mmPA_CL_CLIP_CNTL] >> 19) & 1);
 
   const gcn::Recompiled& rc = GetGraphicsShader(regs, state);
@@ -856,7 +859,8 @@ bool BuildDrawInfo(rhi::Renderer& renderer,
   ResolveVsTextures(regs, vs_addr, d, masks);
 
   const RecompStatus status = ResolveRecompiledShaders(
-      regs, vs_addr, ps_addr, fetch_addr, ps_prog, masks, mrt_uint_mask, d);
+      regs, vs_addr, ps_addr, fetch_addr, ps_prog, masks, mrt_uint_mask,
+      d.mrt_bound_mask, d);
   if (auto_vertex_count && auto_vertex_count <= kMaxElementCount)
     d.vertex_count = auto_vertex_count;
 

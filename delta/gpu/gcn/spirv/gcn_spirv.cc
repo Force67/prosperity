@@ -838,7 +838,17 @@ void EmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       const u32 v[4] = {w1 & 0xFF, (w1 >> 8) & 0xFF, (w1 >> 16) & 0xFF,
                              (w1 >> 24) & 0xFF};
       if (sc.is_ps) {
-        if (target <= 7 && en) {  // MRT0..7; EN=0 is a null export
+        if (target <= 7 && en && !((sc.mrt_bound_mask >> target) & 1u)) {
+          // The pass binds no attachment at this slot, so the export has
+          // nowhere to land. The instruction still matters: reaching it is what
+          // tells the discard lowering this fragment survived its alpha test.
+          // Record that and emit nothing -- declaring an Output the pipeline
+          // has no attachment for is a write Vulkan discards, and the layer
+          // reports it on every such draw.
+          sc.wrote_color = true;
+          if (sc.color_written_var)
+            t.m.Store(sc.color_written_var, t.U32(1));
+        } else if (target <= 7 && en) {  // MRT0..7; EN=0 is a null export
           sc.wrote_color = true;
           Id col;
           const bool int_target = ((sc.mrt_uint_mask >> target) & 1u) != 0;
@@ -1972,6 +1982,7 @@ bool TranslatePs(const Program& program,
                   u32 tex_1d_mask,
                   u32 tex_uint_mask,
                   u32 mrt_uint_mask,
+                  u32 mrt_bound_mask,
                   Recompiled& r,
                   Translator& t) {
   // Color outputs (PsColorOut) are declared lazily per MRT target (location ==
@@ -2021,6 +2032,7 @@ bool TranslatePs(const Program& program,
   sc.tex_1d_mask = tex_1d_mask;
   sc.tex_uint_mask = tex_uint_mask;
   sc.mrt_uint_mask = mrt_uint_mask;
+  sc.mrt_bound_mask = mrt_bound_mask;
   for (u32 i = 0; i < mimg_plan.binding_srsrc.size(); i++)
     r.ps_texs.push_back({i, mimg_plan.binding_srsrc[i],
                          mimg_plan.binding_storage[i],
@@ -2058,13 +2070,17 @@ bool TranslatePs(const Program& program,
     // The default has to match the output's declared type: an integer target
     // declares uvec4, and storing a float vec4 into it is the one thing the
     // SPIR-V validator rejects outright, which drops the whole shader.
-    const bool mrt0_int = (sc.mrt_uint_mask & 1u) != 0;
-    t.m.Store(PsColorOut(t, sc, 0),
-              mrt0_int ? t.m.ConstComposite(t.m.TypeVec(t.t_u, 4),
-                                            {t.U32(0), t.U32(0), t.U32(0),
-                                             t.U32(0)})
-                       : t.m.ConstComposite(t.t_v4, {t.F32(0.f), t.F32(0.f),
-                                                     t.F32(0.f), t.F32(0.f)}));
+    // With no attachment at slot 0 there is no output to default -- but the
+    // flag the discard lowering reads still has to exist.
+    if (sc.mrt_bound_mask & 1u) {
+      const bool mrt0_int = (sc.mrt_uint_mask & 1u) != 0;
+      t.m.Store(PsColorOut(t, sc, 0),
+                mrt0_int ? t.m.ConstComposite(t.m.TypeVec(t.t_u, 4),
+                                              {t.U32(0), t.U32(0), t.U32(0),
+                                               t.U32(0)})
+                         : t.m.ConstComposite(t.t_v4, {t.F32(0.f), t.F32(0.f),
+                                                       t.F32(0.f), t.F32(0.f)}));
+    }
     sc.color_written_var = t.m.Variable(t.p_priv_u, spv::StorageClass::Private,
                                         t.m.ConstNull(t.t_u));
   }
@@ -2099,7 +2115,7 @@ bool TranslatePs(const Program& program,
   const Id pstex = t.last_texel_var && t.last_texel
                        ? t.m.Load(t.t_v4, t.last_texel_var)
                        : 0;
-  if (kGpuPstex != 0 && has_color_export && pstex &&
+  if (kGpuPstex != 0 && has_color_export && (sc.mrt_bound_mask & 1u) && pstex &&
       !(sc.mrt_uint_mask & 1u))  // an integer MRT0 cannot take a float export
     t.m.Store(PsColorOut(t, sc, 0),
               t.m.CompositeConstruct(
@@ -2113,13 +2129,13 @@ bool TranslatePs(const Program& program,
                    t.F32(1.f)}));
 
   // DELTA_GPU_PSATTR=<slot+1>: export that input slot's interpolated value.
-  if (kGpuPsattr > 0 && has_color_export && !(sc.mrt_uint_mask & 1u)) {
+  if (kGpuPsattr > 0 && has_color_export && (sc.mrt_bound_mask & 1u) && !(sc.mrt_uint_mask & 1u)) {
     const Id in = PsInputVar(t, sc, static_cast<u32>(kGpuPsattr - 1));
     t.m.Store(PsColorOut(t, sc, 0), t.m.Load(t.t_v4, in));
   }
 
   // DELTA_GPU_PSWHITE: isolate VS/rasterization from fragment color math.
-  if (kGpuPswhite && has_color_export && !(sc.mrt_uint_mask & 1u))
+  if (kGpuPswhite && has_color_export && (sc.mrt_bound_mask & 1u) && !(sc.mrt_uint_mask & 1u))
     t.m.Store(PsColorOut(t, sc, 0),
               t.m.ConstComposite(
                   t.t_v4, {t.F32(1.f), t.F32(1.f), t.F32(1.f), t.F32(1.f)}));
@@ -2513,6 +2529,7 @@ bool RecompileSpirv(const u32* vs_code,
                      u32 tex_1d_mask,
                      u32 tex_uint_mask,
                      u32 mrt_uint_mask,
+                     u32 mrt_bound_mask,
                      bool gl_clip_space,
                      Recompiled& r) {
   if (!vs_code || !vs_user_data || !ps_user_data)
@@ -2615,7 +2632,8 @@ bool RecompileSpirv(const u32* vs_code,
                                              ps_input_ena, ps_in_cntl, ps_num_interp, &vs_exported_params,
                       tex_3d_mask,
                                              tex_1d_mask, tex_uint_mask,
-                                             mrt_uint_mask, r, tp)
+                                             mrt_uint_mask, mrt_bound_mask,
+                                             r, tp)
                                : TranslateDepthOnlyPs(tp)) &&
                      !HadUnsupported();
   std::vector<u32> ps;

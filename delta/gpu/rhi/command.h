@@ -100,6 +100,10 @@ struct DrawInfo {
   u64 mrt_base[8] = {0};
   u32 mrt_info[8] = {0};
   u32 mrt_count = 0;
+  // Bit n set = slot n is bound. Not the same as "n < mrt_count": a pass may
+  // leave a lower slot masked off while a higher one is live, and a shader
+  // exporting to a slot nothing is bound at writes into nothing.
+  u32 mrt_bound_mask = 0;
 
   // Texturing (optional). tex_base preserves every valid T# address so the
   // renderer can resolve non-RGBA guest formats to live render targets. Direct

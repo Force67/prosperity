@@ -81,6 +81,7 @@ Recompiled Recompile(const u32* vs_code,
                       u32 tex_1d_mask,
                       u32 tex_uint_mask,
                       u32 mrt_uint_mask,
+                      u32 mrt_bound_mask,
                       bool gl_clip_space) {
   Recompiled r;
   if (!vs_code || !vs_user_data || !ps_user_data)
@@ -89,6 +90,7 @@ Recompiled Recompile(const u32* vs_code,
   RecompileSpirv(vs_code, ps_code, vs_user_data, ps_user_data, ps_input_ena,
                  ps_in_cntl, ps_num_interp,
                  tex_3d_mask, tex_1d_mask, tex_uint_mask, mrt_uint_mask,
+                 mrt_bound_mask,
                  gl_clip_space, r);
   g_ns_recomp += NowNs() - t0;
   g_recomp_n++;

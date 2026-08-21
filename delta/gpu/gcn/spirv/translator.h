@@ -619,6 +619,11 @@ struct StageContext {
   // uvec4 and the export stores raw VGPR bits instead of reinterpreting them
   // as floats. Bit n of tex_uint_mask says the same for sampler binding n.
   u32 mrt_uint_mask = 0;
+  // Bit n set = the pass binds colour attachment n. An export to a target the
+  // pass does not bind writes nowhere, and declaring an Output the pipeline has
+  // no attachment for is a value Vulkan discards -- which the layer reports on
+  // every such draw (Undefined-Value-ShaderOutputNotConsumed).
+  u32 mrt_bound_mask = 0xFF;
   u32 tex_uint_mask = 0;
   Id depth_out = 0;       // MRTZ -> FragDepth (lazily declared)
   std::unordered_map<u32, Id> in_vars;

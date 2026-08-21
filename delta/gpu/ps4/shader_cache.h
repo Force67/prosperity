@@ -44,6 +44,10 @@ struct GraphicsShaderState {
   u32 tex_1d_mask = 0;
   u32 tex_uint_mask = 0;
   u32 mrt_uint_mask = 0;  // colour targets with an integer texel format
+  // Bit n set = the pass binds colour attachment n. The module drops exports to
+  // the targets that are clear, so the same code used in a pass that binds them
+  // is a different module.
+  u32 mrt_bound_mask = 0xFF;
   // PA_CL_CLIP_CNTL.DX_CLIP_SPACE_DEF == 0: the VS bakes the z remap in.
   bool gl_clip = false;
 };

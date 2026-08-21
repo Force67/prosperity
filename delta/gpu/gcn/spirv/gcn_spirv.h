@@ -29,6 +29,7 @@ bool RecompileSpirv(const u32* vs_code,
                      u32 tex_1d_mask,
                      u32 tex_uint_mask,
                      u32 mrt_uint_mask,
+                     u32 mrt_bound_mask,
                      bool gl_clip_space,
                      Recompiled& r);
 

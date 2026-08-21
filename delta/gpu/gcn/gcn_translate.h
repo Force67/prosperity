@@ -235,6 +235,15 @@ Recompiled Recompile(const u32* vs_code,
                       u32 tex_1d_mask = 0,
                       u32 tex_uint_mask = 0,
                       u32 mrt_uint_mask = 0,
+                      // Bit n set = the pass binds colour attachment n. A
+                      // shader routinely exports targets the pass does not
+                      // bind (a depth prepass binds none, and a single-target
+                      // pass still meets exports to MRT1); declaring an Output
+                      // Vulkan has nowhere to put is a write into nothing, so
+                      // the module drops those outputs and keeps only the
+                      // export's effect on the discard lowering. 0xFF = assume
+                      // every target is bound, i.e. the old behaviour.
+                      u32 mrt_bound_mask = 0xFF,
                       bool gl_clip_space = false);
 
 // A memory resource a compute shader touches. The descriptor may be inline in
