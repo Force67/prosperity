@@ -580,27 +580,38 @@ void RecordStagingCopy(VkCommandBuffer c,
   b.buffer = e.buf;
   b.offset = 0;
   b.size = VK_WHOLE_SIZE;
+  // TRANSFER on both sides, not just compute and host. A batch stages the same
+  // range more than once -- GTA:SA restages some buffers ~170 times in one cs
+  // batch -- and a barrier that names only COMPUTE|HOST as its source leaves
+  // copy-after-copy on the same buffer unordered. The later copy may then land
+  // first and the dispatch reads the OLDER guest snapshot.
   b.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
-                    VK_ACCESS_HOST_WRITE_BIT;
+                    VK_ACCESS_HOST_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT |
+                    VK_ACCESS_TRANSFER_READ_BIT;
   b.dstAccessMask =
       to_device ? VK_ACCESS_TRANSFER_WRITE_BIT : VK_ACCESS_TRANSFER_READ_BIT;
   vkCmdPipelineBarrier(
-      c, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_HOST_BIT,
+      c,
+      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_HOST_BIT |
+          VK_PIPELINE_STAGE_TRANSFER_BIT,
       VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 1, &b, 0, nullptr);
   const VkBufferCopy region{0, 0, bytes};
   if (to_device)
     vkCmdCopyBuffer(c, e.host_buf, e.buf, 1, &region);
   else
     vkCmdCopyBuffer(c, e.buf, e.host_buf, 1, &region);
-  b.srcAccessMask =
-      to_device ? VK_ACCESS_TRANSFER_WRITE_BIT : VK_ACCESS_TRANSFER_WRITE_BIT;
+  b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
   b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
-                    VK_ACCESS_HOST_READ_BIT;
+                    VK_ACCESS_HOST_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT |
+                    VK_ACCESS_TRANSFER_READ_BIT;
+  // The readback direction writes host_buf, and nothing above covers it: the
+  // leading barrier is on e.buf, which is that copy's SOURCE.
   b.buffer = to_device ? e.buf : e.host_buf;
   vkCmdPipelineBarrier(
       c, VK_PIPELINE_STAGE_TRANSFER_BIT,
-      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_HOST_BIT, 0, 0,
-      nullptr, 1, &b, 0, nullptr);
+      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_HOST_BIT |
+          VK_PIPELINE_STAGE_TRANSFER_BIT,
+      0, 0, nullptr, 1, &b, 0, nullptr);
 }
 
 bool SameCsResourceShape(const ComputeInfo::Res& a, const ComputeInfo::Res& b) {
