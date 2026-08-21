@@ -30,6 +30,8 @@ DELTA_OPTION(bool, kTrace, "DELTA_GPU_TRACE", false);
 DELTA_OPTION(u64, kSotcCompositeRt, "DELTA_GPU_SOTC_COMPOSITE_RT", 0);
 DELTA_OPTION(u64, kTexSrc, "DELTA_GPU_TEXSRC", 0);
 DELTA_OPTION(u64, kTscan, "DELTA_GPU_TSCAN", 0);
+DELTA_OPTION(const char*, kMemFind, "DELTA_GPU_MEMFIND", nullptr);
+DELTA_OPTION(u32, kSoaScan, "DELTA_GPU_SOASCAN", 0);
 DELTA_OPTION(int, kTscanAfter, "DELTA_GPU_TSCAN_AFTER", 0);
 DELTA_OPTION(bool, kTwatch, "DELTA_GPU_TWATCH", false);
 DELTA_OPTION(bool, kNullDis, "DELTA_GPU_NULLDIS", false);
@@ -111,6 +113,167 @@ u64 ScanForDescriptor(u64 want_base) {
             static_cast<unsigned long>(hits),
             static_cast<unsigned long>(scanned >> 20));
   return first_valid;
+}
+
+// DELTA_GPU_MEMFIND=<hex dword>[,<hex dword>...]: sweep every mapped guest
+// page once for that dword sequence and print where it sits. The inverse of
+// ScanForDescriptor -- that one starts from an address and looks for the
+// descriptor naming it, this one starts from DATA the guest must have written
+// and looks for where it put it, which is the only way left when a descriptor
+// resolves into an arena that reads zero end to end. Reading the process from
+// outside is not an option (ptrace_scope denies /proc/<pid>/mem), so it runs
+// in-process like the sweep above.
+void ScanForDwords(const char* spec) {
+  std::vector<u32> want;
+  for (const char* c = spec; *c;) {
+    while (*c == ',' || *c == ' ')
+      c++;
+    if (!*c)
+      break;
+    want.push_back(static_cast<u32>(std::strtoull(c, nullptr, 16)));
+    while (*c && *c != ',')
+      c++;
+  }
+  if (want.empty())
+    return;
+  std::FILE* maps = std::fopen("/proc/self/maps", "r");
+  if (!maps) {
+    BASE_LOGI("memfind", "cannot read /proc/self/maps");
+    return;
+  }
+  base::String pattern;
+  for (u32 v : want)
+    base::FormatTo(pattern, " {:08x}", v);
+  BASE_LOGI("memfind", "sweeping for{}", pattern.c_str());
+  char line[512];
+  u64 scanned = 0, hits = 0;
+  while (std::fgets(line, sizeof(line), maps)) {
+    u64 lo = 0, hi = 0;
+    char perms[8] = {};
+    if (std::sscanf(line, "%lx-%lx %7s", &lo, &hi, perms) != 3)
+      continue;
+    if (perms[0] != 'r' || lo < kGuestLo || hi > kGuestHi || hi <= lo)
+      continue;
+    scanned += hi - lo;
+    const u32* p = reinterpret_cast<const u32*>(lo);
+    const u64 n = (hi - lo) / 4;
+    for (u64 i = 0; i + want.size() <= n; i++) {
+      if (std::memcmp(&p[i], want.data(), want.size() * 4) != 0)
+        continue;
+      if (++hits > 64)
+        continue;
+      BASE_LOGI("memfind", "hit at={:#x}",
+                static_cast<unsigned long>(lo + i * 4));
+    }
+  }
+  std::fclose(maps);
+  BASE_LOGI("memfind", "done: {} hits over {} MiB",
+            static_cast<unsigned long>(hits),
+            static_cast<unsigned long>(scanned >> 20));
+}
+
+// DELTA_GPU_SOASCAN=<byte stride>: sweep guest memory for a screen-quad
+// vertex block stored as PARALLEL COLUMNS at that stride -- four clip-space
+// corners whose w column is all 1.0, whose z column is all 0.0 and whose x and
+// y columns are all +/-1.0. A shader that fetches its own vertices reads
+// exactly that shape (GTA:SA's LUT pass reads x/y/z/w at +0x180/0x240/0x300/
+// 0x3c0 of a 0xc0-strided block), and when its V# resolves into an arena that
+// reads zero end to end, finding where the block REALLY is is the only thing
+// that names the addressing mistake. A plain dword search cannot: the columns
+// are not contiguous and "-1,-1,1,1" alone hits every static corner table in
+// the modules.
+void ScanForQuadColumns(u32 stride) {
+  std::FILE* maps = std::fopen("/proc/self/maps", "r");
+  if (!maps) {
+    BASE_LOGI("soascan", "cannot read /proc/self/maps");
+    return;
+  }
+  BASE_LOGI("soascan", "sweeping for a column-major screen quad, stride {:#x}",
+            stride);
+  const auto all = [](const float* f, bool (*pred)(float)) {
+    return pred(f[0]) && pred(f[1]) && pred(f[2]) && pred(f[3]);
+  };
+  const auto pm1 = [](float v) { return v == 1.f || v == -1.f; };
+  const auto zero = [](float v) { return v == 0.f; };
+  const auto one = [](float v) { return v == 1.f; };
+  char line[512];
+  u64 scanned = 0, hits = 0;
+  while (std::fgets(line, sizeof(line), maps)) {
+    u64 lo = 0, hi = 0;
+    char perms[8] = {};
+    if (std::sscanf(line, "%lx-%lx %7s", &lo, &hi, perms) != 3)
+      continue;
+    if (perms[0] != 'r' || lo < kGuestLo || hi > kGuestHi || hi <= lo)
+      continue;
+    scanned += hi - lo;
+    const u64 span = static_cast<u64>(stride) * 4 + 16;
+    for (u64 at = lo; at + span <= hi; at += 4) {
+      const auto* w = reinterpret_cast<const float*>(at + stride * 3);
+      if (!all(w, one))
+        continue;
+      const auto* z = reinterpret_cast<const float*>(at + stride * 2);
+      const auto* x = reinterpret_cast<const float*>(at);
+      const auto* y = reinterpret_cast<const float*>(at + stride);
+      // w and z pin the shape. x and y are required to be CLIP COORDINATES --
+      // inside [-1,1] and carrying more than one value each -- rather than
+      // exactly +/-1: a pass that rasterizes a sub-box of the volume writes
+      // corners that are not the unit quad's, and demanding +/-1 is an
+      // assumption about the caller, not about the shape. Relaxing them all
+      // the way to "finite" is useless in the other direction: 24 GiB of
+      // module data then hits thousands of times.
+      if (!all(z, zero))
+        continue;
+      // A quad's x column holds exactly two values, twice each -- its left and
+      // right edge -- and so does its y column. That is true of the unit quad
+      // and of any sub-rect, and it is what separates a real corner table from
+      // the denormal noise that "inside [-1,1]" alone lets through.
+      const auto edges = [](const float* f) {
+        for (u32 k = 0; k < 4; k++) {
+          if (!(f[k] >= -1.f && f[k] <= 1.f))
+            return false;
+          if (f[k] != 0.f && (f[k] > -1e-3f && f[k] < 1e-3f))
+            return false;  // denormal or near-zero junk
+        }
+        u32 same_as_first = 0;
+        for (u32 k = 0; k < 4; k++)
+          same_as_first += f[k] == f[0];
+        if (same_as_first != 2)
+          return false;
+        float other = f[0];
+        for (u32 k = 1; k < 4; k++)
+          if (f[k] != f[0]) {
+            other = f[k];
+            break;
+          }
+        u32 same_as_other = 0;
+        for (u32 k = 0; k < 4; k++)
+          same_as_other += f[k] == other;
+        return same_as_other == 2;
+      };
+      if (!edges(x) || !edges(y))
+        continue;
+      (void)pm1;
+      if (++hits > 32)
+        continue;
+      // The neighbouring columns too: the four that match are the position,
+      // and whether this is the block a given shader reads is decided by what
+      // sits either side of them (its UVs, and any per-vertex slice index).
+      BASE_LOGI("soascan", "hit position columns at={:#x}",
+                static_cast<unsigned long>(at));
+      for (int col = -2; col <= 3; col++) {
+        const u64 ca = at + static_cast<i64>(col) * stride;
+        if (ca < lo || ca + 16 > hi)
+          continue;
+        const auto* f = reinterpret_cast<const float*>(ca);
+        BASE_LOGI("soascan", "  col{:+d} ({:#x}) {:g} {:g} {:g} {:g}", col,
+                  static_cast<unsigned long>(ca), f[0], f[1], f[2], f[3]);
+      }
+    }
+  }
+  std::fclose(maps);
+  BASE_LOGI("soascan", "done: {} hits over {} MiB",
+            static_cast<unsigned long>(hits),
+            static_cast<unsigned long>(scanned >> 20));
 }
 
 // How much of the 4 MiB pool block around `address` was ever written. A block
@@ -1391,6 +1554,21 @@ std::unordered_map<u32, VBuffer> ResolveCbuffers(
   // straight from user data yields base=0. The recompiler assigns one binding
   // per base SGPR (PlanCbufs), so key by base SGPR and keep the first
   // resolvable V# seen for it.
+  // One sweep per run, once the title is past its load: the data a descriptor
+  // should have named exists by then, and the sweep costs a full pass over
+  // every mapped guest page.
+  if ((kMemFind && *kMemFind) || kSoaScan) {
+    static const auto epoch = std::chrono::steady_clock::now();
+    static bool swept = false;
+    if (!swept && std::chrono::duration<double>(
+                      std::chrono::steady_clock::now() - epoch).count() > 60.0) {
+      swept = true;
+      if (kMemFind && *kMemFind)
+        ScanForDwords(kMemFind);
+      if (kSoaScan)
+        ScanForQuadColumns(kSoaScan.get());
+    }
+  }
   ScalarEval eval(user_data);
   for (const Inst& inst : CachedScalarInfo(program).insts) {
     // Decode the pointer/V# from the PRE-step register state: an SMRD whose
@@ -1489,7 +1667,17 @@ std::vector<VBuffer> ResolveShaderBuffers(
       if (buffer.use_pc != inst.pc || !eval.AllKnown(buffer.srsrc_sgpr, 4))
         continue;
       result[i] = DecodeVBuffer(&eval.sgpr[buffer.srsrc_sgpr]);
-      if (eval.trace)
+      if (eval.trace) {
+        // Whether the nibble DecodeVBuffer treats as reserved is an address
+        // after all: a buffer that resolves into a mapped arena and reads as
+        // zeros looks exactly like one whose top bits were thrown away.
+        const u64 wide =
+            (static_cast<u64>(eval.sgpr[buffer.srsrc_sgpr + 1] & 0xFFFF)
+             << 32) |
+            eval.sgpr[buffer.srsrc_sgpr];
+        BASE_LOGI("eud", "rawbuf{} 48-bit base would be {:#x}, mapped={}", i,
+                  static_cast<unsigned long>(wide),
+                  (int)GuestRange(wide, 16));
         BASE_LOGI("eud",
                   "rawbuf{} pc={:#x} s{} -> base={:#x} stride={} "
                   "nrec={} V#={:08x}/{:08x}/{:08x}/{:08x}",
@@ -1499,6 +1687,7 @@ std::vector<VBuffer> ResolveShaderBuffers(
                   eval.sgpr[buffer.srsrc_sgpr + 1],
                   eval.sgpr[buffer.srsrc_sgpr + 2],
                   eval.sgpr[buffer.srsrc_sgpr + 3]);
+      }
     }
   }
   return result;

@@ -6,6 +6,7 @@
  */
 
 #include "gpu/ps4/cmd_processor.h"
+#include <base/logging.h>
 #include "base/arch.h"
 
 #include <algorithm>
@@ -563,6 +564,19 @@ void WalkCcb(rhi::Renderer& renderer,
       case IT_LOAD_CONST_RAM: {  // addrLo, addrHi, num_dwords, byte offset
         if (!kCeOn || count < 4)
           break;
+        // The raw body, once: an address that does not move across a run of
+        // chunked loads is a field-order mistake, not a title loading the same
+        // bytes forty-eight times, and the decoded trace below cannot show the
+        // difference.
+        {
+          static int shown = 0;
+          if (CeTraceOn() && shown < 6) {
+            shown++;
+            BASE_LOGI("ce", "load raw count={} body={:08x} {:08x} {:08x} {:08x}",
+                      count, body[0], body[1], body[2],
+                      count > 3 ? body[3] : 0u);
+          }
+        }
         const u64 address =
             (static_cast<u64>(body[1] & 0xFFFF) << 32) | body[0];
         const u32 dwords = body[2] & 0x7FFF, offset = body[3] & 0xFFFF;

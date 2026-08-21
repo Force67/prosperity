@@ -1378,6 +1378,10 @@ void DumpOpcodeHistogram() {
       BASE_LOGI("gpu", "  op {:#04x} x{}", i, g_op_hist[i]);
 }
 
+bool CeTraceOn() {
+  return kCeTrace;
+}
+
 void TraceConstRam(const char* what,
                    u32 ce_offset,
                    u32 num_dwords,

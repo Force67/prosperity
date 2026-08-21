@@ -6,6 +6,7 @@
 #include "base/arch.h"
 
 #include "gpu/guest_memory.h"
+#include "gpu/gcn/gcn_resource.h"
 #include "gpu/gcn/gcn_translate.h"
 #include "gpu/rhi/renderer.h"
 #include "gpu/vulkan/vk_debug.h"
@@ -1919,6 +1920,76 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
           base::FormatTo(bytes, "{:02x}", p[b]);
         BASE_LOGI("drawrt", " vb{} @{:#x} stride={} v0={}", j,
                   (unsigned long)(uintptr_t)vb.data, vb.stride, bytes.c_str());
+      }
+      // The vertex stage's user data, and what the pointer in its first pair
+      // points AT. Every descriptor a shader fetches for itself hangs off one
+      // of these, so a binding that resolves into dead memory is either a bad
+      // table pointer or a bad slot in a good table, and nothing else in the
+      // trace separates those.
+      {
+        base::String ud;
+        for (u32 k = 0; k < 8; k++)
+          base::FormatTo(ud, " {:08x}", d.vs_user_data[k]);
+        const u64 table = (static_cast<u64>(d.vs_user_data[1] & 0xFFFF) << 32) |
+                          d.vs_user_data[0];
+        BASE_LOGI("drawrt", " vsud{} | [s0:s1]={:#x}", ud.c_str(),
+                  (unsigned long)table);
+        // A window either side of it, not just the target: GNM embeds a
+        // shader's extended user data inline in the command buffer, so a
+        // pointer that is off lands on packet headers and the distance to the
+        // real block is what names the mistake.
+        for (int row = -2; row < 6; row++) {
+          const u64 at = table + static_cast<i64>(row) * 32;
+          if (!gpu::IsReadableRange(at, 32))
+            continue;
+          const auto* w = reinterpret_cast<const u32*>(at);
+          base::String line;
+          for (u32 k = 0; k < 8; k++)
+            base::FormatTo(line, " {:08x}", w[k]);
+          // Each 4-dword pair read as a V#, with a census of what it names.
+          // Whether the ONE descriptor a shader loads is stale is unanswerable
+          // on its own; whether its NEIGHBOURS name live memory answers it.
+          for (u32 half = 0; half < 2; half++) {
+            const gcn::VBuffer vb = gcn::DecodeVBuffer(w + half * 4);
+            const u64 bytes =
+                vb.stride ? (u64)vb.stride * vb.num_records : vb.num_records;
+            if (!vb.base || !bytes)
+              continue;
+            const u32 scan = static_cast<u32>(std::min<u64>(bytes, 4096));
+            int nz = -1;
+            if (gpu::IsReadableRange(vb.base, scan)) {
+              nz = 0;
+              const auto* b = reinterpret_cast<const u8*>(vb.base);
+              for (u32 k = 0; k < scan; k++)
+                nz += b[k] != 0;
+            }
+            base::FormatTo(line, " | V#[{}] {:#x} n={} nz={}", half,
+                           (unsigned long)vb.base, (unsigned long)bytes, nz);
+            // A base that reads zero may still be right-but-biased: the same
+            // shape as the T# arena bias DELTA_GPU_ARENA_PROBE measures. Say
+            // which neighbouring 2 MiB arena, if any, does hold data, because
+            // a CONSTANT bias across every descriptor is a different bug from
+            // a pool the title never fills.
+            if (nz == 0) {
+              int found = 0;
+              for (int k = -16; k <= 16 && !found; k++) {
+                if (!k)
+                  continue;
+                const u64 probe = vb.base + static_cast<i64>(k) * 0x200000;
+                if (!gpu::IsReadableRange(probe, 256))
+                  continue;
+                const auto* b = reinterpret_cast<const u8*>(probe);
+                for (u32 q = 0; q < 256; q++)
+                  if (b[q]) {
+                    found = k;
+                    break;
+                  }
+              }
+              base::FormatTo(line, " arena{:+d}", found);
+            }
+          }
+          BASE_LOGI("drawrt", "  eud{:+d}{}", row * 32, line.c_str());
+        }
       }
       // A shader that fetches its own vertices reads a raw buffer instead of a
       // vertex binding, so vb0 above says nothing about the geometry it draws.

@@ -262,6 +262,10 @@ void DumpOpcodeHistogram();
 // DELTA_GPU_CETRACE: every constant-engine RAM packet and whether it was
 // applied. A descriptor table the CE publishes and we drop reads back as zeros,
 // which looks exactly like a resolver bug.
+// Whether DELTA_GPU_CETRACE is on, for callers that want to print the raw
+// packet next to the decoded line.
+bool CeTraceOn();
+
 void TraceConstRam(const char* what,
                    u32 ce_offset,
                    u32 num_dwords,
