@@ -334,7 +334,15 @@ bool CreateRtImage(RTarget& t,
 // by address alone, so g_rts keeps holding the live target and the other
 // geometries wait here until a draw asks for them again.
 std::unordered_map<u64, std::vector<RTarget>> g_rt_variants;
-constexpr size_t kMaxRtVariants = 3;
+// Budgeted by MEMORY, not by count. A flat cap of three is generous for an
+// address aliased at 1920x1080 and hopeless for one aliased at 48x48, and
+// Gameface renders every glyph into the same scratch address at the glyph's own
+// size -- a dozen geometries and counting. 32 MiB still leaves the big case at
+// three images; the count is only a backstop against an address that cycles
+// forever, so it has to sit well above any real font -- GTA:SA's four glyph
+// targets each want more than 32 geometries and together they come to 201 KiB.
+constexpr u64 kMaxRtVariantBytes = 32ull << 20;
+constexpr size_t kMaxRtVariants = 256;
 
 // Make the image of geometry (w, h, fmt) the live target at `base`, creating it
 // on first use.
@@ -353,8 +361,25 @@ RTarget* ActivateRtVariant(RTarget& live,
       break;
     }
   if (!alt) {
-    if (parked.size() >= kMaxRtVariants)
-      return &live;
+    u64 parked_bytes = 0;
+    for (const RTarget& v : parked)
+      parked_bytes += RtByteSizeWH(v.w, v.h, v.fmt);
+    if (parked.size() >= kMaxRtVariants ||
+        parked_bytes + RtByteSizeWH(w, h, fmt) > kMaxRtVariantBytes) {
+      // Never hand back the live target at ITS geometry: the caller opens a
+      // render area of w x h over it, and if that is bigger than the image the
+      // region is invalid outright (VUID-VkRenderingInfo-pNext-06079/06080) and
+      // the draw writes outside the attachment. Declining loses the draw, which
+      // is at least a defined outcome.
+      static int n = 0;
+      if (n++ < 8)
+        BASE_LOGI("gpuvk",
+                  "RT {:#x}: {} variants ({} KiB) and no room for {}x{} fmt={} "
+                  "-- declining the draw",
+                  (unsigned long)base, parked.size(),
+                  (unsigned long)(parked_bytes >> 10), w, h, (int)fmt);
+      return nullptr;
+    }
     RTarget t;
     if (!CreateRtImage(t, base, w, h, fmt))
       return nullptr;
