@@ -371,6 +371,16 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
       ((u64)(d.blend_enable ? (d.blend_control & 0x7FFFFFFFu) : 0) << 1) ^
       ((u64)d.vertex_stride << 33) ^ ((u64)mrt_n << 60) ^
       ((u64)dstate * 0x100000001b3ull);
+  // The MODULE, not the code address. A pipeline embeds the shader modules it
+  // was created with, and the recompiler builds a different module for the same
+  // code whenever a descriptor-derived mask differs -- tex_3d, tex_1d, tex_uint,
+  // mrt_uint, the PS input mapping. Keying on the addresses and only SOME of
+  // those masks let a draw bind a pipeline holding another draw's module, whose
+  // declarations then disagreed with the descriptor set built for this one: a
+  // binding the executing module reads as integer took the UNORM default
+  // (VUID-vkCmdDrawIndexed-format-07753). The Recompiled is cached per
+  // (code, every mask) and never evicted, so its address IS that identity.
+  key = HashWord(key, reinterpret_cast<u64>(d.recomp));
   key = HashWord(key, d.ps4_neo ? 1 : 0);
   key = HashWord(key, d.stencil_enable ? d.depth_control : 0);
   key = HashWord(key, d.stencil_enable ? d.stencil_control : 0);
@@ -516,7 +526,7 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
   VkVertexInputBindingDescription binds[8];
   for (u32 j = 0; j < nbind; j++)
     binds[j] = {j, d.vbufs[j].stride, VK_VERTEX_INPUT_RATE_VERTEX};
-  VkVertexInputAttributeDescription attrs[8];
+  VkVertexInputAttributeDescription attrs[DrawInfo::kMaxVertexAttrs];
   for (u32 i = 0; i < d.num_vattrs; i++)
     attrs[i] = {d.vattrs[i].location, d.vattrs[i].binding,
                 VertexFormat(d.vattrs[i].dfmt, d.vattrs[i].nfmt),
