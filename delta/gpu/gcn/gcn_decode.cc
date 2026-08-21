@@ -325,10 +325,18 @@ std::vector<u8> ComputeReachability(const Program& program) {
     if (inst.enc == Enc::kSop1) {
       switch (inst.opcode) {
         case 0x20:  // s_setpc_b64
-        case 0x21:  // s_swappc_b64
         case 0x22:  // s_rfe_b64
         case 0x32:  // s_cbranch_join
           return 4;
+        // s_swappc_b64 is a CALL: it parks the return address in the same pair
+        // it jumps through, and the callee returns with s_setpc_b64. Its
+        // successor is therefore the next instruction, not "any block". Every
+        // vertex shader that reaches its fetch shader this way opens with one,
+        // so calling it indirect retained the whole program -- including the
+        // compiler's padding past the final s_endpgm, which decodes as garbage.
+        // GTA:SA lost 59 of its 128 vertex shaders to unsupported ops that its
+        // code does not contain.
+        case 0x21:  // s_swappc_b64
         default:
           return 0;
       }
