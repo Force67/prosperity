@@ -38,8 +38,6 @@ DELTA_OPTION(bool, kVoLleFix, "DELTA_VO_LLE_FIX", false);
 }  // namespace
 
 namespace krnl {
-void ps5MaybeInterposePthreadAlloc();  // proc.cpp: libc-mutex bootstrap fix
-
 int PS4ABI sys_dynlib_dlopen(const char *) {
   /*TODO: implement, however note that this function is only
   present in devkits*/
@@ -78,7 +76,6 @@ int PS4ABI sys_dynlib_get_info(u32 handle, dynlib_info *dyn_info) {
 
 int PS4ABI sys_dynlib_get_info_ex(u32 handle, i32 ukn /*always 1*/,
                                   dynlib_info_ex *dyn_info) {
-  ps5MaybeInterposePthreadAlloc();  // frequent main-thread init call (see load_prx)
   if (!dyn_info)
     return -SysError::eFAULT;
   if (dyn_info->size != sizeof(*dyn_info))
@@ -269,10 +266,6 @@ int PS4ABI sys_dynlib_get_list(u32 *handles, size_t maxCount,
 // written to *pHandle and 0 returned on success.
 int PS4ABI sys_dynlib_load_prx(const char *path, u64 flags, int *pHandle,
                                u64 arg4, const void *opt, i64 *pRes) {
-  // Main-thread module loading runs after libc init (so libkernel's pthread-state
-  // allocator pointer is populated) but before the multithreaded malloc-mutex
-  // bootstrap that would recurse; interpose it here (idempotent, PS5+native).
-  ps5MaybeInterposePthreadAlloc();
   if (pRes)
     *pRes = 0;
   if (!path)
