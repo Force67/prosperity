@@ -19,6 +19,10 @@
 
 namespace {
 DELTA_OPTION(u64, kPs5Cores, "DELTA_PS5_CORES", 0);
+// The kern.proc.55 answer. 1 is the truth for a native title (see the handler);
+// 0 restores the old zero-fill, which keeps a title that trips over the native
+// path running while that path is being fixed.
+DELTA_OPTION(u32, kProc55, "DELTA_PS5_PROC55", 1);
 }  // namespace
 
 namespace krnl {
@@ -79,15 +83,28 @@ void censusSysctl(int *name, u32 namelen, const void *newp, size_t newlen) {
 int PS4ABI ps5_sysctl(int *name, u32 namelen, void *oldp, size_t *oldlenp,
                       const void *newp, size_t newlen) {
   censusSysctl(name, namelen, newp, newlen);
-  // kern.proc.35 and kern.proc.55 are both wider on Prospero than the Orbis
-  // replies the shared handler builds, and a title reads each as a fixed-size
-  // struct, so hand back a zeroed block of exactly the length asked for rather
-  // than a short one.
-  if (name && namelen >= 3 && name[0] == 1 && name[1] == 14 &&
-      (name[2] == 35 || name[2] == 55)) {
+  // kern.proc.35 is wider on Prospero than the Orbis reply the shared handler
+  // builds, and a title reads it as a fixed-size struct, so hand back a zeroed
+  // block of exactly the length asked for rather than a short one.
+  if (name && namelen >= 3 && name[0] == 1 && name[1] == 14 && name[2] == 35) {
     if (!oldp || !oldlenp)
       return -SysError::eINVAL;
     std::memset(oldp, 0, *oldlenp);
+    return 0;
+  }
+  // kern.proc.55 is the one oid whose VALUE matters rather than its shape.
+  // libkernel caches `value == 0` once (its +0x6c130) and every system library
+  // branches on it: libSceSysmodule keeps two internal-module-id tables and
+  // scans the 316-entry one when it is set, the 416-entry one otherwise. Only
+  // the second holds the codec ids libSceVdecCore.native asks for, so zeroing
+  // this told the video decoder its own codec module does not exist
+  // (SCE_SYSMODULE_ERROR_INVALID_VALUE) and Astro Bot's title screen waited on
+  // a player that never started.
+  if (name && namelen >= 3 && name[0] == 1 && name[1] == 14 && name[2] == 55) {
+    if (!oldp || !oldlenp || *oldlenp < sizeof(u32))
+      return -SysError::eINVAL;
+    std::memset(oldp, 0, *oldlenp);
+    *static_cast<u32 *>(oldp) = kProc55;
     return 0;
   }
   // Prospero libkernel resolves a handful of oids Orbis never had. None of them
