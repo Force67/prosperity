@@ -26,6 +26,10 @@ namespace {
 // A title parked on a semaphore is waiting for a post that either never comes
 // or came before it arrived, and only the pairing tells the two apart.
 DELTA_OPTION(u32, kOsemTrace, "DELTA_OSEM_TRACE", 0);
+// DELTA_OSEM_MAXWAIT=<ms>: cap an untimed wait. Diagnostic: a title parked
+// forever on a semaphore tells you nothing, but one that is let go says what it
+// does next -- usually an assert naming what it was waiting for.
+DELTA_OPTION(u32, kOsemMaxWaitMs, "DELTA_OSEM_MAXWAIT", 0);
 }  // namespace
 
 namespace krnl {
@@ -170,6 +174,9 @@ int PS4ABI sys_osem_wait(int id, int need, u32 *timeoutUs) {
   if (!s)
     return -SysError::eSRCH;
   osemTrace("wait", id, need, s->value());
+  u32 capUs = kOsemMaxWaitMs * 1000;
+  if (!timeoutUs && capUs)
+    timeoutUs = &capUs;
   // The doorbell of a service we do not host: nothing in this process will ever
   // ring it, so an untimed wait parks the caller for the rest of the run (Tomb
   // Raider's sceNpCheckCallback sat on 'SceNpTpip 0' forever). Give it the

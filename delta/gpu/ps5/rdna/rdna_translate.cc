@@ -1543,6 +1543,98 @@ void ResolveValuSrc0(const Inst& inst,
   }
 }
 
+// ---- DPP -------------------------------------------------------------------
+// A DPP modifier reads src0 from ANOTHER lane of the same row of 16, which the
+// host subgroup answers with a shuffle. Exact when the guest wave's lanes map
+// to consecutive host invocations -- what an NGG vertex wave does, and what
+// ds_swizzle already assumes. Without it the whole shader was rejected: Astro
+// Bot's vertex program uses one `v_add_nc_u32_dpp row_shr:1` and every draw it
+// takes part in was dropped.
+struct DppLane {
+  Id lane = 0;    // which lane to read
+  Id valid = 0;   // 0 = always in range
+  bool known = false;
+};
+
+DppLane RdnaDppLane(Translator& t, Id subid, u32 ctrl) {
+  DppLane r;
+  r.known = true;
+  if (ctrl <= 0xFF) {  // quad_perm: two bits per lane of the quad
+    const Id quad_base = t.And(subid, t.U32(0xFFFFFFFCu));
+    const Id lane = t.And(subid, t.U32(3));
+    const Id sel =
+        t.And(t.Shr(t.U32(ctrl), t.Shl(lane, t.U32(1))), t.U32(3));
+    r.lane = t.Or(quad_base, sel);
+    return r;
+  }
+  const u32 amount = ctrl & 0xF;
+  const Id row = t.And(subid, t.U32(0xFFFFFFF0u));
+  const Id lane = t.And(subid, t.U32(15));
+  if (ctrl >= 0x101 && ctrl <= 0x10F) {  // row_shl
+    r.lane = t.Or(row, t.Add(lane, t.U32(amount)));
+    r.valid = t.Ult(lane, t.U32(16u - amount));
+    return r;
+  }
+  if (ctrl >= 0x111 && ctrl <= 0x11F) {  // row_shr
+    r.lane = t.Or(row, t.Sub(lane, t.U32(amount)));
+    r.valid = t.Uge(lane, t.U32(amount));
+    return r;
+  }
+  if (ctrl >= 0x121 && ctrl <= 0x12F) {  // row_ror: wraps, so always in range
+    const Id high = t.Uge(lane, t.U32(amount));
+    const Id minus = t.Sub(lane, t.U32(amount));
+    const Id plus = t.Add(lane, t.U32(16u - amount));
+    r.lane = t.Or(row, t.SelectB(high, minus, plus));
+    return r;
+  }
+  if (ctrl == 0x140 || ctrl == 0x141) {  // row_mirror / row_half_mirror
+    const u32 lane_mask = ctrl == 0x141 ? 7u : 15u;
+    const Id base = t.And(subid, t.U32(~lane_mask));
+    const Id in = t.And(subid, t.U32(lane_mask));
+    r.lane = t.Or(base, t.Sub(t.U32(lane_mask), in));
+    return r;
+  }
+  r.known = false;
+  return r;
+}
+
+// The src0 value a DPP-modified VOP1/VOP2 reads. Returns 0 if this modifier
+// cannot be modelled, so the caller can fall back to rejecting the shader.
+Id RdnaDppSrc0(Translator& t, StageContext& sc, const Inst& inst) {
+  if (!sc.subgroup_local_id)
+    return 0;
+  const u32 mod = inst.raw[1];
+  const u32 src_reg = mod & 0xFF;
+  const u32 ctrl = (mod >> 8) & 0x1FF;
+  const bool bound_ctrl = ((mod >> 19) & 1) != 0;
+  const Id subid = t.m.Load(t.t_u, sc.subgroup_local_id);
+  const DppLane sel = RdnaDppLane(t, subid, ctrl);
+  if (!sel.known)
+    return 0;
+  const Id own = t.Vg(src_reg);
+  const Id scope = t.U32(static_cast<u32>(spv::Scope::Subgroup));
+  Id value =
+      t.m.Emit(spv::Op::OpGroupNonUniformShuffle, t.t_u, {scope, own, sel.lane});
+  if (sel.valid) {
+    // Out of the row: BOUND_CTRL reads zero, otherwise the hardware leaves the
+    // destination alone. We have no per-lane write mask here, so the lane keeps
+    // its own value -- the same shape, and the case a prefix sum never hits.
+    if (!bound_ctrl)
+      gpu::gcn::NoteApproximated("dpp.bound", ctrl);
+    value = t.SelectB(sel.valid, value, bound_ctrl ? t.U32(0) : own);
+  }
+  return value;
+}
+
+// Does any instruction carry a DPP modifier? Decides whether the stage needs
+// the subgroup channel declared.
+bool RdnaUsesDpp(const Program& program) {
+  for (const Inst& inst : program)
+    if (inst.extension == gpu::gcn::InstExtension::kDpp)
+      return true;
+  return false;
+}
+
 // ---- per-instruction dispatch ----------------------------------------------
 // Decodes RDNA2 field layouts and calls the shared GFX7 emitters (which take
 // pre-decoded operands + a GFX7-canonical opcode). The scalar and VOP1/2/C
@@ -1550,13 +1642,21 @@ void ResolveValuSrc0(const Inst& inst,
 // width and the CLAMP bit position (bit 15, not 11); SMEM replaces SMRD.
 void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
   const u32 w = inst.raw[0], w1 = inst.raw[1];
-  if (inst.extension == gpu::gcn::InstExtension::kDpp ||
-      inst.extension == gpu::gcn::InstExtension::kDpp8 ||
-      inst.extension == gpu::gcn::InstExtension::kDpp8Fi) {
-    gpu::gcn::WarnUnsupported("dpp.rdna", inst.opcode, w, w1);
+  Id dpp_src0 = 0;
+  if (inst.extension == gpu::gcn::InstExtension::kDpp) {
+    dpp_src0 = RdnaDppSrc0(t, sc, inst);
+    if (!dpp_src0) {
+      gpu::gcn::WarnUnsupported("dpp.rdna", inst.opcode, w, w1);
+      return;
+    }
+  } else if (inst.extension == gpu::gcn::InstExtension::kDpp8 ||
+             inst.extension == gpu::gcn::InstExtension::kDpp8Fi) {
+    gpu::gcn::WarnUnsupported("dpp8.rdna", inst.opcode, w, w1);
     return;
   }
-  if (UsesUnsupportedRdnaSource(inst)) {
+  // A DPP instruction's src0 field is the modifier marker, not a real operand;
+  // the value came from the shuffle above.
+  if (!dpp_src0 && UsesUnsupportedRdnaSource(inst)) {
     gpu::gcn::WarnUnsupported("source.special.rdna", inst.opcode, w, w1);
     return;
   }
@@ -1594,9 +1694,16 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       gpu::gcn::EmitSopk(t, inst);
       break;
     case Enc::kSopp:
-      if (inst.opcode == 0x0A && sc.is_cs) {  // s_barrier
-        t.m.EmitVoid(spv::Op::OpControlBarrier,
-                     {t.U32(2), t.U32(2), t.U32(0x108)});
+      if (inst.opcode == 0x0A) {  // s_barrier
+        if (sc.is_cs) {
+          t.m.EmitVoid(spv::Op::OpControlBarrier,
+                       {t.U32(2), t.U32(2), t.U32(0x108)});
+        } else {
+          // A graphics stage's LDS is per-invocation (Private), so there is
+          // nothing for the wave to wait on -- and SPIR-V has no control
+          // barrier there to emit anyway.
+          gpu::gcn::NoteApproximated("barrier.graphics", inst.opcode);
+        }
       } else if (inst.opcode != 0x00 && inst.opcode != 0x01 &&
                  inst.opcode != 0x02 &&
                  !(inst.opcode >= 0x04 && inst.opcode <= 0x09) &&
@@ -1680,7 +1787,9 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
             t, SdwaSelect(t, t.SrcRaw(sd.src1, 0), sd.src1_sel, sd.src1_sext),
             sd.src1_neg, sd.src1_abs);
       }
-      const Id s0u = sdwa0 ? sdwa0 : t.SrcRaw(src0, lit);
+      const Id s0u = dpp_src0 ? dpp_src0
+                     : sdwa0   ? sdwa0
+                               : t.SrcRaw(src0, lit);
       const Id s1u = sdwa1 ? sdwa1 : t.SrcRaw(src1, lit);
       // RDNA2-only VOP2 numbers the shared GFX7 emitter would misinterpret: the
       // no-carry integer add/sub forms must NOT write VCC (a later v_cndmask
@@ -1905,8 +2014,17 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
         if (neg & 1)
           source0 = t.FNeg(source0);
       }
+      // RDNA2 renumbered the lane-count pair; the shared emitter has them at
+      // their GFX7 numbers. A vertex shader that spills to LDS computes its
+      // slot with exactly this pair, so without the remap the whole stage was
+      // rejected.
+      u32 emit_op = op;
+      if (op == 0x365)
+        emit_op = 0x23;  // v_mbcnt_lo_u32_b32
+      else if (op == 0x366)
+        emit_op = 0x24;  // v_mbcnt_hi_u32_b32
       gpu::gcn::EmitVop3(
-          t, op, vdst, source0, t.SrcRawHi(s0, inst.literal, op == 0x163),
+          t, emit_op, vdst, source0, t.SrcRawHi(s0, inst.literal, op == 0x163),
           t.SrcF(s1, inst.literal, neg & 2, abs & 2),
           t.SrcF(s2, inst.literal, neg & 4, abs & 4),
           t.SrcRawHi(s2, inst.literal, op == 0x177), sdst, clamp, omod);
@@ -2170,6 +2288,26 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
     case Enc::kFlat:
       RdnaEmitFlat(t, inst, sc);
       break;
+    // LDS. The shared emitter takes RDNA2 DS unchanged: gfx10 kept both the
+    // opcode numbers and the field layout, and our decoder already reads the
+    // opcode from word0[25:18]. A compute stage gets real Workgroup storage; a
+    // graphics stage cannot have any (SPIR-V allows that class only in
+    // compute-like stages), so it is backed by a Private array -- exact when
+    // the address is the lane's own slot, which is what an NGG vertex shader's
+    // spill does. gfx10.3 has no hardware VS: every vertex program is a merged
+    // ES/GS that stages its exports through LDS, so without this the whole
+    // stage was rejected and its draws dropped.
+    case Enc::kDs:
+      if (sc.is_cs || inst.opcode == 0x35) {
+        gpu::gcn::EmitDs(t, inst, sc);
+      } else if (sc.lds_var && gpu::gcn::DsGraphicsSupported(inst.opcode)) {
+        if (!sc.ds_own_lane.count(inst.pc))
+          gpu::gcn::NoteApproximated("ds.private", inst.opcode);
+        gpu::gcn::EmitDs(t, inst, sc);
+      } else {
+        gpu::gcn::WarnUnsupported("ds.graphics", inst.opcode, w, w1);
+      }
+      break;
     default:
       gpu::gcn::WarnUnsupported("rdna", inst.opcode, w, w1);
       break;
@@ -2356,6 +2494,30 @@ std::vector<FetchAttr> ParseFetch(u64 fetch_addr) {
 
 }  // namespace
 
+// LDS for a graphics stage: Private (one array per invocation), because SPIR-V
+// forbids Workgroup storage outside compute-like stages. Zero initialised so a
+// read-before-write is reproducible.
+void PlanCrossLane(const Program& program, Translator& t, StageContext& sc,
+                   std::vector<Id>& iface) {
+  if (!sc.subgroup_local_id &&
+      (RdnaUsesDpp(program) || gpu::gcn::UsesDsSwizzle(program, nullptr)))
+    gpu::gcn::EnableDsSwizzle(t, sc, iface);
+}
+
+void PlanGraphicsLds(const Program& program, Translator& t, StageContext& sc) {
+  sc.ds_own_lane = gpu::gcn::PlanDsOwnLane(program, nullptr);
+  const u32 lds_dwords = gpu::gcn::GraphicsLdsDwords(program, nullptr);
+  if (!lds_dwords)
+    return;
+  const Id lds_arr = t.m.TypeArray(t.t_u, lds_dwords);
+  sc.lds_storage = spv::StorageClass::Private;
+  sc.lds_dwords = lds_dwords;
+  sc.lds_var =
+      t.m.Variable(t.m.TypePointer(spv::StorageClass::Private, lds_arr),
+                   spv::StorageClass::Private, t.m.ConstNull(lds_arr));
+  t.m.Name(sc.lds_var, "lds");
+}
+
 u64 FetchPlanHash(u64 fetch_addr) {
   const std::vector<FetchAttr> attrs = ParseFetch(fetch_addr);
   if (attrs.empty())
@@ -2519,6 +2681,8 @@ bool TranslateVs(const Program& program,
     if (a.pc != ~0u)
       lifted.insert(a.pc);
   RdnaPlanGfxBuffers(program, 0, &lifted, r.vs_bufs, sc.gfx_buf_bind);
+  PlanGraphicsLds(program, t, sc);
+  PlanCrossLane(program, t, sc, iface);
   if (ShDbg())
     BASE_LOGI("gcnspv", "vs planned {} cbufs", r.vs_cbufs.size());
   // DELTA_GPU_DBGPOS=<vs address>[:<dword offset>]: recompute this one shader's
@@ -2668,6 +2832,8 @@ bool TranslatePs(const Program& program,
     return false;
   RdnaPlanGfxBuffers(program, static_cast<u32>(r.vs_bufs.size()),
                      nullptr, r.ps_bufs, sc.gfx_buf_bind);
+  PlanGraphicsLds(program, t, sc);
+  PlanCrossLane(program, t, sc, iface);
   const gpu::gcn::MimgBindingPlan mimg_plan = RdnaPlanMimg(program);
   if (mimg_plan.binding_srsrc.size() > StageContext::kMaxPsSamplers)
     return false;

@@ -1736,6 +1736,8 @@ void EmitBody(Translator& t,
   }
 }
 
+}  // namespace
+
 bool UsesDsSwizzle(const Program& program, const u8* reachable) {
   for (u32 i = 0; i < program.size(); i++)
     if ((!reachable || reachable[i]) && program[i].enc == Enc::kDs &&
@@ -1753,9 +1755,16 @@ void EnableDsSwizzle(Translator& t, StageContext& sc, std::vector<Id>& iface) {
   t.m.Decorate(
       sc.subgroup_local_id, spv::Decoration::BuiltIn,
       {static_cast<u32>(spv::BuiltIn::SubgroupLocalInvocationId)});
-  t.m.Decorate(sc.subgroup_local_id, spv::Decoration::Flat);
+  // Flat is required of an integer fragment input and FORBIDDEN everywhere
+  // else: a vertex shader carrying it fails validation outright
+  // (VUID-StandaloneSpirv-Flat-06202), which rejected every NGG stage that
+  // reads another lane.
+  if (sc.is_ps)
+    t.m.Decorate(sc.subgroup_local_id, spv::Decoration::Flat);
   iface.push_back(sc.subgroup_local_id);
 }
+
+namespace {
 
 // The push range is shared by both stages, so each takes its own 64-byte half:
 // pushing both at offset 0 let the second stage's user data overwrite the

@@ -820,6 +820,14 @@ bool DsGraphicsSupported(u32 op);
 // from M0: these shaders set M0 to 0x10000, the whole 64 KB, which is an upper
 // bound meaning "unrestricted", not an allocation.
 u32 GraphicsLdsDwords(const Program& program, const u8* reachable);
+// The DS instructions whose address is provably the lane's own slot, so a
+// Private-backed LDS answers them exactly.
+std::unordered_set<u32> PlanDsOwnLane(const Program& program,
+                                      const u8* reachable);
+// Declare SubgroupLocalInvocationId and the shuffle capability, the channel a
+// cross-lane instruction (ds_swizzle, DPP) reads another lane through.
+void EnableDsSwizzle(Translator& t, StageContext& sc, std::vector<Id>& iface);
+bool UsesDsSwizzle(const Program& program, const u8* reachable);
 void EmitMimg(Translator& t,
               const Inst& inst,
               StageContext& sc,

@@ -1788,6 +1788,10 @@ bool DsGraphicsSupported(u32 op) {
     case 78:   // ds_write2_b64
     case 118:  // ds_read_b64
     case 119:  // ds_read2_b64
+    case 222:  // ds_write_b96
+    case 223:  // ds_write_b128
+    case 254:  // ds_read_b96
+    case 255:  // ds_read_b128
       return true;
     default:
       return false;  // atomics and the rest: no Private lowering exists
@@ -1969,6 +1973,22 @@ void EmitDs(Translator& t, const Inst& inst, StageContext& sc) {
       const Id a = single_addr();
       t.m.Store(lds_at(a), t.Vg(data0));
       t.m.Store(lds_at(t.Add(a, t.U32(4))), t.Vg(data0 + 1));
+      break;
+    }
+    case 222:
+    case 223: {  // ds_write_b96 / ds_write_b128
+      const u32 n = op == 222 ? 3u : 4u;
+      const Id a = single_addr();
+      for (u32 i = 0; i < n; i++)
+        t.m.Store(lds_at(t.Add(a, t.U32(i * 4))), t.Vg(data0 + i));
+      break;
+    }
+    case 254:
+    case 255: {  // ds_read_b96 / ds_read_b128
+      const u32 n = op == 254 ? 3u : 4u;
+      const Id a = single_addr();
+      for (u32 i = 0; i < n; i++)
+        t.SetVg(vdst + i, t.m.Load(t.t_u, lds_at(t.Add(a, t.U32(i * 4)))));
       break;
     }
     case 118: {  // ds_read_b64
