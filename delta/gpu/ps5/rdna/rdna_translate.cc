@@ -65,9 +65,22 @@ DELTA_OPTION(const char*, kSpvDump, "DELTA_GPU_SPVDUMP", nullptr);
 DELTA_OPTION(bool, kAgcTrace, "DELTA_AGC_TRACE", false);
 DELTA_OPTION(bool, kGpuDebugalpha, "DELTA_GPU_DEBUGALPHA", false);
 DELTA_OPTION(bool, kGpuForcecolor, "DELTA_GPU_FORCECOLOR", false);
+// merged_wave_info (s3): verts-in-wave in [7:0], prims in [15:8]. One
+// invocation is one lane here, so a wave has to be as wide as the invocations
+// the draw actually runs -- a shader that masks EXEC with `lane < verts` keeps
+// only lane 0 otherwise, and its triangle collapses.
+DELTA_OPTION(u32, kNggWaveInfo, "DELTA_PS5_WAVEINFO", 0x0101);
 DELTA_OPTION(bool, kGpuForcequad, "DELTA_GPU_FORCEQUAD", false);
 DELTA_OPTION(bool, kGpuNokill, "DELTA_GPU_NOKILL", false);
 DELTA_OPTION(bool, kGpuPosprobe, "DELTA_GPU_POSPROBE", false);
+DELTA_OPTION(bool, kGpuPosunset, "DELTA_GPU_POSUNSET", false);
+DELTA_OPTION(bool, kLdsMark, "DELTA_GPU_LDSMARK", false);
+// DELTA_GPU_PSTEX=<binding+1>: export the sampled texel instead of the
+// shader's colour (0 = off, 1 = the last sample). Answers whether a black
+// composite read a black source or computed black from a good one.
+DELTA_OPTION(int, kGpuPstex, "DELTA_GPU_PSTEX", 0);
+// EXEC and v_cmp results as real subgroup masks (see Translator::wave_masks).
+DELTA_OPTION(bool, kWaveMasks, "DELTA_PS5_WAVEMASK", true);
 DELTA_OPTION(bool, kGpuPsuv, "DELTA_GPU_PSUV", false);
 DELTA_OPTION(u32, kGpuPsuvAttr, "DELTA_GPU_PSUV_ATTR", 0);
 DELTA_OPTION(bool, kGpuShtrace, "DELTA_GPU_SHTRACE", false);
@@ -353,9 +366,12 @@ u32 RemapVop2(u32 op) {
 }
 
 bool RdnaSharedVop2(u32 op) {
+  // 0x15/0x17/0x19 are the non-reversed shifts and 0x22-0x24 the bit counts:
+  // gfx10.3 keeps all six at their GFX7 numbers (checked against KytyPS5's
+  // VOP2 table), and rejecting them threw away whole vertex programs.
   return (op >= 0x03 && op <= 0x05) || (op >= 0x08 && op <= 0x0c) ||
-         (op >= 0x0f && op <= 0x14) || op == 0x16 || op == 0x18 ||
-         (op >= 0x1a && op <= 0x1d) || op == 0x2f;
+         (op >= 0x0f && op <= 0x19) || (op >= 0x1a && op <= 0x1d) ||
+         (op >= 0x22 && op <= 0x24) || op == 0x2f;
 }
 
 bool UnsupportedRdnaScalarSource(u32 field) {
@@ -449,7 +465,7 @@ bool RdnaEmitVop3Int(Translator& t,
       flag = t.Or(flag, t.m.CompositeExtract(t.t_u, pair, 1));
     }
     t.SetVg(vdst, value);
-    t.SetSdst(sdst, 0, t.And(flag, t.Exec()));
+    t.SetLaneFlag(sdst, flag);
   };
   switch (op) {
     case 0x30F:
@@ -617,6 +633,19 @@ void InvalidateCbufDefs(std::unordered_map<u32, CbufDef>& loads,
   }
 }
 
+// Same, for the SGPR quad -> descriptor-source map, whose entries are always
+// four dwords wide.
+void InvalidateDescSrc(std::unordered_map<u32, u64>& src, ScalarWrite write) {
+  if (!write.count)
+    return;
+  for (auto it = src.begin(); it != src.end();) {
+    if (Overlaps(it->first, 4, write.first, write.count))
+      it = src.erase(it);
+    else
+      ++it;
+  }
+}
+
 bool UsedAsBaseBeforeOverwrite(const Program& program,
                                u32 index,
                                u32 sdst,
@@ -714,14 +743,23 @@ bool RdnaPlanCbufs(const Program& program,
   // user-data V#, then s_loads the vertex V# INTO s[8:11]); a whole-program
   // last-write map would misroute the transform to the vertex chain.
   std::unordered_map<u32, CbufDef> loads;
-  std::unordered_map<u64, u32> binding_by_producer;
+  // One descriptor can back several bindings: loads too far apart to share a
+  // window get one each (see below).
+  std::unordered_map<u64, std::vector<u32>> bindings_by_descriptor;
+  // binding -> [lowest dword, highest dword) any of its loads touches.
+  std::unordered_map<u32, std::pair<u32, u32>> span;
+  // SGPR quad -> which descriptor it currently holds, so a reload of the same
+  // table entry is recognised as the same buffer.
+  std::unordered_map<u32, u64> desc_src;
   const auto version_keys = BufferVersionKeys(program);
   const auto descriptor_sgprs = VmemDescriptorSgprs(program);
   u32 inst_index = 0;
   for (const Inst& inst : program) {
     const u32 producer = inst_index++;
     if (inst.enc != Enc::kSmrd) {
-      InvalidateCbufDefs(loads, DecodeScalarWrite(inst));
+      const ScalarWrite write = DecodeScalarWrite(inst);
+      InvalidateCbufDefs(loads, write);
+      InvalidateDescSrc(desc_src, write);
       continue;
     }
     const Smem smem = DecodeSmem(inst);
@@ -733,6 +771,15 @@ bool RdnaPlanCbufs(const Program& program,
     const u32 load_count = SmemLoadCount(op);
     const i32 off =
         sbufload ? static_cast<i32>(inst.raw[1] & 0xFFFFF) : smem.offset;
+    // Remember which table entry an s_load'd V# came from. A shader that keeps
+    // one quad and reloads it entry by entry (Astro Bot's composite PS does it
+    // a dozen times) otherwise looks like a dozen different buffers, and each
+    // one costs a binding.
+    if (sload && load_count == 4) {
+      InvalidateDescSrc(desc_src, {sdst, load_count});
+      desc_src[sdst] = version_keys.at(inst.pc) * 0x9E3779B97F4A7C15ull +
+                       static_cast<u64>(static_cast<u32>(off));
+    }
     // A descriptor fetch (the V# a vertex fetch or texture op then reads). Its
     // offset is often a runtime table index -- Minecraft's NGG VS computes one
     // into vcc_hi -- which no cbuf binding can express, and treating it as a
@@ -757,32 +804,36 @@ bool RdnaPlanCbufs(const Program& program,
     // soffset naming an SGPR instead of the inline zero is a byte offset the
     // shader computes: how one constant buffer holding an array is indexed at
     // run time. Nothing static bounds what it reads, so the binding takes the
-    // whole window -- RdnaEmitSmem already adds that offset to the immediate
-    // and CbufDwordId clamps the result into the declared UBO. Rejecting it
-    // dropped every draw that used one, which for Dead Cells is the shaders
-    // that light the scene.
-    const u32 hi =
-        smem.soffset != 125
-            ? gpu::gcn::kCbufDwords
-            : static_cast<u32>(off < 0 ? 0 : off) / 4 + SmemLoadCount(op);
-    if (hi > gpu::gcn::kCbufDwords) {
-      if (ShDbg())
-        BASE_LOGI("gcnspv",
-                  "cbuf plan reject pc={:#x} op={:#x} soffset={} off={} "
-                  "hi={} raw={:08x} {:08x} sbase={} sdst={}",
-                  inst.pc, op, smem.soffset, off, hi, inst.raw[0],
-                  inst.raw[1], smem.sbase, smem.sdst);
-      return false;
-    }
+    // whole window from dword 0 -- RdnaEmitSmem already adds that offset to the
+    // immediate and CbufDwordId clamps the result into the declared UBO.
+    // Rejecting it dropped every draw that used one, which for Dead Cells is
+    // the shaders that light the scene.
+    const bool dynamic = smem.soffset != 125;
+    const u32 lo = dynamic ? 0 : static_cast<u32>(off < 0 ? 0 : off) / 4;
+    const u32 hi = dynamic ? gpu::gcn::kCbufDwords : lo + SmemLoadCount(op);
 
     u32 chain_off[3] = {}, chain_len = 0;
     const u32 root = TraceCbufChain(sbase, loads, chain_off, &chain_len);
-    const u64 key = version_keys.at(inst.pc);
+    const auto src_it = desc_src.find(sbase);
+    const u64 key = src_it != desc_src.end() ? src_it->second
+                                             : version_keys.at(inst.pc);
 
-    auto it = binding_by_producer.find(key);
-    if (it == binding_by_producer.end()) {
-      const u32 binding =
-          first_binding + static_cast<u32>(cbufs.size());
+    // Reuse a binding on the same buffer when this load still fits its window.
+    // Only the SPAN has to fit: a shader reading one constant 17 KiB into a
+    // buffer and the rest near its start gets two windows on it, not a
+    // rejection.
+    std::vector<u32>& shared = bindings_by_descriptor[key];
+    u32 binding = ~0u;
+    for (u32 b : shared) {
+      const auto& s = span[b];
+      if (std::max(s.second, hi) - std::min(s.first, lo) <=
+          gpu::gcn::kCbufDwords) {
+        binding = b;
+        break;
+      }
+    }
+    if (binding == ~0u) {
+      binding = first_binding + static_cast<u32>(cbufs.size());
       if (binding >= kMaxCbufBindings) {
         if (ShDbg())
           BASE_LOGI("gcnspv", "cbuf plan reject pc={:#x} out of "
@@ -790,26 +841,46 @@ bool RdnaPlanCbufs(const Program& program,
                     inst.pc, binding);
         return false;
       }
-      it = binding_by_producer.emplace(key, binding).first;
+      shared.push_back(binding);
       bindings.emplace(sbase, binding);
       ShaderCbuf cb;
       cb.binding = binding;
       cb.ud_sgpr = root;
-      cb.num_dwords = hi;
+      cb.first_dword = lo;
+      cb.num_dwords = hi - lo;
       cb.chain_len = chain_len;
       for (u32 i = 0; i < 3; i++)
         cb.chain_off[i] = chain_off[i];
       cb.use_pc = inst.pc;
       cbufs.push_back(cb);
+      span[binding] = {lo, hi};
+      if (ShDbg())
+        BASE_LOGI("gcnspv",
+                  "cbuf bind={} pc={:#x} sbase={} root={} chain={} dw={}..{}",
+                  binding, inst.pc, sbase, root, chain_len, lo, hi);
     } else {
+      auto& s = span[binding];
+      s.first = std::min(s.first, lo);
+      s.second = std::max(s.second, hi);
       for (ShaderCbuf& cb : cbufs)
-        if (cb.binding == it->second && hi > cb.num_dwords)
-          cb.num_dwords = hi;
+        if (cb.binding == binding) {
+          cb.first_dword = s.first;
+          cb.num_dwords = s.second - s.first;
+        }
     }
-    by_pc[inst.pc] = it->second;
+    by_pc[inst.pc] = binding;
     InvalidateCbufDefs(loads, {sdst, load_count});
+    InvalidateDescSrc(desc_src, {sdst, load_count});
   }
   return true;
+}
+
+// Hand the emitter the window each binding was planned at, once every planner
+// that can widen one has run.
+void NoteCbufWindows(const std::vector<ShaderCbuf>& cbufs, StageContext& sc) {
+  for (const ShaderCbuf& cb : cbufs)
+    if (cb.first_dword)
+      sc.cbuf_first_dword[cb.binding] = cb.first_dword;
 }
 
 // Plan set-1 UBO bindings for CONSTANT buffer_load_format ops (a load whose
@@ -997,7 +1068,14 @@ void RdnaEmitSmem(Translator& t, const Inst& inst, StageContext& sc) {
     const Id soffset =
         smem.soffset == 125 ? t.U32(0) : t.SrcRaw(smem.soffset, 0);
     const Id byte_offset = t.Add(t.And(soffset, t.U32(~3u)), t.U32(immediate));
-    const Id dword0 = t.Shr(byte_offset, t.U32(2));
+    // The staged window starts at the binding's first dword, not at the guest
+    // buffer's, so a load's index is relative to it.
+    const auto first_it = sc.cbuf_first_dword.find(binding);
+    const u32 first =
+        first_it == sc.cbuf_first_dword.end() ? 0 : first_it->second;
+    Id dword0 = t.Shr(byte_offset, t.U32(2));
+    if (first)
+      dword0 = t.Sub(dword0, t.U32(first));
     const u32 n = SmemLoadCount(op);
     for (u32 k = 0; k < n; k++)
       t.SetSdst(smem.sdst, k, t.CbufDwordId(binding, t.Add(dword0, t.U32(k))));
@@ -1309,6 +1387,11 @@ void EmitExport(Translator& t, const Inst& inst, StageContext& sc) {
     if (target <= 7) {  // MRT0..7
       sc.wrote_color = true;
       Id col;
+      if (t.last_texel_var && t.last_texel) {
+        t.m.Store(gpu::gcn::PsColorOut(t, sc, target),
+                  t.m.Load(t.t_v4, t.last_texel_var));
+        return;
+      }
       if (compr) {
         // A compressed export packs two components per VGPR, and EN selects
         // PAIRS: bit 0 covers components 0-1 in v[0], bit 2 covers 2-3 in v[1].
@@ -1635,6 +1718,19 @@ bool RdnaUsesDpp(const Program& program) {
   return false;
 }
 
+// v_mbcnt_lo/hi (VOP3 0x365/0x366) is how a program derives its own lane, and
+// every LDS address in a merged ES/GS shader is built from it.
+bool RdnaUsesMbcnt(const Program& program) {
+  for (const Inst& inst : program) {
+    if (inst.enc != Enc::kVop3)
+      continue;
+    const u32 op = (inst.raw[0] >> 16) & 0x3FF;
+    if (op == 0x365 || op == 0x366)
+      return true;
+  }
+  return false;
+}
+
 // ---- per-instruction dispatch ----------------------------------------------
 // Decodes RDNA2 field layouts and calls the shared GFX7 emitters (which take
 // pre-decoded operands + a GFX7-canonical opcode). The scalar and VOP1/2/C
@@ -1698,6 +1794,15 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
         if (sc.is_cs) {
           t.m.EmitVoid(spv::Op::OpControlBarrier,
                        {t.U32(2), t.U32(2), t.U32(0x108)});
+        } else if (sc.lds_wave_base) {
+          // Shared LDS: the wave really does have to converge here. A control
+          // barrier at SUBGROUP scope is legal in any stage (unlike Workgroup,
+          // which SPIR-V allows only in compute-like ones), and a subgroup is
+          // exactly the set of lanes sharing the block.
+          t.m.EmitVoid(spv::Op::OpControlBarrier,
+                       {t.U32(static_cast<u32>(spv::Scope::Subgroup)),
+                        t.U32(static_cast<u32>(spv::Scope::Subgroup)),
+                        t.U32(0x48)});  // AcquireRelease | UniformMemory
         } else {
           // A graphics stage's LDS is per-invocation (Private), so there is
           // nothing for the wave to wait on -- and SPIR-V has no control
@@ -2018,13 +2123,25 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       // their GFX7 numbers. A vertex shader that spills to LDS computes its
       // slot with exactly this pair, so without the remap the whole stage was
       // rejected.
+      // 0x1xx, not the bare number: EmitVop3 reads an opcode below 0x100 as a
+      // VOPC, so the bare form wrote a predicate to an SGPR and left the
+      // destination VGPR at zero -- every lane then computed lane 0's LDS slot.
+      // The pack converts keep their GFX7 VOP2 meaning, just renumbered.
       u32 emit_op = op;
-      if (op == 0x364)
-        emit_op = 0x22;  // v_bcnt_u32_b32
+      if (op == 0x368)
+        emit_op = 0x12d;  // v_cvt_pknorm_i16_f32
+      else if (op == 0x369)
+        emit_op = 0x12e;  // v_cvt_pknorm_u16_f32
+      else if (op == 0x36a)
+        emit_op = 0x130;  // v_cvt_pk_u16_u32
+      else if (op == 0x36b)
+        emit_op = 0x131;  // v_cvt_pk_i16_i32
+      else if (op == 0x364)
+        emit_op = 0x122;  // v_bcnt_u32_b32
       else if (op == 0x365)
-        emit_op = 0x23;  // v_mbcnt_lo_u32_b32
+        emit_op = 0x123;  // v_mbcnt_lo_u32_b32
       else if (op == 0x366)
-        emit_op = 0x24;  // v_mbcnt_hi_u32_b32
+        emit_op = 0x124;  // v_mbcnt_hi_u32_b32
       gpu::gcn::EmitVop3(
           t, emit_op, vdst, source0, t.SrcRawHi(s0, inst.literal, op == 0x163),
           t.SrcF(s1, inst.literal, neg & 2, abs & 2),
@@ -2089,23 +2206,15 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
                          (op & 0x10) ? 126 : 106);
       break;
     }
-    case Enc::kVintrp: {
+    case Enc::kVintrp:
       if (!sc.is_ps) {
         gpu::gcn::WarnUnsupported("vintrp.stage", inst.opcode, w, w1);
         break;
       }
-      const u32 chan = (w >> 8) & 3, attr = (w >> 10) & 0x3F;
-      const u32 op = (w >> 16) & 3, vdst = (w >> 18) & 0xFF;
-      if (op == 1 || (op == 2 && (w & 0xFF) == 2)) {
-        const Id var = gpu::gcn::PsInputVar(t, sc, attr);
-        const Id p_in_f = t.m.TypePointer(spv::StorageClass::Input, t.t_f);
-        t.SetVgF(vdst,
-                 t.m.Load(t.t_f, t.m.AccessChain(p_in_f, var, {t.U32(chan)})));
-      } else if (op != 0) {
-        gpu::gcn::WarnUnsupported("vintrp.rdna", op, w, w1);
-      }
+      // Same encoding as GFX7, including the P10/P20 reads that turn a
+      // Location into a PerVertexKHR array.
+      gpu::gcn::EmitVintrp(t, w, sc);
       break;
-    }
     case Enc::kExp:
       EmitExport(t, inst, sc);
       break;
@@ -2224,7 +2333,12 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
         byte_off = t.Add(byte_off, t.Mul(t.Vg(vaddr), t.U32(nc * 4)));
       if (offen)
         byte_off = t.Add(byte_off, t.Vg(vaddr + (idxen ? 1u : 0u)));
-      const Id dword0 = t.Shr(byte_off, t.U32(2));
+      Id dword0 = t.Shr(byte_off, t.U32(2));
+      // Relative to the staged window, as in RdnaEmitSmem: this load can land
+      // on a binding an SMEM planned at a nonzero first dword.
+      if (const auto fit = sc.cbuf_first_dword.find(binding);
+          fit != sc.cbuf_first_dword.end())
+        dword0 = t.Sub(dword0, t.U32(fit->second));
       for (u32 k = 0; k < nc; k++)
         t.SetVg(vdata + k, t.CbufDwordId(binding, t.Add(dword0, t.U32(k))));
       break;
@@ -2304,8 +2418,11 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
     case Enc::kDs:
       if (sc.is_cs || inst.opcode == 0x35) {
         gpu::gcn::EmitDs(t, inst, sc);
-      } else if (sc.lds_var && gpu::gcn::DsGraphicsSupported(inst.opcode)) {
-        if (!sc.ds_own_lane.count(inst.pc))
+      } else if ((sc.lds_var || sc.lds_wave_base) &&
+                 gpu::gcn::DsGraphicsSupported(inst.opcode)) {
+        // Shared LDS answers any address exactly; Private storage only the
+        // lane's own slot.
+        if (!sc.lds_wave_base && !sc.ds_own_lane.count(inst.pc))
           gpu::gcn::NoteApproximated("ds.private", inst.opcode);
         gpu::gcn::EmitDs(t, inst, sc);
       } else {
@@ -2504,8 +2621,14 @@ std::vector<FetchAttr> ParseFetch(u64 fetch_addr) {
 void PlanCrossLane(const Program& program, Translator& t, StageContext& sc,
                    std::vector<Id>& iface) {
   if (!sc.subgroup_local_id &&
-      (RdnaUsesDpp(program) || gpu::gcn::UsesDsSwizzle(program, nullptr)))
+      (RdnaUsesDpp(program) || gpu::gcn::UsesDsSwizzle(program, nullptr) ||
+       RdnaUsesMbcnt(program)))
     gpu::gcn::EnableDsSwizzle(t, sc, iface);
+  // A graphics stage had no lane at all: WaveLane() answered 0, so v_mbcnt
+  // handed every invocation lane zero and an NGG shader's per-lane LDS
+  // addresses all collapsed onto slot zero.
+  if (sc.subgroup_local_id && !t.lane_id)
+    t.lane_id = t.m.Load(t.t_u, sc.subgroup_local_id);
 }
 
 // Which sampler bindings are volumes. GCN left this to the T# alone, so the
@@ -2530,9 +2653,46 @@ void PlanGraphicsLds(const Program& program, Translator& t, StageContext& sc) {
   const u32 lds_dwords = gpu::gcn::GraphicsLdsDwords(program, nullptr);
   if (!lds_dwords)
     return;
+  sc.lds_dwords = lds_dwords;
+  // An NGG vertex program stages its vertices through LDS and reads back slots
+  // its own lane never wrote, so Private storage (one array per invocation)
+  // hands it zeros. Back it with the shared buffer instead: one block per wave,
+  // the block picked by the wave's first vertex index, which is the same for
+  // every lane of the wave and different for the next one. Only the vertex
+  // stage can do this -- a fragment shader has no vertex index to key on.
+  if (sc.is_vs_shared_lds_capable) {
+    sc.lds_storage = spv::StorageClass::StorageBuffer;
+    t.EnsureLdsBuffer();
+    t.RequireSubgroup(spv::Capability::GroupNonUniformBallot);
+    const Id first = t.m.Emit(spv::Op::OpGroupNonUniformBroadcastFirst, t.t_u,
+                              {t.U32(static_cast<u32>(spv::Scope::Subgroup)),
+                               sc.vertex_index_value});
+    // Vertex indices run consecutively through a subgroup, so dividing by its
+    // width names the subgroup. kLdsWaves is a power of two, so the wrap is a
+    // mask.
+    u32 shift = 0;
+    while ((1u << shift) < gpu::gcn::HostSubgroupSize())
+      shift++;
+    const Id wave =
+        t.And(t.Shr(first, t.U32(shift)), t.U32(gpu::gcn::kLdsWaves - 1));
+    sc.lds_wave_base = t.Mul(wave, t.U32(lds_dwords));
+    // DELTA_GPU_LDSMARK: stamp the wave's block at entry, so a DELTA_GPU_LDSDUMP
+    // that comes back all zero says whether the scratch is reachable at all or
+    // the shader's own writes never ran.
+    if (kLdsMark) {
+      const Id p = t.m.TypePointer(spv::StorageClass::StorageBuffer, t.t_u);
+      t.m.Store(t.m.AccessChain(p, t.lds_buf_var,
+                                {t.U32(0), t.Add(sc.lds_wave_base,
+                                                 t.WaveLane())}),
+                t.U32(0xDEADBEEF));
+    }
+    if (ShDbg())
+      BASE_LOGI("gcnspv", "vs shared lds {} dwords ({} per wave)", lds_dwords,
+                lds_dwords);
+    return;
+  }
   const Id lds_arr = t.m.TypeArray(t.t_u, lds_dwords);
   sc.lds_storage = spv::StorageClass::Private;
-  sc.lds_dwords = lds_dwords;
   sc.lds_var =
       t.m.Variable(t.m.TypePointer(spv::StorageClass::Private, lds_arr),
                    spv::StorageClass::Private, t.m.ConstNull(lds_arr));
@@ -2604,6 +2764,13 @@ bool TranslateVs(const Program& program,
     for (const FetchAttr& a : attrs)
       BASE_LOGI("gcnspv", "vs attr loc={} nc={} vgpr={} pc={:#x}",
                 a.semantic, a.num_comps, a.dest_vgpr, a.pc);
+  // Real wave masks only where a shader reads one as a NUMBER: an NGG merged
+  // program gates its per-primitive body on `mask > lane` and derives its LDS
+  // slots from mbcnt over a ballot. Every v_cmp then costs a subgroup ballot,
+  // which halved Dead Cells' frame rate when it was on for shaders that only
+  // ever use a mask as this lane's predicate -- and those are exactly the
+  // shaders with no LDS.
+  t.wave_masks = kWaveMasks && gpu::gcn::GraphicsLdsDwords(program, nullptr);
   t.InitTypes();
 
   std::vector<Id> iface;
@@ -2617,14 +2784,23 @@ bool TranslateVs(const Program& program,
   const Id user_data = DeclareUserData(t);
   const Id main_fn = t.m.BeginFunction(t.t_void, t.t_fn);
   SeedUserData(t, user_data, 8, user_sgprs);
+  // DELTA_GPU_POSUNSET: stamp a sentinel w, and at the tail draw an NDC quad
+  // wherever it survived. A target that paints under this says the shader
+  // never reached its position export at all -- which no probe reading the
+  // exported value can tell apart from exporting zeros.
+  if (kGpuPosunset)
+    t.m.Store(pos_out, t.m.CompositeConstruct(
+                           t.t_v4, {t.F32(0.f), t.F32(0.f), t.F32(0.f),
+                                    t.F32(-1234.f)}));
 
   // NGG merged-wave prologue: the VS derives its EXEC/lane bookkeeping from
   // merged_wave_info in s3 (verts-in-wave [7:0], prims [15:8]); model a
   // 1-vert/1-prim wave so that math yields a live lane instead of zeros.
-  t.SetSg(3, t.U32(0x0101));
+  t.SetSg(3, t.U32(kNggWaveInfo));
 
   std::unordered_map<u32, StageContext::VfetchSeed> vfetch_seed;
   Id vertex_index = 0;
+  bool v0_is_vertex = false;
   if (attrs.empty()) {  // procedural VS: seed the ABI VGPRs from Vulkan
                         // built-ins
     const Id p_in_u = t.m.TypePointer(spv::StorageClass::Input, t.t_u);
@@ -2638,6 +2814,7 @@ bool TranslateVs(const Program& program,
     iface.push_back(instance_index);
     const Id vertex = t.m.Load(t.t_u, vertex_index);
     t.SetVg(0, vertex);
+    v0_is_vertex = true;
     const Id instance = t.m.Load(t.t_u, instance_index);
     t.SetVg(1, instance);
     t.SetVg(3, instance);
@@ -2690,6 +2867,29 @@ bool TranslateVs(const Program& program,
   sc.flat_attrs = &flat_attrs;
   sc.vfetch_seed = std::move(vfetch_seed);
   sc.skip_launch_movs = LaunchExecMovPcs(program);
+  // Shared LDS keys its per-wave block on the vertex index, so a fetch-path VS
+  // (whose attributes arrive as vertex inputs, with no VertexIndex of its own)
+  // needs one declared before the block base can be computed.
+  if (gpu::gcn::GraphicsLdsDwords(program, nullptr)) {
+    if (!vertex_index) {
+      vertex_index =
+          t.m.Variable(t.m.TypePointer(spv::StorageClass::Input, t.t_u),
+                       spv::StorageClass::Input);
+      t.m.Decorate(vertex_index, spv::Decoration::BuiltIn,
+                   {static_cast<u32>(spv::BuiltIn::VertexIndex)});
+      iface.push_back(vertex_index);
+    }
+    sc.is_vs_shared_lds_capable = true;
+    sc.vertex_index_value = t.m.Load(t.t_u, vertex_index);
+    r.shared_lds = true;
+    // A merged NGG program takes its packed ES vertex offsets in v0 and reads
+    // the launch header at LDS[v0]. Those offsets are LDS byte addresses, not
+    // a vertex index: seeding the index there sends the read off into the
+    // block and the primitive body then works from a junk record index. The
+    // one primitive a fullscreen pass draws lives at offset 0.
+    if (v0_is_vertex)
+      t.SetVg(0, t.U32(0));
+  }
   if (!RdnaPlanCbufs(program, 0, r.vs_cbufs, sc.cbuf_bind, sc.smem_cbuf_by_pc))
     return false;
   // Constant buffer_load descriptors (e.g. the ortho matrix a procedural 2D VS
@@ -2702,8 +2902,11 @@ bool TranslateVs(const Program& program,
     if (a.pc != ~0u)
       lifted.insert(a.pc);
   RdnaPlanGfxBuffers(program, 0, &lifted, r.vs_bufs, sc.gfx_buf_bind);
-  PlanGraphicsLds(program, t, sc);
+  NoteCbufWindows(r.vs_cbufs, sc);
+  // Cross-lane first: the LDS plan and every DS address the body emits are
+  // built from the lane id.
   PlanCrossLane(program, t, sc, iface);
+  PlanGraphicsLds(program, t, sc);
   if (ShDbg())
     BASE_LOGI("gcnspv", "vs planned {} cbufs", r.vs_cbufs.size());
   // DELTA_GPU_DBGPOS=<vs address>[:<dword offset>]: recompute this one shader's
@@ -2734,6 +2937,41 @@ bool TranslateVs(const Program& program,
 
   EmitBody(t, program, sc);
   r.num_params = sc.max_param;
+
+  // DELTA_GPU_LDSMARK on a shared-LDS stage: stamp the position this shader
+  // exported into the scratch's trace area, where DELTA_GPU_LDSDUMP can read
+  // it. A degenerate export is otherwise only visible as "the target is black".
+  if (kLdsMark && t.lds_buf_var) {
+    const Id p = t.m.TypePointer(spv::StorageClass::StorageBuffer, t.t_u);
+    const Id pos = t.m.Load(t.t_v4, pos_out);
+    for (u32 i = 0; i < 4; i++)
+      t.m.Store(t.m.AccessChain(p, t.lds_buf_var,
+                                {t.U32(0), t.U32(gpu::gcn::kLdsTraceBase +
+                                                 0x3F0 + i)}),
+                t.m.Bitcast(t.t_u, t.m.CompositeExtract(t.t_f, pos, i)));
+  }
+
+  if (kGpuPosunset) {
+    const Id p_out_f = t.m.TypePointer(spv::StorageClass::Output, t.t_f);
+    const Id w =
+        t.m.Load(t.t_f, t.m.AccessChain(p_out_f, pos_out, {t.U32(3)}));
+    const Id unset = t.m.Emit(spv::Op::OpFOrdEqual, t.t_bool,
+                              {w, t.F32(-1234.f)});
+    const Id vidx = sc.vertex_index_value
+                        ? sc.vertex_index_value
+                        : t.U32(0);
+    const Id fx =
+        t.SelectF(t.IsNonZero(t.And(vidx, t.U32(1))), t.F32(1.f), t.F32(-1.f));
+    const Id fy =
+        t.SelectF(t.IsNonZero(t.And(vidx, t.U32(2))), t.F32(1.f), t.F32(-1.f));
+    const Id have = t.m.Load(t.t_v4, pos_out);
+    const Id quad[4] = {fx, fy, t.F32(0.f), t.F32(1.f)};
+    std::vector<Id> comps;
+    for (u32 i = 0; i < 4; i++)
+      comps.push_back(t.SelectF(unset, quad[i],
+                                t.m.CompositeExtract(t.t_f, have, i)));
+    t.m.Store(pos_out, t.m.CompositeConstruct(t.t_v4, comps));
+  }
 
   // DELTA_GPU_FORCEQUAD: ignore the VS's computed position and emit a
   // full-screen quad straight from gl_VertexIndex (0..3 -> the four NDC
@@ -2848,13 +3086,19 @@ bool TranslatePs(const Program& program,
   sc.ps_num_interp = ps_num_interp;
   sc.vs_exported_params = vs_exported_params;
   sc.skip_launch_movs = LaunchExecMovPcs(program);
+  sc.pervertex_attrs = gpu::gcn::PlanPerVertexAttrs(program, nullptr);
+  if (kGpuPstex)
+    t.last_texel_var =
+        t.m.Variable(t.m.TypePointer(spv::StorageClass::Private, t.t_v4),
+                     spv::StorageClass::Private, t.m.ConstNull(t.t_v4));
   if (!RdnaPlanCbufs(program, static_cast<u32>(r.vs_cbufs.size()),
                      r.ps_cbufs, sc.cbuf_bind, sc.smem_cbuf_by_pc))
     return false;
   RdnaPlanGfxBuffers(program, static_cast<u32>(r.vs_bufs.size()),
                      nullptr, r.ps_bufs, sc.gfx_buf_bind);
-  PlanGraphicsLds(program, t, sc);
+  NoteCbufWindows(r.ps_cbufs, sc);
   PlanCrossLane(program, t, sc, iface);
+  PlanGraphicsLds(program, t, sc);
   const gpu::gcn::MimgBindingPlan mimg_plan = RdnaPlanMimg(program);
   if (mimg_plan.binding_srsrc.size() > StageContext::kMaxPsSamplers)
     return false;
@@ -2911,7 +3155,7 @@ bool TranslatePs(const Program& program,
     // discards Isaac's entire frame. Only the explicit compare-and-kill counts.
   }
   if (sc.wrote_color && kills_lanes && !kGpuNokill) {
-    const Id live = t.IsNonZero(t.Exec());
+    const Id live = t.LaneActive(t.Exec());
     const Id kill_blk = t.m.NewBlock(), after_kill = t.m.NewBlock();
     t.m.SelectionMerge(after_kill);
     t.m.BranchConditional(live, after_kill, kill_blk);

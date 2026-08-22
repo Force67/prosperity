@@ -952,7 +952,7 @@ Id ReadFirstLane(Translator& t, Id value) {
   t.RequireSubgroup(spv::Capability::GroupNonUniformBallot);
   t.RequireSubgroup(spv::Capability::GroupNonUniformVote);
   const Id scope = t.U32(3);  // Subgroup
-  const Id active = t.IsNonZero(t.Exec());
+  const Id active = t.LaneActive(t.Exec());
   const Id ballot = t.m.Emit(spv::Op::OpGroupNonUniformBallot,
                              t.m.TypeVec(t.t_u, 4), {scope, active});
   const Id any = t.m.Emit(spv::Op::OpGroupNonUniformAny, t.t_bool,
@@ -1162,8 +1162,8 @@ void EmitVop2(Translator& t,
     return t.m.CompositeExtract(t.t_u, prod, 1);
   };
   switch (op) {
-    case 0x00: {  // v_cndmask_b32: VCC ? s1 : s0 (VCC stored as raw 1u/0u)
-      set_f(t.SelectF(t.IsNonZero(t.Sg(106)), s1, s0));
+    case 0x00: {  // v_cndmask_b32: this lane's bit of VCC picks s1 or s0
+      set_f(t.SelectF(t.LaneActive(t.Sg(106)), s1, s0));
       break;
     }
     // v_readlane / v_writelane name one lane of the wave and both ignore EXEC.
@@ -1314,37 +1314,37 @@ void EmitVop2(Translator& t,
     case 0x25: {  // v_add_i32: carry-out -> VCC
       const CarryResult r = AddCarry(t, u0, u1);
       set_u(t.Add(u0, u1));
-      t.SetSg(106, r.flag);
+      t.SetLaneFlag(106, r.flag);
       break;
     }
     case 0x26: {  // v_sub_i32
       const CarryResult r = SubBorrow(t, u0, u1);
       set_u(r.value);
-      t.SetSg(106, r.flag);
+      t.SetLaneFlag(106, r.flag);
       break;
     }
     case 0x27: {  // v_subrev_i32
       const CarryResult r = SubBorrow(t, u1, u0);
       set_u(r.value);
-      t.SetSg(106, r.flag);
+      t.SetLaneFlag(106, r.flag);
       break;
     }
     case 0x28: {  // v_addc_u32: s0 + s1 + VCC, carry-out -> VCC
-      const CarryResult r = AddCarry(t, u0, u1, t.Sg(106));
+      const CarryResult r = AddCarry(t, u0, u1, t.LaneFlag(106));
       set_u(r.value);
-      t.SetSg(106, r.flag);
+      t.SetLaneFlag(106, r.flag);
       break;
     }
     case 0x29: {  // v_subb_u32
-      const CarryResult r = SubBorrow(t, u0, u1, t.Sg(106));
+      const CarryResult r = SubBorrow(t, u0, u1, t.LaneFlag(106));
       set_u(r.value);
-      t.SetSg(106, r.flag);
+      t.SetLaneFlag(106, r.flag);
       break;
     }
     case 0x2a: {  // v_subbrev_u32
-      const CarryResult r = SubBorrow(t, u1, u0, t.Sg(106));
+      const CarryResult r = SubBorrow(t, u1, u0, t.LaneFlag(106));
       set_u(r.value);
-      t.SetSg(106, r.flag);
+      t.SetLaneFlag(106, r.flag);
       break;
     }
     case 0x2b:  // v_ldexp_f32
@@ -1647,8 +1647,7 @@ void EmitVopc(Translator& t,
     cond = is_64 ? Int64Predicate(t, op & 0x7, is_signed, a, b)
                  : IntPredicate(t, op & 0x7, is_signed, s0u, s1u);
   }
-  const Id predicate =
-      cond ? t.SelectB(cond, t.U32(1), t.U32(0)) : t.U32(0);  // F -> 0
+  const Id predicate = cond ? t.MaskOf(cond) : t.U32(0);  // F -> 0
   const Id result = t.And(predicate, t.Exec());
   t.SetSg(dst, result);
   if (op & 0x10)
@@ -1686,7 +1685,7 @@ void EmitVop3(Translator& t,
     return;
   }
   if (op == 0x100) {  // VOP3 cndmask uses explicit S2 instead of implicit VCC
-    set_u(t.SelectNz(t.And(u2, t.U32(1)), u1, u0));
+    set_u(t.SelectB(t.LaneActive(u2), u1, u0));
     return;
   }
   if (op >= 0x125 && op <= 0x12a) {  // VOP3B integer add/sub + explicit SDST
@@ -1704,7 +1703,7 @@ void EmitVop3(Translator& t,
     else
       r = SubBorrow(t, u1, u0, u2);
     set_u(r.value);
-    t.SetSdst(sdst, 0, r.flag);
+    t.SetLaneFlag(sdst, r.flag);
     return;
   }
   if (op >= 0x100 && op < 0x140) {

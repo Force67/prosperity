@@ -244,6 +244,17 @@ struct ScalarEval {
     if (user_sgpr_base == 8) {
       sgpr[3] = 0x0101;
       known[3] = true;
+      // A merged NGG stage takes the root of its descriptor table in s[0:1] and
+      // then s_load_dwordx16s the V#s it needs into s8.. over its own user
+      // data. That root is user-data entry 0, so seed it there as well:
+      // without it every descriptor a fullscreen pass reads resolves to
+      // nothing, and Astro Bot's composite shaders gate their whole body on
+      // one such read.
+      if (user_sgprs >= 2) {
+        sgpr[0] = user_data[0];
+        sgpr[1] = user_data[1];
+        known[0] = known[1] = true;
+      }
     }
     // EXEC. The NGG prologue derives its lane masks from it and then feeds them
     // through s_cselect into the very registers a vertex V# is patched in, so
@@ -712,11 +723,33 @@ struct ScalarEval {
     for (u32 i = 0; i < dwords; i++)
       ClearDest(smem.sdst, i);
     if (!base_known || !offset_known || byte_offset < 0 ||
-        static_cast<u64>(byte_offset) > UINT64_MAX - base)
+        static_cast<u64>(byte_offset) > UINT64_MAX - base) {
+      if (kDbg) {
+        static int n = 0;
+        if (n++ < 24)
+          BASE_LOGI("restrace",
+                    "smem pc={:#x} -> s{}..{} SKIPPED sbase=s{} known={}{} "
+                    "clearedby={:#x}/{:#x} vals={:08x}/{:08x} off_known={}",
+                    inst.pc, smem.sdst, smem.sdst + dwords - 1, smem.sbase,
+                    (int)known[smem.sbase], (int)known[smem.sbase + 1],
+                    clear_pc[smem.sbase], clear_pc[smem.sbase + 1],
+                    sgpr[smem.sbase], sgpr[smem.sbase + 1],
+                    (int)offset_known);
+      }
       return;
+    }
     const u64 address = base + static_cast<u64>(byte_offset);
-    if (!GuestRange(address, static_cast<u64>(dwords) * 4))
+    if (!GuestRange(address, static_cast<u64>(dwords) * 4)) {
+      if (kDbg) {
+        static int n = 0;
+        if (n++ < 24)
+          BASE_LOGI("restrace",
+                    "smem pc={:#x} -> s{}..{} UNMAPPED addr={:#x} ({} dwords)",
+                    inst.pc, smem.sdst, smem.sdst + dwords - 1, address,
+                    dwords);
+      }
       return;
+    }
     // The table this chain reads may still be sitting in a compute dispatch's
     // buffer, written this frame but not yet copied back; reading around that
     // resolves the descriptor to whatever the slot held before.
@@ -1591,9 +1624,13 @@ std::unordered_map<u32, BufferResource> ResolveBuffers(
       // Stores too, not just the loads a graphics stage fetches with: a compute
       // dispatch's output buffer reaches it through the same V#.
       const u32 srsrc = ((inst.raw[1] >> 16) & 0x1F) * 4;
+      // An UNRESOLVED fetch is the interesting one: its buffer binds to nothing
+      // and the shader reads zeros. Resolved ones are reported only for the
+      // first few, so the cap is not spent on them.
       if (kDbg) {
-        static int n = 0;
-        if (n++ < 40)
+        static int n = 0, unresolved = 0;
+        const bool all_known = eval.AllKnown(srsrc, 4);
+        if (all_known ? n++ < 16 : unresolved++ < 64)
           BASE_LOGI("restrace",
                     "fetch pc={:#x} srsrc=s{} known={}{}{}{} "
                     "clearedby={:#x}/{:#x}/{:#x}/{:#x}",

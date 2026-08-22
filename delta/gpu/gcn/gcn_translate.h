@@ -24,6 +24,20 @@ namespace gpu::gcn {
 // The renderer additionally checks the selected device's descriptor limits.
 inline constexpr u32 kMaxCsResources = 48;
 
+// Waves a shared-LDS block is allocated for. A graphics stage cannot declare
+// Workgroup storage, so an NGG vertex program's LDS lives in one storage
+// buffer with a block per wave; this is how many blocks that buffer holds, and
+// the wave id wraps into it.
+inline constexpr u32 kLdsWaves = 1024;
+inline constexpr u32 kLdsMaxDwords = 4096;  // GraphicsLdsDwords' own cap
+// DELTA_GPU_DSMARK's trace area: the tail of the scratch, one slot per DS
+// instruction pc, so a dump says which stores actually ran.
+inline constexpr u32 kLdsTraceBase = kLdsWaves * kLdsMaxDwords - 1024;
+// Where a store from an inactive lane goes. LDS writes are per-lane on the
+// hardware and EXEC gates them, so a lane the wave has masked off must not
+// reach the block the active lanes share.
+inline constexpr u32 kLdsTrashDword = kLdsWaves * kLdsMaxDwords - 1;
+
 // A vertex attribute recovered from the VS fetch shader, in semantic order.
 struct ShaderAttr {
   u32 location = 0;        // GLSL `in` location == semantic index
@@ -64,7 +78,12 @@ constexpr u32 kCbufDwords = 4096;
 struct ShaderCbuf {
   u32 binding = 0;
   u32 ud_sgpr = 0;  // user-data dword index of the 4-dword V# / chain root
-  u32 num_dwords = 0;  // highest dword index read + 1 (UBO size)
+  u32 num_dwords = 0;  // dwords the window spans (UBO size)
+  // Dword the window STARTS at. A constant buffer larger than kCbufDwords is
+  // still readable when every load into it sits within one window's span: the
+  // renderer stages from base + first_dword*4 and the shader indexes relative
+  // to that. Left 0 by the GFX7 planner, so the PS4 path is unchanged.
+  u32 first_dword = 0;
   // Descriptor pointer chain (RDNA2 SMEM): when the descriptor is not directly
   // in user data but s_load'd from a chain of user-data root pointers.
   // chain_len == 0 means direct (the V# is inline at ud_sgpr). Otherwise
@@ -196,6 +215,9 @@ struct Recompiled {
   std::vector<ShaderTex> vs_texs;
   u32 num_params = 0;           // VS->PS interpolants (locations 0..n-1)
   u8 ps_mrt_mask = 0;           // bit n set = PS exports MRT color n
+  // The VS backs its LDS with the shared per-wave buffer at set 3, so the
+  // pipeline layout needs that set and the draw has to bind it.
+  bool shared_lds = false;
 };
 
 // Time spent recompiling shaders (GCN -> SPIR-V + spirv-opt) and the number of

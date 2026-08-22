@@ -16,6 +16,13 @@
 #include <limits>
 
 #include <base/logging.h>
+#include <utl/options.h>
+
+namespace {
+// DELTA_GPU_LDSDUMP=<dwords>: host-visible shared-LDS scratch, dumped after a
+// frame.
+DELTA_OPTION(u32, kLdsDump, "DELTA_GPU_LDSDUMP", 0);
+}  // namespace
 
 namespace gpu::vk {
 
@@ -211,6 +218,75 @@ bool CreateUploadRings(const VkPhysicalDeviceProperties& props) {
     VKOK(vkCreateDescriptorSetLayout(g_dev.device, &sl, nullptr,
                                      &g_ring.sbo_layout));
   }
+  return true;
+}
+
+// One storage buffer at set 3 binding 0, big enough for kLdsWaves blocks. It is
+// never uploaded to and never read back: the shader writes its wave's block and
+// reads it again within the same draw.
+// DELTA_GPU_LDSDUMP=<dwords> makes it host visible and mapped instead, so what
+// an NGG shader staged through LDS can be read after the frame -- the only way
+// to tell "the write never happened" from "the read was at another address".
+bool EnsureLdsScratch() {
+  if (g_ring.lds_set)
+    return true;
+  VkDescriptorSetLayoutBinding lb{};
+  lb.binding = 0;
+  lb.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  lb.descriptorCount = 1;
+  lb.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+  VkDescriptorSetLayoutCreateInfo sl{
+      VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+  sl.bindingCount = 1;
+  sl.pBindings = &lb;
+  if (vkCreateDescriptorSetLayout(g_dev.device, &sl, nullptr,
+                                  &g_ring.lds_layout) != VK_SUCCESS)
+    return false;
+  VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+  bi.size = kLdsScratch;
+  bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+             VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+  if (vkCreateBuffer(g_dev.device, &bi, nullptr, &g_ring.lds_buf) != VK_SUCCESS)
+    return false;
+  VkMemoryRequirements mr;
+  vkGetBufferMemoryRequirements(g_dev.device, g_ring.lds_buf, &mr);
+  VkMemoryAllocateInfo ma{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+  ma.allocationSize = mr.size;
+  ma.memoryTypeIndex =
+      kLdsDump ? FindMemoryType(mr.memoryTypeBits,
+                                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                    VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+               : FindMemoryType(mr.memoryTypeBits,
+                                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+  if (vkAllocateMemory(g_dev.device, &ma, nullptr, &g_ring.lds_mem) !=
+      VK_SUCCESS)
+    return false;
+  VKOK(vkBindBufferMemory(g_dev.device, g_ring.lds_buf, g_ring.lds_mem, 0));
+  if (kLdsDump)
+    VKOK(vkMapMemory(g_dev.device, g_ring.lds_mem, 0, kLdsScratch, 0,
+                     reinterpret_cast<void**>(&g_ring.lds_map)));
+  NameObject(VK_OBJECT_TYPE_BUFFER, (u64)g_ring.lds_buf, "shared lds");
+  VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1};
+  VkDescriptorPoolCreateInfo pi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+  pi.maxSets = 1;
+  pi.poolSizeCount = 1;
+  pi.pPoolSizes = &ps;
+  VKOK(vkCreateDescriptorPool(g_dev.device, &pi, nullptr, &g_ring.lds_pool));
+  VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+  ai.descriptorPool = g_ring.lds_pool;
+  ai.descriptorSetCount = 1;
+  ai.pSetLayouts = &g_ring.lds_layout;
+  VKOK(vkAllocateDescriptorSets(g_dev.device, &ai, &g_ring.lds_set));
+  VkDescriptorBufferInfo dbi{g_ring.lds_buf, 0, kLdsScratch};
+  VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+  w.dstSet = g_ring.lds_set;
+  w.dstBinding = 0;
+  w.descriptorCount = 1;
+  w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  w.pBufferInfo = &dbi;
+  vkUpdateDescriptorSets(g_dev.device, 1, &w, 0, nullptr);
+  BASE_LOGI("gpuvk", "shared LDS scratch: {} MB ({} waves)",
+            (unsigned long long)(kLdsScratch >> 20), gpu::gcn::kLdsWaves);
   return true;
 }
 

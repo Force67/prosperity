@@ -30,6 +30,7 @@ DELTA_OPTION(bool, kNoStickyRt, "DELTA_GPU_NOSTICKYRT", false);
 DELTA_OPTION(bool, kRecompOn, "DELTA_PS5_RECOMP", true);
 DELTA_OPTION(u64, kSkipVs, "DELTA_PS5_SKIPVS", 0);
 DELTA_OPTION(u32, kUdBase, "DELTA_PS5_UDBASE", 8);
+DELTA_OPTION(bool, kGsIsVs, "DELTA_PS5_GSVS", false);
 }  // namespace
 
 namespace gpu::ps5 {
@@ -144,11 +145,18 @@ ShaderBinding ResolveShaderBinding(const Regs& regs) {
   ShaderBinding binding;
   // gfx10.3 has no HW VS: the vertex program is the merged NGG shader, whose
   // address is written to the ES (front half) and/or GS (back half) PGM_LO.
-  // Some pipelines populate only the ES slot, so fall back to it when the GS
-  // slot reads 0.
-  binding.vs_addr = regs.ShaderAddr(mmSPI_SHADER_PGM_LO_GS);
+  // The ES slot is the VERTEX program. Usually both slots hold the same merged
+  // address and the choice does not matter, but a pass whose GS half is a
+  // primitive shader programs them separately -- and then the GS program is
+  // one that reads its vertices back out of LDS after the ES half filled it,
+  // which as a Vulkan vertex shader exports a degenerate position. Astro Bot's
+  // fullscreen passes are all of that shape. DELTA_PS5_GSVS=1 restores the
+  // old preference for a bisect.
+  const u64 es_addr = regs.ShaderAddr(mmSPI_SHADER_PGM_LO_ES);
+  const u64 gs_addr = regs.ShaderAddr(mmSPI_SHADER_PGM_LO_GS);
+  binding.vs_addr = kGsIsVs ? gs_addr : es_addr;
   if (!IsGuestAddress(binding.vs_addr))
-    binding.vs_addr = regs.ShaderAddr(mmSPI_SHADER_PGM_LO_ES);
+    binding.vs_addr = kGsIsVs ? es_addr : gs_addr;
   binding.ps_addr = regs.ShaderAddr(mmSPI_SHADER_PGM_LO_PS);
 
   // A pipeline that only populates the ES half leaves the GS user-data window
@@ -162,6 +170,8 @@ ShaderBinding ResolveShaderBinding(const Regs& regs) {
   binding.vs_user_data = gs_populated ? gs_user_data : es_user_data;
   binding.ps_user_data = regs.At(mmSPI_SHADER_USER_DATA_PS_0);
   TraceUserData(gs_user_data, es_user_data);
+  TraceVsUserData(binding.vs_addr, gs_user_data, es_user_data,
+                  gs_populated);
 
   if (!IsGuestAddress(binding.vs_addr) || !IsGuestAddress(binding.ps_addr))
     RecoverShaderAddresses(regs, binding);
@@ -450,14 +460,18 @@ void ResolveCbufferBindings(const std::vector<gcn::ShaderCbuf>& cbufs,
     const auto it = resolved.find(cb.use_pc);
     if (it == resolved.end())
       continue;
-    const u64 base = it->second.base & ~u64{3};
+    // The window need not start at the buffer: a shader reading one constant
+    // far into a large buffer is bound at that dword and indexes relative to it
+    // (ShaderCbuf::first_dword).
+    const u64 base =
+        (it->second.base & ~u64{3}) + static_cast<u64>(cb.first_dword) * 4;
     const u64 bytes = static_cast<u64>(cb.num_dwords) * 4;
     TraceCbufBinding(vertex_stage, cb.binding, cb.use_pc, base, cb.num_dwords);
     if (!IsGuestAddress(base) || !gpu::IsReadableRangeCached(base, bytes))
       continue;
     d.cbufs[cb.binding] = {base, static_cast<u32>(bytes)};
     d.num_cbufs = std::max(d.num_cbufs, cb.binding + 1);
-    if (vertex_stage && bytes >= sizeof(d.mvp)) {
+    if (vertex_stage && !cb.first_dword && bytes >= sizeof(d.mvp)) {
       d.cbuf_base = base;
       d.cbuf_size = static_cast<u32>(bytes);
       std::memcpy(d.mvp, reinterpret_cast<const void*>(base), sizeof(d.mvp));
@@ -471,7 +485,8 @@ void ResolveRawBuffers(const std::vector<gcn::ShaderBuffer>& buffers,
                        const ResolvedBuffers& resolved,
                        const u32* user_data,
                        u32 user_sgprs,
-                       rhi::DrawInfo& d) {
+                       rhi::DrawInfo& d,
+                       bool vertex_stage) {
   for (const gcn::ShaderBuffer& sb : buffers) {
     if (sb.binding >= rhi::DrawInfo::kMaxBuffers)
       continue;
@@ -492,8 +507,11 @@ void ResolveRawBuffers(const std::vector<gcn::ShaderBuffer>& buffers,
       else if (const u32 s = sb.srsrc_sgpr - kRawBufTag; s + 1 < user_sgprs)
         base = user_data[s] |
                (static_cast<u64>(user_data[s + 1] & 0xFFFF) << 32);
-      if (!IsGuestAddress(base) ||
-          !gpu::IsReadableRangeCached(base, kRawBufWindow))
+      const bool ok = IsGuestAddress(base) &&
+                      gpu::IsReadableRangeCached(base, kRawBufWindow);
+      TraceRawBufBinding(vertex_stage, sb.binding, sb.use_pc, sb.srsrc_sgpr,
+                         it != resolved.end(), base, ok ? kRawBufWindow : 0);
+      if (!ok)
         continue;
       d.bufs[sb.binding] = {base, kRawBufWindow};
       d.num_bufs = std::max(d.num_bufs, sb.binding + 1);
@@ -507,8 +525,25 @@ void ResolveRawBuffers(const std::vector<gcn::ShaderBuffer>& buffers,
     const u64 bytes =
         vb.stride ? static_cast<u64>(vb.stride) * vb.num_records
                   : vb.num_records;
-    if (!IsGuestAddress(vb.base) || !bytes || bytes > 0xFFFFFFFFull)
+    const bool ok =
+        IsGuestAddress(vb.base) && bytes && bytes <= 0xFFFFFFFFull;
+    TraceRawBufBinding(vertex_stage, sb.binding, sb.use_pc, sb.srsrc_sgpr,
+                       it != resolved.end() && it->second.descriptor_valid,
+                       vb.base, ok ? bytes : 0);
+    if (!ok)
       continue;
+    // Hand the shader the descriptor the replay walked to. A V# that arrives
+    // through an s_load is invisible to the recompiled module (descriptor
+    // loads emit nothing), so an in-shader read of the descriptor's own fields
+    // -- the STRIDE an indexed buffer_load multiplies by -- came back zero and
+    // every vertex of a draw read the same record.
+    if (it != resolved.end() && it->second.descriptor_valid &&
+        it->second.descriptor_dwords >= 4 && sb.srsrc_sgpr >= kUdBase &&
+        sb.srsrc_sgpr + 4 <= kUdBase + 16) {
+      u32* ud = vertex_stage ? d.vs_user_data : d.ps_user_data;
+      std::memcpy(&ud[sb.srsrc_sgpr - kUdBase], it->second.descriptor,
+                  4 * sizeof(u32));
+    }
     d.bufs[sb.binding] = {vb.base, static_cast<u32>(bytes)};
     d.num_bufs = std::max(d.num_bufs, sb.binding + 1);
   }
@@ -676,11 +711,11 @@ void ResolveRecompiledShaders(const Regs& regs,
   }
   ResolveCbufferBindings(rc.vs_cbufs, vs_resources, true, d);
   ResolveRawBuffers(rc.vs_bufs, vs_resources, binding.vs_user_data,
-                    vs_user_sgprs, d);
+                    vs_user_sgprs, d, true);
   if (binding.ps_addr) {
     ResolveCbufferBindings(rc.ps_cbufs, ps_resources, false, d);
     ResolveRawBuffers(rc.ps_bufs, ps_resources, binding.ps_user_data,
-                      ps_user_sgprs, d);
+                      ps_user_sgprs, d, false);
     if (!rc.ps_texs.empty())
       ResolvePsTextures(binding.ps_addr, binding.ps_user_data, ps_user_sgprs,
                         d);

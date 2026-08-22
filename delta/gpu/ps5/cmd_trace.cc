@@ -437,6 +437,45 @@ void TraceUserData(const u32* gs_user_data, const u32* es_user_data) {
   BASE_LOGI("agc", "  UD ES:{}", Words(es_user_data, 16).c_str());
 }
 
+// Which user-data window a draw's vertex stage actually got, per shader. A
+// merged NGG stage can be programmed through either the GS or the ES bank, and
+// a stage that reads an empty one resolves every descriptor against zeros.
+void TraceVsUserData(u64 vs_addr,
+                     const u32* gs_user_data,
+                     const u32* es_user_data,
+                     bool chose_gs) {
+  if (!kTrace)
+    return;
+  static int n = 0;
+  if (n++ >= 24)
+    return;
+  BASE_LOGI("agc",
+            "  UD vs={:#x} chose={} gs[0..3]={:08x} {:08x} {:08x} {:08x} "
+            "es[0..3]={:08x} {:08x} {:08x} {:08x}",
+            vs_addr, chose_gs ? "gs" : "es", gs_user_data[0], gs_user_data[1],
+            gs_user_data[2], gs_user_data[3], es_user_data[0], es_user_data[1],
+            es_user_data[2], es_user_data[3]);
+}
+
+// Every non-zero SH register a draw sees. A vertex stage whose user-data window
+// reads all zeros is either a stage we are reading from the wrong block or one
+// the title programs somewhere else entirely, and only the whole file says
+// which.
+void TraceShRegs(const Regs& regs) {
+  if (!kTrace)
+    return;
+  static int n = 0;
+  if (n++ >= 120)
+    return;
+  base::String line;
+  for (u32 off = 0; off < 0x200; off++) {
+    const u32 v = regs[kShRegBase + off];
+    if (v)
+      base::FormatTo(line, " {:03x}={:08x}", off, v);
+  }
+  BASE_LOGI("agc", "  SH regs:{}", line.c_str());
+}
+
 void TraceShaderScan(const Regs& regs,
                      const u32* found_reg,
                      const u64* found,
@@ -603,6 +642,39 @@ void TraceAttr(u32 index,
               vb.base, vb.stride, vb.num_records, vb.gfmt, vb.dfmt, vb.nfmt);
 }
 
+// A raw (set-2) buffer the shader indexes itself: whether the draw could name
+// it at all. A shader reading an unbound one reads zeros, which is
+// indistinguishable from a shader whose maths produced zero -- and an NGG
+// vertex program gates its whole body on such a read.
+void TraceRawBufBinding(bool vertex_stage,
+                        u32 binding,
+                        u32 use_pc,
+                        u32 srsrc_sgpr,
+                        bool replayed,
+                        u64 base,
+                        u64 bytes) {
+  if (!Detail())
+    return;
+  // With the head of the window: a resolved binding says only that the draw
+  // could name a buffer, and a buffer of zeros produces exactly the degenerate
+  // geometry an unbound one does.
+  base::String head;
+  if (bytes && gpu::IsReadableRange(base, 32)) {
+    const u32* w = reinterpret_cast<const u32*>(base);
+    for (u32 i = 0; i < 8; i++) {
+      float f;
+      std::memcpy(&f, &w[i], 4);
+      base::FormatTo(head, " {:08x}({})", w[i], f);
+    }
+  }
+  BASE_LOGI("agc",
+            "  {} rawbuf{} use_pc={:#x} srsrc={} replay={} -> base={:#x} "
+            "bytes={} {}{}",
+            vertex_stage ? "vs" : "ps", binding, use_pc, srsrc_sgpr,
+            (int)replayed, base, bytes, bytes ? "" : "(UNBOUND)",
+            head.c_str());
+}
+
 void TraceCbufBinding(bool vertex_stage,
                       u32 binding,
                       u32 use_pc,
@@ -663,9 +735,14 @@ void TraceVertexDump(const rhi::DrawInfo& d,
       static_cast<u64>(d.vertex_stride) * (d.vertex_count ? d.vertex_count : 4),
       128);
   static int n = 0;
-  if (n >= kVdumpN || !d.num_vattrs || !d.vertex_data || !vertex_bytes ||
-      !IsGuestAddress(reinterpret_cast<u64>(d.vertex_data)) ||
-      !gpu::IsReadableRange(reinterpret_cast<u64>(d.vertex_data), vertex_bytes))
+  // A procedural pass has no attributes and no vertex buffer, and every
+  // composite and post draw in a modern title is one -- so the dump has to
+  // cover them too, or the draws that matter most are the ones it cannot show.
+  const bool has_vertices =
+      d.num_vattrs && d.vertex_data && vertex_bytes &&
+      IsGuestAddress(reinterpret_cast<u64>(d.vertex_data)) &&
+      gpu::IsReadableRange(reinterpret_cast<u64>(d.vertex_data), vertex_bytes);
+  if (n >= kVdumpN)
     return;
   n++;
   BASE_LOGI("agc",
@@ -686,7 +763,7 @@ void TraceVertexDump(const rhi::DrawInfo& d,
       DumpProgram(kAgcVdumpps ? "  PS" : "  VS", addr);
   }
   const auto* bytes = reinterpret_cast<const u8*>(d.vertex_data);
-  for (u64 o = 0; o + 4 <= vertex_bytes; o += 4) {
+  for (u64 o = 0; has_vertices && o + 4 <= vertex_bytes; o += 4) {
     u32 u;
     float f;
     std::memcpy(&u, bytes + o, 4);

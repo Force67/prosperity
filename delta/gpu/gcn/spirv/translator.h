@@ -81,6 +81,7 @@ struct Translator {
   Id cbuf_type = 0;  // shared CB { uvec4 data[64]; } type
   std::unordered_map<u32, Id> cbuf_vars;  // binding -> cbuffer UBO var
   Id gfx_buf_type = 0;  // shared Buf { uint data[]; } type (set 2)
+  Id lds_buf_var = 0;   // shared-LDS storage buffer (set 3), see EnsureLdsBuffer
   std::unordered_map<u32, Id> gfx_buf_vars;  // binding -> raw-buffer SSBO
   // Indexed by (arrayed ? 1 : 0) | (dref ? 2 : 0) | (3D ? 4 : 0).
   // Index: arrayed | dref<<1 | 3d<<2 | integer<<3. An integer-format image
@@ -132,9 +133,44 @@ struct Translator {
     m.Name(state_var, "state");
   }
 
-  // Seed EXEC all-active (sgpr[126] = 1) at the start of the function body.
-  // Must run after BeginFunction (emits an OpStore).
-  void SeedExec() { SetSg(126, U32(1)); }
+  // Seed EXEC all-active at the start of the function body. Must run after
+  // BeginFunction (emits an OpStore).
+  void SeedExec() { SetSg(126, wave_masks ? BallotLow(True()) : U32(1)); }
+
+  // ---- wave masks ------------------------------------------------------
+  // EXEC and every v_cmp result are 64-bit LANE MASKS on the hardware, and
+  // shaders read them as numbers, not as booleans: an NGG program gates its
+  // per-primitive work with `v_cmpx_gt_u32 vcc_lo, v_lane` -- true for lane L
+  // exactly when the mask has more than L bits' worth of value. Modelling a
+  // mask as this invocation's single bit makes that gate pass for lane 0 only,
+  // and the whole wave's vertex staging collapses onto one lane.
+  // With wave_masks the mask really is the subgroup's ballot, so mbcnt counts
+  // real lanes and a mask compared as an integer means what it means on the
+  // hardware. Off (the GFX7 path) keeps the one-bit model.
+  bool wave_masks = false;
+  Id BallotLow(Id cond) {
+    RequireSubgroup(spv::Capability::GroupNonUniformBallot);
+    const Id b = m.Emit(spv::Op::OpGroupNonUniformBallot, TypeV4u(),
+                        {U32(static_cast<u32>(spv::Scope::Subgroup)), cond});
+    return m.CompositeExtract(t_u, b, 0);
+  }
+  // A predicate as the wave mask an instruction writes to an SGPR.
+  Id MaskOf(Id cond) {
+    return wave_masks ? BallotLow(cond) : SelectB(cond, U32(1), U32(0));
+  }
+  // Whether this invocation's lane is set in a wave mask.
+  Id LaneActive(Id mask) {
+    return wave_masks ? IsNonZero(And(Shr(mask, WaveLane()), U32(1)))
+                      : IsNonZero(mask);
+  }
+  // A carry/borrow out: one bit per lane on the hardware, so it is a mask too.
+  void SetLaneFlag(u32 sgpr, Id flag) {
+    SetSg(sgpr, wave_masks ? And(MaskOf(IsNonZero(flag)), Exec()) : flag);
+  }
+  Id LaneFlag(u32 sgpr) {
+    return wave_masks ? SelectB(LaneActive(Sg(sgpr)), U32(1), U32(0))
+                      : And(Sg(sgpr), U32(1));
+  }
 
   // ---- cross-lane ------------------------------------------------------
   // A GCN wave is 64 lanes and a host subgroup may be narrower, so an
@@ -241,7 +277,7 @@ struct Translator {
   }
   void SetVg(u32 i, Id v) {
     if (predicate_vector)
-      v = SelectNz(Exec(), v, Vg(i));
+      v = SelectB(LaneActive(Exec()), v, Vg(i));
     m.Store(VgPtr(i), v);
   }
   Id VgF(u32 i) { return m.Bitcast(t_f, Vg(i)); }
@@ -358,6 +394,9 @@ struct Translator {
   }
   Id Low24(Id a) { return And(a, U32(0xFFFFFF)); }
 
+  Id TypeV4u() { return m.TypeVec(t_u, 4); }
+  Id True() { return IsNonZero(U32(1)); }
+
   // ---- comparisons / selects (Bool domain) ----
   Id IsNonZero(Id u) {
     return m.Emit(spv::Op::OpINotEqual, t_bool, {u, U32(0)});
@@ -430,10 +469,24 @@ struct Translator {
   // Declared as Buf { uint data[]; } at set 2, one binding per distinct V# the
   // stage loads through. Storage rather than uniform because the address is a
   // per-lane index, not a constant offset.
-  Id EnsureGfxBuffer(u32 binding) {
-    auto it = gfx_buf_vars.find(binding);
-    if (it != gfx_buf_vars.end())
-      return it->second;
+  // The shared-LDS buffer (set 3, binding 0). One block per wave; the base is
+  // computed once at entry (see PlanSharedLds).
+  Id EnsureLdsBuffer() {
+    if (lds_buf_var)
+      return lds_buf_var;
+    lds_buf_var = m.Variable(
+        m.TypePointer(spv::StorageClass::StorageBuffer, EnsureRawBlockType()),
+        spv::StorageClass::StorageBuffer);
+    m.Decorate(lds_buf_var, spv::Decoration::DescriptorSet, {3});
+    m.Decorate(lds_buf_var, spv::Decoration::Binding, {0});
+    m.Name(lds_buf_var, "lds");
+    return lds_buf_var;
+  }
+
+  // Buf { uint data[]; }, shared by every storage buffer the stage declares.
+  // The type ids are deduplicated by the builder, so decorating a second copy
+  // decorates the same id twice -- which spirv-val rejects outright.
+  Id EnsureRawBlockType() {
     if (!gfx_buf_type) {
       const Id run = m.TypeRuntimeArray(t_u);
       m.Decorate(run, spv::Decoration::ArrayStride, {4});
@@ -441,8 +494,15 @@ struct Translator {
       m.Decorate(gfx_buf_type, spv::Decoration::Block);
       m.MemberDecorate(gfx_buf_type, 0, spv::Decoration::Offset, {0});
     }
+    return gfx_buf_type;
+  }
+
+  Id EnsureGfxBuffer(u32 binding) {
+    auto it = gfx_buf_vars.find(binding);
+    if (it != gfx_buf_vars.end())
+      return it->second;
     const Id v = m.Variable(
-        m.TypePointer(spv::StorageClass::StorageBuffer, gfx_buf_type),
+        m.TypePointer(spv::StorageClass::StorageBuffer, EnsureRawBlockType()),
         spv::StorageClass::StorageBuffer);
     m.Decorate(v, spv::Decoration::DescriptorSet, {2});
     m.Decorate(v, spv::Decoration::Binding, {binding});
@@ -667,6 +727,10 @@ struct StageContext {
   std::unordered_map<u32, u32> mubuf_cbuf_by_pc;
   // Per-instruction RDNA SMEM binding when one sbase has multiple producers.
   std::unordered_map<u32, u32> smem_cbuf_by_pc;
+  // set-1 binding -> the dword its staged window starts at (ShaderCbuf::
+  // first_dword). A load's index is relative to the window, not to the guest
+  // buffer, so anything absent here reads from dword 0 as before.
+  std::unordered_map<u32, u32> cbuf_first_dword;
   // pcs of `s_mov exec, sN` movs where sN holds unmodelled SPI launch state
   // (e.g. the PS coverage mask); emitting them would zero EXEC and skip every
   // export in the CFG path, so they are dropped (EXEC keeps its all-on seed).
@@ -698,8 +762,17 @@ struct StageContext {
   // The idiom that would break it is mbcnt applied to EXEC (a compaction
   // index), where lanes share and reuse slots over time.
   spv::StorageClass lds_storage = spv::StorageClass::Workgroup;
-  // pcs of the DS instructions whose address is proven to be the lane's own
-  // slot, so Private storage answers them exactly (PlanDsOwnLane).
+  // ...unless the stage takes the shared-LDS path: a storage buffer at set 3
+  // with one lds_dwords block per wave, which is what an NGG vertex program
+  // needs. It stages every vertex through LDS and then reads back slots ITS
+  // OWN lane never wrote, so Private storage hands it zeros and the position
+  // export comes out degenerate.
+  Id lds_wave_base = 0;  // dword index of this wave's block (0 = Private LDS)
+  // The vertex stage sets these before planning LDS: shared LDS needs a value
+  // every lane of a wave agrees on to key its block by, and the vertex index
+  // is the only one a vertex shader has.
+  bool is_vs_shared_lds_capable = false;
+  Id vertex_index_value = 0;
   std::unordered_set<u32> ds_own_lane;
   Id subgroup_local_id = 0;     // SubgroupLocalInvocationId for DS swizzles
   // Instruction indices (sorted) at which a workgroup barrier must be emitted
@@ -718,6 +791,11 @@ struct StageContext {
 
 // ---- stage-io helpers (gcn_spirv.cc) --------------------------------------
 Id PsInputVar(Translator& t, StageContext& sc, u32 attr);
+// Attributes a reachable v_interp_mov_f32 reads as P10/P20: those Locations
+// become PerVertexKHR arrays, which has to be settled before the first read.
+std::unordered_set<u32> PlanPerVertexAttrs(const Program& program,
+                                           const u8* reachable);
+void EmitVintrp(Translator& t, u32 w, StageContext& sc);
 Id VsParamOut(Translator& t, StageContext& sc, u32 p);
 Id PsColorOut(Translator& t, StageContext& sc, u32 target);
 Id PsDepthOut(Translator& t, StageContext& sc);

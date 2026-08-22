@@ -53,6 +53,8 @@ DELTA_OPTION(u64, kWantAddr, "DELTA_GPU_PRESENT_ADDR", 0);
 DELTA_OPTION(int, kFlipMode, "DELTA_GPU_FLIP", 0);
 DELTA_OPTION(bool, kCsLazyFlush, "DELTA_GPU_CS_LAZY_FLUSH", false);
 DELTA_OPTION(int, kSnapAt, "DELTA_GPU_SNAP", 0);
+DELTA_OPTION(u32, kLdsDump, "DELTA_GPU_LDSDUMP", 0);
+constexpr u32 kLdsPoison = 0xCDCDCDCD;
 DELTA_OPTION(int, kSnapMinDraws, "DELTA_GPU_SNAP_MINDRAWS", 0);
 DELTA_OPTION(int, kSnapMinIdx, "DELTA_GPU_SNAP_MININDICES", 0);
 DELTA_OPTION(int, kSnapSeqN, "DELTA_GPU_SNAPSEQ", 0);
@@ -219,6 +221,45 @@ void* RdocDevice() {
 // single early frame instead. DELTA_GPU_RTDUMP also writes the selected
 // targets.
 bool ReportRtContents(FrameSlot& owner) {
+  // DELTA_GPU_LDSDUMP=<dwords>: what the frame's NGG shaders staged through the
+  // shared-LDS scratch. Runs on the same schedule as RTSTAT, after the frame's
+  // work has been waited on.
+  if (kLdsDump && g_ring.lds_map &&
+      g_frame.num % std::max(1, kRtStatEvery.get()) == 0) {
+    const u32* dw = reinterpret_cast<const u32*>(g_ring.lds_map);
+    const u32 n = std::min<u32>(kLdsDump.get(),
+                                (u32)(kLdsScratch / sizeof(u32)));
+    char line[1024];
+    int at = 0;
+    u32 nonzero = 0;
+    for (u32 i = 0; i < n; i++) {
+      if (dw[i] == kLdsPoison)
+        continue;
+      nonzero++;
+      if (at < (int)sizeof(line) - 24)
+        at += std::snprintf(line + at, sizeof(line) - at, " %u:%08x", i, dw[i]);
+    }
+    // The DELTA_GPU_DSMARK trace area sits at the tail of the scratch.
+    char marks[512];
+    int mat = 0;
+    const u32* tr = dw + gpu::gcn::kLdsTraceBase;
+    for (u32 i = 0; i + 1 < 1024 && mat < (int)sizeof(marks) - 24; i += 2)
+      if (tr[i] != kLdsPoison && tr[i] != 0)
+        mat += std::snprintf(marks + mat, sizeof(marks) - mat, " %x/vcc=%x",
+                             tr[i] & 0xFFFF, tr[i + 1]);
+    marks[mat] = 0;
+    const u32* pos = tr + 0x3F0;
+    float px[4];
+    for (u32 i = 0; i < 4; i++) {
+      const u32 raw = pos[i] == kLdsPoison ? 0u : pos[i];
+      std::memcpy(&px[i], &raw, 4);
+    }
+    if (pos[0] != kLdsPoison || pos[3] != kLdsPoison)
+      BASE_LOGI("ldsdump", "f{} exported POS0 = {} {} {} {}", g_frame.num,
+                px[0], px[1], px[2], px[3]);
+    BASE_LOGI("ldsdump", "f{} {} of {} dwords written:{} | ds pcs:{}",
+              g_frame.num, nonzero, n, line, marks);
+  }
   // DELTA_GPU_RTSTAT_EVERY=<n>: sample every n frames instead of every 200, so
   // a per-frame flicker can be told apart from a slow animation.
   const int every = std::max(1, kRtStatEvery.get());
@@ -969,6 +1010,14 @@ void BeginFrame(Renderer& renderer) {
   bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
   vkBeginCommandBuffer(g_frame.cmd, &bi);
   CmdBeginLabel(g_frame.cmd, "frame %llu", (unsigned long long)g_frame.num);
+  // Clear the shared-LDS scratch every frame: a merged NGG vertex program
+  // reads its launch header out of LDS before anything writes it, and the
+  // Private-storage path it replaces was zero initialised. Under
+  // DELTA_GPU_LDSDUMP it is poisoned instead, so the dump separates "a shader
+  // wrote zero here" from "nothing wrote here at all".
+  if (g_ring.lds_buf)
+    vkCmdFillBuffer(g_frame.cmd, g_ring.lds_buf, 0, kLdsScratch,
+                    kLdsDump ? kLdsPoison : 0u);
   if (slot.timestamps) {
     vkCmdResetQueryPool(g_frame.cmd, slot.timestamps, 0, 2);
     vkCmdWriteTimestamp(g_frame.cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,

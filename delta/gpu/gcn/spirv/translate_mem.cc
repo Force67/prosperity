@@ -453,7 +453,7 @@ void EmitMimg(Translator& t,
       t.m.EmitVoid(spv::Op::OpImageWrite, {image, coord, texel});
       return;
     }
-    const Id live = t.IsNonZero(t.Exec());
+    const Id live = t.LaneActive(t.Exec());
     const Id write = t.m.NewBlock(), merge = t.m.NewBlock();
     t.m.SelectionMerge(merge);
     t.m.BranchConditional(live, write, merge);
@@ -1798,6 +1798,12 @@ bool DsGraphicsSupported(u32 op) {
   }
 }
 
+// DELTA_GPU_DSMARK: see the trace store in EmitDs.
+bool DsMark() {
+  static const bool on = std::getenv("DELTA_GPU_DSMARK") != nullptr;
+  return on;
+}
+
 u32 GraphicsLdsDwords(const Program& program, const u8* reachable) {
   u32 max_bytes = 0;
   bool any = false;
@@ -1839,7 +1845,7 @@ u32 GraphicsLdsDwords(const Program& program, const u8* reachable) {
 
 void EmitDs(Translator& t, const Inst& inst, StageContext& sc) {
   const u32 w = inst.raw[0], w1 = inst.raw[1], op = inst.opcode;
-  if (op != 0x35 && (!sc.lds_var || !sc.lds_dwords)) {
+  if (op != 0x35 && ((!sc.lds_var && !sc.lds_wave_base) || !sc.lds_dwords)) {
     sc.cs_unsupported = true;
     return;
   }
@@ -1856,11 +1862,32 @@ void EmitDs(Translator& t, const Inst& inst, StageContext& sc) {
     return;
   }
   const Id p_lds = t.m.TypePointer(sc.lds_storage, t.t_u);
-  const auto lds_at = [&](Id byte_addr) {
+  // The shared path puts this wave's block at lds_wave_base, so a slot another
+  // lane wrote is the same slot this lane reads.
+  const auto lds_at = [&](Id byte_addr, bool store = false) {
     const Id idx = t.UMin(t.Shr(byte_addr, t.U32(2)), t.U32(sc.lds_dwords - 1));
+    if (sc.lds_wave_base) {
+      Id abs = t.Add(sc.lds_wave_base, idx);
+      // EXEC gates an LDS write. Without this an inactive lane writes its
+      // stale address register over the block the active lanes staged their
+      // vertices in.
+      if (store && t.wave_masks)
+        abs = t.SelectB(t.LaneActive(t.Exec()), abs, t.U32(kLdsTrashDword));
+      return t.m.AccessChain(p_lds, t.lds_buf_var, {t.U32(0), abs});
+    }
     return t.m.AccessChain(p_lds, sc.lds_var, {idx});
   };
   const Id addr = t.Vg(addr_reg);
+  // DELTA_GPU_DSMARK: stamp the trace area with this store's pc, so a dump of
+  // the shared scratch says which DS instructions a draw actually reached.
+  if (DsMark() && sc.lds_wave_base) {
+    const Id p = t.m.TypePointer(spv::StorageClass::StorageBuffer, t.t_u);
+    const u32 slot = kLdsTraceBase + (inst.pc & 0x1FF) * 2;
+    t.m.Store(t.m.AccessChain(p, t.lds_buf_var, {t.U32(0), t.U32(slot)}),
+              t.U32(0xD5000000u | (inst.pc & 0xFFFF)));
+    t.m.Store(t.m.AccessChain(p, t.lds_buf_var, {t.U32(0), t.U32(slot + 1)}),
+              t.Sg(106));
+  }
   const auto single_addr = [&] { return t.Add(addr, t.U32(offset16)); };
   const auto pair_addr = [&](u32 which, u32 elem_bytes, bool st64) {
     const u32 off =
@@ -1950,13 +1977,13 @@ void EmitDs(Translator& t, const Inst& inst, StageContext& sc) {
       break;
     }
     case 13:  // ds_write_b32
-      t.m.Store(lds_at(single_addr()), t.Vg(data0));
+      t.m.Store(lds_at(single_addr(), true), t.Vg(data0));
       break;
     case 14:
     case 15: {  // ds_write2_b32 / ds_write2st64_b32
       const bool st64 = op == 15;
-      t.m.Store(lds_at(pair_addr(0, 4, st64)), t.Vg(data0));
-      t.m.Store(lds_at(pair_addr(1, 4, st64)), t.Vg(data1));
+      t.m.Store(lds_at(pair_addr(0, 4, st64), true), t.Vg(data0));
+      t.m.Store(lds_at(pair_addr(1, 4, st64), true), t.Vg(data1));
       break;
     }
     case 54:  // ds_read_b32
@@ -1971,8 +1998,8 @@ void EmitDs(Translator& t, const Inst& inst, StageContext& sc) {
     }
     case 77: {  // ds_write_b64
       const Id a = single_addr();
-      t.m.Store(lds_at(a), t.Vg(data0));
-      t.m.Store(lds_at(t.Add(a, t.U32(4))), t.Vg(data0 + 1));
+      t.m.Store(lds_at(a, true), t.Vg(data0));
+      t.m.Store(lds_at(t.Add(a, t.U32(4)), true), t.Vg(data0 + 1));
       break;
     }
     case 222:
@@ -1980,7 +2007,7 @@ void EmitDs(Translator& t, const Inst& inst, StageContext& sc) {
       const u32 n = op == 222 ? 3u : 4u;
       const Id a = single_addr();
       for (u32 i = 0; i < n; i++)
-        t.m.Store(lds_at(t.Add(a, t.U32(i * 4))), t.Vg(data0 + i));
+        t.m.Store(lds_at(t.Add(a, t.U32(i * 4)), true), t.Vg(data0 + i));
       break;
     }
     case 254:
@@ -2001,8 +2028,8 @@ void EmitDs(Translator& t, const Inst& inst, StageContext& sc) {
       const u32 src[2] = {data0, data1};
       for (u32 i = 0; i < 2; i++) {
         const Id a = t.And(pair_addr(i, 8, false), t.U32(~7u));
-        t.m.Store(lds_at(a), t.Vg(src[i]));
-        t.m.Store(lds_at(t.Add(a, t.U32(4))), t.Vg(src[i] + 1));
+        t.m.Store(lds_at(a, true), t.Vg(src[i]));
+        t.m.Store(lds_at(t.Add(a, t.U32(4)), true), t.Vg(src[i] + 1));
       }
       break;
     }

@@ -482,6 +482,59 @@ Id PsBaryCoord(Translator& t, StageContext& sc) {
   return v;
 }
 
+// v_interp_p1/p2/mov_f32. The RDNA2 encoding is identical to GFX7's, so both
+// front ends share this.
+void EmitVintrp(Translator& t, u32 w, StageContext& sc) {
+  if (!sc.is_ps)
+    return;
+  const u32 chan = (w >> 8) & 3, attr = (w >> 10) & 0x3F;
+  const u32 op = (w >> 16) & 3, vdst = (w >> 18) & 0xFF;
+  // Attributes read as P10/P20 come from the PerVertexKHR array, and every
+  // read of such an attribute must, since the Location no longer carries an
+  // interpolated value. VSRC selects the parameter: 0 = P10, 1 = P20,
+  // 2 = P0; P10 = P1 - P0 and P20 = P2 - P0 at the provoking vertex.
+  if (sc.pervertex_attrs.count(attr)) {
+    const Id var = PsPerVertexVar(t, sc, attr);
+    const Id p_in_f = t.m.TypePointer(spv::StorageClass::Input, t.t_f);
+    const auto vert = [&](u32 i) {
+      return t.m.Load(t.t_f,
+                      t.m.AccessChain(p_in_f, var, {t.U32(i), t.U32(chan)}));
+    };
+    if (op == 0)
+      return;  // p1 is a no-op; p2 below produces the value
+    if (op == 1) {
+      // Rebuild what interpolation would have produced.
+      const Id b = PsBaryCoord(t, sc);
+      const Id p_bary_f = t.m.TypePointer(spv::StorageClass::Input, t.t_f);
+      const auto weight = [&](u32 i) {
+        return t.m.Load(t.t_f, t.m.AccessChain(p_bary_f, b, {t.U32(i)}));
+      };
+      t.SetVgF(vdst, t.FAdd(t.FAdd(t.FMul(vert(0), weight(0)),
+                                   t.FMul(vert(1), weight(1))),
+                            t.FMul(vert(2), weight(2))));
+      return;
+    }
+    const u32 vsrc = w & 0xFF;
+    if (vsrc == 2)
+      t.SetVgF(vdst, vert(0));  // P0
+    else if (vsrc == 0)
+      t.SetVgF(vdst, t.FSub(vert(1), vert(0)));  // P10
+    else if (vsrc == 1)
+      t.SetVgF(vdst, t.FSub(vert(2), vert(0)));  // P20
+    return;
+  }
+  // Attributes nothing reads as P10/P20 keep the plain interpolated input:
+  // Vulkan hands back the completed interpolation, so p2 reads it directly
+  // and a mov of P0 reads the same Location rather than leaving vdst zero.
+  // (p1 is a no-op here.)
+  if (op == 1 || (op == 2 && (w & 0xFF) == 2)) {
+    const Id v = PsInputVar(t, sc, attr);
+    const Id p_in_f = t.m.TypePointer(spv::StorageClass::Input, t.t_f);
+    t.SetVgF(vdst,
+             t.m.Load(t.t_f, t.m.AccessChain(p_in_f, v, {t.U32(chan)})));
+  }
+}
+
 Id VsParamOut(Translator& t, StageContext& sc, u32 p) {
   auto it = sc.param_outs.find(p);
   if (it != sc.param_outs.end())
@@ -765,60 +818,9 @@ void EmitInst(Translator& t, const Inst& inst, StageContext& sc) {
                t.SrcRawHi(256 + vsrc1, inst.literal, false));
       break;
     }
-    case Enc::kVintrp: {
-      if (!sc.is_ps)
-        break;
-      const u32 chan = (w >> 8) & 3, attr = (w >> 10) & 0x3F;
-      const u32 op = (w >> 16) & 3, vdst = (w >> 18) & 0xFF;
-      // Attributes read as P10/P20 come from the PerVertexKHR array, and every
-      // read of such an attribute must, since the Location no longer carries an
-      // interpolated value. VSRC selects the parameter: 0 = P10, 1 = P20,
-      // 2 = P0; P10 = P1 - P0 and P20 = P2 - P0 at the provoking vertex.
-      if (sc.pervertex_attrs.count(attr)) {
-        const Id var = PsPerVertexVar(t, sc, attr);
-        const Id p_in_f = t.m.TypePointer(spv::StorageClass::Input, t.t_f);
-        const auto vert = [&](u32 i) {
-          return t.m.Load(t.t_f,
-                          t.m.AccessChain(p_in_f, var, {t.U32(i), t.U32(chan)}));
-        };
-        if (op == 0)
-          break;  // p1 is a no-op; p2 below produces the value
-        if (op == 1) {
-          // Rebuild what interpolation would have produced.
-          const Id b = PsBaryCoord(t, sc);
-          const Id p_bary_f = t.m.TypePointer(spv::StorageClass::Input, t.t_f);
-          const auto weight = [&](u32 i) {
-            return t.m.Load(t.t_f, t.m.AccessChain(p_bary_f, b, {t.U32(i)}));
-          };
-          t.SetVgF(vdst, t.FAdd(t.FAdd(t.FMul(vert(0), weight(0)),
-                                       t.FMul(vert(1), weight(1))),
-                                t.FMul(vert(2), weight(2))));
-          break;
-        }
-        const u32 vsrc = w & 0xFF;
-        if (vsrc == 2)
-          t.SetVgF(vdst, vert(0));  // P0
-        else if (vsrc == 0)
-          t.SetVgF(vdst, t.FSub(vert(1), vert(0)));  // P10
-        else if (vsrc == 1)
-          t.SetVgF(vdst, t.FSub(vert(2), vert(0)));  // P20
-        break;
-      }
-      // Attributes nothing reads as P10/P20 keep the plain interpolated input:
-      // Vulkan hands back the completed interpolation, so p2 reads it directly
-      // and a mov of P0 reads the same Location rather than leaving vdst zero.
-      // (p1 is a no-op here.)
-      if (op == 1 || (op == 2 && (w & 0xFF) == 2)) {
-        // Vulkan provides the completed interpolation directly. P2 reads the
-        // final value; MOV P0 reads the selected parameter input instead of
-        // leaving the destination zero-initialised. (P1 is a no-op here.)
-        const Id v = PsInputVar(t, sc, attr);
-        const Id p_in_f = t.m.TypePointer(spv::StorageClass::Input, t.t_f);
-        t.SetVgF(vdst,
-                 t.m.Load(t.t_f, t.m.AccessChain(p_in_f, v, {t.U32(chan)})));
-      }
+    case Enc::kVintrp:
+      EmitVintrp(t, w, sc);
       break;
-    }
     case Enc::kMubuf:
       if (sc.is_cs) {
         EmitCsMubuf(t, inst, sc);

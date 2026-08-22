@@ -118,6 +118,11 @@ void NoteDrawDetail();
 // (for a pipeline whose program addresses are not in the registers we read) the
 // register-file scan, the pointer at SH 0x113 and the tables user data names.
 void TraceUserData(const u32* gs_user_data, const u32* es_user_data);
+void TraceVsUserData(u64 vs_addr,
+                     const u32* gs_user_data,
+                     const u32* es_user_data,
+                     bool chose_gs);
+void TraceShRegs(const Regs& regs);
 void TraceShaderScan(const Regs& regs, const u32* found_reg, const u64* found,
                      u32 count);
 void TraceUserDataPointers(const u32* vs_user_data, const u32* ps_user_data);
@@ -157,6 +162,13 @@ void TraceAttr(u32 index,
                u32 fetch_soffset,
                const char* how);
 
+void TraceRawBufBinding(bool vertex_stage,
+                        u32 binding,
+                        u32 use_pc,
+                        u32 srsrc_sgpr,
+                        bool replayed,
+                        u64 base,
+                        u64 bytes);
 void TraceCbufBinding(bool vertex_stage,
                       u32 binding,
                       u32 use_pc,

@@ -462,7 +462,12 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
     set0 = rp.tex_set_layout;
   }
   rp.raw_bufs = !d.recomp->vs_bufs.empty() || !d.recomp->ps_bufs.empty();
-  VkDescriptorSetLayout sls[3] = {set0, g_ring.ubo_layout, g_ring.sbo_layout};
+  // A stage that stages through LDS needs the set-3 scratch, and a descriptor
+  // set is positional: taking it means taking set 2 as well, whether or not
+  // the shader reads a raw buffer.
+  rp.shared_lds = d.recomp->shared_lds && EnsureLdsScratch();
+  VkDescriptorSetLayout sls[4] = {set0, g_ring.ubo_layout, g_ring.sbo_layout,
+                                  g_ring.lds_layout};
   // One 64-byte window per stage: 16 user-data dwords each, 128 bytes total,
   // which is the guaranteed minimum push-constant size, plus each stage's own
   // code-address words (VS 128..135, PS 136..143) pushed per draw for
@@ -484,7 +489,7 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
        pc_base ? 144u : 128u},
   };
   VkPipelineLayoutCreateInfo li{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-  li.setLayoutCount = rp.raw_bufs ? 3 : 2;
+  li.setLayoutCount = rp.shared_lds ? 4 : (rp.raw_bufs ? 3 : 2);
   li.pSetLayouts = sls;
   li.pushConstantRangeCount = 1;
   li.pPushConstantRanges = push;

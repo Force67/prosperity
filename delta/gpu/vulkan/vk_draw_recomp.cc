@@ -1647,6 +1647,11 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
   if (tex_set)
     vkCmdBindDescriptorSets(g_frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                             rp->layout, 0, 1, &tex_set, 0, nullptr);
+  // The shared-LDS scratch never changes: one set, bound whenever the pipeline
+  // declares it.
+  if (rp->shared_lds)
+    vkCmdBindDescriptorSets(g_frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            rp->layout, 3, 1, &g_ring.lds_set, 0, nullptr);
   // Commit ring uploads only after every fallible pipeline, texture, region and
   // cbuffer decision has succeeded. Bindings served by the per-frame cache
   // were copied by an earlier draw and only rebind.

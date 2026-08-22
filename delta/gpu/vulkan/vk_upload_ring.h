@@ -75,6 +75,9 @@ constexpr u32 kCbufBindings =
 constexpr VkDeviceSize kSboRing = 512ull * 1024 * 1024;
 constexpr u32 kRawBufWindow = gpu::gcn::kGfxBufferDwords * 4;
 constexpr u32 kRawBufBindings = gpu::gcn::kMaxGfxBuffers;
+// Shared-LDS scratch: kLdsWaves blocks of the recompiler's LDS cap.
+constexpr VkDeviceSize kLdsScratch =
+    VkDeviceSize(gpu::gcn::kLdsWaves) * gpu::gcn::kLdsMaxDwords * 4;
 
 struct UploadRings {
   // Vertex ring: interleaved pos+colour+uv for the heuristic path, the raw
@@ -125,6 +128,17 @@ struct UploadRings {
   VkDescriptorPool sbo_pool = VK_NULL_HANDLE;
   VkDescriptorSet sbo_set = VK_NULL_HANDLE;
 
+  // Shared LDS (set 3): one device-local block per wave for a graphics stage
+  // that stages through LDS. Nothing reads it back on the CPU and nothing
+  // survives a draw, so it is plain device memory written and read by the
+  // shader alone.
+  VkBuffer lds_buf = VK_NULL_HANDLE;
+  VkDeviceMemory lds_mem = VK_NULL_HANDLE;
+  VkDescriptorSetLayout lds_layout = VK_NULL_HANDLE;
+  VkDescriptorPool lds_pool = VK_NULL_HANDLE;
+  VkDescriptorSet lds_set = VK_NULL_HANDLE;
+  u8* lds_map = nullptr;  // only under DELTA_GPU_LDSDUMP
+
   // Texture uploads are recorded into the active frame command buffer. Each
   // frame slot owns its blocks so an in-flight transfer is never overwritten.
   std::vector<TextureUploadBlock> texture_uploads[2];
@@ -138,6 +152,9 @@ bool CreateUploadRings(const VkPhysicalDeviceProperties& props);
 // vertex-input state already covers never binds set 2 at all. The set layout
 // itself is created up front, because pipeline layouts name it.
 bool EnsureRawBufferRing();
+// The shared-LDS scratch buffer and its set-3 descriptor, created on first use
+// by a shader that declares LDS in a graphics stage.
+bool EnsureLdsScratch();
 bool AllocateTextureUpload(u32 slot,
                            VkDeviceSize bytes,
                            VkDeviceSize alignment,
