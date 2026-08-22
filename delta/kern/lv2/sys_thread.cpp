@@ -56,6 +56,10 @@ DELTA_OPTION(bool, kUmtxTrace, "DELTA_UMTX_TRACE", false);
 // to the injected cost, shaving nanoseconds off it pays; if fps does not move,
 // the threads are polling around something else and the op is a symptom.
 DELTA_OPTION(long, kUmtxInjectNs, "DELTA_UMTX_INJECT_NS", 0);
+// DELTA_UMTX_STALL=<seconds>: report a wait that outlives it. "Every thread is
+// parked" says nothing on its own; which object, what its word holds, and which
+// guest code is waiting is the whole diagnosis of a wedged title.
+DELTA_OPTION(long, kUmtxStallSecs, "DELTA_UMTX_STALL", 0);
 }  // namespace
 
 namespace krnl {
@@ -317,6 +321,14 @@ struct WaitChan {
   u64 gen = 0;      // broadcast generation for mutex/CV/semaphore waits
   u64 signals = 0;  // pending single-waiter releases (CV_SIGNAL)
   u32 waiters = 0;  // live CV_WAIT sleepers (drives ucond c_has_waiters)
+  // A signal releases one of the sleepers QUEUED WHEN IT WAS SENT, which a bare
+  // count cannot express: a thread that starts waiting afterwards would consume
+  // it and the intended sleeper never wakes. Astro Bot deadlocks on exactly
+  // that -- its DrawThread and its Draw Geometry worker share one condvar, so
+  // the completion-waiter kept stealing the wake meant for the worker. Each
+  // waiter takes a ticket; only tickets below the cutoff may consume a signal.
+  u64 nextTicket = 0;
+  u64 signalCutoff = 0;
   // Live umutex sleepers (op 5 MUTEX_LOCK + op 17 MUTEX_WAIT). FreeBSD's
   // umtxq_count() on the mutex's own queue decides whether a release leaves the
   // word UNOWNED or CONTESTED, so the count has to be tracked, not guessed.
@@ -388,6 +400,32 @@ constexpr u32 UMUTEX_CONTESTED = 0x80000000u;
 std::chrono::milliseconds umtxTimeout() {
   return std::chrono::milliseconds(kUmtxTimeoutMs);
 }
+
+// One report per stalled wait (DELTA_UMTX_STALL). Constructed on entry to a
+// wait loop, asked once per re-poll tick; the guest stack is what names the
+// caller, and the object word is what names who it is waiting for -- for a
+// umutex the low 31 bits are the owning guest tid.
+struct StallReport {
+  const char *op;
+  const void *obj;
+  std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+  bool done = kUmtxStallSecs <= 0;
+
+  void tick() {
+    if (done)
+      return;
+    const auto waited = std::chrono::steady_clock::now() - start;
+    if (waited < std::chrono::seconds(kUmtxStallSecs))
+      return;
+    done = true;
+    const u32 word = obj ? *static_cast<const volatile u32 *>(obj) : 0;
+    BASE_LOGI("umtxstall", "{} obj={:p} word={:#x} (owner gtid={}) waited {}s",
+              op, obj, word, word & 0x7fffffffu,
+              (long long)std::chrono::duration_cast<std::chrono::seconds>(
+                  waited).count());
+    guestStackTrace("umtxstall", 8);
+  }
+};
 
 // The WAIT-class ops take an optional timeout at uaddr2 (FreeBSD 9 passes a
 // struct timespec there; NULL = wait forever). Relative time.
@@ -602,7 +640,10 @@ bool enabled() {
   return kUmtxHist;
 }
 
+void startTimer();
+
 inline void count(int op, const void *ptr, u32 tid) {
+  startTimer();
   const u64 a = reinterpret_cast<u64>(ptr);
   g_total.fetch_add(1, std::memory_order_relaxed);
   g_op[op & 63].fetch_add(1, std::memory_order_relaxed);
@@ -688,17 +729,21 @@ void dump() {
   std::fflush(stderr);
 }
 
-const bool g_timer = [] {
-  if (!enabled())
-    return false;
-  std::thread([] {
-    for (;;) {
-      std::this_thread::sleep_for(std::chrono::seconds(20));
-      dump();
-    }
-  }).detach();
-  return true;
-}();
+// Started from the first counted call, not from static init: options are read
+// in dcoreMain, long after a namespace-scope initializer would have asked, so
+// the timer used to see the knob unset and the histogram was never printed.
+void startTimer() {
+  static const bool once = [] {
+    std::thread([] {
+      for (;;) {
+        std::this_thread::sleep_for(std::chrono::seconds(20));
+        dump();
+      }
+    }).detach();
+    return true;
+  }();
+  (void)once;
+}
 }  // namespace umtxhist
 
 static void umtxTrace(int op, void *ptr, u32 self, u32 owner) {
@@ -895,8 +940,11 @@ int PS4ABI sys_umtx_op(void *ptr, int op, u64 val, void *a, void *b) {
     // A spurious exit here is harmless (libthr re-runs its CAS loop), but
     // still leave only on "free" or an explicit MUTEX_WAKE so a heavily
     // contended mutex doesn't degrade into a 2ms spin per waiter.
-    while ((p->load() & ~UMUTEX_CONTESTED) != 0 && ch.gen == g0)
+    StallReport stall{"MUTEX_WAIT", ptr};
+    while ((p->load() & ~UMUTEX_CONTESTED) != 0 && ch.gen == g0) {
       bk.cv.wait_for(lk, umtxTimeout());
+      stall.tick();
+    }
     ch.mutexWaiters--;
     return 0;
   }
@@ -918,6 +966,15 @@ int PS4ABI sys_umtx_op(void *ptr, int op, u64 val, void *a, void *b) {
   // N-way stampede on each handoff. When the queue drains to <=1 the kernel --
   // not userland -- clears CONTESTED, because libthr's contested release
   // deliberately leaves the word at CONTESTED and relies on this.
+  // PS5 (FreeBSD 11) numbers the same wake 23, not 22. Its libkernel's mutex
+  // unlock is FreeBSD's _thr_umutex_unlock2 verbatim -- flags at m_flags+4, the
+  // PI/PP path to MUTEX_UNLOCK, the CAS of m_owner from the caller's tid to
+  // UNOWNED, and on UMUTEX_CONTESTED one call to "wake2" with the flags in val
+  // (libkernel.sprx +0x3300, the ONLY op-23 site in the module). We answered it
+  // EINVAL, so a contested release woke nobody: every PS5 title's contended
+  // mutexes were released only by the safety re-poll, and Astro Bot parked its
+  // main thread in scePthreadMutexLock and never rendered another frame.
+  case 23:   // PS5 UMTX_OP_MUTEX_WAKE2
   case 18: { // UMTX_OP_MUTEX_WAKE
     auto *p = static_cast<std::atomic<u32> *>(ptr);
     // Same shape as op 17: "still held, so wake nobody" is decided by the owner
@@ -972,7 +1029,9 @@ int PS4ABI sys_umtx_op(void *ptr, int op, u64 val, void *a, void *b) {
           c->mutexWaiters--;
       }
     } dequeue{&ch, &queued};
+    StallReport stall{"MUTEX_LOCK", ptr};
     for (;;) {
+      stall.tick();
       u32 owner = p->load();
       u32 held = owner & ~UMUTEX_CONTESTED;
       if (held == 0) {                 // free: claim it atomically. A blind store
@@ -1053,6 +1112,7 @@ int PS4ABI sys_umtx_op(void *ptr, int op, u64 val, void *a, void *b) {
     std::unique_lock<std::mutex> clk(cbk.m);
     auto &ch = cbk.chan[ptr];  // stable ref: unordered_map never moves nodes
     ch.waiters++;
+    const u64 myTicket = ch.nextTicket++;
     addrWatchDump("cv-wait pre", ptr, t_tid);
     static_cast<std::atomic<u32> *>(ptr)->store(1);  // c_has_waiters
     addrWatchDump("cv-wait post", ptr, t_tid);
@@ -1111,8 +1171,8 @@ int PS4ABI sys_umtx_op(void *ptr, int op, u64 val, void *a, void *b) {
     for (;;) {
       if (ch.gen != g0)                // broadcast: releases every sleeper
         break;
-      if (ch.signals > 0) {            // signal: exactly one sleeper consumes it
-        ch.signals--;
+      if (ch.signals > 0 && myTicket < ch.signalCutoff) {
+        ch.signals--;                  // exactly one queued sleeper consumes it
         break;
       }
       if (dl && std::chrono::steady_clock::now() >= *dl) {
@@ -1141,8 +1201,10 @@ int PS4ABI sys_umtx_op(void *ptr, int op, u64 val, void *a, void *b) {
     auto &bk = umtxBucket(ptr);
     std::lock_guard<std::mutex> lk(bk.m);
     auto &ch = bk.chan[ptr];
-    if (ch.waiters > ch.signals)       // signal with nobody waiting is lost
+    if (ch.waiters > ch.signals) {     // signal with nobody waiting is lost
       ch.signals++;
+      ch.signalCutoff = ch.nextTicket;  // only sleepers queued by now may take it
+    }
     bk.cv.notify_all();
     return 0;
   }
@@ -1299,13 +1361,16 @@ int PS4ABI sys_umtx_op(void *ptr, int op, u64 val, void *a, void *b) {
     auto &bk = umtxBucket(ptr);
     std::lock_guard<std::mutex> lk(bk.m);
     auto &ch = bk.chan[ptr];
-    if (ch.waiters > ch.signals)
+    if (ch.waiters > ch.signals) {
       ch.signals++;
+      ch.signalCutoff = ch.nextTicket;
+    }
     bk.cv.notify_all();
     return 0;
   }
   default: {
-    // The kernel op_table has 23 entries (0..22); anything else is EINVAL.
+    // FreeBSD 9 (PS4) stops at 22; anything else is EINVAL there. PS5's table
+    // is one longer and its numbers past 17 do not line up (see op 23 above).
     if (op < 0 || op > 22)
       return -SysError::eINVAL;
     static std::atomic<u32> seen[32]{};
