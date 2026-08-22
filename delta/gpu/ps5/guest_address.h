@@ -16,6 +16,9 @@
  * bytes are readable right now and costs a syscall. Ask this one first.
  */
 
+#include <atomic>
+#include <mutex>
+
 #include "base/arch.h"
 
 namespace gpu::ps5 {
@@ -39,8 +42,51 @@ inline bool IsGuestAddress(u64 address) {
 inline constexpr u64 kGpuBase = 0x1000000000ull;
 inline constexpr u64 kGpuEnd = 0x10000000000ull;
 
+// ...and the pools a title actually maps, because that band is only ever a
+// guess about where a title puts them. Astro Bot fixed-maps its GPU pools at 12
+// to 25 GiB, all of it under the 64 GiB floor, so every draw submit naming one
+// was dropped and the title waited forever on a fence the dropped work would
+// have written. Direct memory is where GPU-visible memory comes from, so the
+// kernel notes each mapping it makes (kern/ps5/dev/dma_dev.cpp).
+inline constexpr u32 kMaxNotedPools = 64;
+
+struct NotedPools {
+  struct Range {
+    u64 base, end;
+  } ranges[kMaxNotedPools];
+  std::atomic<u32> count{0};
+  std::mutex lock;
+};
+
+inline NotedPools& GpuPools() {
+  static NotedPools pools;
+  return pools;
+}
+
+inline void NoteGpuPool(u64 base, u64 size) {
+  if (!base || !size)
+    return;
+  auto& pools = GpuPools();
+  std::lock_guard<std::mutex> lk(pools.lock);
+  const u32 n = pools.count.load(std::memory_order_relaxed);
+  for (u32 i = 0; i < n; i++)
+    if (pools.ranges[i].base <= base && pools.ranges[i].end >= base + size)
+      return;
+  if (n >= kMaxNotedPools)
+    return;
+  pools.ranges[n] = {base, base + size};
+  pools.count.store(n + 1, std::memory_order_release);
+}
+
 inline bool IsGpuAddress(u64 address) {
-  return address >= kGpuBase && address < kGpuEnd;
+  if (address >= kGpuBase && address < kGpuEnd)
+    return true;
+  auto& pools = GpuPools();
+  const u32 n = pools.count.load(std::memory_order_acquire);
+  for (u32 i = 0; i < n; i++)
+    if (address >= pools.ranges[i].base && address < pools.ranges[i].end)
+      return true;
+  return false;
 }
 
 }  // namespace gpu::ps5

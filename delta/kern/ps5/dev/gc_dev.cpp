@@ -46,6 +46,8 @@ DELTA_OPTION(bool, kGcTrace, "DELTA_GC_TRACE", false);
 extern "C" void prosperity_agc_submit(u64 dcbBase, u32 sizeBytes);
 // PS5 present bridge: end the frame and present the rendered RT to the window.
 extern "C" void prosperity_agc_flip(u64 scanoutBase);
+// Is this address inside a pool the title mapped for the GPU (gpu/ps5)?
+extern "C" int prosperity_gpu_is_aperture(u64 address);
 
 // Set once the title issues the mode-1 end-of-frame ioctl. Until then the frame
 // has to be ended somewhere, and the start of a state submit is the only other
@@ -94,13 +96,13 @@ static void scanPagePm4(void *ctx, u8 *p, size_t sz) {
   }
 }
 
-// A guest GPU address: see GpuAddr() in gpu/ps5/cmd_processor.cc. The band must
-// span everything allocLowGuest() can hand out (64 GiB slot up to the 2^40 user
-// ceiling); a fixed band around one title's pool silently drops every command
-// buffer another title allocates outside it, so nothing renders and the game
-// waits forever on a GPU label the dropped submits would have written.
+// A guest GPU address: one question, answered by gpu/ps5/guest_address.h, which
+// knows both the assumed band and the pools the title really mapped. A fixed
+// band silently drops every command buffer another title allocates outside it,
+// so nothing renders and the game waits forever on a GPU label the dropped
+// submits would have written -- which is exactly what Astro Bot did.
 static inline bool gpuAddr(u64 a) {
-  return a >= 0x1000000000ull && a < 0x10000000000ull;
+  return prosperity_gpu_is_aperture(a) != 0;
 }
 
 // The submit paths and trace probes below deref candidate pointers pulled out of

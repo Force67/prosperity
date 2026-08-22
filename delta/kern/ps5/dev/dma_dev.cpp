@@ -31,6 +31,11 @@ DELTA_OPTION(bool, kDmemTrace, "DELTA_DMEM_TRACE", false);
 DELTA_OPTION(bool, kNoCarry, "DELTA_DMEM_NOCARRY", false);
 }  // namespace
 
+// GPU aperture bridge (delta_gpu, gpu/ps5): direct memory is where a title's
+// GPU-visible memory comes from, so the command processor learns the pools from
+// here instead of assuming a band.
+extern "C" void prosperity_gpu_note_aperture(u64 base, u64 size);
+
 namespace krnl {
 
 namespace {
@@ -124,6 +129,7 @@ u8 *dmaDevicePs5::map(void *addr, size_t len, u32 /*prot*/, u32 flags,
   if (p == MAP_FAILED)
     return reinterpret_cast<u8 *>(-1);
   noteGuestTaken(static_cast<u8 *>(p), len);
+  prosperity_gpu_note_aperture(reinterpret_cast<u64>(p), len);
   if (!carry.empty())
     std::memcpy(p, carry.data(), carry.size());
   {

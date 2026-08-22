@@ -475,3 +475,13 @@ extern "C" void prosperity_agc_submit(u64 dcb_base, u32 size_bytes) {
 extern "C" void prosperity_agc_flip(u64 scanout_base) {
   gpu::ps5::EndFrame(scanout_base);
 }
+
+// GPU aperture bridge: the kernel tells us where the title mapped its direct
+// memory, so a packet naming a pool outside the assumed band is still followed.
+extern "C" void prosperity_gpu_note_aperture(u64 base, u64 size) {
+  gpu::ps5::NoteGpuPool(base, size);
+}
+
+extern "C" int prosperity_gpu_is_aperture(u64 address) {
+  return gpu::ps5::IsGpuAddress(address) ? 1 : 0;
+}
