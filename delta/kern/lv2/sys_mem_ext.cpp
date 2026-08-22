@@ -126,6 +126,37 @@ int PS4ABI sys_query_memory_protection(void *addr, void *info) {
   return 0;
 }
 
+// The host's own view of an address, for ranges the guest VMA never recorded.
+struct HostMapping {
+  u64 start = 0;
+  u64 end = 0;
+  u32 prot = 0;  // SCE r/w/x bits, 0 when the address is not mapped at all
+};
+
+HostMapping hostMappingOf(const void *addr) {
+  HostMapping out;
+  const u64 want = reinterpret_cast<u64>(addr);
+  std::FILE *f = std::fopen("/proc/self/maps", "re");
+  if (!f)
+    return out;
+  char line[512];
+  while (std::fgets(line, sizeof(line), f)) {
+    unsigned long long lo = 0, hi = 0;
+    char perms[8] = {};
+    if (std::sscanf(line, "%llx-%llx %7s", &lo, &hi, perms) != 3)
+      continue;
+    if (want < lo || want >= hi)
+      continue;
+    out.start = lo;
+    out.end = hi;
+    out.prot = (perms[0] == 'r' ? 1u : 0u) | (perms[1] == 'w' ? 2u : 0u) |
+               (perms[2] == 'x' ? 4u : 0u);
+    break;
+  }
+  std::fclose(f);
+  return out;
+}
+
 // sceKernelVirtualQuery(addr, flags, SceKernelVirtualQueryInfo* info, size).
 // Layout verified against the consumer at libkernel 0x2b9d0 (passes size 0x48
 // and reads name at info+0x21):
@@ -144,6 +175,31 @@ int PS4ABI sys_virtual_query(const void *addr, int /*flags*/, void *info,
   auto *region =
       proc->getVma().get(const_cast<u8 *>(static_cast<const u8 *>(addr)));
   if (!region) {
+    // Memory we allocated outside the guest VMA is still memory the guest is
+    // using: a thread we start runs guest code on a host stack, and a library
+    // that validates a caller's buffer with this call must not be told it is
+    // unmapped. libSceVideodec2 does exactly that and answers every AvPlayer
+    // call with SCE_VIDEODEC2_ERROR_ARGUMENT_POINTER, which is why Astro Bot's
+    // title screen sat behind a video that never started.
+    if (const HostMapping host = hostMappingOf(addr); host.prot) {
+      auto *vq = static_cast<u8 *>(info);
+      std::memcpy(vq + 0x00, &host.start, sizeof(u64));
+      std::memcpy(vq + 0x08, &host.end, sizeof(u64));
+      std::memcpy(vq + 0x10, &host.start, sizeof(u64));
+      if (infoSize >= 0x1C + sizeof(int)) {
+        const int prot = static_cast<int>(host.prot);
+        const int memType = 0;  // WB_ONION, like any other CPU mapping
+        std::memcpy(vq + 0x18, &prot, sizeof(int));
+        std::memcpy(vq + 0x1C, &memType, sizeof(int));
+      }
+      if (infoSize >= 0x21)
+        vq[0x20] = 0x01 | 0x10;  // flexible + committed
+      if (kVqTrace)
+        BASE_LOGI("vq", "addr={:p} host mapping [{:#x}..{:#x}) prot={:#x}",
+                  addr, (unsigned long long)host.start,
+                  (unsigned long long)host.end, host.prot);
+      return 0;
+    }
     // Worth seeing: a caller that walks its own heap this way reads the zeroed
     // struct as "not committed" and silently skips the range.
     if (kVqTrace)

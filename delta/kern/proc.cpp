@@ -2295,10 +2295,17 @@ modulePtr proc::loadModule(base::StringRef name) {
           dir.append(p, len);
           if (dir.back() != '/')
             dir += "/";
-          // Some sysmodules only ship as <name>.native.sprx (fw 08.40 has
-          // libSceShare.native.sprx but no libSceShare.sprx), so a title's
-          // plain DT_NEEDED name misses without the fallback.
-          for (const char *ext : {".sprx", ".native.sprx"}) {
+          // A PS5 firmware ships thirteen sysmodules twice: <name>.sprx is the
+          // build a PS4 title runs under backwards compatibility, and
+          // <name>.native.sprx is the Prospero one. Both carry the same
+          // SONAME, so a NEEDED entry names the pair and the process ABI picks
+          // -- and a native title given the BC build is missing exports the
+          // rest of its native stack imports. Astro Bot's video decoder is
+          // that: libSceVideodec2 imports four NIDs only libSceVdecCore.native
+          // has, and its player parks forever without them. Three sysmodules
+          // ship only as .native (fw 08.40's libSceShare), so the other order
+          // is still a fallback, not an alternative.
+          for (const char *ext : {".native.sprx", ".sprx"}) {
             base::String hp(dir);
             hp += sname.c_str();
             hp += ext;
