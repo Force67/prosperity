@@ -357,6 +357,15 @@ int PS4ABI sys_dynlib_load_prx(const char *path, u64 flags, int *pHandle,
     return -SysError::eNOEXEC;
   }
 
+  // A module that loads later can export what an earlier one's imports missed.
+  // libSceFontFt needs libSceFreeTypeFull, which no firmware dump ships; the
+  // title load-starts libSceFreeTypeOt right after it, and that exports the
+  // same 24 NIDs. The console binds a PLT slot at first call, so rebinding the
+  // slots that landed on the badcall stub is the same behaviour, just eager.
+  for (auto &other : proc->getModuleList())
+    if (other.get() != mod.get() && other->hasUnresolvedImports())
+      other->resolveImports();
+
   // Run the module's DT_INIT (module_start) now, as the real kernel does during
   // load-start. The system modules ship with constructors that self-register
   // their service with the kernel devices; e.g. the real libSceVideoOut registers

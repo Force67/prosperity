@@ -92,6 +92,10 @@ public:
   bool applyRelocations();
   bool resolveImports();
 
+  // Imports that landed on the badcall stub the last time resolveImports ran,
+  // i.e. slots a module loaded later could still satisfy.
+  inline bool hasUnresolvedImports() const { return unresolvedImports != 0; }
+
   bool unload();
 
   inline moduleInfo &getInfo() { return info; }
@@ -196,5 +200,8 @@ private:
   // are additive (+=), so a second pass (the harness relocates, then the guest
   // libkernel calls syscall 599 too) would double the module's TLS index.
   bool relocated = false;
+
+  u32 unresolvedImports = 0;
+  bool importsBound = false;
 };
 }

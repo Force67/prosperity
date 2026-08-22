@@ -966,6 +966,13 @@ bool smodule::resolveImports() {
   if (auto kmod = process->getModule("libkernel"))
     addrBadCall = kmod->getSymbolFullName("M0z6Dr6TNnM#libkernel#libkernel");
 
+  // A re-run only revisits the slots still sitting on the badcall stub: binding
+  // an already-bound slot again would allocate a second host thunk for it, and
+  // the miss has already been reported once.
+  const bool retry = importsBound;
+  importsBound = true;
+  unresolvedImports = 0;
+
   for (u32 i = 0; i < numJmpSlots; i++) {
     const auto *r = &jmpslots[i];
 
@@ -973,6 +980,9 @@ bool smodule::resolveImports() {
     i32 isym = ELF64_R_SYM(r->info);
 
     ElfSym *sym = &symbols[isym];
+
+    if (retry && *getAddress<uintptr_t>(r->offset) != addrBadCall)
+      continue;
 
     if (type != R_X86_64_JUMP_SLOT) {
       LOG_WARNING("resolveImports: bad jump slot {}", i);
@@ -1005,8 +1015,12 @@ bool smodule::resolveImports() {
     // unresolved import (missing dep): point at the badcall stub, don't fail
     if (!resolveObfSymbol(name, addr) || !addr) {
       addr = addrBadCall;
-      LOG_WARNING("unresolved import {} in {} (jmpslot@{:#x})", name,
-                  info.name.c_str(), r->offset);
+      unresolvedImports++;
+      if (!retry)
+        LOG_WARNING("unresolved import {} in {} (jmpslot@{:#x})", name,
+                    info.name.c_str(), r->offset);
+    } else if (retry) {
+      BASE_LOGI("reloc", "late-bound {} in {}", name, info.name.c_str());
     }
 
     if (kRelocTrace)
