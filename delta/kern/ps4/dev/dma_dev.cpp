@@ -59,8 +59,18 @@ constexpr u64 kDmemTotal = 0x300000000ull;  // 12 GiB (SOTTR working set)
 // its arena arithmetic is downstream of this value. Overridable per run rather
 // than lowered outright: the 12 GiB figure is load-bearing for SOTTR.
 DELTA_OPTION(u64, kDmemTotalOverride, "DELTA_DMEM_TOTAL", 0);
+// A PS5 hands a game 12.5 GiB of the console's 16 GiB. Astro Bot reserves ~7.6
+// GiB up front and then asks for one 4.5 GiB block anywhere in the pool, which
+// misses in 12 GiB by 72 MiB; its DirectMemoryAllocator asserts and the engine
+// runs on with no GPU heap at all.
+constexpr u64 kDmemTotalPs5 = 0x320000000ull;  // 12.5 GiB
 u64 dmemTotal() {
-  return kDmemTotalOverride ? kDmemTotalOverride : kDmemTotal;
+  if (kDmemTotalOverride)
+    return kDmemTotalOverride;
+  auto *p = proc::getActive();
+  if (p && p->getPlatform() == proc::platform::ps5)
+    return kDmemTotalPs5;
+  return kDmemTotal;
 }
 // Floor for window-less requests so physical offset 0 stays invalid ("offset 0
 // means the allocation failed" checks in titles keep working).
