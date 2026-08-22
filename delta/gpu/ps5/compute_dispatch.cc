@@ -53,6 +53,7 @@ ResourceRange ResolveImageResource(u64 cs_addr,
                                    const u32* descriptor) {
   ResourceRange out;
   const gcn::TImage t = rdna::DecodeTImage(descriptor);
+  const bool r8 = t.dfmt == 1 && (t.nfmt == 0 || t.nfmt == 4);
   const bool rgba8 = t.dfmt == 10 && (t.nfmt == 0 || t.nfmt == 4);
   const bool r32 = t.dfmt == 4 && (t.nfmt == 4 || t.nfmt == 5 || t.nfmt == 7);
   const bool rg16f = t.dfmt == 5 && t.nfmt == 7;
@@ -63,22 +64,32 @@ ResourceRange ResolveImageResource(u64 cs_addr,
   // 32_32: two full dwords per texel, so it stages unchanged like the other
   // 32-bit-per-channel forms, just twice as wide.
   const bool rg32 = t.dfmt == 11 && (t.nfmt == 4 || t.nfmt == 5 || t.nfmt == 7);
-  out.elem_bytes = (rgba16f || rg32) ? 8u : (r16f || rg8) ? 2u : 4u;
+  const bool block128 = t.dfmt == 14 && (t.nfmt == 4 || t.nfmt == 5);
+  out.elem_bytes = block128            ? 16u
+                   : (rgba16f || rg32) ? 8u
+                   : (r16f || rg8)     ? 2u
+                   : r8                ? 1u
+                                       : 4u;
   out.stage_elem_bytes = r11g11b10f ? 16u : std::max(out.elem_bytes, 4u);
 
-  gcn::TextureLayout32 layout;
   // type 10 is a volume: DecodeTImage already reports its depth as layers and
   // the shared emitter addresses 3D slice-major, so it stages like the 2D
   // forms.
-  if ((t.type != 9 && t.type != 13 && t.type != 10) ||
-      !(rgba8 || r32 || rg16f || r16f || rg8 || rgba16f || r11g11b10f ||
-        rg32) ||
+  const bool supported_type = t.type >= 8 && t.type <= 13;
+  const bool supported_format = r8 || rgba8 || r32 || rg16f || r16f || rg8 ||
+                                rgba16f || r11g11b10f || rg32 || block128;
+  gcn::TextureLayout32 layout;
+  if (!supported_type || !supported_format ||
       !gcn::TilingSupported(t.tiling_idx) || !t.valid ||
       !gcn::BuildTextureLayout32(layout, t.width, t.height, t.pitch, t.layers,
                                  t.mip_levels, t.tiling_idx, t.pow2_pad,
                                  out.elem_bytes)) {
+    // One descriptor we cannot stage used to skip the whole dispatch, taking
+    // every other binding's work with it. Hand this one zeros instead and let
+    // the rest of the shader run.
     TraceCsUnsupportedImage(cs_addr, res.binding, t);
-    out.ok = false;
+    out.zero_fill = true;
+    out.size = std::max<u64>(res.min_bytes, 16);
     return out;
   }
   out.base = t.base;

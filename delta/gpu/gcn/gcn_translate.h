@@ -22,7 +22,7 @@ namespace gpu::gcn {
 
 // Upper bound used by the compute resource planner and Vulkan staging path.
 // The renderer additionally checks the selected device's descriptor limits.
-inline constexpr u32 kMaxCsResources = 32;
+inline constexpr u32 kMaxCsResources = 48;
 
 // A vertex attribute recovered from the VS fetch shader, in semantic order.
 struct ShaderAttr {

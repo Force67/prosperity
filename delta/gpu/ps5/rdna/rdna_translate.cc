@@ -2244,7 +2244,9 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       // dim 3 (cube) arrives with the face already selected, so it is the
       // same (s, t, layer) address the 2D-array path takes.
       const bool arrayed_dim = dim == 3 || dim == 5;
-      if (dim != 1 && !arrayed_dim) {
+      // dim 2 is a volume: three coordinates, no layer. RdnaTex3dMask told the
+      // shared emitter which binding that is, so DA stays clear here.
+      if (dim != 1 && dim != 2 && !arrayed_dim) {
         gpu::gcn::WarnUnsupported("mimg.dim", dim, w, w1);
         break;
       }
@@ -2502,6 +2504,23 @@ void PlanCrossLane(const Program& program, Translator& t, StageContext& sc,
   if (!sc.subgroup_local_id &&
       (RdnaUsesDpp(program) || gpu::gcn::UsesDsSwizzle(program, nullptr)))
     gpu::gcn::EnableDsSwizzle(t, sc, iface);
+}
+
+// Which sampler bindings are volumes. GCN left this to the T# alone, so the
+// shared emitter takes it out of band; gfx10 states it in the instruction's DIM
+// field, which is available here without a descriptor.
+u32 RdnaTex3dMask(const Program& program,
+                  const gpu::gcn::MimgBindingPlan& plan) {
+  u32 mask = 0;
+  for (const Inst& inst : program) {
+    if (inst.enc != Enc::kMimg || ((inst.raw[0] >> 3) & 0x7) != 2)
+      continue;
+    const auto it = plan.binding_by_pc.find(inst.pc);
+    if (it != plan.binding_by_pc.end() &&
+        it->second < StageContext::kMaxPsSamplers)
+      mask |= 1u << it->second;
+  }
+  return mask;
 }
 
 void PlanGraphicsLds(const Program& program, Translator& t, StageContext& sc) {
@@ -2838,6 +2857,7 @@ bool TranslatePs(const Program& program,
   if (mimg_plan.binding_srsrc.size() > StageContext::kMaxPsSamplers)
     return false;
   sc.mimg_plan = &mimg_plan;  // borrowed by EmitBody
+  sc.tex_3d_mask = RdnaTex3dMask(program, mimg_plan);
   for (u32 i = 0; i < mimg_plan.binding_srsrc.size(); i++)
     r.ps_texs.push_back(
         {i, mimg_plan.binding_srsrc[i], mimg_plan.binding_storage[i]});

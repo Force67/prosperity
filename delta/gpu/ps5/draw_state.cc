@@ -546,6 +546,7 @@ void ResolvePsTextures(u64 ps_addr,
   d.tex_pow2_pad = texs[0].pow2_pad;
   d.tex_sampler_valid = texs[0].sampler_valid;
   d.tex_arrayed = texs[0].arrayed;
+  d.tex_is_3d = texs[0].is_3d;
   d.tex_force_lod_zero = texs[0].force_lod_zero;
   d.tex_depth_compare = texs[0].depth_compare;
   d.tex_null_descriptor = texs[0].null_descriptor;
@@ -571,6 +572,7 @@ void ResolvePsTextures(u64 ps_addr,
     std::memcpy(dt.sampler, s.sampler, sizeof(dt.sampler));
     dt.sampler_valid = s.sampler_valid;
     dt.arrayed = s.arrayed;
+    dt.is_3d = s.is_3d;
     dt.force_lod_zero = s.force_lod_zero;
     dt.depth_compare = s.depth_compare;
     dt.storage = s.storage;

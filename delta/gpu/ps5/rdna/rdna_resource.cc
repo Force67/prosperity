@@ -1135,6 +1135,7 @@ TImage DecodeTImage(const u32* d, bool r128) {
   // Cube (type 11) is sampled as a 6-layer 2D array; see MimgArrayed.
   t.arrayed = t.type == 11 || t.type == 12 || t.type == 13;
   const bool volumetric = t.type == 10;  // 3D
+  t.is_3d = volumetric;
   t.layers = (t.arrayed || volumetric) ? depth + 1 : 1;
   if (t.type == 11)
     t.layers = std::max<u32>(t.layers, 6);
