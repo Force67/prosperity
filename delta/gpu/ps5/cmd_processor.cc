@@ -304,6 +304,10 @@ void Walk(rhi::Renderer& renderer,
           break;
         const u64 ib = (static_cast<u64>(body[1] & 0xFFFF) << 32) | body[0];
         const u32 ib_words = body[2] & 0xFFFFF;
+        TraceIndirectBuffer(ib, ib_words,
+                            IsGpuAddress(ib) && ib_words && ib_words <= 0x40000 &&
+                                gpu::IsReadableRange(
+                                    ib, static_cast<u64>(ib_words) * sizeof(u32)));
         // Bounds-guard: only follow IBs into the GPU aperture with a sane
         // size, so a stale/garbage ring window cannot fault the walker.
         if (IsGpuAddress(ib) && ib_words && ib_words <= 0x40000 &&

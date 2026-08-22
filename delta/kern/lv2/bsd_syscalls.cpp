@@ -8,6 +8,7 @@
  */
 
 #include "kern/proc.h"
+#include "kern/crash.h"
 #include <utl/mem.h>
 #include <cstdint>
 
@@ -159,6 +160,26 @@ int PS4ABI sys_regmgr_call(u32 op, u32 id, void *result, void *value,
     int_value->value = 0;
     BASE_LOGI("regmgr", "get-int unknown encoded_id={:#x}",
               (unsigned long long)int_value->encoded_id);
+    // Name the guest code that asked, once. A key a title reads ONCE at boot
+    // and one it polls every frame want different answers, and only the caller
+    // says which this is.
+    static std::mutex seenMtx;
+    static u64 seen[24]{};
+    static int seenN = 0;
+    bool fresh = false;
+    {
+      std::lock_guard<std::mutex> lk(seenMtx);
+      fresh = true;
+      for (int i = 0; i < seenN; i++)
+        if (seen[i] == int_value->encoded_id)
+          fresh = false;
+      if (fresh && seenN < 24)
+        seen[seenN++] = int_value->encoded_id;
+      else
+        fresh = false;
+    }
+    if (fresh)
+      guestStackTrace("regmgr", 8);
     return 0x800D0203;
   }
 

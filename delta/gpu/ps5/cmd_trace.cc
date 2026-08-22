@@ -1038,6 +1038,20 @@ void TraceDcbPacket(u32 position, u32 op, const u32* body, u32 count) {
   BASE_LOGI("agc", "{}", line.c_str());
 }
 
+// Followed vs refused INDIRECT_BUFFERs. A chain we refuse takes every draw in
+// it with it, and the only symptom is a frame that renders nothing.
+void TraceIndirectBuffer(u64 address, u32 words, bool followed) {
+  static std::atomic<u64> ok{0}, skipped{0};
+  (followed ? ok : skipped).fetch_add(1, std::memory_order_relaxed);
+  if (!kWalkStat)
+    return;
+  const u64 n = ok.load() + skipped.load();
+  if ((n % 2000) == 1)
+    BASE_LOGI("walkstat", "indirect buffers: followed={} refused={} (last {:#x} x{} dw {})",
+              (unsigned long long)ok.load(), (unsigned long long)skipped.load(),
+              (unsigned long)address, words, followed ? "ok" : "REFUSED");
+}
+
 void TraceResync(u32 position, u32 words, u32 hdr, u32 op, u32 count) {
   static u64 resyncs = 0;
   if (kWalkStat && (++resyncs % 500) == 1)

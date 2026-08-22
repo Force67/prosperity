@@ -318,7 +318,19 @@ int PS4ABI vGetEventData(const void *event, i64 *data) {
   return 0;
 }
 
+// Whether a title flips through VideoOut at all -- and how often -- is the
+// first thing to know when nothing reaches the screen; the AGC path flips
+// somewhere else entirely.
+static void traceSubmit(const char *what, int bufferIndex, i64 flipArg) {
+  static std::atomic<u64> n{0};
+  const u64 i = n.fetch_add(1);
+  if (i < 3 || (i % 600) == 0)
+    BASE_LOGI("videoout/ps5", "{} #{} buffer={} arg={}", what,
+              (unsigned long long)i, bufferIndex, (long long)flipArg);
+}
+
 int PS4ABI vSubmitFlip(int, int bufferIndex, int, i64 flipArg) {
+  traceSubmit("submitFlip", bufferIndex, flipArg);
   void *fb = nullptr;
   u32 w, h, pitch, fmt;
   int eqHandle;
@@ -357,6 +369,7 @@ int PS4ABI vSubmitFlip(int, int bufferIndex, int, i64 flipArg) {
 // RendererContextAGC parks on `*label == 1` and never submits another frame).
 int PS4ABI vSubmitFlipEop(int, int bufferIndex, int, i64 flipArg,
                           void *eopLabel) {
+  traceSubmit("submitFlipEop", bufferIndex, flipArg);
   u64 scanout = 0;
   int eqHandle;
   {

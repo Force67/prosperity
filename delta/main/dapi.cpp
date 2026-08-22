@@ -17,6 +17,10 @@
 #include <string>
 #include <thread>
 
+#if defined(__linux__)
+#include <sys/prctl.h>
+#endif
+
 #ifdef _WIN32
 #include <Windows.h>
 #include <VersionHelpers.h>
@@ -128,6 +132,13 @@ static void win32PostInit() {
 #endif
 
 EXPORT int dcoreMain(int argc, char **argv) {
+#if defined(__linux__)
+  // Let a debugger attach to a run that is already going. Under the default
+  // yama ptrace_scope=1 only an ancestor may attach, and a stuck title is
+  // exactly the case where starting over under gdb changes the timing that
+  // produced it.
+  prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY, 0, 0, 0);
+#endif
   utl::createLogger(true);
   utl::routeBaseLogging();
   // Before anything logs: the on-screen panel shows the tail of the log, and

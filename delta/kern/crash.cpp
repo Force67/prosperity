@@ -93,6 +93,13 @@ static void backtrace(uintptr_t rbp) {
   for (int i = 0; i < 32; i++) {
     if (rbp < 0x10000 || (rbp & 7))
       break;
+    // "Range-checked" was only a bounds test: a thread parked deep in host code
+    // has no frame chain at rbp at all, and the walk faulted reading it. That is
+    // survivable in a crash report but not from the SIGUSR1 probe, which is
+    // asking a live run what it is stuck on and took the run down instead.
+    if (!utl::isMemoryRangeMapped(reinterpret_cast<void *>(rbp),
+                                  2 * sizeof(uintptr_t)))
+      break;
     auto *frame = reinterpret_cast<uintptr_t *>(rbp);
     uintptr_t next = frame[0];
     uintptr_t ret = frame[1];
@@ -383,19 +390,13 @@ static void probeHandler(int, siginfo_t *, void *ucv) {
   // The frame chain first: a stack scan finds stale return addresses too, which
   // is misleading when the question is "what is this thread blocked in".
   backtrace(gr[REG_RBP]);
-  uintptr_t rsp = gr[REG_RSP];
-  if (rsp >= 0x10000) {
-    auto *sp = reinterpret_cast<uintptr_t *>(rsp);
-    int printed = 0;
-    for (int i = 0; i < 512 && printed < 6; i++) {
-      char sym[256];
-      symbolize(sp[i], sym, sizeof(sym));
-      if (std::strstr(sym, "(.text)")) {
-        BASE_LOGI("probe", "  sp+{:<4x} {}", i * 8, sym);
-        printed++;
-      }
-    }
-  }
+  // A thread parked in a wait is parked inside a SYSCALL, so its rsp is our own
+  // handler stack and scanning it finds host frames and nothing else -- which is
+  // what the probe used to print, and it also walked off the end of the mapping
+  // and took the run down. The guest stack the thread came off is recorded on
+  // syscall entry, it is copied out with process_vm_readv rather than read
+  // directly, and it is the one that says which guest function is waiting.
+  guestStackTrace("probe", 8);
   // DELTA_SCHIST syscall histogram (lv2.cpp counts each syscall in its trampoline).
   // Dump the non-zero counts so a slow/wedged title's hammered syscalls are visible
   // -- the only profiler available (perf/strace/proc-mem are yama-blocked here).
