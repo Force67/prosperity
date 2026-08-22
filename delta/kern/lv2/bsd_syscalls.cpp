@@ -24,6 +24,8 @@ void symbolize(uintptr_t addr, char *out, size_t n);
 #include <cstring>
 #include <cstdlib>
 #include <cstdio>
+#include <mutex>
+#include <string>
 #include <utl/options.h>
 
 namespace {
@@ -285,7 +287,23 @@ int PS4ABI sys_write(u32 fd, const void *buf, size_t nbytes) {
     // Suppress guest fd1/2 output while diagnosing the host-side render path.
     if (kQuietGuest)
       return static_cast<int>(nbytes);
-    fwrite(buf, 1, nbytes, stdout);
+    // Through the logger a line at a time, like sys_writev: host stdout is
+    // usually a redirected file, so a plain fwrite sits in a host stdio buffer
+    // that a killed run never flushes -- a title that stops printing and one
+    // whose last 4 KiB were lost look identical. Titles print this fd a
+    // character at a time, hence the accumulator.
+    static std::mutex mtx;
+    static std::string line;
+    std::lock_guard<std::mutex> lk(mtx);
+    line.append(static_cast<const char *>(buf), nbytes);
+    for (size_t nl; (nl = line.find('\n')) != std::string::npos;) {
+      std::string one = line.substr(0, nl);
+      line.erase(0, nl + 1);
+      while (!one.empty() && one.back() == '\r')
+        one.pop_back();
+      if (!one.empty())
+        BASE_LOGI("guest", "{}", one.c_str());
+    }
     return static_cast<int>(nbytes);
   }
 
