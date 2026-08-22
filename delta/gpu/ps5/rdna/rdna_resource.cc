@@ -924,24 +924,35 @@ ScalarReplayPlan::Loss ScalarReplayPlan::LossAt(u32 sgpr,
   // EXEC is seeded with a fictional one-lane mask, not read from the dispatch.
   if (sgpr < 128 && sgpr + dwords > 126)
     return kUnmodelled;
-  // A branch target inside (write, use] means some path reaches the use
-  // without the write; a back edge spanning the write means the wave ran it
-  // more often than the replay's single walk did.
+  // A write that does not dominate the use has a path around it; a back edge
+  // spanning the write means the wave ran it more often than the replay's
+  // single walk did.
   const auto skippable = [&](u32 write) {
-    for (u32 target : targets)
-      if (target > write && target <= use_index)
-        return true;
+    if (!Dominates(write, use_index))
+      return kConditional;
     for (const BackEdge& edge : back_edges)
-      if (edge.target <= write && write <= edge.source)
-        return true;
-    return false;
+      if (edge.target <= write && write <= edge.source) {
+        for (const Write& w : writes)
+          if (w.index == write && w.loop_invariant)
+            return kCovered;
+        return kLoopBody;
+      }
+    return kCovered;
   };
   // A write the program places after the use still runs before it if a back
-  // edge carries execution from the write back to the use.
-  const auto carried = [&](u32 write) {
-    for (const BackEdge& edge : back_edges)
-      if (edge.target <= use_index && edge.source >= write)
+  // edge carries execution from the write back to the use -- unless a write in
+  // the loop body kills that value before the use is reached again. A shader
+  // that reuses one register for several descriptors down a long loop body does
+  // exactly that, and reading only the back edge declined the whole dispatch.
+  const auto carried = [&](u32 write, const Write* last) {
+    for (const BackEdge& edge : back_edges) {
+      if (edge.target > use_index || edge.source < write)
+        continue;
+      const bool killed = last && last->index >= edge.target &&
+                          Dominates(last->index, use_index);
+      if (!killed)
         return true;
+    }
     return false;
   };
 
@@ -954,17 +965,197 @@ ScalarReplayPlan::Loss ScalarReplayPlan::LossAt(u32 sgpr,
         continue;
       if (write.index < use_index)
         last = &write;  // writes are recorded in program order
-      else if (indirect || carried(write.index))
+    }
+    for (const Write& write : writes) {
+      if (reg < write.first || reg >= write.first + write.count)
+        continue;
+      if (write.index >= use_index && (indirect || carried(write.index, last)))
         note(kLoopCarried);
     }
     if (!last)
       continue;  // never written: still the user data the dispatch seeded
     if (!last->exact)
       note(kUnmodelled);
-    else if (indirect || skippable(last->index))
+    else if (indirect)
       note(kConditional);
+    else
+      note(skippable(last->index));
   }
   return worst;
+}
+
+// The scalar registers an instruction reads, for the encodings the replay
+// evaluates. False means the read set is not modelled, which counts as reading
+// anything.
+bool ScalarSourceRegs(const Inst& inst, u32 out[6], u32& n) {
+  n = 0;
+  const auto add = [&](u32 reg) {
+    if (reg < ScalarReplayPlan::kRegs && n < 6)
+      out[n++] = reg;
+  };
+  switch (inst.enc) {
+    case Enc::kSmrd: {
+      const Smem smem = DecodeSmem(inst);
+      add(smem.sbase);
+      add(smem.sbase + 1);
+      if (smem.soffset < 102)
+        add(smem.soffset);
+      return true;
+    }
+    case Enc::kSop1: {
+      const u32 ssrc = inst.raw[0] & 0xFF;
+      if (ssrc < 102) {
+        add(ssrc);
+        add(ssrc + 1);
+      }
+      return true;
+    }
+    case Enc::kSop2: {
+      const u32 ssrc0 = inst.raw[0] & 0xFF;
+      const u32 ssrc1 = (inst.raw[0] >> 8) & 0xFF;
+      for (u32 ssrc : {ssrc0, ssrc1})
+        if (ssrc < 102) {
+          add(ssrc);
+          add(ssrc + 1);
+        }
+      return true;
+    }
+    case Enc::kSopk:
+      add((inst.raw[0] >> 16) & 0x7F);
+      return true;
+    default:
+      return false;
+  }
+}
+
+bool ScalarReplayPlan::Dominates(u32 write_index, u32 use_index) const {
+  if (write_index >= block_of.size() || use_index >= block_of.size())
+    return false;
+  const u32 write_block = block_of[write_index];
+  const u32 use_block = block_of[use_index];
+  if (write_block == use_block)
+    return write_index <= use_index;
+  for (u32 block = use_block;;) {
+    if (block == write_block)
+      return true;
+    const u32 next = idom[block];
+    if (next == block || next == kNoBlock)
+      return false;
+    block = next;
+  }
+}
+
+// Split the program into basic blocks and dominator-tree them. Blocks are
+// numbered in program order, which is a reverse post-order for the reducible
+// control flow a shader compiler emits, so the classic iterative walk settles
+// in one or two passes.
+void BuildBlockDominators(const Program& program, ScalarReplayPlan& plan) {
+  const u32 n = static_cast<u32>(program.size());
+  if (!n)
+    return;
+  std::vector<u8> leader(n, 0);
+  leader[0] = 1;
+  for (u32 target : plan.targets)
+    if (target < n)
+      leader[target] = 1;
+  for (u32 i = 0; i + 1 < n; i++)
+    if (BranchKind(program[i]) != 0)
+      leader[i + 1] = 1;
+
+  plan.block_of.assign(n, 0);
+  std::vector<u32> start;
+  for (u32 i = 0; i < n; i++) {
+    if (leader[i])
+      start.push_back(i);
+    plan.block_of[i] = static_cast<u32>(start.size() - 1);
+  }
+  const u32 blocks = static_cast<u32>(start.size());
+  std::vector<std::vector<u32>> preds(blocks);
+  for (u32 b = 0; b < blocks; b++) {
+    const u32 last = (b + 1 < blocks ? start[b + 1] : n) - 1;
+    const int kind = BranchKind(program[last]);
+    if (kind == 1 || kind == 2) {
+      const u32 target = BranchTargetIndex(program, last);
+      if (target < n)
+        preds[plan.block_of[target]].push_back(b);
+    }
+    // Kind 1 is s_branch and kind 3 ends the wave: neither falls through.
+    if ((kind == 0 || kind == 2) && last + 1 < n)
+      preds[plan.block_of[last + 1]].push_back(b);
+  }
+
+  plan.idom.assign(blocks, ScalarReplayPlan::kNoBlock);
+  plan.idom[0] = 0;
+  const auto intersect = [&](u32 a, u32 b) {
+    while (a != b) {
+      while (a > b) {
+        const u32 next = plan.idom[a];
+        if (next == a || next == ScalarReplayPlan::kNoBlock)
+          return b;
+        a = next;
+      }
+      while (b > a) {
+        const u32 next = plan.idom[b];
+        if (next == b || next == ScalarReplayPlan::kNoBlock)
+          return a;
+        b = next;
+      }
+    }
+    return a;
+  };
+  for (bool changed = true; changed;) {
+    changed = false;
+    for (u32 b = 1; b < blocks; b++) {
+      u32 candidate = ScalarReplayPlan::kNoBlock;
+      for (u32 pred : preds[b]) {
+        if (plan.idom[pred] == ScalarReplayPlan::kNoBlock)
+          continue;
+        candidate = candidate == ScalarReplayPlan::kNoBlock
+                        ? pred
+                        : intersect(pred, candidate);
+      }
+      if (candidate != ScalarReplayPlan::kNoBlock && plan.idom[b] != candidate) {
+        plan.idom[b] = candidate;
+        changed = true;
+      }
+    }
+  }
+}
+
+// A write inside a loop body whose sources the loop never touches leaves the
+// same value behind on every iteration, so the replay's single walk holds the
+// wave's value after all. This is how a shader that reloads a descriptor from
+// the same user-data table inside its loop stays resolvable.
+void MarkLoopInvariantWrites(const Program& program,
+                             ScalarReplayPlan& plan) {
+  for (ScalarReplayPlan::Write& write : plan.writes) {
+    u32 begin = 0, end = 0;
+    bool in_loop = false;
+    for (const ScalarReplayPlan::BackEdge& edge : plan.back_edges)
+      if (edge.target <= write.index && write.index <= edge.source) {
+        // The widest loop the write sits in: a value the outer loop changes is
+        // not invariant just because the inner one leaves it alone.
+        begin = in_loop ? std::min(begin, edge.target) : edge.target;
+        end = in_loop ? std::max(end, edge.source) : edge.source;
+        in_loop = true;
+      }
+    if (!in_loop || write.index >= program.size())
+      continue;
+    u32 reads[6], n = 0;
+    if (!ScalarSourceRegs(program[write.index], reads, n))
+      continue;
+    bool invariant = true;
+    for (const ScalarReplayPlan::Write& other : plan.writes) {
+      if (other.index < begin || other.index > end)
+        continue;
+      for (u32 i = 0; i < n && invariant; i++)
+        if (reads[i] >= other.first && reads[i] < other.first + other.count)
+          invariant = false;
+      if (!invariant)
+        break;
+    }
+    write.loop_invariant = invariant;
+  }
 }
 
 ScalarReplayPlan PlanScalarReplay(const Program& program) {
@@ -984,13 +1175,16 @@ ScalarReplayPlan PlanScalarReplay(const Program& program) {
     for (const ScalarWrites::Range& range :
          PossibleScalarWrites(inst, scc_trusted).range)
       if (range.count)
-        plan.writes.push_back({index, range.first, range.count, range.exact});
+        plan.writes.push_back(
+            {index, range.first, range.count, range.exact, false});
     if (WritesSccUnmodelled(inst))
       scc_trusted = false;
     else if (RestoresScc(inst))
       scc_trusted = true;
     index++;
   }
+  BuildBlockDominators(program, plan);
+  MarkLoopInvariantWrites(program, plan);
   return plan;
 }
 

@@ -2019,7 +2019,9 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       // slot with exactly this pair, so without the remap the whole stage was
       // rejected.
       u32 emit_op = op;
-      if (op == 0x365)
+      if (op == 0x364)
+        emit_op = 0x22;  // v_bcnt_u32_b32
+      else if (op == 0x365)
         emit_op = 0x23;  // v_mbcnt_lo_u32_b32
       else if (op == 0x366)
         emit_op = 0x24;  // v_mbcnt_hi_u32_b32

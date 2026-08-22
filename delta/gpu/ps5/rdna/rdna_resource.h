@@ -205,7 +205,8 @@ struct ScalarReplayPlan {
   enum Loss : u8 {
     kCovered = 0,
     kUnmodelled,   // written by an op ScalarEval does not evaluate
-    kConditional,  // written under a branch, or inside a loop body
+    kConditional,  // written under a branch that a path around it skips
+    kLoopBody,     // written inside a loop, so the wave ran it more than once
     kLoopCarried,  // a later write a back edge can run before the use
   };
   struct Write {
@@ -213,6 +214,11 @@ struct ScalarReplayPlan {
     u32 first;
     u32 count;
     bool exact;
+    // Inside a loop, does this write produce the same value on every
+    // iteration? A descriptor s_loaded from a user-data table at a constant
+    // offset does, and that is most of what a loop body holds; only a write
+    // whose own inputs the loop changes is beyond the replay.
+    bool loop_invariant;
   };
   // Instruction indices. A back edge is a branch whose target precedes it.
   struct BackEdge {
@@ -223,6 +229,16 @@ struct ScalarReplayPlan {
   std::vector<BackEdge> back_edges;
   std::vector<u32> targets;
   bool indirect = false;  // s_setpc: control may reach anywhere from anywhere
+  // Basic blocks and their dominator tree. "A branch lands between the write
+  // and the use" is not the question -- a descriptor is routinely built in one
+  // arm of an if and used at the join, and every path still runs the write.
+  // The question is whether the write DOMINATES the use, which is what this
+  // answers. Astro Bot's frame is largely compute, and the blunt test declined
+  // its two biggest passes.
+  static constexpr u32 kNoBlock = ~0u;
+  std::vector<u32> block_of;  // instruction index -> block id
+  std::vector<u32> idom;      // block id -> immediate dominator (entry: self)
+  bool Dominates(u32 write_index, u32 use_index) const;
 
   // Does the replay hold the live value of sgpr[dwords] at instruction
   // use_index, and if not, why not?

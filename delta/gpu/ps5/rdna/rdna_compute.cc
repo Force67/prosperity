@@ -44,6 +44,8 @@ gpu::gcn::RecompiledCs RecompileCompute(const u32*,
 
 namespace {
 DELTA_OPTION(bool, kGpuSpirvNoopt, "DELTA_GPU_SPIRV_NOOPT", false);
+DELTA_OPTION(bool, kGpuShtrace, "DELTA_GPU_SHTRACE", false);
+DELTA_OPTION(bool, kAgcTrace, "DELTA_AGC_TRACE", false);
 }  // namespace
 
 namespace gpu::rdna {
@@ -59,6 +61,25 @@ using gpu::gcn::RecompiledCs;
 using gpu::gcn::StageContext;
 using gpu::gcn::Translator;
 
+// The decoded compute program, instruction by instruction, under the same knob
+// the vertex and pixel stages use. A declined dispatch says which register it
+// could not follow; this is what says what wrote it.
+void DumpCsProgram(const Program& program) {
+  if (!kGpuShtrace && !kAgcTrace)
+    return;
+  BASE_LOGI("gcnspv", "=== cs decode: {} insts ===", program.size());
+  for (const Inst& in : program) {
+    base::String line;
+    base::FormatTo(line, "  pc={:04x} len={} enc={} op={:#05x}  {:08x}", in.pc,
+                   in.size, static_cast<u32>(in.enc), in.opcode, in.raw[0]);
+    if (in.size >= 2)
+      base::FormatTo(line, " {:08x}", in.raw[1]);
+    if (in.has_literal)
+      base::FormatTo(line, " lit={:08x}", in.literal);
+    BASE_LOGI("gcnspv", "{}", line.c_str());
+  }
+}
+
 // Why a descriptor the replay could not follow was declined, as its own tag:
 // the three have very different fixes, and one line per shader is all the
 // visibility a skipped pass gets.
@@ -68,6 +89,8 @@ const char* LossTag(ScalarReplayPlan::Loss loss) {
       return "cs.descriptor-unmodelled-write.rdna";
     case ScalarReplayPlan::kConditional:
       return "cs.descriptor-conditional-write.rdna";
+    case ScalarReplayPlan::kLoopBody:
+      return "cs.descriptor-loop-body-write.rdna";
     default:
       return "cs.descriptor-loop-carried.rdna";
   }
@@ -477,6 +500,7 @@ bool TranslateCs(const Program& program,
                  Translator& t) {
   if (program.empty())
     return false;
+  DumpCsProgram(program);
   StageContext sc;
   sc.is_cs = true;
   sc.lds_dwords = lds_dwords * 128;  // RSRC2.LDS_SIZE is in 128-dword granules
