@@ -61,6 +61,7 @@ DELTA_OPTION(bool, kRdoffTrace, "DELTA_RDOFF_TRACE", false);
 }  // namespace
 
 namespace krnl {
+const u32 *currentGuestTidPtr();  // sys_thread.cpp: this thread's guest tid
 // Resolve a host address to "<module>+0x<off> (<seg>)" by scanning loaded module
 // images, so a guest fault points straight at a guest module offset.
 void symbolize(uintptr_t addr, char *out, size_t n) {
@@ -373,8 +374,11 @@ static void probeHandler(int, siginfo_t *, void *ucv) {
   auto *gr = uc->uc_mcontext.gregs;
   char rip[256];
   symbolize(gr[REG_RIP], rip, sizeof(rip));
-  BASE_LOGI("probe", "tid={} rip={:016x} {}", (long)gettid(),
-            (unsigned long long)gr[REG_RIP], rip);
+  // The GUEST tid too: the host tid says nothing about which of the title's
+  // threads this is, and "which thread is the title's main one" is the first
+  // thing to know when it stops.
+  BASE_LOGI("probe", "tid={} gtid={} rip={:016x} {}", (long)gettid(),
+            *currentGuestTidPtr(), (unsigned long long)gr[REG_RIP], rip);
   // GPRs too: a thread caught in a busy-wait only makes sense with the address
   // and value it is polling.
   BASE_LOGI("probe",

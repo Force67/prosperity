@@ -257,6 +257,7 @@ void TraceDcbPacket(u32 position, u32 op, const u32* body, u32 count);
 // mis-parsed something earlier; the walker resyncs a dword at a time and every
 // packet in between is lost.
 void TraceIndirectBuffer(u64 address, u32 words, bool followed);
+void TraceOcclusionQuery(u64 address, u64 value);
 void TraceResync(u32 position, u32 words, u32 hdr, u32 op, u32 count);
 
 // DELTA_AGC_TRACE: type-0 writes into SH space. The AGC driver programs shader

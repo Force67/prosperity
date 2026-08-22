@@ -19,8 +19,26 @@
 #include "kern/proc.h"
 #include "sys_mem.h"
 #include "sys_semaphore.h"
+#include <utl/options.h>
+
+namespace {
+// DELTA_OSEM_TRACE=<id>: every wait/post on one semaphore, with the guest tid.
+// A title parked on a semaphore is waiting for a post that either never comes
+// or came before it arrived, and only the pairing tells the two apart.
+DELTA_OPTION(u32, kOsemTrace, "DELTA_OSEM_TRACE", 0);
+}  // namespace
 
 namespace krnl {
+const u32 *currentGuestTidPtr();  // sys_thread.cpp: this thread's guest tid
+
+static void osemTrace(const char *what, int id, int n, int count) {
+  // 1 traces every semaphore; any other value traces just that id.
+  if (!kOsemTrace || (kOsemTrace != 1 && static_cast<u32>(id) != kOsemTrace))
+    return;
+  BASE_LOGI("osem", "{} id={} n={} count={} gtid={}", what, id, n, count,
+            *currentGuestTidPtr());
+}
+
 // Named semaphores, so osem_open(name) finds the one osem_create(name) made.
 static std::mutex g_semRegM;
 static std::unordered_map<std::string, semaphore *> g_semByName;
@@ -151,6 +169,7 @@ int PS4ABI sys_osem_wait(int id, int need, u32 *timeoutUs) {
   auto *s = fromId(id);
   if (!s)
     return -SysError::eSRCH;
+  osemTrace("wait", id, need, s->value());
   // The doorbell of a service we do not host: nothing in this process will ever
   // ring it, so an untimed wait parks the caller for the rest of the run (Tomb
   // Raider's sceNpCheckCallback sat on 'SceNpTpip 0' forever). Give it the
@@ -177,7 +196,9 @@ int PS4ABI sys_osem_post(int id, int count) {
   auto *s = fromId(id);
   if (!s)
     return -SysError::eSRCH;
-  return s->post(count);
+  const int r = s->post(count);
+  osemTrace("post", id, count, s->value());
+  return r;
 }
 
 int PS4ABI sys_osem_cancel(int id, int setCount, int *numWaiters) {

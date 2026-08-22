@@ -210,6 +210,76 @@ void HandleEventWriteEos(const u32* body, u32 count) {
   WriteLabel(address, body[3], false);
 }
 
+// IT_COPY_DATA: one small copy between memory, a register and the GPU's own
+// clocks. gfx10 widens both selectors by a bit from the header's top, so they
+// are read as (field << 1) | bit30 and the useful values double: 2/4/5 name
+// memory, 3/6/7 a register, 10/11 an immediate in the packet, and src 9 / 18
+// are the GPU and system reference clocks. A title reads the clock through
+// this packet and polls the result, so dropping it is a wait that never ends.
+void HandleCopyData(const u32* body, u32 count) {
+  if (count < 5)
+    return;
+  const u32 control = body[0];
+  const u32 src_sel = ((control & 0xF) << 1) | ((control >> 30) & 0x1);
+  const u32 dst_sel = ((control >> 8) & 0xF) << 1;
+  const u32 bytes = ((control >> 16) & 0x1) ? 8u : 4u;
+  const u64 src = body[1] | (static_cast<u64>(body[2]) << 32);
+  const u64 dst = body[3] | (static_cast<u64>(body[4]) << 32);
+  const auto is_memory = [](u32 sel) {
+    return sel == 2 || sel == 4 || sel == 5;
+  };
+  if (!is_memory(dst_sel) || !dst || (dst & (bytes - 1)) ||
+      !IsLabelAddress(dst) || !gpu::IsReadableRange(dst, bytes))
+    return;
+  u64 value = 0;
+  if (src_sel == 9 || src_sel == 18) {         // GPU clock / system clock
+    value = GpuClockTimestamp();
+  } else if (src_sel == 10 || src_sel == 11) { // immediate, in the packet
+    value = src;
+  } else if (is_memory(src_sel)) {
+    if (!IsLabelAddress(src) || !gpu::IsReadableRange(src, bytes))
+      return;
+    std::memcpy(&value, reinterpret_cast<const void*>(src), bytes);
+  } else {
+    return;                                    // a register we do not model
+  }
+  if (bytes == 8)
+    *reinterpret_cast<volatile u64*>(dst) = value;
+  else
+    *reinterpret_cast<volatile u32*>(dst) = static_cast<u32>(value);
+}
+
+// IT_EVENT_WRITE carrying ZPASS_DONE (event type 0x39, index 1) is an occlusion
+// query: the packet names a result buffer and the hardware writes one
+// begin/end pair per depth block into it, with bit 63 set once a value is
+// ready. We have no host query, and a title that waits for that bit waits
+// forever -- Astro Bot's boot stops on the first frame it draws, its main
+// thread parked on a semaphore nothing posts. Publish an always-visible count
+// instead: nothing culls, which is wrong but visible, and the ready bit is
+// what the wait is actually looking for.
+void HandleEventWrite(const u32* body, u32 count) {
+  if (count < 3)
+    return;
+  const u32 event_type = body[0] & 0x3F;
+  const u32 event_index = (body[0] >> 8) & 0x7;
+  if (event_type != 0x39 || event_index != 1)
+    return;
+  const u64 address = body[1] | (static_cast<u64>(body[2]) << 32);
+  constexpr u32 kBlocks = 16;              // one begin/end pair per DB
+  constexpr u64 kBytes = kBlocks * 2 * sizeof(u64);
+  if (!address || (address & 7) || !IsLabelAddress(address) ||
+      !gpu::IsReadableRange(address, kBytes))
+    return;
+  constexpr u64 kReady = 1ull << 63;
+  static u64 samples = 0;
+  const u64 value = kReady | (samples & (kReady - 1));
+  auto* results = reinterpret_cast<volatile u64*>(address);
+  for (u32 db = 0; db < kBlocks; db++)
+    results[db * 2] = value;
+  samples++;
+  TraceOcclusionQuery(address, value);
+}
+
 void HandleDrawPacket(rhi::Renderer& renderer,
                       u32 op,
                       const u32* body,
@@ -376,6 +446,12 @@ void Walk(rhi::Renderer& renderer,
         break;
       case IT_WRITE_DATA:
         HandleWriteData(body, count);
+        break;
+      case IT_COPY_DATA:
+        HandleCopyData(body, count);
+        break;
+      case IT_EVENT_WRITE:
+        HandleEventWrite(body, count);
         break;
       case IT_EVENT_WRITE_EOP:
         HandleEventWriteEop(body, count);

@@ -756,6 +756,13 @@ int scePadRead(int handle, void *data, int num) {
 }
 
 int scePadReadState(int handle, void *data) {
+  // Whether a title polls the pad at all, and how often. A title sitting on a
+  // screen that renders nothing is either waiting for input or not asking for
+  // it, and those want opposite fixes.
+  static std::atomic<u64> reads{0};
+  const u64 n = reads.fetch_add(1);
+  if (n < 2 || (n % 3000) == 0)
+    BASE_LOGI("pad", "readState #{}", (unsigned long long)n);
   fillPadState(static_cast<PadData *>(data));
   return 0;
 }

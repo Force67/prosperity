@@ -26,6 +26,7 @@
 #include <unistd.h>
 
 #include "kern/proc.h"
+#include "wait_probe.h"
 #include "kern/ps4/dev/socket_dev.h"
 #include "sys_event.h"
 #include <utl/options.h>
@@ -436,6 +437,10 @@ int PS4ABI sys_kevent(int kq, const kevent_t *changelist, int nchanges,
     BASE_LOGI("kevent", "bad kq fd={}", kq);
     return -SysError::eBADF;
   }
+  // A thread blocked here is waiting for an event that may never be posted --
+  // the same "wedged title" question the umtx/semaphore probes answer, and it
+  // was the one wait they could not see.
+  WaitProbe _wp("kevent", (long)kq, (long)nevents);
   int r = static_cast<equeue *>(obj)->kevent(changelist, nchanges, eventlist,
                                              nevents, to);
   if (kKeventTrace) {

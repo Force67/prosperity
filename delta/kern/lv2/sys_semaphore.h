@@ -56,6 +56,8 @@ public:
   int cancel(int setCount, int *numWaiters);
 
   const base::String &fname() const { return name; }
+  // Units available right now; diagnostics only (a racing reader is fine).
+  int value() const { return count; }
 
 private:
   std::mutex m;

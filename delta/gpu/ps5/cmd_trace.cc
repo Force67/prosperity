@@ -1052,6 +1052,17 @@ void TraceIndirectBuffer(u64 address, u32 words, bool followed) {
               (unsigned long)address, words, followed ? "ok" : "REFUSED");
 }
 
+// The first few occlusion-query dumps: a title that never gets one waits for a
+// result bit that never arrives, and that is invisible in any other log.
+void TraceOcclusionQuery(u64 address, u64 value) {
+  static std::atomic<u64> n{0};
+  const u64 i = n.fetch_add(1);
+  if (i < 3 || (i % 4000) == 0)
+    BASE_LOGI("agc", "occlusion query #{} -> {:#x} = {:#x} (always visible)",
+              (unsigned long long)i, (unsigned long)address,
+              (unsigned long long)value);
+}
+
 void TraceResync(u32 position, u32 words, u32 hdr, u32 op, u32 count) {
   static u64 resyncs = 0;
   if (kWalkStat && (++resyncs % 500) == 1)
