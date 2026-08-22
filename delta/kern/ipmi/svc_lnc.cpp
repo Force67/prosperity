@@ -22,6 +22,12 @@ enum {
   // and returns SCE_NP_WEBAPI error 0x8055a402 unless it is 4 or 5, which fails
   // the whole NpToolkit2 bring-up above it (GTA:SA treats that as fatal).
   kLncGetAppStatus = 0x30013,
+  // The same question on PS5, asked with a 64-byte reply and no input:
+  // libSceSystemService+0xdfa0 invokes it once at init and caches what comes
+  // back. An empty (zeroed) reply means appId 0, which does not match the
+  // SceShellCoreUtilAppFocus pattern, so GetStatus reports the title overlaid
+  // by system UI -- and a title that believes that renders nothing at all.
+  kLncGetAppStatusPs5 = 0x30010,
 };
 
 // The state that means "the title is running in the foreground". 5 is the same
@@ -34,6 +40,7 @@ struct Lnc : Service {
 
   void invoke(Invocation &inv) override {
     switch (inv.method()) {
+    case kLncGetAppStatusPs5:
     case kLncGetAppStatus: {
       // libSceSystemService caches the appId from this reply and compares it
       // against the SceShellCoreUtilAppFocus/CtrlFocus flag patterns; a
