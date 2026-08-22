@@ -125,7 +125,7 @@ static u64 g_acqRingLo = 0, g_acqRingHi = 0;
 // named is the only chance we get to learn where a queue's ring lives.
 struct AcqQueue {
   u64 dcb = 0;       // command ring
-  u64 ccb = 0;       // constant ring, always dcb + ringBytes
+  u64 ccb = 0;       // dcb + ringBytes: the ring READ POINTER (see below)
   u64 doorbell = 0;  // 8-byte write-pointer slot in the DingDong page
   u32 ringBytes = 0;
   u64 lastDoorbell = 0;
@@ -156,6 +156,16 @@ static void drainQueue(AcqQueue &q, u64 doorbell) {
     forward(0, write);
   }
   q.readDw = write;
+  // Report the read pointer back, or the ring only ever fills. The driver keeps
+  // one dword right past the ring for it (libSceAgcDriver+0x2226 stores
+  // `dcb + 0x4000` into its queue struct and zeroes the word; +0x11f0 spins on
+  // it, computing free space as `rptr - (write % ringDw)` wrapped, and waits
+  // for more than 8 dwords). Astro Bot's DrawThread parks in exactly that spin
+  // -- holding its frame mutex, so the main thread blocks behind it and the
+  // title never submits again.
+  const u64 rptr = q.dcb + q.ringBytes;
+  if (gpuReadable(rptr, sizeof(u32)))
+    *reinterpret_cast<volatile u32 *>(rptr) = q.readDw;
 }
 
 // Poll every registered doorbell. A real command processor is woken by the
@@ -553,9 +563,20 @@ i32 gcDevicePs5::ioctl(u32 cmd, void *data) {
                   w[0], w[1], w[2], w[3], (unsigned long)ptr, count);
         if (ptr && count && count < 4096) {
           auto *dd = reinterpret_cast<const u32 *>(ptr);
-          for (u32 i = 0; i < count && i < 24; i++)
+          for (u32 i = 0; i < count && i < 24; i++) {
             BASE_LOGI("agc", "  desc[{}] = {:08x} {:08x} {:08x} {:08x}", i,
                       dd[i * 4], dd[i * 4 + 1], dd[i * 4 + 2], dd[i * 4 + 3]);
+            const u64 buf = (static_cast<u64>(dd[i * 4 + 1]) << 32) | dd[i * 4];
+            const u32 sz = dd[i * 4 + 2];
+            if (!sz || !gpuReadable(buf, 4)) continue;
+            const u32 show = sz < 48 ? sz : 48;
+            if (!gpuReadable(buf, show * 4)) continue;
+            auto *bw = reinterpret_cast<const u32 *>(buf);
+            base::String line;
+            base::FormatTo(line, "    buf {:#x} ({} dw):", (unsigned long)buf, sz);
+            for (u32 k = 0; k < show; k++) base::FormatTo(line, " {:08x}", bw[k]);
+            BASE_LOGI("agc", "{}", line.c_str());
+          }
         }
       }
       // Census: a whole submit used to be dropped when it carried >= 64

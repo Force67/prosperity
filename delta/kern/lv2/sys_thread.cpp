@@ -408,6 +408,7 @@ std::chrono::milliseconds umtxTimeout() {
 struct StallReport {
   const char *op;
   const void *obj;
+  const void *obj2 = nullptr;  // a CV wait's umutex, whose owner is the other half
   std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
   bool done = kUmtxStallSecs <= 0;
 
@@ -419,8 +420,12 @@ struct StallReport {
       return;
     done = true;
     const u32 word = obj ? *static_cast<const volatile u32 *>(obj) : 0;
-    BASE_LOGI("umtxstall", "{} obj={:p} word={:#x} (owner gtid={}) waited {}s",
-              op, obj, word, word & 0x7fffffffu,
+    const u32 word2 = obj2 ? *static_cast<const volatile u32 *>(obj2) : 0;
+    BASE_LOGI("umtxstall",
+              "{} obj={:p} word={:#x} (owner gtid={}) mutex={:p} word={:#x} "
+              "(owner gtid={}) waited {}s",
+              op, obj, word, word & 0x7fffffffu, obj2, word2,
+              word2 & 0x7fffffffu,
               (long long)std::chrono::duration_cast<std::chrono::seconds>(
                   waited).count());
     guestStackTrace("umtxstall", 8);
@@ -1168,7 +1173,9 @@ int PS4ABI sys_umtx_op(void *ptr, int op, u64 val, void *a, void *b) {
       }
     }
     int r = 0;
+    StallReport stall{"CV_WAIT", ptr, a};
     for (;;) {
+      stall.tick();
       if (ch.gen != g0)                // broadcast: releases every sleeper
         break;
       if (ch.signals > 0 && myTicket < ch.signalCutoff) {
