@@ -243,9 +243,15 @@ int PS4ABI sys_sysctl(int *name, u32 namelen, void *oldp, size_t *oldlenp,
     auto *out = static_cast<tlsArenaInfo *>(oldp);
     out->size = sizeof(tlsArenaInfo);
     out->version = 1;
-    // 64 blocks: libkernel's free-slot bitmap is a fixed BSS array of one qword
-    // per block, and its scan walks every one of them.
-    out->blocks = 64;
+    // This count is the process's thread ceiling: libkernel hands thread N the
+    // block at base + N * blocksize, and the arena ENDS at 0x9_0000_0000, so the
+    // first thread past the count maps outside it, fails, and scePthreadCreate
+    // returns without ever reaching the kernel. At 64 Astro Bot stopped dead at
+    // 64 threads with one Havok worker left to start. The ceiling on the other
+    // side is libkernel's free-slot bitmap, a fixed 0x100-byte BSS array (one
+    // BIT a block, but scanned a qword per block), so anything up to 2048 is
+    // both in-array and in-arena.
+    out->blocks = 256;
     out->blockPages = 16;  // the TCB and the thread's own bookkeeping
     // Never 0: that means "no secondary arena", and libkernel then derives the
     // thread's TLS pointer from the null block address and memsets through it.
