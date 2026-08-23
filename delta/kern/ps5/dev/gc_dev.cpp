@@ -166,7 +166,7 @@ static void drainQueue(AcqQueue &q, u64 doorbell) {
     const u64 at = q.dcb + static_cast<u64>(firstDw) * 4;
     if (!dwords)
       return;
-    if (gpuReadable(at, static_cast<size_t>(dwords) * 4)) {
+    if (guestReadable(at, static_cast<size_t>(dwords) * 4)) {
       prosperity_agc_submit(at, dwords * 4);
       return;
     }
@@ -193,7 +193,7 @@ static void drainQueue(AcqQueue &q, u64 doorbell) {
   // -- holding its frame mutex, so the main thread blocks behind it and the
   // title never submits again.
   const u64 rptr = q.dcb + q.ringBytes;
-  if (gpuReadable(rptr, sizeof(u32)))
+  if (guestReadable(rptr, sizeof(u32)))
     *reinterpret_cast<volatile u32 *>(rptr) = q.readDw;
 }
 
@@ -210,7 +210,7 @@ static void doorbellPoller() {
     // either work we never drained (they differ) or work never submitted.
     const bool stat = kAgcQstat && (++ticks % 10000) == 0;
     for (auto &[qid, q] : g_queues) {
-      if (stat && gpuReadable(q.doorbell, sizeof(u64))) {
+      if (stat && guestReadable(q.doorbell, sizeof(u64))) {
         const u64 db = *reinterpret_cast<volatile const u64 *>(q.doorbell);
         const u32 ringDw = q.ringBytes / 4;
         BASE_LOGI("agcq", "q{} doorbell={:#x} write={:#x} read={:#x} ring={:#x}",
@@ -218,8 +218,16 @@ static void doorbellPoller() {
                   ringDw ? (unsigned long)(db % ringDw) : 0ul,
                   (unsigned long)q.readDw, q.ringBytes);
       }
-      if (!gpuReadable(q.doorbell, sizeof(u64)))
+      if (!guestReadable(q.doorbell, sizeof(u64))) {
+        // A queue we never poll is a queue whose work never runs, and the
+        // title waits on it just the same. The aperture is a guess; mapped is
+        // the fact.
+        static int n = 0;
+        if (n++ < 16)
+          LOG_WARNING("agc: queue {} doorbell {:#x} unreadable, never drained",
+                      qid, (unsigned long)q.doorbell);
         continue;
+      }
       const u64 now =
           *reinterpret_cast<volatile const u64 *>(q.doorbell);
       if (now == q.lastDoorbell)
@@ -239,7 +247,9 @@ static void doorbellPoller() {
 
 static void registerAcqQueue(u32 qid, u64 dcb, u64 ccb, u64 doorbellBase,
                              u32 ringLog2Dw) {
-  if (!qid || !gpuAddr(dcb) || ringLog2Dw > 24)
+  // Register any ring the title names; where it allocated it is its own
+  // business, and refusing one on the aperture guess loses every submit on it.
+  if (!qid || !dcb || ringLog2Dw > 24)
     return;
   std::lock_guard<std::mutex> lk(g_queueLock);
   AcqQueue &q = g_queues[qid];
@@ -247,7 +257,7 @@ static void registerAcqQueue(u32 qid, u64 dcb, u64 ccb, u64 doorbellBase,
   q.ccb = ccb;
   q.doorbell = doorbellBase + static_cast<u64>(qid - 1) * 8;
   q.ringBytes = 4u << ringLog2Dw;
-  q.lastDoorbell = gpuReadable(q.doorbell, sizeof(u64))
+  q.lastDoorbell = guestReadable(q.doorbell, sizeof(u64))
                        ? *reinterpret_cast<volatile const u64 *>(q.doorbell)
                        : 0;
   q.readDw = static_cast<u32>(q.lastDoorbell % (q.ringBytes / 4));
