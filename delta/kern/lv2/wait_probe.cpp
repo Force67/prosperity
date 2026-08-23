@@ -140,6 +140,9 @@ bool waitProbeDescribeGuest(unsigned gtid, char *out, unsigned long len) {
     const long secs = static_cast<long>(
         std::chrono::duration_cast<std::chrono::seconds>(now - p.since).count());
     std::snprintf(out, len, "%s(%#lx) for %lds", p.what, p.a0, secs);
+    // The owner's own stack is the other half of the cycle: it says which of
+    // its calls is waiting, not just which primitive.
+    guestStackTraceFrom(p.gsp, "umtxstall-owner", 12, tid);
     return true;
   }
   return false;

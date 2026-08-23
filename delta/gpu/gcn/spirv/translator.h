@@ -932,6 +932,7 @@ bool PlanCsResources(const Program& program,
                      std::unordered_map<u32, u32>& bind);
 void EmitCsSmrd(Translator& t, const Inst& inst, StageContext& sc);
 void EmitCsMubuf(Translator& t, const Inst& inst, StageContext& sc);
+void EmitCsGlobal(Translator& t, const Inst& inst, StageContext& sc);
 void EmitCsMtbuf(Translator& t, const Inst& inst, StageContext& sc);
 void EmitCsMimg(Translator& t,
                 const Inst& inst,

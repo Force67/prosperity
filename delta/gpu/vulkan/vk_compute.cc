@@ -2139,7 +2139,8 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci) {
     }
     // Guest-page import: valid only for plain (non-image) linear ranges, and
     // only while the range is not already staged some other way.
-    if (kCsImport && !e.buf && !ci.res[i].image_staging && !ci.res[i].zero_fill)
+    if ((kCsImport || ci.res[i].prefer_import) && !e.buf &&
+        !ci.res[i].image_staging && !ci.res[i].zero_fill)
       CsRangeImportGuest(e, base, static_cast<VkDeviceSize>(sz[i]));
     const bool buffer_reused =
         e.buf && e.cap >= static_cast<VkDeviceSize>(sz[i]);

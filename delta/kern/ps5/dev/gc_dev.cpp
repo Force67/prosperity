@@ -113,6 +113,15 @@ static inline bool gpuReadable(u64 a, size_t n) {
   return gpuAddr(a) && utl::isMemoryRangeMapped(reinterpret_cast<void *>(a), n);
 }
 
+// Command buffers do not have to live in a pool we recognise as the GPU
+// aperture -- a title can build one in any allocation it owns, and the video
+// decoder does. Mapped and inside the guest map is the honest test; the
+// aperture band stays for the probes that guess at pointers.
+static inline bool guestReadable(u64 a, size_t n) {
+  return a >= 0x10000ull && a < 0x1000000000000ull &&
+         utl::isMemoryRangeMapped(reinterpret_cast<void *>(a), n);
+}
+
 // Span of ACQ ring windows the driver named in its 0xC0408121 submits, learned at
 // run time rather than hardcoded (each title's ring sits wherever its driver
 // mapped it). Lets the per-frame trace re-read the ring long after the 0x8121
@@ -618,7 +627,7 @@ i32 gcDevicePs5::ioctl(u32 cmd, void *data) {
       static std::atomic<u64> nSubmits{0}, nDropBatch{0}, nDesc{0},
           nFwd{0}, nSkipAddr{0};
       nSubmits.fetch_add(1, std::memory_order_relaxed);
-      if (count >= 64) nDropBatch.fetch_add(1, std::memory_order_relaxed);
+      if (count > 0x1000) nDropBatch.fetch_add(1, std::memory_order_relaxed);
       if (kGcCensus) {
         static std::atomic<u64> last{0};
         u64 n = nSubmits.load();
@@ -634,19 +643,32 @@ i32 gcDevicePs5::ioctl(u32 cmd, void *data) {
                     (unsigned long long)nSkipAddr.load());
         }
       }
-      if (ptr && count && count < 64) {
+      // A batch is however long the title makes it. The old count < 64 cap
+      // dropped a whole submit -- every buffer in it, including the fence the
+      // title then waits on -- once a level got heavy enough to exceed it.
+      if (ptr && count && count <= 0x1000 &&
+          guestReadable(ptr, static_cast<size_t>(count) * 16)) {
         auto *d = reinterpret_cast<u32 *>(ptr);
         for (u32 i = 0; i < count; i++) {
           u64 buf = (static_cast<u64>(d[i * 4 + 1]) << 32) | d[i * 4];
           u32 sz = d[i * 4 + 2];
           nDesc.fetch_add(1, std::memory_order_relaxed);
-          if (sz && gpuReadable(buf, sz * 4)) {
+          if (sz && guestReadable(buf, static_cast<size_t>(sz) * 4)) {
             nFwd.fetch_add(1, std::memory_order_relaxed);
             prosperity_agc_submit(buf, sz * 4);
           } else if (sz) {
             nSkipAddr.fetch_add(1, std::memory_order_relaxed);
+            static int n = 0;
+            if (n++ < 16)
+              LOG_WARNING("agc: submit buffer {:#x}+{:#x} dwords unreadable",
+                          (unsigned long)buf, sz);
           }
         }
+      } else if (ptr && count) {
+        static int n = 0;
+        if (n++ < 16)
+          LOG_WARNING("agc: submit batch of {} descriptors at {:#x} dropped",
+                      count, (unsigned long)ptr);
       }
       clearSubmitStatus(cmd, data, 0x10);
     }

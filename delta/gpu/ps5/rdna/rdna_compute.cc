@@ -43,6 +43,7 @@ gpu::gcn::RecompiledCs RecompileCompute(const u32*,
 #include <utl/options.h>
 
 namespace {
+DELTA_OPTION(bool, kCsGlobal, "DELTA_PS5_CSGLOBAL", false);
 DELTA_OPTION(bool, kGpuSpirvNoopt, "DELTA_GPU_SPIRV_NOOPT", false);
 DELTA_OPTION(bool, kGpuShtrace, "DELTA_GPU_SHTRACE", false);
 DELTA_OPTION(bool, kAgcTrace, "DELTA_AGC_TRACE", false);
@@ -258,12 +259,7 @@ bool PlanResources(const Program& program,
         // ds_swizzle is a cross-lane move rather than an LDS access, so it is
         // the one DS op that runs without an LDS allocation. GDS is not
         // modelled at all.
-        // The cross-lane DS ops move data between lanes, not through LDS, so
-        // they run without an allocation. gfx10 numbers them 0x3d swizzle /
-        // 0x3e permute / 0x3f bpermute (GCN had swizzle at 0x35).
-        if (((w >> 17) & 1) ||
-            (!lds_dwords && inst.opcode != 0x35 && inst.opcode != 0x3d &&
-             inst.opcode != 0x3f)) {
+        if (((w >> 17) & 1) || (!lds_dwords && inst.opcode != 0x35)) {
           gpu::gcn::WarnUnsupported("ds.cs.rdna", inst.opcode, w, w1);
           return false;
         }
@@ -284,11 +280,31 @@ bool PlanResources(const Program& program,
           return false;
         break;
       }
-      case Enc::kFlat:
-        // global_/scratch_ addressing is a raw 64-bit pointer, which the
-        // descriptor-bound resource model cannot express.
-        gpu::gcn::WarnUnsupported("flat.cs.rdna", inst.opcode, w, w1);
-        return false;
+      case Enc::kFlat: {
+        // SEG=2 is global_*: a 64-bit base in a scalar pair plus a VGPR byte
+        // offset, which IS a descriptor the dispatch can resolve (kind 2).
+        // Flat and scratch addressing carry the whole address in VGPRs and
+        // still have no model here.
+        const u32 seg = (w >> 14) & 3;
+        const u32 op = inst.opcode;
+        const u32 saddr = (w1 >> 16) & 0x7F;
+        const bool load = op >= 0x08 && op <= 0x0f;
+        const bool store = op >= 0x18 && op <= 0x1f;
+        // Off by default: the window below is a guess at the extent, and a
+        // store that lands clamped corrupts what the shader was walking. The
+        // decoders' own shaders need this, so it stays here to finish.
+        // Loads only for now: a store whose base we resolved wrongly lands in
+        // the title's own structures, and the video decoder stops dead.
+        if (!kCsGlobal || seg != 2 || saddr >= 100 || !load) {
+          gpu::gcn::WarnUnsupported("flat.cs.rdna", inst.opcode, w, w1);
+          return false;
+        }
+        // The extent is not in the instruction; take a window big enough for
+        // the frame-sized buffers these shaders walk.
+        if (!resource(inst.pc, saddr, 2, 2, store, 0x100000))
+          return false;
+        break;
+      }
       default:
         break;
     }
@@ -635,6 +651,9 @@ bool EmitCsMemory(Translator& t, const Inst& inst, StageContext& sc) {
     case Enc::kSmrd:
       EmitSmem(t, inst, sc);
       return true;
+    case Enc::kFlat:
+      gpu::gcn::EmitCsGlobal(t, inst, sc);
+      break;
     case Enc::kMubuf:
       gpu::gcn::EmitCsMubuf(t, inst, sc);
       return true;
@@ -678,9 +697,6 @@ bool EmitCsMemory(Translator& t, const Inst& inst, StageContext& sc) {
       gpu::gcn::EmitCsMimg(t, lowered, sc);
       return true;
     }
-    case Enc::kFlat:
-      sc.cs_unsupported = true;  // the plan already declined these
-      return true;
     default:
       return false;
   }

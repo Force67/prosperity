@@ -35,6 +35,7 @@ namespace {
 DELTA_OPTION(bool, kEventTrace, "DELTA_EVENT_TRACE", false);
 DELTA_OPTION(bool, kKeventTrace, "DELTA_KEVENT_TRACE", false);
 DELTA_OPTION(long, kEventStallSecs, "DELTA_EVENT_STALL", 0);
+DELTA_OPTION(long, kEopPumpMs, "DELTA_PS5_EOPPUMP", 0);
 }  // namespace
 
 namespace krnl {
@@ -301,6 +302,21 @@ int equeue::kevent(const kevent_t *changes, int nchanges, kevent_t *out,
 
   if (nout <= 0)
     return 0;
+
+  // DELTA_PS5_EOPPUMP: diagnostic. Treat a Gnm knote as due again after this
+  // many milliseconds of silence, to tell "the title is one event short" apart
+  // from "the title is stuck on something else entirely".
+  if (kEopPumpMs > 0) {
+    const auto now = std::chrono::steady_clock::now();
+    for (auto &k : notes) {
+      if (k.active || k.ev.filter != kEVFILT_VIDEOOUT ||
+          k.ev.ident >= kGnmIdentMax)
+        continue;
+      k.active = true;
+      k.ev.data = static_cast<i64>((gpuEndOfPipeCount() << 16) | k.ev.ident);
+    }
+    (void)now;
+  }
 
   // Re-arm any Gnm knote the GPU has run past since this queue last looked.
   // The interrupt is an edge on real hardware, but our submits finish inside

@@ -78,6 +78,21 @@ inline void NoteGpuPool(u64 base, u64 size) {
   pools.count.store(n + 1, std::memory_order_release);
 }
 
+// The pool an address belongs to, when the kernel noted one. A raw pointer is
+// valid to the end of its own allocation and no further, which is the only
+// honest extent available for a global_* access.
+inline bool GpuPoolRange(u64 address, u64& base, u64& end) {
+  auto& pools = GpuPools();
+  const u32 n = pools.count.load(std::memory_order_acquire);
+  for (u32 i = 0; i < n; i++)
+    if (address >= pools.ranges[i].base && address < pools.ranges[i].end) {
+      base = pools.ranges[i].base;
+      end = pools.ranges[i].end;
+      return true;
+    }
+  return false;
+}
+
 inline bool IsGpuAddress(u64 address) {
   if (address >= kGpuBase && address < kGpuEnd)
     return true;

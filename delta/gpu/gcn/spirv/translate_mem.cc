@@ -1024,6 +1024,78 @@ void EmitCsSmrd(Translator& t, const Inst& inst, StageContext& sc) {
 }
 
 // ---- compute: MUBUF ---------------------------------------------------------
+// GLOBAL_LOAD/STORE with an SGPR base (gfx10 FLAT encoding, SEG=2). The base
+// is a 64-bit pointer in a scalar pair, which the dispatch resolves into a
+// storage buffer exactly like a V#; the address VGPR carries the byte offset
+// inside it. The video decoders reach their frame buffers this way, so a
+// rejected shader here is a decoded picture that never appears.
+void EmitCsGlobal(Translator& t, const Inst& inst, StageContext& sc) {
+  const u32 w = inst.raw[0], w1 = inst.raw[1];
+  const u32 op = (w >> 18) & 0x7F;
+  // 13-bit signed instruction offset on gfx10 global/scratch.
+  const i32 inst_offset = static_cast<i32>((w & 0x1FFF) << 19) >> 19;
+  const u32 vaddr = w1 & 0xFF, vdata = (w1 >> 8) & 0xFF;
+  const int b = CsBindingFor(sc, inst.pc);
+  if (b < 0) {
+    sc.cs_unsupported = true;
+    return;
+  }
+  const u32 binding = static_cast<u32>(b);
+  const Id byte_off =
+      t.Add(t.Vg(vaddr), t.U32(static_cast<u32>(inst_offset)));
+  const Id dword_idx = t.Shr(byte_off, t.U32(2));
+  const auto sub_dword = [&](u32 bits, bool sign) {
+    const Id word = CsSsboLoad(t, sc, binding, dword_idx);
+    const Id shift = t.Mul(t.And(byte_off, t.U32(bits == 8 ? 3u : 2u)),
+                           t.U32(8));
+    Id v = t.Shr(word, shift);
+    const u32 mask = bits == 8 ? 0xFFu : 0xFFFFu;
+    v = t.And(v, t.U32(mask));
+    if (sign) {
+      const u32 sh = 32u - bits;
+      v = t.Sar(t.Shl(v, t.U32(sh)), t.U32(sh));
+    }
+    t.SetVg(vdata, v);
+  };
+  const auto load_dwords = [&](u32 n) {
+    for (u32 i = 0; i < n; i++)
+      t.SetVg(vdata + i, CsSsboLoad(t, sc, binding, t.Add(dword_idx, t.U32(i))));
+  };
+  const auto store_dwords = [&](u32 n) {
+    for (u32 i = 0; i < n; i++)
+      CsSsboStore(t, sc, binding, t.Add(dword_idx, t.U32(i)), t.Vg(vdata + i));
+  };
+  const auto store_sub_dword = [&](u32 bits) {
+    const Id shift = t.Mul(t.And(byte_off, t.U32(bits == 8 ? 3u : 2u)),
+                           t.U32(8));
+    const u32 mask = bits == 8 ? 0xFFu : 0xFFFFu;
+    const Id keep = t.Not(t.Shl(t.U32(mask), shift));
+    const Id old = CsSsboLoad(t, sc, binding, dword_idx);
+    const Id ins = t.Shl(t.And(t.Vg(vdata), t.U32(mask)), shift);
+    CsSsboStore(t, sc, binding, dword_idx, t.Or(t.And(old, keep), ins));
+  };
+  switch (op) {
+    case 0x08: sub_dword(8, false); break;   // global_load_ubyte
+    case 0x09: sub_dword(8, true); break;    // global_load_sbyte
+    case 0x0a: sub_dword(16, false); break;  // global_load_ushort
+    case 0x0b: sub_dword(16, true); break;   // global_load_sshort
+    case 0x0c: load_dwords(1); break;
+    case 0x0d: load_dwords(2); break;
+    case 0x0e: load_dwords(4); break;
+    case 0x0f: load_dwords(3); break;
+    case 0x18: store_sub_dword(8); break;
+    case 0x1a: store_sub_dword(16); break;
+    case 0x1c: store_dwords(1); break;
+    case 0x1d: store_dwords(2); break;
+    case 0x1e: store_dwords(4); break;
+    case 0x1f: store_dwords(3); break;
+    default:
+      WarnUnsupported("global.cs", op, w, w1);
+      sc.cs_unsupported = true;
+      break;
+  }
+}
+
 void EmitCsMubuf(Translator& t, const Inst& inst, StageContext& sc) {
   const u32 w = inst.raw[0], w1 = inst.raw[1];
   const u32 op = (w >> 18) & 0x7F, inst_offset = w & 0xFFF;
@@ -1946,7 +2018,6 @@ void EmitDs(Translator& t, const Inst& inst, StageContext& sc) {
     case 43:
       lds_atomic(spv::Op::OpAtomicXor);  // ds_xor[_rtn]_b32
       break;
-    case 61:  // gfx10 renumbered ds_swizzle_b32 from 0x35 to 0x3d
     case 53: {  // ds_swizzle_b32
       if (!sc.subgroup_local_id) {
         if (sc.is_cs)
@@ -2040,22 +2111,6 @@ void EmitDs(Translator& t, const Inst& inst, StageContext& sc) {
         t.SetVg(vdst + i * 2, t.m.Load(t.t_u, lds_at(a)));
         t.SetVg(vdst + i * 2 + 1, t.m.Load(t.t_u, lds_at(t.Add(a, t.U32(4)))));
       }
-      break;
-    }
-    case 63: {  // ds_bpermute_b32: this lane reads the lane its address names
-      if (!sc.subgroup_local_id) {
-        if (sc.is_cs)
-          sc.cs_unsupported = true;
-        break;
-      }
-      const Id source_lane =
-          t.And(t.Shr(t.Add(addr, t.U32(offset16)), t.U32(2)), t.U32(63));
-      const Id scope = t.U32(static_cast<u32>(spv::Scope::Subgroup));
-      const Id value = t.m.Emit(spv::Op::OpGroupNonUniformShuffle, t.t_u,
-                                {scope, t.Vg(data0), source_lane});
-      const Id source_exec = t.m.Emit(spv::Op::OpGroupNonUniformShuffle, t.t_u,
-                                      {scope, t.Exec(), source_lane});
-      t.SetVg(vdst, t.SelectB(t.IsNonZero(source_exec), value, t.U32(0)));
       break;
     }
     // gfx10's addtid pair: the address is the lane's own slot, not an address

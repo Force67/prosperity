@@ -39,6 +39,7 @@ struct ResourceRange {
   gcn::TImage image;
   bool image_staging = false;  // tiled or reformatted: stage, don't alias
   bool zero_fill = false;      // no live range: hand the shader zeros
+  bool prefer_import = false;  // alias the guest pages, do not copy them
   u32 elem_bytes = 4;
   u32 stage_elem_bytes = 4;
   bool ok = true;
@@ -119,6 +120,16 @@ ResourceRange ResolveBufferResource(const gcn::CsResource& res,
   if (res.kind == 2) {  // a raw pointer into an SRT/descriptor table
     out.base = (static_cast<u64>(descriptor[1] & 0xFFFF) << 32) | descriptor[0];
     out.size = res.min_bytes;
+    // A global_* base has no extent in the instruction. Its own allocation is
+    // the bound the hardware would fault at, so use that and let the range be
+    // imported instead of copied.
+    u64 pool_base = 0, pool_end = 0;
+    if (res.min_bytes >= 0x10000 && out.base &&
+        GpuPoolRange(out.base, pool_base, pool_end)) {
+      constexpr u64 kMaxWindow = 64ull << 20;
+      out.size = std::min<u64>(pool_end - out.base, kMaxWindow);
+      out.prefer_import = true;
+    }
     return out;
   }
   const rdna::VBuffer v = rdna::DecodeVBuffer(descriptor);
@@ -243,6 +254,7 @@ void DispatchCompute(rhi::Renderer& renderer,
     out.size = range.size;
     out.guest_size = range.guest_size;
     out.binding = r.binding;
+    out.prefer_import = range.prefer_import;
     out.shader_writes = r.written;
     out.written = r.written && !range.zero_fill;
     out.zero_fill = range.zero_fill;
