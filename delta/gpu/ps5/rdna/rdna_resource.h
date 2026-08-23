@@ -293,9 +293,12 @@ bool PlausibleVBuffer(const VBuffer& v);
 // (SPI_SHADER_PGM_RSRC2_*.USER_SGPR): a descriptor inline beyond that window is
 // not user data at all, just whatever the previous draw left in those
 // registers.
+// ud_base is the SGPR the stage's user data starts at: 0 for a PS, 8 for the
+// merged NGG stage a vertex program runs as.
 std::vector<gpu::gcn::TImage> TrackTextures(const u32* ps_code,
                                             const u32* ps_user_data,
-                                            u32 user_sgprs);
+                                            u32 user_sgprs,
+                                            u32 ud_base = 0);
 
 // Resolve buffer bases and complete V#s at their consuming instruction PCs.
 std::unordered_map<u32, BufferResource> ResolveBuffers(

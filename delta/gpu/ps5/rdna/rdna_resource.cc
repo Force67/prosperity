@@ -1445,7 +1445,8 @@ TImage DecodeTImage(const u32* d, bool r128) {
 
 std::vector<TImage> TrackTextures(const u32* ps_code,
                                   const u32* pud,
-                                  u32 user_sgprs) {
+                                  u32 user_sgprs,
+                                  u32 ud_base) {
   std::vector<TImage> out;
   if (!ps_code || !pud || !InGuest(reinterpret_cast<u64>(ps_code)))
     return out;
@@ -1469,7 +1470,7 @@ std::vector<TImage> TrackTextures(const u32* ps_code,
   const MimgBindingPlan& plan = plan_it->second.second;
   out.resize(plan.binding_srsrc.size());
   std::vector<bool> filled(out.size(), false);
-  ScalarEval eval(pud, user_sgprs, 0);
+  ScalarEval eval(pud, user_sgprs, ud_base);
 
   for (const Inst& in : prog) {
     eval.Step(in);

@@ -2790,7 +2790,8 @@ bool TranslateVs(const Program& program,
                  Recompiled& r,
                  Translator& t,
                  bool gl_clip_space,
-                 u32 user_sgprs) {
+                 u32 user_sgprs,
+                 u32 tex_binding_base) {
   if (ShDbg())
     DumpProgram(program, "vs");
   const u64 fetch =
@@ -2949,6 +2950,30 @@ bool TranslateVs(const Program& program,
       lifted.insert(a.pc);
   RdnaPlanGfxBuffers(program, 0, &lifted, r.vs_bufs, sc.gfx_buf_bind);
   NoteCbufWindows(r.vs_cbufs, sc);
+  // A vertex program may sample too, and only the PS path used to plan its
+  // MIMG bindings -- so every VS that read a texture reached the shared
+  // emitter with no plan, was reported "mimg.unplanned" and took its draws
+  // with it. The renderer expects the PS's textures first in the descriptor
+  // array (see the `declared` lambda in vk_texture_cache), so these start
+  // after them.
+  const gpu::gcn::MimgBindingPlan vs_mimg_plan = RdnaPlanMimg(program);
+  if (!vs_mimg_plan.binding_srsrc.empty()) {
+    if (vs_mimg_plan.binding_srsrc.size() + tex_binding_base >
+        StageContext::kMaxPsSamplers) {
+      gpu::gcn::WarnUnsupported(
+          "mimg.vs-binding-count",
+          static_cast<u32>(vs_mimg_plan.binding_srsrc.size()));
+      return false;
+    }
+    sc.mimg_plan = &vs_mimg_plan;
+    sc.tex_binding_base = tex_binding_base;
+    sc.tex_3d_mask = RdnaTex3dMask(program, vs_mimg_plan);
+    for (u32 i = 0; i < vs_mimg_plan.binding_srsrc.size(); i++)
+      r.vs_texs.push_back({i + tex_binding_base,
+                           vs_mimg_plan.binding_srsrc[i],
+                           vs_mimg_plan.binding_storage[i],
+                           ((sc.tex_3d_mask >> i) & 1u) != 0});
+  }
   // Cross-lane first: the LDS plan and every DS address the body emits are
   // built from the lane id.
   PlanCrossLane(program, t, sc, iface);
@@ -3407,8 +3432,14 @@ Recompiled Recompile(const u32* vs_code,
   // command processor, and what SeedUserData assumes here); a PS gets it at s0.
   g_stage_bufs = ResolveBuffers(vs_code, vs_user_data, vs_user_sgprs, 8);
   g_warned_store = false;
+  // The PS's textures occupy the first descriptor slots, so the VS has to know
+  // how many there are before it plans its own. Planning is a pure walk of the
+  // program, so it can be done ahead of translating either stage.
+  const u32 ps_tex_count =
+      ps_code ? static_cast<u32>(RdnaPlanMimg(ps_program).binding_srsrc.size())
+              : 0;
   if (!TranslateVs(vs_program, vs_user_data, flat_attrs, r, tv, gl_clip_space,
-                   vs_user_sgprs) ||
+                   vs_user_sgprs, ps_tex_count) ||
       gpu::gcn::HadUnsupported()) {
     if (ShDbg() || kDrawCensus)
       BASE_LOGI("gcnspv", "vs {:#x} rejected: {}",

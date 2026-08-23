@@ -549,6 +549,8 @@ void ResolveRawBuffers(const std::vector<gcn::ShaderBuffer>& buffers,
   }
 }
 
+void FillDrawTex(u32 slot, const gcn::TImage& s, rhi::DrawInfo& d);
+
 // Resolve the live gfx10.3 T#/S# each PS sampler reads, in the recompiler's
 // set-0 binding order (rdna::TrackTextures re-derives the same plan), so
 // texs[i] maps to PS sampler binding i.
@@ -586,10 +588,16 @@ void ResolvePsTextures(u64 ps_addr,
   d.tex_depth_compare = texs[0].depth_compare;
   d.tex_null_descriptor = texs[0].null_descriptor;
 
-  for (size_t i = 0; i < texs.size() && i < 16; i++) {
-    const gcn::TImage& s = texs[i];
-    rhi::DrawInfo::DrawTex& dt = d.texs[i];
-    TraceRejectedTexture(static_cast<u32>(i), s);
+  for (size_t i = 0; i < texs.size() && i < 16; i++)
+    FillDrawTex(static_cast<u32>(i), texs[i], d);
+  d.num_texs = static_cast<u32>(std::min<size_t>(texs.size(), 16));
+  TraceDrawTextures(d);
+}
+
+// One resolved T# into one descriptor slot.
+void FillDrawTex(u32 slot, const gcn::TImage& s, rhi::DrawInfo& d) {
+  rhi::DrawInfo::DrawTex& dt = d.texs[slot];
+  TraceRejectedTexture(slot, s);
     dt.base = s.valid ? s.base : 0;
     dt.w = s.width;
     dt.h = s.height;
@@ -612,9 +620,20 @@ void ResolvePsTextures(u64 ps_addr,
     dt.depth_compare = s.depth_compare;
     dt.storage = s.storage;
     dt.null_descriptor = s.null_descriptor;
-    dt.swizzle = PackDstSel(s);
-  }
-  d.num_texs = static_cast<u32>(std::min<size_t>(texs.size(), 16));
+  dt.swizzle = PackDstSel(s);
+}
+
+// Append a stage's samplers after whatever is already resolved: the renderer
+// reads the PS's bindings first and the VS's after them.
+void AppendStageTextures(u64 code,
+                         const u32* user_data,
+                         u32 user_sgprs,
+                         u32 ud_base,
+                         rhi::DrawInfo& d) {
+  const auto texs = rdna::TrackTextures(reinterpret_cast<const u32*>(code),
+                                        user_data, user_sgprs, ud_base);
+  for (size_t i = 0; i < texs.size() && d.num_texs < 16; i++)
+    FillDrawTex(d.num_texs++, texs[i], d);
   TraceDrawTextures(d);
 }
 
@@ -720,6 +739,12 @@ void ResolveRecompiledShaders(const Regs& regs,
       ResolvePsTextures(binding.ps_addr, binding.ps_user_data, ps_user_sgprs,
                         d);
   }
+  // The VS's samplers follow the PS's in the descriptor array, which is the
+  // order the renderer reads them back in. Its user data starts at s8: the
+  // merged NGG stage is launched there.
+  if (!rc.vs_texs.empty())
+    AppendStageTextures(binding.vs_addr, binding.vs_user_data, vs_user_sgprs, 8,
+                        d);
   d.vs_addr = binding.vs_addr;
   d.ps_addr = binding.ps_addr;
   d.recomp = &rc;
