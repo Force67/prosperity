@@ -337,6 +337,29 @@ int PS4ABI sys_dynlib_load_prx(const char *path, u64 flags, int *pHandle,
 
   // already loaded (we preload the system module tree): hand back its handle.
   auto mod = proc->getModule(base::StringRef(name));
+  // A PS5 firmware ships thirteen sysmodules twice under ONE SONAME, and the
+  // guest's own NEEDED entries name them inconsistently: the eboot needs
+  // "libSceVdecCore.prx" (which loadModule satisfies with the .native FILE, so
+  // the module is registered as "libSceVdecCore") while libSceSysmodule's
+  // native id table asks for "libSceVdecCore.native". Missing that match loaded
+  // a SECOND copy of the same library, and libSceSysmodule then abandoned the
+  // rest of the sysmodule's dependency list -- which is why Astro Bot's
+  // libSceAvPlayer never came up, its engine's memory-manager init was gated
+  // out, and its video workers dereferenced allocators nobody had created.
+  // The two spellings denote one module: let either find the other.
+  if (!mod && isPs5) {
+    constexpr size_t kNat = 7;  // ".native"
+    base::String alt;
+    if (name.length() > kNat &&
+        std::strcmp(name.c_str() + name.length() - kNat, ".native") == 0)
+      alt = name.substr(0, name.length() - kNat);
+    else
+      alt = name + ".native";
+    mod = proc->getModule(base::StringRef(alt));
+    if (mod)
+      BASE_LOGI("load_prx", "{} is already loaded as {}", name.c_str(),
+                alt.c_str());
+  }
   if (!mod) {
     mod = proc->loadModule(base::StringRef(name));
     if (!mod) {
