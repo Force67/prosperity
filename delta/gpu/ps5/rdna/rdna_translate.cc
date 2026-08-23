@@ -1883,6 +1883,29 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
                                      {t.VgF(vdst), t.F32(0.f), t.F32(1.f)}));
         break;
       }
+      // The movrel family indexes the register file with M0. Our VGPRs are one
+      // Private array, so that is an access chain on a computed index; the
+      // clamp keeps a stray M0 inside it, because an out-of-bounds access is
+      // undefined in SPIR-V and a fault here takes the whole title down.
+      // 0x42 v_movreld_b32   VGPR[vdst + M0] = src0
+      // 0x43 v_movrels_b32   vdst            = VGPR[src0 + M0]
+      // 0x44 v_movrelsd_b32  VGPR[vdst + M0] = VGPR[src0 + M0]
+      if (op >= 0x42 && op <= 0x44) {
+        const auto reg_at = [&](u32 base) {
+          const Id idx = t.m.Emit(spv::Op::OpIAdd, t.t_u,
+                                  {t.U32(base), t.Sg(124)});  // 124 = M0
+          return t.m.AccessChain(
+              t.p_priv_u, t.vgpr,
+              {t.m.ExtInst(t.t_u, GLSLstd450UMin, {idx, t.U32(255)})});
+        };
+        if (op == 0x42)
+          t.m.Store(reg_at(vdst), t.SrcRaw(src0, lit));
+        else if (op == 0x43)
+          t.SetVg(vdst, t.m.Load(t.t_u, reg_at(raw0 & 0xFF)));
+        else
+          t.m.Store(reg_at(vdst), t.m.Load(t.t_u, reg_at(raw0 & 0xFF)));
+        break;
+      }
       if (op == 0x0b) {
         gpu::gcn::EmitVop1(t, op, vdst,
                            t.m.Bitcast(t.t_f, RdnaF16Bits(t, src0, lit)));
