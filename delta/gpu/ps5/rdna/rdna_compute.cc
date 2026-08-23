@@ -508,10 +508,17 @@ bool TranslateCs(const Program& program,
       r.resources.empty())
     return false;
 
-  bool uses_ds_swizzle = false;
+  // Cross-lane work needs this invocation's lane. ds_swizzle is not the only
+  // way a program asks for it: a DPP modifier is a lane shuffle too, and a
+  // compute shader that used one without a lane id was rejected outright --
+  // Astro Bot's world map skips a dozen dispatches that way.
+  bool uses_lane_id = false;
   for (const Inst& inst : program)
-    if (inst.enc == Enc::kDs && inst.opcode == 0x35) {
-      uses_ds_swizzle = true;
+    if ((inst.enc == Enc::kDs && inst.opcode == 0x35) ||
+        inst.extension == gpu::gcn::InstExtension::kDpp ||
+        inst.extension == gpu::gcn::InstExtension::kDpp8 ||
+        inst.extension == gpu::gcn::InstExtension::kDpp8Fi) {
+      uses_lane_id = true;
       break;
     }
 
@@ -565,7 +572,7 @@ bool TranslateCs(const Program& program,
   t.m.Decorate(group_id, spv::Decoration::BuiltIn,
                {static_cast<u32>(spv::BuiltIn::WorkgroupId)});
   std::vector<Id> iface{local_id, group_id};
-  if (uses_ds_swizzle) {
+  if (uses_lane_id) {
     t.m.Capability(spv::Capability::GroupNonUniform);
     t.m.Capability(spv::Capability::GroupNonUniformShuffle);
     sc.subgroup_local_id =
@@ -596,6 +603,8 @@ bool TranslateCs(const Program& program,
     t.SetSg(sg++, group_comp(2));
   for (u32 c = 0; c < 3; c++)  // local invocation id (tidig) -> v0..v2
     t.SetVg(c, t.m.Load(t.t_u, t.m.AccessChain(p_in_u, local_id, {t.U32(c)})));
+  if (sc.subgroup_local_id)
+    t.lane_id = t.m.Load(t.t_u, sc.subgroup_local_id);
   t.SeedExec();
   t.predicate_vector = true;
   EmitCfg(t, program, sc);

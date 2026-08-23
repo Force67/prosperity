@@ -22,7 +22,7 @@ namespace gpu::gcn {
 
 // Upper bound used by the compute resource planner and Vulkan staging path.
 // The renderer additionally checks the selected device's descriptor limits.
-inline constexpr u32 kMaxCsResources = 48;
+inline constexpr u32 kMaxCsResources = 64;
 
 // Waves a shared-LDS block is allocated for. A graphics stage cannot declare
 // Workgroup storage, so an NGG vertex program's LDS lives in one storage

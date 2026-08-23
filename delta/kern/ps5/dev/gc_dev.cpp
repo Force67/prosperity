@@ -34,6 +34,7 @@
 namespace {
 DELTA_OPTION(bool, kAgcRingdump, "DELTA_AGC_RINGDUMP", false);
 DELTA_OPTION(bool, kAgcTrace, "DELTA_AGC_TRACE", false);
+DELTA_OPTION(bool, kAgcQstat, "DELTA_AGC_QSTAT", false);
 DELTA_OPTION(bool, kDmemTrace, "DELTA_DMEM_TRACE", false);
 DELTA_OPTION(bool, kFlipTrace, "DELTA_FLIP_TRACE", false);
 DELTA_OPTION(bool, kGcCensus, "DELTA_GC_CENSUS", false);
@@ -142,12 +143,31 @@ static void drainQueue(AcqQueue &q, u64 doorbell) {
   if (!ringDw)
     return;
   const u32 write = static_cast<u32>(doorbell % ringDw);
-  if (write == q.readDw)
+  if (write == q.readDw) {
+    // The doorbell moved but lands where we already are: the title wrapped a
+    // whole ring between two polls, so that lap is gone (and with it any fence
+    // it carried). Say so; a silent skip reads as an idle queue.
+    static int n = 0;
+    if (n++ < 16)
+      LOG_WARNING("agc: queue lapped, ring {:#x} write={:#x} == read",
+                  (unsigned long)q.dcb, write);
     return;
+  }
   auto forward = [&](u32 firstDw, u32 dwords) {
     const u64 at = q.dcb + static_cast<u64>(firstDw) * 4;
-    if (dwords && gpuReadable(at, static_cast<size_t>(dwords) * 4))
+    if (!dwords)
+      return;
+    if (gpuReadable(at, static_cast<size_t>(dwords) * 4)) {
       prosperity_agc_submit(at, dwords * 4);
+      return;
+    }
+    // Dropping a submit is invisible from the guest side: the work simply
+    // never completes and whatever fence it would have written stalls its
+    // waiter forever. Say so rather than advancing the read pointer quietly.
+    static int n = 0;
+    if (n++ < 16)
+      LOG_WARNING("agc: queue ring {:#x}+{:#x} unreadable, {} dwords dropped",
+                  (unsigned long)at, dwords * 4, dwords);
   };
   if (write > q.readDw) {
     forward(q.readDw, write - q.readDw);
@@ -172,10 +192,23 @@ static void drainQueue(AcqQueue &q, u64 doorbell) {
 // doorbell write; we have no way to trap it cheaply, and the page is a handful
 // of cache lines, so a poll costs nothing next to a frame.
 static void doorbellPoller() {
+  u64 ticks = 0;
   for (;;) {
     std::this_thread::sleep_for(std::chrono::microseconds(500));
     std::lock_guard<std::mutex> lk(g_queueLock);
+    // Every 5s under DELTA_AGC_QSTAT: what each queue has published against
+    // what we have walked. A consumer waiting on a fence one submit short is
+    // either work we never drained (they differ) or work never submitted.
+    const bool stat = kAgcQstat && (++ticks % 10000) == 0;
     for (auto &[qid, q] : g_queues) {
+      if (stat && gpuReadable(q.doorbell, sizeof(u64))) {
+        const u64 db = *reinterpret_cast<volatile const u64 *>(q.doorbell);
+        const u32 ringDw = q.ringBytes / 4;
+        BASE_LOGI("agcq", "q{} doorbell={:#x} write={:#x} read={:#x} ring={:#x}",
+                  qid, (unsigned long)db,
+                  ringDw ? (unsigned long)(db % ringDw) : 0ul,
+                  (unsigned long)q.readDw, q.ringBytes);
+      }
       if (!gpuReadable(q.doorbell, sizeof(u64)))
         continue;
       const u64 now =

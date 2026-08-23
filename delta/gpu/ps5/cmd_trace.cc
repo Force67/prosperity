@@ -55,6 +55,7 @@ DELTA_OPTION(bool, kGpuDrawcensus, "DELTA_GPU_DRAWCENSUS", false);
 DELTA_OPTION(bool, kResTrace, "DELTA_GPU_CSRES", false);
 DELTA_OPTION(bool, kRtProbe, "DELTA_AGC_RTPROBE", false);
 DELTA_OPTION(bool, kTrace, "DELTA_AGC_TRACE", false);
+DELTA_OPTION(bool, kOpHist, "DELTA_AGC_OPHIST", false);
 DELTA_OPTION(bool, kWalkStat, "DELTA_AGC_WALKSTAT", false);
 }  // namespace
 
@@ -1193,7 +1194,8 @@ bool TraceSubmit(const void* dcb, u32 size_bytes, u32 words, u64 submission) {
 }
 
 void TraceOpcodeCensus(const void* dcb, u32 words, u64 submission) {
-  if (!kTrace || !NonEmpty(dcb, words) || (submission % 200) != 0)
+  if ((!kTrace && !kOpHist) || !NonEmpty(dcb, words) ||
+      (submission % 2000) != 0)
     return;
   BASE_LOGI("agc", "=== global opcode census @submit {} ===", submission);
   DumpOpcodeHistogram();

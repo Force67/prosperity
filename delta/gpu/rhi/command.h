@@ -307,7 +307,7 @@ struct DrawInfo {
 // into a storage buffer, runs the dispatch, and copies the written ranges back
 // to guest memory (where the graphics texture path re-reads them).
 struct ComputeInfo {
-  static constexpr u32 kMaxResources = 48;
+  static constexpr u32 kMaxResources = 64;
 
   u64 cs_addr = 0;            // pipeline cache key
   u32 groups[3] = {1, 1, 1};  // workgroup counts (DISPATCH_DIRECT dims)

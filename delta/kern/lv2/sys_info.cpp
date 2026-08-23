@@ -399,16 +399,18 @@ int PS4ABI sys_sysctl(int *name, u32 namelen, void *oldp, size_t *oldlenp,
   // hw.sce_main_socid (synthetic {0x1337,7}): the SoC identifier, which doubles as
   // the GPU chip revision. libSceAgc's shader-create (f3dg2CSgRKY) gates on it:
   // shaders whose min-GPU-target field (.shader_header[0x4c]) is > 5 are REJECTED
-  // (0x8a6c003d) unless chipRev > 0x840f4f. All of Isaac's 38 embedded shaders use
-  // target 6, so we must report the real Oberon revision (0x840fc0) or every shader
-  // create fails -> empty pipelines -> zero SPI_SHADER_PGM -> nothing renders. This
+  // (0x8a6c003d) on an old socid, and newer firmware rejects target >= 0xd when
+  // (socid & ~0xf) == 0x840fc0. Every shader the firmware itself ships uses one of
+  // those targets, so the four bounds the modules test pin the answer exactly:
+  // libSceAgc 01.14 wants > 0x840f4f, libSceVdecCore wants > 0x840f7f, libkernel
+  // caps the family at 0x840fdf, and the target-0xe gate excludes 0x840fcx. This
   // oid is PS5-only (the 0x1337 family is synthetic PS5 config), so PS4 is unaffected.
   else if (name[0] == 0x1337 && name[1] == 7 && namelen == 2) {
     if (oldp && oldlenp && *oldlenp >= sizeof(u32)) {
       const auto *active = proc::getActive();
       *reinterpret_cast<u32 *>(oldp) =
           active && active->getPlatform() == proc::platform::ps5
-              ? 0x840fc0
+              ? 0x840fd0
               : ps4::hardwareModeProfile().mainSocId;
       *oldlenp = sizeof(u32);
     }

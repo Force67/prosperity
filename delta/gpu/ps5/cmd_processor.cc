@@ -12,6 +12,7 @@
 #include <cstring>
 #include <mutex>
 
+#include <base/logging.h>
 #include <utl/options.h>
 
 #include "gpu/gcn/gcn_resource.h"
@@ -30,6 +31,10 @@
 
 namespace {
 DELTA_OPTION(bool, kNoCopy, "DELTA_GPU_NODMACOPY", false);
+// Report every fence label written into the 1 MiB after this address. A
+// consumer stuck one count short of its target is the readable half of a
+// missing submit, and the label is the only place that count exists.
+DELTA_OPTION(u64, kLabelWatch, "DELTA_AGC_LABELWATCH", 0);
 }  // namespace
 
 // Whether a target address is a buffer the title registered for display; see
@@ -98,15 +103,30 @@ void WriteLabel(u64 address, u64 value, bool is_64bit) {
     *reinterpret_cast<volatile u32*>(address) = static_cast<u32>(value);
 }
 
+// INT_SEL asks the CP to raise an end-of-pipe interrupt once the write lands.
+// libSceAgcDriver turns that into an event on the equeue sceAgcAddEqEvent
+// registered, and a consumer that never polls its label -- the video decoder
+// parks in sceKernelWaitEqueue -- makes no progress without it.
+extern "C" void prosperity_gpu_end_of_pipe();
+
 // The label write shared by EOP and RELEASE_MEM, which encode DATA_SEL the same
 // way: 1 = 32-bit immediate, 2 = 64-bit immediate, 3/4 = a clock counter.
-void WriteEventLabel(u64 address, u32 data_sel, u64 value) {
+void WriteEventLabel(u64 address, u32 data_sel, u64 value, u32 int_sel = 0) {
+  if (kLabelWatch && address >= kLabelWatch &&
+      address < kLabelWatch + 0x4000000ull) {
+    static int n = 0;
+    if (n++ < 64 || n % 64 == 0)
+      BASE_LOGI("agclabel", "{:#x} sel={} int={} value={:#x}", address,
+                data_sel, int_sel, value);
+  }
   if (data_sel == 1)
     WriteLabel(address, value, false);
   else if (data_sel == 2)
     WriteLabel(address, value, true);
   else if (data_sel >= 3)
     WriteLabel(address, GpuClockTimestamp(), true);
+  if (int_sel)
+    prosperity_gpu_end_of_pipe();
 }
 
 // --- packet handlers -------------------------------------------------------
@@ -187,7 +207,8 @@ void HandleEventWriteEop(const u32* body, u32 count) {
       (static_cast<u64>(body[2] & 0xFFFF) << 32) | (body[1] & ~0x3u);
   const u64 value = static_cast<u64>(body[3]) |
                     (static_cast<u64>(count >= 5 ? body[4] : 0) << 32);
-  WriteEventLabel(address, (body[2] >> 29) & 0x7, value);
+  WriteEventLabel(address, (body[2] >> 29) & 0x7, value,
+                  (body[2] >> 24) & 0x3);
 }
 
 // body: eventCtrl, selBits, addrLo, addrHi, dataLo, dataHi
@@ -198,7 +219,8 @@ void HandleReleaseMem(const u32* body, u32 count) {
       (static_cast<u64>(body[3] & 0xFFFF) << 32) | (body[2] & ~0x3u);
   const u64 value = static_cast<u64>(body[4]) |
                     (static_cast<u64>(count >= 6 ? body[5] : 0) << 32);
-  WriteEventLabel(address, (body[1] >> 29) & 0x7, value);
+  WriteEventLabel(address, (body[1] >> 29) & 0x7, value,
+                  (body[1] >> 24) & 0x7);
 }
 
 // body: eventCtrl, addrLo, addrHi+cmd, data
@@ -346,8 +368,16 @@ void Walk(rhi::Renderer& renderer,
       i += 1 + count;
       continue;
     }
-    if (type != Pm4Type::kType3)
-      break;  // a type-1 header is a genuine desync
+    if (type != Pm4Type::kType3) {
+      // A type-1 header is a genuine desync. Everything after it is abandoned,
+      // including any fence the submission still had to write, so a waiter on
+      // that fence hangs: report the truncation instead of hiding it.
+      static int n = 0;
+      if (n++ < 16)
+        BASE_LOGW("agc", "type-{} header {:#x} at dword {}/{}, rest dropped",
+                    static_cast<u32>(type), hdr, i, words);
+      break;
+    }
 
     const u32 op = Pm4Opcode(hdr);
     const u32 count = Pm4Count(hdr);  // body dword count
@@ -374,16 +404,25 @@ void Walk(rhi::Renderer& renderer,
           break;
         const u64 ib = (static_cast<u64>(body[1] & 0xFFFF) << 32) | body[0];
         const u32 ib_words = body[2] & 0xFFFFF;
-        TraceIndirectBuffer(ib, ib_words,
-                            IsGpuAddress(ib) && ib_words && ib_words <= 0x40000 &&
-                                gpu::IsReadableRange(
-                                    ib, static_cast<u64>(ib_words) * sizeof(u32)));
-        // Bounds-guard: only follow IBs into the GPU aperture with a sane
-        // size, so a stale/garbage ring window cannot fault the walker.
-        if (IsGpuAddress(ib) && ib_words && ib_words <= 0x40000 &&
-            gpu::IsReadableRange(ib, static_cast<u64>(ib_words) * sizeof(u32)))
+        // Bounds-guard: a sane size, in the guest map, actually readable. The
+        // GPU aperture is deliberately NOT required -- the video decoder builds
+        // its command buffers in its own allocation (0x6_0000_0000 for Astro
+        // Bot, well under the aperture floor), and skipping those left its
+        // completion fence one submit short forever, so the decode thread spun
+        // holding the lock the whole player waits on.
+        const bool follow =
+            ib_words && ib_words <= 0x40000 && IsGuestAddress(ib) &&
+            gpu::IsReadableRange(ib, static_cast<u64>(ib_words) * sizeof(u32));
+        TraceIndirectBuffer(ib, ib_words, follow);
+        if (follow) {
           Walk(renderer, reinterpret_cast<const u32*>(ib), ib_words, dump,
                depth + 1);
+        } else {
+          static int n = 0;
+          if (n++ < 16)
+            BASE_LOGW("agc", "IB {:#x}+{:#x} dwords not followed", (u64)ib,
+                      ib_words);
+        }
         break;
       }
       case IT_SET_CONTEXT_REG:
