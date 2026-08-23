@@ -340,6 +340,9 @@ struct ComputeInfo {
   };
   Res res[kMaxResources];
   u32 num_res = 0;
+  // Binding of the GDS scratchpad, past the resources, or -1 when the shader
+  // has no ds_append/ds_consume.
+  int gds_binding = -1;
 };
 
 // How long a command processor spent walking a submitted command buffer, and

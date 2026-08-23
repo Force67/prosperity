@@ -298,6 +298,9 @@ struct RecompiledCs {
   std::vector<u32> spirv;
   std::vector<CsResource> resources;
   u32 local_size[3] = {1, 1, 1};  // threads per workgroup
+  // GDS: a small global scratchpad the ds_append/ds_consume counters live in.
+  // It is not guest memory, so it gets a binding of its own past the resources.
+  int gds_binding = -1;
 };
 
 // Recompile a compute shader to a Vulkan compute pipeline (GLCompute SPIR-V).

@@ -135,6 +135,7 @@ bool PlanResources(const Program& program,
                    RecompiledCs& r,
                    std::unordered_map<u32, u32>& bind) {
   const ScalarReplayPlan replay = PlanScalarReplay(program);
+  bool uses_gds = false;
   // COMPUTE_USER_DATA is 16 dwords wide; the dispatch path reads no further.
   const u32 ud_dwords = std::min(user_sgpr, 16u);
   bool scalar_written[136] = {};
@@ -255,15 +256,23 @@ bool PlanResources(const Program& program,
           return false;
         break;
       }
-      case Enc::kDs:
+      case Enc::kDs: {
         // ds_swizzle is a cross-lane move rather than an LDS access, so it is
-        // the one DS op that runs without an LDS allocation. GDS is not
-        // modelled at all.
-        if (((w >> 17) & 1) || (!lds_dwords && inst.opcode != 0x35)) {
+        // the one DS op that runs without an LDS allocation. The GDS bit picks
+        // the global scratchpad instead of LDS; the counter pair that lives
+        // there (append / consume) we do model, the rest we do not.
+        const bool gds = ((w >> 17) & 1) != 0;
+        const bool counter = inst.opcode == 0x3d || inst.opcode == 0x3e;
+        if (gds && counter) {
+          uses_gds = true;
+          break;
+        }
+        if (gds || (!lds_dwords && inst.opcode != 0x35)) {
           gpu::gcn::WarnUnsupported("ds.cs.rdna", inst.opcode, w, w1);
           return false;
         }
         break;
+      }
       case Enc::kMimg: {
         // The shared emitter reads the T# with the gfx10.3 field positions when
         // the translator is in RDNA mode, so the plan is the same as GCN's.
@@ -293,9 +302,7 @@ bool PlanResources(const Program& program,
         // Off by default: the window below is a guess at the extent, and a
         // store that lands clamped corrupts what the shader was walking. The
         // decoders' own shaders need this, so it stays here to finish.
-        // Loads only for now: a store whose base we resolved wrongly lands in
-        // the title's own structures, and the video decoder stops dead.
-        if (!kCsGlobal || seg != 2 || saddr >= 100 || !load) {
+        if (!kCsGlobal || seg != 2 || saddr >= 100 || (!load && !store)) {
           gpu::gcn::WarnUnsupported("flat.cs.rdna", inst.opcode, w, w1);
           return false;
         }
@@ -317,6 +324,8 @@ bool PlanResources(const Program& program,
       }
     index++;
   }
+  if (uses_gds)
+    r.gds_binding = static_cast<int>(r.resources.size());
   return true;
 }
 
@@ -561,6 +570,17 @@ bool TranslateCs(const Program& program,
     sc.cs_ssbo[res.binding] = v;
   }
 
+  // GDS: the append/consume counters, in a buffer of their own past the
+  // resources. It is device memory the title never names, so it needs no range.
+  if (r.gds_binding >= 0) {
+    const Id v = t.m.Variable(p_buf, spv::StorageClass::StorageBuffer);
+    t.m.Decorate(v, spv::Decoration::DescriptorSet, {0});
+    t.m.Decorate(v, spv::Decoration::Binding,
+                 {static_cast<u32>(r.gds_binding)});
+    t.m.Name(v, "gds");
+    sc.gds_var = v;
+  }
+
   // LDS: a Workgroup-storage uint array sized by RSRC2.
   if (sc.lds_dwords) {
     const Id lds_arr = t.m.TypeArray(t.t_u, sc.lds_dwords);
@@ -661,7 +681,11 @@ bool EmitCsMemory(Translator& t, const Inst& inst, StageContext& sc) {
       gpu::gcn::EmitCsMtbuf(t, inst, sc);
       return true;
     case Enc::kDs:
-      gpu::gcn::EmitDs(t, inst, sc);
+      // The GDS bit picks the global counters, not LDS.
+      if (((inst.raw[0] >> 17) & 1) && sc.gds_var)
+        gpu::gcn::EmitGdsCounter(t, inst, sc);
+      else
+        gpu::gcn::EmitDs(t, inst, sc);
       return true;
     case Enc::kMimg: {
       // Same lowering as the graphics path: dim 3 (cube) and 5 (2D array)

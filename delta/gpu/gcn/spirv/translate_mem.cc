@@ -50,7 +50,21 @@ Id SsboLoad(Translator& t, Id var, Id dword_idx) {
 // Exported: the compute resource model itself is ISA-neutral (a guest range
 // aliased as Buf { uint data[]; }, addressed by dword index). The RDNA2 path
 // binds the same buffers and only decodes its own scalar loads differently.
+// A binding past the planned resources is a bug in the plan, not something to
+// index with: it used to walk off the vector and take the process with it.
+bool CsBindingValid(StageContext& sc, u32 binding) {
+  if (binding < sc.cs_ssbo.size() && sc.cs_ssbo[binding])
+    return true;
+  WarnUnsupported("cs.binding-range", binding,
+                  static_cast<u32>(sc.cs_ssbo.size()),
+                  binding < sc.cs_ssbo.size() ? sc.cs_ssbo[binding] : 0);
+  sc.cs_unsupported = true;
+  return false;
+}
+
 Id CsSsboPtr(Translator& t, StageContext& sc, u32 binding, Id dword_idx) {
+  if (!CsBindingValid(sc, binding))
+    return t.U32(0);
   return SsboPtr(t, sc.cs_ssbo[binding], dword_idx);
 }
 // MUBUF atomics (GFX7): 0x30..0x3f on 32-bit values, 0x50..0x5f on 64-bit
@@ -61,6 +75,8 @@ bool MubufAtomic(u32 op) {
 }
 
 Id CsSsboLoad(Translator& t, StageContext& sc, u32 binding, Id dword_idx) {
+  if (!CsBindingValid(sc, binding))
+    return t.U32(0);
   return SsboLoad(t, sc.cs_ssbo[binding], dword_idx);
 }
 void CsSsboStore(Translator& t,
@@ -68,11 +84,20 @@ void CsSsboStore(Translator& t,
                  u32 binding,
                  Id dword_idx,
                  Id value) {
+  if (!CsBindingValid(sc, binding))
+    return;
   t.m.Store(CsSsboPtr(t, sc, binding, dword_idx), value);
 }
 int CsBindingFor(StageContext& sc, u32 pc) {
   auto it = sc.cs_bind.find(pc);
-  return it != sc.cs_bind.end() ? static_cast<int>(it->second) : -1;
+  if (it == sc.cs_bind.end())
+    return -1;
+  if (it->second >= sc.cs_ssbo.size()) {
+    WarnUnsupported("cs.binding-for", pc, it->second,
+                    static_cast<u32>(sc.cs_ssbo.size()));
+    return -1;
+  }
+  return static_cast<int>(it->second);
 }
 
 namespace {
@@ -1029,6 +1054,31 @@ void EmitCsSmrd(Translator& t, const Inst& inst, StageContext& sc) {
 // storage buffer exactly like a V#; the address VGPR carries the byte offset
 // inside it. The video decoders reach their frame buffers this way, so a
 // rejected shader here is a decoded picture that never appears.
+// ds_append / ds_consume: the GDS counter at (M0 + offset0) hands each active
+// lane a distinct slot. One atomic per lane is exactly that -- the counter ends
+// up moved by the number of active lanes and every lane gets its own index --
+// which is what an append buffer needs; only the lane ORDER is unspecified.
+void EmitGdsCounter(Translator& t, const Inst& inst, StageContext& sc) {
+  const u32 w = inst.raw[0], w1 = inst.raw[1];
+  const u32 op = (w >> 18) & 0xFF;
+  const u32 offset0 = w & 0xFF;
+  const u32 vdst = (w1 >> 24) & 0xFF;
+  if (!sc.gds_var)
+    return;
+  const Id p_u = t.m.TypePointer(spv::StorageClass::StorageBuffer, t.t_u);
+  const Id ptr = t.m.AccessChain(p_u, sc.gds_var, {t.U32(0), t.U32(offset0 / 4)});
+  const Id scope = t.U32(static_cast<u32>(spv::Scope::Device));
+  const Id relaxed = t.U32(0);
+  if (op == 0x3e) {  // ds_append
+    t.SetVg(vdst, t.m.Emit(spv::Op::OpAtomicIAdd, t.t_u,
+                           {ptr, scope, relaxed, t.U32(1)}));
+  } else {  // ds_consume
+    const Id old = t.m.Emit(spv::Op::OpAtomicISub, t.t_u,
+                            {ptr, scope, relaxed, t.U32(1)});
+    t.SetVg(vdst, t.Sub(old, t.U32(1)));
+  }
+}
+
 void EmitCsGlobal(Translator& t, const Inst& inst, StageContext& sc) {
   const u32 w = inst.raw[0], w1 = inst.raw[1];
   const u32 op = (w >> 18) & 0x7F;
@@ -2046,6 +2096,15 @@ void EmitDs(Translator& t, const Inst& inst, StageContext& sc) {
       const Id source_exec = t.m.Emit(spv::Op::OpGroupNonUniformShuffle, t.t_u,
                                       {scope, t.Exec(), source_lane});
       t.SetVg(vdst, t.SelectB(t.IsNonZero(source_exec), value, t.U32(0)));
+      break;
+    }
+    case 45: {  // ds_wrxchg_rtn_b32: swap the slot, keep the old value
+      const Id old_value = t.m.Emit(
+          spv::Op::OpAtomicExchange, t.t_u,
+          {lds_at(single_addr(), true),
+           t.U32(static_cast<u32>(spv::Scope::Workgroup)), t.U32(0),
+           t.Vg(data0)});
+      t.SetVg(vdst, old_value);
       break;
     }
     case 13:  // ds_write_b32

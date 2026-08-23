@@ -751,6 +751,7 @@ struct StageContext {
   std::unordered_map<u32, Id> pervertex_vars;
   Id bary_var = 0;  // BaryCoordKHR, declared on first use
 
+  Id gds_var = 0;   // GDS counters (ds_append / ds_consume), a storage buffer
   Id lds_var = 0;           // uint array backing LDS (0 = no LDS)
   u32 lds_dwords = 0;  // its length
   // Workgroup in a CS. A fragment shader cannot declare Workgroup storage at
@@ -933,6 +934,7 @@ bool PlanCsResources(const Program& program,
 void EmitCsSmrd(Translator& t, const Inst& inst, StageContext& sc);
 void EmitCsMubuf(Translator& t, const Inst& inst, StageContext& sc);
 void EmitCsGlobal(Translator& t, const Inst& inst, StageContext& sc);
+void EmitGdsCounter(Translator& t, const Inst& inst, StageContext& sc);
 void EmitCsMtbuf(Translator& t, const Inst& inst, StageContext& sc);
 void EmitCsMimg(Translator& t,
                 const Inst& inst,

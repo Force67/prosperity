@@ -272,6 +272,7 @@ void DispatchCompute(rhi::Renderer& renderer,
     out.dfmt = range.image.dfmt;
     out.pow2_pad = range.image.pow2_pad;
   }
+  ci.gds_binding = rc.gds_binding;
   if (!ci.num_res)
     return;
   const bool dispatched = rhi::Dispatch(renderer, ci);

@@ -97,7 +97,18 @@ struct CsPipe {
   VkPipelineLayout layout = VK_NULL_HANDLE;
   VkDescriptorSetLayout set_layout = VK_NULL_HANDLE;
   u32 num_res = 0;
+  int gds_binding = -1;
 };
+
+// The GDS scratchpad: one small device-local buffer for the whole device, which
+// is what the hardware's global data share is. Created on first use and left
+// alone afterwards -- the counters in it are the title's to manage.
+struct GdsBuffer {
+  VkBuffer buf = VK_NULL_HANDLE;
+  VkDeviceMemory mem = VK_NULL_HANDLE;
+  static constexpr VkDeviceSize kBytes = 64 * 1024;
+};
+GdsBuffer g_gds;
 
 std::unordered_map<u64, CsPipe> g_cs_pipes;
 
@@ -170,13 +181,20 @@ CsPipe* GetCsPipe(const ComputeInfo& ci) {
     return it->second.num_res == ci.num_res ? &it->second : nullptr;
   CsPipe cp;
   cp.num_res = ci.num_res;
-  VkDescriptorSetLayoutBinding binds[ComputeInfo::kMaxResources];
+  VkDescriptorSetLayoutBinding binds[ComputeInfo::kMaxResources + 1];
+  u32 nbind = 0;
   for (u32 i = 0; i < ci.num_res; i++)
-    binds[i] = {i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
-                VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+    binds[nbind++] = {i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
+                      VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+  // The GDS scratchpad sits past the resources; it is ours, not a guest range.
+  cp.gds_binding = ci.gds_binding;
+  if (ci.gds_binding >= 0)
+    binds[nbind++] = {static_cast<u32>(ci.gds_binding),
+                      VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
+                      VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
   VkDescriptorSetLayoutCreateInfo sl{
       VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-  sl.bindingCount = ci.num_res;
+  sl.bindingCount = nbind;
   sl.pBindings = binds;
   if (vkCreateDescriptorSetLayout(g_dev.device, &sl, nullptr, &cp.set_layout) !=
       VK_SUCCESS)
@@ -1231,6 +1249,40 @@ bool CsRangeImportGuest(CsRange& e, u64 base, VkDeviceSize size) {
   e.imported = true;
   e.imported_base = lo;
   e.imported_offset = off;
+  return true;
+}
+
+// The GDS scratchpad, created once. Zeroed at creation; after that it is the
+// title's own counter store, so nothing here resets it.
+bool EnsureGdsBuffer() {
+  if (g_gds.buf)
+    return true;
+  VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+  bi.size = GdsBuffer::kBytes;
+  bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+             VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+  if (vkCreateBuffer(g_dev.device, &bi, nullptr, &g_gds.buf) != VK_SUCCESS) {
+    g_gds.buf = VK_NULL_HANDLE;
+    return false;
+  }
+  VkMemoryRequirements mr;
+  vkGetBufferMemoryRequirements(g_dev.device, g_gds.buf, &mr);
+  VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+  ai.allocationSize = mr.size;
+  ai.memoryTypeIndex = FindComputeMemoryType(mr.memoryTypeBits);
+  if (vkAllocateMemory(g_dev.device, &ai, nullptr, &g_gds.mem) != VK_SUCCESS) {
+    vkDestroyBuffer(g_dev.device, g_gds.buf, nullptr);
+    g_gds.buf = VK_NULL_HANDLE;
+    g_gds.mem = VK_NULL_HANDLE;
+    return false;
+  }
+  vkBindBufferMemory(g_dev.device, g_gds.buf, g_gds.mem, 0);
+  void* p = nullptr;
+  if (vkMapMemory(g_dev.device, g_gds.mem, 0, GdsBuffer::kBytes, 0, &p) ==
+      VK_SUCCESS) {
+    std::memset(p, 0, GdsBuffer::kBytes);
+    vkUnmapMemory(g_dev.device, g_gds.mem);
+  }
   return true;
 }
 
@@ -2317,8 +2369,8 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci) {
     if (vkAllocateDescriptorSets(g_dev.device, &da, &set) != VK_SUCCESS)
       return false;
   }
-  VkDescriptorBufferInfo dbi[ComputeInfo::kMaxResources];
-  VkWriteDescriptorSet wr[ComputeInfo::kMaxResources];
+  VkDescriptorBufferInfo dbi[ComputeInfo::kMaxResources + 1];
+  VkWriteDescriptorSet wr[ComputeInfo::kMaxResources + 1];
   for (u32 i = 0; i < ci.num_res; i++)
     bind_off[i] = ci.res[i].zero_fill
                       ? 0
@@ -2332,7 +2384,18 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci) {
     wr[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     wr[i].pBufferInfo = &dbi[i];
   }
-  vkUpdateDescriptorSets(g_dev.device, ci.num_res, wr, 0, nullptr);
+  u32 nwrite = ci.num_res;
+  if (ci.gds_binding >= 0 && EnsureGdsBuffer()) {
+    dbi[nwrite] = {g_gds.buf, 0, GdsBuffer::kBytes};
+    wr[nwrite] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    wr[nwrite].dstSet = set;
+    wr[nwrite].dstBinding = static_cast<u32>(ci.gds_binding);
+    wr[nwrite].descriptorCount = 1;
+    wr[nwrite].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    wr[nwrite].pBufferInfo = &dbi[nwrite];
+    nwrite++;
+  }
+  vkUpdateDescriptorSets(g_dev.device, nwrite, wr, 0, nullptr);
 
   // Record the dispatch into the open batch. Submission + the fence wait
   // happen at the next flush point, not here.
