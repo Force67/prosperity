@@ -72,10 +72,21 @@ public:
   // Remove a knote by (ident,filter). Returns true if one was removed.
   bool removeEvent(u64 ident, i16 filter);
 
+  // What this queue is registered for, for the report a long wait triggers:
+  // the event that never arrived is the one nothing here is active on.
+  void reportRegistrations(int fd);
+
 private:
+  void reportRegistrationsLocked(int fd);
   struct knote {
     kevent_t ev;
     bool active = false;
+    // The end-of-pipe count this knote last accounted for. Our submits run to
+    // completion inside the submit call, so a GPU event can fire before the
+    // title has armed its wait; comparing counts turns that lost edge back
+    // into the level it really is ("the GPU has finished work since you last
+    // looked"), which is what the title is asking.
+    u64 eop_seen = 0;
   };
   knote *find(u64 ident, i16 filter);
 
@@ -83,6 +94,11 @@ private:
   std::condition_variable cv;
   base::Vector<knote> notes;
   bool warnedEmptyWait = false;
+  // A queue nothing has posted to since this point. A title that polls with a
+  // timeout looks busy from the outside, so the idle span is what says its
+  // event never came.
+  std::chrono::steady_clock::time_point idleSince{};
+  bool reportedIdle = false;
 };
 
 // Fan a (filter,data) trigger out to every live equeue. The vblank pump uses
@@ -98,6 +114,9 @@ void triggerAllEqueues(i64 ident, i16 filter, i64 data);
 void noteFlip();
 // A GPU end-of-pipe interrupt reached the CP: wake the graphics-core events.
 void noteGpuEndOfPipe();
+
+// End-of-pipe interrupts raised so far (see equeue::knote::eop_seen).
+u64 gpuEndOfPipeCount();
 u64 flipCount();
 
 int PS4ABI sys_kqueue();

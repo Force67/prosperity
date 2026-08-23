@@ -9,6 +9,8 @@
 
 #include "wait_probe.h"
 
+#include "base/arch.h"
+
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -25,6 +27,10 @@
 
 #include "kern/crash.h"
 
+namespace krnl {
+const u32 *currentGuestTidPtr();  // sys_thread.cpp: this thread's guest tid
+}
+
 namespace {
 DELTA_OPTION(bool, kWaitProbe, "DELTA_WAIT_PROBE", false);
 }  // namespace
@@ -34,6 +40,7 @@ namespace {
 
 struct Parked {
   const char *what;
+  unsigned gtid;
   long a0, a1;
   std::chrono::steady_clock::time_point since;
   uintptr_t gsp;   // guest stack at the syscall, walked by the reporter
@@ -44,6 +51,11 @@ std::mutex g_mtx;
 std::unordered_map<long, Parked> g_parked;
 
 long selfTid() { return static_cast<long>(::syscall(SYS_gettid)); }
+
+unsigned currentGuestTid() {
+  const u32 *p = krnl::currentGuestTidPtr();
+  return p ? *p : 0;
+}
 
 bool probeOn() {
   return kWaitProbe;
@@ -109,8 +121,28 @@ void waitProbeEnter(const char *what, long a0, long a1) {
   startReporter();
   const long tid = selfTid();
   std::lock_guard<std::mutex> lk(g_mtx);
-  g_parked[tid] = {what, a0, a1, std::chrono::steady_clock::now(),
-                   guestStackScanBase(), false};
+  g_parked[tid] = {what, currentGuestTid(), a0, a1,
+                   std::chrono::steady_clock::now(), guestStackScanBase(),
+                   false};
+}
+
+bool waitProbeDescribeGuest(unsigned gtid, char *out, unsigned long len) {
+  if (!out || !len)
+    return false;
+  out[0] = '\0';
+  if (!probeOn() || !gtid)
+    return false;
+  const auto now = std::chrono::steady_clock::now();
+  std::lock_guard<std::mutex> lk(g_mtx);
+  for (const auto &[tid, p] : g_parked) {
+    if (p.gtid != gtid)
+      continue;
+    const long secs = static_cast<long>(
+        std::chrono::duration_cast<std::chrono::seconds>(now - p.since).count());
+    std::snprintf(out, len, "%s(%#lx) for %lds", p.what, p.a0, secs);
+    return true;
+  }
+  return false;
 }
 
 void waitProbeExit() {

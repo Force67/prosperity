@@ -83,6 +83,20 @@ static std::atomic<u32> g_nextTid{2};
 // thread that holds the lock and dump WHAT that owner is blocked on.
 const u32 *currentGuestTidPtr() { return &t_tid; }
 
+// guest tid -> host tid. A umutex owner word names a guest thread; finding out
+// what that thread is doing means finding its OS thread first.
+static std::atomic<long> g_hostByGuest[4096];
+
+void noteGuestThreadHost(u32 gtid) {
+  if (gtid < 4096)
+    g_hostByGuest[gtid].store(static_cast<long>(::syscall(SYS_gettid)),
+                              std::memory_order_relaxed);
+}
+
+long hostTidForGuest(u32 gtid) {
+  return gtid < 4096 ? g_hostByGuest[gtid].load(std::memory_order_relaxed) : 0;
+}
+
 // Thread-startup handshake: sys_thr_new blocks until the new thread has run its
 // init and reached its first sync point (umtx). The game spawns workers that
 // produce shared state the main thread then reads with no explicit ordering
@@ -230,6 +244,7 @@ int PS4ABI sys_thr_new(thr_param *p, int size) {
                                        std::shared_ptr<std::atomic<bool>>,
                                        void *, size_t> *>(pv);
       t_tid = std::get<1>(*c);
+      noteGuestThreadHost(t_tid);
       t_started = std::get<2>(*c).get();
       void *gt = std::get<0>(*c);
       registerGuestThreadStack(std::get<3>(*c), std::get<4>(*c));
@@ -243,6 +258,7 @@ int PS4ABI sys_thr_new(thr_param *p, int size) {
       delete ctx;
       std::thread([gthread, tid, started, gsb, gss] {
         t_tid = tid;
+        noteGuestThreadHost(t_tid);
         t_started = started.get();
         registerGuestThreadStack(gsb, gss);
         cpu::backend().runGuestThread(gthread);
@@ -253,6 +269,7 @@ int PS4ABI sys_thr_new(thr_param *p, int size) {
   } else {
     std::thread([gthread, tid, started, gsb, gss] {
       t_tid = tid;
+      noteGuestThreadHost(t_tid);
       t_started = started.get();
       registerGuestThreadStack(gsb, gss);
       cpu::backend().runGuestThread(gthread);
@@ -423,6 +440,19 @@ struct StallReport {
               word2 & 0x7fffffffu,
               (long long)std::chrono::duration_cast<std::chrono::seconds>(
                   waited).count());
+    // Name what the OWNER is stuck in: a lock nobody releases is only half
+    // the story, and the other half is a wait on the far side of the cycle.
+    if (std::strcmp(op, "MUTEX_WAIT") == 0) {
+      const u32 owner_gtid = word & 0x7fffffffu;
+      char owner[128];
+      if (waitProbeDescribeGuest(owner_gtid, owner, sizeof(owner)))
+        BASE_LOGI("umtxstall", "  owner gtid={} is parked in {}", owner_gtid,
+                  owner);
+      else
+        BASE_LOGI("umtxstall",
+                  "  owner gtid={} (host tid {}) is in no probed wait",
+                  owner_gtid, hostTidForGuest(owner_gtid));
+    }
     guestStackTrace("umtxstall", 8);
   }
 };

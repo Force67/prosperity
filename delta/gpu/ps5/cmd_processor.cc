@@ -458,8 +458,19 @@ void Walk(rhi::Renderer& renderer,
       case 0x63:
         LoadRegBlock(g_regs, kShRegBase, body, count);
         break;
-      case 0x93:  // an inline SH-register set
-        SetShRegsInline(g_regs, body, count);
+      // SET_UCONFIG_REG_INDEX: the index lives in the offset dword's top bits
+      // and SetRegs already masks the selector off, so the register write is
+      // the same one. Dropping these lost the index type and primitive type a
+      // title programs through this form.
+      case 0x7a:
+        SetRegs(g_regs, kUConfigRegBase, body, count);
+        break;
+      // WAIT_REG_MEM_64: wait until a 64-bit value in memory satisfies a
+      // comparison. Our submit is synchronous, so the condition is met by the
+      // time we walk the packet. It is NOT a register write: reading it as one
+      // stored the poll address over the shader user-data registers, which is
+      // why the draws that followed sampled from nothing.
+      case 0x93:
         break;
       case IT_DMA_DATA:
         HandleDmaData(renderer, body, count);

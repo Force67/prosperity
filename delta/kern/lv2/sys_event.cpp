@@ -34,6 +34,7 @@
 namespace {
 DELTA_OPTION(bool, kEventTrace, "DELTA_EVENT_TRACE", false);
 DELTA_OPTION(bool, kKeventTrace, "DELTA_KEVENT_TRACE", false);
+DELTA_OPTION(long, kEventStallSecs, "DELTA_EVENT_STALL", 0);
 }  // namespace
 
 namespace krnl {
@@ -174,9 +175,13 @@ static void startVblankPump() {
 // GPU finished" at moments when it did not. Small idents are the Gnm
 // registrations (videoout puts its event id in the high bits of ident), so the
 // pump leaves those alone and they arrive from here instead.
+// End-of-pipe interrupts since boot. A Gnm knote compares against this so an
+// interrupt raised between two arming windows is not lost.
+static std::atomic<u64> g_eopSeq{0};
+u64 gpuEndOfPipeCount() { return g_eopSeq.load(std::memory_order_relaxed); }
+
 void noteGpuEndOfPipe() {
-  static std::atomic<u64> seq{0};
-  const u64 n = seq.fetch_add(1) + 1;
+  const u64 n = g_eopSeq.fetch_add(1) + 1;
   if (kEventTrace && (n == 1 || (n % 2000) == 0))
     BASE_LOGI("gpueop", "end-of-pipe interrupt #{}", (unsigned long long)n);
   // Same packing as the display events: the counter above bit 16, a 1..14
@@ -289,12 +294,28 @@ int equeue::kevent(const kevent_t *changes, int nchanges, kevent_t *out,
       out[n++] = k.ev;
       // edge semantics: a fired knote is consumed until its source fires again.
       k.active = false;
+      k.eop_seen = gpuEndOfPipeCount();
     }
     return n;
   };
 
   if (nout <= 0)
     return 0;
+
+  // Re-arm any Gnm knote the GPU has run past since this queue last looked.
+  // The interrupt is an edge on real hardware, but our submits finish inside
+  // the submit call, so an edge raised while the title was between kevents
+  // would otherwise be lost with nothing left to raise another one.
+  {
+    const u64 eop = gpuEndOfPipeCount();
+    for (auto &k : notes) {
+      if (k.active || k.ev.filter != kEVFILT_VIDEOOUT ||
+          k.ev.ident >= kGnmIdentMax || k.eop_seen >= eop)
+        continue;
+      k.active = true;
+      k.ev.data = static_cast<i64>((eop << 16) | k.ev.ident);
+    }
+  }
 
   int got = collect();
   if (got > 0) {
@@ -325,7 +346,18 @@ int equeue::kevent(const kevent_t *changes, int nchanges, kevent_t *out,
               handle());
   }
   if (!to) {
-    cv.wait(lk, pred);
+    // Report once what an untimed wait is registered for if it goes long: a
+    // queue with knotes that never go active is a source we do not drive.
+    if (kEventStallSecs > 0) {
+      const auto until =
+          std::chrono::steady_clock::now() + std::chrono::seconds(kEventStallSecs);
+      if (!cv.wait_until(lk, until, pred)) {
+        reportRegistrationsLocked(handle());
+        cv.wait(lk, pred);
+      }
+    } else {
+      cv.wait(lk, pred);
+    }
     ready = true;
   } else {
     auto dur = std::chrono::seconds(to->tv_sec) +
@@ -335,14 +367,40 @@ int equeue::kevent(const kevent_t *changes, int nchanges, kevent_t *out,
   if (!ready) {
     if (kEventTrace)
       BASE_LOGI("kevent", "timeout nout={}", nout);
+    const auto now = std::chrono::steady_clock::now();
+    if (idleSince == std::chrono::steady_clock::time_point{})
+      idleSince = now;
+    if (kEventStallSecs > 0 && !reportedIdle &&
+        now - idleSince >= std::chrono::seconds(kEventStallSecs)) {
+      reportedIdle = true;
+      reportRegistrationsLocked(handle());
+    }
     return 0;
   }
+  idleSince = {};
+  reportedIdle = false;
   got = collect();
   if (kEventTrace && got > 0)
     BASE_LOGI("kevent", "return wait n={} filter={} ident={:#x} data={:#x}",
               got, out[0].filter, (unsigned long long)out[0].ident,
               (unsigned long long)out[0].data);
   return got;
+}
+
+void equeue::reportRegistrations(int fd) {
+  std::lock_guard<std::mutex> lk(m);
+  reportRegistrationsLocked(fd);
+}
+
+// Caller holds m.
+void equeue::reportRegistrationsLocked(int fd) {
+  base::String line;
+  base::FormatTo(line, "kq={} ({}) long wait, registered:", fd, name.c_str());
+  for (const auto &k : notes)
+    base::FormatTo(line, " [ident={:#x} filter={} active={}]",
+                   (unsigned long long)k.ev.ident, (int)k.ev.filter,
+                   (int)k.active);
+  BASE_LOGI("kevent", "{}", line.c_str());
 }
 
 void equeue::addEvent(u64 ident, i16 filter, void *udata) {
@@ -441,8 +499,16 @@ int PS4ABI sys_kevent(int kq, const kevent_t *changelist, int nchanges,
   // the same "wedged title" question the umtx/semaphore probes answer, and it
   // was the one wait they could not see.
   WaitProbe _wp("kevent", (long)kq, (long)nevents);
-  int r = static_cast<equeue *>(obj)->kevent(changelist, nchanges, eventlist,
-                                             nevents, to);
+  auto *eq = static_cast<equeue *>(obj);
+  const auto t0 = std::chrono::steady_clock::now();
+  int r = eq->kevent(changelist, nchanges, eventlist, nevents, to);
+  // A wait this long is a title that is not going to wake up on its own. What
+  // it registered says which event never arrived, and that is the only thing
+  // the queue can tell us from the outside.
+  if (kEventStallSecs > 0 &&
+      std::chrono::steady_clock::now() - t0 >=
+          std::chrono::seconds(kEventStallSecs))
+    eq->reportRegistrations(kq);
   if (kKeventTrace) {
     base::String line;
     base::FormatTo(line, "kq={} nchanges={} -> {}", kq, nchanges, r);

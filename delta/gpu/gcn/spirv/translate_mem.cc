@@ -1946,6 +1946,7 @@ void EmitDs(Translator& t, const Inst& inst, StageContext& sc) {
     case 43:
       lds_atomic(spv::Op::OpAtomicXor);  // ds_xor[_rtn]_b32
       break;
+    case 61:  // gfx10 renumbered ds_swizzle_b32 from 0x35 to 0x3d
     case 53: {  // ds_swizzle_b32
       if (!sc.subgroup_local_id) {
         if (sc.is_cs)
@@ -2041,6 +2042,34 @@ void EmitDs(Translator& t, const Inst& inst, StageContext& sc) {
       }
       break;
     }
+    case 63: {  // ds_bpermute_b32: this lane reads the lane its address names
+      if (!sc.subgroup_local_id) {
+        if (sc.is_cs)
+          sc.cs_unsupported = true;
+        break;
+      }
+      const Id source_lane =
+          t.And(t.Shr(t.Add(addr, t.U32(offset16)), t.U32(2)), t.U32(63));
+      const Id scope = t.U32(static_cast<u32>(spv::Scope::Subgroup));
+      const Id value = t.m.Emit(spv::Op::OpGroupNonUniformShuffle, t.t_u,
+                                {scope, t.Vg(data0), source_lane});
+      const Id source_exec = t.m.Emit(spv::Op::OpGroupNonUniformShuffle, t.t_u,
+                                      {scope, t.Exec(), source_lane});
+      t.SetVg(vdst, t.SelectB(t.IsNonZero(source_exec), value, t.U32(0)));
+      break;
+    }
+    // gfx10's addtid pair: the address is the lane's own slot, not an address
+    // register (M0 reads zero on this path).
+    case 176:  // ds_write_addtid_b32
+      t.m.Store(lds_at(t.Add(t.U32(offset16), t.Mul(t.WaveLane(), t.U32(4))),
+                       true),
+                t.Vg(data0));
+      break;
+    case 177:  // ds_read_addtid_b32
+      t.SetVg(vdst,
+              t.m.Load(t.t_u, lds_at(t.Add(t.U32(offset16),
+                                           t.Mul(t.WaveLane(), t.U32(4))))));
+      break;
     default:
       WarnUnsupported("ds", op, w, w1);
       sc.cs_unsupported = true;

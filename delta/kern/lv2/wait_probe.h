@@ -13,6 +13,12 @@ namespace krnl {
 void waitProbeEnter(const char* what, long a0, long a1);
 void waitProbeExit();
 
+// What is guest thread `gtid` parked in? Fills `out` with e.g.
+// "osem_wait(0x118) for 42s" and returns false when that thread is not in a
+// probed wait at all. Lets a stalled lock name what its OWNER is stuck on,
+// which is the half of a deadlock the waiter cannot see.
+bool waitProbeDescribeGuest(unsigned gtid, char* out, unsigned long len);
+
 // Scoped form: records the wait for the lifetime of the object.
 struct WaitProbe {
   bool on;

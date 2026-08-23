@@ -258,7 +258,12 @@ bool PlanResources(const Program& program,
         // ds_swizzle is a cross-lane move rather than an LDS access, so it is
         // the one DS op that runs without an LDS allocation. GDS is not
         // modelled at all.
-        if (((w >> 17) & 1) || (!lds_dwords && inst.opcode != 0x35)) {
+        // The cross-lane DS ops move data between lanes, not through LDS, so
+        // they run without an allocation. gfx10 numbers them 0x3d swizzle /
+        // 0x3e permute / 0x3f bpermute (GCN had swizzle at 0x35).
+        if (((w >> 17) & 1) ||
+            (!lds_dwords && inst.opcode != 0x35 && inst.opcode != 0x3d &&
+             inst.opcode != 0x3f)) {
           gpu::gcn::WarnUnsupported("ds.cs.rdna", inst.opcode, w, w1);
           return false;
         }
