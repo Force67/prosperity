@@ -8,6 +8,7 @@
 #include "gpu/ps5/cmd_processor.h"
 #include "base/arch.h"
 
+#include <atomic>
 #include <chrono>
 #include <cstring>
 #include <mutex>
@@ -332,6 +333,12 @@ void HandleEventWrite(const u32* body, u32 count) {
       !gpu::IsReadableRange(address, kBytes))
     return;
   constexpr u64 kReady = 1ull << 63;
+  // The packet address selects the column of a one-pair-per-depth-block
+  // record: begin at the base, end at +8, 16 bytes per DB. The title computes
+  // end - begin, so a fixed pair of values reads as zero visible and it culls
+  // everything (fixed end values dropped the world map entirely; contiguous
+  // qwords hung the boot). The counter advances one sample per packet, so
+  // every end exceeds its begin.
   static u64 samples = 0;
   const u64 value = kReady | (samples & (kReady - 1));
   auto* results = reinterpret_cast<volatile u64*>(address);

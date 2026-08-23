@@ -588,9 +588,13 @@ void ResolvePsTextures(u64 ps_addr,
   d.tex_depth_compare = texs[0].depth_compare;
   d.tex_null_descriptor = texs[0].null_descriptor;
 
-  for (size_t i = 0; i < texs.size() && i < 16; i++)
+  // The renderer carries kMaxDrawTextures of them; truncating at 16 turned
+  // every binding past that into a default, and a vertex stage's samplers now
+  // sit after the PS's.
+  constexpr size_t kMax = rhi::DrawInfo::kMaxDrawTextures;
+  for (size_t i = 0; i < texs.size() && i < kMax; i++)
     FillDrawTex(static_cast<u32>(i), texs[i], d);
-  d.num_texs = static_cast<u32>(std::min<size_t>(texs.size(), 16));
+  d.num_texs = static_cast<u32>(std::min<size_t>(texs.size(), kMax));
   TraceDrawTextures(d);
 }
 
@@ -632,7 +636,8 @@ void AppendStageTextures(u64 code,
                          rhi::DrawInfo& d) {
   const auto texs = rdna::TrackTextures(reinterpret_cast<const u32*>(code),
                                         user_data, user_sgprs, ud_base);
-  for (size_t i = 0; i < texs.size() && d.num_texs < 16; i++)
+  for (size_t i = 0;
+       i < texs.size() && d.num_texs < rhi::DrawInfo::kMaxDrawTextures; i++)
     FillDrawTex(d.num_texs++, texs[i], d);
   TraceDrawTextures(d);
 }
