@@ -63,7 +63,7 @@ public:
   // Mark every knote matching (ident,filter) ready and wake waiters. ident<0
   // matches any ident. Called by the vblank pump / dce on flip.
   void trigger(i64 ident, i16 filter, i64 data);
-  void triggerGnm(i64 data);
+  void triggerGnm(i64 data, bool raw_data = false);
 
   // Register a knote directly (no kevent syscall). Used by the HLE VideoOut
   // flip/vblank-event APIs, which add the equeue entry on the game's behalf.
@@ -114,6 +114,12 @@ void triggerAllEqueues(i64 ident, i16 filter, i64 data);
 void noteFlip();
 // A GPU end-of-pipe interrupt reached the CP: wake the graphics-core events.
 void noteGpuEndOfPipe();
+
+// The AGC form: libSceAgcDriver's GetEqEventType reads the event's IDENT and
+// GetEqContextId reads its DATA, so the data has to be the context id the
+// RELEASE_MEM packet carried (or its fence value when it carried none). A
+// counter of our own there means the title never recognises its own submit.
+void noteGpuEndOfPipeCtx(u64 context_id);
 
 // End-of-pipe interrupts raised so far (see equeue::knote::eop_seen).
 u64 gpuEndOfPipeCount();

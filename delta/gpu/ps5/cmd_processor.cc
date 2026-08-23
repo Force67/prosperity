@@ -114,16 +114,30 @@ void WriteLabel(u64 address, u64 value, bool is_64bit) {
 // registered, and a consumer that never polls its label -- the video decoder
 // parks in sceKernelWaitEqueue -- makes no progress without it.
 extern "C" void prosperity_gpu_end_of_pipe();
+extern "C" void prosperity_gpu_end_of_pipe_ctx(u64 context_id);
 
 // The label write shared by EOP and RELEASE_MEM, which encode DATA_SEL the same
 // way: 1 = 32-bit immediate, 2 = 64-bit immediate, 3/4 = a clock counter.
-void WriteEventLabel(u64 address, u32 data_sel, u64 value, u32 int_sel = 0) {
+void WriteEventLabel(u64 address,
+                     u32 data_sel,
+                     u64 value,
+                     u32 int_sel = 0,
+                     u64 context_id = 0) {
   if (kLabelWatch && address >= kLabelWatch &&
       address < kLabelWatch + 0x4000000ull) {
     static int n = 0;
     if (n++ < 64 || n % 64 == 0)
       BASE_LOGI("agclabel", "{:#x} sel={} int={} value={:#x}", address,
                 data_sel, int_sel, value);
+  }
+  // A fence packet whose write we skip is a waiter that never wakes, so say so
+  // rather than passing over it: sel 0 asks for no write at all, but an address
+  // we refuse is our own gap.
+  if (data_sel && !IsLabelAddress(address)) {
+    static int n = 0;
+    if (n++ < 16)
+      BASE_LOGW("agc", "fence label {:#x} (sel {}) is not writable, skipped",
+                address, data_sel);
   }
   if (data_sel == 1)
     WriteLabel(address, value, false);
@@ -132,7 +146,7 @@ void WriteEventLabel(u64 address, u32 data_sel, u64 value, u32 int_sel = 0) {
   else if (data_sel >= 3)
     WriteLabel(address, GpuClockTimestamp(), true);
   if (int_sel)
-    prosperity_gpu_end_of_pipe();
+    prosperity_gpu_end_of_pipe_ctx(context_id ? context_id : value);
 }
 
 // --- packet handlers -------------------------------------------------------
@@ -225,8 +239,10 @@ void HandleReleaseMem(const u32* body, u32 count) {
       (static_cast<u64>(body[3] & 0xFFFF) << 32) | (body[2] & ~0x3u);
   const u64 value = static_cast<u64>(body[4]) |
                     (static_cast<u64>(count >= 6 ? body[5] : 0) << 32);
+  // DW6 is INT_CTXID: the id the title tags its submit with and matches the
+  // interrupt against.
   WriteEventLabel(address, (body[1] >> 29) & 0x7, value,
-                  (body[1] >> 24) & 0x7);
+                  (body[1] >> 24) & 0x7, count >= 7 ? body[6] : 0);
 }
 
 // body: eventCtrl, addrLo, addrHi+cmd, data

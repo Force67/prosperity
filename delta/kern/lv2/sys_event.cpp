@@ -29,6 +29,8 @@
 #include "wait_probe.h"
 #include "kern/ps4/dev/socket_dev.h"
 #include "sys_event.h"
+
+#include "kern/crash.h"
 #include <utl/options.h>
 
 namespace {
@@ -36,6 +38,7 @@ DELTA_OPTION(bool, kEventTrace, "DELTA_EVENT_TRACE", false);
 DELTA_OPTION(bool, kKeventTrace, "DELTA_KEVENT_TRACE", false);
 DELTA_OPTION(long, kEventStallSecs, "DELTA_EVENT_STALL", 0);
 DELTA_OPTION(long, kEopPumpMs, "DELTA_PS5_EOPPUMP", 0);
+DELTA_OPTION(bool, kIdent0Vblank, "DELTA_PS5_IDENT0_VBLANK", false);
 }  // namespace
 
 namespace krnl {
@@ -194,6 +197,19 @@ void noteGpuEndOfPipe() {
     eq->triggerGnm(data);
 }
 
+// The id of the most recent completion, for a knote that was not listening when
+// it happened: re-arming it with a counter would hand the title an id it can
+// never match.
+static std::atomic<u64> g_lastEopCtx{0};
+
+void noteGpuEndOfPipeCtx(u64 context_id) {
+  g_eopSeq.fetch_add(1, std::memory_order_relaxed);
+  g_lastEopCtx.store(context_id, std::memory_order_relaxed);
+  std::lock_guard<std::mutex> lk(g_eqRegM);
+  for (auto *eq : g_equeues)
+    eq->triggerGnm(static_cast<i64>(context_id), /*raw_data=*/true);
+}
+
 void noteFlip() {
   u64 idx = g_flipCount.fetch_add(1);  // index of the flip that just completed
   // Post the flip (-13) event immediately so a thread blocked waiting for this
@@ -313,7 +329,7 @@ int equeue::kevent(const kevent_t *changes, int nchanges, kevent_t *out,
           k.ev.ident >= kGnmIdentMax)
         continue;
       k.active = true;
-      k.ev.data = static_cast<i64>((gpuEndOfPipeCount() << 16) | k.ev.ident);
+      k.ev.data = static_cast<i64>(g_lastEopCtx.load(std::memory_order_relaxed));
     }
     (void)now;
   }
@@ -329,7 +345,7 @@ int equeue::kevent(const kevent_t *changes, int nchanges, kevent_t *out,
           k.ev.ident >= kGnmIdentMax || k.eop_seen >= eop)
         continue;
       k.active = true;
-      k.ev.data = static_cast<i64>((eop << 16) | k.ev.ident);
+      k.ev.data = static_cast<i64>(g_lastEopCtx.load(std::memory_order_relaxed));
     }
   }
 
@@ -390,6 +406,9 @@ int equeue::kevent(const kevent_t *changes, int nchanges, kevent_t *out,
         now - idleSince >= std::chrono::seconds(kEventStallSecs)) {
       reportedIdle = true;
       reportRegistrationsLocked(handle());
+      // On the waiting thread itself, so the walk is this call's own stack:
+      // which of the title's calls is parked here.
+      guestStackTrace("kevent-stall", 12);
     }
     return 0;
   }
@@ -450,14 +469,18 @@ bool equeue::removeEvent(u64 ident, i16 filter) {
 // one told its own event id. sceGnmGetEqEventType reads the delivered data
 // whole and sceGnmGetEqTimeStamp reads data >> 16, so the id has to survive in
 // the low bits or the title cannot tell which of its events arrived.
-void equeue::triggerGnm(i64 data) {
+void equeue::triggerGnm(i64 data, bool raw_data) {
   std::lock_guard<std::mutex> lk(m);
   bool any = false;
   for (auto &k : notes) {
     if (k.ev.filter != kEVFILT_VIDEOOUT || k.ev.ident >= kGnmIdentMax)
       continue;
     k.active = true;
-    k.ev.data = (data & ~static_cast<i64>(0xFFF)) | static_cast<i64>(k.ev.ident);
+    // AGC: the data IS the context id. Gnm (PS4): the id has to survive in the
+    // low bits, because sceGnmGetEqEventType reads the data there.
+    k.ev.data = raw_data ? data
+                         : ((data & ~static_cast<i64>(0xFFF)) |
+                            static_cast<i64>(k.ev.ident));
     any = true;
   }
   if (any)
@@ -474,8 +497,11 @@ void equeue::trigger(i64 ident, i16 filter, i64 data) {
     if (ident >= 0 && k.ev.ident != static_cast<u64>(ident))
       continue;
     // See triggerGnm: a Gnm graphics-core registration is not a vblank waiter
-    // and must not be told the GPU finished on a timer.
-    if (filter == kEVFILT_VIDEOOUT && k.ev.ident < kGnmIdentMax)
+    // and must not be told the GPU finished on a timer. DELTA_PS5_IDENT0_VBLANK
+    // asks whether ident 0 is one of those or a videoout FLIP registration
+    // (event id 0), which lands on the same ident.
+    if (filter == kEVFILT_VIDEOOUT && k.ev.ident < kGnmIdentMax &&
+        !(kIdent0Vblank && k.ev.ident == 0))
       continue;
     k.active = true;
     k.ev.data = data;
