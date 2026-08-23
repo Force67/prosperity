@@ -63,6 +63,12 @@ struct IndexState {
 };
 IndexState g_index;
 
+// IT_SET_BASE(base_index=1) publishes where the indirect argument buffers live;
+// an indirect draw or dispatch then names an offset into one. The header's
+// shader-type bit picks which of the two it set.
+u64 g_draw_indirect_base = 0;
+u64 g_dispatch_indirect_base = 0;
+
 // The colour target of the last draw actually issued; EndFrame presents it when
 // it is a registered display buffer.
 u64 g_last_draw_rt = 0;
@@ -302,6 +308,61 @@ void HandleEventWrite(const u32* body, u32 count) {
   TraceOcclusionQuery(address, value);
 }
 
+// IT_DISPATCH_INDIRECT: the workgroup counts live in memory rather than in the
+// packet. Our submits run synchronously, so whatever wrote them has already
+// run and the counts are readable now.
+void HandleDispatchIndirect(rhi::Renderer& renderer,
+                            const u32* body,
+                            u32 count) {
+  u64 args = 0;
+  if (count >= 3)  // pointer form: addrLo, addrHi, mode
+    args = body[0] | (static_cast<u64>(body[1]) << 32);
+  else if (count >= 1)  // offset form: an offset into the SET_BASE buffer
+    args = g_dispatch_indirect_base + body[0];
+  if (!args || !IsGuestAddress(args) || !gpu::IsReadableRange(args, 12))
+    return;
+  const u32* a = reinterpret_cast<const u32*>(args);
+  const u32 groups[3] = {a[0], a[1], a[2]};
+  if (!groups[0] || !groups[1] || !groups[2])
+    return;
+  DispatchCompute(renderer, g_regs, groups, 3);
+}
+
+// IT_DRAW_INDIRECT / IT_DRAW_INDEX_INDIRECT: same as the direct forms with the
+// counts read from the argument buffer. Rebuilding the direct packet keeps one
+// draw path rather than a second one that would drift from it.
+void HandleDrawIndirect(rhi::Renderer& renderer,
+                        u32 op,
+                        const u32* body,
+                        u32 count,
+                        void (*issue)(rhi::Renderer&, u32, const u32*, u32)) {
+  if (count < 1)
+    return;
+  const bool indexed = op == 0x25;
+  const u64 args = g_draw_indirect_base + body[0];
+  const u32 want = indexed ? 20u : 16u;
+  if (!g_draw_indirect_base || !IsGuestAddress(args) ||
+      !gpu::IsReadableRange(args, want))
+    return;
+  const u32* a = reinterpret_cast<const u32*>(args);
+  const u32 initiator = count >= 4 ? body[3] : 0;
+  const u32 saved_instances = g_index.num_instances;
+  if (a[1])
+    g_index.num_instances = a[1];
+  if (!indexed) {
+    const u32 auto_body[2] = {a[0], initiator};
+    issue(renderer, IT_DRAW_INDEX_AUTO, auto_body, 2);
+  } else {
+    const u32 stride = g_index.type == 1 ? 4u : g_index.type == 2 ? 1u : 2u;
+    const u64 base = g_index.base + static_cast<u64>(a[2]) * stride;
+    const u32 idx_body[5] = {g_index.max ? g_index.max : a[0],
+                             static_cast<u32>(base),
+                             static_cast<u32>(base >> 32), a[0], initiator};
+    issue(renderer, IT_DRAW_INDEX_2, idx_body, 5);
+  }
+  g_index.num_instances = saved_instances;
+}
+
 void HandleDrawPacket(rhi::Renderer& renderer,
                       u32 op,
                       const u32* body,
@@ -494,6 +555,35 @@ void Walk(rhi::Renderer& renderer,
       case IT_DISPATCH_DIRECT:
         DispatchCompute(renderer, g_regs, body, count);
         break;
+      case 0x16:  // DISPATCH_INDIRECT
+        HandleDispatchIndirect(renderer, body, count);
+        break;
+      case 0x24:  // DRAW_INDIRECT
+      case 0x25:  // DRAW_INDEX_INDIRECT
+        HandleDrawIndirect(renderer, op, body, count, HandleDrawPacket);
+        break;
+      case 0x11: {  // SET_BASE
+        if (count < 3 || (body[0] & 0xF) != 1)
+          break;
+        const u64 base = (body[1] & ~0x7ull) |
+                         (static_cast<u64>(body[2] & 0xFFFF) << 32);
+        if ((hdr >> 1) & 0x3)
+          g_dispatch_indirect_base = base;
+        else
+          g_draw_indirect_base = base;
+        break;
+      }
+      case IT_COND_EXEC: {  // skip the following dwords when the flag is zero
+        if (count < 4)
+          break;
+        const u64 flag = (static_cast<u64>(body[1] & 0xFFFF) << 32) |
+                         (body[0] & 0xFFFFFFFCu);
+        const u32 skip = body[3] & 0x3FFF;
+        if (IsGuestAddress(flag) && gpu::IsReadableRange(flag, 4) &&
+            *reinterpret_cast<const volatile u32*>(flag) == 0)
+          i += skip;  // the guarded block did not run on the real CP either
+        break;
+      }
       case IT_WRITE_DATA:
         HandleWriteData(body, count);
         break;
