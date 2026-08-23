@@ -1454,7 +1454,35 @@ void EmitExport(Translator& t, const Inst& inst, StageContext& sc) {
       if (kGpuForcecolor)
         col = t.m.CompositeConstruct(
             t.t_v4, {t.F32(1.f), t.F32(0.f), t.F32(0.f), t.F32(1.f)});
-      t.m.Store(gpu::gcn::PsColorOut(t, sc, target), col);
+      // A pixel export may name any MRT any number of times, and the ISA
+      // accumulates the write masks per target. Storing the whole vec4 let a
+      // later export clobber the channels an earlier one wrote with the
+      // defaults above -- RGB 0 and alpha 1 -- so a shader that exports its
+      // colour and its alpha in two instructions came out opaque black. The
+      // GCN emitter already writes only the components its EN enables; do the
+      // same here. The diagnostics that replace the whole colour still write
+      // every channel, or they would show nothing.
+      const Id out_var = gpu::gcn::PsColorOut(t, sc, target);
+      const auto live = [&](u32 i) {
+        return compr ? (en & (i < 2 ? 0x1u : 0x4u)) != 0
+                     : (en & (1u << i)) != 0;
+      };
+      bool all_channels = kGpuForcecolor || kGpuDebugalpha;
+      if (!all_channels) {
+        all_channels = true;
+        for (u32 i = 0; i < 4; i++)
+          all_channels &= live(i);
+      }
+      if (all_channels) {
+        t.m.Store(out_var, col);
+      } else {
+        const Id comp_ptr_ty =
+            t.m.TypePointer(spv::StorageClass::Output, t.t_f);
+        for (u32 i = 0; i < 4; i++)
+          if (live(i))
+            t.m.Store(t.m.AccessChain(comp_ptr_ty, out_var, {t.U32(i)}),
+                      t.m.CompositeExtract(t.t_f, col, i));
+      }
       if (sc.color_written_var)
         t.m.Store(sc.color_written_var, t.U32(1));
       return;
@@ -1814,6 +1842,7 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
                  !(inst.opcode >= 0x04 && inst.opcode <= 0x09) &&
                  inst.opcode != 0x0C && inst.opcode != 0x0E &&
                  inst.opcode != 0x0F && inst.opcode != 0x10 &&
+                 !(inst.opcode >= 0x17 && inst.opcode <= 0x1A) &&
                  inst.opcode != 0x1E &&
                  inst.opcode != 0x1F && inst.opcode != 0x20 &&
                  inst.opcode != 0x21 && inst.opcode != 0x23) {
@@ -1821,7 +1850,10 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       }
       // Branches are emitted by the CFG; waits/hints are synchronous. 0x10 is
       // s_sendmsg, whose only use in an NGG stage is GS_ALLOC_REQ (reserving
-      // vertex/primitive slots in the hardware's own export space).
+      // vertex/primitive slots in the hardware's own export space). 0x17-0x1a
+      // are the s_cbranch_cdbg* debug branches, and BranchKind already reports
+      // them as no branch at all: with no debugger attached the condition is
+      // false, so falling through is what the hardware does.
       break;
     case Enc::kSmrd:
       RdnaEmitSmem(t, inst, sc);
