@@ -2498,10 +2498,24 @@ int BranchKind(const Inst& inst) {
   }
 }
 
+// s_call_b64 writes the return address into an SGPR pair and jumps; the
+// matching s_setpc_b64 jumps back through it. The block-index state machine
+// EmitCfg builds can carry that exactly: the call stores its fall-through
+// BLOCK id where the hardware would store the return address, and the return
+// loads the state from the same pair. That models several call sites and
+// nesting, and only breaks on code that does arithmetic on a return address,
+// which no compiler emits.
+bool IsCall(const Inst& inst) {
+  return inst.enc == Enc::kSopk && inst.opcode == 0x16;
+}
+bool IsReturn(const Inst& inst) {
+  return inst.enc == Enc::kSop1 && inst.opcode == 0x20;
+}
+
 bool HasControlFlow(const Program& program) {
   return std::any_of(program.begin(), program.end(), [](const Inst& inst) {
     const int k = BranchKind(inst);
-    return k >= 1 && k <= 7;
+    return (k >= 1 && k <= 7) || IsCall(inst) || IsReturn(inst);
   });
 }
 
@@ -2528,10 +2542,10 @@ std::vector<u32> BlockStarts(const Program& program, u32 max_pc) {
   std::vector<u32> leaders{0};
   for (const Inst& inst : program) {
     const int k = BranchKind(inst);
-    if (k == 0)
+    if (k == 0 && !IsCall(inst) && !IsReturn(inst))
       continue;
     leaders.push_back(inst.pc + inst.size);
-    if (k >= 1 && k <= 7) {
+    if (IsCall(inst) || (k >= 1 && k <= 7)) {
       const i32 simm = static_cast<i16>(inst.raw[0] & 0xFFFF);
       leaders.push_back(static_cast<u32>(static_cast<i32>(inst.pc) +
                                               static_cast<i32>(inst.size) +
@@ -3293,12 +3307,22 @@ void EmitCfg(Translator& t, const Program& program, StageContext& sc) {
       if (inst.pc < blk_start || inst.pc >= blk_end)
         continue;
       const int k = BranchKind(inst);
-      if (k == 0) {
+      if (k == 0 && !IsCall(inst) && !IsReturn(inst)) {
         RdnaEmitInst(t, inst, sc);
         continue;
       }
       const u32 fall = (bi + 1 < num_blocks) ? bi + 1 : kExit;
-      if (k == 8) {
+      if (IsCall(inst)) {
+        const u32 sdst = (inst.raw[0] >> 16) & 0x7F;
+        const i32 simm = static_cast<i16>(inst.raw[0] & 0xFFFF);
+        t.SetSg(sdst, t.U32(fall));
+        t.SetSg(sdst + 1, t.U32(0));
+        t.SetState(block_of(static_cast<u32>(static_cast<i32>(inst.pc) +
+                                             static_cast<i32>(inst.size) +
+                                             simm)));
+      } else if (IsReturn(inst)) {
+        t.SetStateId(t.Sg(inst.raw[0] & 0xFF));
+      } else if (k == 8) {
         t.SetState(kExit);
       } else if (k == 1) {
         const i32 simm = static_cast<i16>(inst.raw[0] & 0xFFFF);

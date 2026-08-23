@@ -222,14 +222,30 @@ std::vector<u8> ComputeRdnaReachability(const Program& program) {
     return reachable;
 
   // 0=ordinary, 1=unconditional relative, 2=conditional/call relative,
+  // An s_setpc_b64 that returns from an s_call_b64 goes back to the call's
+  // fall-through, which kind 2 has already marked -- so in a program that
+  // calls, the return is a terminator and not a jump to anywhere. Reading it as
+  // indirect control flow instead floods every block reachable, including the
+  // debug-name string a shader binary carries between its code and its footer:
+  // the translator then decodes ASCII as instructions and declines the whole
+  // shader. Astro Bot's scene pair (vs 0x500704f00) is exactly that, and it
+  // costs 45% of the title's draws.
+  bool has_call = false;
+  for (const Inst& inst : program)
+    if (inst.enc == Enc::kSopk && inst.opcode == 0x16) {
+      has_call = true;
+      break;
+    }
   // 3=program end, 4=indirect control flow.
-  const auto branch_kind = [](const Inst& inst) {
+  const auto branch_kind = [has_call](const Inst& inst) {
     if (inst.enc == Enc::kSopk) {
       if (inst.opcode == 0x16 || inst.opcode == 0x1b || inst.opcode == 0x1c)
         return 2;  // s_call_b64 / subvector loops
       return 0;
     }
     if (inst.enc == Enc::kSop1) {
+      if (inst.opcode == 0x20 && has_call)
+        return 3;  // s_setpc_b64: the return of the call above
       if (inst.opcode >= 0x20 && inst.opcode <= 0x22)
         return 4;  // setpc/swappc/rfe
       return 0;
