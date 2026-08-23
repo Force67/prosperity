@@ -187,7 +187,19 @@ int PS4ABI sys_virtual_query(const void *addr, int /*flags*/, void *info,
       std::memcpy(vq + 0x08, &host.end, sizeof(u64));
       std::memcpy(vq + 0x10, &host.start, sizeof(u64));
       if (infoSize >= 0x1C + sizeof(int)) {
-        const int prot = static_cast<int>(host.prot);
+        // Host PROT_READ/WRITE happen to be SCE's CPU read/write bits, but a
+        // host mapping carries no GPU ones -- and a library validating a
+        // buffer it will hand to hardware demands them. libSceVdecCore's check
+        // (its +0x17c50) rejects any range without prot & 0x30 and fails the
+        // whole decoder instance with error 5, which is what kept Astro Bot's
+        // intro video from ever decoding. Guest memory is identity-mapped for
+        // our GPU, so anything the guest can write here the GPU can reach:
+        // report the GPU bits alongside the CPU ones.
+        int prot = static_cast<int>(host.prot);
+        if (prot & 0x1)
+          prot |= 0x10;  // GPU read
+        if (prot & 0x2)
+          prot |= 0x20;  // GPU write
         const int memType = 0;  // WB_ONION, like any other CPU mapping
         std::memcpy(vq + 0x18, &prot, sizeof(int));
         std::memcpy(vq + 0x1C, &memType, sizeof(int));
@@ -205,6 +217,40 @@ int PS4ABI sys_virtual_query(const void *addr, int /*flags*/, void *info,
     if (kVqTrace)
       BASE_LOGI("vq", "addr={:p} NOT MAPPED", addr);
     return -SysError::eACCES;
+  }
+
+  // A region that carries NO protection at all is a reservation, and a title
+  // that commits sub-ranges inside one leaves us reporting the outer entry:
+  // Astro Bot's decoder buffer sits inside a 1.9 GiB reservation, so the query
+  // answered prot=0 and libSceVdecCore rejected the buffer (its +0x17c50 wants
+  // prot & 0x2 and prot & 0x30). If the host really has accessible pages
+  // there, that mapping is the truth -- an untouched PROT_NONE reservation has
+  // no host protection either, so it still reads as uncommitted.
+  if (!region->sceProt && !static_cast<u32>(region->prot)) {
+    if (const HostMapping host = hostMappingOf(addr); host.prot) {
+      auto *vq = static_cast<u8 *>(info);
+      std::memcpy(vq + 0x00, &host.start, sizeof(u64));
+      std::memcpy(vq + 0x08, &host.end, sizeof(u64));
+      std::memcpy(vq + 0x10, &host.start, sizeof(u64));
+      if (infoSize >= 0x1C + sizeof(int)) {
+        int prot = static_cast<int>(host.prot);
+        if (prot & 0x1)
+          prot |= 0x10;  // GPU read: guest memory is identity-mapped for us
+        if (prot & 0x2)
+          prot |= 0x20;  // GPU write
+        const int memType = 0;  // WB_ONION
+        std::memcpy(vq + 0x18, &prot, sizeof(int));
+        std::memcpy(vq + 0x1C, &memType, sizeof(int));
+      }
+      if (infoSize >= 0x21)
+        vq[0x20] = 0x01 | 0x10;  // flexible + committed
+      if (kVqTrace)
+        BASE_LOGI("vq", "addr={:p} committed inside a reservation: "
+                        "[{:#x}..{:#x}) prot={:#x}",
+                  addr, (unsigned long long)host.start,
+                  (unsigned long long)host.end, host.prot);
+      return 0;
+    }
   }
 
   auto *vq = static_cast<u8 *>(info);
