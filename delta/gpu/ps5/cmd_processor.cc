@@ -31,10 +31,14 @@
 
 namespace {
 DELTA_OPTION(bool, kNoCopy, "DELTA_GPU_NODMACOPY", false);
-// Report every fence label written into the 1 MiB after this address. A
+// Report every fence label written into the window after this address. A
 // consumer stuck one count short of its target is the readable half of a
 // missing submit, and the label is the only place that count exists.
 DELTA_OPTION(u64, kLabelWatch, "DELTA_AGC_LABELWATCH", 0);
+// How wide that window is. Narrow it to one object and the throttle below
+// stops aliasing: proving a slot is NEVER written needs every write in the
+// window, not a sample of them.
+DELTA_OPTION(u64, kLabelWatchSize, "DELTA_AGC_LABELWATCH_SIZE", 0x4000000);
 }  // namespace
 
 // Whether a target address is a buffer the title registered for display; see
@@ -124,11 +128,13 @@ void WriteEventLabel(u64 address,
                      u32 int_sel = 0,
                      u64 context_id = 0) {
   if (kLabelWatch && address >= kLabelWatch &&
-      address < kLabelWatch + 0x4000000ull) {
+      address < kLabelWatch + kLabelWatchSize) {
     static int n = 0;
-    if (n++ < 64 || n % 64 == 0)
-      BASE_LOGI("agclabel", "{:#x} sel={} int={} value={:#x}", address,
-                data_sel, int_sel, value);
+    // A window narrow enough to be one object is reported in full: sampling it
+    // cannot show which write was the last one.
+    if (kLabelWatchSize <= 0x10000 || n++ < 4096 || n % 256 == 0)
+      BASE_LOGI("agclabel", "{:#x} sel={} int={} value={:#x} ctx={:#x}", address,
+                data_sel, int_sel, value, context_id);
   }
   // A fence packet whose write we skip is a waiter that never wakes, so say so
   // rather than passing over it: sel 0 asks for no write at all, but an address
@@ -139,12 +145,22 @@ void WriteEventLabel(u64 address,
       BASE_LOGW("agc", "fence label {:#x} (sel {}) is not writable, skipped",
                 address, data_sel);
   }
+  // 5 stores GDS data, not the packet's own: the immediate words are a GDS
+  // offset and size. A timestamp there puts a huge number where a fence value
+  // belongs and the waiter's `label == expected` never comes true, and the
+  // immediate is not the value either, so write nothing and say so.
   if (data_sel == 1)
     WriteLabel(address, value, false);
   else if (data_sel == 2)
     WriteLabel(address, value, true);
-  else if (data_sel >= 3)
+  else if (data_sel == 3 || data_sel == 4)
     WriteLabel(address, GpuClockTimestamp(), true);
+  else if (data_sel == 5) {
+    static int n = 0;
+    if (n++ < 8)
+      BASE_LOGW("agc", "fence label {:#x} asks for GDS data, unimplemented",
+                address);
+  }
   if (int_sel)
     prosperity_gpu_end_of_pipe_ctx(context_id ? context_id : value);
 }
@@ -227,6 +243,7 @@ void HandleEventWriteEop(const u32* body, u32 count) {
       (static_cast<u64>(body[2] & 0xFFFF) << 32) | (body[1] & ~0x3u);
   const u64 value = static_cast<u64>(body[3]) |
                     (static_cast<u64>(count >= 5 ? body[4] : 0) << 32);
+  // INT_SEL is two bits here; RELEASE_MEM widens it to three, EOP does not.
   WriteEventLabel(address, (body[2] >> 29) & 0x7, value,
                   (body[2] >> 24) & 0x3);
 }
@@ -428,9 +445,18 @@ void Walk(rhi::Renderer& renderer,
   if (!p || depth > kMaxIbDepth)
     return;
   u32 i = 0;
+  // The last few packet starts, so a desync can name the packet whose size was
+  // wrong instead of the data it eventually ran into. A type-0 header consumes
+  // its run silently, so a walk that is already off can travel a long way
+  // before anything complains.
+  u32 trail_pos[32] = {}, trail_hdr[32] = {};
+  u32 trail_n = 0;
   while (i < words) {
     const u32 hdr = p[i];
     const Pm4Type type = Pm4TypeOf(hdr);
+    trail_pos[trail_n & 31] = i;
+    trail_hdr[trail_n & 31] = hdr;
+    trail_n++;
     if (type == Pm4Type::kType2 || hdr == 0) {
       i += 1;  // filler / alignment
       continue;
@@ -439,30 +465,68 @@ void Walk(rhi::Renderer& renderer,
       // Type-0 writes a run of consecutive registers directly. The walker used
       // to SKIP these -- but the AGC driver programs shader PGM_LO/HI (and
       // other SH state) via type-0, which is why no SET_SH_REG carried them.
+      // A type-0 header is only two zero bits, so any data dword looks like
+      // one: a walk that has already lost alignment travels thousands of
+      // dwords through "type-0 runs" without a word of complaint, which is how
+      // a desync stays invisible until it lands on data that happens to be
+      // type-1. Bound it to the register file it claims to write.
       const u32 count = Pm4Count(hdr);
-      if (i + 1 + count <= words)
-        SetRegRun(g_regs, Pm4Type0Reg(hdr), &p[i + 1], count);
+      const u32 first = Pm4Type0Reg(hdr);
+      if (first + count > kRegFileSize || i + 1 + count > words) {
+        i += 1;
+        continue;
+      }
+      SetRegRun(g_regs, first, &p[i + 1], count);
       i += 1 + count;
       continue;
     }
     if (type != Pm4Type::kType3) {
-      // A type-1 header is a genuine desync. Everything after it is abandoned,
-      // including any fence the submission still had to write, so a waiter on
-      // that fence hangs: report the truncation instead of hiding it.
+      // A type-1 header is a desync, and abandoning the buffer costs the fence
+      // the submission still had to write, which parks whatever waits on it
+      // forever. Skip the dword and resync on the next header, exactly as a
+      // type-3 packet whose count overruns the buffer already does.
       static int n = 0;
-      if (n++ < 16)
-        BASE_LOGW("agc", "type-{} header {:#x} at dword {}/{}, rest dropped",
-                    static_cast<u32>(type), hdr, i, words);
-      break;
+      if (n++ < 4) {
+        // The dwords either side of the desync, so the packet that mis-sized
+        // itself can be identified rather than guessed at.
+        base::String line;
+        base::FormatTo(line, "type-{} header {:#x} at dword {}/{} of {:p}, "
+                             "resyncing; packets in:",
+                       static_cast<u32>(type), hdr, i, words, (const void*)p);
+        const u32 seen = trail_n < 32 ? trail_n : 32;
+        for (u32 k = 0; k < seen; k++) {
+          const u32 s = (trail_n - seen + k) & 31;
+          base::FormatTo(line, " [{}]{:08x}", trail_pos[s], trail_hdr[s]);
+        }
+        // Plus the stream just before the oldest of those, which is where the
+        // walk was still aligned.
+        const u32 oldest = trail_pos[(trail_n - seen) & 31];
+        const u32 from = oldest > 24 ? oldest - 24 : 0;
+        base::FormatTo(line, " | dwords from {}:", from);
+        for (u32 k = from; k < words && k < oldest + 4; k++)
+          base::FormatTo(line, " {:08x}", p[k]);
+        BASE_LOGW("agc", "{}", line.c_str());
+      }
+      i += 1;
+      continue;
     }
 
     const u32 op = Pm4Opcode(hdr);
     const u32 count = Pm4Count(hdr);  // body dword count
     const u32* body = &p[i + 1];
-    // Desync recovery: a data dword misread as a huge-count packet (e.g. a
-    // RELEASE_MEM trailer 0xffff1000 parsed as NOP count=16384) would abandon
-    // the rest of the buffer -- and with it the shader bind that follows.
-    // Instead of bailing, skip one dword and resync on the next header.
+    // 0xffff1000: IT_NOP with the count field saturated is the canonical
+    // one-dword pad, and a command buffer is padded with it. Reading it as a
+    // 16385-dword packet skipped 64 KiB of real commands -- for Astro Bot's
+    // world map that was the whole tail of the buffer, RELEASE_MEM included,
+    // so its DrawThread waited on a fence nothing was left to write.
+    if (op == IT_NOP && ((hdr >> 16) & 0x3FFF) == 0x3FFF) {
+      i += 1;
+      continue;
+    }
+    // Desync recovery: a data dword misread as a huge-count packet would
+    // abandon the rest of the buffer -- and with it the shader bind that
+    // follows. Instead of bailing, skip one dword and resync on the next
+    // header.
     if (i + 1 + count > words) {
       TraceResync(i, words, hdr, op, count);
       i += 1;

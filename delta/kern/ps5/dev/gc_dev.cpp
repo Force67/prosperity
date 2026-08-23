@@ -192,7 +192,7 @@ static void drainQueue(AcqQueue &q, u64 doorbell) {
   // for more than 8 dwords). Astro Bot's DrawThread parks in exactly that spin
   // -- holding its frame mutex, so the main thread blocks behind it and the
   // title never submits again.
-  const u64 rptr = q.dcb + q.ringBytes;
+  const u64 rptr = q.ccb ? q.ccb : q.dcb + q.ringBytes;
   if (guestReadable(rptr, sizeof(u32)))
     *reinterpret_cast<volatile u32 *>(rptr) = q.readDw;
 }
@@ -232,8 +232,11 @@ static void doorbellPoller() {
           *reinterpret_cast<volatile const u64 *>(q.doorbell);
       if (now == q.lastDoorbell)
         continue;
+      // QSTAT wants every ring, uncapped: correlating them with the fence
+      // labels is what tells a submit the title never made from one it made
+      // and we lost.
       static int rung = 0;
-      if (kAgcTrace && rung < 32) {
+      if (kAgcQstat || (kAgcTrace && rung < 32)) {
         rung++;
         BASE_LOGI("agc", "doorbell q{} {:#x} -> {:#x} (ring {:#x} +{:#x})", qid,
                   (unsigned long)q.lastDoorbell, (unsigned long)now,
@@ -297,8 +300,12 @@ static void submitGnmDescArray(u64 descPtr, u32 count) {
     u64 addr = (static_cast<u64>(e[2] & 0xFF) << 32) | e[1];
     u32 bytes = (e[3] & 0xFFFFF) * 4;
     if (bytes && (hdr == 0xC0023F00u || hdr == 0xC0023300u) &&
-        gpuReadable(addr, bytes))
+        gpuReadable(addr, bytes)) {
+      if (kAgcQstat)
+        BASE_LOGI("agcq", "ioctl submit {:#x}+{:#x}", (unsigned long)addr,
+                  bytes);
       prosperity_agc_submit(addr, bytes);
+    }
   }
 }
 
@@ -402,9 +409,15 @@ i32 gcDevicePs5::ioctl(u32 cmd, void *data) {
       std::memcpy(&doorbellBase, a + 0x20, 8);
       std::memcpy(&qid, a + 0x0c, 4);
       std::memcpy(&ringLog2Dw, a + 0x28, 4);
-      if (gpuAddr(doorbellBase))
+      // Mapped is the test here too: a doorbell page the title put outside the
+      // aperture guess would never register, and a queue that never registers
+      // is a queue whose submits never run.
+      if (guestReadable(doorbellBase, sizeof(u64)))
         registerAcqQueue(qid, base, base2, doorbellBase, ringLog2Dw);
-      u32 size = 0x8000;
+      // The ring is exactly what the create names. A fixed 0x8000 walked twice
+      // past the end of a 0x4000-byte ring, over the read-pointer dword and
+      // into whatever followed.
+      u32 size = ringLog2Dw <= 24 ? (4u << ringLog2Dw) : 0x8000u;
       if (gpuAddr(base)) {
         if (!g_acqRingLo || base < g_acqRingLo) g_acqRingLo = base;
         if (base + size > g_acqRingHi) g_acqRingHi = base + size;
@@ -538,6 +551,8 @@ i32 gcDevicePs5::ioctl(u32 cmd, void *data) {
                       // command buffer: leading filler then IT_INDIRECT_BUFFER
                       // packets pointing at the real per-frame PM4. Forward it to the
                       // command processor, which follows the IBs and renders.
+    if (kAgcQstat)
+      BASE_LOGI("agcq", "submit 8131");
     if (data) {
       // Present the previous frame's accumulated draws at the start of each new
       // frame's state submit -- but ONLY while the title has never signalled a
@@ -608,6 +623,8 @@ i32 gcDevicePs5::ioctl(u32 cmd, void *data) {
       auto *w = static_cast<u32 *>(data);
       u32 count = w[1];
       u64 ptr = (static_cast<u64>(w[3]) << 32) | w[2];
+      if (kAgcQstat)
+        BASE_LOGI("agcq", "submit 8132 count={}", count);
       static int s_d132 = 0;
       if (kAgcTrace && s_d132 < 8) {
         s_d132++;
@@ -693,6 +710,8 @@ i32 gcDevicePs5::ioctl(u32 cmd, void *data) {
                     // firmware presets a status word the driver expects cleared,
                     // and only the IN form was handled, so every frame this
                     // title ends went unpresented.
+    if (kAgcQstat)
+      BASE_LOGI("agcq", "frame end 8133");
     g_sawEndOfFrame.store(true, std::memory_order_relaxed);
     u64 scanout = prosperity_ps5_scanout_base();
     traceFlip("0x8133", scanout);
