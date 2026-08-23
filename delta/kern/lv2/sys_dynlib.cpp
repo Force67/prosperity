@@ -10,6 +10,7 @@
 #include <base.h>
 #include "base/arch.h"
 #include <base/logging.h>
+#include "kern/crash.h"
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
@@ -284,6 +285,10 @@ int PS4ABI sys_dynlib_load_prx(const char *path, u64 flags, int *pHandle,
 
   BASE_LOGI("load_prx", "path='{}' -> '{}' flags={:#x}", path, name.c_str(),
             (unsigned long long)flags);
+  // DELTA_LOADPRX_STACK: who asked. A sysmodule the guest load-starts and one
+  // it never asks for want different answers, and only the caller says which.
+  if (std::getenv("DELTA_LOADPRX_STACK"))
+    guestStackTrace("load_prx", 10);
 
   // Modules whose LLE module_start needs a backend we don't emulate yet fall into
   // two groups by how the guest reacts to a failed load-start.

@@ -324,6 +324,9 @@ int PS4ABI sys_write(u32 fd, const void *buf, size_t nbytes) {
         one.pop_back();
       if (!one.empty())
         BASE_LOGI("guest", "{}", one.c_str());
+        if (const char *m = std::getenv("DELTA_GUEST_LOG_STACK");
+            m && one.find(m) != base::String::npos)
+          guestStackTrace("guestlog", 12);
     }
     return static_cast<int>(nbytes);
   }

@@ -10,6 +10,8 @@
 #include <base.h>
 #include "base/arch.h"
 #include <base/logging.h>
+#include <cstdlib>
+#include "kern/crash.h"
 #include <base/strings/format.h>
 #include <cstdio>
 #include <cstring>
@@ -300,6 +302,9 @@ i64 PS4ABI sys_writev(u32 fd, const void *iov, int iovcnt) {
       out.pop_back();
     if (!out.empty())
       BASE_LOGI("guest", "{}", out.c_str());
+      if (const char *m = std::getenv("DELTA_GUEST_LOG_STACK");
+          m && out.find(m) != base::String::npos)
+        guestStackTrace("guestlog", 12);
     return total;
   }
 

@@ -1,4 +1,7 @@
 #pragma once
+
+#include <cstddef>
+#include <cstdint>
 #include "base/arch.h"
 
 /*
