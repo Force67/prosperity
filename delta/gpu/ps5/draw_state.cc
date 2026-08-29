@@ -38,6 +38,7 @@ DELTA_OPTION(bool, kGsIsVs, "DELTA_PS5_GSVS", false);
 // memory. A shader whose constants all read zero is indistinguishable
 // in the output from one that computed zero.
 DELTA_OPTION(bool, kCbResolve, "DELTA_GPU_CBRESOLVE", false);
+DELTA_OPTION(bool, kDimTrace, "DELTA_GPU_TEXDIM", false);
 }  // namespace
 
 namespace gpu::ps5 {
@@ -480,6 +481,7 @@ void BindVertexAttributes(const gcn::Recompiled& rc,
 void ResolveCbufferBindings(const std::vector<gcn::ShaderCbuf>& cbufs,
                             const ResolvedBuffers& resolved,
                             bool vertex_stage,
+                            u64 stage_addr,
                             rhi::DrawInfo& d) {
   u32 planned = 0, replayed = 0, mapped = 0;
   for (const gcn::ShaderCbuf& cb : cbufs) {
@@ -510,11 +512,10 @@ void ResolveCbufferBindings(const std::vector<gcn::ShaderCbuf>& cbufs,
   }
   if (kCbResolve && planned) {
     static std::unordered_set<u64> seen;
-    const u64 key = (vertex_stage ? d.vs_addr : d.ps_addr) * 2 + vertex_stage;
+    const u64 key = stage_addr * 2 + vertex_stage;
     if (seen.size() < 512 && seen.insert(key).second)
       BASE_LOGI("cbresolve", "{} {:#x} planned={} replayed={} mapped={}",
-                vertex_stage ? "vs" : "ps",
-                (unsigned long)(vertex_stage ? d.vs_addr : d.ps_addr), planned,
+                vertex_stage ? "vs" : "ps", (unsigned long)stage_addr, planned,
                 replayed, mapped);
   }
 }
@@ -667,6 +668,45 @@ void FillDrawTex(u32 slot, const gcn::TImage& s, rhi::DrawInfo& d) {
   dt.swizzle = PackDstSel(s);
 }
 
+// The SPIR-V declares each sampled image's dimensionality at compile time, so
+// the descriptor bound to it has to agree or the set is invalid and the sample
+// returns nothing. When the module says a binding is a volume and the T# came
+// back a 2D array (Astro Bot's 240x135x64 froxel volume does exactly this),
+// the module wins: its declaration is the one the pipeline was built against,
+// and a 2D array and a 3D image of the same shape occupy the same memory.
+void ReconcileTextureDims(const std::vector<gcn::ShaderTex>& plan,
+                          u32 first_slot,
+                          rhi::DrawInfo& d) {
+  for (const gcn::ShaderTex& st : plan) {
+    const u32 slot = first_slot + st.binding;
+    if (slot >= d.num_texs)
+      continue;
+    rhi::DrawInfo::DrawTex& dt = d.texs[slot];
+    if (dt.is_3d == st.is_3d)
+      continue;
+    if (kDimTrace)
+      BASE_LOGI("texdim", "binding {} module {} descriptor {} {}x{} layers={}",
+                slot, st.is_3d ? "3D" : "2D", dt.is_3d ? "3D" : "2D", dt.w,
+                dt.h, dt.layers);
+    dt.is_3d = st.is_3d;
+    if (st.is_3d) {
+      dt.arrayed = false;
+      dt.base_array = 0;
+      dt.view_layers = 1;
+    } else {
+      dt.layers = 1;
+      dt.view_layers = 1;
+    }
+    if (slot == 0) {
+      d.tex_is_3d = dt.is_3d;
+      d.tex_arrayed = dt.arrayed;
+      d.tex_layers = dt.layers;
+      d.tex_base_array = dt.base_array;
+      d.tex_view_layers = dt.view_layers;
+    }
+  }
+}
+
 // Append a stage's samplers after whatever is already resolved: the renderer
 // reads the PS's bindings first and the VS's after them.
 void AppendStageTextures(u64 code,
@@ -773,23 +813,28 @@ void ResolveRecompiledShaders(const Regs& regs,
     d.num_vattrs = 0;
     return;
   }
-  ResolveCbufferBindings(rc.vs_cbufs, vs_resources, true, d);
+  ResolveCbufferBindings(rc.vs_cbufs, vs_resources, true, binding.vs_addr, d);
   ResolveRawBuffers(rc.vs_bufs, vs_resources, binding.vs_user_data,
                     vs_user_sgprs, d, true);
   if (binding.ps_addr) {
-    ResolveCbufferBindings(rc.ps_cbufs, ps_resources, false, d);
+    ResolveCbufferBindings(rc.ps_cbufs, ps_resources, false, binding.ps_addr,
+                           d);
     ResolveRawBuffers(rc.ps_bufs, ps_resources, binding.ps_user_data,
                       ps_user_sgprs, d, false);
     if (!rc.ps_texs.empty())
       ResolvePsTextures(binding.ps_addr, binding.ps_user_data, ps_user_sgprs,
                         d);
+    ReconcileTextureDims(rc.ps_texs, 0, d);
   }
+  const u32 vs_tex_slot = static_cast<u32>(rc.ps_texs.size());
   // The VS's samplers follow the PS's in the descriptor array, which is the
   // order the renderer reads them back in. Its user data starts at s8: the
   // merged NGG stage is launched there.
-  if (!rc.vs_texs.empty())
+  if (!rc.vs_texs.empty()) {
     AppendStageTextures(binding.vs_addr, binding.vs_user_data, vs_user_sgprs, 8,
                         d);
+    ReconcileTextureDims(rc.vs_texs, vs_tex_slot, d);
+  }
   d.vs_addr = binding.vs_addr;
   d.ps_addr = binding.ps_addr;
   d.recomp = &rc;
