@@ -482,6 +482,63 @@ Id PsBaryCoord(Translator& t, StageContext& sc) {
   return v;
 }
 
+// gl_BaryCoordNoPerspKHR, for the LINEAR_* input groups.
+Id PsBaryCoordNoPersp(Translator& t, StageContext& sc) {
+  if (sc.bary_nopersp_var)
+    return sc.bary_nopersp_var;
+  t.m.Capability(spv::Capability::FragmentBarycentricKHR);
+  t.m.Extension("SPV_KHR_fragment_shader_barycentric");
+  const Id v = t.m.Variable(t.m.TypePointer(spv::StorageClass::Input, t.t_v3),
+                            spv::StorageClass::Input);
+  t.m.Decorate(v, spv::Decoration::BuiltIn,
+               {static_cast<u32>(spv::BuiltIn::BaryCoordNoPerspKHR)});
+  t.m.Name(v, "bary_np");
+  sc.iface->push_back(v);
+  sc.bary_nopersp_var = v;
+  return v;
+}
+
+// SPI_PS_INPUT_ENA's low seven groups put the barycentric weights in the first
+// VGPRs, and a gfx10 compiler interpolates by hand against them --
+// `v_fma_f32 attr, delta, J, base` -- rather than through v_interp. Leaving
+// them zero collapses every such attribute onto its base term, which is what
+// made Astro Bot's whole scene compute black. Hardware's I and J are the
+// weights of vertices 1 and 2 (attr = P0 + I*(P1-P0) + J*(P2-P0)), i.e.
+// components y and z of the barycentric built-in.
+void SeedPsBarycentrics(Translator& t, u32 ena, StageContext& sc) {
+  if (!sc.is_ps || !(ena & 0x7Fu))
+    return;
+  static constexpr u8 width[16] = {2, 2, 2, 3, 2, 2, 2, 1,
+                                   1, 1, 1, 1, 1, 1, 1, 1};
+  u32 vg[16] = {}, next = 0;
+  for (u32 bit = 0; bit < 16; bit++)
+    if (ena & (1u << bit)) {
+      vg[bit] = next;
+      next += width[bit];
+    }
+  const Id p_in_f = t.m.TypePointer(spv::StorageClass::Input, t.t_f);
+  const auto seed = [&](u32 bit, Id bary) {
+    if (!(ena & (1u << bit)))
+      return;
+    for (u32 c = 0; c < 2; c++)
+      t.SetVgF(vg[bit] + c,
+               t.m.Load(t.t_f, t.m.AccessChain(p_in_f, bary, {t.U32(c + 1)})));
+  };
+  if (ena & 0x7u) {
+    const Id b = PsBaryCoord(t, sc);
+    for (u32 bit = 0; bit < 3; bit++)
+      seed(bit, b);
+  }
+  // PERSP_PULL_MODEL (bit 3) hands the shader 1/W and the unnormalised
+  // weights; nothing decodes that yet, so it stays unseeded rather than
+  // seeded wrong.
+  if (ena & 0x70u) {
+    const Id b = PsBaryCoordNoPersp(t, sc);
+    for (u32 bit = 4; bit < 7; bit++)
+      seed(bit, b);
+  }
+}
+
 // v_interp_p1/p2/mov_f32. The RDNA2 encoding is identical to GFX7's, so both
 // front ends share this.
 void EmitVintrp(Translator& t, u32 w, StageContext& sc) {
@@ -2111,6 +2168,7 @@ bool TranslatePs(const Program& program,
   sc.ps_num_interp = ps_num_interp;
   sc.vs_exported_params = vs_exported_params;
   SeedPsInputVgprs(t, ps_input_ena, iface);
+  SeedPsBarycentrics(t, ps_input_ena, sc);
 
   // A PS with no color export writes nothing to the color targets (hardware
   // semantics: only exports write; e.g. depth-only or buffer-store passes).

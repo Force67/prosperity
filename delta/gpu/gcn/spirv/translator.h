@@ -756,6 +756,7 @@ struct StageContext {
   std::unordered_set<u32> pervertex_attrs;
   std::unordered_map<u32, Id> pervertex_vars;
   Id bary_var = 0;  // BaryCoordKHR, declared on first use
+  Id bary_nopersp_var = 0;  // BaryCoordNoPerspKHR, likewise
 
   Id gds_var = 0;   // GDS counters (ds_append / ds_consume), a storage buffer
   Id lds_var = 0;           // uint array backing LDS (0 = no LDS)
@@ -806,6 +807,10 @@ void EmitVintrp(Translator& t, u32 w, StageContext& sc);
 Id VsParamOut(Translator& t, StageContext& sc, u32 p);
 Id PsColorOut(Translator& t, StageContext& sc, u32 target);
 Id PsDepthOut(Translator& t, StageContext& sc);
+// The barycentric I/J pairs SPI_PS_INPUT_ENA allocates at the bottom of the
+// VGPR file. SeedPsInputVgprs cannot do it: they come from BaryCoordKHR, which
+// lives with the rest of the fragment-input helpers.
+void SeedPsBarycentrics(Translator& t, u32 ena, StageContext& sc);
 
 // ---- ALU emitters (translate_alu.cc) --------------------------------------
 void EmitSop1(Translator& t, const Inst& inst);

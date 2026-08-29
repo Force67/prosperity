@@ -3230,6 +3230,7 @@ bool TranslatePs(const Program& program,
   sc.main_fn = t.m.BeginFunction(t.t_void, t.t_fn);
   SeedUserData(t, user_data, 0, user_sgprs);
   gpu::gcn::SeedPsInputVgprs(t, ps_input_ena, iface);
+  gpu::gcn::SeedPsBarycentrics(t, ps_input_ena, sc);
 
   const bool has_color_export =
       std::any_of(program.begin(), program.end(), [](const Inst& inst) {
