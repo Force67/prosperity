@@ -62,11 +62,15 @@ u32 FbDim(const Regs& regs, u32 scale_reg) {
 // state blocks never program the viewport registers, so the scale-derived size
 // reads 0 and every draw is skipped for a zero-sized target; the target's own
 // dimensions are the authority in that case.
-u32 FbAttrib2Dim(const Regs& regs, bool want_width) {
-  const u32 a2 = regs[mmCB_COLOR0_ATTRIB2];
+u32 SurfaceDim(const Regs& regs, int rt, bool want_width) {
+  const u32 a2 = regs[mmCB_COLOR0_ATTRIB2 + rt * kCbColorExtStride];
   if (!a2)
     return 0;
   return want_width ? ((a2 >> 14) & 0x3FFF) + 1 : (a2 & 0x3FFF) + 1;
+}
+
+u32 FbAttrib2Dim(const Regs& regs, bool want_width) {
+  return SurfaceDim(regs, 0, want_width);
 }
 
 u32 FbWidth(const Regs& regs) {
@@ -234,6 +238,13 @@ void ResolveRenderTargets(const Regs& regs, rhi::DrawInfo& d) {
       d.mrt_base[rt] = base;
       d.mrt_info[rt] = info;
       d.mrt_count = rt + 1;
+      // Each target carries its own geometry, while rt_w/rt_h come from the
+      // viewport and only say how much of it this pass draws into. Without
+      // this a half-resolution pass into a full-size target reads as a
+      // half-size target, which aliases the address to a second image the
+      // full-size passes never see.
+      d.mrt_surf_w[rt] = SurfaceDim(regs, rt, true);
+      d.mrt_surf_h[rt] = SurfaceDim(regs, rt, false);
     }
   }
   d.rt_base = d.mrt_count ? d.mrt_base[0] : 0;

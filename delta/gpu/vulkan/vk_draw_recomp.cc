@@ -1072,13 +1072,23 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
   // A post-processing chain that samples its own previous target reads zero the
   // moment one of those lands on guest memory.
   {
-    if (kTexBindFrame >= 0 && (int)g_frame.num == kTexBindFrame)
+    // A frame NUMBER is not reproducible across runs (the intro's length
+    // varies), so this arms at the first frame at or after it and stops on a
+    // line budget rather than at a frame boundary.
+    static int texbind_lines = 0;
+    const bool texbind =
+        kTexBindFrame >= 0 && (int)g_frame.num >= kTexBindFrame &&
+        texbind_lines < 600 && (texbind_lines++, true);
+    if (texbind)
       BASE_LOGI("blend",
-                "draw#{} rt={:#x} blend={} ctl={:#x} mask={:#x} mrt={}",
-                g_frame.draws, (unsigned long)d.rt_base, (int)d.blend_enable,
-                d.blend_control, d.target_mask, d.mrt_count);
-    if (kTexBindFrame >= 0 && (int)g_frame.num == kTexBindFrame &&
-        !rp->multi_tex)
+                "f{} draw#{} rt={:#x} vs={:#x} ps={:#x} blend={} ctl={:#x} "
+                "tmask={:#x} smask={:#x} mrt={} idx={} depth={:#x} dw={}",
+                g_frame.num, g_frame.draws, (unsigned long)d.rt_base,
+                (unsigned long)d.vs_addr, (unsigned long)d.ps_addr,
+                (int)d.blend_enable, d.blend_control, d.target_mask,
+                d.shader_mask, d.mrt_count, d.index_count,
+                (unsigned long)d.depth_base, (int)d.depth_write_enable);
+    if (texbind && !rp->multi_tex)
       BASE_LOGI("texbind",
                 "draw#{} rt={:#x} {}x{} LEGACY tex={:#x} {}x{} "
                 "rtAsTex={} color={} feedback={} depth={} set={}",
@@ -1087,8 +1097,7 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
                 (unsigned)rt_as_tex, (unsigned)color_as_tex,
                 (unsigned)feedback_as_tex, (unsigned)depth_as_tex,
                 (unsigned)(tex_set != VK_NULL_HANDLE));
-    if (kTexBindFrame >= 0 && (int)g_frame.num == kTexBindFrame && multi_n &&
-        rp->multi_tex) {
+    if (texbind && multi_n && rp->multi_tex) {
       base::String line;
       base::FormatTo(line, "draw#{} rt={:#x} {}x{} ntex={}:", g_frame.draws,
                      (unsigned long)d.rt_base, d.rt_w, d.rt_h, multi_n);
