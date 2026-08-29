@@ -65,6 +65,18 @@ bool CsBindingValid(StageContext& sc, u32 binding) {
 Id CsSsboPtr(Translator& t, StageContext& sc, u32 binding, Id dword_idx) {
   if (!CsBindingValid(sc, binding))
     return t.U32(0);
+  // The stage's bound block (push constant member 1) carries a dword count
+  // per binding; any access beyond it stops at the last dword instead of
+  // walking into whatever the driver mapped after this buffer.
+  if (sc.cs_bounds_var) {
+    const Id p_u = t.m.TypePointer(spv::StorageClass::PushConstant, t.t_u);
+    const Id bound =
+        t.m.Load(t.t_u, t.m.AccessChain(p_u, sc.cs_bounds_var,
+                                        {t.U32(1), t.U32(binding)}));
+    dword_idx =
+        t.SelectB(t.IsNonZero(bound), t.UMin(dword_idx, t.Sub(bound, t.U32(1))),
+                  dword_idx);
+  }
   return SsboPtr(t, sc.cs_ssbo[binding], dword_idx);
 }
 // MUBUF atomics (GFX7): 0x30..0x3f on 32-bit values, 0x50..0x5f on 64-bit
@@ -77,7 +89,7 @@ bool MubufAtomic(u32 op) {
 Id CsSsboLoad(Translator& t, StageContext& sc, u32 binding, Id dword_idx) {
   if (!CsBindingValid(sc, binding))
     return t.U32(0);
-  return SsboLoad(t, sc.cs_ssbo[binding], dword_idx);
+  return t.m.Load(t.t_u, CsSsboPtr(t, sc, binding, dword_idx));
 }
 void CsSsboStore(Translator& t,
                  StageContext& sc,

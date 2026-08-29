@@ -1139,12 +1139,26 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
   bool samples_bound_depth = depth_self_read;
   for (u32 i = 0; i < multi_n && !samples_bound_depth; i++)
     samples_bound_depth = multi_depth[i] && multi_depth[i] == d.depth_base;
+  // The pipeline carried the format the region was opened with; a draw that
+  // re-binds the same base at a different format or extent (Astro's post chain
+  // recycles a target as B10G11R11 then R16G16B16A16) needs a NEW region, or
+  // the pipeline and the attachment disagree -- the validation layer flags the
+  // pairing and the pixels are interpreted in the wrong format.
+  bool mrt_sig_changed =
+      g_region.cur_area_w != d.rt_w || g_region.cur_area_h != d.rt_h;
+  for (u32 i = 0; i < mrt_n && !mrt_sig_changed; i++)
+    mrt_sig_changed =
+        g_region.cur_fmt[i] != (u32)ColorTargetFormat(d.mrt_info[i]) ||
+        g_region.cur_w[i] !=
+            RtSurfaceExtent(d.mrt_surf_w[i], d.rt_w, 256) ||
+        g_region.cur_h[i] != RtSurfaceExtent(d.mrt_surf_h[i], d.rt_h, 64);
   bool restart_region = g_region.cur_rt != d.rt_base ||
                          g_region.cur_mrt_count != mrt_n ||
                          g_region.cur_depth != d.depth_base ||
                          g_region.cur_stencil != d.stencil_base ||
                          g_region.depth_read_only != samples_bound_depth ||
-                         transition_source || pending_depth_clear;
+                         mrt_sig_changed || transition_source ||
+                         pending_depth_clear;
   if (restart_region) {
     EndRegion();
     if (!rp->multi_tex && color_as_tex && transition_source) {

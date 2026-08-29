@@ -198,6 +198,11 @@ struct RenderRegion {
   u64 cur_rt = 0;        // primary RT (MRT0) of the open region (0 = none)
   u64 cur_mrt[8] = {0};  // all colour targets bound in the open region
   u32 cur_mrt_count = 0;
+  u32 cur_fmt[8] = {0};  // colour attachment formats the region opened with
+  u32 cur_w[8] = {0};    // per-attachment extents the region opened with
+  u32 cur_h[8] = {0};
+  u32 cur_area_w = 0;  // render area the region opened with
+  u32 cur_area_h = 0;
   u64 cur_depth = 0;  // depth target bound in the open region (0 = none)
   u64 cur_stencil = 0;
   u64 last_rt = 0;    // last RT rendered to (present fallback)

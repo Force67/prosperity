@@ -739,6 +739,12 @@ struct StageContext {
   // Compute: storage buffers modelling the guest memory the CS reads/writes.
   std::unordered_map<u32, u32> cs_bind;  // instruction pc -> binding
   std::vector<Id> cs_ssbo;                         // binding -> SSBO variable
+  // Push-constant struct carrying a per-binding bound (in dwords), when the
+  // stage's entry declared the bound block: {user_data[16], bounds[64]}.
+  // A buffer store the ISA computes outside the bound is dropped by real
+  // hardware long before it can hit a neighbouring device allocation; SSBO
+  // loads and stores clamp to it.
+  Id cs_bounds_var = 0;
   // Attributes that v_interp_mov_f32 reads as P10 or P20. Those are the
   // per-vertex DELTAS (P1-P0, P2-P0), which an interpolated fragment input
   // cannot supply, so the whole Location is declared PerVertexKHR -- an

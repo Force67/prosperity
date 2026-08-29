@@ -2340,16 +2340,25 @@ bool TranslateCs(const Program& program,
   }
 
   // Push constant: the 16 COMPUTE_USER_DATA dwords seed s0.. (descriptors +
-  // params).
-  const Id t_arr16 = t.m.TypeArray(t.t_u, 16);
+  // params), then one bound (in dwords) per SSBO binding; 0 = unbounded. The
+  // bounds come from the range the dispatch actually mapped: an OOB access
+  // from the shader runs into whatever comes next if the emitted reads kept
+  // going.
+  constexpr u32 kUdWords = 16;
+  constexpr u32 kBoundWords = 48;
+  const Id t_arr16 = t.m.TypeArray(t.t_u, kUdWords);
   t.m.Decorate(t_arr16, spv::Decoration::ArrayStride, {4});
-  const Id t_pc = t.m.TypeStruct({t_arr16});
+  const Id t_bounds = t.m.TypeArray(t.t_u, kBoundWords);
+  t.m.Decorate(t_bounds, spv::Decoration::ArrayStride, {4});
+  const Id t_pc = t.m.TypeStruct({t_arr16, t_bounds});
   t.m.Decorate(t_pc, spv::Decoration::Block);
   t.m.MemberDecorate(t_pc, 0, spv::Decoration::Offset, {0});
+  t.m.MemberDecorate(t_pc, 1, spv::Decoration::Offset, {4 * kUdWords});
   const Id pc_var =
       t.m.Variable(t.m.TypePointer(spv::StorageClass::PushConstant, t_pc),
                    spv::StorageClass::PushConstant);
   t.m.Name(pc_var, "user_data");
+  sc.cs_bounds_var = pc_var;
 
   // Builtins: gl_LocalInvocationID (-> v0..v2) and gl_WorkGroupID (-> the
   // SGPRs after the user data, per tgid_enable).

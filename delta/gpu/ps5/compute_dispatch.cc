@@ -9,7 +9,9 @@
 #include "base/arch.h"
 
 #include <algorithm>
+#include <cstring>
 
+#include <base/logging.h>
 #include <utl/options.h>
 
 #include "gpu/gcn/gcn_detile.h"
@@ -22,6 +24,7 @@
 
 namespace {
 DELTA_OPTION(bool, kNoCs, "DELTA_GPU_NOCS", false);
+DELTA_OPTION(const char*, kCsProbe, "DELTA_GPU_CSPROBE", nullptr);
 }  // namespace
 
 namespace gpu::ps5 {
@@ -156,6 +159,21 @@ void DispatchCompute(rhi::Renderer& renderer,
                           regs[mmCOMPUTE_NUM_THREAD_Z] & 0xFFFF};
   const u32 rsrc2 = regs[mmCOMPUTE_PGM_RSRC2];
   const u32 user_sgpr = (rsrc2 >> 1) & 0x1F;
+
+  char probe_buf[32];
+  std::snprintf(probe_buf, sizeof(probe_buf), "%llx",
+                (unsigned long long)cs_addr);
+  if (kCsProbe && std::strstr(probe_buf, kCsProbe)) {
+    base::String line;
+    base::FormatTo(line, "cs={:#x} groups=[{} {} {}] tg=[{} {} {}] "
+                        "user_sgpr={} rsrc2={:#x} ud:",
+                   cs_addr, groups[0], groups[1], groups[2], threads[0],
+                   threads[1], threads[2], user_sgpr, rsrc2);
+    const u32* ud = regs.At(mmCOMPUTE_USER_DATA_0);
+    for (int k = 0; k < 16; k++)
+      base::FormatTo(line, " {:08x}", ud[k]);
+    BASE_LOGI("csprobe", "{}", line.c_str());
+  }
 
   NoteDispatch(cs_addr, threads, rsrc2);
   TraceComputeShader(regs, cs_addr, groups, threads, rsrc2);

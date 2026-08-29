@@ -999,12 +999,22 @@ bool BeginRegion(const u64* mrt_base,
   VkRenderingAttachmentInfo colors[8]{};
   RTarget* targets[8]{};
   mrt_count = std::min(mrt_count, 8u);
+  for (u32 i = 0; i < 8; i++) {
+    g_region.cur_fmt[i] = 0;
+    g_region.cur_w[i] = 0;
+    g_region.cur_h[i] = 0;
+  }
+  g_region.cur_area_w = w;
+  g_region.cur_area_h = h;
   for (u32 i = 0; i < mrt_count; i++) {
     const u32 iw = RtSurfaceExtent(mrt_surf_w ? mrt_surf_w[i] : 0, w, 256);
     const u32 ih = RtSurfaceExtent(mrt_surf_h ? mrt_surf_h[i] : 0, h, 64);
     targets[i] = GetRT(mrt_base[i], iw, ih, ColorTargetFormat(mrt_info[i]));
     if (!targets[i])
       return false;
+    g_region.cur_fmt[i] = ColorTargetFormat(mrt_info[i]);
+    g_region.cur_w[i] = iw;
+    g_region.cur_h[i] = ih;
   }
   // Depth gets the same surface-vs-drawn sizing as colour. A pass whose
   // screen scissor is smaller than the surface it binds (GTA:SA opens a

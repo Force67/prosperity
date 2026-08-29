@@ -199,8 +199,11 @@ CsPipe* GetCsPipe(const ComputeInfo& ci) {
   if (vkCreateDescriptorSetLayout(g_dev.device, &sl, nullptr, &cp.set_layout) !=
       VK_SUCCESS)
     return nullptr;
-  VkPushConstantRange pcr{VK_SHADER_STAGE_COMPUTE_BIT, 0,
-                          64};  // 16 user-data dwords
+  // 16 user-data dwords, then one bound (in dwords) per SSBO binding. The
+  // bound is what the emitted SSBO accesses clamp to; the SPIR-V block for a
+  // compute stage declares the same 16 + 48 shape, 256 B total -- the driver
+  // max this backend runs against.
+  VkPushConstantRange pcr{VK_SHADER_STAGE_COMPUTE_BIT, 0, 64 * 4};
   VkPipelineLayoutCreateInfo li{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
   li.setLayoutCount = 1;
   li.pSetLayouts = &cp.set_layout;
@@ -864,6 +867,11 @@ bool EnsureBridgeScratch(VkDeviceSize bytes) {
 void CsCopyStaging(CsRange& e, VkDeviceSize bytes, bool to_device);
 
 // Record one bridge copy (image->buffer or buffer->image), submit and wait.
+// Device is lost: every later submit fails regardless of what it records, so
+// work that only waits must not pretend its failure is a per-staging miss and
+// keep recording. Declared before its first possible setter (RunAliasedCopy).
+bool g_cs_failed = false;
+
 bool RunAliasedCopy(const CsAliasedImage& img,
                     const ComputeInfo::Res& res,
                     CsRange& e,
@@ -998,6 +1006,12 @@ bool RunAliasedCopy(const CsAliasedImage& img,
   g_out_rt_submits++;
   vkFreeCommandBuffers(g_dev.device, g_dev.pool, 1, &c);
   if (r != VK_SUCCESS) {
+    // A device loss is not a "shape mismatch": the queue is dead and every
+    // fallback the caller would keep recording with is already doomed. Latch
+    // the failure so the caller stops instead of building more work on a
+    // lost device.
+    if (r == VK_ERROR_DEVICE_LOST)
+      g_cs_failed = true;
     BASE_LOGI("gpuvk", "cs {} bridge copy failed: {} (base={:#x})",
               to_image ? "upload" : "staging", (int)r,
               (unsigned long long)res.base);
@@ -1430,7 +1444,6 @@ void CsRangeDestroy(CsRange& e) {
 // a staging hazard, or the batch cap). 228 individual submit+fence round
 // trips per frame were ~40% of the whole compute cost.
 bool g_cs_batch_open = false;
-bool g_cs_failed = false;
 u32 g_cs_batch_count = 0;
 // What the open batch contains. A device loss names no dispatch on its own, and
 // a batch is up to 128 of them, so the shader that killed the queue is
@@ -2279,6 +2292,12 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci) {
                     (unsigned long)base, ci.res[i].width, ci.res[i].height,
                     e.rt_sourced ? "staged-from-RT" : "guest-fallback");
         }
+        // A failed bridge is either "not a live target" (fall back) or a lost
+        // device (stop recording altogether, like every other failed flush).
+        if (g_cs_failed) {
+          renderer.state = nullptr;
+          return false;
+        }
       }
       if (!rt_attempt || !e.rt_sourced) {
         if (ci.res[i].image_staging) {
@@ -2437,8 +2456,21 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci) {
   vkCmdBindPipeline(g_cs_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, cp->pipe);
   vkCmdBindDescriptorSets(g_cs_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, cp->layout,
                           0, 1, &set, 0, nullptr);
-  vkCmdPushConstants(g_cs_cmd, cp->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 64,
-                     ci.user_data);
+  // The block is 16 user-data dwords plus 48 bounds; its total is the driver's
+  // maxPushConstantsSize (256 B == 64 dwords).
+  constexpr u32 kCsPushDwords = 64;
+  static_assert(16 + 48 == kCsPushDwords);
+  u32 pc[kCsPushDwords];
+  std::memcpy(pc, ci.user_data, sizeof(pc[0]) * 16);
+  // Every SSBO access clamps to the bound the dispatch mapped for its
+  // binding; 0 means unbounded (a binding the shader indexes nowhere).
+  for (u32 i = 16; i < kCsPushDwords; i++)
+    pc[i] = 0;
+  for (u32 i = 0; i < ci.num_res; i++)
+    if (bind_buf[i] && ci.res[i].binding < kCsPushDwords - 16)
+      pc[16 + ci.res[i].binding] = static_cast<u32>(sz[i] / 4);
+  vkCmdPushConstants(g_cs_cmd, cp->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
+                     sizeof(pc), pc);
   VkBufferMemoryBarrier barriers[ComputeInfo::kMaxResources];
   u32 barrier_count = 0;
   VkBuffer unique_buffers[ComputeInfo::kMaxResources];
