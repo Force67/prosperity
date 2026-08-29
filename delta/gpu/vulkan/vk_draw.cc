@@ -304,6 +304,7 @@ void Draw(Renderer& renderer, const DrawInfo& d_in) {
     vkCmdPushConstants(g_frame.cmd, g_quad.layout, VK_SHADER_STAGE_VERTEX_BIT,
                        0, 64, d.mvp);
   }
+  vkCmdSetBlendConstants(g_frame.cmd, d.blend_constants);
   vkCmdBindVertexBuffers(g_frame.cmd, 0, 1, &g_ring.vb, &off);
   CmdInsertLabel(g_frame.cmd, "quad vs=%#llx ps=%#llx n=%u",
                  (unsigned long long)d.vs_addr, (unsigned long long)d.ps_addr,

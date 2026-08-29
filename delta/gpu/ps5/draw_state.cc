@@ -275,7 +275,15 @@ void ResolveColorState(const Regs& regs, rhi::DrawInfo& d) {
     if ((control >> 30) & 1u)
       d.mrt_blend_mask |= (1u << rt);
   }
+  for (u32 c = 0; c < 4; c++) {
+    const u32 raw = regs[mmCB_BLEND_RED + c];
+    std::memcpy(&d.blend_constants[c], &raw, sizeof(float));
+  }
   d.target_mask = regs[mmCB_TARGET_MASK];
+  // Without this the per-channel write mask is never applied, so a PS that
+  // exports only some components stores its whole vec4 and zeroes the rest of
+  // a target an earlier pass filled.
+  d.shader_mask = regs[mmCB_SHADER_MASK];
   d.color_control = regs[mmCB_COLOR_CONTROL];
 }
 

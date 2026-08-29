@@ -292,6 +292,10 @@ void ResolveColorState(const Regs& regs, u64 ps_addr, rhi::DrawInfo& d) {
     if ((blend >> 30) & 1u)
       d.mrt_blend_mask |= 1u << rt;
   }
+  for (u32 c = 0; c < 4; c++) {
+    const u32 raw = regs[mmCB_BLEND_RED + c];
+    std::memcpy(&d.blend_constants[c], &raw, sizeof(float));
+  }
   d.target_mask = regs[mmCB_TARGET_MASK];
   d.shader_mask = regs[mmCB_SHADER_MASK];
 

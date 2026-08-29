@@ -182,6 +182,10 @@ struct DrawInfo {
   // applied to every attachment.
   u32 mrt_blend[8] = {0};
   u32 mrt_blend_mask = 0;
+  // CB_BLEND_RED/GREEN/BLUE/ALPHA, the operand of the CONSTANT_* blend
+  // factors. Left at zero these turn a constant-blended pass black, which is
+  // indistinguishable from a shader that computed nothing.
+  float blend_constants[4] = {0.f, 0.f, 0.f, 0.f};
   // CB_TARGET_MASK (per-MRT channel write enable; MRT0 = bits[3:0]) and
   // CB_COLOR_CONTROL (MODE field [6:4]; 0 = disable color output). Honoured as
   // the colour write mask so a draw the game masks off (e.g. a fullscreen

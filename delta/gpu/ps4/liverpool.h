@@ -77,6 +77,9 @@ constexpr u32 mmCB_SHADER_MASK = 0xA08F;
 //  [29] separate_alpha_blend  [30] enable
 constexpr u32 mmCB_BLEND0_CONTROL = 0xA1E0;
 constexpr u32 kCbBlendStride = 0x1;
+// The operand of the CONSTANT_COLOR/CONSTANT_ALPHA blend factors, one dword
+// per channel (R at 0xA105, then G, B, A).
+constexpr u32 mmCB_BLEND_RED = 0xA105;
 // Pixel-shader system-value VGPR layout (barycentrics, position, face, etc.).
 constexpr u32 mmSPI_PS_INPUT_CNTL_0 = 0xA191;  // ..._31 at 0xA1B0
 constexpr u32 mmSPI_PS_INPUT_ENA = 0xA1B3;

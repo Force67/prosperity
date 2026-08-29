@@ -235,11 +235,12 @@ VkPipeline BuildPipeline(bool textured,
       VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
   cb.attachmentCount = 1;
   cb.pAttachments = &cba;
-  VkDynamicState dyns[2] = {VK_DYNAMIC_STATE_VIEWPORT,
-                            VK_DYNAMIC_STATE_SCISSOR};
+  VkDynamicState dyns[3] = {VK_DYNAMIC_STATE_VIEWPORT,
+                            VK_DYNAMIC_STATE_SCISSOR,
+                            VK_DYNAMIC_STATE_BLEND_CONSTANTS};
   VkPipelineDynamicStateCreateInfo dy{
       VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
-  dy.dynamicStateCount = 2;
+  dy.dynamicStateCount = 3;
   dy.pDynamicStates = dyns;
   VkPipelineRenderingCreateInfo rci{
       VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
@@ -684,11 +685,12 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
       VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
   cb.attachmentCount = mrt_n;
   cb.pAttachments = cb_att;
-  VkDynamicState dyns[2] = {VK_DYNAMIC_STATE_VIEWPORT,
-                            VK_DYNAMIC_STATE_SCISSOR};
+  VkDynamicState dyns[3] = {VK_DYNAMIC_STATE_VIEWPORT,
+                            VK_DYNAMIC_STATE_SCISSOR,
+                            VK_DYNAMIC_STATE_BLEND_CONSTANTS};
   VkPipelineDynamicStateCreateInfo dy{
       VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
-  dy.dynamicStateCount = 2;
+  dy.dynamicStateCount = 3;
   dy.pDynamicStates = dyns;
   VkFormat fmts[8];
   for (u32 i = 0; i < mrt_n; i++)

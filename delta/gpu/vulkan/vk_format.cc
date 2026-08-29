@@ -493,37 +493,46 @@ VkBlendFactor BlendFactor(u32 f) {
       return VK_BLEND_FACTOR_SRC_ALPHA;
     case 5:
       return VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-    // 6..10 are NOT the D3D order. GCN's CB_BLEND_CONTROL enum puts
-    // SRC_ALPHA_SATURATE at 6 and pushes DST_COLOR/DST_ALPHA up behind it
-    // (V_028780_BLEND_*), so reading this block as D3D silently substitutes a
-    // different factor for five of the commonest values -- turning
-    // SRC_ALPHA_SATURATE into DST_ALPHA, which on the ALPHA channel is the
-    // difference between dst.a = src.a and dst.a = src.a * dst.a.
+    // 6 upwards is neither the D3D order nor SRC_ALPHA_SATURATE-first: the
+    // hardware enum (V_028780_BLEND_*) runs DST_ALPHA, DST_COLOR,
+    // SRC_ALPHA_SATURATE, the two BOTH_* forms, the constants and only then
+    // the dual-source factors at 0x0f..0x12. That last range is what pins it
+    // -- KytyPS5's IsDualSourceBlendFactor tests exactly 0x0f..0x12. Reading
+    // 0x0d (CONSTANT_COLOR) as SRC1_COLOR gave a shader with no Index-1
+    // output an undefined second source, which comes out as a black colour
+    // term (Astro Bot's whole composite chain).
     case 6:
-      return VK_BLEND_FACTOR_SRC_ALPHA_SATURATE;
-    case 7:
-      return VK_BLEND_FACTOR_DST_COLOR;
-    case 8:
-      return VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR;
-    case 9:
       return VK_BLEND_FACTOR_DST_ALPHA;
-    case 10:
+    case 7:
       return VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA;
+    case 8:
+      return VK_BLEND_FACTOR_DST_COLOR;
+    case 9:
+      return VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR;
+    case 10:
+      return VK_BLEND_FACTOR_SRC_ALPHA_SATURATE;
+    // BOTH_SRC_ALPHA / BOTH_INV_SRC_ALPHA set the colour and alpha factors
+    // together on hardware; Vulkan has no such factor, and the pair they
+    // stand for is (SRC_ALPHA, ONE_MINUS_SRC_ALPHA) per channel.
     case 11:
-      return VK_BLEND_FACTOR_CONSTANT_COLOR;
+      return VK_BLEND_FACTOR_SRC_ALPHA;
     case 12:
-      return VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_COLOR;
+      return VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
     case 13:
-      return VK_BLEND_FACTOR_SRC1_COLOR;
+      return VK_BLEND_FACTOR_CONSTANT_COLOR;
     case 14:
-      return VK_BLEND_FACTOR_ONE_MINUS_SRC1_COLOR;
+      return VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_COLOR;
     case 15:
-      return VK_BLEND_FACTOR_SRC1_ALPHA;
+      return VK_BLEND_FACTOR_SRC1_COLOR;
     case 16:
-      return VK_BLEND_FACTOR_ONE_MINUS_SRC1_ALPHA;
+      return VK_BLEND_FACTOR_ONE_MINUS_SRC1_COLOR;
     case 17:
-      return VK_BLEND_FACTOR_CONSTANT_ALPHA;
+      return VK_BLEND_FACTOR_SRC1_ALPHA;
     case 18:
+      return VK_BLEND_FACTOR_ONE_MINUS_SRC1_ALPHA;
+    case 19:
+      return VK_BLEND_FACTOR_CONSTANT_ALPHA;
+    case 20:
       return VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_ALPHA;
     default:
       return VK_BLEND_FACTOR_ONE;

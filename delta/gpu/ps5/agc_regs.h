@@ -73,6 +73,9 @@ constexpr u32 mmCB_SHADER_MASK = 0xA08F;
 //  [29] separate_alpha_blend  [30] enable
 constexpr u32 mmCB_BLEND0_CONTROL = 0xA1E0;
 constexpr u32 kCbBlendStride = 0x1;
+// The operand of the CONSTANT_COLOR/CONSTANT_ALPHA blend factors, one dword
+// per channel (R at 0xA105, then G, B, A).
+constexpr u32 mmCB_BLEND_RED = 0xA105;
 // Overall color-buffer mode (ROP3 / blend disable). MODE field is [6:4].
 constexpr u32 mmCB_COLOR_CONTROL = 0xA202;
 

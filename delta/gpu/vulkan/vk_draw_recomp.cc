@@ -1447,6 +1447,9 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
   (void)t_bind;
   SetGuestViewport(d);
   vkCmdBindPipeline(g_frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, rp->pipe);
+  // The CONSTANT_* blend factors read these, and they change per draw --
+  // keying a pipeline on them would multiply the cache instead.
+  vkCmdSetBlendConstants(g_frame.cmd, d.blend_constants);
   // 16 user-data dwords per stage, in its own half of the shared push range:
   // both stages at offset 0 meant the second push overwrote the first.
   vkCmdPushConstants(g_frame.cmd, rp->layout, kPcStages, 0, 64,
