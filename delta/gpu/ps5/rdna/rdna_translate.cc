@@ -3213,8 +3213,9 @@ bool TranslatePs(const Program& program,
   sc.mimg_plan = &mimg_plan;  // borrowed by EmitBody
   sc.tex_3d_mask = RdnaTex3dMask(program, mimg_plan);
   for (u32 i = 0; i < mimg_plan.binding_srsrc.size(); i++)
-    r.ps_texs.push_back(
-        {i, mimg_plan.binding_srsrc[i], mimg_plan.binding_storage[i]});
+    r.ps_texs.push_back({i, mimg_plan.binding_srsrc[i],
+                         mimg_plan.binding_storage[i],
+                         ((sc.tex_3d_mask >> i) & 1u) != 0});
 
   const Id user_data = DeclareUserData(t);
   sc.main_fn = t.m.BeginFunction(t.t_void, t.t_fn);

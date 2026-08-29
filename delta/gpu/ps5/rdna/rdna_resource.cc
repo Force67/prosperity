@@ -1363,6 +1363,11 @@ TImage DecodeTImage(const u32* d, bool r128) {
   t.arrayed = t.type == 11 || t.type == 12 || t.type == 13;
   const bool volumetric = t.type == 10;  // 3D
   t.is_3d = volumetric;
+  // A volume's slice count lives in the same descriptor field a 2D array's
+  // layer count does, but the image is built from `depth` -- leaving that at 1
+  // makes a 64-slice froxel volume one slice deep and every sample past the
+  // first reads it stretched.
+  t.depth = volumetric ? depth + 1 : 1;
   t.layers = (t.arrayed || volumetric) ? depth + 1 : 1;
   if (t.type == 11)
     t.layers = std::max<u32>(t.layers, 6);

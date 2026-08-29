@@ -38,6 +38,13 @@ DELTA_OPTION(float, kCaptureAfter, "DELTA_GPU_CAPTURE_AFTER", 0.f);
 DELTA_OPTION(int, kCaptureBusy, "DELTA_GPU_CAPTURE_BUSY", 0);
 DELTA_OPTION(int, kCaptureCount, "DELTA_GPU_CAPTURE_COUNT", 1);
 DELTA_OPTION(const char*, kCaptureDir, "DELTA_GPU_CAPTURE_DIR", nullptr);
+// DELTA_GPU_RTWATCH=<guest base>: include this render target in every
+// CAPTURE_AT snapshot even while it is not bound. A target that loses its
+// content between the region that fills it and the region that reads it is
+// invisible otherwise -- snapshots only cover the targets a region has open,
+// so the window where the content actually disappears is the one window with
+// no measurement in it.
+DELTA_OPTION(u64, kRtWatch, "DELTA_GPU_RTWATCH", 0);
 // What to read back and write as PNG when the frame closes: any of
 // rt, depth, tex, all, none (comma separated).
 DELTA_OPTION(const char*, kCaptureDump, "DELTA_GPU_CAPTURE_DUMP", "rt,depth");
@@ -1380,6 +1387,14 @@ void SnapshotOpenRegion(u32 draw_index) {
     DepthTarget& dt = dit->second;
     QueueSnapshot(dt.image, VK_IMAGE_ASPECT_DEPTH_BIT, dt.w, dt.h, kDepthFormat,
                   depth_base, true, draw_index, dt.layout, &dt.layout);
+  }
+  const u64 watch = kRtWatch.get();
+  if (watch && std::find(mrt, mrt + n, watch) == mrt + n) {
+    auto wit = g_rts.find(watch);
+    if (wit != g_rts.end())
+      QueueSnapshot(wit->second.image, VK_IMAGE_ASPECT_COLOR_BIT,
+                    wit->second.w, wit->second.h, wit->second.fmt, watch, false,
+                    draw_index, wit->second.layout, &wit->second.layout);
   }
 }
 

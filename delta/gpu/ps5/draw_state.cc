@@ -614,6 +614,7 @@ void ResolvePsTextures(u64 ps_addr,
   d.tex_tiling = texs[0].tiling_idx;
   d.tex_pitch = texs[0].pitch;
   d.tex_layers = texs[0].layers;
+  d.tex_depth = texs[0].depth;
   d.tex_base_array = texs[0].base_array;
   d.tex_view_layers = texs[0].view_layers;
   d.tex_mip_levels = texs[0].mip_levels;
@@ -651,6 +652,7 @@ void FillDrawTex(u32 slot, const gcn::TImage& s, rhi::DrawInfo& d) {
     dt.dfmt = s.dfmt;
     dt.nfmt = s.nfmt;
     dt.layers = s.layers;
+    dt.depth = s.depth;
     dt.base_array = s.base_array;
     dt.view_layers = s.view_layers;
     dt.mip_levels = s.mip_levels;
@@ -690,10 +692,12 @@ void ReconcileTextureDims(const std::vector<gcn::ShaderTex>& plan,
                 dt.h, dt.layers);
     dt.is_3d = st.is_3d;
     if (st.is_3d) {
+      dt.depth = dt.layers;
       dt.arrayed = false;
       dt.base_array = 0;
       dt.view_layers = 1;
     } else {
+      dt.depth = 1;
       dt.layers = 1;
       dt.view_layers = 1;
     }
