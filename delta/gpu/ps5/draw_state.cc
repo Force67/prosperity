@@ -11,8 +11,10 @@
 #include <algorithm>
 #include <cstring>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
+#include <base/logging.h>
 #include <utl/options.h>
 
 #include "gpu/gcn/gcn_translate.h"
@@ -31,6 +33,11 @@ DELTA_OPTION(bool, kRecompOn, "DELTA_PS5_RECOMP", true);
 DELTA_OPTION(u64, kSkipVs, "DELTA_PS5_SKIPVS", 0);
 DELTA_OPTION(u32, kUdBase, "DELTA_PS5_UDBASE", 8);
 DELTA_OPTION(bool, kGsIsVs, "DELTA_PS5_GSVS", false);
+// DELTA_GPU_CBRESOLVE=1: once per shader, how many of the cbuffer
+// bindings the recompiler planned actually resolved to readable guest
+// memory. A shader whose constants all read zero is indistinguishable
+// in the output from one that computed zero.
+DELTA_OPTION(bool, kCbResolve, "DELTA_GPU_CBRESOLVE", false);
 }  // namespace
 
 namespace gpu::ps5 {
@@ -291,10 +298,11 @@ void ResolveColorState(const Regs& regs, rhi::DrawInfo& d) {
     std::memcpy(&d.blend_constants[c], &raw, sizeof(float));
   }
   d.target_mask = regs[mmCB_TARGET_MASK];
-  // Without this the per-channel write mask is never applied, so a PS that
-  // exports only some components stores its whole vec4 and zeroes the rest of
-  // a target an earlier pass filled.
-  d.shader_mask = regs[mmCB_SHADER_MASK];
+  // CB_SHADER_MASK is deliberately NOT read here. On the AGC path it does not
+  // track the draw: it reads 0xf against a 0x737 target mask (which would mask
+  // two live G-buffer targets off) and 0xff against 0x7 (wider than the targets
+  // exist), i.e. it is whatever the last state block left. The recompiler's own
+  // ps_mrt_mask already masks the targets the shader does not export to.
   d.color_control = regs[mmCB_COLOR_CONTROL];
 }
 
@@ -473,12 +481,15 @@ void ResolveCbufferBindings(const std::vector<gcn::ShaderCbuf>& cbufs,
                             const ResolvedBuffers& resolved,
                             bool vertex_stage,
                             rhi::DrawInfo& d) {
+  u32 planned = 0, replayed = 0, mapped = 0;
   for (const gcn::ShaderCbuf& cb : cbufs) {
     if (cb.binding >= gpu::gcn::kMaxCbufBindings)
       continue;
+    planned++;
     const auto it = resolved.find(cb.use_pc);
     if (it == resolved.end())
       continue;
+    replayed++;
     // The window need not start at the buffer: a shader reading one constant
     // far into a large buffer is bound at that dword and indexes relative to it
     // (ShaderCbuf::first_dword).
@@ -488,6 +499,7 @@ void ResolveCbufferBindings(const std::vector<gcn::ShaderCbuf>& cbufs,
     TraceCbufBinding(vertex_stage, cb.binding, cb.use_pc, base, cb.num_dwords);
     if (!IsGuestAddress(base) || !gpu::IsReadableRangeCached(base, bytes))
       continue;
+    mapped++;
     d.cbufs[cb.binding] = {base, static_cast<u32>(bytes)};
     d.num_cbufs = std::max(d.num_cbufs, cb.binding + 1);
     if (vertex_stage && !cb.first_dword && bytes >= sizeof(d.mvp)) {
@@ -495,6 +507,15 @@ void ResolveCbufferBindings(const std::vector<gcn::ShaderCbuf>& cbufs,
       d.cbuf_size = static_cast<u32>(bytes);
       std::memcpy(d.mvp, reinterpret_cast<const void*>(base), sizeof(d.mvp));
     }
+  }
+  if (kCbResolve && planned) {
+    static std::unordered_set<u64> seen;
+    const u64 key = (vertex_stage ? d.vs_addr : d.ps_addr) * 2 + vertex_stage;
+    if (seen.size() < 512 && seen.insert(key).second)
+      BASE_LOGI("cbresolve", "{} {:#x} planned={} replayed={} mapped={}",
+                vertex_stage ? "vs" : "ps",
+                (unsigned long)(vertex_stage ? d.vs_addr : d.ps_addr), planned,
+                replayed, mapped);
   }
 }
 
