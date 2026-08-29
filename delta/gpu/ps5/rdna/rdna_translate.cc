@@ -67,6 +67,11 @@ DELTA_OPTION(const char*, kSpvDump, "DELTA_GPU_SPVDUMP", nullptr);
 DELTA_OPTION(bool, kAgcTrace, "DELTA_AGC_TRACE", false);
 DELTA_OPTION(bool, kGpuDebugalpha, "DELTA_GPU_DEBUGALPHA", false);
 DELTA_OPTION(bool, kGpuForcecolor, "DELTA_GPU_FORCECOLOR", false);
+// DELTA_GPU_PSVGPR=<n+1>: export VGPR n as greyscale instead of the shader's
+// colour. FORCECOLOR says the pipeline is sound and PSTEX says the samples
+// are black; between those two lies the arithmetic, and this is the only way
+// to see a value in the middle of it.
+DELTA_OPTION(u32, kGpuPsVgpr, "DELTA_GPU_PSVGPR", 0);
 // merged_wave_info (s3): verts-in-wave in [7:0], prims in [15:8]. One
 // invocation is one lane here, so a wave has to be as wide as the invocations
 // the draw actually runs -- a shader that masks EXEC with `lane < verts` keeps
@@ -1456,6 +1461,10 @@ void EmitExport(Translator& t, const Inst& inst, StageContext& sc) {
       if (kGpuForcecolor)
         col = t.m.CompositeConstruct(
             t.t_v4, {t.F32(1.f), t.F32(0.f), t.F32(0.f), t.F32(1.f)});
+      if (kGpuPsVgpr) {
+        const Id g = t.VgF(kGpuPsVgpr - 1);
+        col = t.m.CompositeConstruct(t.t_v4, {g, g, g, t.F32(1.f)});
+      }
       // A pixel export may name any MRT any number of times, and the ISA
       // accumulates the write masks per target. Storing the whole vec4 let a
       // later export clobber the channels an earlier one wrote with the
@@ -1469,7 +1478,7 @@ void EmitExport(Translator& t, const Inst& inst, StageContext& sc) {
         return compr ? (en & (i < 2 ? 0x1u : 0x4u)) != 0
                      : (en & (1u << i)) != 0;
       };
-      bool all_channels = kGpuForcecolor || kGpuDebugalpha;
+      bool all_channels = kGpuForcecolor || kGpuDebugalpha || kGpuPsVgpr;
       if (!all_channels) {
         all_channels = true;
         for (u32 i = 0; i < 4; i++)
