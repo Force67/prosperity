@@ -100,6 +100,13 @@ VkShaderModule MakeModuleVec(const std::vector<u32>& spv);
 // Ask the driver what the GPU actually faulted on (VK_EXT_device_fault).
 void ReportDeviceFault(DeviceState& device);
 
+// DELTA_GPU_QCHECK: an empty command buffer through the same queue, waited.
+// A failure names the queue work that ran BEFORE this point as the device
+// loss, so the first failing checkpoint brackets the faulting op even when
+// the failing submit itself carries no work at all.
+bool QueueCheck(const char* where);
+bool QueueCheckArmed();
+
 // Persist the driver's pipeline cache. Called after a pipeline is created
 // rather than at exit: the runner SIGKILLs the emulator, so an atexit hook
 // would never fire on the runs that matter. Cheap and self-throttling -- it

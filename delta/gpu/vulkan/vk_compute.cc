@@ -993,10 +993,14 @@ bool RunAliasedCopy(const CsAliasedImage& img,
         nullptr, 1, &bb, 0, nullptr);
   }
   const VkResult end_result = vkEndCommandBuffer(c);
+  base::String where;
+  base::FormatTo(where, "bridge base={:#x}", (unsigned long long)res.base);
   VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
   si.commandBufferCount = 1;
   si.pCommandBuffers = &c;
   VkResult r = end_result;
+  if (r == VK_SUCCESS && !QueueCheck(where.c_str()))
+    r = VK_ERROR_DEVICE_LOST;
   if (r == VK_SUCCESS)
     r = vkResetFences(g_dev.device, 1, &g_dev.fence);
   if (r == VK_SUCCESS)
@@ -1514,6 +1518,14 @@ bool CsBatchFlush(CsSyncWhy why = kSyncWriteback) {
   if (!g_cs_batch_open)
     return !g_cs_failed;
   const u64 t0 = NowNs();
+  base::String where;
+  base::FormatTo(where, "batch n={} last-cs={:#x}", g_cs_batch_count,
+                 g_cs_batch_log.empty() ? 0 : g_cs_batch_log.back().cs_addr);
+  if (!QueueCheck(where.c_str())) {
+    g_cs_failed = true;
+    g_ns_cs_gpu += NowNs() - t0;
+    return false;
+  }
   CmdEndLabel(g_cs_cmd);  // close the "cs batch" scope
   const VkResult end_result = vkEndCommandBuffer(g_cs_cmd);
   VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
@@ -1988,6 +2000,66 @@ bool PreserveCsDepthBeforeClear(u64 base) {
                 (unsigned long)base);
   }
   return true;
+}
+
+// DELTA_GPU_QCHECK=1: before every CS batch is submitted, run an EMPTY
+// command buffer through the same queue and wait for it. The device is lost
+// by whatever ran before the first failing submit, so a checkpoint that
+// fails names PRIOR queue work (graphics draws, an earlier bridge copy) as
+// the fault, and one that succeeds while the batch's own wait fails
+// isolates the batch content. The checkpoint shares the graphics queue, so
+// it runs after everything already recorded there.
+struct QueueCheckpoint {
+  VkCommandBuffer cmd = VK_NULL_HANDLE;
+  VkFence fence = VK_NULL_HANDLE;
+  bool ready = false;
+};
+QueueCheckpoint g_qcheck;
+DELTA_OPTION(bool, kQueueCheck, "DELTA_GPU_QCHECK", false);
+
+bool QueueCheckArmed() {
+  return kQueueCheck;
+}
+
+bool QueueCheck(const char* where) {
+  if (!kQueueCheck)
+    return true;
+  if (!g_qcheck.ready) {
+    VkCommandBufferAllocateInfo ai{
+        VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+    ai.commandPool = g_dev.pool;
+    ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    ai.commandBufferCount = 1;
+    if (vkAllocateCommandBuffers(g_dev.device, &ai, &g_qcheck.cmd) !=
+        VK_SUCCESS)
+      return true;
+    VkFenceCreateInfo fi{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+    if (vkCreateFence(g_dev.device, &fi, nullptr, &g_qcheck.fence) !=
+        VK_SUCCESS)
+      return true;
+    g_qcheck.ready = true;
+  }
+  VkResult r = vkResetCommandBuffer(g_qcheck.cmd, 0);
+  if (r == VK_SUCCESS) {
+    VkCommandBufferBeginInfo bi{
+        VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        nullptr, VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
+    r = vkBeginCommandBuffer(g_qcheck.cmd, &bi);
+    if (r == VK_SUCCESS)
+      r = vkEndCommandBuffer(g_qcheck.cmd);
+  }
+  if (r == VK_SUCCESS)
+    r = vkResetFences(g_dev.device, 1, &g_qcheck.fence);
+  VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+  si.commandBufferCount = 1;
+  si.pCommandBuffers = &g_qcheck.cmd;
+  if (r == VK_SUCCESS)
+    r = vkQueueSubmit(g_dev.queue, 1, &si, g_qcheck.fence);
+  if (r == VK_SUCCESS)
+    r = vkWaitForFences(g_dev.device, 1, &g_qcheck.fence, VK_TRUE, UINT64_MAX);
+  if (r != VK_SUCCESS)
+    BASE_LOGI("gpuvk", "queue CHECKPOINT FAILED at {}: {}", where, (int)r);
+  return r == VK_SUCCESS;
 }
 
 }  // namespace gpu::vk

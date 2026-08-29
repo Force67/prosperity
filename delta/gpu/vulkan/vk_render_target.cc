@@ -996,6 +996,18 @@ bool BeginRegion(const u64* mrt_base,
                  const u32* mrt_surf_w,
                  const u32* mrt_surf_h) {
   ScopeNs _region_timer(&g_ns_region);
+  // DELTA_GPU_QCHECK also gates this path: a checkpoint that fails here names
+  // the DRAWS that ran before this region as the device loss, which is the
+  // attribution the compute-side checkpoints cannot reach.
+  if (QueueCheckArmed()) {
+    char where[64];
+    std::snprintf(where, sizeof(where), "region draw#%u rt=%#llx f%u",
+                  g_frame.draws,
+                  (unsigned long long)(mrt_count ? mrt_base[0] : 0),
+                  g_frame.num);
+    if (!QueueCheck(where))
+      return false;
+  }
   VkRenderingAttachmentInfo colors[8]{};
   RTarget* targets[8]{};
   mrt_count = std::min(mrt_count, 8u);

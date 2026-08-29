@@ -542,6 +542,12 @@ bool CreateDevice() {
   // gets undefined behaviour across EVERY attachment, not just the odd one out.
   if (avail2.features.independentBlend)
     want_feat.independentBlend = VK_TRUE;
+  // Guest blend state names dual-source factors (Astro's intro card uses
+  // SRC1_COLOR); a pipeline that carries one without this feature is invalid.
+  // The shader model's Index-1 output is still not translated, so the second
+  // source's values are whatever the implementation hands out -- valid, not
+  // exact.
+  want_feat.dualSrcBlend = avail2.features.dualSrcBlend;
   if (avail2.features.shaderStorageImageWriteWithoutFormat)
     want_feat.shaderStorageImageWriteWithoutFormat = VK_TRUE;
   // A recompiled VERTEX shader can index a guest buffer by hand, which becomes

@@ -57,6 +57,8 @@ u64 FetchPlanHash(u64) {
 
 namespace {
 DELTA_OPTION(bool, kExpTrace, "DELTA_GPU_EXPTRACE", false);
+DELTA_OPTION(u32, kCfgMaxIter, "DELTA_GPU_CFG_MAXITER", 16384);
+DELTA_OPTION(bool, kLoopTrace, "DELTA_GPU_LOOPTRACE", false);
 DELTA_OPTION(bool, kAllowNan, "DELTA_GPU_ALLOWNAN", false);
 DELTA_OPTION(const char*, kDbgPos, "DELTA_GPU_DBGPOS", nullptr);
 DELTA_OPTION(float, kRawPos, "DELTA_GPU_RAWPOS", 0.f);
@@ -2850,10 +2852,22 @@ bool TranslateVs(const Program& program,
   t.m.Decorate(pos_out, spv::Decoration::BuiltIn,
                {static_cast<u32>(spv::BuiltIn::Position)});
   iface.push_back(pos_out);
+  // A POINT_LIST pipeline needs the vertex stage to write PointSize (the
+  // validation layer rejects the module otherwise). The ISA carries point
+  // geometry in the POS1-3 export group we do not read yet, so 1.0 -- the
+  // hardware's default -- is what keeps the pipeline valid; a wrong size
+  // shows as differently sized dots, not as a fault.
+  const Id point_out =
+      t.m.Variable(t.m.TypePointer(spv::StorageClass::Output, t.t_f),
+                   spv::StorageClass::Output);
+  t.m.Decorate(point_out, spv::Decoration::BuiltIn,
+               {static_cast<u32>(spv::BuiltIn::PointSize)});
+  iface.push_back(point_out);
 
   const Id user_data = DeclareUserData(t);
   const Id main_fn = t.m.BeginFunction(t.t_void, t.t_fn);
   SeedUserData(t, user_data, 8, user_sgprs);
+  t.m.Store(point_out, t.F32(1.f));
   // DELTA_GPU_POSUNSET: stamp a sentinel w, and at the tail draw an NDC quad
   // wherever it survived. A target that paints under this says the shader
   // never reached its position export at all -- which no probe reading the
@@ -3333,13 +3347,50 @@ void EmitCfg(Translator& t, const Program& program, StageContext& sc) {
   for (Id& l : case_labels)
     l = t.m.NewBlock();
 
+  // Runaway guard: one mistranslated branch condition or target leaves the
+  // state machine spinning, and a spinning invocation takes the whole VkDevice
+  // down -- on NVIDIA as Xid 109 CTX SWITCH TIMEOUT, reported to us as
+  // VK_ERROR_DEVICE_LOST from whatever submit happened to be waiting. Cap
+  // block-steps per invocation so a bad shader renders wrong instead of
+  // killing the device. DELTA_GPU_CFG_MAXITER=0 disables it.
+  const Id iter_var = kCfgMaxIter
+                          ? t.m.Variable(t.p_priv_u, spv::StorageClass::Private,
+                                         t.m.ConstNull(t.t_u))
+                          : 0;
+
+  // DELTA_GPU_LOOPTRACE: name the programs that can loop at all. A shader with
+  // no backward branch cannot be the one spinning, which is most of them.
+  if (kLoopTrace) {
+    u32 back_edges = 0;
+    for (const Inst& inst : program) {
+      const int k = BranchKind(inst);
+      if ((k != 1 && k < 2) || IsCall(inst) || IsReturn(inst))
+        continue;
+      const i32 simm = static_cast<i16>(inst.raw[0] & 0xFFFF);
+      if (simm < 0)
+        back_edges++;
+    }
+    if (back_edges)
+      BASE_LOGI("looptrace", "{} vs={:#x} blocks={} back_edges={} insts={}",
+                sc.is_cs ? "cs" : (sc.is_ps ? "ps" : "vs"),
+                (unsigned long)(sc.is_cs ? 0 : g_vs_addr), num_blocks,
+                back_edges, program.size());
+  }
+
   t.SetState(0);
   t.m.Branch(header);
   t.m.OpenBlock(header);
   t.m.LoopMerge(merge, cont);
   t.m.Branch(dispatch);
   t.m.OpenBlock(dispatch);
-  const Id state = t.State();
+  Id state = t.State();
+  if (kCfgMaxIter) {
+    const Id it = t.m.Load(t.t_u, iter_var);
+    t.m.Store(iter_var, t.m.Emit(spv::Op::OpIAdd, t.t_u, {it, t.U32(1)}));
+    const Id over =
+        t.m.Emit(spv::Op::OpUGreaterThan, t.t_bool, {it, t.U32(kCfgMaxIter)});
+    state = t.SelectB(over, t.U32(kExit), state);
+  }
   t.m.SelectionMerge(merge_sel);
   std::vector<std::pair<u32, Id> > cases;
   for (u32 i = 0; i < num_blocks; i++)
