@@ -757,6 +757,9 @@ struct StageContext {
   std::unordered_map<u32, Id> pervertex_vars;
   Id bary_var = 0;  // BaryCoordKHR, declared on first use
   Id bary_nopersp_var = 0;  // BaryCoordNoPerspKHR, likewise
+  // DELTA_GPU_PSVGPR_BLOCK: a saved copy of the probed VGPR, taken at
+  // the top of one CFG block instead of at the export.
+  Id vgpr_snap_var = 0;
 
   Id gds_var = 0;   // GDS counters (ds_append / ds_consume), a storage buffer
   Id lds_var = 0;           // uint array backing LDS (0 = no LDS)

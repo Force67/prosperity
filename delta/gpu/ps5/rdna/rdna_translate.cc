@@ -72,6 +72,11 @@ DELTA_OPTION(bool, kGpuForcecolor, "DELTA_GPU_FORCECOLOR", false);
 // are black; between those two lies the arithmetic, and this is the only way
 // to see a value in the middle of it.
 DELTA_OPTION(u32, kGpuPsVgpr, "DELTA_GPU_PSVGPR", 0);
+// DELTA_GPU_PSVGPR_BLOCK=<block+1>: sample the probed register at the top
+// of that CFG block rather than at the export, so a value the shader
+// overwrites later can still be seen. Bisect the blocks to find where a
+// value dies.
+DELTA_OPTION(u32, kGpuPsVgprBlock, "DELTA_GPU_PSVGPR_BLOCK", 0);
 // merged_wave_info (s3): verts-in-wave in [7:0], prims in [15:8]. One
 // invocation is one lane here, so a wave has to be as wide as the invocations
 // the draw actually runs -- a shader that masks EXEC with `lane < verts` keeps
@@ -1462,7 +1467,9 @@ void EmitExport(Translator& t, const Inst& inst, StageContext& sc) {
         col = t.m.CompositeConstruct(
             t.t_v4, {t.F32(1.f), t.F32(0.f), t.F32(0.f), t.F32(1.f)});
       if (kGpuPsVgpr) {
-        const Id g = t.VgF(kGpuPsVgpr - 1);
+        const Id g = sc.vgpr_snap_var
+                         ? t.m.Load(t.t_f, sc.vgpr_snap_var)
+                         : t.VgF(kGpuPsVgpr - 1);
         col = t.m.CompositeConstruct(t.t_v4, {g, g, g, t.F32(1.f)});
       }
       // A pixel export may name any MRT any number of times, and the ISA
@@ -3204,6 +3211,10 @@ bool TranslatePs(const Program& program,
   sc.vs_exported_params = vs_exported_params;
   sc.skip_launch_movs = LaunchExecMovPcs(program);
   sc.pervertex_attrs = gpu::gcn::PlanPerVertexAttrs(program, nullptr);
+  if (kGpuPsVgpr && kGpuPsVgprBlock)
+    sc.vgpr_snap_var =
+        t.m.Variable(t.m.TypePointer(spv::StorageClass::Private, t.t_f),
+                     spv::StorageClass::Private, t.m.ConstNull(t.t_f));
   if (kGpuPstex)
     t.last_texel_var =
         t.m.Variable(t.m.TypePointer(spv::StorageClass::Private, t.t_v4),
@@ -3410,6 +3421,8 @@ void EmitCfg(Translator& t, const Program& program, StageContext& sc) {
 
   for (u32 bi = 0; bi < num_blocks; bi++) {
     t.m.OpenBlock(case_labels[bi]);
+    if (sc.vgpr_snap_var && kGpuPsVgprBlock - 1 == bi)
+      t.m.Store(sc.vgpr_snap_var, t.VgF(kGpuPsVgpr - 1));
     const u32 blk_start = starts[bi];
     const u32 blk_end = (bi + 1 < num_blocks) ? starts[bi + 1] : max_pc;
     bool terminated = false;
