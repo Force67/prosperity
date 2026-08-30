@@ -13,10 +13,10 @@ endif()
 
 add_library(shared STATIC ${SHARED_SOURCES})
 
-target_include_directories(shared PUBLIC
-  ${CMAKE_CURRENT_SOURCE_DIR}
-  ${CMAKE_CURRENT_SOURCE_DIR}/utl
-)
+# One include root, so every header has exactly one spelling: <utl/mem.h>,
+# <logger/logger.h>, <base.h>. logger/ used to sit under utl/ and be reached
+# through a second root, which meant the same file was addressable two ways.
+target_include_directories(shared PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
 target_link_libraries(shared PUBLIC
   fmt::fmt
