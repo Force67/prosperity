@@ -28,12 +28,21 @@ add_subdirectory(kern)
 add_subdirectory(runtime)
 add_subdirectory(main)
 
+if(DELTA_BUILD_TESTS)
+  add_subdirectory(tests)
+endif()
+
 # kern and runtime are co-dependent: kern drives the JIT runtime
 # (proc -> vprx/code_lift) and the runtime calls back into kern
 # (code_lift -> proc::getActive). delta_cpu is likewise co-dependent with kern:
 # the loader/proc/threads call cpu::backend(), and the FEX backend calls back
 # into kern (lv2_get, moduleInfo). Declare the static-lib cycles so the linker
 # repeats the archives until symbols resolve.
+#
+# Both are recorded in delta/tests/check_module_layering.py as debts to unwind,
+# not as the intended shape. kern no longer reaches gpu or gfx at all: the two
+# calls that used to (the PM4 write-watch and the crash dump's CS-range
+# describer) are now installed by the composition root, as is the audio sink.
 target_link_libraries(delta_kern    PUBLIC delta_runtime delta_cpu)
 target_link_libraries(delta_runtime PUBLIC delta_kern delta_gpu)
 target_link_libraries(delta_cpu     PUBLIC delta_kern)
