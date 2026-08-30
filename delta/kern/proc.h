@@ -92,10 +92,4 @@ private:
   u16 nextFreeTLS() { return tlsCounter++; }
 };
 
-// DELTA_FIOS_TRACE hook: called from smodule::resolveImports for each PLT import.
-// Returns a guest wrapper around `realAddr` that traces the libSceFios2 whole-file
-// APIs (FHOpen/FHGetSize/FHRead/FHPread) when the env var is set and `nidName`
-// (encoded "NID#lib#mod") matches; otherwise returns realAddr unchanged. Defined
-// in proc.cpp. Off (identity) by default.
-uintptr_t maybeWrapFiosImport(const char *nidName, uintptr_t realAddr);
 }

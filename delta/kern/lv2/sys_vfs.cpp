@@ -49,6 +49,7 @@
 #include "kern/ps4/dev/vtrm_dev.h"
 #include "kern/proc.h"
 #include "kern/crash.h"
+#include "kern/probe/probe_arm.h"
 #include "kern/vfs.h"
 #include "sys_mem.h"
 #include "sys_vfs_ext.h"
@@ -271,7 +272,7 @@ int PS4ABI sys_open(const char *path, u32 flags, u32 mode) {
   // Flag manifest fds so the read-request setter hook (DELTA_RDOFF_FIX) can
   // force their read offset to 0.
   if (std::strstr(path, ".manifest.bin"))
-    markManifestFd(file->handle(), true);
+    probe::markManifestFd(file->handle(), true);
   // Flag .qar archive fds for the DELTA_QARBUF read-destination trace.
   if (std::strstr(path, ".qar"))
     markQarFd(file->handle(), true);
