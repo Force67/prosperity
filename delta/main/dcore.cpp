@@ -31,16 +31,14 @@
 #include <kern/crash.h>
 #include <kern/probe/probe_arm.h>
 #include <kern/vfs.h>
+#include <kern/vfs_providers.h>
 
 #include "formats/archive_object.h"
-#include "formats/pkg_object.h"
 #include "formats/pup_object.h"
-#include "formats/ufs2_object.h"
+#include "formats/title_metadata.h"
 #include <utl/options.h>
 
 namespace {
-DELTA_OPTION(const char *, kPkgLs, "DELTA_PKG_LS", nullptr);
-DELTA_OPTION(const char *, kPkgDump, "DELTA_PKG_DUMP", nullptr);
 DELTA_OPTION(bool, kHdrFill, "DELTA_HDR_FILL", false);
 }  // namespace
 
@@ -60,109 +58,22 @@ bool deltaCore::init() {
 }
 
 namespace {
+// The window title bar is the only consumer of a title's icon, so only the
+// desktop build pays for reading it.
+#if defined(__linux__) && !defined(__ANDROID__)
+constexpr bool kWantIcon = true;
+#else
+constexpr bool kWantIcon = false;
+#endif
+
 constexpr u64 kMaxSfoSize = 1u << 20;
 constexpr u64 kMaxIconSize = 16u << 20;
 
-// Minimal param.sfo reader: return the string value of `key` (e.g. "TITLE_ID"),
-// or "" if absent. The SFO is a small flat table; all offsets are bounds-checked.
-std::string sfoGet(const u8 *d, size_t n, const char *key) {
-  if (n < 20)
-    return {};
-  auto rd16 = [&](size_t o) -> u16 {
-    return o + 2 <= n ? u16(d[o] | (d[o + 1] << 8)) : 0;
-  };
-  auto rd32 = [&](size_t o) -> u32 {
-    return o + 4 <= n ? u32(d[o]) | (u32(d[o + 1]) << 8) |
-                            (u32(d[o + 2]) << 16) | (u32(d[o + 3]) << 24)
-                      : 0;
-  };
-  if (rd32(0) != 0x46535000u) // "\0PSF"
-    return {};
-  u32 keyStart = rd32(8), dataStart = rd32(12), count = rd32(16);
-  size_t klen = std::strlen(key);
-  for (u32 i = 0, idx = 20; i < count; i++, idx += 16) {
-    if (idx + 16 > n)
-      break;
-    size_t kpos = size_t(keyStart) + rd16(idx);
-    if (kpos + klen + 1 > n)
-      continue;
-    if (std::memcmp(d + kpos, key, klen) != 0 || d[kpos + klen] != '\0')
-      continue;
-    size_t dpos = size_t(dataStart) + rd32(idx + 12);
-    if (dpos >= n)
-      return {};
-    size_t avail = n - dpos, len = rd32(idx + 4);
-    std::string s(reinterpret_cast<const char *>(d + dpos),
-                  len < avail ? len : avail);
-    while (!s.empty() && s.back() == '\0')
-      s.pop_back();
-    return s;
-  }
-  return {};
-}
-
-u32 sfoGetU32(const u8 *d, size_t n, const char *key) {
-  if (n < 20)
-    return 0;
-  auto rd16 = [&](size_t o) -> u16 {
-    return o + 2 <= n ? u16(d[o] | (d[o + 1] << 8)) : 0;
-  };
-  auto rd32 = [&](size_t o) -> u32 {
-    return o + 4 <= n ? u32(d[o]) | (u32(d[o + 1]) << 8) |
-                             (u32(d[o + 2]) << 16) |
-                             (u32(d[o + 3]) << 24)
-                       : 0;
-  };
-  if (rd32(0) != 0x46535000u)
-    return 0;
-  const u32 keyStart = rd32(8), dataStart = rd32(12), count = rd32(16);
-  const size_t keyLength = std::strlen(key);
-  for (u32 i = 0, index = 20; i < count; i++, index += 16) {
-    if (index + 16 > n)
-      break;
-    const size_t keyPosition = size_t(keyStart) + rd16(index);
-    if (keyPosition + keyLength + 1 > n ||
-        std::memcmp(d + keyPosition, key, keyLength) != 0 ||
-        d[keyPosition + keyLength] != '\0')
-      continue;
-    const size_t dataPosition = size_t(dataStart) + rd32(index + 12);
-    return dataPosition + sizeof(u32) <= n ? rd32(dataPosition) : 0;
-  }
-  return 0;
-}
-
-// PS5 titles carry sce_sys/param.json instead of the PS4 param.sfo. Pull one
-// top-level string value out of it (flat file, no nesting on the keys we want).
-std::string jsonGetString(const std::string &js, const char *key) {
-  std::string pat = std::string("\"") + key + "\"";
-  size_t k = js.find(pat);
-  if (k == std::string::npos)
-    return {};
-  size_t colon = js.find(':', k + pat.size());
-  if (colon == std::string::npos)
-    return {};
-  size_t open = js.find('"', colon);
-  size_t close = open == std::string::npos ? open : js.find('"', open + 1);
-  if (close == std::string::npos)
-    return {};
-  return js.substr(open + 1, close - open - 1);
-}
-
-// param.json keeps the display name under localizedParameters.<defaultLanguage>
-// .titleName. Search from the default language's block so a title shipping
-// several languages doesn't pick whichever one happens to come first.
-std::string jsonGetTitleName(const std::string &js) {
-  const std::string lang = jsonGetString(js, "defaultLanguage");
-  if (!lang.empty()) {
-    const size_t block = js.find("\"" + lang + "\"");
-    if (block != std::string::npos) {
-      std::string name = jsonGetString(js.substr(block), "titleName");
-      if (!name.empty())
-        return name;
-    }
-  }
-  return jsonGetString(js, "titleName");
-}
+using formats::jsonGetString;
+using formats::jsonGetTitleName;
+using formats::parseSdkVersion;
+using formats::sfoGet;
+using formats::sfoGetU32;
 
 bool readHostFile(const std::string &path, u64 maxSize,
                   std::vector<u8> &out) {
@@ -186,380 +97,7 @@ std::string parentPath(const base::String &path) {
   return slash == std::string::npos ? std::string(".") : value.substr(0, slash);
 }
 
-// param.json stores sdkVersion as "0xMMmmpppp00000000"; libkernel wants the top
-// half (0x03000000 for a 3.00 title). Empty/unparsable -> 0.
-u32 parseSdkVersion(const std::string &s) {
-  if (s.empty())
-    return 0;
-  return static_cast<u32>(std::strtoull(s.c_str(), nullptr, 0) >> 32);
-}
 
-// Bridges a PkgFilesystem into the kernel VFS as an on-demand virtual mount.
-class PkgProvider : public krnl::vfs::VirtualProvider {
-public:
-  explicit PkgProvider(const base::String &path) : fs_(path) {
-    if (const char *sub = kPkgLs) {
-      std::vector<std::string> all;
-      fs_.paths(all);
-      for (const auto &p : all)
-        if (sub[0] == '1' || p.find(sub) != std::string::npos) {
-          const auto *n = fs_.find(p.c_str());
-          BASE_LOGI("pkg", "{:12}  {}", n ? (long long)n->size : -1LL,
-                    p.c_str());
-        }
-    }
-    if (const char *wantEnv = kPkgDump) {
-      std::string list(wantEnv);
-      size_t pos = 0;
-      while (pos <= list.size()) {
-        size_t comma = list.find(',', pos);
-        std::string want = list.substr(pos, comma == std::string::npos
-                                                ? std::string::npos
-                                                : comma - pos);
-        pos = comma == std::string::npos ? list.size() + 1 : comma + 1;
-        if (want.empty())
-          continue;
-        if (const auto *node = fs_.find(want.c_str())) {
-          std::vector<u8> buf(node->size);
-          i64 n = fs_.read(*node, buf.data(), 0, node->size);
-          const char *base = std::strrchr(want.c_str(), '/');
-          std::string out =
-              std::string("/tmp/") + (base ? base + 1 : want.c_str());
-          if (FILE *f = std::fopen(out.c_str(), "wb")) {
-            std::fwrite(buf.data(), 1, n > 0 ? n : 0, f);
-            std::fclose(f);
-            BASE_LOGI("pkg", "dumped {} -> {} ({} bytes)", want.c_str(),
-                      out.c_str(), (long long)n);
-          }
-        } else {
-          BASE_LOGI("pkg", "DUMP: {} not found", want.c_str());
-        }
-      }
-    }
-  }
-  bool valid() const { return fs_.valid(); }
-
-  // The title's TITLE_ID from the outer-PKG param.sfo (entry 0x1000). That entry
-  // lives in the PKG header, outside the encrypted PFS, so it reads even for
-  // titles (e.g. Isaac) whose only param.sfo copy is there and never appears at
-  // /app0/sce_sys. Returns "" when unavailable.
-  std::string titleId() {
-    std::vector<u8> sfo;
-    if (fs_.readPkgEntry(0x1000, sfo) > 0)
-      return sfoGet(sfo.data(), sfo.size(), "TITLE_ID");
-    return {};
-  }
-
-  std::string title() {
-    std::vector<u8> sfo;
-    if (fs_.readPkgEntry(0x1000, sfo) > 0)
-      return sfoGet(sfo.data(), sfo.size(), "TITLE");
-    return {};
-  }
-
-  u32 attributes() {
-    std::vector<u8> sfo;
-    if (fs_.readPkgEntry(0x1000, sfo) > 0)
-      return sfoGetU32(sfo.data(), sfo.size(), "ATTRIBUTE");
-    return 0;
-  }
-
-  std::vector<u8> icon() {
-    std::vector<u8> png;
-    fs_.readPkgEntry(0x1200, png);
-    return png;
-  }
-
-  // SOTTR workaround: cache every .manifest.bin's bytes keyed by its base name
-  // (e.g. "PRIORITY7_ENGLISH"), so the count-setter can fill the header buffer
-  // with correct data (the engine's async manifest reader races on our threads).
-  void cacheManifests() {
-    if (!kHdrFill)
-      return;
-    std::vector<std::string> all;
-    fs_.paths(all);
-    for (const auto &p : all) {
-      const char *suf = ".manifest.bin";
-      size_t sl = std::strlen(suf);
-      if (p.size() <= sl || p.compare(p.size() - sl, sl, suf) != 0)
-        continue;
-      const auto *node = fs_.find(p.c_str());
-      if (!node)
-        continue;
-      std::vector<u8> buf(node->size);
-      i64 n = fs_.read(*node, buf.data(), 0, node->size);
-      if (n <= 0)
-        continue;
-      buf.resize(static_cast<size_t>(n));
-      size_t start = (p[0] == '/') ? 1 : 0;
-      std::string key = p.substr(start, p.size() - start - sl);
-      krnl::vfs::cacheFile(key, std::move(buf));
-    }
-  }
-
-  std::unique_ptr<krnl::vfs::VirtualFile> open(const char *rel) override {
-    maybeDump();
-    const auto *node = fs_.find(rel);
-    if (!node)
-      return nullptr;
-    return std::make_unique<PkgFile>(&fs_, *node);
-  }
-  void maybeDump() {
-    static bool done = false;
-    const char *want = kPkgDump;
-    if (done || !want)
-      return;
-    done = true;
-    if (const auto *node = fs_.find(want)) {
-      std::vector<u8> buf(node->size);
-      i64 n = fs_.read(*node, buf.data(), 0, node->size);
-      const char *base = std::strrchr(want, '/');
-      std::string out = std::string("/tmp/") + (base ? base + 1 : want);
-      if (FILE *f = std::fopen(out.c_str(), "wb")) {
-        std::fwrite(buf.data(), 1, n > 0 ? n : 0, f);
-        std::fclose(f);
-        BASE_LOGI("pkg", "dumped {} -> {} ({} bytes)", want, out.c_str(),
-                  (long long)n);
-      }
-    }
-  }
-  bool stat(const char *rel, i64 &size) override {
-    const auto *node = fs_.find(rel);
-    if (!node)
-      return false;
-    size = static_cast<i64>(node->size);
-    return true;
-  }
-  bool list(const char *rel, std::vector<krnl::vfs::DirEntry> &out) override {
-    // Build "prefix/" so we match only paths inside this directory. Root ("" or
-    // "/") -> "/". The pkg stores absolute paths with a leading '/'.
-    std::string prefix(rel ? rel : "");
-    while (!prefix.empty() && prefix.back() == '/')
-      prefix.pop_back();
-    prefix += "/";
-    if (prefix.empty() || prefix[0] != '/')
-      prefix.insert(prefix.begin(), '/');
-
-    std::vector<std::string> all;
-    fs_.paths(all);
-    std::set<std::string> seen;
-    for (const auto &p : all) {
-      if (p.size() <= prefix.size() || p.compare(0, prefix.size(), prefix) != 0)
-        continue;
-      std::string rest = p.substr(prefix.size());
-      auto slash = rest.find('/');
-      bool isDir = slash != std::string::npos;
-      std::string child = isDir ? rest.substr(0, slash) : rest;
-      if (!child.empty() && seen.insert(child).second)
-        out.push_back({child, isDir});
-    }
-    return !out.empty();
-  }
-
-private:
-  struct PkgFile : krnl::vfs::VirtualFile {
-    vfs::PkgFilesystem *fs;
-    vfs::PkgFilesystem::Node node;
-    PkgFile(vfs::PkgFilesystem *f, const vfs::PkgFilesystem::Node &n)
-        : fs(f), node(n) {}
-    i64 read(void *buf, i64 off, i64 len) override {
-      return fs->read(node, buf, off, len);
-    }
-    i64 size() override { return static_cast<i64>(node.size); }
-  };
-
-  vfs::PkgFilesystem fs_;
-};
-
-// Bridges a UFS2 (*.ffpkg) game backup into the kernel VFS. The files inside are
-// already decrypted, so this is a straight filesystem mount (no crypto chain).
-class Ufs2Provider : public krnl::vfs::VirtualProvider {
-public:
-  explicit Ufs2Provider(const base::String &path) : fs_(path) {}
-  bool valid() const { return fs_.valid(); }
-
-  std::unique_ptr<krnl::vfs::VirtualFile> open(const char *rel) override {
-    const auto *node = fs_.find(rel);
-    if (!node)
-      return nullptr;
-    return std::make_unique<Ufs2File>(&fs_, *node);
-  }
-  bool stat(const char *rel, i64 &size) override {
-    const auto *node = fs_.find(rel);
-    if (!node)
-      return false;
-    size = static_cast<i64>(node->size);
-    return true;
-  }
-  bool list(const char *rel, std::vector<krnl::vfs::DirEntry> &out) override {
-    std::string prefix(rel ? rel : "");
-    while (!prefix.empty() && prefix.back() == '/')
-      prefix.pop_back();
-    prefix += "/";
-    if (prefix[0] != '/')
-      prefix.insert(prefix.begin(), '/');
-    std::vector<std::string> all;
-    fs_.paths(all);
-    std::set<std::string> seen;
-    for (const auto &p : all) {
-      if (p.size() <= prefix.size() || p.compare(0, prefix.size(), prefix) != 0)
-        continue;
-      std::string rest = p.substr(prefix.size());
-      auto slash = rest.find('/');
-      bool isDir = slash != std::string::npos;
-      std::string child = isDir ? rest.substr(0, slash) : rest;
-      if (!child.empty() && seen.insert(child).second)
-        out.push_back({child, isDir});
-    }
-    return !out.empty();
-  }
-
-  // True when the backup carries a decrypted/ tree of plaintext ELFs.
-  bool hasDecrypted() { return fs_.find("/decrypted/eboot.bin") != nullptr; }
-
-  // The title's id (e.g. "PPSA03311"). PS5 backups carry sce_sys/param.json
-  // instead of the PS4 param.sfo; pull the "titleId" string out of it.
-  std::string titleId() { return paramJsonField("titleId"); }
-
-  std::string title() { return jsonGetTitleName(paramJson()); }
-
-  std::vector<u8> icon() {
-    const auto *node = fs_.find("/sce_sys/icon0.png");
-    if (!node || node->size > kMaxIconSize)
-      return {};
-    std::vector<u8> png(node->size);
-    const i64 read = fs_.read(*node, png.data(), 0, node->size);
-    if (read <= 0)
-      return {};
-    png.resize(static_cast<size_t>(read));
-    return png;
-  }
-
-  // param.json spells the SDK version as a 64-bit hex string ("0x0300...")
-  // whose top half is the 0xMMmmpppp form libkernel compares against.
-  u32 sdkVersion() { return parseSdkVersion(paramJsonField("sdkVersion")); }
-
-private:
-  std::string paramJson() {
-    const auto *node = fs_.find("/sce_sys/param.json");
-    if (!node || node->size > (1u << 20))
-      return {};
-    std::string js(node->size, '\0');
-    if (fs_.read(*node, js.data(), 0, static_cast<i64>(js.size())) <= 0)
-      return {};
-    return js;
-  }
-
-  std::string paramJsonField(const char *key) {
-    return jsonGetString(paramJson(), key);
-  }
-
-  struct Ufs2File : krnl::vfs::VirtualFile {
-    vfs::Ufs2Filesystem *fs;
-    vfs::Ufs2Filesystem::Node node;
-    Ufs2File(vfs::Ufs2Filesystem *f, const vfs::Ufs2Filesystem::Node &n)
-        : fs(f), node(n) {}
-    i64 read(void *buf, i64 off, i64 len) override {
-      return fs->read(node, buf, off, len);
-    }
-    i64 size() override { return static_cast<i64>(node.size); }
-  };
-
-  vfs::Ufs2Filesystem fs_;
-};
-
-// Bridges a plain .rar/.zip of a game dump into the kernel VFS. Same shape as
-// the pkg and ufs2 providers, but the archive holds an ordinary extracted app
-// tree, so the only work beyond decompression is reading the metadata out of it
-// to tell a PS4 title from a PS5 one.
-class ArchiveProvider : public krnl::vfs::VirtualProvider {
-public:
-  explicit ArchiveProvider(const base::String &path) : fs_(path) {}
-  bool valid() const { return fs_.valid(); }
-
-  std::unique_ptr<krnl::vfs::VirtualFile> open(const char *rel) override {
-    const auto *node = fs_.find(rel);
-    if (!node)
-      return nullptr;
-    return std::make_unique<ArchiveFile>(&fs_, *node);
-  }
-  bool stat(const char *rel, i64 &size) override {
-    const auto *node = fs_.find(rel);
-    if (!node)
-      return false;
-    size = static_cast<i64>(node->size);
-    return true;
-  }
-  bool list(const char *rel, std::vector<krnl::vfs::DirEntry> &out) override {
-    std::vector<vfs::ArchiveFilesystem::Child> children;
-    if (!fs_.list(rel, children))
-      return false;
-    for (auto &c : children)
-      out.push_back({std::move(c.name), c.isDir});
-    return true;
-  }
-
-  // A PS5 dump carries sce_sys/param.json, a PS4 one sce_sys/param.sfo.
-  bool isPs5() { return fs_.find("/sce_sys/param.json") != nullptr; }
-  bool hasDecrypted() { return fs_.find("/decrypted/eboot.bin") != nullptr; }
-
-  std::string titleId() {
-    if (isPs5())
-      return jsonGetString(paramJson(), "titleId");
-    std::vector<u8> sfo = readWhole("/sce_sys/param.sfo", kMaxSfoSize);
-    return sfoGet(sfo.data(), sfo.size(), "TITLE_ID");
-  }
-
-  std::string title() {
-    if (isPs5())
-      return jsonGetTitleName(paramJson());
-    std::vector<u8> sfo = readWhole("/sce_sys/param.sfo", kMaxSfoSize);
-    return sfoGet(sfo.data(), sfo.size(), "TITLE");
-  }
-
-  u32 attributes() {
-    std::vector<u8> sfo = readWhole("/sce_sys/param.sfo", kMaxSfoSize);
-    return sfoGetU32(sfo.data(), sfo.size(), "ATTRIBUTE");
-  }
-
-  u32 sdkVersion() {
-    return parseSdkVersion(jsonGetString(paramJson(), "sdkVersion"));
-  }
-
-  std::vector<u8> icon() { return readWhole("/sce_sys/icon0.png", kMaxIconSize); }
-
-private:
-  std::vector<u8> readWhole(const char *rel, u64 maxSize) {
-    const auto *node = fs_.find(rel);
-    if (!node || node->size == 0 || node->size > maxSize)
-      return {};
-    std::vector<u8> buf(node->size);
-    const i64 read = fs_.read(*node, buf.data(), 0, static_cast<i64>(buf.size()));
-    if (read <= 0)
-      return {};
-    buf.resize(static_cast<size_t>(read));
-    return buf;
-  }
-
-  std::string paramJson() {
-    const std::vector<u8> js = readWhole("/sce_sys/param.json", kMaxSfoSize);
-    return std::string(js.begin(), js.end());
-  }
-
-  struct ArchiveFile : krnl::vfs::VirtualFile {
-    vfs::ArchiveFilesystem *fs;
-    vfs::ArchiveFilesystem::Node node;
-    ArchiveFile(vfs::ArchiveFilesystem *f,
-                const vfs::ArchiveFilesystem::Node &n)
-        : fs(f), node(n) {}
-    i64 read(void *buf, i64 off, i64 len) override {
-      return fs->read(node, buf, off, len);
-    }
-    i64 size() override { return static_cast<i64>(node.size); }
-  };
-
-  vfs::ArchiveFilesystem fs_;
-};
 
 bool endsWithIgnoreCase(const base::String &s, const char *ext) {
   size_t n = s.length(), e = std::strlen(ext);
@@ -617,63 +155,52 @@ void deltaCore::boot(const base::String &xdir) {
 #endif
 
   if (isPkg) {
-    auto provider = std::make_shared<PkgProvider>(path);
-    if (!provider->valid()) {
-      LOG_ERROR("failed to load pkg {}", path.c_str());
+    auto mount = krnl::vfs::mountPkg(path, kWantIcon);
+    if (!mount)
       return;
-    }
-    krnl::vfs::mountVirtual("/app0", provider);
-    provider->cacheManifests();
+    krnl::vfs::mountVirtual("/app0", mount.provider);
     // Publish the title id so savedata can give this game its own host save
     // root (else saves for different titles collide under one directory).
-    krnl::vfs::setTitleId(provider->titleId());
-    gameTitle = provider->title();
-    ps4Attributes = provider->attributes();
+    krnl::vfs::setTitleId(mount.titleId);
+    gameTitle = mount.title;
+    ps4Attributes = mount.attributes;
 #if defined(__linux__) && !defined(__ANDROID__)
-    gameIcon = provider->icon();
+    gameIcon = std::move(mount.icon);
 #endif
     mainModule = base::String("/app0/eboot.bin");
   } else if (isFfpkg) {
     // PS5 game backup (UFS2). Mount it at /app0 and prefer the decrypted/ tree
     // of plaintext ELFs when the dump provides one (the top-level eboot.bin is a
     // still-encrypted SELF).
-    auto provider = std::make_shared<Ufs2Provider>(path);
-    if (!provider->valid()) {
-      LOG_ERROR("failed to load ffpkg {}", path.c_str());
+    auto mount = krnl::vfs::mountFfpkg(path, kWantIcon);
+    if (!mount)
       return;
-    }
-    bool decrypted = provider->hasDecrypted();
-    krnl::vfs::mountVirtual("/app0", provider);
-    krnl::vfs::setTitleId(provider->titleId());
-    gameTitle = provider->title();
+    krnl::vfs::mountVirtual("/app0", mount.provider);
+    krnl::vfs::setTitleId(mount.titleId);
+    gameTitle = mount.title;
 #if defined(__linux__) && !defined(__ANDROID__)
-    gameIcon = provider->icon();
+    gameIcon = std::move(mount.icon);
 #endif
-    sdkVersion = provider->sdkVersion();
-    mainModule = base::String(decrypted ? "/app0/decrypted/eboot.bin"
-                                        : "/app0/eboot.bin");
+    sdkVersion = mount.sdkVersion;
+    mainModule = base::String(mount.hasDecrypted ? "/app0/decrypted/eboot.bin"
+                                                 : "/app0/eboot.bin");
     LOG_INFO("mounted ffpkg at /app0 ({}), boot module {}",
              krnl::vfs::titleId().c_str(), mainModule.c_str());
   } else if (isArchive) {
-    auto provider = std::make_shared<ArchiveProvider>(path);
-    if (!provider->valid()) {
-      LOG_ERROR("failed to load archive {}", path.c_str());
+    auto mount = krnl::vfs::mountArchive(path, kWantIcon);
+    if (!mount)
       return;
-    }
-    isPs5Archive = provider->isPs5();
-    const bool decrypted = provider->hasDecrypted();
-    krnl::vfs::setTitleId(provider->titleId());
-    gameTitle = provider->title();
-    if (isPs5Archive)
-      sdkVersion = provider->sdkVersion();
-    else
-      ps4Attributes = provider->attributes();
+    isPs5Archive = mount.isPs5;
+    krnl::vfs::setTitleId(mount.titleId);
+    gameTitle = mount.title;
+    sdkVersion = mount.sdkVersion;
+    ps4Attributes = mount.attributes;
 #if defined(__linux__) && !defined(__ANDROID__)
-    gameIcon = provider->icon();
+    gameIcon = std::move(mount.icon);
 #endif
-    krnl::vfs::mountVirtual("/app0", provider);
-    mainModule = base::String(decrypted ? "/app0/decrypted/eboot.bin"
-                                        : "/app0/eboot.bin");
+    krnl::vfs::mountVirtual("/app0", mount.provider);
+    mainModule = base::String(mount.hasDecrypted ? "/app0/decrypted/eboot.bin"
+                                                 : "/app0/eboot.bin");
     LOG_INFO("mounted archive at /app0 ({}), boot module {}",
              krnl::vfs::titleId().c_str(), mainModule.c_str());
   } else if (isAppDir) {
