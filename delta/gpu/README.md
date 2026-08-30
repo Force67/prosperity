@@ -11,6 +11,7 @@ ps5/            AGC / gfx10.3 command processor + the RDNA2 decoder/emitter
 shaders/        prebuilt SPIR-V for the heuristic quad path
 guest_memory.h  safe reads of guest memory shared by both command processors
 gpu_check.h     GPU_BUGCHECK: always-on fail-fast checks for module invariants
+gpu_perf.h      the frame-time counters and clock every unit in the module feeds
 tests/          unit tests + the layering check
 ```
 
@@ -67,7 +68,7 @@ One unit per decision, roughly in dependency order:
 | `vk_draw_recomp` | running the game's own recompiled VS/PS for a draw |
 | `vk_draw` | the draw entry point and the heuristic quad fallback |
 | `vk_frame` | the two-slot frame ring, readback and presentation of a finished frame |
-| `vk_perf` | where frame time goes, and the on-screen overlay |
+| `vk_perf` | reporting `gpu_perf.h`'s counters: the FPS line and the on-screen overlay |
 | `vk_capture` / `vk_present` | frames out to disk / to the window |
 
 Rendering is offscreen: there is no swapchain on this device. Each draw renders

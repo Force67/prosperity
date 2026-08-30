@@ -19,7 +19,7 @@
 #include "gpu/rhi/renderer.h"
 #include "gpu/vulkan/vk_backend.h"
 #include "gpu/vulkan/vk_debug.h"
-#include "gpu/vulkan/vk_perf.h"
+#include "gpu/gpu_perf.h"
 #include "gpu/vulkan/vk_frame.h"
 #include "gpu/vulkan/vk_trace.h"
 #include "gpu/vulkan/vk_upload_ring.h"

@@ -16,7 +16,7 @@
 #include "gpu/ps5/rdna/rdna_compute.h"
 #include "gpu/ps5/rdna/rdna_decode.h"
 #include "gpu/ps5/rdna/rdna_translate.h"
-#include "gpu/vulkan/vk_perf.h"
+#include "gpu/gpu_perf.h"
 
 #include <base/logging.h>
 #include <utl/options.h>
@@ -87,9 +87,9 @@ struct ComputeKeyHash {
 // points are reached directly, so without this `sh=` on the FPS line reads zero
 // on PS5 no matter how long a burst of first-use shaders takes.
 struct RecompTimer {
-  u64 t0 = vk::NowNs();
+  u64 t0 = NowNs();
   ~RecompTimer() {
-    gcn::g_ns_recomp += vk::NowNs() - t0;
+    gcn::g_ns_recomp += NowNs() - t0;
     gcn::g_recomp_n++;
   }
 };

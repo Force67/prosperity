@@ -6,7 +6,7 @@
 #include "base/arch.h"
 
 #include "gfx/gfx.h"
-#include "gpu/vulkan/vk_perf.h"
+#include "gpu/gpu_perf.h"
 
 #include <condition_variable>
 #include <mutex>

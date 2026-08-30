@@ -24,7 +24,7 @@
 #include "gpu/ps5/guest_address.h"
 #include "gpu/ps5/rdna/rdna_resource.h"
 #include "gpu/ps5/shader_cache.h"
-#include "gpu/vulkan/vk_perf.h"
+#include "gpu/gpu_perf.h"
 
 namespace {
 DELTA_OPTION(bool, kNoDepth, "DELTA_GPU_NODEPTH", false);
@@ -849,8 +849,8 @@ void ResolveRecompiledShaders(const Regs& regs,
 bool BuildDrawInfo(const Regs& regs,
                    const DrawPacket& packet,
                    rhi::DrawInfo& d) {
-  vk::ScopeNs _build_timer(&vk::g_ns_build_draw);
-  vk::g_build_draw_n++;
+  ScopeNs _build_timer(&g_ns_build_draw);
+  g_build_draw_n++;
   const ShaderBinding binding = ResolveShaderBinding(regs);
   TraceShaderListing(binding.vs_addr);
   TraceShaderListing(binding.ps_addr);

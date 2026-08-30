@@ -9,7 +9,7 @@
 #include "gpu/gcn/spirv/spv_post.h"
 #include "base/arch.h"
 #include "gpu/gcn/gcn_translate.h"
-#include "gpu/vulkan/vk_perf.h"
+#include "gpu/gpu_perf.h"
 
 #include <base/logging.h>
 
@@ -28,7 +28,7 @@
 
 namespace gpu::gcn::spirv {
 
-using gpu::vk::NowNs;
+using gpu::NowNs;
 
 namespace {
 // DELTA_GPU_SPIRV_OPT: 2 = legalize + performance passes, 1 = legalize only,

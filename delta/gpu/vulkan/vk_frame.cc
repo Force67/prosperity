@@ -15,6 +15,7 @@
 #include "gpu/vulkan/vk_device.h"
 #include "gpu/vulkan/vk_draw_recomp.h"
 #include "gpu/vulkan/vk_format.h"
+#include "gpu/gpu_perf.h"
 #include "gpu/vulkan/vk_perf.h"
 #include "gpu/vulkan/vk_pipeline_cache.h"
 #include "gpu/vulkan/vk_present.h"

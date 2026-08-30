@@ -10,6 +10,8 @@ Rules enforced (see delta/gpu/README.md):
            gpu/gcn/ (recompiled-program types only) -- never a command
            processor or register file
   tests/   may include anything in gpu/
+Module-root headers (gpu/guest_memory.h, gpu/gpu_check.h, gpu/gpu_perf.h) are
+reachable from every directory and themselves include nothing in the module.
 Outside delta/gpu, only the public surface is reachable:
   gpu/rhi/*, gpu/ps4/cmd_processor.h, gpu/ps5/cmd_processor.h
 
@@ -23,26 +25,31 @@ ROOT = sys.argv[1] if len(sys.argv) > 1 else '.'
 GPU = os.path.join(ROOT, 'delta', 'gpu')
 DELTA = os.path.join(ROOT, 'delta')
 
+# Reachable from every directory; they include nothing in the module.
+ROOT_HEADERS = ('gpu/guest_memory.h', 'gpu/gpu_check.h', 'gpu/gpu_perf.h')
+
 ALLOWED = {
     'rhi': ('gpu/rhi/',),
     # The shared ISA decode + SPIR-V translator both consoles emit through. It
     # is the bottom of the recompiler stack, so it may not reach back up into a
     # console's command processor.
-    'gcn': ('gpu/gcn/', 'gpu/guest_memory.h', 'gpu/gpu_check.h'),
-    'ps4': ('gpu/ps4/', 'gpu/gcn/', 'gpu/rhi/', 'gpu/guest_memory.h'),
+    'gcn': ('gpu/gcn/', *ROOT_HEADERS),
+    'ps4': ('gpu/ps4/', 'gpu/gcn/', 'gpu/rhi/', *ROOT_HEADERS),
     # gpu/ps4/pm4.h: AGC command streams are PM4-framed, the packet framing
     # header is shared with the PS4 path.
-    'ps5': ('gpu/ps5/', 'gpu/gcn/', 'gpu/ps4/pm4.h', 'gpu/rhi/',
-            'gpu/guest_memory.h'),
-    # The gcn allowance is the two headers the backend actually consumes (the
-    # recompiled-program types and the detiler), not the directory: a backend
-    # reaching into the decoder or spirv/ internals is a layering bug.
+    'ps5': ('gpu/ps5/', 'gpu/gcn/', 'gpu/ps4/pm4.h', 'gpu/rhi/', *ROOT_HEADERS),
+    # The gcn allowance is the three headers the backend actually consumes (the
+    # recompiled-program types, the resource sharps and the detiler), not the
+    # directory: a backend reaching into the decoder or spirv/ internals is a
+    # layering bug.
     'vulkan': ('gpu/vulkan/', 'gpu/rhi/', 'gpu/shaders/',
-               'gpu/guest_memory.h', 'gpu/gpu_check.h',
-               'gpu/gcn/gcn_translate.h', 'gpu/gcn/gcn_detile.h'),
+               *ROOT_HEADERS,
+               'gpu/gcn/gcn_translate.h', 'gpu/gcn/gcn_detile.h',
+               'gpu/gcn/gcn_resource.h'),
     'tests': ('gpu/',),
     'shaders': (),
-    '': (),  # module-root headers depend on nothing in the module
+    # The module root depends on nothing in the module but itself.
+    '': ROOT_HEADERS,
 }
 
 PUBLIC = ('gpu/rhi/', 'gpu/ps4/cmd_processor.h', 'gpu/ps5/cmd_processor.h')

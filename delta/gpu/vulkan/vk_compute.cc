@@ -21,6 +21,7 @@
 #include "gpu/vulkan/vk_format.h"
 #include "gpu/vulkan/vk_frame.h"
 #include "gpu/vulkan/vk_hash.h"
+#include "gpu/gpu_perf.h"
 #include "gpu/vulkan/vk_perf.h"
 #include "gpu/vulkan/vk_render_target.h"
 #include "gpu/vulkan/vk_texture_cache.h"

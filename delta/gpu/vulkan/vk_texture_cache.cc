@@ -17,7 +17,7 @@
 #include "gpu/vulkan/vk_frame.h"
 #include "gpu/vulkan/vk_hash.h"
 #include "gpu/vulkan/vk_memory.h"
-#include "gpu/vulkan/vk_perf.h"
+#include "gpu/gpu_perf.h"
 #include "gpu/vulkan/vk_render_target.h"
 #include "gpu/vulkan/vk_upload_ring.h"
 
