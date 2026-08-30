@@ -25,6 +25,8 @@
 #include <gfx/gfx.h>
 #include <gpu/ps4/cmd_processor.h>
 #include <gpu/rhi/renderer.h>
+#include <gfx/gfx_audio.h>
+#include <kern/ps4/audio_sink.h>
 #include <kern/ps4/hardware_mode.h>
 #include <kern/crash.h>
 #include <kern/probe/probe_arm.h>
@@ -47,11 +49,13 @@ deltaCore::~deltaCore() = default;
 
 bool deltaCore::init() {
   LOG_INFO("Initializing deltaCore " rsc_copyright);
-  // Two collaborators kern is not allowed to name: the PM4 write-watch the
-  // probes arm, and the CS-range describer the crash dump asks for. The
-  // composition root introduces them.
+  // Three collaborators kern is not allowed to name: the PM4 write-watch the
+  // probes arm, the CS-range describer the crash dump asks for, and the audio
+  // daemon's host sink. The composition root introduces them.
   gpu::ps4::SetWriteWatchCallback(&krnl::probe::startWriteWatch);
   krnl::setCsRangeDescriber(&gpu::rhi::DescribeCsRangeCovering);
+  krnl::ps4::setAudioSink({prosperity_audio_open, prosperity_audio_output,
+                           prosperity_audio_volume, prosperity_audio_close});
   return true;
 }
 

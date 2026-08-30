@@ -82,7 +82,7 @@
 #include <unordered_map>
 #include <vector>
 
-#include "gfx/gfx_audio.h"
+#include "kern/ps4/audio_sink.h"
 #include "kern/lv2/sys_event_flag.h"
 #include <utl/options.h>
 
@@ -123,7 +123,7 @@ struct Region {
 };
 
 struct Port {
-  int sink = -1;  // gfx_audio handle
+  int sink = -1;  // AudioSink handle
   u32 bpf = 0, type = 0, rate = 0, grain = 0, channels = 0;
   float gain = 1.f;
   u64 nextDueUs = 0;
@@ -292,14 +292,16 @@ void daemonMain() {
         if (!p.configured || p.bpf != bpf || p.type != type || p.rate != rate ||
             p.channels != channels) {
           if (p.sink >= 0) {
-            prosperity_audio_close(p.sink);
+            if (auto f = ps4::audioSink().close) f(p.sink);
             p.sink = -1;
           }
           p.bpf = bpf; p.type = type; p.rate = rate; p.grain = grain;
           p.channels = channels;
           p.configured = true;
           if (type == 0 || type == 1) {
-            p.sink = prosperity_audio_open(rate, channels, type == 1 ? 1 : 0);
+            p.sink = ps4::audioSink().open
+                         ? ps4::audioSink().open(rate, channels, type == 1 ? 1 : 0)
+                         : -1;
             BASE_LOGI("audiod",
                       "port {} -> sink {}: {}ch {} {}Hz grain={} (bpf={})",
                       k, p.sink, channels, type == 1 ? "f32" : "s16", rate,
@@ -346,9 +348,9 @@ void daemonMain() {
             want = p.gain;
           if (want < p.gain - 0.001f || want > p.gain + 0.001f) {
             p.gain = want;
-            prosperity_audio_volume(p.sink, want);
+            if (auto f = ps4::audioSink().volume) f(p.sink, want);
           }
-          prosperity_audio_output(p.sink, block.data(), grain);
+          if (auto f = ps4::audioSink().output) f(p.sink, block.data(), grain);
         } else {
           p.dropped++;
         }
@@ -439,3 +441,11 @@ void audioDaemonNoticeShm(const char *name, u8 *base, size_t size) {
 }
 
 }  // namespace krnl
+
+namespace krnl::ps4 {
+namespace {
+AudioSink g_sink;
+}
+void setAudioSink(const AudioSink &sink) { g_sink = sink; }
+const AudioSink &audioSink() { return g_sink; }
+}  // namespace krnl::ps4
