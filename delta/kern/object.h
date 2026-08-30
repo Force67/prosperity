@@ -19,6 +19,7 @@
 
 namespace krnl {
 class proc;
+class objectTable;
 
 class kObject {
 public:
@@ -33,7 +34,7 @@ public:
     shm,
   };
 
-  explicit kObject(proc *, oType);
+  explicit kObject(objectTable &, oType);
   // Must be virtual: derived devices add virtual methods, so without a virtual
   // dtor the kObject subobject sits past the vptr (offset 8) and `delete this`
   // in release() would free an interior pointer (invalid free) and skip the
@@ -58,7 +59,7 @@ public:
 
 protected:
   oType otype;
-  proc *process;
+  objectTable &objects;
   base::String name;
 
 private:

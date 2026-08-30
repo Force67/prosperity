@@ -8,7 +8,7 @@
 #include "file_dev.h"
 
 namespace krnl {
-authmgrDevice::authmgrDevice(proc *p) : device(p) {}
+authmgrDevice::authmgrDevice(objectTable &objects) : device(objects) {}
 
 i32 authmgrDevice::ioctl(u32 cmd, void *data) {
   if (!data)

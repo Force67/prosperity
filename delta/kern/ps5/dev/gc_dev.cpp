@@ -68,7 +68,7 @@ static void traceFlip(const char *site, u64 base) {
 }
 
 namespace krnl {
-gcDevicePs5::gcDevicePs5(proc *p) : device(p) {}
+gcDevicePs5::gcDevicePs5(objectTable &objects) : device(objects) {}
 
 bool gcDevicePs5::init(const char *, u32, u32) { return true; }
 

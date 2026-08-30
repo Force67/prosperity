@@ -11,7 +11,7 @@ class proc;
 // memory disks, so queries/detaches report "not found" and list is empty.
 class mdctlDevice : public device {
 public:
-  mdctlDevice(proc *p);
+  mdctlDevice(objectTable &objects);
 
   i32 ioctl(u32 command, void *args) override;
   i64 lseek(i64, int) override;

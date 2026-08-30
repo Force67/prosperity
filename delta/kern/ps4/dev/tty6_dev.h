@@ -8,7 +8,7 @@
 namespace krnl {
 class tty6Device : public device {
 public:
-  tty6Device(proc *);
+  tty6Device(objectTable &);
 
   bool init(const char *, u32, u32) override;
   u8 *map(void *, size_t, u32, u32, size_t) override;

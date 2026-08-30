@@ -3,7 +3,7 @@
 
 #include <gtest/gtest.h>
 
-#include "kern/proc.h"
+#include "kern/util/object_table.h"
 #include "kern/ps4/dev/console_dev.h"
 #include "kern/ps4/dev/file_dev.h"
 #include "kern/lv2/error_table.h"
@@ -15,11 +15,12 @@ namespace {
 
 class ConsoleDevice : public ::testing::Test {
 protected:
-  // A device registers itself in its process' object table, which then owns it,
-  // so it has to be built the way the kernel builds one.
-  ConsoleDevice() : dev_(*new krnl::consoleDevice(&proc_)) {}
+  // A device registers itself in the object table it is handed, which then owns
+  // it, so it has to be built the way the kernel builds one -- but that table is
+  // the whole of what it needs, so no process is involved.
+  ConsoleDevice() : dev_(*new krnl::consoleDevice(objects_)) {}
 
-  krnl::proc proc_;
+  krnl::objectTable objects_;
   krnl::consoleDevice &dev_;
 };
 

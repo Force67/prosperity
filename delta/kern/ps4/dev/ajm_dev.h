@@ -23,7 +23,7 @@ class proc;
 // init complete; no sound plays.
 class ajmDevice : public device {
 public:
-  ajmDevice(proc *);
+  ajmDevice(objectTable &);
   i32 ioctl(u32 command, void *args) override;
 };
 } // namespace krnl

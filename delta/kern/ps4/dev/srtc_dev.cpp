@@ -8,7 +8,7 @@
 #include "srtc_dev.h"
 
 namespace krnl {
-srtcDevice::srtcDevice(proc *p) : device(p) {}
+srtcDevice::srtcDevice(objectTable &objects) : device(objects) {}
 
 i32 srtcDevice::ioctl(u32 cmd, void *data) {
   BASE_LOGI("srtc", "UNHANDLED ioctl({:#x})", cmd);

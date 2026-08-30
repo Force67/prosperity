@@ -49,7 +49,7 @@ void fillStat(SceKernelStat &out, u16 mode, i64 size);
 // A regular host-backed file exposed to the guest through the object table.
 class fileDevice : public device {
 public:
-  explicit fileDevice(proc *p);
+  explicit fileDevice(objectTable &objects);
 
   // Open the resolved host path. Returns false if it doesn't exist.
   bool open(const base::String &hostPath, u32 flags);

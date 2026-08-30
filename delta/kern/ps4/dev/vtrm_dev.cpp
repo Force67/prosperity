@@ -8,7 +8,7 @@
 #include "vtrm_dev.h"
 
 namespace krnl {
-vtrmDevice::vtrmDevice(proc *p) : device(p) {}
+vtrmDevice::vtrmDevice(objectTable &objects) : device(objects) {}
 
 i32 vtrmDevice::ioctl(u32 cmd, void *data) {
   BASE_LOGI("vtrm", "UNHANDLED ioctl({:#x})", cmd);

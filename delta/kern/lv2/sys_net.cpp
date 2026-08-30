@@ -105,7 +105,7 @@ int PS4ABI sys_socket(i32 domain, i32 type, i32 protocol) {
   if (hostDomain != -1 && (type == kBsdSockDgram || type == kSceSockDgramP2p)) {
     int fd = ::socket(hostDomain, SOCK_DGRAM, 0);
     if (fd >= 0) {
-      auto *dev = new socketDevice(proc::getActive(), fd, domain);
+      auto *dev = new socketDevice(proc::getActive()->getObjTable(), fd, domain);
       dev->setName("socket");  // so a diagnostic can say what it landed on
       BASE_LOGI("net", "socket(domain={} type={}) -> fd={} (host {})", domain,
                 type, dev->handle(), fd);

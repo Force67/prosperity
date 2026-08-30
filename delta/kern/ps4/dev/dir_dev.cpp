@@ -24,8 +24,8 @@ struct fbsd_dirent {
 };
 enum { kDtDir = 4, kDtReg = 8 };
 
-dirDevice::dirDevice(proc *p, std::vector<vfs::DirEntry> &&entries)
-    : device(p), entries_(std::move(entries)) {}
+dirDevice::dirDevice(objectTable &objects, std::vector<vfs::DirEntry> &&entries)
+    : device(objects), entries_(std::move(entries)) {}
 
 i64 dirDevice::getdents(void *buf, size_t len) {
   auto *p = static_cast<u8 *>(buf);

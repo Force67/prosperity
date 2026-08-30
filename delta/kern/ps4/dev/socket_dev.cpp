@@ -100,8 +100,8 @@ int fromErrno() { return -errno; }
 
 }  // namespace
 
-socketDevice::socketDevice(proc *p, int hostFd, int guestFamily)
-    : device(p), fd_(hostFd), family_(guestFamily) {}
+socketDevice::socketDevice(objectTable &objects, int hostFd, int guestFamily)
+    : device(objects), fd_(hostFd), family_(guestFamily) {}
 
 socketDevice::~socketDevice() {
   if (fd_ >= 0)

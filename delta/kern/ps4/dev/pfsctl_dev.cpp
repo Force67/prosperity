@@ -8,7 +8,7 @@
 #include "pfsctl_dev.h"
 
 namespace krnl {
-pfsctlDevice::pfsctlDevice(proc *p) : device(p) {}
+pfsctlDevice::pfsctlDevice(objectTable &objects) : device(objects) {}
 
 i32 pfsctlDevice::ioctl(u32 cmd, void *data) {
   BASE_LOGI("pfsctl", "UNHANDLED ioctl({:#x})", cmd);

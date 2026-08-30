@@ -16,7 +16,7 @@ constexpr u32 kMdQuery  = 0xc1c06d02;
 constexpr u32 kMdList   = 0xc1c06d03;
 } // namespace
 
-mdctlDevice::mdctlDevice(proc *p) : device(p) {}
+mdctlDevice::mdctlDevice(objectTable &objects) : device(objects) {}
 
 i32 mdctlDevice::ioctl(u32 cmd, void *data) {
   auto *args = static_cast<u8 *>(data);

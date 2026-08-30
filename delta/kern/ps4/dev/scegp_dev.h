@@ -11,7 +11,7 @@ class proc;
 // commands soft-succeed.
 class sceGpDevice : public device {
 public:
-  sceGpDevice(proc *p);
+  sceGpDevice(objectTable &objects);
 
   i32 ioctl(u32 command, void *args) override;
   i64 lseek(i64, int) override;

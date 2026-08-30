@@ -27,7 +27,7 @@ DELTA_OPTION(bool, kDceTrace, "DELTA_DCE_TRACE", false);
 }  // namespace
 
 namespace krnl {
-dceDevice::dceDevice(proc *p) : device(p) {}
+dceDevice::dceDevice(objectTable &objects) : device(objects) {}
 
 // A monotonic nanosecond timestamp and a wall-clock ~60 Hz vblank counter. The
 // GameMaker runner (and sceVideoOutWaitVblank) busy-polls sceVideoOutGet-

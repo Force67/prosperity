@@ -15,7 +15,7 @@
 #include "dipsw_dev.h"
 
 namespace krnl {
-dipswDevice::dipswDevice(proc *p) : device(p) {}
+dipswDevice::dipswDevice(objectTable &objects) : device(objects) {}
 
 /* dipsw_dev_ioctl */
 i32 dipswDevice::ioctl(u32 cmd, void *data) {

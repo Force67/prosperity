@@ -664,7 +664,7 @@ int runLight(hidSource &src, void *data, bool reset) {
 }  // namespace
 
 namespace krnl {
-hidDevice::hidDevice(proc *p) : device(p) {}
+hidDevice::hidDevice(objectTable &objects) : device(objects) {}
 
 i32 hidDevice::ioctl(u32 cmd, void *data) {
   // Passthrough off: mirror the real device's system-only soft-fail.

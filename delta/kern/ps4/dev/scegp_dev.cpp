@@ -8,7 +8,7 @@
 #include "scegp_dev.h"
 
 namespace krnl {
-sceGpDevice::sceGpDevice(proc *p) : device(p) {}
+sceGpDevice::sceGpDevice(objectTable &objects) : device(objects) {}
 
 i32 sceGpDevice::ioctl(u32 cmd, void *data) {
   BASE_LOGI("sceGp", "UNHANDLED ioctl({:#x})", cmd);

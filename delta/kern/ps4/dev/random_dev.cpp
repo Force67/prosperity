@@ -26,7 +26,7 @@ bool zeroEntropy() {
 }
 } // namespace
 
-randomDevice::randomDevice(proc *p) : device(p) {}
+randomDevice::randomDevice(objectTable &objects) : device(objects) {}
 
 i64 randomDevice::read(void *buf, size_t len) {
   if (!buf)

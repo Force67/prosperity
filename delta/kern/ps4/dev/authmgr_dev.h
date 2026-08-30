@@ -12,7 +12,7 @@ class proc;
 // through the npdrm device, but register a functional table regardless.
 class authmgrDevice : public device {
 public:
-  authmgrDevice(proc *p);
+  authmgrDevice(objectTable &objects);
 
   i32 ioctl(u32 command, void *args) override;
   i64 lseek(i64, int) override;

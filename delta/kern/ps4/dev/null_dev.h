@@ -11,7 +11,7 @@ class proc;
 // to discard output.
 class nullDevice : public device {
 public:
-  nullDevice(proc *p);
+  nullDevice(objectTable &objects);
 
   i64 read(void *, size_t) override;
   i64 write(const void *, size_t) override;

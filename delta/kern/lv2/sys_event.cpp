@@ -222,7 +222,8 @@ void noteFlip() {
   triggerAllEqueues(-1, kEVFILT_DISPLAY, data);
 }
 
-equeue::equeue(proc *p, const char *nm) : kObject(p, oType::equeue) {
+equeue::equeue(objectTable &objects, const char *nm)
+    : kObject(objects, oType::equeue) {
   if (nm)
     name = nm;
   std::lock_guard<std::mutex> lk(g_eqRegM);
@@ -518,13 +519,13 @@ void triggerAllEqueues(i64 ident, i16 filter, i64 data) {
 }
 
 int PS4ABI sys_kqueue() {
-  auto *eq = new equeue(proc::getActive(), nullptr);
+  auto *eq = new equeue(proc::getActive()->getObjTable(), nullptr);
   BASE_LOGI("kqueue", "-> fd={}", eq->handle());
   return eq->handle();
 }
 
 int PS4ABI sys_kqueueex(const char *name, int flags) {
-  auto *eq = new equeue(proc::getActive(), name);
+  auto *eq = new equeue(proc::getActive()->getObjTable(), name);
   BASE_LOGI("kqueueex", "name={} flags={:#x} -> fd={}",
             name ? name : "(null)", flags, eq->handle());
   return eq->handle();

@@ -11,7 +11,7 @@ class proc;
 // soft-succeed.
 class pfsctlDevice : public device {
 public:
-  pfsctlDevice(proc *p);
+  pfsctlDevice(objectTable &objects);
 
   i32 ioctl(u32 command, void *args) override;
   i64 lseek(i64, int) override;

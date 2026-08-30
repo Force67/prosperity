@@ -16,7 +16,7 @@ class proc;
 
 class dipswDevice : public device {
 public:
-  dipswDevice(proc *);
+  dipswDevice(objectTable &);
 
   i32 ioctl(u32 command, void *args) override;
 };

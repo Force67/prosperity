@@ -6,7 +6,7 @@
 #include "null_dev.h"
 
 namespace krnl {
-nullDevice::nullDevice(proc *p) : device(p) {}
+nullDevice::nullDevice(objectTable &objects) : device(objects) {}
 
 i64 nullDevice::read(void *, size_t) { return 0; }
 i64 nullDevice::write(const void *, size_t n) {

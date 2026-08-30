@@ -59,7 +59,7 @@ public:
   // `sticky` bits are re-asserted after every clear: used for system focus/
   // ready flags the (absent) ShellCore would keep set, so a game that polls
   // them with clear-on-wait stays "focused" instead of latching off.
-  eventFlag(proc *p, const char *name, u64 init, u64 sticky = 0);
+  eventFlag(objectTable &objects, const char *name, u64 init, u64 sticky = 0);
 
   // Wait until the bits satisfy pattern per mode (AND=all, OR=any). Blocks up to
   // *timeoutUs micros (null = forever). Writes the matched bits to *result, then

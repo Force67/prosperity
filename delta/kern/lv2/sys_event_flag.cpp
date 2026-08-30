@@ -41,8 +41,8 @@ namespace krnl {
 static std::mutex g_efRegM;
 static std::unordered_map<std::string, eventFlag *> g_efByName;
 
-eventFlag::eventFlag(proc *p, const char *nm, u64 init, u64 sticky_)
-    : kObject(p, oType::eventflag), bits(init), sticky(sticky_) {
+eventFlag::eventFlag(objectTable &objects, const char *nm, u64 init, u64 sticky_)
+    : kObject(objects, oType::eventflag), bits(init), sticky(sticky_) {
   if (nm && *nm) {
     name = nm;
     std::lock_guard<std::mutex> lk(g_efRegM);
@@ -245,7 +245,7 @@ int PS4ABI sys_evf_create(const char *name, u32 attr,
     BASE_LOGI("evf", "create rejected: null name (attr={:#x})", attr);
     return -SysError::eINVAL;
   }
-  auto *ef = new eventFlag(proc::getActive(), name, initPattern);
+  auto *ef = new eventFlag(proc::getActive()->getObjTable(), name, initPattern);
   BASE_LOGI("evf", "create '{}' attr={:#x} init={:#x} -> id={}",
             name ? name : "", attr, (unsigned long long)initPattern,
             ef->handle());
@@ -300,7 +300,7 @@ int PS4ABI sys_evf_open(const char *name) {
   // here both producer and consumer just open by name, so creating on first
   // open gives them a shared flag and the sync actually works.
   u64 seed = systemFlagInit(name);
-  auto *ef = new eventFlag(proc::getActive(), name, seed, seed);
+  auto *ef = new eventFlag(proc::getActive()->getObjTable(), name, seed, seed);
   BASE_LOGI("evf", "open '{}' (auto-created) -> id={}", name ? name : "",
             ef->handle());
   return ef->handle();

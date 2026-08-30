@@ -8,7 +8,7 @@
 #include "hdmi_dev.h"
 
 namespace krnl {
-hdmiDevice::hdmiDevice(proc *p) : device(p) {}
+hdmiDevice::hdmiDevice(objectTable &objects) : device(objects) {}
 
 i32 hdmiDevice::ioctl(u32 cmd, void *data) {
   BASE_LOGI("hdmi", "UNHANDLED ioctl({:#x})", cmd);

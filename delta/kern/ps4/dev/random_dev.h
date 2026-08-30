@@ -23,7 +23,7 @@ class proc;
 
 class randomDevice : public device {
 public:
-  randomDevice(proc *);
+  randomDevice(objectTable &);
 
   i64 read(void *buf, size_t len) override;
   i64 lseek(i64 off, int whence) override;

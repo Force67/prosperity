@@ -102,47 +102,47 @@ static device *make_device(const char *deviceName) {
   device *dev = nullptr;
   auto *proc = proc::getActive();
   if (xname == "console")
-    dev = new consoleDevice(proc);
+    dev = new consoleDevice(proc->getObjTable());
   if (xname == "deci_tty6")
-    dev = new tty6Device(proc);
+    dev = new tty6Device(proc->getObjTable());
   if (xname == "deci_stdin")
-    dev = new deciStdinDevice(proc);
+    dev = new deciStdinDevice(proc->getObjTable());
   if (xname == "null")
-    dev = new nullDevice(proc);
+    dev = new nullDevice(proc->getObjTable());
   if (xname == "zero")
-    dev = new zeroDevice(proc);
+    dev = new zeroDevice(proc->getObjTable());
   if (xname == "mdctl")
-    dev = new mdctlDevice(proc);
+    dev = new mdctlDevice(proc->getObjTable());
   if (xname == "av_control")
-    dev = new avControlDevice(proc);
+    dev = new avControlDevice(proc->getObjTable());
   if (xname == "hdmi")
-    dev = new hdmiDevice(proc);
+    dev = new hdmiDevice(proc->getObjTable());
   if (xname == "srtc")
-    dev = new srtcDevice(proc);
+    dev = new srtcDevice(proc->getObjTable());
   if (xname == "authmgr")
-    dev = new authmgrDevice(proc);
+    dev = new authmgrDevice(proc->getObjTable());
   if (xname == "npdrm")
-    dev = new npdrmDevice(proc);
+    dev = new npdrmDevice(proc->getObjTable());
   if (xname == "vtrm")
-    dev = new vtrmDevice(proc);
+    dev = new vtrmDevice(proc->getObjTable());
   if (xname == "pfsctldev")
-    dev = new pfsctlDevice(proc);
+    dev = new pfsctlDevice(proc->getObjTable());
   if (xname == "usbctl")
-    dev = new usbctlDevice(proc);
+    dev = new usbctlDevice(proc->getObjTable());
   if (xname == "hid")
-    dev = new hidDevice(proc);
+    dev = new hidDevice(proc->getObjTable());
   if (xname == "sceGp")
-    dev = new sceGpDevice(proc);
+    dev = new sceGpDevice(proc->getObjTable());
   if (xname == "gc")
     dev = (proc && proc->getPlatform() == krnl::proc::platform::ps5)
-              ? static_cast<device *>(new gcDevicePs5(proc))
-              : static_cast<device *>(new gcDevice(proc));
+              ? static_cast<device *>(new gcDevicePs5(proc->getObjTable()))
+              : static_cast<device *>(new gcDevice(proc->getObjTable()));
   if (xname == "dce")
-    dev = new dceDevice(proc);
+    dev = new dceDevice(proc->getObjTable());
   if (xname == "dipsw")
-    dev = new dipswDevice(proc);
+    dev = new dipswDevice(proc->getObjTable());
   if (xname == "random" || xname == "urandom")
-    dev = new randomDevice(proc);
+    dev = new randomDevice(proc->getObjTable());
   // PS5 only, for now. Answering /dev/rng lets libSceSsl's DT_INIT seed itself,
   // which carries libSceNpManager's module start further than it used to get --
   // far enough on Prospero, but on Orbis it then reaches libSceNpMatching2's
@@ -150,14 +150,14 @@ static device *make_device(const char *deviceName) {
   // Raider faults there). Widen this once the PS4 Np bring-up follows.
   if (xname == "rng" && proc &&
       proc->getPlatform() == krnl::proc::platform::ps5)
-    dev = new randomDevice(proc);
+    dev = new randomDevice(proc->getObjTable());
   if (xname == "ajm")
-    dev = new ajmDevice(proc);
+    dev = new ajmDevice(proc->getObjTable());
   /*there are multiple of these*/
   if (xname.find("dmem", 0, 4) != base::StringRef::npos)
     dev = (proc && proc->getPlatform() == krnl::proc::platform::ps5)
-              ? static_cast<device *>(new dmaDevicePs5(proc))
-              : static_cast<device *>(new dmaDevice(proc));
+              ? static_cast<device *>(new dmaDevicePs5(proc->getObjTable()))
+              : static_cast<device *>(new dmaDevice(proc->getObjTable()));
 
   return dev;
 }
@@ -219,7 +219,7 @@ int PS4ABI sys_open(const char *path, u32 flags, u32 mode) {
     std::vector<vfs::DirEntry> entries;
     if (vfs::listDir(path, entries)) {
       const size_t n = entries.size();
-      auto *dir = new dirDevice(proc::getActive(), std::move(entries));
+      auto *dir = new dirDevice(proc::getActive()->getObjTable(), std::move(entries));
       if (kVfsTrace)
         BASE_LOGI("open", "  -> dir fd={} entries={} {}", dir->handle(), n,
                   path);
@@ -238,7 +238,7 @@ int PS4ABI sys_open(const char *path, u32 flags, u32 mode) {
   if (writeIntent) {
     base::String host = vfs::resolveWritable(path);
     if (!host.empty()) {
-      auto *file = new fileDevice(proc::getActive());
+      auto *file = new fileDevice(proc::getActive()->getObjTable());
       if (file->openWritable(host, (flags & O_CREAT) != 0,
                              (flags & O_TRUNC) != 0)) {
         if (kVfsTrace)
@@ -260,7 +260,7 @@ int PS4ABI sys_open(const char *path, u32 flags, u32 mode) {
   }
 
   i64 fsize = vf.GetSize();
-  auto *file = new fileDevice(proc::getActive());
+  auto *file = new fileDevice(proc::getActive()->getObjTable());
   if (!file->adopt(std::move(vf))) {
     file->releaseHandle();
     return -SysError::eNOENT;

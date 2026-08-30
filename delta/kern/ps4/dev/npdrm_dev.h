@@ -11,7 +11,7 @@ class proc;
 // commands soft-succeed.
 class npdrmDevice : public device {
 public:
-  npdrmDevice(proc *p);
+  npdrmDevice(objectTable &objects);
 
   i32 ioctl(u32 command, void *args) override;
   i64 lseek(i64, int) override;

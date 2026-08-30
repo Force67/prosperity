@@ -6,7 +6,7 @@
 #include "tty6_dev.h"
 
 namespace krnl {
-tty6Device::tty6Device(proc *p) : device(p) {}
+tty6Device::tty6Device(objectTable &objects) : device(objects) {}
 
 bool tty6Device::init(const char *, u32, u32) { return true; }
 

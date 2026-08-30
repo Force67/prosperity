@@ -10,7 +10,7 @@ class proc;
 // anonymous mmap fallbacks and as a source of zero pages.
 class zeroDevice : public device {
 public:
-  zeroDevice(proc *p);
+  zeroDevice(objectTable &objects);
 
   i64 read(void *buf, size_t len) override;
   i64 write(const void *, size_t n) override;

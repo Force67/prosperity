@@ -16,7 +16,7 @@ class proc;
 
 class dmaDevice : public device {
 public:
-  dmaDevice(proc *);
+  dmaDevice(objectTable &);
 
   i32 ioctl(u32 command, void *args) override;
   u8 *map(void *, size_t, u32, u32, size_t) override;

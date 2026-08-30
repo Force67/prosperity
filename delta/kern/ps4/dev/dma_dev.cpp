@@ -32,7 +32,7 @@ DELTA_OPTION(bool, kDmemTrace, "DELTA_DMEM_TRACE", false);
 }  // namespace
 
 namespace krnl {
-dmaDevice::dmaDevice(proc *p) : device(p) {}
+dmaDevice::dmaDevice(objectTable &objects) : device(objects) {}
 
 // PS4 direct ("physical") memory model.
 //

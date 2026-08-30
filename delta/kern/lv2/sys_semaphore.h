@@ -36,7 +36,7 @@ class proc;
 //   +0x50  int32   nwaiters
 class semaphore : public kObject {
 public:
-  semaphore(proc *p, const char *name, int init, int max);
+  semaphore(objectTable &objects, const char *name, int init, int max);
 
   // Block until at least `need` units are available, then take them. Waits up to
   // *timeoutUs micros (null = forever). Returns 0, -eTIMEDOUT, or -errno.

@@ -10,7 +10,7 @@ class proc;
 // Games never open it. Registers so an open succeeds; commands soft-succeed.
 class vtrmDevice : public device {
 public:
-  vtrmDevice(proc *p);
+  vtrmDevice(objectTable &objects);
 
   i32 ioctl(u32 command, void *args) override;
   i64 lseek(i64, int) override;

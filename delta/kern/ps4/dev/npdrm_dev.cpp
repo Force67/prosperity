@@ -8,7 +8,7 @@
 #include "npdrm_dev.h"
 
 namespace krnl {
-npdrmDevice::npdrmDevice(proc *p) : device(p) {}
+npdrmDevice::npdrmDevice(objectTable &objects) : device(objects) {}
 
 i32 npdrmDevice::ioctl(u32 cmd, void *data) {
   BASE_LOGI("npdrm", "UNHANDLED ioctl({:#x})", cmd);

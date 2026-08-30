@@ -13,7 +13,7 @@ class proc;
 
 class gcDevice : public device {
 public:
-  gcDevice(proc *);
+  gcDevice(objectTable &);
 
   bool init(const char *, u32, u32) override;
   i32 ioctl(u32 command, void *args) override;

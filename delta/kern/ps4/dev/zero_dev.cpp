@@ -6,7 +6,7 @@
 #include "zero_dev.h"
 
 namespace krnl {
-zeroDevice::zeroDevice(proc *p) : device(p) {}
+zeroDevice::zeroDevice(objectTable &objects) : device(objects) {}
 
 i64 zeroDevice::read(void *buf, size_t len) {
   if (!buf)

@@ -11,7 +11,7 @@ class proc;
 // succeeds; unknown commands soft-succeed.
 class avControlDevice : public device {
 public:
-  avControlDevice(proc *p);
+  avControlDevice(objectTable &objects);
 
   i32 ioctl(u32 command, void *args) override;
   i64 lseek(i64, int) override;

@@ -20,7 +20,7 @@ namespace krnl {
 // a directory. Games open a dir then enumerate it to find their resources.
 class dirDevice : public device {
 public:
-  dirDevice(proc *p, std::vector<vfs::DirEntry> &&entries);
+  dirDevice(objectTable &objects, std::vector<vfs::DirEntry> &&entries);
 
   i64 getdents(void *buf, size_t len) override;
   int fstat(void *stat) override;

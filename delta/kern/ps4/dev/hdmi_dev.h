@@ -11,7 +11,7 @@ class proc;
 // succeeds; commands soft-succeed.
 class hdmiDevice : public device {
 public:
-  hdmiDevice(proc *p);
+  hdmiDevice(objectTable &objects);
 
   i32 ioctl(u32 command, void *args) override;
   i64 lseek(i64, int) override;

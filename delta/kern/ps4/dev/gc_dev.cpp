@@ -58,7 +58,7 @@ extern "C" void prosperity_gc_flip(u64 scanoutBase, int displayBufferIndex,
 // kern/ps5/dev/gc_dev.cpp (gcDevicePs5); this file is PS4 GNM only.
 
 namespace krnl {
-gcDevice::gcDevice(proc *p) : device(p) {}
+gcDevice::gcDevice(objectTable &objects) : device(objects) {}
 
 bool gcDevice::init(const char *, u32, u32) { return true; }
 

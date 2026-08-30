@@ -47,8 +47,8 @@ static void osemTrace(const char *what, int id, int n, int count) {
 static std::mutex g_semRegM;
 static std::unordered_map<std::string, semaphore *> g_semByName;
 
-semaphore::semaphore(proc *p, const char *nm, int init, int max)
-    : kObject(p, oType::semaphore), count(init), maxCount(max), initCount(init) {
+semaphore::semaphore(objectTable &objects, const char *nm, int init, int max)
+    : kObject(objects, oType::semaphore), count(init), maxCount(max), initCount(init) {
   if (nm && *nm) {
     name = nm;
     std::lock_guard<std::mutex> lk(g_semRegM);
@@ -132,7 +132,7 @@ static semaphore *fromId(int id) {
 }
 
 int PS4ABI sys_osem_create(const char *name, u32 attr, int init, int max) {
-  auto *s = new semaphore(proc::getActive(), name, init, max);
+  auto *s = new semaphore(proc::getActive()->getObjTable(), name, init, max);
   BASE_LOGI("osem", "create '{}' attr={:#x} init={} max={} -> id={}",
             name ? name : "", attr, init, max, s->handle());
   return s->handle();
@@ -147,7 +147,7 @@ int PS4ABI sys_osem_open(const char *name) {
   }
   // Auto-create unknown named semaphores (a system service makes them on real
   // hw); creating on first open gives producer+consumer a shared one.
-  auto *s = new semaphore(proc::getActive(), name, 0, 0x7fffffff);
+  auto *s = new semaphore(proc::getActive()->getObjTable(), name, 0, 0x7fffffff);
   BASE_LOGI("osem", "open '{}' (auto-created) -> id={}", name ? name : "",
             s->handle());
   return s->handle();

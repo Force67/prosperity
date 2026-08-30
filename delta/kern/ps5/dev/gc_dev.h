@@ -14,7 +14,7 @@ class proc;
 
 class gcDevicePs5 : public device {
 public:
-  gcDevicePs5(proc *);
+  gcDevicePs5(objectTable &);
 
   bool init(const char *, u32, u32) override;
   i32 ioctl(u32 command, void *args) override;

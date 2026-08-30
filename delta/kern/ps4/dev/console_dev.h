@@ -12,7 +12,7 @@ class proc;
 // kernel answers.
 class consoleDevice : public device {
 public:
-  consoleDevice(proc *);
+  consoleDevice(objectTable &);
 
   bool init(const char *, u32, u32) override;
   i64 read(void *, size_t) override;

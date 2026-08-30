@@ -8,7 +8,7 @@
 #include "usbctl_dev.h"
 
 namespace krnl {
-usbctlDevice::usbctlDevice(proc *p) : device(p) {}
+usbctlDevice::usbctlDevice(objectTable &objects) : device(objects) {}
 
 i32 usbctlDevice::ioctl(u32 cmd, void *data) {
   BASE_LOGI("usbctl", "UNHANDLED ioctl({:#x})", cmd);

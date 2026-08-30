@@ -22,7 +22,7 @@ DELTA_OPTION(bool, kAjmTrace, "DELTA_AJM_TRACE", false);
 }  // namespace
 
 namespace krnl {
-ajmDevice::ajmDevice(proc *p) : device(p) {}
+ajmDevice::ajmDevice(objectTable &objects) : device(objects) {}
 
 // AJM ioctls (sizes encoded in the command). We don't decode audio; we only need
 // libSceAjm's init handshake to report success. Return 0 (success) and hand back

@@ -11,7 +11,7 @@ class proc;
 // has no writer, so reads report EOF and writes are discarded.
 class deciStdinDevice : public device {
 public:
-  deciStdinDevice(proc *p);
+  deciStdinDevice(objectTable &objects);
 
   i64 read(void *, size_t) override;
   i64 write(const void *, size_t n) override;

@@ -488,8 +488,8 @@ void shmAudioDumpMaybeStart() {
 
 class shmObject : public kObject {
 public:
-  shmObject(proc *p, std::string nm, shmRef b)
-      : kObject(p, kObject::oType::shm), shmName(std::move(nm)),
+  shmObject(objectTable &objects, std::string nm, shmRef b)
+      : kObject(objects, kObject::oType::shm), shmName(std::move(nm)),
         backing(std::move(b)) {}
   std::string shmName;  // diagnostics / audio protocol key
   shmRef backing;       // keeps the backing alive while this fd is open
@@ -917,7 +917,7 @@ int PS4ABI sys_shm_open(const char *path, u32 flags, u16 mode) {
 
   // A fresh fd per open, all sharing the named backing (POSIX-ish for a single
   // guest process). The ctor registers it in the object table.
-  auto *obj = new shmObject(proc, std::move(name), std::move(backing));
+  auto *obj = new shmObject(proc->getObjTable(), std::move(name), std::move(backing));
   BASE_LOGI("shm_open", "'{}' flags={:#x} -> fd={}", path, flags,
             obj->handle());
   shmAudioTrace("shm_open", obj->shmName, nullptr, 0, flags);

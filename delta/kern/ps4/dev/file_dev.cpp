@@ -32,7 +32,7 @@ void fillStat(SceKernelStat &out, u16 mode, i64 size) {
   out.st_blocks = (size + 0x3FFF) / 0x4000;
 }
 
-fileDevice::fileDevice(proc *p) : device(p) {}
+fileDevice::fileDevice(objectTable &objects) : device(objects) {}
 
 bool fileDevice::open(const base::String &hostPath, u32 /*flags*/) {
   // Read-only for now: the disc image is immutable.

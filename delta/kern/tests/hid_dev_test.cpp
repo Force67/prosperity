@@ -3,7 +3,7 @@
 
 #include <gtest/gtest.h>
 
-#include "kern/proc.h"
+#include "kern/util/object_table.h"
 #include "kern/ps4/dev/file_dev.h"
 #include "kern/ps4/dev/hid_dev.h"
 #include "kern/lv2/error_table.h"
@@ -16,11 +16,12 @@ namespace {
 
 class HidDevice : public ::testing::Test {
 protected:
-  // A device registers itself in its process' object table, which then owns it,
-  // so it has to be built the way the kernel builds one.
-  HidDevice() : dev_(*new krnl::hidDevice(&proc_)) {}
+  // A device registers itself in the object table it is handed, which then owns
+  // it, so it has to be built the way the kernel builds one -- but that table is
+  // the whole of what it needs, so no process is involved.
+  HidDevice() : dev_(*new krnl::hidDevice(objects_)) {}
 
-  krnl::proc proc_;
+  krnl::objectTable objects_;
   krnl::hidDevice &dev_;
 };
 

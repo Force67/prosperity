@@ -18,7 +18,7 @@ namespace krnl {
 
 class socketDevice : public device {
 public:
-  socketDevice(proc *p, int hostFd, int guestFamily);
+  socketDevice(objectTable &objects, int hostFd, int guestFamily);
   ~socketDevice();
 
   // The host fd, for the event queue's readability poll.

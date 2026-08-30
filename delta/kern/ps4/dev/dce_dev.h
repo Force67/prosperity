@@ -20,7 +20,7 @@ u64 dceScanoutBuffer(u32 index);
 // able scanout pool, and flip completion, so the module runs unmodified.
 class dceDevice : public device {
 public:
-  dceDevice(proc *);
+  dceDevice(objectTable &);
 
   bool init(const char *, u32, u32) override;
   i32 ioctl(u32 command, void *args) override;

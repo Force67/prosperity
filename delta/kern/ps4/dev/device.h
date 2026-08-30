@@ -16,13 +16,14 @@
 
 #include "kern/lv2/error_table.h"
 #include "kern/object.h"
+#include "kern/util/object_table.h"
 
 namespace krnl {
 class proc;
 
 class device : public kObject {
 public:
-  inline device(proc *p) : kObject(p, kObject::oType::device) {}
+  inline device(objectTable &objects) : kObject(objects, kObject::oType::device) {}
 
   virtual bool init(const char *, u32, u32) { return true; }
 

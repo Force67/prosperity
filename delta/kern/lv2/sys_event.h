@@ -52,7 +52,7 @@ struct ktimespec {
 // when their source fires. Games wait on it for flip/vblank notifications.
 class equeue : public kObject {
 public:
-  equeue(proc *p, const char *name);
+  equeue(objectTable &objects, const char *name);
   ~equeue() override;
 
   // apply changelist (EV_ADD/DELETE/...), then collect up to nout ready events,

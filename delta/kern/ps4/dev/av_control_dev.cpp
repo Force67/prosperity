@@ -8,7 +8,7 @@
 #include "file_dev.h"
 
 namespace krnl {
-avControlDevice::avControlDevice(proc *p) : device(p) {}
+avControlDevice::avControlDevice(objectTable &objects) : device(objects) {}
 
 i32 avControlDevice::ioctl(u32 cmd, void *data) {
   // The full set (crtc/pll/dp/fmt/blnd/dvo) configures display hardware the

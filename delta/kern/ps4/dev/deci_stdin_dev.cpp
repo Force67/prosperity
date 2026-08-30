@@ -5,7 +5,7 @@
 #include "file_dev.h"
 
 namespace krnl {
-deciStdinDevice::deciStdinDevice(proc *p) : device(p) {}
+deciStdinDevice::deciStdinDevice(objectTable &objects) : device(objects) {}
 
 i64 deciStdinDevice::read(void *, size_t) { return 0; }
 i64 deciStdinDevice::write(const void *, size_t n) {

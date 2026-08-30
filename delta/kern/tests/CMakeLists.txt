@@ -19,10 +19,17 @@ add_delta_test(umtx_op_test
   SOURCES umtx_op_test.cpp
   DEPS delta_kern)
 
+# A device now takes the object table it registers with rather than the whole
+# process, so these two build the unit under test into the test binary and link
+# no emulator at all -- which is the acceptance test for the boundary.
 add_delta_test(console_dev_test
   SOURCES console_dev_test.cpp
-  DEPS delta_kern)
+    ../ps4/dev/console_dev.cpp ../ps4/dev/file_dev.cpp
+    ../object.cpp ../util/object_table.cpp
+  DEPS delta_deps)
 
 add_delta_test(hid_dev_test
   SOURCES hid_dev_test.cpp
-  DEPS delta_kern)
+    ../ps4/dev/hid_dev.cpp ../ps4/dev/file_dev.cpp
+    ../object.cpp ../util/object_table.cpp
+  DEPS delta_deps)

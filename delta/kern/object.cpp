@@ -9,7 +9,6 @@
 
 #include "object.h"
 #include "base/arch.h"
-#include "kern/proc.h"
 #include "util/object_table.h"
 
 #include <cstdlib>
@@ -22,9 +21,10 @@ DELTA_OPTION(bool, kObjTrace, "DELTA_OBJ_TRACE", false);
 }  // namespace
 
 namespace krnl {
-kObject::kObject(proc *process, oType type) : otype(type), process(process) {
+kObject::kObject(objectTable &objects, oType type)
+    : otype(type), objects(objects) {
   u32 temp = 0;
-  process->getObjTable().add(this, temp);
+  objects.add(this, temp);
 
   // DELTA_OBJ_TRACE: titles that poll a device re-create its object thousands
   // of times a second (Minecraft: ~14k in 40s), which buried every other line
@@ -44,10 +44,10 @@ void kObject::release() {
 void kObject::retain() { refCount++; }
 
 void kObject::retainHandle() {
-  process->getObjTable().keep(handleCollection[0]);
+  objects.keep(handleCollection[0]);
 }
 
 void kObject::releaseHandle() {
-  process->getObjTable().release(handleCollection[0]);
+  objects.release(handleCollection[0]);
 }
 } // namespace krnl

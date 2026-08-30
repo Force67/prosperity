@@ -12,7 +12,7 @@ class proc;
 // host's evdev state and the write commands drive a uinput device instead.
 class hidDevice : public device {
 public:
-  hidDevice(proc *p);
+  hidDevice(objectTable &objects);
 
   i32 ioctl(u32 command, void *args) override;
   i64 lseek(i64, int) override;

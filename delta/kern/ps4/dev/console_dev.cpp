@@ -19,7 +19,7 @@ DELTA_OPTION(bool, kQuietGuest, "DELTA_QUIET_GUEST", false);
 }  // namespace
 
 namespace krnl {
-consoleDevice::consoleDevice(proc *p) : device(p) {}
+consoleDevice::consoleDevice(objectTable &objects) : device(objects) {}
 
 bool consoleDevice::init(const char *, u32, u32) { return true; }
 

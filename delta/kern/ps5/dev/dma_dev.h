@@ -20,7 +20,7 @@ void forgetDmemVa(u8 *ptr, size_t size);
 
 class dmaDevicePs5 : public dmaDevice {
 public:
-  dmaDevicePs5(proc *p) : dmaDevice(p) {}
+  dmaDevicePs5(objectTable &objects) : dmaDevice(objects) {}
 
   u8 *map(void *, size_t, u32, u32, size_t) override;
 };
