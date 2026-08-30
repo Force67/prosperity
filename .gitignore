@@ -337,3 +337,4 @@ dcrun.sh
 /.cache
 /scratchpad
 desrun.sh
+.verify/
