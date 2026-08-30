@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 
-#include "kern/util/object_table.h"
+#include "kern/object_table.h"
 
 using krnl::objectTable;
 

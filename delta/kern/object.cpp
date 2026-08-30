@@ -9,7 +9,7 @@
 
 #include "object.h"
 #include "base/arch.h"
-#include "util/object_table.h"
+#include "kern/object_table.h"
 
 #include <cstdlib>
 

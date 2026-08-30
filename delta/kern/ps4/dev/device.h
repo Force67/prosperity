@@ -16,7 +16,7 @@
 
 #include "kern/lv2/error_table.h"
 #include "kern/object.h"
-#include "kern/util/object_table.h"
+#include "kern/object_table.h"
 
 namespace krnl {
 class proc;

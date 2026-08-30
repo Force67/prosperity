@@ -3,7 +3,7 @@
 
 #include <gtest/gtest.h>
 
-#include "kern/util/object_table.h"
+#include "kern/object_table.h"
 #include "kern/ps4/dev/console_dev.h"
 #include "kern/ps4/dev/file_dev.h"
 #include "kern/lv2/error_table.h"

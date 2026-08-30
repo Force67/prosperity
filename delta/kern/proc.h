@@ -16,7 +16,7 @@
 #include "ps4/dev/device.h"
 #include "module.h"
 #include "object.h"
-#include "util/object_table.h"
+#include "kern/object_table.h"
 #include "vm_manager.h"
 
 namespace krnl {

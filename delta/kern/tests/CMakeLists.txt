@@ -25,11 +25,11 @@ add_delta_test(umtx_op_test
 add_delta_test(console_dev_test
   SOURCES console_dev_test.cpp
     ../ps4/dev/console_dev.cpp ../ps4/dev/file_dev.cpp
-    ../object.cpp ../util/object_table.cpp
+    ../object.cpp ../object_table.cpp
   DEPS delta_deps)
 
 add_delta_test(hid_dev_test
   SOURCES hid_dev_test.cpp
     ../ps4/dev/hid_dev.cpp ../ps4/dev/file_dev.cpp
-    ../object.cpp ../util/object_table.cpp
+    ../object.cpp ../object_table.cpp
   DEPS delta_deps)
