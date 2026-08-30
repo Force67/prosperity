@@ -1,9 +1,9 @@
 /*
- * PS4Delta : PS4 emulation and research project
+ * PS4Delta : PS4/PS5 emulation and research project
  *
- * Shared graphics-layer state with no platform dependency. Currently just the
- * gameplay harness signal (see gfx.h), defined here so both the GPU renderer
- * (delta_gpu) and the input layer (libScePad, delta_runtime) link one instance.
+ * Whether the title has reached gameplay, as opposed to a menu or a cutscene.
+ * The renderer sets it and the pad HLE reads it, so it is defined here -- in
+ * the module both already link -- rather than owned by either of them.
  */
 
 #include "gfx.h"
