@@ -3,7 +3,8 @@
 Turns guest GPU command streams into rendered frames.
 
 ```
-rhi/            the renderer as its callers see it (command.h, renderer.h)
+rhi/            the renderer as its callers see it (command.h, renderer.h), and
+                the device abstraction its backends implement (types.h, device.h)
 vulkan/         the only backend implementing it
 gcn/            shared ISA decode + the SPIR-V translator both consoles emit through
 ps4/            PM4 / Liverpool command processor + its GCN specifics
@@ -46,6 +47,36 @@ coherency flushes), and `NoteMemoryFill` for the CP DMA fills a title uses in
 place of a clear packet. `DefaultRenderer()` hands out the process-wide
 instance the command processors drive (the guest-called HLE entry points
 cannot thread a handle); it is the one piece of ambient state at this seam.
+
+`types.h` and `device.h` are the *device* abstraction: what a graphics API has
+to provide for the renderer to run on it, in a vocabulary of its own (formats,
+resource states, bind groups, render passes) rather than either API's. It is
+sized by what the renderer calls -- 23 command-list operations and 14 device
+ones, which is what the 17k lines of `vulkan/` reduce to once the guest
+semantics are taken out of them -- so a second backend implements an API rather
+than reimplementing the renderer.
+`docs/design/rhi-backend-portability.md` is why it looks like this.
+
+Resource state is explicit but tracked: every buffer and texture knows the state
+the recording has left it in, so `Transition` to a state it already holds costs
+nothing, and for unordered access it is the request to make earlier writes
+visible. Command lists must therefore be submitted in the order they were
+recorded.
+
+Clip space has +Y up, which is D3D12's convention; the Vulkan backend reaches it
+with a negative-height viewport, the same flip the guest renderer already
+applies so that a target sampled as a texture lines up with the one it was
+rasterized into. Face winding then means the same thing on both, and geometry
+needs no per-backend flip.
+
+A binding index is unique within its group across register classes, which is
+what lets one number serve as both a Vulkan binding and an HLSL register slot. A
+group is a descriptor set on Vulkan and a descriptor table on D3D12; push
+constants are root constants at `b0` in space 8.
+
+`null_device.h` is a device that records instead of rendering: every operation
+appends a line to a log, so what the renderer decided can be asserted without a
+GPU. It is the only way this module's decision-making has ever been testable.
 
 ## vulkan/
 

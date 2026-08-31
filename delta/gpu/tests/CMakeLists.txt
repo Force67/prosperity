@@ -67,3 +67,12 @@ add_delta_test(vk_index_upload_test
     vk_index_upload_test.cc
     ../vulkan/vk_index_upload.cc
   DEPS delta_deps)
+
+# The RHI's decisions, asserted against the recording device: no GPU needed, so
+# this one runs everywhere.
+add_delta_test(rhi_null_test
+  SOURCES
+    rhi_null_test.cc
+    ../rhi/null_device.cc
+    ../rhi/types.cc
+  DEPS delta_deps)
