@@ -9,6 +9,7 @@ Rules enforced (see delta/gpu/README.md):
   vulkan/  may include gpu/vulkan/, gpu/rhi/, gpu/shaders/, gpu/guest_memory.h,
            gpu/gcn/ (recompiled-program types only) -- never a command
            processor or register file
+  d3d12/   may include gpu/d3d12/ and gpu/rhi/ only
   tests/   may include anything in gpu/
 Module-root headers (gpu/guest_memory.h, gpu/gpu_check.h, gpu/gpu_perf.h) are
 reachable from every directory and themselves include nothing in the module.
@@ -46,6 +47,9 @@ ALLOWED = {
                *ROOT_HEADERS,
                'gpu/gcn/gcn_translate.h', 'gpu/gcn/gcn_detile.h',
                'gpu/gcn/gcn_resource.h'),
+    # An RHI backend sees the seam it implements and its own directory, and
+    # nothing else in the module: it knows a graphics API, not this emulator.
+    'd3d12': ('gpu/d3d12/', 'gpu/rhi/', *ROOT_HEADERS),
     'tests': ('gpu/',),
     'shaders': (),
     # The module root depends on nothing in the module but itself.

@@ -5,7 +5,8 @@ Turns guest GPU command streams into rendered frames.
 ```
 rhi/            the renderer as its callers see it (command.h, renderer.h), and
                 the device abstraction its backends implement (types.h, device.h)
-vulkan/         the only backend implementing it
+vulkan/         the guest renderer, and the Vulkan RHI backend (vk_rhi)
+d3d12/          the D3D12 RHI backend
 gcn/            shared ISA decode + the SPIR-V translator both consoles emit through
 ps4/            PM4 / Liverpool command processor + its GCN specifics
 ps5/            AGC / gfx10.3 command processor + the RDNA2 decoder/emitter
@@ -101,6 +102,7 @@ One unit per decision, roughly in dependency order:
 | `vk_frame` | the two-slot frame ring, readback and presentation of a finished frame |
 | `vk_perf` | reporting `gpu_perf.h`'s counters: the FPS line and the on-screen overlay |
 | `vk_capture` / `vk_present` | frames out to disk / to the window |
+| `vk_rhi` | Vulkan behind `rhi::Device`: its own instance, device and queue, so a test can create one |
 
 Rendering is offscreen: there is no swapchain on this device. Each draw renders
 into the image for its `rt_base`, and `EndFrame` reads back the target at the
@@ -109,6 +111,31 @@ scanout address and hands the pixels to the window (or to a PPM, headless).
 The heuristic quad path in `vk_draw` predates the recompiler and is still the
 fallback for draws `vk_draw_recomp` declines; `DELTA_GPU_DECLINES=1` reports why
 draws are still landing there.
+
+Everything above `vk_rhi` in that table still calls Vulkan directly. Moving it
+onto the device abstraction (and out to a backend-free directory with it) is the
+next phase of the plan in `docs/design/rhi-backend-portability.md`.
+
+## d3d12/
+
+`d3d12_rhi` is the second backend: Windows D3D12 code, compiled as such. On
+Linux it builds against vkd3d, which implements the same API over Vulkan, so it
+is developed and tested on the machine it is written on rather than only on the
+one it ships to. The build finds either through `DELTA_HAVE_D3D12`; without it
+the factory returns null and nothing else changes.
+
+D3D12 has no dynamic descriptors, so a bind group stages its descriptors in a
+CPU heap and `SetBindGroup` copies them into the command list's shader-visible
+ring, writing any dynamic binding's descriptor fresh with the per-draw offset
+applied. It has no load ops, so a pass that wants a cleared attachment clears it
+at `BeginRenderPass`, which is the work the driver does behind Vulkan's
+`loadOp`. It has no fill command, so `FillBuffer` clears through an unordered
+access view, and the buffer has to carry `kBufferStorage` as well as
+`kBufferCopyDst`.
+
+There is no equivalent of `VK_EXT_external_memory_host`, so
+`DeviceCaps::host_import` is false here and guest pages are copied rather than
+aliased.
 
 ## ps4/
 
@@ -164,6 +191,28 @@ Gnm puts register values in the packet. AGC mostly does not -- it restores
 shadow images and submits blocks of (offset, value) entries whose layout is not
 documented anywhere and was read back out of the command stream -- so that
 guesswork is one unit rather than a third of the walk.
+
+## Testing the RHI
+
+Two tests, with different requirements:
+
+- `rhi_null_test` runs against the recording device and needs no GPU, so it runs
+  wherever the rest of the unit tests do. It asserts on the command stream: that
+  a repeated transition emits nothing, that a pass transitions its own
+  attachments, that every dynamic offset reaches its binding.
+- `rhi_conformance_test` runs the same work through every backend the build has
+  and compares the results pixel for pixel: clear, a covering triangle, clip
+  space orientation, interpolation, depth ordering, MRT, a textured quad with a
+  dynamic constant buffer and push constants, and a compute dispatch. Each
+  scenario also states what the image should be, so one backend failing alone is
+  caught as well as the two disagreeing. It needs a device and skips without
+  one.
+
+The shaders are one HLSL file (`tests/rhi_conformance.hlsl`), compiled to SPIR-V
+by glslc at build time and to DXBC by `D3DCompile` at run time. A pixel
+difference is therefore a backend difference rather than a shader difference.
+Without glslc the conformance test is not built at all, rather than quietly
+testing one backend.
 
 ## Debugging a frame
 
