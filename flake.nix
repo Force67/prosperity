@@ -80,6 +80,11 @@
             sdl3
             shaderc         # runtime GLSL -> SPIR-V for the shader recompiler
             renderdocPython # frame capture: UI, CLI, and Python replay API
+            # vkd3d implements D3D12 over Vulkan, and ships the same headers
+            # Windows does. The D3D12 RHI backend builds and runs against it
+            # here, so it is not code that only compiles on the machine it
+            # ships to.
+            vkd3d
           ];
 
           shellHook = ''
@@ -143,6 +148,10 @@
                 export LD_LIBRARY_PATH="$LD_LIBRARY_PATH''${LD_LIBRARY_PATH:+:}$nvdir:${pkgs.xorg.libX11}/lib:${pkgs.xorg.libXext}/lib:${pkgs.xorg.libxcb}/lib:${pkgs.libglvnd}/lib"
               fi
             fi
+            # vkd3d dlopens libvulkan.so.1 by name rather than linking it, and
+            # the nix loader is not on any default search path. Without this the
+            # D3D12 backend reports "no D3D12 device" on a machine that has one.
+            export LD_LIBRARY_PATH="${pkgs.vulkan-loader}/lib''${LD_LIBRARY_PATH:+:}$LD_LIBRARY_PATH"
           '';
         };
       });
