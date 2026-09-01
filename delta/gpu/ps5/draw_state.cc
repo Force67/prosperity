@@ -112,17 +112,18 @@ u32 PackDstSel(const gcn::TImage& t) {
 struct ShaderBinding {
   u64 vs_addr = 0;
   u64 ps_addr = 0;
+  u64 es_addr = 0;
+  u64 gs_addr = 0;
   const u32* vs_user_data = nullptr;
   const u32* ps_user_data = nullptr;
 };
 
-// Some titles program the shader PGM_LO/HI at non-standard SH offsets (via the
-// inline op 0x93), so the fixed GS/PS registers read 0. Fallback: scan the SH
-// register block for PGM pairs whose address is a 256-aligned GPU-aperture
-// pointer to plausible RDNA2 ISA. It is proven that for the titles that need
-// this, NO register in the whole file points at shader code -- the AGC binds
-// them outside the PM4 stream -- so this stays inert until that path is
-// decoded, and the probes it feeds are what will decode it.
+// Some titles leave the fixed GS/PS PGM_LO/HI registers reading 0. Fallback:
+// scan the SH register block for PGM pairs whose address is a 256-aligned
+// GPU-aperture pointer to plausible RDNA2 ISA. It is proven that for the
+// titles that need this, NO register in the file points at shader code -- the
+// AGC binds them outside the PM4 stream -- so this stays inert until that path
+// is decoded, and the probes it feeds are what will decode it.
 void RecoverShaderAddresses(const Regs& regs, ShaderBinding& binding) {
   u64 found[16];
   u32 found_reg[16];
@@ -149,7 +150,7 @@ void RecoverShaderAddresses(const Regs& regs, ShaderBinding& binding) {
     binding.vs_addr = found[0];
   if (nf >= 2 && !IsGuestAddress(binding.ps_addr))
     binding.ps_addr = found[1];
-  TraceShaderScan(regs, found_reg, found, nf);
+  TraceShaderScan(found_reg, found, nf);
   TraceUserDataPointers(binding.vs_user_data, binding.ps_user_data);
 }
 
@@ -170,6 +171,8 @@ ShaderBinding ResolveShaderBinding(const Regs& regs) {
   if (!IsGuestAddress(binding.vs_addr))
     binding.vs_addr = kGsIsVs ? es_addr : gs_addr;
   binding.ps_addr = regs.ShaderAddr(mmSPI_SHADER_PGM_LO_PS);
+  binding.es_addr = es_addr;
+  binding.gs_addr = gs_addr;
 
   // A pipeline that only populates the ES half leaves the GS user-data window
   // empty, and then every cbuffer and texture the vertex stage names resolves
@@ -841,6 +844,8 @@ void ResolveRecompiledShaders(const Regs& regs,
   }
   d.vs_addr = binding.vs_addr;
   d.ps_addr = binding.ps_addr;
+  d.es_addr = binding.es_addr;
+  d.gs_addr = binding.gs_addr;
   d.recomp = &rc;
 }
 

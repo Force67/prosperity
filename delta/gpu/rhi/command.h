@@ -283,6 +283,10 @@ struct DrawInfo {
   // buffer, vattrs describe the inputs, mvp holds the constant buffer (pushed),
   // tex_base the sampler.
   u64 vs_addr = 0, ps_addr = 0;  // pipeline cache key
+  // gfx10.3 merged NGG: both half addresses the draw programmed, and which one
+  // vs_addr picked. Captured so a pass that never rasterizes can name the half
+  // the geometry actually lives in. The PS4 walk leaves both 0.
+  u64 es_addr = 0, gs_addr = 0;
   bool ps4_neo = false;
   u32 vs_user_data[32] = {};
   u32 ps_user_data[32] = {};

@@ -38,10 +38,6 @@ void SetRegs(Regs& regs, u32 base, const u32* body, u32 count);
 // it.
 void SetRegRun(Regs& regs, u32 first_reg, const u32* values, u32 count);
 
-// op 0x93, an inline SH-register set: body[0]'s low 16 bits are the offset (the
-// high bits are flags/count), body[1..] the values.
-void SetShRegsInline(Regs& regs, const u32* body, u32 count);
-
 // LOAD_*_REG: the values live in a register shadow image in GPU memory at
 // body[0..1], and body[2..] are (offset, dword count) ranges into it.
 void LoadRegImage(Regs& regs, u32 base, const u32* body, u32 count);

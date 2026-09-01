@@ -183,18 +183,6 @@ void SetRegRun(Regs& regs, u32 first_reg, const u32* values, u32 count) {
   TraceType0ShaderRegs(first_reg, values, count);
 }
 
-void SetShRegsInline(Regs& regs, const u32* body, u32 count) {
-  if (count < 2)
-    return;
-  const u32 first = kShRegBase + (body[0] & 0xFFFF);
-  for (u32 i = 1; i < count; i++) {
-    const u32 reg = first + (i - 1);
-    if (reg < kRegFileSize)
-      regs[reg] = body[i];
-    NoteRegisterWrite("SET_SH_INLINE(0x93)", reg, body[i]);
-  }
-}
-
 void LoadRegImage(Regs& regs, u32 base, const u32* body, u32 count) {
   if (count < 4)
     return;

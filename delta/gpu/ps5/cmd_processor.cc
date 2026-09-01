@@ -458,6 +458,8 @@ void Walk(rhi::Renderer& renderer,
   // before anything complains.
   u32 trail_pos[32] = {}, trail_hdr[32] = {};
   u32 trail_n = 0;
+  // The opcode walked before the current one, for the unhandled-opcode census.
+  u32 last_op = 0;
   while (i < words) {
     const u32 hdr = p[i];
     const Pm4Type type = Pm4TypeOf(hdr);
@@ -613,12 +615,57 @@ void Walk(rhi::Renderer& renderer,
       case 0x7a:
         SetRegs(g_regs, kUConfigRegBase, body, count);
         break;
-      // WAIT_REG_MEM_64: wait until a 64-bit value in memory satisfies a
-      // comparison. Our submit is synchronous, so the condition is met by the
-      // time we walk the packet. It is NOT a register write: reading it as one
-      // stored the poll address over the shader user-data registers, which is
-      // why the draws that followed sampled from nothing.
+      // Skipped on purpose. The reason is recorded so the census can tell a
+      // packet we chose to ignore from one nothing ever looked at.
+      case 0x10:  // IT_NOP carrying a real count: padding
+        NoteSkippedOpcode(op, "NOP padding");
+        break;
+      case 0x28:  // CONTEXT_CONTROL: selects which register shadow the CP
+                  // loads and dumps; the flat register file keeps every
+                  // register, so there is no shadow to switch between
+        NoteSkippedOpcode(op, "CONTEXT_CONTROL, no shadow to select");
+        break;
+      case 0x4a:  // PREAMBLE_CNTL: brackets the state preamble for a context
+                  // save, body[0] bits [31:28] naming which bracket
+        NoteSkippedOpcode(op, "PREAMBLE_CNTL, a bracket not state");
+        break;
+      case 0x42:  // PFP_SYNC_ME: stalls the PFP until the ME catches up, and
+                  // we have neither
+        NoteSkippedOpcode(op, "PFP_SYNC_ME, one engine here");
+        break;
+      // waitOnAddress: stall until a value in memory satisfies a comparison.
+      // 0x3c takes a 32-bit value in 6 dwords, 0x93 a 64-bit one in 8:
+      // [function/mem_space/engine, addrLo, addrHi, ref.., mask.., interval].
+      // Our submit runs to completion inside SubmitDcb, so whatever it waits
+      // for has already happened by the time the walk reaches it.
+      //
+      // 0x93 is NOT a register write, however plausibly one reads: body[0] is
+      // 0x113 (function 3, memory space, engine 1), which taken as an SH
+      // offset aims the following seven dwords -- poll address, reference,
+      // mask, interval -- straight at SPI_SHADER_USER_DATA_HS_7. Reading it
+      // that way is what left the draws after it sampling from nothing, and
+      // the poll address landing in a register made the mistake look
+      // confirmed.
+      case 0x3c:
       case 0x93:
+        NoteSkippedOpcode(op, "waitOnAddress, already satisfied");
+        break;
+      // acquireMem (gfx10 ACQUIRE_MEM, 7 dwords): coher_cntl, coher_size{,_hi},
+      // coher_base{,_hi}, poll_interval, GCR_CNTL. GCR_CNTL bits [1:0] are the
+      // instruction-cache invalidate, which is how a title says the shader
+      // memory it just wrote is now code: let the cached programs revalidate.
+      // The cache ops on every other cache need nothing from us.
+      //
+      // The count matters: a six-dword variant would put poll_interval last,
+      // and the usual interval (0x19) has both of those bits set.
+      case 0x58:
+        if (count >= 7 && (body[6] & 0x3)) {
+          rdna::NextProgramGeneration();
+          static int n = 0;
+          if (n++ < 8)
+            BASE_LOGI("agc", "acquireMem gcr={:#x} -> program generation bump",
+                      body[6]);
+        }
         break;
       case IT_DMA_DATA:
         HandleDmaData(renderer, body, count);
@@ -692,8 +739,11 @@ void Walk(rhi::Renderer& renderer,
       default:
         if (IsDraw(op))
           HandleDrawPacket(renderer, op, body, count);
+        else
+          NoteUnhandledOpcode(op, hdr, i, words, body, count, last_op);
         break;
     }
+    last_op = op;
     i += 1 + count;
   }
 }

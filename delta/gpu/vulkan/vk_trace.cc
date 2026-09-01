@@ -1937,6 +1937,8 @@ void RecordDraw(const rhi::DrawInfo& d,
       .Raw("bufs", bufs.Done())
       .Raw("vs", ShaderObj(d.vs_addr, d.recomp ? &d.recomp->vs_spirv : nullptr))
       .Raw("ps", ShaderObj(d.ps_addr, d.recomp ? &d.recomp->fs_spirv : nullptr))
+      .Hex("es_addr", d.es_addr)
+      .Hex("gs_addr", d.gs_addr)
       .Bool("neo", d.ps4_neo)
       .Raw("vs_user_data", vs_ud.Done())
       .Raw("ps_user_data", ps_ud.Done());

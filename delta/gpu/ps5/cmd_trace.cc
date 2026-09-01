@@ -57,6 +57,7 @@ DELTA_OPTION(bool, kRtProbe, "DELTA_AGC_RTPROBE", false);
 DELTA_OPTION(bool, kTrace, "DELTA_AGC_TRACE", false);
 DELTA_OPTION(bool, kOpHist, "DELTA_AGC_OPHIST", false);
 DELTA_OPTION(bool, kWalkStat, "DELTA_AGC_WALKSTAT", false);
+DELTA_OPTION(bool, kOpCensus, "DELTA_AGC_OPCENSUS", false);
 }  // namespace
 
 // Whether the target of a draw is a buffer the title registered for display,
@@ -95,10 +96,24 @@ bool CsReport() {
 
 u32 g_op_hist[256] = {};
 
+// The opcodes the walk did not act on. An opcode nothing looked at is state or
+// a draw the title expects to happen, and the only symptom downstream is
+// whatever it never set -- so a skip we chose records why, and one we did not
+// choose stands out as the census entry worth chasing.
+bool g_skipped[256] = {};
+const char* g_skip_reason[256] = {};
+
 void DumpOpcodeHistogram() {
-  for (int o = 0; o < 256; o++)
-    if (g_op_hist[o])
-      BASE_LOGI("agc", "  op {:#04x} x{}", o, g_op_hist[o]);
+  for (int o = 0; o < 256; o++) {
+    if (!g_op_hist[o])
+      continue;
+    base::String line;
+    base::FormatTo(line, "  op {:#04x} x{}", o, g_op_hist[o]);
+    if (g_skipped[o])
+      base::FormatTo(line, "  [{}]",
+                     g_skip_reason[o] ? g_skip_reason[o] : "UNHANDLED");
+    BASE_LOGI("agc", "{}", line.c_str());
+  }
 }
 
 const char* const kEncName[19] = {"?",     "sop1", "sop2", "sopk", "sopc",
@@ -477,24 +492,9 @@ void TraceShRegs(const Regs& regs) {
   BASE_LOGI("agc", "  SH regs:{}", line.c_str());
 }
 
-void TraceShaderScan(const Regs& regs,
-                     const u32* found_reg,
-                     const u64* found,
-                     u32 count) {
+void TraceShaderScan(const u32* found_reg, const u64* found, u32 count) {
   if (!kTrace)
     return;
-  // PS5 shaders carry a metadata header before the ISA, so a pointer to one
-  // does not start with an opcode. The op 0x93 writes SH reg 0x113 with a raw
-  // GPU pointer; dump what it names deeply enough to find the ISA offset.
-  static int s_hdr = 0;
-  const u64 a113 = (static_cast<u64>(regs[kShRegBase + 0x114] & 0xFFFF) << 32) |
-                   regs[kShRegBase + 0x113];
-  if (s_hdr < 3 && IsGpuAddress(a113) &&
-      gpu::IsReadableRange(a113, 32 * sizeof(u32))) {
-    s_hdr++;
-    BASE_LOGI("agc", "  reg0x113 -> {:#x} dump:{}", a113,
-              Words(reinterpret_cast<const u32*>(a113), 32).c_str());
-  }
   static int s_sc = 0;
   if (s_sc >= 6 || !count)
     return;
@@ -1068,6 +1068,52 @@ void TraceCsDispatch(u64 cs_addr, bool executed, u32 num_resources) {
 
 void NoteOpcode(u32 op) {
   g_op_hist[op & 0xFF]++;
+  if (!kOpCensus)
+    return;
+  static const bool started = [] {
+    std::thread([] {
+      for (;;) {
+        std::this_thread::sleep_for(std::chrono::seconds(15));
+        BASE_LOGI("agc", "=== opcode census (tick) ===");
+        DumpOpcodeHistogram();
+      }
+    }).detach();
+    return true;
+  }();
+  (void)started;
+}
+
+void NoteSkippedOpcode(u32 op, const char* why) {
+  g_skipped[op & 0xFF] = true;
+  g_skip_reason[op & 0xFF] = why;
+}
+
+void NoteUnhandledOpcode(u32 op,
+                         u32 hdr,
+                         u32 position,
+                         u32 words,
+                         const u32* body,
+                         u32 count,
+                         u32 prev_op) {
+  g_skipped[op & 0xFF] = true;
+  // One line per distinct opcode, 32 lines total per boot: the census dump
+  // carries the counts beyond that.
+  static u32 logged[32] = {};
+  static int n_logged = 0;
+  for (int k = 0; k < n_logged; k++)
+    if (logged[k] == op)
+      return;
+  if (n_logged == 32)
+    return;
+  logged[n_logged++] = op;
+  base::String line;
+  base::FormatTo(line,
+                 "unhandled op {:#04x} count={} (hdr {:08x} at {}/{} dwords) "
+                 "after op {:#04x}: body:",
+                 op, count, hdr, position, words, prev_op);
+  for (u32 k = 0; k < count && k < 8; k++)
+    base::FormatTo(line, " {:08x}", body[k]);
+  BASE_LOGI("agc", "{}", line.c_str());
 }
 
 void TraceOpcodeBody(u32 op, const u32* body, u32 count) {
@@ -1106,8 +1152,7 @@ void TraceDcbPacket(u32 position, u32 op, const u32* body, u32 count) {
     base::FormatTo(line, " {:08x}", body[b]);
   // An indirect register packet references a GPU buffer at body[0..1]; dump it
   // so the register layout it carries can be read off.
-  if ((op == 0x9f || op == 0x93 || op == 0x64 || op == 0x7a || op == 0x63) &&
-      count >= 2) {
+  if ((op == 0x9f || op == 0x64 || op == 0x7a || op == 0x63) && count >= 2) {
     const u64 a = (static_cast<u64>(body[1] & 0xFFFF) << 32) | body[0];
     if (IsGpuAddress(a) && gpu::IsReadableRange(a, 12 * sizeof(u32)))
       base::FormatTo(line, " -> buf {:#x}:{}", a,

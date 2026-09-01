@@ -123,8 +123,7 @@ void TraceVsUserData(u64 vs_addr,
                      const u32* es_user_data,
                      bool chose_gs);
 void TraceShRegs(const Regs& regs);
-void TraceShaderScan(const Regs& regs, const u32* found_reg, const u64* found,
-                     u32 count);
+void TraceShaderScan(const u32* found_reg, const u64* found, u32 count);
 void TraceUserDataPointers(const u32* vs_user_data, const u32* ps_user_data);
 
 // The index buffer a draw packet resolved to, and its first few indices.
@@ -251,6 +250,23 @@ void TraceCsDispatch(u64 cs_addr, bool executed, u32 num_resources);
 
 // Every type-3 packet, for the opcode histogram.
 void NoteOpcode(u32 op);
+
+// A type-3 opcode the walk skips on purpose. `why` is what the census prints
+// next to it, so a packet we decided carries no state we model is not read as
+// one we never looked at.
+void NoteSkippedOpcode(u32 op, const char* why);
+
+// A type-3 opcode nothing handled: flagged UNHANDLED in the census, and the
+// first distinct ones logged with their packet (budgeted, all streams share
+// it). `prev_op` is the opcode walked before it, which is often the only
+// context a boundary packet has.
+void NoteUnhandledOpcode(u32 op,
+                         u32 hdr,
+                         u32 position,
+                         u32 words,
+                         const u32* body,
+                         u32 count,
+                         u32 prev_op);
 
 // DELTA_AGC_OPDUMP=<hex op>: the first few bodies of ONE opcode, wherever it
 // occurs. The submit-level dump only covers early init submits, so a packet
