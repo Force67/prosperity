@@ -45,6 +45,10 @@ add_delta_test(pm4_test
   SOURCES pm4_test.cc
   DEPS delta_deps)
 
+add_delta_test(agc_queue_test
+  SOURCES agc_queue_test.cc
+  DEPS delta_gpu)
+
 if(SPIRVTOOLS_FOUND AND SPIRVHEADERS_FOUND)
   add_delta_test(gcn_spirv_test
     SOURCES gcn_spirv_test.cc

@@ -39,6 +39,7 @@ DELTA_OPTION(bool, kNoCopy, "DELTA_GPU_NODMACOPY", false);
 namespace gpu::rhi {
 // Declared in rhi/command.h; the frame-time overlay reports them.
 u64 g_ns_dcb = 0;
+u32 g_submit_queue = 0;
 u64 g_ns_dcb_lock = 0;
 u32 g_dcb_n = 0;
 }  // namespace gpu::rhi

@@ -45,6 +45,8 @@ DELTA_OPTION(bool, kGcTrace, "DELTA_GC_TRACE", false);
 // PS5 AGC submit bridge (delta_gpu, gpu/ps5): forward the DCB to the PS5 command
 // processor, which follows INDIRECT_BUFFER chains and decodes the draws.
 extern "C" void prosperity_agc_submit(u64 dcbBase, u32 sizeBytes);
+extern "C" u32 prosperity_agc_submit_ring(u64 dcbBase, u32 sizeBytes, u32 queue);
+extern "C" void prosperity_agc_submit_tagged(u64 dcbBase, u32 sizeBytes, u32 tag);
 // PS5 present bridge: end the frame and present the rendered RT to the window.
 extern "C" void prosperity_agc_flip(u64 scanoutBase);
 // Is this address inside a pool the title mapped for the GPU (gpu/ps5)?
@@ -136,6 +138,10 @@ struct AcqQueue {
   u32 ringBytes = 0;
   u64 lastDoorbell = 0;
   u32 readDw = 0;  // how far we have walked, in dwords
+  // The walk stopped at a wait the memory did not satisfy; poll again even
+  // though the doorbell has not moved.
+  bool stalled = false;
+  u32 id = 0;
 };
 
 static std::mutex g_queueLock;
@@ -148,6 +154,7 @@ static void drainQueue(AcqQueue &q, u64 doorbell) {
   if (!ringDw)
     return;
   const u32 write = static_cast<u32>(doorbell % ringDw);
+  q.stalled = false;
   if (write == q.readDw) {
     // The doorbell moved but lands where we already are: the title wrapped a
     // whole ring between two polls, so that lap is gone (and with it any fence
@@ -158,13 +165,20 @@ static void drainQueue(AcqQueue &q, u64 doorbell) {
                   (unsigned long)q.dcb, write);
     return;
   }
+  // Returns false when the walk stalled part way: readDw then sits on the
+  // waiting packet and the rest of the ring waits for the next poll.
   auto forward = [&](u32 firstDw, u32 dwords) {
     const u64 at = q.dcb + static_cast<u64>(firstDw) * 4;
     if (!dwords)
-      return;
+      return true;
     if (guestReadable(at, static_cast<size_t>(dwords) * 4)) {
-      prosperity_agc_submit(at, dwords * 4);
-      return;
+      const u32 done = prosperity_agc_submit_ring(at, dwords * 4, q.id);
+      if (done < dwords) {
+        q.readDw = (firstDw + done) % ringDw;
+        q.stalled = true;
+        return false;
+      }
+      return true;
     }
     // Dropping a submit is invisible from the guest side: the work simply
     // never completes and whatever fence it would have written stalls its
@@ -173,14 +187,16 @@ static void drainQueue(AcqQueue &q, u64 doorbell) {
     if (n++ < 16)
       LOG_WARNING("agc: queue ring {:#x}+{:#x} unreadable, {} dwords dropped",
                   (unsigned long)at, dwords * 4, dwords);
+    return true;
   };
+  bool complete;
   if (write > q.readDw) {
-    forward(q.readDw, write - q.readDw);
+    complete = forward(q.readDw, write - q.readDw);
   } else {  // wrapped
-    forward(q.readDw, ringDw - q.readDw);
-    forward(0, write);
+    complete = forward(q.readDw, ringDw - q.readDw) && forward(0, write);
   }
-  q.readDw = write;
+  if (complete)
+    q.readDw = write;
   // Report the read pointer back, or the ring only ever fills. The driver keeps
   // one dword right past the ring for it (libSceAgcDriver+0x2226 stores
   // `dcb + 0x4000` into its queue struct and zeroes the word; +0x11f0 spins on
@@ -226,7 +242,7 @@ static void doorbellPoller() {
       }
       const u64 now =
           *reinterpret_cast<volatile const u64 *>(q.doorbell);
-      if (now == q.lastDoorbell)
+      if (now == q.lastDoorbell && !q.stalled)
         continue;
       // QSTAT wants every ring, uncapped: correlating them with the fence
       // labels is what tells a submit the title never made from one it made
@@ -252,6 +268,7 @@ static void registerAcqQueue(u32 qid, u64 dcb, u64 ccb, u64 doorbellBase,
     return;
   std::lock_guard<std::mutex> lk(g_queueLock);
   AcqQueue &q = g_queues[qid];
+  q.id = qid;
   q.dcb = dcb;
   q.ccb = ccb;
   q.doorbell = doorbellBase + static_cast<u64>(qid - 1) * 8;
@@ -666,7 +683,10 @@ i32 gcDevicePs5::ioctl(u32 cmd, void *data) {
           nDesc.fetch_add(1, std::memory_order_relaxed);
           if (sz && guestReadable(buf, static_cast<size_t>(sz) * 4)) {
             nFwd.fetch_add(1, std::memory_order_relaxed);
-            prosperity_agc_submit(buf, sz * 4);
+            // Tag: 0x8132, the descriptor's index in the batch, its flags.
+            prosperity_agc_submit_tagged(
+                buf, sz * 4,
+                0x81320000u | ((i & 0xFF) << 8) | (d[i * 4 + 3] & 0xFF));
           } else if (sz) {
             nSkipAddr.fetch_add(1, std::memory_order_relaxed);
             static int n = 0;

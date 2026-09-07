@@ -8,9 +8,11 @@
 #include "gpu/ps5/cmd_processor.h"
 #include "base/arch.h"
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstring>
+#include <map>
 #include <mutex>
 
 #include <base/logging.h>
@@ -48,9 +50,27 @@ namespace {
 // The register file is the state of one GPU: two submit threads walking it
 // concurrently would interleave one draw's registers with another's.
 std::mutex g_mutex;
-// Persistent across submits: AGC programs a register once and relies on it
-// holding for every later submission.
-Regs g_regs;
+
+// A waitOnAddress the memory does not satisfy yet stalls the QUEUE it sits
+// in, exactly as the command processor would: the ring walk stops at the
+// packet and resumes there on a later doorbell poll. Only ring walks can be
+// resumed (an ioctl submit is handed over whole, so those keep skipping the
+// wait). Astro Bot's async compute queue clears the exposure texel its
+// scanout composite reads, gated on a label the graphics queue writes after
+// the composite; walked in submission order, the clear ran first and the
+// frame was black.
+struct RingStall {
+  bool ring_walk = false;  // stalls allowed
+  bool stalled = false;
+  // Where inside each nested indirect buffer the walk stopped, so the ring
+  // packet that called it can re-enter at the same place.
+  u64 ib[10] = {};  // kMaxIbDepth + 2, declared below
+  u32 ib_dw[10] = {};
+  // Retained for diagnostics; elapsed time never satisfies a GPU wait.
+  u64 wait_addr = 0;
+  u64 wait_ref = 0;
+  std::chrono::steady_clock::time_point wait_since;
+};
 u64 g_total_submits = 0;
 bool g_renderer_started = false;
 bool g_frame_active = false;
@@ -62,13 +82,25 @@ struct IndexState {
   u32 max = 0;   // IT_INDEX_BUFFER_SIZE
   u32 num_instances = 1;  // IT_NUM_INSTANCES, for the following draw(s)
 };
-IndexState g_index;
 
 // IT_SET_BASE(base_index=1) publishes where the indirect argument buffers live;
 // an indirect draw or dispatch then names an offset into one. The header's
 // shader-type bit picks which of the two it set.
-u64 g_draw_indirect_base = 0;
-u64 g_dispatch_indirect_base = 0;
+// Each hardware queue owns its register context and suspended IB stack.
+// A different queue can run while this one waits, without replacing its
+// shader registers or the position at which its nested buffer must resume.
+struct QueueState {
+  Regs regs;
+  RingStall stall;
+  IndexState index;
+  u64 draw_indirect_base = 0;
+  u64 dispatch_indirect_base = 0;
+  std::array<u32, 0x400> pushed_context{};
+  bool context_pushed = false;
+};
+QueueState g_graphics_queue;
+std::map<u32, QueueState> g_ring_queues;
+QueueState* g_queue = &g_graphics_queue;  // protected by g_mutex
 
 // A cycle in the IB chain would recurse until the stack overflowed. Real
 // submissions are flat or a couple of levels deep.
@@ -207,6 +239,69 @@ void HandleDmaData(rhi::Renderer& renderer, const u32* body, u32 count) {
 }
 
 // body: control, dstLo, dstHi, data...
+// waitOnAddress (0x3c: 32-bit, 6 dwords; 0x93: 64-bit, 8 dwords). body[0]
+// carries the compare function in [2:0] (0 always, 1 <, 2 <=, 3 ==, 4 !=,
+// 5 >=, 6 >), the poll address follows, then reference and mask.
+bool WaitSatisfied(u32 op, const u32* body, u32 count) {
+  const bool wide = op == 0x93;
+  if (count < (wide ? 8u : 6u))
+    return true;
+  const u32 function = body[0] & 0x7;
+  const u64 address = (static_cast<u64>(body[2] & 0xFFFF) << 32) | body[1];
+  u64 ref, mask;
+  if (wide) {
+    ref = (static_cast<u64>(body[4]) << 32) | body[3];
+    mask = (static_cast<u64>(body[6]) << 32) | body[5];
+  } else {
+    ref = body[3];
+    mask = body[4];
+  }
+  if (function == 0 || !IsLabelAddress(address) ||
+      !gpu::IsReadableRange(address, wide ? 8 : 4))
+    return true;
+  if (!rhi::FlushCsWritesRange(rhi::DefaultRenderer(), address, wide ? 8 : 4))
+    return false;
+  u64 value;
+  if (wide)
+    value = *reinterpret_cast<const volatile u64*>(address);
+  else
+    value = *reinterpret_cast<const volatile u32*>(address);
+  value &= mask;
+  switch (function) {
+    case 1: return value < ref;
+    case 2: return value <= ref;
+    case 3: return value == ref;
+    case 4: return value != ref;
+    case 5: return value >= ref;
+    case 6: return value > ref;
+    default: return true;
+  }
+}
+
+// Suspend this queue until the comparison succeeds. Other queues remain
+// runnable and may produce the value this one is waiting for.
+bool StallOnWait(u32 op, const u32* body, u32 count) {
+  if (!g_queue->stall.ring_walk || WaitSatisfied(op, body, count))
+    return false;
+  const bool wide = op == 0x93;
+  const u64 address = (static_cast<u64>(body[2] & 0xFFFF) << 32) | body[1];
+  const u64 ref = wide ? (static_cast<u64>(body[4]) << 32) | body[3] : body[3];
+  const auto now = std::chrono::steady_clock::now();
+  if (address != g_queue->stall.wait_addr || ref != g_queue->stall.wait_ref) {
+    g_queue->stall.wait_addr = address;
+    g_queue->stall.wait_ref = ref;
+    g_queue->stall.wait_since = now;
+    return true;
+  }
+  if (now - g_queue->stall.wait_since >= std::chrono::seconds(5)) {
+    BASE_LOGW("agc", "queue {} waitOnAddress {:#x} ref={:#x} remains pending",
+              rhi::g_submit_queue,
+              (unsigned long)address, (unsigned long)ref);
+    g_queue->stall.wait_since = now;
+  }
+  return true;
+}
+
 void HandleWriteData(const u32* body, u32 count) {
   if (count < 4)
     return;
@@ -216,7 +311,7 @@ void HandleWriteData(const u32* body, u32 count) {
   // the guest and silently dropped it. Titles stream state through these, so
   // the registers they carry were simply missing.
   if (((body[0] >> 8) & 0xF) == 0) {
-    WriteDataRegs(g_regs, body, count);
+    WriteDataRegs(g_queue->regs, body, count);
     return;
   }
   const u64 address =
@@ -350,7 +445,7 @@ void HandleDispatchIndirect(rhi::Renderer& renderer,
   if (count >= 3)  // pointer form: addrLo, addrHi, mode
     args = body[0] | (static_cast<u64>(body[1]) << 32);
   else if (count >= 1)  // offset form: an offset into the SET_BASE buffer
-    args = g_dispatch_indirect_base + body[0];
+    args = g_queue->dispatch_indirect_base + body[0];
   if (!args || !IsGuestAddress(args) || !gpu::IsReadableRange(args, 12))
     return;
   // An earlier compute dispatch can produce the indirect dimensions.
@@ -361,7 +456,7 @@ void HandleDispatchIndirect(rhi::Renderer& renderer,
   const u32 groups[3] = {a[0], a[1], a[2]};
   if (!groups[0] || !groups[1] || !groups[2])
     return;
-  DispatchCompute(renderer, g_regs, groups, 3);
+  DispatchCompute(renderer, g_queue->regs, groups, 3);
 }
 
 // IT_DRAW_INDIRECT / IT_DRAW_INDEX_INDIRECT: same as the direct forms with the
@@ -375,9 +470,9 @@ void HandleDrawIndirect(rhi::Renderer& renderer,
   if (count < 1)
     return;
   const bool indexed = op == 0x25;
-  const u64 args = g_draw_indirect_base + body[0];
+  const u64 args = g_queue->draw_indirect_base + body[0];
   const u32 want = indexed ? 20u : 16u;
-  if (!g_draw_indirect_base || !IsGuestAddress(args) ||
+  if (!g_queue->draw_indirect_base || !IsGuestAddress(args) ||
       !gpu::IsReadableRange(args, want))
     return;
   if (!rhi::FlushCsWritesRange(renderer, args, want))
@@ -386,21 +481,20 @@ void HandleDrawIndirect(rhi::Renderer& renderer,
   if (!a[0] || !a[1])
     return;
   const u32 initiator = count >= 4 ? body[3] : 0;
-  const u32 saved_instances = g_index.num_instances;
-  if (a[1])
-    g_index.num_instances = a[1];
+  const u32 saved_instances = g_queue->index.num_instances;
+  g_queue->index.num_instances = a[1];
   if (!indexed) {
     const u32 auto_body[2] = {a[0], initiator};
     issue(renderer, IT_DRAW_INDEX_AUTO, auto_body, 2);
   } else {
-    const u32 stride = g_index.type == 1 ? 4u : g_index.type == 2 ? 1u : 2u;
-    const u64 base = g_index.base + static_cast<u64>(a[2]) * stride;
-    const u32 idx_body[5] = {g_index.max ? g_index.max : a[0],
+    const u32 stride = g_queue->index.type == 1 ? 4u : g_queue->index.type == 2 ? 1u : 2u;
+    const u64 base = g_queue->index.base + static_cast<u64>(a[2]) * stride;
+    const u32 idx_body[5] = {g_queue->index.max ? g_queue->index.max : a[0],
                              static_cast<u32>(base),
                              static_cast<u32>(base >> 32), a[0], initiator};
     issue(renderer, IT_DRAW_INDEX_2, idx_body, 5);
   }
-  g_index.num_instances = saved_instances;
+  g_queue->index.num_instances = saved_instances;
 }
 
 void HandleDrawPacket(rhi::Renderer& renderer,
@@ -414,13 +508,13 @@ void HandleDrawPacket(rhi::Renderer& renderer,
   packet.op = op;
   packet.body = body;
   packet.count = count;
-  packet.index_type = g_index.type;
-  packet.index_base = g_index.base;
-  packet.index_max = g_index.max;
-  packet.num_instances = g_index.num_instances;
+  packet.index_type = g_queue->index.type;
+  packet.index_base = g_queue->index.base;
+  packet.index_max = g_queue->index.max;
+  packet.num_instances = g_queue->index.num_instances;
 
   rhi::DrawInfo d;
-  if (!BuildDrawInfo(g_regs, packet, d))
+  if (!BuildDrawInfo(g_queue->regs, packet, d))
     return;
   if (!g_frame_active) {
     TraceBeginFrame();
@@ -443,13 +537,13 @@ bool IsDraw(u32 op) {
 // Walk one AGC stream, following INDIRECT_BUFFER, latching registers, decoding
 // draws and writing completion labels. `depth` guards a malformed
 // self-reference.
-void Walk(rhi::Renderer& renderer,
-          const u32* p,
-          u32 words,
-          bool dump,
-          u32 depth) {
+u32 Walk(rhi::Renderer& renderer,
+         const u32* p,
+         u32 words,
+         bool dump,
+         u32 depth) {
   if (!p || depth > kMaxIbDepth)
-    return;
+    return words;
   u32 i = 0;
   // The last few packet starts, so a desync can name the packet whose size was
   // wrong instead of the data it eventually ran into. A type-0 header consumes
@@ -484,7 +578,7 @@ void Walk(rhi::Renderer& renderer,
         i += 1;
         continue;
       }
-      SetRegRun(g_regs, first, &p[i + 1], count);
+      SetRegRun(g_queue->regs, first, &p[i + 1], count);
       i += 1 + count;
       continue;
     }
@@ -542,7 +636,7 @@ void Walk(rhi::Renderer& renderer,
     }
     NoteOpcode(op);
     TraceOpcodeBody(op, body, count);
-    TraceColorBaseSource(op, g_regs[mmCB_COLOR0_BASE]);
+    TraceColorBaseSource(op, g_queue->regs[mmCB_COLOR0_BASE]);
     if (dump)
       TraceDcbPacket(i, op, body, count);
     switch (op) {
@@ -564,8 +658,20 @@ void Walk(rhi::Renderer& renderer,
             gpu::IsReadableRange(ib, static_cast<u64>(ib_words) * sizeof(u32));
         TraceIndirectBuffer(ib, ib_words, follow);
         if (follow) {
-          Walk(renderer, reinterpret_cast<const u32*>(ib), ib_words, dump,
-               depth + 1);
+          // Re-enter where a stalled walk of this same buffer left off.
+          u32 start = 0;
+          if (g_queue->stall.ib[depth + 1] == ib) {
+            start = std::min(g_queue->stall.ib_dw[depth + 1], ib_words);
+            g_queue->stall.ib[depth + 1] = 0;
+          }
+          const u32 done =
+              Walk(renderer, reinterpret_cast<const u32*>(ib) + start,
+                   ib_words - start, dump, depth + 1);
+          if (g_queue->stall.stalled) {
+            g_queue->stall.ib[depth + 1] = ib;
+            g_queue->stall.ib_dw[depth + 1] = start + done;
+            return i;  // the ring packet that called it is walked again
+          }
         } else {
           static int n = 0;
           if (n++ < 16)
@@ -575,44 +681,44 @@ void Walk(rhi::Renderer& renderer,
         break;
       }
       case IT_SET_CONTEXT_REG:
-        SetRegs(g_regs, kContextRegBase, body, count);
+        SetRegs(g_queue->regs, kContextRegBase, body, count);
         break;
       case IT_SET_SH_REG:
-        SetRegs(g_regs, kShRegBase, body, count);
+        SetRegs(g_queue->regs, kShRegBase, body, count);
         break;
       case IT_SET_UCONFIG_REG:
-        SetRegs(g_regs, kUConfigRegBase, body, count);
+        SetRegs(g_queue->regs, kUConfigRegBase, body, count);
         break;
       case IT_SET_CONFIG_REG:
-        SetRegs(g_regs, kConfigRegBase, body, count);
+        SetRegs(g_queue->regs, kConfigRegBase, body, count);
         break;
       // LOAD_*_REG: registers loaded from a shadow image in GPU memory.
       case 0x61:  // LOAD_CONTEXT_REG
-        LoadRegImage(g_regs, kContextRegBase, body, count);
+        LoadRegImage(g_queue->regs, kContextRegBase, body, count);
         break;
       case 0x5f:  // LOAD_SH_REG
-        LoadRegImage(g_regs, kShRegBase, body, count);
+        LoadRegImage(g_queue->regs, kShRegBase, body, count);
         break;
       case 0x5e:  // LOAD_UCONFIG_REG
-        LoadRegImage(g_regs, kUConfigRegBase, body, count);
+        LoadRegImage(g_queue->regs, kUConfigRegBase, body, count);
         break;
       // SET_*_REG_INDIRECT: a state block of (offset, value) entries, which is
       // how the per-draw render target and shaders arrive.
       case 0x9f:
-        LoadRegBlock(g_regs, kContextRegBase, body, count);
+        LoadRegBlock(g_queue->regs, kContextRegBase, body, count);
         break;
       case 0x64:
-        LoadRegBlock(g_regs, kUConfigRegBase, body, count);
+        LoadRegBlock(g_queue->regs, kUConfigRegBase, body, count);
         break;
       case 0x63:
-        LoadRegBlock(g_regs, kShRegBase, body, count);
+        LoadRegBlock(g_queue->regs, kShRegBase, body, count);
         break;
       // SET_UCONFIG_REG_INDEX: the index lives in the offset dword's top bits
       // and SetRegs already masks the selector off, so the register write is
       // the same one. Dropping these lost the index type and primitive type a
       // title programs through this form.
       case 0x7a:
-        SetRegs(g_regs, kUConfigRegBase, body, count);
+        SetRegs(g_queue->regs, kUConfigRegBase, body, count);
         break;
       // Skipped on purpose. The reason is recorded so the census can tell a
       // packet we chose to ignore from one nothing ever looked at.
@@ -647,6 +753,10 @@ void Walk(rhi::Renderer& renderer,
       // confirmed.
       case 0x3c:
       case 0x93:
+        if (StallOnWait(op, body, count)) {
+          g_queue->stall.stalled = true;
+          return i;
+        }
         NoteSkippedOpcode(op, "waitOnAddress, already satisfied");
         break;
       // acquireMem (gfx10 ACQUIRE_MEM, 7 dwords): coher_cntl, coher_size{,_hi},
@@ -671,22 +781,22 @@ void Walk(rhi::Renderer& renderer,
         break;
       case IT_INDEX_TYPE:
         if (count >= 1)
-          g_index.type = body[0] & 0x3;
+          g_queue->index.type = body[0] & 0x3;
         break;
       case IT_INDEX_BASE:  // baseLo, baseHi
         if (count >= 2)
-          g_index.base =
+          g_queue->index.base =
               (static_cast<u64>(body[1] & 0xFFFF) << 32) | (body[0] & ~1u);
         break;
       case IT_INDEX_BUFFER_SIZE:
         if (count >= 1)
-          g_index.max = body[0];
+          g_queue->index.max = body[0];
         break;
       case IT_NUM_INSTANCES:
-        g_index.num_instances = (count >= 1 && body[0]) ? body[0] : 1;
+        g_queue->index.num_instances = (count >= 1 && body[0]) ? body[0] : 1;
         break;
       case IT_DISPATCH_DIRECT:
-        DispatchCompute(renderer, g_regs, body, count);
+        DispatchCompute(renderer, g_queue->regs, body, count);
         break;
       case 0x16:  // DISPATCH_INDIRECT
         HandleDispatchIndirect(renderer, body, count);
@@ -701,9 +811,9 @@ void Walk(rhi::Renderer& renderer,
         const u64 base = (body[1] & ~0x7ull) |
                          (static_cast<u64>(body[2] & 0xFFFF) << 32);
         if ((hdr >> 1) & 0x3)
-          g_dispatch_indirect_base = base;
+          g_queue->dispatch_indirect_base = base;
         else
-          g_draw_indirect_base = base;
+          g_queue->draw_indirect_base = base;
         break;
       }
       case IT_COND_EXEC: {  // skip the following dwords when the flag is zero
@@ -745,6 +855,7 @@ void Walk(rhi::Renderer& renderer,
     last_op = op;
     i += 1 + count;
   }
+  return words;
 }
 
 // The renderer comes up on the first submission rather than at startup: a title
@@ -763,6 +874,33 @@ void StartRendererOnce(rhi::Renderer& renderer) {
 }
 
 }  // namespace
+
+u32 SubmitDcbRing(const void* dcb, u32 size_bytes, u32 queue) {
+  if (!dcb || size_bytes < 4)
+    return size_bytes / 4;
+  std::lock_guard<std::mutex> lock(g_mutex);
+  rhi::Renderer& renderer = rhi::DefaultRenderer();
+  StartRendererOnce(renderer);
+  const u32 words = size_bytes / 4;
+  const u64 submission = ++g_total_submits;
+  const bool dump = TraceSubmit(dcb, size_bytes, words, submission);
+  rhi::g_submit_queue = queue;
+  g_queue = &g_ring_queues[queue];
+  g_queue->stall.ring_walk = true;
+  g_queue->stall.stalled = false;
+  const u32 done = Walk(renderer, static_cast<const u32*>(dcb), words, dump, 0);
+  g_queue->stall.ring_walk = false;
+  const bool stalled = g_queue->stall.stalled;
+  g_queue = &g_graphics_queue;
+  rhi::g_submit_queue = 0;
+  if (!stalled) {
+    TraceOpcodeCensus(dcb, words, submission);
+    if (dump)
+      TraceWalkDone();
+    return words;
+  }
+  return done;
+}
 
 void SubmitDcb(const void* dcb, u32 size_bytes) {
   if (!dcb || size_bytes < 4)
@@ -817,6 +955,26 @@ void EndFrame(u64 scanout_base) {
 // here, mirroring prosperity_gc_submit on the PS4 path.
 extern "C" void prosperity_agc_submit(u64 dcb_base, u32 size_bytes) {
   gpu::ps5::SubmitDcb(reinterpret_cast<const void*>(dcb_base), size_bytes);
+}
+
+// The same, carrying a tag the frame capture records on every draw and
+// dispatch of the buffer (an ioctl submit's descriptor index and flags).
+extern "C" void prosperity_agc_submit_tagged(u64 dcb_base,
+                                             u32 size_bytes,
+                                             u32 tag) {
+  gpu::rhi::g_submit_queue = tag;
+  gpu::ps5::SubmitDcb(reinterpret_cast<const void*>(dcb_base), size_bytes);
+  gpu::rhi::g_submit_queue = 0;
+}
+
+// The ring form: returns how many dwords were consumed. Fewer than submitted
+// means the walk stalled on a wait the memory does not satisfy yet; hand the
+// rest in again on a later poll, starting at the returned dword.
+extern "C" u32 prosperity_agc_submit_ring(u64 dcb_base,
+                                          u32 size_bytes,
+                                          u32 queue) {
+  return gpu::ps5::SubmitDcbRing(reinterpret_cast<const void*>(dcb_base),
+                                 size_bytes, queue);
 }
 
 // PS5 flip bridge: the shared dce/VideoOut flip path calls this when the active

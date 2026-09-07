@@ -357,6 +357,11 @@ struct ComputeInfo {
 // how many it walked. The console-specific processors write these and the
 // renderer's per-frame report reads them, so neither has to include the other.
 extern u64 g_ns_dcb, g_ns_dcb_lock;
+// The AGC queue whose ring the command processor is walking (0 = a submit
+// that did not come through a ring), for the frame capture: work that lands
+// in the wrong order between the graphics and compute queues is otherwise
+// indistinguishable from work that is simply wrong.
+extern u32 g_submit_queue;
 extern u32 g_dcb_n;
 
 }  // namespace gpu::rhi
