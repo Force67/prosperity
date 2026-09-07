@@ -25,6 +25,9 @@
 namespace {
 DELTA_OPTION(bool, kNoCs, "DELTA_GPU_NOCS", false);
 DELTA_OPTION(const char*, kCsProbe, "DELTA_GPU_CSPROBE", nullptr);
+// The video decoder writes frames into its own mappings, outside every GPU
+// pool; off by default because a written range is only as safe as the V#.
+DELTA_OPTION(bool, kCsAnyMem, "DELTA_PS5_CSANYMEM", false);
 }  // namespace
 
 namespace gpu::ps5 {
@@ -255,11 +258,32 @@ void DispatchCompute(rhi::Renderer& renderer,
       range.guest_size = range.size;
     TraceCsResource(cs_addr, r, range.base, range.size, range.guest_size,
                     range.zero_fill);
+    // The decoder's frame-pool T# is a 2D array whose layout runs past its
+    // mapping; stage the mapped prefix and let the tail live in the SSBO only.
+    if (kCsAnyMem && r.kind == 1 && !range.zero_fill &&
+        range.guest_size <= kMaxResource &&
+        !gpu::IsReadableRange(range.base, range.guest_size)) {
+      constexpr u64 kGrain = 64 * 1024;
+      u64 lo = 0, hi = range.guest_size / kGrain;
+      while (lo < hi) {
+        const u64 mid = (lo + hi + 1) / 2;
+        if (gpu::IsReadableRange(range.base, mid * kGrain))
+          lo = mid;
+        else
+          hi = mid - 1;
+      }
+      if (lo)
+        range.guest_size = lo * kGrain;
+    }
     // A dispatch writes guest memory, so a range that does not check out skips
     // the whole dispatch rather than binding something wrong.
+    // A read-only table may sit anywhere readable: the video decoder keeps its
+    // shaders' constants in its own module image, outside the GPU aperture.
+    const u64 max_resource = kCsAnyMem ? 2 * kMaxResource : kMaxResource;
     if (!range.zero_fill &&
-        (range.size < r.min_bytes || range.size > kMaxResource ||
-         range.guest_size > kMaxResource || !IsGpuAddress(range.base) ||
+        (range.size < r.min_bytes || range.size > max_resource ||
+         range.guest_size > max_resource ||
+         (r.written && !kCsAnyMem && !IsGpuAddress(range.base)) ||
          !gpu::IsReadableRange(range.base, range.guest_size))) {
       TraceCsInvalidRange(cs_addr, r, range.base, range.guest_size);
       return;
