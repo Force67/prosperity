@@ -62,15 +62,16 @@ ResourceRange ResolveImageResource(u64 cs_addr,
   const bool r32 = t.dfmt == 4 && (t.nfmt == 4 || t.nfmt == 5 || t.nfmt == 7);
   const bool rg16f = t.dfmt == 5 && t.nfmt == 7;
   const bool r16f = t.dfmt == 2 && t.nfmt == 7;
-  const bool rg8 = t.dfmt == 3 && t.nfmt == 0;
-  const bool rgba16f = t.dfmt == 12 && t.nfmt == 7;
+  const bool rg8 = t.dfmt == 3 && (t.nfmt == 0 || t.nfmt == 4);
+  const bool rgba16 = t.dfmt == 12 && (t.nfmt == 0 || t.nfmt == 7);
   const bool r11g11b10f = t.dfmt == 6 && t.nfmt == 7;
   // 32_32: two full dwords per texel, so it stages unchanged like the other
   // 32-bit-per-channel forms, just twice as wide.
   const bool rg32 = t.dfmt == 11 && (t.nfmt == 4 || t.nfmt == 5 || t.nfmt == 7);
-  const bool block128 = t.dfmt == 14 && (t.nfmt == 4 || t.nfmt == 5);
+  const bool block128 =
+      t.dfmt == 14 && (t.nfmt == 4 || t.nfmt == 5 || t.nfmt == 7);
   out.elem_bytes = block128            ? 16u
-                   : (rgba16f || rg32) ? 8u
+                   : (rgba16 || rg32) ? 8u
                    : (r16f || rg8)     ? 2u
                    : r8                ? 1u
                                        : 4u;
@@ -81,7 +82,7 @@ ResourceRange ResolveImageResource(u64 cs_addr,
   // forms.
   const bool supported_type = t.type >= 8 && t.type <= 13;
   const bool supported_format = r8 || rgba8 || r32 || rg16f || r16f || rg8 ||
-                                rgba16f || r11g11b10f || rg32 || block128;
+                                rgba16 || r11g11b10f || rg32 || block128;
   gcn::TextureLayout32 layout;
   if (!supported_type || !supported_format ||
       !gcn::TilingSupported(t.tiling_idx) || !t.valid ||

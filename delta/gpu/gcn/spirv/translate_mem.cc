@@ -1454,7 +1454,7 @@ void EmitCsMimg(Translator& t,
   };
   const Id is_rgba8 =
       t.rdna_sources
-          ? is_gfmt({56, 60, 130})
+          ? is_gfmt({56, 60, 130, 1, 5})  // R8 stages as an RGBA8 texel
           : t.LAnd(t.Eq(dfmt, t.U32(10)),
                    logical_or(is_unorm, t.Eq(nfmt, t.U32(4))));
   const Id is_r32 =
@@ -1470,11 +1470,33 @@ void EmitCsMimg(Translator& t,
   const Id is_r16f = t.rdna_sources
                          ? is_gfmt({13})
                          : t.LAnd(t.Eq(dfmt, t.U32(2)), t.Eq(nfmt, t.U32(7)));
+  // gfx10 14 = 8_8_UNORM, 18 = 8_8_UINT (the video decoder's frame planes).
   const Id is_rg8 =
-      t.rdna_sources ? is_gfmt({14}) : t.LAnd(t.Eq(dfmt, t.U32(3)), is_unorm);
-  const Id is_rgba16f = t.rdna_sources ? is_gfmt({71})
-                                       : t.LAnd(t.Eq(dfmt, t.U32(12)),
-                                                t.Eq(nfmt, t.U32(7)));
+      t.rdna_sources ? is_gfmt({14, 18})
+                     : t.LAnd(t.Eq(dfmt, t.U32(3)),
+                              logical_or(is_unorm, t.Eq(nfmt, t.U32(4))));
+  const Id is_rgba16_unorm =
+      t.rdna_sources ? is_gfmt({65})
+                     : t.LAnd(t.Eq(dfmt, t.U32(12)), is_unorm);
+  const Id is_rgba16 =
+      logical_or(is_rgba16_unorm,
+                 t.rdna_sources ? is_gfmt({71})
+                                : t.LAnd(t.Eq(dfmt, t.U32(12)),
+                                         t.Eq(nfmt, t.U32(7))));
+  const auto unpack16 = [&](Id word) {
+    const Id half = t.m.ExtInst(t.t_v2, GLSLstd450UnpackHalf2x16, {word});
+    const Id unorm = t.m.ExtInst(t.t_v2, GLSLstd450UnpackUnorm2x16, {word});
+    return t.m.CompositeConstruct(t.t_v2, {
+        t.SelectF(is_rgba16_unorm, t.m.CompositeExtract(t.t_f, unorm, 0),
+                  t.m.CompositeExtract(t.t_f, half, 0)),
+        t.SelectF(is_rgba16_unorm, t.m.CompositeExtract(t.t_f, unorm, 1),
+                  t.m.CompositeExtract(t.t_f, half, 1))});
+  };
+  const auto pack16 = [&](Id pair) {
+    return t.SelectB(is_rgba16_unorm,
+                      t.m.ExtInst(t.t_u, GLSLstd450PackUnorm2x16, {pair}),
+                      t.m.ExtInst(t.t_u, GLSLstd450PackHalf2x16, {pair}));
+  };
   const Id is_r11g11b10f = t.rdna_sources
                                ? is_gfmt({36})
                                : t.LAnd(t.Eq(dfmt, t.U32(6)),
@@ -1491,21 +1513,25 @@ void EmitCsMimg(Translator& t,
   const Id is_rgba16u = t.rdna_sources
                             ? false_id
                             : t.LAnd(t.Eq(dfmt, t.U32(12)), is_int);
-  const Id is_rg32u =
-      t.rdna_sources ? false_id : t.LAnd(t.Eq(dfmt, t.U32(11)), is_int);
-  const Id is_rgba32u =
-      t.rdna_sources ? false_id : t.LAnd(t.Eq(dfmt, t.U32(14)), is_int);
+  const Id is_rg32_raw =
+      t.rdna_sources ? is_gfmt({62, 63, 64})
+                     : t.LAnd(t.Eq(dfmt, t.U32(11)), is_int);
+  const Id is_rgba32_raw =
+      t.rdna_sources ? is_gfmt({75, 76, 77})
+                     : t.LAnd(t.Eq(dfmt, t.U32(14)), is_int);
+  // Full-width float channels use the same raw dwords as integer channels
+  // for image_load/store. Sampling interprets those dwords as floats below.
   // Two dwords per texel (16_16_16_16 packs two components each, 32_32 is one
   // per dword), four for 32_32_32_32.
-  const Id is_block2 = logical_or(is_rgba16u, is_rg32u);
-  const Id is_block_int = logical_or(is_block2, is_rgba32u);
+  const Id is_block2 = logical_or(is_rgba16u, is_rg32_raw);
+  const Id is_raw_block = logical_or(is_block2, is_rgba32_raw);
   Id supported_format = logical_or(is_rgba8, is_r32);
   supported_format = logical_or(supported_format, is_rg16f);
   supported_format = logical_or(supported_format, is_r16f);
   supported_format = logical_or(supported_format, is_rg8);
-  supported_format = logical_or(supported_format, is_rgba16f);
+  supported_format = logical_or(supported_format, is_rgba16);
   supported_format = logical_or(supported_format, is_r11g11b10f);
-  supported_format = logical_or(supported_format, is_block_int);
+  supported_format = logical_or(supported_format, is_raw_block);
   const Id supported_type = logical_or(
       logical_or(t.Eq(image_type, t.U32(9)), t.Eq(image_type, t.U32(8))),
       has_slices);
@@ -1626,13 +1652,13 @@ void EmitCsMimg(Translator& t,
   const Id layer_off = t.Mul(layer, t.Mul(pitch, stored_height));
   const Id texel_idx =
       t.Add(mip_off, t.Add(layer_off, t.Add(t.Mul(y, pitch), x)));
-  Id dword_idx = t.SelectB(is_rgba16f, t.Mul(texel_idx, t.U32(2)), texel_idx);
+  Id dword_idx = t.SelectB(is_rgba16, t.Mul(texel_idx, t.U32(2)), texel_idx);
   dword_idx = t.SelectB(is_r11g11b10f, t.Mul(texel_idx, t.U32(4)), dword_idx);
   dword_idx = t.SelectB(is_block2, t.Mul(texel_idx, t.U32(2)), dword_idx);
-  dword_idx = t.SelectB(is_rgba32u, t.Mul(texel_idx, t.U32(4)), dword_idx);
-  const Id wide2 = logical_or(logical_or(is_rgba16f, is_r11g11b10f),
-                              logical_or(is_block2, is_rgba32u));
-  const Id wide4 = logical_or(is_r11g11b10f, is_rgba32u);
+  dword_idx = t.SelectB(is_rgba32_raw, t.Mul(texel_idx, t.U32(4)), dword_idx);
+  const Id wide2 = logical_or(logical_or(is_rgba16, is_r11g11b10f),
+                              logical_or(is_block2, is_rgba32_raw));
+  const Id wide4 = logical_or(is_r11g11b10f, is_rgba32_raw);
 
   if (load) {
     const Id raw = CsSsboLoad(t, sc, binding, dword_idx);
@@ -1646,8 +1672,8 @@ void EmitCsMimg(Translator& t,
     const Id raw_3 = CsSsboLoad(
         t, sc, binding,
         t.SelectB(wide4, t.Add(dword_idx, t.U32(3)), dword_idx));
-    const Id halfs = t.m.ExtInst(t.t_v2, GLSLstd450UnpackHalf2x16, {raw});
-    const Id halfs_hi = t.m.ExtInst(t.t_v2, GLSLstd450UnpackHalf2x16, {raw_hi});
+    const Id halfs = unpack16(raw);
+    const Id halfs_hi = unpack16(raw_hi);
     const Id float_component[4] = {raw, raw_hi, raw_2, raw_3};
     u32 out = 0;
     for (int i = 0; i < 4; i++) {
@@ -1667,7 +1693,7 @@ void EmitCsMimg(Translator& t,
       const Id wide_half = t.m.Bitcast(
           t.t_u, t.m.CompositeExtract(t.t_f, i < 2 ? halfs : halfs_hi,
                                       i < 2 ? i : i - 2));
-      value = t.SelectB(is_rgba16f, wide_half, value);
+      value = t.SelectB(is_rgba16, wide_half, value);
       value = t.SelectB(is_r11g11b10f, float_component[i], value);
       value = t.SelectB(is_r32, i == 0 ? raw : t.U32(0), value);
       // Raw block bits: 16_16_16_16 puts two components in each dword, the
@@ -1677,22 +1703,21 @@ void EmitCsMimg(Translator& t,
           t.And(t.Shr(i < 2 ? raw : raw_hi, t.U32((i & 1) * 16u)),
                 t.U32(0xFFFF)),
           value);
-      value = t.SelectB(is_rg32u,
+      value = t.SelectB(is_rg32_raw,
                         i == 0 ? raw : (i == 1 ? raw_hi : t.U32(0)), value);
-      value = t.SelectB(is_rgba32u, float_component[i], value);
+      value = t.SelectB(is_rgba32_raw, float_component[i], value);
       t.SetVg(vdata + out++, value);
     }
   } else if (sample || gather) {
-    const Id has_second =
-        t.m.Emit(spv::Op::OpLogicalOr, t.t_bool, {is_rgba16f, is_r11g11b10f});
+    const Id has_second = wide2;
     // Storage-buffer index of texel (xx,yy) in the current mip/layer, scaled
     // for the multi-dword formats (matches the single-texel index above).
     const auto texel_at = [&](Id xx, Id yy) {
       Id ti = t.Add(mip_off, t.Add(layer_off, t.Add(t.Mul(yy, pitch), xx)));
-      ti = t.SelectB(is_rgba16f, t.Mul(ti, t.U32(2)), ti);
+      ti = t.SelectB(is_rgba16, t.Mul(ti, t.U32(2)), ti);
       ti = t.SelectB(is_r11g11b10f, t.Mul(ti, t.U32(4)), ti);
       ti = t.SelectB(is_block2, t.Mul(ti, t.U32(2)), ti);
-      ti = t.SelectB(is_rgba32u, t.Mul(ti, t.U32(4)), ti);
+      ti = t.SelectB(is_rgba32_raw, t.Mul(ti, t.U32(4)), ti);
       return ti;
     };
     // Decode one texel to float RGBA, honouring the storage format. Sampling
@@ -1703,12 +1728,11 @@ void EmitCsMimg(Translator& t,
       const Id raw_hi = CsSsboLoad(
           t, sc, binding, t.SelectB(has_second, t.Add(idx, t.U32(1)), idx));
       const Id raw_2 = CsSsboLoad(
-          t, sc, binding, t.SelectB(is_r11g11b10f, t.Add(idx, t.U32(2)), idx));
+          t, sc, binding, t.SelectB(wide4, t.Add(idx, t.U32(2)), idx));
       const Id raw_3 = CsSsboLoad(
-          t, sc, binding, t.SelectB(is_r11g11b10f, t.Add(idx, t.U32(3)), idx));
-      const Id halfs = t.m.ExtInst(t.t_v2, GLSLstd450UnpackHalf2x16, {raw});
-      const Id halfs_hi =
-          t.m.ExtInst(t.t_v2, GLSLstd450UnpackHalf2x16, {raw_hi});
+          t, sc, binding, t.SelectB(wide4, t.Add(idx, t.U32(3)), idx));
+      const Id halfs = unpack16(raw);
+      const Id halfs_hi = unpack16(raw_hi);
       const Id fcomp[4] = {raw, raw_hi, raw_2, raw_3};
       for (int i = 0; i < 4; i++) {
         const Id byte = t.And(t.Shr(raw, t.U32(i * 8u)), t.U32(0xFF));
@@ -1724,10 +1748,16 @@ void EmitCsMimg(Translator& t,
             is_r16f,
             i == 0 ? t.m.CompositeExtract(t.t_f, halfs, 0) : t.F32(0.f), v);
         v = t.SelectF(is_rg8, i < 2 ? byte_f : t.F32(0.f), v);
+        // Integer 8-bit formats deliver the raw byte, not a normalised float.
+        v = t.SelectF(t.LAnd(is_int, logical_or(is_rgba8, is_rg8)),
+                      t.m.Bitcast(t.t_f, byte), v);
         const Id wide = t.m.CompositeExtract(t.t_f, i < 2 ? halfs : halfs_hi,
                                              i < 2 ? i : i - 2);
-        v = t.SelectF(is_rgba16f, wide, v);
+        v = t.SelectF(is_rgba16, wide, v);
         v = t.SelectF(is_r11g11b10f, t.m.Bitcast(t.t_f, fcomp[i]), v);
+        v = t.SelectF(is_rg32_raw,
+                       i < 2 ? t.m.Bitcast(t.t_f, fcomp[i]) : t.F32(0.f), v);
+        v = t.SelectF(is_rgba32_raw, t.m.Bitcast(t.t_f, fcomp[i]), v);
         out[i] = v;
       }
     };
@@ -1840,8 +1870,7 @@ void EmitCsMimg(Translator& t,
         packed = t.Or(keep, t.Shl(store_byte(vdata + comp++), t.U32(i * 8u)));
       }
     }
-    const Id old_halfs =
-        t.m.ExtInst(t.t_v2, GLSLstd450UnpackHalf2x16, {old_raw});
+    const Id old_halfs = unpack16(old_raw);
     Id half[2] = {t.m.CompositeExtract(t.t_f, old_halfs, 0),
                   t.m.CompositeExtract(t.t_f, old_halfs, 1)};
     u32 half_reg = 0;
@@ -1857,8 +1886,7 @@ void EmitCsMimg(Translator& t,
     const Id packed_r16f =
         t.m.ExtInst(t.t_u, GLSLstd450PackHalf2x16,
                     {t.m.CompositeConstruct(t.t_v2, {r16f, t.F32(0.f)})});
-    const Id old_halfs_hi =
-        t.m.ExtInst(t.t_v2, GLSLstd450UnpackHalf2x16, {old_raw_hi});
+    const Id old_halfs_hi = unpack16(old_raw_hi);
     Id wide_half[4] = {
         t.m.CompositeExtract(t.t_f, old_halfs, 0),
         t.m.CompositeExtract(t.t_f, old_halfs, 1),
@@ -1869,12 +1897,10 @@ void EmitCsMimg(Translator& t,
     for (u32 i = 0; i < 4; i++)
       if (dmask & (1u << i))
         wide_half[i] = t.m.Bitcast(t.t_f, t.Vg(vdata + wide_reg++));
-    const Id packed_rgba16f_lo = t.m.ExtInst(
-        t.t_u, GLSLstd450PackHalf2x16,
-        {t.m.CompositeConstruct(t.t_v2, {wide_half[0], wide_half[1]})});
-    const Id packed_rgba16f_hi = t.m.ExtInst(
-        t.t_u, GLSLstd450PackHalf2x16,
-        {t.m.CompositeConstruct(t.t_v2, {wide_half[2], wide_half[3]})});
+    const Id packed_rgba16_lo = pack16(
+        t.m.CompositeConstruct(t.t_v2, {wide_half[0], wide_half[1]}));
+    const Id packed_rgba16_hi = pack16(
+        t.m.CompositeConstruct(t.t_v2, {wide_half[2], wide_half[3]}));
     Id packed_float[4] = {old_raw, old_raw_hi, old_raw_2, old_raw_3};
     u32 packed_float_reg = 0;
     for (u32 i = 0; i < 4; i++) {
@@ -1900,7 +1926,13 @@ void EmitCsMimg(Translator& t,
     // dmask leaves out keep what memory already held.
     Id blk[4] = {old_raw, old_raw_hi, old_raw_2, old_raw_3};
     {
-      Id comp[4] = {t.U32(0), t.U32(0), t.U32(0), t.U32(0)};
+      Id comp[4] = {old_raw, old_raw_hi, old_raw_2, old_raw_3};
+      for (u32 i = 0; i < 4; i++) {
+        const Id word = i < 2 ? old_raw : old_raw_hi;
+        const Id half = t.And(t.Shr(word, t.U32((i & 1) * 16)),
+                              t.U32(0xFFFF));
+        comp[i] = t.SelectB(is_rgba16u, half, comp[i]);
+      }
       u32 reg = 0;
       for (u32 i = 0; i < 4; i++)
         if (dmask & (1u << i))
@@ -1917,20 +1949,20 @@ void EmitCsMimg(Translator& t,
     packed = t.SelectB(is_rg16f, packed_rg16f, packed);
     packed = t.SelectB(is_r16f, packed_r16f, packed);
     packed = t.SelectB(is_rg8, packed_rg8, packed);
-    packed = t.SelectB(is_rgba16f, packed_rgba16f_lo, packed);
+    packed = t.SelectB(is_rgba16, packed_rgba16_lo, packed);
     packed = t.SelectB(is_r11g11b10f, packed_float[0], packed);
-    packed = t.SelectB(is_block_int, blk[0], packed);
+    packed = t.SelectB(is_raw_block, blk[0], packed);
     CsSsboStore(t, sc, binding, dword_idx,
                 t.SelectB(is_r32, t.Vg(vdata), packed));
     // Both operands of the branch must exist before OpSelectionMerge: nothing
     // may sit between the merge and its OpBranchConditional.
-    const Id store_second = logical_or(is_rgba16f, is_block2);
+    const Id store_second = logical_or(is_rgba16, is_block2);
     const Id wide_store = t.m.NewBlock(), store_done = t.m.NewBlock();
     t.m.SelectionMerge(store_done);
     t.m.BranchConditional(store_second, wide_store, store_done);
     t.m.OpenBlock(wide_store);
     CsSsboStore(t, sc, binding, t.Add(dword_idx, t.U32(1)),
-                t.SelectB(is_rgba16f, packed_rgba16f_hi, blk[1]));
+                t.SelectB(is_rgba16, packed_rgba16_hi, blk[1]));
     t.m.Branch(store_done);
     t.m.OpenBlock(store_done);
     const Id packed_store = t.m.NewBlock(), packed_done = t.m.NewBlock();

@@ -53,6 +53,9 @@ if(SPIRVTOOLS_FOUND AND SPIRVHEADERS_FOUND)
   add_delta_test(gcn_spirv_test
     SOURCES gcn_spirv_test.cc
     DEPS delta_gpu)
+  add_delta_test(rdna_compute_image_test
+    SOURCES rdna_compute_image_test.cc
+    DEPS delta_gpu)
 endif()
 
 add_delta_test(vk_memory_span_test

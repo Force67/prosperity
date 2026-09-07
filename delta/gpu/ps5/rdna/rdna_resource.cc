@@ -143,10 +143,18 @@ void Gfx10ImgFormat(u32 gfmt, u32& dfmt, u32& nfmt) {
       dfmt = 11;
       nfmt = 4;
       break;  // 32_32_UINT
+    case 63:
+      dfmt = 11;
+      nfmt = 5;
+      break;  // 32_32_SINT
     case 64:
       dfmt = 11;
       nfmt = 7;
       break;  // 32_32_FLOAT
+    case 65:
+      dfmt = 12;
+      nfmt = 0;
+      break;  // 16_16_16_16_UNORM
     case 71:
       dfmt = 12;
       nfmt = 7;
@@ -155,6 +163,14 @@ void Gfx10ImgFormat(u32 gfmt, u32& dfmt, u32& nfmt) {
       dfmt = 13;
       nfmt = 7;
       break;  // 32_32_32_FLOAT
+    case 75:
+      dfmt = 14;
+      nfmt = 4;
+      break;  // 32_32_32_32_UINT
+    case 76:
+      dfmt = 14;
+      nfmt = 5;
+      break;  // 32_32_32_32_SINT
     case 77:
       dfmt = 14;
       nfmt = 7;
