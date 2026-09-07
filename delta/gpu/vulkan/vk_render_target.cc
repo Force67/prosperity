@@ -394,6 +394,9 @@ RTarget* ActivateRtVariant(RTarget& live,
     RegisterRtPages(base, w, h, fmt);
   }
   std::swap(live, *alt);
+  if (trace::Recording())
+    trace::RecordVariantSwap(base, alt->image, alt->w, alt->h, live.image,
+                             live.w, live.h);
   // BeginFrame's per-frame reset only walks the live targets, so one that slept
   // through a frame boundary catches up here.
   if (live.last_frame != g_frame.num) {

@@ -1053,6 +1053,9 @@ bool RunAliasedCopy(const CsAliasedImage& img,
               (unsigned long long)res.base);
     return false;
   }
+  if (trace::Recording())
+    trace::RecordBridge(to_image ? "upload" : "stage", res.base, img.image,
+                        plan.w, plan.h);
   if (img.is_stencil) {
     auto* packed = static_cast<u8*>(e.map);
     auto* expanded = static_cast<u32*>(e.map);

@@ -93,6 +93,21 @@ void RecordBarrier(const char* aspect,
 // A CP DMA fill over guest memory (this hardware's clear).
 void RecordMemoryFill(u64 base, u64 bytes, u32 value);
 
+// The live image at `base` changed (see ActivateRtVariant): every later record
+// naming that base is about a different VkImage than the ones before it.
+void RecordVariantSwap(u64 base,
+                       VkImage from,
+                       u32 from_w,
+                       u32 from_h,
+                       VkImage to,
+                       u32 to_w,
+                       u32 to_h);
+
+// A compute bridge copy between a live image and the CS staging buffer. It is
+// submitted and waited on its own, outside the frame's command buffer, so no
+// barrier record covers it.
+void RecordBridge(const char* dir, u64 base, VkImage image, u32 w, u32 h);
+
 // --- Vulkan-level visibility -----------------------------------------------
 
 // DELTA_GPU_VALIDATE=1: enable the Khronos validation layers and route their

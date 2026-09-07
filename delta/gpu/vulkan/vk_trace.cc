@@ -45,6 +45,10 @@ DELTA_OPTION(const char*, kCaptureDir, "DELTA_GPU_CAPTURE_DIR", nullptr);
 // so the window where the content actually disappears is the one window with
 // no measurement in it.
 DELTA_OPTION(u64, kRtWatch, "DELTA_GPU_RTWATCH", 0);
+// DELTA_GPU_RTWATCH_ONLY=1: a CAPTURE_AT snapshot covers the watched target
+// alone. Snapshotting every attachment of a 3-MRT 1080p region at every draw
+// of a 140-draw frame is gigabytes of readback for one question.
+DELTA_OPTION(bool, kRtWatchOnly, "DELTA_GPU_RTWATCH_ONLY", false);
 // What to read back and write as PNG when the frame closes: any of
 // rt, depth, tex, all, none (comma separated).
 DELTA_OPTION(const char*, kCaptureDump, "DELTA_GPU_CAPTURE_DUMP", "rt,depth");
@@ -105,6 +109,7 @@ struct Snapshot {
   u64 base = 0;
   bool depth = false;
   u32 at_draw = 0;
+  VkImage image = VK_NULL_HANDLE;
 };
 std::vector<Snapshot> g_snapshots;
 
@@ -374,6 +379,8 @@ MemStat StatGuest(u64 base, u64 bytes) {
   return s;
 }
 
+std::string HexBytes(u64 base, u32 bytes);
+
 std::string GuestObj(u64 base, u64 bytes) {
   const MemStat s = StatGuest(base, bytes);
   Obj o;
@@ -382,6 +389,10 @@ std::string GuestObj(u64 base, u64 bytes) {
     o.Hex("hash", s.hash);
     o.U("nonzero", s.nonzero);
     o.U("sampled", s.sampled);
+    // A 1x1 exposure or adaptation texel is worth more as its bytes than as
+    // a count of the non-zero ones.
+    if (bytes <= 64)
+      o.Str("data", HexBytes(base, static_cast<u32>(bytes)).c_str());
   }
   return o.Done();
 }
@@ -1321,6 +1332,7 @@ void QueueSnapshot(VkImage image,
   s.base = base;
   s.depth = depth;
   s.at_draw = at_draw;
+  s.image = image;
   VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
   bi.size = s.bytes;
   bi.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
@@ -1374,7 +1386,8 @@ void SnapshotOpenRegion(u32 draw_index) {
     mrt[i] = g_region.cur_mrt[i];
   const u64 depth_base = g_region.cur_depth;
   EndRegion();
-  for (u32 i = 0; i < n; i++) {
+  const bool watch_only = kRtWatchOnly && kRtWatch.get();
+  for (u32 i = 0; i < n && !watch_only; i++) {
     auto it = g_rts.find(mrt[i]);
     if (it == g_rts.end())
       continue;
@@ -1383,7 +1396,7 @@ void SnapshotOpenRegion(u32 draw_index) {
                   mrt[i], false, draw_index, rt.layout, &rt.layout);
   }
   auto dit = g_depths.find(depth_base);
-  if (dit != g_depths.end()) {
+  if (dit != g_depths.end() && !watch_only) {
     DepthTarget& dt = dit->second;
     QueueSnapshot(dt.image, VK_IMAGE_ASPECT_DEPTH_BIT, dt.w, dt.h, kDepthFormat,
                   depth_base, true, draw_index, dt.layout, &dt.layout);
@@ -1419,6 +1432,7 @@ void DrainSnapshots() {
         .Str("when", "mid-frame")
         .Int("after_draw", s.at_draw)
         .Hex("base", s.base)
+        .Hex("image", reinterpret_cast<u64>(s.image))
         .U("w", s.w)
         .U("h", s.h)
         .Str("format", FormatName(s.depth ? kDepthFormat : s.fmt))
@@ -1459,6 +1473,7 @@ void DumpFrameResources() {
           .Str("kind", "rt")
           .Str("when", "frame-end")
           .Hex("base", kv.first)
+          .Hex("image", reinterpret_cast<u64>(rt.image))
           .U("w", rt.w)
           .U("h", rt.h)
           .Str("format", FormatName(rt.fmt))
@@ -1793,6 +1808,7 @@ void RecordDraw(const rhi::DrawInfo& d,
     clear.Add(Line::HexText(d.mrt_clear_word[i][0]));
     clear.Add(Line::HexText(d.mrt_clear_word[i][1]));
     o.Raw("clear_word", clear.Done());
+    o.Hex("dcc_base", d.mrt_dcc_base[i]);
     rts.Add(o);
   }
 
@@ -1861,6 +1877,7 @@ void RecordDraw(const rhi::DrawInfo& d,
 
   Obj depth;
   depth.Hex("base", d.depth_base);
+  depth.Hex("htile", d.depth_htile_base);
   depth.Bool("valid", d.depth_valid);
   depth.Bool("test", d.depth_test_enable);
   depth.Bool("write", d.depth_write_enable);
@@ -1904,6 +1921,7 @@ void RecordDraw(const rhi::DrawInfo& d,
 
   Line l("draw");
   l.U("seq", g_seq++)
+      .U("queue", rhi::g_submit_queue)
       .Int("frame", g_frame_num)
       .U("draw", index)
       .U("frame_draw", g_frame.draws)
@@ -1993,6 +2011,7 @@ void RecordDispatch(const rhi::ComputeInfo& ci) {
   l.U("seq", g_seq++)
       .Int("frame", g_frame_num)
       .Int("after_draw", int(g_draw_seq))
+      .U("queue", rhi::g_submit_queue)
       .Raw("cs", ShaderObj(ci.cs_addr, ci.recomp ? &ci.recomp->spirv : nullptr))
       .Raw("groups", groups.Done())
       .Raw("resources", res.Done())
@@ -2031,6 +2050,42 @@ void RecordBarrier(const char* aspect,
       .Str("to", LayoutName(to))
       .Hex("src_access", src_access)
       .Hex("dst_access", dst_access);
+  l.Emit();
+}
+
+void RecordVariantSwap(u64 base,
+                       VkImage from,
+                       u32 from_w,
+                       u32 from_h,
+                       VkImage to,
+                       u32 to_w,
+                       u32 to_h) {
+  if (!g_recording)
+    return;
+  Line l("variant_swap");
+  l.U("seq", g_seq++)
+      .Int("after_draw", int(g_draw_seq))
+      .Hex("base", base)
+      .Hex("from_image", reinterpret_cast<u64>(from))
+      .U("from_w", from_w)
+      .U("from_h", from_h)
+      .Hex("to_image", reinterpret_cast<u64>(to))
+      .U("to_w", to_w)
+      .U("to_h", to_h);
+  l.Emit();
+}
+
+void RecordBridge(const char* dir, u64 base, VkImage image, u32 w, u32 h) {
+  if (!g_recording)
+    return;
+  Line l("bridge");
+  l.U("seq", g_seq++)
+      .Int("after_draw", int(g_draw_seq))
+      .Str("dir", dir)
+      .Hex("base", base)
+      .Hex("image", reinterpret_cast<u64>(image))
+      .U("w", w)
+      .U("h", h);
   l.Emit();
 }
 
