@@ -738,6 +738,7 @@ struct StageContext {
 
   // Compute: storage buffers modelling the guest memory the CS reads/writes.
   std::unordered_map<u32, u32> cs_bind;  // instruction pc -> binding
+  u32 cs_cur_pc = 0;                     // instruction being emitted
   std::vector<Id> cs_ssbo;                         // binding -> SSBO variable
   // Push-constant struct carrying a per-binding bound (in dwords), when the
   // stage's entry declared the bound block: {user_data[16], bounds[64]}.

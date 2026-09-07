@@ -56,8 +56,7 @@ bool CsBindingValid(StageContext& sc, u32 binding) {
   if (binding < sc.cs_ssbo.size() && sc.cs_ssbo[binding])
     return true;
   WarnUnsupported("cs.binding-range", binding,
-                  static_cast<u32>(sc.cs_ssbo.size()),
-                  binding < sc.cs_ssbo.size() ? sc.cs_ssbo[binding] : 0);
+                  static_cast<u32>(sc.cs_ssbo.size()), sc.cs_cur_pc);
   sc.cs_unsupported = true;
   return false;
 }

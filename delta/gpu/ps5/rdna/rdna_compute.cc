@@ -527,8 +527,9 @@ void ReportDecline(const u32* cs_code, size_t insts) {
   const u64 address = reinterpret_cast<uintptr_t>(cs_code);
   if (!reported.insert(address).second)
     return;
-  BASE_LOGI("rdnacs", "declined CS @{:#x} ({} insts); dispatch skipped",
-            static_cast<unsigned long>(address), insts);
+  BASE_LOGI("rdnacs", "declined CS @{:#x} ({} insts) on [{}]; dispatch skipped",
+            static_cast<unsigned long>(address), insts,
+            gpu::gcn::UnsupportedOps().c_str());
 }
 
 bool TranslateCs(const Program& program,
@@ -688,6 +689,7 @@ bool TranslateCs(const Program& program,
 }  // namespace
 
 bool EmitCsMemory(Translator& t, const Inst& inst, StageContext& sc) {
+  sc.cs_cur_pc = inst.pc;
   switch (inst.enc) {
     case Enc::kSmrd:
       EmitSmem(t, inst, sc);

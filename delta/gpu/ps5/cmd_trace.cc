@@ -82,7 +82,7 @@ u64 CurrentDraw() {
 
 // The window of draws the detail probes cover: enough to walk into steady
 // state, bounded so a run does not drown in its own trace.
-constexpr u64 kDetailDraws = 5000;
+DELTA_OPTION(u64, kDetailDraws, "DELTA_AGC_DETAIL_DRAWS", 5000);
 bool Detail() {
   return kTrace && g_detailed <= kDetailDraws;
 }
@@ -122,6 +122,8 @@ const char* const kEncName[19] = {"?",     "sop1", "sop2", "sopk", "sopc",
                                   "mtbuf", "mimg", "exp",  "flat"};
 
 // One decoded shader, instruction by instruction.
+base::String Words(const u32* p, u32 count);
+
 void DumpProgram(const char* what, u64 address) {
   const auto prog =
       rdna::DecodeShader(reinterpret_cast<const u32*>(address), 4096);
@@ -138,6 +140,12 @@ void DumpProgram(const char* what, u64 address) {
     if (in.has_literal)
       base::FormatTo(line, " lit={:08x}", in.literal);
     BASE_LOGI("agc", "{}", line.c_str());
+  }
+  // The dwords past the decoded end, for a branch that lands there.
+  if (!prog.empty()) {
+    const u32 end = prog.back().pc + prog.back().size;
+    BASE_LOGI("agc", "  after {:#x}:{}", end,
+              Words(reinterpret_cast<const u32*>(address) + end, 24).c_str());
   }
 }
 
@@ -1000,7 +1008,9 @@ void TraceCsUnresolved(u64 cs_addr, const gcn::CsResource& res, u32 ud_dwords) {
 void TraceCsUnsupportedImage(u64 cs_addr,
                              u32 binding,
                              const gcn::TImage& image) {
-  if (CsReport())
+  static std::unordered_set<u64> reported;
+  if (reported.size() < 256 &&
+      reported.insert((cs_addr << 8) | (binding & 0xFF)).second)
     BASE_LOGI("csgpu",
               "CS @{:#x} bind={} unsupported image base={:#x} type={} dfmt={} "
               "nfmt={} tiling={:#x} {}x{} pitch={} valid={} tiling_ok={} "
@@ -1038,8 +1048,11 @@ void TraceCsTooManyResources(u64 cs_addr, u32 max_resources) {
               cs_addr, max_resources);
 }
 
+// One line per shader: a global cap spends itself on the loading screens and
+// then says nothing about the dispatch that goes missing at the frontier.
 void TraceCsDispatchFailed(u64 cs_addr, u32 num_resources) {
-  if (CsReport())
+  static std::unordered_set<u64> reported;
+  if (reported.size() < 256 && reported.insert(cs_addr).second)
     BASE_LOGI("csgpu", "CS @{:#x} dispatch failed ({} resources)", cs_addr,
               num_resources);
 }
