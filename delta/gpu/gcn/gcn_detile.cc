@@ -1736,6 +1736,9 @@ bool RetileTextureMip32Pitched(const void* src,
   auto* tiled = static_cast<u8*>(dst);
   auto* linear = const_cast<u8*>(static_cast<const u8*>(src));
   switch (layout.elem_bytes) {
+    case 1:
+      return CopyTextureMip<1, false>(tiled, linear, src_row_bytes, layout, mip,
+                                      layer);
     case 2:
       return CopyTextureMip<2, false>(tiled, linear, src_row_bytes, layout, mip,
                                       layer);

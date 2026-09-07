@@ -272,6 +272,46 @@ TEST(GcnDetile, PitchedTransfersLeaveLinearPaddingUntouched) {
   }
 }
 
+TEST(GcnDetile, ByteWritebackRoundTripsAcrossMipsLayersAndPaddedRows) {
+  // Include Astro's 64KB_R_X byte-image layout (0x11b), as well as linear
+  // and GCN tiled layouts. Each layer is written before any are read back.
+  for (u32 tiling : {8u, 14u, 31u, 0x11bu}) {
+    SCOPED_TRACE(tiling);
+    gpu::gcn::TextureLayout32 layout;
+    ASSERT_TRUE(gpu::gcn::BuildTextureLayout32(
+        layout, 263, 137, 271, 2, 4, tiling, false, 1));
+    std::vector<u8> tiled(layout.size, 0xa5);
+    for (u32 mip = 0; mip < layout.mip_levels; ++mip) {
+      const auto& level = layout.mips[mip];
+      const size_t row_bytes = level.width + 13;
+      for (u32 layer = 0; layer < layout.layers; ++layer) {
+        std::vector<u8> source(row_bytes * level.height, 0xcd);
+        for (u32 y = 0; y < level.height; ++y)
+          for (u32 x = 0; x < level.width; ++x)
+            source[y * row_bytes + x] =
+                static_cast<u8>(x * 13 + y * 37 + layer * 53 + mip * 71);
+        ASSERT_TRUE(gpu::gcn::RetileTextureMip32Pitched(
+            source.data(), row_bytes, tiled.data(), layout, mip, layer));
+      }
+    }
+    for (u32 mip = 0; mip < layout.mip_levels; ++mip) {
+      const auto& level = layout.mips[mip];
+      const size_t row_bytes = level.width + 13;
+      for (u32 layer = 0; layer < layout.layers; ++layer) {
+        std::vector<u8> result(row_bytes * level.height, 0xee);
+        std::vector<u8> expected(result);
+        for (u32 y = 0; y < level.height; ++y)
+          for (u32 x = 0; x < level.width; ++x)
+            expected[y * row_bytes + x] =
+                static_cast<u8>(x * 13 + y * 37 + layer * 53 + mip * 71);
+        ASSERT_TRUE(gpu::gcn::DetileTextureMip32Pitched(
+            tiled.data(), result.data(), row_bytes, layout, mip, layer));
+        EXPECT_EQ(result, expected) << "mip " << mip << " layer " << layer;
+      }
+    }
+  }
+}
+
 TEST(GcnDetile, NestedParallelRegionsRunInline) {
   std::atomic<u32> work{0};
   gpu::gcn::DetileParallelRows(32, [&](u32 outer0, u32 outer1) {
