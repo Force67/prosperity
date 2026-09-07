@@ -682,7 +682,7 @@ bool EmitCsMemory(Translator& t, const Inst& inst, StageContext& sc) {
       return true;
     case Enc::kFlat:
       gpu::gcn::EmitCsGlobal(t, inst, sc);
-      break;
+      return true;
     case Enc::kMubuf:
       gpu::gcn::EmitCsMubuf(t, inst, sc);
       return true;

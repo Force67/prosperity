@@ -1096,7 +1096,9 @@ void EmitCsGlobal(Translator& t, const Inst& inst, StageContext& sc) {
   const u32 op = (w >> 18) & 0x7F;
   // 13-bit signed instruction offset on gfx10 global/scratch.
   const i32 inst_offset = static_cast<i32>((w & 0x1FFF) << 19) >> 19;
-  const u32 vaddr = w1 & 0xFF, vdata = (w1 >> 8) & 0xFF;
+  // Loads land in VDST [31:24]; stores take their value from VDATA [15:8].
+  const u32 vaddr = w1 & 0xFF;
+  const u32 vdata = op < 0x18 ? (w1 >> 24) & 0xFF : (w1 >> 8) & 0xFF;
   const int b = CsBindingFor(sc, inst.pc);
   if (b < 0) {
     sc.cs_unsupported = true;
