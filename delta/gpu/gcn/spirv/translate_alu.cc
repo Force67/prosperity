@@ -1649,9 +1649,16 @@ void EmitVopc(Translator& t,
   }
   const Id predicate = cond ? t.MaskOf(cond) : t.U32(0);  // F -> 0
   const Id result = t.And(predicate, t.Exec());
-  t.SetSg(dst, result);
+  // cmpx replaces EXEC. GCN also wrote VCC (or the VOP3 destination); RDNA
+  // does not, and a gfx10 compiler leans on that: Astro Bot's scanout
+  // composite parks EXEC in VCC, runs three v_cmpx highlight-compression
+  // blocks and restores `exec = vcc` after each -- with VCC clobbered by the
+  // compare, the restore left every lane whose colour was not over 1.0
+  // masked off for the rest of the shader, and the frame was black.
+  if (!(op & 0x10) || !t.rdna_sources)
+    t.SetSg(dst, result);
   if (op & 0x10)
-    t.SetSg(126, result);  // cmpx: replace EXEC
+    t.SetSg(126, result);
 }
 
 // ---- VOP3 -------------------------------------------------------------------
