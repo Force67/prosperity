@@ -2148,7 +2148,38 @@ bool DescribeCsRangeCovering(u64 addr, char* out, size_t out_size) {
 namespace gpu::rhi {
 using namespace gpu::vk;
 
-bool Dispatch(Renderer& renderer, const ComputeInfo& ci) {
+// Two plain-buffer bindings on one guest base with different extents (a
+// constant block read through a 0x1c-byte window and a 0x24-byte one) share
+// one staging range, so they have to agree on its size: take the larger for
+// both. Image bindings keep their own shapes and still conflict below.
+const ComputeInfo& MergeSameBase(const ComputeInfo& ci, ComputeInfo& merged) {
+  bool need = false;
+  for (u32 i = 0; i < ci.num_res && !need; i++)
+    for (u32 j = 0; j < i && !need; j++)
+      need = ci.res[i].base == ci.res[j].base && !ci.res[i].zero_fill &&
+             !ci.res[j].zero_fill && !ci.res[i].image_staging &&
+             !ci.res[j].image_staging &&
+             (ci.res[i].size != ci.res[j].size ||
+              ci.res[i].guest_size != ci.res[j].guest_size);
+  if (!need)
+    return ci;
+  merged = ci;
+  for (u32 i = 0; i < merged.num_res; i++)
+    for (u32 j = 0; j < i; j++) {
+      auto& a = merged.res[i];
+      auto& b = merged.res[j];
+      if (a.base != b.base || a.zero_fill || b.zero_fill || a.image_staging ||
+          b.image_staging)
+        continue;
+      a.size = b.size = std::max(a.size, b.size);
+      a.guest_size = b.guest_size = std::max(a.guest_size, b.guest_size);
+    }
+  return merged;
+}
+
+bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
+  ComputeInfo ci_merged;
+  const ComputeInfo& ci = MergeSameBase(ci_in, ci_merged);
   if (g_cs_failed) {
     renderer.state = nullptr;
     return false;
