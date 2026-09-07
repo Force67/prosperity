@@ -52,6 +52,19 @@ DELTA_OPTION(bool, kCsList, "DELTA_GPU_CSLIST", false);
 DELTA_OPTION(int, kCsHist, "DELTA_GPU_CSHIST", 0);
 DELTA_OPTION(bool, kCsRtTrace, "DELTA_GPU_CSRT", false);
 DELTA_OPTION(bool, kCsRename, "DELTA_GPU_CSRENAME", false);
+// Re-bridge a render target into its compute staging buffer only when
+// something has rendered into it since the last copy. =0 restores the
+// every-frame copy if a title ever writes a target by a path last_frame does
+// not see.
+DELTA_OPTION(bool, kCsRtCache, "DELTA_GPU_CS_RT_CACHE", true);
+// Reuse a staged plain buffer when a later dispatch binds a smaller window of
+// it instead of restaging the range. =0 restores the exact-size match.
+DELTA_OPTION(bool, kCsSubset, "DELTA_GPU_CS_SUBSET", true);
+// A compute result whose address is a live GPU image is refreshed on the GPU by
+// UploadCsRangeToRt; retiling the same bytes into guest memory as well is only
+// there for readers that go through guest memory. Skipping it is the single
+// biggest CPU saving in a compute-heavy frame (Astro Bot: ~50 ms).
+DELTA_OPTION(bool, kCsSkipRetile, "DELTA_GPU_CS_SKIP_RETILE", false);
 // Skip staging in a compute range the shader never reads (see the use below).
 DELTA_OPTION(bool, kCsSkipUpload, "DELTA_GPU_CS_SKIP_UPLOAD", false);
 u64 g_cs_skip_n = 0;
@@ -86,6 +99,17 @@ u64 g_stage_cpu_detile_bytes = 0, g_stage_cpu_detile_n = 0;
 u64 g_in_hash_ns = 0, g_in_detile_ns = 0, g_in_rt_ns = 0, g_in_copy_ns = 0;
 u64 g_in_hash_n = 0, g_in_rt_n = 0;
 u64 g_out_retile_n = 0, g_out_rt_submits = 0;
+
+// Per-range staging accounting (DELTA_GPU_CSSYNC). A frame that stages half a
+// gigabyte says nothing about what to fix until the bytes are attributed to a
+// base and a REASON: guest memory really changed, the same base was rebound
+// with a different shape, or a render target had to be bridged.
+struct StageStat {
+  u64 bytes = 0;
+  u32 n = 0, first = 0, shape = 0, hash = 0, rt = 0, wait = 0;
+  u64 wait_ns = 0;
+};
+std::unordered_map<u64, StageStat> g_stage_stats;
 
 using rhi::ComputeInfo;
 
@@ -750,6 +774,19 @@ bool CsAliasedBase(u64 base) {
                      [base](const auto& entry) {
                        return entry.second.stencil_base == base;
                      });
+}
+
+// The frame a live image at this address was last rendered into. Unknown
+// addresses report "now", so a caller asking "has it changed since?" re-reads
+// rather than trusting a stale copy.
+int AliasedImageLastRender(u64 base) {
+  auto rt = g_rts.find(base);
+  if (rt != g_rts.end())
+    return rt->second.last_frame;
+  auto d = g_depths.find(base);
+  if (d != g_depths.end())
+    return d->second.last_frame;
+  return INT_MAX;
 }
 
 VkAccessFlags AliasedImageAccess(const CsAliasedImage& img, VkImageLayout l) {
@@ -1703,8 +1740,17 @@ bool CsRangeFlushOne(u64 base, CsRange& e) {
   // Already-recorded readbacks (CsStageReadbacks) skip this.
   if (e.device_local && !e.mirror_current)
     CsCopyStaging(e, e.size ? e.size : e.cap, /*to_device=*/false);
-  if (e.pending_batch && !CsBatchFlush(kSyncWriteback))
-    return false;  // results must exist before readback
+  if (e.pending_batch) {
+    const u64 _tw = NowNs();
+    const bool ok = CsBatchFlush(kSyncWriteback);
+    if (kCsSyncReport) {
+      StageStat& st = g_stage_stats[base];
+      st.wait++;
+      st.wait_ns += NowNs() - _tw;
+    }
+    if (!ok)
+      return false;  // results must exist before readback
+  }
   if (g_cs_failed)
     return false;
   g_cs_flush_n++;
@@ -1731,7 +1777,16 @@ bool CsRangeFlushOne(u64 base, CsRange& e) {
                 (unsigned long long)e.res.size);
   }
   const u64 _t_wb = NowNs();
-  if (e.image_staging) {
+  // DELTA_GPU_CS_SKIP_RETILE: an image the GPU refresh below can carry needs no
+  // CPU retile into guest memory. Only readers that go through guest memory
+  // (the texture cache's own upload, a CP DMA, the guest CPU) lose anything,
+  // and for a live image the draw path samples the image instead.
+  CsAliasedImage refreshed{};
+  const bool gpu_carries =
+      kCsSkipRetile && e.image_staging &&
+      FindCsAliasedImage(base, refreshed, /*for_write=*/true,
+                         /*prefer_depth=*/e.res.dfmt == 4);
+  if (e.image_staging && !gpu_carries) {
     if (!WritebackCsImage(e.res, e.map)) {
       // Count as well as sample: a flat cap of 8 lines cannot tell one
       // recurring bad descriptor apart from every upload in the title failing,
@@ -1747,7 +1802,7 @@ bool CsRangeFlushOne(u64 base, CsRange& e) {
                   e.res.stage_elem_bytes);
       return false;
     }
-  } else {
+  } else if (!e.image_staging) {
     // Never write back more than the guest footprint the range was staged
     // from, and never into memory that is not the guest's: the staged size is
     // the shader's view of the resource and a descriptor with a bogus size
@@ -1962,6 +2017,30 @@ void CsSyncReport(double frames) {
             g_stage_cpu_detile_n / frames);
   g_stage_ro_bytes = g_stage_rw_bytes = g_stage_img_bytes = 0;
   g_stage_cpu_detile_bytes = g_stage_cpu_detile_n = 0;
+  // The ranges that actually cost the frame, most expensive first: what to fix
+  // is whichever reason column is not "hash" (guest memory genuinely changed).
+  std::vector<std::pair<u64, StageStat>> top(g_stage_stats.begin(),
+                                             g_stage_stats.end());
+  std::sort(top.begin(), top.end(), [](const auto& a, const auto& b) {
+    return a.second.bytes + a.second.wait_ns / 8 >
+           b.second.bytes + b.second.wait_ns / 8;
+  });
+  for (size_t i = 0; i < top.size() && i < 8; i++) {
+    const StageStat& s = top[i].second;
+    const auto found = g_cs_ranges.find(top[i].first);
+    const ComputeInfo::Res* r =
+        found == g_cs_ranges.end() ? nullptr : &found->second.res;
+    BASE_LOGI("cstop",
+              "{:#x} {:.1f}MB/f x{:.1f} (first={:.1f} shape={:.1f} hash={:.1f} "
+              "rt={:.1f}) wait={:.1f}x {:.1f}ms | {}x{} l={} m={} e={} t={}",
+              (unsigned long)top[i].first, s.bytes / frames / 1e6, s.n / frames,
+              s.first / frames, s.shape / frames, s.hash / frames,
+              s.rt / frames, s.wait / frames, s.wait_ns / frames / 1e6,
+              r ? r->width : 0, r ? r->height : 0, r ? r->layers : 0,
+              r ? r->mip_levels : 0, r ? r->elem_bytes : 0,
+              r ? r->tiling_idx : 0);
+  }
+  g_stage_stats.clear();
   BASE_LOGI("csout",
             "retile={:.1f}ms x{:.1f} rt-upload={:.1f}ms x{:.1f} tail={:.1f}ms",
             g_out_retile_ns / frames / 1e6, g_out_retile_n / frames,
@@ -2379,9 +2458,19 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
         return CsDeclined(ci, "11");
     }
     CsRange& e = g_cs_ranges[base];
-    const bool same_shape = e.buf && e.size == static_cast<u64>(sz[i]) &&
-                            e.guest_bytes == guest_bytes &&
-                            SameCsResourceShape(e.res, ci.res[i]);
+    const bool exact_shape = e.buf && e.size == static_cast<u64>(sz[i]) &&
+                             e.guest_bytes == guest_bytes &&
+                             SameCsResourceShape(e.res, ci.res[i]);
+    // A plain buffer bound again through a SMALLER window is the same data:
+    // the staged copy already covers it and the descriptor carries its own
+    // range. Treating that as a reshape restages the whole thing -- Astro Bot
+    // has two dispatches a frame that size one 39 MB buffer differently, and
+    // each flip cost a full copy and a fence wait.
+    const bool subset = kCsSubset && !exact_shape && e.buf && !e.imported &&
+                        !ci.res[i].image_staging && !e.image_staging &&
+                        e.size >= static_cast<u64>(sz[i]) &&
+                        e.guest_bytes >= guest_bytes;
+    const bool same_shape = exact_shape || subset;
     if (!same_shape && e.gpu_dirty)
       if (!CsRangeFlushOne(base, e))
         return CsDeclined(ci, "12");  // reshaped: keep its data
@@ -2414,7 +2503,15 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
     // guest hash. Attempted at most once per frame per range; a CS-written
     // buffer (gpu_dirty) stays authoritative.
     const bool rt_backed = ci.res[i].image_staging && CsAliasedBase(base);
-    const bool rt_attempt = rt_backed && !e.gpu_dirty &&
+    // ... and at most once per frame per range, but a target NOTHING has
+    // rendered into since the last bridge still holds the bytes already
+    // staged. Astro Bot's shadow array (1536x1536 x16 layers = 151 MB) is
+    // re-lit rarely and re-copied every frame without this; that one range is
+    // 40% of a frame's image staging.
+    const bool rt_stale =
+        kCsRtCache && e.rt_sourced && e.last_rt_frame >= 0 &&
+        AliasedImageLastRender(base) <= e.last_rt_frame;
+    const bool rt_attempt = rt_backed && !e.gpu_dirty && !rt_stale &&
                             e.last_rt_frame != static_cast<int>(g_frame.num);
     if (rt_attempt)
       valid = false;
@@ -2532,6 +2629,36 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
       e.gpu_dirty = false;
       g_cs_stage_n++;
       g_cs_stage_bytes += sz[i];
+      if (kCsSyncReport) {
+        StageStat& st = g_stage_stats[base];
+        st.bytes += sz[i];
+        st.n++;
+        if (!buffer_reused)
+          st.first++;
+        else if (!same_shape) {
+          st.shape++;
+          // Which field flipped is the whole question: two dispatches that
+          // describe the same surface slightly differently restage it in full.
+          static std::unordered_set<u64> shape_logged;
+          if (shape_logged.size() < 64 && shape_logged.insert(base).second)
+            BASE_LOGI("csshape",
+                      "{:#x} was {}x{} p={} l={} m={} t={} e={}/{} d={} sz={:#x}"
+                      " now {}x{} p={} l={} m={} t={} e={}/{} d={} sz={:#x}",
+                      (unsigned long)base, e.res.width, e.res.height,
+                      e.res.pitch, e.res.layers, e.res.mip_levels,
+                      e.res.tiling_idx, e.res.elem_bytes,
+                      e.res.stage_elem_bytes, e.res.dfmt,
+                      (unsigned long)e.size, ci.res[i].width, ci.res[i].height,
+                      ci.res[i].pitch, ci.res[i].layers, ci.res[i].mip_levels,
+                      ci.res[i].tiling_idx, ci.res[i].elem_bytes,
+                      ci.res[i].stage_elem_bytes, ci.res[i].dfmt,
+                      (unsigned long)sz[i]);
+        }
+        else if (rt_attempt)
+          st.rt++;
+        else
+          st.hash++;
+      }
       // Which staged bytes the CPU only ever WRITES: those could live straight
       // in host-visible VRAM (ReBAR) with no mirror and no copy, because
       // nothing ever reads them back across the bus.
@@ -2542,12 +2669,17 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
       else
         g_stage_ro_bytes += sz[i];
     }
-    e.size = sz[i];
-    e.guest_bytes = guest_bytes;
+    // A subset bind keeps the entry at the larger footprint it was staged and
+    // hashed at: shrinking it here is what made the next full-size bind look
+    // like a reshape.
+    if (!subset) {
+      e.size = sz[i];
+      e.guest_bytes = guest_bytes;
+      e.image_staging = ci.res[i].image_staging;
+      e.res = ci.res[i];
+    }
     if (ci.res[i].image_staging)
       g_cs_image_staged++;
-    e.image_staging = ci.res[i].image_staging;
-    e.res = ci.res[i];
     e.last_used_frame = g_frame.num;
     bind_buf[i] = e.buf;
   }
