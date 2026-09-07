@@ -77,6 +77,10 @@ DELTA_OPTION(u32, kGpuPsVgpr, "DELTA_GPU_PSVGPR", 0);
 // overwrites later can still be seen. Bisect the blocks to find where a
 // value dies.
 DELTA_OPTION(u32, kGpuPsVgprBlock, "DELTA_GPU_PSVGPR_BLOCK", 0);
+// DELTA_GPU_PSVGPR_PS=<ps addr>: probe only that pixel shader. Every other
+// program keeps its real SPIR-V and its warm pipeline cache, so a probed run
+// reaches a late frame as fast as a plain one.
+DELTA_OPTION(u64, kGpuPsVgprPs, "DELTA_GPU_PSVGPR_PS", 0);
 // merged_wave_info (s3): verts-in-wave in [7:0], prims in [15:8]. One
 // invocation is one lane here, so a wave has to be as wide as the invocations
 // the draw actually runs -- a shader that masks EXEC with `lane < verts` keeps
@@ -1469,7 +1473,7 @@ void EmitExport(Translator& t, const Inst& inst, StageContext& sc) {
       if (kGpuForcecolor)
         col = t.m.CompositeConstruct(
             t.t_v4, {t.F32(1.f), t.F32(0.f), t.F32(0.f), t.F32(1.f)});
-      if (kGpuPsVgpr) {
+      if (kGpuPsVgpr && (!kGpuPsVgprPs || g_ps_addr == (u64)kGpuPsVgprPs)) {
         const Id g = sc.vgpr_snap_var
                          ? t.m.Load(t.t_f, sc.vgpr_snap_var)
                          : t.VgF(kGpuPsVgpr - 1);
@@ -1488,7 +1492,9 @@ void EmitExport(Translator& t, const Inst& inst, StageContext& sc) {
         return compr ? (en & (i < 2 ? 0x1u : 0x4u)) != 0
                      : (en & (1u << i)) != 0;
       };
-      bool all_channels = kGpuForcecolor || kGpuDebugalpha || kGpuPsVgpr;
+      bool all_channels =
+          kGpuForcecolor || kGpuDebugalpha ||
+          (kGpuPsVgpr && (!kGpuPsVgprPs || g_ps_addr == (u64)kGpuPsVgprPs));
       if (!all_channels) {
         all_channels = true;
         for (u32 i = 0; i < 4; i++)
