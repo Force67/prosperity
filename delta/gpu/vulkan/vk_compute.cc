@@ -37,6 +37,7 @@
 #include <map>
 #include <mutex>
 #include <unordered_map>
+#include <string>
 #include <unordered_set>
 #include <vector>
 
@@ -2148,6 +2149,17 @@ bool DescribeCsRangeCovering(u64 addr, char* out, size_t out_size) {
 namespace gpu::rhi {
 using namespace gpu::vk;
 
+// A dispatch the backend could not run, named once per shader and reason.
+// The reason is the number of the `return false` it came from; the file's
+// line is one grep away and a prose reason at each of them would be noise.
+bool CsDeclined(const ComputeInfo& ci, const char* why) {
+  static std::unordered_set<std::string> reported;
+  std::string key = std::to_string(ci.cs_addr) + why;
+  if (reported.size() < 512 && reported.insert(key).second)
+    BASE_LOGI("csgpu", "CS @{:#x} declined at exit {}", ci.cs_addr, why);
+  return false;
+}
+
 // Two plain-buffer bindings on one guest base with different extents (a
 // constant block read through a 0x1c-byte window and a 0x24-byte one) share
 // one staging range, so they have to agree on its size: take the larger for
@@ -2182,17 +2194,17 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
   const ComputeInfo& ci = MergeSameBase(ci_in, ci_merged);
   if (g_cs_failed) {
     renderer.state = nullptr;
-    return false;
+    return CsDeclined(ci, "1");
   }
   if (!renderer.available() || !ci.recomp || !ci.recomp->ok || !ci.num_res ||
       ci.num_res > g_dev.max_cs_resources)
-    return false;
+    return CsDeclined(ci, "2");
   ScopeCs _cs;
   for (u32 i = 0; i < ci.num_res; i++)
     g_cs_bytes += ci.res[i].size;
   for (u32 i = 0; i < ci.num_res; i++)
     if (ci.res[i].size > g_dev.max_storage_buffer_range)
-      return false;
+      return CsDeclined(ci, "3");
   for (u32 i = 0; i < ci.num_res; i++) {
     if (ci.res[i].zero_fill)
       continue;
@@ -2209,7 +2221,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
           ci.res[j].size ? ((ci.res[j].size + 3) & ~VkDeviceSize(3)) : 4;
       if (size != other_size || guest_bytes != other_guest_bytes ||
           !SameCsResourceShape(ci.res[i], ci.res[j]))
-        return false;
+        return CsDeclined(ci, "4");
     }
   }
   for (u32 i = 0; i < ci.num_res; i++) {
@@ -2223,7 +2235,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
   }
   CsPipe* cp = GetCsPipe(ci);
   if (!cp)
-    return false;
+    return CsDeclined(ci, "5");
 
   // Persistent command buffer + descriptor pool (created once, reused).
   if (g_cs_cmd == VK_NULL_HANDLE) {
@@ -2234,7 +2246,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
     ca.commandBufferCount = 1;
     if (vkAllocateCommandBuffers(g_dev.device, &ca, &g_cs_cmd) != VK_SUCCESS) {
       g_cs_cmd = VK_NULL_HANDLE;
-      return false;
+      return CsDeclined(ci, "6");
     }
   }
   if (g_cs_desc_pool == VK_NULL_HANDLE) {
@@ -2249,7 +2261,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
     if (vkCreateDescriptorPool(g_dev.device, &pci, nullptr, &g_cs_desc_pool) !=
         VK_SUCCESS) {
       g_cs_desc_pool = VK_NULL_HANDLE;
-      return false;
+      return CsDeclined(ci, "7");
     }
   }
   if (g_cs_batch_fence == VK_NULL_HANDLE) {
@@ -2257,7 +2269,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
     if (vkCreateFence(g_dev.device, &fci, nullptr, &g_cs_batch_fence) !=
         VK_SUCCESS) {
       g_cs_batch_fence = VK_NULL_HANDLE;
-      return false;
+      return CsDeclined(ci, "8");
     }
     // What an EMPTY submit+wait costs here. SotC spends over half its frame in
     // fence waits while the GPU sits at 18% utilisation, so the question is
@@ -2341,10 +2353,10 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
       if (g_cs_stage_pending[i] && g_cs_stage[i].cap < sz[i] &&
           !CsBatchFlush(kSyncScratchGrow)) {
         renderer.state = nullptr;
-        return false;
+        return CsDeclined(ci, "9");
       }
       if (!CsEnsureStage(i, sz[i]))
-        return false;
+        return CsDeclined(ci, "10");
       bind_buf[i] = g_cs_stage[i].buf;
       continue;
     }
@@ -2364,11 +2376,11 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
                             SameCsResourceShape(e.res, ci.res[i]);
     if (!same_shape && e.gpu_dirty)
       if (!CsRangeFlushOne(base, e))
-        return false;  // reshaped: keep its data
+        return CsDeclined(ci, "12");  // reshaped: keep its data
     if (e.pending_batch && (!e.buf || e.cap < sz[i]) &&
         !CsBatchFlush(kSyncRangeGrow)) {
       renderer.state = nullptr;
-      return false;  // growth would destroy a buffer the batch references
+      return CsDeclined(ci, "13");  // growth would destroy a buffer the batch references
     }
     // Guest-page import: valid only for plain (non-image) linear ranges, and
     // only while the range is not already staged some other way.
@@ -2378,7 +2390,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
     const bool buffer_reused =
         e.buf && e.cap >= static_cast<VkDeviceSize>(sz[i]);
     if (!CsRangeEnsureBuffer(e, sz[i]))
-      return false;
+      return CsDeclined(ci, "14");
     if (!buffer_reused)
       NameObject(VK_OBJECT_TYPE_BUFFER, (u64)e.buf, "csbuf %#llx",
                  (unsigned long long)base);
@@ -2439,12 +2451,12 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
       if (kCsRename && e.pending_batch && !e.gpu_dirty && !e.res.written) {
         if (!CsRangeRename(e, sz[i])) {
           renderer.state = nullptr;
-          return false;
+          return CsDeclined(ci, "15");
         }
         e.pending_batch = false;
       } else if (e.pending_batch && !CsBatchFlush(kSyncStageHazard)) {
         renderer.state = nullptr;
-        return false;
+        return CsDeclined(ci, "16");
       }
       if (rt_attempt) {
         e.last_rt_frame = static_cast<int>(g_frame.num);
@@ -2464,7 +2476,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
         // device (stop recording altogether, like every other failed flush).
         if (g_cs_failed) {
           renderer.state = nullptr;
-          return false;
+          return CsDeclined(ci, "17");
         }
       }
       if (!rt_attempt || !e.rt_sourced) {
@@ -2475,7 +2487,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
           const bool ok = StageCsImage(ci.res[i], e.map);
           g_in_detile_ns += NowNs() - _td;
           if (!ok)
-            return false;
+            return CsDeclined(ci, "18");
         } else {
           std::memcpy(e.map, reinterpret_cast<const void*>(base),
                       ci.res[i].size);
@@ -2551,10 +2563,10 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
   if (vkAllocateDescriptorSets(g_dev.device, &da, &set) != VK_SUCCESS) {
     if (!CsBatchFlush(kSyncDescPool)) {
       renderer.state = nullptr;
-      return false;
+      return CsDeclined(ci, "19");
     }
     if (vkAllocateDescriptorSets(g_dev.device, &da, &set) != VK_SUCCESS)
-      return false;
+      return CsDeclined(ci, "20");
   }
   VkDescriptorBufferInfo dbi[ComputeInfo::kMaxResources + 1];
   VkWriteDescriptorSet wr[ComputeInfo::kMaxResources + 1];
@@ -2717,7 +2729,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
   }
   if ((++g_cs_batch_count >= 128 || kGpuCsgpuVerbose) && !CsBatchFlush(kSyncBatchCap)) {
     renderer.state = nullptr;
-    return false;
+    return CsDeclined(ci, "21");
   }
 
   // Mark written ranges GPU-dirty. Guest memory catches up lazily at the next
