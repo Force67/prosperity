@@ -232,6 +232,11 @@ struct ScalarEval {
   bool known[kRegs] = {};
   bool scc = false;
   bool scc_known = false;
+  // The program's guest address, for s_getpc_b64: a shader that keeps its
+  // descriptors next to its code (Astro Bot's SMAA passes fetch their
+  // fullscreen triangle through a V# built from s_getpc + 0xd0) is
+  // unresolvable without it.
+  u64 code_addr = 0;
 
   ScalarEval(const u32* user_data,
              u32 user_sgprs,
@@ -376,6 +381,10 @@ struct ScalarEval {
           ClearDest(sdst, 0);
           ClearDest(sdst, 1);
         }
+      } else if (inst.opcode == 0x1F && code_addr) {  // s_getpc_b64
+        const u64 next = code_addr + static_cast<u64>(inst.pc + 1) * 4;
+        SetDest(sdst, 0, static_cast<u32>(next));
+        SetDest(sdst, 1, static_cast<u32>(next >> 32));
       } else {
         // The gfx10 SOP1 table decides how wide the destination is; a 64-bit
         // form whose second dword stayed "known" would hand a descriptor half
@@ -492,12 +501,42 @@ struct ScalarEval {
         return;
       }
       u32 value;
+      // The unsigned add/sub carry chain: s_add_u32 leaves its carry in SCC
+      // and s_addc_u32 consumes it, which is how a 64-bit address (s_getpc +
+      // offset) is built.
+      bool carry = false, carry_known = false;
       switch (inst.opcode) {
         case 0x00:
+          value = a + b;
+          carry = (static_cast<u64>(a) + b) >> 32;
+          carry_known = true;
+          break;
+        case 0x01:
+          value = a - b;
+          carry = b > a;
+          carry_known = true;
+          break;
+        case 0x04:
+        case 0x05: {
+          if (!scc_known) {
+            ClearDest(sdst, 0);
+            return;
+          }
+          const u64 c = scc ? 1 : 0;
+          if (inst.opcode == 0x04) {
+            const u64 wide = static_cast<u64>(a) + b + c;
+            value = static_cast<u32>(wide);
+            carry = wide >> 32;
+          } else {
+            value = a - b - static_cast<u32>(c);
+            carry = static_cast<u64>(b) + c > a;
+          }
+          carry_known = true;
+          break;
+        }
         case 0x02:
           value = a + b;
           break;
-        case 0x01:
         case 0x03:
           value = a - b;
           break;
@@ -560,8 +599,12 @@ struct ScalarEval {
           return;
       }
       SetDest(sdst, 0, value);
-      if (inst.opcode <= 0x03 || (inst.opcode >= 0x2f && inst.opcode <= 0x32))
+      if (inst.opcode <= 0x05 || (inst.opcode >= 0x2f && inst.opcode <= 0x32))
         scc_known = false;
+      if (carry_known) {
+        scc = carry;
+        scc_known = true;
+      }
       switch (inst.opcode) {
         case 0x0e:
         case 0x10:
@@ -826,8 +869,8 @@ u32 Sop2WriteDwords(u32 op) {
 // SOP2 operations ScalarEval evaluates. The rest it clears, which reads back as
 // unknown rather than as a wrong value.
 bool Sop2Exact(u32 op, bool scc_trusted) {
-  if (op == 0x0A || op == 0x0B)
-    return scc_trusted;  // s_cselect_b32/b64
+  if (op == 0x0A || op == 0x0B || op == 0x04 || op == 0x05)
+    return scc_trusted;  // s_cselect_b32/b64, s_addc_u32/s_subb_u32
   switch (op) {
     case 0x00:
     case 0x01:
@@ -1476,6 +1519,7 @@ std::vector<TImage> TrackTextures(const u32* ps_code,
   out.resize(plan.binding_srsrc.size());
   std::vector<bool> filled(out.size(), false);
   ScalarEval eval(pud, user_sgprs, ud_base);
+  eval.code_addr = code_addr;
 
   for (const Inst& in : prog) {
     eval.Step(in);
@@ -1577,6 +1621,7 @@ std::unordered_map<u32, BufferResource> ResolveBuffers(
   if (!code || !user_data || !InGuest(reinterpret_cast<u64>(code)))
     return out;
   ScalarEval eval(user_data, user_sgprs, user_sgpr_base);
+  eval.code_addr = reinterpret_cast<u64>(code);
   for (const Inst& inst : *CachedReachableProgram(code, 4096)) {
     if (inst.enc == Enc::kSmrd && SmemLoadCount(inst.opcode)) {
       const Smem smem = DecodeSmem(inst);
