@@ -557,6 +557,16 @@ VkBlendOp BlendOp(u32 f) {
   }
 }
 
+VkColorComponentFlags ColorWriteMask(u32 target_mask, u32 shader_mask,
+                                     u8 export_mask, u32 target) {
+  if (target >= 8 || !(export_mask & (1u << target)))
+    return 0;
+  u32 mask = (target_mask >> (4 * target)) & 0xF;
+  if (shader_mask)
+    mask &= (shader_mask >> (4 * target)) & 0xF;
+  return VkColorComponentFlags(mask);
+}
+
 // Decode CB_BLEND0_CONTROL into a Vulkan colour-blend attachment. `en` is the
 // per-target blend enable (bit 30). Falls back to a sensible src-alpha blend
 // when the guest enables blend but the control word is zero (default state, not

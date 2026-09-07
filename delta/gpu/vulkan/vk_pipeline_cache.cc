@@ -650,19 +650,11 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
     if (IsIntegerColorFormat(ColorTargetFormat(d.mrt_info[i])))
       en = false;
     cb_att[i] = BlendAttachment(bc, en);
-    // Mask attachments the PS does not export to. A PS with no color export
-    // at all (depth-only / buffer-store passes) writes nothing -- previously a
-    // white fallback was painted, which poisoned multi-pass chains (PT).
-    if (!kNoMaskDiag && !(d.recomp->ps_mrt_mask & (1u << i)))
-      cb_att[i].colorWriteMask = 0;
-    // Per-channel mask. A channel the PS leaves out of its export keeps its
-    // previous contents on hardware, but the recompiler has to store a whole
-    // vec4, so without this the omitted channels are overwritten with zero. A
-    // zero CB_SHADER_MASK means the register was never programmed, not that
-    // the shader exports nothing; ps_mrt_mask above already covers that case.
-    if (!kNoMaskDiag && d.shader_mask)
-      cb_att[i].colorWriteMask &= VkColorComponentFlags(
-          (d.target_mask >> (4 * i)) & (d.shader_mask >> (4 * i)) & 0xF);
+    // Only exported targets may write, and CB_TARGET_MASK always gates each
+    // component, including when the frontend omits CB_SHADER_MASK (AGC).
+    if (!kNoMaskDiag)
+      cb_att[i].colorWriteMask = ColorWriteMask(
+          d.target_mask, d.shader_mask, d.recomp->ps_mrt_mask, i);
   }
   // DELTA_GPU_PIPETRACE: the colour-blend state a pipeline is actually built
   // with, next to the PS's export mask -- the two have to agree or an

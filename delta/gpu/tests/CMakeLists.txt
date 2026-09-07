@@ -61,6 +61,10 @@ add_delta_test(vk_memory_span_test
     ../vulkan/vk_memory_span.cc
   DEPS delta_deps)
 
+add_delta_test(vk_color_mask_test
+  SOURCES vk_color_mask_test.cc
+  DEPS delta_gpu)
+
 add_delta_test(vk_compute_hazard_test
   SOURCES
     vk_compute_hazard_test.cc

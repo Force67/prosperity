@@ -5,6 +5,8 @@
 
 #include "gpu/gcn/gcn_decode.h"
 #include "gpu/gcn/gcn_translate.h"
+#include "gpu/ps5/rdna/rdna_decode.h"
+#include "gpu/ps5/rdna/rdna_translate.h"
 
 namespace {
 
@@ -69,6 +71,21 @@ bool Recompile(std::vector<u32> code) {
   code.push_back(kEndPgm);
   const u32 user_data[16] = {};
   return gpu::gcn::Recompile(code.data(), nullptr, user_data, user_data).ok;
+}
+
+TEST(RdnaSpirv, NoColorExportDoesNotSynthesizeWhiteOutput) {
+  const u32 user_data[32] = {};
+  const u32 vs[64] = {kEndPgm};
+  const u32 no_export[64] = {kEndPgm};
+  const u32 null_export[64] = {0xf8000890, 0, kEndPgm};
+  const u32 color_export[64] = {
+      0x7e0002f2, 0xf800080f, 0, kEndPgm};  // v0=1; exp mrt0 v0,v0,v0,v0
+  for (const u32* ps : {no_export, null_export, color_export}) {
+    gpu::rdna::NextProgramGeneration();
+    const auto result = gpu::rdna::Recompile(vs, ps, user_data, user_data);
+    ASSERT_TRUE(result.ok);
+    EXPECT_EQ(result.ps_mrt_mask, ps == color_export ? 1 : 0);
+  }
 }
 
 TEST(GcnSpirv, AcceptsImplementedNeoVectorFamilies) {

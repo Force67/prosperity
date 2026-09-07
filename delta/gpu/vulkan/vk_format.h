@@ -36,6 +36,10 @@ u32 FormatBytes(VkFormat fmt);
 VkBlendFactor BlendFactor(u32 f);
 VkBlendOp BlendOp(u32 f);
 VkPipelineColorBlendAttachmentState BlendAttachment(u32 bc, bool en);
+// shader_mask == 0 means the frontend supplies only the recompiler's export
+// mask. The target's per-component write mask still applies independently.
+VkColorComponentFlags ColorWriteMask(u32 target_mask, u32 shader_mask,
+                                     u8 export_mask, u32 target);
 
 VkFormat VertexFormat(u32 dfmt, u32 nfmt);
 u32 VertexFormatBytes(u32 dfmt);

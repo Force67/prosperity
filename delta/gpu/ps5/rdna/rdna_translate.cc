@@ -3294,12 +3294,9 @@ bool TranslatePs(const Program& program,
     t.m.OpenBlock(after_kill);
   }
 
-  if (!sc.wrote_color) {
-    // No color export at all: opaque white fallback (matches the GFX7 path).
-    t.m.Store(gpu::gcn::PsColorOut(t, sc, 0),
-              t.m.ConstComposite(
-                  t.t_v4, {t.F32(1.f), t.F32(1.f), t.F32(1.f), t.F32(1.f)}));
-  } else if (sc.color_written_var) {
+  // Depth-only and buffer-store programs do not export a color. Leave their
+  // MRT mask empty so the backend preserves the loaded color attachments.
+  if (sc.color_written_var) {
     if (!kGpuNokill) {
       const Id wrote = t.IsNonZero(t.m.Load(t.t_u, sc.color_written_var));
       const Id kill_blk = t.m.NewBlock(), after_kill = t.m.NewBlock();
