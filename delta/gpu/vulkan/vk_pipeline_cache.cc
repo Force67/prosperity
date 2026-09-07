@@ -32,6 +32,7 @@
 
 namespace {
 DELTA_OPTION(bool, kDoCull, "DELTA_GPU_CULL", false);
+DELTA_OPTION(bool, kDepthClamp, "DELTA_GPU_DEPTHCLAMP", false);
 // DELTA_GPU_PIPETRACE=1 traces the first pipelines built; =<ps addr> traces
 // only that shader's. Pipelines are built in load order, so a flat cap only
 // ever shows the loading screens -- a negative from it says nothing about the
@@ -568,6 +569,7 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
   rs.frontFace =
       d.front_ccw ? VK_FRONT_FACE_CLOCKWISE : VK_FRONT_FACE_COUNTER_CLOCKWISE;
   rs.lineWidth = 1.0f;
+  rs.depthClampEnable = kDepthClamp ? VK_TRUE : VK_FALSE;
   VkPipelineMultisampleStateCreateInfo ms{
       VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
   ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;

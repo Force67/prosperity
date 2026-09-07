@@ -533,6 +533,8 @@ bool CreateDevice() {
   want_feat.textureCompressionBC = avail2.features.textureCompressionBC;
   if (avail2.features.robustBufferAccess)
     want_feat.robustBufferAccess = VK_TRUE;
+  if (avail2.features.depthClamp)
+    want_feat.depthClamp = VK_TRUE;
   if (avail2.features.samplerAnisotropy)
     want_feat.samplerAnisotropy = VK_TRUE;
   if (avail2.features.geometryShader)
