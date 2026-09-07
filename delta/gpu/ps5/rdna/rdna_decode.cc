@@ -374,6 +374,11 @@ Program Decode(const u32* code, u32 max_dwords, bool stop_at_endpgm) {
   Program out;
   if (!code)
     return out;
+  // The furthest forward branch target seen. A program's early-out block
+  // routinely sits PAST its main s_endpgm (Astro Bot's SMAA edge pass jumps
+  // over it to "exec = 0; null export; s_endpgm"), so an endpgm-bounded scan
+  // must not stop while a branch still points beyond it.
+  u32 furthest_target = 0;
   u32 i = 0;
   while (i < max_dwords) {
     Inst in;
@@ -451,11 +456,23 @@ Program Decode(const u32* code, u32 max_dwords, bool stop_at_endpgm) {
     out.push_back(in);
 
     if (in.enc == Enc::kSopp) {
+      // s_branch and the s_cbranch_* family: a signed dword offset from the
+      // next instruction.
+      const bool branch = in.opcode == 0x02 ||
+                          (in.opcode >= 0x04 && in.opcode <= 0x09) ||
+                          (in.opcode >= 0x17 && in.opcode <= 0x1A);
+      if (branch) {
+        const int offset = static_cast<i16>(code[i] & 0xFFFF);
+        const long long target = static_cast<long long>(i) + in.size + offset;
+        if (target > 0 && static_cast<u64>(target) > furthest_target &&
+            static_cast<u64>(target) < max_dwords)
+          furthest_target = static_cast<u32>(target);
+      }
       // s_code_end is a hard executable-code marker. Ordinary and ordered PS
       // endpgm operations stop an unbounded scan, but a footer-bounded decode
       // retains later branch targets.
       if (in.opcode == 0x1F ||
-          (stop_at_endpgm &&
+          (stop_at_endpgm && i + in.size > furthest_target &&
            (in.opcode == 0x01 || in.opcode == 0x1B || in.opcode == 0x1E)))
         break;
     }
