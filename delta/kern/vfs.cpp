@@ -407,9 +407,13 @@ bool stat(const char *path, i64 &size, bool &isDir) {
   const char *rest = path + len;
   if (m.provider) {
     bool ok = m.provider->stat(rest, size);
+    if (!ok && m.provider->isDir(rest)) {
+      ok = isDir = true;
+      size = 0;
+    }
     if (kOpenTrace)
-      BASE_LOGI("stat", "{} -> {} size={}", path, ok ? "ok" : "MISS",
-                (long long)size);
+      BASE_LOGI("stat", "{} -> {} size={} dir={}", path, ok ? "ok" : "MISS",
+                (long long)size, (int)isDir);
     return ok;
   }
 

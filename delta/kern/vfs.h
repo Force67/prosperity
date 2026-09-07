@@ -70,6 +70,14 @@ struct VirtualProvider {
   virtual bool list(const char * /*relPath*/, std::vector<DirEntry> & /*out*/) {
     return false;
   }
+  // Whether relPath names a directory. A provider's stat() only knows files, so
+  // without this a title that probes for a directory (Astro Bot stats
+  // "<level>/cinematics" to decide whether a level has any) is told it does not
+  // exist. Providers that can answer cheaply should override.
+  virtual bool isDir(const char *relPath) {
+    std::vector<DirEntry> children;
+    return list(relPath, children);
+  }
 };
 
 // Map a guest path prefix onto an on-demand provider (kept alive for the
