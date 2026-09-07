@@ -42,10 +42,6 @@ DELTA_OPTION(u64, kLabelWatch, "DELTA_AGC_LABELWATCH", 0);
 DELTA_OPTION(u64, kLabelWatchSize, "DELTA_AGC_LABELWATCH_SIZE", 0x4000000);
 }  // namespace
 
-// Whether a target address is a buffer the title registered for display; see
-// EndFrame.
-extern "C" bool prosperity_ps5_is_display_buffer(u64 addr);
-
 namespace gpu::ps5 {
 namespace {
 
@@ -73,10 +69,6 @@ IndexState g_index;
 // shader-type bit picks which of the two it set.
 u64 g_draw_indirect_base = 0;
 u64 g_dispatch_indirect_base = 0;
-
-// The colour target of the last draw actually issued; EndFrame presents it when
-// it is a registered display buffer.
-u64 g_last_draw_rt = 0;
 
 // A cycle in the IB chain would recurse until the stack overflowed. Real
 // submissions are flat or a couple of levels deep.
@@ -429,7 +421,6 @@ void HandleDrawPacket(rhi::Renderer& renderer,
   }
   TraceDrawSubmit(d);
   NoteDrawIssued(d);
-  g_last_draw_rt = d.rt_base;
   rhi::Draw(renderer, d);
   TraceDrawDone();
 }
@@ -806,14 +797,8 @@ void EndFrame(u64 scanout_base) {
   rhi::Renderer& renderer = rhi::DefaultRenderer();
   if (!g_frame_active || !renderer.available())
     return;
-  // The trigger that ends a frame is often the NEXT frame's state submit, and
-  // the flip it reads still names the buffer before this one. When the frame
-  // composited straight into a registered display buffer, that buffer is what
-  // the title just finished, so present it instead -- otherwise every frame
-  // presents its neighbour, which the title has already cleared.
-  if (g_last_draw_rt && g_last_draw_rt != scanout_base &&
-      prosperity_ps5_is_display_buffer(g_last_draw_rt))
-    scanout_base = g_last_draw_rt;
+  // VideoOut specifies the registered buffer to present. A later draw can
+  // target another display buffer without changing this flip request.
   rhi::EndFrame(renderer, scanout_base);
   g_frame_active = false;
 }

@@ -50,10 +50,6 @@ extern "C" void prosperity_agc_flip(u64 scanoutBase);
 // Is this address inside a pool the title mapped for the GPU (gpu/ps5)?
 extern "C" int prosperity_gpu_is_aperture(u64 address);
 
-// Set once the title issues the mode-1 end-of-frame ioctl. Until then the frame
-// has to be ended somewhere, and the start of a state submit is the only other
-// boundary available.
-static std::atomic<bool> g_sawEndOfFrame{false};
 // Guest address of the display buffer the game most recently flipped, resolved
 // from sceVideoOutSubmitFlip*'s bufferIndex via the registered-buffer table
 // (libSceVideoOut_ps5.cpp). The AGC flip ioctls below carry no buffer field, so
@@ -554,20 +550,8 @@ i32 gcDevicePs5::ioctl(u32 cmd, void *data) {
     if (kAgcQstat)
       BASE_LOGI("agcq", "submit 8131");
     if (data) {
-      // Present the previous frame's accumulated draws at the start of each new
-      // frame's state submit -- but ONLY while the title has never signalled a
-      // real end of frame (0x80088133). A state submit happens several times a
-      // frame, so ending the frame here cuts the title's own passes in half:
-      // Minecraft's UI layer gets its clear in one of our frames and its
-      // content in the next, so the composite that samples it sees an empty
-      // target and the UI flickers. The display buffer to scan out is the one
-      // the game last flipped via the HLE videoout (bufferIndex -> registered
-      // address), not whichever RT drew last.
-      if (!g_sawEndOfFrame.load(std::memory_order_relaxed)) {
-        u64 scanout = prosperity_ps5_scanout_base();
-        traceFlip("0x80488131", scanout);
-        prosperity_agc_flip(scanout);
-      }
+      // Acquiring/submitting command state is not a display flip. VideoOut
+      // owns presentation and supplies the actual registered buffer index.
       static int s_d131 = 0;
       if (kAgcTrace && s_d131 < 6) {
         s_d131++;
@@ -702,20 +686,12 @@ i32 gcDevicePs5::ioctl(u32 cmd, void *data) {
     return 0;
   }
   case 0xC0088133:
-  case 0x80088133: {  // AGC mode-1 end-of-frame / flip signal, issued once per
-                    // frame after the 0x8131 state + 0x8132 draw submits. The
-                    // 8-byte arg carries no buffer field (observed all-zero);
-                    // present the buffer the game flipped via the HLE videoout.
-                    // Both directions occur, like 0x8131 and 0x8132: newer
-                    // firmware presets a status word the driver expects cleared,
-                    // and only the IN form was handled, so every frame this
-                    // title ends went unpresented.
+  case 0x80088133: {  // AGC mode-1 submission completion. This carries no
+                    // display-buffer index and is followed by a separate
+                    // VideoOut EOP flip. Presenting here as well splits one
+                    // guest frame into two and scans out the previous buffer.
     if (kAgcQstat)
-      BASE_LOGI("agcq", "frame end 8133");
-    g_sawEndOfFrame.store(true, std::memory_order_relaxed);
-    u64 scanout = prosperity_ps5_scanout_base();
-    traceFlip("0x8133", scanout);
-    prosperity_agc_flip(scanout);
+      BASE_LOGI("agcq", "submit done 8133");
     clearSubmitStatus(cmd, data, 0);
     return 0;
   }
