@@ -408,11 +408,12 @@ RTarget* ActivateRtVariant(RTarget& live,
     live.clear_pending = false;
     live.clear_src = "none";
   }
-  // EndFrame's submitted-layout stamp skips a parked target too. Leaving a
-  // value that predates its last recorded transition would have the compute
-  // bridge barrier from the wrong layout; UNDEFINED means "nothing submitted
-  // yet", which that path already handles.
-  alt->submitted_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+  // The parked target keeps its submitted-layout stamp: EndFrame stamps
+  // parked variants as well as live ones, so the stamp is the layout the GPU
+  // holds whatever this frame has recorded since. Resetting it to UNDEFINED
+  // here made every variant re-activated mid-frame unreadable to the compute
+  // bridge until the next frame end, and Astro Bot's upscaler read its
+  // 1080p input from guest memory (zeros) every frame because of it.
   return &live;
 }
 
@@ -682,10 +683,7 @@ DepthTarget* ActivateDepthVariant(DepthTarget& live,
     live.used_this_frame = false;
     live.stencil_used_this_frame = false;
   }
-  // See ActivateRtVariant: a parked target missed EndFrame's layout stamp.
-  alt->submitted_layout = VK_IMAGE_LAYOUT_UNDEFINED;
-  alt->submitted_stencil_layout = VK_IMAGE_LAYOUT_UNDEFINED;
-  return &live;
+  return &live;  // see ActivateRtVariant: the parked stamp stays valid
 }
 
 // The depth counterpart of ActivateSampledRtVariant: a sample names a depth
@@ -994,6 +992,46 @@ void ResolveHtileClear(DepthTarget& dt, u64 base, float depth_clear) {
                 (unsigned long)dt.htile_base, code,
                 clear ? "clear" : "not a clear");
   }
+}
+
+void NoteRawWrite(u64 base, u64 bytes) {
+  if (!base || !bytes)
+    return;
+  const auto note = [&](RTarget& rt, u64 rt_base) {
+    // Rendered this frame: the image is the newer one, and a partial raw
+    // write (a region update) must not turn its next bind into a clear.
+    if (rt.last_frame == g_frame.num || !rt.ever_rendered)
+      return;
+    const u64 end = rt_base + RtByteSize(rt);
+    if (base < end && rt_base < base + bytes)
+      rt.ever_rendered = false;
+  };
+  for (auto& kv : g_rts) {
+    note(kv.second, kv.first);
+    auto v = g_rt_variants.find(kv.first);
+    if (v == g_rt_variants.end())
+      continue;
+    for (RTarget& alt : v->second)
+      note(alt, kv.first);
+  }
+}
+
+bool ActivateWrittenRtVariant(u64 base, u32 w, u32 h) {
+  if (!base || !w || !h)
+    return false;
+  auto it = g_rts.find(base);
+  if (it == g_rts.end())
+    return false;
+  RTarget& live = it->second;
+  if (live.w == w && live.h == h)
+    return true;
+  auto parked = g_rt_variants.find(base);
+  if (parked == g_rt_variants.end())
+    return false;
+  for (const RTarget& v : parked->second)
+    if (v.w == w && v.h == h)
+      return ActivateRtVariant(live, base, w, h, v.fmt) != nullptr;
+  return false;
 }
 
 // The DCC clear codes (gfx8..gfx10): four fixed colours, one that names

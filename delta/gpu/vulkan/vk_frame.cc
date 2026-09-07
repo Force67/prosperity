@@ -1212,11 +1212,21 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
   // RT-backed CS input) chains its barriers from.
   for (auto& rt_entry : g_rts)
     rt_entry.second.submitted_layout = rt_entry.second.layout;
+  // Parked geometry variants (see ActivateRtVariant) are in this submission
+  // too, whatever they recorded before being swapped out.
+  for (auto& parked : g_rt_variants)
+    for (RTarget& v : parked.second)
+      v.submitted_layout = v.layout;
   for (auto& depth_entry : g_depths) {
     depth_entry.second.submitted_layout = depth_entry.second.layout;
     depth_entry.second.submitted_stencil_layout =
         depth_entry.second.stencil_layout;
   }
+  for (auto& parked : g_depth_variants)
+    for (DepthTarget& v : parked.second) {
+      v.submitted_layout = v.layout;
+      v.submitted_stencil_layout = v.stencil_layout;
+    }
   cur.frame_num = g_frame.num;
   cur.frame_draws = g_frame.draws;
   cur.frame_max_idx = g_frame.max_idx;

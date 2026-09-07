@@ -664,18 +664,48 @@ struct CsAliasedImage {
 // True when `base` names a live target the compute bridges apply to. The
 // UNDEFINED-submitted-layout case (target created this frame, no submission
 // yet) reports false: there is nothing real to copy either way yet.
-bool FindCsAliasedImage(u64 base, CsAliasedImage& out) {
+// `for_write`: the dispatch produces the surface, so an image nothing has
+// rendered into yet is still the one to fill. Its layout anchor may also be
+// missing: a parked variant (see ActivateRtVariant) has no submitted-layout
+// stamp, but one untouched this frame has nothing recorded against it either,
+// so the layout its last frame left it in IS the one on the GPU.
+// `prefer_depth`: the resource is a single 32-bit channel, which is what a
+// depth surface looks like to a dispatch. One address can hold a colour
+// target AND a depth target (Astro Bot's bloom pyramid and its half-res
+// scene depth share 0x53a500000 in different passes), and the colour one
+// answered first, so the depth downsample landed in the bloom image.
+bool FindCsAliasedImage(u64 base,
+                        CsAliasedImage& out,
+                        bool for_write = false,
+                        bool prefer_depth = false) {
+  if (prefer_depth) {
+    auto depth_it = g_depths.find(base);
+    if (depth_it != g_depths.end() && depth_it->second.image) {
+      DepthTarget& depth = depth_it->second;
+      VkImageLayout anchor = depth.submitted_layout;
+      if (anchor == VK_IMAGE_LAYOUT_UNDEFINED && for_write &&
+          depth.last_frame != g_frame.num)
+        anchor = depth.layout;
+      out = {depth.image, depth.w, depth.h, 4, VK_IMAGE_ASPECT_DEPTH_BIT,
+             anchor, true, false};
+      return out.submitted_layout != VK_IMAGE_LAYOUT_UNDEFINED;
+    }
+  }
   auto rt_it = g_rts.find(base);
   if (rt_it != g_rts.end()) {
     RTarget& rt = rt_it->second;
-    if (!rt.image || rt.is_depth || !rt.ever_rendered)
+    if (!rt.image || rt.is_depth || (!for_write && !rt.ever_rendered))
       return false;
+    VkImageLayout anchor = rt.submitted_layout;
+    if (anchor == VK_IMAGE_LAYOUT_UNDEFINED && for_write &&
+        rt.last_frame != g_frame.num)
+      anchor = rt.layout;
     out = {rt.image,
            rt.w,
            rt.h,
            FormatBytes(rt.fmt),
            VK_IMAGE_ASPECT_COLOR_BIT,
-           rt.submitted_layout,
+           anchor,
             false,
             false};
     return out.submitted_layout != VK_IMAGE_LAYOUT_UNDEFINED;
@@ -1056,7 +1086,8 @@ bool RunAliasedCopy(const CsAliasedImage& img,
 // live target or the shapes disagree.
 bool StageCsRangeFromRt(const ComputeInfo::Res& res, CsRange& e) {
   CsAliasedImage img;
-  if (!FindCsAliasedImage(res.base, img))
+  if (!FindCsAliasedImage(res.base, img, /*for_write=*/false,
+                          /*prefer_depth=*/res.dfmt == 4))
     return false;
   AliasedCopyPlan plan;
   if (!PlanAliasedCopy(img, res, "reads", plan))
@@ -1073,7 +1104,13 @@ bool StageCsRangeFromRt(const ComputeInfo::Res& res, CsRange& e) {
 // by the caller either way; a shape mismatch just leaves the image stale.
 bool UploadCsRangeToRt(u64 base, CsRange& e) {
   CsAliasedImage img;
-  if (!e.image_staging || !FindCsAliasedImage(base, img))
+  if (!e.image_staging)
+    return true;
+  // A base rendered at several geometries: the dispatch names which one it
+  // writes, and only the live image answers to the address.
+  ActivateWrittenRtVariant(base, e.res.width, e.res.height);
+  if (!FindCsAliasedImage(base, img, /*for_write=*/true,
+                          /*prefer_depth=*/e.res.dfmt == 4))
     return true;  // nothing to refresh
   AliasedCopyPlan plan;
   if (!PlanAliasedCopy(img, e.res, "writes", plan)) {
@@ -1093,8 +1130,26 @@ bool UploadCsRangeToRt(u64 base, CsRange& e) {
   }
   if (!RunAliasedCopy(img, e.res, e, /*to_image=*/true, plan))
     return false;
-  if (!img.is_depth)
-    g_rts[base].ever_rendered = true;  // CS content is real content
+  if (!img.is_depth) {
+    RTarget& rt = g_rts[base];
+    rt.ever_rendered = true;  // CS content is real content
+    rt.last_frame = g_frame.num;
+    // The copy chained from and restored the anchor, so that is the layout
+    // on the GPU now whether or not a frame end had stamped it.
+    if (rt.submitted_layout == VK_IMAGE_LAYOUT_UNDEFINED)
+      rt.submitted_layout = img.submitted_layout;
+  } else if (!img.is_stencil) {
+    // A depth surface a dispatch produced is this frame's content: the first
+    // pass to bind it must LOAD it, where an untouched depth target is
+    // cleared on its first bind of the frame. Astro Bot downsamples its scene
+    // depth with a CS and tests its fog volumes against the result; clearing
+    // it on the bind rejected every fog fragment.
+    auto it = g_depths.find(base);
+    if (it != g_depths.end()) {
+      it->second.used_this_frame = true;
+      it->second.last_frame = g_frame.num;
+    }
+  }
   return true;
 }
 
@@ -2125,6 +2180,15 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci) {
           !SameCsResourceShape(ci.res[i], ci.res[j]))
         return false;
     }
+  }
+  for (u32 i = 0; i < ci.num_res; i++) {
+    if (!ci.res[i].written || ci.res[i].zero_fill)
+      continue;
+    const u64 bytes =
+        ci.res[i].guest_size ? ci.res[i].guest_size : ci.res[i].size;
+    NoteDccWrite(ci.res[i].base, bytes, nullptr);
+    if (!ci.res[i].image_staging)
+      NoteRawWrite(ci.res[i].base, bytes);
   }
   CsPipe* cp = GetCsPipe(ci);
   if (!cp)

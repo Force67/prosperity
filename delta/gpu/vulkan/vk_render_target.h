@@ -219,6 +219,19 @@ bool PreserveCsDepthBeforeClear(u64 base);
 // next bind.
 void NoteDccWrite(u64 base, u64 bytes, const u32* fill);
 
+// A dispatch wrote `bytes` at `base` through a raw buffer, i.e. not through
+// any image the compute bridge could carry into a target. Guest memory under
+// a target it overlaps is now newer than the image, so until a draw renders
+// into it again a sample of that address has to read the memory: Astro Bot
+// reuses the pages of its title-screen UI target for an exposure texel, and
+// the image is what the old surface last held.
+void NoteRawWrite(u64 base, u64 bytes);
+
+// A dispatch is about to write `base` at geometry (w, h): make that
+// geometry's image the live one so the write lands where a later sample at
+// that geometry looks, whether or not it has been rendered before.
+bool ActivateWrittenRtVariant(u64 base, u32 w, u32 h);
+
 // The open dynamic-rendering region, and which targets the frame has touched.
 struct RenderRegion {
   u64 cur_rt = 0;        // primary RT (MRT0) of the open region (0 = none)
