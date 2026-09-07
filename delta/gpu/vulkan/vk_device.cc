@@ -530,6 +530,7 @@ bool CreateDevice() {
   // (return 0 / drop the write) so the compute path can't corrupt memory on a
   // miscomputed index.
   VkPhysicalDeviceFeatures want_feat{};
+  want_feat.textureCompressionBC = avail2.features.textureCompressionBC;
   if (avail2.features.robustBufferAccess)
     want_feat.robustBufferAccess = VK_TRUE;
   if (avail2.features.samplerAnisotropy)

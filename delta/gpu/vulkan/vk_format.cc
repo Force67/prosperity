@@ -144,6 +144,8 @@ VkFormat GuestTextureFormat(u32 dfmt, u32 nfmt) {
     return nfmt == 1 ? VK_FORMAT_BC4_SNORM_BLOCK : VK_FORMAT_BC4_UNORM_BLOCK;
   if (dfmt == 39)
     return nfmt == 1 ? VK_FORMAT_BC5_SNORM_BLOCK : VK_FORMAT_BC5_UNORM_BLOCK;
+  if (dfmt == 40)
+    return nfmt == 1 ? VK_FORMAT_BC6H_SFLOAT_BLOCK : VK_FORMAT_BC6H_UFLOAT_BLOCK;
   if (dfmt == 41)
     return nfmt == 9 ? VK_FORMAT_BC7_SRGB_BLOCK : VK_FORMAT_BC7_UNORM_BLOCK;
   return VK_FORMAT_UNDEFINED;
@@ -169,6 +171,8 @@ bool FormatBlockCompressed(VkFormat format) {
     case VK_FORMAT_BC4_SNORM_BLOCK:
     case VK_FORMAT_BC5_UNORM_BLOCK:
     case VK_FORMAT_BC5_SNORM_BLOCK:
+    case VK_FORMAT_BC6H_UFLOAT_BLOCK:
+    case VK_FORMAT_BC6H_SFLOAT_BLOCK:
     case VK_FORMAT_BC7_UNORM_BLOCK:
     case VK_FORMAT_BC7_SRGB_BLOCK:
       return true;

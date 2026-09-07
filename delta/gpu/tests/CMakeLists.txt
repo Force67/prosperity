@@ -68,6 +68,10 @@ add_delta_test(vk_color_mask_test
   SOURCES vk_color_mask_test.cc
   DEPS delta_gpu)
 
+add_delta_test(bc6_texture_test
+  SOURCES bc6_texture_test.cc
+  DEPS delta_gpu)
+
 add_delta_test(vk_compute_hazard_test
   SOURCES
     vk_compute_hazard_test.cc

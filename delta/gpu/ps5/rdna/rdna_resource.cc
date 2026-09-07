@@ -227,6 +227,14 @@ void Gfx10ImgFormat(u32 gfmt, u32& dfmt, u32& nfmt) {
       dfmt = 39;
       nfmt = 1;
       break;
+    case 179:
+      dfmt = 40;
+      nfmt = 0;
+      break;  // BC6_UFLOAT (BC6 uses UNORM/SNORM to select unsigned/signed)
+    case 180:
+      dfmt = 40;
+      nfmt = 1;
+      break;  // BC6_SFLOAT
     case 181:
       dfmt = 41;
       nfmt = 0;
