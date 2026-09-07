@@ -353,6 +353,10 @@ void HandleDispatchIndirect(rhi::Renderer& renderer,
     args = g_dispatch_indirect_base + body[0];
   if (!args || !IsGuestAddress(args) || !gpu::IsReadableRange(args, 12))
     return;
+  // An earlier compute dispatch can produce the indirect dimensions.
+  // Read its completed result, not the stale guest-side staging copy.
+  if (!rhi::FlushCsWritesRange(renderer, args, 12))
+    return;
   const u32* a = reinterpret_cast<const u32*>(args);
   const u32 groups[3] = {a[0], a[1], a[2]};
   if (!groups[0] || !groups[1] || !groups[2])
@@ -376,7 +380,11 @@ void HandleDrawIndirect(rhi::Renderer& renderer,
   if (!g_draw_indirect_base || !IsGuestAddress(args) ||
       !gpu::IsReadableRange(args, want))
     return;
+  if (!rhi::FlushCsWritesRange(renderer, args, want))
+    return;
   const u32* a = reinterpret_cast<const u32*>(args);
+  if (!a[0] || !a[1])
+    return;
   const u32 initiator = count >= 4 ? body[3] : 0;
   const u32 saved_instances = g_index.num_instances;
   if (a[1])
