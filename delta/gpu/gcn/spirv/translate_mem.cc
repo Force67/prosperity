@@ -1349,7 +1349,12 @@ void EmitCsMimg(Translator& t,
   // instruction.
   const bool gather = op == 0x47;
   const bool resinfo = op == 0x0e;
-  if (!store && !load && !sample && !gather && !resinfo) {
+  // image_atomic_swap..xor (0x0f..0x1a): one dword read-modify-write on an
+  // R32 image, which over the staged linear buffer is the same atomic the
+  // MUBUF path issues. Astro Bot builds its luminance histogram this way,
+  // and the exposure its scanout composite scales by comes out of it.
+  const bool atomic = op >= 0x0f && op <= 0x1a;
+  if (!store && !load && !sample && !gather && !resinfo && !atomic) {
     // Silently setting the flag made the whole dispatch vanish with an empty
     // op list in the audit -- the one report that was supposed to say why.
     WarnUnsupported("mimg.cs", op, w, w1);
@@ -1765,6 +1770,40 @@ void EmitCsMimg(Translator& t,
         t.SetVgF(vdata + out++, mix(top, bot, wy));
       }
     }
+  } else if (atomic) {
+    // GLC returns the pre-op value into VDATA. Device scope, like MUBUF.
+    const bool glc = (w >> 13) & 1;
+    const Id ptr = CsSsboPtr(t, sc, binding, dword_idx);
+    const Id scope = t.U32(static_cast<u32>(spv::Scope::Device));
+    const Id relaxed = t.U32(0);
+    const Id src = t.Vg(vdata);
+    Id old_value = 0;
+    const auto rmw = [&](spv::Op a) {
+      old_value = t.m.Emit(a, t.t_u, {ptr, scope, relaxed, src});
+    };
+    switch (op) {
+      case 0x0f: rmw(spv::Op::OpAtomicExchange); break;
+      case 0x10:  // cmpswap: vdata = new value, vdata+1 = comparand
+        old_value = t.m.Emit(spv::Op::OpAtomicCompareExchange, t.t_u,
+                             {ptr, scope, relaxed, relaxed, src,
+                              t.Vg(vdata + 1)});
+        break;
+      case 0x11: rmw(spv::Op::OpAtomicIAdd); break;
+      case 0x12: rmw(spv::Op::OpAtomicISub); break;
+      case 0x14: rmw(spv::Op::OpAtomicSMin); break;
+      case 0x15: rmw(spv::Op::OpAtomicUMin); break;
+      case 0x16: rmw(spv::Op::OpAtomicSMax); break;
+      case 0x17: rmw(spv::Op::OpAtomicUMax); break;
+      case 0x18: rmw(spv::Op::OpAtomicAnd); break;
+      case 0x19: rmw(spv::Op::OpAtomicOr); break;
+      case 0x1a: rmw(spv::Op::OpAtomicXor); break;
+      default:
+        WarnUnsupported("mimg.atomic", op, w, w1);
+        sc.cs_unsupported = true;
+        break;
+    }
+    if (glc && old_value)
+      t.SetVg(vdata, old_value);
   } else {
     const auto store_byte = [&](u32 reg) {
       const Id value = t.Vg(reg);

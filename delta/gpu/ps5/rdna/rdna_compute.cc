@@ -105,6 +105,17 @@ bool CsMimgSupported(u32 op) {
     case 0x01:  // image_load_mip
     case 0x08:  // image_store
     case 0x09:  // image_store_mip
+    case 0x0f:  // image_atomic_swap .. image_atomic_xor
+    case 0x10:
+    case 0x11:
+    case 0x12:
+    case 0x14:
+    case 0x15:
+    case 0x16:
+    case 0x17:
+    case 0x18:
+    case 0x19:
+    case 0x1a:
     case 0x24:  // image_sample_l
     case 0x27:  // image_sample_lz
     case 0x2c:  // image_sample_c_l
@@ -280,7 +291,8 @@ bool PlanResources(const Program& program,
         const u32 srsrc = ((w1 >> 16) & 0x1F) * 4;
         if (op == 0x0e)
           break;  // get_resinfo reads only descriptor SGPRs
-        const bool store = op == 0x08 || op == 0x09;
+        const bool store =
+            op == 0x08 || op == 0x09 || (op >= 0x0f && op <= 0x1a);
         if (!CsMimgSupported(op) || ((w >> 15) & 1) || srsrc + 7 >= 136) {
           gpu::gcn::WarnUnsupported("mimg.cs.rdna", inst.opcode, w, w1);
           return false;
