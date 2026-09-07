@@ -463,6 +463,22 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
   // per-format unpack in ColorTargetClearValue. Clearing to zero regardless
   // turns P.T.'s opaque white and opaque black clears into transparent black,
   // which is a hole in a deferred composite.
+  // CB_COLOR_CONTROL.MODE 2..6 are CMASK/FMASK/DCC operations on the bound
+  // targets -- eliminate fast clear, resolve, decompress: fullscreen passes
+  // that rewrite a compressed surface in place, with no colour export of
+  // their own. Our targets are never compressed, so the surface already is
+  // what they would produce, and rasterising one writes undefined colour over
+  // it. Astro Bot decompresses its scene target right before the G-buffer
+  // pass and its motion vectors right after, and both came out zero.
+  {
+    const u32 cb_mode = (d.color_control >> 4) & 7u;
+    if (cb_mode >= 2 && cb_mode <= 6) {
+      WhyDrop(d, "cb-metadata-pass");
+      g_frame.draws++;
+      return true;
+    }
+  }
+
   if (d.is_clear_rect) {
     // ...but a RECT_LIST with no pixel shader is ALSO the shape of the CB
     // metadata passes, and those are the opposite of a clear: they preserve
