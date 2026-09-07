@@ -35,6 +35,12 @@
 
 namespace {
 DELTA_OPTION(bool, kNoCopy, "DELTA_GPU_NODMACOPY", false);
+// DELTA_AGC_MEMWATCH=<addr>: report every CP-side write that lands on the
+// 64 KiB page holding that address -- WRITE_DATA, DMA copies and fills,
+// ATOMIC_MEM. The frame capture records none of those, so a value that
+// changes between two draws with no dispatch naming it is invisible
+// otherwise.
+DELTA_OPTION(u64, kMemWatch, "DELTA_AGC_MEMWATCH", 0);
 // Report every fence label written into the window after this address. A
 // consumer stuck one count short of its target is the readable half of a
 // missing submit, and the label is the only place that count exists.
@@ -51,6 +57,11 @@ namespace {
 // The register file is the state of one GPU: two submit threads walking it
 // concurrently would interleave one draw's registers with another's.
 std::mutex g_mutex;
+
+bool MemWatchHit(u64 base, u64 bytes) {
+  const u64 w = kMemWatch;
+  return w && base < ((w | 0xFFFF) + 1) && (w & ~0xFFFFull) < base + bytes;
+}
 
 // A waitOnAddress the memory does not satisfy yet stalls the QUEUE it sits
 // in, exactly as the command processor would: the ring walk stops at the
@@ -210,6 +221,10 @@ void HandleDmaData(rhi::Renderer& renderer, const u32* body, u32 count) {
   const u32 bytes = body[5] & 0x1FFFFF;
   const bool src_is_memory = src_sel == 0 || src_sel == 3;
   const bool dst_is_memory = dst_sel == 0 || dst_sel == 3;
+  if (MemWatchHit(dst, bytes))
+    BASE_LOGI("memwatch",
+              "DMA_DATA control={:#x} src={:#x} dst={:#x} bytes={}",
+              control, (unsigned long)src, (unsigned long)dst, bytes);
   // The sel bits report "memory" even for GDS/register targets, which are not
   // mapped in our address space and would segfault; every real guest
   // allocation sits far above 16 MiB.
@@ -280,6 +295,9 @@ void HandleAtomicMem(const u32* body, u32 count) {
   const u64 cmp = (static_cast<u64>(body[6]) << 32) | body[5];
   const bool wide = (op & 0x20) != 0;
   const u32 base_op = op & ~0x60u;  // strip the no-return and 64-bit bits
+  if (MemWatchHit(address, wide ? 8 : 4))
+    BASE_LOGI("memwatch", "ATOMIC_MEM op={} {:#x} src={:#x}", op,
+              (unsigned long)address, (unsigned long)src);
   if (!IsLabelAddress(address) || (address & (wide ? 7 : 3)) ||
       !gpu::IsReadableRange(address, wide ? 8 : 4)) {
     static int n = 0;
@@ -415,6 +433,10 @@ void HandleWriteData(const u32* body, u32 count) {
   const u64 address =
       (static_cast<u64>(body[2] & 0xFFFF) << 32) | (body[1] & ~0x3u);
   const u32 dwords = count - 3;
+  if (MemWatchHit(address, static_cast<u64>(dwords) * 4))
+    BASE_LOGI("memwatch", "WRITE_DATA {:#x} {} dwords: {:08x} {:08x}",
+              (unsigned long)address, dwords, body[3],
+              dwords > 1 ? body[4] : 0u);
   if (IsLabelAddress(address) &&
       IsLabelAddress(address + static_cast<u64>(dwords) * 4))
     std::memcpy(reinterpret_cast<void*>(address), &body[3],
