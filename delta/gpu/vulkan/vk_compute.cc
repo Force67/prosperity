@@ -2365,10 +2365,15 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
         ci.res[i].guest_size ? ci.res[i].guest_size : ci.res[i].size;
     // A read overlapping some OTHER dirty range must see that data through
     // guest memory: flush those first.
+    // A range whose writeback cannot be produced (an image the retiler
+    // does not handle) stays stale whatever happens next; declining THIS
+    // dispatch over it only loses a second result. Only a dead device stops
+    // the recording.
     for (u64 dirty : DirtyRangesOverlapping(base, guest_bytes, base)) {
       auto found = g_cs_ranges.find(dirty);
-      if (found != g_cs_ranges.end() && !CsRangeFlushOne(dirty, found->second))
-        return false;
+      if (found != g_cs_ranges.end() &&
+          !CsRangeFlushOne(dirty, found->second) && g_cs_failed)
+        return CsDeclined(ci, "11");
     }
     CsRange& e = g_cs_ranges[base];
     const bool same_shape = e.buf && e.size == static_cast<u64>(sz[i]) &&
