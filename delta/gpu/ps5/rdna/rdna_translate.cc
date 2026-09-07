@@ -512,6 +512,9 @@ bool RdnaEmitVop3Int(Translator& t,
     case 0x11E:
       t.SetVg(vdst, t.Not(t.Xor(s0, s1)));
       return true;  // VOP3-form v_xnor_b32
+    case 0x345:
+      t.SetVg(vdst, t.Add(t.Xor(s0, s1), s2));
+      return true;  // v_xad_u32
     case 0x346:
       t.SetVg(vdst, t.Add(t.Shl(s0, s1), s2));
       return true;  // v_lshl_add_u32
@@ -2057,6 +2060,35 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
     }
     case Enc::kVop3p: {
       const u32 op = inst.opcode, vdst = w & 0xFF;
+      if (op == 0x20) {  // v_fma_mix_f32
+        // MIX uses OP_SEL_HI to select f16 versus f32 independently for
+        // each source. OP_SEL selects the half only for an f16 input.
+        // NEG_HI is repurposed as ABS; NEG_LO still negates after ABS.
+        const u32 half_input = ((w1 >> 27) & 3) | ((w >> 12) & 4);
+        const u32 half_select = (w >> 11) & 7;
+        const u32 abs = (w >> 8) & 7, neg = (w1 >> 29) & 7;
+        Id source[3];
+        for (u32 i = 0; i < 3; i++) {
+          const u32 field = (w1 >> (i * 9)) & 0x1ff;
+          if (half_input & (1u << i)) {
+            const Id pair = t.m.ExtInst(t.t_v2, GLSLstd450UnpackHalf2x16,
+                                         {RdnaF16Bits(t, field, inst.literal)});
+            source[i] = t.m.CompositeExtract(t.t_f, pair, (half_select >> i) & 1);
+          } else {
+            source[i] = t.SrcF(field, inst.literal);
+          }
+          if (abs & (1u << i))
+            source[i] = t.m.ExtInst(t.t_f, GLSLstd450FAbs, {source[i]});
+          if (neg & (1u << i))
+            source[i] = t.m.Emit(spv::Op::OpFNegate, t.t_f, {source[i]});
+        }
+        Id result = t.m.ExtInst(t.t_f, GLSLstd450Fma,
+                                {source[0], source[1], source[2]});
+        if (w & (1u << 15))
+          result = t.FClamp01(result);
+        t.SetVgF(vdst, result);
+        break;
+      }
       // Componentwise packed operations select each source's low half for the
       // low result and high half for the high result.
       if ((w & 0x0000FF00u) != 0x00004000u ||
