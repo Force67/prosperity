@@ -9,6 +9,7 @@
 #include "gpu/rhi/renderer.h"
 #include "gpu/vulkan/vk_debug.h"
 #include "gpu/vulkan/vk_device.h"
+#include "gpu/guest_memory.h"
 #include "gpu/vulkan/vk_format.h"
 #include "gpu/vulkan/vk_frame.h"
 #include "gpu/vulkan/vk_texture_cache.h"
@@ -931,6 +932,128 @@ u64 ResolveSampledDepth(u64 addr, u32 w, u32 h) {
   return best;
 }
 
+void NoteDccWrite(u64 base, u64 bytes, const u32* fill) {
+  if (!base || !bytes)
+    return;
+  const auto note = [&](RTarget& rt) {
+    if (!rt.dcc_base || rt.dcc_base < base || rt.dcc_base >= base + bytes)
+      return;
+    rt.dcc_clear_pending = true;
+    rt.dcc_code_known = fill != nullptr;
+    rt.dcc_clear_code = fill ? *fill : 0;
+  };
+  for (auto& kv : g_rts) {
+    note(kv.second);
+    auto v = g_rt_variants.find(kv.first);
+    if (v == g_rt_variants.end())
+      continue;
+    for (RTarget& alt : v->second)
+      note(alt);
+  }
+  const auto note_depth = [&](DepthTarget& dt) {
+    if (!dt.htile_base || dt.htile_base < base || dt.htile_base >= base + bytes)
+      return;
+    dt.htile_clear_pending = true;
+    dt.htile_code_known = fill != nullptr;
+    dt.htile_clear_code = fill ? *fill : 0;
+  };
+  for (auto& kv : g_depths) {
+    note_depth(kv.second);
+    auto v = g_depth_variants.find(kv.first);
+    if (v == g_depth_variants.end())
+      continue;
+    for (DepthTarget& alt : v->second)
+      note_depth(alt);
+  }
+}
+
+// The depth counterpart of ResolveDccClear. HTILE's low nibble is ZMASK:
+// 0 and 13 are the clear states (a title fills 0 or 0xfffffff0), 0xF is an
+// expanded tile, the rest are partially compressed tiles no fill produces.
+void ResolveHtileClear(DepthTarget& dt, u64 base, float depth_clear) {
+  dt.htile_clear_pending = false;
+  u32 code = dt.htile_clear_code;
+  if (!dt.htile_code_known) {
+    rhi::FlushCsWritesRange(rhi::DefaultRenderer(), dt.htile_base, 4);
+    if (!gpu::IsReadableRange(dt.htile_base, 4))
+      return;
+    std::memcpy(&code, reinterpret_cast<const void*>(dt.htile_base), 4);
+  }
+  const u32 zmask = code & 0xF;
+  const bool clear = zmask == 0 || zmask == 13;
+  if (clear) {
+    dt.clear_pending = true;
+    dt.clear_value = depth_clear;
+  }
+  if (kClearTrace) {
+    static int n = 0;
+    if (n++ < kClearTrace)
+      BASE_LOGI("clear",
+                "f{} draw#{} depth {:#x} {}x{} HTILE {:#x} code={:08x} -> {}",
+                g_frame.num, g_frame.draws, (unsigned long)base, dt.w, dt.h,
+                (unsigned long)dt.htile_base, code,
+                clear ? "clear" : "not a clear");
+  }
+}
+
+// The DCC clear codes (gfx8..gfx10): four fixed colours, one that names
+// CB_COLORn_CLEAR_WORD0/1, and "uncompressed", which is not a clear.
+bool DccClearColor(u32 code,
+                   u32 info,
+                   const u32* clear_word,
+                   VkClearColorValue& out) {
+  switch (code) {
+    case 0x00000000:
+      out = VkClearColorValue{{0.f, 0.f, 0.f, 0.f}};
+      return true;
+    case 0x40404040:
+      out = VkClearColorValue{{0.f, 0.f, 0.f, 1.f}};
+      return true;
+    case 0x80808080:
+      out = VkClearColorValue{{1.f, 1.f, 1.f, 0.f}};
+      return true;
+    case 0xC0C0C0C0:
+      out = VkClearColorValue{{1.f, 1.f, 1.f, 1.f}};
+      return true;
+    case 0x20202020:
+      if (!clear_word)
+        return false;
+      out = ColorTargetClearValue(info, clear_word[0], clear_word[1]);
+      return true;
+    default:
+      return false;
+  }
+}
+
+// A pending DCC write is about to be followed by a draw into the target:
+// find out what it wrote and make it the target's clear.
+void ResolveDccClear(RTarget& rt, u64 base, u32 info, const u32* clear_word) {
+  rt.dcc_clear_pending = false;
+  u32 code = rt.dcc_clear_code;
+  if (!rt.dcc_code_known) {
+    rhi::FlushCsWritesRange(rhi::DefaultRenderer(), rt.dcc_base, 4);
+    if (!gpu::IsReadableRange(rt.dcc_base, 4))
+      return;
+    std::memcpy(&code, reinterpret_cast<const void*>(rt.dcc_base), 4);
+  }
+  VkClearColorValue value;
+  const bool clear = DccClearColor(code, info, clear_word, value);
+  if (clear) {
+    rt.clear_pending = true;
+    rt.clear_value = value;
+    rt.clear_src = "dcc-clear";
+  }
+  if (kClearTrace) {
+    static int n = 0;
+    if (n++ < kClearTrace)
+      BASE_LOGI("clear",
+                "f{} draw#{} RT {:#x} {}x{} DCC {:#x} code={:08x} -> {}",
+                g_frame.num, g_frame.draws, (unsigned long)base, rt.w, rt.h,
+                (unsigned long)rt.dcc_base, code,
+                clear ? "clear" : "not a clear");
+  }
+}
+
 // End the current dynamic-rendering region. Attachments remain in attachment
 // layouts until an actual sampled/transfer consumer requests a transition.
 void EndRegion() {
@@ -994,7 +1117,10 @@ bool BeginRegion(const u64* mrt_base,
                  u32 depth_w,
                  u32 depth_h,
                  const u32* mrt_surf_w,
-                 const u32* mrt_surf_h) {
+                 const u32* mrt_surf_h,
+                 const u64* mrt_dcc_base,
+                 const u32 (*mrt_clear_word)[2],
+                 u64 depth_htile_base) {
   ScopeNs _region_timer(&g_ns_region);
   // DELTA_GPU_QCHECK also gates this path: a checkpoint that fails here names
   // the DRAWS that ran before this region as the device loss, which is the
@@ -1024,6 +1150,11 @@ bool BeginRegion(const u64* mrt_base,
     targets[i] = GetRT(mrt_base[i], iw, ih, ColorTargetFormat(mrt_info[i]));
     if (!targets[i])
       return false;
+    if (targets[i]->dcc_clear_pending)
+      ResolveDccClear(*targets[i], mrt_base[i], mrt_info[i],
+                      mrt_clear_word ? mrt_clear_word[i] : nullptr);
+    if (mrt_dcc_base && mrt_dcc_base[i])
+      targets[i]->dcc_base = mrt_dcc_base[i];
     g_region.cur_fmt[i] = ColorTargetFormat(mrt_info[i]);
     g_region.cur_w[i] = iw;
     g_region.cur_h[i] = ih;
@@ -1145,7 +1276,12 @@ bool BeginRegion(const u64* mrt_base,
                 (unsigned long)depth_base);
   }
   if (dt) {
-    const bool clear_depth = dt->clear_pending || !dt->used_this_frame;
+    if (depth_htile_base)
+      dt->htile_base = depth_htile_base;
+    if (dt->htile_clear_pending)
+      ResolveHtileClear(*dt, depth_base, depth_clear);
+    const bool clear_depth =
+        dt->clear_pending || (!dt->used_this_frame && !dt->htile_base);
     // Async compute is currently serialized ahead of the next graphics frame.
     // Keep this frame's scene depth in its persistent CS range before a later
     // pass clears the shared depth image, or next frame's compute sees zero.
@@ -1289,6 +1425,7 @@ void NoteMemoryFill(Renderer& renderer,
     return;
   if (trace::Recording())
     trace::RecordMemoryFill(base, bytes, value);
+  NoteDccWrite(base, bytes, &value);
   const u64 end = base + bytes;
   const auto note = [&](RTarget& rt, u64 rt_base) {
     const u64 rt_end = rt_base + RtByteSize(rt);

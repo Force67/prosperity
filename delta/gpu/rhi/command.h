@@ -203,6 +203,9 @@ struct DrawInfo {
   // titles leave depth_base 0 (DB_Z_INFO format invalid), so no depth
   // attachment is bound (unchanged path).
   u64 depth_base = 0;
+  // DB_HTILE_DATA_BASE: the depth surface's compression metadata. A write
+  // over it is the depth fast clear (see NoteDccWrite).
+  u64 depth_htile_base = 0;
   bool depth_valid = false;         // DB_Z_INFO format != 0
   bool depth_test_enable = false;   // DB_DEPTH_CONTROL Z_ENABLE
   bool depth_write_enable = false;  // DB_DEPTH_CONTROL Z_WRITE_ENABLE
@@ -261,6 +264,10 @@ struct DrawInfo {
   u32 clear_window_tl = 0, clear_window_br = 0;
   u32 clear_screen_tl = 0, clear_screen_br = 0;
   u32 mrt_clear_word[8][2] = {};
+  // CB_COLORn_DCC_BASE: where each target's compression metadata lives. A
+  // title clears a compressed target by writing a clear code over this, not
+  // by touching the pixels (see NoteDccWrite).
+  u64 mrt_dcc_base[8] = {};
 
   // Primitive-setup: raster topology + face culling, from VGT_PRIMITIVE_TYPE
   // and PA_SU_SC_MODE_CNTL. 2D titles draw triangle lists with no culling

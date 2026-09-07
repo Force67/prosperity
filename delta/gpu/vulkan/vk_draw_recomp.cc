@@ -1348,7 +1348,8 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
     if (!BeginRegion(d.mrt_base, d.mrt_info, mrt_n, d.rt_w, d.rt_h,
                       d.depth_base, d.depth_clear, d.stencil_base,
                       d.stencil_clear, samples_bound_depth, DepthW(d),
-                      DepthH(d), d.mrt_surf_w, d.mrt_surf_h))
+                      DepthH(d), d.mrt_surf_w, d.mrt_surf_h, d.mrt_dcc_base,
+                      d.mrt_clear_word, d.depth_htile_base))
       return true;
   }
   // DB_RENDER_CONTROL clear. The guest issues a RECT_LIST with no vertex

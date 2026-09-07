@@ -87,6 +87,14 @@ struct RTarget {
   // for every bit that is clear, which is indistinguishable in the output from
   // a buffer that is genuinely zero -- so it has to be reported.
   u32 last_rawbuf_mask = 0;
+  // CB_COLORn_DCC_BASE of the last draw that bound this target: the
+  // compression metadata a fast clear writes instead of the pixels. A write
+  // over it (NoteDccWrite) is turned into the lazy clear at the next bind,
+  // when the code it wrote can be read back.
+  u64 dcc_base = 0;
+  bool dcc_clear_pending = false;
+  bool dcc_code_known = false;  // an immediate fill carried its value
+  u32 dcc_clear_code = 0;
 };
 
 // The live target at each guest address. An address the guest renders to at
@@ -131,6 +139,16 @@ struct DepthTarget {
   bool stencil_used_this_frame = false;
   bool clear_pending = false;
   float clear_value = 1.0f;
+  // DB_HTILE_DATA_BASE of the last draw that bound this target, and whether
+  // something wrote over it since (the depth fast clear, see NoteDccWrite).
+  // A target with a known HTILE base is cleared by those writes alone, not
+  // on its first bind of every frame: the guest's frame does not line up with
+  // ours, and Astro Bot's depth prepass lands in the frame before the one
+  // that tests against it.
+  u64 htile_base = 0;
+  bool htile_clear_pending = false;
+  bool htile_code_known = false;
+  u32 htile_clear_code = 0;
 };
 
 extern std::unordered_map<u64, DepthTarget>& g_depths;
@@ -193,6 +211,14 @@ VkImageView StencilSampledView(DepthTarget& depth);
 // same-frame clear destroys it. No-op when no compute range aliases the target.
 bool PreserveCsDepthBeforeClear(u64 base);
 
+// A write of `bytes` at `base` by a dispatch or a CP DMA fill. If it covers a
+// live target's DCC metadata it is that target's fast clear: the hardware
+// reads the clear code out of the metadata and never touches the pixels, so
+// nothing else in the stream says the target was cleared. `fill` is the dword
+// written when the packet carries it; a compute write is read back at the
+// next bind.
+void NoteDccWrite(u64 base, u64 bytes, const u32* fill);
+
 // The open dynamic-rendering region, and which targets the frame has touched.
 struct RenderRegion {
   u64 cur_rt = 0;        // primary RT (MRT0) of the open region (0 = none)
@@ -230,7 +256,10 @@ bool BeginRegion(const u64* mrt_base,
                   u32 depth_w = 0,
                   u32 depth_h = 0,
                   const u32* mrt_surf_w = nullptr,
-                  const u32* mrt_surf_h = nullptr);
+                  const u32* mrt_surf_h = nullptr,
+                  const u64* mrt_dcc_base = nullptr,
+                  const u32 (*mrt_clear_word)[2] = nullptr,
+                  u64 depth_htile_base = 0);
 
 // The extent an attachment's image needs: its own surface geometry when that is
 // believable, else the region the pass draws into.

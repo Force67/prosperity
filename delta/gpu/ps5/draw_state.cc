@@ -256,6 +256,20 @@ void ResolveRenderTargets(const Regs& regs, rhi::DrawInfo& d) {
       // full-size passes never see.
       d.mrt_surf_w[rt] = SurfaceDim(regs, rt, true);
       d.mrt_surf_h[rt] = SurfaceDim(regs, rt, false);
+      d.mrt_clear_word[rt][0] =
+          regs[mmCB_COLOR0_CLEAR_WORD0 + rt * kCbColorStride];
+      d.mrt_clear_word[rt][1] =
+          regs[mmCB_COLOR0_CLEAR_WORD1 + rt * kCbColorStride];
+      // INFO.DCC_ENABLE[28]: without it the DCC base is whatever was last
+      // programmed and a write over it means nothing for this target.
+      if ((info >> 28) & 1u) {
+        const u64 dcc =
+            ((static_cast<u64>(regs[mmCB_COLOR0_DCC_BASE_EXT + rt]) << 32) |
+             regs[mmCB_COLOR0_DCC_BASE + rt * kCbColorStride])
+            << 8;
+        if (IsGuestAddress(dcc))
+          d.mrt_dcc_base[rt] = dcc;
+      }
     }
   }
   d.rt_base = d.mrt_count ? d.mrt_base[0] : 0;
@@ -328,6 +342,12 @@ void ResolveDepthState(const Regs& regs, rhi::DrawInfo& d) {
     return;
   }
   d.depth_base = z_base;
+  const u64 htile =
+      ((static_cast<u64>(regs[mmDB_HTILE_DATA_BASE_HI]) << 32) |
+       regs[mmDB_HTILE_DATA_BASE])
+      << 8;
+  if (IsGuestAddress(htile))
+    d.depth_htile_base = htile;
   d.depth_test_enable = (control >> 1) & 1u;
   d.depth_write_enable = (control >> 2) & 1u;
   d.depth_func = (control >> 4) & 0x7;

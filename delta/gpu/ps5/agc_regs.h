@@ -43,6 +43,12 @@ constexpr u32 mmCB_COLOR0_INFO =
 constexpr u32 mmCB_COLOR0_ATTRIB =
     0xA31D;  // NUM_SAMPLES[14:12], NUM_FRAGMENTS[16:15]
 constexpr u32 kCbColorStride = 0xF;
+// The fast-clear colour, in the target's own format, and the DCC metadata
+// the target is compressed with (base << 8, high bits in _DCC_BASE_EXT).
+constexpr u32 mmCB_COLOR0_CLEAR_WORD0 = 0xA323;
+constexpr u32 mmCB_COLOR0_CLEAR_WORD1 = 0xA324;
+constexpr u32 mmCB_COLOR0_DCC_BASE = 0xA325;
+constexpr u32 mmCB_COLOR0_DCC_BASE_EXT = 0xA3A8;
 // gfx10 64-bit high-bit extension registers (stride 1 across the 8 slots).
 constexpr u32 mmCB_COLOR0_BASE_EXT = 0xA390;  // high bits of the RT base
 constexpr u32 mmCB_COLOR0_ATTRIB2 =
@@ -89,6 +95,10 @@ constexpr u32 mmDB_Z_READ_BASE = 0xA012;
 constexpr u32 mmDB_Z_WRITE_BASE = 0xA014;
 constexpr u32 mmDB_Z_READ_BASE_HI = 0xA01A;
 constexpr u32 mmDB_Z_WRITE_BASE_HI = 0xA01C;
+// The depth surface's HTILE metadata (base << 8): a title fast-clears depth
+// by filling this, not the Z plane.
+constexpr u32 mmDB_HTILE_DATA_BASE = 0xA005;
+constexpr u32 mmDB_HTILE_DATA_BASE_HI = 0xA01E;
 // Fast-clear depth value (float) used when the buffer is bound with
 // loadOp=CLEAR.
 constexpr u32 mmDB_DEPTH_CLEAR = 0xA00B;
