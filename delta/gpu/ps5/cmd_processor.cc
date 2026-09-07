@@ -14,6 +14,7 @@
 #include <cstring>
 #include <map>
 #include <mutex>
+#include <type_traits>
 
 #include <base/logging.h>
 #include <utl/options.h>
@@ -239,6 +240,103 @@ void HandleDmaData(rhi::Renderer& renderer, const u32* body, u32 count) {
 }
 
 // body: control, dstLo, dstHi, data...
+// ATOMIC_MEM: one GL2 atomic on guest memory, issued by the CP. body:
+// [op/command, addrLo, addrHi, srcLo, srcHi, cmpLo, cmpHi, loopInterval].
+// The op numbers are sce::Agc::AtomicMemOp: 1..57 return the pre-op value,
+// 65..121 are the same ops without a return, +32 selects 64-bit. Our submit
+// runs to completion, so the "wait for confirm" commands need nothing, and a
+// kLoop compare-swap that would spin on another agent has already been
+// satisfied. The AGC driver stores a 64-bit 1 into its system block this way
+// once per submit (op 103 kSwap64), which nothing else ever wrote.
+template <typename T>
+T AtomicMemOp(u32 op, T dst, T src, T cmp) {
+  using S = std::make_signed_t<T>;
+  switch (op) {
+    case 1: case 9:  // fcmpswap: compare as floats
+      return dst == cmp ? src : dst;
+    case 2: case 10: case 17:  // fmin, smin (a float compares as a signed int)
+      return static_cast<S>(src) < static_cast<S>(dst) ? src : dst;
+    case 3: case 11: case 19:
+      return static_cast<S>(src) > static_cast<S>(dst) ? src : dst;
+    case 7: return src;
+    case 8: return dst == cmp ? src : dst;
+    case 15: return dst + src;
+    case 16: return dst - src;
+    case 21: return dst & src;
+    case 22: return dst | src;
+    case 23: return dst ^ src;
+    case 24: return dst >= src ? T(0) : dst + 1;
+    case 25: return (dst == 0 || dst > src) ? src : dst - 1;
+    default: return dst;
+  }
+}
+
+void HandleAtomicMem(const u32* body, u32 count) {
+  if (count < 7)
+    return;
+  const u32 op = body[0] & 0x7F;
+  const u64 address = (static_cast<u64>(body[2] & 0xFFFF) << 32) | body[1];
+  const u64 src = (static_cast<u64>(body[4]) << 32) | body[3];
+  const u64 cmp = (static_cast<u64>(body[6]) << 32) | body[5];
+  const bool wide = (op & 0x20) != 0;
+  const u32 base_op = op & ~0x60u;  // strip the no-return and 64-bit bits
+  if (!IsLabelAddress(address) || (address & (wide ? 7 : 3)) ||
+      !gpu::IsReadableRange(address, wide ? 8 : 4)) {
+    static int n = 0;
+    if (n++ < 4)
+      BASE_LOGW("agc", "ATOMIC_MEM op={} at {:#x}: not guest memory", op,
+                address);
+    return;
+  }
+  // umin/umax (18/20) compare unsigned, everything else goes through the
+  // table.
+  if (wide) {
+    auto* p = reinterpret_cast<volatile u64*>(address);
+    const u64 dst = *p;
+    u64 r;
+    if (base_op == 18) r = src < dst ? src : dst;
+    else if (base_op == 20) r = src > dst ? src : dst;
+    else r = AtomicMemOp<u64>(base_op, dst, src, cmp);
+    *p = r;
+  } else {
+    auto* p = reinterpret_cast<volatile u32*>(address);
+    const u32 dst = *p;
+    const u32 s32 = static_cast<u32>(src), c32 = static_cast<u32>(cmp);
+    u32 r;
+    if (base_op == 18) r = s32 < dst ? s32 : dst;
+    else if (base_op == 20) r = s32 > dst ? s32 : dst;
+    else r = AtomicMemOp<u32>(base_op, dst, s32, c32);
+    *p = r;
+  }
+}
+
+// CLEAR_STATE carries sce::Agc::ContextStateOperation in body[0]: 0 resets
+// the context registers to their defaults, 1 saves them, 2 restores the saved
+// copy, 3 saves and resets. The driver brackets its own state with a push/pop
+// pair, so without the restore whatever it programmed in between leaked into
+// the title's next draws. The defaults table is not modelled: a clear leaves
+// the file as it is.
+void HandleClearState(const u32* body, u32 count) {
+  if (count < 1)
+    return;
+  const u32 cmd = body[0] & 0x3;
+  if (cmd == 1 || cmd == 3) {
+    std::memcpy(g_queue->pushed_context.data(), g_queue->regs.At(kContextRegBase),
+                g_queue->pushed_context.size() * sizeof(u32));
+    g_queue->context_pushed = true;
+  } else if (cmd == 2 && g_queue->context_pushed) {
+    std::memcpy(&g_queue->regs[kContextRegBase], g_queue->pushed_context.data(),
+                g_queue->pushed_context.size() * sizeof(u32));
+    g_queue->context_pushed = false;
+  }
+  if (cmd == 0 || cmd == 3) {
+    static int n = 0;
+    if (n++ < 2)
+      BASE_LOGI("agc", "CLEAR_STATE cmd={}: context defaults not modelled",
+                cmd);
+  }
+}
+
 // waitOnAddress (0x3c: 32-bit, 6 dwords; 0x93: 64-bit, 8 dwords). body[0]
 // carries the compare function in [2:0] (0 always, 1 <, 2 <=, 3 ==, 4 !=,
 // 5 >=, 6 >), the poll address follows, then reference and mask.
@@ -827,6 +925,16 @@ u32 Walk(rhi::Renderer& renderer,
           i += skip;  // the guarded block did not run on the real CP either
         break;
       }
+      case 0x1e:  // ATOMIC_MEM
+        HandleAtomicMem(body, count);
+        break;
+      case 0x12:  // CLEAR_STATE: context push/pop/clear
+        HandleClearState(body, count);
+        break;
+      case 0x8e:  // four zero dwords after every acquireMem; no state, no
+                  // memory, no name in any table we have
+        NoteSkippedOpcode(op, "0x8e, an empty packet after acquireMem");
+        break;
       case IT_WRITE_DATA:
         HandleWriteData(body, count);
         break;
