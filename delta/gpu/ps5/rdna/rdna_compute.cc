@@ -814,12 +814,18 @@ gpu::gcn::RecompiledCs RecompileCompute(const u32* cs_code,
   // A module the translator emitted but the validator rejects is a translator
   // bug (wrong codegen, not a guest gap): always loud.
   std::string err;
-  if (!gpu::gcn::spirv::Validate(spv_bin, &err)) {
+  // Use the same content-addressed optimizer cache as graphics. Large native
+  // decoder kernels otherwise repeat legalization on every game launch.
+  const bool no_opt = NoOpt();
+  const bool valid = no_opt ? gpu::gcn::spirv::Validate(spv_bin, &err)
+                            : gpu::gcn::spirv::Finalize(spv_bin, &tmp.spirv, &err);
+  if (!valid) {
     BASE_LOGI("rdnacs", "CS invalid @{:p}: {}",
               static_cast<const void*>(cs_code), err.c_str());
     return r;
   }
-  tmp.spirv = NoOpt() ? spv_bin : gpu::gcn::spirv::Optimize(spv_bin);
+  if (no_opt)
+    tmp.spirv = spv_bin;
   if (tmp.spirv.empty())
     return r;
   tmp.ok = true;
