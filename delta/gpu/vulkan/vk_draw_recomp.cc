@@ -296,7 +296,10 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
               (unsigned long)d.vs_addr, (unsigned long)d.rt_base,
               d.mrt_count, (unsigned long)d.tex_base, d.prim_type,
               d.index_data ? d.index_count : d.vertex_count);
-  bool indexed = d.index_data && d.index_count >= 3;
+  // The primitive topology determines assembly, not whether vertices execute.
+  // Point/line draws can have fewer than three vertices, and an incomplete
+  // triangle still runs its vertex shader (which may write storage buffers).
+  bool indexed = d.index_data != nullptr;
   u32 draw_count = indexed ? d.index_count : d.vertex_count;
   if (kDrawTrace && draw_count >= 300) {
     static int n = 0;
@@ -308,7 +311,7 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
                 (unsigned long)d.tex_base, d.num_texs, d.num_vattrs,
                 d.recomp ? d.recomp->ok : 0);
   }
-  if (!d.recomp || !d.recomp->ok || draw_count < 3) {
+  if (!d.recomp || !d.recomp->ok || !draw_count) {
     // DELTA_GPU_DECLTRACE: norecomp lumps together three unrelated causes --
     // no recompiled program, a program that failed to translate, and a draw
     // whose count never made it out of the packet. Separate them, because only
@@ -321,7 +324,7 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
                   "vbufs={} vattrs={} prim={:#x} rt={:#x}",
                   !d.recomp       ? "no-program"
                   : !d.recomp->ok ? "translate-failed"
-                                  : "count<3",
+                                  : "count=0",
                   d.vertex_count, d.index_count, d.index_data, d.num_vbufs,
                   d.num_vattrs, d.prim_type, (unsigned long)d.rt_base);
     }
