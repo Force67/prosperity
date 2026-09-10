@@ -121,6 +121,29 @@ TEST(RdnaSpirv, NoColorExportDoesNotSynthesizeWhiteOutput) {
   }
 }
 
+TEST(RdnaSpirv, ReloadedDescriptorUsesItsOwnGraphicsBuffer) {
+  const u32 vs[64] = {
+      0xf4080404, 0xfa000000,  // s_load_dwordx4 s[16:19], s[8:9], 0
+      0xe0300000, 0x80040000,  // v0 = buffer A[0]
+      0xe0300004, 0x80040100,  // v1 = buffer A[1], same descriptor
+      0xf4080404, 0xfa000010,  // reload s[16:19] with buffer B's descriptor
+      0xe0300000, 0x80040200,  // v2 = buffer B[0]
+      kEndPgm};
+  const u32 values[4] = {1, 2, 3, 4};
+  const u64 a = reinterpret_cast<u64>(values);
+  const u64 b = reinterpret_cast<u64>(values + 2);
+  const u32 descriptors[8] = {u32(a), u32(a >> 32), 8, 0x21014fac,
+                              u32(b), u32(b >> 32), 8, 0x21014fac};
+  const u64 table = reinterpret_cast<u64>(descriptors);
+  const u32 user_data[32] = {u32(table), u32(table >> 32)};
+  gpu::rdna::NextProgramGeneration();
+  const auto result = gpu::rdna::Recompile(vs, nullptr, user_data, user_data);
+  ASSERT_TRUE(result.ok);
+  ASSERT_EQ(result.vs_bufs.size(), 2u);
+  EXPECT_EQ(result.vs_bufs[0].use_pc, 2u);
+  EXPECT_EQ(result.vs_bufs[1].use_pc, 8u);
+}
+
 TEST(GcnSpirv, AcceptsImplementedNeoVectorFamilies) {
   const IsaScope neo(gpu::gcn::IsaMode::kNeo);
   EXPECT_TRUE(Recompile({}));

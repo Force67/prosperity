@@ -596,18 +596,6 @@ void ResolveRawBuffers(const std::vector<gcn::ShaderBuffer>& buffers,
                        vb.base, ok ? bytes : 0);
     if (!ok)
       continue;
-    // Hand the shader the descriptor the replay walked to. A V# that arrives
-    // through an s_load is invisible to the recompiled module (descriptor
-    // loads emit nothing), so an in-shader read of the descriptor's own fields
-    // -- the STRIDE an indexed buffer_load multiplies by -- came back zero and
-    // every vertex of a draw read the same record.
-    if (it != resolved.end() && it->second.descriptor_valid &&
-        it->second.descriptor_dwords >= 4 && sb.srsrc_sgpr >= kUdBase &&
-        sb.srsrc_sgpr + 4 <= kUdBase + 16) {
-      u32* ud = vertex_stage ? d.vs_user_data : d.ps_user_data;
-      std::memcpy(&ud[sb.srsrc_sgpr - kUdBase], it->second.descriptor,
-                  4 * sizeof(u32));
-    }
     d.bufs[sb.binding] = {vb.base, static_cast<u32>(bytes)};
     d.num_bufs = std::max(d.num_bufs, sb.binding + 1);
   }

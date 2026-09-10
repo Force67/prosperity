@@ -772,6 +772,11 @@ bool RdnaPlanCbufs(const Program& program,
   std::unordered_map<u32, u64> desc_src;
   const auto version_keys = BufferVersionKeys(program);
   const auto descriptor_sgprs = VmemDescriptorSgprs(program);
+  std::unordered_set<u32> indexed_raw_descriptors;
+  for (const Inst& inst : program)
+    if (inst.enc == Enc::kMubuf && inst.opcode >= 0x08 &&
+        inst.opcode <= 0x0f && (inst.raw[0] & (1u << 13)))
+      indexed_raw_descriptors.insert(((inst.raw[1] >> 16) & 0x1f) * 4);
   u32 inst_index = 0;
   for (const Inst& inst : program) {
     const u32 producer = inst_index++;
@@ -804,7 +809,12 @@ bool RdnaPlanCbufs(const Program& program,
     // into vcc_hi -- which no cbuf binding can express, and treating it as a
     // constant buffer failed the whole shader over a load the cbuf path never
     // needed to see.
-    if (sload && descriptor_sgprs.count(sdst)) {
+    // Raw indexed loads also read STRIDE from the descriptor's SGPRs. Keep
+    // their descriptor fetch as a real uniform load, including each reload.
+    const bool raw_descriptor = std::any_of(
+        indexed_raw_descriptors.begin(), indexed_raw_descriptors.end(),
+        [&](u32 descriptor) { return Overlaps(sdst, load_count, descriptor, 4); });
+    if (sload && descriptor_sgprs.count(sdst) && !raw_descriptor) {
       InvalidateCbufDefs(loads, {sdst, load_count});
       continue;
     }
@@ -814,7 +824,7 @@ bool RdnaPlanCbufs(const Program& program,
                   inst.pc, off);
       return false;
     }
-    if (sload &&
+    if (sload && !raw_descriptor &&
         UsedAsBaseBeforeOverwrite(program, producer, sdst, load_count)) {
       InvalidateCbufDefs(loads, {sdst, load_count});
       loads[sdst] = {sbase, static_cast<u32>(off), load_count};
@@ -909,7 +919,7 @@ void NoteCbufWindows(const std::vector<ShaderCbuf>& cbufs, StageContext& sc) {
 // (decodeVBuffer(&vud[srsrc])).
 // Raw MUBUF loads (buffer_load_dword{,x2,x3,x4} and the sub-dword forms) the
 // shader indexes itself, plus every buffer_load_format the vertex-input path did
-// not lift (`claimed`). Each distinct descriptor SGPR quad becomes one set-2
+// not lift (`claimed`). Each live descriptor in an SGPR quad becomes one set-2
 // storage buffer, which the command processor resolves per draw -- a format load
 // belongs here rather than in a 64-byte UBO because its index is per-lane and
 // reaches the whole resource. The shared PlanGfxBuffers cannot be reused: its
@@ -923,6 +933,23 @@ void RdnaPlanGfxBuffers(const Program& program,
                         std::unordered_map<u32, u32>& bindings) {
   std::unordered_map<u32, u32> by_srsrc;
   for (const Inst& inst : program) {
+    // Reloading any word of a descriptor changes the resource seen by later
+    // loads. Keep earlier bindings for their original instructions, but stop
+    // reusing them after a scalar write overlaps the descriptor or raw pair.
+    const auto writes = PossibleScalarWrites(inst);
+    for (auto it = by_srsrc.begin(); it != by_srsrc.end();) {
+      const bool flat = it->first >= kFlatBaseTag;
+      const u32 first = flat ? it->first - kFlatBaseTag : it->first;
+      const u32 count = flat ? 2u : 4u;
+      bool overwritten = false;
+      for (const auto& write : writes.range)
+        overwritten |= write.count && first < write.first + write.count &&
+                       write.first < first + count;
+      if (overwritten)
+        it = by_srsrc.erase(it);
+      else
+        ++it;
+    }
     u32 srsrc;
     if (inst.enc == Enc::kFlat) {
       // A servable global_load takes the same window treatment; RdnaEmitFlat
