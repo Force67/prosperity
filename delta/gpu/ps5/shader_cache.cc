@@ -40,8 +40,8 @@ struct GraphicsKey {
   u32 ps_user_sgprs = 0;
   u32 ps_input_ena = 0;
   u32 ps_num_interp = 0;
-  // The OFFSET fields that are defined for this draw, in slot order.
-  std::array<u8, 32> ps_param_slot{};
+  // Attribute locations and passthrough interpolation mode, in slot order.
+  std::array<u16, 32> ps_param_slot{};
   bool gl_clip = false;
 
   bool operator==(const GraphicsKey& other) const = default;
@@ -55,7 +55,7 @@ struct GraphicsKeyHash {
     MixHash(h, k.ps_user_sgprs);
     MixHash(h, k.ps_input_ena);
     MixHash(h, k.ps_num_interp);
-    for (u8 slot : k.ps_param_slot)
+    for (u16 slot : k.ps_param_slot)
       MixHash(h, slot);
     h ^= k.gl_clip ? kGoldenRatio64 : 0ull;
     return static_cast<size_t>(h);
@@ -123,7 +123,7 @@ void ReportMiss(const GraphicsKey& key, const GraphicsShaderState& state,
   if (n++ >= 64)
     return;
   u64 slots = 0;
-  for (u8 s : key.ps_param_slot)
+  for (u16 s : key.ps_param_slot)
     MixHash(slots, s);
   BASE_LOGI("shmiss",
             "n={} cache={} vs={:#x}@{:#x} ps={:#x}@{:#x} fetch={:#x}@{:#x} "
@@ -131,6 +131,9 @@ void ReportMiss(const GraphicsKey& key, const GraphicsShaderState& state,
             n, cache_size, key.vs, state.vs_addr, key.ps, state.ps_addr,
             key.fetch, state.fetch_addr, key.vs_user_sgprs, key.ps_user_sgprs,
             key.ps_input_ena, key.ps_num_interp, slots, (int)key.gl_clip);
+  if (state.ps_in_cntl)
+    for (u32 i = 0; i < state.ps_num_interp && i < 32; ++i)
+      BASE_LOGI("shmiss", "  input[{}]={:#x}", i, state.ps_in_cntl[i]);
 }
 
 }  // namespace
@@ -148,7 +151,7 @@ const gcn::Recompiled& GetGraphicsShader(const GraphicsShaderState& state) {
   key.gl_clip = state.gl_clip;
   if (state.ps_in_cntl)
     for (u32 i = 0; i < state.ps_num_interp && i < 32; i++)
-      key.ps_param_slot[i] = static_cast<u8>(state.ps_in_cntl[i] & 0x1F);
+      key.ps_param_slot[i] = static_cast<u16>(state.ps_in_cntl[i] & 0x43F);
   auto it = cache.find(key);
   if (it != cache.end())
     return it->second;

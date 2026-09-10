@@ -549,7 +549,8 @@ void EmitVintrp(Translator& t, u32 w, StageContext& sc) {
   // Attributes read as P10/P20 come from the PerVertexKHR array, and every
   // read of such an attribute must, since the Location no longer carries an
   // interpolated value. VSRC selects the parameter: 0 = P10, 1 = P20,
-  // 2 = P0; P10 = P1 - P0 and P20 = P2 - P0 at the provoking vertex.
+  // 2 = P0. Normally P10/P20 are deltas, but OFFSET[5] together with
+  // FLAT_SHADE requests passthrough: all three vertices retain their raw bits.
   if (sc.pervertex_attrs.count(attr)) {
     const Id var = PsPerVertexVar(t, sc, attr);
     const Id p_in_f = t.m.TypePointer(spv::StorageClass::Input, t.t_f);
@@ -572,12 +573,14 @@ void EmitVintrp(Translator& t, u32 w, StageContext& sc) {
       return;
     }
     const u32 vsrc = w & 0xFF;
+    const bool passthrough = sc.ps_in_cntl && attr < sc.ps_num_interp &&
+                             (sc.ps_in_cntl[attr] & 0x420u) == 0x420u;
     if (vsrc == 2)
       t.SetVgF(vdst, vert(0));  // P0
     else if (vsrc == 0)
-      t.SetVgF(vdst, t.FSub(vert(1), vert(0)));  // P10
+      t.SetVgF(vdst, passthrough ? vert(1) : t.FSub(vert(1), vert(0)));  // P10
     else if (vsrc == 1)
-      t.SetVgF(vdst, t.FSub(vert(2), vert(0)));  // P20
+      t.SetVgF(vdst, passthrough ? vert(2) : t.FSub(vert(2), vert(0)));  // P20
     return;
   }
   // Attributes nothing reads as P10/P20 keep the plain interpolated input:
