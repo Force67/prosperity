@@ -63,15 +63,14 @@ constexpr u32 kCbufWindow = gpu::gcn::kCbufDwords * 4;
 constexpr u32 kCbufBindings =
     gpu::gcn::kMaxCbufBindings;  // set-1 UBO bindings
 // Raw-buffer ring: the windows a recompiled shader's hand-written MUBUF loads
-// read from, at set-2 bindings 0..kRawBufBindings-1. Four dynamic storage
-// buffers is the Vulkan floor (maxDescriptorSetStorageBuffersDynamic), so the
-// recompiler's cap matches it exactly.
+// read from, at set-2 bindings 0..kRawBufBindings-1. The device's dynamic storage
+// buffer limit determines how many bindings are available.
 // The window is a compromise the shader knows about: a MUBUF index has no
 // static bound, so a resource larger than this is staged only up to here and
 // the recompiled shader clamps, reading the window's last dword past it.
-// 128 MiB is 64 one-MiB windows a frame, and SotC's demo pegged it (RINGHWM
-// 65536K/65536K) -- a heavy cut binds more unique raw buffers (skinning
-// palettes, instance tables) than that even deduped. 512 MiB = 256 windows.
+// The allocation stays fixed as the supported window grows. Small resources
+// reserve only their aligned payload, and repeated buffers share an upload.
+// Each frame owns half the ring; its resources must fit within that half.
 constexpr VkDeviceSize kSboRing = 512ull * 1024 * 1024;
 constexpr u32 kRawBufWindow = gpu::gcn::kGfxBufferDwords * 4;
 constexpr u32 kRawBufBindings = gpu::gcn::kMaxGfxBuffers;

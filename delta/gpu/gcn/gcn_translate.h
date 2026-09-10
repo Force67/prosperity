@@ -122,7 +122,10 @@ struct ShaderCbuf {
 // whole shader down with it.
 constexpr u32 kMaxGfxBuffers = 16;
 constexpr u32 kMinGfxBuffers = 4;  // the Vulkan floor
-constexpr u32 kGfxBufferDwords = 262144;  // 1 MB
+// Astro Bot binds scene buffers up to 16 MiB. Truncating these to 1 MiB
+// loses records even when their descriptors and indices are valid. This is
+// the per-binding range; the upload ring retains its fixed total allocation.
+constexpr u32 kGfxBufferDwords = 4 * 1024 * 1024;  // 16 MiB
 
 // Planner-visible cap, in [kMinGfxBuffers, kMaxGfxBuffers].
 u32 MaxGfxBuffers();
