@@ -235,6 +235,20 @@ TEST(RdnaDecode, OrderedEndpgmAndCodeEndTerminateAppropriately) {
   EXPECT_EQ(gpu::rdna::Decode(code_end, 2, false).size(), 1u);
 }
 
+TEST(RdnaDecode, DisabledDebugBranchesDoNotReachIndirectTrapStubs) {
+  for (u32 opcode = 0x17; opcode <= 0x1a; ++opcode) {
+    const u32 code[] = {
+        (0x17fu << 23) | (opcode << 16) | 1u,
+        0xbf810000,  // normal exit
+        0xbe802100,  // debug-only s_swappc_b64 s[0:1], s[0:1]
+        0xdeadbeef}; // non-executable footer
+    const auto reachable = gpu::rdna::ReachableProgram(
+        gpu::rdna::Decode(code, std::size(code), false));
+    ASSERT_EQ(reachable.size(), 2u) << "debug opcode " << opcode;
+    EXPECT_EQ(reachable.back().raw[0], 0xbf810000u);
+  }
+}
+
 TEST(RdnaDecode, EndpgmSavedTerminatesAndCallTargetsRemainReachable) {
   const u32 saved[] = {Sopp(0x1B), Vop2(0x03)};
   EXPECT_EQ(gpu::rdna::Decode(saved, 2).size(), 1u);

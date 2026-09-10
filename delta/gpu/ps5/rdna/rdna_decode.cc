@@ -266,11 +266,16 @@ std::vector<u8> ComputeRdnaReachability(const Program& program) {
       case 0x07:
       case 0x08:
       case 0x09:
+        return 2;
       case 0x17:
       case 0x18:
       case 0x19:
       case 0x1a:
-        return 2;
+        // COND_DBG_SYS/USER are unset: the emulator does not attach a guest
+        // shader debugger. These branches fall through, matching emission.
+        // Following their debug stubs can encounter an indirect trap call
+        // and incorrectly mark the shader's name/footer as executable code.
+        return 0;
       default:
         return 0;
     }
