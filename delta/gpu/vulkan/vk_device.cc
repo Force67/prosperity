@@ -37,6 +37,9 @@ DELTA_OPTION(const char*, kVkGpu, "DELTA_VK_GPU", nullptr);
 namespace gpu::vk {
 
 namespace {
+DELTA_OPTION(bool, kCheckpoints, "DELTA_GPU_CHECKPOINTS", false);
+bool g_checkpoints_available = false;
+PFN_vkCmdSetCheckpointNV g_set_checkpoint = nullptr;
 DELTA_OPTION(bool, kShaderCacheOn, "DELTA_GPU_SHADER_CACHE", true);
 DELTA_OPTION(const char*,
              kShaderCacheDirOpt,
@@ -161,9 +164,28 @@ VkPipelineStageFlags StageForAccess(VkAccessFlags access, bool source) {
 // Ask the driver what the GPU actually faulted on (VK_EXT_device_fault).
 // Prints once per device -- every later DEVICE_LOST is collateral of the first.
 void ReportDeviceFault(DeviceState& device) {
-  if (device.device_fault_reported || !device.device_fault_available)
+  if (device.device_fault_reported)
     return;
   device.device_fault_reported = true;
+  if (g_checkpoints_available && kCheckpoints) {
+    auto get = reinterpret_cast<PFN_vkGetQueueCheckpointDataNV>(
+        vkGetDeviceProcAddr(device.device, "vkGetQueueCheckpointDataNV"));
+    if (get) {
+      u32 count = 0;
+      get(device.queue, &count, nullptr);
+      std::vector<VkCheckpointDataNV> checkpoints(
+          count, {VK_STRUCTURE_TYPE_CHECKPOINT_DATA_NV});
+      get(device.queue, &count, checkpoints.data());
+      for (const auto& checkpoint : checkpoints) {
+        const u64 marker = reinterpret_cast<uintptr_t>(checkpoint.pCheckpointMarker);
+        BASE_LOGI("gpuvk", "  checkpoint stage={:#x} frame={} draw={} {}",
+                  u32(checkpoint.stage), (marker >> 32) - 1, u32(marker) >> 1,
+                  marker & 1 ? "after" : "before");
+      }
+    }
+  }
+  if (!device.device_fault_available)
+    return;
   auto p_get_fault = (PFN_vkGetDeviceFaultInfoEXT)vkGetDeviceProcAddr(
       device.device, "vkGetDeviceFaultInfoEXT");
   if (!p_get_fault)
@@ -189,6 +211,18 @@ void ReportDeviceFault(DeviceState& device) {
     BASE_LOGI("gpuvk", "  vendor '{}' code={:#x} data={:#x}",
               v.description, (unsigned long long)v.vendorFaultCode,
               (unsigned long long)v.vendorFaultData);
+}
+
+void DrawCheckpoint(VkCommandBuffer cmd, u32 frame, u32 draw, bool after) {
+  if (!g_checkpoints_available || !kCheckpoints)
+    return;
+  if (!g_set_checkpoint)
+    g_set_checkpoint = reinterpret_cast<PFN_vkCmdSetCheckpointNV>(
+        vkGetDeviceProcAddr(g_dev.device, "vkCmdSetCheckpointNV"));
+  // Opaque integer marker: no host object lifetime or allocation is involved.
+  const uintptr_t marker = ((u64(frame) + 1) << 32) | (u64(draw) << 1) | u32(after);
+  if (g_set_checkpoint)
+    g_set_checkpoint(cmd, reinterpret_cast<const void*>(marker));
 }
 
 u32 FindMemoryType(u32 type_bits, VkMemoryPropertyFlags props) {
@@ -473,7 +507,7 @@ bool CreateDevice() {
   // VK_KHR_fragment_shader_barycentric supplies the per-vertex attribute values
   // a pixel shader needs for v_interp_mov_f32's P10/P20 parameters (the deltas
   // P1-P0 and P2-P0), which an interpolated input cannot express.
-  const char* dev_exts[3] = {};
+  const char* dev_exts[5] = {};
   u32 dev_ext_count = 0;
   {
     u32 en = 0;
@@ -482,6 +516,9 @@ bool CreateDevice() {
     vkEnumerateDeviceExtensionProperties(g_dev.phys, nullptr, &en,
                                          eprops.data());
     for (const auto& ep : eprops) {
+      if (kCheckpoints && !std::strcmp(ep.extensionName,
+              VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME))
+        g_checkpoints_available = true;
       if (!std::strcmp(ep.extensionName, VK_EXT_DEVICE_FAULT_EXTENSION_NAME))
         g_dev.device_fault_available = true;
       if (!std::strcmp(ep.extensionName,
@@ -492,6 +529,8 @@ bool CreateDevice() {
         g_dev.barycentric_available = true;
     }
   }
+  if (g_checkpoints_available)
+    dev_exts[dev_ext_count++] = VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME;
   if (g_dev.host_import_available) {
     VkPhysicalDeviceExternalMemoryHostPropertiesEXT hp{
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT};

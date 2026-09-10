@@ -1747,12 +1747,14 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
                  (unsigned long long)d.vs_addr, (unsigned long long)d.ps_addr,
                  indexed ? d.index_count : d.vertex_count,
                  indexed ? " indexed" : "");
+  DrawCheckpoint(g_frame.cmd, g_frame.num, g_frame.draws, false);
   if (indexed)
     vkCmdDrawIndexed(g_frame.cmd, d.index_count,
                      d.instance_count ? d.instance_count : 1, 0, 0, 0);
   else
     vkCmdDraw(g_frame.cmd, d.vertex_count,
               d.instance_count ? d.instance_count : 1, 0, 0);
+  DrawCheckpoint(g_frame.cmd, g_frame.num, g_frame.draws, true);
   // DELTA_GPU_DRAWSEQ=<n>: the first n draws of the run in record order, with
   // the frame they belong to -- the per-frame filters cannot show that a pass
   // and the pass that reads it landed in different frames.

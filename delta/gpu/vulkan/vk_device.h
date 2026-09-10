@@ -100,6 +100,7 @@ VkShaderModule MakeModuleVec(const std::vector<u32>& spv);
 
 // Ask the driver what the GPU actually faulted on (VK_EXT_device_fault).
 void ReportDeviceFault(DeviceState& device);
+void DrawCheckpoint(VkCommandBuffer cmd, u32 frame, u32 draw, bool after);
 
 // DELTA_GPU_QCHECK: an empty command buffer through the same queue, waited.
 // A failure names the queue work that ran BEFORE this point as the device
