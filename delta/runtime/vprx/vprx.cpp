@@ -40,6 +40,7 @@ static base::Vector<const modInfo *> vprxTablePs5;
 extern "C" int vprx_anchor_libSceVideoOut;
 // PS5 module copies (runtime/vprx/ps5/*). Separate registry (vprxTablePs5).
 extern "C" int vprx_anchor_ps5_libSceVideoOut;
+extern "C" int vprx_anchor_ps5_libSceVideodec2;
 extern "C" int vprx_anchor_ps5_libSceUserService;
 // A few libkernel exports newer SDK libc.prx builds import that firmware 01.14.00
 // doesn't export at all; the rest of libkernel stays LLE.
@@ -94,6 +95,7 @@ extern "C" int vprx_anchor_libSceSaveData;
 extern "C" int vprx_anchor_libSceSaveDataDialog;
 static volatile int *const vprx_anchors[] = {&vprx_anchor_libSceVideoOut,
                                              &vprx_anchor_ps5_libSceVideoOut,
+                                             &vprx_anchor_ps5_libSceVideodec2,
                                              &vprx_anchor_ps5_libSceUserService,
                                              &vprx_anchor_ps5_libkernel,
                                              &vprx_anchor_ps5_libSceAgcDriver,
@@ -244,6 +246,13 @@ static bool useHleShim(const char *lib, u64 hid) {
 }
 
 uintptr_t vprx_get_forced(const char *lib, u64 hid) {
+  // Keep native decoder execution available for GPU accuracy investigations.
+  static const bool native_video = [] {
+    const char* value = std::getenv("DELTA_PS5_NATIVE_VIDEO");
+    return value && std::strcmp(value, "1") == 0;
+  }();
+  if (native_video && std::strcmp(lib, "libSceVideodec2") == 0)
+    return 0;
   // PS5-only: resolve exclusively from the PS5 registry (runtime/vprx/ps5/*).
   // PS5 must NOT borrow the PS4 HLE modules -- each forced-HLE library has its own
   // full PS5 copy so behaviour can diverge safely. A miss here falls through to the

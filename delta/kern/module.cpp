@@ -826,7 +826,7 @@ bool smodule::resolveObfSymbol(const char *name, uintptr_t &ptrOut) {
     static const char *const kPs5ForcedHle[] = {
         "libSceVideoOut", "libSceUserService",   "libScePad",
         "libSceSaveData", "libSceSystemService", "libSceIme",
-        "libSceAppContent"};
+        "libSceAppContent", "libSceVideodec2"};
     auto bindHle = [&](const char *lib, uintptr_t hle) {
       char tn[64];
       std::snprintf(tn, sizeof(tn), "%s!%.11s", lib, name);

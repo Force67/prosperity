@@ -39,6 +39,7 @@
             vulkan-headers
             vulkan-loader
             sdl3
+            ffmpeg-headless # H.264 decoding behind the PS5 video API
             shaderc          # runtime GLSL -> SPIR-V for the shader recompiler
           ];
 
@@ -78,6 +79,7 @@
             vulkan-validation-layers
             mesa            # lavapipe: software Vulkan for headless testing
             sdl3
+            ffmpeg-headless
             shaderc         # runtime GLSL -> SPIR-V for the shader recompiler
             renderdocPython # frame capture: UI, CLI, and Python replay API
           ];
