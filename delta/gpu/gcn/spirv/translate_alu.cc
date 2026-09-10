@@ -774,6 +774,19 @@ void EmitSopc(Translator& t, const Inst& inst) {
       c = t.IsNonZero(t.And(t.Shr(a, b), t.U32(1)));
       break;
     }
+    case 0x12:  // RDNA s_cmp_eq_u64
+    case 0x13: {  // RDNA s_cmp_lg_u64
+      if (!t.rdna_sources) {
+        WarnUnsupported("sopc", op);
+        break;
+      }
+      const Id ahi = t.SrcRawHi(s0f, inst.literal, false);
+      const Id bhi = t.SrcRawHi(s1f, inst.literal, false);
+      const Id equal = t.LAnd(t.Eq(a, b), t.Eq(ahi, bhi));
+      c = op == 0x12 ? equal
+                     : t.m.Emit(spv::Op::OpLogicalNot, t.t_bool, {equal});
+      break;
+    }
     default:
       WarnUnsupported("sopc", op);
       break;

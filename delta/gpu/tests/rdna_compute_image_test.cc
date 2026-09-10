@@ -183,6 +183,52 @@ TEST(RdnaComputeImageConversion, Rgba16UnormLoadAndMaskedClampedStore) {
     EXPECT_EQ(output[i], expected[i]) << "dword " << i;
 }
 
+TEST(RdnaComputeAlu, Scalar64CompareUsesHighDwordAndInlineSignExtension) {
+  auto& renderer = gpu::rhi::DefaultRenderer();
+  if (!gpu::rhi::Init(renderer))
+    GTEST_SKIP() << "A Vulkan device is required for this integration test";
+  alignas(65536) static std::array<u32, 16384> output{};
+  alignas(256) static std::array<u32, 4096> code{};
+  gpu::ps5::NoteGpuPool(reinterpret_cast<u64>(output.data()), sizeof(output));
+  u32 pc_dw = 0;
+  const auto compare = [&](u32 op, u32 a, u32 b, u32 dst) {
+    code[pc_dw++] = 0xbf000000 | (op << 16) | (b << 8) | a;
+    code[pc_dw++] = 0x85108081;  // s_cselect_b32 s16, 1, 0
+    code[pc_dw++] = 0x7e000210 | (dst << 17);  // v_mov_b32 vdst, s16
+  };
+  compare(0x12, 8, 10, 4);   // same low half, different high half
+  compare(0x13, 8, 10, 5);
+  compare(0x12, 12, 193, 6);  // -1 inline is sign extended to 64 bits
+  compare(0x13, 12, 193, 7);
+  // The VCC-targeting SDWA compare must not invalidate the output T# in s0.
+  code[pc_dw++] = 0x7c041ef9; code[pc_dw++] = 0x86860080;
+  code[pc_dw++] = 0xf0200f00; code[pc_dw++] = 0x00000400;
+  code[pc_dw++] = 0xbf810000;
+  gpu::rdna::NextProgramGeneration();
+  gpu::ps5::Regs regs;
+  const u64 pc = reinterpret_cast<u64>(code.data());
+  regs[gpu::ps5::mmCOMPUTE_PGM_LO] = pc >> 8;
+  regs[gpu::ps5::mmCOMPUTE_PGM_HI] = pc >> 40;
+  regs[gpu::ps5::mmCOMPUTE_NUM_THREAD_X] = 1;
+  regs[gpu::ps5::mmCOMPUTE_NUM_THREAD_Y] = 1;
+  regs[gpu::ps5::mmCOMPUTE_NUM_THREAD_Z] = 1;
+  regs[gpu::ps5::mmCOMPUTE_PGM_RSRC2] = 16 << 1;
+  const u64 address = reinterpret_cast<u64>(output.data());
+  const u32 ud = gpu::ps5::mmCOMPUTE_USER_DATA_0;
+  regs[ud] = address >> 8;
+  regs[ud + 1] = ((address >> 40) & 0xff) | (75 << 20);
+  regs[ud + 3] = 0x80000fac;
+  regs[ud + 9] = 1;
+  regs[ud + 11] = 2;
+  regs[ud + 12] = regs[ud + 13] = 0xffffffff;
+  const u32 dispatch[] = {1, 1, 1, 1};
+  gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
+  ASSERT_TRUE(gpu::rhi::FlushCsWrites(renderer));
+  const std::array<u32, 4> expected = {0, 1, 1, 0};
+  for (u32 i = 0; i < 4; ++i)
+    EXPECT_EQ(output[i], expected[i]);
+}
+
 TEST(RdnaComputeAlu, XadUsesXorBeforeWrappingAdd) {
   auto& renderer = gpu::rhi::DefaultRenderer();
   if (!gpu::rhi::Init(renderer))

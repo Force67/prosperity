@@ -2185,6 +2185,21 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
         gpu::gcn::WarnUnsupported("vop3.opcode.rdna", op, w, w1);
         break;
       }
+      const bool integer64_compare =
+          (op >= 0xa0 && op <= 0xa7) || (op >= 0xb0 && op <= 0xb7) ||
+          (op >= 0xe0 && op <= 0xe7) || (op >= 0xf0 && op <= 0xf7);
+      if (integer64_compare) {
+        if (neg || abs || clamp || omod || op_sel) {
+          gpu::gcn::WarnUnsupported("vop3.integer-modifier", op, w, w1);
+          break;
+        }
+        gpu::gcn::EmitVopc(t, op, t.SrcF(s0, inst.literal),
+                           t.SrcF(s1, inst.literal), t.SrcRaw(s0, inst.literal),
+                           t.SrcRaw(s1, inst.literal), vdst,
+                           t.SrcRawHi(s0, inst.literal, true),
+                           t.SrcRawHi(s1, inst.literal, true));
+        break;
+      }
       const bool supported_compare = op <= 0x1F || (op >= 0x80 && op <= 0x87) ||
                                      (op >= 0x90 && op <= 0x97) ||
                                      (op >= 0xC0 && op <= 0xC7) ||
@@ -2202,6 +2217,16 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
                            t.SrcF(s1, inst.literal, neg & 2, abs & 2),
                            t.SrcRaw(s0, inst.literal),
                            t.SrcRaw(s1, inst.literal), 126);
+        break;
+      }
+      if (op == 0x178) {  // v_xor3_b32, used by the AVC decoder filters
+        if (neg || abs || clamp || omod || op_sel) {
+          gpu::gcn::WarnUnsupported("vop3.xor3-modifier", op, w, w1);
+          break;
+        }
+        t.SetVg(vdst, t.Xor(t.Xor(t.SrcRaw(s0, inst.literal),
+                                  t.SrcRaw(s1, inst.literal)),
+                            t.SrcRaw(s2, inst.literal)));
         break;
       }
       if (op == 0x16f) {

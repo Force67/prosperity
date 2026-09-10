@@ -764,6 +764,18 @@ struct ScalarEval {
         case 0x0d:
           scc = ((a >> (b & 31)) & 1) != 0;
           break;
+        case 0x12:  // s_cmp_eq_u64
+        case 0x13: {  // s_cmp_lg_u64
+          u32 a_hi, b_hi;
+          if (!SourceHi(inst.raw[0] & 0xFF, a_hi) ||
+              !SourceHi((inst.raw[0] >> 8) & 0xFF, b_hi)) {
+            scc_known = false;
+            return;
+          }
+          const bool equal = a == b && a_hi == b_hi;
+          scc = inst.opcode == 0x12 ? equal : !equal;
+          break;
+        }
         default:
           scc_known = false;
           return;
