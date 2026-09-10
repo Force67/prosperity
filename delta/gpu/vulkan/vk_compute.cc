@@ -1044,12 +1044,12 @@ bool RunAliasedCopy(const CsAliasedImage& img,
     vkFreeCommandBuffers(g_dev.device, g_dev.pool, 1, &c);
     return false;
   }
-  // Everything above prepared the HOST mirror (padding zeroed, stencil packed).
-  // A split range has to carry that to VRAM before the image copy reads it, and
-  // ahead of an image->buffer copy so the padding it does not cover is zeroed
-  // there too. The converting path copies through the scratch instead, and
-  // carries the host mirror over after it has been unpacked.
-  if (!plan.unpack)
+  // The dispatch result already lives in VRAM. An ordinary buffer->image copy
+  // must read it there, without uploading the identical host readback again.
+  // Stencil packing changes the host bytes, and image->buffer staging may have
+  // zeroed padding, so those directions still need the host preparation copy.
+  // Format conversion uses the separate scratch buffer.
+  if (!plan.unpack && (!to_image || img.is_stencil))
     RecordStagingCopy(c, e, e.cap, /*to_device=*/true);
   // Chain from -- and restore -- the SUBMITTED layout: this copy executes
   // before the current frame's still-recording barriers, whose oldLayout
