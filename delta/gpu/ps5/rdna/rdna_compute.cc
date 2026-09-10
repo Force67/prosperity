@@ -33,7 +33,7 @@ u32 ComputeCodeDwords(const u32* code) {
 namespace gpu::rdna {
 
 gpu::gcn::RecompiledCs
-RecompileCompute(const u32*, u32, u32, u32, u32, u32, u32, bool) {
+RecompileCompute(const u32*, u32, u32, u32, u32, u32, u32, bool, bool) {
   return {};  // no SPIR-V backend: the caller skips the dispatch
 }
 
@@ -603,6 +603,7 @@ bool TranslateCs(const Program& program,
                  u32 user_sgpr,
                  u32 tgid_enable,
                  u32 lds_dwords,
+                 bool wave32,
                  RecompiledCs& r,
                  Translator& t) {
   if (program.empty())
@@ -630,6 +631,7 @@ bool TranslateCs(const Program& program,
     }
 
   t.rdna_sources = true;
+  t.wave_size = wave32 ? 32 : 64;
   t.InitTypes();
   // Storage buffers: Buf { uint data[]; } at set 0, binding = resource index.
   const Id t_run = t.m.TypeRuntimeArray(t.t_u);
@@ -660,6 +662,16 @@ bool TranslateCs(const Program& program,
                  {static_cast<u32>(r.gds_binding)});
     t.m.Name(v, "gds");
     sc.gds_var = v;
+    // Counters return one pre-operation value to the entire guest wave,
+    // including when it spans two host subgroups. The CFG only enables this
+    // exchange channel at points where the whole workgroup can synchronize.
+    t.xchg_lanes = std::max(num_thread_x, 1u) *
+                   std::max(num_thread_y, 1u) * std::max(num_thread_z, 1u);
+    const Id exchange = t.m.TypeArray(t.t_u, t.xchg_lanes * 2);
+    t.xchg_var = t.m.Variable(
+        t.m.TypePointer(spv::StorageClass::Workgroup, exchange),
+        spv::StorageClass::Workgroup);
+    t.m.Name(t.xchg_var, "wave_counters");
   }
 
   // LDS: a Workgroup-storage uint array sized by RSRC2.
@@ -736,8 +748,18 @@ bool TranslateCs(const Program& program,
     t.SetSg(sg++, group_comp(2));
   for (u32 c = 0; c < 3; c++)  // local invocation id (tidig) -> v0..v2
     t.SetVg(c, t.m.Load(t.t_u, t.m.AccessChain(p_in_u, local_id, {t.U32(c)})));
-  if (sc.subgroup_local_id)
-    t.lane_id = t.m.Load(t.t_u, sc.subgroup_local_id);
+  t.lane_masks = true;
+  const Id local_index = t.Add(
+      t.Vg(0), t.Mul(t.U32(std::max(num_thread_x, 1u)),
+                    t.Add(t.Vg(1), t.Mul(t.U32(std::max(num_thread_y, 1u)),
+                                         t.Vg(2)))));
+  t.mask_lane_id = t.And(local_index, t.U32(t.wave_size - 1));
+  t.xchg_index = local_index;
+  t.wave_base = t.And(local_index, t.U32(~(t.wave_size - 1)));
+  // MBCNT and LDS add-tid address the guest wave, whose upper half can live
+  // in a second host subgroup. They also need a lane ID without any shuffle
+  // instruction in the program. Keep the host subgroup builtin for shuffles.
+  t.lane_id = t.mask_lane_id;
   t.SeedExec();
   t.predicate_vector = true;
   EmitCfg(t, program, sc);
@@ -830,7 +852,8 @@ gpu::gcn::RecompiledCs RecompileCompute(const u32* cs_code,
                                         u32 user_sgpr,
                                         u32 tgid_enable,
                                         u32 lds_dwords,
-                                        bool trap_present) {
+                                        bool trap_present,
+                                        bool wave32) {
   RecompiledCs r;
   const u32 code_dwords = ComputeCodeDwords(cs_code);
   if (!code_dwords)
@@ -857,7 +880,7 @@ gpu::gcn::RecompiledCs RecompileCompute(const u32* cs_code,
   RecompiledCs tmp;  // build into a temp so a mid-emit failure leaves r intact
   gpu::gcn::ResetUnsupported();
   if (!TranslateCs(program, num_thread_x, num_thread_y, num_thread_z, user_sgpr,
-                   tgid_enable, lds_dwords, tmp, t) ||
+                   tgid_enable, lds_dwords, wave32, tmp, t) ||
       gpu::gcn::HadUnsupported()) {
     ReportDecline(cs_code, program.size());
     return r;

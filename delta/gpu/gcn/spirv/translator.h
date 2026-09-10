@@ -135,7 +135,11 @@ struct Translator {
 
   // Seed EXEC all-active at the start of the function body. Must run after
   // BeginFunction (emits an OpStore).
-  void SeedExec() { SetSg(126, wave_masks ? BallotLow(True()) : U32(1)); }
+  void SeedExec() {
+    SetSg(126, lane_masks ? U32(~0u) : wave_masks ? BallotLow(True()) : U32(1));
+    if (lane_masks)
+      SetSg(127, U32(~0u));
+  }
 
   // ---- wave masks ------------------------------------------------------
   // EXEC and every v_cmp result are 64-bit LANE MASKS on the hardware, and
@@ -148,6 +152,34 @@ struct Translator {
   // real lanes and a mask compared as an integer means what it means on the
   // hardware. Off (the GFX7 path) keeps the one-bit model.
   bool wave_masks = false;
+  // Compute's per-invocation mask retains its hardware bit position in the
+  // 64-bit pair. Unlike a Boolean in bit zero, it can intersect literal lane
+  // masks without activating the whole workgroup. Cross-lane mask queries
+  // still require the subgroup operations that implement those instructions.
+  bool lane_masks = false;
+  bool full_wave_masks = false;
+  Id mask_lane_id = 0;
+  Id MaskLaneHigh() { return IsNonZero(And(mask_lane_id, U32(32))); }
+  Id MaskWord(Id lo, Id hi) {
+    return lane_masks ? SelectB(MaskLaneHigh(), hi, lo) : lo;
+  }
+  Id SgMask(u32 sgpr) { return MaskWord(Sg(sgpr), Sg(sgpr + 1)); }
+  void SetMask(u32 sgpr, Id value) {
+    if (full_wave_masks) {
+      WavePublish(value);
+      Barrier();
+      const Id lo = WaveFetch(U32(0)), hi = WaveFetch(U32(32));
+      Barrier();
+      SetSg(sgpr, lo);
+      SetSg(sgpr + 1, hi);
+    } else if (lane_masks) {
+      const Id high = MaskLaneHigh();
+      SetSg(sgpr, SelectB(high, U32(0), value));
+      SetSg(sgpr + 1, SelectB(high, value, U32(0)));
+    } else {
+      SetSg(sgpr, value);
+    }
+  }
   Id BallotLow(Id cond) {
     RequireSubgroup(spv::Capability::GroupNonUniformBallot);
     const Id b = m.Emit(spv::Op::OpGroupNonUniformBallot, TypeV4u(),
@@ -156,20 +188,45 @@ struct Translator {
   }
   // A predicate as the wave mask an instruction writes to an SGPR.
   Id MaskOf(Id cond) {
-    return wave_masks ? BallotLow(cond) : SelectB(cond, U32(1), U32(0));
+    if (full_wave_masks) {
+      const Id half = XchgAt(Add(wave_base, And(WaveLane(), U32(32))));
+      const Id init = m.NewBlock(), ready = m.NewBlock();
+      const Id leader = IsZero(And(WaveLane(), U32(31)));
+      m.SelectionMerge(ready);
+      m.BranchConditional(leader, init, ready);
+      m.OpenBlock(init);
+      m.Store(half, U32(0));
+      m.Branch(ready);
+      m.OpenBlock(ready);
+      Barrier();
+      m.Emit(spv::Op::OpAtomicOr, t_u,
+             {half, U32(2), U32(0x108),
+              SelectB(cond, Shl(U32(1), And(WaveLane(), U32(31))), U32(0))});
+      Barrier();
+      const Id mask = m.Load(t_u, half);
+      Barrier();
+      return mask;
+    }
+    return wave_masks ? BallotLow(cond)
+                      : SelectB(cond, lane_masks ? Shl(U32(1), And(mask_lane_id, U32(31)))
+                                                : U32(1), U32(0));
   }
   // Whether this invocation's lane is set in a wave mask.
   Id LaneActive(Id mask) {
-    return wave_masks ? IsNonZero(And(Shr(mask, WaveLane()), U32(1)))
-                      : IsNonZero(mask);
+    return (wave_masks || lane_masks)
+               ? IsNonZero(And(Shr(mask, And(lane_masks ? mask_lane_id : WaveLane(), U32(31))),
+                               U32(1)))
+               : IsNonZero(mask);
   }
   // A carry/borrow out: one bit per lane on the hardware, so it is a mask too.
   void SetLaneFlag(u32 sgpr, Id flag) {
-    SetSg(sgpr, wave_masks ? And(MaskOf(IsNonZero(flag)), Exec()) : flag);
+    SetMask(sgpr, (wave_masks || lane_masks)
+                      ? And(MaskOf(IsNonZero(flag)), Exec()) : flag);
   }
   Id LaneFlag(u32 sgpr) {
-    return wave_masks ? SelectB(LaneActive(Sg(sgpr)), U32(1), U32(0))
-                      : And(Sg(sgpr), U32(1));
+    return (wave_masks || lane_masks)
+               ? SelectB(LaneActive(SgMask(sgpr)), U32(1), U32(0))
+               : And(Sg(sgpr), U32(1));
   }
 
   // ---- cross-lane ------------------------------------------------------
@@ -181,6 +238,7 @@ struct Translator {
   // reaches the same dynamic instance -- `uniform_here`, set per instruction
   // from the same analysis that places the LDS barriers.
   Id lane_id = 0;    // this invocation's lane within its wave (0..63)
+  u32 wave_size = 64;  // GCN uses 64; RDNA can request 32 at dispatch.
   Id wave_base = 0;  // LocalInvocationIndex of lane 0 of this wave
   Id xchg_var = 0;   // the exchange array, 2 slots per invocation
   u32 xchg_lanes = 0;  // invocations per workgroup (0 = no channel)
@@ -205,7 +263,7 @@ struct Translator {
   }
   Id WaveFetch(Id src_lane, u32 slot = 0) {
     return m.Load(t_u, XchgAt(Add(U32(slot * xchg_lanes),
-                                  Add(wave_base, And(src_lane, U32(63))))));
+                                  Add(wave_base, And(src_lane, U32(wave_size - 1))))));
   }
   Id XchgAt(Id index) {
     return m.AccessChain(m.TypePointer(spv::StorageClass::Workgroup, t_u),
@@ -252,7 +310,7 @@ struct Translator {
   Id Scc() { return m.Load(t_u, scc_var); }
   void SetScc(Id v) { m.Store(scc_var, v); }
   void SetSccBool(Id b) { SetScc(SelectB(b, U32(1), U32(0))); }
-  Id Exec() { return Sg(126); }
+  Id Exec() { return SgMask(126); }
   Id State() { return m.Load(t_u, state_var); }
   void SetState(u32 s) { m.Store(state_var, U32(s)); }
   void SetStateId(Id s) { m.Store(state_var, s); }
@@ -542,9 +600,11 @@ struct Translator {
       case 248:
         return U32(0x3e22f983u);  // INV_2PI
       case 251:
-        return SelectB(IsZero(Sg(106)), U32(1), U32(0));
+        return SelectB(IsZero(full_wave_masks ? Or(Sg(106), Sg(107))
+                                             : SgMask(106)), U32(1), U32(0));
       case 252:
-        return SelectB(IsZero(Exec()), U32(1), U32(0));
+        return SelectB(IsZero(full_wave_masks ? Or(Sg(126), Sg(127))
+                                             : Exec()), U32(1), U32(0));
       case 253:
         return Scc();
     }

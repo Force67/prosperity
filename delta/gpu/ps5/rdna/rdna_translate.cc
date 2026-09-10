@@ -1745,14 +1745,15 @@ Id RdnaDppSrc0(Translator& t, StageContext& sc, const Inst& inst) {
   const u32 src_reg = mod & 0xFF;
   const u32 ctrl = (mod >> 8) & 0x1FF;
   const bool bound_ctrl = ((mod >> 19) & 1) != 0;
-  const Id subid = t.m.Load(t.t_u, sc.subgroup_local_id);
+  const Id subid = t.CanExchange() ? t.WaveLane()
+                                   : t.m.Load(t.t_u, sc.subgroup_local_id);
   const DppLane sel = RdnaDppLane(t, subid, ctrl);
   if (!sel.known)
     return 0;
   const Id own = t.Vg(src_reg);
   const Id scope = t.U32(static_cast<u32>(spv::Scope::Subgroup));
-  Id value =
-      t.m.Emit(spv::Op::OpGroupNonUniformShuffle, t.t_u, {scope, own, sel.lane});
+  Id value = t.CanExchange() ? t.WaveExchange(own, sel.lane)
+      : t.m.Emit(spv::Op::OpGroupNonUniformShuffle, t.t_u, {scope, own, sel.lane});
   if (sel.valid) {
     // Out of the row: BOUND_CTRL reads zero, otherwise the hardware leaves the
     // destination alone. We have no per-lane write mask here, so the lane keeps
@@ -2017,11 +2018,11 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
           Id value = t.m.CompositeExtract(t.t_u, pair, 0);
           Id flag = t.m.CompositeExtract(t.t_u, pair, 1);
           pair = t.m.Emit(operation, t.PairType(),
-                          {value, t.And(t.Sg(106), t.U32(1))});
+                          {value, t.LaneFlag(106)});
           value = t.m.CompositeExtract(t.t_u, pair, 0);
           flag = t.Or(flag, t.m.CompositeExtract(t.t_u, pair, 1));
           t.SetVg(vdst, value);
-          t.SetSg(106, t.And(flag, t.Exec()));
+          t.SetLaneFlag(106, flag);
           break;
         }
         case 0x2B:
@@ -2135,9 +2136,22 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       }
       if (op_sel)
         gpu::gcn::WarnUnsupported("vop3.op-sel", op, w, w1);
+      const Id mask_source = t.MaskWord(t.SrcRaw(s2, inst.literal),
+                                        t.SrcRawHi(s2, inst.literal, false));
+      if (t.lane_masks && op == 0x100) {
+        t.SetVgF(vdst, t.SelectF(t.LaneActive(mask_source),
+                                 t.SrcF(s1, inst.literal, neg & 2, abs & 2),
+                                 t.SrcF(s0, inst.literal, neg & 1, abs & 1)));
+        break;
+      }
+      const Id third = (t.lane_masks || t.wave_masks) &&
+                               op >= 0x128 && op <= 0x12a
+                           ? t.SelectB(t.LaneActive(mask_source), t.U32(1),
+                                        t.U32(0))
+                           : t.SrcRaw(s2, inst.literal);
       if (RdnaEmitVop3Int(t, op, vdst, sdst, t.SrcRaw(s0, inst.literal),
                           t.SrcRaw(s1, inst.literal),
-                          t.SrcRaw(s2, inst.literal))) {
+                          third)) {
         if (neg || abs || clamp || omod || op_sel)
           gpu::gcn::WarnUnsupported("vop3.integer-modifier", op, w, w1);
         break;
@@ -2239,7 +2253,7 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
                         {t.SrcF(s0, inst.literal, neg & 1, abs & 1),
                          t.SrcF(s1, inst.literal, neg & 2, abs & 2),
                          t.SrcF(s2, inst.literal, neg & 4, abs & 4)});
-        t.SetVgF(vdst, t.SelectF(t.IsNonZero(t.Sg(106)),
+        t.SetVgF(vdst, t.SelectF(t.LaneActive(t.SgMask(106)),
                                  t.FMul(fma, t.F32(4294967296.0f)), fma));
         break;
       }
@@ -2624,19 +2638,22 @@ bool HasControlFlow(const Program& program) {
 }
 
 Id BranchTaken(Translator& t, int kind) {
+  const auto mask = [&](u32 sg) {
+    return t.full_wave_masks ? t.Or(t.Sg(sg), t.Sg(sg + 1)) : t.SgMask(sg);
+  };
   switch (kind) {
     case 2:
       return t.IsZero(t.Scc());
     case 3:
       return t.IsNonZero(t.Scc());
     case 4:
-      return t.IsZero(t.Sg(106));
+      return t.IsZero(mask(106));
     case 5:
-      return t.IsNonZero(t.Sg(106));
+      return t.IsNonZero(mask(106));
     case 6:
-      return t.IsZero(t.Exec());
+      return t.IsZero(mask(126));
     case 7:
-      return t.IsNonZero(t.Exec());
+      return t.IsNonZero(mask(126));
     default:
       return t.m.ConstBool(false);
   }

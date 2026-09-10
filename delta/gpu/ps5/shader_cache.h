@@ -61,6 +61,7 @@ struct ComputeShaderState {
   u32 thread_x = 0, thread_y = 0, thread_z = 0;
   u32 user_sgpr = 0, tgid_enable = 0, lds_dwords = 0;
   bool trap_present = false;
+  bool wave32 = false;  // COMPUTE_DISPATCH_INITIATOR.CS_W32_EN
 };
 
 // The compute module for `state`, recompiled on first use. Never null; .ok is

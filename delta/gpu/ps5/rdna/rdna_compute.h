@@ -28,6 +28,7 @@ u32 ComputeCodeDwords(const u32* code);
 // tgid_enable which workgroup-id dimensions land in the SGPRs after the user
 // data; lds_dwords the raw RSRC2 LDS_SIZE field (128-dword granules).
 // trap_present is RSRC2.TRAP_PRESENT; without a handler S_TRAP is a NOP.
+// wave32 selects 32 lanes via COMPUTE_DISPATCH_INITIATOR.CS_W32_EN.
 //
 // Returns ok=false when the shader uses something the compute backend cannot
 // model, so the caller skips the dispatch loudly instead of running a wrong one
@@ -39,6 +40,7 @@ gpu::gcn::RecompiledCs RecompileCompute(const u32* cs_code,
                                         u32 user_sgpr,
                                         u32 tgid_enable,
                                         u32 lds_dwords,
-                                        bool trap_present = false);
+                                        bool trap_present = false,
+                                        bool wave32 = false);
 
 }  // namespace gpu::rdna

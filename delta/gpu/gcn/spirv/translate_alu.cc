@@ -102,7 +102,22 @@ void SaveExec(Translator& t,
               u32 sdst,
               Id src,
               bool wide,
-              bool write_modified) {
+              bool write_modified,
+              Id src_hi = 0) {
+  if (t.lane_masks || t.wave_masks) {
+    const Id old_lo = t.Sg(126), old_hi = t.Sg(127);
+    const Id new_lo = CombineExec(t, kind, old_lo, src);
+    const Id new_hi = wide ? CombineExec(t, kind, old_hi,
+                                          src_hi ? src_hi : t.U32(0)) : old_hi;
+    t.SetSdst(sdst, 0, write_modified ? new_lo : old_lo);
+    if (wide)
+      t.SetSdst(sdst, 1, write_modified ? new_hi : old_hi);
+    t.SetSg(126, new_lo);
+    if (wide)
+      t.SetSg(127, new_hi);
+    t.SetSccBool(t.IsNonZero(wide ? t.Or(new_lo, new_hi) : new_lo));
+    return;
+  }
   const Id old_exec = t.Exec();
   const Id new_exec = t.And(CombineExec(t, kind, old_exec, src), t.U32(1));
   t.SetSdst(sdst, 0, write_modified ? new_exec : old_exec);
@@ -136,19 +151,19 @@ Id LeadingZeros64(Translator& t, Id lo, Id hi) {
 // andn1/orn1 EXEC combiners, the wrexec family and the wave32 32-bit saveexec
 // set. Numbering per LLVM's gfx10 SOP1 tables. Returns false for the slots that
 // stay refused.
-bool EmitGfx10Sop1(Translator& t, u32 op, u32 sdst, Id a) {
+bool EmitGfx10Sop1(Translator& t, u32 op, u32 sdst, Id a, Id a_hi) {
   switch (op) {
     case 0x37:
-      SaveExec(t, ExecOp::kAndn1, sdst, a, true, false);
+      SaveExec(t, ExecOp::kAndn1, sdst, a, true, false, a_hi);
       return true;  // s_andn1_saveexec_b64
     case 0x38:
-      SaveExec(t, ExecOp::kOrn1, sdst, a, true, false);
+      SaveExec(t, ExecOp::kOrn1, sdst, a, true, false, a_hi);
       return true;  // s_orn1_saveexec_b64
     case 0x39:
-      SaveExec(t, ExecOp::kAndn1, sdst, a, true, true);
+      SaveExec(t, ExecOp::kAndn1, sdst, a, true, true, a_hi);
       return true;  // s_andn1_wrexec_b64
     case 0x3a:
-      SaveExec(t, ExecOp::kAndn2, sdst, a, true, true);
+      SaveExec(t, ExecOp::kAndn2, sdst, a, true, true, a_hi);
       return true;  // s_andn2_wrexec_b64
     case 0x3b: {    // s_bitreplicate_b64_b32: every source bit doubled
       const auto spread = [&](Id half) {
@@ -359,7 +374,7 @@ void EmitSop1(Translator& t, const Inst& inst) {
     case 0x2a:
     case 0x2b:
       // s_{and,or,xor,andn2,orn2,nand,nor,xnor}_saveexec_b64
-      SaveExec(t, static_cast<ExecOp>(op - 0x24), sdst, a, true, false);
+      SaveExec(t, static_cast<ExecOp>(op - 0x24), sdst, a, true, false, a_hi);
       break;
     case 0x34: {  // s_abs_i32
       const Id r = t.m.Bitcast(
@@ -401,7 +416,7 @@ void EmitSop1(Translator& t, const Inst& inst) {
     default:
       // gfx10 keeps GFX7's numbering right through s_abs_i32 and appends its
       // own block above it, so only an RDNA program can mean anything there.
-      if (!t.rdna_sources || !EmitGfx10Sop1(t, op, sdst, a))
+      if (!t.rdna_sources || !EmitGfx10Sop1(t, op, sdst, a, a_hi))
         WarnUnsupported("sop1", op);
       break;
   }
@@ -962,6 +977,14 @@ Id ReadFirstLane(Translator& t, Id value) {
     return value;
   if (!t.xchg_lanes)
     return value;
+  if (t.full_wave_masks) {
+    const Id lo = t.Sg(126), hi = t.Sg(127);
+    const Id first_lo = t.m.ExtInst(t.t_u, GLSLstd450FindILsb, {lo});
+    const Id first_hi = t.m.ExtInst(t.t_u, GLSLstd450FindILsb, {hi});
+    const Id first = t.SelectB(t.IsNonZero(lo), first_lo,
+        t.SelectB(t.IsNonZero(hi), t.Add(first_hi, t.U32(32)), t.U32(0)));
+    return t.WaveExchange(value, first);
+  }
   t.RequireSubgroup(spv::Capability::GroupNonUniformBallot);
   t.RequireSubgroup(spv::Capability::GroupNonUniformVote);
   const Id scope = t.U32(3);  // Subgroup
@@ -1176,7 +1199,7 @@ void EmitVop2(Translator& t,
   };
   switch (op) {
     case 0x00: {  // v_cndmask_b32: this lane's bit of VCC picks s1 or s0
-      set_f(t.SelectF(t.LaneActive(t.Sg(106)), s1, s0));
+      set_f(t.SelectF(t.LaneActive(t.SgMask(106)), s1, s0));
       break;
     }
     // v_readlane / v_writelane name one lane of the wave and both ignore EXEC.
@@ -1669,9 +1692,9 @@ void EmitVopc(Translator& t,
   // compare, the restore left every lane whose colour was not over 1.0
   // masked off for the rest of the shader, and the frame was black.
   if (!(op & 0x10) || !t.rdna_sources)
-    t.SetSg(dst, result);
+    t.SetMask(dst, result);
   if (op & 0x10)
-    t.SetSg(126, result);
+    t.SetMask(126, result);
 }
 
 // ---- VOP3 -------------------------------------------------------------------

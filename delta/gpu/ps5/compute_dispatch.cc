@@ -236,7 +236,8 @@ void DispatchCompute(rhi::Renderer& renderer,
                         .user_sgpr = user_sgpr,
                         .tgid_enable = (rsrc2 >> 7) & 0x7,
                         .lds_dwords = (rsrc2 >> 15) & 0x1FF,
-                        .trap_present = (rsrc2 & 0x40) != 0});
+                        .trap_present = (rsrc2 & 0x40) != 0,
+                        .wave32 = (initiator & (1u << 15)) != 0});
   if (!rc.ok) {
     TraceCsUnsupported(cs_addr, groups, threads, user_sgpr);
     return;

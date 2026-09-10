@@ -1085,28 +1085,60 @@ void EmitCsSmrd(Translator& t, const Inst& inst, StageContext& sc) {
 // storage buffer exactly like a V#; the address VGPR carries the byte offset
 // inside it. The video decoders reach their frame buffers this way, so a
 // rejected shader here is a decoded picture that never appears.
-// ds_append / ds_consume: the GDS counter at (M0 + offset0) hands each active
-// lane a distinct slot. One atomic per lane is exactly that -- the counter ends
-// up moved by the number of active lanes and every lane gets its own index --
-// which is what an append buffer needs; only the lane ORDER is unspecified.
+// ds_append / ds_consume address a counter relative to M0.base. The current
+// wave operation counts active lanes and broadcasts the pre-operation value.
+// Where control flow cannot safely synchronize a wave, the fallback still
+// preserves the final count but returns distinct per-lane slots.
 void EmitGdsCounter(Translator& t, const Inst& inst, StageContext& sc) {
   const u32 w = inst.raw[0], w1 = inst.raw[1];
   const u32 op = (w >> 18) & 0xFF;
-  const u32 offset0 = w & 0xFF;
+  const u32 offset = w & 0xFFFF;
   const u32 vdst = (w1 >> 24) & 0xFF;
   if (!sc.gds_var)
     return;
   const Id p_u = t.m.TypePointer(spv::StorageClass::StorageBuffer, t.t_u);
-  const Id ptr = t.m.AccessChain(p_u, sc.gds_var, {t.U32(0), t.U32(offset0 / 4)});
+  // M0 packs {base[15:0], size[15:0]}, both in bytes. Different shader
+  // clients may use the same instruction offset in distinct GDS regions.
+  const Id address = t.Add(t.Shr(t.Sg(124), t.U32(16)), t.U32(offset));
+  const Id index = t.UMin(t.Shr(address, t.U32(2)), t.U32(16383));
+  const Id ptr = t.m.AccessChain(p_u, sc.gds_var, {t.U32(0), index});
   const Id scope = t.U32(static_cast<u32>(spv::Scope::Device));
   const Id relaxed = t.U32(0);
+  if (t.CanExchange()) {
+    t.WavePublish(t.SelectB(t.LaneActive(t.Exec()), t.U32(1), t.U32(0)));
+    t.Barrier();
+    const Id leader = t.m.NewBlock(), merge = t.m.NewBlock();
+    const Id is_leader = t.Eq(t.WaveLane(), t.U32(0));
+    t.m.SelectionMerge(merge);
+    t.m.BranchConditional(is_leader, leader, merge);
+    t.m.OpenBlock(leader);
+    Id count = t.U32(0);
+    for (u32 lane = 0; lane < std::min(t.xchg_lanes, t.wave_size); ++lane) {
+      const Id at = t.Add(t.wave_base, t.U32(lane));
+      const Id safe_at = t.UMin(at, t.U32(t.xchg_lanes - 1));
+      const Id active = t.m.Load(t.t_u, t.XchgAt(safe_at));
+      count = t.Add(count, t.SelectB(t.Ult(at, t.U32(t.xchg_lanes)),
+                                     active, t.U32(0)));
+    }
+    const Id old = t.m.Emit(op == 0x3e ? spv::Op::OpAtomicIAdd
+                                      : spv::Op::OpAtomicISub,
+                            t.t_u, {ptr, scope, relaxed, count});
+    t.WavePublish(old, 1);
+    t.m.Branch(merge);
+    t.m.OpenBlock(merge);
+    t.Barrier();
+    const Id result = t.WaveFetch(t.U32(0), 1);
+    t.Barrier();
+    t.SetVg(vdst, result);
+    return;
+  }
   if (op == 0x3e) {  // ds_append
     t.SetVg(vdst, t.m.Emit(spv::Op::OpAtomicIAdd, t.t_u,
                            {ptr, scope, relaxed, t.U32(1)}));
   } else {  // ds_consume
     const Id old = t.m.Emit(spv::Op::OpAtomicISub, t.t_u,
                             {ptr, scope, relaxed, t.U32(1)});
-    t.SetVg(vdst, t.Sub(old, t.U32(1)));
+    t.SetVg(vdst, old);
   }
 }
 
@@ -2284,7 +2316,8 @@ void EmitDs(Translator& t, const Inst& inst, StageContext& sc) {
           sc.cs_unsupported = true;
         break;
       }
-      const Id lane = t.m.Load(t.t_u, sc.subgroup_local_id);
+      const Id lane = t.CanExchange() ? t.WaveLane()
+                                     : t.m.Load(t.t_u, sc.subgroup_local_id);
       Id source_lane;
       if (offset16 & 0x8000) {
         const Id quad_lane = t.And(lane, t.U32(3));
@@ -2301,10 +2334,21 @@ void EmitDs(Translator& t, const Inst& inst, StageContext& sc) {
         source_lane = t.Or(t.And(lane, t.U32(~31u)), low);
       }
       const Id scope = t.U32(static_cast<u32>(spv::Scope::Subgroup));
-      const Id value = t.m.Emit(spv::Op::OpGroupNonUniformShuffle, t.t_u,
-                                {scope, t.Vg(addr_reg), source_lane});
-      const Id source_exec = t.m.Emit(spv::Op::OpGroupNonUniformShuffle, t.t_u,
-                                      {scope, t.Exec(), source_lane});
+      const Id own_exec = t.SelectB(t.LaneActive(t.Exec()), t.U32(1), t.U32(0));
+      Id value, source_exec;
+      if (t.CanExchange()) {
+        t.WavePublish(t.Vg(addr_reg), 0);
+        t.WavePublish(own_exec, 1);
+        t.Barrier();
+        value = t.WaveFetch(source_lane, 0);
+        source_exec = t.WaveFetch(source_lane, 1);
+        t.Barrier();
+      } else {
+        value = t.m.Emit(spv::Op::OpGroupNonUniformShuffle, t.t_u,
+                          {scope, t.Vg(addr_reg), source_lane});
+        source_exec = t.m.Emit(spv::Op::OpGroupNonUniformShuffle, t.t_u,
+                                {scope, own_exec, source_lane});
+      }
       t.SetVg(vdst, t.SelectB(t.IsNonZero(source_exec), value, t.U32(0)));
       break;
     }
