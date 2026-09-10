@@ -358,10 +358,14 @@ void EmitSmem(Translator& t, const Inst& inst, StageContext& sc) {
                           ? immediate
                           : t.Add(t.SrcRaw(smem.soffset, 0), immediate);
   const Id dword0 = t.Shr(byte_off, t.U32(2));
+  // The destination may overwrite the pointer/descriptor pair itself.
+  // Read every component using the original SGPRs before updating any of them.
+  std::vector<Id> values;
   for (u32 k = 0; k < n; k++)
-    t.SetSdst(smem.sdst, k,
-              gpu::gcn::CsSsboLoad(t, sc, static_cast<u32>(b),
-                                   t.Add(dword0, t.U32(k))));
+    values.push_back(gpu::gcn::CsSsboLoad(t, sc, static_cast<u32>(b),
+                                         t.Add(dword0, t.U32(k))));
+  for (u32 k = 0; k < n; k++)
+    t.SetSdst(smem.sdst, k, values[k]);
 }
 
 // MIMG address components in VGPR order: NSA names each in its own register,
