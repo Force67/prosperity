@@ -573,10 +573,10 @@ void HandleDispatchIndirect(rhi::Renderer& renderer,
   if (!rhi::FlushCsWritesRange(renderer, args, 12))
     return;
   const u32* a = reinterpret_cast<const u32*>(args);
-  const u32 groups[3] = {a[0], a[1], a[2]};
+  const u32 groups[4] = {a[0], a[1], a[2], count >= 2 ? body[count - 1] : 5};
   if (!groups[0] || !groups[1] || !groups[2])
     return;
-  DispatchCompute(renderer, g_queue->regs, groups, 3);
+  DispatchCompute(renderer, g_queue->regs, groups, 4);
 }
 
 // IT_DRAW_INDIRECT / IT_DRAW_INDEX_INDIRECT: same as the direct forms with the

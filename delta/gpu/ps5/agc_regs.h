@@ -155,6 +155,9 @@ constexpr u32 mmSPI_SHADER_PGM_HI_ES = 0x2CC9;
 constexpr u32 mmSPI_SHADER_USER_DATA_ES_0 = 0x2CCC;
 
 // Compute program registers.
+constexpr u32 mmCOMPUTE_START_X = 0x2E04;
+constexpr u32 mmCOMPUTE_START_Y = 0x2E05;
+constexpr u32 mmCOMPUTE_START_Z = 0x2E06;
 constexpr u32 mmCOMPUTE_NUM_THREAD_X = 0x2E07;  // u16 full | u16 partial
 constexpr u32 mmCOMPUTE_NUM_THREAD_Y = 0x2E08;
 constexpr u32 mmCOMPUTE_NUM_THREAD_Z = 0x2E09;

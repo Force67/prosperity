@@ -154,8 +154,18 @@ void DispatchCompute(rhi::Renderer& renderer,
                      const Regs& regs,
                      const u32* body,
                      u32 count) {
-  const u32 groups[3] = {count >= 1 ? body[0] : 0, count >= 2 ? body[1] : 0,
+  u32 groups[3] = {count >= 1 ? body[0] : 0, count >= 2 ? body[1] : 0,
                          count >= 3 ? body[2] : 0};
+  const u32 initiator = count >= 4 ? body[3] : 5;
+  u32 group_base[3] = {};
+  if (!(initiator & 4))
+    for (u32 axis = 0; axis < 3; ++axis) {
+      group_base[axis] = regs[mmCOMPUTE_START_X + axis];
+      // COMPUTE_DIM is an exclusive end, not a count, when START is nonzero.
+      if (groups[axis] <= group_base[axis])
+        return;
+      groups[axis] -= group_base[axis];
+    }
   const u64 cs_addr = (static_cast<u64>(regs[mmCOMPUTE_PGM_HI] & 0xFF) << 32 |
                        regs[mmCOMPUTE_PGM_LO])
                       << 8;
@@ -170,9 +180,10 @@ void DispatchCompute(rhi::Renderer& renderer,
                 (unsigned long long)cs_addr);
   if (kCsProbe && std::strstr(probe_buf, kCsProbe)) {
     base::String line;
-    base::FormatTo(line, "cs={:#x} groups=[{} {} {}] tg=[{} {} {}] "
+    base::FormatTo(line, "cs={:#x} groups=[{} {} {}] base=[{} {} {}] init={:#x} tg=[{} {} {}] "
                         "user_sgpr={} rsrc2={:#x} ud:",
-                   cs_addr, groups[0], groups[1], groups[2], threads[0],
+                   cs_addr, groups[0], groups[1], groups[2], group_base[0],
+                   group_base[1], group_base[2], initiator, threads[0],
                    threads[1], threads[2], user_sgpr, rsrc2);
     const u32* ud = regs.At(mmCOMPUTE_USER_DATA_0);
     for (int k = 0; k < 16; k++)
@@ -213,6 +224,7 @@ void DispatchCompute(rhi::Renderer& renderer,
   ci.groups[0] = groups[0];
   ci.groups[1] = groups[1];
   ci.groups[2] = groups[2];
+  std::copy(std::begin(group_base), std::end(group_base), ci.group_base);
   ci.recomp = &rc;
   for (int k = 0; k < 16; k++)
     ci.user_data[k] = ud[k];

@@ -325,7 +325,8 @@ struct ComputeInfo {
   static constexpr u32 kMaxResources = 64;
 
   u64 cs_addr = 0;            // pipeline cache key
-  u32 groups[3] = {1, 1, 1};  // workgroup counts (DISPATCH_DIRECT dims)
+  u32 groups[3] = {1, 1, 1};  // workgroup counts
+  u32 group_base[3] = {};     // first workgroup ID in each dimension
   const gcn::RecompiledCs* recomp = nullptr;
   u32 user_data[16] = {};  // COMPUTE_USER_DATA_0..15 (push constants)
   struct Res {

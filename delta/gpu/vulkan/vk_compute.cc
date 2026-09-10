@@ -244,6 +244,7 @@ CsPipe* GetCsPipe(const ComputeInfo& ci) {
       MakeModule(ci.recomp->spirv.data(), ci.recomp->spirv.size() * 4);
   VkComputePipelineCreateInfo pi{
       VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+  pi.flags = VK_PIPELINE_CREATE_DISPATCH_BASE_BIT;
   pi.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
   pi.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
   pi.stage.module = cs;
@@ -2837,7 +2838,8 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
   CmdInsertLabel(g_cs_cmd, "dispatch cs=%#llx %ux%ux%u res=%u",
                  (unsigned long long)ci.cs_addr, ci.groups[0], ci.groups[1],
                  ci.groups[2], ci.num_res);
-  vkCmdDispatch(g_cs_cmd, ci.groups[0], ci.groups[1], ci.groups[2]);
+  vkCmdDispatchBase(g_cs_cmd, ci.group_base[0], ci.group_base[1],
+                    ci.group_base[2], ci.groups[0], ci.groups[1], ci.groups[2]);
   {
     BatchedDispatch bd{ci.cs_addr,
                        {ci.groups[0], ci.groups[1], ci.groups[2]},

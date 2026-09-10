@@ -2004,9 +2004,11 @@ void RecordDispatch(const rhi::ComputeInfo& ci) {
   Arr ud;
   for (u32 i = 0; i < 16; i++)
     ud.Add(Line::HexText(ci.user_data[i]));
-  Arr groups;
-  for (u32 i = 0; i < 3; i++)
+  Arr groups, group_base;
+  for (u32 i = 0; i < 3; i++) {
     groups.Add(Line::IntText(ci.groups[i]));
+    group_base.Add(Line::IntText(ci.group_base[i]));
+  }
   Line l("dispatch");
   l.U("seq", g_seq++)
       .Int("frame", g_frame_num)
@@ -2014,6 +2016,7 @@ void RecordDispatch(const rhi::ComputeInfo& ci) {
       .U("queue", rhi::g_submit_queue)
       .Raw("cs", ShaderObj(ci.cs_addr, ci.recomp ? &ci.recomp->spirv : nullptr))
       .Raw("groups", groups.Done())
+      .Raw("group_base", group_base.Done())
       .Raw("resources", res.Done())
       .Raw("user_data", ud.Done());
   l.Emit();
