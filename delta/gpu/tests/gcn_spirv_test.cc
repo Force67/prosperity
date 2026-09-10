@@ -6,6 +6,7 @@
 #include "gpu/gcn/gcn_decode.h"
 #include "gpu/gcn/gcn_translate.h"
 #include "gpu/ps5/rdna/rdna_decode.h"
+#include "gpu/ps5/rdna/rdna_resource.h"
 #include "gpu/ps5/rdna/rdna_translate.h"
 
 namespace {
@@ -71,6 +72,38 @@ bool Recompile(std::vector<u32> code) {
   code.push_back(kEndPgm);
   const u32 user_data[16] = {};
   return gpu::gcn::Recompile(code.data(), nullptr, user_data, user_data).ok;
+}
+
+TEST(RdnaScalarReplay, CompareWritesOnlyItsSelectedMaskRegister) {
+  // Astro's compare uses VCC. Bits 14:8 are zero but do not name s[0:1]
+  // unless SD is set. Inventing that write rejected its later buffer atomic.
+  const u32 code[] = {0x7c041ef9, 0x86860080, kEndPgm};
+  auto program = gpu::rdna::DecodeShader(code, std::size(code));
+  auto writes = gpu::rdna::PossibleScalarWrites(program[0]);
+  EXPECT_EQ(writes.range[0].first, 106u);
+  EXPECT_EQ(writes.range[0].count, 2u);
+  EXPECT_EQ(writes.range[1].count, 0u);
+  auto replay = gpu::rdna::PlanScalarReplay(program);
+  EXPECT_EQ(replay.LossAt(0, 4, 1), gpu::rdna::ScalarReplayPlan::kCovered);
+
+  // Selecting s[20:21] leaves VCC intact instead.
+  program[0].raw[1] = 0x0686946a;
+  writes = gpu::rdna::PossibleScalarWrites(program[0]);
+  EXPECT_EQ(writes.range[0].first, 20u);
+  EXPECT_EQ(writes.range[1].count, 0u);
+  replay = gpu::rdna::PlanScalarReplay(program);
+  EXPECT_EQ(replay.LossAt(106, 2, 1), gpu::rdna::ScalarReplayPlan::kCovered);
+  EXPECT_EQ(replay.LossAt(20, 2, 1), gpu::rdna::ScalarReplayPlan::kUnmodelled);
+
+  // RDNA CMPX writes EXEC, regardless of SDST or the VOP3 destination field.
+  program[0].opcode |= 0x10;
+  writes = gpu::rdna::PossibleScalarWrites(program[0]);
+  EXPECT_EQ(writes.range[0].first, 126u);
+  program[0].enc = gpu::gcn::Enc::kVop3;
+  program[0].raw[0] = 0xd5120000;
+  writes = gpu::rdna::PossibleScalarWrites(program[0]);
+  EXPECT_EQ(writes.range[0].first, 126u);
+  EXPECT_EQ(writes.range[1].count, 0u);
 }
 
 TEST(RdnaSpirv, NoColorExportDoesNotSynthesizeWhiteOutput) {

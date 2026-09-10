@@ -997,14 +997,17 @@ ScalarWrites PossibleScalarWrites(const Inst& inst, bool scc_trusted) {
         return {{{106, 2, false}}};
       return {};
     case Enc::kVopc:
+      // CMPX writes EXEC on RDNA, leaving VCC/SDST unchanged.
+      if (inst.opcode & 0x10)
+        return {{{126, 2, false}}};
       // SDWA's SD bit picks an explicit SDST over VCC.
-      if (inst.extension == gpu::gcn::InstExtension::kSdwa)
-        return {{{106, 2, false}, {(w1 >> 8) & 0x7F, 2, false}}};
+      if (inst.extension == gpu::gcn::InstExtension::kSdwa && (w1 & 0x8000))
+        return {{{(w1 >> 8) & 0x7F, 2, false}}};
       return {{{106, 2, false}}};
     case Enc::kVop3: {
       ScalarWrites out;
       if (inst.opcode < 0x100)
-        out.range[0] = {w & 0xFF, 2, false};  // VOPC alias: mask lands in VDST
+        out.range[0] = {(inst.opcode & 0x10) ? 126u : w & 0xFF, 2, false};
       else if (inst.opcode == 0x182 || inst.opcode == 0x360)
         out.range[0] = {w & 0xFF, 1, false};  // v_readfirstlane / v_readlane
       if (Vop3HasSdst(inst.opcode))
