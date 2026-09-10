@@ -1530,6 +1530,16 @@ TImage DecodeTImage(const u32* d, bool r128) {
   return t;
 }
 
+bool CanAccessLinearIntegerImage(const TImage& t) {
+  return t.valid && t.tiling_idx == gcn::kGfx10TilingBase &&
+      t.mip_levels == 1 && (t.type == 8 || t.type == 9 || t.type == 12 || t.type == 13) &&
+      (t.nfmt == 4 || t.nfmt == 5) &&
+      (t.dfmt == 1 || t.dfmt == 3 || t.dfmt == 4 || t.dfmt == 5 ||
+       t.dfmt == 10 || t.dfmt == 11 || t.dfmt == 12 || t.dfmt == 14) &&
+      // R8/RG8 signed formats are outside the current image emitter's set.
+      !((t.dfmt == 1 || t.dfmt == 3) && t.nfmt == 5);
+}
+
 std::vector<TImage> TrackTextures(const u32* ps_code,
                                   const u32* pud,
                                   u32 user_sgprs,

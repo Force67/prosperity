@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <unordered_set>
 
 #include <base/logging.h>
 #include <utl/options.h>
@@ -19,6 +20,7 @@
 #include "gpu/guest_memory.h"
 #include "gpu/ps5/cmd_trace.h"
 #include "gpu/ps5/guest_address.h"
+#include "gpu/ps5/guest_memory_ranges.h"
 #include "gpu/ps5/rdna/rdna_resource.h"
 #include "gpu/ps5/rdna/rdna_compute.h"
 #include "gpu/ps5/shader_cache.h"
@@ -236,7 +238,53 @@ void DispatchCompute(rhi::Renderer& renderer,
       reinterpret_cast<const u32*>(cs_addr), ud, ud_dwords, 0,
       rdna::ComputeCodeDwords(reinterpret_cast<const u32*>(cs_addr)));
 
+  if (kCsProbe && std::strstr(probe_buf, kCsProbe)) {
+    static std::unordered_set<u64> reported;
+    if (reported.insert(cs_addr).second) {
+      for (const auto& r : rc.resources) {
+        const auto it = resolved.find(r.use_pc);
+        base::String line;
+        base::FormatTo(line, "binding={} kind={} s{} pc={:#x} dynamic={} desc:",
+                       r.binding, r.kind, r.base_sgpr, r.use_pc, r.runtime_address);
+        if (it != resolved.end() && it->second.descriptor_valid)
+          for (u32 i = 0; i < it->second.descriptor_dwords; i++)
+            base::FormatTo(line, " {:08x}", it->second.descriptor[i]);
+        BASE_LOGI("csprobe", "{}", line.c_str());
+      }
+      const auto& pools = GpuPools();
+      for (u32 i = 0; i < pools.count.load(std::memory_order_acquire); i++)
+        BASE_LOGI("csprobe", "pool {:#x}-{:#x}", pools.ranges[i].base,
+                  pools.ranges[i].end);
+    }
+  }
+
+  if (rc.guest_memory_binding >= 0) {
+    std::vector<u64> bases;
+    for (const auto& r : rc.resources) {
+      if (!r.runtime_address && !r.runtime_image)
+        continue;
+      const auto it = resolved.find(r.use_pc);
+      if (it != resolved.end() && it->second.descriptor_valid) {
+        const u64 base = r.runtime_image ? rdna::DecodeTImage(it->second.descriptor).base
+            : ResolveBufferResource(r, it->second.descriptor).base;
+        if (base)
+          bases.push_back(base);
+      }
+    }
+    ci.guest_memory = GuestMemoryRanges(bases);
+    if (ci.guest_memory.empty())
+      return;
+  }
+
   for (const gcn::CsResource& r : rc.resources) {
+    if (r.runtime_address) {
+      auto& out = ci.res[ci.num_res++];
+      out.binding = r.binding;
+      out.size = 16;
+      out.zero_fill = true;
+      out.read = false;
+      continue;
+    }
     const u32 dwords = r.kind == 1 ? 8u : r.kind == 2 ? 2u : 4u;
     // Compute seeds user data straight into s0.., so a plan naming an SGPR past
     // the loaded window names one an SRT load produced, which nothing here
@@ -256,6 +304,14 @@ void DispatchCompute(rhi::Renderer& renderer,
     }
 
     ResourceRange range;
+    if (r.runtime_image && rdna::CanAccessLinearIntegerImage(rdna::DecodeTImage(desc))) {
+      auto& out = ci.res[ci.num_res++];
+      out.binding = r.binding;
+      out.size = 16;
+      out.zero_fill = true;
+      out.read = false;
+      continue;
+    }
     if (std::all_of(desc, desc + dwords, [](u32 w) { return w == 0; })) {
       // A null descriptor is a real binding on a path this launch does not
       // take; the translator guards it and reads zero.
@@ -333,6 +389,9 @@ void DispatchCompute(rhi::Renderer& renderer,
   if (!ci.num_res)
     return;
   const bool dispatched = rhi::Dispatch(renderer, ci);
+  if (kCsProbe && std::strstr(probe_buf, kCsProbe))
+    BASE_LOGI("csprobe", "cs={:#x} dispatch {} ({} resources)", cs_addr,
+              dispatched ? "executed" : "failed", ci.num_res);
   if (!dispatched)
     TraceCsDispatchFailed(cs_addr, ci.num_res);
   TraceCsDispatch(cs_addr, dispatched, ci.num_res);

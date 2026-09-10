@@ -12,8 +12,88 @@
 #include <unistd.h>
 
 #include <vector>
+#include <map>
+#include <mutex>
 
 namespace utl {
+
+namespace {
+struct Mapping {
+  uintptr_t end;
+  u64 identity;
+};
+struct MappingRegistry {
+  std::mutex lock;
+  std::map<uintptr_t, Mapping> mappings;
+  u64 next_identity = 0;
+};
+MappingRegistry& MappingState() {
+  // allocMem can be called while another translation unit initializes.
+  static MappingRegistry state;
+  return state;
+}
+
+void ForgetMapping(MappingRegistry& state, uintptr_t begin, uintptr_t end) {
+  auto& mappings = state.mappings;
+  auto it = mappings.upper_bound(begin);
+  if (it != mappings.begin())
+    --it;
+  while (it != mappings.end() && it->first < end) {
+    const auto [base, prior] = *it;
+    if (prior.end <= begin) {
+      ++it;
+      continue;
+    }
+    it = mappings.erase(it);
+    if (base < begin)
+      mappings.emplace(base, Mapping{begin, prior.identity});
+    if (prior.end > end)
+      mappings.emplace(end, Mapping{prior.end, prior.identity});
+  }
+}
+}  // namespace
+
+void trackMemoryMapping(void* addr, size_t len) {
+  const uintptr_t base = reinterpret_cast<uintptr_t>(addr);
+  if (!base || !len || len > UINTPTR_MAX - base)
+    return;
+  auto& state = MappingState();
+  std::lock_guard lock(state.lock);
+  ForgetMapping(state, base, base + len);
+  state.mappings.emplace(base, Mapping{base + len, ++state.next_identity});
+}
+
+void forgetMemoryMapping(void* addr, size_t len) {
+  const uintptr_t base = reinterpret_cast<uintptr_t>(addr);
+  if (!base || !len || len > UINTPTR_MAX - base)
+    return;
+  auto& state = MappingState();
+  std::lock_guard lock(state.lock);
+  ForgetMapping(state, base, base + len);
+}
+
+u64 memoryMappingIdentity(const void* addr, size_t len) {
+  uintptr_t base = reinterpret_cast<uintptr_t>(addr);
+  if (!base || !len || len > UINTPTR_MAX - base)
+    return 0;
+  const uintptr_t end = base + len;
+  auto& state = MappingState();
+  std::lock_guard lock(state.lock);
+  const auto& mappings = state.mappings;
+  auto it = mappings.upper_bound(base);
+  if (it == mappings.begin())
+    return 0;
+  --it;
+  u64 hash = 1469598103934665603ull;
+  while (base < end) {
+    if (it == mappings.end() || it->first > base || it->second.end <= base)
+      return 0;
+    hash = (hash ^ it->second.identity) * 1099511628211ull;
+    base = it->second.end;
+    ++it;
+  }
+  return hash ? hash : 1;
+}
 
 static int protection_ToPosix(pageProtection prot) {
   switch (prot) {
@@ -54,6 +134,7 @@ void* allocMem(void* preferredAddr, size_t length, pageProtection prot,
   void* p = ::mmap(preferredAddr, length, posix_prot, flags, -1, 0);
   if (p == MAP_FAILED)
     return nullptr;
+  trackMemoryMapping(p, length);
   return p;
 }
 

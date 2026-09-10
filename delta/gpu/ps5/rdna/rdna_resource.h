@@ -259,6 +259,7 @@ gpu::gcn::MimgBindingPlan RdnaPlanMimg(const Program& program);
 // Decode a gfx10.3 image resource. R128 selects the compact four-dword form;
 // ordinary resources contain eight dwords.
 gpu::gcn::TImage DecodeTImage(const u32* dwords, bool r128 = false);
+bool CanAccessLinearIntegerImage(const gpu::gcn::TImage& image);
 
 // A decoded gfx10.3 buffer resource (V#, four dwords): base48 = w0 |
 // (w1[15:0] << 32), stride w1[29:16], num_records w2, format w3[18:12].

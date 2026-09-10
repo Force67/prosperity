@@ -7,6 +7,7 @@
 // recorded into one batched command buffer, and their writes land back in guest
 // memory lazily -- only when something needs guest memory to be current.
 
+#include "gpu/vulkan/vk_guest_memory.h"
 #include "gpu/rhi/renderer.h"
 #include "base/arch.h"
 
@@ -207,7 +208,7 @@ CsPipe* GetCsPipe(const ComputeInfo& ci) {
     return it->second.num_res == ci.num_res ? &it->second : nullptr;
   CsPipe cp;
   cp.num_res = ci.num_res;
-  VkDescriptorSetLayoutBinding binds[ComputeInfo::kMaxResources + 1];
+  VkDescriptorSetLayoutBinding binds[ComputeInfo::kMaxResources + 2];
   u32 nbind = 0;
   for (u32 i = 0; i < ci.num_res; i++)
     binds[nbind++] = {i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
@@ -218,6 +219,10 @@ CsPipe* GetCsPipe(const ComputeInfo& ci) {
     binds[nbind++] = {static_cast<u32>(ci.gds_binding),
                       VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
                       VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+  if (ci.recomp->guest_memory_binding >= 0)
+    binds[nbind++] = {static_cast<u32>(ci.recomp->guest_memory_binding),
+                     VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
+                     VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
   VkDescriptorSetLayoutCreateInfo sl{
       VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
   sl.bindingCount = nbind;
@@ -2280,8 +2285,18 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
     return CsDeclined(ci, "1");
   }
   if (!renderer.available() || !ci.recomp || !ci.recomp->ok || !ci.num_res ||
-      ci.num_res > g_dev.max_cs_resources)
+      ci.num_res + (ci.recomp->guest_memory_binding >= 0) + (ci.gds_binding >= 0) > g_dev.max_cs_resources)
     return CsDeclined(ci, "2");
+  VkDescriptorBufferInfo guest_table{};
+  if (ci.recomp->guest_memory_binding >= 0) {
+    // Runtime reads follow guest pointers across resources. Retire writes and
+    // publish their guest mirrors before exposing those pages to this shader.
+    // A read-only batch may have no dirty staged range for FlushCsWrites to
+    // visit. Retire it explicitly before replacing imported memory or the map.
+    if (!CsBatchFlush(kSyncBatchCap) || !FlushCsWrites(renderer) ||
+        !PrepareGuestMemory(ci.guest_memory, guest_table, ci.recomp->guest_memory_written))
+      return CsDeclined(ci, "guest-address-map");
+  }
   ScopeCs _cs;
   for (u32 i = 0; i < ci.num_res; i++)
     g_cs_bytes += ci.res[i].size;
@@ -2709,8 +2724,8 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
     if (vkAllocateDescriptorSets(g_dev.device, &da, &set) != VK_SUCCESS)
       return CsDeclined(ci, "20");
   }
-  VkDescriptorBufferInfo dbi[ComputeInfo::kMaxResources + 1];
-  VkWriteDescriptorSet wr[ComputeInfo::kMaxResources + 1];
+  VkDescriptorBufferInfo dbi[ComputeInfo::kMaxResources + 2];
+  VkWriteDescriptorSet wr[ComputeInfo::kMaxResources + 2];
   for (u32 i = 0; i < ci.num_res; i++)
     bind_off[i] = ci.res[i].zero_fill
                       ? 0
@@ -2730,6 +2745,16 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
     wr[nwrite] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
     wr[nwrite].dstSet = set;
     wr[nwrite].dstBinding = static_cast<u32>(ci.gds_binding);
+    wr[nwrite].descriptorCount = 1;
+    wr[nwrite].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    wr[nwrite].pBufferInfo = &dbi[nwrite];
+    nwrite++;
+  }
+  if (ci.recomp->guest_memory_binding >= 0) {
+    dbi[nwrite] = guest_table;
+    wr[nwrite] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    wr[nwrite].dstSet = set;
+    wr[nwrite].dstBinding = ci.recomp->guest_memory_binding;
     wr[nwrite].descriptorCount = 1;
     wr[nwrite].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     wr[nwrite].pBufferInfo = &dbi[nwrite];
@@ -2838,6 +2863,14 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
   CmdInsertLabel(g_cs_cmd, "dispatch cs=%#llx %ux%ux%u res=%u",
                  (unsigned long long)ci.cs_addr, ci.groups[0], ci.groups[1],
                  ci.groups[2], ci.num_res);
+  if (ci.recomp->guest_memory_binding >= 0) {
+    VkMemoryBarrier host{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    host.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
+    host.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(g_cs_cmd, VK_PIPELINE_STAGE_HOST_BIT,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
+                         1, &host, 0, nullptr, 0, nullptr);
+  }
   vkCmdDispatchBase(g_cs_cmd, ci.group_base[0], ci.group_base[1],
                     ci.group_base[2], ci.groups[0], ci.groups[1], ci.groups[2]);
   {
@@ -2898,6 +2931,38 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
                 (unsigned long)ci.res[i].base, (unsigned long)ci.res[i].size,
                 (unsigned long)nz, (unsigned long)(ci.res[i].size / step));
     }
+  }
+  if (ci.recomp->guest_memory_written) {
+    // Publish physical writes before a CPU consumer or another dispatch can
+    // use a stale staged copy. The dirty bitmap identifies actual stores,
+    // rather than treating the shader's whole guest pool as overwritten.
+    VkMemoryBarrier host{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    host.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    host.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+    CsBatchBeginImpl();
+    vkCmdPipelineBarrier(g_cs_cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &host, 0, nullptr, 0, nullptr);
+    if (!CsBatchFlush(kSyncBatchCap) || !FlushCsWrites(renderer))
+      return CsDeclined(ci, "guest-writeback");
+    const auto written = FinishGuestMemoryWrites();
+    for (const auto& range : written) {
+      NoteDccWrite(range.base, range.size, nullptr);
+      NoteRawWrite(range.base, range.size);
+      InvalidateTexRange(range.base, range.size);
+    }
+    for (auto it = g_cs_ranges.begin(); it != g_cs_ranges.end();) {
+      const u64 base = it->first, end = base + it->second.guest_bytes;
+      const bool touched = std::any_of(written.begin(), written.end(),
+          [&](const auto& r) { return r.base < end && base < r.base + r.size; });
+      if (touched) {
+        CsRangeDestroy(it->second);
+        it = g_cs_ranges.erase(it);
+      } else {
+        ++it;
+      }
+    }
+    if (!written.empty())
+      ++g_cs_writeback_gen;
   }
   g_ns_cs_out += NowNs() - _t_out0;
   return true;

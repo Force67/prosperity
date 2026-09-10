@@ -455,6 +455,7 @@ bool CreateDevice() {
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
   f12.samplerMirrorClampToEdge = avail12.samplerMirrorClampToEdge;
   f12.separateDepthStencilLayouts = avail12.separateDepthStencilLayouts;
+  f12.bufferDeviceAddress = avail12.bufferDeviceAddress && avail2.features.shaderInt64;
   VkPhysicalDeviceVulkan13Features f13{
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
   f13.pNext = &f12;
@@ -530,6 +531,8 @@ bool CreateDevice() {
   // (return 0 / drop the write) so the compute path can't corrupt memory on a
   // miscomputed index.
   VkPhysicalDeviceFeatures want_feat{};
+  want_feat.shaderInt64 = f12.bufferDeviceAddress;
+  g_dev.buffer_device_address = f12.bufferDeviceAddress;
   want_feat.textureCompressionBC = avail2.features.textureCompressionBC;
   if (avail2.features.robustBufferAccess)
     want_feat.robustBufferAccess = VK_TRUE;

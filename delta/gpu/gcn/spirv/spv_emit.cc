@@ -307,11 +307,29 @@ void Module::Extension(const std::string& name) {
 }
 
 // ---- function / block construction -----------------------------------------
-Id Module::BeginFunction(Id ret_type, Id fn_type) {
+void Module::PhysicalStorageBuffers() {
+  Capability(spv::Capability::Int64);
+  Capability(spv::Capability::PhysicalStorageBufferAddresses);
+  Extension("SPV_KHR_physical_storage_buffer");
+  mem_model_.clear();
+  Instr(mem_model_, spv::Op::OpMemoryModel,
+        {static_cast<u32>(spv::AddressingModel::PhysicalStorageBuffer64),
+         static_cast<u32>(spv::MemoryModel::GLSL450)});
+}
+
+Id Module::BeginFunction(Id ret_type, Id fn_type,
+                         const std::vector<Id>& parameter_types,
+                         std::vector<Id>* parameter_ids) {
   const Id fn = Alloc();
   Instr(fn_body_, spv::Op::OpFunction,
         {ret_type, fn,
          static_cast<u32>(spv::FunctionControlMask::MaskNone), fn_type});
+  for (Id type : parameter_types) {
+    const Id id = Alloc();
+    Instr(fn_body_, spv::Op::OpFunctionParameter, {type, id});
+    if (parameter_ids)
+      parameter_ids->push_back(id);
+  }
   const Id entry = Alloc();
   Instr(fn_body_, spv::Op::OpLabel, {entry});
   cur_block_ = entry;

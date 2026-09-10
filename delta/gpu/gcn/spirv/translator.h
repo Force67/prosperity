@@ -746,6 +746,10 @@ struct StageContext {
   // hardware long before it can hit a neighbouring device allocation; SSBO
   // loads and stores clamp to it.
   Id cs_bounds_var = 0;
+  Id cs_guest_table = 0, cs_guest_translate = 0;
+  std::unordered_map<u32, std::pair<u32, u32>> cs_runtime_resources; // binding -> kind, SGPR
+  std::unordered_set<u32> cs_runtime_images;
+
   // Attributes that v_interp_mov_f32 reads as P10 or P20. Those are the
   // per-vertex DELTAS (P1-P0, P2-P0), which an interpolated fragment input
   // cannot supply, so the whole Location is declared PerVertexKHR -- an
@@ -962,6 +966,20 @@ void EmitDs(Translator& t, const Inst& inst, StageContext& sc);
 // buffers and only has to decode its own (differently encoded) scalar loads.
 Id CsSsboPtr(Translator& t, StageContext& sc, u32 binding, Id dword_idx);
 Id CsSsboLoad(Translator& t, StageContext& sc, u32 binding, Id dword_idx);
+Id CsSsboBound(Translator& t, StageContext& sc, u32 binding);
+void DeclareGuestMemory(Translator& t, StageContext& sc, u32 binding);
+Id CsGuestBase(Translator& t, StageContext& sc, u32 binding);
+Id CsGuestAddress(Translator& t, StageContext& sc, Id address, Id bytes, bool write = false);
+void CsGuestStore(Translator& t, StageContext& sc, u32 binding, Id dword_idx, Id value);
+void EmitGuestGlobal(Translator& t, const Inst& inst, StageContext& sc);
+Id CsGuestLoad(Translator& t, StageContext& sc, u32 binding, Id dword_idx,
+               Id required_end = 0);
+Id CsPhysicalLoad(Translator& t, Id address);
+void CsGuestStoreMasked(Translator& t, StageContext& sc, Id address, Id value, Id mask);
+Id CsLinearImageEligible(Translator& t, const Inst& inst);
+void EmitCsLinearImage(Translator& t, const Inst& inst, StageContext& sc,
+                       const Id* address);
+
 void CsSsboStore(Translator& t,
                  StageContext& sc,
                  u32 binding,

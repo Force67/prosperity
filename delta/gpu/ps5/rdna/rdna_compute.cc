@@ -60,7 +60,6 @@ RecompileCompute(const u32*, u32, u32, u32, u32, u32, u32, bool) {
 #include <utl/options.h>
 
 namespace {
-DELTA_OPTION(bool, kCsGlobal, "DELTA_PS5_CSGLOBAL", false);
 DELTA_OPTION(bool, kGpuSpirvNoopt, "DELTA_GPU_SPIRV_NOOPT", false);
 DELTA_OPTION(bool, kGpuShtrace, "DELTA_GPU_SHTRACE", false);
 DELTA_OPTION(bool, kAgcTrace, "DELTA_AGC_TRACE", false);
@@ -164,6 +163,7 @@ bool PlanResources(const Program& program,
                    std::unordered_map<u32, u32>& bind) {
   const ScalarReplayPlan replay = PlanScalarReplay(program);
   bool uses_gds = false;
+  std::unordered_set<u32> image_candidates, staged_images;
   // COMPUTE_USER_DATA is 16 dwords wide; the dispatch path reads no further.
   const u32 ud_dwords = std::min(user_sgpr, 16u);
   bool scalar_written[136] = {};
@@ -194,6 +194,7 @@ bool PlanResources(const Program& program,
     // replay, which prefers its own result over the window for exactly this
     // reason, so it is only as good as the replay is.
     const bool inline_user_data = base_sgpr + dwords <= ud_dwords && untouched;
+    bool runtime_address = false;
     if (!inline_user_data) {
       const ScalarReplayPlan::Loss loss =
           replay.LossAt(base_sgpr, dwords, index);
@@ -201,12 +202,15 @@ bool PlanResources(const Program& program,
         // The replay would hand the dispatch a descriptor the wave never had.
         // A read only stages a copy of guest memory and can at worst come out
         // as wrong pixels; a write would land in the wrong place.
-        if (written) {
+        if (written && kind == 1) {
           gpu::gcn::WarnUnsupported(LossTag(loss), base_sgpr);
           return false;
         }
-        gpu::gcn::NoteApproximated("cs.descriptor-unproven-read.rdna",
-                                   base_sgpr);
+        if (kind != 1)
+          runtime_address = true;
+        else
+          gpu::gcn::NoteApproximated("cs.descriptor-unproven-read.rdna",
+                                     base_sgpr);
       }
     }
     BindingKey key{.base_sgpr = base_sgpr, .kind = kind};
@@ -217,19 +221,27 @@ bool PlanResources(const Program& program,
         continue;
       CsResource& res = r.resources[i];
       res.written = res.written || written;
+      res.runtime_address = res.runtime_address || runtime_address;
       res.min_bytes = std::max(res.min_bytes, min_bytes);
       bind[pc] = i;
       return true;
     }
     const u32 idx = static_cast<u32>(r.resources.size());
     if (idx >= kMaxCsResources) {
+      if (kGpuShtrace) {
+        for (const CsResource& res : r.resources)
+          BASE_LOGI("rdnacs", "resource {} kind={} sgpr={} pc={:#x}",
+                    res.binding, res.kind, res.base_sgpr, res.use_pc);
+        BASE_LOGI("rdnacs", "overflow kind={} sgpr={} pc={:#x}", kind,
+                  base_sgpr, pc);
+      }
       gpu::gcn::WarnUnsupported("cs.resource-count", idx + 1);
       return false;
     }
     keys.push_back(key);
     bind[pc] = idx;
-    r.resources.push_back(
-        {base_sgpr, pc, idx, kind, written, /*read=*/true, min_bytes});
+    r.resources.push_back({base_sgpr, pc, idx, kind, written, /*read=*/true,
+                           min_bytes, runtime_address});
     return true;
   };
 
@@ -316,29 +328,25 @@ bool PlanResources(const Program& program,
         }
         if (!resource(inst.pc, srsrc, 8, 1, store, 0))
           return false;
+        (op == 0 || op == 8 ? image_candidates : staged_images).insert(bind[inst.pc]);
         break;
       }
       case Enc::kFlat: {
-        // SEG=2 is global_*: a 64-bit base in a scalar pair plus a VGPR byte
-        // offset, which IS a descriptor the dispatch can resolve (kind 2).
-        // Flat and scratch addressing carry the whole address in VGPRs and
-        // still have no model here.
+        // GLOBAL uses a live 64-bit SGPR base plus an unsigned VGPR byte
+        // offset, or a full VGPR pair when SADDR=NULL. The signed immediate
+        // is added in 64 bits; a CPU-guessed SSBO window cannot model this.
         const u32 seg = (w >> 14) & 3;
         const u32 op = inst.opcode;
-        const u32 saddr = (w1 >> 16) & 0x7F;
+        const u32 saddr = (w1 >> 16) & 0x7f;
         const bool load = op >= 0x08 && op <= 0x0f;
-        const bool store = op >= 0x18 && op <= 0x1f;
-        // Off by default: the window below is a guess at the extent, and a
-        // store that lands clamped corrupts what the shader was walking. The
-        // decoders' own shaders need this, so it stays here to finish.
-        if (!kCsGlobal || seg != 2 || saddr >= 100 || (!load && !store)) {
-          gpu::gcn::WarnUnsupported("flat.cs.rdna", inst.opcode, w, w1);
+        const bool store = op == 0x18 || op == 0x1a || (op >= 0x1c && op <= 0x1f);
+        if (seg != 2 || (saddr >= 104 && saddr != 125) || (!load && !store)) {
+          gpu::gcn::WarnUnsupported("flat.cs.rdna", op, w, w1);
           return false;
         }
-        // The extent is not in the instruction; take a window big enough for
-        // the frame-sized buffers these shaders walk.
-        if (!resource(inst.pc, saddr, 2, 2, store, 0x100000))
+        if (!resource(inst.pc, saddr == 125 ? 0 : saddr, 2, 2, store, 0))
           return false;
+        r.resources[bind[inst.pc]].runtime_address = true;
         break;
       }
       default:
@@ -355,6 +363,26 @@ bool PlanResources(const Program& program,
   }
   if (uses_gds)
     r.gds_binding = static_cast<int>(r.resources.size());
+  // Reuse the guest-address capability only in shaders that already require
+  // it. Ordinary image shaders retain their portable staged implementation.
+  const bool has_runtime = std::any_of(r.resources.begin(), r.resources.end(),
+      [](const CsResource& res) { return res.runtime_address; });
+  if (has_runtime)
+    for (u32 binding : image_candidates)
+      r.resources[binding].runtime_image = !staged_images.count(binding);
+  if (std::any_of(r.resources.begin(), r.resources.end(),
+                  [](const CsResource& res) { return res.runtime_address || res.runtime_image; })) {
+    // Traversal follows pointers through scalar tables before reaching a BVH.
+    // All read-only raw resources in this shader use their live GPU address.
+    const bool writes = std::any_of(r.resources.begin(), r.resources.end(),
+        [](const CsResource& res) { return res.runtime_address && res.written; });
+    for (CsResource& res : r.resources)
+      if (res.kind != 1 && (!res.written || writes))
+        res.runtime_address = true;
+    for (const CsResource& res : r.resources)
+      r.guest_memory_written |= (res.runtime_address || res.runtime_image) && res.written;
+    r.guest_memory_binding = r.resources.size() + (uses_gds ? 1 : 0);
+  }
   return true;
 }
 
@@ -602,6 +630,10 @@ bool TranslateCs(const Program& program,
     t.m.Decorate(v, spv::Decoration::Binding, {res.binding});
     t.m.Name(v, "buf" + std::to_string(res.binding));
     sc.cs_ssbo[res.binding] = v;
+    if (res.runtime_address)
+      sc.cs_runtime_resources[res.binding] = {res.kind, res.base_sgpr};
+    if (res.runtime_image)
+      sc.cs_runtime_images.insert(res.binding);
   }
 
   // GDS: the append/consume counters, in a buffer of their own past the
@@ -668,6 +700,8 @@ bool TranslateCs(const Program& program,
     iface.push_back(sc.subgroup_local_id);
   }
 
+  if (r.guest_memory_binding >= 0)
+    gpu::gcn::DeclareGuestMemory(t, sc, r.guest_memory_binding);
   const Id main_fn = t.m.BeginFunction(t.t_void, t.t_fn);
   sc.main_fn = main_fn;
   const Id p_pc_u = t.m.TypePointer(spv::StorageClass::PushConstant, t.t_u);

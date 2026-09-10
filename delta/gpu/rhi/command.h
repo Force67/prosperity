@@ -12,6 +12,7 @@
  */
 
 #include "base/arch.h"
+#include <vector>
 
 namespace gpu::gcn {
 struct Recompiled;
@@ -321,8 +322,15 @@ struct DrawInfo {
 // + the raw user data (pushed to the shader). The renderer stages each range
 // into a storage buffer, runs the dispatch, and copies the written ranges back
 // to guest memory (where the graphics texture path re-reads them).
+struct GuestMemoryRange {
+  u64 base = 0, size = 0;
+  // Backing identity (file offset or tracked allocation), invalidates remaps.
+  u64 identity = 0;
+  bool writable = false;
+};
+
 struct ComputeInfo {
-  static constexpr u32 kMaxResources = 64;
+  static constexpr u32 kMaxResources = 128;
 
   u64 cs_addr = 0;            // pipeline cache key
   u32 groups[3] = {1, 1, 1};  // workgroup counts
@@ -359,6 +367,7 @@ struct ComputeInfo {
   // Binding of the GDS scratchpad, past the resources, or -1 when the shader
   // has no ds_append/ds_consume.
   int gds_binding = -1;
+  std::vector<GuestMemoryRange> guest_memory;
 };
 
 // How long a command processor spent walking a submitted command buffer, and

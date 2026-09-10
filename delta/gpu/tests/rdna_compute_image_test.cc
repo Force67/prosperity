@@ -309,6 +309,103 @@ TEST(RdnaComputeAlu, FmaMixSelectsPrecisionHalvesAndSourceModifiers) {
   for (u32 i = 0; i < expected.size(); i++)
     EXPECT_FLOAT_EQ(std::bit_cast<float>(dest[i]), expected[i]);
 }
+TEST(RdnaComputeImageConversion, LinearIntegerViewsShareWritesWithinOneDispatch) {
+  auto& renderer = gpu::rhi::DefaultRenderer();
+  if (!gpu::rhi::Init(renderer)) GTEST_SKIP() << "Vulkan is required";
+  alignas(65536) static std::array<std::array<u32, 16384>, 2> memory{};
+  alignas(256) static std::array<u32, 4096> code{};
+  gpu::ps5::NoteGpuPool(reinterpret_cast<u64>(memory.data()), sizeof(memory));
+  for (u32 reverse = 0; reverse < 2; ++reverse) {
+    memory[0].fill(0xa5a5a5a5);
+    memory[0][1] = 0xdeadbeef;
+    memory[1].fill(0xa5a5a5a5);
+    const u64 dst = reinterpret_cast<u64>(memory[1].data());
+    const u32 program[] = {
+        0x7e0002ff, reverse ? 5u : 1u, 0x7e020280,
+        0x7e0802ff, reverse ? 0x66u : 0x12345678u,
+        0xf0200100, 0x00000400, // store through s[0:7]
+        0x7e0402ff, reverse ? 1u : 5u, 0x7e060280,
+        0xf0000100, 0x00020502, // read the same word through s[8:15]
+        0x7e2802ff, u32(dst), 0x7e2a02ff, u32(dst >> 32),
+        0xdc708000, 0x007d0514, // GLOBAL store v5 through v[20:21]
+        0xbf810000};
+    std::copy(std::begin(program), std::end(program), code.begin());
+    gpu::rdna::NextProgramGeneration();
+    gpu::ps5::Regs regs;
+    const u64 pc = reinterpret_cast<u64>(code.data());
+    regs[gpu::ps5::mmCOMPUTE_PGM_LO] = pc >> 8;
+    regs[gpu::ps5::mmCOMPUTE_PGM_HI] = pc >> 40;
+    regs[gpu::ps5::mmCOMPUTE_NUM_THREAD_X] = 1;
+    regs[gpu::ps5::mmCOMPUTE_NUM_THREAD_Y] = 1;
+    regs[gpu::ps5::mmCOMPUTE_NUM_THREAD_Z] = 1;
+    regs[gpu::ps5::mmCOMPUTE_PGM_RSRC2] = 16 << 1;
+    const auto descriptor = [&](u32 first, bool byte) {
+      const u64 base = reinterpret_cast<u64>(memory[0].data());
+      const u32 last = byte ? 7 : 1;
+      regs[first] = base >> 8;
+      regs[first + 1] = ((base >> 40) & 255) | ((byte ? 5u : 20u) << 20) | ((last & 3) << 30);
+      regs[first + 2] = last >> 2;
+      regs[first + 3] = 0x80000004;
+    };
+    descriptor(gpu::ps5::mmCOMPUTE_USER_DATA_0, reverse);
+    descriptor(gpu::ps5::mmCOMPUTE_USER_DATA_0 + 8, !reverse);
+    const u32 launch[] = {1, 1, 1, 1};
+    gpu::ps5::DispatchCompute(renderer, regs, launch, 4);
+    ASSERT_TRUE(gpu::rhi::FlushCsWrites(renderer));
+    EXPECT_EQ(memory[1][0], reverse ? 0xdead66efu : 0x56u);
+    EXPECT_EQ(memory[0][1], reverse ? 0xdead66efu : 0x12345678u);
+    EXPECT_EQ(memory[0][0], 0xa5a5a5a5);
+    EXPECT_EQ(memory[0][2], 0xa5a5a5a5);
+  }
+}
+
+TEST(RdnaComputeImageConversion, LinearIntegerArraysRespectRowsLayersAndBounds) {
+  auto& renderer = gpu::rhi::DefaultRenderer();
+  if (!gpu::rhi::Init(renderer)) GTEST_SKIP() << "Vulkan is required";
+  alignas(65536) static std::array<std::array<u32, 16384>, 2> memory{};
+  alignas(256) static std::array<u32, 4096> code{};
+  gpu::ps5::NoteGpuPool(reinterpret_cast<u64>(memory.data()), sizeof(memory));
+  const u32 program[] = {0x7e280280, 0x7e2a0280, 0xdc308000, 0x147d0014,
+      0xf0000128, 0x00000400, 0xf0200128, 0x00020400, 0xbf810000};
+  std::copy(std::begin(program), std::end(program), code.begin());
+  auto* source = reinterpret_cast<u8*>(memory[0].data());
+  for (u32 layer = 0; layer < 2; ++layer)
+    for (u32 y = 0; y < 3; ++y)
+      for (u32 x = 0; x < 7; ++x)
+        source[(layer * 3 + y) * 256 + x] = 16 + layer * 32 + y * 8 + x;
+  for (u32 base_layer = 0; base_layer < 2; ++base_layer) {
+    memory[1].fill(0xa5a5a5a5);
+    std::array<u32, 16384> expected;
+    expected.fill(0xa5a5a5a5);
+    for (u32 layer = base_layer; layer < 2; ++layer)
+      for (u32 y = 0; y < 3; ++y)
+        for (u32 x = 0; x < 7; ++x)
+          expected[(layer * 3 + y) * 64 + x] = 16 + layer * 32 + y * 8 + x;
+    gpu::rdna::NextProgramGeneration();
+    gpu::ps5::Regs regs;
+    const u64 pc = reinterpret_cast<u64>(code.data());
+    regs[gpu::ps5::mmCOMPUTE_PGM_LO] = pc >> 8;
+    regs[gpu::ps5::mmCOMPUTE_PGM_HI] = pc >> 40;
+    regs[gpu::ps5::mmCOMPUTE_NUM_THREAD_X] = 8;
+    regs[gpu::ps5::mmCOMPUTE_NUM_THREAD_Y] = 4;
+    regs[gpu::ps5::mmCOMPUTE_NUM_THREAD_Z] = 3;
+    regs[gpu::ps5::mmCOMPUTE_PGM_RSRC2] = 16 << 1;
+    for (u32 image = 0; image < 2; ++image) {
+      const u64 base = reinterpret_cast<u64>(memory[image].data());
+      const u32 ud = gpu::ps5::mmCOMPUTE_USER_DATA_0 + image * 8;
+      regs[ud] = base >> 8;
+      regs[ud + 1] = ((base >> 40) & 255) | ((image ? 20u : 5u) << 20) | (2u << 30);
+      regs[ud + 2] = 1 | (2u << 14); // 7 x 3
+      regs[ud + 3] = 0xd0000004; // 2D array, R
+      regs[ud + 4] = 1 | (base_layer << 16);
+    }
+    const u32 launch[] = {1, 1, 1, 1};
+    gpu::ps5::DispatchCompute(renderer, regs, launch, 4);
+    ASSERT_TRUE(gpu::rhi::FlushCsWrites(renderer));
+    EXPECT_EQ(memory[1], expected) << "base layer " << base_layer;
+  }
+}
+
 }  // namespace
 
 // Performance counters normally owned by the command-processor composition.

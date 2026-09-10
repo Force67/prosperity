@@ -22,7 +22,7 @@ namespace gpu::gcn {
 
 // Upper bound used by the compute resource planner and Vulkan staging path.
 // The renderer additionally checks the selected device's descriptor limits.
-inline constexpr u32 kMaxCsResources = 64;
+inline constexpr u32 kMaxCsResources = 128;
 
 // Waves a shared-LDS block is allocated for. A graphics stage cannot declare
 // Workgroup storage, so an NGG vertex program's LDS lives in one storage
@@ -287,6 +287,12 @@ struct CsResource {
   // still reports read.
   bool read = false;
   u32 min_bytes = 0;  // lower bound on size from immediate offsets
+  // Bases that depend on lane results or traversal iterations are resolved
+  // from the live SGPRs through the checked guest-address map on the GPU.
+  bool runtime_address = false;
+  // Plain image loads/stores can share native linear integer storage across
+  // differently formatted views. Other layouts keep the staged image path.
+  bool runtime_image = false;
 };
 
 // A recompiled compute shader: the GLCompute SPIR-V + its resource-binding
@@ -301,6 +307,8 @@ struct RecompiledCs {
   // GDS: a small global scratchpad the ds_append/ds_consume counters live in.
   // It is not guest memory, so it gets a binding of its own past the resources.
   int gds_binding = -1;
+  int guest_memory_binding = -1;
+  bool guest_memory_written = false;
 };
 
 // Recompile a compute shader to a Vulkan compute pipeline (GLCompute SPIR-V).

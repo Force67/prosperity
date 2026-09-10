@@ -90,6 +90,7 @@ std::vector<ReleasedRange> g_released;
 void noteGuestReleased(u8 *ptr, size_t size) {
   if (!ptr || !size)
     return;
+  utl::forgetMemoryMapping(ptr, size);
   const uintptr_t base = reinterpret_cast<uintptr_t>(ptr);
   std::lock_guard<std::mutex> lk(g_releasedLock);
   for (auto &r : g_released) {
@@ -106,6 +107,7 @@ void noteGuestReleased(u8 *ptr, size_t size) {
 void noteGuestTaken(u8 *ptr, size_t size) {
   if (!ptr || !size)
     return;
+  utl::forgetMemoryMapping(ptr, size);
   const uintptr_t lo = reinterpret_cast<uintptr_t>(ptr), hi = lo + size;
   std::lock_guard<std::mutex> lk(g_releasedLock);
   for (auto it = g_released.begin(); it != g_released.end();) {
@@ -172,6 +174,7 @@ u8 *allocLowGuest(size_t size, size_t align) {
     void *p = ::mmap(reinterpret_cast<void *>(base), size, PROT_READ | PROT_WRITE,
                      MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
     if (p == reinterpret_cast<void *>(base)) {
+      utl::trackMemoryMapping(p, size);
       if (kAllocTrace)
         BASE_LOGI("lowalloc", "{:#x} +{:#x}", (unsigned long)base,
                   (unsigned long)size);

@@ -44,6 +44,13 @@ void freeMem(void *addr);
 bool protectMem(void *addr, size_t len, pageProtection);
 bool isMemoryRangeMapped(const void *addr, size_t len);
 
+// Identity of backing pages allocated through the guest memory helpers. A
+// remap gets a new identity even when its address, size and permissions match.
+// Unknown or only partially tracked ranges return zero and cannot be cached.
+void trackMemoryMapping(void* addr, size_t len);
+void forgetMemoryMapping(void* addr, size_t len);
+u64 memoryMappingIdentity(const void* addr, size_t len);
+
 // Arm a write-watch on a guest range from a layer that cannot reach the kernel
 // directly. The kernel owns the SIGSEGV machinery (see krnl::startWriteWatch)
 // and registers itself here at startup; the GPU layer needs it because the only

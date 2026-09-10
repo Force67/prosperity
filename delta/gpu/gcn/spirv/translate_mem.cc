@@ -61,17 +61,23 @@ bool CsBindingValid(StageContext& sc, u32 binding) {
   return false;
 }
 
+Id CsSsboBound(Translator& t, StageContext& sc, u32 binding) {
+  if (!CsBindingValid(sc, binding))
+    return t.U32(0);
+  if (binding >= 48 || !sc.cs_bounds_var)
+    return t.m.Emit(spv::Op::OpArrayLength, t.t_u, {sc.cs_ssbo[binding], 0});
+  const Id p_u = t.m.TypePointer(spv::StorageClass::PushConstant, t.t_u);
+  return t.m.Load(t.t_u, t.m.AccessChain(p_u, sc.cs_bounds_var,
+                                         {t.U32(1), t.U32(binding)}));
+}
+
 Id CsSsboPtr(Translator& t, StageContext& sc, u32 binding, Id dword_idx) {
   if (!CsBindingValid(sc, binding))
     return t.U32(0);
-  // The stage's bound block (push constant member 1) carries a dword count
-  // per binding; any access beyond it stops at the last dword instead of
-  // walking into whatever the driver mapped after this buffer.
+  // Stop at the last dword of the descriptor's range. Bindings beyond the
+  // 48 push-constant bounds obtain their length from the runtime SSBO array.
   if (sc.cs_bounds_var) {
-    const Id p_u = t.m.TypePointer(spv::StorageClass::PushConstant, t.t_u);
-    const Id bound =
-        t.m.Load(t.t_u, t.m.AccessChain(p_u, sc.cs_bounds_var,
-                                        {t.U32(1), t.U32(binding)}));
+    const Id bound = CsSsboBound(t, sc, binding);
     dword_idx =
         t.SelectB(t.IsNonZero(bound), t.UMin(dword_idx, t.Sub(bound, t.U32(1))),
                   dword_idx);
@@ -86,6 +92,8 @@ bool MubufAtomic(u32 op) {
 }
 
 Id CsSsboLoad(Translator& t, StageContext& sc, u32 binding, Id dword_idx) {
+  if (sc.cs_runtime_resources.count(binding))
+    return CsGuestLoad(t, sc, binding, dword_idx);
   if (!CsBindingValid(sc, binding))
     return t.U32(0);
   return t.m.Load(t.t_u, CsSsboPtr(t, sc, binding, dword_idx));
@@ -95,6 +103,11 @@ void CsSsboStore(Translator& t,
                  u32 binding,
                  Id dword_idx,
                  Id value) {
+  if (sc.cs_runtime_resources.count(binding)) {
+    CsGuestStore(t, sc, binding, dword_idx, value);
+    return;
+  }
+
   if (!CsBindingValid(sc, binding))
     return;
   t.m.Store(CsSsboPtr(t, sc, binding, dword_idx), value);
@@ -268,6 +281,13 @@ void StoreSubDword(Translator& t,
                    Id byte_off,
                    u32 bits,
                    Id value) {
+  if (sc.cs_runtime_resources.count(binding)) {
+    // The static buffer path below is a non-atomic RMW. Do not use it for
+    // runtime aliases where independent lanes can share a physical dword.
+    WarnUnsupported("mubuf.runtime-subword-store", bits);
+    sc.cs_unsupported = true;
+    return;
+  }
   const Id idx = t.Shr(byte_off, t.U32(2));
   const Id shift = t.Shl(t.And(byte_off, t.U32(3)), t.U32(3));
   const Id old = CsSsboLoad(t, sc, binding, idx);
@@ -1091,6 +1111,10 @@ void EmitGdsCounter(Translator& t, const Inst& inst, StageContext& sc) {
 }
 
 void EmitCsGlobal(Translator& t, const Inst& inst, StageContext& sc) {
+  if (t.rdna_sources) {
+    EmitGuestGlobal(t, inst, sc);
+    return;
+  }
   const u32 w = inst.raw[0], w1 = inst.raw[1];
   const u32 op = (w >> 18) & 0x7F;
   // 13-bit signed instruction offset on gfx10 global/scratch.
@@ -1187,7 +1211,23 @@ void EmitCsMubuf(Translator& t, const Inst& inst, StageContext& sc) {
       CsSsboStore(t, sc, binding, t.Add(dword_idx, t.U32(i)), t.Vg(vdata + i));
   };
 
+  const auto load_subword = [&](u32 bits, bool sign) {
+    if (!sc.cs_runtime_resources.count(binding))
+      return LoadSubDword(t, sc.cs_ssbo[binding], byte_off, bits, sign);
+    const Id word = CsGuestLoad(t, sc, binding, dword_idx,
+                                t.Add(byte_off, t.U32(bits / 8)));
+    const Id shift = t.Shl(t.And(byte_off, t.U32(3)), t.U32(3));
+    Id value = t.And(t.Shr(word, shift), t.U32((1u << bits) - 1));
+    if (sign)
+      value = t.Sar(t.Shl(value, t.U32(32 - bits)), t.U32(32 - bits));
+    return value;
+  };
   if (MubufAtomic(op)) {
+    if (sc.cs_runtime_resources.count(binding)) {
+      WarnUnsupported("mubuf.runtime-atomic", op, w, w1);
+      sc.cs_unsupported = true;
+      return;
+    }
     // GLC returns the pre-op value into VDATA; without it the result is
     // simply unused. Device scope: these order against other workgroups.
     const bool glc = (w >> 14) & 1;
@@ -1242,16 +1282,16 @@ void EmitCsMubuf(Translator& t, const Inst& inst, StageContext& sc) {
       store_dwords(op - 3);
       break;
     case 0x08:  // buffer_load_ubyte
-      t.SetVg(vdata, LoadSubDword(t, sc.cs_ssbo[binding], byte_off, 8, false));
+      t.SetVg(vdata, load_subword(8, false));
       break;
     case 0x09:  // buffer_load_sbyte
-      t.SetVg(vdata, LoadSubDword(t, sc.cs_ssbo[binding], byte_off, 8, true));
+      t.SetVg(vdata, load_subword(8, true));
       break;
     case 0x0a:  // buffer_load_ushort
-      t.SetVg(vdata, LoadSubDword(t, sc.cs_ssbo[binding], byte_off, 16, false));
+      t.SetVg(vdata, load_subword(16, false));
       break;
     case 0x0b:  // buffer_load_sshort
-      t.SetVg(vdata, LoadSubDword(t, sc.cs_ssbo[binding], byte_off, 16, true));
+      t.SetVg(vdata, load_subword(16, true));
       break;
     case 0x0c:
       load_dwords(1);
@@ -1323,7 +1363,7 @@ void EmitCsMtbuf(Translator& t, const Inst& inst, StageContext& sc) {
 // image_load/store[_mip] against staged linear RGBA8 images modelled as
 // storage buffers. Storage is mip-major; each level contains all physical
 // array layers and explicit LOD is view-relative.
-void EmitCsMimg(Translator& t,
+static void EmitCsMimgStaged(Translator& t,
                 const Inst& inst,
                 StageContext& sc,
                 const Id* address) {
@@ -1976,6 +2016,25 @@ void EmitCsMimg(Translator& t,
   }
   t.m.Branch(merge_blk);
   t.m.OpenBlock(merge_blk);
+}
+
+void EmitCsMimg(Translator& t, const Inst& inst, StageContext& sc, const Id* address) {
+  const int binding = CsBindingFor(sc, inst.pc);
+  if (!t.rdna_sources || binding < 0 || !sc.cs_runtime_images.count(binding)) {
+    EmitCsMimgStaged(t, inst, sc, address);
+    return;
+  }
+  const Id eligible = CsLinearImageEligible(t, inst);
+  const Id native = t.m.NewBlock(), staged = t.m.NewBlock(), done = t.m.NewBlock();
+  t.m.SelectionMerge(done);
+  t.m.BranchConditional(eligible, native, staged);
+  t.m.OpenBlock(native);
+  EmitCsLinearImage(t, inst, sc, address);
+  t.m.Branch(done);
+  t.m.OpenBlock(staged);
+  EmitCsMimgStaged(t, inst, sc, address);
+  t.m.Branch(done);
+  t.m.OpenBlock(done);
 }
 
 // ---- DS (LDS / subgroup swizzle) -------------------------------------------

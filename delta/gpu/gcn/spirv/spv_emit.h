@@ -105,12 +105,15 @@ class Module {
   // after the capabilities and before the ext-inst imports, per the module's
   // required section order.
   void Extension(const std::string& name);
+  void PhysicalStorageBuffers();
 
   Id GlslExt() const { return glsl_ext_; }
 
   // ---- function + block construction ----
   // Begin a function (emits OpFunction + the entry OpLabel); returns the fn id.
-  Id BeginFunction(Id ret_type, Id fn_type);
+  Id BeginFunction(Id ret_type, Id fn_type,
+                   const std::vector<Id>& parameter_types = {},
+                   std::vector<Id>* parameter_ids = nullptr);
   Id NewBlock();             // allocate a label id (not yet opened)
   void OpenBlock(Id label);  // emit OpLabel for a previously allocated id
   Id CurrentBlock() const { return cur_block_; }
