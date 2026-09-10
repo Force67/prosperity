@@ -1637,6 +1637,7 @@ struct SdwaMod {
   bool src0_neg = false, src0_abs = false;
   bool src1_neg = false, src1_abs = false;
   u32 dst_sel = 6;
+  u32 dst_unused = 0;  // 0 = zero, 1 = sign-extend above, 2 = preserve
   bool clamp = false;
   u32 omod = 0;
 };
@@ -1653,6 +1654,7 @@ SdwaMod DecodeSdwa(const Inst& inst, u32 vsrc1, bool dpp) {
   if (dpp)
     return s;
   s.dst_sel = (m >> 8) & 7;
+  s.dst_unused = (m >> 11) & 3;
   s.clamp = (m >> 13) & 1;
   s.omod = (m >> 14) & 3;
   s.src0_sel = (m >> 16) & 7;
@@ -1693,6 +1695,24 @@ Id SdwaSelect(Translator& t, Id raw, u32 sel, bool sext) {
     return t.And(shifted, t.U32(bits == 8 ? 0xFFu : 0xFFFFu));
   return t.m.Emit(spv::Op::OpBitFieldSExtract, t.t_u,
                   {shifted, t.U32(0), t.U32(bits)});
+}
+
+void StoreSdwaResult(Translator& t, u32 vdst, const SdwaMod& sd, Id previous) {
+  if (sd.dst_sel >= 6)
+    return;
+  const u32 bits = sd.dst_sel < 4 ? 8 : 16;
+  const u32 offset = sd.dst_sel < 4 ? sd.dst_sel * 8 : (sd.dst_sel - 4) * 16;
+  const u32 mask = bits == 8 ? 0xff : 0xffff;
+  Id value = t.Vg(vdst);
+  if (sd.dst_unused == 1)
+    value = t.m.Emit(spv::Op::OpBitFieldSExtract, t.t_u,
+                     {value, t.U32(0), t.U32(bits)});
+  else
+    value = t.And(value, t.U32(mask));
+  value = t.Shl(value, t.U32(offset));
+  if (sd.dst_unused == 2)
+    value = t.Or(value, t.And(previous, t.U32(~(mask << offset))));
+  t.SetVg(vdst, value);
 }
 
 void ResolveValuSrc0(const Inst& inst,
@@ -1918,10 +1938,17 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       const u32 raw0 = w & 0x1FF;
       u32 src0, lit;
       ResolveValuSrc0(inst, raw0, src0, lit);
+      if (dpp_src0) {
+        gpu::gcn::EmitVop1(t, op, vdst, t.m.Bitcast(t.t_f, dpp_src0));
+        break;
+      }
       if (raw0 == 249) {  // SDWA: apply the source's sub-dword selection
         const SdwaMod sd = DecodeSdwa(inst, 0, false);
-        if (sd.dst_sel != 6 || sd.src0_sel > 6)
+        if (sd.dst_sel > 6 || sd.dst_unused > 2 || sd.src0_sel > 6) {
           gpu::gcn::WarnUnsupported("vop1.sdwa-mod", op, w, w1);
+          break;
+        }
+        const Id previous = sd.dst_sel < 6 ? t.Vg(vdst) : 0;
         gpu::gcn::EmitVop1(
             t, op, vdst,
             t.m.Bitcast(t.t_f,
@@ -1936,6 +1963,7 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
         if (sd.clamp)
           t.SetVgF(vdst, t.m.ExtInst(t.t_f, GLSLstd450FClamp,
                                      {t.VgF(vdst), t.F32(0.f), t.F32(1.f)}));
+        StoreSdwaResult(t, vdst, sd, previous);
         break;
       }
       // The movrel family indexes the register file with M0. Our VGPRs are one
@@ -1983,10 +2011,17 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       Id sdwa0 = 0, sdwa1 = 0;
       bool sdwa_clamp = false;
       u32 sdwa_omod = 0;
+      SdwaMod sdwa_dst;
+      Id sdwa_previous = 0;
       if (raw0 == 249) {
         const SdwaMod sd = DecodeSdwa(inst, vsrc1, false);
-        if (sd.dst_sel != 6 || sd.src0_sel > 6 || sd.src1_sel > 6)
+        if (sd.dst_sel > 6 || sd.dst_unused > 2 ||
+            sd.src0_sel > 6 || sd.src1_sel > 6) {
           gpu::gcn::WarnUnsupported("vop2.sdwa-mod", op, w, w1);
+          break;
+        }
+        sdwa_dst = sd;
+        sdwa_previous = sd.dst_sel < 6 ? t.Vg(vdst) : 0;
         // CLAMP and OMOD are applied to the RESULT, so they need no operand
         // rewriting -- the shared emitter writes vdst and we scale/saturate it
         // afterwards. OMOD is a real gfx10 SDWA field: `v_mul_f32_sdwa ... mul:2`
@@ -2090,6 +2125,7 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       if (sdwa_clamp)
         t.SetVgF(vdst, t.m.ExtInst(t.t_f, GLSLstd450FClamp,
                                    {t.VgF(vdst), t.F32(0.f), t.F32(1.f)}));
+      StoreSdwaResult(t, vdst, sdwa_dst, sdwa_previous);
       break;
     }
     case Enc::kVop3p: {
