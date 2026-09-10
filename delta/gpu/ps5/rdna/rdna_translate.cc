@@ -15,6 +15,8 @@
 
 #ifndef DELTA_HAVE_SPIRV_BACKEND
 namespace gpu::rdna {
+bool HasNggTransfer(const u32*) { return false; }
+bool HasNggPrimitiveExports(const u32*) { return false; }
 gpu::gcn::Recompiled Recompile(const u32*,
                                const u32*,
                                const u32*,
@@ -24,7 +26,7 @@ gpu::gcn::Recompiled Recompile(const u32*,
                                u32,
                                u32,
                                const u32*,
-                               u32) {
+                               u32, const NggConfig*) {
   return {};
 }
 u64 FetchPlanHash(u64) {
@@ -755,7 +757,8 @@ bool RdnaPlanCbufs(const Program& program,
                    u32 first_binding,
                    std::vector<ShaderCbuf>& cbufs,
                    std::unordered_map<u32, u32>& bindings,
-                   std::unordered_map<u32, u32>& by_pc) {
+                   std::unordered_map<u32, u32>& by_pc,
+                   u32 binding_limit = kMaxCbufBindings) {
   // Walk in program order, growing the def map as s_loads appear, so each
   // SMEM's base traces through the defs live AT that instruction. Shaders
   // reuse SGPRs (the sprite VS s_buffer_loads its transform from the s[8:11]
@@ -863,7 +866,7 @@ bool RdnaPlanCbufs(const Program& program,
     }
     if (binding == ~0u) {
       binding = first_binding + static_cast<u32>(cbufs.size());
-      if (binding >= kMaxCbufBindings) {
+      if (binding >= binding_limit) {
         if (ShDbg())
           BASE_LOGI("gcnspv", "cbuf plan reject pc={:#x} out of "
                               "bindings ({})",
@@ -988,7 +991,8 @@ void RdnaPlanBufLoadCbufs(const Program& program,
                           u32 first_binding,
                           std::vector<ShaderCbuf>& cbufs,
                           std::unordered_map<u32, u32>& bindings,
-                          std::unordered_map<u32, u32>& by_pc) {
+                          std::unordered_map<u32, u32>& by_pc,
+                   u32 binding_limit = kMaxCbufBindings) {
   // Mirror ParseFetchInsts' walk: srsrc SGPRs written by an s_load hold V#s
   // from the user-data descriptor TABLE (entry index from
   // MapTableChainedLoads). A constant load through such a V# becomes a chained
@@ -1014,7 +1018,7 @@ void RdnaPlanBufLoadCbufs(const Program& program,
     const u32 binding =
         first_binding + static_cast<u32>(cbufs.size());
     if (chained) {
-      if (binding >= kMaxCbufBindings)
+      if (binding >= binding_limit)
         return;
       by_pc[inst.pc] = binding;
       ShaderCbuf cb;
@@ -1029,7 +1033,7 @@ void RdnaPlanBufLoadCbufs(const Program& program,
     }
     if (bindings.count(srsrc))
       continue;
-    if (binding >= kMaxCbufBindings)
+    if (binding >= binding_limit)
       return;
     bindings[srsrc] = binding;
     ShaderCbuf cb;
@@ -1419,6 +1423,31 @@ void EmitExport(Translator& t, const Inst& inst, StageContext& sc) {
               sc.is_ps ? "ps" : "vs", target, en, compr, (w >> 11) & 1, w1);
   if (!en)
     return;  // architecturally null export
+  if (sc.is_mesh) {
+    const Id active = t.LaneActive(t.Exec());
+    const Id body = t.m.NewBlock(), merge = t.m.NewBlock();
+    t.m.SelectionMerge(merge);
+    t.m.BranchConditional(active, body, merge);
+    t.m.OpenBlock(body);
+    if (target == 20) {
+      t.m.Store(sc.mesh_primitive, t.Vg(v[0]));
+    } else if (target == 12 || target >= 32) {
+      const Id out = target == 12 ? sc.pos_out
+                                  : gpu::gcn::VsParamOut(t, sc, target - 32);
+      if (target >= 32)
+        sc.max_param = std::max(sc.max_param, target - 31);
+      Id c[4];
+      for (u32 i = 0; i < 4; ++i)
+        c[i] = (en & (1u << i)) ? t.VgF(v[i])
+                               : t.F32(target == 12 && i == 3 ? 1.f : 0.f);
+      t.m.Store(out, t.m.CompositeConstruct(t.t_v4, {c[0], c[1], c[2], c[3]}));
+    } else if (target != 9) {
+      gpu::gcn::WarnUnsupported("exp.mesh-target", target, w, w1);
+    }
+    t.m.Branch(merge);
+    t.m.OpenBlock(merge);
+    return;
+  }
   if (sc.is_ps) {
     // DELTA_GPU_EXPTRACE: the EN mask of each colour export. A component the
     // shader does not export gets a default here, and defaulting alpha to 1
@@ -1863,6 +1892,51 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
   // storage buffers), not through the graphics cbuf/vertex-fetch bindings.
   if (sc.is_cs && EmitCsMemory(t, inst, sc))
     return;
+  if (sc.is_mesh && inst.enc == Enc::kSopp && inst.opcode == 0x0a) {
+    t.Barrier();
+    return;
+  }
+  if (sc.is_mesh && inst.enc == Enc::kSopp && inst.opcode == 0x10 &&
+      (w & 0xf) == 9) {
+    // GS_ALLOC_REQ carries vertex/primitive counts in M0. Retain them until
+    // the whole workgroup has finished, then call SetMeshOutputs uniformly.
+    const Id leader = t.InBlock(t.Eq(sc.mesh_local_index, t.U32(0)));
+    const Id body = t.m.NewBlock(), merge = t.m.NewBlock();
+    t.m.SelectionMerge(merge);
+    t.m.BranchConditional(leader, body, merge);
+    t.m.OpenBlock(body);
+    const Id p = t.m.TypePointer(spv::StorageClass::Workgroup, t.t_u);
+    const Id counts = t.Sg(124);
+    t.m.Store(t.m.AccessChain(p, sc.mesh_counts, {t.U32(0)}),
+               t.And(counts, t.U32(0x7ff)));
+    t.m.Store(t.m.AccessChain(p, sc.mesh_counts, {t.U32(1)}),
+               t.And(t.Shr(counts, t.U32(12)), t.U32(0x7ff)));
+    t.m.Branch(merge);
+    t.m.OpenBlock(merge);
+    return;
+  }
+  if (sc.is_mesh && inst.enc == Enc::kDs) {
+    if ((w >> 17) & 1) {
+      gpu::gcn::WarnUnsupported("ds.mesh-gds", inst.opcode, w, w1);
+      return;
+    }
+    const u32 op = inst.opcode;
+    const bool writes = op != 0x35 && !(op >= 0x36 && op <= 0x38) &&
+                        !(op >= 0x76 && op <= 0x78) && op != 0xfe && op != 0xff;
+    if (!writes) {
+      gpu::gcn::EmitDs(t, inst, sc);
+      return;
+    }
+    const Id active = t.LaneActive(t.Exec());
+    const Id body = t.m.NewBlock(), merge = t.m.NewBlock();
+    t.m.SelectionMerge(merge);
+    t.m.BranchConditional(active, body, merge);
+    t.m.OpenBlock(body);
+    gpu::gcn::EmitDs(t, inst, sc);
+    t.m.Branch(merge);
+    t.m.OpenBlock(merge);
+    return;
+  }
   switch (inst.enc) {
     case Enc::kSop1:
       if (sc.skip_launch_movs.count(inst.pc))
@@ -1982,11 +2056,11 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
               {t.m.ExtInst(t.t_u, GLSLstd450UMin, {idx, t.U32(255)})});
         };
         if (op == 0x42)
-          t.m.Store(reg_at(vdst), t.SrcRaw(src0, lit));
+          t.StorePrivate(reg_at(vdst), t.SrcRaw(src0, lit));
         else if (op == 0x43)
           t.SetVg(vdst, t.m.Load(t.t_u, reg_at(raw0 & 0xFF)));
         else
-          t.m.Store(reg_at(vdst), t.m.Load(t.t_u, reg_at(raw0 & 0xFF)));
+          t.StorePrivate(reg_at(vdst), t.m.Load(t.t_u, reg_at(raw0 & 0xFF)));
         break;
       }
       if (op == 0x0b) {
@@ -2752,6 +2826,7 @@ bool ForceCfg() {
 void EmitBody(Translator& t, const Program& program, StageContext& sc) {
   t.SeedExec();
   t.predicate_vector = true;
+  t.uniform_here = sc.is_mesh;
   if (ForceCfg() || HasControlFlow(program)) {
     EmitCfg(t, program, sc);
     return;
@@ -2948,11 +3023,12 @@ thread_local u64 g_vs_addr = 0;
 
 // ---- VS / PS drivers --------------------------------------------------------
 Id DeclareUserData(Translator& t) {
-  const Id words = t.m.TypeArray(t.t_u, 32);
+  const Id words = t.m.TypeArray(t.t_u, 16);
   t.m.Decorate(words, spv::Decoration::ArrayStride, {4});
   const Id block = t.m.TypeStruct({words});
   t.m.Decorate(block, spv::Decoration::Block);
-  t.m.MemberDecorate(block, 0, spv::Decoration::Offset, {0});
+  t.m.MemberDecorate(block, 0, spv::Decoration::Offset,
+                     {t.user_data_slot * 64});
   return t.m.Variable(t.m.TypePointer(spv::StorageClass::PushConstant, block),
                       spv::StorageClass::PushConstant);
 }
@@ -2965,7 +3041,17 @@ void SeedUserData(Translator& t,
   for (u32 i = 0; i < std::min(count, 32u); i++)
     t.SetSg(
         sgpr_base + i,
-        t.m.Load(t.t_u, t.m.AccessChain(p_u, user_data, {t.U32(0), t.U32(i)})));
+        t.indirect_cbufs
+            ? t.DrawDataDword(gpu::gcn::kIndirectCbufBindings +
+                                t.user_data_slot * 32 + i)
+            : t.m.Load(t.t_u, t.m.AccessChain(p_u, user_data,
+                                               {t.U32(0), t.U32(i)})));
+  // Merged graphics entries also receive the descriptor-table root in s0:1.
+  // Keep runtime launch state consistent with ScalarEval's resource replay.
+  if (sgpr_base == 8 && count >= 2) {
+    t.SetSg(0, t.Sg(8));
+    t.SetSg(1, t.Sg(9));
+  }
 }
 
 bool TranslateVs(const Program& program,
@@ -3043,9 +3129,7 @@ bool TranslateVs(const Program& program,
 
   std::unordered_map<u32, StageContext::VfetchSeed> vfetch_seed;
   Id vertex_index = 0;
-  bool v0_is_vertex = false;
-  if (attrs.empty()) {  // procedural VS: seed the ABI VGPRs from Vulkan
-                        // built-ins
+  {  // Vertex/instance IDs are live inputs even when attributes are fetched.
     const Id p_in_u = t.m.TypePointer(spv::StorageClass::Input, t.t_u);
     vertex_index = t.m.Variable(p_in_u, spv::StorageClass::Input);
     const Id instance_index = t.m.Variable(p_in_u, spv::StorageClass::Input);
@@ -3057,16 +3141,14 @@ bool TranslateVs(const Program& program,
     iface.push_back(instance_index);
     const Id vertex = t.m.Load(t.t_u, vertex_index);
     t.SetVg(0, vertex);
-    v0_is_vertex = true;
     const Id instance = t.m.Load(t.t_u, instance_index);
     t.SetVg(1, instance);
     t.SetVg(3, instance);
-    // An NGG merged shader takes its vertex index in v5, not v0: v0..v4 carry
-    // the GS half's packed vertex offsets, primitive id and invocation id, all
-    // of which a shader with no attributes overwrites before reading. Demon's
-    // Souls builds every fullscreen pass out of v5 alone, so leaving it zero
-    // collapsed each quad to a point and nothing rasterised.
+    // NGG's ES inputs start at v5; v0..v4 belong to the GS half.
+    // Both procedural passes and inline vertex fetches consume v5.
     t.SetVg(5, vertex);
+    // GFX10 merged ES/GS puts the ES instance ID in v8.
+    t.SetVg(8, instance);
   }
 
   Id first_attr_var = 0;
@@ -3083,11 +3165,12 @@ bool TranslateVs(const Program& program,
     t.m.Name(in_var, "v_attr" + std::to_string(a.semantic));
     iface.push_back(in_var);
     const Id val = t.m.Load(comp_ty, in_var);
-    for (u32 c = 0; c < a.num_comps; c++) {
-      const Id comp =
-          a.num_comps == 1 ? val : t.m.CompositeExtract(t.t_f, val, c);
-      t.SetVgF(a.dest_vgpr + c, comp);
-    }
+    if (a.pc == ~0u)
+      for (u32 c = 0; c < a.num_comps; c++) {
+        const Id comp =
+            a.num_comps == 1 ? val : t.m.CompositeExtract(t.t_f, val, c);
+        t.SetVgF(a.dest_vgpr + c, comp);
+      }
     // An inline fetch is a no-op in the body, but the merged-wave index math
     // can clobber its destination VGPRs (e.g. v0) between here and the
     // transform, so re-seed them at the fetch's pc where the real
@@ -3110,18 +3193,8 @@ bool TranslateVs(const Program& program,
   sc.flat_attrs = &flat_attrs;
   sc.vfetch_seed = std::move(vfetch_seed);
   sc.skip_launch_movs = LaunchExecMovPcs(program);
-  // Shared LDS keys its per-wave block on the vertex index, so a fetch-path VS
-  // (whose attributes arrive as vertex inputs, with no VertexIndex of its own)
-  // needs one declared before the block base can be computed.
+  // Shared LDS keys its per-wave block on the vertex index.
   if (gpu::gcn::GraphicsLdsDwords(program, nullptr)) {
-    if (!vertex_index) {
-      vertex_index =
-          t.m.Variable(t.m.TypePointer(spv::StorageClass::Input, t.t_u),
-                       spv::StorageClass::Input);
-      t.m.Decorate(vertex_index, spv::Decoration::BuiltIn,
-                   {static_cast<u32>(spv::BuiltIn::VertexIndex)});
-      iface.push_back(vertex_index);
-    }
     sc.is_vs_shared_lds_capable = true;
     sc.vertex_index_value = t.m.Load(t.t_u, vertex_index);
     r.shared_lds = true;
@@ -3130,15 +3203,18 @@ bool TranslateVs(const Program& program,
     // a vertex index: seeding the index there sends the read off into the
     // block and the primitive body then works from a junk record index. The
     // one primitive a fullscreen pass draws lives at offset 0.
-    if (v0_is_vertex)
-      t.SetVg(0, t.U32(0));
+    t.SetVg(0, t.U32(0));
   }
-  if (!RdnaPlanCbufs(program, 0, r.vs_cbufs, sc.cbuf_bind, sc.smem_cbuf_by_pc))
+  if (!RdnaPlanCbufs(program, 0, r.vs_cbufs, sc.cbuf_bind, sc.smem_cbuf_by_pc,
+                     r.indirect_cbufs ? gpu::gcn::kIndirectCbufBindings
+                                      : kMaxCbufBindings))
     return false;
   // Constant buffer_load descriptors (e.g. the ortho matrix a procedural 2D VS
   // reads) become additional set-1 UBOs after the SMEM cbufs.
   RdnaPlanBufLoadCbufs(program, 0, r.vs_cbufs, sc.cbuf_bind,
-                       sc.mubuf_cbuf_by_pc);
+                       sc.mubuf_cbuf_by_pc,
+                       r.indirect_cbufs ? gpu::gcn::kIndirectCbufBindings
+                                        : kMaxCbufBindings);
   // A fetch already lifted to a vertex input needs no buffer of its own.
   std::unordered_set<u32> lifted;
   for (const FetchAttr& a : attrs)
@@ -3327,6 +3403,251 @@ bool TranslateVs(const Program& program,
   return true;
 }
 
+bool TranslateMesh(Program es_program, const Program& gs_program,
+                   const u32* es_code, const u32* user_data, u32 user_sgprs,
+                   const NggConfig& cfg,
+                   const std::unordered_set<u32>& flat_attrs,
+                   u32 tex_binding_base, bool gl_clip_space,
+                   Recompiled& r, Translator& t) {
+  if (es_program.empty() || gs_program.empty() || !cfg.threads ||
+      !cfg.input_primitives || !cfg.max_vertices || !cfg.max_primitives ||
+      cfg.max_vertices > cfg.threads || cfg.max_primitives > cfg.threads ||
+      !cfg.lds_dwords || (cfg.threads % 64) != 0)
+    return false;
+  // The ES entry transfers to the separately bound GS entry through s[6:7].
+  // Each half gets its own descriptor plan and original instruction PCs.
+  if (cfg.separate_es) {
+    const auto transfer_at = std::find_if(es_program.begin(), es_program.end(),
+        [](const Inst& inst) {
+          return IsReturn(inst) && (inst.raw[0] & 0xff) == 6;
+        });
+    if (transfer_at == es_program.end())
+      return false;
+    // Generic indirect-branch reachability conservatively includes the shader
+    // footer. Here s6 names the separately bound GS, so it ends the ES body.
+    es_program.erase(transfer_at + 1, es_program.end());
+    Inst& transfer = es_program.back();
+    transfer.enc = Enc::kSopp;
+    transfer.opcode = 1;
+    transfer.raw[0] = 0xbf810000;
+  }
+  t.rdna_sources = true;
+  t.lane_masks = true;
+  t.full_wave_masks = true;
+  t.indirect_cbufs = r.indirect_cbufs = true;
+  t.InitTypes();
+  t.xchg_lanes = cfg.threads;
+  t.xchg_var = t.m.Variable(t.m.TypePointer(spv::StorageClass::Workgroup,
+      t.m.TypeArray(t.t_u, 2 * cfg.threads + 1)), spv::StorageClass::Workgroup);
+  t.m.Capability(spv::Capability::MeshShadingEXT);
+  t.m.Extension("SPV_EXT_mesh_shader");
+  std::vector<Id> iface;
+  const Id uv3 = t.m.TypeVec(t.t_u, 3);
+  const Id local = t.m.Variable(t.m.TypePointer(spv::StorageClass::Input, t.t_u),
+                                spv::StorageClass::Input);
+  t.m.Decorate(local, spv::Decoration::BuiltIn,
+               {static_cast<u32>(spv::BuiltIn::LocalInvocationIndex)});
+  const Id group = t.m.Variable(t.m.TypePointer(spv::StorageClass::Input, uv3),
+                                spv::StorageClass::Input);
+  t.m.Decorate(group, spv::Decoration::BuiltIn,
+               {static_cast<u32>(spv::BuiltIn::WorkgroupId)});
+  const Id words = t.m.TypeArray(t.t_u, 32);
+  t.m.Decorate(words, spv::Decoration::ArrayStride, {4});
+  const Id draw_type = t.m.TypeVec(t.t_u, 4);
+  const Id push_type = t.m.TypeStruct({words, draw_type});
+  t.m.Decorate(push_type, spv::Decoration::Block);
+  t.m.MemberDecorate(push_type, 0, spv::Decoration::Offset, {0});
+  t.m.MemberDecorate(push_type, 1, spv::Decoration::Offset, {144});
+  const Id push = t.m.Variable(
+      t.m.TypePointer(spv::StorageClass::PushConstant, push_type),
+      spv::StorageClass::PushConstant);
+  const Id lds = t.m.Variable(
+      t.m.TypePointer(spv::StorageClass::Workgroup,
+                       t.m.TypeArray(t.t_u, cfg.lds_dwords)),
+      spv::StorageClass::Workgroup);
+  const Id counts = t.m.Variable(
+      t.m.TypePointer(spv::StorageClass::Workgroup, t.m.TypeArray(t.t_u, 2)),
+      spv::StorageClass::Workgroup);
+  const Id count_ptr = t.m.TypePointer(spv::StorageClass::Workgroup, t.t_u);
+  const Id main_fn = t.m.BeginFunction(t.t_void, t.t_fn);
+  const Id index = t.m.Load(t.t_u, local);
+  t.xchg_index = index;
+  const Id groups = t.m.Load(uv3, group);
+  const Id base = t.Mul(t.m.CompositeExtract(t.t_u, groups, 0),
+                        t.U32(cfg.input_primitives));
+  const Id input_count = t.m.Load(t.t_u, t.m.AccessChain(
+      t.m.TypePointer(spv::StorageClass::PushConstant, t.t_u),
+      push, {t.U32(1), t.U32(0)}));
+  const Id group_count = t.UMin(t.Sub(input_count, base),
+                                t.U32(cfg.input_primitives));
+  const Id wave_base = t.And(index, t.U32(~63u));
+  const Id wave_count = t.UMin(t.SelectB(t.Ult(wave_base, group_count),
+                                        t.Sub(group_count, wave_base), t.U32(0)),
+                                t.U32(64));
+  const Id wave_info = t.Or(t.Or(wave_count, t.Shl(wave_count, t.U32(8))),
+                            t.Shl(t.Shr(index, t.U32(6)), t.U32(24)));
+  t.lane_id = t.mask_lane_id = t.And(index, t.U32(63));
+  t.wave_base = wave_base;
+  const Id is_first = t.Eq(index, t.U32(0));
+  const Id init = t.m.NewBlock(), initialized = t.m.NewBlock();
+  t.m.SelectionMerge(initialized);
+  t.m.BranchConditional(is_first, init, initialized);
+  t.m.OpenBlock(init);
+  for (u32 i = 0; i < 2; ++i)
+    t.m.Store(t.m.AccessChain(count_ptr, counts, {t.U32(i)}), t.U32(0));
+  t.m.Branch(initialized);
+  t.m.OpenBlock(initialized);
+  t.Barrier();
+
+  StageContext sc;
+  Id subgroup_local_id = 0;
+  for (u32 half = cfg.separate_es ? 0 : 1; half < 2; ++half) {
+    sc = {};
+    sc.subgroup_local_id = subgroup_local_id;
+    sc.is_mesh = true;
+    sc.r = &r;
+    sc.iface = &iface;
+    sc.main_fn = main_fn;
+    sc.flat_attrs = &flat_attrs;
+    sc.mesh_local_index = index;
+    sc.mesh_counts = counts;
+    sc.mesh_primitive = t.m.Variable(t.p_priv_u, spv::StorageClass::Private,
+                                      t.U32(0x80000000));
+    sc.pos_out = t.m.Variable(
+        t.m.TypePointer(spv::StorageClass::Private, t.t_v4),
+        spv::StorageClass::Private, t.m.ConstNull(t.t_v4));
+    sc.lds_storage = spv::StorageClass::Workgroup;
+    sc.lds_var = lds;
+    sc.lds_dwords = cfg.lds_dwords;
+    const Program& program = half ? gs_program : es_program;
+    std::vector<ShaderCbuf> cbufs;
+    const u32 cb_base = static_cast<u32>(r.vs_cbufs.size());
+    if (!RdnaPlanCbufs(program, cb_base, cbufs, sc.cbuf_bind, sc.smem_cbuf_by_pc,
+                        gpu::gcn::kIndirectCbufBindings))
+      return false;
+    RdnaPlanBufLoadCbufs(program, cb_base, cbufs, sc.cbuf_bind,
+                         sc.mubuf_cbuf_by_pc, gpu::gcn::kIndirectCbufBindings);
+    NoteCbufWindows(cbufs, sc);
+    for (auto& cb : cbufs) {
+      cb.from_gs = half != 0;
+      r.vs_cbufs.push_back(cb);
+    }
+    std::vector<gpu::gcn::ShaderBuffer> buffers;
+    RdnaPlanGfxBuffers(program, static_cast<u32>(r.vs_bufs.size()), nullptr,
+                       buffers, sc.gfx_buf_bind);
+    for (auto& buf : buffers) {
+      buf.from_gs = half != 0;
+      r.vs_bufs.push_back(buf);
+    }
+    const auto image_plan = RdnaPlanMimg(program);
+    if (!half && !image_plan.binding_srsrc.empty())
+      return false;  // split ES fetches are buffer operations
+    if (image_plan.binding_srsrc.size() + tex_binding_base >
+        StageContext::kMaxPsSamplers)
+      return false;
+    sc.mimg_plan = &image_plan;
+    sc.tex_binding_base = tex_binding_base;
+    sc.tex_3d_mask = RdnaTex3dMask(program, image_plan);
+    for (u32 i = 0; i < image_plan.binding_srsrc.size(); ++i)
+      r.vs_texs.push_back({i + tex_binding_base, image_plan.binding_srsrc[i],
+                           image_plan.binding_storage[i],
+                           ((sc.tex_3d_mask >> i) & 1u) != 0});
+    g_stage_bufs = ResolveBuffers(half ? cfg.gs_code : es_code, user_data,
+                                  user_sgprs, 8, 4096, cfg.gs_user_data_addr);
+    t.predicate_vector = false;
+    SeedUserData(t, push, 8, user_sgprs);
+    const Id root_lo = t.DrawDataDword(gpu::gcn::kIndirectGsUserDataAddr);
+    const Id root_hi = t.DrawDataDword(gpu::gcn::kIndirectGsUserDataAddr + 1);
+    const Id has_root = t.IsNonZero(t.Or(root_lo, root_hi));
+    t.SetSg(0, t.SelectB(has_root, root_lo, t.Sg(0)));
+    t.SetSg(1, t.SelectB(has_root, root_hi, t.Sg(1)));
+    t.SetSg(3, wave_info);
+    t.SetVg(0, t.Mul(index, t.U32(4)));
+    t.SetVg(5, t.Add(base, index));
+    t.SetVg(8, t.m.CompositeExtract(t.t_u, groups, 1));
+    PlanCrossLane(program, t, sc, iface);
+    subgroup_local_id = sc.subgroup_local_id;
+    EmitBody(t, program, sc);
+    if (sc.cs_unsupported)
+      return false;
+    t.Barrier();
+  }
+
+  const Id vertices = t.UMin(t.m.Load(t.t_u,
+      t.m.AccessChain(count_ptr, counts, {t.U32(0)})), t.U32(cfg.max_vertices));
+  const Id primitives = t.UMin(t.m.Load(t.t_u,
+      t.m.AccessChain(count_ptr, counts, {t.U32(1)})), t.U32(cfg.max_primitives));
+  t.m.EmitVoid(spv::Op::OpSetMeshOutputsEXT, {vertices, primitives});
+  const auto output_array = [&](Id type, u32 size, spv::BuiltIn builtin) {
+    const Id var = t.m.Variable(
+        t.m.TypePointer(spv::StorageClass::Output, t.m.TypeArray(type, size)),
+        spv::StorageClass::Output);
+    t.m.Decorate(var, spv::Decoration::BuiltIn, {static_cast<u32>(builtin)});
+    return var;
+  };
+  const Id positions = output_array(t.t_v4, cfg.max_vertices, spv::BuiltIn::Position);
+  const Id triangles = output_array(uv3, cfg.max_primitives,
+                                     spv::BuiltIn::PrimitiveTriangleIndicesEXT);
+  const Id cull = output_array(t.t_bool, cfg.max_primitives,
+                                spv::BuiltIn::CullPrimitiveEXT);
+  t.m.Decorate(cull, spv::Decoration::PerPrimitiveEXT);
+  const auto write_when = [&](Id condition, auto emit) {
+    const Id body = t.m.NewBlock(), merge = t.m.NewBlock();
+    t.m.SelectionMerge(merge);
+    t.m.BranchConditional(condition, body, merge);
+    t.m.OpenBlock(body);
+    emit();
+    t.m.Branch(merge);
+    t.m.OpenBlock(merge);
+  };
+  write_when(t.Ult(index, vertices), [&] {
+    Id position = t.m.Load(t.t_v4, sc.pos_out);
+    if (gl_clip_space) {
+      Id c[4];
+      for (u32 i = 0; i < 4; ++i)
+        c[i] = t.m.CompositeExtract(t.t_f, position, i);
+      c[2] = t.FMul(t.FAdd(c[2], c[3]), t.F32(.5f));
+      position = t.m.CompositeConstruct(t.t_v4, {c[0], c[1], c[2], c[3]});
+    }
+    const Id p = t.m.TypePointer(spv::StorageClass::Output, t.t_v4);
+    t.m.Store(t.m.AccessChain(p, positions, {index}), position);
+    for (const auto& [slot, value] : sc.param_outs) {
+      const Id out = t.m.Variable(t.m.TypePointer(spv::StorageClass::Output,
+          t.m.TypeArray(t.t_v4, cfg.max_vertices)), spv::StorageClass::Output);
+      t.m.Decorate(out, spv::Decoration::Location, {slot});
+      if (flat_attrs.count(slot))
+        t.m.Decorate(out, spv::Decoration::Flat);
+      t.m.Store(t.m.AccessChain(p, out, {index}), t.m.Load(t.t_v4, value));
+    }
+  });
+  write_when(t.Ult(index, primitives), [&] {
+    const Id packed = t.m.Load(t.t_u, sc.mesh_primitive);
+    const Id p = t.m.TypePointer(spv::StorageClass::Output, uv3);
+    const Id indices = t.m.CompositeConstruct(uv3,
+        {t.And(packed, t.U32(0x3ff)),
+         t.And(t.Shr(packed, t.U32(10)), t.U32(0x3ff)),
+         t.And(t.Shr(packed, t.U32(20)), t.U32(0x3ff))});
+    t.m.Store(t.m.AccessChain(p, triangles, {index}), indices);
+    t.m.Store(t.m.AccessChain(t.m.TypePointer(spv::StorageClass::Output, t.t_bool),
+                              cull, {index}),
+               t.IsNonZero(t.And(packed, t.U32(0x80000000))));
+  });
+  r.num_params = sc.max_param;
+  r.mesh_input_primitives = cfg.input_primitives;
+  r.mesh_threads = cfg.threads;
+  r.mesh_shared_bytes = (cfg.lds_dwords + 2 * cfg.threads + 3) * 4;
+  r.mesh_vertices = cfg.max_vertices;
+  r.mesh_primitives = cfg.max_primitives;
+  t.m.ReturnVoid();
+  t.m.EndFunction();
+  t.m.EntryPoint(spv::ExecutionModel::MeshEXT, main_fn, "main", iface);
+  t.m.ExecMode(main_fn, spv::ExecutionMode::LocalSize, {cfg.threads, 1, 1});
+  t.m.ExecMode(main_fn, spv::ExecutionMode::OutputVertices, {cfg.max_vertices});
+  t.m.ExecMode(main_fn, spv::ExecutionMode::OutputPrimitivesEXT, {cfg.max_primitives});
+  t.m.ExecMode(main_fn, spv::ExecutionMode::OutputTrianglesEXT, {});
+  return true;
+}
+
 bool TranslatePs(const Program& program,
                  const std::unordered_set<u32>& flat_attrs,
                  u32 ps_input_ena,
@@ -3363,12 +3684,13 @@ bool TranslatePs(const Program& program,
         t.m.Variable(t.m.TypePointer(spv::StorageClass::Private, t.t_v4),
                      spv::StorageClass::Private, t.m.ConstNull(t.t_v4));
   if (!RdnaPlanCbufs(program, static_cast<u32>(r.vs_cbufs.size()),
-                     r.ps_cbufs, sc.cbuf_bind, sc.smem_cbuf_by_pc))
+                     r.ps_cbufs, sc.cbuf_bind, sc.smem_cbuf_by_pc,
+                     r.indirect_cbufs ? gpu::gcn::kIndirectCbufBindings
+                                      : kMaxCbufBindings))
     return false;
   RdnaPlanGfxBuffers(program, static_cast<u32>(r.vs_bufs.size()),
                      nullptr, r.ps_bufs, sc.gfx_buf_bind);
   NoteCbufWindows(r.ps_cbufs, sc);
-  PlanCrossLane(program, t, sc, iface);
   PlanGraphicsLds(program, t, sc);
   const gpu::gcn::MimgBindingPlan mimg_plan = RdnaPlanMimg(program);
   if (mimg_plan.binding_srsrc.size() > StageContext::kMaxPsSamplers)
@@ -3382,6 +3704,7 @@ bool TranslatePs(const Program& program,
 
   const Id user_data = DeclareUserData(t);
   sc.main_fn = t.m.BeginFunction(t.t_void, t.t_fn);
+  PlanCrossLane(program, t, sc, iface);
   SeedUserData(t, user_data, 0, user_sgprs);
   gpu::gcn::SeedPsInputVgprs(t, ps_input_ena, iface);
   gpu::gcn::SeedPsBarycentrics(t, ps_input_ena, sc);
@@ -3483,12 +3806,53 @@ bool TranslateDepthOnlyPs(Translator& t) {
 
 // Shared with the compute stage (rdna_compute.cc), which lowers the same
 // branches through the same per-instruction dispatch.
+bool HasNggTransfer(const u32* code) {
+  if (!code || !gpu::IsReadableRangeCached(reinterpret_cast<u64>(code), 1024))
+    return false;
+  const Program program = DecodeShader(code, 256);
+  return std::any_of(program.begin(), program.end(), [](const Inst& inst) {
+    return IsReturn(inst) && (inst.raw[0] & 0xff) == 6;
+  });
+}
+
+bool HasNggPrimitiveExports(const u32* code) {
+  if (!code || !gpu::IsReadableRangeCached(reinterpret_cast<u64>(code), 16384))
+    return false;
+  bool allocation = false, connectivity = false;
+  for (const Inst& inst : *CachedReachableProgram(code, 4096)) {
+    allocation |= inst.enc == Enc::kSopp && inst.opcode == 0x10 &&
+                  (inst.raw[0] & 0xf) == 9;
+    connectivity |= inst.enc == Enc::kExp &&
+                    ((inst.raw[0] >> 4) & 0x3f) == 20;
+    if (allocation && connectivity)
+      return true;
+  }
+  return false;
+}
+
 void EmitCfg(Translator& t, const Program& program, StageContext& sc) {
   const u32 max_pc =
       program.empty() ? 0 : program.back().pc + program.back().size;
-  const std::vector<u32> starts = BlockStarts(program, max_pc);
+  std::vector<u32> starts = BlockStarts(program, max_pc);
+  if (sc.is_mesh) {
+    // A guest barrier is a rendezvous PC. Keep it separate from adjacent
+    // instructions so an early wave can wait while its peers keep running.
+    for (const Inst& inst : program) {
+      if (inst.enc != Enc::kSopp || inst.opcode != 0x0a)
+        continue;
+      starts.push_back(inst.pc);
+      if (inst.pc + inst.size < max_pc)
+        starts.push_back(inst.pc + inst.size);
+    }
+    std::sort(starts.begin(), starts.end());
+    starts.erase(std::unique(starts.begin(), starts.end()), starts.end());
+  }
   const u32 num_blocks = static_cast<u32>(starts.size());
   const u32 kExit = num_blocks;
+  // A single block executes once for every invocation. In the general
+  // dispatch loop, different invocations can visit blocks on different
+  // iterations, so a workgroup barrier inside a case would be unsafe.
+  t.uniform_here = sc.is_mesh || (sc.is_cs && num_blocks == 1);
   const auto block_of = [&](u32 pc) -> u32 {
     if (pc >= max_pc)
       return kExit;
@@ -3546,6 +3910,42 @@ void EmitCfg(Translator& t, const Program& program, StageContext& sc) {
   t.m.Branch(dispatch);
   t.m.OpenBlock(dispatch);
   Id state = t.State();
+  if (sc.is_mesh) {
+    // All invocations execute the selected block, with guest state updates
+    // predicated by their wave's PC. This keeps cross-lane exchanges uniform
+    // even when guest waves take different branches or finish at different
+    // times. A barrier can run only when every wave has reached it.
+    t.WavePublish(state);
+    t.Barrier();
+    const Id leader = t.m.NewBlock(), selected = t.m.NewBlock();
+    const Id is_leader = t.IsZero(t.xchg_index);
+    t.m.SelectionMerge(selected);
+    t.m.BranchConditional(is_leader, leader, selected);
+    t.m.OpenBlock(leader);
+    const Id first = t.m.Load(t.t_u, t.XchgAt(t.U32(0)));
+    Id all_equal = t.True(), pending = t.U32(kExit);
+    for (u32 wave = 0; wave < t.xchg_lanes; wave += 64) {
+      const Id pc = t.m.Load(t.t_u, t.XchgAt(t.U32(wave)));
+      all_equal = t.m.Emit(spv::Op::OpLogicalAnd, t.t_bool,
+                           {all_equal, t.Eq(pc, first)});
+      Id runnable = t.Ult(pc, t.U32(kExit));
+      for (const Inst& inst : program) {
+        if (inst.enc == Enc::kSopp && inst.opcode == 0x0a)
+          runnable = t.m.Emit(spv::Op::OpLogicalAnd, t.t_bool,
+              {runnable, t.m.Emit(spv::Op::OpINotEqual, t.t_bool,
+                                  {pc, t.U32(block_of(inst.pc))})});
+      }
+      pending = t.SelectB(runnable, t.UMin(pending, pc), pending);
+    }
+    const Id choice = t.XchgAt(t.U32(2 * t.xchg_lanes));
+    t.m.Store(choice, t.SelectB(all_equal, first, pending));
+    t.m.Branch(selected);
+    t.m.OpenBlock(selected);
+    t.Barrier();
+    state = t.m.Load(t.t_u, t.XchgAt(t.U32(2 * t.xchg_lanes)));
+    t.Barrier();
+    t.block_active = t.Eq(t.State(), state);
+  }
   if (kCfgMaxIter) {
     const Id it = t.m.Load(t.t_u, iter_var);
     t.m.Store(iter_var, t.m.Emit(spv::Op::OpIAdd, t.t_u, {it, t.U32(1)}));
@@ -3613,6 +4013,7 @@ void EmitCfg(Translator& t, const Program& program, StageContext& sc) {
   t.m.OpenBlock(cont);
   t.m.Branch(header);
   t.m.OpenBlock(merge);
+  t.block_active = 0;
 }
 
 Recompiled Recompile(const u32* vs_code,
@@ -3624,7 +4025,8 @@ Recompiled Recompile(const u32* vs_code,
                      u32 vs_user_sgprs,
                      u32 ps_user_sgprs,
                      const u32* ps_in_cntl,
-                     u32 ps_num_interp) {
+                     u32 ps_num_interp,
+                     const NggConfig* ngg) {
   Recompiled r;
   if (!vs_code || !vs_user_data || !ps_user_data)
     return r;
@@ -3633,10 +4035,14 @@ Recompiled Recompile(const u32* vs_code,
   const u64 vs_address = reinterpret_cast<uintptr_t>(vs_code);
   const u64 ps_address = reinterpret_cast<uintptr_t>(ps_code);
   if (!gpu::IsReadableRange(vs_address, kMaxShaderBytes) ||
-      (ps_code && !gpu::IsReadableRange(ps_address, kMaxShaderBytes)))
+      (ps_code && !gpu::IsReadableRange(ps_address, kMaxShaderBytes)) ||
+      (ngg && (!ngg->gs_code || !gpu::IsReadableRange(
+          reinterpret_cast<u64>(ngg->gs_code), kMaxShaderBytes))))
     return r;
 
   const Program vs_program = ReachableProgram(DecodeShader(vs_code, 4096));
+  const Program gs_program = ngg && ngg->gs_code
+      ? ReachableProgram(DecodeShader(ngg->gs_code, 4096)) : Program{};
   const Program ps_program =
       ps_code ? ReachableProgram(DecodeShader(ps_code, 4096)) : Program{};
 
@@ -3651,7 +4057,7 @@ Recompiled Recompile(const u32* vs_code,
   // The parameter cache packs the VS's exports densely in export order, and
   // SPI_PS_INPUT_CNTL.OFFSET indexes THAT, not the param number.
   std::vector<u32> vs_exported_params;
-  for (const Inst& inst : vs_program)
+  for (const Inst& inst : ngg ? gs_program : vs_program)
     if (inst.enc == Enc::kExp) {
       const u32 tgt = (inst.raw[0] >> 4) & 0x3F;
       if (tgt >= 32 && tgt <= 63)
@@ -3662,13 +4068,16 @@ Recompiled Recompile(const u32* vs_code,
       std::unique(vs_exported_params.begin(), vs_exported_params.end()),
       vs_exported_params.end());
 
+  r.indirect_cbufs = ngg || vs_user_sgprs > 16 || ps_user_sgprs > 16;
   Translator tv;
   tv.rdna_sources = true;
+  tv.indirect_cbufs = r.indirect_cbufs;
   gpu::gcn::ResetUnsupported();
   g_vs_addr = reinterpret_cast<uintptr_t>(vs_code);
   // The merged NGG stage is launched with its user data at s8 (kUdBase in the
   // command processor, and what SeedUserData assumes here); a PS gets it at s0.
-  g_stage_bufs = ResolveBuffers(vs_code, vs_user_data, vs_user_sgprs, 8);
+  g_stage_bufs = ResolveBuffers(vs_code, vs_user_data, vs_user_sgprs, 8, 4096,
+                                ngg ? ngg->gs_user_data_addr : 0);
   g_warned_store = false;
   // The PS's textures occupy the first descriptor slots, so the VS has to know
   // how many there are before it plans its own. Planning is a pure walk of the
@@ -3676,8 +4085,13 @@ Recompiled Recompile(const u32* vs_code,
   const u32 ps_tex_count =
       ps_code ? static_cast<u32>(RdnaPlanMimg(ps_program).binding_srsrc.size())
               : 0;
-  if (!TranslateVs(vs_program, vs_user_data, flat_attrs, r, tv, gl_clip_space,
-                   vs_user_sgprs, ps_tex_count) ||
+  const bool vertex_ok = ngg
+      ? TranslateMesh(vs_program, gs_program, vs_code, vs_user_data,
+                      vs_user_sgprs, *ngg, flat_attrs, ps_tex_count,
+                      gl_clip_space, r, tv)
+      : TranslateVs(vs_program, vs_user_data, flat_attrs, r, tv, gl_clip_space,
+                    vs_user_sgprs, ps_tex_count);
+  if (!vertex_ok ||
       gpu::gcn::HadUnsupported()) {
     if (ShDbg() || kDrawCensus)
       BASE_LOGI("gcnspv", "vs {:#x} rejected: {}",
@@ -3687,6 +4101,8 @@ Recompiled Recompile(const u32* vs_code,
   }
   Translator tp;
   tp.rdna_sources = true;
+  tp.indirect_cbufs = r.indirect_cbufs;
+  tp.user_data_slot = 1;
   g_ps_addr = reinterpret_cast<uintptr_t>(ps_code);
   g_stage_bufs = ResolveBuffers(ps_code, ps_user_data, ps_user_sgprs, 0);
   g_warned_store = false;
@@ -3713,12 +4129,12 @@ Recompiled Recompile(const u32* vs_code,
       gpu::gcn::EmitRectListGeometry(r.num_params, flat_attrs);
   std::string err;
   if (!gpu::gcn::spirv::Validate(vs, &err)) {
-    if (gpu::gcn::TraceEnabled())
+    if (gpu::gcn::TraceEnabled() || kDrawCensus)
       BASE_LOGI("rdna", "VS invalid: {}", err.c_str());
     return r;
   }
   if (!gpu::gcn::spirv::Validate(ps, &err)) {
-    if (gpu::gcn::TraceEnabled())
+    if (gpu::gcn::TraceEnabled() || kDrawCensus)
       BASE_LOGI("rdna", "PS invalid: {}", err.c_str());
     return r;
   }
@@ -3742,14 +4158,17 @@ Recompiled Recompile(const u32* vs_code,
   // SPIRV-Tools' def-use rewrite takes minutes on some large Skyrim modules.
   // These binaries were validated above, so submit them without
   // post-processing.
-  r.vs_spirv = vs;
+  if (ngg)
+    r.mesh_spirv = vs;
+  else
+    r.vs_spirv = vs;
   r.fs_spirv = ps;
   std::string gs_err;
   if (!gs.empty() && gpu::gcn::spirv::Validate(gs, &gs_err))
     r.gs_spirv = gs;
   else if (gpu::gcn::TraceEnabled())
     BASE_LOGI("rdna", "RECTLIST GS invalid: {}", gs_err.c_str());
-  r.ok = !r.vs_spirv.empty() && !r.fs_spirv.empty();
+  r.ok = (!r.vs_spirv.empty() || !r.mesh_spirv.empty()) && !r.fs_spirv.empty();
   return r;
 }
 

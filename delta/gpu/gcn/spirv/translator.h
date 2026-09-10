@@ -63,6 +63,9 @@ struct Translator {
   Id t_v2 = 0, t_v3 = 0, t_v4 = 0;
   Id p_priv_u = 0, sgpr = 0, vgpr = 0;
   bool predicate_vector = false;
+  // A mesh workgroup executes one selected guest block uniformly. Only the
+  // waves whose private PC names that block may change their guest state.
+  Id block_active = 0;
   bool rdna_sources = false;
   // Guest address of dword 0 of the program being translated. Guest memory is
   // identity-mapped, so this is just the code pointer. s_getpc_b64 needs it:
@@ -79,6 +82,9 @@ struct Translator {
   Id scc_var = 0;    // scalar condition code
   Id state_var = 0;  // CFG block index for the while-switch dispatch
   Id cbuf_type = 0;  // shared CB { uvec4 data[64]; } type
+  bool indirect_cbufs = false;
+  u32 user_data_slot = 0;  // 0 = vertex/geometry, 1 = pixel
+  Id cbuf_ring = 0, cbuf_offsets = 0;
   std::unordered_map<u32, Id> cbuf_vars;  // binding -> cbuffer UBO var
   Id gfx_buf_type = 0;  // shared Buf { uint data[]; } type (set 2)
   Id lds_buf_var = 0;   // shared-LDS storage buffer (set 3), see EnsureLdsBuffer
@@ -213,10 +219,19 @@ struct Translator {
   }
   // Whether this invocation's lane is set in a wave mask.
   Id LaneActive(Id mask) {
-    return (wave_masks || lane_masks)
+    return InBlock((wave_masks || lane_masks)
                ? IsNonZero(And(Shr(mask, And(lane_masks ? mask_lane_id : WaveLane(), U32(31))),
                                U32(1)))
-               : IsNonZero(mask);
+               : IsNonZero(mask));
+  }
+  Id InBlock(Id condition) {
+    return block_active ? m.Emit(spv::Op::OpLogicalAnd, t_bool,
+                                 {block_active, condition}) : condition;
+  }
+  void StorePrivate(Id pointer, Id value) {
+    m.Store(pointer, block_active
+                         ? SelectB(block_active, value, m.Load(t_u, pointer))
+                         : value);
   }
   // A carry/borrow out: one bit per lane on the hardware, so it is a mask too.
   void SetLaneFlag(u32 sgpr, Id flag) {
@@ -308,12 +323,12 @@ struct Translator {
 
   // ---- SCC / EXEC / CFG-state ----
   Id Scc() { return m.Load(t_u, scc_var); }
-  void SetScc(Id v) { m.Store(scc_var, v); }
+  void SetScc(Id v) { StorePrivate(scc_var, v); }
   void SetSccBool(Id b) { SetScc(SelectB(b, U32(1), U32(0))); }
   Id Exec() { return SgMask(126); }
   Id State() { return m.Load(t_u, state_var); }
-  void SetState(u32 s) { m.Store(state_var, U32(s)); }
-  void SetStateId(Id s) { m.Store(state_var, s); }
+  void SetState(u32 s) { StorePrivate(state_var, U32(s)); }
+  void SetStateId(Id s) { StorePrivate(state_var, s); }
 
   // ---- register file ----
   Id SgPtr(u32 i) { return m.AccessChain(p_priv_u, sgpr, {U32(i)}); }
@@ -324,7 +339,7 @@ struct Translator {
   Id Vg(u32 i) { return m.Load(t_u, VgPtr(i)); }
   void SetSg(u32 i, Id v) {
     if (!rdna_sources || i != 125)
-      m.Store(SgPtr(i), v);
+      StorePrivate(SgPtr(i), v);
   }
   Id Sdst(u32 base, u32 offset = 0) {
     return rdna_sources && base == 125 ? U32(0) : Sg(base + offset);
@@ -336,7 +351,7 @@ struct Translator {
   void SetVg(u32 i, Id v) {
     if (predicate_vector)
       v = SelectB(LaneActive(Exec()), v, Vg(i));
-    m.Store(VgPtr(i), v);
+    StorePrivate(VgPtr(i), v);
   }
   Id VgF(u32 i) { return m.Bitcast(t_f, Vg(i)); }
   void SetVgF(u32 i, Id f) { SetVg(i, m.Bitcast(t_u, f)); }
@@ -508,6 +523,8 @@ struct Translator {
   // clamps into the declared window so an out-of-range constant
   // index cannot produce an invalid access chain.
   Id CbufDword(u32 binding, u32 k) {
+    if (indirect_cbufs)
+      return CbufDwordId(binding, U32(k));
     const Id var = EnsureCbuf(binding);
     const Id p_u = m.TypePointer(spv::StorageClass::Uniform, t_u);
     const Id ch = m.AccessChain(
@@ -515,7 +532,38 @@ struct Translator {
         {U32(0), U32(std::min(k >> 2, kCbufDwords / 4 - 1)), U32(k & 3)});
     return m.Load(t_u, ch);
   }
+  Id DrawDataDword(u32 index) {
+    if (!cbuf_offsets) {
+      const Id array = m.TypeArray(TypeV4u(), kIndirectDrawDwords / 4);
+      m.Decorate(array, spv::Decoration::ArrayStride, {16});
+      const Id block = m.TypeStruct({array});
+      m.Decorate(block, spv::Decoration::Block);
+      m.MemberDecorate(block, 0, spv::Decoration::Offset, {0});
+      cbuf_offsets = m.Variable(m.TypePointer(spv::StorageClass::Uniform,
+          block), spv::StorageClass::Uniform);
+      m.Decorate(cbuf_offsets, spv::Decoration::DescriptorSet, {1});
+      m.Decorate(cbuf_offsets, spv::Decoration::Binding, {1});
+    }
+    return m.Load(t_u, m.AccessChain(
+        m.TypePointer(spv::StorageClass::Uniform, t_u), cbuf_offsets,
+        {U32(0), U32(index / 4), U32(index % 4)}));
+  }
   Id CbufDwordId(u32 binding, Id k) {
+    if (indirect_cbufs) {
+      if (!cbuf_ring) {
+        cbuf_ring = m.Variable(m.TypePointer(spv::StorageClass::StorageBuffer,
+            EnsureRawBlockType()), spv::StorageClass::StorageBuffer);
+        m.Decorate(cbuf_ring, spv::Decoration::DescriptorSet, {1});
+        m.Decorate(cbuf_ring, spv::Decoration::Binding, {0});
+        m.Decorate(cbuf_ring, spv::Decoration::NonWritable);
+      }
+      const Id base = DrawDataDword(binding);
+      const Id index = Add(base, Add(Mul(UMin(Shr(k, U32(2)),
+          U32(kCbufDwords / 4 - 1)), U32(4)), And(k, U32(3))));
+      return m.Load(t_u, m.AccessChain(
+          m.TypePointer(spv::StorageClass::StorageBuffer, t_u), cbuf_ring,
+          {U32(0), index}));
+    }
     const Id var = EnsureCbuf(binding);
     const Id v4 = UMin(Shr(k, U32(2)), U32(kCbufDwords / 4 - 1));
     const Id p_u = m.TypePointer(spv::StorageClass::Uniform, t_u);
@@ -713,6 +761,10 @@ struct StageContext {
   Id main_fn = 0;  // entry function (for stage-wide ExecMode additions)
 
   // VS
+  bool is_mesh = false;
+  Id mesh_counts = 0;     // Workgroup {vertex count, primitive count}
+  Id mesh_primitive = 0;  // Private packed NGG connectivity
+  Id mesh_local_index = 0;
   Id pos_out = 0;
   std::unordered_map<u32, Id> param_outs;
   std::unordered_set<u32>

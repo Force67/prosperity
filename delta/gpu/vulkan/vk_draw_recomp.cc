@@ -330,6 +330,25 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
     }
     return Decline(kNoRecomp);
   }
+  const bool mesh = !d.recomp->mesh_spirv.empty();
+  if (mesh && (!g_dev.draw_mesh_tasks || !d.recomp->mesh_input_primitives ||
+               indexed))
+    return Decline(kNoRecomp);
+  if (mesh) {
+    const auto& limits = g_dev.mesh_limits;
+    if (d.recomp->mesh_threads > limits.maxMeshWorkGroupInvocations ||
+        d.recomp->mesh_threads > limits.maxMeshWorkGroupSize[0] ||
+        d.recomp->mesh_shared_bytes > limits.maxMeshSharedMemorySize ||
+        d.recomp->mesh_vertices > limits.maxMeshOutputVertices ||
+        d.recomp->mesh_primitives > limits.maxMeshOutputPrimitives)
+      return Decline(kNoRecomp);
+    const u32 groups = (draw_count - 1) / d.recomp->mesh_input_primitives + 1;
+    const u32 instances = std::max(d.instance_count, 1u);
+    if (groups > g_dev.mesh_limits.maxMeshWorkGroupCount[0] ||
+        instances > g_dev.mesh_limits.maxMeshWorkGroupCount[1] ||
+        u64(groups) * instances > g_dev.mesh_limits.maxMeshWorkGroupTotalCount)
+      return Decline(kNoRecomp);
+  }
   const bool has_storage_image =
       std::any_of(d.recomp->ps_texs.begin(), d.recomp->ps_texs.end(),
                   [](const gcn::ShaderTex& tex) { return tex.storage; });
@@ -1481,10 +1500,16 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
   vkCmdSetBlendConstants(g_frame.cmd, d.blend_constants);
   // 16 user-data dwords per stage, in its own half of the shared push range:
   // both stages at offset 0 meant the second push overwrote the first.
-  vkCmdPushConstants(g_frame.cmd, rp->layout, kPcStages, 0, 64,
+  const VkShaderStageFlags pc_stages = mesh
+      ? VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_FRAGMENT_BIT : kPcStages;
+  vkCmdPushConstants(g_frame.cmd, rp->layout, pc_stages, 0, 64,
                      d.vs_user_data);
-  vkCmdPushConstants(g_frame.cmd, rp->layout, kPcStages, 64, 64,
+  vkCmdPushConstants(g_frame.cmd, rp->layout, pc_stages, 64, 64,
                      d.ps_user_data);
+  if (mesh) {
+    const u32 mesh_draw[4] = {draw_count, std::max(d.instance_count, 1u), 0, 0};
+    vkCmdPushConstants(g_frame.cmd, rp->layout, pc_stages, 144, 16, mesh_draw);
+  }
   if (gpu::gcn::PushCodeBase()) {
     // Each stage's OWN code address, for s_getpc_b64: the modules are keyed by
     // content, so the address cannot live in the SPIR-V, and VS and PS live at
@@ -1494,18 +1519,22 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
                                  static_cast<u32>(d.vs_addr >> 32)};
     const u32 ps_base[2] = {static_cast<u32>(d.ps_addr),
                                  static_cast<u32>(d.ps_addr >> 32)};
-    vkCmdPushConstants(g_frame.cmd, rp->layout, kPcStages, 128,
+    vkCmdPushConstants(g_frame.cmd, rp->layout, pc_stages, 128,
                        8, vs_base);
-    vkCmdPushConstants(g_frame.cmd, rp->layout, kPcStages, 136, 8,
+    vkCmdPushConstants(g_frame.cmd, rp->layout, pc_stages, 136, 8,
                        ps_base);
   }
   // Copy each guest cbuffer window into the per-frame ring and bind set 1.
   // Vulkan requires one dynamic offset for every dynamic descriptor in the set
   // layout.
+  const bool indirect_cbufs = d.recomp->indirect_cbufs;
+  const u32 cbuf_count = indirect_cbufs ? gpu::gcn::kIndirectCbufBindings
+                                       : kCbufBindings;
   VkDeviceSize cb_off = (g_ring.ubo_offset + g_ring.ubo_align - 1) &
                         ~(VkDeviceSize)(g_ring.ubo_align - 1);
   VkDeviceSize cb_stride = g_ring.ubo_stride;
-  if (cb_off + cb_stride * kCbufBindings > g_ring.ubo_end) {
+  if (cb_off + cb_stride * (cbuf_count + (indirect_cbufs ? 1 : 0)) >
+      g_ring.ubo_end) {
     if (kGpuDecltrace) {
       static int n = 0;
       if (n++ < 32)
@@ -1515,10 +1544,10 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
     }
     return Decline(kRing);
   }
-  u32 dyn_off[kCbufBindings];
+  u32 dyn_off[gpu::gcn::kIndirectCbufBindings]{};
   u32 cbuf_mask = 0;
   VkDeviceSize next = cb_off;
-  for (u32 i = 0; i < kCbufBindings; i++) {
+  for (u32 i = 0; i < cbuf_count; i++) {
     const auto& cb = d.cbufs[i];
     const u32 readable = std::min(cb.size, kCbufWindow);
     const bool have_cbuf = readable && IsReadableThisFrame(cb.base, readable);
@@ -1607,10 +1636,37 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
     dyn_off[i] = static_cast<u32>(next);
     next += cb_stride;
   }
+  if (indirect_cbufs) {
+    const VkDeviceSize slot_base = g_frame.slot_idx * (kUboRing / 2);
+    u32 offsets[gpu::gcn::kIndirectDrawDwords]{};
+    for (u32 i = 0; i < cbuf_count; ++i)
+      if (dyn_off[i])
+        offsets[i] = static_cast<u32>((dyn_off[i] - slot_base) / sizeof(u32));
+    std::memcpy(offsets + gpu::gcn::kIndirectCbufBindings,
+                 d.vs_user_data, sizeof(d.vs_user_data));
+    std::memcpy(offsets + gpu::gcn::kIndirectCbufBindings + 32,
+                 d.ps_user_data, sizeof(d.ps_user_data));
+    offsets[gpu::gcn::kIndirectGsUserDataAddr] = static_cast<u32>(d.gs_user_data_addr);
+    offsets[gpu::gcn::kIndirectGsUserDataAddr + 1] =
+        static_cast<u32>(d.gs_user_data_addr >> 32);
+    const size_t window = static_cast<size_t>(next / cb_stride);
+    const u32 previous = g_ring.ubo_written[window];
+    std::memcpy(g_ring.ubo_map + next, offsets, sizeof(offsets));
+    if (previous > sizeof(offsets))
+      std::memset(g_ring.ubo_map + next + sizeof(offsets), 0,
+                   previous - sizeof(offsets));
+    g_ring.ubo_written[window] = sizeof(offsets);
+    const u32 table_offset = static_cast<u32>(next);
+    vkCmdBindDescriptorSets(g_frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+        rp->layout, 1, 1, &g_ring.indirect_cbuf_sets[g_frame.slot_idx],
+        1, &table_offset);
+    next += cb_stride;
+  } else {
+    vkCmdBindDescriptorSets(g_frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            rp->layout, 1, 1, &g_ring.ubo_set, kCbufBindings,
+                            dyn_off);
+  }
   g_ring.ubo_offset = next;
-  vkCmdBindDescriptorSets(g_frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                          rp->layout, 1, 1, &g_ring.ubo_set, kCbufBindings,
-                          dyn_off);
   // Stage the raw buffers the shader indexes by hand (set 2). Only the leading
   // window of each is copied -- a MUBUF address is a per-lane index with no
   // static bound, so there is no "planned size" to copy exactly -- and the
@@ -1748,7 +1804,11 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
                  indexed ? d.index_count : d.vertex_count,
                  indexed ? " indexed" : "");
   DrawCheckpoint(g_frame.cmd, g_frame.num, g_frame.draws, false);
-  if (indexed)
+  if (mesh)
+    g_dev.draw_mesh_tasks(g_frame.cmd,
+        (draw_count - 1) / d.recomp->mesh_input_primitives + 1,
+        d.instance_count ? d.instance_count : 1, 1);
+  else if (indexed)
     vkCmdDrawIndexed(g_frame.cmd, d.index_count,
                      d.instance_count ? d.instance_count : 1, 0, 0, 0);
   else

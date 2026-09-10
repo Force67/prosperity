@@ -62,6 +62,12 @@ if(SPIRVTOOLS_FOUND AND SPIRVHEADERS_FOUND)
   add_delta_test(rdna_bvh_test
     SOURCES rdna_bvh_test.cc
     DEPS delta_gpu)
+  add_delta_test(vk_draw_test
+    SOURCES vk_draw_test.cc
+    DEPS delta_gpu)
+  target_include_directories(vk_draw_test PRIVATE ${SPIRVHEADERS_INCLUDE_DIRS})
+  set_tests_properties(vk_draw_test PROPERTIES
+    ENVIRONMENT "SDL_VIDEODRIVER=offscreen;DELTA_GPU_NOPRESENT=1;DELTA_GPU_SNAPEVERY=1000000;DELTA_GPU_SNAPEVERY_MAX=0")
 endif()
 
 add_delta_test(vk_memory_span_test

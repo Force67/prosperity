@@ -447,6 +447,26 @@ void NoteDrawDropped(const rhi::DrawInfo& d,
 
 // --- one draw, in detail ---------------------------------------------------
 
+void TraceNggState(const Regs& regs, u64 es_addr, u64 gs_addr) {
+  if (!kGpuDrawcensus || !gs_addr || es_addr == gs_addr)
+    return;
+  static std::unordered_set<u64> seen;
+  const u64 key = gs_addr ^ (es_addr * 0x9e3779b97f4a7c15ull);
+  if (seen.size() >= 128 || !seen.insert(key).second)
+    return;
+  BASE_LOGI("nggstate",
+            "es={:#x} gs={:#x} ge_cntl={:#x} onchip={:#x} max_out={:#x} "
+            "subgrp={:#x} instances={:#x} rsrc2={:#x}",
+            es_addr, gs_addr, regs[0xc25b], regs[0xa291], regs[0xa2ce],
+            regs[0xa2d3], regs[0xa2e4], regs[mmSPI_SHADER_PGM_RSRC2_GS]);
+  BASE_LOGI("nggstate", "GS UD:{}",
+            Words(regs.At(mmSPI_SHADER_USER_DATA_GS_0), 32).c_str());
+  BASE_LOGI("nggstate", "ES UD:{}",
+            Words(regs.At(mmSPI_SHADER_USER_DATA_ES_0), 32).c_str());
+  BASE_LOGI("nggstate", "GS system UD:{}",
+            Words(regs.At(mmSPI_SHADER_USER_DATA_ADDR_LO_GS), 2).c_str());
+}
+
 void NoteDrawDetail() {
   g_detailed++;
 }

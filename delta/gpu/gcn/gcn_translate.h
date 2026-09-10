@@ -72,6 +72,11 @@ struct ShaderAttr {
 // mishandle silently. 15 is what current NVIDIA parts report; the check in
 // vk_upload_ring.cc still reports a device below that rather than assuming.
 constexpr u32 kMaxCbufBindings = 15;
+// Mesh pipelines address staged windows through one storage buffer and a
+// small offset table, avoiding the limit on dynamic UBO descriptors.
+constexpr u32 kIndirectCbufBindings = 32;
+constexpr u32 kIndirectGsUserDataAddr = kIndirectCbufBindings + 2 * 32;
+constexpr u32 kIndirectDrawDwords = kIndirectGsUserDataAddr + 4;
 constexpr u32 kCbufDwords = 4096;
 
 // A constant buffer a shader stage reads (s_buffer_load). Bound as a UBO.
@@ -101,6 +106,7 @@ struct ShaderCbuf {
   // ud_sgpr is then the SGPR pair holding the pointer, which draw-time scalar
   // evaluation resolves, and num_dwords alone gives the window size.
   bool pointer = false;
+  bool from_gs = false;  // split NGG stage used for scalar descriptor replay
 };
 
 // Set-2 storage-buffer bindings shared by VS + PS, and the window of each one
@@ -187,6 +193,7 @@ struct ShaderBuffer {
   u32 binding = 0;
   u32 srsrc_sgpr = 0;
   u32 use_pc = 0;
+  bool from_gs = false;
 };
 
 // A texture the PS references (MIMG). Bound as a combined image sampler at
@@ -205,6 +212,11 @@ struct ShaderTex {
 struct Recompiled {
   bool ok = false;
   std::vector<u32> vs_spirv;  // emitted directly from GCN
+  std::vector<u32> mesh_spirv;  // merged NGG geometry, replaces VS/GS
+  u32 mesh_input_primitives = 1;  // input primitives consumed per workgroup
+  u32 mesh_threads = 0, mesh_shared_bytes = 0;
+  u32 mesh_vertices = 0, mesh_primitives = 0;
+  bool indirect_cbufs = false;
   std::vector<u32> gs_spirv;  // fixed RECTLIST expansion stage
   std::vector<u32> fs_spirv;
   std::vector<ShaderAttr> attrs;     // vertex inputs

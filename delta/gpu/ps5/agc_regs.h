@@ -128,6 +128,9 @@ constexpr u32 mmVGT_SHADER_STAGES_EN = 0xA2D5;
 constexpr u32 mmVGT_PRIMITIVE_TYPE = 0xC242;
 constexpr u32 mmVGT_INDEX_TYPE = 0xC243;
 constexpr u32 mmGE_CNTL = 0xC25B;
+constexpr u32 mmVGT_GS_ONCHIP_CNTL = 0xA291;
+constexpr u32 mmVGT_GS_MAX_VERT_OUT = 0xA2CE;
+constexpr u32 mmGE_NGG_SUBGRP_CNTL = 0xA2D3;
 
 // --- shader (SH) registers (absolute = kShRegBase + n) ---
 // Pixel shader program address + resources + user data.
@@ -144,6 +147,8 @@ constexpr u32 mmSPI_SHADER_USER_DATA_PS_0 =
 // the ES and GS PGM_LO registers. We read the vertex shader from the GS block
 // (SPI_SHADER_PGM_LO_GS) and its user data from SPI_SHADER_USER_DATA_GS_0.
 constexpr u32 mmSPI_SHADER_PGM_LO_GS = 0x2C88;
+constexpr u32 mmSPI_SHADER_USER_DATA_ADDR_LO_GS = 0x2C82;
+constexpr u32 mmSPI_SHADER_USER_DATA_ADDR_HI_GS = 0x2C83;
 constexpr u32 mmSPI_SHADER_PGM_HI_GS = 0x2C89;
 constexpr u32 mmSPI_SHADER_PGM_RSRC1_GS = 0x2C8A;
 constexpr u32 mmSPI_SHADER_PGM_RSRC2_GS = 0x2C8B;

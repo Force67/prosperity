@@ -107,6 +107,9 @@ struct UploadRings {
   VkDescriptorSetLayout empty_layout = VK_NULL_HANDLE;
   VkDescriptorPool ubo_pool = VK_NULL_HANDLE;
   VkDescriptorSet ubo_set = VK_NULL_HANDLE;
+  VkDescriptorSetLayout indirect_cbuf_layout = VK_NULL_HANDLE;
+  VkDescriptorPool indirect_cbuf_pool = VK_NULL_HANDLE;
+  VkDescriptorSet indirect_cbuf_sets[2]{};
 
   // Raw-buffer ring: same shape as the cbuffer ring (fixed windows selected by
   // a dynamic offset), but storage buffers, because a MUBUF address is a

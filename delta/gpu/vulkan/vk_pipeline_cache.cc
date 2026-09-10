@@ -424,6 +424,11 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
   if (RecompPipe* pipeline = g_recomp_cache.Find(key))
     return pipeline;
   RecompPipe rp;
+  const bool mesh = !d.recomp->mesh_spirv.empty();
+  if (mesh && (!g_dev.mesh_shader || !g_dev.draw_mesh_tasks))
+    return nullptr;
+  const VkShaderStageFlags vertex_stage =
+      mesh ? VK_SHADER_STAGE_MESH_BIT_EXT : VK_SHADER_STAGE_VERTEX_BIT;
   rp.textured = !d.recomp->ps_texs.empty() || !d.recomp->vs_texs.empty();
   const bool has_storage =
       std::any_of(d.recomp->ps_texs.begin(), d.recomp->ps_texs.end(),
@@ -449,7 +454,7 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
                      storage ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE
                              : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
                      1,
-                     is_vs ? VK_SHADER_STAGE_VERTEX_BIT
+                     is_vs ? vertex_stage
                            : VK_SHADER_STAGE_FRAGMENT_BIT,
                      nullptr};
     }
@@ -468,7 +473,11 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
   // set is positional: taking it means taking set 2 as well, whether or not
   // the shader reads a raw buffer.
   rp.shared_lds = d.recomp->shared_lds && EnsureLdsScratch();
-  VkDescriptorSetLayout sls[4] = {set0, g_ring.ubo_layout, g_ring.sbo_layout,
+  const VkDescriptorSetLayout cbuf_layout = d.recomp->indirect_cbufs
+      ? g_ring.indirect_cbuf_layout : g_ring.ubo_layout;
+  if (!cbuf_layout)
+    return nullptr;
+  VkDescriptorSetLayout sls[4] = {set0, cbuf_layout, g_ring.sbo_layout,
                                   g_ring.lds_layout};
   // One 64-byte window per stage: 16 user-data dwords each, 128 bytes total,
   // which is the guaranteed minimum push-constant size, plus each stage's own
@@ -487,8 +496,8 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
   // match; the bytes written are unchanged.
   const bool pc_base = gpu::gcn::PushCodeBase();
   const VkPushConstantRange push[1] = {
-      {VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
-       pc_base ? 144u : 128u},
+      {vertex_stage | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+       mesh ? 160u : pc_base ? 144u : 128u},
   };
   VkPipelineLayoutCreateInfo li{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
   li.setLayoutCount = rp.shared_lds ? 4 : (rp.raw_bufs ? 3 : 2);
@@ -499,21 +508,22 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
       VK_SUCCESS)
     return nullptr;
 
-  VkShaderModule vs = MakeModuleVec(d.recomp->vs_spirv);
+  VkShaderModule vs = MakeModuleVec(mesh ? d.recomp->mesh_spirv
+                                       : d.recomp->vs_spirv);
   VkShaderModule fs = MakeModuleVec(d.recomp->fs_spirv);
   // RECTLIST is primitive type 17 on GFX7 but 7 on gfx10.3 (PrimitiveType::
   // kRectList; 17 is kRectListLegacy there). Missing the gfx10 number rendered
   // every PS5 fullscreen pass as a single triangle covering half the rect.
   const bool is_rect_list = d.prim_type == 17 || d.prim_type == 7;
   bool rect_list =
-      is_rect_list && !kNoRectGs && g_dev.geometry_shader &&
+      !mesh && is_rect_list && !kNoRectGs && g_dev.geometry_shader &&
       !d.recomp->gs_spirv.empty();
   VkShaderModule gs =
       rect_list ? MakeModuleVec(d.recomp->gs_spirv) : VK_NULL_HANDLE;
   VkPipelineShaderStageCreateInfo stages[3]{};
   u32 stage_count = 0;
   stages[stage_count] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
-  stages[stage_count].stage = VK_SHADER_STAGE_VERTEX_BIT;
+  stages[stage_count].stage = static_cast<VkShaderStageFlagBits>(vertex_stage);
   stages[stage_count].module = vs;
   stages[stage_count++].pName = "main";
   if (rect_list) {
@@ -702,8 +712,8 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
   pi.pNext = &rci;
   pi.stageCount = stage_count;
   pi.pStages = stages;
-  pi.pVertexInputState = &vi;
-  pi.pInputAssemblyState = &ia;
+  pi.pVertexInputState = mesh ? nullptr : &vi;
+  pi.pInputAssemblyState = mesh ? nullptr : &ia;
   pi.pViewportState = &vp;
   pi.pRasterizationState = &rs;
   pi.pMultisampleState = &ms;

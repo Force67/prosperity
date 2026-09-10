@@ -186,6 +186,8 @@ class Module {
   void PutString(std::vector<u32>& sec, const std::string& s);
 
   u32 bound_ = 1;
+  u32 version_ = 0x00010300u;
+  std::vector<Id> globals_;
   Id glsl_ext_ = 0;
 
   std::vector<u32> caps_, exts_, ext_imports_, mem_model_, entries_,

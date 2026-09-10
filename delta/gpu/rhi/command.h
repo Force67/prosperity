@@ -73,7 +73,7 @@ struct DrawInfo {
     u64 base = 0;
     u32 size = 0;
   };
-  DrawCbuf cbufs[16];
+  DrawCbuf cbufs[32];
   u32 num_cbufs = 0;
   // Raw (non-format) buffers the recompiled VS/PS read by hand with MUBUF: a
   // skinning palette, an instance table, vertex data the shader indexes itself
@@ -295,6 +295,7 @@ struct DrawInfo {
   // vs_addr picked. Captured so a pass that never rasterizes can name the half
   // the geometry actually lives in. The PS4 walk leaves both 0.
   u64 es_addr = 0, gs_addr = 0;
+  u64 gs_user_data_addr = 0;
   bool ps4_neo = false;
   u32 vs_user_data[32] = {};
   u32 ps_user_data[32] = {};

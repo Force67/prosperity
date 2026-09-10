@@ -44,7 +44,9 @@ DELTA_OPTION(u32, kOptLevel, "DELTA_GPU_SPIRV_OPT", 2);
 std::vector<u32> Optimize(const std::vector<u32>& spv) {
   if (kOptLevel == 0)
     return spv;
-  spvtools::Optimizer opt(SPV_ENV_VULKAN_1_1);
+  const auto env = spv.size() > 1 && spv[1] >= 0x00010400u
+                       ? SPV_ENV_VULKAN_1_2 : SPV_ENV_VULKAN_1_1;
+  spvtools::Optimizer opt(env);
   opt.SetMessageConsumer([](spv_message_level_t lvl, const char*,
                             const spv_position_t&, const char* msg) {
     if (lvl <= SPV_MSG_WARNING)
@@ -60,7 +62,9 @@ std::vector<u32> Optimize(const std::vector<u32>& spv) {
 }
 
 bool Validate(const std::vector<u32>& spv, std::string* err) {
-  spv_context ctx = spvContextCreate(SPV_ENV_VULKAN_1_1);
+  const auto env = spv.size() > 1 && spv[1] >= 0x00010400u
+                       ? SPV_ENV_VULKAN_1_2 : SPV_ENV_VULKAN_1_1;
+  spv_context ctx = spvContextCreate(env);
   spv_diagnostic diag = nullptr;
   spv_const_binary_t bin{spv.data(), spv.size()};
   spv_result_t r = spvValidate(ctx, &bin, &diag);

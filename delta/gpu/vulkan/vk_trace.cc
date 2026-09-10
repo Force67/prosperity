@@ -1848,7 +1848,7 @@ void RecordDraw(const rhi::DrawInfo& d,
   Arr cbufs;
   const u32 cbuf_cap =
       kCaptureCbufBytes.get() < 0 ? 0 : u32(kCaptureCbufBytes.get());
-  for (u32 i = 0; i < d.num_cbufs && i < 16; i++) {
+  for (u32 i = 0; i < d.num_cbufs && i < std::size(d.cbufs); i++) {
     if (!d.cbufs[i].base && !d.cbufs[i].size)
       continue;
     Obj o;
@@ -1914,7 +1914,7 @@ void RecordDraw(const rhi::DrawInfo& d,
   viewport.Num("z_offset", d.viewport_z_offset);
 
   Arr vs_ud, ps_ud;
-  for (u32 i = 0; i < 16; i++) {
+  for (u32 i = 0; i < std::size(d.vs_user_data); i++) {
     vs_ud.Add(Line::HexText(d.vs_user_data[i]));
     ps_ud.Add(Line::HexText(d.ps_user_data[i]));
   }
@@ -1957,6 +1957,7 @@ void RecordDraw(const rhi::DrawInfo& d,
       .Raw("ps", ShaderObj(d.ps_addr, d.recomp ? &d.recomp->fs_spirv : nullptr))
       .Hex("es_addr", d.es_addr)
       .Hex("gs_addr", d.gs_addr)
+      .Hex("gs_user_data_addr", d.gs_user_data_addr)
       .Bool("neo", d.ps4_neo)
       .Raw("vs_user_data", vs_ud.Done())
       .Raw("ps_user_data", ps_ud.Done());

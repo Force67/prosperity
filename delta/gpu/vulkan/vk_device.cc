@@ -516,6 +516,8 @@ bool CreateDevice() {
     vkEnumerateDeviceExtensionProperties(g_dev.phys, nullptr, &en,
                                          eprops.data());
     for (const auto& ep : eprops) {
+      if (!std::strcmp(ep.extensionName, VK_EXT_MESH_SHADER_EXTENSION_NAME))
+        g_dev.mesh_shader = true;
       if (kCheckpoints && !std::strcmp(ep.extensionName,
               VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME))
         g_checkpoints_available = true;
@@ -561,6 +563,25 @@ bool CreateDevice() {
     bary_feat.pNext = f13.pNext;
     f13.pNext = &bary_feat;
     dev_exts[dev_ext_count++] = VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME;
+  }
+  VkPhysicalDeviceMeshShaderFeaturesEXT mesh_feat{
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT};
+  if (g_dev.mesh_shader) {
+    VkPhysicalDeviceFeatures2 query{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+    query.pNext = &mesh_feat;
+    vkGetPhysicalDeviceFeatures2(g_dev.phys, &query);
+    g_dev.mesh_shader = mesh_feat.meshShader;
+    if (g_dev.mesh_shader) {
+      mesh_feat = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT};
+      mesh_feat.meshShader = VK_TRUE;
+      mesh_feat.pNext = f13.pNext;
+      f13.pNext = &mesh_feat;
+      dev_exts[dev_ext_count++] = VK_EXT_MESH_SHADER_EXTENSION_NAME;
+      VkPhysicalDeviceProperties2 props{
+          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+      props.pNext = &g_dev.mesh_limits;
+      vkGetPhysicalDeviceProperties2(g_dev.phys, &props);
+    }
   }
   if (dev_ext_count) {
     dc.enabledExtensionCount = dev_ext_count;
@@ -611,6 +632,9 @@ bool CreateDevice() {
       want_feat.shaderStorageImageWriteWithoutFormat;
   dc.pEnabledFeatures = &want_feat;
   VKOK(vkCreateDevice(g_dev.phys, &dc, nullptr, &g_dev.device));
+  if (g_dev.mesh_shader)
+    g_dev.draw_mesh_tasks = reinterpret_cast<PFN_vkCmdDrawMeshTasksEXT>(
+        vkGetDeviceProcAddr(g_dev.device, "vkCmdDrawMeshTasksEXT"));
   vkGetDeviceQueue(g_dev.device, g_dev.qfam, 0, &g_dev.queue);
   // Seed the driver's pipeline cache from disk. Without this every run
   // recompiles every pipeline from scratch, which on SotC is several hundred.

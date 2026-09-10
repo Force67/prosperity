@@ -47,6 +47,10 @@ struct DeviceState {
   bool independent_blend = false;
   bool sampler_mirror_clamp = false;
   bool geometry_shader = false;
+  bool mesh_shader = false;
+  PFN_vkCmdDrawMeshTasksEXT draw_mesh_tasks = nullptr;
+  VkPhysicalDeviceMeshShaderPropertiesEXT mesh_limits{
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_PROPERTIES_EXT};
   bool storage_image_write_without_format = false;
   bool host_import_available = false;
   bool buffer_device_address = false;

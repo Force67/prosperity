@@ -23,6 +23,7 @@
 #include "base/arch.h"
 
 #include "gpu/gcn/gcn_translate.h"
+#include "gpu/ps5/rdna/rdna_translate.h"
 
 namespace gpu::ps5 {
 
@@ -47,6 +48,7 @@ struct GraphicsShaderState {
   bool gl_clip = false;
   const u32* vs_user_data = nullptr;
   const u32* ps_user_data = nullptr;
+  rdna::NggConfig ngg;
 };
 
 // The module for `state`, recompiled on first use. Never null; check .ok, which

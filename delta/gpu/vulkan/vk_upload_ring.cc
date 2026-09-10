@@ -88,7 +88,7 @@ bool CreateUploadRings(const VkPhysicalDeviceProperties& props) {
   {
     VkBufferCreateInfo ub{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
     ub.size = kUboRing;
-    ub.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+    ub.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
     VKOK(vkCreateBuffer(g_dev.device, &ub, nullptr, &g_ring.ubo_buf));
     VkMemoryRequirements ur;
     vkGetBufferMemoryRequirements(g_dev.device, g_ring.ubo_buf, &ur);
@@ -119,7 +119,8 @@ bool CreateUploadRings(const VkPhysicalDeviceProperties& props) {
       ubs[i].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
       ubs[i].descriptorCount = 1;
       ubs[i].stageFlags =
-          VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+          VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT |
+          (g_dev.mesh_shader ? VK_SHADER_STAGE_MESH_BIT_EXT : 0);
     }
     VkDescriptorSetLayoutCreateInfo ul{
         VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
@@ -159,6 +160,55 @@ bool CreateUploadRings(const VkPhysicalDeviceProperties& props) {
       uw[i].pBufferInfo = &ubinfo[i];
     }
     vkUpdateDescriptorSets(g_dev.device, kCbufBindings, uw, 0, nullptr);
+    // Mesh stages can need more windows than the dynamic UBO limit allows.
+    // Bind the current frame's half of the existing ring as one read-only
+    // storage buffer, plus one dynamic UBO containing the window offsets.
+    if (props.limits.maxStorageBufferRange >= kUboRing / 2) {
+      const VkShaderStageFlags stages = VK_SHADER_STAGE_VERTEX_BIT |
+          VK_SHADER_STAGE_FRAGMENT_BIT |
+          (g_dev.mesh_shader ? VK_SHADER_STAGE_MESH_BIT_EXT : 0);
+      const VkDescriptorSetLayoutBinding bindings[2] = {
+          {0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, stages, nullptr},
+          {1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1, stages, nullptr}};
+      VkDescriptorSetLayoutCreateInfo layout{
+          VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+      layout.bindingCount = 2;
+      layout.pBindings = bindings;
+      VKOK(vkCreateDescriptorSetLayout(g_dev.device, &layout, nullptr,
+                                       &g_ring.indirect_cbuf_layout));
+      const VkDescriptorPoolSize sizes[2] = {
+          {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2},
+          {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 2}};
+      VkDescriptorPoolCreateInfo pool{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+      pool.maxSets = 2;
+      pool.poolSizeCount = 2;
+      pool.pPoolSizes = sizes;
+      VKOK(vkCreateDescriptorPool(g_dev.device, &pool, nullptr,
+                                  &g_ring.indirect_cbuf_pool));
+      const VkDescriptorSetLayout layouts[2] = {
+          g_ring.indirect_cbuf_layout, g_ring.indirect_cbuf_layout};
+      VkDescriptorSetAllocateInfo alloc{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+      alloc.descriptorPool = g_ring.indirect_cbuf_pool;
+      alloc.descriptorSetCount = 2;
+      alloc.pSetLayouts = layouts;
+      VKOK(vkAllocateDescriptorSets(g_dev.device, &alloc,
+                                    g_ring.indirect_cbuf_sets));
+      for (u32 slot = 0; slot < 2; ++slot) {
+        const VkDescriptorBufferInfo buffers[2] = {
+            {g_ring.ubo_buf, slot * (kUboRing / 2), kUboRing / 2},
+            {g_ring.ubo_buf, 0, gpu::gcn::kIndirectDrawDwords * sizeof(u32)}};
+        VkWriteDescriptorSet writes[2]{};
+        for (u32 i = 0; i < 2; ++i) {
+          writes[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+          writes[i].dstSet = g_ring.indirect_cbuf_sets[slot];
+          writes[i].dstBinding = i;
+          writes[i].descriptorCount = 1;
+          writes[i].descriptorType = bindings[i].descriptorType;
+          writes[i].pBufferInfo = &buffers[i];
+        }
+        vkUpdateDescriptorSets(g_dev.device, 2, writes, 0, nullptr);
+      }
+    }
   }
 
   // Raw-buffer set layout (set 2). Every recompiled pipeline layout that has a
@@ -209,7 +259,8 @@ bool CreateUploadRings(const VkPhysicalDeviceProperties& props) {
       sbs[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC;
       sbs[i].descriptorCount = 1;
       sbs[i].stageFlags =
-          VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+          VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT |
+          (g_dev.mesh_shader ? VK_SHADER_STAGE_MESH_BIT_EXT : 0);
     }
     VkDescriptorSetLayoutCreateInfo sl{
         VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};

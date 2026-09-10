@@ -240,6 +240,7 @@ Id Module::Variable(Id ptr_type, spv::StorageClass sc, Id init) {
   if (init)
     ops.push_back(init);
   Instr(types_consts_, spv::Op::OpVariable, ops);
+  globals_.push_back(id);
   return id;
 }
 void Module::Decorate(Id target,
@@ -286,7 +287,14 @@ void Module::EntryPoint(spv::ExecutionModel model,
                         const std::vector<Id>& interface) {
   std::vector<u32> ops{static_cast<u32>(model), fn};
   PutString(ops, n);
-  ops.insert(ops.end(), interface.begin(), interface.end());
+  if (model == spv::ExecutionModel::MeshEXT) {
+    // Mesh shading requires SPIR-V 1.4, whose entry-point interface includes
+    // every global variable used by the entry point, not only stage I/O.
+    version_ = 0x00010400u;
+    ops.insert(ops.end(), globals_.begin(), globals_.end());
+  } else {
+    ops.insert(ops.end(), interface.begin(), interface.end());
+  }
   Instr(entries_, spv::Op::OpEntryPoint, ops);
 }
 void Module::ExecMode(Id fn,
@@ -440,7 +448,7 @@ void Module::Kill() {
 std::vector<u32> Module::Assemble() const {
   std::vector<u32> out;
   out.push_back(spv::MagicNumber);  // 0x07230203
-  out.push_back(0x00010300u);       // SPIR-V 1.3 (Vulkan 1.1)
+  out.push_back(version_);
   out.push_back(0);                 // generator (0 = unknown)
   out.push_back(bound_);            // id bound
   out.push_back(0);                 // schema

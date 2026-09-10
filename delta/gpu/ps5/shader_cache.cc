@@ -43,6 +43,8 @@ struct GraphicsKey {
   // Attribute locations and passthrough interpolation mode, in slot order.
   std::array<u16, 32> ps_param_slot{};
   bool gl_clip = false;
+  u64 gs = 0;
+  std::array<u32, 6> ngg{};
 
   bool operator==(const GraphicsKey& other) const = default;
 };
@@ -51,6 +53,9 @@ struct GraphicsKeyHash {
   size_t operator()(const GraphicsKey& k) const {
     u64 h = k.vs ^ (k.ps + kGoldenRatio64 + (k.vs << 6) + (k.vs >> 2));
     MixHash(h, k.fetch);
+    MixHash(h, k.gs);
+    for (u32 value : k.ngg)
+      MixHash(h, value);
     MixHash(h, k.vs_user_sgprs);
     MixHash(h, k.ps_user_sgprs);
     MixHash(h, k.ps_input_ena);
@@ -149,6 +154,12 @@ const gcn::Recompiled& GetGraphicsShader(const GraphicsShaderState& state) {
                   state.ps_input_ena,
                   state.ps_num_interp};
   key.gl_clip = state.gl_clip;
+  if (state.ngg.gs_code) {
+    key.gs = CodeHash(reinterpret_cast<u64>(state.ngg.gs_code), 4096);
+    key.ngg = {state.ngg.threads, state.ngg.input_primitives,
+                state.ngg.max_vertices, state.ngg.max_primitives,
+                state.ngg.lds_dwords, state.ngg.separate_es};
+  }
   if (state.ps_in_cntl)
     for (u32 i = 0; i < state.ps_num_interp && i < 32; i++)
       key.ps_param_slot[i] = static_cast<u16>(state.ps_in_cntl[i] & 0x43F);
@@ -170,7 +181,8 @@ const gcn::Recompiled& GetGraphicsShader(const GraphicsShaderState& state) {
                        state.vs_user_data, state.ps_user_data,
                        state.ps_input_ena, state.gl_clip, state.vs_user_sgprs,
                        state.ps_user_sgprs, state.ps_in_cntl,
-                       state.ps_num_interp))
+                       state.ps_num_interp,
+                       state.ngg.gs_code ? &state.ngg : nullptr))
           .first->second;
   TraceRecompileDone(rc.ok);
   // A shader we cannot recompile drops its draw entirely, which is

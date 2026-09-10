@@ -299,7 +299,8 @@ bool PlausibleVBuffer(const VBuffer& v);
 std::vector<gpu::gcn::TImage> TrackTextures(const u32* ps_code,
                                             const u32* ps_user_data,
                                             u32 user_sgprs,
-                                            u32 ud_base = 0);
+                                            u32 ud_base = 0,
+                                            u64 system_user_data_addr = 0);
 
 // Resolve buffer bases and complete V#s at their consuming instruction PCs.
 std::unordered_map<u32, BufferResource> ResolveBuffers(
@@ -307,6 +308,7 @@ std::unordered_map<u32, BufferResource> ResolveBuffers(
     const u32* user_data,
     u32 user_sgprs,
     u32 user_sgpr_base = 0,
-    u32 max_dwords = 4096);
+    u32 max_dwords = 4096,
+    u64 system_user_data_addr = 0);
 
 }  // namespace gpu::rdna

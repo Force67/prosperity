@@ -599,13 +599,16 @@ Id VsParamOut(Translator& t, StageContext& sc, u32 p) {
   auto it = sc.param_outs.find(p);
   if (it != sc.param_outs.end())
     return it->second;
-  const Id v = t.m.Variable(t.m.TypePointer(spv::StorageClass::Output, t.t_v4),
-                            spv::StorageClass::Output);
-  t.m.Decorate(v, spv::Decoration::Location, {p});
-  if (sc.flat_attrs && sc.flat_attrs->count(p))
+  const auto storage = sc.is_mesh ? spv::StorageClass::Private
+                                  : spv::StorageClass::Output;
+  const Id v = t.m.Variable(t.m.TypePointer(storage, t.t_v4), storage);
+  if (!sc.is_mesh)
+    t.m.Decorate(v, spv::Decoration::Location, {p});
+  if (!sc.is_mesh && sc.flat_attrs && sc.flat_attrs->count(p))
     t.m.Decorate(v, spv::Decoration::Flat);
   t.m.Name(v, "out_param" + std::to_string(p));
-  sc.iface->push_back(v);
+  if (!sc.is_mesh)
+    sc.iface->push_back(v);
   sc.param_outs[p] = v;
   return v;
 }

@@ -113,6 +113,7 @@ u64 DrawsSeen();
 // the draw path calls once, when a draw reaches shader resolution. The walk
 // holds the register lock, so there is only ever one such draw in flight.
 void NoteDrawDetail();
+void TraceNggState(const Regs& regs, u64 es_addr, u64 gs_addr);
 
 // The two shader-address recovery dumps: the user-data windows themselves, and
 // (for a pipeline whose program addresses are not in the registers we read) the

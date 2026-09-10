@@ -280,7 +280,8 @@ struct ScalarEval {
 
   ScalarEval(const u32* user_data,
              u32 user_sgprs,
-             u32 user_sgpr_base) {
+             u32 user_sgpr_base,
+             u64 system_user_data_addr = 0) {
     const u32 count = std::min(user_sgprs, 32u);
     for (u32 i = 0; i < count && user_sgpr_base + i < kRegs; i++) {
       sgpr[user_sgpr_base + i] = user_data[i];
@@ -289,15 +290,14 @@ struct ScalarEval {
     if (user_sgpr_base == 8) {
       sgpr[3] = 0x0101;
       known[3] = true;
-      // A merged NGG stage takes the root of its descriptor table in s[0:1] and
-      // then s_load_dwordx16s the V#s it needs into s8.. over its own user
-      // data. That root is user-data entry 0, so seed it there as well:
-      // without it every descriptor a fullscreen pass reads resolves to
-      // nothing, and Astro Bot's composite shaders gate their whole body on
-      // one such read.
-      if (user_sgprs >= 2) {
-        sgpr[0] = user_data[0];
-        sgpr[1] = user_data[1];
+      // Split NGG stages receive SPI_SHADER_USER_DATA_ADDR_GS in s0:s1,
+      // independently of their vertex user window. Preserve the older root
+      // alias for callers which do not supply that system register pair.
+      if (system_user_data_addr || user_sgprs >= 2) {
+        sgpr[0] = system_user_data_addr ? static_cast<u32>(system_user_data_addr)
+                                      : user_data[0];
+        sgpr[1] = system_user_data_addr ? static_cast<u32>(system_user_data_addr >> 32)
+                                      : user_data[1];
         known[0] = known[1] = true;
       }
     }
@@ -1559,7 +1559,8 @@ bool CanAccessLinearIntegerImage(const TImage& t) {
 std::vector<TImage> TrackTextures(const u32* ps_code,
                                   const u32* pud,
                                   u32 user_sgprs,
-                                  u32 ud_base) {
+                                  u32 ud_base,
+                                  u64 system_user_data_addr) {
   std::vector<TImage> out;
   if (!ps_code || !pud || !InGuest(reinterpret_cast<u64>(ps_code)))
     return out;
@@ -1583,7 +1584,7 @@ std::vector<TImage> TrackTextures(const u32* ps_code,
   const MimgBindingPlan& plan = plan_it->second.second;
   out.resize(plan.binding_srsrc.size());
   std::vector<bool> filled(out.size(), false);
-  ScalarEval eval(pud, user_sgprs, ud_base);
+  ScalarEval eval(pud, user_sgprs, ud_base, system_user_data_addr);
   eval.code_addr = code_addr;
 
   for (const Inst& in : prog) {
@@ -1681,11 +1682,11 @@ std::unordered_map<u32, BufferResource> ResolveBuffers(
     const u32* code,
     const u32* user_data,
     u32 user_sgprs,
-    u32 user_sgpr_base, u32 max_dwords) {
+    u32 user_sgpr_base, u32 max_dwords, u64 system_user_data_addr) {
   std::unordered_map<u32, BufferResource> out;
   if (!code || !user_data || !InGuest(reinterpret_cast<u64>(code)))
     return out;
-  ScalarEval eval(user_data, user_sgprs, user_sgpr_base);
+  ScalarEval eval(user_data, user_sgprs, user_sgpr_base, system_user_data_addr);
   eval.code_addr = reinterpret_cast<u64>(code);
   for (const Inst& inst : *CachedReachableProgram(code, max_dwords)) {
     if (inst.enc == Enc::kSmrd && SmemLoadCount(inst.opcode)) {

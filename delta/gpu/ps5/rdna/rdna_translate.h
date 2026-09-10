@@ -21,6 +21,23 @@
 
 namespace gpu::rdna {
 
+struct NggConfig {
+  const u32* gs_code = nullptr;
+  u32 threads = 0;
+  u32 input_primitives = 0;
+  u32 max_vertices = 0;
+  u32 max_primitives = 0;
+  u32 lds_dwords = 0;
+  // Per-draw system SGPR s0:s1, separate from the user window at s8.
+  // Used for resource replay; generated shaders load it from draw data.
+  u64 gs_user_data_addr = 0;
+  bool separate_es = true;  // false when one program contains both NGG halves
+};
+
+// Whether the ES entry explicitly transfers to the separately bound GS.
+bool HasNggTransfer(const u32* code);
+bool HasNggPrimitiveExports(const u32* code);
+
 // Recompile an RDNA2 VS+PS pair. vs_code/ps_code are guest pointers to the
 // RDNA2 bytecode; the user-data arrays are the shader-stage user SGPRs (used to
 // read the fetch-shader pointer during translation). On gfx10.3 the "VS" is the
@@ -41,7 +58,8 @@ gpu::gcn::Recompiled Recompile(const u32* vs_code,
                                // SPI_PS_INPUT_CNTL_0..31 and NUM_INTERP: which
                                // VS parameter export each PS input slot reads.
                                const u32* ps_in_cntl = nullptr,
-                               u32 ps_num_interp = 0);
+                               u32 ps_num_interp = 0,
+                               const NggConfig* ngg = nullptr);
 
 // What the fetch pointer contributes to a module's identity: a hash of the
 // attribute plan Recompile would parse out of it, and 0 when it parses to no

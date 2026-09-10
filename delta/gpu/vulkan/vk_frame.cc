@@ -964,18 +964,16 @@ void BeginFrame(Renderer& renderer) {
   g_ring.ib_end = ib_base + kIbRing / 2;
   g_ring.ubo_offset = ubo_base;
   g_ring.ubo_end = ubo_base + kUboRing / 2;
-  // Window 0 of the cbuffer ring is a permanently-zero window: every binding a
-  // draw does not use points there (dynamic offset 0), so DrawRecomp only
-  // writes the windows it actually fills instead of zeroing 8 windows per
-  // draw. Slot 0's usable range starts after it; nothing ever writes it again.
+  // Reserve one zero window in each half. Legacy dynamic UBOs address the
+  // first one; an indirect cbuffer table addresses its current frame's half.
   if (g_ring.ubo_map) {
     if (!g_ring.zero_window_initialized) {
       g_ring.zero_window_initialized = true;
       std::memset(g_ring.ubo_map, 0, kCbufWindow);
+      std::memset(g_ring.ubo_map + kUboRing / 2, 0, kCbufWindow);
     }
-    if (g_frame.slot_idx == 0)
-      g_ring.ubo_offset = (kCbufWindow + g_ring.ubo_align - 1) &
-                          ~(VkDeviceSize)(g_ring.ubo_align - 1);
+    g_ring.ubo_offset = ubo_base + ((kCbufWindow + g_ring.ubo_align - 1) &
+                                   ~(VkDeviceSize)(g_ring.ubo_align - 1));
   }
   // Raw-buffer ring: same slot split and same permanently-zero window 0, which
   // is where a binding whose descriptor did not resolve points.

@@ -942,7 +942,7 @@ bool EmitLaneSpill(Translator& t,
     // Publish into the slot array, then report NOT consumed so the general
     // lowering still updates the VGPR itself: a stage that has a lane index
     // keeps exactly the behaviour it had, and this is purely additive.
-    t.m.Store(t.SpillAt(dst, t.SrcRaw(src1, literal)), t.SrcRaw(src0, literal));
+    t.StorePrivate(t.SpillAt(dst, t.SrcRaw(src1, literal)), t.SrcRaw(src0, literal));
     return false;
   }
   return false;
@@ -1212,7 +1212,7 @@ void EmitVop2(Translator& t,
       // write publishes and no cross-lane channel is needed. Not SetVg: a lane
       // write is not EXEC-predicated.
       const Id keep = t.m.Load(t.t_u, t.VgPtr(vdst));
-      t.m.Store(t.VgPtr(vdst),
+      t.StorePrivate(t.VgPtr(vdst),
                 t.SelectB(t.Eq(t.WaveLane(), t.And(u1, t.U32(63))), u0, keep));
       break;
     }

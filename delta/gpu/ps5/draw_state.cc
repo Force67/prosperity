@@ -173,6 +173,7 @@ ShaderBinding ResolveShaderBinding(const Regs& regs) {
   binding.ps_addr = regs.ShaderAddr(mmSPI_SHADER_PGM_LO_PS);
   binding.es_addr = es_addr;
   binding.gs_addr = gs_addr;
+  TraceNggState(regs, es_addr, gs_addr);
 
   // A pipeline that only populates the ES half leaves the GS user-data window
   // empty, and then every cbuffer and texture the vertex stage names resolves
@@ -505,14 +506,16 @@ void ResolveCbufferBindings(const std::vector<gcn::ShaderCbuf>& cbufs,
                             const ResolvedBuffers& resolved,
                             bool vertex_stage,
                             u64 stage_addr,
-                            rhi::DrawInfo& d) {
+                            rhi::DrawInfo& d,
+                            const ResolvedBuffers* gs_resolved = nullptr) {
   u32 planned = 0, replayed = 0, mapped = 0;
   for (const gcn::ShaderCbuf& cb : cbufs) {
-    if (cb.binding >= gpu::gcn::kMaxCbufBindings)
+    if (cb.binding >= std::size(d.cbufs))
       continue;
     planned++;
-    const auto it = resolved.find(cb.use_pc);
-    if (it == resolved.end())
+    const auto& resources = cb.from_gs && gs_resolved ? *gs_resolved : resolved;
+    const auto it = resources.find(cb.use_pc);
+    if (it == resources.end())
       continue;
     replayed++;
     // The window need not start at the buffer: a shader reading one constant
@@ -550,11 +553,13 @@ void ResolveRawBuffers(const std::vector<gcn::ShaderBuffer>& buffers,
                        const u32* user_data,
                        u32 user_sgprs,
                        rhi::DrawInfo& d,
-                       bool vertex_stage) {
+                       bool vertex_stage,
+                       const ResolvedBuffers* gs_resolved = nullptr) {
   for (const gcn::ShaderBuffer& sb : buffers) {
     if (sb.binding >= rhi::DrawInfo::kMaxBuffers)
       continue;
-    const auto it = resolved.find(sb.use_pc);
+    const auto& resources = sb.from_gs && gs_resolved ? *gs_resolved : resolved;
+    const auto it = resources.find(sb.use_pc);
     // A global_load names its window with a raw 64-bit pointer pair rather than
     // a V#, tagged srsrc_sgpr >= kRawBufTag (rdna_translate.cc kFlatBaseTag) so
     // it can never be V#-decoded by accident. Its length is not expressed
@@ -564,7 +569,7 @@ void ResolveRawBuffers(const std::vector<gcn::ShaderBuffer>& buffers,
     if (sb.srsrc_sgpr >= kRawBufTag) {
       constexpr u32 kRawBufWindow = 1u << 20;
       u64 base = 0;
-      if (it != resolved.end() && it->second.descriptor_valid &&
+      if (it != resources.end() && it->second.descriptor_valid &&
           it->second.descriptor_dwords >= 2)
         base = it->second.descriptor[0] |
                (static_cast<u64>(it->second.descriptor[1] & 0xFFFF) << 32);
@@ -574,7 +579,7 @@ void ResolveRawBuffers(const std::vector<gcn::ShaderBuffer>& buffers,
       const bool ok = IsGuestAddress(base) &&
                       gpu::IsReadableRangeCached(base, kRawBufWindow);
       TraceRawBufBinding(vertex_stage, sb.binding, sb.use_pc, sb.srsrc_sgpr,
-                         it != resolved.end(), base, ok ? kRawBufWindow : 0);
+                         it != resources.end(), base, ok ? kRawBufWindow : 0);
       if (!ok)
         continue;
       d.bufs[sb.binding] = {base, kRawBufWindow};
@@ -582,7 +587,7 @@ void ResolveRawBuffers(const std::vector<gcn::ShaderBuffer>& buffers,
       continue;
     }
     rdna::VBuffer vb{};
-    if (it != resolved.end() && it->second.descriptor_valid)
+    if (it != resources.end() && it->second.descriptor_valid)
       vb = rdna::DecodeVBuffer(it->second.descriptor);
     else if (sb.srsrc_sgpr + 3 < user_sgprs)
       vb = rdna::DecodeVBuffer(&user_data[sb.srsrc_sgpr]);
@@ -592,7 +597,7 @@ void ResolveRawBuffers(const std::vector<gcn::ShaderBuffer>& buffers,
     const bool ok =
         IsGuestAddress(vb.base) && bytes && bytes <= 0xFFFFFFFFull;
     TraceRawBufBinding(vertex_stage, sb.binding, sb.use_pc, sb.srsrc_sgpr,
-                       it != resolved.end() && it->second.descriptor_valid,
+                       it != resources.end() && it->second.descriptor_valid,
                        vb.base, ok ? bytes : 0);
     if (!ok)
       continue;
@@ -728,9 +733,11 @@ void AppendStageTextures(u64 code,
                          const u32* user_data,
                          u32 user_sgprs,
                          u32 ud_base,
-                         rhi::DrawInfo& d) {
+                         rhi::DrawInfo& d,
+                         u64 system_user_data_addr = 0) {
   const auto texs = rdna::TrackTextures(reinterpret_cast<const u32*>(code),
-                                        user_data, user_sgprs, ud_base);
+                                        user_data, user_sgprs, ud_base,
+                                        system_user_data_addr);
   for (size_t i = 0;
        i < texs.size() && d.num_texs < rhi::DrawInfo::kMaxDrawTextures; i++)
     FillDrawTex(d.num_texs++, texs[i], d);
@@ -772,6 +779,41 @@ void ResolveRecompiledShaders(const Regs& regs,
        !gpu::IsReadableRangeCached(binding.ps_addr, kMaxShaderBytes)))
     return;
 
+  rdna::NggConfig ngg;
+  const u64 gs_user_data_addr = regs[mmSPI_SHADER_USER_DATA_ADDR_LO_GS] |
+      (static_cast<u64>(regs[mmSPI_SHADER_USER_DATA_ADDR_HI_GS]) << 32);
+  const auto* es_code = reinterpret_cast<const u32*>(binding.es_addr);
+  const bool point_ngg = d.prim_type == 1 && !d.index_count &&
+                         binding.vs_addr == binding.es_addr;
+  const bool split_ngg = point_ngg && binding.es_addr != binding.gs_addr &&
+      IsGuestAddress(binding.gs_addr) &&
+      gpu::IsReadableRangeCached(binding.gs_addr, kMaxShaderBytes) &&
+      rdna::HasNggTransfer(es_code);
+  const bool unified_ngg = point_ngg && !split_ngg &&
+                          rdna::HasNggPrimitiveExports(es_code);
+  if (split_ngg || unified_ngg) {
+    // In a point-input geometry pipeline each input primitive is one ES
+    // vertex. The register limits bound the expanded vertices and triangles;
+    // guest waves also stage those outputs through LDS before exporting them.
+    const u32 vertices_per_input = regs[mmVGT_GS_MAX_VERT_OUT] & 0x7ff;
+    const u32 primitives_per_input = regs[mmGE_NGG_SUBGRP_CNTL] & 0x1ff;
+    // Point primitives are independent, and NGG programs already handle a
+    // partial final group. Use smaller input batches to fit Vulkan's guaranteed
+    // 128 mesh invocations; DrawMeshTasks still covers every input primitive.
+    const u32 per_input = std::max({1u, vertices_per_input, primitives_per_input});
+    const u32 inputs = std::min((regs[mmVGT_GS_ONCHIP_CNTL] >> 11) & 0x7ff,
+                                128u / per_input);
+    const u32 vertices = inputs * vertices_per_input;
+    const u32 primitives = inputs * primitives_per_input;
+    const u32 lds = ((regs[mmSPI_SHADER_PGM_RSRC2_GS] >> 19) & 0xff) * 128;
+    if (inputs && vertices && primitives && lds &&
+        vertices <= 256 && primitives <= 256) {
+      const u32 threads = (std::max({inputs, vertices, primitives}) + 63) & ~63u;
+      ngg = {split_ngg ? reinterpret_cast<const u32*>(binding.gs_addr) : es_code,
+               threads, inputs, vertices, primitives, lds, gs_user_data_addr,
+               split_ngg};
+    }
+  }
   const gcn::Recompiled& rc = GetGraphicsShader(
       {.vs_addr = binding.vs_addr,
        .ps_addr = binding.ps_addr,
@@ -784,7 +826,8 @@ void ResolveRecompiledShaders(const Regs& regs,
        // DX_CLIP_SPACE_DEF (bit 19) picks the guest's clip-z convention.
        .gl_clip = !((regs[mmPA_CL_CLIP_CNTL] >> 19) & 1),
        .vs_user_data = binding.vs_user_data,
-       .ps_user_data = binding.ps_user_data});
+       .ps_user_data = binding.ps_user_data,
+       .ngg = ngg});
   if (!rc.ok)
     return;
 
@@ -796,7 +839,8 @@ void ResolveRecompiledShaders(const Regs& regs,
   // TODO: derive from RSRC2.
   const ResolvedBuffers vs_resources =
       rdna::ResolveBuffers(reinterpret_cast<const u32*>(binding.vs_addr),
-                           binding.vs_user_data, vs_user_sgprs, kUdBase);
+                           binding.vs_user_data, vs_user_sgprs, kUdBase, 4096,
+                           ngg.gs_code ? gs_user_data_addr : 0);
   TraceAttrPlan(rc.attrs.size(), vs_user_sgprs, vs_resources.size(),
                 binding.vs_user_data);
   BindVertexAttributes(rc, vs_resources, binding.vs_user_data, vs_user_sgprs,
@@ -828,9 +872,15 @@ void ResolveRecompiledShaders(const Regs& regs,
     d.num_vattrs = 0;
     return;
   }
-  ResolveCbufferBindings(rc.vs_cbufs, vs_resources, true, binding.vs_addr, d);
+  const ResolvedBuffers gs_resources = rc.mesh_spirv.empty()
+      ? ResolvedBuffers{}
+      : rdna::ResolveBuffers(ngg.gs_code,
+                              binding.vs_user_data, vs_user_sgprs, kUdBase,
+                              4096, gs_user_data_addr);
+  ResolveCbufferBindings(rc.vs_cbufs, vs_resources, true, binding.vs_addr, d,
+                         &gs_resources);
   ResolveRawBuffers(rc.vs_bufs, vs_resources, binding.vs_user_data,
-                    vs_user_sgprs, d, true);
+                    vs_user_sgprs, d, true, &gs_resources);
   if (binding.ps_addr) {
     ResolveCbufferBindings(rc.ps_cbufs, ps_resources, false, binding.ps_addr,
                            d);
@@ -846,14 +896,17 @@ void ResolveRecompiledShaders(const Regs& regs,
   // order the renderer reads them back in. Its user data starts at s8: the
   // merged NGG stage is launched there.
   if (!rc.vs_texs.empty()) {
-    AppendStageTextures(binding.vs_addr, binding.vs_user_data, vs_user_sgprs, 8,
-                        d);
+    AppendStageTextures(rc.mesh_spirv.empty() ? binding.vs_addr
+                                             : reinterpret_cast<u64>(ngg.gs_code),
+                         binding.vs_user_data, vs_user_sgprs, 8,
+                        d, rc.mesh_spirv.empty() ? 0 : gs_user_data_addr);
     ReconcileTextureDims(rc.vs_texs, vs_tex_slot, d);
   }
   d.vs_addr = binding.vs_addr;
   d.ps_addr = binding.ps_addr;
   d.es_addr = binding.es_addr;
   d.gs_addr = binding.gs_addr;
+  d.gs_user_data_addr = gs_user_data_addr;
   d.recomp = &rc;
 }
 
