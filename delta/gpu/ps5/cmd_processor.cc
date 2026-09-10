@@ -598,6 +598,15 @@ void HandleDispatchIndirect(rhi::Renderer& renderer,
     return;
   const u32* a = reinterpret_cast<const u32*>(args);
   const u32 groups[4] = {a[0], a[1], a[2], count >= 2 ? body[count - 1] : 5};
+  if (groups[0] > (1u << 20) || groups[1] > (1u << 20) || groups[2] > (1u << 20)) {
+    static u32 reported = 0;
+    if (reported++ < 16)
+      BASE_LOGW("agc", "indirect dispatch cs={:#x} args={:#x} packet={:p} count={} "
+                        "body=[{:#x} {:#x} {:#x}] groups=[{:#x} {:#x} {:#x}]",
+                g_queue->regs.ShaderAddr(mmCOMPUTE_PGM_LO),
+                args, body, count, body[0], count >= 2 ? body[1] : 0,
+                count >= 3 ? body[2] : 0, groups[0], groups[1], groups[2]);
+  }
   if (!groups[0] || !groups[1] || !groups[2])
     return;
   DispatchCompute(renderer, g_queue->regs, groups, 4);
@@ -622,6 +631,9 @@ void HandleDrawIndirect(rhi::Renderer& renderer,
   if (!rhi::FlushCsWritesRange(renderer, args, want))
     return;
   const u32* a = reinterpret_cast<const u32*>(args);
+  if (a[1] > (1u << 20))
+    BASE_LOGW("agc", "indirect draw op={:#x} args={:#x} packet={:p} words=[{:#x} {:#x} {:#x} {:#x} {:#x}]",
+              op, args, body, a[0], a[1], a[2], a[3], indexed ? a[4] : 0);
   if (!a[0] || !a[1])
     return;
   const u32 initiator = count >= 4 ? body[3] : 0;
@@ -941,6 +953,8 @@ u32 Walk(rhi::Renderer& renderer,
           g_queue->index.max = body[0];
         break;
       case IT_NUM_INSTANCES:
+        if (count && body[0] > (1u << 20))
+          BASE_LOGW("agc", "NUM_INSTANCES packet={:p} value={:#x}", body, body[0]);
         g_queue->index.num_instances = (count >= 1 && body[0]) ? body[0] : 1;
         break;
       case IT_DISPATCH_DIRECT:
