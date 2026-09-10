@@ -17,6 +17,7 @@ namespace {
 std::vector<u32> dispatch_values;
 std::vector<std::array<u32, 3>> dispatch_groups;
 std::vector<u32> draw_instances;
+std::vector<u32> draw_index_types;
 u64 pending_address = 0;
 std::array<u32, 3> pending_groups{};
 bool flush_succeeds = true;
@@ -169,11 +170,27 @@ TEST(AgcQueue, ZeroInstanceIndirectDrawDoesNotReusePreviousInstanceCount) {
   EXPECT_EQ(Submit(w, 111), w.size());
   EXPECT_EQ(draw_instances, (std::vector<u32>{2}));
 }
+
+TEST(AgcQueue, IndexTypePacketsAndRegisterWritesShareState) {
+  draw_index_types.clear();
+  Words w;
+  Packet(w, 0x2a, {0});  // INDEX_TYPE: 16-bit
+  Packet(w, 0x2d, {3, 0});
+  Packet(w, 0x7a, {0x20000000u |
+                       (gpu::ps5::mmVGT_INDEX_TYPE - gpu::kUConfigRegBase),
+                   1});  // SET_UCONFIG_REG_INDEX: 32-bit
+  Packet(w, 0x2d, {3, 0});
+  Packet(w, 0x2a, {2});  // INDEX_TYPE: 8-bit
+  Packet(w, 0x2d, {3, 0});
+  EXPECT_EQ(Submit(w, 112), w.size());
+  EXPECT_EQ(draw_index_types, (std::vector<u32>{0, 1, 2}));
+}
 }  // namespace
 
 namespace gpu::ps5 {
 bool BuildDrawInfo(const Regs&, const DrawPacket& packet, rhi::DrawInfo& draw) {
   draw_instances.push_back(packet.num_instances);
+  draw_index_types.push_back(packet.index_type);
   draw.rt_base = draw_target;
   return accept_draw;
 }

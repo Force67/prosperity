@@ -89,7 +89,6 @@ bool g_frame_active = false;
 
 // Latched by the IT_* packets that precede a draw and consumed by it.
 struct IndexState {
-  u32 type = 0;  // VGT_INDEX_TYPE[1:0]: 0 = 16-bit, 1 = 32-bit, 2 = 8-bit
   u64 base = 0;  // IT_INDEX_BASE: DRAW_INDEX_OFFSET_2 has only an offset
   u32 max = 0;   // IT_INDEX_BUFFER_SIZE
   u32 num_instances = 1;  // IT_NUM_INSTANCES, for the following draw(s)
@@ -607,7 +606,8 @@ void HandleDrawIndirect(rhi::Renderer& renderer,
     const u32 auto_body[2] = {a[0], initiator};
     issue(renderer, IT_DRAW_INDEX_AUTO, auto_body, 2);
   } else {
-    const u32 stride = g_queue->index.type == 1 ? 4u : g_queue->index.type == 2 ? 1u : 2u;
+    const u32 type = g_queue->regs[mmVGT_INDEX_TYPE] & 3u;
+    const u32 stride = type == 1 ? 4u : type == 2 ? 1u : 2u;
     const u64 base = g_queue->index.base + static_cast<u64>(a[2]) * stride;
     const u32 idx_body[5] = {g_queue->index.max ? g_queue->index.max : a[0],
                              static_cast<u32>(base),
@@ -628,7 +628,7 @@ void HandleDrawPacket(rhi::Renderer& renderer,
   packet.op = op;
   packet.body = body;
   packet.count = count;
-  packet.index_type = g_queue->index.type;
+  packet.index_type = g_queue->regs[mmVGT_INDEX_TYPE] & 3u;
   packet.index_base = g_queue->index.base;
   packet.index_max = g_queue->index.max;
   packet.num_instances = g_queue->index.num_instances;
@@ -901,7 +901,10 @@ u32 Walk(rhi::Renderer& renderer,
         break;
       case IT_INDEX_TYPE:
         if (count >= 1)
-          g_queue->index.type = body[0] & 0x3;
+          // SET_UCONFIG_REG[_INDEX] and shadow-state loads write this same
+          // register. A separate packet latch leaves those draws using a
+          // stale element size (32-bit indices become alternating index/0).
+          g_queue->regs[mmVGT_INDEX_TYPE] = body[0];
         break;
       case IT_INDEX_BASE:  // baseLo, baseHi
         if (count >= 2)
