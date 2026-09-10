@@ -138,6 +138,7 @@ struct CsPipe {
 struct GdsBuffer {
   VkBuffer buf = VK_NULL_HANDLE;
   VkDeviceMemory mem = VK_NULL_HANDLE;
+  void* map = nullptr;
   static constexpr VkDeviceSize kBytes = 64 * 1024;
 };
 GdsBuffer g_gds;
@@ -1442,12 +1443,14 @@ bool EnsureGdsBuffer() {
     return false;
   }
   vkBindBufferMemory(g_dev.device, g_gds.buf, g_gds.mem, 0);
-  void* p = nullptr;
-  if (vkMapMemory(g_dev.device, g_gds.mem, 0, GdsBuffer::kBytes, 0, &p) ==
-      VK_SUCCESS) {
-    std::memset(p, 0, GdsBuffer::kBytes);
-    vkUnmapMemory(g_dev.device, g_gds.mem);
+  if (vkMapMemory(g_dev.device, g_gds.mem, 0, GdsBuffer::kBytes, 0,
+                   &g_gds.map) != VK_SUCCESS) {
+    vkDestroyBuffer(g_dev.device, g_gds.buf, nullptr);
+    vkFreeMemory(g_dev.device, g_gds.mem, nullptr);
+    g_gds = {};
+    return false;
   }
+  std::memset(g_gds.map, 0, GdsBuffer::kBytes);
   return true;
 }
 
@@ -2322,6 +2325,46 @@ bool DescribeCsRangeCovering(u64 addr, char* out, size_t out_size) {
 namespace gpu::rhi {
 using namespace gpu::vk;
 
+static bool PrepareGdsTransfer(Renderer& renderer, u32 offset, u32 bytes,
+                                bool read = false) {
+  if (!renderer.available() || offset > GdsBuffer::kBytes ||
+      bytes > GdsBuffer::kBytes - offset || !EnsureGdsBuffer())
+    return false;
+  if (read) {
+    CsBatchBeginImpl();
+    VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+    vkCmdPipelineBarrier(g_cs_cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &barrier,
+                         0, nullptr, 0, nullptr);
+  }
+  return CsBatchFlush(kSyncWriteback);
+}
+
+bool ReadGds(Renderer& renderer, u32 offset, void* data, u32 bytes) {
+  if (!PrepareGdsTransfer(renderer, offset, bytes, true))
+    return false;
+  std::memcpy(data, static_cast<const u8*>(g_gds.map) + offset, bytes);
+  return true;
+}
+
+bool WriteGds(Renderer& renderer, u32 offset, const void* data, u32 bytes) {
+  if (!PrepareGdsTransfer(renderer, offset, bytes))
+    return false;
+  std::memcpy(static_cast<u8*>(g_gds.map) + offset, data, bytes);
+  return true;
+}
+
+bool FillGds(Renderer& renderer, u32 offset, u32 bytes, u32 value) {
+  if (!PrepareGdsTransfer(renderer, offset, bytes))
+    return false;
+  auto* dst = static_cast<u8*>(g_gds.map) + offset;
+  for (u32 i = 0; i < bytes; i++)
+    dst[i] = static_cast<u8>(value >> ((i & 3u) * 8));
+  return true;
+}
+
 // A dispatch the backend could not run, named once per shader and reason.
 // The reason is the number of the `return false` it came from; the file's
 // line is one grep away and a prose reason at each of them would be noise.
@@ -2883,6 +2926,14 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
     vkCmdPipelineBarrier(g_cs_cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
                          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr,
                          zero_count, zero_after, 0, nullptr);
+  }
+  if (ci.gds_binding >= 0) {
+    VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    vkCmdPipelineBarrier(g_cs_cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier,
+                         0, nullptr, 0, nullptr);
   }
   vkCmdBindPipeline(g_cs_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, cp->pipe);
   vkCmdBindDescriptorSets(g_cs_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, cp->layout,

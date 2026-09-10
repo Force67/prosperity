@@ -18,6 +18,7 @@ std::vector<u32> dispatch_values;
 std::vector<std::array<u32, 3>> dispatch_groups;
 std::vector<u32> draw_instances;
 std::vector<u32> draw_index_types;
+std::array<u8, 65536> gds{};
 u64 pending_address = 0;
 std::array<u32, 3> pending_groups{};
 bool flush_succeeds = true;
@@ -185,6 +186,21 @@ TEST(AgcQueue, IndexTypePacketsAndRegisterWritesShareState) {
   EXPECT_EQ(Submit(w, 112), w.size());
   EXPECT_EQ(draw_index_types, (std::vector<u32>{0, 1, 2}));
 }
+
+TEST(AgcQueue, DmaDataCopiesAndClearsGdsCounters) {
+  std::array<u32, 2> input{17, 29}, output{};
+  Words w;
+  Packet(w, 0x50, {1u << 20, Lo(input.data()), Hi(input.data()),
+                    0xc70, 0, 8});
+  Packet(w, 0x50, {1u << 29, 0xc70, 0, Lo(output.data()), Hi(output.data()), 8});
+  EXPECT_EQ(Submit(w, 113), w.size());
+  EXPECT_EQ(output, input);
+  w.clear();
+  Packet(w, 0x50, {0x46106000, 0, 0, 0xc70, 0, 4});
+  Packet(w, 0x50, {0x24306000, 0xc70, 0, Lo(output.data()), Hi(output.data()), 8});
+  EXPECT_EQ(Submit(w, 113), w.size());
+  EXPECT_EQ(output, (std::array<u32, 2>{0, 29}));
+}
 }  // namespace
 
 namespace gpu::ps5 {
@@ -215,6 +231,19 @@ void BeginFrame(Renderer&) {}
 void EndFrame(Renderer&, u64 base) { presented = base; }
 void Draw(Renderer&, const DrawInfo&) {}
 bool FlushCsWrites(Renderer&) { return true; }
+bool ReadGds(Renderer&, u32 offset, void* data, u32 bytes) {
+  std::memcpy(data, gds.data() + offset, bytes);
+  return true;
+}
+bool WriteGds(Renderer&, u32 offset, const void* data, u32 bytes) {
+  std::memcpy(gds.data() + offset, data, bytes);
+  return true;
+}
+bool FillGds(Renderer&, u32 offset, u32 bytes, u32 value) {
+  for (u32 i = 0; i < bytes; i++)
+    gds[offset + i] = static_cast<u8>(value >> ((i & 3u) * 8));
+  return true;
+}
 bool FlushCsWritesRange(Renderer&, u64 base, u64 bytes) {
   if (!flush_succeeds)
     return false;

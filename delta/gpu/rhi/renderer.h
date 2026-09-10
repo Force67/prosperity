@@ -65,6 +65,12 @@ bool FlushCsWrites(Renderer& renderer);
 // contract as FlushCsWrites.
 bool FlushCsWritesRange(Renderer& renderer, u64 base, u64 bytes);
 
+// CP transfers address the same 64 KiB GDS allocation as shader DS operations.
+// Offsets and lengths are bytes; transfers wait for preceding compute work.
+bool ReadGds(Renderer& renderer, u32 offset, void* data, u32 bytes);
+bool WriteGds(Renderer& renderer, u32 offset, const void* data, u32 bytes);
+bool FillGds(Renderer& renderer, u32 offset, u32 bytes, u32 value);
+
 // Monotonic count of compute-results-became-visible-in-guest-memory events
 // (a range writeback, or an executed batch of dispatches that write guest
 // memory directly). A cached copy of guest bytes taken at generation G is

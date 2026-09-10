@@ -231,6 +231,31 @@ void HandleDmaData(rhi::Renderer& renderer, const u32* body, u32 count) {
     return address >= 0x1000000ull && address < 0x20000000000ull;
   };
   bool copied = false;
+  if (!kNoCopy && bytes && (src_sel == 1 || dst_sel == 1)) {
+    // Selector 1 addresses GDS by byte offset, rather than guest virtual
+    // memory. These fills reset the append counters used to build indirect
+    // dispatch arguments; dropping them makes those counts grow every frame.
+    if (dst_sel == 1 && dst < 65536 && bytes <= 65536 - dst) {
+      if (src_sel == 2)
+        copied = rhi::FillGds(renderer, static_cast<u32>(dst), bytes, body[1]);
+      else if (src_is_memory && gpu::IsReadableRange(src, bytes) &&
+               rhi::FlushCsWritesRange(renderer, src, bytes))
+        copied = rhi::WriteGds(renderer, static_cast<u32>(dst),
+                                reinterpret_cast<const void*>(src), bytes);
+      else if (src_sel == 1 && src < 65536 && bytes <= 65536 - src) {
+        std::vector<u8> data(bytes);
+        copied = rhi::ReadGds(renderer, static_cast<u32>(src), data.data(), bytes) &&
+                 rhi::WriteGds(renderer, static_cast<u32>(dst), data.data(), bytes);
+      }
+    } else if (src_sel == 1 && src < 65536 && bytes <= 65536 - src &&
+               dst_is_memory && gpu::IsReadableRange(dst, bytes) &&
+               rhi::FlushCsWritesRange(renderer, dst, bytes)) {
+      copied = rhi::ReadGds(renderer, static_cast<u32>(src),
+                             reinterpret_cast<void*>(dst), bytes);
+    }
+    TraceDmaData(control, src, dst, bytes, copied);
+    return;
+  }
   if (!kNoCopy && src_is_memory && dst_is_memory && bytes &&
       bytes <= 0x1000000u && src != dst && addressable(src) &&
       addressable(src + bytes) && addressable(dst) &&
