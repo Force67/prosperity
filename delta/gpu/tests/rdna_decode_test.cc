@@ -1,3 +1,4 @@
+#include <array>
 #include "base/arch.h"
 
 #include <gtest/gtest.h>
@@ -249,6 +250,28 @@ TEST(RdnaDecode, EndpgmSavedTerminatesAndCallTargetsRemainReachable) {
       gpu::rdna::ReachableProgram(gpu::rdna::Decode(call, 4, false));
   ASSERT_EQ(reachable.size(), 4u);
   EXPECT_EQ(reachable[2].pc, 2u);
+}
+
+TEST(RdnaDecode, ReusedShaderAddressInvalidatesChangesAfterFirst64Dwords) {
+  std::array<u32, 128> code;
+  code.fill(Sopp(0));
+  code[80] = Sopp(1);
+  gpu::rdna::NextProgramGeneration();
+  const auto first =
+      gpu::rdna::CachedReachableProgram(code.data(), code.size());
+  code[70] = Vop2(3);
+  gpu::rdna::NextProgramGeneration();
+  const auto changed =
+      gpu::rdna::CachedReachableProgram(code.data(), code.size());
+  ASSERT_NE(first, changed);
+  ASSERT_EQ(changed->size(), 81);
+  EXPECT_EQ((*changed)[70].raw[0], Vop2(3));
+  code[80] = Sopp(0);
+  code[81] = Sopp(1);
+  gpu::rdna::NextProgramGeneration();
+  const auto extended =
+      gpu::rdna::CachedReachableProgram(code.data(), code.size());
+  EXPECT_EQ(extended->size(), 82);
 }
 
 }  // namespace

@@ -305,6 +305,7 @@ std::unordered_map<u32, BufferResource> ResolveBuffers(
     const u32* code,
     const u32* user_data,
     u32 user_sgprs,
-    u32 user_sgpr_base = 0);
+    u32 user_sgpr_base = 0,
+    u32 max_dwords = 4096);
 
 }  // namespace gpu::rdna

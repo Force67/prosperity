@@ -177,7 +177,7 @@ const gcn::Recompiled& GetGraphicsShader(const GraphicsShaderState& state) {
 const gcn::RecompiledCs& GetComputeShader(const ComputeShaderState& state) {
   static std::unordered_map<ComputeKey, gcn::RecompiledCs, ComputeKeyHash>
       cache;
-  const ComputeKey key{CodeHash(state.cs_addr, 4096),
+  const ComputeKey key{CodeHash(state.cs_addr, rdna::ComputeCodeDwords(reinterpret_cast<const u32*>(state.cs_addr))),
                        state.thread_x,
                        state.thread_y,
                        state.thread_z,

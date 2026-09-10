@@ -20,6 +20,7 @@
 #include "gpu/ps5/cmd_trace.h"
 #include "gpu/ps5/guest_address.h"
 #include "gpu/ps5/rdna/rdna_resource.h"
+#include "gpu/ps5/rdna/rdna_compute.h"
 #include "gpu/ps5/shader_cache.h"
 
 namespace {
@@ -220,7 +221,8 @@ void DispatchCompute(rhi::Renderer& renderer,
   // the shader's scalar ops to recover the one each resource's instruction
   // actually used.
   const auto resolved = rdna::ResolveBuffers(
-      reinterpret_cast<const u32*>(cs_addr), ud, ud_dwords, 0);
+      reinterpret_cast<const u32*>(cs_addr), ud, ud_dwords, 0,
+      rdna::ComputeCodeDwords(reinterpret_cast<const u32*>(cs_addr)));
 
   for (const gcn::CsResource& r : rc.resources) {
     const u32 dwords = r.kind == 1 ? 8u : r.kind == 2 ? 2u : 4u;

@@ -19,6 +19,9 @@
 
 namespace gpu::rdna {
 
+// Readable shader scan budget, up to 64 KiB. Decoder kernels exceed 16 KiB.
+u32 ComputeCodeDwords(const u32* code);
+
 // Recompile an RDNA2 compute shader. cs_code is a guest pointer to the shader;
 // num_thread_* the workgroup size (COMPUTE_NUM_THREAD_*); user_sgpr the number
 // of user-data SGPRs seeded into s0.. (COMPUTE_PGM_RSRC2.user_sgpr);

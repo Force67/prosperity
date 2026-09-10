@@ -7,6 +7,28 @@
 #include "gpu/ps5/rdna/rdna_compute.h"
 #include "base/arch.h"
 
+#include "gpu/guest_memory.h"
+
+namespace gpu::rdna {
+u32 ComputeCodeDwords(const u32* code) {
+  if (!code)
+    return 0;
+  const u64 base = reinterpret_cast<u64>(code);
+  // Probe only mapped memory, then let the decoder stop at the actual endpgm.
+  u32 lo = 0, hi = 64 * 1024 / 4;
+  if (gpu::IsReadableRange(base, u64(hi) * 4))
+    return hi;
+  while (lo < hi) {
+    const u32 mid = (lo + hi + 1) / 2;
+    if (gpu::IsReadableRange(base, u64(mid) * 4))
+      lo = mid;
+    else
+      hi = mid - 1;
+  }
+  return lo;
+}
+}
+
 #ifndef DELTA_HAVE_SPIRV_BACKEND
 namespace gpu::rdna {
 
@@ -761,11 +783,18 @@ gpu::gcn::RecompiledCs RecompileCompute(const u32* cs_code,
                                         u32 tgid_enable,
                                         u32 lds_dwords) {
   RecompiledCs r;
-  constexpr u64 kMaxShaderBytes = 4096 * sizeof(u32);
-  if (!cs_code || !gpu::IsReadableRange(reinterpret_cast<uintptr_t>(cs_code),
-                                        kMaxShaderBytes))
+  const u32 code_dwords = ComputeCodeDwords(cs_code);
+  if (!code_dwords)
     return r;
-  const Program program = ReachableProgram(DecodeShader(cs_code, 4096));
+  Program program = ReachableProgram(DecodeShader(cs_code, code_dwords));
+  if (program.empty())
+    return r;
+  const auto& last = program.back();
+  if (last.pc + last.size >= code_dwords &&
+      !(last.enc == Enc::kSopp && (last.opcode == 1 || last.opcode == 0x1f))) {
+    gpu::gcn::WarnUnsupported("cs.truncated.rdna", last.pc);
+    return r;
+  }
 
   Translator t;
   RecompiledCs tmp;  // build into a temp so a mid-emit failure leaves r intact

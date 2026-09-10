@@ -537,8 +537,16 @@ std::shared_ptr<const Program> CachedReachableProgram(const u32* code,
 
   // Hash the real code span (footer-bounded when there is one) so a shader
   // rewritten in place at the same address invalidates the entry.
-  const u32 len = CodeLength(code, max_dwords);
-  const u32 hashed = len ? len : (max_dwords < 64 ? max_dwords : 64);
+  u32 len = CodeLength(code, max_dwords);
+  if (!len) {
+    len = max_dwords;
+    for (const Inst& inst : Decode(code, max_dwords, /*stop_at_endpgm=*/true))
+      if (inst.enc == Enc::kSopp && inst.opcode == 0x01) {
+        len = inst.pc + inst.size;
+        break;
+      }
+  }
+  const u32 hashed = len;
   const u64 hash = HashCode(code, hashed);
   if (it != cache.end() && it->second.hash == hash &&
       it->second.hashed_dwords == hashed) {

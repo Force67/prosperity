@@ -1655,13 +1655,13 @@ std::unordered_map<u32, BufferResource> ResolveBuffers(
     const u32* code,
     const u32* user_data,
     u32 user_sgprs,
-    u32 user_sgpr_base) {
+    u32 user_sgpr_base, u32 max_dwords) {
   std::unordered_map<u32, BufferResource> out;
   if (!code || !user_data || !InGuest(reinterpret_cast<u64>(code)))
     return out;
   ScalarEval eval(user_data, user_sgprs, user_sgpr_base);
   eval.code_addr = reinterpret_cast<u64>(code);
-  for (const Inst& inst : *CachedReachableProgram(code, 4096)) {
+  for (const Inst& inst : *CachedReachableProgram(code, max_dwords)) {
     if (inst.enc == Enc::kSmrd && SmemLoadCount(inst.opcode)) {
       const Smem smem = DecodeSmem(inst);
       // s_buffer_load reads through a V#, s_load through a bare 64-bit pointer.
