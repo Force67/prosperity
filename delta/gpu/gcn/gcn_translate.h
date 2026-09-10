@@ -277,7 +277,7 @@ struct CsResource {
   u32 base_sgpr = 0;  // SGPR index of the live descriptor at use_pc
   u32 use_pc = 0;     // representative instruction consuming it
   u32 binding = 0;    // storage-buffer binding (set 0)
-  u8 kind = 0;        // 0 = buffer V#, 1 = image T#, 2 = scalar pointer
+  u8 kind = 0;  // 0 = buffer V#, 1 = image T#, 2 = scalar pointer, 3 = BVH T#
   bool written = false;    // dispatch writes it -> copy back to guest
   // Does the dispatch READ it? A resource that is written and never read does
   // not have to be staged in from guest memory before the dispatch -- and

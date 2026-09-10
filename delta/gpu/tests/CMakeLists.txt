@@ -59,6 +59,9 @@ if(SPIRVTOOLS_FOUND AND SPIRVHEADERS_FOUND)
   add_delta_test(rdna_global_test
     SOURCES rdna_global_test.cc
     DEPS delta_gpu)
+  add_delta_test(rdna_bvh_test
+    SOURCES rdna_bvh_test.cc
+    DEPS delta_gpu)
 endif()
 
 add_delta_test(vk_memory_span_test

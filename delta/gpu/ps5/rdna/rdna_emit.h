@@ -18,6 +18,10 @@
 
 namespace gpu::rdna {
 
+void EmitBvh(gpu::gcn::Translator& t,
+             const gpu::gcn::Inst& inst,
+             gpu::gcn::StageContext& sc);
+
 // rdna_translate.cc: lower the program's branches into the while/switch state
 // machine, emitting each instruction through the RDNA2 dispatch.
 void EmitCfg(gpu::gcn::Translator& t,

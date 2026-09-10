@@ -318,6 +318,21 @@ bool PlanResources(const Program& program,
         // the translator is in RDNA mode, so the plan is the same as GCN's.
         const u32 op = inst.opcode;
         const u32 srsrc = ((w1 >> 16) & 0x1F) * 4;
+        if (op == 0xe6 || op == 0xe7) {
+          const u32 nsa = (w >> 1) & 3;
+          const u32 addresses = ((w1 >> 30) & 1 ? 8u : 11u) + (op == 0xe7);
+          // DIM=0, DMASK=15, UNRM=R128=1, TFE=LWE=D16=SSAMP=0.
+          if ((w & 0x39f38u) != 0x9f00u || (w1 & 0xbfe00000u) ||
+              (nsa && 1 + nsa * 4 < addresses) ||
+              (!nsa && (w1 & 255) + addresses > 256) ||
+              ((w1 >> 8) & 255) > 252) {
+            gpu::gcn::WarnUnsupported("bvh.control.rdna", op, w, w1);
+            return false;
+          }
+          if (!resource(inst.pc, srsrc, 4, 3, false, 0))
+            return false;
+          break;
+        }
         if (op == 0x0e)
           break;  // get_resinfo reads only descriptor SGPRs
         const bool store =
@@ -766,6 +781,10 @@ bool EmitCsMemory(Translator& t, const Inst& inst, StageContext& sc) {
         gpu::gcn::EmitDs(t, inst, sc);
       return true;
     case Enc::kMimg: {
+      if (inst.opcode == 0xe6 || inst.opcode == 0xe7) {
+        EmitBvh(t, inst, sc);
+        return true;
+      }
       // Same lowering as the graphics path: dim 3 (cube) and 5 (2D array)
       // become the shared emitter's DA bit, and NSA names each address
       // component in its own VGPR.
