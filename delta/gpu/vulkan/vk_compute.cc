@@ -47,6 +47,10 @@
 #include <base/strings/xstring.h>
 #include <utl/options.h>
 
+#define BCDECDEF static inline
+#define BCDEC_IMPLEMENTATION
+#include <bcdec.h>
+
 namespace {
 DELTA_OPTION(u64, kDetileDump, "DELTA_GPU_DETILEDUMP", 0);
 DELTA_OPTION(bool, kCsList, "DELTA_GPU_CSLIST", false);
@@ -298,8 +302,12 @@ bool BuildCsImageLayouts(const ComputeInfo::Res& res,
                          gcn::TextureLayout32& tiled,
                          gcn::TextureLayout32& linear) {
   const u32 stage_tiling = res.tiling_idx == 31 ? 31 : 8;
+  const bool bc6 = res.dfmt == 40;
   return res.image_staging &&
-         gcn::BuildTextureLayout32(tiled, res.width, res.height, res.pitch,
+         gcn::BuildTextureLayout32(tiled,
+                                   bc6 ? (res.width + 3) / 4 : res.width,
+                                   bc6 ? (res.height + 3) / 4 : res.height,
+                                   bc6 ? (res.pitch + 3) / 4 : res.pitch,
                                    res.layers, res.mip_levels, res.tiling_idx,
                                    res.pow2_pad, res.elem_bytes) &&
          gcn::BuildTextureLayout32(linear, res.width, res.height, res.pitch,
@@ -372,7 +380,8 @@ bool StageCsImage(const ComputeInfo::Res& res, void* dst) {
   gcn::TextureLayout32 tiled, linear;
   if (!BuildCsImageLayouts(res, tiled, linear))
     return false;
-  const bool direct = res.elem_bytes == res.stage_elem_bytes;
+  const bool bc6 = res.dfmt == 40;
+  const bool direct = !bc6 && res.elem_bytes == res.stage_elem_bytes;
   bool fills_complete_layout = direct;
   u64 filled_bytes = 0;
   for (u32 mip = 0; fills_complete_layout && mip < linear.mip_levels;
@@ -391,7 +400,8 @@ bool StageCsImage(const ComputeInfo::Res& res, void* dst) {
     std::memset(dst, 0, res.size);
   std::vector<u8> tight;
   if (!direct)
-    tight.resize(static_cast<size_t>(res.width) * res.height * res.elem_bytes);
+    tight.resize(static_cast<size_t>(tiled.mips[0].width) *
+                   tiled.mips[0].height * res.elem_bytes);
   // DELTA_GPU_DETILEDUMP=<base>: write the de-tiled level-0 bytes of that guest
   // surface to <dumpdir>/detiled.bin once, so the swizzle can be checked
   // against an offline decode of the same texture.
@@ -430,6 +440,29 @@ bool StageCsImage(const ComputeInfo::Res& res, void* dst) {
       if (!gcn::DetileTextureMip32(reinterpret_cast<const void*>(res.base),
                                    tight.data(), tiled, mip, layer))
         return false;
+      if (bc6) {
+        gcn::DetileParallelRows(src_level.height, [&](u32 y0, u32 y1) {
+          for (u32 by = y0; by < y1; ++by) {
+            for (u32 bx = 0; bx < src_level.width; ++bx) {
+              float rgb[4][4][3];
+              const u8* block = tight.data() +
+                  (static_cast<size_t>(by) * src_level.width + bx) * 16;
+              bcdec_bc6h_float(block, rgb, 12, res.nfmt == 1);
+              for (u32 y = 0; y < 4 && by * 4 + y < dst_level.height; ++y) {
+                for (u32 x = 0; x < 4 && bx * 4 + x < dst_level.width; ++x) {
+                  const float rgba[4] = {
+                      rgb[y][x][0], rgb[y][x][1], rgb[y][x][2], 1.f};
+                  const size_t offset =
+                      (static_cast<size_t>(by * 4 + y) * dst_level.pitch +
+                       bx * 4 + x) * 16;
+                  std::memcpy(level_dst + offset, rgba, sizeof(rgba));
+                }
+              }
+            }
+          }
+        });
+        continue;
+      }
       gcn::DetileParallelRows(src_level.height, [&](u32 y0, u32 y1) {
         for (u32 y = y0; y < y1; y++) {
           u8* dst_row = level_dst + static_cast<size_t>(y) *
@@ -465,6 +498,8 @@ bool StageCsImage(const ComputeInfo::Res& res, void* dst) {
 }
 
 bool WritebackCsImage(const ComputeInfo::Res& res, const void* src) {
+  if (res.dfmt == 40)
+    return false;  // Compressed textures are sampled, never image-stored.
   gcn::TextureLayout32 tiled, linear;
   // A bail here leaves the destination holding whatever it held before the
   // dispatch, which for a first upload is zeros -- indistinguishable from a

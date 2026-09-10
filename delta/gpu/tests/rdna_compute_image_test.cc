@@ -227,6 +227,139 @@ INSTANTIATE_TEST_SUITE_P(LinearAndShadowTiling,
                          RdnaR16Unorm,
                          testing::Values(0u, 24u));
 
+// BC6 mode 11 stores two explicit 10-bit RGB endpoints. Equal endpoints
+// make a constant block, independent of the interpolation indices.
+class RdnaBc6Image : public testing::TestWithParam<u32> {};
+
+TEST_P(RdnaBc6Image, HdrLoadAndCubeSamplePreserveBlocksMipsAndLayers) {
+  auto& renderer = gpu::rhi::DefaultRenderer();
+  if (!gpu::rhi::Init(renderer))
+    GTEST_SKIP() << "A Vulkan device is required for this integration test";
+  const u32 param = GetParam();
+  const bool is_signed = param & 1;
+  const bool cube = param & 4;
+  const u32 layer_count = cube ? 6 : 2;
+  const u32 tile = param & 2 ? 5 : 0;
+  alignas(65536) static std::array<std::array<u8, 131072>, 8> inputs{},
+      outputs{};
+  auto& input = inputs[param];
+  auto& output = outputs[param];
+  gpu::gcn::TextureLayout32 blocks, pixels;
+  ASSERT_TRUE(gpu::gcn::BuildTextureLayout32(blocks, 2, 2, 2, layer_count, 4,
+                                             0x100 | tile, false, 16));
+  ASSERT_TRUE(gpu::gcn::BuildTextureLayout32(pixels, 8, 8, 8, layer_count, 4,
+                                             0x100, false, 16));
+  ASSERT_LE(blocks.size, input.size());
+  ASSERT_LE(pixels.size, output.size());
+  const u32 quantized[3] = {0, is_signed ? 256u : 512u,
+                            is_signed ? 768u : 1023u};
+  const float expected[3] = {0.f, is_signed ? 1.5302734375f : 1.5146484375f,
+                             is_signed ? -1.5302734375f : 65504.f};
+  for (u32 mip = 0; mip < 4; ++mip) {
+    for (u32 layer = 0; layer < layer_count; ++layer) {
+      std::array<u8, 64> tight{};
+      const auto& level = blocks.mips[mip];
+      for (u32 b = 0; b < level.width * level.height; ++b) {
+        u8* encoded = tight.data() + b * 16;
+        u32 bit = 0;
+        const auto put = [&](u32 value, u32 count) {
+          for (u32 i = 0; i < count; ++i, ++bit)
+            encoded[bit / 8] |= ((value >> i) & 1) << (bit % 8);
+        };
+        put(3, 5);
+        for (u32 endpoint = 0; endpoint < 2; ++endpoint)
+          for (u32 c = 0; c < 3; ++c)
+            put(quantized[(mip + layer + b + c) % 3], 10);
+      }
+      ASSERT_TRUE(gpu::gcn::RetileTextureMip32(tight.data(), input.data(),
+                                               blocks, mip, layer));
+    }
+  }
+  const auto original = input;
+  gpu::ps5::NoteGpuPool(reinterpret_cast<u64>(input.data()), input.size());
+  gpu::ps5::NoteGpuPool(reinterpret_cast<u64>(output.data()), output.size());
+  alignas(256) static std::array<u32, 4096> code{};
+  code[0] = 0xf0000f28;
+  code[1] = 0x00000400;  // image_load RGBA, 2D array
+  code[2] = 0xf0200f28;
+  code[3] = 0x00020400;  // image_store RGBA32_FLOAT
+  code[4] = 0xbf810000;
+  gpu::rdna::NextProgramGeneration();
+  for (u32 mip = 0; mip < 4; ++mip) {
+    gpu::ps5::Regs regs;
+    const u64 pc = reinterpret_cast<u64>(code.data());
+    regs[gpu::ps5::mmCOMPUTE_PGM_LO] = pc >> 8;
+    regs[gpu::ps5::mmCOMPUTE_PGM_HI] = pc >> 40;
+    const u32 dim = 8u >> mip;
+    if (cube) {
+      const u32 scale = std::bit_cast<u32>(1.f / dim);
+      const u32 bias = std::bit_cast<u32>(1.f + .5f / dim);
+      const u32 sample_code[] = {
+          0x7e100d00, 0x7e120d01,
+          0x7e140d02,  // float x, y, face
+          0x101010ff, scale,
+          0x061010ff, std::bit_cast<u32>(1.f + 1.f / dim),
+          0x101212ff, scale,
+          0x061212ff, bias,
+          0x7e160280,              // LOD 0, relative to the descriptor base mip
+          0xf0900f18, 0x00800408,  // image_sample_l cube
+          0xf0200f28, 0x00020400,  // image_store 2D array
+          0xbf810000};
+      std::copy(std::begin(sample_code), std::end(sample_code), code.begin());
+      gpu::rdna::NextProgramGeneration();
+    }
+    regs[gpu::ps5::mmCOMPUTE_NUM_THREAD_X] = dim;
+    regs[gpu::ps5::mmCOMPUTE_NUM_THREAD_Y] = dim;
+    regs[gpu::ps5::mmCOMPUTE_NUM_THREAD_Z] = layer_count;
+    regs[gpu::ps5::mmCOMPUTE_PGM_RSRC2] = 16 << 1;
+    const auto descriptor = [&](u32 first, const void* data, u32 fmt, u32 sw) {
+      const u64 address = reinterpret_cast<u64>(data);
+      regs[first] = address >> 8;
+      regs[first + 1] = ((address >> 40) & 0xff) | (fmt << 20) | (3u << 30);
+      regs[first + 2] = 1 | (7 << 14);  // 8x8 texels
+      regs[first + 3] = 0xd0030fac | (mip << 12) | (sw << 20);
+      regs[first + 4] = layer_count - 1;
+      if (cube && first == gpu::ps5::mmCOMPUTE_USER_DATA_0) {
+        regs[first + 3] = (regs[first + 3] & 0x0fffffff) | 0xb0000000;
+        regs[first + 4] = 0;  // a single cube still occupies all six faces
+      }
+      regs[first + 5] = 3 << 4;  // four physical mip levels
+    };
+    descriptor(gpu::ps5::mmCOMPUTE_USER_DATA_0, input.data(),
+               is_signed ? 180 : 179, tile);
+    descriptor(gpu::ps5::mmCOMPUTE_USER_DATA_0 + 8, output.data(), 77, 0);
+    const u32 dispatch[] = {1, 1, 1, 1};
+    gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
+    ASSERT_TRUE(gpu::rhi::FlushCsWrites(renderer));
+    for (u32 layer = 0; layer < layer_count; ++layer) {
+      std::array<float, 8 * 8 * 4> result{};
+      ASSERT_TRUE(gpu::gcn::DetileTextureMip32(output.data(), result.data(),
+                                               pixels, mip, layer));
+      for (u32 y = 0; y < dim; ++y) {
+        for (u32 x = 0; x < dim; ++x) {
+          const u32 b = (y / 4) * blocks.mips[mip].width + x / 4;
+          for (u32 c = 0; c < 4; ++c) {
+            float value = c == 3 ? 1.f : expected[(mip + layer + b + c) % 3];
+            // Sample half a texel to the right; the two neighboring blocks
+            // contribute equally at their boundary. This checks HDR filtering.
+            if (cube && dim == 8 && x == 3 && c != 3)
+              value = .5f * (value + expected[(mip + layer + b + 1 + c) % 3]);
+            EXPECT_FLOAT_EQ(result[(y * dim + x) * 4 + c], value)
+                << "mip=" << mip << " layer=" << layer << " xy=" << x << ','
+                << y;
+          }
+        }
+      }
+    }
+  }
+  EXPECT_EQ(input,
+            original);  // Sampling cannot write decompressed texels back.
+}
+
+INSTANTIATE_TEST_SUITE_P(SignedUnsignedLinearTiled,
+                         RdnaBc6Image,
+                         testing::Values(0u, 1u, 2u, 3u, 4u, 5u, 6u, 7u));
+
 TEST(RdnaComputeImageConversion, Rgba16UnormLoadAndMaskedClampedStore) {
   auto& renderer = gpu::rhi::DefaultRenderer();
   if (!gpu::rhi::Init(renderer))
@@ -732,6 +865,71 @@ TEST(RdnaComputeImageConversion, LinearIntegerArraysRespectRowsLayersAndBounds) 
   }
 }
 
+TEST(RdnaComputeImageConversion, AstroBc6CubeArrayStagingExceedsRawBufferLimit) {
+  auto& renderer = gpu::rhi::DefaultRenderer();
+  if (!gpu::rhi::Init(renderer))
+    GTEST_SKIP() << "A Vulkan device is required";
+  // Exact dimensions of Astro's lighting environment: 192 faces, nine mips.
+  // 16.5 MiB of guest BC6 expands to slightly more than 256 MiB of RGBA32F.
+  alignas(65536) static std::array<u8, 0x1080000> input{};
+  alignas(65536) static std::array<u32, 16384> output{};
+  alignas(256) static std::array<u32, 4096> code{};
+  gpu::gcn::TextureLayout32 blocks, pixels;
+  ASSERT_TRUE(gpu::gcn::BuildTextureLayout32(blocks, 64, 64, 64, 192, 9,
+                                           0x105, false, 16));
+  ASSERT_TRUE(gpu::gcn::BuildTextureLayout32(pixels, 256, 256, 256, 192, 9,
+                                           8, false, 16));
+  ASSERT_EQ(blocks.size, input.size());
+  ASSERT_EQ(pixels.size, 0x100b0000u);
+  std::array<u8, 16> encoded{};
+  u32 bit = 0;
+  const auto put = [&](u32 value, u32 count) {
+    for (u32 i = 0; i < count; ++i, ++bit)
+      encoded[bit / 8] |= ((value >> i) & 1) << (bit % 8);
+  };
+  put(3, 5);
+  for (u32 endpoint = 0; endpoint < 2; ++endpoint) {
+    put(0, 10); put(512, 10); put(1023, 10);
+  }
+  ASSERT_TRUE(gpu::gcn::RetileTextureMip32(encoded.data(), input.data(),
+                                         blocks, 8, 191));
+  gpu::ps5::NoteGpuPool(reinterpret_cast<u64>(input.data()), input.size());
+  gpu::ps5::NoteGpuPool(reinterpret_cast<u64>(output.data()), sizeof(output));
+  const u32 program[] = {
+      0x7e020280, 0x7e0402ff, 191, // y=0, face=191
+      0xf0000f28, 0x00000400,     // image_load RGBA, 2D array
+      0xe0780000, 0x80020400,     // buffer_store RGBA to s[8:11]
+      0xbf810000};
+  std::copy(std::begin(program), std::end(program), code.begin());
+  gpu::rdna::NextProgramGeneration();
+  gpu::ps5::Regs regs;
+  const u64 pc = reinterpret_cast<u64>(code.data());
+  regs[gpu::ps5::mmCOMPUTE_PGM_LO] = pc >> 8;
+  regs[gpu::ps5::mmCOMPUTE_PGM_HI] = pc >> 40;
+  regs[gpu::ps5::mmCOMPUTE_NUM_THREAD_X] = 1;
+  regs[gpu::ps5::mmCOMPUTE_NUM_THREAD_Y] = 1;
+  regs[gpu::ps5::mmCOMPUTE_NUM_THREAD_Z] = 1;
+  regs[gpu::ps5::mmCOMPUTE_PGM_RSRC2] = 12 << 1;
+  const u32 ud = gpu::ps5::mmCOMPUTE_USER_DATA_0;
+  const u64 src = reinterpret_cast<u64>(input.data());
+  regs[ud] = src >> 8;
+  regs[ud + 1] = ((src >> 40) & 255) | 0xcb300000;
+  regs[ud + 2] = 0x003fc03f;
+  regs[ud + 3] = 0xb0588fac;  // base mip 8, last mip 8
+  regs[ud + 4] = 191;
+  regs[ud + 5] = 0x80;
+  const u64 dst = reinterpret_cast<u64>(output.data());
+  regs[ud + 8] = dst;
+  regs[ud + 9] = (dst >> 32) & 0xffff;
+  regs[ud + 10] = 16;
+  regs[ud + 11] = 0x20000;
+  const u32 dispatch[] = {1, 1, 1, 1};
+  gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
+  ASSERT_TRUE(gpu::rhi::FlushCsWrites(renderer));
+  const float expected[] = {0, 1.5146484375f, 65504, 1};
+  for (u32 i = 0; i < 4; ++i)
+    EXPECT_FLOAT_EQ(std::bit_cast<float>(output[i]), expected[i]);
+}
 }  // namespace
 
 // Performance counters normally owned by the command-processor composition.

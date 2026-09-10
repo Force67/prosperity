@@ -1580,9 +1580,11 @@ static void EmitCsMimgStaged(Translator& t,
   const Id is_rg32_raw =
       t.rdna_sources ? is_gfmt({62, 63, 64})
                      : t.LAnd(t.Eq(dfmt, t.U32(11)), is_int);
-  const Id is_rgba32_raw =
-      t.rdna_sources ? is_gfmt({75, 76, 77})
-                     : t.LAnd(t.Eq(dfmt, t.U32(14)), is_int);
+  const Id is_rgba32_raw = t.rdna_sources
+                               ? is_gfmt({75, 76, 77, 179, 180})
+                               : t.LAnd(t.Eq(dfmt, t.U32(14)), is_int);
+  // BC6H (179/180) is decoded to RGBA32_FLOAT by compute staging; loads and
+  // filtering consume full-width float components just like format 77.
   // Full-width float channels use the same raw dwords as integer channels
   // for image_load/store. Sampling interprets those dwords as floats below.
   // Two dwords per texel (16_16_16_16 packs two components each, 32_32 is one

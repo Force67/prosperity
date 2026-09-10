@@ -37,8 +37,10 @@ namespace gpu::ps5 {
 namespace {
 
 constexpr u64 kMaxShaderBytes = 4096 * sizeof(u32);
-// A storage buffer beyond this is a descriptor we misread.
+// Limit guest ranges separately from expanded image staging. BC6H expands
+// from one byte per pixel to sixteen, and padding may cross a power of two.
 constexpr u64 kMaxResource = 256ull * 1024 * 1024;
+constexpr u64 kMaxImageStaging = 1024ull * 1024 * 1024;
 
 // One resource's live guest range and how it has to be staged.
 struct ResourceRange {
@@ -79,23 +81,33 @@ ResourceRange ResolveImageResource(u64 cs_addr,
   const bool rg32 = t.dfmt == 11 && (t.nfmt == 4 || t.nfmt == 5 || t.nfmt == 7);
   const bool block128 =
       t.dfmt == 14 && (t.nfmt == 4 || t.nfmt == 5 || t.nfmt == 7);
-  out.elem_bytes = block128            ? 16u
+  // BC6H is read-only: decompress its 4x4 blocks into RGBA32_FLOAT staging.
+  // As in graphics uploads, non-power-of-two mip chains and volumes need a
+  // different block layout and are not supported here yet.
+  const bool bc6 = t.dfmt == 40 && (t.nfmt == 0 || t.nfmt == 1) &&
+                   !res.written && t.type != 10 &&
+                   (t.mip_levels == 1 || (!(t.width & (t.width - 1)) &&
+                                          !(t.height & (t.height - 1))));
+  out.elem_bytes = (block128 || bc6)  ? 16u
                    : (rgba16 || rg32) ? 8u
-                   : (r16 || rg8)      ? 2u
-                   : r8                ? 1u
-                                       : 4u;
-  out.stage_elem_bytes = r11g11b10f ? 16u : std::max(out.elem_bytes, 4u);
+                   : (r16 || rg8)     ? 2u
+                   : r8               ? 1u
+                                      : 4u;
+  out.stage_elem_bytes =
+      (r11g11b10f || bc6) ? 16u : std::max(out.elem_bytes, 4u);
 
   // type 10 is a volume: DecodeTImage already reports its depth as layers and
   // the shared emitter addresses 3D slice-major, so it stages like the 2D
   // forms.
   const bool supported_type = t.type >= 8 && t.type <= 13;
   const bool supported_format = r8 || rgba8 || r32 || rg16f || rg16i || r16 || rg8 ||
-                                rgba16 || r11g11b10f || rg32 || block128;
+                                rgba16 || r11g11b10f || rg32 || block128 || bc6;
   gcn::TextureLayout32 layout;
   if (!supported_type || !supported_format ||
       !gcn::TilingSupported(t.tiling_idx) || !t.valid ||
-      !gcn::BuildTextureLayout32(layout, t.width, t.height, t.pitch, t.layers,
+      !gcn::BuildTextureLayout32(layout, bc6 ? (t.width + 3) / 4 : t.width,
+                                 bc6 ? (t.height + 3) / 4 : t.height,
+                                 bc6 ? (t.pitch + 3) / 4 : t.pitch, t.layers,
                                  t.mip_levels, t.tiling_idx, t.pow2_pad,
                                  out.elem_bytes)) {
     // One descriptor we cannot stage used to skip the whole dispatch, taking
@@ -129,6 +141,15 @@ ResourceRange ResolveImageResource(u64 cs_addr,
 ResourceRange ResolveBufferResource(const gcn::CsResource& res,
                                     const u32* descriptor) {
   ResourceRange out;
+  if (res.kind == 3) {  // RDNA BVH T#: base in 256-byte units, 64-byte nodes
+    out.base = ((static_cast<u64>(descriptor[1] & 0xff) << 32) | descriptor[0])
+               << 8;
+    const u64 last_node =
+        (static_cast<u64>(descriptor[3] & 0x3ff) << 32) | descriptor[2];
+    out.size = (last_node + 1) * 64;
+    out.ok = (descriptor[3] >> 28) == 8;
+    return out;
+  }
   if (res.kind == 2) {  // a raw pointer into an SRT/descriptor table
     out.base = (static_cast<u64>(descriptor[1] & 0xFFFF) << 32) | descriptor[0];
     out.size = res.min_bytes;
@@ -353,7 +374,8 @@ void DispatchCompute(rhi::Renderer& renderer,
     // shaders' constants in its own module image, outside the GPU aperture.
     const u64 max_resource = kCsAnyMem ? 2 * kMaxResource : kMaxResource;
     if (!range.zero_fill &&
-        (range.size < r.min_bytes || range.size > max_resource ||
+        (range.size < r.min_bytes ||
+         range.size > (range.image_staging ? kMaxImageStaging : max_resource) ||
          range.guest_size > max_resource ||
          (r.written && !kCsAnyMem && !IsGpuAddress(range.base)) ||
          !gpu::IsReadableRange(range.base, range.guest_size))) {

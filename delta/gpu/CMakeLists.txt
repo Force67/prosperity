@@ -22,6 +22,9 @@ else()
   add_delta_module(gpu DEPS Vulkan::Vulkan delta_gfx)
 endif()
 
+# Header-only BC6H decoder used by compute image staging.
+target_include_directories(delta_gpu PRIVATE ${CMAKE_SOURCE_DIR}/vendor/bcdec)
+
 # Layering: rhi/ is the backend-free renderer interface the command processors
 # talk to, vulkan/ is the only backend implementing it, and the PS4
 # PM4/Liverpool + GCN and PS5 AGC/RDNA2 paths live in ps4/ and ps5/. Every
