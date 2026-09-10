@@ -73,6 +73,22 @@ class RdnaGlobal : public testing::Test {
   }
 };
 
+TEST_F(RdnaGlobal, InactiveLaneCannotOverwriteSharedMemory) {
+  auto& dest = PageForDispatch();
+  lds_size = 1;
+  Mov(0, 0);
+  Mov(2, 17);
+  program.insert(program.end(), {0xd8340000, 0x00000200});  // LDS[0] = 17
+  Mov(2, 0x3f800000);
+  program.push_back(0xbefe0480);  // s_mov_b64 exec, 0
+  program.insert(program.end(), {0xd8340000, 0x00000200});  // inactive store
+  program.push_back(0xbefe04c1);  // s_mov_b64 exec, -1
+  program.insert(program.end(), {0xd8d80000, 0x02000000});  // v2 = LDS[0]
+  Global(0x1c, 0, 2, 2);
+  Run(0, reinterpret_cast<u64>(dest.data()));
+  EXPECT_EQ(dest[0], 17u);
+}
+
 TEST_F(RdnaGlobal, GdsCounterUsesM0BaseAndReturnsPreOperationValue) {
   auto& renderer = gpu::rhi::DefaultRenderer();
   auto& dest = PageForDispatch();

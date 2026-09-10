@@ -780,7 +780,9 @@ bool TranslateCs(const Program& program,
 
 }  // namespace
 
-bool EmitCsMemory(Translator& t, const Inst& inst, StageContext& sc) {
+static bool EmitCsMemoryUnpredicated(Translator& t,
+                                     const Inst& inst,
+                                     StageContext& sc) {
   sc.cs_cur_pc = inst.pc;
   switch (inst.enc) {
     case Enc::kSmrd:
@@ -843,6 +845,43 @@ bool EmitCsMemory(Translator& t, const Inst& inst, StageContext& sc) {
     default:
       return false;
   }
+}
+
+bool EmitCsMemory(Translator& t, const Inst& inst, StageContext& sc) {
+  if (inst.enc == Enc::kDs && ((inst.raw[0] >> 17) & 1) &&
+      (inst.opcode == 0x3d || inst.opcode == 0x3e) && t.CanExchange()) {
+    // All lanes must reach the broadcast barriers, even with EXEC disabled.
+    // EmitGdsCounter applies EXEC to the active count and destination writes.
+    return EmitCsMemoryUnpredicated(t, inst, sc);
+  }
+  // Predicating VGPR assignments does not suppress stores or atomic effects.
+  // Inactive lanes must not touch memory with their stale address/data VGPRs.
+  // Loads already predicate their VGPR assignments. Avoid branching around
+  // every load: large decoder kernels otherwise make the driver compiler
+  // spend minutes and gigabytes processing redundant control flow. GLOBAL
+  // stores have their own guard; subgroup DS swizzle must keep all lanes live.
+  const u32 op = inst.opcode;
+  const bool writes =
+      (inst.enc == Enc::kMubuf &&
+       ((op >= 0x04 && op <= 0x07) || (op >= 0x18 && op <= 0x1f) ||
+        (op >= 0x30 && op <= 0x5f))) ||
+      (inst.enc == Enc::kMtbuf && op >= 0x04 && op <= 0x07) ||
+      (inst.enc == Enc::kMimg &&
+       (op == 0x08 || op == 0x09 || (op >= 0x0f && op <= 0x1b))) ||
+      (inst.enc == Enc::kDs && op != 0x35 &&
+       !(op >= 0x36 && op <= 0x38) &&
+       !(op >= 0x76 && op <= 0x78) && op != 0xfe && op != 0xff);
+  if (!writes || !t.predicate_vector)
+    return EmitCsMemoryUnpredicated(t, inst, sc);
+  const Id body = t.m.NewBlock(), merge = t.m.NewBlock();
+  const Id active = t.LaneActive(t.Exec());
+  t.m.SelectionMerge(merge);
+  t.m.BranchConditional(active, body, merge);
+  t.m.OpenBlock(body);
+  const bool handled = EmitCsMemoryUnpredicated(t, inst, sc);
+  t.m.Branch(merge);
+  t.m.OpenBlock(merge);
+  return handled;
 }
 
 gpu::gcn::RecompiledCs RecompileCompute(const u32* cs_code,
