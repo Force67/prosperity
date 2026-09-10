@@ -64,12 +64,15 @@ ResourceRange ResolveImageResource(u64 cs_addr,
   ResourceRange out;
   const gcn::TImage t = rdna::DecodeTImage(descriptor);
   const bool r8 = t.dfmt == 1 && (t.nfmt == 0 || t.nfmt == 4);
-  const bool rgba8 = t.dfmt == 10 && (t.nfmt == 0 || t.nfmt == 4);
+  const bool rgba8 = t.dfmt == 10 && (t.nfmt == 0 || t.nfmt == 4 || t.nfmt == 5 ||
+                                     (t.nfmt == 9 && !res.written));
   const bool r32 = t.dfmt == 4 && (t.nfmt == 4 || t.nfmt == 5 || t.nfmt == 7);
   const bool rg16f = t.dfmt == 5 && t.nfmt == 7;
-  const bool r16f = t.dfmt == 2 && t.nfmt == 7;
+  const bool rg16i = t.dfmt == 5 && (t.nfmt == 4 || t.nfmt == 5);
+  const bool r16 = t.dfmt == 2 && (t.nfmt == 0 || t.nfmt == 7);
   const bool rg8 = t.dfmt == 3 && (t.nfmt == 0 || t.nfmt == 4);
-  const bool rgba16 = t.dfmt == 12 && (t.nfmt == 0 || t.nfmt == 7);
+  const bool rgba16 = t.dfmt == 12 && (t.nfmt == 0 || t.nfmt == 4 ||
+                                      t.nfmt == 5 || t.nfmt == 7);
   const bool r11g11b10f = t.dfmt == 6 && t.nfmt == 7;
   // 32_32: two full dwords per texel, so it stages unchanged like the other
   // 32-bit-per-channel forms, just twice as wide.
@@ -78,7 +81,7 @@ ResourceRange ResolveImageResource(u64 cs_addr,
       t.dfmt == 14 && (t.nfmt == 4 || t.nfmt == 5 || t.nfmt == 7);
   out.elem_bytes = block128            ? 16u
                    : (rgba16 || rg32) ? 8u
-                   : (r16f || rg8)     ? 2u
+                   : (r16 || rg8)      ? 2u
                    : r8                ? 1u
                                        : 4u;
   out.stage_elem_bytes = r11g11b10f ? 16u : std::max(out.elem_bytes, 4u);
@@ -87,7 +90,7 @@ ResourceRange ResolveImageResource(u64 cs_addr,
   // the shared emitter addresses 3D slice-major, so it stages like the 2D
   // forms.
   const bool supported_type = t.type >= 8 && t.type <= 13;
-  const bool supported_format = r8 || rgba8 || r32 || rg16f || r16f || rg8 ||
+  const bool supported_format = r8 || rgba8 || r32 || rg16f || rg16i || r16 || rg8 ||
                                 rgba16 || r11g11b10f || rg32 || block128;
   gcn::TextureLayout32 layout;
   if (!supported_type || !supported_format ||
@@ -105,12 +108,11 @@ ResourceRange ResolveImageResource(u64 cs_addr,
   }
   out.base = t.base;
   out.guest_size = layout.size;
-  out.image_staging = !gcn::TilingIsLinear(t.tiling_idx) ||
-                      out.elem_bytes != out.stage_elem_bytes;
-  if (!out.image_staging) {
-    out.size = out.guest_size;
-    return out;
-  }
+  // Even gfx10 LINEAR has a physical layout: 256-byte row alignment and a
+  // layer-major mip chain. The shared compute emitter addresses the staged
+  // image as a mip-major, linear-aligned SSBO, so linear images need the same
+  // layout conversion as tiled ones (including byte/halfword expansion).
+  out.image_staging = true;
   gcn::TextureLayout32 linear;
   if (!gcn::BuildTextureLayout32(linear, t.width, t.height, t.pitch, t.layers,
                                  t.mip_levels, 8, t.pow2_pad,
@@ -383,6 +385,7 @@ void DispatchCompute(rhi::Renderer& renderer,
     out.elem_bytes = range.elem_bytes;
     out.stage_elem_bytes = range.stage_elem_bytes;
     out.dfmt = range.image.dfmt;
+    out.nfmt = range.image.nfmt;
     out.pow2_pad = range.image.pow2_pad;
   }
   ci.gds_binding = rc.gds_binding;

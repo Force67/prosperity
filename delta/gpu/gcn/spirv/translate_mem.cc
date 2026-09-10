@@ -1452,7 +1452,11 @@ static void EmitCsMimgStaged(Translator& t,
   // stayed zero, which graded the finished frame to black.
   const Id is_3d_img = t.Eq(image_type, t.U32(10));
   const Id has_slices = logical_or(is_array, is_3d_img);
-  const Id descriptor_layers = t.Add(field(4, 0, 0x1FFF), t.U32(1));
+  const Id is_rdna_cube =
+      t.rdna_sources ? t.Eq(image_type, t.U32(11)) : t.m.ConstBool(false);
+  const Id raw_layers = t.Add(field(4, 0, 0x1FFF), t.U32(1));
+  const Id descriptor_layers =
+      t.SelectB(is_rdna_cube, t.UMax(raw_layers, t.U32(6)), raw_layers);
 
   if (resinfo) {  // dimensions from the descriptor, no memory access
     const Id mip = t.UMin(addr_vg(0), t.Sub(safe_last_mip, base_mip));
@@ -1484,16 +1488,29 @@ static void EmitCsMimgStaged(Translator& t,
   // gfx10.3 replaces (dfmt, nfmt) with one 9-bit format enum.
   const Id gfmt = field(1, 20, 0x1FF);
   const Id dfmt = field(1, 20, 0x3F), nfmt = field(1, 26, 0xF);
-  const Id is_unorm = t.IsZero(nfmt);  // nfmt 0 = UNORM
   const auto is_gfmt = [&](std::initializer_list<u32> values) {
     Id any = t.m.ConstBool(false);
     for (u32 v : values)
       any = logical_or(any, t.Eq(gfmt, t.U32(v)));
     return any;
   };
+  // gfx10 packs a unified format, not GCN's separate DFMT/NFMT. Reading the
+  // old NFMT bits labels every format below 64 UNORM, including R8_UINT and
+  // RGBA8_SINT used by the native video decoder.
+  const Id is_unorm = t.rdna_sources ? is_gfmt({1, 7, 14, 23, 56, 65})
+                                     : t.IsZero(nfmt);
+  const Id is_signed8 = t.rdna_sources ? is_gfmt({61}) : t.m.ConstBool(false);
+  const Id is_srgb = t.rdna_sources ? is_gfmt({130}) : t.Eq(nfmt, t.U32(9));
+  const auto srgb_decode = [&](Id value) {
+    const Id linear = t.FMul(value, t.F32(1.f / 12.92f));
+    const Id curved = t.m.ExtInst(t.t_f, GLSLstd450Pow,
+        {t.FMul(t.FAdd(value, t.F32(.055f)), t.F32(1.f / 1.055f)), t.F32(2.4f)});
+    return t.SelectF(t.m.Emit(spv::Op::OpFOrdLessThanEqual, t.t_bool,
+                              {value, t.F32(.04045f)}), linear, curved);
+  };
   const Id is_rgba8 =
       t.rdna_sources
-          ? is_gfmt({56, 60, 130, 1, 5})  // R8 stages as an RGBA8 texel
+          ? is_gfmt({56, 60, 61, 130, 1, 5})  // R8 stages as an RGBA8 texel
           : t.LAnd(t.Eq(dfmt, t.U32(10)),
                    logical_or(is_unorm, t.Eq(nfmt, t.U32(4))));
   const Id is_r32 =
@@ -1506,9 +1523,14 @@ static void EmitCsMimgStaged(Translator& t,
   const Id is_rg16f = t.rdna_sources
                           ? is_gfmt({29})
                           : t.LAnd(t.Eq(dfmt, t.U32(5)), t.Eq(nfmt, t.U32(7)));
-  const Id is_r16f = t.rdna_sources
-                         ? is_gfmt({13})
-                         : t.LAnd(t.Eq(dfmt, t.U32(2)), t.Eq(nfmt, t.U32(7)));
+  const Id is_rg16i = t.rdna_sources ? is_gfmt({27, 28}) : t.m.ConstBool(false);
+  const Id is_rg16_signed = t.rdna_sources ? is_gfmt({28}) : t.m.ConstBool(false);
+  const Id is_r16_unorm =
+      t.rdna_sources ? is_gfmt({7}) : t.LAnd(t.Eq(dfmt, t.U32(2)), is_unorm);
+  const Id is_r16 = logical_or(
+      is_r16_unorm, t.rdna_sources
+                        ? is_gfmt({13})
+                        : t.LAnd(t.Eq(dfmt, t.U32(2)), t.Eq(nfmt, t.U32(7))));
   // gfx10 14 = 8_8_UNORM, 18 = 8_8_UINT (the video decoder's frame planes).
   const Id is_rg8 =
       t.rdna_sources ? is_gfmt({14, 18})
@@ -1522,19 +1544,20 @@ static void EmitCsMimgStaged(Translator& t,
                  t.rdna_sources ? is_gfmt({71})
                                 : t.LAnd(t.Eq(dfmt, t.U32(12)),
                                          t.Eq(nfmt, t.U32(7))));
+  const Id is_unorm16 = logical_or(is_r16_unorm, is_rgba16_unorm);
   const auto unpack16 = [&](Id word) {
     const Id half = t.m.ExtInst(t.t_v2, GLSLstd450UnpackHalf2x16, {word});
     const Id unorm = t.m.ExtInst(t.t_v2, GLSLstd450UnpackUnorm2x16, {word});
-    return t.m.CompositeConstruct(t.t_v2, {
-        t.SelectF(is_rgba16_unorm, t.m.CompositeExtract(t.t_f, unorm, 0),
-                  t.m.CompositeExtract(t.t_f, half, 0)),
-        t.SelectF(is_rgba16_unorm, t.m.CompositeExtract(t.t_f, unorm, 1),
-                  t.m.CompositeExtract(t.t_f, half, 1))});
+    return t.m.CompositeConstruct(
+        t.t_v2, {t.SelectF(is_unorm16, t.m.CompositeExtract(t.t_f, unorm, 0),
+                           t.m.CompositeExtract(t.t_f, half, 0)),
+                 t.SelectF(is_unorm16, t.m.CompositeExtract(t.t_f, unorm, 1),
+                           t.m.CompositeExtract(t.t_f, half, 1))});
   };
   const auto pack16 = [&](Id pair) {
-    return t.SelectB(is_rgba16_unorm,
-                      t.m.ExtInst(t.t_u, GLSLstd450PackUnorm2x16, {pair}),
-                      t.m.ExtInst(t.t_u, GLSLstd450PackHalf2x16, {pair}));
+    return t.SelectB(is_unorm16,
+                     t.m.ExtInst(t.t_u, GLSLstd450PackUnorm2x16, {pair}),
+                     t.m.ExtInst(t.t_u, GLSLstd450PackHalf2x16, {pair}));
   };
   const Id is_r11g11b10f = t.rdna_sources
                                ? is_gfmt({36})
@@ -1547,11 +1570,13 @@ static void EmitCsMimgStaged(Translator& t,
   // they pass through the staging buffer unchanged. P.T.'s texture streamer
   // uploads every streamed surface this way; without these the access was
   // gated off and the copy stored nothing.
-  const Id is_int = logical_or(t.Eq(nfmt, t.U32(4)), t.Eq(nfmt, t.U32(5)));
-  const Id false_id = t.m.ConstBool(false);
+  const Id is_int = t.rdna_sources
+      ? is_gfmt({5, 18, 20, 21, 27, 28, 60, 61, 62, 63, 69, 70, 75, 76})
+      : logical_or(t.Eq(nfmt, t.U32(4)), t.Eq(nfmt, t.U32(5)));
   const Id is_rgba16u = t.rdna_sources
-                            ? false_id
+                            ? is_gfmt({69, 70})
                             : t.LAnd(t.Eq(dfmt, t.U32(12)), is_int);
+  const Id is_signed16 = t.rdna_sources ? is_gfmt({70}) : t.Eq(nfmt, t.U32(5));
   const Id is_rg32_raw =
       t.rdna_sources ? is_gfmt({62, 63, 64})
                      : t.LAnd(t.Eq(dfmt, t.U32(11)), is_int);
@@ -1566,7 +1591,9 @@ static void EmitCsMimgStaged(Translator& t,
   const Id is_raw_block = logical_or(is_block2, is_rgba32_raw);
   Id supported_format = logical_or(is_rgba8, is_r32);
   supported_format = logical_or(supported_format, is_rg16f);
-  supported_format = logical_or(supported_format, is_r16f);
+  if (load || store)
+    supported_format = logical_or(supported_format, is_rg16i);
+  supported_format = logical_or(supported_format, is_r16);
   supported_format = logical_or(supported_format, is_rg8);
   supported_format = logical_or(supported_format, is_rgba16);
   supported_format = logical_or(supported_format, is_r11g11b10f);
@@ -1603,9 +1630,15 @@ static void EmitCsMimgStaged(Translator& t,
     // weights are formed in the access block.
     const Id width_f = t.m.Emit(spv::Op::OpConvertUToF, t.t_f, {width});
     const Id height_f = t.m.Emit(spv::Op::OpConvertUToF, t.t_f, {height});
-    sample_fx = t.FSub(t.FMul(t.FClamp01(addr_vgf(0)), width_f), t.F32(0.5f));
+    // Cube coordinates arrive in [1,2], with the face selected by the guest
+    // ALU. Match the graphics path's conversion to a normalized 2D-array UV.
+    const Id cube_bias = t.SelectF(is_rdna_cube, t.F32(1.f), t.F32(0.f));
+    sample_fx =
+        t.FSub(t.FMul(t.FClamp01(t.FSub(addr_vgf(0), cube_bias)), width_f),
+               t.F32(0.5f));
     sample_fy =
-        t.FSub(t.FMul(t.FClamp01(addr_vgf(1)), height_f), t.F32(0.5f));
+        t.FSub(t.FMul(t.FClamp01(t.FSub(addr_vgf(1), cube_bias)), height_f),
+               t.F32(0.5f));
     const Id fx0 =
         t.Ext1(GLSLstd450Floor, t.Ext2(GLSLstd450FMax, sample_fx, t.F32(0.f)));
     const Id fy0 =
@@ -1631,8 +1664,12 @@ static void EmitCsMimgStaged(Translator& t,
     }
     y = t.SelectB(is_1d_img, t.U32(0), y);
   }
-  // gfx10.3 swizzle mode 0 is the linear one, and it has no pow2-pad bit.
-  const Id linear_general = t.Eq(field(3, 20, 0x1F), t.U32(t.rdna_sources ? 0 : 31));
+  // RDNA images, including LINEAR, are converted to the backend's
+  // linear-aligned staging layout. A guest swizzle mode of zero is not a
+  // tightly packed SSBO; its native rows are aligned to 256 bytes.
+  const Id linear_general = t.rdna_sources
+                                ? t.m.ConstBool(false)
+                                : t.Eq(field(3, 20, 0x1F), t.U32(31));
   const Id pow2_pad =
       t.rdna_sources ? t.m.ConstBool(false) : t.IsNonZero(field(3, 25, 1));
   const Id stored_height = t.SelectB(pow2_pad, BitCeil(t, height), height);
@@ -1648,7 +1685,14 @@ static void EmitCsMimgStaged(Translator& t,
   const Id base_array = t.SelectB(is_3d_img, t.U32(0), raw_base_array);
   const Id last_array = t.SelectB(
       is_3d_img, t.Add(descriptor_layers, t.U32(~0u)), raw_last_array);
-  const Id addr_slice = t.SelectB(is_1d_img, addr_vg(1), addr_vg(2));
+  Id addr_slice = t.SelectB(is_1d_img, addr_vg(1), addr_vg(2));
+  if (sample || gather) {
+    // v_cubeid_f32 supplies an exact floating-point face index, whereas an
+    // image_load's layer is an integer. Do not reinterpret its float bits.
+    const Id face = t.m.Emit(spv::Op::OpConvertFToU, t.t_u,
+                             {t.m.Bitcast(t.t_f, addr_slice)});
+    addr_slice = t.SelectB(is_rdna_cube, face, addr_slice);
+  }
   const Id view_layer =
       da ? addr_slice : t.SelectB(is_3d_img, addr_slice, t.U32(0));
   const Id physical_layer = t.Add(base_array, view_layer);
@@ -1719,15 +1763,24 @@ static void EmitCsMimgStaged(Translator& t,
       if (!(dmask & (1 << i)))
         continue;
       const Id byte = t.And(t.Shr(raw, t.U32(i * 8u)), t.U32(0xFF));
-      const Id normalized =
+      Id normalized =
           t.FMul(t.m.Emit(spv::Op::OpConvertUToF, t.t_f, {byte}),
                  t.F32(1.0f / 255.0f));
-      Id value = t.SelectB(is_unorm, t.m.Bitcast(t.t_u, normalized), byte);
+      if (i < 3)
+        normalized = t.SelectF(is_srgb, srgb_decode(normalized), normalized);
+      Id value = t.SelectB(logical_or(is_unorm, is_srgb),
+                           t.m.Bitcast(t.t_u, normalized), byte);
+      value = t.SelectB(is_signed8, t.Sar(t.Shl(byte, t.U32(24)), t.U32(24)), value);
       const Id half =
           i < 2 ? t.m.Bitcast(t.t_u, t.m.CompositeExtract(t.t_f, halfs, i))
                 : t.U32(0);
       value = t.SelectB(is_rg16f, half, value);
-      value = t.SelectB(is_r16f, i == 0 ? half : t.U32(0), value);
+      Id integer_half = i < 2
+          ? t.And(t.Shr(raw, t.U32(i * 16)), t.U32(0xffff)) : t.U32(0);
+      integer_half = t.SelectB(is_rg16_signed,
+          t.Sar(t.Shl(integer_half, t.U32(16)), t.U32(16)), integer_half);
+      value = t.SelectB(is_rg16i, integer_half, value);
+      value = t.SelectB(is_r16, i == 0 ? half : t.U32(0), value);
       value = t.SelectB(is_rg8, i < 2 ? value : t.U32(0), value);
       const Id wide_half = t.m.Bitcast(
           t.t_u, t.m.CompositeExtract(t.t_f, i < 2 ? halfs : halfs_hi,
@@ -1737,11 +1790,11 @@ static void EmitCsMimgStaged(Translator& t,
       value = t.SelectB(is_r32, i == 0 ? raw : t.U32(0), value);
       // Raw block bits: 16_16_16_16 puts two components in each dword, the
       // 32-bit forms one per dword.
-      value = t.SelectB(
-          is_rgba16u,
-          t.And(t.Shr(i < 2 ? raw : raw_hi, t.U32((i & 1) * 16u)),
-                t.U32(0xFFFF)),
-          value);
+      Id raw_half = t.And(t.Shr(i < 2 ? raw : raw_hi, t.U32((i & 1) * 16u)),
+                          t.U32(0xFFFF));
+      raw_half = t.SelectB(is_signed16,
+          t.Sar(t.Shl(raw_half, t.U32(16)), t.U32(16)), raw_half);
+      value = t.SelectB(is_rgba16u, raw_half, value);
       value = t.SelectB(is_rg32_raw,
                         i == 0 ? raw : (i == 1 ? raw_hi : t.U32(0)), value);
       value = t.SelectB(is_rgba32_raw, float_component[i], value);
@@ -1779,13 +1832,15 @@ static void EmitCsMimgStaged(Translator& t,
             t.FMul(t.m.Emit(spv::Op::OpConvertUToF, t.t_f, {byte}),
                    t.F32(1.0f / 255.0f));
         Id v = byte_f;  // rgba8 unorm default
+        if (i < 3)
+          v = t.SelectF(is_srgb, srgb_decode(byte_f), v);
         v = t.SelectF(is_r32, i == 0 ? t.m.Bitcast(t.t_f, raw) : t.F32(0.f), v);
         const Id half =
             i < 2 ? t.m.CompositeExtract(t.t_f, halfs, i) : t.F32(0.f);
         v = t.SelectF(is_rg16f, half, v);
         v = t.SelectF(
-            is_r16f,
-            i == 0 ? t.m.CompositeExtract(t.t_f, halfs, 0) : t.F32(0.f), v);
+            is_r16, i == 0 ? t.m.CompositeExtract(t.t_f, halfs, 0) : t.F32(0.f),
+            v);
         v = t.SelectF(is_rg8, i < 2 ? byte_f : t.F32(0.f), v);
         // Integer 8-bit formats deliver the raw byte, not a normalised float.
         v = t.SelectF(t.LAnd(is_int, logical_or(is_rgba8, is_rg8)),
@@ -1919,12 +1974,21 @@ static void EmitCsMimgStaged(Translator& t,
     const Id packed_rg16f =
         t.m.ExtInst(t.t_u, GLSLstd450PackHalf2x16,
                     {t.m.CompositeConstruct(t.t_v2, {half[0], half[1]})});
-    Id r16f = t.m.CompositeExtract(t.t_f, old_halfs, 0);
+    Id packed_rg16i = old_raw;
+    u32 integer_half_reg = 0;
+    for (u32 i = 0; i < 2; ++i) {
+      if (!(dmask & (1u << i)))
+        continue;
+      const Id value = t.Vg(vdata + integer_half_reg++);
+      const Id keep = t.And(packed_rg16i, t.U32(~(0xffffu << (16 * i))));
+      packed_rg16i = t.Or(keep, t.Shl(t.And(value, t.U32(0xffff)),
+                                    t.U32(16 * i)));
+    }
+    Id r16 = t.m.CompositeExtract(t.t_f, old_halfs, 0);
     if (dmask & 1)
-      r16f = t.m.Bitcast(t.t_f, t.Vg(vdata));
-    const Id packed_r16f =
-        t.m.ExtInst(t.t_u, GLSLstd450PackHalf2x16,
-                    {t.m.CompositeConstruct(t.t_v2, {r16f, t.F32(0.f)})});
+      r16 = t.m.Bitcast(t.t_f, t.Vg(vdata));
+    const Id packed_r16 =
+        pack16(t.m.CompositeConstruct(t.t_v2, {r16, t.F32(0.f)}));
     const Id old_halfs_hi = unpack16(old_raw_hi);
     Id wide_half[4] = {
         t.m.CompositeExtract(t.t_f, old_halfs, 0),
@@ -1986,7 +2050,8 @@ static void EmitCsMimgStaged(Translator& t,
       blk[3] = comp[3];
     }
     packed = t.SelectB(is_rg16f, packed_rg16f, packed);
-    packed = t.SelectB(is_r16f, packed_r16f, packed);
+    packed = t.SelectB(is_rg16i, packed_rg16i, packed);
+    packed = t.SelectB(is_r16, packed_r16, packed);
     packed = t.SelectB(is_rg8, packed_rg8, packed);
     packed = t.SelectB(is_rgba16, packed_rgba16_lo, packed);
     packed = t.SelectB(is_r11g11b10f, packed_float[0], packed);

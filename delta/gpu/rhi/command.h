@@ -360,6 +360,7 @@ struct ComputeInfo {
     u32 elem_bytes = 4;
     u32 stage_elem_bytes = 4;
     u32 dfmt = 0;
+    u32 nfmt = 0;
     bool pow2_pad = false;
   };
   Res res[kMaxResources];

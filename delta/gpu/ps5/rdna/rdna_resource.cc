@@ -119,6 +119,10 @@ void Gfx10ImgFormat(u32 gfmt, u32& dfmt, u32& nfmt) {
       dfmt = 5;
       nfmt = 4;
       break;  // 16_16_UINT
+    case 28:
+      dfmt = 5;
+      nfmt = 5;
+      break;  // 16_16_SINT (video decoder coefficients)
     case 29:
       dfmt = 5;
       nfmt = 7;
@@ -155,6 +159,14 @@ void Gfx10ImgFormat(u32 gfmt, u32& dfmt, u32& nfmt) {
       dfmt = 12;
       nfmt = 0;
       break;  // 16_16_16_16_UNORM
+    case 69:
+      dfmt = 12;
+      nfmt = 4;
+      break;  // 16_16_16_16_UINT
+    case 70:
+      dfmt = 12;
+      nfmt = 5;
+      break;  // 16_16_16_16_SINT
     case 71:
       dfmt = 12;
       nfmt = 7;
@@ -183,6 +195,10 @@ void Gfx10ImgFormat(u32 gfmt, u32& dfmt, u32& nfmt) {
       dfmt = 10;
       nfmt = 4;
       break;  // 8_8_8_8_UINT
+    case 61:
+      dfmt = 10;
+      nfmt = 5;
+      break;  // 8_8_8_8_SINT
     case 130:
       dfmt = 10;
       nfmt = 9;

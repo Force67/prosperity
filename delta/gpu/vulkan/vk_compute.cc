@@ -676,6 +676,7 @@ bool SameCsResourceShape(const ComputeInfo::Res& a, const ComputeInfo::Res& b) {
          a.layers == b.layers && a.mip_levels == b.mip_levels &&
          a.tiling_idx == b.tiling_idx && a.elem_bytes == b.elem_bytes &&
          a.stage_elem_bytes == b.stage_elem_bytes && a.dfmt == b.dfmt &&
+         a.nfmt == b.nfmt &&
          a.pow2_pad == b.pow2_pad;
 }
 
