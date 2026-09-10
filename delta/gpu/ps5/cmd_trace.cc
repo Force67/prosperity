@@ -1011,7 +1011,7 @@ void TraceCsUnsupported(u64 cs_addr,
   if (reported.insert(cs_addr).second && CsReport())
     BASE_LOGI("csgpu",
               "unsupported CS @{:#x} groups=[{} {} {}] tg=[{} {} {}] usgpr={} "
-              "-- dispatch skipped",
+              "-- binding zero-filled",
               cs_addr, groups[0], groups[1], groups[2], threads[0], threads[1],
               threads[2], user_sgpr);
 }
