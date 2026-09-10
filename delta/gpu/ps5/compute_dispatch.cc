@@ -192,15 +192,15 @@ void DispatchCompute(rhi::Renderer& renderer,
 
   // Recompile the CS to a Vulkan compute pipeline (cached), resolve the guest
   // ranges its descriptors name, and run it on the shared compute backend.
-  const gcn::RecompiledCs& rc = GetComputeShader({.cs_addr = cs_addr,
-                                                  .thread_x = threads[0],
-                                                  .thread_y = threads[1],
-                                                  .thread_z = threads[2],
-                                                  .user_sgpr = user_sgpr,
-                                                  .tgid_enable =
-                                                      (rsrc2 >> 7) & 0x7,
-                                                  .lds_dwords =
-                                                      (rsrc2 >> 15) & 0x1FF});
+  const gcn::RecompiledCs& rc =
+      GetComputeShader({.cs_addr = cs_addr,
+                        .thread_x = threads[0],
+                        .thread_y = threads[1],
+                        .thread_z = threads[2],
+                        .user_sgpr = user_sgpr,
+                        .tgid_enable = (rsrc2 >> 7) & 0x7,
+                        .lds_dwords = (rsrc2 >> 15) & 0x1FF,
+                        .trap_present = (rsrc2 & 0x40) != 0});
   if (!rc.ok) {
     TraceCsUnsupported(cs_addr, groups, threads, user_sgpr);
     return;

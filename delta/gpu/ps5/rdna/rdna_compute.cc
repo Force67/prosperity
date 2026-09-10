@@ -32,13 +32,8 @@ u32 ComputeCodeDwords(const u32* code) {
 #ifndef DELTA_HAVE_SPIRV_BACKEND
 namespace gpu::rdna {
 
-gpu::gcn::RecompiledCs RecompileCompute(const u32*,
-                                        u32,
-                                        u32,
-                                        u32,
-                                        u32,
-                                        u32,
-                                        u32) {
+gpu::gcn::RecompiledCs
+RecompileCompute(const u32*, u32, u32, u32, u32, u32, u32, bool) {
   return {};  // no SPIR-V backend: the caller skips the dispatch
 }
 
@@ -781,7 +776,8 @@ gpu::gcn::RecompiledCs RecompileCompute(const u32* cs_code,
                                         u32 num_thread_z,
                                         u32 user_sgpr,
                                         u32 tgid_enable,
-                                        u32 lds_dwords) {
+                                        u32 lds_dwords,
+                                        bool trap_present) {
   RecompiledCs r;
   const u32 code_dwords = ComputeCodeDwords(cs_code);
   if (!code_dwords)
@@ -795,6 +791,14 @@ gpu::gcn::RecompiledCs RecompileCompute(const u32* cs_code,
     gpu::gcn::WarnUnsupported("cs.truncated.rdna", last.pc);
     return r;
   }
+  // RDNA2 STATUS.TRAP_EN=0 makes S_TRAP a hardware NOP. A present trap
+  // handler still requires trap emulation and follows the unsupported path.
+  if (!trap_present)
+    for (Inst& inst : program)
+      if (inst.enc == Enc::kSopp && inst.opcode == 0x12) {
+        inst.opcode = 0;
+        inst.raw[0] = 0xbf800000;
+      }
 
   Translator t;
   RecompiledCs tmp;  // build into a temp so a mid-emit failure leaves r intact

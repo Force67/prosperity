@@ -27,6 +27,7 @@ u32 ComputeCodeDwords(const u32* code);
 // of user-data SGPRs seeded into s0.. (COMPUTE_PGM_RSRC2.user_sgpr);
 // tgid_enable which workgroup-id dimensions land in the SGPRs after the user
 // data; lds_dwords the raw RSRC2 LDS_SIZE field (128-dword granules).
+// trap_present is RSRC2.TRAP_PRESENT; without a handler S_TRAP is a NOP.
 //
 // Returns ok=false when the shader uses something the compute backend cannot
 // model, so the caller skips the dispatch loudly instead of running a wrong one
@@ -37,6 +38,7 @@ gpu::gcn::RecompiledCs RecompileCompute(const u32* cs_code,
                                         u32 num_thread_z,
                                         u32 user_sgpr,
                                         u32 tgid_enable,
-                                        u32 lds_dwords);
+                                        u32 lds_dwords,
+                                        bool trap_present = false);
 
 }  // namespace gpu::rdna

@@ -66,6 +66,7 @@ struct ComputeKey {
   u64 code = 0;
   u32 thread_x = 0, thread_y = 0, thread_z = 0;
   u32 user_sgpr = 0, tgid_enable = 0, lds_dwords = 0;
+  bool trap_present = false;
 
   bool operator==(const ComputeKey& other) const = default;
 };
@@ -79,6 +80,7 @@ struct ComputeKeyHash {
     MixHash(h, key.user_sgpr);
     MixHash(h, key.tgid_enable);
     MixHash(h, key.lds_dwords);
+    MixHash(h, key.trap_present);
     return static_cast<size_t>(h);
   }
 };
@@ -183,16 +185,18 @@ const gcn::RecompiledCs& GetComputeShader(const ComputeShaderState& state) {
                        state.thread_z,
                        state.user_sgpr,
                        state.tgid_enable,
-                       state.lds_dwords};
+                       state.lds_dwords,
+                       state.trap_present};
   auto it = cache.find(key);
   if (it != cache.end())
     return it->second;
   const RecompTimer timer;
   return cache
-      .emplace(key, rdna::RecompileCompute(
-                        reinterpret_cast<const u32*>(state.cs_addr),
-                        state.thread_x, state.thread_y, state.thread_z,
-                        state.user_sgpr, state.tgid_enable, state.lds_dwords))
+      .emplace(key,
+               rdna::RecompileCompute(
+                   reinterpret_cast<const u32*>(state.cs_addr), state.thread_x,
+                   state.thread_y, state.thread_z, state.user_sgpr,
+                   state.tgid_enable, state.lds_dwords, state.trap_present))
       .first->second;
 }
 
