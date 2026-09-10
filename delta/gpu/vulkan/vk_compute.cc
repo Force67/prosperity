@@ -29,6 +29,7 @@
 #include "gpu/vulkan/vk_trace.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -261,9 +262,16 @@ CsPipe* GetCsPipe(const ComputeInfo& ci) {
   pi.layout = cp.layout;
   VkResult r;
   {
+    if (kCsSyncReport)
+      BASE_LOGI("cspipe", "compile cs={:#x} words={}", ci.cs_addr,
+                ci.recomp->spirv.size());
+    const u64 started = NowNs();
     ScopeNs t(&g_ns_pipe_build);
     r = vkCreateComputePipelines(g_dev.device, g_dev.pipeline_cache, 1, &pi,
                                  nullptr, &cp.pipe);
+    if (kCsSyncReport)
+      BASE_LOGI("cspipe", "compiled cs={:#x} ms={:.3f}", ci.cs_addr,
+                double(NowNs() - started) / 1e6);
   }
   g_pipe_build_n++;
   SavePipelineCache();  // persist the driver's compiled pipeline
@@ -1601,6 +1609,12 @@ struct BatchedDispatch {
   u8 res_write;  // bit i: resource i is written
 };
 std::vector<BatchedDispatch> g_cs_batch_log;
+VkQueryPool g_cs_timestamps = VK_NULL_HANDLE;
+struct CsGpuTime {
+  double ns = 0;
+  u64 count = 0;
+};
+std::unordered_map<u64, CsGpuTime> g_cs_gpu_times;
 VkFence g_cs_batch_fence = VK_NULL_HANDLE;
 bool g_cs_stage_pending[ComputeInfo::kMaxResources] = {};
 std::unordered_map<VkBuffer, ComputeBufferAccess> g_cs_batch_access;
@@ -1633,6 +1647,14 @@ void CsBatchBeginImpl() {
   VkCommandBufferBeginInfo cbi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
   cbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
   vkBeginCommandBuffer(g_cs_cmd, &cbi);
+  if (kCsSyncReport && g_dev.timestamp_valid_bits && !g_cs_timestamps) {
+    VkQueryPoolCreateInfo qi{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+    qi.queryType = VK_QUERY_TYPE_TIMESTAMP;
+    qi.queryCount = 256;  // two timestamps for each of at most 128 dispatches
+    vkCreateQueryPool(g_dev.device, &qi, nullptr, &g_cs_timestamps);
+  }
+  if (g_cs_timestamps)
+    vkCmdResetQueryPool(g_cs_cmd, g_cs_timestamps, 0, 256);
   CmdBeginLabel(g_cs_cmd, "cs batch (frame %llu)",
                 (unsigned long long)g_frame.num);
   g_cs_batch_open = true;
@@ -1701,6 +1723,21 @@ bool CsBatchFlush(CsSyncWhy why = kSyncWriteback) {
     g_cs_failed = true;
     g_ns_cs_gpu += NowNs() - t0;
     return false;
+  }
+  if (g_cs_timestamps && !g_cs_batch_log.empty()) {
+    std::array<u64, 256> stamps{};
+    const u32 count = static_cast<u32>(g_cs_batch_log.size());
+    if (vkGetQueryPoolResults(g_dev.device, g_cs_timestamps, 0, count * 2,
+                             count * 2 * sizeof(u64), stamps.data(), sizeof(u64),
+                             VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
+      const u64 mask = UINT64_MAX >> (64 - g_dev.timestamp_valid_bits);
+      for (u32 i = 0; i < count; ++i) {
+        auto& time = g_cs_gpu_times[g_cs_batch_log[i].cs_addr];
+        time.ns += ((stamps[i * 2 + 1] - stamps[i * 2]) & mask) *
+                   double(g_dev.timestamp_period);
+        ++time.count;
+      }
+    }
   }
   if (vkResetDescriptorPool(g_dev.device, g_cs_desc_pool, 0) != VK_SUCCESS) {
     g_cs_failed = true;
@@ -2034,6 +2071,18 @@ struct ScopeCs {
 }  // namespace
 
 void CsSyncReport(double frames) {
+  if (kCsSyncReport && frames > 0) {
+    std::vector<std::pair<u64, CsGpuTime>> times(g_cs_gpu_times.begin(),
+                                               g_cs_gpu_times.end());
+    std::sort(times.begin(), times.end(), [](const auto& a, const auto& b) {
+      return a.second.ns > b.second.ns;
+    });
+    for (size_t i = 0; i < std::min<size_t>(8, times.size()); ++i)
+      BASE_LOGI("cstime", "CS {:#x} {:.2f}ms/f x{:.1f}", times[i].first,
+                times[i].second.ns / frames / 1e6,
+                double(times[i].second.count) / frames);
+    g_cs_gpu_times.clear();
+  }
   u64 total = 0;
   for (int i = 0; i < kSyncCount; i++)
     total += g_cs_sync_n[i];
@@ -2907,8 +2956,14 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
                          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
                          1, &host, 0, nullptr, 0, nullptr);
   }
+  if (g_cs_timestamps)
+    vkCmdWriteTimestamp(g_cs_cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                         g_cs_timestamps, g_cs_batch_count * 2);
   vkCmdDispatchBase(g_cs_cmd, ci.group_base[0], ci.group_base[1],
                     ci.group_base[2], ci.groups[0], ci.groups[1], ci.groups[2]);
+  if (g_cs_timestamps)
+    vkCmdWriteTimestamp(g_cs_cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                         g_cs_timestamps, g_cs_batch_count * 2 + 1);
   {
     BatchedDispatch bd{ci.cs_addr,
                        {ci.groups[0], ci.groups[1], ci.groups[2]},
