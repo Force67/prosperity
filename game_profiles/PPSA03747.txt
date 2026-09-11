@@ -1,7 +1,11 @@
 // The Elder Scrolls V: Skyrim (PPSA03747, PS5)
-// Boots fully, loads its data and renders at ~100 fps at 3840x2160. The frame
-// is still black: the AGC register-shadow images come through zeroed
-// (2026-07-31).
+// Boots with the original Skyrim.ini and reaches the menu and opening cart
+// sequence at 3840x2160 (2026-09-11). AudioOut2 currently uses a paced null
+// sink. World rendering remains slow and has terrain/lighting artifacts.
+
+// The opening world frame needs up to ~230 MiB of constants per frame slot.
+// A 512 MiB ring supplies 256 MiB per slot; the default drops hundreds of draws.
++DELTA_GPU_UBORING_MB=512
 
 // What the AGC command processor was handed.
 // +DELTA_AGC_TRACE=1
