@@ -2,6 +2,10 @@ add_delta_test(object_table_test
   SOURCES object_table_test.cpp
   DEPS delta_kern)
 
+add_delta_test(audio_queue_test
+  SOURCES audio_queue_test.cpp
+  DEPS delta_deps)
+
 add_delta_test(sys_info_test
   SOURCES sys_info_test.cpp
   DEPS delta_kern)

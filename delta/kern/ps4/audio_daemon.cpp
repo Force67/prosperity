@@ -71,18 +71,22 @@
 #include <base.h>
 #include <base/logging.h>
 
+#include <algorithm>
 #include <atomic>
+#include <charconv>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
 #include <vector>
 
 #include "kern/ps4/audio_sink.h"
+#include "kern/ps5/audio_queue.h"
 #include "kern/lv2/sys_event_flag.h"
 #include <utl/options.h>
 
@@ -138,6 +142,43 @@ std::mutex g_m;
 Region g_ctl;
 std::unordered_map<int, Region> g_area;
 std::atomic<bool> g_started{false};
+
+// AudioOut2 uses monotonically increasing producer/consumer block counters,
+// unlike AudioOut's single-buffer token. Offsets from the 01.14.00 module's
+// container allocation and free-block query, checked against Skyrim's queues.
+// The channel-port sample layout is not decoded yet, so this is a paced null
+// sink. Releasing only submitted blocks keeps the guest's mixer running without
+// inventing event grants or assuming that its samples use the PS4 layout.
+struct Ps5Container {
+  Region region;
+  std::string flag;
+  u32 index = 0;
+  u64 due = 0;
+  u64 blocks = 0;
+};
+std::unordered_map<std::string, Ps5Container> g_ps5_containers;
+
+u64 drainPs5(u64 now) {
+  std::lock_guard<std::mutex> lk(g_m);
+  u64 wait = 2000;
+  for (auto& [name, c] : g_ps5_containers) {
+    if (now < c.due) {
+      wait = std::min(wait, c.due - now);
+      continue;
+    }
+    const u32 frames = ps5::ConsumeAudioOut2Block(c.region.base, c.region.size);
+    if (!frames)
+      continue;
+    // AudioOut2's container clock is 48 kHz. One counter step releases one
+    // grain across all the container's channel ports.
+    evfSetByNameSubstr(c.flag.c_str(), 1ull << c.index);
+    c.due = now + u64(frames) * 1000000 / 48000;
+    if (!c.blocks++)
+      BASE_LOGI("audiod", "AudioOut2 container {}: paced null sink, {} frames "
+                          "per block (playback not implemented)", name.c_str(), frames);
+  }
+  return wait;
+}
 
 bool traceOn() {
   return kAudioTrace;
@@ -213,7 +254,7 @@ void daemonMain() {
     }
 
     const u64 now = nowUs();
-    u64 sleepUs = 2000;
+    u64 sleepUs = drainPs5(now);
 
     if (ctl.base && ctl.size >= kCtlExtent) {
       for (size_t k = 0; k < kSlots; k++) {
@@ -403,17 +444,49 @@ int parsePortIndex(const std::string &n) {
 
 }  // namespace
 
+void audioDaemonForgetRange(const void* base, size_t size) {
+  const auto first = reinterpret_cast<uintptr_t>(base);
+  std::lock_guard<std::mutex> lk(g_m);
+  for (auto it = g_ps5_containers.begin(); it != g_ps5_containers.end();) {
+    const auto other = reinterpret_cast<uintptr_t>(it->second.region.base);
+    if (first < other + it->second.region.size && other < first + size)
+      it = g_ps5_containers.erase(it);
+    else
+      ++it;
+  }
+}
+
 void audioDaemonNoticeShm(const char *name, u8 *base, size_t size) {
   if (!name || !enabled())
     return;
   const std::string n(name);
-  if (n.compare(0, 5, "/shm_") != 0)
+  constexpr std::string_view ps5_stem = "/SceAuOut2ContShm";
+  const bool ps5 = n.starts_with(ps5_stem);
+  if (!ps5 && n.compare(0, 5, "/shm_") != 0)
     return;
 
   bool start = false;
   {
     std::lock_guard<std::mutex> lk(g_m);
-    if (n.size() > 2 && n.compare(n.size() - 2, 2, "_C") == 0) {
+    if (ps5) {
+      const size_t split = n.rfind("0x");
+      if (split == std::string::npos || split <= ps5_stem.size())
+        return;
+      u32 index;
+      const auto result = std::from_chars(n.data() + split + 2,
+                                          n.data() + n.size(), index, 16);
+      if (result.ec != std::errc{} || result.ptr != n.data() + n.size() ||
+          index >= 64)
+        return;
+      auto& c = g_ps5_containers[n];
+      if (c.region.base != base)
+        c = {};
+      c.region = {base, size};
+      c.index = index;
+      c.flag = "SceAuOut2ContPushEvf" +
+               n.substr(ps5_stem.size(), split - ps5_stem.size());
+      start = base != nullptr;
+    } else if (n.size() > 2 && n.compare(n.size() - 2, 2, "_C") == 0) {
       g_ctl = {base, size};
       start = base != nullptr;
     } else {
@@ -429,9 +502,8 @@ void audioDaemonNoticeShm(const char *name, u8 *base, size_t size) {
   bool expected = false;
   if (!g_started.compare_exchange_strong(expected, true))
     return;
-  BASE_LOGI("audiod",
-            "'{}' is an LLE libSceAudioOut control block; starting the system "
-            "audio daemon stand-in", name);
+  BASE_LOGI("audiod", "'{}' is an LLE audio control block; starting the system "
+                       "audio daemon stand-in", name);
   if (kAudiomixAck)
     BASE_LOGI("audiod",
               "WARNING: DELTA_AUDIOMIX_ACK is set. That research aid fakes the "

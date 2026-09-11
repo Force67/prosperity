@@ -16,6 +16,10 @@
  * It cannot collide with the HLE shim: only the real module ever creates
  * "/shm_<pid>_C", and when the shim is in play (the default) the module is never
  * loaded, so the daemon never starts and never opens an SDL stream.
+ *
+ * PS5 AudioOut2 uses separate container queues. Those are currently drained
+ * with a paced null sink: titles can progress, but AudioOut2 playback is not
+ * implemented. Container mappings are retired before guest unmap.
  */
 
 #include <cstddef>
@@ -28,5 +32,9 @@ namespace krnl {
 // of the libSceAudioOut protocol are ignored; the first control region starts the
 // daemon thread.
 void audioDaemonNoticeShm(const char *name, u8 *base, size_t size);
+
+// Stop consuming AudioOut2 containers before the guest releases their mapping.
+// Waits for any consumer access in progress to finish.
+void audioDaemonForgetRange(const void *base, size_t size);
 
 }  // namespace krnl

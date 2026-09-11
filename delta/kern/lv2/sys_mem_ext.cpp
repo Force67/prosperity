@@ -21,6 +21,7 @@
 #include <sys/mman.h>
 
 #include "kern/proc.h"
+#include "kern/ps4/audio_daemon.h"
 #include "kern/ps4/dev/dma_dev.h"  // dmemBackingFd/Size (shared physical dmem store)
 #include "error_table.h"
 #include "kern/ps5/dev/dma_dev.h"
@@ -49,6 +50,7 @@ int PS4ABI sys_munmap(void *addr, size_t len) {
                 "only the VMA bookkeeping is released",
                 fmt::ptr(addr), len);
   if (auto *proc = proc::getActive(); proc && addr && len) {
+    audioDaemonForgetRange(addr, len);
     // One exception to "keep the host pages": a whole PROT_NONE reservation.
     // Nothing has data in it by definition, and leaving it mapped makes the
     // next reservation at that address get relocated -- V8 reserves a padded
