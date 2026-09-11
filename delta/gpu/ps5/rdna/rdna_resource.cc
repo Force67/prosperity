@@ -12,10 +12,12 @@
 #include "gpu/guest_memory.h"
 
 #include <algorithm>
+#include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <numeric>
+#include <map>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -1330,6 +1332,19 @@ MimgBindingPlan RdnaPlanMimg(const Program& program) {
   std::vector<BindingKey> keys;
   u32 versions[136] = {};
   u32 generation = 1;
+  // Repeated loads of an unchanged descriptor table entry name the same
+  // texture. Skyrim's unrolled parallax shader reloads one sampler thirty
+  // times; assigning a new binding each time exceeds the hardware interface.
+  // Only reuse loads in programs without memory writes, and include the
+  // address registers' versions so a changed table pointer stays distinct.
+  const bool read_only = std::none_of(program.begin(), program.end(), [](const Inst& i) {
+    return (i.enc == Enc::kSmrd && i.opcode >= 0x10) ||
+           (i.enc == Enc::kMubuf && i.opcode >= 4) ||
+           (i.enc == Enc::kMtbuf && i.opcode >= 4) ||
+           i.enc == Enc::kFlat ||
+           (i.enc == Enc::kMimg && i.opcode >= 8 && i.opcode < 0x20);
+  });
+  std::map<std::array<u32, 4>, u32> descriptor_loads;
   for (const Inst& inst : program) {
     if (inst.enc == Enc::kMimg) {
       const u32 w0 = inst.raw[0], w1 = inst.raw[1], op = inst.opcode;
@@ -1369,8 +1384,18 @@ MimgBindingPlan RdnaPlanMimg(const Program& program) {
     }
 
     const ScalarWrite write = DecodeScalarWrite(inst);
+    u32 value_version = generation;
+    if (read_only && inst.enc == Enc::kSmrd && inst.opcode <= 4) {
+      const Smem load = DecodeSmem(inst);
+      if (load.soffset == 125) {
+        const std::array<u32, 4> key = {
+            inst.raw[0], inst.raw[1], versions[load.sbase],
+            versions[load.sbase + 1]};
+        value_version = descriptor_loads.emplace(key, generation).first->second;
+      }
+    }
     for (u32 i = 0; i < write.count && write.first + i < 136; i++)
-      versions[write.first + i] = generation;
+      versions[write.first + i] = value_version;
     generation++;
   }
   return plan;

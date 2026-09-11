@@ -418,6 +418,10 @@ std::unordered_set<u32> PlanDsOwnLane(const Program& program,
     const Inst& inst = program[i];
     if (inst.enc != Enc::kDs || (reachable && !reachable[i]))
       continue;
+    if (inst.opcode == 176 || inst.opcode == 177) {
+      out.insert(inst.pc);  // ADDTID has an implicit lane-local address.
+      continue;
+    }
     u32 reg = inst.raw[1] & 0xFF;
     // addr <- lshlrev(2, lane) <- mbcnt_lo(-1, hi) <- mbcnt_hi(-1, 0)
     static constexpr u32 kOps[3] = {0x1a, 0x23, 0x24};

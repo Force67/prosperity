@@ -794,9 +794,18 @@ static bool EmitCsMemoryUnpredicated(Translator& t,
     case Enc::kMubuf:
       gpu::gcn::EmitCsMubuf(t, inst, sc);
       return true;
-    case Enc::kMtbuf:
-      gpu::gcn::EmitCsMtbuf(t, inst, sc);
+    case Enc::kMtbuf: {
+      // GFX10 combines the format in seven bits. The shared GCN emitter
+      // expects separate DFMT/NFMT fields; passing the original word made
+      // Skyrim's R32G32_FLOAT depth-filter load look like a packed format.
+      u32 dfmt = 0, nfmt = 0;
+      DecodeBufferFormat((inst.raw[0] >> 19) & 0x7f, dfmt, nfmt);
+      Inst lowered = inst;
+      lowered.raw[0] = (inst.raw[0] & ~(0x7fu << 19)) |
+                       (dfmt << 19) | (nfmt << 23);
+      gpu::gcn::EmitCsMtbuf(t, lowered, sc);
       return true;
+    }
     case Enc::kDs:
       // The GDS bit picks the global counters, not LDS.
       if (((inst.raw[0] >> 17) & 1) && sc.gds_var)

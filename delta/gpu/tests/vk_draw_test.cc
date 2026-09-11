@@ -1,5 +1,8 @@
 #include <algorithm>
 #include <array>
+#include <bit>
+#include <cstring>
+#include <vector>
 #include <gtest/gtest.h>
 #include <utl/options.h>
 
@@ -12,13 +15,70 @@
 #include "gpu/ps5/compute_dispatch.h"
 #include "gpu/ps5/guest_address.h"
 #include "gpu/ps5/shader_cache.h"
+#include "gpu/ps5/draw_state.h"
 #include "gpu/rhi/renderer.h"
 #include "gpu/vulkan/vk_device.h"
 #include "gpu/vulkan/vk_draw_recomp.h"
 #include "gpu/vulkan/vk_frame.h"
+#include "gpu/vulkan/vk_upload_ring.h"
 
 extern "C" void prosperity_gpu_end_of_pipe() {}
 extern "C" bool prosperity_ps5_is_display_buffer(u64) { return false; }
+
+TEST(VkDraw, ConstantBufferBudgetAppliesAfterDeviceInitialization) {
+  utl::initOptions();
+  auto& renderer = gpu::rhi::DefaultRenderer();
+  if (!gpu::rhi::Init(renderer))
+    GTEST_SKIP() << "A Vulkan device is required";
+  if (gpu::vk::g_ring.ubo_buf)
+    GTEST_SKIP() << "Run this initialization test in a fresh renderer";
+  base::OptionBase* budget = nullptr;
+  base::OptionBase::VisitAll([&](const base::OptionBase* option) {
+    if (std::strcmp(option->name(), "DELTA_GPU_UBORING_MB") == 0)
+      budget = const_cast<base::OptionBase*>(option);
+  });
+  ASSERT_NE(budget, nullptr);
+  ASSERT_TRUE(budget->SetFromString("512"));  // Title settings load after Init.
+  gpu::rhi::BeginFrame(renderer);
+  const auto capacity = gpu::vk::UboRingBytes();
+  EXPECT_EQ(capacity, std::min<VkDeviceSize>(512ull << 20,
+      VkDeviceSize(gpu::vk::g_dev.max_storage_buffer_range) * 2));
+  ASSERT_NE(gpu::vk::g_ring.ubo_map, nullptr);
+  VkMemoryRequirements memory{};
+  vkGetBufferMemoryRequirements(gpu::vk::g_dev.device,
+                                gpu::vk::g_ring.ubo_buf, &memory);
+  EXPECT_GE(memory.size, capacity);
+  // Later option changes cannot move offsets beyond the existing allocation.
+  ASSERT_TRUE(budget->SetFromString("1024"));
+  EXPECT_EQ(gpu::vk::UboRingBytes(), capacity);
+  budget->Reset();
+  gpu::rhi::EndFrame(renderer, 0);
+}
+
+TEST(RdnaResources, RepeatedDescriptorLoadsReuseTextureBindings) {
+  std::vector<u32> code;
+  for (u32 i = 0; i < 32; ++i) {
+    code.insert(code.end(), {0xf408040e, 0xfa000030,  // s_load s[16:19], s[28:29], 48
+                              0xf09c0108, 0x00040f05});  // sample with s[16:23]
+  }
+  code.push_back(0xbf810000);
+  const auto plan = gpu::rdna::RdnaPlanMimg(gpu::rdna::Decode(code.data(), code.size()));
+  EXPECT_EQ(plan.binding_srsrc.size(), 1u);
+  EXPECT_EQ(plan.binding_by_pc.size(), 32u);
+
+  // A changed table pointer or offset must keep the samples distinct.
+  code.insert(code.begin() + 4, 0xbe9c0381);  // s_mov_b32 s28, 1
+  auto changed = gpu::rdna::RdnaPlanMimg(gpu::rdna::Decode(code.data(), code.size()));
+  EXPECT_EQ(changed.binding_srsrc.size(), 2u);
+  code[6] = 0xfa000040;
+  changed = gpu::rdna::RdnaPlanMimg(gpu::rdna::Decode(code.data(), code.size()));
+  EXPECT_EQ(changed.binding_srsrc.size(), 3u);
+
+  // A memory-writing shader cannot assume a repeated load sees the same data.
+  code.insert(code.end() - 1, {0xf0200108, 0x00000400});  // image_store
+  changed = gpu::rdna::RdnaPlanMimg(gpu::rdna::Decode(code.data(), code.size()));
+  EXPECT_EQ(changed.binding_srsrc.size(), 33u);
+}
 
 // Pipelines use Recompiled addresses as module identities. Keep programs alive
 // for the renderer lifetime, matching the production shader cache.
@@ -777,6 +837,135 @@ TEST(VkDraw, IndexedRawVerticesUseLoadedDescriptorStride) {
   EXPECT_EQ(halves, (std::array<u32, 2>{1, 1}));
 }
 
+TEST(VkDraw, Ps5DepthClearUsesRegisterValueInsteadOfVertexDepth) {
+  utl::initOptions();
+  auto& renderer = gpu::rhi::DefaultRenderer();
+  if (!gpu::rhi::Init(renderer))
+    GTEST_SKIP() << "A Vulkan device is required";
+  alignas(256) static const u32 vs[4096] = {
+      0x7e000280, 0x7e020280, 0x7e0402ff, 0x3f400000,
+      0x7e0602f2, 0xf80008cf, 0x03020100, 0xbf810000};
+  alignas(256) static const u32 ps[4096] = {
+      0x7e0002f2, 0x7e020280, 0xf800080f, 0x00010100, 0xbf810000};
+  alignas(65536) static std::array<u8, 65536> target{}, depth{};
+  using namespace gpu::ps5;
+  Regs regs;
+  const auto address = [&](u32 reg, const void* ptr) {
+    const u64 value = reinterpret_cast<u64>(ptr);
+    regs[reg] = u32(value >> 8);
+    regs[reg + 1] = u32(value >> 40);
+  };
+  address(mmSPI_SHADER_PGM_LO_ES, vs);
+  address(mmSPI_SHADER_PGM_LO_PS, ps);
+  regs[mmVGT_PRIMITIVE_TYPE] = 1;
+  regs[mmCB_TARGET_MASK] = 15;
+  regs[mmCB_COLOR0_BASE] = u32(reinterpret_cast<u64>(target.data()) >> 8);
+  regs[mmCB_COLOR0_BASE_EXT] = u32(reinterpret_cast<u64>(target.data()) >> 40);
+  regs[mmCB_COLOR0_INFO] = 10u << 2;
+  regs[mmCB_COLOR0_ATTRIB2] = (15u << 14) | 15;
+  regs[mmPA_CL_CLIP_CNTL] = 1u << 19;
+  regs[mmPA_CL_VPORT_XSCALE] = regs[mmPA_CL_VPORT_XOFFSET] = std::bit_cast<u32>(8.f);
+  regs[mmPA_CL_VPORT_YSCALE] = std::bit_cast<u32>(-8.f);
+  regs[mmPA_CL_VPORT_YOFFSET] = std::bit_cast<u32>(8.f);
+  regs[mmDB_Z_INFO] = 3;
+  regs[mmDB_Z_WRITE_BASE] = u32(reinterpret_cast<u64>(depth.data()) >> 8);
+  regs[mmDB_Z_WRITE_BASE_HI] = u32(reinterpret_cast<u64>(depth.data()) >> 40);
+  regs[mmDB_DEPTH_CLEAR] = std::bit_cast<u32>(1.f);
+  regs[mmDB_DEPTH_CONTROL] = (7u << 4) | 6;  // ALWAYS, test and write
+  regs[mmDB_RENDER_CONTROL] = 1;
+  const u32 body[] = {1, 0};
+  const DrawPacket packet{0x2d, body, 2};  // DRAW_INDEX_AUTO
+  gpu::rhi::DrawInfo clear;
+  ASSERT_TRUE(BuildDrawInfo(regs, packet, clear));
+  ASSERT_TRUE(clear.depth_clear_draw);
+  // Skyrim retains its previous postprocess resources during the clear.
+  // They must not turn the clear into a rejected depth-feedback draw.
+  clear.tex_base = clear.depth_base;
+  clear.num_texs = 1;
+  clear.texs[0].base = clear.depth_base;
+  gpu::rhi::BeginFrame(renderer);
+  ASSERT_TRUE(gpu::vk::DrawRecomp(renderer, clear));
+  regs[mmDB_RENDER_CONTROL] = 0;
+  regs[mmDB_DEPTH_CONTROL] = (1u << 4) | 6;  // LESS: .75 passes only after clear=1
+  gpu::rhi::DrawInfo point;
+  ASSERT_TRUE(BuildDrawInfo(regs, packet, point));
+  ASSERT_FALSE(point.depth_clear_draw);
+  ASSERT_TRUE(gpu::vk::DrawRecomp(renderer, point));
+  const u32 slot_index = gpu::vk::g_frame.slot_idx;
+  gpu::rhi::EndFrame(renderer, point.rt_base);
+  const auto& slot = gpu::vk::g_frame.slots[slot_index];
+  ASSERT_EQ(vkWaitForFences(gpu::vk::g_dev.device, 1, &slot.fence,
+                           VK_TRUE, UINT64_MAX), VK_SUCCESS);
+  ASSERT_TRUE(slot.presentable);
+  const auto* pixels = static_cast<const u8*>(slot.readback_map);
+  u32 red = 0;
+  for (u32 i = 0; i < 16 * 16; ++i)
+    red += pixels[i * 4] == 255;
+  EXPECT_EQ(red, 1u);
+}
+
+TEST(VkDraw, IndexedTypedLoadUsesLiveStrideAndInstructionFormat) {
+  utl::initOptions();
+  auto& renderer = gpu::rhi::DefaultRenderer();
+  if (!gpu::rhi::Init(renderer))
+    GTEST_SKIP() << "A Vulkan device is required";
+  // Inline V# at s[8:11], indexed by v5. The instruction requests float4
+  // even though the descriptor advertises R32_UINT. Padding must not become
+  // vertex data, and changing the stride must work with the same module.
+  const u32 vs[64] = {0xea6b2000, 0x80020005,
+                      0xf80008cf, 0x03020100, 0xbf810000};
+  const u32 ps[64] = {0x7e0002f2, 0x7e020280,
+                      0xf800080f, 0x00010100, 0xbf810000};
+  std::array<float, 32> vertices;
+  const u64 vb = reinterpret_cast<u64>(vertices.data());
+  u32 user_data[32] = {u32(vb), u32(vb >> 32) | (32u << 16), 2,
+                       0x21014fac};
+  gpu::rdna::NextProgramGeneration();
+  static const auto program = gpu::rdna::Recompile(vs, ps, user_data, user_data);
+  ASSERT_TRUE(program.ok);
+  ASSERT_TRUE(program.attrs.empty());
+  ASSERT_EQ(program.vs_bufs.size(), 1u);
+  alignas(65536) static std::array<std::array<u8, 65536>, 2> targets{};
+  for (u32 pass = 0; pass < 2; ++pass) {
+    const u32 stride = pass ? 48 : 32;
+    SCOPED_TRACE(stride);
+    vertices.fill(99.f);
+    const std::array<float, 4> left = {-.5f, 0.f, 0.f, 1.f};
+    const std::array<float, 4> right = {.5f, 0.f, 0.f, 1.f};
+    std::copy(left.begin(), left.end(), vertices.begin());
+    std::copy(right.begin(), right.end(), vertices.begin() + stride / 4);
+    user_data[1] = u32(vb >> 32) | (stride << 16);
+    gpu::rhi::DrawInfo draw;
+    draw.recomp = &program;
+    draw.vs_addr = reinterpret_cast<u64>(vs);
+    draw.ps_addr = reinterpret_cast<u64>(ps);
+    std::copy_n(user_data, 32, draw.vs_user_data);
+    draw.prim_type = 1;
+    draw.vertex_count = 2;
+    draw.bufs[0] = {vb, sizeof(vertices)};
+    draw.num_bufs = 1;
+    draw.rt_base = draw.mrt_base[0] = reinterpret_cast<u64>(targets[pass].data());
+    draw.rt_w = draw.rt_h = 16;
+    draw.mrt_count = draw.mrt_bound_mask = 1;
+    draw.mrt_info[0] = 10u << 2;
+    gpu::rhi::BeginFrame(renderer);
+    ASSERT_TRUE(gpu::vk::DrawRecomp(renderer, draw));
+    const u32 slot_index = gpu::vk::g_frame.slot_idx;
+    gpu::rhi::EndFrame(renderer, draw.rt_base);
+    const auto& slot = gpu::vk::g_frame.slots[slot_index];
+    ASSERT_EQ(vkWaitForFences(gpu::vk::g_dev.device, 1, &slot.fence,
+                             VK_TRUE, UINT64_MAX), VK_SUCCESS);
+    ASSERT_TRUE(slot.presentable);
+    const auto* pixels = static_cast<const u8*>(slot.readback_map);
+    std::array<u32, 2> halves{};
+    for (u32 y = 0; y < 16; ++y)
+      for (u32 x = 0; x < 16; ++x)
+        if (pixels[(y * 16 + x) * 4] == 255)
+          ++halves[x / 8];
+    EXPECT_EQ(halves, (std::array<u32, 2>{1, 1}));
+  }
+}
+
 TEST(VkDraw, BulkDescriptorLoadPreservesInteriorBufferStride) {
   utl::initOptions();
   auto& renderer = gpu::rhi::DefaultRenderer();
@@ -903,6 +1092,119 @@ TEST(VkDraw, PassthroughInterpolationPreservesPackedVertexValues) {
     EXPECT_EQ(pixels[(8 * 16 + 8) * 4 + 1], passthrough ? 255 : 0);
     EXPECT_EQ(pixels[(8 * 16 + 8) * 4 + 2], passthrough ? 255 : 0);
   }
+}
+
+TEST(VkDraw, PixelTypedLoadConvertsPackedDataWithByteOffsets) {
+  utl::initOptions();
+  auto& renderer = gpu::rhi::DefaultRenderer();
+  if (!gpu::rhi::Init(renderer))
+    GTEST_SKIP() << "A Vulkan device is required";
+  const u32 vs[64] = {0x7e000280, 0x7e0202f2,
+                      0xf80008cf, 0x01000000, 0xbf810000};
+  const u32 ps[64] = {
+      0x7e000284,                        // v0 = byte offset 4
+      0xe8001004 | (56u << 19) | (3u << 16), 0x88020000,
+      // tbuffer_load_format_xyzw v[0:3], v0, s[8:11], 8 offen offset:4
+      0xf800080f, 0x03020100, 0xbf810000};
+  const u32 data[8] = {0, 0, 0, 0, 0xffff8040, 0, 0, 0};
+  const u64 base = reinterpret_cast<u64>(data);
+  const u32 user_data[32] = {u32(base), u32(base >> 32), sizeof(data), 0x14fac};
+  static const auto program = gpu::rdna::Recompile(vs, ps, user_data, user_data);
+  ASSERT_TRUE(program.ok);
+  ASSERT_EQ(program.ps_bufs.size(), 1u);
+  alignas(65536) static std::array<u8, 65536> target{};
+  gpu::rhi::DrawInfo draw;
+  draw.recomp = &program;
+  draw.vs_addr = reinterpret_cast<u64>(vs);
+  draw.ps_addr = reinterpret_cast<u64>(ps);
+  std::copy_n(user_data, 32, draw.ps_user_data);
+  draw.prim_type = draw.vertex_count = 1;
+  draw.bufs[0] = {base, sizeof(data)};
+  draw.num_bufs = 1;
+  draw.rt_base = draw.mrt_base[0] = reinterpret_cast<u64>(target.data());
+  draw.rt_w = draw.rt_h = 16;
+  draw.mrt_count = draw.mrt_bound_mask = 1;
+  draw.mrt_info[0] = 10u << 2;
+  gpu::rhi::BeginFrame(renderer);
+  ASSERT_TRUE(gpu::vk::DrawRecomp(renderer, draw));
+  const u32 slot_index = gpu::vk::g_frame.slot_idx;
+  gpu::rhi::EndFrame(renderer, draw.rt_base);
+  const auto& slot = gpu::vk::g_frame.slots[slot_index];
+  ASSERT_EQ(vkWaitForFences(gpu::vk::g_dev.device, 1, &slot.fence,
+                           VK_TRUE, UINT64_MAX), VK_SUCCESS);
+  ASSERT_TRUE(slot.presentable);
+  const auto* pixels = static_cast<const u8*>(slot.readback_map);
+  u32 colored = 0;
+  for (u32 i = 0; i < 256; ++i) {
+    if (!pixels[i * 4 + 2])
+      continue;
+    ++colored;
+    EXPECT_EQ(pixels[i * 4], 64);
+    EXPECT_EQ(pixels[i * 4 + 1], 128);
+    EXPECT_EQ(pixels[i * 4 + 2], 255);
+    EXPECT_EQ(pixels[i * 4 + 3], 255);
+  }
+  EXPECT_EQ(colored, 1u);
+}
+
+TEST(VkDraw, PixelOneDimensionalSampleSurvivesAddtidSpill) {
+  utl::initOptions();
+  auto& renderer = gpu::rhi::DefaultRenderer();
+  if (!gpu::rhi::Init(renderer))
+    GTEST_SKIP() << "A Vulkan device is required";
+  const u32 vs[64] = {0x7e000280, 0x7e0202f2,
+                      0xf80008cf, 0x01000000, 0xbf810000};
+  const u32 ps[64] = {
+      0x7e0002f0, 0xf09c0f00, 0x00400400,  // sample_lz 1D at x=.5
+      0xbefc03ff, 256,                    // M0 = 256
+      0xdac00000, 0x00000400,              // spill red at M0 + lane*4
+      0xbefc0380,                         // M0 = 0
+      0xdac40100, 0x00000000,              // reload with offset:256
+      0xf800080f, 0x07060500, 0xbf810000};
+  const u32 user_data[32]{};
+  static const auto program = gpu::rdna::Recompile(vs, ps, user_data, user_data);
+  ASSERT_TRUE(program.ok);
+  alignas(65536) static std::array<u8, 65536> texture{64, 128, 255, 255}, target{};
+  gpu::rhi::DrawInfo draw;
+  draw.recomp = &program;
+  draw.vs_addr = reinterpret_cast<u64>(vs);
+  draw.ps_addr = reinterpret_cast<u64>(ps);
+  draw.prim_type = draw.vertex_count = 1;
+  draw.num_texs = 1;
+  auto& tex = draw.texs[0];
+  tex.base = reinterpret_cast<u64>(texture.data());
+  tex.w = tex.h = tex.pitch = 1;
+  tex.dfmt = 10;
+  tex.tiling = 256;  // RDNA linear
+  tex.is_1d = true;
+  draw.tex_base = tex.base;
+  draw.tex_w = draw.tex_h = draw.tex_pitch = 1;
+  draw.tex_dfmt = 10;
+  draw.tex_tiling = 256;
+  draw.tex_is_1d = true;
+  draw.rt_base = draw.mrt_base[0] = reinterpret_cast<u64>(target.data());
+  draw.rt_w = draw.rt_h = 16;
+  draw.mrt_count = draw.mrt_bound_mask = 1;
+  draw.mrt_info[0] = 10u << 2;
+  gpu::rhi::BeginFrame(renderer);
+  ASSERT_TRUE(gpu::vk::DrawRecomp(renderer, draw));
+  const u32 slot_index = gpu::vk::g_frame.slot_idx;
+  gpu::rhi::EndFrame(renderer, draw.rt_base);
+  const auto& slot = gpu::vk::g_frame.slots[slot_index];
+  ASSERT_EQ(vkWaitForFences(gpu::vk::g_dev.device, 1, &slot.fence,
+                           VK_TRUE, UINT64_MAX), VK_SUCCESS);
+  ASSERT_TRUE(slot.presentable);
+  const auto* pixels = static_cast<const u8*>(slot.readback_map);
+  u32 colored = 0;
+  for (u32 i = 0; i < 256; ++i) {
+    if (!pixels[i * 4 + 2])
+      continue;
+    ++colored;
+    EXPECT_EQ(pixels[i * 4], 64);
+    EXPECT_EQ(pixels[i * 4 + 1], 128);
+    EXPECT_EQ(pixels[i * 4 + 2], 255);
+  }
+  EXPECT_EQ(colored, 1u);
 }
 
 TEST(VkDraw, RawVertexBufferReadsPastOneMiB) {
@@ -1048,5 +1350,101 @@ TEST(VkDraw, SinglePointRendersWithAndWithoutIndices) {
           result[i * 4 + 2] == 0)
         ++green;
     EXPECT_EQ(green, 1u) << "indexed=" << indexed;
+  }
+}
+
+TEST(VkDraw, NarrowRenderTargetsRoundTripThroughCompute) {
+  utl::initOptions();
+  auto& renderer = gpu::rhi::DefaultRenderer();
+  if (!gpu::rhi::Init(renderer))
+    GTEST_SKIP() << "A Vulkan device is required";
+  // A half-red point in an R8/R16 target, whose guest bytes remain zero.
+  const u32 vs[64] = {0x7e000280, 0x7e0202f2,
+                       0xf80008cf, 0x01000000, 0xbf810000};
+  const u32 ps[64] = {0x7e0002f0, 0x7e020280,
+                       0xf800080f, 0x00010100, 0xbf810000};
+  const u32 user_data[32] = {};
+  static const auto program = gpu::rdna::Recompile(vs, ps, user_data, user_data);
+  ASSERT_TRUE(program.ok);
+  alignas(65536) static std::array<std::array<u8, 65536>, 3> targets{};
+  for (u32 format_index = 0; format_index < 3; ++format_index) {
+    gpu::rhi::DrawInfo draw;
+    draw.recomp = &program;
+    draw.vs_addr = reinterpret_cast<u64>(vs);
+    draw.ps_addr = reinterpret_cast<u64>(ps);
+    draw.prim_type = 1;
+    draw.vertex_count = 1;
+    draw.index_data = nullptr;
+    draw.index_count = 0;
+    draw.rt_base = draw.mrt_base[0] = reinterpret_cast<u64>(targets[format_index].data());
+    draw.rt_w = draw.rt_h = 16;
+    draw.mrt_count = draw.mrt_bound_mask = 1;
+    draw.mrt_info[0] = ((format_index ? 2u : 1u) << 2) |
+                       (format_index == 2 ? 7u << 8 : 0);  // R8/R16_UNORM, R16_FLOAT
+    gpu::rhi::BeginFrame(renderer);
+    ASSERT_TRUE(gpu::vk::DrawRecomp(renderer, draw)) << "format=" << format_index;
+    const u32 slot_index = gpu::vk::g_frame.slot_idx;
+    gpu::rhi::EndFrame(renderer, draw.rt_base);
+    const auto& slot = gpu::vk::g_frame.slots[slot_index];
+    ASSERT_EQ(vkWaitForFences(gpu::vk::g_dev.device, 1, &slot.fence,
+                             VK_TRUE, UINT64_MAX), VK_SUCCESS);
+    ASSERT_TRUE(slot.presentable);
+    ASSERT_NE(slot.readback_map, nullptr);
+    const auto* pixels = static_cast<const u8*>(slot.readback_map);
+    const auto red = [&](const u8* data, u32 i) -> u32 {
+      if (!format_index) return data[i];
+      u16 value;
+      std::memcpy(&value, data + i * 2, 2);
+      return value;
+    };
+    const u32 half = format_index == 2 ? 0x3800 : format_index ? 32768 : 128;
+    const u32 quarter = format_index == 2 ? 0x3400 : half / 2;
+    u32 colored = 0;
+    for (u32 i = 0; i < 16 * 16; ++i)
+      if (red(pixels, i) >= half - 1 && red(pixels, i) <= half)
+        ++colored;
+    EXPECT_EQ(colored, 1u) << "format=" << format_index;
+    EXPECT_EQ(gpu::vk::g_frame.heuristic, 0u);
+
+    // Halve the live red channel in compute, then present the modified image.
+    alignas(256) static std::array<u32, 4096> cs{};
+    const std::array<u32, 7> code = {
+        0x7e020287,               // v1 = row 7
+        0xf0000108, 0x00000400,   // image_load v4, v[0:1], s[0:7]
+        0x100808f0,              // v_mul_f32 v4, 0.5, v4
+        0xf0200108, 0x00000400,   // image_store v4, v[0:1], s[0:7]
+        0xbf810000};
+    std::copy(code.begin(), code.end(), cs.begin());
+    gpu::rdna::NextProgramGeneration();
+    gpu::ps5::NoteGpuPool(draw.rt_base, targets[format_index].size());
+    gpu::ps5::Regs regs;
+    const u64 pc = reinterpret_cast<u64>(cs.data());
+    regs[gpu::ps5::mmCOMPUTE_PGM_LO] = pc >> 8;
+    regs[gpu::ps5::mmCOMPUTE_PGM_HI] = pc >> 40;
+    regs[gpu::ps5::mmCOMPUTE_NUM_THREAD_X] = 16;
+    regs[gpu::ps5::mmCOMPUTE_NUM_THREAD_Y] = 1;
+    regs[gpu::ps5::mmCOMPUTE_NUM_THREAD_Z] = 1;
+    regs[gpu::ps5::mmCOMPUTE_PGM_RSRC2] = 8 << 1;
+    const u32 ud = gpu::ps5::mmCOMPUTE_USER_DATA_0;
+    regs[ud] = draw.rt_base >> 8;
+    regs[ud + 1] = ((draw.rt_base >> 40) & 0xff) | ((format_index == 2 ? 13u : format_index ? 7u : 1u) << 20) | (3u << 30);
+    regs[ud + 2] = 3 | (15u << 14);
+    regs[ud + 3] = 0x90000fac;  // 2D, LINEAR
+    gpu::rhi::BeginFrame(renderer);
+    const u32 dispatch[] = {1, 1, 1, 1};
+    gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
+    ASSERT_TRUE(gpu::rhi::FlushCsWrites(renderer));
+    const u32 compute_slot_index = gpu::vk::g_frame.slot_idx;
+    gpu::rhi::EndFrame(renderer, draw.rt_base);
+    const auto& compute_slot = gpu::vk::g_frame.slots[compute_slot_index];
+    ASSERT_EQ(vkWaitForFences(gpu::vk::g_dev.device, 1, &compute_slot.fence,
+                             VK_TRUE, UINT64_MAX), VK_SUCCESS);
+    ASSERT_TRUE(compute_slot.presentable);
+    const auto* result = static_cast<const u8*>(compute_slot.readback_map);
+    u32 quarter_red = 0;
+    for (u32 i = 0; i < 16 * 16; ++i)
+      if (red(result, i) >= quarter - 1 && red(result, i) <= quarter)
+        ++quarter_red;
+    EXPECT_EQ(quarter_red, 1u) << "format=" << format_index;
   }
 }

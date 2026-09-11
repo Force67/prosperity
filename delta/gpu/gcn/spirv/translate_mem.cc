@@ -247,11 +247,11 @@ bool MtbufIsRawDwords(const Inst& inst, u32 n) {
     case 4:
       return n == 1;  // 32
     case 11:
-      return n == 2;  // 32_32
+      return n <= 2;  // 32_32
     case 13:
-      return n == 3;  // 32_32_32
+      return n <= 3;  // 32_32_32
     case 14:
-      return n == 4;  // 32_32_32_32
+      return n <= 4;  // 32_32_32_32 (an XY load reads only the first pair)
     default:
       return false;
   }
@@ -2152,6 +2152,8 @@ bool DsGraphicsSupported(u32 op) {
     case 78:   // ds_write2_b64
     case 118:  // ds_read_b64
     case 119:  // ds_read2_b64
+    case 176:  // ds_write_addtid_b32
+    case 177:  // ds_read_addtid_b32
     case 222:  // ds_write_b96
     case 223:  // ds_write_b128
     case 254:  // ds_read_b96
@@ -2181,6 +2183,10 @@ u32 GraphicsLdsDwords(const Program& program, const u8* reachable) {
     const u32 w = inst.raw[0];
     u32 reach = 0;
     switch (inst.opcode) {
+      case 176:
+      case 177:
+        // M0 supplies an additional dynamic byte base for ADDTID.
+        return 4096;
       case 14:
       case 55:  // pair forms: two byte offsets, each scaled by the element size
       case 78:
@@ -2426,18 +2432,17 @@ void EmitDs(Translator& t, const Inst& inst, StageContext& sc) {
       }
       break;
     }
-    // gfx10's addtid pair: the address is the lane's own slot, not an address
-    // register (M0 reads zero on this path).
-    case 176:  // ds_write_addtid_b32
-      t.m.Store(lds_at(t.Add(t.U32(offset16), t.Mul(t.WaveLane(), t.U32(4))),
-                       true),
-                t.Vg(data0));
+    // ADDTID addresses M0[15:0] + OFFSET + laneID * 4.
+    case 176:
+    case 177: {
+      const Id a = t.Add(t.And(t.Sg(124), t.U32(0xffff)),
+                         t.Add(t.U32(offset16), t.Mul(t.WaveLane(), t.U32(4))));
+      if (op == 176)
+        t.m.Store(lds_at(a, true), t.Vg(data0));
+      else
+        t.SetVg(vdst, t.m.Load(t.t_u, lds_at(a)));
       break;
-    case 177:  // ds_read_addtid_b32
-      t.SetVg(vdst,
-              t.m.Load(t.t_u, lds_at(t.Add(t.U32(offset16),
-                                           t.Mul(t.WaveLane(), t.U32(4))))));
-      break;
+    }
     default:
       WarnUnsupported("ds", op, w, w1);
       sc.cs_unsupported = true;

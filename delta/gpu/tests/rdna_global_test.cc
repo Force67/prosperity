@@ -89,6 +89,51 @@ TEST_F(RdnaGlobal, InactiveLaneCannotOverwriteSharedMemory) {
   EXPECT_EQ(dest[0], 17u);
 }
 
+TEST_F(RdnaGlobal, MadAndMacScaleOutputBeforeClamping) {
+  auto& dest = PageForDispatch();
+  for (u32 op : {0x141u, 0x11fu}) {
+    for (u32 omod = 0; omod < 4; ++omod) {
+      const u32 result = 4 + (op == 0x141 ? 0 : 4) + omod;
+      Mov(result, 0x3f000000);  // MAC accumulator = .5
+      Mov(1, 0x40000000);     // source 0 = 2
+      Mov(2, 0x3f000000);     // source 1 = .5
+      Mov(3, 0x3f000000);     // MAD source 2 = .5
+      program.push_back(0xd4008000 | (op << 16) | result);
+      program.push_back(257 | (258 << 9) | (259 << 18) | (omod << 27));
+    }
+  }
+  Mov(0, 0);
+  for (u32 i = 0; i < 8; ++i)
+    Global(0x1c, 0, i + 4, 2, i * 4);
+  Run(0, reinterpret_cast<u64>(dest.data()));
+  for (u32 i = 0; i < 8; ++i)
+    EXPECT_EQ(dest[i], i % 4 == 3 ? 0x3f400000u : 0x3f800000u) << i;
+}
+
+TEST_F(RdnaGlobal, TypedComputeLoadDecodesRdnaFormat) {
+  auto& source = PageForDispatch();
+  auto& dest = PageForDispatch();
+  source[0] = 0x3e800000;
+  source[1] = 0xbf400000;
+  source[2] = 0x3f000000;
+  source[3] = 0x3f800000;
+  // Inline V# at s[4:7], byte offsets v1 = lane * 8. R32G32_FLOAT
+  // is GFX10 format 64, not the GCN DFMT/NFMT occupying those bits.
+  program = {0xbe840300, 0xbe850301, 0xbe8603a0, 0xbe870380,
+             0x34020083, 0xe8001000 | (64u << 19) | (1u << 16),
+             0x80010401};
+  Global(0x1d, 1, 4, 2);
+  for (u32 format : {64u, 77u}) {
+    // A two-component read is also legal with an RGBA32 format: it does not
+    // require the instruction to request all four stored components.
+    program[5] = 0xe8001000 | (format << 19) | (1u << 16);
+    Run(reinterpret_cast<u64>(source.data()),
+        reinterpret_cast<u64>(dest.data()), 2);
+    for (u32 i = 0; i < 4; ++i)
+      EXPECT_EQ(dest[i], source[i]) << format << ':' << i;
+  }
+}
+
 TEST_F(RdnaGlobal, GdsCounterUsesM0BaseAndReturnsPreOperationValue) {
   auto& renderer = gpu::rhi::DefaultRenderer();
   auto& dest = PageForDispatch();

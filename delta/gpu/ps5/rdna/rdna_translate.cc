@@ -247,23 +247,10 @@ constexpr u32 kFlatBaseTag = 0x100;
 // per-vertex data by v0 or a computed register (the composite VS uses v3, the
 // sprite VS's uv/param streams use v4); the Vulkan vertex-input stage supplies
 // per-vertex data by the draw index either way. A NON-chained IDXEN load reads
-// an inline user-data descriptor (e.g. a 2D VS's ortho matrix): that is a
-// CONSTANT bound as a UBO and read in the shader body, NOT lifted to a vertex
-// input.
-// KNOWN WRONG for at least one title, and not yet fixable without a better
-// discriminator: this asks whether the V# came out of a user-data table, but
-// what it means to ask (see RdnaPlanBufLoadCbufs) is whether the load's index
-// is the vertex index. Demon's Souls' vertex programs load position and colour
-// from V#s sitting INLINE in user data at s8/s12, indexed by v5, so the chain
-// test reads a genuine per-vertex fetch as a uniform: every vertex gets dword 0
-// of a UBO, each pass exports one constant position and one constant colour,
-// and the scene composites to flat alpha with no RGB.
-//
-// Accepting an inline load indexed by v5 (the merged NGG vertex index) fixes
-// that reading, but moves 17.8% of PS5 Isaac's pixels -- Isaac renders
-// correctly either way, so the difference is a pacing shift rather than
-// corruption, but it is not neutral and it did not make Demon's Souls render.
-// Left as-is until the index can be identified rather than guessed at.
+// an inline user-data descriptor. Such loads remain in the shader and read
+// a storage buffer with their original addressing. The table-chain heuristic
+// cannot prove that every chained index is a vertex ID; only those recognised
+// fetches are lifted, and the remaining loads keep their per-lane semantics.
 bool BufLoadIsVertexFetch(const Inst& in, bool chained) {
   const bool idxen = (in.raw[0] >> 13) & 1;
   return idxen && chained;
@@ -725,7 +712,7 @@ u32 TraceCbufChain(u32 sbase,
 
 // SGPRs a VMEM/MIMG op reads as its descriptor (srsrc V#/T#, ssamp S#). An
 // s_load writing one of these fetches a DESCRIPTOR, not constant data, so the
-// cbuf planner must leave it alone: ParseFetchInsts/RdnaPlanBufLoadCbufs and
+// cbuf planner must leave it alone: ParseFetchInsts/RdnaPlanGfxBuffers and
 // RdnaPlanMimg resolve those at draw time from user data instead.
 static std::unordered_set<u32> VmemDescriptorSgprs(const Program& program) {
   std::unordered_set<u32> regs;
@@ -777,8 +764,10 @@ bool RdnaPlanCbufs(const Program& program,
   const auto descriptor_sgprs = VmemDescriptorSgprs(program);
   std::unordered_set<u32> indexed_raw_descriptors;
   for (const Inst& inst : program)
-    if (inst.enc == Enc::kMubuf && inst.opcode >= 0x08 &&
-        inst.opcode <= 0x0f && (inst.raw[0] & (1u << 13)))
+    if (((inst.enc == Enc::kMubuf && inst.opcode >= 0x08 &&
+          inst.opcode <= 0x0f) ||
+         (inst.enc == Enc::kMtbuf && inst.opcode <= 0x03)) &&
+        (inst.raw[0] & (1u << 13)))
       indexed_raw_descriptors.insert(((inst.raw[1] >> 16) & 0x1f) * 4);
   u32 inst_index = 0;
   for (const Inst& inst : program) {
@@ -964,7 +953,8 @@ void RdnaPlanGfxBuffers(const Program& program,
     } else {
       const bool raw = inst.opcode >= 0x08 && inst.opcode <= 0x0f;
       const bool format = inst.opcode <= 0x03;
-      if (inst.enc != Enc::kMubuf || (!raw && !format))
+      const bool typed = inst.enc == Enc::kMtbuf && format;
+      if (!typed && (inst.enc != Enc::kMubuf || (!raw && !format)))
         continue;
       if (claimed && claimed->count(inst.pc))
         continue;
@@ -984,64 +974,6 @@ void RdnaPlanGfxBuffers(const Program& program,
     by_srsrc[srsrc] = binding;
     bindings[inst.pc] = binding;
     buffers.push_back({binding, srsrc, inst.pc});
-  }
-}
-
-void RdnaPlanBufLoadCbufs(const Program& program,
-                          u32 first_binding,
-                          std::vector<ShaderCbuf>& cbufs,
-                          std::unordered_map<u32, u32>& bindings,
-                          std::unordered_map<u32, u32>& by_pc,
-                   u32 binding_limit = kMaxCbufBindings) {
-  // Mirror ParseFetchInsts' walk: srsrc SGPRs written by an s_load hold V#s
-  // from the user-data descriptor TABLE (entry index from
-  // MapTableChainedLoads). A constant load through such a V# becomes a chained
-  // cbuf (root = the s_load's sbase pair, table offset = entry * 16 bytes); the
-  // renderer derefs the table pointer at draw time. srsrc-keyed bindings
-  // collide when the shader reuses an SGPR quad (s[8:11] = MVP V# then vertex
-  // V#), so constant loads are bound per-instruction (by_pc) instead.
-  // MUBUF format loads are NOT bound here: their format lives in the V#, so they
-  // go through RdnaPlanGfxBuffers/RdnaEmitBufFormatLoad instead.
-  const auto chained_loads = MapTableChainedLoads(program);
-  for (const Inst& inst : program) {
-    if (inst.enc == Enc::kSop1 && inst.opcode == 0x20)
-      break;  // s_setpc_b64
-    if (inst.enc == Enc::kSopp && inst.opcode == 1)
-      break;  // s_endpgm
-    if (inst.enc != Enc::kMtbuf || inst.opcode > 0x03)
-      continue;
-    const u32 srsrc = ((inst.raw[1] >> 16) & 0x1F) * 4;
-    const auto chain = chained_loads.find(inst.pc);
-    const bool chained = chain != chained_loads.end();
-    if (BufLoadIsVertexFetch(inst, chained))
-      continue;  // real fetch -> vertex input
-    const u32 binding =
-        first_binding + static_cast<u32>(cbufs.size());
-    if (chained) {
-      if (binding >= binding_limit)
-        return;
-      by_pc[inst.pc] = binding;
-      ShaderCbuf cb;
-      cb.binding = binding;
-      cb.ud_sgpr = chain->second.first;
-      cb.num_dwords = 16;
-      cb.chain_len = 1;
-      cb.chain_off[0] = chain->second.second * 16;
-      cb.use_pc = inst.pc;
-      cbufs.push_back(cb);
-      continue;
-    }
-    if (bindings.count(srsrc))
-      continue;
-    if (binding >= binding_limit)
-      return;
-    bindings[srsrc] = binding;
-    ShaderCbuf cb;
-    cb.binding = binding;
-    cb.ud_sgpr = srsrc;
-    cb.num_dwords = 16;
-    cb.use_pc = inst.pc;
-    cbufs.push_back(cb);
   }
 }
 
@@ -1261,11 +1193,15 @@ bool RdnaEmitBufFormatLoad(Translator& t,
   const u32 w = inst.raw[0], w1 = inst.raw[1];
   const auto bind = sc.gfx_buf_bind.find(inst.pc);
   const auto res = g_stage_bufs.find(inst.pc);
-  if (bind == sc.gfx_buf_bind.end() || res == g_stage_bufs.end() ||
-      !res->second.descriptor_valid)
+  const bool typed = inst.enc == Enc::kMtbuf;
+  if (bind == sc.gfx_buf_bind.end() ||
+      (!typed && (res == g_stage_bufs.end() ||
+                  !res->second.descriptor_valid)))
     return false;
   BufFormat fmt;
-  if (!DecodeBufFormat((res->second.descriptor[3] >> 12) & 0x7F, fmt))
+  const u32 format = typed ? (w >> 19) & 0x7F
+                           : (res->second.descriptor[3] >> 12) & 0x7F;
+  if (!DecodeBufFormat(format, fmt))
     return false;
   // 11-bit and 10-bit packed floats need their own exponent/mantissa unpack.
   if (fmt.num == BufNum::kFloat && fmt.bits[0] != 16 && fmt.bits[0] != 32)
@@ -1273,18 +1209,26 @@ bool RdnaEmitBufFormatLoad(Translator& t,
 
   const u32 soffset_field = (w1 >> 24) & 0xFF;
   u32 soffset = 0;
-  if (soffset_field != 125 && soffset_field != 128) {
+  if (!typed && soffset_field != 125 && soffset_field != 128) {
     if (!res->second.soffset_valid)
       return false;
     soffset = res->second.soffset;
   }
-  const u32 stride = (res->second.descriptor[1] >> 16) & 0x3FFF;
+  // Typed loads carry their format in the instruction, while stride and
+  // scalar offset remain live shader values. Do not bake the first draw's
+  // descriptor into a cached module. RdnaPlanCbufs preserves its SMEM load.
+  const u32 srsrc = ((w1 >> 16) & 0x1F) * 4;
+  const Id stride = typed
+      ? t.And(t.Shr(t.Sg(srsrc + 1), t.U32(16)), t.U32(0x3FFF))
+      : t.U32((res->second.descriptor[1] >> 16) & 0x3FFF);
   const u32 vdata = (w1 >> 8) & 0xFF, vaddr = w1 & 0xFF;
   const bool offen = (w >> 12) & 1, idxen = (w >> 13) & 1;
-  Id byte_off = t.U32((w & 0xFFF) + soffset);
+  Id byte_off = typed
+      ? t.Add(t.U32(w & 0xFFF), t.SrcRaw(soffset_field, inst.literal))
+      : t.U32((w & 0xFFF) + soffset);
   u32 va = vaddr;
   if (idxen)
-    byte_off = t.Add(byte_off, t.Mul(t.Vg(va++), t.U32(stride)));
+    byte_off = t.Add(byte_off, t.Mul(t.Vg(va++), stride));
   if (offen)
     byte_off = t.Add(byte_off, t.Vg(va));
 
@@ -2310,6 +2254,8 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
                            {t.SrcF(s0, inst.literal, neg & 1, abs & 1),
                             t.SrcF(s1, inst.literal, neg & 2, abs & 2),
                             t.VgF(vdst)});
+        if (omod)
+          r = t.FMul(r, t.F32(omod == 1 ? 2.f : omod == 2 ? 4.f : .5f));
         if (clamp)
           r = t.m.ExtInst(t.t_f, GLSLstd450FClamp, {r, t.F32(0.f), t.F32(1.f)});
         t.SetVgF(vdst, r);
@@ -2327,6 +2273,8 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
                            {t.SrcF(s0, inst.literal, neg & 1, abs & 1),
                             t.SrcF(s1, inst.literal, neg & 2, abs & 2),
                             t.SrcF(s2, inst.literal, neg & 4, abs & 4)});
+        if (omod)
+          r = t.FMul(r, t.F32(omod == 1 ? 2.f : omod == 2 ? 4.f : .5f));
         if (clamp)
           r = t.m.ExtInst(t.t_f, GLSLstd450FClamp, {r, t.F32(0.f), t.F32(1.f)});
         t.SetVgF(vdst, r);
@@ -2538,7 +2486,6 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       }
       const bool tfe = (w1 >> 23) & 1;
       const bool lds = inst.enc == Enc::kMubuf && ((w >> 16) & 1);
-      const u32 soffset = (w1 >> 24) & 0xff;
       if (tfe || lds) {
         gpu::gcn::WarnUnsupported("buffer.control.rdna", inst.opcode, w, w1);
         break;
@@ -2547,9 +2494,7 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       // seed. Re-seed its destination VGPRs from that input HERE (where the
       // real buffer_load_format runs), overwriting any value the merged-wave
       // index math clobbered them with (e.g. v0/v3/v4, reused as the fetch
-      // index). A CONSTANT load (e.g. the 2D ortho matrix) has no seed and
-      // reads num_comps dwords from the bound UBO at the computed byte offset
-      // into the destination VGPRs.
+      // index). Other loads execute against the storage buffer below.
       if (auto sit = sc.vfetch_seed.find(inst.pc);
           sit != sc.vfetch_seed.end()) {
         const auto& vs = sit->second;
@@ -2564,70 +2509,14 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
                                          : t.m.CompositeExtract(t.t_f, val, c));
         break;
       }
-      // An untyped format load converts through the V#'s format, which only the
-      // resolved descriptor knows; it reads the set-2 window (its index is
-      // per-lane) rather than a UBO.
-      if (inst.enc == Enc::kMubuf) {
-        if (!RdnaEmitBufFormatLoad(t, inst, sc))
-          gpu::gcn::WarnUnsupported("mubuf.format-conversion.rdna",
-                                    inst.opcode, w, w1);
-        break;
-      }
-      // Past the fetch path the load really is emitted, so a scalar byte offset
-      // would move the read and is not expressible against a bound UBO. Sony's
-      // compiler parks a scratch SGPR (vcc_hi) in this field even when the
-      // offset is zero, so only a fetch -- replaced above by its vertex input --
-      // can ignore it.
-      if (soffset != 125 && soffset != 128) {
-        gpu::gcn::WarnUnsupported("buffer.control.rdna", inst.opcode, w, w1);
-        break;
-      }
-      const u32 srsrc = ((w1 >> 16) & 0x1F) * 4;
-      u32 binding;
-      auto pit = sc.mubuf_cbuf_by_pc.find(inst.pc);
-      if (pit != sc.mubuf_cbuf_by_pc.end()) {
-        binding = pit->second;
-      } else {
-        auto it = sc.cbuf_bind.find(srsrc);
-        if (it == sc.cbuf_bind.end()) {
-          gpu::gcn::WarnUnsupported("mubuf.cbuf-unplanned", inst.opcode, w, w1);
-          break;
-        }
-        binding = it->second;
-      }
-      const u32 nc = (inst.opcode & 3) + 1;
-      // A typed constant load delivers the buffer's dwords unchanged only when
-      // its format is 32-bit per channel; narrower ones would need unpacking.
-      if (inst.enc == Enc::kMtbuf) {
-        const u32 fmt = (w >> 19) & 0x7F;
-        if (!(fmt >= 20 && (fmt <= 22 || (fmt >= 62 && fmt <= 77))))
-          gpu::gcn::WarnUnsupported("mtbuf.fmt", fmt, w, w1);
-      }
-      const u32 inst_offset = w & 0xFFF, vdata = (w1 >> 8) & 0xFF;
-      const bool idxen = (w >> 13) & 1, offen = (w >> 12) & 1;
-      if (idxen) {
-        gpu::gcn::WarnUnsupported("mtbuf.descriptor-stride.rdna", inst.opcode,
-                                  w, w1);
-        break;
-      }
-      const u32 vaddr = w1 & 0xFF;
-      // byte offset = inst_offset + index*stride + voffset. The V# stride is
-      // not available in the shader (the descriptor SGPRs are not seeded), so
-      // an indexed uniform row-select assumes tight packing (stride == nc*4);
-      // an unindexed load uses the immediate offset directly.
-      Id byte_off = t.U32(inst_offset);
-      if (idxen)
-        byte_off = t.Add(byte_off, t.Mul(t.Vg(vaddr), t.U32(nc * 4)));
-      if (offen)
-        byte_off = t.Add(byte_off, t.Vg(vaddr + (idxen ? 1u : 0u)));
-      Id dword0 = t.Shr(byte_off, t.U32(2));
-      // Relative to the staged window, as in RdnaEmitSmem: this load can land
-      // on a binding an SMEM planned at a nonzero first dword.
-      if (const auto fit = sc.cbuf_first_dword.find(binding);
-          fit != sc.cbuf_first_dword.end())
-        dword0 = t.Sub(dword0, t.U32(fit->second));
-      for (u32 k = 0; k < nc; k++)
-        t.SetVg(vdata + k, t.CbufDwordId(binding, t.Add(dword0, t.U32(k))));
+      // Every remaining formatted load reads its set-2 buffer, including
+      // nonindexed MTBUF loads in pixel shaders. The instruction supplies a
+      // typed load's format; MUBUF takes it from the resolved descriptor.
+      if (!RdnaEmitBufFormatLoad(t, inst, sc))
+        gpu::gcn::WarnUnsupported(
+            inst.enc == Enc::kMtbuf ? "mtbuf.format-conversion.rdna"
+                                    : "mubuf.format-conversion.rdna",
+            inst.opcode, w, w1);
       break;
     }
     case Enc::kMimg: {
@@ -2646,10 +2535,10 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       const u32 dim = (w >> 3) & 0x7;
       // dim 3 (cube) arrives with the face already selected, so it is the
       // same (s, t, layer) address the 2D-array path takes.
-      const bool arrayed_dim = dim == 3 || dim == 5;
-      // dim 2 is a volume: three coordinates, no layer. RdnaTex3dMask told the
+      const bool arrayed_dim = dim == 3 || dim == 4 || dim == 5;
+      // dim 2 is a volume: three coordinates, no layer. RdnaTexDimMask told the
       // shared emitter which binding that is, so DA stays clear here.
-      if (dim != 1 && dim != 2 && !arrayed_dim) {
+      if (dim > 5) {
         gpu::gcn::WarnUnsupported("mimg.dim", dim, w, w1);
         break;
       }
@@ -2893,10 +2782,8 @@ std::vector<FetchAttr> ParseFetchInsts(const Program& insts) {
                 "buf_load nc={} vdst=v{} srsrc=s{} idxen={} offen={} "
                 "vaddr=v{} soffset=s{} ioff={} -> {} (table_sgpr=s{} doff={})",
                 nc, vdata, srsrc, idxen, offen, vaddr, soffset, inst_offset,
-                vtx ? "vertex-attr" : "const-ubo", table_sgpr, dword_off);
-    // Only a genuine per-vertex fetch becomes a vertex input. A constant load
-    // is left for the UBO path (RdnaPlanBufLoadCbufs assigns the same table
-    // slots).
+                vtx ? "vertex-attr" : "storage-buffer", table_sgpr, dword_off);
+    // Other loads retain their addressing through the storage-buffer path.
     if (vtx) {
       out.push_back({sem, nc, vdata, table_sgpr, dword_off, in.pc,
                      typed ? ((in.raw[0] >> 19) & 0x7F) : 0u, inst_offset});
@@ -2925,8 +2812,11 @@ std::vector<FetchAttr> ParseFetch(u64 fetch_addr) {
 // read-before-write is reproducible.
 void PlanCrossLane(const Program& program, Translator& t, StageContext& sc,
                    std::vector<Id>& iface) {
+  const bool addtid = std::any_of(program.begin(), program.end(), [](const Inst& i) {
+    return i.enc == Enc::kDs && (i.opcode == 176 || i.opcode == 177);
+  });
   if (!sc.subgroup_local_id &&
-      (RdnaUsesDpp(program) || gpu::gcn::UsesDsSwizzle(program, nullptr) ||
+      (addtid || RdnaUsesDpp(program) || gpu::gcn::UsesDsSwizzle(program, nullptr) ||
        RdnaUsesMbcnt(program)))
     gpu::gcn::EnableDsSwizzle(t, sc, iface);
   // A graphics stage had no lane at all: WaveLane() answered 0, so v_mbcnt
@@ -2936,14 +2826,15 @@ void PlanCrossLane(const Program& program, Translator& t, StageContext& sc,
     t.lane_id = t.m.Load(t.t_u, sc.subgroup_local_id);
 }
 
-// Which sampler bindings are volumes. GCN left this to the T# alone, so the
+// Which sampler bindings use the requested DIM encodings. GCN left this to the T# alone, so the
 // shared emitter takes it out of band; gfx10 states it in the instruction's DIM
 // field, which is available here without a descriptor.
-u32 RdnaTex3dMask(const Program& program,
-                  const gpu::gcn::MimgBindingPlan& plan) {
+u32 RdnaTexDimMask(const Program& program,
+                   const gpu::gcn::MimgBindingPlan& plan, u32 dimensions) {
   u32 mask = 0;
   for (const Inst& inst : program) {
-    if (inst.enc != Enc::kMimg || ((inst.raw[0] >> 3) & 0x7) != 2)
+    if (inst.enc != Enc::kMimg ||
+        !(dimensions & (1u << ((inst.raw[0] >> 3) & 0x7))))
       continue;
     const auto it = plan.binding_by_pc.find(inst.pc);
     if (it != plan.binding_by_pc.end() &&
@@ -3209,12 +3100,6 @@ bool TranslateVs(const Program& program,
                      r.indirect_cbufs ? gpu::gcn::kIndirectCbufBindings
                                       : kMaxCbufBindings))
     return false;
-  // Constant buffer_load descriptors (e.g. the ortho matrix a procedural 2D VS
-  // reads) become additional set-1 UBOs after the SMEM cbufs.
-  RdnaPlanBufLoadCbufs(program, 0, r.vs_cbufs, sc.cbuf_bind,
-                       sc.mubuf_cbuf_by_pc,
-                       r.indirect_cbufs ? gpu::gcn::kIndirectCbufBindings
-                                        : kMaxCbufBindings);
   // A fetch already lifted to a vertex input needs no buffer of its own.
   std::unordered_set<u32> lifted;
   for (const FetchAttr& a : attrs)
@@ -3239,7 +3124,8 @@ bool TranslateVs(const Program& program,
     }
     sc.mimg_plan = &vs_mimg_plan;
     sc.tex_binding_base = tex_binding_base;
-    sc.tex_3d_mask = RdnaTex3dMask(program, vs_mimg_plan);
+    sc.tex_3d_mask = RdnaTexDimMask(program, vs_mimg_plan, 1u << 2);
+    sc.tex_1d_mask = RdnaTexDimMask(program, vs_mimg_plan, (1u << 0) | (1u << 4));
     for (u32 i = 0; i < vs_mimg_plan.binding_srsrc.size(); i++)
       r.vs_texs.push_back({i + tex_binding_base,
                            vs_mimg_plan.binding_srsrc[i],
@@ -3525,8 +3411,6 @@ bool TranslateMesh(Program es_program, const Program& gs_program,
     if (!RdnaPlanCbufs(program, cb_base, cbufs, sc.cbuf_bind, sc.smem_cbuf_by_pc,
                         gpu::gcn::kIndirectCbufBindings))
       return false;
-    RdnaPlanBufLoadCbufs(program, cb_base, cbufs, sc.cbuf_bind,
-                         sc.mubuf_cbuf_by_pc, gpu::gcn::kIndirectCbufBindings);
     NoteCbufWindows(cbufs, sc);
     for (auto& cb : cbufs) {
       cb.from_gs = half != 0;
@@ -3547,7 +3431,8 @@ bool TranslateMesh(Program es_program, const Program& gs_program,
       return false;
     sc.mimg_plan = &image_plan;
     sc.tex_binding_base = tex_binding_base;
-    sc.tex_3d_mask = RdnaTex3dMask(program, image_plan);
+    sc.tex_3d_mask = RdnaTexDimMask(program, image_plan, 1u << 2);
+    sc.tex_1d_mask = RdnaTexDimMask(program, image_plan, (1u << 0) | (1u << 4));
     for (u32 i = 0; i < image_plan.binding_srsrc.size(); ++i)
       r.vs_texs.push_back({i + tex_binding_base, image_plan.binding_srsrc[i],
                            image_plan.binding_storage[i],
@@ -3696,7 +3581,8 @@ bool TranslatePs(const Program& program,
   if (mimg_plan.binding_srsrc.size() > StageContext::kMaxPsSamplers)
     return false;
   sc.mimg_plan = &mimg_plan;  // borrowed by EmitBody
-  sc.tex_3d_mask = RdnaTex3dMask(program, mimg_plan);
+  sc.tex_3d_mask = RdnaTexDimMask(program, mimg_plan, 1u << 2);
+  sc.tex_1d_mask = RdnaTexDimMask(program, mimg_plan, (1u << 0) | (1u << 4));
   for (u32 i = 0; i < mimg_plan.binding_srsrc.size(); i++)
     r.ps_texs.push_back({i, mimg_plan.binding_srsrc[i],
                          mimg_plan.binding_storage[i],
