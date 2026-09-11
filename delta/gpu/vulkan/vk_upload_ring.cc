@@ -22,9 +22,22 @@ namespace {
 // DELTA_GPU_LDSDUMP=<dwords>: host-visible shared-LDS scratch, dumped after a
 // frame.
 DELTA_OPTION(u32, kLdsDump, "DELTA_GPU_LDSDUMP", 0);
+DELTA_OPTION(u32, kUboRingMb, "DELTA_GPU_UBORING_MB", 256);
 }  // namespace
 
 namespace gpu::vk {
+
+VkDeviceSize UboRingBytes() {
+  // Once allocated, the physical buffer determines the capacity. A later
+  // option update must not make offsets escape the mapped allocation.
+  if (g_ring.ubo_bytes)
+    return g_ring.ubo_bytes;
+  const VkDeviceSize requested =
+      VkDeviceSize(std::clamp(kUboRingMb.get(), 16u, 2048u)) * 1024 * 1024;
+  return g_dev.max_storage_buffer_range
+      ? std::min(requested, VkDeviceSize(g_dev.max_storage_buffer_range) * 2)
+      : requested;
+}
 
 VkDeviceSize VbRingBytes() {
   static const VkDeviceSize bytes = [] {
@@ -86,28 +99,8 @@ bool CreateUploadRings(const VkPhysicalDeviceProperties& props) {
               props.limits.maxPerStageDescriptorUniformBuffers,
               kCbufBindings);
   {
-    VkBufferCreateInfo ub{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-    ub.size = kUboRing;
-    ub.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
-    VKOK(vkCreateBuffer(g_dev.device, &ub, nullptr, &g_ring.ubo_buf));
-    VkMemoryRequirements ur;
-    vkGetBufferMemoryRequirements(g_dev.device, g_ring.ubo_buf, &ur);
-    VkMemoryAllocateInfo um{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-    um.allocationSize = ur.size;
-    um.memoryTypeIndex = FindMemoryType(
-        ur.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                               VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-    VKOK(vkAllocateMemory(g_dev.device, &um, nullptr, &g_ring.ubo_mem));
-    VKOK(vkBindBufferMemory(g_dev.device, g_ring.ubo_buf, g_ring.ubo_mem, 0));
-    VKOK(vkMapMemory(g_dev.device, g_ring.ubo_mem, 0, kUboRing, 0,
-                     (void**)&g_ring.ubo_map));
-    std::memset(g_ring.ubo_map, 0, kUboRing);
-    NameObject(VK_OBJECT_TYPE_BUFFER, (u64)g_ring.ubo_buf, "cbuffer ring");
     g_ring.ubo_stride = (kCbufWindow + g_ring.ubo_align - 1) &
                         ~(VkDeviceSize)(g_ring.ubo_align - 1);
-    g_ring.ubo_written.resize(static_cast<size_t>(
-        (kUboRing + g_ring.ubo_stride - 1) / g_ring.ubo_stride));
-
     // kMaxCbufBindings, not 8: a shader pair whose constant buffers exceed the
     // cap is planned only up to it, and every s_buffer_load from a dropped base
     // emits nothing, leaving its destination SGPRs zero. Skyrim's UI shaders
@@ -148,22 +141,10 @@ bool CreateUploadRings(const VkPhysicalDeviceProperties& props) {
     uai.descriptorSetCount = 1;
     uai.pSetLayouts = &g_ring.ubo_layout;
     VKOK(vkAllocateDescriptorSets(g_dev.device, &uai, &g_ring.ubo_set));
-    VkDescriptorBufferInfo ubinfo[kCbufBindings];
-    VkWriteDescriptorSet uw[kCbufBindings];
-    for (u32 i = 0; i < kCbufBindings; i++) {
-      ubinfo[i] = {g_ring.ubo_buf, 0, kCbufWindow};
-      uw[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-      uw[i].dstSet = g_ring.ubo_set;
-      uw[i].dstBinding = i;
-      uw[i].descriptorCount = 1;
-      uw[i].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
-      uw[i].pBufferInfo = &ubinfo[i];
-    }
-    vkUpdateDescriptorSets(g_dev.device, kCbufBindings, uw, 0, nullptr);
     // Mesh stages can need more windows than the dynamic UBO limit allows.
     // Bind the current frame's half of the existing ring as one read-only
     // storage buffer, plus one dynamic UBO containing the window offsets.
-    if (props.limits.maxStorageBufferRange >= kUboRing / 2) {
+    if (props.limits.maxStorageBufferRange >= UboRingBytes() / 2) {
       const VkShaderStageFlags stages = VK_SHADER_STAGE_VERTEX_BIT |
           VK_SHADER_STAGE_FRAGMENT_BIT |
           (g_dev.mesh_shader ? VK_SHADER_STAGE_MESH_BIT_EXT : 0);
@@ -193,21 +174,6 @@ bool CreateUploadRings(const VkPhysicalDeviceProperties& props) {
       alloc.pSetLayouts = layouts;
       VKOK(vkAllocateDescriptorSets(g_dev.device, &alloc,
                                     g_ring.indirect_cbuf_sets));
-      for (u32 slot = 0; slot < 2; ++slot) {
-        const VkDescriptorBufferInfo buffers[2] = {
-            {g_ring.ubo_buf, slot * (kUboRing / 2), kUboRing / 2},
-            {g_ring.ubo_buf, 0, gpu::gcn::kIndirectDrawDwords * sizeof(u32)}};
-        VkWriteDescriptorSet writes[2]{};
-        for (u32 i = 0; i < 2; ++i) {
-          writes[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-          writes[i].dstSet = g_ring.indirect_cbuf_sets[slot];
-          writes[i].dstBinding = i;
-          writes[i].descriptorCount = 1;
-          writes[i].descriptorType = bindings[i].descriptorType;
-          writes[i].pBufferInfo = &buffers[i];
-        }
-        vkUpdateDescriptorSets(g_dev.device, 2, writes, 0, nullptr);
-      }
     }
   }
 
@@ -268,6 +234,70 @@ bool CreateUploadRings(const VkPhysicalDeviceProperties& props) {
     sl.pBindings = sbs;
     VKOK(vkCreateDescriptorSetLayout(g_dev.device, &sl, nullptr,
                                      &g_ring.sbo_layout));
+  }
+  return true;
+}
+
+// The device is initialized before guest mappings exist, but the title profile
+// is loaded later. Allocate constants at the first frame so its budget applies
+// to both the Vulkan allocation and the offsets used to address it.
+bool EnsureCbufRing() {
+  if (g_ring.ubo_buf)
+    return g_ring.ubo_map != nullptr;
+  g_ring.ubo_bytes = UboRingBytes();
+  VkBufferCreateInfo ub{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+  ub.size = UboRingBytes();
+  ub.usage =
+      VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+  VKOK(vkCreateBuffer(g_dev.device, &ub, nullptr, &g_ring.ubo_buf));
+  VkMemoryRequirements ur;
+  vkGetBufferMemoryRequirements(g_dev.device, g_ring.ubo_buf, &ur);
+  VkMemoryAllocateInfo um{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+  um.allocationSize = ur.size;
+  um.memoryTypeIndex = FindMemoryType(ur.memoryTypeBits,
+                                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  VKOK(vkAllocateMemory(g_dev.device, &um, nullptr, &g_ring.ubo_mem));
+  VKOK(vkBindBufferMemory(g_dev.device, g_ring.ubo_buf, g_ring.ubo_mem, 0));
+  VKOK(vkMapMemory(g_dev.device, g_ring.ubo_mem, 0, UboRingBytes(), 0,
+                   (void **)&g_ring.ubo_map));
+  std::memset(g_ring.ubo_map, 0, UboRingBytes());
+  NameObject(VK_OBJECT_TYPE_BUFFER, (u64)g_ring.ubo_buf, "cbuffer ring");
+  g_ring.ubo_stride = (kCbufWindow + g_ring.ubo_align - 1) &
+                      ~(VkDeviceSize)(g_ring.ubo_align - 1);
+  g_ring.ubo_written.resize(static_cast<size_t>(
+      (UboRingBytes() + g_ring.ubo_stride - 1) / g_ring.ubo_stride));
+
+  VkDescriptorBufferInfo ubinfo[kCbufBindings];
+  VkWriteDescriptorSet uw[kCbufBindings];
+  for (u32 i = 0; i < kCbufBindings; i++) {
+    ubinfo[i] = {g_ring.ubo_buf, 0, kCbufWindow};
+    uw[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    uw[i].dstSet = g_ring.ubo_set;
+    uw[i].dstBinding = i;
+    uw[i].descriptorCount = 1;
+    uw[i].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+    uw[i].pBufferInfo = &ubinfo[i];
+  }
+  vkUpdateDescriptorSets(g_dev.device, kCbufBindings, uw, 0, nullptr);
+  if (g_ring.indirect_cbuf_layout) {
+    for (u32 slot = 0; slot < 2; ++slot) {
+      const VkDescriptorBufferInfo buffers[2] = {
+          {g_ring.ubo_buf, slot * (UboRingBytes() / 2), UboRingBytes() / 2},
+          {g_ring.ubo_buf, 0, gpu::gcn::kIndirectDrawDwords * sizeof(u32)}};
+      VkWriteDescriptorSet writes[2]{};
+      for (u32 i = 0; i < 2; ++i) {
+        writes[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        writes[i].dstSet = g_ring.indirect_cbuf_sets[slot];
+        writes[i].dstBinding = i;
+        writes[i].descriptorCount = 1;
+        writes[i].descriptorType =
+            i == 0 ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
+                   : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+        writes[i].pBufferInfo = &buffers[i];
+      }
+      vkUpdateDescriptorSets(g_dev.device, 2, writes, 0, nullptr);
+    }
   }
   return true;
 }

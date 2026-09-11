@@ -895,6 +895,7 @@ struct AliasedCopyPlan {
   u32 w = 0;
   u32 h = 0;
   bool unpack = false;  // image holds packed 11/11/10, staging holds float4
+  bool widen = false;   // image holds 8/16-bit texels, staging holds u32
 };
 
 bool PlanAliasedCopy(const CsAliasedImage& img,
@@ -905,6 +906,10 @@ bool PlanAliasedCopy(const CsAliasedImage& img,
       img.is_stencil ? res.elem_bytes : res.stage_elem_bytes;
   const bool unpack = res.dfmt == 6 && !img.is_depth && !img.is_stencil &&
                       img.elem_bytes == 4 && want_elem == 16;
+  const bool widen = !img.is_depth && !img.is_stencil &&
+                     img.elem_bytes == res.elem_bytes &&
+                     (img.elem_bytes == 1 || img.elem_bytes == 2) &&
+                     want_elem == 4;
   // A tile row of slack in either direction: an image padded up to its tile
   // height and a descriptor rounded to the surface's own are the same
   // surface, and the copy takes the overlap.
@@ -912,10 +917,11 @@ bool PlanAliasedCopy(const CsAliasedImage& img,
   if (res.mip_levels == 1 && res.layers == 1 &&
       img.w + kExtentSlack >= res.width &&
       img.h + kExtentSlack >= res.height &&
-      (img.elem_bytes == want_elem || unpack)) {
+      (img.elem_bytes == want_elem || unpack || widen)) {
     plan.w = std::min(img.w, res.width);
     plan.h = std::min(img.h, res.height);
     plan.unpack = unpack;
+    plan.widen = widen;
     return true;
   }
   // One line per address and direction. A flat cap spends itself on the level
@@ -925,12 +931,12 @@ bool PlanAliasedCopy(const CsAliasedImage& img,
   if (warned.size() < 256 && warned.insert(key).second)
     BASE_LOGI("gpuvk",
               "cs {} live {} target {:#x} shape mismatch: image {}x{} {}B vs "
-              "cs {}x{} pitch={} mips={} dfmt={} elem={}/{}B tiling={} -> "
+              "cs {}x{} pitch={} mips={} layers={} dfmt={} elem={}/{}B tiling={} -> "
               "falling back to guest memory",
               dir, img.is_depth ? "depth" : img.is_stencil ? "stencil"
                                                           : "color",
               (unsigned long long)res.base, img.w, img.h, img.elem_bytes,
-              res.width, res.height, res.pitch, res.mip_levels, res.dfmt,
+              res.width, res.height, res.pitch, res.mip_levels, res.layers, res.dfmt,
               res.elem_bytes, res.stage_elem_bytes, res.tiling_idx);
   return false;
 }
@@ -1008,23 +1014,30 @@ bool RunAliasedCopy(const CsAliasedImage& img,
   // The converting path copies at the IMAGE's element size, through a scratch
   // the CPU then unpacks into (or packs out of) the staged layout.
   const u64 packed_bytes = texels * img.elem_bytes;
-  if (plan.unpack && !EnsureBridgeScratch(packed_bytes))
+  const bool convert = plan.unpack || plan.widen;
+  if (convert && !EnsureBridgeScratch(packed_bytes))
     return false;
-  const VkBuffer copy_buf = plan.unpack ? g_bridge.buf : e.buf;
+  const VkBuffer copy_buf = convert ? g_bridge.buf : e.buf;
   auto* scratch = static_cast<u32*>(g_bridge.map);
-  if (plan.unpack && to_image) {
+  if (convert && to_image) {
     for (u32 y = 0; y < plan.h; y++) {
       const u8* row = static_cast<const u8*>(e.map) + level.offset +
                       static_cast<u64>(y) * level.pitch * res.stage_elem_bytes;
-      for (u32 x = 0; x < plan.w; x++)
-        scratch[static_cast<u64>(y) * level.pitch + x] =
-            PackR11G11B10(row + static_cast<u64>(x) * res.stage_elem_bytes);
+      for (u32 x = 0; x < plan.w; x++) {
+        const u64 i = static_cast<u64>(y) * level.pitch + x;
+        const u8* texel = row + static_cast<u64>(x) * res.stage_elem_bytes;
+        if (plan.unpack)
+          scratch[i] = PackR11G11B10(texel);
+        else
+          std::memcpy(static_cast<u8*>(g_bridge.map) + i * img.elem_bytes,
+                      texel, img.elem_bytes);
+      }
     }
   }
   // Host-zero any padding an image->buffer copy does not cover (host writes
   // are made available by the submission).
   if (!to_image &&
-      (plan.unpack || level.offset != 0 || copy_bytes < res.size))
+      (convert || level.offset != 0 || copy_bytes < res.size))
     std::memset(e.map, 0, res.size);
   if (img.is_stencil) {
     if (level.offset || texels > e.cap)
@@ -1058,7 +1071,7 @@ bool RunAliasedCopy(const CsAliasedImage& img,
   // Stencil packing changes the host bytes, and image->buffer staging may have
   // zeroed padding, so those directions still need the host preparation copy.
   // Format conversion uses the separate scratch buffer.
-  if (!plan.unpack && (!to_image || img.is_stencil))
+  if (!convert && (!to_image || img.is_stencil))
     RecordStagingCopy(c, e, e.cap, /*to_device=*/true);
   // Chain from -- and restore -- the SUBMITTED layout: this copy executes
   // before the current frame's still-recording barriers, whose oldLayout
@@ -1087,7 +1100,7 @@ bool RunAliasedCopy(const CsAliasedImage& img,
                       AliasedImageAccess(img, img.submitted_layout),
                       transfer_access);
   VkBufferImageCopy copy{};
-  copy.bufferOffset = (img.is_stencil || plan.unpack) ? 0 : level.offset;
+  copy.bufferOffset = (img.is_stencil || convert) ? 0 : level.offset;
   copy.bufferRowLength = level.pitch;
   copy.imageSubresource = {img.aspect, 0, 0, 1};
   copy.imageExtent = {plan.w, plan.h, 1};
@@ -1150,14 +1163,24 @@ bool RunAliasedCopy(const CsAliasedImage& img,
     for (u64 i = texels; i-- > 0;)
       expanded[i] = packed[i];
   }
-  if (plan.unpack && !to_image) {
+  if (convert && !to_image) {
     gcn::DetileParallelRows(plan.h, [&](u32 y0, u32 y1) {
       for (u32 y = y0; y < y1; y++) {
         u8* row = static_cast<u8*>(e.map) + level.offset +
                   static_cast<u64>(y) * level.pitch * res.stage_elem_bytes;
-        for (u32 x = 0; x < plan.w; x++)
-          UnpackR11G11B10(scratch[static_cast<u64>(y) * level.pitch + x],
-                          row + static_cast<u64>(x) * res.stage_elem_bytes);
+        for (u32 x = 0; x < plan.w; x++) {
+          const u64 i = static_cast<u64>(y) * level.pitch + x;
+          u8* texel = row + static_cast<u64>(x) * res.stage_elem_bytes;
+          if (plan.unpack)
+            UnpackR11G11B10(scratch[i], texel);
+          else {
+            u32 expanded = 0;
+            std::memcpy(&expanded,
+                        static_cast<const u8*>(g_bridge.map) + i * img.elem_bytes,
+                        img.elem_bytes);
+            std::memcpy(texel, &expanded, 4);
+          }
+        }
       }
     });
     CsCopyStaging(e, e.cap, /*to_device=*/true);

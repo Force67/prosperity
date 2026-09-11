@@ -59,6 +59,10 @@ constexpr VkDeviceSize kIbRing =
     128ull * 1024 * 1024;  // per-frame index ring (32-bit), see kVbRing
 constexpr VkDeviceSize kUboRing =
     256ull * 1024 * 1024;  // per-frame recomp cbuffer ring
+// DELTA_GPU_UBORING_MB changes the total budget (half per frame slot).
+// Heavy scenes can require more unique constant windows than the default.
+// Latched on the first frame, after the title profile has loaded.
+VkDeviceSize UboRingBytes();
 constexpr u32 kCbufWindow = gpu::gcn::kCbufDwords * 4;
 constexpr u32 kCbufBindings =
     gpu::gcn::kMaxCbufBindings;  // set-1 UBO bindings
@@ -98,6 +102,7 @@ struct UploadRings {
   VkBuffer ubo_buf = VK_NULL_HANDLE;
   VkDeviceMemory ubo_mem = VK_NULL_HANDLE;
   u8* ubo_map = nullptr;
+  VkDeviceSize ubo_bytes = 0;  // latched when allocated after title settings load
   VkDeviceSize ubo_offset = 0, ubo_end = kUboRing;
   u32 ubo_align = 256;
   VkDeviceSize ubo_stride = kCbufWindow;
@@ -149,6 +154,7 @@ struct UploadRings {
 extern UploadRings& g_ring;
 
 bool CreateUploadRings(const VkPhysicalDeviceProperties& props);
+bool EnsureCbufRing();
 // Allocate the raw-buffer ring + its descriptor set. Deferred to the first
 // draw that needs one: the ring is large, and a title whose vertex fetches the
 // vertex-input state already covers never binds set 2 at all. The set layout

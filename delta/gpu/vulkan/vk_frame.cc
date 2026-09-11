@@ -871,6 +871,8 @@ using namespace gpu::vk;
 void BeginFrame(Renderer& renderer) {
   if (!renderer.available())
     return;
+  if (!EnsureCbufRing())
+    return;
   // Objects retired two frames ago are past every in-flight command buffer
   // (see ReleaseRetiredTextures) and safe to destroy now.
   ReleaseRetiredTextures();
@@ -945,32 +947,32 @@ void BeginFrame(Renderer& renderer) {
                 (unsigned long long)((kIbRing / 2) >> 10),
                 (unsigned long long)(peak_ib >> 10),
                 (unsigned long long)(used_ubo >> 10),
-                (unsigned long long)((kUboRing / 2) >> 10),
+                (unsigned long long)((UboRingBytes() / 2) >> 10),
                 (unsigned long long)(peak_ubo >> 10),
                 (unsigned long long)(used_sbo >> 10),
                 (unsigned long long)((kSboRing / 2) >> 10),
                 (unsigned long long)(peak_sbo >> 10));
     prev_vb = g_frame.slot_idx * (VbRingBytes() / 2);
     prev_ib = g_frame.slot_idx * (kIbRing / 2);
-    prev_ubo = g_frame.slot_idx * (kUboRing / 2);
+    prev_ubo = g_frame.slot_idx * (UboRingBytes() / 2);
     prev_sbo = g_frame.slot_idx * (kSboRing / 2);
   }
   const VkDeviceSize vb_base = g_frame.slot_idx * (VbRingBytes() / 2);
   const VkDeviceSize ib_base = g_frame.slot_idx * (kIbRing / 2);
-  const VkDeviceSize ubo_base = g_frame.slot_idx * (kUboRing / 2);
+  const VkDeviceSize ubo_base = g_frame.slot_idx * (UboRingBytes() / 2);
   g_ring.vb_offset = vb_base;
   g_ring.vb_end = vb_base + VbRingBytes() / 2;
   g_ring.ib_offset = ib_base;
   g_ring.ib_end = ib_base + kIbRing / 2;
   g_ring.ubo_offset = ubo_base;
-  g_ring.ubo_end = ubo_base + kUboRing / 2;
+  g_ring.ubo_end = ubo_base + UboRingBytes() / 2;
   // Reserve one zero window in each half. Legacy dynamic UBOs address the
   // first one; an indirect cbuffer table addresses its current frame's half.
   if (g_ring.ubo_map) {
     if (!g_ring.zero_window_initialized) {
       g_ring.zero_window_initialized = true;
       std::memset(g_ring.ubo_map, 0, kCbufWindow);
-      std::memset(g_ring.ubo_map + kUboRing / 2, 0, kCbufWindow);
+      std::memset(g_ring.ubo_map + UboRingBytes() / 2, 0, kCbufWindow);
     }
     g_ring.ubo_offset = ubo_base + ((kCbufWindow + g_ring.ubo_align - 1) &
                                    ~(VkDeviceSize)(g_ring.ubo_align - 1));
