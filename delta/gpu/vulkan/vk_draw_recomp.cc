@@ -311,6 +311,36 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
                 (unsigned long)d.tex_base, d.num_texs, d.num_vattrs,
                 d.recomp ? d.recomp->ok : 0);
   }
+  // DB_RENDER_CONTROL clear. The guest issues a RECT_LIST with no vertex
+  // buffers and no pixel shader, and the hardware fills the depth/stencil
+  // plane with DB_DEPTH_CLEAR / DB_STENCIL_CLEAR over it -- the shader's
+  // output is not used. Running it as an ordinary draw wrote the vertex
+  // shader's z instead, which for P.T. is one packet that flattened the whole
+  // scene depth it had just rendered, and every pass that samples that depth
+  // (its SSAO first) then had nothing to read.
+  if ((d.depth_clear_draw || d.stencil_clear_draw) && d.depth_base && draw_count) {
+    // Clear commands can retain the preceding pass's shader and textures.
+    // Resolve attachments before any sampling checks or shader uploads.
+    if (!BeginRegion(d.mrt_base, d.mrt_info, d.mrt_count, d.rt_w, d.rt_h,
+                     d.depth_base, d.depth_clear, d.stencil_base,
+                     d.stencil_clear, false, DepthW(d), DepthH(d),
+                     d.mrt_surf_w, d.mrt_surf_h, d.mrt_dcc_base,
+                     d.mrt_clear_word, d.depth_htile_base))
+      return true;
+    VkClearAttachment ca{};
+    ca.aspectMask =
+        (d.depth_clear_draw ? VK_IMAGE_ASPECT_DEPTH_BIT : 0u) |
+        (d.stencil_clear_draw ? VK_IMAGE_ASPECT_STENCIL_BIT : 0u);
+    ca.clearValue.depthStencil = {d.depth_clear, d.stencil_clear};
+    VkClearRect cr{};
+    cr.rect = {{0, 0}, {d.rt_w, d.rt_h}};
+    cr.baseArrayLayer = 0;
+    cr.layerCount = 1;
+    vkCmdClearAttachments(g_frame.cmd, 1, &ca, 1, &cr);
+    g_depths[d.depth_base].dirty_for_read = true;
+    g_frame.draws++;
+    return true;
+  }
   if (!d.recomp || !d.recomp->ok || !draw_count) {
     // DELTA_GPU_DECLTRACE: norecomp lumps together three unrelated causes --
     // no recompiled program, a program that failed to translate, and a draw
@@ -1390,29 +1420,6 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
                       d.mrt_clear_word, d.depth_htile_base))
       return true;
   }
-  // DB_RENDER_CONTROL clear. The guest issues a RECT_LIST with no vertex
-  // buffers and no pixel shader, and the hardware fills the depth/stencil
-  // plane with DB_DEPTH_CLEAR / DB_STENCIL_CLEAR over it -- the shader's
-  // output is not used. Running it as an ordinary draw wrote the vertex
-  // shader's z instead, which for P.T. is one packet that flattened the whole
-  // scene depth it had just rendered, and every pass that samples that depth
-  // (its SSAO first) then had nothing to read.
-  if ((d.depth_clear_draw || d.stencil_clear_draw) && d.depth_base &&
-      g_depths.count(d.depth_base)) {
-    VkClearAttachment ca{};
-    ca.aspectMask =
-        (d.depth_clear_draw ? VK_IMAGE_ASPECT_DEPTH_BIT : 0u) |
-        (d.stencil_clear_draw ? VK_IMAGE_ASPECT_STENCIL_BIT : 0u);
-    ca.clearValue.depthStencil = {d.depth_clear, d.stencil_clear};
-    VkClearRect cr{};
-    cr.rect = {{0, 0}, {d.rt_w, d.rt_h}};
-    cr.baseArrayLayer = 0;
-    cr.layerCount = 1;
-    vkCmdClearAttachments(g_frame.cmd, 1, &ca, 1, &cr);
-    g_depths[d.depth_base].dirty_for_read = true;
-    g_frame.draws++;
-    return true;
-  }
   if (rp->multi_tex) {
     if (!tex_set) {
       VkFormat multi_formats[kMaxTex] = {};
@@ -1637,7 +1644,7 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
     next += cb_stride;
   }
   if (indirect_cbufs) {
-    const VkDeviceSize slot_base = g_frame.slot_idx * (kUboRing / 2);
+    const VkDeviceSize slot_base = g_frame.slot_idx * (UboRingBytes() / 2);
     u32 offsets[gpu::gcn::kIndirectDrawDwords]{};
     for (u32 i = 0; i < cbuf_count; ++i)
       if (dyn_off[i])

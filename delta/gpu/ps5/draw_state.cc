@@ -331,6 +331,12 @@ void ResolveColorState(const Regs& regs, rhi::DrawInfo& d) {
 // leave DB_Z_INFO's format field invalid, so no depth attachment binds.
 void ResolveDepthState(const Regs& regs, rhi::DrawInfo& d) {
   const u32 control = regs[mmDB_DEPTH_CONTROL];
+  d.depth_control = control;
+  d.render_control = regs[mmDB_RENDER_CONTROL];
+  // A hardware clear writes DB_DEPTH_CLEAR, not the clear quad's position Z.
+  // Treating Skyrim's clear as geometry filled depth with 0.5 and rejected
+  // the logo and world that followed it.
+  d.depth_clear_draw = (d.render_control & 1u) != 0;
   const u32 z_info = kNoDepth ? 0 : regs[mmDB_Z_INFO];
   const u64 z_base =
       ((static_cast<u64>(regs[mmDB_Z_WRITE_BASE_HI]) << 32) |
