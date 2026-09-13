@@ -308,6 +308,9 @@ struct CsResource {
   // Plain image loads/stores can share native linear integer storage across
   // differently formatted views. Other layouts keep the staged image path.
   bool runtime_image = false;
+  u32 image_table_pc = ~0u;  // s_buffer_load_dwordx8 selecting this image
+  bool inline_user_data = false;
+  bool base_mip_only = false;
 };
 
 // A recompiled compute shader: the GLCompute SPIR-V + its resource-binding
@@ -341,6 +344,20 @@ RecompiledCs RecompileCompute(const u32* cs_code,
                               u32 user_sgpr,
                               u32 tgid_enable,
                               u32 lds_dwords);
+
+// Parameters shared by the image-layout utility shader and its Vulkan caller.
+// Tiled offsets, strides and table terms are bytes; linear offsets and strides
+// are dwords. Pitch is in texels, words is the expanded size of one texel.
+struct ImageTilingParams {
+  u32 width, height, words, table, mask;
+  u32 tiled_offset, tiled_stride, linear_offset, pitch, linear_stride;
+  u32 detile, elem_bytes;
+  // Narrow texels stay packed on the linear side: linear_offset and
+  // linear_stride are then in bytes and each texel is a lane of a dword.
+  u32 packed;
+};
+
+std::vector<u32> BuildImageTilingShader();
 
 // Print the instruction listing of the shader at a guest code address, tagged
 // with `tag`. Diagnostic only: a renderer that has caught a target in a bad

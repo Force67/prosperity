@@ -9,6 +9,7 @@
 #include "base/arch.h"
 
 #include <algorithm>
+#include <array>
 #include <cstring>
 #include <unordered_set>
 
@@ -37,8 +38,8 @@ namespace gpu::ps5 {
 namespace {
 
 constexpr u64 kMaxShaderBytes = 4096 * sizeof(u32);
-// Limit guest ranges separately from expanded image staging. BC6H expands
-// from one byte per pixel to sixteen, and padding may cross a power of two.
+// Images need larger ranges than raw buffers: array layers, decompression,
+// and padded staging can each exceed the raw-buffer limit.
 constexpr u64 kMaxResource = 256ull * 1024 * 1024;
 constexpr u64 kMaxImageStaging = 1024ull * 1024 * 1024;
 
@@ -64,6 +65,16 @@ ResourceRange ResolveImageResource(u64 cs_addr,
                                    const gcn::CsResource& res,
                                    const u32* descriptor) {
   ResourceRange out;
+  std::array<u32, 8> view;
+  if (res.base_mip_only) {
+    std::copy_n(descriptor, view.size(), view.begin());
+    const u32 base_mip = (view[3] >> 12) & 15;
+    if (base_mip <= ((view[3] >> 16) & 15))
+      view[3] = (view[3] & ~0xf0000u) | (base_mip << 16);
+    descriptor = view.data();
+  }
+  // Plain loads/stores only access BASE_LEVEL. Keep MAX_MIP for the physical
+  // layout, without requiring unused levels advertised by LAST_LEVEL.
   const gcn::TImage t = rdna::DecodeTImage(descriptor);
   const bool r8 = t.dfmt == 1 && (t.nfmt == 0 || t.nfmt == 4);
   const bool rgba8 = t.dfmt == 10 && (t.nfmt == 0 || t.nfmt == 4 || t.nfmt == 5 ||
@@ -81,33 +92,38 @@ ResourceRange ResolveImageResource(u64 cs_addr,
   const bool rg32 = t.dfmt == 11 && (t.nfmt == 4 || t.nfmt == 5 || t.nfmt == 7);
   const bool block128 =
       t.dfmt == 14 && (t.nfmt == 4 || t.nfmt == 5 || t.nfmt == 7);
-  // BC6H is read-only: decompress its 4x4 blocks into RGBA32_FLOAT staging.
+  // BC1 and BC6H are read-only: decompress their 4x4 blocks into staging.
   // As in graphics uploads, non-power-of-two mip chains and volumes need a
   // different block layout and are not supported here yet.
+  const bool bc1 = t.dfmt == 35 && (t.nfmt == 0 || t.nfmt == 9) &&
+                   !res.written && t.type != 10 &&
+                   (t.mip_levels == 1 || (!(t.width & (t.width - 1)) &&
+                                          !(t.height & (t.height - 1))));
   const bool bc6 = t.dfmt == 40 && (t.nfmt == 0 || t.nfmt == 1) &&
                    !res.written && t.type != 10 &&
                    (t.mip_levels == 1 || (!(t.width & (t.width - 1)) &&
                                           !(t.height & (t.height - 1))));
+  const bool compressed = bc1 || bc6;
   out.elem_bytes = (block128 || bc6)  ? 16u
-                   : (rgba16 || rg32) ? 8u
+                   : (rgba16 || rg32 || bc1) ? 8u
                    : (r16 || rg8)     ? 2u
                    : r8               ? 1u
                                       : 4u;
   out.stage_elem_bytes =
-      (r11g11b10f || bc6) ? 16u : std::max(out.elem_bytes, 4u);
+      (r11g11b10f || bc6) ? 16u : bc1 ? 4u : std::max(out.elem_bytes, 4u);
 
   // type 10 is a volume: DecodeTImage already reports its depth as layers and
   // the shared emitter addresses 3D slice-major, so it stages like the 2D
   // forms.
   const bool supported_type = t.type >= 8 && t.type <= 13;
   const bool supported_format = r8 || rgba8 || r32 || rg16f || rg16i || r16 || rg8 ||
-                                rgba16 || r11g11b10f || rg32 || block128 || bc6;
+                                rgba16 || r11g11b10f || rg32 || block128 || compressed;
   gcn::TextureLayout32 layout;
   if (!supported_type || !supported_format ||
       !gcn::TilingSupported(t.tiling_idx) || !t.valid ||
-      !gcn::BuildTextureLayout32(layout, bc6 ? (t.width + 3) / 4 : t.width,
-                                 bc6 ? (t.height + 3) / 4 : t.height,
-                                 bc6 ? (t.pitch + 3) / 4 : t.pitch, t.layers,
+      !gcn::BuildTextureLayout32(layout, compressed ? (t.width + 3) / 4 : t.width,
+                                 compressed ? (t.height + 3) / 4 : t.height,
+                                 compressed ? (t.pitch + 3) / 4 : t.pitch, t.layers,
                                  t.mip_levels, t.tiling_idx, t.pow2_pad,
                                  out.elem_bytes)) {
     // One descriptor we cannot stage used to skip the whole dispatch, taking
@@ -171,6 +187,30 @@ ResourceRange ResolveBufferResource(const gcn::CsResource& res,
                       : v.num_records;
   out.size = std::max<u64>(out.size, res.min_bytes);
   return out;
+}
+
+const u32* ResolveUniformImageTable(
+    const gcn::CsResource& resource,
+    const std::unordered_map<u32, rdna::BufferResource>& resolved,
+    std::array<u32, 8>& descriptor) {
+  const auto table = resolved.find(resource.image_table_pc);
+  if (table == resolved.end() || !table->second.descriptor_valid)
+    return nullptr;
+  const auto buffer = rdna::DecodeVBuffer(table->second.descriptor);
+  if (buffer.stride != sizeof(descriptor) || !buffer.num_records ||
+      buffer.num_records > 2048)
+    return nullptr;
+  const u64 size = static_cast<u64>(buffer.stride) * buffer.num_records;
+  if (!gpu::IsReadableRange(buffer.base, size))
+    return nullptr;
+  if (gcn::g_flush_guest_range)
+    gcn::g_flush_guest_range(buffer.base, size);
+  const auto* first = reinterpret_cast<const u32*>(buffer.base);
+  for (u32 record = 1; record < buffer.num_records; record++)
+    if (std::memcmp(first, first + record * 8, sizeof(descriptor)))
+      return nullptr;
+  std::memcpy(descriptor.data(), first, sizeof(descriptor));
+  return descriptor.data();
 }
 
 }  // namespace
@@ -316,13 +356,15 @@ void DispatchCompute(rhi::Renderer& renderer,
     // is at least as good: preferring the window would bind whatever the CPU
     // left there for a shader that loaded a descriptor over its own user data.
     const u32* desc = nullptr;
+    std::array<u32, 8> table_descriptor;
     if (const auto it = resolved.find(r.use_pc);
         it != resolved.end() && it->second.descriptor_valid &&
         it->second.descriptor_dwords >= dwords) {
       desc = it->second.descriptor;
-    } else if (r.base_sgpr + dwords <= ud_dwords) {
+    } else if (r.inline_user_data && r.base_sgpr + dwords <= ud_dwords) {
       desc = &ud[r.base_sgpr];
-    } else {
+    } else if (r.image_table_pc == ~0u ||
+               !(desc = ResolveUniformImageTable(r, resolved, table_descriptor))) {
       TraceCsUnresolved(cs_addr, r, ud_dwords);
       return;
     }
@@ -377,7 +419,7 @@ void DispatchCompute(rhi::Renderer& renderer,
     if (!range.zero_fill &&
         (range.size < r.min_bytes ||
          range.size > (range.image_staging ? kMaxImageStaging : max_resource) ||
-         range.guest_size > max_resource ||
+         range.guest_size > (range.image_staging ? kMaxImageStaging : max_resource) ||
          (r.written && !kCsAnyMem && !IsGpuAddress(range.base)) ||
          !gpu::IsReadableRange(range.base, range.guest_size))) {
       TraceCsInvalidRange(cs_addr, r, range.base, range.guest_size);

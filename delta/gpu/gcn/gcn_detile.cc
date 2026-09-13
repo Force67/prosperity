@@ -86,7 +86,7 @@ class RowPool {
       // Aim for several chunks per lane so stealing balances uneven units.
       const u32 lanes = worker_count_ + 1;
       block_ = std::max(1u, units / (lanes * 4u));
-      active_ = worker_count_;
+      active_ = 0;
       ++generation_;
       start_cv_.notify_all();
     }
@@ -163,7 +163,12 @@ class RowPool {
         if (stop_)
           return;
         local_gen = generation_;
-        participate = index < worker_count_;
+        // A late worker need not acknowledge a region whose rows are already
+        // claimed. Only workers holding the callback can delay its release.
+        participate = index < worker_count_ &&
+                      cursor_.load(std::memory_order_relaxed) < total_units_;
+        if (participate)
+          ++active_;
       }
       if (!participate)
         continue;
@@ -1549,9 +1554,98 @@ bool CopyTextureMip(u8* tiled_image,
 
 }  // namespace
 
+bool BuildGfx10AddressTable(const TextureLayout32& layout,
+                            u32 mip,
+                            std::vector<u32>& terms,
+                            u32& block_mask) {
+  if (!TilingIsGfx10(layout.tiling_idx) || TilingIsLinear(layout.tiling_idx) ||
+      mip >= layout.mip_levels || layout.size > UINT32_MAX)
+    return false;
+  Gfx10Addresser addr;
+  if (!addr.Init(layout.tiling_idx - kGfx10TilingBase, layout.elem_bytes))
+    return false;
+  const auto& level = layout.mips[mip];
+  const u32 block_bytes = addr.block_bytes();
+  block_mask = block_bytes - 1;
+  terms.resize(level.width + level.height + layout.layers);
+  for (u32 x = 0; x < level.width; x++)
+    terms[x] = (x / addr.block_w()) * block_bytes +
+               addr.Offset(0, x + level.mip_tail_x);
+  for (u32 y = 0; y < level.height; y++)
+    terms[level.width + y] =
+        (y / addr.block_h()) * (level.pitch / addr.block_w()) * block_bytes +
+        addr.Offset(1, y + level.mip_tail_y);
+  for (u32 layer = 0; layer < layout.layers; layer++)
+    terms[level.width + level.height + layer] = addr.Offset(2, layer);
+  return true;
+}
+
+void CopyGfx10ImageContents(const TextureLayout32& layout,
+                            const void* src,
+                            void* dst) {
+  Gfx10Addresser addr;
+  if (!addr.Init(layout.tiling_idx - kGfx10TilingBase, layout.elem_bytes))
+    return;
+  std::vector<u32> terms;
+  for (u32 mip = 0; mip < layout.mip_levels; mip++) {
+    const auto& level = layout.mips[mip];
+    u32 mask;
+    if (!BuildGfx10AddressTable(layout, mip, terms, mask))
+      return;
+    const u32 full_width = level.mip_tail_x || level.mip_tail_y
+                               ? 0
+                               : level.width / addr.block_w() * addr.block_w();
+    const u32 full_height = level.height / addr.block_h() * addr.block_h();
+    for (u32 layer = 0; layer < layout.layers; layer++) {
+      const u64 base = level.offset + layout.layer_stride * layer;
+      const auto* source = static_cast<const u8*>(src) + base;
+      auto* dest = static_cast<u8*>(dst) + base;
+      const u32 slice = terms[level.width + level.height + layer];
+      // The bulk is whole block rows, megabytes of contiguous copying for a 4K
+      // surface, and it reads memory the GPU has just DMA'd in, so every line
+      // comes from RAM. One thread moves ~4 GB/s of that; the pool is what
+      // makes it the memory system's problem rather than one core's.
+      const u32 block_rows = full_height / addr.block_h();
+      const u64 row_bytes =
+          u64(full_width / addr.block_w()) * addr.block_bytes();
+      DetileParallelWork(
+          block_rows, u64(block_rows) * row_bytes, [&](u32 b0, u32 b1) {
+            for (u32 b = b0; b < b1; b++) {
+              const u64 offset =
+                  u64(b) * (level.pitch / addr.block_w()) * addr.block_bytes();
+              std::memcpy(dest + offset, source + offset, row_bytes);
+            }
+          });
+      const u32 edge_rows = level.height;
+      DetileParallelWork(
+          edge_rows,
+          u64(level.height - full_height) * level.width +
+              u64(full_height) * (level.width - full_width),
+          [&](u32 y0, u32 y1) {
+            for (u32 y = y0; y < y1; y++) {
+              const u32 yt = terms[level.width + y];
+              for (u32 x = y < full_height ? full_width : 0; x < level.width;
+                   x++) {
+                const u32 xt = terms[x];
+                const u32 offset =
+                    (xt & ~mask) + (yt & ~mask) + ((xt ^ yt ^ slice) & mask);
+                std::memcpy(dest + offset, source + offset, layout.elem_bytes);
+              }
+            }
+          });
+    }
+  }
+}
+
 void DetileParallelRows(u32 rows,
                         const std::function<void(u32, u32)>& fn) {
   RowPool::get().run(rows, static_cast<u64>(rows) * 1024, fn);
+}
+
+void DetileParallelWork(u32 units,
+                        u64 work_items,
+                        const std::function<void(u32, u32)>& fn) {
+  RowPool::get().run(units, work_items, fn);
 }
 
 bool TilingIsLinear(u32 tiling_idx) {

@@ -10,6 +10,7 @@
 #include "gpu/gcn/gcn_translate.h"
 #include "gpu/rhi/renderer.h"
 #include "gpu/vulkan/vk_debug.h"
+#include "gpu/vulkan/vk_compute.h"
 #include "gpu/vulkan/vk_device.h"
 #include "gpu/vulkan/vk_format.h"
 #include "gpu/vulkan/vk_frame.h"
@@ -501,7 +502,7 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
     return vtx_decline(nv > 200000u ? "nv-cap" : "no-vertex-data", nv);
   if (d.vertex_data && d.vertex_stride &&
       !FlushCsWritesRange(renderer, reinterpret_cast<u64>(d.vertex_data),
-                          static_cast<u64>(nv) * d.vertex_stride))
+                          static_cast<u64>(nv) * d.vertex_stride, "vtx"))
     return vtx_decline("cs-flush", nv);
 
   // GNM's fast clear (see DrawInfo::is_clear_rect): a RECT_LIST draw with no
@@ -1066,9 +1067,9 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
       // before this draw samples it (the flush uploads it -- see
       // UploadCsRangeToRt); guest-upload textures already get this from the
       // texture cache.
-      if (base && g_rts.count(base))
+      if (base && g_rts.count(base) && !CsRefreshRtFromTruth(base))
         FlushCsWritesRange(renderer, base,
-                           u64(g_rts[base].w) * g_rts[base].h * 8);
+                           u64(g_rts[base].w) * g_rts[base].h * 8, "rt-tex");
       if (base && rt_eligible && is_bound_target(base) && g_rts.count(base) &&
           g_rts[base].ever_rendered) {
         multi_feedback[i] = base;
@@ -1585,7 +1586,7 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
     }
     u8* cb_dst = g_ring.ubo_map + next;
     u32 n;
-    if (have_cbuf && !FlushCsWritesRange(renderer, cb.base, kCbufWindow))
+    if (have_cbuf && !FlushCsWritesRange(renderer, cb.base, kCbufWindow, "cb"))
       return Decline(kNoRecomp);
     if (have_cbuf) {
       // Upload as much of the window as the base's page holds, not just the
@@ -1719,7 +1720,7 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
       // is short and even in the second frame slot.
       if (off + reserve > g_ring.sbo_end || off + kRawBufWindow > kSboRing)
         return Decline(kRing);
-      if (!FlushCsWritesRange(renderer, rb.base, want))
+      if (!FlushCsWritesRange(renderer, rb.base, want, "raw"))
         return Decline(kNoRecomp);
       u8* dst = g_ring.sbo_map + off;
       std::memcpy(dst, reinterpret_cast<const void*>(rb.base), want);
@@ -1769,7 +1770,7 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
       continue;
     if (!FlushCsWritesRange(renderer,
                             reinterpret_cast<u64>(d.vbufs[j].data),
-                            bind_size[j]))
+                            bind_size[j], "vb"))
       return Decline(kNoRecomp);
     std::memcpy(g_ring.vb_map + voff + bind_off[j], d.vbufs[j].data,
                 (size_t)bind_size[j]);

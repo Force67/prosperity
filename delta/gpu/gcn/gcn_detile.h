@@ -21,6 +21,7 @@
 #include "base/arch.h"
 #include <cstddef>
 #include <functional>
+#include <vector>
 
 namespace gpu::gcn {
 
@@ -35,6 +36,14 @@ namespace gpu::gcn {
 // format-convert loops. Only one row-parallel region runs at a time (calls are
 // serialized), matching the single-threaded GPU pipeline.
 void DetileParallelRows(u32 rows,
+                        const std::function<void(u32, u32)>& fn);
+
+// As above, but the caller states how much work the units carry (bytes or
+// texels) instead of the row heuristic. A few dozen block rows of a 4K surface
+// are megabytes of copying and worth splitting; the same count of scanlines is
+// not, and only the caller can tell the two apart.
+void DetileParallelWork(u32 units,
+                        u64 work_items,
                         const std::function<void(u32, u32)>& fn);
 
 // A PS5 gfx10.3 swizzle mode enters the tiling_idx parameter as
@@ -78,6 +87,19 @@ struct TextureLayout32 {
   // interleaved inside each level).
   u64 layer_stride = 0;
 };
+
+// Separable gfx10 byte-address terms, ordered x, y, then array layer.
+// Block offsets add; the low bits selected by block_mask XOR together.
+bool BuildGfx10AddressTable(const TextureLayout32& layout,
+                            u32 mip,
+                            std::vector<u32>& terms,
+                            u32& block_mask);
+
+// Copy only logical texels between matching gfx10 layouts, leaving padding
+// untouched. Whole interior blocks use contiguous copies.
+void CopyGfx10ImageContents(const TextureLayout32& layout,
+                           const void* src,
+                           void* dst);
 
 // Compute the complete physical layout of a one-sample 2D/2D-array image whose
 // elements are `elem_bytes` wide (2/4 = a pixel; 8/16 = a BCn block, with

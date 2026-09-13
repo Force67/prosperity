@@ -9,6 +9,7 @@
 // and its pixels presented, one frame late -- at frame N's EndFrame.
 
 #include <vulkan/vulkan.h>
+#include <vector>
 #include "base/arch.h"
 
 
@@ -22,6 +23,9 @@ struct FrameSlot {
   VkDeviceMemory readback_mem = VK_NULL_HANDLE;
   void* readback_map = nullptr;
   VkDeviceSize readback_size = 0;
+  // Command buffers of this frame submitted early (SubmitFrameChunk), freed
+  // once the slot's fence is waited.
+  std::vector<VkCommandBuffer> chunks;
   bool submitted = false;    // fence submitted and not yet waited
   bool presentable = false;  // the frame copied pixels into `readback`
   bool present_to_window = false;
@@ -51,6 +55,11 @@ struct FrameState {
   bool had_room = false;   // this frame sampled a room-sized (~832w) RT
   bool room_bake = false;  // this frame RENDERED into a room-sized RT
 
+  // Which chunk of the frame `cmd` is recording: bumped by SubmitFrameChunk.
+  // Work recorded against chunk N is on the queue once the sequence passes N.
+  u64 chunk_seq = 1;
+  u32 draws_at_chunk = 0;  // `draws` when the chunk was opened
+
   FrameSlot slots[2];
   u32 slot_idx = 0;
 };
@@ -62,5 +71,13 @@ bool CreateFrameSlots();
 bool FramePipelined();
 // Grow the active slot's readback buffer to hold one w*h image of `fmt`.
 void EnsureReadback(u32 w, u32 h, VkFormat fmt);
+
+// Submit what the frame has recorded so far, without waiting, and go on
+// recording into a fresh command buffer. Work submitted next (a compute batch,
+// a bridge copy) then executes after those draws instead of a frame early.
+bool SubmitFrameChunk();
+// Stamp every target's submitted layout with its recorded one: what the GPU
+// holds once the work submitted so far executes.
+void StampSubmittedLayouts();
 
 }  // namespace gpu::vk

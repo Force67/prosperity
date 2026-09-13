@@ -57,6 +57,10 @@ struct DeviceState {
   size_t host_import_align = 0;
   size_t storage_buffer_offset_align = 16;
   bool device_fault_available = false;
+  // VK_KHR_push_descriptor: descriptors written into the command buffer, so
+  // a pass recorded into any command buffer needs no pool that outlives it.
+  bool push_descriptor = false;
+  PFN_vkCmdPushDescriptorSetKHR push_descriptor_set = nullptr;
   // VK_KHR_fragment_shader_barycentric: lets a PS read the three per-vertex
   // values of an attribute, which v_interp_mov_f32's P10/P20 parameters need.
   bool barycentric_available = false;

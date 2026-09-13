@@ -63,7 +63,15 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci);
 bool FlushCsWrites(Renderer& renderer);
 // Flush only dirty ranges overlapping [base, base+bytes), with the same result
 // contract as FlushCsWrites.
-bool FlushCsWritesRange(Renderer& renderer, u64 base, u64 bytes);
+// `why` names the reader for the DELTA_GPU_CSSYNC report.
+bool FlushCsWritesRange(Renderer& renderer,
+                        u64 base,
+                        u64 bytes,
+                        const char* why = "cp");
+// The frame-end flush: FlushCsWrites, except that an image range only the GPU
+// reads stays in VRAM, and the open dispatch batch is submitted so the frame's
+// own command buffer lands behind it. `writeback` false submits only.
+bool FlushCsWritesFrameEnd(Renderer& renderer, bool writeback);
 
 // CP transfers address the same 64 KiB GDS allocation as shader DS operations.
 // Offsets and lengths are bytes; transfers wait for preceding compute work.

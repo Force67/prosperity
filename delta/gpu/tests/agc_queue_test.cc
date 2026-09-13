@@ -244,7 +244,7 @@ bool FillGds(Renderer&, u32 offset, u32 bytes, u32 value) {
     gds[offset + i] = static_cast<u8>(value >> ((i & 3u) * 8));
   return true;
 }
-bool FlushCsWritesRange(Renderer&, u64 base, u64 bytes) {
+bool FlushCsWritesRange(Renderer&, u64 base, u64 bytes, const char*) {
   if (!flush_succeeds)
     return false;
   if (pending_address == base && bytes == sizeof(pending_groups)) {

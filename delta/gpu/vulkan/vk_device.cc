@@ -507,7 +507,7 @@ bool CreateDevice() {
   // VK_KHR_fragment_shader_barycentric supplies the per-vertex attribute values
   // a pixel shader needs for v_interp_mov_f32's P10/P20 parameters (the deltas
   // P1-P0 and P2-P0), which an interpolated input cannot express.
-  const char* dev_exts[5] = {};
+  const char* dev_exts[6] = {};
   u32 dev_ext_count = 0;
   {
     u32 en = 0;
@@ -523,6 +523,8 @@ bool CreateDevice() {
         g_checkpoints_available = true;
       if (!std::strcmp(ep.extensionName, VK_EXT_DEVICE_FAULT_EXTENSION_NAME))
         g_dev.device_fault_available = true;
+      if (!std::strcmp(ep.extensionName, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME))
+        g_dev.push_descriptor = true;
       if (!std::strcmp(ep.extensionName,
                        VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME))
         g_dev.host_import_available = true;
@@ -533,6 +535,8 @@ bool CreateDevice() {
   }
   if (g_checkpoints_available)
     dev_exts[dev_ext_count++] = VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME;
+  if (g_dev.push_descriptor)
+    dev_exts[dev_ext_count++] = VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME;
   if (g_dev.host_import_available) {
     VkPhysicalDeviceExternalMemoryHostPropertiesEXT hp{
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT};
@@ -635,6 +639,11 @@ bool CreateDevice() {
   if (g_dev.mesh_shader)
     g_dev.draw_mesh_tasks = reinterpret_cast<PFN_vkCmdDrawMeshTasksEXT>(
         vkGetDeviceProcAddr(g_dev.device, "vkCmdDrawMeshTasksEXT"));
+  if (g_dev.push_descriptor) {
+    g_dev.push_descriptor_set = reinterpret_cast<PFN_vkCmdPushDescriptorSetKHR>(
+        vkGetDeviceProcAddr(g_dev.device, "vkCmdPushDescriptorSetKHR"));
+    g_dev.push_descriptor = g_dev.push_descriptor_set != nullptr;
+  }
   vkGetDeviceQueue(g_dev.device, g_dev.qfam, 0, &g_dev.queue);
   // Seed the driver's pipeline cache from disk. Without this every run
   // recompiles every pipeline from scratch, which on SotC is several hundred.

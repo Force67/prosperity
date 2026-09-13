@@ -1019,8 +1019,8 @@ void TraceCsUnsupported(u64 cs_addr,
 void TraceCsUnresolved(u64 cs_addr, const gcn::CsResource& res, u32 ud_dwords) {
   if (CsReport())
     BASE_LOGI("csgpu",
-              "CS @{:#x} bind={} kind={} s{} pc={:#x} is outside the {}-dword "
-              "user data and did not replay -- dispatch skipped",
+              "CS @{:#x} bind={} kind={} s{} pc={:#x} has no resolved descriptor "
+              "({} user-data dwords) -- dispatch skipped",
               cs_addr, res.binding, res.kind, res.base_sgpr, res.use_pc,
               ud_dwords);
 }

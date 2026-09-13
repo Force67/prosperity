@@ -1752,6 +1752,10 @@ DppLane RdnaDppLane(Translator& t, Id subid, u32 ctrl) {
     r.lane = t.Or(base, t.Sub(t.U32(lane_mask), in));
     return r;
   }
+  if (ctrl >= 0x160 && ctrl <= 0x16F) {  // row_xmask
+    r.lane = t.Xor(subid, t.U32(amount));
+    return r;
+  }
   r.known = false;
   return r;
 }
@@ -1794,14 +1798,12 @@ bool RdnaUsesDpp(const Program& program) {
   return false;
 }
 
-// v_mbcnt_lo/hi (VOP3 0x365/0x366) is how a program derives its own lane, and
-// every LDS address in a merged ES/GS shader is built from it.
-bool RdnaUsesMbcnt(const Program& program) {
+bool RdnaUsesLaneOps(const Program& program) {
   for (const Inst& inst : program) {
     if (inst.enc != Enc::kVop3)
       continue;
     const u32 op = (inst.raw[0] >> 16) & 0x3FF;
-    if (op == 0x365 || op == 0x366)
+    if (op == 0x365 || op == 0x366 || op == 0x377 || op == 0x378)
       return true;
   }
   return false;
@@ -2148,7 +2150,7 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
     }
     case Enc::kVop3p: {
       const u32 op = inst.opcode, vdst = w & 0xFF;
-      if (op == 0x20) {  // v_fma_mix_f32
+      if (op >= 0x20 && op <= 0x22) {  // v_fma_mix_{f32,lo_f16,hi_f16}
         // MIX uses OP_SEL_HI to select f16 versus f32 independently for
         // each source. OP_SEL selects the half only for an f16 input.
         // NEG_HI is repurposed as ABS; NEG_LO still negates after ABS.
@@ -2174,7 +2176,16 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
                                 {source[0], source[1], source[2]});
         if (w & (1u << 15))
           result = t.FClamp01(result);
-        t.SetVgF(vdst, result);
+        if (op == 0x20) {
+          t.SetVgF(vdst, result);
+        } else {
+          const Id packed = t.m.ExtInst(
+              t.t_u, GLSLstd450PackHalf2x16,
+              {t.m.CompositeConstruct(t.t_v2, {result, t.F32(0.f)})});
+          const u32 shift = op == 0x22 ? 16 : 0;
+          t.SetVg(vdst, t.Or(t.And(t.Vg(vdst), t.U32(~(0xffffu << shift))),
+                              t.Shl(t.And(packed, t.U32(0xffff)), t.U32(shift))));
+        }
         break;
       }
       // Componentwise packed operations select each source's low half for the
@@ -2213,6 +2224,37 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       const u32 omod = (w1 >> 27) & 3;
       if (op == 0x102 || op == 0x10D) {
         gpu::gcn::WarnUnsupported("vop3.dot.rdna", op, w, w1);
+        break;
+      }
+      if (op == 0x377 || op == 0x378) {  // v_permlane16 / v_permlanex16_b32
+        if (s0 < 256 || s1 >= 256 || s2 >= 256 || abs || neg || omod ||
+            clamp || (op_sel & ~3u) || !sc.subgroup_local_id) {
+          gpu::gcn::WarnUnsupported("vop3.permlane", op, w, w1);
+          break;
+        }
+        const Id lane = t.m.Load(t.t_u, sc.subgroup_local_id);
+        const Id selectors = t.SelectB(t.IsZero(t.And(lane, t.U32(8))),
+                                        t.SrcRaw(s1, inst.literal),
+                                        t.SrcRaw(s2, inst.literal));
+        const Id selected = t.And(
+            t.Shr(selectors, t.Shl(t.And(lane, t.U32(7)), t.U32(2))), t.U32(15));
+        Id row = t.And(lane, t.U32(~15u));
+        if (op == 0x378)
+          row = t.Xor(row, t.U32(16));
+        const Id source_lane = t.Or(row, selected);
+        const Id scope = t.U32(static_cast<u32>(spv::Scope::Subgroup));
+        const auto shuffle = [&](Id value) {
+          return t.m.Emit(spv::Op::OpGroupNonUniformShuffle, t.t_u,
+                           {scope, value, source_lane});
+        };
+        Id result = shuffle(t.Vg(s0 - 256));
+        if (!(op_sel & 1)) {
+          const Id active = shuffle(t.SelectB(t.LaneActive(t.Exec()),
+                                               t.U32(1), t.U32(0)));
+          result = t.SelectB(t.IsNonZero(active), result,
+                              (op_sel & 2) ? t.U32(0) : t.Vg(vdst));
+        }
+        t.SetVg(vdst, result);
         break;
       }
       if (op_sel)
@@ -2371,6 +2413,8 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
         emit_op = 0x130;  // v_cvt_pk_u16_u32
       else if (op == 0x36b)
         emit_op = 0x131;  // v_cvt_pk_i16_i32
+      else if (op == 0x363)
+        emit_op = 0x11e;  // v_bfm_b32
       else if (op == 0x364)
         emit_op = 0x122;  // v_bcnt_u32_b32
       else if (op == 0x365)
@@ -2817,7 +2861,7 @@ void PlanCrossLane(const Program& program, Translator& t, StageContext& sc,
   });
   if (!sc.subgroup_local_id &&
       (addtid || RdnaUsesDpp(program) || gpu::gcn::UsesDsSwizzle(program, nullptr) ||
-       RdnaUsesMbcnt(program)))
+       RdnaUsesLaneOps(program)))
     gpu::gcn::EnableDsSwizzle(t, sc, iface);
   // A graphics stage had no lane at all: WaveLane() answered 0, so v_mbcnt
   // handed every invocation lane zero and an NGG shader's per-lane LDS

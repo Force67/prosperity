@@ -239,7 +239,7 @@ void HandleDmaData(rhi::Renderer& renderer, const u32* body, u32 count) {
       if (src_sel == 2)
         copied = rhi::FillGds(renderer, static_cast<u32>(dst), bytes, body[1]);
       else if (src_is_memory && gpu::IsReadableRange(src, bytes) &&
-               rhi::FlushCsWritesRange(renderer, src, bytes))
+               rhi::FlushCsWritesRange(renderer, src, bytes, "dma"))
         copied = rhi::WriteGds(renderer, static_cast<u32>(dst),
                                 reinterpret_cast<const void*>(src), bytes);
       else if (src_sel == 1 && src < 65536 && bytes <= 65536 - src) {
@@ -249,7 +249,7 @@ void HandleDmaData(rhi::Renderer& renderer, const u32* body, u32 count) {
       }
     } else if (src_sel == 1 && src < 65536 && bytes <= 65536 - src &&
                dst_is_memory && gpu::IsReadableRange(dst, bytes) &&
-               rhi::FlushCsWritesRange(renderer, dst, bytes)) {
+               rhi::FlushCsWritesRange(renderer, dst, bytes, "dma")) {
       copied = rhi::ReadGds(renderer, static_cast<u32>(src),
                              reinterpret_cast<void*>(dst), bytes);
     }
@@ -399,7 +399,8 @@ bool WaitSatisfied(u32 op, const u32* body, u32 count) {
   if (function == 0 || !IsLabelAddress(address) ||
       !gpu::IsReadableRange(address, wide ? 8 : 4))
     return true;
-  if (!rhi::FlushCsWritesRange(rhi::DefaultRenderer(), address, wide ? 8 : 4))
+  if (!rhi::FlushCsWritesRange(rhi::DefaultRenderer(), address, wide ? 8 : 4,
+                               "label"))
     return false;
   u64 value;
   if (wide)
@@ -594,7 +595,7 @@ void HandleDispatchIndirect(rhi::Renderer& renderer,
     return;
   // An earlier compute dispatch can produce the indirect dimensions.
   // Read its completed result, not the stale guest-side staging copy.
-  if (!rhi::FlushCsWritesRange(renderer, args, 12))
+  if (!rhi::FlushCsWritesRange(renderer, args, 12, "indirect"))
     return;
   const u32* a = reinterpret_cast<const u32*>(args);
   const u32 groups[4] = {a[0], a[1], a[2], count >= 2 ? body[count - 1] : 5};
@@ -628,7 +629,7 @@ void HandleDrawIndirect(rhi::Renderer& renderer,
   if (!g_queue->draw_indirect_base || !IsGuestAddress(args) ||
       !gpu::IsReadableRange(args, want))
     return;
-  if (!rhi::FlushCsWritesRange(renderer, args, want))
+  if (!rhi::FlushCsWritesRange(renderer, args, want, "indirect"))
     return;
   const u32* a = reinterpret_cast<const u32*>(args);
   if (a[1] > (1u << 20))
@@ -1041,7 +1042,7 @@ void StartRendererOnce(rhi::Renderer& renderer) {
   // dispatch may still own, and it sits below the renderer, so it cannot ask
   // for the flush itself.
   gcn::g_flush_guest_range = [](u64 address, u64 bytes) {
-    rhi::FlushCsWritesRange(rhi::DefaultRenderer(), address, bytes);
+    rhi::FlushCsWritesRange(rhi::DefaultRenderer(), address, bytes, "srt");
   };
 }
 

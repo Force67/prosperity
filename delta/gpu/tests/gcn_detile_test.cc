@@ -1,6 +1,7 @@
 #include <algorithm>
 #include "base/arch.h"
 #include <atomic>
+#include <thread>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -321,6 +322,28 @@ TEST(GcnDetile, NestedParallelRegionsRunInline) {
     });
   });
   EXPECT_EQ(work.load(std::memory_order_relaxed), 32u * 32u);
+}
+
+TEST(GcnDetile, ConcurrentRepeatedRegionsFinishEveryRowBeforeReturning) {
+  std::atomic<u32> failures{0};
+  std::vector<std::thread> callers;
+  for (u32 caller = 0; caller < 4; caller++) {
+    callers.emplace_back([&] {
+      for (u32 iteration = 0; iteration < 500; iteration++) {
+        std::vector<std::atomic<u32>> rows(128);
+        gpu::gcn::DetileParallelRows(rows.size(), [&](u32 first, u32 last) {
+          for (u32 row = first; row < last; row++)
+            rows[row].fetch_add(1, std::memory_order_relaxed);
+        });
+        for (const auto& row : rows)
+          if (row.load(std::memory_order_relaxed) != 1)
+            failures.fetch_add(1, std::memory_order_relaxed);
+      }
+    });
+  }
+  for (auto& caller : callers)
+    caller.join();
+  EXPECT_EQ(failures.load(), 0u);
 }
 
 }  // namespace

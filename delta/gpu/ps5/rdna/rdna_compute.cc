@@ -140,6 +140,8 @@ bool CsMimgSupported(u32 op) {
     case 0x37:  // image_sample_lz_o
     case 0x44:  // image_gather4_l
     case 0x47:  // image_gather4_lz
+    case 0x57:  // image_gather4_lz_o
+    case 0x5f:  // image_gather4_c_lz_o
       return true;
     default:
       return false;
@@ -242,6 +244,7 @@ bool PlanResources(const Program& program,
     bind[pc] = idx;
     r.resources.push_back({base_sgpr, pc, idx, kind, written, /*read=*/true,
                            min_bytes, runtime_address});
+    r.resources.back().inline_user_data = inline_user_data;
     return true;
   };
 
@@ -344,6 +347,37 @@ bool PlanResources(const Program& program,
         if (!resource(inst.pc, srsrc, 8, 1, store, 0))
           return false;
         (op == 0 || op == 8 ? image_candidates : staged_images).insert(bind[inst.pc]);
+        auto& image = r.resources[bind[inst.pc]];
+        if (!store && version[srsrc]) {
+          const u32 writer = version[srsrc] - 1;
+          const auto& load = program[writer];
+          bool same_writer = true;
+          for (u32 k = 1; k < 8; k++)
+            same_writer &= version[srsrc + k] == version[srsrc];
+          const Smem smem = DecodeSmem(load);
+          if (same_writer && load.enc == Enc::kSmrd && load.opcode == 0x0b &&
+              smem.sdst == srsrc && !(smem.offset & 31) && smem.soffset < 125 &&
+              replay.block_of[writer] == replay.block_of[index] &&
+              replay.Covers(smem.sbase, 4, writer)) {
+            // A complete T# selected with index*32 from one V# table. Keeping
+            // the shift and load in one block proves alignment on every path.
+            for (u32 previous = writer; previous-- > 0;) {
+              const auto& shift = program[previous];
+              bool writes_offset = false;
+              for (const auto& range : PossibleScalarWrites(shift).range)
+                writes_offset |= smem.soffset >= range.first &&
+                                 smem.soffset < range.first + range.count;
+              if (!writes_offset)
+                continue;
+              const u32 amount = (shift.raw[0] >> 8) & 255;
+              if (shift.enc == Enc::kSop2 && shift.opcode == 0x1e &&
+                  amount >= 128 && amount <= 192 && ((amount - 128) & 31) >= 5 &&
+                  replay.block_of[previous] == replay.block_of[writer])
+                image.image_table_pc = load.pc;
+              break;
+            }
+          }
+        }
         break;
       }
       case Enc::kFlat: {
@@ -382,9 +416,11 @@ bool PlanResources(const Program& program,
   // it. Ordinary image shaders retain their portable staged implementation.
   const bool has_runtime = std::any_of(r.resources.begin(), r.resources.end(),
       [](const CsResource& res) { return res.runtime_address; });
-  if (has_runtime)
-    for (u32 binding : image_candidates)
-      r.resources[binding].runtime_image = !staged_images.count(binding);
+  for (u32 binding : image_candidates) {
+    auto& image = r.resources[binding];
+    image.base_mip_only = !staged_images.count(binding);
+    image.runtime_image = has_runtime && image.base_mip_only;
+  }
   if (std::any_of(r.resources.begin(), r.resources.end(),
                   [](const CsResource& res) { return res.runtime_address || res.runtime_image; })) {
     // Traversal follows pointers through scalar tables before reaching a BVH.
@@ -493,9 +529,9 @@ Id StepTexels(Translator& t, Id coord, Id texels, Id extent) {
 void EmitLoweredMimg(Translator& t, const Inst& inst, StageContext& sc) {
   const u32 w = inst.raw[0], w1 = inst.raw[1], op = inst.opcode;
   const bool explicit_lod = op == 0x2c || op == 0x34 || op == 0x44;
-  const bool compare = op == 0x2c || op == 0x2f;
-  const bool offset = op == 0x34 || op == 0x37;
-  const bool gather = op == 0x44 || op == 0x47;
+  const bool compare = op == 0x2c || op == 0x2f || op == 0x5f;
+  const bool offset = op == 0x34 || op == 0x37 || op == 0x57 || op == 0x5f;
+  const bool gather = op == 0x44 || op == 0x47 || op == 0x57 || op == 0x5f;
   const bool da = (w & 0x4000) != 0;
   const u32 dmask = (w >> 8) & 0xF;
   const u32 vdata = (w1 >> 8) & 0xFF;
@@ -503,10 +539,11 @@ void EmitLoweredMimg(Translator& t, const Inst& inst, StageContext& sc) {
   const u32 ssamp = ((w1 >> 21) & 0x1F) * 4;
 
   std::array<Id, 8> address = MimgAddress(t, inst);
-  const Id lead = address[0];
-  if (compare || offset)  // the modifier rides in the first address dword
-    for (u32 i = 0; i + 1 < address.size(); i++)
-      address[i] = address[i + 1];
+  const Id packed_offset = address[0];
+  const Id reference = t.m.Bitcast(t.t_f, address[offset ? 1 : 0]);
+  const u32 prefix = u32(compare) + u32(offset);
+  for (u32 i = 0; i + prefix < address.size(); i++)
+    address[i] = address[i + prefix];
   // The 1D forms park the LOD one component earlier; they do not reach a
   // compute sampler in practice, so the extents follow the 2D placement.
   const Id lod =
@@ -526,7 +563,7 @@ void EmitLoweredMimg(Translator& t, const Inst& inst, StageContext& sc) {
     // Six signed bits per axis: [5:0] x, [13:8] y. A z offset would need the
     // volume's depth, which only a 3D sample carries.
     const auto texels = [&](u32 shift) {
-      const Id raw = t.And(t.Shr(lead, t.U32(shift)), t.U32(0x3F));
+      const Id raw = t.And(t.Shr(packed_offset, t.U32(shift)), t.U32(0x3F));
       const Id value = ToFloat(t, raw);
       return t.SelectF(t.Uge(raw, t.U32(0x20)), t.FSub(value, t.F32(64.f)),
                        value);
@@ -535,7 +572,11 @@ void EmitLoweredMimg(Translator& t, const Inst& inst, StageContext& sc) {
     address[1] = StepTexels(t, address[1], texels(8), extent.height);
   }
 
-  if (gather) {
+  if (gather && !explicit_lod) {
+    plain.opcode = 0x47;
+    plain.raw[0] = (plain.raw[0] & ~(0x7fu << 18)) | (plain.opcode << 18);
+    gpu::gcn::EmitCsMimg(t, plain, sc, address.data());
+  } else if (gather) {
     const LevelExtent extent = MimgLevelExtent(t, srsrc, lod);
     // One component only, so each tap lands in its own destination register.
     const u32 component = dmask & (~dmask + 1u);
@@ -554,13 +595,12 @@ void EmitLoweredMimg(Translator& t, const Inst& inst, StageContext& sc) {
     return;
   }
 
-  gpu::gcn::EmitCsMimg(t, plain, sc, address.data());
+  if (!gather)
+    gpu::gcn::EmitCsMimg(t, plain, sc, address.data());
   if (!compare)
     return;
   // S# word 0 [15:13] names the comparison; the fetch left the depth in the
   // first destination register.
-  const Id depth = t.m.Bitcast(t.t_f, t.Vg(vdata));
-  const Id reference = t.m.Bitcast(t.t_f, lead);
   const Id func = t.And(t.Shr(t.Sg(ssamp), t.U32(13)), t.U32(0x7));
   static const spv::Op kCompare[8] = {
       spv::Op::OpFOrdEqual,        // 0 never, selected away below
@@ -569,15 +609,18 @@ void EmitLoweredMimg(Translator& t, const Inst& inst, StageContext& sc) {
       spv::Op::OpFOrdNotEqual,     spv::Op::OpFOrdGreaterThanEqual,
       spv::Op::OpFOrdEqual,        // 7 always, selected away below
   };
-  Id pass = t.m.ConstBool(false);
-  for (u32 f = 1; f < 8; f++) {
-    const Id value = f == 7 ? t.m.ConstBool(true)
-                            : t.m.Emit(kCompare[f], t.t_bool,
-                                       {reference, depth});
-    pass = t.m.Emit(spv::Op::OpSelect, t.t_bool,
-                    {t.Eq(func, t.U32(f)), value, pass});
+  for (u32 tap = 0; tap < (gather ? 4u : 1u); tap++) {
+    const Id depth = t.m.Bitcast(t.t_f, t.Vg(vdata + tap));
+    Id pass = t.m.ConstBool(false);
+    for (u32 f = 1; f < 8; f++) {
+      const Id value = f == 7 ? t.m.ConstBool(true)
+                              : t.m.Emit(kCompare[f], t.t_bool,
+                                         {reference, depth});
+      pass = t.m.Emit(spv::Op::OpSelect, t.t_bool,
+                      {t.Eq(func, t.U32(f)), value, pass});
+    }
+    t.SetVgF(vdata + tap, t.SelectF(pass, t.F32(1.f), t.F32(0.f)));
   }
-  t.SetVgF(vdata, t.SelectF(pass, t.F32(1.f), t.F32(0.f)));
 }
 
 bool NoOpt() {
@@ -623,6 +666,8 @@ bool TranslateCs(const Program& program,
   bool uses_lane_id = false;
   for (const Inst& inst : program)
     if ((inst.enc == Enc::kDs && inst.opcode == 0x35) ||
+        (inst.enc == Enc::kVop3 &&
+         (inst.opcode == 0x377 || inst.opcode == 0x378)) ||
         inst.extension == gpu::gcn::InstExtension::kDpp ||
         inst.extension == gpu::gcn::InstExtension::kDpp8 ||
         inst.extension == gpu::gcn::InstExtension::kDpp8Fi) {
@@ -833,6 +878,8 @@ static bool EmitCsMemoryUnpredicated(Translator& t,
         case 0x37:
         case 0x44:
         case 0x47:
+        case 0x57:
+        case 0x5f:
           EmitLoweredMimg(t, lowered, sc);
           return true;
         default:

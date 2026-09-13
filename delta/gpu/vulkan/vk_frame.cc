@@ -11,6 +11,7 @@
 #include "gpu/rhi/renderer.h"
 #include "gpu/vulkan/vk_backend.h"
 #include "gpu/vulkan/vk_capture.h"
+#include "gpu/vulkan/vk_compute.h"
 #include "gpu/vulkan/vk_debug.h"
 #include "gpu/vulkan/vk_device.h"
 #include "gpu/vulkan/vk_draw_recomp.h"
@@ -863,6 +864,66 @@ bool ReportRtContents(FrameSlot& owner) {
 }
 
 }  // namespace
+
+void StampSubmittedLayouts() {
+  for (auto& rt_entry : g_rts)
+    rt_entry.second.submitted_layout = rt_entry.second.layout;
+  // Parked geometry variants (see ActivateRtVariant) are in this submission
+  // too, whatever they recorded before being swapped out.
+  for (auto& parked : g_rt_variants)
+    for (RTarget& v : parked.second)
+      v.submitted_layout = v.layout;
+  for (auto& depth_entry : g_depths) {
+    depth_entry.second.submitted_layout = depth_entry.second.layout;
+    depth_entry.second.submitted_stencil_layout =
+        depth_entry.second.stencil_layout;
+  }
+  for (auto& parked : g_depth_variants)
+    for (DepthTarget& v : parked.second) {
+      v.submitted_layout = v.layout;
+      v.submitted_stencil_layout = v.stencil_layout;
+    }
+}
+
+bool SubmitFrameChunk() {
+  if (!g_frame.recording)
+    return true;
+  FrameSlot& slot = g_frame.slots[g_frame.slot_idx];
+  EndRegion();
+  CmdEndLabel(g_frame.cmd);
+  if (vkEndCommandBuffer(g_frame.cmd) != VK_SUCCESS)
+    return false;
+  VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+  si.commandBufferCount = 1;
+  si.pCommandBuffers = &g_frame.cmd;
+  if (vkQueueSubmit(g_dev.queue, 1, &si, VK_NULL_HANDLE) != VK_SUCCESS)
+    return false;
+  slot.chunks.push_back(g_frame.cmd);
+  VkCommandBufferAllocateInfo ca{
+      VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+  ca.commandPool = g_dev.pool;
+  ca.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+  ca.commandBufferCount = 1;
+  VkCommandBuffer next = VK_NULL_HANDLE;
+  if (vkAllocateCommandBuffers(g_dev.device, &ca, &next) != VK_SUCCESS)
+    return false;
+  VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+  bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+  if (vkBeginCommandBuffer(next, &bi) != VK_SUCCESS) {
+    vkFreeCommandBuffers(g_dev.device, g_dev.pool, 1, &next);
+    return false;
+  }
+  slot.cmd = next;
+  g_frame.cmd = next;
+  g_frame.chunk_seq++;
+  g_frame.draws_at_chunk = g_frame.draws;
+  CmdBeginLabel(g_frame.cmd, "frame %llu chunk %llu",
+                (unsigned long long)g_frame.num,
+                (unsigned long long)g_frame.chunk_seq);
+  StampSubmittedLayouts();
+  return true;
+}
+
 }  // namespace gpu::vk
 
 namespace gpu::rhi {
@@ -876,6 +937,7 @@ void BeginFrame(Renderer& renderer) {
   // Objects retired two frames ago are past every in-flight command buffer
   // (see ReleaseRetiredTextures) and safe to destroy now.
   ReleaseRetiredTextures();
+  ReleaseRetiredCsBuffers();
   if (!CreatePipeline())
     return;
   CreateTexPipeline();  // best-effort; colored path still works without it
@@ -883,6 +945,7 @@ void BeginFrame(Renderer& renderer) {
   // the busy trigger can still see the frame that just ended.
   trace::FrameBegin(g_frame.num + 1);
   g_frame.draws = 0;
+  g_frame.draws_at_chunk = 0;
   g_frame.heuristic = 0;
   g_frame.max_idx = 0;
   g_frame.num++;
@@ -1070,7 +1133,8 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
   // are written back EVERY frame whether anything reads them or not -- 80 ms a
   // frame of memcpy in a 1.3 fps frame. The risk it takes is a guest CPU read
   // that goes through none of those hooks seeing a stale range.
-  if (!kCsLazyFlush && !FlushCsWrites(renderer) && !renderer.available()) {
+  if (!FlushCsWritesFrameEnd(renderer, !kCsLazyFlush) &&
+      !renderer.available()) {
     g_frame.recording = false;
     return;
   }
@@ -1210,23 +1274,7 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
   // Stamp the layout each color target will hold once this submission
   // executes: the anchor a mid-frame readback (the compute path staging an
   // RT-backed CS input) chains its barriers from.
-  for (auto& rt_entry : g_rts)
-    rt_entry.second.submitted_layout = rt_entry.second.layout;
-  // Parked geometry variants (see ActivateRtVariant) are in this submission
-  // too, whatever they recorded before being swapped out.
-  for (auto& parked : g_rt_variants)
-    for (RTarget& v : parked.second)
-      v.submitted_layout = v.layout;
-  for (auto& depth_entry : g_depths) {
-    depth_entry.second.submitted_layout = depth_entry.second.layout;
-    depth_entry.second.submitted_stencil_layout =
-        depth_entry.second.stencil_layout;
-  }
-  for (auto& parked : g_depth_variants)
-    for (DepthTarget& v : parked.second) {
-      v.submitted_layout = v.layout;
-      v.submitted_stencil_layout = v.stencil_layout;
-    }
+  StampSubmittedLayouts();
   cur.frame_num = g_frame.num;
   cur.frame_draws = g_frame.draws;
   cur.frame_max_idx = g_frame.max_idx;
@@ -1290,6 +1338,9 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
         g_gpu_exec_samples++;
       }
     }
+    for (VkCommandBuffer c : fin.chunks)
+      vkFreeCommandBuffers(g_dev.device, g_dev.pool, 1, &c);
+    fin.chunks.clear();
     fin.submitted = false;
   }
   PushStageSample();

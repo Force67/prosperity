@@ -1529,10 +1529,10 @@ static void EmitCsMimgStaged(Translator& t,
   // gfx10 packs a unified format, not GCN's separate DFMT/NFMT. Reading the
   // old NFMT bits labels every format below 64 UNORM, including R8_UINT and
   // RGBA8_SINT used by the native video decoder.
-  const Id is_unorm = t.rdna_sources ? is_gfmt({1, 7, 14, 23, 56, 65})
+  const Id is_unorm = t.rdna_sources ? is_gfmt({1, 7, 14, 23, 56, 65, 169})
                                      : t.IsZero(nfmt);
   const Id is_signed8 = t.rdna_sources ? is_gfmt({61}) : t.m.ConstBool(false);
-  const Id is_srgb = t.rdna_sources ? is_gfmt({130}) : t.Eq(nfmt, t.U32(9));
+  const Id is_srgb = t.rdna_sources ? is_gfmt({130, 170}) : t.Eq(nfmt, t.U32(9));
   const auto srgb_decode = [&](Id value) {
     const Id linear = t.FMul(value, t.F32(1.f / 12.92f));
     const Id curved = t.m.ExtInst(t.t_f, GLSLstd450Pow,
@@ -1542,7 +1542,7 @@ static void EmitCsMimgStaged(Translator& t,
   };
   const Id is_rgba8 =
       t.rdna_sources
-          ? is_gfmt({56, 60, 61, 130, 1, 5})  // R8 stages as an RGBA8 texel
+          ? is_gfmt({56, 60, 61, 130, 1, 5, 169, 170})  // R8 stages as an RGBA8 texel
           : t.LAnd(t.Eq(dfmt, t.U32(10)),
                    logical_or(is_unorm, t.Eq(nfmt, t.U32(4))));
   const Id is_r32 =

@@ -11,6 +11,7 @@
 #include "gpu/gcn/gcn_translate.h"
 #include "gpu/rhi/renderer.h"
 #include "gpu/vulkan/vk_capture.h"
+#include "gpu/vulkan/vk_compute.h"
 #include "gpu/vulkan/vk_debug.h"
 #include "gpu/vulkan/vk_device.h"
 #include "gpu/vulkan/vk_format.h"
@@ -199,6 +200,14 @@ struct TexImageEntry {
   // back to 1 the moment it moves: reading every bound texture in full every
   // frame was 269 MB and 12 ms of a Dead Cells frame, and none of it changed.
   u32 check_interval = 1;
+  // False while `hash` predates the image's current contents. A refresh already
+  // reads the whole surface to upload it; hashing it again in the same breath
+  // is a second cold pass over tens of megabytes, and the value is only ever
+  // needed by the next full sweep -- which recomputes it anyway.
+  bool hash_valid = true;
+  // Revision of the compute range the image was last copied from
+  // (CsSupplyTexture); 0 when it holds guest memory.
+  u64 cs_seq = 0;
 };
 
 struct TexViewEntry {
@@ -1390,10 +1399,23 @@ VkDescriptorSet GetTexture(u64 base,
       tdn++;
     }
   }
-  if (!rhi::FlushCsWritesRange(rhi::DefaultRenderer(), base, footprint))
-    return VK_NULL_HANDLE;
   auto image_it = g_tex_images.find(key.image);
-  u64 hsh = 0;
+  // A dispatch's output for this surface still in VRAM is copied straight into
+  // the image; the guest bytes under it are stale and stay that way.
+  const bool cs_supplies =
+      !is_3d && CsSupplyTexture(base, layout, w, h, VK_NULL_HANDLE,
+                                VK_IMAGE_LAYOUT_UNDEFINED, nullptr);
+  if (cs_supplies && image_it != g_tex_images.end()) {
+    if (!CsSupplyTexture(base, layout, w, h, image_it->second.image,
+                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                         &image_it->second.cs_seq))
+      return VK_NULL_HANDLE;
+    image_it->second.last_checked_frame = g_frame.num;
+    image_it->second.hash_valid = false;
+  }
+  if (!cs_supplies &&
+      !rhi::FlushCsWritesRange(rhi::DefaultRenderer(), base, footprint, "tex"))
+    return VK_NULL_HANDLE;
   if (image_it == g_tex_images.end() ||
       image_it->second.last_checked_frame != g_frame.num) {
     // Mapping probes are syscall-heavy. Perform one alongside the
@@ -1419,10 +1441,10 @@ VkDescriptorSet GetTexture(u64 base,
       return VK_NULL_HANDLE;
     }
     const u64 _t_hash = NowNs();
-    if (image_it == g_tex_images.end()) {
-      hsh = TexHash(base, footprint);
-      g_tex_hash_bytes += footprint;
-    } else {
+    // A brand new image has no reference hash to compare against, and the
+    // upload below reads the whole surface anyway: leave its first full hash
+    // to the first sweep.
+    if (image_it != g_tex_images.end()) {
       TexImageEntry& e = image_it->second;
       e.last_checked_frame = g_frame.num;
       // Cheap windowed check every frame, whole-content sweep on the backoff.
@@ -1434,9 +1456,14 @@ VkDescriptorSet GetTexture(u64 base,
       bool changed = sample != e.sample_hash;
       if (!changed &&
           g_frame.num - e.last_full_frame >= static_cast<int>(e.check_interval)) {
-        hsh = TexHash(base, footprint);
+        const u64 hsh = TexHash(base, footprint);
         g_tex_hash_bytes += footprint;
-        changed = hsh != e.hash;
+        // With no reference hash the sweep has nothing to compare against, and
+        // the windowed check has already said the surface is holding still --
+        // so adopt this value as the reference rather than forcing a refresh.
+        changed = e.hash_valid && hsh != e.hash;
+        e.hash = hsh;
+        e.hash_valid = true;
         e.last_full_frame = g_frame.num;
         if (!changed && e.check_interval < kMaxCheckInterval)
           e.check_interval *= 2;
@@ -1454,7 +1481,7 @@ VkDescriptorSet GetTexture(u64 base,
           g_ns_tex_hash += NowNs() - _t_hash;
           return VK_NULL_HANDLE;
         }
-        e.hash = TexHash(base, footprint);
+        e.hash_valid = false;
         e.sample_hash = sample;
         e.last_full_frame = g_frame.num;
         e.check_interval = 1;
@@ -1469,7 +1496,7 @@ VkDescriptorSet GetTexture(u64 base,
         return VK_NULL_HANDLE;
     TexImageEntry image_entry;
     image_entry.footprint = footprint;
-    image_entry.hash = hsh;
+    image_entry.hash_valid = false;
     image_entry.sample_hash = TexSampleHash(base, footprint);
     image_entry.last_checked_frame = g_frame.num;
     image_entry.last_full_frame = g_frame.num;
@@ -1505,7 +1532,12 @@ VkDescriptorSet GetTexture(u64 base,
       vkDestroyImage(g_dev.device, image_entry.image, nullptr);
       return VK_NULL_HANDLE;
     }
-    if (!RecordTexPixels(image_entry.image, VK_IMAGE_LAYOUT_UNDEFINED, base,
+    const bool cs_uploaded =
+        cs_supplies && CsSupplyTexture(base, layout, w, h, image_entry.image,
+                                       VK_IMAGE_LAYOUT_UNDEFINED,
+                                       &image_entry.cs_seq);
+    if (!cs_uploaded &&
+        !RecordTexPixels(image_entry.image, VK_IMAGE_LAYOUT_UNDEFINED, base,
                          layout, w, h, is_3d)) {
       if (kTexFail) {
         static int n = 0;
