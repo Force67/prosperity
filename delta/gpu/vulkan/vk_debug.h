@@ -7,12 +7,10 @@
 // here is a no-op unless VK_EXT_debug_utils is present, which in practice
 // means RenderDoc or the validation layer is attached: names turn anonymous
 // handles into "rt 0x8142f00000 1920x1080 tex" in the resource inspector, and
-// labels group the event browser into frame / region / draw / dispatch scopes
-// instead of a flat run of vkCmdDraw calls.
-//
-// Everything is keyed by GUEST addresses (the rt_base, shader address, texture
-// base), because that is the vocabulary every other diagnostic in this module
-// speaks -- a capture can be lined up against DELTA_GPU_* logs by eye.
+// labels group the event browser into frame / region / draw / dispatch scopes.
+// Everything is keyed by GUEST addresses (rt_base, shader address, texture
+// base), the vocabulary every other diagnostic in this module speaks, so a
+// capture can be lined up against DELTA_GPU_* logs by eye.
 
 #include <vulkan/vulkan.h>
 #include "base/arch.h"
@@ -21,7 +19,7 @@
 namespace gpu::vk {
 
 // Whether names/labels should be emitted at all. The Vulkan loader implements
-// VK_EXT_debug_utils itself, so the extension is always advertised -- but with
+// VK_EXT_debug_utils itself, so the extension is always advertised, but with
 // no consumer every label is a formatted string handed to nobody (~0.3 ms per
 // Isaac frame). True only when RenderDoc is injected into the process or
 // DELTA_GPU_MARKERS=1 forces it (e.g. for a validation-layer run).

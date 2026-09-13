@@ -122,7 +122,7 @@ bool dceDevice::init(const char *, u32, u32) { return true; }
 // dereferences to a sane userspace range so a stray field doesn't fault.
 // NB: on the FEX (aarch64) backend the guest stack is a host mmap up at
 // 0xffff_xxxx_xxxx, so the real libSceVideoOut passes out-slot pointers above
-// the old 0x8000_0000_0000 ceiling -- accept the full 48-bit user range, else
+// the old 0x8000_0000_0000 ceiling. Accept the full 48-bit user range, else
 // the dce silently drops every write to a stack out-slot (the open-op then
 // mmaps an uninitialised offset/size and fails).
 static bool plausiblePtr(u64 v) {
@@ -220,10 +220,10 @@ i32 dceDevice::ioctl(u32 cmd, void *data) {
       // looks up the flip target, then writes offset=0x4000 and size=
       // (bufferCount<<14) to s[2]/s[3]; the module mmaps the dce fd at that
       // offset for that size. We substitute a bump-allocated pool slice (a
-      // guest-addressable region map() hands back as real memory) -- same
+      // guest-addressable region map() hands back as real memory): same
       // shape, real backing.
       // s[3] is a pure OUT slot on some callers (libSceVideoOut's open path passes
-      // it uninitialised) -- only treat *s[3] as a requested size when it's a
+      // it uninitialised), so only treat *s[3] as a requested size when it's a
       // sane size (not stack garbage / a pointer), else use the default. Without
       // this the open-op reads a bogus huge size, poolAlloc fails ENOMEM, the
       // slots stay uninitialised, and the title mmaps garbage offset/len.
@@ -301,7 +301,7 @@ i32 dceDevice::ioctl(u32 cmd, void *data) {
     case 0xc: {
       // scaler-setup query (videoout service thread). out[0x00] != 0 only when a
       // NEW scaler config is pending; the title never reconfigures the scaler after
-      // boot, so report "none pending" (all zero) -- a non-zero handle here makes
+      // boot, so report "none pending" (all zero). A non-zero handle here makes
       // the service spin posting bogus scaler events. (NOT the flip-done path; that
       // is the EVFILT_DISPLAY/-13 event below.)
       if (plausiblePtr(s[2]))

@@ -5,7 +5,7 @@
  *
  * GCN (GFX7 / Sea Islands) disassembler: full mnemonic tables + operand
  * rendering for every encoding the decoder classifies. Debug/diagnostic
- * surface only -- the translator never consumes disassembly.
+ * surface only; the translator never consumes disassembly.
  *
  * Opcode numbering follows the Sea Islands ISA (the decoder's encoding-
  * relative opcode fields):

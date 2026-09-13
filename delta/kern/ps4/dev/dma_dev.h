@@ -27,7 +27,7 @@ private:
 };
 
 // Shared physical-dmem backing store (a memfd) so that every virtual address
-// mapping the same physical offset aliases the same bytes -- the direct-memory
+// mapping the same physical offset aliases the same bytes, the direct-memory
 // coherency the AGC/GNM command buffers rely on (a CPU-written command buffer
 // and the GPU's view of it map one physOffset at possibly-different VAs). The
 // dmem physical-offset bump-allocator lives in the /dev/dmem ioctls; the mapper

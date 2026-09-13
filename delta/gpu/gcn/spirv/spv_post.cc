@@ -34,7 +34,7 @@ namespace {
 // DELTA_GPU_SPIRV_OPT: 2 = legalize + performance passes, 1 = legalize only,
 // 0 = neither. Legalization (mem2reg over the Private-storage register file) is
 // not a speed choice: without it the module is a load/store stream over 512
-// variables, and whoever compiles it pays -- turning it off moved 22.6 s of
+// variables, and whoever compiles it pays. Turning it off moved 22.6 s of
 // Shadow of the Colossus's first minute out of spirv-opt and straight into the
 // driver, at 626 ms a pipeline. The performance passes on top are the part that
 // is optional.
@@ -83,9 +83,9 @@ DELTA_OPTION(const char*,
              "DELTA_GPU_SHADER_CACHE_DIR",
              nullptr);
 
-// Bump when anything that changes the optimizer's OUTPUT changes -- the pass
+// Bump when anything that changes the optimizer's OUTPUT changes: the pass
 // list here, or the SPIRV-Tools version the build links. Entries from an older
-// generation are simply never looked up.
+// generation are never looked up.
 constexpr u32 kCacheGeneration = 1;
 
 u64 HashWords(const std::vector<u32>& w) {

@@ -41,7 +41,7 @@ DELTA_OPTION(const char*, kCaptureDir, "DELTA_GPU_CAPTURE_DIR", nullptr);
 // DELTA_GPU_RTWATCH=<guest base>: include this render target in every
 // CAPTURE_AT snapshot even while it is not bound. A target that loses its
 // content between the region that fills it and the region that reads it is
-// invisible otherwise -- snapshots only cover the targets a region has open,
+// invisible otherwise: snapshots only cover the targets a region has open,
 // so the window where the content actually disappears is the one window with
 // no measurement in it.
 DELTA_OPTION(u64, kRtWatch, "DELTA_GPU_RTWATCH", 0);
@@ -260,7 +260,7 @@ class Line {
   }
 
   // Non-finite floats are not JSON, but every JSON reader in this loop
-  // (Python's included) accepts the bare literals -- and a NaN in a viewport
+  // (Python's included) accept the bare literals. A NaN in a viewport
   // or a constant is exactly what a capture exists to show, so it must not be
   // silently rewritten to null.
   static std::string NumText(double v) {
@@ -1080,7 +1080,7 @@ bool DecodeGuestTexel(u32 dfmt,
       out[dfmt == 8 ? 0 : 2] = u8((((packed >> 20) & 0x3FF) * 255) / 1023);
       out[3] = u8(((packed >> 30) & 3) * 85);
       return true;
-    case 4: {  // 32 -- a single-channel 32-bit texel, which is how a title
+    case 4: {  // 32: a single-channel 32-bit texel, which is how a title
                // hands a resolved DEPTH plane to a later pass. Without this the
                // dump reported `skipped: format` and the one surface a deferred
                // renderer reconstructs world position from stayed invisible.
@@ -1089,7 +1089,7 @@ bool DecodeGuestTexel(u32 dfmt,
         std::memcpy(&f, src, 4);
         // A reversed-Z depth resolve lives in a narrow band near zero (P.T.'s
         // is 0.013..0.025), so a 1:1 decode is a black frame. Scaling makes it
-        // visible -- but a FIXED scale is a trap: at x8 that band lands in
+        // visible, but a FIXED scale is a trap: at x8 that band lands in
         // bytes 92..122, and 31 low-contrast levels read as a flat gradient
         // even when every value is correct. That cost a wrong root-cause
         // claim. The depth dumps normalise against their own extent; this path
@@ -1257,7 +1257,7 @@ std::string TexObj(u32 index,
   for (u32 i = 0; i < 4; i++)
     sampler.Add(Line::HexText(t.sampler[i]));
   o.Raw("sampler", sampler.Done());
-  // How the binding actually resolved -- the whole point of a capture.
+  // How the binding actually resolved, the whole point of a capture.
   const char* how = "unknown";
   u64 resolved = 0;
   if (b && index < b->tex_count) {
@@ -1664,7 +1664,7 @@ void FrameBegin(int frame_num) {
     g_start_ns = NowNs();
   if (!g_frames_left) {
     // Called before the frame counters reset, so g_frame.draws still holds the
-    // PREVIOUS frame's count -- which is what the busy trigger needs (a frame's
+    // PREVIOUS frame's count, which is what the busy trigger needs (a frame's
     // own draw count is not known until it ends).
     bool trigger = false;
     if (kCaptureFrame.get() > 0 && frame_num == kCaptureFrame.get())
@@ -1908,7 +1908,7 @@ void RecordDraw(const rhi::DrawInfo& d,
   // (see SetGuestViewport), so a pass whose depth comes out wrong is only
   // diagnosable if the capture says what the guest asked for: (1, 0) is
   // identity, (0.5, 0.5) is the GL [-1,1]->[0,1] mapping that the VS z remap
-  // handles instead -- and which of the two a draw uses has to be readable per
+  // handles instead, and which of the two a draw uses has to be readable per
   // draw, not per title.
   viewport.Num("z_scale", d.viewport_z_scale);
   viewport.Num("z_offset", d.viewport_z_offset);

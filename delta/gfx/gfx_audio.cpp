@@ -138,7 +138,7 @@ extern "C" int prosperity_audio_output(int handle, const void *samples, u32 fram
     if (q < 0 || static_cast<u32>(q) <= target)
       break;
     // Only pace against a device that is actually consuming. If the queue isn't
-    // shrinking (no real playback, e.g. headless/no audio device), don't block --
+    // shrinking (no real playback, e.g. headless/no audio device), don't block:
     // otherwise every Output stalls the full cap and drags the caller (and the
     // game's main thread, via the audio mutex) to a crawl. Drop instead (below).
     if (prevQ >= 0 && q >= prevQ)
@@ -203,7 +203,7 @@ extern "C" void prosperity_audio_close(int handle) {
   }
 }
 
-#else  // __ANDROID__ : SDL is not linked into the gfx build; no-op for now.
+#else  // __ANDROID__ : SDL is not linked into the gfx build; no-ops below.
 
 extern "C" int prosperity_audio_open(u32, u32, int) { return -1; }
 extern "C" int prosperity_audio_output(int, const void *, u32 frames) {

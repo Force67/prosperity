@@ -237,7 +237,6 @@ void sha1_update(sha1_context *ctx, const unsigned char *input, size_t ilen) {
   size_t fill;
   u32 left;
 
-  // TODO:: Syphurith: Orz. It is said that size_t is an unsigned type..
   if (ilen <= 0)
     return;
 

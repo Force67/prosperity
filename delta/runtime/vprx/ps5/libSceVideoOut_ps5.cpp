@@ -5,7 +5,7 @@
  * under different NIDs than PS4 (sceVideoOutSetBufferAttribute = PjS5uASwcV8,
  * sceVideoOutRegisterBuffers = rKBUtgRrtbk, whose ABI also gains an extra `option`
  * arg) and its LLE .sprx never registers its display port in our env. This is a
- * dedicated PS5 copy -- own port state, own functions -- so its behaviour can
+ * dedicated PS5 copy with its own port state and functions, so its behaviour can
  * diverge from the PS4 HLE without touching PS4 titles. Registered in the PS5-only
  * registry (MODULE_INIT_PS5); the ps5Layout import resolver force-routes
  * libSceVideoOut here. NIDs decoded from the PPSA03311 (Isaac) eboot import table.
@@ -318,7 +318,7 @@ int PS4ABI vGetEventData(const void *event, i64 *data) {
   return 0;
 }
 
-// Whether a title flips through VideoOut at all -- and how often -- is the
+// Whether a title flips through VideoOut at all, and how often, is the
 // first thing to know when nothing reaches the screen; the AGC path flips
 // somewhere else entirely.
 static void traceSubmit(const char *what, int bufferIndex, i64 flipArg) {
@@ -365,7 +365,7 @@ int PS4ABI vSubmitFlip(int, int bufferIndex, int, i64 flipArg) {
 // The EOP variant the AGC path flips through. eopLabel is the GPU completion
 // label: the title queues the flip, then spins until the display controller
 // writes 1 there. Our present is synchronous, so the flip is already done by the
-// time we return -- write the label or the title waits on it forever (bgfx's
+// time we return. Write the label or the title waits on it forever (bgfx's
 // RendererContextAGC parks on `*label == 1` and never submits another frame).
 int PS4ABI vSubmitFlipEop(int, int bufferIndex, int, i64 flipArg,
                           void *eopLabel) {

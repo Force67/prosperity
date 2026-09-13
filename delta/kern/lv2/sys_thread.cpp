@@ -51,7 +51,7 @@ DELTA_OPTION(u64, kCvTrace, "DELTA_UMTX_CVTRACE", 0);
 DELTA_OPTION(bool, kNoThrBarrier, "DELTA_NO_THR_BARRIER", false);
 DELTA_OPTION(bool, kUmtxHist, "DELTA_UMTX_HIST", false);
 DELTA_OPTION(bool, kUmtxTrace, "DELTA_UMTX_TRACE", false);
-// DELTA_UMTX_INJECT_NS: burn N ns inside MUTEX_WAIT. Not a tuning knob -- it
+// DELTA_UMTX_INJECT_NS: burn N ns inside MUTEX_WAIT. Not a tuning knob: it
 // answers "is this op on the critical path at all". If fps falls in proportion
 // to the injected cost, shaving nanoseconds off it pays; if fps does not move,
 // the threads are polling around something else and the op is a symptom.
@@ -165,15 +165,14 @@ int PS4ABI sys_thr_new(thr_param *p, int size) {
     *p->parent_tid = tid;
 
   // The guest's libthr switches RSP onto this caller-provided stack the instant
-  // the thread starts (its trampoline does a `mov rsp, <stack_top>`). If any page
-  // of [stack_base, stack_base+stack_size) is not actually backed -- e.g. the
-  // guest's own stack mmap landed part of the region at a different address than
-  // the base it hands us -- that very first push faults. This surfaced as P.T.'s
-  // "GameSave" worker crashing on entry at stack_top-0x18 (the top page of its
-  // 64 KiB stack was unmapped). Guarantee the whole range is committed + writable
-  // before the thread runs. We only fill pages that are currently FREE (reserve
-  // == MAP_FIXED_NOREPLACE returns non-null only then), so an intentional
-  // PROT_NONE guard page or already-valid stack memory is never clobbered.
+  // the thread starts (its trampoline does a `mov rsp, <stack_top>`). If any
+  // page of [stack_base, stack_base+stack_size) is not actually backed, the
+  // first push faults (P.T.'s "GameSave" worker crashed on entry at
+  // stack_top-0x18: the top page of its 64 KiB stack was unmapped). Guarantee
+  // the whole range is committed + writable before the thread runs. Only pages
+  // that are currently FREE are filled (reserve == MAP_FIXED_NOREPLACE returns
+  // non-null only then), so an intentional PROT_NONE guard page or already-valid
+  // stack memory is never clobbered.
   if (auto *proc = proc::getActive(); proc && p->stack_base && p->stack_size) {
     constexpr size_t kPage = 0x4000;  // PS4 16 KiB page
     const auto sb = reinterpret_cast<uintptr_t>(p->stack_base);
@@ -218,15 +217,15 @@ int PS4ABI sys_thr_new(thr_param *p, int size) {
   void *gthread =
       cpu::backend().createGuestThread(reinterpret_cast<uintptr_t>(fn), arg, fsbase);
 
-  // DIAGNOSTIC (env-gated, default off): the FEX guest-worker
-  // HOST pthread stack is the glibc default (8 MiB). Deep BPE streaming jobs
-  // (FIOS2 decompress -> libkernel HLE -> FEX dispatcher/thunk round-trips) blow
-  // it ~9s into LoadInitialWorld, faulting at the host-stack guard 0x...feff0
+  // DIAGNOSTIC (env-gated, default off): the FEX guest-worker HOST pthread
+  // stack is the glibc default (8 MiB), and deep BPE streaming jobs (FIOS2
+  // decompress -> libkernel HLE -> FEX dispatcher/thunk round-trips) blow it
+  // ~9s into LoadInitialWorld, faulting at the host-stack guard 0x...feff0
   // (same root cause fex_backend.cpp ties to the SotC AllocationTracker crash).
   // DELTA_HOST_STACK_MB=<N> spawns guest workers with an N-MiB native stack to
-  // test/mitigate the overflow; UNSET keeps the original std::thread behaviour.
-  // The worker registers the guest's thr_param stack range so the sys_mname
-  // tag titles put on it becomes the host thread's name (thread_names.cpp).
+  // test/mitigate the overflow; UNSET keeps the std::thread behaviour. The
+  // worker registers the guest's thr_param stack range so the sys_mname tag
+  // titles put on it becomes the host thread's name (thread_names.cpp).
   auto *gsb = p->stack_base;
   const size_t gss = p->stack_size;
   const char *hsEnv = kHostStackMb;
@@ -315,7 +314,7 @@ int PS4ABI sys_rtprio_thread(int function, u64 lwpid, thread_prio *rtp) {
 
 // Address-keyed wait/wake (a small futex). A fixed bucket array avoids per-
 // address allocation; hash collisions only cause harmless spurious wakeups of
-// the HOST condvar -- never spurious returns to the guest, because every wait
+// the HOST condvar, never spurious returns to the guest, because every wait
 // below re-checks its own exit condition in a loop before returning.
 namespace {
 // Per-address wake state. Simple WAIT uses an explicit queue because WAKE's val
@@ -336,7 +335,7 @@ struct WaitChan {
   // A signal releases one of the sleepers QUEUED WHEN IT WAS SENT, which a bare
   // count cannot express: a thread that starts waiting afterwards would consume
   // it and the intended sleeper never wakes. Astro Bot deadlocks on exactly
-  // that -- its DrawThread and its Draw Geometry worker share one condvar, so
+  // that: its DrawThread and its Draw Geometry worker share one condvar, so
   // the completion-waiter kept stealing the wake meant for the worker. Each
   // waiter takes a ticket; only tickets below the cutoff may consume a signal.
   u64 nextTicket = 0;
@@ -399,23 +398,22 @@ Bucket &umtxBucket(const void *a) {
 }
 constexpr u32 UMUTEX_CONTESTED = 0x80000000u;
 // Re-poll interval for a blocked waiter. A waiter is woken promptly by the
-// matching WAKE/SIGNAL, but some guest code publishes its predicate with a plain
-// lock-free store and NO wake syscall (it expects the waiter to re-check), so a
-// long timeout left such a waiter asleep for the whole interval -> Doom64's KEX
-// job scheduler stalled ~1s per frame (~1fps). Re-checking every few ms turns
-// that into full speed (Doom64 1fps -> 60fps). The tick is ONLY a re-poll: no
-// wait below returns to the guest because of it (a poll tick with the exit
-// condition still false goes back to sleep). Returning "woken" with the
-// predicate unpublished let engines deref half-built state -- SotC's fiber
-// job/stream managers crashed intermittently on null / -1 / partially-written
-// pointers exactly that way. DELTA_UMTX_TIMEOUT_MS overrides the tick.
+// matching WAKE/SIGNAL, but some guest code publishes its predicate with a
+// plain lock-free store and NO wake syscall (it expects the waiter to re-check),
+// so a long timeout left such a waiter asleep for the whole interval (Doom64's
+// KEX job scheduler stalled ~1s per frame). Re-checking every few ms turns that
+// into full speed. The tick is ONLY a re-poll: no wait below returns to the
+// guest because of it. Returning "woken" with the predicate unpublished let
+// engines deref half-built state (SotC's fiber job/stream managers crashed
+// intermittently on null / -1 / partially-written pointers).
+// DELTA_UMTX_TIMEOUT_MS overrides the tick.
 std::chrono::milliseconds umtxTimeout() {
   return std::chrono::milliseconds(kUmtxTimeoutMs);
 }
 
 // One report per stalled wait (DELTA_UMTX_STALL). Constructed on entry to a
 // wait loop, asked once per re-poll tick; the guest stack is what names the
-// caller, and the object word is what names who it is waiting for -- for a
+// caller, and the object word is what names who it is waiting for. For a
 // umutex the low 31 bits are the owning guest tid.
 struct StallReport {
   const char *op;
@@ -555,7 +553,7 @@ const AddrWatchList &addrWatchList() {
 bool addrWatchEnabled() { return addrWatchList().n != 0; }
 
 // Line budget per log kind, so a wide window can't fill the disk. Raise with
-// DELTA_UMTX_ADDRWATCH_MAX when a hot address is inside the window -- a budget
+// DELTA_UMTX_ADDRWATCH_MAX when a hot address is inside the window. A budget
 // that runs out mid-run makes "no wake ever arrived" unprovable.
 u32 addrWatchMax() {
   return kAddrWatchLimit;
@@ -588,8 +586,8 @@ void hexBytes(char *out, size_t outN, const void *p, size_t n) {
 // DELTA_UMTX_CVTRACE=<hex ucond addr>: log every CV_WAIT / CV_SIGNAL /
 // CV_BROADCAST on one condvar, with the calling tid and the host thread name
 // (thread_names.cpp). A title that stalls waiting on a condvar nobody signals
-// looks identical to an idle one; naming both sides of the handshake -- and
-// showing that only the wait side ever appears -- is what identifies the
+// looks identical to an idle one; naming both sides of the handshake and
+// showing that only the wait side ever appears is what identifies the
 // producer that stopped running.
 static void cvTrace(const char *what, const void *ucond, u32 self) {
   if (!kCvTrace || reinterpret_cast<u64>(ucond) != kCvTrace)
@@ -650,7 +648,7 @@ static void addrWatchDump(const char *what, const void *p, u32 self) {
 // DELTA_UMTX_HIST: DELTA_SCHIST says which *syscall* a wedged title hammers, but
 // sys_umtx_op is a dozen different primitives behind one number, so a count of
 // 800k/s names nothing. Bucket every call by op and by object address (fixed
-// open-addressed table, claimed lock-free -- this runs on the hottest path in the
+// open-addressed table, claimed lock-free; this runs on the hottest path in the
 // process, so no locks and no allocation), and dump the top offenders on a timer.
 namespace umtxhist {
 constexpr size_t kSlots = 1024;
@@ -786,8 +784,8 @@ static void umtxTrace(int op, void *ptr, u32 self, u32 owner) {
 }
 
 // DELTA_UMTX_PROF=1: WALL time each thread spends inside sys_umtx_op, as a
-// share of elapsed time. A CPU profile cannot answer this -- a thread blocked
-// in futex_wait burns no cycles and simply vanishes from the samples -- so it
+// share of elapsed time. A CPU profile cannot answer this: a thread blocked
+// in futex_wait burns no cycles and simply vanishes from the samples, so it
 // is the only way to tell "the guest's locks are the critical path" from "some
 // worker is parked on a condvar and nobody is waiting for it".
 namespace umtxwall {
@@ -936,7 +934,7 @@ int PS4ABI sys_umtx_op(void *ptr, int op, u64 val, void *a, void *b) {
     // calls this after its userland CAS lost, and the winner often releases in
     // the window before the syscall lands. That outcome needs no bucket lock
     // and no channel lookup, and taking them anyway is what made this op cost
-    // ~1us across 2.9M calls a second in SotC -- half the wall time of every
+    // ~1us across 2.9M calls a second in SotC, half the wall time of every
     // thread that submits our command buffers. Reading unlocked is no weaker
     // than reading under the lock: the value can change either way, and a
     // spurious 0 return just sends libthr around its own CAS loop.
@@ -949,7 +947,7 @@ int PS4ABI sys_umtx_op(void *ptr, int op, u64 val, void *a, void *b) {
     auto &ch = bk.chan[ptr];
     u32 owner = p->load();
     // FreeBSD _do_lock_normal (kern_umtx.c, _UMUTEX_WAIT mode): a word that is
-    // free -- UNOWNED, or CONTESTED with no owner tid -- returns immediately.
+    // free (UNOWNED, or CONTESTED with no owner tid) returns immediately.
     if ((owner & ~UMUTEX_CONTESTED) == 0)
       return 0;
     const u64 g0 = ch.gen;
@@ -959,9 +957,9 @@ int PS4ABI sys_umtx_op(void *ptr, int op, u64 val, void *a, void *b) {
     // system call for unlock." Without it libthr's inline release
     // (atomic_cmpset_rel_32(m_owner, id, UMUTEX_UNOWNED)) always succeeds, the
     // owner never enters the kernel, no MUTEX_WAKE is ever issued, and every
-    // waiter here is released only by the safety re-poll below -- which turned
-    // SotC's JobSystem handoffs into a 2ms-per-acquire livelock (15708 failed
-    // re-acquires on one mutex) that stalled the whole FIOS streaming pipeline.
+    // waiter here is released only by the safety re-poll below, which turned
+    // SotC's JobSystem handoffs into a 2ms-per-acquire livelock that stalled the
+    // whole FIOS streaming pipeline.
     // CAS, not a store: if the word changed under us (a concurrent userland
     // unlock freed it) re-evaluate instead of stamping a stale owner back.
     if (!p->compare_exchange_strong(owner, owner | UMUTEX_CONTESTED))
@@ -993,23 +991,22 @@ int PS4ABI sys_umtx_op(void *ptr, int op, u64 val, void *a, void *b) {
   // FreeBSD do_wake_umutex / do_wake2_umutex (kern_umtx.c). Both refuse to
   // release anyone while the word still names an owner: waking then would send
   // every sleeper into a failed re-CAS and straight back into MUTEX_WAIT, an
-  // N-way stampede on each handoff. When the queue drains to <=1 the kernel --
-  // not userland -- clears CONTESTED, because libthr's contested release
+  // N-way stampede on each handoff. When the queue drains to <=1 the kernel,
+  // not userland, clears CONTESTED, because libthr's contested release
   // deliberately leaves the word at CONTESTED and relies on this.
-  // PS5 (FreeBSD 11) numbers the same wake 23, not 22. Its libkernel's mutex
-  // unlock is FreeBSD's _thr_umutex_unlock2 verbatim -- flags at m_flags+4, the
+  // PS5 (FreeBSD 11) numbers the same wake 23, not 22: its libkernel's mutex
+  // unlock is FreeBSD's _thr_umutex_unlock2 verbatim (flags at m_flags+4, the
   // PI/PP path to MUTEX_UNLOCK, the CAS of m_owner from the caller's tid to
-  // UNOWNED, and on UMUTEX_CONTESTED one call to "wake2" with the flags in val
-  // (libkernel.sprx +0x3300, the ONLY op-23 site in the module). We answered it
-  // EINVAL, so a contested release woke nobody: every PS5 title's contended
-  // mutexes were released only by the safety re-poll, and Astro Bot parked its
-  // main thread in scePthreadMutexLock and never rendered another frame.
+  // UNOWNED, and on UMUTEX_CONTESTED one call to "wake2" with the flags in val,
+  // libkernel.sprx +0x3300, the ONLY op-23 site in the module). Answering it
+  // EINVAL meant a contested release woke nobody and Astro Bot parked its main
+  // thread in scePthreadMutexLock, never rendering another frame.
   case 23:   // PS5 UMTX_OP_MUTEX_WAKE2
   case 18: { // UMTX_OP_MUTEX_WAKE
     auto *p = static_cast<std::atomic<u32> *>(ptr);
     // Same shape as op 17: "still held, so wake nobody" is decided by the owner
     // word alone. Losing this race only means the release that just happened
-    // does the waking instead, and it must enter the kernel to do it -- the
+    // does the waking instead, and it must enter the kernel to do it: the
     // word is CONTESTED while waiters are queued, which is exactly what stops
     // libthr releasing in userland.
     if ((p->load() & ~UMUTEX_CONTESTED) != 0) {
@@ -1096,7 +1093,7 @@ int PS4ABI sys_umtx_op(void *ptr, int op, u64 val, void *a, void *b) {
     // libthr only reaches the kernel unlock for a CONTESTED mutex, and its
     // userland path has ALREADY verified the caller owns it (and, for the
     // contested PI/PROTECT release, already cleared the owner tid to 0/CONTESTED
-    // before the syscall). So don't re-check ownership here -- the owner word is
+    // before the syscall). So don't re-check ownership here: the owner word is
     // often already 0 by now, and an EPERM makes libthr skip dequeueing the mutex
     // -> "Fatal error 'mutex is on list'". Just release and wake a waiter.
     auto &bk = umtxBucket(ptr);
@@ -1112,7 +1109,7 @@ int PS4ABI sys_umtx_op(void *ptr, int op, u64 val, void *a, void *b) {
     // or one thread only waiting for it. Otherwise, it must be marked as
     // contested." Storing a blind 0 with 2+ waiters queued hands the next
     // acquirer an UNCONTESTED word, so ITS release stays in userland and never
-    // wakes the rest -- the contested chain breaks at every handoff, not just
+    // wakes the rest: the contested chain breaks at every handoff, not just
     // the first.
     p->compare_exchange_strong(owner, ch.mutexWaiters <= 1
                                           ? 0u
@@ -1124,8 +1121,8 @@ int PS4ABI sys_umtx_op(void *ptr, int op, u64 val, void *a, void *b) {
   }
   // Kernel condvar. CV_WAIT atomically releases the umutex (uaddr1=a) and sleeps
   // on the ucond (ptr) until signaled; libthr re-locks the mutex (op 5) on return.
-  // Hold the cond bucket across the mutex release so a concurrent signal can't be
-  // lost between unlock and sleep. Two details real engines depend on:
+  // Hold the cond bucket across the mutex release so a concurrent signal can't
+  // be lost between unlock and sleep. Two details real engines depend on:
   //  - ucond.c_has_waiters must be raised BEFORE the mutex is released:
   //    pthread_cond_signal only issues the CV_SIGNAL syscall when it sees the
   //    flag (it reads it under the mutex the waiter just held); without it no
@@ -1151,7 +1148,7 @@ int PS4ABI sys_umtx_op(void *ptr, int op, u64 val, void *a, void *b) {
     // Snapshot the ucond and its umutex so the poll loop below can report ANY
     // guest write to them. A producer that publishes a wake with a plain store
     // instead of a syscall leaves no other trace, and libthr's uncontended
-    // lock/unlock of the mutex is a userland CAS with no syscall either -- so
+    // lock/unlock of the mutex is a userland CAS with no syscall either, so
     // an unchanging mutex word is the evidence that the producer side of the
     // handshake never even runs, as opposed to running but never signalling.
     const bool watch = addrWatched(ptr);
@@ -1164,7 +1161,7 @@ int PS4ABI sys_umtx_op(void *ptr, int op, u64 val, void *a, void *b) {
     // Snapshot the wake generation BEFORE releasing the guest mutex: any
     // signal that lands from here on bumps gen/signals under cbk.m and the
     // wait loop below will see it. That makes it safe to DROP the cond bucket
-    // while releasing the mutex -- never hold two bucket locks at once. The
+    // while releasing the mutex (never hold two bucket locks at once). The
     // old hold-cbk-lock-mbk order deadlocked against a second CV_WAIT whose
     // cond/mutex hashed to the opposite buckets (SotC: whole process wedged
     // ~9s in, every thread queued on two host bucket mutexes while the guest
@@ -1251,15 +1248,14 @@ int PS4ABI sys_umtx_op(void *ptr, int op, u64 val, void *a, void *b) {
   // Userland semaphore (struct _usem { u32 _has_waiters; u32 _count; u32 _flags; }
   // at ptr). SEM_WAIT publishes _has_waiters and blocks while _count == 0; the
   // poster bumps _count (userland) and calls SEM_WAKE. Returning 0 immediately
-  // (the old default) turned sem_wait into a hot spin -- a savedata worker
-  // (Shadow of the Tomb Raider) pegged a core re-issuing the syscall, starving
-  // the threads it was waiting on. Block on _count like the other WAIT ops.
+  // turned sem_wait into a hot spin (a SotTR savedata worker pegged a core
+  // re-issuing the syscall, starving the threads it waited on). Block on _count
+  // like the other WAIT ops.
   // Reader/writer lock (struct urwlock: {state, flags, blocked_readers,
   // blocked_writers}). libthr CASes rw_state in userland and only enters the
-  // kernel when it has to block, so every state change here is a CAS too --
-  // a blind store would stomp a concurrent userland acquire. These fell through
-  // to the default "unhandled -> success" arm before, which granted the lock to
-  // every caller at once; a UE4 title then races on whatever it guards.
+  // kernel when it has to block, so every state change here is a CAS too; a
+  // blind store would stomp a concurrent userland acquire, and the default
+  // "unhandled -> success" arm granted the lock to every caller at once.
   case 12:   // UMTX_OP_RW_RDLOCK
   case 13: { // UMTX_OP_RW_WRLOCK
     constexpr u32 kWriteOwner = 0x80000000u;

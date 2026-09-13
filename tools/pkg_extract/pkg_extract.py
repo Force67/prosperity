@@ -133,7 +133,7 @@ def main():
     f = open(pkg, "rb")
     ekpfs = get_ekpfs(f)
     if not ekpfs:
-        sys.exit("Could not recover EKPFS -- not a fake pkg?")
+        sys.exit("Could not recover EKPFS, not a fake pkg?")
     print("EKPFS", ekpfs.hex())
     outer = Pfs(Raw(f, 0x700000), ekpfs)
     # outer uroot holds the contiguous, PFSC-compressed inner image at block 11

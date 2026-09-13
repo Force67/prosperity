@@ -7,7 +7,7 @@
  * or 0x80bc0003 / 0x80bc0004, then aborts from its own assert handler.
  *
  * 0x80bc0004 is a status the real sceImeKeyboardOpen returns on its own device
- * paths, and the call site treats it as "no keyboard attached" -- it leaves the
+ * paths, and the call site treats it as "no keyboard attached": it leaves the
  * keyboard-open flag clear and carries on. Report that rather than faking a
  * keyboard the title would then poll.
  *

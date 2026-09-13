@@ -65,7 +65,7 @@ bool GuestRange(u64 address, u64 size) {
 // a texture descriptor naming that surface, and print each hit with the dwords
 // around it. When a binding resolves to an all-zero T#, this is what separates
 // "the title never built the descriptor" from "it built it somewhere our
-// pointer chain does not reach" -- the second case shows the descriptor sitting
+// pointer chain does not reach". The second case shows the descriptor sitting
 // in a table we never look at, and the distance to the address the shader read
 // names the mistake.
 u64 ScanForDescriptor(u64 want_base) {
@@ -117,7 +117,7 @@ u64 ScanForDescriptor(u64 want_base) {
 
 // DELTA_GPU_MEMFIND=<hex dword>[,<hex dword>...]: sweep every mapped guest
 // page once for that dword sequence and print where it sits. The inverse of
-// ScanForDescriptor -- that one starts from an address and looks for the
+// ScanForDescriptor: that one starts from an address and looks for the
 // descriptor naming it, this one starts from DATA the guest must have written
 // and looks for where it put it, which is the only way left when a descriptor
 // resolves into an arena that reads zero end to end. Reading the process from
@@ -173,7 +173,7 @@ void ScanForDwords(const char* spec) {
 }
 
 // DELTA_GPU_SOASCAN=<byte stride>: sweep guest memory for a screen-quad
-// vertex block stored as PARALLEL COLUMNS at that stride -- four clip-space
+// vertex block stored as PARALLEL COLUMNS at that stride: four clip-space
 // corners whose w column is all 1.0, whose z column is all 0.0 and whose x and
 // y columns are all +/-1.0. A shader that fetches its own vertices reads
 // exactly that shape (GTA:SA's LUT pass reads x/y/z/w at +0x180/0x240/0x300/
@@ -214,8 +214,8 @@ void ScanForQuadColumns(u32 stride) {
       const auto* z = reinterpret_cast<const float*>(at + stride * 2);
       const auto* x = reinterpret_cast<const float*>(at);
       const auto* y = reinterpret_cast<const float*>(at + stride);
-      // w and z pin the shape. x and y are required to be CLIP COORDINATES --
-      // inside [-1,1] and carrying more than one value each -- rather than
+      // w and z pin the shape. x and y are required to be CLIP COORDINATES
+      // inside [-1,1] and carrying more than one value each, rather than
       // exactly +/-1: a pass that rasterizes a sub-box of the volume writes
       // corners that are not the unit quad's, and demanding +/-1 is an
       // assumption about the caller, not about the shape. Relaxing them all
@@ -223,8 +223,8 @@ void ScanForQuadColumns(u32 stride) {
       // module data then hits thousands of times.
       if (!all(z, zero))
         continue;
-      // A quad's x column holds exactly two values, twice each -- its left and
-      // right edge -- and so does its y column. That is true of the unit quad
+      // A quad's x column holds exactly two values, twice each (its left and
+      // right edge), and so does its y column. That is true of the unit quad
       // and of any sub-rect, and it is what separates a real corner table from
       // the denormal noise that "inside [-1,1]" alone lets through.
       const auto edges = [](const float* f) {
@@ -309,8 +309,8 @@ void CensusBlock(const char* what, u64 address) {
 // DELTA_GPU_TWATCH=1: remember every address a null T# was read from and
 // re-read it later. A descriptor that is zero when the draw is processed but
 // non-zero a moment later means the title fills the table AFTER submitting the
-// draw that names it -- an ordering bug on our side, since our submit is
-// synchronous -- while one that stays zero for the rest of the run means the
+// draw that names it, an ordering bug on our side, since our submit is
+// synchronous. One that stays zero for the rest of the run means the
 // pointer never named live data at all. Those two need opposite fixes, and
 // nothing else distinguishes them.
 struct NullSite {
@@ -539,16 +539,14 @@ struct ScalarEval {
   bool trace = false;
   u64 code_base = 0;  // guest address of the program, for s_getpc_b64
 
-  // A shader that runs out of SGPRs parks scalars in the LANES of a VGPR with
-  // v_writelane_b32 and reads them back with v_readlane_b32. Both of that
-  // pair's scalar operands are wave-uniform by encoding -- the value must come
-  // from an SGPR or an inline constant, never a VGPR, and so must the lane --
-  // so the value a lane holds is exactly the scalar that was written, and the
-  // walk can replay it. SotC restores descriptor-table POINTERS this way
-  // (`v_readlane_b32 s82, v47, 11` then `s_load_dwordx4 s[8:11], s[82:83], 8`),
-  // so a walk that skips the pair reads whatever those SGPRs held earlier and
-  // decodes a descriptor from the wrong address. Keyed vgpr*64 + lane; a slot
-  // that is absent is unknown and invalidates its destination.
+  // A shader out of SGPRs parks scalars in the LANES of a VGPR with
+  // v_writelane_b32 and reads them back with v_readlane_b32. Both of the pair's
+  // scalar operands are wave-uniform by encoding (value and lane must come from
+  // an SGPR or inline constant, never a VGPR), so the value a lane holds is
+  // exactly the scalar that was written and the walk can replay it. SotC
+  // restores descriptor-table POINTERS this way, and a walk that skips the pair
+  // decodes a descriptor from whatever those SGPRs held earlier. Keyed
+  // vgpr*64 + lane; an absent slot is unknown and invalidates its destination.
   std::unordered_map<u32, u32> lane_spill;
   std::unordered_map<u32, u64> lane_spill_src;
 
@@ -662,7 +660,7 @@ struct ScalarEval {
     }
     if (readlane || readfirstlane) {
       // readfirstlane names the lowest EXEC-active lane. The walk does not
-      // model EXEC, so it can only answer when the shader spilled to lane 0 --
+      // model EXEC, so it can only answer when the shader spilled to lane 0,
       // which is what a spill/reload pair does when it uses one slot.
       u32 lane = 0;
       const bool lane_known = readfirstlane || Source(src1, inst.literal, lane);
@@ -732,7 +730,7 @@ struct ScalarEval {
       } else {
         // Everything else still WRITES sdst on hardware. Leaving our shadow
         // untouched kept a stale value there, and a descriptor decoded from it
-        // is garbage that reads as a valid-looking T# -- worse than an
+        // is garbage that reads as a valid-looking T#, worse than an
         // unresolved one, which at least falls back cleanly.
         Clear(sdst);
         if (Sop1DestIs64(inst.opcode))
@@ -873,7 +871,7 @@ struct ScalarEval {
       return;
     const Smrd s = DecodeSmrd(inst.raw[0]);
     // s_load reads a descriptor through a raw 2-dword pointer; s_buffer_load
-    // (op 0x08..0x0c) reads it through a 4-dword V# resource table -- FOX and
+    // (op 0x08..0x0c) reads it through a 4-dword V# resource table. FOX and
     // other engines stash T#/pointer descriptors in a cbuffer/SRT accessed this
     // way, so following it here is what lets those bindings resolve.
     const bool buffer_load = s.op >= 0x08 && s.op <= 0x0c;
@@ -919,8 +917,8 @@ struct ScalarEval {
       return;
     }
     // The table this chain reads may have been filled by a compute dispatch
-    // this frame -- SotC's material arenas hold the very T#s its draws reach
-    // through their SRTs -- and those results sit in the CS buffer until they
+    // this frame (SotC's material arenas hold the T#s its draws reach
+    // through their SRTs), and those results sit in the CS buffer until they
     // are written back. Reading around the writeback resolves the descriptor
     // to zeros while the slot visibly holds a plausible T# a moment later
     // (TEXMISS's "src holds a valid descriptor" signature). One branch when
@@ -956,8 +954,8 @@ struct ScalarEval {
 // Per-program analysis reused across draws: the MIMG binding plan plus the
 // subset of instructions the scalar walk actually consumes (descriptor-chain
 // scalar ops, SMRD loads, MIMG/MUBUF uses). The resolvers run once per
-// draw on shaders that are mostly VALU code, so stepping only this subset --
-// and planning bindings once instead of per draw -- removes the bulk of the
+// draw on shaders that are mostly VALU code, so stepping only this subset and
+// planning bindings once instead of per draw removes the bulk of the
 // per-draw analysis cost. Keyed by the Program object; the cached shared_ptr
 // pins the object so the pointer cannot be reused while the entry lives. A
 // shader rewrite yields a new Program from CachedProgram -> a new entry.
@@ -1091,8 +1089,8 @@ VBuffer DecodeVBuffer(const u32* p) {
   //  [3]  dst_sel/nfmt/dfmt/...: nfmt[14:12], dfmt[18:15]
   // The base is 44 bits, not 48: the top nibble of word 1 is reserved, and
   // Shadow of the Colossus leaves it non-zero on its per-object vertex pools.
-  // Reading it as address put them at 0x7080_xxxxxxxx -- 124 TB, far outside a
-  // PS4 process' ~1 TB address space -- so every descriptor carrying that
+  // Reading it as address put them at 0x7080_xxxxxxxx, about 124 TB and far
+  // outside a PS4 process' ~1 TB address space, so every descriptor carrying that
   // nibble was rejected as out of range and read back as zero.
   return {
       .base = (static_cast<u64>(p[1] & 0xFFF) << 32) | p[0],
@@ -1134,7 +1132,7 @@ TImage DecodeTImage(const u32* p) {
   if (t.pitch < t.width)
     t.pitch = t.width;  // fall back to width if unset
   // SQ_RSRC_IMG_2D_ARRAY / _1D_ARRAY, and CUBE. A cube is stored and sampled
-  // as a 2D array whose layers are its faces -- the gfx10 decoder models it the
+  // as a 2D array whose layers are its faces; the gfx10 decoder models it the
   // same way, and the MIMG path has already selected the face by the time the
   // address reaches the hardware. Leaving type 11 out made every PS4 cubemap
   // descriptor invalid, so the sample fell back to the 1x1 white default.
@@ -1290,7 +1288,7 @@ std::vector<TImage> TrackTextures(
       NoteNullDescriptor(eval.src[srsrc], code_base);
       // The arenas are 2 MiB. If the descriptor the shader wanted sits a whole
       // arena away from where it looked, the title and we disagree about which
-      // arena is current -- a constant bias, not a lost write.
+      // arena is current, a constant bias, not a lost write.
       static int probes = 0;
       const u64 at = eval.src[srsrc];
       if (at && probes < 24) {
@@ -1321,13 +1319,13 @@ std::vector<TImage> TrackTextures(
     // descriptor while sampling through a chain of more than one hop. Our
     // scalar walk steps the program in ORDER and ignores branches, so a shader
     // that selects its table behind a branch (or by an index we cannot fold)
-    // gets a deterministically wrong address -- which is what a constant
+    // gets a deterministically wrong address, which is what a constant
     // offset between where the title wrote its table and where we looked
     // would look like.
     // DELTA_GPU_NULLWATCH=1: watch the SRT slot whose pointer led to a null
     // descriptor, so the guest instruction that wrote that pointer names
-    // itself. This is the one address worth watching and it is not knowable
-    // until a draw is processed -- it moves every run -- which is why the arm
+    // itself. The address is not knowable until a draw is processed (it moves
+    // every run), which is why the arm
     // goes through utl rather than an env var parsed at startup.
     if (kNullWatch && t.null_descriptor) {
       static bool armed = false;
@@ -1575,7 +1573,7 @@ std::unordered_map<u32, VBuffer> ResolveCbuffers(
     // destination overlaps its own source (s_buffer_load_dword s4, s[4:7])
     // clobbers the V#'s base dword in Step, and decoding afterwards turns the
     // loaded constant into the address (Tomb Raider's UI globals cbuf decoded
-    // as base 0x803f800000 -- the 1.0f it had just loaded).
+    // as base 0x803f800000, the 1.0f it had just loaded).
     const bool smrd = inst.enc == Enc::kSmrd;
     const Smrd s = smrd ? DecodeSmrd(inst.raw[0]) : Smrd{};
     const bool candidate =

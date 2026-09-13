@@ -17,7 +17,7 @@ namespace {
 // deflate (RFC 1951), fixed Huffman + a 32 KiB greedy LZ77 match finder.
 //
 // Fixed Huffman costs at most 9 bits per literal, so the worst case is 1.125x
-// the input -- but the images this writes (a mostly-black render target, a
+// the input, but the images this writes (a mostly-black render target, a
 // flat UI layer) are exactly the input LZ77 collapses, which is the difference
 // between an 8 MB dump and a 40 KiB one. A full dynamic-Huffman encoder would
 // win maybe another 20% and is not worth the code.

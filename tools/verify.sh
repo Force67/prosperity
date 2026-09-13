@@ -18,7 +18,7 @@
 #                       and line numbers normalised away, then sorted. Measured
 #                       stable across repeated runs of the same binary, and it
 #                       covers module loading, syscall dispatch and HLE
-#                       bring-up -- the parts a kern refactor can break.
+#                       bring-up: the parts a kern refactor can break.
 #                       NOTE: the presented FRAME is not usable here. Three runs
 #                       of one binary produced three different frames (the
 #                       capture lands on whichever frame the wall clock reaches
@@ -105,7 +105,7 @@ run() {
 # written by several threads, so line order is not stable but content is):
 #
 #   ANSI colouring, the timestamp, and build/dump paths.
-#   Hex values and decimal runs -- the latter covers the func:line prefix, so
+#   Hex values and decimal runs; the latter covers the func:line prefix, so
 #     moving code between files is not reported as a behaviour change.
 #   "sp+" lines. guestStackTrace SCANS the stack window and prints every slot
 #     that still looks like a code pointer, so it reports stale residue left by
@@ -152,7 +152,7 @@ fi
 
 # --- the fatal path still reports ------------------------------------------
 # Inject a real SIGSEGV into a running guest thread. Nothing is armed, so
-# probe::onSignal declines it and the crash reporter must produce its dump --
+# probe::onSignal declines it and the crash reporter must produce its dump –
 # which is the half of the handler no other check here reaches. An earlier
 # version of this check grepped for "<module>+0x..." after arming a breakpoint
 # that never executed, and matched ordinary module-load lines instead: it
@@ -182,5 +182,5 @@ echo
 if [ "$FP" = "$OUT/current.txt" ] && [ -f "$OUT/baseline.txt" ]; then
   echo "--- baseline vs current ---"
   diff -u "$OUT/baseline.txt" "$FP" && echo IDENTICAL ||
-    { echo "DIFFERENCES ABOVE -- explain every one before landing"; exit 1; }
+    { echo "DIFFERENCES ABOVE: explain every one before landing"; exit 1; }
 fi

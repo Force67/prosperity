@@ -71,14 +71,14 @@ DELTA_OPTION(bool, kGpuRtdump, "DELTA_GPU_RTDUMP", false);
 DELTA_OPTION(bool, kGpuRtstat, "DELTA_GPU_RTSTAT", false);
 // Depth scoring is a SEPARATE knob from RTSTAT on purpose: reading a depth
 // image needs its own barriers and submits, and doing that inside the colour
-// report perturbed the frame it was reporting on -- the scene stopped
-// rendering whenever RTSTAT was on, which silently invalidated every colour
-// measurement taken alongside it. Opt in when you want depth, and know that
-// the numbers you get come at that cost.
+// report perturbed the frame it reported on (the scene stopped rendering
+// whenever RTSTAT was on, silently invalidating every colour measurement taken
+// alongside it). Opt in when you want depth, and know the numbers come at that
+// cost.
 // DELTA_GPU_DBSTAT=1 scores every depth target; =<base> scores only that one.
 // Each score costs a synchronous submit and a full-image readback, and this
-// runs with the frame already submitted -- doing it for a 2048x2048 shadow
-// map alongside everything else is enough to take the guest down with it.
+// runs with the frame already submitted; doing it for a 2048x2048 shadow map
+// alongside everything else can take the guest down with it.
 DELTA_OPTION(u64, kGpuDbStat, "DELTA_GPU_DBSTAT", 0);
 DELTA_OPTION(bool, kGpuRtstatAll, "DELTA_GPU_RTSTAT_ALL", false);
 DELTA_OPTION(bool, kNanDis, "DELTA_GPU_RTSTAT_DIS", false);
@@ -136,7 +136,7 @@ void EnsureReadback(u32 w, u32 h, VkFormat fmt) {
     return;
   // DELTA_GPU_RBTRACE: every (re)allocation of the readback buffer, with the
   // map it is replacing. This buffer is per-frame-slot, but EnsureReadback only
-  // ever updates the CURRENTLY bound slot's copy of the handles -- so a growth
+  // ever updates the CURRENTLY bound slot's copy of the handles, so a growth
   // here unmaps a pointer the other slot is still holding.
   static const bool kRbTrace = std::getenv("DELTA_GPU_RBTRACE") != nullptr;
   if (kRbTrace)
@@ -286,7 +286,7 @@ bool ReportRtContents(FrameSlot& owner) {
          i < order.size() && at < (int)sizeof(dropped) - 16; i++)
       at += std::snprintf(dropped + at, sizeof(dropped) - at, " %#lx",
                           (unsigned long)order[i].first);
-    BASE_LOGI("rtstat", "f{} {} targets, scoring {} -- not scored:{}",
+    BASE_LOGI("rtstat", "f{} {} targets, scoring {}, not scored:{}",
               g_frame.num, (unsigned)order.size(), (unsigned)max_scored,
               dropped);
     order.resize(max_scored);
@@ -350,7 +350,7 @@ bool ReportRtContents(FrameSlot& owner) {
     // time, so every other sample read (B,A) where it meant (R,G). Alpha on a
     // light volume is its coverage term and sits at 1.0 wherever the volume
     // covers; counting that as luminance is what produced the "P.T. has no
-    // midtones" reading -- a 50% pile-up just under 1.0 with an empty midrange,
+    // midtones" reading: a 50% pile-up just under 1.0 with an empty midrange,
     // in a buffer that had neither.
     const auto* px8 = static_cast<const u8*>(g_frame.readback_map);
     const u32 bpp = std::max(1u, (u32)FormatBytes(rt.fmt));
@@ -412,7 +412,7 @@ bool ReportRtContents(FrameSlot& owner) {
           const u32 h =
               (u32)t[2 * c] | ((u32)t[2 * c + 1] << 8);
           // Inf and NaN share the exponent; only the mantissa tells them apart,
-          // so counting NaN alone reports nothing for a buffer full of Inf --
+          // so counting NaN alone reports nothing for a buffer full of Inf –
           // and an Inf in an HDR target reads downstream as a clipped
           // highlight, not as an error.
           if ((h & 0x7C00u) == 0x7C00u) {
@@ -433,7 +433,7 @@ bool ReportRtContents(FrameSlot& owner) {
       rgb_nz += any_rgb;  // ignores an opaque-black alpha channel
       // Alpha ON ITS OWN. On a G-buffer it is not coverage: UE4 packs the
       // SHADING MODEL there, and a deferred light gates every lane on it being
-      // non-zero. Folded into nz/mean it is invisible -- a target with correct
+      // non-zero. Folded into nz/mean it is invisible: a target with correct
       // colour and dead alpha reads as a healthy target.
       a_nz += ch[3] != 0.f;
       a_sum += ch[3];
@@ -482,7 +482,7 @@ bool ReportRtContents(FrameSlot& owner) {
         // means strictly above 1.0: a buffer of exact 1.0s is a mask or a
         // normalised term, not a blown highlight, and counting those made an
         // ordinary ambient buffer read as 99.9% saturated. On a UNORM target
-        // 1.0 IS the clip -- nothing can exceed it -- so the same test there
+        // 1.0 IS the clip, and nothing can exceed it, so the same test there
         // would report zero however blown the frame is.
         if (is_half ? lum > 1.f : lum >= 1.f)
           hot++;
@@ -494,7 +494,7 @@ bool ReportRtContents(FrameSlot& owner) {
         distinct[num_distinct++] = v;
     }
     // Same picture for the TARGET itself, from the readback the stats above
-    // already made -- so the feedback copy and the image it was copied from can
+    // already made, so the feedback copy and the image it was copied from can
     // be compared directly, and a defect in one told apart from a defect in the
     // other.
     if (kFbDump && is_h4) {
@@ -524,7 +524,7 @@ bool ReportRtContents(FrameSlot& owner) {
       }
     }
     // The FEEDBACK image holds exactly what a self-sampling pass read this
-    // frame, mid-frame -- not the end-of-frame state every other number here
+    // frame, mid-frame, not the end-of-frame state every other number here
     // reports. For P.T.'s un-premultiply pass (ps=0x80b54b4000, out.rgb =
     // rgb/(1-alpha)) that mid-frame alpha is the number that decides whether a
     // texel resets or amplifies, and end-of-frame alpha cannot stand in for it:
@@ -599,7 +599,7 @@ bool ReportRtContents(FrameSlot& owner) {
             // A PICTURE of where the runaway texels are. Every aggregate so
             // far (count, bounding box, percentiles) is compatible with several
             // different mechanisms; the arrangement usually is not. Written
-            // from the feedback readback, which is already non-perturbing --
+            // from the feedback readback, which is already non-perturbing –
             // DELTA_GPU_RTDUMP is not (see the profile).
             if (kFbDump) {
               char fp[256];
@@ -725,7 +725,7 @@ bool ReportRtContents(FrameSlot& owner) {
       }
     }
   }
-  // Depth targets were never scored, only colour ones -- so "does the pass
+  // Depth targets were never scored, only colour ones, so "does the pass
   // that samples the depth read anything?" had no answer at all, and a whole
   // chain of black post-process targets could not be told apart from a black
   // depth buffer. Read the Z plane back the same way.
@@ -751,7 +751,7 @@ bool ReportRtContents(FrameSlot& owner) {
     DepthTarget& d = *entry.second;
     // Never touch a target still in UNDEFINED: a barrier out of that layout
     // is allowed to DISCARD the image, so reading one to report on it would
-    // destroy the very thing being measured -- and it did, every RTSTAT run,
+    // destroy the thing being measured, and it did, every RTSTAT run,
     // which quietly invalidated depth readings taken with it.
     if (!d.image || !d.w || !d.h || d.layout == VK_IMAGE_LAYOUT_UNDEFINED ||
         (!d.used_this_frame && !kGpuRtstatAll))
@@ -840,7 +840,7 @@ bool ReportRtContents(FrameSlot& owner) {
               samples ? sum / samples : 0.0, (unsigned long)zero,
               (unsigned long)samples, (unsigned long)one);
     // Under RTDUMP, write the Z plane too: "75% of it is exactly zero" is a
-    // number that fits several very different pictures, and which one it is
+    // number that fits several different pictures, and which one it is
     // decides where to look next.
     if (kGpuRtdump && hi > lo) {
       std::vector<u8> bgra(n * 4);
@@ -950,7 +950,7 @@ void BeginFrame(Renderer& renderer) {
   g_frame.max_idx = 0;
   g_frame.num++;
   // DELTA_GPU_FORCECLEAR=<rt address>: clear that target at the top of every
-  // frame. Diagnostic for a target the title clears by a means we do not see --
+  // frame. Diagnostic for a target the title clears by a means we do not see –
   // additive passes into it otherwise accumulate frame over frame.
   if (kForceClear) {
     auto it = g_rts.find(kForceClear);
@@ -969,7 +969,7 @@ void BeginFrame(Renderer& renderer) {
   FrameSlot& slot = g_frame.slots[g_frame.slot_idx];
   // This slot's readback buffer is the one lent to the presenter two frames
   // ago, and this frame is about to have the GPU write over it. The copy is
-  // long finished by now in the steady state, so this waits for nothing -- but
+  // long finished by now in the steady state, so this waits for nothing; but
   // it is what makes lending the buffer instead of copying it safe.
   if (renderer.state)
     renderer.state->presenter.WaitForBorrowed();
@@ -1125,14 +1125,13 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
   // Bound CS-write staleness for guest CPU readers. Only a device fault (the
   // flush nulls renderer.state) is fatal; a range that could not be written
   // back just stays stale, as it always did.
-  //
   // DELTA_GPU_CS_LAZY_FLUSH=1 drops this blanket flush and leaves the writeback
   // to the targeted FlushCsWritesRange calls the guest readers already make
   // (textures, vertex/index data, constant buffers, CP DMA sources). It exists
-  // because executing SotC's async compute means whole 4 MiB material arenas
-  // are written back EVERY frame whether anything reads them or not -- 80 ms a
-  // frame of memcpy in a 1.3 fps frame. The risk it takes is a guest CPU read
-  // that goes through none of those hooks seeing a stale range.
+  // because SotC's async compute writes back whole 4 MiB material arenas EVERY
+  // frame whether anything reads them or not: 80 ms of memcpy in a 1.3 fps
+  // frame. The risk is a guest CPU read that goes through none of those hooks
+  // seeing a stale range.
   if (!FlushCsWritesFrameEnd(renderer, !kCsLazyFlush) &&
       !renderer.available()) {
     g_frame.recording = false;
@@ -1293,7 +1292,7 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
 
   // Gameplay latches judge the just-recorded frame's command stream (no pixels
   // involved): sustained room frames with real draw counts, or a huge-index 3D
-  // draw, mean a run is underway -- stop the headless autoskip mashing menus.
+  // draw, mean a run is underway. Stop the headless autoskip mashing menus.
   static int room_streak = 0;
   if (g_frame.had_room && g_frame.draws > 20 && ++room_streak >= 4)
     gfx::setInGameplay(true);  // latch fast, before the autoskip re-pauses
@@ -1372,8 +1371,8 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
   auto* rb = static_cast<u8*>(fin.readback_map);
   // DELTA_GPU_RBTRACE: whether the bytes this present is about to show are
   // actually non-zero, and which slot's mapping they came from. "A black window"
-  // has two very different causes that look identical downstream -- the readback
-  // failing, or the target genuinely being black -- and every consumer below
+  // has two different causes that look identical downstream (the readback
+  // failing, or the target genuinely being black), and every consumer below
   // (present, WritePpm, SNAP) inherits the answer silently. `nz` separates them
   // in one line. The presented slot's map differing from the currently bound
   // one is NORMAL: presentation runs one frame behind recording.
@@ -1442,21 +1441,17 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
   };
   // Minimal single-shot capture (DELTA_GPU_SNAP=N): write ONE ppm of the
   // presented scanout to <dumpdir>/gpu_snap.ppm at the first drawing frame >=
-  // N, then never again. For verifying gfx without the rolling DELTA_GPU_DUMP
+  // N, then never again, for verifying gfx without the rolling DELTA_GPU_DUMP
   // firehose (hundreds of MB per run). DELTA_GPU_SNAP_ROOM=1 waits for a
   // gameplay-room frame.
-  // Wait for a frame with at least this many draws before capturing, so a busy
-  // scene frame is grabbed instead of a sparse HUD/transition frame (e.g.
-  // Doom64 gameplay where only some frames carry the full level geometry).
   // DELTA_GPU_SNAP_MININDICES: require a frame to contain a draw with at least
-  // this many indices (3D level geometry, e.g. Doom64 with ~2400-index draws)
-  // instead of counting draws -- a level frame can have few draws but huge
-  // index counts that a draw-count gate (kSnapMinDraws/kSnapBest) misses.
+  // this many indices (3D level geometry) instead of counting draws; a level
+  // frame can have few draws but huge index counts that a draw-count gate
+  // (kSnapMinDraws/kSnapBest) misses.
   // DELTA_GPU_SNAP_BEST: instead of capturing the first qualifying frame, keep
   // re-capturing whenever this frame has more draws than any seen so far (after
-  // kSnapAt). The final gpu_snap.ppm is then the busiest frame of the run -- a
-  // real scene frame, not a sparse HUD/transition one, without guessing a frame
-  // number.
+  // kSnapAt). The final gpu_snap.ppm is then the busiest frame of the run, a
+  // real scene frame, without guessing a frame number.
   static int snap_best_draws = 0;
   static bool snapped = false;
   bool snap_now = kSnapAt && fin.frame_num >= kSnapAt && fin.frame_draws > 0 &&
@@ -1564,7 +1559,7 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
                   kv.second.draws,
                   kv.first == fin.scanout_base ? " <-SCANOUT" : "");
   }
-  // Perf overlay, drawn into the presented buffer only -- the PPM capture
+  // Perf overlay, drawn into the presented buffer only: the PPM capture
   // paths above already consumed `pixels`, so dumps stay clean.
   DrawPerfOverlay(pixels, fin.w, fin.h,
                   pixel_fmt == gfx::PixelFormat::rgba8);
@@ -1608,7 +1603,7 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
   SavePipelineCache();
 
   // Runs last: reuses (and clobbers) the readback buffer the present path
-  // above already consumed -- so the presenter has to be done reading it. It
+  // above already consumed, so the presenter has to be done reading it. It
   // normally does nothing, and the wait costs nothing when nothing was lent.
   if (kGpuRtstat && renderer.state)
     renderer.state->presenter.WaitForBorrowed();

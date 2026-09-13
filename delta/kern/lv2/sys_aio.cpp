@@ -3,7 +3,7 @@
  *
  * Async file IO. Failing these with ENOTSUP was supposed to push a guest onto a
  * synchronous fallback; GTA:SA has none. It submits 23 read commands during
- * engine start-up, takes the error, and never reads another byte -- the title
+ * engine start-up, takes the error, and never reads another byte, so the title
  * reaches its main menu and stays behind the transition curtain forever.
  *
  * Serving the reads inside submit and reporting the request complete is a legal

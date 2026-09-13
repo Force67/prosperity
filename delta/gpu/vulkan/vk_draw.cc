@@ -77,7 +77,7 @@ void Draw(Renderer& renderer, const DrawInfo& d_in) {
   // texture, which is legal while depth testing and writes are off. Detaching
   // the unused attachment lets the draw run instead of being declined as
   // self-sampling: Skyrim's grading pass does exactly this, and dropping it
-  // left the display buffer showing ungraded content on those frames -- the
+  // left the display buffer showing ungraded content on those frames, so the
   // frame alternated between graded and raw as the pass came and went.
   bool detach_depth = false;
   if (d_sw.depth_base && !d_sw.depth_test_enable && !d_sw.depth_write_enable) {
@@ -151,7 +151,7 @@ void Draw(Renderer& renderer, const DrawInfo& d_in) {
   // so a depth-only pass has nothing it can contribute here. It used to open a
   // region on an RT keyed at address 0 whose geometry followed whichever draw
   // touched it last, and then render a 1020x1020 shadow pass into a 1470x827
-  // attachment -- rendering outside the attachment, which is undefined and
+  // attachment, rendering outside the attachment, which is undefined and
   // takes the device down during GTA:SA's level load.
   if (!d.rt_base)
     return;

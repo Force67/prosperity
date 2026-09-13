@@ -85,7 +85,7 @@ void setRetTrace(uintptr_t addr, const char *label, bool isTest = false);
 
 // DELTA_FNWATCH="off:label,...": int3 hit-COUNTER at guest function entries (push
 // rbp). Unlike setOrderTrace (per-hit log), this only counts hits per address and
-// a background thread prints running totals every 2s -- safe at any call frequency
+// a background thread prints running totals every 2s, safe at any call frequency
 // (e.g. a retry-churn loop). setFnWatch registers; startFnWatchPrinter spawns the
 // printer once. Used to answer "does function X ever run / how fast does it churn".
 void setFnWatch(uintptr_t addr, const char *label);
@@ -93,7 +93,7 @@ void startFnWatchPrinter();
 
 // DELTA_GUEST_POPCNT=<hex addr>:<hex bytes>[:<ms>]: report a guest bitmap's
 // population count, and its first/last set bit, on an interval (see crash.cpp).
-// Tells a map that drains from one that was never filled -- which a single dump
+// Tells a map that drains from one that was never filled, which a single dump
 // at the crash cannot.
 void startPopcntPrinter(uintptr_t addr, size_t bytes, unsigned everyMs);
 

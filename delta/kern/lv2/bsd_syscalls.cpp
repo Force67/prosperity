@@ -192,7 +192,7 @@ int PS4ABI sys_regmgr_call(u32 op, u32 id, void *result, void *value,
   if (op == 0x1b || op == 0x1d)  // non-system get str / get bin
   {
     // {u64 encoded_id, u32 index, u32 pad, u64 size, u8 data[size]}, with the
-    // payload returned in place -- `type` is the whole struct, 0x18 + size.
+    // payload returned in place; `type` is the whole struct, 0x18 + size.
     auto *bin = static_cast<nonsys_bin *>(value);
     if (type < sizeof(nonsys_bin) || bin->size != type - sizeof(nonsys_bin))
       return 0x800D0203;
@@ -310,7 +310,7 @@ int PS4ABI sys_write(u32 fd, const void *buf, size_t nbytes) {
       return static_cast<int>(nbytes);
     // Through the logger a line at a time, like sys_writev: host stdout is
     // usually a redirected file, so a plain fwrite sits in a host stdio buffer
-    // that a killed run never flushes -- a title that stops printing and one
+    // that a killed run never flushes, so a title that stops printing and one
     // whose last 4 KiB were lost look identical. Titles print this fd a
     // character at a time, hence the accumulator.
     static std::mutex mtx;

@@ -28,7 +28,7 @@ constexpr u32 kSkuFlagFull = 0;
 // Free space reported for both areas, in KiB. Deliberately 1 GiB and not
 // something larger: a caller that converts KiB to bytes in 32 bits wraps to
 // exactly 0 for any value that is a multiple of 4 GiB, which reads as "no
-// space". 1 GiB is 0x40000000 bytes -- positive even as a signed 32-bit count,
+// space". 1 GiB is 0x40000000 bytes, positive even as a signed 32-bit count,
 // and far more than a new world needs.
 constexpr u64 kAvailableKb = 1024ull * 1024;
 

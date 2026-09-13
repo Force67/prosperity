@@ -75,7 +75,7 @@ i32 ajmDevice::ioctl(u32 cmd, void *data) {
     // pointers it calls during init). A zeroed result makes FMOD accept the
     // register but then crash calling a null descriptor fn; a non-zeroed (stale)
     // result makes FMOD report FMOD_ERR_INTERNAL. Getting past this needs a real
-    // (or convincingly faked) ATRAC9/AJM descriptor -- see DELTA_AJM_RESULT probe.
+    // (or convincingly faked) ATRAC9/AJM descriptor, see DELTA_AJM_RESULT probe.
     // EXPERIMENT (DELTA_AJM_RESULT=N): write a result pattern to the batch output
     // so FMOD's codec-register init accepts it. N selects the pattern.
     if (const char *e = kAjmResult;

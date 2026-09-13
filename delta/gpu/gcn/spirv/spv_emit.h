@@ -10,7 +10,7 @@
  * rewrite + performance passes to legalise and optimise the naive output.
  *
  * Scope: enough of SPIR-V 1.3 (Vulkan 1.1) to express the shaders the
- * recompiler needs -- scalar/vector int+float arithmetic, GLSL.std.450
+ * recompiler needs: scalar/vector int+float arithmetic, GLSL.std.450
  * ext-inst, sampled images, input/output/private/pushconstant/uniform/
  * storage-buffer/workgroup variables, structured control flow. Not a general
  * assembler.
@@ -147,7 +147,7 @@ class Module {
   void Kill();  // OpKill (PS discard)
 
  private:
-  // Packed cache key: kind (8 bits) | a (32 bits) | b (24 bits). Exact -- every
+  // Packed cache key: kind (8 bits) | a (32 bits) | b (24 bits). Exact, every
   // cached entity maps to a unique key, no hashing of the payload.
   enum class CacheKind : u8 {
     kVoid,

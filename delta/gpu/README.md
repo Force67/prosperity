@@ -17,7 +17,7 @@ tests/          unit tests + the layering check
 
 Dependencies run one way: `ps4/` and `ps5/` depend on `gcn/` and `rhi/`, `vulkan/` depends
 on `rhi/` (plus the `gcn/` recompiled-program and detile types it consumes),
-and `rhi/` includes nothing in this module -- though `command.h` does
+and `rhi/` includes nothing in this module, though `command.h` does
 forward-declare `gcn::Recompiled`/`gcn::RecompiledCs`, so the seam is
 backend-free, not recompiler-free. A command processor decodes guest packets
 into an `rhi::DrawInfo` or `rhi::ComputeInfo` and calls the entry points in
@@ -35,12 +35,12 @@ include compiles and only `gpu_layering` rejects it.
 
 `command.h` is the contract: one decoded draw or dispatch, expressed in guest
 terms (addresses, GCN data/number formats, GNM blend words). It is deliberately
-not a "translated" description -- the backend owns every mapping decision, so
+not a "translated" description: the backend owns every mapping decision, so
 both command processors stay free of graphics API policy.
 
 `renderer.h` is the operation set: a `Renderer` value (a struct with a couple
 of cheap queries; all backend state hangs off its opaque `BackendState*`)
-operated on by free functions -- bring-up (`Init`), the frame lifecycle
+operated on by free functions: bring-up (`Init`), the frame lifecycle
 (`BeginFrame` / `Draw` / `EndFrame`), compute (`Dispatch` and the guest-memory
 coherency flushes), and `NoteMemoryFill` for the CP DMA fills a title uses in
 place of a clear packet. `DefaultRenderer()` hands out the process-wide
@@ -129,9 +129,9 @@ everything below it is gfx10.3 and RDNA2:
 | `rdna/` | the RDNA2 decoder, descriptor decode and SPIR-V translator (see `ps5/README.md`) |
 
 `reg_state` has no PS4 counterpart because the PS4 has nothing to hide there:
-Gnm puts register values in the packet. AGC mostly does not -- it restores
+Gnm puts register values in the packet. AGC mostly does not: it restores
 shadow images and submits blocks of (offset, value) entries whose layout is not
-documented anywhere and was read back out of the command stream -- so that
+documented anywhere and was read back out of the command stream, so that
 guesswork is one unit rather than a third of the walk.
 
 ## Debugging a frame
@@ -178,7 +178,7 @@ enforced by the local `.clang-format` / `.clang-tidy` (naming) and by
 Deliberate deviations from Chromium:
 
 - (The module uses Chromium's `.cc` extension; the rest of the repo stays
-  `.cpp` — the shared `add_delta_module` glob accepts both.)
+  `.cpp`. The shared `add_delta_module` glob accepts both.)
 - Unit tests live in `tests/`, not next to the code (repo-wide
   `add_delta_module`/CTest wiring).
 - Hardware mnemonics keep AMD's canonical spelling (`IT_DRAW_INDEX_2`,

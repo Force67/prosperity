@@ -27,7 +27,7 @@ constexpr size_t kTcbSize = 0x40;
 // Stand-in for libkernel's `struct pthread`. Only what the mutex path touches
 // before libkernel installs its own thread matters: the id at +0 (which becomes
 // the mutex owner word via `lock cmpxchg`) and the owned-mutex queues, which are
-// TAILQs -- an empty one has tqh_last pointing at its own tqh_first, so a zeroed
+// TAILQs: an empty one has tqh_last pointing at its own tqh_first, so a zeroed
 // head faults on the first insert. Offsets read off libkernel's own thread
 // initializer (fw 01.14.00 libkernel+0x37940..0x37992), which TAILQ_INITs
 // exactly these two heads.
@@ -39,9 +39,9 @@ constexpr size_t kMutexQueues[] = {0x1a0, 0x1b0};
 
 // The Prospero kernel hands a new process's initial thread a TCB before it jumps
 // to libkernel's entry, and libkernel relies on that: pthread_mutex_lock loads
-// the current thread from fs:0x10 with no null check, on its very first
-// instruction. That first lock comes from libc's init -- which libkernel runs
-// BEFORE the sysarch(AMD64_SET_FSBASE) that installs its own TCB -- so entering
+// the current thread from fs:0x10 with no null check, on its first
+// instruction. That first lock comes from libc's init, which libkernel runs
+// BEFORE the sysarch(AMD64_SET_FSBASE) that installs its own TCB, so entering
 // the guest with a zero fs base faults any title whose libc init locks, e.g. one
 // installing a sceLibcParam malloc replacement.
 //

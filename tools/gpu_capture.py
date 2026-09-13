@@ -357,7 +357,7 @@ def cmd_zero(args):
     """Everything the frame is silently reading as zero.
 
     A binding that does not resolve is bound to a zero window or a 1x1 default,
-    which is indistinguishable in the output from data that is genuinely zero --
+    which is indistinguishable in the output from data that is genuinely zero –
     so it has to be named."""
     events = load(args.capture)
     print('sampler bindings that resolved to the default (1x1 white/zero):')

@@ -385,13 +385,9 @@ void HandleReleaseMem(const u32* body, u32 count) {
 // EVENT_WRITE with an address is an occlusion/statistics query: the CP samples
 // a counter and writes it as a 64 bit value whose TOP BIT is the done flag.
 // body: eventCtrl (EVENT_TYPE[5:0], EVENT_INDEX[11:8]), addrLo, addrHi.
-//
-// GTA:SA polls exactly that bit -- 16 query slots ANDed against
-// 0x8000000000000000 -- before it will render anything, and never got it: the
-// opcode was unhandled, so 289 of these packets a frame wrote nothing and the
-// title sat waiting on queries the GPU had already "run".
-//
-// The value is a monotonically increasing counter, not a constant. These slots
+// GTA:SA polls exactly that bit (16 query slots ANDed against
+// 0x8000000000000000) before it will render anything.
+// The value is a monotonically increasing counter, not a constant: the slots
 // come in begin/end pairs eight bytes apart and the caller reads end - begin as
 // "samples that passed"; writing the same number to both would answer "nothing
 // was visible" and cull the frame just as thoroughly as never writing at all.
@@ -415,7 +411,7 @@ void HandleEventWrite(const u32* body, u32 count) {
   // ZPASS_DONE does not write ONE counter: the CP fans it out to one qword per
   // render backend, at a 16 byte stride, and the caller sums them. Liverpool
   // has 8 RBs, so a begin packet at `base` fills base + i*16 and the matching
-  // end packet at base+8 fills base + i*16 + 8 -- which is exactly the pair
+  // end packet at base+8 fills base + i*16 + 8, which is exactly the pair
   // stride GTA:SA's poll walks. Writing a single qword leaves fourteen of its
   // sixteen slots at zero and the poll never completes.
   constexpr u32 kRenderBackends = 8;
@@ -654,13 +650,12 @@ u32 WalkDcb(rhi::Renderer& renderer,
     if (type == Pm4Type::kType2 || hdr == 0) {
       // Type-2 NOPs and the zero-dword alignment padding Gnm sprinkles between
       // packets; real packets resume after it.
-      //
       // NOT the all-ones filler an async compute ring is initialised with:
       // 0xFFFFFFFF is a well-formed type-3 header (opcode 0xff, count 16384),
       // so it falls through to the packet path, where the truncation guard
       // stops the walk and every dispatch past the untouched ring is dropped.
-      // Skipping it here would change which dispatches run, so that is a fix to
-      // make and measure on its own.
+      // Skipping it here would change which dispatches run, so that is a fix
+      // to make and measure on its own.
       i += 1;
       continue;
     }

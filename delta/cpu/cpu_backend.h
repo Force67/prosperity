@@ -119,15 +119,15 @@ uintptr_t makeGuestReturnHook(void *realTarget, u32 hookId, void *loggerFn,
                               const char *name = nullptr);
 
 // Build a callable copy (trampoline) of an internal guest function whose first
-// `prologueLen` bytes will be overwritten by an entry detour. Returns a
-// guest-executable address that runs the original from the top and continues
-// into its body; pass it as `realTarget` to makeGuestReturnHook to wrap an
-// eboot-internal (non-import) function. Native backend: returns the original
-// entry unchanged. See makeGuestTrampoline in fex_backend.cpp for constraints.
+// `prologueLen` bytes will be overwritten by an entry detour: the copy runs the
+// original from the top and continues into its body, so it can serve as
+// `realTarget` for makeGuestReturnHook on an eboot-internal (non-import)
+// function. Native backend returns the original entry unchanged. See
+// makeGuestTrampoline in fex_backend.cpp for constraints.
 // Wrap a callable guest function so a native lock is held across the whole call
 // (lockFn before, unlockFn after). Lets the host serialise a guest critical
-// section, and -- because a failed try_lock inside lockFn names a second thread
-// already inside -- measure deterministically whether one was ever needed.
+// section and, because a failed try_lock inside lockFn names a second thread
+// already inside, measure deterministically whether one was ever needed.
 uintptr_t makeGuestLockWrapper(void *realTarget, void *lockFn, void *unlockFn,
                                const char *name);
 
@@ -163,8 +163,8 @@ void guestThreadFsBases(std::vector<u64> &out);
 const u64 *currentGuestGregs();
 
 // The 16 guest GPRs read out of a SIGNAL CONTEXT taken inside JIT'd code, in
-// FEXCore::X86State::REG_* order. Unlike currentGuestGregs() -- which reads the
-// in-memory thread state and is therefore only accurate at block boundaries --
+// FEXCore::X86State::REG_* order. Unlike currentGuestGregs(), which reads the
+// in-memory thread state and is therefore only accurate at block boundaries, this
 // this is exact at the faulting instruction, because FEX's arm64 backend pins
 // every guest GPR to a fixed host register (its static register allocation).
 // Returns false when the host PC is not in a JIT code buffer, or on a backend

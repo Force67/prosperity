@@ -12,8 +12,8 @@
  *
  * sceSystemServiceParamGetInt is how a title reads the console's system
  * settings, the system LANGUAGE above all. There is no console to ask, and the
- * value that means "Japanese" is 0 -- which is also what a title reads when the
- * call fails -- so a title comes up in Japanese unless we answer.
+ * value that means "Japanese" is 0, which is also what a title reads when the
+ * call fails, so a title comes up in Japanese unless we answer.
  */
 
 #include "../../vprx.h"

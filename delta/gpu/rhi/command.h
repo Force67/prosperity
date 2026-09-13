@@ -4,7 +4,7 @@
  * PS4Delta : PS4/PS5 emulation and research project
  *
  * The work a command processor hands the renderer: one decoded draw, or one
- * decoded compute dispatch. Backend-agnostic by construction -- nothing here
+ * decoded compute dispatch. Backend-agnostic by construction: nothing here
  * names a graphics API type, so the PS4 (PM4/GCN) and PS5 (AGC/RDNA2) command
  * processors compile without seeing the backend at all.
  *
@@ -23,7 +23,7 @@ namespace gpu::rhi {
 
 // One vertex attribute for the recompiled-shader path: where the recompiled VS
 // reads input `location` from within a vertex buffer binding. `binding` indexes
-// DrawInfo::vbufs -- multiple attributes that interleave in one buffer share a
+// DrawInfo::vbufs; multiple attributes that interleave in one buffer share a
 // binding (distinct offsets); attributes fed from separate buffers each get
 // their own binding (SotC streams position/normal/uv from distinct buffers).
 struct VertexAttr {
@@ -218,7 +218,7 @@ struct DrawInfo {
   bool depth_clear_draw = false;
   bool stencil_clear_draw = false;
   u32 render_control = 0;  // raw DB_RENDER_CONTROL, for diagnosis
-  // The Z surface's OWN padded geometry, from DB_DEPTH_SIZE -- not the colour
+  // The Z surface's OWN padded geometry, from DB_DEPTH_SIZE, not the colour
   // target's. A title routinely binds a half-resolution depth buffer to a
   // full-resolution pass, and sizing the depth image from the colour target
   // makes its guest footprint several times too large, which swallows
@@ -236,19 +236,19 @@ struct DrawInfo {
   // GNM's fast clear: a RECT_LIST draw with no pixel shader and no vertex
   // attributes, whose colour lives in CB_COLORn_CLEAR_WORD0/1 rather than in
   // vertex data. Rasterising it writes nothing, so a backend that does not
-  // recognise it leaves the target holding the previous frame -- which is how
+  // recognise it leaves the target holding the previous frame, which is how
   // SotC's world colour target accumulated one fullscreen pass per frame until
   // its value tracked the frame counter.
   bool is_clear_rect = false;
   // The rectangle a fast clear covers, from the generic scissor (x in the low
   // half, y in the high half of each word). A GNM fast clear carries no vertex
   // attributes, so this is the ONLY thing that says how much of the target it
-  // touches -- treating a partial clear as a whole-attachment one erases
+  // touches. Treating a partial clear as a whole-attachment one erases
   // everything else that is in there.
   // MRT0's real surface geometry, from CB_COLOR0_PITCH.TILE_MAX and
   // CB_COLOR0_SLICE.TILE_MAX (the colour-target analogue of DB_DEPTH_SIZE).
   // rt_w/rt_h come from the screen scissor, which is the DRAWN region and can
-  // be a fraction of the surface -- a pass that fills a strip a slice at a time
+  // be a fraction of the surface: a pass that fills a strip a slice at a time
   // shrinks it on every draw.
   u32 rt_surf_w = 0, rt_surf_h = 0;
   // The same, per bound target. MRT slots can have different geometries, and
@@ -260,7 +260,7 @@ struct DrawInfo {
   u32 clear_tl = 0, clear_br = 0;
   // The other two scissors in force for the same draw. The generic scissor is
   // one of three the hardware intersects, and a title that leaves it at its
-  // reset value (P.T. does -- it reads (0,0)-(0,0) on every fast clear) pins
+  // reset value (P.T. does, it reads (0,0)-(0,0) on every fast clear) pins
   // the rectangle with the window or screen scissor instead.
   u32 clear_window_tl = 0, clear_window_br = 0;
   u32 clear_screen_tl = 0, clear_screen_br = 0;
@@ -281,7 +281,7 @@ struct DrawInfo {
   float viewport_y_scale = 0, viewport_y_offset = 0;
   // Depth range, same registers: window_z = ndc_z * z_scale + z_offset. A
   // title that does not use the whole [0,1] range writes depth a shader later
-  // reads back, so ignoring this does not merely shift the depth test -- it
+  // reads back, so ignoring this does not merely shift the depth test: it
   // hands every depth-sampling pass the wrong numbers.
   float viewport_z_scale = 1.0f, viewport_z_offset = 0.0f;
 
@@ -303,7 +303,7 @@ struct DrawInfo {
   // Vulkan guarantees 16 vertex input attributes and every desktop driver
   // reports far more. A shader declares an input for every attribute its fetch
   // shader reads, and stopping at 8 left the ones past it with no attribute
-  // description at all -- the pipeline then has no Location 8/9/10 for inputs
+  // description at all, so the pipeline then has no Location 8/9/10 for inputs
   // the module does have (VUID-VkGraphicsPipelineCreateInfo-Input-07904) and
   // those vertex inputs read undefined.
   static constexpr u32 kMaxVertexAttrs = 16;

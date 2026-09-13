@@ -90,13 +90,13 @@ inline bool IsReadableRange(u64 address, u64 bytes) {
 
 // The same answer, remembered until the generation advances.
 //
-// The probe above costs three syscalls, and a draw asks it about the same
-// handful of ranges (its shader code, its index buffer, its descriptor tables)
-// every single time -- at 92 draws a frame that was most of the per-draw cost.
-// The generation is advanced once per frame, so a mapping the guest tears down
-// mid-frame can still be reported readable for the rest of that frame; the
-// cbuffer path in vk_draw_recomp already makes exactly that bargain. Use the
-// uncached form for anything that must see a teardown immediately.
+// The probe costs three syscalls and a draw asks it about the same handful of
+// ranges (shader code, index buffer, descriptor tables) every time; at 92 draws
+// a frame that was most of the per-draw cost. The generation advances once per
+// frame, so a mapping the guest tears down mid-frame can still read as
+// readable for the rest of that frame (the cbuffer path in vk_draw_recomp
+// already makes that bargain). Use the uncached form when a teardown must be
+// seen immediately.
 inline u64& MemoryGeneration() {
   static u64 gen = 1;
   return gen;

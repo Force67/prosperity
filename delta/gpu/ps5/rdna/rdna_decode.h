@@ -58,7 +58,7 @@ Program ReachableProgram(const Program& program);
 
 // Shared, cached ReachableProgram(DecodeShader(...)) for the per-draw resource
 // walks. TrackTextures and ResolveBuffers each decoded the same shader, so one
-// draw decoded up to 16 KB of ISA three times over -- 5.4 ms a frame in Dead
+// draw decoded up to 16 KB of ISA three times over, 5.4 ms a frame in Dead
 // Cells. Keyed by address; entries revalidate against a hash of the code, at
 // most once per generation, so an in-place rewrite is still picked up. Returns
 // a shared_ptr so an entry stays alive across an eviction. Not thread-safe:

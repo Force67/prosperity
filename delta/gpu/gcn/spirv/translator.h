@@ -150,7 +150,7 @@ struct Translator {
   // ---- wave masks ------------------------------------------------------
   // EXEC and every v_cmp result are 64-bit LANE MASKS on the hardware, and
   // shaders read them as numbers, not as booleans: an NGG program gates its
-  // per-primitive work with `v_cmpx_gt_u32 vcc_lo, v_lane` -- true for lane L
+  // per-primitive work with `v_cmpx_gt_u32 vcc_lo, v_lane`, true for lane L
   // exactly when the mask has more than L bits' worth of value. Modelling a
   // mask as this invocation's single bit makes that gate pass for lane 0 only,
   // and the whole wave's vertex staging collapses onto one lane.
@@ -250,7 +250,7 @@ struct Translator {
   // shuffle. Compute has a second channel: a Workgroup array indexed by
   // LocalInvocationIndex, which is exactly the order GCN packs threads into
   // waves. It costs two barriers, so it is only usable where every invocation
-  // reaches the same dynamic instance -- `uniform_here`, set per instruction
+  // reaches the same dynamic instance. `uniform_here`, set per instruction
   // from the same analysis that places the LDS barriers.
   Id lane_id = 0;    // this invocation's lane within its wave (0..63)
   u32 wave_size = 64;  // GCN uses 64; RDNA can request 32 at dispatch.
@@ -359,8 +359,8 @@ struct Translator {
   // ---- SGPR spill slots ------------------------------------------------
   // A shader out of scalar registers parks scalars in the LANES of a VGPR with
   // v_writelane_b32 and reloads them with v_readlane_b32. Both scalar operands
-  // of that pair are wave-uniform by encoding -- neither the value nor the
-  // lane may be a VGPR -- so every invocation writes and reads exactly the
+  // of that pair are wave-uniform by encoding (neither the value nor the
+  // lane may be a VGPR), so every invocation writes and reads exactly the
   // same thing, and a Private array per spilled VGPR reproduces the wave's
   // lane file exactly, with no cross-lane channel and no lane index. That
   // matters most in a graphics stage, where no lane index exists at all: the
@@ -415,7 +415,7 @@ struct Translator {
   // and likewise for log/rsq). Both must touch ONLY infinities: a GLSL
   // FMin/FMax/FClamp against +/-FLT_MAX would also fold a NaN into a finite
   // bound, because GLSL's min/max return the non-NaN operand. Selecting on
-  // OpIsInf leaves NaN -- and every finite value -- exactly as produced.
+  // OpIsInf leaves NaN, and every finite value, exactly as produced.
   Id IsInf(Id f) { return m.Emit(spv::Op::OpIsInf, t_bool, {f}); }
   Id FLt(Id a, Id b) { return m.Emit(spv::Op::OpFOrdLessThan, t_bool, {a, b}); }
   Id FGt(Id a, Id b) {
@@ -591,7 +591,7 @@ struct Translator {
 
   // Buf { uint data[]; }, shared by every storage buffer the stage declares.
   // The type ids are deduplicated by the builder, so decorating a second copy
-  // decorates the same id twice -- which spirv-val rejects outright.
+  // decorates the same id twice, which spirv-val rejects outright.
   Id EnsureRawBlockType() {
     if (!gfx_buf_type) {
       const Id run = m.TypeRuntimeArray(t_u);
@@ -674,8 +674,8 @@ struct Translator {
     const Id lo = SrcRaw(field, literal);
     // An integer inline constant is a 64-bit value in a 64-bit operand, so
     // -1..-16 fill the high dword too. Sign-extending 0..64 is a no-op, so this
-    // needs no per-op opt-in. Without it `s_lshr_b64 exec, -1, n` -- the NGG
-    // prologue's lane mask -- yields EXEC 0 and masks off the whole shader.
+    // needs no per-op opt-in. Without it `s_lshr_b64 exec, -1, n`, the NGG
+    // prologue's lane mask, yields EXEC 0 and masks off the whole shader.
     if (field >= 128 && field <= 208)
       return Sar(lo, U32(31));
     return sign_extend ? Sar(lo, U32(31)) : U32(0);
@@ -742,13 +742,13 @@ inline void SeedPsInputVgprs(Translator& t,
 struct StageContext {
   bool is_ps = false;
   // SPI_PS_INPUT_CNTL_0..31: which VS PARAMETER EXPORT each PS input attribute
-  // slot reads (OFFSET, bits [5:0]). The mapping is NOT the identity -- a VS
+  // slot reads (OFFSET, bits [5:0]). The mapping is NOT the identity: a VS
   // commonly exports the clip position as param0 and the real texture
   // coordinate as param1, and points the PS's attr0 at param1. Null means no
   // mapping was supplied and attr_i falls back to param_i.
   const u32* ps_in_cntl = nullptr;
   // SPI_PS_IN_CONTROL.NUM_INTERP: how many of those 32 slots are MEANINGFUL.
-  // Slots at or above it are don't-care and read 0, which is not a mapping --
+  // Slots at or above it are don't-care and read 0, which is not a mapping:
   // honouring them would send every such attribute to Location 0.
   u32 ps_num_interp = 0;
   // The VS parameter exports that actually EXIST, ascending. OFFSET indexes the
@@ -798,7 +798,7 @@ struct StageContext {
   u32 mrt_uint_mask = 0;
   // Bit n set = the pass binds colour attachment n. An export to a target the
   // pass does not bind writes nowhere, and declaring an Output the pipeline has
-  // no attachment for is a value Vulkan discards -- which the layer reports on
+  // no attachment for is a value Vulkan discards, which the layer reports on
   // every such draw (Undefined-Value-ShaderOutputNotConsumed).
   u32 mrt_bound_mask = 0xFF;
   u32 tex_uint_mask = 0;
@@ -864,7 +864,7 @@ struct StageContext {
 
   // Attributes that v_interp_mov_f32 reads as P10 or P20. Those are the
   // per-vertex DELTAS (P1-P0, P2-P0), which an interpolated fragment input
-  // cannot supply, so the whole Location is declared PerVertexKHR -- an
+  // cannot supply, so the whole Location is declared PerVertexKHR, an
   // array[3] of the triangle's vertex values. A Location cannot be both that
   // and an ordinary interpolated input, and two variables cannot share one, so
   // the choice is per attribute: everything here goes through the array (its
@@ -882,7 +882,7 @@ struct StageContext {
   Id lds_var = 0;           // uint array backing LDS (0 = no LDS)
   u32 lds_dwords = 0;  // its length
   // Workgroup in a CS. A fragment shader cannot declare Workgroup storage at
-  // all -- SPIR-V allows that class only in GLCompute/Kernel/Task/Mesh -- so a
+  // all. SPIR-V allows that class only in GLCompute/Kernel/Task/Mesh, so a
   // graphics stage backs LDS with Private, one copy per invocation. That is
   // exact precisely when every address is the lane's OWN slot, which is what
   // `v_mbcnt_{lo,hi}(-1)` computes: the ISA counts bits in the explicit vsrc

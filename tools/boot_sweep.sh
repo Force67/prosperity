@@ -65,7 +65,7 @@ for entry in "${TITLES[@]}"; do
       timeout -k 5 --signal=KILL "$SECS" "$BIN" "$path" ) >"$log" 2>&1
   pkill -9 -x ps4delta 2>/dev/null   # ignores SIGTERM; -x so the sweep does not match itself
   mods=$(grep -c 'get_info_ex' "$log")
-  # "did the GPU produce anything" -- a flip or a presented frame.
+  # "did the GPU produce anything": a flip or a presented frame.
   frames=$(grep -cE '\[(flip|gpuvk|snap)\]' "$log")
   fps=$(grep -oE '[0-9]+\.[0-9]+ fps' "$log" | tail -1 | cut -d' ' -f1)
   printf '%-14s %7s %7s %6s %s\n' "$label" "$mods" "$frames" "${fps:--}" "$(digest "$log")"

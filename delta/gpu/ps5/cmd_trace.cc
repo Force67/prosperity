@@ -98,7 +98,7 @@ u32 g_op_hist[256] = {};
 
 // The opcodes the walk did not act on. An opcode nothing looked at is state or
 // a draw the title expects to happen, and the only symptom downstream is
-// whatever it never set -- so a skip we chose records why, and one we did not
+// whatever it never set, so a skip we chose records why, and one we did not
 // choose stands out as the census entry worth chasing.
 bool g_skipped[256] = {};
 const char* g_skip_reason[256] = {};
@@ -217,7 +217,7 @@ void TraceRegImage(u32 base, u64 image, const u32* body, u32 count) {
   const u32* src = reinterpret_cast<const u32*>(image);
   // Coherency census: a title that drives its whole context through register
   // shadows is invisible if those images read zero. Sample one late, once
-  // rendering has started -- an early shadow may be empty simply because it
+  // rendering has started; an early shadow may be empty because it
   // has not.
   static int s_img_n = 0;
   if (base == kContextRegBase && ++s_img_n >= 100 && s_img_n <= 106) {
@@ -634,7 +634,7 @@ void TraceRecompileDone(bool ok) {
 void TraceRecompileFailed(u64 vs_addr, u64 ps_addr) {
   static int n = 0;
   if (n++ < 32)
-    BASE_LOGI("agc", "recompile FAILED vs={:#x} ps={:#x} -- draw dropped",
+    BASE_LOGI("agc", "recompile FAILED vs={:#x} ps={:#x}, draw dropped",
               vs_addr, ps_addr);
 }
 
@@ -673,7 +673,7 @@ void TraceAttr(u32 index,
 
 // A raw (set-2) buffer the shader indexes itself: whether the draw could name
 // it at all. A shader reading an unbound one reads zeros, which is
-// indistinguishable from a shader whose maths produced zero -- and an NGG
+// indistinguishable from a shader whose maths produced zero, and an NGG
 // vertex program gates its whole body on such a read.
 void TraceRawBufBinding(bool vertex_stage,
                         u32 binding,
@@ -765,7 +765,7 @@ void TraceVertexDump(const rhi::DrawInfo& d,
       128);
   static int n = 0;
   // A procedural pass has no attributes and no vertex buffer, and every
-  // composite and post draw in a modern title is one -- so the dump has to
+  // composite and post draw in a modern title is one, so the dump has to
   // cover them too, or the draws that matter most are the ones it cannot show.
   const bool has_vertices =
       d.num_vattrs && d.vertex_data && vertex_bytes &&
@@ -1020,7 +1020,7 @@ void TraceCsUnresolved(u64 cs_addr, const gcn::CsResource& res, u32 ud_dwords) {
   if (CsReport())
     BASE_LOGI("csgpu",
               "CS @{:#x} bind={} kind={} s{} pc={:#x} has no resolved descriptor "
-              "({} user-data dwords) -- dispatch skipped",
+              "({} user-data dwords); dispatch skipped",
               cs_addr, res.binding, res.kind, res.base_sgpr, res.use_pc,
               ud_dwords);
 }
@@ -1063,7 +1063,7 @@ void TraceCsInvalidRange(u64 cs_addr,
 
 void TraceCsTooManyResources(u64 cs_addr, u32 max_resources) {
   if (CsReport())
-    BASE_LOGI("csgpu", "CS @{:#x} needs more than {} resources -- dispatch "
+    BASE_LOGI("csgpu", "CS @{:#x} needs more than {} resources, dispatch "
                        "skipped",
               cs_addr, max_resources);
 }

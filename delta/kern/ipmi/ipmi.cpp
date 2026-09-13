@@ -150,7 +150,7 @@ bool traceOn() {
 }
 
 // DELTA_IPMI_HIST: per-op and per-method call counts, dumped every 15s.
-// Deliberately lock-free: a mutex-guarded version throttled the very spin it was
+// Deliberately lock-free: a mutex-guarded version throttled the spin it was
 // meant to measure, so the numbers lied.
 void histogram(u32 op, const InvokeRequest *req) {
   if (!kIpmiHist)
@@ -510,16 +510,13 @@ int managerCall(u32 op, u32 kid, void *out, void *in,
   // (callers libSceUserService+0x1c45 -> +0x1ded) for the daemon to publish a
   // login/logout event. Request block insize 0x20: +0x00 flag index,
   // +0x04 pattern, +0x08 and +0x10 out pointers, +0x18 size.
-  //
-  // There is one local user and it is permanently signed in, so no event is ever
-  // pending and the wait must report UNSATISFIED. That is not the same as the
-  // generic "empty success": answering success says an event arrived, so
-  // sceUserServiceGetEvent allocates an event record out of libkernel's 16 MiB
-  // SceKernelInternalMemory arena, finds nothing in it, and retries -- leaking
-  // per iteration until libkernel prints "Internal Memory is running out",
-  // throws std::bad_alloc, and std::terminate lands on a UD2 in
-  // libSceLibcInternal. Failing the wait is what makes GetEvent return
-  // "no event" and let the caller proceed.
+  // One local user, permanently signed in, so no event is ever pending and the
+  // wait must report UNSATISFIED. Answering generic "empty success" instead
+  // makes sceUserServiceGetEvent allocate an event record out of libkernel's
+  // 16 MiB SceKernelInternalMemory arena, find nothing in it, and retry,
+  // leaking per iteration until libkernel throws std::bad_alloc and
+  // std::terminate lands on a UD2 in libSceLibcInternal. Failing the wait is
+  // what makes GetEvent return "no event" and let the caller proceed.
   case kWaitEventFlag:
     dumpManagerOp(op, kid, out, in, insize);
     // Leaves the wrapper's pre-set -1 result in place, which is what libSceIpmi
@@ -527,7 +524,7 @@ int managerCall(u32 op, u32 kid, void *out, void *in,
     return -1;
 
   // DELTA_IPMI_FAILOP=<op>: answer one op as a hard failure instead of "empty
-  // success". Kept as a research knob -- it is what separated a caller that
+  // success". Kept as a research knob: it is what separated a caller that
   // retries on failure from one that spins because we claimed success with no
   // data, and the next unknown op will need the same distinction drawn.
   default:

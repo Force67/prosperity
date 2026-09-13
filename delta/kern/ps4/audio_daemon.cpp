@@ -4,7 +4,7 @@
  * System audio daemon stand-in for LLE libSceAudioOut. See audio_daemon.h.
  *
  * THE PROTOCOL (reverse-engineered from the 11.00 module and cross-checked
- * against live memory; the field table below is the part that is established --
+ * against live memory; the field table below is the part that is established –
  * see the "unverified" notes for the part that is not).
  *
  * On the first sceAudioOutOpen the module creates:
@@ -13,7 +13,7 @@
  *                           port slots of 0x250 bytes; slot k at 0x20+k*0x250.
  *                           NOTE: it is ftruncate'd to only 0xf28 and relies on
  *                           page rounding, so never size it from the ftruncate
- *                           length -- the real extent is 0x20+26*0x250 = 0x3c40.
+ *                           length; the real extent is 0x20+26*0x250 = 0x3c40.
  *   "/shm_<pid>_<idx>_A"    one per open port, always 0x10000 bytes, holding
  *                           exactly ONE block of samples at offset 0. Not a ring
  *                           and not cursor'd: submit() memcpy's to offset 0 every
@@ -24,7 +24,7 @@
  *   +0x00 u64  handshake token. The guest writes the slot's own guest address
  *              here after filling the sample region; its submit() returns BUSY
  *              (0x80260002) for as long as it is non-zero. THE DAEMON MUST ZERO
- *              IT -- that single store is the whole reason LLE was silent.
+ *              IT: that single store is the whole reason LLE was silent.
  *   +0x08 u32  bytes per frame (2/4/8/12/16/32)
  *   +0x0c 8xf  per-channel gain, 1.0 == SCE volume 32768 == 0 dB
  *   +0x2c u32  sample type: 0 = int16, 1 = float32, 2 = 32-bit
@@ -185,7 +185,7 @@ bool traceOn() {
 }
 
 // DELTA_AUDIO_DAEMON=0 turns the daemon off, leaving LLE libSceAudioOut silent
-// (the pre-daemon behaviour) -- useful when bisecting an LLE hang, since the
+// (the pre-daemon behaviour), useful when bisecting an LLE hang, since the
 // daemon is what unblocks the title's audio thread.
 bool enabled() {
   return kAudioDaemon;
@@ -210,7 +210,7 @@ bool plausibleSlot(u32 bpf, u32 type, u32 rate, u32 grain) {
     return false;
   // The module's format jump table yields whole frames only: s16 at 2 bytes,
   // f32 and 32-bit at 4 bytes, and the audio block tops out at 8 channels.
-  // Cross-checking the two rejects shapes the module cannot produce -- most
+  // Cross-checking the two rejects shapes the module cannot produce, most
   // importantly bpf=32 with s16 (16ch) and bpf=2 with f32 (0ch), either of
   // which used to pass the old value list and open a nonsense sink channel
   // count. The kernel's own PCM path (kernel_ps4.elf.c) exposes no wider
@@ -277,7 +277,7 @@ void daemonMain() {
           if (!p.badFormat) {
             p.badFormat = true;
             BASE_LOGI("audiod",
-                      "slot {} declares bpf={} type={} rate={} grain={} -- not "
+                      "slot {} declares bpf={} type={} rate={} grain={}; not "
                       "a shape this module can produce, leaving it alone",
                       k, bpf, type, rate, grain);
           }
@@ -286,7 +286,7 @@ void daemonMain() {
 
         // The slot records its own port index, and that index is also the
         // event-flag bit. We address slots by position and would otherwise
-        // never notice a disagreement -- which matters more than it looks:
+        // never notice a disagreement, which matters more than it looks:
         // a title whose mixer thread waits on SEVERAL bits at once with
         // AND|CLEARPAT (SotC waits on 0x1000c0 = bits 6|7|20) is only released
         // when every one of those bits is set, so granting the wrong bit
@@ -296,7 +296,7 @@ void daemonMain() {
           if (!p.badFormat) {
             p.badFormat = true;
             BASE_LOGI("audiod",
-                      "slot {} declares port index {} -- refusing to grant, the "
+                      "slot {} declares port index {}; refusing to grant, the "
                       "event-flag bit would be wrong",
                       k, word(kOffIndex));
           }
@@ -313,7 +313,7 @@ void daemonMain() {
             p.warnedNoArea = true;
             BASE_LOGI("audiod",
                       "port {} has a pending block but its sample region is {} "
-                      "(need {} bytes) -- not granting",
+                      "(need {} bytes); not granting",
                       k, it == areas.end() ? "not mapped" : "too small", need);
           }
           continue;  // sample region not mapped yet: come back next tick
@@ -352,7 +352,7 @@ void daemonMain() {
             // has never been observed here. It is a real format: the kernel's
             // PCM path (kernel_ps4.elf.c) supports 32-bit samples. Only the
             // host sink lacks a mapping, so drain the port rather than guess a
-            // conversion -- the title keeps running, just without this port's
+            // conversion. The title keeps running, just without this port's
             // audio.
             BASE_LOGI("audiod",
                       "port {} sample type {} is unverified; draining without "
@@ -365,7 +365,7 @@ void daemonMain() {
         block.assign(it->second.base, it->second.base + need);
 
         // Release the guest: zero the token, then grant the mix bit. Order
-        // matters -- the module re-tests the token as soon as it wakes.
+        // matters, since the module re-tests the token as soon as it wakes.
         *reinterpret_cast<volatile u64 *>(
             const_cast<u8 *>(slot) + kOffToken) = 0;
         std::atomic_thread_fence(std::memory_order_release);

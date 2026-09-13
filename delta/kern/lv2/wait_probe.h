@@ -2,7 +2,7 @@
  * PS4Delta : PS4/PS5 emulation and research project
  *
  * See wait_probe.cpp. DELTA_WAIT_PROBE reports guest threads parked in a wait
- * for longer than a couple of seconds -- the signature of a stalled title,
+ * for longer than a couple of seconds, the signature of a stalled title,
  * which a CPU profiler cannot show because a blocked thread burns no cycles.
  */
 

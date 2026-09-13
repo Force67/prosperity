@@ -67,7 +67,7 @@ public:
   void runGuestThread(void *handle) override {
     auto *t = static_cast<NativeThread *>(handle);
     // Give this guest thread a signal alt-stack so the fatal handler still runs
-    // (and dumps the guest RIP) when the guest blows or corrupts its own RSP --
+    // (and dumps the guest RIP) when the guest blows or corrupts its own RSP;
     // otherwise the kernel can't deliver SIGSEGV and silently core-dumps.
     krnl::installSigAltStack();
     krnl::setThreadFsBase(t->fsbase);

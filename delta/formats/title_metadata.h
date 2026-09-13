@@ -4,7 +4,7 @@
 #pragma once
 
 // The two files a title uses to describe itself, and nothing else: PS4's
-// binary param.sfo and PS5's param.json. Pure readers over a buffer -- they
+// binary param.sfo and PS5's param.json. Pure readers over a buffer: they
 // open nothing and know nothing about the container the buffer came from, so
 // the pkg, ffpkg and archive paths can all ask the same questions.
 

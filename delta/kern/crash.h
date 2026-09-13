@@ -32,7 +32,7 @@ void symbolize(uintptr_t addr, char *out, size_t n);
 void guestStackTrace(const char *tag, int maxFrames);
 
 // Walk a frame-pointer chain and symbolize each return address. Only works on
-// code built with frame pointers, which optimised guest code is not -- prefer
+// code built with frame pointers, which optimised guest code is not, so prefer
 // guestStackTrace for those; this is the cheap path when rbp is trustworthy.
 void backtrace(uintptr_t rbp);
 

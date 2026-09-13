@@ -6,7 +6,7 @@
  * How a register write reaches the register file.
  *
  * The PS4 has one way: the value is in the packet. AGC has four, and three of
- * them put it in guest memory instead -- a LOAD_*_REG restores a register
+ * them put it in guest memory instead, where a LOAD_*_REG restores a register
  * shadow image, a SET_*_REG_INDIRECT names a block of (offset, value) entries,
  * a type-0 packet writes an absolute run. Which of those a title uses is a
  * property of the title and not of the state it is setting: Skyrim never issues

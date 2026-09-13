@@ -328,7 +328,7 @@ int PS4ABI sys_evf_close(int id) { return sys_evf_delete(id); }
 // flag "sceAudioOutMix<pid>" for the console's audio daemon to say "block
 // taken". We host no daemon, so that wait never returns and the port produces
 // exactly one block, ever. Setting this makes any wait on that flag succeed
-// after <us> microseconds WITHOUT consuming anything -- just enough to keep the
+// after <us> microseconds WITHOUT consuming anything, just enough to keep the
 // mixer thread cycling so its ring can be observed. 0 = free-run. This is an
 // observation aid for reverse-engineering the ring, NOT a daemon.
 static long audioMixAckUs() {

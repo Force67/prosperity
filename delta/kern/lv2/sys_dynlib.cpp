@@ -40,8 +40,7 @@ DELTA_OPTION(bool, kVoLleFix, "DELTA_VO_LLE_FIX", false);
 
 namespace krnl {
 int PS4ABI sys_dynlib_dlopen(const char *) {
-  /*TODO: implement, however note that this function is only
-  present in devkits*/
+  /* devkit-only; retail titles never call it */
   return -SysError::eNOSYS;
 }
 
@@ -290,17 +289,13 @@ int PS4ABI sys_dynlib_load_prx(const char *path, u64 flags, int *pHandle,
   if (std::getenv("DELTA_LOADPRX_STACK"))
     guestStackTrace("load_prx", 10);
 
-  // Modules whose LLE module_start needs a backend we don't emulate yet fall into
-  // two groups by how the guest reacts to a failed load-start.
-  //
-  // kLoadOk: the application itself load-starts these directly and *asserts* that
-  // it succeeded (Doom64: `sceSysmoduleLoadModule(SCE_SYSMODULE_APP_CONTENT) ==
-  // SCE_OK`), aborting on any signalled failure. Report load-start SUCCESS with a
-  // real handle and merely skip running the LLE module_start (it's a preloaded
-  // dup of libSceAppContentUtil whose IPMI init is already scout-patched). These
-  // "worked" before only because the FEX syscall bridge used to drop the BSD
-  // carry flag so every errno read as success; now that the bridge signals carry
-  // correctly (needed for genuine error returns) a -ENOENT here aborts the title.
+  // Modules whose LLE module_start needs a backend we don't emulate yet fall
+  // into two groups by how the guest reacts to a failed load-start.
+  // kLoadOk: the application itself load-starts these directly and *asserts*
+  // that it succeeded (Doom64: `sceSysmoduleLoadModule(SCE_SYSMODULE_APP_CONTENT)
+  // == SCE_OK`), aborting on any signalled failure. Report load-start SUCCESS
+  // with a real handle and merely skip running the LLE module_start (a preloaded
+  // dup of libSceAppContentUtil whose IPMI init is already scout-patched).
   static const char *kLoadOk[] = {"libSceAppContent"};
   // kSkipNotFound: libkernel *preloads* these via sceSysmodulePreloadModuleFor-
   // Libkernel, which strictly verifies the module actually STARTED and aborts
@@ -343,10 +338,9 @@ int PS4ABI sys_dynlib_load_prx(const char *path, u64 flags, int *pHandle,
   // the module is registered as "libSceVdecCore") while libSceSysmodule's
   // native id table asks for "libSceVdecCore.native". Missing that match loaded
   // a SECOND copy of the same library, and libSceSysmodule then abandoned the
-  // rest of the sysmodule's dependency list -- which is why Astro Bot's
-  // libSceAvPlayer never came up, its engine's memory-manager init was gated
-  // out, and its video workers dereferenced allocators nobody had created.
-  // The two spellings denote one module: let either find the other.
+  // rest of the sysmodule's dependency list, which is why Astro Bot's
+  // libSceAvPlayer never came up. The two spellings denote one module: let
+  // either find the other.
   if (!mod && isPs5) {
     constexpr size_t kNat = 7;  // ".native"
     base::String alt;

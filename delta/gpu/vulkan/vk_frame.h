@@ -5,8 +5,8 @@
 
 // The frame ring. Two slots let frame N record (and the guest emulate) while
 // frame N-1 still rasterizes; each slot owns a command buffer, a fence, a
-// readback buffer and half of each upload ring. Slot N-1's fence is waited --
-// and its pixels presented, one frame late -- at frame N's EndFrame.
+// readback buffer and half of each upload ring. Slot N-1's fence is waited –
+// and its pixels presented, one frame late: at frame N's EndFrame.
 
 #include <vulkan/vulkan.h>
 #include <vector>

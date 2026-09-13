@@ -6,17 +6,16 @@
 // libSceSaveData HLE. PS4 savedata is client/server: the LLE libSceSaveData.sprx
 // only forwards each call over IPMI to the SceSaveData system-service process,
 // which we do not host, so the sprx blocks forever waiting for a reply. We
-// cannot LLE the daemon (no decrypted binary / sealed-image crypto), so -- like
-// shadPS4 -- we replace the library functions and back them with a plain host
-// directory (a writable VFS mount per mounted save). Mount returns a /savedataN
-// mount point the game then does normal file I/O under.
-//
-// Saves live under $DELTA_SAVEDATA_DIR (default ~/.prosperity/savedata) keyed by
-// <TITLE_ID>/<dirName>, so different games can't collide on a shared dirName.
-// The title id comes from the pkg's param.sfo (plumbed by dcore). Saves created
-// before per-title roots existed (a bare <dirName> under the root) are still
-// found: mount/param lookups fall back to that legacy path when no per-title
-// directory exists yet.
+// cannot LLE the daemon (no decrypted binary / sealed-image crypto), so, like
+// shadPS4, we replace the library functions and back them with a plain host
+// directory (a writable VFS mount per mounted save). Mount returns a
+// /savedataN mount point the game then does normal file I/O under.
+// Saves live under $DELTA_SAVEDATA_DIR (default ~/.prosperity/savedata) keyed
+// by <TITLE_ID>/<dirName>, so different games can't collide on a shared
+// dirName. The title id comes from the pkg's param.sfo (plumbed by dcore).
+// Saves created before per-title roots existed (a bare <dirName> under the
+// root) are still found: mount/param lookups fall back to that legacy path when
+// no per-title directory exists yet.
 //
 // Layouts (Orbis, byte offsets):
 //   Mount2 { s32 userId@0; DirName*@8; u64 blocks@16; u32 mountMode@24; }

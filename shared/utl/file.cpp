@@ -25,7 +25,7 @@ public:
     // convert access mode. The writable modes open "+" (read+write) so a
     // caller can read a file back after writing it (savedata round-trips a save
     // within one mount); `write` stays create-or-truncate but is now also
-    // readable (a superset -- the write-once exporters that use it are
+    // readable (a superset; the write-once exporters that use it are
     // unaffected). `readWrite` opens an existing file without truncating.
     const char *modeStr = "a+";
     if (mode == fileMode::read)
@@ -158,7 +158,6 @@ public:
     return 0;
   }
 
-  // TODO
   u64 Write(const void *, size_t) override { return 0; }
 
   u64 Seek(i64 ofs, seekMode mode) override {

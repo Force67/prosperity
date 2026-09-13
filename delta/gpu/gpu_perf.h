@@ -48,7 +48,7 @@ extern u32 g_cs_stage_n, g_cs_flush_n;
 extern u64 g_cs_stage_bytes;
 // Compute writeback coverage: how much of what we copy back to guest memory the
 // dispatch actually changed. The gap is memory the CPU owns and we were
-// reverting -- see CsRangeFlushOne.
+// reverting (see CsRangeFlushOne).
 extern u64 g_cs_wb_bytes_written, g_cs_wb_bytes_total;
 
 // Per-frame accumulators (ns), reset when a frame's sample is pushed.

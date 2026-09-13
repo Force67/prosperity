@@ -3,7 +3,7 @@
  *
  * PS5 /dev/dmem mapping: back each mmap with the shared physical-dmem store at the
  * requested physical offset (MAP_SHARED), so every VA that maps a given offset
- * aliases the same bytes -- the direct-memory coherency the AGC command buffers
+ * aliases the same bytes, the direct-memory coherency the AGC command buffers
  * rely on. Placed in the low (<2^40) guest aperture the GPU pointers reference.
  */
 
@@ -44,7 +44,7 @@ namespace {
 // recycled physical RAM: a title that maps a new block where an old one was
 // gets whatever was in those pages, NOT zeroes. Our backing store is a memfd,
 // so a fresh offset reads zero and every such remap silently wipes what was
-// there -- which is how V8 lost the read-only heap it had just deserialized
+// there, which is how V8 lost the read-only heap it had just deserialized
 // when it shrank the page holding it.
 std::mutex g_dmemVaLock;
 std::unordered_map<u64, size_t> g_dmemVaLen;
@@ -96,24 +96,21 @@ u8 *dmaDevicePs5::map(void *addr, size_t len, u32 /*prot*/, u32 flags,
   // 0xfe0040000, printing "[Agc] FS Table offset has shifted" and failing
   // sce::Agc::init with 0x8a6c002f when the block moved. The band is guest-owned
   // address space that only our own PROT_NONE placeholder (guest_vaspace)
-  // occupies, and the NOREPLACE probe below reads that as taken. Commit the
+  // occupies, and the NOREPLACE probe below reads that as taken; commit the
   // block over the placeholder.
-  //
   // libSceGnmDriver wants the SAME base: its own .data starts at 0xfe0000000
   // and it maps a 64 KiB "SceGnmDriver" block there (an OUT-pointer map, so the
-  // hint is the pre-set value), then checks that its region 5 -- base+0xf000 --
+  // hint is the pre-set value), then checks that its region 5, base+0xf000,
   // covers 0xfe000f000..0xfe000f300, which only holds at that base. On hardware
-  // both drivers name one system area; refusing the second hint printed
-  // "GnmDriver Initialization Error: Unsupported memory range" and then
-  // "sce::Gnm::Initialize Error: Initialize Embedded Shader Fails", so a title
-  // that keeps a Gnm path alongside AGC came up with no embedded shaders. Only
-  // the exact base is granted; a hint that merely OVERLAPS the block is still
-  // refused, because that is a title's own allocation landing on it by accident.
+  // both drivers name one system area; refusing the second hint failed embedded
+  // shader init for a title that keeps a Gnm path alongside AGC. Only the exact
+  // base is granted; a hint that merely OVERLAPS the block is still refused,
+  // because that is a title's own allocation landing on it by accident.
   constexpr uintptr_t kAgcSystemBase = 0xfe0000000ull;
   constexpr size_t kAgcSystemSize = 0x200000;
   const uintptr_t hint = reinterpret_cast<uintptr_t>(va);
   // ...and once libSceGnmDriver has taken the base, libSceAgcDriver stops
-  // hinting it and asks for its 2 MiB with no address at all -- on a console
+  // hinting it and asks for its 2 MiB with no address at all. On a console
   // the kernel puts the system block at the one place it lives whatever the
   // caller asks for. Recognise that follow-up map and pin it too, or libSceAgc
   // finds its fetch-shader table away from the 0xfe0040000 it has compiled in
@@ -135,7 +132,7 @@ u8 *dmaDevicePs5::map(void *addr, size_t len, u32 /*prot*/, u32 flags,
       hint + len > kAgcSystemBase;
   // A non-fixed hint is advisory: if the range is taken the host kernel picks an
   // address of its own, which is only page-aligned. Direct memory is 64 KiB
-  // aligned on real hardware and titles rely on it -- Dead Cells' HashLink GC
+  // aligned on real hardware and titles rely on it: Dead Cells' HashLink GC
   // fatals ("Page memory is not correctly aligned") on a 4 KiB-aligned page. So
   // probe the hint, and on a miss fall back to our own aperture rather than
   // whatever the kernel hands back.

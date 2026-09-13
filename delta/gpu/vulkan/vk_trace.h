@@ -5,17 +5,15 @@
 
 // The frame debugger: one armed guest frame recorded, in order, into one
 // machine-readable file.
-//
 // The ~150 DELTA_GPU_* printf switches answer one question each, cost a
 // recompile when the question changes, and cap themselves at an arbitrary line
-// count. This records the whole frame instead -- every region, draw, dispatch,
-// barrier and validation message with its complete state -- so a new question
+// count. This records the whole frame instead (every region, draw, dispatch,
+// barrier and validation message with its complete state), so a new question
 // is a query over an existing capture (tools/gpu_capture.py) rather than a new
 // build.
-//
-// Everything is keyed by GUEST addresses, the vocabulary the rest of the
-// module speaks. Every entry point below is a no-op unless a capture is
-// recording, so the disarmed cost is one predictable branch on a global bool.
+// Everything is keyed by GUEST addresses, the vocabulary the rest of the module
+// speaks. Every entry point below is a no-op unless a capture is recording, so
+// the disarmed cost is one predictable branch on a global bool.
 
 #include <vulkan/vulkan.h>
 #include "base/arch.h"
@@ -55,8 +53,8 @@ void RegionBegin(const RegionInfo& region);
 void RegionEnd();
 
 // How each of a draw's sampler bindings actually resolved. This is the
-// question a capture exists to answer -- a binding that silently falls through
-// to guest memory reads what no draw ever wrote -- and only the draw path
+// question a capture exists to answer: a binding that silently falls through
+// to guest memory reads what no draw ever wrote, and only the draw path
 // knows it, so it is passed in rather than recomputed.
 struct DrawBindings {
   const u64* tex_color = nullptr;     // resolved to a live colour RT

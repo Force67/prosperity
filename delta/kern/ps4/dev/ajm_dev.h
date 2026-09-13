@@ -16,7 +16,7 @@ class proc;
 
 // /dev/ajm: the PS4 audio-decoder (AJM) management device. libSceAjm opens it
 // during init (FMOD on PS4 routes its decoding through AJM). We don't decode any
-// audio, but the open must SUCCEED -- a soft ENOENT here makes libSceAjm fail,
+// audio, but the open must SUCCEED: a soft ENOENT here makes libSceAjm fail,
 // which makes FMOD's System::init return FMOD_ERR_INTERNAL, which makes Doom64
 // treat audio init as fatal and exit its main thread before it ever renders.
 // Open + benign ioctls (a non-zero AJM context handle, zeroed batch results) let

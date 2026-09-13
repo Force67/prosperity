@@ -223,7 +223,7 @@ std::vector<u8> ComputeRdnaReachability(const Program& program) {
 
   // 0=ordinary, 1=unconditional relative, 2=conditional/call relative,
   // An s_setpc_b64 that returns from an s_call_b64 goes back to the call's
-  // fall-through, which kind 2 has already marked -- so in a program that
+  // fall-through, which kind 2 has already marked, so in a program that
   // calls, the return is a terminator and not a jump to anywhere. Reading it as
   // indirect control flow instead floods every block reachable, including the
   // debug-name string a shader binary carries between its code and its footer:
@@ -584,7 +584,7 @@ u64 CachedCodeHash(const u32* code, u32 max_dwords) {
   u32 len = CodeLength(code, max_dwords);
   if (!len) {
     // No footer: hash up to the terminator rather than a fixed window, or the
-    // unrelated bytes that follow give two copies of one shader two hashes --
+    // unrelated bytes that follow give two copies of one shader two hashes,
     // which is the miss this cache exists to avoid.
     len = max_dwords;
     for (const Inst& inst : Decode(code, max_dwords, /*stop_at_endpgm=*/true)) {

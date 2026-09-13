@@ -91,7 +91,7 @@ public:
 
     if (g_logSilenced.load(std::memory_order_relaxed)) {
       // The crash handler stopped the backend thread so nothing races its
-      // report on stderr -- but the report itself comes through here, so the
+      // report on stderr, but the report itself comes through here, so the
       // dumping thread has to write its own lines, synchronously.
       if (g_dumpingThread.load(std::memory_order_relaxed) !=
           std::this_thread::get_id())

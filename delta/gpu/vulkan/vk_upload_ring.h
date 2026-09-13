@@ -36,13 +36,12 @@ struct TextureUploadSlice {
 
 // Per-frame vertex ring. A 1080p title that re-draws its whole scene for a
 // depth prepass and again for the G-buffer needs far more than a token
-// allocation: SotC declined 83 draws a frame -- its entire world -- against a
+// allocation: SotC declined 83 draws a frame (its entire world) against a
 // 16 MiB ring, and 1 against 384 MiB. Sized for that, since the failure mode is
-// silent deletion of geometry rather than a stall.
-// 512 MiB carried SotC's title screen; its attract demo's heaviest cuts issue
-// 11.6k draws a frame and still hit the 256 MiB half with the per-frame dedupe
-// active (RINGHWM peak == cap, i.e. clamped, true need unknown). Doubled so
-// the demo's worst frame fits; the failure mode remains silent deletion.
+// silent deletion of geometry rather than a stall. 512 MiB carried SotC's
+// title screen; its attract demo's heaviest cuts issue 11.6k draws a frame and
+// still hit the 256 MiB half with the per-frame dedupe active (RINGHWM peak ==
+// cap, true need unknown). Doubled so the demo's worst frame fits.
 constexpr VkDeviceSize kVbRing = 1024ull * 1024 * 1024;
 // DELTA_GPU_VBRING_MB=<n>: override the vertex ring size (default kVbRing).
 // Halved per frame slot like every other ring, so the usable per-frame budget
@@ -67,14 +66,14 @@ constexpr u32 kCbufWindow = gpu::gcn::kCbufDwords * 4;
 constexpr u32 kCbufBindings =
     gpu::gcn::kMaxCbufBindings;  // set-1 UBO bindings
 // Raw-buffer ring: the windows a recompiled shader's hand-written MUBUF loads
-// read from, at set-2 bindings 0..kRawBufBindings-1. The device's dynamic storage
-// buffer limit determines how many bindings are available.
+// read from, at set-2 bindings 0..kRawBufBindings-1; the device's dynamic
+// storage buffer limit determines how many bindings are available.
 // The window is a compromise the shader knows about: a MUBUF index has no
 // static bound, so a resource larger than this is staged only up to here and
-// the recompiled shader clamps, reading the window's last dword past it.
-// The allocation stays fixed as the supported window grows. Small resources
-// reserve only their aligned payload, and repeated buffers share an upload.
-// Each frame owns half the ring; its resources must fit within that half.
+// the recompiled shader clamps, reading the window's last dword past it. Small
+// resources reserve only their aligned payload, and repeated buffers share an
+// upload. Each frame owns half the ring; its resources must fit within that
+// half.
 constexpr VkDeviceSize kSboRing = 512ull * 1024 * 1024;
 constexpr u32 kRawBufWindow = gpu::gcn::kGfxBufferDwords * 4;
 constexpr u32 kRawBufBindings = gpu::gcn::kMaxGfxBuffers;

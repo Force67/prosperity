@@ -23,11 +23,11 @@ class proc;
 // Kernel event-flag attr / wait-mode bits. The attr is a persistent default
 // stored on the object; the mode is supplied per wait/trywait call. Both share
 // the same bit layout.
-//   0x0001  AND  -- all bits of pattern must be set
-//   0x0002  OR   -- any bit of pattern
-//   0x0010  CLEAR_ALL -- clear every bit on a successful wait
-//   0x0020  CLEAR_PAT -- clear only the waited-for bits on success
-//   0x0100  SHARED    -- publish in the global name table (cross-process open)
+//   0x0001  AND: all bits of pattern must be set
+//   0x0002  OR: any bit of pattern
+//   0x0010  CLEAR_ALL: clear every bit on a successful wait
+//   0x0020  CLEAR_PAT: clear only the waited-for bits on success
+//   0x0100  SHARED: publish in the global name table (cross-process open)
 //   0x1000  (internal) destroyed/cancelling marker, checked by evf_wait/osem_wait
 // The kernel rejects: attr/mode with both AND and OR (bits & 3 == 3), both clear
 // modes (bits & 0x30 == 0x30), or any bit outside the 0x133 mask.
@@ -40,12 +40,12 @@ enum evfAttr : u32 {
 };
 
 // Kernel event_flag object (0x58 bytes):
-//   +0x00  uint64  bits       -- current pattern
-//   +0x08  mtx     lock       -- "evf mtx"
-//   +0x28  cv      cond       -- "evf cv"
-//   +0x38  void*   waiters.fst -- sleepq head
-//   +0x40  void*   waiters.lst -- sleepq tail
-//   +0x48  uint32  attr       -- persisted create flags
+//   +0x00  uint64  bits       = current pattern
+//   +0x08  mtx     lock       = "evf mtx"
+//   +0x28  cv      cond       = "evf cv"
+//   +0x38  void*   waiters.fst = sleepq head
+//   +0x40  void*   waiters.lst = sleepq tail
+//   +0x48  uint32  attr       = persisted create flags
 //   +0x4c  uint32  nwaiters
 //   +0x50  uint32  is_shared
 //   +0x54  uint32  proc_type

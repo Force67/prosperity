@@ -7,14 +7,14 @@
 //
 // Each supported container (a PS4 .pkg, a PS5 .ffpkg UFS2 image, a .rar/.zip
 // holding either console's game directory) is adapted onto the guest VFS by a
-// provider that reads it on demand -- nothing is ever extracted. The providers
+// provider that reads it on demand; nothing is ever extracted. The providers
 // themselves are private to this unit; a caller says which container it has and
 // gets back the mount plus the handful of title facts the boot path needs.
 //
 // This lives in kern rather than delta_formats because a provider implements
-// krnl::vfs::VirtualProvider, and formats depends on nothing in delta -- worth
-// keeping that way, since it is the module whose tests stand alone. It lives
-// here rather than in main because choosing how a container becomes a guest
+// krnl::vfs::VirtualProvider, and formats depends on nothing in delta (worth
+// keeping, since it is the module whose tests stand alone). It lives here
+// rather than in main because choosing how a container becomes a guest
 // filesystem is a decision, and the composition root holds wiring.
 
 #include "base/arch.h"

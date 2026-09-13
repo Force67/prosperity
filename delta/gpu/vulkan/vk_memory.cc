@@ -69,7 +69,7 @@ bool ImageMemoryPool::Allocate(const DeviceState& device,
     // A bind failure against pooled memory releases the span and falls
     // through to a dedicated allocation instead of failing the image: the
     // driver may accept the same image with its own memory. One pooled bind
-    // failure skips the fresh-block attempt too -- another suballocation is
+    // failure skips the fresh-block attempt too, and another suballocation is
     // no more likely to bind.
     bool pooled_bind_failed = false;
     for (auto& block : blocks_) {

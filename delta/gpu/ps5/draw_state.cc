@@ -121,8 +121,8 @@ struct ShaderBinding {
 // Some titles leave the fixed GS/PS PGM_LO/HI registers reading 0. Fallback:
 // scan the SH register block for PGM pairs whose address is a 256-aligned
 // GPU-aperture pointer to plausible RDNA2 ISA. It is proven that for the
-// titles that need this, NO register in the file points at shader code -- the
-// AGC binds them outside the PM4 stream -- so this stays inert until that path
+// titles that need this, NO register in the file points at shader code (the
+// AGC binds them outside the PM4 stream), so this stays inert until that path
 // is decoded, and the probes it feeds are what will decode it.
 void RecoverShaderAddresses(const Regs& regs, ShaderBinding& binding) {
   u64 found[16];
@@ -160,11 +160,11 @@ ShaderBinding ResolveShaderBinding(const Regs& regs) {
   // address is written to the ES (front half) and/or GS (back half) PGM_LO.
   // The ES slot is the VERTEX program. Usually both slots hold the same merged
   // address and the choice does not matter, but a pass whose GS half is a
-  // primitive shader programs them separately -- and then the GS program is
-  // one that reads its vertices back out of LDS after the ES half filled it,
-  // which as a Vulkan vertex shader exports a degenerate position. Astro Bot's
-  // fullscreen passes are all of that shape. DELTA_PS5_GSVS=1 restores the
-  // old preference for a bisect.
+  // primitive shader programs them separately, and the GS program then reads
+  // its vertices back out of LDS after the ES half filled it, which as a Vulkan
+  // vertex shader exports a degenerate position (Astro Bot's fullscreen passes
+  // are all of that shape). DELTA_PS5_GSVS=1 restores the old preference for a
+  // bisect.
   const u64 es_addr = regs.ShaderAddr(mmSPI_SHADER_PGM_LO_ES);
   const u64 gs_addr = regs.ShaderAddr(mmSPI_SHADER_PGM_LO_GS);
   binding.vs_addr = kGsIsVs ? gs_addr : es_addr;
@@ -202,7 +202,7 @@ ShaderBinding ResolveShaderBinding(const Regs& regs) {
 // indices in. Minecraft draws its world geometry almost entirely with the
 // latter (291k packets a run against 33k AUTO), and leaving it undecoded left
 // every one of those draws with no index buffer and a vertex count taken from
-// the V#'s num_records -- a shared ~210k-record ring -- so they all tripped the
+// the V#'s num_records, a shared ~210k-record ring, so they all tripped the
 // vertex-count cap and were dropped.
 void ResolveIndexBuffer(const DrawPacket& packet, rhi::DrawInfo& d) {
   const u64 index_size =
@@ -372,7 +372,7 @@ void ResolveRasterState(const Regs& regs, rhi::DrawInfo& d) {
   std::memcpy(&d.viewport_y_scale, regs.At(mmPA_CL_VPORT_YSCALE), 4);
   std::memcpy(&d.viewport_y_offset, regs.At(mmPA_CL_VPORT_YOFFSET), 4);
   // Titles whose context state arrives as AGC state blocks never program
-  // PA_CL_VPORT_*, and the renderer rejects a zero scale -- so no viewport is
+  // PA_CL_VPORT_*, and the renderer rejects a zero scale, so no viewport is
   // ever set and every draw rasterises nothing. Default to the bound target's
   // full extent, y-up (negative height) like a programmed one, so RT-as-texture
   // composites still sample aligned.
@@ -390,7 +390,7 @@ void ResolveRasterState(const Regs& regs, rhi::DrawInfo& d) {
 // same-stride V#s within one stride of each other interleave in one binding,
 // others get their own (a textured sprite VS streams pos/colour and uv/params
 // from two buffers, so a single interleaved binding would feed the PS garbage
-// UVs). Attributes that do not decode to a valid V# are skipped -- a partial
+// UVs). Attributes that do not decode to a valid V# are skipped; a partial
 // fetch still rasterises.
 void BindVertexAttributes(const gcn::Recompiled& rc,
                           const ResolvedBuffers& resolved,

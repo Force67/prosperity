@@ -384,9 +384,9 @@ static void investigateFnArgs(smodule &m) {
 
 // DELTA_SOTC_FORCE_PAYLOAD: experiment to get past LoadInitialWorld. The SotC
 // world-container's whole-file libSceFios2 read returns actualCount 0 (root cause
-// still open), so the loader's payload accessor at eboot+0x14c000 --
+// still open), so the loader's payload accessor at eboot+0x14c000
 //   xor eax,eax; cmp [rdi+0x80],0; je +0x9 (return null); mov rax,[rdi+0x90]; ret
-// -- returns NULL, FinalizeResource commits result=0, CommitResult re-enqueues
+// returns NULL, FinalizeResource commits result=0, CommitResult re-enqueues
 // forever and the game-logic thread wedges polling [op+0x98]==0xb. The buffer at
 // [ldr+0x90] IS allocated (before the read), so NOP the `je 74 07` -> `90 90` and
 // the accessor always returns that buffer; an empty precache container should
@@ -410,7 +410,7 @@ static void forceSotcPayload(smodule &m) {
   }
   // DELTA_SOTC_SKIP_WORLDWAIT: force CGame::LoadInitialWorld's busy-poll loop
   // (0x3c54e0..0x3c55fd) to EXIT immediately instead of spinning until the world-
-  // container op reaches state 0xb (which never happens -- FHGetSize=0 on the
+  // container op reaches state 0xb (which never happens: FHGetSize=0 on the
   // container, infinite retry). The loop tail `0f84 ddfeffff` (je 0x3c54e0 = "not
   // done -> loop") is NOPed (6x 0x90) so it falls through to the epilogue 0x3c5603
   // and returns to the boot driver at 0x25c1ff, which already tolerates a NULL
@@ -433,23 +433,23 @@ static void forceSotcPayload(smodule &m) {
   //  (1) CommitResult 0x14d768 `je 0x14d777` (result==0 -> retry) NOPed so a
   //      null-payload commit always writes op-state 0xb (0x14d76a) instead of
   //      re-enqueuing forever;
-  //  (2) IsDone 0x14cf0e `setne al` (needs op+0x20 result != 0) -> `mov al,1` so
-  //      IsDone returns done on state==0xb alone (the op has no result object).
+  //  (2) IsDone 0x14cf0e `setne al` -> `mov al,1`, so IsDone returns done on
+  //      state==0xb alone (the op has no result object).
   // The boot continuation at 0x25c1ff already tolerates a NULL result
   // (`test rbx,rbx; je 0x25c253`). Runtime patch EXPERIMENT, env-gated.
   // DELTA_SOTC_JOBFIX: the world-load hang is a BPE-JobSystem livelock. The
-  // world-op finalize job is DIRECT-ASSIGNED to worker ordinal 6 (the "Resource
-  // Loading" coordinator, hardcoded-pinned to core 6, mask 0x40 -- outside our
-  // 6-core cpuset), but SotC spawns only 4 job-claim workers with ordinals 0..3;
-  // none services direct-assign slot 6 and the coordinator thread itself parks on
-  // its evf "job done" flag, so the job never runs and the main loop spins the
-  // loading screen forever (proven live: [jobclaim] directAssign[6]=0x1, workers
-  // ordinal 0..3, ~99.4% claim failures). The ordinal comes from fn 0x33350
-  // (reads [tcb-0x10]=0x8000|core, returns core or -1). Clamp its result into the
-  // worker range [0,3]: the coordinator (ord 6 -> 6&3=2) then direct-assigns to a
-  // serviced slot, worker 2 claims+runs the finalize, the op reaches state 0xb and
-  // the game advances. Workers (0..3) and unbound threads (-1) are unchanged.
-  // Patch the fn tail 0x3337f (`pop rbp; ret` + pad) in place:
+  // world-op finalize job is DIRECT-ASSIGNED to worker ordinal 6 (the
+  // "Resource Loading" coordinator, hardcoded-pinned to core 6, mask 0x40,
+  // outside our 6-core cpuset), but SotC spawns only 4 job-claim workers with
+  // ordinals 0..3; none services direct-assign slot 6, the coordinator parks on
+  // its evf "job done" flag, and the main loop spins the loading screen forever
+  // (proven live: directAssign[6]=0x1, workers ordinal 0..3, ~99.4% claim
+  // failures). The ordinal comes from fn 0x33350 (reads [tcb-0x10]=0x8000|core,
+  // returns core or -1). Clamp its result into the worker range [0,3]: the
+  // coordinator (ord 6 -> 6&3=2) then direct-assigns to a serviced slot, worker
+  // 2 claims and runs the finalize, and the op reaches state 0xb. Workers (0..3)
+  // and unbound threads (-1) are unchanged. Patch the fn tail 0x3337f
+  // (`pop rbp; ret` + pad) in place:
   //   test eax,eax; js .r; cmp eax,4; jb .r; and eax,3; .r: pop rbp; ret
   if (kSotcJobfix) {
     u8 *t = base + 0x3337f;
@@ -493,12 +493,10 @@ static void forceSotcPayload(smodule &m) {
 // Wrapping happens at IMPORT-RESOLUTION time (maybeWrapFiosImport, called from
 // smodule::resolveImports): the eboot's PLT jump-slots are lazy and unresolved
 // until the guest runs sys_dynlib_process_needed_and_relocate, so a GOT patch at
-// proc::create is too early (the slot still holds the PLT stub, and eager
-// resolution would overwrite it). At resolveImports the REAL export address is in
-// hand; we substitute the wrapper for it before it is written to the GOT, so the
-// hook is installed exactly when the slot is bound and stays for the whole run.
-// The smoking gun is FHGetSize returning 0 for "$/misc/****/mainMenuPrecacheList
-// .calt" while the 18k sibling members size non-zero.
+// proc::create is too early (the slot still holds the PLT stub). At
+// resolveImports the real export address is in hand; substituting the wrapper
+// before it is written to the GOT installs the hook exactly when the slot is
+// bound, for the whole run.
 // ===========================================================================
 namespace {
 struct FiosOpen {          // one FHOpen (all opens tracked so any fh maps to a path)
@@ -743,14 +741,14 @@ void onProcessCreated(proc &p, smodule &mainModule, bool ps5) {
       krnl::setNullGuard(eb + 0x5c7c53, krnl::GuardReg::rax, 8);
       // ROOT FIX: the renderer-init chain 0x5535d0 bails at its gate checks
       // (`test al,al; je 0x55365d`) when VOInit (gate C, 0x58fb10) returns false
-      // -- a GPU render-context vtable step that fails in our env -- SKIPPING the
+      // (a GPU render-context vtable step that fails in our env), SKIPPING the
       // Shape-Renderer install at 0x55361b (0x58ec90). That leaves the global
       // active renderer *(0x9854f0) null, which is the source of the whole
       // first-frame null-object cascade. Force the chain past its three bail
       // branches so the game installs the renderer + builds its RTs/fonts itself.
       // DELTA_PS5_NOFORCE: skip the RenderInit gate force-through. Now that the PS5
       // videoout NIDs are HLE'd (RegisterBuffers returns 0), VOInit (gate C) should
-      // return TRUE on its own -- forcing past it leaves an INVALID render context
+      // return TRUE on its own; forcing past it leaves an INVALID render context
       // (null pipelines / zero shader PGM). Test whether it succeeds naturally.
       struct { u32 off; u8 b1; } gates[] = {
           {0x553602, 0x59}, {0x553612, 0x49}, {0x553622, 0x39}};

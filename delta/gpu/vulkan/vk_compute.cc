@@ -5,7 +5,7 @@
 // Compute dispatches. Each guest range a CS touches gets a persistent
 // host-visible storage buffer keyed by its base address; dispatches are
 // recorded into one batched command buffer, and their writes land back in guest
-// memory lazily -- only when something needs guest memory to be current.
+// memory lazily, only when something needs guest memory to be current.
 
 #include "gpu/vulkan/vk_guest_memory.h"
 #include "gpu/rhi/renderer.h"
@@ -188,7 +188,7 @@ void ParallelCopy(void* dst, const void* src, u64 bytes) {
 
 // Per-range staging accounting (DELTA_GPU_CSSYNC). A frame that stages half a
 // gigabyte says nothing about what to fix until the bytes are attributed to a
-// base and a REASON: guest memory really changed, the same base was rebound
+// base and a REASON: guest memory changed, the same base was rebound
 // with a different shape, or a render target had to be bridged.
 struct StageStat {
   u64 bytes = 0;
@@ -214,7 +214,7 @@ struct CsPipe {
 
 // The GDS scratchpad: one small device-local buffer for the whole device, which
 // is what the hardware's global data share is. Created on first use and left
-// alone afterwards -- the counters in it are the title's to manage.
+// alone afterwards; the counters in it are the title's to manage.
 struct GdsBuffer {
   VkBuffer buf = VK_NULL_HANDLE;
   VkDeviceMemory mem = VK_NULL_HANDLE;
@@ -227,7 +227,7 @@ std::unordered_map<u64, CsPipe> g_cs_pipes;
 
 // Memory for a buffer the GPU alone touches: VRAM, host visibility irrelevant.
 // Only worth splitting off a host mirror when the device heap is NOT already
-// cheap for the CPU to read -- on a UMA part the one buffer serves both sides
+// cheap for the CPU to read. On a UMA part the one buffer serves both sides
 // and FindComputeMemoryType already returns it, so report none here.
 u32 FindDeviceMemoryType(u32 type_bits) {
   VkPhysicalDeviceMemoryProperties properties;
@@ -318,7 +318,7 @@ CsPipe* GetCsPipe(const ComputeInfo& ci) {
     return nullptr;
   // 16 user-data dwords, then one bound (in dwords) per SSBO binding. The
   // bound is what the emitted SSBO accesses clamp to; the SPIR-V block for a
-  // compute stage declares the same 16 + 48 shape, 256 B total -- the driver
+  // compute stage declares the same 16 + 48 shape, 256 B total, the driver
   // max this backend runs against.
   VkPushConstantRange pcr{VK_SHADER_STAGE_COMPUTE_BIT, 0, 64 * 4};
   VkPipelineLayoutCreateInfo li{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
@@ -610,7 +610,7 @@ bool WritebackCsImage(const ComputeInfo::Res& res, const void* src) {
     return false;  // Compressed textures are sampled, never image-stored.
   gcn::TextureLayout32 tiled, linear;
   // A bail here leaves the destination holding whatever it held before the
-  // dispatch, which for a first upload is zeros -- indistinguishable from a
+  // dispatch, which for a first upload is zeros, indistinguishable from a
   // dispatch that never ran unless it says so (DELTA_GPU_CS_WB_AUDIT).
   if (!BuildCsImageLayouts(res, tiled, linear)) {
     if (kCsWbAudit) {
@@ -714,7 +714,7 @@ bool WritebackCsImage(const ComputeInfo::Res& res, const void* src) {
 
 // guest-sourced ranges revalidate against a content hash at most once per
 // frame. Writebacks to guest memory (the expensive image retile) happen
-// LAZILY — only when a draw / DMA / frame boundary needs guest memory to be
+// LAZILY, only when a draw / DMA / frame boundary needs guest memory to be
 // current (FlushCsWrites), not after every dispatch.
 struct CsRange {
   VkBuffer buf = VK_NULL_HANDLE;
@@ -754,7 +754,7 @@ struct CsRange {
   // A copy of the guest bytes as they were staged IN, kept so the writeback can
   // tell "the shader wrote this word" from "the shader never touched it".
   // Without it the writeback has to assume the whole range is GPU output and
-  // copies the stale snapshot back over anything the CPU changed meanwhile --
+  // copies the stale snapshot back over anything the CPU changed meanwhile –
   // see CsRangeFlushOne.
   std::vector<u8> shadow;
   bool shadow_valid = false;
@@ -860,8 +860,8 @@ void RecordStagingCopy(VkCommandBuffer c,
   b.offset = 0;
   b.size = VK_WHOLE_SIZE;
   // TRANSFER on both sides, not just compute and host. A batch stages the same
-  // range more than once -- GTA:SA restages some buffers ~170 times in one cs
-  // batch -- and a barrier that names only COMPUTE|HOST as its source leaves
+  // range more than once (GTA:SA restages some buffers ~170 times in one cs
+  // batch), and a barrier that names only COMPUTE|HOST as its source leaves
   // copy-after-copy on the same buffer unordered. The later copy may then land
   // first and the dispatch reads the OLDER guest snapshot.
   b.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
@@ -937,15 +937,15 @@ struct CsAliasedImage {
 // UNDEFINED-submitted-layout case (target created this frame, no submission
 // yet) reports false: there is nothing real to copy either way yet.
 // `for_write`: the dispatch produces the surface, so an image nothing has
-// rendered into yet is still the one to fill. Its layout anchor may also be
-// missing: a parked variant (see ActivateRtVariant) has no submitted-layout
-// stamp, but one untouched this frame has nothing recorded against it either,
-// so the layout its last frame left it in IS the one on the GPU.
+// rendered into yet is still the one to fill. Its layout anchor may be missing:
+// a parked variant (see ActivateRtVariant) has no submitted-layout stamp, but
+// one untouched this frame has nothing recorded against it either, so the
+// layout its last frame left it in IS the one on the GPU.
 // `prefer_depth`: the resource is a single 32-bit channel, which is what a
-// depth surface looks like to a dispatch. One address can hold a colour
-// target AND a depth target (Astro Bot's bloom pyramid and its half-res
-// scene depth share 0x53a500000 in different passes), and the colour one
-// answered first, so the depth downsample landed in the bloom image.
+// depth surface looks like to a dispatch. One address can hold a colour target
+// AND a depth target (Astro Bot's bloom pyramid and its half-res scene depth
+// share 0x53a500000 in different passes); the colour one answered first, so the
+// depth downsample landed in the bloom image.
 bool FindCsAliasedImage(u64 base,
                         CsAliasedImage& out,
                         bool for_write = false,
@@ -1093,7 +1093,7 @@ void AliasedImageBarrier(VkCommandBuffer c,
 // floats per texel because that is what StageCsImage produces on the
 // guest-memory path. Demanding exact agreement rejected GTA:SA's scene
 // target on both counts, so its whole compute post chain read the guest
-// bytes under the target -- which draws never write, i.e. black.
+// bytes under the target, which draws never write, i.e. black.
 struct AliasedCopyPlan {
   u32 w = 0;
   u32 h = 0;
@@ -1316,7 +1316,7 @@ bool RunAliasedCopy(const CsAliasedImage& img,
                          VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &cleared, 0,
                          nullptr, 0, nullptr);
   }
-  // Chain from -- and restore -- the SUBMITTED layout: this copy executes
+  // Chain from, and restore, the SUBMITTED layout: this copy executes
   // before the current frame's still-recording barriers, whose oldLayout
   // chain must stay intact.
   const VkImageLayout transfer_layout =
@@ -1437,14 +1437,14 @@ bool RunAliasedCopy(const CsAliasedImage& img,
 }
 
 // Stage a CS input whose descriptor points at a live render/depth target from
-// the VkImage instead of guest memory. Draws only ever render into the image
-// -- the guest bytes under a target stay stale (usually zero), so the
+// the VkImage instead of guest memory. Draws only ever render into the image:
+// the guest bytes under a target stay stale (usually zero), so the
 // guest-memory path feeds a compute post chain black (SotC reads its HDR
 // scene target AND its 1080p depth buffer this way for the whole
 // downsample/tonemap/pyramid cascade). The copy is submitted on the queue and
 // waited: it executes after the last submitted frame and before the current
-// recording, so it sees the previous frame's completed content -- one frame
-// of latency in a post input, not black.
+// recording, so it sees the previous frame's completed content, one frame of
+// latency in a post input, not black.
 // Returns false (caller falls back to guest staging) when the base is not a
 // live target or the shapes disagree.
 bool StageCsRangeFromRt(const ComputeInfo::Res& res, CsRange& e) {
@@ -1490,7 +1490,7 @@ bool UploadCsRangeToRt(u64 base, CsRange& e) {
     // longer represent it; stop resolving subsequent samples to that image.
     if (!img.is_depth) {
       // Losing this flag makes every later sample of that address fall back to
-      // guest memory, which draws never write -- i.e. the target silently reads
+      // guest memory, which draws never write, i.e. the target silently reads
       // black from then on. Worth seeing.
       if (kCsRtTrace)
         BASE_LOGI("csrt", "shape mismatch on {:#x} -> ever_rendered=false",
@@ -1530,7 +1530,7 @@ constexpr u32 kCsDirtyPageShift = 16;
 std::unordered_map<u64, std::vector<u64>> g_cs_dirty_pages;
 // Bumped whenever compute results land in guest memory (writeback or an
 // executed batch of importing dispatches). The draw path's per-frame staging
-// caches stamp entries with this and re-copy when it has moved -- a cached
+// caches stamp entries with this and re-copy when it has moved: a cached
 // window of guest bytes is only as fresh as the last compute visibility point.
 u64 g_cs_writeback_gen = 1;
 
@@ -1573,7 +1573,7 @@ std::vector<u64> DirtyRangesOverlapping(u64 base,
   // Walking the QUERY's pages costs a lookup per 64 KB of it, and a texture is
   // hundreds of pages while the whole dirty index is a handful of entries.
   // Whichever side is smaller gives the same answer, because the filter below
-  // rechecks every candidate's overlap exactly -- a superset is safe here.
+  // rechecks every candidate's overlap exactly, so a superset is safe here.
   const u64 first_page = base >> kCsDirtyPageShift;
   const u64 last_page = (end - 1) >> kCsDirtyPageShift;
   if (last_page - first_page + 1 > g_cs_dirty_pages.size()) {
@@ -1628,7 +1628,7 @@ u64 RangeHash(u64 base, u64 bytes) {
 // DELTA_GPU_CSIMPORT: back the range's buffer with the GUEST PAGES themselves
 // instead of a staging copy. Everything a compute dispatch reads then costs
 // nothing to get in, and anything it writes is already in guest memory when the
-// dispatch retires -- SotC spends ~550 ms of a 2 fps frame on that copy in and
+// dispatch retires. SotC spends ~550 ms of a 2 fps frame on that copy in and
 // back out. Needs the guest range page-aligned to the driver's import
 // granularity; callers fall back to staging when this returns false.
 bool CsRangeImportGuest(CsRange& e, u64 base, VkDeviceSize size) {
@@ -1849,7 +1849,7 @@ bool CsRangeEnsureBuffer(CsRange& e, VkDeviceSize size) {
 std::vector<std::pair<VkBuffer, VkDeviceMemory>> g_cs_retired;
 
 // DELTA_GPU_CSRENAME: a CPU write into a range the open batch already reads has
-// to flush that batch and wait on the GPU -- SotC's streaming does that 37 times
+// to flush that batch and wait on the GPU. SotC's streaming does that 37 times
 // a frame, and staging then costs 272 ms of a 2 fps frame. Giving the range a
 // FRESH buffer and retiring the old one until the batch completes takes that to
 // 24 ms: the recorded descriptors keep reading the contents they were built
@@ -1936,7 +1936,7 @@ const ImportedRange* ImportTiledRange(u64 base, u64 bytes) {
   if (it != g_tiled_imports.end()) {
     // The import pins host pages by address. If the title has since unmapped
     // that surface, the mapping still points at pages that now belong to
-    // something else, and a conversion would write through it -- so confirm
+    // something else, and a conversion would write through it, so confirm
     // the range before every reuse, not only when it is created.
     if (it->second.bytes >= bytes && gpu::IsReadableRangeCached(base, bytes))
       return &it->second;
@@ -2498,8 +2498,8 @@ void RecordImageTiling(VkCommandBuffer c,
 }
 
 // Transient detiled views. A scratch is reused within the frame as soon as
-// the pass that consumed it has been recorded -- the conversions' own
-// barriers order the accesses -- and never by the dispatch being recorded.
+// the pass that consumed it has been recorded (the conversions' own
+// barriers order the accesses) and never by the dispatch being recorded.
 // A scratch that goes cold is retired through the frame ring.
 struct CsScratch {
   VkBuffer buf = VK_NULL_HANDLE;
@@ -2903,7 +2903,7 @@ void CsBatchFinalize(CsBatch& b) {
   b.log.clear();
   b.count = 0;
   // Imported ranges are written by the dispatches this batch executed,
-  // straight into guest memory -- no writeback step will announce them, so the
+  // straight into guest memory, and no writeback step will announce them, so the
   // batch itself is the visibility point for the staging caches.
   g_cs_writeback_gen++;
 }
@@ -3227,7 +3227,7 @@ bool CsRangeFlushOne(u64 base, CsRange& e) {
     // Never write back more than the guest footprint the range was staged
     // from, and never into memory that is not the guest's: the staged size is
     // the shader's view of the resource and a descriptor with a bogus size
-    // would otherwise scribble compute results over whatever follows -- which
+    // would otherwise scribble compute results over whatever follows, which
     // reads as float data turning up in the title's allocator free lists.
     const u64 n =
         e.guest_bytes ? std::min<u64>(e.size, e.guest_bytes) : e.size;
@@ -3241,23 +3241,19 @@ bool CsRangeFlushOne(u64 base, CsRange& e) {
       return false;
     }
     // Write back only what the DISPATCH changed. A staged range is the shader's
-    // whole view of a resource, but a shader writes a part of it -- and this
+    // whole view of a resource, but a shader writes a part of it, and this
     // title puts its CPU heap in the same direct memory as the buffers it hands
     // to compute, so the bytes in between belong to the allocator. Copying the
-    // full range back therefore reverts every CPU write made since stage-in,
-    // and a word the CPU was writing WHILE we snapshotted comes back half
-    // updated: that is the 5-valid-bytes-plus-3-stale-bytes free-tree pointer
-    // SotC dies on at eboot+0x48ac5 when New Game is confirmed.
-    // The shadow copy taken at stage-in says which words the shader touched;
-    // untouched words are left alone. (A shader that rewrites a word with the
-    // value it already had is skipped too, which is a no-op by definition.)
-    // The merge is symmetric, so that staging, shadow and guest all agree again
-    // when it returns -- the bookkeeping below this point promises exactly that:
+    // full range back reverts every CPU write made since stage-in, and a word
+    // the CPU was writing WHILE we snapshotted comes back half updated: the
+    // 5-valid-bytes-plus-3-stale-bytes free-tree pointer SotC dies on at
+    // eboot+0x48ac5 when New Game is confirmed. The shadow copy taken at
+    // stage-in says which words the shader touched; untouched words are left
+    // alone. The merge is symmetric, so staging, shadow and guest agree again
+    // when it returns:
     //   the shader wrote the block  -> guest   <- staging  (publish the result)
     //   the shader left it alone    -> staging <- guest    (adopt the CPU's word)
-    // Skipping the second half would leave a dispatch reading stale values for
-    // whatever the CPU changed, which is the same defect pointed the other way.
-    // Guest-sourced linear ranges only. A range staged from a live render
+    // Guest-sourced linear ranges only: a range staged from a live render
     // target exists precisely so the writeback can publish that image into
     // guest memory, so "the dispatch did not write it" must not stop it there.
     if (!kCsWbFull && !e.rt_sourced && e.shadow_valid && e.shadow.size() >= n) {
@@ -3267,7 +3263,7 @@ bool CsRangeFlushOne(u64 base, CsRange& e) {
       const u64 blocks = n / 64;
       u64 off = blocks * 64, wrote = 0;
       // 64-byte blocks: a block the shader left alone costs one compare, which
-      // keeps "the shader wrote a little of a big range" -- the common case --
+      // keeps "the shader wrote a little of a big range" (the common case)
       // no more expensive than the unconditional copy this replaces. Blocks are
       // independent, so the sweep is split across the detiler's pool; the
       // per-lane written counts are summed rather than shared.
@@ -4169,7 +4165,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
   }
 
   // DELTA_GPU_CSLIST: per-dispatch resource staging list for the first 200
-  // dispatches — shows what the chain actually round-trips per frame.
+  // dispatches: shows what the chain actually round-trips per frame.
   // DELTA_GPU_CSHIST=<seconds>: every distinct guest range a dispatch WRITES,
   // for the whole run. The capped per-dispatch list above only ever showed the
   // first few frames, which cannot answer "does the title ever compute-copy
@@ -4369,14 +4365,13 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
     }
     // A read overlapping some OTHER dirty range must see that data through
     // guest memory: flush those first.
-    // A range whose writeback cannot be produced (an image the retiler
-    // does not handle) stays stale whatever happens next; declining THIS
-    // dispatch over it only loses a second result. Only a dead device stops
-    // the recording.
-    // NOTE: a range that is itself dirty keeps a VRAM copy without the
-    // sibling's bytes after this, and one that is clean relies on the
-    // sampled hash to notice them. Both are the pre-existing behaviour; the
-    // fix is one VRAM copy per guest byte (see des-perf-profile).
+    // A range whose writeback cannot be produced (an image the retiler does not
+    // handle) stays stale whatever happens next; declining THIS dispatch over it
+    // only loses a second result. Only a dead device stops the recording.
+    // A range that is itself dirty keeps a VRAM copy without the sibling's
+    // bytes after this, and one that is clean relies on the sampled hash to
+    // notice them. Both are the pre-existing behaviour; the fix is one VRAM copy
+    // per guest byte (see des-perf-profile).
     {
       const u64 _to = NowNs();
       const auto siblings = DirtyRangesOverlapping(base, guest_bytes, base);
@@ -4422,7 +4417,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
          SameCsResourceShape(e.res, ci.res[i]));
     // A plain buffer bound again through a SMALLER window is the same data:
     // the staged copy already covers it and the descriptor carries its own
-    // range. Treating that as a reshape restages the whole thing -- Astro Bot
+    // range. Treating that as a reshape restages the whole thing: Astro Bot
     // has two dispatches a frame that size one 39 MB buffer differently, and
     // each flip cost a full copy and a fence wait.
     const bool subset =
@@ -4505,18 +4500,16 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
     }
     // A range the shader only WRITES needs no content from guest memory: it
     // supplies every byte it will write back. SotC's material fills are whole
-    // 4 MiB arenas of exactly that shape, and staging them in is ~60 ms a
-    // frame of pure waste (`in=` in the fps line). Opt-in because a shader
-    // that writes only PART of such a range would then write back whatever the
-    // buffer happened to hold -- the resource plan says "never read", not
-    // "writes all of it".
-    //
+    // 4 MiB arenas of exactly that shape, and staging them in is ~60 ms a frame
+    // of pure waste (`in=` in the fps line). Opt-in because a shader that
+    // writes only PART of such a range would write back whatever the buffer
+    // happened to hold (the resource plan says "never read", not "writes all
+    // of it").
     // Direct-memory arenas only. A compute range that aliases module .data
-    // (modules sit at 0x2xxxxxxxxxxx, the dmem arena at 0x80xxxxxxxx) gets a
+    // (modules at 0x2xxxxxxxxxxx, the dmem arena at 0x80xxxxxxxx) gets a
     // partial write + writeback of stale staging over live globals when the
-    // plan's "written" bit is wrong or the write is partial -- SotC's menu
-    // transition died exactly that way, float garbage across the allocator's
-    // static bin array (SIGSEGV in malloc, Shadow_Shipping+0xfacff0).
+    // plan's "written" bit is wrong or the write is partial; SotC's menu
+    // transition died exactly that way (SIGSEGV in malloc).
     const bool dmem_arena =
         base >= 0x8000000000ull && base < 0x9000000000ull;
     if (kCsSkipUpload && !valid && dmem_arena && !ci.res[i].read &&
@@ -4994,7 +4987,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
   }
 
   // Mark written ranges GPU-dirty. Guest memory catches up lazily at the next
-  // flush point (draw / DMA / frame end) — writing every dispatch's outputs
+  // flush point (draw / DMA / frame end). Writing every dispatch's outputs
   // back immediately (the image retile especially) was ~100ms/frame.
   const u64 _t_out0 = NowNs();
   for (u32 i = 0; i < ci.num_res; i++) {
@@ -5163,7 +5156,7 @@ bool FlushCsWritesFrameEnd(Renderer& renderer, bool writeback) {
 
 // Targeted variant: flush only dirty ranges overlapping [base, base+bytes).
 // The per-draw guest readers (texture upload, vertex copy, cbuffer ring) call
-// this instead of the full flush — flushing every dirty range at every draw
+// this instead of the full flush: flushing every dirty range at every draw
 // re-tiled the whole post chain ~19x/frame.
 bool FlushCsWritesRange(Renderer& renderer,
                         u64 base,
@@ -5172,11 +5165,11 @@ bool FlushCsWritesRange(Renderer& renderer,
   ScopeNs _flush_timer(&g_ns_cs_flush);
   // Nothing dirty anywhere: answer without touching the page index, which
   // otherwise allocates a vector, hashes a lookup per page, then sorts and
-  // dedups it. That is called once per guest read -- and SotC issues 1.2M
+  // dedups it. That is called once per guest read, and SotC issues 1.2M
   // DRAW_INDEX_INDIRECT packets a run, each flushing before it reads its
   // argument struct, which measured 33 seconds of a 150 s run. The index is
   // maintained on both edges (indexed when a range goes dirty, unindexed when
-  // it is flushed), so empty really does mean "no writeback outstanding".
+  // it is flushed), so empty means "no writeback outstanding".
   if (g_cs_dirty_pages.empty())
     return true;
   if (g_cs_failed) {

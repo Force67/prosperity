@@ -21,7 +21,7 @@ namespace gpu::vk {
 
 // An image in the resource cache: a render target keyed by its guest base
 // address, that also doubles as a sampleable texture (render-to-texture). This
-// is the unit of the resource model -- RT-bind and texture-sample both resolve
+// is the unit of the resource model: RT-bind and texture-sample both resolve
 // to the same Image via the address page table, so render-to-texture/MRT "just
 // work".
 struct RTarget {
@@ -49,14 +49,14 @@ struct RTarget {
   VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
   // Rendered into since the last barrier that made it readable. A later draw
   // sampling this target needs an execution/memory dependency even when the
-  // layout already matches, or it reads what was there BEFORE those writes --
+  // layout already matches, or it reads what was there BEFORE those writes –
   // which is how SotC's composite sampled its scene target and got black.
   bool dirty_for_read = false;
   // Layout the image holds once the last SUBMITTED work executes (stamped at
   // EndFrame submit). `layout` tracks the recording timeline, which runs
   // ahead of the GPU: a mid-frame submission (the compute path staging an
   // RT-backed CS input) executes before this frame's still-recording
-  // barriers, so its own barriers must chain from -- and restore -- the
+  // barriers, so its own barriers must chain from, and restore, the
   // submitted state, never `layout`.
   VkImageLayout submitted_layout = VK_IMAGE_LAYOUT_UNDEFINED;
   bool used_this_frame = false;
@@ -85,7 +85,7 @@ struct RTarget {
   // Bit i: set-2 raw-buffer binding i of that draw resolved to readable guest
   // memory and was staged. A shader that indexes a buffer by hand reads zeros
   // for every bit that is clear, which is indistinguishable in the output from
-  // a buffer that is genuinely zero -- so it has to be reported.
+  // a buffer that is genuinely zero, so it has to be reported.
   u32 last_rawbuf_mask = 0;
   // CB_COLORn_DCC_BASE of the last draw that bound this target: the
   // compression metadata a fast clear writes instead of the pixels. A write
@@ -128,7 +128,7 @@ struct DepthTarget {
   u64 stencil_base = 0;
   // Rendered into since the last barrier that made it readable. A later draw
   // sampling this target needs an execution/memory dependency even when the
-  // layout already matches, or it reads what was there BEFORE those writes --
+  // layout already matches, or it reads what was there BEFORE those writes –
   // which is how SotC's composite sampled its scene target and got black.
   bool dirty_for_read = false;
   // See RTarget::submitted_layout: the anchor for mid-frame copies.

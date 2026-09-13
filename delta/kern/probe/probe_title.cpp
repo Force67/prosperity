@@ -115,8 +115,8 @@ void PS4ABI jobTraceLogger(u64 hookId, u64 a0, u64 a1,
     break;
   }
   case 13: { // "Material Param Update" fills a block ON THE GPU (0x16eb90).
-    // SotC's material parameter blocks -- the constants AND the texture
-    // descriptors a draw reads through its SRT -- are not written by the CPU.
+    // SotC's material parameter blocks (the constants AND the texture
+    // descriptors a draw reads through its SRT) are not written by the CPU.
     // `Shadow_Shipping+0x117930` (its timing print is "Material Param Update")
     // allocates a block, memcpys a template into it, and calls this to build
     // two buffer descriptors over it and dispatch (n+63)/64 threadgroups.
@@ -172,7 +172,7 @@ void PS4ABI jobTraceLogger(u64 hookId, u64 a0, u64 a1,
     //
     // Do NOT hook JobKick(0x35480) here: it reads its 7th argument from the
     // CALLER's frame (`mov r14d,[rbp+0x10]`), and an entry detour relocates
-    // the `mov rbp,rsp` prologue so rbp lands in the wrapper's frame -- every
+    // the `mov rbp,rsp` prologue so rbp lands in the wrapper's frame, so every
     // job then gets a garbage affinity and the title wedges before its main
     // loop. Entry detours are only safe on functions whose arguments never
     // come off the caller's stack.
@@ -192,7 +192,7 @@ void PS4ABI jobTraceLogger(u64 hookId, u64 a0, u64 a1,
 // signature is a persistent marker in a block whose ordinal (4..7) no
 // claim-worker (0..3) services while blocks 0..3 sit empty.
 // DELTA_SOTC_JOBMOVE (flawed, kept for experiments): when the signature holds
-// across two consecutive dumps, move the marker qword into block 2 -- note the
+// across two consecutive dumps, move the marker qword into block 2. Note the
 // claim path copies a 0x40-byte descriptor at +0xea8, so a single-qword move
 // hands worker 2 a zeroed job; superseded by the job-table affinity survey.
 void spawnJobWatcher(u64 base) {
@@ -240,14 +240,12 @@ void spawnJobWatcher(u64 base) {
           // mask the 4 workers (0xF) cannot satisfy.
           // Is there pending work at all, and can our workers claim it? The
           // claim (0x38d40) scans 8 priority buckets at
-          // `[jobsys+0x1478] + lvl*0x2078` and has TWO consumer paths. An
-          // earlier version of this walk guessed the layout (per-ordinal words
-          // at bucket+8 / bucket+0x2040) and read zeros out of both, which is
-          // why "no queue node has pending work" was never trustworthy; both
-          // paths below are taken straight from the disassembly instead:
+          // `[jobsys+0x1478] + lvl*0x2078` and has TWO consumer paths, both
+          // taken straight from the disassembly (an earlier guessed layout read
+          // zeros, so "no queue node has pending work" was never trustworthy):
           //
           //   scan A (0x38fa7, taken when [bucket+0x2038] != 0): a slot array
-          //     at [bucket+0x2070], stride 0x120, affinity mask at slot+0xf0 --
+          //     at [bucket+0x2070], stride 0x120, affinity mask at slot+0xf0 –
           //     `test [slots + i*0x120 + 0xf0], 1<<ord` at 0x38fc5.
           //   scan B (0x39130, taken when [bucket+0x2038] == 0 && [bucket] != 0):
           //     a NODE POINTER array at bucket+0x38 (8 bytes each, count in
@@ -341,8 +339,8 @@ void spawnJobWatcher(u64 base) {
           // Which worker ordinals exist process-wide. The claim path tests
           // `job_affinity & (1 << ordinal)` with ordinal = [*(fsbase)-0x10]
           // (0x8000|core, bit 15 = valid; fn 0x33350). A job whose affinity
-          // names only a core no live thread reports -- e.g. SotC's core-6
-          // "Resource Loading" pin, mask 0x40 -- is unclaimable by anyone.
+          // names only a core no live thread reports (e.g. SotC's core-6
+          // "Resource Loading" pin, mask 0x40) is unclaimable by anyone.
           {
             std::vector<u64> fsb;
             cpu::guestThreadFsBases(fsb);
@@ -405,7 +403,7 @@ void spawnJobWatcher(u64 base) {
                     !dep || (readable && (mode == 0 ? (u64)depval == thresh
                                                     : (long long)depval > (long long)thresh));
                 // NOTE: this walk covers the 1024-slot job TABLE, which is not
-                // what the claim scans -- so `aff` (+0x998) is the only gate
+                // what the claim scans, so `aff` (+0x998) is the only gate
                 // reading meaningfully here. The old `obj = [node+0x38];
                 // mask = [obj+0xf0]` chase was wrong twice over: +0x38 is the
                 // node-pointer ARRAY inside a priority bucket (not a per-job
@@ -500,25 +498,23 @@ void spawnJobWatcher(u64 base) {
 // DELTA_SOTC_ALLOCLOCK: hold ONE host mutex across every call into the title's
 // allocator, and count how often a thread had to wait for it.
 //
-// This is the deterministic form of the question DELTA_RIPRACE could not afford
-// to answer. The free tree ends up holding stale child links; only two
-// explanations survived the census (which showed the corrupted words are written
-// exclusively by the allocator's own nine sites): two guest threads inside at
-// once, or a miscompiled store. Every call is observed here, not one in 40000 --
-// so `contended` is a decisive count, whatever happens to the crash:
+// The deterministic form of the question DELTA_RIPRACE could not afford to
+// answer. The free tree ends up holding stale child links; only two
+// explanations survived the census (the corrupted words are written exclusively
+// by the allocator's own nine sites): two guest threads inside at once, or a
+// miscompiled store. Every call is observed here, so `contended` is decisive:
 //   contended == 0  -> no two threads were EVER inside together. Concurrency is
 //                      eliminated and the remaining suspect is our codegen.
-//   contended >  0  -> they were, and the title's own exclusion is not doing what
-//                      it does on hardware.
+//   contended >  0  -> they were, and the title's own exclusion is not doing
+//                      what it does on hardware.
 // The mutex is recursive because these entries nest (the allocator frees while
 // allocating, and the tracker reenters), and because a fiber switch on the same
 // host thread must not deadlock against itself.
-// One lock PER SITE, because a shared lock cannot tell the two cases apart.
-// Several threads inside malloc at once is normal for a shared heap and proves
-// nothing. Several threads inside the FREE-TREE INSERT at once is a violation:
-// that function mutates the tree whose child links come out stale. So each hook
-// gets its own mutex and its own contention count, and the insert's count is the
-// answer.
+// One lock PER SITE: several threads inside malloc at once is normal for a
+// shared heap and proves nothing, while several inside the FREE-TREE INSERT at
+// once is a violation (that function mutates the tree whose child links come
+// out stale). Each hook gets its own mutex and contention count; the insert's
+// count is the answer.
 struct AllocLockSite {
   std::recursive_mutex m;
   std::atomic<u64> calls{0};
@@ -533,28 +529,26 @@ AllocLockSite g_allocSites[kAllocLockSites];
 // DELTA_SOTC_ALLOCLOCK=2 gives every site its own mutex, which is what MEASURES
 // the violation: a failed try_lock at the insert names a second thread inside the
 // insert itself. DELTA_SOTC_ALLOCLOCK=1 makes them share one mutex, which is what
-// MITIGATES it -- per-site locks cannot, because a thread inside 0x12820 and a
+// MITIGATES it. Per-site locks cannot, because a thread inside 0x12820 and a
 // thread inside 0x12af0 hold different locks and still meet over the same tree.
 // (Learned the hard way: the first mitigation run still crashed, with the per-site
 // counters proving the exclusion it needed was never in place.)
 std::recursive_mutex g_allocSharedM;
 
 // ONE LOCK PER ALLOCATOR STATE, not one lock overall. The contention forensics
-// showed 22 of 24 collisions were between DIFFERENT allocator instances -- this
-// title runs three (two static in module .data, one in direct memory) and they
-// share no tree, so serialising them against each other is pure false sharing. It
-// also made the experiment unrunnable: locking the hot coalescer across all three
+// showed 22 of 24 collisions between DIFFERENT allocator instances (this title
+// runs three, two static in module .data and one in direct memory, sharing no
+// tree), so serialising them against each other is pure false sharing, and it
+// made the experiment unrunnable: locking the hot coalescer across all three
 // heaps ran ~20x slower than locking four sites across one, and the repro never
 // reached the crash window.
-//
-// Keyed on arg0, which is the state pointer at the three sites that take one
-// (insert, remove, coalesce all use arg0+0x70). Rebalance and fixup are called
-// from inside those and take node pointers rather than a state, so they are
-// observed and not locked -- their callers already hold the right lock, which is
-// why their contention counts were 0 all along.
-//
-// The payoff is that contention now MEANS something: with per-state locking, a
-// failed try_lock is two threads inside the tree mutators of the SAME tree.
+// Keyed on arg0, the state pointer at the three sites that take one (insert,
+// remove, coalesce all use arg0+0x70). Rebalance and fixup are called from
+// inside those and take node pointers rather than a state, so they are observed
+// and not locked; their callers already hold the right lock, which is why their
+// contention counts were 0 all along.
+// The payoff: with per-state locking, a failed try_lock is two threads inside
+// the tree mutators of the SAME tree.
 constexpr int kAllocStates = 16;
 struct StateLock {
   std::atomic<u64> state{0};
@@ -587,22 +581,19 @@ static std::recursive_mutex &allocMutexFor(int i, u64 a0) {
 // Ring of the most recent allocator calls, so that when the periodic walk trips
 // there is a story for the window it brackets instead of only a verdict: which
 // sites ran, with what argument, on which thread. Read back on the first trip.
-// Who is inside the shared lock right now, so a thread that contends can say what
-// it collided with. Set on acquire, cleared on release.
+// Who is inside the shared lock right now, so a thread that contends can say
+// what it collided with. Set on acquire, cleared on release.
 // DELTA_SOTC_HEAPROUTE: do the title's three heaps share address space?
-//
-// The corruption on the crashing heap needs no concurrency if a chunk is freed into
-// one state's tree while its backing memory belongs to another state's arena that
-// later gets recycled wholesale -- the tree would keep a link to memory handed out
-// again elsewhere, which is exactly the observed shape (a live record array holding
-// memory the tree still thinks is free), and it would explain why no same-tree
-// collision has ever been seen on that heap.
-//
-// The insert takes the state in rdi and inserts the chunk cached at state+0xc0 (its
-// designated victim), so both sides are readable at the hook with no pointer map:
-// bucket the chunk address by 256 MiB per state and print the table. Disjoint
-// buckets per state means chunks never cross heaps and the idea is dead; a bucket
-// shared by two states is where to look next.
+// The corruption on the crashing heap needs no concurrency if a chunk is freed
+// into one state's tree while its backing memory belongs to another state's
+// arena that later gets recycled wholesale: the tree would keep a link to
+// memory handed out again elsewhere, which is exactly the observed shape (a
+// live record array holding memory the tree still thinks is free).
+// The insert takes the state in rdi and inserts the chunk cached at state+0xc0
+// (its designated victim), so both sides are readable at the hook with no
+// pointer map: bucket the chunk address by 256 MiB per state and print the
+// table. Disjoint buckets per state means chunks never cross heaps and the idea
+// is dead; a bucket shared by two states is where to look next.
 struct RouteBucket { u64 prefix; u64 count; };
 struct RouteTab {
   std::atomic<u64> state{0};
@@ -661,7 +652,7 @@ struct LockHolder {
 LockHolder g_lockHolder;
 std::atomic<int> g_contendReported{0};
 
-// The guest pthread mutex the allocator's shared heap is locked with -- the one the
+// The guest pthread mutex the allocator's shared heap is locked with, the one the
 // crashing thread spins on with MUTEX_WAIT/MUTEX_WAKE. FreeBSD's umutex keeps the
 // owner tid in the low bits of its first word with UMUTEX_CONTESTED (0x80000000)
 // on top, which is how sys_umtx_op reads it.
@@ -673,7 +664,7 @@ static u32 umtxOwnerWord() {
 }
 
 // The discriminating report. Two threads inside the tree mutators at once is only a
-// race on the SAME tree if they are working on the same allocator state -- this
+// race on the SAME tree if they are working on the same allocator state. This
 // title hands out per-scope allocators, so a0 (the state pointer for insert and
 // remove) has to match before the collision means anything. And if it does match,
 // the owner word says whether the guest's own mutex thought it was excluding them.
@@ -688,12 +679,12 @@ static void reportContention(int site, u64 a0) {
   const u32 owner = ow & ~0x80000000u;
   const char *verdict =
       (ha && a0 && ha != a0)
-          ? "DIFFERENT allocator states -- not one tree, not a race"
+          ? "DIFFERENT allocator states, not one tree, not a race"
           : (owner == myGtid || owner == hg)
-                ? "SAME state, and the guest mutex names one of them as owner -- "
+                ? "SAME state, and the guest mutex names one of them as owner; "
                   "the other entered without it"
                 : (owner == 0)
-                      ? "SAME state, guest mutex UNOWNED -- neither holds it"
+                      ? "SAME state, guest mutex UNOWNED, neither holds it"
                       : "SAME state, guest mutex owned by a THIRD thread";
   BASE_LOGI("contend",
             "me: gtid={} site={} a0={:#x} | holder: gtid={} site={} "
@@ -751,8 +742,8 @@ static void allocLockEnterAt(int i, u64 a0, u64 a1) {
     g_lockHolder.a0.store(a0);
     return;
   }
-  // The try_lock failed, so another thread is inside this very function right
-  // now. That is the measurement; the blocking acquire below is the mitigation.
+  // The try_lock failed, so another thread is inside this function. That is
+  // the measurement; the blocking acquire below is the mitigation.
   s.contended.fetch_add(1, std::memory_order_relaxed);
   reportContention(i, a0);
   const auto t0 = std::chrono::steady_clock::now();
@@ -770,26 +761,26 @@ static void allocLockEnterAt(int i, u64 a0, u64 a1) {
 
 // DELTA_SOTC_TREEWATCH: catch the free tree going bad AT ITS BIRTH.
 //
-// Five crashes all corrupt the same field -- node 0x8052e00020's child[0] -- so
+// Five crashes all corrupt the same field, node 0x8052e00020's child[0], so
 // there is no need to walk the tree: check that one word, on both sides of every
 // allocator call. Entry clean and exit dirty names the call that CONTAINED the
-// corrupting store, which is what a "miscompiled store" claim needs and what the
-// crash-time walk can never give (by then the store is millions of calls old).
-// Two loads and a few compares per call, against ~6M calls a run.
-//
-// A healthy child[0] is either the tree's sentinel or a pointer to a free chunk,
-// whose size word sits at child-8 and is small, non-zero and 16-byte aligned --
-// the same plausibility test the crash-time walker uses. Every bad value observed
-// so far is a mapped pointer into reused live data, so reading it is safe; a value
-// outside guest direct memory is reported without being dereferenced.
+// corrupting store, which is what a "miscompiled store" claim needs and what
+// the crash-time walk can never give (by then the store is millions of calls
+// old). Two loads and a few compares per call, against ~6M calls a run.
+// A healthy child[0] is either the tree's sentinel or a pointer to a free
+// chunk, whose size word sits at child-8 and is small, non-zero and 16-byte
+// aligned (the same plausibility test the crash-time walker uses). Every bad
+// value observed so far is a mapped pointer into reused live data, so reading
+// it is safe; a value outside guest direct memory is reported without being
+// dereferenced.
 static thread_local bool t_treeOkAtEntry = true;
 std::atomic<u64> g_treeChecks{0};
 std::atomic<u64> g_treeBadAtEntry{0};
 std::atomic<u64> g_treeWentBad{0};
 std::atomic<int> g_treeReported{0};
 
-// The watched node does not exist at boot -- the heap has not grown into it yet --
-// so the check has to stay disarmed until its page is mapped, or the very first
+// The watched node does not exist at boot, because the heap has not grown into it yet, so
+// the check has to stay disarmed until its page is mapped, or the first
 // allocator call dereferences nothing and takes the process down. (It did.) Poll
 // for the page the way the write census does, then confirm the address really
 // looks like a free-tree node before trusting anything it says.
@@ -839,7 +830,7 @@ static bool treeFieldOk(u64 &valOut, u64 &szOut) {
   if (c == sentinel)
     return true;
   if (c < 0x8000000000ull || c >= 0x8700000000ull)
-    return false;  // not a guest pointer at all -- do not dereference it
+    return false;  // not a guest pointer at all, do not dereference it
   const u64 sz = *reinterpret_cast<const u64 *>(c - 8) & ~7ull;
   szOut = sz;
   return sz && sz < 0x8000000ull;
@@ -863,7 +854,7 @@ static void treeWatchAt(int site, bool onExit) {
   if (g_treeReported.fetch_add(1) < 8) {
     BASE_LOGI("treewatch",
               "node {:#x} child[0] WENT BAD inside {} (tid {}): "
-              "now {:#x}, its size word reads {:#x} -- this call contained the "
+              "now {:#x}, its size word reads {:#x}; this call contained the "
               "corrupting store",
               (unsigned long long)kSotcTreeNode, g_allocSites[site].name,
               (long)syscall(SYS_gettid), (unsigned long long)val,
@@ -877,11 +868,10 @@ static void treeWatchAt(int site, bool onExit) {
 // went silent the run the victim moved elsewhere. Bracketing to N calls turns a
 // 25-minute repro into "the corruption appeared within these N calls", and the
 // ring buffer above says what ran in that window.
-//
 // Depth-first over both children with an explicit stack; a node is judged by its
-// size word at node-8 (8-granular, non-zero, not absurd) exactly as the crash-time
-// walker does. Pointers are range-checked against guest direct memory before any
-// dereference, so a corrupt link cannot fault the walker.
+// size word at node-8 (8-granular, non-zero, not absurd) exactly as the
+// crash-time walker does. Pointers are range-checked against guest direct memory
+// before any dereference, so a corrupt link cannot fault the walker.
 std::atomic<bool> g_treeWalkTripped{false};
 
 static inline bool inDmem(u64 p) {
@@ -924,7 +914,7 @@ static void treeWalkPeriodic() {
       BASE_LOGI("treewalk",
                 "\nTRIPPED after {} allocator calls, {} nodes "
                 "visited: the link at {:#x} points at {:#x}, whose size word "
-                "reads {:#x} -- no longer a free chunk",
+                "reads {:#x}, no longer a free chunk",
                 (unsigned long long)g_allocCallSeq.load(), visited,
                 (unsigned long long)field, (unsigned long long)cur,
                 (unsigned long long)sz);
@@ -1044,12 +1034,12 @@ void installAllocLock(smodule &m) {
       {0x4a210, 15, "treeFixup(0x4a210)",      false},
       // The census site 0x48dfb lives here. An earlier pass mis-attributed it to
       // 0x48c70 because that address is a 9-byte leaf whose `ret` is followed by
-      // seven nops, one short of the eight the function-boundary scan wanted --
+      // seven nops, one short of the eight the function-boundary scan wanted –
       // so this mutator went unserialised through the whole first experiment.
       // Observed, NOT locked. Serialising this one stalls the title outright:
       // hooked-but-unlocked runs 174093 inserts and 3.3 fps in five minutes, and
-      // hooked-and-locked manages 129 inserts and never renders a frame -- with
-      // per-state locks too, so it is not false sharing across heaps. The
+      // hooked-and-locked manages 129 inserts and never renders a frame, and
+      // that is with per-state locks too, so it is not false sharing across heaps. The
       // coalescer evidently must not be held across by a foreign lock (it is
       // reached with guest locks already held, and the title's sched_yield spin
       // convoys behind it). Left in the table because its contention count is the
@@ -1134,7 +1124,7 @@ void installJobTrace(smodule &m) {
   // The ctor hook alone is enough to arm the watcher and costs one call per
   // run. The claim hook additionally counts claim/fail rates, but the workers
   // hit it ~2M times/sec, and the magic-syscall round trip roughly halves the
-  // world-load drain rate -- opt in with DELTA_JOB_TRACE_CLAIM when the rates
+  // world-load drain rate; opt in with DELTA_JOB_TRACE_CLAIM when the rates
   // are what you're after.
   installInternalHook(base, 0x36210, 15, 11, "JobSystemCtor(0x36210)");
   if (kJobTraceClaim)
@@ -1293,7 +1283,7 @@ void bringUpRebirthSurfaceRegistry(smodule &m) {
 // statically links the same "rebirth" engine, so it has the same global surface-
 // name registry, here at eboot+0x985458 (bucket-array base pointer, a fixed 0x20
 // buckets * 0x20-byte stride). Its ctor at eboot+0x56a5d0 zeroes the pointer
-// (the null-write at eboot+0x56a5e7) and never allocates the array -- that
+// (the null-write at eboot+0x56a5e7) and never allocates the array. That
 // storage is meant to come from the renderer registering the base surfaces,
 // which needs the AGC/GPU device that isn't up yet. Main-init's first registry
 // find (eboot+0x568840) then iterates null+idx*0x20 and faults (eboot+0x56889e).

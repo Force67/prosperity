@@ -124,7 +124,7 @@ void* allocMem(void* preferredAddr, size_t length, pageProtection prot,
     if (preferredAddr)
       flags |= MAP_FIXED_NOREPLACE;
   } else {
-    // commit: overlay a sub-range of the reservation. has to be MAP_FIXED --
+    // commit: overlay a sub-range of the reservation. has to be MAP_FIXED –
     // MAP_FIXED_NOREPLACE hits EEXIST and the page stays unwritable.
     posix_prot = protection_ToPosix(prot);
     if (preferredAddr)

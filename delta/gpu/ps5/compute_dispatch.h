@@ -13,8 +13,8 @@
  * deciding which need staging (a tiled image, a format the GPU cannot alias)
  * and refusing the ones that do not add up happens here.
  *
- * Titles build real content this way -- Minecraft assembles its UI vertex
- * buffers with compute -- so a skipped dispatch leaves the draws that read them
+ * Titles build real content this way (Minecraft assembles its UI vertex
+ * buffers with compute), so a skipped dispatch leaves the draws that read them
  * fetching zeros. Getting one wrong is a black surface, not a crash, so a
  * refused dispatch is loud (DELTA_GPU_CSDUMP / DELTA_GPU_CSRES).
  */

@@ -8,7 +8,7 @@ records which edges exist and fails when a new one appears.
 It is a RATCHET, not a description of the intended design. Edges that should
 not exist are listed under GRANDFATHERED with the reason and what would remove
 them; the file only ever shrinks. Adding an entry to GRANDFATHERED to make a
-build pass defeats the point -- fix the direction instead.
+build pass defeats the point; fix the direction instead.
 
 delta/gpu additionally polices its own internals; see gpu/tests/check_layering.py.
 
@@ -30,8 +30,8 @@ MODULES = ('cpu', 'crypto', 'formats', 'gfx', 'gpu', 'kern', 'main', 'runtime')
 #   kern        the process model, lv2 syscalls, devices, VFS
 #   gpu         guest command streams -> rendered frames
 #   gfx         the host platform shell (window, input, audio, overlay)
-#   formats     container parsers (pkg, pup, ufs2, archive) -- depends on nothing
-#   crypto      primitives -- depends on nothing
+#   formats     container parsers (pkg, pup, ufs2, archive); depends on nothing
+#   crypto      primitives; depends on nothing
 ALLOWED = {
     'crypto': (),
     'formats': (),
@@ -59,7 +59,7 @@ GRANDFATHERED = {
     # the lifter rewriting guest code; runtime -> kern is every HLE module
     # calling the kernel it sits on. Either invert the resolver (kern declares
     # it, runtime registers into it) or declare kern+runtime one layer and say
-    # so here -- but decide, because right now neither is written down.
+    # so here, but decide, because right now neither is written down.
     ('kern', 'runtime'),
 }
 

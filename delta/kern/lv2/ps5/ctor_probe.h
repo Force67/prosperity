@@ -7,7 +7,7 @@ class proc;
 
 namespace krnl::ps5 {
 
-// DIAGNOSTIC ONLY -- not a fix, and off unless DELTA_PS5_CTOR_PREPEND is set.
+// DIAGNOSTIC ONLY, not a fix, and off unless DELTA_PS5_CTOR_PREPEND is set.
 //
 // Prepend a function in the main module to its legacy .ctors list, so it runs
 // before every static initializer. Used to answer "if subsystem X were already

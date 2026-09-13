@@ -2,7 +2,7 @@
  * PS4Delta : PS4/PS5 emulation and research project
  *
  * PS5-only HLE alias for the one libSceNgs2 export missing from firmware 01.14.00.
- * All 12 call sites build the command struct in place and pass it in -- there is no
+ * All 12 call sites build the command struct in place and pass it in; there is no
  * out-parameter to fill, and the sites that check the result treat non-zero as
  * fatal, so report success.
  *

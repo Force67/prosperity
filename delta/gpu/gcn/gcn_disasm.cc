@@ -850,8 +850,8 @@ std::string MimgName(u32 op) {
     return std::string("image_sample") + kSample[op - 0x20];
   if (op >= 0x30 && op <= 0x3f)
     return std::string("image_sample") + kSample[op - 0x30] + "_o";
-  // Same suffix layout as kSample -- low three bits are the LOD mode, bit 3
-  // adds the compare -- except that gather4 has no derivative forms, so the
+  // Same suffix layout as kSample: low three bits are the LOD mode, bit 3
+  // adds the compare. Gather4 has no derivative forms, so the
   // _d / _d_cl slots are holes. The old table omitted those holes and shifted
   // every entry after them: 0x44 (_l) printed as "_b_cl", and 0x47 (_lz), the
   // one gather the translator has always handled, printed as "_c_cl".

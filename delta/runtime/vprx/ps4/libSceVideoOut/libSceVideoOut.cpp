@@ -139,8 +139,8 @@ struct VideoPort {
   // MUST live in GUEST-addressable memory, not this struct: the title embeds
   // the address in PM4 (Gnm's prepareFlip WRITE_DATA / EOP fence) and the
   // command processor's label range check rightly refuses to write host .bss
-  // -- SotC's render fence never landed and its LoadInitialWorld job chain
-  // stalled forever on the unset label.
+  // (SotC's render fence never landed and its LoadInitialWorld job chain
+  // stalled forever on the unset label).
   u64 *labels = nullptr;
 };
 

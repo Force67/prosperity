@@ -25,7 +25,7 @@ VkFormat ColorTargetFormat(u32 info);
 
 // A colour target whose texels are integers. The fragment shader must declare
 // an integer output for one, blending is not allowed on one, and a sampler
-// reading one may not filter -- three rules that all key off this.
+// reading one may not filter. Three rules that all key off this.
 bool IsIntegerColorFormat(VkFormat format);
 VkClearColorValue ColorTargetClearValue(u32 info,
                                         u32 word0,

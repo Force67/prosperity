@@ -71,7 +71,7 @@ void NoteRegBlock(u32 base,
 // DELTA_AGC_REGSTAT>=2: a whole state block, entry by entry (>=3 trades the
 // full dump for a non-zero digest of ten times as many blocks, so a steady-state
 // frame's state stream fits in one run). DELTA_AGC_REGSTAT_FROM=<draw> skips
-// the init blocks and starts at the draw the frame is really made of.
+// the init blocks and starts at the draw the frame is made of.
 void TraceRegBlock(u32 base, u64 address, u32 num_pairs, u32 mode);
 
 // DELTA_AGC_REGSTAT: the entry a colour-target bind was anchored on.
@@ -91,7 +91,7 @@ void TraceColorBaseWrite(u32 reg,
                          u32 offset_dword);
 
 // DELTA_AGC_TRACE: the first few state blocks that leave a non-zero shader
-// program address behind -- the real pipeline binds.
+// program address behind: the real pipeline binds.
 void TraceShaderBind(u64 address, u32 gs_pgm_lo, u32 ps_pgm_lo);
 
 // --- draw accounting -------------------------------------------------------
@@ -184,7 +184,7 @@ void TraceDrawTextures(const rhi::DrawInfo& d);
 // DELTA_AGC_VDUMP*: the raw vertex bytes of a resolved draw as float32 and
 // uint32, its transform and constant buffers, and optionally the decoded
 // program (VDUMPPROG / VDUMPPS) and a host-side projection of its first
-// vertices (VDUMPPROJ) -- which say whether positions are garbage (wrong
+// vertices (VDUMPPROJ), which say whether positions are garbage (wrong
 // format), screen-space (missing projection) or clip-space (a later problem).
 // VDUMPFROM/VDUMPRT/VDUMPIC pick the draw: indices shift between runs, a target
 // address and an index count do not.
@@ -275,7 +275,7 @@ void NoteUnhandledOpcode(u32 op,
 void TraceOpcodeBody(u32 op, const u32* body, u32 count);
 
 // DELTA_AGC_TRACE: which packet first makes CB_COLOR0_BASE non-zero, and every
-// later change -- that is, who actually binds the render target.
+// later change, that is, who actually binds the render target.
 void TraceColorBaseSource(u32 op, u32 color0_base);
 
 // One packet of a dumped submission, with the GPU buffer an indirect register
@@ -299,7 +299,7 @@ void TraceDmaData(u32 control, u64 src, u64 dst, u32 bytes, bool copied);
 // --- submissions -----------------------------------------------------------
 
 // DELTA_AGC_TRACE: the first few submissions that carry packets are dumped in
-// full -- the raw prefix here, then every packet through TraceDcbPacket.
+// full: the raw prefix here, then every packet through TraceDcbPacket.
 // Returns whether this submission is one of them.
 bool TraceSubmit(const void* dcb, u32 size_bytes, u32 words, u64 submission);
 

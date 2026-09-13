@@ -110,7 +110,7 @@ constexpr u32 mmDB_Z_WRITE_BASE = 0xA014;
 constexpr u32 mmDB_STENCIL_WRITE_BASE = 0xA015;
 // DB_DEPTH_SIZE: PITCH_TILE_MAX[10:0], HEIGHT_TILE_MAX[21:11] (both in 8-texel
 // tiles, minus one). DB_DEPTH_SLICE: SLICE_TILE_MAX[21:0], the tiles in one
-// slice minus one -- which is what says whether a Z surface has more than one.
+// slice minus one, which is what says whether a Z surface has more than one.
 constexpr u32 mmDB_HTILE_DATA_BASE = 0xA005;
 constexpr u32 mmDB_DEPTH_SIZE = 0xA016;
 constexpr u32 mmDB_DEPTH_SLICE = 0xA017;

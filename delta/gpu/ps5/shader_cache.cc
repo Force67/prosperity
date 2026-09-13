@@ -108,9 +108,9 @@ struct RecompTimer {
 // dozen shaders through a fresh address almost every draw: keyed by address
 // this cache missed ~500 times every two seconds and spent a whole core
 // recompiling shaders it already had, forever, with 200-600 ms frames where the
-// misses clustered. Nothing in an RDNA module depends on where the code sat --
+// misses clustered. Nothing in an RDNA module depends on where the code sat –
 // the address reaches the translator only as a readability check and a log
-// line -- so the content hash is the whole identity.
+// line, so the content hash is the whole identity.
 u64 CodeHash(u64 addr, u32 max_dwords) {
   return rdna::CachedCodeHash(reinterpret_cast<const u32*>(addr), max_dwords);
 }

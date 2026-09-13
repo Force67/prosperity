@@ -98,7 +98,7 @@ void DumpCsProgram(const Program& program) {
 }
 
 // Why a descriptor the replay could not follow was declined, as its own tag:
-// the three have very different fixes, and one line per shader is all the
+// the three take different fixes, and one line per shader is all the
 // visibility a skipped pass gets.
 const char* LossTag(ScalarReplayPlan::Loss loss) {
   switch (loss) {
@@ -191,8 +191,8 @@ bool PlanResources(const Program& program,
     for (u32 k = 0; k < dwords; k++)
       untouched = untouched && !scalar_written[base_sgpr + k];
     // A descriptor the shader never wrote and that fits the COMPUTE_USER_DATA
-    // window is that window's, verbatim. Anything else -- an SRT chain, or a
-    // load over the shader's own user data -- reaches the dispatch through the
+    // window is that window's, verbatim. Anything else (an SRT chain, or a
+    // load over the shader's own user data) reaches the dispatch through the
     // replay, which prefers its own result over the window for exactly this
     // reason, so it is only as good as the replay is.
     const bool inline_user_data = base_sgpr + dwords <= ud_dwords && untouched;
@@ -661,7 +661,7 @@ bool TranslateCs(const Program& program,
 
   // Cross-lane work needs this invocation's lane. ds_swizzle is not the only
   // way a program asks for it: a DPP modifier is a lane shuffle too, and a
-  // compute shader that used one without a lane id was rejected outright --
+  // compute shader that used one without a lane id was rejected outright.
   // Astro Bot's world map skips a dozen dispatches that way.
   bool uses_lane_id = false;
   for (const Inst& inst : program)

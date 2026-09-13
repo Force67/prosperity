@@ -85,8 +85,8 @@ DELTA_OPTION(u32, kGpuPsVgprBlock, "DELTA_GPU_PSVGPR_BLOCK", 0);
 DELTA_OPTION(u64, kGpuPsVgprPs, "DELTA_GPU_PSVGPR_PS", 0);
 // merged_wave_info (s3): verts-in-wave in [7:0], prims in [15:8]. One
 // invocation is one lane here, so a wave has to be as wide as the invocations
-// the draw actually runs -- a shader that masks EXEC with `lane < verts` keeps
-// only lane 0 otherwise, and its triangle collapses.
+// the draw actually runs: a shader that masks EXEC with `lane < verts` would
+// otherwise keep only lane 0, and its triangle collapses.
 DELTA_OPTION(u32, kNggWaveInfo, "DELTA_PS5_WAVEINFO", 0x0101);
 DELTA_OPTION(bool, kGpuForcequad, "DELTA_GPU_FORCEQUAD", false);
 DELTA_OPTION(bool, kGpuNokill, "DELTA_GPU_NOKILL", false);
@@ -225,9 +225,9 @@ bool FlatIsStore(u32 op) {
 // The one FLAT-family form the graphics resource model can express: a GLOBAL
 // load whose base is a scalar register pair. Its address is
 // s[SADDR:SADDR+1] + zext(v[ADDR]) + sext(OFFSET), so the pair names a
-// resource and the VGPR is a byte offset into it -- the shape a set-2 window
-// already has. A negative immediate would read below that base with nothing to
-// clamp into, so it stays out.
+// resource and the VGPR is a byte offset into it, which is the shape a set-2
+// window already has. A negative immediate would read below that base with
+// nothing to clamp into, so it stays out.
 bool FlatServableLoad(const Flat& f) {
   return f.seg == 2 && !f.saddr_null && !f.lds && FlatLoadDwords(f.op) &&
          f.offset >= 0;
@@ -243,7 +243,7 @@ constexpr u32 kFlatBaseTag = 0x100;
 
 // A buffer_load_format is a real PER-VERTEX fetch when it is IDXEN and its
 // srsrc V# is TABLE-CHAINED (loaded from a user-data descriptor table,
-// `chained`) -- regardless of which VGPR indexes it. NGG streams index
+// `chained`), regardless of which VGPR indexes it. NGG streams index
 // per-vertex data by v0 or a computed register (the composite VS uses v3, the
 // sprite VS's uv/param streams use v4); the Vulkan vertex-input stage supplies
 // per-vertex data by the draw index either way. A NON-chained IDXEN load reads
@@ -262,7 +262,7 @@ bool BufLoadIsVertexFetch(const Inst& in, bool chained) {
 // selected by that s_load's SGPR soffset, computed at runtime from an index
 // table the game uploads (`s_lshl_b32 soff, sN, 4` + `s_and_b32 soff, soff,
 // 0x1f0`). The compiler emits those s_loads in entry order, but SCHEDULES the
-// buffer_loads that consume them in a different order -- so the entry must be
+// buffer_loads that consume them in a different order, so the entry must be
 // taken from the s_load, not from the position of the load. Returns, per
 // buffer_load pc, {table root SGPR pair, entry index}; absent means the V# is
 // inline in user data at srsrc.
@@ -735,8 +735,8 @@ static std::unordered_set<u32> VmemDescriptorSgprs(const Program& program) {
 
 // Plan the set-1 UBO bindings a stage's SMEM loads reference. A leaf read is an
 // s_buffer_load* (op 0x08-0x0C, V# in the sbase quad) or an s_load* (op
-// 0x00-0x04, pointer in the sbase pair) whose result is used as data -- not as
-// another SMEM's descriptor base. When the base SGPR was itself s_load'd (a
+// 0x00-0x04, pointer in the sbase pair) whose result is used as data rather
+// than as another SMEM's descriptor base. When the base SGPR was itself s_load'd (a
 // runtime pointer chain, e.g. a 2D VS that loads its transform's V# from a root
 // descriptor table), the chain back to the user-data root is recorded so the
 // renderer can walk it.
@@ -797,8 +797,8 @@ bool RdnaPlanCbufs(const Program& program,
                        static_cast<u64>(static_cast<u32>(off));
     }
     // A descriptor fetch (the V# a vertex fetch or texture op then reads). Its
-    // offset is often a runtime table index -- Minecraft's NGG VS computes one
-    // into vcc_hi -- which no cbuf binding can express, and treating it as a
+    // offset is often a runtime table index (Minecraft's NGG VS computes one
+    // into vcc_hi), which no cbuf binding can express; treating it as a
     // constant buffer failed the whole shader over a load the cbuf path never
     // needed to see.
     // Raw indexed loads also read STRIDE from the descriptor's SGPRs. Keep
@@ -825,7 +825,7 @@ bool RdnaPlanCbufs(const Program& program,
     // soffset naming an SGPR instead of the inline zero is a byte offset the
     // shader computes: how one constant buffer holding an array is indexed at
     // run time. Nothing static bounds what it reads, so the binding takes the
-    // whole window from dword 0 -- RdnaEmitSmem already adds that offset to the
+    // whole window from dword 0: RdnaEmitSmem already adds that offset to the
     // immediate and CbufDwordId clamps the result into the declared UBO.
     // Rejecting it dropped every draw that used one, which for Dead Cells is
     // the shaders that light the scene.
@@ -912,7 +912,7 @@ void NoteCbufWindows(const std::vector<ShaderCbuf>& cbufs, StageContext& sc) {
 // Raw MUBUF loads (buffer_load_dword{,x2,x3,x4} and the sub-dword forms) the
 // shader indexes itself, plus every buffer_load_format the vertex-input path did
 // not lift (`claimed`). Each live descriptor in an SGPR quad becomes one set-2
-// storage buffer, which the command processor resolves per draw -- a format load
+// storage buffer, which the command processor resolves per draw. A format load
 // belongs here rather than in a 64-byte UBO because its index is per-lane and
 // reaches the whole resource. The shared PlanGfxBuffers cannot be reused: its
 // descriptor-reload versioning reads the SMEM sdst with GCN field positions.
@@ -1072,7 +1072,7 @@ thread_local u64 g_ps_addr = 0;
 // ---- MUBUF buffer_load_format ----------------------------------------------
 // buffer_load_format converts through the FORMAT in the V#, which the
 // instruction does not carry. The V#s the stage's buffer ops read, resolved by
-// replaying the stage's scalar code against the live user data -- the same
+// replaying the stage's scalar code against the live user data, the same
 // resolution the command processor performs when it binds those buffers. The
 // format is then baked into the module, so a later draw binding a
 // differently-formatted V# to the same shader would be wrong; that is the
@@ -1271,8 +1271,8 @@ bool RdnaEmitBufFormatLoad(Translator& t,
 // Only global_load through a scalar base pair is expressible against a bound
 // resource (FlatServableLoad): the scalar pair is the window the planner bound
 // and the VGPR is a byte offset into it. Every other form carries the whole
-// 64-bit pointer per lane -- a generic FLAT access, a SADDR-NULL global, or
-// per-thread SCRATCH -- with nothing naming a resource, so each keeps its own
+// 64-bit pointer per lane (a generic FLAT access, a SADDR-NULL global, or
+// per-thread SCRATCH) with nothing naming a resource, so each keeps its own
 // reject tag rather than reading somewhere plausible. GLC/SLC/DLC only pick
 // which caches a load bypasses, never the data it returns, so they are ignored.
 void RdnaEmitFlat(Translator& t, const Inst& inst, StageContext& sc) {
@@ -1482,7 +1482,7 @@ void EmitExport(Translator& t, const Inst& inst, StageContext& sc) {
       // A pixel export may name any MRT any number of times, and the ISA
       // accumulates the write masks per target. Storing the whole vec4 let a
       // later export clobber the channels an earlier one wrote with the
-      // defaults above -- RGB 0 and alpha 1 -- so a shader that exports its
+      // defaults above (RGB 0 and alpha 1), so a shader that exports its
       // colour and its alpha in two instructions came out opaque black. The
       // GCN emitter already writes only the components its EN enables; do the
       // same here. The diagnostics that replace the whole colour still write
@@ -1586,7 +1586,7 @@ void EmitExport(Translator& t, const Inst& inst, StageContext& sc) {
   } else if (target >= 13 && target <= 15) {
     // POS1..POS3 carry the clip/cull distances and the point-size / edge-flag /
     // layer / viewport-index quad. The renderer has no user clip planes and no
-    // layered rendering, so there is nothing to store -- but rejecting the
+    // layered rendering, so there is nothing to store. Rejecting the
     // shader over it throws the whole draw away. Demon's Souls binds one
     // fullscreen RECTLIST vertex program that exports POS1 with EN=0x4 (the
     // render-target array index) and nothing else we cannot translate;
@@ -1704,8 +1704,8 @@ void ResolveValuSrc0(const Inst& inst,
 // ---- DPP -------------------------------------------------------------------
 // A DPP modifier reads src0 from ANOTHER lane of the same row of 16, which the
 // host subgroup answers with a shuffle. Exact when the guest wave's lanes map
-// to consecutive host invocations -- what an NGG vertex wave does, and what
-// ds_swizzle already assumes. Without it the whole shader was rejected: Astro
+// to consecutive host invocations, which is what an NGG vertex wave does and
+// what ds_swizzle already assumes. Without it the whole shader was rejected: Astro
 // Bot's vertex program uses one `v_add_nc_u32_dpp row_shr:1` and every draw it
 // takes part in was dropped.
 struct DppLane {
@@ -1781,7 +1781,7 @@ Id RdnaDppSrc0(Translator& t, StageContext& sc, const Inst& inst) {
   if (sel.valid) {
     // Out of the row: BOUND_CTRL reads zero, otherwise the hardware leaves the
     // destination alone. We have no per-lane write mask here, so the lane keeps
-    // its own value -- the same shape, and the case a prefix sum never hits.
+    // its own value: the same shape, and the case a prefix sum never hits.
     if (!bound_ctrl)
       gpu::gcn::NoteApproximated("dpp.bound", ctrl);
     value = t.SelectB(sel.valid, value, bound_ctrl ? t.U32(0) : own);
@@ -1918,7 +1918,7 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
           t.m.EmitVoid(spv::Op::OpControlBarrier,
                        {t.U32(2), t.U32(2), t.U32(0x108)});
         } else if (sc.lds_wave_base) {
-          // Shared LDS: the wave really does have to converge here. A control
+          // Shared LDS: the wave has to converge here. A control
           // barrier at SUBGROUP scope is legal in any stage (unlike Workgroup,
           // which SPIR-V allows only in compute-like ones), and a subgroup is
           // exactly the set of lanes sharing the block.
@@ -1928,7 +1928,7 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
                         t.U32(0x48)});  // AcquireRelease | UniformMemory
         } else {
           // A graphics stage's LDS is per-invocation (Private), so there is
-          // nothing for the wave to wait on -- and SPIR-V has no control
+          // nothing for the wave to wait on, and SPIR-V has no control
           // barrier there to emit anyway.
           gpu::gcn::NoteApproximated("barrier.graphics", inst.opcode);
         }
@@ -2043,7 +2043,7 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
         sdwa_dst = sd;
         sdwa_previous = sd.dst_sel < 6 ? t.Vg(vdst) : 0;
         // CLAMP and OMOD are applied to the RESULT, so they need no operand
-        // rewriting -- the shared emitter writes vdst and we scale/saturate it
+        // rewriting: the shared emitter writes vdst and we scale/saturate it
         // afterwards. OMOD is a real gfx10 SDWA field: `v_mul_f32_sdwa ... mul:2`
         // is what Minecraft's world shaders use, and rejecting it dropped the
         // whole shader.
@@ -2074,7 +2074,7 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
           break;  // v_xnor_b32
         case 0x1F:
           // v_mac_f32 (D = S0*S1 + D). This slot is gfx1010 numbering, which
-          // gfx1030 dropped -- the PS5's ISA keeps some RDNA1 assignments, so
+          // gfx1030 dropped; the PS5's ISA keeps some RDNA1 assignments, so
           // decode it the way llvm-mc -mcpu=gfx1010 does, not gfx1030.
           t.SetVgF(vdst, t.m.ExtInst(t.t_f, GLSLstd450Fma,
                                      {t.m.Bitcast(t.t_f, s0u),
@@ -2309,7 +2309,7 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
         break;
       }
       if (op == 0x141) {
-        // v_mad_f32 (D = S0*S1 + S2), gfx1010 numbering -- see the VOP2 0x1f
+        // v_mad_f32 (D = S0*S1 + S2), gfx1010 numbering; see the VOP2 0x1f
         // note. Minecraft's shaders use it for the classic *2-1 remap.
         Id r = t.m.ExtInst(t.t_f, GLSLstd450Fma,
                            {t.SrcF(s0, inst.literal, neg & 1, abs & 1),
@@ -2402,7 +2402,7 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       // rejected.
       // 0x1xx, not the bare number: EmitVop3 reads an opcode below 0x100 as a
       // VOPC, so the bare form wrote a predicate to an SGPR and left the
-      // destination VGPR at zero -- every lane then computed lane 0's LDS slot.
+      // destination VGPR at zero, so every lane computed lane 0's LDS slot.
       // The pack converts keep their GFX7 VOP2 meaning, just renumbered.
       u32 emit_op = op;
       if (op == 0x368)
@@ -2508,7 +2508,7 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       }
       // A store has nowhere to land: the set-2 window is a per-draw staging copy
       // that is never read back, and draws sharing a resource share one window.
-      // Drop it and keep going -- a rejected shader drops the whole draw, while
+      // Drop it and keep going: a rejected shader drops the whole draw, while
       // a draw missing a side-effect write still rasterizes its geometry.
       if (inst.enc == Enc::kMubuf ? RdnaMubufStore(inst.opcode)
                                   : RdnaMtbufStore(inst.opcode)) {
@@ -2630,7 +2630,7 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
     // opcode numbers and the field layout, and our decoder already reads the
     // opcode from word0[25:18]. A compute stage gets real Workgroup storage; a
     // graphics stage cannot have any (SPIR-V allows that class only in
-    // compute-like stages), so it is backed by a Private array -- exact when
+    // compute-like stages), so it is backed by a Private array, exact when
     // the address is the lane's own slot, which is what an NGG vertex shader's
     // spill does. gfx10.3 has no hardware VS: every vertex program is a merged
     // ES/GS that stages its exports through LDS, so without this the whole
@@ -2899,7 +2899,7 @@ void PlanGraphicsLds(const Program& program, Translator& t, StageContext& sc) {
   // hands it zeros. Back it with the shared buffer instead: one block per wave,
   // the block picked by the wave's first vertex index, which is the same for
   // every lane of the wave and different for the next one. Only the vertex
-  // stage can do this -- a fragment shader has no vertex index to key on.
+  // stage can do this: a fragment shader has no vertex index to key on.
   if (sc.is_vs_shared_lds_capable) {
     sc.lds_storage = spv::StorageClass::StorageBuffer;
     t.EnsureLdsBuffer();
@@ -3020,7 +3020,7 @@ bool TranslateVs(const Program& program,
   // program gates its per-primitive body on `mask > lane` and derives its LDS
   // slots from mbcnt over a ballot. Every v_cmp then costs a subgroup ballot,
   // which halved Dead Cells' frame rate when it was on for shaders that only
-  // ever use a mask as this lane's predicate -- and those are exactly the
+  // ever use a mask as this lane's predicate, and those are exactly the
   // shaders with no LDS.
   t.wave_masks = kWaveMasks && gpu::gcn::GraphicsLdsDwords(program, nullptr);
   t.InitTypes();
@@ -3034,8 +3034,8 @@ bool TranslateVs(const Program& program,
   iface.push_back(pos_out);
   // A POINT_LIST pipeline needs the vertex stage to write PointSize (the
   // validation layer rejects the module otherwise). The ISA carries point
-  // geometry in the POS1-3 export group we do not read yet, so 1.0 -- the
-  // hardware's default -- is what keeps the pipeline valid; a wrong size
+  // geometry in the POS1-3 export group we do not read yet. The hardware's
+  // default of 1.0 is what keeps the pipeline valid; a wrong size
   // shows as differently sized dots, not as a fault.
   const Id point_out =
       t.m.Variable(t.m.TypePointer(spv::StorageClass::Output, t.t_f),
@@ -3050,7 +3050,7 @@ bool TranslateVs(const Program& program,
   t.m.Store(point_out, t.F32(1.f));
   // DELTA_GPU_POSUNSET: stamp a sentinel w, and at the tail draw an NDC quad
   // wherever it survived. A target that paints under this says the shader
-  // never reached its position export at all -- which no probe reading the
+  // never reached its position export at all, which no probe reading the
   // exported value can tell apart from exporting zeros.
   if (kGpuPosunset)
     t.m.Store(pos_out, t.m.CompositeConstruct(
@@ -3152,7 +3152,7 @@ bool TranslateVs(const Program& program,
   RdnaPlanGfxBuffers(program, 0, &lifted, r.vs_bufs, sc.gfx_buf_bind);
   NoteCbufWindows(r.vs_cbufs, sc);
   // A vertex program may sample too, and only the PS path used to plan its
-  // MIMG bindings -- so every VS that read a texture reached the shared
+  // MIMG bindings, so every VS that read a texture reached the shared
   // emitter with no plan, was reported "mimg.unplanned" and took its draws
   // with it. The renderer expects the PS's textures first in the descriptor
   // array (see the `declared` lambda in vk_texture_cache), so these start
@@ -3254,7 +3254,7 @@ bool TranslateVs(const Program& program,
   // (index/vertex_count/render target).
   if (kGpuForcequad) {
     // A fetch-path VS never created a VertexIndex input, and its v0 is
-    // clobbered by the vertex fetch -- bind a real VertexIndex here so the quad
+    // clobbered by the vertex fetch. Bind a real VertexIndex here so the quad
     // is valid either way.
     Id vidx_var = vertex_index;
     if (!vidx_var) {
@@ -3665,7 +3665,7 @@ bool TranslatePs(const Program& program,
 
   // The straight-line alpha kill: v_cmpx_* compares and clears EXEC, and the
   // export then applies to no lane. Nothing consulted EXEC, so those fragments
-  // were written anyway -- Skyrim's menu quads painted their transparent area
+  // were written anyway: Skyrim's menu quads painted their transparent area
   // over the whole screen. Gate the fragment on EXEC only for shaders that
   // actually contain a cmpx: our EXEC model is one bit, not a lane mask, and
   // applying it everywhere discards everything in a shader that merely moves
@@ -3805,7 +3805,7 @@ void EmitCfg(Translator& t, const Program& program, StageContext& sc) {
 
   // Runaway guard: one mistranslated branch condition or target leaves the
   // state machine spinning, and a spinning invocation takes the whole VkDevice
-  // down -- on NVIDIA as Xid 109 CTX SWITCH TIMEOUT, reported to us as
+  // down, on NVIDIA as Xid 109 CTX SWITCH TIMEOUT, reported to us as
   // VK_ERROR_DEVICE_LOST from whatever submit happened to be waiting. Cap
   // block-steps per invocation so a bad shader renders wrong instead of
   // killing the device. DELTA_GPU_CFG_MAXITER=0 disables it.

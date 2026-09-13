@@ -59,7 +59,7 @@ extern "C" void prosperity_gc_submit(const void *descArray, u32 descCount) {
     return;
   // Guest bug shields: submits arrive with guest-controlled pointers. A stray
   // descriptor array (or a descriptor whose IB address is garbage) must be
-  // dropped loudly, not dereferenced — SotC's debug menu produced a submit
+  // dropped loudly, not dereferenced. SotC's debug menu produced a submit
   // whose descPtr pointed at unmapped host space and SIGSEGV'd the CP.
   if (descCount > 4096 ||
       !utl::isMemoryRangeMapped(descArray, descCount * 16ull)) {
@@ -71,7 +71,7 @@ extern "C" void prosperity_gc_submit(const void *descArray, u32 descCount) {
   }
   // Guest bug shields: submits arrive with guest-controlled pointers. A stray
   // descriptor array (or a descriptor whose IB address is garbage) must be
-  // dropped loudly, not dereferenced — SotC's debug menu produced a submit
+  // dropped loudly, not dereferenced. SotC's debug menu produced a submit
   // whose descPtr pointed at unmapped host space and SIGSEGV'd the CP.
   if (descCount > 4096 ||
       !utl::isMemoryRangeMapped(descArray, descCount * 16ull)) {
@@ -275,7 +275,7 @@ int PS4ABI sceGnmSubmitDone() { return 0; }
 int PS4ABI sceGnmAreSubmitsAllowed() { return 1; }
 
 // The doorbell. Under LLE this is the real driver storing `offset` into its
-// /dev/gc mapping, which tells us nothing -- force this ONE nid onto the shim
+// /dev/gc mapping, which tells us nothing, so force this ONE nid onto the shim
 // (DELTA_HLE_NIDS_GNM) and the ring runs at the only moment its contents are
 // known good. See prosperity_gc_dingdong.
 int PS4ABI sceGnmDingDong(u32 ringId, u32 offset) {

@@ -151,11 +151,11 @@ EXPORT int dcoreMain(int argc, char **argv) {
   // initialized lazily (first Gnm submit), the NVIDIA driver fails its
   // in-process setup once the guest's huge MAP_FIXED mappings exist
   // (vk_icdGetInstanceProcAddr returns NULL) and enumeration silently falls
-  // back to the llvmpipe software rasteriser -- ~30 ms/frame instead of a real
+  // back to the llvmpipe software rasteriser, ~30 ms/frame instead of a real
   // GPU. Harmless when only llvmpipe exists (same device either way).
   gpu::rhi::Init(gpu::rhi::DefaultRenderer());
   // Claim the addresses the guest MAP_FIXEDs before anything host-side can be
-  // handed them -- in particular before the CPU backend reserves its JIT heap.
+  // handed them, in particular before the CPU backend reserves its JIT heap.
   krnl::reserveGuestVaSpace();
   cpu::earlyInit(); // segregate guest/JIT memory before guest modules map
 
@@ -185,7 +185,6 @@ EXPORT int dcoreMain(int argc, char **argv) {
   }
 
   // Block forever; proc runs on a detached thread.
-  // TODO: replace with proper shutdown signal once we have an event loop.
   for (;;) {
     std::this_thread::sleep_for(std::chrono::seconds(1));
   }

@@ -36,7 +36,7 @@
 // These three are read unconditionally below (sys_cpuset_getaffinity, the
 // sysctl handlers), so they must be DECLARED unconditionally too. They used to
 // sit behind `#if defined(DELTA_BACKEND_NATIVE)`, which left the FEX/ARM build
-// -- the only one SotC runs under -- with the uses but not the declarations, so
+// (the only one SotC runs under) with the uses but not the declarations, so
 // this file simply did not compile there.
 namespace {
 DELTA_OPTION(bool, kArndZero, "DELTA_ARND_ZERO", false);
@@ -50,7 +50,7 @@ namespace krnl {
 // actually advances, or every libkernel timer (frame pacing, timeouts: a guest
 // `wait until rdtsc-start >= seconds*tsc_freq` loop) runs at the wrong speed.
 // The PS4's invariant TSC is 1.6 GHz, but on the native x86 backend the guest's
-// rdtsc IS the host's rdtsc, which ticks at the host TSC rate (often 2-4 GHz) --
+// rdtsc IS the host's rdtsc, which ticks at the host TSC rate (often 2-4 GHz) –
 // reporting 1.6 GHz there made all guest timers run host_rate/1.6 too fast.
 // rdtsc can't be cheaply rescaled in the lifter (it's a 2-byte op: no room for a
 // call, and trapping it per use is far too slow for busy-wait loops), so instead
@@ -179,7 +179,7 @@ int PS4ABI sys_sysctl(int *name, u32 namelen, void *oldp, size_t *oldlenp,
 
   // PS5 kern.proc.36: the SDK version the title was compiled against.
   // sceKernelGetCompiledSdkVersion reads it from here and libkernel branches on
-  // it all over process init -- notably, below SDK 1.70 it carves the initial
+  // it all over process init. Notably, below SDK 1.70 it carves the initial
   // thread's static TLS out of the small SceKernelInternalMemory arena instead
   // of mmap'ing it, which a title with a 2 MiB PT_TLS (Skyrim) overflows.
   else if (name[0] == 1 && name[1] == 14 && name[2] == 36 && namelen >= 3 &&
@@ -263,7 +263,7 @@ int PS4ABI sys_sysctl(int *name, u32 namelen, void *oldp, size_t *oldlenp,
   // PS5 kern.proc.79: another app/process-info selector the PS5 system-service
   // client polls during net/NP init (kern.proc.35 is GetAppInfo above). Left as
   // ENOENT it reads as "retry", so the client thread spins re-querying and
-  // creating/destroying a wait object each pass -- leaking the guest's fixed
+  // creating/destroying a wait object each pass, leaking the guest's fixed
   // ScePthread internal heap until it throws bad_alloc. Answer with a zeroed
   // buffer + success (same as .35) so the poll resolves. PS5-only: PS4 titles
   // never query this selector, so the PS4 path stays byte-identical.
@@ -435,7 +435,7 @@ int PS4ABI sys_sysctl(int *name, u32 namelen, void *oldp, size_t *oldlenp,
   // libkernel's internal-memory allocator takes its failure path and sizes the
   // SceKernelInternalMemory arena minimally, then reports
   // "[ScePthread/System] Internal Memory is running out." and throws
-  // std::bad_alloc -- which terminates the process via a UD2 in
+  // std::bad_alloc, which terminates the process via a UD2 in
   // libSceLibcInternal. That only bites once a real firmware module allocates
   // from the arena, which is why it stayed hidden while every service module ran
   // as an HLE shim (see DELTA_LLE in runtime/vprx/vprx.cpp).
@@ -451,7 +451,7 @@ int PS4ABI sys_sysctl(int *name, u32 namelen, void *oldp, size_t *oldlenp,
   }
 
   // kern.rng_pseudo (synthetic {0x1337,12}): whether the kernel's pseudo RNG is
-  // available. libSceRandom polls this and only stops once it reads non-zero --
+  // available. libSceRandom polls this and only stops once it reads non-zero –
   // answering 0 cost 30 million name2oid resolutions in 80 seconds and hung
   // Minecraft's OpenSSL key generation behind it.
   else if (name[0] == 0x1337 && name[1] == 12 && namelen == 2) {

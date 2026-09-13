@@ -36,8 +36,8 @@
 namespace {
 DELTA_OPTION(bool, kNoCopy, "DELTA_GPU_NODMACOPY", false);
 // DELTA_AGC_MEMWATCH=<addr>: report every CP-side write that lands on the
-// 64 KiB page holding that address -- WRITE_DATA, DMA copies and fills,
-// ATOMIC_MEM. The frame capture records none of those, so a value that
+// 64 KiB page holding that address (WRITE_DATA, DMA copies and fills,
+// ATOMIC_MEM). The frame capture records none of those, so a value that
 // changes between two draws with no dispatch naming it is invisible
 // otherwise.
 DELTA_OPTION(u64, kMemWatch, "DELTA_AGC_MEMWATCH", 0);
@@ -151,8 +151,8 @@ void WriteLabel(u64 address, u64 value, bool is_64bit) {
 
 // INT_SEL asks the CP to raise an end-of-pipe interrupt once the write lands.
 // libSceAgcDriver turns that into an event on the equeue sceAgcAddEqEvent
-// registered, and a consumer that never polls its label -- the video decoder
-// parks in sceKernelWaitEqueue -- makes no progress without it.
+// registered, and a consumer that never polls its label (the video decoder
+// parks in sceKernelWaitEqueue) makes no progress without it.
 extern "C" void prosperity_gpu_end_of_pipe();
 extern "C" void prosperity_gpu_end_of_pipe_ctx(u64 context_id);
 
@@ -204,7 +204,7 @@ void WriteEventLabel(u64 address,
 // --- packet handlers -------------------------------------------------------
 
 // CP DMA. body: ctrl, srcLo/Hi, dstLo/Hi, command(byteCount). Skyrim never
-// issues SET_CONTEXT_REG: it builds its context state (so CB_COLOR -- the
+// issues SET_CONTEXT_REG: it builds its context state (so CB_COLOR, the
 // render target) into a shadow image with CP DMA and then restores it with
 // LOAD_CONTEXT_REG. Without the copy the shadow reads zero, every colour draw
 // runs with no target bound and the frame is black. ctrl: SRC_SEL[30:29],
@@ -265,7 +265,7 @@ void HandleDmaData(rhi::Renderer& renderer, const u32* body, u32 count) {
     copied = true;
   }
   // src_sel 2 = the packet's own dword, repeated: a fill. That is how a title
-  // clears a surface -- there is no clear packet -- so apply it to guest memory
+  // clears a surface, since there is no clear packet, so apply it to guest memory
   // and let the renderer clear any target it covers.
   if (!kNoCopy && src_sel == 2 && dst_is_memory && bytes &&
       bytes <= 0x8000000u && addressable(dst) && addressable(dst + bytes)) {
@@ -450,7 +450,7 @@ void HandleWriteData(const u32* body, u32 count) {
   // memory-mapped REGISTER file, where dstLo is a register offset and not an
   // address at all; treating it as one sent the write to a pointer far below
   // the guest and silently dropped it. Titles stream state through these, so
-  // the registers they carry were simply missing.
+  // the registers they carry went missing.
   if (((body[0] >> 8) & 0xF) == 0) {
     WriteDataRegs(g_queue->regs, body, count);
     return;
@@ -547,7 +547,7 @@ void HandleCopyData(const u32* body, u32 count) {
 // query: the packet names a result buffer and the hardware writes one
 // begin/end pair per depth block into it, with bit 63 set once a value is
 // ready. We have no host query, and a title that waits for that bit waits
-// forever -- Astro Bot's boot stops on the first frame it draws, its main
+// forever. Astro Bot's boot stops on the first frame it draws, its main
 // thread parked on a semaphore nothing posts. Publish an always-visible count
 // instead: nothing culls, which is wrong but visible, and the ready bit is
 // what the wait is actually looking for.
@@ -723,7 +723,7 @@ u32 Walk(rhi::Renderer& renderer,
     }
     if (type == Pm4Type::kType0) {
       // Type-0 writes a run of consecutive registers directly. The walker used
-      // to SKIP these -- but the AGC driver programs shader PGM_LO/HI (and
+      // to SKIP these, but the AGC driver programs shader PGM_LO/HI (and
       // other SH state) via type-0, which is why no SET_SH_REG carried them.
       // A type-0 header is only two zero bits, so any data dword looks like
       // one: a walk that has already lost alignment travels thousands of
@@ -776,7 +776,7 @@ u32 Walk(rhi::Renderer& renderer,
     const u32* body = &p[i + 1];
     // 0xffff1000: IT_NOP with the count field saturated is the canonical
     // one-dword pad, and a command buffer is padded with it. Reading it as a
-    // 16385-dword packet skipped 64 KiB of real commands -- for Astro Bot's
+    // 16385-dword packet skipped 64 KiB of real commands. For Astro Bot's
     // world map that was the whole tail of the buffer, RELEASE_MEM included,
     // so its DrawThread waited on a fence nothing was left to write.
     if (op == IT_NOP && ((hdr >> 16) & 0x3FFF) == 0x3FFF) {
@@ -784,7 +784,7 @@ u32 Walk(rhi::Renderer& renderer,
       continue;
     }
     // Desync recovery: a data dword misread as a huge-count packet would
-    // abandon the rest of the buffer -- and with it the shader bind that
+    // abandon the rest of the buffer, and with it the shader bind that
     // follows. Instead of bailing, skip one dword and resync on the next
     // header.
     if (i + 1 + count > words) {
@@ -806,7 +806,7 @@ u32 Walk(rhi::Renderer& renderer,
         const u64 ib = (static_cast<u64>(body[1] & 0xFFFF) << 32) | body[0];
         const u32 ib_words = body[2] & 0xFFFFF;
         // Bounds-guard: a sane size, in the guest map, actually readable. The
-        // GPU aperture is deliberately NOT required -- the video decoder builds
+        // GPU aperture is deliberately NOT required, since the video decoder builds
         // its command buffers in its own allocation (0x6_0000_0000 for Astro
         // Bot, well under the aperture floor), and skipping those left its
         // completion fence one submit short forever, so the decode thread spun
@@ -901,14 +901,11 @@ u32 Walk(rhi::Renderer& renderer,
       // [function/mem_space/engine, addrLo, addrHi, ref.., mask.., interval].
       // Our submit runs to completion inside SubmitDcb, so whatever it waits
       // for has already happened by the time the walk reaches it.
-      //
       // 0x93 is NOT a register write, however plausibly one reads: body[0] is
-      // 0x113 (function 3, memory space, engine 1), which taken as an SH
-      // offset aims the following seven dwords -- poll address, reference,
-      // mask, interval -- straight at SPI_SHADER_USER_DATA_HS_7. Reading it
-      // that way is what left the draws after it sampling from nothing, and
-      // the poll address landing in a register made the mistake look
-      // confirmed.
+      // 0x113 (function 3, memory space, engine 1), which taken as an SH offset
+      // aims the following seven dwords (poll address, reference, mask,
+      // interval) straight at SPI_SHADER_USER_DATA_HS_7. Reading it that way
+      // left the draws after it sampling from nothing.
       case 0x3c:
       case 0x93:
         if (StallOnWait(op, body, count)) {

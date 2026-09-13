@@ -74,17 +74,13 @@ using Program = std::vector<Inst>;
 //   IMM=1               OFFSET is an 8-bit DWORD offset.
 //   IMM=0, OFFSET=0xFF  a trailing 32-bit literal, also a DWORD offset (the
 //                       Sea Islands wide-offset form; LLVM encodes it through
-//                       the same byte>>2 conversion as the 8-bit field).
-//                       CHALLENGED AND LEFT ALONE 2026-08-05. The ISA prose
-//                       for IMM=0 ("the index of an SGPR soffset", and soffset
+//                       the same byte>>2 conversion as the 8-bit field). The
+//                       ISA prose ("the index of an SGPR soffset", and soffset
 //                       is a BYTE offset) reads as though the literal were
-//                       bytes; implementing that and measuring found NO
-//                       difference -- SotC reports 64 unresolved bindings
-//                       either way in its in-game state -- so the metric does
-//                       not discriminate and the dword reading stays as the
-//                       validated status quo (it took the MENU's misses 64->0).
-//                       If you revisit this, find a case that separates them
-//                       first; the texmiss count alone will not.
+//                       bytes; implementing that measured NO difference (SotC
+//                       reports 64 unresolved bindings either way), so the
+//                       dword reading stays. If you revisit this, find a case
+//                       that separates them first; the texmiss count will not.
 //   IMM=0 otherwise     OFFSET names an SGPR holding a BYTE offset.
 struct SmrdOffset {
   u32 dwords = 0;    // resolved offset, when it is not in an SGPR
@@ -157,7 +153,7 @@ u64 CachedCodeHash(u64 addr, u32 max_dwords);
 
 // Does this program transfer to a fetch shader (s_swappc_b64)? The fetch
 // pointer convention parks the target in s[0:1], but s[0:1] holds SOMETHING in
-// every VS -- SotC keeps its per-draw shader-resource-table pointer there --
+// every VS. SotC keeps its per-draw shader-resource-table pointer there,
 // so the only ground truth for "s0:s1 is a fetch shader" is the call itself.
 // Treating the pointee as code without this check hashed live constant data
 // into the recompile-cache key (a fresh key nearly every draw, 95% of all

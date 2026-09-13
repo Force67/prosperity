@@ -29,7 +29,7 @@ DELTA_OPTION(u32, kHitchMs, "DELTA_GPU_HITCH_MS", 40);
 
 // Hitch census over the report window: the longest presented frame and how
 // many were long enough to be seen as a stutter. An average frame time hides
-// exactly the event this is about -- one 400 ms frame vanishes into a 2 s mean.
+// exactly the event this is about: one 400 ms frame vanishes into a 2 s mean.
 float g_frame_worst_ms = 0;
 u32 g_frame_hitch_n = 0;
 

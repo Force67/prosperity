@@ -51,7 +51,7 @@ bool GuestRange(u64 address, u64 bytes) {
 }
 
 // A cube sample reaches the hardware with the face already selected (the
-// shader ran v_cubeid/v_cubesc/v_cubetc), so its address is (s, t, faceId) --
+// shader ran v_cubeid/v_cubesc/v_cubetc), so its address is (s, t, faceId),
 // exactly a 2D-array lookup with layer = faceId.
 bool MimgArrayed(u32 dim) {
   return dim == 3 || dim == 5;
@@ -304,7 +304,7 @@ struct ScalarEval {
       }
     }
     // EXEC. The NGG prologue derives its lane masks from it and then feeds them
-    // through s_cselect into the very registers a vertex V# is patched in, so
+    // through s_cselect into the registers a vertex V# is patched in, so
     // leaving EXEC unknown poisons the descriptor and the draw loses every
     // attribute. Model the same one-vertex/one-primitive wave the translator
     // does (sgpr[3] above): lane 0 active.
@@ -489,7 +489,7 @@ struct ScalarEval {
       // 64-bit shifts (s_lshl_b64 / s_lshr_b64 / s_ashr_i64). The NGG prologue
       // narrows EXEC with `s_lshr_b64 exec, -1, vcc_lo`; without these the
       // default case clears EXEC, and the s_cselect_b64 that patches the vertex
-      // V# from it then yields an unknown descriptor dword -- which drops every
+      // V# from it then yields an unknown descriptor dword, which drops every
       // vertex attribute and leaves the draw with no geometry at all.
       // s_bfe_u64 / s_bfe_i64: offset = S1[5:0], width = S1[22:16]. The vertex
       // V#'s last dword is patched with `s_cselect_b32 sN+3, sN+3, vcc` and VCC
@@ -1073,7 +1073,7 @@ ScalarReplayPlan::Loss ScalarReplayPlan::LossAt(u32 sgpr,
     return kCovered;
   };
   // A write the program places after the use still runs before it if a back
-  // edge carries execution from the write back to the use -- unless a write in
+  // edge carries execution from the write back to the use, unless a write in
   // the loop body kills that value before the use is reached again. A shader
   // that reuses one register for several descriptors down a long loop body does
   // exactly that, and reading only the back edge declined the whole dispatch.
@@ -1487,7 +1487,7 @@ TImage DecodeTImage(const u32* d, bool r128) {
   const bool volumetric = t.type == 10;  // 3D
   t.is_3d = volumetric;
   // A volume's slice count lives in the same descriptor field a 2D array's
-  // layer count does, but the image is built from `depth` -- leaving that at 1
+  // layer count does, but the image is built from `depth`. Leaving that at 1
   // makes a 64-slice froxel volume one slice deep and every sample past the
   // first reads it stretched.
   t.depth = volumetric ? depth + 1 : 1;
@@ -1509,7 +1509,7 @@ TImage DecodeTImage(const u32* d, bool r128) {
   // variants) has no detiler yet, so it is shifted past the valid range:
   // BuildTextureLayout32 rejects it and the draw gets the white fallback
   // instead of scrambled texels.
-  // DELTA_GPU_SWCENSUS: which gfx10 swizzle modes this title's textures use --
+  // DELTA_GPU_SWCENSUS: which gfx10 swizzle modes this title's textures use –
   // the detiler only covers linear and the three "standard" modes, and anything
   // else is rejected into the white fallback (flat-coloured quads).
   if (kGpuSwcensus) {
@@ -1749,7 +1749,7 @@ std::unordered_map<u32, BufferResource> ResolveBuffers(
       // scalar pair is the resource and the VGPR is a byte offset into it.
       // gfx10.3 FLAT: w0[15:14] SEG (2 = global), w1[22:16] SADDR, with 0x7d
       // (and gfx9's 0x7f) reading as NULL. That pair sits well past the
-      // user-data window -- s[48:49] in this title -- so the replay is the only
+      // user-data window (s[48:49] in this title), so the replay is the only
       // thing that can recover it.
       const u32 seg = (inst.raw[0] >> 14) & 0x3;
       const u32 saddr = (inst.raw[1] >> 16) & 0x7F;

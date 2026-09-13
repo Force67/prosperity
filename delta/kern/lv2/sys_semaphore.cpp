@@ -28,7 +28,7 @@ namespace {
 DELTA_OPTION(u32, kOsemTrace, "DELTA_OSEM_TRACE", 0);
 // DELTA_OSEM_MAXWAIT=<ms>: cap an untimed wait. Diagnostic: a title parked
 // forever on a semaphore tells you nothing, but one that is let go says what it
-// does next -- usually an assert naming what it was waiting for.
+// does next, usually an assert naming what it was waiting for.
 DELTA_OPTION(u32, kOsemMaxWaitMs, "DELTA_OSEM_MAXWAIT", 0);
 }  // namespace
 
@@ -180,7 +180,7 @@ int PS4ABI sys_osem_wait(int id, int need, u32 *timeoutUs) {
   // The doorbell of a service we do not host: nothing in this process will ever
   // ring it, so an untimed wait parks the caller for the rest of the run (Tomb
   // Raider's sceNpCheckCallback sat on 'SceNpTpip 0' forever). Give it the
-  // answer an idle channel gives -- wait a beat, then time out -- so the caller
+  // answer an idle channel gives: wait a beat, then time out, so the caller
   // polls on instead of blocking, without spinning a core.
   if (isAbsentServiceChannel(s->fname().c_str())) {
     u32 idleUs = 100 * 1000;

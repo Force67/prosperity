@@ -5,7 +5,7 @@
 
 // Shared between the two probe translation units: the generic guest-code
 // probes in probe.cpp and the per-title bring-up patches in probe_title.cpp.
-// Not part of the probe interface -- kern calls probe.h, nothing else.
+// Not part of the probe interface: kern calls probe.h, nothing else.
 
 #include "base/arch.h"
 

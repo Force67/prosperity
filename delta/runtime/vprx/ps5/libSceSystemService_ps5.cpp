@@ -8,7 +8,7 @@
  * complaining about. Accept the report and let the title's error path continue.
  *
  * sceSystemServiceParamGetInt answers the console's system settings, the system
- * LANGUAGE above all -- see ../sys_params.h.
+ * LANGUAGE above all (see ../sys_params.h).
  *
  * Everything else in libSceSystemService stays LLE.
  */

@@ -745,7 +745,7 @@ RecompStatus ResolveRecompiledShaders(
   // parameter export that slot reads, and it is routinely not the identity.
   // GTA:SA's UI shader has slot 1 -> param 3: assuming identity handed it the
   // clip position as a texture coordinate and the vertex colour as a scale, so
-  // every UI quad sampled texel (0,0) and multiplied it by zero -- a black
+  // every UI quad sampled texel (0,0) and multiplied it by zero, a black
   // screen over a main menu that was otherwise drawing correctly.
   // DELTA_GPU_PSCNTL_APPLY=0 goes back to the identity, =<ps addr> applies the
   // mapping to one shader (Isaac/Undertale/Doom64 are unchanged either way).
@@ -875,7 +875,7 @@ bool BuildDrawInfo(rhi::Renderer& renderer,
   TraceVertexAttrs(d);
   TraceWorldGeometry(regs, d);
 
-  // DELTA_GPU_SKIPSTALE: drop draws that sample a very wide (>=2048) buffer, to
+  // DELTA_GPU_SKIPSTALE: drop draws that sample a wide (>=2048) buffer, to
   // hide a title's stale full-screen video-buffer blit (Doom64's undecoded 4K
   // menu background) so the menu items drawn on top become readable.
   if (kSkipStale && d.tex_base && d.tex_w >= 2048)

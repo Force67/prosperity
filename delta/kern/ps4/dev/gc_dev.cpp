@@ -158,7 +158,7 @@ i32 gcDevice::ioctl(u32 cmd, void *data) {
   case 0xC020810C: {  // gc submit + EOP: {u32 pid, u32 count, u64 descPtr,
                       //   u64 eopVal, u32 wait}. Layout per fpPS4 dev_gc.pas
                       // t_submit_args: +0x10 is the EOP completion VALUE
-                      // ("submit_id | vmid<<32") -- a scalar the kernel writes
+                      // ("submit_id | vmid<<32"), a scalar the kernel writes
                       // on GPU completion, never a pointer. EOP label writes
                       // come from EVENT_WRITE_EOP packets inside the dcb and
                       // are the CP's job. (We used to dereference +0x10 as a
@@ -194,7 +194,7 @@ i32 gcDevice::ioctl(u32 cmd, void *data) {
   }
   case 0xC0088101:  // kernel: wait-suspend-done. Suspend/resume handshake; our
                     // GPU never suspends, so "done" is always true. (Was
-                    // mislabeled "switch buffer" -- gc_switch_buffer_internal is
+                    // mislabeled "switch buffer"; gc_switch_buffer_internal is
                     // unreachable in the 11.00 kernel's dispatch.)
   case 0xC0048117:  // kernel: wait-suspend-done as well (same handler).
     return 0;
@@ -207,7 +207,7 @@ i32 gcDevice::ioctl(u32 cmd, void *data) {
       *static_cast<u32 *>(data) = 0;
     return 0;
   }
-  case 0xC0048114: {  // kernel: GRBM poll -- spins on the busy regs (0x1413/0x1414)
+  case 0xC0048114: {  // kernel: GRBM poll, spins on the busy regs (0x1413/0x1414)
                       // and returns 0 WITHOUT writing the arg slot. The GnmDriver
                       // wrapper (libSceGnmDriver +0x5fd0) zeroes the slot itself
                       // and never reads it back, so only the success return
@@ -344,7 +344,7 @@ i32 gcDevice::ioctl(u32 cmd, void *data) {
       }
     }
     // Synchronous CPU submit path: no real HQD/doorbell to program. Accept the
-    // mapping and return success WITHOUT touching the caller's struct --
+    // mapping and return success WITHOUT touching the caller's struct –
     // vqueueId (+0x0C) is the handle the GnmDriver wrapper hands back to the
     // app for DingDong/Unmap; the UNHANDLED fallthrough used to memset the
     // whole struct, so the app saw handle 0, treated the map as failed and
@@ -489,7 +489,7 @@ i32 gcDevice::ioctl(u32 cmd, void *data) {
   }
   // Zero the output buffer of an unhandled OUT/INOUT ioctl. The driver reads the
   // buffer back as a query result (capability counts, status words, etc.); left
-  // uninitialised it returns stack/heap garbage, which the engine then trusts --
+  // uninitialised it returns stack/heap garbage, which the engine then trusts –
   // e.g. a bogus huge "format count" that overruns a fixed table and smashes the
   // stack. Zero is the benign "nothing/idle/none" answer (matches the explicit
   // 0x16 submit-done handler). Length is encoded in the ioctl command (FreeBSD
@@ -517,15 +517,14 @@ std::mutex gcDevice::computeMutex;
 // can ring one by writing to its /dev/gc mapping). Consume a ring entry only
 // when it is a complete IB packet whose target resolves, advance readOffsetDw
 // past it so nothing executes twice, and stop at the first word that is not
-// one -- a half-written entry or the end of what the guest wrote.
-// NOTE: the caller must already hold computeMutex. The doorbell handler runs
-// this from inside its own lock scope, and std::mutex is not recursive --
-// locking here as well deadlocked the title the instant it rang a doorbell.
+// one (a half-written entry or the end of what the guest wrote).
+// The caller must already hold computeMutex: the doorbell handler runs this
+// from inside its own lock scope, and std::mutex is not recursive, so locking
+// here as well deadlocked the title the instant it rang a doorbell.
 // The ring id a doorbell names is the queue's VQUEUE field, the one the map
-// ioctl carried at +0x0c -- GTA:SA maps vqueue 0x29 and rings 41. (Not
-// pipe + me*8: that is the driver's index into its own doorbell table, which is
-// a different number.) A doorbell for a ring we never saw mapped is not ours to
-// guess at. NOTE: the caller must already hold computeMutex.
+// ioctl carried at +0x0c (GTA:SA maps vqueue 0x29 and rings 41; not pipe +
+// me*8, which is the driver's index into its own doorbell table). A doorbell
+// for a ring we never saw mapped is not ours to guess at.
 void gcDevice::ringDoorbell(u32 ringId, u32 writeOffsetDw) {
   for (ComputeQueue &q : computeQueues) {
     if (!q.mapped || q.vqueue != ringId)
@@ -603,7 +602,7 @@ u8 *gcDevice::map(void *, size_t size, u32, u32, size_t offset) {
 // backlog to whichever frame happened to ring it.
 // sceGnmDingDong(ringId, offset) publishes a queue's write pointer. The real
 // driver writes it straight into its /dev/gc mapping, so no ioctl announces it
-// and the work would otherwise only be noticed at the next flip -- by which
+// and the work would otherwise only be noticed at the next flip, by which
 // time the guest has recycled the buffers those packets point at (draining a
 // ring at flip time SIGSEGVs Tomb Raider). The doorbell is the only moment the
 // ring's contents are known good, so run them here.

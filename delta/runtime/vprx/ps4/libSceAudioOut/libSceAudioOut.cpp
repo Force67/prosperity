@@ -8,19 +8,19 @@
  * This path is verified working end to end: The Binding of Isaac opens two
  * ports and its samples reach SDL with a live signal (peak climbing 0.037 ->
  * 0.071 over a run). A title that comes out silent through here is submitting
- * silence -- SotC does, for the same upstream reason it submits a black frame.
+ * silence. SotC does, for the same upstream reason it submits a black frame.
  *
  * ---- the LLE shared-memory mixer protocol ----------------------------------
  * The real libSceAudioOut does NOT use an ioctl device; there is no /dev node to
  * write. It hands blocks to the system audio daemon through POSIX shm and is
  * woken by a named event flag. Established by disassembling the 11.00 module
- * (/system/common/lib/libSceAudioOut.sprx, a plain FreeBSD ELF -- the exported
+ * (/system/common/lib/libSceAudioOut.sprx, a plain FreeBSD ELF; the exported
  * NIDs decode straight to sceAudioOut* names) and confirmed against a live Isaac
  * run. There is NO ring and NO cursor: it is a one-block-deep handshake.
  *
  * Regions, all created O_RDWR|O_CREAT (0x202) by the module:
  *   "/shm_<pid>_C"        control block. ftruncate'd to 0xf28, but the module
- *                         WRITES up to 0x3c40 and relies on page rounding --
+ *                         WRITES up to 0x3c40 and relies on page rounding –
  *                         map at least 0x4000. Do not size it from ftruncate.
  *   "/shm_<pid>_<idx>_A"  one per open port, always 0x10000 bytes: the worst
  *                         case single block (max grain 2048 * 8ch * 4B). The
@@ -43,7 +43,7 @@
  *   +0x60 u32  grain, frames per block: multiple of 256, 256..2048
  *   +0x90 u32  state; 3 once a block has been submitted
  * channels = (+0x08) / (type 0 ? 2 : 4). Samples are the game's buffer verbatim,
- * interleaved, memcpy'd -- no conversion, no header, grain*bytesPerFrame bytes.
+ * interleaved, memcpy'd, with no conversion and no header: grain*bytesPerFrame bytes.
  *
  * sceAudioOutOutput(handle, ptr) is, in the module:
  *     submit();  if (!BUSY) return;          <- FIRST block needs no permission
@@ -173,7 +173,7 @@ struct OutputParam { i32 handle; u32 pad; const void *ptr; };
 int PS4ABI sceAudioOutOutputs(void *params, u32 num) {
   if (!params) return -1;
   // DELTA_AUDIO_TRACE: the raw param array next to how we parse it. The struct
-  // stride is the whole ballgame -- misread it and every handle/ptr past the
+  // stride is the whole ballgame. Misread it and every handle/ptr past the
   // first is garbage, which reads downstream as "one port, silent".
   static int dumped = 0;
   if (kAudioTrace && dumped < 4) {

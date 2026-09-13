@@ -15,7 +15,7 @@
  *    (stage, code hash, pc) to reproduce. With a path, also written there.
  *  - DELTA_GPU_SHDUMP=<dir>: per unique shader, write
  *      <stage>_<hash>.txt  annotated disassembly (per-instruction fate +
- *                          SPIR-V word count -- a non-trivial instruction
+ *                          SPIR-V word count, a non-trivial instruction
  *                          that emitted 0 words is a silent drop),
  *      <stage>_<hash>.gcn  raw bytecode,
  *      <stage>_<hash>.spv  the unoptimized SPIR-V, with OpLine markers

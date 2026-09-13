@@ -156,7 +156,7 @@ static thread_local std::atomic<u64> t_sampleGen{0};
 static thread_local std::atomic<u64> t_sampleRip{0};
 // When the sample was taken. Signal delivery across threads is not simultaneous,
 // so without this a "co-occurrence" could be one thread leaving and another
-// entering hundreds of microseconds apart -- which is not the question.
+// entering hundreds of microseconds apart, which is not the question.
 static thread_local std::atomic<u64> t_sampleNs{0};
 
 struct LiveThread {
@@ -173,7 +173,7 @@ struct LiveThread {
   // rip is only written back at block boundaries, so a thread asleep in
   // sys_umtx_op keeps whatever rip it last published. DELTA_RIPRACE needs the
   // difference, because a thread WAITING for a lock sits at a rip inside the
-  // very function whose concurrent execution it is trying to detect.
+  // function whose concurrent execution it is trying to detect.
   const bool *inSyscall = nullptr;
   // Where DELTA_RIPRACE leaves this thread's sampled guest rip, and the host tid
   // to signal to ask for one.
@@ -211,28 +211,19 @@ static void startWatchdog() {
       }).detach();
     }
     // DELTA_RIPRACE=<ms>:<lo>-<hi>[,<lo>-<hi>...]  (absolute guest VAs, hex)
-    // Answer "do two guest threads ever EXECUTE inside these code ranges at the
-    // same time?" -- i.e. is a critical section actually mutually excluded. Give
-    // it the ranges that may only run under a lock (SotC's allocator: the
-    // free-tree insert 201400048a70-201400048b64 and the rebalance
-    // 20140004a040-20140004a205).
-    //
-    // It must NOT read CurrentFrame->State.rip to do this. That field is only
-    // written when a thread leaves a block or enters a syscall, so for a thread
-    // running in the JIT it names wherever it last did so -- the same staleness
-    // that once made the crash dump report a syscall's registers as the fault's.
-    // A first version of this sampler read it, skipped threads parked in a
-    // syscall to avoid counting lock waiters, and consequently measured NOTHING:
-    // 280k samples, never one thread inside, because the only threads whose rip
-    // was meaningful were exactly the ones it excluded.
-    //
-    // So sample a real PC: signal each guest thread and let it reconstruct its
-    // own guest rip from the host PC in its signal context, which is exact
-    // inside JIT code. The sample is stamped with a generation so the collector
-    // only counts answers from the round it asked for. Signal delivery is not
-    // simultaneous, so two threads counted in one round can be tens of
-    // microseconds apart: a ZERO result is therefore strong (no skew invents an
-    // absence) while a nonzero one is suggestive and wants a second look.
+    // Answers "do two guest threads ever EXECUTE inside these code ranges at the
+    // same time?", i.e. is a critical section actually mutually exclusive. Feed
+    // it the ranges that may only run under a lock (SotC's allocator: free-tree
+    // insert 201400048a70-201400048b64, rebalance 20140004a040-20140004a205).
+    // CurrentFrame->State.rip must NOT be read: it is only written when a thread
+    // leaves a block or enters a syscall, so for a thread running in the JIT it
+    // names wherever that last happened, and a sampler built on it measured
+    // nothing (280k samples, never one thread inside). Instead, signal each
+    // guest thread and let it reconstruct its own guest rip from the host PC in
+    // its signal context, exact inside JIT code. Samples carry a generation so
+    // the collector only counts the round it asked for. Delivery is not
+    // simultaneous (tens of microseconds apart), so a ZERO result is strong and
+    // a nonzero one wants a second look.
     if (kRipRace) {
       std::string spec(kRipRace);
       int ms = 1;
@@ -513,7 +504,7 @@ static void startWatchdog() {
                         (unsigned long long)e.a2, (unsigned long long)e.a3,
                         (unsigned long long)e.ret);
               // Thread parked in UMTX_OP_MUTEX_WAIT (last ring entry, op 17):
-              // decode the umutex owner word -- the owner tid is the whole
+              // decode the umutex owner word; the owner tid is the whole
               // ballgame in a deadlock (who holds it and what are THEY doing).
               if (k == cnt - 1 && e.id == 454 && e.a1 == 17 && e.a0 >= 0x10000) {
                 unsigned char mv = 0;
@@ -734,9 +725,8 @@ public:
   }
 };
 
-// Minimal signal delegator. Sufficient for fault-free guest code; a real game
-// that self-modifies or faults will need the host SIGSEGV/SIGILL plumbing.
-// TODO(boot): real signal handling (SMC write-protect faults, guest signals).
+// Minimal signal delegator. Sufficient for fault-free guest code; a game that
+// self-modifies code or faults needs the host SIGSEGV/SIGILL plumbing.
 class FexSignalDelegator final : public FEXCore::SignalDelegator {};
 
 // Return target for runGuestFunction: a synchronously-called guest function rets
@@ -774,17 +764,13 @@ public:
   };
 
   // Retired guest stacks are pooled, never munmap'd. Guest code captures its
-  // current rsp into long-lived structures (FIOS2/module_start register
-  // callback contexts and sync objects during init; on a real PS4 those point
-  // into the loader thread's PERMANENT stack). runGuestFunction used to unmap
-  // its 8 MiB stack after every synchronous guest call, so such captured
-  // pointers dangled -- a later switch/longjmp onto one faulted at the dead
-  // stack's top (libSceFios2/libkernel call-push at 0x....feff0), and when the
-  // hole had been REUSED by a newer guest thread's stack the two silently
-  // corrupted each other (SotC: AllocationTracker null/-1 lookups on a job
-  // fiber ~10s into LoadInitialWorld, or a yield-loop stall). Pooling keeps
-  // retired stacks mapped and only ever re-issues them as stacks, which is the
-  // closest host analogue of the console's stable stack memory.
+  // rsp into long-lived structures (FIOS2/module_start register contexts, sync
+  // objects during init) which on a real PS4 point into the loader's PERMANENT
+  // stack. Unmapping a stack after each synchronous guest call made those
+  // pointers dangle (fault at the dead stack's top), and reuse by a newer
+  // thread silently corrupted both (SotC: AllocationTracker null/-1 lookups on
+  // a job fiber ~10s into LoadInitialWorld, or a yield-loop stall). Pooling
+  // keeps retired stacks mapped and re-issues them only as stacks.
   std::mutex stackPoolM;
   std::vector<std::pair<void *, size_t>> stackPool;    // guest rsp stacks
   std::vector<std::pair<void *, size_t>> callretPool;  // FEX call-ret stacks
@@ -820,7 +806,7 @@ public:
                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     u64 rsp = (reinterpret_cast<u64>(h->stack) + h->stackSize - 0x200) & ~0xFULL;
 
-    // IMPORTANT: create on the calling (parent) thread, as FEX's ThreadManager
+    // Create on the calling (parent) thread, as FEX's ThreadManager
     // does, never on the freshly spawned worker while other guest threads run.
     auto *thread = CTX->CreateThread(entry, rsp, nullptr);
     h->thread = thread;
@@ -1006,13 +992,13 @@ public:
     S.gregs[FEXCore::X86State::REG_RSP] = rsp;
     // Run on a PERSISTENT host worker (never nest ExecuteThread on the caller's
     // host thread) and block until it finishes. fn returns -> exitThunk ->
-    // longjmp. The worker must outlive the call: guest code run here (module
-    // inits above all) records pointers derived from the executing host
-    // thread's identity (glibc TCB/static-TLS sits just above the pthread
-    // stack). With a fresh std::thread per call those blocks died with the
-    // thread, and SotC's FIOS2 dereferenced a dangling one (host_stack_top +
-    // 0xff0) minutes later during world streaming. On a real console module
-    // inits all run on the loader's permanent thread; mirror that.
+    // longjmp. The worker must outlive the call: module inits above all record
+    // pointers derived from the executing host thread's identity (glibc
+    // TCB/static-TLS sits just above the pthread stack), and a per-call
+    // std::thread let those blocks die with the thread (SotC's FIOS2
+    // dereferenced one, host_stack_top + 0xff0, minutes later during world
+    // streaming). The console runs module inits on the loader's permanent
+    // thread; mirror that.
     {
       std::unique_lock<std::mutex> lk(initWorkerM);
       if (!initWorkerStarted) {
@@ -1061,22 +1047,17 @@ private:
       // BPE allocator/job system: >1000 unaligned-atomic sites in the eboot)
       // otherwise corrupt their lock-free structures intermittently.
       FEXCore::Config::Set(FEXCore::Config::CONFIG_STRICTINPROCESSSPLITLOCKS, "1");
-      // FEX only emulates x86's store ordering for SCALAR loadstores by
-      // default: VectorTSOEnabled and MemcpySetTSOEnabled are off, so SIMD
-      // copies and REP MOVS/STOS are reordered freely on ARM. PS4 engines
-      // publish shared structures with SIMD stores -- SotC's BPE JobSystem
-      // copies each job's descriptor block as a `vmovups ymm` pair (claim
-      // 0x38d40 reads [jobsys+ord*0x120+0xea8/0xeb8]; the enqueue side writes
-      // it the same way) -- so an unordered vector store lets a worker observe
-      // the "work available" flag against a stale or half-published
-      // descriptor. That is a work-visible-but-unclaimable livelock: the
-      // workers spin failing to claim while the producer waits for a
-      // completion that never comes. Ordering costs throughput on vector
-      // copies, so allow opting out for perf experiments.
-      // The two halves are priced very differently: ordering SIMD loadstores
-      // (DELTA_FEX_VECTOR_TSO) is what the JobSystem descriptor publish needs,
-      // while ordering REP MOVS/STOS (DELTA_FEX_MEMCPY_TSO) makes every guest
-      // memcpy atomic and costs far more. Both default off; enable per run.
+      // FEX emulates x86 store ordering for SCALAR loadstores only: SIMD copies
+      // and REP MOVS/STOS reorder freely on ARM. PS4 engines publish shared
+      // structures with SIMD stores (SotC's BPE JobSystem copies each job's
+      // descriptor block as a `vmovups ymm` pair), so an unordered vector store
+      // lets a worker observe the "work available" flag against a stale or
+      // half-published descriptor: the workers spin failing to claim while the
+      // producer waits for a completion that never comes. The two halves are
+      // priced differently: ordering SIMD loadstores (DELTA_FEX_VECTOR_TSO) is
+      // what the descriptor publish needs, while ordering REP MOVS/STOS
+      // (DELTA_FEX_MEMCPY_TSO) makes every guest memcpy atomic and costs far
+      // more. Both default off; enable per run.
       if (kVectorTso)
         FEXCore::Config::Set(FEXCore::Config::CONFIG_VECTORTSOENABLED, "1");
       if (kMemcpyTso)
@@ -1130,7 +1111,7 @@ void *fexInternalMmap(void *addr, size_t len, int prot, int flags, int fd, off_t
   if ((flags & MAP_FIXED) || !g_fexHeapEnd)
     return ::mmap(addr, len, prot, flags, fd, off);
   // A bare hint is advisory, and the kernel is free to ignore it and place the
-  // mapping anywhere -- including a range the guest MAP_FIXEDs later, which is
+  // mapping anywhere, including a range the guest MAP_FIXEDs later, which is
   // the collision this whole window exists to prevent. Keeping FEX's internals
   // inside the window matters more than honouring a hint it cannot rely on, so
   // fall through to the bump allocator below and drop the hint.
@@ -1186,7 +1167,7 @@ void exitGuestThread() {
 // arg (rcx) into r10 before `syscall` clobbers rcx, matching the dispatch above.
 // Attribute an address inside the host-thunk pool back to the HLE export whose
 // trampoline lives there. A guest fault in this pool means the guest called an
-// import slot we bound but cannot service -- knowing WHICH import turns an
+// import slot we bound but cannot service; knowing WHICH import turns an
 // unreadable "illegal instruction at 0x5000000004xx" into a name.
 const char *hostThunkNameForAddr(uintptr_t addr, u32 *idxOut) {
   std::lock_guard lk(g_thunkMutex);
@@ -1322,14 +1303,10 @@ uintptr_t makeGuestReturnHook(void *realTarget, u32 hookId, void *loggerFn,
 // emit [save args] syscall(lockFn) [restore args] call realTarget syscall(unlockFn)
 // ret. Unlike makeGuestReturnHook this fires BEFORE the call as well as after,
 // which is what serialising a guest critical section from the host needs.
-//
-// Why this exists: SotC's allocator free tree ends up holding stale child links,
-// and the two surviving explanations are "two guest threads mutate it at once"
-// and "we miscompile one of the stores". Holding a host mutex across the whole
-// allocator call decides it -- and the lock is itself the measurement, because a
-// try_lock that FAILS is deterministic proof that another thread was inside. The
-// sampling approach could not reach that conclusion at any affordable cost (see
-// DELTA_RIPRACE), while this observes every single call.
+// SotC's allocator free tree ends up holding stale child links; the surviving
+// explanations are concurrent guest threads or a miscompiled store. A failed
+// try_lock is deterministic proof of the former, and this observes every call
+// where DELTA_RIPRACE could only sample.
 uintptr_t makeGuestLockWrapper(void *realTarget, void *lockFn, void *unlockFn,
                                const char *name) {
   std::lock_guard lk(g_thunkMutex);
@@ -1359,7 +1336,7 @@ uintptr_t makeGuestLockWrapper(void *realTarget, void *lockFn, void *unlockFn,
   auto emit32 = [&](u32 v) { std::memcpy(p, &v, 4); p += 4; };
   auto emit64 = [&](u64 v) { std::memcpy(p, &v, 8); p += 8; };
   // Reached by `jmp` from the patched entry, so rsp%16==8 and [rsp] is still the
-  // ORIGINAL caller's return address -- the final `ret` therefore returns to it.
+  // ORIGINAL caller's return address, so the final `ret` therefore returns to it.
   // The syscall handler calls a C function, which may clobber every SysV
   // caller-saved register, so the argument registers are saved around it. The
   // pushes come in pairs so rsp%16 is 8 again before `sub rsp,8; call`, which
@@ -1435,7 +1412,7 @@ u64 currentGuestFsBase() {
 
 // Every live guest thread's fs base, for host-side surveys of guest TLS. The
 // BPE JobSystem's worker ordinal lives at [*(fsbase) - 0x10] as 0x8000|core,
-// and the claim path tests `job_affinity & (1 << ordinal)` -- so enumerating
+// and the claim path tests `job_affinity & (1 << ordinal)`, so enumerating
 // the ordinals that actually exist decides whether a job whose affinity names
 // a core we never assign (e.g. SotC's core-6 "Resource Loading" pin, mask
 // 0x40) can be claimed by anyone at all.
@@ -1463,7 +1440,7 @@ bool guestGregsFromSignal(const void *ucontext, u64 out[16]) {
     return false;
   // FEX's arm64 backend gives every guest GPR a FIXED host register (its
   // static register allocation, x64::SRA in Arm64Emitter.cpp), so at any point
-  // in JIT code the live guest value is in a known host register -- exact at
+  // in JIT code the live guest value is in a known host register, exact at
   // the faulting instruction, unlike CPUState.gregs which is only written back
   // at block boundaries. Indices are FEXCore::X86State::REG_* order
   // (RAX,RCX,RDX,RBX,RSP,RBP,RSI,RDI,R8..R15); the host register numbers below
@@ -1523,15 +1500,13 @@ bool tryHandleJitSignal(int sig, void *infop, void *ucv) {
   auto *uc = static_cast<ucontext_t *>(ucv);
 
   // FEX's call-ret prediction stack: the JIT pushes/pops a predictor entry on
-  // every guest call/ret through x25. Guest code whose calls and rets don't
-  // pair up -- sceFiber switches jump between fiber stacks without returning
-  // (SotC's BPE job system does this thousands of times per streaming second)
-  // -- drifts the predictor sp until it walks into one of the buffer's guard
-  // pages. Upstream FEX treats that as EXPECTED (SyscallsSMCTracking.cpp
-  // HandleSegfault): reset x25 to the default mid-buffer location and resume.
-  // Without this mirror, a purely internal predictor overflow surfaced as a
-  // fatal "guest fault" at the guard page (0x...feff0) ~9s into SotC's
-  // LoadInitialWorld.
+  // every guest call/ret through x25. Guest code whose calls and rets do not
+  // pair up (fiber switches: SotC's BPE job system, thousands per streaming
+  // second) drifts the predictor sp into the buffer's guard pages. Upstream FEX
+  // treats that as EXPECTED (SyscallsSMCTracking.cpp HandleSegfault): reset x25
+  // to the default mid-buffer location and resume. Without this mirror the
+  // overflow surfaced as a fatal "guest fault" at the guard page ~9s into
+  // SotC's LoadInitialWorld.
   if (sig == SIGSEGV && t_curThread->CallRetStackBase) {
     const u64 fa =
         reinterpret_cast<u64>(static_cast<siginfo_t *>(infop)->si_addr);

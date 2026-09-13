@@ -385,7 +385,7 @@ void EmitSop1(Translator& t, const Inst& inst) {
     }
     case 0x1f: {  // s_getpc_b64: sdst = PC + 4, i.e. the NEXT instruction
       // Shaders use this to build an absolute address from their own location
-      // -- typically s_getpc_b64 / s_add_u32 / s_addc_u32 / s_load_dwordx*, to
+      // (typically s_getpc_b64 / s_add_u32 / s_addc_u32 / s_load_dwordx*, to
       // reach a descriptor the toolchain stored next to the code. Guest memory
       // is identity-mapped, so the program's guest address is its code pointer,
       // and s_getpc is one dword wide.
@@ -685,7 +685,7 @@ void EmitSop2(Translator& t, const Inst& inst) {
       scc = true;
       break;
     case 0x2e:  // s_lshl1_add_u32 .. s_lshl4_add_u32: (a << n) + b. RDNA-only
-    case 0x2f:  // numbering -- these opcodes mean something else pre-gfx10, so
+    case 0x2f:  // numbering; these opcodes mean something else pre-gfx10, so
     case 0x30:  // the PS4 decoder must not reach them.
     case 0x31: {
       if (!t.rdna_sources) {
@@ -1226,12 +1226,12 @@ void EmitVop2(Translator& t,
       set_f(t.FSub(s1, s0));
       break;  // v_subrev_f32
     // The legacy multiply forms differ from the IEEE ones in returning ZERO
-    // when a multiplicand is zero, whatever the other one is -- including inf
+    // when a multiplicand is zero, whatever the other one is, including inf
     // and NaN, where IEEE gives NaN. Shaders use exactly that to kill a term
     // guarded by a reciprocal: mul_legacy(guard, 1/d) is 0 when the guard is 0,
     // even where d was 0 and the reciprocal is inf. Lowering it as a plain
-    // multiply produces NaN there, and a later clamp turns NaN or inf into 1.0
-    // -- a saturated pixel, with nothing left in the buffer to show it was ever
+    // multiply produces NaN there, and a later clamp turns NaN or inf into 1.0,
+    // a saturated pixel, with nothing left in the buffer to show it was ever
     // either. That is why nan and inf counts can read zero on a target full of
     // blown highlights.
     case 0x06:
@@ -1258,7 +1258,7 @@ void EmitVop2(Translator& t,
     // v_min_legacy_f32 / v_max_legacy_f32 = min_dx9 / max_dx9. The ISA is
     // explicit: "If one or both inputs are NaN values then vsrc1 is always
     // returned", and IEEE mode has no effect. An ordered compare is exactly
-    // that -- it is false whenever either operand is NaN, so the select falls
+    // that: it is false whenever either operand is NaN, so the select falls
     // to vsrc1. GLSL FMin/FMax return the *non-NaN* operand instead, which is
     // the opposite answer when vsrc1 is the NaN.
     case 0x0d:
@@ -1501,11 +1501,11 @@ Id IntPredicate(Translator& t, u32 lo, bool is_signed, Id a, Id b) {
 }
 
 // ---- exact 64-bit compares, assembled from dword pairs ----------------------
-// These families used to be evaluated on the low dword alone, which is simply a
+// These families used to be evaluated on the low dword alone, which is a
 // different answer for any value whose halves disagree. Building them out of
 // 32-bit halves (rather than OpTypeInt 64 / OpTypeFloat 64) keeps the emitted
 // module free of the Int64 and Float64 capabilities, and so free of the
-// shaderInt64 / shaderFloat64 device features -- which the Android targets do
+// shaderInt64 / shaderFloat64 device features, which the Android targets do
 // not all advertise.
 struct Dword2 {
   Id lo, hi;
@@ -1661,8 +1661,8 @@ void EmitVopc(Translator& t,
   // EXEC-writing cmpx form. The 64-bit families read a register PAIR, so they
   // are evaluated on both halves (see the Dword2 predicates above). The only
   // caller that omits the high dwords is translate_neo's f16 path, which maps
-  // onto the 32-bit families exclusively, so the zero default is dead there --
-  // it is not a safe fallback, since {lo, 0} reads as a denormal.
+  // onto the 32-bit families exclusively, so the zero default is dead there.
+  // It is not a safe fallback, since {lo, 0} reads as a denormal.
   const Dword2 a{s0u, s0_hi ? s0_hi : t.U32(0)};
   const Dword2 b{s1u, s1_hi ? s1_hi : t.U32(0)};
   Id cond = 0;
@@ -1688,7 +1688,7 @@ void EmitVopc(Translator& t,
   // cmpx replaces EXEC. GCN also wrote VCC (or the VOP3 destination); RDNA
   // does not, and a gfx10 compiler leans on that: Astro Bot's scanout
   // composite parks EXEC in VCC, runs three v_cmpx highlight-compression
-  // blocks and restores `exec = vcc` after each -- with VCC clobbered by the
+  // blocks and restores `exec = vcc` after each. With VCC clobbered by the
   // compare, the restore left every lane whose colour was not over 1.0
   // masked off for the rest of the shader, and the frame was black.
   if (!(op & 0x10) || !t.rdna_sources)

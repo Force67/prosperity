@@ -156,14 +156,12 @@ Id LinearMipPitch(Translator& t,
 
 // Byte offset of mip `physical_mip`'s first texel: the sizes of every level
 // below it, summed.
-//
-// Emitted as a real loop, not unrolled over all 16 possible levels. Each
-// iteration costs ~55 SPIR-V instructions (two BitCeils and a three-round
-// 64-byte alignment search), so the unrolled form was ~880 per image access --
-// which is what made Shadow of the Colossus's pixel shaders 190K words apiece
-// and cost half a second each in spirv-opt and the same again in the driver.
-// The accumulator is a Private variable, like the dispatch loop's state, so
-// legalization turns it back into a phi.
+// Emitted as a real loop, not unrolled over all 16 possible levels: each
+// iteration costs ~55 SPIR-V instructions, so the unrolled form was ~880 per
+// image access, which made SotC's pixel shaders 190K words apiece and cost half
+// a second each in spirv-opt and the same again in the driver. The accumulator
+// is a Private variable, like the dispatch loop's state, so legalization turns
+// it back into a phi.
 Id MipChainOffset(Translator& t,
                   Id base_pitch,
                   Id base_height,
@@ -221,7 +219,7 @@ Id BufferByteOffset(Translator& t,
     // DELTA_GPU_IDXSTRIDE: force the indexed stride instead of reading it from
     // the V#'s SGPR. A V# that arrives through s_load (an SRT chain) is never
     // written into the SGPR file by the graphics path, so the stride there is
-    // whatever user data happened to sit in that slot -- diagnostic.
+    // whatever user data happened to sit in that slot; diagnostic.
     const Id stride =
         kIdxStride ? t.U32(static_cast<u32>(kIdxStride))
                    : t.And(t.Shr(t.Sg(srsrc + 1), t.U32(16)), t.U32(0x3FFF));
@@ -234,7 +232,7 @@ Id BufferByteOffset(Translator& t,
 
 // A typed buffer op carries its own dfmt/nfmt, overriding the V#'s. Both buffer
 // models move the components as raw dwords, which is only exact when the format
-// really is one unconverted 32-bit dword per component; anything packed would
+// is one unconverted 32-bit dword per component; anything packed would
 // need real conversion, so those still warn.
 bool MtbufIsRawDwords(const Inst& inst, u32 n) {
   const u32 w = inst.raw[0];
@@ -316,7 +314,7 @@ u32 SmrdDwordCount(u32 op) {
 // Cbuffer bindings are keyed by the SGPR the descriptor is read from. The same
 // SGPR can hold a flat pointer for one load and a V# for another (user data
 // s[0:1] as a table pointer, s[0:3] as a buffer), so the descriptor kind is
-// part of the key -- otherwise whichever load came first would capture the
+// part of the key, otherwise whichever load came first would capture the
 // other's window.
 u32 CbufBindKey(u32 base_sgpr, bool pointer) {
   return base_sgpr | (pointer ? 0x100u : 0u);
@@ -426,7 +424,7 @@ void EmitMimg(Translator& t,
   // load-bearing: OpImageGather is fixed at level zero, so a form naming a LOD
   // or a bias cannot be honoured; and the ISA orders vaddr[] as
   // "Offsets, bias, zpcf, then coordinates", so a _b form carries a bias word
-  // this emitter does not account for -- it would read the bias as the
+  // this emitter does not account for: it would read the bias as the
   // z-compare and every coordinate one word early. Gather is NOT inherently
   // level zero (the ISA describes software trilinear via two gathers a LOD
   // step apart); the rest fall through `known` below and decline loudly.
@@ -579,7 +577,7 @@ void EmitMimg(Translator& t,
   const u32 dref_index = offset ? 1u : 0u;
   // _D / _CD carry user derivatives between the z-compare and the coordinates:
   // two words per sampled dimension. A compute stage has no implicit
-  // derivatives, so these are the only sample forms it can use -- GTA:SA's
+  // derivatives, so these are the only sample forms it can use. GTA:SA's
   // deferred lighting dispatch is written entirely in them, and reading its
   // derivative words as coordinates is how the whole pass came out black.
   const bool derivs = op == 0x22 || op == 0x2a || op == 0x68 || op == 0x6a;
@@ -626,7 +624,7 @@ void EmitMimg(Translator& t,
   if (!known)
     WarnUnsupported("mimg", op, w0, w1);
   // The Grad operand takes one vector per axis, sized like the sampled
-  // dimension -- an array layer is a coordinate but not a derivative.
+  // dimension; an array layer is a coordinate but not a derivative.
   const u32 grad_operand = static_cast<u32>(spv::ImageOperandsMask::Grad);
   const auto deriv_vec = [&](u32 first) {
     if (deriv_dims == 1)
@@ -684,8 +682,8 @@ void EmitMimg(Translator& t,
                      {si, uv, lod_operand, t.F32(0.0f)});
   } else if (gather && dref) {
     // image_gather4_c*: four PCF comparisons, one per texel of the footprint.
-    // OpImageDrefGather takes no component operand -- the compare result IS the
-    // gathered value -- and yields a vec4 like the uncompared gather.
+    // OpImageDrefGather takes no component operand, the compare result IS the
+    // gathered value, and it yields a vec4 like the uncompared gather.
     texel = t.m.Emit(spv::Op::OpImageDrefGather, t.t_v4,
                      {si, uv, addr_f(dref_index)});
   } else if (gather) {  // DMASK selects the gathered channel
@@ -756,8 +754,8 @@ void EmitMimg(Translator& t,
 // A buffer op the vertex-input state does not already cover is a hand-written
 // buffer read: the shader computes a per-lane index (an s_load'd vertex id, a
 // bone index, an instance number) and pulls dwords out of a V#-described
-// resource. Model it exactly as the compute path models guest memory -- a
-// storage buffer aliasing [V#.base, ...) addressed by dword index -- rather
+// resource. Model it exactly as the compute path models guest memory, a
+// storage buffer aliasing [V#.base, ...) addressed by dword index, rather
 // than as a constant window, because the address is not uniform.
 namespace {
 
@@ -1261,7 +1259,7 @@ void EmitCsMubuf(Translator& t, const Inst& inst, StageContext& sc) {
       return;
     }
     // GLC returns the pre-op value into VDATA; without it the result is
-    // simply unused. Device scope: these order against other workgroups.
+    // unused. Device scope: these order against other workgroups.
     const bool glc = (w >> 14) & 1;
     const Id ptr = CsSsboPtr(t, sc, binding, dword_idx);
     const Id scope = t.U32(static_cast<u32>(spv::Scope::Device));
@@ -1409,11 +1407,12 @@ static void EmitCsMimgStaged(Translator& t,
   // image_sample_lz_o: sample_lz plus a constant texel offset. The ISA orders
   // vaddr as "offsets, bias, zpcf, then coordinates", and _lz_o carries neither
   // a bias nor a z-compare, so word 0 is the packed offset and the coordinates
-  // start one word later -- which is what addr_shift below is for.
+  // start one word later, which is what addr_shift below is for.
   const bool offset = op == 0x37;
   const bool sample = op == 0x24 || op == 0x27 || offset;
   // image_gather4_lz: the same 2x2 footprint the bilinear path already fetches,
-  // returned as four texels instead of blended. Only the plain form -- the
+  // returned as four texels instead of blended. Only the plain form works:
+  // the
   // z-compare (bit 3) and offset (bit 4) variants carry extra address words
   // this emitter does not read, so they would take the coordinates one word
   // early. GTA:SA's depth pyramid, the HZB every occlusion test reads, is this
@@ -1427,7 +1426,7 @@ static void EmitCsMimgStaged(Translator& t,
   const bool atomic = op >= 0x0f && op <= 0x1a;
   if (!store && !load && !sample && !gather && !resinfo && !atomic) {
     // Silently setting the flag made the whole dispatch vanish with an empty
-    // op list in the audit -- the one report that was supposed to say why.
+    // op list in the audit, the one report that was supposed to say why.
     WarnUnsupported("mimg.cs", op, w, w1);
     sc.cs_unsupported = true;
     return;
@@ -1435,7 +1434,7 @@ static void EmitCsMimgStaged(Translator& t,
   const bool da = (w & 0x4000) != 0;
   // gfx10 NSA names every address component in its own VGPR; the caller hands
   // them over already loaded. Without this a 2D load reads y from vaddr+1,
-  // which on an NSA instruction is some unrelated register -- the source image
+  // which on an NSA instruction is some unrelated register, so the source image
   // is then addressed by x alone and the result is vertical stripes.
   const u32 addr_shift = offset ? 1u : 0u;
   const auto addr_vg = [&](u32 i) {
@@ -1475,12 +1474,12 @@ static void EmitCsMimgStaged(Translator& t,
       logical_or(t.Eq(image_type, t.U32(13)), t.Eq(image_type, t.U32(12))),
       t.Eq(image_type, t.U32(11)));
   // A volume (type 10) stages slice by slice exactly as an array does, and its
-  // slice count sits in the same descriptor field as an array's layer count --
+  // slice count sits in the same descriptor field as an array's layer count,
   // so everything below can address it as an array. The one difference is
   // where the slice index comes from: a 3D MIMG leaves DA clear and carries z
   // as its third address component, so it must be read whether or not DA is
   // set. Without this the type fell outside supported_type, every store was
-  // predicated off, and P.T.'s colour-grading LUT -- its only volume upload --
+  // predicated off, and P.T.'s colour-grading LUT (its only volume upload)
   // stayed zero, which graded the finished frame to black.
   const Id is_3d_img = t.Eq(image_type, t.U32(10));
   const Id has_slices = logical_or(is_array, is_3d_img);
@@ -1598,7 +1597,7 @@ static void EmitCsMimgStaged(Translator& t,
   // A block-compressed surface a shader writes is described as an
   // uncompressed integer image whose texel is one BC block: 64 bpp (32_32 or
   // 16_16_16_16) for BC1/BC4, 128 bpp (32_32_32_32) for BC2/BC3/BC5. The
-  // components are raw bits -- no normalisation, no float conversion -- so
+  // components are raw bits, with no normalisation and no float conversion, so
   // they pass through the staging buffer unchanged. P.T.'s texture streamer
   // uploads every streamed surface this way; without these the access was
   // gated off and the copy stored nothing.
@@ -1659,7 +1658,7 @@ static void EmitCsMimgStaged(Translator& t,
   if (sample || gather) {
     // Bilinear filter of the linear staging image with clamp addressing and
     // texel-centre coordinates. image_sample_l (0x24) takes an explicit LOD in
-    // the address; _lz (0x27) forces LOD 0 -- both already folded into the mip
+    // the address; _lz (0x27) forces LOD 0, both already folded into the mip
     // maths above. x/y hold the lower texel; the upper corner and fractional
     // weights are formed in the access block.
     const Id width_f = t.m.Emit(spv::Op::OpConvertUToF, t.t_f, {width});
@@ -1903,7 +1902,7 @@ static void EmitCsMimgStaged(Translator& t,
     if (gather) {
       // The gathered component is the one DMASK names; the four destination
       // registers are the footprint counter-clockwise from the lower left,
-      // (x,y+1) (x+1,y+1) (x+1,y) (x,y) -- the order both the GCN ISA and
+      // (x,y+1) (x+1,y+1) (x+1,y) (x,y), the order both the GCN ISA and
       // OpImageGather use.
       u32 comp = 0;
       for (u32 i = 0; i < 4; i++)

@@ -115,17 +115,13 @@ struct ShaderCbuf {
 // reads; the window is what the renderer can afford to copy per draw, and the
 // shader clamps into it.
 // kMaxGfxBuffers is the compile-time ceiling: it sizes the descriptor-layout
-// and per-draw arrays, and nothing may plan a binding at or above it. The
-// binding these live in is a DYNAMIC storage buffer, and
-// maxDescriptorSetStorageBuffersDynamic has a Vulkan floor of only 4 -- so the
-// count actually usable is a device property, not a constant. The renderer
-// calls SetMaxGfxBuffers() once it knows the limit; until then the planner
-// stays at the floor, which is valid everywhere.
-//
-// This matters because a shader is planned against the cap: SotC's deferred
-// pixel shaders reference 5+ distinct raw buffers, and at a cap of 4 every
-// load past the fourth was left unplanned, warned as "mubuf.ps", and took the
-// whole shader down with it.
+// and per-draw arrays. The binding is a DYNAMIC storage buffer and
+// maxDescriptorSetStorageBuffersDynamic has a Vulkan floor of only 4, so the
+// usable count is a device property: the renderer calls SetMaxGfxBuffers() once
+// it knows the limit; until then the planner stays at the floor, which is
+// valid everywhere. Shaders are planned against the cap: SotC's deferred pixel
+// shaders reference 5+ distinct raw buffers, and at a cap of 4 every load past
+// the fourth was left unplanned and took the whole shader down with it.
 constexpr u32 kMaxGfxBuffers = 16;
 constexpr u32 kMinGfxBuffers = 4;  // the Vulkan floor
 // Astro Bot binds scene buffers up to 16 MiB. Truncating these to 1 MiB
@@ -187,7 +183,7 @@ std::vector<u8> UniformPoints(const Program& program);
 // VS fetches by hand rather than through the vertex-input state, a skinning
 // palette, an instance table. Bound as a storage buffer at set 2, aliasing
 // [V#.base, V#.base + window). The V# lives in `srsrc_sgpr` at `use_pc`, where
-// draw-time scalar evaluation reads it -- it may have arrived there by s_load
+// draw-time scalar evaluation reads it, since it may have arrived there by s_load
 // through an SRT chain, so user data alone does not name it.
 struct ShaderBuffer {
   u32 binding = 0;
@@ -295,7 +291,7 @@ struct CsResource {
   u8 kind = 0;  // 0 = buffer V#, 1 = image T#, 2 = scalar pointer, 3 = BVH T#
   bool written = false;    // dispatch writes it -> copy back to guest
   // Does the dispatch READ it? A resource that is written and never read does
-  // not have to be staged in from guest memory before the dispatch -- and
+  // not have to be staged in from guest memory before the dispatch, and
   // SotC's material fills are whole 4 MiB arenas of exactly that shape, so
   // uploading them is pure cost. Tracked per access and OR'd, so a
   // read-modify-write (an atomic, or a load and a store to the same buffer)

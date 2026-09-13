@@ -37,7 +37,7 @@ inline bool isErrnoPtr(const u8 *p) {
 
 // VA the guest itself unmapped. sys_munmap keeps the host pages (see there), so
 // a later mmap HINT at the same address would otherwise be refused and
-// relocated -- which breaks any allocator that frees a probe mapping and then
+// relocated, which breaks any allocator that frees a probe mapping and then
 // asks for an exact sub-range of it.
 void noteGuestReleased(u8 *ptr, size_t size);
 bool wasGuestReleased(u8 *ptr, size_t size);

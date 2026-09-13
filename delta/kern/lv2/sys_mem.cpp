@@ -143,7 +143,7 @@ u8 *allocLowGuest(size_t size, size_t align) {
   // memory pools at round 64 GiB slots (N * 0x10_0000_0000): Uncharted 2 uses
   // 0x10..0x12_0000_0000 (Onion/Garlic/Flexible); GTA:SA's Gameface engine
   // MAP_FIXEDs pools at 0x10/0x20/0x30/0x40_0000_0000, the last being a 128 MB
-  // direct-memory pool exactly on our old 256 GiB floor -- it clobbered the
+  // direct-memory pool exactly on our old 256 GiB floor; it clobbered the
   // primary TCB (fs:0x10 -> 0), which crashed the first scePthreadMutexLock. Our
   // bookkeeping must sit above every slot a title fixed-maps; 512 GiB clears all
   // observed pools while staying under the PS4 2^40 user ceiling.
@@ -159,7 +159,7 @@ u8 *allocLowGuest(size_t size, size_t align) {
   size = (size + 0x3FFF) & ~uintptr_t(0x3FFF);
   // Caller-requested alignment (MAP_ALIGNED(n) in the mmap flags): the kernel
   // CONTRACTUALLY returns a base aligned to 2^n. Engines size their arena
-  // bookkeeping around it -- SotC reserves its streaming arenas with
+  // bookkeeping around it: SotC reserves its streaming arenas with
   // MAP_ALIGNED(20) and indexes them by VA>>20; a 64 KiB-aligned base breaks
   // every lookup (AllocationTracker null-record crash in LoadInitialWorld).
   const uintptr_t al = align > kAlign ? align : kAlign;
@@ -201,7 +201,7 @@ using shmRef = std::shared_ptr<shmBacking>;
 std::mutex g_shmMutex;
 // name -> shared backing. The backing outlives the name: shmObject holds a
 // shared ref, so a region that was shm_open'd then shm_unlink'd keeps working
-// through its fd -- the real kernel refcounts the shm object by file
+// through its fd. The real kernel refcounts the shm object by file
 // descriptor the same way (unlink only drops the name).
 std::unordered_map<std::string, shmRef> g_shmByName;
 
@@ -259,7 +259,7 @@ std::string shmAudioSanitize(const std::string &n) {
 
 // DELTA_SHM_AUDIO_POISON=<byte>: fill a matching region with a poison byte when
 // it is first mapped. Without this a region the guest fills with SILENCE is
-// indistinguishable from one the guest never touches -- both read back as
+// indistinguishable from one the guest never touches, since both read back as
 // zeros. Only regions matching DELTA_SHM_AUDIO_POISON_FILTER (default "_A", the
 // per-port sample regions) are poisoned, so the descriptor block stays clean.
 bool shmAudioPoisonQuiet(const std::string &name, u8 *base, size_t size) {
@@ -337,7 +337,7 @@ void shmAudioDumperMain(std::string dir, unsigned periodMs, unsigned maxSnaps,
       // DELTA_SHM_AUDIO_REPOISON: refill with the poison byte after sampling, so
       // the NEXT snapshot shows exactly the bytes written during this tick. A
       // producer that rewrites the same block with silence every tick is
-      // otherwise invisible -- silence over silence is no change. Destroys the
+      // otherwise invisible: silence over silence is no change. Destroys the
       // region's contents, so it is only valid while nothing consumes them.
       shmAudioRepoison(r.n, r.b, len);
       if (idx)
@@ -358,7 +358,7 @@ void shmAudioDumperMain(std::string dir, unsigned periodMs, unsigned maxSnaps,
 // ---------------------------------------------------------------------------
 // DELTA_SHM_AUDIO_PROBE=<us>: SPEC VALIDATION HARNESS, default OFF. Performs
 // exactly the consumer half of the LLE libSceAudioOut handshake and reports what
-// it finds, WITHOUT playing anything -- the point is to prove the decode, not to
+// it finds, WITHOUT playing anything. The point is to prove the decode, not to
 // be the daemon (that is the next stage's job).
 //
 // Every <us> it walks the 26 port slots of "/shm_<pid>_C" and, for any slot
@@ -535,8 +535,8 @@ u8 *PS4ABI sys_mmap(void *addr, size_t size, u32 prot, u32 flags,
 
   // A zero-length mapping is invalid (BSD returns EINVAL). Guests hit this on an
   // error-recovery path, e.g. mmap()ing an fd from a failed physhm_open/fstat.
-  // Without this it fell into allocLowGuest(0) -- 8192 failing mmap(len=0) host
-  // calls -- and returned (u8*)-1, which the errno convention reports as
+  // Without this it fell into allocLowGuest(0), 8192 failing mmap(len=0) host
+  // calls, and returned (u8*)-1, which the errno convention reports as
   // EPERM (1) rather than EINVAL (22), misleading the guest's fallback.
   if (size == 0)
     return reinterpret_cast<u8 *>(-SysError::eINVAL);
@@ -618,7 +618,7 @@ u8 *PS4ABI sys_mmap(void *addr, size_t size, u32 prot, u32 flags,
     // occupying them is our own PROT_NONE placeholder, so a hint landing there
     // is guest-owned address space and must be COMMITTED where the guest asked.
     // Relocating instead is what makes libkernel fall back to its internal
-    // arena and exhaust it -- see guest_vaspace.cpp.
+    // arena and exhaust it (see guest_vaspace.cpp).
     inUserStack = inUserStack || isGuestReservedVa(addr, size);
   }
 
@@ -653,7 +653,7 @@ u8 *PS4ABI sys_mmap(void *addr, size_t size, u32 prot, u32 flags,
   }
 
   // MAP_ALIGNED(n): bits 31..24 of the flags carry log2 of a base alignment the
-  // kernel must honor (FreeBSD 9 semantics; Sony titles rely on it -- SotC
+  // kernel must honor (FreeBSD 9 semantics; Sony titles rely on it: SotC
   // reserves streaming arenas with MAP_ALIGNED(20) and keys its allocator
   // bookkeeping on the 1 MiB-aligned base).
   const u32 alignLog = (flags >> 24) & 0x1F;
@@ -665,7 +665,7 @@ u8 *PS4ABI sys_mmap(void *addr, size_t size, u32 prot, u32 flags,
     addr = nullptr;  // misaligned hint: pick our own aligned base instead
 
   // A pure address-space reservation (prot 0) must not be planted in the band
-  // titles MAP_FIXED their own direct/flexible pools into -- the round 64 GiB
+  // titles MAP_FIXED their own direct/flexible pools into, the round 64 GiB
   // slots below our arena floor. The hint there is only advisory, but a later
   // MAP_FIXED over it is not: Minecraft maps direct memory at 0x10_0000_0000,
   // which is also the hint V8 uses for its pointer-compression cage, and the
@@ -722,7 +722,7 @@ u8 *PS4ABI sys_mmap(void *addr, size_t size, u32 prot, u32 flags,
 
   // No zero-fill for anonymous maps: every ptr above comes from an anonymous
   // ::mmap (utl::allocMem or allocLowGuest), which the kernel already hands
-  // back zeroed. Writing it ourselves faulted in the whole mapping -- a title
+  // back zeroed. Writing it ourselves faulted in the whole mapping: a title
   // that maps multi-GiB pools (Minecraft maps 4 and 8 GiB ones) went to 43 GiB
   // RSS at ~3 GB/s and took the host down. The shm and device-backed paths
   // return before this point, so they are unaffected.
@@ -764,7 +764,7 @@ u8 *PS4ABI sys_mmap(void *addr, size_t size, u32 prot, u32 flags,
   // (0x8000_.. below the big dmem pools) to pin how the AGC ring buffers (ACQRB
   // etc.) are mapped and by whom (return address). The AGC command ring is mapped
   // here as plain anon (fd=-1); its coherency with the guest's PM4 writes is an
-  // open item (Onion/Garlic dual mapping -- see ps5-boot-progress memory).
+  // open item (Onion/Garlic dual mapping, see ps5-boot-progress memory).
   if (kGnmapTrace) {
     u64 r = reinterpret_cast<u64>(ptr);
     if (r >= 0x8000000000ull && r < 0x8300000000ull) {
@@ -884,7 +884,7 @@ int PS4ABI sys_shm_open(const char *path, u32 flags, u16 mode) {
         // A read-only open of a shm that wasn't created by the guest: this is a
         // SYSTEM shared region the kernel would have published at boot (e.g.
         // libSceAvSetting's audio/video settings block). We don't model its
-        // contents, so auto-provide a zeroed, pre-sized backing -- the title
+        // contents, so auto-provide a zeroed, pre-sized backing. The title
         // then fstat()s a real size and mmaps it (reading defaults) instead of
         // failing init with a -ENOENT shm fd it tries to map anyway.
         backing = std::make_shared<shmBacking>();

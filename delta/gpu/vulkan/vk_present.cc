@@ -17,7 +17,7 @@ namespace gpu::vk {
 
 // gfx::present blocks on the window swapchain (previous-present fence, vsync /
 // compositor pacing) and, on a software Vulkan driver, rasterizes the blit on
-// the CPU -- ~10ms+ that used to sit on the frame loop. A dedicated presenter
+// the CPU, ~10ms+ that used to sit on the frame loop. A dedicated presenter
 // thread owns the window (creation, event pump, and present all happen on it)
 // and always shows the newest completed frame; the frame loop just snapshots
 // the pixels and signals. DELTA_GPU_SYNCPRESENT=1 restores the inline call.
@@ -42,7 +42,7 @@ void LatestFramePresenter::Run() {
     const gfx::PixelFormat fmt = pending_fmt_;
     // A lent buffer is presented in place. Staging it into `local` first would
     // be a second 33 MB copy of a 4K scanout on top of the one gfx::present
-    // already does into its upload buffer -- 6.5 ms for nothing. The borrow is
+    // already does into its upload buffer, 6.5 ms for nothing. The borrow is
     // held until present returns; the renderer waits for that in BeginFrame
     // before it lets the GPU write the buffer again.
     const u8* src = pending_src_;

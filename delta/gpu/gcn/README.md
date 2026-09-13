@@ -8,7 +8,7 @@ intermediate).
 
 | File | Role |
 | --- | --- |
-| `gcn_decode.{h,cpp}` | Instruction decoder: bytecode -> `Program` (flat `Inst` list). Footer-aware length recovery (`OrbShdr`), plus `CachedProgram()` — a hash-validated per-address cache so per-draw analysis never re-decodes. |
+| `gcn_decode.{h,cpp}` | Instruction decoder: bytecode -> `Program` (flat `Inst` list). Footer-aware length recovery (`OrbShdr`), plus `CachedProgram()`, a hash-validated per-address cache so per-draw analysis never re-decodes. |
 | `gcn_disasm.{h,cpp}` | Full GFX7 disassembler (mnemonic tables for every encoding + operand rendering). Debug surface only. |
 | `gcn_audit.{h,cpp}` | Shader translation audit: per-instruction fates (translated / unsupported / silently-dropped / dead), run-wide ranked report (`DELTA_GPU_SHAUDIT`), per-shader dump files (`DELTA_GPU_SHDUMP`). |
 | `gcn_resource.{h,cpp}` | Descriptor ("sharp") decode: V#/T#/S#, and per-draw tracking of the resources a decoded shader references (`TrackTextures` / `TrackVertexBuffers`). Consumes a `Program`. |
@@ -34,19 +34,19 @@ Compute models guest memory as one storage buffer per descriptor (the buffer
 aliases `[base, base+size)`), the 16 `COMPUTE_USER_DATA` dwords as push
 constants, and LDS as a `Workgroup` array sized from `RSRC2.LDS_SIZE`
 (128-dword granules). An op the model cannot express (atomics, sampling in
-CS, GDS) declines the recompile — the dispatch is skipped loudly rather than
+CS, GDS) declines the recompile, and the dispatch is skipped loudly rather than
 corrupting memory.
 
 ## Known gaps (declined or approximated, all warned once via `[gcnspv] UNSUPPORTED`)
 
 - Graphics-stage MUBUF/MTBUF/DS: raw buffer loads in a VS/PS need renderer
-  SSBO plumbing (guest-range aliasing like the compute path) — currently
+  SSBO plumbing (guest-range aliasing like the compute path), so currently
   ignored with a warning. Vertex fetch through the Gnm fetch shader is fully
   supported (that is the common path).
 - PS sampler bindings are deduplicated by descriptor identity
   (`PlanMimgBindings`, shared by the recompiler and `TrackTextures`), so a
   shader may reference at most 8 *unique* T#/S# pairs (the renderer's set-0
-  layout size). A PS exceeding that declines the recompile — exceeding the
+  layout size). A PS exceeding that declines the recompile; exceeding the
   layout instead would crash driver pipeline creation (seen with PT's FOX
   shaders before the dedupe: 44 MIMG instructions, ≤8 unique descriptors).
 - `SPI_PS_INPUT_ENA` ABI VGPR seeding (frag-coord / face / barycentrics in
@@ -57,7 +57,7 @@ corrupting memory.
   and are assembled from 32-bit halves, so the module needs neither the
   `Int64`/`Float64` capability nor the device features behind them. Exact for
   register operands; a 64-bit compare against a float inline constant or a
-  literal (the ISA gives both special 64-bit meanings — a float inline denotes
+  literal (the ISA gives both special 64-bit meanings: a float inline denotes
   the *double*, a literal occupies bits [63:32]) or carrying a VOP3 neg/abs
   modifier is declined rather than answered wrongly.
 - The `_clamp` and `_legacy` transcendentals (`v_log_clamp_f32`,
@@ -66,10 +66,10 @@ corrupting memory.
   the DX9 NaN rule (min/max return vsrc1 when either input is NaN) and
   `ClampInfToFltMax` / `ConvertInfToZero` touching only infinities.
 - Output modifiers (OMOD) on integer results and on VOPC lane masks are
-  *ignored*, which is what the hardware does — not a gap.
+  *ignored*, which is what the hardware does, so not a gap.
 - LDS in a **graphics** stage is backed by `Private` storage, one array per
   invocation, because SPIR-V allows `Workgroup` only in a compute (or task/mesh)
-  shader. This is exact for per-lane addressing — which is all a fragment shader
+  shader. This is exact for per-lane addressing, which is all a fragment shader
   can legally express in Vulkan, and all the Orbis compiler emits here: a spill,
   addressed by `v_mbcnt_{lo,hi}(-1)`, i.e. the lane's own slot. Genuine
   cross-lane LDS in a graphics stage has no lowering and still declines by
@@ -107,7 +107,7 @@ shaders), `DELTA_GPU_SPIRV` (accept/decline tally), `DELTA_GPU_SPIRV_CFG`
   shader and prints, at exit, a ranked report: each unsupported/approximated
   op with how many shaders it appears in (fix order = report order), every
   instruction that **silently emitted no SPIR-V** (the "an ignored load is
-  silently wrong" class — a non-nop instruction with 0 emitted words and no
+  silently wrong" class: a non-nop instruction with 0 emitted words and no
   warning), and every declined shader, each with an example
   `stage_hash pc=` to reproduce.
 - `DELTA_GPU_SHDUMP=<dir>`: per unique shader writes
@@ -115,7 +115,7 @@ shaders), `DELTA_GPU_SPIRV` (accept/decline tally), `DELTA_GPU_SPIRV_CFG`
   per-instruction emitted-word counts, `!UNSUPPORTED` / `!SILENT` / `dead`
   markers, binding plan header), `.gcn` (raw bytecode), and `.spv` (the
   unoptimized module, where every op is preceded by an `OpLine` whose line
-  number is the GCN dword pc — `spirv-dis`/RenderDoc show exactly which
+  number is the GCN dword pc, so `spirv-dis`/RenderDoc show exactly which
   guest instruction produced which SPIR-V, for auditing suspected
   mistranslations by eye).
 - SPIR-V validation failures of translator-emitted modules now always log

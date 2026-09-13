@@ -6,7 +6,7 @@
  * same problem in libc). Both entries here are query functions with a u32
  * out-parameter, reached from the title's varargs GPU-debug-label path. Left on the
  * badcall stub they return "success" without writing the out-param, and the caller
- * allocas that uninitialised stack slot -- Dead Cells (PPSA15552) overflows its
+ * allocas that uninitialised stack slot. Dead Cells (PPSA15552) overflows its
  * stack into a guard page that way.
  *
  * Everything else in libSceAgcDriver stays LLE.
@@ -30,7 +30,7 @@ int PS4ABI agcDriverQueryU32(u32 *out) {
 }
 
 // f(u32 *sizeOut): on success the caller allocas *sizeOut. We have no size to
-// report, so fail instead -- the caller then returns -1 without touching the stack.
+// report, so fail instead; the caller then returns -1 without touching the stack.
 int PS4ABI agcDriverQuerySize(u32 *sizeOut) {
   if (sizeOut)
     *sizeOut = 0;

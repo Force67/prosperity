@@ -7,8 +7,8 @@
  * There is one local user and it is always signed in, so the state to report is
  * settled: user id kUserId present in the login list, and an event queue that is
  * permanently empty AFTER the initial login has been consumed. Replying with
- * zeros instead would say "user id 0", which is SCE_USER_SERVICE_USER_ID_INVALID
- * -- a title that resolves the foreground user before it builds its HUD then
+ * zeros instead would say "user id 0", which is SCE_USER_SERVICE_USER_ID_INVALID,
+ * so a title that resolves the foreground user before it builds its HUD then
  * either retries forever or indexes a save slot with an invalid id.
  *
  * Mirrors the HLE libSceUserService shim (runtime/vprx/ps4/libSceUserService),

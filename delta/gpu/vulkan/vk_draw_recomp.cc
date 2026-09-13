@@ -60,11 +60,11 @@ DELTA_OPTION(bool, kRawBufTrace, "DELTA_GPU_RAWBUF", false);
 DELTA_OPTION(bool, kSelfTrace, "DELTA_GPU_SELFTRACE", false);
 DELTA_OPTION(bool, kTightCbuf, "DELTA_GPU_TIGHTCBUF", false);
 // DELTA_GPU_CBSTAGED=<vs addr> (or 1 for every draw): the bytes that reached
-// the ring slot the descriptor points at -- what the SPIR-V actually loads,
-// as opposed to the guest buffer the CPU-side trace prints.
+// the ring slot the descriptor points at (what the SPIR-V actually loads,
+// as opposed to the guest buffer the CPU-side trace prints).
 DELTA_OPTION(u64, kCbInfo, "DELTA_GPU_CBSTAGED", 0);
 // DELTA_GPU_TEXFORCE=<guest addr>: bind the 1x1 white default for exactly
-// this texture address. A diagnostic, not a setting -- it answers "is THIS
+// this texture address. A diagnostic, not a setting: it answers "is THIS
 // surface the one holding the frame back", which forcing every sampler
 // white cannot.
 DELTA_OPTION(u64, kTexForce, "DELTA_GPU_TEXFORCE", 0);
@@ -121,22 +121,20 @@ struct ReadableRangeKeyHash {
 
 // Per-frame staging dedupe. SotC redraws its whole world for the depth
 // prepass, the G-buffer and the shadow cascades, and every one of those draws
-// staged its vertex records, indices and cbuffer windows into the upload rings
-// again -- RINGHWM showed the VB ring's whole 256 MiB frame half consumed by
-// ~250 draws and the UBO ring full at ~130, after which every further draw was
-// declined to the heuristic path (drawn with a guessed transform, which is
-// where the exploded geometry came from). A window of guest bytes already
-// staged this frame is byte-identical on repeat, so stage it once.
-//
-// A cached copy is current iff nothing has made its guest range stale since
-// the copy: entries are stamped with rhi::CsWritebackGeneration() (compute
-// results landing in guest memory bump it) and refused when a GPU-dirty
-// compute range overlaps the key (dirty now means a writeback -- and a content
-// change -- is still owed). CPU rewrites of the same address within one frame
-// have no announcement to hook; titles ring-allocate their dynamic data so a
-// rewritten buffer arrives at a new address, and the raw-buffer path has
-// shipped this exact assumption since it grew its own `staged` map.
-// DELTA_GPU_RING_DEDUP=0 restores the copy-per-draw behaviour for A/B.
+// staged its vertex records, indices and cbuffer windows again: RINGHWM showed
+// the VB ring's whole 256 MiB frame half consumed by ~250 draws and the UBO
+// ring full at ~130, after which every further draw was declined to the
+// heuristic path (guessed transform, hence the exploded geometry). A window of
+// guest bytes already staged this frame is byte-identical on repeat, so stage
+// it once.
+// A cached copy is current iff nothing has made its guest range stale since the
+// copy: entries are stamped with rhi::CsWritebackGeneration() (compute results
+// landing in guest memory bump it) and refused when a GPU-dirty compute range
+// overlaps the key (dirty means a writeback is still owed). CPU rewrites of the
+// same address within one frame have no announcement to hook; titles
+// ring-allocate their dynamic data so a rewritten buffer arrives at a new
+// address, and the raw-buffer path has shipped that assumption since it grew
+// its own `staged` map. DELTA_GPU_RING_DEDUP=0 restores copy-per-draw for A/B.
 struct StageCacheKey {
   u64 base;
   u32 salt;  // index type for the IB cache, 0 elsewhere
@@ -168,7 +166,7 @@ struct StageCache {
   // COVERS the request answers it: same base, and every byte asked for is
   // already in the ring at the same offset, so the indices still land. Keying
   // on the exact length instead made a shared vertex buffer miss on every
-  // draw -- GTA:SA indexes one 200k-vertex buffer, each draw reaching a few
+  // draw: GTA:SA indexes one 200k-vertex buffer, each draw reaching a few
   // hundred vertices further than the last, and re-copied ~2.4 MB per draw
   // until the per-frame ring ran out and the rest of the world was declined.
   VkDeviceSize Find(u64 base, u64 bytes, u32 salt = 0) {
@@ -180,7 +178,7 @@ struct StageCache {
       return VkDeviceSize(-1);
     return it->second.off;
   }
-  // Record a copy made at the CURRENT generation -- call after the range was
+  // Record a copy made at the CURRENT generation, called after the range was
   // flushed (or was never compute-written), never before. A shorter copy never
   // replaces a longer live one: it would answer requests it does not cover.
   void Insert(u64 base, u64 bytes, u32 salt, VkDeviceSize off) {
@@ -238,17 +236,16 @@ void ReportDeclines() {
 
 // Issue a draw running the game's recompiled VS/PS. Returns false if the draw
 // can't be handled (the caller falls back to the heuristic path).
-// DELTA_GPU_SKIP_PS=<hex> / DELTA_GPU_ONLY_PS=<hex>[,<hex>...]: drop every
-// draw using that guest pixel shader, or every draw except those. Guest shader
-// addresses are stable per build, which draw INDICES are not -- DELTA_GPU_
+// DELTA_GPU_SKIP_PS=<hex> / DELTA_GPU_ONLY_PS=<hex>[,<hex>...]: drop every draw
+// using that guest pixel shader, or every draw except those. Guest shader
+// addresses are stable per build, which draw INDICES are not (DELTA_GPU_
 // ONLYDRAW looks equivalent and hands you a different pass whenever the draw
-// count moves (P.T.'s light pass alone varies 29..34 draws).
-//
+// count moves).
 // Answered from the RENDERER's entry point, not from the recompiled path: a
 // draw whose shader never recompiled has no `d.recomp`, never reaches
 // DrawRecomp at all, and would sail past the filter into the heuristic quad
-// renderer -- so "isolate one pass" quietly left every un-recompiled pass in
-// the frame, painting flat quads that no SPIR-V probe can touch.
+// renderer, so "isolate one pass" quietly left every un-recompiled pass in the
+// frame, painting flat quads no SPIR-V probe can touch.
 bool ShaderFilterDrops(u64 ps_addr) {
   static const u64 kSkipPs = [] {
     const char* e = std::getenv("DELTA_GPU_SKIP_PS");
@@ -314,7 +311,7 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
   }
   // DB_RENDER_CONTROL clear. The guest issues a RECT_LIST with no vertex
   // buffers and no pixel shader, and the hardware fills the depth/stencil
-  // plane with DB_DEPTH_CLEAR / DB_STENCIL_CLEAR over it -- the shader's
+  // plane with DB_DEPTH_CLEAR / DB_STENCIL_CLEAR over it; the shader's
   // output is not used. Running it as an ordinary draw wrote the vertex
   // shader's z instead, which for P.T. is one packet that flattened the whole
   // scene depth it had just rendered, and every pass that samples that depth
@@ -343,7 +340,7 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
     return true;
   }
   if (!d.recomp || !d.recomp->ok || !draw_count) {
-    // DELTA_GPU_DECLTRACE: norecomp lumps together three unrelated causes --
+    // DELTA_GPU_DECLTRACE: norecomp lumps together three unrelated causes –
     // no recompiled program, a program that failed to translate, and a draw
     // whose count never made it out of the packet. Separate them, because only
     // the last one points upstream at the command processor.
@@ -415,7 +412,7 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
   u64 tex_base = d.tex_base;
   // DELTA_GPU_TEXFORCE also has to cover the single-texture path, or it
   // silently does nothing for exactly the blit-shaped draws that path exists
-  // for -- and a diagnostic that quietly no-ops reads as a negative result.
+  // for, and a diagnostic that quietly no-ops reads as a negative result.
   const bool force_white_tex =
       kTexForce && tex_base == (u64)kTexForce;
   if (force_white_tex)
@@ -508,21 +505,18 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
   // GNM's fast clear (see DrawInfo::is_clear_rect): a RECT_LIST draw with no
   // pixel shader whose colour lives in CB_COLORn_CLEAR_WORD0/1. Rasterising it
   // writes nothing, so leaving it to the normal path silently turns every clear
-  // into a no-op and each target keeps loading the previous frame -- SotC's
-  // world colour RT accumulated one fullscreen pass per frame until its value
-  // literally tracked the frame counter. Record the clear and consume the draw.
-  //
+  // into a no-op and each target keeps loading the previous frame (SotC's world
+  // colour RT accumulated one fullscreen pass per frame until its value tracked
+  // the frame counter). Record the clear and consume the draw.
   // The clear colour is encoded in each target's own format, so it needs the
-  // per-format unpack in ColorTargetClearValue. Clearing to zero regardless
+  // per-format unpack in ColorTargetClearValue; clearing to zero regardless
   // turns P.T.'s opaque white and opaque black clears into transparent black,
-  // which is a hole in a deferred composite.
+  // a hole in a deferred composite.
   // CB_COLOR_CONTROL.MODE 2..6 are CMASK/FMASK/DCC operations on the bound
-  // targets -- eliminate fast clear, resolve, decompress: fullscreen passes
-  // that rewrite a compressed surface in place, with no colour export of
-  // their own. Our targets are never compressed, so the surface already is
-  // what they would produce, and rasterising one writes undefined colour over
-  // it. Astro Bot decompresses its scene target right before the G-buffer
-  // pass and its motion vectors right after, and both came out zero.
+  // targets (eliminate fast clear, resolve, decompress): fullscreen passes that
+  // rewrite a compressed surface in place, with no colour export of their own.
+  // Our targets are never compressed, so the surface already is what they would
+  // produce, and rasterising one writes undefined colour over it.
   {
     const u32 cb_mode = (d.color_control >> 4) & 7u;
     if (cb_mode >= 2 && cb_mode <= 6) {
@@ -534,20 +528,15 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
 
   if (d.is_clear_rect) {
     // ...but a RECT_LIST with no pixel shader is ALSO the shape of the CB
-    // metadata passes, and those are the opposite of a clear: they preserve
-    // the surface. CB_COLOR_CONTROL.MODE tells them apart --
-    // CB_NORMAL(1) is the clear; CB_ELIMINATE_FAST_CLEAR(2),
-    // CB_RESOLVE(3), CB_DECOMPRESS(4) and CB_FMASK_DECOMPRESS(5) resolve
-    // CMASK/FMASK/DCC into the surface. We never compress a target, so for us
-    // those are no-ops -- but they still have to be consumed, because with no
-    // pixel shader they would otherwise rasterise nothing and drop through as
-    // a normal draw.
-    //
-    // P.T. issues 58k of these and not one real fast clear: every frame it
-    // eliminated the fast-clear state of its composite eight times, twice
-    // right before the tonemap pass samples that same target through a
-    // feedback copy. Taking them for clears wiped the scene a draw before it
-    // was read, which is why the game presented black.
+    // metadata passes, and those are the opposite of a clear: they preserve the
+    // surface. CB_COLOR_CONTROL.MODE tells them apart: CB_NORMAL(1) is the
+    // clear; CB_ELIMINATE_FAST_CLEAR(2), CB_RESOLVE(3), CB_DECOMPRESS(4) and
+    // CB_FMASK_DECOMPRESS(5) resolve CMASK/FMASK/DCC into the surface. We never
+    // compress a target, so for us those are no-ops, but they still have to be
+    // consumed, because with no pixel shader they would otherwise rasterise
+    // nothing and drop through as a normal draw. P.T. issues 58k of these and
+    // not one real fast clear; taking them for clears wiped the scene a draw
+    // before it was read, which is why the game presented black.
     const u32 cb_mode = (d.color_control >> 4) & 7u;
     if (cb_mode != 1) {
       if (kClearTrace) {
@@ -564,7 +553,7 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
       return true;
     }
     // A fast clear covers the generic scissor, not necessarily the whole
-    // target, and we have no way to express a partial one here -- a pending
+    // target, and we have no way to express a partial one here: a pending
     // clear is realised as loadOp=CLEAR over the entire attachment. SotC
     // issues twelve of these a frame against the buffer its compute resolve
     // reads, so taking each of them as "clear everything" erases the deferred
@@ -629,8 +618,8 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
 
   // DELTA_GPU_UIWATCH=1: name the guest code that writes SotC's UI vertex
   // COLOURS. Its title screen composites an opaque black plate over the scene
-  // and draws every UI element with an RGBA8 colour attribute of 00000000 --
-  // faded out -- so nothing reaches the screen however well the scene renders.
+  // and draws every UI element with an RGBA8 colour attribute of 00000000 –
+  // faded out, so nothing reaches the screen however well the scene renders.
   // The buffer holding those colours is only knowable while a draw is
   // processed and moves every run, which is why the watch is armed from here
   // (the same route DELTA_GPU_NULLWATCH uses for a descriptor pointer).
@@ -655,7 +644,7 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
         const uintptr_t at = reinterpret_cast<uintptr_t>(p) + attr.offset;
         BASE_LOGI("uiwatch",
                   "arming on UI colour {:#x} (rt={:#x}, {} verts, "
-                  "stride {}) -- it currently reads 00000000",
+                  "stride {}), it currently reads 00000000",
                   (unsigned long)at, (unsigned long)d.rt_base,
                   d.vertex_count, vb.stride);
         utl::setWriteWatchValueProbe(at);
@@ -669,7 +658,7 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
 
   // A target whose FIRST draw of a frame blends with COLOR_DESTBLEND == ONE is
   // being ACCUMULATED into, and accumulation from an unknown starting value is
-  // meaningless -- the guest necessarily begins it from a defined state. The
+  // meaningless; the guest necessarily begins it from a defined state. The
   // lazy-clear heuristic (persist RT content across frames as LOAD) is right
   // for content baked once and wrong here: without a reset the accumulation
   // compounds every frame. P.T.'s light buffer is accumulated by two draws and
@@ -738,16 +727,15 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
 
   // A fullscreen, untextured, near-black REPLACE draw is the game CLEARING an
   // RT. Don't render it (that wipes the RT immediately); record a LAZY clear
-  // instead -- realised as loadOp=CLEAR only when content actually redraws this
-  // RT this frame (see BeginRegion). Baked-once content (the room floor) whose
-  // clear and redraw land on different frames then survives. A COLOURED
-  // fullscreen REPLACE is real content (e.g. the per-frame minimap redraw) and
-  // must NOT be treated as a clear.
+  // instead, realised as loadOp=CLEAR only when content actually redraws this
+  // RT this frame (see BeginRegion), so baked-once content (the room floor)
+  // whose clear and redraw land on different frames survives. A COLOURED
+  // fullscreen REPLACE is real content (the per-frame minimap redraw) and must
+  // NOT be treated as a clear.
   // The extent test below reads the position attribute as float32s. A title
-  // whose positions are not floats (Skyrim's UI uses 16_16_SScaled) would have
-  // its geometry read as garbage, land a bogus fullscreen extent, and get
-  // swallowed as a "clear" -- which is exactly what turned its whole frame
-  // black. Only consider draws whose position really is float.
+  // whose positions are not floats (Skyrim's UI uses 16_16_SScaled) would get a
+  // bogus fullscreen extent and be swallowed as a "clear", which turned its
+  // whole frame black. Only consider draws whose position really is float.
   bool float_pos = false;
   for (u32 a = 0; a < d.num_vattrs; a++) {
     if (d.vattrs[a].location != 0)
@@ -1025,7 +1013,7 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
       const bool rt_eligible = !t.arrayed && !t.is_3d;
       // One base can hold several render-target geometries, and only the live
       // one answers to the address. Pick the variant this sample is asking for
-      // before deciding what the binding resolves to -- but never while the
+      // before deciding what the binding resolves to, but never while the
       // base is a target of this same draw, where the feedback path below owns
       // the image.
       if (base && rt_eligible && !is_bound_target(base)) {
@@ -1064,7 +1052,7 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
         continue;
       }
       // A pending CS write into an RT-resolved range must reach the image
-      // before this draw samples it (the flush uploads it -- see
+      // before this draw samples it (the flush uploads it, see
       // UploadCsRangeToRt); guest-upload textures already get this from the
       // texture cache.
       if (base && g_rts.count(base) && !CsRefreshRtFromTruth(base))
@@ -1136,9 +1124,9 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
     }
   }
 
-  // DELTA_GPU_TEXBIND=<frame>: how each sampler of each draw resolved -- to a
-  // live render target, a depth target, guest memory, or the 1x1 white default.
-  // A post-processing chain that samples its own previous target reads zero the
+  // DELTA_GPU_TEXBIND=<frame>: how each sampler of each draw resolved, be it
+  // a live render target, a depth target, guest memory, or the 1x1 white
+  // default. A post-processing chain that samples its own previous target reads zero the
   // moment one of those lands on guest memory.
   {
     // A frame NUMBER is not reproducible across runs (the intro's length
@@ -1220,7 +1208,7 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
   // The pipeline carried the format the region was opened with; a draw that
   // re-binds the same base at a different format or extent (Astro's post chain
   // recycles a target as B10G11R11 then R16G16B16A16) needs a NEW region, or
-  // the pipeline and the attachment disagree -- the validation layer flags the
+  // the pipeline and the attachment disagree, and the validation layer flags the
   // pairing and the pixels are interpreted in the wrong format.
   bool mrt_sig_changed =
       g_region.cur_area_w != d.rt_w || g_region.cur_area_h != d.rt_h;
@@ -1365,7 +1353,7 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
     if (rp->multi_tex) {
       // The format each binding's view ended up with. A render target the T#
       // does not describe hands over its OWN format, and if that is an integer
-      // one the binding may not be filtered -- the sampler is otherwise built
+      // one the binding may not be filtered; the sampler is otherwise built
       // from the T#, which says nothing about it
       // (VUID-vkCmdDrawIndexed-magFilter-04553).
       VkFormat multi_formats[kMaxTex] = {};
@@ -1503,7 +1491,7 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
   (void)t_bind;
   SetGuestViewport(d);
   vkCmdBindPipeline(g_frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, rp->pipe);
-  // The CONSTANT_* blend factors read these, and they change per draw --
+  // The CONSTANT_* blend factors read these, and they change per draw –
   // keying a pipeline on them would multiply the cache instead.
   vkCmdSetBlendConstants(g_frame.cmd, d.blend_constants);
   // 16 user-data dwords per stage, in its own half of the shared push range:
@@ -1591,8 +1579,8 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
     if (have_cbuf) {
       // Upload as much of the window as the base's page holds, not just the
       // recompiler's planned size (computed above as cache_n). A shader that
-      // indexes its constants dynamically -- a UI batch picking a per-quad
-      // transform out of an array -- reads past the planned size, and the
+      // indexes its constants dynamically (a UI batch picking a per-quad
+      // transform out of an array) reads past the planned size, and the
       // truncated copy left those entries zero: Skyrim's menu drew its sprite
       // atlas at screen size over everything. Clamped to the page so a cbuffer
       // at the end of a mapping cannot fault.
@@ -1607,7 +1595,7 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
     // ring slot the descriptor points at, which is what the SPIR-V loads.
     // DELTA_GPU_DRAWRT_FRAME also gates this: unfiltered, the 40-line cap is
     // spent on startup frames, where a light buffer is legitimately all zero
-    // and reads as the very corruption being looked for.
+    // and reads as the corruption being looked for.
     if (kCbInfo && have_cbuf && n >= 16 &&
         (!kWantFrame || g_frame.num == kWantFrame) &&
         (kCbInfo == 1 || d.vs_addr == (u64)kCbInfo)) {
@@ -1676,8 +1664,8 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
   }
   g_ring.ubo_offset = next;
   // Stage the raw buffers the shader indexes by hand (set 2). Only the leading
-  // window of each is copied -- a MUBUF address is a per-lane index with no
-  // static bound, so there is no "planned size" to copy exactly -- and the
+  // window of each is copied: a MUBUF address is a per-lane index with no
+  // static bound, so there is no "planned size" to copy exactly, and the
   // recompiled shader clamps into that window. Repeats within a frame (the
   // same skinning palette across a character's draws) reuse one upload.
   u32 rawbuf_mask = 0;
@@ -1690,7 +1678,7 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
       const u32 want = std::min(rb.size, kRawBufWindow);
       if (!want || !IsReadableThisFrame(rb.base, want))
         continue;  // unresolved descriptor: the shared zero window at offset 0
-      // Same per-frame cache as the vertex/index/cbuffer rings -- and unlike
+      // Same per-frame cache as the vertex/index/cbuffer rings. Unlike
       // the plain map this replaced, a window whose range a dispatch has
       // rewritten since it was staged (generation moved, or dirty right now)
       // is re-copied instead of served stale.
@@ -1703,8 +1691,8 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
       const VkDeviceSize off = (g_ring.sbo_offset + g_ring.sbo_align - 1) &
                                ~(VkDeviceSize)(g_ring.sbo_align - 1);
       // A resource SMALLER than the window takes only what it needs. Reserving
-      // a whole window for each turned GTA:SA's world -- three buffers a draw,
-      // ~50 KB between them -- into 3 MiB of ring per draw, so the frame ran
+      // a whole window for each turned GTA:SA's world (three buffers a draw,
+      // ~50 KB between them) into 3 MiB of ring per draw, so the frame ran
       // out after ~85 draws of several thousand and the rest was silently
       // dropped. A resource the window TRUNCATES keeps the full reservation:
       // there the shader's clamp really can land past the payload, and the
@@ -1824,7 +1812,7 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
               d.instance_count ? d.instance_count : 1, 0, 0);
   DrawCheckpoint(g_frame.cmd, g_frame.num, g_frame.draws, true);
   // DELTA_GPU_DRAWSEQ=<n>: the first n draws of the run in record order, with
-  // the frame they belong to -- the per-frame filters cannot show that a pass
+  // the frame they belong to, since the per-frame filters cannot show that a pass
   // and the pass that reads it landed in different frames.
   {
     static int seq = 0;
@@ -1844,17 +1832,14 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
     // frame rather than the opening composites.
     // DELTA_GPU_DRAWRT_BUSY=N: only frames that reach N draws, for screens whose
     // frame number moves between runs.
-    // A composite target takes tens of draws per frame and the ones that
-    // decide its final content are the LAST few, so a cap of 8 shows only the
-    // ones that get overwritten.
     // With a frame filter the output is bounded by that frame's draw count, so
-    // the whole graph can be printed; without one, cap it. The end of the graph
-    // is the part that decides what is presented, and a low cap never reaches
-    // it.
-    // Printing the whole graph needs ONE frame, and a frame number is not
-    // reproducible across runs while a draw count is: with DRAWRT=1 and a busy
-    // threshold, latch onto the first frame that reaches it and print all of
-    // that frame, from its first draw.
+    // the whole graph can be printed; without one, cap it. A composite target
+    // takes tens of draws per frame and the ones that decide its final content
+    // are the LAST few, so a low cap never reaches the part that decides what
+    // is presented. Printing the whole graph needs ONE frame, and a frame
+    // number is not reproducible across runs while a draw count is: with
+    // DRAWRT=1 and a busy threshold, latch onto the first frame that reaches it
+    // and print all of that frame, from its first draw.
     static int latched = 0;
     if (all && kBusy && !kWantFrame && !latched && (int)g_frame.draws >= kBusy)
       latched = g_frame.num + 1;  // this one is already half gone
@@ -1914,11 +1899,11 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
                 d.depth_func, d.depth_clear, (int)d.stencil_enable,
                 (int)d.depth_clear_draw, (int)d.stencil_clear_draw,
                 d.render_control, (unsigned long)d.stencil_base);
-      // A single-texture pipeline never fills the multi_* arrays -- it binds
-      // through color_as_tex/depth_as_tex below -- so reading them here would
+      // A single-texture pipeline never fills the multi_* arrays (it binds
+      // through color_as_tex/depth_as_tex below), so reading them here would
       // report every such draw as a MISS that resolved fine.
       // Whether the legacy path's one binding resolved to a real guest
-      // texture or fell back to a 1x1 default -- without this every
+      // texture or fell back to a 1x1 default; without this every
       // single-texture draw reported MISS even when its upload was fine, which
       // is a false lead pointing straight at the texture cache.
       const bool legacy_resolved =
@@ -2161,19 +2146,16 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
         base::FormatTo(line, " cb{} {:#x} sz={}:", c,
                        (unsigned long)cb.base, cb.size);
         // Sixteen, not eight: with the window walk below starting at 0x40,
-        // eight left bytes 32..63 unprintable -- and P.T.'s draw #38 scales its
+        // eight would leave bytes 32..63 unprintable, and P.T.'s draw #38 scales its
         // whole extinction by a scalar at byte 44.
         for (u32 k = 0; k < 16 && k * 4 < cb.size; k++)
           base::FormatTo(line, " {:g}", *reinterpret_cast<const float*>(&w[k]));
         // A shader loads its constants with s_buffer_load at whatever offset
         // the compiler chose, so show EVERY 4x4-sized window the binding is big
-        // enough to hold. Showing only 0x40 and 0x80 printed a plausible matrix
-        // while the value the shader actually multiplies by sat unexamined:
-        // P.T.'s light pass scales every light colour by a scalar at byte 376
-        // of a 464-byte buffer, past the last window this used to print.
-        // Including the final PARTIAL window: P.T.'s light pass decides whether
-        // to alpha-test its cookie on a scalar at byte 200 of a 208-byte
-        // buffer, which every whole-window walk stops just short of.
+        // enough to hold, including the final PARTIAL one. Showing only whole
+        // 0x40/0x80 windows left the scalars a shader actually uses unexamined
+        // (P.T.'s light pass: byte 376 of a 464-byte buffer, byte 200 of a
+        // 208-byte buffer).
         for (u32 off = 0x40u; off + 4 <= cb.size; off += 0x40u) {
           base::FormatTo(line, "\n  @{:#x}:", off);
           for (u32 k = off / 4; k < off / 4 + 16 && k * 4 + 4 <= cb.size;
@@ -2213,7 +2195,7 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
     }
   }
   // Frame debugger: the complete draw, including how every sampler binding
-  // resolved -- which only this function knows. Runs last so a mid-frame
+  // resolved, which only this function knows. Runs last so a mid-frame
   // snapshot (which must close the open region) cannot disturb the accounting
   // above.
   if (trace::Recording()) {

@@ -124,7 +124,7 @@ int PS4ABI sys_thr_get_name(u32 tid, char *buf) {
 
 // A CPU "relax" hint for a spin-wait: no syscall, no context switch. The guest
 // scheduler (e.g. Doom64's KEX parallel-job manager) busy-waits for a worker by
-// calling scePthreadYield in a tight loop -- millions of times per frame. Mapping
+// calling scePthreadYield in a tight loop, millions of times per frame. Mapping
 // that to the host sched_yield forced a context-switch each call; with ~35 guest
 // threads runnable the host scheduler kept parking the waiter, so the worker's
 // result was only seen after tens of microseconds of scheduling latency PER spin,
@@ -158,7 +158,7 @@ static void yieldCallerScout() {
 int PS4ABI sys_sched_yield() {
   if (kYieldCaller)
     yieldCallerScout();
-  // Default: a `pause` hint (see cpuRelax above) — correct + fast when guest
+  // Default: a `pause` hint (see cpuRelax above), correct + fast when guest
   // workers each own a host core. But FOX/FIOS2 asset streaming spins one thread
   // on sched_yield (~40% of all syscalls) while a sibling must run to advance the
   // stream; with more runnable guest threads than host cores a pure pause never

@@ -5,7 +5,7 @@
 
 // The Vulkan device the renderer owns: instance, adapter, queue, command pool,
 // and the driver limits and features every other unit reads. There is no
-// surface -- guest frames render offscreen and are read back (see vk_frame).
+// surface, since guest frames render offscreen and are read back (see vk_frame).
 
 #include <vulkan/vulkan.h>
 #include "base/arch.h"
@@ -119,7 +119,7 @@ bool QueueCheckArmed();
 
 // Persist the driver's pipeline cache. Called after a pipeline is created
 // rather than at exit: the runner SIGKILLs the emulator, so an atexit hook
-// would never fire on the runs that matter. Cheap and self-throttling -- it
+// would never fire on the runs that matter. Cheap and self-throttling: it
 // only writes when new pipelines have appeared since the last write.
 void SavePipelineCache(bool force = false);
 

@@ -99,7 +99,7 @@ void SavePipelineCache(bool force) {
     return;
   // A level's worth of pipelines is built in one burst, and every one of them
   // would otherwise re-serialize and rewrite the WHOLE blob on the submit
-  // thread -- turning the save into a second source of the hitch it exists to
+  // thread, turning the save into a second source of the hitch it exists to
   // remove. One write a second keeps the burst cheap; what it drops is rebuilt
   // and saved on the next run.
   const u64 now = NowNs();
@@ -162,7 +162,7 @@ VkPipelineStageFlags StageForAccess(VkAccessFlags access, bool source) {
 }  // namespace
 
 // Ask the driver what the GPU actually faulted on (VK_EXT_device_fault).
-// Prints once per device -- every later DEVICE_LOST is collateral of the first.
+// Prints once per device; every later DEVICE_LOST is collateral of the first.
 void ReportDeviceFault(DeviceState& device) {
   if (device.device_fault_reported)
     return;
@@ -237,7 +237,7 @@ u32 FindMemoryType(u32 type_bits, VkMemoryPropertyFlags props) {
 
 // Pick a memory type matching `pref` if any exists, else fall back to `req`.
 // Used for the readback buffer: the CPU READS it every frame (the scanout
-// flip), so it must be HOST_CACHED -- reading from the default HOST_COHERENT
+// flip), so it must be HOST_CACHED: reading from the default HOST_COHERENT
 // (write-combined, uncached) staging memory byte-by-byte is ~30x slower and was
 // dominating frame time. CACHED+COHERENT (present on desktop GPUs) needs no
 // manual invalidate.
@@ -344,7 +344,7 @@ bool CreateDevice() {
   VkInstanceCreateInfo ic{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
   ic.pApplicationInfo = &app;
   // Object names + command labels for capture tools (vk_debug). Gated on a
-  // consumer actually listening -- the loader always advertises the extension,
+  // consumer actually listening. The loader always advertises the extension,
   // but formatting labels for nobody costs real frame time.
   bool debug_utils = false;
   if (WantDebugUtils() || trace::WantValidation()) {
@@ -363,7 +363,7 @@ bool CreateDevice() {
   }
   // DELTA_GPU_VALIDATE=1: the Khronos validation layers, with their messages
   // routed into the frame capture next to the draw that provoked them. Off by
-  // default -- the layers cost real frame time and the loader only finds them
+  // default, since the layers cost real frame time and the loader only finds them
   // when the layer path is on the environment.
   const char* validation_layer = trace::ValidationLayerName();
   if (trace::WantValidation()) {
@@ -499,7 +499,7 @@ bool CreateDevice() {
   dc.queueCreateInfoCount = 1;
   dc.pQueueCreateInfos = &qc;
   // VK_EXT_device_fault: on DEVICE_LOST, vkGetDeviceFaultInfoEXT reports what
-  // the GPU actually faulted on (page fault address etc.) — keep it enabled,
+  // the GPU actually faulted on (page fault address etc.). Keep it enabled,
   // it costs nothing until a fault is queried.
   // VK_EXT_external_memory_host lets a buffer be backed by guest pages DIRECTLY,
   // so a compute dispatch reading guest memory needs no staging copy in and no
@@ -606,8 +606,8 @@ bool CreateDevice() {
     want_feat.samplerAnisotropy = VK_TRUE;
   if (avail2.features.geometryShader)
     want_feat.geometryShader = VK_TRUE;
-  // Without independentBlend, "all elements of pAttachments must be identical"
-  // -- so a G-buffer pass that blends its targets differently (SotC disables
+  // Without independentBlend, "all elements of pAttachments must be identical",
+  // so a G-buffer pass that blends its targets differently (SotC disables
   // blending on its integer planes and accumulates additively on the others)
   // gets undefined behaviour across EVERY attachment, not just the odd one out.
   if (avail2.features.independentBlend)
@@ -615,7 +615,7 @@ bool CreateDevice() {
   // Guest blend state names dual-source factors (Astro's intro card uses
   // SRC1_COLOR); a pipeline that carries one without this feature is invalid.
   // The shader model's Index-1 output is still not translated, so the second
-  // source's values are whatever the implementation hands out -- valid, not
+  // source's values are whatever the implementation hands out, valid, not
   // exact.
   want_feat.dualSrcBlend = avail2.features.dualSrcBlend;
   if (avail2.features.shaderStorageImageWriteWithoutFormat)
@@ -726,7 +726,7 @@ bool Init(Renderer& renderer) {
   // Create the device from a clean host thread: Init() is reached on a FEX
   // guest thread (guest stack / TLS), where the NVIDIA ICD's
   // vk_icdGetInstanceProcAddr silently fails and enumeration falls back to
-  // llvmpipe -- a ~30ms/frame software rasteriser on a box with a real GPU.
+  // llvmpipe, a ~30ms/frame software rasteriser on a box with a real GPU.
   // llvmpipe never cared, so this is behaviour-neutral for pure-software runs.
   bool ok = false;
   std::thread init_thread([&ok] { ok = CreateDevice(); });

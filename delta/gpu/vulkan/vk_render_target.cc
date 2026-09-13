@@ -42,13 +42,13 @@ DELTA_OPTION(int, kGpuFilltrace, "DELTA_GPU_FILLTRACE", 0);
 DELTA_OPTION(bool, kRegTrace, "DELTA_GPU_REGTRACE", false);
 // DELTA_GPU_RESOLVETRACE=1: report a sampled address that more than one live
 // render target can answer for. The winner is scored by freshness, and two
-// targets rendered in the same frame TIE -- broken by page-table insertion
+// targets rendered in the same frame TIE, broken by page-table insertion
 // order, i.e. by the guest addresses of the run. That is a per-run coin flip
 // deciding which image a pass reads.
 DELTA_OPTION(bool, kResolveTrace, "DELTA_GPU_RESOLVETRACE", false);
 // DELTA_GPU_NOVARIANT=1: never swap in a parked geometry variant. One base
 // rendered at two geometries owns two images, and which one answers to the
-// address depends on draw order -- so an artefact that alternates frame to
+// address depends on draw order, so an artefact that alternates frame to
 // frame has to be tested against variant switching before anything else.
 DELTA_OPTION(bool, kNoVariant, "DELTA_GPU_NOVARIANT", false);
 DELTA_OPTION(u64, kDepthResolveTrace, "DELTA_GPU_DEPTHRESOLVE", 0);
@@ -76,8 +76,8 @@ VkImageView SampledImageView(VkImage image,
     return it->second;
   VkImageViewCreateInfo vi{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
   // A view inherits the image's usage unless told otherwise, and an SRGB view
-  // of a storage-capable image is then invalid -- SRGB cannot be a storage
-  // format (VUID-VkImageViewCreateInfo-usage-02275). These views are only ever
+  // of a storage-capable image is then invalid, because SRGB cannot be a
+  // storage format (VUID-VkImageViewCreateInfo-usage-02275). These views are only ever
   // sampled, so say so.
   VkImageViewUsageCreateInfo vu{VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO};
   vu.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
@@ -181,16 +181,14 @@ void RegisterRtPages(u64 base, u32 w, u32 h, VkFormat fmt) {
 // of GetRT because an address the guest renders to at two geometries needs a
 // second image (see ActivateRtVariant).
 // A freshly created VkImage's contents are UNDEFINED. That is invisible for a
-// target whose first use is a clear or a full-screen draw, but it is not
-// invisible for one a pass READS before it writes: P.T.'s light buffer is
-// consumed by a feedback pass (ps=0x80b54b4000) that un-premultiplies it,
-// out.rgb = rgb / (1 - alpha), which can only ever INCREASE a texel. Fed
-// undefined memory on its first frame, whatever garbage the allocation happened
-// to hold is amplified every frame until it saturates fp16, and because that
-// pass never decreases a pixel it can never recover -- the frame ends up with a
-// few dozen texels pinned at 65504 for the rest of the run, which then bloom
-// into blown-white blobs. Guest memory a title renders into holds defined
-// values; an undefined image is our artefact, so define it.
+// target whose first use is a clear or a full-screen draw, but not for one a
+// pass READS before it writes: P.T.'s light buffer is consumed by a feedback
+// pass (ps=0x80b54b4000) that un-premultiplies it, out.rgb = rgb / (1 - alpha),
+// which can only ever INCREASE a texel. Fed undefined memory on its first
+// frame, whatever garbage the allocation held is amplified every frame until it
+// saturates fp16 and can never recover; the frame ends up with texels pinned at
+// 65504 that then bloom into blown-white blobs. Guest memory a title renders
+// into holds defined values; an undefined image is our artefact, so define it.
 void ClearNewRt(RTarget& t) {
   VkCommandBufferAllocateInfo ca{
       VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
@@ -279,7 +277,7 @@ bool CreateRtImage(RTarget& t,
   if (fmt != VK_FORMAT_R8G8B8A8_SRGB && fmt != VK_FORMAT_B8G8R8A8_SRGB)
     ii.usage |= VK_IMAGE_USAGE_STORAGE_BIT;
   // The colour format a pass RENDERS with and the format a later shader SAMPLES
-  // the same memory with are independent on PS4 -- a G-buffer plane written as
+  // the same memory with are independent on PS4: a G-buffer plane written as
   // UINT is read back through a T# that may name a different numeric type, and
   // Vulkan requires the view's numeric type to match the shader's sampled type.
   // Mutable format lets SampledViewAs() hand out a view in the format the
@@ -338,9 +336,9 @@ std::unordered_map<u64, std::vector<RTarget>> g_rt_variants;
 // Budgeted by MEMORY, not by count. A flat cap of three is generous for an
 // address aliased at 1920x1080 and hopeless for one aliased at 48x48, and
 // Gameface renders every glyph into the same scratch address at the glyph's own
-// size -- a dozen geometries and counting. 32 MiB still leaves the big case at
+// size, a dozen geometries and counting. 32 MiB still leaves the big case at
 // three images; the count is only a backstop against an address that cycles
-// forever, so it has to sit well above any real font -- GTA:SA's four glyph
+// forever, so it has to sit well above any real font (GTA:SA's four glyph
 // targets each want more than 32 geometries and together they come to 201 KiB.
 constexpr u64 kMaxRtVariantBytes = 32ull << 20;
 constexpr size_t kMaxRtVariants = 256;
@@ -422,14 +420,13 @@ RTarget* ActivateRtVariant(RTarget& live,
 
 // The extent an attachment's IMAGE needs, given the target's own surface
 // geometry (CB_COLORn_PITCH/SLICE) and the region this pass draws into.
-//
 // The drawn region normally IS the target, padded: a 1920x1080 surface reports
 // 1920x1088 because the slice is tile-aligned, and sizing the image from that
 // would make every scanout eight rows taller than the display. So the surface
 // only wins when the drawn region cannot be it even after rounding up a full
-// tile -- which is the case the screen scissor gets wrong, GTA:SA binding its
-// 1792x960 G-buffer under a 256x256 scissor and losing 164 draws a frame into a
-// 256x256 image.
+// tile, which is the case the screen scissor gets wrong (GTA:SA binding its
+// 1792x960 G-buffer under a 256x256 scissor, losing 164 draws a frame into a
+// 256x256 image).
 u32 RtSurfaceExtent(u32 surface, u32 drawn, u32 tile) {
   const u32 padded = (drawn + tile - 1) & ~(tile - 1);
   return (surface > padded && surface <= 8192) ? surface : drawn;
@@ -449,13 +446,13 @@ RTarget* GetRT(u64 base, u32 w, u32 h, VkFormat fmt) {
   // it resolves by overlap to whatever else happens to cover the address.
   // GTA:SA's world hit 64 during its level load, lost the shadow buffer at
   // 0x202b800000, and its lighting then sampled a shadow atlas that merely
-  // overlapped -- which is what made the scene black. Kept as a backstop
+  // overlapped, which is what made the scene black. Kept as a backstop
   // against a title that cycles addresses forever, not as a budget.
   if (g_rts.size() >= kMaxRenderTargets) {
     static int n = 0;
     if (n++ < 4)
       BASE_LOGI("gpuvk",
-                "RT table full ({}) -- dropping {:#x} {}x{} fmt={} and every "
+                "RT table full ({}), dropping {:#x} {}x{} fmt={} and every "
                 "draw that targets it",
                 (u32)kMaxRenderTargets, (unsigned long)base, w, h, (int)fmt);
     return nullptr;
@@ -560,12 +557,12 @@ u64 RtByteSize(const RTarget& rt) {
 }
 // Find or create the depth target at guest address `base` (dimensions w x h).
 // The images of a depth base the guest renders to at more than one geometry,
-// minus the one live in g_depths -- the same arrangement the colour targets
+// minus the one live in g_depths, the same arrangement the colour targets
 // use (see g_rt_variants). Without it, the first geometry to touch a base
 // fixed it forever and every later pass at another size rendered into a corner
 // of that image: P.T.'s 1920x1080 depth buffer had a 960x540 clear in its
 // top-left quadrant and nothing anywhere else, so every pass that sampled the
-// depth -- SSAO first, then the whole post chain -- read zero.
+// depth (SSAO first, then the whole post chain) read zero.
 std::unordered_map<u64, std::vector<DepthTarget>> g_depth_variants;
 constexpr size_t kMaxDepthVariants = 3;
 
@@ -647,16 +644,14 @@ DepthTarget* ActivateDepthVariant(DepthTarget& live,
                                   u32 h,
                                   u64 stencil_base) {
   // A depth attachment must COVER the render area: Vulkan lets it be larger,
-  // never smaller (VUID-VkRenderingInfo-pNext-06079/06080). Every fallback
-  // below used to hand the live target back whatever its geometry, and
-  // BeginRegion then bound it -- which is how P.T. began a 512x512 region with
-  // a 64x64 depth view and LOST THE DEVICE. Its environment-probe bake requests
-  // one depth base at five geometries (960x540, 512x512, 256x256, 128x128,
-  // 64x64), so the three-variant cap is reached and the cap path fires. The
-  // guest walks away with the device gone: no EndFrame, no present, black
-  // window, while its own threads keep running. Declining the draw (nullptr ->
-  // BeginRegion false) is the only safe fallback -- a dropped draw costs one
-  // pass, a lost device costs the run.
+  // never smaller (VUID-VkRenderingInfo-pNext-06079/06080). Handing the live
+  // target back whatever its geometry is how P.T. began a 512x512 region with a
+  // 64x64 depth view and LOST THE DEVICE (its environment-probe bake requests
+  // one depth base at five geometries, so the three-variant cap is reached and
+  // the cap path fires; the guest walks away with the device gone: no EndFrame,
+  // no present, black window). Declining the draw (nullptr -> BeginRegion
+  // false) is the only safe fallback: a dropped draw costs one pass, a lost
+  // device costs the run.
   const auto covers = [&](DepthTarget* t) -> DepthTarget* {
     return (t && t->w >= w && t->h >= h) ? t : nullptr;
   };
@@ -691,7 +686,7 @@ DepthTarget* ActivateDepthVariant(DepthTarget& live,
 
 // The depth counterpart of ActivateSampledRtVariant: a sample names a depth
 // target by address, and the live geometry at that address is whichever pass
-// ran last -- routinely the small half-resolution one. P.T.'s SSAO samples the
+// ran last, routinely the small half-resolution one. P.T.'s SSAO samples the
 // full-resolution scene depth and was handed the 960x540 variant instead.
 bool ActivateSampledDepthVariant(u64 base, u32 w, u32 h) {
   if (!base || !w || !h)
@@ -738,17 +733,16 @@ DepthTarget* GetDepthRT(u64 base,
 // resource model's "the page table collects all overlappers" lookup). The game
 // cycles/aliases RT addresses (double-buffered room layers, a pool of scene
 // buffers), so a composite often samples an address that does not exactly match
-// the RT base it was rendered into. We gather every RT whose footprint touches
-// the sampled region's pages and resolve by IDENTITY, not recency: an exact
-// base whose size matches wins outright (the guest bound that buffer, so a more
+// the RT base it was rendered into. Gather every RT whose footprint touches the
+// sampled region's pages and resolve by IDENTITY, not recency: an exact base
+// whose size matches wins outright (the guest bound that buffer, so a more
 // recently rendered overlapping buffer must never override it); only when no
-// exact match exists do we fall back to the best-fitting overlapper (dimension
-// match, then the freshest). Returns the g_rts key, or 0.
-// Only the RT-bind path used to activate a variant, so a base whose live
-// target was some other geometry stayed that way for samples. P.T. renders its
-// fullscreen composite and a 64x64 pass to the same address; when the small one
-// was live, the present blit sampled it, found `ever_rendered` false, and
-// resolved to nothing -- a black screen with the whole scene one variant away.
+// exact match exists fall back to the best-fitting overlapper (dimension match,
+// then the freshest). Returns the g_rts key, or 0.
+// This path also activates a variant, because only the RT-bind path used to:
+// P.T. renders its fullscreen composite and a 64x64 pass to the same address,
+// and when the small one was live the present blit resolved to nothing, a black
+// screen with the whole scene one variant away.
 bool ActivateSampledRtVariant(u64 base, u32 w, u32 h) {
   if (!base || !w || !h)
     return false;
@@ -778,7 +772,7 @@ u64 ResolveSampledRT(u64 addr, u32 w, u32 h) {
   u64 req_size = w && h ? (u64)w * h * 4 : 4;
   u64 a0 = addr, a1 = addr + req_size;
   // Exact-identity hit: the guest sampled this exact base and it is a live RT
-  // of the requested size. That is unambiguously the right image -- return it
+  // of the requested size. That is unambiguously the right image, so return it
   // before any freshness comparison can pick an overlapping cycled buffer
   // instead.
   auto ex = g_rts.find(addr);
@@ -804,7 +798,7 @@ u64 ResolveSampledRT(u64 addr, u32 w, u32 h) {
     // sampled, or if it at least CONTAINS the sampled footprint. Bare interval
     // overlap is not enough: P.T. samples a 2048x1024 compute-written surface
     // whose 8 MB footprint runs across a pool of 480x270 targets, and seven of
-    // them tied on freshness -- so an arbitrary half-megabyte target answered
+    // them tied on freshness, so an arbitrary half-megabyte target answered
     // for it, and which one depended on the guest addresses of that run. A
     // surface that is not a render target belongs to the texture cache.
     if (!dim_match && !(b0 <= a0 && b1 >= a1))
@@ -834,7 +828,7 @@ u64 ResolveSampledRT(u64 addr, u32 w, u32 h) {
     static std::atomic<u64> n{0};
     if (n.fetch_add(1) < 40)
       BASE_LOGI("resolve",
-                "AMBIGUOUS {:#x} {}x{}: {} candidates, {} tied at score {} -- "
+                "AMBIGUOUS {:#x} {}x{}: {} candidates, {} tied at score {}; "
                 "chose {:#x} over {:#x}",
                 (unsigned long)addr, w, h, candidates, ties, best_score,
                 (unsigned long)best, (unsigned long)tie_with);
@@ -886,7 +880,7 @@ u64 ResolveSampledDepth(u64 addr, u32 w, u32 h) {
     // sample names the address, not the geometry. Score against every variant:
     // otherwise a base whose small variant happens to be live stops covering
     // an address its full-resolution one does, and the sample falls through to
-    // guest memory -- which for a depth buffer is empty.
+    // guest memory, which for a depth buffer is empty.
     u64 span = depth.guest_w && depth.guest_h
                         ? (u64)depth.guest_w * depth.guest_h * 4
                         : RtByteSizeWH(depth.w, depth.h, kDepthFormat);
@@ -915,8 +909,8 @@ u64 ResolveSampledDepth(u64 addr, u32 w, u32 h) {
   }
   // DELTA_GPU_DEPTHRESOLVE=<addr>: why a sampled address did or did not land on
   // a depth target. An address INSIDE a depth allocation that misses resolves
-  // to a guest upload of undefined bytes, which reads as depth 0 -- i.e. the
-  // far plane -- and nothing downstream looks wrong.
+  // to a guest upload of undefined bytes, which reads as depth 0, i.e. the
+  // far plane, and nothing downstream looks wrong.
   if (kDepthResolveTrace && addr == (u64)kDepthResolveTrace) {
     static int n = 0;
     if (n++ < 6) {
@@ -1122,12 +1116,11 @@ void SetGuestViewport(const DrawInfo& d) {
   // which is exactly Vulkan's minDepth + ndc_z * (maxDepth - minDepth). Both
   // ends must land in [0,1]; a descriptor that does not is left at the full
   // range rather than clamped into a different transform.
-  // NOTE: PA_CL_VPORT_ZSCALE/ZOFFSET are deliberately NOT applied here. Doing
-  // so collapses P.T.'s depth range -- every fragment lands on one value and
-  // the scene stops rendering -- so whatever this title puts in those
-  // registers is not the plain window_z = ndc_z * scale + offset this would
-  // assume. Kept as a note rather than a knob: the registers are read into
-  // DrawInfo, and the next person to try this needs to explain that first.
+  // PA_CL_VPORT_ZSCALE/ZOFFSET are deliberately NOT applied here: doing so
+  // collapses P.T.'s depth range (every fragment lands on one value, the scene
+  // stops rendering), so whatever this title puts in those registers is not the
+  // plain window_z transform. The registers are read into DrawInfo, and the
+  // next person to try this needs to explain that first.
   const float min_depth = 0.0f, max_depth = 1.0f;
   VkViewport vp{
       d.viewport_x_offset - d.viewport_x_scale,
@@ -1200,15 +1193,15 @@ bool BeginRegion(const u64* mrt_base,
     g_region.cur_w[i] = iw;
     g_region.cur_h[i] = ih;
   }
-  // Depth gets the same surface-vs-drawn sizing as colour. A pass whose
-  // screen scissor is smaller than the surface it binds (GTA:SA opens a
-  // 256x256 scissor over a 1792x960 Z buffer) otherwise builds a 256x256 depth
-  // image, and everything that reads scene depth afterwards -- the deferred
-  // lights' world-position reconstruction, and every compute post pass, which
-  // then falls back to the zeroed guest bytes -- reads a corner of the frame
-  // and garbage elsewhere. RtSurfaceExtent only ever grows the image to the
-  // surface, so a genuinely half-resolution Z bound to a full-resolution pass
-  // still keeps the drawn extent.
+  // Depth gets the same surface-vs-drawn sizing as colour. A pass whose screen
+  // scissor is smaller than the surface it binds (GTA:SA opens a 256x256
+  // scissor over a 1792x960 Z buffer) otherwise builds a 256x256 depth image,
+  // and everything that reads scene depth afterwards (the deferred lights'
+  // world-position reconstruction, and every compute post pass, which falls
+  // back to the zeroed guest bytes) reads a corner of the frame and garbage
+  // elsewhere. RtSurfaceExtent only ever grows the image to the surface, so a
+  // genuinely half-resolution Z bound to a full-resolution pass keeps the drawn
+  // extent.
   const u32 dw = RtSurfaceExtent(depth_w, w, 256);
   const u32 dh = RtSurfaceExtent(depth_h, h, 64);
   DepthTarget* dt =
@@ -1231,14 +1224,13 @@ bool BeginRegion(const u64* mrt_base,
     color.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     // Lazy clear (DELTA_GPU_LAZYCLEAR, default on): persist RT content across
     // frames (LOAD), clearing only when the game explicitly requested a clear
-    // (clear_pending) or the RT was never rendered. The old per-frame
-    // auto-clear wiped baked-once content (room floor) whose redraw lands on a
-    // different frame than its clear.
+    // (clear_pending) or the RT was never rendered. Per-frame auto-clear wiped
+    // baked-once content (room floor) whose redraw lands on a different frame
+    // than its clear.
     // DELTA_GPU_FRAMECLEAR=<base>: force this target to load CLEAR on the FIRST
     // region of each frame (not every region, which would wipe a pass before a
     // later one in the same frame reads it). Setting clear_pending from EndFrame
-    // does NOT work -- it never reaches this gate -- so the earlier probe that
-    // did so tested nothing.
+    // does not work, it never reaches this gate.
     if (kFrameClearRt && mrt_base[i] == (u64)kFrameClearRt) {
       static int cleared_frame = -1;
       if (cleared_frame != g_frame.num) {
@@ -1303,7 +1295,7 @@ bool BeginRegion(const u64* mrt_base,
     // The IMAGE has to cover the render area, but the guest FOOTPRINT is the
     // Z surface's own padded geometry. Keeping them apart is what stops a
     // half-resolution depth buffer bound to a full-resolution pass from
-    // claiming several megabytes it does not own -- and swallowing a
+    // claiming several megabytes it does not own, and swallowing a
     // neighbouring surface in the sampled-address lookup.
     dt->guest_w = depth_w;
     dt->guest_h = depth_h;
@@ -1312,7 +1304,7 @@ bool BeginRegion(const u64* mrt_base,
     static int n = 0;
     if (n++ < 8)
       BASE_LOGI("region",
-                "depth {:#x} REQUESTED BUT NOT BOUND -- every depth write in "
+                "depth {:#x} REQUESTED BUT NOT BOUND; every depth write in "
                 "this region is dropped",
                 (unsigned long)depth_base);
   }

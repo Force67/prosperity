@@ -48,7 +48,7 @@ struct NpManager : Service {
 
 // sceNpCheckCallback pumps this once per frame (method 0x70004, five output
 // buffers). With no account there is never an event to deliver, and an empty
-// reply is exactly "nothing pending" -- the buffers must still be written,
+// reply is exactly "nothing pending", but the buffers must still be written,
 // though, or the caller reads whatever was on its stack.
 struct NpWeb : Service {
   const char *name() const override { return "SceNpService"; }

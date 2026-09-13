@@ -127,7 +127,7 @@ static int PS4ABI ps5_dynlib_get_obj_member(u32 handle, u8 index,
 // kern.proc.35 is sceKernelGetAppInfo. PS5 libkernel asks for 0x58 bytes, 16
 // more than the PS4 struct the shared handler zeroes, so the tail stays caller
 // stack garbage. libSceAgcDriver and libSceGnmDriver read the app mode from
-// +0x48 -- the first byte past the PS4 struct -- and anything above 2 leaves
+// +0x48 (the first byte past the PS4 struct), and anything above 2 leaves
 // the GPU trap handler unregistered ("Failed to get trap hanlder code", and on
 // older firmware "No trap hanlder for mode 224"). Zero what the caller asked
 // for; the PS4 path keeps the shorter fill.

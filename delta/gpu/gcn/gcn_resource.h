@@ -86,8 +86,8 @@ VBuffer DecodeVBuffer(const u32* dwords);
 TImage DecodeTImage(const u32* dwords);
 
 // Sampler-binding plan for a pixel shader: MIMG instructions that reference
-// the same descriptor (same T#/S# SGPRs, written by the same s_load -- or
-// inline user data -- and used with the same access type) share one binding.
+// the same descriptor (same T#/S# SGPRs, written by the same s_load or
+// inline user data, and used with the same access type) share one binding.
 // Bindings are numbered in first-appearance order. This is the contract
 // between the recompiler's set-0 sampler declarations and TrackTextures'
 // per-binding result: both derive from this one plan so they cannot drift.
@@ -121,7 +121,7 @@ std::vector<TImage> TrackTextures(
 // Resolve the live descriptor behind each constant buffer a graphics stage
 // reads, following the same extended-user-data / SRT pointer chains as
 // TrackTextures: the 4-dword V# of an s_buffer_load, or the 2-dword flat
-// pointer of an s_load (only .base is filled -- an s_load table carries no
+// pointer of an s_load (only .base is filled, since an s_load table carries no
 // size, so the shader's own num_dwords bounds it). Returns a map keyed by the
 // cbuffer's base SGPR, or'd with 0x100 for a pointer, since the same SGPR can
 // serve as both. FOX passes cbuffer descriptors through EUD, so reading the V#

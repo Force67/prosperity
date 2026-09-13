@@ -72,7 +72,7 @@ u64 flipCount() { return g_flipCount.load(); }
 // A low-bit TSC nonce for the display event's bits 0..11, so a polling title
 // sees each event as new. On the native x86 backend that's the real rdtsc; the
 // aarch64/FEX host has no rdtsc intrinsic, so fall back to a monotonic wall
-// clock -- only the low 12 bits are used. Mirrors dce_dev.cpp::guestTsc.
+// clock; only the low 12 bits are used. Mirrors dce_dev.cpp::guestTsc.
 static u64 tscNonce() {
 #if defined(DELTA_BACKEND_NATIVE)
   return __builtin_ia32_rdtsc();
@@ -170,10 +170,8 @@ static void startVblankPump() {
 // A GPU end-of-pipe interrupt. RELEASE_MEM/EVENT_WRITE_EOP carry an INT_SEL
 // field asking the CP to raise one once the label write lands, and
 // libSceGnmDriver turns that interrupt into an event on whatever equeue
-// sceGnmAddEqEvent registered -- filter -14, under the small ident the caller
-// chose (GTA:SA asks for 0x5 and 0x40). We used to write the label and drop the
-// interrupt, so a title driving its fences off the event never saw one.
-//
+// sceGnmAddEqEvent registered (filter -14, under the small ident the caller
+// chose, e.g. GTA:SA's 0x5 and 0x40).
 // Deliberately NOT the 60 Hz pump's business: that tick exists for the videoout
 // vblank waiters that share this filter, and firing a Gnm event on it says "the
 // GPU finished" at moments when it did not. Small idents are the Gnm
@@ -369,7 +367,7 @@ int equeue::kevent(const kevent_t *changes, int nchanges, kevent_t *out,
   };
 
   // An untimed wait on a queue with no knotes can never return: nothing has a
-  // source that could set one active. Report it once per queue -- it is always a
+  // source that could set one active. Report it once per queue, since it is always a
   // missing registration on our side, and the symptom (a wedged render thread)
   // otherwise looks like the title hanging on its own.
   if (!to && notes.empty() && !warnedEmptyWait) {
@@ -538,7 +536,7 @@ int PS4ABI sys_kevent(int kq, const kevent_t *changelist, int nchanges,
     BASE_LOGI("kevent", "bad kq fd={}", kq);
     return -SysError::eBADF;
   }
-  // A thread blocked here is waiting for an event that may never be posted --
+  // A thread blocked here is waiting for an event that may never be posted –
   // the same "wedged title" question the umtx/semaphore probes answer, and it
   // was the one wait they could not see.
   WaitProbe _wp("kevent", (long)kq, (long)nevents);

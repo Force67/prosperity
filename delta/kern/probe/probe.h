@@ -10,7 +10,7 @@
 // entirely by DELTA_* options and does nothing when they are unset, which is
 // every normal run. It lives behind these four calls so that the process model
 // in kern/proc.cpp reads as the decisions it makes rather than as the probes
-// that were needed to find them -- the same treatment gpu/cmd_trace gets.
+// that were needed to find them, the same treatment gpu/cmd_trace gets.
 //
 // Everything here may read and write guest memory, plant int3, and depend on
 // offsets in one specific build of one specific game. Nothing in kern may

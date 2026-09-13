@@ -52,7 +52,7 @@ void maybePrependCtor(proc &p) {
     return;
   }
   // A ctor is called with no arguments, so rdi holds whatever the previous one
-  // left. Park a shim that zeroes it first -- the init entry points we want to
+  // left. Park a shim that zeroes it first, since the init entry points we want to
   // probe are typically `f(0)`.
   u8 *shim = krnl::allocLowGuest(0x40);
   if (!shim)

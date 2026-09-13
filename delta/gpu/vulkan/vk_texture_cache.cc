@@ -203,7 +203,7 @@ struct TexImageEntry {
   // False while `hash` predates the image's current contents. A refresh already
   // reads the whole surface to upload it; hashing it again in the same breath
   // is a second cold pass over tens of megabytes, and the value is only ever
-  // needed by the next full sweep -- which recomputes it anyway.
+  // needed by the next full sweep, which recomputes it anyway.
   bool hash_valid = true;
   // Revision of the compute range the image was last copied from
   // (CsSupplyTexture); 0 when it holds guest memory.
@@ -647,7 +647,7 @@ VkSampler SamplerFor(const SamplerKey& key) {
   // DELTA_GPU_DEFSAMPLER: ignore every guest S# and use the default sampler,
   // to tell a mis-decoded sampler apart from a mis-bound image.
   // The default sampler is LINEAR, and an integer-format view may not be
-  // filtered at all -- so every exit that hands out a default has to hand out
+  // filtered at all, so every exit that hands out a default has to hand out
   // the NEAREST one for those. An unresolved S# over an integer view taking the
   // LINEAR default was the overwhelming majority of GTA:SA's magFilter-04553,
   // 200k messages in a 200 s run.
@@ -824,7 +824,7 @@ void PackTexPixels(u8* linear,
   // named texture to <dumpdir>/tex_<addr>.bin, whatever its size or format.
   // The size-capped text dump below cannot reach a 2048x2048 compressed
   // atlas, and a light cookie's decoded ALPHA is what shapes P.T.'s light
-  // pools -- there is no way to tell a ragged cookie from a ragged decode of
+  // pools. There is no way to tell a ragged cookie from a ragged decode of
   // a smooth one without looking at the texels.
   // Dump the LAST upload seen, not the first: a once-only guard reports the
   // state at first sample, which for a surface the title fills later is zero
@@ -1449,7 +1449,7 @@ VkDescriptorSet GetTexture(u64 base,
       e.last_checked_frame = g_frame.num;
       // Cheap windowed check every frame, whole-content sweep on the backoff.
       // The sweep alone would let a guest CPU write sit unnoticed for as long
-      // as the interval (nothing calls InvalidateTexRange for those -- only
+      // as the interval (nothing calls InvalidateTexRange for those, only
       // compute writeback does), and the windows alone can miss a small one.
       const u64 sample = TexSampleHash(base, footprint);
       g_tex_hash_bytes += std::min<u64>(footprint, 16384);
@@ -1459,7 +1459,7 @@ VkDescriptorSet GetTexture(u64 base,
         const u64 hsh = TexHash(base, footprint);
         g_tex_hash_bytes += footprint;
         // With no reference hash the sweep has nothing to compare against, and
-        // the windowed check has already said the surface is holding still --
+        // the windowed check has already said the surface is holding still –
         // so adopt this value as the reference rather than forcing a refresh.
         changed = e.hash_valid && hsh != e.hash;
         e.hash = hsh;
@@ -1624,7 +1624,7 @@ bool GuestTextureUploadSupported(u32 dfmt, u32 nfmt) {
 
 VkImageView TexViewFor(const DrawInfo::DrawTex& t) {
   // Each exit here leaves the binding on the white fallback, so each one needs
-  // to be able to say so (DELTA_GPU_TEXFAIL) -- an unsupported format and an
+  // to be able to say so (DELTA_GPU_TEXFAIL): an unsupported format and an
   // unmapped surface look identical from the draw side.
   const auto fail = [&](const char* why) {
     if (kTexFail) {
@@ -1673,7 +1673,7 @@ struct MultiTexSet {
 struct MultiTexKey {
   u32 num_texs = 0;
   // What the MODULE declared each binding as, which decides the default a
-  // binding takes when nothing resolves -- and is not a function of the
+  // binding takes when nothing resolves, and is not a function of the
   // textures. Two shaders sampling the same list share a set otherwise, so one
   // declaring binding 3 as an integer sampler was handed the UNORM default the
   // other's set was built with (VUID-vkCmdDrawIndexed-format-07753).
@@ -1724,7 +1724,7 @@ void ReleaseRetiredTextures() {
   // Two-stage aging for the pipelined frame: an object retired while frame N
   // recorded may still be referenced by BOTH in-flight command buffers (N-1
   // until N's EndFrame, N until N+1's EndFrame). Objects therefore rest one
-  // extra BeginFrame in the `aged` generation before being destroyed -- by
+  // extra BeginFrame in the `aged` generation before being destroyed, by
   // then every command buffer that could reference them has been fence-waited.
   static std::vector<MultiTexSet> aged_mtex;
   static std::vector<TexEntry> aged_tex_sets;
@@ -1765,7 +1765,7 @@ VkDescriptorSet GetMultiTexSet(const DrawInfo& d,
   g_tex_set_n++;
   // What the draw resolved, and what the layout declares. A shader may declare
   // more samplers than the draw tracked textures for, and a binding left
-  // unwritten is read as an undefined descriptor -- validation names it
+  // unwritten is read as an undefined descriptor. Validation names it
   // (VUID-vkCmdDrawIndexed-None-08114) and a driver may fault on it. Cover
   // every declared binding; the ones past what resolved take the default.
   const u32 resolved = std::min(d.num_texs, kMaxTex);
@@ -1888,14 +1888,14 @@ VkDescriptorSet GetMultiTexSet(const DrawInfo& d,
       // A depth comparison is only defined on a view whose format supports
       // it. This binding may have resolved to a colour target instead of the
       // depth surface the guest named, and a compare sampler on that is
-      // undefined (VUID-vkCmdDrawIndexed-None-06479) -- GCN compares against
+      // undefined (VUID-vkCmdDrawIndexed-None-06479): GCN compares against
       // the first component of any format, Vulkan does not. Sample it plainly.
       sampler.depth_compare =
           d.texs[i].depth_compare && depth_src && depth_src[i];
       // The T# says how the SHADER reads the texels; the view says what the
       // hardware may do with them. A binding that resolved to a render target
       // takes that target's format, and an integer one is not filterable at
-      // all -- VK_FILTER_LINEAR on it is undefined
+      // all, because VK_FILTER_LINEAR on it is undefined
       // (VUID-vkCmdDrawIndexed-magFilter-04553), whatever the T# asked for.
       sampler.integer =
           !d.texs[i].storage &&

@@ -197,32 +197,29 @@ static bool libListed(const char *list, const char *lib) {
 //
 // The HLE shims for the non-graphics service modules exist because their real
 // sprx forwards over IPMI to a system service we do not host (SceShellCore /
-// SceShellUI / SceSysCore), not because LLE was tried and rejected -- so which
-// of them could actually run LLE is an open question per module. Rather than
+// SceShellUI / SceSysCore), not because LLE was tried and rejected, so which of
+// them could actually run LLE is an open question per module. Rather than
 // answer it by recompiling, make the policy switchable:
 //   DELTA_LLE=<list>  force LLE (ignore the HLE shim) for these libraries
 //   DELTA_HLE=<list>  force HLE, and it wins over DELTA_LLE
-// Both take a comma/space list of substrings, or "all". So a bisect looks like
+// Both take a comma/space list of substrings, or "all". A bisect looks like
 //   DELTA_LLE=all DELTA_HLE=libSceSaveDataDialog
 // A library with no HLE table registered is LLE regardless; forcing LLE on one
 // that the guest then calls into an unhosted IPMI service will hang or fault,
 // which is exactly the information the switch is there to obtain.
 //
 // MEASURED, so nobody repeats the mistake: "boots and does not crash under
-// DELTA_LLE=all" is NOT the same as "these modules work". Two known traps.
-//
-//  - libSceAudioOut LLE WAS silent, and the reason is the general shape of the
-//    trap: the real module needs no /dev node at all, it hands blocks to the
-//    system audio daemon over POSIX shm and waits on a named event flag, so with
-//    no daemon it wrote into nothing and no crash/fps check could see it. That
-//    daemon is now hosted (kern/ps4/audio_daemon.cpp) and LLE audio plays; the
-//    lesson stands for every other module whose LLE partner is a system service.
+// DELTA_LLE=all" is NOT the same as "these modules work". Two known traps:
+//  - libSceAudioOut LLE was silent: the real module needs no /dev node, it
+//    hands blocks to the system audio daemon over POSIX shm and waits on a
+//    named event flag, so with no daemon it wrote into nothing and no crash/fps
+//    check could see it. That daemon is now hosted (kern/ps4/audio_daemon.cpp);
+//    the lesson stands for every module whose LLE partner is a system service.
 //  - The common dialogs (libSceSaveDataDialog, libSceMsgDialog) LLE forward to
-//    a ShellUI daemon that kern/ipmi does not stand in for yet (it has PlayGo,
-//    NpManager, NpWeb and UserService), so their status never leaves RUNNING for
-//    a title that actually opens one.
+//    a ShellUI daemon that kern/ipmi does not stand in for yet, so their status
+//    never leaves RUNNING for a title that actually opens one.
 //
-// What IS verified: the switch itself is airtight -- under DELTA_LLE=all the HLE
+// What IS verified: the switch itself is airtight; under DELTA_LLE=all the HLE
 // trace records zero thunk calls, so every registered shim really is bypassed.
 static bool useHleShim(const char *lib, u64 hid) {
   if (libListed(kHleLibs, lib))
@@ -254,7 +251,7 @@ uintptr_t vprx_get_forced(const char *lib, u64 hid) {
   if (native_video && std::strcmp(lib, "libSceVideodec2") == 0)
     return 0;
   // PS5-only: resolve exclusively from the PS5 registry (runtime/vprx/ps5/*).
-  // PS5 must NOT borrow the PS4 HLE modules -- each forced-HLE library has its own
+  // PS5 must NOT borrow the PS4 HLE modules, since each forced-HLE library has its own
   // full PS5 copy so behaviour can diverge safely. A miss here falls through to the
   // real .sprx (LLE) in the caller, never to a PS4 stub.
   for (const auto &t : vprxTablePs5) {

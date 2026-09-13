@@ -237,7 +237,7 @@ i64 PS4ABI sys_pread(u32 fd, void *buf, size_t nbytes, i64 offset) {
   if (kIoprogress) {
     // maxOff/lastMax = streaming high-water. nNew/nReread since last line tell
     // whether the FIOS2 streamer is fetching NEW file bytes (nNew climbing,
-    // offset+r > previous max) or RE-READING already-covered blocks (nReread) --
+    // offset+r > previous max) or RE-READING already-covered blocks (nReread) –
     // the latter signals a downstream consume/decompress stage that never drains,
     // so the streamer re-issues the same reads. lastOff catches exact-repeat reads.
     struct FdIo { i64 maxOff, lastMax, lastOff; long lastMs; long nNew, nReread, nSame; };
@@ -433,7 +433,7 @@ void fdSet(void *set, int fd) {
 
 // select() answers for the fds we model: a socket is asked of the host, and
 // anything else (a file, a device) is a regular file as far as select is
-// concerned -- always ready, never blocking. The old stub returned "nothing
+// concerned: always ready, never blocking. The old stub returned "nothing
 // ready" without waiting or clearing the sets, so a title that selects with a
 // timeout spun instead of sleeping: GTA:SA's Gameface thread got through 1.8
 // billion calls in 78 seconds and left the render loop 0.1 fps.

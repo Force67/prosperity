@@ -92,7 +92,7 @@ bool CreateUploadRings(const VkPhysicalDeviceProperties& props) {
     g_ring.ubo_align = 1;
   if (props.limits.maxDescriptorSetUniformBuffersDynamic < kCbufBindings ||
       props.limits.maxPerStageDescriptorUniformBuffers < kCbufBindings)
-    BASE_LOGI("gpuvk", "only {}/{} dynamic UBOs available, need {} -- set 1 "
+    BASE_LOGI("gpuvk", "only {}/{} dynamic UBOs available, need {}; set 1 "
                        "is an out-of-spec layout on this device and a cbuffer "
                        "may silently read zero",
               props.limits.maxDescriptorSetUniformBuffersDynamic,
@@ -306,7 +306,7 @@ bool EnsureCbufRing() {
 // never uploaded to and never read back: the shader writes its wave's block and
 // reads it again within the same draw.
 // DELTA_GPU_LDSDUMP=<dwords> makes it host visible and mapped instead, so what
-// an NGG shader staged through LDS can be read after the frame -- the only way
+// an NGG shader staged through LDS can be read after the frame, the only way
 // to tell "the write never happened" from "the read was at another address".
 bool EnsureLdsScratch() {
   if (g_ring.lds_set)
@@ -498,7 +498,7 @@ bool AllocateTextureUpload(u32 slot,
 void ResetTextureUploads(u32 slot) {
   GPU_BUGCHECK(slot < 2, "slot %u is not a frame-ring slot", slot);
   // Reset runs in BeginFrame after this slot's fence wait, so no in-flight
-  // transfer references these blocks -- the one point where destroying one is
+  // transfer references these blocks, which is the one point where destroying one is
   // safe. Blocks grow on demand (a loading burst can leave hundreds of idle
   // megabytes behind), so drop any block that has sat unused for ~10s of
   // resets; the next burst simply recreates it.

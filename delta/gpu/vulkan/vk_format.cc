@@ -16,7 +16,7 @@
 namespace {
 // A colour target whose NUMBER_TYPE is UINT/SINT holds packed bits, not a
 // colour. Mapping one to UNORM clamps every export into [0,1] and the target
-// reads back black -- SotC lost two whole G-buffer planes that way. On by
+// reads back black; SotC lost two whole G-buffer planes that way. On by
 // default; DELTA_GPU_INT_RT=0 restores the old UNORM mapping.
 DELTA_OPTION(bool, kIntegerRt, "DELTA_GPU_INT_RT", true);
 DELTA_OPTION(bool, kNoBlend, "DELTA_GPU_NOBLEND", false);
@@ -297,8 +297,8 @@ VkFormat ColorTargetFormat(u32 info) {
       case 10:
         // COMP_SWAP (bits 12:11) names the order the hardware writes the four
         // components in: STD puts red in the first byte, ALT puts blue there.
-        // Answering BGRA for both is invisible on screen -- the present path
-        // swaps back -- but a pass that SAMPLES the target aliases the image in
+        // Answering BGRA for both is invisible on screen (the present path
+        // swaps back), but a pass that SAMPLES the target aliases the image in
         // the T#'s own format, and there an STD target comes back with red and
         // blue exchanged (Dead Cells' scene composite renders purple).
         return ((info >> 11) & 3) == 1 ? VK_FORMAT_B8G8R8A8_UNORM
@@ -500,8 +500,8 @@ VkBlendFactor BlendFactor(u32 f) {
     // 6 upwards is neither the D3D order nor SRC_ALPHA_SATURATE-first: the
     // hardware enum (V_028780_BLEND_*) runs DST_ALPHA, DST_COLOR,
     // SRC_ALPHA_SATURATE, the two BOTH_* forms, the constants and only then
-    // the dual-source factors at 0x0f..0x12. That last range is what pins it
-    // -- KytyPS5's IsDualSourceBlendFactor tests exactly 0x0f..0x12. Reading
+    // the dual-source factors at 0x0f..0x12. That last range is what pins it:
+    // KytyPS5's IsDualSourceBlendFactor tests exactly 0x0f..0x12. Reading
     // 0x0d (CONSTANT_COLOR) as SRC1_COLOR gave a shader with no Index-1
     // output an undefined second source, which comes out as a black colour
     // term (Astro Bot's whole composite chain).
@@ -609,12 +609,11 @@ VkFormat VertexFormat(u32 dfmt, u32 nfmt) {
   // undefined (VUID-VkGraphicsPipelineCreateInfo-Input-08733). The SCALED
   // forms deliver the same integer VALUE as a float, which is what a shader
   // that fetches an integer attribute and converts it ends up with. 32-bit
-  // 32-bit integers have no SCALED form, but they do not need one: the module
-  // BITCASTS every attribute component into its VGPR rather than converting it,
-  // which is what the hardware does for an integer number format, and a 32-bit
-  // SFLOAT attribute delivers those same 32 bits to a float input. So the
-  // SFLOAT twin is both bit-exact and correctly typed. GTA:SA fetches 185
-  // R32_UINT attributes a run.
+  // integers have no SCALED form but need none: the module BITCASTS every
+  // attribute component into its VGPR (what the hardware does for an integer
+  // number format), and a 32-bit SFLOAT attribute delivers those same 32 bits
+  // to a float input, so the SFLOAT twin is both bit-exact and correctly
+  // typed.
   // GCN number formats: 0 UNORM, 1 SNORM, 2 USCALED, 3 SSCALED, 4 UINT,
   // 5 SINT, 7 FLOAT. The scaled forms deliver the integer value as a float,
   // which is what Vulkan's *_SSCALED/_USCALED do.
@@ -732,7 +731,7 @@ VkFormat VertexFormat(u32 dfmt, u32 nfmt) {
   }
 }
 
-// Byte size of one vertex element in the given GCN data format -- must match
+// Byte size of one vertex element in the given GCN data format; must match
 // the VkFormat VertexFormat() selects. Used to size a stride-0 (constant)
 // binding's upload, where there is no source stride to derive the record extent
 // from.

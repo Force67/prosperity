@@ -41,13 +41,12 @@ dmaDevice::dmaDevice(objectTable &objects) : device(objects) {}
 // sceKernelMapDirectMemory (ioctl 0x80108002), supplying the VA it already
 // reserved. We don't model a real GPU physical pool, since the renderer drives
 // the GPU by the virtual addresses it maps and the physical offset is only
-// bookkeeping. The offset still has to be unique, non-zero and aligned. If it
-// collapses to 0 on every allocation, the title's own allocator sees overlaps
-// and the dependent subsystem (PT's render device) refuses to initialise.
-//
+// bookkeeping; it still has to be unique, non-zero and aligned, or the title's
+// own allocator sees overlaps and the dependent subsystem (PT's render device)
+// refuses to initialise.
 // GetDirectMemorySize (ioctl 0x4008800A) is the search ceiling the title passes
-// back into AllocateDirectMemory, so the old 1 KiB stub made every real
-// allocation impossible.
+// back into AllocateDirectMemory, so a tiny stub makes every real allocation
+// impossible.
 namespace {
 // PS4 user-accessible direct memory is roughly 4.5 to 5 GiB depending on the
 // title budget. Report a flat large pool and bump offsets from a non-zero base
@@ -105,11 +104,11 @@ std::once_flag g_dmemBackingOnce;
 // not a hint: SotC carves the whole pool into fixed windows up front (0x220000
 // tail scratch that ends exactly at pool end, a 1 GiB CPU heap, the ~11 GiB
 // streaming/GPU heap between them) and derives which internal heap partition
-// owns an address from the physical range. The old bump allocator satisfied
-// the tail window and then bumped every later reservation past the end of the
-// pool, so the two MAIN heaps lived outside their windows -- the engine's
-// AllocationTracker range lookup then missed on free and the job fiber
-// dereferenced the null/-1 result (Shadow_Shipping+0x189a7 / +0x8d9b7).
+// owns an address from the physical range. A bump allocator satisfied the tail
+// window and then pushed every later reservation past the end of the pool, so
+// the two MAIN heaps lived outside their windows, the engine's
+// AllocationTracker range lookup missed on free, and the job fiber dereferenced
+// the null/-1 result (Shadow_Shipping+0x189a7 / +0x8d9b7).
 int dmemAllocate(u64 lo, u64 hi, u64 len, u64 align,
                  u32 memType, u64 *out) {
   // A caller that supplies its own search window means it, offset 0 included:
@@ -158,8 +157,8 @@ int dmemAllocate(u64 lo, u64 hi, u64 len, u64 align,
       return 0;
     }
     // Band full (or the request is bigger than it): fall back to the highest
-    // hole that fits. Titles carve their own windows upwards from offset 0 --
-    // Skyrim walks the pool in 2 MiB steps -- so the bottom is not free either.
+    // hole that fits. Titles carve their own windows upwards from offset 0 –
+    // Skyrim walks the pool in 2 MiB steps, so the bottom is not free either.
     u64 top = hi;
     cand = UINT64_MAX;
     for (auto it = g_dmemRegions.rbegin(); it != g_dmemRegions.rend(); ++it) {

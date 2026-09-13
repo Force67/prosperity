@@ -4,8 +4,8 @@ One armed guest frame, recorded completely, into one machine-readable file.
 
 The `DELTA_GPU_*` printf switches each answer one question, cost a rebuild when
 the question changes, and cap themselves at an arbitrary line count. This
-records the whole frame instead — every region, draw, dispatch, barrier, memory
-fill, decline and validation message with its full state — so a new question is
+records the whole frame instead (every region, draw, dispatch, barrier, memory
+fill, decline and validation message with its full state), so a new question is
 a query over an existing capture rather than a new build.
 
 Implementation: `vulkan/vk_trace.{h,cc}` (the recorder) and `vulkan/vk_png.{h,cc}`
@@ -42,7 +42,7 @@ Then, optionally:
 Disarmed, all of this costs one predictable branch on a global bool per draw,
 region and barrier. Nothing is allocated and no file is opened.
 
-Example — the frame after 40 seconds, with the depth buffer and every guest
+Example: the frame after 40 seconds, with the depth buffer and every guest
 texture, plus a snapshot of the bound targets after draws 12 and 40:
 
 ```
@@ -65,7 +65,7 @@ them. Records appear in the order the backend recorded them.
 | `capture` | file header: frame, exposure/gamma, what was dumped |
 | `frame_begin` / `frame_end` | frame number, draw counts, scanout address |
 | `region_begin` / `region_end` | every colour attachment (guest base, `CB_COLORn_INFO`, resolved Vulkan format, loadOp, current layout), the depth/stencil base, the render area |
-| `draw` | the complete draw — see below |
+| `draw` | the complete draw, see below |
 | `decline` | the recompiled path refusing a draw, with the reason |
 | `dispatch` | CS guest address + SPIR-V hash, group counts, every resolved resource range with its guest-memory statistics, the raw user data |
 | `barrier` | every image layout transition, named after the guest resource the image holds |
@@ -79,13 +79,13 @@ blend word and clear word), `CB_TARGET_MASK` / `CB_SHADER_MASK` /
 scale/offset and the rectangle the backend sets), cull state, primitive type,
 the index buffer, every vertex binding and attribute, every resolved texture
 descriptor `T#` (**including the guest address the descriptor itself was
-`s_load`ed from**, and **how the binding actually resolved** — to a live render
+`s_load`ed from**, and **how the binding actually resolved** (a live render
 target, a feedback copy, a depth target, a storage image, a guest upload, or
 the 1x1 default), every constant buffer with its bytes, every set-2 raw buffer,
 and the VS/PS guest addresses with both a guest-code hash and a SPIR-V hash.
 
 Non-finite floats are emitted as the bare `NaN` / `Infinity` literals, which
-Python's `json` reads back unchanged — a NaN in a viewport or a constant is
+Python's `json` reads back unchanged, and a NaN in a viewport or a constant is
 exactly what a capture exists to show.
 
 ## Querying a capture

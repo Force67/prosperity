@@ -29,7 +29,7 @@ constexpr i64 kHandle = 1;
 
 // SceAvPlayerInitData carries the title's event callback at +0x50 (the object
 // pointer) and +0x58 (the function). A title that drives playback from those
-// events -- rather than by polling IsActive -- never leaves its movie screen
+// events rather than by polling IsActive never leaves its movie screen
 // unless they arrive: Bloodborne opens sprj_opening.mp4, waits for READY, and
 // sits on a black frame forever.
 u64 g_eventObject = 0;
@@ -229,7 +229,7 @@ int PS4ABI sceAvPlayerSetLooping(i64 /*handle*/, bool /*loop*/) {
 // One video stream. A count of zero looks like "this file has nothing in it"
 // and a title that picks a video stream before starting playback then never
 // calls Start: GTA:SA opens its intro movie, takes READY, enumerates zero
-// streams and leaves the movie layer up -- an opaque black rect over the main
+// streams and leaves the movie layer up, an opaque black rect over the main
 // menu, forever. Reporting a stream lets the title enable it, Start, and take
 // the end-of-playback that tears the layer down.
 int PS4ABI sceAvPlayerStreamCount(i64 /*handle*/) {

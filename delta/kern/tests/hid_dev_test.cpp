@@ -17,7 +17,7 @@ namespace {
 class HidDevice : public ::testing::Test {
 protected:
   // A device registers itself in the object table it is handed, which then owns
-  // it, so it has to be built the way the kernel builds one -- but that table is
+  // it, so it has to be built the way the kernel builds one. But that table is
   // the whole of what it needs, so no process is involved.
   HidDevice() : dev_(*new krnl::hidDevice(objects_)) {}
 

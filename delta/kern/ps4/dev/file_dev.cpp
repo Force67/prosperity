@@ -35,7 +35,7 @@ void fillStat(SceKernelStat &out, u16 mode, i64 size) {
 fileDevice::fileDevice(objectTable &objects) : device(objects) {}
 
 bool fileDevice::open(const base::String &hostPath, u32 /*flags*/) {
-  // Read-only for now: the disc image is immutable.
+  // Read-only: the disc image is immutable.
   utl::File tmp(hostPath, utl::fileMode::read);
   // Exists() only means a PhysFile object was constructed; IsOpen() means the
   // underlying fopen actually succeeded. Without the IsOpen() check a missing
@@ -80,7 +80,7 @@ i64 fileDevice::write(const void *buf, size_t n) {
     return 0;
   // Flush every guest write: the emulator is normally SIGKILLed, which discards
   // whatever is still sitting in the stdio buffer. Without this a save only ever
-  // reached disk in whole 4 KiB buffer flushes -- every savedata file ended up
+  // reached disk in whole 4 KiB buffer flushes, so every savedata file ended up
   // 0 bytes or truncated mid-record at exactly 4096.
   file_.Flush();
   return static_cast<i64>(n);

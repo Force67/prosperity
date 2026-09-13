@@ -99,7 +99,7 @@ static void scanPagePm4(void *ctx, u8 *p, size_t sz) {
 // knows both the assumed band and the pools the title really mapped. A fixed
 // band silently drops every command buffer another title allocates outside it,
 // so nothing renders and the game waits forever on a GPU label the dropped
-// submits would have written -- which is exactly what Astro Bot did.
+// submits would have written, which is exactly what Astro Bot did.
 static inline bool gpuAddr(u64 a) {
   return prosperity_gpu_is_aperture(a) != 0;
 }
@@ -112,7 +112,7 @@ static inline bool gpuReadable(u64 a, size_t n) {
 }
 
 // Command buffers do not have to live in a pool we recognise as the GPU
-// aperture -- a title can build one in any allocation it owns, and the video
+// aperture: a title can build one in any allocation it owns, and the video
 // decoder does. Mapped and inside the guest map is the honest test; the
 // aperture band stays for the probes that guess at pointers.
 static inline bool guestReadable(u64 a, size_t n) {
@@ -202,7 +202,7 @@ static void drainQueue(AcqQueue &q, u64 doorbell) {
   // `dcb + 0x4000` into its queue struct and zeroes the word; +0x11f0 spins on
   // it, computing free space as `rptr - (write % ringDw)` wrapped, and waits
   // for more than 8 dwords). Astro Bot's DrawThread parks in exactly that spin
-  // -- holding its frame mutex, so the main thread blocks behind it and the
+  // , holding its frame mutex, so the main thread blocks behind it and the
   // title never submits again.
   const u64 rptr = q.ccb ? q.ccb : q.dcb + q.ringBytes;
   if (guestReadable(rptr, sizeof(u32)))
@@ -288,7 +288,7 @@ static void registerAcqQueue(u32 qid, u64 dcb, u64 ccb, u64 doorbellBase,
 // status dword in the arg and, on return, treats the submit as FAILED unless the
 // kernel has cleared it. A failed state submit makes the driver skip the 0x8132
 // call that carries the title's own command buffer, so the frame is dropped
-// entirely -- no draws reach us, and the completion label the title spins on is
+// entirely: no draws reach us, and the completion label the title spins on is
 // never written. The IN-only variants older firmware issues have no such field.
 static void clearSubmitStatus(u32 cmd, void *data, u32 offset) {
   if (!data || !(cmd & 0x40000000u))
@@ -617,7 +617,7 @@ i32 gcDevicePs5::ioctl(u32 cmd, void *data) {
   case 0x80108132: {  // AGC mode-1 secondary submit (IN, 16 bytes): arg = [_, count,
                       // ptrLo, ptrHi]; ptr -> array of `count` 16-byte descriptors
                       // [addrLo, addrHi, sizeDwords, flags]. THESE carry the real
-                      // rendering PM4 (SET_*_REG, draws, RELEASE_MEM) -- the
+                      // rendering PM4 (SET_*_REG, draws, RELEASE_MEM); the
                       // 0x80488131 stream is only per-frame register state. Forward
                       // each non-null command buffer to the command processor.
     if (data) {
@@ -672,8 +672,8 @@ i32 gcDevicePs5::ioctl(u32 cmd, void *data) {
         }
       }
       // A batch is however long the title makes it. The old count < 64 cap
-      // dropped a whole submit -- every buffer in it, including the fence the
-      // title then waits on -- once a level got heavy enough to exceed it.
+      // dropped a whole submit (every buffer in it, including the fence the
+      // title then waits on) once a level got heavy enough to exceed it.
       if (ptr && count && count <= 0x1000 &&
           guestReadable(ptr, static_cast<size_t>(count) * 16)) {
         auto *d = reinterpret_cast<u32 *>(ptr);

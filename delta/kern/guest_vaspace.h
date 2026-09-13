@@ -13,7 +13,7 @@
 namespace krnl {
 
 // Reserve every known guest-fixed range PROT_NONE. Call once, as early as
-// possible -- before the CPU backend reserves its JIT heap and before any guest
+// possible, before the CPU backend reserves its JIT heap and before any guest
 // module maps. Safe to call twice (the second call is a no-op).
 void reserveGuestVaSpace();
 

@@ -143,8 +143,8 @@ static device *make_device(const char *deviceName) {
     dev = new dipswDevice(proc->getObjTable());
   if (xname == "random" || xname == "urandom")
     dev = new randomDevice(proc->getObjTable());
-  // PS5 only, for now. Answering /dev/rng lets libSceSsl's DT_INIT seed itself,
-  // which carries libSceNpManager's module start further than it used to get --
+  // PS5 only. Answering /dev/rng lets libSceSsl's DT_INIT seed itself,
+  // which carries libSceNpManager's module start further than it used to get –
   // far enough on Prospero, but on Orbis it then reaches libSceNpMatching2's
   // init, which dereferences an NpManager context we still leave null (Tomb
   // Raider faults there). Widen this once the PS4 Np bring-up follows.
@@ -206,7 +206,7 @@ int PS4ABI sys_open(const char *path, u32 flags, u32 mode) {
   // and the flag the guest sets is FreeBSD's, not the host's, so the bit test
   // alone misses those. Confirm with a stat when it is absent: a read open that
   // turns out to be a directory still has to yield a dirDevice, else getdents
-  // reports ENOTDIR and a caller walking d_reclen never advances -- Dead Cells
+  // reports ENOTDIR and a caller walking d_reclen never advances. Dead Cells
   // enumerates /savedata0 this way and spins forever on its loading screen.
   // Write opens are never directories, so they skip the stat.
   bool asDir = (flags & O_DIRECTORY) != 0;
@@ -323,7 +323,7 @@ void fdReadStat(u32 fd, i64 n) {
 // DELTA_IO_MBPS=<MiB/s>: cap file-read throughput. A host SSD serves a title's
 // streaming loader orders of magnitude faster than the console drive it was
 // tuned for, so a pipeline that keeps loaded-but-not-yet-finalized data in a
-// fixed CPU budget can be outrun by its own loader and exhaust that budget --
+// fixed CPU budget can be outrun by its own loader and exhaust that budget –
 // SotC fills its 1 GiB onion heap this way and dies in its own allocator, and
 // the same run survives whenever the host happens to be busy. 0 = unlimited.
 void throttleIo(i64 bytes) {
@@ -351,7 +351,7 @@ i64 PS4ABI sys_read(u32 fd, void *buf, size_t nbytes) {
   if (!d) {
     // The three standard descriptors exist on a real process but have nothing to
     // read; report end-of-file rather than EBADF. Skyrim's INI parser falls back
-    // to stderr when the file is missing and its fgets loop only stops on EOF --
+    // to stderr when the file is missing and its fgets loop only stops on EOF –
     // an error return left it reading fd 2 forever at 100% CPU.
     if (fd <= 2)
       return 0;
@@ -387,7 +387,7 @@ i64 PS4ABI sys_lseek(u32 fd, i64 offset, int whence) {
 
 // FreeBSD struct statfs (472 / 0x1D8 bytes, copies out to user). Only the
 // capacity fields matter to a title: they decide whether it may write. Left
-// unhandled the caller reads an uninitialised buffer as "no space" --
+// unhandled the caller reads an uninitialised buffer as "no space" –
 // Minecraft refuses to open a world with "there is not enough free space"
 // and never leaves its menu. Requires privilege 0x2AC in the kernel.
 struct BsdStatfs {

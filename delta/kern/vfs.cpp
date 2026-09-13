@@ -88,7 +88,7 @@ void mountVirtual(const char *guest, std::shared_ptr<VirtualProvider> provider) 
 // and Windows-style ones, so normalise both before the mount lookup. relPrefix
 // picks where a bare relative path lands: /app0 for reads (the game image),
 // /download0 for writes (relative creates against a read-only mount could never
-// succeed -- see resolveWritable).
+// succeed; see resolveWritable).
 static base::String normalizePath(const char *path, const char *relPrefix = "/app0/") {
   base::String out;
   if (path && path[0] != '/')
@@ -159,10 +159,10 @@ struct PfsFileStream final : utl::fileBase {
     // whole destination buffer, so the tail bytes are valid (zeros). SotC's world
     // container is loaded by libSceFios2's whole-file sceFiosFHRead as ONE async
     // op; FIOS2 block-pads its final chunk past the member's EOF and treats the
-    // resulting short read as an OP FAILURE -> actualCount 0 -> the loader (which
-    // ignores the read error) commits payload=0,err=0 and RETRIES FOREVER (the
-    // post-LoadInitialWorld freeze). Reporting the full length lets that op
-    // complete. Off by default so other titles keep true short-at-EOF semantics.
+    // resulting short read as an OP FAILURE, which makes the loader commit
+    // payload=0,err=0 and RETRIES FOREVER (the post-LoadInitialWorld freeze).
+    // Reporting the full length lets that op complete. Off by default so other
+    // titles keep true short-at-EOF semantics.
     // DELTA_SHORTREAD: log every clamped-short provider read (raw n < requested),
     // which is exactly the FIOS2-op-failure trigger, regardless of zeroPad. Cheap:
     // only fires on the anomaly, not on full reads.
@@ -265,7 +265,7 @@ base::String fixHostCase(const base::String &host) {
 
 // DELTA_VFS_OVERLAY=<hostdir>: a host tree searched before the real mounts, so
 // a single file can be substituted or supplied without repacking the pkg (the
-// title's own config hooks -- SotC reads /app0/savedcmdargs.txt at boot -- live
+// title's own config hooks: SotC reads /app0/savedcmdargs.txt at boot, and they live
 // inside a read-only PFS image otherwise).
 static base::String overlayPath(const char *guestPath) {
   const char *dir = kVfsOverlay;

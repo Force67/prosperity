@@ -30,16 +30,14 @@ std::vector<u32> Optimize(const std::vector<u32>& spv);
 bool Validate(const std::vector<u32>& spv, std::string* err = nullptr);
 
 // Validate + optimize, with a DISK cache keyed by the content of the incoming
-// module. Optimization is ~65% of the recompiler's cost (measured on SotC:
-// 3110 ms of shader time a run, 1074 ms with the pass disabled) and its output
-// is a pure function of its input, so a hit is indistinguishable from a miss
-// except in time. A hit also skips validation, because nothing is stored that
-// did not validate when it was produced.
-//
+// module. Optimization is ~65% of the recompiler's cost (SotC: 3110 ms of
+// shader time a run, 1074 ms with the pass disabled) and its output is a pure
+// function of its input, so a hit is indistinguishable from a miss except in
+// time; a hit also skips validation, since nothing is stored that did not
+// validate when it was produced.
 // Returns false only when the module fails validation, filling *err as
 // Validate does. The cache lives in DELTA_GPU_SHADER_CACHE_DIR, or
-// $XDG_CACHE_HOME/ps4delta/spirv (~/.cache/ps4delta/spirv), and is disabled
-// entirely by DELTA_GPU_SHADER_CACHE=0.
+// $XDG_CACHE_HOME/ps4delta/spirv, and is disabled by DELTA_GPU_SHADER_CACHE=0.
 bool Finalize(const std::vector<u32>& spv,
               std::vector<u32>* out,
               std::string* err = nullptr);

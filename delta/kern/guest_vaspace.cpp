@@ -7,7 +7,7 @@
  * 64 GiB slots. None of that is negotiable: the guest asserts on, or silently
  * mis-indexes, an address it did not ask for.
  *
- * The host, meanwhile, is free to put an anonymous mmap wherever it likes -- and
+ * The host, meanwhile, is free to put an anonymous mmap wherever it likes, and
  * with FEX in the process there are a lot of host allocations (JIT buffers, block
  * link maps, thunk pools) made before the guest has mapped anything. Whoever gets
  * there first wins, and when the host wins the guest's fixed map either fails or
@@ -65,7 +65,7 @@ constexpr Range kRanges[] = {
 // title: a guest pointer into a pool at 256 GiB faulted on the PROT_NONE
 // placeholder inside an ioctl, because the paths that commit those pools probe
 // with MAP_FIXED_NOREPLACE and a placeholder reads as "occupied" to them. The
-// slots also do not need it -- a title MAP_FIXEDs them, and MAP_FIXED replaces
+// slots also do not need it: a title MAP_FIXEDs them, and MAP_FIXED replaces
 // whatever is mapped. Only ranges nothing of ours allocates into belong here.
 #endif
 

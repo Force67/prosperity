@@ -38,7 +38,7 @@ u64 threadFsBase();
 i32 hostGuestFsOffset();
 i32 hostFsScratchOffset();
 
-/*TODO: FIX MISUSE OF modulePtr*/
+/*TODO: modulePtr is misused in places; audit the refs*/
 using modulePtr = utl::object_ref<smodule>;
 
 class proc {

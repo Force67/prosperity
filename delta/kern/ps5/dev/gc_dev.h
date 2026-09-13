@@ -2,7 +2,7 @@
 
 // PS5 /dev/gc device (libSceAgc / libSceAgcDriver AGC protocol). Kept fully
 // separate from the PS4 gcDevice (kern/ps4/dev/gc_dev.h), which speaks the GNM
-// PM4 ioctl protocol -- the two command sets share no opcodes, so mixing them in
+// PM4 ioctl protocol; the two command sets share no opcodes, so mixing them in
 // one switch invited bugs. The device factory (sys_vfs make_device) instantiates
 // this for /dev/gc when the active process is a PS5 title.
 

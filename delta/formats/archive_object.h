@@ -19,17 +19,12 @@ namespace vfs {
 struct ArchiveImpl;
 
 // On-demand reader for a game shipped as a plain compressed container (.rar,
-// .zip). Entries are decompressed lazily, so a 54 GB archive is never extracted
-// to disk, which matters because a host with room for the extracted game is not
-// something we can assume.
-//
-// A dump archived this way almost always wraps the game in one top-level
-// directory (PPSA01342-app/...). That wrapper is stripped at index time so the
-// paths here start at the game root and /app0 lines up with what the guest
-// expects.
-//
-// Same public shape as PkgFilesystem and Ufs2Filesystem so it drops into the
-// same VirtualProvider. Thread-safe across guest threads.
+// .zip). Entries decompress lazily, so a 54 GB archive is never extracted, which
+// a host without room for the extracted game could not afford. The one
+// top-level directory dumps wrap the game in (PPSA01342-app/...) is stripped at
+// index time so paths start at the game root and /app0 lines up with what the
+// guest expects. Same public shape as PkgFilesystem and Ufs2Filesystem so it
+// drops into the same VirtualProvider. Thread-safe across guest threads.
 class ArchiveFilesystem {
 public:
   // A regular file inside the container, identified by its index in the entry

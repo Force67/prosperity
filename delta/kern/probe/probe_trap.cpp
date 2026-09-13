@@ -6,8 +6,8 @@
  *
  * This used to live inside kern/crash.cpp, which meant the fatal crash reporter
  * and two dozen unrelated debug probes shared one file and one header. They do
- * share the signal handler -- a probe trap and a real fault arrive the same way
- * -- so the seam is onSignal(): crash.cpp offers every signal here first and
+ * share the signal handler (a probe trap and a real fault arrive the same
+ * way), so the seam is onSignal(): crash.cpp offers every signal here first and
  * only reports a fault the probes did not claim. Ordering matters and is
  * preserved: the probes run BEFORE the CPU backend's JIT-signal hand-off,
  * because a trap we planted is ours whatever the JIT would make of it.
@@ -109,18 +109,19 @@ static void probeHandler(int, siginfo_t *, void *ucv) {
   // is misleading when the question is "what is this thread blocked in".
   backtrace(gr[REG_RBP]);
   // A thread parked in a wait is parked inside a SYSCALL, so its rsp is our own
-  // handler stack and scanning it finds host frames and nothing else -- which is
+  // handler stack and scanning it finds host frames and nothing else, which is
   // what the probe used to print, and it also walked off the end of the mapping
   // and took the run down. The guest stack the thread came off is recorded on
   // syscall entry, it is copied out with process_vm_readv rather than read
   // directly, and it is the one that says which guest function is waiting.
   guestStackTrace("probe", 8);
   // DELTA_SCHIST syscall histogram (lv2.cpp counts each syscall in its trampoline).
-  // Dump the non-zero counts so a slow/wedged title's hammered syscalls are visible
-  // -- the only profiler available (perf/strace/proc-mem are yama-blocked here).
+  // Dump the non-zero counts so a slow/wedged title's hammered syscalls are
+  // visible. This is the only profiler available (perf/strace/proc-mem are yama-blocked here).
   // The probe is sent to every thread, so only the first responder of a burst
   // prints it: forty copies interleaved with forty stack dumps is unreadable,
-  // and the stacks are the reason for the burst.
+  // and the stacks are the reason for the burst. It is the only profiler
+  // available (perf/strace/proc-mem are yama-blocked here).
   static std::atomic<u64> lastHist{0};
   const u64 nowS = (u64)::time(nullptr);
   u64 prev = lastHist.load();
@@ -145,7 +146,7 @@ static void probeHandler(int, siginfo_t *, void *ucv) {
 // DELTA_ALLOC_TRACE: a guest allocator-entry vaddr whose first byte is `push rbp`
 // (0x55), replaced with int3 so we log each large allocation's size without gdb
 // (gdb conditional breakpoints are far too slow on this hot path). The handler
-// logs rsi (the size arg) when big, emulates the push rbp, and resumes -- one
+// logs rsi (the size arg) when big, emulates the push rbp, and resumes: one
 // trap per call, no single-stepping. x86-native only.
 uintptr_t g_allocTraceAddr = 0;
 u64 g_allocTraceMin = 0x1000000;  // 16 MiB
@@ -328,7 +329,7 @@ bool g_manifestFd[8192] = {false};
 void markManifestFd(u32 fd, bool v) { if (fd < 8192) g_manifestFd[fd] = v; }
 // DELTA_SKIP_FN: int3 at a function entry (push rbp); emulate an immediate
 // `ret` (the push rbp hasn't run, so [rsp] is the return addr) with rax=0. Skips
-// the whole function -- used to step past a guest function that crashes/wedges
+// the whole function. Used to step past a guest function that crashes/wedges
 // (e.g. the localization loader 0x666410) to reach the next boot stage.
 uintptr_t g_skipFnAddrs[8] = {0};
 int g_skipFnCount = 0;
@@ -413,7 +414,7 @@ static std::atomic<u64> g_whistUnattributed{0};
 // through FEX. `cpu::currentGuestRip()` must NOT serve as a fallback here: it is
 // only block-accurate (see cpu_backend.h), so under multiblock compilation it
 // names some earlier instruction of whatever block is running. That reads as an
-// authoritative answer while being wrong -- it attributed a write to one of
+// authoritative answer while being wrong: it attributed a write to one of
 // SotC's descriptor pages to libc's memcpy, a store the title never made, and
 // sent a whole investigation down a dead end. An unattributable fault must SAY
 // it is unattributable.
@@ -469,7 +470,7 @@ static void probeHandler(int, siginfo_t *, void *ucv) {
 // Reopen the one page a watch fault landed on so the guest can retry the access.
 // Arch-independent: returning from the handler re-executes the faulting
 // instruction, which is what turns a one-shot trap into a running trace. Without
-// this the watch is not merely blind, it is FATAL -- on ARM both watches used to
+// this the watch is not merely blind, it is FATAL: on ARM both watches used to
 // fall through to the crash reporter and kill the title.
 static void reopenWatchPage(uintptr_t at) {
   const long pgsz = sysconf(_SC_PAGESIZE);
@@ -516,7 +517,7 @@ bool onSignal(int sig, siginfo_t *si, void *ucv) {
       if (b < kWhistBuckets)
         g_whistBucket[b].fetch_add(1, std::memory_order_relaxed);
       // Slot 0 doubles as "empty" in the site table, so an unattributable
-      // fault must not be filed as a writer at rip 0 -- it is counted apart and
+      // fault must not be filed as a writer at rip 0. It is counted apart and
       // the report says how many there were.
       if (!attributed) {
         g_whistUnattributed.fetch_add(1, std::memory_order_relaxed);
@@ -568,7 +569,7 @@ bool onSignal(int sig, siginfo_t *si, void *ucv) {
         // Not guest code, so it is OUR code writing into the guest's memory
         // (an HLE call, the kernel, a GPU readback). Naming the host module is
         // the point: "unattributed" alone reads as noise when it may be the
-        // emulator scribbling on the title's heap. Only the leaf is named --
+        // emulator scribbling on the title's heap. Only the leaf is named –
         // backtrace() cannot unwind past the signal trampoline, and a hand
         // walk of the interrupted frame chain yields addresses dladdr cannot
         // symbolise in our own binary, so resolving our own frames would need
@@ -601,7 +602,7 @@ bool onSignal(int sig, siginfo_t *si, void *ucv) {
       }
       // Only a write-only watch can name the access from the protection alone.
       // A reads-too watch (PROT_NONE) cannot on ARM, where there is no x86
-      // page-fault error code -- so it says "access" rather than guessing.
+      // page-fault error code, so it says "access" rather than guessing.
 #if defined(__x86_64__)
       const char *kind =
           (static_cast<ucontext_t *>(ucv)->uc_mcontext.gregs[REG_ERR] & 2)
@@ -619,7 +620,7 @@ bool onSignal(int sig, siginfo_t *si, void *ucv) {
         BASE_LOGI("wprot", "{} {:#x} from {}", kind, (unsigned long long)at,
                   sym);
       // The writer of a descriptor/command ring is nearly always libc memcpy,
-      // which names no subsystem -- so the CALLER is the whole point of the
+      // which names no subsystem, so the CALLER is the whole point of the
       // report, not an extra for the reads-too mode. Reading the single qword at
       // the guest rsp does not find it: the leaf is mid-body by the time it
       // faults (and on ARM the guest rsp snapshot can lag), which yields a stack
@@ -649,8 +650,8 @@ bool onSignal(int sig, siginfo_t *si, void *ucv) {
 #else
         // FEX pins every guest GPR to a fixed host register, so the signal
         // context holds the exact values at the faulting instruction. Only fall
-        // back to the in-memory thread state -- which is written back at block
-        // boundaries and therefore lags -- when the fault was not in JIT code.
+        // back to the in-memory thread state, which is written back at block
+        // boundaries and therefore lags, when the fault was not in JIT code.
         u64 sig_gregs[16];
         bool exact = cpu::guestGregsFromSignal(ucv, sig_gregs);
         g = exact ? sig_gregs : cpu::currentGuestGregs();
@@ -708,7 +709,7 @@ bool onSignal(int sig, siginfo_t *si, void *ucv) {
 #if defined(__x86_64__)
   // DELTA_GUEST_BRK_TRACE: a RESUMABLE planted breakpoint. The ud2 replaced the
   // first bytes of a known instruction, so the handler emulates that
-  // instruction, logs what we came for, and returns -- turning a one-shot trap
+  // instruction, logs what we came for, and returns, turning a one-shot trap
   // into a trace. Shaped for the V8 snapshot dispatch
   // (libcohtml `mov %esi,%r12d`, 3 bytes): logs the bytecode in esi and the
   // SnapshotByteSource position at rdi+0x3c, so each record says which bytecode
@@ -787,7 +788,7 @@ bool onSignal(int sig, siginfo_t *si, void *ucv) {
       u32 eax = (u32)gr[REG_RAX];
       // DELTA_PS5_DCBFORCE: force a failing graphics-init sub-call to report
       // success (SCE_OK) so the run-once init 0x69e720 completes and the engine
-      // creates its DrawCommandBuffer -- lets us measure how far the boot gets
+      // creates its DrawCommandBuffer, which lets us measure how far the boot gets
       // when the (obfuscated) libSceAgc call is treated as succeeding.
       static const int force = kPs5Dcbforce;
       if (force && eax) {
@@ -986,7 +987,7 @@ bool onSignal(int sig, siginfo_t *si, void *ucv) {
         if (kHdrFill && hdr >= 0x10000 && nm[0]) {
           auto *h = reinterpret_cast<u8 *>(hdr);
           // The header buffer [parent+0x8] is allocated filesize (at 0x605e30),
-          // so fill the WHOLE manifest at every consumer hook -- both the header
+          // so fill the WHOLE manifest at every consumer hook: both the header
           // (count) and the entry table must be correct for the downstream
           // segment/entry processing (0x666xxx) not to read garbage.
           if (const auto *mf = vfs::getCachedFile(nm)) {
@@ -1236,12 +1237,11 @@ void setFnArgs(uintptr_t addr, const char *label, const u64 *offsets,
 // behaves as if it filled it either has no writer at all or one writing
 // elsewhere, and only the fault distinguishes those.
 //
-// The trap RE-ARMS every `ms` instead of firing once. Each fault reopens its own
-// page so the guest makes progress, which used to end the watch after a single
-// report for a range the title writes continuously -- one sample cannot tell a
-// one-time initialiser from a per-frame producer, and it certainly cannot follow
-// a value from one buffer to the next. Re-arming keeps the cost at roughly one
-// fault per page per interval while turning the watch into a stream.
+// The trap RE-ARMS every `ms` instead of firing once: each fault reopens its
+// own page so the guest makes progress, and a single report cannot tell a
+// one-time initialiser from a per-frame producer. Re-arming keeps the cost at
+// roughly one fault per page per interval while turning the watch into a
+// stream.
 void startWriteWatch(uintptr_t addr, size_t bytes, unsigned everyMs,
                      bool trapReads, bool singleStep) {
   if (!addr || !bytes)

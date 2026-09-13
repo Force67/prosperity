@@ -829,7 +829,7 @@ u32 BitCeil(u32 value) {
 // of the byte offset inside a block is the XOR of every coordinate bit selected
 // by entry b: lane 0 (bits 0..15) picks x bits, lane 1 (16..31) y bits and
 // lane 2 (32..47) array-slice bits. Only the low blk_log2 entries of a row are
-// used, so the shorter rows simply end early.
+// used, so the shorter rows end early.
 //
 // This is the AMD address-library gfx10 swizzle pattern data for a 16-pipe,
 // non-RB+ configuration. That is the PS5's: its render-target and depth
@@ -1404,7 +1404,7 @@ void CopyGfx10StdMip(u8* tiled,
   u8* slice = tiled + slice_bytes * layer;
   // Within a block: the 256 B micro-tile has its own bit pattern, and above it
   // the micro-tiles interleave Y first. For 32bpp the micro-tile is 8x8 laid
-  // out x0,x1,y0,y1,y2,x2 -- a 4x4 row-major quadrant, quadrants ordered Y
+  // out x0,x1,y0,y1,y2,x2, a 4x4 row-major quadrant with quadrants ordered Y
   // first. Solved from the surfaces themselves: a 64 KiB block only ever holds
   // non-zero elements inside the WxH image, and over two dozen differently
   // shaped Minecraft UI surfaces this is the only bit order that never places a

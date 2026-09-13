@@ -19,7 +19,7 @@ constexpr u64 kHashPrime = 1099511628211ull;
 constexpr u64 kHashChunk = 1ull << 20;
 
 // frame per texture unless a compute write explicitly invalidates the
-// resource, and big atlases make it the dominant per-frame CPU cost -- so it
+// resource, and big atlases make it the dominant per-frame CPU cost, so it
 // runs four independent FNV lanes over 64-bit words (instead of one dependent
 // multiply per dword) to break the serial multiply chain and go memory-bound.
 u64 TexHashRange(u64 base, u64 bytes) {

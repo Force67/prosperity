@@ -104,7 +104,7 @@ std::unordered_map<u64, size_t> g_by_key;  // hash^stage -> record index
 bool g_atexit_registered = false;
 
 // Rewrite the report file after every new shader. The emulator is routinely
-// stopped with SIGKILL (it ignores TERM), which skips atexit -- an
+// stopped with SIGKILL (it ignores TERM), which skips atexit, so an
 // exit-only report would usually be lost.
 void MaybeWriteReportFile() {
   const char* v = AuditEnv();
@@ -141,7 +141,7 @@ void WriteDumpFiles(const ShaderRecord& rec,
   // The guest address goes in the name, not just the hash. Every other
   // diagnostic in the tree names a shader by the address the guest set it from
   // (RTSTAT's last_ps, the draw trace, the capture), so a dump keyed only by
-  // content hash could not be tied back to any of them -- which is what stopped
+  // content hash could not be tied back to any of them, which is what stopped
   // an investigation dead once already. Address first so the files sort by it.
   char stem[256];
   std::snprintf(stem, sizeof(stem), "%s/%s_%llx_%016llx", dir,
@@ -410,7 +410,7 @@ void WriteAuditReport(std::FILE* f) {
                                 const std::map<std::string, Agg>& m) {
     if (m.empty())
       return;
-    std::fprintf(f, "[shaudit] -- %s --\n", title);
+    std::fprintf(f, "[shaudit] == %s ==\n", title);
     std::vector<const std::pair<const std::string, Agg>*> rows;
     for (const auto& e : m)
       rows.push_back(&e);
@@ -431,7 +431,7 @@ void WriteAuditReport(std::FILE* f) {
   print_ranked("silently dropped (0 SPIR-V ops, no warning)", silents);
 
   if (declined) {
-    std::fprintf(f, "[shaudit] -- declined shaders --\n");
+    std::fprintf(f, "[shaudit] == declined shaders ==\n");
     for (const ShaderRecord& r : g_records)
       if (r.declined)
         std::fprintf(f, "[shaudit]   %s_%016llx guest=0x%llx x%u: %s\n",

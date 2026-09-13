@@ -78,7 +78,7 @@ public:
 
   // Diagnostic: invoke `fn(ctx, ptr, size)` for every tracked mapping in the GPU
   // aperture [0x8000_0000_00, 0x8100_0000_00) that is small enough to sweep
-  // (<= 4 MiB) -- used to locate the guest's PM4 command buffers without a
+  // (<= 4 MiB), used to locate the guest's PM4 command buffers without a
   // multi-GB scan of the big dmem pools.
   void forEachGpuAperturePage(void (*fn)(void *, u8 *, size_t),
                               void *ctx) const;

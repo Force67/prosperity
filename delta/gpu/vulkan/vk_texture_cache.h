@@ -41,7 +41,7 @@ struct TextureBindings {
 
   // Multi-texture (a recomp PS sampling >1 texture, e.g. Doom64's 3D walls): a
   // kMaxTex-binding set-0 layout and its pools, plus a 1x1 white default for
-  // any binding we could not resolve -- so diffuse*lightmap with a missing map
+  // any binding we could not resolve, so diffuse*lightmap with a missing map
   // shows the diffuse instead of going black.
   VkDescriptorSetLayout tex_array_layout = VK_NULL_HANDLE;
   VkDescriptorPool mtex_pool = VK_NULL_HANDLE;
@@ -65,8 +65,8 @@ struct TextureBindings {
   VkImageView zero_3d_view = VK_NULL_HANDLE;
   // A shader that does image_sample_c compares against the sampled value, and
   // Vulkan only defines that on a format supporting depth comparison. When such
-  // a binding resolves to a colour surface -- which every guest texture and
-  // every colour target is -- there is nothing valid to bind, so bind this: a
+  // a binding resolves to a colour surface (which every guest texture and
+  // every colour target is), there is nothing valid to bind, so bind this: a
   // 1x1 D32 image holding the far plane, which reads as "nothing occludes this"
   // rather than as undefined.
   VkImage depth_default_img = VK_NULL_HANDLE;

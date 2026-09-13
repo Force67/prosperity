@@ -35,7 +35,7 @@ DELTA_OPTION(bool, kDoCull, "DELTA_GPU_CULL", false);
 DELTA_OPTION(bool, kDepthClamp, "DELTA_GPU_DEPTHCLAMP", false);
 // DELTA_GPU_PIPETRACE=1 traces the first pipelines built; =<ps addr> traces
 // only that shader's. Pipelines are built in load order, so a flat cap only
-// ever shows the loading screens -- a negative from it says nothing about the
+// ever shows the loading screens, so a negative from it says nothing about the
 // draw you care about.
 DELTA_OPTION(u64, kGpuPipetrace, "DELTA_GPU_PIPETRACE", 0);
 DELTA_OPTION(bool, kNoMaskDiag, "DELTA_GPU_NOMASK", false);
@@ -49,7 +49,7 @@ DELTA_OPTION(bool, kRelaxDepthEqual, "DELTA_GPU_RELAX_ZEQUAL", true);
 // "its shader computed nothing", which look identical in an empty target.
 DELTA_OPTION(bool, kNoZTest, "DELTA_GPU_NOZTEST", false);
 // DELTA_GPU_NOZTEST_PS=<ps guest addr>: the same, for ONE pass. NOZTEST is a
-// blunt instrument -- it disables the depth test on every pipeline, so a frame
+// blunt instrument: it disables the depth test on every pipeline, so a frame
 // that improves under it has told you only that SOME depth test was responsible,
 // and every other pass is now drawing over everything at the same time. Naming
 // one shader answers the question the blunt version cannot: whether THIS pass is
@@ -375,13 +375,13 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
       ((u64)dstate * 0x100000001b3ull);
   // The MODULE, not the code address. A pipeline embeds the shader modules it
   // was created with, and the recompiler builds a different module for the same
-  // code whenever a descriptor-derived mask differs -- tex_3d, tex_1d, tex_uint,
-  // mrt_uint, the PS input mapping. Keying on the addresses and only SOME of
+  // code whenever a descriptor-derived mask differs (tex_3d, tex_1d, tex_uint,
+  // mrt_uint, the PS input mapping). Keying on the addresses and only SOME of
   // those masks let a draw bind a pipeline holding another draw's module, whose
-  // declarations then disagreed with the descriptor set built for this one: a
-  // binding the executing module reads as integer took the UNORM default
-  // (VUID-vkCmdDrawIndexed-format-07753). The Recompiled is cached per
-  // (code, every mask) and never evicted, so its address IS that identity.
+  // declarations then disagreed with the descriptor set built for this one (a
+  // binding the executing module reads as integer took the UNORM default,
+  // VUID-vkCmdDrawIndexed-format-07753). The Recompiled is cached per (code,
+  // every mask) and never evicted, so its address IS that identity.
   key = HashWord(key, reinterpret_cast<u64>(d.recomp));
   key = HashWord(key, d.ps4_neo ? 1 : 0);
   key = HashWord(key, d.stencil_enable ? d.depth_control : 0);
@@ -479,21 +479,19 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
     return nullptr;
   VkDescriptorSetLayout sls[4] = {set0, cbuf_layout, g_ring.sbo_layout,
                                   g_ring.lds_layout};
-  // One 64-byte window per stage: 16 user-data dwords each, 128 bytes total,
-  // which is the guaranteed minimum push-constant size, plus each stage's own
+  // One 64-byte window per stage: 16 user-data dwords each, 128 bytes total
+  // (the guaranteed minimum push-constant size), plus each stage's own
   // code-address words (VS 128..135, PS 136..143) pushed per draw for
   // s_getpc_b64.
-  //
   // ONE range naming both stages, not one range per stage. The two stages'
-  // windows interleave -- VS owns [0,64) and [128,136), PS [64,128) and
-  // [136,144) -- so no pair of per-stage ranges can cover that without
+  // windows interleave (VS owns [0,64) and [128,136), PS [64,128) and
+  // [136,144)), so no pair of per-stage ranges can cover that without
   // overlapping, and Vulkan requires a push to name every stage of every range
   // it overlaps (VUID-vkCmdPushConstants-offset-01796). The per-stage form
-  // declared VERTEX over [0,136) and FRAGMENT over [64,144), so the PS user
-  // data and the VS code address were both being pushed through a range that
-  // did not name their stage: undefined, and the PS user data is where the
-  // shader's descriptor pointers live. Every push below names both stages to
-  // match; the bytes written are unchanged.
+  // pushed the PS user data and the VS code address through a range that did
+  // not name their stage: undefined, and the PS user data is where the shader's
+  // descriptor pointers live. Every push below names both stages; the bytes
+  // written are unchanged.
   const bool pc_base = gpu::gcn::PushCodeBase();
   const VkPushConstantRange push[1] = {
       {vertex_stage | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
@@ -570,10 +568,8 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
   // (y-up) viewport to match GCN rasterisation, which flips triangle winding in
   // framebuffer space, so the guest's front-face sense is inverted here to
   // compensate. Culling is opt-in (DELTA_GPU_CULL=1) until the winding can be
-  // validated against visible 3D geometry: Doom64's world textures are
-  // compute-built (unimplemented) so its geometry is not yet visible, and depth
-  // already resolves occlusion, so the default stays cull-none to avoid
-  // dropping correctly-drawn faces (some HUD draws set cull bits).
+  // validated against visible 3D geometry; the default stays cull-none so
+  // correctly-drawn faces are never dropped.
   rs.cullMode =
       kDoCull ? (VkCullModeFlags)(d.cull_mode & 0x3) : VK_CULL_MODE_NONE;
   rs.frontFace =
@@ -635,8 +631,8 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
     // and the full VS for the shaded pass, and our two SPIR-V modules are
     // optimised independently, so the interpolated depth differs by an ULP and
     // EQUAL rejects the whole scene. Widen EQUAL to the direction the prepass
-    // wrote, which admits exactly the surface the prepass kept -- nothing can
-    // be nearer than the nearest surface -- so the visible result matches.
+    // wrote, which admits exactly the surface the prepass kept (nothing can be
+    // nearer than the nearest surface), so the visible result matches.
     if (kRelaxDepthEqual && dss.depthCompareOp == VK_COMPARE_OP_EQUAL &&
         !d.depth_write_enable)
       dss.depthCompareOp = d.depth_clear <= 0.5f
@@ -669,7 +665,7 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
           d.target_mask, d.shader_mask, d.recomp->ps_mrt_mask, i);
   }
   // DELTA_GPU_PIPETRACE: the colour-blend state a pipeline is actually built
-  // with, next to the PS's export mask -- the two have to agree or an
+  // with, next to the PS's export mask. The two have to agree or an
   // attachment is silently write-masked off (or written unblended).
   if (kGpuPipetrace &&
       (kGpuPipetrace == 1 || d.ps_addr == kGpuPipetrace)) {
@@ -740,7 +736,7 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
              "recomp vs=%#llx ps=%#llx", (unsigned long long)d.vs_addr,
              (unsigned long long)d.ps_addr);
   // Every pipeline a title actually draws with is built here, and this was the
-  // one creation path that never persisted the driver's cache -- so each run
+  // one creation path that never persisted the driver's cache, so each run
   // re-paid the driver's compile for the whole game and hitched again.
   SavePipelineCache();
   return g_recomp_cache.Store(key, std::move(rp));

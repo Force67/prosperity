@@ -104,15 +104,14 @@ extern "C" u32 krnl_syscall_errno(u64 raw) {
 }
 
 #if defined(DELTA_BACKEND_NATIVE)
-// Per-thread stack for syscall handlers -- the emulator's equivalent of a
-// kernel stack. The native backend runs guest code on the host thread directly,
-// so a handler would otherwise execute on whatever stack the guest is using,
-// and a title that runs jobs on FIBERS gives those a stack of its own choosing:
-// SotC's are 16 KiB with the fiber's saved context sitting at the bottom, which
-// a handler's host frames (a std::mutex wait, a printf, an allocation) walk
-// straight through. The corruption showed up as a fiber resuming into the
-// middle of glibc's free().
-//
+// Per-thread stack for syscall handlers, the emulator's equivalent of a kernel
+// stack. The native backend runs guest code on the host thread directly, so a
+// handler would otherwise execute on whatever stack the guest is using, and a
+// title that runs jobs on FIBERS gives those a stack of its own choosing:
+// SotC's are 16 KiB with the fiber's saved context at the bottom, which a
+// handler's host frames (a std::mutex wait, a printf, an allocation) walk
+// straight through (observed as a fiber resuming into the middle of glibc's
+// free()).
 // Returns 0 when no switch is wanted, which is also how nesting is handled: a
 // guest callback invoked from a handler makes its syscalls on the stack we
 // already switched to, and it just grows further down.
@@ -195,8 +194,8 @@ static const bool g_scHistDump = [] {
 // above. Replaces the bare `call handler` so the guest sees faithful errors.
 static uintptr_t emit_bsd_trampoline(const void *handler, u32 sid,
                                      bool trace, bool count) {
-  // The two handlers that never return -- they longjmp out of the guest call
-  // chain (cpu::exitGuestThread) -- must stay on the guest stack: glibc's
+  // The two handlers that never return (they longjmp out of the guest call
+  // chain, cpu::exitGuestThread) must stay on the guest stack: glibc's
   // longjmp check rejects a jump to a frame that is not on the current stack.
   // Neither needs the room anyway.
   const bool ownStack = sid != 1 /*exit*/ && sid != 431 /*thr_exit*/;
@@ -291,7 +290,6 @@ uintptr_t lv2_trampoline(const void *handler, u32 sid) {
 // its plain-open fallback (Demon's Souls reported every asset as FileNotFound
 // this way). ENOSYS makes the libkernel wrapper return a negative SCE error
 // and the engine falls back to open/read, which the VFS serves fine.
-// TODO: fold into lv2/ps5/table.cpp once that file is free to edit.
 static int PS4ABI sys_apr_unavailable() { return -SysError::eNOSYS; }
 
 uintptr_t lv2_lookup(u32 sid) {

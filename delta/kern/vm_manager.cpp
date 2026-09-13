@@ -139,7 +139,7 @@ void vmManager::setRangeName(u8 *ptr, size_t size, const char *name) {
   // The kernel (vm_map_set_name) allocates the name storage per entry; mirror
   // that with a strdup'd copy so the field outlives the caller's buffer. The
   // VMA never frees entry names, so repeated naming leaks a small string each
-  // time -- names are handed out rarely (thread stacks), so that is fine.
+  // time. Names are handed out rarely (thread stacks), so that is fine.
   if (!name)
     return;
   size_t n = strlen(name);

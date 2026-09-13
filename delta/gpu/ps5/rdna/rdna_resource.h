@@ -82,7 +82,7 @@ struct ScalarWrite {
 // SGPRs an SOP1 writes, from the gfx10 opcode table (LLVM SOPInstructions.td
 // SOP1_Real_gfx10). RDNA renumbered the whole block: the 64-bit saveexec family
 // GFX7 puts at 0x24-0x2b is still there, but gfx10 added the wave32 (b32) forms
-// at 0x3c-0x47 and four more 64-bit ones at 0x37-0x3b -- including
+// at 0x3c-0x47 and four more 64-bit ones at 0x37-0x3b, including
 // s_andn1_saveexec_b64, which Demon's Souls' G-buffer shaders use. Reading one
 // of those as a single-dword write leaves the second SGPR looking like live
 // user data, which is exactly how a stale value reaches a descriptor.
@@ -198,7 +198,7 @@ ScalarWrites PossibleScalarWrites(const gpu::gcn::Inst& inst,
 // that write ran on every path to the use, ran exactly once, and is an
 // operation ScalarEval models. A compute dispatch writes guest memory, so a
 // descriptor built out of a register that fails any of the three is declined
-// rather than guessed -- and which one it failed is reported, so the gap is
+// rather than guessed, and which one it failed is reported, so the gap is
 // visible rather than just a count.
 struct ScalarReplayPlan {
   static constexpr u32 kRegs = 136;
@@ -230,7 +230,7 @@ struct ScalarReplayPlan {
   std::vector<u32> targets;
   bool indirect = false;  // s_setpc: control may reach anywhere from anywhere
   // Basic blocks and their dominator tree. "A branch lands between the write
-  // and the use" is not the question -- a descriptor is routinely built in one
+  // and the use" is not the question. A descriptor is routinely built in one
   // arm of an if and used at the join, and every path still runs the write.
   // The question is whether the write DOMINATES the use, which is what this
   // answers. Astro Bot's frame is largely compute, and the blunt test declined
@@ -268,7 +268,7 @@ struct VBuffer {
   u32 stride = 0;
   u32 num_records = 0;
   // The GCN (data, number) format pair the shared renderer speaks, mapped from
-  // `gfmt` -- which is what the descriptor actually encodes.
+  // `gfmt`, which is what the descriptor actually encodes.
   u32 dfmt = 0;
   u32 nfmt = 0;
   u32 gfmt = 0;

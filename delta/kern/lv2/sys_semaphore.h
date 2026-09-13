@@ -25,14 +25,14 @@ class proc;
 // and reads half-built / null state.
 //
 // Kernel osem object (0x54 bytes):
-//   +0x00  mtx     lock        -- "osem mtx"
-//   +0x20  cv      cond        -- "osem cv"
-//   +0x30  void*   waiters.fst -- sleepq head
-//   +0x38  void*   waiters.lst -- sleepq tail
-//   +0x40  int32   count       -- current available units
-//   +0x44  int32   attr        -- create flags (byte +0x45 bit 0x10 = deleted)
-//   +0x48  int32   initCount   -- value reset to on cancel(setCount<0)
-//   +0x4c  int32   maxCount    -- ceiling; post past this is EINVAL
+//   +0x00  mtx     lock        = "osem mtx"
+//   +0x20  cv      cond        = "osem cv"
+//   +0x30  void*   waiters.fst = sleepq head
+//   +0x38  void*   waiters.lst = sleepq tail
+//   +0x40  int32   count       = current available units
+//   +0x44  int32   attr        = create flags (byte +0x45 bit 0x10 = deleted)
+//   +0x48  int32   initCount   = value reset to on cancel(setCount<0)
+//   +0x4c  int32   maxCount    = ceiling; post past this is EINVAL
 //   +0x50  int32   nwaiters
 class semaphore : public kObject {
 public:

@@ -89,14 +89,14 @@ u64 CsWritebackGeneration();
 bool CsRangeDirtyOverlapping(u64 base, u64 bytes);
 
 // A CP DMA immediate fill over guest memory. When the range covers a live
-// render target that is how the title clears it -- there is no clear packet on
-// this hardware -- so the target takes a pending clear with the filled value.
+// render target that is how the title clears it (there is no clear packet on
+// this hardware), so the target takes a pending clear with the filled value.
 void NoteMemoryFill(Renderer& renderer,
                     u64 base,
                     u64 bytes,
                     u32 value);
 
-// Does `addr` fall inside a compute staging range -- guest memory the renderer
+// Does `addr` fall inside a compute staging range, i.e. guest memory the renderer
 // snapshots and copies back? A guest fault on memory the guest alone should own
 // wants that answered on the spot: the crash handler asks, so a corrupted heap
 // word can be attributed to (or cleared of) the compute writeback without a

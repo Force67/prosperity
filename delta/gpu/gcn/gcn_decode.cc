@@ -217,7 +217,7 @@ u32 CodeLength(const u32* code, u32 max_dwords) {
   // shader LONGER than the window is exactly the case worth getting right.
   // Decoding a prefix stops at the first s_endpgm, which in a shader with an
   // early-out is not the end, and every branch past that point then lands on
-  // whatever follows the code -- 0xd0d0d0d0 fill, in GTA:SA's deferred
+  // whatever follows the code (0xd0d0d0d0 fill, in GTA:SA's deferred
   // lighting dispatch, which the translator rejected as an unknown encoding.
   if (code[0] == 0xBEEB03FFu) {
     const u64 d = (static_cast<u64>(code[1]) + 1) * 2;
@@ -332,7 +332,7 @@ std::vector<u8> ComputeReachability(const Program& program) {
         // it jumps through, and the callee returns with s_setpc_b64. Its
         // successor is therefore the next instruction, not "any block". Every
         // vertex shader that reaches its fetch shader this way opens with one,
-        // so calling it indirect retained the whole program -- including the
+        // so calling it indirect retained the whole program, including the
         // compiler's padding past the final s_endpgm, which decodes as garbage.
         // GTA:SA lost 59 of its 128 vertex shaders to unsupported ops that its
         // code does not contain.

@@ -7,7 +7,7 @@ Rules enforced (see delta/gpu/README.md):
   ps5/     may include gpu/ps5/, gpu/gcn/, gpu/rhi/, gpu/guest_memory.h
            (the RDNA2 path reuses the GCN->SPIR-V translator infrastructure)
   vulkan/  may include gpu/vulkan/, gpu/rhi/, gpu/shaders/, gpu/guest_memory.h,
-           gpu/gcn/ (recompiled-program types only) -- never a command
+           gpu/gcn/ (recompiled-program types only), never a command
            processor or register file
   tests/   may include anything in gpu/
 Module-root headers (gpu/guest_memory.h, gpu/gpu_check.h, gpu/gpu_perf.h) are

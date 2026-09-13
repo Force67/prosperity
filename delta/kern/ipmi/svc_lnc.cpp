@@ -26,7 +26,7 @@ enum {
   // libSceSystemService+0xdfa0 invokes it once at init and caches what comes
   // back. An empty (zeroed) reply means appId 0, which does not match the
   // SceShellCoreUtilAppFocus pattern, so GetStatus reports the title overlaid
-  // by system UI -- and a title that believes that renders nothing at all.
+  // by system UI, and a title that believes that renders nothing at all.
   kLncGetAppStatusPs5 = 0x30010,
 };
 

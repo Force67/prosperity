@@ -7,7 +7,7 @@
  *
  * Two windows, because a PS5 title's allocations are not all in one place. The
  * GPU aperture is where the allocator hands out the things the command
- * processor follows -- command buffers, register images, state blocks -- and is
+ * processor follows (command buffers, register images, state blocks) and is
  * narrow enough to reject a mis-parsed packet field. Everything else a packet
  * may name (shader code, a fence label, a surface) can sit anywhere in the user
  * map, so it gets only the wide test.

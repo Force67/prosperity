@@ -26,7 +26,7 @@ namespace {
 // Registers per space, so a LOAD_*_REG range can never spill into the next one.
 // A LOAD_SH_REG whose range ran long wrote zeros from its (empty) shadow image
 // straight over CB_COLOR0_BASE at 0xA318, unbinding the render target that
-// op 0x49 had just set -- every colour draw after it hit no target and the
+// op 0x49 had just set, so every colour draw after it hit no target and the
 // frame came out black.
 constexpr u32 kRegSpaceSize = 0x400;
 
@@ -46,7 +46,7 @@ struct BlendObject {
 
 // The blend object is recognised by its per-target array: the 15 entries at
 // pairs-20..pairs-6 carry tags 1..0xF. Requiring that keeps a block which
-// merely ENDS in some OTHER type-1 object from being read as blend state --
+// merely ENDS in some OTHER type-1 object from being read as blend state –
 // doing so zeroed the write mask and silently deleted the draw.
 bool EndsWithBlendArray(const u32* p, u32 num_pairs) {
   for (u32 k = 0; k < 15; k++) {
@@ -63,7 +63,7 @@ bool EndsWithBlendArray(const u32* p, u32 num_pairs) {
 // pairs-23 and CB_BLEND0_CONTROL at pairs-24, followed by two spares, the
 // per-target array and five more. The object is truncatable: a shorter tail
 // stops before the mask field, which then means "writes nothing". That is how a
-// clear quad says it must not touch colour -- Minecraft ends every frame with
+// clear quad says it must not touch colour. Minecraft ends every frame with
 // one, and taking it as a normal draw overwrote the composited UI with white.
 BlendObject ReadBlendObject(Regs& regs,
                             u32 base,
@@ -73,7 +73,7 @@ BlendObject ReadBlendObject(Regs& regs,
   // The array can also arrive as a block of its OWN, the object's first four
   // entries having gone out with the draw's state in the block before it (57
   // pairs + 21, against 78 in one). The object is 25 entries either way, so
-  // joining the two puts the mask back 23 from the end -- in the earlier block.
+  // joining the two puts the mask back 23 from the end, in the earlier block.
   // Read apart, the mask stays whatever the previous draw left, which is how
   // the quad that ends Minecraft's loading screen painted flat white over it.
   static u64 prev_addr = 0;
@@ -149,8 +149,8 @@ bool AnchorColorTarget(Regs& regs,
     regs[mmCB_COLOR0_ATTRIB2] = attrib2;
     // A block carrying a base AND a valid colour format IS a colour-target
     // bind, so slot 0 is written. If the block brought no blend tail its write
-    // mask is unknown, and a default 0 reads as "writes nothing" -- which would
-    // drop the very draw this block set up.
+    // mask is unknown, and a default 0 reads as "writes nothing", which would
+    // drop the draw this block set up.
     if (!blend_applied && !(regs[mmCB_TARGET_MASK] & 0xF))
       regs[mmCB_TARGET_MASK] |= 0xF;
     TraceRegBlockAnchor(k, rt, info, w, h);
@@ -206,8 +206,8 @@ void LoadRegImage(Regs& regs, u32 base, const u32* body, u32 count) {
 
   // LOAD_*_REG restores a register shadow the command processor is supposed to
   // have SAVED into. We do not model the save side, so a shadow the title never
-  // wrote reads as all zeros -- and applying it wipes live state: Skyrim binds
-  // CB_COLOR0_BASE with SET_CONTEXT_REG_INDIRECT (0x9f) and the very next
+  // wrote reads as all zeros, and applying it wipes live state: Skyrim binds
+  // CB_COLOR0_BASE with SET_CONTEXT_REG_INDIRECT (0x9f) and the next
   // LOAD_CONTEXT_REG zeroed it again, leaving every colour draw with no render
   // target. An all-zero shadow carries nothing to restore, so skip it.
   bool any_value = false;
@@ -245,7 +245,7 @@ void LoadRegBlock(Regs& regs, u32 base, const u32* body, u32 count) {
   // The whole guest map, not just the GPU aperture: a state block is CPU-built
   // data the GPU only reads, so a title is free to put it wherever it built it.
   // Demon's Souls submits 23% of its context blocks out of two places the
-  // aperture test rejected -- the AGC system block at 0xfe0_xxxxxxx, which sits
+  // aperture test rejected: the AGC system block at 0xfe0_xxxxxxx, which sits
   // just under the 64 GiB floor, and its own eboot data at 0x2014_xxxxxxxx,
   // far over the 1 TiB ceiling. Each one rejected is a whole draw's state
   // (render target, blend, write mask) left at whatever the last draw set. The

@@ -4,7 +4,7 @@
  * Guest thread naming. Titles rarely call sys_thr_set_name; the common
  * convention is tagging the thread's STACK via sys_mname ("RenderFlip",
  * "Game Render", ...). Carry those tags onto the host threads so every
- * host-side view of the process -- the wait probe, /proc, gdb, perf --
+ * host-side view of the process (the wait probe, /proc, gdb, perf)
  * shows which guest thread is which.
  *
  * Two directions, because the tag and the thread can start in either order:
@@ -90,7 +90,7 @@ void nameThreadsForRange(const void *ptr, size_t len, const char *name) {
   // CONTAINMENT, not overlap. A title tags a region that can span several
   // guest stacks (SotC's "Resource Loading" tag covers a range overlapping the
   // FIOS and job-worker stacks), and renaming on any overlap gave four
-  // unrelated threads the same name -- which is worse than no name, because it
+  // unrelated threads the same name, which is worse than no name, because it
   // makes a wait-probe report look like one subsystem is wedged four times.
   // Only rename a thread whose whole stack lies inside the tagged range.
   for (const auto &e : g_stacks) {

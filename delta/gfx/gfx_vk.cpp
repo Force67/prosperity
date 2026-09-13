@@ -274,7 +274,7 @@ void destroyRenderSemaphores() {
 
 // Park the current semaphores instead of destroying them: the presentation
 // engine may still wait on one after vkDeviceWaitIdle returns. Whatever was
-// parked by the previous recreation is destroyed now -- by then a full
+// parked by the previous recreation is destroyed now, and by then a full
 // swapchain generation (plus another idle) has passed.
 void retireRenderSemaphores() {
   for (VkSemaphore sem : g.retiredRenderSems)

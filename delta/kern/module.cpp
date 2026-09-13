@@ -134,7 +134,6 @@ bool smodule::fromVfs(const base::String &guestPath) {
 }
 
 bool smodule::fromMem(base::UniquePointer<u8[]> data) {
-  /*TODO: figure out a way of getting rid of the back buffer*/
   this->data = std::move(data);
 
   elf = getOffset<ELFHeader>(0);
@@ -187,7 +186,6 @@ bool smodule::fromMem(base::UniquePointer<u8[]> data) {
 bool smodule::unload() {
   data = {};
 
-  // todo: unload memory from VMA
   return true;
 }
 
@@ -266,7 +264,6 @@ void smodule::digestDynamic() {
       break;
     case DT_SCE_EXPLIB:
     case DT_SCE_IMPLIB: {
-      /*for now, in the future we also want to store explibs*/
       auto &e = impLibs.emplace_back();
       e.id = d->un.value >> 48;
       e.exported = d->tag == DT_SCE_EXPLIB;
@@ -505,7 +502,7 @@ void smodule::plantGuestBreakpoints() {
 
 // DELTA_MODCHECK=<name substring>: watch a module's NON-WRITABLE load segments
 // for corruption. Read-only data must never change after load, so a digest that
-// moves means something scribbled on the image -- which for a module carrying a
+// moves means something scribbled on the image, which for a module carrying a
 // blob (libcohtml's V8 snapshot) shows up much later as unparseable data.
 void smodule::startModuleWatch() {
   const char *want = kModCheck;
@@ -666,7 +663,7 @@ bool smodule::mapImage() {
     utl::protectMem(info.ripZone, info.ripZoneSize, utl::pageProtection::rwx);
   }
 
-  // step 0: map data
+  // map data
   for (u16 i = 0; i < elf->phnum; i++) {
     const auto *s = &segments[i];
     if (s->type == PT_LOAD || s->type == PT_SCE_RELRO) {
@@ -687,7 +684,7 @@ bool smodule::mapImage() {
   // that; gate the relaxation to PS5 so PS4 handling is unchanged.
   const bool ps5 = process->getPlatform() == proc::platform::ps5;
 
-  // step 1: lift code (x86 host only). The lifter rewrites syscall/int/fs reads
+  // Lift code (x86 host only). The lifter rewrites syscall/int/fs reads
   // in place so raw guest x86-64 runs natively. On aarch64 the FEXCore JIT
   // handles all three, so the image is left byte-for-byte intact.
 #if defined(DELTA_BACKEND_NATIVE)
@@ -700,7 +697,6 @@ bool smodule::mapImage() {
       runtime::codeLift lift(info.ripZone, ripEnd);
       LOG_ASSERT(lift.init());
 
-      /*TODO: we should really introduce a cache here*/
       lift.transform(getAddress<u8>(s->vaddr), s->filesz);
     }
   }
@@ -718,7 +714,7 @@ bool smodule::mapImage() {
   }
 #endif
 
-  // step 2: apply page protections
+  // apply page protections
   for (u16 i = 0; i < elf->phnum; i++) {
     const auto *s = &segments[i];
     if (s->type == PT_LOAD) {
@@ -742,7 +738,6 @@ bool smodule::mapImage() {
           return utl::pageProtection::r;
         default:
           return utl::pageProtection::priv;
-          /*todo: invalid parameter bugcheck*/
         }
       };
 
@@ -778,7 +773,7 @@ static bool decodeNid(const char *name, u64 &lid, u64 &mid) {
   // Obfuscated imports are "<11-char nid>#<libid>#<modid>" where both ids are
   // variable-length base64: one char for 0..63, two chars once an index passes
   // 63 (games importing from >64 libraries hit the long form, which shifts the
-  // second '#' — the ids can't be read at fixed offsets).
+  // second '#'. The ids can't be read at fixed offsets.
   const char *h1 = std::strchr(name, '#');
   if (!h1)
     return false;
@@ -803,26 +798,25 @@ bool smodule::resolveObfSymbol(const char *name, uintptr_t &ptrOut) {
     u64 hid = 0;
     if (!runtime::decode_nid(name, 11, hid))
       return false;
-    // A few system libraries must run HLE on PS5 because their LLE backend needs a
-    // service daemon we don't host:
+    // A few system libraries must run HLE on PS5 because their LLE backend
+    // needs a service daemon we don't host:
     //   - libSceVideoOut: its .bss port table never registers, so the real
-    //     sceVideoOutOpen returns 0x802900ff and the renderer bails before creating
-    //     its command buffers (null AGC DrawCommandBuffer crash).
+    //     sceVideoOutOpen returns 0x802900ff and the renderer bails before
+    //     creating its command buffers (null AGC DrawCommandBuffer crash).
     //   - libSceUserService: the real sceUserServiceInitialize spins allocating
-    //     buffers forever waiting on the SceUserService IPMI daemon, stalling the
-    //     engine's RenderInit before it ever submits GPU work.
+    //     buffers forever waiting on the SceUserService IPMI daemon, stalling
+    //     the engine's RenderInit before it ever submits GPU work.
     //   - libScePad: the real one reads controller state the pad daemon writes
-    //     into its shared block, so the title only ever sees a disconnected pad
-    //     and no input. The HLE feeds it SDL keyboard/gamepad instead.
+    //     into its shared block, so the title only ever sees a disconnected
+    //     pad. The HLE feeds it SDL keyboard/gamepad instead.
     //   - libSceSaveData: sceSaveDataInitialize3 opens an IPMI session to the
     //     save-data daemon; without it every call returns an error and a title
     //     that retries (Skyrim's boot state machine) spins at 100% CPU forever.
+    //   - libSceIme / libSceSystemService: one export each; the real ones abort
+    //     or fail in a way titles treat as fatal.
     // NIDs are globally unique, so probing each forced-HLE table by name is safe
-    // (a userService NID only ever matches the userService table). Everything else
-    // (incl. libSceGnmDriver/AGC, which run LLE fine) stays LLE.
-    //   - libSceIme / libSceSystemService: one export each (sceImeKeyboardOpen,
-    //     sceSystemServiceReportAbnormalTermination); the real ones abort or
-    //     fail in a way titles treat as fatal. Everything else stays LLE.
+    // (a userService NID only ever matches the userService table). Everything
+    // else (incl. libSceGnmDriver/AGC, which run LLE fine) stays LLE.
     static const char *const kPs5ForcedHle[] = {
         "libSceVideoOut", "libSceUserService",   "libScePad",
         "libSceSaveData", "libSceSystemService", "libSceIme",
@@ -841,7 +835,7 @@ bool smodule::resolveObfSymbol(const char *name, uintptr_t &ptrOut) {
     // Bind to the module the import actually names. A title that ships SDK
     // modules in /app0/sce_module (libc.prx) gets the same NIDs from its own
     // copy and from the firmware's libSceLibcInternal, but only the named one
-    // has the title's SceLibcMallocReplace installed in its dispatch table --
+    // has the title's SceLibcMallocReplace installed in its dispatch table –
     // resolving by load order alone sends Skyrim's malloc/memalign into
     // libSceLibcInternal's 16 MiB internal arena instead of the game's manager.
     u64 libid = 0, modid = 0;
@@ -866,7 +860,7 @@ bool smodule::resolveObfSymbol(const char *name, uintptr_t &ptrOut) {
     // Shims for exports a given firmware doesn't have: newer-SDK titles import
     // them and would otherwise land on the badcall stub (vprx/ps5/*_ps5.cpp says
     // what each works around). Consulted only once no loaded module exports the
-    // NID, so the real function wins where it exists -- all seven AGC shims are
+    // NID, so the real function wins where it exists. All seven AGC shims are
     // real exports from firmware 13.60 on, and forcing them there would report
     // "unsupported" over a working implementation.
     static const char *const kPs5MissingExportShims[] = {
@@ -891,7 +885,6 @@ bool smodule::resolveObfSymbol(const char *name, uintptr_t &ptrOut) {
 
   const char *libname = nullptr;
 
-  // TODO: could be done nicer
   for (auto &mod : impLibs) {
     if (mod.id == static_cast<i32>(libid)) {
       libname = mod.name;
@@ -1065,7 +1058,6 @@ bool smodule::applyRelocations() {
     if (bind == STB_LOCAL)
       symVal = sym->st_value;
     else if (bind == STB_GLOBAL || bind == STB_WEAK) {
-      /*relative offset*/ // TODO (force): should we check MID here?
       if (sym->st_value)
         symVal = getAddressNPTR<uintptr_t>(sym->st_value);
       else {
@@ -1156,8 +1148,6 @@ uintptr_t smodule::getExport(u64 nid) {
 }
 
 uintptr_t smodule::getSymbolFullName(const char *name) {
-  // TODO: fix elf hash lookup
-
   // no export hash table (module exports nothing)
   if (!hashes || !symbols || !strtab.ptr)
     return 0;
@@ -1277,7 +1267,7 @@ void smodule::installEHFrame() {
     auto offset = *reinterpret_cast<i32 *>(current);
     // pc-relative means relative to where this field is in the MAPPED image.
     // exinfo points into the on-disk file buffer, so using it as the pc gave a
-    // host heap address and every module failed the in-image check below --
+    // host heap address and every module failed the in-image check below –
     // which is why no module ever got an .eh_frame.
     const size_t field_off = static_cast<size_t>(
         current - reinterpret_cast<u8 *>(exinfo));
@@ -1324,12 +1314,12 @@ void smodule::installEHFrame() {
       break;
     data_buffer_end += advance;
   }
-  // A terminating zero-length CFI is optional -- most toolchains just end the
-  // section -- and the trailing encodings vary. None of that changes where
+  // A terminating zero-length CFI is optional (most toolchains just end the
+  // section), and the trailing encodings vary. None of that changes where
   // .eh_frame starts, which is all the guest unwinder needs from us (it finds
   // an FDE through the header's binary-search table, not by walking). Requiring
   // a terminator left eh_frame_addr at 0 for EVERY module, so a C++ throw in a
-  // guest module found no unwind info and went straight to std::terminate --
+  // guest module found no unwind info and went straight to std::terminate –
   // Minecraft's world creation aborts inside libcohtml that way. Fall back to
   // the rest of the image when the walk doesn't terminate cleanly.
   info.ehFrameheaderAddr = data_buffer;

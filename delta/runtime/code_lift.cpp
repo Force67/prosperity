@@ -183,7 +183,7 @@ void codeLift::emit_syscall(u8 *base, u32 idx) {
     // `jb cerror; ret`, which is what turns the BSD carry/errno return into the
     // -1 + errno every sce* wrapper tests for. Jumping would return past that
     // tail straight to the wrapper's caller, so a failing syscall arrived as
-    // rax = errno instead of -1 -- and a wrapper like sceKernelPollEventFlag
+    // rax = errno instead of -1, and a wrapper like sceKernelPollEventFlag
     // (`mov ecx,eax; xor eax,eax; cmp ecx,-1`) then reported success.
     *(u16 *)base = 0xB848;
     *(u64 *)(base + 2) = address;

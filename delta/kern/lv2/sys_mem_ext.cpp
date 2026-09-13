@@ -41,7 +41,7 @@ namespace krnl {
 // honour a partial munmap; stale guest pointers then read stable garbage
 // rather than faulting). The BOOKKEEPING, however, must be released: titles
 // churn VA (SotC recycles multi-MB fiber/streaming regions constantly) and key
-// real allocator state off sceKernelVirtualQuery's [start, end) — leaving dead
+// real allocator state off sceKernelVirtualQuery's [start, end), leaving dead
 // entries in the VMA made later queries report stale bounds.
 int PS4ABI sys_munmap(void *addr, size_t len) {
   static std::atomic<bool> warned{false};
@@ -53,7 +53,7 @@ int PS4ABI sys_munmap(void *addr, size_t len) {
     audioDaemonForgetRange(addr, len);
     // One exception to "keep the host pages": a whole PROT_NONE reservation.
     // Nothing has data in it by definition, and leaving it mapped makes the
-    // next reservation at that address get relocated -- V8 reserves a padded
+    // next reservation at that address get relocated. V8 reserves a padded
     // region, frees it and re-reserves an exact sub-range, and a stale pointer
     // into the freed padding then reads memory that is still there instead of
     // faulting where the mistake is.
@@ -190,7 +190,7 @@ int PS4ABI sys_virtual_query(const void *addr, int /*flags*/, void *info,
       std::memcpy(vq + 0x10, &host.start, sizeof(u64));
       if (infoSize >= 0x1C + sizeof(int)) {
         // Host PROT_READ/WRITE happen to be SCE's CPU read/write bits, but a
-        // host mapping carries no GPU ones -- and a library validating a
+        // host mapping carries no GPU ones, and a library validating a
         // buffer it will hand to hardware demands them. libSceVdecCore's check
         // (its +0x17c50) rejects any range without prot & 0x30 and fails the
         // whole decoder instance with error 5, which is what kept Astro Bot's
@@ -226,7 +226,7 @@ int PS4ABI sys_virtual_query(const void *addr, int /*flags*/, void *info,
   // Astro Bot's decoder buffer sits inside a 1.9 GiB reservation, so the query
   // answered prot=0 and libSceVdecCore rejected the buffer (its +0x17c50 wants
   // prot & 0x2 and prot & 0x30). If the host really has accessible pages
-  // there, that mapping is the truth -- an untouched PROT_NONE reservation has
+  // there, that mapping is the truth: an untouched PROT_NONE reservation has
   // no host protection either, so it still reads as uncommitted.
   if (!region->sceProt && !static_cast<u32>(region->prot)) {
     if (const HostMapping host = hostMappingOf(addr); host.prot) {
@@ -299,7 +299,7 @@ int PS4ABI sys_virtual_query(const void *addr, int /*flags*/, void *info,
               region->hasPhys ? " (dmem)" : "");
   if (infoSize >= 0x21) {
     // flexible(0x01) | direct(0x02, GPU mem) | committed(0x10). A MAP_VOID
-    // reservation is none of these -- titles branch on isCommitted to decide
+    // reservation is none of these; titles branch on isCommitted to decide
     // whether a range still needs a real commit.
     vq[0x20] = region->reserved
                    ? 0x00
@@ -368,7 +368,7 @@ int PS4ABI sys_batch_map(u32 /*handle*/, u32 /*flags*/,
       // Sharing the dmem backing is NOT safe for PS4 as things stand. SotC
       // maps one physical offset at 1664 successive VAs and never releases
       // them, so a shared store aliases every historical mapping at once and
-      // the title's memory dissolves -- measured twice, once as-is and once
+      // the title's memory dissolves. Measured twice, once as-is and once
       // with sys_munmap dropping the alias on release: both times SotC stopped
       // rendering even its intro (0 lit frames). Whatever the guest is doing
       // with that offset has to be understood before this can be turned on.
@@ -432,7 +432,7 @@ int PS4ABI sys_set_vm_container(u32 op) {
 //
 // The physical offset is the source of truth: map the VA to the shared dmem
 // backing store at that offset (MAP_SHARED) so every VA that maps the same
-// physOffset -- a CPU-written GPU command buffer and the GPU's own view of it --
+// physOffset (a CPU-written GPU command buffer and the GPU's own view of it)
 // aliases the same bytes. Without this the two views were independent anonymous
 // pages and the command processor read all-zero DCBs. Falls back to anonymous
 // memory when the backing is unavailable. Returns the mapped VA (rax).
