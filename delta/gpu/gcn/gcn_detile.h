@@ -25,16 +25,11 @@
 
 namespace gpu::gcn {
 
-// Split the row range [0, rows) into chunks and invoke fn(y0, y1) on each
-// across an internal persistent worker pool, joining before return. Falls back
-// to a single fn(0, rows) call when the multithreaded path is disabled
-// (DELTA_GPU_DETILE_MT=0) or the workload is too small to be worth splitting.
-// DELTA_GPU_DETILE_THREADS sets the total lane count, including the caller.
-// The pool is owned entirely by this module; callers see a plain blocking call
-// and need no synchronization of their own. The detilers use it for 8-row
-// microtile bands; the GPU staging paths reuse it for row-major
-// format-convert loops. Only one row-parallel region runs at a time (calls are
-// serialized), matching the single-threaded GPU pipeline.
+// Split [0, rows) into chunks and run fn(y0, y1) across a persistent worker pool,
+// joining before return; single fn(0, rows) when MT is off or the workload is tiny.
+// DELTA_GPU_DETILE_THREADS sets the lane count (including the caller). Pool owned by
+// this module; callers get a plain blocking call, no synchronization. Used for 8-row
+// microtile bands and the staging paths' row-major converts; one region at a time.
 void DetileParallelRows(u32 rows,
                         const std::function<void(u32, u32)>& fn);
 
@@ -101,11 +96,10 @@ void CopyGfx10ImageContents(const TextureLayout32& layout,
                            const void* src,
                            void* dst);
 
-// Compute the complete physical layout of a one-sample 2D/2D-array image whose
-// elements are `elem_bytes` wide (2/4 = a pixel; 8/16 = a BCn block, with
-// width/height/pitch given in blocks). Mips are stored mip-major; each mip
-// contains all array layers. Later macro-tiled mips are downgraded to 1D
-// microtiling when they no longer span a macro tile.
+// Full physical layout of a 1-sample 2D/2D-array image with `elem_bytes`-wide elements
+// (2/4 = pixel; 8/16 = BCn block, dims in blocks). Mip-major; each mip holds all array
+// layers; later macro-tiled mips downgrade to 1D microtile when they stop spanning a
+// macro tile.
 bool BuildTextureLayout32(TextureLayout32& out,
                           u32 width,
                           u32 height,

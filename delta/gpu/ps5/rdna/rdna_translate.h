@@ -38,15 +38,11 @@ struct NggConfig {
 bool HasNggTransfer(const u32* code);
 bool HasNggPrimitiveExports(const u32* code);
 
-// Recompile an RDNA2 VS+PS pair. vs_code/ps_code are guest pointers to the
-// RDNA2 bytecode; the user-data arrays are the shader-stage user SGPRs (used to
-// read the fetch-shader pointer during translation). On gfx10.3 the "VS" is the
-// merged ES/GS NGG vertex program (read from the GS SH block). ps_input_ena is
-// SPI_PS_INPUT_ENA: it fixes the PS input-VGPR layout (frag-coord / face) the
-// shader reads directly, not through v_interp. gl_clip_space selects the
-// guest's clip convention (PA_CL_CLIP_CNTL.DX_CLIP_SPACE_DEF == 0): the VS then
-// remaps its z from [-w,w] to Vulkan's [0,w]. Returns a gpu::gcn::Recompiled
-// (r.ok == false when a required feature is unsupported).
+// Recompile an RDNA2 VS+PS pair (guest pointers + per-stage user SGPRs, used for the
+// fetch-shader pointer). On gfx10.3 the "VS" is the merged ES/GS NGG program (GS SH
+// block). ps_input_ena fixes the PS input-VGPR layout (frag-coord/face) read directly,
+// not via v_interp; gl_clip_space selects the guest's clip convention (the VS remaps z
+// from [-w,w] to Vulkan's [0,w]). r.ok = false on unsupported features.
 gpu::gcn::Recompiled Recompile(const u32* vs_code,
                                const u32* ps_code,
                                const u32* vs_user_data,
@@ -61,12 +57,10 @@ gpu::gcn::Recompiled Recompile(const u32* vs_code,
                                u32 ps_num_interp = 0,
                                const NggConfig* ngg = nullptr);
 
-// What the fetch pointer contributes to a module's identity: a hash of the
-// attribute plan Recompile would parse out of it, and 0 when it parses to no
-// attributes at all. Not a hash of the code: the two user-data dwords the fetch pointer
-// is read from hold a plain per-draw constant buffer in some titles (Dead Cells
-// puts a fading alpha there), so hashing the bytes makes every draw a fresh
-// module and the title recompiles the same shader forever.
+// What the fetch pointer contributes to module identity: a hash of the attribute plan,
+// 0 when it parses to none. NOT a code hash: the two user-data dwords it comes from
+// hold a plain per-draw constant in some titles (Dead Cells: fading alpha), so hashing
+// bytes makes every draw a fresh module and the title recompiles forever.
 u64 FetchPlanHash(u64 fetch_addr);
 
 }  // namespace gpu::rdna

@@ -49,23 +49,19 @@ static_assert(sizeof(pup_entry) == 32);
 constexpr u32 kPupMagicPS4 = 0x1D3D154Fu;
 constexpr u32 kPupMagicPS5 = 0xEEF51454u;
 
-// Reader for a PS4/PS5 firmware update (.PUP). The outer container is parsed
-// here; segments are written out by extractAll(). Retail PUPs are encrypted, so
-// this path only works on already-decrypted images (e.g. a *.PUP.dec dump). For
-// a decrypted PS5 PUP the container segments (filesystem images, SLB2 blobs,
-// nested PUPs) are recovered in full; the encrypted SELF modules inside those
-// images still need the per-title crypto chain to become loadable .sprx.
+// PS4/PS5 firmware (.PUP) reader: outer container here, segments written by
+// extractAll(). Retail PUPs are encrypted; decrypted images (*.PUP.dec) recover
+// container segments in full (FS images, SLB2, nested PUPs), but the SELF modules
+// inside still need the per-title crypto chain to become loadable .sprx.
 class pupReader {
 public:
   explicit pupReader(const base::String &);
 
   bool load();
 
-  // Extract every non-special segment into outDir (which must already exist),
-  // named by its known firmware name or segment_<id>.<type>. zlib-compressed
-  // segments are inflated when possible. Returns a human-readable multi-line
-  // summary; sets `looksEncrypted` when the segments don't parse as plaintext
-  // (i.e. the PUP needs decryption we can't do here).
+  // Extract every non-special segment into outDir (must exist), named by firmware name
+  // or segment_<id>.<type>; inflate zlib segments when possible. Returns a summary and
+  // sets looksEncrypted when segments don't parse as plaintext.
   base::String extractAll(const base::String &outDir, bool &looksEncrypted);
 
   int segmentCount() const { return header.numSegments; }

@@ -19,11 +19,9 @@
 
 namespace gpu::vk {
 
-// An image in the resource cache: a render target keyed by its guest base
-// address, that also doubles as a sampleable texture (render-to-texture). This
-// is the unit of the resource model: RT-bind and texture-sample both resolve
-// to the same Image via the address page table, so render-to-texture/MRT "just
-// work".
+// One resource-model unit: a render target keyed by guest base address that also
+// samples as a texture, so RT-bind and texture-sample resolve to the same image via
+// the address page table and render-to-texture/MRT just work.
 struct RTarget {
   VkImage image = VK_NULL_HANDLE;
   ImageAllocation allocation;
@@ -52,12 +50,10 @@ struct RTarget {
   // layout already matches, or it reads what was there BEFORE those writes –
   // which is how SotC's composite sampled its scene target and got black.
   bool dirty_for_read = false;
-  // Layout the image holds once the last SUBMITTED work executes (stamped at
-  // EndFrame submit). `layout` tracks the recording timeline, which runs
-  // ahead of the GPU: a mid-frame submission (the compute path staging an
-  // RT-backed CS input) executes before this frame's still-recording
-  // barriers, so its own barriers must chain from, and restore, the
-  // submitted state, never `layout`.
+  // Layout once the last SUBMITTED work executes (stamped at EndFrame). `layout`
+  // tracks the recording timeline, which runs ahead: a mid-frame submission (compute
+  // staging an RT-backed CS input) must chain from and restore the submitted state,
+  // never `layout`.
   VkImageLayout submitted_layout = VK_IMAGE_LAYOUT_UNDEFINED;
   bool used_this_frame = false;
   u32 draws = 0;      // draws into this RT this frame
@@ -139,12 +135,10 @@ struct DepthTarget {
   bool stencil_used_this_frame = false;
   bool clear_pending = false;
   float clear_value = 1.0f;
-  // DB_HTILE_DATA_BASE of the last draw that bound this target, and whether
-  // something wrote over it since (the depth fast clear, see NoteDccWrite).
-  // A target with a known HTILE base is cleared by those writes alone, not
-  // on its first bind of every frame: the guest's frame does not line up with
-  // ours, and Astro Bot's depth prepass lands in the frame before the one
-  // that tests against it.
+  // DB_HTILE_DATA_BASE of the last draw that bound this target + whether something
+  // overwrote it since. A known HTILE base is cleared by those writes alone, not on
+  // every first bind: the guest's frame does not line up with ours (Astro Bot's depth
+  // prepass lands a frame early).
   u64 htile_base = 0;
   bool htile_clear_pending = false;
   bool htile_code_known = false;
@@ -159,12 +153,9 @@ extern std::unordered_map<u64, std::vector<DepthTarget>> g_depth_variants;
 // ActivateRtVariant); only the one in g_rts answers to the address.
 extern std::unordered_map<u64, std::vector<RTarget>> g_rt_variants;
 
-// Address -> image page table (the resource model's core). Maps a 64 KiB guest
-// page to the RT bases whose memory footprint covers it, so a sampled address
-// resolves to every overlapping live image in O(pages) instead of scanning the
-// whole cache. A page can be touched by several overlapping/aliased RTs
-// (double-buffer pairs, a pool of cycled scene buffers), so each page holds a
-// list.
+// Address -> image page table, the resource model's core: a 64 KiB guest page maps to
+// the RT bases whose footprint covers it, so a sampled address resolves to every
+// overlapping live image in O(pages). Pages hold lists (aliased/double-buffered RTs).
 constexpr u32 kRtPageShift = 16;  // 64 KiB
 extern std::unordered_map<u64, std::vector<u64>>& g_rt_pages;
 
@@ -182,20 +173,16 @@ DepthTarget* GetDepthRT(u64 base,
 VkDescriptorSet SnapshotRT(RTarget& rt);
 
 VkImageView SampledView(RTarget& rt, u32 swizzle, bool feedback = false);
-// Sampled view reinterpreted into `want` (same texel size) so the view's
-// numeric type matches the shader's OpTypeImage sampled type.
-// `used` takes the format the view was actually created with, which is not
-// always `want`: the caller needs it to decide whether the binding may be
-// filtered.
+// Sampled view reinterpreted into `want` (same texel size) so the numeric type matches
+// the shader's OpTypeImage; `used` returns the format actually created, which the
+// caller needs to decide whether the binding may be filtered.
 VkImageView SampledViewAs(RTarget& rt, u32 swizzle, VkFormat want,
                           VkFormat* used = nullptr);
 VkImageView SampledView(DepthTarget& depth, u32 swizzle);
 
-// Resolve a sampled guest address to the live image backing it (0 = none).
-// A sample names a render target by address alone, but one base can hold
-// several geometries (see ActivateRtVariant). Make the variant matching the
-// sampled geometry the live one when the live target cannot serve the sample.
-// Returns true if a usable target is live at `base` afterwards.
+// Resolve a sampled guest address to its live image (0 = none), making the variant
+// matching the sampled geometry live when the current one cannot serve the sample.
+// True if a usable target is live at `base` afterwards.
 bool ActivateSampledRtVariant(u64 base, u32 w, u32 h);
 bool ActivateSampledDepthVariant(u64 base, u32 w, u32 h);
 
@@ -211,20 +198,16 @@ VkImageView StencilSampledView(DepthTarget& depth);
 // same-frame clear destroys it. No-op when no compute range aliases the target.
 bool PreserveCsDepthBeforeClear(u64 base);
 
-// A write of `bytes` at `base` by a dispatch or a CP DMA fill. If it covers a
-// live target's DCC metadata it is that target's fast clear: the hardware
-// reads the clear code out of the metadata and never touches the pixels, so
-// nothing else in the stream says the target was cleared. `fill` is the dword
-// written when the packet carries it; a compute write is read back at the
-// next bind.
+// A dispatch/DMA write of `bytes` at `base` covering a live target's DCC metadata IS
+// that target's fast clear (the hardware reads the clear code from the metadata and
+// never touches pixels); turned into the lazy clear at the next bind. `fill` = the
+// dword when the packet carries it; a compute write is read back at the next bind.
 void NoteDccWrite(u64 base, u64 bytes, const u32* fill);
 
-// A dispatch wrote `bytes` at `base` through a raw buffer, i.e. not through
-// any image the compute bridge could carry into a target. Guest memory under
-// a target it overlaps is now newer than the image, so until a draw renders
-// into it again a sample of that address has to read the memory: Astro Bot
-// reuses the pages of its title-screen UI target for an exposure texel, and
-// the image is what the old surface last held.
+// A dispatch wrote `bytes` at `base` through a raw buffer, so guest memory under any
+// overlapping target is now newer than its image: until a draw renders again, a
+// sample must read the memory (Astro Bot reuses its UI target's pages for an
+// exposure texel).
 void NoteRawWrite(u64 base, u64 bytes);
 
 // A dispatch is about to write `base` at geometry (w, h): make that

@@ -67,11 +67,9 @@ void scanIds(const char *p, const char *end, u32 &maxId, bool &any) {
   }
 }
 
-// PS5 pkgs ship no playgo-chunk.dat; the chunk id space is in the pkg's
-// scenario JSON ("chunks": ["0-15", "17"] per scenario) or, for titles whose
-// JSON omits the list (Demon's Souls), a chunkdefs XML next to it
-// (<chunk id="23" ...>). Ids 0..max: a dense superset of a sparse set is
-// still "everything installed".
+// PS5 pkgs ship no playgo-chunk.dat; the chunk id space lives in the scenario JSON
+// ("chunks": ["0-15", "17"]) or, when omitted (Demon's Souls), a chunkdefs XML
+// beside it. Ids 0..max: a dense superset of a sparse set is still "installed".
 u32 ps5ChunkCount() {
   u32 maxId = 0;
   bool any = false;
@@ -117,13 +115,11 @@ u32 ps5ChunkCount() {
   return any ? maxId + 1 : 0;
 }
 
-// The real per-title count lives in /app0/sce_sys/playgo-chunk.dat (magic
-// "pgd\0", chunk_count is a u16 at 0x0A). A wrong count breaks multi-chunk
-// titles: Shadow of the Tomb Raider enumerates chunk loci 0..N during boot and,
-// when the count is too small, an unsigned `count - 0x50` underflows into a
-// ~4-billion-iteration loop that smashes the stack. Default to 0x50, the value
-// such titles treat as "the standard set, fully installed"; the pkgs we run
-// mostly ship no playgo-chunk.dat. DELTA_PLAYGO_CHUNKS overrides.
+// The real count lives in playgo-chunk.dat (magic "pgd\0", u16 at 0x0A). A wrong
+// count breaks multi-chunk titles: SOTTR enumerates loci 0..N and an unsigned
+// `count - 0x50` underflows into a ~4-billion-iteration stack-smashing loop when
+// the count is too small. Default 0x50 ("standard set, fully installed");
+// DELTA_PLAYGO_CHUNKS overrides.
 u32 chunkCount() {
   static u32 cached = 0;
   if (cached)

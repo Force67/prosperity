@@ -79,14 +79,11 @@ struct ScalarWrite {
   u32 count = 0;
 };
 
-// SGPRs an SOP1 writes, from the gfx10 opcode table (LLVM SOPInstructions.td
-// SOP1_Real_gfx10). RDNA renumbered the whole block: the 64-bit saveexec family
-// GFX7 puts at 0x24-0x2b is still there, but gfx10 added the wave32 (b32) forms
-// at 0x3c-0x47 and four more 64-bit ones at 0x37-0x3b, including
-// s_andn1_saveexec_b64, which Demon's Souls' G-buffer shaders use. Reading one
-// of those as a single-dword write leaves the second SGPR looking like live
-// user data, which is exactly how a stale value reaches a descriptor.
-// Everything unrecognised counts as a pair for the same reason.
+// SGPRs an SOP1 writes, from the gfx10 opcode table (LLVM SOP1_Real_gfx10). RDNA
+// renumbered the block: the 64-bit saveexec family stays at 0x24-0x2b, gfx10 adds
+// wave32 forms at 0x3c-0x47 and four more 64-bit ones at 0x37-0x3b (incl.
+// s_andn1_saveexec_b64, used by Demon's Souls' G-buffer shaders). Reading one as a
+// single-dword write leaves the second SGPR passing for live user data.
 inline u32 Sop1WriteDwords(u32 op) {
   switch (op) {
     case 0x03:  // s_mov_b32
@@ -174,13 +171,10 @@ inline ScalarWrite DecodeScalarWrite(const gpu::gcn::Inst& inst) {
   return {};
 }
 
-// Every SGPR an instruction may write, over-approximated, with `exact` set when
-// the dispatch-time replay (ScalarEval) either reproduces the value or clears
-// the register. DecodeScalarWrite above reports only the scalar ALU's exact
-// destinations; this one also reports the vector ops that land in an SGPR and
-// the wider forms, which is what stops a register the shader clobbered from
-// passing for user data. scc_trusted says whether SCC itself is still faithful,
-// which is what makes s_cselect exact.
+// Every SGPR an instruction may write, over-approximated; `exact` when ScalarEval
+// reproduces the value or clears the register. Wider than DecodeScalarWrite (which
+// covers scalar ALU only), so a clobbered register doesn't pass for user data;
+// scc_trusted gates s_cselect exactness.
 struct ScalarWrites {
   struct Range {
     u32 first = 0;
@@ -192,14 +186,11 @@ struct ScalarWrites {
 ScalarWrites PossibleScalarWrites(const gpu::gcn::Inst& inst,
                                   bool scc_trusted = false);
 
-// SGPRs whose live value ResolveBuffers reproduces faithfully. The replay walks
-// the instruction list once and in order, so what it holds at a use is what the
-// LAST write before that use left behind. That is the wave's value only when
-// that write ran on every path to the use, ran exactly once, and is an
-// operation ScalarEval models. A compute dispatch writes guest memory, so a
-// descriptor built out of a register that fails any of the three is declined
-// rather than guessed, and which one it failed is reported, so the gap is
-// visible rather than just a count.
+// SGPRs whose live value ResolveBuffers reproduces faithfully: the replay walks in
+// order, so a use sees the LAST write before it; that is the wave's value only if
+// the write dominates the use, runs once per path, and ScalarEval models it. A
+// descriptor built from a register failing any of the three is declined, with the
+// reason reported.
 struct ScalarReplayPlan {
   static constexpr u32 kRegs = 136;
   enum Loss : u8 {
@@ -229,12 +220,9 @@ struct ScalarReplayPlan {
   std::vector<BackEdge> back_edges;
   std::vector<u32> targets;
   bool indirect = false;  // s_setpc: control may reach anywhere from anywhere
-  // Basic blocks and their dominator tree. "A branch lands between the write
-  // and the use" is not the question. A descriptor is routinely built in one
-  // arm of an if and used at the join, and every path still runs the write.
-  // The question is whether the write DOMINATES the use, which is what this
-  // answers. Astro Bot's frame is largely compute, and the blunt test declined
-  // its two biggest passes.
+  // Dominators, not "a branch lands between": a descriptor is routinely built in one
+  // if-arm and used at the join. The question is whether the write DOMINATES the use
+  // (Astro Bot's frame is largely compute; the blunt test declined its biggest passes).
   static constexpr u32 kNoBlock = ~0u;
   std::vector<u32> block_of;  // instruction index -> block id
   std::vector<u32> idom;      // block id -> immediate dominator (entry: self)
@@ -275,10 +263,9 @@ struct VBuffer {
 };
 
 // gfx10.3 buffer V#s carry a UNIFIED 7-bit format enum where GCN has separate
-// data and number formats, so every descriptor and every typed fetch that
-// reaches the shared renderer has to be mapped back onto the GCN pair. Only the
-// vertex-attribute formats are covered; unknowns yield (0, 0), which is
-// harmless for descriptors that never reach VertexFormat().
+// dfmt/nfmt; map descriptors and typed fetches back onto the GCN pair. Vertex
+// attribute formats only; unknowns yield (0,0), harmless if never reaching
+// VertexFormat().
 void DecodeBufferFormat(u32 gfmt, u32& dfmt, u32& nfmt);
 
 VBuffer DecodeVBuffer(const u32* dwords);
@@ -289,13 +276,9 @@ VBuffer DecodeVBuffer(const u32* dwords);
 // Mirrors the PS4 fetch-shader sanity gate (gpu/gcn/gcn_resource.cc).
 bool PlausibleVBuffer(const VBuffer& v);
 
-// Resolve the live T#/S# each MIMG in a pixel shader samples, in binding order.
-// user_sgprs is how many user-data SGPRs the stage was launched with
-// (SPI_SHADER_PGM_RSRC2_*.USER_SGPR): a descriptor inline beyond that window is
-// not user data at all, just whatever the previous draw left in those
-// registers.
-// ud_base is the SGPR the stage's user data starts at: 0 for a PS, 8 for the
-// merged NGG stage a vertex program runs as.
+// Resolve the live T#/S# each MIMG samples, in binding order. user_sgprs is
+// SPI_SHADER_PGM_RSRC2_*.USER_SGPR: a descriptor inline beyond that window is not
+// user data, just whatever the previous draw left in those registers.
 std::vector<gpu::gcn::TImage> TrackTextures(const u32* ps_code,
                                             const u32* ps_user_data,
                                             u32 user_sgprs,

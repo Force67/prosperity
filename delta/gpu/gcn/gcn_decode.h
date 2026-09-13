@@ -68,20 +68,15 @@ struct Inst {
 // A decoded shader: the flat instruction list in program order.
 using Program = std::vector<Inst>;
 
-// Where an SMRD scalar load takes its offset from, and in what units. The
-// three forms do NOT share units, and reading a descriptor table at the wrong
-// stride resolves a T#/V# out of whatever else the buffer holds:
-//   IMM=1               OFFSET is an 8-bit DWORD offset.
-//   IMM=0, OFFSET=0xFF  a trailing 32-bit literal, also a DWORD offset (the
-//                       Sea Islands wide-offset form; LLVM encodes it through
-//                       the same byte>>2 conversion as the 8-bit field). The
-//                       ISA prose ("the index of an SGPR soffset", and soffset
-//                       is a BYTE offset) reads as though the literal were
-//                       bytes; implementing that measured NO difference (SotC
-//                       reports 64 unresolved bindings either way), so the
-//                       dword reading stays. If you revisit this, find a case
-//                       that separates them first; the texmiss count will not.
-//   IMM=0 otherwise     OFFSET names an SGPR holding a BYTE offset.
+// Where an SMRD load takes its offset from; the three forms do NOT share units, and
+// the wrong stride resolves a T#/V# out of unrelated buffer bytes:
+    // IMM=1              OFFSET = 8-bit DWORD offset.
+    // IMM=0, OFFSET=0xFF trailing 32-bit literal, also DWORDs (Sea Islands wide form;
+                       // LLVM encodes it through the same byte>>2 conversion). The ISA
+                       // prose reads the literal as bytes, but implementing that measured
+                       // no difference (SotC: 64 unresolved bindings either way); find a
+                       // separating case before revisiting, texmiss won't show it.
+    // IMM=0 otherwise    OFFSET = SGPR holding a BYTE offset.
 struct SmrdOffset {
   u32 dwords = 0;    // resolved offset, when it is not in an SGPR
   u32 sgpr = 0;      // SGPR index carrying a byte offset
@@ -102,12 +97,10 @@ inline SmrdOffset DecodeSmrdOffset(const Inst& inst) {
   return o;
 }
 
-// Decode a GCN program. `code` points at the bytecode (guest, host-readable),
-// `max_dwords` bounds the scan (use CodeLength() / the BinaryInfo length).
-// s_endpgm is a basic-block terminator, not an end-of-stream marker: with
-// stop_at_endpgm=false the whole program is decoded so blocks reached only
-// after an early-out s_endpgm are still lifted. stop_at_endpgm=true stops at
-// the first s_endpgm for callers without a reliable length bound.
+// Decode a GCN program (`code` guest bytecode, `max_dwords` bounds the scan; use
+// CodeLength()/BinaryInfo). s_endpgm is a block terminator, not end-of-stream:
+// stop_at_endpgm=false lifts blocks after an early-out endpgm too; true stops at
+// the first, for callers without a reliable length bound.
 IsaMode DefaultIsaMode();
 void SetDefaultIsaMode(IsaMode mode);
 
@@ -134,37 +127,28 @@ Program DecodeShader(const u32* code,
 // influence translation or resource planning.
 std::vector<u8> ComputeReachability(const Program& program);
 
-// Shared, cached DecodeShader for per-draw analysis (resource tracking runs on
-// every draw; decoding 4K dwords each time is measurable). The cache key is the
-// guest address; entries revalidate against a hash of the code so an in-place
-// shader rewrite is picked up. Returns a shared_ptr so entries stay valid even
-// if the cache evicts. Not thread-safe: callers already serialize on the
-// command-processor lock.
+// Shared, cached DecodeShader for per-draw analysis (decoding 4K dwords per draw is
+// measurable). Keyed by guest address, revalidated against a code hash so an
+// in-place rewrite is picked up; shared_ptr keeps entries valid past eviction.
+// Not thread-safe: callers hold the command-processor lock.
 std::shared_ptr<const Program> CachedProgram(u64 addr,
                                              u32 max_dwords);
 
-// Content hash of the shader at `addr`, covering its instructions only: the
-// footer-bounded body, or, for a shader the guest generates at runtime and has
-// no footer, up to its terminator. Lets a cache key name the CODE rather than
-// the address it happens to sit at, which matters for shaders a title emits
-// into scratch memory per draw. Cached per address per generation, as
-// CachedProgram is.
+// Content hash of the shader at `addr`, instructions only (footer body, or up to the
+// terminator for runtime-generated shaders with no footer), so a cache key can name
+// the CODE, not the scratch address it sits at this draw. Cached per address per
+// generation, like CachedProgram.
 u64 CachedCodeHash(u64 addr, u32 max_dwords);
 
-// Does this program transfer to a fetch shader (s_swappc_b64)? The fetch
-// pointer convention parks the target in s[0:1], but s[0:1] holds SOMETHING in
-// every VS. SotC keeps its per-draw shader-resource-table pointer there,
-// so the only ground truth for "s0:s1 is a fetch shader" is the call itself.
-// Treating the pointee as code without this check hashed live constant data
-// into the recompile-cache key (a fresh key nearly every draw, 95% of all
-// misses) and let ParseFetch read phantom vertex attributes out of it.
+// Does this program transfer to a fetch shader (s_swappc_b64)? The pointer parks in
+// s[0:1], but s[0:1] holds something in every VS (SotC keeps its SRT pointer there),
+// so the call is the only ground truth. Without it, constant data got hashed into
+// the recompile key (95% of misses) and ParseFetch read phantom attributes.
 bool CallsFetchShader(const Program& program);
 
-// Advance the CachedProgram revalidation generation (call once per frame, from
-// the command processor's end-of-frame). Entries revalidate their code hash at
-// most once per generation; repeat lookups within a frame are pure map hits.
-// Shader uploads happen between frames, so a same-address rewrite is still
-// picked up on the next frame's first use.
+// Advance the CachedProgram revalidation generation (once per frame, end-of-frame).
+// Entries revalidate at most once per generation; within a frame, pure map hits.
+// Uploads happen between frames, so a same-address rewrite is still caught.
 void NextProgramCacheGeneration();
 
 // Mnemonics and full disassembly live in gcn_disasm.h.

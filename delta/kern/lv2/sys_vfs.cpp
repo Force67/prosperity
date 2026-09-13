@@ -143,11 +143,9 @@ static device *make_device(const char *deviceName) {
     dev = new dipswDevice(proc->getObjTable());
   if (xname == "random" || xname == "urandom")
     dev = new randomDevice(proc->getObjTable());
-  // PS5 only. Answering /dev/rng lets libSceSsl's DT_INIT seed itself,
-  // which carries libSceNpManager's module start further than it used to get –
-  // far enough on Prospero, but on Orbis it then reaches libSceNpMatching2's
-  // init, which dereferences an NpManager context we still leave null (Tomb
-  // Raider faults there). Widen this once the PS4 Np bring-up follows.
+  // PS5 only. /dev/rng lets libSceSsl's DT_INIT seed itself; on Orbis that reaches
+  // libSceNpMatching2's init, which derefs an NpManager context we leave null
+  // (Tomb Raider faults). Widen once PS4 Np bring-up follows.
   if (xname == "rng" && proc &&
       proc->getPlatform() == krnl::proc::platform::ps5)
     dev = new randomDevice(proc->getObjTable());
@@ -201,14 +199,11 @@ int PS4ABI sys_open(const char *path, u32 flags, u32 mode) {
     return -SysError::eNOENT;
   }
 
-  // Directory: games open one (O_DIRECTORY) then getdents it to find assets.
-  // BSD also allows a plain read-only open of a directory followed by getdents,
-  // and the flag the guest sets is FreeBSD's, not the host's, so the bit test
-  // alone misses those. Confirm with a stat when it is absent: a read open that
-  // turns out to be a directory still has to yield a dirDevice, else getdents
-  // reports ENOTDIR and a caller walking d_reclen never advances. Dead Cells
-  // enumerates /savedata0 this way and spins forever on its loading screen.
-  // Write opens are never directories, so they skip the stat.
+  // Directory: games open (O_DIRECTORY) then getdents. The guest's flag bits are
+  // FreeBSD's, so confirm with a stat when the flag is absent: a read open of a
+  // directory must still yield a dirDevice, else getdents reports ENOTDIR and a
+  // d_reclen walk never advances (Dead Cells spins on its loading screen). Write
+  // opens are never directories, so they skip the stat.
   bool asDir = (flags & O_DIRECTORY) != 0;
   if (!asDir && (flags & O_ACCMODE) == O_RDONLY && !(flags & O_CREAT)) {
     i64 dsize = 0;
@@ -290,10 +285,8 @@ static device *fdToDevice(u32 fd) {
   return static_cast<device *>(obj);
 }
 
-// DELTA_FD_STATS: bytes read per fd, dumped periodically. "Was this file ever
-// actually read, or only opened?" is otherwise unanswerable without the
-// per-call firehose, and an opened-but-never-read asset is a strong signal that
-// whatever consumes it is stuck.
+// DELTA_FD_STATS: bytes read per fd, dumped periodically; "opened but never read"
+// is a strong signal that whatever consumes the asset is stuck.
 void fdReadStat(u32 fd, i64 n) {
   if (!kFdStats || n <= 0)
     return;
@@ -320,12 +313,10 @@ void fdReadStat(u32 fd, i64 n) {
   (void)started;
 }
 
-// DELTA_IO_MBPS=<MiB/s>: cap file-read throughput. A host SSD serves a title's
-// streaming loader orders of magnitude faster than the console drive it was
-// tuned for, so a pipeline that keeps loaded-but-not-yet-finalized data in a
-// fixed CPU budget can be outrun by its own loader and exhaust that budget –
-// SotC fills its 1 GiB onion heap this way and dies in its own allocator, and
-// the same run survives whenever the host happens to be busy. 0 = unlimited.
+// DELTA_IO_MBPS=<MiB/s>: cap file-read throughput. A host SSD outruns a loader the
+// title tuned to a console drive: a pipeline keeping loaded-but-unfinalized data
+// in a fixed CPU budget can be outrun and exhaust it (SotC fills its 1 GiB onion
+// heap and dies in its own allocator; the same run survives on a busy host). 0 = off.
 void throttleIo(i64 bytes) {
   const unsigned mbps = kIoMbps;
   if (!mbps || bytes <= 0)
@@ -349,10 +340,9 @@ void throttleIo(i64 bytes) {
 i64 PS4ABI sys_read(u32 fd, void *buf, size_t nbytes) {
   auto *d = fdToDevice(fd);
   if (!d) {
-    // The three standard descriptors exist on a real process but have nothing to
-    // read; report end-of-file rather than EBADF. Skyrim's INI parser falls back
-    // to stderr when the file is missing and its fgets loop only stops on EOF –
-    // an error return left it reading fd 2 forever at 100% CPU.
+    // The standard descriptors exist but read nothing: report EOF, not EBADF. Skyrim's
+    // INI parser falls back to stderr when the file is missing and its fgets loop only
+    // stops on EOF; an error left it reading fd 2 forever at 100% CPU.
     if (fd <= 2)
       return 0;
     if (kRdall)
@@ -385,11 +375,9 @@ i64 PS4ABI sys_lseek(u32 fd, i64 offset, int whence) {
   return d->lseek(offset, whence);
 }
 
-// FreeBSD struct statfs (472 / 0x1D8 bytes, copies out to user). Only the
-// capacity fields matter to a title: they decide whether it may write. Left
-// unhandled the caller reads an uninitialised buffer as "no space" –
-// Minecraft refuses to open a world with "there is not enough free space"
-// and never leaves its menu. Requires privilege 0x2AC in the kernel.
+// FreeBSD struct statfs (0x1D8 bytes). Only capacity matters (it decides whether a
+// title may write); unhandled, the caller read garbage as "no space" and
+// Minecraft refused to open a world. Needs privilege 0x2AC in the kernel.
 struct BsdStatfs {
   u32 f_version, f_type;
   u64 f_flags, f_bsize, f_iosize;
@@ -463,11 +451,9 @@ int PS4ABI sys_fstat(u32 fd, void *stat) {
   }
   auto *d = fdToDevice(fd);
   if (!d) {
-    // The three standard descriptors exist on a real process but are not
-    // device-backed here. Report them as character devices rather than EBADF,
-    // the same reason sys_read returns EOF for them: Skyrim's INI parser falls
-    // back to stderr when a file is missing and stats it, and an error there
-    // makes its stdio layer treat the stream as broken.
+    // The standard descriptors are not device-backed here; report them as character
+    // devices, not EBADF (Skyrim's INI parser stats its stderr fallback; an error
+    // makes its stdio layer treat the stream as broken).
     if (fd <= 2) {
       if (stat) {
         auto *st = static_cast<SceKernelStat *>(stat);
@@ -521,15 +507,12 @@ i64 PS4ABI sys_getdents(u32 fd, void *buf, size_t nbytes) {
   return d->getdents(buf, nbytes);
 }
 
-// Regular-file fd slots are released a bounded number of closes late. Titles
-// (e.g. Shadow of the Tomb Raider) open a file, hand its fd to an async I/O
-// worker, then immediately close and reopen the next file. If we free the slot
-// at once it is reused for the next open, and the worker's still-pending read
-// lands on the wrong file -> a garbage archive header -> a huge (~32 GiB)
-// entry-table allocation. Keeping the last N closed file slots alive lets the
-// lagging read complete against the right file. The window is small; PFS-backed
-// files share one host fd, so this does not consume host descriptors. Char
-// devices (/dev/gc, ...) are released immediately.
+// Regular-file fd slots are released a bounded number of closes late. SOTTR opens a
+// file, hands the fd to an async I/O worker, then closes and reopens: freeing the
+// slot at once reuses it for the next open, and the pending read lands on the wrong
+// file -> garbage archive header -> a ~32 GiB entry-table allocation. Keeping the
+// last N closed slots alive lets the lagging read finish right. PFS-backed files
+// share one host fd, so this costs no host descriptors; char devices close at once.
 static std::mutex g_deferM;
 static std::deque<u32> g_deferred;
 static constexpr size_t kDeferredCloseWindow = 256;

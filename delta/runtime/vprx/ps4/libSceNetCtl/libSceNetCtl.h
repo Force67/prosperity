@@ -3,12 +3,10 @@
 #include "../../vprx.h"
 #include "base/arch.h"
 
-// libSceNetCtl HLE: report a fully configured wired network (state IP_OBTAINED
-// with a static LAN config). The LLE libSceNetCtl.sprx asks the system's net
-// daemon over IPMI, which doesn't exist in our env, so its state never leaves
-// DISCONNECTED. Titles that gate boot on connectivity (PT polls GetState for
-// up to 10s, then continues down a broken init path) stall or break without
-// this.
+// libSceNetCtl HLE: report a fully configured wired network (IP_OBTAINED, static LAN).
+// The LLE .sprx asks the system net daemon over IPMI, which doesn't exist here, so its
+// state never leaves DISCONNECTED; titles gating boot on connectivity (PT polls
+// GetState up to 10s, then a broken init path) stall or break without this.
 int PS4ABI sceNetCtlInit();
 int PS4ABI sceNetCtlTerm();
 int PS4ABI sceNetCtlGetState(i32 *state);
@@ -17,11 +15,10 @@ int PS4ABI sceNetCtlRegisterCallback(void *func, void *arg, i32 *cid);
 int PS4ABI sceNetCtlUnregisterCallback(i32 cid);
 int PS4ABI sceNetCtlCheckCallback();
 
-// libSceNetCtlForNpToolkit is a second entry-point set into the same .sprx, so
-// it checks the same internal "initialized" flag, which HLE-ing the plain
-// library leaves unset. NpToolkit2 registers a link-state callback through it
-// during initialize() and treats NOT_INITIALIZED as fatal, which is what takes
-// GTA:SA down. Answer it here rather than leaving half the library LLE.
+// libSceNetCtlForNpToolkit is a second entry set into the same .sprx and checks the
+// same internal initialized flag, which HLE-ing the plain library leaves unset.
+// NpToolkit2 registers a link-state callback there during initialize() and treats
+// NOT_INITIALIZED as fatal (what takes GTA:SA down).
 int PS4ABI sceNetCtlRegisterCallbackForNpToolkit(void *func, void *arg,
                                                  i32 *cid);
 int PS4ABI sceNetCtlUnregisterCallbackForNpToolkit(i32 cid);

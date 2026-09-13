@@ -27,14 +27,10 @@ DELTA_OPTION(u32, kProc55, "DELTA_PS5_PROC55", 1);
 
 namespace krnl {
 
-// A PS5 reserves one of its eight Zen 2 cores for the system and grants the
-// title the other seven; a PS4 grants six of eight. The count matters well
-// beyond scheduling: engines size their worker pool from the set bits here, and
-// Bluepoint's BPE job system additionally uses each worker's spawn ordinal as
-// the bit a job's affinity mask is tested against. One worker short, a job the
-// engine pinned to the missing core can never be claimed, its workers spin on
-// the scheduler forever and whatever that job was gating (a world load, a
-// resource finalize) never completes.
+// A PS5 grants the title seven of eight Zen 2 cores (a PS4: six of eight). Engines
+// size their worker pool from the set bits, and Bluepoint's BPE job system uses each
+// worker's spawn ordinal as the affinity bit tested; one worker short, a job pinned
+// to the missing core spins the workers forever and whatever it gated never completes.
 int PS4ABI ps5_cpuset_getaffinity(int /*level*/, int /*which*/, i64 /*id*/,
                                   size_t cpusetsize, void *mask) {
   if (!mask || !cpusetsize)
@@ -92,14 +88,11 @@ int PS4ABI ps5_sysctl(int *name, u32 namelen, void *oldp, size_t *oldlenp,
     std::memset(oldp, 0, *oldlenp);
     return 0;
   }
-  // kern.proc.55 is the one oid whose VALUE matters rather than its shape.
-  // libkernel caches `value == 0` once (its +0x6c130) and every system library
-  // branches on it: libSceSysmodule keeps two internal-module-id tables and
-  // scans the 316-entry one when it is set, the 416-entry one otherwise. Only
-  // the second holds the codec ids libSceVdecCore.native asks for, so zeroing
-  // this told the video decoder its own codec module does not exist
-  // (SCE_SYSMODULE_ERROR_INVALID_VALUE) and Astro Bot's title screen waited on
-  // a player that never started.
+  // kern.proc.55: the one oid whose VALUE matters. libkernel caches value==0 once and
+  // every system library branches on it: libSceSysmodule scans its 316-entry module-id
+  // table when set, the 416-entry one otherwise; only the second holds the codec ids
+  // libSceVdecCore.native asks for. Zeroing it told the decoder its codec module does
+  // not exist (Astro Bot's title screen waited on a player that never started).
   if (name && namelen >= 3 && name[0] == 1 && name[1] == 14 && name[2] == 55) {
     if (!oldp || !oldlenp || *oldlenp < sizeof(u32))
       return -SysError::eINVAL;

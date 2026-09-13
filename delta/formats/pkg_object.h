@@ -18,13 +18,10 @@
 namespace vfs {
 struct PkgImpl;
 
-// On-demand reader for a fake-signed PS4 .pkg. Recovers the EKPFS, decrypts the
-// PFS and inflates the inner PFSC image lazily: only the blocks actually read
-// are decrypted/inflated, so a multi-GB game is never extracted to disk. Retail
-// (Sony-signed) pkgs are not supported; same key-free path as pkg_extract.py.
-//
-// Thread-safe across guest threads: a single mutex guards the shared pkg fd and
-// the (otherwise stateless) decrypt chain.
+// On-demand fake-signed PS4 .pkg reader: recover the EKPFS, decrypt the PFS, inflate
+// the PFSC image lazily (only blocks actually read), so a multi-GB game never extracts
+// to disk. Retail pkgs unsupported; same key-free path as pkg_extract.py. Thread-safe
+// across guest threads (one mutex over the shared fd + stateless decrypt chain).
 class PkgFilesystem {
 public:
   // A regular file inside the image: its byte size and the inner-image block it
@@ -54,11 +51,9 @@ public:
   // Collect every file path in the image (tooling / debugging).
   void paths(std::vector<std::string> &out) const;
 
-  // Read a well-known outer-PKG metadata entry by its PKG entry id (param.sfo =
-  // 0x1000, icon0.png = 0x1200). Unlike find()/read(), this reads the PKG
-  // header's entry table, which sits outside the encrypted PFS, so it works
-  // even when the inner image didn't decrypt (valid() == false). Returns the
-  // number of bytes read into `out`, or -1 if the entry is absent.
+  // Read a well-known outer-PKG entry by id (param.sfo = 0x1000, icon0.png = 0x1200)
+  // from the header's entry table, which sits outside the encrypted PFS and works even
+  // when the inner image didn't decrypt. Bytes read, or -1 if absent.
   i64 readPkgEntry(u32 entryId, std::vector<u8> &out);
 
 private:

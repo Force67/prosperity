@@ -3,17 +3,12 @@
  */
 #pragma once
 
-// The frame debugger: one armed guest frame recorded, in order, into one
-// machine-readable file.
-// The ~150 DELTA_GPU_* printf switches answer one question each, cost a
-// recompile when the question changes, and cap themselves at an arbitrary line
-// count. This records the whole frame instead (every region, draw, dispatch,
-// barrier and validation message with its complete state), so a new question
-// is a query over an existing capture (tools/gpu_capture.py) rather than a new
-// build.
-// Everything is keyed by GUEST addresses, the vocabulary the rest of the module
-// speaks. Every entry point below is a no-op unless a capture is recording, so
-// the disarmed cost is one predictable branch on a global bool.
+// The frame debugger: one armed guest frame recorded, in order, into one machine-
+// readable file. The ~150 DELTA_GPU_* printf switches each answer one question, cost
+// a recompile when it changes, and cap at an arbitrary line count; this records every
+// region/draw/dispatch/barrier/validation message with full state, so a new question
+// is a query over the capture (tools/gpu_capture.py), not a new build. Keyed by GUEST
+// addresses, the module's vocabulary. No-ops (one branch) unless a capture records.
 
 #include <vulkan/vulkan.h>
 #include "base/arch.h"
@@ -118,11 +113,9 @@ const char* ValidationLayerName();
 void InstallValidationMessenger(VkInstance instance);
 void DestroyValidationMessenger(VkInstance instance);
 
-// Object-name registry. vk_debug names every object it creates after the guest
-// resource it represents; the registry keeps those names on the host side too,
-// so a barrier or a validation message can say "rt 0x8142f00000 1920x1080"
-// with no capture tool attached. Populated only when a capture is armed or
-// validation is on.
+// Object-name registry: vk_debug names objects after the guest resource they stand for;
+// kept host-side too so a barrier or validation line can say "rt 0x8142f00000 1920x1080"
+// with no capture attached. Populated only when a capture is armed or validation runs.
 bool NamesWanted();
 void RegisterObjectName(VkObjectType type, u64 handle, const char* name);
 // "" when the handle was never named.

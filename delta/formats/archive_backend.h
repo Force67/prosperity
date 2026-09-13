@@ -17,11 +17,9 @@
 
 namespace vfs {
 
-// One regular file inside a container archive, as reported by a backend's
-// index. The offset/method fields are backend-private bookkeeping that let a
-// later read resume decoding at this entry without re-walking the container,
-// and they are what gets written to the on-disk index cache, so a backend must
-// be able to decode an entry from these fields alone.
+// One file inside a container archive, per a backend's index. offset/method are
+// backend-private resume bookkeeping AND the on-disk index cache's content, so a
+// backend must decode an entry from these fields alone.
 struct ArchiveEntry {
   std::string path;      // archive-relative, '/' separators, no leading slash
   u64 size = 0;          // uncompressed
@@ -42,14 +40,11 @@ struct ArchiveBackend {
   // false if the container is malformed.
   virtual bool index(std::vector<ArchiveEntry> &out) = 0;
 
-  // Decompress [off, off+len) of one entry into buf. Returns the number of
-  // bytes produced (clamped to the entry size, 0 past the end) or -1 on a
-  // corrupt stream. Entries are far too large to hold whole (this archive has
-  // 3.6 GB ones), so this is the only decode entry point.
-  //
-  // Backends should keep a per-entry decoder cursor: a forward sequential read
-  // must resume rather than restart the stream, or a guest streaming a large
-  // file degrades to quadratic decompression.
+  // Decompress [off, off+len) of one entry into buf; bytes produced (clamped, 0 past
+  // the end) or -1 on a corrupt stream. Entries are far too large to hold whole (3.6 GB
+  // ones here), so this is the only decode entry point. Keep a per-entry cursor: a
+  // forward sequential read must resume, not restart, or streaming degrades to
+  // quadratic decompression.
   virtual i64 extractRange(const ArchiveEntry &entry, void *buf, i64 off,
                            i64 len) = 0;
 

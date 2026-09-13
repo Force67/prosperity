@@ -29,11 +29,10 @@ DELTA_OPTION(bool, kDceTrace, "DELTA_DCE_TRACE", false);
 namespace krnl {
 dceDevice::dceDevice(objectTable &objects) : device(objects) {}
 
-// A monotonic nanosecond timestamp and a wall-clock ~60 Hz vblank counter. The
-// GameMaker runner (and sceVideoOutWaitVblank) busy-polls sceVideoOutGet-
-// VblankStatus until the count advances, to pace the frame loop, so the count
-// MUST tick in real time even though there is no display hardware. Without this
-// the count stays 0 and the title spins forever on its first frame.
+// Monotonic ns timestamp + a wall-clock ~60 Hz vblank counter. The GameMaker runner
+// (and sceVideoOutWaitVblank) busy-poll VblankStatus until the count advances,
+// so it MUST tick in real time despite no display hardware, else the title spins
+// forever on frame 1.
 static u64 nowNs() {
   using namespace std::chrono;
   return static_cast<u64>(
@@ -56,11 +55,9 @@ static u64 guestTsc() {
 #endif
 }
 
-// The last flip submitted via ioctl 0xc0488204 (sceVideoOutSubmitFlip). A title
-// flips display buffer N then polls GetFlipStatus until currentBuffer == N (its
-// flip became the scanout). We used to report currentBuffer = 0 always, so flips
-// to buffers 1/2 never matched and the title spun on each until a ~1s timeout
-// (Doom64 ran at ~1fps). Record the flip here and report it in the status.
+// The last flip submitted via 0xc0488204. A title flips buffer N then polls
+// GetFlipStatus until currentBuffer == N; reporting 0 always made flips to
+// buffers 1/2 spin to a ~1s timeout (Doom64 at ~1fps). Record and report it.
 static std::atomic<u32> g_dceCurrentBuffer{0};
 static std::atomic<i64> g_dceFlipArg{0};
 static std::atomic<u64> g_dceFlipCount{0};
@@ -78,10 +75,9 @@ static bool g_dceTrace() {
   return kDceTrace;
 }
 
-// The native backend runs syscall handlers on the guest stack, so the calling
-// libSceVideoOut wrapper's return address sits somewhere up the stack. Scan raw
-// stack qwords for the first one landing in libSceVideoOut's .text and report it
-// as base+offset, to pin the wrapper that issued each ioctl.
+// Scan the raw stack for the first return address in libSceVideoOut's .text (the
+// native backend runs handlers on the guest stack) to pin which wrapper issued
+// each ioctl.
 static void printVideoOutCaller() {
   auto *proc = proc::getActive();
   if (!proc)
@@ -118,13 +114,11 @@ static void printVideoOutCaller() {
 
 bool dceDevice::init(const char *, u32, u32) { return true; }
 
-// A guest pointer is directly host-addressable here (in-process LLE). Guard
-// dereferences to a sane userspace range so a stray field doesn't fault.
-// NB: on the FEX (aarch64) backend the guest stack is a host mmap up at
-// 0xffff_xxxx_xxxx, so the real libSceVideoOut passes out-slot pointers above
-// the old 0x8000_0000_0000 ceiling. Accept the full 48-bit user range, else
-// the dce silently drops every write to a stack out-slot (the open-op then
-// mmaps an uninitialised offset/size and fails).
+// Guard dereferences to a sane userspace range. NB: under FEX the guest stack is a
+// host mmap up at 0xffff_xxxx_xxxx, so real libSceVideoOut passes out-slot
+// pointers above the old 0x8000_0000_0000 ceiling; accept the full 48-bit user
+// range or every stack out-slot write is silently dropped (open then mmaps an
+// uninitialised offset/size and fails).
 static bool plausiblePtr(u64 v) {
   return v >= 0x10000 && v < 0x0001000000000000ull;
 }
@@ -159,27 +153,19 @@ u64 dceDevice::poolAlloc(u64 bytes) {
 }
 
 u8 *dceDevice::map(void *, size_t size, u32, u32, size_t offset) {
-  // The kernel only maps /dev/dce at offsets < 0x8000: it returns the PHYSICAL
-  // address of the flip-target status page (offset/0x4000 picks the target,
-  // and offset 0x4000 is the data region the scanout-pool query sizes). Our
-  // libSceVideoOut maps the offset sub-op 9 hands back instead. Return the
-  // matching slice of the scanout pool so it gets real, zeroed, shared memory
-  // (not the uninitialised anonymous fallback that made it size buffers from
-  // garbage). Sub-op 9's pool offsets exceed the kernel's 0x8000 window, so
-  // this is a deliberate emulator substitution that keeps the shape (map
-  // fd@offset -> real backing) while giving titles CP-usable memory.
+  // The kernel only maps /dev/dce at offsets < 0x8000 (physical flip-target status
+  // page; offset/0x4000 picks the target). Our libSceVideoOut maps what sub-op 9
+  // hands back, whose offsets exceed that window, so substitute a slice of the
+  // scanout pool: real, zeroed, shared, CP-usable memory in the same shape.
   if (poolBase && offset + size <= poolSize)
     return poolBase + offset;
   return reinterpret_cast<u8 *>(-1);
 }
 
-// Kernel (11.00) dce ioctl dispatch. The scanin ioctls are gated behind a
-// system-credential check, so a game issuing them gets EINVAL (22); the flip
-// ioctls route to the flip handler: 0xC0308203 -> flip control (sub-op switch,
-// valid 0..0x19), 0xC0308206 -> register buffer, 0xC0308207 -> register buffer
-// attribute, 0xC0488204 -> submit flip. 0xc0588212 is not in the dispatch at
-// all (EINVAL). Sub-op arg layouts below were verified against the 11.00
-// libSceVideoOut.sprx callers and the flip-control sub-op jump table.
+// 11.00 dce ioctl dispatch: scanin ioctls are system-credential-gated (a game gets
+// EINVAL); 0xC0308203 -> flip control (sub-ops 0..0x19), 0xC0308206/07 ->
+// register buffer(/attr), 0xC0488204 -> submit flip, 0xc0588212 not in the
+// dispatch (EINVAL). Layouts verified against the 11.00 libSceVideoOut callers.
 i32 dceDevice::ioctl(u32 cmd, void *data) {
   if (g_dceTrace()) {
     u32 len = (cmd >> 16) & 0x1FFF;
@@ -191,11 +177,8 @@ i32 dceDevice::ioctl(u32 cmd, void *data) {
 
   auto *s = static_cast<u64 *>(data);
 
-  // System-only capture ("scanin") ioctls + the non-existent 0xc0588212: the
-  // 11.00 kernel returns EINVAL for all of these from a game context (the
-  // scanin set fails the system-credential check; 0xc0588212 falls in the
-  // submit branch as an unknown cmd). A game's libSceVideoOut is built against
-  // that, so EINVAL is the faithful answer.
+  // Scanin ioctls + the non-existent 0xc0588212: EINVAL from a game context, which
+  // is what a game's libSceVideoOut is built against.
   switch (cmd) {
   case 0x80108210:  // start dual capture mode
   case 0xC068820C:  // start capture buffer manager
@@ -216,17 +199,12 @@ i32 dceDevice::ioctl(u32 cmd, void *data) {
         *reinterpret_cast<u64 *>(s[4]) = nextHandle++;
       return 0;
     case 9: {
-      // Allocate scanout pool. Kernel sub-op 9 (scanout-pool offset query): it
-      // looks up the flip target, then writes offset=0x4000 and size=
-      // (bufferCount<<14) to s[2]/s[3]; the module mmaps the dce fd at that
-      // offset for that size. We substitute a bump-allocated pool slice (a
-      // guest-addressable region map() hands back as real memory): same
-      // shape, real backing.
-      // s[3] is a pure OUT slot on some callers (libSceVideoOut's open path passes
-      // it uninitialised), so only treat *s[3] as a requested size when it's a
-      // sane size (not stack garbage / a pointer), else use the default. Without
-      // this the open-op reads a bogus huge size, poolAlloc fails ENOMEM, the
-      // slots stay uninitialised, and the title mmaps garbage offset/len.
+      // Sub-op 9 (scanout-pool offset query): the kernel writes offset=0x4000 and
+      // size=(bufferCount<<14) to s[2]/s[3] and the module mmaps fd@offset for that
+      // size; we hand back a pool slice instead (same shape, real backing). s[3] is
+      // a pure OUT slot on some callers (the open path passes it uninitialised), so
+      // treat *s[3] as a requested size only when sane, else default; a bogus huge
+      // size made poolAlloc fail ENOMEM and left the slots uninitialised.
       u64 reqd = plausiblePtr(s[3]) ? *reinterpret_cast<u64 *>(s[3]) : 0;
       u64 want = (reqd > 0 && reqd <= 0x10000000) ? reqd  // <= 256 MiB
                                                        : 0x4000000;  // 64 MiB
@@ -255,15 +233,10 @@ i32 dceDevice::ioctl(u32 cmd, void *data) {
       return 0;
     }
     case 0xa: {
-      // Get flip status. arg[0x10] (s[2]) = out ptr, arg[0x18] (s[3]) = size
-      // (0x48). The module copies it into SceVideoOutFlipStatus. Kernel field
-      // layout (verified against the 11.00 sceVideoOutGetFlipStatus wrapper):
-      //   [0x00] flipArg [0x10] count [0x18] processTime [0x20] tsc
-      //   [0x28] currentBuffer [0x2c]+[0x34] flipPendingNum [0x30] gcQueueNum
-      //   [0x38] submitTsc
-      // Our flip/present is synchronous, so nothing is ever pending: report
-      // count == an advancing flip count and pending == 0 so the runner's
-      // "is a flip still queued?" checks let it submit the next frame.
+      // Get flip status: s[2] = out ptr (0x48). Kernel layout: [0x00] flipArg
+      // [0x10] count [0x18] processTime [0x20] tsc [0x28] currentBuffer
+      // [0x2c]+[0x34] flipPendingNum [0x30] gcQueueNum [0x38] submitTsc. Our flip is
+      // synchronous, so report advancing count, pending 0.
       if (plausiblePtr(s[2])) {
         auto *o = reinterpret_cast<u8 *>(s[2]);
         std::memset(o, 0, 0x48);
@@ -283,10 +256,8 @@ i32 dceDevice::ioctl(u32 cmd, void *data) {
       return 0;
     }
     case 0xb: {
-      // Get vblank status. arg[0x10] (s[2]) = out ptr, arg[0x18] (s[3]) = size
-      // (0x28). Kernel field layout: [0x00] count [0x08] processTime [0x10] tsc
-      // [0x18] flags. count MUST advance in real time (see vblankCount) or the
-      // runner's vsync busy-poll never returns -> the title hangs on frame 1.
+      // Get vblank status: s[2] = out ptr (0x28): [0x00] count [0x08] processTime
+      // [0x10] tsc [0x18] flags. count must advance in real time (see vblankCount).
       if (plausiblePtr(s[2])) {
         auto *o = reinterpret_cast<u8 *>(s[2]);
         std::memset(o, 0, 0x28);
@@ -299,20 +270,17 @@ i32 dceDevice::ioctl(u32 cmd, void *data) {
       return 0;
     }
     case 0xc: {
-      // scaler-setup query (videoout service thread). out[0x00] != 0 only when a
-      // NEW scaler config is pending; the title never reconfigures the scaler after
-      // boot, so report "none pending" (all zero). A non-zero handle here makes
-      // the service spin posting bogus scaler events. (NOT the flip-done path; that
-      // is the EVFILT_DISPLAY/-13 event below.)
+      // Scaler-setup query: out[0x00] != 0 only when a NEW scaler config is pending;
+      // titles never reconfigure after boot, so report none (a non-zero handle makes
+      // the service spin posting bogus events). Flip-done is the EVFILT_DISPLAY event.
       if (plausiblePtr(s[2]))
         std::memset(reinterpret_cast<void *>(s[2]), 0, 0x40);
       return 0;
     }
     case 0x1f:  // NOT a valid kernel sub-op: the flip-control switch only
-                 // covers 0..0x19, and 0x1f (31) falls to the EINVAL default
-                 // (kernel jump table -> 0x826e9679). The "open-time capability
-                 // header" reading was a soft-success invention; the retail sprx
-                 // sees EINVAL here, so match it.
+                 // Sub-ops 0..0x19; 0x1f falls to the EINVAL default (kernel jump table
+                 // -> 0x826e9679). The "open-time capability header" was a soft-success
+                 // invention; retail sees EINVAL here.
       return -SysError::eINVAL;
     default:
       // Other query/config sub-ops (1, 6, 0xc, ...). Soft-succeed without
@@ -341,11 +309,9 @@ i32 dceDevice::ioctl(u32 cmd, void *data) {
   }
 
   if (cmd == 0xc0488204 && data) {
-    // Submit flip (72-byte arg). Our flip is
-    // synchronous, so record it as immediately complete: GetFlipStatus then
-    // reports currentBuffer == the index the title just flipped. This is exactly
-    // Undertale's documented blocker (the flip path dropped bufferIndex/flipArg);
-    // it did NOT fix Doom64's separate ~1fps busy-wait, but it is correct.
+    // Submit flip (72-byte arg): record it as immediately complete so GetFlipStatus
+    // reports currentBuffer == the just-flipped index (Undertale's documented
+    // blocker; not Doom64's separate ~1fps busy-wait).
     g_dceCurrentBuffer.store(static_cast<u32>(s[1]));
     g_dceFlipArg.store(static_cast<i64>(s[3]));
     g_dceFlipCount.fetch_add(1);  // a per-flip count reported back in GetFlipStatus

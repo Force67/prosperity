@@ -6,12 +6,10 @@
  * in the root of the source tree.
  */
 
-// SDL3 window with a Vulkan swapchain. A CPU framebuffer is copied into a
-// host-visible staging buffer, then into a device-local image, then blitted
-// (scaling) into the acquired swapchain image and presented. The
-// buffer-to-image copy plus image-to-image blit avoids host-writes-to-image
-// layout constraints and lets the window be any size relative to the
-// framebuffer.
+// SDL3 window + Vulkan swapchain. A CPU framebuffer goes to a host-visible staging
+// buffer, then a device-local image, then blits (scaling) into the swapchain image.
+// The copy+blit route sidesteps host-writes-to-image layout constraints and allows
+// any window size relative to the framebuffer.
 
 // SDL3 is not available on Android; that build uses the headless gfx stub
 // (gfx_headless.cpp) and the GPU renderer dumps frames instead of presenting.
@@ -345,11 +343,8 @@ bool createSwapchain() {
   sc.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
   sc.preTransform = caps.currentTransform;
   sc.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
-  // Present mode: FIFO (vsync) is always supported but double-buffer-misses to
-  // half the refresh when a frame lands late, and adds latency. Prefer MAILBOX
-  // (triple- buffer: latest frame wins, no tearing, no half-rate drop).
-  // DELTA_GPU_VSYNC=0 forces IMMEDIATE (uncapped, for benchmarking); =1 forces
-  // FIFO.
+  // FIFO always works but half-rates on a late frame; prefer MAILBOX (triple-buffer,
+  // latest wins, no tearing). DELTA_GPU_VSYNC=0 forces IMMEDIATE (benchmarking), =1 FIFO.
   {
     u32 npm = 0;
     vkGetPhysicalDeviceSurfacePresentModesKHR(g.phys, g.surface, &npm, nullptr);

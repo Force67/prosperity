@@ -47,20 +47,18 @@ namespace krnl {
 static std::mutex g_eqRegM;
 static base::Vector<equeue *> g_equeues;
 
-// EVFILT_DISPLAY (-13) and Sony's videoout event filter (-14) are both used by
-// real system modules for vblank/flip waits. A thread that waits on either
-// blocks in kevent until a display event arrives. With no real display hardware,
-// a synthetic 60 Hz tick keeps those waits from blocking forever.
+// EVFILT_DISPLAY (-13) and Sony's videoout filter (-14) carry real vblank/flip
+// waits; with no display hardware, a synthetic 60 Hz tick keeps them from blocking
+// forever.
 static constexpr i16 kEVFILT_READ = -1;
 static constexpr i16 kEVFILT_USER = -11;
 static constexpr u32 kNOTE_TRIGGER = 0x01000000;
 static void watchSocket(u32 fd);
 static constexpr i16 kEVFILT_DISPLAY = -13;
 static constexpr i16 kEVFILT_VIDEOOUT = -14;
-// Filter -14 carries two unrelated things. libSceVideoOut's vblank waiters put
-// their event id in the HIGH bits of ident (0x6 << 48 and up); sceGnmAddEqEvent
-// registers the GPU's graphics-core events under the bare id. This is where the
-// two are told apart.
+// Filter -14 carries two things: vblank waiters put their event id in the HIGH
+// bits of ident (0x6 << 48 up), sceGnmAddEqEvent registers under the bare id.
+// This bound tells them apart.
 static constexpr u64 kGnmIdentMax = 0x10000;
 static std::atomic<bool> g_vblankStarted{false};
 
@@ -69,10 +67,8 @@ static std::atomic<bool> g_vblankStarted{false};
 static std::atomic<u64> g_flipCount{0};
 u64 flipCount() { return g_flipCount.load(); }
 
-// A low-bit TSC nonce for the display event's bits 0..11, so a polling title
-// sees each event as new. On the native x86 backend that's the real rdtsc; the
-// aarch64/FEX host has no rdtsc intrinsic, so fall back to a monotonic wall
-// clock; only the low 12 bits are used. Mirrors dce_dev.cpp::guestTsc.
+// Low-bit TSC nonce for the display event's bits 0..11 so a polling title sees each
+// event as new; real rdtsc on native, monotonic clock on FEX. See dce_dev.cpp.
 static u64 tscNonce() {
 #if defined(DELTA_BACKEND_NATIVE)
   return __builtin_ia32_rdtsc();
@@ -83,10 +79,9 @@ static u64 tscNonce() {
 #endif
 }
 
-// Guest fds with a live EVFILT_READ knote, and the one thread that selects on
-// their host sockets. A read knote's source is outside the guest, so nothing in
-// here would ever mark it active; without this a title that waits on socket
-// readability (Minecraft's rtc::PhysicalSocketServer) never wakes.
+// Guest fds with a live EVFILT_READ knote + the thread selecting on their host
+// sockets. A read knote's source is outside the guest, so nothing here would ever
+// mark it active; without this, Minecraft's rtc::PhysicalSocketServer never wakes.
 static std::mutex g_watchM;
 static std::set<u32> g_watched;
 static std::atomic<bool> g_watchStarted{false};
@@ -142,20 +137,17 @@ static void startVblankPump() {
     for (;;) {
       std::this_thread::sleep_for(std::chrono::microseconds(16667));  // ~60 Hz
       ++count;
-      // Event data layout (read as data>>16 for the counter, bits 12..15 a 1..14
-      // per-event sequence the title polls to detect a NEW event, bits 0..11 a
-      // TSC nonce). Packing only count<<16 left bits 12..15 = 0, so the title
-      // woke every tick but saw "no new event".
+      // data>>16 = counter, bits 12..15 = 1..14 per-event sequence the title polls
+      // for "new", bits 0..11 = TSC nonce. Packing only count<<16 left the sequence
+      // 0: the title woke every tick but saw "no new event".
       u64 seq = (count - 1) % 14 + 1;                    // 1..14
       u64 tsc = tscNonce() & 0xFFF;
       // Vblank (-14): a free-running tick for vblank waiters / frame timing.
       i64 vdata = static_cast<i64>((count << 16) | (seq << 12) | tsc);
       triggerAllEqueues(-1, kEVFILT_VIDEOOUT, vdata);
-      // Flip (-13): the engine's flip handler reads data>>16 as the index of the
-      // last flipped frame and asserts unless the sim has produced it. Never post
-      // it before the first real flip (during loading the last produced frame is
-      // -1, so any flip event is "out of range"); once flipping it rides the real
-      // flip count and noteFlip already posts each flip immediately.
+      // Flip (-13): the engine reads data>>16 as the LAST flipped frame index and
+      // asserts unless the sim has produced it. Never post before the first real flip
+      // (during loading, any value is "out of range"); afterwards it rides g_flipCount.
       u64 flips = g_flipCount.load();
       if (flips > 0) {
         u64 idx = flips - 1;
@@ -167,18 +159,12 @@ static void startVblankPump() {
   }).detach();
 }
 
-// A GPU end-of-pipe interrupt. RELEASE_MEM/EVENT_WRITE_EOP carry an INT_SEL
-// field asking the CP to raise one once the label write lands, and
-// libSceGnmDriver turns that interrupt into an event on whatever equeue
-// sceGnmAddEqEvent registered (filter -14, under the small ident the caller
-// chose, e.g. GTA:SA's 0x5 and 0x40).
-// Deliberately NOT the 60 Hz pump's business: that tick exists for the videoout
-// vblank waiters that share this filter, and firing a Gnm event on it says "the
-// GPU finished" at moments when it did not. Small idents are the Gnm
-// registrations (videoout puts its event id in the high bits of ident), so the
-// pump leaves those alone and they arrive from here instead.
-// End-of-pipe interrupts since boot. A Gnm knote compares against this so an
-// interrupt raised between two arming windows is not lost.
+// A GPU end-of-pipe interrupt: RELEASE_MEM/EVENT_WRITE_EOP's INT_SEL asks the CP to
+// raise one when the label write lands; libSceGnmDriver turns it into an event on
+// the equeue sceGnmAddEqEvent registered (filter -14, small ident, e.g. GTA:SA's
+// 0x5/0x40). Deliberately NOT the 60 Hz pump's business: that tick serves the
+// vblank waiters sharing the filter, and firing Gnm events on it says "GPU done"
+// when it did not. EOP interrupts since boot; a knote compares so none is lost.
 static std::atomic<u64> g_eopSeq{0};
 u64 gpuEndOfPipeCount() { return g_eopSeq.load(std::memory_order_relaxed); }
 
@@ -210,10 +196,8 @@ void noteGpuEndOfPipeCtx(u64 context_id) {
 
 void noteFlip() {
   u64 idx = g_flipCount.fetch_add(1);  // index of the flip that just completed
-  // Post the flip (-13) event immediately so a thread blocked waiting for this
-  // flip wakes now instead of on the next 60 Hz pump tick. data>>16 is the index
-  // of the LAST completed flip (not the count): the engine's flip handler then
-  // processes frames up to and including that index, which the sim has produced.
+  // Post the flip event immediately so a blocked waiter wakes now, not on the next
+  // pump tick; data>>16 is the LAST completed flip index, which the sim has produced.
   u64 seq = idx % 14 + 1;
   u64 tsc = tscNonce() & 0xFFF;
   i64 data = static_cast<i64>((idx << 16) | (seq << 12) | tsc);
@@ -266,17 +250,15 @@ int equeue::kevent(const kevent_t *changes, int nchanges, kevent_t *out,
       continue;
     }
     // EVFILT_USER + NOTE_TRIGGER is one thread poking another awake, not a
-    // registration: it must fire the existing knote, not replace and clear it.
-    // This is how WebRTC's SocketServer::WakeUp reaches a thread parked in
-    // kevent, so dropping it leaves every rtc::Thread::BlockingCall hung.
+    // registration: fire the existing knote, don't replace and clear it (this is how
+    // WebRTC's SocketServer::WakeUp reaches a parked kevent; dropping it hangs every
+    // rtc::Thread::BlockingCall).
     if (c.filter == kEVFILT_USER && (c.fflags & kNOTE_TRIGGER)) {
       if (auto *k = find(c.ident, c.filter)) {
         k->active = true;
         k->ev.data = c.data;
-        // The trigger carries the udata, not the registration: sceKernelAddUserEvent
-        // registers with none and sceKernelTriggerUserEvent supplies it per poke.
-        // Keeping the registration's null made sceKernelGetEventUserData return
-        // null, and Minecraft's handler dereferences it straight into a vcall.
+        // The trigger carries the udata, the registration doesn't; keeping null made
+        // sceKernelGetEventUserData return null and Minecraft deref it into a vcall.
         if (c.udata)
           k->ev.udata = c.udata;
         cv.notify_all();
@@ -333,10 +315,8 @@ int equeue::kevent(const kevent_t *changes, int nchanges, kevent_t *out,
     (void)now;
   }
 
-  // Re-arm any Gnm knote the GPU has run past since this queue last looked.
-  // The interrupt is an edge on real hardware, but our submits finish inside
-  // the submit call, so an edge raised while the title was between kevents
-  // would otherwise be lost with nothing left to raise another one.
+  // Re-arm Gnm knotes the GPU has run past: our submits finish inside the submit
+  // call, so an edge raised between kevents would be lost with nothing to re-raise it.
   {
     const u64 eop = gpuEndOfPipeCount();
     for (auto &k : notes) {
@@ -366,10 +346,8 @@ int equeue::kevent(const kevent_t *changes, int nchanges, kevent_t *out,
     return false;
   };
 
-  // An untimed wait on a queue with no knotes can never return: nothing has a
-  // source that could set one active. Report it once per queue, since it is always a
-  // missing registration on our side, and the symptom (a wedged render thread)
-  // otherwise looks like the title hanging on its own.
+  // An untimed wait on a knote-less queue can never return; report once per queue,
+  // it always means a missing registration on our side.
   if (!to && notes.empty() && !warnedEmptyWait) {
     warnedEmptyWait = true;
     BASE_LOGI("kevent", "tid={} waits forever on '{}' (fd={}): no knotes",
@@ -464,10 +442,9 @@ bool equeue::removeEvent(u64 ident, i16 filter) {
   return false;
 }
 
-// The Gnm half of filter -14: every knote registered under a small ident, each
-// one told its own event id. sceGnmGetEqEventType reads the delivered data
-// whole and sceGnmGetEqTimeStamp reads data >> 16, so the id has to survive in
-// the low bits or the title cannot tell which of its events arrived.
+// The Gnm half of filter -14: every knote registered under a small ident gets its
+// own event id. sceGnmGetEqEventType reads data whole and GetEqTimeStamp reads
+// data >> 16, so the id must survive in the low bits.
 void equeue::triggerGnm(i64 data, bool raw_data) {
   std::lock_guard<std::mutex> lk(m);
   bool any = false;
@@ -495,10 +472,9 @@ void equeue::trigger(i64 ident, i16 filter, i64 data) {
       continue;
     if (ident >= 0 && k.ev.ident != static_cast<u64>(ident))
       continue;
-    // See triggerGnm: a Gnm graphics-core registration is not a vblank waiter
-    // and must not be told the GPU finished on a timer. DELTA_PS5_IDENT0_VBLANK
-    // asks whether ident 0 is one of those or a videoout FLIP registration
-    // (event id 0), which lands on the same ident.
+    // A Gnm registration is not a vblank waiter and must not be told the GPU finished
+    // on a timer. DELTA_PS5_IDENT0_VBLANK probes whether ident 0 is one of those or a
+    // videoout FLIP registration (event id 0), which lands on the same ident.
     if (filter == kEVFILT_VIDEOOUT && k.ev.ident < kGnmIdentMax &&
         !(kIdent0Vblank && k.ev.ident == 0))
       continue;

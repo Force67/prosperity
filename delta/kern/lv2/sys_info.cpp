@@ -33,11 +33,8 @@
 #include <string>
 #include <utl/options.h>
 
-// These three are read unconditionally below (sys_cpuset_getaffinity, the
-// sysctl handlers), so they must be DECLARED unconditionally too. They used to
-// sit behind `#if defined(DELTA_BACKEND_NATIVE)`, which left the FEX/ARM build
-// (the only one SotC runs under) with the uses but not the declarations, so
-// this file simply did not compile there.
+// Declared unconditionally: read unconditionally below. They used to sit behind
+// DELTA_BACKEND_NATIVE, leaving the FEX/ARM build uses without declarations.
 namespace {
 DELTA_OPTION(bool, kArndZero, "DELTA_ARND_ZERO", false);
 DELTA_OPTION(bool, kSotc7core, "DELTA_SOTC_7CORE", false);
@@ -46,16 +43,11 @@ DELTA_OPTION(bool, kSysctlCaller, "DELTA_SYSCTL_CALLER", false);
 
 namespace krnl {
 
-// The guest's TSC. machdep.tsc_freq must equal the rate the guest's `rdtsc`
-// actually advances, or every libkernel timer (frame pacing, timeouts: a guest
-// `wait until rdtsc-start >= seconds*tsc_freq` loop) runs at the wrong speed.
-// The PS4's invariant TSC is 1.6 GHz, but on the native x86 backend the guest's
-// rdtsc IS the host's rdtsc, which ticks at the host TSC rate (often 2-4 GHz) –
-// reporting 1.6 GHz there made all guest timers run host_rate/1.6 too fast.
-// rdtsc can't be cheaply rescaled in the lifter (it's a 2-byte op: no room for a
-// call, and trapping it per use is far too slow for busy-wait loops), so instead
-// report the real host rate (calibrated once) so the two agree. On FEX/aarch64
-// the guest rdtsc is emulated by the JIT, so keep the PS4-native 1.6 GHz.
+// The guest TSC. machdep.tsc_freq must match the rate the guest's rdtsc actually
+// advances or every libkernel timer runs at the wrong speed. Native x86: the guest
+// rdtsc IS the host's (report the calibrated host rate; rescaling rdtsc in the
+// lifter is not viable, it's a 2-byte op). FEX/aarch64: the JIT emulates rdtsc,
+// so keep the PS4-native 1.6 GHz.
 static u64 guestTscFreq() {
 #if defined(DELTA_BACKEND_NATIVE)
   static const u64 hz = [] {
@@ -97,25 +89,18 @@ int PS4ABI sys_is_in_sandbox() { return 0; }
 
 int PS4ABI sys_cpuset_getaffinity(int /*level*/, int /*which*/, i64 /*id*/,
                                   size_t cpusetsize, void *mask) {
-  // Report the CPUs the title is allowed to run on. Base PS4 grants a game 6
-  // cores (0..5; the OS keeps 6/7). The KEX engine (Doom64) sizes its worker
-  // pool from the set-bit count here (workers = availableCores/2); the old no-op
-  // left `mask` unfilled, so it saw 0 cores -> "Max Worker Threads: 0" -> the
-  // parallel job manager ran every job serially on the main thread and its job
-  // pump spun, throttling the whole engine. Fill the low 6 bits.
+  // Report the CPUs the title may run on. Base PS4 grants 6 cores (OS keeps 6/7).
+  // Doom64's KEX engine sizes its worker pool from the set-bit count; the old
+  // no-op gave 0 cores and ran every job serially on the main thread. Fill the low 6 bits.
   if (mask && cpusetsize) {
     std::memset(mask, 0, cpusetsize);
     u64 bits = 0x3F;  // cores 0..5
-    // DELTA_SOTC_7CORE: also grant core 6. SotC's engine hardcodes its "Resource
-    // Loading" thread to core 6 (mask 0x40) and its BPE JobSystem sizes its worker
-    // pool from the set-bit count here, giving each worker an ordinal = spawn seq.
-    // The job CLAIM path tests (job_affinity_mask & (1<<worker_ordinal)); a job the
-    // engine pins to core 6 (mask 0x40) is then UNCLAIMABLE when only workers with
-    // ordinals 0..5 exist -> the workers hot-spin on the scheduler umutex
-    // (0x200004140) forever and the world-load finalize job never dispatches
-    // (loader parks on its evf "job done" flag, the game loops on the loading
-    // screen). Granting core 6 spawns a 7th worker (ordinal 6, bit 0x40) so that
-    // job becomes claimable. Off by default (Isaac/Doom64 keep 6 cores).
+    // DELTA_SOTC_7CORE: also grant core 6. SotC pins its "Resource Loading" thread
+    // to core 6 (mask 0x40) and sizes its JobSystem workers from the set-bit count;
+    // a job pinned to core 6 is UNCLAIMABLE by workers 0..5, so the workers hot-spin
+    // on the scheduler umutex and the world-load finalize never dispatches. Granting
+    // core 6 spawns the 7th worker (ordinal 6, bit 0x40) that makes it claimable.
+    // Off by default (Isaac/Doom64 keep 6 cores).
     if (kSotc7core)
       bits = 0x7F;  // cores 0..6
     std::memcpy(mask, &bits,
@@ -125,12 +110,10 @@ int PS4ABI sys_cpuset_getaffinity(int /*level*/, int /*which*/, i64 /*id*/,
 }
 
 int PS4ABI sys_get_authinfo(int pid, void *infoOut) {
-  // SceSelfAuthInfo is 0x88 (136) bytes, copied verbatim from the process
-  // ucred (+88). Without privilege 0x2AE the kernel masks the buffer to just
-  // the top three bits of qword[1]; a privileged caller gets the full block.
-  // We hand back a plausible non-privileged game identity: auth_id of a normal
-  // application plus a permissive capability mask. Returning 1 here (the old
-  // behaviour) reads as EPERM and aborts libc.
+  // SceSelfAuthInfo is 0x88 bytes, copied from the process ucred (+88); without
+  // privilege 0x2AE the kernel masks it to the top three bits of qword[1]. Hand
+  // back a plausible non-privileged identity (auth_id + permissive caps); returning
+  // 1 (the old behaviour) reads as EPERM and aborts libc.
   std::memset(infoOut, 0, 136);
   auto *p = reinterpret_cast<u64 *>(infoOut);
   p[0] = 0x3100000000000001ull; // auth_id: regular application
@@ -141,18 +124,12 @@ int PS4ABI sys_get_authinfo(int pid, void *infoOut) {
 
 /*maybe should be moved to a proc file*/
 int PS4ABI sys_get_proc_type_info(void *oinfo) {
-  // Kernel output is a fixed 16-byte block:
-  //   +0x00  uint64  reserved      (always zeroed)
-  //   +0x08  int32   ptype         (budget process type, 0..3)
-  //   +0x0c  uint8   cptype        (capability/process-class flags)
-  //   +0x0d  uint8[3] padding
-  // cptype bits:
-  //   0x01 JIT compiler, 0x02 JIT application, 0x04 video player,
-  //   0x08 disk-player UI, 0x10 use-video-service capability,
-  //   0x20 webcore, 0x40 has sce program attribute.
-  // A game SELF is a JIT application (0x02) carrying the sce program attribute
-  // (0x40), so cptype = 0x42. Without the JIT-app bit libkernel's process-init
-  // path skips the JIT shm setup it later expects to find.
+  // Fixed 16-byte block: +0x00 reserved, +0x08 int32 ptype (0..3), +0x0c uint8
+  // cptype, +0x0d pad. cptype bits: 0x01 JIT compiler, 0x02 JIT application,
+  // 0x04 video player, 0x08 disk-player UI, 0x10 video-service capability,
+  // 0x20 webcore, 0x40 has sce program attribute. A game SELF is a JIT application
+  // with the sce attribute, so cptype = 0x42; without the JIT-app bit libkernel's
+  // process-init skips the JIT shm setup it expects later.
   struct procTypeInfo {
     u64 reserved;
     i32 ptype;
@@ -177,11 +154,10 @@ int PS4ABI sys_sysctl(int *name, u32 namelen, void *oldp, size_t *oldlenp,
     return 0;
   }
 
-  // PS5 kern.proc.36: the SDK version the title was compiled against.
-  // sceKernelGetCompiledSdkVersion reads it from here and libkernel branches on
-  // it all over process init. Notably, below SDK 1.70 it carves the initial
-  // thread's static TLS out of the small SceKernelInternalMemory arena instead
-  // of mmap'ing it, which a title with a 2 MiB PT_TLS (Skyrim) overflows.
+  // PS5 kern.proc.36: SDK version the title was compiled against (read by
+  // sceKernelGetCompiledSdkVersion). Below 1.70 libkernel carves the initial
+  // thread's static TLS from the small internal arena instead of mmap'ing, which
+  // a 2 MiB PT_TLS (Skyrim) overflows.
   else if (name[0] == 1 && name[1] == 14 && name[2] == 36 && namelen >= 3 &&
            proc::getActive()->getPlatform() == proc::platform::ps5) {
     if (oldp && oldlenp) {
@@ -192,13 +168,10 @@ int PS4ABI sys_sysctl(int *name, u32 namelen, void *oldp, size_t *oldlenp,
     return 0;
   }
 
-  // PS5 kern.proc.68: an 8-byte per-process info block libkernel caches for a
-  // getter libSceSaveData calls during sceSaveDataInitialize3. libkernel reads
-  // the second dword as the value and treats a non-zero block as "already
-  // cached". Left as ENOENT the getter returns 0x80020001 forever and the
-  // title's save-data init state machine spins at 100% CPU with no syscalls.
-  // libkernel's own caller defaults the value to 0 when the getter fails, so 0
-  // is the safe answer.
+  // PS5 kern.proc.68: 8-byte per-process info libkernel caches for a getter
+  // sceSaveDataInitialize3 calls; non-zero block = "already cached". Left ENOENT
+  // the getter returns 0x80020001 forever and save-data init spins at 100% CPU.
+  // libkernel defaults the value to 0 when the getter fails, so 0 is safe.
   else if (name[0] == 1 && name[1] == 14 && name[2] == 68 && namelen >= 3 &&
            proc::getActive()->getPlatform() == proc::platform::ps5) {
     if (oldp && oldlenp) {
@@ -209,14 +182,11 @@ int PS4ABI sys_sysctl(int *name, u32 namelen, void *oldp, size_t *oldlenp,
     return 0;
   }
 
-  // PS5 kern.proc.69: the geometry of the per-thread TLS/TCB arena. libkernel
-  // reserves count * pages * 16 KiB of address space ending at 0x9_0000_0000 and
-  // hands each thread one block, indexing it by (block - base) / blocksize.
-  // The reply must be exactly this 24-byte struct: a mismatched size or version
-  // makes libkernel zero the whole thing, reserve nothing, and abort the first
-  // thread with 'Invalid TCB initialization'. A block holds the static TLS plus
-  // the TCB; the third count reserves a second arena below 0xf_c2000000, which
-  // 0 skips. Both fw 01.14.00 and 13.60 query this before any thread exists.
+  // PS5 kern.proc.69: geometry of the per-thread TLS/TCB arena (count * pages *
+  // 16 KiB ending at 0x9_0000_0000, block index = (block-base)/blocksize). The
+  // reply must be exactly this 24-byte struct or libkernel zero it, reserve
+  // nothing, and abort the first thread ('Invalid TCB initialization'). The third
+  // count reserves a second arena below 0xf_c2000000 (0 skips).
   else if (name[0] == 1 && name[1] == 14 && name[2] == 69 && namelen >= 3 &&
            proc::getActive()->getPlatform() == proc::platform::ps5) {
     struct tlsArenaInfo {
@@ -243,14 +213,10 @@ int PS4ABI sys_sysctl(int *name, u32 namelen, void *oldp, size_t *oldlenp,
     auto *out = static_cast<tlsArenaInfo *>(oldp);
     out->size = sizeof(tlsArenaInfo);
     out->version = 1;
-    // This count is the process's thread ceiling: libkernel hands thread N the
-    // block at base + N * blocksize, and the arena ENDS at 0x9_0000_0000, so the
-    // first thread past the count maps outside it, fails, and scePthreadCreate
-    // returns without ever reaching the kernel. At 64 Astro Bot stopped dead at
-    // 64 threads with one Havok worker left to start. The ceiling on the other
-    // side is libkernel's free-slot bitmap, a fixed 0x100-byte BSS array (one
-    // BIT a block, but scanned a qword per block), so anything up to 2048 is
-    // both in-array and in-arena.
+    // This count is the thread ceiling: block N sits at base + N*blocksize and the
+    // arena ends at 0x9_0000_0000, so past the count scePthreadCreate fails without
+    // reaching the kernel (Astro Bot stopped dead at 64). The other bound is
+    // libkernel's 0x100-byte free-slot bitmap, so anything up to 2048 works.
     out->blocks = 256;
     out->blockPages = 16;  // the TCB and the thread's own bookkeeping
     // Never 0: that means "no secondary arena", and libkernel then derives the
@@ -260,13 +226,9 @@ int PS4ABI sys_sysctl(int *name, u32 namelen, void *oldp, size_t *oldlenp,
     return 0;
   }
 
-  // PS5 kern.proc.79: another app/process-info selector the PS5 system-service
-  // client polls during net/NP init (kern.proc.35 is GetAppInfo above). Left as
-  // ENOENT it reads as "retry", so the client thread spins re-querying and
-  // creating/destroying a wait object each pass, leaking the guest's fixed
-  // ScePthread internal heap until it throws bad_alloc. Answer with a zeroed
-  // buffer + success (same as .35) so the poll resolves. PS5-only: PS4 titles
-  // never query this selector, so the PS4 path stays byte-identical.
+  // PS5 kern.proc.79: another app/process-info selector polled during net/NP init.
+  // Left ENOENT it reads "retry": the client spins re-querying, leaking the fixed
+  // ScePthread heap until bad_alloc. Answer zeroed + success (like .35). PS5-only.
   else if (name[0] == 1 && name[1] == 14 && name[2] == 79 && namelen >= 3 &&
            proc::getActive()->getPlatform() == proc::platform::ps5) {
     if (oldp && oldlenp) {
@@ -275,10 +237,9 @@ int PS4ABI sys_sysctl(int *name, u32 namelen, void *oldp, size_t *oldlenp,
     return 0;
   }
 
-  // PS5 kern.61: a 24-byte status block a libkernel getter reads on behalf of
-  // the title. Minecraft's main loop calls it every tick and, while it errors,
-  // sits in that tick doing nothing else. The getter zeroes most of the struct
-  // itself on the success path, so an all-zero answer is in-band.
+  // PS5 kern.61: a 24-byte status block a libkernel getter reads; Minecraft's main
+  // loop stalls in it while it errors. The getter zeroes most of the struct itself,
+  // so all-zero is in-band.
   else if (name[0] == 1 && name[1] == 61 && namelen == 2 &&
            proc::getActive()->getPlatform() == proc::platform::ps5) {
     if (oldp && oldlenp)
@@ -336,11 +297,8 @@ int PS4ABI sys_sysctl(int *name, u32 namelen, void *oldp, size_t *oldlenp,
     return 0;
   }
 
-  // kern.arnd (CTL_KERN.37): the kernel entropy source. This used to answer with
-  // zeros, which is fine for the stack cookies and ASLR that libc wants but not
-  // for a title that seeds a CSPRNG from it: Minecraft's OpenSSL sits in DTLS
-  // certificate/key generation on an all-zero pool. DELTA_ARND_ZERO restores the
-  // old deterministic fill.
+  // kern.arnd (CTL_KERN.37): kernel entropy. An all-zero pool hung Minecraft's
+  // OpenSSL in DTLS key generation; DELTA_ARND_ZERO restores the old fill.
   else if (name[0] == 1 && name[1] == 37 && namelen == 2) {
     auto length = *oldlenp;
     if (length > 256)
@@ -363,10 +321,8 @@ int PS4ABI sys_sysctl(int *name, u32 namelen, void *oldp, size_t *oldlenp,
     return 0;
   }
 
-  // answer machdep.tsc_freq (synthetic oid {0x1337,5}). libkernel's
-  // sceKernelGetTscFrequency reads this and uses it to convert rdtsc deltas to
-  // time, so it MUST match the rate the guest's rdtsc actually advances at (see
-  // guestTscFreq): the host TSC rate on native, 1.6 GHz on FEX.
+  // machdep.tsc_freq (synthetic {0x1337,5}): MUST match the guest rdtsc rate
+  // (see guestTscFreq): host TSC on native, 1.6 GHz on FEX.
   else if (name[0] == 0x1337 && name[1] == 5 && namelen == 2) {
     if (oldp && oldlenp && *oldlenp >= sizeof(u64)) {
       *reinterpret_cast<u64 *>(oldp) = guestTscFreq();
@@ -375,14 +331,11 @@ int PS4ABI sys_sysctl(int *name, u32 namelen, void *oldp, size_t *oldlenp,
     return 0;
   }
 
-  // answer kern.sdk_version (synthetic oid {0x1337,6}), encoded 0x0MMMmmpp.
-  // The real kernel reports the CALLING PROCESS's SDK version here, and PS5
-  // libkernel's checkSdkVersionForLoadStartModule compares every module's
-  // param SDK stamp against it: report less than the firmware the modules come
-  // from and every fresh sceKernelLoadStartModule is unloaded again with
-  // 0x8002002d "Invalid SDK version" (Demon's Souls: libSceMouse/libSceRudp
-  // rejected -> Dantelion2 "Required cell system module(s) could not be
-  // loaded" panic). PS4 keeps the proven 5.05 constant.
+  // kern.sdk_version (synthetic {0x1337,6}), encoded 0x0MMMmmpp. The real kernel
+  // reports the CALLING PROCESS's SDK version; PS5 libkernel compares every
+  // module's param stamp against it, and reporting less than the firmware the
+  // modules come from gets every LoadStartModule unloaded with 0x8002002d
+  // (Demon's Souls: libSceMouse/Rudp rejected -> Dantelion2 panic). PS4 keeps 5.05.
   else if (name[0] == 0x1337 && name[1] == 6 && namelen == 2) {
     if (oldp && oldlenp && *oldlenp >= sizeof(u32)) {
       u32 v = 0x05050001;
@@ -396,15 +349,12 @@ int PS4ABI sys_sysctl(int *name, u32 namelen, void *oldp, size_t *oldlenp,
     return 0;
   }
 
-  // hw.sce_main_socid (synthetic {0x1337,7}): the SoC identifier, which doubles as
-  // the GPU chip revision. libSceAgc's shader-create (f3dg2CSgRKY) gates on it:
-  // shaders whose min-GPU-target field (.shader_header[0x4c]) is > 5 are REJECTED
-  // (0x8a6c003d) on an old socid, and newer firmware rejects target >= 0xd when
-  // (socid & ~0xf) == 0x840fc0. Every shader the firmware itself ships uses one of
-  // those targets, so the four bounds the modules test pin the answer exactly:
-  // libSceAgc 01.14 wants > 0x840f4f, libSceVdecCore wants > 0x840f7f, libkernel
-  // caps the family at 0x840fdf, and the target-0xe gate excludes 0x840fcx. This
-  // oid is PS5-only (the 0x1337 family is synthetic PS5 config), so PS4 is unaffected.
+  // hw.sce_main_socid (synthetic {0x1337,7}): SoC id = GPU chip revision. libSceAgc
+  // shader-create gates on it: shaders with min-GPU-target (.shader_header[0x4c])
+  // > 5 are rejected on an old socid, and fw >= 08.40 rejects target >= 0xd when
+  // (socid & ~0xf) == 0x840fc0. The modules' bounds pin the answer: libSceAgc 01.14
+  // wants > 0x840f4f, libSceVdecCore > 0x840f7f, libkernel caps at 0x840fdf, and the
+  // target-0xe gate excludes 0x840fcx. PS5-only oid.
   else if (name[0] == 0x1337 && name[1] == 7 && namelen == 2) {
     if (oldp && oldlenp && *oldlenp >= sizeof(u32)) {
       const auto *active = proc::getActive();
@@ -430,16 +380,11 @@ int PS4ABI sys_sysctl(int *name, u32 namelen, void *oldp, size_t *oldlenp,
     return 0;
   }
 
-  // vm.budgets.mlock_avail (synthetic {0x1337,11}): the wired-memory budget
-  // still AVAILABLE, the companion to mlock_total above. Left at ENOENT
-  // libkernel's internal-memory allocator takes its failure path and sizes the
-  // SceKernelInternalMemory arena minimally, then reports
-  // "[ScePthread/System] Internal Memory is running out." and throws
-  // std::bad_alloc, which terminates the process via a UD2 in
-  // libSceLibcInternal. That only bites once a real firmware module allocates
-  // from the arena, which is why it stayed hidden while every service module ran
-  // as an HLE shim (see DELTA_LLE in runtime/vprx/vprx.cpp).
-  // Report the same 6 GiB as mlock_total: nothing has been wired yet.
+  // vm.budgets.mlock_avail (synthetic {0x1337,11}): wired-memory budget still
+  // AVAILABLE. Left ENOENT, libkernel's internal allocator sizes the
+  // SceKernelInternalMemory arena minimally, then "Internal Memory is running
+  // out" + std::bad_alloc terminates the process (only bites once a real firmware
+  // module allocates from the arena; see DELTA_LLE in vprx.cpp). Report 6 GiB.
   else if (name[0] == 0x1337 && name[1] == 11 && namelen == 2) {
     if (oldp && oldlenp) {
       u64 v = 0x180000000ull;
@@ -450,10 +395,8 @@ int PS4ABI sys_sysctl(int *name, u32 namelen, void *oldp, size_t *oldlenp,
     return 0;
   }
 
-  // kern.rng_pseudo (synthetic {0x1337,12}): whether the kernel's pseudo RNG is
-  // available. libSceRandom polls this and only stops once it reads non-zero –
-  // answering 0 cost 30 million name2oid resolutions in 80 seconds and hung
-  // Minecraft's OpenSSL key generation behind it.
+  // kern.rng_pseudo (synthetic {0x1337,12}): libSceRandom polls until non-zero;
+  // answering 0 cost 30M name2oid resolutions in 80s and hung Minecraft's OpenSSL.
   else if (name[0] == 0x1337 && name[1] == 12 && namelen == 2) {
     if (oldp && oldlenp && *oldlenp >= sizeof(u32)) {
       *static_cast<u32 *>(oldp) = 1;
@@ -462,12 +405,9 @@ int PS4ABI sys_sysctl(int *name, u32 namelen, void *oldp, size_t *oldlenp,
     return 0;
   }
 
-  // Benign zero-filled PS5 config oids (synthetic {0x1337,9}): kern.amm.param,
-  // kern.app.memconf, machdep.auto_update_version, plus the obfuscated
-  // kern.gjevmtrb newer firmware adds. Zero is the default/"no-override"/
-  // "feature off" answer for each. Reporting one as missing is not survivable:
-  // libSceAgc reads kern.gjevmtrb via libkernel, which aborts outright when the
-  // query errors.
+  // Benign zero-filled PS5 config oids ({0x1337,9}): kern.amm.param, kern.app.memconf,
+  // machdep.auto_update_version, kern.gjevmtrb. Zero = default/no-override/off;
+  // a missing answer is not survivable (libSceAgc aborts when the gjevmtrb query errors).
   else if (name[0] == 0x1337 && name[1] == 9 && namelen == 2) {
     if (oldp && oldlenp) {
       size_t n = *oldlenp;
@@ -495,10 +435,9 @@ int PS4ABI sys_sysctl(int *name, u32 namelen, void *oldp, size_t *oldlenp,
       BASE_LOGI("sysctl", "name2oid '{}'",
                 base::String(static_cast<const char *>(newp), newlen).c_str());
 
-    // PS5 system-info oids the network/system-service init resolves. Left
-    // unhandled they returned ENOENT and the KAGE net thread spun (sizing its
-    // heap from a missing budget), leaking sync objects until the pthread
-    // internal heap ran out. Map them to synthetic oids answered below.
+    // PS5 system-info oids the net/system-service init resolves; left ENOENT the
+    // KAGE net thread spun, leaking sync objects until the pthread heap ran out.
+    // Map them to the synthetic oids answered below.
     if (name == "hw.sce_main_socid") {
       static_cast<u32 *>(oldp)[0] = 0x1337;
       static_cast<u32 *>(oldp)[1] = 7;
@@ -518,10 +457,8 @@ int PS4ABI sys_sysctl(int *name, u32 namelen, void *oldp, size_t *oldlenp,
                name == "machdep.auto_update_version" ||
                name == "kern.gjevmtrb" || name == "kern.nfxtmeqp" ||
                name == "kern.vegccsjk") {
-      // The obfuscated names rotate per SDK release: gjevmtrb belongs to a
-      // newer firmware, nfxtmeqp/vegccsjk to 08.40's libkernel. Its reader
-      // discards the value, and zero is what the wrapper yields when its
-      // hw.sce_main_socid gate is closed.
+      // Obfuscated oid names rotate per SDK release (gjevmtrb, nfxtmeqp/vegccsjk in
+      // 08.40); the reader discards the value, and zero matches the closed socid gate.
       static_cast<u32 *>(oldp)[0] = 0x1337;
       static_cast<u32 *>(oldp)[1] = 9;
       *oldlenp = 8;
@@ -589,10 +526,8 @@ int PS4ABI sys_sysctl(int *name, u32 namelen, void *oldp, size_t *oldlenp,
       return 0;
     }
 
-    // A name we answer with ENOENT is often polled from a retry loop (Demon's
-    // Souls asks for kern.nfxtmeqp ~9000 times a second), so log each distinct
-    // one once. Unbounded, the log alone costs tens of megabytes and most of
-    // the boot time.
+    // An ENOENT answer is often polled from a retry loop (Demon's Souls asks for
+    // kern.nfxtmeqp ~9000x/s), so log each distinct name once.
     {
       std::string key(static_cast<const char *>(newp), newlen);
       std::lock_guard<std::mutex> lock(g_loggedOidLock);

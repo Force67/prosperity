@@ -79,9 +79,8 @@ namespace krnl::probe {
 extern uintptr_t g_heapProfAddr;
 static void heapProfDumpOnce();
 
-// SIGUSR1 probe: dump the receiving thread's current guest RIP + a stack scan of
-// return addresses in loaded modules. Sent to every thread (one per /proc task)
-// to find what a wedged title's threads are blocked on. x86-native only.
+// SIGUSR1 probe: dump the receiving thread's guest RIP + a module-stack scan,
+// one per /proc task, to find what a wedged title's threads are blocked on.
 #if defined(__x86_64__)
 static void probeHandler(int, siginfo_t *, void *ucv) {
   auto *uc = static_cast<ucontext_t *>(ucv);
@@ -89,8 +88,7 @@ static void probeHandler(int, siginfo_t *, void *ucv) {
   char rip[256];
   symbolize(gr[REG_RIP], rip, sizeof(rip));
   // The GUEST tid too: the host tid says nothing about which of the title's
-  // threads this is, and "which thread is the title's main one" is the first
-  // thing to know when it stops.
+  // threads this is, the first thing to know when it stops.
   BASE_LOGI("probe", "tid={} gtid={} rip={:016x} {}", (long)gettid(),
             *currentGuestTidPtr(), (unsigned long long)gr[REG_RIP], rip);
   // GPRs too: a thread caught in a busy-wait only makes sense with the address
@@ -109,19 +107,12 @@ static void probeHandler(int, siginfo_t *, void *ucv) {
   // is misleading when the question is "what is this thread blocked in".
   backtrace(gr[REG_RBP]);
   // A thread parked in a wait is parked inside a SYSCALL, so its rsp is our own
-  // handler stack and scanning it finds host frames and nothing else, which is
-  // what the probe used to print, and it also walked off the end of the mapping
-  // and took the run down. The guest stack the thread came off is recorded on
-  // syscall entry, it is copied out with process_vm_readv rather than read
-  // directly, and it is the one that says which guest function is waiting.
+  // handler stack; the guest stack it came off is recorded on syscall entry,
+  // copied out with process_vm_readv, and is the one that names the waiter.
   guestStackTrace("probe", 8);
-  // DELTA_SCHIST syscall histogram (lv2.cpp counts each syscall in its trampoline).
-  // Dump the non-zero counts so a slow/wedged title's hammered syscalls are
-  // visible. This is the only profiler available (perf/strace/proc-mem are yama-blocked here).
-  // The probe is sent to every thread, so only the first responder of a burst
-  // prints it: forty copies interleaved with forty stack dumps is unreadable,
-  // and the stacks are the reason for the burst. It is the only profiler
-  // available (perf/strace/proc-mem are yama-blocked here).
+  // DELTA_SCHIST histogram dump: the only profiler available (perf/strace/
+  // proc-mem are yama-blocked here). Only the first responder of a burst
+  // prints it; forty interleaved copies are unreadable.
   static std::atomic<u64> lastHist{0};
   const u64 nowS = (u64)::time(nullptr);
   u64 prev = lastHist.load();
@@ -143,16 +134,13 @@ static void probeHandler(int, siginfo_t *, void *ucv) {
 }
 #endif
 
-// DELTA_ALLOC_TRACE: a guest allocator-entry vaddr whose first byte is `push rbp`
-// (0x55), replaced with int3 so we log each large allocation's size without gdb
-// (gdb conditional breakpoints are far too slow on this hot path). The handler
-// logs rsi (the size arg) when big, emulates the push rbp, and resumes: one
-// trap per call, no single-stepping. x86-native only.
+// DELTA_ALLOC_TRACE: int3 at a guest allocator entry (push rbp) to log each
+// large allocation's size: the handler logs rsi when big, emulates the push,
+// resumes. One trap per call, no single-stepping; gdb is too slow here.
 uintptr_t g_allocTraceAddr = 0;
 u64 g_allocTraceMin = 0x1000000;  // 16 MiB
-// DELTA_HEAP_PROF: aggregate operator-new/malloc (size in rdi) by guest caller.
-// Fixed open-addressing table, claimed lock-free from the trap handler (called
-// concurrently from every guest thread). SIGUSR1 dumps the top sites by bytes.
+// DELTA_HEAP_PROF: aggregate operator-new/malloc by guest caller in a fixed
+// lock-free open-addressing table (called from every guest thread).
 uintptr_t g_heapProfAddr = 0;  // non-zero once any hook is armed
 static constexpr int kHeapProfMaxHooks = 24;
 static uintptr_t g_heapProfHooks[kHeapProfMaxHooks];
@@ -171,14 +159,12 @@ struct HeapProfSlot {
 HeapProfSlot g_heapProf[kHeapProfSlots];
 std::atomic<u64> g_heapProfTotal{0};
 
-// DELTA_HEAP_PROF_SCOPE=<tls-slot-global>:<depth-offset>. Engines route an
-// allocation through a THREAD-LOCAL stack of scoped allocators and fall back
-// to the process heap when that stack is empty; memory taken from a scope is
-// released wholesale when the scope resets, memory from the fallback is not.
-// A leak that is really "this thread had no scope" is invisible in a profile
-// keyed by call site alone, so record the depth the guest would have read:
-//   slot  = fs_base + *(u64*)<tls-slot-global>   (the guest's own indirection)
-//   block = *(u64*)slot
+// DELTA_HEAP_PROF_SCOPE=<tls-slot-global>:<depth-offset>: engines route
+// allocations through a THREAD-LOCAL stack of scoped allocators, falling back
+// to the process heap when empty (scope memory frees wholesale, fallback does
+// not), so a leak that is really "this thread had no scope" is invisible to a
+// call-site profile. Record the guest's own indirection:
+//   slot = fs_base + *(u64*)<tls-slot-global>; block = *(u64*)slot;
 //   depth = block ? *(u32*)(block + <depth-offset>) : 0
 uintptr_t g_heapProfScopeSlot = 0;
 u64 g_heapProfScopeDepthOff = 0;
@@ -315,30 +301,27 @@ uintptr_t g_cntTraceAddr = 0;
 // DELTA_FATAL_TRACE: int3 at a printf-style fatal handler entry (push rbp); log
 // rdi (the format string) + caller + the first varargs, then resume.
 uintptr_t g_fatalTraceAddr = 0;
-// DELTA_HDR_TRACE: int3 at each manifest consumer (push rbp) where rdi=parent;
-// the manifest header is [parent+0x8] and the archive name is [[parent+0x10]+0x5c].
-// Supports several addresses (comma-separated env) so every consumer that reads
-// the header (count-setter 0x606150, segcount-reader 0x6063a0, ...) gets it filled.
+// DELTA_HDR_TRACE: int3 at each manifest consumer (push rbp, rdi=parent); the
+// header is [parent+0x8], the archive name [[parent+0x10]+0x5c]. Comma-
+// separated addresses cover every consumer that reads the header.
 uintptr_t g_hdrTraceAddrs[8] = {0};
 int g_hdrTraceCount = 0;
-// DELTA_RDOFF_FIX: int3 at the file-read-request setter 0x60b510 (push rbp), args
-// esi=fd edx=offset ecx=nbytes r8=buf. SOTTR passes a garbage offset for manifest
-// reads; force it to 0 (read from the start) when the fd is a .manifest.bin fd.
+// DELTA_RDOFF_FIX: int3 at the file-read-request setter 0x60b510 (push rbp;
+// esi=fd edx=off ecx=n r8=buf); force offset 0 for .manifest.bin fds,
+// which SOTTR passes as garbage.
 uintptr_t g_rdoffAddr = 0;
 bool g_manifestFd[8192] = {false};
 void markManifestFd(u32 fd, bool v) { if (fd < 8192) g_manifestFd[fd] = v; }
-// DELTA_SKIP_FN: int3 at a function entry (push rbp); emulate an immediate
-// `ret` (the push rbp hasn't run, so [rsp] is the return addr) with rax=0. Skips
-// the whole function. Used to step past a guest function that crashes/wedges
-// (e.g. the localization loader 0x666410) to reach the next boot stage.
+// DELTA_SKIP_FN: int3 at a function entry (push rbp); emulate an immediate ret
+// (the push hasn't run, so [rsp] is the return addr) with rax=0, skipping the
+// whole function (e.g. the localization loader) to reach the next boot stage.
 uintptr_t g_skipFnAddrs[8] = {0};
 int g_skipFnCount = 0;
 
 // DELTA_PS5_GLYPHGUARD: recover the first-frame unbound-font null derefs in the
-// game's UI/text renderer. Each entry: the faulting rip, the GP register the
-// faulting instruction writes (zeroed so the code proceeds with a benign value),
-// and the instruction length (rip is advanced past it). The fault only fires when
-// the base register is null, so normal (bound-font) calls are untouched.
+// UI/text renderer. Per entry: faulting rip, the GP register the instruction
+// writes (zeroed so the code proceeds), and the instruction length. Fires only
+// when the base register is null, so bound-font calls are untouched.
 
 // DELTA_PS5_DCBWATCH call-order trace (see crash.h).
 static constexpr int kOrderMax = 12;
@@ -388,10 +371,9 @@ static std::atomic<size_t> g_wprotReportLen{0};
 static thread_local uintptr_t g_wprotStepPage = 0;
 #endif
 
-// DELTA_GUEST_WHIST census state (see startWriteHist). A one-shot watch names
-// the first writer of a page and then goes quiet; this one re-arms, so a pool
-// too large to log per write still yields "which parts of it are written, by
-// whom, over the whole run".
+// DELTA_GUEST_WHIST census state (see startWriteHist): re-arming watch, so a
+// pool too large to log per write still yields who writes which parts over
+// the whole run.
 static constexpr size_t kWhistGranule = 16u << 20;
 static constexpr int kWhistBuckets = 512;
 static constexpr int kWhistSites = 32;
@@ -401,23 +383,16 @@ static std::atomic<u32> g_whistBucket[kWhistBuckets];
 static std::atomic<uintptr_t> g_whistSite[kWhistSites];
 static std::atomic<uintptr_t> g_whistSiteCaller[kWhistSites];
 static std::atomic<u32> g_whistSiteHits[kWhistSites];
-// Faults whose guest instruction could not be established (see
-// watchFaultGuestRip). Reported alongside the sites so a census can never read
-// as "these are all the writers" when some of them went unnamed.
+// Faults whose guest instruction could not be established; reported alongside
+// the sites so a census never reads as complete when some writers went unnamed.
 static std::atomic<u64> g_whistUnattributed{0};
 
-// The guest instruction behind a memory-watch fault. Returns false when it
-// cannot be established, and then `rip` is 0.
-//
-// On an x86 host the signal context's RIP already IS the guest RIP. Under FEX on
-// ARM the fault is raised inside JIT'd code, so the host pc must be mapped back
-// through FEX. `cpu::currentGuestRip()` must NOT serve as a fallback here: it is
-// only block-accurate (see cpu_backend.h), so under multiblock compilation it
-// names some earlier instruction of whatever block is running. That reads as an
-// authoritative answer while being wrong: it attributed a write to one of
-// SotC's descriptor pages to libc's memcpy, a store the title never made, and
-// sent a whole investigation down a dead end. An unattributable fault must SAY
-// it is unattributable.
+// The guest instruction behind a memory-watch fault; false (rip 0) when it
+// cannot be established. On x86 the context RIP already IS the guest RIP;
+// under FEX on ARM map the host pc back through FEX. cpu::currentGuestRip()
+// is NOT a fallback: block-accurate only, it attributed a title's store to
+// libc memcpy and sent an investigation down a dead end. Unattributable
+// faults must say so.
 static bool watchFaultGuestRip(void *ucv, uintptr_t &rip) {
   rip = 0;
 #if defined(__x86_64__)
@@ -467,11 +442,9 @@ static void probeHandler(int, siginfo_t *, void *ucv) {
 }
 #endif
 
-// Reopen the one page a watch fault landed on so the guest can retry the access.
-// Arch-independent: returning from the handler re-executes the faulting
-// instruction, which is what turns a one-shot trap into a running trace. Without
-// this the watch is not merely blind, it is FATAL: on ARM both watches used to
-// fall through to the crash reporter and kill the title.
+// Reopen the one page a watch fault landed on so the guest retries: returning
+// re-executes the faulting instruction, turning a one-shot trap into a trace.
+// Without this the watch is not merely blind, it is FATAL on ARM.
 static void reopenWatchPage(uintptr_t at) {
   const long pgsz = sysconf(_SC_PAGESIZE);
   ::mprotect(reinterpret_cast<void *>(at & ~((uintptr_t)pgsz - 1)),
@@ -504,9 +477,8 @@ bool onSignal(int sig, siginfo_t *si, void *ucv) {
     return true;
   }
 #endif
-  // Write census: same trap as the write watch, but it only counts (per 16 MiB
-  // bucket and per faulting instruction) and reopens the page, so it survives a
-  // multi-GB range being re-armed for the length of a run.
+  // Write census: same trap as the write watch, but only counts (per 16 MiB
+  // bucket and per instruction) and reopens the page.
   if (sig == SIGSEGV && si && ucv && g_whistLen.load()) {
     const uintptr_t base = g_whistBase.load();
     const uintptr_t at = reinterpret_cast<uintptr_t>(si->si_addr);
@@ -516,9 +488,8 @@ bool onSignal(int sig, siginfo_t *si, void *ucv) {
       const size_t b = (at - base) / kWhistGranule;
       if (b < kWhistBuckets)
         g_whistBucket[b].fetch_add(1, std::memory_order_relaxed);
-      // Slot 0 doubles as "empty" in the site table, so an unattributable
-      // fault must not be filed as a writer at rip 0. It is counted apart and
-      // the report says how many there were.
+      // Slot 0 doubles as "empty" in the site table, so an unattributable fault
+      // is counted apart, never filed as a writer at rip 0.
       if (!attributed) {
         g_whistUnattributed.fetch_add(1, std::memory_order_relaxed);
       } else {
@@ -544,9 +515,8 @@ bool onSignal(int sig, siginfo_t *si, void *ucv) {
       return true;
     }
   }
-  // Write watch: the range was made read-only, so a write faults here. Name the
-  // instruction, open that one page and resume, which turns the trap into a
-  // list of everything that writes the range rather than just the first thing.
+  // Write watch: the range is read-only, so a write faults here; name the
+  // instruction, reopen that page and resume.
   if (sig == SIGSEGV && si && ucv && g_wprotLen.load()) {
     const uintptr_t base = g_wprotBase.load();
     const size_t len = g_wprotLen.load();
@@ -566,14 +536,9 @@ bool onSignal(int sig, siginfo_t *si, void *ucv) {
       if (attributed)
         symbolize(rip, sym, sizeof(sym));
       else {
-        // Not guest code, so it is OUR code writing into the guest's memory
-        // (an HLE call, the kernel, a GPU readback). Naming the host module is
-        // the point: "unattributed" alone reads as noise when it may be the
-        // emulator scribbling on the title's heap. Only the leaf is named –
-        // backtrace() cannot unwind past the signal trampoline, and a hand
-        // walk of the interrupted frame chain yields addresses dladdr cannot
-        // symbolise in our own binary, so resolving our own frames would need
-        // the project's symbolize() driven from uc_mcontext.
+        // Not guest code, so it is OUR code writing into the guest (HLE, kernel,
+        // GPU readback); naming the host module is the point. Only the leaf is
+        // named: backtrace() cannot unwind past the signal trampoline.
 #if defined(__x86_64__)
         const uintptr_t host_pc = (uintptr_t)static_cast<ucontext_t *>(ucv)
                                       ->uc_mcontext.gregs[REG_RIP];
@@ -600,9 +565,8 @@ bool onSignal(int sig, siginfo_t *si, void *ucv) {
           std::snprintf(sym, sizeof(sym), "HOST pc=%#lx (no symbol)",
                         (unsigned long)host_pc);
       }
-      // Only a write-only watch can name the access from the protection alone.
-      // A reads-too watch (PROT_NONE) cannot on ARM, where there is no x86
-      // page-fault error code, so it says "access" rather than guessing.
+      // Only a write-only watch can name the access from the protection alone;
+      // a reads-too watch on ARM (no x86 error code) says "access".
 #if defined(__x86_64__)
       const char *kind =
           (static_cast<ucontext_t *>(ucv)->uc_mcontext.gregs[REG_ERR] & 2)
@@ -620,21 +584,16 @@ bool onSignal(int sig, siginfo_t *si, void *ucv) {
         BASE_LOGI("wprot", "{} {:#x} from {}", kind, (unsigned long long)at,
                   sym);
       // The writer of a descriptor/command ring is nearly always libc memcpy,
-      // which names no subsystem, so the CALLER is the whole point of the
-      // report, not an extra for the reads-too mode. Reading the single qword at
-      // the guest rsp does not find it: the leaf is mid-body by the time it
-      // faults (and on ARM the guest rsp snapshot can lag), which yields a stack
-      // address rather than a return address. Scan the stack window for values
-      // that land in a loaded module's .text, the same way the fatal reporter
-      // recovers a call chain the frame pointer misses.
+      // which names no subsystem, so the CALLER is the whole point. The guest rsp
+      // qword is mid-body by fault time; scan the stack window for module .text
+      // values, like the fatal reporter does.
       if (attributed) {
         if (const uintptr_t sp = watchFaultGuestRsp(ucv))
           guestStackTraceFrom(sp, "wprot", 4, (long)syscall(SYS_gettid));
       }
       // A consumer's other pointer (where it puts what it just read) is only
-      // visible in its registers at the access. A value probe is an explicit
-      // request to follow one word, and the word's SOURCE (a memcpy's rsi) is
-      // the next hop, so dump registers for that case too.
+      // visible in its registers at the access; a value probe follows one word,
+      // and the word's SOURCE (a memcpy's rsi) is the next hop.
       if (g_wprotRegs.load() || utl::writeWatchValueProbe()) {
         const u64 *g = nullptr;
 #if defined(__x86_64__)
@@ -648,10 +607,9 @@ bool onSignal(int sig, siginfo_t *si, void *ucv) {
           xg[i] = (u64)hg[kOrder[i]];
         g = xg;
 #else
-        // FEX pins every guest GPR to a fixed host register, so the signal
-        // context holds the exact values at the faulting instruction. Only fall
-        // back to the in-memory thread state, which is written back at block
-        // boundaries and therefore lags, when the fault was not in JIT code.
+        // FEX pins every guest GPR to a fixed host register, so the signal context
+        // holds the exact values at the fault; the in-memory state lags (written at
+        // block boundaries) and is only a fallback for non-JIT faults.
         u64 sig_gregs[16];
         bool exact = cpu::guestGregsFromSignal(ucv, sig_gregs);
         g = exact ? sig_gregs : cpu::currentGuestGregs();
@@ -673,11 +631,9 @@ bool onSignal(int sig, siginfo_t *si, void *ucv) {
                     exact ? "" : "  (guest regs may lag the faulting insn)");
 #endif
 #if !defined(__x86_64__)
-          // Chase the probed word upstream. With exact registers a block copy
-          // reads as rdi=dest, rsi=source, rcx=length; the word we are watching
-          // sits at (probe - rdi) into the destination, so the same word in the
-          // SOURCE is rsi + that delta. Re-aim there and watch it: that is one
-          // hop back towards wherever the value was first produced.
+          // Chase the probed word upstream: with exact registers a block copy reads
+          // as rdi=dest/rsi=src/rcx=len, so the same word in the SOURCE is
+          // rsi + (probe - rdi). Re-aim there: one hop towards the producer.
           enum { C_RCX = 1, C_RSI = 6, C_RDI = 7 };
           const uintptr_t probe = utl::writeWatchValueProbe();
           if (exact && probe && utl::writeWatchChaseLeft()) {
@@ -707,13 +663,9 @@ bool onSignal(int sig, siginfo_t *si, void *ucv) {
     }
   }
 #if defined(__x86_64__)
-  // DELTA_GUEST_BRK_TRACE: a RESUMABLE planted breakpoint. The ud2 replaced the
-  // first bytes of a known instruction, so the handler emulates that
-  // instruction, logs what we came for, and returns, turning a one-shot trap
-  // into a trace. Shaped for the V8 snapshot dispatch
-  // (libcohtml `mov %esi,%r12d`, 3 bytes): logs the bytecode in esi and the
-  // SnapshotByteSource position at rdi+0x3c, so each record says which bytecode
-  // ran and how many stream bytes the previous one consumed.
+  // DELTA_GUEST_BRK_TRACE: a RESUMABLE planted breakpoint (ud2 over a known 3-byte
+  // instruction, e.g. V8 snapshot dispatch `mov %esi,%r12d`): emulate it, log
+  // the bytecode in esi and the stream position at rdi+0x3c, and return.
   if (sig == SIGILL && ucv) {
     const uintptr_t site = kBrkTrace;
     if (site) {
@@ -725,9 +677,8 @@ bool onSignal(int sig, siginfo_t *si, void *ucv) {
         u32 pos = 0;
         if (self > 0x10000)
           pos = *reinterpret_cast<const u32 *>(self + 0x3c);
-        // One open() and one write() per record to a dedicated fd: fprintf to
-        // stderr loses most records here, because other threads interleave
-        // mid-line and the trace is the whole point.
+        // One open()+write() per record to a dedicated fd: fprintf to stderr loses
+        // records to mid-line interleaving from other threads.
         static const int fd = ::open("/tmp/bc_trace.txt",
                                      O_WRONLY | O_CREAT | O_TRUNC | O_APPEND,
                                      0644);
@@ -739,13 +690,10 @@ bool onSignal(int sig, siginfo_t *si, void *ucv) {
           ssize_t ignored = ::write(fd, buf, len);
           (void)ignored;
         }
-        // DELTA_GUEST_BRK_ARM=<addr>: plant a ud2 there the moment the traced
-        // stream RESTARTS. A site on a hot path traps on its first execution,
-        // which for two back-to-back deserializations is always the first one;
-        // this reaches the second.
-        // DELTA_GUEST_BRK_ARM_POS=<n>: wait until the restarted stream reaches
-        // this position, so the trap lands on one named record rather than the
-        // first of its kind.
+        // DELTA_GUEST_BRK_ARM=<addr>: plant a ud2 when the traced stream RESTARTS
+        // (a hot-path site always traps on the first of two back-to-back
+        // deserializations; this reaches the second). DELTA_GUEST_BRK_ARM_POS=<n>:
+        // wait until the restarted stream reaches that position.
         static u32 last_pos = 0;
         static bool armed = false, restarted = false;
         if (pos < last_pos)
@@ -756,10 +704,8 @@ bool onSignal(int sig, siginfo_t *si, void *ucv) {
           at[1] = 0x0B;
           armed = true;
         }
-        // DELTA_GUEST_BRK_WPROT=<hex addr>:<hex size>: write-protect a guest
-        // range at the same moment. Memory that holds live data in one pass and
-        // reads empty in the next has a writer; this makes the write fault, so
-        // the crash report names the instruction instead of the symptom.
+        // DELTA_GUEST_BRK_WPROT=<hex addr>:<hex size>: write-protect the range at
+        // the same moment; a writer makes the write fault and the report names it.
         static bool wprot_done = false;
         if (const char *wp = kBrkWprot; wp && !wprot_done &&
                                         pos >= kBrkArmPos) {
@@ -787,9 +733,8 @@ bool onSignal(int sig, siginfo_t *si, void *ucv) {
         continue;
       u32 eax = (u32)gr[REG_RAX];
       // DELTA_PS5_DCBFORCE: force a failing graphics-init sub-call to report
-      // success (SCE_OK) so the run-once init 0x69e720 completes and the engine
-      // creates its DrawCommandBuffer, which lets us measure how far the boot gets
-      // when the (obfuscated) libSceAgc call is treated as succeeding.
+      // SCE_OK so init 0x69e720 completes and the engine creates its
+      // DrawCommandBuffer, measuring how far boot gets.
       static const int force = kPs5Dcbforce;
       if (force && eax) {
         gr[REG_RAX] = 0;
@@ -961,9 +906,8 @@ bool onSignal(int sig, siginfo_t *si, void *ucv) {
       if (parent >= 0x10000) {
         hdr = *reinterpret_cast<u64 *>(parent + 0x8);
         obj = *reinterpret_cast<u64 *>(parent + 0x10);
-        // DELTA_HDR_WAIT: test the producer-consumer-race hypothesis. If the
-        // manifest header buffer isn't filled yet (magic != "TAFS"), block this
-        // (consumer) thread to let the worker thread's read+copy complete.
+        // DELTA_HDR_WAIT: if the manifest header isn't filled yet (magic != "TAFS"),
+        // block this consumer thread to let the worker's read+copy complete.
         if (kHdrWait && hdr >= 0x10000) {
           for (int i = 0; i < 2000; i++) {
             if (*reinterpret_cast<volatile u32 *>(hdr) == 0x53464154u)
@@ -982,20 +926,17 @@ bool onSignal(int sig, siginfo_t *si, void *ucv) {
           nm[j] = 0;
         }
         // DELTA_HDR_FILL: bypass the racy async manifest reader by copying the
-        // real (cached) manifest bytes straight into the header buffer, so the
-        // count-setter reads the correct count + entry table for THIS archive.
+        // cached manifest bytes straight into the header buffer.
         if (kHdrFill && hdr >= 0x10000 && nm[0]) {
           auto *h = reinterpret_cast<u8 *>(hdr);
-          // The header buffer [parent+0x8] is allocated filesize (at 0x605e30),
-          // so fill the WHOLE manifest at every consumer hook: both the header
-          // (count) and the entry table must be correct for the downstream
-          // segment/entry processing (0x666xxx) not to read garbage.
+          // The header buffer [parent+0x8] is filesize-sized (0x605e30), so fill the
+          // WHOLE manifest at every consumer hook: header AND entry table must be
+          // correct or downstream processing reads garbage.
           if (const auto *mf = vfs::getCachedFile(nm)) {
             std::memcpy(h, mf->data(), mf->size());
           } else {
-            // Missing archive (e.g. JAPANESE not in this pkg): write a valid
-            // empty TAFS header (count=0) so the entry-table alloc is tiny and
-            // the archive is empty, instead of reading a garbage count -> OOM.
+            // Missing archive: write a valid empty TAFS header (count=0) instead of
+            // a garbage count -> OOM.
             std::memset(h, 0, 0x34);
             h[0] = 'T'; h[1] = 'A'; h[2] = 'F'; h[3] = 'S';
             *reinterpret_cast<u32 *>(h + 4) = 3;     // version
@@ -1077,9 +1018,8 @@ bool onSignal(int sig, siginfo_t *si, void *ucv) {
       int n = std::snprintf(m, sizeof(m), "[cnt] obj=%llx count=%u (%#x) name=\"%s\"\n",
                             (unsigned long long)obj, cnt, cnt, nm);
       if (n > 0) { ssize_t w = write(2, m, (size_t)n); (void)w; }
-      // DELTA_CNT_CLAMP: experiment - if the entry count is absurd (uninitialised
-      // garbage), force it to 0 so the entry-table alloc is tiny and the boot can
-      // proceed past the OOM to reveal the next blocker.
+      // DELTA_CNT_CLAMP: force an absurd (uninitialised) entry count to 0 so the
+      // entry-table alloc is tiny and boot proceeds past the OOM.
       if (kCntClamp && obj >= 0x10000 && cnt > 0x100000)
         *reinterpret_cast<u32 *>(obj + 0x30) = 0;
       gr[REG_RSP] -= 8;
@@ -1098,9 +1038,8 @@ bool onSignal(int sig, siginfo_t *si, void *ucv) {
       uintptr_t rsp = (uintptr_t)gr[REG_RSP];
       uintptr_t caller = rsp >= 0x10000 ? *reinterpret_cast<u64 *>(rsp) : 0;
       const u64 size = g_heapProfCountOnly[i] ? 1u : (u64)gr[REG_RDI];
-      // The guest's fs base is NOT the thread's real fs (the lifter rewrites
-      // guest fs accesses and the host keeps its own TLS there), so ask the
-      // backend for the base the guest's own `fs:0` resolves to.
+      // The guest's fs base is NOT the thread's real fs (the lifter rewrites guest
+      // fs accesses); ask the backend for the base the guest's fs:0 resolves to.
       heapProfRecord(
           caller, size,
           g_heapProfScopeSlot && heapProfScopeDepth(threadFsBase()) == 0);
@@ -1231,17 +1170,10 @@ void setFnArgs(uintptr_t addr, const char *label, const u64 *offsets,
 }
 
 // DELTA_GUEST_WPROT=<hex addr>:<hex bytes>[:<ms>]: name every writer of a guest
-// range. Waits until the range is mapped (a title allocates its pools well after
-// startup), makes it read-only, and lets the SIGSEGV path report the faulting
-// instruction and reopen that page. Memory that stays empty while the title
-// behaves as if it filled it either has no writer at all or one writing
-// elsewhere, and only the fault distinguishes those.
-//
-// The trap RE-ARMS every `ms` instead of firing once: each fault reopens its
-// own page so the guest makes progress, and a single report cannot tell a
-// one-time initialiser from a per-frame producer. Re-arming keeps the cost at
-// roughly one fault per page per interval while turning the watch into a
-// stream.
+// range. Waits until mapped, makes it read-only, and the SIGSEGV path reports
+// the faulting instruction and reopens the page. The trap RE-ARMS every `ms`: a
+// single report cannot tell a one-time initialiser from a per-frame producer,
+// and re-arming costs about one fault per page per interval.
 void startWriteWatch(uintptr_t addr, size_t bytes, unsigned everyMs,
                      bool trapReads, bool singleStep) {
   if (!addr || !bytes)
@@ -1298,10 +1230,8 @@ void startWriteWatch(uintptr_t addr, size_t bytes, unsigned everyMs,
 }
 
 // DELTA_GUEST_WHIST=<hex addr>:<hex bytes>[:<ms>]: write census over a pool too
-// big to watch one write at a time. Re-arms the whole range read-only every
-// `ms`, so each report says which 16 MiB slices the guest wrote in that window
-// and which instructions wrote them. Answers "the title fills its video pool
-// somewhere, but where, and from what code" in one run.
+// big to watch per write; re-arms read-only every `ms`, so each report says
+// which 16 MiB slices were written in that window and by which instructions.
 void startWriteHist(uintptr_t addr, size_t bytes, unsigned everyMs) {
   if (!addr || !bytes)
     return;
@@ -1351,10 +1281,9 @@ void startWriteHist(uintptr_t addr, size_t bytes, unsigned everyMs) {
   }).detach();
 }
 
-// DELTA_GUEST_POPCNT=<hex addr>:<hex bytes>: report the population count of a
-// guest bitmap every 2s. A title's own allocator keeps its free/used map as a
-// bitmap, and "does it drain, or was it never filled" is the question a single
-// dump at the crash cannot answer.
+// DELTA_GUEST_POPCNT=<hex addr>:<hex bytes>: population count of a guest bitmap
+// every 2s (a title allocator's free/used map); "does it drain, or was it never
+// filled" needs the interval, not one dump.
 void startPopcntPrinter(uintptr_t addr, size_t bytes, unsigned everyMs) {
   if (!addr || !bytes)
     return;
@@ -1384,11 +1313,9 @@ void startPopcntPrinter(uintptr_t addr, size_t bytes, unsigned everyMs) {
   }).detach();
 }
 
-// DELTA_GUEST_SUMWATCH=<slot>:<off>:<stride>:<count>[:<ms>] (all hex but count):
-// dereference a guest pointer SLOT, then report the individual u32 counters at
-// obj+off+i*stride and their sum, on an interval. An engine's "work remaining"
-// is usually a set of per-queue counters behind a singleton pointer, and whether
-// it moves is the difference between "stalled" and "just slow".
+// DELTA_GUEST_SUMWATCH=<slot>:<off>:<stride>:<count>[:<ms>] (hex but count):
+// dereference guest pointer SLOT and report the u32 counters obj+off+i*stride
+// and their sum; an engine's "work remaining" is usually such a counter set.
 void startSumWatchPrinter(uintptr_t slot, size_t off, size_t stride, int count,
                           unsigned everyMs) {
   if (!slot || count <= 0 || count > 32)
@@ -1422,10 +1349,9 @@ void startSumWatchPrinter(uintptr_t slot, size_t off, size_t stride, int count,
   }).detach();
 }
 
-// DELTA_POOLMAP=<hex addr>:<hex bytes>[:<ms>]: survey a multi-GB guest pool
-// without touching it. mincore reports which pages the guest has actually
-// faulted in, so a region the title claims to have filled but never wrote is
-// visible as a hole; only resident pages are then read for a non-zero test.
+// DELTA_POOLMAP=<hex addr>:<hex bytes>[:<ms>]: survey a multi-GB pool without
+// touching it: mincore shows which pages the guest actually faulted in, so an
+// unfilled region shows as a hole; only resident pages get the non-zero test.
 void startPoolMap(uintptr_t addr, size_t bytes, unsigned everyMs) {
   if (!addr || !bytes)
     return;
@@ -1466,9 +1392,8 @@ void startPoolMap(uintptr_t addr, size_t bytes, unsigned everyMs) {
   }).detach();
 }
 
-// DELTA_POOLMAP=all[:<ms>]: the same survey over every guest mapping, read out
-// of /proc/self/maps. "The title wrote a gigabyte somewhere, but not where the
-// GPU reads" is only answerable with the whole address space in one view.
+// DELTA_POOLMAP=all[:<ms>]: the same survey over every guest mapping; a
+// "wrote a gigabyte somewhere" question needs the whole address space.
 void startPoolCensus(unsigned everyMs) {
   std::thread([everyMs] {
     const size_t pgsz = (size_t)sysconf(_SC_PAGESIZE);
@@ -1513,8 +1438,7 @@ void startPoolCensus(unsigned everyMs) {
 }
 
 // DELTA_MEMDUMP=<hex addr>:<hex bytes>:<ms>:<path>[,...]: snapshot a guest range
-// to a file. Only resident pages are read, so dumping a sparse pool does not
-// commit it; the holes come out as zeros.
+// to a file; only resident pages are read, holes come out as zeros.
 void startMemDump(uintptr_t addr, size_t bytes, unsigned afterMs,
                   const char *path) {
   if (!addr || !bytes || !path)

@@ -21,11 +21,9 @@ struct RecompiledCs;
 
 namespace gpu::rhi {
 
-// One vertex attribute for the recompiled-shader path: where the recompiled VS
-// reads input `location` from within a vertex buffer binding. `binding` indexes
-// DrawInfo::vbufs; multiple attributes that interleave in one buffer share a
-// binding (distinct offsets); attributes fed from separate buffers each get
-// their own binding (SotC streams position/normal/uv from distinct buffers).
+// One vertex attribute for the recompiled-shader path: where the recompiled VS reads
+// input `location` from within a vertex buffer binding (binding indexes
+// DrawInfo::vbufs; interleaved attributes share a binding, separate streams don't).
 struct VertexAttr {
   u32 location = 0;
   u32 binding = 0;    // index into DrawInfo::vbufs
@@ -53,20 +51,17 @@ struct DrawInfo {
   u32 pos_offset = 0;     // byte offset of the float2 position
   u32 prim_type = 0;      // VGT_PRIMITIVE_TYPE (4 = triangle list)
 
-  // Index buffer (DRAW_INDEX_2). When index_data != null the draw is indexed:
-  // the indices select vertices out of the vertex buffer. index_type: 0 =
-  // 16-bit, 1 = 32-bit, 2 = 8-bit. Without an index buffer the draw is
-  // sequential (DRAW_INDEX_AUTO).
+  // Index buffer (DRAW_INDEX_2); non-null means indexed (type: 0=16, 1=32, 2=8 bit).
+  // Without one the draw is sequential (DRAW_INDEX_AUTO).
   const void* index_data = nullptr;
   u32 index_count = 0;
   u32 index_type = 0;
   u32 instance_count =
       1;  // from IT_NUM_INSTANCES (tilemaps draw instanced)
   float mvp[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
-  // The legacy transform buffer fields feed heuristic rendering and mirror the
-  // first resolved VS cbuffer. Recompiled shaders use cbufs[] at set 1 bindings
-  // 0..7; each entry is copied into a zero-padded dynamic UBO window. mvp[]
-  // remains binding 0's fallback when the VS descriptor cannot be resolved.
+  // Legacy transform fields for heuristic rendering, mirroring the first resolved
+  // VS cbuffer; recompiled shaders use cbufs[] (set 1, bindings 0..7). mvp[] stays
+  // binding 0's fallback when the VS descriptor cannot be resolved.
   u64 cbuf_base = 0;
   u32 cbuf_size = 0;
   struct DrawCbuf {
@@ -75,12 +70,9 @@ struct DrawInfo {
   };
   DrawCbuf cbufs[32];
   u32 num_cbufs = 0;
-  // Raw (non-format) buffers the recompiled VS/PS read by hand with MUBUF: a
-  // skinning palette, an instance table, vertex data the shader indexes itself
-  // rather than receiving through the vertex-input state. Each is staged into
-  // a storage-buffer window and bound at set 2, binding == index here. Empty
-  // for shaders that read no such buffer, which is every title whose vertex
-  // fetches the vertex-input state already covers.
+  // Raw MUBUF buffers the recompiled VS/PS read by hand (skinning palette, instance
+  // table, self-indexed vertex data), each staged into a set-2 storage window with
+  // binding == index. Empty when the vertex-input state covers every fetch.
   static constexpr u32 kMaxBuffers = 16;
   struct DrawBuffer {
     u64 base = 0;
@@ -93,11 +85,9 @@ struct DrawInfo {
   u32 rt_w = 0,
            rt_h = 0;  // render-target dimensions (shared by all MRT targets)
 
-  // Multiple render targets (CB_COLOR0..7). mrt_base[0] mirrors rt_base. A
-  // target is bound when its CB_TARGET_MASK nibble and CB_COLORn_INFO format
-  // are non-zero and its base is a valid guest address. mrt_info preserves
-  // CB_COLORn_INFO so image and pipeline attachment formats match the guest
-  // surface. mrt_count is zero for a depth-only draw.
+  // Multiple render targets (CB_COLOR0..7); mrt_base[0] mirrors rt_base. A target is
+  // bound when its CB_TARGET_MASK nibble, CB_COLORn_INFO format and base are valid;
+  // mrt_info preserves the format so attachments match the guest surface.
   u64 mrt_base[8] = {0};
   u32 mrt_info[8] = {0};
   u32 mrt_count = 0;
@@ -139,10 +129,8 @@ struct DrawInfo {
   bool tex_null_descriptor = false;
   u32 tex_swizzle = 0;  // packed T# DST_SEL for the legacy single texture
 
-  // Multi-texture: a PS can sample several textures (Doom64's 3D walls/floors
-  // use a diffuse + lightmap + ... loaded from the EUD resource table). texs[0]
-  // mirrors tex_base. When num_texs > 1 the renderer binds an N-sampler
-  // descriptor set; texs[i] maps to the recompiled PS's sampler binding i.
+  // Multi-texture (Doom64 walls: diffuse + lightmap + ... from the EUD table);
+  // texs[0] mirrors tex_base; num_texs > 1 binds an N-sampler descriptor set.
   struct DrawTex {
     u64 base = 0;
     u32 w = 0, h = 0, tiling = 8, pitch = 0;
@@ -176,21 +164,16 @@ struct DrawInfo {
   // factors/functions to a pipeline (cached per unique state).
   u32 blend_control = 0;
   bool blend_enable = false;
-  // Per-MRT blend: CB_BLENDn_CONTROL for each color target, with a per-target
-  // enable bit in mrt_blend_mask. mrt_blend[0]/mrt_blend_mask bit0 mirror
-  // blend_control/blend_enable, so the single-RT path is unchanged; an MRT draw
-  // (CB_COLOR1..7) gets each target's own blend instead of target 0's blend
-  // applied to every attachment.
+  // Per-MRT blend (CB_BLENDn_CONTROL + enable mask); [0]/bit0 mirror the single-RT
+  // fields, and an MRT draw gets each target's own blend instead of target 0's.
   u32 mrt_blend[8] = {0};
   u32 mrt_blend_mask = 0;
   // CB_BLEND_RED/GREEN/BLUE/ALPHA, the operand of the CONSTANT_* blend
   // factors. Left at zero these turn a constant-blended pass black, which is
   // indistinguishable from a shader that computed nothing.
   float blend_constants[4] = {0.f, 0.f, 0.f, 0.f};
-  // CB_TARGET_MASK (per-MRT channel write enable; MRT0 = bits[3:0]) and
-  // CB_COLOR_CONTROL (MODE field [6:4]; 0 = disable color output). Honoured as
-  // the colour write mask so a draw the game masks off (e.g. a fullscreen
-  // "clear" it expects to write nothing) does not overwrite the target.
+  // CB_TARGET_MASK (MRT0 = bits[3:0]) + CB_COLOR_CONTROL MODE [6:4], honoured as the
+  // colour write mask so a draw the game masks off writes nothing.
   u32 target_mask = 0xF;
   // CB_SHADER_MASK: which channels of each target the PS actually exports. The
   // hardware writes a channel only when this and target_mask both enable it,
@@ -198,11 +181,8 @@ struct DrawInfo {
   u32 shader_mask = 0;
   u32 color_control = 0;
 
-  // Depth/stencil (DB) state. When depth_base is a valid guest address and
-  // depth_valid is set the draw's region binds a depth attachment keyed by
-  // depth_base, and honours the DB_DEPTH_CONTROL test/write/func below. 2D
-  // titles leave depth_base 0 (DB_Z_INFO format invalid), so no depth
-  // attachment is bound (unchanged path).
+  // Depth/stencil: valid depth_base + depth_valid binds a depth attachment keyed by
+  // depth_base; 2D titles leave it 0 (unchanged path).
   u64 depth_base = 0;
   // DB_HTILE_DATA_BASE: the depth surface's compression metadata. A write
   // over it is the depth fast clear (see NoteDccWrite).
@@ -218,10 +198,8 @@ struct DrawInfo {
   bool depth_clear_draw = false;
   bool stencil_clear_draw = false;
   u32 render_control = 0;  // raw DB_RENDER_CONTROL, for diagnosis
-  // The Z surface's OWN padded geometry, from DB_DEPTH_SIZE, not the colour
-  // target's. A title routinely binds a half-resolution depth buffer to a
-  // full-resolution pass, and sizing the depth image from the colour target
-  // makes its guest footprint several times too large, which swallows
+  // The Z surface's OWN padded geometry (DB_DEPTH_SIZE), not the colour target's:
+  // a half-resolution depth on a full pass, sized from the colour target, swallows
   // unrelated addresses in the sampled-address page table.
   u32 depth_w = 0, depth_h = 0;
   u64 stencil_base = 0;
@@ -233,23 +211,16 @@ struct DrawInfo {
   u32 stencil_refmask = 0;
   u32 stencil_refmask_bf = 0;
 
-  // GNM's fast clear: a RECT_LIST draw with no pixel shader and no vertex
-  // attributes, whose colour lives in CB_COLORn_CLEAR_WORD0/1 rather than in
-  // vertex data. Rasterising it writes nothing, so a backend that does not
-  // recognise it leaves the target holding the previous frame, which is how
-  // SotC's world colour target accumulated one fullscreen pass per frame until
-  // its value tracked the frame counter.
+  // GNM fast clear: a RECT_LIST draw, no PS, no attributes, colour in
+  // CB_COLORn_CLEAR_WORD0/1. Rasterising it writes nothing, so an unrecognising
+  // backend leaves the target holding the previous frame (SotC accumulated one
+  // fullscreen pass per frame until its value tracked the frame counter).
   bool is_clear_rect = false;
-  // The rectangle a fast clear covers, from the generic scissor (x in the low
-  // half, y in the high half of each word). A GNM fast clear carries no vertex
-  // attributes, so this is the ONLY thing that says how much of the target it
-  // touches. Treating a partial clear as a whole-attachment one erases
-  // everything else that is in there.
-  // MRT0's real surface geometry, from CB_COLOR0_PITCH.TILE_MAX and
-  // CB_COLOR0_SLICE.TILE_MAX (the colour-target analogue of DB_DEPTH_SIZE).
-  // rt_w/rt_h come from the screen scissor, which is the DRAWN region and can
-  // be a fraction of the surface: a pass that fills a strip a slice at a time
-  // shrinks it on every draw.
+  // The rectangle a fast clear covers, from the generic scissor; a GNM fast clear
+  // has no vertex attributes, so this is the ONLY size hint (a partial clear
+  // treated as whole-attachment erases everything else in the target).
+  // MRT0's real surface geometry from CB_COLOR0_PITCH/SLICE TILE_MAX; the screen
+  // scissor is the DRAWN region and can be a fraction of the surface.
   u32 rt_surf_w = 0, rt_surf_h = 0;
   // The same, per bound target. MRT slots can have different geometries, and
   // the image each one needs is its own surface, not the drawn region.
@@ -258,10 +229,8 @@ struct DrawInfo {
   // and y in the high half of each word. This is the per-DRAW scissor.
   u32 scissor_tl = 0, scissor_br = 0;
   u32 clear_tl = 0, clear_br = 0;
-  // The other two scissors in force for the same draw. The generic scissor is
-  // one of three the hardware intersects, and a title that leaves it at its
-  // reset value (P.T. does, it reads (0,0)-(0,0) on every fast clear) pins
-  // the rectangle with the window or screen scissor instead.
+  // The other two scissors (hardware intersects three); a title leaving the generic
+  // one at reset (P.T.: (0,0)-(0,0) every fast clear) is pinned by the others.
   u32 clear_window_tl = 0, clear_window_br = 0;
   u32 clear_screen_tl = 0, clear_screen_br = 0;
   u32 mrt_clear_word[8][2] = {};
@@ -279,17 +248,13 @@ struct DrawInfo {
   // XY viewport transform from PA_CL_VPORT_0_*.
   float viewport_x_scale = 0, viewport_x_offset = 0;
   float viewport_y_scale = 0, viewport_y_offset = 0;
-  // Depth range, same registers: window_z = ndc_z * z_scale + z_offset. A
-  // title that does not use the whole [0,1] range writes depth a shader later
-  // reads back, so ignoring this does not merely shift the depth test: it
-  // hands every depth-sampling pass the wrong numbers.
+  // Depth range: window_z = ndc_z * z_scale + z_offset; ignoring it hands every
+  // depth-sampling pass the wrong numbers, not just a shifted test.
   float viewport_z_scale = 1.0f, viewport_z_offset = 0.0f;
 
-  // Recompiled-shader path. When recomp != null the renderer runs the game's
-  // actual VS/PS instead of the heuristic quad; procedural VS programs may have
-  // no attributes. vertex_data/vertex_stride is the raw interleaved vertex
-  // buffer, vattrs describe the inputs, mvp holds the constant buffer (pushed),
-  // tex_base the sampler.
+  // Recompiled-shader path: non-null recomp runs the game's actual VS/PS instead of
+  // the heuristic quad; vertex_data/stride is the raw interleaved buffer, vattrs
+  // the inputs, mvp the pushed constant buffer, tex_base the sampler.
   u64 vs_addr = 0, ps_addr = 0;  // pipeline cache key
   // gfx10.3 merged NGG: both half addresses the draw programmed, and which one
   // vs_addr picked. Captured so a pass that never rasterizes can name the half
@@ -300,29 +265,22 @@ struct DrawInfo {
   u32 vs_user_data[32] = {};
   u32 ps_user_data[32] = {};
   const gcn::Recompiled* recomp = nullptr;
-  // Vulkan guarantees 16 vertex input attributes and every desktop driver
-  // reports far more. A shader declares an input for every attribute its fetch
-  // shader reads, and stopping at 8 left the ones past it with no attribute
-  // description at all, so the pipeline then has no Location 8/9/10 for inputs
-  // the module does have (VUID-VkGraphicsPipelineCreateInfo-Input-07904) and
-  // those vertex inputs read undefined.
+  // Vulkan guarantees 16 vertex input attributes; stopping at 8 left later inputs
+  // with no Location (VUID-VkGraphicsPipelineCreateInfo-Input-07904) reading
+  // undefined.
   static constexpr u32 kMaxVertexAttrs = 16;
   VertexAttr vattrs[kMaxVertexAttrs];
   u32 num_vattrs = 0;
-  // Vertex buffer bindings the attributes read from. vbufs[0] mirrors
-  // vertex_data/vertex_stride so the single-binding fast path and the heuristic
-  // fallback are unchanged; a multi-stream draw fills one entry per distinct
-  // V#.
+  // Vertex buffer bindings; vbufs[0] mirrors vertex_data/stride so the single-
+  // binding fast path is unchanged; a multi-stream draw fills one per distinct V#.
   VertexBinding vbufs[8];
   u32 num_vbufs = 0;
 };
 
-// A compute dispatch resolved by the command processor: the recompiled CS + the
-// live guest memory ranges its descriptors point at (resolved from
-// COMPUTE_USER_DATA)
-// + the raw user data (pushed to the shader). The renderer stages each range
-// into a storage buffer, runs the dispatch, and copies the written ranges back
-// to guest memory (where the graphics texture path re-reads them).
+// A compute dispatch resolved by the command processor: the recompiled CS, the live
+// guest memory ranges its descriptors point at, and the raw user data (pushed).
+// The renderer stages each range into a storage buffer, runs the dispatch, and
+// copies written ranges back for the graphics texture path.
 struct GuestMemoryRange {
   u64 base = 0, size = 0;
   // Backing identity (file offset or tracked allocation), invalidates remaps.
@@ -376,10 +334,9 @@ struct ComputeInfo {
 // how many it walked. The console-specific processors write these and the
 // renderer's per-frame report reads them, so neither has to include the other.
 extern u64 g_ns_dcb, g_ns_dcb_lock;
-// The AGC queue whose ring the command processor is walking (0 = a submit
-// that did not come through a ring), for the frame capture: work that lands
-// in the wrong order between the graphics and compute queues is otherwise
-// indistinguishable from work that is simply wrong.
+// The AGC queue whose ring the command processor walks (0 = not via a ring), for
+// frame capture: out-of-order work across queues is otherwise indistinguishable
+// from work that is simply wrong.
 extern u32 g_submit_queue;
 extern u32 g_dcb_n;
 

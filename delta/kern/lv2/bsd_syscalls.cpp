@@ -71,13 +71,9 @@ int PS4ABI sys_sigaction(int sig, const void *act, void *oact) {
   return 0;
 }
 
-// sys_namedobj_create (557): registers a name -> data-pointer pair in the
-// process's id table. The kernel allocates a 24-byte object {char* name@0;
-// void* data@8; uint32 flags@16}, copies the name (max 32 chars), and stores
-// the caller's data pointer. The flags field is ORed with 0x1000 (the
-// namedobj type tag for the id table). Returns the allocated id in rax.
-// We return 0 (success, id 0): the only known caller (debug instrumentation)
-// ignores the id.
+// sys_namedobj_create (557): registers name -> data pointer in the process id table
+// (24-byte object {name@0, data@8, flags@16}, name max 32 chars, flags OR 0x1000,
+// id in rax). We return 0; the only known caller ignores the id.
 int PS4ABI sys_namedobj_create(const char *name, void *arg2, u32 arg3) {
   (void)name;
   (void)arg2;
@@ -151,12 +147,9 @@ int PS4ABI sys_regmgr_call(u32 op, u32 id, void *result, void *value,
       return 0;
     }
 
-    // The remaining keys are Sony's obfuscated (checksummed) registry ids whose
-    // plaintext we can't recover, so we can't know the correct value to return.
-    // The guest tolerates the "key not available" error and uses its defaults,
-    // which is safer than inventing a value for an unidentified setting. Clear
-    // the output anyway: a caller that reads it despite the error would
-    // otherwise get stack garbage.
+    // The remaining keys are Sony's obfuscated registry ids we can't decode, so the
+    // guest's "key not available" handling (use defaults) is safer than inventing a
+    // value. Clear the output anyway so a reader despite the error gets no garbage.
     int_value->value = 0;
     BASE_LOGI("regmgr", "get-int unknown encoded_id={:#x}",
               (unsigned long long)int_value->encoded_id);
@@ -183,12 +176,9 @@ int PS4ABI sys_regmgr_call(u32 op, u32 id, void *result, void *value,
     return 0x800D0203;
   }
 
-  // The non-system registry family, read out of libSceRegMgr (every export is a
-  // thin wrapper around syscall 532 with the op in rdi):
-  //   0x18/0x19 Set/GetInt   0x1a/0x1b Set/GetStr   0x1c/0x1d Set/GetBin
-  //   0x1e takes a bare u32
-  // Get-str and get-bin share one struct and differ only in how the caller
-  // reads the payload back, so they are served together here.
+  // The non-system registry family (libSceRegMgr wrappers around syscall 532, op in
+  // rdi): 0x18/19 Set/GetInt, 0x1a/1b Set/GetStr, 0x1c/1d Set/GetBin, 0x1e bare u32.
+  // Get-str and get-bin share one struct, differing only in how the payload is read.
   if (op == 0x1b || op == 0x1d)  // non-system get str / get bin
   {
     // {u64 encoded_id, u32 index, u32 pad, u64 size, u8 data[size]}, with the
@@ -197,15 +187,11 @@ int PS4ABI sys_regmgr_call(u32 op, u32 id, void *result, void *value,
     if (type < sizeof(nonsys_bin) || bin->size != type - sizeof(nonsys_bin))
       return 0x800D0203;
 
-    // Every key here is one of Sony's obfuscated ids. Unlike get-int, failing
-    // is not an option for get-str: libSceNpCommon reads id
-    // 0x6b976df7f847ea43 (a 17-byte per-console blob) during NpAsm
-    // resource-context setup and treats any error as fatal, which aborts the
-    // whole NP bring-up. An all-zero payload is what an unprovisioned console
-    // has, and NP accepts it. Get-bin is more forgiving (libkernel's accessor
-    // for key 0x44746d9c58675bee defaults to 0 on any error and never reads
-    // the buffer), but answering it the same way keeps the reply honest rather
-    // than leaving the caller's blob at whatever it held.
+    // Every key here is an obfuscated id, and get-str may NOT fail: libSceNpCommon
+    // reads 0x6b976df7f847ea43 (a 17-byte per-console blob) during NpAsm setup and
+    // treats any error as fatal, aborting NP bring-up. All-zero is what an
+    // unprovisioned console has, and NP accepts it. Get-bin's accessor defaults to 0
+    // on error anyway; answering the same keeps the reply honest.
     std::memset(bin->data, 0, bin->size);
     // The wrapper returns this int32 to its caller when the syscall succeeds.
     if (result && utl::isMemoryRangeMapped(result, sizeof(u32)))
@@ -238,14 +224,10 @@ int PS4ABI sys_regmgr_call(u32 op, u32 id, void *result, void *value,
   return 0x800D0203;
 }
 
-// sys_randomized_path (602): libkernel's sceKernelGetRandomizedPath. Args are a
-// struct {char* set_path@0; char* out@8; size_t* out_len@16}. If set_path is
-// non-null the kernel stores it as the new randomized prefix (requires priv
-// 0x2AF); the current prefix (up to 256 bytes) is always copied to out/out_len.
-// The prefix is the per-title randomized sandbox component used under
-// /system_data. We have no such mapping, so report an empty path (len 0) with
-// success; the guest treats that as "no randomized prefix" and falls through to
-// the plain sandbox path.
+// sys_randomized_path (602): args {set_path@0, out@8, out_len@16}. Non-null set_path
+// stores the new randomized prefix (priv 0x2AF); the current prefix (<=256 bytes)
+// always copies to out. It's the per-title sandbox component under /system_data;
+// we have no mapping, so report empty (len 0) and the guest uses the plain path.
 int PS4ABI sys_randomized_path(const char *set_path, char *out,
                                size_t *out_len) {
   (void)set_path;
@@ -279,18 +261,14 @@ int PS4ABI sys_uuidgen(u8 *store, int count) {
   return 0;
 }
 
-// sys_workaround8849 (605): a restricted registry-int getter. The kernel reads
-// a uint32 regmgr key from the args struct, validates it against a whitelist of
-// four fixed keys (0x19780100, 0x78026300, 0x78028300, 0x78028A00), calls
-// sceRegMgrGetInt, and returns the value. Anything else is EINVAL. We have no
-// registry, so return 0 (the value an unprovisioned console would have).
+// sys_workaround8849 (605): restricted registry-int getter; kernel validates the key
+// against four whitelisted values and reads sceRegMgrGetInt. No registry here, so
+// return 0 (an unprovisioned console's value).
 int PS4ABI sys_workaround8849() { return 0; }
 
-// sys_blockpool_open (653): allocates a "block pool" used by the flexible-memory
-// allocator and returns a descriptor. We don't model block pools yet; the only
-// caller during boot does not feed the result into blockpool_map/mmap, so hand
-// back a fixed positive descriptor (a non-zero, non-stdio handle) to signal
-// success without colliding with a real object-table fd.
+// sys_blockpool_open (653): descriptor for the flexible-memory block pool. Unmodelled;
+// the boot caller never feeds it to blockpool_map/mmap, so return a fixed positive
+// non-stdio handle.
 int PS4ABI sys_blockpool_open() { return 0x4000; }
 
 // sys_dynlib_do_copy_relocations (596): processes R_X86_64_COPY relocations for
@@ -308,11 +286,10 @@ int PS4ABI sys_write(u32 fd, const void *buf, size_t nbytes) {
     // Suppress guest fd1/2 output while diagnosing the host-side render path.
     if (kQuietGuest)
       return static_cast<int>(nbytes);
-    // Through the logger a line at a time, like sys_writev: host stdout is
-    // usually a redirected file, so a plain fwrite sits in a host stdio buffer
-    // that a killed run never flushes, so a title that stops printing and one
-    // whose last 4 KiB were lost look identical. Titles print this fd a
-    // character at a time, hence the accumulator.
+    // A line at a time through the logger, like sys_writev: host stdout is usually a
+    // redirected file, and a plain fwrite sits in stdio a killed run never flushes,
+    // making "stopped printing" and "lost the last 4 KiB" identical. Titles write
+    // this fd a character at a time, hence the accumulator.
     static std::mutex mtx;
     static std::string line;
     std::lock_guard<std::mutex> lk(mtx);

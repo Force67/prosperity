@@ -1,15 +1,9 @@
 /*
- * PS4Delta : PS4 emulation and research project
- *
- * FexBackend (aarch64 host). Guest PS4 x86-64 code runs inside an embedded
- * FEXCore JIT. Nothing in the guest image is rewritten: the JIT decodes
- * `syscall` itself and hands it to HandleSyscall (dispatched to lv2), and
- * emulates fs/gs from the guest CPUState. Each guest thread is a FEXCore thread
- * pinned 1:1 to a host thread, so the "current FEXCore thread" is a host
- * thread_local and guest TLS (fs base) is that thread's CPUState.fs_cached.
- *
- * Mirrors the standalone harness (see memory fex-arm-embedding
- * and tools fex-embed/harness.cpp).
+ * PS4Delta: FexBackend (aarch64 host). Guest x86-64 code runs inside an
+ * embedded FEXCore JIT; nothing in the guest image is rewritten. The JIT
+ * decodes `syscall` into HandleSyscall (lv2) and emulates fs/gs from the guest
+ * CPUState. Guest threads pin 1:1 to host threads, so guest TLS (fs base) is
+ * the host thread_local's CPUState.fs_cached. Mirrors tools fex-embed/harness.
  */
 #if defined(DELTA_BACKEND_FEX)
 
@@ -77,23 +71,19 @@ const u32 *currentGuestTidPtr();           // this thread's guest tid TLS addr
 
 namespace cpu {
 
-// The FEXCore thread executing on this host thread (1:1). Set on entry so the
-// syscall handler and setThreadFsBase can reach the live guest CPUState.
-// Internal linkage at namespace scope so krnl::setThreadFsBase (same TU) reaches it.
+// FEXCore thread on this host thread (1:1); the syscall handler and
+// krnl::setThreadFsBase (same TU) reach the live guest CPUState through it.
 static thread_local FEXCore::Core::InternalThreadState *t_curThread = nullptr;
 
-// Raw context pointer for the signal-path helpers (reconstructGuestRip); the
-// owning unique_ptr lives in FexBackend.
+// Raw context for the signal-path helpers; owned by FexBackend's unique_ptr.
 static FEXCore::Context::Context *g_ctxPtr = nullptr;
 
-// Last syscall this host thread entered (and whether it returned), so the crash
-// handler can name the syscall a fault occurred inside.
+// Last syscall this host thread entered, for the crash handler.
 static thread_local u32 t_lastSyscall = 0xFFFFFFFFu;
 static thread_local bool t_inSyscall = false;
 
-// Per-thread ring of recent guest->host boundary crossings (syscalls + HLE
-// thunk calls), dumped by the crash handler for the faulting thread. Kept tiny
-// and lock-free (thread_local) so it is safe to touch from a signal handler.
+// Per-thread ring of recent guest->host crossings, dumped by the crash
+// handler; thread_local so a signal handler can touch it.
 struct TraceEvt {
   char kind;        // 's' syscall, 'h' HLE thunk, 0 = empty
   u32 id;      // syscall number / thunk index
@@ -111,8 +101,7 @@ static inline TraceEvt &traceNext() {
   return e;
 }
 
-// Set around CTX->ExecuteThread so thr_exit can bail out of the JIT (longjmp)
-// instead of returning into guest code (which libkernel treats as fatal).
+// Set around CTX->ExecuteThread so thr_exit can longjmp out of the JIT.
 static thread_local std::jmp_buf t_exitJmp;
 static thread_local bool t_exitJmpValid = false;
 
@@ -145,38 +134,27 @@ static void symRange(u64 a, char *out, size_t n) {
   std::snprintf(out, n, "%#llx", (unsigned long long)a);
 }
 
-// Live guest threads, for the DELTA_WATCHDOG=secs deadlock dump: after N seconds
-// it prints every live thread's current guest RIP so a stalled boot's blocking
-// site can be symbolized to a module+offset without a debugger.
-// DELTA_RIPRACE sample slots. The signalled thread reconstructs its own guest
-// rip (exact, from the host PC in its signal context) and stamps the round it is
-// answering; the collector only counts slots stamped with the round it asked for.
+// Live guest threads, for the DELTA_WATCHDOG deadlock dump and DELTA_RIPRACE
+// sampling; a signalled thread stamps the round it is answering.
 static std::atomic<u64> g_sampleGen{0};
 static thread_local std::atomic<u64> t_sampleGen{0};
 static thread_local std::atomic<u64> t_sampleRip{0};
-// When the sample was taken. Signal delivery across threads is not simultaneous,
-// so without this a "co-occurrence" could be one thread leaving and another
-// entering hundreds of microseconds apart, which is not the question.
+// When the sample was taken; delivery is not simultaneous, so "co-occurrence"
+// needs a timestamp.
 static thread_local std::atomic<u64> t_sampleNs{0};
 
 struct LiveThread {
   FEXCore::Core::InternalThreadState *thread;
   u32 id;
-  // This thread's TLS syscall/HLE trace ring (valid while the thread lives):
-  // lets the DELTA_WATCHDOG stall dump show every parked thread's last
-  // syscalls WITH arguments, not just its rip.
+  // This thread's TLS trace ring, so the stall dump shows parked threads'
+  // last syscalls with arguments, not just the rip.
   const TraceEvt *trace = nullptr;
   const u32 *tracePos = nullptr;
   const u32 *gtid = nullptr;  // this thread's guest tid (umutex owner space)
-  // Whether this thread is parked in a syscall. A sampler reading State.rip
-  // cannot tell "executing here" from "blocked in a wait it entered from here":
-  // rip is only written back at block boundaries, so a thread asleep in
-  // sys_umtx_op keeps whatever rip it last published. DELTA_RIPRACE needs the
-  // difference, because a thread WAITING for a lock sits at a rip inside the
-  // function whose concurrent execution it is trying to detect.
+  // Parked in a syscall? State.rip is only written at block boundaries, so a
+  // waiting thread keeps its last published rip.
   const bool *inSyscall = nullptr;
-  // Where DELTA_RIPRACE leaves this thread's sampled guest rip, and the host tid
-  // to signal to ask for one.
+  // DELTA_RIPRACE sample slots and the host tid to signal for one.
   std::atomic<u64> *sampleGen = nullptr;
   std::atomic<u64> *sampleRip = nullptr;
   std::atomic<u64> *sampleNs = nullptr;
@@ -188,10 +166,7 @@ std::atomic<u32> g_liveSeq{0};
 static void startWatchdog() {
   static std::once_flag once;
   std::call_once(once, [] {
-    // DELTA_SAMPLE_MS=<ms>: high-frequency sampler. Prints a compact one-line
-    // RIP for every live guest thread every <ms> milliseconds. The last sample
-    // before a hard crash (one that bypasses the signal handler) pins where each
-    // thread was, with no dependence on signal delivery.
+    // DELTA_SAMPLE_MS: one-line RIP per live thread every <ms>; pins pre-crash state.
     if (kSampleMs) {
       int ms = kSampleMs;
       if (ms <= 0) ms = 50;
@@ -210,20 +185,10 @@ static void startWatchdog() {
         }
       }).detach();
     }
-    // DELTA_RIPRACE=<ms>:<lo>-<hi>[,<lo>-<hi>...]  (absolute guest VAs, hex)
-    // Answers "do two guest threads ever EXECUTE inside these code ranges at the
-    // same time?", i.e. is a critical section actually mutually exclusive. Feed
-    // it the ranges that may only run under a lock (SotC's allocator: free-tree
-    // insert 201400048a70-201400048b64, rebalance 20140004a040-20140004a205).
-    // CurrentFrame->State.rip must NOT be read: it is only written when a thread
-    // leaves a block or enters a syscall, so for a thread running in the JIT it
-    // names wherever that last happened, and a sampler built on it measured
-    // nothing (280k samples, never one thread inside). Instead, signal each
-    // guest thread and let it reconstruct its own guest rip from the host PC in
-    // its signal context, exact inside JIT code. Samples carry a generation so
-    // the collector only counts the round it asked for. Delivery is not
-    // simultaneous (tens of microseconds apart), so a ZERO result is strong and
-    // a nonzero one wants a second look.
+    // DELTA_RIPRACE=<ms>:<lo>-<hi>[,...] (hex guest VAs): do two threads ever
+    // execute these ranges at the same time? State.rip is stale inside the JIT,
+    // so each thread is signalled to reconstruct its own rip. A zero result is
+    // strong; a nonzero one wants a second look (delivery is not simultaneous).
     if (kRipRace) {
       std::string spec(kRipRace);
       int ms = 1;
@@ -309,10 +274,7 @@ static void startWatchdog() {
             if (n == 1) withOne++;
             if (n >= 2) {
               withTwo++;
-              // How far apart the two samples actually were. Only a spread well
-              // under a microsecond means "both were inside at the same time";
-              // anything larger is one thread leaving as another arrives, which
-              // no lock forbids.
+              // Only a spread well under a microsecond means "both inside at once".
               u64 lo = hits[0].ns, hi = hits[0].ns;
               for (unsigned k = 1; k < n; k++) {
                 lo = std::min(lo, hits[k].ns);
@@ -350,71 +312,8 @@ static void startWatchdog() {
         }).detach();
       }
     }
-    // DELTA_LOADWATCH=<ms>: SotC world-load counter poller. The eboot's
-    // "[MSG-Init] LoadInitialWorld() Remaining Resources To Load: N" line is
-    // only printed twice during init; the live count is the sum of 10 per-
-    // category int32 queues at obj+0x110 + i*0x28, where obj = *(base+0x2ee2d00)
-    // (base = Shadow_Shipping @ 0x201400000000). This reads that sum every <ms>
-    // ms so we can see whether the load DECREASES, PLATEAUS, or stops, and which
-    // of the 10 category queues is stuck. Env overrides: DELTA_LOADWATCH_BASE,
-    // DELTA_LOADWATCH_GOFF (global offset), all optional. See sotcdis notes.
-    if (kLoadWatch) {
-      int ms = kLoadWatch;
-      if (ms <= 0) ms = 2000;
-      const u64 base = kLoadWatchBase;
-      const u64 goff = kLoadWatchGoff;
-      std::thread([ms, base, goff] {
-        auto rd = [](u64 a, void *dst, size_t n) -> bool {
-          long pg = sysconf(_SC_PAGESIZE);
-          for (u64 p = a & ~((u64)pg - 1); p < a + n; p += pg) {
-            unsigned char mv = 0;
-            if (mincore(reinterpret_cast<void *>(p), 1, &mv) != 0) return false;
-          }
-          std::memcpy(dst, reinterpret_cast<void *>(a), n);
-          return true;
-        };
-        u64 pobj = base + goff;
-        int lastTotal = -1, plateau = 0;
-        for (u64 tick = 0;; tick++) {
-          std::this_thread::sleep_for(std::chrono::milliseconds(ms));
-          u64 obj = 0;
-          if (!rd(pobj, &obj, 8) || obj < 0x1000) {
-            BASE_LOGI("loadwatch", "{} obj ptr @{:#x} not ready (obj={:#x})",
-                      (unsigned long long)tick, (unsigned long long)pobj,
-                      (unsigned long long)obj);
-            std::fflush(stderr);
-            continue;
-          }
-          i32 c[10] = {0};
-          int total = 0;
-          bool ok = true;
-          for (int i = 0; i < 10; i++) {
-            i32 v = 0;
-            if (!rd(obj + 0x110 + (u64)i * 0x28, &v, 4)) { ok = false; break; }
-            c[i] = v;
-            total += v;
-          }
-          if (!ok) { BASE_LOGI("loadwatch", "{} obj={:#x} read fault",
-                               (unsigned long long)tick, (unsigned long long)obj);
-                     std::fflush(stderr); continue; }
-          if (total == lastTotal) plateau++; else plateau = 0;
-          lastTotal = total;
-          BASE_LOGI("loadwatch",
-              "{} obj={:#x} REMAINING={} plateau={}x q=[{} {} {} {} {} {} {} {} {} {}]",
-              (unsigned long long)tick, (unsigned long long)obj, total, plateau,
-              c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8], c[9]);
-          std::fflush(stderr);
-        }
-      }).detach();
-    }
-    // DELTA_LOADWATCH=<ms>: SotC world-load counter poller. The eboot's
-    // "[MSG-Init] LoadInitialWorld() Remaining Resources To Load: N" line is
-    // only printed twice during init; the live count is the sum of 10 per-
-    // category int32 queues at obj+0x110 + i*0x28, where obj = *(base+0x2ee2d00)
-    // (base = Shadow_Shipping @ 0x201400000000). This reads that sum every <ms>
-    // ms so we can see whether the load DECREASES, PLATEAUS, or stops, and which
-    // of the 10 category queues is stuck. Env overrides: DELTA_LOADWATCH_BASE,
-    // DELTA_LOADWATCH_GOFF (global offset), all optional. See sotcdis notes.
+    // DELTA_LOADWATCH: poll the sum of SotC's 10 per-category load queues
+    // (obj+0x110+i*0x28, obj = *(base+0x2ee2d00)) to see the count move or stall.
     if (kLoadWatch) {
       int ms = kLoadWatch;
       if (ms <= 0) ms = 2000;
@@ -477,18 +376,12 @@ static void startWatchdog() {
           auto &S = t.thread->CurrentFrame->State;
           char sym[256];
           symRange(S.rip, sym, sizeof(sym));
-          // scN = total syscalls this thread has made: compare across rounds
-          // to tell a thread that is genuinely STUCK in one wait (scN frozen)
-          // from one that loops through waits (scN advancing).
+          // scN frozen = stuck in one wait; advancing = looping through waits.
           BASE_LOGI("watchdog", "  tid={} gtid={} rip={:#x} scN={} ({})", t.id,
                     t.gtid ? *t.gtid : 0, (unsigned long long)S.rip,
                     t.tracePos ? *t.tracePos : 0, sym);
-          // Scan the stack upward for return addresses into known modules (the
-          // wait stub omits frame pointers, so a raw scan beats an rbp walk) to
-          // reveal which subsystem this thread is parked inside.
-          // Parked thread's last syscalls WITH ARGUMENTS (its TLS trace ring,
-          // registered in g_live): the difference between "waiting" and "waiting
-          // on WHAT".
+          // Raw stack scan for module return addresses (the wait stub omits
+          // frame pointers), plus the last syscalls with arguments.
           if (t.trace && t.tracePos) {
             u32 pos = *t.tracePos;
             u32 cnt = pos < kTraceRing ? pos : kTraceRing;
@@ -503,9 +396,7 @@ static void startWatchdog() {
                         (unsigned long long)e.a0, (unsigned long long)e.a1,
                         (unsigned long long)e.a2, (unsigned long long)e.a3,
                         (unsigned long long)e.ret);
-              // Thread parked in UMTX_OP_MUTEX_WAIT (last ring entry, op 17):
-              // decode the umutex owner word; the owner tid is the whole
-              // ballgame in a deadlock (who holds it and what are THEY doing).
+              // Parked in UMTX_OP_MUTEX_WAIT: decode the umutex owner word.
               if (k == cnt - 1 && e.id == 454 && e.a1 == 17 && e.a0 >= 0x10000) {
                 unsigned char mv = 0;
                 long pg = sysconf(_SC_PAGESIZE);
@@ -517,10 +408,7 @@ static void startWatchdog() {
                             "      ^ umutex {:#x} word={:#x} owner-tid={}{}",
                             (unsigned long long)e.a0, ow, ownerTid,
                             (ow & 0x80000000u) ? " CONTESTED" : "");
-                  // Cross-reference: find the live thread that OWNS this umutex
-                  // (its guest tid == owner-tid) and print what IT is doing. If
-                  // the owner is itself parked in a wait while holding the lock,
-                  // THAT wait is the real deadlock root.
+                  // Print what the owner thread is doing; its wait is the deadlock root.
                   for (auto &o : g_live) {
                     if (!o.gtid || *o.gtid != ownerTid || &o == &t) continue;
                     const TraceEvt *ot = o.trace;
@@ -547,9 +435,7 @@ static void startWatchdog() {
           for (int i = 0; i < 1024 && shown < 12; i++) {
             u64 a = rsp + (u64)i * 8;
             if (a < 0x1000) break;
-            // Guard every read: the scan walks past stack tops and the old
-            // unguarded memcpy CRASHED the process mid-dump (fault at the
-            // mapping end above a guest stack).
+            // Guard every read; the scan walks past stack tops.
             unsigned char mv = 0;
             long pg = sysconf(_SC_PAGESIZE);
             if (mincore(reinterpret_cast<void *>(a & ~((u64)pg - 1)), 1,
@@ -592,8 +478,7 @@ public:
     // Args->Argument[0] = syscall number (RAX); [1..6] = RDI,RSI,RDX,R10,R8,R9.
     const u32 num = static_cast<u32>(Args->Argument[0]);
 
-    // Dynamic-TLS bridge: the patched guest __tls_get_addr issues this magic
-    // syscall with the tls_index pointer in rdi (Argument[1]).
+    // Dynamic-TLS bridge: patched __tls_get_addr issues this magic syscall.
     if (num == kTlsGetAddrSyscall) {
       u64 r = reinterpret_cast<u64>(krnl::guest_tls_get_addr(
           reinterpret_cast<krnl::tls_index *>(Args->Argument[1])));
@@ -604,11 +489,9 @@ public:
       return r;
     }
 
-    // Host-thunk bridge: a guest trampoline (planted by makeHostThunk) issued
-    // this magic syscall to invoke a native HLE function. Reconstruct the SysV
-    // call arguments: the trampoline did `mov r10,rcx` so the original 4th arg
-    // (rcx, which `syscall` clobbers) is in Argument[4]; args 7-8 sit on the
-    // guest stack just above the return address.
+    // Host-thunk bridge: a planted trampoline issued this magic syscall. It did
+    // `mov r10,rcx`, so the original 4th arg (rcx, clobbered by `syscall`) is in
+    // Argument[4]; args 7+ sit on the guest stack above the return address.
     if ((num & 0xFF000000u) == kHostThunkSyscallBase) {
       const u32 idx = num & 0x00FFFFFFu;
       void *fn = nullptr;
@@ -619,10 +502,8 @@ public:
       }
       u64 ret = 0;
       if (fn) {
-        // Reconstruct SysV args 7..14 from the guest stack just above the return
-        // address (the trampoline pushed nothing). Passing extra args a callee
-        // ignores is harmless; this covers up to 14-arg Sce exports such as
-        // sceGnmSubmitAndFlipCommandBuffers (9 args).
+        // Args 7..14 sit on the guest stack above the return address; extras a
+        // callee ignores are harmless.
         const u64 rsp = Frame->State.gregs[FEXCore::X86State::REG_RSP];
         u64 s[8] = {};
         if (rsp)
@@ -673,13 +554,11 @@ public:
                 Args->Argument[2], Args->Argument[3], Args->Argument[4],
                 Args->Argument[5], Args->Argument[6]);
 
-    // The lv2 handlers are plain AArch64 functions (PS4ABI is empty off-x86);
-    // call with the six GPR args and translate their Linux-style negative errno
-    // returns to the BSD/PS4 carry + positive errno convention.
+    // lv2 handlers are plain AArch64 functions; translate Linux-style negative
+    // errno to the BSD carry + positive errno convention.
     using Fn = u64(PS4ABI *)(u64, u64, u64, u64, u64, u64);
     auto fn = reinterpret_cast<Fn>(handler);
-    // DELTA_SCHIST: the histogram is incremented by the native x86 bsd trampoline,
-    // which this backend never emits, so count here too. Racy increments are fine.
+    // The native x86 bsd trampoline normally counts this; count here too.
     if (krnl::g_scHist)
       g_sysHist[num & 1023]++;
     t_lastSyscall = num;
@@ -697,8 +576,8 @@ public:
     if (kFexSctrace)
       BASE_LOGI("sc", "    -> {:#x}", ret);
 
-    // CF isn't stored directly in flags[]; update it through FEX's compacted-
-    // EFLAGS API so the guest's `jb cerror` observes the syscall result.
+    // CF isn't in flags[]; set it through the compacted-EFLAGS API so the
+    // guest's `jb cerror` sees the syscall result.
     if (g_ctxPtr) {
       u32 ef = g_ctxPtr->ReconstructCompactedEFLAGS(Frame->Thread, false, nullptr, 0);
       if (error)
@@ -725,13 +604,12 @@ public:
   }
 };
 
-// Minimal signal delegator. Sufficient for fault-free guest code; a game that
-// self-modifies code or faults needs the host SIGSEGV/SIGILL plumbing.
+// Sufficient for fault-free guest code; self-modifying code needs the real
+// SIGSEGV/SIGILL plumbing.
 class FexSignalDelegator final : public FEXCore::SignalDelegator {};
 
-// Return target for runGuestFunction: a synchronously-called guest function rets
-// here, and we longjmp out of the JIT just like thr_exit. Dispatched as a host
-// thunk, so its signature matches the thunk call path (extra args ignored).
+// Return target for runGuestFunction: longjmp out of the JIT like thr_exit;
+// dispatched as a host thunk, so extra args are ignored.
 static u64 PS4ABI guestFnReturnExit() {
   exitGuestThread();
   return 0;  // unreachable (exitGuestThread longjmps)
@@ -751,9 +629,8 @@ public:
     LOG_INFO("fex: registered exec range {} +{:#x}", (void *)info.base, info.codeSize);
   }
 
-  // Per-guest-thread bookkeeping. The gdt lives here (FEX tracks GDT/LDT per
-  // thread; sharing one array across threads is incorrect) alongside the guest
-  // stack and call-ret stack so they can be recycled when the thread finishes.
+  // Per-guest-thread state; the GDT is per thread (FEX requirement) and the
+  // stacks are pooled for reuse.
   struct FexThread {
     FEXCore::Core::InternalThreadState *thread;
     void *stack;
@@ -763,14 +640,9 @@ public:
     FEXCore::Core::CPUState::gdt_segment gdt[32];
   };
 
-  // Retired guest stacks are pooled, never munmap'd. Guest code captures its
-  // rsp into long-lived structures (FIOS2/module_start register contexts, sync
-  // objects during init) which on a real PS4 point into the loader's PERMANENT
-  // stack. Unmapping a stack after each synchronous guest call made those
-  // pointers dangle (fault at the dead stack's top), and reuse by a newer
-  // thread silently corrupted both (SotC: AllocationTracker null/-1 lookups on
-  // a job fiber ~10s into LoadInitialWorld, or a yield-loop stall). Pooling
-  // keeps retired stacks mapped and re-issues them only as stacks.
+  // Retired stacks are pooled, never unmapped: guest code captures rsp into
+  // long-lived structures, and unmapping made those dangle or corrupted the
+  // next reuse (SotC AllocationTracker faults ~10s into LoadInitialWorld).
   std::mutex stackPoolM;
   std::vector<std::pair<void *, size_t>> stackPool;    // guest rsp stacks
   std::vector<std::pair<void *, size_t>> callretPool;  // FEX call-ret stacks
@@ -796,9 +668,8 @@ public:
     ensureInit();
     auto *h = new FexThread{};
 
-    // Guest stack (the guest's own RSP); HLE handlers run on the host thread
-    // stack, so this only needs to satisfy guest code. Reuse a pooled retired
-    // stack when one exists (see stackPool above for why they never unmap).
+    // Guest stack; HLE handlers run on the host stack, so this only serves
+    // guest code. Reuse a pooled retired stack when one exists.
     h->stackSize = 8ull * 1024 * 1024;
     h->stack = poolTake(stackPool, h->stackSize);
     if (!h->stack)
@@ -806,8 +677,7 @@ public:
                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     u64 rsp = (reinterpret_cast<u64>(h->stack) + h->stackSize - 0x200) & ~0xFULL;
 
-    // Create on the calling (parent) thread, as FEX's ThreadManager
-    // does, never on the freshly spawned worker while other guest threads run.
+    // Create on the calling thread, as FEX's ThreadManager does.
     auto *thread = CTX->CreateThread(entry, rsp, nullptr);
     h->thread = thread;
     auto &S = thread->CurrentFrame->State;
@@ -843,9 +713,8 @@ public:
     // PS4 entry convention: argument block pointer in RDI.
     S.gregs[FEXCore::X86State::REG_RDI] = reinterpret_cast<u64>(arg);
 
-    // Seed guest TLS (fs base). Until the guest installs its own via sysarch, an
-    // unset (0) base would fault early TLS reads at fs+disp; give a scratch TLS
-    // region with a TCB self-pointer at [fs:0], mirroring native's valid host fs.
+    // Scratch TLS with a TCB self-pointer at [fs:0] until the guest installs
+    // its own; an unset base faults early TLS reads.
     u64 fs = fsbase;
     if (fs == 0) {
       constexpr size_t kTls = 0x10000;
@@ -864,18 +733,15 @@ public:
     auto *h = static_cast<FexThread *>(handle);
     t_curThread = h->thread;
     krnl::installSigAltStack();  // fatal handler must survive a blown guest stack
-    // Re-assert our fatal handler: FEXCore init (which runs after proc::start's
-    // installCrashHandler) may have registered its own SIGSEGV/SIGILL handlers.
-    // sigaction is process-wide and idempotent, so the last writer wins.
+    // Re-assert the fatal handler: FEXCore init may have registered its own
+    // SIGSEGV/SIGILL handlers; sigaction is idempotent.
     krnl::installCrashHandler();
     FEXCore::Allocator::RegisterTLSData(h->thread); // FEX per-thread registration
     startWatchdog();
     u32 myId = g_liveSeq.fetch_add(1);
     u64 entryRip = h->thread->CurrentFrame->State.rip;
     {
-      // Map out this guest thread's memory identity: its FEX-allocated guest
-      // stack and the HOST pthread stack it runs on, so a later fault address
-      // can be attributed ("dead host stack of thread N" vs guest stack).
+      // Log guest + host pthread stack ranges, to attribute fault addresses later.
       pthread_attr_t at;
       void *hsp = nullptr;
       size_t hsz = 0;
@@ -894,9 +760,7 @@ public:
                         static_cast<pid_t>(::syscall(SYS_gettid))}); }
     LOG_INFO("fex: running guest thread rip={:#x} (watchdog tid={})",
              h->thread->CurrentFrame->State.rip, myId);
-    // thr_exit (cpu::exitGuestThread) longjmps here to leave the JIT without
-    // returning to guest code. The thread is being torn down regardless, so
-    // abandoning the JIT dispatcher's host frame is safe.
+    // thr_exit longjmps here to leave the JIT; the thread is being torn down anyway.
     if (setjmp(t_exitJmp) == 0) {
       t_exitJmpValid = true;
       CTX->ExecuteThread(h->thread);
@@ -931,9 +795,7 @@ public:
         shown++;
       }
     }
-    // Diagnostic: a guest thread that "returns" to a tiny rip jumped through a
-    // bad/unset function pointer (e.g. a GPU thread with no real GPU backend).
-    // Dump its registers + a module-resolved stack scan to pin the culprit.
+    // A "return" to a tiny rip is a bad/unset function pointer; dump registers.
     if (endS.rip < 0x100000ull) {
       BASE_LOGI("fex", "=== BOGUS THREAD RETURN rip={:#x} ===",
                 (unsigned long)endS.rip);
@@ -956,9 +818,7 @@ public:
     FEXCore::Allocator::UninstallTLSData(h->thread);
     CTX->DestroyThread(h->thread);
     t_curThread = nullptr;
-    // Pool, never unmap: guest code may hold pointers into this stack (see
-    // stackPool). Keeping it mapped turns a use-after-retire into a stale read
-    // of stable memory instead of a fault or cross-thread corruption.
+    // Pool, never unmap: guest code may hold pointers into a retired stack.
     if (h->stack) poolPut(stackPool, h->stack, h->stackSize);
     if (h->callret) poolPut(callretPool, h->callret, h->callretSize);
     delete h;
@@ -966,15 +826,12 @@ public:
 
   u64 runGuestFunction(uintptr_t fn, u64 a0, u64 a1,
                             u64 a2, u64 a3) override {
-    // A guest function that returns must land somewhere; point its return address
-    // at a host thunk that calls exitGuestThread, so the JIT unwinds cleanly.
+    // Point a guest function's return address at a thunk that exits the thread.
     static uintptr_t exitThunk =
         makeHostThunk(reinterpret_cast<void *>(&guestFnReturnExit));
 
-    // Inherit the caller's guest TLS (fs base): module init calls into libkernel,
-    // which reads thread-local state. The caller (blocked on join below) isn't
-    // touching its TLS meanwhile, so sharing it for this synchronous call is safe
-    // and avoids faulting on the scratch-TLS a fresh thread would otherwise get.
+    // Inherit the caller's fs base: module init calls libkernel, which reads
+    // TLS, and the caller is blocked on join meanwhile.
     u64 fsbase = t_curThread ? t_curThread->CurrentFrame->State.fs_cached : 0;
 
     // createGuestThread sets RDI=arg; add RSI/RDX for the 2nd/3rd SysV args.
@@ -984,21 +841,15 @@ public:
     S.gregs[FEXCore::X86State::REG_RSI] = a1;
     S.gregs[FEXCore::X86State::REG_RDX] = a2;
     S.gregs[FEXCore::X86State::REG_RCX] = a3;
-    // Push the return address. After the implicit `call`, x86 wants rsp%16==8 at
-    // the callee's first instruction, so 16-align then subtract 8.
+    // After the implicit `call`, x86 wants rsp%16==8 at the callee's first instruction.
     u64 rsp = S.gregs[FEXCore::X86State::REG_RSP] & ~0xFULL;
     rsp -= 8;
     *reinterpret_cast<u64 *>(rsp) = exitThunk;
     S.gregs[FEXCore::X86State::REG_RSP] = rsp;
-    // Run on a PERSISTENT host worker (never nest ExecuteThread on the caller's
-    // host thread) and block until it finishes. fn returns -> exitThunk ->
-    // longjmp. The worker must outlive the call: module inits above all record
-    // pointers derived from the executing host thread's identity (glibc
-    // TCB/static-TLS sits just above the pthread stack), and a per-call
-    // std::thread let those blocks die with the thread (SotC's FIOS2
-    // dereferenced one, host_stack_top + 0xff0, minutes later during world
-    // streaming). The console runs module inits on the loader's permanent
-    // thread; mirror that.
+    // Run on a persistent host worker, never the caller's thread, and block:
+    // module inits record host-thread-derived pointers (glibc TCB above the
+    // pthread stack) that must outlive the call (SotC FIOS2). The console runs
+    // inits on a permanent thread; mirror that.
     {
       std::unique_lock<std::mutex> lk(initWorkerM);
       if (!initWorkerStarted) {
@@ -1041,23 +892,12 @@ private:
       FEXCore::Config::Initialize();
       FEXCore::Config::ReloadMetaLayer();
       FEXCore::Config::Set(FEXCore::Config::CONFIG_IS64BIT_MODE, "1");
-      // Unaligned LOCK-prefixed RMWs (x86 split locks) are emulated with dual-
-      // CAS loops that can tear on ARM. Serialize them under FEX's global
-      // split-lock mutex: engines with variably-aligned atomic fields (SotC's
-      // BPE allocator/job system: >1000 unaligned-atomic sites in the eboot)
-      // otherwise corrupt their lock-free structures intermittently.
+      // Serialize unaligned LOCK RMWs: the dual-CAS emulation tears on ARM
+      // (SotC's BPE allocator has >1000 unaligned-atomic sites).
       FEXCore::Config::Set(FEXCore::Config::CONFIG_STRICTINPROCESSSPLITLOCKS, "1");
-      // FEX emulates x86 store ordering for SCALAR loadstores only: SIMD copies
-      // and REP MOVS/STOS reorder freely on ARM. PS4 engines publish shared
-      // structures with SIMD stores (SotC's BPE JobSystem copies each job's
-      // descriptor block as a `vmovups ymm` pair), so an unordered vector store
-      // lets a worker observe the "work available" flag against a stale or
-      // half-published descriptor: the workers spin failing to claim while the
-      // producer waits for a completion that never comes. The two halves are
-      // priced differently: ordering SIMD loadstores (DELTA_FEX_VECTOR_TSO) is
-      // what the descriptor publish needs, while ordering REP MOVS/STOS
-      // (DELTA_FEX_MEMCPY_TSO) makes every guest memcpy atomic and costs far
-      // more. Both default off; enable per run.
+      // FEX orders scalar loadstores only; SIMD copies and REP MOVS reorder on
+      // ARM. SotC publishes job descriptors with vmovups pairs, so workers can
+      // observe a half-published descriptor. Both knobs default off.
       if (kVectorTso)
         FEXCore::Config::Set(FEXCore::Config::CONFIG_VECTORTSOENABLED, "1");
       if (kMemcpyTso)
@@ -1087,16 +927,11 @@ FexBackend g_backend;
 } // namespace
 
 namespace {
-// Dedicated VA region for FEXCore's internal allocations (JIT code buffers,
-// block-link maps, lookup caches). Kept disjoint from guest memory: FEX
-// identity-maps the guest into the host VA, and the PS4 guest reserves large
-// MAP_FIXED ranges high in the address space (~0xfcxx_xxxx_xxxx); if FEX's
-// kernel-chosen ::mmap internals land there too, a guest fixed mapping clobbers
-// them (zero-fills the JIT's block-link map -> the null-node crash). We route
-// all of FEXCore's allocations into this reserved window instead.
+// Dedicated VA window for FEXCore internals, disjoint from guest memory: a
+// guest MAP_FIXED range high in VA would clobber kernel-placed FEX mappings
+// (zero-fills the JIT's block-link map, the null-node crash).
 #ifdef __ANDROID__
-// 39-bit user VA: pin above the guest arena (sys_mem kCeil = 384 GiB) and below
-// where bionic's mmap_base/stack live (~448 GiB+). Reserved first in earlyInit.
+// 39-bit user VA: above the guest arena, below bionic's mmap_base. Reserved in earlyInit.
 constexpr uintptr_t kFexHeapBase = 0x0000'0060'0000'0000ull; // 384 GiB
 constexpr size_t kFexHeapSize = 32ull * 1024 * 1024 * 1024;  // 32 GiB
 #else
@@ -1110,14 +945,10 @@ void *fexInternalMmap(void *addr, size_t len, int prot, int flags, int fd, off_t
   // MAP_FIXED means FEX requires that exact address; honour it.
   if ((flags & MAP_FIXED) || !g_fexHeapEnd)
     return ::mmap(addr, len, prot, flags, fd, off);
-  // A bare hint is advisory, and the kernel is free to ignore it and place the
-  // mapping anywhere, including a range the guest MAP_FIXEDs later, which is
-  // the collision this whole window exists to prevent. Keeping FEX's internals
-  // inside the window matters more than honouring a hint it cannot rely on, so
-  // fall through to the bump allocator below and drop the hint.
+  // A bare hint is advisory and the kernel may place the mapping in a range the
+  // guest MAP_FIXEDs later; the window matters more, so drop the hint.
   (void)addr;
-  // Bump-allocate anonymous requests from the reserved window with MAP_FIXED so
-  // they can never overlap guest memory.
+  // Bump-allocate from the reserved window with MAP_FIXED, never overlapping guest memory.
   const size_t alen = (len + 0xFFFull) & ~0xFFFull;
   uintptr_t base = g_fexHeapNext.fetch_add(alen, std::memory_order_relaxed);
   if (base + alen > g_fexHeapEnd)
@@ -1128,9 +959,7 @@ int fexInternalMunmap(void *addr, size_t len) { return ::munmap(addr, len); }
 } // namespace
 
 void earlyInit() {
-  // Reserve the window PROT_NONE so the kernel won't hand any of it to guest
-  // mmaps, then point FEXCore's allocator hooks at it. Done before any context
-  // or guest mapping exists.
+  // Reserve PROT_NONE before any guest mapping, then hook FEXCore's allocator.
   int flags = MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE;
 #ifdef MAP_FIXED_NOREPLACE
   void *r = ::mmap(reinterpret_cast<void *>(kFexHeapBase), kFexHeapSize, PROT_NONE,
@@ -1162,13 +991,8 @@ void exitGuestThread() {
   // Not in a guest thread context: nothing to unwind.
 }
 
-// Plant a guest x86 trampoline that bounces into the native HLE function `hostFn`
-// via the kHostThunkSyscallBase magic syscall. The trampoline preserves the 4th
-// arg (rcx) into r10 before `syscall` clobbers rcx, matching the dispatch above.
-// Attribute an address inside the host-thunk pool back to the HLE export whose
-// trampoline lives there. A guest fault in this pool means the guest called an
-// import slot we bound but cannot service; knowing WHICH import turns an
-// unreadable "illegal instruction at 0x5000000004xx" into a name.
+// Map a host-thunk-pool address back to the HLE export planted there; a guest
+// fault in this pool is a call through a bound-but-unserviced import slot.
 const char *hostThunkNameForAddr(uintptr_t addr, u32 *idxOut) {
   std::lock_guard lk(g_thunkMutex);
   if (!g_thunkPool)
@@ -1184,6 +1008,8 @@ const char *hostThunkNameForAddr(uintptr_t addr, u32 *idxOut) {
   return "";
 }
 
+// Plant a guest x86 trampoline bouncing into native hostFn via the magic
+// syscall; preserves rcx into r10 before `syscall` clobbers rcx.
 uintptr_t makeHostThunk(void *hostFn, const char *name) {
   std::lock_guard lk(g_thunkMutex);
   g_thunkNames.resize(g_hostThunks.size() + 1);
@@ -1197,10 +1023,8 @@ uintptr_t makeHostThunk(void *hostFn, const char *name) {
       LOG_ERROR("fex: host-thunk pool mmap failed");
       return 0;
     }
-    // FEX hooks mmap, so this pool lands inside FEX's reserved internal heap
-    // rather than wherever the host kernel would have put it. Log the range: a
-    // guest fault that lands in it is a call through a bad HLE import slot, and
-    // without the base there is no way to tell that from random garbage.
+    // FEX hooks mmap, so the pool lands in the reserved heap; log the range
+    // (faults here are bad HLE import slots).
     LOG_INFO("fex: host-thunk pool {:#x}+{:#x}",
              reinterpret_cast<u64>(g_thunkPool),
              (u64)g_thunkPoolSize);
@@ -1227,18 +1051,10 @@ uintptr_t makeHostThunk(void *hostFn, const char *name) {
   return reinterpret_cast<uintptr_t>(t);
 }
 
-// Plant a guest x86 trampoline that WRAPS an existing resolved guest function
-// `realTarget`, capturing both its arguments and its RETURN VALUE. The wrapper:
-//   1. calls realTarget with the caller's original args (rdi,rsi,rdx,rcx,...),
-//   2. then invokes native `loggerFn(hookId, a0,a1,a2,a3, ret)` via the
-//      kHostThunkSyscallBase magic syscall (a0..a3 = the ORIGINAL rdi/rsi/rdx/rcx,
-//      ret = realTarget's rax),
-//   3. returns realTarget's return value to the original caller.
-// Install by writing the returned guest address into the import GOT slot that
-// used to hold `realTarget` (the game's `jmp [GOT]` PLT stub then lands here).
-// This is the ARM-compatible replacement for int3 return hooks: FEX JITs the
-// emitted bytes and the `call r11 -> realTarget` chains into the real callee.
-// Reentrant/thread-safe (all transient state on the guest stack). 0 on failure.
+// Plant a trampoline that calls realTarget with the original args, then
+// loggerFn(hookId, a0..a3, ret) via the magic syscall, and returns realTarget's
+// result. Install by writing the returned address into the import GOT slot;
+// the ARM-compatible replacement for int3 return hooks. 0 on failure.
 uintptr_t makeGuestReturnHook(void *realTarget, u32 hookId, void *loggerFn,
                               const char *name) {
   std::lock_guard lk(g_thunkMutex);
@@ -1299,14 +1115,9 @@ uintptr_t makeGuestReturnHook(void *realTarget, u32 hookId, void *loggerFn,
   return reinterpret_cast<uintptr_t>(t);
 }
 
-// Wrap an already-callable guest function so a NATIVE lock is held across it:
-// emit [save args] syscall(lockFn) [restore args] call realTarget syscall(unlockFn)
-// ret. Unlike makeGuestReturnHook this fires BEFORE the call as well as after,
-// which is what serialising a guest critical section from the host needs.
-// SotC's allocator free tree ends up holding stale child links; the surviving
-// explanations are concurrent guest threads or a miscompiled store. A failed
-// try_lock is deterministic proof of the former, and this observes every call
-// where DELTA_RIPRACE could only sample.
+// Wrap a guest function so a NATIVE lock is held across it: syscall(lockFn),
+// call realTarget, syscall(unlockFn). Fires before and after, unlike
+// makeGuestReturnHook; observes every call DELTA_RIPRACE could only sample.
 uintptr_t makeGuestLockWrapper(void *realTarget, void *lockFn, void *unlockFn,
                                const char *name) {
   std::lock_guard lk(g_thunkMutex);
@@ -1335,12 +1146,9 @@ uintptr_t makeGuestLockWrapper(void *realTarget, void *lockFn, void *unlockFn,
   auto emit = [&](std::initializer_list<u8> b) { for (u8 x : b) *p++ = x; };
   auto emit32 = [&](u32 v) { std::memcpy(p, &v, 4); p += 4; };
   auto emit64 = [&](u64 v) { std::memcpy(p, &v, 8); p += 8; };
-  // Reached by `jmp` from the patched entry, so rsp%16==8 and [rsp] is still the
-  // ORIGINAL caller's return address, so the final `ret` therefore returns to it.
-  // The syscall handler calls a C function, which may clobber every SysV
-  // caller-saved register, so the argument registers are saved around it. The
-  // pushes come in pairs so rsp%16 is 8 again before `sub rsp,8; call`, which
-  // hands realTarget the same alignment an ordinary `call` would.
+  // Reached by `jmp` from the patched entry: [rsp] is still the original
+  // caller's return address. Args are saved around the syscall (a C handler may
+  // clobber every caller-saved register), pushes paired for call alignment.
   emit({0x57});                    // push rdi        ; save a0
   emit({0x56});                    // push rsi        ; save a1
   emit({0x52});                    // push rdx        ; save a2
@@ -1366,14 +1174,9 @@ uintptr_t makeGuestLockWrapper(void *realTarget, void *lockFn, void *unlockFn,
   return reinterpret_cast<uintptr_t>(t);
 }
 
-// Build a callable copy of an internal guest function whose first `prologueLen`
-// bytes are about to be overwritten by an entry detour. Emits [the prologueLen
-// original bytes] + [abs jmp to continueAt] into the thunk pool and returns its
-// address. The caller then patches the real entry to jump to a wrapper whose
-// realTarget is this trampoline; calling the trampoline runs the original
-// function from the top (relocated prologue) and falls through into its body.
-// `prologueLen` bytes MUST be position-independent (no rip-relative / relative
-// branches) and end on an instruction boundary >= 14 (the detour's abs-jmp size).
+// Callable copy of a guest function whose prologue an entry detour overwrites:
+// [relocated prologue] + [abs jmp to continueAt]. prologueLen must be
+// position-independent and cover >= 14 bytes on an instruction boundary.
 uintptr_t makeGuestTrampoline(const void *fnBytes, u32 prologueLen,
                               const void *continueAt) {
   std::lock_guard lk(g_thunkMutex);
@@ -1403,19 +1206,14 @@ u64 currentGuestRip() {
   return t_curThread ? t_curThread->CurrentFrame->State.rip : 0;
 }
 
-// Guest fs-segment base of the thread currently executing on this host thread
-// (0 if none). Lets a native hook logger read the guest's TLS (e.g. the BPE
-// JobSystem worker ordinal at fs:[-8]) without emitting guest fs-relative code.
+// Guest fs base of the thread on this host thread, so a native logger can
+// read guest TLS without emitting fs-relative code.
 u64 currentGuestFsBase() {
   return t_curThread ? t_curThread->CurrentFrame->State.fs_cached : 0;
 }
 
-// Every live guest thread's fs base, for host-side surveys of guest TLS. The
-// BPE JobSystem's worker ordinal lives at [*(fsbase) - 0x10] as 0x8000|core,
-// and the claim path tests `job_affinity & (1 << ordinal)`, so enumerating
-// the ordinals that actually exist decides whether a job whose affinity names
-// a core we never assign (e.g. SotC's core-6 "Resource Loading" pin, mask
-// 0x40) can be claimed by anyone at all.
+// Every live thread's fs base, to survey guest TLS (the BPE worker ordinal at
+// [*(fsbase)-0x10] decides which job affinities are claimable).
 void guestThreadFsBases(std::vector<u64> &out) {
   out.clear();
   std::lock_guard lk(g_liveMutex);
@@ -1434,17 +1232,12 @@ bool guestGregsFromSignal(const void *ucontext, u64 out[16]) {
   if (!ucontext || !t_curThread)
     return false;
   const auto *uc = static_cast<const ucontext_t *>(ucontext);
-  // Only meaningful inside JIT'd code: elsewhere these host registers belong to
-  // the host, not the guest. Reuse the same test the RIP reconstruction uses.
+  // Only meaningful inside JIT'd code; same test the RIP reconstruction uses.
   if (!reconstructGuestRip(uc->uc_mcontext.pc))
     return false;
-  // FEX's arm64 backend gives every guest GPR a FIXED host register (its
-  // static register allocation, x64::SRA in Arm64Emitter.cpp), so at any point
-  // in JIT code the live guest value is in a known host register, exact at
-  // the faulting instruction, unlike CPUState.gregs which is only written back
-  // at block boundaries. Indices are FEXCore::X86State::REG_* order
-  // (RAX,RCX,RDX,RBX,RSP,RBP,RSI,RDI,R8..R15); the host register numbers below
-  // mirror x64::SRA element for element and must be kept in step with it.
+  // FEX's arm64 backend keeps every guest GPR in a fixed host register
+  // (x64::SRA), exact at the faulting pc unlike the block-boundary gregs; kSra
+  // mirrors SRA element for element.
   static constexpr int kSra[16] = {4,  7,  5,  6,  8,  9,  10, 11,
                                    12, 13, 14, 15, 16, 17, 19, 29};
   for (int i = 0; i < 16; i++)
@@ -1499,14 +1292,9 @@ bool tryHandleJitSignal(int sig, void *infop, void *ucv) {
     return false;
   auto *uc = static_cast<ucontext_t *>(ucv);
 
-  // FEX's call-ret prediction stack: the JIT pushes/pops a predictor entry on
-  // every guest call/ret through x25. Guest code whose calls and rets do not
-  // pair up (fiber switches: SotC's BPE job system, thousands per streaming
-  // second) drifts the predictor sp into the buffer's guard pages. Upstream FEX
-  // treats that as EXPECTED (SyscallsSMCTracking.cpp HandleSegfault): reset x25
-  // to the default mid-buffer location and resume. Without this mirror the
-  // overflow surfaced as a fatal "guest fault" at the guard page ~9s into
-  // SotC's LoadInitialWorld.
+  // Guest call/ret that do not pair up (fiber switches) drift FEX's call-ret
+  // predictor into its guard pages; upstream FEX treats that as expected and
+  // resets x25. Mirror it, or SotC's job system dies mid-LoadInitialWorld.
   if (sig == SIGSEGV && t_curThread->CallRetStackBase) {
     const u64 fa =
         reinterpret_cast<u64>(static_cast<siginfo_t *>(infop)->si_addr);
@@ -1527,10 +1315,8 @@ bool tryHandleJitSignal(int sig, void *infop, void *ucv) {
     }
   }
 
-  // FEX raises SIGBUS(BUS_ADRALN) from the JIT for unaligned atomic accesses
-  // and backpatches them. Mirror FEX's frontend SIGBUS handler. (FEX's own
-  // SignalDelegator owns the richer SIGSEGV/SMC path; we only need this one
-  // case.)
+  // FEX raises SIGBUS(BUS_ADRALN) from the JIT for unaligned atomics and
+  // backpatches them; mirror its frontend handler.
   if (sig != SIGBUS)
     return false;
   const u64 pc = uc->uc_mcontext.pc;
@@ -1541,9 +1327,7 @@ bool tryHandleJitSignal(int sig, void *infop, void *ucv) {
   auto result = FEXCore::ArchHelpers::Arm64::HandleUnalignedAccess(
       t_curThread, FEXCore::ArchHelpers::Arm64::UnalignedHandlerType::HalfBarrier,
       pc, reinterpret_cast<u64 *>(&uc->uc_mcontext.regs[0]));
-  // A backpatched unaligned ATOMIC stops being atomic (HalfBarrier splits it
-  // into plain ops + barriers). That silently breaks guest spinlocks/queues,
-  // so make every backpatch visible: log the first ones with the guest RIP.
+  // A backpatched atomic stops being atomic (HalfBarrier); log each site once.
   static std::mutex logM;
   static std::set<u64> seenRips;
   const u64 grip = reconstructGuestRip(pc);
@@ -1564,8 +1348,8 @@ bool tryHandleJitSignal(int sig, void *infop, void *ucv) {
 
 } // namespace cpu
 
-// Guest fs base (TLS) is the current FEXCore thread's CPUState.fs_cached. Called
-// by the guest via sys_sysarch(AMD64_SET_FSBASE) and on thread spawn.
+// Guest fs base lives in the current FEXCore thread's CPUState; called via
+// sys_sysarch(AMD64_SET_FSBASE) and on thread spawn.
 namespace krnl {
 void setThreadFsBase(u64 v) {
   if (cpu::t_curThread)

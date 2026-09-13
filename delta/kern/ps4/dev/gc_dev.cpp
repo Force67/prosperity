@@ -24,12 +24,9 @@
 
 namespace {
 DELTA_OPTION(bool, kGcCaller, "DELTA_GC_CALLER", false);
-// Execute the async-compute rings a title maps and rings doorbells on. A
-// title that uploads through them (P.T. streams every texture as a compute
-// copy on ring 1/0/0) renders nothing at all without this, and the work is
-// invisible: no draw is declined, no dispatch is dropped, the packets are
-// simply never walked. Off is the old boot-safe behaviour, not a default
-// worth keeping; DELTA_GPU_ACB=0 still turns it back off.
+// Execute the async-compute rings a title maps and rings doorbells on. P.T. streams
+// every texture as a compute copy on ring 1/0/0 and renders nothing without this;
+// no draw is declined, the packets are just never walked. DELTA_GPU_ACB=0 reverts.
 DELTA_OPTION(bool, kGcAcb, "DELTA_GPU_ACB", true);
 // Drain mapped compute rings by their contents rather than by a matching
 // doorbell; see the walk in the DingDong handler.
@@ -39,10 +36,9 @@ DELTA_OPTION(bool, kGcTrace, "DELTA_GC_TRACE", false);
 DELTA_OPTION(u32, kGcTraceMax, "DELTA_GC_TRACE_MAX", 0);
 }  // namespace
 
-// LLE GPU submit bridge (delta_runtime). The real libSceGnmDriver.sprx submits
-// PM4 through these ioctls; forward the descriptor array to the GPU command
-// processor. See prosperity_gc_submit in libSceGnmDriver.cpp.
-// The CP raises this when a packet's INT_SEL asks for an end-of-pipe interrupt.
+// LLE GPU submit bridge: real libSceGnmDriver.sprx submits PM4 through these
+// ioctls; forward the descriptor array to the GPU command processor
+// (see prosperity_gc_submit in libSceGnmDriver.cpp).
 extern "C" void prosperity_gpu_end_of_pipe() { krnl::noteGpuEndOfPipe(); }
 extern "C" void prosperity_gpu_end_of_pipe_ctx(u64 ctx) {
   krnl::noteGpuEndOfPipeCtx(ctx);
@@ -73,10 +69,8 @@ static void completeFlipLabels(u64 flipPtr) {
     return;
 
   auto *p = reinterpret_cast<u32 *>(flipPtr);
-  // Gnm prepareFlip emits a PM4-like EOP-label packet:
-  //   C0038000 addr_lo addr_hi value_lo value_hi
-  // Complete it synchronously because the CPU-side emulated submit already
-  // finished all draws before returning.
+  // Gnm prepareFlip emits a PM4-like EOP-label packet (C0038000 lo hi val_lo val_hi);
+  // complete it synchronously, the emulated submit already finished all draws.
   if (p[0] == 0xC0038000u) {
     u64 addr = (static_cast<u64>(p[2] & 0xFF) << 32) | p[1];
     u64 value = static_cast<u64>(p[3]) |
@@ -93,10 +87,9 @@ static void completeFlipLabels(u64 flipPtr) {
   }
 }
 
-// SCOUT (DELTA_GC_CALLER): scan the stack for the first return address landing in
-// any guest module's .text and report it as <module>+offset, to pin which guest
-// wrapper issued each gc ioctl (the native backend runs handlers on the guest
-// stack). Off by default: the submit ioctls fire 60+/frame and the scan is slow.
+// DELTA_GC_CALLER: scan the stack for the first return address in a guest module's
+// .text, to pin which guest wrapper issued each gc ioctl. Off by default: the
+// submit ioctls fire 60+/frame and the scan is slow.
 static void printGuestCaller() {
   if (!kGcCaller)
     return;
@@ -126,10 +119,9 @@ static void printGuestCaller() {
 
 /* ioctl dispatch */
 i32 gcDevice::ioctl(u32 cmd, void *data) {
-  // Graphics command submission (the LLE path: real libSceGnmDriver.sprx). The
-  // arg's descriptor array is an array of 16-byte PM4 INDIRECT_BUFFER packets;
-  // forward it to the GPU command processor. Handle these first (and without the
-  // stack-scan SCOUT) since they fire 60+ times per frame.
+  // Graphics command submission (LLE path): the arg's descriptor array is 16-byte
+  // PM4 INDIRECT_BUFFER packets; forward to the GPU command processor. Handle
+  // first, without the SCOUT scan, they fire 60+ times per frame.
   switch (cmd) {
   case 0xC0108102: {  // gc submit: {u32 a0, u32 count, u64 descPtr}
     struct argl {
@@ -157,13 +149,10 @@ i32 gcDevice::ioctl(u32 cmd, void *data) {
   }
   case 0xC020810C: {  // gc submit + EOP: {u32 pid, u32 count, u64 descPtr,
                       //   u64 eopVal, u32 wait}. Layout per fpPS4 dev_gc.pas
-                      // t_submit_args: +0x10 is the EOP completion VALUE
-                      // ("submit_id | vmid<<32"), a scalar the kernel writes
-                      // on GPU completion, never a pointer. EOP label writes
-                      // come from EVENT_WRITE_EOP packets inside the dcb and
-                      // are the CP's job. (We used to dereference +0x10 as a
-                      // prepareFlip packet pointer; SotC passes a scalar there
-                      // and the read faulted.)
+                      // t_submit_args: +0x10 is the EOP completion VALUE (submit_id | vmid<<32),
+                      // a scalar the kernel writes on completion, never a pointer; EOP label
+                      // writes come from EVENT_WRITE_EOP packets in the dcb. (Deref'ing +0x10 as
+                      // a prepareFlip pointer faulted; SotC passes a scalar.)
     struct argl {
       u32 pid;
       u32 count;
@@ -199,21 +188,16 @@ i32 gcDevice::ioctl(u32 cmd, void *data) {
   case 0xC0048117:  // kernel: wait-suspend-done as well (same handler).
     return 0;
   case 0xC0048116: {  // kernel: submit-completion signal. Returns 0
-                      // when no submit is in flight, EBUSY (16) otherwise; hot
-                      // (polled per submit). Our submits are synchronous, so
-                      // "done" is always true; the kernel never touches the arg
-                      // slot, we zero it as the benign idle answer.
+                      // 0 when no submit is in flight, EBUSY (16) otherwise; polled per submit.
+                      // Our submits are synchronous, so always report done and zero the arg slot.
     if (data)
       *static_cast<u32 *>(data) = 0;
     return 0;
   }
   case 0xC0048114: {  // kernel: GRBM poll, spins on the busy regs (0x1413/0x1414)
-                      // and returns 0 WITHOUT writing the arg slot. The GnmDriver
-                      // wrapper (libSceGnmDriver +0x5fd0) zeroes the slot itself
-                      // and never reads it back, so only the success return
-                      // matters. A title's render thread polls it in a tight loop;
-                      // handle it here (return success, zero the slot) so it stops
-                      // falling through to the UNHANDLED logger.
+                      // Returns 0 WITHOUT writing the arg slot (the GnmDriver wrapper +0x5fd0
+                      // zeroes it itself and never reads back). Polled in a tight loop; answer
+                      // here so it stops falling through to the UNHANDLED logger.
     if (data)
       *static_cast<u32 *>(data) = 0;
     return 0;
@@ -255,10 +239,9 @@ i32 gcDevice::ioctl(u32 cmd, void *data) {
     return 0;
   }
   case 0xC010810B: {
-    // kernel: redundant-CU query -> {se0, se0, se1, se1}. The values come
-    // from a GPU PCI config read (reg 0xBC, low16>>6 and high16&0x3FF); real
-    // consoles report 0 redundant CUs. The old 1024 placeholder produced se0=16,
-    // which is impossible (an SE has 9 CUs) and would skew the driver's CU count.
+    // Redundant-CU query -> {se0, se0, se1, se1} from a GPU PCI config read (reg
+    // 0xBC); real consoles report 0 redundant CUs. The old 1024 placeholder gave
+    // se0=16, impossible for a 9-CU SE, and skewed the driver's CU count.
     struct argl {
       u32 cumask0;
       u32 cumask1;
@@ -273,11 +256,9 @@ i32 gcDevice::ioctl(u32 cmd, void *data) {
     return 0;
   }
   case 0xC008811B: {
-    // GNM "trace/info init": the driver passes an 8-byte out slot and stores the
-    // returned pointer into its global logging-info pointer (Gnm vaddr 0x100e8),
-    // then dereferences it on every submit (`cmp dword[ptr],0` = trace-enable).
-    // A bogus value here makes that deref fault. Hand back a real, zeroed guest
-    // struct so the deref reads trace-disabled (0) and the logger is a no-op.
+    // GNM trace/info init: the driver stores the returned pointer globally (Gnm
+    // vaddr 0x100e8) and derefs it on every submit (`cmp dword[ptr],0`). A bogus
+    // value faults that deref; hand back a zeroed guest struct (trace-disabled).
     static u8 *traceInfo = nullptr;
     if (!traceInfo)
       traceInfo = allocLowGuest(0x100);  // zero-filled; [+0] = trace flag (off)
@@ -343,13 +324,10 @@ i32 gcDevice::ioctl(u32 cmd, void *data) {
         }
       }
     }
-    // Synchronous CPU submit path: no real HQD/doorbell to program. Accept the
-    // mapping and return success WITHOUT touching the caller's struct –
-    // vqueueId (+0x0C) is the handle the GnmDriver wrapper hands back to the
-    // app for DingDong/Unmap; the UNHANDLED fallthrough used to memset the
-    // whole struct, so the app saw handle 0, treated the map as failed and
-    // remapped in a loop. The retail kernel validates and returns 0 with the
-    // inputs intact.
+    // Synchronous CPU submit path: accept the mapping, return success WITHOUT
+    // touching the caller's struct. vqueueId (+0x0C) is the handle the app uses
+    // for DingDong/Unmap; the old UNHANDLED fallthrough memset the struct, the app
+    // saw handle 0 and remapped in a loop.
     return 0;
   }
   case 0xC00C810E: { // sceGnmUnmapComputeQueue
@@ -388,12 +366,10 @@ i32 gcDevice::ioctl(u32 cmd, void *data) {
     if (kGcAcb && data) {
       const auto* args = static_cast<const u32*>(data);
       std::lock_guard lock(computeMutex);
-      // Periodic census of EVERY mapped queue, not just the kicked one. SotC
-      // maps seven and only 1/0/0 ever arrives here, which leaves two very
-      // different possibilities: the other six are genuinely empty, or they
-      // hold work whose doorbell we never see (the driver can ring one by
-      // writing to its /dev/gc mapping instead of calling this ioctl). Reading
-      // the first packet of each ring separates them.
+      // Census of EVERY mapped queue, not just the kicked one: SotC maps seven and
+      // only 1/0/0 arrives here. Either the other six are empty or their doorbell
+      // never reaches us (the driver can ring via its /dev/gc mapping); reading the
+      // first packet of each ring separates the cases.
       if (kGcTrace) {
         static u32 kicks = 0;
         if ((kicks++ % 500) == 0) {
@@ -478,22 +454,17 @@ i32 gcDevice::ioctl(u32 cmd, void *data) {
   }
   }
 
-  // SCOUT: log unknown gc ioctls and soft-succeed so the boot keeps advancing
-  // instead of trapping. Lets us discover the sequence GNM actually issues.
-  // Rate-limited: an unknown ioctl in the per-submit hot path would otherwise
-  // flood unbuffered stderr and stall the render loop.
+  // SCOUT: log unknown gc ioctls and soft-succeed so boot advances; rate-limited,
+  // an unknown per-submit ioctl would flood unbuffered stderr and stall the loop.
   static int unhandledLogged = 0;
   if (kGcTrace || unhandledLogged < 32) {
     unhandledLogged++;
     BASE_LOGI("gc", "UNHANDLED ioctl({:x}) data={:p}", cmd, data);
   }
-  // Zero the output buffer of an unhandled OUT/INOUT ioctl. The driver reads the
-  // buffer back as a query result (capability counts, status words, etc.); left
-  // uninitialised it returns stack/heap garbage, which the engine then trusts –
-  // e.g. a bogus huge "format count" that overruns a fixed table and smashes the
-  // stack. Zero is the benign "nothing/idle/none" answer (matches the explicit
-  // 0x16 submit-done handler). Length is encoded in the ioctl command (FreeBSD
-  // IOCPARM_LEN). Only touch OUT ioctls (bit 0x40000000).
+  // Zero the output buffer of an unhandled OUT/INOUT ioctl (length = IOCPARM_LEN of
+  // the command). The driver reads it back as a query result; garbage there became
+  // a bogus huge "format count" overrunning a fixed table. Zero is the benign
+  // "nothing/idle/none" answer; only OUT ioctls (bit 0x40000000).
   if (data && (cmd & 0x40000000u)) {
     u32 len = (cmd >> 16) & 0x1fff;
     if (len)
@@ -502,29 +473,21 @@ i32 gcDevice::ioctl(u32 cmd, void *data) {
   return 0;
 }
 
-// Kernel (11.00) maps GPU-visible device memory at a fixed base + offset for
-// offsets under a size cap; on retail those fields are never initialized, so
-// every real mmap fails. Back the mapping with a lazily allocated GPU-visible
-// pool instead: allocLowGuest hands out [512 GiB, 2^40), inside the identity
-// range the CP renders into, so a title that maps /dev/gc gets real, CP-usable
-// memory. Out-of-range offsets fall back to the anonymous mmap path (-1).
+// Kernel 11.00 maps GPU-visible device memory at a fixed base+offset under a size
+// cap; on retail those fields are never initialized, so every real mmap fails.
+// Back the mapping with a lazily allocated pool in [512 GiB, 2^40), inside the
+// identity range the CP renders into; out-of-range offsets fall back to anon.
 std::array<gcDevice::ComputeQueue, 64> gcDevice::computeQueues{};
 std::mutex gcDevice::computeMutex;
 
-// SotC spreads its async compute over seven queues and only 1/0/0 ever arrives
-// as a DingDong ioctl; the other six hold real work and sit at read=0 for the
-// whole run, so their doorbell reaches the hardware some other way (the driver
-// can ring one by writing to its /dev/gc mapping). Consume a ring entry only
-// when it is a complete IB packet whose target resolves, advance readOffsetDw
-// past it so nothing executes twice, and stop at the first word that is not
-// one (a half-written entry or the end of what the guest wrote).
-// The caller must already hold computeMutex: the doorbell handler runs this
-// from inside its own lock scope, and std::mutex is not recursive, so locking
-// here as well deadlocked the title the instant it rang a doorbell.
-// The ring id a doorbell names is the queue's VQUEUE field, the one the map
-// ioctl carried at +0x0c (GTA:SA maps vqueue 0x29 and rings 41; not pipe +
-// me*8, which is the driver's index into its own doorbell table). A doorbell
-// for a ring we never saw mapped is not ours to guess at.
+// SotC spreads async compute over seven queues; only 1/0/0 arrives as a DingDong
+// ioctl, the other six sit at read=0 all run, so their doorbell reaches the
+// hardware some other way (the driver can write its /dev/gc mapping). Consume a
+// ring entry only when it is a complete IB packet whose target resolves, advance
+// readOffsetDw past it, stop at the first non-packet word. Caller must hold
+// computeMutex (not recursive; locking here too deadlocked on the first doorbell).
+// The ring id a doorbell names is the queue's VQUEUE field from the map ioctl's
+// +0x0c (GTA:SA maps vqueue 0x29 and rings 41; not pipe + me*8).
 void gcDevice::ringDoorbell(u32 ringId, u32 writeOffsetDw) {
   for (ComputeQueue &q : computeQueues) {
     if (!q.mapped || q.vqueue != ringId)
@@ -577,10 +540,9 @@ void gcDevice::drainQueues(u32 budget_dw) {
 
 u8 *gcDevice::map(void *, size_t size, u32, u32, size_t offset) {
   constexpr u64 kPoolSize = 256ull * 1024 * 1024;
-  // The pool belongs to the device, not to the descriptor: sys_open news a
-  // gcDevice per open, so a per-instance pool would hand two openers different
-  // memory for the same offset. sys_mmap holds no lock across device::map
-  // either, so the lazy creation needs its own.
+  // The pool belongs to the device, not the descriptor: a gcDevice per open would
+  // hand two openers different memory for the same offset; sys_mmap holds no lock
+  // across device::map, so lazy creation needs its own.
   static std::mutex poolLock;
   static u8 *pool = nullptr;
   std::lock_guard<std::mutex> lk(poolLock);
@@ -598,14 +560,10 @@ u8 *gcDevice::map(void *, size_t size, u32, u32, size_t offset) {
 }
 } // namespace krnl
 
-// Called once per flip: draining inside the doorbell handler charges the whole
-// backlog to whichever frame happened to ring it.
-// sceGnmDingDong(ringId, offset) publishes a queue's write pointer. The real
-// driver writes it straight into its /dev/gc mapping, so no ioctl announces it
-// and the work would otherwise only be noticed at the next flip, by which
-// time the guest has recycled the buffers those packets point at (draining a
-// ring at flip time SIGSEGVs Tomb Raider). The doorbell is the only moment the
-// ring's contents are known good, so run them here.
+// sceGnmDingDong(ringId, offset) publishes a queue's write pointer. The real driver
+// writes it into its /dev/gc mapping, so no ioctl announces it; draining only at
+// flip time recycles buffers under us (SIGSEGV in Tomb Raider). Called once per
+// flip so the backlog is not charged to whichever frame rang the doorbell.
 extern "C" void prosperity_gc_dingdong(u32 ringId, u32 offsetDw) {
   std::lock_guard lock(krnl::gcDevice::computeMutex);
   krnl::gcDevice::ringDoorbell(ringId, offsetDw);

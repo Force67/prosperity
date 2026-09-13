@@ -5,11 +5,9 @@
  * For information regarding licensing see LICENSE
  * in the root of the source tree.
  */
-// Generic container mount: sniffs a .rar/.zip, indexes its entries once and
-// serves file bytes by decompressing on demand. The per-format decoding lives
-// behind ArchiveBackend (archive_rar.cpp, archive_zip.cpp); everything here is
-// format-agnostic bookkeeping: the index cache, the wrapper-directory strip and
-// the decompressed-file cache.
+// Generic container mount: sniff .rar/.zip, index once, serve bytes by on-demand
+// decompression. Per-format decoding lives behind ArchiveBackend; everything here is
+// format-agnostic: index cache, wrapper-dir strip, decompressed-file cache.
 
 #include "archive_object.h"
 #include "archive_backend.h"
@@ -197,11 +195,9 @@ void saveIndexCache(const std::string &path, const char *backend,
   f.Write(buf.data(), buf.size());
 }
 
-// The console's /app0 is case-insensitive, and titles rely on it: Demon's Souls
-// is dumped all-lowercase but its engine opens mixed-case paths off its own
-// command line ("$/CoreData/EngineSupport/DebugMenu/DebugRenderMenu.txt"), so an
-// exact-match lookup loses files that are plainly there. Keys are folded, the
-// entry keeps its real name for listings.
+// The console's /app0 is case-insensitive and titles rely on it: Demon's Souls dumps
+// all-lowercase but opens mixed-case paths off its own command line, so exact-match
+// loses files that are plainly there. Keys fold; the entry keeps its real name.
 std::string foldCase(std::string s) {
   for (char &c : s)
     if (c >= 'A' && c <= 'Z')

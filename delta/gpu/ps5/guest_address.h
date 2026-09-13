@@ -33,21 +33,17 @@ inline bool IsGuestAddress(u64 address) {
   return address >= kGuestBase && address < kGuestEnd;
 }
 
-// The GPU aperture: from the lowest slot a title fixed-maps a pool at (64 GiB)
-// up to the 2^40 user ceiling allocLowGuest() bumps towards. Isaac's AGC pool
-// sits in the 0x80_xx_xx_xx_xx band and Skyrim's command buffers land around
-// 0x10_00_00_00_00, but a title that allocates more than a few GiB runs well
-// past either: Minecraft's bgfx command buffers are at 0x89_xx_xx_xx_xx, and an
-// earlier 0x81_00_00_00_00 ceiling silently dropped every submit naming one.
+// GPU aperture: from the lowest slot a title fixed-maps a pool at (64 GiB) to the 2^40
+// user ceiling. Isaac's AGC pool sits ~0x80_xx.., Skyrim's command buffers ~0x10_xx..,
+// but bigger titles run past either (Minecraft's bgfx buffers at 0x89_xx..; an earlier
+// 0x81 ceiling silently dropped every submit naming one).
 inline constexpr u64 kGpuBase = 0x1000000000ull;
 inline constexpr u64 kGpuEnd = 0x10000000000ull;
 
-// ...and the pools a title actually maps, because that band is only ever a
-// guess about where a title puts them. Astro Bot fixed-maps its GPU pools at 12
-// to 25 GiB, all of it under the 64 GiB floor, so every draw submit naming one
-// was dropped and the title waited forever on a fence the dropped work would
-// have written. Direct memory is where GPU-visible memory comes from, so the
-// kernel notes each mapping it makes (kern/ps5/dev/dma_dev.cpp).
+// ...and the pools a title actually maps, since the band is only ever a guess. Astro Bot
+// fixed-maps its GPU pools at 12-25 GiB, under the 64 GiB floor, so every submit naming
+// one was dropped and the title waited forever on the fence they'd have written. The
+// kernel notes each dmem mapping (kern/ps5/dev/dma_dev.cpp).
 inline constexpr u32 kMaxNotedPools = 64;
 
 struct NotedPools {

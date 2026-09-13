@@ -22,11 +22,9 @@ enum {
   // and returns SCE_NP_WEBAPI error 0x8055a402 unless it is 4 or 5, which fails
   // the whole NpToolkit2 bring-up above it (GTA:SA treats that as fatal).
   kLncGetAppStatus = 0x30013,
-  // The same question on PS5, asked with a 64-byte reply and no input:
-  // libSceSystemService+0xdfa0 invokes it once at init and caches what comes
-  // back. An empty (zeroed) reply means appId 0, which does not match the
-  // SceShellCoreUtilAppFocus pattern, so GetStatus reports the title overlaid
-  // by system UI, and a title that believes that renders nothing at all.
+  // PS5 asks the same question with a 64-byte reply and no input; libSceSystemService
+  // +0xdfa0 caches it at init. A zeroed reply = appId 0, which matches no focus
+  // pattern, so GetStatus reports the title overlaid by system UI and it renders nothing.
   kLncGetAppStatusPs5 = 0x30010,
 };
 
@@ -42,11 +40,9 @@ struct Lnc : Service {
     switch (inv.method()) {
     case kLncGetAppStatusPs5:
     case kLncGetAppStatus: {
-      // libSceSystemService caches the appId from this reply and compares it
-      // against the SceShellCoreUtilAppFocus/CtrlFocus flag patterns; a
-      // mismatch reads as "another app has focus" and GetStatus reports
-      // isInBackgroundExecution, which titles answer by dropping pad input
-      // (Tomb Raider: DE stops calling scePadReadState forever).
+      // libSceSystemService caches this appId against the focus flag patterns; a mismatch
+      // reads "another app has focus" and titles answer by dropping pad input (Tomb
+      // Raider: DE stops calling scePadReadState forever).
       const u32 status[3] = {kForegroundAppId, 0, kAppRunning};
       inv.reply(0, status, sizeof(status));
       break;

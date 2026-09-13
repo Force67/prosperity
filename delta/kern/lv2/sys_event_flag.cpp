@@ -321,16 +321,11 @@ int PS4ABI sys_evf_delete(int id) {
 
 int PS4ABI sys_evf_close(int id) { return sys_evf_delete(id); }
 
-// RESEARCH INSTRUMENTATION, default OFF.
-//   DELTA_AUDIOMIX_ACK=<us>
-// The LLE libSceAudioOut's per-port mixer thread submits a block into its
-// "/shm_<pid>_<port>_A" region and then waits on bit <port> of the named event
-// flag "sceAudioOutMix<pid>" for the console's audio daemon to say "block
-// taken". We host no daemon, so that wait never returns and the port produces
-// exactly one block, ever. Setting this makes any wait on that flag succeed
-// after <us> microseconds WITHOUT consuming anything, just enough to keep the
-// mixer thread cycling so its ring can be observed. 0 = free-run. This is an
-// observation aid for reverse-engineering the ring, NOT a daemon.
+// RESEARCH INSTRUMENTATION, default OFF. DELTA_AUDIOMIX_ACK=<us>: the LLE
+// libSceAudioOut mixer waits on bit <port> of "sceAudioOutMix<pid>" for the daemon
+// to take its block; we host no daemon, so a port produces exactly one block ever.
+// This makes the wait succeed after <us> WITHOUT consuming, keeping the mixer
+// cycling so its ring can be observed. Not a daemon.
 static long audioMixAckUs() {
   return kAudioMixAck;
 }
@@ -382,16 +377,11 @@ int PS4ABI sys_evf_trywait(int id, u64 pattern, u32 mode,
     return -SysError::eSRCH;
   u64 res = 0;
   int r = ef->trywait(pattern, mode, &res);
-  // Handshake grace: when the polling thread itself posted the last set() on
-  // this flag, it is the requester of a request/response channel (it set the
-  // "request" bit and now polls for the responder's "done" bit). On the real
-  // console the responder runs at higher SCE priority, so the set() preempts
-  // the requester and the response is already posted by the time it polls;
-  // engines rely on that ordering (Shadow of the Tomb Raider's file-I/O
-  // channel streams garbage progress if the poll misses). Emulate it with a
-  // bounded wait for the response. Pure status pollers never set the flag
-  // themselves, so they keep true poll semantics and pay nothing.
-  // DELTA_NO_EVF_GRACE disables for A/B testing.
+  // Handshake grace: when the polling thread itself made the last set(), it is the
+  // requester of a request/response channel; on hardware the higher-priority responder
+  // preempts it, so the response is already posted when it polls, and engines rely on
+  // that (SOTTR's file-I/O channel streams garbage otherwise). Emulate with a bounded
+  // wait. Pure pollers never set the flag, so they pay nothing. DELTA_NO_EVF_GRACE = A/B.
   if (r == -SysError::eBUSY && !kNoEvfGrace &&
       ef->lastSetTid.load(std::memory_order_relaxed) == (long)gettid()) {
     u32 toUs = 250000;

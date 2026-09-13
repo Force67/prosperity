@@ -101,10 +101,9 @@ int PS4ABI sys_dynlib_get_info_ex(u32 handle, i32 ukn /*always 1*/,
   dyn_info->init_proc_addr = reinterpret_cast<uintptr_t>(info.initAddr);
   dyn_info->fini_proc_addr = reinterpret_cast<uintptr_t>(info.finiAddr);
 
-  // installEHFrame stores the *hdr* (PT_GNU_EH_FRAME) in ehFrameAddr/Size and
-  // the actual unwind data (.eh_frame) in ehFrameheaderAddr/Size, i.e. the
-  // fields are named backwards. Report them the way the guest unwinder expects:
-  // eh_frame_addr = .eh_frame, eh_frame_hdr_addr = .eh_frame_hdr.
+  // installEHFrame stores the hdr (PT_GNU_EH_FRAME) in ehFrameAddr and the unwind
+  // data (.eh_frame) in ehFrameheaderAddr, i.e. named backwards; report as the
+  // guest unwinder expects.
   dyn_info->eh_frame_addr =
       reinterpret_cast<uintptr_t>(info.ehFrameheaderAddr);
   dyn_info->eh_frame_hdr_addr = reinterpret_cast<uintptr_t>(info.ehFrameAddr);
@@ -217,15 +216,11 @@ int PS4ABI sys_dynlib_get_list(u32 *handles, size_t maxCount,
   auto *proc = proc::getActive();
   auto &list = proc->getModuleList();
 
-  // The real kernel loads each PRX's needed modules before the PRX itself, so
-  // the module list is dependency-ordered and libkernel's module-init walker
-  // (which runs inits in list order) always initializes a library before its
-  // dependents. Our list is discovery order, which can invert that: SOTTR's
-  // eboot names libSceNpManager before libSceHttp, so NpManager's PrxStart ran
-  // first, called sceHttpInit before libSceHttp's own init, got 0x80431001
-  // (before-init), and left its NP context null (later deref'd by Matching2).
-  // Emit the list dependency-first (postorder over DT_SCE_NEEDED_MODULE), with
-  // the main module kept up front like the real list.
+  // The real kernel loads each PRX's needed modules first, so its list is
+  // dependency-ordered and libkernel's init walker initializes a library before
+  // its dependents. Our discovery order can invert that: SOTTR's NpManager PrxStart
+  // ran before libSceHttp's init, got 0x80431001, left its NP context null. Emit
+  // dependency-first (postorder over DT_SCE_NEEDED_MODULE), main module up front.
   base::Vector<smodule *> sorted;
   std::unordered_set<smodule *> visited;
   std::function<void(smodule *)> visit = [&](smodule *m) {
@@ -289,28 +284,20 @@ int PS4ABI sys_dynlib_load_prx(const char *path, u64 flags, int *pHandle,
   if (std::getenv("DELTA_LOADPRX_STACK"))
     guestStackTrace("load_prx", 10);
 
-  // Modules whose LLE module_start needs a backend we don't emulate yet fall
-  // into two groups by how the guest reacts to a failed load-start.
-  // kLoadOk: the application itself load-starts these directly and *asserts*
-  // that it succeeded (Doom64: `sceSysmoduleLoadModule(SCE_SYSMODULE_APP_CONTENT)
-  // == SCE_OK`), aborting on any signalled failure. Report load-start SUCCESS
-  // with a real handle and merely skip running the LLE module_start (a preloaded
-  // dup of libSceAppContentUtil whose IPMI init is already scout-patched).
+  // Modules whose LLE module_start needs a backend we don't emulate, by how the
+  // guest reacts to a failed load-start. kLoadOk: the app load-starts them directly
+  // and ASSERTS success (Doom64), so report success with a real handle and skip the
+  // LLE module_start (a preloaded dup whose IPMI init is scout-patched).
   static const char *kLoadOk[] = {"libSceAppContent"};
-  // kSkipNotFound: libkernel *preloads* these via sceSysmodulePreloadModuleFor-
-  // Libkernel, which strictly verifies the module actually STARTED and aborts
-  // ("cannot be loaded", 0x80020064) if we report a load we then can't start
-  // (their module_start is unresolved, so we can't run it, e.g. libSceNet's init
-  // faults on a __thread errno whose TLS isn't in the DTV). Report a genuine
-  // "not found" so the preloader treats the sysmodule as absent and skips it.
+  // kSkipNotFound: libkernel PRELOADS these and strictly verifies they started,
+  // aborting (0x80020064) on a load we can't start (module_start unresolved, e.g.
+  // libSceNet faults on a __thread errno with no DTV TLS). Report genuine not-found
+  // so the preloader skips them.
   static const char *kSkipNotFound[] = {"libSceSsl2", "libSceHttp2",
                                         "libSceNpManager", "libSceNpWebApi2"};
-  // The skip list is PS4-only. On PS5 the net stack is up and these DT_INITs
-  // run fine in the preload-init phase; Demon's Souls' Crossgen init asserts
-  // sceSysmoduleLoadModule(0x0112) succeeds, which load-starts libSceHttp2,
-  // libSceNpManager and libSceNpWebApi2 in turn before it feeds the
-  // sceHttp2Init context to sceNpWebApi2Initialize. (libSceSsl2 has no PS5
-  // firmware module at all, so it degrades to a genuine not-found.)
+  // The skip list is PS4-only: on PS5 the net stack is up and these DT_INITs run fine
+  // (Demon's Souls' Crossgen init asserts 0x0112 load-start succeeds, chaining
+  // libSceHttp2/NpManager/NpWebApi2; libSceSsl2 has no PS5 module, degrades to not-found).
   auto *proc = proc::getActive();
   const bool isPs5 = proc->getPlatform() == krnl::proc::platform::ps5;
   bool skipInit = false;
@@ -332,15 +319,12 @@ int PS4ABI sys_dynlib_load_prx(const char *path, u64 flags, int *pHandle,
 
   // already loaded (we preload the system module tree): hand back its handle.
   auto mod = proc->getModule(base::StringRef(name));
-  // A PS5 firmware ships thirteen sysmodules twice under ONE SONAME, and the
-  // guest's own NEEDED entries name them inconsistently: the eboot needs
-  // "libSceVdecCore.prx" (which loadModule satisfies with the .native FILE, so
-  // the module is registered as "libSceVdecCore") while libSceSysmodule's
-  // native id table asks for "libSceVdecCore.native". Missing that match loaded
-  // a SECOND copy of the same library, and libSceSysmodule then abandoned the
-  // rest of the sysmodule's dependency list, which is why Astro Bot's
-  // libSceAvPlayer never came up. The two spellings denote one module: let
-  // either find the other.
+  // PS5 ships thirteen sysmodules twice under ONE SONAME and the guest names them
+  // inconsistently: the eboot needs "libSceVdecCore.prx" (registered as
+  // "libSceVdecCore") while libSceSysmodule asks for "libSceVdecCore.native".
+  // Missing that match loaded a SECOND copy and libSceSysmodule abandoned the rest
+  // of the dependency list (why Astro Bot's libSceAvPlayer never came up). Let
+  // either spelling find the other.
   if (!mod && isPs5) {
     constexpr size_t kNat = 7;  // ".native"
     base::String alt;
@@ -362,32 +346,25 @@ int PS4ABI sys_dynlib_load_prx(const char *path, u64 flags, int *pHandle,
     }
   }
 
-  // Always relocate: a module pulled in as another module's DT_NEEDED dep is
-  // added to the list by loadModule but never relocated, so its init_array
-  // holds raw offsets and module_start calls a bad pointer. applyRelocations
-  // is idempotent (guarded), so re-running it on an already-relocated module
-  // is a no-op.
+  // Always relocate: a DT_NEEDED dep added by loadModule is never relocated, so its
+  // init_array holds raw offsets and module_start calls a bad pointer. Idempotent.
   if ((!mod->resolveImports() || !mod->applyRelocations()) && !skipInit) {
     LOG_ERROR("load_prx: relocate failed for {}", name.c_str());
     return -SysError::eNOEXEC;
   }
 
-  // A module that loads later can export what an earlier one's imports missed.
-  // libSceFontFt needs libSceFreeTypeFull, which no firmware dump ships; the
-  // title load-starts libSceFreeTypeOt right after it, and that exports the
-  // same 24 NIDs. The console binds a PLT slot at first call, so rebinding the
-  // slots that landed on the badcall stub is the same behaviour, just eager.
+  // A module loaded later can export what an earlier one's imports missed: libSceFontFt
+  // needs libSceFreeTypeFull (not shipped); libSceFreeTypeOt exports the same 24 NIDs.
+  // The console binds PLT slots at first call, so rebinding badcall slots is the same,
+  // just eager.
   for (auto &other : proc->getModuleList())
     if (other.get() != mod.get() && other->hasUnresolvedImports())
       other->resolveImports();
 
-  // Run the module's DT_INIT (module_start) now, as the real kernel does during
-  // load-start. The system modules ship with constructors that self-register
-  // their service with the kernel devices; e.g. the real libSceVideoOut registers
-  // its display driver here, without which sceVideoOutOpen returns an error (its
-  // internal display-config table stays empty) and titles that run it LLE crash
-  // in their renderer. We don't run every module's init (some take backend paths
-  // we don't emulate and fault); scope it to the ones we've verified.
+  // Run DT_INIT (module_start) at load-start, as the kernel does: system modules
+  // self-register their service (libSceVideoOut registers its display driver; without
+  // it sceVideoOutOpen errors and LLE titles crash in their renderer). Some inits
+  // fault on backend paths we don't emulate, so scope to the verified ones.
   static const char *kRunInit[] = {"libSceVideoOut"};
   for (auto *s : kRunInit) {
     if (!skipInit && std::strcmp(name.c_str(), s) == 0 && !mod->getInfo().initRan) {
@@ -408,13 +385,11 @@ int PS4ABI sys_dynlib_load_prx(const char *path, u64 flags, int *pHandle,
         cpu::backend().runGuestFunction(a, 0, 0, 0);
         BASE_LOGI("modinit", "{} init @ returned", s);
       }
-      // DELTA_VO_LLE_FIX: run libSceVideoOut's lazy init now (its 0xd530 ctor sets
-      // the display-config defaults + tail-calls 0x28f0 which opens /dev/dce and
-      // registers the driver into cfg[0]). The real driver would then mark the
-      // MAIN display connected (cfg[idx].f0=4) off a /dev/dce report we don't yet
-      // emulate, so synthesize it: copy the registered cfg[0] slot into cfg[idx]
-      // and set f0=4. Finally set the scePthreadOnce guard so the title's first
-      // sceVideoOutOpen skips re-running the ctor and reads our connected slot.
+      // DELTA_VO_LLE_FIX: run libSceVideoOut's lazy init now (0xd530 sets display-config
+      // defaults and tail-calls 0x28f0, opening /dev/dce and registering the driver into
+      // cfg[0]). The driver would mark the MAIN display connected off a /dev/dce report
+      // we don't emulate, so synthesize it: copy cfg[0] into cfg[idx], f0=4, and set the
+      // scePthreadOnce guard so the first Open skips the ctor and reads our slot.
       if (kVoLleFix) {
         u8 *base = mod->getInfo().base;
         BASE_LOGI("volle", "running libSceVideoOut ctor (+0xd530)");
@@ -456,12 +431,10 @@ int PS4ABI sys_dynlib_unload_prx(u32 handle) {
   return 0;
 }
 
-// HLE of libkernel's __tls_get_addr (NID vNe1w4diLCs). libkernel's own dynamic
-// TLS allocator leaves the per-thread DTV entries null, so general-dynamic
-// __thread access (e.g. libc's malloc arena, module errno) reads address 0 and
-// faults. We resolve the module by its TLS module index and hand back a real,
-// init-image-populated block. tls_index = {module_id, offset}; the result is
-// block + offset. Single boot thread => one block per module, cached.
+// HLE of libkernel's __tls_get_addr (NID vNe1w4diLCs): its own dynamic-TLS allocator
+// leaves DTV entries null, so general-dynamic __thread access faults. Resolve by
+// TLS module index, hand back an init-image-populated block (+ offset). Single
+// boot thread => one block per module, cached.
 struct tls_index {
   u64 module_id;
   u64 offset;

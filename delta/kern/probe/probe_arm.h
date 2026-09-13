@@ -4,12 +4,8 @@
 #pragma once
 
 // Arming the guest-code trap probes, and the seam the crash handler offers them
-// every signal through. See probe_trap.cpp.
-//
-// These used to be declared in kern/crash.h, where 23 of that header's 29
-// functions had nothing to do with crashing; what they share with the crash
-// handler is one signal handler, not one job. Everything here is inert until a
-// DELTA_* option arms it, which is every normal run.
+// every signal through (see probe_trap.cpp). Formerly in crash.h, whose other 23
+// functions have nothing to do with crashing. Inert until a DELTA_* option arms it.
 
 #include "base/arch.h"
 #include <csignal>
@@ -34,20 +30,14 @@ void installThreadProbeHandler(struct sigaction &pa);
 // fatal handler logs each allocation (size in rsi) >= minSize and resumes.
 void setAllocTrace(uintptr_t addr, u64 minSize);
 
-// DELTA_HEAP_PROF: int3 at a guest allocator entry (push rbp) whose size arg is
-// in rdi (operator new / malloc). Each hit aggregates bytes+count keyed by the
-// guest caller ([rsp]); SIGUSR1 dumps the top sites. Finds the heap's dominant
-// consumer/leaker without a per-call log flood.
-// `countOnly` for an entry whose first argument is not a size (a deallocator
-// takes a pointer): the site is then ranked and reported by call count, with
-// the byte column left at one per call rather than filled with pointer values.
+// DELTA_HEAP_PROF: int3 at a `push rbp` allocator entry (size in rdi); aggregates
+// bytes+count by guest caller, SIGUSR1 dumps the top sites. countOnly for an entry
+// whose first arg is a pointer (a deallocator): ranked by call count instead.
 void setHeapProf(uintptr_t addr, bool countOnly = false);
 
-// DELTA_HEAP_PROF_SCOPE=<tls-slot-global>:<depth-offset>: also record, per
-// site, whether the allocating thread had a scoped allocator live. Engines
-// route through a thread-local stack of scopes and fall back to the process
-// heap when it is empty; only the scoped memory comes back on a scope reset,
-// so "this thread had no scope" is a leak a caller-keyed profile cannot show.
+// DELTA_HEAP_PROF_SCOPE=<tls-slot-global>:<depth-offset>: also record per site
+// whether a scoped allocator was live (scopes free wholesale, the process-heap
+// fallback does not, so "no scope" is a leak a caller-keyed profile cannot show).
 void setHeapProfScope(uintptr_t tlsSlotGlobal, u64 depthOffset);
 
 // DELTA_CNT_TRACE: like setAllocTrace but logs the archive entry-count [rdi+0x30]
@@ -83,11 +73,8 @@ void setOrderTrace(uintptr_t addr, const char *label);
 // bring-up. DELTA_RETTRACE="hexoff:label,..." arms it by eboot offset.
 void setRetTrace(uintptr_t addr, const char *label, bool isTest = false);
 
-// DELTA_FNWATCH="off:label,...": int3 hit-COUNTER at guest function entries (push
-// rbp). Unlike setOrderTrace (per-hit log), this only counts hits per address and
-// a background thread prints running totals every 2s, safe at any call frequency
-// (e.g. a retry-churn loop). setFnWatch registers; startFnWatchPrinter spawns the
-// printer once. Used to answer "does function X ever run / how fast does it churn".
+// DELTA_FNWATCH="off:label,...": int3 hit-COUNTER at function entries, totals
+// printed every 2s, safe at any call frequency (unlike setOrderTrace's per-hit log).
 void setFnWatch(uintptr_t addr, const char *label);
 void startFnWatchPrinter();
 
@@ -97,11 +84,9 @@ void startFnWatchPrinter();
 // at the crash cannot.
 void startPopcntPrinter(uintptr_t addr, size_t bytes, unsigned everyMs);
 
-// DELTA_GUEST_WPROT=<hex addr>:<hex bytes>[:<ms>]: write-protect a guest range
-// once it is mapped and report the instruction behind every write to it (see
-// crash.cpp). The poll interval doubles as the wait for the range to appear.
-// DELTA_GUEST_RPROT has the same shape but traps reads too, which names the
-// consumer of a buffer rather than its producer.
+// DELTA_GUEST_WPROT=<addr>:<bytes>[:<ms>]: write-protect a guest range once mapped
+// and report the instruction behind every write (see crash.cpp). DELTA_GUEST_RPROT
+// traps reads too, naming the consumer rather than the producer.
 void startWriteWatch(uintptr_t addr, size_t bytes, unsigned everyMs,
                      bool trapReads = false, bool singleStep = false);
 
@@ -129,11 +114,10 @@ void startPoolCensus(unsigned everyMs);
 void startMemDump(uintptr_t addr, size_t bytes, unsigned afterMs,
                   const char *path);
 
-// DELTA_FNARGS="off+o1+o2...:label,...": int3 at a guest function entry (push
-// rbp) that logs rdi and then walks the offset chain from it, printing every
-// intermediate pointer and the qword the last one lands on. Answers "which
-// address does this function poll/store", which a backtrace cannot: by the time
-// a wedged thread is inside the emulator its callee-saved registers are gone.
+// DELTA_FNARGS="off+o1+o2...:label,...": int3 at an entry that logs rdi then walks
+// the offset chain, printing every intermediate pointer and the final qword, i.e.
+// which address the function polls/stores (a backtrace cannot: by the time a wedged
+// thread is inside the emulator its callee-saved regs are gone).
 void setFnArgs(uintptr_t addr, const char *label, const u64 *offsets,
                int noffsets);
 }  // namespace krnl::probe

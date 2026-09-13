@@ -16,10 +16,9 @@
 #include "error_table.h"
 #include "sys_procid.h"
 
-// One emulated process pretending to be a running game. The pid matches
-// sys_getpid (bsd_syscalls.cpp). We report a normal non-root user (uid/gid 1)
-// because running as root (0) makes some guests take privileged paths we don't
-// model. There is no real OS state behind these, so setters just accept and
+// One emulated process pretending to be a running game; pid matches sys_getpid.
+// Reported as a normal non-root user (uid/gid 1): root makes some guests take
+// privileged paths we don't model. No real OS state behind these; setters accept,
 // getters report the fixed fake identity.
 
 namespace krnl {
@@ -104,11 +103,10 @@ int PS4ABI sys_getrusage(int who, void *rusage) {
   return 0;
 }
 
-// FreeBSD rlimit{int64 rlim_cur; int64 rlim_max}; RLIM_INFINITY is INT64_MAX.
-// Most resources are genuinely unbounded here, but a few must read back finite
-// or the guest sizes structures against "infinity": NOFILE drives fd tables and
-// fd_sets, NPROC/NPTS cap process/pty counts. CORE is 0 to match a retail box
-// that never dumps core.
+// FreeBSD rlimit {rlim_cur, rlim_max}, RLIM_INFINITY = INT64_MAX. Most resources are
+// genuinely unbounded, but a few must read finite or the guest sizes structures
+// against infinity: NOFILE (fd tables/fd_sets), NPROC/NPTS (process/pty caps),
+// CORE 0 (a retail box never dumps core).
 int PS4ABI sys_getrlimit(int which, void *rlp) {
   if (!rlp)
     return -SysError::eFAULT;

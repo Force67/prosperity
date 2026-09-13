@@ -106,11 +106,9 @@ int PS4ABI sys_fstatat(int fd, const char *path, void *stat, int flag) {
   return sys_lstat(path, stat);
 }
 
-// sys_fcntl: the kernel validates cmd in the non-privileged path against
-// bitmask 0x3818 {F_GETFL(3), F_SETFL(4), F_GETLK(11), F_SETLK(12),
-// F_SETLKW(13)}. cmds 7/8/9 (OGETLK/OSETLK/OSETLKW) are translated to 11/12/13.
-// We don't model fd flags or advisory locks, so GETFD/GETFL report 0 and the
-// lock commands accept silently.
+// sys_fcntl: non-privileged cmds validated against 0x3818 {F_GETFL, F_SETFL, F_GETLK,
+// F_SETLK, F_SETLKW}; 7/8/9 (OGETLK/OSETLK/OSETLKW) translate to 11/12/13. Flags and
+// advisory locks unmodelled: GETFD/GETFL report 0, locks accept silently.
 int PS4ABI sys_fcntl(u32 fd, int cmd, i64 arg) {
   enum {
     F_DUPFD = 0, F_GETFD = 1, F_SETFD = 2, F_GETFL = 3, F_SETFL = 4,
@@ -229,17 +227,13 @@ i64 PS4ABI sys_pread(u32 fd, void *buf, size_t nbytes, i64 offset) {
     BASE_LOGI("qarbuf", "fd={} off={} nbytes={:#x} -> {} buf={:p} {}us", fd,
               (long long)offset, (size_t)nbytes, (long long)r, buf, readUs);
   }
-  // DELTA_IOPROGRESS: throttled per-fd streaming high-water mark. FOX/FIOS2 streams
-  // large world archives via pread; this shows whether that streaming is advancing
-  // (offset climbing) or has completed/stalled, without the DELTA_RDALL firehose.
-  // At most one line per fd per ~2 s; prints the current + max offset and MB/s since
-  // the last line so a long headless load can be tracked to completion.
+  // DELTA_IOPROGRESS: throttled per-fd streaming high-water mark: is FIOS2's pread of
+  // a large world archive advancing or stalled, without the DELTA_RDALL firehose.
+  // One line per fd per ~2s: current + max offset and MB/s since the last line.
   if (kIoprogress) {
-    // maxOff/lastMax = streaming high-water. nNew/nReread since last line tell
-    // whether the FIOS2 streamer is fetching NEW file bytes (nNew climbing,
-    // offset+r > previous max) or RE-READING already-covered blocks (nReread) –
-    // the latter signals a downstream consume/decompress stage that never drains,
-    // so the streamer re-issues the same reads. lastOff catches exact-repeat reads.
+    // maxOff/lastMax = streaming high-water. nNew climbing = fetching NEW bytes;
+    // nReread = a downstream consume/decompress stage that never drains, so the
+    // streamer re-issues the same reads. lastOff catches exact-repeat reads.
     struct FdIo { i64 maxOff, lastMax, lastOff; long lastMs; long nNew, nReread, nSame; };
     static std::mutex m;
     static std::unordered_map<u32, FdIo> tbl;
@@ -431,12 +425,10 @@ void fdSet(void *set, int fd) {
 }
 }  // namespace
 
-// select() answers for the fds we model: a socket is asked of the host, and
-// anything else (a file, a device) is a regular file as far as select is
-// concerned: always ready, never blocking. The old stub returned "nothing
-// ready" without waiting or clearing the sets, so a title that selects with a
-// timeout spun instead of sleeping: GTA:SA's Gameface thread got through 1.8
-// billion calls in 78 seconds and left the render loop 0.1 fps.
+// select(): sockets ask the host; everything else (file, device) is always ready and
+// never blocks. The old stub returned "nothing ready" without waiting or clearing
+// the sets, so a title selecting with a timeout spun: GTA:SA's Gameface thread made
+// 1.8 billion calls in 78s and left the render loop at 0.1 fps.
 int PS4ABI sys_select(int nfds, void *readfds, void *writefds, void *exceptfds,
                       void *timeout) {
   if (nfds < 0)
@@ -585,11 +577,8 @@ i64 PS4ABI sys_getdirentries(u32 fd, void *buf, size_t nbytes,
   if (nbytes == 0)
     return -SysError::eINVAL;
   i64 r = d->getdents(buf, nbytes);
-  // On success the kernel writes the next directory seek offset to *basep so
-  // the caller can resume a partial enumeration. Use the byte count consumed
-  // as the cookie: a subsequent getdirentries at this offset reads the next
-  // chunk. Our dirDevice serves all entries on the first call and returns EOF
-  // after, so the cookie is simply the total returned.
+  // On success write the next seek offset to *basep; the byte count consumed is the
+  // cookie. Our dirDevice serves all entries on the first call, so it's just the total.
   if (r >= 0 && basep)
     *basep = r;
   if (kVfsTrace)

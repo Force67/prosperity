@@ -3,14 +3,11 @@
  */
 #pragma once
 
-// Debug-utils object names and command labels for capture tools. Everything
-// here is a no-op unless VK_EXT_debug_utils is present, which in practice
-// means RenderDoc or the validation layer is attached: names turn anonymous
-// handles into "rt 0x8142f00000 1920x1080 tex" in the resource inspector, and
-// labels group the event browser into frame / region / draw / dispatch scopes.
-// Everything is keyed by GUEST addresses (rt_base, shader address, texture
-// base), the vocabulary every other diagnostic in this module speaks, so a
-// capture can be lined up against DELTA_GPU_* logs by eye.
+// Debug-utils object names + command labels for capture tools; no-ops unless
+// VK_EXT_debug_utils has a consumer (RenderDoc or the validation layer). Names turn
+// anonymous handles into "rt 0x8142f00000 1920x1080 tex"; labels group the event
+// browser into frame/region/draw/dispatch. Keyed by GUEST addresses so a capture
+// lines up against DELTA_GPU_* logs by eye.
 
 #include <vulkan/vulkan.h>
 #include "base/arch.h"
@@ -18,11 +15,9 @@
 
 namespace gpu::vk {
 
-// Whether names/labels should be emitted at all. The Vulkan loader implements
-// VK_EXT_debug_utils itself, so the extension is always advertised, but with
-// no consumer every label is a formatted string handed to nobody (~0.3 ms per
-// Isaac frame). True only when RenderDoc is injected into the process or
-// DELTA_GPU_MARKERS=1 forces it (e.g. for a validation-layer run).
+// Whether to emit names/labels at all: the loader always advertises the extension,
+// but with no consumer every label is a formatted string for nobody (~0.3 ms per
+// Isaac frame). True only with RenderDoc injected or DELTA_GPU_MARKERS=1.
 bool WantDebugUtils();
 
 // Resolve the entry points off the instance; called once by CreateDevice

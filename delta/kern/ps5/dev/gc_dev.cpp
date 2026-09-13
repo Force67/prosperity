@@ -52,10 +52,8 @@ extern "C" void prosperity_agc_flip(u64 scanoutBase);
 // Is this address inside a pool the title mapped for the GPU (gpu/ps5)?
 extern "C" int prosperity_gpu_is_aperture(u64 address);
 
-// Guest address of the display buffer the game most recently flipped, resolved
-// from sceVideoOutSubmitFlip*'s bufferIndex via the registered-buffer table
-// (libSceVideoOut_ps5.cpp). The AGC flip ioctls below carry no buffer field, so
-// they present this instead of falling back to whichever RT was drawn last.
+// Guest address of the most recently flipped display buffer, resolved from
+// sceVideoOutSubmitFlip's bufferIndex; the AGC flip ioctls carry no buffer field.
 extern "C" u64 prosperity_ps5_scanout_base();
 
 // DELTA_FLIP_TRACE: log the scanout base each AGC flip presents, so the derived
@@ -95,11 +93,9 @@ static void scanPagePm4(void *ctx, u8 *p, size_t sz) {
   }
 }
 
-// A guest GPU address: one question, answered by gpu/ps5/guest_address.h, which
-// knows both the assumed band and the pools the title really mapped. A fixed
-// band silently drops every command buffer another title allocates outside it,
-// so nothing renders and the game waits forever on a GPU label the dropped
-// submits would have written, which is exactly what Astro Bot did.
+// A guest GPU address: one question, answered by gpu/ps5/guest_address.h. A fixed
+// band silently drops command buffers allocated outside it, and the title waits
+// forever on a GPU label the dropped submits would have written (Astro Bot).
 static inline bool gpuAddr(u64 a) {
   return prosperity_gpu_is_aperture(a) != 0;
 }
@@ -111,26 +107,21 @@ static inline bool gpuReadable(u64 a, size_t n) {
   return gpuAddr(a) && utl::isMemoryRangeMapped(reinterpret_cast<void *>(a), n);
 }
 
-// Command buffers do not have to live in a pool we recognise as the GPU
-// aperture: a title can build one in any allocation it owns, and the video
-// decoder does. Mapped and inside the guest map is the honest test; the
-// aperture band stays for the probes that guess at pointers.
+// Command buffers need not live in the GPU aperture (the video decoder builds
+// one in any allocation it owns); mapped-and-in-guest-map is the honest test.
 static inline bool guestReadable(u64 a, size_t n) {
   return a >= 0x10000ull && a < 0x1000000000000ull &&
          utl::isMemoryRangeMapped(reinterpret_cast<void *>(a), n);
 }
 
-// Span of ACQ ring windows the driver named in its 0xC0408121 submits, learned at
-// run time rather than hardcoded (each title's ring sits wherever its driver
-// mapped it). Lets the per-frame trace re-read the ring long after the 0x8121
-// ioctls have stopped.
+// Span of ACQ ring windows named in 0xC0408121 submits, learned at run time, so
+// the per-frame trace can re-read the ring after the ioctls stop.
 static u64 g_acqRingLo = 0, g_acqRingHi = 0;
 
-// One ACQ ring the title created through sceAgcDriverCreateQueue (ioctl
-// 0xC0408121). Steady-state submits never reach the kernel at all: the title
-// writes its ring write-pointer to the queue's doorbell slot and the hardware
-// command processor picks the work up from there. Recording what each create
-// named is the only chance we get to learn where a queue's ring lives.
+// One ACQ ring from sceAgcDriverCreateQueue (0xC0408121). Steady-state submits
+// never reach the kernel: the title stores its ring write pointer to the
+// doorbell slot and the hardware picks it up, so recording the create is the
+// only chance to learn where a queue's ring lives.
 struct AcqQueue {
   u64 dcb = 0;       // command ring
   u64 ccb = 0;       // dcb + ringBytes: the ring READ POINTER (see below)
@@ -197,13 +188,10 @@ static void drainQueue(AcqQueue &q, u64 doorbell) {
   }
   if (complete)
     q.readDw = write;
-  // Report the read pointer back, or the ring only ever fills. The driver keeps
-  // one dword right past the ring for it (libSceAgcDriver+0x2226 stores
-  // `dcb + 0x4000` into its queue struct and zeroes the word; +0x11f0 spins on
-  // it, computing free space as `rptr - (write % ringDw)` wrapped, and waits
-  // for more than 8 dwords). Astro Bot's DrawThread parks in exactly that spin
-  // , holding its frame mutex, so the main thread blocks behind it and the
-  // title never submits again.
+  // Report the read pointer back or the ring only ever fills: the driver keeps one
+  // dword past the ring for it (+0x2226 stores dcb+0x4000, +0x11f0 spins on free
+  // space). Astro Bot's DrawThread parks in exactly that spin, holding its frame
+  // mutex, and the main thread blocks behind it.
   const u64 rptr = q.ccb ? q.ccb : q.dcb + q.ringBytes;
   if (guestReadable(rptr, sizeof(u32)))
     *reinterpret_cast<volatile u32 *>(rptr) = q.readDw;
@@ -284,12 +272,10 @@ static void registerAcqQueue(u32 qid, u64 dcb, u64 ccb, u64 doorbellBase,
   }
 }
 
-// The mode-1 submit ioctls are INOUT on firmware 13.60: libSceAgcDriver presets a
-// status dword in the arg and, on return, treats the submit as FAILED unless the
-// kernel has cleared it. A failed state submit makes the driver skip the 0x8132
-// call that carries the title's own command buffer, so the frame is dropped
-// entirely: no draws reach us, and the completion label the title spins on is
-// never written. The IN-only variants older firmware issues have no such field.
+// The mode-1 submit ioctls are INOUT on firmware 13.60: the driver presets a
+// status dword and treats the submit as FAILED unless the kernel clears it,
+// skipping the 0x8132 call that carries the real command buffer (frame dropped,
+// completion label never written). Older IN-only variants have no such field.
 static void clearSubmitStatus(u32 cmd, void *data, u32 offset) {
   if (!data || !(cmd & 0x40000000u))
     return;
@@ -300,10 +286,9 @@ static void clearSubmitStatus(u32 cmd, void *data, u32 offset) {
 }
 
 // GNM-style submit descriptor array: each 4-dword entry is an IT_INDIRECT_BUFFER
-// (0xC0023F00 = dcb) / _CNST (0xC0023300 = ccb) with [hdr, addrLo, addrHi&0xFF,
-// sizeDwords]. libSceAgcDriver/GnmDriver submits the pipeline+shader setup and
-// draws through these on PS5 too; forward each buffer to the PS5 command processor
-// (they carry the SET_SH_REG shader binding the AGC mode-1 path never emits).
+// (0xC0023F00 dcb) / _CNST (0xC0023300 ccb) with [hdr, addrLo, addrHi&0xFF,
+// sizeDwords]; they carry the SET_SH_REG shader binding the AGC mode-1 path
+// never emits, so forward each buffer to the command processor.
 static void submitGnmDescArray(u64 descPtr, u32 count) {
   const u32 *d = reinterpret_cast<const u32 *>(descPtr);
   if (!d || count > 0x1000) return;
@@ -362,13 +347,10 @@ i32 gcDevicePs5::ioctl(u32 cmd, void *data) {
     return 0;
   }
   case 0xC008811B: {
-    // GNM submit-state pointer. libSceGnmDriver stores the returned address in a
-    // global and reads through it on every submit path
-    // (sceGnmAreSubmitsAllowed is `*p == 0`, sceGnmSubmitDone tests it, so do
-    // SubmitCommandBuffers/SubmitAndFlip/DingDong). The soft-succeed default
-    // zeroes the OUT slot, so the driver cached a null pointer and every submit
-    // after the first one read through it. Hand back a real zeroed page:
-    // [+0] == 0 means "submits allowed".
+    // GNM submit-state pointer, read through on every submit path
+    // (AreSubmitsAllowed is `*p == 0`, SubmitDone tests it). The soft-succeed
+    // default zeroed the OUT slot, so the driver cached null and every later
+    // submit read through it; hand back a real zeroed page ([+0] == 0 = allowed).
     static u8 *submitState = nullptr;
     if (!submitState)
       submitState = allocLowGuest(0x100);
@@ -378,10 +360,9 @@ i32 gcDevicePs5::ioctl(u32 cmd, void *data) {
     return 0;
   }
   case 0xC0108139: {
-    // AGC suspend-point submit, issued at the tail of every submit. The driver
-    // fails the submit with 0x8A6D0107 ("checkSuspend failure") unless this
-    // succeeds; its two out words are a suspend sequence number, so advance
-    // them rather than reporting the same value forever.
+    // AGC suspend-point submit, at the tail of every submit; the driver fails with
+    // 0x8A6D0107 unless it succeeds. The two out words are a suspend sequence
+    // number, so advance them.
     static std::atomic<u64> suspendSeq{0};
     if (data) {
       const u64 seq = ++suspendSeq;
@@ -404,15 +385,12 @@ i32 gcDevicePs5::ioctl(u32 cmd, void *data) {
       *static_cast<u32 *>(data) = 0;
     return 0;
   case 0xC0408121: {  // sceAgcDriverCreateQueue (IN, 64 bytes):
-                      //   +0x00 me  +0x04 pipe  +0x08 queue  +0x0c 1-based qid
-                      //   +0x10 dcb  +0x18 ccb (= dcb + ring)  +0x20 doorbell page
-                      //   +0x28 log2(ring dwords)  +0x2c flags
-                      //   +0x30 mqd  +0x38 mqd size
-                      // NOT a submit: it hands the title a ring plus a doorbell
-                      // slot, and every later submit is a store of the ring
-                      // write pointer to that slot with no ioctl at all. Record
-                      // the queue so the poller can drain it; the ring is empty
-                      // now, by construction.
+                      //   +0x00 me +0x04 pipe +0x08 queue +0x0c 1-based qid
+                      //   +0x10 dcb +0x18 ccb (=dcb+ring) +0x20 doorbell page
+                      //   +0x28 log2(ring dwords) +0x2c flags +0x30 mqd +0x38 mqd size
+                      // Not a submit: hands the title a ring + doorbell slot, and every
+                      // later submit is a store of the write pointer there. Record the
+                      // queue for the poller; the ring is empty now, by construction.
     if (data) {
       auto *a = static_cast<u8 *>(data);
       u64 base = 0, base2 = 0, doorbellBase = 0;
@@ -480,10 +458,8 @@ i32 gcDevicePs5::ioctl(u32 cmd, void *data) {
                     (unsigned long)base, nz, 0x8000u / 4, first);
         }
       }
-      // The window a submit names is empty AT IOCTL TIME if the driver fills it
-      // afterwards and kicks the GPU through the doorbell instead. Re-read the
-      // PREVIOUS submit's window here: if it has packets now, the ioctl is a
-      // ring-window acquire and the submit boundary is the doorbell, not this.
+      // A submit's window is empty AT IOCTL TIME when the driver fills it later and
+      // kicks via the doorbell; re-read the PREVIOUS submit's window to detect that.
       static u64 prevBase = 0;
       if (kAgcTrace && prevBase && prevBase != base && gpuReadable(prevBase, 0x8000)) {
         auto *pw = reinterpret_cast<const u32 *>(prevBase);
@@ -499,10 +475,9 @@ i32 gcDevicePs5::ioctl(u32 cmd, void *data) {
         }
       }
       prevBase = base;
-      // DELTA_AGC_RINGDUMP: the submit arg in full plus the ring descriptor table
-      // it references, with a PM4 sniff of each buffer. The per-pass register
-      // state Skyrim never seems to program (a colour target for some passes, PS
-      // user data above 15) has to come from one of these.
+      // DELTA_AGC_RINGDUMP: the submit arg in full plus its ring descriptor table,
+      // with a PM4 sniff of each buffer (Skyrim's unprogrammed per-pass register
+      // state has to come from one of these).
       static int ringN = 0;
       if (kAgcRingdump && ringN < 3) {
         ringN++;
@@ -545,20 +520,16 @@ i32 gcDevicePs5::ioctl(u32 cmd, void *data) {
     return 0;
   }
   case 0xC0048125: {  // AGC submit.mode=1 completion poll (INOUT, 4 bytes). The
-                      // render loop submits (0x80488131) then reads this for GPU
-                      // progress; our submit is synchronous, so report a monotonic
-                      // counter that always satisfies a ">= submitted id" wait. Left
-                      // at 0 the title spins re-submitting forever.
+                      // The render loop reads this for GPU progress; our submit is synchronous,
+                      // so report a monotonic counter or the title spins re-submitting forever.
     if (data) {
       static u32 s_agcDone = 0;
       *static_cast<u32 *>(data) = ++s_agcDone;
     }
     return 0;
   }
-  // Firmware 13.60 issues the mode-1 family as INOUT and widens the 0x8132 arg
-  // from 16 to 24 bytes. Both payloads are otherwise unchanged (0x8132's two
-  // extra dwords sit past the descriptor fields read below), so the directions
-  // share a case.
+  // Firmware 13.60 issues the mode-1 family INOUT and widens the 0x8132 arg from
+  // 16 to 24 bytes (extra dwords past the fields read below); directions share a case.
   case 0xC0488131:
   case 0x80488131: {  // AGC submit.mode=1 submit (IN, 72 bytes). The arg IS a small
                       // command buffer: leading filler then IT_INDIRECT_BUFFER
@@ -615,11 +586,9 @@ i32 gcDevicePs5::ioctl(u32 cmd, void *data) {
   }
   case 0xC0188132:
   case 0x80108132: {  // AGC mode-1 secondary submit (IN, 16 bytes): arg = [_, count,
-                      // ptrLo, ptrHi]; ptr -> array of `count` 16-byte descriptors
-                      // [addrLo, addrHi, sizeDwords, flags]. THESE carry the real
-                      // rendering PM4 (SET_*_REG, draws, RELEASE_MEM); the
-                      // 0x80488131 stream is only per-frame register state. Forward
-                      // each non-null command buffer to the command processor.
+                      // [ptrLo, ptrHi] -> `count` 16-byte descriptors [addrLo, addrHi,
+                      // sizeDwords, flags]. THESE carry the real rendering PM4; the 0x80488131
+                      // stream is only per-frame register state. Forward each non-null buffer.
     if (data) {
       auto *w = static_cast<u32 *>(data);
       u32 count = w[1];
@@ -716,10 +685,8 @@ i32 gcDevicePs5::ioctl(u32 cmd, void *data) {
     return 0;
   }
 
-  // The init-time family, each issued once while libSceAgcDriver and
-  // libSceGnmDriver come up. Named from the drivers' own error strings; the
-  // soft-succeed default already answered them, but leaving them unnamed made
-  // every boot log eight UNHANDLED lines that read like gaps.
+  // The init-time family, issued once while the drivers come up; named from their
+  // own error strings so boot doesn't log eight UNHANDLED lines that read like gaps.
   case 0xC00C8110:  // sceGnmSetGsRingSizes {esgsRingSize, gsvsRingSize, _}: our
                     // rings are implicit in the walker.
   case 0xC0848119:  // MIP-stats report setup/reset (132-byte command block).
@@ -730,10 +697,9 @@ i32 gcDevicePs5::ioctl(u32 cmd, void *data) {
     return 0;
 
   case 0xC010810B: {  // Get CU Mask. The driver presets four dwords to
-                      // 0xFFFFFFFF and reads back the low 16 bits of each as a
-                      // per-shader-engine REDUNDANT-CU mask; a real console
-                      // reports none, and a non-zero answer would skew its CU
-                      // count. Failing it aborts with "Get CU Mask Fails".
+                      // Reads back the low 16 bits as a per-SE REDUNDANT-CU mask; a real
+                      // console reports none, and a non-zero answer skews its CU count
+                      // (failing it aborts with "Get CU Mask Fails").
     if (data)
       std::memset(data, 0, 0x10);
     return 0;
@@ -808,11 +774,9 @@ i32 gcDevicePs5::ioctl(u32 cmd, void *data) {
   return 0;
 }
 
-// The AGC driver mmaps /dev/gc to map its GPU ring/fifo buffers (ACQRB, DingDong,
-// EopFifo, ...). Back these with the shared physical-dmem store at the requested
-// offset (MAP_SHARED) so the bytes the CPU writes command packets into and the
-// bytes the command processor reads at submit time are the same. Places the
-// mapping in the low guest aperture the GPU pointers reference.
+// The AGC driver mmaps /dev/gc for its GPU ring/fifo buffers; back them with the
+// shared physical-dmem store at the requested offset so the CPU's command packets
+// and the command processor's reads are the same bytes, in the low guest aperture.
 u8 *gcDevicePs5::map(void *addr, size_t len, u32 /*prot*/, u32 flags,
                           size_t offset) {
   int fd = dmemBackingFd();

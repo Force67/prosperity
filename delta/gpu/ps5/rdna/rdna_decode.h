@@ -56,22 +56,18 @@ Program DecodeShader(const u32* code, u32 max_dwords);
 // original PCs for branch and resource-plan lookup.
 Program ReachableProgram(const Program& program);
 
-// Shared, cached ReachableProgram(DecodeShader(...)) for the per-draw resource
-// walks. TrackTextures and ResolveBuffers each decoded the same shader, so one
-// draw decoded up to 16 KB of ISA three times over, 5.4 ms a frame in Dead
-// Cells. Keyed by address; entries revalidate against a hash of the code, at
-// most once per generation, so an in-place rewrite is still picked up. Returns
-// a shared_ptr so an entry stays alive across an eviction. Not thread-safe:
-// callers already serialize on the command-processor lock.
+// Shared, cached ReachableProgram(DecodeShader(...)) for the per-draw resource walks:
+// TrackTextures and ResolveBuffers each decoded the same shader, up to 16 KB of ISA
+// three times per draw (5.4 ms/frame in Dead Cells). Keyed by address, revalidated
+// against a code hash at most once per generation; shared_ptr survives eviction.
+// Not thread-safe: callers hold the command-processor lock.
 std::shared_ptr<const Program> CachedReachableProgram(const u32* code,
                                                       u32 max_dwords);
 
-// A hash of the shader's code, spanning the footer-declared length when there
-// is one and otherwise up to the first program-ending instruction. This is what
-// identifies a shader for the module cache: AGC titles hand the same program
-// out of a rotating pool, so an address names a different shader from frame to
-// frame and a cache keyed on one recompiles forever. Cached per address and
-// revalidated at most once a generation, like CachedReachableProgram.
+// Hash of the shader's CODE (footer-declared length, else up to the first ending
+// instruction), which is what identifies it for the module cache: AGC titles hand the
+// same program out of a rotating pool, so an address names a different shader per frame
+// and an address-keyed cache recompiles forever. Revalidated once per generation.
 u64 CachedCodeHash(const u32* code, u32 max_dwords);
 
 // Advance the revalidation generation; called once per frame. Repeat lookups

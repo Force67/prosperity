@@ -85,15 +85,11 @@ int PS4ABI lv2_unmapped_syscall() {
   return 0;
 }
 
-// BSD/PS4 syscall return convention: on failure the kernel returns the positive
-// errno in rax with the carry flag SET; on success it clears carry and rax holds
-// the result. Our C handlers use the Linux-style convention instead (a negative
-// errno, or the result, in rax). Classify a raw handler return for both the
-// native trampoline and the FEX syscall bridge.
-//
-// An `int` handler zero-extends its 32-bit result into rax, an `i64` handler
-// fills all 64 bits, so a negative errno arrives as either 0x00000000_FFFFFFxx or
-// 0xFFFFFFFF_FFFFFFxx. Guest pointers live at >= 64 GiB and cannot match this.
+// BSD/PS4 syscall return convention: failure = positive errno in rax with carry SET;
+// success = carry clear, result in rax. Our C handlers use Linux-style negative errno,
+// zero-extended by `int` handlers and full-width by `i64` ones (0x00000000_FFFFFFxx or
+// 0xFFFFFFFF_FFFFFFxx; guest pointers live >= 64 GiB and never match). Classify for
+// both the native trampoline and the FEX bridge.
 extern "C" u32 krnl_syscall_errno(u64 raw) {
   i32 lo = static_cast<i32>(static_cast<u32>(raw));
   u32 hi = static_cast<u32>(raw >> 32);
@@ -104,17 +100,12 @@ extern "C" u32 krnl_syscall_errno(u64 raw) {
 }
 
 #if defined(DELTA_BACKEND_NATIVE)
-// Per-thread stack for syscall handlers, the emulator's equivalent of a kernel
-// stack. The native backend runs guest code on the host thread directly, so a
-// handler would otherwise execute on whatever stack the guest is using, and a
-// title that runs jobs on FIBERS gives those a stack of its own choosing:
-// SotC's are 16 KiB with the fiber's saved context at the bottom, which a
-// handler's host frames (a std::mutex wait, a printf, an allocation) walk
-// straight through (observed as a fiber resuming into the middle of glibc's
-// free()).
-// Returns 0 when no switch is wanted, which is also how nesting is handled: a
-// guest callback invoked from a handler makes its syscalls on the stack we
-// already switched to, and it just grows further down.
+// Per-thread stack for syscall handlers (the kernel-stack equivalent). The native
+// backend runs guest code on the host thread, so a handler would otherwise run on the
+// guest's stack: SotC's fibers are 16 KiB with saved context at the bottom, which a
+// handler's host frames walk straight through (a fiber resumed inside glibc free()).
+// 0 = no switch; nesting works because a guest callback's syscalls land on the
+// already-switched stack.
 extern "C" u64 krnl_kstack_top() {
   constexpr size_t kSize = 1u << 20;  // 1 MiB, lazily backed
   static thread_local u8 *base = nullptr;
@@ -147,20 +138,14 @@ static void PS4ABI trace_syscall_err(u32 sid, u32 err) {
 }
 #endif // DELTA_BACKEND_NATIVE
 
-// Per-syscall-id call counter (DELTA_SCHIST). The only profiler available on this
-// build: perf/strace/`/proc/PID/mem` are all yama-blocked, so to find what a
-// wedged/slow title hammers, count every syscall in the trampoline and dump the
-// histogram from the SIGUSR1 probe (crash.cpp). Racy increments are fine here.
-// Deliberately outside the DELTA_BACKEND_NATIVE guard: the stub handlers read
-// g_scHist/dumpSyscallHist unconditionally, so the FEX build must link them too
-// (only the trampoline that increments g_sysHist is native-only).
+// DELTA_SCHIST per-syscall-id counter, the only profiler on this build (perf/strace/
+// proc-mem are yama-blocked); dumped from the SIGUSR1 probe. Outside the NATIVE guard:
+// the stub handlers read these unconditionally, so the FEX build must link them too.
 extern "C" u64 g_sysHist[1024] = {};
 
-// The histogram was only ever printed by the crash reporter, so a clean run
-// discarded it. "Which syscall is this title hammering" is the question it
-// exists to answer, and most runs neither crash nor exit gracefully (the
-// emulator is normally SIGKILLed), so it is also dumped from the unimplemented
-// -syscall stub, which is where the question usually comes up.
+// Also dump from the unimplemented-syscall stub: most runs neither crash nor exit
+// gracefully (SIGKILL), and "which syscall is this title hammering" usually comes
+// up there.
 void dumpSyscallHist() {
   BASE_LOGI("schist", "syscall call counts:");
   for (int i = 0; i < 1024; i++) {
@@ -283,13 +268,10 @@ uintptr_t lv2_trampoline(const void *handler, u32 sid) {
 #endif
 }
 
-// APR (0x2bc..0x2c0, the PS5 async-package-read interface) must FAIL, not
-// empty-succeed: the Prospero table stubs it as success without filling any
-// output, and a title that routes its /app0 asset opens through
-// sceKernelAprResolve then trusts garbage resolve results instead of taking
-// its plain-open fallback (Demon's Souls reported every asset as FileNotFound
-// this way). ENOSYS makes the libkernel wrapper return a negative SCE error
-// and the engine falls back to open/read, which the VFS serves fine.
+// APR (0x2bc..0x2c0, PS5 async-package-read) must FAIL, not empty-succeed: the
+// Prospero stub's success-with-garbage made Demon's Souls trust bogus resolve
+// results (every asset FileNotFound) instead of its plain-open fallback. ENOSYS
+// sends the wrapper negative and the engine falls back to VFS open/read.
 static int PS4ABI sys_apr_unavailable() { return -SysError::eNOSYS; }
 
 uintptr_t lv2_lookup(u32 sid) {

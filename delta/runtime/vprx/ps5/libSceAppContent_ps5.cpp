@@ -25,11 +25,9 @@ namespace {
 // SCE_APP_CONTENT_APPPARAM_ID_SKU_FLAG == 0; 0 = full game, 1 = trial.
 constexpr u32 kSkuFlagFull = 0;
 
-// Free space reported for both areas, in KiB. Deliberately 1 GiB and not
-// something larger: a caller that converts KiB to bytes in 32 bits wraps to
-// exactly 0 for any value that is a multiple of 4 GiB, which reads as "no
-// space". 1 GiB is 0x40000000 bytes, positive even as a signed 32-bit count,
-// and far more than a new world needs.
+// Free space for both areas, in KiB, deliberately 1 GiB: KiB->bytes in 32 bits wraps
+// to exactly 0 for any multiple of 4 GiB (reads as "no space"); 1 GiB = 0x40000000
+// bytes, positive as a signed 32-bit count, and plenty for a new world.
 constexpr u64 kAvailableKb = 1024ull * 1024;
 
 constexpr char kTempPoint[] = "/temp0";

@@ -1,10 +1,7 @@
 
 /*
- * PS4Delta : PS4 emulation and research project
- *
- * Copyright 2019-2020 Force67.
- * For information regarding licensing see LICENSE
- * in the root of the source tree.
+ * PS4Delta: PS4 emulation and research project
+ * Copyright 2019-2020 Force67. See LICENSE in the root of the source tree.
  */
 
 #include <cstdio>
@@ -63,22 +60,17 @@ namespace krnl {
 using ppt = utl::pageProtection;
 using alt = utl::allocationType;
 
-// Floor of the arena we hand out addresses from (see allocLowGuest). Below it is
-// the guest's own space, including the round 64 GiB slots titles MAP_FIXED their
-// direct/flexible pools into.
+// Floor of the guest address arena; below sit the round 64 GiB slots titles
+// MAP_FIXED their direct/flexible pools into.
 #ifdef __ANDROID__
 constexpr uintptr_t kGuestArenaFloor = 0x4000000000ull;  // 256 GiB
 #else
 constexpr uintptr_t kGuestArenaFloor = 0x8000000000ull;  // 512 GiB
 #endif
 
-// Ranges the guest has unmapped. sys_munmap deliberately keeps the host pages
-// mapped, so the MAP_FIXED_NOREPLACE probe a hint goes through always fails
-// there and the mapping gets relocated. That is fatal to an allocator that
-// reserves a padded region, frees it, then re-reserves an exact aligned
-// sub-range of it: V8's pointer-compression cage does exactly that, and a
-// relocated cage leaves every compressed pointer resolving into memory nothing
-// lives in.
+// Ranges the guest has unmapped. sys_munmap keeps the host pages mapped, so a
+// hint there relocates, which breaks allocators that reserve a padded region,
+// free it, then re-reserve an exact aligned sub-range (V8's pointer cage).
 namespace {
 struct ReleasedRange {
   uintptr_t base, end;
@@ -139,29 +131,18 @@ u8 *allocLowGuest(size_t size, size_t align) {
   constexpr uintptr_t kFloor = kGuestArenaFloor;  // 256 GiB
   constexpr uintptr_t kCeil = 0x6000000000ull;    // 384 GiB
 #else
-  // Start the arena at 512 GiB. Titles map their own fixed-address direct/flexible
-  // memory pools at round 64 GiB slots (N * 0x10_0000_0000): Uncharted 2 uses
-  // 0x10..0x12_0000_0000 (Onion/Garlic/Flexible); GTA:SA's Gameface engine
-  // MAP_FIXEDs pools at 0x10/0x20/0x30/0x40_0000_0000, the last being a 128 MB
-  // direct-memory pool exactly on our old 256 GiB floor; it clobbered the
-  // primary TCB (fs:0x10 -> 0), which crashed the first scePthreadMutexLock. Our
-  // bookkeeping must sit above every slot a title fixed-maps; 512 GiB clears all
-  // observed pools while staying under the PS4 2^40 user ceiling.
+  // Start at 512 GiB: titles fixed-map pools at round 64 GiB slots (GTA:SA put a
+  // 128 MB pool exactly on the old 256 GiB floor, clobbering the primary TCB).
   constexpr uintptr_t kFloor = kGuestArenaFloor;  // 512 GiB
   constexpr uintptr_t kCeil = 0x10000000000ull;   // 2^40, the PS4 user ceiling
 #endif
-  // Align bases to 64 KiB, not just the 16 KiB page: GNM tiled textures/render
-  // targets carry alignment requirements above a page, and titles that allocate
-  // a GPU pool here and sub-allocate surfaces from its base assert when the base
-  // isn't aligned enough (DOOM's rhiTextureGnm buffer-block alignment check).
+  // 64 KiB, not just one page: GNM surfaces sub-allocated from a pool base
+  // assert on weaker alignment (DOOM rhiTextureGnm).
   constexpr uintptr_t kAlign = 0x10000;
   static std::atomic<uintptr_t> next{kFloor};
   size = (size + 0x3FFF) & ~uintptr_t(0x3FFF);
-  // Caller-requested alignment (MAP_ALIGNED(n) in the mmap flags): the kernel
-  // CONTRACTUALLY returns a base aligned to 2^n. Engines size their arena
-  // bookkeeping around it: SotC reserves its streaming arenas with
-  // MAP_ALIGNED(20) and indexes them by VA>>20; a 64 KiB-aligned base breaks
-  // every lookup (AllocationTracker null-record crash in LoadInitialWorld).
+  // MAP_ALIGNED(n) is contractual: SotC indexes its streaming arenas by VA>>20,
+  // so a weaker base breaks every lookup.
   const uintptr_t al = align > kAlign ? align : kAlign;
   for (int tries = 0; tries < 8192; tries++) {
     uintptr_t raw = next.load(std::memory_order_relaxed);
@@ -186,12 +167,9 @@ u8 *allocLowGuest(size_t size, size_t align) {
   return nullptr;
 }
 
-// POSIX shared memory (shm_open/shm_unlink/ftruncate + fd-backed mmap).
-//
-// A named shm object is sized with ftruncate then mmap'd to share a region
-// between components. In a single guest process "shared" means the same name
-// resolves to the same backing block, so every mapper sees one region. The block
-// is a low (<2^40) guest allocation; ftruncate or the first mmap allocates it.
+// POSIX shared memory (shm_open/shm_unlink/ftruncate + fd-backed mmap). In a
+// single guest process the same name resolves to one backing block; ftruncate
+// or the first mmap allocates it.
 namespace {
 struct shmBacking {
   u8 *base = nullptr;
@@ -199,27 +177,19 @@ struct shmBacking {
 };
 using shmRef = std::shared_ptr<shmBacking>;
 std::mutex g_shmMutex;
-// name -> shared backing. The backing outlives the name: shmObject holds a
-// shared ref, so a region that was shm_open'd then shm_unlink'd keeps working
-// through its fd. The real kernel refcounts the shm object by file
-// descriptor the same way (unlink only drops the name).
+// name -> backing. The backing outlives the name (shmObject holds a shared
+// ref), like the kernel refcounting the shm object by fd.
 std::unordered_map<std::string, shmRef> g_shmByName;
 
 // ---------------------------------------------------------------------------
-// RESEARCH INSTRUMENTATION (env-gated, default OFF, no effect on the normal
-// path). Used to reverse-engineer the shared-memory mixer protocol the REAL
-// libSceAudioOut speaks when it runs LLE: it creates per-port POSIX shm named
-// "/shm_<pid>_<n>[_A]" and mixes into it, expecting the system audio daemon to
-// consume. See the note at the head of runtime/vprx/ps4/libSceAudioOut.
-//
+// RESEARCH INSTRUMENTATION (env-gated, default OFF), for reverse-engineering
+// the LLE libSceAudioOut shared-memory mixer protocol (see the note at the
+// head of runtime/vprx/ps4/libSceAudioOut):
 //   DELTA_SHM_AUDIO_TRACE=1        log shm_open/ftruncate/mmap for matching names
 //   DELTA_SHM_AUDIO_FILTER=<sub>   name substring to match (default "shm_")
 //   DELTA_SHM_AUDIO_DUMP=<dir>     periodically snapshot every matching region
-//   DELTA_SHM_AUDIO_DUMP_MS=<n>    snapshot period, default 10 ms
-//   DELTA_SHM_AUDIO_DUMP_N=<n>     max snapshots per region, default 400
-//   DELTA_SHM_AUDIO_DUMP_MAX=<n>   cap bytes copied per region, default 1 MiB
-// Snapshots are appended to <dir>/<name>.bin and indexed in <dir>/index.txt as
-// "<seq> <t_us> <name> <off> <len>", so a grower/reallocation is visible.
+//   DELTA_SHM_AUDIO_DUMP_MS/N/MAX  period (10 ms), count (400), byte cap (1 MiB)
+// Snapshots append to <dir>/<name>.bin, indexed in <dir>/index.txt.
 // ---------------------------------------------------------------------------
 const char *shmAudioFilter() {
   const char *v = kShmFilter;
@@ -257,11 +227,8 @@ std::string shmAudioSanitize(const std::string &n) {
   return s;
 }
 
-// DELTA_SHM_AUDIO_POISON=<byte>: fill a matching region with a poison byte when
-// it is first mapped. Without this a region the guest fills with SILENCE is
-// indistinguishable from one the guest never touches, since both read back as
-// zeros. Only regions matching DELTA_SHM_AUDIO_POISON_FILTER (default "_A", the
-// per-port sample regions) are poisoned, so the descriptor block stays clean.
+// DELTA_SHM_AUDIO_POISON=<byte>: fill matching regions (filter default "_A") on
+// first map; silence is otherwise indistinguishable from untouched.
 bool shmAudioPoisonQuiet(const std::string &name, u8 *base, size_t size) {
   const char *pv = kShmPoison;
   if (!pv || !base || !size)
@@ -313,15 +280,14 @@ void shmAudioDumperMain(std::string dir, unsigned periodMs, unsigned maxSnaps,
       if (!f)
         continue;
       const size_t len = r.sz < maxBytes ? r.sz : maxBytes;
-      // Racy by construction: the guest mixes while we copy. Tearing shows up as
-      // a torn sample block, never as a wrong cursor VALUE, so cursor tracking
-      // stays sound; treat the sample area as "sampled", not "coherent".
+      // Racy by construction: tearing shows up as torn samples, never a wrong
+      // cursor value.
       cur.assign(r.b, r.b + len);
       auto &p = prev[r.n];
       const bool same = (p.size() == len) &&
                         std::memcmp(p.data(), cur.data(), len) == 0;
-      // Cheap per-tick fingerprint so a 75 s run can be judged without keeping
-      // 75 s of bytes: how much of the region is non-zero, and an FNV-1a hash.
+      // Per-tick fingerprint (non-zero count + FNV-1a) so a long run can be
+      // judged without keeping its bytes.
       size_t nz = 0;
       u64 h = 1469598103934665603ull;
       for (size_t i = 0; i < len; i++) {
@@ -334,11 +300,8 @@ void shmAudioDumperMain(std::string dir, unsigned periodMs, unsigned maxSnaps,
         std::fwrite(cur.data(), 1, len, f);
         p = cur;
       }
-      // DELTA_SHM_AUDIO_REPOISON: refill with the poison byte after sampling, so
-      // the NEXT snapshot shows exactly the bytes written during this tick. A
-      // producer that rewrites the same block with silence every tick is
-      // otherwise invisible: silence over silence is no change. Destroys the
-      // region's contents, so it is only valid while nothing consumes them.
+      // Repoison after sampling so the next snapshot shows exactly this tick's
+      // writes; destroys the contents.
       shmAudioRepoison(r.n, r.b, len);
       if (idx)
         std::fprintf(idx, "%u %llu %s %ld %zu %zu %016llx\n", seq,
@@ -356,19 +319,12 @@ void shmAudioDumperMain(std::string dir, unsigned periodMs, unsigned maxSnaps,
 }
 
 // ---------------------------------------------------------------------------
-// DELTA_SHM_AUDIO_PROBE=<us>: SPEC VALIDATION HARNESS, default OFF. Performs
-// exactly the consumer half of the LLE libSceAudioOut handshake and reports what
-// it finds, WITHOUT playing anything. The point is to prove the decode, not to
-// be the daemon (that is the next stage's job).
-//
-// Every <us> it walks the 26 port slots of "/shm_<pid>_C" and, for any slot
-// whose +0x00 token is non-zero, reads grain*bytesPerFrame bytes from the head
-// of "/shm_<pid>_<idx>_A", computes a peak level under the slot's declared
-// format, and then zeroes +0x00 to release the port. Pair it with
-// DELTA_AUDIOMIX_ACK so the guest's mixer wait also completes.
-//
-// If the layout below is right, Isaac's peak here must track the HLE reference
-// (climbing from ~0.03 to ~0.4); if it is wrong, the peak is garbage or zero.
+// DELTA_SHM_AUDIO_PROBE=<us>: SPEC VALIDATION HARNESS, default OFF. Plays
+// nothing; performs the consumer half of the LLE libSceAudioOut handshake:
+// walk the 26 port slots of "/shm_<pid>_C", read a block from the matching
+// "_A" region, compute a peak, zero +0x00 to release the port. Pair with
+// DELTA_AUDIOMIX_ACK. Correct layout => peaks track the HLE reference.
+// ---------------------------------------------------------------------------
 void shmAudioProbeMain(long periodUs) {
   constexpr size_t kHdr = 0x20, kStride = 0x250, kSlots = 26;
   u64 ticks = 0, blocks = 0;
@@ -498,8 +454,8 @@ public:
   shmRef backing;       // keeps the backing alive while this fd is open
 };
 
-// Return the backing block for a shm, allocating/growing it to cover the
-// requested range. Caller must NOT hold g_shmMutex. -1 on failure.
+// Backing block for a shm, grown to cover the requested range. Caller must not
+// hold g_shmMutex; -1 on failure.
 u8 *shmMap(shmObject *shm, size_t size, size_t offset) {
   std::lock_guard<std::mutex> lk(g_shmMutex);
   auto &b = *shm->backing;
@@ -514,8 +470,7 @@ u8 *shmMap(shmObject *shm, size_t size, size_t offset) {
   if (!b.base || offset > b.size)
     return reinterpret_cast<u8 *>(-1);
   shmAudioTrace("mmap", shm->shmName, b.base + offset, size, offset);
-  // Also announce here: a region mmap'd without a prior ftruncate gets its
-  // backing allocated above, and the audio daemon must not miss that case.
+  // Announce here too: a region mmap'd without ftruncate allocates above.
   audioDaemonNoticeShm(shm->shmName.c_str(), b.base, b.size);
   return b.base + offset;
 }
@@ -533,17 +488,13 @@ u8 *PS4ABI sys_mmap(void *addr, size_t size, u32 prot, u32 flags,
   /*align the page*/
   size = (size + 0x3FFF) & 0xFFFFFFFFFFFFC000LL;
 
-  // A zero-length mapping is invalid (BSD returns EINVAL). Guests hit this on an
-  // error-recovery path, e.g. mmap()ing an fd from a failed physhm_open/fstat.
-  // Without this it fell into allocLowGuest(0), 8192 failing mmap(len=0) host
-  // calls, and returned (u8*)-1, which the errno convention reports as
-  // EPERM (1) rather than EINVAL (22), misleading the guest's fallback.
+  // A zero-length mapping is invalid (BSD EINVAL); guests hit it on
+  // error-recovery paths (mmap of an fd from a failed physhm_open/fstat).
   if (size == 0)
     return reinterpret_cast<u8 *>(-SysError::eINVAL);
 
-  // SCOUT (DELTA_MMAP_CALLER=<minMB>): scan the guest stack for return addresses
-  // in a loaded module's .text to pin which guest code requested a big map (e.g.
-  // the libc heap). Handler runs on the guest stack on native.
+  // DELTA_MMAP_CALLER=<minMB>: scan the guest stack for module .text return
+  // addresses to pin which guest code requested a big map.
   if (const char *mc = kMmapCaller) {
     size_t minB = static_cast<size_t>(std::strtoull(mc, nullptr, 0)) * 1024 * 1024;
     if (minB == 0) minB = 64ull * 1024 * 1024;
@@ -568,16 +519,10 @@ u8 *PS4ABI sys_mmap(void *addr, size_t size, u32 prot, u32 flags,
     }
   }
 
-  // Faithful validation, mirroring the kernel's sys_mmap arg handling:
-  //  - MAP_STACK (0x400): requires an anonymous fd and PROT_READ|PROT_WRITE;
-  //    the kernel ORs in MAP_ANON and drops the offset.
-  //  - MAP_VOID (0x100): an address-space reservation; the kernel forces prot 0
-  //    (nothing is committed until a MAP_FIXED punches in) and tracks the range
-  //    as reserved.
-  //  - MAP_FIXED (0x10): the address must be page-aligned and the range must not
-  //    wrap, else EINVAL. The kernel also bounds it by VM_MAXUSER_ADDRESS; we
-  //    cannot, because a guest thread runs on a HOST stack, and libkernel
-  //    MAP_FIXEDs the guard page of that stack far above the 2^40 guest ceiling.
+  // Faithful validation, mirroring the kernel: MAP_STACK needs an anon fd + r|w
+  // and drops the offset; MAP_VOID forces prot 0; MAP_FIXED must be page-aligned
+  // and not wrap. (Unbounded by VM_MAXUSER_ADDRESS: libkernel fixed-maps a host
+  // stack guard far above the 2^40 guest ceiling.)
   if (flags & mFlags::stack) {
     if (fd != static_cast<u32>(-1) || (prot & 3) != 3)
       return reinterpret_cast<u8 *>(-SysError::eINVAL);
@@ -601,29 +546,19 @@ u8 *PS4ABI sys_mmap(void *addr, size_t size, u32 prot, u32 flags,
       addr = nullptr;
   }
 
-  // A hint inside the reserved user-stack region is guest-owned address space:
-  // kern.usrstack hands the guest that region's top and libkernel places the
-  // initial thread's system TLS just below it. Our own PROT_NONE reservation
-  // makes the MAP_FIXED_NOREPLACE probe below fail, so the block would get
-  // relocated and libkernel then reports its internal memory pool as exhausted.
-  // Commit it where the guest asked instead.
+  // A hint inside the guest's user-stack region (or a VA range
+  // reserveGuestVaSpace() claimed) is guest-owned: our PROT_NONE placeholder
+  // would relocate it and exhaust libkernel's internal arena.
   bool inUserStack = false;
   if (addr) {
     auto &env = proc->getEnv();
     auto a = reinterpret_cast<uintptr_t>(addr);
     auto lo = reinterpret_cast<uintptr_t>(env.userStack);
     inUserStack = env.userStack && a >= lo && a + size <= lo + env.userStackSize;
-    // Same reasoning for the ranges reserveGuestVaSpace() claimed up front
-    // (libkernel's arena, the GNM areas, the title pool slots): the only thing
-    // occupying them is our own PROT_NONE placeholder, so a hint landing there
-    // is guest-owned address space and must be COMMITTED where the guest asked.
-    // Relocating instead is what makes libkernel fall back to its internal
-    // arena and exhaust it (see guest_vaspace.cpp).
     inUserStack = inUserStack || isGuestReservedVa(addr, size);
   }
 
-  // An mmap through /dev/dmem carries the direct-memory physical offset in
-  // `offset`; remember it so sceKernelVirtualQuery can report it.
+  // A /dev/dmem mmap carries the direct-memory physical offset in `offset`.
   bool dmemMap = false;
   if (fd != -1) {
     auto *obj = proc->getObjTable().get(fd);
@@ -634,14 +569,11 @@ u8 *PS4ABI sys_mmap(void *addr, size_t size, u32 prot, u32 flags,
       BASE_LOGI("mmapfd", "fd={} addr={:p} size={:#x} off={:#x} objType={}",
                 fd, addr, size, offset, obj ? (int)obj->type() : -1);
     if (obj && obj->type() == kObject::oType::shm) {
-      // POSIX shared memory: hand back the shared backing so every mapper of
-      // this shm sees the same region (sized by ftruncate).
+      // Every mapper of this shm shares the backing (sized by ftruncate).
       return shmMap(static_cast<shmObject *>(obj), size, offset);
     }
     if (obj) {
-      // Device-backed mmap (e.g. /dev/dce's scanout pool): use the region the
-      // device hands back instead of an anonymous fallback, so the guest maps
-      // the device's real memory. -1 means "not device-backed"; fall through.
+      // Device-backed mmap: use the region the device hands back; -1 = fall through.
       auto *m = static_cast<device *>(obj)->map(addr, size, prot, flags, offset);
       if (m != reinterpret_cast<u8 *>(-1)) {
         proc->getVma().add(
@@ -652,10 +584,8 @@ u8 *PS4ABI sys_mmap(void *addr, size_t size, u32 prot, u32 flags,
     }
   }
 
-  // MAP_ALIGNED(n): bits 31..24 of the flags carry log2 of a base alignment the
-  // kernel must honor (FreeBSD 9 semantics; Sony titles rely on it: SotC
-  // reserves streaming arenas with MAP_ALIGNED(20) and keys its allocator
-  // bookkeeping on the 1 MiB-aligned base).
+  // MAP_ALIGNED(n): flags bits 31..24 carry log2 base alignment the kernel must
+  // honor (SotC keys streaming-arena bookkeeping on it).
   const u32 alignLog = (flags >> 24) & 0x1F;
   const size_t mapAlign = (alignLog >= 14 && alignLog < 40)
                               ? (size_t(1) << alignLog)
@@ -664,13 +594,9 @@ u8 *PS4ABI sys_mmap(void *addr, size_t size, u32 prot, u32 flags,
       (reinterpret_cast<uintptr_t>(addr) & (mapAlign - 1)))
     addr = nullptr;  // misaligned hint: pick our own aligned base instead
 
-  // A pure address-space reservation (prot 0) must not be planted in the band
-  // titles MAP_FIXED their own direct/flexible pools into, the round 64 GiB
-  // slots below our arena floor. The hint there is only advisory, but a later
-  // MAP_FIXED over it is not: Minecraft maps direct memory at 0x10_0000_0000,
-  // which is also the hint V8 uses for its pointer-compression cage, and the
-  // remap silently replaced the cage's first page (and with it V8's whole
-  // read-only heap) long after the cage was handed out.
+  // Keep prot-0 reservations out of the band titles MAP_FIXED their pools into:
+  // Minecraft's direct-memory MAP_FIXED would silently replace the first page
+  // of V8's pointer cage (and its read-only heap with it).
   if (addr && !(flags & mFlags::fixed) && prot == 0 &&
       reinterpret_cast<uintptr_t>(addr) >= 0x1000000000ull &&
       reinterpret_cast<uintptr_t>(addr) < kGuestArenaFloor)
@@ -679,10 +605,7 @@ u8 *PS4ABI sys_mmap(void *addr, size_t size, u32 prot, u32 flags,
   void *ptr = nullptr;
   if (addr) {
     if (flags & mFlags::fixed) {
-      // MAP_FIXED: the guest demands this exact address; overlay whatever's there.
-      // For a MAP_FIXED stack the kernel maps the region BELOW the address and
-      // returns the address itself (vm_map_stack maps [start-size, start)), so
-      // plant the block below the hint instead of on top of it.
+      // MAP_FIXED stack maps [start-size, start): plant below the hint.
       void *want = addr;
       if (flags & mFlags::stack)
         want = static_cast<u8 *>(addr) - size;
@@ -692,17 +615,13 @@ u8 *PS4ABI sys_mmap(void *addr, size_t size, u32 prot, u32 flags,
     } else if (inUserStack) {
       ptr = utl::allocMem(addr, size, ppt::w, alt::commit);
     } else if (utl::allocMem(addr, size, ppt::w, alt::reserve)) {
-      // A hint must never alias an existing mapping. reservecommit uses MAP_FIXED
-      // and would clobber it, so probe with a NOREPLACE reserve first and only
-      // commit if the address was free; otherwise fall through to the low arena.
-      // Without this a guest TLS/TCB hint lands on and destroys a loaded module
-      // (seen on Android, where the guest hints into the low module region).
+      // A hint must never alias an existing mapping; reservecommit would clobber
+      // it (a guest TLS hint destroyed a loaded module on Android).
       ptr = utl::allocMem(addr, size, ppt::w, alt::commit);
     } else if (wasGuestReleased(static_cast<u8 *>(addr), size) &&
                !proc->getVma().overlaps(static_cast<u8 *>(addr), size)) {
-      // The probe can only fail here because we kept the host pages of a range
-      // the guest ITSELF unmapped, and nothing has been mapped there since. The
-      // address is free as far as the guest is concerned, so honour the hint.
+      // The probe only fails here because we kept the pages of a guest-unmapped
+      // range; the address is free as far as the guest is concerned.
       ptr = utl::allocMem(addr, size, ppt::w, alt::reservecommit);
     }
   }
@@ -713,32 +632,21 @@ u8 *PS4ABI sys_mmap(void *addr, size_t size, u32 prot, u32 flags,
   if (!ptr)
     return reinterpret_cast<u8 *>(-SysError::eNOMEM);
 
-  // Track the prot the guest actually asked for (BSD r=1/w=2/x=4 maps 1:1 onto
-  // pageProtection) so sceKernelVirtualQuery / QueryMemoryProtection report the
-  // truth instead of a blanket rwx. The host pages stay rwx: FEX reads guest
-  // memory directly and we don't deliver protection faults, so restricting them
-  // would only risk spurious crashes, not faithful behaviour.
+  // Track the guest-requested prot so VirtualQuery reports the truth; host pages
+  // stay rwx (FEX reads guest memory directly, no protection faults delivered).
   auto gprot = static_cast<ppt>(prot & static_cast<u32>(ppt::rwx));
 
-  // No zero-fill for anonymous maps: every ptr above comes from an anonymous
-  // ::mmap (utl::allocMem or allocLowGuest), which the kernel already hands
-  // back zeroed. Writing it ourselves faulted in the whole mapping: a title
-  // that maps multi-GiB pools (Minecraft maps 4 and 8 GiB ones) went to 43 GiB
-  // RSS at ~3 GB/s and took the host down. The shm and device-backed paths
-  // return before this point, so they are unaffected.
+  // No zero-fill: every path above already returns kernel-zeroed anonymous
+  // pages; self-fill faulted in multi-GiB pools (Minecraft, 43 GiB RSS).
 
-  // File-backed mmap: copy the file's content into the freshly-mapped pages so the
-  // guest reads the file it mapped (Doom64 mmaps its asset/WAD files and samples
-  // textures straight out of the mapping; an anonymous zero-fill left them black).
-  // readAt is a no-op (-1) for non-file devices; the read stops at EOF so a sparse
-  // over-sized mapping keeps zeros past the file's end.
+  // File-backed mmap: copy the file's content in (Doom64 mmaps its WADs and
+  // samples textures from the mapping); the read stops at EOF so an oversized
+  // mapping keeps zeros past the file's end.
   if (fd != static_cast<u32>(-1)) {
     if (auto *o = proc->getObjTable().get(fd))
       if (o->type() == kObject::oType::device) {
-        // The kernel maps the page-aligned file range and hands back
-        // base + (offset & 0x3FFF), so the guest's pointer lands on the file's
-        // byte at `offset`. The fill must therefore start at the page-aligned
-        // offset for that contract to hold.
+        // The kernel hands back base + (offset & 0x3FFF), so the fill starts at
+        // the page-aligned offset for that contract to hold.
         const i64 fileOff = static_cast<i64>(offset & ~size_t(0x3FFF));
         i64 got = static_cast<device *>(o)->readAt(ptr, size, fileOff);
         if (got > 0 && kMmapfdTrace)
@@ -747,10 +655,8 @@ u8 *PS4ABI sys_mmap(void *addr, size_t size, u32 prot, u32 flags,
       }
   }
 
-  // MAP_VOID (0x100): an address-space reservation (titles later commit pieces
-  // inside with MAP_FIXED, which punches the reservation apart in the VMA).
-  // Virtual query must see it as reserved, not committed memory. `prot` was
-  // forced to 0 above, mirroring the kernel.
+  // MAP_VOID is a reservation (later MAP_FIXED commits punch it apart in the
+  // VMA); virtual query must see it as reserved, not committed.
   if (dmemMap)
     proc->getVma().addDirect(static_cast<u8 *>(ptr), size, gprot, prot,
                              offset);
@@ -760,16 +666,14 @@ u8 *PS4ABI sys_mmap(void *addr, size_t size, u32 prot, u32 flags,
 
   utl::protectMem(static_cast<void *>(ptr), size, ppt::rwx);
 
-  // DELTA_GNMAP_TRACE: log any mapping that lands in the GNM/GPU aperture
-  // (0x8000_.. below the big dmem pools) to pin how the AGC ring buffers (ACQRB
-  // etc.) are mapped and by whom (return address). The AGC command ring is mapped
-  // here as plain anon (fd=-1); its coherency with the guest's PM4 writes is an
-  // open item (Onion/Garlic dual mapping, see ps5-boot-progress memory).
+  // DELTA_GNMAP_TRACE: log mappings in the GNM/GPU aperture to pin how the AGC
+  // ring buffers are mapped and by whom (coherency with guest PM4 writes is
+  // an open item).
   if (kGnmapTrace) {
     u64 r = reinterpret_cast<u64>(ptr);
     if (r >= 0x8000000000ull && r < 0x8300000000ull) {
-      // Walk the guest frame chain (libkernel keeps frame pointers) so we see the
-      // real caller above libkernel's mmap wrapper, not just the wrapper itself.
+      // Walk the guest frame chain (libkernel keeps frame pointers) for the
+      // real caller above libkernel's mmap wrapper.
       base::String callers;
       base::FormatTo(callers, "{:p} size={:#x} fd={} flags={:#x}  callers:",
                      ptr, size, static_cast<int>(fd), flags);
@@ -795,10 +699,8 @@ u8 *PS4ABI sys_mmap(void *addr, size_t size, u32 prot, u32 flags,
               addr, size, prot, flags, static_cast<int>(fd), offset,
               _ReturnAddress(), ptr);
 
-  // The kernel's returned address = page-aligned base + (offset & 0x3FFF), so a
-  // map with a non-page-aligned offset points at the file's byte at `offset`
-  // (FreeBSD mmap semantics). Anonymous maps carry offset 0 and return the base.
-  // MAP_STACK returns the top of the region, exactly like vm_map_stack.
+  // Returned address = base + (offset & 0x3FFF), FreeBSD mmap semantics;
+  // MAP_STACK returns the region top, like vm_map_stack.
   if (flags & mFlags::stack)
     return &static_cast<u8 *>(ptr)[size];
 
@@ -819,12 +721,9 @@ int PS4ABI sys_mprotect(u8 *addr, size_t len, int prot) {
   if (__builtin_add_overflow(base, span, &end))
     return -SysError::eINVAL;
 
-  // The kernel masks the requested prot to 0x37 (r/w/x plus the GPU bits) and
-  // applies it to every entry in the range, so sceKernelVirtualQuery reports
-  // the mprotect result. We don't restrict the host pages (see sys_mmap) and we
-  // don't fail on an untracked range: the dynamic linker mprotects its own
-  // RELRO segments, which the module loader maps outside this table, and
-  // vm_map_protect succeeds over gaps too. So update what we know and succeed.
+  // The kernel masks prot to 0x37 and applies it to every entry in the range.
+  // We don't restrict host pages and don't fail over gaps (the linker mprotects
+  // its own RELRO segments outside this table); update what we know, succeed.
   const u32 sceProt = static_cast<u32>(prot) & 0x37;
   proc->getVma().protectRange(reinterpret_cast<u8 *>(base), span,
                               static_cast<ppt>(sceProt &
@@ -833,10 +732,8 @@ int PS4ABI sys_mprotect(u8 *addr, size_t len, int prot) {
   return 0;
 }
 
-// System services we do not host. A title reaches one through two objects that
-// share the service's name: a shm ("/SceNpTpip") it maps, and a named semaphore
-// ("SceNpTpip 0") the service would ring when it has something to say. This is
-// a list, and it grows one name at a time as a title walks into the next one.
+// System services we do not host: a shm + named semaphore pair sharing the
+// service's name. The list grows one name at a time as titles walk into the next.
 bool isAbsentServiceChannel(const char *name) {
   static constexpr const char *kServices[] = {"SceNpTpip"};
   if (!name)
@@ -855,12 +752,9 @@ int PS4ABI sys_shm_open(const char *path, u32 flags, u16 mode) {
   if (!proc || !path)
     return -SysError::eINVAL;
 
-  // Argument validation from the kernel's sys_shm_open: O_WRONLY (0x1) is not a
-  // valid shm_open mode, and an unknown bit among {O_RDWR=0x2, O_CREAT=0x200,
-  // O_TRUNC=0x400, O_EXCL=0x800} is EINVAL. Only the low half is checked:
-  // libkernel passes descriptor flags above it (the common dialog opens its work
-  // area with 0x200000) that the FreeBSD mask does not name but the console
-  // accepts.
+  // From the kernel's sys_shm_open: O_WRONLY is invalid, unknown bits among
+  // {O_RDWR, O_CREAT, O_TRUNC, O_EXCL} are EINVAL. Only the low half is checked:
+  // libkernel passes high descriptor flags the console accepts.
   if ((flags & 1) != 0)
     return -SysError::eINVAL;
   if ((flags & 0xF1FC) != 0)
@@ -874,19 +768,15 @@ int PS4ABI sys_shm_open(const char *path, u32 flags, u16 mode) {
     auto it = g_shmByName.find(name);
     if (it == g_shmByName.end()) {
       if (!(flags & kO_CREAT) && kShmNoAuto) {
-        // DIAGNOSTIC: restore the pre-LLE behaviour (fail an open of a system shm
-        // the guest didn't create) to test whether auto-providing it makes a title
-        // block waiting for a ShellCore handshake that never arrives (Doom64).
+        // DIAGNOSTIC: fail opens of system shms the guest didn't create
+        // (tests whether auto-providing masks a missing ShellCore handshake).
         BASE_LOGI("shm_open", "NOAUTO: '{}' -> ENOENT", name.c_str());
         return -SysError::eNOENT;
       }
       if (!(flags & kO_CREAT)) {
-        // A read-only open of a shm that wasn't created by the guest: this is a
-        // SYSTEM shared region the kernel would have published at boot (e.g.
-        // libSceAvSetting's audio/video settings block). We don't model its
-        // contents, so auto-provide a zeroed, pre-sized backing. The title
-        // then fstat()s a real size and mmaps it (reading defaults) instead of
-        // failing init with a -ENOENT shm fd it tries to map anyway.
+        // Read-only open of a system shm (e.g. libSceAvSetting's settings
+        // block): auto-provide a zeroed backing so the title fstats a real
+        // size instead of failing init.
         backing = std::make_shared<shmBacking>();
         backing->size = 0x10000;  // 64 KiB, ample for a settings block
         backing->base = allocLowGuest(backing->size);
@@ -906,9 +796,8 @@ int PS4ABI sys_shm_open(const char *path, u32 flags, u16 mode) {
       if ((flags & kO_CREAT) && (flags & kO_EXCL))
         return -SysError::eEXIST;
       backing = it->second;
-      // O_TRUNC on an existing region: the kernel truncates it to zero
-      // (shm_dotruncate, only honoured for O_RDWR | O_TRUNC, 0x402). Existing
-      // fds keep mapping the (now empty) backing, exactly like the real object.
+      // O_TRUNC|O_RDWR (0x402) truncates to zero; existing fds keep mapping the
+      // empty backing, exactly like the real object.
       if ((flags & 0x403) == 0x402) {
         shmAudioTrace("trunc", name, backing->base, 0, 0);
         backing->size = 0;
@@ -918,8 +807,7 @@ int PS4ABI sys_shm_open(const char *path, u32 flags, u16 mode) {
     }
   }
 
-  // A fresh fd per open, all sharing the named backing (POSIX-ish for a single
-  // guest process). The ctor registers it in the object table.
+  // A fresh fd per open, all sharing the named backing.
   auto *obj = new shmObject(proc->getObjTable(), std::move(name), std::move(backing));
   BASE_LOGI("shm_open", "'{}' flags={:#x} -> fd={}", path, flags,
             obj->handle());
@@ -936,9 +824,8 @@ int PS4ABI sys_shm_unlink(const char *path) {
   auto it = g_shmByName.find(path);
   if (it == g_shmByName.end())
     return -SysError::eNOENT;
-  // Drop the name only. Any fd that already opened this shm holds a shared ref
-  // to the backing, so its mmaps keep working; the backing goes away when the
-  // last fd closes (the kernel refcounts the shm object the same way).
+  // Drop the name only; open fds hold shared refs to the backing, like the
+  // kernel refcounting the shm object.
   g_shmByName.erase(it);
   return 0;
 }
@@ -978,8 +865,8 @@ int PS4ABI sys_ftruncate(u32 fd, i64 length) {
   // The RAW length matters for the protocol spec (the rounded `want` hides it).
   shmAudioTrace("ftruncate", shm->shmName, b.base, raw, want);
   if (want < b.size) {
-    // Shrink (kernel shm_dotruncate frees the tail pages). The host block
-    // stays put; a later grow reallocates and copies only `size` bytes.
+    // Shrink (the kernel frees the tail pages); the host block stays put, a
+    // later grow reallocates and copies `size` bytes.
     b.size = want;
     audioDaemonNoticeShm(shm->shmName.c_str(), b.base, b.size);
     return 0;
@@ -996,10 +883,8 @@ int PS4ABI sys_ftruncate(u32 fd, i64 length) {
   proc->getVma().add(b.base, want, ppt::w);
   shmAudioTrace("sized", shm->shmName, b.base, want, 0);
   shmAudioPoison(shm->shmName, b.base, want);
-  // The LLE libSceAudioOut's regions become consumable here; audioDaemonNotice
-  // ignores every name that is not part of that protocol. Note the base can
-  // MOVE on a later grow, which is why the daemon is told the current one rather
-  // than caching a pointer.
+  // The LLE audio regions become consumable here; the base can MOVE on a later
+  // grow, hence the fresh pointer each time.
   audioDaemonNoticeShm(shm->shmName.c_str(), b.base, b.size);
   return 0;
 }
@@ -1009,10 +894,8 @@ int PS4ABI sys_mname(u8 *ptr, size_t len, const char *name, void *) {
   if (!proc)
     return -SysError::eINVAL;
 
-  // Same guards as the kernel's sys_mname: the range must live inside the
-  // user VA space (here the 2^40 allocLowGuest ceiling stands in for
-  // map->max_offset) and the name must fit the kernel's 32-byte tag buffer
-  // (vm_map_set_name copies into a fixed 32-byte region).
+  // Kernel guards: the range lives inside user VA space and the name fits the
+  // 32-byte tag buffer.
   const uintptr_t a = reinterpret_cast<uintptr_t>(ptr);
   if (a >= 0x10000000000ull || len > 0x10000000000ull - a)
     return -SysError::eINVAL;
@@ -1023,11 +906,10 @@ int PS4ABI sys_mname(u8 *ptr, size_t len, const char *name, void *) {
   memcpy(tag, name, n);
   tag[n] = '\0';
 
-  // Tag every mapping entry in the page-rounded range, mirroring vm_map_set_name
-  // which walks and names each entry the range covers.
+  // Tag every entry the range covers, mirroring vm_map_set_name.
   proc->getVma().setRangeName(ptr, len, tag);
-  // Titles name their thread STACKS this way; carry the tag onto the host
-  // thread running on that stack (wait probe / gdb / perf attribution).
+  // Titles name thread stacks this way; carry the tag onto the host thread
+  // running on that stack (attribution).
   nameThreadsForRange(ptr, len, tag);
   return 0;
 }
@@ -1044,15 +926,12 @@ struct mdbg_property {
 
 static_assert(sizeof(mdbg_property) == 72);
 
-// Debug-raise state standing in for the kernel's per-process proc+2600 qword
-// (mdbg_service_raise sets bit 1; sys_mdbg_service case 0 reports the whole
-// word). No debugger is attached here, so a raise is recorded and reported as
-// delivered rather than suspending the process.
+// Stand-in for the kernel's per-process debug-raise qword (proc+2600); no
+// debugger is attached, so a raise is recorded and reported delivered.
 static std::atomic<u64> gMdbgFlags{0};
 
-// Mirrors the kernel's mdbg_service_raise: the reason (<= 0x7E) is stored, the
-// debug-raise flag set, then the process is signalled. The suspend notification
-// callback is unregistered here, so report the raise as delivered.
+// Mirrors mdbg_service_raise; the suspend notification callback is
+// unregistered, so report the raise as delivered.
 static int mdbgServiceRaise(uintptr_t reason) {
   if (reason <= 0x7E)
     gMdbgFlags.fetch_or(static_cast<u64>(reason) << 32);
@@ -1070,10 +949,7 @@ int PS4ABI sys_mdbg_service(u32 op, void *arg1, void *arg2, void *a3) {
     *static_cast<u64 *>(arg1) = gMdbgFlags.load();
     return 0;
   case 1: {
-    // Kernel: copyin a 72-byte property {40 bytes of data + 32-byte name} and
-    // register a named object from it. Registration is a no-op on our side (see
-    // sys_namedobj_create), so surface the property and store the name as the
-    // per-process tag would.
+    // Copyin a 72-byte property and register a named object (a no-op here); log it.
     auto *info = static_cast<mdbg_property *>(arg1);
     char tag[32];
     tag[31] = 0; // kernel zeroes the last name byte after copyin
@@ -1086,13 +962,10 @@ int PS4ABI sys_mdbg_service(u32 op, void *arg1, void *arg2, void *a3) {
     // Kernel: mdbg_service_raise with the raw second syscall argument as reason.
     return mdbgServiceRaise(reinterpret_cast<uintptr_t>(arg1));
   case 4:
-    // Kernel: raise only while debug mode is allowed (boot_parameter(0)==0 and
-    // the process debug flag at proc+900 set). Both hold for an emulated
-    // process, so raise directly.
+    // Raise only while debug mode is allowed; both conditions hold for us.
     return mdbgServiceRaise(reinterpret_cast<uintptr_t>(arg1));
   case 7: {
-    // Kernel: copyinstr a message (up to 0x1000) and printf it; the mdbg text
-    // facility. Log it instead.
+    // The mdbg text facility: log the message.
     const char *msg = static_cast<const char *>(arg1);
     if (!msg)
       return -SysError::eINVAL;
@@ -1101,12 +974,9 @@ int PS4ABI sys_mdbg_service(u32 op, void *arg1, void *arg2, void *a3) {
     return 0;
   }
   case 8:
-    // Wait for a debug event (0x28-byte record out). libkernel's debug-service
-    // thread loops on this and only treats EINTR as "no event": any other error
-    // falls through as if an event arrived and it runs the title's registered
-    // coredump callback on an UNINITIALIZED event buffer (Demon's Souls then
-    // faults inside its callback at boot). No debugger ever posts an event
-    // here, so park the caller the way the real kernel would.
+    // libkernel's debug thread treats any error as "event arrived" and runs the
+    // title's coredump callback on an UNINITIALIZED buffer (Demon's Souls faults
+    // at boot). No debugger ever posts here; park the caller like the kernel.
     LOG_INFO("mdbg wait-event: parking caller (no debugger attached)");
     for (;;)
       ::pause();
@@ -1116,11 +986,8 @@ int PS4ABI sys_mdbg_service(u32 op, void *arg1, void *arg2, void *a3) {
   }
 }
 
-// sys_dmem_container (586): sceKernelGet/SetDirectMemoryContainer.
-// arg == 0xFFFFFFFF: returns the current container id in rax.
-// arg == 0 or 1: requires privilege 0x2AD; sets the proc's dmem container.
-// Any other value is EINVAL. The kernel keeps the id at proc+2020. We don't
-// enforce separate dmem pools, so just track the selected id (default 0).
+// sys_dmem_container (586): 0xFFFFFFFF reads the container id, 0/1 sets it
+// (needs privilege 0x2AD; the kernel keeps it at proc+2020). We only track it.
 int PS4ABI sys_dmem_container(u32 op) {
   static std::atomic<u32> current{0};
   if (op == 0xFFFFFFFFu)

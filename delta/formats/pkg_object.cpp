@@ -656,12 +656,9 @@ struct PkgImpl {
     return static_cast<i64>(take);
   }
 
-  // Read a well-known outer-PKG entry (param.sfo = 0x1000, icon0.png = 0x1200)
-  // straight from the PKG header's entry table. These entries are plaintext in
-  // a fake pkg and live outside the encrypted PFS, so this works regardless of
-  // whether the inner image decrypted. Same big-endian header layout getEkpfs
-  // walks: entry count @0x10, table offset @0x18, 0x20-byte rows of
-  // [id @0, data offset @16, data size @20].
+  // Outer-PKG entry straight from the header's entry table (plaintext in a fake pkg,
+  // outside the PFS). Same big-endian layout getEkpfs walks: count @0x10, table @0x18,
+  // 0x20-byte rows of [id @0, offset @16, size @20].
   bool readEntry(u32 wantId, std::vector<u8> &out) {
     if (!pkg.IsOpen())
       return false;
@@ -707,11 +704,10 @@ bool PkgFilesystem::valid() const { return impl_ && impl_->valid; }
 const PkgFilesystem::Node *PkgFilesystem::find(const char *relPath) const {
   if (!impl_ || !relPath)
     return nullptr;
-  // Normalize to a single leading slash and collapse repeated slashes. Titles
-  // build asset paths by concatenation and routinely emit doubled separators
-  // (Doom64 opens "/app0//DOOMSND.DLS"); the file table is keyed on the clean
-  // path, and POSIX treats "//" as "/", so an exact match must too. Without this
-  // the soundfont open returns ENOENT and FMOD aborts the boot.
+  // Normalize to one leading slash, collapse repeats: titles concatenate paths and
+  // emit doubled separators (Doom64 opens "/app0//DOOMSND.DLS"); the table is keyed
+  // on the clean path and POSIX treats // as /, so an exact match must too (else the
+  // soundfont open ENOENTs and FMOD aborts the boot).
   std::string key;
   key.reserve(std::strlen(relPath) + 1);
   key.push_back('/');

@@ -195,10 +195,8 @@ void smodule::digestDynamic() {
     return;
   const auto *dyldS = getSegment(ElfSegType::PT_SCE_DYNLIBDATA);
 
-  // PS5 (Prospero) modules have no PT_SCE_DYNLIBDATA: their string/symbol/rela
-  // tables are described by standard ELF dynamic tags as vaddrs into the mapped
-  // image, not DT_SCE_* offsets into a data segment. Route them to the PS5-only
-  // path and leave the PS4 handling below untouched.
+  // PS5 modules have no PT_SCE_DYNLIBDATA: their tables are standard ELF dynamic
+  // tags as vaddrs into the mapped image. Route to the PS5 path; PS4 untouched.
   if (!dyldS) {
     ps5Layout = true;
     digestDynamicPs5(dynS);
@@ -320,12 +318,9 @@ void smodule::digestDynamic() {
   }
 }
 
-// PS5-only dynamic parser. A Prospero module uses standard ELF dynamic tags:
-// DT_STRTAB/SYMTAB/RELA/JMPREL are vaddrs into the mapped image (mapImage() has
-// already run), unlike PS4 where DT_SCE_* tags are offsets into
-// PT_SCE_DYNLIBDATA. The symbol/reloc format itself (Elf64_Sym, Elf64_Rela,
-// x86-64 reloc types, NID#lib#mod mangling) is identical, so resolveImports()
-// and applyRelocations() are reused unchanged.
+// PS5-only dynamic parser: DT_STRTAB/SYMTAB/RELA/JMPREL are vaddrs into the mapped
+// image (unlike PS4's DT_SCE_* offsets into PT_SCE_DYNLIBDATA). Symbol/reloc
+// format is identical, so resolveImports/applyRelocations are reused unchanged.
 void smodule::digestDynamicPs5(const ELFPgHeader *dynS) {
   ELFDyn *dynamics = getOffset<ELFDyn>(dynS->offset);
   const int count = static_cast<int>(dynS->filesz / sizeof(ELFDyn));
@@ -426,15 +421,11 @@ void smodule::digestDynamicPs5(const ELFPgHeader *dynS) {
               (unsigned long long)sharedObjects.size());
 }
 
-// DELTA_GUEST_BRK=<name substring>:<hex offset>[,...]: plant a ud2 at a guest
-// address once the module is mapped. The crash handler then reports registers
-// AT that instruction instead of wherever the guest's own abort path ends up,
-// which is the only way to see the state feeding a fault inside a stripped
-// third-party module. Diagnostic only.
-// DELTA_GUEST_NOEXEC=<hex addr>:<hex size>:<seconds>: take execute permission
-// off a guest range once the title is up. Straight-line execution through data
-// faults only where the mapping ends, which says nothing about where control
-// left the code; dropping X makes the fault happen at the ENTRY instead.
+// DELTA_GUEST_BRK=<name>:<hex offset>[,...]: ud2 at a guest address once mapped, so
+// the crash handler reports registers AT that instruction (the only way to see
+// state feeding a fault inside a stripped module). DELTA_GUEST_NOEXEC=<addr>:<size>:
+// <secs>: take X off a guest range; faults then happen at the ENTRY, not where the
+// mapping ends.
 static void startNoExecWatch() {
   const char *spec = kNoExec;
   if (!spec)
@@ -500,10 +491,8 @@ void smodule::plantGuestBreakpoints() {
   }
 }
 
-// DELTA_MODCHECK=<name substring>: watch a module's NON-WRITABLE load segments
-// for corruption. Read-only data must never change after load, so a digest that
-// moves means something scribbled on the image, which for a module carrying a
-// blob (libcohtml's V8 snapshot) shows up much later as unparseable data.
+// DELTA_MODCHECK=<name>: watch a module's read-only segments for corruption; a
+// moving digest means something scribbled on the image (libcohtml's V8 snapshot).
 void smodule::startModuleWatch() {
   const char *want = kModCheck;
   if (!want || info.name.find(want) == base::String::npos)
@@ -573,14 +562,11 @@ bool smodule::mapImage() {
   constexpr size_t one_mb = 1024ull * 1024ull;
   constexpr size_t eight_gb = 8ull * 1024ull * one_mb;
 
-  // A fixed (non-PIC) PS4 executable (ET_SCE_EXEC) links against its absolute
-  // load addresses: its segments start at vaddr 0x400000 and it embeds absolute
-  // references the loader cannot rebase. It must be mapped *in place*, with a
-  // zero load bias so getAddress(vaddr) == vaddr. Relocatable modules
-  // (ET_SCE_DYNEXEC main module, ET_SCE_DYNAMIC PRX) are position-independent
-  // and get a sequential high reservation instead. codeSize above is already the
-  // absolute image end for ET_SCE_EXEC (base = vaddr) and the image size for the
-  // relocatable types (base = paddr, which starts near 0).
+  // A fixed (non-PIC) ET_SCE_EXEC embeds absolute references (segments at vaddr
+  // 0x400000) and must map IN PLACE with zero bias (getAddress(vaddr) == vaddr).
+  // Relocatable modules (ET_SCE_DYNEXEC / ET_SCE_DYNAMIC) get a sequential high
+  // reservation. codeSize is the absolute image end for ET_SCE_EXEC, else the
+  // image size.
   if (elf->type == ET_SCE_EXEC) {
     u64 loVaddr = UINT64_MAX;
     for (u16 i = 0; i < elf->phnum; ++i) {
@@ -616,20 +602,12 @@ bool smodule::mapImage() {
     std::memset(info.ripZone, 0xCC, info.ripZoneSize);
     utl::protectMem(info.ripZone, info.ripZoneSize, utl::pageProtection::rwx);
   } else {
-    // ASLR off: hand out fixed, sequential bases so a guest crash lands at the
-    // same address every run and is easy to reproduce while the boot is being
-    // worked on. Switch back to the nullptr (kernel-chosen) reservation below
-    // once the boot is stable.
-    // info.base = static_cast<u8 *>(utl::allocMem(
-    //     nullptr, eight_gb, utl::pageProtection::w,
-    //     utl::allocationType::reserve));
+    // ASLR off: fixed sequential bases so a guest crash reproduces at the same
+    // address while the boot is being worked on; switch to kernel-chosen later.
 #ifdef __ANDROID__
-    // Android user VA is 39-bit (~512 GiB); the x86 layout's 32 TiB base is
-    // unmappable. Pack modules with a tight slot (modules are << 2 GiB, ripZone
-    // is 5 KiB), based at 64 GiB: above the fixed PS4 guest regions the GNM
-    // driver maps (SceGnm* at ~0xfe0000000 / 63.5 GiB) and
-    // SceKernelInternalMemory at 8 GiB, and below the guest arena (lv2/sys_mem,
-    // 256 GiB) and FEX heap.
+    // Android user VA is 39-bit; the x86 layout's 32 TiB base is unmappable. Pack
+    // modules in tight 2 GiB slots from 64 GiB: above the GNM driver's fixed PS4
+    // regions (~63.5 GiB) and internal memory (8 GiB), below the guest arena/FEX heap.
     constexpr size_t moduleSlot = 2ull * 1024ull * one_mb;  // 2 GiB
     static uintptr_t s_nextBase = 0x0000'0010'0000'0000ull; // 64 GiB
 #else
@@ -644,12 +622,9 @@ bool smodule::mapImage() {
     if (!info.base)
       return false;
 
-    // The lifter emits a per-fs-access stub into the rip-zone. The linear-sweep
-    // resync lifts the whole segment (not just the prefix before the first
-    // rodata blob), so a large module can need far more than the old fixed 5
-    // KiB. Size the zone to the code (a generous bound: stubs are ~32 B, fs
-    // accesses are sparser than that), capped well under the 8 GiB module slot /
-    // rel32 reach.
+    // The lifter emits a per-fs-access stub into the rip-zone; linear-sweep lifts the
+    // whole segment, so size the zone to the code (stubs ~32 B, capped under the
+    // 8 GiB slot / rel32 reach), not the old fixed 5 KiB.
     info.ripZoneSize = std::max<size_t>(info.ripZoneSize, codeSize);
 
     // immediately take module memory + rip Zone memory
@@ -754,10 +729,8 @@ bool smodule::mapImage() {
 
 bool smodule::setupTLS() {
   auto *p = getSegment(PT_TLS);
-  // Only modules with an actual TLS template get a module index. Many modules
-  // ship an empty PT_TLS (memsz 0); handing those a slot inflates the indices
-  // so they no longer match libkernel's own (dense) TLS-module numbering, and
-  // __tls_get_addr then can't find a real module's block.
+  // Only modules with a real TLS template get an index; empty PT_TLS (memsz 0)
+  // would inflate indices away from libkernel's dense numbering.
   if (p && p->memsz) {
     info.tlsAddr = getAddress<u8>(p->vaddr);
     info.tlsalign = p->align;
@@ -770,10 +743,8 @@ bool smodule::setupTLS() {
 }
 
 static bool decodeNid(const char *name, u64 &lid, u64 &mid) {
-  // Obfuscated imports are "<11-char nid>#<libid>#<modid>" where both ids are
-  // variable-length base64: one char for 0..63, two chars once an index passes
-  // 63 (games importing from >64 libraries hit the long form, which shifts the
-  // second '#'. The ids can't be read at fixed offsets.
+  // Obfuscated imports: "<11-char nid>#<libid>#<modid>", ids variable-length
+  // base64 (two chars past 63), so the ids can't be read at fixed offsets.
   const char *h1 = std::strchr(name, '#');
   if (!h1)
     return false;
@@ -790,33 +761,19 @@ static bool decodeNid(const char *name, u64 &lid, u64 &mid) {
 }
 
 bool smodule::resolveObfSymbol(const char *name, uintptr_t &ptrOut) {
-  // PS5: the symbol's #lib#mod ids use different import metadata than PS4
-  // (impLibs/impModules aren't populated), so resolve by the global NID - a
-  // unique hash - across all loaded modules. LLE only: PS4 HLE stubs must not
-  // hijack a Prospero import.
+  // PS5: impLibs/impModules aren't populated, so resolve by global NID across all
+  // loaded modules. LLE only: PS4 HLE stubs must not hijack a Prospero import.
   if (ps5Layout) {
     u64 hid = 0;
     if (!runtime::decode_nid(name, 11, hid))
       return false;
-    // A few system libraries must run HLE on PS5 because their LLE backend
-    // needs a service daemon we don't host:
-    //   - libSceVideoOut: its .bss port table never registers, so the real
-    //     sceVideoOutOpen returns 0x802900ff and the renderer bails before
-    //     creating its command buffers (null AGC DrawCommandBuffer crash).
-    //   - libSceUserService: the real sceUserServiceInitialize spins allocating
-    //     buffers forever waiting on the SceUserService IPMI daemon, stalling
-    //     the engine's RenderInit before it ever submits GPU work.
-    //   - libScePad: the real one reads controller state the pad daemon writes
-    //     into its shared block, so the title only ever sees a disconnected
-    //     pad. The HLE feeds it SDL keyboard/gamepad instead.
-    //   - libSceSaveData: sceSaveDataInitialize3 opens an IPMI session to the
-    //     save-data daemon; without it every call returns an error and a title
-    //     that retries (Skyrim's boot state machine) spins at 100% CPU forever.
-    //   - libSceIme / libSceSystemService: one export each; the real ones abort
-    //     or fail in a way titles treat as fatal.
-    // NIDs are globally unique, so probing each forced-HLE table by name is safe
-    // (a userService NID only ever matches the userService table). Everything
-    // else (incl. libSceGnmDriver/AGC, which run LLE fine) stays LLE.
+    // System libraries forced to HLE on PS5 because their LLE backend needs a daemon
+    // we don't host: libSceVideoOut (port table never registers; real Open returns
+    // 0x802900ff, null DCB crash), libSceUserService (spins on the IPMI daemon),
+    // libScePad (reads pad-daemon state; HLE feeds SDL), libSceSaveData (IPMI
+    // session; Skyrim's boot state machine spins at 100% CPU), libSceIme/
+    // libSceSystemService (abort or fail fatally). NIDs are globally unique, so
+    // probing by name is safe; everything else (incl. GnmDriver/AGC) stays LLE.
     static const char *const kPs5ForcedHle[] = {
         "libSceVideoOut", "libSceUserService",   "libScePad",
         "libSceSaveData", "libSceSystemService", "libSceIme",
@@ -832,12 +789,10 @@ bool smodule::resolveObfSymbol(const char *name, uintptr_t &ptrOut) {
         return true;
       }
     }
-    // Bind to the module the import actually names. A title that ships SDK
-    // modules in /app0/sce_module (libc.prx) gets the same NIDs from its own
-    // copy and from the firmware's libSceLibcInternal, but only the named one
-    // has the title's SceLibcMallocReplace installed in its dispatch table –
-    // resolving by load order alone sends Skyrim's malloc/memalign into
-    // libSceLibcInternal's 16 MiB internal arena instead of the game's manager.
+    // Bind to the module the import names: a title shipping SDK modules gets the
+    // same NIDs from its own libc.prx and the firmware's libSceLibcInternal, but
+    // only the named one has SceLibcMallocReplace installed (else Skyrim's malloc
+    // lands in the firmware's 16 MiB arena instead of the game's manager).
     u64 libid = 0, modid = 0;
     if (decodeNid(name, libid, modid)) {
       for (auto &m : impModules) {
@@ -857,12 +812,9 @@ bool smodule::resolveObfSymbol(const char *name, uintptr_t &ptrOut) {
         return true;
       }
 
-    // Shims for exports a given firmware doesn't have: newer-SDK titles import
-    // them and would otherwise land on the badcall stub (vprx/ps5/*_ps5.cpp says
-    // what each works around). Consulted only once no loaded module exports the
-    // NID, so the real function wins where it exists. All seven AGC shims are
-    // real exports from firmware 13.60 on, and forcing them there would report
-    // "unsupported" over a working implementation.
+    // Shims for exports a given firmware lacks (see vprx/ps5/*_ps5.cpp); consulted
+    // only when no loaded module exports the NID. The seven AGC shims are real
+    // exports from firmware 13.60 on; forcing them there would shadow working code.
     static const char *const kPs5MissingExportShims[] = {
         "libkernel", "libSceAgcDriver", "libSceAgc", "libSceNgs2",
         "libSceFiber"};
@@ -895,10 +847,8 @@ bool smodule::resolveObfSymbol(const char *name, uintptr_t &ptrOut) {
   if (!libname)
     return false;
 
-  // HLE override: if a vprx module is registered for this library, it wins over
-  // the loaded LLE module (e.g. libSceVideoOut, whose real .bss device table is
-  // never populated in our env). The 11-char NID prefix decodes to the same hid
-  // the HLE table is keyed on.
+  // HLE override: a registered vprx module wins over the loaded LLE module (e.g.
+  // libSceVideoOut's .bss device table is never populated here).
   {
     u64 hid = 0;
     if (runtime::decode_nid(name, 11, hid)) {
@@ -932,10 +882,8 @@ bool smodule::resolveObfSymbol(const char *name, uintptr_t &ptrOut) {
       longName += mod.name;
       ptrOut = xmod->getSymbolFullName(longName.c_str());
 
-      // libkernel forwards a set of its exports to libkernel_sys; the import
-      // still names "libkernel", so a miss there means we search the rest of
-      // the loaded modules for the bare NID before falling back to the badcall
-      // stub. (Fixes libSceSaveData's libkernel_sys memory-pool imports.)
+      // libkernel forwards some exports to libkernel_sys under the name "libkernel";
+      // on a miss, search the other loaded modules for the bare NID before badcall.
       if (!ptrOut) {
         for (auto &other : process->getModuleList()) {
           if (other.get() == xmod || other.get() == this)
@@ -1265,10 +1213,9 @@ void smodule::installEHFrame() {
   } else if (exinfo->encoding == 0x1B) // pc-relative
   {
     auto offset = *reinterpret_cast<i32 *>(current);
-    // pc-relative means relative to where this field is in the MAPPED image.
-    // exinfo points into the on-disk file buffer, so using it as the pc gave a
-    // host heap address and every module failed the in-image check below –
-    // which is why no module ever got an .eh_frame.
+    // pc-relative means relative to the field's position in the MAPPED image;
+    // exinfo points into the on-disk buffer, so using it as the pc failed the
+    // in-image check (why no module ever got an .eh_frame).
     const size_t field_off = static_cast<size_t>(
         current - reinterpret_cast<u8 *>(exinfo));
     current += 4;
@@ -1314,14 +1261,11 @@ void smodule::installEHFrame() {
       break;
     data_buffer_end += advance;
   }
-  // A terminating zero-length CFI is optional (most toolchains just end the
-  // section), and the trailing encodings vary. None of that changes where
-  // .eh_frame starts, which is all the guest unwinder needs from us (it finds
-  // an FDE through the header's binary-search table, not by walking). Requiring
-  // a terminator left eh_frame_addr at 0 for EVERY module, so a C++ throw in a
-  // guest module found no unwind info and went straight to std::terminate –
-  // Minecraft's world creation aborts inside libcohtml that way. Fall back to
-  // the rest of the image when the walk doesn't terminate cleanly.
+  // A terminating zero-length CFI is optional and trailing encodings vary; none of
+  // it changes where .eh_frame starts (the guest unwinder finds FDEs through the
+  // header's table, not by walking). Requiring a terminator left eh_frame_addr 0
+  // for EVERY module, so a guest C++ throw hit std::terminate (Minecraft world
+  // creation, inside libcohtml). Fall back to the rest of the image.
   info.ehFrameheaderAddr = data_buffer;
   info.ehFrameheaderSize = static_cast<u32>(
       (terminated ? data_buffer_end : image_end) - data_buffer);

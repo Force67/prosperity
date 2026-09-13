@@ -39,13 +39,11 @@ extern "C" void prosperity_gpu_note_aperture(u64 base, u64 size);
 namespace krnl {
 
 namespace {
-// What each VA currently maps, so a map that lands on direct memory the guest
-// already has can be told apart from a fresh one. Real direct memory is
-// recycled physical RAM: a title that maps a new block where an old one was
-// gets whatever was in those pages, NOT zeroes. Our backing store is a memfd,
-// so a fresh offset reads zero and every such remap silently wipes what was
-// there, which is how V8 lost the read-only heap it had just deserialized
-// when it shrank the page holding it.
+// What each VA currently maps, so a re-map of direct memory the guest already has is
+// distinguishable from a fresh one. Real dmem is recycled RAM: a remap gets whatever
+// was in those pages, NOT zeroes. Our memfd backing reads zero at a fresh offset,
+// so every such remap silently wiped what was there (V8 lost a just-deserialized
+// read-only heap when it shrank the page holding it).
 std::mutex g_dmemVaLock;
 std::unordered_map<u64, size_t> g_dmemVaLen;
 }  // namespace
@@ -71,11 +69,9 @@ u8 *dmaDevicePs5::map(void *addr, size_t len, u32 /*prot*/, u32 flags,
     return reinterpret_cast<u8 *>(-1);
   u8 *va = static_cast<u8 *>(addr);
   const bool fixed = (flags & mFlags::fixed) != 0;
-  // A fixed map onto the exact base of one the guest already has is it
-  // re-pointing its own region, not asking for fresh memory: carry the contents
-  // over so the remap behaves like reusing the same physical pages. A map at a
-  // DIFFERENT base is a genuine new allocation (a piece committed inside a pool,
-  // say) and must still read as fresh memory.
+  // A fixed map onto the exact base of an existing region is the guest re-pointing its
+  // own region: carry the contents over, like reusing the same physical pages. A map
+  // at a DIFFERENT base is a genuine new allocation and must read fresh.
   std::vector<u8> carry;
   const bool systemBase =
       !fixed && reinterpret_cast<uintptr_t>(va) == 0xfe0000000ull;
@@ -90,31 +86,21 @@ u8 *dmaDevicePs5::map(void *addr, size_t len, u32 /*prot*/, u32 flags,
       carry.assign(va, va + std::min<size_t>(len, it->second));
   }
   void *p = MAP_FAILED;
-  // libSceAgcDriver's init maps a 2 MiB system block with a plain hint at
-  // 0xfe0000000, and libSceAgc treats the placement as ABI: it reads its fetch
-  // shader table at base+0x40000 and compares that against a hardcoded
-  // 0xfe0040000, printing "[Agc] FS Table offset has shifted" and failing
-  // sce::Agc::init with 0x8a6c002f when the block moved. The band is guest-owned
-  // address space that only our own PROT_NONE placeholder (guest_vaspace)
-  // occupies, and the NOREPLACE probe below reads that as taken; commit the
-  // block over the placeholder.
-  // libSceGnmDriver wants the SAME base: its own .data starts at 0xfe0000000
-  // and it maps a 64 KiB "SceGnmDriver" block there (an OUT-pointer map, so the
-  // hint is the pre-set value), then checks that its region 5, base+0xf000,
-  // covers 0xfe000f000..0xfe000f300, which only holds at that base. On hardware
-  // both drivers name one system area; refusing the second hint failed embedded
-  // shader init for a title that keeps a Gnm path alongside AGC. Only the exact
-  // base is granted; a hint that merely OVERLAPS the block is still refused,
-  // because that is a title's own allocation landing on it by accident.
+  // libSceAgcDriver maps a 2 MiB system block with a hint at 0xfe0000000 and treats
+  // the placement as ABI (fetch shader table at base+0x40000 compared against
+  // 0xfe0040000; a moved block fails sce::Agc::init with 0x8a6c002f). The band is
+  // guest-owned space only our PROT_NONE placeholder occupies; commit over it.
+  // libSceGnmDriver wants the SAME base (its .data starts there; region 5 must cover
+  // 0xfe000f000..0xfe000f300). On hardware both drivers share one system area, so
+  // grant the exact base to both; a hint that merely OVERLAPS is still refused
+  // (a title's own allocation landing on it by accident).
   constexpr uintptr_t kAgcSystemBase = 0xfe0000000ull;
   constexpr size_t kAgcSystemSize = 0x200000;
   const uintptr_t hint = reinterpret_cast<uintptr_t>(va);
-  // ...and once libSceGnmDriver has taken the base, libSceAgcDriver stops
-  // hinting it and asks for its 2 MiB with no address at all. On a console
-  // the kernel puts the system block at the one place it lives whatever the
-  // caller asks for. Recognise that follow-up map and pin it too, or libSceAgc
-  // finds its fetch-shader table away from the 0xfe0040000 it has compiled in
-  // and calls it "not survivable".
+  // Once libSceGnmDriver has taken the base, libSceAgcDriver stops hinting and asks
+  // with no address at all (the kernel pins the system block wherever it lives).
+  // Recognise that follow-up map and pin it too, or libSceAgc finds its fetch-shader
+  // table away from the compiled-in 0xfe0040000.
   static bool s_gnmTookBase = false, s_agcTookBase = false;
   const bool agcSystemBlock =
       !fixed && hint == kAgcSystemBase && len <= kAgcSystemSize;

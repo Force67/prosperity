@@ -70,16 +70,12 @@ namespace krnl::probe {
 
 static void probeFiosPaths();
 
-// DELTA_PS5_DCBWATCH: diagnose the null frame-0 DrawCommandBuffer gate.
-// (1) poll the DCB pointer slot manager[0] @ eboot+0x985a00 (renderer eboot+
-//     0x985508 + idx0*0x600 + 0x138 + 0x3c0) + adjacent manager fields, logging
-//     every change -> answers "is the DCB ever created before the render uses it?"
-// (2) int3 call-order trace over the renderer/DCB-creation entry points so the
-//     actual execution order (and which are reached) is visible before the crash.
-// DELTA_FNWATCH="hexoff:label,hexoff:label,...": arm an int3 hit-counter at each
-// guest function entry (first byte must be push rbp). Offsets are relative to the
-// eboot base. The crash-handler counts hits and a printer thread logs totals every
-// 2s (see crash.h). Generic; used to probe which functions in a stuck pipeline run.
+// DELTA_PS5_DCBWATCH: diagnose the null frame-0 DrawCommandBuffer gate: poll the DCB
+// pointer slot (manager[0] @ eboot+0x985a00) + adjacent fields, logging every change
+// (is the DCB ever created before the render uses it?), plus an int3 call-order trace
+// over the renderer/DCB-creation entry points. DELTA_FNWATCH="hexoff:label,...":
+// int3 hit-counters at guest function entries (first byte push rbp), eboot-relative;
+// the handler counts and a thread prints totals every 2s (see crash.h).
 static void investigatePopcnt();
 static void investigateSumWatch();
 static void investigateWriteWatch();
@@ -88,10 +84,9 @@ static void investigatePoolMap();
 static void investigateMemDump();
 static void investigateRetTrace(proc &);
 
-// DELTA_RETTRACE="[module+]hexoff:label,...": arm a return-value trace at each
-// `mov ebx,eax` / `test eax,eax` right after a call. Offsets are relative to the
-// eboot unless a module name is given, which is what lets a failure be followed
-// out of the title and into the system module that actually reports it.
+// DELTA_RETTRACE="[module+]hexoff:label,...": return-value trace at each
+// `mov ebx,eax` / `test eax,eax` after a call, eboot-relative unless a module is
+// named, so a failure can be followed into the system module reporting it.
 static void investigateRetTrace(proc &pr) {
   const char *e = kRetTrace;
   if (!e)
@@ -382,16 +377,13 @@ static void investigateFnArgs(smodule &m) {
   }
 }
 
-// DELTA_SOTC_FORCE_PAYLOAD: experiment to get past LoadInitialWorld. The SotC
-// world-container's whole-file libSceFios2 read returns actualCount 0 (root cause
-// still open), so the loader's payload accessor at eboot+0x14c000
-//   xor eax,eax; cmp [rdi+0x80],0; je +0x9 (return null); mov rax,[rdi+0x90]; ret
-// returns NULL, FinalizeResource commits result=0, CommitResult re-enqueues
-// forever and the game-logic thread wedges polling [op+0x98]==0xb. The buffer at
-// [ldr+0x90] IS allocated (before the read), so NOP the `je 74 07` -> `90 90` and
-// the accessor always returns that buffer; an empty precache container should
-// parse as 0 entries and let boot proceed to the title/main menu. This is a
-// runtime patching EXPERIMENT (env-gated, off by default; not a shipped fix).
+// DELTA_SOTC_FORCE_PAYLOAD: experiment past LoadInitialWorld. The world-container's
+// whole-file FIOS2 read returns actualCount 0 (root cause open), so the payload
+// accessor at eboot+0x14c000 (cmp [rdi+0x80],0; je -> null) returns NULL and
+// CommitResult re-enqueues forever, wedging the game thread on [op+0x98]==0xb.
+// [ldr+0x90] IS allocated pre-read, so NOP the `je 74 07` -> `90 90`: the accessor
+// always returns that buffer; an empty container should parse as 0 entries. Env-
+// gated EXPERIMENT, not a shipped fix.
 static void forceSotcPayload(smodule &m) {
   u8 *base = m.getInfo().base;
   auto rwx = [](u8 *p) {
@@ -408,15 +400,10 @@ static void forceSotcPayload(smodule &m) {
       LOG_WARNING("sotc force-payload: unexpected bytes {:#x} {:#x}", je[0], je[1]);
     }
   }
-  // DELTA_SOTC_SKIP_WORLDWAIT: force CGame::LoadInitialWorld's busy-poll loop
-  // (0x3c54e0..0x3c55fd) to EXIT immediately instead of spinning until the world-
-  // container op reaches state 0xb (which never happens: FHGetSize=0 on the
-  // container, infinite retry). The loop tail `0f84 ddfeffff` (je 0x3c54e0 = "not
-  // done -> loop") is NOPed (6x 0x90) so it falls through to the epilogue 0x3c5603
-  // and returns to the boot driver at 0x25c1ff, which already tolerates a NULL
-  // result (`test rbx,rbx; je 0x25c253` skips world-registration). Lets boot
-  // proceed past the wedge to the title/menu, skipping the (broken) precache.
-  // Runtime patching EXPERIMENT (env-gated, off by default).
+  // DELTA_SOTC_SKIP_WORLDWAIT: make CGame::LoadInitialWorld's busy-poll (0x3c54e0..)
+  // exit at once instead of spinning on a world-op that never reaches 0xb (FHGetSize=0).
+  // NOP the loop-tail `je 0x3c54e0` (6x 0x90) so it falls into the epilogue and returns
+  // to 0x25c1ff, which tolerates a NULL result. Env-gated EXPERIMENT.
   if (kSotcSkipWorldwait) {
     u8 *je = base + 0x3c55fd;
     rwx(je);
@@ -427,30 +414,18 @@ static void forceSotcPayload(smodule &m) {
       LOG_WARNING("sotc skip-worldwait: unexpected bytes {:#x} {:#x}", je[0], je[1]);
     }
   }
-  // DELTA_SOTC_FORCE_WORLDDONE: force the world-container async op to read as
-  // COMPLETE so the main-loop gate passes and boot proceeds to the title/menu,
-  // skipping the (broken, FHGetSize=0) precache. Two byte-patches:
-  //  (1) CommitResult 0x14d768 `je 0x14d777` (result==0 -> retry) NOPed so a
-  //      null-payload commit always writes op-state 0xb (0x14d76a) instead of
-  //      re-enqueuing forever;
-  //  (2) IsDone 0x14cf0e `setne al` -> `mov al,1`, so IsDone returns done on
-  //      state==0xb alone (the op has no result object).
-  // The boot continuation at 0x25c1ff already tolerates a NULL result
-  // (`test rbx,rbx; je 0x25c253`). Runtime patch EXPERIMENT, env-gated.
-  // DELTA_SOTC_JOBFIX: the world-load hang is a BPE-JobSystem livelock. The
-  // world-op finalize job is DIRECT-ASSIGNED to worker ordinal 6 (the
-  // "Resource Loading" coordinator, hardcoded-pinned to core 6, mask 0x40,
-  // outside our 6-core cpuset), but SotC spawns only 4 job-claim workers with
-  // ordinals 0..3; none services direct-assign slot 6, the coordinator parks on
-  // its evf "job done" flag, and the main loop spins the loading screen forever
-  // (proven live: directAssign[6]=0x1, workers ordinal 0..3, ~99.4% claim
-  // failures). The ordinal comes from fn 0x33350 (reads [tcb-0x10]=0x8000|core,
-  // returns core or -1). Clamp its result into the worker range [0,3]: the
-  // coordinator (ord 6 -> 6&3=2) then direct-assigns to a serviced slot, worker
-  // 2 claims and runs the finalize, and the op reaches state 0xb. Workers (0..3)
-  // and unbound threads (-1) are unchanged. Patch the fn tail 0x3337f
-  // (`pop rbp; ret` + pad) in place:
-  //   test eax,eax; js .r; cmp eax,4; jb .r; and eax,3; .r: pop rbp; ret
+  // DELTA_SOTC_FORCE_WORLDDONE: force the world-container async op COMPLETE so boot
+  // reaches the title, skipping the broken precache. (1) CommitResult 0x14d768
+  // `je 0x14d777` NOPed so a null-payload commit writes op-state 0xb instead of
+  // re-enqueuing; (2) IsDone 0x14cf0e `setne al` -> `mov al,1` (done on 0xb alone).
+  // The continuation at 0x25c1ff tolerates NULL. Env-gated EXPERIMENT.
+  // DELTA_SOTC_JOBFIX: the hang is a BPE-JobSystem livelock; the world-op finalize
+  // job is DIRECT-ASSIGNED to ordinal 6 (the coordinator, pinned to core 6, mask 0x40,
+  // outside our 6-core cpuset) while only workers 0..3 exist, so slot 6 is never
+  // serviced and the coordinator parks forever (proven live: directAssign[6]=1,
+  // ~99.4% claim failures). Ordinal from fn 0x33350 ([tcb-0x10]=0x8000|core). Clamp
+  // its result to [0,3] (patch tail 0x3337f: test/js/cmp 4/jb/and 3/ret) so the
+  // coordinator assigns to a serviced slot; workers and unbound (-1) unchanged.
   if (kSotcJobfix) {
     u8 *t = base + 0x3337f;
     rwx(t);
@@ -484,19 +459,13 @@ static void forceSotcPayload(smodule &m) {
 }
 
 // ===========================================================================
-// DELTA_FIOS_TRACE: ARM-compatible guest-function trace of libSceFios2's
+// DELTA_FIOS_TRACE: ARM-compatible guest trace of libSceFios2's
 // FHOpen/FHGetSize/FHRead/FHPread (the whole-file API the SotC world-container
-// loads through). int3 hooks are x86-host-only and inert under FEX on aarch64;
-// this uses cpu::makeGuestReturnHook to WRAP each import via a guest x86
-// trampoline that runs the real PRX export and reports its args AND return.
-//
-// Wrapping happens at IMPORT-RESOLUTION time (maybeWrapFiosImport, called from
-// smodule::resolveImports): the eboot's PLT jump-slots are lazy and unresolved
-// until the guest runs sys_dynlib_process_needed_and_relocate, so a GOT patch at
-// proc::create is too early (the slot still holds the PLT stub). At
-// resolveImports the real export address is in hand; substituting the wrapper
-// before it is written to the GOT installs the hook exactly when the slot is
-// bound, for the whole run.
+// loads through); int3 hooks are inert under FEX, so each import is WRAPPED via
+// cpu::makeGuestReturnHook. Wrapping happens at IMPORT-RESOLUTION time
+// (maybeWrapFiosImport from resolveImports): the PLT slots are lazy, so a GOT
+// patch at proc::create is too early; at resolveImports the real export address is
+// in hand and substituting the wrapper installs the hook exactly when bound.
 // ===========================================================================
 namespace {
 struct FiosOpen {          // one FHOpen (all opens tracked so any fh maps to a path)
@@ -532,15 +501,12 @@ std::string pathForFh(u64 fh) {
   return "<unknown-fh>";
 }
 
-// The native logger the guest wrapper calls AFTER the real FIOS2 fn returns.
-// hookId: 1=FHOpen 2=FHGetSize 3=FHRead 4=FHPread 5=OpGetActualCount.
-//  FHOpen           : a1=pOutFH  a2=path   ret=op
-//  FHGetSize        : a0=fh                ret=size          <-- smoking gun
-//  FHRead/FHPread   : a1=fh a2=buf a3=len  ret=op
-//  OpGetActualCount : a0=op                ret=actualCount   <-- smoking gun
-// Detection is path-agnostic: a size or count of 0 is the anomaly; we then map
-// the fh back to the file that opened it. Zero events are deduped per-fh/op so
-// the post-drain retry churn (millions of calls) can't flood the log.
+// Native logger called after the real FIOS2 fn returns. hookId: 1=FHOpen 2=FHGetSize
+// 3=FHRead 4=FHPread 5=OpGetActualCount; FHGetSize ret = size, OpGetActualCount
+// ret = actualCount (the smoking guns); FHOpen a1=pOutFH a2=path ret=op;
+// FHRead/Pread a1=fh a2=buf a3=len ret=op. Path-agnostic detection: a 0 size/count
+// is the anomaly, mapped back to the opener. Zero events deduped per fh/op so the
+// post-drain retry churn can't flood the log.
 void PS4ABI fiosTraceLogger(u64 hookId, u64 a0, u64 a1,
                             u64 a2, u64 a3, u64 ret) {
   char pb[512];
@@ -621,11 +587,9 @@ void PS4ABI fiosTraceLogger(u64 hookId, u64 a0, u64 a1,
 }
 } // namespace
 
-// Called from smodule::resolveImports for every PLT import. If DELTA_FIOS_TRACE
-// is set and `nidName` (an encoded "NID#lib#mod") is one of the libSceFios2
-// whole-file APIs, return a guest wrapper around the resolved `realAddr` that
-// logs args+return; otherwise return realAddr unchanged. NID prefixes from the
-// SCE dynamic tables (report §10.2), cryptographically verified there.
+// Called from resolveImports per PLT import: if DELTA_FIOS_TRACE is set and nidName
+// ("NID#lib#mod") is one of the libSceFios2 whole-file APIs, return a logging
+// wrapper around realAddr, else unchanged.
 uintptr_t maybeWrapFiosImport(const char *nidName, uintptr_t realAddr) {
   if (!kFiosTrace || !nidName || !realAddr)
     return realAddr;
@@ -654,11 +618,9 @@ uintptr_t maybeWrapFiosImport(const char *nidName, uintptr_t realAddr) {
   return realAddr;
 }
 
-// DELTA_FIOS_PROBE=path1,path2,...  Boot-time probe: resolve each guest path
-// through the VFS exactly as the guest would and log Exists/size. Lets us read
-// the world-op container's backing WITHOUT waiting ~50min for the JobSystem to
-// schedule its (low-priority, retry-churning) load job. Paths are guest paths
-// like "/app0/misc/_cmn/mainmenuprecachelist.calt" (FIOS2 lowercases; $ -> /app0).
+// DELTA_FIOS_PROBE=path1,...: resolve each guest path through the VFS as the guest
+// would and log Exists/size, reading the world-op container's backing without
+// waiting ~50min for the retry-churning load job (FIOS2 lowercases; $ -> /app0).
 static void probeFiosPaths() {
   const char *e = kFiosProbe;
   if (!e)
@@ -685,14 +647,12 @@ static void probeFiosPaths() {
 }
 
 // ===========================================================================
-// DELTA_JOB_TRACE: instrument SotC's BPE JobSystem to find why the 4 workers
-// livelock post-drain, unable to claim the final world-op finalize job. Uses an
-// INTERNAL-function entry detour (not GOT-based, since these are eboot-internal
-// calls): overwrite the target's prologue with an abs jmp to a return-capturing
-// wrapper whose realTarget is a trampoline (relocated prologue + jmp back). The
-// wrapper reports args+return via the magic-syscall to jobTraceLogger.
-//   claim 0x38d40: worker ordinal = fs:[-8]; ret = claimed job (0 = fail)
-//   kick  0x35480: job affinity/prio submitted
+// DELTA_JOB_TRACE: instrument SotC's BPE JobSystem (why do the 4 workers livelock
+// post-drain?). INTERNAL-function entry detours (not GOT-based): overwrite the
+// prologue with an abs jmp to a return-capturing wrapper whose realTarget is a
+// trampoline (relocated prologue + jmp back); args+return go to jobTraceLogger
+// via the magic syscall. claim 0x38d40: ordinal = fs:[-8], ret = claimed job;
+// kick 0x35480: affinity/prio submitted.
 // ===========================================================================
 
 // ---- the interface kern calls ---------------------------------------------
@@ -702,11 +662,10 @@ void onProcessCreated(proc &p, smodule &mainModule, bool ps5) {
   smodule *first = &mainModule;
   // Engine bring-up: give Isaac's surface-name registry valid empty storage so
   // main-init doesn't deref a null bucket array (self-gated by ctor signature).
-    // DELTA_GUEST_NULLGUARD="<hexoff>:<rax|rsi>:<len>[,...]": recover a guest
-  // deref of a bad pointer by zeroing the destination register and stepping
-  // over the instruction. For an allocator that faults instead of reporting
-  // "no space", this is how you find out whether the engine has an
-  // out-of-memory path at all.
+  // DELTA_GUEST_NULLGUARD="<hexoff>:<rax|rsi>:<len>[,...]": recover a guest deref of
+  // a bad pointer by zeroing the destination register and stepping over the
+  // instruction; for an allocator that faults instead of reporting "no space", this
+  // finds whether an out-of-memory path exists at all.
   if (const char *ng = kNullGuard) {
     for (const char *p = ng; *p;) {
       char *endp = nullptr;
@@ -739,17 +698,12 @@ void onProcessCreated(proc &p, smodule &mainModule, bool ps5) {
       krnl::setNullGuard(eb + 0x5cab56, krnl::GuardReg::rsi, 5);
       // mov rax,[rax+0x28]; mov rax,[rax+0x18] (chained font-object load), rax==0
       krnl::setNullGuard(eb + 0x5c7c53, krnl::GuardReg::rax, 8);
-      // ROOT FIX: the renderer-init chain 0x5535d0 bails at its gate checks
-      // (`test al,al; je 0x55365d`) when VOInit (gate C, 0x58fb10) returns false
-      // (a GPU render-context vtable step that fails in our env), SKIPPING the
-      // Shape-Renderer install at 0x55361b (0x58ec90). That leaves the global
-      // active renderer *(0x9854f0) null, which is the source of the whole
-      // first-frame null-object cascade. Force the chain past its three bail
-      // branches so the game installs the renderer + builds its RTs/fonts itself.
-      // DELTA_PS5_NOFORCE: skip the RenderInit gate force-through. Now that the PS5
-      // videoout NIDs are HLE'd (RegisterBuffers returns 0), VOInit (gate C) should
-      // return TRUE on its own; forcing past it leaves an INVALID render context
-      // (null pipelines / zero shader PGM). Test whether it succeeds naturally.
+      // ROOT FIX: the renderer-init chain 0x5535d0 bails at its gates when VOInit
+      // (gate C, 0x58fb10) returns false in our env, skipping the Shape-Renderer install
+      // at 0x55361b and leaving *(0x9854f0) null, the source of the first-frame null-
+      // object cascade. Force the chain past its three bail branches. DELTA_PS5_NOFORCE:
+      // skip the force now that videoout NIDs are HLE'd (VOInit should return TRUE on
+      // its own; forcing leaves an INVALID context with null pipelines).
       struct { u32 off; u8 b1; } gates[] = {
           {0x553602, 0x59}, {0x553612, 0x49}, {0x553622, 0x39}};
       bool noForce = kPs5Noforce;

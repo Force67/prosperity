@@ -89,12 +89,10 @@ int PS4ABI sys_socketex(const char* name, i32 domain, i32 type,
   return sys_socket(domain, type, protocol);
 }
 
-// Datagram sockets get a real host socket: a title that uses one for LAN
-// discovery also polls it for readability, and a stub fd it can never read from
-// wedges whatever waits on that poll. Everything else (the AF_UNIX sockets the
-// guest uses to reach NP/ShellCore, and TCP) is still refused up front, so those
-// callers keep falling back to their offline path instead of blocking on a
-// service process we do not host.
+// Datagram sockets get a real host socket: a title using one for LAN discovery also
+// polls readability, and a stub fd wedges that poll. Everything else (the AF_UNIX
+// sockets to NP/ShellCore, and TCP) stays refused so callers keep their offline
+// fallback instead of blocking on a service process we don't host.
 int PS4ABI sys_socket(i32 domain, i32 type, i32 protocol) {
   const int hostDomain = domain == kBsdAfInet    ? AF_INET
                          : domain == kBsdAfInet6 ? AF_INET6
@@ -117,12 +115,10 @@ int PS4ABI sys_socket(i32 domain, i32 type, i32 protocol) {
   return -SysError::eAFNOSUPPORT;
 }
 
-// sceNetGetSockInfo(s, info, n, flags): report the kernel's view of a socket.
-// The reply is a count of filled entries, so zero entries is a legitimate
-// answer; what is not legitimate is the old stub, which returned "0 entries"
-// without touching the buffer. libSceNet reads the first entry regardless of
-// the count and calls through a pointer it finds there, so GTA:SA's net thread
-// jumped into stack garbage the moment it asked.
+// sceNetGetSockInfo(s, info, n, flags): reply = count of filled entries, so zero is
+// legitimate; what is not is the old stub returning 0 without touching the buffer.
+// libSceNet reads the first entry regardless and calls through a pointer it finds
+// there (GTA:SA's net thread jumped into stack garbage).
 int PS4ABI sys_netgetsockinfo(i32 fd, void *info, i32 n, i32 flags) {
   if (kNetTrace)
     BASE_LOGI("net", "getsockinfo fd={} info={:p} n={} flags={:#x}", fd, info, n,

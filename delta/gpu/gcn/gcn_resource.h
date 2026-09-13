@@ -85,12 +85,10 @@ VBuffer DecodeVBuffer(const u32* dwords);
 // Decode a T# from 8 consecutive dwords.
 TImage DecodeTImage(const u32* dwords);
 
-// Sampler-binding plan for a pixel shader: MIMG instructions that reference
-// the same descriptor (same T#/S# SGPRs, written by the same s_load or
-// inline user data, and used with the same access type) share one binding.
-// Bindings are numbered in first-appearance order. This is the contract
-// between the recompiler's set-0 sampler declarations and TrackTextures'
-// per-binding result: both derive from this one plan so they cannot drift.
+// Sampler-binding plan: MIMGs referencing the same descriptor (same SGPRs, same
+// producer, same access) share one binding, numbered in first-appearance order.
+// Contract between the recompiler's set-0 declarations and TrackTextures, so they
+// cannot drift.
 struct MimgBindingPlan {
   // MIMG instruction pc -> binding id.
   std::unordered_map<u32, u32> binding_by_pc;
@@ -102,51 +100,37 @@ struct MimgBindingPlan {
 MimgBindingPlan PlanMimgBindings(const Program& program,
                                  const u8* reachable = nullptr);
 
-// Recover the image(s) a pixel shader references, by tracking its
-// s_load_dwordx4/x8/x16 of descriptor tables out of the user-data SGPRs.
-// The result preserves MIMG order (it is the shader's set-0 binding order);
-// unresolved entries are returned with valid=false so later bindings are not
-// compacted. Pass a CachedProgram() of the PS code: the shared_ptr keys a
-// per-program cache of the binding plan + the scalar-relevant instruction
-// subset, so per-draw calls skip re-planning and walking the VALU bulk.
-// `code_base` is the guest address the program was decoded from; it lets the
-// scalar walk resolve s_getpc_b64, which shaders use to reach a descriptor
-// table embedded after their own code. Zero leaves the PC unknown.
+// Recover the image(s) a PS references by tracking s_load_dwordx4/x8/x16 of
+// descriptor tables out of the user-data SGPRs. Preserves MIMG order (set-0 binding
+// order); unresolved entries carry valid=false. Pass CachedProgram(): it keys a
+// per-program cache of plan + scalar-relevant subset, skipping re-planning per draw.
+// code_base resolves s_getpc_b64 against a table embedded after the code; 0 = unknown.
 std::vector<TImage> TrackTextures(
     const std::shared_ptr<const Program>& ps_program,
     const u32* ps_user_data,
     bool trace = false,
     u64 code_base = 0);
 
-// Resolve the live descriptor behind each constant buffer a graphics stage
-// reads, following the same extended-user-data / SRT pointer chains as
-// TrackTextures: the 4-dword V# of an s_buffer_load, or the 2-dword flat
-// pointer of an s_load (only .base is filled, since an s_load table carries no
-// size, so the shader's own num_dwords bounds it). Returns a map keyed by the
-// cbuffer's base SGPR, or'd with 0x100 for a pointer, since the same SGPR can
-// serve as both. FOX passes cbuffer descriptors through EUD, so reading the V#
-// straight out of user data yields base=0; this walks the chain and reads the
-// descriptor at the point of the load.
+// Resolve the live descriptor behind each cbuffer, following the same extended-
+// user-data / SRT chains as TrackTextures: a 4-dword V# (s_buffer_load) or a
+// 2-dword flat pointer (s_load, .base only, no size field). Keyed by base SGPR
+// OR'd 0x100 for a pointer (one SGPR can serve both). FOX passes cbuffer
+// descriptors through EUD, so the chain is walked and read at the point of load.
 std::unordered_map<u32, VBuffer> ResolveCbuffers(
     const std::shared_ptr<const Program>& program,
     const u32* user_data);
 
-// Resolve attributes fetched directly by MUBUF instructions in the main VS.
-// The descriptor SGPRs may begin as inline user data or be overwritten by an
-// earlier SMRD load; capture each V# from the scalar state live at its MUBUF.
-// The result is index-aligned with attrs; non-direct or unresolved entries are
-// zero-initialized.
+// Resolve attributes fetched by MUBUF in the main VS: the descriptor SGPRs may start
+// as inline user data or be overwritten by an SMRD load, so capture each V# from the
+// scalar state live at its MUBUF. Index-aligned with attrs; unresolved zeroed.
 std::vector<VBuffer> ResolveDirectVertexBuffers(
     const std::shared_ptr<const Program>& program,
     const std::vector<ShaderAttr>& attrs,
     const u32* user_data);
 
-// Resolve the live V# behind each raw buffer a graphics stage loads from with
-// MUBUF (see ShaderBuffer / PlanGfxBuffers). Same replay as
-// ResolveDirectVertexBuffers: the descriptor SGPRs may start as inline user
-// data or be overwritten by an SRT s_load, so each V# is captured from the
-// scalar state live at the instruction that consumes it. The result is
-// index-aligned with `buffers`; unresolved entries are zero-initialized.
+// Resolve the live V# behind each raw MUBUF buffer (see ShaderBuffer): same replay
+// as ResolveDirectVertexBuffers, captured at the consuming instruction.
+// Index-aligned with `buffers`; unresolved zeroed.
 std::vector<VBuffer> ResolveShaderBuffers(
     const std::shared_ptr<const Program>& program,
     const std::vector<ShaderBuffer>& buffers,
@@ -163,11 +147,9 @@ std::vector<ResolvedCsResource> ResolveCsResources(const Program& program,
                                                    const RecompiledCs& plan,
                                                    const u32* user_data);
 
-// Given a decoded fetch shader and the VS user-data SGPRs (16 dwords), recover
-// the vertex-attribute buffers it fetches, in attribute order. Handles the
-// common Gnm fetch-shader pattern (s_load_dwordx4 of a V# from the
-// vertex-buffer table a user SGPR points at, then buffer_load_format per
-// attribute).
+// Given a decoded fetch shader + the 16 VS user-data SGPRs, recover the vertex-
+// attribute buffers in attribute order (the common s_load_dwordx4 from the
+// vertex-buffer table + buffer_load_format pattern).
 std::vector<VBuffer> TrackVertexBuffers(const Program& fetch_program,
                                         const u32* vs_user_data);
 

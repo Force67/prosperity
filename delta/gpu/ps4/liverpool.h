@@ -54,12 +54,9 @@ constexpr u32 mmPA_SC_WINDOW_SCISSOR_TL = 0xA081;
 constexpr u32 mmPA_SC_WINDOW_SCISSOR_BR = 0xA082;
 constexpr u32 mmPA_SC_GENERIC_SCISSOR_TL = 0xA090;
 constexpr u32 mmPA_SC_GENERIC_SCISSOR_BR = 0xA091;
-// Viewport 0 scale/offset (float).
-// DB_RENDER_CONTROL: DEPTH_CLEAR_ENABLE[0], STENCIL_CLEAR_ENABLE[1],
-// DEPTH_COPY[2], STENCIL_COPY[3], RESUMMARIZE_ENABLE[4]. A draw issued with a
-// clear bit set is not a draw: the hardware fills the depth/stencil plane with
-// DB_DEPTH_CLEAR / DB_STENCIL_CLEAR over the drawn rect and ignores the
-// shader's output.
+// Viewport 0 scale/offset (float). DB_RENDER_CONTROL clear/copy/resummarize bits: a
+// draw with a clear bit set is not a draw; the hardware fills the plane with
+// DB_DEPTH_CLEAR / DB_STENCIL_CLEAR over the rect and ignores the shader.
 constexpr u32 mmDB_RENDER_CONTROL = 0xA000;
 constexpr u32 mmPA_CL_VPORT_XSCALE = 0xA10F;
 constexpr u32 mmPA_CL_VPORT_XOFFSET = 0xA110;
@@ -70,11 +67,9 @@ constexpr u32 mmPA_CL_VPORT_ZOFFSET = 0xA114;
 // Render-target mask (which CB targets are written).
 constexpr u32 mmCB_TARGET_MASK = 0xA08E;
 constexpr u32 mmCB_SHADER_MASK = 0xA08F;
-// Per-MRT blend control. CB_BLENDn_CONTROL are 1 dword apart. Layout (GCN
-// gen2):
-//  [0:4] color_src_factor  [5:7] color_func   [8:12] color_dst_factor
-//  [16:20] alpha_src_factor [21:23] alpha_func [24:28] alpha_dst_factor
-//  [29] separate_alpha_blend  [30] enable
+// Per-MRT blend control, 1 dword apart. GCN gen2 layout: [0:4] color_src [5:7]
+// color_func [8:12] color_dst [16:20] alpha_src [21:23] alpha_func [24:28]
+// alpha_dst [29] separate_alpha [30] enable.
 constexpr u32 mmCB_BLEND0_CONTROL = 0xA1E0;
 constexpr u32 kCbBlendStride = 0x1;
 // The operand of the CONSTANT_COLOR/CONSTANT_ALPHA blend factors, one dword

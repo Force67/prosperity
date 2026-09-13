@@ -39,10 +39,9 @@ DELTA_OPTION(bool, kPadExploreCont, "DELTA_PAD_EXPLORE_CONT", false);
 DELTA_OPTION(bool, kPadTrace, "DELTA_PAD_TRACE", false);
 }  // namespace
 
-// HLE controller. We report a single connected DS4 on the open handle and feed
-// the game a neutral pad state (sticks centered, no buttons). With
-// DELTA_PAD_AUTOSKIP=1 we pulse the confirm/back/start buttons periodically so a
-// headless run can advance past the intro/title into the menu for verification.
+// HLE controller: one connected DS4, neutral state (sticks centered, no buttons).
+// DELTA_PAD_AUTOSKIP=1 pulses confirm/back/start so a headless run advances past
+// the intro/title into the menu for verification.
 namespace {
 
 // Orbis button bitmasks (ScePadButtonDataOffset).
@@ -102,12 +101,9 @@ struct PadControllerInformation {
 
 u64 g_readSeq = 0;
 
-// DELTA_MEMWATCH=addr[,addr...]: spawn a background thread that prints the qword
-// at each guest VA every ~250ms with a wall-clock delta, so the lifecycle of a
-// guest global (e.g. a lazily-constructed singleton pointer transitioning
-// null->non-null) can be correlated with boot/crash timing. Generic diagnostic;
-// guest memory is identity-mapped so a fixed VA reads as a host pointer. Started
-// once from the first pad read (guaranteed to run for any title that polls input).
+// DELTA_MEMWATCH=addr[,...]: background thread printing the qword at each guest VA
+// every ~250ms with a wall-clock delta, to correlate a global's lifecycle with
+// boot/crash timing. Started once from the first pad read (any polling title runs it).
 void startMemWatch() {
   const char *e = kMemWatch;
   if (!e) return;
@@ -144,19 +140,11 @@ void startMemWatch() {
   }).detach();
 }
 
-// DELTA_MEMPOKE=<spec>[,<spec>...]: runtime guest-memory patch experiment. Each
-// spec = addr:width:value[:delayMs], colon-separated:
-//   addr   literal hex VA (e.g. 0x201402ee2d00), OR *PTR+OFF meaning "read the
-//          u64 at PTR, add OFF"), which resolves a singleton object every apply (so a
-//          pointer that is null until constructed is followed once it is live).
-//   width  1/2/4/8 bytes.
-//   value  hex (0x..) or decimal.
-//   delayMs optional; hold neutral this long after the first pad read before the
-//          first write (default 0).
-// Writes are RE-APPLIED every 200ms so the value is HELD against the guest's own
-// updates, so an experiment can pin a guest global (e.g. force a load counter to
-// 0, or set a completion event word) to probe what a value change triggers.
-// Guest memory is identity-mapped, so a resolved VA is written as a host pointer.
+// DELTA_MEMPOKE=<spec>[,...], spec = addr:width:value[:delayMs]. addr is a literal
+// hex VA or *PTR+OFF (resolves a singleton every apply, so a not-yet-constructed
+// pointer is followed once live). Writes are RE-APPLIED every 200ms so the value
+// is HELD against the guest's own updates, pinning a guest global to probe what
+// a change triggers. Guest memory is identity-mapped.
 struct PokeSpec {
   bool indirect = false;
   u64 ptrAddr = 0;   // for indirect: address holding the object pointer
@@ -239,18 +227,12 @@ void startMemPoke() {
   }).detach();
 }
 
-// Auto-skip pulse: advance the intro/title/menus into actual gameplay for a
-// headless verification run. Gated by g_autoskip at the call site, where it
-// takes precedence over the keyboard. NEVER pulse Circle (back/cancel) together
-// with Cross (confirm): pressing both each cycle confirms then immediately
-// backs out, so menus never advance. Sequence: Options first (title "PRESS
-// OPTIONS" -> main menu), then Cross to confirm "New Run"/save-slot/
-// character-select, with the occasional Down to move the menu cursor; buttons
-// pulse with gaps so menus see clean press edges.
-// DELTA_PAD_SCRIPT="<name>:<reads>[,<name>:<reads>]...": replay one exact
-// button sequence, then hold neutral, driving an arbitrary path (title -> Play
-// -> world list -> load) the heuristic pulses cannot reach. Names are the
-// button constants below plus "none" for a gap.
+// Auto-skip pulse for headless verification runs. NEVER pulse Circle with Cross:
+// confirm then immediately backs out, so menus never advance. Sequence: Options
+// first (title -> main menu), then Cross to confirm New Run/save-slot/char-select
+// with the occasional Down; gaps between pulses give clean press edges.
+// DELTA_PAD_SCRIPT="<name>:<reads>[,...]": replay one exact button sequence
+// (names = the constants below plus "none" for a gap), then hold neutral.
 u32 scriptButtons(bool &active) {
   struct Step { u32 mask; u64 reads; };
   static const std::vector<Step> steps = [] {
@@ -309,44 +291,28 @@ u32 autoSkipButtons() {
     if (scripted)
       return m;
   }
-  // Drive intro -> title -> menu -> a started run, then STOP opening menus so we
-  // stay in gameplay (for headless verification). Options opens the menu from the
-  // "PRESS OPTIONS" title; Cross confirms New Run / save-slot / character-select
-  // (default entries pre-highlighted). Once a run is likely underway we drop
-  // Options (it would open the pause menu and Cross would navigate us back out),
-  // keeping only an occasional Cross to dismiss incidental item/pickup popups.
-  // Never Circle/Down so nothing cancels or moves off the default path. Once the
-  // GPU renderer reports sustained gameplay, hold neutral; the signal latches,
-  // so a brief pause flash won't restart the menu mashing.
+  // Drive intro -> title -> menu -> a started run, then stop opening menus so we
+  // stay in gameplay: drop Options once a run is likely underway (it would open the
+  // pause menu) and keep only an occasional Cross to dismiss popups. Never Circle/
+  // Down so nothing cancels or moves off the default path. The gameplay signal
+  // latches, so a brief pause flash won't restart the mashing.
   if (gfx::inGameplay())
     return 0;
-  // DELTA_PAD_AUTOSKIP_STOP=N: stop pulsing after N reads and hold neutral. Some
-  // titles (Doom64) need a few button presses to pass the login/title, but then an
-  // idle-triggered attract DEMO only plays if input goes quiet; continuous pulsing
-  // suppresses it. Stop after N so login passes, then the title idles into the demo.
+  // DELTA_PAD_AUTOSKIP_STOP=N: stop after N reads; an idle-triggered attract DEMO
+  // (Doom64) only plays once input goes quiet, so login passes then the title idles.
   if (kAutoskipStop && g_readSeq > kAutoskipStop)
     return 0;
-  // DELTA_PAD_AUTOSKIP_START=N: hold neutral for the first N pad reads before any
-  // pulsing. Some engines (FOX/PT) lazily construct subsystem singletons on a
-  // worker/job thread during boot; feeding a progression input (which triggers a
-  // fade/scene transition) before that construction completes dereferences a null
-  // component pointer. A warm-up delay lets init finish so the first triggered
-  // transition finds a live object. Generic; the value is title/hardware-timing
-  // dependent (PT: the renderer needs a few thousand reads to spin up).
+  // DELTA_PAD_AUTOSKIP_START=N: hold neutral for the first N reads. Some engines
+  // (FOX/PT) lazily construct subsystem singletons on worker threads; a progression
+  // input before that completes derefs a null component. Value is title-timing
+  // dependent (PT needs a few thousand reads).
   if (g_readSeq < kAutoskipStart)
     return 0;
-  // DELTA_PAD_AUTOSKIP_NOOPT: don't pulse Options, only Cross. The Options pulse is
-  // for Isaac's "PRESS OPTIONS" title; in Undertale (and other Z-to-advance titles)
-  // Options opens the config menu and derails progression, so Cross-only (= Z, the
-  // confirm/advance button) drives the intro/title/dialogue straight into the game.
-  // DELTA_PAD_AUTOSKIP_NAV: vertical menu navigation. Pulse Options (pass a title),
-  // then Down (move the cursor down a list) interleaved with Cross (confirm). Needed
-  // for titles whose default cursor is not on "New Game" (e.g. Doom64's KEX menu),
-  // where Isaac's Cross-only never reaches the start entry.
-  // DELTA_PAD_AUTOSKIP_SWEEP: cycle through every button (one at a time, ~40 reads
-  // each with gaps for clean press edges) to discover which input advances a title
-  // whose menu we cannot see. The [pad] log prints the current button so a draw-
-  // count jump (level load) can be correlated to the button that caused it.
+  // DELTA_PAD_AUTOSKIP_NOOPT: Cross only (Options derails Z-to-advance titles like
+  // Undertale; Cross = Z drives straight in). DELTA_PAD_AUTOSKIP_NAV: Options then
+  // Down+Cross (titles whose default cursor isn't "New Game", e.g. Doom64).
+  // DELTA_PAD_AUTOSKIP_SWEEP: cycle every button ~40 reads each to discover which
+  // input advances an unseen menu; the [pad] log correlates draw jumps to buttons.
   if (kPadAutoskipSweep) {
     static const u32 btns[] = {kCross, kOptions, kCircle, kTriangle, kSquare,
                                     kDown, kUp, kLeft, kRight, kL1, kR1, kTouchPad};
@@ -363,11 +329,9 @@ u32 autoSkipButtons() {
     u32 ph = g_readSeq % 60;
     return (ph < 30) ? btns[slot] : 0;  // hold ~30 reads, release ~30
   }
-  // DELTA_PAD_AUTOSKIP_DOOM: Doom64's title/menu flow. Press Options ("START")
-  // a few times to leave the title screen, then ONLY Cross (confirm) from then
-  // on. Crucially it must never re-press Options once in the menu (that backs
-  // out, looping at the title) and never Down (the cursor defaults to "New
-  // Game"). Drives title -> New Game -> skill -> level load.
+  // DELTA_PAD_AUTOSKIP_DOOM: Options a few times to leave the title, then Cross only
+  // (re-pressing Options backs out to the title; Down is safe, cursor defaults to
+  // New Game). Drives title -> New Game -> skill -> load.
   if (kPadAutoskipDoom) {
     u32 ph = g_readSeq % 30;
     if (g_readSeq < 240) return (ph < 8) ? kOptions : 0;  // leave the title
@@ -407,10 +371,9 @@ constexpr BtnName kBtnNames[] = {
     {kTouchPad, "touchpad"},
 };
 
-// Symbolic analog-stick deflections, for the same script table. A first-person
-// title cannot be driven past its first door by buttons alone, because walking is
-// the left stick, and 0/255 are the extremes of the same uint8 the read path fills
-// with 128 for neutral. `up` is 0 on the PS4's y axis (see the explore path).
+// Symbolic analog deflections for the script table: buttons alone cannot pass a
+// first-person door (walking is the left stick); 0/255 are the uint8 extremes,
+// 128 neutral, `up` = 0 on the PS4 y axis.
 struct AxisName {
   const char *name;
   int lx, ly, rx, ry;  // -1: this step leaves that axis alone
@@ -443,18 +406,11 @@ std::string buttonNames(u32 buttons) {
   return out.empty() ? "none" : out;
 }
 
-// DELTA_PAD_SCRIPT="<time>:<buttons>[:<holdMs>],..." presses buttons at scripted
-// times (seconds after the first pad read) so a headless run can be driven past
-// intros/menus into gameplay. Buttons are symbolic (see kBtnNames) and combine
-// with '+', e.g. "12:cross,15:down+cross:200". holdMs defaults to 150. The
-// scripted buttons are OR'd into whatever state the read path produced.
-//
-// Stick deflections (kAxisNames) use the same syntax and the same '+', so
-// "20:lsup:3000" walks forward for three seconds and "24:lsup+lsright:800"
-// walks diagonally. holdMs is how far you travel or turn, since the deflection
-// itself is always full. An axis a step does not name is left at whatever the
-// rest of the read path produced, so two overlapping steps can drive one stick
-// each.
+// DELTA_PAD_SCRIPT="<time>:<buttons>[:<holdMs>],...": press at scripted seconds
+// after the first read (e.g. "12:cross,15:down+cross:200", holdMs default 150),
+// OR'd into the read path's state. Stick deflections use the same syntax, so
+// "20:lsup:3000" walks forward 3s (holdMs = travel/turn, deflection is full).
+// An axis a step doesn't name keeps whatever the rest of the read path produced.
 struct ScriptStep {
   double start, end;
   u32 buttons;
@@ -464,14 +420,9 @@ struct ScriptStep {
 std::vector<ScriptStep> parseScript(const char *s) {
   std::vector<ScriptStep> steps;
   const std::string in(s);
-  // DELTA_PAD_SCRIPT drives TWO different replayers: this one is keyed on
-  // seconds ("12:cross"), scriptButtons() above is keyed on pad-read counts
-  // ("none:4500,cross:3"). Tell them apart by what precedes the first colon
-  // (a number here, a button name there) and leave the other format alone.
-  // Without this every read-count script was also fed through this parser,
-  // which turned each "none:40" into a "[padscript] unknown button '40'"
-  // complaint: harmless, since the steps it built had no buttons and were
-  // dropped, but it made every working repro run look like it had failed.
+  // Two script formats share this env: time-keyed here, read-count-keyed in
+  // scriptButtons(). Distinguish by what precedes the first colon (number vs
+  // button name); feeding a count script here spammed unknown-button complaints.
   size_t colon = in.find(':');
   if (colon == std::string::npos)
     return steps;

@@ -135,12 +135,9 @@ struct VideoPort {
   int vblankEqueue = -1;
   void *vblankUdata = nullptr;
 
-  // Flip labels handed to the title via sceVideoOutGetBufferLabelAddress.
-  // MUST live in GUEST-addressable memory, not this struct: the title embeds
-  // the address in PM4 (Gnm's prepareFlip WRITE_DATA / EOP fence) and the
-  // command processor's label range check rightly refuses to write host .bss
-  // (SotC's render fence never landed and its LoadInitialWorld job chain
-  // stalled forever on the unset label).
+  // Flip labels handed out via GetBufferLabelAddress MUST live in GUEST-addressable
+  // memory: the title embeds the address in PM4 and the command processor's label
+  // range check rightly refuses host .bss (SotC's render fence never landed).
   u64 *labels = nullptr;
 };
 
@@ -223,11 +220,9 @@ void presentScanout() {
 
 std::atomic<bool> g_flipPumpStarted{false};
 
-// The game submits flips through Gnm (a PM4 prepareFlip packet to the GPU), not
-// sceVideoOutSubmitFlip, and then blocks in kevent on the equeue it registered
-// with sceVideoOutAddFlipEvent waiting for flip completion. We don't run the GPU
-// yet, so synthesize that completion: a ~60 Hz pump that presents the current
-// scanout buffer and posts the flip event to every equeue that registered one.
+// The game flips through Gnm (a PM4 prepareFlip), then blocks in kevent on the equeue
+// from sceVideoOutAddFlipEvent. No GPU yet, so synthesize completion: a ~60 Hz pump
+// presenting the current scanout buffer and posting the flip event to registrants.
 void startFlipPump() {
   bool expected = false;
   if (!g_flipPumpStarted.compare_exchange_strong(expected, true))
@@ -236,26 +231,17 @@ void startFlipPump() {
   std::thread([] {
     for (;;) {
       std::this_thread::sleep_for(std::chrono::microseconds(16667));
-      // NB: do NOT present here. The window is driven solely by the GPU
-      // renderer (Gnm submit -> gpu::ps4::EndFrame -> gfx::present) on the submit
-      // thread. gfx has one swapchain/command buffer and is not thread-safe, so
-      // a present from this pump thread races the renderer's present and
-      // intermittently deadlocks Vulkan. This pump only synthesizes flip
-      // completion (labels + events) to unblock the game's flip wait; the guest
-      // scanout buffer it used to blit is never CPU-written by the title anyway.
+      // NB: do NOT present here. The window is driven solely by the GPU renderer on the
+      // submit thread; gfx has one swapchain/command buffer and a present from this pump
+      // thread races it, intermittently deadlocking Vulkan. This pump only synthesizes
+      // flip completion (labels + events); the scanout buffer is never CPU-written.
       u64 c = g_port.flipCount.fetch_add(1) + 1;
-      // Mark GPU/flip completion in the buffer labels. Gnm's prepareFlip packet
-      // tells the GPU to write the buffer's label (sceVideoOutGetBufferLabelAddress
-      // + bufferIndex*8) when the flip completes; the game busy-polls that label
-      // to recycle buffers. With no real GPU we write it ourselves: a monotonic
-      // value (the flip count) satisfies the ">= submitted id" poll so the game
-      // stops waiting and submits the next frame.
-      // DELTA_VO_NOSTOMP: leave the labels to the title's own GPU fence
-      // writes (Gnm prepareFlip WRITE_DATA, which the command processor now
-      // lands in this guest-visible block). The blanket stomp below satisfies
-      // ">= submitted id" polls for HLE-only titles with no real GPU fences
-      // (Isaac), but overwrites the EXACT flip-arg a real Gnm flip protocol
-      // may compare against.
+      // Mark flip completion in the buffer labels (Gnm's prepareFlip writes label
+      // = GetBufferLabelAddress + index*8; the game busy-polls to recycle buffers).
+      // With no GPU we write a monotonic flip count satisfying ">= submitted id".
+      // DELTA_VO_NOSTOMP: leave labels to the title's own GPU fence writes (the command
+      // processor lands them in this guest-visible block); the stomp overwrites the
+      // EXACT flip-arg a real Gnm flip protocol may compare against.
       if (!kVoNostomp)
         if (u64 *lb = videoLabels())
           for (int i = 0; i < 16; i++)
@@ -477,13 +463,10 @@ int PS4ABI sceVideoOutSubmitFlip(int handle, int bufferIndex, int flipMode,
 
 int PS4ABI sceVideoOutSubmitFlipEop(int handle, int bufferIndex, int flipMode,
                                     i64 flipArg, void *eopLabel) {
-  // The real libSceGnmDriver (LLE submit path) flips through this internal
-  // videoout entry instead of sceVideoOutSubmitFlip. It is the EOP-label variant:
-  // the eopLabel is the GPU completion label the flip would wait on, which we
-  // don't need since our submit/present is synchronous. The game renders through
-  // Gnm (PM4 -> the GPU command processor's Vulkan render target), so present that
-  // render target here (endFrame), not the raw guest scanout buffer (which the
-  // title never CPU-writes). Then complete the flip exactly like SubmitFlip.
+  // The real libSceGnmDriver (LLE) flips through this internal videoout entry, the
+  // EOP-label variant (eopLabel = the GPU completion label we don't need; our submit
+  // is synchronous). Present the GPU's render target here (endFrame), not the raw
+  // guest scanout buffer the title never CPU-writes; then complete like SubmitFlip.
   u64 scanout = 0;
   int eqHandle;
   void *udata;

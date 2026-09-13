@@ -81,11 +81,9 @@ private:
   struct knote {
     kevent_t ev;
     bool active = false;
-    // The end-of-pipe count this knote last accounted for. Our submits run to
-    // completion inside the submit call, so a GPU event can fire before the
-    // title has armed its wait; comparing counts turns that lost edge back
-    // into the level it really is ("the GPU has finished work since you last
-    // looked"), which is what the title is asking.
+    // EOP count this knote last accounted for: our submits finish inside the submit
+    // call, so an event can fire before the wait is armed; comparing counts turns the
+    // lost edge back into the level the title is asking about.
     u64 eop_seen = 0;
   };
   knote *find(u64 ident, i16 filter);
@@ -105,12 +103,9 @@ private:
 // this so it needn't know which equeue a flip event landed on.
 void triggerAllEqueues(i64 ident, i16 filter, i64 data);
 
-// Count one submitted flip (LLE gc submit-and-flip / HLE SubmitFlip) and post a
-// display event carrying the new flip count. The engine's render-frame pacing
-// reads the EVFILT_DISPLAY event's data>>16 as "how many frames have flipped",
-// so it must track real flips, not the free-running 60 Hz vblank tick (which
-// races ahead while the title is still loading -> GetRenderFrameParams asks for
-// a frame far beyond the last produced -> "frame number out of range" halt).
+// Count one submitted flip and post a display event with the new count. The engine's
+// pacing reads data>>16 as "frames flipped", so it must track real flips, not the
+// 60 Hz vblank tick (which races ahead during loading -> "frame number out of range").
 void noteFlip();
 // A GPU end-of-pipe interrupt reached the CP: wake the graphics-core events.
 void noteGpuEndOfPipe();

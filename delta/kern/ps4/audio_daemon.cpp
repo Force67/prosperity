@@ -143,12 +143,10 @@ Region g_ctl;
 std::unordered_map<int, Region> g_area;
 std::atomic<bool> g_started{false};
 
-// AudioOut2 uses monotonically increasing producer/consumer block counters,
-// unlike AudioOut's single-buffer token. Offsets from the 01.14.00 module's
-// container allocation and free-block query, checked against Skyrim's queues.
-// The channel-port sample layout is not decoded yet, so this is a paced null
-// sink. Releasing only submitted blocks keeps the guest's mixer running without
-// inventing event grants or assuming that its samples use the PS4 layout.
+// AudioOut2 uses monotonically increasing producer/consumer block counters (unlike
+// AudioOut's single-buffer token); offsets from the 01.14.00 module, checked against
+// Skyrim's queues. Sample layout not decoded yet, so this is a paced null sink that
+// releases only submitted blocks.
 struct Ps5Container {
   Region region;
   std::string flag;
@@ -208,13 +206,9 @@ bool plausibleSlot(u32 bpf, u32 type, u32 rate, u32 grain) {
     return false;
   if (type > 2)
     return false;
-  // The module's format jump table yields whole frames only: s16 at 2 bytes,
-  // f32 and 32-bit at 4 bytes, and the audio block tops out at 8 channels.
-  // Cross-checking the two rejects shapes the module cannot produce, most
-  // importantly bpf=32 with s16 (16ch) and bpf=2 with f32 (0ch), either of
-  // which used to pass the old value list and open a nonsense sink channel
-  // count. The kernel's own PCM path (kernel_ps4.elf.c) exposes no wider
-  // combination either.
+  // The module's format jump table yields whole frames only (s16: 2 B, f32/32-bit:
+  // 4 B; 8 channels max); cross-checking rejects shapes it cannot produce, e.g.
+  // bpf=32+s16 and bpf=2+f32, which the old value list let through as nonsense sinks.
   const u32 bps = type == 0 ? 2u : 4u;
   if (bpf < bps || bpf % bps != 0 || bpf / bps > 8)
     return false;
@@ -284,14 +278,9 @@ void daemonMain() {
           continue;
         }
 
-        // The slot records its own port index, and that index is also the
-        // event-flag bit. We address slots by position and would otherwise
-        // never notice a disagreement, which matters more than it looks:
-        // a title whose mixer thread waits on SEVERAL bits at once with
-        // AND|CLEARPAT (SotC waits on 0x1000c0 = bits 6|7|20) is only released
-        // when every one of those bits is set, so granting the wrong bit
-        // deadlocks that thread's whole port set rather than degrading one
-        // port. Verify rather than assume.
+        // The slot's recorded port index is also the event-flag bit. A title waiting on
+        // SEVERAL bits with AND|CLEARPAT (SotC: 0x1000c0) releases only when all are set,
+        // so granting the wrong bit deadlocks the whole port set, not one port. Verify.
         if (word(kOffIndex) != k) {
           if (!p.badFormat) {
             p.badFormat = true;
@@ -348,12 +337,8 @@ void daemonMain() {
                       k, p.sink, channels, type == 1 ? "f32" : "s16", rate,
                       grain, bpf);
           } else {
-            // Sample type 2 ("32-bit") exists in the module's format table but
-            // has never been observed here. It is a real format: the kernel's
-            // PCM path (kernel_ps4.elf.c) supports 32-bit samples. Only the
-            // host sink lacks a mapping, so drain the port rather than guess a
-            // conversion. The title keeps running, just without this port's
-            // audio.
+            // Sample type 2 ("32-bit") is real (the kernel PCM path supports it) but has
+            // no host sink mapping; drain the port rather than guess a conversion.
             BASE_LOGI("audiod",
                       "port {} sample type {} is unverified; draining without "
                       "playback",

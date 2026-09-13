@@ -18,12 +18,10 @@
 
 namespace gpu::vk {
 
-// Sampler bindings a recompiled PS may consume in one draw.
-// A pixel shader's sampler bindings. Tomb Raider's lighting pass declares 23,
-// and a shader that needs more than this is declined outright, so the limit is
-// a rendering cliff rather than a tuning knob. 24 stays far inside what every
-// desktop and mobile driver reports for maxPerStageDescriptorSampledImages,
-// which is well above the 16 Vulkan merely guarantees.
+// Sampler bindings a recompiled PS may consume in one draw. SOTTR's lighting pass
+// declares 23 and a shader needing more is declined outright, so this is a rendering
+// cliff, not a tuning knob; 24 sits far inside every driver's reported
+// maxPerStageDescriptorSampledImages (Vulkan guarantees only 16).
 constexpr u32 kMaxTex = 24;
 
 // Descriptor infrastructure shared by every sampled image (guest textures,
@@ -63,12 +61,9 @@ struct TextureBindings {
   VkImageView zero_view = VK_NULL_HANDLE;
   VkImageView zero_array_view = VK_NULL_HANDLE;
   VkImageView zero_3d_view = VK_NULL_HANDLE;
-  // A shader that does image_sample_c compares against the sampled value, and
-  // Vulkan only defines that on a format supporting depth comparison. When such
-  // a binding resolves to a colour surface (which every guest texture and
-  // every colour target is), there is nothing valid to bind, so bind this: a
-  // 1x1 D32 image holding the far plane, which reads as "nothing occludes this"
-  // rather than as undefined.
+  // image_sample_c compares against the sampled value, which Vulkan defines only on
+  // depth-comparison formats; bound to a colour surface there is nothing valid, so
+  // bind this 1x1 D32 image at the far plane (reads as "nothing occludes").
   VkImage depth_default_img = VK_NULL_HANDLE;
   ImageAllocation depth_default_allocation;
   VkImageView depth_default_view = VK_NULL_HANDLE;

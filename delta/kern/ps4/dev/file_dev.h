@@ -15,11 +15,9 @@
 #include "device.h"
 
 namespace krnl {
-// FreeBSD-style stat the PS4 returns (SceKernelStat, 0x78 / 120 bytes).
-// The kernel fills this from vn_stat and copies it out. Without privilege 0x2AC
-// the kernel zeroes st_dev, st_ino, st_nlink, st_uid, st_gid, st_rdev, st_flags,
-// st_gen, st_lspare and st_birthtim. We zero the whole struct first, so every
-// non-filled field is always 0.
+// FreeBSD-style stat the PS4 returns (SceKernelStat, 0x78 bytes), filled from vn_stat.
+// Without privilege 0x2AC the kernel zeroes st_dev/ino/nlink/uid/gid/rdev/flags/gen/
+// lspare/birthtim; we zero the whole struct first, so unfilled fields are always 0.
 struct SceKernelStat {
   u32 st_dev;          // +0x00
   u32 st_ino;          // +0x04
@@ -65,12 +63,10 @@ public:
 
   bool isRegularFile() const override { return true; }
 
-  // SOTTR's TAFS loader issues manifest reads with an uninitialised (garbage)
-  // file offset, so the header at off 0 never loads. In sequential mode the
-  // device ignores the bogus absolute offsets and serves reads in order from an
-  // internal cursor, which reads the whole manifest correctly. Scoped to
-  // .manifest.bin opens (set in sys_open) so it can't affect random-access asset
-  // reads. Gated by DELTA_MANIFEST_SEQ.
+  // SOTTR's TAFS loader issues manifest reads with a garbage offset, so the header at 0
+  // never loads. Sequential mode ignores the bogus absolute offsets and serves reads in
+  // order from an internal cursor. Scoped to .manifest.bin opens (set in sys_open);
+  // gated by DELTA_MANIFEST_SEQ.
   void setSeqMode() { seq_ = true; }
 
   // A file mmap is satisfied by sys_mmap's anonymous-alloc + file-content fill

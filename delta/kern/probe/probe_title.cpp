@@ -115,15 +115,10 @@ void PS4ABI jobTraceLogger(u64 hookId, u64 a0, u64 a1,
     break;
   }
   case 13: { // "Material Param Update" fills a block ON THE GPU (0x16eb90).
-    // SotC's material parameter blocks (the constants AND the texture
-    // descriptors a draw reads through its SRT) are not written by the CPU.
-    // `Shadow_Shipping+0x117930` (its timing print is "Material Param Update")
-    // allocates a block, memcpys a template into it, and calls this to build
-    // two buffer descriptors over it and dispatch (n+63)/64 threadgroups.
-    // Nothing on the CPU ever touches the blocks the failing draws read, so
-    // the question is which blocks this path actually targets: a3 = rcx = the
-    // block, a2 = rdx = its element count. One line per DISTINCT block, so a
-    // block updated every frame costs one line, not thousands.
+    // SotC's material parameter blocks (constants + texture descriptors) are
+    // never written by the CPU: +0x117930 ("Material Param Update") memcpys a
+    // template and dispatches (n+63)/64 threadgroups over the block (a3=rcx) with
+    // element count a2=rdx. One line per DISTINCT block.
     static std::mutex m;
     static std::unordered_set<u64> seen;
     static u64 calls = 0;
@@ -140,12 +135,10 @@ void PS4ABI jobTraceLogger(u64 hookId, u64 a0, u64 a1,
     break;
   }
   case 14: { // the DISPATCH_DIRECT emitter (0x883870).
-    // The material fills are issued by the guest and never reach our PM4
-    // parser (DELTA_GPU_CSDROPS reports zero drops), so the question is which
-    // command buffer they are written into. a0 = rdi = the buffer object:
-    // [a0+0] .. [a0+8] is its extent and [a0+0x10] its write pointer, which is
-    // where this 9-dword packet lands. a1 = the X threadgroup count, so
-    // 16384 selects exactly the whole-arena (1048576-element) fills.
+    // The material fills never reach our PM4 parser (CSDROPS reports zero drops),
+    // so which command buffer do they land in? a0=rdi is the buffer object
+    // ([a0+0]..[a0+8] extent, [a0+0x10] write pointer); a1=16384 selects the
+    // whole-arena fills.
     if (a1 != 16384)
       break;
     const auto *cb = reinterpret_cast<const u64 *>(a0);
@@ -164,18 +157,12 @@ void PS4ABI jobTraceLogger(u64 hookId, u64 a0, u64 a1,
     break;
   }
   case 11: { // CTOR 0x36210 -> a0 = rdi = the JobSystem object being built.
-    // The zero-cost watcher bootstrap: this runs ONCE at init, returns
-    // normally, and takes its argument in a register. Verified to be the same
-    // base the claim path indexes: the ctor zeroes per-ordinal blocks at
-    // +0xeb0/+0xfd0/... (stride 0x120), exactly what claim tests at
-    // [jobsys + ordinal*0x120 + 0xeb0].
-    //
-    // Do NOT hook JobKick(0x35480) here: it reads its 7th argument from the
-    // CALLER's frame (`mov r14d,[rbp+0x10]`), and an entry detour relocates
-    // the `mov rbp,rsp` prologue so rbp lands in the wrapper's frame, so every
-    // job then gets a garbage affinity and the title wedges before its main
-    // loop. Entry detours are only safe on functions whose arguments never
-    // come off the caller's stack.
+    // Zero-cost watcher bootstrap: runs ONCE at init, returns normally, argument
+    // in a register; verified to be the base the claim path indexes (ctor zeroes
+    // per-ordinal blocks at +0xeb0/+0xfd0/..., stride 0x120). Do NOT hook
+    // JobKick(0x35480): it reads arg7 from the CALLER's frame, and an entry detour
+    // relocates `mov rbp,rsp` so every job gets a garbage affinity and the title
+    // wedges. Entry detours are only safe on functions whose args stay in registers.
     if (a0 > 0x10000) {
       BASE_LOGI("jobctor", "JobSystem ctor this={:#x}",
                 (unsigned long long)a0);
@@ -187,14 +174,12 @@ void PS4ABI jobTraceLogger(u64 hookId, u64 a0, u64 a1,
   }
 }
 
-// Watcher body: every 30s dump the 8 per-ordinal direct-assign blocks
-// (jobsys + i*0x120 + 0xeb0) plus the job-table survey. The round-10 livelock
-// signature is a persistent marker in a block whose ordinal (4..7) no
-// claim-worker (0..3) services while blocks 0..3 sit empty.
-// DELTA_SOTC_JOBMOVE (flawed, kept for experiments): when the signature holds
-// across two consecutive dumps, move the marker qword into block 2. Note the
-// claim path copies a 0x40-byte descriptor at +0xea8, so a single-qword move
-// hands worker 2 a zeroed job; superseded by the job-table affinity survey.
+// Watcher body: every 30s dump the 8 per-ordinal direct-assign blocks (jobsys +
+// i*0x120 + 0xeb0) plus the job-table survey; the round-10 livelock signature is
+// a persistent marker in a block whose ordinal (4..7) no claim-worker (0..3)
+// services while blocks 0..3 sit empty. DELTA_SOTC_JOBMOVE (flawed, experimental):
+// moving the marker qword into block 2 hands worker 2 a zeroed job (the claim
+// path copies a 0x40-byte descriptor at +0xea8); superseded by the survey.
 void spawnJobWatcher(u64 base) {
   static std::atomic<u64> once{0};
   u64 expect = 0;
@@ -232,31 +217,20 @@ void spawnJobWatcher(u64 base) {
                       (unsigned long long)q[4], (unsigned long long)q[5],
                       (unsigned long long)q[6], (unsigned long long)q[7]);
           }
-          // The decisive post-drain read: live entries in the 1024-slot job
-          // table ([jobsys+0xb60], stride 0x9b8, alloc bitmap at +0xac0).
-          // JobKick writes job+0x998 = affinity (arg7, default [jobsys+0x3c])
-          // and job+0x9a0 = prio; the claim path tests 1<<worker-ordinal
-          // against the affinity. A stuck finalize job shows up here with a
-          // mask the 4 workers (0xF) cannot satisfy.
-          // Is there pending work at all, and can our workers claim it? The
-          // claim (0x38d40) scans 8 priority buckets at
-          // `[jobsys+0x1478] + lvl*0x2078` and has TWO consumer paths, both
-          // taken straight from the disassembly (an earlier guessed layout read
-          // zeros, so "no queue node has pending work" was never trustworthy):
-          //
-          //   scan A (0x38fa7, taken when [bucket+0x2038] != 0): a slot array
-          //     at [bucket+0x2070], stride 0x120, affinity mask at slot+0xf0 –
-          //     `test [slots + i*0x120 + 0xf0], 1<<ord` at 0x38fc5.
-          //   scan B (0x39130, taken when [bucket+0x2038] == 0 && [bucket] != 0):
-          //     a NODE POINTER array at bucket+0x38 (8 bytes each, count in
-          //     [bucket+0]); a node is pending when head [n] != tail [n+8], then
-          //     the dependency triple +0x980/+0x988/+0x990 must be satisfied,
-          //     and finally `test [n+0x998], 1<<ord` (0x3919e) must pass.
-          //
-          // Empty everywhere while the coordinator waits = the job was never
-          // ENQUEUED (producer-side bug); pending but unclaimable = the workers
-          // cannot take what is there (consumer-side). Our workers report
-          // ordinals 0..3, so a mask missing 0xf excludes every one of them.
+          // The decisive post-drain read: live entries in the 1024-slot job table
+          // ([jobsys+0xb60], stride 0x9b8, alloc bitmap at +0xac0). JobKick writes
+          // job+0x998 = affinity (arg7, default [jobsys+0x3c]); the claim path tests
+          // 1<<worker-ordinal against it. A stuck finalize job shows a mask the 4
+          // workers (0xF) cannot satisfy. The claim (0x38d40) scans 8 priority
+          // buckets at [jobsys+0x1478] + lvl*0x2078 with TWO consumer paths, both
+          // taken from disassembly (an earlier guessed layout read zeros):
+          //   scan A (0x38fa7, [bucket+0x2038] != 0): slot array at [bucket+0x2070],
+          //     stride 0x120, affinity at slot+0xf0, tested at 0x38fc5.
+          //   scan B (0x39130, [bucket+0x2038] == 0 && [bucket] != 0): node-pointer
+          //     array at bucket+0x38; pending when head [n] != tail [n+8], dep triple
+          //     +0x980/+0x988/+0x990 satisfied, and `test [n+0x998], 1<<ord` passes.
+          // Empty while the coordinator waits = never ENQUEUED (producer); pending
+          // but unclaimable = workers cannot take it (consumer).
           {
             const u64 qbase =
                 *reinterpret_cast<volatile u64 *>(base + 0x1478);
@@ -336,11 +310,10 @@ void spawnJobWatcher(u64 base) {
               }
             }
           }
-          // Which worker ordinals exist process-wide. The claim path tests
-          // `job_affinity & (1 << ordinal)` with ordinal = [*(fsbase)-0x10]
-          // (0x8000|core, bit 15 = valid; fn 0x33350). A job whose affinity
-          // names only a core no live thread reports (e.g. SotC's core-6
-          // "Resource Loading" pin, mask 0x40) is unclaimable by anyone.
+          // Which worker ordinals exist process-wide: the claim tests
+          // `job_affinity & (1 << ordinal)`, ordinal = [*(fsbase)-0x10] (0x8000|core,
+          // bit 15 = valid; fn 0x33350). An affinity naming only an unreported core
+          // (e.g. SotC's core-6 pin, mask 0x40) is unclaimable by anyone.
           {
             std::vector<u64> fsb;
             cpu::guestThreadFsBases(fsb);
@@ -369,15 +342,12 @@ void spawnJobWatcher(u64 base) {
                       "threads={} withOrdinal={} ordinals={ {} } claimable-mask={:#x}",
                       fsb.size(), valid, list.c_str(), present);
           }
-          // The real claim gate is a DEPENDENCY, not affinity. Claim
-          // (0x39130..) walks a queue node, and after finding head != tail it
-          // tests: dep = [node+0x980]; if dep, compare *dep against
-          // threshold [node+0x988] under mode [node+0x990] (0 = equal,
-          // 1 = counter > threshold) and SKIP the node when it does not hold.
-          // That is precisely "work is visible but nobody can claim it": a job
-          // whose dependency counter never reaches its target stays queued
-          // forever while the workers spin. Dump every node with pending work
-          // so a stuck dependency shows its counter, target and mode.
+          // The real claim gate is a DEPENDENCY, not affinity: claim walks a node and
+          // tests dep = [node+0x980] against threshold [node+0x988] under mode
+          // [node+0x990] (0 = equal, 1 = counter > threshold), skipping the node when
+          // it fails. That is "work visible but unclaimable": a dependency counter
+          // that never reaches its target wedges the job while workers spin. Dump
+          // every node with pending work.
           {
             u64 tbl = *reinterpret_cast<volatile u64 *>(base + 0xb60);
             int shown = 0;
@@ -402,15 +372,11 @@ void spawnJobWatcher(u64 base) {
                 const bool satisfied =
                     !dep || (readable && (mode == 0 ? (u64)depval == thresh
                                                     : (long long)depval > (long long)thresh));
-                // NOTE: this walk covers the 1024-slot job TABLE, which is not
-                // what the claim scans, so `aff` (+0x998) is the only gate
-                // reading meaningfully here. The old `obj = [node+0x38];
-                // mask = [obj+0xf0]` chase was wrong twice over: +0x38 is the
-                // node-pointer ARRAY inside a priority bucket (not a per-job
-                // object pointer), and the +0xf0 mask belongs to the scan-A
-                // slot array at [bucket+0x2070]. Both live in the bucket walk
-                // above; a table entry's +0x38 reads 0, which is exactly why
-                // that chase always reported nothing.
+                // NOTE: this walk covers the job TABLE, not what the claim scans, so
+                // `aff` (+0x998) is the only meaningful gate here. The old
+                // `obj = [node+0x38]; mask = [obj+0xf0]` chase was wrong twice: +0x38 is
+                // the node-pointer ARRAY in a priority bucket, and +0xf0 belongs to the
+                // scan-A slot array; a table entry's +0x38 reads 0, hence no reports.
                 const u64 obj = 0;
                 u32 mask = 0;
                 bool mask_read = false;
@@ -496,25 +462,14 @@ void spawnJobWatcher(u64 base) {
 }
 
 // DELTA_SOTC_ALLOCLOCK: hold ONE host mutex across every call into the title's
-// allocator, and count how often a thread had to wait for it.
-//
-// The deterministic form of the question DELTA_RIPRACE could not afford to
-// answer. The free tree ends up holding stale child links; only two
-// explanations survived the census (the corrupted words are written exclusively
-// by the allocator's own nine sites): two guest threads inside at once, or a
-// miscompiled store. Every call is observed here, so `contended` is decisive:
-//   contended == 0  -> no two threads were EVER inside together. Concurrency is
-//                      eliminated and the remaining suspect is our codegen.
-//   contended >  0  -> they were, and the title's own exclusion is not doing
-//                      what it does on hardware.
-// The mutex is recursive because these entries nest (the allocator frees while
-// allocating, and the tracker reenters), and because a fiber switch on the same
-// host thread must not deadlock against itself.
-// One lock PER SITE: several threads inside malloc at once is normal for a
-// shared heap and proves nothing, while several inside the FREE-TREE INSERT at
-// once is a violation (that function mutates the tree whose child links come
-// out stale). Each hook gets its own mutex and contention count; the insert's
-// count is the answer.
+// allocator and count waits. The deterministic form of the question DELTA_RIPRACE
+// could not afford: the corrupted words are written only by the allocator's own
+// nine sites, so `contended` decides between "two guest threads inside at once"
+// (contended > 0) and "our codegen miscompiles a store" (contended == 0).
+// The mutex is recursive (entries nest; a fiber switch on the same host thread
+// must not self-deadlock). One lock PER SITE: several threads inside malloc at
+// once is normal for a shared heap; several inside the FREE-TREE INSERT at once
+// is the violation, so the insert's count is the answer.
 struct AllocLockSite {
   std::recursive_mutex m;
   std::atomic<u64> calls{0};
@@ -526,29 +481,19 @@ struct AllocLockSite {
 constexpr int kAllocLockSites = 7;
 AllocLockSite g_allocSites[kAllocLockSites];
 
-// DELTA_SOTC_ALLOCLOCK=2 gives every site its own mutex, which is what MEASURES
-// the violation: a failed try_lock at the insert names a second thread inside the
-// insert itself. DELTA_SOTC_ALLOCLOCK=1 makes them share one mutex, which is what
-// MITIGATES it. Per-site locks cannot, because a thread inside 0x12820 and a
-// thread inside 0x12af0 hold different locks and still meet over the same tree.
-// (Learned the hard way: the first mitigation run still crashed, with the per-site
-// counters proving the exclusion it needed was never in place.)
+// DELTA_SOTC_ALLOCLOCK=2: per-site mutexes, which MEASURE the violation (a failed
+// try_lock at the insert names a second thread inside it). =1 shares one mutex,
+// which MITIGATES it; per-site locks cannot, since threads in 0x12820 and
+// 0x12af0 hold different locks yet meet over the same tree.
 std::recursive_mutex g_allocSharedM;
 
-// ONE LOCK PER ALLOCATOR STATE, not one lock overall. The contention forensics
-// showed 22 of 24 collisions between DIFFERENT allocator instances (this title
-// runs three, two static in module .data and one in direct memory, sharing no
-// tree), so serialising them against each other is pure false sharing, and it
-// made the experiment unrunnable: locking the hot coalescer across all three
-// heaps ran ~20x slower than locking four sites across one, and the repro never
-// reached the crash window.
-// Keyed on arg0, the state pointer at the three sites that take one (insert,
-// remove, coalesce all use arg0+0x70). Rebalance and fixup are called from
-// inside those and take node pointers rather than a state, so they are observed
-// and not locked; their callers already hold the right lock, which is why their
-// contention counts were 0 all along.
-// The payoff: with per-state locking, a failed try_lock is two threads inside
-// the tree mutators of the SAME tree.
+// ONE LOCK PER ALLOCATOR STATE, not overall: 22 of 24 measured collisions were
+// between DIFFERENT allocator instances (three heaps, disjoint trees), so
+// serialising them is false sharing and made the experiment unrunnable (~20x
+// slower). Keyed on arg0 (the state pointer; insert/remove/coalesce all use
+// arg0+0x70). Rebalance/fixup take node pointers, so they are observed, not
+// locked; their callers hold the right lock (their counts were always 0).
+// Payoff: a failed try_lock is now two threads in the SAME tree's mutators.
 constexpr int kAllocStates = 16;
 struct StateLock {
   std::atomic<u64> state{0};
@@ -578,22 +523,14 @@ static std::recursive_mutex &allocMutexFor(int i, u64 a0) {
   return g_allocSharedM;  // more states than slots: fall back to one lock
 }
 
-// Ring of the most recent allocator calls, so that when the periodic walk trips
-// there is a story for the window it brackets instead of only a verdict: which
-// sites ran, with what argument, on which thread. Read back on the first trip.
-// Who is inside the shared lock right now, so a thread that contends can say
-// what it collided with. Set on acquire, cleared on release.
-// DELTA_SOTC_HEAPROUTE: do the title's three heaps share address space?
-// The corruption on the crashing heap needs no concurrency if a chunk is freed
-// into one state's tree while its backing memory belongs to another state's
-// arena that later gets recycled wholesale: the tree would keep a link to
-// memory handed out again elsewhere, which is exactly the observed shape (a
-// live record array holding memory the tree still thinks is free).
-// The insert takes the state in rdi and inserts the chunk cached at state+0xc0
-// (its designated victim), so both sides are readable at the hook with no
-// pointer map: bucket the chunk address by 256 MiB per state and print the
-// table. Disjoint buckets per state means chunks never cross heaps and the idea
-// is dead; a bucket shared by two states is where to look next.
+// Ring of the most recent allocator calls, so a periodic trip comes with the
+// story of its window (which sites, what argument, which thread). Also: who is
+// inside the shared lock right now (set on acquire, cleared on release).
+// DELTA_SOTC_HEAPROUTE: do the three heaps share address space? A chunk freed
+// into one state's tree while its backing belongs to another state's recycled
+// arena needs no concurrency and matches the observed shape. The insert takes
+// the state in rdi and the chunk at state+0xc0, so bucket chunk addresses by
+// 256 MiB per state: disjoint buckets kill the idea, a shared bucket is the lead.
 struct RouteBucket { u64 prefix; u64 count; };
 struct RouteTab {
   std::atomic<u64> state{0};
@@ -652,10 +589,9 @@ struct LockHolder {
 LockHolder g_lockHolder;
 std::atomic<int> g_contendReported{0};
 
-// The guest pthread mutex the allocator's shared heap is locked with, the one the
-// crashing thread spins on with MUTEX_WAIT/MUTEX_WAKE. FreeBSD's umutex keeps the
-// owner tid in the low bits of its first word with UMUTEX_CONTESTED (0x80000000)
-// on top, which is how sys_umtx_op reads it.
+// The guest pthread mutex the allocator's shared heap locks with (the one the
+// crashing thread spins on): FreeBSD umutex, owner tid in the low bits of word
+// 0 with UMUTEX_CONTESTED (0x80000000) on top, as sys_umtx_op reads it.
 static u32 umtxOwnerWord() {
   const u64 a = kSotcUmtxAddr;
   if (a < 0x200000000ull || a >= 0x201000000ull)
@@ -663,11 +599,9 @@ static u32 umtxOwnerWord() {
   return *reinterpret_cast<const volatile u32 *>(a);
 }
 
-// The discriminating report. Two threads inside the tree mutators at once is only a
-// race on the SAME tree if they are working on the same allocator state. This
-// title hands out per-scope allocators, so a0 (the state pointer for insert and
-// remove) has to match before the collision means anything. And if it does match,
-// the owner word says whether the guest's own mutex thought it was excluding them.
+// The discriminating report: two threads in the tree mutators is only a race on
+// the SAME tree if their allocator state (a0 for insert/remove) matches. If it
+// does, the owner word says whether the guest's own mutex excluded them.
 static void reportContention(int site, u64 a0) {
   if (g_contendReported.fetch_add(1) >= 24)
     return;
@@ -759,31 +693,23 @@ static void allocLockEnterAt(int i, u64 a0, u64 a1) {
          !s.maxWaitNs.compare_exchange_weak(prev, ns, std::memory_order_relaxed)) {}
 }
 
-// DELTA_SOTC_TREEWATCH: catch the free tree going bad AT ITS BIRTH.
-//
-// Five crashes all corrupt the same field, node 0x8052e00020's child[0], so
-// there is no need to walk the tree: check that one word, on both sides of every
-// allocator call. Entry clean and exit dirty names the call that CONTAINED the
-// corrupting store, which is what a "miscompiled store" claim needs and what
-// the crash-time walk can never give (by then the store is millions of calls
-// old). Two loads and a few compares per call, against ~6M calls a run.
-// A healthy child[0] is either the tree's sentinel or a pointer to a free
-// chunk, whose size word sits at child-8 and is small, non-zero and 16-byte
-// aligned (the same plausibility test the crash-time walker uses). Every bad
-// value observed so far is a mapped pointer into reused live data, so reading
-// it is safe; a value outside guest direct memory is reported without being
-// dereferenced.
+// DELTA_SOTC_TREEWATCH: catch the free tree going bad AT ITS BIRTH. Five crashes
+// corrupt the same field (node 0x8052e00020's child[0]), so check that one word
+// on both sides of every allocator call: entry clean + exit dirty names the call
+// CONTAINING the corrupting store, which a crash-time walk can never give.
+// A healthy child[0] is the sentinel or a free chunk (size word at child-8,
+// small, non-zero, 16-aligned). Bad values observed are mapped pointers into
+// reused live data, safe to read; anything outside guest direct memory is
+// reported without dereference. Two loads + compares per call, ~6M calls a run.
 static thread_local bool t_treeOkAtEntry = true;
 std::atomic<u64> g_treeChecks{0};
 std::atomic<u64> g_treeBadAtEntry{0};
 std::atomic<u64> g_treeWentBad{0};
 std::atomic<int> g_treeReported{0};
 
-// The watched node does not exist at boot, because the heap has not grown into it yet, so
-// the check has to stay disarmed until its page is mapped, or the first
-// allocator call dereferences nothing and takes the process down. (It did.) Poll
-// for the page the way the write census does, then confirm the address really
-// looks like a free-tree node before trusting anything it says.
+// The watched node does not exist until the heap grows into it, so stay disarmed
+// until its page is mapped (the first armed run took the process down). Poll
+// like the write census, then sanity-check the node before trusting it.
 std::atomic<bool> g_treeArmed{false};
 
 static void treeWatchArm() {
@@ -817,11 +743,9 @@ static bool treeFieldOk(u64 &valOut, u64 &szOut) {
   valOut = szOut = 0;
   if (node < 0x8000000000ull || node >= 0x8700000000ull)
     return true;  // not the layout this watch was aimed at; stay quiet
-  // Only judge the field while the node is ITSELF a live free chunk. Before the
-  // tree grows into this address its words are whatever the previous owner left,
-  // and calling that "bad" buries the real signal: the first run of this watch
-  // reported 124 bad-on-entry hits with 0 transitions, which is what pre-
-  // membership noise looks like.
+  // Only judge the field while the node is ITSELF a live free chunk; before the
+  // tree grows here its words are the previous owner's, and calling that "bad"
+  // buries the signal (first run: 124 bad-on-entry, 0 transitions).
   const u64 own = *reinterpret_cast<const u64 *>(node - 8) & ~7ull;
   if (!own || own >= 0x8000000ull)
     return true;  // 8-granular sizes: masking with ~7 is the only test available
@@ -863,15 +787,12 @@ static void treeWatchAt(int site, bool onExit) {
 }
 
 // DELTA_SOTC_TREEWALK=<N>: every N allocator calls, walk the WHOLE free tree and
-// report the first link pointing at something that is no longer a free chunk.
-// This replaces the single-field watch, which was aimed at node 0x8052e00020 and
-// went silent the run the victim moved elsewhere. Bracketing to N calls turns a
-// 25-minute repro into "the corruption appeared within these N calls", and the
-// ring buffer above says what ran in that window.
-// Depth-first over both children with an explicit stack; a node is judged by its
-// size word at node-8 (8-granular, non-zero, not absurd) exactly as the
-// crash-time walker does. Pointers are range-checked against guest direct memory
-// before any dereference, so a corrupt link cannot fault the walker.
+// report the first link no longer pointing at a free chunk. Replaces the single-
+// field watch (aimed at one node, silent once the victim moved). Bracketing to
+// N calls turns a 25-minute repro into "the corruption appeared within these N
+// calls", and the ring above says what ran in that window. Depth-first with an
+// explicit stack; nodes judged by their size word at node-8 (8-granular, non-
+// zero, not absurd), pointers range-checked before any dereference.
 std::atomic<bool> g_treeWalkTripped{false};
 
 static inline bool inDmem(u64 p) {
@@ -1004,27 +925,22 @@ static void installAllocLockHook(u8 *base, u32 off, u32 prologueLen,
 
 } // namespace
 
-// Prologue cut points are the smallest instruction boundary >= 14 that stays
-// position-independent; each stops before the function's first rip-relative load:
-//   0x12820 alloc: pushes + `sub rsp,0x28` end at 17, then `mov r14,[rip+..]`
-//   0x12af0 free : pushes + `sub rsp,0x30` end at 15, then `mov r15,[rip+..]`
-//   0x48a70 free-tree insert: pushes + `mov r15,rdi` + `mov r14,rsi` end at 16
+// Prologue cut points: smallest position-independent instruction boundary >= 14,
+// each stopping before the function's first rip-relative load:
+//   0x12820 alloc: ends at 17;  0x12af0 free: ends at 15;  0x48a70 insert: ends at 16
 void installAllocLock(smodule &m) {
   if (!kSotcAllocLock && !kSotcTreeWatch && !kSotcTreeWalk && !kSotcHeapRoute)
     return;
   u8 *base = m.getInfo().base;
   struct Site { u32 off; u32 cut; const char *name; bool lock; };
-  // Prologue cuts are the smallest position-independent instruction boundary >= 14,
-  // each stopping before the function's first rip-relative load; every one was
-  // checked for positive-rbp stack-argument reads, which an entry detour breaks.
-  // 0x4a040 uses rbp as a NODE pointer (it loads it from rdx at 0x4a075) rather
-  // than as a frame pointer, so its [rbp+0x20] accesses are node fields and safe.
+  // Prologue cuts as above; each checked for positive-rbp stack-argument reads,
+  // which an entry detour breaks. 0x4a040 uses rbp as a NODE pointer (loaded from
+  // rdx at 0x4a075), so its [rbp+0x20] accesses are node fields and safe.
   //
   // The four TREE MUTATORS carry the shared lock; the two API entries are observed
-  // only. Locking the API was the earlier mistake: the allocator core has 22
-  // external direct entry points scattered across the eboot, so serialising
-  // 0x12820 and 0x12af0 left most doors open. All 11 call sites of the mutators
-  // are inside the core, so locking THEM covers every door at once.
+  // only. Locking the API was the earlier mistake: the core has 22 external entry
+  // points, so serialising 0x12820/0x12af0 left most doors open; all 11 call sites
+  // of the mutators are inside the core, so locking THEM covers every door.
   static const Site kSites[kAllocLockSites] = {
       {0x12820, 17, "alloc(0x12820)",          false},
       {0x12af0, 15, "free(0x12af0)",           false},
@@ -1032,18 +948,14 @@ void installAllocLock(smodule &m) {
       {0x497f0, 16, "treeRemove(0x497f0)",     true},
       {0x4a040, 14, "treeRebalance(0x4a040)",  false},
       {0x4a210, 15, "treeFixup(0x4a210)",      false},
-      // The census site 0x48dfb lives here. An earlier pass mis-attributed it to
-      // 0x48c70 because that address is a 9-byte leaf whose `ret` is followed by
-      // seven nops, one short of the eight the function-boundary scan wanted –
-      // so this mutator went unserialised through the whole first experiment.
-      // Observed, NOT locked. Serialising this one stalls the title outright:
-      // hooked-but-unlocked runs 174093 inserts and 3.3 fps in five minutes, and
-      // hooked-and-locked manages 129 inserts and never renders a frame, and
-      // that is with per-state locks too, so it is not false sharing across heaps. The
-      // coalescer evidently must not be held across by a foreign lock (it is
-      // reached with guest locks already held, and the title's sched_yield spin
-      // convoys behind it). Left in the table because its contention count is the
-      // measurement; flipping this to true is how the stall reproduces.
+      // The census site 0x48dfb lives here (earlier pass mis-attributed it to
+      // 0x48c70, whose 9-byte body + 7 nops fell one short of the boundary scan,
+      // leaving this mutator unserialised through the first experiment).
+      // Observed, NOT locked: serialising it stalls the title outright (hooked-
+      // unlocked: 174093 inserts / 3.3 fps in 5 min; hooked-and-locked: 129
+      // inserts, no frame, even with per-state locks). It is reached with guest
+      // locks already held and the sched_yield spin convoys behind it. The
+      // contention count is the measurement; true is how the stall reproduces.
       {0x48c80, 17, "treeCoalesce(0x48c80)",   false},
   };
   static void *const kEnter[kAllocLockSites] = {
@@ -1094,12 +1006,9 @@ void installAllocLock(smodule &m) {
   }).detach();
 }
 
-// DELTA_SOTC_MATTRACE: name the blocks SotC's "Material Param Update" fills.
-// Hooks the dispatch builder rather than the update routine itself, because the
-// block is that call's 4th argument (rcx) and only a local inside the caller.
-// Prologue cut point 17 (push rbp / mov rbp,rsp / 5 pushes / sub rsp,0x58); the
-// function takes all five arguments in registers and reads nothing at a
-// positive rbp offset, which is the thing an entry detour would break.
+// DELTA_SOTC_MATTRACE: name the blocks "Material Param Update" fills. Hooks the
+// dispatch builder (block = its 4th arg, rcx, a local of the caller). Prologue
+// cut 17; all five args in registers, nothing read at positive rbp offsets.
 void installMatTrace(smodule &m) {
   if (!kSotcMatTrace)
     return;
@@ -1222,19 +1131,12 @@ void investigateDcbGate(smodule &m) {
 }
 
 /*does not expect an extension*/
-// Isaac-specific surface setup. The game's global surface-name registry, a
-// fixed-bucket hash map<string,surface> at rebirth+0x687a90, is constructed
-// with a NULL bucket-array pointer (its ctor at +0x1e9bcd just zeroes it) and is
-// meant to get its storage lazily when the renderer registers the base surfaces
-// ("Floor Surface"/"Wall Surface"). That renderer path is gated on the Gnm->
-// Vulkan graphics device, which isn't brought up yet, so the bucket array is
-// never allocated and every registry find/insert dereferences null + idx*0x20
-// (rebirth+0x1e8c8b on a worker insert, +0x1e7e09 on a main-thread find). Until
-// the real gfx/renderer init exists, hand the registry valid empty storage up
-// front: allocate the N=0x20 * 0x20-byte zeroed bucket array, point the registry
-// at it, and NOP the ctor's null-write so it can't clobber the pointer when it
-// later runs. The map then works as a valid empty registry independent of order
-// or the missing gfx init. (Verified offsets via the decrypted rebirth.elf.)
+// Isaac-specific: the global surface-name registry (fixed-bucket hash map at
+// rebirth+0x687a90) is constructed with a NULL bucket array, meant to get storage
+// when the renderer registers base surfaces, which needs the not-yet-up GfxContext,
+// so every find/insert derefs null + idx*0x20 (0x1e8c8b insert, 0x1e7e09 find).
+// Hand it a zeroed 0x20*0x20-byte bucket array up front, point the registry at it,
+// and NOP the ctor's null-write (offsets from the decrypted rebirth.elf).
 void bringUpRebirthSurfaceRegistry(smodule &m) {
   u8 *base = m.getInfo().base;
   constexpr u32 kRegistryOff = 0x687a90; // bucket-array base pointer
@@ -1279,17 +1181,11 @@ void bringUpRebirthSurfaceRegistry(smodule &m) {
   }
 }
 
-// PS5 bring-up (mirror of bringUpRebirthSurfaceRegistry above). The PS5 eboot
-// statically links the same "rebirth" engine, so it has the same global surface-
-// name registry, here at eboot+0x985458 (bucket-array base pointer, a fixed 0x20
-// buckets * 0x20-byte stride). Its ctor at eboot+0x56a5d0 zeroes the pointer
-// (the null-write at eboot+0x56a5e7) and never allocates the array. That
-// storage is meant to come from the renderer registering the base surfaces,
-// which needs the AGC/GPU device that isn't up yet. Main-init's first registry
-// find (eboot+0x568840) then iterates null+idx*0x20 and faults (eboot+0x56889e).
-// Hand it a valid empty bucket array up front and NOP the ctor's null-write, as
-// on PS4. Guarded by the exact ctor-instruction bytes so a different PS5 title's
-// eboot is left untouched. (Offsets verified against the decrypted eboot.)
+// PS5 mirror of the above: same "rebirth" engine statically linked, registry at
+// eboot+0x985458 (0x20 buckets x 0x20 stride), ctor null-write at eboot+0x56a5e7,
+// first find at eboot+0x568840 faults at +0x56889e. Same fix: empty bucket array
+// + NOP the ctor write, guarded by exact ctor bytes so another PS5 title's eboot
+// is untouched. (Offsets from the decrypted eboot.)
 void bringUpRebirthEbootRegistry(smodule &m) {
   u8 *base = m.getInfo().base;
   constexpr u32 kRegistryOff = 0x985458; // bucket-array base pointer
@@ -1320,14 +1216,11 @@ void bringUpRebirthEbootRegistry(smodule &m) {
            (void *)buckets, kRegistryOff);
 }
 
-// DIAGNOSTIC (DELTA_VO_PATCH): patch real libSceVideoOut export entries to
-// `mov eax,<v>; ret`, to isolate which real setup function's error return makes
-// rebirth skip command-buffer creation. List: open,regbuf,fliprate,addflip,getlabel.
-// open returns 1 (a valid handle); the rest return 0 (SCE_OK).
-// DIAGNOSTIC (DELTA_VO_WATCH): poll libSceVideoOut's internal display-config state
-// during the NATURAL flow (its init runs via pthread_once on first Open). Shows
-// how count[0x1cb30]/idx[0x1cb40]/cfg[*].f0[0x1cb50 stride 0x140] evolve, to pin
-// exactly what the driver fails to set (the display-connected state f0==4 Open needs).
+// DIAGNOSTIC DELTA_VO_PATCH: patch real libSceVideoOut exports to `mov eax,<v>; ret`
+// to isolate which setup function's error makes rebirth skip DCB creation (open
+  // returns 1, the rest 0). DELTA_VO_WATCH: poll the driver's internal display
+// config (count/idx/cfg stride 0x140) during the natural flow, to pin what it
+  // fails to set (Open needs the connected state f0==4).
 static void watchVideoOutState(smodule &m) {
   if (!kVoWatch)
     return;
@@ -1355,10 +1248,8 @@ static void watchVideoOutState(smodule &m) {
         lc = c; li = idx; lf[0] = f[0]; lf[1] = f[1]; lf[2] = f[2]; lpo = portOpen;
         lp48 = port48;
       }
-      // DELTA_VO_FORCE_CONNECT: once the driver registered the placeholder into
-      // cfg[0] (f0 went -1 -> 0) but Open reads cfg[idx] (still free -1), make a
-      // connected display: copy the populated cfg[0] slot into cfg[idx] and mark
-      // it connected (f0=4). Proves the display-config mechanism end to end.
+      // DELTA_VO_FORCE_CONNECT: copy the populated cfg[0] into cfg[idx] and mark it
+      // connected (f0=4), proving the display-config mechanism end to end.
       static bool patched = false;
       if (kVoForceConnect && !patched && idx >= 1 &&
           idx < 8 && f[0] == 0 && f[1] == 0xffffffff) {
@@ -1374,11 +1265,9 @@ static void watchVideoOutState(smodule &m) {
   }).detach();
 }
 
-// Host hook for the videoout busType/index map-op (vaddr 0x1020). Open calls it
-// with esi=userId, edx=busType, ecx=index, r8=param. Via makeHostThunk those land
-// in args (rsi,rdx,r10,r8) -> a2,a3,a4,a5. Logs the title's real Open() args and
-// returns 0 (the op's value for the main display). If this never logs, Open failed
-// before the op (count/f0/param gate).
+// Host hook for the videoout busType/index map-op (vaddr 0x1020; esi=userId,
+  // edx=busType, ecx=index). Logs the title's real Open() args and returns 0;
+// if this never logs, Open failed before the op.
 static u64 PS4ABI voOpMapLog(u64 a1, u64 userId, u64 busType,
                                   u64 index, u64 param, u64 a6) {
   u32 pv = 0;
@@ -1470,14 +1359,9 @@ static void forceGetterOk(proc &p, const char *mod, u32 off, u32 val) {
 // (modexec and the real pkg boot), not just the modexec harness.
 void applyBootPatches(proc &p) {
   // Redirect libkernel's __tls_get_addr (NID vNe1w4diLCs) to our per-thread HLE;
-  // libkernel's own dynamic-TLS allocator leaves DTV entries null. NID lookup is
-  // firmware-independent.
-  //
-  // NATIVE ONLY: this patches the guest to `jmp` a *host* function pointer,
-  // which only works when the host runs x86 directly. Under the FEXCore JIT
-  // (aarch64) that address is ARM code and jumping to it as x86 faults wildly.
-  // TODO(boot/fex): redirect __tls_get_addr via a FEXCore thunk trampoline, or
-  // satisfy guest dynamic TLS another way.
+  // its own dynamic-TLS allocator leaves DTV entries null. NATIVE ONLY: the patch
+  // jumps a host pointer, which under the FEXCore JIT is ARM code read as x86.
+  // TODO(boot/fex): FEXCore thunk trampoline, or satisfy guest dynamic TLS otherwise.
 #if defined(DELTA_BACKEND_NATIVE)
   if (auto k = p.getModule(base::StringRef("libkernel"))) {
     if (uintptr_t a = k->getSymbolByNid("vNe1w4diLCs")) {
@@ -1511,11 +1395,9 @@ void applyBootPatches(proc &p) {
     }
   }
 #endif
-  // DEBUG (DELTA_TRAP_VADDR=0xADDR[,0xADDR...]): plant an int3 at guest code
-  // address(es) so reaching them traps into the crash handler, which dumps the
-  // guest RIP/registers/backtrace + stack scan. Lets us capture the context of a
-  // deterministic-but-hard-to-breakpoint site (e.g. a fatal-error spin) without
-  // gdb, which is far too slow under the boot's threading.
+  // DEBUG DELTA_TRAP_VADDR=0xADDR[,...]: int3 at guest code addresses; the crash
+  // handler dumps RIP/regs/backtrace. Captures a deterministic-but-hard-to-
+  // breakpoint site without gdb (far too slow under the boot's threading).
   if (const char *t = kTrapVaddr) {
     base::String spec(t);
     char *cur = const_cast<char *>(spec.c_str());
@@ -1531,20 +1413,17 @@ void applyBootPatches(proc &p) {
       while (*cur == ',' || *cur == ' ') cur++;
     }
   }
-  // DEBUG (DELTA_ALLOC_TRACE=0xADDR[,minMB]): trace large allocations through a
-  // guest allocator whose entry (ADDR) begins with `push rbp`. Replace it with
-  // int3; the fatal handler logs the size (rsi) and emulates the push. Lets us
-  // see what fills a fixed heap (e.g. SOTTR's 1 GiB pool) without gdb.
+  // DEBUG DELTA_ALLOC_TRACE=0xADDR[,minMB]: int3 at a `push rbp` allocator entry;
+  // the handler logs the size (rsi) and emulates the push. Shows what fills a
+  // fixed heap (e.g. SOTTR's 1 GiB pool) without gdb.
   if (const char *at = kAllocTrace) {
     char *end = nullptr;
     u64 addr = std::strtoull(at, &end, 0);
     u64 minB = 0x1000000;
     if (end && *end == ',') minB = std::strtoull(end + 1, nullptr, 0) * 1024 * 1024;
-    // DELTA_ALLOC_TRACE doubles as a boolean toggle for the [lowalloc] tracer in
-    // sys_mem.cpp, so a bare "=1" is legitimate and must NOT be treated as a code
-    // address here: addr=1 would protect/deref page 0 (host null-deref SIGSEGV).
-    // A real allocator entry is a guest .text vaddr (>= 64 KiB); ignore anything
-    // smaller so tracing can be enabled without planting an int3 at a bogus addr.
+    // DELTA_ALLOC_TRACE doubles as the [lowalloc] toggle in sys_mem.cpp, so a bare
+    // "=1" is legitimate and must NOT be treated as a code address (addr=1 would
+    // deref page 0); a real entry is a guest .text vaddr (>= 64 KiB).
     if (addr >= 0x10000) {
       auto *c = reinterpret_cast<u8 *>(addr);
       utl::protectMem(reinterpret_cast<void *>(addr & ~0xFFFull), 0x1000,
@@ -1560,10 +1439,9 @@ void applyBootPatches(proc &p) {
       }
     }
   }
-  // DELTA_HEAP_PROF=0xADDR: plant int3 at an operator-new/malloc entry (push rbp,
-  // size in rdi) and aggregate bytes+count by guest caller; SIGUSR1 dumps top sites.
-  // DELTA_HEAP_PROF_SCOPE=<tls-slot-global>:<depth-offset>: additionally split
-  // each site by whether the thread had a scoped allocator live (see crash.h).
+  // DELTA_HEAP_PROF=0xADDR: int3 at a `push rbp` new/malloc entry, aggregate by
+  // guest caller; SIGUSR1 dumps top sites. DELTA_HEAP_PROF_SCOPE additionally
+  // splits each site by whether a scoped allocator was live (see crash.h).
   if (const char *hs = kHeapProfScope) {
     char *cur = const_cast<char *>(hs);
     const u64 slot = std::strtoull(cur, &cur, 0);
@@ -1658,10 +1536,8 @@ void applyBootPatches(proc &p) {
   ps5::maybePrependCtor(p);
   forceReturn0(p, "libkernel", 0x287e0);            // module-gen lib-id validator
   forceReturn0(p, "libSceAppContentUtil", 0x1a00);  // AppContent IPMI init
-  // AppContent's IPMI client is stubbed, so the real Initialize/AppParamGetInt
-  // error out and the engine's GameSystemInit (big.cpp:1298/1302) asserts. Force
-  // both to SCE_OK: Initialize (bootParam out is pre-zeroed = normal boot) and
-  // AppParamGetInt returning SKU_FLAG = FULL (3).
+  // AppContent's IPMI client is stubbed, so Initialize/AppParamGetInt error out
+  // and GameSystemInit asserts; force SCE_OK and SKU_FLAG = FULL (3).
   forceReturn0(p, "libSceAppContentUtil", 0x1610);     // sceAppContentInitialize
   forceGetterOk(p, "libSceAppContentUtil", 0x1630, 3); // sceAppContentAppParamGetInt
 }

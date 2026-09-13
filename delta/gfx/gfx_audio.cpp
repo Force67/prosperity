@@ -99,11 +99,9 @@ FILE *pcmFile(int handle, int channels, int bps) {
 }  // namespace
 
 extern "C" int prosperity_audio_output(int handle, const void *samples, u32 frames) {
-  // Snapshot the port under the lock, then operate lock-free. The SDL stream is
-  // owned by SDL (stable), and SDL_Get/PutAudioStreamData are thread-safe, so we
-  // must NOT hold g_mtx across the backpressure sleep below: another thread can
-  // open a port mid-wait (e.g. AvPlayer's audio thread during an intro movie),
-  // reallocating g_ports and dangling a held Port& -> crash.
+  // Snapshot the port under the lock, then run lock-free. SDL stream ops are
+  // thread-safe, but we must NOT hold g_mtx across the backpressure sleep: another
+  // thread opening a port mid-wait reallocs g_ports and dangles the held Port&.
   SDL_AudioStream *stream;
   int channels, bytesPerSample;
   float gain;
@@ -124,13 +122,10 @@ extern "C" int prosperity_audio_output(int handle, const void *samples, u32 fram
     std::fwrite(samples, 1, bytes, pf);
     std::fflush(pf);
   }
-  // Backpressure: the real sceAudioOutOutput blocks until the previous grain has
-  // played, which is what paces a title's audio thread to real time. Our queue is
-  // non-blocking, so an audio thread (e.g. FMOD's mixer/output threads) that loops
-  // on Output runs flat-out, pinning a core at ~100% and starving the game thread.
-  // Block here until the device queue drains below a small target so the producer
-  // tracks playback. Bounded so a stalled/absent device (headless) can't hang the
-  // thread: if it doesn't drain within ~a buffer's worth of time, fall through.
+  // The real sceAudioOutOutput blocks until the previous grain plays, pacing the
+  // audio thread; our queue is non-blocking, so a looping Output (FMOD) pins a core
+  // at 100% and starves the game thread. Block until the queue drains below a small
+  // target, bounded so a headless/stalled device can't hang the thread.
   const u32 target = bytes * 3;  // keep ~3 buffers of latency
   int prevQ = -1;
   for (int i = 0; i < 64; i++) {

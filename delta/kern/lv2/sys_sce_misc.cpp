@@ -51,11 +51,9 @@ i64 PS4ABI sys_jitshm_create(size_t len, u32 flags) {
 
 int PS4ABI sys_jitshm_alias() { return -SysError::eOPNOTSUPP; }
 
-// The kernel's sys_dl_get_list is gated on a debugger/coredump/syscore process;
-// anything else (a retail game title) gets 1 (EPERM). Same for get_info
-// below: the debugger (the system process running dbglogger) is the only caller
-// that may enumerate loaded modules. arg block is
-// {pid@0, ids[]@8, max@16, count@24} in the kernel.
+// sys_dl_get_list/get_info: gated on a debugger/coredump/syscore process; a retail
+// title gets EPERM (the dbglogger system process is the only legitimate enumerator).
+// Arg block {pid@0, ids[]@8, max@16, count@24}.
 int PS4ABI sys_dl_get_list() { return -SysError::ePERM; }
 
 // Kernel arg block: {pid@0, handle@8, info@16}; fills a 0xA50-byte module-info
@@ -94,35 +92,25 @@ int PS4ABI sys_opmc_get_ctr() { return 0; }
 int PS4ABI sys_opmc_set_hw() { return 0; }
 int PS4ABI sys_opmc_get_hw() { return 0; }
 
-// Budget objects gate flexible memory / resource pools. We don't enforce them,
-// but the guest stores the id and passes it back, so hand out a fixed non-zero
-// id. Logged once: if a title's allocations are actually capped by a budget we
-// granted unconditionally, that overcommit shows up here first.
-//
-// Kernel budget_create args: {char* name@0; uint32 ptype@8 (0..3);
-// SceBudgetResource* res@16; uint32 nres@24 (0..10); SceBudgetResource* resOut@32}.
-// The budget object (64 bytes) holds the name, resource array, ptype, nres, and
-// an open-count. Only a system ucred may create one (returns 78 otherwise).
+// Budget objects gate flexible memory / resource pools; unenforced, but the guest
+// stores the id and passes it back, so hand out a fixed non-zero id. Logged once:
+// an overcommit shows up here first. Args {name@0, ptype@8 (0..3), res@16,
+// nres@24 (0..10), resOut@32}; object = 64 bytes; system ucred only (else 78).
 int PS4ABI sys_budget_create() {
   static std::atomic<bool> once{false};
   logOnce(once, "budget_create granted unconditionally (no enforcement)");
   return 0x2001;
 }
 int PS4ABI sys_budget_delete() { return 0; }
-// The libkernel_sys wrappers (stub at 0x25c0) forward the args straight to the
-// syscall; the kernel fills a caller-provided buffer that no libkernel function
-// reads back, so the out-struct layout isn't recoverable from libkernel alone.
-// Callers pre-zero that buffer, so success leaves it reading as an all-zero
-// budget. We return success rather than an errno: with the carry flag cleared,
-// a negative return would drive the wrapper's errno path on a stale errno.
+// The libkernel_sys wrappers forward args straight through; the kernel fills a buffer
+// no libkernel function reads back (layout unrecoverable), and callers pre-zero it,
+// so success reads as an all-zero budget. Return success, not an errno: with carry
+// clear, a negative return would drive the wrapper's errno path on a stale errno.
 int PS4ABI sys_budget_get() { return 0; }
 int PS4ABI sys_budget_set() { return 0; }
-// Kernel (sys_budget_getid): only a system-ucred process may ask. It gets the
-// proc's own budget id, or 2/ENOENT when none is set, and everyone else gets
-// 78 (ENOSYS). A game is the latter, but the game's libkernel wrapper takes the
-// id and passes it back to budget_get/delete, so keep the benign fixed id the
-// wrapper path expects rather than turning the call into an error the title was
-// never coded to handle.
+// sys_budget_getid: system-ucred only (a game gets 78 on hardware), but the game's
+// wrapper passes the id back to budget_get/delete, so keep the benign fixed id
+// rather than an error the title was never coded to handle.
 int PS4ABI sys_budget_getid() { return 0x2001; }
 int PS4ABI sys_budget_get_ptype_of_budget() { return sys_budget_get_ptype(); }
 
@@ -137,15 +125,11 @@ int PS4ABI sys_sblock_exit() { return 0; }
 int PS4ABI sys_sblock_xenter() { return 0; }
 int PS4ABI sys_sblock_xexit() { return 0; }
 
-// Event-port objects for kqueue-style delivery. We don't route events through
-// them, so return a fixed handle and swallow trigger/delete. Logged once: a
-// title waiting on an eport event we never deliver would stall, and this is the
-// trace that explains it.
-//
-// Kernel eport object (~0x60 bytes): name (32 bytes), mtx, cv, waiter list,
-// open-count, attr. eport_trigger sets the pattern and broadcasts cv; waiters
-// wake and read the triggered pattern. Like evf/osem, named eports can be
-// shared across processes via the global name table (attr bit 0x100).
+// Event-port objects for kqueue-style delivery; unrouted, so return a fixed handle
+// and swallow trigger/delete. Logged once: a title waiting on an eport event we
+// never deliver stalls, and this trace explains it. Kernel eport (~0x60 bytes):
+// name, mtx, cv, waiter list, open-count, attr; trigger sets the pattern and
+// broadcasts; named eports share across processes (attr bit 0x100).
 int PS4ABI sys_eport_create() {
   static std::atomic<bool> once{false};
   logOnce(once, "eport_create returns a fake handle; events are never delivered");
@@ -159,11 +143,9 @@ int PS4ABI sys_eport_close() { return 0; }
 int PS4ABI sys_dynlib_dlclose() { return 0; }
 int PS4ABI sys_dynlib_prepare_dlclose() { return 0; }
 
-// The kernel's sys_sandbox_path is a SETTER, not a getter: the system process
-// hands the title's sandbox-root string in and the kernel stores it in the
-// proc. Only a system ucred may do that; a game gets 1 (EPERM). We have no
-// per-title jail (the mount table is the sandbox) and the game is not the
-// system, so deny exactly the way hardware would.
+// sys_sandbox_path is a SETTER: the system process hands in the title's sandbox root.
+// System ucred only; a game gets EPERM on hardware, and we have no per-title jail,
+// so deny exactly as hardware would.
 int PS4ABI sys_sandbox_path(const char *path) {
   (void)path;
   return -SysError::ePERM;
@@ -332,11 +314,9 @@ int PS4ABI sys_flock() { return 0; }
 int PS4ABI sys_utimes() { return 0; }
 int PS4ABI sys_futimes() { return 0; }
 
-// pathconf/fpathconf/lpathconf: report the configurable limit for `name`. We
-// return concrete values rather than the -1 "indeterminate" sentinel: a -1 in
-// rax is indistinguishable from an errno under the syscall return convention, so
-// a caller sizing a buffer against it would misread a failure. Values match
-// FreeBSD's defaults for a UFS-like filesystem.
+// pathconf/fpathconf/lpathconf: concrete values, not the -1 sentinel, which is
+// indistinguishable from an errno in rax and would misread as failure when sizing
+// a buffer. Values = FreeBSD defaults for a UFS-like filesystem.
 static i64 pathconf_value(int name) {
   switch (name) {
   case 1:  return 32767; // _PC_LINK_MAX

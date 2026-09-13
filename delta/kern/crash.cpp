@@ -94,19 +94,15 @@ void symbolize(uintptr_t addr, char *out, size_t n) {
   std::snprintf(out, n, "%#lx (??)", addr);
 }
 
-// Walk the rbp frame chain (guest code keeps frame pointers) and symbolize each
-// return address. Bounded and range-checked so a bad frame can't loop or fault.
-// Works for both backends: guest frames are x86-64 frames in identity-mapped
-// memory, so the walk is plain pointer reads on either host arch.
+// Walk the rbp frame chain and symbolize each return address; bounded and
+// range-checked so a bad frame can't loop or fault. Host-arch agnostic.
 void backtrace(uintptr_t rbp) {
   BASE_LOGI("crashHandler", "  --- backtrace ---");
   for (int i = 0; i < 32; i++) {
     if (rbp < 0x10000 || (rbp & 7))
       break;
-    // "Range-checked" was only a bounds test: a thread parked deep in host code
-    // has no frame chain at rbp at all, and the walk faulted reading it. That is
-    // survivable in a crash report but not from the SIGUSR1 probe, which is
-    // asking a live run what it is stuck on and took the run down instead.
+  // A thread parked deep in host code has no frame chain at rbp; the walk
+  // faulted reading it, fatal from the SIGUSR1 probe asking a live run.
     if (!utl::isMemoryRangeMapped(reinterpret_cast<void *>(rbp),
                                   2 * sizeof(uintptr_t)))
       break;
@@ -125,25 +121,16 @@ void backtrace(uintptr_t rbp) {
 }
 
 // ---------------------------------------------------------------------------
-// SOTC AllocationTracker walk (crash-scoped diagnostic; only runs on faults
-// inside that title's tracker code). On a fault inside the Shadow_Shipping
-// eboot's slot-21 "untrack on free" methods (fn @+0x18920 CPU tracker,
-// +0x8d930 GPU/renderer tracker), the record lookup @+0x47ab0 returned NULL and
-// the caller unconditionally read [rec+0x58]/[rec+0x50] -> #GP. Walk the
-// tracker's own record list to answer: is the freed KEY absent, present at a
-// different base, or in the other tracker?
-//
-// Object layout (verified from disasm of +0x18920 / +0x47ab0 / +0x476f0):
-//   tracker+0x28  listener; +0x38  embedded list SENTINEL node;
-//   tracker+0x48  == sentinel.next (first record); +0x70 spinlock;
-//   +0x80 total bytes; +0x90 count.
-//   record node:  +0x08 prev, +0x10 next (circular list threaded here),
-//                 +0x58 size (interval-end field used by the lookup),
-//                 +0x60 base/key. (+0x50 is a second size copy on the GPU var.)
-// (tracker,key) at fault time is recovered from RSP, NOT the callee-saved regs
-// (FEX reconstruction of those is unreliable): both fns push
-// rbp;r15;r14;r13;r12;rbx;rax with NO further stack alloc before the fault, so
-//   [rsp+0x18]=saved r13=TRACKER   [rsp+0x20]=saved r14=KEY.
+// SOTC AllocationTracker walk (crash-scoped diagnostic): the eboot's record
+// lookup @+0x47ab0 returned NULL and the caller deref'd [rec+0x58]/[rec+0x50];
+// walk the tracker's record list to answer whether the freed KEY is absent,
+// relocated, or in the other tracker. Layout (from disasm): tracker +0x28
+// listener, +0x38 sentinel, +0x48 first record, +0x70 spinlock, +0x80 bytes,
+// +0x90 count; record node +0x08 prev, +0x10 next, +0x58 size, +0x60 base.
+// (tracker,key) are recovered from RSP ([rsp+0x18]=r13, [rsp+0x20]=r14; both
+// fns push rbp;r15;r14;r13;r12;rbx;rax before the fault), not the callee-saved
+// regs, whose FEX reconstruction is unreliable.
+// ---------------------------------------------------------------------------
 namespace {
 inline bool trkMincore(u64 va) {
   if (va < 0x10000) return false;
@@ -157,15 +144,11 @@ inline bool trkRd64(u64 va, u64 &out) {
   out = *reinterpret_cast<const u64 *>(va);
   return true;
 }
-// Re-walk the title's size-ordered free tree the way the faulting insert does,
-// and name the FIELD that holds the bad pointer. The insert loop only ever has
-// the bad VALUE in a register (rax); the address it was loaded FROM is the one
-// thing needed to arm a write census, and it is gone by the time we fault.
-//
-// The walk (eboot+0x48a70, a dlmalloc-shaped allocator): `state+0x80` is the
-// tree head and doubles as the loop's sentinel; a node points at chunk+0x10, so
-// its size word is at node-8; children are node[0] and node[1]; the branch taken
-// is `newsz < cursz ? 0 : 1`, and an exact size match ends the walk.
+// Re-walk the title's size-ordered free tree like the faulting insert and name
+// the FIELD holding the bad pointer (the insert only ever has the VALUE in a
+// register). The walk (eboot+0x48a70, dlmalloc-shaped): state+0x80 is tree head
+// and sentinel, a node points at chunk+0x10 (size word at node-8), children are
+// node[0]/node[1], branch is `newsz < cursz ? 0 : 1`, exact match ends the walk.
 void sotcWalkFreeTree(u64 state, u64 newsz) {
   const u64 sentinel = state + 0x80;
   BASE_LOGI("freetree", "  state={:#x} sentinel={:#x} newsz={:#x}",
@@ -206,18 +189,15 @@ void sotcWalkFreeTree(u64 state, u64 newsz) {
                        (unsigned long long)(trkRd64(win + i * 8, v) ? v : 0));
       }
       BASE_LOGI("freetree", "{}", winwords.c_str());
-      // Split the value: SotC's stale links read as a valid 40-bit guest
-      // pointer with rubbish above it, because the word is not a pointer at
-      // all: it is whatever the new owner of the reused chunk stored there, and
-      // the arrays in question hold packed descriptors.
+      // SotC's stale links read as a valid 40-bit guest pointer with rubbish above:
+      // the word is whatever the reused chunk's new owner stored there.
       BASE_LOGI("freetree", "\n  bad value {:#x}: low40={:#x}, "
                             "bits40+={:#x} (so probably not a pointer)",
                 (unsigned long long)cur,
                 (unsigned long long)(cur & 0xffffffffffull),
                 (unsigned long long)(cur >> 40));
-      // Is the corrupt word inside guest memory the GPU module snapshots and
-      // copies back? If it is, the compute writeback is reverting the
-      // allocator's own stores and this is our corruption, not the title's.
+      // Inside guest memory the GPU module snapshots and copies back? Then the
+      // compute writeback is reverting the allocator's own stores.
       char csr[256];
       if (describeCsRange(field, csr, sizeof(csr)))
         BASE_LOGI("freetree", "  the field IS inside a compute staging range: {}",
@@ -228,15 +208,11 @@ void sotcWalkFreeTree(u64 state, u64 newsz) {
     }
     sz &= ~7ull;
     const int idx = (newsz < sz) ? 0 : 1;
-    // A free chunk's size is small, non-zero and 16-byte aligned. The walk
-    // running off the tree shows up HERE, one step before it dereferences
-    // something unmapped: the node is memory that has been handed back out and
-    // refilled, so its "size" is whatever the new owner stored there. Reporting
-    // only the unmapped dereference blames the wrong field; by then the walk
-    // has been reading live application data as nodes for several steps.
-    // 8-granular, not 16: the allocator masks the size word with ~7 and a real
-    // free chunk of 0x158 turned up in a later crash, which a 16-alignment test
-    // flagged as "no longer a free chunk" and blamed the wrong link for.
+    // A free chunk's size is small, non-zero and 8-granular (the allocator
+    // masks the size word with ~7; a real 0x158 chunk failed a 16-alignment
+    // test). A walk running off the tree shows up HERE, one step before it
+    // dereferences something unmapped; blaming the dereference blames the
+    // wrong field.
     const bool plausible = sz && sz < 0x8000000ull && (sz & 7) == 0;
     BASE_LOGI("freetree",
               "  step {}: node={:#x} size={:#x} -> child[{}]{}",
@@ -287,9 +263,8 @@ void sotcWalkFreeTree(u64 state, u64 newsz) {
   BASE_LOGI("freetree", "  64 steps without terminating (a cycle?)");
 }
 
-// Walk one tracker's circular record list; report count/bytes, whether `key`
-// is covered by a record, and the 8 records nearest to `key` by |base-key|.
-// Returns true if `key` fell inside some record's [base,base+size).
+// Walk one tracker's record list; report count/bytes, whether `key` is covered,
+// and the 8 records nearest by |base-key|. True if `key` is inside a record.
 bool sotcWalkTracker(u64 tracker, u64 key, const char *tag) {
   BASE_LOGI("trkwalk", "{}  tracker={:#x} key={:#x}", tag,
             (unsigned long long)tracker, (unsigned long long)key);
@@ -386,9 +361,8 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
     return;
 
 #if defined(__x86_64__)
-  // DELTA_PS5_GLYPHGUARD: recover a registered null-object deref in the UI/text
-  // renderer: zero the destination register and step past the faulting load so
-  // the code continues with a benign value (unbound-font text renders empty).
+  // DELTA_PS5_GLYPHGUARD: recover a registered null-object deref by zeroing the
+  // destination register and stepping past the faulting load.
   if (sig == SIGSEGV && g_nullGuardCount && ucv) {
     auto *uc = static_cast<ucontext_t *>(ucv);
     auto *gr = uc->uc_mcontext.gregs;
@@ -400,20 +374,15 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
     }
   }
 
-  // Guest SDK assert/__debugbreak is a software interrupt (`int 0xNN`, cd NN);
-  // in userspace it raises SIGSEGV (#GP). Real hardware with no kernel debugger
-  // attached just steps over it and the assert handler's caller continues, so do
-  // the same: skip the 2-byte instruction and resume. Otherwise every guest
-  // assertion would kill the boot. PS4 uses int 0x41; PS5 (Prospero) also uses
-  // int 0x44/0x45 (e.g. libkernel's `int 0x45; xor eax,eax; ret` assert stub).
-  // Must stay ahead of the dump latch below: a skipped assert is a resume path,
-  // and latching on it would make the next real fault park instead of dump.
+  // Guest SDK assert/__debugbreak is `int 0xNN` raising SIGSEGV (#GP); with no
+  // kernel debugger the console steps over it, so skip the 2-byte instruction
+  // and resume (PS4 int 0x41; PS5 also int 0x44/0x45). Must stay ahead of the
+  // dump latch: a skipped assert is a resume, not a fault to park on.
   if (sig == SIGSEGV && ucv) {
     auto *uc = static_cast<ucontext_t *>(ucv);
     auto *ip = reinterpret_cast<const u8 *>(uc->uc_mcontext.gregs[REG_RIP]);
-    // A jump into unmapped memory faults with rip THERE, so reading the opcode
-    // is itself a fault, and the handler dying re-entrantly buries the real
-    // report. Check the page is there first.
+    // A jump into unmapped memory faults with rip THERE, so check the page first:
+    // the handler dying re-entrantly buries the real report.
     if (ip) {
       const long pgsz = sysconf(_SC_PAGESIZE);
       unsigned char vec = 0;
@@ -442,18 +411,15 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
   }
 #endif
 
-  // Async-signal-safe entry marker: proves the handler actually ran even if a
-  // later step (symbolize / backtrace) re-faults. Without it a re-fault inside
-  // the handler is indistinguishable from the handler never being entered.
+  // Async-signal-safe entry marker: proves the handler ran even if a later
+  // step re-faults (otherwise indistinguishable from never being entered).
   { char m[48];
     int n = std::snprintf(m, sizeof(m), "\n[crashHandler] entered sig=%d\n", sig);
     if (n > 0) { ssize_t w = write(2, m, (size_t)n); (void)w; } }
 
-  // Only the first faulting thread prints. A second concurrent fault (common at
-  // teardown) would interleave the dump and can itself core-dump, truncating it.
-  // The dumper re-entering is a different case: a step below re-faulted (e.g. the
-  // stack scan on a stack that overflowed into its guard page), and parking it
-  // would hang the process instead of ending it, so bail straight out.
+  // Only the first faulting thread prints (a concurrent second fault
+  // interleaves and truncates the dump); a dumper re-entering after a step
+  // re-faulted must bail out, not park, or the process hangs.
   static std::atomic<bool> s_dumping{false};
   static std::atomic<pid_t> s_dumper{0};
   const pid_t self = static_cast<pid_t>(syscall(SYS_gettid));
@@ -479,9 +445,8 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
               syscall_getname((u32)sc));
   BASE_LOGI("crashHandler", "  fault = {:016x}  {}",
             (unsigned long long)si->si_addr, fault);
-  // A fault inside the host-thunk pool is the guest calling an HLE import slot
-  // we bound but cannot actually service. Name it: the raw address is inside
-  // FEX's reserved heap and looks like unrelated garbage otherwise.
+  // A fault inside the host-thunk pool is a call through a bound-but-unserviced
+  // HLE import slot; name it (the raw address looks like unrelated garbage).
   {
     u32 ti = 0;
     if (const char *tn =
@@ -496,14 +461,9 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
     const u64 fa = (u64)si->si_addr;
     int mf = open("/proc/self/maps", O_RDONLY);
     if (mf >= 0) {
-      // Stream the file a line at a time. Slurping it into one fixed buffer
-      // silently truncated instead: a guest process has tens of thousands of
-      // mappings, /proc/self/maps runs past a megabyte, the fill loop's count
-      // went to zero at the brim, and the walk then fell off the end and
-      // reported the LAST (half-read) line as the neighbour of the fault. Every
-      // SotC fault dump so far "landed next to /dev/nvidiactl" for that reason
-      // alone. The one fact the block exists to establish, whether the
-      // faulting page was mapped at all, was the fact it destroyed.
+      // Stream a line at a time: slurping truncated at the buffer brim (tens of
+      // thousands of mappings push /proc/self/maps past a megabyte) and the walk
+      // then reported the last half-read line as the fault's neighbour.
       static char buf[65536];
       static char prev[512];
       size_t held = 0;      // bytes of a partial line kept at buf's front
@@ -601,9 +561,8 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
       base::FormatTo(insn, " {:02x}", b[i]);
     BASE_LOGI("crashHandler", "{}", insn.c_str());
   }
-  // The host TLS base the faulting code was using. A fault in host library code
-  // reached from the guest is usually this: something left the host fs base
-  // wrong, so every `errno = x` writes near zero instead of into host TLS.
+  // The host TLS base the faulting code was using; a fault in host library code
+  // reached from the guest is usually a wrong fs base (errno writes near zero).
   {
     unsigned long fsb = 0;
     if (::syscall(SYS_arch_prctl, 0x1003 /*ARCH_GET_FS*/, &fsb) == 0)
@@ -626,10 +585,8 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
                       : 0ul);
     }
   }
-  // DELTA_GUEST_BRK_DUMP=<reg>|all: follow an argument register one level. A
-  // planted breakpoint lands where some object is about to be used, and what
-  // that object POINTS AT (a byte stream, a descriptor) is the whole question –
-  // registers alone say which object, not what is in it.
+  // DELTA_GUEST_BRK_DUMP=<reg>|all: follow an argument register one level; what
+  // the object POINTS AT is the whole question, registers only say which object.
   if (const char *rn = kBrkDump) {
     static const struct {
       const char *name;
@@ -673,13 +630,9 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
     }
     std::fflush(stderr);
   }
-  // DELTA_GUEST_BRK_PEEK=<hex addr>[:<bytes>]: dump a fixed guest address. The
-  // register-following dump can only reach what a register points at, and the
-  // object in question is often one the guest reached by arithmetic (a
-  // compressed pointer, a heap offset) that no register holds.
-  // "scan:<hex base>:<hex size>" instead reports, per 4 KiB block, how many of
-  // its bytes are non-zero, which is how a region that should hold a heap but
-  // reads empty shows where the real data went.
+  // DELTA_GUEST_BRK_PEEK=<hex addr>[:<bytes>]: dump a fixed guest address (often
+  // one reached by arithmetic, held by no register). "scan:<base>:<size>" instead
+  // reports non-zero byte counts per 4 KiB block, showing where the data went.
   if (const char *pk = kBrkPeek; pk && std::strncmp(pk, "scan:", 5) == 0) {
     const uintptr_t base = std::strtoull(pk + 5, nullptr, 16);
     const char *c2 = std::strchr(pk + 5, ':');
@@ -778,15 +731,10 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
     std::fflush(stderr);
   }
   backtrace(gr[REG_RBP]);
-  // Raw stack scan: optimised guest code omits frame pointers, so the rbp chain
-  // above misses frames. Scan the guest stack for values that land in a loaded
-  // module's .text (the real call chain) and for pointers into the guest heap
-  // arena that hold a printable ASCII string (an asset filename / tag the
-  // faulting code was handling). The arena (0x40_0000_0000..0x41_0000_0000) is
-  // always mapped, so reading a string there can't fault.
-  // DELTA_CRASH_PEEK: the raw top of the stack. The symbolising scan below only
-  // prints values that land in a module's .text, which hides the operand a bad
-  // control transfer came through.
+  // Raw stack scan: optimised guest code omits frame pointers, so scan the
+  // guest stack for module .text return addresses and printable ASCII strings
+  // in the guest heap arena (always mapped, can't fault). DELTA_CRASH_PEEK:
+  // the raw top of stack, which the symbolising scan hides.
   if (kCrashPeek && gr[REG_RSP] >= 0x10000) {
     auto *q = reinterpret_cast<const u64 *>(gr[REG_RSP] & ~7ull);
     base::String rspwords;
@@ -797,10 +745,8 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
     }
     base::FormatTo(rspwords, "\n");
     BASE_LOGI("crashHandler", "{}", rspwords.c_str());
-    // ...and the objects rbx/r12 point at. A guest breakpoint's registers name
-    // a `this`, and the fields behind it are the whole reason for stopping
-    // there: without them a dump says which code ran, never what it was
-    // looking at. Guest heap only, and only when the range reads.
+    // ...and the objects rbx/r12 point at: a breakpoint's registers name a `this`,
+    // and the fields behind it are why we stopped there. Guest heap only.
     const struct { const char *name; u64 v; } objs[] = {
         {"rbx", (u64)gr[REG_RBX]}, {"r12", (u64)gr[REG_R12]}};
     for (const auto &o : objs) {
@@ -837,9 +783,8 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
     }
   }
 #else
-  // aarch64 host: guest x86 state lives in the FEXCore CPUState, not the host
-  // ARM signal context. Reconstruct the precise guest RIP from the host JIT PC
-  // (CPUState.rip alone is only block-accurate and multiblock hides the site).
+  // aarch64 host: guest x86 state lives in the FEXCore CPUState, not the ARM
+  // signal context; reconstruct the exact guest RIP from the host JIT PC.
   u64 hostpc = 0;
 #if defined(__aarch64__)
   if (ucv)
@@ -862,18 +807,13 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
       base::FormatTo(insnb, " {:02x}", b[i]);
     BASE_LOGI("crashHandler", "{}", insnb.c_str());
   }
-  // Guest GPR dump + rbp backtrace (parity with the native x86 dump above).
-  // gregs order is FEXCore::X86State::REG_* (RAX,RCX,RDX,RBX,RSP,RBP,RSI,RDI,
-  // R8..R15); mirror it locally so this TU needs no FEXCore headers.
-  // Take the registers from the SIGNAL CONTEXT, not from the in-memory CPUState:
-  // FEX pins every guest GPR to a fixed host register, so the host context holds
-  // the values AT the faulting instruction, while CPUState.gregs is only written
-  // back when the JIT leaves a block and FEX's syscall op spills just the subset
-  // the syscall ABI reads. Reading it here reports whichever registers the
-  // thread's last syscall happened to publish, dressed up as the fault state;
-  // that is how SotC's New-Game crash got misdiagnosed as a fiber on a freed
-  // stack. Label the fallback so a stale dump can never again be mistaken for a
-  // precise one.
+  // Guest GPR dump + rbp backtrace (parity with the native x86 dump above);
+  // gregs order is FEXCore::X86State::REG_*, mirrored locally to avoid FEXCore
+  // headers. Registers come from the SIGNAL CONTEXT, not CPUState: FEX pins
+  // guest GPRs to fixed host registers, so the context holds the values AT the
+  // faulting instruction, while CPUState.gregs holds whatever the last syscall
+  // published (how SotC's New-Game crash got misdiagnosed). The fallback is
+  // labelled so a stale dump is never mistaken for a precise one.
   u64 sig_gregs[16];
   const bool gexact = cpu::guestGregsFromSignal(ucv, sig_gregs);
   if (!gexact)
@@ -895,11 +835,9 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
               (unsigned long long)g[R12], (unsigned long long)g[R13],
               (unsigned long long)g[R14], (unsigned long long)g[R15]);
 
-    // Corroborate the recovery against si_addr: a faulting memory operand is
-    // built out of a base register, so SOME GPR should sit within a small
-    // displacement of the address that faulted. If none does, the recovery is
-    // wrong (vendored FEX's x64::SRA moved under us) and every conclusion drawn
-    // from the dump is worthless, so say so instead of printing plausible lies.
+    // Corroborate against si_addr: some GPR should sit within a small
+    // displacement of the faulting address; if none does, say so instead of
+    // printing plausible lies (vendored FEX's x64::SRA may have moved).
     if (gexact && si && si->si_addr) {
       static const char *kN[16] = {"rax", "rcx", "rdx", "rbx", "rsp", "rbp",
                                    "rsi", "rdi", "r8",  "r9",  "r10", "r11",
@@ -923,10 +861,8 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
     }
 
     // ---- SOTC free-tree walk (diagnostic; see helper above) ----
-    // Fire when the fault is inside the eboot's size-ordered free-tree insert
-    // (+0x48a70..+0x48b64), which is where every heap-corruption fault in this
-    // title lands. r15 is arg0 (the allocator state) and rdx the size being
-    // inserted; both are live for the whole loop, so the walk can be replayed.
+    // Fire inside the eboot's free-tree insert (+0x48a70..+0x48b64), where every
+    // heap-corruption fault in this title lands; r15=arg0, rdx=size, both live.
     {
       u64 ebase2 = 0;
       if (auto *proc = proc::getActive()) {
@@ -945,10 +881,8 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
     }
 
     // ---- SOTC AllocationTracker walk (diagnostic; see helper above) ----
-    // Fire only when the fault is inside the eboot's slot-21 untrack-on-free
-    // methods: fn @+0x18920 (CPU tracker) / +0x8d930 (GPU tracker). Resolve the
-    // eboot base from the module whose .text contains grip (== textSeg.addr, so
-    // grip-base is the module-relative ELF vaddr), like symbolize() does.
+    // Fire only inside the eboot's untrack-on-free fns (+0x18920 CPU / +0x8d930
+    GPU); resolve the eboot base from the module containing grip.
     {
       u64 ebase = 0;
       if (auto *proc = proc::getActive()) {
@@ -969,10 +903,9 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
                   "\n  === SOTC tracker walk (eboot base={:#x}, fault off={:#x}) "
                   "===",
                   (unsigned long long)ebase, (unsigned long long)off);
-        // Recover (tracker,key) from the saved-register slots on the stack,
-        // which are reliable regardless of FEX callee-saved reconstruction.
-        // Layout after the prologue pushes (no further stack alloc):
-        //   [rsp+0x18]=saved r13=TRACKER   [rsp+0x20]=saved r14=KEY
+        // Recover (tracker,key) from the saved-register slots on the stack
+        // (reliable regardless of FEX callee-saved reconstruction):
+        // [rsp+0x18]=saved r13=TRACKER  [rsp+0x20]=saved r14=KEY
         u64 rsp = g[RSP];
         u64 trkStk = 0, keyStk = 0;
         bool haveStk = trkRd64(rsp + 0x18, trkStk) && trkRd64(rsp + 0x20, keyStk);
@@ -1035,10 +968,9 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
       }
     }
 
-    // DELTA_CRASH_PEEK: dump a window of guest memory around each GPR that points
-    // into loaded-module space (>= 0x2000_0000_0000). An indirect call/jmp through
-    // a garbage/null vtable slot is our most common late-boot fault; seeing the
-    // object bytes + where the slot points identifies the uninitialised object.
+    // DELTA_CRASH_PEEK: dump a window around each GPR pointing into loaded-module
+    // space; an indirect call through a garbage vtable slot is our most common
+    // late-boot fault, and the object bytes identify the uninitialised object.
     if (const char *pk = kCrashPeek) {
       const u64 regs[] = {g[RAX], g[RBX], g[RDI], g[RSI], g[RCX], g[RDX]};
       const char *rn[] = {"rax", "rbx", "rdi", "rsi", "rcx", "rdx"};
@@ -1047,9 +979,8 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
         if (base < 0x200000000000ull || base >= 0x210000000000ull)
           continue;  // only the module VA window is reliably mapped to read
         auto *q = reinterpret_cast<const u64 *>(base);
-        // rax/rbx are the usual object/this pointers: dump far enough to cover a
-        // deep vtable/member-fn slot (the fault operand disp can be several
-        // hundred bytes in). Other regs get just a header.
+        // rax/rbx are the usual object/this pointers: dump deep enough for a far
+        // vtable/member-fn slot; other regs get just a header.
         int n = (r < 2) ? 56 : 8;
         base::String peekr;
         for (int i = 0; i < n; i++) {
@@ -1060,11 +991,9 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
         base::FormatTo(peekr, "\n");
         BASE_LOGI("crashHandler", "{}", peekr.c_str());
       }
-      // Explicit address list: DELTA_CRASH_PEEK=0x1c92d00,0x1c2fc00 also dumps a
-      // window of guest memory at each given VA (comma/space separated). Unlike the
-      // register scan this is NOT restricted to the loaded-module window, so it can
-      // read low ET_SCE_EXEC globals/BSS (e.g. a null singleton pointer). Guarded by
-      // mincore so an unmapped address can't fault the crash handler.
+      // Explicit address list (comma/space separated), not restricted to the
+      // loaded-module window, so low ET_SCE_EXEC globals/BSS are readable;
+      // mincore-guarded so an unmapped address can't fault the handler.
       for (const char *p = pk; *p;) {
         while (*p == ',' || *p == ' ') p++;
         char *end = nullptr;
@@ -1092,10 +1021,9 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
         BASE_LOGI("crashHandler", "{}", peeks.c_str());
       }
     }
-    // DELTA_CRASH_PEEK also dumps the raw stack window around rsp: for a fault
-    // inside a leaf helper (e.g. a lookup that returned null) the caller's
-    // locals (the key being freed, the object under operation) are the
-    // fastest route to "what data was this actually working on".
+    // DELTA_CRASH_PEEK also dumps the stack window around rsp: for a fault in a
+    // leaf helper, the caller's locals are the fastest route to what data was
+    // actually being worked on.
     if (kCrashPeek && g[RSP] >= 0x10000) {
       long pg = sysconf(_SC_PAGESIZE);
       unsigned char vec[2] = {0, 0};
@@ -1112,10 +1040,8 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
         BASE_LOGI("crashHandler", "{}", stackwords.c_str());
       }
     }
-    // DELTA_GUEST_BRK_DUMP=<reg>: follow an argument register one level. A
-    // planted breakpoint usually lands where some object is about to be used,
-    // and what that object POINTS AT (a byte stream, a descriptor) is the whole
-    // question; registers alone only say which object, not what is in it.
+    // DELTA_GUEST_BRK_DUMP=<reg>: follow an argument register one level; what
+    // the object POINTS AT is the whole question, registers only name it.
     if (const char *rn = kBrkDump) {
       static const struct {
         const char *name;
@@ -1160,10 +1086,8 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
       }
       std::fflush(stderr);
     }
-    // DELTA_GUEST_BRK_PEEK=<hex addr>[:<bytes>]: dump a fixed guest address.
-    // The register-following dump can only reach what a register points at, and
-    // the object in question is often one the guest reached by arithmetic (a
-    // compressed pointer, a heap offset) that no register holds.
+    // DELTA_GUEST_BRK_PEEK=<hex addr>[:<bytes>]: dump a fixed guest address,
+    // often one reached by arithmetic that no register holds.
     if (const char *pk = kBrkPeek) {
       const uintptr_t at = std::strtoull(pk, nullptr, 16);
       const char *colon = std::strchr(pk, ':');
@@ -1194,10 +1118,8 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
     cpu::dumpThreadTrace(stderr);
     std::fflush(stderr);
     backtrace(g[RBP]);
-    // Raw stack scan: optimised guest code omits frame pointers, so the rbp
-    // chain above misses frames. Scan the guest stack for any value that lands
-    // in a loaded module's .text; that's the (super)set of return
-    // addresses, i.e. the real call chain.
+    // Raw stack scan: optimised guest code omits frame pointers, so scan for
+    // any value landing in a loaded module's .text (the real call chain).
     BASE_LOGI("crashHandler", "  --- stack scan ---");
     auto *sp = reinterpret_cast<uintptr_t *>(g[RSP]);
     if (g[RSP] >= 0x10000) {
@@ -1226,19 +1148,16 @@ void setNullGuard(uintptr_t addr, GuardReg reg, int insnLen) {
 #endif
 }
 
-// Scan the CALLING thread's stack for return addresses that land in a loaded
-// module and print them. A syscall handler runs on the guest stack (the native
-// trampoline does not switch), so this names the guest code that reached the
-// handler even when no frame pointer is available, which is the only way to
-// see why a title's worker thread bailed out of its own loop.
+// Scan the CALLING thread's stack for module return addresses. A syscall handler
+// runs on the guest stack (the native trampoline does not switch), so this names
+// the guest code that reached the handler even with no frame pointer.
 static thread_local uintptr_t t_guestSp = 0;
 void setGuestStackScanBase(uintptr_t sp) { t_guestSp = sp; }
 uintptr_t guestStackScanBase() { return t_guestSp; }
 
-// A stack scan walks towards the top of the stack and runs into the guard page
-// at the end of it, so it cannot dereference the window directly: a diagnostic
-// must not be the thing that kills the process. Copy it out through
-// process_vm_readv, which reports an unmapped page instead of faulting on it.
+// A stack scan runs into the guard page at the top of the stack, and a
+// diagnostic must not be what kills the process; copy the window out via
+// process_vm_readv, which reports an unmapped page instead of faulting.
 static size_t copyStackWindow(uintptr_t base, uintptr_t *out, size_t words) {
   while (words) {
     iovec local{out, words * sizeof(uintptr_t)};
@@ -1301,10 +1220,9 @@ void installSigAltStack() {
   s_alt.ss_flags = 0;
   sigaltstack(&s_alt, nullptr);
 
-  // Guarantee the fatal signals are deliverable on this thread. Guest libthr
-  // (or a syscall the lifter missed) can leave them blocked in the host mask, in
-  // which case a synchronous fault force-kills the process before our handler
-  // runs (silent core, no dump). Unblock them unconditionally.
+  // Guest libthr (or a syscall the lifter missed) can leave the fatal signals
+  // blocked, force-killing the process before our handler runs (silent core);
+  // unblock them unconditionally.
   sigset_t unb;
   sigemptyset(&unb);
   sigaddset(&unb, SIGSEGV);
@@ -1318,21 +1236,17 @@ void installSigAltStack() {
 }
 
 void installCrashHandler() {
-  // Let layers that cannot reach the kernel arm a watch (see utl::armWriteWatch):
-  // the GPU only learns the address worth watching (the descriptor pointer a
-  // shader actually read) while a draw is being processed.
+  // Let layers that cannot reach the kernel arm a watch: the GPU only learns
+  // the address worth watching while a draw is being processed.
   utl::setWriteWatchArmer([](uintptr_t addr, size_t bytes, unsigned everyMs) {
     probe::startWriteWatch(addr, bytes, everyMs);
   });
   struct sigaction sa = {};
   sa.sa_sigaction = crashHandler;
-  // SA_NODEFER: don't auto-mask the signal during the handler, so a re-fault
-  // inside the dump produces another catchable signal (and our s_dumping guard
-  // parks it) instead of the kernel forcing the default action -> silent core.
-  // SA_ONSTACK: run the handler on each thread's sigaltstack (installSigAltStack)
-  // so a stack-overflow / corrupt-RSP fault is still deliverable. Without it the
-  // kernel can't push the signal frame onto the bad guest stack and force-kills
-  // the process (silent core, no dump).
+  // SA_NODEFER: a re-fault inside the dump stays catchable (s_dumping parks it)
+  // instead of the kernel forcing the default action (silent core).
+  // SA_ONSTACK: run on each thread's sigaltstack so a stack-overflow fault is
+  // still deliverable.
   sa.sa_flags = SA_SIGINFO | SA_NODEFER | SA_ONSTACK;
   sigemptyset(&sa.sa_mask);
   installSigAltStack();  // for the installing (ctx) thread

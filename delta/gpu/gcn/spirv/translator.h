@@ -1,19 +1,11 @@
 #pragma once
 
 /*
- * PS4Delta : PS4 emulation and research project
- *
- * Internal shared state of the GCN -> SPIR-V translator. Only the backend TUs
- * (gcn_spirv.cc, translate_alu.cc, translate_mem.cc) include this; the
- * public surface is gcn_spirv.h / gcn_translate.h.
- *
- * The translator models the GCN register file as Private-storage arrays
- * (sgpr[128] / vgpr[256]) plus SCC/EXEC/state scalars, emits straight
- * load/compute/store SPIR-V per instruction, and relies on spirv-opt's SSA
- * rewrite to clean it up. One wave lane == one SPIR-V invocation: EXEC is a
- * single "this lane active" bit, VCC (sgpr[106]) a 0/1 scalar.
- *
- * ISA reference: AMD Sea Islands (GFX7) ISA,
+ * PS4Delta: internal state of the GCN -> SPIR-V translator. Backend TUs only
+ * (gcn_spirv.cc, translate_alu.cc, translate_mem.cc); public surface is
+ * gcn_spirv.h / gcn_translate.h. The register file is Private arrays plus
+ * SCC/EXEC scalars; spirv-opt's SSA rewrite cleans the straight-line output.
+ * ISA reference: AMD Sea Islands (GFX7),
  * https://docs.amd.com/v/u/en-US/sea-islands-instruction-set-architecture_0
  */
 
@@ -39,10 +31,7 @@ inline bool InGuest(u64 a) {
   return a >= kGuestLo && a < kGuestHi;
 }
 
-// Loud, deduplicated report of an instruction the translator does not
-// implement, so it falls back to an approximation. Logged once per distinct
-// (encoding, opcode): silent wrong codegen is never acceptable, but a
-// per-frame flood is useless.
+// Loud, deduplicated report of an unimplemented instruction (once per encoding+opcode).
 void WarnUnsupported(const char* enc,
                      u32 op,
                      u32 w0 = 0,
@@ -63,20 +52,12 @@ struct Translator {
   Id t_v2 = 0, t_v3 = 0, t_v4 = 0;
   Id p_priv_u = 0, sgpr = 0, vgpr = 0;
   bool predicate_vector = false;
-  // A mesh workgroup executes one selected guest block uniformly. Only the
-  // waves whose private PC names that block may change their guest state.
+  // Mesh: only waves whose private PC names the selected block may change state.
   Id block_active = 0;
   bool rdna_sources = false;
-  // Guest address of dword 0 of the program being translated. Guest memory is
-  // identity-mapped, so this is just the code pointer. s_getpc_b64 needs it:
-  // shaders form absolute addresses from their own PC to reach descriptors
-  // stored alongside the code, and a PC of zero sends those loads to null.
+  // Guest address of dword 0; s_getpc_b64 forms absolute addresses from it.
   u64 program_base = 0;
-  // Graphics stages under PushCodeBase(): the {lo, hi} u32 members of the push
-  // block that carry the stage's code address per draw. s_getpc_b64 then reads
-  // the address at draw time instead of baking program_base into the module,
-  // so one content-keyed module serves every address the title streams the
-  // shader to. Zero = bake program_base (compute, or the 128-byte push floor).
+  // Push-constant {lo,hi} of the code address under PushCodeBase(); 0 = bake program_base.
   Id pc_base_var = 0;
   u32 pc_base_member = 0;
   Id scc_var = 0;    // scalar condition code
@@ -89,26 +70,18 @@ struct Translator {
   Id gfx_buf_type = 0;  // shared Buf { uint data[]; } type (set 2)
   Id lds_buf_var = 0;   // shared-LDS storage buffer (set 3), see EnsureLdsBuffer
   std::unordered_map<u32, Id> gfx_buf_vars;  // binding -> raw-buffer SSBO
-  // Indexed by (arrayed ? 1 : 0) | (dref ? 2 : 0) | (3D ? 4 : 0).
-  // Index: arrayed | dref<<1 | 3d<<2 | integer<<3. An integer-format image
-  // needs its own OpTypeImage (sampled type uint) and yields a uvec4.
+  // Index: arrayed | dref<<1 | 3d<<2 | integer<<3 (integer images yield uvec4).
   Id img_types[16] = {};      // sampled 2D / 2D-array / 3D, color / depth
   Id sampled_types[16] = {};  // corresponding combined image-sampler types
   Id sampled_ptrs[16] = {};   // UniformConstant pointers to sampled_types
   Id storage_img_types[2] = {};  // storage 2D / 2D-array images
   Id storage_img_ptrs[2] = {};   // UniformConstant pointers to storage images
   bool image_query = false;
-  // DELTA_GPU_PSTEX: the most recent image sample, so the PS epilogue can
-  // export it instead of the shader's own colour maths (see gcn_spirv.cc).
+  // DELTA_GPU_PSTEX: most recent image sample, exported by the PS epilogue.
   Id last_texel = 0;
-  // DELTA_GPU_PSTEX keeps the sampled texel in a Private variable rather than
-  // an SSA value: a sample taken inside a branch does not dominate the shader
-  // epilogue, and using the value directly made the module fail validation.
+  // Same, in a Private var: a sample inside a branch does not dominate the epilogue.
   Id last_texel_var = 0;
-  // DELTA_GPU_PSVGPR_AT's destination: three VGPRs captured the moment one
-  // instruction has executed, so a register the shader later reuses can still
-  // be read. Private, like last_texel_var, so a capture inside a branch still
-  // reaches the epilogue.
+  // DELTA_GPU_PSVGPR_AT: three VGPRs snapshotted after one instruction.
   Id probe_var = 0;
   Id dbg_file = 0;  // OpString for OpLine pc markers (DELTA_GPU_SHDUMP)
 
@@ -139,8 +112,7 @@ struct Translator {
     m.Name(state_var, "state");
   }
 
-  // Seed EXEC all-active at the start of the function body. Must run after
-  // BeginFunction (emits an OpStore).
+  // Seed EXEC all-active; must run after BeginFunction (emits an OpStore).
   void SeedExec() {
     SetSg(126, lane_masks ? U32(~0u) : wave_masks ? BallotLow(True()) : U32(1));
     if (lane_masks)
@@ -148,20 +120,10 @@ struct Translator {
   }
 
   // ---- wave masks ------------------------------------------------------
-  // EXEC and every v_cmp result are 64-bit LANE MASKS on the hardware, and
-  // shaders read them as numbers, not as booleans: an NGG program gates its
-  // per-primitive work with `v_cmpx_gt_u32 vcc_lo, v_lane`, true for lane L
-  // exactly when the mask has more than L bits' worth of value. Modelling a
-  // mask as this invocation's single bit makes that gate pass for lane 0 only,
-  // and the whole wave's vertex staging collapses onto one lane.
-  // With wave_masks the mask really is the subgroup's ballot, so mbcnt counts
-  // real lanes and a mask compared as an integer means what it means on the
-  // hardware. Off (the GFX7 path) keeps the one-bit model.
-  bool wave_masks = false;
-  // Compute's per-invocation mask retains its hardware bit position in the
-  // 64-bit pair. Unlike a Boolean in bit zero, it can intersect literal lane
-  // masks without activating the whole workgroup. Cross-lane mask queries
-  // still require the subgroup operations that implement those instructions.
+  // EXEC and v_cmp results are 64-bit lane masks shaders read as numbers; a
+  // one-bit-per-invocation model collapses NGG's v_cmpx lane gating onto lane 0.
+  bool wave_masks = false;  // true mask = subgroup ballot; off (GFX7) = one-bit model
+  // Per-invocation mask keeps its hardware bit position in the 64-bit pair.
   bool lane_masks = false;
   bool full_wave_masks = false;
   Id mask_lane_id = 0;
@@ -245,13 +207,9 @@ struct Translator {
   }
 
   // ---- cross-lane ------------------------------------------------------
-  // A GCN wave is 64 lanes and a host subgroup may be narrower, so an
-  // instruction that names a lane cannot always be answered with a subgroup
-  // shuffle. Compute has a second channel: a Workgroup array indexed by
-  // LocalInvocationIndex, which is exactly the order GCN packs threads into
-  // waves. It costs two barriers, so it is only usable where every invocation
-  // reaches the same dynamic instance. `uniform_here`, set per instruction
-  // from the same analysis that places the LDS barriers.
+  // A wave wider than the host subgroup cannot always use a subgroup shuffle;
+  // compute also has a Workgroup-array channel (two barriers, uniform points
+  // only; see uniform_here).
   Id lane_id = 0;    // this invocation's lane within its wave (0..63)
   u32 wave_size = 64;  // GCN uses 64; RDNA can request 32 at dispatch.
   Id wave_base = 0;  // LocalInvocationIndex of lane 0 of this wave
@@ -264,15 +222,11 @@ struct Translator {
 
   bool CanExchange() const { return xchg_var && uniform_here; }
 
-  // This invocation's lane within its GCN wave. Zero where no such index
-  // exists (a fragment wave's lanes are pixels the rasteriser grouped, and
-  // Vulkan exposes no mapping), which keeps the graphics lowerings that
-  // assume a single lane exactly as they were.
+  // Lane within the GCN wave; 0 where no lane index exists (graphics).
   Id WaveLane() { return lane_id ? lane_id : U32(0); }
 
-  // Publish/fetch across the whole wave through the Workgroup array. `slot`
-  // picks one of the two per-invocation words, so one barrier pair can carry
-  // two values. Callers bracket their publishes and fetches with Barrier().
+  // Cross-wave publish/fetch via the Workgroup array; `slot` is one of the
+  // two words a barrier pair can carry. Bracket with Barrier().
   void WavePublish(Id value, u32 slot = 0) {
     m.Store(XchgAt(Add(U32(slot * xchg_lanes), xchg_index)), value);
   }
@@ -298,18 +252,14 @@ struct Translator {
     m.EmitVoid(spv::Op::OpControlBarrier, {U32(2), U32(2), U32(0x108)});
   }
 
-  // Subgroup helpers. Exact within one subgroup; a wave wider than the
-  // subgroup needs WaveExchange for anything crossing the boundary.
+  // Exact within one subgroup; crossing the boundary needs WaveExchange.
   void RequireSubgroup(spv::Capability extra) {
     m.Capability(spv::Capability::GroupNonUniform);
     m.Capability(extra);
   }
   Id SubgroupShuffle(Id value, Id lane) {
     RequireSubgroup(spv::Capability::GroupNonUniformShuffle);
-    // OpGroupNonUniformShuffle is POISON for an id at or past the subgroup
-    // width, so the index is masked into it rather than merely assumed to fit.
-    // The module is built for the device that reported the width, so it folds
-    // to a constant instead of a SubgroupSize load.
+    // Shuffle is poison past the subgroup width; mask the index (folds to a constant).
     return m.Emit(spv::Op::OpGroupNonUniformShuffle, t_u,
                   {U32(3), value, And(lane, U32(HostSubgroupSize() - 1))});
   }
@@ -357,19 +307,10 @@ struct Translator {
   void SetVgF(u32 i, Id f) { SetVg(i, m.Bitcast(t_u, f)); }
 
   // ---- SGPR spill slots ------------------------------------------------
-  // A shader out of scalar registers parks scalars in the LANES of a VGPR with
-  // v_writelane_b32 and reloads them with v_readlane_b32. Both scalar operands
-  // of that pair are wave-uniform by encoding (neither the value nor the
-  // lane may be a VGPR), so every invocation writes and reads exactly the
-  // same thing, and a Private array per spilled VGPR reproduces the wave's
-  // lane file exactly, with no cross-lane channel and no lane index. That
-  // matters most in a graphics stage, where no lane index exists at all: the
-  // old lowering dropped every write whose lane was not 0 and answered every
-  // read with the invocation's own value, and SotC restores descriptor-table
-  // pointers this way.
-  // Populated by PlanLaneSpills before the body is translated, so a reload
-  // that textually precedes its spill still resolves here.
-  std::unordered_set<u32> spill_vgprs;
+  // A scalar-starved shader parks scalars in VGPR lanes (v_writelane_b32);
+  // both lane operands are wave-uniform by encoding, so a Private array per
+  // spilled VGPR reproduces the lane file exactly, with no cross-lane channel.
+  std::unordered_set<u32> spill_vgprs;  // pre-populated by PlanLaneSpills
   std::unordered_map<u32, Id> spill_vars;
   bool IsSpillVgpr(u32 v) const { return spill_vgprs.count(v) != 0; }
   Id SpillAt(u32 vgpr, Id lane) {
@@ -391,9 +332,7 @@ struct Translator {
   Id Ext1(u32 op, Id a) { return m.ExtInst(t_f, op, {a}); }
   Id Ext2(u32 op, Id a, Id b) { return m.ExtInst(t_f, op, {a, b}); }
   Id FMul(Id a, Id b) { return m.Emit(spv::Op::OpFMul, t_f, {a, b}); }
-  // GCN's V_*_LEGACY_F32 multiply: zero times anything is zero, including
-  // inf and NaN, where IEEE gives NaN. Shaders rely on it to kill a term
-  // guarded by a reciprocal that may have divided by zero.
+  // V_*_LEGACY_F32: zero times anything is zero, even inf/NaN.
   Id LegacyMul(Id a, Id b) {
     const Id zero = F32(0.f);
     const Id any_zero = m.Emit(spv::Op::OpLogicalOr, t_bool,
@@ -409,13 +348,8 @@ struct Translator {
     return m.ExtInst(t_f, GLSLstd450FClamp, {f, F32(0.0f), F32(1.0f)});
   }
 
-  // The two saturating primitives the Sea Islands ISA writes its `_clamp` and
-  // `_legacy` transcendentals in terms of (v_rcp_clamp_f32 =
-  // ClampInfToFltMax(Rcp(x)), v_rcp_legacy_f32 = ConvertInfToZero(Rcp(x)),
-  // and likewise for log/rsq). Both must touch ONLY infinities: a GLSL
-  // FMin/FMax/FClamp against +/-FLT_MAX would also fold a NaN into a finite
-  // bound, because GLSL's min/max return the non-NaN operand. Selecting on
-  // OpIsInf leaves NaN, and every finite value, exactly as produced.
+  // Saturating primitives behind the _clamp/_legacy transcendentals; NaN must
+  // survive (select on OpIsInf, not GLSL min/max, which fold NaN).
   Id IsInf(Id f) { return m.Emit(spv::Op::OpIsInf, t_bool, {f}); }
   Id FLt(Id a, Id b) { return m.Emit(spv::Op::OpFOrdLessThan, t_bool, {a, b}); }
   Id FGt(Id a, Id b) {
@@ -430,8 +364,7 @@ struct Translator {
     return SelectF(IsInf(f), F32(0.0f), f);
   }
 
-  // ---- integer ALU (uint domain; signed ops bitcast through t_i). Shifts
-  // mask the amount to [4:0] as GCN does. ----
+  // ---- integer ALU (uint domain; signed bitcast; shifts mask to [4:0]) ----
   Id Add(Id a, Id b) { return m.Emit(spv::Op::OpIAdd, t_u, {a, b}); }
   Id Sub(Id a, Id b) { return m.Emit(spv::Op::OpISub, t_u, {a, b}); }
   Id Mul(Id a, Id b) { return m.Emit(spv::Op::OpIMul, t_u, {a, b}); }
@@ -497,8 +430,7 @@ struct Translator {
   Id PairType() { return m.TypeStruct({t_u, t_u}); }  // {result, carry/hi}
 
   // ---- constant buffers (graphics SMRD model) ----
-  // Declared as CB { uvec4 data[]; } at set 1. Separate bindings preserve
-  // the distinct V# resources selected by each s_buffer_load.
+  // CB { uvec4 data[]; } at set 1, one binding per distinct V#.
   Id EnsureCbuf(u32 binding) {
     auto it = cbuf_vars.find(binding);
     if (it != cbuf_vars.end())
@@ -519,9 +451,7 @@ struct Translator {
     cbuf_vars[binding] = v;
     return v;
   }
-  // Read cbuffer dword k (== uvec4 data[k>>2][k&3]) as a uint. The uvec4 index
-  // clamps into the declared window so an out-of-range constant
-  // index cannot produce an invalid access chain.
+  // Read cbuffer dword k; the uvec4 index clamps into the declared window.
   Id CbufDword(u32 binding, u32 k) {
     if (indirect_cbufs)
       return CbufDwordId(binding, U32(k));
@@ -572,11 +502,8 @@ struct Translator {
   }
 
   // ---- raw buffers (graphics MUBUF model) ----
-  // Declared as Buf { uint data[]; } at set 2, one binding per distinct V# the
-  // stage loads through. Storage rather than uniform because the address is a
-  // per-lane index, not a constant offset.
-  // The shared-LDS buffer (set 3, binding 0). One block per wave; the base is
-  // computed once at entry (see PlanSharedLds).
+  // Buf { uint data[]; } at set 2, one binding per distinct V# (per-lane
+  // index, so storage rather than uniform).
   Id EnsureLdsBuffer() {
     if (lds_buf_var)
       return lds_buf_var;
@@ -589,9 +516,8 @@ struct Translator {
     return lds_buf_var;
   }
 
-  // Buf { uint data[]; }, shared by every storage buffer the stage declares.
-  // The type ids are deduplicated by the builder, so decorating a second copy
-  // decorates the same id twice, which spirv-val rejects outright.
+  // Shared by every storage buffer; the builder dedups type ids, so a second
+  // decorated copy would decorate the same id twice and fail spirv-val.
   Id EnsureRawBlockType() {
     if (!gfx_buf_type) {
       const Id run = m.TypeRuntimeArray(t_u);
@@ -672,10 +598,7 @@ struct Translator {
     if (field >= 256 && field <= 510)
       return Vg(field - 255);
     const Id lo = SrcRaw(field, literal);
-    // An integer inline constant is a 64-bit value in a 64-bit operand, so
-    // -1..-16 fill the high dword too. Sign-extending 0..64 is a no-op, so this
-    // needs no per-op opt-in. Without it `s_lshr_b64 exec, -1, n`, the NGG
-    // prologue's lane mask, yields EXEC 0 and masks off the whole shader.
+    // Inline integer constants -1..-16 fill the high dword of a 64-bit operand too.
     if (field >= 128 && field <= 208)
       return Sar(lo, U32(31));
     return sign_extend ? Sar(lo, U32(31)) : U32(0);
@@ -694,9 +617,8 @@ struct Translator {
   }
 };
 
-// SPI_PS_INPUT_ENA lays system inputs into initial VGPRs in ascending bit
-// order. Interpolated parameters are modeled as Vulkan Location inputs by the
-// instruction translator; seed the system values that shaders read directly.
+// Seed the system values SPI_PS_INPUT_ENA lays into initial VGPRs (ascending
+// bit order); interpolated parameters come through as Location inputs.
 inline void SeedPsInputVgprs(Translator& t,
                              u32 ena,
                              std::vector<Id>& iface) {
@@ -741,19 +663,12 @@ inline void SeedPsInputVgprs(Translator& t,
 // Per-stage state carried into the shared per-instruction emitter (EmitInst).
 struct StageContext {
   bool is_ps = false;
-  // SPI_PS_INPUT_CNTL_0..31: which VS PARAMETER EXPORT each PS input attribute
-  // slot reads (OFFSET, bits [5:0]). The mapping is NOT the identity: a VS
-  // commonly exports the clip position as param0 and the real texture
-  // coordinate as param1, and points the PS's attr0 at param1. Null means no
-  // mapping was supplied and attr_i falls back to param_i.
+  // SPI_PS_INPUT_CNTL: VS param each PS attr slot reads; null = attr_i -> param_i.
   const u32* ps_in_cntl = nullptr;
-  // SPI_PS_IN_CONTROL.NUM_INTERP: how many of those 32 slots are MEANINGFUL.
-  // Slots at or above it are don't-care and read 0, which is not a mapping:
-  // honouring them would send every such attribute to Location 0.
+  // NUM_INTERP: slots at or above it are don't-care and read 0.
   u32 ps_num_interp = 0;
-  // The VS parameter exports that actually EXIST, ascending. OFFSET indexes the
-  // parameter CACHE, which packs exports densely in export order, so OFFSET is
-  // the param NUMBER only when the exports happen to be dense.
+  // VS param exports that exist; OFFSET indexes the export cache, not always
+  // the param number.
   const std::vector<u32>* vs_exported_params = nullptr;
   bool is_cs = false;
   Recompiled* r = nullptr;
@@ -770,20 +685,15 @@ struct StageContext {
   std::unordered_set<u32>
       direct_vfetch;  // MUBUF pc seeded as vertex input
   u32 max_param = 0;
-  // PS5 inline vertex fetch: (Location input, first dest VGPR, component count)
-  // keyed by the fetch MUBUF's pc. The destination VGPRs are (re)seeded from
-  // the input AT the fetch instruction, because an NGG merged-wave's index math
-  // can overwrite them (e.g. v0, reused as the fetch index) between the
-  // function prologue and the position transform.
+  // PS5 inline vertex fetch: (input, first dest VGPR, comps) per fetch pc;
+  // reseeded at the fetch because NGG index math can overwrite the VGPRs.
   struct VfetchSeed {
     Id in_var;
     u32 dest_vgpr, num_comps;
   };
   std::unordered_map<u32, VfetchSeed> vfetch_seed;
-  // DELTA_GPU_DBGPOS: the position input and the cbuffer holding a 4x4
-  // transform, so the position export can be recomputed the way the draw's
-  // host-side state says it should be. Splits "the lifted math is wrong" from
-  // "the values reaching the shader are wrong".
+  // DELTA_GPU_DBGPOS: position input + cbuf transform, to split bad lifted
+  // math from bad input values.
   Id dbg_pos_in = 0;
   u32 dbg_pos_comps = 0;
   int dbg_pos_cbuf = -1;
@@ -792,14 +702,10 @@ struct StageContext {
 
   // PS
   Id color_outs[8] = {};  // lazily declared per MRT target (location == target)
-  // Bit n set = MRT n is an integer-format target, so its output is declared
-  // uvec4 and the export stores raw VGPR bits instead of reinterpreting them
-  // as floats. Bit n of tex_uint_mask says the same for sampler binding n.
+  // Bit n: MRT n is integer format (output uvec4); tex_uint_mask says the
+  // same for sampler bindings.
   u32 mrt_uint_mask = 0;
-  // Bit n set = the pass binds colour attachment n. An export to a target the
-  // pass does not bind writes nowhere, and declaring an Output the pipeline has
-  // no attachment for is a value Vulkan discards, which the layer reports on
-  // every such draw (Undefined-Value-ShaderOutputNotConsumed).
+  // Bit n: the pass binds colour attachment n; unbound exports write nowhere.
   u32 mrt_bound_mask = 0xFF;
   u32 tex_uint_mask = 0;
   Id depth_out = 0;       // MRTZ -> FragDepth (lazily declared)
@@ -807,69 +713,48 @@ struct StageContext {
   bool wrote_color = false;  // compile-time: shader has a color export
   Id color_written_var = 0;  // runtime: this fragment reached a color export
   const std::unordered_set<u32>* flat_attrs = nullptr;
-  // Sampler-binding plan (see PlanMimgBindings): MIMGs referencing the same
-  // descriptor share one set-0 binding; variables are created lazily per
-  // binding. The plan is also what TrackTextures pairs against at draw time.
+  // MIMGs sharing a descriptor share one set-0 binding; TrackTextures pairs
+  // against this plan at draw time.
   const MimgBindingPlan* mimg_plan = nullptr;
-  // Set 0 is shared by both stages, so a VS's samplers are numbered after the
-  // PS's. tex_vars[] stays indexed by the stage-local binding.
+  // Set 0 is shared: VS samplers number after the PS's; tex_vars stays stage-local.
   u32 tex_binding_base = 0;
   static constexpr u32 kMaxPsSamplers = 24;  // == gpu::vk::kMaxTex
   Id tex_vars[kMaxPsSamplers] = {};
   u32 tex_types[kMaxPsSamplers] = {};
-  // Bit i set: binding i's T# is SQ_RSRC_IMG_3D. Nothing in the MIMG encoding
-  // says so (a 3D descriptor leaves DA 0), so the caller has to supply it from
-  // the decoded descriptors, and it belongs in the shader cache key.
+  // Bit i: binding i's T# is SQ_RSRC_IMG_3D; invisible in MIMG (DA 0), so
+  // caller-supplied and cache-keyed.
   u32 tex_3d_mask = 0;
-  // Bit i set: binding i's T# is SQ_RSRC_IMG_1D[_ARRAY]. Same reasoning as
-  // tex_3d_mask: the instruction encodes only DA, not the dimensionality. The
-  // resource is bound as a height-1 2D image; the address body carries x
-  // (+layer) and y is fixed at the row centre.
+  // Bit i: binding i's T# is 1D[_ARRAY]; bound as height-1 2D, y at row centre.
   u32 tex_1d_mask = 0;
 
   // shared graphics
   std::unordered_map<u32, u32> cbuf_bind;  // V# SGPR -> set-1 binding
-  // Raw MUBUF loads: instruction pc -> set-2 storage-buffer binding (see
-  // PlanGfxBuffers). Keyed per instruction, not per SGPR, because one SGPR quad
-  // can hold several descriptors over a shader's life.
+  // Raw MUBUF: pc -> set-2 binding (per pc, not SGPR: one quad can hold
+  // several descriptors over a shader's life).
   std::unordered_map<u32, u32> gfx_buf_bind;
-  // Per-instruction cbuf bindings for constant buffer_loads whose srsrc SGPRs
-  // are reused (PS5 table-chained descriptors); takes precedence over
-  // cbuf_bind.
+  // Per-pc cbuf bindings for reused srsrc SGPRs (PS5 table chains); beats cbuf_bind.
   std::unordered_map<u32, u32> mubuf_cbuf_by_pc;
   // Per-instruction RDNA SMEM binding when one sbase has multiple producers.
   std::unordered_map<u32, u32> smem_cbuf_by_pc;
-  // set-1 binding -> the dword its staged window starts at (ShaderCbuf::
-  // first_dword). A load's index is relative to the window, not to the guest
-  // buffer, so anything absent here reads from dword 0 as before.
+  // set-1 binding -> staged window start (ShaderCbuf::first_dword); absent = 0.
   std::unordered_map<u32, u32> cbuf_first_dword;
-  // pcs of `s_mov exec, sN` movs where sN holds unmodelled SPI launch state
-  // (e.g. the PS coverage mask); emitting them would zero EXEC and skip every
-  // export in the CFG path, so they are dropped (EXEC keeps its all-on seed).
+  // pcs of `s_mov exec, sN` with unmodelled launch state; emitting would zero
+  // EXEC and skip every export.
   std::unordered_set<u32> skip_launch_movs;
 
   // Compute: storage buffers modelling the guest memory the CS reads/writes.
   std::unordered_map<u32, u32> cs_bind;  // instruction pc -> binding
   u32 cs_cur_pc = 0;                     // instruction being emitted
   std::vector<Id> cs_ssbo;                         // binding -> SSBO variable
-  // Push-constant struct carrying a per-binding bound (in dwords), when the
-  // stage's entry declared the bound block: {user_data[16], bounds[64]}.
-  // A buffer store the ISA computes outside the bound is dropped by real
-  // hardware long before it can hit a neighbouring device allocation; SSBO
-  // loads and stores clamp to it.
+  // Push constants {user_data[16], bounds[64]}: SSBO access clamps to the
+  // per-binding bounds, as the hardware drops out-of-bound stores.
   Id cs_bounds_var = 0;
   Id cs_guest_table = 0, cs_guest_translate = 0;
   std::unordered_map<u32, std::pair<u32, u32>> cs_runtime_resources; // binding -> kind, SGPR
   std::unordered_set<u32> cs_runtime_images;
 
-  // Attributes that v_interp_mov_f32 reads as P10 or P20. Those are the
-  // per-vertex DELTAS (P1-P0, P2-P0), which an interpolated fragment input
-  // cannot supply, so the whole Location is declared PerVertexKHR, an
-  // array[3] of the triangle's vertex values. A Location cannot be both that
-  // and an ordinary interpolated input, and two variables cannot share one, so
-  // the choice is per attribute: everything here goes through the array (its
-  // interpolated value recomputed from BaryCoordKHR), everything else keeps
-  // the plain input.
+  // Attrs v_interp_mov_f32 reads as P10/P20 (per-vertex deltas); their whole
+  // Location becomes a PerVertexKHR array[3] recomputed from BaryCoordKHR.
   std::unordered_set<u32> pervertex_attrs;
   std::unordered_map<u32, Id> pervertex_vars;
   Id bary_var = 0;  // BaryCoordKHR, declared on first use
@@ -881,34 +766,22 @@ struct StageContext {
   Id gds_var = 0;   // GDS counters (ds_append / ds_consume), a storage buffer
   Id lds_var = 0;           // uint array backing LDS (0 = no LDS)
   u32 lds_dwords = 0;  // its length
-  // Workgroup in a CS. A fragment shader cannot declare Workgroup storage at
-  // all. SPIR-V allows that class only in GLCompute/Kernel/Task/Mesh, so a
-  // graphics stage backs LDS with Private, one copy per invocation. That is
-  // exact precisely when every address is the lane's OWN slot, which is what
-  // `v_mbcnt_{lo,hi}(-1)` computes: the ISA counts bits in the explicit vsrc
-  // mask, so an all-ones mask yields the raw thread id regardless of EXEC.
-  // The idiom that would break it is mbcnt applied to EXEC (a compaction
-  // index), where lanes share and reuse slots over time.
+  // Workgroup in a CS; graphics backs LDS with Private (exact only when every
+  // address is the lane's own slot, e.g. v_mbcnt with an explicit all-ones
+  // mask, not mbcnt-on-EXEC compaction indices).
   spv::StorageClass lds_storage = spv::StorageClass::Workgroup;
-  // ...unless the stage takes the shared-LDS path: a storage buffer at set 3
-  // with one lds_dwords block per wave, which is what an NGG vertex program
-  // needs. It stages every vertex through LDS and then reads back slots ITS
-  // OWN lane never wrote, so Private storage hands it zeros and the position
-  // export comes out degenerate.
+  // Nonzero = shared-LDS path instead: set-3 buffer, one block per wave, which
+  // an NGG vertex program needs (it reads slots its own lane never wrote).
   Id lds_wave_base = 0;  // dword index of this wave's block (0 = Private LDS)
-  // The vertex stage sets these before planning LDS: shared LDS needs a value
-  // every lane of a wave agrees on to key its block by, and the vertex index
-  // is the only one a vertex shader has.
+  // Shared LDS keys its block by a wave-agreed value; the vertex index is the
+  // only one a VS has.
   bool is_vs_shared_lds_capable = false;
   Id vertex_index_value = 0;
   std::unordered_set<u32> ds_own_lane;
   Id subgroup_local_id = 0;     // SubgroupLocalInvocationId for DS swizzles
-  // Instruction indices (sorted) at which a workgroup barrier must be emitted
-  // because the guest compiler omitted one it was entitled to omit on a
-  // 64-lane wave. See PlanLdsBarriers.
+  // Sorted instruction indices needing a barrier the guest omitted. See PlanLdsBarriers.
   std::vector<u32> lds_barrier_at;
-  // Per instruction: is this v_readfirstlane's source proven wave-uniform, so
-  // that every lowering of it agrees? See ProvenUniformReadFirstLane.
+  // Per instruction: v_readfirstlane source proven wave-uniform.
   std::vector<u8> uniform_readfirstlane;
   // Per instruction: may the group be synchronised there? See UniformPoints.
   std::vector<u8> uniform_points;
@@ -919,17 +792,16 @@ struct StageContext {
 
 // ---- stage-io helpers (gcn_spirv.cc) --------------------------------------
 Id PsInputVar(Translator& t, StageContext& sc, u32 attr);
-// Attributes a reachable v_interp_mov_f32 reads as P10/P20: those Locations
-// become PerVertexKHR arrays, which has to be settled before the first read.
+// Locations a reachable v_interp_mov_f32 reads as P10/P20 become PerVertexKHR
+// arrays; settled before the first read.
 std::unordered_set<u32> PlanPerVertexAttrs(const Program& program,
                                            const u8* reachable);
 void EmitVintrp(Translator& t, u32 w, StageContext& sc);
 Id VsParamOut(Translator& t, StageContext& sc, u32 p);
 Id PsColorOut(Translator& t, StageContext& sc, u32 target);
 Id PsDepthOut(Translator& t, StageContext& sc);
-// The barycentric I/J pairs SPI_PS_INPUT_ENA allocates at the bottom of the
-// VGPR file. SeedPsInputVgprs cannot do it: they come from BaryCoordKHR, which
-// lives with the rest of the fragment-input helpers.
+// Seed the barycentric I/J VGPRs (bottom of the file per SPI_PS_INPUT_ENA)
+// from BaryCoordKHR, which SeedPsInputVgprs cannot supply.
 void SeedPsBarycentrics(Translator& t, u32 ena, StageContext& sc);
 
 // ---- ALU emitters (translate_alu.cc) --------------------------------------
@@ -963,10 +835,8 @@ void EmitVop3(Translator& t,
               bool clamp,
               u32 omod = 0,
               Id s1_hi = 0);
-// Vector compare: writes the 0/1 predicate to sgpr[dst]; the cmpx forms also
-// replace EXEC.
-// s0_hi/s1_hi carry the high dword of a 64-bit operand pair; the f64/i64/u64
-// opcode families need both halves to compare a whole value.
+// Vector compare: 0/1 predicate to sgpr[dst], cmpx also replaces EXEC;
+// s0_hi/s1_hi carry the high dwords of 64-bit operand pairs.
 void EmitVopc(Translator& t,
               u32 op,
               Id s0f,
@@ -977,13 +847,11 @@ void EmitVopc(Translator& t,
               Id s0_hi = 0,
               Id s1_hi = 0);
 bool IsVop3b(u32 op);
-// The VGPRs a shader uses as SGPR spill areas: every v_writelane_b32
-// destination, including the VOP3 form. See Translator::spill_vgprs.
+// Every v_writelane_b32 destination (incl. VOP3). See Translator::spill_vgprs.
 std::unordered_set<u32> PlanLaneSpills(const Program& program,
                                             const u8* reachable = nullptr);
-// v_readlane_b32 / v_writelane_b32 against such a VGPR, which is exact in
-// every stage. False when the VGPR is not a spill area, leaving the general
-// cross-lane lowering to answer the instruction.
+// v_readlane/writelane against a spill VGPR, exact in every stage; false
+// leaves the general cross-lane lowering.
 bool EmitLaneSpill(Translator& t,
                    u32 op,
                    u32 dst,
@@ -1018,35 +886,26 @@ bool PlanCbufs(const Program& program,
 void EmitCbufSmrd(Translator& t,
                   const Inst& inst,
                   const std::unordered_map<u32, u32>& bindings);
-// True for the MIMG ops that state their own LOD, i.e. the ones legal outside a
-// fragment shader (see the definition for the opcode-bit reasoning).
+// True for MIMG ops stating their own LOD (legal outside fragment shaders).
 bool MimgNamesItsLod(u32 op);
-// DS ops a graphics stage may run against Private-backed LDS: the plain loads
-// and stores only. Atomics are excluded because Vulkan does not allow them on a
-// Private pointer, and everything else declines.
+// DS ops legal on Private-backed LDS: plain loads/stores only (no atomics on
+// a Private pointer).
 bool DsGraphicsSupported(u32 op);
-// Dwords of Private LDS a graphics program needs, from the largest address its
-// DS instructions can reach. 0 if it has none. Sized statically rather than
-// from M0: these shaders set M0 to 0x10000, the whole 64 KB, which is an upper
-// bound meaning "unrestricted", not an allocation.
+// Dwords of Private LDS a graphics program needs, static from its DS
+// addresses (M0 0x10000 means "unrestricted", not an allocation).
 u32 GraphicsLdsDwords(const Program& program, const u8* reachable);
-// The DS instructions whose address is provably the lane's own slot, so a
-// Private-backed LDS answers them exactly.
+// DS instructions whose address is provably the lane's own slot.
 std::unordered_set<u32> PlanDsOwnLane(const Program& program,
                                       const u8* reachable);
-// Declare SubgroupLocalInvocationId and the shuffle capability, the channel a
-// cross-lane instruction (ds_swizzle, DPP) reads another lane through.
+// Declare SubgroupLocalInvocationId + shuffle capability (ds_swizzle/DPP channel).
 void EnableDsSwizzle(Translator& t, StageContext& sc, std::vector<Id>& iface);
 bool UsesDsSwizzle(const Program& program, const u8* reachable);
 void EmitMimg(Translator& t,
               const Inst& inst,
               StageContext& sc,
               const Id* address = nullptr);
-// Assign a set-2 storage-buffer binding to every raw MUBUF/MTBUF load in a
-// graphics stage, skipping the instructions `claimed` already serves as vertex
-// inputs. Instructions sharing one descriptor (same SGPR quad, same producing
-// scalar load) share a binding; anything past MaxGfxBuffers() is left unplanned
-// and warns at emit time, exactly as an unimplemented op would.
+// Set-2 binding per raw MUBUF/MTBUF load not already claimed as a vertex
+// input; sharers share a binding, past the cap warns at emit time.
 void PlanGfxBuffers(const Program& program,
                     u32 first_binding,
                     const std::unordered_set<u32>* claimed,
@@ -1054,8 +913,8 @@ void PlanGfxBuffers(const Program& program,
                     std::unordered_map<u32, u32>& bindings,
                     const u8* reachable = nullptr);
 void EmitGfxMubuf(Translator& t, const Inst& inst, StageContext& sc);
-// Typed buffer op in a graphics stage. Loads go through the same set-2 window
-// as EmitGfxMubuf; a store is dropped, because that window is not written back.
+// Typed buffer op in a graphics stage; loads share the set-2 window, stores
+// are dropped (the window is not written back).
 void EmitGfxMtbuf(Translator& t, const Inst& inst, StageContext& sc);
 bool PlanCsResources(const Program& program,
                      const u8* reachable,
@@ -1073,9 +932,8 @@ void EmitCsMimg(Translator& t,
                 const Id* address = nullptr);
 void EmitDs(Translator& t, const Inst& inst, StageContext& sc);
 
-// The compute resource model: a guest range aliased as Buf { uint data[]; },
-// addressed by dword index. ISA-neutral, so the RDNA2 path binds the same
-// buffers and only has to decode its own (differently encoded) scalar loads.
+// Compute resource model: a guest range aliased as Buf { uint data[]; },
+// addressed by dword index; ISA-neutral, so RDNA2 binds the same buffers.
 Id CsSsboPtr(Translator& t, StageContext& sc, u32 binding, Id dword_idx);
 Id CsSsboLoad(Translator& t, StageContext& sc, u32 binding, Id dword_idx);
 Id CsSsboBound(Translator& t, StageContext& sc, u32 binding);
@@ -1100,9 +958,8 @@ void CsSsboStore(Translator& t,
 // Storage-buffer binding planned for the instruction at pc, or -1.
 int CsBindingFor(StageContext& sc, u32 pc);
 
-// RECTLIST expansion stage: three post-VS corners in, two triangles out. Shared
-// with the RDNA2 path, which reaches RECTLIST under a different primitive-type
-// number but needs the identical fixed-function expansion.
+// RECTLIST expansion: three post-VS corners in, two triangles out; shared
+// with the RDNA2 path.
 std::vector<u32> EmitRectListGeometry(
     u32 num_params,
     const std::unordered_set<u32>& flat_attrs);
