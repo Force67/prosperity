@@ -1,0 +1,69 @@
+// Demon's Souls (PPSA01342, update 1.05, PS5)
+// 2026-09-12: renders the Sony startup text. A native Wayland window with all GPU
+// capture/snapshot options disabled reproduces the later corruption, verified
+// with KDE Spectacle. Reaching the main menu has not been verified.
+// GPU texture-layout conversion now handles direct 32/64/128-bit compute
+// images in the existing VRAM buffers. The paired startup comparison measured
+// median input conversion 189 -> 66 ms/frame, image retile 191 -> 149 ms/frame,
+// and 1.0 -> 1.35 FPS in the 15-draw segment. Later boot still runs around
+// 1 FPS and remains corrupted. These measurements do not establish playability.
+// About 340-380 MB/frame, 160 dispatches and 115 resource flushes, with about
+// 33 guest-compute batch waits/frame. GPU conversion has its own waits.
+// Verified 1,745 live conversions (20.8 GB, 41 guest addresses) byte-for-byte
+// against the CPU converter, plus 39 image tests with Vulkan sync validation.
+// All 34 CTest targets pass. The old "retile" timing included raw-buffer
+// writebacks; it now reports those separately as "buffers".
+// Additional pass: GPU conversion supports expanded 8/16-bit texels, and
+// CPU tiling no longer waits for selected workers that acquired no work.
+// With unrelated background compilation active, capture-free paired runs
+// measured image writeback 196 -> 150 ms/frame (15 draws) and 194 -> 168 ms
+// (36 draws). Overall speed remains around 1 FPS. All 34 CTest targets and
+// all 40 image tests with Vulkan synchronization validation pass.
+// Fixed: uniform cubemap descriptor tables in CS 0x800b547300, BC1 compute
+// reads, the 320 MiB shadow array, and base-mip stores through block views
+// whose unused LAST_LEVEL exceeds MAX_MIP.
+// Frame 180: the end-of-frame dump of RGBA16F texture 0x81bca00000 is also
+// corrupted. UI PS 0x800b484400 samples it, but the dump does not establish
+// its contents at that draw. Windowed verification confirms the visible
+// corruption, but does not establish its source.
+
+// 2026-09-12, renderer throughput pass. The frame was CPU-bound, not GPU-bound:
+// the GPU executed it in 5-10 ms while the walk under the command-processor
+// mutex took 500+ ms, and 13 guest job workers held ~11 of 16 cores, so
+// spreading host work over threads bought almost nothing. What paid was taking
+// the work away.
+// The tiled half of every compute image conversion used to cross the CPU twice
+// per frame -- ~240 MB in on the way to the shader, ~230 MB out on the way back
+// -- for 82 ms/frame at a bit over 2 GB/s of cold memory. Those guest pages are
+// now imported (VK_EXT_external_memory_host) and moved by linear DMA to and
+// from the VRAM scratch the shader actually addresses. Measured over eight
+// 300 s runs, four each way at matched wall clock (100-160 s):
+//   conversions   129 -> 52 ms/frame     host-in  22 -> 0.9 ms   (240 -> 4 MB)
+//   host-out       60 -> 6 ms/frame      gpu-wait 42 -> 41 ms    (unchanged)
+//   csflush        94 -> 80 ms/frame     texture path 86 -> 75 ms
+//   1.504 -> 1.712 fps (+14%), 338 -> 373 frames rendered in 300 s
+// Binding the imported pages to the tiling shader DIRECTLY was tried and is
+// wrong: the shader's addressing is scattered, and scattered PCIe access cost
+// 145 ms/frame of GPU wait against 42 ms for the same bytes moved linearly.
+// Recording conversions into the open dispatch batch was also tried and
+// reverted: it cut conversion time to 13 ms but split the flush into 48 waits a
+// frame instead of 28, and lengthened each batch enough (67 -> 136 ms) to be a
+// net loss. DELTA_GPU_CS_TILE_IMPORT=0 restores the copies for A/B.
+// Also removed: a duplicate full TexHash of every texture refreshed in a frame
+// (the upload already reads the surface), 47 -> 29 ms/frame.
+// UNRESOLVED: the title intermittently stops submitting part-way through a run
+// and logs "waitOnAddress ... remains pending". It predates this work (an
+// unmodified build did it at t=266 s) but was seen in 2 of 6 import-on runs
+// against 0 of 5 import-off, always in the runs that were rendering fastest.
+// Not explained; treat a short run as suspect rather than as a result.
+
+// Reproduce the late boot frame, with captures under DELTA_GPU_DUMP_DIR.
+// +DELTA_GPU_CAPTURE=180
+// +DELTA_GPU_CAPTURE_EXIT=1
+// +DELTA_GPU_SNAPEVERY=30
+// +DELTA_GPU_SNAPEVERY_MAX=8
+// +DELTA_GPU_CSPROBE=547300
+// +DELTA_PAD_SCRIPT=30:cross,60:cross,90:cross,120:cross,150:cross,180:cross
+
+// CPU conversion control for performance comparisons.
+// +DELTA_GPU_CS_GPU_TILING=0
