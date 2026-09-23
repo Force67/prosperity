@@ -28,6 +28,12 @@ void EmitCfg(gpu::gcn::Translator& t,
              const gpu::gcn::Program& program,
              gpu::gcn::StageContext& sc);
 
+// The compute program being translated (for DELTA_GPU_CSVGPR).
+void SetComputeAddress(u64 address);
+
+// The LDS access a DS instruction makes: 1 = read, 2 = write, 3 = both.
+u32 LdsAccess(const gpu::gcn::Inst& inst);
+
 // rdna_compute.cc: emit a memory instruction against the compute resource
 // model (set-0 storage buffers). Returns false for encodings that have no
 // compute-specific form, which the caller then emits normally.

@@ -628,6 +628,88 @@ TEST(RdnaComputeAlu, XadUsesXorBeforeWrappingAdd) {
   EXPECT_EQ(dest[2], 0xffffffffu);
 }
 
+TEST(RdnaComputeAlu, HalfPrecisionOpsSelectHalvesAndPackResults) {
+  auto& renderer = gpu::rhi::DefaultRenderer();
+  if (!gpu::rhi::Init(renderer))
+    GTEST_SKIP() << "A Vulkan device is required for this integration test";
+  alignas(65536) static std::array<u32, 16384> dest{};
+  alignas(256) static std::array<u32, 4096> code{};
+  gpu::ps5::NoteGpuPool(reinterpret_cast<u64>(dest.data()), sizeof(dest));
+  // v1 = {1.0, 2.0}, v2 = {4.0, 3.0}, v3 = {-1.0, 0.5}, v6 = 0xabcd0000
+  // v_add_f16 v4, v1, v2
+  // v_min3_f16 v5, v1, v2, v3 op_sel:[1,1,1,0]
+  // v_min_f16_sdwa v6, v1, v2 dst_sel:WORD_0 UNUSED_PRESERVE src*_sel:WORD_1
+  // v_max3_f16 v8, v1, v2, v3 op_sel:[0,0,0,1]
+  // image_store v4/v5/v6/v8 at x = 0..3
+  const u32 shader[] = {
+      0x7e0202ff, 0x40003c00, 0x7e0402ff, 0x42004400, 0x7e0602ff,
+      0x3800bc00, 0x7e0c02ff, 0xabcd0000, 0x64080501, 0xd7513805,
+      0x040e0501, 0x740c04f9, 0x05051401, 0xd7544008, 0x040e0501,
+      0x7e0e0280, 0xf0200100, 0x00000407, 0x7e0e0281, 0xf0200100,
+      0x00000507, 0x7e0e0282, 0xf0200100, 0x00000607, 0x7e0e0283,
+      0xf0200100, 0x00000807, 0xbf810000};
+  std::copy(std::begin(shader), std::end(shader), code.begin());
+  gpu::rdna::NextProgramGeneration();
+  gpu::ps5::Regs regs;
+  const u64 pc = reinterpret_cast<u64>(code.data());
+  regs[gpu::ps5::mmCOMPUTE_PGM_LO] = pc >> 8;
+  regs[gpu::ps5::mmCOMPUTE_PGM_HI] = pc >> 40;
+  regs[gpu::ps5::mmCOMPUTE_NUM_THREAD_X] = 1;
+  regs[gpu::ps5::mmCOMPUTE_NUM_THREAD_Y] = 1;
+  regs[gpu::ps5::mmCOMPUTE_NUM_THREAD_Z] = 1;
+  regs[gpu::ps5::mmCOMPUTE_PGM_RSRC2] = 8 << 1;
+  const u64 address = reinterpret_cast<u64>(dest.data());
+  regs[gpu::ps5::mmCOMPUTE_USER_DATA_0] = address >> 8;
+  regs[gpu::ps5::mmCOMPUTE_USER_DATA_0 + 1] =
+      ((address >> 40) & 0xff) | (20 << 20) | (3u << 30);
+  regs[gpu::ps5::mmCOMPUTE_USER_DATA_0 + 3] = 0x80000fac;
+  const u32 dispatch[] = {1, 1, 1, 1};
+  gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
+  ASSERT_TRUE(gpu::rhi::FlushCsWrites(renderer));
+  EXPECT_EQ(dest[0], 0x00004500u);
+  EXPECT_EQ(dest[1], 0x00003800u);
+  EXPECT_EQ(dest[2], 0xabcd4000u);
+  EXPECT_EQ(dest[3], 0x44000000u);
+}
+
+TEST(RdnaComputeAlu, LockstepWaveBranchesOnFullExecMask) {
+  auto& renderer = gpu::rhi::DefaultRenderer();
+  if (!gpu::rhi::Init(renderer))
+    GTEST_SKIP() << "A Vulkan device is required for this integration test";
+  alignas(65536) static std::array<u32, 16384> dest{};
+  alignas(256) static std::array<u32, 4096> code{};
+  gpu::ps5::NoteGpuPool(reinterpret_cast<u64>(dest.data()), sizeof(dest));
+  // An LDS round trip makes this a lock-step wave. Then, as a tiled lighting
+  // shader does: exec = !(x >= 40 || 1 <= 0) through an SGPR-source SDWA
+  // compare and s_nor_b64, skip on execz, store x + 1 for the lanes left.
+  const u32 shader[] = {
+      0x34020082, 0xd8340000, 0x00000001, 0xbf8cc07f, 0xd8d80000,
+      0x02000001, 0xbe8c03a8, 0xbe8d0381, 0x7e060280, 0x7d8606f9,
+      0x06868a0d, 0x7d86000c, 0x8dea0a6a, 0xbefe046a, 0xbf880003,
+      0x4a080481, 0xf0200100, 0x00000400, 0xbf810000};
+  std::copy(std::begin(shader), std::end(shader), code.begin());
+  gpu::rdna::NextProgramGeneration();
+  gpu::ps5::Regs regs;
+  const u64 pc = reinterpret_cast<u64>(code.data());
+  regs[gpu::ps5::mmCOMPUTE_PGM_LO] = pc >> 8;
+  regs[gpu::ps5::mmCOMPUTE_PGM_HI] = pc >> 40;
+  regs[gpu::ps5::mmCOMPUTE_NUM_THREAD_X] = 64;
+  regs[gpu::ps5::mmCOMPUTE_NUM_THREAD_Y] = 1;
+  regs[gpu::ps5::mmCOMPUTE_NUM_THREAD_Z] = 1;
+  regs[gpu::ps5::mmCOMPUTE_PGM_RSRC2] = (8 << 1) | (1 << 15);
+  const u64 address = reinterpret_cast<u64>(dest.data());
+  regs[gpu::ps5::mmCOMPUTE_USER_DATA_0] = address >> 8;
+  regs[gpu::ps5::mmCOMPUTE_USER_DATA_0 + 1] =
+      ((address >> 40) & 0xff) | (20 << 20) | (63u << 30);
+  regs[gpu::ps5::mmCOMPUTE_USER_DATA_0 + 2] = 63 >> 2;
+  regs[gpu::ps5::mmCOMPUTE_USER_DATA_0 + 3] = 0x80000fac;
+  const u32 dispatch[] = {1, 1, 1, 1};
+  gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
+  ASSERT_TRUE(gpu::rhi::FlushCsWrites(renderer));
+  for (u32 x = 0; x < 64; x++)
+    EXPECT_EQ(dest[x], x < 40 ? x + 1 : 0u) << "lane " << x;
+}
+
 TEST(RdnaComputeAlu, BitfieldMaskWrapsWidthAndOffset) {
   auto& renderer = gpu::rhi::DefaultRenderer();
   if (!gpu::rhi::Init(renderer))

@@ -541,6 +541,18 @@ void SeedPsBarycentrics(Translator& t, u32 ena, StageContext& sc) {
   }
 }
 
+// Two slots can read one parameter, and a Location is either a PerVertexKHR
+// array or a plain input, never both.
+bool ReadsPerVertex(StageContext& sc, u32 attr) {
+  if (sc.pervertex_attrs.count(attr))
+    return true;
+  const u32 loc = PsAttrLocation(sc, attr);
+  for (u32 a : sc.pervertex_attrs)
+    if (PsAttrLocation(sc, a) == loc)
+      return true;
+  return false;
+}
+
 // v_interp_p1/p2/mov_f32. The RDNA2 encoding is identical to GFX7's, so both
 // front ends share this.
 void EmitVintrp(Translator& t, u32 w, StageContext& sc) {
@@ -553,7 +565,7 @@ void EmitVintrp(Translator& t, u32 w, StageContext& sc) {
   // interpolated value. VSRC selects the parameter: 0 = P10, 1 = P20,
   // 2 = P0. Normally P10/P20 are deltas, but OFFSET[5] together with
   // FLAT_SHADE requests passthrough: all three vertices retain their raw bits.
-  if (sc.pervertex_attrs.count(attr)) {
+  if (ReadsPerVertex(sc, attr)) {
     const Id var = PsPerVertexVar(t, sc, attr);
     const Id p_in_f = t.m.TypePointer(spv::StorageClass::Input, t.t_f);
     const auto vert = [&](u32 i) {

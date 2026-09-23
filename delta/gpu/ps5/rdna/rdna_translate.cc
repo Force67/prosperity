@@ -146,6 +146,13 @@ bool RdnaMubufStore(u32 op) {
          (op >= 0x18 && op <= 0x1f);
 }
 
+// An atomic without GLC returns nothing, so it is a store as far as a graphics
+// stage can tell.
+bool RdnaMubufAtomicNoReturn(const Inst& inst) {
+  return inst.opcode >= 0x30 && inst.opcode <= 0x60 &&
+         !((inst.raw[0] >> 14) & 1);
+}
+
 // MTBUF: 0x00-0x03 load, 0x04-0x07 store, 0x08-0x0f the d16 pair (opcode bit 3
 // comes from word1[21], which rdna_decode folds in).
 bool RdnaMtbufStore(u32 op) {
@@ -811,7 +818,7 @@ bool RdnaPlanCbufs(const Program& program,
       continue;
     }
     if (sload && smem.soffset == 125 && off < 0) {
-      if (ShDbg())
+      if (ShDbg() || kDrawCensus)
         BASE_LOGI("gcnspv", "cbuf plan reject pc={:#x} sload negative off={}",
                   inst.pc, off);
       return false;
@@ -856,7 +863,7 @@ bool RdnaPlanCbufs(const Program& program,
     if (binding == ~0u) {
       binding = first_binding + static_cast<u32>(cbufs.size());
       if (binding >= binding_limit) {
-        if (ShDbg())
+        if (ShDbg() || kDrawCensus)
           BASE_LOGI("gcnspv", "cbuf plan reject pc={:#x} out of "
                               "bindings ({})",
                     inst.pc, binding);
@@ -1814,7 +1821,50 @@ bool RdnaUsesLaneOps(const Program& program) {
 // pre-decoded operands + a GFX7-canonical opcode). The scalar and VOP1/2/C
 // field layouts are identical to GFX7; VOP3 differs only in the opcode-field
 // width and the CLAMP bit position (bit 15, not 11); SMEM replaces SMRD.
+// DELTA_GPU_CSVGPR_CS=<cs> DELTA_GPU_CSVGPR_PC=<pc> DELTA_GPU_CSVGPR=<v>:
+// v..v+3 as they stand after the instruction at pc replace whatever that
+// compute shader's image stores write, so its output image shows them.
+DELTA_OPTION(u64, kCsVgprCs, "DELTA_GPU_CSVGPR_CS", 0);
+DELTA_OPTION(u32, kCsVgprPc, "DELTA_GPU_CSVGPR_PC", 0);
+DELTA_OPTION(u32, kCsVgpr, "DELTA_GPU_CSVGPR", 0);
+thread_local u64 g_cs_addr = 0;
+
+void RdnaEmitInstBody(Translator& t, const Inst& inst, StageContext& sc);
+
 void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
+  const bool probing = sc.is_cs && kCsVgprCs && g_cs_addr == kCsVgprCs;
+  if (probing && !sc.cs_probe_var) {
+    const Id arr = t.m.TypeArray(t.t_u, 4);
+    sc.cs_probe_var =
+        t.m.Variable(t.m.TypePointer(spv::StorageClass::Private, arr),
+                     spv::StorageClass::Private, t.m.ConstNull(arr));
+  }
+  const Id p_priv = t.p_priv_u;
+  if (probing && inst.enc == Enc::kMimg && inst.opcode == 0x08) {
+    const u32 vdata = (inst.raw[1] >> 8) & 0xFF;
+    const u32 n = __builtin_popcount((inst.raw[0] >> 8) & 0xF);
+    for (u32 i = 0; i < n; i++)
+      t.SetVg(vdata + i, t.m.Load(t.t_u, t.m.AccessChain(p_priv, sc.cs_probe_var,
+                                                         {t.U32(i)})));
+  }
+  RdnaEmitInstBody(t, inst, sc);
+  // 1000 + n names SGPR n and 2000 + n VGPR n as an integer; both are
+  // stored as floats so a colour target shows them.
+  if (probing && inst.pc == kCsVgprPc)
+    for (u32 i = 0; i < 4; i++) {
+      const Id value = kCsVgpr >= 2000   ? t.Vg(kCsVgpr - 2000 + i)
+                       : kCsVgpr >= 1000 ? t.Sg(kCsVgpr - 1000 + i)
+                                         : t.Vg(kCsVgpr + i);
+      t.StorePrivate(
+          t.m.AccessChain(p_priv, sc.cs_probe_var, {t.U32(i)}),
+          kCsVgpr >= 1000
+              ? t.m.Bitcast(t.t_u,
+                            t.m.Emit(spv::Op::OpConvertUToF, t.t_f, {value}))
+              : value);
+    }
+}
+
+void RdnaEmitInstBody(Translator& t, const Inst& inst, StageContext& sc) {
   const u32 w = inst.raw[0], w1 = inst.raw[1];
   Id dpp_src0 = 0;
   if (inst.extension == gpu::gcn::InstExtension::kDpp) {
@@ -2065,6 +2115,46 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       // no-carry integer add/sub forms must NOT write VCC (a later v_cndmask
       // reads it), and v_xnor_b32 sits where GFX7 has v_bfm_b32.
       switch (op) {
+        case 0x32:  // v_add_f16
+        case 0x33:  // v_sub_f16
+        case 0x34:  // v_subrev_f16
+        case 0x35:  // v_mul_f16
+        case 0x36:  // v_fmac_f16
+        case 0x39:  // v_max_f16
+        case 0x3a:  // v_min_f16
+        case 0x3b: {  // v_ldexp_f16
+          const auto half = [&](Id bits) {
+            return t.m.CompositeExtract(
+                t.t_f, t.m.ExtInst(t.t_v2, GLSLstd450UnpackHalf2x16, {bits}),
+                0);
+          };
+          const Id a = half(dpp_src0 || sdwa0 ? s0u : RdnaF16Bits(t, src0, lit));
+          const Id b = half(sdwa1 ? s1u : RdnaF16Bits(t, src1, lit));
+          Id r;
+          switch (op) {
+            case 0x32: r = t.FAdd(a, b); break;
+            case 0x33: r = t.FSub(a, b); break;
+            case 0x34: r = t.FSub(b, a); break;
+            case 0x35: r = t.FMul(a, b); break;
+            case 0x36:
+              r = t.m.ExtInst(t.t_f, GLSLstd450Fma,
+                              {a, b, half(t.Vg(vdst))});
+              break;
+            case 0x39: r = t.m.ExtInst(t.t_f, GLSLstd450NMax, {a, b}); break;
+            case 0x3a: r = t.m.ExtInst(t.t_f, GLSLstd450NMin, {a, b}); break;
+            default: {
+              const Id e = t.m.Bitcast(
+                  t.t_i, t.Sar(t.Shl(s1u, t.U32(16)), t.U32(16)));
+              r = t.m.ExtInst(t.t_f, GLSLstd450Ldexp, {a, e});
+              break;
+            }
+          }
+          t.SetVg(vdst, t.And(t.m.ExtInst(t.t_u, GLSLstd450PackHalf2x16,
+                                          {t.m.CompositeConstruct(
+                                              t.t_v2, {r, t.F32(0.f)})}),
+                              t.U32(0xFFFF)));
+          break;
+        }
         case 0x02:  // v_dot2c_f32_f16, not GFX7 v_writelane
         case 0x0D:  // v_dot4c_i32_i8, not GFX7 v_min_legacy_f32
           gpu::gcn::WarnUnsupported("vop2.rdna", op, w, w1);
@@ -2255,6 +2345,52 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
                               (op_sel & 2) ? t.U32(0) : t.Vg(vdst));
         }
         t.SetVg(vdst, result);
+        break;
+      }
+      // f16 three-operand forms. OP_SEL[2:0] pick each source's high half,
+      // OP_SEL[3] writes the result into the destination's high half.
+      if (op == 0x351 || op == 0x354 || op == 0x357 || op == 0x34b) {
+        if (clamp || omod) {
+          gpu::gcn::WarnUnsupported("vop3.f16-modifier", op, w, w1);
+          break;
+        }
+        const u32 src[3] = {s0, s1, s2};
+        Id v[3];
+        for (u32 i = 0; i < 3; i++) {
+          Id half = t.m.ExtInst(t.t_v2, GLSLstd450UnpackHalf2x16,
+                                {RdnaF16Bits(t, src[i], inst.literal)});
+          if ((op_sel >> i) & 1)
+            half = t.m.ExtInst(t.t_v2, GLSLstd450UnpackHalf2x16,
+                               {t.Shr(t.SrcRaw(src[i], inst.literal), t.U32(16))});
+          v[i] = t.m.CompositeExtract(t.t_f, half, 0);
+          if ((abs >> i) & 1)
+            v[i] = t.Ext1(GLSLstd450FAbs, v[i]);
+          if ((neg >> i) & 1)
+            v[i] = t.FNeg(v[i]);
+        }
+        const auto fmin = [&](Id a, Id b) {
+          return t.m.ExtInst(t.t_f, GLSLstd450NMin, {a, b});
+        };
+        const auto fmax = [&](Id a, Id b) {
+          return t.m.ExtInst(t.t_f, GLSLstd450NMax, {a, b});
+        };
+        Id r;
+        if (op == 0x351)
+          r = fmin(fmin(v[0], v[1]), v[2]);
+        else if (op == 0x354)
+          r = fmax(fmax(v[0], v[1]), v[2]);
+        else if (op == 0x357)
+          r = fmax(fmin(v[0], v[1]), fmin(fmax(v[0], v[1]), v[2]));
+        else
+          r = t.m.ExtInst(t.t_f, GLSLstd450Fma, {v[0], v[1], v[2]});
+        const Id bits = t.And(
+            t.m.ExtInst(t.t_u, GLSLstd450PackHalf2x16,
+                        {t.m.CompositeConstruct(t.t_v2, {r, t.F32(0.f)})}),
+            t.U32(0xFFFF));
+        t.SetVg(vdst, (op_sel & 8)
+                          ? t.Or(t.And(t.Vg(vdst), t.U32(0xFFFF)),
+                                 t.Shl(bits, t.U32(16)))
+                          : bits);
         break;
       }
       if (op_sel)
@@ -2460,7 +2596,8 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       // RDNA2 f16 compares sit at 0xC8-0xCF, which the GFX7-numbered EmitVopc
       // would read as u32 integer compares; run the float predicate (op-0xC8)
       // on the low-half f16 operands instead. u32 compares stay at 0xC0-0xC7.
-      if (op >= 0xC8 && op <= 0xCF) {
+      // v_cmpx_*_f16 follow at 0xD8-0xDF; they write EXEC like the f32 cmpx.
+      if ((op >= 0xC8 && op <= 0xCF) || (op >= 0xD8 && op <= 0xDF)) {
         auto f16 = [&](u32 f) {
           return t.m.CompositeExtract(
               t.t_f,
@@ -2468,8 +2605,10 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
                           {RdnaF16Bits(t, f, lit)}),
               0);
         };
-        gpu::gcn::EmitVopc(t, op - 0xC8, f16(src0), f16(vopc_src1),
-                           t.SrcRaw(src0, lit), t.SrcRaw(vopc_src1, lit));
+        const u32 gcn_op = op >= 0xD8 ? op - 0xD8 + 0x10 : op - 0xC8;
+        gpu::gcn::EmitVopc(t, gcn_op, f16(src0), f16(vopc_src1),
+                           t.SrcRaw(src0, lit), t.SrcRaw(vopc_src1, lit),
+                           gcn_op & 0x10 ? 126 : 106);
         break;
       }
       const bool supported = op <= 0x1F || (op >= 0x80 && op <= 0x87) ||
@@ -2510,7 +2649,8 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       // that is never read back, and draws sharing a resource share one window.
       // Drop it and keep going: a rejected shader drops the whole draw, while
       // a draw missing a side-effect write still rasterizes its geometry.
-      if (inst.enc == Enc::kMubuf ? RdnaMubufStore(inst.opcode)
+      if (inst.enc == Enc::kMubuf ? RdnaMubufStore(inst.opcode) ||
+                                        RdnaMubufAtomicNoReturn(inst)
                                   : RdnaMtbufStore(inst.opcode)) {
         gpu::gcn::AuditNote(
             inst.enc == Enc::kMtbuf ? "mtbuf.store.rdna" : "mubuf.store.rdna",
@@ -2873,9 +3013,9 @@ void PlanCrossLane(const Program& program, Translator& t, StageContext& sc,
 // Which sampler bindings use the requested DIM encodings. GCN left this to the T# alone, so the
 // shared emitter takes it out of band; gfx10 states it in the instruction's DIM
 // field, which is available here without a descriptor.
-u32 RdnaTexDimMask(const Program& program,
+u64 RdnaTexDimMask(const Program& program,
                    const gpu::gcn::MimgBindingPlan& plan, u32 dimensions) {
-  u32 mask = 0;
+  u64 mask = 0;
   for (const Inst& inst : program) {
     if (inst.enc != Enc::kMimg ||
         !(dimensions & (1u << ((inst.raw[0] >> 3) & 0x7))))
@@ -2883,7 +3023,7 @@ u32 RdnaTexDimMask(const Program& program,
     const auto it = plan.binding_by_pc.find(inst.pc);
     if (it != plan.binding_by_pc.end() &&
         it->second < StageContext::kMaxPsSamplers)
-      mask |= 1u << it->second;
+      mask |= 1ull << it->second;
   }
   return mask;
 }
@@ -3622,8 +3762,12 @@ bool TranslatePs(const Program& program,
   NoteCbufWindows(r.ps_cbufs, sc);
   PlanGraphicsLds(program, t, sc);
   const gpu::gcn::MimgBindingPlan mimg_plan = RdnaPlanMimg(program);
-  if (mimg_plan.binding_srsrc.size() > StageContext::kMaxPsSamplers)
+  if (mimg_plan.binding_srsrc.size() > StageContext::kMaxPsSamplers) {
+    if (ShDbg() || kDrawCensus)
+      BASE_LOGI("gcnspv", "ps {:#x} rejected: {} textures", g_ps_addr,
+                mimg_plan.binding_srsrc.size());
     return false;
+  }
   sc.mimg_plan = &mimg_plan;  // borrowed by EmitBody
   sc.tex_3d_mask = RdnaTexDimMask(program, mimg_plan, 1u << 2);
   sc.tex_1d_mask = RdnaTexDimMask(program, mimg_plan, (1u << 0) | (1u << 4));
@@ -3760,11 +3904,28 @@ bool HasNggPrimitiveExports(const u32* code) {
   return false;
 }
 
+void SetComputeAddress(u64 address) {
+  g_cs_addr = address;
+}
+
+u32 LdsAccess(const Inst& inst) {
+  if (inst.enc != Enc::kDs || ((inst.raw[0] >> 17) & 1))
+    return 0;
+  const u32 op = inst.opcode;
+  if (op == 0x35 || op == 0xb2 || op == 0xb3 || (op >= 0x3d && op <= 0x3f))
+    return 0;  // swizzle, permutes, GDS counters
+  const bool read = (op >= 0x36 && op <= 0x3c) || (op >= 0x76 && op <= 0x78) ||
+                    op == 0xfe || op == 0xff || (op >= 0xa1 && op <= 0xa6);
+  const bool atomic_rtn = (op >= 0x20 && op <= 0x33) || (op >= 0x60 && op <= 0x73);
+  return atomic_rtn ? 3 : read ? 1 : 2;
+}
+
 void EmitCfg(Translator& t, const Program& program, StageContext& sc) {
   const u32 max_pc =
       program.empty() ? 0 : program.back().pc + program.back().size;
   std::vector<u32> starts = BlockStarts(program, max_pc);
-  if (sc.is_mesh) {
+  const bool scheduled = sc.is_mesh || sc.wave_lockstep;
+  if (scheduled) {
     // A guest barrier is a rendezvous PC. Keep it separate from adjacent
     // instructions so an early wave can wait while its peers keep running.
     for (const Inst& inst : program) {
@@ -3782,7 +3943,7 @@ void EmitCfg(Translator& t, const Program& program, StageContext& sc) {
   // A single block executes once for every invocation. In the general
   // dispatch loop, different invocations can visit blocks on different
   // iterations, so a workgroup barrier inside a case would be unsafe.
-  t.uniform_here = sc.is_mesh || (sc.is_cs && num_blocks == 1);
+  t.uniform_here = scheduled || (sc.is_cs && num_blocks == 1);
   const auto block_of = [&](u32 pc) -> u32 {
     if (pc >= max_pc)
       return kExit;
@@ -3840,7 +4001,7 @@ void EmitCfg(Translator& t, const Program& program, StageContext& sc) {
   t.m.Branch(dispatch);
   t.m.OpenBlock(dispatch);
   Id state = t.State();
-  if (sc.is_mesh) {
+  if (scheduled) {
     // All invocations execute the selected block, with guest state updates
     // predicated by their wave's PC. This keeps cross-lane exchanges uniform
     // even when guest waves take different branches or finish at different
@@ -3896,11 +4057,25 @@ void EmitCfg(Translator& t, const Program& program, StageContext& sc) {
     const u32 blk_start = starts[bi];
     const u32 blk_end = (bi + 1 < num_blocks) ? starts[bi + 1] : max_pc;
     bool terminated = false;
+    // What the LDS saw since the last barrier: 1 = a read, 2 = a write. A
+    // block can be entered after either.
+    u32 lds_seen = num_blocks > 1 ? 3 : 0;
     for (const Inst& inst : program) {
       if (inst.pc < blk_start || inst.pc >= blk_end)
         continue;
       const int k = BranchKind(inst);
       if (k == 0 && !IsCall(inst) && !IsReturn(inst)) {
+        if (sc.lds_sync) {
+          u32 access = LdsAccess(inst);
+          if (access && ((access & 1 && lds_seen & 2) ||
+                         (access & 2 && lds_seen & 1))) {
+            t.Barrier();
+            lds_seen = 0;
+          }
+          lds_seen |= access;
+          if (inst.enc == Enc::kSopp && inst.opcode == 0x0a)
+            lds_seen = 0;
+        }
         RdnaEmitInst(t, inst, sc);
         continue;
       }

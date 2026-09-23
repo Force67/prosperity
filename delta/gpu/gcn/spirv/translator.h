@@ -132,6 +132,8 @@ struct Translator {
     return lane_masks ? SelectB(MaskLaneHigh(), hi, lo) : lo;
   }
   Id SgMask(u32 sgpr) { return MaskWord(Sg(sgpr), Sg(sgpr + 1)); }
+  // A wave32 mask is one SGPR; the next one is an ordinary register the
+  // compiler may still hold a live value in (a descriptor table pointer, say).
   void SetMask(u32 sgpr, Id value) {
     if (full_wave_masks) {
       WavePublish(value);
@@ -139,7 +141,10 @@ struct Translator {
       const Id lo = WaveFetch(U32(0)), hi = WaveFetch(U32(32));
       Barrier();
       SetSg(sgpr, lo);
-      SetSg(sgpr + 1, hi);
+      if (wave_size != 32)
+        SetSg(sgpr + 1, hi);
+    } else if (lane_masks && wave_size == 32) {
+      SetSg(sgpr, value);
     } else if (lane_masks) {
       const Id high = MaskLaneHigh();
       SetSg(sgpr, SelectB(high, U32(0), value));
@@ -671,6 +676,12 @@ struct StageContext {
   // the param number.
   const std::vector<u32>* vs_exported_params = nullptr;
   bool is_cs = false;
+  // PS5 compute whose 64-lane wave spans two host subgroups: every wave runs
+  // the same block at once (the mesh scheduler), and LDS write/read turns get
+  // the barrier the guest never needed.
+  bool wave_lockstep = false;
+  bool lds_sync = false;
+  Id cs_probe_var = 0;  // DELTA_GPU_CSVGPR snapshot
   Recompiled* r = nullptr;
   std::vector<Id>* iface = nullptr;
   Id main_fn = 0;  // entry function (for stage-wide ExecMode additions)
@@ -707,7 +718,7 @@ struct StageContext {
   u32 mrt_uint_mask = 0;
   // Bit n: the pass binds colour attachment n; unbound exports write nowhere.
   u32 mrt_bound_mask = 0xFF;
-  u32 tex_uint_mask = 0;
+  u64 tex_uint_mask = 0;
   Id depth_out = 0;       // MRTZ -> FragDepth (lazily declared)
   std::unordered_map<u32, Id> in_vars;
   bool wrote_color = false;  // compile-time: shader has a color export
@@ -718,14 +729,14 @@ struct StageContext {
   const MimgBindingPlan* mimg_plan = nullptr;
   // Set 0 is shared: VS samplers number after the PS's; tex_vars stays stage-local.
   u32 tex_binding_base = 0;
-  static constexpr u32 kMaxPsSamplers = 24;  // == gpu::vk::kMaxTex
+  static constexpr u32 kMaxPsSamplers = 64;  // == gpu::vk::kMaxTex
   Id tex_vars[kMaxPsSamplers] = {};
   u32 tex_types[kMaxPsSamplers] = {};
   // Bit i: binding i's T# is SQ_RSRC_IMG_3D; invisible in MIMG (DA 0), so
   // caller-supplied and cache-keyed.
-  u32 tex_3d_mask = 0;
+  u64 tex_3d_mask = 0;
   // Bit i: binding i's T# is 1D[_ARRAY]; bound as height-1 2D, y at row centre.
-  u32 tex_1d_mask = 0;
+  u64 tex_1d_mask = 0;
 
   // shared graphics
   std::unordered_map<u32, u32> cbuf_bind;  // V# SGPR -> set-1 binding

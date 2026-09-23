@@ -50,6 +50,7 @@ RecompileCompute(const u32*, u32, u32, u32, u32, u32, u32, bool, bool) {
 #include <unordered_set>
 #include <vector>
 
+#include "gpu/gcn/gcn_translate.h"
 #include "gpu/gcn/spirv/spv_post.h"
 #include "gpu/gcn/spirv/translator.h"
 #include "gpu/guest_memory.h"
@@ -639,6 +640,23 @@ void ReportDecline(const u32* cs_code, size_t insts) {
             gpu::gcn::UnsupportedOps().c_str());
 }
 
+// A 64-lane wave split over two host subgroups loses the lockstep its
+// compiler relied on wherever lanes talk to each other: through LDS without a
+// barrier, or through a lane mask read as a number.
+bool NeedsWaveLockstep(const Program& program) {
+  u32 lds = 0;
+  for (const Inst& inst : program) {
+    lds |= LdsAccess(inst);
+    if (inst.enc == Enc::kVop3 && (inst.opcode == 0x365 || inst.opcode == 0x366))
+      return true;  // v_mbcnt
+    if (inst.enc == Enc::kSop1 && inst.opcode >= 0x0d && inst.opcode <= 0x16)
+      return true;  // s_bcnt / s_ff / s_flbit
+    if (inst.enc == Enc::kDs && inst.opcode == 0xb3)
+      return true;  // ds_bpermute
+  }
+  return lds == 3;
+}
+
 bool TranslateCs(const Program& program,
                  u32 num_thread_x,
                  u32 num_thread_y,
@@ -665,7 +683,7 @@ bool TranslateCs(const Program& program,
   // Astro Bot's world map skips a dozen dispatches that way.
   bool uses_lane_id = false;
   for (const Inst& inst : program)
-    if ((inst.enc == Enc::kDs && inst.opcode == 0x35) ||
+    if ((inst.enc == Enc::kDs && (inst.opcode == 0x35 || inst.opcode == 0xb3)) ||
         (inst.enc == Enc::kVop3 &&
          (inst.opcode == 0x377 || inst.opcode == 0x378)) ||
         inst.extension == gpu::gcn::InstExtension::kDpp ||
@@ -676,7 +694,10 @@ bool TranslateCs(const Program& program,
     }
 
   t.rdna_sources = true;
+  sc.wave_lockstep = sc.lds_sync = !wave32 &&
+      gpu::gcn::WaveSplitsAcrossSubgroups() && NeedsWaveLockstep(program);
   t.wave_size = wave32 ? 32 : 64;
+  t.full_wave_masks = sc.wave_lockstep;
   t.InitTypes();
   // Storage buffers: Buf { uint data[]; } at set 0, binding = resource index.
   const Id t_run = t.m.TypeRuntimeArray(t.t_u);
@@ -707,16 +728,21 @@ bool TranslateCs(const Program& program,
                  {static_cast<u32>(r.gds_binding)});
     t.m.Name(v, "gds");
     sc.gds_var = v;
+  }
+  // The GDS counters and the lockstep scheduler both need a workgroup channel
+  // to reach every lane of the guest wave; the scheduler keeps its chosen
+  // block in the slot past the lanes.
+  if (r.gds_binding >= 0 || sc.wave_lockstep) {
     // Counters return one pre-operation value to the entire guest wave,
     // including when it spans two host subgroups. The CFG only enables this
     // exchange channel at points where the whole workgroup can synchronize.
     t.xchg_lanes = std::max(num_thread_x, 1u) *
                    std::max(num_thread_y, 1u) * std::max(num_thread_z, 1u);
-    const Id exchange = t.m.TypeArray(t.t_u, t.xchg_lanes * 2);
+    const Id exchange = t.m.TypeArray(t.t_u, t.xchg_lanes * 2 + 1);
     t.xchg_var = t.m.Variable(
         t.m.TypePointer(spv::StorageClass::Workgroup, exchange),
         spv::StorageClass::Workgroup);
-    t.m.Name(t.xchg_var, "wave_counters");
+    t.m.Name(t.xchg_var, "wave_exchange");
   }
 
   // LDS: a Workgroup-storage uint array sized by RSRC2.
@@ -972,6 +998,7 @@ gpu::gcn::RecompiledCs RecompileCompute(const u32* cs_code,
       }
 
   Translator t;
+  SetComputeAddress(reinterpret_cast<u64>(cs_code));
   RecompiledCs tmp;  // build into a temp so a mid-emit failure leaves r intact
   gpu::gcn::ResetUnsupported();
   if (!TranslateCs(program, num_thread_x, num_thread_y, num_thread_z, user_sgpr,

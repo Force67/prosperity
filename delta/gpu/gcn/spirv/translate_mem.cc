@@ -2214,7 +2214,8 @@ u32 GraphicsLdsDwords(const Program& program, const u8* reachable) {
 
 void EmitDs(Translator& t, const Inst& inst, StageContext& sc) {
   const u32 w = inst.raw[0], w1 = inst.raw[1], op = inst.opcode;
-  if (op != 0x35 && ((!sc.lds_var && !sc.lds_wave_base) || !sc.lds_dwords)) {
+  if (op != 0x35 && op != 0xb3 &&
+      ((!sc.lds_var && !sc.lds_wave_base) || !sc.lds_dwords)) {
     sc.cs_unsupported = true;
     return;
   }
@@ -2357,6 +2358,30 @@ void EmitDs(Translator& t, const Inst& inst, StageContext& sc) {
       t.SetVg(vdst, t.SelectB(t.IsNonZero(source_exec), value, t.U32(0)));
       break;
     }
+    case 179: {  // ds_bpermute_b32: read data0 of lane (addr + offset) / 4
+      if (!sc.subgroup_local_id) {
+        if (sc.is_cs)
+          sc.cs_unsupported = true;
+        break;
+      }
+      const Id source_lane =
+          t.And(t.Shr(t.Add(addr, t.U32(offset16)), t.U32(2)), t.U32(63));
+      const Id own_exec = t.SelectB(t.LaneActive(t.Exec()), t.U32(1), t.U32(0));
+      Id value, source_exec;
+      if (t.CanExchange()) {
+        t.WavePublish(t.Vg(data0), 0);
+        t.WavePublish(own_exec, 1);
+        t.Barrier();
+        value = t.WaveFetch(source_lane, 0);
+        source_exec = t.WaveFetch(source_lane, 1);
+        t.Barrier();
+      } else {
+        value = t.SubgroupShuffle(t.Vg(data0), source_lane);
+        source_exec = t.SubgroupShuffle(own_exec, source_lane);
+      }
+      t.SetVg(vdst, t.SelectB(t.IsNonZero(source_exec), value, t.U32(0)));
+      break;
+    }
     case 45: {  // ds_wrxchg_rtn_b32: swap the slot, keep the old value
       const Id old_value = t.m.Emit(
           spv::Op::OpAtomicExchange, t.t_u,
@@ -2414,18 +2439,20 @@ void EmitDs(Translator& t, const Inst& inst, StageContext& sc) {
       t.SetVg(vdst + 1, t.m.Load(t.t_u, lds_at(t.Add(a, t.U32(4)))));
       break;
     }
-    case 78: {  // ds_write2_b64, the store half of case 119
+    case 78:
+    case 79: {  // ds_write2_b64 / ds_write2st64_b64, the store half of 119/120
       const u32 src[2] = {data0, data1};
       for (u32 i = 0; i < 2; i++) {
-        const Id a = t.And(pair_addr(i, 8, false), t.U32(~7u));
+        const Id a = t.And(pair_addr(i, 8, op == 79), t.U32(~7u));
         t.m.Store(lds_at(a, true), t.Vg(src[i]));
         t.m.Store(lds_at(t.Add(a, t.U32(4)), true), t.Vg(src[i] + 1));
       }
       break;
     }
-    case 119: {  // ds_read2_b64
+    case 119:
+    case 120: {  // ds_read2_b64 / ds_read2st64_b64
       for (u32 i = 0; i < 2; i++) {
-        const Id a = t.And(pair_addr(i, 8, false), t.U32(~7u));
+        const Id a = t.And(pair_addr(i, 8, op == 120), t.U32(~7u));
         t.SetVg(vdst + i * 2, t.m.Load(t.t_u, lds_at(a)));
         t.SetVg(vdst + i * 2 + 1, t.m.Load(t.t_u, lds_at(t.Add(a, t.U32(4)))));
       }
