@@ -178,9 +178,14 @@ void ReportDeviceFault(DeviceState& device) {
       get(device.queue, &count, checkpoints.data());
       for (const auto& checkpoint : checkpoints) {
         const u64 marker = reinterpret_cast<uintptr_t>(checkpoint.pCheckpointMarker);
-        BASE_LOGI("gpuvk", "  checkpoint stage={:#x} frame={} draw={} {}",
-                  u32(checkpoint.stage), (marker >> 32) - 1, u32(marker) >> 1,
-                  marker & 1 ? "after" : "before");
+        if (marker >> 63)
+          BASE_LOGI("gpuvk", "  checkpoint stage={:#x} cs={:#x} {}",
+                    u32(checkpoint.stage), (marker << 1) >> 2,
+                    marker & 1 ? "after" : "before");
+        else
+          BASE_LOGI("gpuvk", "  checkpoint stage={:#x} frame={} draw={} {}",
+                    u32(checkpoint.stage), (marker >> 32) - 1, u32(marker) >> 1,
+                    marker & 1 ? "after" : "before");
       }
     }
   }
@@ -221,6 +226,18 @@ void DrawCheckpoint(VkCommandBuffer cmd, u32 frame, u32 draw, bool after) {
         vkGetDeviceProcAddr(g_dev.device, "vkCmdSetCheckpointNV"));
   // Opaque integer marker: no host object lifetime or allocation is involved.
   const uintptr_t marker = ((u64(frame) + 1) << 32) | (u64(draw) << 1) | u32(after);
+  if (g_set_checkpoint)
+    g_set_checkpoint(cmd, reinterpret_cast<const void*>(marker));
+}
+
+// Bit 63 tells a dispatch marker from a draw marker.
+void DispatchCheckpoint(VkCommandBuffer cmd, u64 cs_addr, bool after) {
+  if (!g_checkpoints_available || !kCheckpoints)
+    return;
+  if (!g_set_checkpoint)
+    g_set_checkpoint = reinterpret_cast<PFN_vkCmdSetCheckpointNV>(
+        vkGetDeviceProcAddr(g_dev.device, "vkCmdSetCheckpointNV"));
+  const uintptr_t marker = (1ull << 63) | ((cs_addr << 1) & ~(1ull << 63)) | u32(after);
   if (g_set_checkpoint)
     g_set_checkpoint(cmd, reinterpret_cast<const void*>(marker));
 }
@@ -306,7 +323,8 @@ void DepthBarrier(VkCommandBuffer c,
   b.newLayout = to;
   b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
   b.image = img;
-  b.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+  b.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0,
+                        VK_REMAINING_ARRAY_LAYERS};
   b.srcAccessMask = src_a;
   b.dstAccessMask = dst_a;
   if (trace::Recording())
@@ -327,7 +345,8 @@ void StencilBarrier(VkCommandBuffer c,
   b.newLayout = to;
   b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
   b.image = img;
-  b.subresourceRange = {VK_IMAGE_ASPECT_STENCIL_BIT, 0, 1, 0, 1};
+  b.subresourceRange = {VK_IMAGE_ASPECT_STENCIL_BIT, 0, 1, 0,
+                        VK_REMAINING_ARRAY_LAYERS};
   b.srcAccessMask = src_a;
   b.dstAccessMask = dst_a;
   if (trace::Recording())

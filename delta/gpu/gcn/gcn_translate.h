@@ -43,7 +43,7 @@ struct ShaderAttr {
 constexpr u32 kMaxCbufBindings = 15;
 // Mesh pipelines address staged windows through one storage buffer and a
 // small offset table, avoiding the limit on dynamic UBO descriptors.
-constexpr u32 kIndirectCbufBindings = 32;
+constexpr u32 kIndirectCbufBindings = 64;
 constexpr u32 kIndirectGsUserDataAddr = kIndirectCbufBindings + 2 * 32;
 constexpr u32 kIndirectDrawDwords = kIndirectGsUserDataAddr + 4;
 constexpr u32 kCbufDwords = 4096;
@@ -205,6 +205,8 @@ struct ImageTilingParams {
   u32 tiled_offset, tiled_stride, linear_offset, pitch, linear_stride;
   u32 detile, elem_bytes;
   u32 packed;  // narrow texels: linear side in bytes, one texel per dword lane
+  // The linear side holds 32-bit float depth for a 16-bit UNORM surface.
+  u32 depth16;
 };
 
 std::vector<u32> BuildImageTilingShader();

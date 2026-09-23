@@ -58,6 +58,8 @@ struct RTarget {
   bool used_this_frame = false;
   u32 draws = 0;      // draws into this RT this frame
   int last_frame = -1000;  // frame number this RT was last rendered into
+  u64 render_serial = 0;   // g_render_serial when last bound for writing
+  bool accumulated = false;  // the last draw into it blended dst * ONE
   bool clear_pending =
       false;  // a fullscreen black clear was requested; applied lazily
               // (as loadOp=CLEAR) only when later content redraws this RT
@@ -112,6 +114,12 @@ struct DepthTarget {
   // colour target happens to overlap it and the shader discards every pixel.
   VkImageView stencil_view = VK_NULL_HANDLE;
   VkImageView attachment_view = VK_NULL_HANDLE;
+  // Array layers, and attachment views of the layers past 0, made on demand.
+  u32 layers = 1;
+  std::vector<VkImageView> layer_views;
+  // Layers a clear still has to reach: a clear of an array lands on each
+  // layer's first bind, not only on whichever layer is bound first.
+  u32 clear_layers = 0;
   VkDescriptorSet set = VK_NULL_HANDLE;
   std::unordered_map<u32, VkImageView> sampled_views;
   u32 w = 0, h = 0;
@@ -130,6 +138,7 @@ struct DepthTarget {
   // See RTarget::submitted_layout: the anchor for mid-frame copies.
   VkImageLayout submitted_layout = VK_IMAGE_LAYOUT_UNDEFINED;
   VkImageLayout submitted_stencil_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+  u64 render_serial = 0;
   int last_frame = -1000;
   bool used_this_frame = false;
   bool stencil_used_this_frame = false;
@@ -146,6 +155,9 @@ struct DepthTarget {
 };
 
 extern std::unordered_map<u64, DepthTarget>& g_depths;
+// Bumped each time a target is bound for writing: a finer clock than the
+// frame number, whose boundary does not line up with the guest's.
+extern u64 g_render_serial;
 // Depth images of a base rendered at more than one geometry; only the one in
 // g_depths answers to the address (see ActivateDepthVariant).
 extern std::unordered_map<u64, std::vector<DepthTarget>> g_depth_variants;
@@ -163,10 +175,14 @@ u64 RtByteSizeWH(u32 w, u32 h, VkFormat fmt);
 u64 RtByteSize(const RTarget& rt);
 
 RTarget* GetRT(u64 base, u32 w, u32 h, VkFormat fmt);
+// Destroy depth images retired two frames ago (an array outgrew them).
+void ReleaseRetiredDepths();
+
 DepthTarget* GetDepthRT(u64 base,
                         u32 w,
                         u32 h,
-                        u64 stencil_base = 0);
+                        u64 stencil_base = 0,
+                        u32 layers = 1);
 
 // Sampling an image while it is also a colour attachment needs Vulkan's
 // attachment-feedback-loop extension; copy it instead and sample the copy.
@@ -204,6 +220,10 @@ bool PreserveCsDepthBeforeClear(u64 base);
 // dword when the packet carries it; a compute write is read back at the next bind.
 void NoteDccWrite(u64 base, u64 bytes, const u32* fill);
 
+// A dispatch wrote the pixels of any target overlapping `base`: an earlier DCC
+// fast clear of it no longer describes its content.
+void NoteSurfaceWrite(u64 base, u64 bytes);
+
 // A dispatch wrote `bytes` at `base` through a raw buffer, so guest memory under any
 // overlapping target is now newer than its image: until a draw renders again, a
 // sample must read the memory (Astro Bot reuses its UI target's pages for an
@@ -226,6 +246,7 @@ struct RenderRegion {
   u32 cur_area_w = 0;  // render area the region opened with
   u32 cur_area_h = 0;
   u64 cur_depth = 0;  // depth target bound in the open region (0 = none)
+  u32 cur_depth_slice = 0;
   u64 cur_stencil = 0;
   u64 last_rt = 0;    // last RT rendered to (present fallback)
   u64 first_rt = 0;   // first colour RT created (diagnostic selector)
@@ -255,7 +276,8 @@ bool BeginRegion(const u64* mrt_base,
                   const u32* mrt_surf_h = nullptr,
                   const u64* mrt_dcc_base = nullptr,
                   const u32 (*mrt_clear_word)[2] = nullptr,
-                  u64 depth_htile_base = 0);
+                  u64 depth_htile_base = 0,
+                  u32 depth_slice = 0);
 
 // The extent an attachment's image needs: its own surface geometry when that is
 // believable, else the region the pass draws into.

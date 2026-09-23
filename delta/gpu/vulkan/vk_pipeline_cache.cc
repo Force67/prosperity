@@ -393,12 +393,12 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
   key = HashWord(key, d.num_vattrs);
   // A sampler reading a volume image translates the same PS address to a
   // different module, whose image types the pipeline layout has to match.
-  u32 tex_3d_mask = 0, tex_1d_mask = 0;
+  u64 tex_3d_mask = 0, tex_1d_mask = 0;
   for (u32 i = 0; i < d.num_texs && i < kMaxTex; i++) {
     if (d.texs[i].is_3d)
-      tex_3d_mask |= 1u << i;
+      tex_3d_mask |= 1ull << i;
     if (d.texs[i].is_1d)
-      tex_1d_mask |= 1u << i;
+      tex_1d_mask |= 1ull << i;
   }
   key = HashWord(key, tex_3d_mask);
   key = HashWord(key, tex_1d_mask);

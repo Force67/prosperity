@@ -4,6 +4,7 @@
 #include <base/logging.h>
 #include "gpu/gcn/spirv/spv_emit.h"
 #include "gpu/gcn/spirv/spv_post.h"
+#include <spirv/unified1/GLSL.std.450.h>
 
 namespace gpu::gcn {
 
@@ -99,13 +100,23 @@ std::vector<u32> BuildImageTilingShader() {
       {is_packed, mul(op(Op::OpBitwiseAnd, lin_byte, c(3)), c(8)), c(0)});
   const Id detile = m.NewBlock(), retile = m.NewBlock(), copied = m.NewBlock();
   const Id direction = m.Emit(Op::OpINotEqual, m.TypeBool(), {param(10), c(0)});
+  const Id f = m.TypeFloat();
+  const Id is_depth16 =
+      m.Emit(Op::OpINotEqual, m.TypeBool(), {param(13), c(0)});
   m.SelectionMerge(copied);
   m.BranchConditional(direction, detile, retile);
   m.OpenBlock(detile);
-  const Id texel =
+  const Id raw_texel =
       op(Op::OpBitwiseAnd,
          op(Op::OpShiftRightLogical, m.Load(u, at(0, tiled)), shift),
          value_mask);
+  const Id unorm_to_float = m.Emit(
+      Op::OpBitcast, u,
+      {m.Emit(Op::OpFMul, f,
+              {m.Emit(Op::OpConvertUToF, f, {raw_texel}),
+               m.ConstF32(1.0f / 65535.0f)})});
+  const Id texel =
+      m.Emit(Op::OpSelect, u, {is_depth16, unorm_to_float, raw_texel});
   const Id pk_store = m.NewBlock(), plain_store = m.NewBlock(),
            det_done = m.NewBlock();
   m.SelectionMerge(det_done);
@@ -124,10 +135,20 @@ std::vector<u32> BuildImageTilingShader() {
   m.OpenBlock(det_done);
   m.Branch(copied);
   m.OpenBlock(retile);
-  const Id value =
-      op(Op::OpBitwiseAnd,
-         op(Op::OpShiftRightLogical, m.Load(u, at(1, linear)), lshift),
-         value_mask);
+  const Id raw_value =
+      op(Op::OpShiftRightLogical, m.Load(u, at(1, linear)), lshift);
+  const Id depth = m.Emit(Op::OpBitcast, f, {raw_value});
+  const Id clamped = m.ExtInst(f, GLSLstd450FClamp,
+                               {depth, m.ConstF32(0.f), m.ConstF32(1.f)});
+  const Id float_to_unorm = m.Emit(
+      Op::OpConvertFToU, u,
+      {m.Emit(Op::OpFAdd, f,
+              {m.Emit(Op::OpFMul, f, {clamped, m.ConstF32(65535.f)}),
+               m.ConstF32(0.5f)})});
+  const Id value = op(Op::OpBitwiseAnd,
+                      m.Emit(Op::OpSelect, u,
+                             {is_depth16, float_to_unorm, raw_value}),
+                      value_mask);
   const Id packed = m.NewBlock(), direct = m.NewBlock(), stored = m.NewBlock();
   m.SelectionMerge(stored);
   m.BranchConditional(narrow, packed, direct);

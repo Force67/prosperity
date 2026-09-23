@@ -22,7 +22,7 @@ namespace gpu::vk {
 // declares 23 and a shader needing more is declined outright, so this is a rendering
 // cliff, not a tuning knob; 24 sits far inside every driver's reported
 // maxPerStageDescriptorSampledImages (Vulkan guarantees only 16).
-constexpr u32 kMaxTex = 24;
+constexpr u32 kMaxTex = 64;
 
 // Descriptor infrastructure shared by every sampled image (guest textures,
 // render targets sampled as textures, the 1x1 white fallback).
@@ -133,5 +133,7 @@ void InvalidateTexRange(u64 base, u64 size);
 
 // Destroy objects retired two frames ago; called once per BeginFrame.
 void ReleaseRetiredTextures();
+// Drop every cached multi-texture descriptor set (a view they name is going).
+void ClearMultiTexCache();
 
 }  // namespace gpu::vk

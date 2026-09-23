@@ -750,6 +750,7 @@ struct CsRange {
   // per-frame (last_rt_frame), never the guest content hash.
   bool rt_sourced = false;
   int last_rt_frame = -1;
+  u64 rt_serial = 0;  // the live target's render_serial the staged copy holds
   ComputeInfo::Res res;  // writeback needs the full layout description
   // A copy of the guest bytes as they were staged IN, kept so the writeback can
   // tell "the shader wrote this word" from "the shader never touched it".
@@ -791,7 +792,8 @@ void RecordImageTiling(VkCommandBuffer c,
                        VkDeviceSize linear_bytes,
                        bool detile,
                        u32 mips = 0,
-                       u32 layers = 0);
+                       u32 layers = 0,
+                       bool depth16 = false);
 VkBuffer AcquireScratch(VkDeviceSize bytes);
 // A scratch that already holds revision `seq` of the bytes at `base`+`off`
 // converted with `table`, or a fresh one (`*fresh` says which).
@@ -931,6 +933,7 @@ struct CsAliasedImage {
   VkImageLayout submitted_layout = VK_IMAGE_LAYOUT_UNDEFINED;
   bool is_depth = false;
   bool is_stencil = false;
+  u32 layers = 1;
 };
 
 // True when `base` names a live target the compute bridges apply to. The
@@ -959,7 +962,7 @@ bool FindCsAliasedImage(u64 base,
           depth.last_frame != g_frame.num)
         anchor = depth.layout;
       out = {depth.image, depth.w, depth.h, 4, VK_IMAGE_ASPECT_DEPTH_BIT,
-             anchor, true, false};
+             anchor, true, false, depth.layers};
       return out.submitted_layout != VK_IMAGE_LAYOUT_UNDEFINED;
     }
   }
@@ -994,7 +997,8 @@ bool FindCsAliasedImage(u64 base,
            VK_IMAGE_ASPECT_DEPTH_BIT,
            depth.submitted_layout,
             true,
-            false};
+            false,
+            depth.layers};
     return out.submitted_layout != VK_IMAGE_LAYOUT_UNDEFINED;
   }
   for (auto& [depth_base, depth] : g_depths) {
@@ -1014,6 +1018,26 @@ bool FindCsAliasedImage(u64 base,
   return false;
 }
 
+bool LiveTargetOfSize(u64 base, u32 w, u32 h) {
+  const auto rt = g_rts.find(base);
+  if (rt != g_rts.end()) {
+    if (rt->second.w == w && rt->second.h == h)
+      return true;
+    const auto v = g_rt_variants.find(base);
+    if (v != g_rt_variants.end())
+      for (const RTarget& t : v->second)
+        if (t.w == w && t.h == h)
+          return true;
+  }
+  const auto d = g_depths.find(base);
+  if (d != g_depths.end() && d->second.w == w && d->second.h == h)
+    return true;
+  return std::any_of(g_depths.begin(), g_depths.end(),
+                     [base](const auto& entry) {
+                       return entry.second.stencil_base == base;
+                     });
+}
+
 bool CsAliasedBase(u64 base) {
   if (g_rts.find(base) != g_rts.end() || g_depths.find(base) != g_depths.end())
     return true;
@@ -1026,6 +1050,21 @@ bool CsAliasedBase(u64 base) {
 // The frame a live image at this address was last rendered into. Unknown
 // addresses report "now", so a caller asking "has it changed since?" re-reads
 // rather than trusting a stale copy.
+u64 AliasedImageRenderSerial(u64 base) {
+  auto rt = g_rts.find(base);
+  if (rt != g_rts.end())
+    return rt->second.render_serial;
+  auto d = g_depths.find(base);
+  if (d != g_depths.end())
+    return d->second.render_serial;
+  for (const auto& [depth_base, depth] : g_depths) {
+    (void)depth_base;
+    if (depth.stencil_base == base)
+      return depth.render_serial;
+  }
+  return UINT64_MAX;
+}
+
 int AliasedImageLastRender(u64 base) {
   auto rt = g_rts.find(base);
   if (rt != g_rts.end())
@@ -1077,7 +1116,7 @@ void AliasedImageBarrier(VkCommandBuffer c,
   b.newLayout = to;
   b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
   b.image = img.image;
-  b.subresourceRange = {img.aspect, 0, 1, 0, 1};
+  b.subresourceRange = {img.aspect, 0, 1, 0, VK_REMAINING_ARRAY_LAYERS};
   b.srcAccessMask = src_a;
   b.dstAccessMask = dst_a;
   vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
@@ -1099,6 +1138,8 @@ struct AliasedCopyPlan {
   u32 h = 0;
   bool unpack = false;  // image holds packed 11/11/10, staging holds float4
   bool widen = false;   // image holds 8/16-bit texels, staging holds u32
+  bool depth16 = false;  // image holds float depth, the surface UNORM16
+  u32 layers = 1;
 };
 
 bool PlanAliasedCopy(const CsAliasedImage& img,
@@ -1117,7 +1158,11 @@ bool PlanAliasedCopy(const CsAliasedImage& img,
   // height and a descriptor rounded to the surface's own are the same
   // surface, and the copy takes the overlap.
   constexpr u32 kExtentSlack = 8;
-  if (res.mip_levels == 1 && res.layers == 1 &&
+  // An array copies whole from a layered target; a 16-bit depth surface
+  // takes its texels from the float depth image through the tiling shader.
+  const bool layered = res.layers > 1 || img.layers > 1;
+  const bool depth16 = img.is_depth && res.elem_bytes == 2 && want_elem == 4;
+  if (res.mip_levels == 1 && (!layered || img.is_depth) &&
       img.w + kExtentSlack >= res.width &&
       img.h + kExtentSlack >= res.height &&
       (img.elem_bytes == want_elem || unpack || widen)) {
@@ -1125,6 +1170,9 @@ bool PlanAliasedCopy(const CsAliasedImage& img,
     plan.h = std::min(img.h, res.height);
     plan.unpack = unpack;
     plan.widen = widen;
+    plan.depth16 = depth16;
+    // Layers the target has not grown to yet were never drawn.
+    plan.layers = std::max(std::min(res.layers, img.layers), 1u);
     return true;
   }
   // One line per address and direction. A flat cap spends itself on the level
@@ -1214,6 +1262,14 @@ bool RunAliasedCopy(const CsAliasedImage& img,
   const u64 copy_bytes = texels * res.stage_elem_bytes;
   if (level.offset + copy_bytes > e.cap)
     return false;
+  // Layers sit one stored slice apart in the linear staging layout.
+  const u64 layer_bytes = static_cast<u64>(level.pitch) * level.stored_height *
+                          res.stage_elem_bytes;
+  if (res.layers > 1 &&
+      (level.size != layer_bytes * res.layers ||
+       level.offset + level.size > e.cap || plan.unpack || plan.widen ||
+       img.is_stencil))
+    return false;
   // The converting path copies at the IMAGE's element size, through a scratch
   // the CPU then unpacks into (or packs out of) the staged layout.
   const u64 packed_bytes = texels * img.elem_bytes;
@@ -1224,13 +1280,27 @@ bool RunAliasedCopy(const CsAliasedImage& img,
   // scratch, detiled from the truth before an upload and retiled into it
   // after a readback. Only the direct copies are bridged that way.
   const bool truth = e.truth;
-  if (truth && (convert || img.is_stencil))
+  if (truth && convert)
     return false;
-  gcn::TextureLayout32 t_tiled, t_linear;
+  // A stencil truth goes through the tiling shader's packed form: one byte
+  // per texel on the linear side, which is what the stencil aspect copies.
+  const bool stencil_truth = truth && img.is_stencil;
+  // Only the tiling shader converts float depth to UNORM16.
+  if (plan.depth16 && !truth)
+    return false;
+  gcn::TextureLayout32 t_tiled, t_linear, s_linear;
   const TileTable* table = nullptr;
-  if (truth && (!BuildCsImageLayouts(res, t_tiled, t_linear) ||
-                !(table = GetTileTable(t_tiled, t_linear)) ||
-                !CsRangeEnsureBuffer(g_truth_bridge_scratch, res.size)))
+  if (truth && !BuildCsImageLayouts(res, t_tiled, t_linear))
+    return false;
+  if (stencil_truth &&
+      (res.layers > 1 ||
+       !gcn::BuildTextureLayout32(s_linear, res.width, res.height, res.pitch, 1,
+                                  1, 8, res.pow2_pad, 1) ||
+       !(table = GetTileTable(t_tiled, s_linear, /*packed=*/true))))
+    return false;
+  if (truth && !stencil_truth && !(table = GetTileTable(t_tiled, t_linear)))
+    return false;
+  if (truth && !CsRangeEnsureBuffer(g_truth_bridge_scratch, res.size))
     return false;
   const VkBuffer copy_buf = convert   ? g_bridge.buf
                             : truth   ? g_truth_bridge_scratch.buf
@@ -1256,7 +1326,7 @@ bool RunAliasedCopy(const CsAliasedImage& img,
   if (!to_image &&
       (convert || level.offset != 0 || copy_bytes < res.size))
     std::memset(e.map, 0, res.size);
-  if (img.is_stencil) {
+  if (img.is_stencil && !truth) {
     if (level.offset || texels > e.cap)
       return false;
     if (!to_image)
@@ -1301,14 +1371,17 @@ bool RunAliasedCopy(const CsAliasedImage& img,
     RecordStagingCopy(c, e, e.cap, /*to_device=*/true);
   if (truth && to_image)
     RecordImageTiling(c, *table, e.buf, 0, e.guest_bytes, copy_buf, res.size,
-                      /*detile=*/true, 1, 1);
-  if (truth && !to_image && (plan.w < res.width || plan.h < res.height)) {
+                      /*detile=*/true, 1, plan.layers, plan.depth16);
+  if (truth && !to_image &&
+      (plan.w < res.width || plan.h < res.height || plan.layers < res.layers ||
+       stencil_truth)) {
     // The retile below covers the whole mip; texels the copy leaves alone
     // must not carry a previous conversion's bytes into the truth.
-    vkCmdFillBuffer(c, copy_buf, level.offset,
-                    VkDeviceSize(level.pitch) * level.stored_height *
-                        res.stage_elem_bytes,
-                    0);
+    if (stencil_truth)
+      vkCmdFillBuffer(c, copy_buf, 0, (s_linear.size + 3) & ~u64(3), 0);
+    else
+      vkCmdFillBuffer(c, copy_buf, level.offset,
+                      layer_bytes * std::max(res.layers, 1u), 0);
     VkMemoryBarrier cleared{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
     cleared.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
     cleared.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -1345,7 +1418,13 @@ bool RunAliasedCopy(const CsAliasedImage& img,
   VkBufferImageCopy copy{};
   copy.bufferOffset = (img.is_stencil || convert) ? 0 : level.offset;
   copy.bufferRowLength = level.pitch;
-  copy.imageSubresource = {img.aspect, 0, 0, 1};
+  copy.bufferImageHeight = level.stored_height;
+  if (stencil_truth) {
+    copy.bufferOffset = s_linear.mips[0].offset;
+    copy.bufferRowLength = s_linear.mips[0].pitch;
+    copy.bufferImageHeight = s_linear.mips[0].stored_height;
+  }
+  copy.imageSubresource = {img.aspect, 0, 0, plan.layers};
   copy.imageExtent = {plan.w, plan.h, 1};
   if (to_image)
     vkCmdCopyBufferToImage(c, copy_buf, img.image, transfer_layout, 1, &copy);
@@ -1353,7 +1432,8 @@ bool RunAliasedCopy(const CsAliasedImage& img,
     vkCmdCopyImageToBuffer(c, img.image, transfer_layout, copy_buf, 1, &copy);
   if (truth && !to_image) {
     RecordImageTiling(c, *table, e.buf, 0, e.guest_bytes, copy_buf, res.size,
-                      /*detile=*/false, 1, 1);
+                      /*detile=*/false, 1, std::max(res.layers, 1u),
+                      plan.depth16);
     e.mirror_current = false;
   }
   AliasedImageBarrier(c, img, transfer_layout, img.submitted_layout,
@@ -1395,17 +1475,19 @@ bool RunAliasedCopy(const CsAliasedImage& img,
     // fallback the caller would keep recording with is already doomed. Latch
     // the failure so the caller stops instead of building more work on a
     // lost device.
-    if (r == VK_ERROR_DEVICE_LOST)
-      g_cs_failed = true;
     BASE_LOGI("gpuvk", "cs {} bridge copy failed: {} (base={:#x})",
               to_image ? "upload" : "staging", (int)r,
               (unsigned long long)res.base);
+    if (r == VK_ERROR_DEVICE_LOST) {
+      g_cs_failed = true;
+      ReportDeviceFault(g_dev);
+    }
     return false;
   }
   if (trace::Recording())
     trace::RecordBridge(to_image ? "upload" : "stage", res.base, img.image,
                         plan.w, plan.h);
-  if (img.is_stencil) {
+  if (img.is_stencil && !truth) {
     auto* packed = static_cast<u8*>(e.map);
     auto* expanded = static_cast<u32*>(e.map);
     for (u64 i = texels; i-- > 0;)
@@ -1733,6 +1815,51 @@ bool EnsureGdsBuffer() {
   return true;
 }
 
+void CsRangeDestroy(CsRange& e);
+
+// Device memory ran out: give back the recycled buffers and every range no
+// dispatch has touched for a few frames, instead of dropping the dispatch.
+// `keep` is the range being allocated for. True when anything was released.
+bool CsReleaseMemory(const CsRange& keep) {
+  const auto drop_free_list = [] {
+    const bool any = !g_cs_free.empty();
+    for (const CsFreeBuffer& f : g_cs_free) {
+      if (f.map)
+        vkUnmapMemory(g_dev.device, f.device_local ? f.host_mem : f.mem);
+      for (VkBuffer b : {f.buf, f.host_buf})
+        if (b)
+          vkDestroyBuffer(g_dev.device, b, nullptr);
+      for (VkDeviceMemory m : {f.mem, f.host_mem})
+        if (m)
+          vkFreeMemory(g_dev.device, m, nullptr);
+    }
+    g_cs_free.clear();
+    g_cs_free_bytes = 0;
+    return any;
+  };
+  const bool released = drop_free_list();
+  u64 evicted = 0;
+  for (auto it = g_cs_ranges.begin(); it != g_cs_ranges.end();) {
+    CsRange& r = it->second;
+    if (&r == &keep || r.gpu_dirty || r.pending_batch || CsFrameReferenced(r) ||
+        r.last_used_frame + 2 >= g_frame.num) {
+      ++it;
+      continue;
+    }
+    evicted += r.cap;
+    CsRangeDestroy(r);
+    it = g_cs_ranges.erase(it);
+  }
+  // CsRangeDestroy parks what it frees for reuse; that is the opposite of
+  // what is wanted here.
+  drop_free_list();
+  static int logged = 0;
+  if (logged++ < 16)
+    BASE_LOGI("csgpu", "device memory full: evicted {} MB of idle ranges",
+              evicted >> 20);
+  return released || evicted;
+}
+
 bool CsRangeEnsureBuffer(CsRange& e, VkDeviceSize size) {
   if (e.buf && e.cap >= size)
     return true;
@@ -1803,7 +1930,9 @@ bool CsRangeEnsureBuffer(CsRange& e, VkDeviceSize size) {
   ai.memoryTypeIndex = device_type != UINT32_MAX
                            ? device_type
                            : FindComputeMemoryType(mr.memoryTypeBits);
-  if (vkAllocateMemory(g_dev.device, &ai, nullptr, &e.mem) != VK_SUCCESS) {
+  if (vkAllocateMemory(g_dev.device, &ai, nullptr, &e.mem) != VK_SUCCESS &&
+      (!CsReleaseMemory(e) ||
+       vkAllocateMemory(g_dev.device, &ai, nullptr, &e.mem) != VK_SUCCESS)) {
     vkDestroyBuffer(g_dev.device, e.buf, nullptr);
     e.buf = VK_NULL_HANDLE;
     e.mem = VK_NULL_HANDLE;
@@ -2446,7 +2575,8 @@ void RecordImageTiling(VkCommandBuffer c,
                        VkDeviceSize linear_bytes,
                        bool detile,
                        u32 mips,
-                       u32 layers) {
+                       u32 layers,
+                       bool depth16) {
   auto& s = g_tiling;
   const u32 mip_count =
       mips ? std::min<u32>(mips, t.params.size()) : t.params.size();
@@ -2481,6 +2611,7 @@ void RecordImageTiling(VkCommandBuffer c,
   for (u32 m = 0; m < mip_count; m++) {
     gcn::ImageTilingParams p = t.params[m];
     p.detile = detile ? 1u : 0u;
+    p.depth16 = depth16 ? 1u : 0u;
     vkCmdPushConstants(c, s.push.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
                        sizeof(p), &p);
     vkCmdDispatch(c, (p.width * p.words + 63) / 64, p.height, layer_count);
@@ -2685,7 +2816,7 @@ VkBuffer AcquireView(VkDeviceSize, u64, VkDeviceSize, const TileTable*, u64,
 void StampView(VkBuffer, u64, VkDeviceSize, const TileTable*, u64) {}
 void RecordImageTiling(VkCommandBuffer, const TileTable&, VkBuffer,
                        VkDeviceSize, VkDeviceSize, VkBuffer, VkDeviceSize,
-                       bool, u32, u32) {}
+                       bool, u32, u32, bool) {}
 VkBuffer AcquireScratch(VkDeviceSize) {
   return VK_NULL_HANDLE;
 }
@@ -3610,7 +3741,8 @@ bool PreserveCsDepthBeforeClear(u64 base) {
                        depth.layout,
                        true};
   AliasedCopyPlan plan;
-  if (!PlanAliasedCopy(image, range.res, "preserves", plan) || plan.unpack)
+  if (!PlanAliasedCopy(image, range.res, "preserves", plan) || plan.unpack ||
+      plan.depth16 || range.res.layers > 1 || depth.layers > 1 || range.truth)
     return false;
 
   gcn::TextureLayout32 tiled, linear;
@@ -3660,6 +3792,8 @@ bool PreserveCsDepthBeforeClear(u64 base) {
   // usual copy from the now-cleared depth image.
   range.rt_sourced = true;
   range.last_rt_frame = static_cast<int>(g_frame.num) + 1;
+  // The clear about to be bound takes the next serial: that one is not news.
+  range.rt_serial = g_render_serial + 1;
   if (kCsRtTrace) {
     static int logged = 0;
     if (logged++ < 16)
@@ -3775,7 +3909,10 @@ bool CsSupplyTexture(u64 base,
     return declined("converted staging");
   if (r.elem_bytes != layout.elem_bytes)
     return declined("texel size");
-  if (CsAliasedBase(base))
+  // A live target answers for its own geometry only; a view of the same
+  // memory at another size (a 2432x1368 upscale over a 1080p target's pages)
+  // is this range's.
+  if (LiveTargetOfSize(base, w, h))
     return declined("live target");
   // Another dirty range inside the footprint (a mip generator binding one
   // level at its own address) holds bytes this buffer does not.
@@ -3949,6 +4086,10 @@ void ReleaseRetiredCsBuffers() {
 
 }  // namespace gpu::vk
 
+namespace gpu::vk {
+extern u64 g_tex_image_bytes;
+}
+
 namespace gpu::rhi {
 // Declared in rhi/renderer.h for the kernel's crash handler.
 bool DescribeCsRangeCovering(u64 addr, char* out, size_t out_size) {
@@ -4115,6 +4256,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
     const u64 bytes =
         ci.res[i].guest_size ? ci.res[i].guest_size : ci.res[i].size;
     NoteDccWrite(ci.res[i].base, bytes, nullptr);
+    NoteSurfaceWrite(ci.res[i].base, bytes);
     if (!ci.res[i].image_staging)
       NoteRawWrite(ci.res[i].base, bytes);
   }
@@ -4478,11 +4620,9 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
     // staged. Astro Bot's shadow array (1536x1536 x16 layers = 151 MB) is
     // re-lit rarely and re-copied every frame without this; that one range is
     // 40% of a frame's image staging.
-    const bool rt_stale =
-        kCsRtCache && e.rt_sourced && e.last_rt_frame >= 0 &&
-        AliasedImageLastRender(base) <= e.last_rt_frame;
-    const bool rt_attempt = rt_backed && !e.gpu_dirty && !rt_stale &&
-                            e.last_rt_frame != static_cast<int>(g_frame.num);
+    const bool rt_stale = kCsRtCache && e.rt_sourced && e.last_rt_frame >= 0 &&
+                          AliasedImageRenderSerial(base) <= e.rt_serial;
+    const bool rt_attempt = rt_backed && !e.gpu_dirty && !rt_stale;
     if (rt_attempt)
       valid = false;
     else if (rt_backed && !e.gpu_dirty && e.rt_sourced)
@@ -4543,6 +4683,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
       }
       if (rt_attempt) {
         e.last_rt_frame = static_cast<int>(g_frame.num);
+        e.rt_serial = AliasedImageRenderSerial(base);
         const u64 _tr = NowNs();
         e.rt_sourced = StageCsRangeFromRt(ci.res[i], e);
         g_in_rt_ns += NowNs() - _tr;
@@ -4923,8 +5064,10 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
   if (g_cs_timestamps)
     vkCmdWriteTimestamp(g_cs_cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                          g_cs_timestamps, g_cs_batch_count * 2);
+  DispatchCheckpoint(g_cs_cmd, ci.cs_addr, false);
   vkCmdDispatchBase(g_cs_cmd, ci.group_base[0], ci.group_base[1],
                     ci.group_base[2], ci.groups[0], ci.groups[1], ci.groups[2]);
+  DispatchCheckpoint(g_cs_cmd, ci.cs_addr, true);
   if (g_cs_timestamps)
     vkCmdWriteTimestamp(g_cs_cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
                          g_cs_timestamps, g_cs_batch_count * 2 + 1);
@@ -5097,7 +5240,74 @@ bool FlushCsWrites(Renderer& renderer) {
   return all_current;
 }
 
+// DELTA_GPU_MEMSTAT: what the renderer holds in device memory, every 300 frames.
+DELTA_OPTION(bool, kMemStat, "DELTA_GPU_MEMSTAT", false);
+
+void ReportGpuMemory() {
+  if (!kMemStat || g_frame.num % 300)
+    return;
+  u64 dirty = 0, truth = 0, cold = 0;
+  for (const auto& [base, e] : g_cs_ranges) {
+    (void)base;
+    if (e.gpu_dirty)
+      dirty += e.cap;
+    if (e.truth)
+      truth += e.cap;
+    if (e.last_used_frame + 60 < g_frame.num)
+      cold += e.cap;
+  }
+  u64 rt = 0, rt_parked = 0, depth = 0;
+  for (const auto& [base, t] : g_rts) {
+    (void)base;
+    rt += RtByteSize(t);
+  }
+  for (const auto& [base, v] : g_rt_variants) {
+    (void)base;
+    for (const RTarget& t : v)
+      rt_parked += RtByteSize(t);
+  }
+  for (const auto& [base, d] : g_depths) {
+    (void)base;
+    depth += u64(d.w) * d.h * 5 * d.layers;
+  }
+  for (const auto& [base, v] : g_depth_variants) {
+    (void)base;
+    for (const DepthTarget& d : v)
+      depth += u64(d.w) * d.h * 5 * d.layers;
+  }
+  u64 scratch = 0;
+  for (const CsScratch& c : g_cs_scratch)
+    scratch += c.cap;
+  const u64 tiling = g_tiling.buffers[0].cap + g_tiling.buffers[1].cap +
+                     g_tiling.buffers[2].cap + g_truth_bridge_scratch.cap +
+                     g_bridge.cap;
+  VkPhysicalDeviceMemoryBudgetPropertiesEXT budget{
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT};
+  VkPhysicalDeviceMemoryProperties2 props{
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2, &budget};
+  vkGetPhysicalDeviceMemoryProperties2(g_dev.phys, &props);
+  u64 heap_used = 0, heap_budget = 0;
+  for (u32 i = 0; i < props.memoryProperties.memoryHeapCount; i++)
+    if (props.memoryProperties.memoryHeaps[i].flags &
+        VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) {
+      heap_used += budget.heapUsage[i];
+      heap_budget += budget.heapBudget[i];
+    }
+  constexpr double kMb = 1024.0 * 1024.0;
+  BASE_LOGI("memstat", "f{} device heaps {:.0f}/{:.0f}MB | tex {:.0f}MB "
+            "scratch {:.0f}MB tiling {:.0f}MB",
+            g_frame.num, heap_used / kMb, heap_budget / kMb,
+            gpu::vk::g_tex_image_bytes / kMb, scratch / kMb, tiling / kMb);
+  BASE_LOGI("memstat",
+            "f{} cs ranges={} {:.0f}MB (dirty {:.0f} truth {:.0f} cold {:.0f}) "
+            "free {:.0f}MB | rt {} {:.0f}MB parked {:.0f}MB | depth {:.0f}MB",
+            g_frame.num, g_cs_ranges.size(), g_cs_range_bytes / kMb,
+            dirty / kMb, truth / kMb, cold / kMb, g_cs_free_bytes / kMb,
+            g_rts.size(), rt / kMb, rt_parked / kMb, depth / kMb);
+}
+
 bool FlushCsWritesFrameEnd(Renderer& renderer, bool writeback) {
+  ReportGpuMemory();
   if (g_cs_failed) {
     renderer.state = nullptr;
     return false;

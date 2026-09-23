@@ -323,7 +323,7 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
                      d.depth_base, d.depth_clear, d.stencil_base,
                      d.stencil_clear, false, DepthW(d), DepthH(d),
                      d.mrt_surf_w, d.mrt_surf_h, d.mrt_dcc_base,
-                     d.mrt_clear_word, d.depth_htile_base))
+                     d.mrt_clear_word, d.depth_htile_base, d.depth_slice))
       return true;
     VkClearAttachment ca{};
     ca.aspectMask =
@@ -664,14 +664,21 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
   // compounds every frame. P.T.'s light buffer is accumulated by two draws and
   // then DIVIDED by its own alpha by a third, which turns the compounding into
   // a gain of ~8 per frame and pins texels at the fp16 ceiling.
-  if (kLazyClear2 && d.rt_base && d.blend_enable &&
-      ((d.blend_control >> 8) & 0x1F) == 1u) {
+  // Only a target that nothing but accumulation has written since is reset:
+  // Astro Bot blends one channel into a G-buffer target its previous pass
+  // overwrote, and our frame boundary falls between the two.
+  if (kLazyClear2 && d.rt_base) {
     auto it = g_rts.find(d.rt_base);
-    if (it != g_rts.end() && it->second.last_frame != g_frame.num &&
-        it->second.ever_rendered) {
-      it->second.clear_pending = true;
-      it->second.clear_src = "accumulate-needs-reset";
-      it->second.clear_value = VkClearColorValue{{0.f, 0.f, 0.f, 0.f}};
+    const bool accumulate =
+        d.blend_enable && ((d.blend_control >> 8) & 0x1F) == 1u;
+    if (it != g_rts.end()) {
+      if (accumulate && it->second.last_frame != g_frame.num &&
+          it->second.ever_rendered && it->second.accumulated) {
+        it->second.clear_pending = true;
+        it->second.clear_src = "accumulate-needs-reset";
+        it->second.clear_value = VkClearColorValue{{0.f, 0.f, 0.f, 0.f}};
+      }
+      it->second.accumulated = accumulate;
     }
   }
   // DELTA_GPU_VTXTRACE_RT=<hex>: diagnostic only. For every draw into that
@@ -1055,7 +1062,11 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
       // before this draw samples it (the flush uploads it, see
       // UploadCsRangeToRt); guest-upload textures already get this from the
       // texture cache.
-      if (base && g_rts.count(base) && !CsRefreshRtFromTruth(base))
+      // A sample at another size than the live target reads the memory,
+      // which the texture cache takes from the compute range itself.
+      const bool samples_target = base && g_rts.count(base) &&
+                                  g_rts[base].w == t.w && g_rts[base].h == t.h;
+      if (samples_target && !CsRefreshRtFromTruth(base))
         FlushCsWritesRange(renderer, base,
                            u64(g_rts[base].w) * g_rts[base].h * 8, "rt-tex");
       if (base && rt_eligible && is_bound_target(base) && g_rts.count(base) &&
@@ -1221,6 +1232,7 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
   bool restart_region = g_region.cur_rt != d.rt_base ||
                          g_region.cur_mrt_count != mrt_n ||
                          g_region.cur_depth != d.depth_base ||
+                         g_region.cur_depth_slice != d.depth_slice ||
                          g_region.cur_stencil != d.stencil_base ||
                          g_region.depth_read_only != samples_bound_depth ||
                          mrt_sig_changed || transition_source ||
@@ -1406,7 +1418,7 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
                       d.depth_base, d.depth_clear, d.stencil_base,
                       d.stencil_clear, samples_bound_depth, DepthW(d),
                       DepthH(d), d.mrt_surf_w, d.mrt_surf_h, d.mrt_dcc_base,
-                      d.mrt_clear_word, d.depth_htile_base))
+                      d.mrt_clear_word, d.depth_htile_base, d.depth_slice))
       return true;
   }
   if (rp->multi_tex) {
@@ -1548,7 +1560,7 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
     const u32 readable = std::min(cb.size, kCbufWindow);
     const bool have_cbuf = readable && IsReadableThisFrame(cb.base, readable);
     if (have_cbuf)
-      cbuf_mask |= 1u << i;
+      cbuf_mask |= i < 32 ? 1u << i : 0;
     if (!have_cbuf && i != 0) {
       dyn_off[i] = 0;  // shared zero window (see BeginFrame)
       continue;

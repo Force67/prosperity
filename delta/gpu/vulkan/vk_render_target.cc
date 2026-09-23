@@ -7,6 +7,7 @@
 #include "base/arch.h"
 
 #include "gpu/rhi/renderer.h"
+#include "gpu/vulkan/vk_compute.h"
 #include "gpu/vulkan/vk_debug.h"
 #include "gpu/vulkan/vk_device.h"
 #include "gpu/guest_memory.h"
@@ -570,18 +571,20 @@ bool CreateDepthImage(DepthTarget& t,
                       u64 base,
                       u32 w,
                       u32 h,
-                      u64 stencil_base) {
-  if (!w || !h)
+                      u64 stencil_base,
+                      u32 layers = 1) {
+  if (!w || !h || !layers)
     return false;
   t.w = w;
   t.h = h;
+  t.layers = layers;
   t.stencil_base = stencil_base;
   VkImageCreateInfo ii{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
   ii.imageType = VK_IMAGE_TYPE_2D;
   ii.format = kDepthFormat;
   ii.extent = {w, h, 1};
   ii.mipLevels = 1;
-  ii.arrayLayers = 1;
+  ii.arrayLayers = layers;
   ii.samples = VK_SAMPLE_COUNT_1_BIT;
   ii.tiling = VK_IMAGE_TILING_OPTIMAL;
   // TRANSFER src/dst: the compute path bridges CS reads/writes of a live
@@ -628,7 +631,8 @@ bool CreateDepthImage(DepthTarget& t,
       vkUpdateDescriptorSets(g_dev.device, 1, &wr, 0, nullptr);
     }
   }
-  BASE_LOGI("gpuvk", "new depth {:#x} {}x{}", (unsigned long)base, w, h);
+  BASE_LOGI("gpuvk", "new depth {:#x} {}x{}x{}", (unsigned long)base, w, h,
+            layers);
   NameObject(VK_OBJECT_TYPE_IMAGE, (u64)t.image, "depth %#lx %ux%u",
              (unsigned long)base, w, h);
   return true;
@@ -642,7 +646,8 @@ DepthTarget* ActivateDepthVariant(DepthTarget& live,
                                   u64 base,
                                   u32 w,
                                   u32 h,
-                                  u64 stencil_base) {
+                                  u64 stencil_base,
+                                  u32 layers = 1) {
   // A depth attachment must COVER the render area: Vulkan lets it be larger,
   // never smaller (VUID-VkRenderingInfo-pNext-06079/06080). Handing the live
   // target back whatever its geometry is how P.T. began a 512x512 region with a
@@ -653,14 +658,14 @@ DepthTarget* ActivateDepthVariant(DepthTarget& live,
   // false) is the only safe fallback: a dropped draw costs one pass, a lost
   // device costs the run.
   const auto covers = [&](DepthTarget* t) -> DepthTarget* {
-    return (t && t->w >= w && t->h >= h) ? t : nullptr;
+    return (t && t->w >= w && t->h >= h && t->layers >= layers) ? t : nullptr;
   };
   if (!kDepthVariants)
     return covers(&live);
   auto& parked = g_depth_variants[base];
   DepthTarget* alt = nullptr;
   for (DepthTarget& v : parked)
-    if (v.w == w && v.h == h) {
+    if (v.w == w && v.h == h && v.layers >= layers) {
       alt = &v;
       break;
     }
@@ -668,7 +673,11 @@ DepthTarget* ActivateDepthVariant(DepthTarget& live,
     if (parked.size() >= kMaxDepthVariants)
       return covers(&live);
     DepthTarget t;
-    if (!CreateDepthImage(t, base, w, h, stencil_base))
+    // A variant that replaces the live one at the same geometry only because
+    // it needs more layers keeps the larger count.
+    const u32 want = live.w == w && live.h == h ? std::max(layers, live.layers)
+                                                : layers;
+    if (!CreateDepthImage(t, base, w, h, stencil_base, want))
       return covers(&live);
     BASE_LOGI("gpuvk",
               "depth alias {:#x}: have {}x{}, requested {}x{} -> own image",
@@ -707,23 +716,95 @@ bool ActivateSampledDepthVariant(u64 base, u32 w, u32 h) {
   return false;
 }
 
+u64 g_render_serial = 0;
+std::vector<DepthTarget> g_retired_depths;
+
+void RetireDepthTarget(const DepthTarget& t) {
+  g_retired_depths.push_back(t);
+  // Cached descriptor sets may name its views.
+  ClearMultiTexCache();
+}
+
+void ReleaseRetiredDepths() {
+  // Two BeginFrames of rest, like ReleaseRetiredTextures.
+  static std::vector<DepthTarget> aged;
+  for (DepthTarget& t : aged) {
+    for (VkImageView v : {t.view, t.stencil_view, t.attachment_view})
+      if (v)
+        vkDestroyImageView(g_dev.device, v, nullptr);
+    for (VkImageView v : t.layer_views)
+      if (v)
+        vkDestroyImageView(g_dev.device, v, nullptr);
+    for (auto& [swizzle, v] : t.sampled_views)
+      if (v)
+        vkDestroyImageView(g_dev.device, v, nullptr);
+    if (t.image)
+      vkDestroyImage(g_dev.device, t.image, nullptr);
+    g_image_memory.Free(g_dev, t.allocation);
+  }
+  aged = std::move(g_retired_depths);
+  g_retired_depths.clear();
+}
+
+// The attachment view of one array layer; layer 0 is the target's own.
+VkImageView DepthLayerView(DepthTarget& t, u32 layer) {
+  if (!layer || layer >= t.layers)
+    return t.attachment_view;
+  if (t.layer_views.size() < t.layers)
+    t.layer_views.resize(t.layers, VK_NULL_HANDLE);
+  VkImageView& view = t.layer_views[layer];
+  if (view)
+    return view;
+  VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+  vci.image = t.image;
+  vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+  vci.format = kDepthFormat;
+  vci.subresourceRange = {
+      VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT, 0, 1, layer, 1};
+  if (vkCreateImageView(g_dev.device, &vci, nullptr, &view) != VK_SUCCESS)
+    view = VK_NULL_HANDLE;
+  return view ? view : t.attachment_view;
+}
+
 DepthTarget* GetDepthRT(u64 base,
                         u32 w,
                         u32 h,
-                        u64 stencil_base) {
+                        u64 stencil_base,
+                        u32 layers) {
   auto it = g_depths.find(base);
   if (it != g_depths.end()) {
     DepthTarget& live = it->second;
     if (stencil_base)
       live.stencil_base = stencil_base;
-    if (!w || !h || (live.w == w && live.h == h))
+    if (!w || !h || (live.w == w && live.h == h && live.layers >= layers))
       return &live;
-    return ActivateDepthVariant(live, base, w, h, stencil_base);
+    // DB_DEPTH_VIEW names the slice being drawn, never the array's size: the
+    // array grows in place, and the old image goes once the GPU is done.
+    if (live.w == w && live.h == h) {
+      u32 want = 4;
+      while (want < layers)
+        want *= 2;
+      DepthTarget grown;
+      if (!CreateDepthImage(grown, base, w, h, live.stencil_base, want))
+        return nullptr;
+      grown.htile_base = live.htile_base;
+      grown.guest_w = live.guest_w;
+      grown.guest_h = live.guest_h;
+      grown.last_frame = live.last_frame;
+      grown.used_this_frame = live.used_this_frame;
+      // A new image holds nothing: each layer clears on its first bind.
+      grown.clear_layers = ~0u;
+      grown.clear_value = live.clear_value;
+      RetireDepthTarget(live);
+      live = grown;
+      return &live;
+    }
+    return ActivateDepthVariant(live, base, w, h, stencil_base, layers);
   }
   if (g_depths.size() >= 32 || !w || !h)
     return nullptr;
   DepthTarget t;
-  if (!CreateDepthImage(t, base, w, h, stencil_base))
+  if (!CreateDepthImage(t, base, w, h, stencil_base, layers))
     return nullptr;
   g_depths[base] = t;
   return &g_depths[base];
@@ -991,6 +1072,27 @@ void ResolveHtileClear(DepthTarget& dt, u64 base, float depth_clear) {
   }
 }
 
+void NoteSurfaceWrite(u64 base, u64 bytes) {
+  if (!base || !bytes)
+    return;
+  const auto note = [&](RTarget& rt, u64 rt_base) {
+    if (base >= rt_base + RtByteSize(rt) || rt_base >= base + bytes)
+      return;
+    rt.dcc_clear_pending = false;
+    if (rt.clear_pending && rt.clear_src &&
+        !std::strcmp(rt.clear_src, "dcc-clear"))
+      rt.clear_pending = false;
+  };
+  for (auto& kv : g_rts) {
+    note(kv.second, kv.first);
+    auto v = g_rt_variants.find(kv.first);
+    if (v == g_rt_variants.end())
+      continue;
+    for (RTarget& alt : v->second)
+      note(alt, kv.first);
+  }
+}
+
 void NoteRawWrite(u64 base, u64 bytes) {
   if (!base || !bytes)
     return;
@@ -1154,7 +1256,8 @@ bool BeginRegion(const u64* mrt_base,
                  const u32* mrt_surf_h,
                  const u64* mrt_dcc_base,
                  const u32 (*mrt_clear_word)[2],
-                 u64 depth_htile_base) {
+                 u64 depth_htile_base,
+                 u32 depth_slice) {
   ScopeNs _region_timer(&g_ns_region);
   // DELTA_GPU_QCHECK also gates this path: a checkpoint that fails here names
   // the DRAWS that ran before this region as the device loss, which is the
@@ -1184,6 +1287,10 @@ bool BeginRegion(const u64* mrt_base,
     targets[i] = GetRT(mrt_base[i], iw, ih, ColorTargetFormat(mrt_info[i]));
     if (!targets[i])
       return false;
+    // A dispatch wrote these pixels since the image last saw them.
+    if (!CsRefreshRtFromTruth(mrt_base[i]))
+      rhi::FlushCsWritesRange(rhi::DefaultRenderer(), mrt_base[i],
+                              RtByteSize(*targets[i]), "rt-bind");
     if (targets[i]->dcc_clear_pending)
       ResolveDccClear(*targets[i], mrt_base[i], mrt_info[i],
                       mrt_clear_word ? mrt_clear_word[i] : nullptr);
@@ -1205,7 +1312,8 @@ bool BeginRegion(const u64* mrt_base,
   const u32 dw = RtSurfaceExtent(depth_w, w, 256);
   const u32 dh = RtSurfaceExtent(depth_h, h, 64);
   DepthTarget* dt =
-      depth_base ? GetDepthRT(depth_base, dw, dh, stencil_base) : nullptr;
+      depth_base ? GetDepthRT(depth_base, dw, dh, stencil_base, depth_slice + 1)
+                 : nullptr;
   if (depth_base && !dt)
     return false;
   g_region.cur_mrt_count = 0;
@@ -1279,6 +1387,7 @@ bool BeginRegion(const u64* mrt_base,
     }
     rt.used_this_frame = true;
     rt.last_frame = g_frame.num;
+    rt.render_serial = ++g_render_serial;
     g_region.cur_mrt[i] = mrt_base[i];
   }
   g_region.cur_mrt_count = mrt_count;
@@ -1313,8 +1422,13 @@ bool BeginRegion(const u64* mrt_base,
       dt->htile_base = depth_htile_base;
     if (dt->htile_clear_pending)
       ResolveHtileClear(*dt, depth_base, depth_clear);
-    const bool clear_depth =
-        dt->clear_pending || (!dt->used_this_frame && !dt->htile_base);
+    if (dt->clear_pending && dt->layers > 1) {
+      dt->clear_layers = ~0u;
+      dt->clear_pending = false;
+    }
+    const bool layer_clear = (dt->clear_layers >> depth_slice) & 1;
+    const bool clear_depth = dt->clear_pending || layer_clear ||
+                             (!dt->used_this_frame && !dt->htile_base);
     // Async compute is currently serialized ahead of the next graphics frame.
     // Keep this frame's scene depth in its persistent CS range before a later
     // pass clears the shared depth image, or next frame's compute sees zero.
@@ -1340,14 +1454,14 @@ bool BeginRegion(const u64* mrt_base,
                            : VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT |
                                  VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT);
     dt->layout = depth_layout;
-    depth_att.imageView = dt->attachment_view;
+    depth_att.imageView = DepthLayerView(*dt, depth_slice);
     depth_att.imageLayout = depth_layout;
     depth_att.loadOp =
         clear_depth ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
     depth_att.storeOp = read_only ? VK_ATTACHMENT_STORE_OP_NONE
                                   : VK_ATTACHMENT_STORE_OP_STORE;
     depth_att.clearValue.depthStencil = {
-        dt->clear_pending ? dt->clear_value : depth_clear, 0};
+        dt->clear_pending || layer_clear ? dt->clear_value : depth_clear, 0};
     if (kRegTrace) {
       static int n = 0;
       if (n++ < 200)
@@ -1360,9 +1474,13 @@ bool BeginRegion(const u64* mrt_base,
                   (int)depth_layout, (unsigned long)base);
     }
     dt->clear_pending = false;
+    dt->clear_layers &= ~(1u << depth_slice);
     dt->used_this_frame = true;
     dt->last_frame = g_frame.num;
+    if (!read_only)
+      dt->render_serial = ++g_render_serial;
     g_region.cur_depth = depth_base;
+    g_region.cur_depth_slice = depth_slice;
     if (stencil_base) {
       const bool clear_stencil = !dt->stencil_used_this_frame;
       const VkAccessFlags stencil_source =
@@ -1379,7 +1497,7 @@ bool BeginRegion(const u64* mrt_base,
                      VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
                          VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
       dt->stencil_layout = VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL;
-      stencil_att.imageView = dt->attachment_view;
+      stencil_att.imageView = DepthLayerView(*dt, depth_slice);
       stencil_att.imageLayout = VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL;
       stencil_att.loadOp = clear_stencil ? VK_ATTACHMENT_LOAD_OP_CLEAR
                                          : VK_ATTACHMENT_LOAD_OP_LOAD;
