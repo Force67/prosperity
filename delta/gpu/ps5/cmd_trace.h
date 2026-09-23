@@ -227,7 +227,8 @@ void TraceCsUnsupported(u64 cs_addr,
 void TraceCsUnresolved(u64 cs_addr, const gcn::CsResource& res, u32 ud_dwords);
 void TraceCsUnsupportedImage(u64 cs_addr,
                              u32 binding,
-                             const gcn::TImage& image);
+                             const gcn::TImage& image,
+                             const u32* descriptor);
 void TraceCsNoLinearStaging(u64 cs_addr,
                             u32 binding,
                             const gcn::TImage& image);

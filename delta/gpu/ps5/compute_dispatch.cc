@@ -129,7 +129,7 @@ ResourceRange ResolveImageResource(u64 cs_addr,
     // One descriptor we cannot stage used to skip the whole dispatch, taking
     // every other binding's work with it. Hand this one zeros instead and let
     // the rest of the shader run.
-    TraceCsUnsupportedImage(cs_addr, res.binding, t);
+    TraceCsUnsupportedImage(cs_addr, res.binding, t, descriptor);
     out.zero_fill = true;
     out.size = std::max<u64>(res.min_bytes, 16);
     return out;
@@ -257,6 +257,7 @@ void DispatchCompute(rhi::Renderer& renderer,
   }
 
   NoteDispatch(cs_addr, threads, rsrc2);
+  TraceShaderListing(cs_addr);
   TraceComputeShader(regs, cs_addr, groups, threads, rsrc2);
 
   if (!IsGuestAddress(cs_addr) || !threads[0] || !threads[1] || !groups[0] ||
@@ -453,6 +454,25 @@ void DispatchCompute(rhi::Renderer& renderer,
     out.nfmt = range.image.nfmt;
     out.pow2_pad = range.image.pow2_pad;
   }
+  // A single-mip array and a view of its leading slices stage the same bytes
+  // (slices are consecutive), so the shorter view takes the whole array's
+  // range. The GI atlas writer binds the array and its first slice this way.
+  for (u32 i = 0; i < ci.num_res; i++)
+    for (u32 j = 0; j < ci.num_res; j++) {
+      auto& a = ci.res[i];
+      const auto& b = ci.res[j];
+      if (i != j && a.base == b.base && !a.zero_fill && !b.zero_fill &&
+          a.image_staging && b.image_staging && a.mip_levels == 1 &&
+          b.mip_levels == 1 && a.layers < b.layers && a.width == b.width &&
+          a.height == b.height && a.pitch == b.pitch &&
+          a.tiling_idx == b.tiling_idx && a.elem_bytes == b.elem_bytes &&
+          a.stage_elem_bytes == b.stage_elem_bytes && a.dfmt == b.dfmt &&
+          a.nfmt == b.nfmt && a.pow2_pad == b.pow2_pad) {
+        a.layers = b.layers;
+        a.size = b.size;
+        a.guest_size = b.guest_size;
+      }
+    }
   ci.gds_binding = rc.gds_binding;
   if (!ci.num_res)
     return;

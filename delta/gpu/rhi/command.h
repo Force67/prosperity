@@ -68,7 +68,7 @@ struct DrawInfo {
     u64 base = 0;
     u32 size = 0;
   };
-  DrawCbuf cbufs[32];
+  DrawCbuf cbufs[64];
   u32 num_cbufs = 0;
   // Raw MUBUF buffers the recompiled VS/PS read by hand (skinning palette, instance
   // table, self-indexed vertex data), each staged into a set-2 storage window with
@@ -155,7 +155,7 @@ struct DrawInfo {
     // behind it: whether the slot is zero, stale, or never the shader's.
     u64 src = 0;
   };
-  static constexpr u32 kMaxDrawTextures = 24;  // == gpu::vk::kMaxTex
+  static constexpr u32 kMaxDrawTextures = 64;  // == gpu::vk::kMaxTex
   DrawTex texs[kMaxDrawTextures];
   u32 num_texs = 0;
 
@@ -187,6 +187,7 @@ struct DrawInfo {
   // DB_HTILE_DATA_BASE: the depth surface's compression metadata. A write
   // over it is the depth fast clear (see NoteDccWrite).
   u64 depth_htile_base = 0;
+  u32 depth_slice = 0;  // array layer of depth_base this draw renders into
   bool depth_valid = false;         // DB_Z_INFO format != 0
   bool depth_test_enable = false;   // DB_DEPTH_CONTROL Z_ENABLE
   bool depth_write_enable = false;  // DB_DEPTH_CONTROL Z_WRITE_ENABLE

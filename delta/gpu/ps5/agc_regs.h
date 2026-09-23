@@ -91,12 +91,21 @@ constexpr u32 mmDB_RENDER_CONTROL = 0xA000;
 // DB_DEPTH_CONTROL: STENCIL_ENABLE[0] Z_ENABLE[1] Z_WRITE_ENABLE[2] ZFUNC[6:4].
 constexpr u32 mmDB_DEPTH_CONTROL = 0xA200;
 // DB_Z_INFO: FORMAT[1:0] (0=invalid/off, 1=Z16, 3=Z32_FLOAT).
+constexpr u32 mmDB_DEPTH_VIEW = 0xA002;
 constexpr u32 mmDB_Z_INFO = 0xA010;
 // Depth surface base (byte addr = value << 8); gfx10 adds high-bit ext regs.
 constexpr u32 mmDB_Z_READ_BASE = 0xA012;
 constexpr u32 mmDB_Z_WRITE_BASE = 0xA014;
 constexpr u32 mmDB_Z_READ_BASE_HI = 0xA01A;
 constexpr u32 mmDB_Z_WRITE_BASE_HI = 0xA01C;
+// Stencil: FORMAT[0] of DB_STENCIL_INFO says whether a plane exists.
+constexpr u32 mmDB_STENCIL_INFO = 0xA011;
+constexpr u32 mmDB_STENCIL_WRITE_BASE = 0xA015;
+constexpr u32 mmDB_STENCIL_WRITE_BASE_HI = 0xA01D;
+constexpr u32 mmDB_STENCIL_CLEAR = 0xA00A;
+constexpr u32 mmDB_STENCIL_CONTROL = 0xA10B;
+constexpr u32 mmDB_STENCILREFMASK = 0xA10C;
+constexpr u32 mmDB_STENCILREFMASK_BF = 0xA10D;
 // The depth surface's HTILE metadata (base << 8): a title fast-clears depth
 // by filling this, not the Z plane.
 constexpr u32 mmDB_HTILE_DATA_BASE = 0xA005;

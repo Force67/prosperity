@@ -12,6 +12,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <mutex>
@@ -34,7 +35,7 @@
 namespace {
 DELTA_OPTION(u64, kBlkFrom, "DELTA_AGC_REGSTAT_FROM", 0);
 DELTA_OPTION(int, kCbTraceFrom, "DELTA_AGC_CBTRACE", -1);
-DELTA_OPTION(u64, kDumpSh, "DELTA_AGC_DUMPSH", 0);
+DELTA_OPTION(const char*, kDumpSh, "DELTA_AGC_DUMPSH", nullptr);
 DELTA_OPTION(int, kVdumpN, "DELTA_AGC_VDUMPN", 8);
 DELTA_OPTION(unsigned long, kVdumpFrom, "DELTA_AGC_VDUMPFROM", 0);
 DELTA_OPTION(u64, kVdumpRt, "DELTA_AGC_VDUMPRT", 0);
@@ -123,6 +124,23 @@ const char* const kEncName[19] = {"?",     "sop1", "sop2", "sopk", "sopc",
 
 // One decoded shader, instruction by instruction.
 base::String Words(const u32* p, u32 count);
+
+// sh_<address>.bin in the working directory, for an offline disassembler.
+void WriteShaderFile(u64 address) {
+  if (!IsGuestAddress(address) || !gpu::IsReadableRange(address, kMaxShaderBytes))
+    return;
+  char path[64];
+  std::snprintf(path, sizeof(path), "sh_%llx.bin", (unsigned long long)address);
+  // Compute programs run past 4096 dwords; take what is mapped, up to 64 KiB.
+  u64 bytes = kMaxShaderBytes;
+  while (bytes < 4 * kMaxShaderBytes &&
+         gpu::IsReadableRange(address, bytes + kMaxShaderBytes))
+    bytes += kMaxShaderBytes;
+  if (FILE* f = std::fopen(path, "wb")) {
+    std::fwrite(reinterpret_cast<const void*>(address), 1, bytes, f);
+    std::fclose(f);
+  }
+}
 
 void DumpProgram(const char* what, u64 address) {
   const auto prog =
@@ -633,9 +651,14 @@ void TraceRecompileDone(bool ok) {
 
 void TraceRecompileFailed(u64 vs_addr, u64 ps_addr) {
   static int n = 0;
-  if (n++ < 32)
+  if (n++ < 32) {
     BASE_LOGI("agc", "recompile FAILED vs={:#x} ps={:#x}, draw dropped",
               vs_addr, ps_addr);
+    if (kGpuDrawcensus) {
+      WriteShaderFile(vs_addr);
+      WriteShaderFile(ps_addr);
+    }
+  }
 }
 
 void TraceAttrPlan(size_t attrs,
@@ -918,13 +941,27 @@ void TraceDrawDone() {
     BASE_LOGI("agc", "DL draw#{} done", CurrentDraw());
 }
 
+// DELTA_AGC_DUMPSH=<addr>[,<addr>...]: list each program once and write it out.
 void TraceShaderListing(u64 address) {
-  static bool done = false;
-  if (!kDumpSh || done || address != kDumpSh || !IsGuestAddress(address) ||
+  if (!kDumpSh)
+    return;
+  static std::set<u64> wanted = [] {
+    std::set<u64> out;
+    for (const char* p = kDumpSh; *p;) {
+      char* end = nullptr;
+      const u64 v = std::strtoull(p, &end, 0);
+      if (end == p)
+        break;
+      out.insert(v);
+      p = *end == ',' ? end + 1 : end;
+    }
+    return out;
+  }();
+  if (!wanted.erase(address) || !IsGuestAddress(address) ||
       !gpu::IsReadableRange(address, kMaxShaderBytes))
     return;
-  done = true;
   DumpProgram("SHADER", address);
+  WriteShaderFile(address);
 }
 
 // --- compute ---------------------------------------------------------------
@@ -1027,17 +1064,20 @@ void TraceCsUnresolved(u64 cs_addr, const gcn::CsResource& res, u32 ud_dwords) {
 
 void TraceCsUnsupportedImage(u64 cs_addr,
                              u32 binding,
-                             const gcn::TImage& image) {
+                             const gcn::TImage& image,
+                             const u32* descriptor) {
   static std::unordered_set<u64> reported;
   if (reported.size() < 256 &&
       reported.insert((cs_addr << 8) | (binding & 0xFF)).second)
     BASE_LOGI("csgpu",
               "CS @{:#x} bind={} unsupported image base={:#x} type={} dfmt={} "
-              "nfmt={} tiling={:#x} {}x{} pitch={} valid={} tiling_ok={} "
-              "-- dispatch skipped",
+              "nfmt={} tiling={:#x} {}x{} pitch={} mips={} valid={} "
+              "tiling_ok={} T#={} -- binding zero-filled",
               cs_addr, binding, image.base, image.type, image.dfmt, image.nfmt,
               image.tiling_idx, image.width, image.height, image.pitch,
-              image.valid, gcn::TilingSupported(image.tiling_idx));
+              image.mip_levels, image.valid,
+              gcn::TilingSupported(image.tiling_idx),
+              Words(descriptor, 8).c_str());
 }
 
 void TraceCsNoLinearStaging(u64 cs_addr,

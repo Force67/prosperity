@@ -344,11 +344,13 @@ void ResolveDepthState(const Regs& regs, rhi::DrawInfo& d) {
       << 8;
   d.depth_valid = (z_info & 0x3) != 0;
   if (!d.depth_valid || !IsGuestAddress(z_base) ||
-      !(((control >> 1) & 1u) || ((control >> 2) & 1u))) {
+      !((control & 1u) || ((control >> 1) & 1u) || ((control >> 2) & 1u))) {
     d.depth_valid = false;
     return;
   }
   d.depth_base = z_base;
+  // SLICE_START: the array layer this pass renders (shadow cascades).
+  d.depth_slice = regs[mmDB_DEPTH_VIEW] & 0x7FF;
   const u64 htile =
       ((static_cast<u64>(regs[mmDB_HTILE_DATA_BASE_HI]) << 32) |
        regs[mmDB_HTILE_DATA_BASE])
@@ -361,6 +363,22 @@ void ResolveDepthState(const Regs& regs, rhi::DrawInfo& d) {
   std::memcpy(&d.depth_clear, regs.At(mmDB_DEPTH_CLEAR), 4);
   if (!(d.depth_clear >= 0.0f && d.depth_clear <= 1.0f))
     d.depth_clear = 1.0f;
+  const u64 stencil_base =
+      ((static_cast<u64>(regs[mmDB_STENCIL_WRITE_BASE_HI]) << 32) |
+       regs[mmDB_STENCIL_WRITE_BASE])
+      << 8;
+  d.stencil_enable = (control & 1u) && (regs[mmDB_STENCIL_INFO] & 1u) &&
+                     IsGuestAddress(stencil_base);
+  d.stencil_clear_draw =
+      d.stencil_enable && ((d.render_control >> 1) & 1u) != 0;
+  if (d.stencil_enable) {
+    d.stencil_base = stencil_base;
+    d.stencil_backface_enable = (control >> 7) & 1u;
+    d.stencil_clear = regs[mmDB_STENCIL_CLEAR] & 0xFF;
+    d.stencil_control = regs[mmDB_STENCIL_CONTROL];
+    d.stencil_refmask = regs[mmDB_STENCILREFMASK];
+    d.stencil_refmask_bf = regs[mmDB_STENCILREFMASK_BF];
+  }
 }
 
 void ResolveRasterState(const Regs& regs, rhi::DrawInfo& d) {

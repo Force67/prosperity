@@ -217,7 +217,7 @@ void HandleDmaData(rhi::Renderer& renderer, const u32* body, u32 count) {
   const u32 dst_sel = (control >> 20) & 0x3;
   const u64 src = (static_cast<u64>(body[2] & 0xFFFF) << 32) | body[1];
   const u64 dst = (static_cast<u64>(body[4] & 0xFFFF) << 32) | body[3];
-  const u32 bytes = body[5] & 0x1FFFFF;
+  const u32 bytes = body[5] & 0x3FFFFFF;  // gfx9+ BYTE_COUNT is 26 bits
   const bool src_is_memory = src_sel == 0 || src_sel == 3;
   const bool dst_is_memory = dst_sel == 0 || dst_sel == 3;
   if (MemWatchHit(dst, bytes))
