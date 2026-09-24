@@ -412,7 +412,8 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
   // vice versa) for the same shader pair.
   key = HashWord(key, d.num_vbufs);
   for (u32 j = 0; j < d.num_vbufs; j++)
-    key = HashWord(key, d.vbufs[j].stride);
+    key = HashWord(key, d.vbufs[j].stride |
+                            (d.vbufs[j].per_instance ? 1ull << 32 : 0));
   for (u32 i = 0; i < d.num_vattrs; i++) {
     key = HashWord(key, d.vattrs[i].location);
     key = HashWord(key, d.vattrs[i].binding);
@@ -513,18 +514,23 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
   // kRectList; 17 is kRectListLegacy there). Missing the gfx10 number rendered
   // every PS5 fullscreen pass as a single triangle covering half the rect.
   const bool is_rect_list = d.prim_type == 17 || d.prim_type == 7;
-  bool rect_list =
+  bool use_gs =
       !mesh && is_rect_list && !kNoRectGs && g_dev.geometry_shader &&
       !d.recomp->gs_spirv.empty();
+  if (d.recomp->guest_gs) {
+    if (!g_dev.geometry_shader)
+      return nullptr;
+    use_gs = true;
+  }
   VkShaderModule gs =
-      rect_list ? MakeModuleVec(d.recomp->gs_spirv) : VK_NULL_HANDLE;
+      use_gs ? MakeModuleVec(d.recomp->gs_spirv) : VK_NULL_HANDLE;
   VkPipelineShaderStageCreateInfo stages[3]{};
   u32 stage_count = 0;
   stages[stage_count] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
   stages[stage_count].stage = static_cast<VkShaderStageFlagBits>(vertex_stage);
   stages[stage_count].module = vs;
   stages[stage_count++].pName = "main";
-  if (rect_list) {
+  if (use_gs) {
     stages[stage_count] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
     stages[stage_count].stage = VK_SHADER_STAGE_GEOMETRY_BIT;
     stages[stage_count].module = gs;
@@ -540,7 +546,9 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
   u32 nbind = d.num_vattrs ? std::min(d.num_vbufs, 8u) : 0;
   VkVertexInputBindingDescription binds[8];
   for (u32 j = 0; j < nbind; j++)
-    binds[j] = {j, d.vbufs[j].stride, VK_VERTEX_INPUT_RATE_VERTEX};
+    binds[j] = {j, d.vbufs[j].stride,
+                d.vbufs[j].per_instance ? VK_VERTEX_INPUT_RATE_INSTANCE
+                                        : VK_VERTEX_INPUT_RATE_VERTEX};
   VkVertexInputAttributeDescription attrs[DrawInfo::kMaxVertexAttrs];
   for (u32 i = 0; i < d.num_vattrs; i++)
     attrs[i] = {d.vattrs[i].location, d.vattrs[i].binding,

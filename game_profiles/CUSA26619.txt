@@ -1,21 +1,44 @@
 // Grand Theft Auto: San Andreas - The Definitive Edition (CUSA26619, PS4)
 // UE4 / Gameface, native x86 backend.
 //
-// IN GAME (2026-08-21). The main menu is pixel-correct at 24 fps -- logo, Los
-// Santos artwork, START / GAME / OPTIONS / SOCIAL CLUB -- Cross on START is
-// accepted, the title cycles its loading screens, streams the level and runs
-// its opening cutscene with subtitles.
+// IN GAME, 3D GEOMETRY CORRECT (2026-09-24). Menu, loading screens, the
+// opening cutscene with subtitles and gameplay with the HUD (minimap, clock,
+// money) all run. The G-buffer holds clean geometry: interiors, stairs,
+// characters. What reaches the screen is still wrong (see "WHAT IS LEFT").
 //
-// THE WORLD IS DRAWN. Dump the base pass mid-cutscene and it is a real scene:
-// at f750 GBufferC (0x2011000000) is a bus and a road with its lane markings,
-// from a low camera. Two things are between that and the screen:
-//   - the deferred lighting still accumulates to ZERO (the red a full frame
-//     shows in the scene target is the base pass's MRT0, not the lights, and
-//     the flat blue an older note describes was the heuristic quad renderer);
-//   - the tonemapper is gated by a colour-grading LUT that never gets drawn,
-//     and its output IS that lookup, so the presented frame is black. Forcing
-//     the LUT white presents a picture (see below), which is the proof that
-//     everything downstream of it works.
+// Four general PS4 defects were between the world and a correct G-buffer:
+//   - ES -> GS pipelines never ran. VGT_SHADER_STAGES_EN=0xb0 puts a COPY
+//     shader in the VS slot, and it reads the GSVS ring the ES and GS fill; the
+//     "vertex buffer nothing ever writes" at 0x2000400000 was that ring. The ES
+//     and GS now translate to a Vulkan vertex + geometry shader
+//     (gcn/spirv/translate_gs.cc), the copy shader only supplies the export map.
+//   - the colour-grading LUT and the 48^3 translucency volumes are LAYERED
+//     (gl_Layer from the GS): a target a GS renders layered is now a 3D image
+//     rendered through a 2D-array view and sampled through a 3D one.
+//   - the world fetch shader indexes its per-object stream by v3 (InstanceID),
+//     and every binding was VK_VERTEX_INPUT_RATE_VERTEX: each vertex took a
+//     different instance's transform, the horizontal shreds across the frame.
+//   - v0 (VertexID) was only seeded for VS without a fetch shader, but UE4
+//     fetches half its attributes by hand from v0 after the fetch returns.
+// Also: 8/16-bit UINT attributes (skinning indices) reached the VGPR as float
+// bits; IT_DMA_DATA immediate fills were dropped; CMASK fast clears
+// (CB_COLORn_INFO.FAST_CLEAR) were never seen.
+//
+// WHAT IS LEFT (all post-processing, downstream of a correct G-buffer):
+//   - scene colour 0x2012800000 stays nearly empty: the deferred lights still
+//     contribute almost nothing. Re-measure before trusting the light notes
+//     below; most were taken while the geometry was still shredded.
+//   - the separate-translucency target 0x2015000000 (RGBA16F, FAST_CLEAR) holds
+//     a 4x4 grid of character silhouettes over grey noise, and the composite
+//     into 0x2013800000 and every later pass inherit it. The only draws into it
+//     in a frame are small blended quads, so the grid is not drawn this frame.
+//   - the presented colour is teal/green, and dark frames carry green speckle.
+// Snapshots every 60 frames show it best, one frame lies (the cutscene fades):
+//   +DELTA_GPU_SNAPEVERY=60 +DELTA_GPU_SNAPEVERY_MAX=40 +DELTA_GPU_DUMP_DIR=<dir>
+// The world runs at 1-4 fps, so frame 1100 takes ~5 minutes; never combine
+// DELTA_GPU_DRAWRT=1 with a world frame (it censuses every buffer of ~3000
+// draws and does not finish).
+//
 // Beware a single frame: the cutscene camera passes through geometry, and
 // frames like f900 are legitimately a wall filling the screen. Compare two or
 // three before believing a G-buffer looks broken.
@@ -171,175 +194,17 @@
 // pixel. Isaac and Doom64 unchanged.
 //
 // ---------------------------------------------------------------------------
-// WHAT IS LEFT: THE COLOUR-GRADING LUT
+// SOLVED: THE COLOUR-GRADING LUT WAS A GEOMETRY-SHADER PASS
 // ---------------------------------------------------------------------------
-// The tonemap draw is the last one before the scanout: rt=0x2017000000,
-// ps=0x2001308000, 145 instructions, and its output IS a LUT lookup --
-//   008a  image_sample v[0:2], v0, s[8:15], s[40:43]   ; the volume LUT
-//   0091  v_madmk_f32 v0, v0, v20, 0x3f866666          ; and that is the colour
-// so a zero LUT is a black frame no matter what the scene holds. PROVEN with
-// +DELTA_GPU_TEXFORCE=0x200e680000 (bind the 1x1 white default for exactly
-// that address): 0x2017000000 nz 0 -> 11578 mean 180, and the scanout
-// 0x4000800000 nz 0 -> 15294 mean 235. Everything downstream of the LUT works.
-//
-// The LUT is drawn once a frame and comes out empty:
-//   #3090 rt=0x200e680000 32x32 vcount=4 inst=32 prim=6 vs=0x200084ac00
-//         ps=0x20013e8000, no textures, cb1 = 576 bytes of grading parameters
-// and the tonemapper samples that address as a 32x32x32 VOLUME (T# type 3D,
-// depth 32). Two separate things are wrong with it:
-//
-//   - IT RASTERIZES NOTHING. Its vertex data is not a vertex binding but a raw
-//     buffer the VS fetches itself, and that buffer is EMPTY. The V# resolves
-//     (00400000/00003020/00400000/00027204 -> base 0x2000400000, stride 0,
-//     4 MiB) and the first 64 KiB read nz=0/65536, so every fetch returns 0
-//     and every vertex is (0,0,0,0). The VS reads x/y/z/w/layer/u/v from fixed
-//     offsets 0x180/0x240/0x300/0x3c0/0x480/0x0/0xc0 of it. Not the pixel
-//     shader: +DELTA_GPU_PSWHITE=1 leaves the target at nz=0 as well, and
-//     +DELTA_GPU_NOCULL=1 changes nothing. Reading that V#'s base as the full
-//     48 bits the ISA specifies gives 0x302000400000, which is NOT mapped, so
-//     the 44-bit mask in DecodeVBuffer is not what loses it (0x302000400000 is
-//     absent from /proc/<pid>/maps, not merely over the kGuestHi ceiling).
-//     THE WHOLE ARENA IS DEAD, not just those offsets: the DRAWRT buffer dump
-//     samples all 4 MiB and reports nz=0 of 65536 samples, against nz=255/576
-//     for the pixel shader's grading block in the same draw, and
-//     +DELTA_GPU_MEMWATCH=0x2000400000 reports frames-nonzero=0 over a
-//     thousand frames. So the ADDRESS is wrong, not the offsets. The one clue
-//     left: this V#'s base-high field reads 0x3020 where every other buffer in
-//     the title reads 0x0020 -- the only descriptor in the frame with those
-//     bits set, and dropping them is exactly what lands it in a dead arena.
-//     THE BLOCK IS NOT ANYWHERE IN GUEST MEMORY. +DELTA_GPU_SOASCAN=0xc0 sweeps
-//     every mapped guest page for a screen quad stored as parallel columns at
-//     that stride: z column all 0.0, w column all 1.0, and x and y columns
-//     each holding exactly two values twice over -- a rectangle's left/right
-//     and top/bottom edges. That is the shape this VS reads and it does NOT
-//     assume the unit quad, so a pass rasterizing a sub-box would still match.
-//     Over ~24 GiB the only persistent hits are UI corner tables in module
-//     memory; nothing in the GPU arenas, run after run. So the guest never
-//     writes those vertices AT ALL: this is not a descriptor pointing at the
-//     wrong arena, it is a block that is never produced, and the cause is
-//     upstream of the graphics layer.
-//     (The sweep would miss a block whose z is not 0 or whose w is not 1, and
-//     one whose columns are not 0xc0 apart -- pass the stride the shader's own
-//     soffsets show. An earlier, stricter version demanding exactly +/-1
-//     found nothing either, and a looser one demanding only "finite" drowns in
-//     module data: those two bracket the answer.)
-//     (Searching from OUTSIDE the process is not an option -- ptrace_scope=1
-//     denies /proc/<pid>/mem to a non-parent -- hence the in-process sweep,
-//     the way TSCAN works for T#s. +DELTA_GPU_MEMFIND=<hex dwords> is the
-//     plain-sequence version; "bf800000,bf800000,3f800000,3f800000" alone is
-//     useless, it hits every static corner table in the modules.)
-//
-//     BUT GDB AS THE PARENT WORKS -- ptrace_scope=1 blocks attaching, not
-//     tracing a child, so the guest-side trace this needs IS available:
-//       gdb -batch -x wp.gdb --args ./ps4delta <pkg> +DELTA_PAD_SCRIPT=...
-//     with wp.gdb doing
-//       handle SIGSEGV nostop noprint pass   (the lifter's int 0x41 path)
-//       break gpu::rhi::Draw
-//       run
-//       delete breakpoints
-//       watch *(unsigned int *) 0x2000400180
-//       continue
-//       bt 25
-//     That arms cleanly ("Hardware watchpoint 2") and the emulator keeps
-//     running at about half speed (13 fps against 24 on the menu). Armed at
-//     the first draw it never fired through the menu -- but a global vertex
-//     buffer is filled at ENGINE INIT, which is before that anchor, so the
-//     run needs an earlier break and long enough to reach the world (the pad
-//     script's seconds are wall-clock and gdb halves the rate, so widen it).
-//     ANCHOR IT ON `break krnl::sys_mmap_dmem` -- the syscall-628 handler, so
-//     the arena is mapped by the time it returns. The bare `sys_mmap_dmem`
-//     does not resolve (`info functions mmap_dmem` gives the qualified name;
-//     it is a non-debugging symbol at 0x118d10). With the right name the
-//     breakpoint sets at 0x118d1c -- but it never stops, at `ignore 1 24` OR
-//     at `ignore 1 5`. This title barely calls syscall 628 at all: it maps its
-//     GPU memory through the DCE path instead (kern/ps4/dev/dma_dev.cpp does
-//     sceKernelMapDirectMemory as ioctl 0x80108002).
-//
-//     THE WORKING RECIPE: `break krnl::dmaDevice::ioctl`, which is hit exactly
-//     FIVE times in a run, so four `continue`s put you at the last one -- early
-//     device init, long before the engine builds any render resource. Arm
-//     there:
-//       break krnl::dmaDevice::ioctl
-//       run
-//       continue        (x4)
-//       delete breakpoints
-//       watch *(unsigned int *) 0x2000400180
-//       continue
-//     It arms ("Hardware watchpoint 2") and then NEVER FIRES for the rest of
-//     the run. So a hardware watchpoint, armed at device-init time and
-//     independent of every polling probe above, agrees: nothing writes that
-//     address, ever. The buffer is not written and lost, it is never written.
-//     The remaining question is which engine path was supposed to write it and
-//     why that path does not run -- which needs the guest's own code traced,
-//     not its memory watched.
-//     Getting the guest PC that writes -- or proving none does, from a
-//     mechanism independent of the polling above -- is the next step.
-//
-//     The EUD is worth reading before the next attempt. +DELTA_GPU_DRAWRT now
-//     prints the vertex stage's user data and a window around the pointer in
-//     its first pair, and for this draw that pointer is real -- an extended
-//     user-data block inline in the command buffer, holding a table of V#s:
-//       eud+32   00000000 80003020 00400000 00ea7204   00000000 00003020 ...
-//       eud+64   00400000 80603020 00000040 00aa7204   00401800 80003020 ...
-//       eud+128  00400000 00003020 00400000 00027204   <- the one the VS loads
-//     EVERY V# in it carries base-high 0x3020, i.e. bits [45:44] of the base
-//     set, where the same title's working buffers read 0x0020 and 0x0030.
-//     Masking those bits off (what DecodeVBuffer does) lands in 0x2000400000,
-//     which is mapped and dead; keeping them lands at 0x302000400000, which is
-//     not mapped at all. Both readings name memory nothing ever writes, which
-//     agrees with the sweep: whatever fills this table's buffers never runs.
-//
-//   - IT NEEDS LAYERED RENDERING. 32 instances, one per slice, and the VS ends
-//         001e  exp pos1 off, off, v4, off done
-//     which is POS1.z = the render-target array index. The translator emits
-//     NOTHING for a POS1 export (that is the shader audit's "94 shaders / 94
-//     sites  exp"), RTarget has no layer count, and a 3D T# cannot resolve to
-//     a 2D image -- the tonemapper's LUT binding reports GUEST-OVER-RT for
-//     exactly that reason. P.T. is blocked on the same LUT, so this is worth
-//     doing properly: a 3D image with 2D_ARRAY_COMPATIBLE, an array attachment
-//     view, VkRenderingInfo.layerCount, and gl_Layer out of the vertex stage.
-//
-// THE EUD TABLE IS DEAD ALL THE WAY THROUGH, not just in the slot the LUT's VS
-// reads. DRAWRT decodes every 4-dword pair in the window as a V# and censuses
-// what it names:
-//   eud+32   V#[0] 0x2000000000 n=4194304 nz=0 | V#[1] 0x2000000000 n=4194304 nz=0
-//   eud+64   V#[0] 0x2000400000 n=6144    nz=0 | V#[1] 0x2000401800 n=64      nz=0
-//   eud+96   V#[0] 0x2000401800 n=64      nz=0 | V#[1] 0x2000401800 n=64      nz=0
-//   eud+128  V#[0] 0x2000400000 n=4194304 nz=0
-// Every one of them lands in 0x2000000000..0x2000402000 and every one reads
-// zero, while the title's live buffers all sit from 0x2000840000 upward. So
-// this is not one stale descriptor: the whole table names the first ~8 MiB of
-// the arena, which nothing ever fills.
-//
-// AND IT IS NOT A CONSTANT ARENA BIAS. The census also probes each dead base
-// at +/-16 arenas of 2 MiB and reports the first that holds anything: +4 from
-// 0x2000000000 and +2 from 0x2000400000 -- i.e. always the same absolute
-// 0x2000800000, which is just where used memory begins, not a fixed offset
-// from each descriptor. So the SotC-style "descriptors sit N arenas from where
-// the data is" explanation (DELTA_GPU_ARENA_PROBE) does not apply here.
-//
-// AND NOTHING ON THE GPU SIDE WRITES THAT ARENA EITHER. +DELTA_GPU_DMATRACE=1
-// shows every IT_DMA_DATA in the run is a 108-276 byte copy from 0x20008xxxxx
-// to dst=0x3022c, all reported `ignored` -- correctly, because the COMMAND
-// dword carries DAS=1, i.e. the destination is GDS, not memory. There is not
-// one memory-to-memory DMA in a frame. So the fill is not CP DMA, it is not
-// the CE (no DUMP_CONST_RAM packets at all), it is not a compute writeback
-// (that would show in the memory), and it is not the CPU (likewise). Nothing
-// we can see writes the first 8 MiB of that arena, which puts the next step
-// on the guest side: find the engine path that should build this table's
-// buffers and see why it never runs.
-//
-// SEPARATELY, THE CONSTANT ENGINE NEVER LOADS. +DELTA_GPU_CETRACE=1 shows 48
-// IT_LOAD_CONST_RAM packets -- the whole 48 KiB of CE RAM in 256-dword chunks
-// -- every one refused with `addr-not-guest`. The raw bodies read
-//   e0000c00 0000000f 00000100 <ce offset stepping 0x400>
-// so the SOURCE never moves while the destination walks the whole CE RAM:
-// the field order is right (it is the same blob 48 times, which is how GNM
-// initialises CE RAM), and the address 0xfe0000c00 is simply not mapped --
-// it sits just under GuestRange's 0x1000000000 floor and is absent from
-// /proc/<pid>/maps either way. The title issues no IT_DUMP_CONST_RAM at all,
-// so the CE cannot be what patches the EUD table, but a CE that loads nothing
-// is a gap of its own.
+// The LUT (rt=0x200e680000, 32x32x32, vs=0x200084ac00) is drawn by an ES -> GS
+// pipeline: ES 0x200084ad00 stores 9 dwords per vertex to the ESGS ring, GS
+// 0x2000879000 re-emits each triangle with the slice as the layer, and the VS
+// slot holds the copy shader. Its "raw vertex buffer" with base-high 0x3020
+// is the GSVS ring descriptor out of the global resource table, which is why
+// no guest code or DMA ever wrote it. Ring layouts, as translated: ES stores
+// component c at byte 4c; GS reads vertex k component c at k*4 + c*0x100
+// (the vertex offset VGPRs are ring lanes); GS writes vertex k component c at
+// dword c*maxvert + k; the copy shader reads component c at c*maxvert*64.
 //
 // ---------------------------------------------------------------------------
 // THE LIGHTS: THE GATE IS BACK IN PLAY, AND PSREACH CANNOT SEE IT

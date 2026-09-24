@@ -41,6 +41,11 @@ struct RTarget {
   std::unordered_map<u32, VkImageView> feedback_sampled_views;
   VkImageLayout feedback_layout = VK_IMAGE_LAYOUT_UNDEFINED;
   u32 w = 0, h = 0;
+  // Slices of a target a GS renders layered (gl_Layer). Such a target is a 3D
+  // image: `view` is then the 2D-array attachment view over every slice and
+  // `volume_view` the 3D view a volume T# samples.
+  u32 depth = 1;
+  VkImageView volume_view = VK_NULL_HANDLE;
   VkFormat fmt =
       VK_FORMAT_B8G8R8A8_UNORM;  // identity: addr alone doesn't pin format
   bool is_depth = false;         // depth/stencil attachment (MRT/depth task)
@@ -90,6 +95,7 @@ struct RTarget {
   // over it (NoteDccWrite) is turned into the lazy clear at the next bind,
   // when the code it wrote can be read back.
   u64 dcc_base = 0;
+  bool dcc_is_cmask = false;  // dcc_base is GCN CMASK (see ResolveDccClear)
   bool dcc_clear_pending = false;
   bool dcc_code_known = false;  // an immediate fill carried its value
   u32 dcc_clear_code = 0;
@@ -174,7 +180,7 @@ extern std::unordered_map<u64, std::vector<u64>>& g_rt_pages;
 u64 RtByteSizeWH(u32 w, u32 h, VkFormat fmt);
 u64 RtByteSize(const RTarget& rt);
 
-RTarget* GetRT(u64 base, u32 w, u32 h, VkFormat fmt);
+RTarget* GetRT(u64 base, u32 w, u32 h, VkFormat fmt, u32 depth = 1);
 // Destroy depth images retired two frames ago (an array outgrew them).
 void ReleaseRetiredDepths();
 
@@ -200,6 +206,9 @@ VkImageView SampledView(DepthTarget& depth, u32 swizzle);
 // matching the sampled geometry live when the current one cannot serve the sample.
 // True if a usable target is live at `base` afterwards.
 bool ActivateSampledRtVariant(u64 base, u32 w, u32 h);
+// Make the volume at `base` a GS rendered layered the live target, when it is
+// exactly the w x h x depth a 3D T# describes and has been rendered.
+bool ActivateVolumeRt(u64 base, u32 w, u32 h, u32 depth);
 bool ActivateSampledDepthVariant(u64 base, u32 w, u32 h);
 
 u64 ResolveSampledRT(u64 addr, u32 w, u32 h);
@@ -247,6 +256,7 @@ struct RenderRegion {
   u32 cur_area_h = 0;
   u64 cur_depth = 0;  // depth target bound in the open region (0 = none)
   u32 cur_depth_slice = 0;
+  u32 cur_layers = 1;
   u64 cur_stencil = 0;
   u64 last_rt = 0;    // last RT rendered to (present fallback)
   u64 first_rt = 0;   // first colour RT created (diagnostic selector)
@@ -277,7 +287,9 @@ bool BeginRegion(const u64* mrt_base,
                   const u64* mrt_dcc_base = nullptr,
                   const u32 (*mrt_clear_word)[2] = nullptr,
                   u64 depth_htile_base = 0,
-                  u32 depth_slice = 0);
+                  u32 depth_slice = 0,
+                  u32 layers = 1,
+                  bool meta_cmask = false);
 
 // The extent an attachment's image needs: its own surface geometry when that is
 // believable, else the region the pass draws into.

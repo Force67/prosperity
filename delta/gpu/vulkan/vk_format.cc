@@ -303,6 +303,14 @@ VkFormat ColorTargetFormat(u32 info) {
         // blue exchanged (Dead Cells' scene composite renders purple).
         return ((info >> 11) & 3) == 1 ? VK_FORMAT_B8G8R8A8_UNORM
                                        : VK_FORMAT_R8G8B8A8_UNORM;
+      // The same host formats the sampled path picks for these T#s. Left to
+      // the default, a 2_10_10_10 target was BGRA8, and a pass sampling it
+      // read 8-bit texels as 10-bit fields (GTA:SA's grading LUT, which tints
+      // every frame through the tonemapper).
+      case 8:
+        return VK_FORMAT_A2R10G10B10_UNORM_PACK32;
+      case 9:
+        return VK_FORMAT_A2B10G10R10_UNORM_PACK32;
       case 12:
         return VK_FORMAT_R16G16B16A16_UNORM;
       default:

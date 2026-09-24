@@ -319,6 +319,18 @@ void HandleDmaData(rhi::Renderer& renderer,
                 reinterpret_cast<const void*>(src), bytes);
     copied = true;
   }
+  // src_sel 2 = the packet's own dword, repeated: a fill. GNM clears surfaces
+  // and their CMASK/HTILE metadata this way, so apply it to guest memory and let
+  // the renderer clear any target it covers.
+  if (!kNoCopy && src_sel == 2 && dst_is_memory && bytes &&
+      bytes <= 0x8000000u && addressable(dst) && addressable(dst + bytes)) {
+    const u32 fill = body[1];
+    u32* words = reinterpret_cast<u32*>(dst);
+    for (u32 k = 0; k < bytes / 4; k++)
+      words[k] = fill;
+    rhi::NoteMemoryFill(renderer, dst, bytes, fill);
+    copied = true;
+  }
   TraceDmaData(control, body[5] & ~0x1fffffu, src_sel, dst_sel, src, dst, bytes,
                copied);
 }

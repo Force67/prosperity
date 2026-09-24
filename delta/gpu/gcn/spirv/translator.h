@@ -666,6 +666,14 @@ inline void SeedPsInputVgprs(Translator& t,
 }
 
 // Per-stage state carried into the shared per-instruction emitter (EmitInst).
+// One channel of a copy-shader export: GSVS ring component `comp`, or the
+// constant `bits` when comp < 0.
+struct GsCopyExport {
+  u32 target = 0, chan = 0;
+  int comp = -1;
+  u32 bits = 0;
+};
+
 struct StageContext {
   bool is_ps = false;
   // SPI_PS_INPUT_CNTL: VS param each PS attr slot reads; null = attr_i -> param_i.
@@ -799,6 +807,21 @@ struct StageContext {
   // Barrier once per dispatch-loop iteration (see LdsBarrierPlan).
   bool lockstep_loop = false;
   bool cs_unsupported = false;  // op the compute backend can't model
+
+  // Legacy ES -> GS pipeline (translate_gs.cc). ES: es_ring is the uvec4 output
+  // array its ring stores land in. GS: es_ring is the per-vertex input array,
+  // gsvs the Private copy of the GSVS ring, and each emit writes one vertex
+  // through the copy shader's export map.
+  Id es_ring = 0;
+  u32 es_ring_vec4s = 0;
+  u32 gs_input_verts = 0;
+  Id gsvs = 0;
+  u32 gsvs_dwords = 0;
+  Id gs_emitted = 0;
+  u32 gs_max_vert_out = 0;
+  const std::vector<GsCopyExport>* gs_exports = nullptr;
+  Id layer_out = 0;
+  bool gl_clip = false;
 };
 
 // ---- stage-io helpers (gcn_spirv.cc) --------------------------------------
@@ -968,6 +991,17 @@ void CsSsboStore(Translator& t,
                  Id value);
 // Storage-buffer binding planned for the instruction at pc, or -1.
 int CsBindingFor(StageContext& sc, u32 pc);
+
+// ---- legacy geometry shaders (translate_gs.cc) ----------------------------
+// Which GSVS component each export channel of a copy shader carries; false for
+// a copy shader this model cannot follow.
+bool ParseCopyShader(const Program& program,
+                     u32 max_vert_out,
+                     std::vector<GsCopyExport>& out);
+void EmitEsRingStore(Translator& t, const Inst& inst, StageContext& sc);
+void EmitGsRingAccess(Translator& t, const Inst& inst, StageContext& sc);
+// s_sendmsg in a GS: emit and cut become EmitVertex / EndPrimitive.
+void EmitGsMessage(Translator& t, const Inst& inst, StageContext& sc);
 
 // RECTLIST expansion: three post-VS corners in, two triangles out; shared
 // with the RDNA2 path.

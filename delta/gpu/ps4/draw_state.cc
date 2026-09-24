@@ -261,6 +261,16 @@ u32 ResolveRenderTargets(const Regs& regs,
         64u;
     d.mrt_surf_w[rt] = rt_pitch;
     d.mrt_surf_h[rt] = rt_pitch ? static_cast<u32>(rt_slice / rt_pitch) : 0u;
+    // A FAST_CLEAR target is cleared by writing its CMASK, never its pixels.
+    if ((info >> 13) & 1u) {
+      d.mrt_dcc_base[rt] =
+          static_cast<u64>(regs[mmCB_COLOR0_CMASK + rt * kCbColorStride]) << 8;
+      d.mrt_meta_cmask = true;
+    }
+    d.mrt_clear_word[rt][0] =
+        regs[mmCB_COLOR0_CLEAR_WORD0 + rt * kCbColorStride];
+    d.mrt_clear_word[rt][1] =
+        regs[mmCB_COLOR0_CLEAR_WORD1 + rt * kCbColorStride];
     const u32 nfmt = (info >> 8) & 0x7;
     if (kIntegerRt && (nfmt == 4 || nfmt == 5))
       mrt_uint_mask |= 1u << rt;
@@ -312,12 +322,6 @@ void ResolveColorState(const Regs& regs, u64 ps_addr, rhi::DrawInfo& d) {
     d.clear_window_br = regs[mmPA_SC_WINDOW_SCISSOR_BR];
     d.clear_screen_tl = regs[mmPA_SC_SCREEN_SCISSOR_TL];
     d.clear_screen_br = regs[mmPA_SC_SCREEN_SCISSOR_BR];
-    for (u32 rt = 0; rt < 8; rt++) {
-      d.mrt_clear_word[rt][0] =
-          regs[mmCB_COLOR0_CLEAR_WORD0 + rt * kCbColorStride];
-      d.mrt_clear_word[rt][1] =
-          regs[mmCB_COLOR0_CLEAR_WORD1 + rt * kCbColorStride];
-    }
   }
   d.color_control = regs[mmCB_COLOR_CONTROL];
 }
@@ -401,21 +405,19 @@ void ResolveRasterState(const Regs& regs, rhi::DrawInfo& d) {
 // tracked phantom vertex buffers out of live constant data, and hashing the
 // pointee into the shader key made a fresh key nearly every draw: 96% of all
 // recompile-cache misses (4183 of 4352 over 210s).
-u64 FetchShaderAddress(const Regs& regs, u64 vs_addr) {
+u64 FetchShaderAddress(const u32* vud, u64 vs_addr) {
   if (!IsGuestAddress(vs_addr) ||
       !gcn::CallsFetchShader(*gcn::CachedProgram(vs_addr, 4096)))
     return 0;
-  const u64 fetch =
-      UserDataPointer(regs.At(mmSPI_SHADER_USER_DATA_VS_0), 0);
+  const u64 fetch = UserDataPointer(vud, 0);
   return IsGuestAddress(fetch) ? fetch : 0;
 }
 
 // The transform buffer and vertex streams the heuristic quad path uses when the
 // recompiled path below declines the draw.
-void ResolveHeuristicSources(const Regs& regs,
+void ResolveHeuristicSources(const u32* vud,
                              u64 fetch_addr,
                              rhi::DrawInfo& d) {
-  const u32* vud = regs.At(mmSPI_SHADER_USER_DATA_VS_0);
   // Default to the sgpr[4..7] V# (the common VS cbuffer slot); the recompiled
   // path re-resolves it from the SGPR the VS actually reads.
   const u64 cbuf = UserDataPointer(vud, 4);
@@ -518,15 +520,14 @@ std::shared_ptr<const gcn::Program> ResolvePsTextures(rhi::Renderer& renderer,
 // so its descriptors continue the same list. Bloodborne's character sheet draws
 // that way; without it the draw is rejected and falls back to the heuristic
 // quad renderer, which paints the atlas as a staircase.
-void ResolveVsTextures(const Regs& regs,
+void ResolveVsTextures(const u32* vud,
                        u64 vs_addr,
                        rhi::DrawInfo& d,
                        TextureMasks& masks) {
   if (!IsGuestAddress(vs_addr))
     return;
-  auto texs =
-      gcn::TrackTextures(gcn::CachedProgram(vs_addr, 4096),
-                         regs.At(mmSPI_SHADER_USER_DATA_VS_0), false, vs_addr);
+  auto texs = gcn::TrackTextures(gcn::CachedProgram(vs_addr, 4096), vud,
+                                 false, vs_addr);
   for (const auto& t : texs) {
     if (d.num_texs >= kMaxTrackedTextures)
       break;
@@ -570,9 +571,11 @@ RecompStatus BindVertexAttributes(const gcn::Recompiled& rc,
   u32 attr_binding[rhi::DrawInfo::kMaxVertexAttrs] = {};
   for (u32 i = 0; i < attr_count; i++) {
     const gcn::VBuffer& vb = attr_vbs[i];
+    const bool per_instance = rc.attrs[i].per_instance;
     int sel = -1;
     for (u32 j = 0; j < d.num_vbufs; j++) {
-      if (d.vbufs[j].stride != vb.stride)
+      if (d.vbufs[j].stride != vb.stride ||
+          d.vbufs[j].per_instance != per_instance)
         continue;
       const u64 bound = reinterpret_cast<u64>(d.vbufs[j].data);
       const u64 lo = std::min(bound, vb.base);
@@ -587,7 +590,7 @@ RecompStatus BindVertexAttributes(const gcn::Recompiled& rc,
         return RecompStatus::kAttrBindings;
       sel = static_cast<int>(d.num_vbufs);
       d.vbufs[d.num_vbufs++] = {reinterpret_cast<const void*>(vb.base),
-                                vb.stride, vb.num_records};
+                                vb.stride, vb.num_records, per_instance};
     } else {
       auto& bind = d.vbufs[sel];
       if (vb.base < reinterpret_cast<u64>(bind.data))
@@ -621,16 +624,35 @@ RecompStatus BindVertexAttributes(const gcn::Recompiled& rc,
   // smallest strided binding's record count (stride-0 constant bindings do not
   // constrain it).
   u32 primary = 0;
-  while (primary < d.num_vbufs && !d.vbufs[primary].stride)
+  while (primary < d.num_vbufs &&
+         (!d.vbufs[primary].stride || d.vbufs[primary].per_instance))
     primary++;
   d.vertex_data = d.vbufs[primary < d.num_vbufs ? primary : 0].data;
   d.vertex_stride = primary < d.num_vbufs ? d.vbufs[primary].stride : 0;
   u32 records = UINT32_MAX;
   for (u32 j = 0; j < d.num_vbufs; j++)
-    if (d.vbufs[j].stride)
+    if (d.vbufs[j].stride && !d.vbufs[j].per_instance)
       records = std::min(records, d.vbufs[j].num_records);
   d.vertex_count = records == UINT32_MAX ? 0 : records;
   return RecompStatus::kOk;
+}
+
+// Bit n: vertex input location n is 8- or 16-bit UINT; bit 16+n: SINT. The
+// backend fetches those through a SCALED format (see VertexFormat).
+u32 IntAttrMask(const gcn::Recompiled& rc,
+                const gcn::VBuffer* attr_vbs,
+                u32 attr_count) {
+  u32 mask = 0;
+  for (u32 i = 0; i < attr_count; i++) {
+    const gcn::ShaderAttr& a = rc.attrs[i];
+    const u32 dfmt = a.inst_dfmt ? a.inst_dfmt : attr_vbs[i].dfmt;
+    const u32 nfmt = a.inst_dfmt ? a.inst_nfmt : attr_vbs[i].nfmt;
+    const bool narrow = dfmt == 1 || dfmt == 2 || dfmt == 3 || dfmt == 5 ||
+                        dfmt == 10 || dfmt == 12;
+    if (narrow && a.location < 16 && (nfmt == 4 || nfmt == 5))
+      mask |= 1u << (a.location + (nfmt == 5 ? 16 : 0));
+  }
+  return mask;
 }
 
 // Resolve every cbuffer V# an emitted stage reads, following EUD/SRT pointer
@@ -714,6 +736,8 @@ void ResolveRawBuffers(const std::vector<gcn::ShaderBuffer>& buffers,
 RecompStatus ResolveRecompiledShaders(
     const Regs& regs,
     u64 vs_addr,
+    const u32* vud,
+    const gcn::GsPipeline* gs,
     u64 ps_addr,
     u64 fetch_addr,
     const std::shared_ptr<const gcn::Program>& ps_prog,
@@ -736,7 +760,8 @@ RecompStatus ResolveRecompiledShaders(
   TraceDepthBaseWatch(regs);
 
   GraphicsShaderState state;
-  state.vs_addr = vs_addr;
+  state.vs_addr = gs ? regs.ShaderAddr(mmSPI_SHADER_PGM_LO_VS) : vs_addr;
+  state.gs = gs;
   state.ps_addr = ps_addr;
   state.fetch_addr = fetch_addr;
   state.ps_input_ena = ps_input_ena;
@@ -759,22 +784,21 @@ RecompStatus ResolveRecompiledShaders(
   state.mrt_bound_mask = mrt_bound_mask;
   state.gl_clip = !((regs[mmPA_CL_CLIP_CNTL] >> 19) & 1);
 
-  const gcn::Recompiled& rc = GetGraphicsShader(regs, state);
-  if (!rc.ok)
+  const gcn::Recompiled* rc = &GetGraphicsShader(regs, state);
+  if (!rc->ok)
     return RecompStatus::kRejected;
 
   d.ps4_neo = gcn::DefaultIsaMode() == gcn::IsaMode::kNeo;
-  const u32* vud = regs.At(mmSPI_SHADER_USER_DATA_VS_0);
   const u32* pud = regs.At(mmSPI_SHADER_USER_DATA_PS_0);
   const auto vs_prog = gcn::CachedProgram(vs_addr, 4096);
   const auto direct_vbs =
-      gcn::ResolveDirectVertexBuffers(vs_prog, rc.attrs, vud);
+      gcn::ResolveDirectVertexBuffers(vs_prog, rc->attrs, vud);
 
   gcn::VBuffer attr_vbs[rhi::DrawInfo::kMaxVertexAttrs];
   u32 attr_count = 0;
   for (size_t i = 0;
-       i < rc.attrs.size() && i < rhi::DrawInfo::kMaxVertexAttrs; i++) {
-    const gcn::ShaderAttr& a = rc.attrs[i];
+       i < rc->attrs.size() && i < rhi::DrawInfo::kMaxVertexAttrs; i++) {
+    const gcn::ShaderAttr& a = rc->attrs[i];
     if (!a.direct_fetch && a.table_sgpr + 1 >= 16)
       return RecompStatus::kBadAttrs;
     gcn::VBuffer vb;
@@ -795,10 +819,18 @@ RecompStatus ResolveRecompiledShaders(
     // unambiguously a constant.
     attr_vbs[attr_count++] = vb;
   }
+  // The V# formats are not in the code, so a vertex shader fed narrow integer
+  // attributes is a different module; the attribute list is the same in both.
+  state.int_attr_mask = IntAttrMask(*rc, attr_vbs, attr_count);
+  if (state.int_attr_mask) {
+    rc = &GetGraphicsShader(regs, state);
+    if (!rc->ok)
+      return RecompStatus::kRejected;
+  }
 
   if (attr_count) {
     const RecompStatus status =
-        BindVertexAttributes(rc, attr_vbs, attr_count, d);
+        BindVertexAttributes(*rc, attr_vbs, attr_count, d);
     if (status != RecompStatus::kOk) {
       d.num_vattrs = 0;
       d.num_vbufs = 0;
@@ -807,26 +839,52 @@ RecompStatus ResolveRecompiledShaders(
   }
 
   bool resolved_vs_cbuf = false;
-  ResolveCbufferBindings(rc.vs_cbufs, vud, vs_prog, true, d, resolved_vs_cbuf);
+  ResolveCbufferBindings(rc->vs_cbufs, vud, vs_prog, true, d, resolved_vs_cbuf);
   const auto ps_program =
       ps_prog ? ps_prog
               : (IsGuestAddress(ps_addr) ? gcn::CachedProgram(ps_addr, 4096)
                                          : nullptr);
   if (ps_program)
-    ResolveCbufferBindings(rc.ps_cbufs, pud, ps_program, false, d,
+    ResolveCbufferBindings(rc->ps_cbufs, pud, ps_program, false, d,
                            resolved_vs_cbuf);
-  for (const auto& cb : rc.vs_cbufs)
+  for (const auto& cb : rc->vs_cbufs)
     d.num_cbufs = std::max(d.num_cbufs, cb.binding + 1);
-  for (const auto& cb : rc.ps_cbufs)
+  for (const auto& cb : rc->ps_cbufs)
     d.num_cbufs = std::max(d.num_cbufs, cb.binding + 1);
-  ResolveRawBuffers(rc.vs_bufs, vud, vs_prog, "vs", vs_addr, d);
+  ResolveRawBuffers(rc->vs_bufs, vud, vs_prog, "vs", vs_addr, d);
   if (ps_program)
-    ResolveRawBuffers(rc.ps_bufs, pud, ps_program, "ps", vs_addr, d);
+    ResolveRawBuffers(rc->ps_bufs, pud, ps_program, "ps", vs_addr, d);
 
   d.vs_addr = vs_addr;
   d.ps_addr = ps_addr;
-  d.recomp = &rc;
+  d.recomp = rc;
   return RecompStatus::kOk;
+}
+
+// The ES -> GS pipeline shape when the draw enables a geometry shader
+// (VGT_SHADER_STAGES_EN: ES_EN[4:3] = 2 real ES, GS_EN[5]), with no
+// tessellation in front of it. The ES then plays the vertex shader.
+bool ResolveGsPipeline(const Regs& regs, u32 prim_type, gcn::GsPipeline& gs) {
+  const u32 stages = regs[mmVGT_SHADER_STAGES_EN];
+  if (!((stages >> 5) & 1) || ((stages >> 3) & 3) != 2 || (stages & 7))
+    return false;
+  const u64 es_addr = regs.ShaderAddr(mmSPI_SHADER_PGM_LO_ES);
+  const u64 gs_addr = regs.ShaderAddr(mmSPI_SHADER_PGM_LO_GS);
+  if (!IsGuestAddress(es_addr) || !IsGuestAddress(gs_addr))
+    return false;
+  gs.es_code = reinterpret_cast<const u32*>(es_addr);
+  gs.gs_code = reinterpret_cast<const u32*>(gs_addr);
+  gs.es_user_data = regs.At(mmSPI_SHADER_USER_DATA_ES_0);
+  gs.es_user_sgprs = (regs[mmSPI_SHADER_PGM_RSRC2_ES] >> 1) & 0x1F;
+  gs.gs_user_sgprs = (regs[mmSPI_SHADER_PGM_RSRC2_GS] >> 1) & 0x1F;
+  gs.input_prim = prim_type;
+  gs.out_prim = regs[mmVGT_GS_OUT_PRIM_TYPE] & 0x3F;
+  gs.max_vert_out = regs[mmVGT_GS_MAX_VERT_OUT] & 0x7FF;
+  gs.esgs_dwords = regs[mmVGT_ESGS_RING_ITEMSIZE] & 0x7FFF;
+  gs.gsvs_dwords = regs[mmVGT_GSVS_RING_ITEMSIZE] & 0x7FFF;
+  const u32 instancing = regs[mmVGT_GS_INSTANCE_CNT];
+  gs.instances = (instancing & 1) ? std::max(1u, (instancing >> 2) & 0x7F) : 1;
+  return true;
 }
 
 }  // namespace
@@ -835,13 +893,18 @@ bool BuildDrawInfo(rhi::Renderer& renderer,
                    const Regs& regs,
                    const DrawPacket& packet,
                    rhi::DrawInfo& d) {
-  const u64 vs_addr = regs.ShaderAddr(mmSPI_SHADER_PGM_LO_VS);
+  d.prim_type = regs[mmVGT_PRIMITIVE_TYPE];
+  gcn::GsPipeline gs;
+  const bool has_gs = ResolveGsPipeline(regs, d.prim_type, gs);
+  // Under a GS the vertex stage is the ES; the VS slot holds its copy shader.
+  const u64 vs_addr = has_gs ? regs.ShaderAddr(mmSPI_SHADER_PGM_LO_ES)
+                             : regs.ShaderAddr(mmSPI_SHADER_PGM_LO_VS);
+  const u32* vud = regs.At(has_gs ? mmSPI_SHADER_USER_DATA_ES_0
+                                  : mmSPI_SHADER_USER_DATA_VS_0);
   const u64 ps_addr = regs.ShaderAddr(mmSPI_SHADER_PGM_LO_PS);
-  std::memcpy(d.vs_user_data, regs.At(mmSPI_SHADER_USER_DATA_VS_0),
-              16 * sizeof(u32));
+  std::memcpy(d.vs_user_data, vud, 16 * sizeof(u32));
   std::memcpy(d.ps_user_data, regs.At(mmSPI_SHADER_USER_DATA_PS_0),
               16 * sizeof(u32));
-  d.prim_type = regs[mmVGT_PRIMITIVE_TYPE];
   d.instance_count = packet.num_instances;
   const u32 auto_vertex_count =
       packet.op == IT_DRAW_INDEX_AUTO && packet.count >= 1 ? packet.body[0] : 0;
@@ -854,19 +917,22 @@ bool BuildDrawInfo(rhi::Renderer& renderer,
   ResolveDepthState(regs, d);
   ResolveRasterState(regs, d);
 
-  const u64 fetch_addr = FetchShaderAddress(regs, vs_addr);
-  ResolveHeuristicSources(regs, fetch_addr, d);
+  const u64 fetch_addr = FetchShaderAddress(vud, vs_addr);
+  ResolveHeuristicSources(vud, fetch_addr, d);
 
   TextureMasks masks;
   const auto ps_prog =
       ResolvePsTextures(renderer, regs, ps_addr, packet.frame, d, masks);
-  ResolveVsTextures(regs, vs_addr, d, masks);
+  ResolveVsTextures(vud, vs_addr, d, masks);
 
   const RecompStatus status = ResolveRecompiledShaders(
-      regs, vs_addr, ps_addr, fetch_addr, ps_prog, masks, mrt_uint_mask,
+      regs, vs_addr, vud, has_gs ? &gs : nullptr, ps_addr, fetch_addr, ps_prog, masks, mrt_uint_mask,
       d.mrt_bound_mask, d);
   if (auto_vertex_count && auto_vertex_count <= kMaxElementCount)
     d.vertex_count = auto_vertex_count;
+  // CB_COLOR0_VIEW.SLICE_MAX[23:13]: the slices a layered pass can reach.
+  if (status == RecompStatus::kOk && d.recomp->writes_layer)
+    d.rt_layers = ((regs[mmCB_COLOR0_VIEW] >> 13) & 0x7FF) + 1;
 
   TraceBlitDraw(regs, d, vs_addr, ps_addr);
   TraceDrawList(regs, d, vs_addr, ps_addr, fetch_addr, status);

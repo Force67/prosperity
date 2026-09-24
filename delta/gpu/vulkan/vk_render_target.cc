@@ -65,7 +65,8 @@ VkImageView SampledImageView(VkImage image,
                              VkFormat format,
                              VkImageAspectFlags aspect,
                              u32 swizzle,
-                             std::unordered_map<u32, VkImageView>& views) {
+                             std::unordered_map<u32, VkImageView>& views,
+                             VkImageViewType type = VK_IMAGE_VIEW_TYPE_2D) {
   const VkComponentMapping components = TextureComponents(swizzle);
   if (components.r == VK_COMPONENT_SWIZZLE_IDENTITY &&
       components.g == VK_COMPONENT_SWIZZLE_IDENTITY &&
@@ -84,7 +85,7 @@ VkImageView SampledImageView(VkImage image,
   vu.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
   vi.pNext = &vu;
   vi.image = image;
-  vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+  vi.viewType = type;
   vi.format = format;
   vi.components = components;
   vi.subresourceRange = {aspect, 0, 1, 0, 1};
@@ -125,7 +126,7 @@ VkImageView SampledViewAs(RTarget& rt, u32 swizzle, VkFormat want,
   vu.usage = VK_IMAGE_USAGE_SAMPLED_BIT;  // see SampledImageView
   vci.pNext = &vu;
   vci.image = rt.image;
-  vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+  vci.viewType = rt.depth > 1 ? VK_IMAGE_VIEW_TYPE_3D : VK_IMAGE_VIEW_TYPE_2D;
   vci.format = want;
   vci.components = TextureComponents(swizzle);
   vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
@@ -143,12 +144,16 @@ VkImageView SampledView(RTarget& rt, u32 swizzle, bool feedback) {
   // to avoid, so leave the caller its default texture.
   if (feedback && !rt.feedback_image)
     return VK_NULL_HANDLE;
-  return feedback ? SampledImageView(rt.feedback_image, rt.feedback_view,
-                                     rt.fmt, VK_IMAGE_ASPECT_COLOR_BIT, swizzle,
-                                     rt.feedback_sampled_views)
-                  : SampledImageView(rt.image, rt.view, rt.fmt,
-                                     VK_IMAGE_ASPECT_COLOR_BIT, swizzle,
-                                     rt.sampled_views);
+  if (feedback)
+    return SampledImageView(rt.feedback_image, rt.feedback_view, rt.fmt,
+                            VK_IMAGE_ASPECT_COLOR_BIT, swizzle,
+                            rt.feedback_sampled_views);
+  if (rt.depth > 1)
+    return SampledImageView(rt.image, rt.volume_view, rt.fmt,
+                            VK_IMAGE_ASPECT_COLOR_BIT, swizzle,
+                            rt.sampled_views, VK_IMAGE_VIEW_TYPE_3D);
+  return SampledImageView(rt.image, rt.view, rt.fmt, VK_IMAGE_ASPECT_COLOR_BIT,
+                          swizzle, rt.sampled_views);
 }
 
 VkImageView SampledView(DepthTarget& depth, u32 swizzle) {
@@ -246,8 +251,9 @@ bool CreateRtImage(RTarget& t,
                    u64 base,
                    u32 w,
                    u32 h,
-                   VkFormat fmt) {
-  if (!w || !h)
+                   VkFormat fmt,
+                   u32 depth = 1) {
+  if (!w || !h || !depth)
     return false;
   // Robustness: reject render targets with implausible dimensions or an
   // undefined format. A garbage CB_COLOR base/scissor (e.g. a stray shader-pool
@@ -260,11 +266,12 @@ bool CreateRtImage(RTarget& t,
   }
   t.w = w;
   t.h = h;
+  t.depth = depth;
   t.fmt = fmt;
   VkImageCreateInfo ii{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
-  ii.imageType = VK_IMAGE_TYPE_2D;
+  ii.imageType = depth > 1 ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D;
   ii.format = fmt;
-  ii.extent = {w, h, 1};
+  ii.extent = {w, h, depth};
   ii.mipLevels = 1;
   ii.arrayLayers = 1;
   ii.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -284,6 +291,9 @@ bool CreateRtImage(RTarget& t,
   // Mutable format lets SampledViewAs() hand out a view in the format the
   // descriptor asked for instead of the one the attachment was created with.
   ii.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+  // A layered pass renders the slices of a volume through a 2D-array view.
+  if (depth > 1)
+    ii.flags |= VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT;
   if (vkCreateImage(g_dev.device, &ii, nullptr, &t.image) != VK_SUCCESS)
     return false;
   if (!g_image_memory.Allocate(g_dev, t.image, t.allocation)) {
@@ -294,17 +304,26 @@ bool CreateRtImage(RTarget& t,
   }
   VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
   vci.image = t.image;
-  vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+  vci.viewType =
+      depth > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
   vci.format = fmt;
-  vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+  vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, depth};
   if (vkCreateImageView(g_dev.device, &vci, nullptr, &t.view) != VK_SUCCESS) {
     vkDestroyImage(g_dev.device, t.image, nullptr);
     g_image_memory.Free(g_dev, t.allocation);
     t.image = VK_NULL_HANDLE;
     return false;
   }
-  // descriptor set so this RT can be sampled (render-to-texture).
-  if (g_tex.ds_pool) {
+  if (depth > 1) {
+    vci.viewType = VK_IMAGE_VIEW_TYPE_3D;
+    vci.subresourceRange.layerCount = 1;
+    if (vkCreateImageView(g_dev.device, &vci, nullptr, &t.volume_view) !=
+        VK_SUCCESS)
+      t.volume_view = VK_NULL_HANDLE;
+  }
+  // descriptor set so this RT can be sampled (render-to-texture); a 2D-array
+  // view of a volume is an attachment only.
+  if (g_tex.ds_pool && depth == 1) {
     VkDescriptorPool owner;
     t.set = AllocateSamplerSet(g_tex.ds_layout, false, owner);
     if (t.set) {
@@ -319,8 +338,8 @@ bool CreateRtImage(RTarget& t,
     }
   }
   ClearNewRt(t);
-  BASE_LOGI("gpuvk", "new RT {:#x} {}x{} fmt={}", (unsigned long)base, w, h,
-            (int)fmt);
+  BASE_LOGI("gpuvk", "new RT {:#x} {}x{}x{} fmt={}", (unsigned long)base, w,
+            h, depth, (int)fmt);
   NameObject(VK_OBJECT_TYPE_IMAGE, (u64)t.image, "rt %#lx %ux%u fmt=%d",
              (unsigned long)base, w, h, (int)fmt);
   return true;
@@ -350,13 +369,14 @@ RTarget* ActivateRtVariant(RTarget& live,
                            u64 base,
                            u32 w,
                            u32 h,
-                           VkFormat fmt) {
+                           VkFormat fmt,
+                           u32 depth = 1) {
   if (kNoVariant)
     return &live;
   auto& parked = g_rt_variants[base];
   RTarget* alt = nullptr;
   for (RTarget& v : parked)
-    if (v.w == w && v.h == h && v.fmt == fmt) {
+    if (v.w == w && v.h == h && v.fmt == fmt && v.depth == depth) {
       alt = &v;
       break;
     }
@@ -381,7 +401,7 @@ RTarget* ActivateRtVariant(RTarget& live,
       return nullptr;
     }
     RTarget t;
-    if (!CreateRtImage(t, base, w, h, fmt))
+    if (!CreateRtImage(t, base, w, h, fmt, depth))
       return nullptr;
     BASE_LOGI("gpuvk",
               "RT alias {:#x}: have {}x{} fmt={}, requested {}x{} fmt={} -> "
@@ -419,6 +439,27 @@ RTarget* ActivateRtVariant(RTarget& live,
   return &live;
 }
 
+bool ActivateVolumeRt(u64 base, u32 w, u32 h, u32 depth) {
+  const auto it = g_rts.find(base);
+  if (depth <= 1 || it == g_rts.end())
+    return false;
+  RTarget& live = it->second;
+  const auto matches = [&](const RTarget& t) {
+    return t.w == w && t.h == h && t.depth == depth;
+  };
+  if (!matches(live)) {
+    const auto parked = g_rt_variants.find(base);
+    if (parked == g_rt_variants.end())
+      return false;
+    const auto alt = std::find_if(parked->second.begin(), parked->second.end(),
+                                  matches);
+    if (alt == parked->second.end() ||
+        !ActivateRtVariant(live, base, w, h, alt->fmt, depth))
+      return false;
+  }
+  return live.ever_rendered;
+}
+
 // The extent an attachment's IMAGE needs, given the target's own surface
 // geometry (CB_COLORn_PITCH/SLICE) and the region this pass draws into.
 // The drawn region normally IS the target, padded: a 1920x1080 surface reports
@@ -434,12 +475,12 @@ u32 RtSurfaceExtent(u32 surface, u32 drawn, u32 tile) {
 }
 
 // Find or create the render target at guest address `base` (dimensions w x h).
-RTarget* GetRT(u64 base, u32 w, u32 h, VkFormat fmt) {
+RTarget* GetRT(u64 base, u32 w, u32 h, VkFormat fmt, u32 depth) {
   auto it = g_rts.find(base);
   if (it != g_rts.end()) {
     RTarget& live = it->second;
-    if (live.w != w || live.h != h || live.fmt != fmt)
-      return ActivateRtVariant(live, base, w, h, fmt);
+    if (live.w != w || live.h != h || live.fmt != fmt || live.depth != depth)
+      return ActivateRtVariant(live, base, w, h, fmt, depth);
     return &live;
   }
   // A cap that a title exceeds does not degrade, it deletes: the target is
@@ -459,7 +500,7 @@ RTarget* GetRT(u64 base, u32 w, u32 h, VkFormat fmt) {
     return nullptr;
   }
   RTarget t;
-  if (!CreateRtImage(t, base, w, h, fmt)) {
+  if (!CreateRtImage(t, base, w, h, fmt, depth)) {
     static int n = 0;
     if (n++ < 8)
       BASE_LOGI("gpuvk", "RT image create FAILED {:#x} {}x{} fmt={}",
@@ -1162,6 +1203,26 @@ bool DccClearColor(u32 code,
   }
 }
 
+// A FAST_CLEAR target reads cleared wherever its CMASK nibble is 0, and the
+// eliminate pass that follows rendering writes the clear colour in and marks
+// the tiles expanded (0xF). Our targets are never compressed and eliminate is
+// a no-op, so do both here: a cleared CMASK at bind is the clear, and marking
+// it expanded lets the guest's next clear show up as a write back to 0 however
+// it lands, which is not always a packet we see.
+void NoteCmaskBind(RTarget& rt) {
+  const u64 bytes = std::max<u64>(4, (u64(rt.w) * rt.h) / 128);
+  if (!gpu::IsReadableRange(rt.dcc_base, bytes))
+    return;
+  rhi::FlushCsWritesRange(rhi::DefaultRenderer(), rt.dcc_base, 4);
+  auto* cmask = reinterpret_cast<u32*>(rt.dcc_base);
+  if (*cmask & 0xF)
+    return;
+  rt.dcc_clear_pending = true;
+  rt.dcc_code_known = true;
+  rt.dcc_clear_code = *cmask;
+  std::memset(cmask, 0xFF, bytes);
+}
+
 // A pending DCC write is about to be followed by a draw into the target:
 // find out what it wrote and make it the target's clear.
 void ResolveDccClear(RTarget& rt, u64 base, u32 info, const u32* clear_word) {
@@ -1174,7 +1235,15 @@ void ResolveDccClear(RTarget& rt, u64 base, u32 info, const u32* clear_word) {
     std::memcpy(&code, reinterpret_cast<const void*>(rt.dcc_base), 4);
   }
   VkClearColorValue value;
-  const bool clear = DccClearColor(code, info, clear_word, value);
+  bool clear;
+  if (rt.dcc_is_cmask) {
+    // A CMASK nibble of 0 is a fast-cleared tile; 0xF is an expanded one.
+    clear = (code & 0xF) == 0 && clear_word;
+    if (clear)
+      value = ColorTargetClearValue(info, clear_word[0], clear_word[1]);
+  } else {
+    clear = DccClearColor(code, info, clear_word, value);
+  }
   if (clear) {
     rt.clear_pending = true;
     rt.clear_value = value;
@@ -1257,7 +1326,9 @@ bool BeginRegion(const u64* mrt_base,
                  const u64* mrt_dcc_base,
                  const u32 (*mrt_clear_word)[2],
                  u64 depth_htile_base,
-                 u32 depth_slice) {
+                 u32 depth_slice,
+                 u32 layers,
+                 bool meta_cmask) {
   ScopeNs _region_timer(&g_ns_region);
   // DELTA_GPU_QCHECK also gates this path: a checkpoint that fails here names
   // the DRAWS that ran before this region as the device loss, which is the
@@ -1284,18 +1355,23 @@ bool BeginRegion(const u64* mrt_base,
   for (u32 i = 0; i < mrt_count; i++) {
     const u32 iw = RtSurfaceExtent(mrt_surf_w ? mrt_surf_w[i] : 0, w, 256);
     const u32 ih = RtSurfaceExtent(mrt_surf_h ? mrt_surf_h[i] : 0, h, 64);
-    targets[i] = GetRT(mrt_base[i], iw, ih, ColorTargetFormat(mrt_info[i]));
+    targets[i] =
+        GetRT(mrt_base[i], iw, ih, ColorTargetFormat(mrt_info[i]), layers);
     if (!targets[i])
       return false;
     // A dispatch wrote these pixels since the image last saw them.
     if (!CsRefreshRtFromTruth(mrt_base[i]))
       rhi::FlushCsWritesRange(rhi::DefaultRenderer(), mrt_base[i],
                               RtByteSize(*targets[i]), "rt-bind");
+    if (mrt_dcc_base && mrt_dcc_base[i]) {
+      targets[i]->dcc_base = mrt_dcc_base[i];
+      targets[i]->dcc_is_cmask = meta_cmask;
+    }
+    if (meta_cmask && mrt_dcc_base && mrt_dcc_base[i])
+      NoteCmaskBind(*targets[i]);
     if (targets[i]->dcc_clear_pending)
       ResolveDccClear(*targets[i], mrt_base[i], mrt_info[i],
                       mrt_clear_word ? mrt_clear_word[i] : nullptr);
-    if (mrt_dcc_base && mrt_dcc_base[i])
-      targets[i]->dcc_base = mrt_dcc_base[i];
     g_region.cur_fmt[i] = ColorTargetFormat(mrt_info[i]);
     g_region.cur_w[i] = iw;
     g_region.cur_h[i] = ih;
@@ -1309,6 +1385,10 @@ bool BeginRegion(const u64* mrt_base,
   // elsewhere. RtSurfaceExtent only ever grows the image to the surface, so a
   // genuinely half-resolution Z bound to a full-resolution pass keeps the drawn
   // extent.
+  // The depth views are single-layer, and every attachment of a layered pass
+  // has to cover all its layers.
+  if (layers > 1)
+    depth_base = 0;
   const u32 dw = RtSurfaceExtent(depth_w, w, 256);
   const u32 dh = RtSurfaceExtent(depth_h, h, 64);
   DepthTarget* dt =
@@ -1509,7 +1589,8 @@ bool BeginRegion(const u64* mrt_base,
   }
   VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
   ri.renderArea = {{0, 0}, {w, h}};
-  ri.layerCount = 1;
+  ri.layerCount = layers;
+  g_region.cur_layers = layers;
   ri.colorAttachmentCount = g_region.cur_mrt_count;
   ri.pColorAttachments = colors;
   if (dt)

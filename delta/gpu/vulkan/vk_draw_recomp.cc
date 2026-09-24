@@ -876,7 +876,10 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
   VkDeviceSize vneed = 0;
   for (u32 j = 0; j < nbind; j++) {
     if (d.vbufs[j].stride) {
-      bind_size[j] = (VkDeviceSize)nv * d.vbufs[j].stride;
+      const u32 records = d.vbufs[j].per_instance
+                              ? std::max(1u, d.instance_count)
+                              : nv;
+      bind_size[j] = (VkDeviceSize)records * d.vbufs[j].stride;
     } else {
       // Stride-0 (constant) binding: upload a single record large enough to
       // cover every attribute that reads it; the pipeline binds it with stride
@@ -1058,6 +1061,14 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
         multi_views[i] = VK_NULL_HANDLE;
         continue;
       }
+      if (base && t.is_3d && !t.storage &&
+          ActivateVolumeRt(base, t.w, t.h, t.depth)) {
+        multi_color[i] = base;
+        multi_transition_source |=
+            g_rts[base].layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL ||
+            g_rts[base].dirty_for_read;
+        continue;
+      }
       // A pending CS write into an RT-resolved range must reach the image
       // before this draw samples it (the flush uploads it, see
       // UploadCsRangeToRt); guest-upload textures already get this from the
@@ -1233,6 +1244,7 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
                          g_region.cur_mrt_count != mrt_n ||
                          g_region.cur_depth != d.depth_base ||
                          g_region.cur_depth_slice != d.depth_slice ||
+                         g_region.cur_layers != d.rt_layers ||
                          g_region.cur_stencil != d.stencil_base ||
                          g_region.depth_read_only != samples_bound_depth ||
                          mrt_sig_changed || transition_source ||
@@ -1410,7 +1422,7 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
     RTarget* rt =
         d.rt_base ? GetRT(d.rt_base, RtSurfaceExtent(d.mrt_surf_w[0], d.rt_w, 256),
                           RtSurfaceExtent(d.mrt_surf_h[0], d.rt_h, 64),
-                          ColorTargetFormat(d.mrt_info[0]))
+                          ColorTargetFormat(d.mrt_info[0]), d.rt_layers)
                   : nullptr;
     if (d.rt_base && !rt)
       return true;  // RT cap hit: treat as handled (dropped)
@@ -1418,7 +1430,8 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
                       d.depth_base, d.depth_clear, d.stencil_base,
                       d.stencil_clear, samples_bound_depth, DepthW(d),
                       DepthH(d), d.mrt_surf_w, d.mrt_surf_h, d.mrt_dcc_base,
-                      d.mrt_clear_word, d.depth_htile_base, d.depth_slice))
+                      d.mrt_clear_word, d.depth_htile_base, d.depth_slice,
+                      d.rt_layers, d.mrt_meta_cmask))
       return true;
   }
   if (rp->multi_tex) {

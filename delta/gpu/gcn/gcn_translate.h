@@ -36,6 +36,8 @@ struct ShaderAttr {
   u32 inst_offset = 0;  // field separator when RDNA packs attrs into one V#
   u32 inst_dfmt = 0;  // MTBUF typed-fetch format; 0 = untyped, use the V#
   u32 inst_nfmt = 0;
+  // The fetch indexes it by an instance id (v1..v3), not the vertex id (v0).
+  bool per_instance = false;
 };
 
 // Set-1 dynamic UBOs shared by VS + PS, bounded by
@@ -115,8 +117,28 @@ struct ShaderTex {
   bool is_uint = false;  // integer sampled type; even the fallback binding must match
 };
 
+// A legacy ES -> GS pipeline (VGT_SHADER_STAGES_EN.GS_EN). The vertex slot then
+// holds the copy shader, which only moves GSVS ring data into exports; the ES
+// and GS run as a Vulkan vertex and geometry shader, and the copy shader is
+// read for where each ring component goes.
+struct GsPipeline {
+  const u32* es_code = nullptr;
+  const u32* gs_code = nullptr;
+  const u32* es_user_data = nullptr;
+  u32 es_user_sgprs = 0;  // SPI_SHADER_PGM_RSRC2_ES.USER_SGPR
+  u32 gs_user_sgprs = 0;  // SPI_SHADER_PGM_RSRC2_GS.USER_SGPR
+  u32 input_prim = 4;     // VGT_PRIMITIVE_TYPE of the draw
+  u32 out_prim = 2;       // VGT_GS_OUT_PRIM_TYPE: 0 points, 1 lines, 2 tris
+  u32 max_vert_out = 0;   // VGT_GS_MAX_VERT_OUT
+  u32 esgs_dwords = 0;    // VGT_ESGS_RING_ITEMSIZE
+  u32 gsvs_dwords = 0;    // VGT_GSVS_RING_ITEMSIZE
+  u32 instances = 1;      // VGT_GS_INSTANCE_CNT
+};
+
 struct Recompiled {
   bool ok = false;
+  bool guest_gs = false;  // gs_spirv is the guest's GS, bound for every prim
+  bool writes_layer = false;  // the GS picks the target slice (gl_Layer)
   std::vector<u32> vs_spirv;  // emitted directly from GCN
   std::vector<u32> mesh_spirv;  // merged NGG geometry, replaces VS/GS
   u32 mesh_input_primitives = 1;  // input primitives consumed per workgroup
@@ -147,6 +169,8 @@ extern u32 g_spv_hit_n, g_spv_miss_n;
 
 // Recompile a VS+PS pair. The masks name descriptor shapes the MIMG encoding
 // cannot see (3D/1D/uint); they change emitted types, so they key the cache.
+// int_attr_mask: bit n = vertex input location n has a narrow UINT V# format,
+// bit 16+n a narrow SINT one (see TranslateVs).
 Recompiled Recompile(const u32* vs_code,
                       const u32* ps_code,
                       const u32* vs_user_data,
@@ -159,7 +183,9 @@ Recompiled Recompile(const u32* vs_code,
                       u32 tex_uint_mask = 0,
                       u32 mrt_uint_mask = 0,
                       u32 mrt_bound_mask = 0xFF,  // bit n = pass binds colour n; rest dropped
-                      bool gl_clip_space = false);
+                      bool gl_clip_space = false,
+                      const GsPipeline* gs = nullptr,
+                      u32 int_attr_mask = 0);
 
 // A CS memory resource; base_sgpr/use_pc locate the possibly-SRT-chained
 // descriptor for the command processor to resolve at dispatch.

@@ -40,6 +40,7 @@ struct VertexBinding {
   const void* data = nullptr;  // guest base of this binding's vertex data
   u32 stride = 0;         // bytes per record
   u32 num_records = 0;    // records available in the source buffer
+  bool per_instance = false;  // one record per instance, not per vertex
 };
 
 // Per-draw inputs extracted by the command processor (resource-tracked from the
@@ -82,6 +83,8 @@ struct DrawInfo {
   DrawBuffer bufs[kMaxBuffers];
   u32 num_bufs = 0;
   u64 rt_base = 0;  // CB_COLOR0 address; the draw's render target
+  // Slices a layered pass (a GS writing gl_Layer) renders in one draw.
+  u32 rt_layers = 1;
   u32 rt_w = 0,
            rt_h = 0;  // render-target dimensions (shared by all MRT targets)
 
@@ -239,6 +242,9 @@ struct DrawInfo {
   // title clears a compressed target by writing a clear code over this, not
   // by touching the pixels (see NoteDccWrite).
   u64 mrt_dcc_base[8] = {};
+  // mrt_dcc_base names GCN CMASK rather than DCC: a fast-cleared tile reads
+  // nibble 0 and takes its colour from CB_COLORn_CLEAR_WORD0/1.
+  bool mrt_meta_cmask = false;
 
   // Primitive-setup: raster topology + face culling, from VGT_PRIMITIVE_TYPE
   // and PA_SU_SC_MODE_CNTL. 2D titles draw triangle lists with no culling

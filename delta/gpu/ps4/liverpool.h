@@ -36,6 +36,8 @@ constexpr u32 mmCB_COLOR0_ATTRIB = 0xA31D;  // tiling/dims
 // helper programs these and then issues a RECT_LIST draw with no pixel shader;
 // the colour is here, not in vertex data. See the clear-rect path in
 // vk_draw_recomp.cc.
+// CMASK metadata base (byte addr = value << 8), live when INFO.FAST_CLEAR[13].
+constexpr u32 mmCB_COLOR0_CMASK = 0xA31F;
 constexpr u32 mmCB_COLOR0_CLEAR_WORD0 = 0xA323;  // CB_COLOR0_BASE + 0xB
 constexpr u32 mmCB_COLOR0_CLEAR_WORD1 = 0xA324;
 constexpr u32 kCbColorStride = 0xF;
@@ -88,6 +90,13 @@ constexpr u32 mmCB_COLOR_CONTROL = 0xA202;
 // tessellation path, [3:2] the ES/GS path. Anything but 0 means the shader at
 // the VS slot is not the stage that exports vertices.
 constexpr u32 mmVGT_SHADER_STAGES_EN = 0xA2D5;
+// The legacy geometry-shader pipeline's shape: output topology, vertices per
+// input primitive, ring item sizes in dwords, and GS instancing.
+constexpr u32 mmVGT_GS_OUT_PRIM_TYPE = 0xA29B;
+constexpr u32 mmVGT_ESGS_RING_ITEMSIZE = 0xA2AB;
+constexpr u32 mmVGT_GSVS_RING_ITEMSIZE = 0xA2AC;
+constexpr u32 mmVGT_GS_MAX_VERT_OUT = 0xA2CE;
+constexpr u32 mmVGT_GS_INSTANCE_CNT = 0xA2E4;
 constexpr u32 mmVGT_PRIMITIVE_TYPE = 0xC242;
 constexpr u32 mmVGT_NUM_INDICES = 0xC24C;
 
@@ -133,6 +142,11 @@ constexpr u32 mmSPI_SHADER_PGM_HI_VS = 0x2C49;
 constexpr u32 mmSPI_SHADER_PGM_RSRC1_VS = 0x2C4A;
 constexpr u32 mmSPI_SHADER_PGM_RSRC2_VS = 0x2C4B;
 constexpr u32 mmSPI_SHADER_USER_DATA_VS_0 = 0x2C4C;  // 16 user-data SGPRs
+constexpr u32 mmSPI_SHADER_PGM_LO_GS = 0x2C88;
+constexpr u32 mmSPI_SHADER_PGM_RSRC2_GS = 0x2C8B;
+constexpr u32 mmSPI_SHADER_PGM_LO_ES = 0x2CC8;
+constexpr u32 mmSPI_SHADER_PGM_RSRC2_ES = 0x2CCB;
+constexpr u32 mmSPI_SHADER_USER_DATA_ES_0 = 0x2CCC;
 
 // Compute program registers (SET_SH_REG relative 0x200..; absolute =
 // 0x2C00+rel).

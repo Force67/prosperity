@@ -50,6 +50,10 @@ struct GraphicsShaderState {
   u32 mrt_bound_mask = 0xFF;
   // PA_CL_CLIP_CNTL.DX_CLIP_SPACE_DEF == 0: the VS bakes the z remap in.
   bool gl_clip = false;
+  // Set when the draw runs ES -> GS; vs_addr is then the copy shader.
+  const gcn::GsPipeline* gs = nullptr;
+  // Vertex inputs whose V# names a narrow integer format (see gcn::Recompile).
+  u32 int_attr_mask = 0;
 };
 
 // The module for `state`, recompiled on first use. Never null; check .ok, which

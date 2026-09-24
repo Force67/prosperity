@@ -19,9 +19,16 @@ bool RecompileSpirv(const u32*,
                      const u32*,
                      const u32*,
                      u32,
+                     const u32*,
+                     u32,
+                     u32,
+                     u32,
+                     u32,
                      u32,
                      u32,
                      bool,
+                     const GsPipeline*,
+                     u32,
                      Recompiled&) {
   return false;
 }
@@ -681,6 +688,9 @@ struct FetchAttr {
   bool direct_fetch = false;
   u32 pc = ~0u;
   u32 dfmt = 0, nfmt = 0;  // MTBUF only: format from the instruction
+  // The VGPR the fetch indexes by: v0 is the vertex id, v1..v3 instance ids
+  // (stepped by VGT_INSTANCE_STEP_RATE_0/1, and raw).
+  u32 index_vgpr = 0;
 };
 
 std::vector<FetchAttr> ParseFetch(u64 fetch_addr) {
@@ -713,7 +723,8 @@ std::vector<FetchAttr> ParseFetch(u64 fetch_addr) {
       const u32 tbl = it != loads.end() ? it->second.table_sgpr : 0;
       const u32 off = it != loads.end() ? it->second.dword_off : 0;
       out.push_back({semantic, nc, vdata, tbl, off, false, ~0u,
-                     typed ? (w >> 19) & 0xF : 0, typed ? (w >> 23) & 0x7 : 0});
+                     typed ? (w >> 19) & 0xF : 0, typed ? (w >> 23) & 0x7 : 0,
+                     (w >> 13) & 1 ? w1 & 0xFF : 0});
       semantic++;
     }
   }
@@ -790,6 +801,8 @@ void EmitInst(Translator& t, const Inst& inst, StageContext& sc) {
         // ControlBarrier(Workgroup, Workgroup, AcquireRelease|WorkgroupMemory)
         t.m.EmitVoid(spv::Op::OpControlBarrier,
                      {t.U32(2), t.U32(2), t.U32(0x108)});
+      } else if (inst.opcode == 0x10 && sc.gs_input_verts) {  // s_sendmsg
+        EmitGsMessage(t, inst, sc);
       } else if (inst.opcode >= 0x16 && inst.opcode <= 0x19 &&
                  static_cast<i16>(w & 0xffff) == 0) {
         // Debug-state branch to the next instruction: both outcomes fall
@@ -802,7 +815,14 @@ void EmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       }
       break;  // s_nop / s_waitcnt / hints: no-ops in this model
     case Enc::kSmrd:
-      if (sc.is_cs)
+      if (sc.gs_input_verts) {
+        // A GS s_loads only the ring descriptors, which the ring lowering
+        // never reads; a constant buffer would need a binding plan of its own.
+        if (inst.opcode > 0x04)
+          WarnUnsupported("smrd.gs", inst.opcode, w, w1);
+        for (u32 i = 0; i < SmrdDwordCount(inst.opcode); i++)
+          t.SetSg(((w >> 15) & 0x7F) + i, t.U32(0));
+      } else if (sc.is_cs)
         EmitCsSmrd(t, inst, sc);
       else
         EmitCbufSmrd(t, inst, sc.cbuf_bind);
@@ -899,7 +919,12 @@ void EmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       EmitVintrp(t, w, sc);
       break;
     case Enc::kMubuf:
-      if (sc.is_cs) {
+      if (sc.gs_input_verts) {
+        EmitGsRingAccess(t, inst, sc);
+      } else if (sc.es_ring && ((w >> 18) & 0x7F) >= 0x18 &&
+                 ((w >> 18) & 0x7F) <= 0x1f) {
+        EmitEsRingStore(t, inst, sc);
+      } else if (sc.is_cs) {
         EmitCsMubuf(t, inst, sc);
       } else if (!sc.is_ps && sc.direct_vfetch.count(inst.pc)) {
         // Seeded from the vertex-input state instead.
@@ -1897,6 +1922,8 @@ bool TranslateVs(const Program& program,
                  u32 tex_3d_mask,
                  u32 tex_1d_mask,
                  bool gl_clip_space,
+                 const GsPipeline* es,
+                 u32 int_attr_mask,
                  Recompiled& r,
                  Translator& t) {
   const u64 fetch =
@@ -1984,6 +2011,15 @@ bool TranslateVs(const Program& program,
       sc.direct_vfetch.insert(attr.pc);
   if (UsesDsSwizzle(program, reachable.data()))
     EnableDsSwizzle(t, sc, iface);
+  if (es) {
+    sc.es_ring_vec4s = std::max(1u, (es->esgs_dwords + 3) / 4);
+    const Id ring = t.m.TypeArray(t.TypeV4u(), sc.es_ring_vec4s);
+    sc.es_ring = t.m.Variable(t.m.TypePointer(spv::StorageClass::Output, ring),
+                              spv::StorageClass::Output);
+    t.m.Decorate(sc.es_ring, spv::Decoration::Location, {0});
+    t.m.Name(sc.es_ring, "esgs_ring");
+    iface.push_back(sc.es_ring);
+  }
   const Id user_data = DeclareUserData(t, 0);
 
   const Id main_fn = t.m.BeginFunction(t.t_void, t.t_fn);
@@ -1999,10 +2035,12 @@ bool TranslateVs(const Program& program,
     iface.push_back(debug_vertex_index);
   }
 
-  if (attrs.empty() || !sc.direct_vfetch.empty()) {
-    // A procedural or direct-fetch VS receives VertexID in v0 before its main
-    // instruction stream. Attribute loads below overwrite their destination
-    // VGPRs just as the direct MUBUF instructions would.
+  {
+    // Every VS receives VertexID in v0 before its main instruction stream,
+    // fetch shader or not: UE4 vertex factories fetch half their attributes
+    // by hand from v0 after the fetch shader returns, and with v0 left at zero
+    // every vertex read vertex 0's. Attribute loads below overwrite their
+    // destination VGPRs just as the fetch instructions would.
     // On GFX6-8, InstanceID/StepRate0 enters in v1 and raw InstanceID in v3.
     // Seed those ABI inputs from Vulkan's draw built-ins.
     // https://gitlab.freedesktop.org/mesa/mesa/-/blob/be00f53d4d50b87a87f83e8fa243b77e614eb0b8/src/gallium/drivers/radeonsi/gfx/si_state_shaders.cpp#L269-307
@@ -2037,16 +2075,30 @@ bool TranslateVs(const Program& program,
     t.m.Name(in_var, "v_attr" + std::to_string(a.semantic));
     iface.push_back(in_var);
     const Id val = t.m.Load(comp_ty, in_var);
+    // A narrow integer format arrives through its SCALED twin as the value in
+    // float, but the hardware leaves the integer itself in the VGPR: a bone
+    // index of 3 read back as 0x40400000 throws the vertex across the screen.
+    const bool uint_attr = (int_attr_mask >> a.semantic) & 1;
+    const bool sint_attr = (int_attr_mask >> (16 + a.semantic)) & 1;
     // DELTA_GPU_VSFLIPZ: negate the z of the position attribute (semantic 0,
     // >= 3 comps), a projection-convention diagnostic. Default off.
     for (u32 c = 0; c < a.num_comps; c++) {
       Id comp = a.num_comps == 1 ? val : t.m.CompositeExtract(t.t_f, val, c);
       if (kGpuVsflipz && a.semantic == 0 && c == 2 && a.num_comps >= 3)
         comp = t.FNeg(comp);
-      t.SetVgF(a.dest_vgpr + c, comp);
+      if (uint_attr)
+        t.SetVg(a.dest_vgpr + c,
+                t.m.Emit(spv::Op::OpConvertFToU, t.t_u, {comp}));
+      else if (sint_attr)
+        t.SetVg(a.dest_vgpr + c,
+                t.m.Bitcast(t.t_u, t.m.Emit(spv::Op::OpConvertFToS, t.t_i,
+                                            {comp})));
+      else
+        t.SetVgF(a.dest_vgpr + c, comp);
     }
     r.attrs.push_back({a.semantic, a.num_comps, a.table_sgpr, a.dword_off,
-                       a.direct_fetch, 0, a.pc, 0, a.dfmt, a.nfmt});
+                       a.direct_fetch, 0, a.pc, 0, a.dfmt, a.nfmt,
+                       a.index_vgpr >= 1 && a.index_vgpr <= 3});
   }
 
   if (!PlanCbufs(program, 0, r.vs_cbufs, sc.cbuf_bind, reachable.data()))
@@ -2079,7 +2131,7 @@ bool TranslateVs(const Program& program,
   // mode z spans [-w,w] and has to be remapped or everything is clipped away.
   // This mirrors what the PS5/RDNA path already does; the PS4 path used to
   // remap unconditionally. DELTA_GPU_NOZREMAP=1 forces DX mode for both.
-  if (gl_clip_space && !kGpuNoZRemap) {
+  if (gl_clip_space && !kGpuNoZRemap && !es) {
     const Id p_out_f = t.m.TypePointer(spv::StorageClass::Output, t.t_f);
     const Id z_ptr = t.m.AccessChain(p_out_f, pos_out, {t.U32(2)});
     const Id w_ptr = t.m.AccessChain(p_out_f, pos_out, {t.U32(3)});
@@ -2103,6 +2155,108 @@ bool TranslateVs(const Program& program,
   t.m.ReturnVoid();
   t.m.EndFunction();
   t.m.EntryPoint(spv::ExecutionModel::Vertex, main_fn, "main", iface);
+  return true;
+}
+
+// ---- GS ---------------------------------------------------------------------
+// Vertices per input primitive for a VGT_PRIMITIVE_TYPE, and its GS input mode.
+std::pair<u32, spv::ExecutionMode> GsInputOf(u32 prim) {
+  switch (prim) {
+    case 0x1:
+      return {1, spv::ExecutionMode::InputPoints};
+    case 0x2:
+    case 0x3:
+      return {2, spv::ExecutionMode::InputLines};
+    case 0xa:
+    case 0xb:
+      return {4, spv::ExecutionMode::InputLinesAdjacency};
+    case 0xc:
+    case 0xd:
+      return {6, spv::ExecutionMode::InputTrianglesAdjacency};
+    default:
+      return {3, spv::ExecutionMode::Triangles};
+  }
+}
+
+bool TranslateGs(const Program& program,
+                 const GsPipeline& gs,
+                 const std::vector<GsCopyExport>& exports,
+                 const std::unordered_set<u32>& flat_params,
+                 bool gl_clip_space,
+                 Recompiled& r,
+                 Translator& t) {
+  const std::vector<u8> reachable = ComputeReachability(program);
+  t.spill_vgprs = PlanLaneSpills(program, reachable.data());
+  t.InitTypes();
+  t.m.Capability(spv::Capability::Geometry);
+  const auto [verts, input_mode] = GsInputOf(gs.input_prim);
+
+  std::vector<Id> iface;
+  StageContext sc;
+  sc.r = &r;
+  sc.iface = &iface;
+  sc.flat_attrs = &flat_params;
+  sc.gl_clip = gl_clip_space && !kGpuNoZRemap;
+  sc.pos_out = t.m.Variable(t.m.TypePointer(spv::StorageClass::Output, t.t_v4),
+                            spv::StorageClass::Output);
+  t.m.Decorate(sc.pos_out, spv::Decoration::BuiltIn,
+               {static_cast<u32>(spv::BuiltIn::Position)});
+  iface.push_back(sc.pos_out);
+
+  sc.gs_input_verts = verts;
+  sc.es_ring_vec4s = std::max(1u, (gs.esgs_dwords + 3) / 4);
+  const Id ring = t.m.TypeArray(t.m.TypeArray(t.TypeV4u(), sc.es_ring_vec4s),
+                                verts);
+  sc.es_ring = t.m.Variable(t.m.TypePointer(spv::StorageClass::Input, ring),
+                            spv::StorageClass::Input);
+  t.m.Decorate(sc.es_ring, spv::Decoration::Location, {0});
+  t.m.Name(sc.es_ring, "esgs_ring");
+  iface.push_back(sc.es_ring);
+
+  sc.gsvs_dwords = std::max(1u, gs.gsvs_dwords);
+  const Id gsvs = t.m.TypeArray(t.t_u, sc.gsvs_dwords);
+  sc.gsvs = t.m.Variable(t.m.TypePointer(spv::StorageClass::Private, gsvs),
+                         spv::StorageClass::Private, t.m.ConstNull(gsvs));
+  t.m.Name(sc.gsvs, "gsvs_ring");
+  sc.gs_emitted = t.m.Variable(t.p_priv_u, spv::StorageClass::Private,
+                               t.m.ConstNull(t.t_u));
+  sc.gs_max_vert_out = std::max(1u, gs.max_vert_out);
+  sc.gs_exports = &exports;
+
+  const Id p_in_i = t.m.TypePointer(spv::StorageClass::Input, t.t_i);
+  const Id primitive_id = t.m.Variable(p_in_i, spv::StorageClass::Input);
+  t.m.Decorate(primitive_id, spv::Decoration::BuiltIn,
+               {static_cast<u32>(spv::BuiltIn::PrimitiveId)});
+  iface.push_back(primitive_id);
+  const Id invocation_id = t.m.Variable(p_in_i, spv::StorageClass::Input);
+  t.m.Decorate(invocation_id, spv::Decoration::BuiltIn,
+               {static_cast<u32>(spv::BuiltIn::InvocationId)});
+  iface.push_back(invocation_id);
+
+  const Id main_fn = t.m.BeginFunction(t.t_void, t.t_fn);
+  sc.main_fn = main_fn;
+  // The input VGPRs: vertex offsets 0..5 in v0, v1, v3..v6 (their ring lane,
+  // which the ring loads turn back into a vertex index), the primitive id in
+  // v2 and the instance in v7. The ring base SGPRs past user data stay zero.
+  static constexpr u32 kVertexVgpr[6] = {0, 1, 3, 4, 5, 6};
+  for (u32 i = 0; i < 6; i++)
+    t.SetVg(kVertexVgpr[i], t.U32(i));
+  t.SetVg(2, t.m.Bitcast(t.t_u, t.m.Load(t.t_i, primitive_id)));
+  t.SetVg(7, t.m.Bitcast(t.t_u, t.m.Load(t.t_i, invocation_id)));
+  EmitBody(t, program, sc, reachable.data());
+  r.num_params = sc.max_param;
+
+  t.m.ReturnVoid();
+  t.m.EndFunction();
+  t.m.EntryPoint(spv::ExecutionModel::Geometry, main_fn, "main", iface);
+  t.m.ExecMode(main_fn, spv::ExecutionMode::Invocations,
+               {std::max(1u, gs.instances)});
+  t.m.ExecMode(main_fn, input_mode);
+  t.m.ExecMode(main_fn, gs.out_prim == 0   ? spv::ExecutionMode::OutputPoints
+                        : gs.out_prim == 1 ? spv::ExecutionMode::OutputLineStrip
+                                           : spv::ExecutionMode::OutputTriangleStrip);
+  t.m.ExecMode(main_fn, spv::ExecutionMode::OutputVertices,
+               {sc.gs_max_vert_out});
   return true;
 }
 
@@ -2718,8 +2872,12 @@ bool RecompileSpirv(const u32* vs_code,
                      u32 mrt_uint_mask,
                      u32 mrt_bound_mask,
                      bool gl_clip_space,
+                     const GsPipeline* gs,
+                     u32 int_attr_mask,
                      Recompiled& r) {
   if (!vs_code || !vs_user_data || !ps_user_data)
+    return false;
+  if (gs && (!gs->es_code || !gs->gs_code || !gs->es_user_data))
     return false;
 
   // Decode each stage exactly once; every later step works on these programs.
@@ -2780,17 +2938,31 @@ bool RecompileSpirv(const u32* vs_code,
         PlanMimgBindings(ps_program, ps_reachable.data()).binding_srsrc.size());
   }
 
+  // Under a GS the vertex stage is the ES, and the VS slot's copy shader only
+  // says which export each GSVS component feeds.
+  const Program es_program =
+      gs ? DecodeShader(gs->es_code, 4096) : Program{};
+  std::vector<GsCopyExport> copy_exports;
+  if (gs && !ParseCopyShader(vs_program, gs->max_vert_out, copy_exports)) {
+    BASE_LOGI("gcnspv", "copy shader not understood @{}",
+              static_cast<const void*>(vs_code));
+    return false;
+  }
+  const u32* vertex_code = gs ? gs->es_code : vs_code;
+  const Program& vertex_program = gs ? es_program : vs_program;
+
   // VS and PS are separate SPIR-V modules.
   const bool dbg = ShaderDebugEnabled();
   Translator tv;
-  tv.program_base = reinterpret_cast<u64>(vs_code);
+  tv.program_base = reinterpret_cast<u64>(vertex_code);
   ResetUnsupported();
   if (dbg)
-    AuditBegin("vs", vs_code, vs_program);
+    AuditBegin(gs ? "es" : "vs", vertex_code, vertex_program);
   const bool vs_ok =
-      TranslateVs(vs_program, vs_user_data, flat_params, vs_tex_base,
-                  tex_3d_mask >> vs_tex_base, tex_1d_mask >> vs_tex_base,
-                  gl_clip_space, r, tv) &&
+      TranslateVs(vertex_program, gs ? gs->es_user_data : vs_user_data,
+                  flat_params, vs_tex_base, tex_3d_mask >> vs_tex_base,
+                  tex_1d_mask >> vs_tex_base, gl_clip_space, gs, int_attr_mask,
+                  r, tv) &&
       !HadUnsupported();
   std::vector<u32> vs;
   if (vs_ok)
@@ -2805,8 +2977,34 @@ bool RecompileSpirv(const u32* vs_code,
   if (!vs_ok) {
     if (TraceEnabled())
       BASE_LOGI("gcnspv", "VS translation rejected @{}",
-                static_cast<const void*>(vs_code));
+                static_cast<const void*>(vertex_code));
     return false;
+  }
+
+  std::vector<u32> gs_words;
+  if (gs) {
+    const Program gs_program = DecodeShader(gs->gs_code, 4096);
+    Translator tg;
+    tg.program_base = reinterpret_cast<u64>(gs->gs_code);
+    ResetUnsupported();
+    if (dbg)
+      AuditBegin("gs", gs->gs_code, gs_program);
+    const bool gs_ok = TranslateGs(gs_program, *gs, copy_exports, flat_params,
+                                   gl_clip_space, r, tg) &&
+                       !HadUnsupported();
+    if (gs_ok)
+      gs_words = tg.m.Assemble();
+    if (dbg) {
+      if (!gs_ok)
+        AuditDecline("gs translation rejected");
+      AuditEnd(gs_ok ? &gs_words : nullptr);
+    }
+    if (!gs_ok) {
+      BASE_LOGI("gcnspv", "GS translation rejected @{}",
+                static_cast<const void*>(gs->gs_code));
+      return false;
+    }
+    r.guest_gs = true;
   }
 
   Translator tp;
@@ -2840,8 +3038,8 @@ bool RecompileSpirv(const u32* vs_code,
     return false;
   }
 
-  const std::vector<u32> gs =
-      EmitRectListGeometry(r.num_params, flat_params);
+  if (!gs)
+    gs_words = EmitRectListGeometry(r.num_params, flat_params);
   // A module the translator emitted but the validator rejects is a translator
   // bug (wrong codegen, not a guest gap): always loud.
   std::string err;
@@ -2860,12 +3058,12 @@ bool RecompileSpirv(const u32* vs_code,
                 static_cast<const void*>(ps_code), err.c_str());
       return false;
     }
-    if (!spirv::Validate(gs, &err)) {
-      BASE_LOGI("gcnspv", "RECTLIST GS invalid: {}", err.c_str());
+    if (!spirv::Validate(gs_words, &err)) {
+      BASE_LOGI("gcnspv", "GS invalid: {}", err.c_str());
       return false;
     }
     r.vs_spirv = vs;
-    r.gs_spirv = gs;
+    r.gs_spirv = gs_words;
     r.fs_spirv = ps;
   } else {
     if (!spirv::Finalize(vs, &r.vs_spirv, &err)) {
@@ -2878,8 +3076,8 @@ bool RecompileSpirv(const u32* vs_code,
                 static_cast<const void*>(ps_code), err.c_str());
       return false;
     }
-    if (!spirv::Finalize(gs, &r.gs_spirv, &err)) {
-      BASE_LOGI("gcnspv", "RECTLIST GS invalid: {}", err.c_str());
+    if (!spirv::Finalize(gs_words, &r.gs_spirv, &err)) {
+      BASE_LOGI("gcnspv", "GS invalid: {}", err.c_str());
       return false;
     }
   }

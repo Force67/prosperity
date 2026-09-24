@@ -36,6 +36,9 @@ struct GraphicsKey {
   u32 mrt_bound_mask = 0xFF;
   bool gl_clip = false;
   bool neo = false;
+  // ES and GS code plus the GS registers the modules bake in; zero without a GS.
+  u64 es = 0, gs = 0, gs_shape = 0;
+  u32 int_attr_mask = 0;
 
   bool operator==(const GraphicsKey& other) const = default;
 };
@@ -53,6 +56,10 @@ struct GraphicsKeyHash {
     MixHash(h, k.mrt_bound_mask);
     h ^= k.gl_clip ? kGoldenRatio64 : 0ull;
     h ^= static_cast<u64>(k.neo) << 63;
+    MixHash(h, k.es);
+    MixHash(h, k.gs);
+    MixHash(h, k.gs_shape);
+    MixHash(h, k.int_attr_mask);
     return static_cast<size_t>(h);
   }
 };
@@ -126,6 +133,15 @@ GraphicsKey GraphicsKeyOf(const GraphicsShaderState& state) {
   key.mrt_bound_mask = state.mrt_bound_mask;
   key.gl_clip = state.gl_clip;
   key.neo = gcn::DefaultIsaMode() == gcn::IsaMode::kNeo;
+  key.int_attr_mask = state.int_attr_mask;
+  if (const gcn::GsPipeline* gs = state.gs) {
+    key.es = gcn::CachedCodeHash(reinterpret_cast<u64>(gs->es_code), 4096);
+    key.gs = gcn::CachedCodeHash(reinterpret_cast<u64>(gs->gs_code), 4096);
+    for (u32 v : {gs->es_user_sgprs, gs->gs_user_sgprs, gs->input_prim,
+                  gs->out_prim, gs->max_vert_out, gs->esgs_dwords,
+                  gs->gsvs_dwords, gs->instances})
+      MixHash(key.gs_shape, v);
+  }
   return key;
 }
 
@@ -154,7 +170,8 @@ const gcn::Recompiled& GetGraphicsShader(const Regs& regs,
                    state.honour_ps_in_cntl ? state.ps_in_cntl : nullptr,
                    state.ps_num_interp, state.tex_3d_mask, state.tex_1d_mask,
                    state.tex_uint_mask, state.mrt_uint_mask,
-                   state.mrt_bound_mask, state.gl_clip))
+                   state.mrt_bound_mask, state.gl_clip, state.gs,
+                   state.int_attr_mask))
       .first->second;
 }
 
