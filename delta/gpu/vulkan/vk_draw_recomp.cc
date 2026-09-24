@@ -1487,9 +1487,13 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
     VkImageView views[kMaxTex] = {};
     VkImageLayout layouts[kMaxTex] = {};
     VkFormat formats[kMaxTex] = {};
-    views[0] = SampledView(src, d.tex_swizzle);
+    // In the T#'s own format, as the multi-texture path does: the swizzle
+    // is written against the guest's memory order, which a BGRA target's
+    // native view has already undone (GTA:SA's final copy swapped R and B).
+    views[0] = SampledViewAs(src, d.tex_swizzle,
+                             GuestTextureFormat(d.tex_dfmt, d.tex_nfmt),
+                             &formats[0]);
     layouts[0] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    formats[0] = src.fmt;
     tex_set =
         GetMultiTexSet(d, g_tex.ds_layout, 1, views, layouts, formats, nullptr);
     if (!tex_set)

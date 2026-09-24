@@ -272,6 +272,80 @@ Id LoadSubDword(Translator& t,
                   {word, shift, t.U32(bits)});
 }
 
+// Component `i` of a buffer_load_format element, converted as the V#'s
+// DATA_FORMAT / NUM_FORMAT say (dword 3, [18:15] and [14:12]). The format is
+// only known at run time, so every width is decoded and the right one picked.
+Id FormattedComponent(Translator& t,
+                      Id var,
+                      Id byte_off,
+                      Id dfmt,
+                      Id nfmt,
+                      u32 i) {
+  const auto is = [&](Id v, u32 k) { return t.Eq(v, t.U32(k)); };
+  const auto any = [&](Id v, std::initializer_list<u32> ks) {
+    Id r = t.m.ConstBool(false);
+    for (u32 k : ks)
+      r = t.m.Emit(spv::Op::OpLogicalOr, t.t_bool, {r, is(v, k)});
+    return r;
+  };
+  const auto fbits = [&](Id f) { return t.m.Bitcast(t.t_u, f); };
+  const auto to_f = [&](Id u) {
+    return t.m.Emit(spv::Op::OpConvertUToF, t.t_f, {u});
+  };
+  const auto to_fs = [&](Id u) {
+    return t.m.Emit(spv::Op::OpConvertSToF, t.t_f, {t.m.Bitcast(t.t_i, u)});
+  };
+  // Integer field -> bits for each NUM_FORMAT, given its width.
+  const auto convert = [&](Id raw, Id sraw, u32 bits) {
+    const float umax = static_cast<float>((1u << bits) - 1);
+    const float smax = static_cast<float>((1u << (bits - 1)) - 1);
+    const Id unorm = fbits(t.FDiv(to_f(raw), t.F32(umax)));
+    const Id snorm = fbits(t.Ext2(GLSLstd450FMax,
+                                  t.FDiv(to_fs(sraw), t.F32(smax)),
+                                  t.F32(-1.f)));
+    Id v = unorm;
+    v = t.SelectB(is(nfmt, 1), snorm, v);
+    v = t.SelectB(is(nfmt, 2), fbits(to_f(raw)), v);
+    v = t.SelectB(is(nfmt, 3), fbits(to_fs(sraw)), v);
+    v = t.SelectB(is(nfmt, 4), raw, v);
+    v = t.SelectB(is(nfmt, 5), sraw, v);
+    return v;
+  };
+  const Id raw32 = SsboLoad(t, var,
+                            t.UMin(t.Add(t.Shr(byte_off, t.U32(2)), t.U32(i)),
+                                   t.U32(kGfxBufferDwords - 1)));
+  const Id at16 = t.Add(byte_off, t.U32(2 * i));
+  const Id h = LoadSubDword(t, var, at16, 16, false);
+  const Id hs = LoadSubDword(t, var, at16, 16, true);
+  const Id half = fbits(t.m.CompositeExtract(
+      t.t_f, t.m.ExtInst(t.t_v2, GLSLstd450UnpackHalf2x16, {h}), 0));
+  const Id v16 = t.SelectB(is(nfmt, 7), half, convert(h, hs, 16));
+  const Id at8 = t.Add(byte_off, t.U32(i));
+  const Id v8 = convert(LoadSubDword(t, var, at8, 8, false),
+                        LoadSubDword(t, var, at8, 8, true), 8);
+  // Components each width's formats carry; the rest read 0, alpha 1.
+  const u32 need = i + 1;
+  const Id has32 = need == 1   ? any(dfmt, {4, 11, 13, 14})
+                   : need == 2 ? any(dfmt, {11, 13, 14})
+                   : need == 3 ? any(dfmt, {13, 14})
+                               : is(dfmt, 14);
+  const Id has16 = need == 1   ? any(dfmt, {2, 5, 12})
+                   : need == 2 ? any(dfmt, {5, 12})
+                               : is(dfmt, 12);
+  const Id has8 = need == 1   ? any(dfmt, {1, 3, 10})
+                  : need == 2 ? any(dfmt, {3, 10})
+                              : is(dfmt, 10);
+  const Id integer = any(nfmt, {4, 5});
+  const Id missing =
+      i == 3 ? t.SelectB(integer, t.U32(1), fbits(t.F32(1.f))) : t.U32(0);
+  const Id known = any(dfmt, {1, 2, 3, 4, 5, 10, 11, 12, 13, 14});
+  Id v = t.SelectB(known, missing, raw32);
+  v = t.SelectB(has8, v8, v);
+  v = t.SelectB(has16, v16, v);
+  v = t.SelectB(has32, raw32, v);
+  return v;
+}
+
 // Sub-dword store: read-modify-write the containing dword.
 void StoreSubDword(Translator& t,
                    StageContext& sc,
@@ -885,6 +959,14 @@ void EmitGfxMubuf(Translator& t, const Inst& inst, StageContext& sc) {
     const bool sign_extend = op == 0x09 || op == 0x0b;
     t.SetVg(vdata,
             LoadSubDword(t, var, byte_off, op <= 0x09 ? 8 : 16, sign_extend));
+    return;
+  }
+  if (op <= 0x03) {
+    const Id w3 = t.Sg(srsrc + 3);
+    const Id dfmt = t.And(t.Shr(w3, t.U32(15)), t.U32(0xF));
+    const Id nfmt = t.And(t.Shr(w3, t.U32(12)), t.U32(0x7));
+    for (u32 i = 0; i < n; i++)
+      t.SetVg(vdata + i, FormattedComponent(t, var, byte_off, dfmt, nfmt, i));
     return;
   }
   for (u32 i = 0; i < n; i++)

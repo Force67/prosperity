@@ -663,6 +663,22 @@ inline void SeedPsInputVgprs(Translator& t,
             t.SelectB(t.m.Load(t.t_bool, front_facing), t.U32(0xFFFFFFFFu),
                       t.U32(0)));
   }
+
+  // ANCILLARY: the render-target array index in [26:16]. A layered pass has no
+  // other way to learn which slice it is shading (the grading LUT's blue axis).
+  if (ena & (1u << 13)) {
+    t.m.Capability(spv::Capability::Geometry);
+    const Id layer = t.m.Variable(
+        t.m.TypePointer(spv::StorageClass::Input, t.t_i),
+        spv::StorageClass::Input);
+    t.m.Decorate(layer, spv::Decoration::BuiltIn,
+                 {static_cast<u32>(spv::BuiltIn::Layer)});
+    t.m.Decorate(layer, spv::Decoration::Flat);
+    iface.push_back(layer);
+    t.SetVg(vg[13], t.Shl(t.And(t.m.Bitcast(t.t_u, t.m.Load(t.t_i, layer)),
+                                t.U32(0x7FF)),
+                          t.U32(16)));
+  }
 }
 
 // Per-stage state carried into the shared per-instruction emitter (EmitInst).
