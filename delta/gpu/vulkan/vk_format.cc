@@ -284,6 +284,12 @@ VkFormat ColorTargetFormat(u32 info) {
         break;
     }
   }
+  // An SRGB target encodes what the shader exports; left UNORM it stores the
+  // linear value, and a pass reading it through its SRGB T# decodes it again
+  // (GTA:SA's base colour plane, which darkened every lit material).
+  if (nfmt == 6 && dfmt == 10)
+    return ((info >> 11) & 3) == 1 ? VK_FORMAT_B8G8R8A8_SRGB
+                                   : VK_FORMAT_R8G8B8A8_SRGB;
   if (nfmt == 0) {
     switch (dfmt) {
       case 1:
