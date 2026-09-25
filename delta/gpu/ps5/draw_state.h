@@ -21,7 +21,7 @@
 #include "base/arch.h"
 
 #include "gpu/ps5/agc_regs.h"
-#include "gpu/rhi/command.h"
+#include "gpu/render/command.h"
 
 namespace gpu::ps5 {
 
@@ -42,6 +42,6 @@ struct DrawPacket {
 // dropped rather than rendered from garbage.
 bool BuildDrawInfo(const Regs& regs,
                    const DrawPacket& packet,
-                   rhi::DrawInfo& d);
+                   render::DrawInfo& d);
 
 }  // namespace gpu::ps5

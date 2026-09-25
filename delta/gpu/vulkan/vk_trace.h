@@ -14,7 +14,7 @@
 #include "base/arch.h"
 
 
-#include "gpu/rhi/command.h"
+#include "gpu/render/command.h"
 
 namespace gpu::vk::trace {
 
@@ -64,7 +64,7 @@ struct DrawBindings {
 
 // A draw the recompiled path issued (`path` = "recomp"), or the heuristic quad
 // fallback ("quad"). `bindings` may be null for paths that resolve no samplers.
-void RecordDraw(const rhi::DrawInfo& draw,
+void RecordDraw(const render::DrawInfo& draw,
                 const char* path,
                 const DrawBindings* bindings);
 // The recompiled path declining a draw, tallied by reason at its one choke
@@ -72,7 +72,7 @@ void RecordDraw(const rhi::DrawInfo& draw,
 // number in a periodic report.
 void RecordDecline(const char* reason);
 
-void RecordDispatch(const rhi::ComputeInfo& dispatch);
+void RecordDispatch(const render::ComputeInfo& dispatch);
 
 // Every layout transition the backend records, named after the guest resource
 // the image holds.

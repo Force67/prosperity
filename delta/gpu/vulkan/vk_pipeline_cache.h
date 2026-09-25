@@ -12,7 +12,7 @@
 
 #include <unordered_map>
 
-#include "gpu/rhi/command.h"
+#include "gpu/render/command.h"
 
 namespace gpu::vk {
 
@@ -62,10 +62,10 @@ class RecompiledPipelineCache {
   std::unordered_map<u64, RecompPipe> pipelines_;
 };
 
-// Transitional alias into rhi::BackendState while pipeline creation is
+// Transitional alias into render::BackendState while pipeline creation is
 // migrated to receive its cache explicitly.
 extern RecompiledPipelineCache& g_recomp_cache;
 
-RecompPipe* GetRecompPipe(const rhi::DrawInfo& d);
+RecompPipe* GetRecompPipe(const render::DrawInfo& d);
 
 }  // namespace gpu::vk

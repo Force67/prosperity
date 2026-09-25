@@ -24,7 +24,7 @@ float Float(u32 value) {
 class RdnaBvh : public testing::Test {
  protected:
   void SetUp() override {
-    if (!gpu::rhi::Init(gpu::rhi::DefaultRenderer()))
+    if (!gpu::render::Init(gpu::render::DefaultRenderer()))
       GTEST_SKIP() << "A Vulkan device is required";
   }
   // Every dispatch owns distinct guest memory; the renderer can cache inputs.
@@ -169,8 +169,8 @@ class RdnaBvh : public testing::Test {
       regs[ud + 9] = pointers >> 32;
     }
     const u32 dispatch[] = {1, 1, 1, 1};
-    gpu::ps5::DispatchCompute(gpu::rhi::DefaultRenderer(), regs, dispatch, 4);
-    EXPECT_TRUE(gpu::rhi::FlushCsWrites(gpu::rhi::DefaultRenderer()));
+    gpu::ps5::DispatchCompute(gpu::render::DefaultRenderer(), regs, dispatch, 4);
+    EXPECT_TRUE(gpu::render::FlushCsWrites(gpu::render::DefaultRenderer()));
     if (changing) {
       EXPECT_EQ(
           (std::array<u32, 4>{output[4], output[5], output[6], output[7]}),
@@ -297,8 +297,8 @@ TEST_F(RdnaBvh, DynamicRawBuffersAndScalarPointersWithoutBvh) {
     regs[ud + 8] = src;
     regs[ud + 9] = src >> 32;
     const u32 dispatch[] = {1, 1, 1, 1};
-    gpu::ps5::DispatchCompute(gpu::rhi::DefaultRenderer(), regs, dispatch, 4);
-    ASSERT_TRUE(gpu::rhi::FlushCsWrites(gpu::rhi::DefaultRenderer()));
+    gpu::ps5::DispatchCompute(gpu::render::DefaultRenderer(), regs, dispatch, 4);
+    ASSERT_TRUE(gpu::render::FlushCsWrites(gpu::render::DefaultRenderer()));
     for (u32 i = 0; i < 4; ++i)
       EXPECT_EQ(output[i], scalar || i < 2 ? input[i] : 0u);
     EXPECT_EQ(output[4], 0xa5a5a5a5);
@@ -460,10 +460,10 @@ TEST_F(RdnaBvh, AllCompressedTrianglesAndBarycentricRotations) {
 }
 }  // namespace
 
-namespace gpu::rhi {
+namespace gpu::render {
 u64 g_ns_dcb = 0, g_ns_dcb_lock = 0;
 u32 g_submit_queue = 0, g_dcb_n = 0;
-}  // namespace gpu::rhi
+}  // namespace gpu::render
 extern "C" bool prosperity_ps5_is_display_buffer(u64) {
   return false;
 }

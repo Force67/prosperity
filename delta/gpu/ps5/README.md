@@ -4,7 +4,7 @@ The PS5 GPU is an RDNA2 part (Oberon, gfx10.3-like) driven by the AGC command
 format. The AGC command buffer libSceAgc builds is a **PM4 type-3 stream using
 the same `IT_` opcode table as the PS4** (verified at runtime), so the packet
 walk, the register-latch model, the submit bridge, and the entire Vulkan
-renderer (`gpu/rhi` + `gpu/vulkan`) are reused from the PS4 path. What is genuinely new
+renderer (`gpu/render` + `gpu/vulkan`) are reused from the PS4 path. What is genuinely new
 for PS5, and lives here:
 
 | File | Role | Mirrors (PS4) |
@@ -13,8 +13,8 @@ for PS5, and lives here:
 | `guest_address.h` | the guest window and the GPU aperture a packet field is checked against. | `gpu/ps4/guest_address.h` |
 | `cmd_processor.{h,cc}` | the AGC packet walk, the index/instance state it latches, CP DMA, completion labels, flip. | `gpu/ps4/cmd_processor.cc` |
 | `reg_state.{h,cc}` | the four ways AGC programs a register, including the shadow images and (offset, value) state blocks. | *(none: Gnm puts values in the packet)* |
-| `draw_state.{h,cc}` | register state + tracked shader resources -> one `gpu::rhi::DrawInfo`. | `gpu/ps4/draw_state.*` |
-| `compute_dispatch.{h,cc}` | COMPUTE_* registers + a CS's descriptors -> one `gpu::rhi::ComputeInfo`. | `gpu/ps4/compute_dispatch.*` |
+| `draw_state.{h,cc}` | register state + tracked shader resources -> one `gpu::render::DrawInfo`. | `gpu/ps4/draw_state.*` |
+| `compute_dispatch.{h,cc}` | COMPUTE_* registers + a CS's descriptors -> one `gpu::render::ComputeInfo`. | `gpu/ps4/compute_dispatch.*` |
 | `shader_cache.{h,cc}` | which recompiled module a given piece of guest state needs. | `gpu/ps4/shader_cache.*` |
 | `cmd_trace.{h,cc}` | the `DELTA_AGC_*` / `DELTA_GPU_*` instrumentation of the command stream. | `gpu/ps4/cmd_trace.*` |
 | `rdna/rdna_decode.{h,cc}` | RDNA2 instruction decoder -> `gpu::gcn::Program` (shared `Inst` repr). Different encoding prefixes + opcode numbers than GFX7. | `gpu/gcn/gcn_decode.*` |

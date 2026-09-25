@@ -16,7 +16,7 @@
 #include "gpu/ps5/guest_address.h"
 #include "gpu/ps5/shader_cache.h"
 #include "gpu/ps5/draw_state.h"
-#include "gpu/rhi/renderer.h"
+#include "gpu/render/renderer.h"
 #include "gpu/vulkan/vk_device.h"
 #include "gpu/vulkan/vk_draw_recomp.h"
 #include "gpu/vulkan/vk_frame.h"
@@ -27,8 +27,8 @@ extern "C" bool prosperity_ps5_is_display_buffer(u64) { return false; }
 
 TEST(VkDraw, ConstantBufferBudgetAppliesAfterDeviceInitialization) {
   utl::initOptions();
-  auto& renderer = gpu::rhi::DefaultRenderer();
-  if (!gpu::rhi::Init(renderer))
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required";
   if (gpu::vk::g_ring.ubo_buf)
     GTEST_SKIP() << "Run this initialization test in a fresh renderer";
@@ -39,7 +39,7 @@ TEST(VkDraw, ConstantBufferBudgetAppliesAfterDeviceInitialization) {
   });
   ASSERT_NE(budget, nullptr);
   ASSERT_TRUE(budget->SetFromString("512"));  // Title settings load after Init.
-  gpu::rhi::BeginFrame(renderer);
+  gpu::render::BeginFrame(renderer);
   const auto capacity = gpu::vk::UboRingBytes();
   EXPECT_EQ(capacity, std::min<VkDeviceSize>(512ull << 20,
       VkDeviceSize(gpu::vk::g_dev.max_storage_buffer_range) * 2));
@@ -52,7 +52,7 @@ TEST(VkDraw, ConstantBufferBudgetAppliesAfterDeviceInitialization) {
   ASSERT_TRUE(budget->SetFromString("1024"));
   EXPECT_EQ(gpu::vk::UboRingBytes(), capacity);
   budget->Reset();
-  gpu::rhi::EndFrame(renderer, 0);
+  gpu::render::EndFrame(renderer, 0);
 }
 
 TEST(RdnaResources, RepeatedDescriptorLoadsReuseTextureBindings) {
@@ -85,8 +85,8 @@ TEST(RdnaResources, RepeatedDescriptorLoadsReuseTextureBindings) {
 
 TEST(VkDraw, MeshWorkgroupsExpandInputPointsIntoTriangles) {
   utl::initOptions();
-  auto& renderer = gpu::rhi::DefaultRenderer();
-  if (!gpu::rhi::Init(renderer) || !gpu::vk::g_dev.mesh_shader)
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer) || !gpu::vk::g_dev.mesh_shader)
     GTEST_SKIP() << "Mesh shading is required";
   const u32 vs[64] = {0x7e000280, 0x7e0202f2,
                       0xf80008cf, 0x01000000, 0xbf810000};
@@ -144,7 +144,7 @@ TEST(VkDraw, MeshWorkgroupsExpandInputPointsIntoTriangles) {
       << error;
   program.vs_spirv.clear();
   alignas(65536) static std::array<u8, 65536> target{};
-  gpu::rhi::DrawInfo draw;
+  gpu::render::DrawInfo draw;
   draw.recomp = &program;
   draw.prim_type = 1;
   draw.vertex_count = 2;
@@ -152,10 +152,10 @@ TEST(VkDraw, MeshWorkgroupsExpandInputPointsIntoTriangles) {
   draw.rt_w = draw.rt_h = 16;
   draw.mrt_count = draw.mrt_bound_mask = 1;
   draw.mrt_info[0] = 10u << 2;
-  gpu::rhi::BeginFrame(renderer);
+  gpu::render::BeginFrame(renderer);
   ASSERT_TRUE(gpu::vk::DrawRecomp(renderer, draw));
   const u32 slot_index = gpu::vk::g_frame.slot_idx;
-  gpu::rhi::EndFrame(renderer, draw.rt_base);
+  gpu::render::EndFrame(renderer, draw.rt_base);
   const auto& slot = gpu::vk::g_frame.slots[slot_index];
   ASSERT_EQ(vkWaitForFences(gpu::vk::g_dev.device, 1, &slot.fence,
                            VK_TRUE, UINT64_MAX), VK_SUCCESS);
@@ -168,8 +168,8 @@ TEST(VkDraw, MeshWorkgroupsExpandInputPointsIntoTriangles) {
 
 TEST(VkDraw, SplitNggStagesTransferLdsAndExportConnectivity) {
   utl::initOptions();
-  auto& renderer = gpu::rhi::DefaultRenderer();
-  if (!gpu::rhi::Init(renderer) || !gpu::vk::g_dev.mesh_shader)
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer) || !gpu::vk::g_dev.mesh_shader)
     GTEST_SKIP() << "Mesh shading is required";
   const u32 es[64] = {
       0x34000a82,              // v0 = ES vertex ID * 4
@@ -199,7 +199,7 @@ TEST(VkDraw, SplitNggStagesTransferLdsAndExportConnectivity) {
   ASSERT_FALSE(program.mesh_spirv.empty());
   ASSERT_TRUE(program.vs_spirv.empty());
   alignas(65536) static std::array<u8, 65536> target{};
-  gpu::rhi::DrawInfo draw;
+  gpu::render::DrawInfo draw;
   draw.recomp = &program;
   draw.prim_type = 1;
   draw.vertex_count = 3;
@@ -207,10 +207,10 @@ TEST(VkDraw, SplitNggStagesTransferLdsAndExportConnectivity) {
   draw.rt_w = draw.rt_h = 16;
   draw.mrt_count = draw.mrt_bound_mask = 1;
   draw.mrt_info[0] = 10u << 2;
-  gpu::rhi::BeginFrame(renderer);
+  gpu::render::BeginFrame(renderer);
   ASSERT_TRUE(gpu::vk::DrawRecomp(renderer, draw));
   const u32 slot_index = gpu::vk::g_frame.slot_idx;
-  gpu::rhi::EndFrame(renderer, draw.rt_base);
+  gpu::render::EndFrame(renderer, draw.rt_base);
   const auto& slot = gpu::vk::g_frame.slots[slot_index];
   ASSERT_EQ(vkWaitForFences(gpu::vk::g_dev.device, 1, &slot.fence,
                            VK_TRUE, UINT64_MAX), VK_SUCCESS);
@@ -222,8 +222,8 @@ TEST(VkDraw, SplitNggStagesTransferLdsAndExportConnectivity) {
 
 TEST(VkDraw, UnifiedNggProgramExportsTriangleConnectivity) {
   utl::initOptions();
-  auto& renderer = gpu::rhi::DefaultRenderer();
-  if (!gpu::rhi::Init(renderer) || !gpu::vk::g_dev.mesh_shader)
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer) || !gpu::vk::g_dev.mesh_shader)
     GTEST_SKIP() << "Mesh shading is required";
   const u32 gs[64] = {
       0x7e040305,              // v2 = input vertex ID
@@ -251,7 +251,7 @@ TEST(VkDraw, UnifiedNggProgramExportsTriangleConnectivity) {
   ASSERT_FALSE(program.mesh_spirv.empty());
   ASSERT_TRUE(program.vs_spirv.empty());
   alignas(65536) static std::array<u8, 65536> target{};
-  gpu::rhi::DrawInfo draw;
+  gpu::render::DrawInfo draw;
   draw.recomp = &program;
   draw.prim_type = 1;
   draw.vertex_count = 3;
@@ -259,10 +259,10 @@ TEST(VkDraw, UnifiedNggProgramExportsTriangleConnectivity) {
   draw.rt_w = draw.rt_h = 16;
   draw.mrt_count = draw.mrt_bound_mask = 1;
   draw.mrt_info[0] = 10u << 2;
-  gpu::rhi::BeginFrame(renderer);
+  gpu::render::BeginFrame(renderer);
   ASSERT_TRUE(gpu::vk::DrawRecomp(renderer, draw));
   const u32 slot_index = gpu::vk::g_frame.slot_idx;
-  gpu::rhi::EndFrame(renderer, draw.rt_base);
+  gpu::render::EndFrame(renderer, draw.rt_base);
   const auto& slot = gpu::vk::g_frame.slots[slot_index];
   ASSERT_EQ(vkWaitForFences(gpu::vk::g_dev.device, 1, &slot.fence,
                            VK_TRUE, UINT64_MAX), VK_SUCCESS);
@@ -274,8 +274,8 @@ TEST(VkDraw, UnifiedNggProgramExportsTriangleConnectivity) {
 
 TEST(VkDraw, NggPointBatchesPreserveEveryExpandedQuad) {
   utl::initOptions();
-  auto& renderer = gpu::rhi::DefaultRenderer();
-  if (!gpu::rhi::Init(renderer) || !gpu::vk::g_dev.mesh_shader)
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer) || !gpu::vk::g_dev.mesh_shader)
     GTEST_SKIP() << "Mesh shading is required";
   std::array<u32, 4096> code{};
   u32 pc = 0;
@@ -338,15 +338,15 @@ TEST(VkDraw, NggPointBatchesPreserveEveryExpandedQuad) {
     programs[i] = gpu::rdna::Recompile(code.data(), ps, user_data, user_data,
                                        0, false, 0, 0, nullptr, 0, &cfg);
     ASSERT_TRUE(programs[i].ok);
-    gpu::rhi::DrawInfo draw;
+    gpu::render::DrawInfo draw;
     draw.recomp = &programs[i]; draw.prim_type = 1; draw.vertex_count = 6;
     draw.rt_base = draw.mrt_base[0] = reinterpret_cast<u64>(targets[i].data());
     draw.rt_w = 64; draw.rt_h = 16;
     draw.mrt_count = draw.mrt_bound_mask = 1; draw.mrt_info[0] = 10u << 2;
-    gpu::rhi::BeginFrame(renderer);
+    gpu::render::BeginFrame(renderer);
     ASSERT_TRUE(gpu::vk::DrawRecomp(renderer, draw));
     const u32 slot_index = gpu::vk::g_frame.slot_idx;
-    gpu::rhi::EndFrame(renderer, draw.rt_base);
+    gpu::render::EndFrame(renderer, draw.rt_base);
     const auto& slot = gpu::vk::g_frame.slots[slot_index];
     ASSERT_EQ(vkWaitForFences(gpu::vk::g_dev.device, 1, &slot.fence,
                              VK_TRUE, UINT64_MAX), VK_SUCCESS);
@@ -363,8 +363,8 @@ TEST(VkDraw, NggPointBatchesPreserveEveryExpandedQuad) {
 
 TEST(VkDraw, MeshConstantWindowsExceedTheDynamicDescriptorLimit) {
   utl::initOptions();
-  auto& renderer = gpu::rhi::DefaultRenderer();
-  if (!gpu::rhi::Init(renderer) || !gpu::vk::g_dev.mesh_shader)
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer) || !gpu::vk::g_dev.mesh_shader)
     GTEST_SKIP() << "Mesh shading is required";
   const u32 es[64] = {0x34000a82, 0xd8340000, 0x00000500, 0xbe802006};
   std::array<u32, 256> gs{};
@@ -396,7 +396,7 @@ TEST(VkDraw, MeshConstantWindowsExceedTheDynamicDescriptorLimit) {
   alignas(65536) static std::array<std::array<u8, 65536>, 3> targets{};
   for (u32 frame = 0; frame < 3; ++frame) {
     constants[16 * gpu::gcn::kCbufDwords] = frame == 1 ? .5f : -.5f;
-    gpu::rhi::DrawInfo draw;
+    gpu::render::DrawInfo draw;
     draw.recomp = &program;
     draw.prim_type = 1;
     draw.vertex_count = 3;
@@ -410,10 +410,10 @@ TEST(VkDraw, MeshConstantWindowsExceedTheDynamicDescriptorLimit) {
     draw.rt_w = draw.rt_h = 16;
     draw.mrt_count = draw.mrt_bound_mask = 1;
     draw.mrt_info[0] = 10u << 2;
-    gpu::rhi::BeginFrame(renderer);
+    gpu::render::BeginFrame(renderer);
     ASSERT_TRUE(gpu::vk::DrawRecomp(renderer, draw));
     const u32 slot_index = gpu::vk::g_frame.slot_idx;
-    gpu::rhi::EndFrame(renderer, draw.rt_base);
+    gpu::render::EndFrame(renderer, draw.rt_base);
     const auto& slot = gpu::vk::g_frame.slots[slot_index];
     ASSERT_EQ(vkWaitForFences(gpu::vk::g_dev.device, 1, &slot.fence,
                              VK_TRUE, UINT64_MAX), VK_SUCCESS);
@@ -427,8 +427,8 @@ TEST(VkDraw, MeshConstantWindowsExceedTheDynamicDescriptorLimit) {
 
 TEST(VkDraw, SplitNggUserWindowsAndHighPixelRegistersRemainDistinct) {
   utl::initOptions();
-  auto& renderer = gpu::rhi::DefaultRenderer();
-  if (!gpu::rhi::Init(renderer) || !gpu::vk::g_dev.mesh_shader)
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer) || !gpu::vk::g_dev.mesh_shader)
     GTEST_SKIP() << "Mesh shading is required";
   const u32 es[64] = {
       0x34000a83,              // v0 = vertex ID * 8
@@ -457,7 +457,7 @@ TEST(VkDraw, SplitNggUserWindowsAndHighPixelRegistersRemainDistinct) {
   ASSERT_TRUE(program.ok);
   alignas(65536) static std::array<std::array<u8, 65536>, 2> targets{};
   for (u32 frame = 0; frame < 2; ++frame) {
-    gpu::rhi::DrawInfo draw;
+    gpu::render::DrawInfo draw;
     draw.recomp = &program;
     draw.prim_type = 1;
     draw.vertex_count = 3;
@@ -468,10 +468,10 @@ TEST(VkDraw, SplitNggUserWindowsAndHighPixelRegistersRemainDistinct) {
     draw.rt_w = draw.rt_h = 16;
     draw.mrt_count = draw.mrt_bound_mask = 1;
     draw.mrt_info[0] = 10u << 2;
-    gpu::rhi::BeginFrame(renderer);
+    gpu::render::BeginFrame(renderer);
     ASSERT_TRUE(gpu::vk::DrawRecomp(renderer, draw));
     const u32 slot_index = gpu::vk::g_frame.slot_idx;
-    gpu::rhi::EndFrame(renderer, draw.rt_base);
+    gpu::render::EndFrame(renderer, draw.rt_base);
     const auto& slot = gpu::vk::g_frame.slots[slot_index];
     ASSERT_EQ(vkWaitForFences(gpu::vk::g_dev.device, 1, &slot.fence,
                              VK_TRUE, UINT64_MAX), VK_SUCCESS);
@@ -505,8 +505,8 @@ TEST(VkDraw, GeometryResourceReplayUsesSystemUserDataAddress) {
 
 TEST(VkDraw, VertexAndPixelUserDataPastSixteenDoNotOverlap) {
   utl::initOptions();
-  auto& renderer = gpu::rhi::DefaultRenderer();
-  if (!gpu::rhi::Init(renderer))
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required";
   const u32 vs[64] = {0x7e00021f, 0x7e0202ff, 0x3d800000,
                       0x7e040280, 0x7e0602f2,
@@ -521,7 +521,7 @@ TEST(VkDraw, VertexAndPixelUserDataPastSixteenDoNotOverlap) {
   ASSERT_TRUE(program.mesh_spirv.empty());
   alignas(65536) static std::array<std::array<u8, 65536>, 2> targets{};
   for (u32 frame = 0; frame < 2; ++frame) {
-    gpu::rhi::DrawInfo draw;
+    gpu::render::DrawInfo draw;
     draw.recomp = &program;
     draw.prim_type = 1;
     draw.vertex_count = 1;
@@ -531,10 +531,10 @@ TEST(VkDraw, VertexAndPixelUserDataPastSixteenDoNotOverlap) {
     draw.rt_w = draw.rt_h = 16;
     draw.mrt_count = draw.mrt_bound_mask = 1;
     draw.mrt_info[0] = 10u << 2;
-    gpu::rhi::BeginFrame(renderer);
+    gpu::render::BeginFrame(renderer);
     ASSERT_TRUE(gpu::vk::DrawRecomp(renderer, draw));
     const u32 slot_index = gpu::vk::g_frame.slot_idx;
-    gpu::rhi::EndFrame(renderer, draw.rt_base);
+    gpu::render::EndFrame(renderer, draw.rt_base);
     const auto& slot = gpu::vk::g_frame.slots[slot_index];
     ASSERT_EQ(vkWaitForFences(gpu::vk::g_dev.device, 1, &slot.fence,
                              VK_TRUE, UINT64_MAX), VK_SUCCESS);
@@ -549,8 +549,8 @@ TEST(VkDraw, VertexAndPixelUserDataPastSixteenDoNotOverlap) {
 
 TEST(VkDraw, PixelShaderUsesDppOperand) {
   utl::initOptions();
-  auto& renderer = gpu::rhi::DefaultRenderer();
-  if (!gpu::rhi::Init(renderer))
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required";
   const u32 vs[64] = {0x7e0002ff, 0x3d800000, 0x7e040280, 0x7e0602f2,
                       0xf80008cf, 0x03020000, 0xbf810000};
@@ -562,7 +562,7 @@ TEST(VkDraw, PixelShaderUsesDppOperand) {
                                                   0, false, 0, 0);
   ASSERT_TRUE(program.ok);
   alignas(65536) static std::array<u8, 65536> target{};
-  gpu::rhi::DrawInfo draw;
+  gpu::render::DrawInfo draw;
   draw.recomp = &program;
   draw.prim_type = 1;
   draw.vertex_count = 1;
@@ -570,10 +570,10 @@ TEST(VkDraw, PixelShaderUsesDppOperand) {
   draw.rt_w = draw.rt_h = 16;
   draw.mrt_count = draw.mrt_bound_mask = 1;
   draw.mrt_info[0] = 10u << 2;
-  gpu::rhi::BeginFrame(renderer);
+  gpu::render::BeginFrame(renderer);
   ASSERT_TRUE(gpu::vk::DrawRecomp(renderer, draw));
   const u32 slot_index = gpu::vk::g_frame.slot_idx;
-  gpu::rhi::EndFrame(renderer, draw.rt_base);
+  gpu::render::EndFrame(renderer, draw.rt_base);
   const auto& slot = gpu::vk::g_frame.slots[slot_index];
   ASSERT_EQ(vkWaitForFences(gpu::vk::g_dev.device, 1, &slot.fence,
                            VK_TRUE, UINT64_MAX), VK_SUCCESS);
@@ -584,8 +584,8 @@ TEST(VkDraw, PixelShaderUsesDppOperand) {
 
 TEST(VkDraw, SdwaAluWritesSelectedBytesAndPreservesOtherBits) {
   utl::initOptions();
-  auto& renderer = gpu::rhi::DefaultRenderer();
-  if (!gpu::rhi::Init(renderer))
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required";
   struct Case { u32 select, unused, input, expected; };
   // Convert 1234.75 to 1234 (0x4d2), or -1.75 to -1. Expected packed
@@ -627,7 +627,7 @@ TEST(VkDraw, SdwaAluWritesSelectedBytesAndPreservesOtherBits) {
     programs[i] = gpu::rdna::Recompile(vs, ps, user_data, user_data,
                                        0, false, 0, 3);
     ASSERT_TRUE(programs[i].ok);
-    gpu::rhi::DrawInfo draw;
+    gpu::render::DrawInfo draw;
     draw.recomp = &programs[i];
     draw.prim_type = 1;
     draw.vertex_count = 1;
@@ -636,10 +636,10 @@ TEST(VkDraw, SdwaAluWritesSelectedBytesAndPreservesOtherBits) {
     draw.rt_w = draw.rt_h = 16;
     draw.mrt_count = draw.mrt_bound_mask = 1;
     draw.mrt_info[0] = 10u << 2;
-    gpu::rhi::BeginFrame(renderer);
+    gpu::render::BeginFrame(renderer);
     ASSERT_TRUE(gpu::vk::DrawRecomp(renderer, draw));
     const u32 slot_index = gpu::vk::g_frame.slot_idx;
-    gpu::rhi::EndFrame(renderer, draw.rt_base);
+    gpu::render::EndFrame(renderer, draw.rt_base);
     const auto& slot = gpu::vk::g_frame.slots[slot_index];
     ASSERT_EQ(vkWaitForFences(gpu::vk::g_dev.device, 1, &slot.fence,
                              VK_TRUE, UINT64_MAX), VK_SUCCESS);
@@ -651,8 +651,8 @@ TEST(VkDraw, SdwaAluWritesSelectedBytesAndPreservesOtherBits) {
 
 TEST(VkDraw, NggWavesKeepIndependentBranchesAndFullBallots) {
   utl::initOptions();
-  auto& renderer = gpu::rhi::DefaultRenderer();
-  if (!gpu::rhi::Init(renderer) || !gpu::vk::g_dev.mesh_shader)
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer) || !gpu::vk::g_dev.mesh_shader)
     GTEST_SKIP() << "Mesh shading is required";
   const u32 es[64] = {0x34000a82, 0xd8340000, 0x00000500, 0xbe802006};
   // Two guest waves take different scalar branches. Their triangles use
@@ -702,7 +702,7 @@ TEST(VkDraw, NggWavesKeepIndependentBranchesAndFullBallots) {
                                             0, false, 0, 0, nullptr, 0, &cfg);
   ASSERT_TRUE(program.ok);
   alignas(65536) static std::array<u8, 65536> target{};
-  gpu::rhi::DrawInfo draw;
+  gpu::render::DrawInfo draw;
   draw.recomp = &program;
   draw.prim_type = 1;
   draw.vertex_count = 99;
@@ -710,10 +710,10 @@ TEST(VkDraw, NggWavesKeepIndependentBranchesAndFullBallots) {
   draw.rt_w = draw.rt_h = 16;
   draw.mrt_count = draw.mrt_bound_mask = 1;
   draw.mrt_info[0] = 10u << 2;
-  gpu::rhi::BeginFrame(renderer);
+  gpu::render::BeginFrame(renderer);
   ASSERT_TRUE(gpu::vk::DrawRecomp(renderer, draw));
   const u32 slot_index = gpu::vk::g_frame.slot_idx;
-  gpu::rhi::EndFrame(renderer, draw.rt_base);
+  gpu::render::EndFrame(renderer, draw.rt_base);
   const auto& slot = gpu::vk::g_frame.slots[slot_index];
   ASSERT_EQ(vkWaitForFences(gpu::vk::g_dev.device, 1, &slot.fence,
                            VK_TRUE, UINT64_MAX), VK_SUCCESS);
@@ -726,8 +726,8 @@ TEST(VkDraw, NggWavesKeepIndependentBranchesAndFullBallots) {
 
 TEST(VkDraw, FetchedVerticesKeepNggVertexAndInstanceIds) {
   utl::initOptions();
-  auto& renderer = gpu::rhi::DefaultRenderer();
-  if (!gpu::rhi::Init(renderer))
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required";
   // Read the launch IDs before an inline fetch overwrites v5. Two vertices
   // in two instances should cover four separate points, one per quadrant.
@@ -751,7 +751,7 @@ TEST(VkDraw, FetchedVerticesKeepNggVertexAndInstanceIds) {
   ASSERT_TRUE(program.ok);
   ASSERT_EQ(program.attrs.size(), 1u);
   alignas(65536) static std::array<u8, 65536> target{};
-  gpu::rhi::DrawInfo draw;
+  gpu::render::DrawInfo draw;
   draw.recomp = &program;
   draw.vs_addr = reinterpret_cast<u64>(vs);
   draw.ps_addr = reinterpret_cast<u64>(ps);
@@ -766,10 +766,10 @@ TEST(VkDraw, FetchedVerticesKeepNggVertexAndInstanceIds) {
   draw.rt_w = draw.rt_h = 16;
   draw.mrt_count = draw.mrt_bound_mask = 1;
   draw.mrt_info[0] = 10u << 2;
-  gpu::rhi::BeginFrame(renderer);
+  gpu::render::BeginFrame(renderer);
   ASSERT_TRUE(gpu::vk::DrawRecomp(renderer, draw));
   const u32 slot_index = gpu::vk::g_frame.slot_idx;
-  gpu::rhi::EndFrame(renderer, draw.rt_base);
+  gpu::render::EndFrame(renderer, draw.rt_base);
   const auto& slot = gpu::vk::g_frame.slots[slot_index];
   ASSERT_EQ(vkWaitForFences(gpu::vk::g_dev.device, 1, &slot.fence,
                            VK_TRUE, UINT64_MAX), VK_SUCCESS);
@@ -785,8 +785,8 @@ TEST(VkDraw, FetchedVerticesKeepNggVertexAndInstanceIds) {
 
 TEST(VkDraw, IndexedRawVerticesUseLoadedDescriptorStride) {
   utl::initOptions();
-  auto& renderer = gpu::rhi::DefaultRenderer();
-  if (!gpu::rhi::Init(renderer))
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required";
   const u32 vs[64] = {
       0xf4080404, 0xfa000000,  // s[16:19] = descriptor from s[8:9]
@@ -805,7 +805,7 @@ TEST(VkDraw, IndexedRawVerticesUseLoadedDescriptorStride) {
   static const auto program = gpu::rdna::Recompile(vs, ps, user_data, user_data);
   ASSERT_TRUE(program.ok);
   alignas(65536) static std::array<u8, 65536> target{};
-  gpu::rhi::DrawInfo draw;
+  gpu::render::DrawInfo draw;
   draw.recomp = &program;
   draw.vs_addr = reinterpret_cast<u64>(vs);
   draw.ps_addr = reinterpret_cast<u64>(ps);
@@ -820,10 +820,10 @@ TEST(VkDraw, IndexedRawVerticesUseLoadedDescriptorStride) {
   draw.rt_w = draw.rt_h = 16;
   draw.mrt_count = draw.mrt_bound_mask = 1;
   draw.mrt_info[0] = 10u << 2;
-  gpu::rhi::BeginFrame(renderer);
+  gpu::render::BeginFrame(renderer);
   ASSERT_TRUE(gpu::vk::DrawRecomp(renderer, draw));
   const u32 slot_index = gpu::vk::g_frame.slot_idx;
-  gpu::rhi::EndFrame(renderer, draw.rt_base);
+  gpu::render::EndFrame(renderer, draw.rt_base);
   const auto& slot = gpu::vk::g_frame.slots[slot_index];
   ASSERT_EQ(vkWaitForFences(gpu::vk::g_dev.device, 1, &slot.fence,
                            VK_TRUE, UINT64_MAX), VK_SUCCESS);
@@ -839,8 +839,8 @@ TEST(VkDraw, IndexedRawVerticesUseLoadedDescriptorStride) {
 
 TEST(VkDraw, Ps5DepthClearUsesRegisterValueInsteadOfVertexDepth) {
   utl::initOptions();
-  auto& renderer = gpu::rhi::DefaultRenderer();
-  if (!gpu::rhi::Init(renderer))
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required";
   alignas(256) static const u32 vs[4096] = {
       0x7e000280, 0x7e020280, 0x7e0402ff, 0x3f400000,
@@ -875,7 +875,7 @@ TEST(VkDraw, Ps5DepthClearUsesRegisterValueInsteadOfVertexDepth) {
   regs[mmDB_RENDER_CONTROL] = 1;
   const u32 body[] = {1, 0};
   const DrawPacket packet{0x2d, body, 2};  // DRAW_INDEX_AUTO
-  gpu::rhi::DrawInfo clear;
+  gpu::render::DrawInfo clear;
   ASSERT_TRUE(BuildDrawInfo(regs, packet, clear));
   ASSERT_TRUE(clear.depth_clear_draw);
   // Skyrim retains its previous postprocess resources during the clear.
@@ -883,16 +883,16 @@ TEST(VkDraw, Ps5DepthClearUsesRegisterValueInsteadOfVertexDepth) {
   clear.tex_base = clear.depth_base;
   clear.num_texs = 1;
   clear.texs[0].base = clear.depth_base;
-  gpu::rhi::BeginFrame(renderer);
+  gpu::render::BeginFrame(renderer);
   ASSERT_TRUE(gpu::vk::DrawRecomp(renderer, clear));
   regs[mmDB_RENDER_CONTROL] = 0;
   regs[mmDB_DEPTH_CONTROL] = (1u << 4) | 6;  // LESS: .75 passes only after clear=1
-  gpu::rhi::DrawInfo point;
+  gpu::render::DrawInfo point;
   ASSERT_TRUE(BuildDrawInfo(regs, packet, point));
   ASSERT_FALSE(point.depth_clear_draw);
   ASSERT_TRUE(gpu::vk::DrawRecomp(renderer, point));
   const u32 slot_index = gpu::vk::g_frame.slot_idx;
-  gpu::rhi::EndFrame(renderer, point.rt_base);
+  gpu::render::EndFrame(renderer, point.rt_base);
   const auto& slot = gpu::vk::g_frame.slots[slot_index];
   ASSERT_EQ(vkWaitForFences(gpu::vk::g_dev.device, 1, &slot.fence,
                            VK_TRUE, UINT64_MAX), VK_SUCCESS);
@@ -906,8 +906,8 @@ TEST(VkDraw, Ps5DepthClearUsesRegisterValueInsteadOfVertexDepth) {
 
 TEST(VkDraw, IndexedTypedLoadUsesLiveStrideAndInstructionFormat) {
   utl::initOptions();
-  auto& renderer = gpu::rhi::DefaultRenderer();
-  if (!gpu::rhi::Init(renderer))
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required";
   // Inline V# at s[8:11], indexed by v5. The instruction requests float4
   // even though the descriptor advertises R32_UINT. Padding must not become
@@ -935,7 +935,7 @@ TEST(VkDraw, IndexedTypedLoadUsesLiveStrideAndInstructionFormat) {
     std::copy(left.begin(), left.end(), vertices.begin());
     std::copy(right.begin(), right.end(), vertices.begin() + stride / 4);
     user_data[1] = u32(vb >> 32) | (stride << 16);
-    gpu::rhi::DrawInfo draw;
+    gpu::render::DrawInfo draw;
     draw.recomp = &program;
     draw.vs_addr = reinterpret_cast<u64>(vs);
     draw.ps_addr = reinterpret_cast<u64>(ps);
@@ -948,10 +948,10 @@ TEST(VkDraw, IndexedTypedLoadUsesLiveStrideAndInstructionFormat) {
     draw.rt_w = draw.rt_h = 16;
     draw.mrt_count = draw.mrt_bound_mask = 1;
     draw.mrt_info[0] = 10u << 2;
-    gpu::rhi::BeginFrame(renderer);
+    gpu::render::BeginFrame(renderer);
     ASSERT_TRUE(gpu::vk::DrawRecomp(renderer, draw));
     const u32 slot_index = gpu::vk::g_frame.slot_idx;
-    gpu::rhi::EndFrame(renderer, draw.rt_base);
+    gpu::render::EndFrame(renderer, draw.rt_base);
     const auto& slot = gpu::vk::g_frame.slots[slot_index];
     ASSERT_EQ(vkWaitForFences(gpu::vk::g_dev.device, 1, &slot.fence,
                              VK_TRUE, UINT64_MAX), VK_SUCCESS);
@@ -968,8 +968,8 @@ TEST(VkDraw, IndexedTypedLoadUsesLiveStrideAndInstructionFormat) {
 
 TEST(VkDraw, BulkDescriptorLoadPreservesInteriorBufferStride) {
   utl::initOptions();
-  auto& renderer = gpu::rhi::DefaultRenderer();
-  if (!gpu::rhi::Init(renderer))
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required";
   const u32 vs[64] = {
       0xf4100204, 0xfa000000,  // s[8:23] = four descriptors from s[8:9]
@@ -991,7 +991,7 @@ TEST(VkDraw, BulkDescriptorLoadPreservesInteriorBufferStride) {
   static const auto program = gpu::rdna::Recompile(vs, ps, user_data, user_data);
   ASSERT_TRUE(program.ok);
   alignas(65536) static std::array<u8, 65536> target{};
-  gpu::rhi::DrawInfo draw;
+  gpu::render::DrawInfo draw;
   draw.recomp = &program;
   draw.vs_addr = reinterpret_cast<u64>(vs);
   draw.ps_addr = reinterpret_cast<u64>(ps);
@@ -1011,10 +1011,10 @@ TEST(VkDraw, BulkDescriptorLoadPreservesInteriorBufferStride) {
   draw.rt_w = draw.rt_h = 16;
   draw.mrt_count = draw.mrt_bound_mask = 1;
   draw.mrt_info[0] = 10u << 2;
-  gpu::rhi::BeginFrame(renderer);
+  gpu::render::BeginFrame(renderer);
   ASSERT_TRUE(gpu::vk::DrawRecomp(renderer, draw));
   const u32 slot_index = gpu::vk::g_frame.slot_idx;
-  gpu::rhi::EndFrame(renderer, draw.rt_base);
+  gpu::render::EndFrame(renderer, draw.rt_base);
   const auto& slot = gpu::vk::g_frame.slots[slot_index];
   ASSERT_EQ(vkWaitForFences(gpu::vk::g_dev.device, 1, &slot.fence,
                            VK_TRUE, UINT64_MAX), VK_SUCCESS);
@@ -1030,8 +1030,8 @@ TEST(VkDraw, BulkDescriptorLoadPreservesInteriorBufferStride) {
 
 TEST(VkDraw, PassthroughInterpolationPreservesPackedVertexValues) {
   utl::initOptions();
-  auto& renderer = gpu::rhi::DefaultRenderer();
-  if (!gpu::rhi::Init(renderer) || !gpu::vk::g_dev.barycentric_available)
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer) || !gpu::vk::g_dev.barycentric_available)
     GTEST_SKIP() << "Fragment barycentrics are required";
   static const u32 vs[4096] = {
       0xe0382000, 0x80020005,  // position.xyz + packed attribute, indexed by v5
@@ -1064,7 +1064,7 @@ TEST(VkDraw, PassthroughInterpolationPreservesPackedVertexValues) {
     if (previous)
       EXPECT_NE(&program, previous) << "Interpolation mode changes the shader";
     previous = &program;
-    gpu::rhi::DrawInfo draw;
+    gpu::render::DrawInfo draw;
     draw.recomp = &program;
     draw.vs_addr = reinterpret_cast<u64>(vs);
     draw.ps_addr = reinterpret_cast<u64>(ps);
@@ -1078,10 +1078,10 @@ TEST(VkDraw, PassthroughInterpolationPreservesPackedVertexValues) {
     draw.rt_w = draw.rt_h = 16;
     draw.mrt_count = draw.mrt_bound_mask = 1;
     draw.mrt_info[0] = 10u << 2;
-    gpu::rhi::BeginFrame(renderer);
+    gpu::render::BeginFrame(renderer);
     ASSERT_TRUE(gpu::vk::DrawRecomp(renderer, draw));
     const u32 slot_index = gpu::vk::g_frame.slot_idx;
-    gpu::rhi::EndFrame(renderer, draw.rt_base);
+    gpu::render::EndFrame(renderer, draw.rt_base);
     const auto& slot = gpu::vk::g_frame.slots[slot_index];
     ASSERT_EQ(vkWaitForFences(gpu::vk::g_dev.device, 1, &slot.fence,
                              VK_TRUE, UINT64_MAX), VK_SUCCESS);
@@ -1096,8 +1096,8 @@ TEST(VkDraw, PassthroughInterpolationPreservesPackedVertexValues) {
 
 TEST(VkDraw, PixelTypedLoadConvertsPackedDataWithByteOffsets) {
   utl::initOptions();
-  auto& renderer = gpu::rhi::DefaultRenderer();
-  if (!gpu::rhi::Init(renderer))
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required";
   const u32 vs[64] = {0x7e000280, 0x7e0202f2,
                       0xf80008cf, 0x01000000, 0xbf810000};
@@ -1113,7 +1113,7 @@ TEST(VkDraw, PixelTypedLoadConvertsPackedDataWithByteOffsets) {
   ASSERT_TRUE(program.ok);
   ASSERT_EQ(program.ps_bufs.size(), 1u);
   alignas(65536) static std::array<u8, 65536> target{};
-  gpu::rhi::DrawInfo draw;
+  gpu::render::DrawInfo draw;
   draw.recomp = &program;
   draw.vs_addr = reinterpret_cast<u64>(vs);
   draw.ps_addr = reinterpret_cast<u64>(ps);
@@ -1125,10 +1125,10 @@ TEST(VkDraw, PixelTypedLoadConvertsPackedDataWithByteOffsets) {
   draw.rt_w = draw.rt_h = 16;
   draw.mrt_count = draw.mrt_bound_mask = 1;
   draw.mrt_info[0] = 10u << 2;
-  gpu::rhi::BeginFrame(renderer);
+  gpu::render::BeginFrame(renderer);
   ASSERT_TRUE(gpu::vk::DrawRecomp(renderer, draw));
   const u32 slot_index = gpu::vk::g_frame.slot_idx;
-  gpu::rhi::EndFrame(renderer, draw.rt_base);
+  gpu::render::EndFrame(renderer, draw.rt_base);
   const auto& slot = gpu::vk::g_frame.slots[slot_index];
   ASSERT_EQ(vkWaitForFences(gpu::vk::g_dev.device, 1, &slot.fence,
                            VK_TRUE, UINT64_MAX), VK_SUCCESS);
@@ -1149,8 +1149,8 @@ TEST(VkDraw, PixelTypedLoadConvertsPackedDataWithByteOffsets) {
 
 TEST(VkDraw, PixelOneDimensionalSampleSurvivesAddtidSpill) {
   utl::initOptions();
-  auto& renderer = gpu::rhi::DefaultRenderer();
-  if (!gpu::rhi::Init(renderer))
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required";
   const u32 vs[64] = {0x7e000280, 0x7e0202f2,
                       0xf80008cf, 0x01000000, 0xbf810000};
@@ -1165,7 +1165,7 @@ TEST(VkDraw, PixelOneDimensionalSampleSurvivesAddtidSpill) {
   static const auto program = gpu::rdna::Recompile(vs, ps, user_data, user_data);
   ASSERT_TRUE(program.ok);
   alignas(65536) static std::array<u8, 65536> texture{64, 128, 255, 255}, target{};
-  gpu::rhi::DrawInfo draw;
+  gpu::render::DrawInfo draw;
   draw.recomp = &program;
   draw.vs_addr = reinterpret_cast<u64>(vs);
   draw.ps_addr = reinterpret_cast<u64>(ps);
@@ -1186,10 +1186,10 @@ TEST(VkDraw, PixelOneDimensionalSampleSurvivesAddtidSpill) {
   draw.rt_w = draw.rt_h = 16;
   draw.mrt_count = draw.mrt_bound_mask = 1;
   draw.mrt_info[0] = 10u << 2;
-  gpu::rhi::BeginFrame(renderer);
+  gpu::render::BeginFrame(renderer);
   ASSERT_TRUE(gpu::vk::DrawRecomp(renderer, draw));
   const u32 slot_index = gpu::vk::g_frame.slot_idx;
-  gpu::rhi::EndFrame(renderer, draw.rt_base);
+  gpu::render::EndFrame(renderer, draw.rt_base);
   const auto& slot = gpu::vk::g_frame.slots[slot_index];
   ASSERT_EQ(vkWaitForFences(gpu::vk::g_dev.device, 1, &slot.fence,
                            VK_TRUE, UINT64_MAX), VK_SUCCESS);
@@ -1209,8 +1209,8 @@ TEST(VkDraw, PixelOneDimensionalSampleSurvivesAddtidSpill) {
 
 TEST(VkDraw, RawVertexBufferReadsPastOneMiB) {
   utl::initOptions();
-  auto& renderer = gpu::rhi::DefaultRenderer();
-  if (!gpu::rhi::Init(renderer))
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required";
   const u32 vs[64] = {
       0xd5690000, 0x00020aff, 0x001fffff,  // v0 = vertex ID * (2M - 1)
@@ -1232,7 +1232,7 @@ TEST(VkDraw, RawVertexBufferReadsPastOneMiB) {
   static const auto program = gpu::rdna::Recompile(vs, ps, user_data, user_data);
   ASSERT_TRUE(program.ok);
   alignas(65536) static std::array<u8, 65536> target{};
-  gpu::rhi::DrawInfo draw;
+  gpu::render::DrawInfo draw;
   draw.recomp = &program;
   draw.vs_addr = reinterpret_cast<u64>(vs);
   draw.ps_addr = reinterpret_cast<u64>(ps);
@@ -1245,10 +1245,10 @@ TEST(VkDraw, RawVertexBufferReadsPastOneMiB) {
   draw.rt_w = draw.rt_h = 16;
   draw.mrt_count = draw.mrt_bound_mask = 1;
   draw.mrt_info[0] = 10u << 2;
-  gpu::rhi::BeginFrame(renderer);
+  gpu::render::BeginFrame(renderer);
   ASSERT_TRUE(gpu::vk::DrawRecomp(renderer, draw));
   const u32 slot_index = gpu::vk::g_frame.slot_idx;
-  gpu::rhi::EndFrame(renderer, draw.rt_base);
+  gpu::render::EndFrame(renderer, draw.rt_base);
   const auto& slot = gpu::vk::g_frame.slots[slot_index];
   ASSERT_EQ(vkWaitForFences(gpu::vk::g_dev.device, 1, &slot.fence,
                            VK_TRUE, UINT64_MAX), VK_SUCCESS);
@@ -1264,8 +1264,8 @@ TEST(VkDraw, RawVertexBufferReadsPastOneMiB) {
 
 TEST(VkDraw, SinglePointRendersWithAndWithoutIndices) {
   utl::initOptions();
-  auto& renderer = gpu::rhi::DefaultRenderer();
-  if (!gpu::rhi::Init(renderer))
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required";
   // A procedural point at the origin, shaded opaque red.
   const u32 vs[64] = {0x7e000280, 0x7e0202f2,
@@ -1278,7 +1278,7 @@ TEST(VkDraw, SinglePointRendersWithAndWithoutIndices) {
   alignas(65536) static std::array<std::array<u8, 65536>, 2> targets{};
   const u16 index = 0;
   for (u32 indexed = 0; indexed < 2; ++indexed) {
-    gpu::rhi::DrawInfo draw;
+    gpu::render::DrawInfo draw;
     draw.recomp = &program;
     draw.vs_addr = reinterpret_cast<u64>(vs);
     draw.ps_addr = reinterpret_cast<u64>(ps);
@@ -1290,10 +1290,10 @@ TEST(VkDraw, SinglePointRendersWithAndWithoutIndices) {
     draw.rt_w = draw.rt_h = 16;
     draw.mrt_count = draw.mrt_bound_mask = 1;
     draw.mrt_info[0] = 10u << 2;  // RGBA8_UNORM
-    gpu::rhi::BeginFrame(renderer);
+    gpu::render::BeginFrame(renderer);
     ASSERT_TRUE(gpu::vk::DrawRecomp(renderer, draw)) << "indexed=" << indexed;
     const u32 slot_index = gpu::vk::g_frame.slot_idx;
-    gpu::rhi::EndFrame(renderer, draw.rt_base);
+    gpu::render::EndFrame(renderer, draw.rt_base);
     const auto& slot = gpu::vk::g_frame.slots[slot_index];
     ASSERT_EQ(vkWaitForFences(gpu::vk::g_dev.device, 1, &slot.fence,
                              VK_TRUE, UINT64_MAX), VK_SUCCESS);
@@ -1333,12 +1333,12 @@ TEST(VkDraw, SinglePointRendersWithAndWithoutIndices) {
     regs[ud + 1] = ((draw.rt_base >> 40) & 0xff) | (56u << 20) | (3u << 30);
     regs[ud + 2] = 3 | (15u << 14);
     regs[ud + 3] = 0x90000fac;  // 2D, LINEAR, RGBA8_UNORM
-    gpu::rhi::BeginFrame(renderer);
+    gpu::render::BeginFrame(renderer);
     const u32 dispatch[] = {1, 1, 1, 1};
     gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
-    ASSERT_TRUE(gpu::rhi::FlushCsWrites(renderer));
+    ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
     const u32 compute_slot_index = gpu::vk::g_frame.slot_idx;
-    gpu::rhi::EndFrame(renderer, draw.rt_base);
+    gpu::render::EndFrame(renderer, draw.rt_base);
     const auto& compute_slot = gpu::vk::g_frame.slots[compute_slot_index];
     ASSERT_EQ(vkWaitForFences(gpu::vk::g_dev.device, 1, &compute_slot.fence,
                              VK_TRUE, UINT64_MAX), VK_SUCCESS);
@@ -1355,8 +1355,8 @@ TEST(VkDraw, SinglePointRendersWithAndWithoutIndices) {
 
 TEST(VkDraw, NarrowRenderTargetsRoundTripThroughCompute) {
   utl::initOptions();
-  auto& renderer = gpu::rhi::DefaultRenderer();
-  if (!gpu::rhi::Init(renderer))
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required";
   // A half-red point in an R8/R16 target, whose guest bytes remain zero.
   const u32 vs[64] = {0x7e000280, 0x7e0202f2,
@@ -1368,7 +1368,7 @@ TEST(VkDraw, NarrowRenderTargetsRoundTripThroughCompute) {
   ASSERT_TRUE(program.ok);
   alignas(65536) static std::array<std::array<u8, 65536>, 3> targets{};
   for (u32 format_index = 0; format_index < 3; ++format_index) {
-    gpu::rhi::DrawInfo draw;
+    gpu::render::DrawInfo draw;
     draw.recomp = &program;
     draw.vs_addr = reinterpret_cast<u64>(vs);
     draw.ps_addr = reinterpret_cast<u64>(ps);
@@ -1381,10 +1381,10 @@ TEST(VkDraw, NarrowRenderTargetsRoundTripThroughCompute) {
     draw.mrt_count = draw.mrt_bound_mask = 1;
     draw.mrt_info[0] = ((format_index ? 2u : 1u) << 2) |
                        (format_index == 2 ? 7u << 8 : 0);  // R8/R16_UNORM, R16_FLOAT
-    gpu::rhi::BeginFrame(renderer);
+    gpu::render::BeginFrame(renderer);
     ASSERT_TRUE(gpu::vk::DrawRecomp(renderer, draw)) << "format=" << format_index;
     const u32 slot_index = gpu::vk::g_frame.slot_idx;
-    gpu::rhi::EndFrame(renderer, draw.rt_base);
+    gpu::render::EndFrame(renderer, draw.rt_base);
     const auto& slot = gpu::vk::g_frame.slots[slot_index];
     ASSERT_EQ(vkWaitForFences(gpu::vk::g_dev.device, 1, &slot.fence,
                              VK_TRUE, UINT64_MAX), VK_SUCCESS);
@@ -1430,12 +1430,12 @@ TEST(VkDraw, NarrowRenderTargetsRoundTripThroughCompute) {
     regs[ud + 1] = ((draw.rt_base >> 40) & 0xff) | ((format_index == 2 ? 13u : format_index ? 7u : 1u) << 20) | (3u << 30);
     regs[ud + 2] = 3 | (15u << 14);
     regs[ud + 3] = 0x90000fac;  // 2D, LINEAR
-    gpu::rhi::BeginFrame(renderer);
+    gpu::render::BeginFrame(renderer);
     const u32 dispatch[] = {1, 1, 1, 1};
     gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
-    ASSERT_TRUE(gpu::rhi::FlushCsWrites(renderer));
+    ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
     const u32 compute_slot_index = gpu::vk::g_frame.slot_idx;
-    gpu::rhi::EndFrame(renderer, draw.rt_base);
+    gpu::render::EndFrame(renderer, draw.rt_base);
     const auto& compute_slot = gpu::vk::g_frame.slots[compute_slot_index];
     ASSERT_EQ(vkWaitForFences(gpu::vk::g_dev.device, 1, &compute_slot.fence,
                              VK_TRUE, UINT64_MAX), VK_SUCCESS);

@@ -13,7 +13,7 @@
 
 #include <vector>
 
-#include "gpu/rhi/command.h"
+#include "gpu/render/command.h"
 #include "gpu/vulkan/vk_memory.h"
 
 namespace gpu::vk {
@@ -109,11 +109,11 @@ VkDescriptorSet GetTexture(u64 base,
                            u32 depth = 1,
                            bool is_3d = false);
 bool GuestTextureUploadSupported(u32 dfmt, u32 nfmt);
-VkImageView TexViewFor(const rhi::DrawInfo::DrawTex& t);
+VkImageView TexViewFor(const render::DrawInfo::DrawTex& t);
 
 // N-sampler descriptor set (set 0) for a recomp PS. `num_bindings` is what the
 // set layout declares, which is not always what the draw resolved textures for.
-VkDescriptorSet GetMultiTexSet(const rhi::DrawInfo& d,
+VkDescriptorSet GetMultiTexSet(const render::DrawInfo& d,
                                VkDescriptorSetLayout set_layout,
                                u32 num_bindings,
                                const VkImageView* resolved_views,

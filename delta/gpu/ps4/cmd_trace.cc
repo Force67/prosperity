@@ -396,7 +396,7 @@ void TraceIndexOffsetArgs(u32 max_size,
                                      : "REJECTED (unmapped)");
 }
 
-void TraceMrtSlotZeroGap(const rhi::DrawInfo& d,
+void TraceMrtSlotZeroGap(const render::DrawInfo& d,
                          u32 target_mask,
                          u64 vs_addr,
                          u64 ps_addr) {
@@ -416,7 +416,7 @@ void TraceMrtSlotZeroGap(const rhi::DrawInfo& d,
 }
 
 void TraceNoMrtBound(const Regs& regs,
-                     const rhi::DrawInfo& d,
+                     const render::DrawInfo& d,
                      u32 target_mask,
                      u64 vs_addr,
                      u64 ps_addr) {
@@ -474,7 +474,7 @@ bool ShouldTraceTextureTracking(u32 frame, u64 ps_addr) {
   return true;
 }
 
-void TraceTextureFormat(const gcn::TImage& tex, const rhi::DrawInfo& d) {
+void TraceTextureFormat(const gcn::TImage& tex, const render::DrawInfo& d) {
   static int n = 0;
   if (!kTexfmt || n >= 24)
     return;
@@ -604,7 +604,7 @@ void TraceRawBuffer(const char* stage,
                     const gcn::VBuffer& resolved,
                     u64 bytes,
                     bool accepted,
-                    const rhi::DrawInfo& d) {
+                    const render::DrawInfo& d) {
   if (!kRawBufTrace)
     return;
   static int n = 0;
@@ -620,7 +620,7 @@ void TraceRawBuffer(const char* stage,
 }
 
 void TraceBlitDraw(const Regs& regs,
-                   const rhi::DrawInfo& d,
+                   const render::DrawInfo& d,
                    u64 vs_addr,
                    u64 ps_addr) {
   static int n = 0;
@@ -686,7 +686,7 @@ void TraceBlitDraw(const Regs& regs,
 }
 
 void TraceDrawList(const Regs& regs,
-                   const rhi::DrawInfo& d,
+                   const render::DrawInfo& d,
                    u64 vs_addr,
                    u64 ps_addr,
                    u64 fetch_addr,
@@ -712,7 +712,7 @@ void TraceDrawList(const Regs& regs,
 }
 
 void TraceColorMasks(const Regs& regs,
-                     const rhi::DrawInfo& d,
+                     const render::DrawInfo& d,
                      u64 ps_addr,
                      RecompStatus status) {
   if (!kMaskTrace)
@@ -752,7 +752,7 @@ void TraceColorMasks(const Regs& regs,
       d.depth_func);
 }
 
-void TraceSpriteDraw(const rhi::DrawInfo& d) {
+void TraceSpriteDraw(const render::DrawInfo& d) {
   static int n = 0;
   if (!kSpriteDump || !d.recomp || d.recomp->ps_texs.empty() ||
       !d.vertex_data || n >= 12)
@@ -838,7 +838,7 @@ void TraceSpriteDraw(const rhi::DrawInfo& d) {
   }
 }
 
-void TraceVertexAttrs(const rhi::DrawInfo& d) {
+void TraceVertexAttrs(const render::DrawInfo& d) {
   static int n = 0;
   if (!kVattrDump || d.num_vattrs < 2 || !d.vertex_data || d.vertex_count > 8 ||
       n >= 24)
@@ -865,7 +865,7 @@ void TraceVertexAttrs(const rhi::DrawInfo& d) {
   }
 }
 
-void TraceWorldGeometry(const Regs& regs, const rhi::DrawInfo& d) {
+void TraceWorldGeometry(const Regs& regs, const render::DrawInfo& d) {
   // Sample periodically across the WHOLE run (every 100th qualifying world
   // draw) so we can see whether the camera/view ever moves.
   static int n = 0, seen = 0;

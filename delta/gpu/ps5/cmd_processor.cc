@@ -29,8 +29,8 @@
 #include "gpu/ps5/guest_address.h"
 #include "gpu/ps5/rdna/rdna_decode.h"
 #include "gpu/ps5/reg_state.h"
-#include "gpu/rhi/command.h"
-#include "gpu/rhi/renderer.h"
+#include "gpu/render/command.h"
+#include "gpu/render/renderer.h"
 #include "gpu/gpu_perf.h"
 
 namespace {
@@ -209,7 +209,7 @@ void WriteEventLabel(u64 address,
 // LOAD_CONTEXT_REG. Without the copy the shadow reads zero, every colour draw
 // runs with no target bound and the frame is black. ctrl: SRC_SEL[30:29],
 // DST_SEL[21:20]; sel 0/3 = memory address, 2 = immediate (a fill).
-void HandleDmaData(rhi::Renderer& renderer, const u32* body, u32 count) {
+void HandleDmaData(render::Renderer& renderer, const u32* body, u32 count) {
   if (count < 6)
     return;
   const u32 control = body[0];
@@ -237,20 +237,20 @@ void HandleDmaData(rhi::Renderer& renderer, const u32* body, u32 count) {
     // dispatch arguments; dropping them makes those counts grow every frame.
     if (dst_sel == 1 && dst < 65536 && bytes <= 65536 - dst) {
       if (src_sel == 2)
-        copied = rhi::FillGds(renderer, static_cast<u32>(dst), bytes, body[1]);
+        copied = render::FillGds(renderer, static_cast<u32>(dst), bytes, body[1]);
       else if (src_is_memory && gpu::IsReadableRange(src, bytes) &&
-               rhi::FlushCsWritesRange(renderer, src, bytes, "dma"))
-        copied = rhi::WriteGds(renderer, static_cast<u32>(dst),
+               render::FlushCsWritesRange(renderer, src, bytes, "dma"))
+        copied = render::WriteGds(renderer, static_cast<u32>(dst),
                                 reinterpret_cast<const void*>(src), bytes);
       else if (src_sel == 1 && src < 65536 && bytes <= 65536 - src) {
         std::vector<u8> data(bytes);
-        copied = rhi::ReadGds(renderer, static_cast<u32>(src), data.data(), bytes) &&
-                 rhi::WriteGds(renderer, static_cast<u32>(dst), data.data(), bytes);
+        copied = render::ReadGds(renderer, static_cast<u32>(src), data.data(), bytes) &&
+                 render::WriteGds(renderer, static_cast<u32>(dst), data.data(), bytes);
       }
     } else if (src_sel == 1 && src < 65536 && bytes <= 65536 - src &&
                dst_is_memory && gpu::IsReadableRange(dst, bytes) &&
-               rhi::FlushCsWritesRange(renderer, dst, bytes, "dma")) {
-      copied = rhi::ReadGds(renderer, static_cast<u32>(src),
+               render::FlushCsWritesRange(renderer, dst, bytes, "dma")) {
+      copied = render::ReadGds(renderer, static_cast<u32>(src),
                              reinterpret_cast<void*>(dst), bytes);
     }
     TraceDmaData(control, src, dst, bytes, copied);
@@ -273,7 +273,7 @@ void HandleDmaData(rhi::Renderer& renderer, const u32* body, u32 count) {
     u32* words = reinterpret_cast<u32*>(dst);
     for (u32 k = 0; k < bytes / 4; k++)
       words[k] = fill;
-    rhi::NoteMemoryFill(renderer, dst, bytes, fill);
+    render::NoteMemoryFill(renderer, dst, bytes, fill);
   }
   TraceDmaData(control, src, dst, bytes, copied);
 }
@@ -399,7 +399,7 @@ bool WaitSatisfied(u32 op, const u32* body, u32 count) {
   if (function == 0 || !IsLabelAddress(address) ||
       !gpu::IsReadableRange(address, wide ? 8 : 4))
     return true;
-  if (!rhi::FlushCsWritesRange(rhi::DefaultRenderer(), address, wide ? 8 : 4,
+  if (!render::FlushCsWritesRange(render::DefaultRenderer(), address, wide ? 8 : 4,
                                "label"))
     return false;
   u64 value;
@@ -436,7 +436,7 @@ bool StallOnWait(u32 op, const u32* body, u32 count) {
   }
   if (now - g_queue->stall.wait_since >= std::chrono::seconds(5)) {
     BASE_LOGW("agc", "queue {} waitOnAddress {:#x} ref={:#x} remains pending",
-              rhi::g_submit_queue,
+              render::g_submit_queue,
               (unsigned long)address, (unsigned long)ref);
     g_queue->stall.wait_since = now;
   }
@@ -583,7 +583,7 @@ void HandleEventWrite(const u32* body, u32 count) {
 // IT_DISPATCH_INDIRECT: the workgroup counts live in memory rather than in the
 // packet. Our submits run synchronously, so whatever wrote them has already
 // run and the counts are readable now.
-void HandleDispatchIndirect(rhi::Renderer& renderer,
+void HandleDispatchIndirect(render::Renderer& renderer,
                             const u32* body,
                             u32 count) {
   u64 args = 0;
@@ -595,7 +595,7 @@ void HandleDispatchIndirect(rhi::Renderer& renderer,
     return;
   // An earlier compute dispatch can produce the indirect dimensions.
   // Read its completed result, not the stale guest-side staging copy.
-  if (!rhi::FlushCsWritesRange(renderer, args, 12, "indirect"))
+  if (!render::FlushCsWritesRange(renderer, args, 12, "indirect"))
     return;
   const u32* a = reinterpret_cast<const u32*>(args);
   const u32 groups[4] = {a[0], a[1], a[2], count >= 2 ? body[count - 1] : 5};
@@ -616,11 +616,11 @@ void HandleDispatchIndirect(rhi::Renderer& renderer,
 // IT_DRAW_INDIRECT / IT_DRAW_INDEX_INDIRECT: same as the direct forms with the
 // counts read from the argument buffer. Rebuilding the direct packet keeps one
 // draw path rather than a second one that would drift from it.
-void HandleDrawIndirect(rhi::Renderer& renderer,
+void HandleDrawIndirect(render::Renderer& renderer,
                         u32 op,
                         const u32* body,
                         u32 count,
-                        void (*issue)(rhi::Renderer&, u32, const u32*, u32)) {
+                        void (*issue)(render::Renderer&, u32, const u32*, u32)) {
   if (count < 1)
     return;
   const bool indexed = op == 0x25;
@@ -629,7 +629,7 @@ void HandleDrawIndirect(rhi::Renderer& renderer,
   if (!g_queue->draw_indirect_base || !IsGuestAddress(args) ||
       !gpu::IsReadableRange(args, want))
     return;
-  if (!rhi::FlushCsWritesRange(renderer, args, want, "indirect"))
+  if (!render::FlushCsWritesRange(renderer, args, want, "indirect"))
     return;
   const u32* a = reinterpret_cast<const u32*>(args);
   if (a[1] > (1u << 20))
@@ -655,7 +655,7 @@ void HandleDrawIndirect(rhi::Renderer& renderer,
   g_queue->index.num_instances = saved_instances;
 }
 
-void HandleDrawPacket(rhi::Renderer& renderer,
+void HandleDrawPacket(render::Renderer& renderer,
                       u32 op,
                       const u32* body,
                       u32 count) {
@@ -671,17 +671,17 @@ void HandleDrawPacket(rhi::Renderer& renderer,
   packet.index_max = g_queue->index.max;
   packet.num_instances = g_queue->index.num_instances;
 
-  rhi::DrawInfo d;
+  render::DrawInfo d;
   if (!BuildDrawInfo(g_queue->regs, packet, d))
     return;
   if (!g_frame_active) {
     TraceBeginFrame();
-    rhi::BeginFrame(renderer);
+    render::BeginFrame(renderer);
     g_frame_active = true;
   }
   TraceDrawSubmit(d);
   NoteDrawIssued(d);
-  rhi::Draw(renderer, d);
+  render::Draw(renderer, d);
   TraceDrawDone();
 }
 
@@ -695,7 +695,7 @@ bool IsDraw(u32 op) {
 // Walk one AGC stream, following INDIRECT_BUFFER, latching registers, decoding
 // draws and writing completion labels. `depth` guards a malformed
 // self-reference.
-u32 Walk(rhi::Renderer& renderer,
+u32 Walk(render::Renderer& renderer,
          const u32* p,
          u32 words,
          bool dump,
@@ -1030,16 +1030,16 @@ u32 Walk(rhi::Renderer& renderer,
 
 // The renderer comes up on the first submission rather than at startup: a title
 // that never submits never needs a device.
-void StartRendererOnce(rhi::Renderer& renderer) {
+void StartRendererOnce(render::Renderer& renderer) {
   if (g_renderer_started)
     return;
   g_renderer_started = true;
-  rhi::Init(renderer);
+  render::Init(renderer);
   // The descriptor replay reads SRT tables out of guest memory a previous
   // dispatch may still own, and it sits below the renderer, so it cannot ask
   // for the flush itself.
   gcn::g_flush_guest_range = [](u64 address, u64 bytes) {
-    rhi::FlushCsWritesRange(rhi::DefaultRenderer(), address, bytes, "srt");
+    render::FlushCsWritesRange(render::DefaultRenderer(), address, bytes, "srt");
   };
 }
 
@@ -1049,12 +1049,12 @@ u32 SubmitDcbRing(const void* dcb, u32 size_bytes, u32 queue) {
   if (!dcb || size_bytes < 4)
     return size_bytes / 4;
   std::lock_guard<std::mutex> lock(g_mutex);
-  rhi::Renderer& renderer = rhi::DefaultRenderer();
+  render::Renderer& renderer = render::DefaultRenderer();
   StartRendererOnce(renderer);
   const u32 words = size_bytes / 4;
   const u64 submission = ++g_total_submits;
   const bool dump = TraceSubmit(dcb, size_bytes, words, submission);
-  rhi::g_submit_queue = queue;
+  render::g_submit_queue = queue;
   g_queue = &g_ring_queues[queue];
   g_queue->stall.ring_walk = true;
   g_queue->stall.stalled = false;
@@ -1062,7 +1062,7 @@ u32 SubmitDcbRing(const void* dcb, u32 size_bytes, u32 queue) {
   g_queue->stall.ring_walk = false;
   const bool stalled = g_queue->stall.stalled;
   g_queue = &g_graphics_queue;
-  rhi::g_submit_queue = 0;
+  render::g_submit_queue = 0;
   if (!stalled) {
     TraceOpcodeCensus(dcb, words, submission);
     if (dump)
@@ -1078,8 +1078,8 @@ void SubmitDcb(const void* dcb, u32 size_bytes) {
   const u64 t_enter = NowNs();
   std::lock_guard<std::mutex> lock(g_mutex);
   const u64 t_held = NowNs();
-  rhi::g_ns_dcb_lock += t_held - t_enter;
-  rhi::Renderer& renderer = rhi::DefaultRenderer();
+  render::g_ns_dcb_lock += t_held - t_enter;
+  render::Renderer& renderer = render::DefaultRenderer();
   StartRendererOnce(renderer);
   TraceRegShadowScan();
 
@@ -1090,15 +1090,15 @@ void SubmitDcb(const void* dcb, u32 size_bytes) {
   TraceOpcodeCensus(dcb, words, submission);
   if (dump)
     TraceWalkDone();
-  rhi::g_ns_dcb += NowNs() - t_held;
-  rhi::g_dcb_n++;
+  render::g_ns_dcb += NowNs() - t_held;
+  render::g_dcb_n++;
 }
 
 void SubmitCcb(const void* ccb, u32 size_bytes) {
   if (!ccb || size_bytes < 4)
     return;
   std::lock_guard<std::mutex> lock(g_mutex);
-  Walk(rhi::DefaultRenderer(), static_cast<const u32*>(ccb), size_bytes / 4,
+  Walk(render::DefaultRenderer(), static_cast<const u32*>(ccb), size_bytes / 4,
        false, 0);
 }
 
@@ -1110,12 +1110,12 @@ void EndFrame(u64 scanout_base) {
   // it and the cache stops revalidating at all.
   rdna::NextProgramGeneration();
   gpu::NextMemoryGeneration();
-  rhi::Renderer& renderer = rhi::DefaultRenderer();
+  render::Renderer& renderer = render::DefaultRenderer();
   if (!g_frame_active || !renderer.available())
     return;
   // VideoOut specifies the registered buffer to present. A later draw can
   // target another display buffer without changing this flip request.
-  rhi::EndFrame(renderer, scanout_base);
+  render::EndFrame(renderer, scanout_base);
   g_frame_active = false;
 }
 
@@ -1132,9 +1132,9 @@ extern "C" void prosperity_agc_submit(u64 dcb_base, u32 size_bytes) {
 extern "C" void prosperity_agc_submit_tagged(u64 dcb_base,
                                              u32 size_bytes,
                                              u32 tag) {
-  gpu::rhi::g_submit_queue = tag;
+  gpu::render::g_submit_queue = tag;
   gpu::ps5::SubmitDcb(reinterpret_cast<const void*>(dcb_base), size_bytes);
-  gpu::rhi::g_submit_queue = 0;
+  gpu::render::g_submit_queue = 0;
 }
 
 // The ring form: returns how many dwords were consumed. Fewer than submitted
@@ -1149,7 +1149,7 @@ extern "C" u32 prosperity_agc_submit_ring(u64 dcb_base,
 
 // PS5 flip bridge: the shared dce/VideoOut flip path calls this when the active
 // process is PS5, so the frame the AGC submit rendered is read back and
-// presented through rhi::EndFrame (mirrors prosperity_gc_flip on the PS4 path).
+// presented through render::EndFrame (mirrors prosperity_gc_flip on the PS4 path).
 extern "C" void prosperity_agc_flip(u64 scanout_base) {
   gpu::ps5::EndFrame(scanout_base);
 }

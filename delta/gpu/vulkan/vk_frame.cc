@@ -8,7 +8,7 @@
 #include "gfx/gfx.h"
 #include "gpu/gcn/gcn_translate.h"
 #include "gpu/guest_memory.h"
-#include "gpu/rhi/renderer.h"
+#include "gpu/render/renderer.h"
 #include "gpu/vulkan/vk_backend.h"
 #include "gpu/vulkan/vk_capture.h"
 #include "gpu/vulkan/vk_compute.h"
@@ -926,7 +926,7 @@ bool SubmitFrameChunk() {
 
 }  // namespace gpu::vk
 
-namespace gpu::rhi {
+namespace gpu::render {
 using namespace gpu::vk;
 
 void BeginFrame(Renderer& renderer) {
@@ -1623,4 +1623,4 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
   }
 }
 
-}  // namespace gpu::rhi
+}  // namespace gpu::render

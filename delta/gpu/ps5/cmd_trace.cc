@@ -429,7 +429,7 @@ u64 DrawsSeen() {
   return g_draws_seen.load(std::memory_order_relaxed);
 }
 
-void NoteDrawIssued(const rhi::DrawInfo& d) {
+void NoteDrawIssued(const render::DrawInfo& d) {
   g_draws_issued.fetch_add(1, std::memory_order_relaxed);
   if (!kGpuDrawcensus)
     return;
@@ -447,7 +447,7 @@ void NoteDrawIssued(const rhi::DrawInfo& d) {
               d.depth_valid, d.prim_type, d.vertex_count);
 }
 
-void NoteDrawDropped(const rhi::DrawInfo& d,
+void NoteDrawDropped(const render::DrawInfo& d,
                      u64 vs_addr,
                      u64 ps_addr,
                      size_t shader_attrs) {
@@ -571,7 +571,7 @@ void TraceUserDataPointers(const u32* vs_user_data, const u32* ps_user_data) {
   }
 }
 
-void TraceIndexBuffer(u32 op, const rhi::DrawInfo& d, u64 index_size) {
+void TraceIndexBuffer(u32 op, const render::DrawInfo& d, u64 index_size) {
   if (!kTrace || !d.index_data)
     return;
   static int n = 0;
@@ -589,7 +589,7 @@ void TraceIndexBuffer(u32 op, const rhi::DrawInfo& d, u64 index_size) {
             d.index_count, d.index_type, idx.c_str());
 }
 
-void TraceRtProbe(const Regs& regs, const rhi::DrawInfo& d) {
+void TraceRtProbe(const Regs& regs, const render::DrawInfo& d) {
   if (!kRtProbe)
     return;
   static int n = 0;
@@ -616,7 +616,7 @@ void TraceNoRenderTarget(const Regs& regs, u32 target_mask) {
 }
 
 void TraceRenderTarget(const Regs& regs,
-                       const rhi::DrawInfo& d,
+                       const render::DrawInfo& d,
                        u64 vs_addr,
                        u64 ps_addr) {
   if (!kTrace)
@@ -765,7 +765,7 @@ void TraceRejectedTexture(u32 binding, const gcn::TImage& tex) {
               tex.tiling_idx, tex.layers, tex.mip_levels);
 }
 
-void TraceDrawTextures(const rhi::DrawInfo& d) {
+void TraceDrawTextures(const render::DrawInfo& d) {
   if (!Detail())
     return;
   for (u32 i = 0; i < d.num_texs; i++)
@@ -774,7 +774,7 @@ void TraceDrawTextures(const rhi::DrawInfo& d) {
               d.texs[i].nfmt, d.texs[i].tiling);
 }
 
-void TraceVertexDump(const rhi::DrawInfo& d,
+void TraceVertexDump(const render::DrawInfo& d,
                      const u32* vs_user_data,
                      u64 vs_addr,
                      u64 ps_addr) {
@@ -911,11 +911,11 @@ void TraceBeginFrame() {
     BASE_LOGI("agc", "DL BeginFrame...");
 }
 
-void TraceDrawSubmit(const rhi::DrawInfo& d) {
+void TraceDrawSubmit(const render::DrawInfo& d) {
   if (!Detail())
     return;
   BASE_LOGI("agc",
-            "DL draw#{} rhi::Draw num_vattrs={} rt={:#x} tmask={:#x} cc={:#x} "
+            "DL draw#{} render::Draw num_vattrs={} rt={:#x} tmask={:#x} cc={:#x} "
             "blend={} dv={} db={:#x} dt={} dw={} df={} ntex={} tex0={:#x}",
             CurrentDraw(), d.num_vattrs, d.rt_base, d.target_mask,
             d.color_control, d.blend_enable, d.depth_valid, d.depth_base,

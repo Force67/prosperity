@@ -204,19 +204,19 @@ TEST(AgcQueue, DmaDataCopiesAndClearsGdsCounters) {
 }  // namespace
 
 namespace gpu::ps5 {
-bool BuildDrawInfo(const Regs&, const DrawPacket& packet, rhi::DrawInfo& draw) {
+bool BuildDrawInfo(const Regs&, const DrawPacket& packet, render::DrawInfo& draw) {
   draw_instances.push_back(packet.num_instances);
   draw_index_types.push_back(packet.index_type);
   draw.rt_base = draw_target;
   return accept_draw;
 }
-void DispatchCompute(rhi::Renderer&, const Regs& regs, const u32* body, u32) {
+void DispatchCompute(render::Renderer&, const Regs& regs, const u32* body, u32) {
   dispatch_values.push_back(regs[mmCOMPUTE_USER_DATA_0]);
   dispatch_groups.push_back({body[0], body[1], body[2]});
 }
 }  // namespace gpu::ps5
 
-namespace gpu::rhi {
+namespace gpu::render {
 struct BackendState {};
 u64 g_ns_dcb = 0, g_ns_dcb_lock = 0;
 u32 g_submit_queue = 0;
@@ -254,7 +254,7 @@ bool FlushCsWritesRange(Renderer&, u64 base, u64 bytes, const char*) {
   return true;
 }
 void NoteMemoryFill(Renderer&, u64, u64, u32) {}
-}  // namespace gpu::rhi
+}  // namespace gpu::render
 
 extern "C" bool prosperity_ps5_is_display_buffer(u64 base) {
   return base == draw_target;

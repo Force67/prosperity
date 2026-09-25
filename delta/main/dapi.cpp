@@ -29,7 +29,7 @@
 #include "dcore.h"
 #include "cpu/cpu_backend.h"
 #include "gfx/overlay_log.h"
-#include "gpu/rhi/renderer.h"
+#include "gpu/render/renderer.h"
 #include "kern/guest_vaspace.h"
 
 static bool verifyViablity() {
@@ -153,7 +153,7 @@ EXPORT int dcoreMain(int argc, char **argv) {
   // (vk_icdGetInstanceProcAddr returns NULL) and enumeration silently falls
   // back to the llvmpipe software rasteriser, ~30 ms/frame instead of a real
   // GPU. Harmless when only llvmpipe exists (same device either way).
-  gpu::rhi::Init(gpu::rhi::DefaultRenderer());
+  gpu::render::Init(gpu::render::DefaultRenderer());
   // Claim the addresses the guest MAP_FIXEDs before anything host-side can be
   // handed them, in particular before the CPU backend reserves its JIT heap.
   krnl::reserveGuestVaSpace();

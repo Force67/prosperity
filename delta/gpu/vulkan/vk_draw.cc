@@ -7,7 +7,7 @@
 // guest vertices into pos/colour/uv and draw them with a fixed shader pair) for
 // draws that path cannot run.
 
-#include "gpu/rhi/renderer.h"
+#include "gpu/render/renderer.h"
 #include "base/arch.h"
 
 #include "gpu/vulkan/vk_debug.h"
@@ -43,7 +43,7 @@ DELTA_OPTION(bool, kNoMask, "DELTA_GPU_NOMASK", false);
 DELTA_OPTION(bool, kSwapTex, "DELTA_GPU_SWAPTEX01", false);
 }  // namespace
 
-namespace gpu::rhi {
+namespace gpu::render {
 using namespace gpu::vk;
 
 void Draw(Renderer& renderer, const DrawInfo& d_in) {
@@ -339,4 +339,4 @@ void Draw(Renderer& renderer, const DrawInfo& d_in) {
     vk::trace::RecordDraw(d, "quad", nullptr);
 }
 
-}  // namespace gpu::rhi
+}  // namespace gpu::render

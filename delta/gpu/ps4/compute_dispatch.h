@@ -21,13 +21,13 @@
 #include "base/arch.h"
 
 #include "gpu/ps4/liverpool.h"
-#include "gpu/rhi/renderer.h"
+#include "gpu/render/renderer.h"
 
 namespace gpu::ps4 {
 
 // Execute one IT_DISPATCH_DIRECT. `body` is the packet body: workgroup counts
 // in x, y, z followed by the dispatch initiator.
-void DispatchCompute(rhi::Renderer& renderer,
+void DispatchCompute(render::Renderer& renderer,
                      const Regs& regs,
                      const u32* body,
                      u32 count);

@@ -24,7 +24,7 @@
 
 #include <gfx/gfx.h>
 #include <gpu/ps4/cmd_processor.h>
-#include <gpu/rhi/renderer.h>
+#include <gpu/render/renderer.h>
 #include <gfx/gfx_audio.h>
 #include <kern/ps4/audio_sink.h>
 #include <kern/ps4/hardware_mode.h>
@@ -51,7 +51,7 @@ bool deltaCore::init() {
   // probes arm, the CS-range describer the crash dump asks for, and the audio
   // daemon's host sink. The composition root introduces them.
   gpu::ps4::SetWriteWatchCallback(&krnl::probe::startWriteWatch);
-  krnl::setCsRangeDescriber(&gpu::rhi::DescribeCsRangeCovering);
+  krnl::setCsRangeDescriber(&gpu::render::DescribeCsRangeCovering);
   krnl::ps4::setAudioSink({prosperity_audio_open, prosperity_audio_output,
                            prosperity_audio_volume, prosperity_audio_close});
   return true;

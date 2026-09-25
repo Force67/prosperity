@@ -3,7 +3,7 @@
 Turns guest GPU command streams into rendered frames.
 
 ```
-rhi/            the renderer as its callers see it (command.h, renderer.h)
+render/         the renderer as its callers see it (command.h, renderer.h)
 vulkan/         the only backend implementing it
 gcn/            shared ISA decode + the SPIR-V translator both consoles emit through
 ps4/            PM4 / Liverpool command processor + its GCN specifics
@@ -15,23 +15,23 @@ gpu_perf.h      the frame-time counters and clock every unit in the module feeds
 tests/          unit tests + the layering check
 ```
 
-Dependencies run one way: `ps4/` and `ps5/` depend on `gcn/` and `rhi/`, `vulkan/` depends
-on `rhi/` (plus the `gcn/` recompiled-program and detile types it consumes),
-and `rhi/` includes nothing in this module, though `command.h` does
+Dependencies run one way: `ps4/` and `ps5/` depend on `gcn/` and `render/`, `vulkan/` depends
+on `render/` (plus the `gcn/` recompiled-program and detile types it consumes),
+and `render/` includes nothing in this module, though `command.h` does
 forward-declare `gcn::Recompiled`/`gcn::RecompiledCs`, so the seam is
 backend-free, not recompiler-free. A command processor decodes guest packets
-into an `rhi::DrawInfo` or `rhi::ComputeInfo` and calls the entry points in
-`rhi/renderer.h`; it never names a graphics API type, and never includes
+into an `render::DrawInfo` or `render::ComputeInfo` and calls the entry points in
+`render/renderer.h`; it never names a graphics API type, and never includes
 anything from `vulkan/`.
 
-The public surface is `rhi/` plus the two `cmd_processor.h` entry headers the
+The public surface is `render/` plus the two `cmd_processor.h` entry headers the
 HLE submit paths call (`gpu/ps4/cmd_processor.h`, `gpu/ps5/cmd_processor.h`).
 Everything else is internal, so a second backend can be added without touching
 a caller. Note this is enforced by `tests/check_layering.py` at test time, not
 by the build: every module shares one include root, so an out-of-bounds
 include compiles and only `gpu_layering` rejects it.
 
-## rhi/
+## render/
 
 `command.h` is the contract: one decoded draw or dispatch, expressed in guest
 terms (addresses, GCN data/number formats, GNM blend words). It is deliberately
@@ -53,7 +53,7 @@ One unit per decision, roughly in dependency order:
 
 | unit | hides |
 |---|---|
-| `vk_backend` | the whole backend state as one value behind `rhi::BackendState` |
+| `vk_backend` | the whole backend state as one value behind `render::BackendState` |
 | `vk_device` | instance/adapter/queue selection, memory types, barriers, shader modules |
 | `vk_format` | every guest encoding -> Vulkan mapping (surface, vertex, blend, topology, readback) |
 | `vk_hash` | key mixing and the guest-memory content fingerprint |
@@ -89,8 +89,8 @@ The same one-unit-per-decision split, from the packet stream inwards:
 | `liverpool` | the Liverpool register file and the offsets worth naming |
 | `guest_address` | which addresses a packet may be believed when it points at one |
 | `cmd_processor` | the DE/CE walks, the state they latch, and the fence labels they write |
-| `draw_state` | how register state plus tracked shader resources become one `rhi::DrawInfo` |
-| `compute_dispatch` | how COMPUTE_* registers plus a CS's descriptors become one `rhi::ComputeInfo` |
+| `draw_state` | how register state plus tracked shader resources become one `render::DrawInfo` |
+| `compute_dispatch` | how COMPUTE_* registers plus a CS's descriptors become one `render::ComputeInfo` |
 | `shader_cache` | which recompiled module a given piece of guest state needs |
 | `cmd_trace` | the `DELTA_GPU_*` instrumentation of the command stream |
 
@@ -122,8 +122,8 @@ everything below it is gfx10.3 and RDNA2:
 | `guest_address` | the two address windows a packet field may be believed in |
 | `cmd_processor` | the AGC walk, the state it latches, the fence labels it writes |
 | `reg_state` | what a register write arriving through guest memory means |
-| `draw_state` | how register state plus tracked shader resources become one `rhi::DrawInfo` |
-| `compute_dispatch` | how COMPUTE_* registers plus a CS's descriptors become one `rhi::ComputeInfo` |
+| `draw_state` | how register state plus tracked shader resources become one `render::DrawInfo` |
+| `compute_dispatch` | how COMPUTE_* registers plus a CS's descriptors become one `render::ComputeInfo` |
 | `shader_cache` | which recompiled module a given piece of guest state needs |
 | `cmd_trace` | the `DELTA_AGC_*` / `DELTA_GPU_*` instrumentation of the command stream |
 | `rdna/` | the RDNA2 decoder, descriptor decode and SPIR-V translator (see `ps5/README.md`) |
@@ -172,7 +172,7 @@ enforced by the local `.clang-format` / `.clang-tidy` (naming) and by
 - Every include is spelled from the delta root (`gpu/vulkan/vk_device.h`),
   including inside the module. No extra include roots.
 - Directory dependencies are one-way and machine-checked; the module's public
-  surface is `rhi/` plus the two `cmd_processor.h` entry headers. Everything
+  surface is `render/` plus the two `cmd_processor.h` entry headers. Everything
   else is internal: nothing outside `delta/gpu` may include it.
 
 Deliberate deviations from Chromium:

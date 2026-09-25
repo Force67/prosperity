@@ -27,9 +27,9 @@
 // Spelled from the delta root, the one include convention the layering check
 // (tests/check_layering.py) accepts; all modules share that include root, so
 // internal headers are kept private by the check, not by the build.
-#include "gpu/rhi/command.h"
+#include "gpu/render/command.h"
 
-namespace gpu::rhi {
+namespace gpu::render {
 
 struct BackendState;  // owned by the backend; opaque outside it
 
@@ -119,4 +119,4 @@ bool DescribeCsRangeCovering(u64 addr, char* out, size_t out_size);
 // handle. The single point of ambient state at this seam.
 Renderer& DefaultRenderer();
 
-}  // namespace gpu::rhi
+}  // namespace gpu::render

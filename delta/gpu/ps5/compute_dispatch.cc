@@ -215,7 +215,7 @@ const u32* ResolveUniformImageTable(
 
 }  // namespace
 
-void DispatchCompute(rhi::Renderer& renderer,
+void DispatchCompute(render::Renderer& renderer,
                      const Regs& regs,
                      const u32* body,
                      u32 count) {
@@ -286,7 +286,7 @@ void DispatchCompute(rhi::Renderer& renderer,
 
   const u32* ud = regs.At(mmCOMPUTE_USER_DATA_0);
   const u32 ud_dwords = std::min(user_sgpr, 16u);
-  rhi::ComputeInfo ci;
+  render::ComputeInfo ci;
   ci.cs_addr = cs_addr;
   ci.groups[0] = groups[0];
   ci.groups[1] = groups[1];
@@ -426,11 +426,11 @@ void DispatchCompute(rhi::Renderer& renderer,
       TraceCsInvalidRange(cs_addr, r, range.base, range.guest_size);
       return;
     }
-    if (ci.num_res >= rhi::ComputeInfo::kMaxResources) {
-      TraceCsTooManyResources(cs_addr, rhi::ComputeInfo::kMaxResources);
+    if (ci.num_res >= render::ComputeInfo::kMaxResources) {
+      TraceCsTooManyResources(cs_addr, render::ComputeInfo::kMaxResources);
       return;
     }
-    rhi::ComputeInfo::Res& out = ci.res[ci.num_res++];
+    render::ComputeInfo::Res& out = ci.res[ci.num_res++];
     out.base = range.base;
     out.size = range.size;
     out.guest_size = range.guest_size;
@@ -476,7 +476,7 @@ void DispatchCompute(rhi::Renderer& renderer,
   ci.gds_binding = rc.gds_binding;
   if (!ci.num_res)
     return;
-  const bool dispatched = rhi::Dispatch(renderer, ci);
+  const bool dispatched = render::Dispatch(renderer, ci);
   if (kCsProbe && std::strstr(probe_buf, kCsProbe))
     BASE_LOGI("csprobe", "cs={:#x} dispatch {} ({} resources)", cs_addr,
               dispatched ? "executed" : "failed", ci.num_res);

@@ -54,7 +54,7 @@ class ImageMemoryPool {
   std::vector<Block> blocks_;
 };
 
-// Transitional alias into rhi::BackendState while callers are migrated to
+// Transitional alias into render::BackendState while callers are migrated to
 // receive the image pool explicitly.
 extern ImageMemoryPool& g_image_memory;
 

@@ -5,11 +5,11 @@
 #include "gpu/vulkan/vk_backend.h"
 #include "base/arch.h"
 
-#include "gpu/rhi/renderer.h"
+#include "gpu/render/renderer.h"
 
 namespace gpu::vk {
 
-rhi::BackendState g_backend;
+render::BackendState g_backend;
 
 // Transitional aliases: the one place the per-subsystem names bind to the
 // backend state. Everything is initialized within this translation unit
@@ -33,11 +33,11 @@ PFN_vkCmdEndRenderingKHR& g_cmd_end_rendering = g_backend.cmd_end_rendering;
 
 }  // namespace gpu::vk
 
-namespace gpu::rhi {
+namespace gpu::render {
 
 Renderer& DefaultRenderer() {
   static Renderer renderer;
   return renderer;
 }
 
-}  // namespace gpu::rhi
+}  // namespace gpu::render

@@ -3,8 +3,8 @@
  */
 #pragma once
 
-// The whole Vulkan backend state as one value. rhi::Renderer::state points at
-// this; rhi::BackendState is opaque to everyone outside gpu/vulkan.
+// The whole Vulkan backend state as one value. render::Renderer::state points at
+// this; render::BackendState is opaque to everyone outside gpu/vulkan.
 //
 // The backend is single-instance today: g_backend is the one BackendState, and
 // the per-subsystem names the implementation uses (g_dev, g_frame, ...) are
@@ -25,7 +25,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace gpu::rhi {
+namespace gpu::render {
 
 struct BackendState {
   vk::DeviceState device;
@@ -51,11 +51,11 @@ struct BackendState {
   vk::LatestFramePresenter presenter;
 };
 
-}  // namespace gpu::rhi
+}  // namespace gpu::render
 
 namespace gpu::vk {
 
 // The single backend instance (see the header comment).
-extern rhi::BackendState g_backend;
+extern render::BackendState g_backend;
 
 }  // namespace gpu::vk

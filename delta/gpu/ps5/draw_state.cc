@@ -204,7 +204,7 @@ ShaderBinding ResolveShaderBinding(const Regs& regs) {
 // every one of those draws with no index buffer and a vertex count taken from
 // the V#'s num_records, a shared ~210k-record ring, so they all tripped the
 // vertex-count cap and were dropped.
-void ResolveIndexBuffer(const DrawPacket& packet, rhi::DrawInfo& d) {
+void ResolveIndexBuffer(const DrawPacket& packet, render::DrawInfo& d) {
   const u64 index_size =
       packet.index_type == 1 ? 4 : packet.index_type == 2 ? 1 : 2;
   const u32* body = packet.body;
@@ -238,7 +238,7 @@ void ResolveIndexBuffer(const DrawPacket& packet, rhi::DrawInfo& d) {
 
 // Bind CB_COLORn only when its write mask and INFO format are valid: a stale
 // base remains programmed during depth-only passes.
-void ResolveRenderTargets(const Regs& regs, rhi::DrawInfo& d) {
+void ResolveRenderTargets(const Regs& regs, render::DrawInfo& d) {
   d.rt_w = FbWidth(regs);
   d.rt_h = FbHeight(regs);
   const u32 target_mask = regs[mmCB_TARGET_MASK];
@@ -300,7 +300,7 @@ void ResolveRenderTargets(const Regs& regs, rhi::DrawInfo& d) {
 }
 
 // Per-MRT blend (CB_BLENDn_CONTROL, bit 30 = enable).
-void ResolveColorState(const Regs& regs, rhi::DrawInfo& d) {
+void ResolveColorState(const Regs& regs, render::DrawInfo& d) {
   d.blend_control = regs[mmCB_BLEND0_CONTROL];
   d.blend_enable = (d.blend_control >> 30) & 1u;
   d.mrt_blend[0] = d.blend_control;
@@ -329,7 +329,7 @@ void ResolveColorState(const Regs& regs, rhi::DrawInfo& d) {
 // the PS4 path: DELTA_GPU_NODEPTH is the shared kill switch, otherwise the
 // title's own DB_Z_INFO / DB_DEPTH_CONTROL state decides. 2D titles (Isaac)
 // leave DB_Z_INFO's format field invalid, so no depth attachment binds.
-void ResolveDepthState(const Regs& regs, rhi::DrawInfo& d) {
+void ResolveDepthState(const Regs& regs, render::DrawInfo& d) {
   const u32 control = regs[mmDB_DEPTH_CONTROL];
   d.depth_control = control;
   d.render_control = regs[mmDB_RENDER_CONTROL];
@@ -381,7 +381,7 @@ void ResolveDepthState(const Regs& regs, rhi::DrawInfo& d) {
   }
 }
 
-void ResolveRasterState(const Regs& regs, rhi::DrawInfo& d) {
+void ResolveRasterState(const Regs& regs, render::DrawInfo& d) {
   const u32 mode = regs[mmPA_SU_SC_MODE_CNTL];
   d.cull_mode = mode & 0x3;
   d.front_ccw = ((mode >> 2) & 1u) == 0;
@@ -414,7 +414,7 @@ void BindVertexAttributes(const gcn::Recompiled& rc,
                           const ResolvedBuffers& resolved,
                           const u32* vs_user_data,
                           u32 vs_user_sgprs,
-                          rhi::DrawInfo& d) {
+                          render::DrawInfo& d) {
   rdna::VBuffer attr_vbs[kMaxAttrs];
   const gcn::ShaderAttr* attr_res[kMaxAttrs];
   u32 attr_n = 0;
@@ -530,7 +530,7 @@ void ResolveCbufferBindings(const std::vector<gcn::ShaderCbuf>& cbufs,
                             const ResolvedBuffers& resolved,
                             bool vertex_stage,
                             u64 stage_addr,
-                            rhi::DrawInfo& d,
+                            render::DrawInfo& d,
                             const ResolvedBuffers* gs_resolved = nullptr) {
   u32 planned = 0, replayed = 0, mapped = 0;
   for (const gcn::ShaderCbuf& cb : cbufs) {
@@ -576,11 +576,11 @@ void ResolveRawBuffers(const std::vector<gcn::ShaderBuffer>& buffers,
                        const ResolvedBuffers& resolved,
                        const u32* user_data,
                        u32 user_sgprs,
-                       rhi::DrawInfo& d,
+                       render::DrawInfo& d,
                        bool vertex_stage,
                        const ResolvedBuffers* gs_resolved = nullptr) {
   for (const gcn::ShaderBuffer& sb : buffers) {
-    if (sb.binding >= rhi::DrawInfo::kMaxBuffers)
+    if (sb.binding >= render::DrawInfo::kMaxBuffers)
       continue;
     const auto& resources = sb.from_gs && gs_resolved ? *gs_resolved : resolved;
     const auto it = resources.find(sb.use_pc);
@@ -630,7 +630,7 @@ void ResolveRawBuffers(const std::vector<gcn::ShaderBuffer>& buffers,
   }
 }
 
-void FillDrawTex(u32 slot, const gcn::TImage& s, rhi::DrawInfo& d);
+void FillDrawTex(u32 slot, const gcn::TImage& s, render::DrawInfo& d);
 
 // Resolve the live gfx10.3 T#/S# each PS sampler reads, in the recompiler's
 // set-0 binding order (rdna::TrackTextures re-derives the same plan), so
@@ -638,7 +638,7 @@ void FillDrawTex(u32 slot, const gcn::TImage& s, rhi::DrawInfo& d);
 void ResolvePsTextures(u64 ps_addr,
                        const u32* ps_user_data,
                        u32 ps_user_sgprs,
-                       rhi::DrawInfo& d) {
+                       render::DrawInfo& d) {
   const auto texs = rdna::TrackTextures(
       reinterpret_cast<const u32*>(ps_addr), ps_user_data, ps_user_sgprs);
   if (texs.empty())
@@ -673,7 +673,7 @@ void ResolvePsTextures(u64 ps_addr,
   // The renderer carries kMaxDrawTextures of them; truncating at 16 turned
   // every binding past that into a default, and a vertex stage's samplers now
   // sit after the PS's.
-  constexpr size_t kMax = rhi::DrawInfo::kMaxDrawTextures;
+  constexpr size_t kMax = render::DrawInfo::kMaxDrawTextures;
   for (size_t i = 0; i < texs.size() && i < kMax; i++)
     FillDrawTex(static_cast<u32>(i), texs[i], d);
   d.num_texs = static_cast<u32>(std::min<size_t>(texs.size(), kMax));
@@ -681,8 +681,8 @@ void ResolvePsTextures(u64 ps_addr,
 }
 
 // One resolved T# into one descriptor slot.
-void FillDrawTex(u32 slot, const gcn::TImage& s, rhi::DrawInfo& d) {
-  rhi::DrawInfo::DrawTex& dt = d.texs[slot];
+void FillDrawTex(u32 slot, const gcn::TImage& s, render::DrawInfo& d) {
+  render::DrawInfo::DrawTex& dt = d.texs[slot];
   TraceRejectedTexture(slot, s);
     dt.base = s.valid ? s.base : 0;
     dt.w = s.width;
@@ -718,12 +718,12 @@ void FillDrawTex(u32 slot, const gcn::TImage& s, rhi::DrawInfo& d) {
 // and a 2D array and a 3D image of the same shape occupy the same memory.
 void ReconcileTextureDims(const std::vector<gcn::ShaderTex>& plan,
                           u32 first_slot,
-                          rhi::DrawInfo& d) {
+                          render::DrawInfo& d) {
   for (const gcn::ShaderTex& st : plan) {
     const u32 slot = first_slot + st.binding;
     if (slot >= d.num_texs)
       continue;
-    rhi::DrawInfo::DrawTex& dt = d.texs[slot];
+    render::DrawInfo::DrawTex& dt = d.texs[slot];
     if (dt.is_3d == st.is_3d)
       continue;
     if (kDimTrace)
@@ -757,13 +757,13 @@ void AppendStageTextures(u64 code,
                          const u32* user_data,
                          u32 user_sgprs,
                          u32 ud_base,
-                         rhi::DrawInfo& d,
+                         render::DrawInfo& d,
                          u64 system_user_data_addr = 0) {
   const auto texs = rdna::TrackTextures(reinterpret_cast<const u32*>(code),
                                         user_data, user_sgprs, ud_base,
                                         system_user_data_addr);
   for (size_t i = 0;
-       i < texs.size() && d.num_texs < rhi::DrawInfo::kMaxDrawTextures; i++)
+       i < texs.size() && d.num_texs < render::DrawInfo::kMaxDrawTextures; i++)
     FillDrawTex(d.num_texs++, texs[i], d);
   TraceDrawTextures(d);
 }
@@ -774,7 +774,7 @@ void AppendStageTextures(u64 code,
 // `shader_attrs` is how many attributes the shader wanted, for that report.
 void ResolveRecompiledShaders(const Regs& regs,
                               const ShaderBinding& binding,
-                              rhi::DrawInfo& d,
+                              render::DrawInfo& d,
                               size_t& shader_attrs) {
   // An unprogrammed RSRC2 reports no user SGPRs at all, which makes every
   // cbuffer and vertex descriptor unreachable; the window picked above is the
@@ -938,7 +938,7 @@ void ResolveRecompiledShaders(const Regs& regs,
 
 bool BuildDrawInfo(const Regs& regs,
                    const DrawPacket& packet,
-                   rhi::DrawInfo& d) {
+                   render::DrawInfo& d) {
   ScopeNs _build_timer(&g_ns_build_draw);
   g_build_draw_n++;
   const ShaderBinding binding = ResolveShaderBinding(regs);

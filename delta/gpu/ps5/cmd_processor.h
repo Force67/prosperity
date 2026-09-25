@@ -15,7 +15,7 @@
  * looks like the PS4's. What differs is the gfx10.3 register file
  * (agc_regs.h), the RDNA2 shader ISA (ps5/rdna) and, above all, that AGC
  * programs most of its state out of guest memory rather than inline
- * (reg_state.h). The renderer (gpu/rhi) and the DrawInfo contract are shared
+ * (reg_state.h). The renderer (gpu/render) and the DrawInfo contract are shared
  * with the PS4 path.
  *
  * Submission is synchronous: a submit returns once the whole buffer has been

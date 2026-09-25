@@ -124,7 +124,7 @@ bool Create(Buffer& out, u64 bytes, void* host = nullptr) {
 }
 }  // namespace
 
-bool PrepareGuestMemory(std::span<const rhi::GuestMemoryRange> ranges,
+bool PrepareGuestMemory(std::span<const render::GuestMemoryRange> ranges,
                         VkDescriptorBufferInfo& table,
                         bool writes) {
   if (!g_dev.buffer_device_address || ranges.empty())
@@ -197,8 +197,8 @@ bool PrepareGuestMemory(std::span<const rhi::GuestMemoryRange> ranges,
   return true;
 }
 
-std::vector<rhi::GuestMemoryRange> FinishGuestMemoryWrites() {
-  std::vector<rhi::GuestMemoryRange> written;
+std::vector<render::GuestMemoryRange> FinishGuestMemoryWrites() {
+  std::vector<render::GuestMemoryRange> written;
   for (auto& [base, dirty] : dirty_spans) {
     auto* marks = static_cast<u32*>(dirty.mapped);
     const u32 first = marks[0], end = marks[1];

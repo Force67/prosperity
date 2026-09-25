@@ -3,7 +3,7 @@
 #include <gtest/gtest.h>
 
 #include "gpu/ps5/rdna/rdna_resource.h"
-#include "gpu/rhi/renderer.h"
+#include "gpu/render/renderer.h"
 #include "gpu/vulkan/vk_device.h"
 #include "gpu/vulkan/vk_format.h"
 #include "gpu/vulkan/vk_texture_cache.h"
@@ -34,8 +34,8 @@ TEST(Bc6Texture, ObservedHdrBackgroundDescriptorIsValid) {
 }
 
 TEST(Bc6Texture, NativeUploadsSupportSignedUnsignedTiledMipArrays) {
-  auto& renderer = gpu::rhi::DefaultRenderer();
-  if (!gpu::rhi::Init(renderer))
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required";
   VkPhysicalDeviceFeatures features{};
   vkGetPhysicalDeviceFeatures(gpu::vk::g_dev.phys, &features);

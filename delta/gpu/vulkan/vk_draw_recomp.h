@@ -7,14 +7,14 @@
 // vertex streams, constant buffers, samplers and render targets out of the draw
 // the command processor decoded.
 
-#include "gpu/rhi/command.h"
-#include "gpu/rhi/renderer.h"
+#include "gpu/render/command.h"
+#include "gpu/render/renderer.h"
 
 namespace gpu::vk {
 
 // False when the draw cannot be handled; the caller then falls back to the
 // heuristic quad path.
-bool DrawRecomp(rhi::Renderer& renderer, const rhi::DrawInfo& d);
+bool DrawRecomp(render::Renderer& renderer, const render::DrawInfo& d);
 
 // DELTA_GPU_SKIP_PS / DELTA_GPU_ONLY_PS: whether this draw is filtered out.
 // Asked before either draw path, so a shader that never recompiled is dropped

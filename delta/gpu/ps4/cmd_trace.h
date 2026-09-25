@@ -19,7 +19,7 @@
 #include "gpu/gcn/gcn_resource.h"
 #include "gpu/gcn/gcn_translate.h"
 #include "gpu/ps4/liverpool.h"
-#include "gpu/rhi/command.h"
+#include "gpu/render/command.h"
 
 namespace gpu::ps4 {
 
@@ -91,12 +91,12 @@ void TraceIndexOffsetArgs(u32 max_size,
 // DELTA_GPU_NOMRT: draws whose colour targets do not add up. A write mask
 // enabling a target the CB registers never name renders into nothing, and a gap
 // at slot 0 drops the draw downstream; both show up only as a black target.
-void TraceMrtSlotZeroGap(const rhi::DrawInfo& d,
+void TraceMrtSlotZeroGap(const render::DrawInfo& d,
                          u32 target_mask,
                          u64 vs_addr,
                          u64 ps_addr);
 void TraceNoMrtBound(const Regs& regs,
-                     const rhi::DrawInfo& d,
+                     const render::DrawInfo& d,
                      u32 target_mask,
                      u64 vs_addr,
                      u64 ps_addr);
@@ -117,7 +117,7 @@ bool ShouldTraceTextureTracking(u32 frame, u64 ps_addr);
 
 // DELTA_GPU_TEXFMT: the format/tiling of sampled textures, to pin a scrambled
 // draw to an encoding we mishandle.
-void TraceTextureFormat(const gcn::TImage& tex, const rhi::DrawInfo& d);
+void TraceTextureFormat(const gcn::TImage& tex, const render::DrawInfo& d);
 
 // DELTA_GPU_PSINCNTL: the VS parameter export each PS input slot reads.
 void TracePsInputCntl(const Regs& regs,
@@ -145,19 +145,19 @@ void TraceRawBuffer(const char* stage,
                     const gcn::VBuffer& resolved,
                     u64 bytes,
                     bool accepted,
-                    const rhi::DrawInfo& d);
+                    const render::DrawInfo& d);
 
 // DELTA_GPU_BLITDUMP: the full state of the first few draws into a
 // scanout-sized target, with the PS listing and its resolved constants.
 void TraceBlitDraw(const Regs& regs,
-                   const rhi::DrawInfo& d,
+                   const render::DrawInfo& d,
                    u64 vs_addr,
                    u64 ps_addr);
 
 // DELTA_GPU_DRAWLIST: one line per draw before any gating, so draws dropped for
 // unresolved vertex data or shaders are visible.
 void TraceDrawList(const Regs& regs,
-                   const rhi::DrawInfo& d,
+                   const render::DrawInfo& d,
                    u64 vs_addr,
                    u64 ps_addr,
                    u64 fetch_addr,
@@ -168,23 +168,23 @@ void TraceDrawList(const Regs& regs,
 // bound and never read the second, so this puts both next to CB_COLOR_CONTROL
 // and the recompiler's own export mask.
 void TraceColorMasks(const Regs& regs,
-                     const rhi::DrawInfo& d,
+                     const render::DrawInfo& d,
                      u64 ps_addr,
                      RecompStatus status);
 
 // DELTA_GPU_SPRITEDUMP: transform, vertices and textures of the first few
 // textured draws: degenerate MVP vs UV=0 vs blend.
-void TraceSpriteDraw(const rhi::DrawInfo& d);
+void TraceSpriteDraw(const render::DrawInfo& d);
 
 // DELTA_GPU_VATTRDUMP: the raw first-vertex bytes per attribute of small
 // multi-attribute draws, to separate "the colours in guest memory are zero"
 // from "the fetch path zeroes them".
-void TraceVertexAttrs(const rhi::DrawInfo& d);
+void TraceVertexAttrs(const render::DrawInfo& d);
 
 // DELTA_GPU_GEOMDUMP: high-index (world geometry) draws, with their vertices
 // projected through the resolved transform to say whether the geometry is on
 // screen at all.
-void TraceWorldGeometry(const Regs& regs, const rhi::DrawInfo& d);
+void TraceWorldGeometry(const Regs& regs, const render::DrawInfo& d);
 
 // DELTA_GPU_TRACE: the register state behind a draw, plus a one-time probe of
 // the shader binaries, their user data and the descriptor tables they point at.

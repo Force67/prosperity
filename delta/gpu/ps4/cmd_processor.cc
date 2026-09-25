@@ -29,7 +29,7 @@
 #include "gpu/ps4/guest_address.h"
 #include "gpu/ps4/liverpool.h"
 #include "gpu/ps4/pm4.h"
-#include "gpu/rhi/renderer.h"
+#include "gpu/render/renderer.h"
 
 namespace {
 DELTA_OPTION(bool, kCeOn, "DELTA_GPU_CE", true);
@@ -37,13 +37,13 @@ DELTA_OPTION(bool, kNoCopy, "DELTA_GPU_NODMACOPY", false);
 DELTA_OPTION(bool, kPrefetchShaders, "DELTA_GPU_PREFETCH_SHADERS", true);
 }  // namespace
 
-namespace gpu::rhi {
-// Declared in rhi/command.h; the frame-time overlay reports them.
+namespace gpu::render {
+// Declared in render/command.h; the frame-time overlay reports them.
 u64 g_ns_dcb = 0;
 u32 g_submit_queue = 0;
 u64 g_ns_dcb_lock = 0;
 u32 g_dcb_n = 0;
-}  // namespace gpu::rhi
+}  // namespace gpu::render
 
 namespace gpu::ps4 {
 namespace {
@@ -285,7 +285,7 @@ void HandleWaitRegMem(const u32* body, u32 count) {
 // addresses stay zero and the 3D world samples blank textures. ctrl word:
 // SRC_SEL[30:29], DST_SEL[21:20]; sel 0/3 = memory address, 2 = immediate data
 // (a fill, not a copy); only true mem->mem is copied.
-void HandleDmaData(rhi::Renderer& renderer,
+void HandleDmaData(render::Renderer& renderer,
                    const u32* body,
                    u32 count) {
   if (count < 6)
@@ -315,7 +315,7 @@ void HandleDmaData(rhi::Renderer& renderer,
       addressable(dst + bytes)) {
     // src may be CS-written; land pending writes first. Copy even if the flush
     // fails: a possibly-stale source beats silently dropping the copy.
-    rhi::FlushCsWrites(renderer);
+    render::FlushCsWrites(renderer);
     std::memcpy(reinterpret_cast<void*>(dst),
                 reinterpret_cast<const void*>(src), bytes);
     copied = true;
@@ -329,7 +329,7 @@ void HandleDmaData(rhi::Renderer& renderer,
     u32* words = reinterpret_cast<u32*>(dst);
     for (u32 k = 0; k < bytes / 4; k++)
       words[k] = fill;
-    rhi::NoteMemoryFill(renderer, dst, bytes, fill);
+    render::NoteMemoryFill(renderer, dst, bytes, fill);
     copied = true;
   }
   TraceDmaData(control, body[5] & ~0x1fffffu, src_sel, dst_sel, src, dst, bytes,
@@ -454,7 +454,7 @@ void HandleEventWriteEos(const u32* body, u32 count) {
   TraceEosLabel(address, body[3]);
 }
 
-void HandleDrawPacket(rhi::Renderer& renderer,
+void HandleDrawPacket(render::Renderer& renderer,
                       u32 op,
                       const u32* body,
                       u32 count) {
@@ -478,17 +478,17 @@ void HandleDrawPacket(rhi::Renderer& renderer,
     packet.num_instances = g_index.num_instances;
     packet.frame = frame;
 
-    rhi::DrawInfo d;
+    render::DrawInfo d;
     const bool renderable = BuildDrawInfo(renderer, g_regs, packet, d);
     // On the first draw of a frame, and for every draw the renderer sees
     // including the ones dropped below, so a frame whose draws all decline
     // still ends (and presents) like any other.
     if (!g_frame_active) {
-      rhi::BeginFrame(renderer);
+      render::BeginFrame(renderer);
       g_frame_active = true;
     }
     if (renderable)
-      rhi::Draw(renderer, d);
+      render::Draw(renderer, d);
   }
   TraceDrawRegisters(g_regs, op, body, count);
 }
@@ -527,7 +527,7 @@ bool ResolveIndirectBuffer(const u32* body,
   return true;
 }
 
-u32 WalkDcb(rhi::Renderer& renderer,
+u32 WalkDcb(render::Renderer& renderer,
                  const u32* p,
                  u32 words,
                  u32 depth,
@@ -536,7 +536,7 @@ u32 WalkDcb(rhi::Renderer& renderer,
 // Walk one CCB (CE stream), recursing into any chained indirect buffers at
 // `depth`. The CE runs ahead of the draw engine: it fills its on-chip RAM and
 // dumps it to the guest memory the DE's draws then read as constant buffers.
-void WalkCcb(rhi::Renderer& renderer,
+void WalkCcb(render::Renderer& renderer,
              const u32* p,
              u32 words,
              u32 depth) {
@@ -650,7 +650,7 @@ void WalkCcb(rhi::Renderer& renderer,
 // Walk one DCB (DE stream), issuing draws and dispatches and recursing into any
 // chained IT_INDIRECT_BUFFER at `depth`. Returns the walk position (dwords
 // consumed) so the top-level caller can report how far it got.
-u32 WalkDcb(rhi::Renderer& renderer,
+u32 WalkDcb(render::Renderer& renderer,
                  const u32* p,
                  u32 words,
                  u32 depth,
@@ -880,24 +880,24 @@ struct ScopedWalkTimer {
   std::chrono::steady_clock::time_point start =
       std::chrono::steady_clock::now();
   ~ScopedWalkTimer() {
-    rhi::g_ns_dcb += std::chrono::duration_cast<std::chrono::nanoseconds>(
+    render::g_ns_dcb += std::chrono::duration_cast<std::chrono::nanoseconds>(
                          std::chrono::steady_clock::now() - start)
                          .count();
-    rhi::g_dcb_n++;
+    render::g_dcb_n++;
   }
 };
 
 // The renderer comes up on the first submission rather than at startup: a title
 // that never submits never needs a device.
-void StartRendererOnce(rhi::Renderer& renderer) {
+void StartRendererOnce(render::Renderer& renderer) {
   if (g_renderer_started)
     return;
   g_renderer_started = true;
-  rhi::Init(renderer);
+  render::Init(renderer);
   // The resource replay reads descriptor tables out of guest memory a compute
   // dispatch may still own; it is below the renderer, so it cannot ask itself.
   gcn::g_flush_guest_range = [](u64 address, u64 bytes) {
-    rhi::FlushCsWritesRange(rhi::DefaultRenderer(), address, bytes, "desc");
+    render::FlushCsWritesRange(render::DefaultRenderer(), address, bytes, "desc");
   };
 }
 
@@ -918,10 +918,10 @@ void EndFrame(u64 scanout_base) {
   // revalidate each address once next frame instead of once per draw.
   gcn::NextProgramCacheGeneration();
   gpu::NextMemoryGeneration();
-  rhi::Renderer& renderer = rhi::DefaultRenderer();
+  render::Renderer& renderer = render::DefaultRenderer();
   if (!g_frame_active || !renderer.available())
     return;
-  rhi::EndFrame(renderer, scanout_base);
+  render::EndFrame(renderer, scanout_base);
   g_frame_active = false;
   g_presented_frames++;
 }
@@ -932,7 +932,7 @@ void SubmitCcb(const void* ccb, u32 size_bytes) {
   std::lock_guard<std::mutex> lock(g_mutex);
   const u32 words = size_bytes / 4;
   TraceCcbSubmit(size_bytes, words);
-  WalkCcb(rhi::DefaultRenderer(), static_cast<const u32*>(ccb), words, 0);
+  WalkCcb(render::DefaultRenderer(), static_cast<const u32*>(ccb), words, 0);
   TraceCcbHistogram(words);
 }
 
@@ -944,11 +944,11 @@ void SubmitDcb(const void* dcb, u32 size_bytes) {
   // one says "make the walk faster", the other "stop serialising the threads".
   const auto lock_start = std::chrono::steady_clock::now();
   std::lock_guard<std::mutex> lock(g_mutex);
-  rhi::g_ns_dcb_lock += std::chrono::duration_cast<std::chrono::nanoseconds>(
+  render::g_ns_dcb_lock += std::chrono::duration_cast<std::chrono::nanoseconds>(
                             std::chrono::steady_clock::now() - lock_start)
                             .count();
 
-  rhi::Renderer& renderer = rhi::DefaultRenderer();
+  render::Renderer& renderer = render::DefaultRenderer();
   StartRendererOnce(renderer);
 
   const auto* p = static_cast<const u32*>(dcb);

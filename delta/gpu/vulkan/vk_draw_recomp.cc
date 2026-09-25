@@ -8,7 +8,7 @@
 #include "gpu/guest_memory.h"
 #include "gpu/gcn/gcn_resource.h"
 #include "gpu/gcn/gcn_translate.h"
-#include "gpu/rhi/renderer.h"
+#include "gpu/render/renderer.h"
 #include "gpu/vulkan/vk_debug.h"
 #include "gpu/vulkan/vk_compute.h"
 #include "gpu/vulkan/vk_device.h"
@@ -73,8 +73,8 @@ DELTA_OPTION(bool, kTint, "DELTA_GPU_RTTINT", false);
 
 namespace gpu::vk {
 
-using rhi::DrawInfo;
-using rhi::FlushCsWritesRange;
+using render::DrawInfo;
+using render::FlushCsWritesRange;
 
 // The recompiled layout declares one push-constant range naming both stages
 // (see GetRecompPipe), so every push has to name both.
@@ -116,7 +116,7 @@ inline bool Decline(DeclineReason r) {
 // guest bytes already staged this frame is byte-identical on repeat, so stage
 // it once.
 // A cached copy is current iff nothing has made its guest range stale since the
-// copy: entries are stamped with rhi::CsWritebackGeneration() (compute results
+// copy: entries are stamped with render::CsWritebackGeneration() (compute results
 // landing in guest memory bump it) and refused when a GPU-dirty compute range
 // overlaps the key (dirty means a writeback is still
 // owed). The cache lives one submission (see RollFrame): CPU rewrites of the
@@ -149,9 +149,9 @@ struct StageCache {
   // work done as far as the guest can tell, so the title may legally rewrite a
   // buffer in place for its next submission within the same frame.
   void RollFrame() {
-    if (frame != g_frame.num || dcb != rhi::g_dcb_n) {
+    if (frame != g_frame.num || dcb != render::g_dcb_n) {
       frame = g_frame.num;
-      dcb = rhi::g_dcb_n;
+      dcb = render::g_dcb_n;
       map.clear();
     }
   }
@@ -166,8 +166,8 @@ struct StageCache {
     RollFrame();
     const auto it = map.find({base, salt});
     if (it == map.end() || it->second.bytes < bytes ||
-        it->second.gen != rhi::CsWritebackGeneration() ||
-        rhi::CsRangeDirtyOverlapping(base, bytes))
+        it->second.gen != render::CsWritebackGeneration() ||
+        render::CsRangeDirtyOverlapping(base, bytes))
       return VkDeviceSize(-1);
     return it->second.off;
   }
@@ -177,9 +177,9 @@ struct StageCache {
   void Insert(u64 base, u64 bytes, u32 salt, VkDeviceSize off) {
     RollFrame();
     auto& e = map[{base, salt}];
-    if (e.gen == rhi::CsWritebackGeneration() && e.bytes >= bytes)
+    if (e.gen == render::CsWritebackGeneration() && e.bytes >= bytes)
       return;
-    e = {off, bytes, rhi::CsWritebackGeneration()};
+    e = {off, bytes, render::CsWritebackGeneration()};
   }
 };
 
@@ -193,14 +193,14 @@ bool IsReadableThisFrame(u64 base, u32 size) {
 
 }  // namespace
 
-static_assert(rhi::DrawInfo::kMaxBuffers == kRawBufBindings,
+static_assert(render::DrawInfo::kMaxBuffers == kRawBufBindings,
               "the command processor and the raw-buffer ring must agree on "
               "how many set-2 bindings exist");
 
 // DELTA_GPU_WHYDROP=<ps addr>: name the early exit that swallowed a draw. A
 // draw that never reaches vkCmdDraw is invisible in every other trace, and the
 // paths that consume one all `return true`.
-static void WhyDrop(const rhi::DrawInfo& d, const char* where) {
+static void WhyDrop(const render::DrawInfo& d, const char* where) {
   if (!kWhyDrop || d.ps_addr != (u64)kWhyDrop)
     return;
   BASE_LOGI("whydrop", "ps={:#x} exit={} rt={:#x} mrt={} depth={:#x}",
@@ -265,7 +265,7 @@ bool ShaderFilterDrops(u64 ps_addr) {
   return true;
 }
 
-bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
+bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   const u64 t_draw_start = NowNs();
   // DELTA_GPU_WHYDROP=1: every draw as the renderer receives it, so a slot that
   // never reaches the seq log can be identified.

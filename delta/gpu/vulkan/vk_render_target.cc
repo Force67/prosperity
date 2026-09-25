@@ -6,7 +6,7 @@
 #include "gpu/gpu_perf.h"
 #include "base/arch.h"
 
-#include "gpu/rhi/renderer.h"
+#include "gpu/render/renderer.h"
 #include "gpu/vulkan/vk_compute.h"
 #include "gpu/vulkan/vk_debug.h"
 #include "gpu/vulkan/vk_device.h"
@@ -58,7 +58,7 @@ DELTA_OPTION(u64, kFrameClearRt, "DELTA_GPU_FRAMECLEAR", 0);
 
 namespace gpu::vk {
 
-using rhi::DrawInfo;
+using render::DrawInfo;
 
 VkImageView SampledImageView(VkImage image,
                              VkImageView identity,
@@ -1096,7 +1096,7 @@ void ResolveHtileClear(DepthTarget& dt, u64 base, float depth_clear) {
   dt.htile_clear_pending = false;
   u32 code = dt.htile_clear_code;
   if (!dt.htile_code_known) {
-    rhi::FlushCsWritesRange(rhi::DefaultRenderer(), dt.htile_base, 4, "htile");
+    render::FlushCsWritesRange(render::DefaultRenderer(), dt.htile_base, 4, "htile");
     if (!gpu::IsReadableRange(dt.htile_base, 4))
       return;
     std::memcpy(&code, reinterpret_cast<const void*>(dt.htile_base), 4);
@@ -1218,7 +1218,7 @@ void NoteCmaskBind(RTarget& rt) {
   const u64 bytes = std::max<u64>(4, (u64(rt.w) * rt.h) / 128);
   if (!gpu::IsReadableRangeCached(rt.dcc_base, bytes))
     return;
-  rhi::FlushCsWritesRange(rhi::DefaultRenderer(), rt.dcc_base, 4, "cmask");
+  render::FlushCsWritesRange(render::DefaultRenderer(), rt.dcc_base, 4, "cmask");
   auto* cmask = reinterpret_cast<u32*>(rt.dcc_base);
   if (*cmask & 0xF)
     return;
@@ -1234,7 +1234,7 @@ void ResolveDccClear(RTarget& rt, u64 base, u32 info, const u32* clear_word) {
   rt.dcc_clear_pending = false;
   u32 code = rt.dcc_clear_code;
   if (!rt.dcc_code_known) {
-    rhi::FlushCsWritesRange(rhi::DefaultRenderer(), rt.dcc_base, 4, "cmask");
+    render::FlushCsWritesRange(render::DefaultRenderer(), rt.dcc_base, 4, "cmask");
     if (!gpu::IsReadableRangeCached(rt.dcc_base, 4))
       return;
     std::memcpy(&code, reinterpret_cast<const void*>(rt.dcc_base), 4);
@@ -1338,7 +1338,7 @@ bool WriteRtToGuest(u64 base, u32 tile_mode) {
   }
   // A dispatch's pending write to these pages (the surface's clear) must land
   // first, or its later writeback covers the slice again.
-  rhi::FlushCsWritesRange(rhi::DefaultRenderer(), base, layout.size,
+  render::FlushCsWritesRange(render::DefaultRenderer(), base, layout.size,
                           "rt-write-through");
   if (!SubmitFrameChunk())
     return false;
@@ -1476,7 +1476,7 @@ bool BeginRegion(const u64* mrt_base,
       return false;
     // A dispatch wrote these pixels since the image last saw them.
     if (!CsRefreshRtFromTruth(mrt_base[i]))
-      rhi::FlushCsWritesRange(rhi::DefaultRenderer(), mrt_base[i],
+      render::FlushCsWritesRange(render::DefaultRenderer(), mrt_base[i],
                               RtByteSize(*targets[i]), "rt-bind");
     if (mrt_dcc_base && mrt_dcc_base[i]) {
       targets[i]->dcc_base = mrt_dcc_base[i];
@@ -1806,7 +1806,7 @@ bool BeginRegion(const u64* mrt_base,
 
 }  // namespace gpu::vk
 
-namespace gpu::rhi {
+namespace gpu::render {
 using namespace gpu::vk;
 
 void NoteMemoryFill(Renderer& renderer,
@@ -1855,4 +1855,4 @@ void NoteMemoryFill(Renderer& renderer,
   }
 }
 
-}  // namespace gpu::rhi
+}  // namespace gpu::render

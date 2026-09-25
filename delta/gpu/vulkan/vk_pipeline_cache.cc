@@ -128,7 +128,7 @@ bool ForceZWriteForPs(u64 ps) {
 
 namespace gpu::vk {
 
-using rhi::DrawInfo;
+using render::DrawInfo;
 
 VkStencilOp StencilOp(u32 op) {
   switch (op & 0xF) {

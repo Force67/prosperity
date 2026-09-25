@@ -21,7 +21,7 @@
 #include "gpu/gcn/gcn_translate.h"
 #include "gpu/ps5/agc_regs.h"
 #include "gpu/ps5/rdna/rdna_resource.h"
-#include "gpu/rhi/command.h"
+#include "gpu/render/command.h"
 
 namespace gpu::ps5 {
 
@@ -100,8 +100,8 @@ void TraceShaderBind(u64 address, u32 gs_pgm_lo, u32 ps_pgm_lo);
 // renderer is indistinguishable from one the title never issued, so both ends
 // are counted; `DrawsSeen` is also what the draw-indexed trace gates read.
 void NoteDrawSeen();
-void NoteDrawIssued(const rhi::DrawInfo& d);
-void NoteDrawDropped(const rhi::DrawInfo& d,
+void NoteDrawIssued(const render::DrawInfo& d);
+void NoteDrawDropped(const render::DrawInfo& d,
                      u64 vs_addr,
                      u64 ps_addr,
                      size_t shader_attrs);
@@ -128,18 +128,18 @@ void TraceShaderScan(const u32* found_reg, const u64* found, u32 count);
 void TraceUserDataPointers(const u32* vs_user_data, const u32* ps_user_data);
 
 // The index buffer a draw packet resolved to, and its first few indices.
-void TraceIndexBuffer(u32 op, const rhi::DrawInfo& d, u64 index_size);
+void TraceIndexBuffer(u32 op, const render::DrawInfo& d, u64 index_size);
 
 // DELTA_AGC_RTPROBE: one line per draw naming the colour state it ran with. A
 // draw with no target and a stale last write points at a bind we never
 // executed; one whose last write zeroed the base points at a packet we execute
 // and should not.
-void TraceRtProbe(const Regs& regs, const rhi::DrawInfo& d);
+void TraceRtProbe(const Regs& regs, const render::DrawInfo& d);
 // Why a colour draw ended up with no target: the state that rejected CB_COLOR0.
 void TraceNoRenderTarget(const Regs& regs, u32 target_mask);
 // The resolved target of a draw, next to the registers it came from.
 void TraceRenderTarget(const Regs& regs,
-                       const rhi::DrawInfo& d,
+                       const render::DrawInfo& d,
                        u64 vs_addr,
                        u64 ps_addr);
 
@@ -179,7 +179,7 @@ void TraceCbufBinding(bool vertex_stage,
 // indistinguishable from a descriptor that was never written. Report the two
 // apart before that happens.
 void TraceRejectedTexture(u32 binding, const gcn::TImage& tex);
-void TraceDrawTextures(const rhi::DrawInfo& d);
+void TraceDrawTextures(const render::DrawInfo& d);
 
 // DELTA_AGC_VDUMP*: the raw vertex bytes of a resolved draw as float32 and
 // uint32, its transform and constant buffers, and optionally the decoded
@@ -188,7 +188,7 @@ void TraceDrawTextures(const rhi::DrawInfo& d);
 // format), screen-space (missing projection) or clip-space (a later problem).
 // VDUMPFROM/VDUMPRT/VDUMPIC pick the draw: indices shift between runs, a target
 // address and an index count do not.
-void TraceVertexDump(const rhi::DrawInfo& d,
+void TraceVertexDump(const render::DrawInfo& d,
                      const u32* vs_user_data,
                      u64 vs_addr,
                      u64 ps_addr);
@@ -196,7 +196,7 @@ void TraceVertexDump(const rhi::DrawInfo& d,
 // The state a draw is handed to the renderer with, and the frame boundary it
 // opened.
 void TraceBeginFrame();
-void TraceDrawSubmit(const rhi::DrawInfo& d);
+void TraceDrawSubmit(const render::DrawInfo& d);
 void TraceDrawDone();
 
 // DELTA_AGC_DUMPSH=<hexaddr>: decode and print one shader by address, once.

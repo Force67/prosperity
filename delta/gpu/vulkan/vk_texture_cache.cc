@@ -9,7 +9,7 @@
 #include "gpu/guest_memory.h"
 #include "gpu/gcn/gcn_detile.h"
 #include "gpu/gcn/gcn_translate.h"
-#include "gpu/rhi/renderer.h"
+#include "gpu/render/renderer.h"
 #include "gpu/vulkan/vk_capture.h"
 #include "gpu/vulkan/vk_compute.h"
 #include "gpu/vulkan/vk_debug.h"
@@ -65,7 +65,7 @@ DELTA_OPTION(u32, kMaxCheckInterval, "DELTA_GPU_TEXRECHECK", 32);
 
 namespace gpu::vk {
 
-using rhi::DrawInfo;
+using render::DrawInfo;
 
 struct TexImageKey {
   u64 base = 0;
@@ -1433,7 +1433,7 @@ VkDescriptorSet GetTexture(u64 base,
     image_it->second.hash_valid = false;
   }
   if (!cs_supplies &&
-      !rhi::FlushCsWritesRange(rhi::DefaultRenderer(), base, footprint, "tex"))
+      !render::FlushCsWritesRange(render::DefaultRenderer(), base, footprint, "tex"))
     return VK_NULL_HANDLE;
   if (image_it == g_tex_images.end() ||
       image_it->second.last_checked_frame != g_frame.num) {

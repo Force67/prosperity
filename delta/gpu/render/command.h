@@ -19,7 +19,7 @@ struct Recompiled;
 struct RecompiledCs;
 }  // namespace gpu::gcn
 
-namespace gpu::rhi {
+namespace gpu::render {
 
 // One vertex attribute for the recompiled-shader path: where the recompiled VS reads
 // input `location` from within a vertex buffer binding (binding indexes
@@ -354,4 +354,4 @@ extern u64 g_ns_dcb, g_ns_dcb_lock;
 extern u32 g_submit_queue;
 extern u32 g_dcb_n;
 
-}  // namespace gpu::rhi
+}  // namespace gpu::render

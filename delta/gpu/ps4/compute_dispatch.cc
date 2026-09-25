@@ -196,7 +196,7 @@ void PrefetchComputeDispatch(const Regs& regs) {
     PrefetchComputeShader(state);
 }
 
-void DispatchCompute(rhi::Renderer& renderer,
+void DispatchCompute(render::Renderer& renderer,
                      const Regs& regs,
                      const u32* body,
                      u32 count) {
@@ -243,7 +243,7 @@ void DispatchCompute(rhi::Renderer& renderer,
   }
 
   const u32* user_data = regs.At(mmCOMPUTE_USER_DATA_0);
-  rhi::ComputeInfo ci;
+  render::ComputeInfo ci;
   ci.cs_addr = cs_addr;
   ci.groups[0] = groups[0];
   ci.groups[1] = groups[1];
@@ -266,7 +266,7 @@ void DispatchCompute(rhi::Renderer& renderer,
     any_unresolved |=
         r.binding >= resolved.size() || !resolved[r.binding].valid;
   if (any_unresolved) {
-    if (!rhi::FlushCsWrites(renderer) && !renderer.available())
+    if (!render::FlushCsWrites(renderer) && !renderer.available())
       return;
     resolved = gcn::ResolveCsResources(*cs_program, rc, user_data);
   }
@@ -306,7 +306,7 @@ void DispatchCompute(rhi::Renderer& renderer,
       return;
     }
 
-    rhi::ComputeInfo::Res& out = ci.res[ci.num_res++];
+    render::ComputeInfo::Res& out = ci.res[ci.num_res++];
     out.base = range.base;
     out.size = range.size;
     out.guest_size = range.guest_size;
@@ -338,7 +338,7 @@ void DispatchCompute(rhi::Renderer& renderer,
   if (!ci.num_res)
     return;
 
-  const bool executed = rhi::Dispatch(renderer, ci);
+  const bool executed = render::Dispatch(renderer, ci);
   if (trace)
     TraceCsDispatch(cs_addr, executed, ci.num_res);
 }

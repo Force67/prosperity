@@ -2,7 +2,7 @@
  * PS4Delta : PS4/PS5 emulation and research project
  */
 
-#include "gpu/rhi/command.h"
+#include "gpu/render/command.h"
 #include "base/arch.h"
 #include "gpu/gpu_perf.h"
 #include "gpu/vulkan/vk_perf.h"
@@ -222,7 +222,7 @@ void DrawResourcePanel(u8* bgra,
 
 // Stacked per-stage frame-time columns drawn over the presented image (default
 // on; DELTA_GPU_OVERLAY=0 disables). One column per frame, 2 px per ms:
-//   green  REC  command recording + per-draw analysis (rhi::Draw)
+//   green  REC  command recording + per-draw analysis (render::Draw)
 //   yellow SUB  command-buffer end + queue submit
 //   red    GPU  fence wait (the rasterizer)
 //   blue   PRS  window present (SDL blit)
@@ -373,8 +373,8 @@ void ReportFps() {
               g_ns_cs_gpu / f / 1e6, g_ns_cs_out / f / 1e6, g_cs_stage_n / f,
               g_cs_stage_bytes / f / 1e6, g_cs_flush_n / f,
               gcn::g_ns_recomp / f / 1e6, gcn::g_recomp_n / f,
-              rhi::g_ns_dcb / f / 1e6, rhi::g_dcb_n / f,
-              rhi::g_ns_dcb_lock / f / 1e6,
+              render::g_ns_dcb / f / 1e6, render::g_dcb_n / f,
+              render::g_ns_dcb_lock / f / 1e6,
               g_cs_wb_bytes_total ? 100.0 * double(g_cs_wb_bytes_written) /
                                         double(g_cs_wb_bytes_total)
                                   : 0.0,
@@ -445,9 +445,9 @@ void ReportFps() {
     gcn::g_recomp_n = 0;
     gcn::g_ns_spv_val = gcn::g_ns_spv_opt = 0;
     gcn::g_spv_hit_n = gcn::g_spv_miss_n = 0;
-    rhi::g_ns_dcb = 0;
-    rhi::g_ns_dcb_lock = 0;
-    rhi::g_dcb_n = 0;
+    render::g_ns_dcb = 0;
+    render::g_ns_dcb_lock = 0;
+    render::g_dcb_n = 0;
   }
 }
 

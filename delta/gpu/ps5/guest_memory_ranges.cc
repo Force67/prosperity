@@ -5,9 +5,9 @@
 #include "utl/mem.h"
 
 namespace gpu::ps5 {
-std::vector<rhi::GuestMemoryRange> GuestMemoryRanges(
+std::vector<render::GuestMemoryRange> GuestMemoryRanges(
     const std::vector<u64>& addresses) {
-  std::vector<rhi::GuestMemoryRange> result;
+  std::vector<render::GuestMemoryRange> result;
 #ifdef OS_LINUX
   FILE* maps = std::fopen("/proc/self/maps", "r");
   if (!maps)
@@ -61,7 +61,7 @@ std::vector<rhi::GuestMemoryRange> GuestMemoryRanges(
   std::fclose(maps);
   std::sort(result.begin(), result.end(),
             [](auto& a, auto& b) { return a.base < b.base; });
-  std::vector<rhi::GuestMemoryRange> unique;
+  std::vector<render::GuestMemoryRange> unique;
   for (auto range : result) {
     if (!unique.empty()) {
       const u64 prior_end = unique.back().base + unique.back().size;

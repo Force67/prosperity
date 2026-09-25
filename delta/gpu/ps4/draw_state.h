@@ -15,8 +15,8 @@
 #include "base/arch.h"
 
 #include "gpu/ps4/liverpool.h"
-#include "gpu/rhi/command.h"
-#include "gpu/rhi/renderer.h"
+#include "gpu/render/command.h"
+#include "gpu/render/renderer.h"
 
 namespace gpu::ps4 {
 
@@ -36,10 +36,10 @@ struct DrawPacket {
 // Fill `d` from the packet and the live registers. False when nothing resolved
 // a vertex source: a draw whose shaders or descriptors we could not follow is
 // dropped rather than rendered from garbage.
-bool BuildDrawInfo(rhi::Renderer& renderer,
+bool BuildDrawInfo(render::Renderer& renderer,
                    const Regs& regs,
                    const DrawPacket& packet,
-                   rhi::DrawInfo& d);
+                   render::DrawInfo& d);
 
 // Start compiling, on worker threads, the shaders a draw with these registers
 // would need. For a look ahead through a command buffer before it runs.

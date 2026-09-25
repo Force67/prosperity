@@ -8,7 +8,7 @@
 // memory lazily, only when something needs guest memory to be current.
 
 #include "gpu/vulkan/vk_guest_memory.h"
-#include "gpu/rhi/renderer.h"
+#include "gpu/render/renderer.h"
 #include "base/arch.h"
 
 #include "gpu/gpu_check.h"
@@ -199,7 +199,7 @@ struct StageStat {
 };
 std::unordered_map<u64, StageStat> g_stage_stats;
 
-using rhi::ComputeInfo;
+using render::ComputeInfo;
 
 static_assert(ComputeInfo::kMaxResources == gcn::kMaxCsResources);
 
@@ -351,7 +351,7 @@ VkPipeline CreateCsPipeline(VkPipelineLayout layout,
   return pipe;
 }
 
-// Pipelines compiled ahead of their first dispatch (rhi::PrebuildComputePipeline),
+// Pipelines compiled ahead of their first dispatch (render::PrebuildComputePipeline),
 // by module content and layout shape.
 struct PrebuiltCs {
   VkDescriptorSetLayout set_layout = VK_NULL_HANDLE;
@@ -4351,8 +4351,8 @@ namespace gpu::vk {
 extern u64 g_tex_image_bytes;
 }
 
-namespace gpu::rhi {
-// Declared in rhi/renderer.h for the kernel's crash handler.
+namespace gpu::render {
+// Declared in render/renderer.h for the kernel's crash handler.
 bool DescribeCsRangeCovering(u64 addr, char* out, size_t out_size) {
   using namespace gpu::vk;
   for (const auto& kv : g_cs_ranges) {
@@ -4374,9 +4374,9 @@ bool DescribeCsRangeCovering(u64 addr, char* out, size_t out_size) {
   }
   return false;
 }
-}  // namespace gpu::rhi
+}  // namespace gpu::render
 
-namespace gpu::rhi {
+namespace gpu::render {
 using namespace gpu::vk;
 
 static bool PrepareGdsTransfer(Renderer& renderer, u32 offset, u32 bytes,
@@ -5791,4 +5791,4 @@ bool CsRangeDirtyOverlapping(u64 base, u64 bytes) {
   return false;
 }
 
-}  // namespace gpu::rhi
+}  // namespace gpu::render

@@ -18,7 +18,7 @@ namespace {
 class RdnaGlobal : public testing::Test {
  protected:
   void SetUp() override {
-    if (!gpu::rhi::Init(gpu::rhi::DefaultRenderer()))
+    if (!gpu::render::Init(gpu::render::DefaultRenderer()))
       GTEST_SKIP() << "Vulkan is required";
   }
   using Page = std::array<u32, 16384>;
@@ -68,8 +68,8 @@ class RdnaGlobal : public testing::Test {
     regs[ud + 2] = dst;
     regs[ud + 3] = dst >> 32;
     const u32 launch[] = {group_end[0], group_end[1], group_end[2], initiator};
-    gpu::ps5::DispatchCompute(gpu::rhi::DefaultRenderer(), regs, launch, 4);
-    ASSERT_TRUE(gpu::rhi::FlushCsWrites(gpu::rhi::DefaultRenderer()));
+    gpu::ps5::DispatchCompute(gpu::render::DefaultRenderer(), regs, launch, 4);
+    ASSERT_TRUE(gpu::render::FlushCsWrites(gpu::render::DefaultRenderer()));
   }
 };
 
@@ -135,11 +135,11 @@ TEST_F(RdnaGlobal, TypedComputeLoadDecodesRdnaFormat) {
 }
 
 TEST_F(RdnaGlobal, GdsCounterUsesM0BaseAndReturnsPreOperationValue) {
-  auto& renderer = gpu::rhi::DefaultRenderer();
+  auto& renderer = gpu::render::DefaultRenderer();
   auto& dest = PageForDispatch();
   const u32 initial = 17;
-  ASSERT_TRUE(gpu::rhi::WriteGds(renderer, 0xc70, &initial, 4));
-  ASSERT_TRUE(gpu::rhi::FillGds(renderer, 0x10, 4, 99));
+  ASSERT_TRUE(gpu::render::WriteGds(renderer, 0xc70, &initial, 4));
+  ASSERT_TRUE(gpu::render::FillGds(renderer, 0x10, 4, 99));
   // M0={base=0xc60,size=32}; append and consume the counter at +0x10.
   program = {0xbefc03ff, 0x0c600020, 0xd8fa0010, 0x02000000,
                0xd8f60010, 0x03000000};
@@ -150,11 +150,11 @@ TEST_F(RdnaGlobal, GdsCounterUsesM0BaseAndReturnsPreOperationValue) {
   EXPECT_EQ(dest[0], 17u);
   EXPECT_EQ(dest[1], 18u);
   u32 value = 0;
-  ASSERT_TRUE(gpu::rhi::ReadGds(renderer, 0xc70, &value, 4));
+  ASSERT_TRUE(gpu::render::ReadGds(renderer, 0xc70, &value, 4));
   EXPECT_EQ(value, initial);
-  ASSERT_TRUE(gpu::rhi::ReadGds(renderer, 0x10, &value, 4));
+  ASSERT_TRUE(gpu::render::ReadGds(renderer, 0x10, &value, 4));
   EXPECT_EQ(value, 99u);
-  EXPECT_FALSE(gpu::rhi::FillGds(renderer, 65535, 4, 0));
+  EXPECT_FALSE(gpu::render::FillGds(renderer, 65535, 4, 0));
 }
 
 TEST_F(RdnaGlobal, MaskBitCountsUseGuestWaveLaneAcrossHostSubgroups) {
@@ -174,7 +174,7 @@ TEST_F(RdnaGlobal, MaskBitCountsUseGuestWaveLaneAcrossHostSubgroups) {
 }
 
 TEST_F(RdnaGlobal, GdsCountersBroadcastAcrossBothHalvesOfEachWave) {
-  auto& renderer = gpu::rhi::DefaultRenderer();
+  auto& renderer = gpu::render::DefaultRenderer();
   auto& dest = PageForDispatch();
   const u64 mask = (8ull << 32) | 5u;  // Three active lanes per guest wave.
   program = {0xbefc03ff, 0x0c600020, 0x34000082};
@@ -190,7 +190,7 @@ TEST_F(RdnaGlobal, GdsCountersBroadcastAcrossBothHalvesOfEachWave) {
   for (const auto [width, threads] :
        {std::pair{64u, 128u}, std::pair{64u, 70u}, std::pair{32u, 80u}}) {
     SCOPED_TRACE(testing::Message() << "width=" << width << " threads=" << threads);
-    ASSERT_TRUE(gpu::rhi::FillGds(renderer, 0xc70, 4, 17));
+    ASSERT_TRUE(gpu::render::FillGds(renderer, 0xc70, 4, 17));
     initiator = 1 | (width == 32 ? 1u << 15 : 0);
     Run(mask, reinterpret_cast<u64>(dest.data()), threads);
     std::vector<std::pair<u32, u32>> allocations, consumptions;
@@ -222,7 +222,7 @@ TEST_F(RdnaGlobal, GdsCountersBroadcastAcrossBothHalvesOfEachWave) {
       next -= count;
     }
     u32 value = 0;
-    ASSERT_TRUE(gpu::rhi::ReadGds(renderer, 0xc70, &value, 4));
+    ASSERT_TRUE(gpu::render::ReadGds(renderer, 0xc70, &value, 4));
     EXPECT_EQ(value, 17u);
   }
 }
@@ -524,10 +524,10 @@ TEST_F(RdnaGlobal, DecoderCodeAndHashExtendBeyondSixteenKiB) {
 }
 }  // namespace
 
-namespace gpu::rhi {
+namespace gpu::render {
 u64 g_ns_dcb = 0, g_ns_dcb_lock = 0;
 u32 g_submit_queue = 0, g_dcb_n = 0;
-}  // namespace gpu::rhi
+}  // namespace gpu::render
 extern "C" bool prosperity_ps5_is_display_buffer(u64) {
   return false;
 }

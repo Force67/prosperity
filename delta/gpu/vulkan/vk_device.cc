@@ -16,7 +16,7 @@
 #include <unistd.h>
 
 #include "gpu/gcn/gcn_translate.h"
-#include "gpu/rhi/renderer.h"
+#include "gpu/render/renderer.h"
 #include "gpu/vulkan/vk_backend.h"
 #include "gpu/vulkan/vk_debug.h"
 #include "gpu/gpu_perf.h"
@@ -741,7 +741,7 @@ VkShaderModule MakeModuleVec(const std::vector<u32>& spv) {
 
 }  // namespace gpu::vk
 
-namespace gpu::rhi {
+namespace gpu::render {
 using namespace gpu::vk;
 
 bool Init(Renderer& renderer) {
@@ -772,4 +772,4 @@ bool Init(Renderer& renderer) {
   return true;
 }
 
-}  // namespace gpu::rhi
+}  // namespace gpu::render

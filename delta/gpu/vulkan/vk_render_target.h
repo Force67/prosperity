@@ -14,7 +14,7 @@
 #include <unordered_map>
 #include <vector>
 
-#include "gpu/rhi/command.h"
+#include "gpu/render/command.h"
 #include "gpu/vulkan/vk_memory.h"
 
 namespace gpu::vk {
@@ -304,14 +304,14 @@ u32 RtSurfaceExtent(u32 surface, u32 drawn, u32 tile);
 // The Z surface's own geometry when DB_DEPTH_SIZE gave one, else the colour
 // target's. Sizing a depth image from the colour pass is wrong whenever the
 // two differ, and the error shows up as a footprint that swallows neighbours.
-inline u32 DepthW(const rhi::DrawInfo& d) {
+inline u32 DepthW(const render::DrawInfo& d) {
   return d.depth_w ? d.depth_w : d.rt_w;
 }
-inline u32 DepthH(const rhi::DrawInfo& d) {
+inline u32 DepthH(const render::DrawInfo& d) {
   return d.depth_h ? d.depth_h : d.rt_h;
 }
 void EndRegion();
-void SetGuestViewport(const rhi::DrawInfo& d);
+void SetGuestViewport(const render::DrawInfo& d);
 
 // Copy the target at `base` into guest memory, retiled with `tile_mode`. Draws
 // only ever render into the VkImage, but a slice of an array or cube surface

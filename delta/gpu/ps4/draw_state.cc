@@ -49,7 +49,7 @@ namespace {
 // per dropped entry, so a shader with 17+ samplers had a volume view land on a
 // binding its module had declared 2D, and its last bindings written by nothing
 // at all (VUID-vkCmdDrawIndexed-viewType-07752 / -None-08114).
-constexpr u32 kMaxTrackedTextures = rhi::DrawInfo::kMaxDrawTextures;
+constexpr u32 kMaxTrackedTextures = render::DrawInfo::kMaxDrawTextures;
 // An index or vertex count beyond this is a decode error, not a draw.
 constexpr u32 kMaxElementCount = 0x100000;
 
@@ -95,7 +95,7 @@ u64 UserDataPointer(const u32* user_data, u32 index) {
          user_data[index];
 }
 
-void FillDrawTex(rhi::DrawInfo::DrawTex& dt, const gcn::TImage& t) {
+void FillDrawTex(render::DrawInfo::DrawTex& dt, const gcn::TImage& t) {
   dt.base = t.valid ? t.base : 0;
   dt.w = t.width;
   dt.h = t.height;
@@ -127,7 +127,7 @@ void FillDrawTex(rhi::DrawInfo::DrawTex& dt, const gcn::TImage& t) {
 
 // Bind one tracked image, recording what its descriptor forces the module to
 // be built with.
-void BindTexture(rhi::DrawInfo& d,
+void BindTexture(render::DrawInfo& d,
                  const gcn::TImage& t,
                  u32 slot,
                  TextureMasks& masks) {
@@ -149,9 +149,9 @@ void BindTexture(rhi::DrawInfo& d,
 // The draws are indexed triangle lists; without the index buffer (drawing raw
 // vertices as a strip) batched sprites smear into long diagonal triangles.
 // DRAW_INDEX_AUTO has no index buffer (sequential verts).
-void ResolveIndexBuffer(rhi::Renderer& renderer,
+void ResolveIndexBuffer(render::Renderer& renderer,
                         const DrawPacket& packet,
-                        rhi::DrawInfo& d) {
+                        render::DrawInfo& d) {
   const u32 op = packet.op, count = packet.count;
   const u32* body = packet.body;
 
@@ -182,7 +182,7 @@ void ResolveIndexBuffer(rhi::Renderer& renderer,
     // counts a later draw consumes). Compute results stay GPU-resident and are
     // written back lazily, so reading guest memory without flushing that range
     // first yields the stale zeros the buffer was allocated with.
-    rhi::FlushCsWritesRange(renderer, args, need, "indirect");
+    render::FlushCsWritesRange(renderer, args, need, "indirect");
     const bool mapped =
         utl::isMemoryRangeMapped(reinterpret_cast<const void*>(args), need);
     u32 a[5] = {};
@@ -244,7 +244,7 @@ void ResolveIndexBuffer(rhi::Renderer& renderer,
 // identity. Kept as raw register bits rather than a VkFormat: this layer must
 // not depend on the backend.
 u32 ResolveRenderTargets(const Regs& regs,
-                              rhi::DrawInfo& d,
+                              render::DrawInfo& d,
                               u64 vs_addr,
                               u64 ps_addr) {
   d.rt_w = FbWidth(regs);
@@ -323,7 +323,7 @@ u32 ResolveRenderTargets(const Regs& regs,
 // per-target blend enable; when clear the draw writes opaquely. Isaac's room
 // vignette and its additive overlays rely on that: rendered with a single
 // hardcoded blend they came out opaque and blacked out the scene.
-void ResolveColorState(const Regs& regs, u64 ps_addr, rhi::DrawInfo& d) {
+void ResolveColorState(const Regs& regs, u64 ps_addr, render::DrawInfo& d) {
   d.blend_control = regs[mmCB_BLEND0_CONTROL];
   d.blend_enable = (d.blend_control >> 30) & 1u;
   // Target 0 mirrors blend_control/blend_enable, so the single-RT path is
@@ -366,7 +366,7 @@ void ResolveColorState(const Regs& regs, u64 ps_addr, rhi::DrawInfo& d) {
 // invalid so no depth attachment is bound. Z and stencil render into one Vulkan
 // depth/stencil image; compute bridges expose their separate guest bases when
 // later shaders consume either plane.
-void ResolveDepthState(const Regs& regs, rhi::DrawInfo& d) {
+void ResolveDepthState(const Regs& regs, render::DrawInfo& d) {
   const u32 depth_control = regs[mmDB_DEPTH_CONTROL];
   d.depth_control = depth_control;
   const u32 z_info = kNoDepth ? 0 : regs[mmDB_Z_INFO];
@@ -428,7 +428,7 @@ void ResolveDepthState(const Regs& regs, rhi::DrawInfo& d) {
   }
 }
 
-void ResolveRasterState(const Regs& regs, rhi::DrawInfo& d) {
+void ResolveRasterState(const Regs& regs, render::DrawInfo& d) {
   const u32 mode = regs[mmPA_SU_SC_MODE_CNTL];
   d.cull_mode = mode & 0x3;  // CULL_FRONT[0] | CULL_BACK[1]
   d.front_ccw = ((mode >> 2) & 1u) == 0;
@@ -460,7 +460,7 @@ u64 FetchShaderAddress(const u32* vud, u64 vs_addr) {
 // recompiled path below declines the draw.
 void ResolveHeuristicSources(const u32* vud,
                              u64 fetch_addr,
-                             rhi::DrawInfo& d) {
+                             render::DrawInfo& d) {
   // Default to the sgpr[4..7] V# (the common VS cbuffer slot); the recompiled
   // path re-resolves it from the SGPR the VS actually reads.
   const u64 cbuf = UserDataPointer(vud, 4);
@@ -500,16 +500,16 @@ void ResolveHeuristicSources(const u32* vud,
 
 // The images the pixel shader samples, in its set-0 binding order. Returns the
 // decoded program, which the recompiled path reuses.
-std::shared_ptr<const gcn::Program> ResolvePsTextures(rhi::Renderer& renderer,
+std::shared_ptr<const gcn::Program> ResolvePsTextures(render::Renderer& renderer,
                                                       const Regs& regs,
                                                       u64 ps_addr,
                                                       u32 frame,
-                                                      rhi::DrawInfo& d,
+                                                      render::DrawInfo& d,
                                                       TextureMasks& masks) {
   if (!IsGuestAddress(ps_addr))
     return nullptr;
   if (kPreflushResources)
-    rhi::FlushCsWrites(renderer);
+    render::FlushCsWrites(renderer);
   auto ps_prog = gcn::CachedProgram(ps_addr, 4096);
   const bool trace = ShouldTraceTextureTracking(frame, ps_addr);
   auto texs = gcn::TrackTextures(ps_prog, regs.At(mmSPI_SHADER_USER_DATA_PS_0),
@@ -565,7 +565,7 @@ std::shared_ptr<const gcn::Program> ResolvePsTextures(rhi::Renderer& renderer,
 // quad renderer, which paints the atlas as a staircase.
 void ResolveVsTextures(const u32* vud,
                        u64 vs_addr,
-                       rhi::DrawInfo& d,
+                       render::DrawInfo& d,
                        TextureMasks& masks) {
   if (!IsGuestAddress(vs_addr))
     return;
@@ -610,8 +610,8 @@ bool ShaderSkipped(u64 vs_addr, u64 ps_addr) {
 RecompStatus BindVertexAttributes(const gcn::Recompiled& rc,
                                   const gcn::VBuffer* attr_vbs,
                                   u32 attr_count,
-                                  rhi::DrawInfo& d) {
-  u32 attr_binding[rhi::DrawInfo::kMaxVertexAttrs] = {};
+                                  render::DrawInfo& d) {
+  u32 attr_binding[render::DrawInfo::kMaxVertexAttrs] = {};
   for (u32 i = 0; i < attr_count; i++) {
     const gcn::VBuffer& vb = attr_vbs[i];
     const bool per_instance = rc.attrs[i].per_instance;
@@ -706,7 +706,7 @@ void ResolveCbufferBindings(const std::vector<gcn::ShaderCbuf>& cbufs,
                             const u32* user_data,
                             const std::shared_ptr<const gcn::Program>& program,
                             bool vertex_stage,
-                            rhi::DrawInfo& d,
+                            render::DrawInfo& d,
                             bool& resolved_vs_cbuf) {
   auto resolved = gcn::ResolveCbuffers(program, user_data);
   for (const auto& cb : cbufs) {
@@ -751,13 +751,13 @@ void ResolveRawBuffers(const std::vector<gcn::ShaderBuffer>& buffers,
                        const std::shared_ptr<const gcn::Program>& program,
                        const char* stage,
                        u64 vs_addr,
-                       rhi::DrawInfo& d) {
+                       render::DrawInfo& d) {
   if (buffers.empty())
     return;
   const auto resolved = gcn::ResolveShaderBuffers(program, buffers, user_data);
   for (size_t i = 0; i < buffers.size(); i++) {
     const gcn::ShaderBuffer& sb = buffers[i];
-    if (sb.binding >= rhi::DrawInfo::kMaxBuffers)
+    if (sb.binding >= render::DrawInfo::kMaxBuffers)
       continue;
     gcn::VBuffer vb = resolved[i];
     if (!vb.base && sb.srsrc_sgpr + 3 < 16)
@@ -828,7 +828,7 @@ RecompStatus ResolveRecompiledShaders(
     const TextureMasks& masks,
     u32 mrt_uint_mask,
     u32 mrt_bound_mask,
-    rhi::DrawInfo& d) {
+    render::DrawInfo& d) {
   if (ShaderSkipped(vs_addr, ps_addr))
     return RecompStatus::kSkipped;
   if (!kRecompOn)
@@ -856,10 +856,10 @@ RecompStatus ResolveRecompiledShaders(
   const auto direct_vbs =
       gcn::ResolveDirectVertexBuffers(vs_prog, rc->attrs, vud);
 
-  gcn::VBuffer attr_vbs[rhi::DrawInfo::kMaxVertexAttrs];
+  gcn::VBuffer attr_vbs[render::DrawInfo::kMaxVertexAttrs];
   u32 attr_count = 0;
   for (size_t i = 0;
-       i < rc->attrs.size() && i < rhi::DrawInfo::kMaxVertexAttrs; i++) {
+       i < rc->attrs.size() && i < render::DrawInfo::kMaxVertexAttrs; i++) {
     const gcn::ShaderAttr& a = rc->attrs[i];
     if (!a.direct_fetch && a.table_sgpr + 1 >= 16)
       return RecompStatus::kBadAttrs;
@@ -958,10 +958,10 @@ bool ResolveGsPipeline(const Regs& regs, u32 prim_type, gcn::GsPipeline& gs) {
 
 }  // namespace
 
-bool BuildDrawInfo(rhi::Renderer& renderer,
+bool BuildDrawInfo(render::Renderer& renderer,
                    const Regs& regs,
                    const DrawPacket& packet,
-                   rhi::DrawInfo& d) {
+                   render::DrawInfo& d) {
   d.prim_type = regs[mmVGT_PRIMITIVE_TYPE];
   gcn::GsPipeline gs;
   const bool has_gs = ResolveGsPipeline(regs, d.prim_type, gs);
@@ -1036,8 +1036,8 @@ void PrefetchDrawShaders(const Regs& regs) {
     return;
   const u32* vud = regs.At(has_gs ? mmSPI_SHADER_USER_DATA_ES_0
                                   : mmSPI_SHADER_USER_DATA_VS_0);
-  thread_local rhi::DrawInfo d;
-  d = rhi::DrawInfo{};
+  thread_local render::DrawInfo d;
+  d = render::DrawInfo{};
   const u32 mrt_uint_mask = ResolveRenderTargets(regs, d, vs_addr, ps_addr);
   TextureMasks masks;
   if (IsGuestAddress(ps_addr)) {

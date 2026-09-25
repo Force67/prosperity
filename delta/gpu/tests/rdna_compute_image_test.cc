@@ -14,8 +14,8 @@
 
 namespace {
 TEST(Gfx10GpuTiling, MatchesCpuAcrossMipsLayersAndPadding) {
-  auto& renderer = gpu::rhi::DefaultRenderer();
-  if (!gpu::rhi::Init(renderer))
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required for this integration test";
   for (u32 mode :
        {1u, 2u, 5u, 6u, 9u, 10u, 17u, 18u, 21u, 22u, 24u, 25u, 26u, 27u}) {
@@ -84,8 +84,8 @@ TEST(Gfx10GpuTiling, MatchesCpuAcrossMipsLayersAndPadding) {
 class RdnaComputeImage : public testing::TestWithParam<u32> {};
 
 TEST_P(RdnaComputeImage, Raw32LoadStorePreservesUnwrittenChannels) {
-  auto& renderer = gpu::rhi::DefaultRenderer();
-  if (!gpu::rhi::Init(renderer))
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required for this integration test";
 
   // Distinct guest allocations prevent the backend's per-frame resource
@@ -136,7 +136,7 @@ TEST_P(RdnaComputeImage, Raw32LoadStorePreservesUnwrittenChannels) {
   descriptor(gpu::ps5::mmCOMPUTE_USER_DATA_0 + 8, dest.data());
   const u32 dispatch[] = {1, 1, 1, 1};
   gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
-  ASSERT_TRUE(gpu::rhi::FlushCsWrites(renderer));
+  ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
   for (u32 x = 0; x < 3; x++) {
     EXPECT_EQ(dest[x * channels], values[x * channels]) << "texel " << x;
     EXPECT_EQ(dest[x * channels + 1], untouched) << "texel " << x;
@@ -151,8 +151,8 @@ INSTANTIATE_TEST_SUITE_P(RgAndRgbaUintSintFloat, RdnaComputeImage,
                         testing::Values(62u, 63u, 64u, 75u, 76u, 77u));
 
 TEST(RdnaComputeImageConversion, R8UnormStoreWritesBackByteImage) {
-  auto& renderer = gpu::rhi::DefaultRenderer();
-  if (!gpu::rhi::Init(renderer))
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required for this integration test";
   alignas(65536) static std::array<u32, 16384> source{};
   alignas(65536) static std::array<u8, 65536> dest{};
@@ -186,7 +186,7 @@ TEST(RdnaComputeImageConversion, R8UnormStoreWritesBackByteImage) {
   descriptor(gpu::ps5::mmCOMPUTE_USER_DATA_0 + 8, dest.data(), 1);
   const u32 dispatch[] = {1, 1, 1, 1};
   gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
-  ASSERT_TRUE(gpu::rhi::FlushCsWrites(renderer));
+  ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
   EXPECT_EQ(dest[0], 0);
   EXPECT_EQ(dest[1], 255);
   EXPECT_EQ(dest[2], 64);
@@ -196,8 +196,8 @@ TEST(RdnaComputeImageConversion, R8UnormStoreWritesBackByteImage) {
 class RdnaR16Unorm : public testing::TestWithParam<u32> {};
 
 TEST(RdnaComputeImageConversion, LargeNarrowStoresPreserveUntouchedTexels) {
-  auto& renderer = gpu::rhi::DefaultRenderer();
-  if (!gpu::rhi::Init(renderer))
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required for this integration test";
   alignas(65536) static std::array<std::array<u8, 1024 * 1024>, 4> memory{};
   gpu::ps5::NoteGpuPool(reinterpret_cast<u64>(memory.data()), sizeof(memory));
@@ -248,15 +248,15 @@ TEST(RdnaComputeImageConversion, LargeNarrowStoresPreserveUntouchedTexels) {
                 elem == 1 ? 1 : 7, 24);
     const u32 dispatch[] = {1, 1, 1, 1};
     gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
-    ASSERT_TRUE(gpu::rhi::FlushCsWrites(renderer));
+    ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
     EXPECT_EQ(std::vector<u8>(dest.begin(), dest.end()), expected)
         << "elem=" << elem;
   }
 }
 
 TEST_P(RdnaR16Unorm, MipArrayLoadAndClampedStorePreserveAdjacentTexels) {
-  auto& renderer = gpu::rhi::DefaultRenderer();
-  if (!gpu::rhi::Init(renderer))
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required for this integration test";
   // Include the 64 KB Z swizzle used by Astro's shadow images. Distinct
   // allocations keep the backend cache from reusing a previous test's data.
@@ -326,7 +326,7 @@ TEST_P(RdnaR16Unorm, MipArrayLoadAndClampedStorePreserveAdjacentTexels) {
       descriptor(gpu::ps5::mmCOMPUTE_USER_DATA_0 + 8, dst.data(), dfmt, dtile);
       const u32 dispatch[] = {1, 1, 1, 1};
       gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
-      ASSERT_TRUE(gpu::rhi::FlushCsWrites(renderer));
+      ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
     };
     transfer(packed, 7, swizzle, loaded, 22, 0);
     transfer(floats, 22, 0, stored, 7, swizzle);
@@ -359,8 +359,8 @@ INSTANTIATE_TEST_SUITE_P(LinearAndShadowTiling,
 class RdnaBc6Image : public testing::TestWithParam<u32> {};
 
 TEST_P(RdnaBc6Image, HdrLoadAndCubeSamplePreserveBlocksMipsAndLayers) {
-  auto& renderer = gpu::rhi::DefaultRenderer();
-  if (!gpu::rhi::Init(renderer))
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required for this integration test";
   const u32 param = GetParam();
   const bool is_signed = param & 1;
@@ -457,7 +457,7 @@ TEST_P(RdnaBc6Image, HdrLoadAndCubeSamplePreserveBlocksMipsAndLayers) {
     descriptor(gpu::ps5::mmCOMPUTE_USER_DATA_0 + 8, output.data(), 77, 0);
     const u32 dispatch[] = {1, 1, 1, 1};
     gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
-    ASSERT_TRUE(gpu::rhi::FlushCsWrites(renderer));
+    ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
     for (u32 layer = 0; layer < layer_count; ++layer) {
       std::array<float, 8 * 8 * 4> result{};
       ASSERT_TRUE(gpu::gcn::DetileTextureMip32(output.data(), result.data(),
@@ -488,8 +488,8 @@ INSTANTIATE_TEST_SUITE_P(SignedUnsignedLinearTiled,
                          testing::Values(0u, 1u, 2u, 3u, 4u, 5u, 6u, 7u));
 
 TEST(RdnaComputeImageConversion, Rgba16UnormLoadAndMaskedClampedStore) {
-  auto& renderer = gpu::rhi::DefaultRenderer();
-  if (!gpu::rhi::Init(renderer))
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required for this integration test";
   alignas(65536) static std::array<u32, 16384> packed{}, floats{}, result{}, output{};
   packed[0] = 0xffff0000;
@@ -528,7 +528,7 @@ TEST(RdnaComputeImageConversion, Rgba16UnormLoadAndMaskedClampedStore) {
     descriptor(gpu::ps5::mmCOMPUTE_USER_DATA_0 + 8, dst, dfmt);
     const u32 dispatch[] = {1, 1, 1, 1};
     gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
-    return gpu::rhi::FlushCsWrites(renderer);
+    return gpu::render::FlushCsWrites(renderer);
   };
   ASSERT_TRUE(transfer(packed.data(), 65, result.data(), 77));
   for (u32 x = 0; x < 3; x++) {
@@ -547,8 +547,8 @@ TEST(RdnaComputeImageConversion, Rgba16UnormLoadAndMaskedClampedStore) {
 }
 
 TEST(RdnaComputeAlu, Scalar64CompareUsesHighDwordAndInlineSignExtension) {
-  auto& renderer = gpu::rhi::DefaultRenderer();
-  if (!gpu::rhi::Init(renderer))
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required for this integration test";
   alignas(65536) static std::array<u32, 16384> output{};
   alignas(256) static std::array<u32, 4096> code{};
@@ -586,15 +586,15 @@ TEST(RdnaComputeAlu, Scalar64CompareUsesHighDwordAndInlineSignExtension) {
   regs[ud + 12] = regs[ud + 13] = 0xffffffff;
   const u32 dispatch[] = {1, 1, 1, 1};
   gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
-  ASSERT_TRUE(gpu::rhi::FlushCsWrites(renderer));
+  ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
   const std::array<u32, 4> expected = {0, 1, 1, 0};
   for (u32 i = 0; i < 4; ++i)
     EXPECT_EQ(output[i], expected[i]);
 }
 
 TEST(RdnaComputeAlu, XadUsesXorBeforeWrappingAdd) {
-  auto& renderer = gpu::rhi::DefaultRenderer();
-  if (!gpu::rhi::Init(renderer))
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required for this integration test";
 
   alignas(65536) static std::array<u32, 16384> dest{};
@@ -622,15 +622,15 @@ TEST(RdnaComputeAlu, XadUsesXorBeforeWrappingAdd) {
   regs[gpu::ps5::mmCOMPUTE_USER_DATA_0 + 3] = 0x80000fac;
   const u32 dispatch[] = {1, 1, 1, 1};
   gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
-  ASSERT_TRUE(gpu::rhi::FlushCsWrites(renderer));
+  ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
   EXPECT_EQ(dest[0], 1u);
   EXPECT_EQ(dest[1], 0u);
   EXPECT_EQ(dest[2], 0xffffffffu);
 }
 
 TEST(RdnaComputeAlu, HalfPrecisionOpsSelectHalvesAndPackResults) {
-  auto& renderer = gpu::rhi::DefaultRenderer();
-  if (!gpu::rhi::Init(renderer))
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required for this integration test";
   alignas(65536) static std::array<u32, 16384> dest{};
   alignas(256) static std::array<u32, 4096> code{};
@@ -665,7 +665,7 @@ TEST(RdnaComputeAlu, HalfPrecisionOpsSelectHalvesAndPackResults) {
   regs[gpu::ps5::mmCOMPUTE_USER_DATA_0 + 3] = 0x80000fac;
   const u32 dispatch[] = {1, 1, 1, 1};
   gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
-  ASSERT_TRUE(gpu::rhi::FlushCsWrites(renderer));
+  ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
   EXPECT_EQ(dest[0], 0x00004500u);
   EXPECT_EQ(dest[1], 0x00003800u);
   EXPECT_EQ(dest[2], 0xabcd4000u);
@@ -673,8 +673,8 @@ TEST(RdnaComputeAlu, HalfPrecisionOpsSelectHalvesAndPackResults) {
 }
 
 TEST(RdnaComputeAlu, LockstepWaveBranchesOnFullExecMask) {
-  auto& renderer = gpu::rhi::DefaultRenderer();
-  if (!gpu::rhi::Init(renderer))
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required for this integration test";
   alignas(65536) static std::array<u32, 16384> dest{};
   alignas(256) static std::array<u32, 4096> code{};
@@ -705,14 +705,14 @@ TEST(RdnaComputeAlu, LockstepWaveBranchesOnFullExecMask) {
   regs[gpu::ps5::mmCOMPUTE_USER_DATA_0 + 3] = 0x80000fac;
   const u32 dispatch[] = {1, 1, 1, 1};
   gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
-  ASSERT_TRUE(gpu::rhi::FlushCsWrites(renderer));
+  ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
   for (u32 x = 0; x < 64; x++)
     EXPECT_EQ(dest[x], x < 40 ? x + 1 : 0u) << "lane " << x;
 }
 
 TEST(RdnaComputeAlu, BitfieldMaskWrapsWidthAndOffset) {
-  auto& renderer = gpu::rhi::DefaultRenderer();
-  if (!gpu::rhi::Init(renderer))
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required for this integration test";
   alignas(65536) static std::array<u32, 16384> dest{};
   alignas(256) static std::array<u32, 4096> code{};
@@ -743,15 +743,15 @@ TEST(RdnaComputeAlu, BitfieldMaskWrapsWidthAndOffset) {
     regs[gpu::ps5::mmCOMPUTE_USER_DATA_0 + 8 + i] = operands[i];
   const u32 dispatch[] = {1, 1, 1, 1};
   gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
-  ASSERT_TRUE(gpu::rhi::FlushCsWrites(renderer));
+  ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
   const std::array<u32, 4> expected = {0, 0x7fffffff, 0xf00, 0xf0000000};
   for (u32 i = 0; i < expected.size(); i++)
     EXPECT_EQ(dest[i], expected[i]);
 }
 
 TEST(RdnaComputeAlu, FmaMixSelectsPrecisionHalvesAndSourceModifiers) {
-  auto& renderer = gpu::rhi::DefaultRenderer();
-  if (!gpu::rhi::Init(renderer))
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required for this integration test";
   alignas(65536) static std::array<u32, 16384> dest{};
   alignas(256) static std::array<u32, 4096> code{};
@@ -788,15 +788,15 @@ TEST(RdnaComputeAlu, FmaMixSelectsPrecisionHalvesAndSourceModifiers) {
   regs[gpu::ps5::mmCOMPUTE_USER_DATA_0 + 10] = 0x3c00c000;
   const u32 dispatch[] = {1, 1, 1, 1};
   gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
-  ASSERT_TRUE(gpu::rhi::FlushCsWrites(renderer));
+  ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
   const std::array<float, 4> expected = {5.f, 6.f, 1.f, 2.f};
   for (u32 i = 0; i < expected.size(); i++)
     EXPECT_FLOAT_EQ(std::bit_cast<float>(dest[i]), expected[i]);
 }
 
 TEST(RdnaComputeAlu, FmaMixHalfResultsPreserveTheOtherHalf) {
-  auto& renderer = gpu::rhi::DefaultRenderer();
-  if (!gpu::rhi::Init(renderer))
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required for this integration test";
   alignas(65536) static std::array<u32, 16384> dest{};
   alignas(256) static std::array<u32, 4096> code{};
@@ -838,15 +838,15 @@ TEST(RdnaComputeAlu, FmaMixHalfResultsPreserveTheOtherHalf) {
   regs[gpu::ps5::mmCOMPUTE_USER_DATA_0 + 10] = 0x3c00c000;
   const u32 dispatch[] = {1, 1, 1, 1};
   gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
-  ASSERT_TRUE(gpu::rhi::FlushCsWrites(renderer));
+  ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
   const std::array<u32, 4> expected = {0x12344500, 0x46005678, 0x40003c00, 0x3c005678};
   for (u32 i = 0; i < expected.size(); i++)
     EXPECT_EQ(dest[i], expected[i]);
 }
 
 TEST(RdnaComputeAlu, PermlaneSelectsRowsAndHonorsInactiveLanes) {
-  auto& renderer = gpu::rhi::DefaultRenderer();
-  if (!gpu::rhi::Init(renderer))
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required for this integration test";
   alignas(65536) static std::array<u32, 16384> dest{};
   alignas(256) static std::array<u32, 4096> code{};
@@ -890,7 +890,7 @@ TEST(RdnaComputeAlu, PermlaneSelectsRowsAndHonorsInactiveLanes) {
   regs[gpu::ps5::mmCOMPUTE_USER_DATA_0 + 9] = 0x01234567;
   const u32 dispatch[] = {1, 1, 1, 1};
   gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
-  ASSERT_TRUE(gpu::rhi::FlushCsWrites(renderer));
+  ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
   for (u32 lane = 0; lane < 64; lane++) {
     const u32 selected = (lane & ~15u) | (15 - (lane & 15));
     EXPECT_EQ(dest[lane * 4], (lane & 1) ? 0x12345678 : selected) << lane;
@@ -901,8 +901,8 @@ TEST(RdnaComputeAlu, PermlaneSelectsRowsAndHonorsInactiveLanes) {
 }
 
 TEST(RdnaComputeAlu, DppRowXmaskKeepsEachExchangeInsideItsRow) {
-  auto& renderer = gpu::rhi::DefaultRenderer();
-  if (!gpu::rhi::Init(renderer))
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required for this integration test";
   alignas(65536) static std::array<u32, 16384> dest{};
   alignas(256) static std::array<u32, 4096> code{};
@@ -934,7 +934,7 @@ TEST(RdnaComputeAlu, DppRowXmaskKeepsEachExchangeInsideItsRow) {
   regs[gpu::ps5::mmCOMPUTE_USER_DATA_0 + 9] = 0x01234567;
   const u32 dispatch[] = {1, 1, 1, 1};
   gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
-  ASSERT_TRUE(gpu::rhi::FlushCsWrites(renderer));
+  ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
   for (u32 lane = 0; lane < 64; lane++)
     for (u32 i = 0; i < masks.size(); i++)
       EXPECT_EQ(dest[lane * 4 + i], lane ^ masks[i]) << lane << ":" << i;
@@ -942,8 +942,8 @@ TEST(RdnaComputeAlu, DppRowXmaskKeepsEachExchangeInsideItsRow) {
 
 
 TEST(RdnaComputeImage, GatherOffsetAndCompareUseFourDepthTaps) {
-  auto& renderer = gpu::rhi::DefaultRenderer();
-  if (!gpu::rhi::Init(renderer))
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required";
   alignas(65536) static std::array<u32, 16384> source{};
   alignas(65536) static std::array<std::array<u32, 16384>, 10> outputs{};
@@ -992,7 +992,7 @@ TEST(RdnaComputeImage, GatherOffsetAndCompareUseFourDepthTaps) {
     regs[ud + 11] = 0x80000fac;
     const u32 dispatch[] = {1, 1, 1, 1};
     gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
-    ASSERT_TRUE(gpu::rhi::FlushCsWrites(renderer));
+    ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
     constexpr std::array<u32, 4> taps = {6, 7, 3, 2};
     for (u32 i = 0; i < taps.size(); i++) {
       const u32 depth = taps[i] + (func == 9 ? 3 : 0);
@@ -1007,8 +1007,8 @@ TEST(RdnaComputeImage, GatherOffsetAndCompareUseFourDepthTaps) {
 }
 
 TEST(RdnaComputeImageConversion, SrgbReadAndUnormMipWriteShareStorage) {
-  auto& renderer = gpu::rhi::DefaultRenderer();
-  if (!gpu::rhi::Init(renderer))
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required";
   alignas(65536) static std::array<u8, 65536> image{};
   alignas(256) static std::array<u32, 4096> code{};
@@ -1047,7 +1047,7 @@ TEST(RdnaComputeImageConversion, SrgbReadAndUnormMipWriteShareStorage) {
   }
   const u32 dispatch[] = {1, 1, 1, 1};
   gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
-  ASSERT_TRUE(gpu::rhi::FlushCsWrites(renderer));
+  ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
   std::array<u32, 64> base{};
   std::array<u32, 16> mip{};
   ASSERT_TRUE(gpu::gcn::DetileTextureMip32(image.data(), base.data(),
@@ -1064,8 +1064,8 @@ TEST(RdnaComputeImageConversion, SrgbReadAndUnormMipWriteShareStorage) {
 }
 
 TEST(RdnaComputeImageConversion, SrgbLoadsAndFilteringDecodeRgbBeforeInterpolation) {
-  auto& renderer = gpu::rhi::DefaultRenderer();
-  if (!gpu::rhi::Init(renderer))
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required";
   alignas(65536) static std::array<std::array<u32, 16384>, 3> inputs{}, outputs{};
   alignas(256) static std::array<u32, 4096> code{};
@@ -1109,7 +1109,7 @@ TEST(RdnaComputeImageConversion, SrgbLoadsAndFilteringDecodeRgbBeforeInterpolati
     regs[ud + 11] = 0x20000;
     const u32 dispatch[] = {1, 1, 1, 1};
     gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
-    ASSERT_TRUE(gpu::rhi::FlushCsWrites(renderer));
+    ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
     const std::array<float, 4> expected = run == 2
         ? std::array<float, 4>{.5f, .5f, .5f, 128.f / 255.f}
         : std::array<float, 4>{.2158605f, .2158605f, 10.f / (255.f * 12.92f), 64.f / 255.f};
@@ -1121,8 +1121,8 @@ TEST(RdnaComputeImageConversion, SrgbLoadsAndFilteringDecodeRgbBeforeInterpolati
 
 
 TEST(RdnaComputeImageConversion, DecoderRg16IntegerLoadsSignExtendBothComponents) {
-  auto& renderer = gpu::rhi::DefaultRenderer();
-  if (!gpu::rhi::Init(renderer)) GTEST_SKIP() << "Vulkan is required";
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer)) GTEST_SKIP() << "Vulkan is required";
   alignas(65536) static std::array<std::array<u32, 16384>, 2> sources{}, outputs{};
   alignas(256) static std::array<u32, 16384> code{};
   const u32 program[] = {0x7e020280, 0xf0000300, 0x00000400,
@@ -1154,7 +1154,7 @@ TEST(RdnaComputeImageConversion, DecoderRg16IntegerLoadsSignExtendBothComponents
     regs[ud + 11] = 0x20000;
     const u32 launch[] = {1, 1, 1, 1};
     gpu::ps5::DispatchCompute(renderer, regs, launch, 4);
-    ASSERT_TRUE(gpu::rhi::FlushCsWrites(renderer));
+    ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
     EXPECT_EQ(output[0], run ? 0xffffffffu : 0xffffu);
     EXPECT_EQ(output[1], run ? 0xffff8001u : 0x8001u);
     EXPECT_EQ(output[2], 0xa5a5a5a5);
@@ -1162,8 +1162,8 @@ TEST(RdnaComputeImageConversion, DecoderRg16IntegerLoadsSignExtendBothComponents
 }
 
 TEST(RdnaComputeImageConversion, DecoderRg16IntegerStoresPackComponents) {
-  auto& renderer = gpu::rhi::DefaultRenderer();
-  if (!gpu::rhi::Init(renderer)) GTEST_SKIP() << "Vulkan is required";
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer)) GTEST_SKIP() << "Vulkan is required";
   alignas(65536) static std::array<std::array<u32, 16384>, 4> sources{}, outputs{};
   alignas(256) static std::array<u32, 16384> code{};
   gpu::ps5::NoteGpuPool(reinterpret_cast<u64>(sources.data()), sizeof(sources));
@@ -1203,7 +1203,7 @@ TEST(RdnaComputeImageConversion, DecoderRg16IntegerStoresPackComponents) {
     descriptor(gpu::ps5::mmCOMPUTE_USER_DATA_0 + 8, output.data(), signed_format ? 28 : 27);
     const u32 launch[] = {1, 1, 1, 1};
     gpu::ps5::DispatchCompute(renderer, regs, launch, 4);
-    ASSERT_TRUE(gpu::rhi::FlushCsWrites(renderer));
+    ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
     for (u32 x = 0; x < 3; ++x) {
       const u32 red = green_only ? 0x1234 : source[x * 2] & 0xffff;
       const u32 green = source[x * 2 + (green_only ? 0 : 1)] & 0xffff;
@@ -1214,8 +1214,8 @@ TEST(RdnaComputeImageConversion, DecoderRg16IntegerStoresPackComponents) {
 }
 
 TEST(RdnaComputeImageConversion, DecoderPackedIntegersRoundTripWithoutNormalization) {
-  auto& renderer = gpu::rhi::DefaultRenderer();
-  if (!gpu::rhi::Init(renderer)) GTEST_SKIP() << "Vulkan is required";
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer)) GTEST_SKIP() << "Vulkan is required";
   struct Case { u32 format, channels, bits; bool is_signed; };
   constexpr Case cases[] = {{5, 1, 8, false}, {18, 2, 8, false},
       {60, 4, 8, false}, {61, 4, 8, true},
@@ -1267,7 +1267,7 @@ TEST(RdnaComputeImageConversion, DecoderPackedIntegersRoundTripWithoutNormalizat
       descriptor(ud + 8, pass ? s.result.data() : s.packed.data(), pass ? 76 : c.format);
       const u32 launch[] = {1, 1, 1, 1};
       gpu::ps5::DispatchCompute(renderer, regs, launch, 4);
-      ASSERT_TRUE(gpu::rhi::FlushCsWrites(renderer));
+      ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
     }
     for (u32 x = 0; x < 3; ++x) {
       for (u32 channel = 0; channel < c.channels; ++channel) {
@@ -1285,8 +1285,8 @@ TEST(RdnaComputeImageConversion, DecoderPackedIntegersRoundTripWithoutNormalizat
 }
 
 TEST(RdnaComputeImageConversion, LinearIntegerViewsShareWritesWithinOneDispatch) {
-  auto& renderer = gpu::rhi::DefaultRenderer();
-  if (!gpu::rhi::Init(renderer)) GTEST_SKIP() << "Vulkan is required";
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer)) GTEST_SKIP() << "Vulkan is required";
   alignas(65536) static std::array<std::array<u32, 16384>, 2> memory{};
   alignas(256) static std::array<u32, 4096> code{};
   gpu::ps5::NoteGpuPool(reinterpret_cast<u64>(memory.data()), sizeof(memory));
@@ -1326,7 +1326,7 @@ TEST(RdnaComputeImageConversion, LinearIntegerViewsShareWritesWithinOneDispatch)
     descriptor(gpu::ps5::mmCOMPUTE_USER_DATA_0 + 8, !reverse);
     const u32 launch[] = {1, 1, 1, 1};
     gpu::ps5::DispatchCompute(renderer, regs, launch, 4);
-    ASSERT_TRUE(gpu::rhi::FlushCsWrites(renderer));
+    ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
     EXPECT_EQ(memory[1][0], reverse ? 0xdead66efu : 0x56u);
     EXPECT_EQ(memory[0][1], reverse ? 0xdead66efu : 0x12345678u);
     EXPECT_EQ(memory[0][0], 0xa5a5a5a5);
@@ -1335,8 +1335,8 @@ TEST(RdnaComputeImageConversion, LinearIntegerViewsShareWritesWithinOneDispatch)
 }
 
 TEST(RdnaComputeImageConversion, LinearIntegerArraysRespectRowsLayersAndBounds) {
-  auto& renderer = gpu::rhi::DefaultRenderer();
-  if (!gpu::rhi::Init(renderer)) GTEST_SKIP() << "Vulkan is required";
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer)) GTEST_SKIP() << "Vulkan is required";
   alignas(65536) static std::array<std::array<u32, 16384>, 2> memory{};
   alignas(256) static std::array<u32, 4096> code{};
   gpu::ps5::NoteGpuPool(reinterpret_cast<u64>(memory.data()), sizeof(memory));
@@ -1376,14 +1376,14 @@ TEST(RdnaComputeImageConversion, LinearIntegerArraysRespectRowsLayersAndBounds) 
     }
     const u32 launch[] = {1, 1, 1, 1};
     gpu::ps5::DispatchCompute(renderer, regs, launch, 4);
-    ASSERT_TRUE(gpu::rhi::FlushCsWrites(renderer));
+    ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
     EXPECT_EQ(memory[1], expected) << "base layer " << base_layer;
   }
 }
 
 TEST(RdnaComputeImageConversion, AstroBc6CubeArrayStagingExceedsRawBufferLimit) {
-  auto& renderer = gpu::rhi::DefaultRenderer();
-  if (!gpu::rhi::Init(renderer))
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required";
   // Exact dimensions of Astro's lighting environment: 192 faces, nine mips.
   // 16.5 MiB of guest BC6 expands to slightly more than 256 MiB of RGBA32F.
@@ -1441,15 +1441,15 @@ TEST(RdnaComputeImageConversion, AstroBc6CubeArrayStagingExceedsRawBufferLimit) 
   regs[ud + 11] = 0x20000;
   const u32 dispatch[] = {1, 1, 1, 1};
   gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
-  ASSERT_TRUE(gpu::rhi::FlushCsWrites(renderer));
+  ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
   const float expected[] = {0, 1.5146484375f, 65504, 1};
   for (u32 i = 0; i < 4; ++i)
     EXPECT_FLOAT_EQ(std::bit_cast<float>(output[i]), expected[i]);
 }
 
 TEST(RdnaComputeImageConversion, Bc1LoadsRespectTilingMipsLayersAndSrgb) {
-  auto& renderer = gpu::rhi::DefaultRenderer();
-  if (!gpu::rhi::Init(renderer))
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required";
   alignas(65536) static std::array<std::array<u8, 131072>, 4> inputs{};
   alignas(65536) static std::array<u32, 16384> output{};
@@ -1506,7 +1506,7 @@ TEST(RdnaComputeImageConversion, Bc1LoadsRespectTilingMipsLayersAndSrgb) {
         regs[ud + 11] = 0x20000;
         const u32 dispatch[] = {1, 1, 1, 1};
         gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
-        ASSERT_TRUE(gpu::rhi::FlushCsWrites(renderer));
+        ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
         const u16 color = colors[(mip + layer + (mip ? 0 : 3)) % 4];
         const u32 rgb[] = {((color >> 11) * 527 + 23) >> 6,
                            (((color >> 5) & 63) * 259 + 33) >> 6,
@@ -1524,8 +1524,8 @@ TEST(RdnaComputeImageConversion, Bc1LoadsRespectTilingMipsLayersAndSrgb) {
 }
 
 TEST(RdnaComputeImageConversion, LargeShadowArrayReadsPastRawBufferLimit) {
-  auto& renderer = gpu::rhi::DefaultRenderer();
-  if (!gpu::rhi::Init(renderer))
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required";
   alignas(65536) static std::array<u8, 320u * 1024 * 1024> input{};
   alignas(65536) static std::array<u32, 16384> output{};
@@ -1565,13 +1565,13 @@ TEST(RdnaComputeImageConversion, LargeShadowArrayReadsPastRawBufferLimit) {
   regs[ud + 11] = 0x20000;
   const u32 dispatch[] = {1, 1, 1, 1};
   gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
-  ASSERT_TRUE(gpu::rhi::FlushCsWrites(renderer));
+  ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
   EXPECT_FLOAT_EQ(std::bit_cast<float>(output[0]), 0.75f);
 }
 
 TEST(RdnaComputeImageConversion, UniformDescriptorTablePreservesDynamicCubeSelection) {
-  auto& renderer = gpu::rhi::DefaultRenderer();
-  if (!gpu::rhi::Init(renderer))
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required";
   alignas(65536) static std::array<u32, 16384> texture{};
   alignas(65536) static std::array<std::array<u32, 16384>, 3> tables{}, outputs{};
@@ -1627,7 +1627,7 @@ TEST(RdnaComputeImageConversion, UniformDescriptorTablePreservesDynamicCubeSelec
     regs[ud + 15] = 0x14004;
     const u32 dispatch[] = {3, 1, 1, 1};
     gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
-    ASSERT_TRUE(gpu::rhi::FlushCsWrites(renderer));
+    ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
     if (variant == 0) {
       EXPECT_FLOAT_EQ(std::bit_cast<float>(output[0]), .25f);
       EXPECT_FLOAT_EQ(std::bit_cast<float>(output[1]), .5f);
@@ -1640,8 +1640,8 @@ TEST(RdnaComputeImageConversion, UniformDescriptorTablePreservesDynamicCubeSelec
   }
 }
 TEST(RdnaComputeImageConversion, PlainStoresValidateOnlyTheAccessedMip) {
-  auto& renderer = gpu::rhi::DefaultRenderer();
-  if (!gpu::rhi::Init(renderer))
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required";
   alignas(65536) static std::array<std::array<u32, 2 * 1024 * 1024>, 5> images{};
   alignas(256) static std::array<u32, 4096> code{};
@@ -1682,7 +1682,7 @@ TEST(RdnaComputeImageConversion, PlainStoresValidateOnlyTheAccessedMip) {
     regs[ud + 5] = 0x00700080;
     const u32 dispatch[] = {1, 1, 1, 1};
     gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
-    ASSERT_TRUE(gpu::rhi::FlushCsWrites(renderer));
+    ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
     for (u32 level = 0; level < layout.mip_levels; level++) {
       std::vector<u32> pixels(layout.mips[level].width * layout.mips[level].height * 4);
       ASSERT_TRUE(gpu::gcn::DetileTextureMip32(image.data(), pixels.data(), layout, level, 0));
@@ -1697,7 +1697,7 @@ TEST(RdnaComputeImageConversion, PlainStoresValidateOnlyTheAccessedMip) {
 }  // namespace
 
 // Performance counters normally owned by the command-processor composition.
-namespace gpu::rhi {
+namespace gpu::render {
 u64 g_ns_dcb = 0, g_ns_dcb_lock = 0;
 u32 g_submit_queue = 0, g_dcb_n = 0;
 }

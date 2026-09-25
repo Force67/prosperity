@@ -1220,7 +1220,7 @@ std::string ShaderObj(u64 addr, const std::vector<u32>* spirv) {
 }
 
 std::string TexObj(u32 index,
-                   const rhi::DrawInfo::DrawTex& t,
+                   const render::DrawInfo::DrawTex& t,
                    const DrawBindings* b) {
   Obj o;
   o.U("i", index);
@@ -1292,7 +1292,7 @@ std::string TexObj(u32 index,
   return o.Done();
 }
 
-void NoteTexture(const rhi::DrawInfo::DrawTex& t) {
+void NoteTexture(const render::DrawInfo::DrawTex& t) {
   if (!t.base || !t.w || !t.h)
     return;
   TexKey k;
@@ -1788,7 +1788,7 @@ void RegionEnd() {
   l.Emit();
 }
 
-void RecordDraw(const rhi::DrawInfo& d,
+void RecordDraw(const render::DrawInfo& d,
                 const char* path,
                 const DrawBindings* b) {
   if (!g_recording)
@@ -1863,7 +1863,7 @@ void RecordDraw(const rhi::DrawInfo& d,
     cbufs.Add(o);
   }
   Arr bufs;
-  for (u32 i = 0; i < d.num_bufs && i < rhi::DrawInfo::kMaxBuffers; i++) {
+  for (u32 i = 0; i < d.num_bufs && i < render::DrawInfo::kMaxBuffers; i++) {
     if (!d.bufs[i].base && !d.bufs[i].size)
       continue;
     Obj o;
@@ -1921,7 +1921,7 @@ void RecordDraw(const rhi::DrawInfo& d,
 
   Line l("draw");
   l.U("seq", g_seq++)
-      .U("queue", rhi::g_submit_queue)
+      .U("queue", render::g_submit_queue)
       .Int("frame", g_frame_num)
       .U("draw", index)
       .U("frame_draw", g_frame.draws)
@@ -1976,11 +1976,11 @@ void RecordDecline(const char* reason) {
   l.Emit();
 }
 
-void RecordDispatch(const rhi::ComputeInfo& ci) {
+void RecordDispatch(const render::ComputeInfo& ci) {
   if (!g_recording)
     return;
   Arr res;
-  for (u32 i = 0; i < ci.num_res && i < rhi::ComputeInfo::kMaxResources;
+  for (u32 i = 0; i < ci.num_res && i < render::ComputeInfo::kMaxResources;
        i++) {
     const auto& r = ci.res[i];
     Obj o;
@@ -2015,7 +2015,7 @@ void RecordDispatch(const rhi::ComputeInfo& ci) {
   l.U("seq", g_seq++)
       .Int("frame", g_frame_num)
       .Int("after_draw", int(g_draw_seq))
-      .U("queue", rhi::g_submit_queue)
+      .U("queue", render::g_submit_queue)
       .Raw("cs", ShaderObj(ci.cs_addr, ci.recomp ? &ci.recomp->spirv : nullptr))
       .Raw("groups", groups.Done())
       .Raw("group_base", group_base.Done())

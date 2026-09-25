@@ -5,7 +5,7 @@
  *
  * RDNA2 (gfx10.3) compute: recompiles an AGC compute shader to GLCompute
  * SPIR-V, producing the same gpu::gcn::RecompiledCs the shared Vulkan compute
- * backend (rhi::Dispatch) already consumes.
+ * backend (render::Dispatch) already consumes.
  *
  * The resource model, the SPIR-V translator and the MUBUF/MTBUF/MIMG/DS
  * emitters are shared with the GCN path (gpu/gcn): those encodings are

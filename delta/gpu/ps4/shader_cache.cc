@@ -15,7 +15,7 @@
 #include "gpu/gcn/gcn_decode.h"
 #include "gpu/gcn/spirv/spv_post.h"
 #include "gpu/ps4/cmd_trace.h"
-#include "gpu/rhi/renderer.h"
+#include "gpu/render/renderer.h"
 
 namespace gpu::ps4 {
 namespace {
@@ -254,7 +254,7 @@ void PrefetchComputeShader(const ComputeShaderState& state) {
     gcn::spirv::PrefetchThen(
         rc.spirv, [n = static_cast<u32>(rc.resources.size()),
                    guest = rc.guest_memory_binding](const std::vector<u32>& spv) {
-          rhi::PrebuildComputePipeline(spv, n, guest);
+          render::PrebuildComputePipeline(spv, n, guest);
         });
 #endif
 }
