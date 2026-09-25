@@ -298,7 +298,7 @@ void GlCommandList::FlushGroup(u32 index, const SlotMap::Group& map) {
                                                         : 0));
         break;
       case SlotKind::kTexture: {
-        SlotState& s = slot_state_[2][slot.slot];
+        SlotState& s = slot_state_[static_cast<u32>(slot.kind)][slot.slot];
         if (s.name == r.name && s.sampler == r.sampler)
           break;
         s.name = r.name;
@@ -326,7 +326,7 @@ void GlCommandList::FlushGroup(u32 index, const SlotMap::Group& map) {
         break;
       }
       case SlotKind::kImage: {
-        SlotState& s = slot_state_[3][slot.slot];
+        SlotState& s = slot_state_[static_cast<u32>(slot.kind)][slot.slot];
         const u64 where = (u64(r.level) << 32) | u32(r.layer) |
                           (u64(r.layered) << 63);
         if (s.name == r.name && s.offset == where && s.size == r.format)
