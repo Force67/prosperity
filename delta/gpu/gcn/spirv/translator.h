@@ -64,6 +64,8 @@ struct Translator {
   Id state_var = 0;  // CFG block index for the while-switch dispatch
   Id cbuf_type = 0;  // shared CB { uvec4 data[64]; } type
   bool indirect_cbufs = false;
+  // Sampler bindings whose T# is a cube: a 2D array of faces.
+  u32 tex_cube_mask = 0;
   u32 user_data_slot = 0;  // 0 = vertex/geometry, 1 = pixel
   Id cbuf_ring = 0, cbuf_offsets = 0;
   std::unordered_map<u32, Id> cbuf_vars;  // binding -> cbuffer UBO var
@@ -742,6 +744,10 @@ struct StageContext {
   u32 mrt_uint_mask = 0;
   // Bit n: the pass binds colour attachment n; unbound exports write nowhere.
   u32 mrt_bound_mask = 0xFF;
+  // Descriptors use the GCN T# layout (the RDNA stages share EmitMimg).
+  bool gcn_tsharp = false;
+  // SPI_SHADER_COL_FORMAT (4 bits per MRT), or kColFormatUnknown.
+  u32 col_format = kColFormatUnknown;
   u64 tex_uint_mask = 0;
   Id depth_out = 0;       // MRTZ -> FragDepth (lazily declared)
   std::unordered_map<u32, Id> in_vars;
@@ -763,7 +769,8 @@ struct StageContext {
   u64 tex_1d_mask = 0;
 
   // shared graphics
-  std::unordered_map<u32, u32> cbuf_bind;  // V# SGPR -> set-1 binding
+  // Set-1 binding per consuming SMRD pc (GCN) or per V# SGPR (RDNA).
+  std::unordered_map<u32, u32> cbuf_bind;
   // Raw MUBUF: pc -> set-2 binding (per pc, not SGPR: one quad can hold
   // several descriptors over a shader's life).
   std::unordered_map<u32, u32> gfx_buf_bind;
@@ -932,7 +939,8 @@ bool PlanCbufs(const Program& program,
                u32 first_binding,
                std::vector<ShaderCbuf>& cbufs,
                std::unordered_map<u32, u32>& bindings,
-               const u8* reachable = nullptr);
+               const u8* reachable = nullptr,
+               u32 max_bindings = kMaxCbufBindings);
 void EmitCbufSmrd(Translator& t,
                   const Inst& inst,
                   const std::unordered_map<u32, u32>& bindings);

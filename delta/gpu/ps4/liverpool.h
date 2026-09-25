@@ -69,6 +69,8 @@ constexpr u32 mmPA_CL_VPORT_ZOFFSET = 0xA114;
 // Render-target mask (which CB targets are written).
 constexpr u32 mmCB_TARGET_MASK = 0xA08E;
 constexpr u32 mmCB_SHADER_MASK = 0xA08F;
+// SPI_SHADER_COL_FORMAT: how the SPI packs each MRT export, 4 bits per target.
+constexpr u32 mmSPI_SHADER_COL_FORMAT = 0xA1C5;
 // Per-MRT blend control, 1 dword apart. GCN gen2 layout: [0:4] color_src [5:7]
 // color_func [8:12] color_dst [16:20] alpha_src [21:23] alpha_func [24:28]
 // alpha_dst [29] separate_alpha [30] enable.
@@ -144,6 +146,7 @@ constexpr u32 mmSPI_SHADER_PGM_RSRC2_VS = 0x2C4B;
 constexpr u32 mmSPI_SHADER_USER_DATA_VS_0 = 0x2C4C;  // 16 user-data SGPRs
 constexpr u32 mmSPI_SHADER_PGM_LO_GS = 0x2C88;
 constexpr u32 mmSPI_SHADER_PGM_RSRC2_GS = 0x2C8B;
+constexpr u32 mmSPI_SHADER_USER_DATA_GS_0 = 0x2C8C;
 constexpr u32 mmSPI_SHADER_PGM_LO_ES = 0x2CC8;
 constexpr u32 mmSPI_SHADER_PGM_RSRC2_ES = 0x2CCB;
 constexpr u32 mmSPI_SHADER_USER_DATA_ES_0 = 0x2CCC;

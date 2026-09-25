@@ -266,6 +266,10 @@ struct RenderRegion {
   // The open region binds depth read-only because a draw in it samples the same
   // image. Tracked so a later draw that needs to write depth restarts.
   bool depth_read_only = false;
+  // The open region renders one slice of an array surface, whose pixels go to
+  // guest memory when it ends (see WriteRtToGuest).
+  u64 write_through = 0;
+  u32 write_through_tile = 0;
 };
 
 extern RenderRegion& g_region;
@@ -308,5 +312,11 @@ inline u32 DepthH(const rhi::DrawInfo& d) {
 }
 void EndRegion();
 void SetGuestViewport(const rhi::DrawInfo& d);
+
+// Copy the target at `base` into guest memory, retiled with `tile_mode`. Draws
+// only ever render into the VkImage, but a slice of an array or cube surface
+// is read back through guest memory by whatever consumes the whole surface
+// (GTA:SA prefilters its sky-capture cube in compute). Waits for the GPU.
+bool WriteRtToGuest(u64 base, u32 tile_mode);
 
 }  // namespace gpu::vk

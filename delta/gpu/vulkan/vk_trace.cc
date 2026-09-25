@@ -1932,6 +1932,7 @@ void RecordDraw(const rhi::DrawInfo& d,
       .Raw("color_targets", rts.Done())
       .Hex("target_mask", d.target_mask)
       .Hex("shader_mask", d.shader_mask)
+      .Hex("col_format", d.col_format)
       .Hex("color_control", d.color_control)
       .Bool("blend_enable", d.blend_enable)
       .Hex("blend_control", d.blend_control)

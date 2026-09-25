@@ -34,4 +34,9 @@ void ReleaseRetiredCsBuffers();
 // shapes disagree (the caller then falls back to the guest-memory flush).
 bool CsRefreshRtFromTruth(u64 base);
 
+// Something other than a dispatch rewrote guest memory at [base, base+bytes):
+// ranges staged from it re-read it at their next use. Flush pending dispatch
+// writes to it first, or they land over the new bytes.
+void CsForgetGuestRange(u64 base, u64 bytes);
+
 }  // namespace gpu::vk

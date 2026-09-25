@@ -97,6 +97,46 @@ inline SmrdOffset DecodeSmrdOffset(const Inst& inst) {
   return o;
 }
 
+// Which scalar load last filled a descriptor's SGPRs, as that load's pc. A
+// shader that reloads the same SGPR quad with a second V# reads a second
+// resource through it, so the pair (base SGPR, version) is what names one.
+// Linear program order, the same for every consumer of it.
+class DescriptorVersions {
+ public:
+  static constexpr u32 kInline = 0xFFFFFFFFu;  // still the user data
+
+  u32 Of(u32 sgpr, u32 dwords) const {
+    for (auto it = loads_.rbegin(); it != loads_.rend(); ++it)
+      if (sgpr >= it->sgpr && sgpr + dwords <= it->sgpr + it->dwords)
+        return it->pc;
+    return kInline;
+  }
+
+  // Record an SMRD's destination; call after reading the version it consumes.
+  void Note(const Inst& inst) {
+    if (inst.enc != Enc::kSmrd)
+      return;
+    // s_load_dword{,x2..x16} 0x00-0x04, s_buffer_load_dword{,x2..x16} 0x08-0x0c.
+    const u32 op = inst.opcode;
+    const u32 n = op <= 0x04 ? 1u << op
+                  : op >= 0x08 && op <= 0x0c ? 1u << (op - 0x08)
+                                             : 0u;
+    if (!n)
+      return;
+    const u32 sdst = (inst.raw[0] >> 15) & 0x7F;
+    std::erase_if(loads_, [&](const Load& ld) {
+      return sdst < ld.sgpr + ld.dwords && ld.sgpr < sdst + n;
+    });
+    loads_.push_back({sdst, n, inst.pc});
+  }
+
+ private:
+  struct Load {
+    u32 sgpr, dwords, pc;
+  };
+  std::vector<Load> loads_;
+};
+
 // Decode a GCN program (`code` guest bytecode, `max_dwords` bounds the scan; use
 // CodeLength()/BinaryInfo). s_endpgm is a block terminator, not end-of-stream:
 // stop_at_endpgm=false lifts blocks after an early-out endpgm too; true stops at

@@ -32,4 +32,7 @@ void DispatchCompute(rhi::Renderer& renderer,
                      const u32* body,
                      u32 count);
 
+// Start compiling the shader a dispatch with these registers would run.
+void PrefetchComputeDispatch(const Regs& regs);
+
 }  // namespace gpu::ps4

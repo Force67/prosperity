@@ -272,78 +272,91 @@ Id LoadSubDword(Translator& t,
                   {word, shift, t.U32(bits)});
 }
 
-// Component `i` of a buffer_load_format element, converted as the V#'s
-// DATA_FORMAT / NUM_FORMAT say (dword 3, [18:15] and [14:12]). The format is
-// only known at run time, so every width is decoded and the right one picked.
+// buffer_load_format converts as the V#'s DATA_FORMAT / NUM_FORMAT say (dword
+// 3, [18:15] and [14:12]). The format is only known at run time, so the facts
+// every component needs are decoded once per instruction and each component is
+// then one load and one extract, whatever its width. Decoding every width per
+// component made UE4 vertex shaders four times their size and dominated their
+// compile.
+struct BufferFormat {
+  Id dfmt_known, nfmt, bytes, bits, is32, integer, ncomp, umax, smax;
+};
+
+// 2 bits per DATA_FORMAT: component width (0 = not a plain 8/16/32 format,
+// 1 = 8, 2 = 16, 3 = 32 bits), and component count - 1.
+constexpr u32 FormatLut(std::initializer_list<std::pair<u32, u32>> v) {
+  u32 lut = 0;
+  for (const auto& [dfmt, code] : v)
+    lut |= code << (dfmt * 2);
+  return lut;
+}
+constexpr u32 kFormatWidth = FormatLut({{1, 1}, {2, 2}, {3, 1}, {4, 3},
+                                        {5, 2}, {10, 1}, {11, 3}, {12, 2},
+                                        {13, 3}, {14, 3}});
+constexpr u32 kFormatComps = FormatLut({{3, 1}, {5, 1}, {10, 3}, {11, 1},
+                                        {12, 3}, {13, 2}, {14, 3}});
+
+BufferFormat DecodeBufferFormat(Translator& t, Id dfmt, Id nfmt) {
+  BufferFormat f;
+  const Id shift = t.Shl(dfmt, t.U32(1));
+  const Id width = t.And(t.Shr(t.U32(kFormatWidth), shift), t.U32(3));
+  f.dfmt_known = t.IsNonZero(width);
+  f.nfmt = nfmt;
+  // An unknown format moves raw dwords.
+  f.bytes = t.SelectB(f.dfmt_known, t.Shr(t.Shl(t.U32(1), width), t.U32(1)),
+                      t.U32(4));
+  f.bits = t.Shl(f.bytes, t.U32(3));
+  f.is32 = t.Eq(f.bytes, t.U32(4));
+  f.integer = t.m.Emit(spv::Op::OpLogicalOr, t.t_bool,
+                       {t.Eq(nfmt, t.U32(4)), t.Eq(nfmt, t.U32(5))});
+  f.ncomp = t.Add(t.And(t.Shr(t.U32(kFormatComps), shift), t.U32(3)),
+                  t.U32(1));
+  const auto max_of = [&](Id bits) {
+    return t.m.Emit(spv::Op::OpConvertUToF, t.t_f,
+                    {t.Sub(t.Shl(t.U32(1), bits), t.U32(1))});
+  };
+  f.umax = max_of(f.bits);
+  f.smax = max_of(t.Sub(f.bits, t.U32(1)));
+  return f;
+}
+
+// Component `i` of a buffer_load_format element.
 Id FormattedComponent(Translator& t,
+                      const BufferFormat& f,
                       Id var,
                       Id byte_off,
-                      Id dfmt,
-                      Id nfmt,
                       u32 i) {
-  const auto is = [&](Id v, u32 k) { return t.Eq(v, t.U32(k)); };
-  const auto any = [&](Id v, std::initializer_list<u32> ks) {
-    Id r = t.m.ConstBool(false);
-    for (u32 k : ks)
-      r = t.m.Emit(spv::Op::OpLogicalOr, t.t_bool, {r, is(v, k)});
-    return r;
-  };
-  const auto fbits = [&](Id f) { return t.m.Bitcast(t.t_u, f); };
-  const auto to_f = [&](Id u) {
-    return t.m.Emit(spv::Op::OpConvertUToF, t.t_f, {u});
-  };
-  const auto to_fs = [&](Id u) {
-    return t.m.Emit(spv::Op::OpConvertSToF, t.t_f, {t.m.Bitcast(t.t_i, u)});
-  };
-  // Integer field -> bits for each NUM_FORMAT, given its width.
-  const auto convert = [&](Id raw, Id sraw, u32 bits) {
-    const float umax = static_cast<float>((1u << bits) - 1);
-    const float smax = static_cast<float>((1u << (bits - 1)) - 1);
-    const Id unorm = fbits(t.FDiv(to_f(raw), t.F32(umax)));
-    const Id snorm = fbits(t.Ext2(GLSLstd450FMax,
-                                  t.FDiv(to_fs(sraw), t.F32(smax)),
-                                  t.F32(-1.f)));
-    Id v = unorm;
-    v = t.SelectB(is(nfmt, 1), snorm, v);
-    v = t.SelectB(is(nfmt, 2), fbits(to_f(raw)), v);
-    v = t.SelectB(is(nfmt, 3), fbits(to_fs(sraw)), v);
-    v = t.SelectB(is(nfmt, 4), raw, v);
-    v = t.SelectB(is(nfmt, 5), sraw, v);
-    return v;
-  };
-  const Id raw32 = SsboLoad(t, var,
-                            t.UMin(t.Add(t.Shr(byte_off, t.U32(2)), t.U32(i)),
-                                   t.U32(kGfxBufferDwords - 1)));
-  const Id at16 = t.Add(byte_off, t.U32(2 * i));
-  const Id h = LoadSubDword(t, var, at16, 16, false);
-  const Id hs = LoadSubDword(t, var, at16, 16, true);
+  const auto fbits = [&](Id v) { return t.m.Bitcast(t.t_u, v); };
+  const Id at = t.Add(byte_off, t.Mul(f.bytes, t.U32(i)));
+  const Id word = SsboLoad(t, var, t.UMin(t.Shr(at, t.U32(2)),
+                                          t.U32(kGfxBufferDwords - 1)));
+  const Id shift = t.SelectB(f.is32, t.U32(0),
+                             t.Shl(t.And(at, t.U32(3)), t.U32(3)));
+  const Id raw = t.m.Emit(spv::Op::OpBitFieldUExtract, t.t_u,
+                          {word, shift, f.bits});
+  const Id sraw = t.m.Bitcast(
+      t.t_u, t.m.Emit(spv::Op::OpBitFieldSExtract, t.t_i,
+                      {t.m.Bitcast(t.t_i, word), shift, f.bits}));
+  const Id uf = t.m.Emit(spv::Op::OpConvertUToF, t.t_f, {raw});
+  const Id sf = t.m.Emit(spv::Op::OpConvertSToF, t.t_f,
+                         {t.m.Bitcast(t.t_i, sraw)});
   const Id half = fbits(t.m.CompositeExtract(
-      t.t_f, t.m.ExtInst(t.t_v2, GLSLstd450UnpackHalf2x16, {h}), 0));
-  const Id v16 = t.SelectB(is(nfmt, 7), half, convert(h, hs, 16));
-  const Id at8 = t.Add(byte_off, t.U32(i));
-  const Id v8 = convert(LoadSubDword(t, var, at8, 8, false),
-                        LoadSubDword(t, var, at8, 8, true), 8);
-  // Components each width's formats carry; the rest read 0, alpha 1.
-  const u32 need = i + 1;
-  const Id has32 = need == 1   ? any(dfmt, {4, 11, 13, 14})
-                   : need == 2 ? any(dfmt, {11, 13, 14})
-                   : need == 3 ? any(dfmt, {13, 14})
-                               : is(dfmt, 14);
-  const Id has16 = need == 1   ? any(dfmt, {2, 5, 12})
-                   : need == 2 ? any(dfmt, {5, 12})
-                               : is(dfmt, 12);
-  const Id has8 = need == 1   ? any(dfmt, {1, 3, 10})
-                  : need == 2 ? any(dfmt, {3, 10})
-                              : is(dfmt, 10);
-  const Id integer = any(nfmt, {4, 5});
+      t.t_f, t.m.ExtInst(t.t_v2, GLSLstd450UnpackHalf2x16, {raw}), 0));
+  const auto is = [&](u32 k) { return t.Eq(f.nfmt, t.U32(k)); };
+  Id v = fbits(t.FDiv(uf, f.umax));
+  v = t.SelectB(is(1), fbits(t.Ext2(GLSLstd450FMax, t.FDiv(sf, f.smax),
+                                    t.F32(-1.f))), v);
+  v = t.SelectB(is(2), fbits(uf), v);
+  v = t.SelectB(is(3), fbits(sf), v);
+  v = t.SelectB(is(4), raw, v);
+  v = t.SelectB(is(5), sraw, v);
+  v = t.SelectB(is(7), half, v);
+  v = t.SelectB(f.is32, raw, v);
+  // Components the format does not carry read 0, alpha 1.
   const Id missing =
-      i == 3 ? t.SelectB(integer, t.U32(1), fbits(t.F32(1.f))) : t.U32(0);
-  const Id known = any(dfmt, {1, 2, 3, 4, 5, 10, 11, 12, 13, 14});
-  Id v = t.SelectB(known, missing, raw32);
-  v = t.SelectB(has8, v8, v);
-  v = t.SelectB(has16, v16, v);
-  v = t.SelectB(has32, raw32, v);
-  return v;
+      i == 3 ? t.SelectB(f.integer, t.U32(1), fbits(t.F32(1.f))) : t.U32(0);
+  v = t.SelectB(t.Ult(t.U32(i), f.ncomp), v, missing);
+  return t.SelectB(f.dfmt_known, v, word);
 }
 
 // Sub-dword store: read-modify-write the containing dword.
@@ -385,22 +398,12 @@ u32 SmrdDwordCount(u32 op) {
   return op <= 0x04 ? (1u << op) : SmrdLoadCount(op);
 }
 
-// Cbuffer bindings are keyed by the SGPR the descriptor is read from. The same
-// SGPR can hold a flat pointer for one load and a V# for another (user data
-// s[0:1] as a table pointer, s[0:3] as a buffer), so the descriptor kind is
-// part of the key, otherwise whichever load came first would capture the
-// other's window.
-u32 CbufBindKey(u32 base_sgpr, bool pointer) {
-  return base_sgpr | (pointer ? 0x100u : 0u);
-}
-
 void EmitCbufSmrd(Translator& t,
                   const Inst& inst,
                   const std::unordered_map<u32, u32>& bindings) {
   const u32 w = inst.raw[0], n = SmrdDwordCount(inst.opcode);
   const u32 sdst = (w >> 15) & 0x7F, base_sgpr = ((w >> 9) & 0x3F) * 2;
-  const bool imm = (w >> 8) & 1;
-  const auto it = bindings.find(CbufBindKey(base_sgpr, inst.opcode <= 0x04));
+  const auto it = bindings.find(inst.pc);
   if (!n || it == bindings.end())
     return;
   const SmrdOffset so = DecodeSmrdOffset(inst);
@@ -418,7 +421,13 @@ bool PlanCbufs(const Program& program,
                u32 first_binding,
                std::vector<ShaderCbuf>& cbufs,
                std::unordered_map<u32, u32>& bindings,
-               const u8* reachable) {
+               const u8* reachable,
+               u32 max_bindings) {
+  // One binding per descriptor, not per SGPR: GTA:SA's radar material reloads
+  // s[20:23] with a second V#, and the load through the second one read the
+  // first one's constants (its alpha test then discarded the whole map).
+  DescriptorVersions versions;
+  std::unordered_map<u64, u32> by_key;
   u32 index = 0;
   for (const Inst& inst : program) {
     if (reachable && !reachable[index]) {
@@ -436,10 +445,13 @@ bool PlanCbufs(const Program& program,
     // it there. Draw-time scalar replay resolves both V#s and flat pointers at
     // the consuming load, so do not discard those chained descriptors.
     const bool pointer = inst.opcode <= 0x04;
-    const auto [it, inserted] = bindings.emplace(
-        CbufBindKey(base_sgpr, pointer), first_binding + cbufs.size());
+    const u32 version = versions.Of(base_sgpr, pointer ? 2 : 4);
+    versions.Note(inst);
+    const auto [it, inserted] =
+        by_key.emplace(CbufKey(base_sgpr, pointer, version),
+                       first_binding + static_cast<u32>(cbufs.size()));
     if (inserted) {
-      if (it->second >= kMaxCbufBindings) {
+      if (it->second >= max_bindings) {
         // Say so: a shader declined here has no unsupported instruction, so an
         // audit that only lists ops reports it as rejected for no reason.
         WarnUnsupported("smrd.cbuf-binding-count", it->second, w, inst.raw[1]);
@@ -449,8 +461,10 @@ bool PlanCbufs(const Program& program,
       cb.binding = it->second;
       cb.ud_sgpr = base_sgpr;
       cb.pointer = pointer;
+      cb.version = version;
       cbufs.push_back(cb);
     }
+    bindings[inst.pc] = it->second;
     const SmrdOffset so = DecodeSmrdOffset(inst);
     const u32 end = so.in_sgpr ? 256 : so.dwords + n;
     for (ShaderCbuf& cb : cbufs)
@@ -505,6 +519,8 @@ void EmitMimg(Translator& t,
   const bool gather = op >= 0x40 && op <= 0x5f && (op & 0x7) == 7;
   const bool dref = op == 0x28 || op == 0x2f || (gather && (op & 0x08));
   const bool offset = op == 0x37 || (gather && (op & 0x10));
+  // image_sample_b[_cl]: a LOD bias word precedes the coordinates.
+  const bool bias = op == 0x25 || op == 0x26;
   const auto addr_u = [&](u32 index) {
     return address ? address[index] : t.Vg(vaddr + index);
   };
@@ -526,7 +542,10 @@ void EmitMimg(Translator& t,
   const bool is_3d = ((sc.tex_3d_mask >> bind) & 1u) != 0;
   // An arrayed 3D sampled image is not a legal SPIR-V type; a 3D T# leaves DA
   // clear anyway, so the descriptor wins over a stray DA bit.
-  const bool arrayed = (w0 & 0x4000) != 0 && !is_3d;
+  // A cube samples as the 2D array of its faces: v_cube* leave the face id as
+  // the third address word and s/t in [1, 2].
+  const bool is_cube = ((t.tex_cube_mask >> bind) & 1u) != 0 && !is_3d;
+  const bool arrayed = ((w0 & 0x4000) != 0 || is_cube) && !is_3d;
   const u32 coord_components = arrayed || is_3d ? 3u : 2u;
   // A 1D T# is bound as a height-1 2D image: the address body carries x
   // (+layer), and y is synthesized at the row centre. Bloodborne's gamma pass
@@ -536,8 +555,13 @@ void EmitMimg(Translator& t,
   const u32 addr_components =
       is_1d ? (arrayed ? 2u : 1u) : coord_components;
   // OpImageSampleDref* / OpImageGather are undefined on Dim3D.
+  // A GTA:SA shader has one behind a 3D T#; rejecting it dropped the whole
+  // draw to the heuristic path, so read zeros instead.
   if (is_3d && (dref || gather)) {
-    WarnUnsupported("mimg.3d-dref-gather", op, w0, w1);
+    NoteApproximated("mimg.3d-dref-gather", op);
+    const u32 n = gather ? 4u : (dmask ? 1u : 0u);
+    for (u32 i = 0; i < n; i++)
+      t.SetVg(vdata + i, t.U32(0));
     return;
   }
 
@@ -646,9 +670,10 @@ void EmitMimg(Translator& t,
 
   // The ISA fixes the vaddr[] order as "Offsets, bias, zpcf, then coordinates",
   // so a compared-and-offset form (image_gather4_c_lz_o) finds its z-compare at
-  // word 1, not word 0. Bias-carrying forms are rejected above rather than
-  // modelled, which is why no bias word is accounted for here.
-  const u32 dref_index = offset ? 1u : 0u;
+  // word 1, not word 0. Reading a bias as the first coordinate sampled every
+  // UE4 material of GTA:SA along a single texel column: the stretched stripes.
+  const u32 bias_index = offset ? 1u : 0u;
+  const u32 dref_index = bias_index + (bias ? 1u : 0u);
   // _D / _CD carry user derivatives between the z-compare and the coordinates:
   // two words per sampled dimension. A compute stage has no implicit
   // derivatives, so these are the only sample forms it can use. GTA:SA's
@@ -657,12 +682,47 @@ void EmitMimg(Translator& t,
   const bool derivs = op == 0x22 || op == 0x2a || op == 0x68 || op == 0x6a;
   const u32 deriv_dims = is_1d ? 1u : (is_3d ? 3u : 2u);
   const u32 deriv_words = derivs ? deriv_dims * 2u : 0u;
-  const u32 deriv_index = (offset ? 1u : 0u) + (dref ? 1u : 0u);
-  const u32 body_addr =
-      vaddr + (offset ? 1u : 0u) + (dref ? 1u : 0u) + deriv_words;
+  const u32 deriv_index = dref_index + (dref ? 1u : 0u);
+  const u32 body_addr = vaddr + deriv_index + deriv_words;
   const u32 body_index = body_addr - vaddr;
   Id x = addr_f(body_index);
   Id y = is_1d ? t.F32(0.5f) : addr_f(body_index + 1);
+  if (is_cube) {
+    x = t.FSub(x, t.F32(1.f));
+    y = t.FSub(y, t.F32(1.f));
+  }
+  // Normalized coordinates are relative to the T#'s extent. A render target
+  // is sized from its CB pitch, so its image can be wider and taller than the
+  // T# that samples it (GTA:SA's 1680x948 scene in a 1792x960 image); the
+  // coordinates then have to be scaled into the image.
+  Id scale_x = 0, scale_y = 0;
+  if (sc.gcn_tsharp && !is_3d && op != 0x00 && op != 0x01) {
+    t.RequireImageQuery();
+    const u32 srsrc = ((w1 >> 16) & 0x1F) * 4;
+    const Id dw2 = t.Sg(srsrc + 2);
+    const Id base_level = t.And(t.Shr(t.Sg(srsrc + 3), t.U32(12)), t.U32(0xF));
+    const Id image = t.m.Emit(spv::Op::OpImage, img_ty, {si});
+    const Id size = t.m.Emit(spv::Op::OpImageQuerySizeLod,
+                             t.m.TypeVec(t.t_u, coord_components),
+                             {image, t.U32(0)});
+    const auto axis = [&](u32 shift, u32 comp) {
+      const Id extent = t.Add(t.And(t.Shr(dw2, t.U32(shift)), t.U32(0x3FFF)),
+                              t.U32(1));
+      const Id tex = t.UMax(t.Shr(extent, base_level), t.U32(1));
+      const Id img = t.m.CompositeExtract(t.t_u, size, comp);
+      const Id ratio =
+          t.FDiv(t.m.Emit(spv::Op::OpConvertUToF, t.t_f, {tex}),
+                 t.m.Emit(spv::Op::OpConvertUToF, t.t_f, {img}));
+      return t.SelectF(t.m.Emit(spv::Op::OpULessThan, t.t_bool, {tex, img}),
+                       ratio, t.F32(1.f));
+    };
+    scale_x = axis(0, 0);
+    x = t.FMul(x, scale_x);
+    if (!is_1d) {
+      scale_y = axis(14, 1);
+      y = t.FMul(y, scale_y);
+    }
+  }
   if (offset) {
     // GFX7 packs signed six-bit X/Y texel offsets before the address body.
     // Vulkan 1.1 does not permit a dynamic Offset operand on OpImageSample*,
@@ -693,7 +753,7 @@ void EmitMimg(Translator& t,
   const u32 lod_operand =
       static_cast<u32>(spv::ImageOperandsMask::Lod);
   const bool known = op == 0x00 || op == 0x01 || op == 0x20 || op == 0x21 ||
-                     op == 0x24 || op == 0x25 || op == 0x27 || op == 0x28 ||
+                     op == 0x24 || bias || op == 0x27 || op == 0x28 ||
                      op == 0x2f || op == 0x37 || gather || derivs;
   if (!known)
     WarnUnsupported("mimg", op, w0, w1);
@@ -701,11 +761,16 @@ void EmitMimg(Translator& t,
   // dimension; an array layer is a coordinate but not a derivative.
   const u32 grad_operand = static_cast<u32>(spv::ImageOperandsMask::Grad);
   const auto deriv_vec = [&](u32 first) {
+    const auto scaled = [&](u32 i) {
+      const Id v = addr_f(deriv_index + first + i);
+      const Id scale = i == 0 ? scale_x : i == 1 ? scale_y : 0;
+      return scale ? t.FMul(v, scale) : v;
+    };
     if (deriv_dims == 1)
-      return addr_f(deriv_index + first);
+      return scaled(0);
     Id c[3];
     for (u32 i = 0; i < deriv_dims; i++)
-      c[i] = addr_f(deriv_index + first + i);
+      c[i] = scaled(i);
     return t.m.CompositeConstruct(
         t.m.TypeVec(t.t_f, deriv_dims),
         deriv_dims == 2 ? std::vector<Id>{c[0], c[1]}
@@ -735,8 +800,7 @@ void EmitMimg(Translator& t,
   } else if (op == 0x24) {  // image_sample_l: explicit LOD after the body
     texel = t.m.Emit(
         spv::Op::OpImageSampleExplicitLod, texel_ty,
-        {si, uv, lod_operand,
-         addr_f(is_1d ? body_index + addr_components : coord_components)});
+        {si, uv, lod_operand, addr_f(body_index + addr_components)});
   } else if (derivs && dref) {  // image_sample_c_[c]d
     texel = t.m.Emit(spv::Op::OpImageSampleDrefExplicitLod, t.t_f,
                      {si, uv, addr_f(dref_index), grad_operand,
@@ -766,7 +830,11 @@ void EmitMimg(Translator& t,
       component++;
     texel =
         t.m.Emit(spv::Op::OpImageGather, texel_ty, {si, uv, t.U32(component)});
-  } else {  // image_sample / _cl / _b (bias/derivs ignored): implicit LOD
+  } else if (bias) {  // image_sample_b[_cl] (the clamp is ignored)
+    texel = t.m.Emit(spv::Op::OpImageSampleImplicitLod, texel_ty,
+                     {si, uv, static_cast<u32>(spv::ImageOperandsMask::Bias),
+                      addr_f(bias_index)});
+  } else {  // image_sample / _cl (the clamp is ignored): implicit LOD
     texel = t.m.Emit(spv::Op::OpImageSampleImplicitLod, texel_ty, {si, uv});
   }
 
@@ -965,8 +1033,9 @@ void EmitGfxMubuf(Translator& t, const Inst& inst, StageContext& sc) {
     const Id w3 = t.Sg(srsrc + 3);
     const Id dfmt = t.And(t.Shr(w3, t.U32(15)), t.U32(0xF));
     const Id nfmt = t.And(t.Shr(w3, t.U32(12)), t.U32(0x7));
+    const BufferFormat format = DecodeBufferFormat(t, dfmt, nfmt);
     for (u32 i = 0; i < n; i++)
-      t.SetVg(vdata + i, FormattedComponent(t, var, byte_off, dfmt, nfmt, i));
+      t.SetVg(vdata + i, FormattedComponent(t, format, var, byte_off, i));
     return;
   }
   for (u32 i = 0; i < n; i++)

@@ -118,10 +118,11 @@ void DispatchCheckpoint(VkCommandBuffer cmd, u64 cs_addr, bool after);
 bool QueueCheck(const char* where);
 bool QueueCheckArmed();
 
-// Persist the driver's pipeline cache. Called after a pipeline is created
-// rather than at exit: the runner SIGKILLs the emulator, so an atexit hook
-// would never fire on the runs that matter. Cheap and self-throttling: it
-// only writes when new pipelines have appeared since the last write.
+// Persist the driver's pipeline cache. Called once a frame rather than at exit:
+// the runner SIGKILLs the emulator, so an atexit hook would never fire on the
+// runs that matter. Writes only once a burst of pipeline builds has settled.
 void SavePipelineCache(bool force = false);
+// Call after every pipeline creation; defers the save past the burst.
+void NotePipelineBuilt();
 
 }  // namespace gpu::vk

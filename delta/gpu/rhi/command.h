@@ -85,6 +85,11 @@ struct DrawInfo {
   u64 rt_base = 0;  // CB_COLOR0 address; the draw's render target
   // Slices a layered pass (a GS writing gl_Layer) renders in one draw.
   u32 rt_layers = 1;
+  // MRT0 is one slice of an array or cube surface (CB_COLOR0_VIEW selects a
+  // single slice past the first): rt_base points at that slice and the surface
+  // starts at rt_array_base. rt_tile_mode is CB_COLOR0_ATTRIB.TILE_MODE_INDEX.
+  u64 rt_array_base = 0;
+  u32 rt_tile_mode = 0;
   u32 rt_w = 0,
            rt_h = 0;  // render-target dimensions (shared by all MRT targets)
 
@@ -182,6 +187,8 @@ struct DrawInfo {
   // hardware writes a channel only when this and target_mask both enable it,
   // and leaves the rest of the target untouched.
   u32 shader_mask = 0;
+  // SPI_SHADER_COL_FORMAT, 4 bits per MRT (0 = ZERO, 1 = 32_R ... 9 = 32_ABGR).
+  u32 col_format = 0;
   u32 color_control = 0;
 
   // Depth/stencil: valid depth_base + depth_valid binds a depth attachment keyed by

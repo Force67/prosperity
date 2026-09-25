@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <unordered_set>
 #include <vector>
 
 #include <utl/mem.h>
@@ -57,7 +58,26 @@ struct TextureMasks {
   u32 tex_3d = 0;
   u32 tex_1d = 0;
   u32 tex_uint = 0;
+  u32 tex_cube = 0;
 };
+
+// Bytes per texel of a CB_COLORn_INFO.FORMAT, or 0 for one this does not know.
+u32 CbFormatBytes(u32 format) {
+  switch (format) {
+    case 1:
+      return 1;
+    case 2: case 3: case 16: case 17: case 18: case 19:
+      return 2;
+    case 4: case 5: case 6: case 7: case 8: case 9: case 10: case 20: case 21:
+      return 4;
+    case 11: case 12:
+      return 8;
+    case 14:
+      return 16;
+    default:
+      return 0;
+  }
+}
 
 // The CB registers carry a pitch and a slice, not a width and a height, so the
 // screen scissor is the only place the render-target geometry appears.
@@ -116,6 +136,8 @@ void BindTexture(rhi::DrawInfo& d,
     masks.tex_3d |= 1u << slot;
   if (t.is_1d)
     masks.tex_1d |= 1u << slot;
+  if (t.type == 11)
+    masks.tex_cube |= 1u << slot;
   // T# NUM_FORMAT 4/5 are UINT/SINT: the texels are packed bits, not a colour,
   // and must reach the shader unconverted.
   if (kIntegerRt && !t.storage && (t.nfmt == 4 || t.nfmt == 5))
@@ -261,6 +283,19 @@ u32 ResolveRenderTargets(const Regs& regs,
         64u;
     d.mrt_surf_w[rt] = rt_pitch;
     d.mrt_surf_h[rt] = rt_pitch ? static_cast<u32>(rt_slice / rt_pitch) : 0u;
+    // One slice of an array or cube surface lives rt_slice texels further on;
+    // rendering every slice into the base's image made the six faces of a cube
+    // overwrite each other. A layered pass (START < MAX) keeps the base.
+    if (rt == 0) {
+      d.rt_tile_mode = regs[mmCB_COLOR0_ATTRIB] & 0x1Fu;
+      const u32 view = regs[mmCB_COLOR0_VIEW];
+      const u32 first = view & 0x7FFu, last = (view >> 13) & 0x7FFu;
+      const u32 bytes = CbFormatBytes((info >> 2) & 0x1Fu);
+      if (first && first == last && bytes) {
+        d.rt_array_base = base;
+        d.mrt_base[rt] = base + first * rt_slice * bytes;
+      }
+    }
     // A FAST_CLEAR target is cleared by writing its CMASK, never its pixels.
     if ((info >> 13) & 1u) {
       d.mrt_dcc_base[rt] =
@@ -308,6 +343,7 @@ void ResolveColorState(const Regs& regs, u64 ps_addr, rhi::DrawInfo& d) {
   }
   d.target_mask = regs[mmCB_TARGET_MASK];
   d.shader_mask = regs[mmCB_SHADER_MASK];
+  d.col_format = regs[mmSPI_SHADER_COL_FORMAT];
 
   // GNM fast clear: RECT_LIST (VGT prim 17), no pixel shader, no vertex
   // attributes, at least one colour target bound. The colour is in
@@ -361,6 +397,13 @@ void ResolveDepthState(const Regs& regs, rhi::DrawInfo& d) {
     std::memcpy(&d.depth_clear, regs.At(mmDB_DEPTH_CLEAR), 4);
     if (!(d.depth_clear >= 0.0f && d.depth_clear <= 1.0f))
       d.depth_clear = 1.0f;
+    // DB_Z_INFO.TILE_SURFACE_ENABLE: the surface has HTILE, and a fill of it
+    // is a depth clear (GTA:SA clears its scene depth with a compute fill).
+    if ((z_info >> 29) & 1u) {
+      const u64 htile = static_cast<u64>(regs[mmDB_HTILE_DATA_BASE]) << 8;
+      if (IsGuestAddress(htile))
+        d.depth_htile_base = htile;
+    }
     d.stencil_enable = !kNoStencil && (depth_control & 1u) &&
                        (stencil_info & 1u) && IsGuestAddress(stencil_base);
     if (d.stencil_enable) {
@@ -667,10 +710,10 @@ void ResolveCbufferBindings(const std::vector<gcn::ShaderCbuf>& cbufs,
                             bool& resolved_vs_cbuf) {
   auto resolved = gcn::ResolveCbuffers(program, user_data);
   for (const auto& cb : cbufs) {
-    if (cb.binding >= 8)
+    if (cb.binding >= std::size(d.cbufs))
       continue;
     gcn::VBuffer vb{};
-    auto it = resolved.find(cb.ud_sgpr | (cb.pointer ? 0x100u : 0u));
+    auto it = resolved.find(gcn::CbufKey(cb.ud_sgpr, cb.pointer, cb.version));
     if (it != resolved.end())
       vb = it->second;  // EUD-resolved V# (handles indirection)
     else if (cb.pointer && cb.ud_sgpr + 1 < 16)
@@ -733,6 +776,47 @@ void ResolveRawBuffers(const std::vector<gcn::ShaderBuffer>& buffers,
 // Run the game's own shaders for this draw: recompile the VS/PS pair (cached)
 // and resolve the live buffers they read. The heuristic fields stay populated
 // as the fallback for a draw this declines.
+// The module identity of a draw: everything GetGraphicsShader keys on except
+// the vertex-input masks, which need the module's attribute list first.
+GraphicsShaderState ShaderStateOf(const Regs& regs,
+                                  u64 vs_addr,
+                                  const gcn::GsPipeline* gs,
+                                  u64 ps_addr,
+                                  u64 fetch_addr,
+                                  const u32* ps_in_cntl,
+                                  const TextureMasks& masks,
+                                  u32 mrt_uint_mask,
+                                  u32 mrt_bound_mask) {
+  GraphicsShaderState state;
+  state.vs_addr = gs ? regs.ShaderAddr(mmSPI_SHADER_PGM_LO_VS) : vs_addr;
+  state.gs = gs;
+  state.ps_addr = ps_addr;
+  state.fetch_addr = fetch_addr;
+  state.ps_input_ena = regs[mmSPI_PS_INPUT_ENA];
+  state.ps_in_cntl = ps_in_cntl;
+  // A PS names an input SLOT; SPI_PS_INPUT_CNTL_<slot>.OFFSET names the VS
+  // parameter export that slot reads, and it is routinely not the identity.
+  // GTA:SA's UI shader has slot 1 -> param 3: assuming identity handed it the
+  // clip position as a texture coordinate and the vertex colour as a scale, so
+  // every UI quad sampled texel (0,0) and multiplied it by zero, a black
+  // screen over a main menu that was otherwise drawing correctly.
+  // DELTA_GPU_PSCNTL_APPLY=0 goes back to the identity, =<ps addr> applies the
+  // mapping to one shader (Isaac/Undertale/Doom64 are unchanged either way).
+  state.honour_ps_in_cntl = kCntlApply != 0 && (kCntlApply == 1 ||
+                                                ps_addr == (u64)kCntlApply);
+  state.ps_num_interp = regs[mmSPI_PS_IN_CONTROL] & 0x3F;
+  state.tex_3d_mask = masks.tex_3d;
+  state.tex_1d_mask = masks.tex_1d;
+  state.tex_cube_mask = masks.tex_cube;
+  state.tex_uint_mask = masks.tex_uint;
+  state.mrt_uint_mask = mrt_uint_mask;
+  state.mrt_bound_mask = mrt_bound_mask;
+  if (ps_addr)
+    state.col_format = regs[mmSPI_SHADER_COL_FORMAT];
+  state.gl_clip = !((regs[mmPA_CL_CLIP_CNTL] >> 19) & 1);
+  return state;
+}
+
 RecompStatus ResolveRecompiledShaders(
     const Regs& regs,
     u64 vs_addr,
@@ -759,31 +843,9 @@ RecompStatus ResolveRecompiledShaders(
   TracePsInputCntl(regs, ps_addr, ps_input_ena, ps_in_cntl);
   TraceDepthBaseWatch(regs);
 
-  GraphicsShaderState state;
-  state.vs_addr = gs ? regs.ShaderAddr(mmSPI_SHADER_PGM_LO_VS) : vs_addr;
-  state.gs = gs;
-  state.ps_addr = ps_addr;
-  state.fetch_addr = fetch_addr;
-  state.ps_input_ena = ps_input_ena;
-  state.ps_in_cntl = ps_in_cntl;
-  // A PS names an input SLOT; SPI_PS_INPUT_CNTL_<slot>.OFFSET names the VS
-  // parameter export that slot reads, and it is routinely not the identity.
-  // GTA:SA's UI shader has slot 1 -> param 3: assuming identity handed it the
-  // clip position as a texture coordinate and the vertex colour as a scale, so
-  // every UI quad sampled texel (0,0) and multiplied it by zero, a black
-  // screen over a main menu that was otherwise drawing correctly.
-  // DELTA_GPU_PSCNTL_APPLY=0 goes back to the identity, =<ps addr> applies the
-  // mapping to one shader (Isaac/Undertale/Doom64 are unchanged either way).
-  state.honour_ps_in_cntl = kCntlApply != 0 && (kCntlApply == 1 ||
-                                                ps_addr == (u64)kCntlApply);
-  state.ps_num_interp = regs[mmSPI_PS_IN_CONTROL] & 0x3F;
-  state.tex_3d_mask = masks.tex_3d;
-  state.tex_1d_mask = masks.tex_1d;
-  state.tex_uint_mask = masks.tex_uint;
-  state.mrt_uint_mask = mrt_uint_mask;
-  state.mrt_bound_mask = mrt_bound_mask;
-  state.gl_clip = !((regs[mmPA_CL_CLIP_CNTL] >> 19) & 1);
-
+  GraphicsShaderState state =
+      ShaderStateOf(regs, vs_addr, gs, ps_addr, fetch_addr, ps_in_cntl, masks,
+                    mrt_uint_mask, mrt_bound_mask);
   const gcn::Recompiled* rc = &GetGraphicsShader(regs, state);
   if (!rc->ok)
     return RecompStatus::kRejected;
@@ -847,7 +909,14 @@ RecompStatus ResolveRecompiledShaders(
   if (ps_program)
     ResolveCbufferBindings(rc->ps_cbufs, pud, ps_program, false, d,
                            resolved_vs_cbuf);
+  if (gs && !rc->gs_cbufs.empty())
+    ResolveCbufferBindings(
+        rc->gs_cbufs, regs.At(mmSPI_SHADER_USER_DATA_GS_0),
+        gcn::CachedProgram(reinterpret_cast<u64>(gs->gs_code), 4096), false,
+        d, resolved_vs_cbuf);
   for (const auto& cb : rc->vs_cbufs)
+    d.num_cbufs = std::max(d.num_cbufs, cb.binding + 1);
+  for (const auto& cb : rc->gs_cbufs)
     d.num_cbufs = std::max(d.num_cbufs, cb.binding + 1);
   for (const auto& cb : rc->ps_cbufs)
     d.num_cbufs = std::max(d.num_cbufs, cb.binding + 1);
@@ -947,6 +1016,47 @@ bool BuildDrawInfo(rhi::Renderer& renderer,
   if (kSkipStale && d.tex_base && d.tex_w >= 2048)
     return false;
   return d.vertex_data || (d.recomp && d.recomp->ok && d.num_vattrs == 0);
+}
+
+void PrefetchDrawShaders(const Regs& regs) {
+  if (!kRecompOn)
+    return;
+  gcn::GsPipeline gs;
+  const bool has_gs =
+      ResolveGsPipeline(regs, regs[mmVGT_PRIMITIVE_TYPE], gs);
+  const u64 vs_addr = has_gs ? regs.ShaderAddr(mmSPI_SHADER_PGM_LO_ES)
+                             : regs.ShaderAddr(mmSPI_SHADER_PGM_LO_VS);
+  const u64 ps_addr = regs.ShaderAddr(mmSPI_SHADER_PGM_LO_PS);
+  // Most draws reuse a shader pair; only a new one is worth resolving.
+  static std::unordered_set<u64> seen;
+  if (!seen.insert(vs_addr * 0x9e3779b97f4a7c15ull ^ ps_addr).second)
+    return;
+  if (ShaderSkipped(vs_addr, ps_addr) || !IsGuestAddress(vs_addr) ||
+      (ps_addr && !IsGuestAddress(ps_addr)))
+    return;
+  const u32* vud = regs.At(has_gs ? mmSPI_SHADER_USER_DATA_ES_0
+                                  : mmSPI_SHADER_USER_DATA_VS_0);
+  thread_local rhi::DrawInfo d;
+  d = rhi::DrawInfo{};
+  const u32 mrt_uint_mask = ResolveRenderTargets(regs, d, vs_addr, ps_addr);
+  TextureMasks masks;
+  if (IsGuestAddress(ps_addr)) {
+    const auto texs = gcn::TrackTextures(
+        gcn::CachedProgram(ps_addr, 4096),
+        regs.At(mmSPI_SHADER_USER_DATA_PS_0), false, ps_addr);
+    for (u32 i = 0; i < texs.size() && i < kMaxTrackedTextures; i++)
+      BindTexture(d, texs[i], i, masks);
+    d.num_texs =
+        static_cast<u32>(std::min<size_t>(texs.size(), kMaxTrackedTextures));
+  }
+  ResolveVsTextures(vud, vs_addr, d, masks);
+  u32 ps_in_cntl[32];
+  for (u32 i = 0; i < 32; i++)
+    ps_in_cntl[i] = regs[mmSPI_PS_INPUT_CNTL_0 + i];
+  PrefetchGraphicsShader(
+      regs, ShaderStateOf(regs, vs_addr, has_gs ? &gs : nullptr, ps_addr,
+                          FetchShaderAddress(vud, vs_addr), ps_in_cntl, masks,
+                          mrt_uint_mask, d.mrt_bound_mask));
 }
 
 }  // namespace gpu::ps4

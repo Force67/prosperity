@@ -111,12 +111,19 @@ std::vector<TImage> TrackTextures(
     bool trace = false,
     u64 code_base = 0);
 
+// A cbuffer as the translator binds it: the SGPR its descriptor sits in, the
+// kind of descriptor (one SGPR can hold a flat pointer for one load and a V#
+// for another), and which load filled it (DescriptorVersions).
+inline u64 CbufKey(u32 base_sgpr, bool pointer, u32 version) {
+  return (static_cast<u64>(version) << 32) | base_sgpr | (pointer ? 0x100u : 0u);
+}
+
 // Resolve the live descriptor behind each cbuffer, following the same extended-
 // user-data / SRT chains as TrackTextures: a 4-dword V# (s_buffer_load) or a
-// 2-dword flat pointer (s_load, .base only, no size field). Keyed by base SGPR
-// OR'd 0x100 for a pointer (one SGPR can serve both). FOX passes cbuffer
-// descriptors through EUD, so the chain is walked and read at the point of load.
-std::unordered_map<u32, VBuffer> ResolveCbuffers(
+// 2-dword flat pointer (s_load, .base only, no size field). Keyed by CbufKey.
+// FOX passes cbuffer descriptors through EUD, so the chain is walked and read
+// at the point of load.
+std::unordered_map<u64, VBuffer> ResolveCbuffers(
     const std::shared_ptr<const Program>& program,
     const u32* user_data);
 

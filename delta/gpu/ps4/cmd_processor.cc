@@ -34,6 +34,7 @@
 namespace {
 DELTA_OPTION(bool, kCeOn, "DELTA_GPU_CE", true);
 DELTA_OPTION(bool, kNoCopy, "DELTA_GPU_NODMACOPY", false);
+DELTA_OPTION(bool, kPrefetchShaders, "DELTA_GPU_PREFETCH_SHADERS", true);
 }  // namespace
 
 namespace gpu::rhi {
@@ -805,6 +806,73 @@ u32 WalkDcb(rhi::Renderer& renderer,
   return i;
 }
 
+// Look ahead through a command buffer for the shaders its draws will need, so
+// they compile on worker threads before the walk reaches them. Only register
+// writes are followed; a draw whose state this misreads just compiles in line
+// as it always did.
+void PrefetchWalk(Regs& regs, const u32* p, u32 words, u32 depth) {
+  u32 i = 0;
+  while (i < words) {
+    const u32 hdr = p[i];
+    const Pm4Type type = Pm4TypeOf(hdr);
+    if (type == Pm4Type::kType2 || hdr == 0) {
+      i += 1;
+      continue;
+    }
+    const u32 count = Pm4Count(hdr);
+    if (type == Pm4Type::kType0) {
+      const u32 base = Pm4Type0Reg(hdr);
+      for (u32 k = 0; k < count && i + 1 + k < words; k++)
+        if (base + k < kRegFileSize)
+          regs[base + k] = p[i + 1 + k];
+      i += 1 + count;
+      continue;
+    }
+    if (type != Pm4Type::kType3 || i + 1 + count > words)
+      return;
+    const u32 op = Pm4Opcode(hdr);
+    const u32* body = &p[i + 1];
+    u32 reg_base = 0;
+    switch (op) {
+      case IT_SET_CONTEXT_REG:
+        reg_base = kContextRegBase;
+        break;
+      case IT_SET_SH_REG:
+      case IT_SET_SH_REG_INDEX:
+        reg_base = kShRegBase;
+        break;
+      case IT_SET_UCONFIG_REG:
+        reg_base = kUConfigRegBase;
+        break;
+      case IT_SET_CONFIG_REG:
+        reg_base = kConfigRegBase;
+        break;
+      case IT_INDIRECT_BUFFER: {
+        const u32* chain = nullptr;
+        u32 chain_dwords = 0;
+        if (depth < kMaxIbDepth &&
+            ResolveIndirectBuffer(body, count, chain, chain_dwords))
+          PrefetchWalk(regs, chain, chain_dwords, depth + 1);
+        break;
+      }
+      case IT_DISPATCH_DIRECT:
+        PrefetchComputeDispatch(regs);
+        break;
+      default:
+        if (IsDraw(op))
+          PrefetchDrawShaders(regs);
+        break;
+    }
+    if (reg_base && count) {
+      const u32 first = Pm4SetRegAddress(reg_base, body[0]);
+      for (u32 k = 1; k < count; k++)
+        if (first + k - 1 < kRegFileSize)
+          regs[first + k - 1] = body[k];
+    }
+    i += 1 + count;
+  }
+}
+
 // Wall time of one command-buffer walk, including the wait for the lock: a
 // second submit thread blocked behind the first is time the guest is stalled on
 // us either way.
@@ -890,6 +958,11 @@ void SubmitDcb(const void* dcb, u32 size_bytes) {
   const bool dump = ShouldDumpDcb(size_bytes);
   TraceDcbStat(words);
 
+  if (kPrefetchShaders && renderer.available()) {
+    static Regs prefetch_regs;
+    prefetch_regs = g_regs;
+    PrefetchWalk(prefetch_regs, p, words, 0);
+  }
   const u32 walked = WalkDcb(renderer, p, words, 0, dump);
   if (dump)
     TraceDcbWalkResult(p, words, walked);

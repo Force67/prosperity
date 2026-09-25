@@ -29,6 +29,8 @@ bool RecompileSpirv(const u32*,
                      bool,
                      const GsPipeline*,
                      u32,
+                     u32,
+                     u32,
                      Recompiled&) {
   return false;
 }
@@ -62,7 +64,8 @@ bool RecompileComputeSpirv(const u32*,
 
 namespace {
 DELTA_OPTION(u32, kCfgMaxIter, "DELTA_GPU_CFG_MAXITER", 16384);
-DELTA_OPTION(u64, kShDisAddr, "DELTA_GPU_SHDIS_ADDR", 0);
+// Strings: the option parser saturates a u64 above 2^63, as most hashes are.
+DELTA_OPTION(const char*, kShDisAddr, "DELTA_GPU_SHDIS_ADDR", nullptr);
 DELTA_OPTION(bool, kGpuNokill, "DELTA_GPU_NOKILL", false);
 // DELTA_GPU_PROBE_PS=<hex ps guest address>: restrict every pixel-shader
 // probe below to that one shader. Without it PSWHITE/PSTEX/PSATTR/PSVGPR/
@@ -70,7 +73,8 @@ DELTA_OPTION(bool, kGpuNokill, "DELTA_GPU_NOKILL", false);
 // to isolate it with ONLY_PS, and isolating a DEFERRED pass drops the
 // G-buffer it samples, which answers a different question. With this the
 // probe runs inside a complete, correct frame.
-DELTA_OPTION(u64, kProbePs, "DELTA_GPU_PROBE_PS", 0);
+// Like DELTA_GPU_SHDIS_ADDR, also takes the code's content hash.
+DELTA_OPTION(const char*, kProbePs, "DELTA_GPU_PROBE_PS", nullptr);
 DELTA_OPTION(bool, kGpuPswhite, "DELTA_GPU_PSWHITE", false);
 DELTA_OPTION(bool, kProbeAlpha, "DELTA_GPU_PSPROBE_A", false);
 DELTA_OPTION(int, kGpuPstex, "DELTA_GPU_PSTEX", 0);
@@ -131,9 +135,27 @@ DELTA_OPTION(bool, kGpuVsNoPred, "DELTA_GPU_VSNOPRED", false);
 namespace gpu::gcn {
 
 namespace {
+// Whether `spec` (hex) names the shader at `code`: its guest address, or, since
+// addresses move between runs, the content hash a GPU capture reports for it
+// (guest_hash: FNV-1a over the dwords up to and including s_endpgm).
+bool CodeMatches(const char* spec, const void* code) {
+  const u64 wanted = std::strtoull(spec, nullptr, 16);
+  if (reinterpret_cast<u64>(code) == wanted)
+    return true;
+  const auto* dwords = static_cast<const u32*>(code);
+  u64 h = 1469598103934665603ull;
+  for (u32 i = 0; i < 8192 && code; i++) {
+    h = (h ^ dwords[i]) * 1099511628211ull;
+    if (dwords[i] == 0xBF810000u)
+      break;
+  }
+  return h == wanted;
+}
+
 // Whether the pixel-shader probes apply to the shader being translated.
 bool ProbeThisPs(const Translator& t) {
-  return !kProbePs || t.program_base == kProbePs.get();
+  return !kProbePs ||
+         CodeMatches(kProbePs, reinterpret_cast<const void*>(t.program_base));
 }
 
 thread_local bool g_had_unsupported = false;
@@ -662,6 +684,82 @@ Id PsColorOut(Translator& t, StageContext& sc, u32 target) {
   return v;
 }
 
+// The four channels an MRT export hands the colour buffer, and which of them it
+// writes. SPI_SHADER_COL_FORMAT decides how the SPI reads the export's
+// registers: 32_R/32_GR/32_AR pass one or two dwords through, the 16-bit
+// formats unpack a pair per register (UNORM16 is v_cvt_pknorm_u16 output, not
+// halves), and 32_ABGR passes all four. Without the register, COMPR alone
+// picks between halves and four dwords.
+void ExportColor(Translator& t, StageContext& sc, u32 target, u32 en,
+                 u32 compr, const u32 v[4], bool int_target, Id c[4],
+                 bool live[4]) {
+  u32 fmt = sc.col_format == kColFormatUnknown
+                ? (compr ? 4u : 9u)
+                : (sc.col_format >> (4 * target)) & 0xFu;
+  // ZERO, or an export that disagrees with the register: trust the export.
+  const bool packed = fmt >= 4 && fmt <= 8;
+  if (fmt == 0 || packed != (compr != 0))
+    fmt = compr ? 4u : 9u;
+  for (u32 i = 0; i < 4; i++) {
+    c[i] = int_target ? t.U32(i == 3 ? 1u : 0u) : t.F32(i == 3 ? 1.f : 0.f);
+    live[i] = false;
+  }
+  const auto dword = [&](u32 i) {
+    c[i] = int_target ? t.Vg(v[i]) : t.VgF(v[i]);
+    live[i] = (en >> i) & 1u;
+  };
+  switch (fmt) {
+    case 1:  // 32_R
+      dword(0);
+      return;
+    case 2:  // 32_GR
+      dword(0);
+      dword(1);
+      return;
+    case 3:  // 32_AR: red and alpha travel in the X and W slots
+      dword(0);
+      dword(3);
+      return;
+    case 9:  // 32_ABGR
+      for (u32 i = 0; i < 4; i++)
+        dword(i);
+      return;
+    default:
+      break;
+  }
+  for (u32 p = 0; p < 2; p++) {
+    if (!(en & (0x3u << (2 * p))))
+      continue;
+    const Id word = t.Vg(v[p]);
+    live[2 * p] = live[2 * p + 1] = true;
+    if (fmt == 7 || fmt == 8) {  // UINT16 / SINT16
+      const spv::Op ext =
+          fmt == 8 ? spv::Op::OpBitFieldSExtract : spv::Op::OpBitFieldUExtract;
+      for (u32 h = 0; h < 2; h++) {
+        const Id x = t.m.Emit(ext, t.t_u, {word, t.U32(16 * h), t.U32(16)});
+        c[2 * p + h] =
+            int_target ? x
+                       : t.m.Emit(fmt == 8 ? spv::Op::OpConvertSToF
+                                           : spv::Op::OpConvertUToF,
+                                  t.t_f, {fmt == 8 ? t.m.Bitcast(t.t_i, x) : x});
+      }
+      continue;
+    }
+    if (int_target) {  // a float pack into an integer target: the raw halves
+      for (u32 h = 0; h < 2; h++)
+        c[2 * p + h] = t.m.Emit(spv::Op::OpBitFieldUExtract, t.t_u,
+                                {word, t.U32(16 * h), t.U32(16)});
+      continue;
+    }
+    const u32 unpack = fmt == 5   ? GLSLstd450UnpackUnorm2x16
+                       : fmt == 6 ? GLSLstd450UnpackSnorm2x16
+                                  : GLSLstd450UnpackHalf2x16;
+    const Id pair = t.m.ExtInst(t.t_v2, unpack, {word});
+    c[2 * p] = t.m.CompositeExtract(t.t_f, pair, 0);
+    c[2 * p + 1] = t.m.CompositeExtract(t.t_f, pair, 1);
+  }
+}
+
 // Lazily declare gl_FragDepth for the MRTZ export (adds DepthReplacing).
 Id PsDepthOut(Translator& t, StageContext& sc) {
   if (sc.depth_out)
@@ -815,14 +913,7 @@ void EmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       }
       break;  // s_nop / s_waitcnt / hints: no-ops in this model
     case Enc::kSmrd:
-      if (sc.gs_input_verts) {
-        // A GS s_loads only the ring descriptors, which the ring lowering
-        // never reads; a constant buffer would need a binding plan of its own.
-        if (inst.opcode > 0x04)
-          WarnUnsupported("smrd.gs", inst.opcode, w, w1);
-        for (u32 i = 0; i < SmrdDwordCount(inst.opcode); i++)
-          t.SetSg(((w >> 15) & 0x7F) + i, t.U32(0));
-      } else if (sc.is_cs)
+      if (sc.is_cs)
         EmitCsSmrd(t, inst, sc);
       else
         EmitCbufSmrd(t, inst, sc.cbuf_bind);
@@ -992,44 +1083,13 @@ void EmitInst(Translator& t, const Inst& inst, StageContext& sc) {
             t.m.Store(sc.color_written_var, t.U32(1));
         } else if (target <= 7 && en) {  // MRT0..7; EN=0 is a null export
           sc.wrote_color = true;
-          Id col;
           const bool int_target = ((sc.mrt_uint_mask >> target) & 1u) != 0;
-          if (int_target) {
-            // An integer attachment stores the VGPR bits verbatim, compressed
-            // or not: under COMPR the register already holds the packed pair
-            // the target wants, so unpacking it to floats would be wrong.
-            Id c[4];
-            const u32 lanes = compr ? 2u : 4u;
-            for (u32 i = 0; i < 4; i++) {
-              const bool live =
-                  compr ? (i < lanes && (en & (0x3u << (2 * i))) != 0)
-                        : (en & (1u << i)) != 0;
-              c[i] = live ? t.Vg(v[i]) : t.U32(i == 3 ? 1u : 0u);
-            }
-            col = t.m.CompositeConstruct(t.m.TypeVec(t.t_u, 4),
-                                         {c[0], c[1], c[2], c[3]});
-          } else if (compr) {
-            // EN pairs up under COMPR (as in the disassembler's OperandsExp):
-            // bits 0-1 gate the register with the packed x/y halves, bits 2-3
-            // the z/w pair. A disabled pair names no register, not VGPR 0.
-            Id c[4];
-            for (int i = 0; i < 4; i++)
-              c[i] = t.F32(i == 3 ? 1.f : 0.f);
-            for (u32 p = 0; p < 2; p++) {
-              if (!(en & (0x3u << (2 * p))))
-                continue;
-              const Id pair =
-                  t.m.ExtInst(t.t_v2, GLSLstd450UnpackHalf2x16, {t.Vg(v[p])});
-              c[2 * p] = t.m.CompositeExtract(t.t_f, pair, 0);
-              c[2 * p + 1] = t.m.CompositeExtract(t.t_f, pair, 1);
-            }
-            col = t.m.CompositeConstruct(t.t_v4, {c[0], c[1], c[2], c[3]});
-          } else {
-            Id c[4];
-            for (int i = 0; i < 4; i++)
-              c[i] = (en & (1 << i)) ? t.VgF(v[i]) : t.F32(i == 3 ? 1.f : 0.f);
-            col = t.m.CompositeConstruct(t.t_v4, {c[0], c[1], c[2], c[3]});
-          }
+          Id c[4];
+          bool live[4];
+          ExportColor(t, sc, target, en, compr, v, int_target, c, live);
+          const Id col = t.m.CompositeConstruct(
+              int_target ? t.m.TypeVec(t.t_u, 4) : t.t_v4,
+              {c[0], c[1], c[2], c[3]});
           // The ISA is explicit that "pixel exports can be performed multiple
           // times to any MRT in any order" and that "write-masks are
           // accumulated separately for each MRT". Storing the whole vec4 made
@@ -1042,12 +1102,7 @@ void EmitInst(Translator& t, const Inst& inst, StageContext& sc) {
           const Id comp_ty = int_target ? t.t_u : t.t_f;
           const Id comp_ptr_ty =
               t.m.TypePointer(spv::StorageClass::Output, comp_ty);
-          bool all_channels = true;
-          for (u32 i = 0; i < 4; i++) {
-            const bool live = compr ? (en & (0x3u << (i & ~1u))) != 0
-                                    : (en & (1u << i)) != 0;
-            all_channels &= live;
-          }
+          const bool all_channels = live[0] && live[1] && live[2] && live[3];
           // DELTA_GPU_PSPROBE_A=1: diagnostic only. Export a colour target's
           // own ALPHA broadcast across RGB, so a term that is only ever written
           // to the alpha channel can be SEEN. Every value in P.T.'s src.a has
@@ -1066,9 +1121,7 @@ void EmitInst(Translator& t, const Inst& inst, StageContext& sc) {
             t.m.Store(out_var, col_out);
           } else {
             for (u32 i = 0; i < 4; i++) {
-              const bool live = compr ? (en & (0x3u << (i & ~1u))) != 0
-                                      : (en & (1u << i)) != 0;
-              if (!live)
+              if (!live[i])
                 continue;
               t.m.Store(t.m.AccessChain(comp_ptr_ty, out_var, {t.U32(i)}),
                         t.m.CompositeExtract(comp_ty, col_out, i));
@@ -1877,6 +1930,27 @@ constexpr u32 kPsUserDataOffset = 64;
 // 128-byte Vulkan floor the address stays baked in the module.
 constexpr u32 kPcBaseOffset = 128;
 
+u32 CbufBindingLimit(const Translator& t) {
+  return t.indirect_cbufs ? kIndirectCbufBindings : kMaxCbufBindings;
+}
+
+// More cbuffers across the stages than set 1 has dynamic UBO bindings: address
+// them through the ring's storage-buffer view and a per-draw offset table.
+bool NeedsIndirectCbufs(const std::initializer_list<const Program*> programs) {
+  u32 total = 0;
+  for (const Program* program : programs) {
+    if (!program || program->empty())
+      continue;
+    const std::vector<u8> reachable = ComputeReachability(*program);
+    std::vector<ShaderCbuf> cbufs;
+    std::unordered_map<u32, u32> bindings;
+    PlanCbufs(*program, 0, cbufs, bindings, reachable.data(),
+              kIndirectCbufBindings);
+    total += static_cast<u32>(cbufs.size());
+  }
+  return total > kMaxCbufBindings;
+}
+
 Id DeclareUserData(Translator& t, u32 byte_offset) {
   const Id words = t.m.TypeArray(t.t_u, 16);
   t.m.Decorate(words, spv::Decoration::ArrayStride, {4});
@@ -1978,6 +2052,7 @@ bool TranslateVs(const Program& program,
   iface.push_back(pos_out);
 
   StageContext sc;
+  sc.gcn_tsharp = true;
   sc.r = &r;
   sc.iface = &iface;
   sc.pos_out = pos_out;
@@ -2101,7 +2176,8 @@ bool TranslateVs(const Program& program,
                        a.index_vgpr >= 1 && a.index_vgpr <= 3});
   }
 
-  if (!PlanCbufs(program, 0, r.vs_cbufs, sc.cbuf_bind, reachable.data()))
+  if (!PlanCbufs(program, 0, r.vs_cbufs, sc.cbuf_bind, reachable.data(),
+                 CbufBindingLimit(t)))
     return false;
   // Raw buffer reads left over once the vertex-input state has claimed the
   // direct fetches: the shader indexes them itself, so they become storage
@@ -2204,6 +2280,12 @@ bool TranslateGs(const Program& program,
   iface.push_back(sc.pos_out);
 
   sc.gs_input_verts = verts;
+  // Particle GSs read their camera from a constant buffer. The ring
+  // descriptors they s_load plan as bindings too; the ring lowering never
+  // reads them.
+  if (!PlanCbufs(program, r.vs_cbufs.size(), r.gs_cbufs, sc.cbuf_bind,
+                 reachable.data(), CbufBindingLimit(t)))
+    return false;
   sc.es_ring_vec4s = std::max(1u, (gs.esgs_dwords + 3) / 4);
   const Id ring = t.m.TypeArray(t.m.TypeArray(t.TypeV4u(), sc.es_ring_vec4s),
                                 verts);
@@ -2272,6 +2354,7 @@ bool TranslatePs(const Program& program,
                   u32 tex_uint_mask,
                   u32 mrt_uint_mask,
                   u32 mrt_bound_mask,
+                  u32 col_format,
                   Recompiled& r,
                   Translator& t) {
   // Color outputs (PsColorOut) are declared lazily per MRT target (location ==
@@ -2281,12 +2364,13 @@ bool TranslatePs(const Program& program,
   t.spill_vgprs = PlanLaneSpills(program, reachable.data());
   StageContext sc;
   sc.is_ps = true;
+  sc.gcn_tsharp = true;
   sc.r = &r;
   sc.iface = &iface;
   sc.flat_attrs = &flat_attrs;
   sc.pervertex_attrs = PlanPerVertexAttrs(program, reachable.data());
-  if (!PlanCbufs(program, r.vs_cbufs.size(), r.ps_cbufs, sc.cbuf_bind,
-                 reachable.data()))
+  if (!PlanCbufs(program, r.vs_cbufs.size() + r.gs_cbufs.size(), r.ps_cbufs,
+                 sc.cbuf_bind, reachable.data(), CbufBindingLimit(t)))
     return false;
   // Set 2 is shared with the VS, so PS bindings continue after the VS's.
   PlanGfxBuffers(program, r.vs_bufs.size(), nullptr, r.ps_bufs, sc.gfx_buf_bind,
@@ -2322,6 +2406,7 @@ bool TranslatePs(const Program& program,
   sc.tex_uint_mask = tex_uint_mask;
   sc.mrt_uint_mask = mrt_uint_mask;
   sc.mrt_bound_mask = mrt_bound_mask;
+  sc.col_format = col_format;
   for (u32 i = 0; i < mimg_plan.binding_srsrc.size(); i++)
     r.ps_texs.push_back({i, mimg_plan.binding_srsrc[i],
                          mimg_plan.binding_storage[i],
@@ -2705,18 +2790,17 @@ void MaybeDumpBranchy(const char* tag, const Program& program) {
   DumpProgram(tag, program);
 }
 
-// DELTA_GPU_SHDIS_ADDR=hexaddr: dump the full instruction list of the shader
-// whose GCN code lives at that guest address, once, whatever its shape.
+// DELTA_GPU_SHDIS_ADDR=hex: dump the full instruction list of the shader at
+// that guest address, or with that content hash (see CodeMatches), once,
+// whatever its shape.
 void MaybeDumpByAddr(const char* tag,
                      const void* code,
                      const Program& program) {
-  if (!kShDisAddr || reinterpret_cast<u64>(code) != kShDisAddr)
-    return;
   static bool dumped = false;
-  if (dumped)
+  if (!kShDisAddr || dumped || !CodeMatches(kShDisAddr, code))
     return;
   dumped = true;
-  BASE_LOGI("shdis", "@{}:", static_cast<const void*>(code));
+  BASE_LOGI("shdis", "@{}:", code);
   DumpProgram(tag, program);
 }
 
@@ -2874,6 +2958,8 @@ bool RecompileSpirv(const u32* vs_code,
                      bool gl_clip_space,
                      const GsPipeline* gs,
                      u32 int_attr_mask,
+                     u32 col_format,
+                     u32 tex_cube_mask,
                      Recompiled& r) {
   if (!vs_code || !vs_user_data || !ps_user_data)
     return false;
@@ -2953,8 +3039,14 @@ bool RecompileSpirv(const u32* vs_code,
 
   // VS and PS are separate SPIR-V modules.
   const bool dbg = ShaderDebugEnabled();
+  const Program gs_program =
+      gs ? DecodeShader(gs->gs_code, 4096) : Program{};
+  r.indirect_cbufs =
+      NeedsIndirectCbufs({&vertex_program, &gs_program, &ps_program});
   Translator tv;
   tv.program_base = reinterpret_cast<u64>(vertex_code);
+  tv.indirect_cbufs = r.indirect_cbufs;
+  tv.tex_cube_mask = tex_cube_mask >> vs_tex_base;
   ResetUnsupported();
   if (dbg)
     AuditBegin(gs ? "es" : "vs", vertex_code, vertex_program);
@@ -2983,9 +3075,9 @@ bool RecompileSpirv(const u32* vs_code,
 
   std::vector<u32> gs_words;
   if (gs) {
-    const Program gs_program = DecodeShader(gs->gs_code, 4096);
     Translator tg;
     tg.program_base = reinterpret_cast<u64>(gs->gs_code);
+    tg.indirect_cbufs = r.indirect_cbufs;
     ResetUnsupported();
     if (dbg)
       AuditBegin("gs", gs->gs_code, gs_program);
@@ -3009,6 +3101,8 @@ bool RecompileSpirv(const u32* vs_code,
 
   Translator tp;
   tp.program_base = reinterpret_cast<u64>(ps_code);
+  tp.indirect_cbufs = r.indirect_cbufs;
+  tp.tex_cube_mask = tex_cube_mask;
   tp.InitTypes();
   ResetUnsupported();
   if (dbg && ps_code)
@@ -3018,7 +3112,7 @@ bool RecompileSpirv(const u32* vs_code,
                       tex_3d_mask,
                                              tex_1d_mask, tex_uint_mask,
                                              mrt_uint_mask, mrt_bound_mask,
-                                             r, tp)
+                                             col_format, r, tp)
                                : TranslateDepthOnlyPs(tp)) &&
                      !HadUnsupported();
   std::vector<u32> ps;
@@ -3066,6 +3160,8 @@ bool RecompileSpirv(const u32* vs_code,
     r.gs_spirv = gs_words;
     r.fs_spirv = ps;
   } else {
+    spirv::Prefetch(ps);
+    spirv::Prefetch(gs_words);
     if (!spirv::Finalize(vs, &r.vs_spirv, &err)) {
       BASE_LOGI("gcnspv", "VS invalid @{}: {}",
                 static_cast<const void*>(vs_code), err.c_str());

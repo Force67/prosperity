@@ -13,10 +13,18 @@
 
 #include <base/logging.h>
 
+#include <algorithm>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
+#include <functional>
+#include <future>
+#include <mutex>
 #include <string>
+#include <thread>
+#include <unordered_map>
 
 #include <spirv-tools/libspirv.h>
 #include <spirv-tools/optimizer.hpp>
@@ -177,10 +185,162 @@ void WriteEntry(u64 key, const std::vector<u32>& spv) {
 }
 }  // namespace
 
+namespace {
+struct Finalized {
+  bool valid = false;
+  std::vector<u32> spv;
+  std::string err;
+};
+
+Finalized RunFinalize(const std::vector<u32>& spv, u64 key) {
+  Finalized f;
+  f.valid = Validate(spv, &f.err);
+  if (f.valid) {
+    f.spv = Optimize(spv);
+    WriteEntry(key, f.spv);
+  }
+  return f;
+}
+
+// Finalize jobs started ahead of the draw that needs them. A level's first
+// frame can bring hundreds of new shaders, and optimizing them one after the
+// other on the submit thread stalled it for minutes while every other core
+// sat idle.
+class FinalizePool {
+ public:
+  FinalizePool() {
+    const u32 n = std::max(2u, std::thread::hardware_concurrency() / 2);
+    for (u32 i = 0; i < n; i++)
+      std::thread([this] { Work(); }).detach();
+  }
+
+  void Start(const std::vector<u32>& spv, u64 key) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (pending_.count(key))
+      return;
+    auto task = std::make_shared<std::packaged_task<Finalized()>>(
+        [spv, key] { return RunFinalize(spv, key); });
+    pending_.emplace(key, task->get_future().share());
+    queue_.push_back([this, task, key] {
+      (*task)();
+      // Once the disk cache holds the result a later Finalize reads it there;
+      // a module the prefetch guessed and no draw asked for is not kept.
+      if (!CacheDir().empty()) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        pending_.erase(key);
+      }
+    });
+    ready_.notify_one();
+  }
+
+  // Run `then` on a worker with the optimized module, once there is one.
+  void Then(const std::vector<u32>& spv,
+            u64 key,
+            std::function<void(const std::vector<u32>&)> then) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto it = pending_.find(key);
+    std::shared_future<Finalized> job;
+    if (it != pending_.end())
+      job = it->second;
+    // FIFO: the job this waits on was queued earlier, so some worker already
+    // holds it.
+    queue_.push_back([spv, key, job, then = std::move(then)] {
+      if (job.valid()) {
+        if (job.get().valid)
+          then(job.get().spv);
+        return;
+      }
+      std::vector<u32> out;
+      if (ReadEntry(key, &out)) {
+        then(out);
+        return;
+      }
+      const Finalized f = RunFinalize(spv, key);
+      if (f.valid)
+        then(f.spv);
+    });
+    ready_.notify_one();
+  }
+
+  // The job for `key`, handed over once: afterwards the disk cache has it.
+  bool Take(u64 key, std::shared_future<Finalized>* out) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto it = pending_.find(key);
+    if (it == pending_.end())
+      return false;
+    *out = it->second;
+    pending_.erase(it);
+    return true;
+  }
+
+ private:
+  void Work() {
+    for (;;) {
+      std::function<void()> job;
+      {
+        std::unique_lock<std::mutex> lock(mutex_);
+        ready_.wait(lock, [this] { return !queue_.empty(); });
+        job = std::move(queue_.front());
+        queue_.pop_front();
+      }
+      job();
+    }
+  }
+
+  std::mutex mutex_;
+  std::condition_variable ready_;
+  std::deque<std::function<void()>> queue_;
+  std::unordered_map<u64, std::shared_future<Finalized>> pending_;
+};
+
+FinalizePool& Pool() {
+  static FinalizePool* pool = new FinalizePool;
+  return *pool;
+}
+
+thread_local bool t_prefetching = false;
+}  // namespace
+
+PrefetchScope::PrefetchScope() {
+  t_prefetching = true;
+}
+
+PrefetchScope::~PrefetchScope() {
+  t_prefetching = false;
+}
+
+void Prefetch(const std::vector<u32>& spv) {
+  const u64 key = HashWords(spv);
+  if (!CacheDir().empty() && ::access(EntryPath(key).c_str(), F_OK) == 0)
+    return;
+  Pool().Start(spv, key);
+}
+
+void PrefetchThen(const std::vector<u32>& spv,
+                  std::function<void(const std::vector<u32>&)> then) {
+  Pool().Then(spv, HashWords(spv), std::move(then));
+}
+
 bool Finalize(const std::vector<u32>& spv,
               std::vector<u32>* out,
               std::string* err) {
+  if (t_prefetching) {
+    Prefetch(spv);
+    *out = spv;
+    return true;
+  }
   const u64 key = HashWords(spv);
+  std::shared_future<Finalized> job;
+  if (Pool().Take(key, &job)) {
+    g_spv_miss_n++;
+    const u64 t0 = NowNs();
+    const Finalized& f = job.get();
+    g_ns_spv_opt += NowNs() - t0;
+    if (!f.valid && err)
+      *err = f.err;
+    *out = f.spv;
+    return f.valid;
+  }
   if (ReadEntry(key, out)) {
     g_spv_hit_n++;
     return true;

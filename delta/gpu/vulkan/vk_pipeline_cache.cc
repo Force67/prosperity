@@ -268,8 +268,7 @@ VkPipeline BuildPipeline(bool textured,
                               nullptr, &p);
   }
   g_pipe_build_n++;
-  // New pipeline compiled: fold it into the on-disk cache (throttled).
-  SavePipelineCache();
+  NotePipelineBuilt();
   vkDestroyShaderModule(g_dev.device, vs, nullptr);
   vkDestroyShaderModule(g_dev.device, fs, nullptr);
   return p;
@@ -743,10 +742,7 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
   NameObject(VK_OBJECT_TYPE_PIPELINE, (u64)rp.pipe,
              "recomp vs=%#llx ps=%#llx", (unsigned long long)d.vs_addr,
              (unsigned long long)d.ps_addr);
-  // Every pipeline a title actually draws with is built here, and this was the
-  // one creation path that never persisted the driver's cache, so each run
-  // re-paid the driver's compile for the whole game and hitched again.
-  SavePipelineCache();
+  NotePipelineBuilt();
   return g_recomp_cache.Store(key, std::move(rp));
 }
 

@@ -420,7 +420,8 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
   // Render targets are plain 2D images, so only a plain 2D binding may resolve
   // to one. An array or volume binding declared a sampler type no render target
   // can satisfy.
-  const bool tex_rt_eligible = !d.tex_arrayed && !d.tex_is_3d;
+  const bool tex_rt_eligible = !d.tex_arrayed && !d.tex_is_3d &&
+                               !GuestFormatBlockCompressed(d.tex_dfmt);
   if (tex_base && tex_rt_eligible && !g_rts.count(tex_base) &&
       !g_depths.count(tex_base)) {
     bool depth_format = d.tex_dfmt == 4 && d.tex_nfmt == 7;
@@ -898,6 +899,12 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
             : VkDeviceSize(-1);
     if (vb_cached[j] != VkDeviceSize(-1))
       continue;
+    // A V# may name more records than are mapped; the GPU only faults on the
+    // ones it fetches, but staging copies them all.
+    if (bind_size[j] &&
+        !IsReadableThisFrame(reinterpret_cast<u64>(d.vbufs[j].data),
+                             static_cast<u32>(bind_size[j])))
+      return Decline(kNoRecomp);
     if (vneed)
       vneed = (vneed + 15) & ~VkDeviceSize(15);
     bind_off[j] = vneed;
@@ -1020,7 +1027,8 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
       // Render targets are plain 2D images, so only a plain 2D binding may
       // resolve to one. An array or volume binding declared a sampler type no
       // render target can satisfy.
-      const bool rt_eligible = !t.arrayed && !t.is_3d;
+      const bool rt_eligible = !t.arrayed && !t.is_3d &&
+                               !GuestFormatBlockCompressed(t.dfmt);
       // One base can hold several render-target geometries, and only the live
       // one answers to the address. Pick the variant this sample is asking for
       // before deciding what the binding resolves to, but never while the
@@ -1209,6 +1217,19 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
   // cannot be recorded inside dynamic rendering; consecutive layer composites
   // often keep the same target while switching sources, so that source change
   // must also close/reopen the region.
+  // The first slice of an array surface renders at the surface's own address
+  // with nothing to say it belongs to one; write it through once a later slice
+  // shows that it does.
+  if (d.rt_array_base) {
+    static std::unordered_map<u64, int> written_frame;
+    const auto first = g_rts.find(d.rt_array_base);
+    int& frame = written_frame[d.rt_array_base];
+    if (first != g_rts.end() && first->second.last_frame == g_frame.num &&
+        frame != g_frame.num) {
+      frame = g_frame.num;
+      WriteRtToGuest(d.rt_array_base, d.rt_tile_mode);
+    }
+  }
   u32 mrt_n = std::min(d.mrt_count, 8u);
   bool transition_source =
       rp->multi_tex
@@ -1649,17 +1670,13 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
         BASE_LOGI("cbinfo", "{}", line.c_str());
       }
     }
-    const size_t window = static_cast<size_t>(next / cb_stride);
-    if (window >= g_ring.ubo_written.size())
-      return Decline(kRing);
-    const u32 previous = g_ring.ubo_written[window];
-    if (n < previous)
-      std::memset(cb_dst + n, 0, previous - n);
-    g_ring.ubo_written[window] = n;
     if (have_cbuf && kRingDedup)
       g_ubo_staged.Insert(cb.base, cache_n, 0, next);
     dyn_off[i] = static_cast<u32>(next);
-    next += cb_stride;
+    // Packed, not one window per binding: GTA:SA binds ~15000 cbuffers a
+    // frame, and a 16 KiB stride exhausted the ring after ~8000 of them.
+    next = (next + n + g_ring.ubo_align - 1) &
+           ~(VkDeviceSize)(g_ring.ubo_align - 1);
   }
   if (indirect_cbufs) {
     const VkDeviceSize slot_base = g_frame.slot_idx * (UboRingBytes() / 2);
@@ -1674,18 +1691,13 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
     offsets[gpu::gcn::kIndirectGsUserDataAddr] = static_cast<u32>(d.gs_user_data_addr);
     offsets[gpu::gcn::kIndirectGsUserDataAddr + 1] =
         static_cast<u32>(d.gs_user_data_addr >> 32);
-    const size_t window = static_cast<size_t>(next / cb_stride);
-    const u32 previous = g_ring.ubo_written[window];
     std::memcpy(g_ring.ubo_map + next, offsets, sizeof(offsets));
-    if (previous > sizeof(offsets))
-      std::memset(g_ring.ubo_map + next + sizeof(offsets), 0,
-                   previous - sizeof(offsets));
-    g_ring.ubo_written[window] = sizeof(offsets);
     const u32 table_offset = static_cast<u32>(next);
     vkCmdBindDescriptorSets(g_frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
         rp->layout, 1, 1, &g_ring.indirect_cbuf_sets[g_frame.slot_idx],
         1, &table_offset);
-    next += cb_stride;
+    next = (next + sizeof(offsets) + g_ring.ubo_align - 1) &
+           ~(VkDeviceSize)(g_ring.ubo_align - 1);
   } else {
     vkCmdBindDescriptorSets(g_frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                             rp->layout, 1, 1, &g_ring.ubo_set, kCbufBindings,
@@ -1829,6 +1841,10 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
                  indexed ? d.index_count : d.vertex_count,
                  indexed ? " indexed" : "");
   DrawCheckpoint(g_frame.cmd, g_frame.num, g_frame.draws, false);
+  if (d.rt_array_base) {
+    g_region.write_through = d.rt_base;
+    g_region.write_through_tile = d.rt_tile_mode;
+  }
   if (mesh)
     g_dev.draw_mesh_tasks(g_frame.cmd,
         (draw_count - 1) / d.recomp->mesh_input_primitives + 1,

@@ -172,6 +172,30 @@ ResourceRange ResolveBufferResource(u64 cs_addr,
 
 }  // namespace
 
+namespace {
+ComputeShaderState ComputeStateOf(const Regs& regs) {
+  ComputeShaderState state;
+  state.cs_addr = (static_cast<u64>(regs[mmCOMPUTE_PGM_HI] & 0xFF) << 32 |
+                   regs[mmCOMPUTE_PGM_LO])
+                  << 8;
+  state.thread_x = regs[mmCOMPUTE_NUM_THREAD_X] & 0xFFFF;
+  state.thread_y = regs[mmCOMPUTE_NUM_THREAD_Y] & 0xFFFF;
+  state.thread_z = regs[mmCOMPUTE_NUM_THREAD_Z] & 0xFFFF;
+  const u32 rsrc2 = regs[mmCOMPUTE_PGM_RSRC2];
+  state.user_sgpr = (rsrc2 >> 1) & 0x1F;   // num_user_regs [37:33]
+  state.tgid_enable = (rsrc2 >> 7) & 0x7;  // tgid_enable [41:39]
+  state.lds_dwords = (rsrc2 >> 15) & 0x1FF;
+  return state;
+}
+}  // namespace
+
+void PrefetchComputeDispatch(const Regs& regs) {
+  const ComputeShaderState state = ComputeStateOf(regs);
+  if (!kNoCs && IsGuestAddress(state.cs_addr) && state.thread_x &&
+      state.thread_y)
+    PrefetchComputeShader(state);
+}
+
 void DispatchCompute(rhi::Renderer& renderer,
                      const Regs& regs,
                      const u32* body,

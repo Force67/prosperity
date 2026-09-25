@@ -113,6 +113,7 @@ bool CreateUploadRings(const VkPhysicalDeviceProperties& props) {
       ubs[i].descriptorCount = 1;
       ubs[i].stageFlags =
           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT |
+          (g_dev.geometry_shader ? VK_SHADER_STAGE_GEOMETRY_BIT : 0) |
           (g_dev.mesh_shader ? VK_SHADER_STAGE_MESH_BIT_EXT : 0);
     }
     VkDescriptorSetLayoutCreateInfo ul{
@@ -147,6 +148,7 @@ bool CreateUploadRings(const VkPhysicalDeviceProperties& props) {
     if (props.limits.maxStorageBufferRange >= UboRingBytes() / 2) {
       const VkShaderStageFlags stages = VK_SHADER_STAGE_VERTEX_BIT |
           VK_SHADER_STAGE_FRAGMENT_BIT |
+          (g_dev.geometry_shader ? VK_SHADER_STAGE_GEOMETRY_BIT : 0) |
           (g_dev.mesh_shader ? VK_SHADER_STAGE_MESH_BIT_EXT : 0);
       const VkDescriptorSetLayoutBinding bindings[2] = {
           {0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, stages, nullptr},
@@ -265,8 +267,6 @@ bool EnsureCbufRing() {
   NameObject(VK_OBJECT_TYPE_BUFFER, (u64)g_ring.ubo_buf, "cbuffer ring");
   g_ring.ubo_stride = (kCbufWindow + g_ring.ubo_align - 1) &
                       ~(VkDeviceSize)(g_ring.ubo_align - 1);
-  g_ring.ubo_written.resize(static_cast<size_t>(
-      (UboRingBytes() + g_ring.ubo_stride - 1) / g_ring.ubo_stride));
 
   VkDescriptorBufferInfo ubinfo[kCbufBindings];
   VkWriteDescriptorSet uw[kCbufBindings];

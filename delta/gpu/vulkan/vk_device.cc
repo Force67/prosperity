@@ -91,25 +91,36 @@ std::vector<u8> ReadPipelineCacheBlob() {
 }
 }  // namespace
 
+namespace {
+u64 g_last_pipeline_build_ns = 0;
+}  // namespace
+
+void NotePipelineBuilt() {
+  g_last_pipeline_build_ns = NowNs();
+}
+
 void SavePipelineCache(bool force) {
   static size_t last_size = 0;
   static u64 last_write_ns = 0;
   const std::string p = PipelineCachePath();
   if (p.empty() || g_dev.pipeline_cache == VK_NULL_HANDLE)
     return;
-  // A level's worth of pipelines is built in one burst, and every one of them
-  // would otherwise re-serialize and rewrite the WHOLE blob on the submit
-  // thread, turning the save into a second source of the hitch it exists to
-  // remove. One write a second keeps the burst cheap; what it drops is rebuilt
-  // and saved on the next run.
+  // Each save re-serializes and rewrites the WHOLE blob on the submit thread,
+  // and a long-lived cache is hundreds of MB: saving once a second through a
+  // level's compile burst added seconds to the very stall that trips UE4's
+  // render-thread watchdog. Wait for the burst to end (or a minute of it).
   const u64 now = NowNs();
-  if (!force && last_write_ns && now - last_write_ns < 1000000000ull)
+  if (!force && g_last_pipeline_build_ns <= last_write_ns)
+    return;
+  if (!force && now - g_last_pipeline_build_ns < 3000000000ull &&
+      now - last_write_ns < 60000000000ull)
     return;
   size_t size = 0;
   if (vkGetPipelineCacheData(g_dev.device, g_dev.pipeline_cache, &size,
                              nullptr) != VK_SUCCESS ||
       !size)
     return;
+  last_write_ns = now;
   // Only write when the driver has actually added something.
   if (!force && size == last_size)
     return;
@@ -118,7 +129,6 @@ void SavePipelineCache(bool force) {
                              blob.data()) != VK_SUCCESS)
     return;
   last_size = size;
-  last_write_ns = now;
   char tmp[512];
   std::snprintf(tmp, sizeof(tmp), "%s.%d.tmp", p.c_str(), (int)::getpid());
   FILE* f = std::fopen(tmp, "wb");

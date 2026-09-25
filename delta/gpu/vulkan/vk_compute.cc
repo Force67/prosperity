@@ -38,6 +38,7 @@
 #include <cstring>
 #include <limits>
 #include <map>
+#include <future>
 #include <mutex>
 #include <unordered_map>
 #include <string>
@@ -287,52 +288,52 @@ u32 FindComputeMemoryType(u32 type_bits) {
              : best;
 }
 
-CsPipe* GetCsPipe(const ComputeInfo& ci) {
-  const u64 key = reinterpret_cast<uintptr_t>(ci.recomp);
-  auto it = g_cs_pipes.find(key);
-  if (it != g_cs_pipes.end())
-    return it->second.num_res == ci.num_res ? &it->second : nullptr;
-  CsPipe cp;
-  cp.num_res = ci.num_res;
+// The set-0 layout every compute pipeline over `num_res` guest ranges uses.
+VkDescriptorSetLayout CsSetLayout(u32 num_res,
+                                  int gds_binding,
+                                  int guest_memory_binding) {
   VkDescriptorSetLayoutBinding binds[ComputeInfo::kMaxResources + 2];
   u32 nbind = 0;
-  for (u32 i = 0; i < ci.num_res; i++)
+  for (u32 i = 0; i < num_res; i++)
     binds[nbind++] = {i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
                       VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
   // The GDS scratchpad sits past the resources; it is ours, not a guest range.
-  cp.gds_binding = ci.gds_binding;
-  if (ci.gds_binding >= 0)
-    binds[nbind++] = {static_cast<u32>(ci.gds_binding),
+  if (gds_binding >= 0)
+    binds[nbind++] = {static_cast<u32>(gds_binding),
                       VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
                       VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
-  if (ci.recomp->guest_memory_binding >= 0)
-    binds[nbind++] = {static_cast<u32>(ci.recomp->guest_memory_binding),
-                     VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
-                     VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+  if (guest_memory_binding >= 0)
+    binds[nbind++] = {static_cast<u32>(guest_memory_binding),
+                      VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
+                      VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
   VkDescriptorSetLayoutCreateInfo sl{
       VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
   sl.bindingCount = nbind;
   sl.pBindings = binds;
-  if (vkCreateDescriptorSetLayout(g_dev.device, &sl, nullptr, &cp.set_layout) !=
-      VK_SUCCESS)
-    return nullptr;
-  // 16 user-data dwords, then one bound (in dwords) per SSBO binding. The
-  // bound is what the emitted SSBO accesses clamp to; the SPIR-V block for a
-  // compute stage declares the same 16 + 48 shape, 256 B total, the driver
-  // max this backend runs against.
+  VkDescriptorSetLayout layout = VK_NULL_HANDLE;
+  vkCreateDescriptorSetLayout(g_dev.device, &sl, nullptr, &layout);
+  return layout;
+}
+
+// 16 user-data dwords, then one bound (in dwords) per SSBO binding. The bound
+// is what the emitted SSBO accesses clamp to; the SPIR-V block for a compute
+// stage declares the same 16 + 48 shape, 256 B total, the driver max this
+// backend runs against.
+VkPipelineLayout CsPipelineLayout(VkDescriptorSetLayout set_layout) {
   VkPushConstantRange pcr{VK_SHADER_STAGE_COMPUTE_BIT, 0, 64 * 4};
   VkPipelineLayoutCreateInfo li{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
   li.setLayoutCount = 1;
-  li.pSetLayouts = &cp.set_layout;
+  li.pSetLayouts = &set_layout;
   li.pushConstantRangeCount = 1;
   li.pPushConstantRanges = &pcr;
-  if (vkCreatePipelineLayout(g_dev.device, &li, nullptr, &cp.layout) !=
-      VK_SUCCESS) {
-    vkDestroyDescriptorSetLayout(g_dev.device, cp.set_layout, nullptr);
-    return nullptr;
-  }
-  VkShaderModule cs =
-      MakeModule(ci.recomp->spirv.data(), ci.recomp->spirv.size() * 4);
+  VkPipelineLayout layout = VK_NULL_HANDLE;
+  vkCreatePipelineLayout(g_dev.device, &li, nullptr, &layout);
+  return layout;
+}
+
+VkPipeline CreateCsPipeline(VkPipelineLayout layout,
+                            const std::vector<u32>& spirv) {
+  VkShaderModule cs = MakeModule(spirv.data(), spirv.size() * 4);
   VkComputePipelineCreateInfo pi{
       VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
   pi.flags = VK_PIPELINE_CREATE_DISPATCH_BASE_BIT;
@@ -340,25 +341,87 @@ CsPipe* GetCsPipe(const ComputeInfo& ci) {
   pi.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
   pi.stage.module = cs;
   pi.stage.pName = "main";
-  pi.layout = cp.layout;
-  VkResult r;
-  {
-    if (kCsSyncReport)
-      BASE_LOGI("cspipe", "compile cs={:#x} words={}", ci.cs_addr,
-                ci.recomp->spirv.size());
-    const u64 started = NowNs();
-    ScopeNs t(&g_ns_pipe_build);
-    r = vkCreateComputePipelines(g_dev.device, g_dev.pipeline_cache, 1, &pi,
-                                 nullptr, &cp.pipe);
-    if (kCsSyncReport)
-      BASE_LOGI("cspipe", "compiled cs={:#x} ms={:.3f}", ci.cs_addr,
-                double(NowNs() - started) / 1e6);
-  }
-  g_pipe_build_n++;
-  SavePipelineCache();  // persist the driver's compiled pipeline
+  pi.layout = layout;
+  VkPipeline pipe = VK_NULL_HANDLE;
+  if (vkCreateComputePipelines(g_dev.device, g_dev.pipeline_cache, 1, &pi,
+                               nullptr, &pipe) != VK_SUCCESS)
+    pipe = VK_NULL_HANDLE;
   vkDestroyShaderModule(g_dev.device, cs, nullptr);
-  if (r != VK_SUCCESS) {
-    BASE_LOGI("gpuvk", "compute pipeline failed: {}", (int)r);
+  return pipe;
+}
+
+// Pipelines compiled ahead of their first dispatch (rhi::PrebuildComputePipeline),
+// by module content and layout shape.
+struct PrebuiltCs {
+  VkDescriptorSetLayout set_layout = VK_NULL_HANDLE;
+  VkPipelineLayout layout = VK_NULL_HANDLE;
+  VkPipeline pipe = VK_NULL_HANDLE;
+};
+std::mutex g_prebuilt_mutex;
+std::unordered_map<u64, std::shared_future<PrebuiltCs>> g_prebuilt;
+
+u64 PrebuiltKey(const std::vector<u32>& spirv,
+                u32 num_res,
+                int guest_memory_binding) {
+  u64 h = 1469598103934665603ull;
+  for (u32 w : spirv)
+    h = (h ^ w) * 1099511628211ull;
+  return HashWord(HashWord(h, num_res), static_cast<u32>(guest_memory_binding));
+}
+
+CsPipe* GetCsPipe(const ComputeInfo& ci) {
+  const u64 key = reinterpret_cast<uintptr_t>(ci.recomp);
+  auto it = g_cs_pipes.find(key);
+  if (it != g_cs_pipes.end())
+    return it->second.num_res == ci.num_res ? &it->second : nullptr;
+  CsPipe cp;
+  cp.num_res = ci.num_res;
+  cp.gds_binding = ci.gds_binding;
+  if (ci.gds_binding < 0) {
+    std::shared_future<PrebuiltCs> prebuilt;
+    {
+      std::lock_guard<std::mutex> lock(g_prebuilt_mutex);
+      const auto found = g_prebuilt.find(PrebuiltKey(
+          ci.recomp->spirv, ci.num_res, ci.recomp->guest_memory_binding));
+      if (found != g_prebuilt.end()) {
+        prebuilt = found->second;
+        g_prebuilt.erase(found);
+      }
+    }
+    if (prebuilt.valid() && prebuilt.get().pipe) {
+      const u64 started = NowNs();
+      cp.set_layout = prebuilt.get().set_layout;
+      cp.layout = prebuilt.get().layout;
+      cp.pipe = prebuilt.get().pipe;
+      g_ns_pipe_build += NowNs() - started;
+      g_pipe_build_n++;
+      g_cs_pipes[key] = cp;
+      return &g_cs_pipes[key];
+    }
+  }
+  cp.set_layout = CsSetLayout(ci.num_res, ci.gds_binding,
+                              ci.recomp->guest_memory_binding);
+  if (!cp.set_layout)
+    return nullptr;
+  cp.layout = CsPipelineLayout(cp.set_layout);
+  if (!cp.layout) {
+    vkDestroyDescriptorSetLayout(g_dev.device, cp.set_layout, nullptr);
+    return nullptr;
+  }
+  if (kCsSyncReport)
+    BASE_LOGI("cspipe", "compile cs={:#x} words={}", ci.cs_addr,
+              ci.recomp->spirv.size());
+  const u64 started = NowNs();
+  cp.pipe = CreateCsPipeline(cp.layout, ci.recomp->spirv);
+  g_ns_pipe_build += NowNs() - started;
+  if (kCsSyncReport)
+    BASE_LOGI("cspipe", "compiled cs={:#x} ms={:.3f}", ci.cs_addr,
+              double(NowNs() - started) / 1e6);
+
+  g_pipe_build_n++;
+  NotePipelineBuilt();
+  if (!cp.pipe) {
+    BASE_LOGI("gpuvk", "compute pipeline failed");
     vkDestroyPipelineLayout(g_dev.device, cp.layout, nullptr);
     vkDestroyDescriptorSetLayout(g_dev.device, cp.set_layout, nullptr);
     return nullptr;
@@ -4084,6 +4147,18 @@ void ReleaseRetiredCsBuffers() {
   g_cs_frame_retired.clear();
 }
 
+void CsForgetGuestRange(u64 base, u64 bytes) {
+  for (auto& [range_base, e] : g_cs_ranges) {
+    if (range_base >= base + bytes || base >= range_base + e.guest_bytes ||
+        e.gpu_dirty)
+      continue;
+    e.last_validated_frame = -1;
+    e.hash = 0;
+    e.mirror_current = false;
+    e.rt_sourced = false;
+  }
+}
+
 }  // namespace gpu::vk
 
 namespace gpu::vk {
@@ -4196,6 +4271,28 @@ const ComputeInfo& MergeSameBase(const ComputeInfo& ci, ComputeInfo& merged) {
       a.guest_size = b.guest_size = std::max(a.guest_size, b.guest_size);
     }
   return merged;
+}
+
+void PrebuildComputePipeline(const std::vector<u32>& spirv,
+                             u32 num_res,
+                             int guest_memory_binding) {
+  if (!g_dev.device || spirv.empty())
+    return;
+  std::promise<PrebuiltCs> done;
+  {
+    std::lock_guard<std::mutex> lock(g_prebuilt_mutex);
+    const u64 key = PrebuiltKey(spirv, num_res, guest_memory_binding);
+    if (g_prebuilt.count(key))
+      return;
+    g_prebuilt.emplace(key, done.get_future().share());
+  }
+  PrebuiltCs built;
+  built.set_layout = CsSetLayout(num_res, -1, guest_memory_binding);
+  if (built.set_layout)
+    built.layout = CsPipelineLayout(built.set_layout);
+  if (built.layout)
+    built.pipe = CreateCsPipeline(built.layout, spirv);
+  done.set_value(built);
 }
 
 bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {

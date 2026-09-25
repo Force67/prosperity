@@ -60,6 +60,9 @@ struct ShaderCbuf {
   u32 chain_off[3] = {};
   u32 use_pc = ~0u;  // RDNA consumer used for draw-time scalar replay
   bool pointer = false;  // 2-dword flat pointer via s_load (SRT), not a 4-dword V#
+  // DescriptorVersions of the descriptor at ud_sgpr (GCN): the pc of the scalar
+  // load that last filled it, or ~0u for user data.
+  u32 version = ~0u;
   bool from_gs = false;  // split NGG stage used for scalar descriptor replay
 };
 
@@ -149,6 +152,7 @@ struct Recompiled {
   std::vector<u32> fs_spirv;
   std::vector<ShaderAttr> attrs;     // vertex inputs
   std::vector<ShaderCbuf> vs_cbufs;  // VS UBOs (set 1, binding = .binding)
+  std::vector<ShaderCbuf> gs_cbufs;  // guest GS UBOs, numbered after the VS's
   std::vector<ShaderCbuf> ps_cbufs;  // PS UBOs (set 1, binding = .binding)
   std::vector<ShaderBuffer> vs_bufs;  // VS raw buffers (set 2, = .binding)
   std::vector<ShaderBuffer> ps_bufs;  // PS raw buffers (set 2, = .binding)
@@ -166,6 +170,9 @@ extern u32 g_recomp_n;
 // The same window split into SPIRV-Tools validate/opt and optimizer-cache hits.
 extern u64 g_ns_spv_val, g_ns_spv_opt;
 extern u32 g_spv_hit_n, g_spv_miss_n;
+
+// SPI_SHADER_COL_FORMAT was not read: infer each export's packing from COMPR.
+constexpr u32 kColFormatUnknown = 0xFFFFFFFFu;
 
 // Recompile a VS+PS pair. The masks name descriptor shapes the MIMG encoding
 // cannot see (3D/1D/uint); they change emitted types, so they key the cache.
@@ -185,7 +192,9 @@ Recompiled Recompile(const u32* vs_code,
                       u32 mrt_bound_mask = 0xFF,  // bit n = pass binds colour n; rest dropped
                       bool gl_clip_space = false,
                       const GsPipeline* gs = nullptr,
-                      u32 int_attr_mask = 0);
+                      u32 int_attr_mask = 0,
+                      u32 col_format = kColFormatUnknown,
+                      u32 tex_cube_mask = 0);
 
 // A CS memory resource; base_sgpr/use_pc locate the possibly-SRT-chained
 // descriptor for the command processor to resolve at dispatch.

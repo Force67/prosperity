@@ -105,7 +105,6 @@ struct UploadRings {
   VkDeviceSize ubo_offset = 0, ubo_end = kUboRing;
   u32 ubo_align = 256;
   VkDeviceSize ubo_stride = kCbufWindow;
-  std::vector<u32> ubo_written;
   bool zero_window_initialized = false;
   VkDescriptorSetLayout ubo_layout = VK_NULL_HANDLE;
   VkDescriptorSetLayout empty_layout = VK_NULL_HANDLE;

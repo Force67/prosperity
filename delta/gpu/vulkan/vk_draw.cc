@@ -17,6 +17,7 @@
 #include "gpu/vulkan/vk_frame.h"
 #include "gpu/vulkan/vk_index_upload.h"
 #include "gpu/gpu_perf.h"
+#include "gpu/guest_memory.h"
 #include "gpu/vulkan/vk_pipeline_cache.h"
 #include "gpu/vulkan/vk_render_target.h"
 #include "gpu/vulkan/vk_texture_cache.h"
@@ -176,6 +177,9 @@ void Draw(Renderer& renderer, const DrawInfo& d_in) {
   }
   if (nv < 3 || nv > 200000u)
     return;                                   // sane cap
+  if (!IsReadableRange(reinterpret_cast<u64>(d.vertex_data),
+                       static_cast<u64>(nv) * d.vertex_stride))
+    return;
   VkDeviceSize need = (VkDeviceSize)nv * 32;  // pos.xy + color.rgba + uv.xy
   if (g_ring.vb_offset + need > g_ring.vb_end)
     return;  // ring full this frame

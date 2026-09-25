@@ -22,6 +22,8 @@
 #include <cstddef>
 #include "base/arch.h"
 
+#include <vector>
+
 // Spelled from the delta root, the one include convention the layering check
 // (tests/check_layering.py) accepts; all modules share that include root, so
 // internal headers are kept private by the check, not by the build.
@@ -55,6 +57,13 @@ void EndFrame(Renderer& renderer, u64 scanout_base);
 // Run a compute dispatch on the GPU. Returns true if it executed, false if it
 // could not be set up (the caller then skips the dispatch, as before).
 bool Dispatch(Renderer& renderer, const ComputeInfo& ci);
+
+// Compile the pipeline a dispatch of this module over `num_res` resources will
+// need, for that dispatch to pick up (or wait for) instead of compiling it
+// again. Safe from any thread.
+void PrebuildComputePipeline(const std::vector<u32>& spirv,
+                             u32 num_res,
+                             int guest_memory_binding);
 
 // Write every GPU-dirty compute range back to guest memory. Must run before
 // anything reads guest memory that a dispatch may have written: draw

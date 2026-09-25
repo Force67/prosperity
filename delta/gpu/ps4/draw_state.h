@@ -41,4 +41,8 @@ bool BuildDrawInfo(rhi::Renderer& renderer,
                    const DrawPacket& packet,
                    rhi::DrawInfo& d);
 
+// Start compiling, on worker threads, the shaders a draw with these registers
+// would need. For a look ahead through a command buffer before it runs.
+void PrefetchDrawShaders(const Regs& regs);
+
 }  // namespace gpu::ps4

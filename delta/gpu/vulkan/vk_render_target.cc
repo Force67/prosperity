@@ -1019,6 +1019,11 @@ u64 ResolveSampledDepth(u64 addr, u32 w, u32 h) {
     u64 b1 = base + span;
     if (!(addr < b1 && base < a1))
       continue;
+    // As for colour targets: overlap alone lets a texture that merely borders
+    // a depth allocation read the depth image. GTA:SA's material textures sit
+    // right below its shadow maps and sampled them as red depth.
+    if (!dim_match && !(base <= addr && b1 >= a1))
+      continue;
     long score = depth.last_frame;
     if (dim_match)
       score += 1L << 30;
@@ -1274,6 +1279,116 @@ void EndRegion() {
   g_region.cur_mrt_count = 0;
   g_region.cur_depth = 0;
   g_region.cur_stencil = 0;
+  if (const u64 slice = g_region.write_through) {
+    g_region.write_through = 0;
+    WriteRtToGuest(slice, g_region.write_through_tile);
+  }
+}
+
+bool WriteRtToGuest(u64 base, u32 tile_mode) {
+  auto it = g_rts.find(base);
+  if (it == g_rts.end() || !it->second.image || it->second.depth > 1)
+    return false;
+  RTarget& rt = it->second;
+  const u32 elem = FormatBytes(rt.fmt);
+  gcn::TextureLayout32 layout;
+  if (!elem ||
+      !gcn::BuildTextureLayout32(layout, rt.w, rt.h, rt.w, 1, 1, tile_mode,
+                                 false, elem) ||
+      !gpu::IsReadableRange(base, layout.size))
+    return false;
+  static VkBuffer buf = VK_NULL_HANDLE;
+  static VkDeviceMemory mem = VK_NULL_HANDLE;
+  static void* map = nullptr;
+  static VkDeviceSize cap = 0;
+  const VkDeviceSize bytes = static_cast<VkDeviceSize>(rt.w) * rt.h * elem;
+  if (cap < bytes) {
+    // The previous user waited for its copy, so nothing still reads these.
+    if (buf)
+      vkDestroyBuffer(g_dev.device, buf, nullptr);
+    if (mem)
+      vkFreeMemory(g_dev.device, mem, nullptr);
+    buf = VK_NULL_HANDLE;
+    mem = VK_NULL_HANDLE;
+    cap = 0;
+    VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    bi.size = bytes;
+    bi.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    if (vkCreateBuffer(g_dev.device, &bi, nullptr, &buf) != VK_SUCCESS)
+      return false;
+    VkMemoryRequirements mr;
+    vkGetBufferMemoryRequirements(g_dev.device, buf, &mr);
+    VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    ai.allocationSize = mr.size;
+    ai.memoryTypeIndex = FindMemoryTypePref(
+        mr.memoryTypeBits,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+            VK_MEMORY_PROPERTY_HOST_CACHED_BIT |
+            VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+            VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    if (vkAllocateMemory(g_dev.device, &ai, nullptr, &mem) != VK_SUCCESS) {
+      vkDestroyBuffer(g_dev.device, buf, nullptr);
+      buf = VK_NULL_HANDLE;
+      return false;
+    }
+    vkBindBufferMemory(g_dev.device, buf, mem, 0);
+    vkMapMemory(g_dev.device, mem, 0, bytes, 0, &map);
+    cap = bytes;
+  }
+  // A dispatch's pending write to these pages (the surface's clear) must land
+  // first, or its later writeback covers the slice again.
+  rhi::FlushCsWritesRange(rhi::DefaultRenderer(), base, layout.size,
+                          "rt-write-through");
+  if (!SubmitFrameChunk())
+    return false;
+  VkCommandBufferAllocateInfo ca{
+      VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+  ca.commandPool = g_dev.pool;
+  ca.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+  ca.commandBufferCount = 1;
+  VkCommandBuffer c = VK_NULL_HANDLE;
+  if (vkAllocateCommandBuffers(g_dev.device, &ca, &c) != VK_SUCCESS)
+    return false;
+  VkCommandBufferBeginInfo cbi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+  cbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+  vkBeginCommandBuffer(c, &cbi);
+  ImageBarrier(c, rt.image, rt.layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+               ColorImageAccess(rt.layout), VK_ACCESS_TRANSFER_READ_BIT);
+  VkBufferImageCopy copy{};
+  copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  copy.imageExtent = {rt.w, rt.h, 1};
+  vkCmdCopyImageToBuffer(c, rt.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buf,
+                         1, &copy);
+  ImageBarrier(c, rt.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, rt.layout,
+               VK_ACCESS_TRANSFER_READ_BIT, ColorImageAccess(rt.layout));
+  VkBufferMemoryBarrier bb{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+  bb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+  bb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+  bb.srcQueueFamilyIndex = bb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+  bb.buffer = buf;
+  bb.size = VK_WHOLE_SIZE;
+  vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                       VK_PIPELINE_STAGE_HOST_BIT, 0, 0, nullptr, 1, &bb, 0,
+                       nullptr);
+  VkResult r = vkEndCommandBuffer(c);
+  VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+  si.commandBufferCount = 1;
+  si.pCommandBuffers = &c;
+  if (r == VK_SUCCESS)
+    r = vkResetFences(g_dev.device, 1, &g_dev.fence);
+  if (r == VK_SUCCESS)
+    r = vkQueueSubmit(g_dev.queue, 1, &si, g_dev.fence);
+  if (r == VK_SUCCESS)
+    r = vkWaitForFences(g_dev.device, 1, &g_dev.fence, VK_TRUE, UINT64_MAX);
+  vkFreeCommandBuffers(g_dev.device, g_dev.pool, 1, &c);
+  if (r != VK_SUCCESS ||
+      !gcn::RetileTextureMip32(map, reinterpret_cast<void*>(base), layout, 0,
+                               0))
+    return false;
+  InvalidateTexRange(base, layout.size);
+  CsForgetGuestRange(base, layout.size);
+  return true;
 }
 
 void SetGuestViewport(const DrawInfo& d) {
@@ -1586,6 +1701,51 @@ bool BeginRegion(const u64* mrt_base,
       dt->stencil_used_this_frame = true;
       g_region.cur_stencil = stencil_base;
     }
+  }
+  // A pending clear covers the whole surface, but loadOp=CLEAR only reaches
+  // the render area. GTA:SA clears its depth and G-buffer inside a 256x256
+  // capture pass, which left the rest of the frame holding last frame's depth.
+  for (u32 i = 0; i < g_region.cur_mrt_count; i++) {
+    RTarget& rt = *targets[i];
+    if (colors[i].loadOp != VK_ATTACHMENT_LOAD_OP_CLEAR ||
+        (rt.w <= w && rt.h <= h))
+      continue;
+    const VkAccessFlags att = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
+                              VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0,
+                                        VK_REMAINING_MIP_LEVELS, 0,
+                                        VK_REMAINING_ARRAY_LAYERS};
+    ImageBarrier(g_frame.cmd, rt.image, rt.layout,
+                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, att,
+                 VK_ACCESS_TRANSFER_WRITE_BIT);
+    vkCmdClearColorImage(g_frame.cmd, rt.image,
+                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                         &colors[i].clearValue.color, 1, &range);
+    ImageBarrier(g_frame.cmd, rt.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                 rt.layout, VK_ACCESS_TRANSFER_WRITE_BIT, att);
+    colors[i].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+  }
+  if (dt && (dt->w > w || dt->h > h)) {
+    const VkAccessFlags att = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                              VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    const auto clear_aspect = [&](VkRenderingAttachmentInfo& a,
+                                  VkImageAspectFlags aspect, auto barrier) {
+      if (a.loadOp != VK_ATTACHMENT_LOAD_OP_CLEAR)
+        return;
+      const VkImageSubresourceRange range{aspect, 0, 1, depth_slice, 1};
+      barrier(g_frame.cmd, dt->image, a.imageLayout,
+              VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, att,
+              VK_ACCESS_TRANSFER_WRITE_BIT);
+      vkCmdClearDepthStencilImage(g_frame.cmd, dt->image,
+                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                  &a.clearValue.depthStencil, 1, &range);
+      barrier(g_frame.cmd, dt->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+              a.imageLayout, VK_ACCESS_TRANSFER_WRITE_BIT, att);
+      a.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    };
+    clear_aspect(depth_att, VK_IMAGE_ASPECT_DEPTH_BIT, DepthBarrier);
+    if (stencil_base)
+      clear_aspect(stencil_att, VK_IMAGE_ASPECT_STENCIL_BIT, StencilBarrier);
   }
   VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
   ri.renderArea = {{0, 0}, {w, h}};

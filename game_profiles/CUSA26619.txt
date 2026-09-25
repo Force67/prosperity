@@ -1,6 +1,54 @@
 // Grand Theft Auto: San Andreas - The Definitive Edition (CUSA26619, PS4)
 // UE4 / Gameface, native x86 backend.
 //
+// 2026-09-25: LIT SCENES REACH THE SCREEN. Sunset cutscenes, the skyline and
+// Grove Street gameplay present with natural colour. Every draw now runs the
+// recompiled path (0 heuristic quads). General PS4 defects fixed on the way:
+//   - the cbuffer ring gave every binding a 16 KiB window and filled after
+//     ~8000 of the ~15000 a frame binds; the rest fell to the heuristic quad
+//     renderer, which drew the smoke flipbook atlas full-screen (the "4x4
+//     silhouette grid"). Windows are packed now.
+//   - cbuffer bindings >= 8 were never resolved (read zeros); pairs needing
+//     more than 15 use the indirect (storage ring + offset table) path.
+//   - guest GS constant buffers (particle GSs were rejected outright).
+//   - SPI_SHADER_COL_FORMAT: UNORM16/SNORM16/(S|U)INT16 exports were unpacked
+//     as halves; 32_R/GR/AR routing.
+//   - RT sampled through a smaller T#: normalized UVs are rescaled to the
+//     image (the final upscale only covered 1470x827 of the screen).
+//   - a pending full-surface clear only reached the render area (a 256x256
+//     capture pass cleared the scene depth's corner only).
+//   - HTILE was never decoded on PS4; the scene depth is cleared by a compute
+//     fill of HTILE (the black 256x256 box).
+//   - cubes are 2D arrays of faces (tex_cube_mask); CB_COLOR0_VIEW slices
+//     render at base + slice * slice bytes and are written through to guest
+//     memory, which the sky-capture prefilter reads (the green reflections).
+//   - textures resolved to depth targets they merely bordered (red walls,
+//     red palms); BC bindings never resolve to targets.
+// Later on 2026-09-25, four more:
+//   - STRIPES / CHROME: image_sample_b carries a LOD-bias word ahead of the
+//     coordinates, and EmitMimg read that bias as U. Nearly every UE4 material
+//     here samples with a bias, so each one read along a single texel column:
+//     the stretched walls, fences and trunks, and wrong specular/roughness
+//     (the chrome characters). DELTA_GPU_DEBUGUV showed it: x was an integer.
+//   - BLACK MINIMAP: the radar is a 256x256 scene capture whose material
+//     reloads s[20:23] with a second V#. Cbuffer bindings were keyed by SGPR,
+//     so the second load read the first buffer's constants and the alpha test
+//     discarded the whole map. Bindings are now per descriptor
+//     (gcn::DescriptorVersions, both in PlanCbufs and ResolveCbuffers).
+//   - WATCHDOG: a cold world load was one ~105 s frame of serial shader work
+//     (spirv-opt ~90 s, driver ~110 s over the run). Now: a prescan of each
+//     submitted DCB starts spirv-opt on worker threads before the walk reaches
+//     the draws/dispatches, compute pipelines are compiled ahead there too
+//     (two CS are 1-2.7M words: 16 s opt + 30 s driver alone), the per-access
+//     buffer_load_format decode is a quarter of its old size, and the
+//     pipeline-cache blob (400 MB) is no longer rewritten every second during
+//     a compile burst. Worst cold frame 105 s -> ~67 s on this machine.
+//   - DELTA_GPU_SHDIS_ADDR / DELTA_GPU_PROBE_PS accept the guest_hash a
+//     capture reports, since shader addresses move between runs.
+// STILL WRONG: the two huge CS modules above (software sampling in the
+// staged CS path) are the critical path of a cold load; black specks in the
+// sky; ghosted translucent silhouettes over some cutscene frames.
+//
 // IN GAME, 3D GEOMETRY CORRECT (2026-09-24). Menu, loading screens, the
 // opening cutscene with subtitles and gameplay with the HUD (minimap, clock,
 // money) all run. The G-buffer holds clean geometry: interiors, stairs,

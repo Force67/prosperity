@@ -15,6 +15,7 @@
  */
 
 #include "base/arch.h"
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -41,5 +42,22 @@ bool Validate(const std::vector<u32>& spv, std::string* err = nullptr);
 bool Finalize(const std::vector<u32>& spv,
               std::vector<u32>* out,
               std::string* err = nullptr);
+
+// Start finalizing `spv` on a worker thread; the Finalize that later asks for
+// the same module waits for it instead of redoing it.
+void Prefetch(const std::vector<u32>& spv);
+
+// Hand the optimized form of `spv` to `then` on a worker thread, finalizing it
+// there first if nothing else has.
+void PrefetchThen(const std::vector<u32>& spv,
+                  std::function<void(const std::vector<u32>&)> then);
+
+// While one is alive on this thread, Finalize only prefetches and hands the
+// input back unchanged: a recompile run for its modules' sake, whose result is
+// thrown away.
+struct PrefetchScope {
+  PrefetchScope();
+  ~PrefetchScope();
+};
 
 }  // namespace gpu::gcn::spirv

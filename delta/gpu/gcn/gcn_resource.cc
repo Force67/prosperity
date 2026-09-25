@@ -1502,7 +1502,8 @@ std::vector<TImage> TrackTextures(
       std::memcpy(t.sampler, sampler, sizeof(t.sampler));
       t.sampler_valid = true;
     }
-    t.arrayed = (inst.raw[0] & 0x4000) != 0;  // MIMG DA
+    // MIMG DA, or a cube: sampled as the 2D array of its faces.
+    t.arrayed = (inst.raw[0] & 0x4000) != 0 || t.type == 11;
     t.force_lod_zero = op == 0x47;            // IMAGE_GATHER4_LZ
     t.depth_compare = op == 0x28 || op == 0x2f;
     t.storage = op == 0x08 || op == 0x09;
@@ -1538,10 +1539,10 @@ std::vector<TImage> TrackTextures(
   return result;
 }
 
-std::unordered_map<u32, VBuffer> ResolveCbuffers(
+std::unordered_map<u64, VBuffer> ResolveCbuffers(
     const std::shared_ptr<const Program>& program,
     const u32* user_data) {
-  std::unordered_map<u32, VBuffer> result;
+  std::unordered_map<u64, VBuffer> result;
   if (!program || !user_data)
     return result;
 
@@ -1550,7 +1551,7 @@ std::unordered_map<u32, VBuffer> ResolveCbuffers(
   // passes cbuffer descriptors through extended user data too (s_load the V#
   // through an EUD pointer, then s_buffer_load through it), so reading the V#
   // straight from user data yields base=0. The recompiler assigns one binding
-  // per base SGPR (PlanCbufs), so key by base SGPR and keep the first
+  // per descriptor (PlanCbufs), so key the same way and keep the first
   // resolvable V# seen for it.
   // One sweep per run, once the title is past its load: the data a descriptor
   // should have named exists by then, and the sweep costs a full pass over
@@ -1568,6 +1569,7 @@ std::unordered_map<u32, VBuffer> ResolveCbuffers(
     }
   }
   ScalarEval eval(user_data);
+  DescriptorVersions versions;
   for (const Inst& inst : CachedScalarInfo(program).insts) {
     // Decode the pointer/V# from the PRE-step register state: an SMRD whose
     // destination overlaps its own source (s_buffer_load_dword s4, s[4:7])
@@ -1582,9 +1584,8 @@ std::unordered_map<u32, VBuffer> ResolveCbuffers(
     // s_load addresses a raw 2-dword pointer, s_buffer_load a 4-dword V#.
     const bool pointer = s.op <= 0x04;
     const u32 base = s.sbase * 2;
-    // Keyed like the translator's bindings (see CbufBindKey): the same SGPR
-    // can serve as a pointer pair for one load and a V# for another.
-    const u32 key = base | (pointer ? 0x100u : 0u);
+    const u64 key = CbufKey(base, pointer, versions.Of(base, pointer ? 2 : 4));
+    versions.Note(inst);
     const bool known = candidate && eval.AllKnown(base, pointer ? 2 : 4);
     VBuffer v{};
     if (known) {

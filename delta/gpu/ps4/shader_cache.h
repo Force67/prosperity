@@ -42,6 +42,7 @@ struct GraphicsShaderState {
   // dimensionality and the texel type belong to the module's identity.
   u32 tex_3d_mask = 0;
   u32 tex_1d_mask = 0;
+  u32 tex_cube_mask = 0;
   u32 tex_uint_mask = 0;
   u32 mrt_uint_mask = 0;  // colour targets with an integer texel format
   // Bit n set = the pass binds colour attachment n. The module drops exports to
@@ -54,12 +55,18 @@ struct GraphicsShaderState {
   const gcn::GsPipeline* gs = nullptr;
   // Vertex inputs whose V# names a narrow integer format (see gcn::Recompile).
   u32 int_attr_mask = 0;
+  // SPI_SHADER_COL_FORMAT: how each MRT export is packed.
+  u32 col_format = gcn::kColFormatUnknown;
 };
 
 // The module for `state`, recompiled on first use. Never null; check .ok, which
 // is false for a shader pair the translator declined.
 const gcn::Recompiled& GetGraphicsShader(const Regs& regs,
                                          const GraphicsShaderState& state);
+
+// Start optimizing the modules GetGraphicsShader(state) will need on worker
+// threads, unless they are already cached. Returns at once.
+void PrefetchGraphicsShader(const Regs& regs, const GraphicsShaderState& state);
 
 // The workgroup shape and RSRC2 state a compute module is built with. The same
 // CS can legally be re-dispatched with a different workgroup size, so the code
@@ -74,5 +81,8 @@ struct ComputeShaderState {
 // false for a shader using something the compute backend does not implement,
 // which the caller must skip loudly rather than run.
 const gcn::RecompiledCs& GetComputeShader(const ComputeShaderState& state);
+
+// The compute counterpart of PrefetchGraphicsShader.
+void PrefetchComputeShader(const ComputeShaderState& state);
 
 }  // namespace gpu::ps4
