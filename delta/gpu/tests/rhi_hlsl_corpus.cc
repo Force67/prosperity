@@ -167,7 +167,9 @@ bool Reflect(const std::vector<u32>& words, Module* m, std::string* error) {
 // The first line of a diagnostic, without the file:line: prefix or numbers
 // that would split one cause into many.
 std::string Reason(const std::string& text) {
-  std::string line = text.substr(0, text.find('\n'));
+  size_t start = text.find("error: ");
+  start = start == std::string::npos ? 0 : text.rfind('\n', start) + 1;
+  std::string line = text.substr(start, text.find('\n', start) - start);
   const size_t err = line.find("error: ");
   if (err != std::string::npos)
     line = line.substr(err + 7);

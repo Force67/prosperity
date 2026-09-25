@@ -7,6 +7,7 @@
 
 #include <cmath>
 #include <cstring>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -31,7 +32,14 @@ ShaderCode Spv(const u32 (&words)[N]) {
 class RhiConformance : public ::testing::TestWithParam<Backend> {
  protected:
   void SetUp() override {
-    device_ = gpu::render::CreateBackendDevice(GetParam());
+    // One device per backend for the whole run, never destroyed: the Vulkan
+    // backend leaves its VkDevice to process exit, and a device per test
+    // exhausts the driver after a few dozen tests.
+    static std::map<Backend, Device*> devices;
+    Device*& shared = devices[GetParam()];
+    if (!shared)
+      shared = gpu::render::CreateBackendDevice(GetParam()).release();
+    device_.reset(shared);
     if (!device_)
       GTEST_SKIP() << BackendName(GetParam()) << " unavailable";
     list_ = device_->CreateCommandList();
@@ -44,6 +52,7 @@ class RhiConformance : public ::testing::TestWithParam<Backend> {
     for (Object* o : objects_)
       device_->Destroy(o);
     device_->Destroy(list_);
+    device_.release();  // NOLINT: owned by SetUp's table
   }
 
   template <typename T>
@@ -1348,6 +1357,49 @@ TEST_P(RhiConformance, ScaledVertexFormatAndFan) {
   EXPECT_EQ(px[2 * kW + 2], Rgba(0, 255, 0, 255));
   EXPECT_EQ(px[(kH - 3) * kW + kW - 3], Rgba(0, 255, 0, 255));
   EXPECT_EQ(px[2 * kW + kW - 3], Rgba(0, 255, 0, 255));
+}
+
+TEST_P(RhiConformance, DispatchBase) {
+  if (!device_->caps().dispatch_base)
+    GTEST_SKIP() << "no dispatch base";
+  BufferDesc bd;
+  bd.size = 64;
+  bd.usage = kBufferStorage | kBufferCopySrc | kBufferCopyDst;
+  Buffer* buf = Own(device_->CreateBuffer(bd));
+  Buffer* rb = Readback(64);
+  BindGroupLayoutDesc ld;
+  ld.bindings.push_back({0, BindingType::kStorageBuffer, kStageCompute});
+  ld.push = true;
+  BindGroupLayout* set0 = Own(device_->CreateBindGroupLayout(ld));
+  PipelineLayoutDesc pl;
+  pl.groups = {set0};
+  PipelineLayout* layout = Own(device_->CreatePipelineLayout(pl));
+  ComputePipelineDesc cp;
+  cp.layout = layout;
+  cp.code = Spv(k_x_base_comp_spv);
+  cp.dispatch_base = true;
+  Pipeline* pipe = Own(device_->CreateComputePipeline(cp));
+  ASSERT_NE(pipe, nullptr);
+  list_->Begin();
+  list_->FillBuffer(buf, 0, 64, 0);
+  list_->Barrier(kAccessCopyWrite, kAccessShaderWrite);
+  list_->SetPipeline(pipe);
+  BindingWrite w;
+  w.binding = 0;
+  w.buffer = buf;
+  w.range = 64;
+  list_->PushBindGroup(0, set0, &w, 1);
+  list_->DispatchBase(2, 0, 0, 1, 1, 1);
+  list_->Barrier(kAccessShaderWrite, kAccessCopyRead);
+  list_->CopyBuffer(rb, 0, buf, 0, 64);
+  list_->Barrier(kAccessCopyWrite, kAccessHostRead);
+  Submit();
+  list_->End();
+  const u32* out = reinterpret_cast<const u32*>(rb->mapped());
+  EXPECT_EQ(out[1], 0u) << "workgroup 0 ran";
+  EXPECT_EQ(out[8], 2008u);
+  EXPECT_EQ(out[11], 2011u);
+  EXPECT_EQ(out[12], 0u);
 }
 
 }  // namespace
