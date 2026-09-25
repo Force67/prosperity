@@ -137,6 +137,10 @@ void GlCommandList::BeginRenderPass(const rhi::RenderPassDesc& pass) {
     };
     load(rhi::kAspectDepth, d.depth_load);
     load(rhi::kAspectStencil, d.stencil_load);
+    if (d.read_only)
+      c->depth_read_only |= rhi::kAspectDepth;
+    if (d.stencil_read_only)
+      c->depth_read_only |= rhi::kAspectStencil;
     c->clear_depth = d.clear_depth;
     c->clear_stencil = d.clear_stencil;
   }
@@ -450,10 +454,22 @@ void GlCommandList::DrawIndexed(u32 index_count,
 void GlCommandList::DrawMeshTasks(u32 /*x*/, u32 /*y*/, u32 /*z*/) {}
 
 void GlCommandList::Dispatch(u32 x, u32 y, u32 z) {
+  DispatchBase(0, 0, 0, x, y, z);
+}
+
+void GlCommandList::DispatchBase(u32 bx,
+                                 u32 by,
+                                 u32 bz,
+                                 u32 x,
+                                 u32 y,
+                                 u32 z) {
   if (!pipeline_ || !pipeline_->compute)
     return;
   FlushBindings();
   auto* c = stream_.Add<CmdDispatch>();
+  c->base[0] = bx;
+  c->base[1] = by;
+  c->base[2] = bz;
   c->x = x;
   c->y = y;
   c->z = z;

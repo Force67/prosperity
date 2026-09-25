@@ -335,6 +335,7 @@ bool GlDevice::InitRenderThread() {
   caps_.sampler_mirror_clamp = true;
   caps_.storage_image_write_without_format = true;
   caps_.texture_blit = true;
+  caps_.dispatch_base = true;
   caps_.debug_labels = debug_;
   GLint bits = 0;
   glGetQueryiv(GL_TIMESTAMP, GL_QUERY_COUNTER_BITS, &bits);
@@ -363,6 +364,10 @@ bool GlDevice::InitRenderThread() {
   caps_.storage_offset_alignment =
       static_cast<u32>(GetInt(GL_SHADER_STORAGE_BUFFER_OFFSET_ALIGNMENT));
   caps_.max_texture_size = static_cast<u32>(GetInt(GL_MAX_TEXTURE_SIZE));
+  caps_.max_texture_size_3d =
+      static_cast<u32>(GetInt(GL_MAX_3D_TEXTURE_SIZE));
+  glGetFloatv(GL_MAX_TEXTURE_LOD_BIAS, &max_lod_bias_);
+  glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY, &max_anisotropy_);
   caps_.max_compute_resources =
       static_cast<u32>(GetInt(GL_MAX_COMPUTE_SHADER_STORAGE_BLOCKS));
 
@@ -569,12 +574,14 @@ rhi::Sampler* GlDevice::CreateSampler(const rhi::SamplerDesc& desc) {
       glSamplerParameteri(s, GL_TEXTURE_WRAP_S, ToGlAddress(desc.address_u));
       glSamplerParameteri(s, GL_TEXTURE_WRAP_T, ToGlAddress(desc.address_v));
       glSamplerParameteri(s, GL_TEXTURE_WRAP_R, ToGlAddress(desc.address_w));
-      glSamplerParameterf(s, GL_TEXTURE_LOD_BIAS, desc.lod_bias);
+      glSamplerParameterf(s, GL_TEXTURE_LOD_BIAS,
+                          std::clamp(desc.lod_bias, -max_lod_bias_,
+                                     max_lod_bias_));
       glSamplerParameterf(s, GL_TEXTURE_MIN_LOD, desc.min_lod);
       glSamplerParameterf(s, GL_TEXTURE_MAX_LOD, desc.max_lod);
       if (linear_ok && desc.max_anisotropy > 1.0f)
         glSamplerParameterf(s, GL_TEXTURE_MAX_ANISOTROPY,
-                            desc.max_anisotropy);
+                            std::min(desc.max_anisotropy, max_anisotropy_));
       if (desc.compare_enable) {
         glSamplerParameteri(s, GL_TEXTURE_COMPARE_MODE,
                             GL_COMPARE_REF_TO_TEXTURE);
@@ -828,6 +835,7 @@ rhi::Pipeline* GlDevice::BuildPipeline(const rhi::PipelineLayoutDesc& layout,
     pipeline->program = prog;
     if (program.pointer_count)
       pipeline->pointer_location = glGetUniformLocation(prog, kPointerTable);
+    pipeline->base_location = glGetUniformLocation(prog, kDispatchBase);
     for (const PushUniform& u : program.push_uniforms) {
       GlPipeline::Push& p = pipeline->push[pipeline->push_count++];
       p.location = glGetUniformLocation(prog, u.name.c_str());
@@ -900,7 +908,7 @@ rhi::Pipeline* GlDevice::CreateComputePipeline(
     const rhi::ComputePipelineDesc& desc) {
   auto pipeline = std::make_unique<GlPipeline>();
   pipeline->compute = true;
-  const StageCode stage{rhi::kStageCompute, desc.code};
+  const StageCode stage{rhi::kStageCompute, desc.code, desc.dispatch_base};
   const auto* layout = static_cast<GlPipelineLayout*>(desc.layout);
   return BuildPipeline(layout->desc(), &stage, 1, pipeline.release());
 }

@@ -231,6 +231,8 @@ class GlPipeline final : public rhi::Pipeline {
   u32 push_bytes = 0;
   GLint pointer_location = -1;
   u32 pointer_count = 0;
+  GLint base_location = -1;  // kDispatchBase
+  u32 base[3] = {};          // its value in the program; render thread
 };
 
 class GlTimestampPool final : public rhi::TimestampPool {
@@ -295,6 +297,7 @@ struct CmdBeginPass {
   u8 discard_mask;  // colours with LoadOp::kDontCare
   u8 depth_clear;   // rhi::Aspect bits
   u8 depth_discard;
+  u8 depth_read_only;
   ClearKind kinds[8];
   rhi::ClearColor clear[8];
   float clear_depth;
@@ -410,6 +413,7 @@ struct CmdDrawIndexed {
 struct CmdDispatch {
   static constexpr Op kOp = Op::kDispatch;
   Cmd h;
+  u32 base[3];
   u32 x, y, z;
 };
 
@@ -597,6 +601,7 @@ class GlCommandList final : public rhi::CommandList {
                    u32 first_instance) override;
   void DrawMeshTasks(u32 x, u32 y, u32 z) override;
   void Dispatch(u32 x, u32 y, u32 z) override;
+  void DispatchBase(u32 bx, u32 by, u32 bz, u32 x, u32 y, u32 z) override;
   void ClearAttachment(u32 attachment,
                        const rhi::ClearColor& color,
                        float depth,
@@ -767,6 +772,7 @@ class Replayer {
   i32 scissor_[4] = {};  // wanted by the recording
   i32 gl_scissor_[4] = {-1, -1, -1, -1};
   bool scissor_test_ = true;
+  u8 pass_read_only_ = 0;  // rhi::Aspect planes the pass must not write
 };
 
 // ---- device ------------------------------------------------------------------
@@ -833,6 +839,8 @@ class GlDevice final : public rhi::Device {
 
   bool debug_ = false;
   bool buffer_pointers_ = false;
+  float max_lod_bias_ = 0.0f;
+  float max_anisotropy_ = 1.0f;
   EglDevice egl_;
   GlWorker render_;
   GlWorker resource_;

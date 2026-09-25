@@ -241,6 +241,7 @@ void Replayer::ClearDepthStencilFbo(GLuint fbo,
 
 void Replayer::BeginPass(const CmdBeginPass& c) {
   const GLuint fbo = Framebuffer(c.key);
+  pass_read_only_ = c.depth_read_only;
   if (fbo != fbo_) {
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo);
     fbo_ = fbo;
@@ -396,9 +397,12 @@ void Replayer::ApplyGraphics() {
     Enable(GL_DEPTH_TEST, r.depth_test);
     raster_.depth_test = r.depth_test;
   }
-  if (r.depth_write != raster_.depth_write) {
-    glDepthMask(r.depth_write ? GL_TRUE : GL_FALSE);
-    raster_.depth_write = r.depth_write;
+  // A read-only attachment keeps its contents whatever the pipeline says.
+  const bool depth_write =
+      r.depth_write && !(pass_read_only_ & rhi::kAspectDepth);
+  if (depth_write != raster_.depth_write) {
+    glDepthMask(depth_write ? GL_TRUE : GL_FALSE);
+    raster_.depth_write = depth_write;
   }
   if (r.depth_func != raster_.depth_func) {
     glDepthFunc(r.depth_func);
@@ -408,10 +412,13 @@ void Replayer::ApplyGraphics() {
     Enable(GL_STENCIL_TEST, r.stencil_test);
     raster_.stencil_test = r.stencil_test;
   }
-  if (!(r.front == raster_.front))
-    ApplyStencil(GL_FRONT, r.front, raster_.front);
-  if (!(r.back == raster_.back))
-    ApplyStencil(GL_BACK, r.back, raster_.back);
+  StencilState front_state = r.front, back_state = r.back;
+  if (pass_read_only_ & rhi::kAspectStencil)
+    front_state.write_mask = back_state.write_mask = 0;
+  if (!(front_state == raster_.front))
+    ApplyStencil(GL_FRONT, front_state, raster_.front);
+  if (!(back_state == raster_.back))
+    ApplyStencil(GL_BACK, back_state, raster_.back);
   for (u32 i = 0; i < 8; i++)
     if (!(r.blend[i] == raster_.blend[i]))
       ApplyBlend(i, r.blend[i]);
@@ -780,6 +787,12 @@ void Replayer::Execute(const GlCommandList& list) {
       case Op::kDispatch: {
         const auto& c = As<CmdDispatch>(p);
         UseProgram(pipeline_->program);
+        if (pipeline_->base_location >= 0 &&
+            std::memcmp(pipeline_->base, c.base, sizeof(c.base))) {
+          glProgramUniform3ui(pipeline_->program, pipeline_->base_location,
+                              c.base[0], c.base[1], c.base[2]);
+          std::memcpy(pipeline_->base, c.base, sizeof(c.base));
+        }
         glDispatchCompute(c.x, c.y, c.z);
         break;
       }

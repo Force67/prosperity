@@ -1,0 +1,6 @@
+#version 450
+layout(local_size_x = 4) in;
+layout(set = 0, binding = 0) buffer Out { uint v[]; } o;
+void main() {
+  o.v[gl_GlobalInvocationID.x] = gl_WorkGroupID.x * 100u + gl_LocalInvocationID.x;
+}

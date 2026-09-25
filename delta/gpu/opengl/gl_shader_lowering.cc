@@ -78,6 +78,21 @@ class Lowerer : public spirv_cross::CompilerGLSL {
                     std::to_string(index) + "].xy))");
   }
 
+  void AddDispatchBase() {
+    dispatch_base_ = true;
+    add_header_line(std::string("uniform uvec3 ") + kDispatchBase + ";");
+  }
+
+  std::string builtin_to_glsl(spv::BuiltIn builtin,
+                              spv::StorageClass storage) override {
+    if (dispatch_base_ && builtin == spv::BuiltInWorkgroupId)
+      return std::string("(gl_WorkGroupID + ") + kDispatchBase + ")";
+    if (dispatch_base_ && builtin == spv::BuiltInGlobalInvocationId)
+      return std::string("(gl_GlobalInvocationID + ") + kDispatchBase +
+             " * gl_WorkGroupSize)";
+    return CompilerGLSL::builtin_to_glsl(builtin, storage);
+  }
+
   void emit_buffer_block(const spirv_cross::SPIRVariable& var) override {
     if (!spilled_.count(var.self))
       CompilerGLSL::emit_buffer_block(var);
@@ -153,6 +168,7 @@ class Lowerer : public spirv_cross::CompilerGLSL {
     u32 stride;
   };
   std::unordered_map<u32, Spilled> spilled_;
+  bool dispatch_base_ = false;
 };
 
 u32 StageOf(spv::ExecutionModel model) {
@@ -247,6 +263,7 @@ bool Accepts(rhi::BindingType type, SlotKind kind) {
 
 struct Stage {
   u32 stage = 0;
+  bool dispatch_base = false;
   std::unique_ptr<Lowerer> compiler;
   spirv_cross::ShaderResources resources;
 };
@@ -278,6 +295,8 @@ bool LowerProgram(const StageCode* stages,
       s.compiler = std::make_unique<Lowerer>(stages[i].code.words,
                                              stages[i].code.count);
       s.stage = StageOf(s.compiler->get_execution_model());
+      s.dispatch_base =
+          stages[i].dispatch_base && s.stage == rhi::kStageCompute;
       if (!s.stage || s.stage != stages[i].stage) {
         *error = "unsupported or mismatched execution model";
         return false;
@@ -445,6 +464,8 @@ bool LowerProgram(const StageCode* stages,
           program->push_ubo = true;
         }
       }
+      if (s.dispatch_base)
+        c.AddDispatchBase();
       c.set_common_options(options);
       std::string source = c.compile();
       if (spills)

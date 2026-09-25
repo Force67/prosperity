@@ -31,6 +31,9 @@ enum class SlotKind : u8 {
 };
 constexpr u32 kSlotKinds = 5;
 constexpr char kPointerTable[] = "delta_ptr";
+// The workgroup base of CommandList::DispatchBase, a uvec3 uniform added to
+// the workgroup and global invocation ids.
+constexpr char kDispatchBase[] = "delta_base";
 
 // Push constants that cannot be flattened into a uniform array live in this
 // uniform buffer binding; the groups' uniform buffers start after it.
@@ -74,6 +77,7 @@ struct GlslFeatures {
 struct StageCode {
   u32 stage = 0;  // rhi::ShaderStage bit
   rhi::ShaderCode code;
+  bool dispatch_base = false;  // compute: offset by kDispatchBase
 };
 
 // Lowers the stages of one program against `groups` (indexed by set; null

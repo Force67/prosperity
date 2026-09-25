@@ -457,6 +457,55 @@ TEST_P(RhiConformance, ManyStorageBuffers) {
   EXPECT_EQ(words[17 * kPerWindow + 1], 17u) << "untouched";
 }
 
+// Workgroup ids start at the base; a plain dispatch of the same pipeline
+// starts at zero again.
+TEST_P(RhiConformance, DispatchBase) {
+  if (!device_->caps().dispatch_base)
+    GTEST_SKIP() << "no dispatch base";
+  constexpr u32 kN = 16;
+  BufferDesc bd;
+  bd.size = kN * 4;
+  bd.usage = kBufferStorage | kBufferCopySrc | kBufferCopyDst;
+  Buffer* buf = Own(device_->CreateBuffer(bd));
+  Buffer* rb = Readback(kN * 4);
+  BindGroupLayoutDesc ld;
+  ld.bindings.push_back({0, BindingType::kStorageBuffer, kStageCompute});
+  ld.push = true;
+  BindGroupLayout* set0 = Own(device_->CreateBindGroupLayout(ld));
+  PipelineLayoutDesc pl;
+  pl.groups = {set0};
+  ComputePipelineDesc cp;
+  cp.layout = Own(device_->CreatePipelineLayout(pl));
+  cp.code = Spv(k_dispatch_base_comp_spv);
+  cp.dispatch_base = true;
+  Pipeline* pipe = Own(device_->CreateComputePipeline(cp));
+  ASSERT_NE(pipe, nullptr);
+
+  list_->Begin();
+  list_->FillBuffer(buf, 0, kN * 4, ~0u);
+  list_->Barrier(kAccessCopyWrite, kAccessShaderWrite);
+  list_->SetPipeline(pipe);
+  BindingWrite w;
+  w.buffer = buf;
+  w.range = kN * 4;
+  list_->PushBindGroup(0, set0, &w, 1);
+  list_->DispatchBase(2, 0, 0, 1, 1, 1);
+  list_->Barrier(kAccessShaderWrite, kAccessShaderWrite);
+  list_->Dispatch(1, 1, 1);
+  list_->Barrier(kAccessShaderWrite, kAccessCopyRead);
+  list_->CopyBuffer(rb, 0, buf, 0, kN * 4);
+  list_->Barrier(kAccessCopyWrite, kAccessHostRead);
+  Submit();
+  list_->End();
+  const u32* v = reinterpret_cast<const u32*>(rb->mapped());
+  EXPECT_EQ(v[0], 0u) << "plain dispatch";
+  EXPECT_EQ(v[3], 3u);
+  EXPECT_EQ(v[4], ~0u) << "workgroup 1 never ran";
+  EXPECT_EQ(v[8], 200u) << "based dispatch";
+  EXPECT_EQ(v[11], 203u);
+  EXPECT_EQ(v[12], ~0u);
+}
+
 TEST_P(RhiConformance, StorageImageWrite) {
   TextureDesc td;
   td.format = Format::kRGBA8Unorm;
