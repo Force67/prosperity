@@ -11,6 +11,7 @@
 #include <cstring>
 #include <map>
 #include <memory>
+#include <tuple>
 #include <unordered_map>
 
 namespace gpu::opengl {
@@ -44,6 +45,15 @@ class Lowerer : public spirv_cross::CompilerGLSL {
       default:
         return 0;
     }
+  }
+
+  // Consecutive locations an input of this type takes.
+  u32 LocationCount(u32 type_id) {
+    const SPIRType& t = get<SPIRType>(type_id);
+    u32 n = t.columns;
+    for (u32 i = 0; i < t.array.size(); i++)
+      n *= t.array_size_literal[i] ? t.array[i] : 1;
+    return n ? n : 1;
   }
 
   u32 DeclaredSize(u32 type_id) {
@@ -466,6 +476,27 @@ bool LowerProgram(const StageCode* stages,
       }
       if (s.dispatch_base)
         c.AddDispatchBase();
+      if (s.stage == rhi::kStageVertex) {
+        // Vulkan allows more attribute locations than GL does (16 on some
+        // drivers), and the recompiler leaves gaps: pack them.
+        std::vector<std::tuple<u32, u32, u32>> inputs;
+        for (const auto& res : s.resources.stage_inputs)
+          inputs.push_back({c.get_decoration(res.id, spv::DecorationLocation),
+                            res.id, res.type_id});
+        std::sort(inputs.begin(), inputs.end());
+        u32 next = 0;
+        for (const auto& [location, id, type] : inputs) {
+          const u32 n = c.LocationCount(type);
+          for (u32 k = 0; k < n; k++)
+            program->vertex_locations.push_back({location + k, next + k});
+          c.set_decoration(id, spv::DecorationLocation, next);
+          next += n;
+        }
+        if (next > features.max_vertex_attribs) {
+          *error = "too many vertex attributes for GL";
+          return false;
+        }
+      }
       c.set_common_options(options);
       std::string source = c.compile();
       if (spills)

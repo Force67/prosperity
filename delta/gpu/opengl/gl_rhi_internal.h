@@ -830,13 +830,16 @@ class GlDevice final : public rhi::Device {
   friend class Replayer;
 
   bool InitRenderThread();
+  // `graphics` is null for a compute pipeline.
   rhi::Pipeline* BuildPipeline(const rhi::PipelineLayoutDesc& layout,
                                const StageCode* stages,
                                u32 count,
+                               const rhi::GraphicsPipelineDesc* graphics,
                                GlPipeline* pipeline);
   const SlotMap* InternSlots(const rhi::PipelineLayoutDesc& layout,
                              const ProgramInterface& program);
-  VertexInput* InternVertexInput(const rhi::GraphicsPipelineDesc& desc);
+  VertexInput* InternVertexInput(const rhi::GraphicsPipelineDesc& desc,
+                                 const ProgramInterface& program);
   void WaitLoop();
 
   bool debug_ = false;

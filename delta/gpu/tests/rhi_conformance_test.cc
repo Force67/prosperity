@@ -781,6 +781,37 @@ TEST_P(RhiConformance, InstancingAndScaledAttributes) {
   EXPECT_EQ(px[49 * kW + 48], white) << "instance 2";
 }
 
+// Sparse attribute locations beyond 16, and an attribute the shader does not
+// read.
+TEST_P(RhiConformance, HighAttributeLocations) {
+  GraphicsPipelineDesc gp = PosPipeline(EmptyLayout());
+  gp.vertex = Spv(k_high_locations_vert_spv);
+  gp.vertex_attributes = {{20, 0, Format::kRGB32Float, 0},
+                          {27, 0, Format::kRGBA8Unorm, 12},
+                          {3, 1, Format::kRG16Sscaled, 0}};
+  Pipeline* pipe = Own(device_->CreateGraphicsPipeline(gp));
+  ASSERT_NE(pipe, nullptr);
+  const u32 cyan = Rgba(0, 255, 255, 255);
+  const Vertex verts[] = {
+      {-1, -1, 0, cyan}, {3, -1, 0, cyan}, {-1, 3, 0, cyan}};
+  Buffer* vb = Upload(verts, sizeof(verts), kBufferVertex);
+  Buffer* inst = Instances({0, 0});
+  Texture* t = Target();
+  TextureView* v = View(t);
+  list_->Begin();
+  TextureBarrier b{t, TextureState::kUndefined, TextureState::kColorTarget};
+  list_->Barrier(kAccessHostWrite, kAccessVertexRead, &b, 1);
+  list_->BeginRenderPass(ClearPass(v));
+  list_->SetPipeline(pipe);
+  YUpViewport();
+  BindVertices(vb, inst);
+  list_->Draw(3, 1, 0, 0);
+  list_->EndRenderPass();
+  std::vector<u32> px = ReadPixels(t, TextureState::kColorTarget);
+  list_->End();
+  EXPECT_EQ(px[32 * kW + 32], cyan);
+}
+
 // A swizzled single-layer view of an array texture, BGRA memory order, and
 // rendering into one slice of a 3D texture through a 2D view.
 TEST_P(RhiConformance, ViewsSwizzleBgraAnd3DSlice) {

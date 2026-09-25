@@ -12,6 +12,7 @@
 // into GL's small per-kind limits.
 
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "base/arch.h"
@@ -59,6 +60,9 @@ struct ProgramInterface {
   std::vector<PushUniform> push_uniforms;
   bool push_ubo = false;  // some stage reads push constants from kPushUboSlot
   u32 pointer_count = 0;  // entries of kPointerTable
+  // Vertex inputs are packed from GL attribute 0: {shader location, GL
+  // attribute} for each location the vertex stage reads.
+  std::vector<std::pair<u32, u32>> vertex_locations;
 };
 
 struct GlslFeatures {
@@ -69,6 +73,7 @@ struct GlslFeatures {
   u32 max_textures = 192;
   u32 max_images = 8;
   u32 max_stage_storage_buffers = 16;
+  u32 max_vertex_attribs = 16;
   // GL_NV_shader_buffer_load and GL_NV_gpu_shader5: storage buffers past the
   // per-stage limit become pointers.
   bool buffer_pointers = false;

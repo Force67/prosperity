@@ -311,6 +311,7 @@ bool GlDevice::InitRenderThread() {
   glsl_.max_storage_buffers = slot_limits_[1];
   glsl_.max_textures = slot_limits_[2];
   glsl_.max_images = slot_limits_[3];
+  glsl_.max_vertex_attribs = static_cast<u32>(GetInt(GL_MAX_VERTEX_ATTRIBS));
   slot_limits_[4] = kMaxPointers;
   glsl_.max_stage_storage_buffers = static_cast<u32>(
       std::min({GetInt(GL_MAX_VERTEX_SHADER_STORAGE_BLOCKS),
@@ -725,12 +726,19 @@ const SlotMap* GlDevice::InternSlots(const rhi::PipelineLayoutDesc& layout,
 }
 
 VertexInput* GlDevice::InternVertexInput(
-    const rhi::GraphicsPipelineDesc& desc) {
+    const rhi::GraphicsPipelineDesc& desc,
+    const ProgramInterface& program) {
   auto input = std::make_unique<VertexInput>();
   for (const rhi::VertexAttribute& a : desc.vertex_attributes) {
+    // Attributes the shader does not read are left disabled.
+    auto it = std::find_if(program.vertex_locations.begin(),
+                           program.vertex_locations.end(),
+                           [&](const auto& m) { return m.first == a.location; });
+    if (it == program.vertex_locations.end())
+      continue;
     const GlFormat& f = ToGl(a.format);
     VertexInput::Attribute attr;
-    attr.location = a.location;
+    attr.location = it->second;
     attr.binding = a.buffer;
     attr.size = f.vertex_size;
     attr.type = f.vertex_type;
@@ -760,10 +768,12 @@ VertexInput* GlDevice::InternVertexInput(
   return it->second.get();
 }
 
-rhi::Pipeline* GlDevice::BuildPipeline(const rhi::PipelineLayoutDesc& layout,
-                                       const StageCode* stages,
-                                       u32 count,
-                                       GlPipeline* raw) {
+rhi::Pipeline* GlDevice::BuildPipeline(
+    const rhi::PipelineLayoutDesc& layout,
+    const StageCode* stages,
+    u32 count,
+    const rhi::GraphicsPipelineDesc* graphics,
+    GlPipeline* raw) {
   std::unique_ptr<GlPipeline> pipeline(raw);
   std::vector<const rhi::BindGroupLayoutDesc*> groups;
   for (rhi::BindGroupLayout* g : layout.groups)
@@ -776,6 +786,8 @@ rhi::Pipeline* GlDevice::BuildPipeline(const rhi::PipelineLayoutDesc& layout,
     return nullptr;
   }
   pipeline->slots = InternSlots(layout, program);
+  if (graphics)
+    pipeline->vertex = InternVertexInput(*graphics, program);
   pipeline->push_ubo = program.push_ubo;
   pipeline->pointer_count = program.pointer_count;
   if (program.pointer_count > kMaxPointers) {
@@ -865,7 +877,6 @@ rhi::Pipeline* GlDevice::CreateGraphicsPipeline(
   if (!desc.fragment.empty())
     stages[count++] = {rhi::kStageFragment, desc.fragment};
 
-  pipeline->vertex = InternVertexInput(desc);
   for (size_t i = 0; i < desc.vertex_buffers.size(); i++)
     pipeline->strides[i] = desc.vertex_buffers[i].stride;
   pipeline->mode = ToGlMode(desc.topology);
@@ -901,7 +912,8 @@ rhi::Pipeline* GlDevice::CreateGraphicsPipeline(
     b.mask = a.write_mask & 0xF;
   }
   const auto* layout = static_cast<GlPipelineLayout*>(desc.layout);
-  return BuildPipeline(layout->desc(), stages, count, pipeline.release());
+  return BuildPipeline(layout->desc(), stages, count, &desc,
+                       pipeline.release());
 }
 
 rhi::Pipeline* GlDevice::CreateComputePipeline(
@@ -910,7 +922,7 @@ rhi::Pipeline* GlDevice::CreateComputePipeline(
   pipeline->compute = true;
   const StageCode stage{rhi::kStageCompute, desc.code, desc.dispatch_base};
   const auto* layout = static_cast<GlPipelineLayout*>(desc.layout);
-  return BuildPipeline(layout->desc(), &stage, 1, pipeline.release());
+  return BuildPipeline(layout->desc(), &stage, 1, nullptr, pipeline.release());
 }
 
 rhi::TimestampPool* GlDevice::CreateTimestampPool(u32 count) {
