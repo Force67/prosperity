@@ -791,9 +791,23 @@ void D3D12CommandList::DrawIndexed(u32 index_count,
 void D3D12CommandList::DrawMeshTasks(u32, u32, u32) {}
 
 void D3D12CommandList::Dispatch(u32 x, u32 y, u32 z) {
+  DispatchBase(0, 0, 0, x, y, z);
+}
+
+void D3D12CommandList::DispatchBase(u32 bx,
+                                    u32 by,
+                                    u32 bz,
+                                    u32 x,
+                                    u32 y,
+                                    u32 z) {
   FlushState(true);
   const u32 groups[3] = {x, y, z};
   cmd->SetComputeRoot32BitConstants(pipeline_->layout->dispatch, 3, groups, 0);
+  if (pipeline_->dispatch_base) {
+    const u32 base[3] = {bx, by, bz};
+    cmd->SetComputeRoot32BitConstants(pipeline_->layout->group_base, 3, base,
+                                      0);
+  }
   cmd->Dispatch(x, y, z);
 }
 

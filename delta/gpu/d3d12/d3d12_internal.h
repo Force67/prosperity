@@ -8,6 +8,7 @@
  * Binding: every PipelineLayout is one root signature,
  *   [push constants (root constants, or a root CBV when they do not fit)]
  *   [raster: y sign] [draw: base vertex/instance] [dispatch: group count]
+ *   [group base: first workgroup id]
  *   per group: [CBV/SRV/UAV table] [sampler table] [root CBV per dynamic UBO]
  * A group's descriptors live in a CPU-only heap and are copied into a
  * shader-visible ring at SetBindGroup; the ring is handed out in chunks a
@@ -195,7 +196,7 @@ class D3D12PipelineLayout final : public rhi::PipelineLayout {
   i32 push_constants = -1;  // root constants
   i32 push_cbv = -1;        // push constants from upload memory
   u32 push_dwords = 0;
-  i32 raster = -1, draw = -1, dispatch = -1;
+  i32 raster = -1, draw = -1, dispatch = -1, group_base = -1;
   std::vector<RootGroup> groups;
   std::vector<std::pair<u32, u32>> read_only_storage;  // (set, binding)
 };
@@ -214,6 +215,7 @@ class D3D12Pipeline final : public rhi::Pipeline {
   bool uses_raster = false;
   bool uses_draw_params = false;
   bool uses_workgroup_count = false;
+  bool dispatch_base = false;
 };
 
 class D3D12TimestampPool final : public rhi::TimestampPool {
@@ -294,6 +296,7 @@ class D3D12CommandList final : public rhi::CommandList {
                    u32 first_instance) override;
   void DrawMeshTasks(u32 x, u32 y, u32 z) override;
   void Dispatch(u32 x, u32 y, u32 z) override;
+  void DispatchBase(u32 bx, u32 by, u32 bz, u32 x, u32 y, u32 z) override;
   void ClearAttachment(u32 attachment,
                        const rhi::ClearColor& color,
                        float depth,

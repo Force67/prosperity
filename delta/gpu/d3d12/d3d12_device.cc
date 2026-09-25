@@ -356,6 +356,8 @@ bool D3D12Device::Init(const D3D12Options& options) {
       D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT;
   caps_.storage_offset_alignment = D3D12_RAW_UAV_SRV_BYTE_ALIGNMENT;
   caps_.max_texture_size = D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION;
+  caps_.max_texture_size_3d = D3D12_REQ_TEXTURE3D_U_V_OR_W_DIMENSION;
+  caps_.dispatch_base = true;  // an id offset in the lowered shader
   caps_.max_compute_resources = 64;
   caps_.texture_blit = InitBlit();
   BASE_LOGI("gpud3d12", "device: {} (shader model {}.{})",
@@ -667,9 +669,12 @@ rhi::Sampler* D3D12Device::CreateSampler(const rhi::SamplerDesc& desc) {
   sd.AddressU = ToAddress(desc.address_u);
   sd.AddressV = ToAddress(desc.address_v);
   sd.AddressW = ToAddress(desc.address_w);
-  sd.MipLODBias = desc.lod_bias;
+  sd.MipLODBias = std::clamp(desc.lod_bias, D3D12_MIP_LOD_BIAS_MIN,
+                             D3D12_MIP_LOD_BIAS_MAX);
   sd.MaxAnisotropy =
-      aniso ? std::min(16u, static_cast<u32>(desc.max_anisotropy)) : 1u;
+      aniso ? std::min<u32>(D3D12_MAX_MAXANISOTROPY,
+                            static_cast<u32>(desc.max_anisotropy))
+            : 1u;
   sd.ComparisonFunc = static_cast<D3D12_COMPARISON_FUNC>(
       desc.compare_enable ? u32(desc.compare) + 1 : 1);
   const float border = desc.border == rhi::BorderColor::kOpaqueWhite ? 1.0f

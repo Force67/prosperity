@@ -26,6 +26,7 @@ constexpr u32 kPushRegister = 0;      // push constants
 constexpr u32 kRasterRegister = 1;    // float y_sign, for the viewport flip
 constexpr u32 kDrawRegister = 2;      // int base_vertex, base_instance
 constexpr u32 kDispatchRegister = 3;  // uint3 workgroup count
+constexpr u32 kGroupBaseRegister = 4;  // uint3 first workgroup id
 
 struct LowerOptions {
   rhi::ShaderStage stage = rhi::kStageVertex;
@@ -39,6 +40,8 @@ struct LowerOptions {
   u32 sint_inputs = 0;
   // Vertex inputs whose red and blue arrive swapped (A2R10G10B10).
   u32 swap_rb_inputs = 0;
+  // Compute: workgroup ids start at the kGroupBaseRegister constant.
+  bool dispatch_base = false;
   // Storage buffers the layout binds as SRVs, as (set, binding).
   std::vector<std::pair<u32, u32>> read_only_storage;
   // The previous stage's outputs (LoweredShader::outputs). D3D12 links

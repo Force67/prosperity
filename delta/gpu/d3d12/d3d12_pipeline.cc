@@ -189,7 +189,8 @@ ID3D12RootSignature* D3D12Device::SerializeRoot(
 rhi::PipelineLayout* D3D12Device::CreatePipelineLayout(
     const rhi::PipelineLayoutDesc& desc) {
   auto layout = std::make_unique<D3D12PipelineLayout>(desc);
-  layout->push_dwords = (desc.push_constant_bytes + 3) / 4;
+  // Whole 16-byte rows: the shader's cbuffer is sized in rows.
+  layout->push_dwords = (desc.push_constant_bytes + 15) / 16 * 4;
 
   // What the root costs with every dynamic uniform buffer as a root CBV and
   // push constants as root constants; over budget, the buffers move into
@@ -203,7 +204,7 @@ rhi::PipelineLayout* D3D12Device::CreatePipelineLayout(
     for (const GroupEntry& e : gl->entries)
       dynamic_ubos += e.type == rhi::BindingType::kUniformBufferDynamic;
   }
-  constexpr u32 kInternal = 1 + 2 + 3;
+  constexpr u32 kInternal = 1 + 2 + 3 + 3;
   bool root_ubos = true;
   bool push_root_constants = true;
   if (layout->push_dwords + kInternal + tables + 2 * dynamic_ubos >
@@ -233,6 +234,8 @@ rhi::PipelineLayout* D3D12Device::CreatePipelineLayout(
   params.push_back(Constants(kDrawRegister, 2));
   layout->dispatch = static_cast<i32>(params.size());
   params.push_back(Constants(kDispatchRegister, 3));
+  layout->group_base = static_cast<i32>(params.size());
+  params.push_back(Constants(kGroupBaseRegister, 3));
 
   layout->groups.resize(desc.groups.size());
   for (u32 set = 0; set < desc.groups.size(); set++) {
@@ -291,9 +294,10 @@ bool D3D12Device::CompileStage(const rhi::ShaderCode& code,
                                std::vector<u8>* dxil,
                                LoweredShader* info) {
   u64 key = HashWords(code.words, code.count, code.count);
-  const u32 opts[] = {u32(options.stage),     options.shader_model,
-                      u32(options.flip_y),    options.uint_inputs,
-                      options.sint_inputs,    options.swap_rb_inputs};
+  const u32 opts[] = {u32(options.stage),         options.shader_model,
+                      u32(options.flip_y),        options.uint_inputs,
+                      options.sint_inputs,        options.swap_rb_inputs,
+                      u32(options.dispatch_base)};
   key = HashWords(opts, sizeof(opts) / 4, key);
   for (const auto& [set, binding] : options.read_only_storage) {
     const u32 sb[] = {set, binding};
@@ -473,6 +477,7 @@ rhi::Pipeline* D3D12Device::CreateComputePipeline(
   co.stage = rhi::kStageCompute;
   co.shader_model = shader_model_;
   co.read_only_storage = layout->read_only_storage;
+  co.dispatch_base = desc.dispatch_base;
   std::vector<u8> cs;
   LoweredShader info;
   if (!CompileStage(desc.code, co, &cs, &info))
@@ -481,6 +486,7 @@ rhi::Pipeline* D3D12Device::CreateComputePipeline(
   pipeline->layout = layout;
   pipeline->compute = true;
   pipeline->uses_workgroup_count = info.uses_workgroup_count;
+  pipeline->dispatch_base = desc.dispatch_base;
   D3D12_COMPUTE_PIPELINE_STATE_DESC pd{};
   pd.pRootSignature = layout->root;
   pd.CS = {cs.data(), cs.size()};

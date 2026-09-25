@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
 #include <regex>
 #include <sstream>
 
@@ -179,6 +180,195 @@ void MatchInputs(std::string& hlsl, const std::string& producer) {
   hlsl.replace(begin, end - begin, out);
 }
 
+// GLSL's extended integer arithmetic, which SPIRV-Cross emits by name.
+std::string ExtendedArithmetic(const std::string& hlsl) {
+  std::string out;
+  for (const char* n : {"", "2", "3", "4"}) {
+    const std::string u = std::string("uint") + n, i = std::string("int") + n;
+    const std::string u64 = std::string("uint64_t") + n;
+    const std::string i64 = std::string("int64_t") + n;
+    if (hlsl.find("uaddCarry(") != std::string::npos)
+      out += u + " uaddCarry(" + u + " x, " + u + " y, out " + u +
+             " carry) { " + u + " s = x + y; carry = " + u +
+             "(s < x); return s; }\n";
+    if (hlsl.find("usubBorrow(") != std::string::npos)
+      out += u + " usubBorrow(" + u + " x, " + u + " y, out " + u +
+             " borrow) { borrow = " + u + "(x < y); return x - y; }\n";
+    if (hlsl.find("umulExtended(") != std::string::npos)
+      out += "void umulExtended(" + u + " x, " + u + " y, out " + u +
+             " msb, out " + u + " lsb) { " + u64 + " p = " + u64 + "(x) * " +
+             u64 + "(y); msb = " + u + "(p >> 32); lsb = " + u + "(p); }\n";
+    if (hlsl.find("imulExtended(") != std::string::npos)
+      out += "void imulExtended(" + i + " x, " + i + " y, out " + i +
+             " msb, out " + i + " lsb) { " + i64 + " p = " + i64 + "(x) * " +
+             i64 + "(y); msb = " + i + "(p >> 32); lsb = " + i + "(p); }\n";
+  }
+  return out;
+}
+
+// SPIRV-Cross cannot express this block with cbuffer packing rules: returns
+// the variable's id from its message.
+bool PackingFailure(const std::string& message, u32* id) {
+  const std::string key = "cbuffer ID ";
+  const size_t at = message.find(key);
+  if (at == std::string::npos ||
+      message.find("cannot be expressed") == std::string::npos)
+    return false;
+  *id = static_cast<u32>(std::strtoul(message.c_str() + at + key.size(),
+                                      nullptr, 10));
+  return true;
+}
+
+// One lowering pass. Blocks in `flatten` become arrays of 16-byte rows,
+// declared inside a cbuffer at the block's register.
+std::string Lower(const u32* words,
+                  size_t count,
+                  const LowerOptions& options,
+                  const std::vector<u32>& flatten,
+                  LoweredShader* out) {
+  sc::CompilerHLSL compiler(words, count);
+  const spv::ExecutionModel model = compiler.get_execution_model();
+
+  sc::CompilerGLSL::Options common = compiler.get_common_options();
+  common.vertex.flip_vert_y =
+      options.flip_y && model == spv::ExecutionModelVertex;
+  common.vertex.fixup_clipspace = false;
+  compiler.set_common_options(common);
+
+  sc::CompilerHLSL::Options hlsl_options;
+  hlsl_options.shader_model = options.shader_model;
+  hlsl_options.point_size_compat = true;
+  hlsl_options.point_coord_compat = true;
+  hlsl_options.support_nonzero_base_vertex_base_instance =
+      model == spv::ExecutionModelVertex;
+  compiler.set_hlsl_options(hlsl_options);
+
+  sc::HLSLResourceBinding push;
+  push.stage = model;
+  push.desc_set = sc::ResourceBindingPushConstantDescriptorSet;
+  push.binding = sc::ResourceBindingPushConstantBinding;
+  push.cbv = {kInternalSpace, kPushRegister};
+  compiler.add_hlsl_resource_binding(push);
+  compiler.set_hlsl_aux_buffer_binding(
+      sc::HLSL_AUX_BINDING_BASE_VERTEX_INSTANCE, kDrawRegister,
+      kInternalSpace);
+
+  if (model == spv::ExecutionModelGLCompute) {
+    const sc::VariableID id = compiler.remap_num_workgroups_builtin();
+    if (id) {
+      compiler.set_decoration(id, spv::DecorationDescriptorSet,
+                              kInternalSpace);
+      compiler.set_decoration(id, spv::DecorationBinding, kDispatchRegister);
+      out->uses_workgroup_count = true;
+    }
+  }
+
+  const sc::ShaderResources resources = compiler.get_shader_resources();
+  for (const sc::Resource& r : resources.storage_buffers) {
+    const u32 set = compiler.get_decoration(r.id, spv::DecorationDescriptorSet);
+    const u32 binding = compiler.get_decoration(r.id, spv::DecorationBinding);
+    const bool srv =
+        std::find(options.read_only_storage.begin(),
+                  options.read_only_storage.end(),
+                  std::make_pair(set, binding)) !=
+        options.read_only_storage.end();
+    if (srv)
+      compiler.set_decoration(r.id, spv::DecorationNonWritable);
+    else
+      compiler.set_hlsl_force_storage_buffer_as_uav(set, binding);
+  }
+  for (u32 id : flatten)
+    compiler.flatten_buffer_block(id);
+
+  std::string hlsl = compiler.compile();
+  out->uses_draw_params = compiler.is_hlsl_aux_buffer_binding_used(
+      sc::HLSL_AUX_BINDING_BASE_VERTEX_INSTANCE);
+
+  for (u32 id : flatten) {
+    const u32 type = compiler.get_type_from_variable(id).self;
+    std::string name = compiler.get_name(type);
+    if (name.empty())
+      name = compiler.get_fallback_name(type);
+    const bool is_push =
+        compiler.get_storage_class(id) == spv::StorageClassPushConstant;
+    const u32 reg = is_push ? kPushRegister
+                            : compiler.get_decoration(id, spv::DecorationBinding);
+    const u32 space =
+        is_push ? kInternalSpace
+                : compiler.get_decoration(id, spv::DecorationDescriptorSet);
+    static const std::regex decl(R"(uniform (\w+) (\w+)\[(\d+)\];)");
+    std::smatch m;
+    std::string::const_iterator from = hlsl.cbegin();
+    while (std::regex_search(from, hlsl.cend(), m, decl)) {
+      if (m[2] == name) {
+        const std::string block = "cbuffer DeltaFlat_" + name +
+                                  " : register(b" + std::to_string(reg) +
+                                  ", space" + std::to_string(space) +
+                                  ")\n{\n    " + m[1].str() + " " + name +
+                                  "[" + m[3].str() + "];\n};";
+        const size_t at = m.position(0) + (from - hlsl.cbegin());
+        hlsl.replace(at, m.length(0), block);
+        break;
+      }
+      from = m.suffix().first;
+    }
+  }
+
+  if (options.flip_y) {
+    const std::string sign = "delta_y_sign";
+    if (model == spv::ExecutionModelVertex)
+      out->uses_raster = Replace(hlsl, "gl_Position.y = -gl_Position.y;",
+                                 "gl_Position.y *= " + sign + ";");
+    else if (model == spv::ExecutionModelGeometry)
+      out->uses_raster =
+          Replace(hlsl, "stage_output.gl_Position = gl_Position;",
+                  "stage_output.gl_Position = float4(gl_Position.x, "
+                  "gl_Position.y * " +
+                      sign + ", gl_Position.zw);");
+    if (out->uses_raster)
+      hlsl = "cbuffer DeltaRaster : register(b" +
+             std::to_string(kRasterRegister) + ", space" +
+             std::to_string(kInternalSpace) + ")\n{\n    float " + sign +
+             ";\n};\n\n" + hlsl;
+  }
+  if (model == spv::ExecutionModelVertex)
+    RetypeInputs(hlsl, options);
+  if (model == spv::ExecutionModelGLCompute && options.dispatch_base) {
+    // D3D12 has no dispatch base: offset the ids the shader reads.
+    std::string size = "uint3(";
+    for (u32 i = 0; i < 3; i++)
+      size += std::to_string(compiler.get_execution_mode_argument(
+                  spv::ExecutionModeLocalSize, i)) +
+              (i < 2 ? ", " : ")");
+    Replace(hlsl, "gl_WorkGroupID = stage_input.gl_WorkGroupID;",
+            "gl_WorkGroupID = stage_input.gl_WorkGroupID + delta_group_base;");
+    Replace(hlsl,
+            "gl_GlobalInvocationID = stage_input.gl_GlobalInvocationID;",
+            "gl_GlobalInvocationID = stage_input.gl_GlobalInvocationID + "
+            "delta_group_base * " +
+                size + ";");
+    hlsl = "cbuffer DeltaGroupBase : register(b" +
+           std::to_string(kGroupBaseRegister) + ", space" +
+           std::to_string(kInternalSpace) +
+           ")\n{\n    uint3 delta_group_base;\n};\n\n" + hlsl;
+  }
+  if (model == spv::ExecutionModelGeometry) {
+    // SPIRV-Cross copies gl_in[].gl_Position into gl_PositionIn but still
+    // reads the GLSL name.
+    static const std::regex gl_in(R"(gl_in\[([^\]]+)\]\.gl_Position)");
+    hlsl = std::regex_replace(hlsl, gl_in, "gl_PositionIn[$1]");
+  }
+  if (model == spv::ExecutionModelFragment ||
+      model == spv::ExecutionModelGeometry)
+    MatchInputs(hlsl, options.producer_outputs);
+  size_t begin, end;
+  if ((model == spv::ExecutionModelVertex ||
+       model == spv::ExecutionModelGeometry) &&
+      FindStruct(hlsl, "SPIRV_Cross_Output", &begin, &end))
+    out->outputs = hlsl.substr(begin, end - begin);
+  return ExtendedArithmetic(hlsl) + hlsl;
+}
+
 }  // namespace
 
 u64 HashWords(const u32* words, size_t count, u64 seed) {
@@ -194,109 +384,27 @@ bool LowerToHlsl(const u32* words,
                  size_t count,
                  const LowerOptions& options,
                  LoweredShader* out) {
-  *out = {};
-  try {
-    sc::CompilerHLSL compiler(words, count);
-    const spv::ExecutionModel model = compiler.get_execution_model();
-
-    sc::CompilerGLSL::Options common = compiler.get_common_options();
-    common.vertex.flip_vert_y =
-        options.flip_y && model == spv::ExecutionModelVertex;
-    common.vertex.fixup_clipspace = false;
-    compiler.set_common_options(common);
-
-    sc::CompilerHLSL::Options hlsl_options;
-    hlsl_options.shader_model = options.shader_model;
-    hlsl_options.point_size_compat = true;
-    hlsl_options.point_coord_compat = true;
-    hlsl_options.support_nonzero_base_vertex_base_instance =
-        model == spv::ExecutionModelVertex;
-    compiler.set_hlsl_options(hlsl_options);
-
-    sc::HLSLResourceBinding push;
-    push.stage = model;
-    push.desc_set = sc::ResourceBindingPushConstantDescriptorSet;
-    push.binding = sc::ResourceBindingPushConstantBinding;
-    push.cbv = {kInternalSpace, kPushRegister};
-    compiler.add_hlsl_resource_binding(push);
-    compiler.set_hlsl_aux_buffer_binding(
-        sc::HLSL_AUX_BINDING_BASE_VERTEX_INSTANCE, kDrawRegister,
-        kInternalSpace);
-
-    if (model == spv::ExecutionModelGLCompute) {
-      const sc::VariableID id = compiler.remap_num_workgroups_builtin();
-      if (id) {
-        compiler.set_decoration(id, spv::DecorationDescriptorSet,
-                                kInternalSpace);
-        compiler.set_decoration(id, spv::DecorationBinding,
-                                kDispatchRegister);
-        out->uses_workgroup_count = true;
+  std::vector<u32> flatten;
+  for (;;) {
+    *out = {};
+    try {
+      out->hlsl = Lower(words, count, options, flatten, out);
+      break;
+    } catch (const std::exception& e) {
+      u32 id;
+      if (flatten.size() < 16 && PackingFailure(e.what(), &id) &&
+          std::find(flatten.begin(), flatten.end(), id) == flatten.end()) {
+        flatten.push_back(id);
+        continue;
       }
+      out->error = e.what();
+      return false;
     }
-
-    const sc::ShaderResources resources = compiler.get_shader_resources();
-    for (const sc::Resource& r : resources.storage_buffers) {
-      const u32 set =
-          compiler.get_decoration(r.id, spv::DecorationDescriptorSet);
-      const u32 binding = compiler.get_decoration(r.id, spv::DecorationBinding);
-      const bool srv =
-          std::find(options.read_only_storage.begin(),
-                    options.read_only_storage.end(),
-                    std::make_pair(set, binding)) !=
-          options.read_only_storage.end();
-      if (srv)
-        compiler.set_decoration(r.id, spv::DecorationNonWritable);
-      else
-        compiler.set_hlsl_force_storage_buffer_as_uav(set, binding);
-    }
-
-    std::string hlsl = compiler.compile();
-    out->uses_draw_params = compiler.is_hlsl_aux_buffer_binding_used(
-        sc::HLSL_AUX_BINDING_BASE_VERTEX_INSTANCE);
-
-    if (options.flip_y) {
-      const std::string sign = "delta_y_sign";
-      if (model == spv::ExecutionModelVertex)
-        out->uses_raster = Replace(hlsl, "gl_Position.y = -gl_Position.y;",
-                                   "gl_Position.y *= " + sign + ";");
-      else if (model == spv::ExecutionModelGeometry)
-        out->uses_raster =
-            Replace(hlsl, "stage_output.gl_Position = gl_Position;",
-                    "stage_output.gl_Position = float4(gl_Position.x, "
-                    "gl_Position.y * " +
-                        sign + ", gl_Position.zw);");
-      if (out->uses_raster)
-        hlsl = "cbuffer DeltaRaster : register(b" +
-               std::to_string(kRasterRegister) + ", space" +
-               std::to_string(kInternalSpace) + ")\n{\n    float " + sign +
-               ";\n};\n\n" + hlsl;
-    }
-    if (model == spv::ExecutionModelVertex)
-      RetypeInputs(hlsl, options);
-    if (model == spv::ExecutionModelGeometry) {
-      // SPIRV-Cross copies gl_in[].gl_Position into gl_PositionIn but still
-      // reads the GLSL name.
-      static const std::regex gl_in(R"(gl_in\[([^\]]+)\]\.gl_Position)");
-      hlsl = std::regex_replace(hlsl, gl_in, "gl_PositionIn[$1]");
-    }
-    if (model == spv::ExecutionModelFragment ||
-        model == spv::ExecutionModelGeometry)
-      MatchInputs(hlsl, options.producer_outputs);
-    size_t begin, end;
-    if ((model == spv::ExecutionModelVertex ||
-         model == spv::ExecutionModelGeometry) &&
-        FindStruct(hlsl, "SPIRV_Cross_Output", &begin, &end))
-      out->outputs = hlsl.substr(begin, end - begin);
-
-    out->hlsl = std::move(hlsl);
-    out->profile = std::string(StagePrefix(options.stage)) + "_" +
-                   std::to_string(options.shader_model / 10) + "_" +
-                   std::to_string(options.shader_model % 10);
-    return true;
-  } catch (const std::exception& e) {
-    out->error = e.what();
-    return false;
   }
+  out->profile = std::string(StagePrefix(options.stage)) + "_" +
+                 std::to_string(options.shader_model / 10) + "_" +
+                 std::to_string(options.shader_model % 10);
+  return true;
 }
 
 }  // namespace gpu::d3d12
