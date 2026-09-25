@@ -12,6 +12,7 @@
 // needs from the BackendState& / Renderer& it is handed instead of naming an
 // alias; the aliases exist so the existing code can migrate incrementally.
 
+#include "gpu/rhi/device.h"
 #include "gpu/vulkan/vk_device.h"
 #include "base/arch.h"
 #include "gpu/vulkan/vk_frame.h"
@@ -28,7 +29,8 @@
 namespace gpu::render {
 
 struct BackendState {
-  vk::DeviceState device;
+  rhi::Device* device = nullptr;
+  vk::DeviceState vk_device;
   vk::FrameState frame;
   vk::UploadRings rings;
   vk::QuadPipelines quad;

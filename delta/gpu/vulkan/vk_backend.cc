@@ -15,7 +15,7 @@ render::BackendState g_backend;
 // backend state. Everything is initialized within this translation unit
 // (g_backend first, in declaration order), so the references are never read
 // unbound; no other TU touches these during static initialization.
-DeviceState& g_dev = g_backend.device;
+DeviceState& g_dev = g_backend.vk_device;
 FrameState& g_frame = g_backend.frame;
 UploadRings& g_ring = g_backend.rings;
 QuadPipelines& g_quad = g_backend.quad;

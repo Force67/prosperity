@@ -16,11 +16,13 @@
 #include <unistd.h>
 
 #include "gpu/gcn/gcn_translate.h"
+#include "gpu/render/backend.h"
 #include "gpu/render/renderer.h"
 #include "gpu/vulkan/vk_backend.h"
 #include "gpu/vulkan/vk_debug.h"
 #include "gpu/gpu_perf.h"
 #include "gpu/vulkan/vk_frame.h"
+#include "gpu/vulkan/vk_rhi.h"
 #include "gpu/vulkan/vk_trace.h"
 #include "gpu/vulkan/vk_upload_ring.h"
 
@@ -49,7 +51,7 @@ DELTA_OPTION(const char*,
 // Where the driver's pipeline cache blob lives. Same convention as the SPIR-V
 // cache (DELTA_GPU_SHADER_CACHE_DIR, else $XDG_CACHE_HOME/ps4delta, else
 // ~/.cache/ps4delta), and disabled by the same DELTA_GPU_SHADER_CACHE=0.
-std::string PipelineCachePath() {
+std::string PipelineCacheDir() {
   static const std::string path = [] {
     if (!kShaderCacheOn)
       return std::string();
@@ -65,30 +67,16 @@ std::string PipelineCachePath() {
     for (size_t i = 1; i <= d.size(); i++)
       if (i == d.size() || d[i] == '/')
         ::mkdir(d.substr(0, i).c_str(), 0755);
-    return d + "/pipeline.bin";
+    return d;
   }();
   return path;
 }
 
-std::vector<u8> ReadPipelineCacheBlob() {
-  std::vector<u8> out;
-  const std::string p = PipelineCachePath();
-  if (p.empty())
-    return out;
-  FILE* f = std::fopen(p.c_str(), "rb");
-  if (!f)
-    return out;
-  std::fseek(f, 0, SEEK_END);
-  const long n = std::ftell(f);
-  std::fseek(f, 0, SEEK_SET);
-  if (n > 0) {
-    out.resize(static_cast<size_t>(n));
-    if (std::fread(out.data(), 1, out.size(), f) != out.size())
-      out.clear();
-  }
-  std::fclose(f);
-  return out;
+std::string PipelineCachePath() {
+  const std::string& d = PipelineCacheDir();
+  return d.empty() ? d : d + "/pipeline.bin";
 }
+
 }  // namespace
 
 namespace {
@@ -367,341 +355,63 @@ void StencilBarrier(VkCommandBuffer c,
 }
 
 bool CreateDevice() {
-  VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
-  app.apiVersion = VK_API_VERSION_1_3;
-  app.pApplicationName = "prosperity-gpu";
-  VkInstanceCreateInfo ic{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
-  ic.pApplicationInfo = &app;
-  // Object names + command labels for capture tools (vk_debug). Gated on a
-  // consumer actually listening. The loader always advertises the extension,
-  // but formatting labels for nobody costs real frame time.
-  bool debug_utils = false;
-  if (WantDebugUtils() || trace::WantValidation()) {
-    u32 ext_n = 0;
-    vkEnumerateInstanceExtensionProperties(nullptr, &ext_n, nullptr);
-    std::vector<VkExtensionProperties> exts(ext_n);
-    vkEnumerateInstanceExtensionProperties(nullptr, &ext_n, exts.data());
-    for (const auto& e : exts)
-      if (!std::strcmp(e.extensionName, VK_EXT_DEBUG_UTILS_EXTENSION_NAME))
-        debug_utils = true;
-  }
-  const char* instance_exts[] = {VK_EXT_DEBUG_UTILS_EXTENSION_NAME};
-  if (debug_utils) {
-    ic.enabledExtensionCount = 1;
-    ic.ppEnabledExtensionNames = instance_exts;
-  }
-  // DELTA_GPU_VALIDATE=1: the Khronos validation layers, with their messages
-  // routed into the frame capture next to the draw that provoked them. Off by
-  // default, since the layers cost real frame time and the loader only finds them
-  // when the layer path is on the environment.
-  const char* validation_layer = trace::ValidationLayerName();
-  if (trace::WantValidation()) {
-    u32 layer_n = 0;
-    vkEnumerateInstanceLayerProperties(&layer_n, nullptr);
-    std::vector<VkLayerProperties> layers(layer_n);
-    vkEnumerateInstanceLayerProperties(&layer_n, layers.data());
-    bool found = false;
-    for (const auto& l : layers)
-      found |= !std::strcmp(l.layerName, validation_layer);
-    if (found) {
-      ic.enabledLayerCount = 1;
-      ic.ppEnabledLayerNames = &validation_layer;
-      if (trace::WantSyncValidation()) {
-        static const VkValidationFeatureEnableEXT sync_feat[1] = {
-            VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT};
-        static VkValidationFeaturesEXT vf{
-            VK_STRUCTURE_TYPE_VALIDATION_FEATURES_EXT};
-        vf.enabledValidationFeatureCount = 1;
-        vf.pEnabledValidationFeatures = sync_feat;
-        vf.pNext = ic.pNext;
-        ic.pNext = &vf;
-      }
-    } else {
-      BASE_LOGI("vkval", "{} not available on this loader",
-                validation_layer);
-    }
-  }
-  VKOK(vkCreateInstance(&ic, nullptr, &g_dev.instance));
-  InitDebugUtils(g_dev.instance, debug_utils);
-  trace::InstallValidationMessenger(g_dev.instance);
-
-  u32 n = 0;
-  vkEnumeratePhysicalDevices(g_dev.instance, &n, nullptr);
-  if (!n) {
-    BASE_LOGI("gpuvk", "no device");
+  render::BackendOptions options;
+  options.gpu_filter = kVkGpu;
+  options.debug_labels = WantDebugUtils() || trace::WantValidation();
+  options.validation_layer =
+      trace::WantValidation() ? trace::ValidationLayerName() : nullptr;
+  options.sync_validation = trace::WantSyncValidation();
+  options.checkpoints = kCheckpoints;
+  const std::string cache_dir = PipelineCacheDir();
+  options.cache_dir = cache_dir.empty() ? nullptr : cache_dir.c_str();
+  // Lives for the process: tearing a device down during static
+  // destruction races the driver's own exit handlers.
+  rhi::Device* device =
+      render::CreateBackendDevice(rhi::Backend::kVulkan, options).release();
+  if (!device)
     return false;
-  }
-  std::vector<VkPhysicalDevice> devs(n);
-  vkEnumeratePhysicalDevices(g_dev.instance, &n, devs.data());
-
-  // Prefer a real GPU over the llvmpipe software rasteriser (reported as type
-  // CPU): discrete > integrated > virtual > CPU. The loader can enumerate both
-  // a discrete GPU and llvmpipe on the same box, so picking devs[0] blindly may
-  // land on software. DELTA_VK_GPU=<name-substring> forces a specific device.
-  const char* want = kVkGpu;
-  int best = -1;
-  g_dev.phys = VK_NULL_HANDLE;
-  for (VkPhysicalDevice d : devs) {
-    u32 dqn = 0;
-    vkGetPhysicalDeviceQueueFamilyProperties(d, &dqn, nullptr);
-    std::vector<VkQueueFamilyProperties> dq(dqn);
-    vkGetPhysicalDeviceQueueFamilyProperties(d, &dqn, dq.data());
-    bool gfx = false;
-    for (auto& q : dq)
-      if (q.queueFlags & VK_QUEUE_GRAPHICS_BIT) {
-        gfx = true;
-        break;
-      }
-    if (!gfx)
-      continue;
-    VkPhysicalDeviceProperties p;
-    vkGetPhysicalDeviceProperties(d, &p);
-    int score;
-    switch (p.deviceType) {
-      case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU:
-        score = 4;
-        break;
-      case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU:
-        score = 3;
-        break;
-      case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU:
-        score = 2;
-        break;
-      case VK_PHYSICAL_DEVICE_TYPE_CPU:
-        score = 0;
-        break;  // llvmpipe
-      default:
-        score = 1;
-        break;
-    }
-    if (want && std::strstr(p.deviceName, want))
-      score = 100;
-    if (score > best) {
-      best = score;
-      g_dev.phys = d;
-    }
-  }
-  if (g_dev.phys == VK_NULL_HANDLE) {
-    BASE_LOGI("gpuvk", "no gfx device");
-    return false;
-  }
-
-  u32 qn = 0;
-  vkGetPhysicalDeviceQueueFamilyProperties(g_dev.phys, &qn, nullptr);
-  std::vector<VkQueueFamilyProperties> qprops(qn);
-  vkGetPhysicalDeviceQueueFamilyProperties(g_dev.phys, &qn, qprops.data());
-  bool found = false;
-  for (u32 i = 0; i < qn; i++)
-    if (qprops[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) {
-      g_dev.qfam = i;
-      found = true;
-      break;
-    }
-  if (!found) {
-    BASE_LOGI("gpuvk", "no gfx queue");
-    return false;
-  }
-  g_dev.timestamp_valid_bits = qprops[g_dev.qfam].timestampValidBits;
-
-  float prio = 1.0f;
-  VkDeviceQueueCreateInfo qc{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
-  qc.queueFamilyIndex = g_dev.qfam;
-  qc.queueCount = 1;
-  qc.pQueuePriorities = &prio;
-  VkPhysicalDeviceVulkan12Features avail12{
-      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
-  VkPhysicalDeviceFeatures2 avail2{
-      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
-  avail2.pNext = &avail12;
-  vkGetPhysicalDeviceFeatures2(g_dev.phys, &avail2);
-  VkPhysicalDeviceVulkan12Features f12{
-      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
-  f12.samplerMirrorClampToEdge = avail12.samplerMirrorClampToEdge;
-  f12.separateDepthStencilLayouts = avail12.separateDepthStencilLayouts;
-  f12.bufferDeviceAddress = avail12.bufferDeviceAddress && avail2.features.shaderInt64;
-  VkPhysicalDeviceVulkan13Features f13{
-      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
-  f13.pNext = &f12;
-  f13.dynamicRendering = VK_TRUE;
-  VkDeviceCreateInfo dc{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
-  dc.pNext = &f13;
-  dc.queueCreateInfoCount = 1;
-  dc.pQueueCreateInfos = &qc;
-  // VK_EXT_device_fault: on DEVICE_LOST, vkGetDeviceFaultInfoEXT reports what
-  // the GPU actually faulted on (page fault address etc.). Keep it enabled,
-  // it costs nothing until a fault is queried.
-  // VK_EXT_external_memory_host lets a buffer be backed by guest pages DIRECTLY,
-  // so a compute dispatch reading guest memory needs no staging copy in and no
-  // writeback out (see vk_compute.cc, DELTA_GPU_CSIMPORT).
-  // VK_KHR_fragment_shader_barycentric supplies the per-vertex attribute values
-  // a pixel shader needs for v_interp_mov_f32's P10/P20 parameters (the deltas
-  // P1-P0 and P2-P0), which an interpolated input cannot express.
-  const char* dev_exts[6] = {};
-  u32 dev_ext_count = 0;
-  {
-    u32 en = 0;
-    vkEnumerateDeviceExtensionProperties(g_dev.phys, nullptr, &en, nullptr);
-    std::vector<VkExtensionProperties> eprops(en);
-    vkEnumerateDeviceExtensionProperties(g_dev.phys, nullptr, &en,
-                                         eprops.data());
-    for (const auto& ep : eprops) {
-      if (!std::strcmp(ep.extensionName, VK_EXT_MESH_SHADER_EXTENSION_NAME))
-        g_dev.mesh_shader = true;
-      if (kCheckpoints && !std::strcmp(ep.extensionName,
-              VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME))
-        g_checkpoints_available = true;
-      if (!std::strcmp(ep.extensionName, VK_EXT_DEVICE_FAULT_EXTENSION_NAME))
-        g_dev.device_fault_available = true;
-      if (!std::strcmp(ep.extensionName, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME))
-        g_dev.push_descriptor = true;
-      if (!std::strcmp(ep.extensionName,
-                       VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME))
-        g_dev.host_import_available = true;
-      if (!std::strcmp(ep.extensionName,
-                       VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME))
-        g_dev.barycentric_available = true;
-    }
-  }
-  if (g_checkpoints_available)
-    dev_exts[dev_ext_count++] = VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME;
-  if (g_dev.push_descriptor)
-    dev_exts[dev_ext_count++] = VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME;
-  if (g_dev.host_import_available) {
-    VkPhysicalDeviceExternalMemoryHostPropertiesEXT hp{
-        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT};
-    VkPhysicalDeviceProperties2 p2{
-        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
-    p2.pNext = &hp;
-    vkGetPhysicalDeviceProperties2(g_dev.phys, &p2);
-    g_dev.host_import_align =
-        (size_t)hp.minImportedHostPointerAlignment;
-    g_dev.storage_buffer_offset_align =
-        (size_t)p2.properties.limits.minStorageBufferOffsetAlignment;
-    if (!g_dev.storage_buffer_offset_align)
-      g_dev.storage_buffer_offset_align = 1;
-    dev_exts[dev_ext_count++] = VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME;
-  }
-  VkPhysicalDeviceFaultFeaturesEXT fault_feat{
-      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT};
-  if (g_dev.device_fault_available) {
-    fault_feat.deviceFault = VK_TRUE;
-    fault_feat.pNext = f13.pNext;
-    f13.pNext = &fault_feat;
-    dev_exts[dev_ext_count++] = VK_EXT_DEVICE_FAULT_EXTENSION_NAME;
-  }
-  VkPhysicalDeviceFragmentShaderBarycentricFeaturesKHR bary_feat{
-      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADER_BARYCENTRIC_FEATURES_KHR};
-  if (g_dev.barycentric_available) {
-    bary_feat.fragmentShaderBarycentric = VK_TRUE;
-    bary_feat.pNext = f13.pNext;
-    f13.pNext = &bary_feat;
-    dev_exts[dev_ext_count++] = VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME;
-  }
-  VkPhysicalDeviceMeshShaderFeaturesEXT mesh_feat{
-      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT};
-  if (g_dev.mesh_shader) {
-    VkPhysicalDeviceFeatures2 query{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
-    query.pNext = &mesh_feat;
-    vkGetPhysicalDeviceFeatures2(g_dev.phys, &query);
-    g_dev.mesh_shader = mesh_feat.meshShader;
-    if (g_dev.mesh_shader) {
-      mesh_feat = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT};
-      mesh_feat.meshShader = VK_TRUE;
-      mesh_feat.pNext = f13.pNext;
-      f13.pNext = &mesh_feat;
-      dev_exts[dev_ext_count++] = VK_EXT_MESH_SHADER_EXTENSION_NAME;
-      VkPhysicalDeviceProperties2 props{
-          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
-      props.pNext = &g_dev.mesh_limits;
-      vkGetPhysicalDeviceProperties2(g_dev.phys, &props);
-    }
-  }
-  if (dev_ext_count) {
-    dc.enabledExtensionCount = dev_ext_count;
-    dc.ppEnabledExtensionNames = dev_exts;
-  }
-  // robustBufferAccess makes out-of-bounds storage-buffer loads/stores safe
-  // (return 0 / drop the write) so the compute path can't corrupt memory on a
-  // miscomputed index.
-  VkPhysicalDeviceFeatures want_feat{};
-  want_feat.shaderInt64 = f12.bufferDeviceAddress;
-  g_dev.buffer_device_address = f12.bufferDeviceAddress;
-  want_feat.textureCompressionBC = avail2.features.textureCompressionBC;
-  if (avail2.features.robustBufferAccess)
-    want_feat.robustBufferAccess = VK_TRUE;
-  if (avail2.features.depthClamp)
-    want_feat.depthClamp = VK_TRUE;
-  if (avail2.features.samplerAnisotropy)
-    want_feat.samplerAnisotropy = VK_TRUE;
-  if (avail2.features.geometryShader)
-    want_feat.geometryShader = VK_TRUE;
-  // Without independentBlend, "all elements of pAttachments must be identical",
-  // so a G-buffer pass that blends its targets differently (SotC disables
-  // blending on its integer planes and accumulates additively on the others)
-  // gets undefined behaviour across EVERY attachment, not just the odd one out.
-  if (avail2.features.independentBlend)
-    want_feat.independentBlend = VK_TRUE;
-  // Guest blend state names dual-source factors (Astro's intro card uses
-  // SRC1_COLOR); a pipeline that carries one without this feature is invalid.
-  // The shader model's Index-1 output is still not translated, so the second
-  // source's values are whatever the implementation hands out, valid, not
-  // exact.
-  want_feat.dualSrcBlend = avail2.features.dualSrcBlend;
-  if (avail2.features.shaderStorageImageWriteWithoutFormat)
-    want_feat.shaderStorageImageWriteWithoutFormat = VK_TRUE;
-  // A recompiled VERTEX shader can index a guest buffer by hand, which becomes
-  // a storage buffer SPIR-V considers writable. Declaring one is only legal
-  // with this feature on; without it the module was used anyway and the access
-  // is undefined (VUID-RuntimeSpirv-NonWritable-06341).
-  if (avail2.features.vertexPipelineStoresAndAtomics)
-    want_feat.vertexPipelineStoresAndAtomics = VK_TRUE;
-  if (avail2.features.fragmentStoresAndAtomics)
-    want_feat.fragmentStoresAndAtomics = VK_TRUE;
-  g_dev.sampler_anisotropy = want_feat.samplerAnisotropy;
-  g_dev.independent_blend = want_feat.independentBlend;
-  g_dev.sampler_mirror_clamp = f12.samplerMirrorClampToEdge;
-  g_dev.geometry_shader = want_feat.geometryShader;
+  g_backend.device = device;
+  const NativeDevice& native = Native(device);
+  const rhi::Caps& caps = device->caps();
+  g_dev.instance = native.instance;
+  g_dev.phys = native.phys;
+  g_dev.device = native.device;
+  g_dev.queue = native.queue;
+  g_dev.qfam = native.queue_family;
+  g_dev.pipeline_cache = native.pipeline_cache;
+  g_dev.timestamp_valid_bits = native.timestamp_valid_bits;
+  g_dev.timestamp_period = static_cast<float>(caps.timestamp_period_ns);
+  g_dev.push_descriptor = native.push_descriptor;
+  g_dev.device_fault_available = native.device_fault;
+  g_checkpoints_available = native.checkpoints;
+  g_dev.mesh_shader = caps.mesh_shader;
+  g_dev.mesh_limits = native.mesh_limits;
+  g_dev.sampler_anisotropy = caps.sampler_anisotropy;
+  g_dev.independent_blend = caps.independent_blend;
+  g_dev.sampler_mirror_clamp = caps.sampler_mirror_clamp;
+  g_dev.geometry_shader = caps.geometry_shader;
   g_dev.storage_image_write_without_format =
-      want_feat.shaderStorageImageWriteWithoutFormat;
-  dc.pEnabledFeatures = &want_feat;
-  VKOK(vkCreateDevice(g_dev.phys, &dc, nullptr, &g_dev.device));
+      caps.storage_image_write_without_format;
+  g_dev.host_import_available = caps.host_import;
+  g_dev.host_import_align = caps.host_import_alignment;
+  g_dev.buffer_device_address = caps.buffer_address;
+  g_dev.barycentric_available = caps.fragment_barycentric;
+  g_dev.storage_buffer_offset_align = caps.storage_offset_alignment;
+  g_dev.max_storage_buffer_range = caps.max_storage_buffer_range;
+  g_dev.max_cs_resources =
+      std::min(gcn::kMaxCsResources, caps.max_compute_resources);
+  InitDebugUtils(g_dev.instance, options.debug_labels);
+  trace::InstallValidationMessenger(g_dev.instance);
   if (g_dev.mesh_shader)
     g_dev.draw_mesh_tasks = reinterpret_cast<PFN_vkCmdDrawMeshTasksEXT>(
         vkGetDeviceProcAddr(g_dev.device, "vkCmdDrawMeshTasksEXT"));
-  if (g_dev.push_descriptor) {
+  if (g_dev.push_descriptor)
     g_dev.push_descriptor_set = reinterpret_cast<PFN_vkCmdPushDescriptorSetKHR>(
         vkGetDeviceProcAddr(g_dev.device, "vkCmdPushDescriptorSetKHR"));
-    g_dev.push_descriptor = g_dev.push_descriptor_set != nullptr;
-  }
-  vkGetDeviceQueue(g_dev.device, g_dev.qfam, 0, &g_dev.queue);
-  // Seed the driver's pipeline cache from disk. Without this every run
-  // recompiles every pipeline from scratch, which on SotC is several hundred.
-  // A blob from another driver/device is rejected by the driver itself (it
-  // checks its own header), so a stale file costs nothing but the read.
-  std::vector<u8> cache_blob = ReadPipelineCacheBlob();
-  VkPipelineCacheCreateInfo pipeline_cache_info{
-      VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
-  pipeline_cache_info.initialDataSize = cache_blob.size();
-  pipeline_cache_info.pInitialData =
-      cache_blob.empty() ? nullptr : cache_blob.data();
-  if (vkCreatePipelineCache(g_dev.device, &pipeline_cache_info, nullptr,
-                            &g_dev.pipeline_cache) != VK_SUCCESS)
-    g_dev.pipeline_cache = VK_NULL_HANDLE;
-
-  g_cmd_begin_rendering = (PFN_vkCmdBeginRenderingKHR)vkGetDeviceProcAddr(
-      g_dev.device, "vkCmdBeginRendering");
-  g_cmd_end_rendering = (PFN_vkCmdEndRenderingKHR)vkGetDeviceProcAddr(
-      g_dev.device, "vkCmdEndRendering");
-  if (!g_cmd_begin_rendering) {
-    g_cmd_begin_rendering = (PFN_vkCmdBeginRenderingKHR)vkGetDeviceProcAddr(
-        g_dev.device, "vkCmdBeginRenderingKHR");
-    g_cmd_end_rendering = (PFN_vkCmdEndRenderingKHR)vkGetDeviceProcAddr(
-        g_dev.device, "vkCmdEndRenderingKHR");
-  }
-  if (!g_cmd_begin_rendering) {
-    BASE_LOGI("gpuvk", "no dynamic rendering");
-    return false;
-  }
+  g_cmd_begin_rendering = reinterpret_cast<PFN_vkCmdBeginRenderingKHR>(
+      vkGetDeviceProcAddr(g_dev.device, "vkCmdBeginRendering"));
+  g_cmd_end_rendering = reinterpret_cast<PFN_vkCmdEndRenderingKHR>(
+      vkGetDeviceProcAddr(g_dev.device, "vkCmdEndRendering"));
 
   VkCommandPoolCreateInfo pc{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
   pc.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
@@ -715,12 +425,6 @@ bool CreateDevice() {
 
   VkPhysicalDeviceProperties props;
   vkGetPhysicalDeviceProperties(g_dev.phys, &props);
-  g_dev.timestamp_period = props.limits.timestampPeriod;
-  g_dev.max_cs_resources = std::min(
-      {gcn::kMaxCsResources, props.limits.maxPerStageDescriptorStorageBuffers,
-       props.limits.maxDescriptorSetStorageBuffers});
-  g_dev.max_storage_buffer_range = props.limits.maxStorageBufferRange;
-  BASE_LOGI("gpuvk", "device: {}", props.deviceName);
   if (!CreateUploadRings(props))
     return false;
   return true;
