@@ -433,6 +433,7 @@ rhi::Buffer* GlDevice::CreateBuffer(const rhi::BufferDesc& desc) {
       glMakeNamedBufferResidentNV(buffer->name, GL_READ_WRITE);
       glGetNamedBufferParameterui64vNV(buffer->name, GL_BUFFER_GPU_ADDRESS_NV,
                                        &address);
+      glMakeNamedBufferNonResidentNV(buffer->name);
       buffer->address = address;
     }
     if (desc.name && debug_)
