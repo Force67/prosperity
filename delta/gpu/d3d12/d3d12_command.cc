@@ -336,10 +336,9 @@ void D3D12CommandList::BeginRenderPass(const rhi::RenderPassDesc& pass) {
   pass_has_dsv_ = d.view != nullptr;
   if (pass_has_dsv_) {
     D3D12View* v = View(d.view);
-    const u32 ro = (d.read_only ? 1 : 0) |
-                   (d.stencil_read_only && v->dsv[2].valid() ? 2 : 0);
-    pass_dsv_ = v->dsv[ro].cpu;
-    pass_dsv_clear_ = v->dsv[0].cpu;
+    pass_dsv_ = device_.Dsv(
+        v, (d.read_only ? 1 : 0) | (d.stencil_read_only ? 2 : 0));
+    pass_dsv_clear_ = device_.Dsv(v, 0);
   }
   cmd->OMSetRenderTargets(pass_color_count_, pass_rtvs_, FALSE,
                           pass_has_dsv_ ? &pass_dsv_ : nullptr);
@@ -761,9 +760,10 @@ void D3D12CommandList::Draw(u32 vertex_count,
                               static_cast<INT>(first_vertex), first_instance);
     return;
   }
-  // SV_VertexID already counts from StartVertexLocation; SV_InstanceID does
-  // not count from StartInstanceLocation.
-  const i32 params[2] = {0, static_cast<i32>(first_instance)};
+  // SV_VertexID and SV_InstanceID count from zero; gl_VertexIndex and
+  // gl_InstanceIndex count from the first vertex and instance.
+  const i32 params[2] = {static_cast<i32>(first_vertex),
+                         static_cast<i32>(first_instance)};
   cmd->SetGraphicsRoot32BitConstants(layout->draw, 2, params, 0);
   cmd->DrawInstanced(vertex_count, instance_count, first_vertex,
                      first_instance);

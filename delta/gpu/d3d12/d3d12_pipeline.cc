@@ -299,6 +299,10 @@ bool D3D12Device::CompileStage(const rhi::ShaderCode& code,
     const u32 sb[] = {set, binding};
     key = HashWords(sb, 2, key);
   }
+  for (char c : options.producer_outputs) {
+    const u32 w = static_cast<u8>(c);
+    key = HashWords(&w, 1, key);
+  }
   {
     std::lock_guard<std::mutex> lock(shader_mutex_);
     auto it = shaders_.find(key);
@@ -364,20 +368,24 @@ rhi::Pipeline* D3D12Device::CreateGraphicsPipeline(
     return nullptr;
   pipeline->uses_draw_params = vinfo.uses_draw_params;
   pipeline->uses_raster = vinfo.uses_raster;
+  std::string outputs = vinfo.outputs;
   if (!desc.geometry.empty()) {
     LowerOptions go = vo;
     go.stage = rhi::kStageGeometry;
     go.flip_y = true;
     go.uint_inputs = go.sint_inputs = go.swap_rb_inputs = 0;
+    go.producer_outputs = outputs;
     if (!CompileStage(desc.geometry, go, &gs, &ginfo))
       return nullptr;
     pipeline->uses_raster = ginfo.uses_raster;
+    outputs = ginfo.outputs;
   }
   if (!desc.fragment.empty()) {
     LowerOptions fo;
     fo.stage = rhi::kStageFragment;
     fo.shader_model = shader_model_;
     fo.read_only_storage = layout->read_only_storage;
+    fo.producer_outputs = outputs;
     if (!CompileStage(desc.fragment, fo, &ps, &pinfo))
       return nullptr;
   }

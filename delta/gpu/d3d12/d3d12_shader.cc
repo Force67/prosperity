@@ -7,6 +7,8 @@
 #include <spirv_hlsl.hpp>
 
 #include <algorithm>
+#include <cctype>
+#include <regex>
 #include <sstream>
 
 namespace gpu::d3d12 {
@@ -81,6 +83,100 @@ void RetypeInputs(std::string& hlsl, const LowerOptions& o) {
   for (const std::string& name : swapped)
     Replace(hlsl, "= stage_input." + name + ";",
             "= stage_input." + name + ".zyxw;");
+}
+
+// One member of a generated stage input/output struct.
+struct Element {
+  std::string qualifiers, type, name, semantic;
+};
+
+bool FindStruct(const std::string& hlsl,
+                const char* name,
+                size_t* begin,
+                size_t* end) {
+  const std::string head = std::string("struct ") + name + "\n{\n";
+  *begin = hlsl.find(head);
+  if (*begin == std::string::npos)
+    return false;
+  *begin += head.size();
+  *end = hlsl.find("};", *begin);
+  return *end != std::string::npos;
+}
+
+std::vector<Element> ParseElements(const std::string& body) {
+  std::vector<Element> out;
+  std::istringstream in(body);
+  std::string line;
+  while (std::getline(in, line)) {
+    const size_t colon = line.find(" : ");
+    const size_t semi = line.rfind(';');
+    if (colon == std::string::npos || semi == std::string::npos)
+      continue;
+    Element e;
+    e.semantic = line.substr(colon + 3, semi - colon - 3);
+    std::istringstream decl(line.substr(0, colon));
+    std::vector<std::string> tokens;
+    for (std::string t; decl >> t;)
+      tokens.push_back(t);
+    if (tokens.size() < 2)
+      continue;
+    e.name = tokens.back();
+    e.type = tokens[tokens.size() - 2];
+    for (size_t i = 0; i + 2 < tokens.size(); i++)
+      e.qualifiers += tokens[i] + " ";
+    out.push_back(e);
+  }
+  return out;
+}
+
+// Component count of a scalar or vector type name; 0 for anything else.
+u32 Components(const std::string& type) {
+  if (type.empty() || type.find('x') != std::string::npos)
+    return 0;
+  const char last = type.back();
+  return last >= '1' && last <= '4' ? static_cast<u32>(last - '0') : 1;
+}
+
+std::string BaseType(const std::string& type) {
+  return std::isdigit(static_cast<unsigned char>(type.back()))
+             ? type.substr(0, type.size() - 1)
+             : type;
+}
+
+// Rewrites the input struct to the producer's element order and widths:
+// D3D12 matches stage signatures by packed register, so an input the
+// consumer skips must still take its row.
+void MatchInputs(std::string& hlsl, const std::string& producer) {
+  size_t begin, end;
+  if (producer.empty() || !FindStruct(hlsl, "SPIRV_Cross_Input", &begin, &end))
+    return;
+  const std::vector<Element> consumer =
+      ParseElements(hlsl.substr(begin, end - begin));
+  std::vector<bool> used(consumer.size());
+  std::string out;
+  u32 unused = 0;
+  for (const Element& p : ParseElements(producer)) {
+    size_t i = 0;
+    while (i < consumer.size() && consumer[i].semantic != p.semantic)
+      i++;
+    if (i == consumer.size()) {
+      out += "    " + p.type + " delta_unused" + std::to_string(unused++) +
+             " : " + p.semantic + ";\n";
+      continue;
+    }
+    used[i] = true;
+    Element c = consumer[i];
+    const u32 pn = Components(p.type), cn = Components(c.type);
+    if (pn > cn && cn)
+      c.type = BaseType(c.type) + std::to_string(pn);
+    out += "    " + c.qualifiers + c.type + " " + c.name + " : " + c.semantic +
+           ";\n";
+  }
+  for (size_t i = 0; i < consumer.size(); i++)
+    if (!used[i])
+      out += "    " + consumer[i].qualifiers + consumer[i].type + " " +
+             consumer[i].name + " : " + consumer[i].semantic + ";\n";
+  hlsl.replace(begin, end - begin, out);
 }
 
 }  // namespace
@@ -177,6 +273,20 @@ bool LowerToHlsl(const u32* words,
     }
     if (model == spv::ExecutionModelVertex)
       RetypeInputs(hlsl, options);
+    if (model == spv::ExecutionModelGeometry) {
+      // SPIRV-Cross copies gl_in[].gl_Position into gl_PositionIn but still
+      // reads the GLSL name.
+      static const std::regex gl_in(R"(gl_in\[([^\]]+)\]\.gl_Position)");
+      hlsl = std::regex_replace(hlsl, gl_in, "gl_PositionIn[$1]");
+    }
+    if (model == spv::ExecutionModelFragment ||
+        model == spv::ExecutionModelGeometry)
+      MatchInputs(hlsl, options.producer_outputs);
+    size_t begin, end;
+    if ((model == spv::ExecutionModelVertex ||
+         model == spv::ExecutionModelGeometry) &&
+        FindStruct(hlsl, "SPIRV_Cross_Output", &begin, &end))
+      out->outputs = hlsl.substr(begin, end - begin);
 
     out->hlsl = std::move(hlsl);
     out->profile = std::string(StagePrefix(options.stage)) + "_" +

@@ -616,28 +616,35 @@ rhi::TextureView* D3D12Device::CreateView(rhi::Texture* texture,
       device->CreateRenderTargetView(tex->resource, &rv, view->rtv.cpu);
   }
 
-  if (tex->flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL) {
-    const rhi::FormatInfo& info = rhi::GetFormatInfo(td.format);
-    for (u32 v = 0; v < 4; v++) {
-      if ((v & 2) && !info.is_stencil)
-        continue;
-      D3D12_DEPTH_STENCIL_VIEW_DESC dv{};
-      dv.Format = Dxgi(td.format).format;
-      dv.Flags = static_cast<D3D12_DSV_FLAGS>(
-          ((v & 1) ? D3D12_DSV_FLAG_READ_ONLY_DEPTH : 0) |
-          ((v & 2) ? D3D12_DSV_FLAG_READ_ONLY_STENCIL : 0));
-      if (arrayed) {
-        dv.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2DARRAY;
-        dv.Texture2DArray = {desc.base_mip, desc.base_layer, desc.layers};
-      } else {
-        dv.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
-        dv.Texture2D = {desc.base_mip};
-      }
-      if (dsvs.Allocate(1, &view->dsv[v]))
-        device->CreateDepthStencilView(tex->resource, &dv, view->dsv[v].cpu);
-    }
-  }
+  if (tex->flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)
+    Dsv(view.get(), 0);
   return view.release();
+}
+
+D3D12_CPU_DESCRIPTOR_HANDLE D3D12Device::Dsv(D3D12View* view, u32 variant) {
+  D3D12Texture* tex = Tex(view->texture());
+  const rhi::TextureDesc& td = tex->desc();
+  if (!rhi::GetFormatInfo(td.format).is_stencil)
+    variant &= 1;
+  std::lock_guard<std::mutex> lock(tex->view_mutex);
+  CpuRange& range = view->dsv[variant];
+  if (range.valid() || !dsvs.Allocate(1, &range))
+    return range.cpu;
+  const rhi::TextureViewDesc& desc = view->desc();
+  D3D12_DEPTH_STENCIL_VIEW_DESC dv{};
+  dv.Format = Dxgi(td.format).format;
+  dv.Flags = static_cast<D3D12_DSV_FLAGS>(
+      ((variant & 1) ? D3D12_DSV_FLAG_READ_ONLY_DEPTH : 0) |
+      ((variant & 2) ? D3D12_DSV_FLAG_READ_ONLY_STENCIL : 0));
+  if (td.layers > 1 || desc.base_layer > 0) {
+    dv.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2DARRAY;
+    dv.Texture2DArray = {desc.base_mip, desc.base_layer, desc.layers};
+  } else {
+    dv.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+    dv.Texture2D = {desc.base_mip};
+  }
+  device->CreateDepthStencilView(tex->resource, &dv, range.cpu);
+  return range.cpu;
 }
 
 rhi::Sampler* D3D12Device::CreateSampler(const rhi::SamplerDesc& desc) {

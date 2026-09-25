@@ -503,6 +503,8 @@ class D3D12Device final : public rhi::Device {
                     u64 offset, u64 range, bool uav);
   void WriteNull(D3D12_CPU_DESCRIPTOR_HANDLE dst, rhi::BindingType type,
                  bool read_only);
+  // The view's DSV; variant bit 0 = read-only depth, bit 1 = stencil.
+  D3D12_CPU_DESCRIPTOR_HANDLE Dsv(D3D12View* view, u32 variant);
 
   // Shader-visible descriptor chunks for command lists.
   bool AcquireChunk(RingChunk* out);

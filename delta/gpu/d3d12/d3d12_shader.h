@@ -41,10 +41,15 @@ struct LowerOptions {
   u32 swap_rb_inputs = 0;
   // Storage buffers the layout binds as SRVs, as (set, binding).
   std::vector<std::pair<u32, u32>> read_only_storage;
+  // The previous stage's outputs (LoweredShader::outputs). D3D12 links
+  // stages by signature register, not by semantic, so the inputs are
+  // rewritten to the producer's order and shapes.
+  std::string producer_outputs;
 };
 
 struct LoweredShader {
   std::string hlsl;
+  std::string outputs;  // the stage's output signature, for the next stage
   std::string profile;  // "vs_6_0", ...
   bool uses_draw_params = false;    // reads kDrawRegister
   bool uses_workgroup_count = false;  // reads kDispatchRegister
