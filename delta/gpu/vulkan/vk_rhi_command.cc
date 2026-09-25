@@ -380,6 +380,15 @@ void VulkanCommandList::Dispatch(u32 x, u32 y, u32 z) {
   vkCmdDispatch(cmd, x, y, z);
 }
 
+void VulkanCommandList::DispatchBase(u32 bx,
+                                     u32 by,
+                                     u32 bz,
+                                     u32 x,
+                                     u32 y,
+                                     u32 z) {
+  vkCmdDispatchBase(cmd, bx, by, bz, x, y, z);
+}
+
 void VulkanCommandList::ClearAttachment(u32 attachment,
                                         const rhi::ClearColor& color,
                                         float depth,

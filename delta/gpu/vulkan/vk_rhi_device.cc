@@ -683,6 +683,7 @@ bool VulkanDevice::Init(const VulkanOptions& options) {
   caps_.buffer_address = f12.bufferDeviceAddress;
   caps_.host_import_alignment = host.minImportedHostPointerAlignment;
   caps_.texture_blit = true;
+  caps_.dispatch_base = true;
   caps_.timestamps = lim.timestampComputeAndGraphics &&
                      native.timestamp_valid_bits != 0;
   caps_.timestamp_period_ns = lim.timestampPeriod;
@@ -1276,6 +1277,8 @@ rhi::Pipeline* VulkanDevice::CreateComputePipeline(
   ci.stage.module = module;
   ci.stage.pName = "main";
   ci.layout = layout->layout;
+  if (desc.dispatch_base)
+    ci.flags = VK_PIPELINE_CREATE_DISPATCH_BASE_BIT;
   auto pipeline = std::make_unique<VulkanPipeline>();
   pipeline->layout = layout;
   pipeline->bind_point = VK_PIPELINE_BIND_POINT_COMPUTE;
