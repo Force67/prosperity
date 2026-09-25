@@ -29,7 +29,10 @@ DELTA = os.path.join(ROOT, 'delta')
 ROOT_HEADERS = ('gpu/guest_memory.h', 'gpu/gpu_check.h', 'gpu/gpu_perf.h')
 
 ALLOWED = {
-    'render': ('gpu/render/',),
+    'rhi': ('gpu/rhi/',),
+    # The renderer runs on rhi/ alone; backend.cc is the one unit that names
+    # the backends, through each one's factory header.
+    'render': ('gpu/render/', 'gpu/rhi/', 'gpu/vulkan/vk_rhi.h'),
     # The shared ISA decode + SPIR-V translator both consoles emit through. It
     # is the bottom of the recompiler stack, so it may not reach back up into a
     # console's command processor.
@@ -42,7 +45,7 @@ ALLOWED = {
     # recompiled-program types, the resource sharps and the detiler), not the
     # directory: a backend reaching into the decoder or spirv/ internals is a
     # layering bug.
-    'vulkan': ('gpu/vulkan/', 'gpu/render/', 'gpu/shaders/',
+    'vulkan': ('gpu/vulkan/', 'gpu/rhi/', 'gpu/render/', 'gpu/shaders/',
                *ROOT_HEADERS,
                'gpu/gcn/gcn_translate.h', 'gpu/gcn/gcn_detile.h',
                'gpu/gcn/gcn_resource.h'),

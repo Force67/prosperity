@@ -338,3 +338,4 @@ dcrun.sh
 /scratchpad
 desrun.sh
 .verify/
+build-rhi/

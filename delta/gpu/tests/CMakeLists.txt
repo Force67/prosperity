@@ -94,3 +94,8 @@ add_delta_test(vk_index_upload_test
     vk_index_upload_test.cc
     ../vulkan/vk_index_upload.cc
   DEPS delta_deps)
+
+# Needs a GPU: every backend without a usable device is skipped.
+add_delta_test(rhi_conformance_test
+  SOURCES rhi_conformance_test.cc
+  DEPS delta_gpu)
