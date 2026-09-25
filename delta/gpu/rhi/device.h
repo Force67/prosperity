@@ -210,7 +210,9 @@ class CommandList : public Object {
                        u32 num_textures = 0) = 0;
 
   virtual void ResetTimestamps(TimestampPool* pool, u32 first, u32 count) = 0;
-  virtual void WriteTimestamp(TimestampPool* pool, u32 index) = 0;
+  // `start`: stamp when the GPU begins the following work, rather than when
+  // everything recorded before it has finished.
+  virtual void WriteTimestamp(TimestampPool* pool, u32 index, bool start) = 0;
 
   virtual void PushLabel(const char* label) = 0;
   virtual void PopLabel() = 0;
