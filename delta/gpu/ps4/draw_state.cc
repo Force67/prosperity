@@ -182,7 +182,7 @@ void ResolveIndexBuffer(rhi::Renderer& renderer,
     // counts a later draw consumes). Compute results stay GPU-resident and are
     // written back lazily, so reading guest memory without flushing that range
     // first yields the stale zeros the buffer was allocated with.
-    rhi::FlushCsWritesRange(renderer, args, need);
+    rhi::FlushCsWritesRange(renderer, args, need, "indirect");
     const bool mapped =
         utl::isMemoryRangeMapped(reinterpret_cast<const void*>(args), need);
     u32 a[5] = {};

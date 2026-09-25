@@ -8,6 +8,7 @@
 #include "base/arch.h"
 
 #include "gpu/gcn/gcn_translate.h"
+#include "gpu/guest_memory.h"
 
 #include <algorithm>
 #include <chrono>
@@ -57,8 +58,7 @@ constexpr u64 kGuestHi = 0x20000000000ull;
 
 bool GuestRange(u64 address, u64 size) {
   return size && address >= kGuestLo && address < kGuestHi &&
-         size <= kGuestHi - address &&
-         utl::isMemoryRangeMapped(reinterpret_cast<const void*>(address), size);
+         size <= kGuestHi - address && IsReadableRangeCached(address, size);
 }
 
 // DELTA_GPU_TSCAN=<hex surface address>: sweep every mapped guest page once for
@@ -994,8 +994,15 @@ const ScalarPassInfo& CachedScalarInfo(
   auto it = cache.find(program.get());
   if (it != cache.end())
     return it->second.info;
-  if (cache.size() > 512)
-    cache.clear();  // unbounded-growth backstop
+  // Unbounded-growth backstop: drop entries whose program CachedProgram no
+  // longer holds (only the pin here keeps it alive). Clearing the lot at 512
+  // re-planned every live shader each frame.
+  if (cache.size() > 4096) {
+    std::erase_if(cache,
+                  [](const auto& kv) { return kv.second.pin.use_count() == 1; });
+    if (cache.size() > 16384)
+      cache.clear();
+  }
   Entry e;
   e.pin = program;
   const std::vector<u8> reachable = ComputeReachability(*program);

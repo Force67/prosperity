@@ -351,8 +351,10 @@ struct Translator {
   Id FSub(Id a, Id b) { return m.Emit(spv::Op::OpFSub, t_f, {a, b}); }
   Id FDiv(Id a, Id b) { return m.Emit(spv::Op::OpFDiv, t_f, {a, b}); }
   Id FNeg(Id a) { return m.Emit(spv::Op::OpFNegate, t_f, {a}); }
+  // The clamp output modifier: GCN takes a NaN to 0, which NClamp does and
+  // FClamp leaves undefined.
   Id FClamp01(Id f) {
-    return m.ExtInst(t_f, GLSLstd450FClamp, {f, F32(0.0f), F32(1.0f)});
+    return m.ExtInst(t_f, GLSLstd450NClamp, {f, F32(0.0f), F32(1.0f)});
   }
 
   // Saturating primitives behind the _clamp/_legacy transcendentals; NaN must

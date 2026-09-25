@@ -216,18 +216,18 @@ Id F16Binary(Translator& t, u32 op, Id a, Id b) {
     case 0x35:
       return t.FMul(a, b);
     case 0x39:
-      return t.Ext2(GLSLstd450FMax, a, b);
+      return t.Ext2(GLSLstd450NMax, a, b);
     case 0x3a:
-      return t.Ext2(GLSLstd450FMin, a, b);
+      return t.Ext2(GLSLstd450NMin, a, b);
     default:
       return 0;
   }
 }
 
 Id MedianF(Translator& t, Id a, Id b, Id c) {
-  const Id lo = t.Ext2(GLSLstd450FMin, a, b);
-  const Id hi = t.Ext2(GLSLstd450FMax, a, b);
-  return t.m.ExtInst(t.t_f, GLSLstd450FClamp, {c, lo, hi});
+  const Id lo = t.Ext2(GLSLstd450NMin, a, b);
+  const Id hi = t.Ext2(GLSLstd450NMax, a, b);
+  return t.m.ExtInst(t.t_f, GLSLstd450NClamp, {c, lo, hi});
 }
 
 Id MedianI16(Translator& t, Id a, Id b, Id c, bool is_signed) {
@@ -740,7 +740,7 @@ bool EmitNeoVop3(Translator& t, const Inst& inst) {
       writes_16 = false;
       break;
     case 0x351:
-      result = t.Ext2(GLSLstd450FMin, t.Ext2(GLSLstd450FMin, f16[0], f16[1]),
+      result = t.Ext2(GLSLstd450NMin, t.Ext2(GLSLstd450NMin, f16[0], f16[1]),
                       f16[2]);
       result = ApplyOmod(t, result, omod);
       if (clamp)
@@ -755,7 +755,7 @@ bool EmitNeoVop3(Translator& t, const Inst& inst) {
       signed_result = op == 0x352;
       break;
     case 0x354:
-      result = t.Ext2(GLSLstd450FMax, t.Ext2(GLSLstd450FMax, f16[0], f16[1]),
+      result = t.Ext2(GLSLstd450NMax, t.Ext2(GLSLstd450NMax, f16[0], f16[1]),
                       f16[2]);
       result = ApplyOmod(t, result, omod);
       if (clamp)
@@ -962,11 +962,11 @@ bool EmitNeoVop3p(Translator& t, const Inst& inst) {
         is_float = true;
         break;
       case 0x11:
-        result = t.Ext2(GLSLstd450FMin, floats[0], floats[1]);
+        result = t.Ext2(GLSLstd450NMin, floats[0], floats[1]);
         is_float = true;
         break;
       case 0x12:
-        result = t.Ext2(GLSLstd450FMax, floats[0], floats[1]);
+        result = t.Ext2(GLSLstd450NMax, floats[0], floats[1]);
         is_float = true;
         break;
       default:

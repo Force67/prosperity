@@ -484,8 +484,16 @@ std::shared_ptr<const Program> CachedProgram(u64 addr,
     return it->second.program;
   }
 
-  if (cache.size() > 512)
-    cache.clear();  // unbounded-growth backstop
+  // Unbounded-growth backstop. A title draws with thousands of shaders
+  // (GTA:SA well over 512), so clearing the lot at a small cap re-decoded
+  // every live shader each frame; drop only the ones idle for a while.
+  if (cache.size() > 4096) {
+    std::erase_if(cache, [](const auto& kv) {
+      return kv.second.generation + 60 < g_prog_cache_generation;
+    });
+    if (cache.size() > 16384)
+      cache.clear();
+  }
   auto program =
       std::make_shared<const Program>(DecodeShader(code, max_dwords, mode));
   cache[addr] = {hash, hashed, g_prog_cache_generation, mode, program};

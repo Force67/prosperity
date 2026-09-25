@@ -30,6 +30,7 @@
 #include "gpu/vulkan/vk_tiling.h"
 
 #include <algorithm>
+#include <bit>
 #include <array>
 #include <chrono>
 #include <cmath>
@@ -473,41 +474,37 @@ float UnpackUnsignedFloat(u32 value, u32 mantissa_bits) {
   const u32 mantissa = value & mantissa_mask;
   const u32 exponent = (value >> mantissa_bits) & 0x1F;
   if (!exponent)
-    return std::ldexp(static_cast<float>(mantissa), 1 - 15 - mantissa_bits);
+    return static_cast<float>(mantissa) *
+           std::bit_cast<float>((127u - 14u - mantissa_bits) << 23);
   if (exponent == 0x1F)
     return mantissa ? std::numeric_limits<float>::quiet_NaN()
                     : std::numeric_limits<float>::infinity();
-  return std::ldexp(1.f + static_cast<float>(mantissa) /
-                              static_cast<float>(1u << mantissa_bits),
-                    static_cast<int>(exponent) - 15);
+  return std::bit_cast<float>((exponent + 112) << 23 |
+                              mantissa << (23 - mantissa_bits));
 }
 
+// Bit arithmetic rather than frexp/lround: this packs every texel of a
+// float-staged R11G11B10 target on each writeback. Rounds to nearest, ties
+// away, as lround did.
 u32 PackUnsignedFloat(float value, u32 mantissa_bits) {
-  if (std::isnan(value))
-    return (0x1Fu << mantissa_bits) | 1u;
-  if (value <= 0.f)
+  const u32 bits = std::bit_cast<u32>(value);
+  const u32 inf = 0x1Fu << mantissa_bits;
+  const u32 exp32 = (bits >> 23) & 0xFF;
+  const u32 mant23 = bits & 0x7FFFFF;
+  if (exp32 == 0xFF)
+    return mant23 ? inf | 1u : (bits >> 31 ? 0 : inf);
+  if (bits >> 31)
     return 0;
-  if (std::isinf(value))
-    return 0x1Fu << mantissa_bits;
-  int exponent;
-  const float fraction = std::frexp(value, &exponent);
-  int target_exponent = exponent - 1 + 15;
-  if (target_exponent <= 0) {
-    const long mantissa = std::lround(std::ldexp(value, 14 + mantissa_bits));
-    return static_cast<u32>(
-        std::clamp<long>(mantissa, 0, static_cast<long>(1u << mantissa_bits)));
+  const u32 drop = 23 - mantissa_bits;
+  if (exp32 > 112) {
+    const u32 packed =
+        (((exp32 - 112) << 23 | mant23) + (1u << (drop - 1))) >> drop;
+    return std::min(packed, inf);
   }
-  if (target_exponent >= 0x1F)
-    return 0x1Fu << mantissa_bits;
-  long mantissa = std::lround((fraction * 2.f - 1.f) *
-                              static_cast<float>(1u << mantissa_bits));
-  if (mantissa == static_cast<long>(1u << mantissa_bits)) {
-    mantissa = 0;
-    if (++target_exponent >= 0x1F)
-      return 0x1Fu << mantissa_bits;
-  }
-  return (static_cast<u32>(target_exponent) << mantissa_bits) |
-         static_cast<u32>(mantissa);
+  // Denormal in the target: the implicit bit joins the shifted mantissa.
+  const u32 shift = drop + 113 - (exp32 ? exp32 : 1);
+  const u32 m = exp32 ? mant23 | 0x800000 : mant23;
+  return shift < 32 ? (m + (1u << (shift - 1))) >> shift : 0;
 }
 
 void UnpackR11G11B10(u32 packed, u8* dst) {
@@ -1370,19 +1367,22 @@ bool RunAliasedCopy(const CsAliasedImage& img,
                                       : e.buf;
   auto* scratch = static_cast<u32*>(g_bridge.map);
   if (convert && to_image) {
-    for (u32 y = 0; y < plan.h; y++) {
-      const u8* row = static_cast<const u8*>(e.map) + level.offset +
-                      static_cast<u64>(y) * level.pitch * res.stage_elem_bytes;
-      for (u32 x = 0; x < plan.w; x++) {
-        const u64 i = static_cast<u64>(y) * level.pitch + x;
-        const u8* texel = row + static_cast<u64>(x) * res.stage_elem_bytes;
-        if (plan.unpack)
-          scratch[i] = PackR11G11B10(texel);
-        else
-          std::memcpy(static_cast<u8*>(g_bridge.map) + i * img.elem_bytes,
-                      texel, img.elem_bytes);
+    gcn::DetileParallelRows(plan.h, [&](u32 y0, u32 y1) {
+      for (u32 y = y0; y < y1; y++) {
+        const u8* row = static_cast<const u8*>(e.map) + level.offset +
+                        static_cast<u64>(y) * level.pitch *
+                            res.stage_elem_bytes;
+        for (u32 x = 0; x < plan.w; x++) {
+          const u64 i = static_cast<u64>(y) * level.pitch + x;
+          const u8* texel = row + static_cast<u64>(x) * res.stage_elem_bytes;
+          if (plan.unpack)
+            scratch[i] = PackR11G11B10(texel);
+          else
+            std::memcpy(static_cast<u8*>(g_bridge.map) + i * img.elem_bytes,
+                        texel, img.elem_bytes);
+        }
       }
-    }
+    });
   }
   // Host-zero any padding an image->buffer copy does not cover (host writes
   // are made available by the submission).
@@ -1581,18 +1581,201 @@ bool RunAliasedCopy(const CsAliasedImage& img,
   return true;
 }
 
-// Stage a CS input whose descriptor points at a live render/depth target from
-// the VkImage instead of guest memory. Draws only ever render into the image:
-// the guest bytes under a target stay stale (usually zero), so the
-// guest-memory path feeds a compute post chain black (SotC reads its HDR
-// scene target AND its 1080p depth buffer this way for the whole
-// downsample/tonemap/pyramid cascade). The copy is submitted on the queue and
-// waited: it executes after the last submitted frame and before the current
-// recording, so it sees the previous frame's completed content, one frame of
-// latency in a post input, not black.
-// Returns false (caller falls back to guest staging) when the base is not a
-// live target or the shapes disagree.
+// A float scratch image the packed-float bridge blits through: no
+// buffer<->image copy converts R11G11B10 to the float4 staging layout, and a
+// blit converts any colour format to any other.
+struct BridgeFloatImage {
+  VkImage image = VK_NULL_HANDLE;
+  ImageAllocation allocation;
+  u32 w = 0, h = 0;
+};
+std::vector<BridgeFloatImage> g_bridge_float_images;
+u64 g_in_frame_bridge_n = 0;
+
+bool BlitsBetween(VkFormat a, VkFormat b) {
+  static std::unordered_map<u64, bool> known;
+  const u64 key = (u64(a) << 32) | u64(b);
+  auto it = known.find(key);
+  if (it != known.end())
+    return it->second;
+  constexpr VkFormatFeatureFlags kBoth =
+      VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT;
+  VkFormatProperties pa{}, pb{};
+  vkGetPhysicalDeviceFormatProperties(g_dev.phys, a, &pa);
+  vkGetPhysicalDeviceFormatProperties(g_dev.phys, b, &pb);
+  const bool ok = (pa.optimalTilingFeatures & kBoth) == kBoth &&
+                  (pb.optimalTilingFeatures & kBoth) == kBoth;
+  return known[key] = ok;
+}
+
+VkImage GetBridgeFloatImage(u32 w, u32 h) {
+  for (const BridgeFloatImage& b : g_bridge_float_images)
+    if (b.w == w && b.h == h)
+      return b.image;
+  if (g_bridge_float_images.size() >= 8)
+    return VK_NULL_HANDLE;
+  BridgeFloatImage b;
+  VkImageCreateInfo ii{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+  ii.imageType = VK_IMAGE_TYPE_2D;
+  ii.format = VK_FORMAT_R32G32B32A32_SFLOAT;
+  ii.extent = {w, h, 1};
+  ii.mipLevels = 1;
+  ii.arrayLayers = 1;
+  ii.samples = VK_SAMPLE_COUNT_1_BIT;
+  ii.tiling = VK_IMAGE_TILING_OPTIMAL;
+  ii.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+  if (vkCreateImage(g_dev.device, &ii, nullptr, &b.image) != VK_SUCCESS)
+    return VK_NULL_HANDLE;
+  if (!g_image_memory.Allocate(g_dev, b.image, b.allocation)) {
+    vkDestroyImage(g_dev.device, b.image, nullptr);
+    return VK_NULL_HANDLE;
+  }
+  b.w = w;
+  b.h = h;
+  g_bridge_float_images.push_back(b);
+  return b.image;
+}
+
+// The draw -> compute bridge, recorded at the current point of the frame
+// command buffer instead of submitted and waited on its own: the target's
+// texels go straight into the range's VRAM buffer, which holds linear texels
+// already, so this is one copy (a packed-float target goes through a blit)
+// and nothing touches the host. The chunk is then submitted so the dispatch
+// that reads the buffer, recorded into the compute batch, runs after it.
+// Returns false for the shapes it does not cover; the caller then takes the
+// synchronous path.
+DELTA_OPTION(bool, kCsInFrameBridge, "DELTA_GPU_CS_INFRAME_BRIDGE", true);
+
+// A live target as the in-frame bridge sees it: the aspect it copies and the
+// layout the recording has it in.
+struct InFrameTarget {
+  CsAliasedImage img;
+  VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
+  VkFormat fmt = VK_FORMAT_UNDEFINED;
+};
+
+bool RecordRtStageInFrame(const InFrameTarget& t,
+                          const ComputeInfo::Res& res,
+                          CsRange& e,
+                          const AliasedCopyPlan& plan) {
+  const CsAliasedImage& img = t.img;
+  if (!kCsInFrameBridge || !g_frame.recording || e.truth || !e.buf ||
+      plan.widen || plan.depth16 || plan.layers != 1 || res.layers > 1 ||
+      img.layers != 1 || t.layout == VK_IMAGE_LAYOUT_UNDEFINED)
+    return false;
+  gcn::TextureLayout32 tiled, linear;
+  if (!BuildCsImageLayouts(res, tiled, linear))
+    return false;
+  const auto& level = linear.mips[0];
+  const u64 copy_bytes =
+      static_cast<u64>(level.pitch) * plan.h * res.stage_elem_bytes;
+  if (level.offset + copy_bytes > e.cap || res.size > e.cap)
+    return false;
+  VkImage float_image = VK_NULL_HANDLE;
+  if (plan.unpack &&
+      (!BlitsBetween(t.fmt, VK_FORMAT_R32G32B32A32_SFLOAT) ||
+       !(float_image = GetBridgeFloatImage(plan.w, plan.h))))
+    return false;
+  EndRegion();
+  const VkCommandBuffer c = g_frame.cmd;
+  VkMemoryBarrier before{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+  before.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+  before.dstAccessMask =
+      VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+  vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                       VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &before, 0,
+                       nullptr, 0, nullptr);
+  constexpr VkImageLayout kSrc = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+  AliasedImageBarrier(c, img, t.layout, kSrc, AliasedImageAccess(img, t.layout),
+                      VK_ACCESS_TRANSFER_READ_BIT);
+  // Staging bytes the copy does not reach read as zero, as the host path's
+  // cleared mirror did.
+  if (level.offset || copy_bytes < res.size || plan.w < level.pitch) {
+    vkCmdFillBuffer(c, e.buf, 0, res.size & ~VkDeviceSize(3), 0);
+    VkMemoryBarrier filled{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    filled.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    filled.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &filled, 0,
+                         nullptr, 0, nullptr);
+  }
+  VkBufferImageCopy copy{};
+  copy.bufferOffset = level.offset;
+  copy.bufferRowLength = level.pitch;
+  copy.bufferImageHeight = level.stored_height;
+  copy.imageSubresource = {img.aspect, 0, 0, 1};
+  copy.imageExtent = {plan.w, plan.h, 1};
+  if (plan.unpack) {
+    VkImageBlit blit{};
+    blit.srcSubresource = blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0,
+                                                 0, 1};
+    blit.srcOffsets[1] = blit.dstOffsets[1] = {static_cast<i32>(plan.w),
+                                               static_cast<i32>(plan.h), 1};
+    ImageBarrier(c, float_image, VK_IMAGE_LAYOUT_UNDEFINED,
+                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0,
+                 VK_ACCESS_TRANSFER_WRITE_BIT);
+    vkCmdBlitImage(c, img.image, kSrc, float_image,
+                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit,
+                   VK_FILTER_NEAREST);
+    ImageBarrier(c, float_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, kSrc,
+                 VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+    vkCmdCopyImageToBuffer(c, float_image, kSrc, e.buf, 1, &copy);
+  } else {
+    vkCmdCopyImageToBuffer(c, img.image, kSrc, e.buf, 1, &copy);
+  }
+  AliasedImageBarrier(c, img, kSrc, t.layout, VK_ACCESS_TRANSFER_READ_BIT,
+                      AliasedImageAccess(img, t.layout));
+  VkMemoryBarrier after{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+  after.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+  after.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+  vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                       VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &after, 0,
+                       nullptr, 0, nullptr);
+  e.frame_ref = g_frame.num;
+  e.mirror_current = false;
+  e.readback_pending = false;
+  g_in_frame_bridge_n++;
+  return CsSplitFrameChunk();
+}
+
+// The live colour or depth target at `base` the bridge would pick (the
+// preference FindCsAliasedImage applies), in its recording-time layout.
+bool LiveInFrameTarget(u64 base, bool prefer_depth, InFrameTarget& t) {
+  const auto use_depth = [&](const DepthTarget& depth) {
+    if (!depth.image || depth.clear_pending)
+      return false;
+    t.img = {depth.image, depth.w, depth.h, 4, VK_IMAGE_ASPECT_DEPTH_BIT,
+             depth.layout, true, false, depth.layers};
+    t.layout = depth.layout;
+    return true;
+  };
+  if (prefer_depth) {
+    auto it = g_depths.find(base);
+    if (it != g_depths.end())
+      return use_depth(it->second);
+  }
+  auto rt_it = g_rts.find(base);
+  if (rt_it != g_rts.end()) {
+    const RTarget& rt = rt_it->second;
+    if (!rt.image || rt.is_depth || rt.depth > 1 || !rt.ever_rendered)
+      return false;
+    t.img = {rt.image, rt.w, rt.h, FormatBytes(rt.fmt),
+             VK_IMAGE_ASPECT_COLOR_BIT, rt.layout};
+    t.layout = rt.layout;
+    t.fmt = rt.fmt;
+    return true;
+  }
+  auto it = g_depths.find(base);
+  return it != g_depths.end() && use_depth(it->second);
+}
+
 bool StageCsRangeFromRt(const ComputeInfo::Res& res, CsRange& e) {
+  InFrameTarget live;
+  AliasedCopyPlan live_plan;
+  if (LiveInFrameTarget(res.base, /*prefer_depth=*/res.dfmt == 4, live) &&
+      PlanAliasedCopy(live.img, res, "reads", live_plan) &&
+      RecordRtStageInFrame(live, res, e, live_plan))
+    return true;
   // The draws that produced it this frame must be on the queue before the
   // copy is, or the dispatch reads last frame's pixels.
   if (RenderedInOpenChunk(res.base) && !CsSplitFrameChunk())
@@ -1670,9 +1853,16 @@ bool UploadCsRangeToRt(u64 base, CsRange& e) {
 }
 
 std::unordered_map<u64, CsRange> g_cs_ranges;
+// Ranges MarkPending flagged, so retiring a batch visits those instead of
+// every range. Map nodes do not move; CsRangeDestroy (which precedes every
+// erase) drops its entry. May hold ranges no longer pending, or twice.
+std::vector<CsRange*> g_cs_pending;
 u64 g_cs_range_bytes = 0;
 constexpr u32 kCsDirtyPageShift = 16;
 std::unordered_map<u64, std::vector<u64>> g_cs_dirty_pages;
+// The same bases, once each: what the readback staging walks instead of every
+// range (thousands of them against a few dozen dirty ones).
+std::unordered_set<u64> g_cs_dirty_bases;
 // Bumped whenever compute results land in guest memory (writeback or an
 // executed batch of importing dispatches). The draw path's per-frame staging
 // caches stamp entries with this and re-copy when it has moved: a cached
@@ -1686,6 +1876,7 @@ u64 RangeEnd(u64 base, u64 bytes) {
 void IndexDirtyRange(u64 base, u64 bytes) {
   if (!bytes)
     return;
+  g_cs_dirty_bases.insert(base);
   const u64 end = RangeEnd(base, bytes);
   for (u64 page = base >> kCsDirtyPageShift;
        page <= (end - 1) >> kCsDirtyPageShift; page++)
@@ -1695,6 +1886,7 @@ void IndexDirtyRange(u64 base, u64 bytes) {
 void UnindexDirtyRange(u64 base, u64 bytes) {
   if (!bytes)
     return;
+  g_cs_dirty_bases.erase(base);
   const u64 end = RangeEnd(base, bytes);
   for (u64 page = base >> kCsDirtyPageShift;
        page <= (end - 1) >> kCsDirtyPageShift; page++) {
@@ -1748,26 +1940,6 @@ std::vector<u64> DirtyRangesOverlapping(u64 base,
                      }),
       candidates.end());
   return candidates;
-}
-
-// Sampled content hash for CS range validation: length + 256 evenly spaced
-// 64-byte windows. Reading a whole 16MB image per validation was the point of
-// the exercise; a CPU write that dodges every window for a whole frame is a
-// risk we accept for the ~50x cheaper check (full TexHash still guards the
-// sampled-texture cache).
-u64 RangeHash(u64 base, u64 bytes) {
-  if (bytes <= 16384)
-    return TexHash(base, bytes);
-  constexpr u64 kPrime = 1099511628211ull;
-  u64 h = 1469598103934665603ull ^ (bytes * kPrime);
-  const u64 step = (bytes - 64) / 255;
-  for (u32 i = 0; i < 256; i++) {
-    u64 w[8];
-    std::memcpy(w, reinterpret_cast<const void*>(base + i * step), 64);
-    for (int j = 0; j < 8; j++)
-      h = (h ^ w[j]) * kPrime;
-  }
-  return h;
 }
 
 // DELTA_GPU_CSIMPORT: back the range's buffer with the GUEST PAGES themselves
@@ -2074,6 +2246,7 @@ bool CsRangeRename(CsRange& e, VkDeviceSize size) {
 void DropTiledImport(u64 base);
 
 void CsRangeDestroy(CsRange& e) {
+  std::erase(g_cs_pending, &e);
   if (e.res.base)
     DropTiledImport(e.res.base);
   if (!e.imported && !CsFrameReferenced(e) && !e.pending_batch && e.buf &&
@@ -3001,6 +3174,8 @@ CsBatch g_cs_batches[kCsBatchRing];
 // The batch a range referenced now belongs to: the open one, or the one that
 // opens next when nothing is recording yet.
 void MarkPending(CsRange& e) {
+  if (!e.pending_batch)
+    g_cs_pending.push_back(&e);
   e.pending_batch = true;
   e.batch_id = g_cs_batch_open ? g_cs_batch_id : g_cs_batch_next_id;
 }
@@ -3082,17 +3257,20 @@ void CsBatchFinalize(CsBatch& b) {
     }
   }
   g_cs_batch_done = std::max(g_cs_batch_done, b.id);
-  for (auto& kv : g_cs_ranges) {
-    CsRange& e = kv.second;
-    if (!e.pending_batch || e.batch_id > g_cs_batch_done)
-      continue;
+  std::erase_if(g_cs_pending, [](CsRange* range) {
+    CsRange& e = *range;
+    if (!e.pending_batch)
+      return true;
+    if (e.batch_id > g_cs_batch_done)
+      return false;
     e.pending_batch = false;
     // Every readback recorded into it is in the host mirror now.
     if (e.readback_pending) {
       e.readback_pending = false;
       e.mirror_current = true;
     }
-  }
+    return true;
+  });
   b.submitted = false;
   b.log.clear();
   b.count = 0;
@@ -3293,14 +3471,21 @@ bool CsLazyKept(u64 base, const CsRange& e) {
 }
 
 // `all`: every dirty range, or only those nothing keeps in VRAM on purpose.
-template <typename It>
-void CsStageReadbacks(It first, It last, bool all = true) {
-  for (It it = first; it != last; ++it) {
-    CsRange& e = it->second;
-    if (e.gpu_dirty && e.device_local && !e.mirror_current && !e.imported &&
-        (!CanGpuTile(e.res, e) || e.truth) &&
-        (all || !CsLazyKept(it->first, e)))
-      CsCopyStaging(e, e.size ? e.size : e.cap, /*to_device=*/false);
+void CsStageReadback(u64 base, CsRange& e, bool all) {
+  if (e.gpu_dirty && e.device_local && !e.mirror_current &&
+      !e.readback_pending && !e.imported &&
+      (!CanGpuTile(e.res, e) || e.truth) && (all || !CsLazyKept(base, e)))
+    CsCopyStaging(e, e.size ? e.size : e.cap, /*to_device=*/false);
+}
+
+void CsStageReadbacks(bool all = true) {
+  // A copy: staging can open a batch, and finalizing an old one may unindex.
+  const std::vector<u64> bases(g_cs_dirty_bases.begin(),
+                               g_cs_dirty_bases.end());
+  for (u64 base : bases) {
+    auto found = g_cs_ranges.find(base);
+    if (found != g_cs_ranges.end())
+      CsStageReadback(base, found->second, all);
   }
 }
 
@@ -3346,7 +3531,7 @@ bool CsRangeFlushOne(u64 base, CsRange& e) {
   // Results live in VRAM: pull them into the host mirror on the same batch that
   // produced them, so the one fence wait covers the dispatch and the copy.
   // Already-recorded readbacks (CsStageReadbacks) skip this.
-  if (e.device_local && !e.mirror_current &&
+  if (e.device_local && !e.mirror_current && !e.readback_pending &&
       (!CanGpuTile(e.res, e) || e.truth))
     CsCopyStaging(e, e.size ? e.size : e.cap, /*to_device=*/false);
   if (e.pending_batch) {
@@ -3555,7 +3740,7 @@ bool CsRangeFlushOne(u64 base, CsRange& e) {
   // path's per-frame staging cache entries (they validate against this).
   g_cs_writeback_gen++;
   e.gpu_dirty = false;
-  e.hash = RangeHash(base, e.guest_bytes);
+  e.hash = TexHash(base, e.guest_bytes);
   e.last_validated_frame = g_frame.num;
   g_out_tail_ns += NowNs() - _t_inv;
   return true;
@@ -3660,12 +3845,13 @@ void CsSyncReport(double frames) {
   }
   BASE_LOGI("csin",
             "hash={:.1f}ms x{:.1f} detile={:.1f}ms rt-bridge={:.1f}ms x{:.1f} "
-            "copy={:.1f}ms",
+            "(in-frame x{:.1f}) copy={:.1f}ms",
             g_in_hash_ns / frames / 1e6, g_in_hash_n / frames,
             g_in_detile_ns / frames / 1e6, g_in_rt_ns / frames / 1e6,
-            g_in_rt_n / frames, g_in_copy_ns / frames / 1e6);
+            g_in_rt_n / frames, g_in_frame_bridge_n / frames,
+            g_in_copy_ns / frames / 1e6);
   g_in_hash_ns = g_in_detile_ns = g_in_rt_ns = g_in_copy_ns = 0;
-  g_in_hash_n = g_in_rt_n = 0;
+  g_in_hash_n = g_in_rt_n = g_in_frame_bridge_n = 0;
   BASE_LOGI("csin2",
             "overlap-wb={:.1f}ms x{:.1f} reshape-wb={:.1f}ms x{:.1f} "
             "alloc={:.1f}ms x{:.1f} recycled={:.1f} ranges={} {:.0f}MB "
@@ -4725,8 +4911,11 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
     else if (rt_backed && !e.gpu_dirty && e.rt_sourced)
       valid = same_shape;
     if (!valid && same_shape && !rt_attempt) {
+      // The whole range, not sampled windows: a CPU write that missed every
+      // window (a buffer streaming in at a scene cut) kept the stale staging
+      // forever, and GTA:SA's lighting went psychedelic in 1 run of 4.
       const u64 _th = NowNs();
-      const u64 h = RangeHash(base, hash_bytes);
+      const u64 h = TexHash(base, hash_bytes);
       g_in_hash_ns += NowNs() - _th;
       g_in_hash_n++;
       if (h == e.hash)
@@ -4834,7 +5023,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
         }
         e.rt_sourced = false;
         if (rt_attempt) {  // fell back: keep guest-hash bookkeeping coherent
-          e.hash = RangeHash(base, hash_bytes);
+          e.hash = TexHash(base, hash_bytes);
           e.last_validated_frame = g_frame.num;
         }
         // The CPU wrote the host mirror; the shaders bind the VRAM copy.
@@ -4845,7 +5034,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
         g_in_copy_ns += NowNs() - _tc;
       }
       if (!same_shape) {
-        e.hash = RangeHash(base, hash_bytes);
+        e.hash = TexHash(base, hash_bytes);
         e.last_validated_frame = g_frame.num;
       }
       // Baseline for the writeback's write-coverage merge: the staging buffer as
@@ -5313,7 +5502,7 @@ bool FlushCsWrites(Renderer& renderer) {
   bool all_current = true;
   // Record every readback first: one fence wait then covers all of them,
   // instead of one submit+wait per dirty range.
-  CsStageReadbacks(g_cs_ranges.begin(), g_cs_ranges.end());
+  CsStageReadbacks();
   for (auto it = g_cs_ranges.begin(); it != g_cs_ranges.end();) {
     if (!CsRangeFlushOne(it->first, it->second)) {
       if (g_cs_failed) {
@@ -5423,7 +5612,7 @@ bool FlushCsWritesFrameEnd(Renderer& renderer, bool writeback) {
       return kCsImageLazyWb && e.truth && e.gpu_dirty && !e.imported &&
              (e.rt_seq == e.write_seq || CsRefreshRtInFrame(base, e));
     };
-    CsStageReadbacks(g_cs_ranges.begin(), g_cs_ranges.end(), /*all=*/false);
+    CsStageReadbacks(/*all=*/false);
     for (auto it = g_cs_ranges.begin(); it != g_cs_ranges.end();) {
       if (stays(it->first, it->second)) {
         g_lazy_kept_n++;
@@ -5469,7 +5658,6 @@ bool FlushCsWritesRange(Renderer& renderer,
                         u64 base,
                         u64 bytes,
                         const char* why) {
-  ScopeNs _flush_timer(&g_ns_cs_flush);
   // Nothing dirty anywhere: answer without touching the page index, which
   // otherwise allocates a vector, hashes a lookup per page, then sorts and
   // dedups it. That is called once per guest read, and SotC issues 1.2M
@@ -5483,8 +5671,13 @@ bool FlushCsWritesRange(Renderer& renderer,
     renderer.state = nullptr;
     return false;
   }
-  if (!base || !bytes || g_cs_ranges.empty())
+  // Most calls are per s_load of the descriptor replay and overlap nothing:
+  // answer those before the timers and the candidate vector.
+  if (!base || !bytes || g_cs_ranges.empty() ||
+      (!CsRangeDirtyOverlapping(base, bytes) &&
+       !(kCsFlushTrace && base == (u64)kCsFlushTrace)))
     return true;
+  ScopeNs _flush_timer(&g_ns_cs_flush);
   const u64 _t0 = NowNs();
   bool all_current = true;
   // DELTA_GPU_CSFLUSHTRACE=<base>: what the dirty-range index finds for a
@@ -5526,7 +5719,7 @@ bool FlushCsWritesRange(Renderer& renderer,
   // eventually wants them needs no wait at all. Draw-at-a-time flushing was
   // ~25 waits a frame where a frame needs 2 or 3.
   if (!overlapping.empty()) {
-    CsStageReadbacks(g_cs_ranges.begin(), g_cs_ranges.end(), /*all=*/false);
+    CsStageReadbacks(/*all=*/false);
     for (u64 dirty : overlapping) {
       auto found = g_cs_ranges.find(dirty);
       if (found == g_cs_ranges.end() || !found->second.gpu_dirty)

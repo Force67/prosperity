@@ -1259,19 +1259,20 @@ void EmitVop2(Translator& t,
     // explicit: "If one or both inputs are NaN values then vsrc1 is always
     // returned", and IEEE mode has no effect. An ordered compare is exactly
     // that: it is false whenever either operand is NaN, so the select falls
-    // to vsrc1. GLSL FMin/FMax return the *non-NaN* operand instead, which is
-    // the opposite answer when vsrc1 is the NaN.
+    // to vsrc1. The plain min/max below return the non-NaN operand, which is
+    // GLSL NMin/NMax; FMin/FMax leave a NaN operand undefined, and a title's
+    // max(x, 0) NaN scrub then lets the NaN through into its history buffers.
     case 0x0d:
       set_f(t.SelectF(t.FLt(s0, s1), s0, s1));
       break;
     case 0x0f:
-      set_f(t.Ext2(GLSLstd450FMin, s0, s1));
+      set_f(t.Ext2(GLSLstd450NMin, s0, s1));
       break;  // v_min_f32
     case 0x0e:
       set_f(t.SelectF(t.FGt(s0, s1), s0, s1));
       break;
     case 0x10:
-      set_f(t.Ext2(GLSLstd450FMax, s0, s1));
+      set_f(t.Ext2(GLSLstd450NMax, s0, s1));
       break;  // v_max_f32
     case 0x11:
       set_u(t.SMin(u0, u1));
@@ -1880,7 +1881,7 @@ void EmitVop3(Translator& t,
       break;
     }
     case 0x151:
-      set_f(t.Ext2(GLSLstd450FMin, t.Ext2(GLSLstd450FMin, s0, s1), s2));
+      set_f(t.Ext2(GLSLstd450NMin, t.Ext2(GLSLstd450NMin, s0, s1), s2));
       break;  // v_min3_f32
     case 0x152:
       set_u(t.SMin(t.SMin(u0, u1), u2));
@@ -1889,7 +1890,7 @@ void EmitVop3(Translator& t,
       set_u(t.UMin(t.UMin(u0, u1), u2));
       break;  // v_min3_u32
     case 0x154:
-      set_f(t.Ext2(GLSLstd450FMax, t.Ext2(GLSLstd450FMax, s0, s1), s2));
+      set_f(t.Ext2(GLSLstd450NMax, t.Ext2(GLSLstd450NMax, s0, s1), s2));
       break;  // v_max3_f32
     case 0x155:
       set_u(t.SMax(t.SMax(u0, u1), u2));
@@ -1898,9 +1899,9 @@ void EmitVop3(Translator& t,
       set_u(t.UMax(t.UMax(u0, u1), u2));
       break;       // v_max3_u32
     case 0x157: {  // v_med3_f32 = clamp(s2, min(s0,s1), max(s0,s1))
-      const Id lo = t.Ext2(GLSLstd450FMin, s0, s1);
-      const Id hi = t.Ext2(GLSLstd450FMax, s0, s1);
-      set_f(t.m.ExtInst(t.t_f, GLSLstd450FClamp, {s2, lo, hi}));
+      const Id lo = t.Ext2(GLSLstd450NMin, s0, s1);
+      const Id hi = t.Ext2(GLSLstd450NMax, s0, s1);
+      set_f(t.m.ExtInst(t.t_f, GLSLstd450NClamp, {s2, lo, hi}));
       break;
     }
     case 0x158:
@@ -1913,7 +1914,7 @@ void EmitVop3(Translator& t,
       set_u(t.Add(t.Sub(t.UMax(u0, u1), t.UMin(u0, u1)), u2));
       break;
     case 0x15e: {  // v_cvt_pk_u8_f32: insert cvt_u8(S0) into byte S1 of S2
-      const Id sat = t.m.ExtInst(t.t_f, GLSLstd450FClamp,
+      const Id sat = t.m.ExtInst(t.t_f, GLSLstd450NClamp,
                                  {s0, t.F32(0.0f), t.F32(255.0f)});
       const Id byte =
           t.And(t.m.Emit(spv::Op::OpConvertFToU, t.t_u, {sat}), t.U32(0xFF));

@@ -1096,7 +1096,7 @@ void ResolveHtileClear(DepthTarget& dt, u64 base, float depth_clear) {
   dt.htile_clear_pending = false;
   u32 code = dt.htile_clear_code;
   if (!dt.htile_code_known) {
-    rhi::FlushCsWritesRange(rhi::DefaultRenderer(), dt.htile_base, 4);
+    rhi::FlushCsWritesRange(rhi::DefaultRenderer(), dt.htile_base, 4, "htile");
     if (!gpu::IsReadableRange(dt.htile_base, 4))
       return;
     std::memcpy(&code, reinterpret_cast<const void*>(dt.htile_base), 4);
@@ -1216,9 +1216,9 @@ bool DccClearColor(u32 code,
 // it lands, which is not always a packet we see.
 void NoteCmaskBind(RTarget& rt) {
   const u64 bytes = std::max<u64>(4, (u64(rt.w) * rt.h) / 128);
-  if (!gpu::IsReadableRange(rt.dcc_base, bytes))
+  if (!gpu::IsReadableRangeCached(rt.dcc_base, bytes))
     return;
-  rhi::FlushCsWritesRange(rhi::DefaultRenderer(), rt.dcc_base, 4);
+  rhi::FlushCsWritesRange(rhi::DefaultRenderer(), rt.dcc_base, 4, "cmask");
   auto* cmask = reinterpret_cast<u32*>(rt.dcc_base);
   if (*cmask & 0xF)
     return;
@@ -1234,8 +1234,8 @@ void ResolveDccClear(RTarget& rt, u64 base, u32 info, const u32* clear_word) {
   rt.dcc_clear_pending = false;
   u32 code = rt.dcc_clear_code;
   if (!rt.dcc_code_known) {
-    rhi::FlushCsWritesRange(rhi::DefaultRenderer(), rt.dcc_base, 4);
-    if (!gpu::IsReadableRange(rt.dcc_base, 4))
+    rhi::FlushCsWritesRange(rhi::DefaultRenderer(), rt.dcc_base, 4, "cmask");
+    if (!gpu::IsReadableRangeCached(rt.dcc_base, 4))
       return;
     std::memcpy(&code, reinterpret_cast<const void*>(rt.dcc_base), 4);
   }

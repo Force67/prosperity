@@ -107,18 +107,6 @@ inline bool Decline(DeclineReason r) {
   return false;
 }
 
-struct ReadableRangeKey {
-  u64 base;
-  u32 size;
-  bool operator==(const ReadableRangeKey&) const = default;
-};
-
-struct ReadableRangeKeyHash {
-  size_t operator()(const ReadableRangeKey& key) const {
-    return static_cast<size_t>(key.base ^ (key.base >> 32) ^ key.size);
-  }
-};
-
 // Per-frame staging dedupe. SotC redraws its whole world for the depth
 // prepass, the G-buffer and the shadow cascades, and every one of those draws
 // staged its vertex records, indices and cbuffer windows again: RINGHWM showed
@@ -130,11 +118,11 @@ struct ReadableRangeKeyHash {
 // A cached copy is current iff nothing has made its guest range stale since the
 // copy: entries are stamped with rhi::CsWritebackGeneration() (compute results
 // landing in guest memory bump it) and refused when a GPU-dirty compute range
-// overlaps the key (dirty means a writeback is still owed). CPU rewrites of the
-// same address within one frame have no announcement to hook; titles
+// overlaps the key (dirty means a writeback is still
+// owed). The cache lives one submission (see RollFrame): CPU rewrites of the
+// same address inside one have no announcement to hook, and titles
 // ring-allocate their dynamic data so a rewritten buffer arrives at a new
-// address, and the raw-buffer path has shipped that assumption since it grew
-// its own `staged` map. DELTA_GPU_RING_DEDUP=0 restores copy-per-draw for A/B.
+// address. DELTA_GPU_RING_DEDUP=0 restores copy-per-draw for A/B.
 struct StageCacheKey {
   u64 base;
   u32 salt;  // index type for the IB cache, 0 elsewhere
@@ -155,10 +143,15 @@ struct StageCache {
   };
   std::unordered_map<StageCacheKey, Entry, StageCacheKeyHash> map;
   int frame = -1;
+  u32 dcb = 0;
 
+  // One command buffer submission, not one frame: the submit returns with its
+  // work done as far as the guest can tell, so the title may legally rewrite a
+  // buffer in place for its next submission within the same frame.
   void RollFrame() {
-    if (frame != g_frame.num) {
+    if (frame != g_frame.num || dcb != rhi::g_dcb_n) {
       frame = g_frame.num;
+      dcb = rhi::g_dcb_n;
       map.clear();
     }
   }
@@ -195,17 +188,7 @@ StageCache g_vb_staged, g_ib_staged, g_ubo_staged, g_sbo_staged;
 DELTA_OPTION(bool, kRingDedup, "DELTA_GPU_RING_DEDUP", true);
 
 bool IsReadableThisFrame(u64 base, u32 size) {
-  static int frame = -1;
-  static std::unordered_map<ReadableRangeKey, bool, ReadableRangeKeyHash> cache;
-  if (frame != g_frame.num) {
-    frame = g_frame.num;
-    cache.clear();
-  }
-  const ReadableRangeKey key{base, size};
-  auto found = cache.find(key);
-  if (found != cache.end())
-    return found->second;
-  return cache.emplace(key, gpu::IsReadableRange(base, size)).first->second;
+  return gpu::IsReadableRangeCached(base, size);
 }
 
 }  // namespace
@@ -1636,6 +1619,7 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
       // at the end of a mapping cannot fault.
       n = cache_n;
       std::memcpy(cb_dst, reinterpret_cast<const void*>(cb.base), n);
+      g_ring_cb_bytes += n;
     } else {  // binding 0 without a resolved cbuffer: the heuristic MVP
       n = sizeof(d.mvp);
       std::memcpy(cb_dst, d.mvp, n);
@@ -1753,6 +1737,7 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
         return Decline(kNoRecomp);
       u8* dst = g_ring.sbo_map + off;
       std::memcpy(dst, reinterpret_cast<const void*>(rb.base), want);
+      g_ring_raw_bytes += want;
       // Zero the reservation's tail so a read just past the payload is zero,
       // as it is past NUM_RECORDS on hardware. A truncated resource fills its
       // whole window, so this costs nothing there.
@@ -1803,6 +1788,7 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
       return Decline(kNoRecomp);
     std::memcpy(g_ring.vb_map + voff + bind_off[j], d.vbufs[j].data,
                 (size_t)bind_size[j]);
+    g_ring_vb_bytes += bind_size[j];
     if (kRingDedup)
       g_vb_staged.Insert(reinterpret_cast<u64>(d.vbufs[j].data),
                          bind_size[j], 0, voff + bind_off[j]);
@@ -1810,6 +1796,7 @@ bool DrawRecomp(rhi::Renderer& renderer, const DrawInfo& d) {
   if (indexed && ib_cached == VkDeviceSize(-1)) {
     CopyGuestIndices(g_ring.ib_map + ioff, d.index_data, d.index_count,
                      d.index_type);
+    g_ring_ib_bytes += index_bytes;
     if (kRingDedup)
       g_ib_staged.Insert(reinterpret_cast<u64>(d.index_data), index_bytes,
                          1u + d.index_type, ioff);

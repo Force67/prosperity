@@ -115,16 +115,49 @@ inline bool IsReadableRangeCached(u64 address, u64 bytes) {
   // Per thread, so the command processor and the frame loop never share it and
   // no lock is needed.
   static thread_local std::unordered_map<u64, Entry> cache;
+  // Pages already proven readable this generation, direct-mapped. Descriptor
+  // and cbuffer reads land at thousands of distinct addresses a frame but on
+  // few pages, so an exact-address cache alone mostly misses. A collision
+  // only costs a re-probe.
+  struct PageSlot {
+    u64 page = 0;
+    u64 generation = 0;
+  };
+  constexpr u64 kPageShift = 12;
+  constexpr u64 kSlots = 4096;
+  constexpr u64 kMaxPagedSpan = 64;
+  static thread_local PageSlot pages[kSlots];
   static thread_local u64 seen_generation = 0;
   const u64 gen = MemoryGeneration();
   if (seen_generation != gen) {
     seen_generation = gen;
     cache.clear();
   }
+  const auto slot = [](u64 page) -> PageSlot& {
+    return pages[(page ^ (page >> 12)) & (kSlots - 1)];
+  };
+  const bool paged = bytes && address <= std::numeric_limits<u64>::max() - bytes &&
+                     ((address + bytes - 1) >> kPageShift) - (address >> kPageShift) <
+                         kMaxPagedSpan;
+  const u64 first = address >> kPageShift;
+  const u64 last = paged ? (address + bytes - 1) >> kPageShift : 0;
+  if (paged) {
+    u64 page = first;
+    while (page <= last && slot(page).page == page &&
+           slot(page).generation == gen)
+      page++;
+    if (page > last)
+      return true;
+  }
   auto it = cache.find(address);
   if (it != cache.end() && it->second.bytes == bytes)
     return it->second.readable;
   const bool readable = IsReadableRange(address, bytes);
+  if (readable && paged) {
+    for (u64 page = first; page <= last; page++)
+      slot(page) = {page, gen};
+    return true;
+  }
   cache[address] = {bytes, gen, readable};
   return readable;
 }

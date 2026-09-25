@@ -897,7 +897,7 @@ void StartRendererOnce(rhi::Renderer& renderer) {
   // The resource replay reads descriptor tables out of guest memory a compute
   // dispatch may still own; it is below the renderer, so it cannot ask itself.
   gcn::g_flush_guest_range = [](u64 address, u64 bytes) {
-    rhi::FlushCsWritesRange(rhi::DefaultRenderer(), address, bytes);
+    rhi::FlushCsWritesRange(rhi::DefaultRenderer(), address, bytes, "desc");
   };
 }
 

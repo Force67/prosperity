@@ -405,11 +405,14 @@ void ReportFps() {
       BASE_LOGI("drawprof2",
                 "per-frame texset={:.2f}ms x{:.0f} region={:.2f}ms "
                 "csflush={:.2f}ms builddraw={:.2f}ms x{:.0f} "
-                "gfxpres={:.2f}ms borrowwait={:.2f}ms",
+                "gfxpres={:.2f}ms borrowwait={:.2f}ms | ring vb={:.1f}MB "
+                "ib={:.1f}MB cb={:.1f}MB raw={:.1f}MB",
                 g_ns_tex_set / f / 1e6, g_tex_set_n / f, g_ns_region / f / 1e6,
                 g_ns_cs_flush / f / 1e6, g_ns_build_draw / f / 1e6,
                 g_build_draw_n / f, g_ns_gfx_present / f / 1e6,
-                g_ns_borrow_wait / f / 1e6);
+                g_ns_borrow_wait / f / 1e6, g_ring_vb_bytes / f / 1e6,
+                g_ring_ib_bytes / f / 1e6, g_ring_cb_bytes / f / 1e6,
+                g_ring_raw_bytes / f / 1e6);
     CsSyncReport(f);
     // Feed the on-screen overlay gauge (gpuMs = GPU end/present-dominated
     // cost).
@@ -435,6 +438,7 @@ void ReportFps() {
     g_frame_worst_ms = 0;
     g_frame_hitch_n = 0;
     g_ns_gfx_present = g_ns_borrow_wait = 0;
+    g_ring_vb_bytes = g_ring_ib_bytes = g_ring_cb_bytes = g_ring_raw_bytes = 0;
     g_cs_stage_bytes = 0;
     g_cs_wb_bytes_written = g_cs_wb_bytes_total = 0;
     gcn::g_ns_recomp = 0;

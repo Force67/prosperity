@@ -1101,28 +1101,33 @@ bool RecordTexPixels(VkImage img,
   return true;
 }
 
-void RetireTextureImage(const TexImageKey& key) {
-  bool retired = false;
+using TexImageKeySet = std::unordered_set<TexImageKey, TexImageKeyHash>;
+
+// One pass over the set and view caches for a whole batch of images: walking
+// both caches once per image was most of what eviction cost.
+void RetireTextureImages(const TexImageKeySet& keys) {
+  if (keys.empty())
+    return;
   for (auto set = g_tex_cache.begin(); set != g_tex_cache.end();) {
-    if (set->first.image == key) {
+    if (keys.count(set->first.image)) {
       g_retired_tex_sets.push_back(set->second);
       set = g_tex_cache.erase(set);
-      retired = true;
     } else {
       ++set;
     }
   }
   for (auto view = g_tex_views.begin(); view != g_tex_views.end();) {
-    if (view->first.image == key) {
+    if (keys.count(view->first.image)) {
       g_retired_tex_views.push_back(view->second);
       view = g_tex_views.erase(view);
-      retired = true;
     } else {
       ++view;
     }
   }
-  auto image = g_tex_images.find(key);
-  if (image != g_tex_images.end()) {
+  for (const TexImageKey& key : keys) {
+    auto image = g_tex_images.find(key);
+    if (image == g_tex_images.end())
+      continue;
     UnregisterTexturePages(key, image->second.footprint);
     GPU_BUGCHECK(g_tex_image_bytes >= image->second.allocation_size,
                  "texture budget underflow: %llu live < %llu retiring",
@@ -1131,25 +1136,39 @@ void RetireTextureImage(const TexImageKey& key) {
     g_tex_image_bytes -= image->second.allocation_size;
     g_retired_tex_images.push_back(image->second);
     g_tex_images.erase(image);
-    retired = true;
   }
-  if (retired)
-    ClearMultiTexCache();
+  ClearMultiTexCache();
 }
 
-bool EvictOldestTexture() {
-  auto oldest = g_tex_images.end();
-  for (auto it = g_tex_images.begin(); it != g_tex_images.end(); ++it) {
-    if (it->second.last_used_frame == g_frame.num)
-      continue;
-    if (oldest == g_tex_images.end() ||
-        it->second.last_used_frame < oldest->second.last_used_frame)
-      oldest = it;
-  }
-  if (oldest == g_tex_images.end())
+// Make room for one more image of `bytes` under `budget`: retire the least
+// recently used images not bound this frame, in one batch, down to 1/16 of
+// the budget and of the image cap below the limit, so the next uploads do not
+// come straight back here. False when nothing can be evicted.
+constexpr size_t kMaxTextureImages = 3000;
+
+bool EvictTextures(u64 bytes, u64 budget) {
+  std::vector<std::pair<int, TexImageKey>> old;
+  for (const auto& [key, entry] : g_tex_images)
+    if (entry.last_used_frame != g_frame.num)
+      old.push_back({entry.last_used_frame, key});
+  if (old.empty())
     return false;
-  const TexImageKey key = oldest->first;
-  RetireTextureImage(key);
+  std::sort(old.begin(), old.end(), [](const auto& a, const auto& b) {
+    return a.first < b.first;
+  });
+  const u64 want_bytes = budget - std::min(budget, budget / 16 + bytes);
+  const size_t want_count = kMaxTextureImages - kMaxTextureImages / 16;
+  u64 live_bytes = g_tex_image_bytes;
+  size_t live_count = g_tex_images.size();
+  TexImageKeySet retire;
+  for (const auto& [frame, key] : old) {
+    if (live_bytes <= want_bytes && live_count <= want_count)
+      break;
+    live_bytes -= g_tex_images[key].allocation_size;
+    live_count--;
+    retire.insert(key);
+  }
+  RetireTextureImages(retire);
   return true;
 }
 
@@ -1441,9 +1460,7 @@ VkDescriptorSet GetTexture(u64 base,
       return VK_NULL_HANDLE;
     }
     const u64 _t_hash = NowNs();
-    // A brand new image has no reference hash to compare against, and the
-    // upload below reads the whole surface anyway: leave its first full hash
-    // to the first sweep.
+    // A brand new image takes its reference hash at the upload below.
     if (image_it != g_tex_images.end()) {
       TexImageEntry& e = image_it->second;
       e.last_checked_frame = g_frame.num;
@@ -1469,6 +1486,13 @@ VkDescriptorSet GetTexture(u64 base,
           e.check_interval *= 2;
       }
       if (changed) {
+        // The reference hash is taken BEFORE the upload. Left to the next
+        // sweep, a surface the guest was still writing while we read it (a
+        // texture streaming in) got its finished contents adopted as the
+        // reference and the half-written upload kept for good. Hashed first,
+        // a write that lands after the hash reads as a change next sweep.
+        e.hash = TexHash(base, footprint);
+        g_tex_hash_bytes += footprint;
         if (!RecordTexPixels(e.image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                              base, layout, w, h, is_3d)) {
           if (kTexFail) {
@@ -1481,7 +1505,7 @@ VkDescriptorSet GetTexture(u64 base,
           g_ns_tex_hash += NowNs() - _t_hash;
           return VK_NULL_HANDLE;
         }
-        e.hash_valid = false;
+        e.hash_valid = true;
         e.sample_hash = sample;
         e.last_full_frame = g_frame.num;
         e.check_interval = 1;
@@ -1491,9 +1515,11 @@ VkDescriptorSet GetTexture(u64 base,
     g_tex_hash_n++;
   }
   if (image_it == g_tex_images.end()) {
-    while (g_tex_images.size() >= 3000)
-      if (!EvictOldestTexture())
-        return VK_NULL_HANDLE;
+    static const u64 kTextureBudget =
+        std::max<u64>(kTextureMb, 64) * 1024 * 1024;
+    if (g_tex_images.size() >= kMaxTextureImages &&
+        !EvictTextures(0, kTextureBudget))
+      return VK_NULL_HANDLE;
     TexImageEntry image_entry;
     image_entry.footprint = footprint;
     image_entry.hash_valid = false;
@@ -1520,13 +1546,12 @@ VkDescriptorSet GetTexture(u64 base,
     // can transiently exceed the budget by up to two frames of retirements;
     // capping allocated bytes instead would make creation fail outright at
     // the budget edge, since eviction cannot free memory mid-frame.
-    static const u64 kTextureBudget =
-        std::max<u64>(kTextureMb, 64) * 1024 * 1024;
-    while (g_tex_image_bytes + mr.size > kTextureBudget)
-      if (!EvictOldestTexture()) {
-        vkDestroyImage(g_dev.device, image_entry.image, nullptr);
-        return VK_NULL_HANDLE;
-      }
+    if (g_tex_image_bytes + mr.size > kTextureBudget &&
+        (!EvictTextures(mr.size, kTextureBudget) ||
+         g_tex_image_bytes + mr.size > kTextureBudget)) {
+      vkDestroyImage(g_dev.device, image_entry.image, nullptr);
+      return VK_NULL_HANDLE;
+    }
     if (!g_image_memory.Allocate(g_dev, image_entry.image,
                                  image_entry.allocation)) {
       vkDestroyImage(g_dev.device, image_entry.image, nullptr);
@@ -1536,6 +1561,11 @@ VkDescriptorSet GetTexture(u64 base,
         cs_supplies && CsSupplyTexture(base, layout, w, h, image_entry.image,
                                        VK_IMAGE_LAYOUT_UNDEFINED,
                                        &image_entry.cs_seq);
+    if (!cs_uploaded) {  // see the refresh above: hash before the upload
+      image_entry.hash = TexHash(base, footprint);
+      image_entry.hash_valid = true;
+      g_tex_hash_bytes += footprint;
+    }
     if (!cs_uploaded &&
         !RecordTexPixels(image_entry.image, VK_IMAGE_LAYOUT_UNDEFINED, base,
                          layout, w, h, is_3d)) {

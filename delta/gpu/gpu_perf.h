@@ -43,6 +43,7 @@ extern u64 g_ns_pipe_build, g_pipe_build_n;
 // The present path: the presenter thread's own time, and what the frame loop
 // waits for it before reusing the scanout buffer it lent.
 extern u64 g_ns_gfx_present, g_ns_borrow_wait;
+extern u64 g_ring_vb_bytes, g_ring_ib_bytes, g_ring_cb_bytes, g_ring_raw_bytes;
 extern u32 g_gpu_exec_samples;
 extern u32 g_cs_stage_n, g_cs_flush_n;
 extern u64 g_cs_stage_bytes;
