@@ -311,6 +311,8 @@ class VulkanDevice final : public rhi::Device {
   u64 last_cache_write_ns_ = 0;
   size_t last_cache_size_ = 0;
   bool fault_reported_ = false;
+  float max_lod_bias_ = 0.0f;
+  float max_anisotropy_ = 1.0f;
 };
 
 inline VulkanDevice& Impl(rhi::Device* device) {

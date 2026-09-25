@@ -3,6 +3,7 @@
  */
 
 #include "gpu/vulkan/vk_render_target.h"
+#include "gpu/vulkan/vk_rhi.h"
 #include "gpu/gpu_perf.h"
 #include "base/arch.h"
 
@@ -60,38 +61,55 @@ namespace gpu::vk {
 
 using render::DrawInfo;
 
-VkImageView SampledImageView(VkImage image,
-                             VkImageView identity,
-                             VkFormat format,
-                             VkImageAspectFlags aspect,
-                             u32 swizzle,
-                             std::unordered_map<u32, VkImageView>& views,
-                             VkImageViewType type = VK_IMAGE_VIEW_TYPE_2D) {
-  const VkComponentMapping components = TextureComponents(swizzle);
-  if (components.r == VK_COMPONENT_SWIZZLE_IDENTITY &&
-      components.g == VK_COMPONENT_SWIZZLE_IDENTITY &&
-      components.b == VK_COMPONENT_SWIZZLE_IDENTITY &&
-      components.a == VK_COMPONENT_SWIZZLE_IDENTITY)
+namespace {
+
+bool IdentitySwizzle(const rhi::Swizzle (&sw)[4]) {
+  for (rhi::Swizzle c : sw)
+    if (c != rhi::Swizzle::kIdentity)
+      return false;
+  return true;
+}
+
+// Transition `texture` from its legacy layout to `state`, keeping the layout
+// field in step. `layers` covers every layer the barrier must reach.
+void Transition(rhi::CommandList* list,
+                rhi::Texture* texture,
+                VkImageLayout& layout,
+                rhi::TextureState state,
+                u8 aspect = rhi::kAspectColor,
+                u32 layers = 1) {
+  rhi::TextureBarrier b;
+  b.texture = texture;
+  b.before = FromVkLayout(layout);
+  b.after = state;
+  b.range.aspect = aspect;
+  b.range.layers = layers;
+  list->Barrier(0, 0, &b, 1);
+  layout = ToVkLayout(state, aspect);
+}
+
+}  // namespace
+
+rhi::TextureView* SampledImageView(rhi::Texture* texture,
+                                   rhi::TextureView* identity,
+                                   VkFormat format,
+                                   u8 aspect,
+                                   u32 swizzle,
+                                   std::unordered_map<u32, rhi::TextureView*>& views,
+                                   rhi::ViewDim dim = rhi::ViewDim::k2D) {
+  rhi::TextureViewDesc desc;
+  TextureSwizzle(swizzle, desc.swizzle);
+  if (IdentitySwizzle(desc.swizzle))
     return identity;
   const auto it = views.find(swizzle);
   if (it != views.end())
     return it->second;
-  VkImageViewCreateInfo vi{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-  // A view inherits the image's usage unless told otherwise, and an SRGB view
-  // of a storage-capable image is then invalid, because SRGB cannot be a
-  // storage format (VUID-VkImageViewCreateInfo-usage-02275). These views are only ever
-  // sampled, so say so.
-  VkImageViewUsageCreateInfo vu{VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO};
-  vu.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
-  vi.pNext = &vu;
-  vi.image = image;
-  vi.viewType = type;
-  vi.format = format;
-  vi.components = components;
-  vi.subresourceRange = {aspect, 0, 1, 0, 1};
-  VkImageView view = VK_NULL_HANDLE;
-  if (vkCreateImageView(g_dev.device, &vi, nullptr, &view) != VK_SUCCESS)
-    return VK_NULL_HANDLE;
+  desc.dim = dim;
+  desc.format = FromVkFormat(format);
+  desc.aspect = aspect;
+  rhi::TextureView* view = Device().CreateView(texture, desc);
+  if (!view)
+    return nullptr;
   views.emplace(swizzle, view);
   return view;
 }
@@ -99,9 +117,9 @@ VkImageView SampledImageView(VkImage image,
 // Sampled view of a colour target in `want` rather than the target's own
 // format, when the two are the same size (so the reinterpretation is legal and
 // the bytes line up). Falls back to the target's format when they are not.
-VkImageView SampledViewAs(RTarget& rt, u32 swizzle, VkFormat want,
-                          VkFormat* used) {
-  const auto own = [&](VkImageView v) {
+rhi::TextureView* SampledViewAs(RTarget& rt, u32 swizzle, VkFormat want,
+                                VkFormat* used) {
+  const auto own = [&](rhi::TextureView* v) {
     if (used)
       *used = rt.fmt;
     return v;
@@ -110,8 +128,8 @@ VkImageView SampledViewAs(RTarget& rt, u32 swizzle, VkFormat want,
   // another format of the same COMPATIBILITY CLASS, and a block-compressed one
   // shares no class with the uncompressed format every render target has. A
   // T# naming BC1/BC5 over a target is a resolution accident, and asking for
-  // that view fails outright (VUID-VkImageViewCreateInfo-image-01761), leaving
-  // the binding on the white default instead of the target's own content.
+  // that view fails outright, leaving the binding on the white default
+  // instead of the target's own content.
   if (want == VK_FORMAT_UNDEFINED || want == rt.fmt ||
       FormatBytes(want) != FormatBytes(rt.fmt) || FormatBlockCompressed(want))
     return own(SampledView(rt, swizzle));
@@ -121,45 +139,39 @@ VkImageView SampledViewAs(RTarget& rt, u32 swizzle, VkFormat want,
   const auto it = rt.alias_views.find(key);
   if (it != rt.alias_views.end())
     return it->second;
-  VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-  VkImageViewUsageCreateInfo vu{VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO};
-  vu.usage = VK_IMAGE_USAGE_SAMPLED_BIT;  // see SampledImageView
-  vci.pNext = &vu;
-  vci.image = rt.image;
-  vci.viewType = rt.depth > 1 ? VK_IMAGE_VIEW_TYPE_3D : VK_IMAGE_VIEW_TYPE_2D;
-  vci.format = want;
-  vci.components = TextureComponents(swizzle);
-  vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-  VkImageView v = VK_NULL_HANDLE;
-  if (vkCreateImageView(g_dev.device, &vci, nullptr, &v) != VK_SUCCESS)
+  rhi::TextureViewDesc desc;
+  desc.dim = rt.depth > 1 ? rhi::ViewDim::k3D : rhi::ViewDim::k2D;
+  desc.format = FromVkFormat(want);
+  TextureSwizzle(swizzle, desc.swizzle);
+  rhi::TextureView* v = Device().CreateView(rt.texture, desc);
+  if (!v)
     return own(SampledView(rt, swizzle));
   rt.alias_views[key] = v;
   return v;
 }
 
-VkImageView SampledView(RTarget& rt, u32 swizzle, bool feedback) {
+rhi::TextureView* SampledView(RTarget& rt, u32 swizzle, bool feedback) {
   // A target that became live at this address after the draw took its snapshot
   // (an alias switch, see ActivateRtVariant) has no copy of its own yet.
   // Sampling the attachment instead would be the feedback loop the copy exists
   // to avoid, so leave the caller its default texture.
-  if (feedback && !rt.feedback_image)
-    return VK_NULL_HANDLE;
+  if (feedback && !rt.feedback_texture)
+    return nullptr;
   if (feedback)
-    return SampledImageView(rt.feedback_image, rt.feedback_view, rt.fmt,
-                            VK_IMAGE_ASPECT_COLOR_BIT, swizzle,
+    return SampledImageView(rt.feedback_texture, rt.feedback_view, rt.fmt,
+                            rhi::kAspectColor, swizzle,
                             rt.feedback_sampled_views);
   if (rt.depth > 1)
-    return SampledImageView(rt.image, rt.volume_view, rt.fmt,
-                            VK_IMAGE_ASPECT_COLOR_BIT, swizzle,
-                            rt.sampled_views, VK_IMAGE_VIEW_TYPE_3D);
-  return SampledImageView(rt.image, rt.view, rt.fmt, VK_IMAGE_ASPECT_COLOR_BIT,
+    return SampledImageView(rt.texture, rt.volume_view, rt.fmt,
+                            rhi::kAspectColor, swizzle, rt.sampled_views,
+                            rhi::ViewDim::k3D);
+  return SampledImageView(rt.texture, rt.view, rt.fmt, rhi::kAspectColor,
                           swizzle, rt.sampled_views);
 }
 
-VkImageView SampledView(DepthTarget& depth, u32 swizzle) {
-  return SampledImageView(depth.image, depth.view, kDepthFormat,
-                          VK_IMAGE_ASPECT_DEPTH_BIT, swizzle,
-                          depth.sampled_views);
+rhi::TextureView* SampledView(DepthTarget& depth, u32 swizzle) {
+  return SampledImageView(depth.texture, depth.view, kDepthFormat,
+                          rhi::kAspectDepth, swizzle, depth.sampled_views);
 }
 
 u64 RtByteSizeWH(u32 w, u32 h, VkFormat fmt) {
@@ -196,55 +208,19 @@ void RegisterRtPages(u64 base, u32 w, u32 h, VkFormat fmt) {
 // 65504 that then bloom into blown-white blobs. Guest memory a title renders
 // into holds defined values; an undefined image is our artefact, so define it.
 void ClearNewRt(RTarget& t) {
-  VkCommandBufferAllocateInfo ca{
-      VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
-  ca.commandPool = g_dev.pool;
-  ca.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-  ca.commandBufferCount = 1;
-  VkCommandBuffer c = VK_NULL_HANDLE;
-  if (vkAllocateCommandBuffers(g_dev.device, &ca, &c) != VK_SUCCESS)
+  rhi::CommandList* list = BeginImmediate();
+  if (!list)
     return;
-  VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-  bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-  if (vkBeginCommandBuffer(c, &bi) != VK_SUCCESS) {
-    vkFreeCommandBuffers(g_dev.device, g_dev.pool, 1, &c);
-    return;
+  VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
+  Transition(list, t.texture, layout, rhi::TextureState::kCopyDst);
+  list->ClearTexture(t.texture, rhi::TextureState::kCopyDst, {},
+                     rhi::ClearColor{});
+  Transition(list, t.texture, layout, rhi::TextureState::kShaderRead);
+  if (EndImmediate(list)) {
+    // Submitted and waited, so this layout is the real one on both timelines.
+    t.layout = layout;
+    t.submitted_layout = layout;
   }
-  VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-  b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-  b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-  b.image = t.image;
-  b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-  b.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-  b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-  vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                       VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr,
-                       1, &b);
-  const VkClearColorValue zero{{0.f, 0.f, 0.f, 0.f}};
-  const VkImageSubresourceRange sr{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-  vkCmdClearColorImage(c, t.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &zero,
-                       1, &sr);
-  VkImageMemoryBarrier b1 = b;
-  b1.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-  b1.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-  b1.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-  b1.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-  vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                       VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0,
-                       nullptr, 1, &b1);
-  if (vkEndCommandBuffer(c) == VK_SUCCESS) {
-    VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-    si.commandBufferCount = 1;
-    si.pCommandBuffers = &c;
-    if (vkResetFences(g_dev.device, 1, &g_dev.fence) == VK_SUCCESS &&
-        vkQueueSubmit(g_dev.queue, 1, &si, g_dev.fence) == VK_SUCCESS) {
-      vkWaitForFences(g_dev.device, 1, &g_dev.fence, VK_TRUE, UINT64_MAX);
-      // Submitted and waited, so this layout is the real one on both timelines.
-      t.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-      t.submitted_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    }
-  }
-  vkFreeCommandBuffers(g_dev.device, g_dev.pool, 1, &c);
 }
 
 bool CreateRtImage(RTarget& t,
@@ -268,80 +244,62 @@ bool CreateRtImage(RTarget& t,
   t.h = h;
   t.depth = depth;
   t.fmt = fmt;
-  VkImageCreateInfo ii{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
-  ii.imageType = depth > 1 ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D;
-  ii.format = fmt;
-  ii.extent = {w, h, depth};
-  ii.mipLevels = 1;
-  ii.arrayLayers = 1;
-  ii.samples = VK_SAMPLE_COUNT_1_BIT;
-  ii.tiling = VK_IMAGE_TILING_OPTIMAL;
-  ii.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
-             VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+  rhi::TextureDesc td;
+  td.dim = depth > 1 ? rhi::TextureDim::k3D : rhi::TextureDim::k2D;
+  td.format = FromVkFormat(fmt);
+  td.width = w;
+  td.height = h;
+  td.depth = depth;
+  td.usage = rhi::kTextureColorTarget | rhi::kTextureSampled |
+             rhi::kTextureCopySrc | rhi::kTextureCopyDst;
   // An SRGB format cannot be a storage image, and asking for it makes every
-  // view of this image invalid (VUID-VkImageViewCreateInfo-usage-02275). A
-  // compute shader that wants to write this surface reaches it through the
-  // linear alias anyway, which is what MUTABLE_FORMAT is here for.
+  // view of this image invalid. A compute shader that wants to write this
+  // surface reaches it through the linear alias anyway, which is what the
+  // mutable format is here for.
   if (fmt != VK_FORMAT_R8G8B8A8_SRGB && fmt != VK_FORMAT_B8G8R8A8_SRGB)
-    ii.usage |= VK_IMAGE_USAGE_STORAGE_BIT;
+    td.usage |= rhi::kTextureStorage;
   // The colour format a pass RENDERS with and the format a later shader SAMPLES
   // the same memory with are independent on PS4: a G-buffer plane written as
   // UINT is read back through a T# that may name a different numeric type, and
-  // Vulkan requires the view's numeric type to match the shader's sampled type.
-  // Mutable format lets SampledViewAs() hand out a view in the format the
-  // descriptor asked for instead of the one the attachment was created with.
-  ii.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+  // the view's numeric type has to match the shader's sampled type. A mutable
+  // format lets SampledViewAs() hand out a view in the format the descriptor
+  // asked for instead of the one the attachment was created with.
+  td.usage |= rhi::kTextureMutableFormat;
   // A layered pass renders the slices of a volume through a 2D-array view.
   if (depth > 1)
-    ii.flags |= VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT;
-  if (vkCreateImage(g_dev.device, &ii, nullptr, &t.image) != VK_SUCCESS)
+    td.usage |= rhi::kTextureArrayCompatible;
+  t.texture = Device().CreateTexture(td);
+  if (!t.texture)
     return false;
-  if (!g_image_memory.Allocate(g_dev, t.image, t.allocation)) {
-    vkDestroyImage(g_dev.device, t.image, nullptr);
-    t.image = VK_NULL_HANDLE;
-    return false;  // GPU OOM -> don't bind/view a memory-less image (driver
-                   // crash)
-  }
-  VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-  vci.image = t.image;
-  vci.viewType =
-      depth > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
-  vci.format = fmt;
-  vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, depth};
-  if (vkCreateImageView(g_dev.device, &vci, nullptr, &t.view) != VK_SUCCESS) {
-    vkDestroyImage(g_dev.device, t.image, nullptr);
-    g_image_memory.Free(g_dev, t.allocation);
+  t.image = Native(t.texture);
+  rhi::TextureViewDesc vd;
+  vd.dim = depth > 1 ? rhi::ViewDim::k2DArray : rhi::ViewDim::k2D;
+  vd.layers = depth;
+  t.view = Device().CreateView(t.texture, vd);
+  if (!t.view) {
+    Device().Destroy(t.texture);
+    t.texture = nullptr;
     t.image = VK_NULL_HANDLE;
     return false;
   }
   if (depth > 1) {
-    vci.viewType = VK_IMAGE_VIEW_TYPE_3D;
-    vci.subresourceRange.layerCount = 1;
-    if (vkCreateImageView(g_dev.device, &vci, nullptr, &t.volume_view) !=
-        VK_SUCCESS)
-      t.volume_view = VK_NULL_HANDLE;
+    vd.dim = rhi::ViewDim::k3D;
+    vd.layers = 1;
+    t.volume_view = Device().CreateView(t.texture, vd);
   }
-  // descriptor set so this RT can be sampled (render-to-texture); a 2D-array
-  // view of a volume is an attachment only.
-  if (g_tex.ds_pool && depth == 1) {
-    VkDescriptorPool owner;
-    t.set = AllocateSamplerSet(g_tex.ds_layout, false, owner);
-    if (t.set) {
-      VkDescriptorImageInfo dii{g_tex.sampler, t.view,
-                                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-      VkWriteDescriptorSet wr{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-      wr.dstSet = t.set;
-      wr.descriptorCount = 1;
-      wr.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-      wr.pImageInfo = &dii;
-      vkUpdateDescriptorSets(g_dev.device, 1, &wr, 0, nullptr);
-    }
-  }
+  // A group so this RT can be sampled (render-to-texture); a 2D-array view of
+  // a volume is an attachment only.
+  if (g_tex.descriptors_ready && depth == 1)
+    t.set = SampledTextureGroup(t.view, g_tex.sampler);
   ClearNewRt(t);
   BASE_LOGI("gpuvk", "new RT {:#x} {}x{}x{} fmt={}", (unsigned long)base, w,
             h, depth, (int)fmt);
-  NameObject(VK_OBJECT_TYPE_IMAGE, (u64)t.image, "rt %#lx %ux%u fmt=%d",
-             (unsigned long)base, w, h, (int)fmt);
+  if (Device().caps().debug_labels) {
+    char name[64];
+    std::snprintf(name, sizeof(name), "rt %#lx %ux%u fmt=%d",
+                  (unsigned long)base, w, h, (int)fmt);
+    Device().SetName(t.texture, name);
+  }
   return true;
 }
 
@@ -514,83 +472,40 @@ RTarget* GetRT(u64 base, u32 w, u32 h, VkFormat fmt, u32 depth) {
   return &g_rts[base];
 }
 
-VkDescriptorSet SnapshotRT(RTarget& rt) {
-  if (!rt.feedback_image) {
-    VkImageCreateInfo ii{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
-    ii.imageType = VK_IMAGE_TYPE_2D;
-    ii.format = rt.fmt;
-    ii.extent = {rt.w, rt.h, 1};
-    ii.mipLevels = 1;
-    ii.arrayLayers = 1;
-    ii.samples = VK_SAMPLE_COUNT_1_BIT;
-    ii.tiling = VK_IMAGE_TILING_OPTIMAL;
-    ii.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-    if (vkCreateImage(g_dev.device, &ii, nullptr, &rt.feedback_image) !=
-        VK_SUCCESS)
-      return VK_NULL_HANDLE;
-    if (!g_image_memory.Allocate(g_dev, rt.feedback_image,
-                                 rt.feedback_allocation)) {
-      vkDestroyImage(g_dev.device, rt.feedback_image, nullptr);
-      rt.feedback_image = VK_NULL_HANDLE;
-      return VK_NULL_HANDLE;
-    }
-    VkImageViewCreateInfo vi{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-    vi.image = rt.feedback_image;
-    vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    vi.format = rt.fmt;
-    vi.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-    NameObject(VK_OBJECT_TYPE_IMAGE, (u64)rt.feedback_image,
-               "rt feedback %ux%u", rt.w, rt.h);
-    if (vkCreateImageView(g_dev.device, &vi, nullptr, &rt.feedback_view) !=
-        VK_SUCCESS) {
-      vkDestroyImage(g_dev.device, rt.feedback_image, nullptr);
-      g_image_memory.Free(g_dev, rt.feedback_allocation);
-      rt.feedback_image = VK_NULL_HANDLE;
-      return VK_NULL_HANDLE;
-    }
-    VkDescriptorPool owner;
-    rt.feedback_set = AllocateSamplerSet(g_tex.ds_layout, false, owner);
+rhi::BindGroup* SnapshotRT(RTarget& rt) {
+  if (!rt.feedback_texture) {
+    rhi::TextureDesc td;
+    td.format = FromVkFormat(rt.fmt);
+    td.width = rt.w;
+    td.height = rt.h;
+    td.usage = rhi::kTextureSampled | rhi::kTextureCopyDst;
+    td.name = "rt feedback";
+    rt.feedback_texture = Device().CreateTexture(td);
+    if (!rt.feedback_texture)
+      return nullptr;
+    rt.feedback_view = Device().CreateView(rt.feedback_texture, {});
+    rt.feedback_set = rt.feedback_view
+                          ? SampledTextureGroup(rt.feedback_view, g_tex.sampler)
+                          : nullptr;
     if (!rt.feedback_set) {
-      vkDestroyImageView(g_dev.device, rt.feedback_view, nullptr);
-      vkDestroyImage(g_dev.device, rt.feedback_image, nullptr);
-      g_image_memory.Free(g_dev, rt.feedback_allocation);
-      rt.feedback_view = VK_NULL_HANDLE;
-      rt.feedback_image = VK_NULL_HANDLE;
-      return VK_NULL_HANDLE;
+      Device().Destroy(rt.feedback_view);
+      Device().Destroy(rt.feedback_texture);
+      rt.feedback_view = nullptr;
+      rt.feedback_texture = nullptr;
+      return nullptr;
     }
-    VkDescriptorImageInfo dii{g_tex.sampler, rt.feedback_view,
-                              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-    VkWriteDescriptorSet wr{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-    wr.dstSet = rt.feedback_set;
-    wr.descriptorCount = 1;
-    wr.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    wr.pImageInfo = &dii;
-    vkUpdateDescriptorSets(g_dev.device, 1, &wr, 0, nullptr);
+    rt.feedback_image = Native(rt.feedback_texture);
   }
-
-  ImageBarrier(g_frame.cmd, rt.image, rt.layout,
-               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-               ColorImageAccess(rt.layout), VK_ACCESS_TRANSFER_READ_BIT);
-  rt.layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-  VkAccessFlags feedback_access =
-      rt.feedback_layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
-          ? VK_ACCESS_SHADER_READ_BIT
-          : 0;
-  ImageBarrier(g_frame.cmd, rt.feedback_image, rt.feedback_layout,
-               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, feedback_access,
-               VK_ACCESS_TRANSFER_WRITE_BIT);
-  rt.feedback_layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-  VkImageCopy copy{};
-  copy.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-  copy.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-  copy.extent = {rt.w, rt.h, 1};
-  vkCmdCopyImage(g_frame.cmd, rt.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                 rt.feedback_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
-                 &copy);
-  ImageBarrier(g_frame.cmd, rt.feedback_image, rt.feedback_layout,
-               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-               VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
-  rt.feedback_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+  rhi::CommandList* list = g_frame.list;
+  Transition(list, rt.texture, rt.layout, rhi::TextureState::kCopySrc);
+  Transition(list, rt.feedback_texture, rt.feedback_layout,
+             rhi::TextureState::kCopyDst);
+  rhi::TextureRegion region;
+  region.width = rt.w;
+  region.height = rt.h;
+  list->CopyTexture(rt.feedback_texture, region, rt.texture, region);
+  Transition(list, rt.feedback_texture, rt.feedback_layout,
+             rhi::TextureState::kShaderRead);
   return rt.feedback_set;
 }
 
@@ -620,62 +535,41 @@ bool CreateDepthImage(DepthTarget& t,
   t.h = h;
   t.layers = layers;
   t.stencil_base = stencil_base;
-  VkImageCreateInfo ii{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
-  ii.imageType = VK_IMAGE_TYPE_2D;
-  ii.format = kDepthFormat;
-  ii.extent = {w, h, 1};
-  ii.mipLevels = 1;
-  ii.arrayLayers = layers;
-  ii.samples = VK_SAMPLE_COUNT_1_BIT;
-  ii.tiling = VK_IMAGE_TILING_OPTIMAL;
-  // TRANSFER src/dst: the compute path bridges CS reads/writes of a live
-  // depth target through image<->buffer copies (see vk_compute.cc).
-  ii.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
-             VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
-             VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-  if (vkCreateImage(g_dev.device, &ii, nullptr, &t.image) != VK_SUCCESS)
+  rhi::TextureDesc td;
+  td.format = FromVkFormat(kDepthFormat);
+  td.width = w;
+  td.height = h;
+  td.layers = layers;
+  // Copy src/dst: the compute path bridges CS reads/writes of a live depth
+  // target through image<->buffer copies (see vk_compute.cc).
+  td.usage = rhi::kTextureDepthTarget | rhi::kTextureSampled |
+             rhi::kTextureCopySrc | rhi::kTextureCopyDst;
+  t.texture = Device().CreateTexture(td);
+  if (!t.texture)
     return false;
-  if (!g_image_memory.Allocate(g_dev, t.image, t.allocation)) {
-    vkDestroyImage(g_dev.device, t.image, nullptr);
-    return false;
-  }
-  VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-  vci.image = t.image;
-  vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
-  vci.format = kDepthFormat;
-  vci.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
-  if (vkCreateImageView(g_dev.device, &vci, nullptr, &t.view) != VK_SUCCESS) {
-    vkDestroyImage(g_dev.device, t.image, nullptr);
-    g_image_memory.Free(g_dev, t.allocation);
+  t.image = Native(t.texture);
+  rhi::TextureViewDesc vd;
+  vd.aspect = rhi::kAspectDepth;
+  t.view = Device().CreateView(t.texture, vd);
+  vd.aspect = rhi::kAspectDepth | rhi::kAspectStencil;
+  t.attachment_view = t.view ? Device().CreateView(t.texture, vd) : nullptr;
+  if (!t.attachment_view) {
+    Device().Destroy(t.view);
+    Device().Destroy(t.texture);
+    t = {};
     return false;
   }
-  vci.subresourceRange.aspectMask =
-      VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
-  if (vkCreateImageView(g_dev.device, &vci, nullptr, &t.attachment_view) !=
-      VK_SUCCESS) {
-    vkDestroyImageView(g_dev.device, t.view, nullptr);
-    vkDestroyImage(g_dev.device, t.image, nullptr);
-    g_image_memory.Free(g_dev, t.allocation);
-    return false;
-  }
-  if (g_tex.ds_pool) {
-    VkDescriptorPool owner;
-    t.set = AllocateSamplerSet(g_tex.ds_layout, false, owner);
-    if (t.set) {
-      VkDescriptorImageInfo dii{g_tex.sampler, t.view,
-                                VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL};
-      VkWriteDescriptorSet wr{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-      wr.dstSet = t.set;
-      wr.descriptorCount = 1;
-      wr.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-      wr.pImageInfo = &dii;
-      vkUpdateDescriptorSets(g_dev.device, 1, &wr, 0, nullptr);
-    }
-  }
+  if (g_tex.descriptors_ready)
+    t.set = SampledTextureGroup(t.view, g_tex.sampler,
+                                rhi::TextureState::kDepthRead);
   BASE_LOGI("gpuvk", "new depth {:#x} {}x{}x{}", (unsigned long)base, w, h,
             layers);
-  NameObject(VK_OBJECT_TYPE_IMAGE, (u64)t.image, "depth %#lx %ux%u",
-             (unsigned long)base, w, h);
+  if (Device().caps().debug_labels) {
+    char name[64];
+    std::snprintf(name, sizeof(name), "depth %#lx %ux%u", (unsigned long)base,
+                  w, h);
+    Device().SetName(t.texture, name);
+  }
   return true;
 }
 
@@ -770,40 +664,32 @@ void ReleaseRetiredDepths() {
   // Two BeginFrames of rest, like ReleaseRetiredTextures.
   static std::vector<DepthTarget> aged;
   for (DepthTarget& t : aged) {
-    for (VkImageView v : {t.view, t.stencil_view, t.attachment_view})
-      if (v)
-        vkDestroyImageView(g_dev.device, v, nullptr);
-    for (VkImageView v : t.layer_views)
-      if (v)
-        vkDestroyImageView(g_dev.device, v, nullptr);
+    Device().Destroy(t.set);
+    for (rhi::TextureView* v : {t.view, t.stencil_view, t.attachment_view})
+      Device().Destroy(v);
+    for (rhi::TextureView* v : t.layer_views)
+      Device().Destroy(v);
     for (auto& [swizzle, v] : t.sampled_views)
-      if (v)
-        vkDestroyImageView(g_dev.device, v, nullptr);
-    if (t.image)
-      vkDestroyImage(g_dev.device, t.image, nullptr);
-    g_image_memory.Free(g_dev, t.allocation);
+      Device().Destroy(v);
+    Device().Destroy(t.texture);
   }
   aged = std::move(g_retired_depths);
   g_retired_depths.clear();
 }
 
 // The attachment view of one array layer; layer 0 is the target's own.
-VkImageView DepthLayerView(DepthTarget& t, u32 layer) {
+rhi::TextureView* DepthLayerView(DepthTarget& t, u32 layer) {
   if (!layer || layer >= t.layers)
     return t.attachment_view;
   if (t.layer_views.size() < t.layers)
-    t.layer_views.resize(t.layers, VK_NULL_HANDLE);
-  VkImageView& view = t.layer_views[layer];
-  if (view)
-    return view;
-  VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-  vci.image = t.image;
-  vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
-  vci.format = kDepthFormat;
-  vci.subresourceRange = {
-      VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT, 0, 1, layer, 1};
-  if (vkCreateImageView(g_dev.device, &vci, nullptr, &view) != VK_SUCCESS)
-    view = VK_NULL_HANDLE;
+    t.layer_views.resize(t.layers, nullptr);
+  rhi::TextureView*& view = t.layer_views[layer];
+  if (!view) {
+    rhi::TextureViewDesc vd;
+    vd.aspect = rhi::kAspectDepth | rhi::kAspectStencil;
+    vd.base_layer = layer;
+    view = Device().CreateView(t.texture, vd);
+  }
   return view ? view : t.attachment_view;
 }
 
@@ -974,17 +860,12 @@ u64 ResolveSampledStencil(u64 addr) {
   return 0;
 }
 
-VkImageView StencilSampledView(DepthTarget& depth) {
-  if (depth.stencil_view)
-    return depth.stencil_view;
-  VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-  vci.image = depth.image;
-  vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
-  vci.format = kDepthFormat;
-  vci.subresourceRange = {VK_IMAGE_ASPECT_STENCIL_BIT, 0, 1, 0, 1};
-  if (vkCreateImageView(g_dev.device, &vci, nullptr, &depth.stencil_view) !=
-      VK_SUCCESS)
-    depth.stencil_view = VK_NULL_HANDLE;
+rhi::TextureView* StencilSampledView(DepthTarget& depth) {
+  if (!depth.stencil_view) {
+    rhi::TextureViewDesc vd;
+    vd.aspect = rhi::kAspectStencil;
+    depth.stencil_view = Device().CreateView(depth.texture, vd);
+  }
   return depth.stencil_view;
 }
 
@@ -1184,19 +1065,19 @@ bool ActivateWrittenRtVariant(u64 base, u32 w, u32 h) {
 bool DccClearColor(u32 code,
                    u32 info,
                    const u32* clear_word,
-                   VkClearColorValue& out) {
+                   rhi::ClearColor& out) {
   switch (code) {
     case 0x00000000:
-      out = VkClearColorValue{{0.f, 0.f, 0.f, 0.f}};
+      out = rhi::ClearColor{{0.f, 0.f, 0.f, 0.f}};
       return true;
     case 0x40404040:
-      out = VkClearColorValue{{0.f, 0.f, 0.f, 1.f}};
+      out = rhi::ClearColor{{0.f, 0.f, 0.f, 1.f}};
       return true;
     case 0x80808080:
-      out = VkClearColorValue{{1.f, 1.f, 1.f, 0.f}};
+      out = rhi::ClearColor{{1.f, 1.f, 1.f, 0.f}};
       return true;
     case 0xC0C0C0C0:
-      out = VkClearColorValue{{1.f, 1.f, 1.f, 1.f}};
+      out = rhi::ClearColor{{1.f, 1.f, 1.f, 1.f}};
       return true;
     case 0x20202020:
       if (!clear_word)
@@ -1239,7 +1120,7 @@ void ResolveDccClear(RTarget& rt, u64 base, u32 info, const u32* clear_word) {
       return;
     std::memcpy(&code, reinterpret_cast<const void*>(rt.dcc_base), 4);
   }
-  VkClearColorValue value;
+  rhi::ClearColor value{};
   bool clear;
   if (rt.dcc_is_cmask) {
     // A CMASK nibble of 0 is a fast-cleared tile; 0xF is an expanded one.
@@ -1270,7 +1151,7 @@ void ResolveDccClear(RTarget& rt, u64 base, u32 info, const u32* clear_word) {
 void EndRegion() {
   if (!g_region.open)
     return;
-  g_cmd_end_rendering(g_frame.cmd);
+  g_frame.list->EndRenderPass();
   CmdEndLabel(g_frame.cmd);
   if (trace::Recording())
     trace::RegionEnd();
@@ -1297,92 +1178,36 @@ bool WriteRtToGuest(u64 base, u32 tile_mode) {
                                  false, elem) ||
       !gpu::IsReadableRange(base, layout.size))
     return false;
-  static VkBuffer buf = VK_NULL_HANDLE;
-  static VkDeviceMemory mem = VK_NULL_HANDLE;
-  static void* map = nullptr;
-  static VkDeviceSize cap = 0;
+  static rhi::Buffer* buf = nullptr;
   const VkDeviceSize bytes = static_cast<VkDeviceSize>(rt.w) * rt.h * elem;
-  if (cap < bytes) {
-    // The previous user waited for its copy, so nothing still reads these.
-    if (buf)
-      vkDestroyBuffer(g_dev.device, buf, nullptr);
-    if (mem)
-      vkFreeMemory(g_dev.device, mem, nullptr);
-    buf = VK_NULL_HANDLE;
-    mem = VK_NULL_HANDLE;
-    cap = 0;
-    VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-    bi.size = bytes;
-    bi.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-    if (vkCreateBuffer(g_dev.device, &bi, nullptr, &buf) != VK_SUCCESS)
+  if (!buf || buf->desc().size < bytes) {
+    Device().WaitIdle();
+    Device().Destroy(buf);
+    rhi::BufferDesc desc;
+    desc.size = bytes;
+    desc.usage = rhi::kBufferCopyDst;
+    desc.memory = rhi::MemoryKind::kReadback;
+    desc.name = "rt write-through";
+    buf = Device().CreateBuffer(desc);
+    if (!buf)
       return false;
-    VkMemoryRequirements mr;
-    vkGetBufferMemoryRequirements(g_dev.device, buf, &mr);
-    VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-    ai.allocationSize = mr.size;
-    ai.memoryTypeIndex = FindMemoryTypePref(
-        mr.memoryTypeBits,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-            VK_MEMORY_PROPERTY_HOST_CACHED_BIT |
-            VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-            VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-    if (vkAllocateMemory(g_dev.device, &ai, nullptr, &mem) != VK_SUCCESS) {
-      vkDestroyBuffer(g_dev.device, buf, nullptr);
-      buf = VK_NULL_HANDLE;
-      return false;
-    }
-    vkBindBufferMemory(g_dev.device, buf, mem, 0);
-    vkMapMemory(g_dev.device, mem, 0, bytes, 0, &map);
-    cap = bytes;
   }
-  // A dispatch's pending write to these pages (the surface's clear) must land
-  // first, or its later writeback covers the slice again.
+  void* map = buf->mapped();
   render::FlushCsWritesRange(render::DefaultRenderer(), base, layout.size,
                           "rt-write-through");
-  if (!SubmitFrameChunk())
+  rhi::CommandList* list = BeginImmediate();
+  if (!list)
     return false;
-  VkCommandBufferAllocateInfo ca{
-      VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
-  ca.commandPool = g_dev.pool;
-  ca.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-  ca.commandBufferCount = 1;
-  VkCommandBuffer c = VK_NULL_HANDLE;
-  if (vkAllocateCommandBuffers(g_dev.device, &ca, &c) != VK_SUCCESS)
-    return false;
-  VkCommandBufferBeginInfo cbi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-  cbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-  vkBeginCommandBuffer(c, &cbi);
-  ImageBarrier(c, rt.image, rt.layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-               ColorImageAccess(rt.layout), VK_ACCESS_TRANSFER_READ_BIT);
-  VkBufferImageCopy copy{};
-  copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-  copy.imageExtent = {rt.w, rt.h, 1};
-  vkCmdCopyImageToBuffer(c, rt.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buf,
-                         1, &copy);
-  ImageBarrier(c, rt.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, rt.layout,
-               VK_ACCESS_TRANSFER_READ_BIT, ColorImageAccess(rt.layout));
-  VkBufferMemoryBarrier bb{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
-  bb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-  bb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
-  bb.srcQueueFamilyIndex = bb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-  bb.buffer = buf;
-  bb.size = VK_WHOLE_SIZE;
-  vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                       VK_PIPELINE_STAGE_HOST_BIT, 0, 0, nullptr, 1, &bb, 0,
-                       nullptr);
-  VkResult r = vkEndCommandBuffer(c);
-  VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-  si.commandBufferCount = 1;
-  si.pCommandBuffers = &c;
-  if (r == VK_SUCCESS)
-    r = vkResetFences(g_dev.device, 1, &g_dev.fence);
-  if (r == VK_SUCCESS)
-    r = vkQueueSubmit(g_dev.queue, 1, &si, g_dev.fence);
-  if (r == VK_SUCCESS)
-    r = vkWaitForFences(g_dev.device, 1, &g_dev.fence, VK_TRUE, UINT64_MAX);
-  vkFreeCommandBuffers(g_dev.device, g_dev.pool, 1, &c);
-  if (r != VK_SUCCESS ||
+  const VkImageLayout old_layout = rt.layout;
+  Transition(list, rt.texture, rt.layout, rhi::TextureState::kCopySrc);
+  rhi::BufferTextureCopy copy;
+  copy.region.width = rt.w;
+  copy.region.height = rt.h;
+  list->CopyTextureToBuffer(buf, rt.texture, &copy, 1);
+  Transition(list, rt.texture, rt.layout, FromVkLayout(old_layout));
+  list->Barrier(rhi::kAccessCopyWrite, rhi::kAccessHostRead);
+  const bool ok = EndImmediate(list);
+  if (!ok ||
       !gcn::RetileTextureMip32(map, reinterpret_cast<void*>(base), layout, 0,
                                0))
     return false;
@@ -1408,15 +1233,10 @@ void SetGuestViewport(const DrawInfo& d) {
   // plain window_z transform. The registers are read into DrawInfo, and the
   // next person to try this needs to explain that first.
   const float min_depth = 0.0f, max_depth = 1.0f;
-  VkViewport vp{
-      d.viewport_x_offset - d.viewport_x_scale,
-      d.viewport_y_offset - d.viewport_y_scale,
-      d.viewport_x_scale * 2.0f,
-      d.viewport_y_scale * 2.0f,
-      min_depth,
-      max_depth,
-  };
-  vkCmdSetViewport(g_frame.cmd, 0, 1, &vp);
+  g_frame.list->SetViewport(d.viewport_x_offset - d.viewport_x_scale,
+                            d.viewport_y_offset - d.viewport_y_scale,
+                            d.viewport_x_scale * 2.0f,
+                            d.viewport_y_scale * 2.0f, min_depth, max_depth);
 }
 
 // Begin a dynamic-rendering region binding mrt_count color targets (mrt_base[0]
@@ -1457,7 +1277,8 @@ bool BeginRegion(const u64* mrt_base,
     if (!QueueCheck(where))
       return false;
   }
-  VkRenderingAttachmentInfo colors[8]{};
+  rhi::RenderPassDesc pass;
+  rhi::ColorAttachment* colors = pass.colors;
   RTarget* targets[8]{};
   mrt_count = std::min(mrt_count, 8u);
   for (u32 i = 0; i < 8; i++) {
@@ -1514,17 +1335,11 @@ bool BeginRegion(const u64* mrt_base,
   g_region.cur_mrt_count = 0;
   for (u32 i = 0; i < mrt_count; i++) {
     RTarget& rt = *targets[i];
-    ImageBarrier(g_frame.cmd, rt.image, rt.layout,
-                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                 ColorImageAccess(rt.layout),
-                 VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
-                     VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
-    rt.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    Transition(g_frame.list, rt.texture, rt.layout,
+               rhi::TextureState::kColorTarget);
     rt.dirty_for_read = true;
     auto& color = colors[i];
-    color.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-    color.imageView = rt.view;
-    color.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    color.view = rt.view;
     // Lazy clear (DELTA_GPU_LAZYCLEAR, default on): persist RT content across
     // frames (LOAD), clearing only when the game explicitly requested a clear
     // (clear_pending) or the RT was never rendered. Per-frame auto-clear wiped
@@ -1539,7 +1354,7 @@ bool BeginRegion(const u64* mrt_base,
       if (cleared_frame != g_frame.num) {
         cleared_frame = g_frame.num;
         rt.clear_pending = true;
-        rt.clear_value = VkClearColorValue{{0.f, 0.f, 0.f, 0.f}};
+        rt.clear_value = rhi::ClearColor{};
         rt.clear_src = "frameclear-probe";
       }
     }
@@ -1554,31 +1369,30 @@ bool BeginRegion(const u64* mrt_base,
                     "f{} draw#{} RT {:#x} {}x{} loadOp=CLEAR value=({} {} {} "
                     "{}) pending={}({}) ever={}",
                     g_frame.num, g_frame.draws, (unsigned long)mrt_base[i],
-                    rt.w, rt.h, rt.clear_value.float32[0],
-                    rt.clear_value.float32[1], rt.clear_value.float32[2],
-                    rt.clear_value.float32[3], (int)rt.clear_pending,
+                    rt.w, rt.h, rt.clear_value.f[0],
+                    rt.clear_value.f[1], rt.clear_value.f[2],
+                    rt.clear_value.f[3], (int)rt.clear_pending,
                     rt.clear_src, (int)rt.ever_rendered);
       }
-      color.loadOp = (rt.clear_pending || !rt.ever_rendered)
-                         ? VK_ATTACHMENT_LOAD_OP_CLEAR
-                         : VK_ATTACHMENT_LOAD_OP_LOAD;
+      color.load = (rt.clear_pending || !rt.ever_rendered)
+                       ? rhi::LoadOp::kClear
+                       : rhi::LoadOp::kLoad;
     } else
-      color.loadOp = rt.used_this_frame ? VK_ATTACHMENT_LOAD_OP_LOAD
-                                        : VK_ATTACHMENT_LOAD_OP_CLEAR;
+      color.load =
+          rt.used_this_frame ? rhi::LoadOp::kLoad : rhi::LoadOp::kClear;
     rt.clear_pending = false;
     rt.ever_rendered = true;
-    color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    color.clearValue.color = rt.clear_value;
+    color.clear = rt.clear_value;
     // DELTA_GPU_CLEARCOLOR / DELTA_GPU_CLEARRED: diagnostic knobs that force
     // every bound RT to clear to a solid colour this frame, to verify which RTs
     // are bound.
     if (kForceClear) {
-      color.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-      color.clearValue.color = {{0.f, 1.f, 0.f, 1.f}};
+      color.load = rhi::LoadOp::kClear;
+      color.clear = rhi::ClearColor{{0.f, 1.f, 0.f, 1.f}};
     }
     if (kClearRed) {
-      color.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-      color.clearValue.color = {{1.0f, 0.0f, 0.0f, 1.0f}};
+      color.load = rhi::LoadOp::kClear;
+      color.clear = rhi::ClearColor{{1.0f, 0.0f, 0.0f, 1.0f}};
     }
     rt.used_this_frame = true;
     rt.last_frame = g_frame.num;
@@ -1591,10 +1405,7 @@ bool BeginRegion(const u64* mrt_base,
   // Depth attachment (3D). Cleared to the guest DB_DEPTH_CLEAR value on its
   // first use this frame, then loaded so multiple regions in a frame share one
   // Z buffer.
-  VkRenderingAttachmentInfo depth_att{
-      VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
-  VkRenderingAttachmentInfo stencil_att{
-      VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+  rhi::DepthAttachment& depth_att = pass.depth;
   if (dt && depth_w && depth_h) {
     // The IMAGE has to cover the render area, but the guest FOOTPRINT is the
     // Z surface's own padded geometry. Keeping them apart is what stops a
@@ -1629,44 +1440,30 @@ bool BeginRegion(const u64* mrt_base,
     // pass clears the shared depth image, or next frame's compute sees zero.
     if (clear_depth && dt->used_this_frame)
       PreserveCsDepthBeforeClear(depth_base);
-    const VkAccessFlags depth_source =
-        dt->layout == VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL
-            ? VK_ACCESS_SHADER_READ_BIT
-        : dt->layout == VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL
-            ? VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
-                  VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT
-            : 0;
     // A pass that samples the depth it tests against keeps the image in the
     // read-only layout, which is what makes attachment and sampled view legal
     // at the same time. A clear still needs write access, so never both.
     const bool read_only = depth_read_only && !clear_depth;
-    const VkImageLayout depth_layout =
-        read_only ? VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL
-                  : VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
-    DepthBarrier(g_frame.cmd, dt->image, dt->layout, depth_layout, depth_source,
-                 read_only ? VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
-                                 VK_ACCESS_SHADER_READ_BIT
-                           : VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT |
-                                 VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT);
-    dt->layout = depth_layout;
-    depth_att.imageView = DepthLayerView(*dt, depth_slice);
-    depth_att.imageLayout = depth_layout;
-    depth_att.loadOp =
-        clear_depth ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
-    depth_att.storeOp = read_only ? VK_ATTACHMENT_STORE_OP_NONE
-                                  : VK_ATTACHMENT_STORE_OP_STORE;
-    depth_att.clearValue.depthStencil = {
-        dt->clear_pending || layer_clear ? dt->clear_value : depth_clear, 0};
+    Transition(g_frame.list, dt->texture, dt->layout,
+               read_only ? rhi::TextureState::kDepthRead
+                         : rhi::TextureState::kDepthTarget,
+               rhi::kAspectDepth, dt->layers);
+    depth_att.view = DepthLayerView(*dt, depth_slice);
+    depth_att.depth = true;
+    depth_att.read_only = read_only;
+    depth_att.depth_load =
+        clear_depth ? rhi::LoadOp::kClear : rhi::LoadOp::kLoad;
+    depth_att.clear_depth =
+        dt->clear_pending || layer_clear ? dt->clear_value : depth_clear;
     if (kRegTrace) {
       static int n = 0;
       if (n++ < 200)
         BASE_LOGI("region",
                   "depth {:#x} {}x{} load={} store={} clear={} read_only={} "
-                  "layout={} rt={:#x}",
+                  "rt={:#x}",
                   (unsigned long)depth_base, dt->w, dt->h,
                   clear_depth ? "CLEAR" : "LOAD", read_only ? "NONE" : "STORE",
-                  depth_att.clearValue.depthStencil.depth, (int)read_only,
-                  (int)depth_layout, (unsigned long)base);
+                  depth_att.clear_depth, (int)read_only, (unsigned long)base);
     }
     dt->clear_pending = false;
     dt->clear_layers &= ~(1u << depth_slice);
@@ -1678,26 +1475,13 @@ bool BeginRegion(const u64* mrt_base,
     g_region.cur_depth_slice = depth_slice;
     if (stencil_base) {
       const bool clear_stencil = !dt->stencil_used_this_frame;
-      const VkAccessFlags stencil_source =
-          dt->stencil_layout == VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL
-              ? VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
-                    VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT
-          : dt->stencil_layout == VK_IMAGE_LAYOUT_STENCIL_READ_ONLY_OPTIMAL
-              ? VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
-                    VK_ACCESS_SHADER_READ_BIT
-              : 0;
-      StencilBarrier(g_frame.cmd, dt->image, dt->stencil_layout,
-                     VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL,
-                     stencil_source,
-                     VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
-                         VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
-      dt->stencil_layout = VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL;
-      stencil_att.imageView = DepthLayerView(*dt, depth_slice);
-      stencil_att.imageLayout = VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL;
-      stencil_att.loadOp = clear_stencil ? VK_ATTACHMENT_LOAD_OP_CLEAR
-                                         : VK_ATTACHMENT_LOAD_OP_LOAD;
-      stencil_att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-      stencil_att.clearValue.depthStencil = {depth_clear, stencil_clear};
+      Transition(g_frame.list, dt->texture, dt->stencil_layout,
+                 rhi::TextureState::kDepthTarget, rhi::kAspectStencil,
+                 dt->layers);
+      depth_att.stencil = true;
+      depth_att.stencil_load =
+          clear_stencil ? rhi::LoadOp::kClear : rhi::LoadOp::kLoad;
+      depth_att.clear_stencil = stencil_clear;
       dt->stencil_used_this_frame = true;
       g_region.cur_stencil = stencil_base;
     }
@@ -1707,56 +1491,46 @@ bool BeginRegion(const u64* mrt_base,
   // capture pass, which left the rest of the frame holding last frame's depth.
   for (u32 i = 0; i < g_region.cur_mrt_count; i++) {
     RTarget& rt = *targets[i];
-    if (colors[i].loadOp != VK_ATTACHMENT_LOAD_OP_CLEAR ||
-        (rt.w <= w && rt.h <= h))
+    if (colors[i].load != rhi::LoadOp::kClear || (rt.w <= w && rt.h <= h))
       continue;
-    const VkAccessFlags att = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
-                              VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-    const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0,
-                                        VK_REMAINING_MIP_LEVELS, 0,
-                                        VK_REMAINING_ARRAY_LAYERS};
-    ImageBarrier(g_frame.cmd, rt.image, rt.layout,
-                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, att,
-                 VK_ACCESS_TRANSFER_WRITE_BIT);
-    vkCmdClearColorImage(g_frame.cmd, rt.image,
-                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                         &colors[i].clearValue.color, 1, &range);
-    ImageBarrier(g_frame.cmd, rt.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                 rt.layout, VK_ACCESS_TRANSFER_WRITE_BIT, att);
-    colors[i].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    const VkImageLayout att = rt.layout;
+    Transition(g_frame.list, rt.texture, rt.layout,
+               rhi::TextureState::kCopyDst);
+    g_frame.list->ClearTexture(rt.texture, rhi::TextureState::kCopyDst, {},
+                               colors[i].clear);
+    Transition(g_frame.list, rt.texture, rt.layout, FromVkLayout(att));
+    colors[i].load = rhi::LoadOp::kLoad;
   }
   if (dt && (dt->w > w || dt->h > h)) {
-    const VkAccessFlags att = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
-                              VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-    const auto clear_aspect = [&](VkRenderingAttachmentInfo& a,
-                                  VkImageAspectFlags aspect, auto barrier) {
-      if (a.loadOp != VK_ATTACHMENT_LOAD_OP_CLEAR)
+    const auto clear_aspect = [&](rhi::LoadOp& load, VkImageLayout& layout,
+                                  u8 aspect) {
+      if (load != rhi::LoadOp::kClear)
         return;
-      const VkImageSubresourceRange range{aspect, 0, 1, depth_slice, 1};
-      barrier(g_frame.cmd, dt->image, a.imageLayout,
-              VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, att,
-              VK_ACCESS_TRANSFER_WRITE_BIT);
-      vkCmdClearDepthStencilImage(g_frame.cmd, dt->image,
-                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                                  &a.clearValue.depthStencil, 1, &range);
-      barrier(g_frame.cmd, dt->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-              a.imageLayout, VK_ACCESS_TRANSFER_WRITE_BIT, att);
-      a.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+      const VkImageLayout att = layout;
+      Transition(g_frame.list, dt->texture, layout,
+                 rhi::TextureState::kCopyDst, aspect, dt->layers);
+      rhi::TextureRange range;
+      range.aspect = aspect;
+      range.base_layer = depth_slice;
+      g_frame.list->ClearDepthStencil(dt->texture, rhi::TextureState::kCopyDst,
+                                      range, depth_att.clear_depth,
+                                      depth_att.clear_stencil);
+      Transition(g_frame.list, dt->texture, layout, FromVkLayout(att), aspect,
+                 dt->layers);
+      load = rhi::LoadOp::kLoad;
     };
-    clear_aspect(depth_att, VK_IMAGE_ASPECT_DEPTH_BIT, DepthBarrier);
+    clear_aspect(depth_att.depth_load, dt->layout, rhi::kAspectDepth);
     if (stencil_base)
-      clear_aspect(stencil_att, VK_IMAGE_ASPECT_STENCIL_BIT, StencilBarrier);
+      clear_aspect(depth_att.stencil_load, dt->stencil_layout,
+                   rhi::kAspectStencil);
   }
-  VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
-  ri.renderArea = {{0, 0}, {w, h}};
-  ri.layerCount = layers;
+  pass.width = w;
+  pass.height = h;
+  pass.layers = layers;
   g_region.cur_layers = layers;
-  ri.colorAttachmentCount = g_region.cur_mrt_count;
-  ri.pColorAttachments = colors;
-  if (dt)
-    ri.pDepthAttachment = &depth_att;
-  if (dt && stencil_base)
-    ri.pStencilAttachment = &stencil_att;
+  pass.color_count = g_region.cur_mrt_count;
+  if (!dt)
+    depth_att = {};
   if (trace::Recording()) {
     trace::RegionInfo info;
     info.mrt_base = mrt_base;
@@ -1767,16 +1541,16 @@ bool BeginRegion(const u64* mrt_base,
     info.depth_base = depth_base;
     info.stencil_base = stencil_base;
     for (u32 i = 0; i < g_region.cur_mrt_count; i++)
-      if (colors[i].loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR)
+      if (colors[i].load == rhi::LoadOp::kClear)
         info.color_clear_mask |= 1u << i;
-    info.depth_clear = dt && depth_att.loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR;
-    info.depth_clear_value = depth_att.clearValue.depthStencil.depth;
+    info.depth_clear = dt && depth_att.depth_load == rhi::LoadOp::kClear;
+    info.depth_clear_value = depth_att.clear_depth;
     trace::RegionBegin(info);
   }
   CmdBeginLabel(g_frame.cmd, "region rt=%#llx %ux%u mrt=%u depth=%#llx",
                 (unsigned long long)base, w, h, g_region.cur_mrt_count,
                 (unsigned long long)depth_base);
-  g_cmd_begin_rendering(g_frame.cmd, &ri);
+  g_frame.list->BeginRenderPass(pass);
   g_region.open = true;
   g_region.depth_read_only = depth_base && depth_read_only;
   // Negative-height (y-up) viewport: GCN/PS4 rasterises y-up, so we do too.
@@ -1784,10 +1558,9 @@ bool BeginRegion(const u64* mrt_base,
   // (the scene->scanout copy, effect overlays) sample it with aligned UVs when
   // run through the game's real recompiled shader, and the presented scanout is
   // already upright (no readback flip needed; DELTA_GPU_FLIP defaults to 0).
-  VkViewport vpt{0, (float)h, (float)w, -(float)h, 0, 1};
-  vkCmdSetViewport(g_frame.cmd, 0, 1, &vpt);
-  VkRect2D sc{{0, 0}, {w, h}};
-  vkCmdSetScissor(g_frame.cmd, 0, 1, &sc);
+  g_frame.list->SetViewport(0, static_cast<float>(h), static_cast<float>(w),
+                            -static_cast<float>(h), 0, 1);
+  g_frame.list->SetScissor(0, 0, w, h);
   if (primary) {
     primary->used_this_frame = true;
     primary->last_frame = g_frame.num;
@@ -1800,7 +1573,7 @@ bool BeginRegion(const u64* mrt_base,
     BASE_LOGI("reg", "f{} begin RT {:#x} {}x{} mrt={} clear={}", g_frame.num,
               (unsigned long)base, w, h, g_region.cur_mrt_count,
               g_region.cur_mrt_count &&
-                  colors[0].loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR);
+                  colors[0].load == rhi::LoadOp::kClear);
   return true;
 }
 
@@ -1831,10 +1604,10 @@ void NoteMemoryFill(Renderer& renderer,
     // format is not worth it: a clear is almost always zero (black), and a
     // non-zero fill lands as its 8-bit-per-channel reading.
     const float inv = 1.0f / 255.0f;
-    rt.clear_value.float32[0] = ((value >> 0) & 0xFF) * inv;
-    rt.clear_value.float32[1] = ((value >> 8) & 0xFF) * inv;
-    rt.clear_value.float32[2] = ((value >> 16) & 0xFF) * inv;
-    rt.clear_value.float32[3] = ((value >> 24) & 0xFF) * inv;
+    rt.clear_value.f[0] = ((value >> 0) & 0xFF) * inv;
+    rt.clear_value.f[1] = ((value >> 8) & 0xFF) * inv;
+    rt.clear_value.f[2] = ((value >> 16) & 0xFF) * inv;
+    rt.clear_value.f[3] = ((value >> 24) & 0xFF) * inv;
     static int n = 0;
     if (kGpuFilltrace && n++ < kGpuFilltrace)
       BASE_LOGI("fill",

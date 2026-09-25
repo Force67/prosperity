@@ -11,6 +11,7 @@
 #include "base/arch.h"
 
 #include "gpu/vulkan/vk_debug.h"
+#include "gpu/vulkan/vk_rhi.h"
 #include "gpu/vulkan/vk_device.h"
 #include "gpu/vulkan/vk_draw_recomp.h"
 #include "gpu/vulkan/vk_format.h"
@@ -243,12 +244,12 @@ void Draw(Renderer& renderer, const DrawInfo& d_in) {
   VkDescriptorSet tex_set = VK_NULL_HANDLE;
   if (d.tex_base && g_quad.tex_pipeline && !rt_as_tex && !d.tex_arrayed &&
       GuestTextureUploadSupported(d.tex_dfmt, d.tex_nfmt))
-    tex_set = GetTexture(
+    tex_set = Native(GetTexture(
         d.tex_base, d.tex_w, d.tex_h, d.tex_dfmt, d.tex_nfmt, d.tex_tiling,
         d.tex_pitch, d.tex_layers, d.tex_base_array, d.tex_view_layers,
         d.tex_mip_levels, d.tex_base_mip, d.tex_view_mips, d.tex_min_lod,
         d.tex_pow2_pad, d.tex_sampler, d.tex_sampler_valid, false,
-        d.tex_force_lod_zero, d.tex_depth_compare, d.tex_swizzle);
+        d.tex_force_lod_zero, d.tex_depth_compare, d.tex_swizzle));
 
   // Switch render target if this draw targets a different RT than the open
   // region (or the open region is multi-target/has a depth attachment: the
@@ -283,7 +284,7 @@ void Draw(Renderer& renderer, const DrawInfo& d_in) {
   }
   if (rt_as_tex &&
       g_rts[tex_base].layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
-    tex_set = g_rts[tex_base].set;
+    tex_set = Native(g_rts[tex_base].set);
 
   g_frame.heuristic++;
   SetGuestViewport(d);
@@ -291,25 +292,26 @@ void Draw(Renderer& renderer, const DrawInfo& d_in) {
   if (tex_set) {
     // Per-draw blend from the guest's CB_BLEND0_CONTROL, real vertex UVs.
     vkCmdBindPipeline(g_frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                      GetPipeline(true, d.blend_control, d.blend_enable,
-                                  ColorTargetFormat(d.mrt_info[0])));
+                      Native(GetPipeline(true, d.blend_control, d.blend_enable,
+                                  ColorTargetFormat(d.mrt_info[0]))));
     float pc[17];
     std::memcpy(pc, d.mvp, 64);
     reinterpret_cast<u32*>(pc)[16] =
         0u;  // clipUV: real per-vertex uv/colour
-    vkCmdPushConstants(g_frame.cmd, g_quad.tex_layout,
+    vkCmdPushConstants(g_frame.cmd, Native(g_quad.tex_layout),
                        VK_SHADER_STAGE_VERTEX_BIT, 0, 68, pc);
     vkCmdBindDescriptorSets(g_frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            g_quad.tex_layout, 0, 1, &tex_set, 0, nullptr);
+                            Native(g_quad.tex_layout), 0, 1, &tex_set, 0, nullptr);
   } else {
     vkCmdBindPipeline(g_frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                      GetPipeline(false, d.blend_control, d.blend_enable,
-                                  ColorTargetFormat(d.mrt_info[0])));
-    vkCmdPushConstants(g_frame.cmd, g_quad.layout, VK_SHADER_STAGE_VERTEX_BIT,
+                      Native(GetPipeline(false, d.blend_control, d.blend_enable,
+                                  ColorTargetFormat(d.mrt_info[0]))));
+    vkCmdPushConstants(g_frame.cmd, Native(g_quad.layout), VK_SHADER_STAGE_VERTEX_BIT,
                        0, 64, d.mvp);
   }
   vkCmdSetBlendConstants(g_frame.cmd, d.blend_constants);
-  vkCmdBindVertexBuffers(g_frame.cmd, 0, 1, &g_ring.vb, &off);
+  const VkBuffer vb = Native(g_ring.vb);
+  vkCmdBindVertexBuffers(g_frame.cmd, 0, 1, &vb, &off);
   CmdInsertLabel(g_frame.cmd, "quad vs=%#llx ps=%#llx n=%u",
                  (unsigned long long)d.vs_addr, (unsigned long long)d.ps_addr,
                  indexed ? d.index_count : nv);
@@ -319,7 +321,7 @@ void Draw(Renderer& renderer, const DrawInfo& d_in) {
                      d.index_type);
     const VkIndexType vk_index_type =
         d.index_type == 1 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16;
-    vkCmdBindIndexBuffer(g_frame.cmd, g_ring.ib, ioff, vk_index_type);
+    vkCmdBindIndexBuffer(g_frame.cmd, Native(g_ring.ib), ioff, vk_index_type);
     vkCmdDrawIndexed(g_frame.cmd, d.index_count,
                      d.instance_count ? d.instance_count : 1, 0, 0, 0);
     g_ring.ib_offset = ioff + index_bytes;

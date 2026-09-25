@@ -196,7 +196,8 @@ void VulkanCommandList::BeginRenderPass(const rhi::RenderPassDesc& pass) {
     depth.imageLayout = d.read_only ? VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL
                                     : VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
     depth.loadOp = ToVkLoad(d.depth_load);
-    depth.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    depth.storeOp = d.read_only ? VK_ATTACHMENT_STORE_OP_NONE
+                                : VK_ATTACHMENT_STORE_OP_STORE;
     depth.clearValue.depthStencil = {d.clear_depth, d.clear_stencil};
   }
   if (d.view && d.stencil) {
@@ -205,7 +206,8 @@ void VulkanCommandList::BeginRenderPass(const rhi::RenderPassDesc& pass) {
                               ? VK_IMAGE_LAYOUT_STENCIL_READ_ONLY_OPTIMAL
                               : VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL;
     stencil.loadOp = ToVkLoad(d.stencil_load);
-    stencil.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    stencil.storeOp = d.stencil_read_only ? VK_ATTACHMENT_STORE_OP_NONE
+                                          : VK_ATTACHMENT_STORE_OP_STORE;
     stencil.clearValue.depthStencil = {d.clear_depth, d.clear_stencil};
   }
   VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};

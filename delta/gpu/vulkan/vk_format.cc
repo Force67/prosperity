@@ -331,9 +331,7 @@ VkFormat ColorTargetFormat(u32 info) {
 // in R,G,B,A component order and applies the format's channel order itself, so
 // the guest components map straight across even though ColorTargetFormat picks
 // a BGRA host format for 8_8_8_8.
-VkClearColorValue ColorTargetClearValue(u32 info,
-                                        u32 word0,
-                                        u32 word1) {
+rhi::ClearColor ColorTargetClearValue(u32 info, u32 word0, u32 word1) {
   const u32 dfmt = (info >> 2) & 0x1F;
   const u32 nfmt = (info >> 8) & 0x7;
   const auto unmapped = [&](const char* what) {
@@ -342,7 +340,7 @@ VkClearColorValue ColorTargetClearValue(u32 info,
       BASE_LOGI("gpuvk", "clear word: unmapped {} (info={:#x} dfmt={} nfmt={} "
                          "words {:08x} {:08x}), clearing to opaque black",
                 what, info, dfmt, nfmt, word0, word1);
-    return VkClearColorValue{{0.0f, 0.0f, 0.0f, 1.0f}};
+    return rhi::ClearColor{{0.0f, 0.0f, 0.0f, 1.0f}};
   };
   u32 width[4] = {0, 0, 0, 0};
   switch (dfmt) {
@@ -389,13 +387,13 @@ VkClearColorValue ColorTargetClearValue(u32 info,
   }
   const u64 packed =
       static_cast<u64>(word0) | static_cast<u64>(word1) << 32;
-  VkClearColorValue out{};
+  rhi::ClearColor out{};
   // Seed opaque: a format with fewer than four components never writes alpha,
   // and a transparent target is a hole in a deferred composite.
   if (nfmt == 4 || nfmt == 5)
-    out.uint32[3] = 1;
+    out.u[3] = 1;
   else
-    out.float32[3] = 1.0f;
+    out.f[3] = 1.0f;
   u32 shift = 0;
   for (u32 i = 0; i < 4 && width[i]; i++) {
     const u32 bits = width[i];
@@ -406,27 +404,27 @@ VkClearColorValue ColorTargetClearValue(u32 info,
       case 0:  // UNORM
       case 6:  // SRGB: ColorTargetFormat gives it a UNORM host image, so the
                // encoded value has to pass through unconverted
-        out.float32[i] = static_cast<float>(raw) / static_cast<float>(mask);
+        out.f[i] = static_cast<float>(raw) / static_cast<float>(mask);
         break;
       case 1:  // SNORM
-        out.float32[i] =
+        out.f[i] =
             std::max(static_cast<float>(SignExtend(raw, bits)) /
                          static_cast<float>((1u << (bits - 1)) - 1),
                      -1.0f);
         break;
       case 4:  // UINT
-        out.uint32[i] = raw;
+        out.u[i] = raw;
         break;
       case 5:  // SINT
-        out.int32[i] = SignExtend(raw, bits);
+        out.i[i] = SignExtend(raw, bits);
         break;
       case 7:  // FLOAT
         if (bits == 32)
-          std::memcpy(&out.float32[i], &raw, sizeof(raw));
+          std::memcpy(&out.f[i], &raw, sizeof(raw));
         else if (bits == 16)
-          out.float32[i] = HalfToFloat(static_cast<u16>(raw));
+          out.f[i] = HalfToFloat(static_cast<u16>(raw));
         else if (bits == 11 || bits == 10)
-          out.float32[i] = PackedUfloat(raw, bits - 5);
+          out.f[i] = PackedUfloat(raw, bits - 5);
         else
           return unmapped("float width");
         break;
@@ -460,6 +458,36 @@ VkComponentMapping TextureComponents(u32 swizzle) {
   };
   return {comp(swizzle & 7), comp((swizzle >> 3) & 7), comp((swizzle >> 6) & 7),
           comp((swizzle >> 9) & 7)};
+}
+
+void TextureSwizzle(u32 swizzle, rhi::Swizzle out[4]) {
+  for (u32 i = 0; i < 4; i++) {
+    out[i] = rhi::Swizzle::kIdentity;
+    if (!swizzle || kNoSwizzle)
+      continue;
+    switch ((swizzle >> (3 * i)) & 7) {
+      case 0:
+        out[i] = rhi::Swizzle::kZero;
+        break;
+      case 1:
+        out[i] = rhi::Swizzle::kOne;
+        break;
+      case 4:
+        out[i] = rhi::Swizzle::kR;
+        break;
+      case 5:
+        out[i] = rhi::Swizzle::kG;
+        break;
+      case 6:
+        out[i] = rhi::Swizzle::kB;
+        break;
+      case 7:
+        out[i] = rhi::Swizzle::kA;
+        break;
+      default:
+        break;
+    }
+  }
 }
 
 u32 FormatBytes(VkFormat fmt) {
@@ -497,20 +525,20 @@ u32 FormatBytes(VkFormat fmt) {
 }
 
 // GNM blend multiplier (CB_BLENDn_CONTROL factor field) -> Vulkan blend factor.
-VkBlendFactor BlendFactor(u32 f) {
+rhi::BlendFactor BlendFactor(u32 f) {
   switch (f) {
     case 0:
-      return VK_BLEND_FACTOR_ZERO;
+      return rhi::BlendFactor::kZero;
     case 1:
-      return VK_BLEND_FACTOR_ONE;
+      return rhi::BlendFactor::kOne;
     case 2:
-      return VK_BLEND_FACTOR_SRC_COLOR;
+      return rhi::BlendFactor::kSrcColor;
     case 3:
-      return VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR;
+      return rhi::BlendFactor::kOneMinusSrcColor;
     case 4:
-      return VK_BLEND_FACTOR_SRC_ALPHA;
+      return rhi::BlendFactor::kSrcAlpha;
     case 5:
-      return VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+      return rhi::BlendFactor::kOneMinusSrcAlpha;
     // 6 upwards is neither the D3D order nor SRC_ALPHA_SATURATE-first: the
     // hardware enum (V_028780_BLEND_*) runs DST_ALPHA, DST_COLOR,
     // SRC_ALPHA_SATURATE, the two BOTH_* forms, the constants and only then
@@ -520,99 +548,96 @@ VkBlendFactor BlendFactor(u32 f) {
     // output an undefined second source, which comes out as a black colour
     // term (Astro Bot's whole composite chain).
     case 6:
-      return VK_BLEND_FACTOR_DST_ALPHA;
+      return rhi::BlendFactor::kDstAlpha;
     case 7:
-      return VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA;
+      return rhi::BlendFactor::kOneMinusDstAlpha;
     case 8:
-      return VK_BLEND_FACTOR_DST_COLOR;
+      return rhi::BlendFactor::kDstColor;
     case 9:
-      return VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR;
+      return rhi::BlendFactor::kOneMinusDstColor;
     case 10:
-      return VK_BLEND_FACTOR_SRC_ALPHA_SATURATE;
+      return rhi::BlendFactor::kSrcAlphaSaturate;
     // BOTH_SRC_ALPHA / BOTH_INV_SRC_ALPHA set the colour and alpha factors
     // together on hardware; Vulkan has no such factor, and the pair they
     // stand for is (SRC_ALPHA, ONE_MINUS_SRC_ALPHA) per channel.
     case 11:
-      return VK_BLEND_FACTOR_SRC_ALPHA;
+      return rhi::BlendFactor::kSrcAlpha;
     case 12:
-      return VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+      return rhi::BlendFactor::kOneMinusSrcAlpha;
     case 13:
-      return VK_BLEND_FACTOR_CONSTANT_COLOR;
+      return rhi::BlendFactor::kConstantColor;
     case 14:
-      return VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_COLOR;
+      return rhi::BlendFactor::kOneMinusConstantColor;
     case 15:
-      return VK_BLEND_FACTOR_SRC1_COLOR;
+      return rhi::BlendFactor::kSrc1Color;
     case 16:
-      return VK_BLEND_FACTOR_ONE_MINUS_SRC1_COLOR;
+      return rhi::BlendFactor::kOneMinusSrc1Color;
     case 17:
-      return VK_BLEND_FACTOR_SRC1_ALPHA;
+      return rhi::BlendFactor::kSrc1Alpha;
     case 18:
-      return VK_BLEND_FACTOR_ONE_MINUS_SRC1_ALPHA;
+      return rhi::BlendFactor::kOneMinusSrc1Alpha;
     case 19:
-      return VK_BLEND_FACTOR_CONSTANT_ALPHA;
+      return rhi::BlendFactor::kConstantAlpha;
     case 20:
-      return VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_ALPHA;
+      return rhi::BlendFactor::kOneMinusConstantAlpha;
     default:
-      return VK_BLEND_FACTOR_ONE;
+      return rhi::BlendFactor::kOne;
   }
 }
 
-// GNM blend function (combine fcn) -> Vulkan blend op.
-VkBlendOp BlendOp(u32 f) {
+// GNM blend function (combine fcn) -> blend op.
+rhi::BlendOp BlendOp(u32 f) {
   switch (f) {
     case 0:
-      return VK_BLEND_OP_ADD;
+      return rhi::BlendOp::kAdd;
     case 1:
-      return VK_BLEND_OP_SUBTRACT;
+      return rhi::BlendOp::kSubtract;
     case 2:
-      return VK_BLEND_OP_MIN;
+      return rhi::BlendOp::kMin;
     case 3:
-      return VK_BLEND_OP_MAX;
+      return rhi::BlendOp::kMax;
     case 4:
-      return VK_BLEND_OP_REVERSE_SUBTRACT;
+      return rhi::BlendOp::kReverseSubtract;
     default:
-      return VK_BLEND_OP_ADD;
+      return rhi::BlendOp::kAdd;
   }
 }
 
-VkColorComponentFlags ColorWriteMask(u32 target_mask, u32 shader_mask,
+u8 ColorWriteMask(u32 target_mask, u32 shader_mask,
                                      u8 export_mask, u32 target) {
   if (target >= 8 || !(export_mask & (1u << target)))
     return 0;
   u32 mask = (target_mask >> (4 * target)) & 0xF;
   if (shader_mask)
     mask &= (shader_mask >> (4 * target)) & 0xF;
-  return VkColorComponentFlags(mask);
+  return static_cast<u8>(mask);
 }
 
-// Decode CB_BLEND0_CONTROL into a Vulkan colour-blend attachment. `en` is the
+// Decode CB_BLEND0_CONTROL into a colour-blend attachment. `en` is the
 // per-target blend enable (bit 30). Falls back to a sensible src-alpha blend
 // when the guest enables blend but the control word is zero (default state, not
 // yet set).
-VkPipelineColorBlendAttachmentState BlendAttachment(u32 bc, bool en) {
-  VkPipelineColorBlendAttachmentState cba{};
-  cba.colorWriteMask = 0xF;
+rhi::BlendAttachment BlendAttachment(u32 bc, bool en) {
+  rhi::BlendAttachment cba;
   // DELTA_GPU_NOBLEND: force opaque (diagnostic) to test whether a draw
   // vanishes because its src-alpha blend multiplies by a zero texel alpha
   // (Doom64 3D walls).
   if (kNoBlend)
     en = false;
-  if (!en) {
-    cba.blendEnable = VK_FALSE;
+  if (!en)
     return cba;
-  }
-  cba.blendEnable = VK_TRUE;
+  cba.enable = true;
   u32 cs = bc & 0x1F, cf = (bc >> 5) & 0x7, cd = (bc >> 8) & 0x1F;
   bool sep = (bc >> 29) & 1;
   u32 as = sep ? (bc >> 16) & 0x1F : cs;
   u32 af = sep ? (bc >> 21) & 0x7 : cf;
   u32 ad = sep ? (bc >> 24) & 0x1F : cd;
-  cba.srcColorBlendFactor = BlendFactor(cs);
-  cba.dstColorBlendFactor = BlendFactor(cd);
-  cba.colorBlendOp = BlendOp(cf);
-  cba.srcAlphaBlendFactor = BlendFactor(as);
-  cba.dstAlphaBlendFactor = BlendFactor(ad);
-  cba.alphaBlendOp = BlendOp(af);
+  cba.src_color = BlendFactor(cs);
+  cba.dst_color = BlendFactor(cd);
+  cba.color_op = BlendOp(cf);
+  cba.src_alpha = BlendFactor(as);
+  cba.dst_alpha = BlendFactor(ad);
+  cba.alpha_op = BlendOp(af);
   return cba;
 }
 
@@ -783,21 +808,21 @@ u32 VertexFormatBytes(u32 dfmt) {
 
 // VGT_PRIMITIVE_TYPE -> Vulkan topology. Unknown/2D types fall back to triangle
 // list (the previous hardcoded topology), so the 2D path is unchanged.
-VkPrimitiveTopology PrimitiveTopology(u32 prim) {
+rhi::Topology PrimitiveTopology(u32 prim) {
   switch (prim) {
     case 1:
-      return VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
+      return rhi::Topology::kPointList;
     case 2:
-      return VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
+      return rhi::Topology::kLineList;
     case 3:
-      return VK_PRIMITIVE_TOPOLOGY_LINE_STRIP;
+      return rhi::Topology::kLineStrip;
     case 5:
-      return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN;
+      return rhi::Topology::kTriangleFan;
     case 6:
-      return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+      return rhi::Topology::kTriangleStrip;
     case 4:  // triangle list
     default:
-      return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+      return rhi::Topology::kTriangleList;
   }
 }
 

@@ -6,8 +6,8 @@
 #include "base/arch.h"
 
 #include "gpu/gpu_check.h"
-#include "gpu/vulkan/vk_debug.h"
 #include "gpu/vulkan/vk_device.h"
+#include "gpu/vulkan/vk_frame.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -34,9 +34,8 @@ VkDeviceSize UboRingBytes() {
     return g_ring.ubo_bytes;
   const VkDeviceSize requested =
       VkDeviceSize(std::clamp(kUboRingMb.get(), 16u, 2048u)) * 1024 * 1024;
-  return g_dev.max_storage_buffer_range
-      ? std::min(requested, VkDeviceSize(g_dev.max_storage_buffer_range) * 2)
-      : requested;
+  const u64 range = Device().caps().max_storage_buffer_range;
+  return range ? std::min(requested, VkDeviceSize(range) * 2) : requested;
 }
 
 VkDeviceSize VbRingBytes() {
@@ -50,253 +49,161 @@ VkDeviceSize VbRingBytes() {
   return bytes;
 }
 
-bool CreateUploadRings(const VkPhysicalDeviceProperties& props) {
-  // Vertex ring.
-  VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-  bi.size = VbRingBytes();
-  bi.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
-  VKOK(vkCreateBuffer(g_dev.device, &bi, nullptr, &g_ring.vb));
-  VkMemoryRequirements vr;
-  vkGetBufferMemoryRequirements(g_dev.device, g_ring.vb, &vr);
-  VkMemoryAllocateInfo va{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-  va.allocationSize = vr.size;
-  va.memoryTypeIndex = FindMemoryType(vr.memoryTypeBits,
-                                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                                          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-  VKOK(vkAllocateMemory(g_dev.device, &va, nullptr, &g_ring.vb_mem));
-  VKOK(vkBindBufferMemory(g_dev.device, g_ring.vb, g_ring.vb_mem, 0));
-  VKOK(vkMapMemory(g_dev.device, g_ring.vb_mem, 0, VbRingBytes(), 0,
-                   (void**)&g_ring.vb_map));
-  NameObject(VK_OBJECT_TYPE_BUFFER, (u64)g_ring.vb, "vertex ring");
+namespace {
 
-  // Index ring (host-visible, 32-bit indices).
-  VkBufferCreateInfo ibi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-  ibi.size = kIbRing;
-  ibi.usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
-  VKOK(vkCreateBuffer(g_dev.device, &ibi, nullptr, &g_ring.ib));
-  VkMemoryRequirements ir;
-  vkGetBufferMemoryRequirements(g_dev.device, g_ring.ib, &ir);
-  VkMemoryAllocateInfo ia{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-  ia.allocationSize = ir.size;
-  ia.memoryTypeIndex = FindMemoryType(ir.memoryTypeBits,
-                                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                                          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-  VKOK(vkAllocateMemory(g_dev.device, &ia, nullptr, &g_ring.ib_mem));
-  VKOK(vkBindBufferMemory(g_dev.device, g_ring.ib, g_ring.ib_mem, 0));
-  VKOK(vkMapMemory(g_dev.device, g_ring.ib_mem, 0, kIbRing, 0,
-                   (void**)&g_ring.ib_map));
-  NameObject(VK_OBJECT_TYPE_BUFFER, (u64)g_ring.ib, "index ring");
+// A persistently mapped host buffer, or null.
+rhi::Buffer* HostBuffer(VkDeviceSize bytes, u32 usage, const char* name,
+                        u8** map) {
+  rhi::BufferDesc desc;
+  desc.size = bytes;
+  desc.usage = usage;
+  desc.memory = rhi::MemoryKind::kUpload;
+  desc.name = name;
+  rhi::Buffer* buffer = Device().CreateBuffer(desc);
+  *map = buffer ? buffer->mapped() : nullptr;
+  if (buffer && !*map) {
+    Device().Destroy(buffer);
+    return nullptr;
+  }
+  return buffer;
+}
+
+u32 GraphicsStages() {
+  const rhi::Caps& caps = Device().caps();
+  return rhi::kStageVertex | rhi::kStageFragment |
+         (caps.geometry_shader ? rhi::kStageGeometry : 0u) |
+         (caps.mesh_shader ? rhi::kStageMesh : 0u);
+}
+
+}  // namespace
+
+bool CreateUploadRings() {
+  const rhi::Caps& caps = Device().caps();
+  g_ring.vb = HostBuffer(VbRingBytes(), rhi::kBufferVertex, "vertex ring",
+                         &g_ring.vb_map);
+  g_ring.ib = HostBuffer(kIbRing, rhi::kBufferIndex, "index ring",
+                         &g_ring.ib_map);
+  if (!g_ring.vb || !g_ring.ib)
+    return false;
   // Recomp cbuffer ring + dynamic-UBO descriptors (set 1) + empty set-0 layout.
-  g_ring.ubo_align = (u32)props.limits.minUniformBufferOffsetAlignment;
-  if (g_ring.ubo_align < 1)
-    g_ring.ubo_align = 1;
-  if (props.limits.maxDescriptorSetUniformBuffersDynamic < kCbufBindings ||
-      props.limits.maxPerStageDescriptorUniformBuffers < kCbufBindings)
-    BASE_LOGI("gpuvk", "only {}/{} dynamic UBOs available, need {}; set 1 "
-                       "is an out-of-spec layout on this device and a cbuffer "
-                       "may silently read zero",
-              props.limits.maxDescriptorSetUniformBuffersDynamic,
-              props.limits.maxPerStageDescriptorUniformBuffers,
-              kCbufBindings);
-  {
-    g_ring.ubo_stride = (kCbufWindow + g_ring.ubo_align - 1) &
-                        ~(VkDeviceSize)(g_ring.ubo_align - 1);
-    // kMaxCbufBindings, not 8: a shader pair whose constant buffers exceed the
-    // cap is planned only up to it, and every s_buffer_load from a dropped base
-    // emits nothing, leaving its destination SGPRs zero. Skyrim's UI shaders
-    // sit right at 8 cbufs, so their transform matrix read back as an all-zero
-    // matrix and collapsed every vertex position.
-    VkDescriptorSetLayoutBinding ubs[kCbufBindings]{};
-    for (u32 i = 0; i < kCbufBindings; i++) {
-      ubs[i].binding = i;
-      ubs[i].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
-      ubs[i].descriptorCount = 1;
-      ubs[i].stageFlags =
-          VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT |
-          (g_dev.geometry_shader ? VK_SHADER_STAGE_GEOMETRY_BIT : 0) |
-          (g_dev.mesh_shader ? VK_SHADER_STAGE_MESH_BIT_EXT : 0);
-    }
-    VkDescriptorSetLayoutCreateInfo ul{
-        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    ul.bindingCount = kCbufBindings;
-    ul.pBindings = ubs;
-    VKOK(vkCreateDescriptorSetLayout(g_dev.device, &ul, nullptr,
-                                     &g_ring.ubo_layout));
-    VkDescriptorSetLayoutCreateInfo el{
-        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    el.bindingCount = 0;
-    VKOK(vkCreateDescriptorSetLayout(g_dev.device, &el, nullptr,
-                                     &g_ring.empty_layout));
-
-    VkDescriptorPoolSize ups{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
-                             kCbufBindings};
-    VkDescriptorPoolCreateInfo upi{
-        VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-    upi.maxSets = 1;
-    upi.poolSizeCount = 1;
-    upi.pPoolSizes = &ups;
-    VKOK(vkCreateDescriptorPool(g_dev.device, &upi, nullptr, &g_ring.ubo_pool));
-    VkDescriptorSetAllocateInfo uai{
-        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-    uai.descriptorPool = g_ring.ubo_pool;
-    uai.descriptorSetCount = 1;
-    uai.pSetLayouts = &g_ring.ubo_layout;
-    VKOK(vkAllocateDescriptorSets(g_dev.device, &uai, &g_ring.ubo_set));
-    // Mesh stages can need more windows than the dynamic UBO limit allows.
-    // Bind the current frame's half of the existing ring as one read-only
-    // storage buffer, plus one dynamic UBO containing the window offsets.
-    if (props.limits.maxStorageBufferRange >= UboRingBytes() / 2) {
-      const VkShaderStageFlags stages = VK_SHADER_STAGE_VERTEX_BIT |
-          VK_SHADER_STAGE_FRAGMENT_BIT |
-          (g_dev.geometry_shader ? VK_SHADER_STAGE_GEOMETRY_BIT : 0) |
-          (g_dev.mesh_shader ? VK_SHADER_STAGE_MESH_BIT_EXT : 0);
-      const VkDescriptorSetLayoutBinding bindings[2] = {
-          {0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, stages, nullptr},
-          {1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1, stages, nullptr}};
-      VkDescriptorSetLayoutCreateInfo layout{
-          VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-      layout.bindingCount = 2;
-      layout.pBindings = bindings;
-      VKOK(vkCreateDescriptorSetLayout(g_dev.device, &layout, nullptr,
-                                       &g_ring.indirect_cbuf_layout));
-      const VkDescriptorPoolSize sizes[2] = {
-          {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2},
-          {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 2}};
-      VkDescriptorPoolCreateInfo pool{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-      pool.maxSets = 2;
-      pool.poolSizeCount = 2;
-      pool.pPoolSizes = sizes;
-      VKOK(vkCreateDescriptorPool(g_dev.device, &pool, nullptr,
-                                  &g_ring.indirect_cbuf_pool));
-      const VkDescriptorSetLayout layouts[2] = {
-          g_ring.indirect_cbuf_layout, g_ring.indirect_cbuf_layout};
-      VkDescriptorSetAllocateInfo alloc{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-      alloc.descriptorPool = g_ring.indirect_cbuf_pool;
-      alloc.descriptorSetCount = 2;
-      alloc.pSetLayouts = layouts;
-      VKOK(vkAllocateDescriptorSets(g_dev.device, &alloc,
-                                    g_ring.indirect_cbuf_sets));
-    }
+  g_ring.ubo_align = std::max(caps.uniform_offset_alignment, 1u);
+  if (caps.max_dynamic_uniform_buffers < kCbufBindings)
+    BASE_LOGI("gpuvk", "only {}/{} dynamic UBOs available; set 1 is an "
+                       "out-of-spec layout on this device and a cbuffer may "
+                       "silently read zero",
+              caps.max_dynamic_uniform_buffers, kCbufBindings);
+  g_ring.ubo_stride = (kCbufWindow + g_ring.ubo_align - 1) &
+                      ~(VkDeviceSize)(g_ring.ubo_align - 1);
+  // kMaxCbufBindings, not 8: a shader pair whose constant buffers exceed the
+  // cap is planned only up to it, and every s_buffer_load from a dropped base
+  // emits nothing, leaving its destination SGPRs zero. Skyrim's UI shaders
+  // sit right at 8 cbufs, so their transform matrix read back as an all-zero
+  // matrix and collapsed every vertex position.
+  rhi::BindGroupLayoutDesc ubo;
+  for (u32 i = 0; i < kCbufBindings; i++)
+    ubo.bindings.push_back(
+        {i, rhi::BindingType::kUniformBufferDynamic, GraphicsStages()});
+  g_ring.ubo_layout = Device().CreateBindGroupLayout(ubo);
+  g_ring.empty_layout = Device().CreateBindGroupLayout({});
+  if (!g_ring.ubo_layout || !g_ring.empty_layout)
+    return false;
+  // Mesh stages can need more windows than the dynamic UBO limit allows.
+  // Bind the current frame's half of the existing ring as one read-only
+  // storage buffer, plus one dynamic UBO containing the window offsets.
+  if (caps.max_storage_buffer_range >= UboRingBytes() / 2) {
+    rhi::BindGroupLayoutDesc indirect;
+    indirect.bindings.push_back(
+        {0, rhi::BindingType::kStorageBuffer, GraphicsStages(), true});
+    indirect.bindings.push_back(
+        {1, rhi::BindingType::kUniformBufferDynamic, GraphicsStages()});
+    g_ring.indirect_cbuf_layout = Device().CreateBindGroupLayout(indirect);
   }
 
   // Raw-buffer set layout (set 2). Every recompiled pipeline layout that has a
   // shader reading buffers by hand names it, so it exists from the start; the
   // ring behind it is allocated only if such a shader actually appears.
-  {
-    g_ring.sbo_align = (u32)std::max<VkDeviceSize>(
-        props.limits.minStorageBufferOffsetAlignment, 4);
-    // These are DYNAMIC storage buffers, and maxDescriptorSetStorageBuffersDynamic
-    // has a Vulkan floor of 4 while real desktop parts report 16+. Take what the
-    // device offers (up to our compile-time ceiling) and tell the recompiler, so
-    // a shader referencing more raw buffers than 4 is planned rather than
-    // declined wherever the hardware can carry it.
-    g_ring.sbo_count =
-        std::min<u32>(props.limits.maxDescriptorSetStorageBuffersDynamic,
-                           kRawBufBindings);
-    if (g_ring.sbo_count < gpu::gcn::kMinGfxBuffers) {
-      BASE_LOGI("gpuvk", "only {} dynamic storage buffers available, below "
-                         "the {} Vulkan floor: shaders reading raw buffers "
-                         "will decline",
-                g_ring.sbo_count, gpu::gcn::kMinGfxBuffers);
-      g_ring.sbo_count = gpu::gcn::kMinGfxBuffers;
-    }
-    gpu::gcn::SetMaxGfxBuffers(g_ring.sbo_count);
-    // Whether the push range can also carry each stage's code address (2x8
-    // bytes after the 128 bytes of user data): with it, no graphics module
-    // ever bakes its own address and the shader cache keys by content.
-    gpu::gcn::SetPushBudget(props.limits.maxPushConstantsSize);
-    // A wave64 shader may rely on lockstep the host only gives us within one
-    // subgroup, so the recompiler has to know how wide this device's is.
-    {
-      VkPhysicalDeviceSubgroupProperties sub{
-          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES};
-      VkPhysicalDeviceProperties2 p2{
-          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &sub};
-      vkGetPhysicalDeviceProperties2(g_dev.phys, &p2);
-      gpu::gcn::SetHostSubgroupSize(sub.subgroupSize);
-      BASE_LOGI("gpuvk", "subgroup: {} lanes{}", sub.subgroupSize,
-                gpu::gcn::WaveSplitsAcrossSubgroups()
-                    ? " (a GCN wave spans several)"
-                    : "");
-    }
-    g_ring.sbo_stride = (kRawBufWindow + g_ring.sbo_align - 1) &
-                        ~(VkDeviceSize)(g_ring.sbo_align - 1);
-    VkDescriptorSetLayoutBinding sbs[kRawBufBindings]{};
-    for (u32 i = 0; i < g_ring.sbo_count; i++) {
-      sbs[i].binding = i;
-      sbs[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC;
-      sbs[i].descriptorCount = 1;
-      sbs[i].stageFlags =
-          VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT |
-          (g_dev.mesh_shader ? VK_SHADER_STAGE_MESH_BIT_EXT : 0);
-    }
-    VkDescriptorSetLayoutCreateInfo sl{
-        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    sl.bindingCount = g_ring.sbo_count;
-    sl.pBindings = sbs;
-    VKOK(vkCreateDescriptorSetLayout(g_dev.device, &sl, nullptr,
-                                     &g_ring.sbo_layout));
+  g_ring.sbo_align = std::max(caps.storage_offset_alignment, 4u);
+  // These are DYNAMIC storage buffers, whose device limit has a floor of 4
+  // while real desktop parts report 16+. Take what the device offers (up to
+  // our compile-time ceiling) and tell the recompiler, so a shader
+  // referencing more raw buffers than 4 is planned rather than declined
+  // wherever the hardware can carry it.
+  g_ring.sbo_count =
+      std::min<u32>(caps.max_dynamic_storage_buffers, kRawBufBindings);
+  if (g_ring.sbo_count < gpu::gcn::kMinGfxBuffers) {
+    BASE_LOGI("gpuvk", "only {} dynamic storage buffers available, below "
+                       "the floor of {}: shaders reading raw buffers will "
+                       "decline",
+              g_ring.sbo_count, gpu::gcn::kMinGfxBuffers);
+    g_ring.sbo_count = gpu::gcn::kMinGfxBuffers;
   }
-  return true;
+  gpu::gcn::SetMaxGfxBuffers(g_ring.sbo_count);
+  // Whether the push range can also carry each stage's code address (2x8
+  // bytes after the 128 bytes of user data): with it, no graphics module
+  // ever bakes its own address and the shader cache keys by content.
+  gpu::gcn::SetPushBudget(caps.max_push_constant_bytes);
+  // A wave64 shader may rely on lockstep the host only gives us within one
+  // subgroup, so the recompiler has to know how wide this device's is.
+  gpu::gcn::SetHostSubgroupSize(caps.subgroup_size);
+  BASE_LOGI("gpuvk", "subgroup: {} lanes{}", caps.subgroup_size,
+            gpu::gcn::WaveSplitsAcrossSubgroups()
+                ? " (a GCN wave spans several)"
+                : "");
+  g_ring.sbo_stride = (kRawBufWindow + g_ring.sbo_align - 1) &
+                      ~(VkDeviceSize)(g_ring.sbo_align - 1);
+  rhi::BindGroupLayoutDesc sbo;
+  for (u32 i = 0; i < g_ring.sbo_count; i++)
+    sbo.bindings.push_back(
+        {i, rhi::BindingType::kStorageBufferDynamic,
+         rhi::kStageVertex | rhi::kStageFragment |
+             (caps.mesh_shader ? rhi::kStageMesh : 0u)});
+  g_ring.sbo_layout = Device().CreateBindGroupLayout(sbo);
+  return g_ring.sbo_layout != nullptr;
 }
 
 // The device is initialized before guest mappings exist, but the title profile
 // is loaded later. Allocate constants at the first frame so its budget applies
-// to both the Vulkan allocation and the offsets used to address it.
+// to both the allocation and the offsets used to address it.
 bool EnsureCbufRing() {
   if (g_ring.ubo_buf)
     return g_ring.ubo_map != nullptr;
   g_ring.ubo_bytes = UboRingBytes();
-  VkBufferCreateInfo ub{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-  ub.size = UboRingBytes();
-  ub.usage =
-      VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
-  VKOK(vkCreateBuffer(g_dev.device, &ub, nullptr, &g_ring.ubo_buf));
-  VkMemoryRequirements ur;
-  vkGetBufferMemoryRequirements(g_dev.device, g_ring.ubo_buf, &ur);
-  VkMemoryAllocateInfo um{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-  um.allocationSize = ur.size;
-  um.memoryTypeIndex = FindMemoryType(ur.memoryTypeBits,
-                                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                                          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-  VKOK(vkAllocateMemory(g_dev.device, &um, nullptr, &g_ring.ubo_mem));
-  VKOK(vkBindBufferMemory(g_dev.device, g_ring.ubo_buf, g_ring.ubo_mem, 0));
-  VKOK(vkMapMemory(g_dev.device, g_ring.ubo_mem, 0, UboRingBytes(), 0,
-                   (void **)&g_ring.ubo_map));
+  g_ring.ubo_buf =
+      HostBuffer(UboRingBytes(), rhi::kBufferUniform | rhi::kBufferStorage,
+                 "cbuffer ring", &g_ring.ubo_map);
+  if (!g_ring.ubo_buf)
+    return false;
   std::memset(g_ring.ubo_map, 0, UboRingBytes());
-  NameObject(VK_OBJECT_TYPE_BUFFER, (u64)g_ring.ubo_buf, "cbuffer ring");
   g_ring.ubo_stride = (kCbufWindow + g_ring.ubo_align - 1) &
                       ~(VkDeviceSize)(g_ring.ubo_align - 1);
 
-  VkDescriptorBufferInfo ubinfo[kCbufBindings];
-  VkWriteDescriptorSet uw[kCbufBindings];
+  rhi::BindGroupDesc set;
+  set.layout = g_ring.ubo_layout;
   for (u32 i = 0; i < kCbufBindings; i++) {
-    ubinfo[i] = {g_ring.ubo_buf, 0, kCbufWindow};
-    uw[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-    uw[i].dstSet = g_ring.ubo_set;
-    uw[i].dstBinding = i;
-    uw[i].descriptorCount = 1;
-    uw[i].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
-    uw[i].pBufferInfo = &ubinfo[i];
+    rhi::BindingWrite w;
+    w.binding = i;
+    w.buffer = g_ring.ubo_buf;
+    w.range = kCbufWindow;
+    set.writes.push_back(w);
   }
-  vkUpdateDescriptorSets(g_dev.device, kCbufBindings, uw, 0, nullptr);
+  g_ring.ubo_set = Device().CreateBindGroup(set);
+  if (!g_ring.ubo_set)
+    return false;
   if (g_ring.indirect_cbuf_layout) {
     for (u32 slot = 0; slot < 2; ++slot) {
-      const VkDescriptorBufferInfo buffers[2] = {
-          {g_ring.ubo_buf, slot * (UboRingBytes() / 2), UboRingBytes() / 2},
-          {g_ring.ubo_buf, 0, gpu::gcn::kIndirectDrawDwords * sizeof(u32)}};
-      VkWriteDescriptorSet writes[2]{};
-      for (u32 i = 0; i < 2; ++i) {
-        writes[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-        writes[i].dstSet = g_ring.indirect_cbuf_sets[slot];
-        writes[i].dstBinding = i;
-        writes[i].descriptorCount = 1;
-        writes[i].descriptorType =
-            i == 0 ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
-                   : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
-        writes[i].pBufferInfo = &buffers[i];
-      }
-      vkUpdateDescriptorSets(g_dev.device, 2, writes, 0, nullptr);
+      rhi::BindGroupDesc indirect;
+      indirect.layout = g_ring.indirect_cbuf_layout;
+      rhi::BindingWrite table;
+      table.binding = 0;
+      table.buffer = g_ring.ubo_buf;
+      table.offset = slot * (UboRingBytes() / 2);
+      table.range = UboRingBytes() / 2;
+      rhi::BindingWrite offsets;
+      offsets.binding = 1;
+      offsets.buffer = g_ring.ubo_buf;
+      offsets.range = gpu::gcn::kIndirectDrawDwords * sizeof(u32);
+      indirect.writes = {table, offsets};
+      g_ring.indirect_cbuf_sets[slot] = Device().CreateBindGroup(indirect);
     }
   }
   return true;
@@ -311,61 +218,31 @@ bool EnsureCbufRing() {
 bool EnsureLdsScratch() {
   if (g_ring.lds_set)
     return true;
-  VkDescriptorSetLayoutBinding lb{};
-  lb.binding = 0;
-  lb.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-  lb.descriptorCount = 1;
-  lb.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-  VkDescriptorSetLayoutCreateInfo sl{
-      VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-  sl.bindingCount = 1;
-  sl.pBindings = &lb;
-  if (vkCreateDescriptorSetLayout(g_dev.device, &sl, nullptr,
-                                  &g_ring.lds_layout) != VK_SUCCESS)
+  rhi::BindGroupLayoutDesc layout;
+  layout.bindings.push_back({0, rhi::BindingType::kStorageBuffer,
+                             rhi::kStageVertex | rhi::kStageFragment});
+  g_ring.lds_layout = Device().CreateBindGroupLayout(layout);
+  if (!g_ring.lds_layout)
     return false;
-  VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-  bi.size = kLdsScratch;
-  bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
-             VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-  if (vkCreateBuffer(g_dev.device, &bi, nullptr, &g_ring.lds_buf) != VK_SUCCESS)
+  rhi::BufferDesc desc;
+  desc.size = kLdsScratch;
+  desc.usage = rhi::kBufferStorage | rhi::kBufferCopyDst;
+  desc.memory = kLdsDump ? rhi::MemoryKind::kReadback : rhi::MemoryKind::kDevice;
+  desc.name = "shared lds";
+  g_ring.lds_buf = Device().CreateBuffer(desc);
+  if (!g_ring.lds_buf)
     return false;
-  VkMemoryRequirements mr;
-  vkGetBufferMemoryRequirements(g_dev.device, g_ring.lds_buf, &mr);
-  VkMemoryAllocateInfo ma{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-  ma.allocationSize = mr.size;
-  ma.memoryTypeIndex =
-      kLdsDump ? FindMemoryType(mr.memoryTypeBits,
-                                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                                    VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
-               : FindMemoryType(mr.memoryTypeBits,
-                                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-  if (vkAllocateMemory(g_dev.device, &ma, nullptr, &g_ring.lds_mem) !=
-      VK_SUCCESS)
-    return false;
-  VKOK(vkBindBufferMemory(g_dev.device, g_ring.lds_buf, g_ring.lds_mem, 0));
   if (kLdsDump)
-    VKOK(vkMapMemory(g_dev.device, g_ring.lds_mem, 0, kLdsScratch, 0,
-                     reinterpret_cast<void**>(&g_ring.lds_map)));
-  NameObject(VK_OBJECT_TYPE_BUFFER, (u64)g_ring.lds_buf, "shared lds");
-  VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1};
-  VkDescriptorPoolCreateInfo pi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-  pi.maxSets = 1;
-  pi.poolSizeCount = 1;
-  pi.pPoolSizes = &ps;
-  VKOK(vkCreateDescriptorPool(g_dev.device, &pi, nullptr, &g_ring.lds_pool));
-  VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-  ai.descriptorPool = g_ring.lds_pool;
-  ai.descriptorSetCount = 1;
-  ai.pSetLayouts = &g_ring.lds_layout;
-  VKOK(vkAllocateDescriptorSets(g_dev.device, &ai, &g_ring.lds_set));
-  VkDescriptorBufferInfo dbi{g_ring.lds_buf, 0, kLdsScratch};
-  VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-  w.dstSet = g_ring.lds_set;
-  w.dstBinding = 0;
-  w.descriptorCount = 1;
-  w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-  w.pBufferInfo = &dbi;
-  vkUpdateDescriptorSets(g_dev.device, 1, &w, 0, nullptr);
+    g_ring.lds_map = g_ring.lds_buf->mapped();
+  rhi::BindGroupDesc set;
+  set.layout = g_ring.lds_layout;
+  rhi::BindingWrite w;
+  w.buffer = g_ring.lds_buf;
+  w.range = kLdsScratch;
+  set.writes.push_back(w);
+  g_ring.lds_set = Device().CreateBindGroup(set);
+  if (!g_ring.lds_set)
+    return false;
   BASE_LOGI("gpuvk", "shared LDS scratch: {} MB ({} waves)",
             (unsigned long long)(kLdsScratch >> 20), gpu::gcn::kLdsWaves);
   return true;
@@ -376,54 +253,27 @@ bool EnsureRawBufferRing() {
     return true;
   if (!g_ring.sbo_layout)
     return false;
-  VkBufferCreateInfo sb{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-  sb.size = kSboRing;
-  sb.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
-  VKOK(vkCreateBuffer(g_dev.device, &sb, nullptr, &g_ring.sbo_buf));
-  VkMemoryRequirements sr;
-  vkGetBufferMemoryRequirements(g_dev.device, g_ring.sbo_buf, &sr);
-  VkMemoryAllocateInfo sm{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-  sm.allocationSize = sr.size;
-  sm.memoryTypeIndex = FindMemoryType(sr.memoryTypeBits,
-                                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                                          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-  VKOK(vkAllocateMemory(g_dev.device, &sm, nullptr, &g_ring.sbo_mem));
-  VKOK(vkBindBufferMemory(g_dev.device, g_ring.sbo_buf, g_ring.sbo_mem, 0));
-  VKOK(vkMapMemory(g_dev.device, g_ring.sbo_mem, 0, kSboRing, 0,
-                   (void**)&g_ring.sbo_map));
+  g_ring.sbo_buf = HostBuffer(kSboRing, rhi::kBufferStorage, "raw buffer ring",
+                              &g_ring.sbo_map);
+  if (!g_ring.sbo_buf)
+    return false;
   std::memset(g_ring.sbo_map, 0, kSboRing);
-  NameObject(VK_OBJECT_TYPE_BUFFER, (u64)g_ring.sbo_buf,
-             "raw buffer ring");
   g_ring.sbo_written.assign(
       static_cast<size_t>((kSboRing + g_ring.sbo_stride - 1) /
                           g_ring.sbo_stride),
       0);
-
-  VkDescriptorPoolSize sps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC,
-                           g_ring.sbo_count};
-  VkDescriptorPoolCreateInfo spi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-  spi.maxSets = 1;
-  spi.poolSizeCount = 1;
-  spi.pPoolSizes = &sps;
-  VKOK(vkCreateDescriptorPool(g_dev.device, &spi, nullptr, &g_ring.sbo_pool));
-  VkDescriptorSetAllocateInfo sai{
-      VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-  sai.descriptorPool = g_ring.sbo_pool;
-  sai.descriptorSetCount = 1;
-  sai.pSetLayouts = &g_ring.sbo_layout;
-  VKOK(vkAllocateDescriptorSets(g_dev.device, &sai, &g_ring.sbo_set));
-  VkDescriptorBufferInfo sbinfo[kRawBufBindings];
-  VkWriteDescriptorSet sw[kRawBufBindings];
+  rhi::BindGroupDesc set;
+  set.layout = g_ring.sbo_layout;
   for (u32 i = 0; i < g_ring.sbo_count; i++) {
-    sbinfo[i] = {g_ring.sbo_buf, 0, kRawBufWindow};
-    sw[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-    sw[i].dstSet = g_ring.sbo_set;
-    sw[i].dstBinding = i;
-    sw[i].descriptorCount = 1;
-    sw[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC;
-    sw[i].pBufferInfo = &sbinfo[i];
+    rhi::BindingWrite w;
+    w.binding = i;
+    w.buffer = g_ring.sbo_buf;
+    w.range = kRawBufWindow;
+    set.writes.push_back(w);
   }
-  vkUpdateDescriptorSets(g_dev.device, g_ring.sbo_count, sw, 0, nullptr);
+  g_ring.sbo_set = Device().CreateBindGroup(set);
+  if (!g_ring.sbo_set)
+    return false;
   BASE_LOGI("gpuvk", "raw-buffer ring: {} MB, {} KB windows, {} bindings",
             (unsigned long long)(kSboRing >> 20), kRawBufWindow >> 10,
             g_ring.sbo_count);
@@ -460,48 +310,24 @@ bool AllocateTextureUpload(u32 slot,
     capacity *= 2;
   }
   TextureUploadBlock block;
-  VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-  bi.size = capacity;
-  bi.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-  if (vkCreateBuffer(g_dev.device, &bi, nullptr, &block.buffer) != VK_SUCCESS)
+  block.buffer = HostBuffer(capacity, rhi::kBufferCopySrc, "texture upload",
+                            &block.map);
+  if (!block.buffer)
     return false;
-  VkMemoryRequirements requirements;
-  vkGetBufferMemoryRequirements(g_dev.device, block.buffer, &requirements);
-  VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-  ai.allocationSize = requirements.size;
-  ai.memoryTypeIndex = FindMemoryType(requirements.memoryTypeBits,
-                                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                                          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-  if (vkAllocateMemory(g_dev.device, &ai, nullptr, &block.memory) !=
-      VK_SUCCESS) {
-    vkDestroyBuffer(g_dev.device, block.buffer, nullptr);
-    return false;
-  }
-  if (vkBindBufferMemory(g_dev.device, block.buffer, block.memory, 0) !=
-          VK_SUCCESS ||
-      vkMapMemory(g_dev.device, block.memory, 0, capacity, 0,
-                  reinterpret_cast<void**>(&block.map)) != VK_SUCCESS) {
-    vkDestroyBuffer(g_dev.device, block.buffer, nullptr);
-    vkFreeMemory(g_dev.device, block.memory, nullptr);
-    return false;
-  }
   block.capacity = capacity;
   block.offset = bytes;
   slice = {block.buffer, 0, block.map};
-  NameObject(VK_OBJECT_TYPE_BUFFER, (u64)block.buffer,
-             "texup slot %u block %zu (%llu MB)", slot, blocks.size(),
-             (unsigned long long)(capacity >> 20));
   blocks.push_back(block);
   return true;
 }
 
 void ResetTextureUploads(u32 slot) {
   GPU_BUGCHECK(slot < 2, "slot %u is not a frame-ring slot", slot);
-  // Reset runs in BeginFrame after this slot's fence wait, so no in-flight
-  // transfer references these blocks, which is the one point where destroying one is
-  // safe. Blocks grow on demand (a loading burst can leave hundreds of idle
-  // megabytes behind), so drop any block that has sat unused for ~10s of
-  // resets; the next burst simply recreates it.
+  // Reset runs in BeginFrame after this slot's submission retired, so no
+  // in-flight transfer references these blocks, which is the one point where
+  // destroying one is safe. Blocks grow on demand (a loading burst can leave
+  // hundreds of idle megabytes behind), so drop any block that has sat unused
+  // for ~10s of resets; the next burst simply recreates it.
   constexpr u64 kIdleResetsBeforeTrim = 300;
   auto& blocks = g_ring.texture_uploads[slot];
   for (size_t i = 0; i < blocks.size();) {
@@ -512,9 +338,7 @@ void ResetTextureUploads(u32 slot) {
       ++i;
       continue;
     }
-    vkUnmapMemory(g_dev.device, block.memory);
-    vkDestroyBuffer(g_dev.device, block.buffer, nullptr);
-    vkFreeMemory(g_dev.device, block.memory, nullptr);
+    Device().Destroy(block.buffer);
     blocks.erase(blocks.begin() + i);
   }
 }

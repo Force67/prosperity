@@ -472,6 +472,7 @@ struct Caps {
   u32 uniform_offset_alignment = 256;
   u32 storage_offset_alignment = 256;
   u32 max_texture_size = 16384;
+  u32 max_texture_size_3d = 2048;
   u32 max_compute_resources = 64;
 };
 

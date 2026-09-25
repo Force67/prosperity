@@ -3,6 +3,7 @@
  */
 
 #include "gpu/vulkan/vk_draw_recomp.h"
+#include "gpu/vulkan/vk_rhi.h"
 #include "base/arch.h"
 
 #include "gpu/guest_memory.h"
@@ -566,7 +567,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
       auto it = g_rts.find(d.mrt_base[i]);
       if (it == g_rts.end())
         continue;
-      const VkClearColorValue clear = ColorTargetClearValue(
+      const rhi::ClearColor clear = ColorTargetClearValue(
           d.mrt_info[i], d.mrt_clear_word[i][0], d.mrt_clear_word[i][1]);
       it->second.clear_pending = true;
       it->second.clear_src = "clear-rect";
@@ -584,8 +585,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
                     cx1, cy1, d.clear_window_tl, d.clear_window_br,
                     d.clear_screen_tl, d.clear_screen_br, d.rt_w, d.rt_h,
                     d.mrt_clear_word[i][0], d.mrt_clear_word[i][1],
-                    clear.float32[0], clear.float32[1], clear.float32[2],
-                    clear.float32[3]);
+                    clear.f[0], clear.f[1], clear.f[2], clear.f[3]);
       }
     }
     if (d.depth_base) {
@@ -660,7 +660,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
           it->second.ever_rendered && it->second.accumulated) {
         it->second.clear_pending = true;
         it->second.clear_src = "accumulate-needs-reset";
-        it->second.clear_value = VkClearColorValue{{0.f, 0.f, 0.f, 0.f}};
+        it->second.clear_value = rhi::ClearColor{};
       }
       it->second.accumulated = accumulate;
     }
@@ -802,7 +802,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
           }
           rt->clear_pending = true;
           rt->clear_src = "lazyclear-heuristic";
-          std::memcpy(rt->clear_value.float32, clear_color,
+          std::memcpy(rt->clear_value.f, clear_color,
                       sizeof(clear_color));
           // Which draws this heuristic decided were clears. It reclassifies a
           // fullscreen near-black draw as a clear and suppresses it, so a
@@ -944,23 +944,23 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   VkDescriptorSet tex_set = VK_NULL_HANDLE;
   if (rp->textured && !rp->multi_tex && !rt_as_tex) {
     if (!force_white_tex && GuestTextureUploadSupported(d.tex_dfmt, d.tex_nfmt))
-      tex_set = GetTexture(
+      tex_set = Native(GetTexture(
           d.tex_base, d.tex_w, d.tex_h, d.tex_dfmt, d.tex_nfmt, d.tex_tiling,
           d.tex_pitch, d.tex_layers, d.tex_base_array, d.tex_view_layers,
           d.tex_mip_levels, d.tex_base_mip, d.tex_view_mips, d.tex_min_lod,
           d.tex_pow2_pad, d.tex_sampler, d.tex_sampler_valid, d.tex_arrayed,
           d.tex_force_lod_zero, d.tex_depth_compare, d.tex_swizzle, d.tex_depth,
-          d.tex_is_3d);
+          d.tex_is_3d));
     // The fallback has to match the dimensionality the shader declared for this
     // binding, or the descriptor write is a type mismatch.
     if (!tex_set)
       tex_set = d.tex_null_descriptor
-                    ? (d.tex_is_3d      ? g_tex.zero_3d_set
-                       : d.tex_arrayed  ? g_tex.zero_array_set
-                                        : g_tex.zero_set)
-                    : (d.tex_is_3d     ? g_tex.white_3d_set
-                       : d.tex_arrayed ? g_tex.white_array_set
-                                       : g_tex.white_set);
+                    ? (d.tex_is_3d      ? Native(g_tex.zero_3d_set)
+                       : d.tex_arrayed  ? Native(g_tex.zero_array_set)
+                                        : Native(g_tex.zero_set))
+                    : (d.tex_is_3d     ? Native(g_tex.white_3d_set)
+                       : d.tex_arrayed ? Native(g_tex.white_array_set)
+                                       : Native(g_tex.white_set));
     if (!tex_set)
       return Decline(kGuestTex);
   }
@@ -1097,10 +1097,10 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
             VK_IMAGE_LAYOUT_STENCIL_READ_ONLY_OPTIMAL;
       } else {
         multi_views[i] = !t.storage && t.null_descriptor
-                             ? (t.is_3d      ? g_tex.zero_3d_view
-                                : t.arrayed  ? g_tex.zero_array_view
-                                             : g_tex.zero_view)
-                             : TexViewFor(t);
+                             ? (t.is_3d      ? Native(g_tex.zero_3d_view)
+                                : t.arrayed  ? Native(g_tex.zero_array_view)
+                                             : Native(g_tex.zero_view))
+                             : Native(TexViewFor(t));
         if (multi_views[i] && t.null_descriptor)
           multi_layouts[i] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
       }
@@ -1290,7 +1290,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
       }
     }
     if (!rp->multi_tex && feedback_as_tex) {
-      tex_set = SnapshotRT(g_rts[tex_base]);
+      tex_set = Native(SnapshotRT(g_rts[tex_base]));
       if (!tex_set)
         return Decline(kMidRegion);
     }
@@ -1387,12 +1387,12 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
       VkFormat multi_formats[kMaxTex] = {};
       for (u32 i = 0; i < multi_n; i++) {
         if (multi_storage[i]) {
-          multi_views[i] = g_rts[multi_storage[i]].view;
+          multi_views[i] = Native(g_rts[multi_storage[i]].view);
           multi_layouts[i] = VK_IMAGE_LAYOUT_GENERAL;
           multi_formats[i] = g_rts[multi_storage[i]].fmt;
         } else if (multi_feedback[i]) {
           auto& src = g_rts[multi_feedback[i]];
-          multi_views[i] = SampledView(src, d.texs[i].swizzle, true);
+          multi_views[i] = Native(SampledView(src, d.texs[i].swizzle, true));
           multi_layouts[i] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
           multi_formats[i] = src.fmt;
         } else if (multi_color[i]) {
@@ -1400,24 +1400,24 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
           // created with: Vulkan requires the view's numeric type to match the
           // shader's sampled type, and the two disagree whenever a pass renders
           // a plane as UNORM that a later shader reads as UINT (or vice versa).
-          multi_views[i] = SampledViewAs(
+          multi_views[i] = Native(SampledViewAs(
               g_rts[multi_color[i]], d.texs[i].swizzle,
               GuestTextureFormat(d.texs[i].dfmt, d.texs[i].nfmt),
-              &multi_formats[i]);
+              &multi_formats[i]));
           multi_layouts[i] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         } else if (multi_stencil_src[i]) {
           multi_views[i] =
-              StencilSampledView(g_depths[multi_stencil_src[i]]);
+              Native(StencilSampledView(g_depths[multi_stencil_src[i]]));
           multi_layouts[i] = VK_IMAGE_LAYOUT_STENCIL_READ_ONLY_OPTIMAL;
           multi_formats[i] = VK_FORMAT_S8_UINT;
         } else if (multi_depth[i]) {
           multi_views[i] =
-              SampledView(g_depths[multi_depth[i]], d.texs[i].swizzle);
+              Native(SampledView(g_depths[multi_depth[i]], d.texs[i].swizzle));
           multi_layouts[i] = VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL;
         }
       }
       tex_set =
-          GetMultiTexSet(d, rp->tex_set_layout, rp->tex_bindings, multi_views,
+          GetMultiTexSet(d, Native(rp->tex_set_layout), rp->tex_bindings, multi_views,
                          multi_layouts, multi_formats,
                          multi_depth);
       if (!tex_set)
@@ -1443,31 +1443,31 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
       VkFormat multi_formats[kMaxTex] = {};
       for (u32 i = 0; i < multi_n; i++) {
         if (multi_storage[i]) {
-          multi_views[i] = g_rts[multi_storage[i]].view;
+          multi_views[i] = Native(g_rts[multi_storage[i]].view);
           multi_layouts[i] = VK_IMAGE_LAYOUT_GENERAL;
           multi_formats[i] = g_rts[multi_storage[i]].fmt;
         } else if (multi_feedback[i]) {
           multi_views[i] =
-              SampledView(g_rts[multi_feedback[i]], d.texs[i].swizzle, true);
+              Native(SampledView(g_rts[multi_feedback[i]], d.texs[i].swizzle, true));
           multi_formats[i] = g_rts[multi_feedback[i]].fmt;
         } else if (multi_color[i]) {
-          multi_views[i] = SampledViewAs(
+          multi_views[i] = Native(SampledViewAs(
               g_rts[multi_color[i]], d.texs[i].swizzle,
               GuestTextureFormat(d.texs[i].dfmt, d.texs[i].nfmt),
-              &multi_formats[i]);
+              &multi_formats[i]));
         } else if (multi_stencil_src[i]) {
           multi_views[i] =
-              StencilSampledView(g_depths[multi_stencil_src[i]]);
+              Native(StencilSampledView(g_depths[multi_stencil_src[i]]));
           multi_layouts[i] = VK_IMAGE_LAYOUT_STENCIL_READ_ONLY_OPTIMAL;
           multi_formats[i] = VK_FORMAT_S8_UINT;
         } else if (multi_depth[i]) {
           multi_views[i] =
-              SampledView(g_depths[multi_depth[i]], d.texs[i].swizzle);
+              Native(SampledView(g_depths[multi_depth[i]], d.texs[i].swizzle));
           multi_layouts[i] = VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL;
         }
       }
       tex_set =
-          GetMultiTexSet(d, rp->tex_set_layout, rp->tex_bindings, multi_views,
+          GetMultiTexSet(d, Native(rp->tex_set_layout), rp->tex_bindings, multi_views,
                          multi_layouts, multi_formats,
                          multi_depth);
     }
@@ -1477,11 +1477,11 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     VkImageView views[kMaxTex] = {};
     VkImageLayout layouts[kMaxTex] = {};
     VkFormat formats[kMaxTex] = {};
-    views[0] = SampledView(g_rts[tex_base], d.tex_swizzle, true);
+    views[0] = Native(SampledView(g_rts[tex_base], d.tex_swizzle, true));
     layouts[0] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     formats[0] = g_rts[tex_base].fmt;
     tex_set =
-        GetMultiTexSet(d, g_tex.ds_layout, 1, views, layouts, formats, nullptr);
+        GetMultiTexSet(d, Native(g_tex.layout), 1, views, layouts, formats, nullptr);
     if (!tex_set)
       return Decline(kMidRegion);
   } else if (color_as_tex) {
@@ -1494,12 +1494,12 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     // In the T#'s own format, as the multi-texture path does: the swizzle
     // is written against the guest's memory order, which a BGRA target's
     // native view has already undone (GTA:SA's final copy swapped R and B).
-    views[0] = SampledViewAs(src, d.tex_swizzle,
+    views[0] = Native(SampledViewAs(src, d.tex_swizzle,
                              GuestTextureFormat(d.tex_dfmt, d.tex_nfmt),
-                             &formats[0]);
+                             &formats[0]));
     layouts[0] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     tex_set =
-        GetMultiTexSet(d, g_tex.ds_layout, 1, views, layouts, formats, nullptr);
+        GetMultiTexSet(d, Native(g_tex.layout), 1, views, layouts, formats, nullptr);
     if (!tex_set)
       return Decline(kMidRegion);
   } else if (depth_as_tex) {
@@ -1508,11 +1508,11 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
       return Decline(kMidRegion);
     VkImageView views[kMaxTex] = {};
     VkImageLayout layouts[kMaxTex] = {};
-    views[0] = SampledView(src, d.tex_swizzle);
+    views[0] = Native(SampledView(src, d.tex_swizzle));
     layouts[0] = VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL;
     const u64 depth_only[kMaxTex] = {tex_base};
     VkFormat formats[kMaxTex] = {};
-    tex_set = GetMultiTexSet(d, g_tex.ds_layout, 1, views, layouts, formats,
+    tex_set = GetMultiTexSet(d, Native(g_tex.layout), 1, views, layouts, formats,
                              depth_only);
     if (!tex_set)
       return Decline(kMidRegion);
@@ -1523,7 +1523,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   ScopeNs bind_timer(&g_ns_dr_bind);
   (void)t_bind;
   SetGuestViewport(d);
-  vkCmdBindPipeline(g_frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, rp->pipe);
+  vkCmdBindPipeline(g_frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Native(rp->pipe));
   // The CONSTANT_* blend factors read these, and they change per draw –
   // keying a pipeline on them would multiply the cache instead.
   vkCmdSetBlendConstants(g_frame.cmd, d.blend_constants);
@@ -1531,13 +1531,13 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   // both stages at offset 0 meant the second push overwrote the first.
   const VkShaderStageFlags pc_stages = mesh
       ? VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_FRAGMENT_BIT : kPcStages;
-  vkCmdPushConstants(g_frame.cmd, rp->layout, pc_stages, 0, 64,
+  vkCmdPushConstants(g_frame.cmd, Native(rp->layout), pc_stages, 0, 64,
                      d.vs_user_data);
-  vkCmdPushConstants(g_frame.cmd, rp->layout, pc_stages, 64, 64,
+  vkCmdPushConstants(g_frame.cmd, Native(rp->layout), pc_stages, 64, 64,
                      d.ps_user_data);
   if (mesh) {
     const u32 mesh_draw[4] = {draw_count, std::max(d.instance_count, 1u), 0, 0};
-    vkCmdPushConstants(g_frame.cmd, rp->layout, pc_stages, 144, 16, mesh_draw);
+    vkCmdPushConstants(g_frame.cmd, Native(rp->layout), pc_stages, 144, 16, mesh_draw);
   }
   if (gpu::gcn::PushCodeBase()) {
     // Each stage's OWN code address, for s_getpc_b64: the modules are keyed by
@@ -1548,9 +1548,9 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
                                  static_cast<u32>(d.vs_addr >> 32)};
     const u32 ps_base[2] = {static_cast<u32>(d.ps_addr),
                                  static_cast<u32>(d.ps_addr >> 32)};
-    vkCmdPushConstants(g_frame.cmd, rp->layout, pc_stages, 128,
+    vkCmdPushConstants(g_frame.cmd, Native(rp->layout), pc_stages, 128,
                        8, vs_base);
-    vkCmdPushConstants(g_frame.cmd, rp->layout, pc_stages, 136, 8,
+    vkCmdPushConstants(g_frame.cmd, Native(rp->layout), pc_stages, 136, 8,
                        ps_base);
   }
   // Copy each guest cbuffer window into the per-frame ring and bind set 1.
@@ -1677,14 +1677,17 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
         static_cast<u32>(d.gs_user_data_addr >> 32);
     std::memcpy(g_ring.ubo_map + next, offsets, sizeof(offsets));
     const u32 table_offset = static_cast<u32>(next);
+    const VkDescriptorSet indirect_set =
+        Native(g_ring.indirect_cbuf_sets[g_frame.slot_idx]);
     vkCmdBindDescriptorSets(g_frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-        rp->layout, 1, 1, &g_ring.indirect_cbuf_sets[g_frame.slot_idx],
+        Native(rp->layout), 1, 1, &indirect_set,
         1, &table_offset);
     next = (next + sizeof(offsets) + g_ring.ubo_align - 1) &
            ~(VkDeviceSize)(g_ring.ubo_align - 1);
   } else {
+    const VkDescriptorSet ubo_set = Native(g_ring.ubo_set);
     vkCmdBindDescriptorSets(g_frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            rp->layout, 1, 1, &g_ring.ubo_set, kCbufBindings,
+                            Native(rp->layout), 1, 1, &ubo_set, kCbufBindings,
                             dyn_off);
   }
   g_ring.ubo_offset = next;
@@ -1752,8 +1755,9 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     // is the device-derived sbo_count, not the compile-time ceiling. Passing
     // the ceiling is a spec violation on every device that reports fewer than
     // 16 (the Vulkan floor is 4).
+    const VkDescriptorSet sbo_set = Native(g_ring.sbo_set);
     vkCmdBindDescriptorSets(g_frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            rp->layout, 2, 1, &g_ring.sbo_set,
+                            Native(rp->layout), 2, 1, &sbo_set,
                             g_ring.sbo_count, sbo_dyn);
     // DELTA_GPU_RAWBUF: which set-2 bindings a draw actually got, so a shader
     // reading zeros can be told apart from one reading real guest data.
@@ -1770,12 +1774,14 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   }
   if (tex_set)
     vkCmdBindDescriptorSets(g_frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            rp->layout, 0, 1, &tex_set, 0, nullptr);
+                            Native(rp->layout), 0, 1, &tex_set, 0, nullptr);
   // The shared-LDS scratch never changes: one set, bound whenever the pipeline
   // declares it.
-  if (rp->shared_lds)
+  if (rp->shared_lds) {
+    const VkDescriptorSet lds_set = Native(g_ring.lds_set);
     vkCmdBindDescriptorSets(g_frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            rp->layout, 3, 1, &g_ring.lds_set, 0, nullptr);
+                            Native(rp->layout), 3, 1, &lds_set, 0, nullptr);
+  }
   // Commit ring uploads only after every fallible pipeline, texture, region and
   // cbuffer decision has succeeded. Bindings served by the per-frame cache
   // were copied by an earlier draw and only rebind.
@@ -1805,7 +1811,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     VkBuffer bufs[8];
     VkDeviceSize offs[8];
     for (u32 j = 0; j < nbind; j++) {
-      bufs[j] = g_ring.vb;
+      bufs[j] = Native(g_ring.vb);
       offs[j] = vb_cached[j] != VkDeviceSize(-1) ? vb_cached[j]
                                                  : voff + bind_off[j];
     }
@@ -1813,7 +1819,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   }
   if (indexed)
     vkCmdBindIndexBuffer(
-        g_frame.cmd, g_ring.ib,
+        g_frame.cmd, Native(g_ring.ib),
         ib_cached != VkDeviceSize(-1) ? ib_cached : ioff,
         d.index_type == 1 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16);
   if (kDrawTrace && draw_count >= 300) {
@@ -1939,10 +1945,10 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
       // single-texture draw reported MISS even when its upload was fine, which
       // is a false lead pointing straight at the texture cache.
       const bool legacy_resolved =
-          tex_set && tex_set != g_tex.white_set &&
-          tex_set != g_tex.white_array_set && tex_set != g_tex.white_3d_set &&
-          tex_set != g_tex.zero_set && tex_set != g_tex.zero_array_set &&
-          tex_set != g_tex.zero_3d_set;
+          tex_set && tex_set != Native(g_tex.white_set) &&
+          tex_set != Native(g_tex.white_array_set) && tex_set != Native(g_tex.white_3d_set) &&
+          tex_set != Native(g_tex.zero_set) && tex_set != Native(g_tex.zero_array_set) &&
+          tex_set != Native(g_tex.zero_3d_set);
       const u64 shown_color[1] = {color_as_tex ? tex_base : 0};
       const u64 shown_feedback[1] = {feedback_as_tex ? tex_base : 0};
       const u64 shown_depth[1] = {depth_as_tex ? tex_base : 0};
@@ -2236,10 +2242,10 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     // either way. A `tex_set` that is one of the 1x1 defaults resolved to
     // nothing, which is the case worth naming.
     const bool legacy_default =
-        !tex_set || tex_set == g_tex.white_set ||
-        tex_set == g_tex.white_array_set || tex_set == g_tex.white_3d_set ||
-        tex_set == g_tex.zero_set || tex_set == g_tex.zero_array_set ||
-        tex_set == g_tex.zero_3d_set;
+        !tex_set || tex_set == Native(g_tex.white_set) ||
+        tex_set == Native(g_tex.white_array_set) || tex_set == Native(g_tex.white_3d_set) ||
+        tex_set == Native(g_tex.zero_set) || tex_set == Native(g_tex.zero_array_set) ||
+        tex_set == Native(g_tex.zero_3d_set);
     const u64 legacy_color = color_as_tex ? tex_base : 0;
     const u64 legacy_feedback = feedback_as_tex ? tex_base : 0;
     const u64 legacy_depth = depth_as_tex ? tex_base : 0;

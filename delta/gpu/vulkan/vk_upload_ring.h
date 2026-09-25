@@ -14,12 +14,12 @@
 #include <vector>
 
 #include "gpu/gcn/gcn_translate.h"
+#include "gpu/rhi/device.h"
 
 namespace gpu::vk {
 
 struct TextureUploadBlock {
-  VkBuffer buffer = VK_NULL_HANDLE;
-  VkDeviceMemory memory = VK_NULL_HANDLE;
+  rhi::Buffer* buffer = nullptr;
   u8* map = nullptr;
   VkDeviceSize capacity = 0;
   VkDeviceSize offset = 0;
@@ -29,7 +29,7 @@ struct TextureUploadBlock {
 };
 
 struct TextureUploadSlice {
-  VkBuffer buffer = VK_NULL_HANDLE;
+  rhi::Buffer* buffer = nullptr;
   VkDeviceSize offset = 0;
   u8* map = nullptr;
 };
@@ -84,42 +84,36 @@ constexpr VkDeviceSize kLdsScratch =
 struct UploadRings {
   // Vertex ring: interleaved pos+colour+uv for the heuristic path, the raw
   // guest vertex records for the recompiled path.
-  VkBuffer vb = VK_NULL_HANDLE;
-  VkDeviceMemory vb_mem = VK_NULL_HANDLE;
+  rhi::Buffer* vb = nullptr;
   u8* vb_map = nullptr;
   VkDeviceSize vb_offset = 0, vb_end = kVbRing;
 
   // Index ring: 32-bit indices (16-bit guest indices are widened on upload).
-  VkBuffer ib = VK_NULL_HANDLE;
-  VkDeviceMemory ib_mem = VK_NULL_HANDLE;
+  rhi::Buffer* ib = nullptr;
   u8* ib_map = nullptr;
   VkDeviceSize ib_offset = 0, ib_end = kIbRing;
 
   // Recomp cbuffer ring: per-draw VS/PS constant buffers live at set 1 bindings
   // 0..kCbufBindings-1, each addressed by a dynamic offset into this ring.
   // empty_layout fills set 0 for untextured recomp draws.
-  VkBuffer ubo_buf = VK_NULL_HANDLE;
-  VkDeviceMemory ubo_mem = VK_NULL_HANDLE;
+  rhi::Buffer* ubo_buf = nullptr;
   u8* ubo_map = nullptr;
   VkDeviceSize ubo_bytes = 0;  // latched when allocated after title settings load
   VkDeviceSize ubo_offset = 0, ubo_end = kUboRing;
   u32 ubo_align = 256;
   VkDeviceSize ubo_stride = kCbufWindow;
   bool zero_window_initialized = false;
-  VkDescriptorSetLayout ubo_layout = VK_NULL_HANDLE;
-  VkDescriptorSetLayout empty_layout = VK_NULL_HANDLE;
-  VkDescriptorPool ubo_pool = VK_NULL_HANDLE;
-  VkDescriptorSet ubo_set = VK_NULL_HANDLE;
-  VkDescriptorSetLayout indirect_cbuf_layout = VK_NULL_HANDLE;
-  VkDescriptorPool indirect_cbuf_pool = VK_NULL_HANDLE;
-  VkDescriptorSet indirect_cbuf_sets[2]{};
+  rhi::BindGroupLayout* ubo_layout = nullptr;
+  rhi::BindGroupLayout* empty_layout = nullptr;
+  rhi::BindGroup* ubo_set = nullptr;
+  rhi::BindGroupLayout* indirect_cbuf_layout = nullptr;
+  rhi::BindGroup* indirect_cbuf_sets[2]{};
 
   // Raw-buffer ring: same shape as the cbuffer ring (fixed windows selected by
   // a dynamic offset), but storage buffers, because a MUBUF address is a
   // per-lane index rather than a uniform offset. Window 0 stays zero and is
   // what an unresolved binding points at.
-  VkBuffer sbo_buf = VK_NULL_HANDLE;
-  VkDeviceMemory sbo_mem = VK_NULL_HANDLE;
+  rhi::Buffer* sbo_buf = nullptr;
   u8* sbo_map = nullptr;
   VkDeviceSize sbo_offset = 0, sbo_end = kSboRing;
   // Bindings actually created, = min(device dynamic-SSBO limit, kRawBufBindings).
@@ -129,19 +123,16 @@ struct UploadRings {
   u32 sbo_align = 256;
   VkDeviceSize sbo_stride = kRawBufWindow;
   std::vector<u32> sbo_written;
-  VkDescriptorSetLayout sbo_layout = VK_NULL_HANDLE;
-  VkDescriptorPool sbo_pool = VK_NULL_HANDLE;
-  VkDescriptorSet sbo_set = VK_NULL_HANDLE;
+  rhi::BindGroupLayout* sbo_layout = nullptr;
+  rhi::BindGroup* sbo_set = nullptr;
 
   // Shared LDS (set 3): one device-local block per wave for a graphics stage
   // that stages through LDS. Nothing reads it back on the CPU and nothing
   // survives a draw, so it is plain device memory written and read by the
   // shader alone.
-  VkBuffer lds_buf = VK_NULL_HANDLE;
-  VkDeviceMemory lds_mem = VK_NULL_HANDLE;
-  VkDescriptorSetLayout lds_layout = VK_NULL_HANDLE;
-  VkDescriptorPool lds_pool = VK_NULL_HANDLE;
-  VkDescriptorSet lds_set = VK_NULL_HANDLE;
+  rhi::Buffer* lds_buf = nullptr;
+  rhi::BindGroupLayout* lds_layout = nullptr;
+  rhi::BindGroup* lds_set = nullptr;
   u8* lds_map = nullptr;  // only under DELTA_GPU_LDSDUMP
 
   // Texture uploads are recorded into the active frame command buffer. Each
@@ -151,7 +142,7 @@ struct UploadRings {
 
 extern UploadRings& g_ring;
 
-bool CreateUploadRings(const VkPhysicalDeviceProperties& props);
+bool CreateUploadRings();
 bool EnsureCbufRing();
 // Allocate the raw-buffer ring + its descriptor set. Deferred to the first
 // draw that needs one: the ring is large, and a title whose vertex fetches the

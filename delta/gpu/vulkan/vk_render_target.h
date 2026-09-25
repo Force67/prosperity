@@ -15,7 +15,7 @@
 #include <vector>
 
 #include "gpu/render/command.h"
-#include "gpu/vulkan/vk_memory.h"
+#include "gpu/rhi/device.h"
 
 namespace gpu::vk {
 
@@ -23,29 +23,29 @@ namespace gpu::vk {
 // samples as a texture, so RT-bind and texture-sample resolve to the same image via
 // the address page table and render-to-texture/MRT just work.
 struct RTarget {
-  VkImage image = VK_NULL_HANDLE;
-  ImageAllocation allocation;
-  VkImageView view = VK_NULL_HANDLE;
-  VkDescriptorSet set = VK_NULL_HANDLE;  // for sampling this RT as a texture
-  // Sampling an image while it is also a color attachment requires Vulkan's
-  // attachment-feedback-loop extension. Keep a lazy copy instead so the shader
+  rhi::Texture* texture = nullptr;
+  VkImage image = VK_NULL_HANDLE;  // Native(texture), for code still on Vulkan
+  rhi::TextureView* view = nullptr;
+  rhi::BindGroup* set = nullptr;  // for sampling this RT as a texture
+  // Sampling an image while it is also a color attachment needs a feedback
+  // loop the APIs do not all have. Keep a lazy copy instead so the shader
   // reads the attachment contents as they existed before the draw.
-  VkImage feedback_image = VK_NULL_HANDLE;
-  ImageAllocation feedback_allocation;
-  VkImageView feedback_view = VK_NULL_HANDLE;
-  VkDescriptorSet feedback_set = VK_NULL_HANDLE;
-  std::unordered_map<u32, VkImageView> sampled_views;
+  rhi::Texture* feedback_texture = nullptr;
+  VkImage feedback_image = VK_NULL_HANDLE;  // Native(feedback_texture)
+  rhi::TextureView* feedback_view = nullptr;
+  rhi::BindGroup* feedback_set = nullptr;
+  std::unordered_map<u32, rhi::TextureView*> sampled_views;
   // Views of the same image in a different (size-compatible) format, keyed by
   // swizzle | format<<16. See SampledViewAs.
-  std::unordered_map<u32, VkImageView> alias_views;
-  std::unordered_map<u32, VkImageView> feedback_sampled_views;
+  std::unordered_map<u32, rhi::TextureView*> alias_views;
+  std::unordered_map<u32, rhi::TextureView*> feedback_sampled_views;
   VkImageLayout feedback_layout = VK_IMAGE_LAYOUT_UNDEFINED;
   u32 w = 0, h = 0;
   // Slices of a target a GS renders layered (gl_Layer). Such a target is a 3D
   // image: `view` is then the 2D-array attachment view over every slice and
   // `volume_view` the 3D view a volume T# samples.
   u32 depth = 1;
-  VkImageView volume_view = VK_NULL_HANDLE;
+  rhi::TextureView* volume_view = nullptr;
   VkFormat fmt =
       VK_FORMAT_B8G8R8A8_UNORM;  // identity: addr alone doesn't pin format
   bool is_depth = false;         // depth/stencil attachment (MRT/depth task)
@@ -69,7 +69,7 @@ struct RTarget {
       false;  // a fullscreen black clear was requested; applied lazily
               // (as loadOp=CLEAR) only when later content redraws this RT
               // in the same frame.
-  VkClearColorValue clear_value{{0.0f, 0.0f, 0.0f, 0.0f}};
+  rhi::ClearColor clear_value{};
   // Which mechanism asked for that clear (static string, DELTA_GPU_CLEARTRACE
   // prints it). A clear that wipes live content is only fixable once you know
   // whether the guest asked for it or one of our heuristics did.
@@ -111,23 +111,23 @@ extern std::unordered_map<u64, RTarget>& g_rts;
 // image preserves the separate PS4 Z and stencil planes for raster and compute.
 constexpr VkFormat kDepthFormat = VK_FORMAT_D32_SFLOAT_S8_UINT;
 struct DepthTarget {
-  VkImage image = VK_NULL_HANDLE;
-  ImageAllocation allocation;
-  VkImageView view = VK_NULL_HANDLE;  // depth-only sampled view
+  rhi::Texture* texture = nullptr;
+  VkImage image = VK_NULL_HANDLE;  // Native(texture), for code still on Vulkan
+  rhi::TextureView* view = nullptr;  // depth-only sampled view
   // Stencil-plane sampled view, made on demand. A deferred renderer reads the
   // stencil plane as an R8_UINT texture to recover the material id it wrote
   // during the G-buffer pass; without this the address resolves to whatever
   // colour target happens to overlap it and the shader discards every pixel.
-  VkImageView stencil_view = VK_NULL_HANDLE;
-  VkImageView attachment_view = VK_NULL_HANDLE;
+  rhi::TextureView* stencil_view = nullptr;
+  rhi::TextureView* attachment_view = nullptr;
   // Array layers, and attachment views of the layers past 0, made on demand.
   u32 layers = 1;
-  std::vector<VkImageView> layer_views;
+  std::vector<rhi::TextureView*> layer_views;
   // Layers a clear still has to reach: a clear of an array lands on each
   // layer's first bind, not only on whichever layer is bound first.
   u32 clear_layers = 0;
-  VkDescriptorSet set = VK_NULL_HANDLE;
-  std::unordered_map<u32, VkImageView> sampled_views;
+  rhi::BindGroup* set = nullptr;
+  std::unordered_map<u32, rhi::TextureView*> sampled_views;
   u32 w = 0, h = 0;
   // DB_DEPTH_SIZE's padded geometry: how much guest memory this Z surface
   // actually owns, which is not the image size when the guest binds a
@@ -192,15 +192,15 @@ DepthTarget* GetDepthRT(u64 base,
 
 // Sampling an image while it is also a colour attachment needs Vulkan's
 // attachment-feedback-loop extension; copy it instead and sample the copy.
-VkDescriptorSet SnapshotRT(RTarget& rt);
+rhi::BindGroup* SnapshotRT(RTarget& rt);
 
-VkImageView SampledView(RTarget& rt, u32 swizzle, bool feedback = false);
+rhi::TextureView* SampledView(RTarget& rt, u32 swizzle, bool feedback = false);
 // Sampled view reinterpreted into `want` (same texel size) so the numeric type matches
 // the shader's OpTypeImage; `used` returns the format actually created, which the
 // caller needs to decide whether the binding may be filtered.
-VkImageView SampledViewAs(RTarget& rt, u32 swizzle, VkFormat want,
-                          VkFormat* used = nullptr);
-VkImageView SampledView(DepthTarget& depth, u32 swizzle);
+rhi::TextureView* SampledViewAs(RTarget& rt, u32 swizzle, VkFormat want,
+                                VkFormat* used = nullptr);
+rhi::TextureView* SampledView(DepthTarget& depth, u32 swizzle);
 
 // Resolve a sampled guest address to its live image (0 = none), making the variant
 // matching the sampled geometry live when the current one cannot serve the sample.
@@ -217,7 +217,7 @@ u64 ResolveSampledDepth(u64 addr, u32 w, u32 h);
 // or 0. Keyed exactly, because the stencil plane is a separate guest surface.
 u64 ResolveSampledStencil(u64 addr);
 // Sampled view of a depth target's stencil plane (S8_UINT), created on demand.
-VkImageView StencilSampledView(DepthTarget& depth);
+rhi::TextureView* StencilSampledView(DepthTarget& depth);
 
 // Preserve an already-rendered depth target for a later compute read before a
 // same-frame clear destroys it. No-op when no compute range aliases the target.

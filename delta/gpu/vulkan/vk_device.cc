@@ -423,9 +423,7 @@ bool CreateDevice() {
   if (!CreateFrameSlots())
     return false;
 
-  VkPhysicalDeviceProperties props;
-  vkGetPhysicalDeviceProperties(g_dev.phys, &props);
-  if (!CreateUploadRings(props))
+  if (!CreateUploadRings())
     return false;
   return true;
 }

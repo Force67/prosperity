@@ -3,6 +3,7 @@
  */
 
 #include <cstdio>
+#include <algorithm>
 #include <cstring>
 #include <memory>
 
@@ -699,6 +700,9 @@ bool VulkanDevice::Init(const VulkanOptions& options) {
   if (!caps_.storage_offset_alignment)
     caps_.storage_offset_alignment = 1;
   caps_.max_texture_size = lim.maxImageDimension2D;
+  caps_.max_texture_size_3d = lim.maxImageDimension3D;
+  max_lod_bias_ = lim.maxSamplerLodBias;
+  max_anisotropy_ = lim.maxSamplerAnisotropy;
   caps_.max_compute_resources =
       std::min(lim.maxPerStageDescriptorStorageBuffers,
                lim.maxDescriptorSetStorageBuffers);
@@ -938,13 +942,13 @@ rhi::Sampler* VulkanDevice::CreateSampler(const rhi::SamplerDesc& desc) {
   si.addressModeU = address(desc.address_u);
   si.addressModeV = address(desc.address_v);
   si.addressModeW = address(desc.address_w);
-  si.mipLodBias = desc.lod_bias;
+  si.mipLodBias = std::clamp(desc.lod_bias, -max_lod_bias_, max_lod_bias_);
   si.minLod = desc.min_lod;
   si.maxLod = desc.max_lod;
   si.anisotropyEnable =
       desc.max_anisotropy > 1.0f && caps_.sampler_anisotropy ? VK_TRUE
                                                              : VK_FALSE;
-  si.maxAnisotropy = desc.max_anisotropy;
+  si.maxAnisotropy = std::min(desc.max_anisotropy, max_anisotropy_);
   si.compareEnable = desc.compare_enable ? VK_TRUE : VK_FALSE;
   si.compareOp = ToVkCompare(desc.compare);
   switch (desc.border) {

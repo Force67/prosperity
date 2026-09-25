@@ -972,8 +972,8 @@ void BeginFrame(Renderer& renderer) {
   // DELTA_GPU_LDSDUMP it is poisoned instead, so the dump separates "a shader
   // wrote zero here" from "nothing wrote here at all".
   if (g_ring.lds_buf)
-    vkCmdFillBuffer(g_frame.cmd, g_ring.lds_buf, 0, kLdsScratch,
-                    kLdsDump ? kLdsPoison : 0u);
+    g_frame.list->FillBuffer(g_ring.lds_buf, 0, kLdsScratch,
+                             kLdsDump ? kLdsPoison : 0u);
   if (slot.timestamps) {
     g_frame.list->ResetTimestamps(slot.timestamps, 0, 2);
     g_frame.list->WriteTimestamp(slot.timestamps, 0);

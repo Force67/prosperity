@@ -64,5 +64,6 @@ void UnlockQueue(rhi::Device* device);
 VkFormat ToVkFormat(rhi::Format format);
 rhi::Format FromVkFormat(VkFormat format);
 VkImageLayout ToVkLayout(rhi::TextureState state, u8 aspect);
+rhi::TextureState FromVkLayout(VkImageLayout layout);
 
 }  // namespace gpu::vk
