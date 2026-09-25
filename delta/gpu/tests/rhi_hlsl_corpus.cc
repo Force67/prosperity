@@ -4,7 +4,7 @@
 // --pso, builds a pipeline on the D3D12 device (vkd3d on Linux, which also
 // translates the DXIL). Prints per-stage counts and the top failure reasons.
 //
-//   rhi_hlsl_corpus [--pso] [--dump] [--limit N] [--sm 61] [--jobs 8]
+//   rhi_hlsl_corpus [--pso] [--dump | --fails] [--limit N] [--sm 61] [--jobs 8]
 //                   [dir|file.spv]...
 //
 // The default input is ~/.cache/ps4delta/spirv.
@@ -339,7 +339,7 @@ void Top(const char* title, const std::map<std::string, int>& reasons) {
 }  // namespace
 
 int main(int argc, char** argv) {
-  bool pso = false, dump = false;
+  bool pso = false, dump = false, fails = false;
   size_t limit = ~size_t(0);
   u32 shader_model = 60;
   u32 jobs = 8;
@@ -349,6 +349,8 @@ int main(int argc, char** argv) {
       pso = true;
     else if (!std::strcmp(argv[i], "--dump"))
       dump = true;
+    else if (!std::strcmp(argv[i], "--fails"))
+      fails = true;
     else if (!std::strcmp(argv[i], "--limit") && i + 1 < argc)
       limit = std::strtoull(argv[++i], nullptr, 10);
     else if (!std::strcmp(argv[i], "--sm") && i + 1 < argc)
@@ -425,7 +427,7 @@ int main(int argc, char** argv) {
           o.read_only_storage.emplace_back(set, b.binding);
     LoweredShader lowered;
     const bool ok = LowerToHlsl(m.words.data(), m.words.size(), o, &lowered);
-    if (dump) {
+    if (dump || (fails && !ok)) {
       std::lock_guard<std::mutex> lock(mutex);
       if (ok)
         std::printf("// %s\n%s\n", files[n].c_str(), lowered.hlsl.c_str());
@@ -446,7 +448,7 @@ int main(int argc, char** argv) {
       stats[stage].lowered++;
       if (!compiled) {
         dxc_fail[stage + ": " + Reason(error)]++;
-        if (dump)
+        if (dump || fails)
           std::printf("%s: dxc: %s\n", files[n].c_str(), error.c_str());
         return;
       }
@@ -466,6 +468,8 @@ int main(int argc, char** argv) {
       stats[stage].pso++;
     else
       pso_fail[stage + ": " + failure]++;
+    if (fails && !failure.empty())
+      std::printf("%s: pipeline: %s\n", files[n].c_str(), failure.c_str());
   };
   std::vector<std::thread> threads;
   for (u32 t = 0; t < jobs; t++)

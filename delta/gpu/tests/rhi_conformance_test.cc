@@ -1275,6 +1275,8 @@ TEST_P(RhiConformance, StorageBindingsAndSubgroups) {
   EXPECT_EQ(out[kN - 1], kN * 3 + 2);
   EXPECT_EQ(out[128], kN) << "runtime array length";
   EXPECT_EQ(out[129], device_->caps().subgroup_size) << "subgroup size";
+  EXPECT_EQ(out[130], 5u) << "ballot find LSB";
+  EXPECT_EQ(out[131], 6u) << "ballot find MSB";
 }
 
 // The fragment shader reads one of three vertex outputs.

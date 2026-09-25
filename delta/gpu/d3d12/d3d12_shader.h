@@ -77,6 +77,10 @@ class Dxc {
                       std::string* error);
 };
 
+// Rewrites what SPIRV-Cross cannot lower to HLSL into what it can
+// (d3d12_spirv_patch.cc). Returns the input unchanged when nothing applies.
+std::vector<u32> PatchSpirvForHlsl(const u32* words, size_t count);
+
 // SPIR-V hash for caches (FNV-1a, 64 bits).
 u64 HashWords(const u32* words, size_t count, u64 seed = 0);
 

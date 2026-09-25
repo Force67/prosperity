@@ -180,32 +180,42 @@ void MatchInputs(std::string& hlsl, const std::string& producer) {
   hlsl.replace(begin, end - begin, out);
 }
 
-// GLSL's extended integer arithmetic, which SPIRV-Cross emits by name.
+// GLSL's extended integer arithmetic, which SPIRV-Cross emits by name. Bit
+// arithmetic only: DXC folds the obvious 64-bit and compare forms into LLVM
+// overflow intrinsics that DXIL validation rejects.
 std::string ExtendedArithmetic(const std::string& hlsl) {
   std::string out;
   for (const char* n : {"", "2", "3", "4"}) {
     const std::string u = std::string("uint") + n, i = std::string("int") + n;
-    const std::string u64 = std::string("uint64_t") + n;
-    const std::string i64 = std::string("int64_t") + n;
     if (hlsl.find("uaddCarry(") != std::string::npos)
       out += u + " uaddCarry(" + u + " x, " + u + " y, out " + u +
-             " carry) { " + u + " s = x + y; carry = " + u +
-             "(s < x); return s; }\n";
+             " carry) { " + u +
+             " s = x + y; carry = ((x & y) | ((x | y) & ~s)) >> 31; "
+             "return s; }\n";
     if (hlsl.find("usubBorrow(") != std::string::npos)
       out += u + " usubBorrow(" + u + " x, " + u + " y, out " + u +
-             " borrow) { borrow = " + u + "(x < y); return x - y; }\n";
-    if (hlsl.find("umulExtended(") != std::string::npos)
+             " borrow) { " + u +
+             " d = x - y; borrow = ((~x & y) | (~(x ^ y) & d)) >> 31; "
+             "return d; }\n";
+    const std::string mul =
+        "{ " + u + " xl = x & 0xffffu, xh = x >> 16, yl = y & 0xffffu, "
+        "yh = y >> 16; " + u + " lh = xl * yh, hl = xh * yl; " + u +
+        " mid = ((xl * yl) >> 16) + (lh & 0xffffu) + (hl & 0xffffu); "
+        "msb = xh * yh + (lh >> 16) + (hl >> 16) + (mid >> 16); "
+        "lsb = x * y; }\n";
+    if (hlsl.find("umulExtended(") != std::string::npos ||
+        hlsl.find("imulExtended(") != std::string::npos)
       out += "void umulExtended(" + u + " x, " + u + " y, out " + u +
-             " msb, out " + u + " lsb) { " + u64 + " p = " + u64 + "(x) * " +
-             u64 + "(y); msb = " + u + "(p >> 32); lsb = " + u + "(p); }\n";
+             " msb, out " + u + " lsb) " + mul;
     if (hlsl.find("imulExtended(") != std::string::npos)
       out += "void imulExtended(" + i + " x, " + i + " y, out " + i +
-             " msb, out " + i + " lsb) { " + i64 + " p = " + i64 + "(x) * " +
-             i64 + "(y); msb = " + i + "(p >> 32); lsb = " + i + "(p); }\n";
+             " msb, out " + i + " lsb) { " + u + " hi, lo; umulExtended(" +
+             u + "(x), " + u + "(y), hi, lo); msb = " + i + "(hi - (x < 0 ? " +
+             u + "(y) : 0u) - (y < 0 ? " + u + "(x) : 0u)); lsb = " + i +
+             "(lo); }\n";
   }
   return out;
 }
-
 // SPIRV-Cross cannot express this block with cbuffer packing rules: returns
 // the variable's id from its message.
 bool PackingFailure(const std::string& message, u32* id) {
@@ -353,6 +363,11 @@ std::string Lower(const u32* words,
            ")\n{\n    uint3 delta_group_base;\n};\n\n" + hlsl;
   }
   if (model == spv::ExecutionModelGeometry) {
+    // A geometry shader without inputs or outputs still names both structs.
+    for (const char* name : {"SPIRV_Cross_Output", "SPIRV_Cross_Input"})
+      if (hlsl.find(std::string("struct ") + name) == std::string::npos)
+        hlsl = std::string("struct ") + name +
+               "\n{\n    float4 delta_unused : TEXCOORD31;\n};\n\n" + hlsl;
     // SPIRV-Cross copies gl_in[].gl_Position into gl_PositionIn but still
     // reads the GLSL name.
     static const std::regex gl_in(R"(gl_in\[([^\]]+)\]\.gl_Position)");
@@ -384,11 +399,13 @@ bool LowerToHlsl(const u32* words,
                  size_t count,
                  const LowerOptions& options,
                  LoweredShader* out) {
+  const std::vector<u32> patched = PatchSpirvForHlsl(words, count);
   std::vector<u32> flatten;
   for (;;) {
     *out = {};
     try {
-      out->hlsl = Lower(words, count, options, flatten, out);
+      out->hlsl =
+          Lower(patched.data(), patched.size(), options, flatten, out);
       break;
     } catch (const std::exception& e) {
       u32 id;
