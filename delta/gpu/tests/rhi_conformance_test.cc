@@ -971,9 +971,9 @@ TEST_P(RhiConformance, Timestamps) {
   Buffer* buf = Own(device_->CreateBuffer(bd));
   list_->Begin();
   list_->ResetTimestamps(pool, 0, 2);
-  list_->WriteTimestamp(pool, 0);
+  list_->WriteTimestamp(pool, 0, true);
   list_->FillBuffer(buf, 0, bd.size, 7);
-  list_->WriteTimestamp(pool, 1);
+  list_->WriteTimestamp(pool, 1, false);
   Submit();
   list_->End();
   u64 t[2] = {};

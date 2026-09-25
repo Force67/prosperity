@@ -1336,7 +1336,11 @@ void D3D12CommandList::UpdateBuffer(rhi::Buffer* buffer,
 
 void D3D12CommandList::ResetTimestamps(rhi::TimestampPool*, u32, u32) {}
 
-void D3D12CommandList::WriteTimestamp(rhi::TimestampPool* pool, u32 index) {
+// D3D12 has one kind of timestamp, taken when the preceding work is done;
+// `start` changes nothing.
+void D3D12CommandList::WriteTimestamp(rhi::TimestampPool* pool,
+                                      u32 index,
+                                      bool /*start*/) {
   auto* p = static_cast<D3D12TimestampPool*>(pool);
   FlushBarriers();
   cmd->EndQuery(p->heap, D3D12_QUERY_TYPE_TIMESTAMP, index);

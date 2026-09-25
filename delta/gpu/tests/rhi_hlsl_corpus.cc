@@ -4,13 +4,15 @@
 // --pso, builds a pipeline on the D3D12 device (vkd3d on Linux, which also
 // translates the DXIL). Prints per-stage counts and the top failure reasons.
 //
-//   rhi_hlsl_corpus [--pso] [--dump] [--limit N] [--sm 61] [dir|file.spv]...
+//   rhi_hlsl_corpus [--pso] [--dump] [--limit N] [--sm 61] [--jobs 8]
+//                   [dir|file.spv]...
 //
 // The default input is ~/.cache/ps4delta/spirv.
 
 #include <spirv_cross.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -19,7 +21,9 @@
 #include <fstream>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "base/arch.h"
@@ -338,6 +342,7 @@ int main(int argc, char** argv) {
   bool pso = false, dump = false;
   size_t limit = ~size_t(0);
   u32 shader_model = 60;
+  u32 jobs = 8;
   std::vector<fs::path> inputs;
   for (int i = 1; i < argc; i++) {
     if (!std::strcmp(argv[i], "--pso"))
@@ -348,6 +353,8 @@ int main(int argc, char** argv) {
       limit = std::strtoull(argv[++i], nullptr, 10);
     else if (!std::strcmp(argv[i], "--sm") && i + 1 < argc)
       shader_model = static_cast<u32>(std::atoi(argv[++i]));
+    else if (!std::strcmp(argv[i], "--jobs") && i + 1 < argc)
+      jobs = std::max(1, std::atoi(argv[++i]));
     else
       inputs.emplace_back(argv[i]);
   }
@@ -386,21 +393,26 @@ int main(int argc, char** argv) {
   std::map<std::string, Stats> stats;
   std::map<std::string, int> lower_fail, dxc_fail, pso_fail;
   int barycentric = 0, buffer_address = 0, separate = 0;
-  for (size_t n = 0; n < files.size(); n++) {
+  std::mutex mutex;
+  std::atomic<size_t> next{0}, done{0};
+  auto process = [&](size_t n) {
     Module m;
     m.words = ReadWords(files[n]);
     std::string error;
     if (!Reflect(m.words, &m, &error)) {
+      std::lock_guard<std::mutex> lock(mutex);
       stats["??"].total++;
       lower_fail["reflect: " + Reason(error)]++;
-      continue;
+      return;
     }
-    Stats& s = stats[StageName(m.stage)];
-    s.total++;
-    barycentric += m.barycentric;
-    buffer_address += m.buffer_address;
-    separate += m.separate != 0;
-
+    const std::string stage = StageName(m.stage);
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      stats[stage].total++;
+      barycentric += m.barycentric;
+      buffer_address += m.buffer_address;
+      separate += m.separate != 0;
+    }
     LowerOptions o;
     o.stage = m.stage;
     o.shader_model = std::max(shader_model, m.barycentric ? 61u : 60u);
@@ -412,41 +424,60 @@ int main(int argc, char** argv) {
         if (b.type == rhi::BindingType::kStorageBuffer && b.read_only)
           o.read_only_storage.emplace_back(set, b.binding);
     LoweredShader lowered;
-    if (!LowerToHlsl(m.words.data(), m.words.size(), o, &lowered)) {
-      lower_fail[std::string(StageName(m.stage)) + ": " +
-                 Reason(lowered.error)]++;
-      if (dump)
+    const bool ok = LowerToHlsl(m.words.data(), m.words.size(), o, &lowered);
+    if (dump) {
+      std::lock_guard<std::mutex> lock(mutex);
+      if (ok)
+        std::printf("// %s\n%s\n", files[n].c_str(), lowered.hlsl.c_str());
+      else
         std::printf("%s: lower: %s\n", files[n].c_str(),
                     lowered.error.c_str());
-      continue;
     }
-    s.lowered++;
-    if (dump)
-      std::printf("// %s\n%s\n", files[n].c_str(), lowered.hlsl.c_str());
+    if (!ok) {
+      std::lock_guard<std::mutex> lock(mutex);
+      lower_fail[stage + ": " + Reason(lowered.error)]++;
+      return;
+    }
     std::vector<u8> dxil;
-    if (!Dxc::Compile(lowered.hlsl, lowered.profile, &dxil, &error)) {
-      dxc_fail[std::string(StageName(m.stage)) + ": " + Reason(error)]++;
-      if (dump)
-        std::printf("%s: dxc: %s\n", files[n].c_str(), error.c_str());
-      continue;
-    }
-    s.compiled++;
-    if (checker) {
-      if (m.barycentric || m.buffer_address) {
-        pso_fail[std::string(StageName(m.stage)) +
-                 (m.barycentric ? ": barycentrics (device lacks SM 6.1)"
-                                : ": buffer device address")]++;
-        continue;
+    const bool compiled =
+        Dxc::Compile(lowered.hlsl, lowered.profile, &dxil, &error);
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      stats[stage].lowered++;
+      if (!compiled) {
+        dxc_fail[stage + ": " + Reason(error)]++;
+        if (dump)
+          std::printf("%s: dxc: %s\n", files[n].c_str(), error.c_str());
+        return;
       }
-      const std::string r = checker->Check(m, dxil);
-      if (r.empty())
-        s.pso++;
-      else
-        pso_fail[std::string(StageName(m.stage)) + ": " + r]++;
+      stats[stage].compiled++;
     }
-    if ((n + 1) % 500 == 0)
-      std::fprintf(stderr, "%zu / %zu\n", n + 1, files.size());
-  }
+    if (!checker)
+      return;
+    std::string failure;
+    if (m.barycentric)
+      failure = "barycentrics (device lacks SM 6.1)";
+    else if (m.buffer_address)
+      failure = "buffer device address";
+    else
+      failure = checker->Check(m, dxil);
+    std::lock_guard<std::mutex> lock(mutex);
+    if (failure.empty())
+      stats[stage].pso++;
+    else
+      pso_fail[stage + ": " + failure]++;
+  };
+  std::vector<std::thread> threads;
+  for (u32 t = 0; t < jobs; t++)
+    threads.emplace_back([&] {
+      for (size_t n; (n = next++) < files.size();) {
+        process(n);
+        if (++done % 1000 == 0)
+          std::fprintf(stderr, "%zu / %zu\n", done.load(), files.size());
+      }
+    });
+  for (std::thread& t : threads)
+    t.join();
 
   std::printf("%zu modules; %d use barycentrics, %d buffer addresses, %d "
               "separate images/samplers\n",
